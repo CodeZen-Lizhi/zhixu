@@ -1,0 +1,58 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Go
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+vendor/
+
+# Node.js / frontend
+node_modules/
+dist/
+.vite/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local runtime data
+/data/
+/workspace/
+/postgres-data/
+/tmp/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# IDEs and editors
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Test and tooling caches
+.cache/
+.pytest_cache/
+.coverage
+playwright-report/
+test-results/
