@@ -146,6 +146,21 @@ Process(context.Context, application.ProcessRequest) (application.ProcessResult,
 
 Write Authorization 消费成功只确认数据库内的 Proposal/Approval/Revision/Workflow 授权事实，不代表文件或 Git 写回成功。当前文件基线冲突可以在完整绑定校验后提前返回 `TARGET_BASE_HASH_CONFLICT`；Safe Writeback 仍必须在原子替换点重新执行 CAS，不能把消费前读取当作跨存储事务保证。
 
+### M5 Safe Writeback Persistence Error Matrix
+
+| 条件 | 稳定错误码 | 分类 | 是否重试 |
+|---|---|---|---|
+| Create/Checkpoint 字段、路径或哈希非法 | `WRITEBACK_INVALID` | InvalidInput | 否 |
+| 同幂等键、Proposal Revision 或 Authorization 身份冲突 | `WRITEBACK_IDENTITY_CONFLICT` | VersionConflict | 否，必须新请求/重新审批 |
+| Execution 乐观锁冲突 | `WRITEBACK_VERSION_CONFLICT` | VersionConflict | 先重读检查点 |
+| 非法 Execution 状态迁移 | `WRITEBACK_STATUS_CONFLICT` | VersionConflict | 否 |
+| Proposal 状态与 Execution 检查点不一致 | `WRITEBACK_PROPOSAL_STATE_CONFLICT` | VersionConflict | 先人工核对事实源 |
+| Mapping、Outbox 或精确 Payload 绑定冲突 | `WRITEBACK_PUBLISH_BINDING_CONFLICT` | ConsistencyViolation | 否，不重复 Commit |
+| 已 verifying 但 Mapping/Outbox 缺失 | `WRITEBACK_OUTBOX_MISSING` / 查询错误 | ConsistencyViolation | 进入恢复，不返回假成功 |
+| 序列化、死锁或连接瞬断 | 当前操作稳定码 | RetryableFailure | 是，先查 Execution/Mapping 幂等记录 |
+
+`git_committed` 之后的数据库失败不能触发文件恢复；否则会让 Git Commit 与文件系统分叉。恢复路径必须保留 Commit，查询 Trailer/Execution 后补 Mapping/Outbox。
+
 ### 7. Wrong vs Correct
 
 ```text

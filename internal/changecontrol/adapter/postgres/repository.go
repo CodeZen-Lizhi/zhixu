@@ -4,6 +4,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
@@ -41,12 +42,12 @@ func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposa
 	defer func() { _ = tx.Rollback(ctx) }()
 	var insertedID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO change_control.proposal(id,workspace_id,idempotency_key,request_hash,status,created_at,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7)
+		INSERT INTO change_control.proposal(id,workspace_id,idempotency_key,request_hash,status,version,created_at,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8)
 		ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
 		RETURNING id::text`,
 		string(proposal.ID), string(proposal.WorkspaceID), proposal.IdempotencyKey, proposal.RequestHash,
-		string(proposal.Status), proposal.CreatedAt.UTC(), proposal.UpdatedAt.UTC()).Scan(&insertedID)
+		string(proposal.Status), proposal.Version, proposal.CreatedAt.UTC(), proposal.UpdatedAt.UTC()).Scan(&insertedID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var existingID, requestHash string
 		if queryErr := tx.QueryRow(ctx, `SELECT id::text,request_hash FROM change_control.proposal WHERE workspace_id=$1 AND idempotency_key=$2`, string(proposal.WorkspaceID), proposal.IdempotencyKey).Scan(&existingID, &requestHash); queryErr != nil {
@@ -80,9 +81,9 @@ func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposa
 // GetProposal 使用单条查询返回一致的 Proposal、Revision 和 Approval 快照。
 func (r *Repository) GetProposal(ctx context.Context, proposalID foundation.ID) (domain.Proposal, error) {
 	row := r.db.QueryRow(ctx, `
-		SELECT p.id::text,p.workspace_id::text,p.idempotency_key,p.request_hash,p.status,p.created_at,p.updated_at,
+		SELECT p.id::text,p.workspace_id::text,p.idempotency_key,p.request_hash,p.status,p.version,p.created_at,p.updated_at,
 			r.id::text,r.revision_no,r.target_path,r.base_hash,r.content,r.evidence_summary,r.risk,r.rollback_plan,r.change_hash,r.created_at,
-			a.id::text,a.change_hash,a.decision,a.decided_at
+			a.id::text,a.change_hash,a.decision,a.approved_git_head,a.decided_at
 		FROM change_control.proposal p
 		JOIN LATERAL (
 			SELECT id,revision_no,target_path,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,created_at
@@ -103,17 +104,22 @@ func (r *Repository) GetProposal(ctx context.Context, proposalID foundation.ID) 
 
 // Approve 只允许 ready_for_review Proposal 被一次性批准或拒绝。
 func (r *Repository) Approve(ctx context.Context, approval domain.Approval) (domain.Approval, error) {
+	if approval.ApprovedGitHead != nil {
+		normalized := strings.ToLower(strings.TrimSpace(*approval.ApprovedGitHead))
+		approval.ApprovedGitHead = &normalized
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return domain.Approval{}, classify(err, "APPROVAL_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var status, revisionHash string
+	var proposalVersion int64
 	err = tx.QueryRow(ctx, `
-		SELECT p.status,r.change_hash
+		SELECT p.status,p.version,r.change_hash
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.proposal_id=p.id AND r.id=$2
-		WHERE p.id=$1 FOR UPDATE`, string(approval.ProposalID), string(approval.RevisionID)).Scan(&status, &revisionHash)
+		WHERE p.id=$1 FOR UPDATE`, string(approval.ProposalID), string(approval.RevisionID)).Scan(&status, &proposalVersion, &revisionHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Approval{}, foundation.NewError(foundation.ErrorNotFound, "PROPOSAL_REVISION_NOT_FOUND", false, err)
 	}
@@ -122,7 +128,7 @@ func (r *Repository) Approve(ctx context.Context, approval domain.Approval) (dom
 	}
 	if status != string(domain.StatusReady) {
 		existing, existingErr := getApproval(ctx, tx, approval.RevisionID)
-		if existingErr == nil && existing.ProposalID == approval.ProposalID && existing.ChangeHash == approval.ChangeHash && existing.Decision == approval.Decision {
+		if existingErr == nil && existing.ProposalID == approval.ProposalID && existing.ChangeHash == approval.ChangeHash && existing.Decision == approval.Decision && sameOptionalString(existing.ApprovedGitHead, approval.ApprovedGitHead) {
 			return existing, nil
 		}
 		if existingErr != nil && !errors.Is(existingErr, pgx.ErrNoRows) {
@@ -134,8 +140,8 @@ func (r *Repository) Approve(ctx context.Context, approval domain.Approval) (dom
 		return domain.Approval{}, foundation.NewError(foundation.ErrorConsistencyViolation, "CHANGE_HASH_MISMATCH", false, errors.New("change hash mismatch"))
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO change_control.approval(id,proposal_id,revision_id,change_hash,decision,decided_at)
-		VALUES($1,$2,$3,$4,$5,$6)`, string(approval.ID), string(approval.ProposalID), string(approval.RevisionID), approval.ChangeHash, string(approval.Decision), approval.DecidedAt.UTC()); err != nil {
+		INSERT INTO change_control.approval(id,proposal_id,revision_id,change_hash,decision,approved_git_head,decided_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7)`, string(approval.ID), string(approval.ProposalID), string(approval.RevisionID), approval.ChangeHash, string(approval.Decision), approval.ApprovedGitHead, approval.DecidedAt.UTC()); err != nil {
 		return domain.Approval{}, classify(err, "APPROVAL_CREATE_FAILED")
 	}
 	newStatus := domain.StatusRejected
@@ -143,8 +149,8 @@ func (r *Repository) Approve(ctx context.Context, approval domain.Approval) (dom
 		newStatus = domain.StatusApproved
 	}
 	command, err := tx.Exec(ctx, `
-		UPDATE change_control.proposal SET status=$1,updated_at=$2
-		WHERE id=$3 AND status=$4`, string(newStatus), approval.DecidedAt.UTC(), string(approval.ProposalID), string(domain.StatusReady))
+		UPDATE change_control.proposal SET status=$1,updated_at=$2,version=version+1
+		WHERE id=$3 AND status=$4 AND version=$5`, string(newStatus), approval.DecidedAt.UTC(), string(approval.ProposalID), string(domain.StatusReady), proposalVersion)
 	if err != nil {
 		return domain.Approval{}, classify(err, "PROPOSAL_DECISION_UPDATE_FAILED")
 	}
@@ -165,7 +171,7 @@ func (r *Repository) MarkNeedsRevision(ctx context.Context, proposalID foundatio
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	command, err := tx.Exec(ctx, `
-		UPDATE change_control.proposal SET status=$1,updated_at=$2
+		UPDATE change_control.proposal SET status=$1,updated_at=$2,version=version+1
 		WHERE id=$3 AND status IN ($4,$5)`, string(domain.StatusNeedsRevision), at.UTC(), string(proposalID), string(domain.StatusApproved), string(domain.StatusReady))
 	if err != nil {
 		return classify(err, "PROPOSAL_STATE_UPDATE_FAILED")
@@ -401,7 +407,7 @@ func verifyCurrentAuthorizationState(ctx context.Context, tx pgx.Tx, authorizati
 		}
 		return classifyAuthorization(err, "WRITE_AUTHORIZATION_APPROVAL_QUERY_FAILED")
 	}
-	if workspaceID != string(authorization.WorkspaceID) || status != string(domain.StatusApproved) || approvalProposal != string(authorization.ProposalID) || approvalRevision != string(authorization.RevisionID) || decision != string(domain.DecisionApproved) || revisionHash != authorization.ApprovedChangeHash || approvalHash != authorization.ApprovedChangeHash || baseHash != authorization.TargetVersion || authorization.Scope != domain.ExpectedAuthorizationScope(targetPath) {
+	if workspaceID != string(authorization.WorkspaceID) || (status != string(domain.StatusApproved) && status != string(domain.StatusApplying)) || approvalProposal != string(authorization.ProposalID) || approvalRevision != string(authorization.RevisionID) || decision != string(domain.DecisionApproved) || revisionHash != authorization.ApprovedChangeHash || approvalHash != authorization.ApprovedChangeHash || baseHash != authorization.TargetVersion || authorization.Scope != domain.ExpectedAuthorizationScope(targetPath) {
 		return foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, errors.New("authorization approval state is no longer valid"))
 	}
 	var one int
@@ -448,14 +454,15 @@ func authorizationTimePointer(value *time.Time) any {
 func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	var proposalID, workspaceID, idempotencyKey, requestHash, status string
 	var revisionID, targetPath, baseHash, content, evidence, risk, rollback, changeHash string
-	var approvalID, approvalHash, decision *string
+	var approvalID, approvalHash, decision, approvedGitHead *string
 	var createdAt, updatedAt, revisionCreatedAt time.Time
 	var decidedAt *time.Time
 	var revisionNo int
+	var version int64
 	err := row.Scan(
-		&proposalID, &workspaceID, &idempotencyKey, &requestHash, &status, &createdAt, &updatedAt,
+		&proposalID, &workspaceID, &idempotencyKey, &requestHash, &status, &version, &createdAt, &updatedAt,
 		&revisionID, &revisionNo, &targetPath, &baseHash, &content, &evidence, &risk, &rollback, &changeHash, &revisionCreatedAt,
-		&approvalID, &approvalHash, &decision, &decidedAt,
+		&approvalID, &approvalHash, &decision, &approvedGitHead, &decidedAt,
 	)
 	if err != nil {
 		return domain.Proposal{}, err
@@ -463,7 +470,7 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	proposal := domain.Proposal{
 		ID: foundation.ID(proposalID), WorkspaceID: foundation.ID(workspaceID), TargetPath: targetPath,
 		IdempotencyKey: idempotencyKey, RequestHash: requestHash,
-		Status: domain.ProposalStatus(status), CreatedAt: createdAt, UpdatedAt: updatedAt,
+		Status: domain.ProposalStatus(status), Version: version, CreatedAt: createdAt, UpdatedAt: updatedAt,
 		Revision: domain.Revision{
 			ID: foundation.ID(revisionID), ProposalID: foundation.ID(proposalID), RevisionNo: revisionNo,
 			TargetPath: targetPath, BaseHash: baseHash, Content: content, EvidenceSummary: evidence,
@@ -473,7 +480,7 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	if approvalID != nil && approvalHash != nil && decision != nil && decidedAt != nil {
 		proposal.Approval = &domain.Approval{
 			ID: foundation.ID(*approvalID), ProposalID: proposal.ID, RevisionID: proposal.Revision.ID,
-			ChangeHash: *approvalHash, Decision: domain.Decision(*decision), DecidedAt: *decidedAt,
+			ChangeHash: *approvalHash, Decision: domain.Decision(*decision), ApprovedGitHead: approvedGitHead, DecidedAt: *decidedAt,
 		}
 	}
 	return proposal, nil
@@ -483,12 +490,20 @@ func getApproval(ctx context.Context, row interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, revisionID foundation.ID) (domain.Approval, error) {
 	var id, proposalID, revision, changeHash, decision string
+	var approvedGitHead *string
 	var decidedAt time.Time
-	err := row.QueryRow(ctx, `SELECT id::text,proposal_id::text,revision_id::text,change_hash,decision,decided_at FROM change_control.approval WHERE revision_id=$1`, string(revisionID)).Scan(&id, &proposalID, &revision, &changeHash, &decision, &decidedAt)
+	err := row.QueryRow(ctx, `SELECT id::text,proposal_id::text,revision_id::text,change_hash,decision,approved_git_head,decided_at FROM change_control.approval WHERE revision_id=$1`, string(revisionID)).Scan(&id, &proposalID, &revision, &changeHash, &decision, &approvedGitHead, &decidedAt)
 	if err != nil {
 		return domain.Approval{}, err
 	}
-	return domain.Approval{ID: foundation.ID(id), ProposalID: foundation.ID(proposalID), RevisionID: foundation.ID(revision), ChangeHash: changeHash, Decision: domain.Decision(decision), DecidedAt: decidedAt}, nil
+	return domain.Approval{ID: foundation.ID(id), ProposalID: foundation.ID(proposalID), RevisionID: foundation.ID(revision), ChangeHash: changeHash, Decision: domain.Decision(decision), ApprovedGitHead: approvedGitHead, DecidedAt: decidedAt}, nil
+}
+
+func sameOptionalString(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return strings.EqualFold(*left, *right)
 }
 
 func classify(err error, code string) error {

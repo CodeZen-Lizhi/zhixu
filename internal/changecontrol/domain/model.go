@@ -49,10 +49,12 @@ type Proposal struct {
 	IdempotencyKey  string
 	RequestHash     string
 	Status          ProposalStatus
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	Revision        Revision
-	Approval        *Approval
+	// Version 用于 Proposal 的乐观锁；每次受控状态变更必须递增一。
+	Version   int64
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Revision  Revision
+	Approval  *Approval
 }
 
 // TargetUnavailableError 表示 Proposal 目标不再是 Workspace 内可安全读取的普通文件。
@@ -80,7 +82,47 @@ type Approval struct {
 	ID, ProposalID, RevisionID foundation.ID
 	ChangeHash                 string
 	Decision                   Decision
-	DecidedAt                  time.Time
+	// ApprovedGitHead 是服务端在批准时观察到的 Git HEAD；nil 表示历史审批没有该绑定，不能用于写回。
+	ApprovedGitHead *string
+	DecidedAt       time.Time
+}
+
+// ErrProposalInvalidTransition 表示 Proposal 状态迁移不在领域允许的迁移表中。
+var ErrProposalInvalidTransition = errors.New("proposal status transition is not allowed")
+
+// ValidateProposalTransition 是 Proposal 状态迁移的唯一领域事实源。
+// 数据库触发器和 Application 必须复用同一张迁移表，禁止各层自行放宽状态转移。
+func ValidateProposalTransition(from, to ProposalStatus) error {
+	allowed := map[ProposalStatus]map[ProposalStatus]struct{}{
+		StatusReady: {
+			StatusApproved: {}, StatusRejected: {}, StatusNeedsRevision: {},
+		},
+		StatusApproved: {
+			StatusApplying: {}, StatusNeedsRevision: {},
+		},
+		StatusApplying: {
+			StatusApplied: {}, StatusApplyFailed: {}, StatusNeedsRevision: {},
+		},
+		StatusApplied: {
+			StatusVerifying: {},
+		},
+		StatusVerifying: {
+			StatusCompleted: {}, StatusVerifyFailed: {}, StatusRolledBack: {},
+		},
+		StatusVerifyFailed: {
+			StatusVerifying: {}, StatusRolledBack: {},
+		},
+		StatusApplyFailed: {
+			StatusApplying: {}, StatusRolledBack: {},
+		},
+		StatusNeedsRevision: {
+			StatusDraft: {}, StatusCancelled: {},
+		},
+	}
+	if _, ok := allowed[from][to]; !ok {
+		return ErrProposalInvalidTransition
+	}
+	return nil
 }
 
 // ComputeChangeHash 对版本化规范载荷计算哈希，保留内容中的语义空白。

@@ -1,0 +1,28 @@
+{
+  "id": "m5-safe-writeback",
+  "name": "m5-safe-writeback",
+  "title": "M5-04 Safe Writeback Saga",
+  "description": "实现批准 Proposal 的 Durable Safe Writeback Saga：双授权、Workspace 锁与最终 CAS、原子文件替换、Git Diff/Commit/恢复、Commit Mapping 和真实增量索引请求；Retrieval 完成前 Proposal 停在 verifying。",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "lizhi",
+  "assignee": "lizhi",
+  "createdAt": "2026-07-17",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-17-m5-writeback-persistence"
+  ],
+  "parent": "07-16-product-delivery",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

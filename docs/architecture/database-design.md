@@ -325,8 +325,24 @@ approval：
 - proposal_revision_no。
 - action。
 - approved_change_hash。
+- approved_git_head：服务端审批时观察到的 Git HEAD；历史 NULL 可读但不可 Safe Writeback。
 - comment。
 - created_at。
+
+### writeback_execution / proposal_commit
+
+writeback_execution：
+
+- 绑定 workspace、workflow run/node、proposal/revision/approval 和两份 Tool Authorization。
+- 保存 target path、base/result/change hash、approved Git HEAD、Git Commit/Parent/Diff Hash、状态、失败码、受控 temp/backup locator、version 和时间戳。
+- 不保存正文、Credential、Token 或绝对路径。
+- `(workspace_id,idempotency_key)` 与 `(proposal_id,revision_id)` 唯一；状态变化必须 `version=old+1`。
+
+proposal_commit：
+
+- 不可变关联 writeback execution、proposal revision、approval 与 Git Commit。
+- `(writeback_execution_id)`、`(proposal_id,revision_id)`、`(workspace_id,git_commit)` 唯一。
+- Mapping、Execution/Proposal verifying 和 `retrieval.revision.reindex_requested` Outbox 在同一事务内发布。
 
 ### workflow
 

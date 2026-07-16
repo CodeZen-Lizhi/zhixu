@@ -82,7 +82,7 @@ func (s *Service) CreateProposal(ctx context.Context, command CreateCommand) (Cr
 		ID: proposalID, WorkspaceID: command.WorkspaceID, TargetPath: targetPath,
 		IdempotencyKey: strings.TrimSpace(command.IdempotencyKey),
 		RequestHash:    domain.ComputeRequestHash(command.WorkspaceID, targetPath, baseHash, command.Content, strings.TrimSpace(command.EvidenceSummary), strings.TrimSpace(command.Risk), strings.TrimSpace(command.RollbackPlan)),
-		Status:         domain.StatusReady, CreatedAt: now, UpdatedAt: now, Revision: revision,
+		Status:         domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: revision,
 	})
 	if err != nil {
 		return CreateResult{}, err

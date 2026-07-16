@@ -45,7 +45,7 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	baseHash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	changeHash := domain.ComputeChangeHash("a.md", baseHash, "new content")
 	proposal := domain.Proposal{
-		ID: proposalID, WorkspaceID: workspaceID, TargetPath: "a.md", IdempotencyKey: "create-one", RequestHash: domain.ComputeRequestHash(workspaceID, "a.md", baseHash, "new content", "source evidence", "low", "revert commit"), Status: domain.StatusReady, CreatedAt: now, UpdatedAt: now,
+		ID: proposalID, WorkspaceID: workspaceID, TargetPath: "a.md", IdempotencyKey: "create-one", RequestHash: domain.ComputeRequestHash(workspaceID, "a.md", baseHash, "new content", "source evidence", "low", "revert commit"), Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
 		Revision: domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: "a.md", BaseHash: baseHash, Content: "new content", EvidenceSummary: "source evidence", Risk: "low", RollbackPlan: "revert commit", ChangeHash: changeHash, CreatedAt: now},
 	}
 	if _, err := repository.CreateProposal(ctx, proposal); err != nil {
@@ -66,15 +66,20 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 		t.Fatalf("idempotency conflict err=%v", err)
 	}
 	queried, err := repository.GetProposal(ctx, proposalID)
-	if err != nil || queried.TargetPath != "a.md" || queried.Approval != nil {
+	if err != nil || queried.TargetPath != "a.md" || queried.Approval != nil || queried.Version != 1 {
 		t.Fatalf("queried=%#v err=%v", queried, err)
 	}
 
-	approval := domain.Approval{ID: integrationID(4), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, DecidedAt: now.Add(time.Minute)}
-	if _, err := repository.Approve(ctx, approval); err != nil {
+	approvedGitHead := "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+	approval := domain.Approval{ID: integrationID(4), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now.Add(time.Minute)}
+	approved, err := repository.Approve(ctx, approval)
+	if err != nil {
 		t.Fatal(err)
 	}
-	replayedApproval, err := repository.Approve(ctx, domain.Approval{ID: integrationID(5), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, DecidedAt: now.Add(2 * time.Minute)})
+	if approved.ApprovedGitHead == nil || *approved.ApprovedGitHead != "abcdef0123456789abcdef0123456789abcdef01" {
+		t.Fatalf("approved git head was not normalized: %#v", approved.ApprovedGitHead)
+	}
+	replayedApproval, err := repository.Approve(ctx, domain.Approval{ID: integrationID(5), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now.Add(2 * time.Minute)})
 	if err != nil || replayedApproval.ID != approval.ID {
 		t.Fatalf("replayed approval=%#v err=%v", replayedApproval, err)
 	}
@@ -82,7 +87,7 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 		t.Fatalf("conflicting approval err=%v", err)
 	}
 	queried, err = repository.GetProposal(ctx, proposalID)
-	if err != nil || queried.Status != domain.StatusApproved || queried.Approval == nil || queried.Approval.ChangeHash != changeHash {
+	if err != nil || queried.Status != domain.StatusApproved || queried.Version != 2 || queried.Approval == nil || queried.Approval.ChangeHash != changeHash || queried.Approval.ApprovedGitHead == nil || *queried.Approval.ApprovedGitHead != "abcdef0123456789abcdef0123456789abcdef01" {
 		t.Fatalf("approved proposal=%#v err=%v", queried, err)
 	}
 
@@ -90,7 +95,7 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 		t.Fatal(err)
 	}
 	queried, err = repository.GetProposal(ctx, proposalID)
-	if err != nil || queried.Status != domain.StatusNeedsRevision {
+	if err != nil || queried.Status != domain.StatusNeedsRevision || queried.Version != 3 {
 		t.Fatalf("needs revision proposal=%#v err=%v", queried, err)
 	}
 
@@ -151,12 +156,16 @@ func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
 		return hex.EncodeToString(digest[:])
 	}
 	changeHash := domain.ComputeChangeHash("a.md", baseHash, "new content")
-	proposal := domain.Proposal{ID: proposalID, WorkspaceID: workspaceID, TargetPath: "a.md", IdempotencyKey: "auth-proposal", RequestHash: domain.ComputeRequestHash(workspaceID, "a.md", baseHash, "new content", "evidence", "low", "rollback"), Status: domain.StatusReady, CreatedAt: now, UpdatedAt: now, Revision: domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: "a.md", BaseHash: baseHash, Content: "new content", EvidenceSummary: "evidence", Risk: "low", RollbackPlan: "rollback", ChangeHash: changeHash, CreatedAt: now}}
+	proposal := domain.Proposal{ID: proposalID, WorkspaceID: workspaceID, TargetPath: "a.md", IdempotencyKey: "auth-proposal", RequestHash: domain.ComputeRequestHash(workspaceID, "a.md", baseHash, "new content", "evidence", "low", "rollback"), Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: "a.md", BaseHash: baseHash, Content: "new content", EvidenceSummary: "evidence", Risk: "low", RollbackPlan: "rollback", ChangeHash: changeHash, CreatedAt: now}}
 	if _, err := repository.CreateProposal(ctx, proposal); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.Approve(ctx, domain.Approval{ID: approvalID, ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, DecidedAt: now.Add(time.Minute)}); err != nil {
+	if _, err := repository.Approve(ctx, domain.Approval{ID: approvalID, ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, DecidedAt: now}); err != nil {
 		t.Fatal(err)
+	}
+	historical, err := repository.GetProposal(ctx, proposalID)
+	if err != nil || historical.Version != 2 || historical.Approval == nil || historical.Approval.ApprovedGitHead != nil {
+		t.Fatalf("historical approval=%#v err=%v", historical, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
