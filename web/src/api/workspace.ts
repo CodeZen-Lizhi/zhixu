@@ -24,6 +24,10 @@ export interface ScannedFile {
   byteSize: number;
   contentHash: string;
   mediaType: string;
+  sourceId: string;
+  sourceVersionId: string;
+  contentArtifactId: string;
+  contentArtifactCreated: boolean;
 }
 
 export interface WorkspaceScan {
@@ -114,6 +118,10 @@ export const decodeWorkspaceScan = (value: unknown): WorkspaceScan => {
       byteSize: numberField(item, "byte_size"),
       contentHash: stringField(item, "content_hash"),
       mediaType: stringField(item, "media_type"),
+      sourceId: stringField(item, "source_id"),
+      sourceVersionId: stringField(item, "source_version_id"),
+      contentArtifactId: stringField(item, "content_artifact_id"),
+      contentArtifactCreated: booleanField(item, "content_artifact_created"),
     };
   });
   const count = numberField(value, "count");

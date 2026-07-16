@@ -72,8 +72,8 @@ func TestHandlerWorkspaceDetailContract(t *testing.T) {
 
 func TestHandlerWorkspaceScanContract(t *testing.T) {
 	service := &fakeWorkspaceService{scanFiles: []domain.ScannedFile{
-		{RelativePath: "a.md", ByteSize: 12, ContentHash: "hash-a", MediaType: "text/markdown"},
-		{RelativePath: "nested/b.txt", ByteSize: 8, ContentHash: "hash-b", MediaType: "text/plain"},
+		{RelativePath: "a.md", ByteSize: 12, ContentHash: "hash-a", MediaType: "text/markdown", SourceID: handlerTestWorkspaceID, SourceVersionID: handlerTestWorkspaceID, ContentArtifactID: handlerTestWorkspaceID, ContentArtifactCreated: true},
+		{RelativePath: "nested/b.txt", ByteSize: 8, ContentHash: "hash-b", MediaType: "text/plain", SourceID: handlerTestWorkspaceID, SourceVersionID: handlerTestWorkspaceID, ContentArtifactID: handlerTestWorkspaceID},
 	}}
 	recorder := serveWorkspaceRequest(t, service, http.MethodPost, "/api/v1/workspaces/"+string(handlerTestWorkspaceID)+"/scan", "")
 
@@ -87,10 +87,10 @@ func TestHandlerWorkspaceScanContract(t *testing.T) {
 	if response.WorkspaceID != string(handlerTestWorkspaceID) || response.Count != 2 || len(response.Files) != 2 {
 		t.Fatalf("scan response = %#v", response)
 	}
-	if response.Files[0] != (scannedFile{RelativePath: "a.md", ByteSize: 12, ContentHash: "hash-a", MediaType: "text/markdown"}) {
+	if response.Files[0] != (scannedFile{RelativePath: "a.md", ByteSize: 12, ContentHash: "hash-a", MediaType: "text/markdown", SourceID: string(handlerTestWorkspaceID), SourceVersionID: string(handlerTestWorkspaceID), ContentArtifactID: string(handlerTestWorkspaceID), ContentArtifactCreated: true}) {
 		t.Fatalf("first scanned file = %#v", response.Files[0])
 	}
-	if response.Files[1] != (scannedFile{RelativePath: "nested/b.txt", ByteSize: 8, ContentHash: "hash-b", MediaType: "text/plain"}) {
+	if response.Files[1] != (scannedFile{RelativePath: "nested/b.txt", ByteSize: 8, ContentHash: "hash-b", MediaType: "text/plain", SourceID: string(handlerTestWorkspaceID), SourceVersionID: string(handlerTestWorkspaceID), ContentArtifactID: string(handlerTestWorkspaceID)}) {
 		t.Fatalf("second scanned file = %#v", response.Files[1])
 	}
 }

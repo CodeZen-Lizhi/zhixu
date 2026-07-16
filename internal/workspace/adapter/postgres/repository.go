@@ -122,17 +122,52 @@ func (r *Repository) RegisterSourceVersions(ctx context.Context, registrations [
 		if err != nil {
 			return nil, classify(err, "SOURCE_REGISTER_FAILED")
 		}
+		artifact, artifactCreated, err := insertOrGetContentArtifact(ctx, tx, registration.Artifact)
+		if err != nil {
+			return nil, classify(err, "CONTENT_ARTIFACT_REGISTER_FAILED")
+		}
 		registration.Version.SourceID = source.ID
+		registration.Version.ContentArtifactID = artifact.ID
 		version, created, err := insertOrGetSourceVersion(ctx, tx, registration.Version)
 		if err != nil {
 			return nil, classify(err, "SOURCE_VERSION_REGISTER_FAILED")
 		}
-		results = append(results, domain.SourceRegistrationResult{Source: source, Version: version, Created: created})
+		results = append(results, domain.SourceRegistrationResult{Source: source, Artifact: artifact, Version: version, ArtifactCreated: artifactCreated, Created: created})
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, classify(err, "SOURCE_VERSION_COMMIT_FAILED")
 	}
 	return results, nil
+}
+
+func insertOrGetContentArtifact(ctx context.Context, tx pgx.Tx, artifact domain.ContentArtifact) (domain.ContentArtifact, bool, error) {
+	row := tx.QueryRow(ctx, `
+		INSERT INTO core.content_artifact (id, workspace_id, content_hash, byte_size, managed_location, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (workspace_id, content_hash) DO NOTHING
+		RETURNING id::text, workspace_id::text, content_hash, byte_size, managed_location, created_at`,
+		string(artifact.ID), string(artifact.WorkspaceID), artifact.ContentHash, artifact.ByteSize,
+		artifact.ManagedLocation, artifact.CreatedAt.UTC(),
+	)
+	persisted, err := scanContentArtifact(row)
+	if err == nil {
+		return persisted, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return domain.ContentArtifact{}, false, err
+	}
+	persisted, err = scanContentArtifact(tx.QueryRow(ctx, `
+		SELECT id::text, workspace_id::text, content_hash, byte_size, managed_location, created_at
+		FROM core.content_artifact WHERE workspace_id = $1 AND content_hash = $2`,
+		string(artifact.WorkspaceID), artifact.ContentHash,
+	))
+	if err != nil {
+		return domain.ContentArtifact{}, false, err
+	}
+	if persisted.ByteSize != artifact.ByteSize || persisted.ManagedLocation != artifact.ManagedLocation {
+		return domain.ContentArtifact{}, false, foundation.NewError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_METADATA_CONFLICT", false, errors.New("content artifact metadata does not match existing hash"))
+	}
+	return persisted, false, nil
 }
 
 func insertOrGetSource(ctx context.Context, tx pgx.Tx, source domain.Source) (domain.Source, error) {
@@ -161,13 +196,13 @@ func insertOrGetSource(ctx context.Context, tx pgx.Tx, source domain.Source) (do
 func insertOrGetSourceVersion(ctx context.Context, tx pgx.Tx, version domain.SourceVersion) (domain.SourceVersion, bool, error) {
 	row := tx.QueryRow(ctx, `
 		INSERT INTO core.source_version (
-			id, source_id, content_hash, byte_size, mime_type, original_content_location,
+			id, source_id, content_artifact_id, content_hash, byte_size, mime_type, original_content_location,
 			security_status, parser_version, captured_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), $9)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10)
 		ON CONFLICT (source_id, content_hash) DO NOTHING
-		RETURNING id::text, source_id::text, content_hash, byte_size, mime_type,
+		RETURNING id::text, source_id::text, content_artifact_id::text, content_hash, byte_size, mime_type,
 			original_content_location, security_status, COALESCE(parser_version, ''), captured_at`,
-		string(version.ID), string(version.SourceID), version.ContentHash, version.ByteSize,
+		string(version.ID), string(version.SourceID), string(version.ContentArtifactID), version.ContentHash, version.ByteSize,
 		version.MediaType, version.OriginalContentLocation, version.SecurityStatus,
 		version.ParserVersion, version.CapturedAt.UTC(),
 	)
@@ -179,12 +214,59 @@ func insertOrGetSourceVersion(ctx context.Context, tx pgx.Tx, version domain.Sou
 		return domain.SourceVersion{}, false, err
 	}
 	persisted, err = scanSourceVersion(tx.QueryRow(ctx, `
-		SELECT id::text, source_id::text, content_hash, byte_size, mime_type,
+		UPDATE core.source_version
+		SET content_artifact_id = $3
+		WHERE source_id = $1 AND content_hash = $2 AND content_artifact_id IS NULL
+		RETURNING id::text, source_id::text, content_artifact_id::text, content_hash, byte_size, mime_type,
+			original_content_location, security_status, COALESCE(parser_version, ''), captured_at`,
+		string(version.SourceID), version.ContentHash, string(version.ContentArtifactID),
+	))
+	if err == nil {
+		return persisted, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return domain.SourceVersion{}, false, err
+	}
+	persisted, err = scanSourceVersion(tx.QueryRow(ctx, `
+		SELECT id::text, source_id::text, content_artifact_id::text, content_hash, byte_size, mime_type,
 			original_content_location, security_status, COALESCE(parser_version, ''), captured_at
 		FROM core.source_version WHERE source_id = $1 AND content_hash = $2`,
 		string(version.SourceID), version.ContentHash,
 	))
+	if err == nil && !sameSourceVersionMetadata(persisted, version) {
+		return domain.SourceVersion{}, false, foundation.NewError(foundation.ErrorConsistencyViolation, "SOURCE_VERSION_METADATA_CONFLICT", false, errors.New("existing source version metadata differs from the requested registration"))
+	}
 	return persisted, false, err
+}
+
+func sameSourceVersionMetadata(existing, requested domain.SourceVersion) bool {
+	return existing.SourceID == requested.SourceID &&
+		existing.ContentArtifactID == requested.ContentArtifactID &&
+		existing.ContentHash == requested.ContentHash &&
+		existing.ByteSize == requested.ByteSize &&
+		existing.MediaType == requested.MediaType &&
+		existing.OriginalContentLocation == requested.OriginalContentLocation &&
+		existing.SecurityStatus == requested.SecurityStatus &&
+		existing.ParserVersion == requested.ParserVersion
+}
+
+func scanContentArtifact(row rowScanner) (domain.ContentArtifact, error) {
+	var artifact domain.ContentArtifact
+	var id, workspaceID string
+	if err := row.Scan(&id, &workspaceID, &artifact.ContentHash, &artifact.ByteSize, &artifact.ManagedLocation, &artifact.CreatedAt); err != nil {
+		return domain.ContentArtifact{}, err
+	}
+	parsedID, err := foundation.ParseID(id)
+	if err != nil {
+		return domain.ContentArtifact{}, fmt.Errorf("parse content artifact id: %w", err)
+	}
+	parsedWorkspaceID, err := foundation.ParseID(workspaceID)
+	if err != nil {
+		return domain.ContentArtifact{}, fmt.Errorf("parse content artifact workspace id: %w", err)
+	}
+	artifact.ID = parsedID
+	artifact.WorkspaceID = parsedWorkspaceID
+	return artifact, nil
 }
 
 type rowScanner interface{ Scan(...any) error }
@@ -229,8 +311,8 @@ func scanSource(row rowScanner) (domain.Source, error) {
 
 func scanSourceVersion(row rowScanner) (domain.SourceVersion, error) {
 	var version domain.SourceVersion
-	var id, sourceID string
-	if err := row.Scan(&id, &sourceID, &version.ContentHash, &version.ByteSize,
+	var id, sourceID, artifactID string
+	if err := row.Scan(&id, &sourceID, &artifactID, &version.ContentHash, &version.ByteSize,
 		&version.MediaType, &version.OriginalContentLocation, &version.SecurityStatus,
 		&version.ParserVersion, &version.CapturedAt); err != nil {
 		return domain.SourceVersion{}, err
@@ -245,6 +327,11 @@ func scanSourceVersion(row rowScanner) (domain.SourceVersion, error) {
 	}
 	version.ID = parsedID
 	version.SourceID = parsedSourceID
+	parsedArtifactID, err := foundation.ParseID(artifactID)
+	if err != nil {
+		return domain.SourceVersion{}, fmt.Errorf("parse source version content artifact id: %w", err)
+	}
+	version.ContentArtifactID = parsedArtifactID
 	return version, nil
 }
 

@@ -55,20 +55,21 @@ const ScanTable = ({ scan }: { scan: WorkspaceScan }) => (
   <section className="scan-section" aria-labelledby="scan-title">
     <div className="section-heading">
       <div>
-        <p className="eyebrow">只读扫描结果</p>
+        <p className="eyebrow">安全摄取结果</p>
         <h2 id="scan-title">发现 {scan.count} 个受支持文件</h2>
       </div>
-      <p>扫描会登记不可变版本元数据，但不修改原文件，也不代表已完成解析或索引。</p>
+      <p>扫描会把原始字节捕获到受管不可变存储，不修改源文件，也不代表已完成解析或索引。</p>
     </div>
     <div className="table-scroll">
       <table className="scan-table">
-        <thead><tr><th>相对路径</th><th>类型</th><th>大小</th><th>SHA-256</th></tr></thead>
+        <thead><tr><th>相对路径</th><th>类型</th><th>大小</th><th>版本</th><th>SHA-256</th></tr></thead>
         <tbody>
           {scan.files.map((file) => (
             <tr key={`${file.relativePath}:${file.contentHash}`}>
               <td>{file.relativePath}</td>
               <td>{file.mediaType}</td>
               <td>{formatBytes(file.byteSize)}</td>
+              <td>{file.contentArtifactCreated ? "新建不可变版本" : "复用已有版本"}</td>
               <td className="hash-value">{file.contentHash}</td>
             </tr>
           ))}

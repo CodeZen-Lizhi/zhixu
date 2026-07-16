@@ -84,7 +84,7 @@ describe("WorkspacePage", () => {
         return Promise.resolve(jsonResponse({
           workspace_id: workspace.id,
           count: 1,
-          files: [{ relative_path: "notes/a.md", byte_size: 12, content_hash: "a".repeat(64), media_type: "text/markdown" }],
+          files: [{ relative_path: "notes/a.md", byte_size: 12, content_hash: "a".repeat(64), media_type: "text/markdown", source_id: workspace.id, source_version_id: workspace.id, content_artifact_id: workspace.id, content_artifact_created: true }],
         }));
       }
       if (url.endsWith(`/api/v1/workspaces/${workspace.id}`)) return Promise.resolve(jsonResponse(workspace));
@@ -95,6 +95,6 @@ describe("WorkspacePage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "扫描受支持文件" }));
 
     expect(await screen.findByRole("cell", { name: "notes/a.md" })).toBeInTheDocument();
-    expect(screen.getByText("扫描会登记不可变版本元数据，但不修改原文件，也不代表已完成解析或索引。")).toBeInTheDocument();
+    expect(screen.getByText("扫描会把原始字节捕获到受管不可变存储，不修改源文件，也不代表已完成解析或索引。")).toBeInTheDocument();
   });
 });

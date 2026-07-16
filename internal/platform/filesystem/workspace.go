@@ -2,6 +2,7 @@
 package filesystem
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
 // Root is a canonical, existing Workspace directory.
@@ -105,6 +108,11 @@ func (r Root) Hash(relative string) (string, error) {
 
 // Scan discovers supported regular files without following directory symlinks.
 func (r Root) Scan(options ScanOptions) ([]File, error) {
+	return r.ScanContext(context.Background(), options)
+}
+
+// ScanContext discovers files while honoring cancellation between filesystem operations.
+func (r Root) ScanContext(ctx context.Context, options ScanOptions) ([]File, error) {
 	if r.path == "" {
 		return nil, errors.New("workspace root is not initialized")
 	}
@@ -117,6 +125,9 @@ func (r Root) Scan(options ScanOptions) ([]File, error) {
 	}
 	files := make([]File, 0)
 	err := filepath.WalkDir(r.path, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -128,7 +139,7 @@ func (r Root) Scan(options ScanOptions) ([]File, error) {
 			return err
 		}
 		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "tmp" || entry.Name() == ".tmp" {
+			if entry.Name() == ".git" || entry.Name() == ".knowledge" || entry.Name() == "tmp" || entry.Name() == ".tmp" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -136,11 +147,14 @@ func (r Root) Scan(options ScanOptions) ([]File, error) {
 		if entry.Type()&os.ModeSymlink != 0 {
 			resolved, resolveErr := r.Resolve(relative)
 			if resolveErr != nil {
-				return nil
+				return fileError(foundation.ErrorPermissionDenied, "WORKSPACE_SYMLINK_UNSAFE", false, resolveErr)
 			}
 			info, statErr := os.Stat(resolved)
-			if statErr != nil || !info.Mode().IsRegular() {
-				return nil
+			if statErr != nil {
+				return statErr
+			}
+			if !info.Mode().IsRegular() {
+				return fileError(foundation.ErrorInvalidInput, "WORKSPACE_SYMLINK_NOT_REGULAR", false, errors.New("symlink target is not a regular file"))
 			}
 			path = resolved
 		}
@@ -156,9 +170,9 @@ func (r Root) Scan(options ScanOptions) ([]File, error) {
 			return nil
 		}
 		if options.MaxBytes > 0 && info.Size() > options.MaxBytes {
-			return fmt.Errorf("file %s exceeds max size", relative)
+			return fileError(foundation.ErrorInvalidInput, "SOURCE_FILE_TOO_LARGE", false, fmt.Errorf("file %s exceeds max size", relative))
 		}
-		digest, err := hashFile(path)
+		digest, err := hashFileContext(ctx, path)
 		if err != nil {
 			return fmt.Errorf("hash %s: %w", relative, err)
 		}
@@ -188,14 +202,33 @@ func within(root, candidate string) bool {
 }
 
 func hashFile(path string) (string, error) {
+	return hashFileContext(context.Background(), path)
+}
+
+func hashFileContext(ctx context.Context, path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
+	buffer := make([]byte, 64*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		count, readErr := file.Read(buffer)
+		if count > 0 {
+			if _, err := hash.Write(buffer[:count]); err != nil {
+				return "", err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return "", readErr
+		}
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }

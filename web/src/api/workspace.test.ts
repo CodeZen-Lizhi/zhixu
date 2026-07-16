@@ -41,4 +41,22 @@ describe("Workspace API decoders", () => {
       count: 1,
     })).toThrow(WorkspaceApiError);
   });
+
+  it("解码 Source Version 与 Content Artifact 身份", () => {
+    const id = workspacePayload.id;
+    expect(decodeWorkspaceScan({
+      workspace_id: id,
+      files: [{
+        relative_path: "notes/a.md",
+        byte_size: 3,
+        content_hash: "a".repeat(64),
+        media_type: "text/markdown",
+        source_id: id,
+        source_version_id: id,
+        content_artifact_id: id,
+        content_artifact_created: true,
+      }],
+      count: 1,
+    }).files[0]).toMatchObject({ sourceVersionId: id, contentArtifactCreated: true });
+  });
 });

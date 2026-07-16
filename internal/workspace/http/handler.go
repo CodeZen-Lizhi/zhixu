@@ -70,10 +70,14 @@ type scanResponse struct {
 }
 
 type scannedFile struct {
-	RelativePath string `json:"relative_path"`
-	ByteSize     int64  `json:"byte_size"`
-	ContentHash  string `json:"content_hash"`
-	MediaType    string `json:"media_type"`
+	RelativePath           string `json:"relative_path"`
+	ByteSize               int64  `json:"byte_size"`
+	ContentHash            string `json:"content_hash"`
+	MediaType              string `json:"media_type"`
+	SourceID               string `json:"source_id"`
+	SourceVersionID        string `json:"source_version_id"`
+	ContentArtifactID      string `json:"content_artifact_id"`
+	ContentArtifactCreated bool   `json:"content_artifact_created"`
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +135,11 @@ func (h *Handler) scan(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]scannedFile, len(files))
 	for index, file := range files {
-		items[index] = scannedFile{RelativePath: file.RelativePath, ByteSize: file.ByteSize, ContentHash: file.ContentHash, MediaType: file.MediaType}
+		items[index] = scannedFile{
+			RelativePath: file.RelativePath, ByteSize: file.ByteSize, ContentHash: file.ContentHash, MediaType: file.MediaType,
+			SourceID: string(file.SourceID), SourceVersionID: string(file.SourceVersionID), ContentArtifactID: string(file.ContentArtifactID),
+			ContentArtifactCreated: file.ContentArtifactCreated,
+		}
 	}
 	writeJSON(w, http.StatusOK, scanResponse{WorkspaceID: string(id), Files: items, Count: len(items)})
 }

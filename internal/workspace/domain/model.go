@@ -45,10 +45,21 @@ type Source struct {
 	CreatedAt        time.Time
 }
 
+// ContentArtifact is an immutable managed copy of the exact source bytes.
+type ContentArtifact struct {
+	ID              foundation.ID
+	WorkspaceID     foundation.ID
+	ContentHash     string
+	ByteSize        int64
+	ManagedLocation string
+	CreatedAt       time.Time
+}
+
 // SourceVersion is one immutable captured content version of a Source.
 type SourceVersion struct {
 	ID                      foundation.ID
 	SourceID                foundation.ID
+	ContentArtifactID       foundation.ID
 	ContentHash             string
 	ByteSize                int64
 	MediaType               string
@@ -61,13 +72,16 @@ type SourceVersion struct {
 // SourceRegistration supplies candidate IDs for a new Source and SourceVersion.
 // Existing records keep their original IDs when the stable location or hash matches.
 type SourceRegistration struct {
-	Source  Source
-	Version SourceVersion
+	Source   Source
+	Artifact ContentArtifact
+	Version  SourceVersion
 }
 
 // SourceRegistrationResult reports the persisted records and whether a version was created.
 type SourceRegistrationResult struct {
-	Source  Source
-	Version SourceVersion
-	Created bool
+	Source          Source
+	Artifact        ContentArtifact
+	Version         SourceVersion
+	ArtifactCreated bool
+	Created         bool
 }

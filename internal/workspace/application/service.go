@@ -155,8 +155,8 @@ func (s *Service) GetWorkspace(ctx context.Context, workspaceID foundation.ID) (
 	return result(workspace, gitStatus), nil
 }
 
-// ScanWorkspace performs a safe read-only file scan and atomically registers
-// the discovered Source/SourceVersion metadata. It does not parse or index files.
+// ScanWorkspace safely captures immutable content and atomically registers
+// Source, ContentArtifact and SourceVersion metadata. It does not parse or index files.
 func (s *Service) ScanWorkspace(ctx context.Context, workspaceID foundation.ID) ([]domain.ScannedFile, error) {
 	if s == nil || s.dependencies.Repository == nil || s.dependencies.Files == nil || s.dependencies.IDs == nil || s.dependencies.Clock == nil {
 		return nil, dependencyError("WORKSPACE_SERVICE_UNAVAILABLE")
@@ -172,6 +172,10 @@ func (s *Service) ScanWorkspace(ctx context.Context, workspaceID foundation.ID) 
 	registrations := make([]domain.SourceRegistration, 0, len(files))
 	capturedAt := s.dependencies.Clock.Now()
 	for _, file := range files {
+		capture, err := s.dependencies.Files.Capture(ctx, workspace.RootPath, file)
+		if err != nil {
+			return nil, err
+		}
 		sourceID, err := s.dependencies.IDs.New()
 		if err != nil {
 			return nil, err
@@ -180,20 +184,38 @@ func (s *Service) ScanWorkspace(ctx context.Context, workspaceID foundation.ID) 
 		if err != nil {
 			return nil, err
 		}
+		artifactID, err := s.dependencies.IDs.New()
+		if err != nil {
+			return nil, err
+		}
 		registrations = append(registrations, domain.SourceRegistration{
 			Source: domain.Source{
 				ID: sourceID, WorkspaceID: workspace.ID, Type: sourceType(file.MediaType),
 				LogicalName: filepath.Base(file.RelativePath), OriginalLocation: file.RelativePath, CreatedAt: capturedAt,
 			},
+			Artifact: domain.ContentArtifact{
+				ID: artifactID, WorkspaceID: workspace.ID, ContentHash: capture.ContentHash,
+				ByteSize: capture.ByteSize, ManagedLocation: capture.ManagedLocation, CreatedAt: capturedAt,
+			},
 			Version: domain.SourceVersion{
-				ID: versionID, ContentHash: file.ContentHash, ByteSize: file.ByteSize,
+				ID: versionID, ContentArtifactID: artifactID, ContentHash: file.ContentHash, ByteSize: file.ByteSize,
 				MediaType: file.MediaType, OriginalContentLocation: file.RelativePath,
 				SecurityStatus: "pending", CapturedAt: capturedAt,
 			},
 		})
 	}
-	if _, err := s.dependencies.Repository.RegisterSourceVersions(ctx, registrations); err != nil {
+	results, err := s.dependencies.Repository.RegisterSourceVersions(ctx, registrations)
+	if err != nil {
 		return nil, err
+	}
+	if len(results) != len(files) {
+		return nil, foundation.NewError(foundation.ErrorConsistencyViolation, "SOURCE_VERSION_RESULT_INCOMPLETE", false, errors.New("repository returned an incomplete registration result"))
+	}
+	for index := range files {
+		files[index].SourceID = results[index].Source.ID
+		files[index].SourceVersionID = results[index].Version.ID
+		files[index].ContentArtifactID = results[index].Artifact.ID
+		files[index].ContentArtifactCreated = results[index].ArtifactCreated
 	}
 	return files, nil
 }

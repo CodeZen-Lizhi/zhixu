@@ -300,12 +300,16 @@
       },
       "ScannedFile": {
         "type": "object",
-        "required": ["relative_path", "byte_size", "content_hash", "media_type"],
+        "required": ["relative_path", "byte_size", "content_hash", "media_type", "source_id", "source_version_id", "content_artifact_id", "content_artifact_created"],
         "properties": {
           "relative_path": { "type": "string", "minLength": 1 },
           "byte_size": { "type": "integer", "minimum": 0 },
           "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-          "media_type": { "type": "string", "minLength": 1 }
+          "media_type": { "type": "string", "minLength": 1 },
+          "source_id": { "type": "string", "format": "uuid" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "content_artifact_id": { "type": "string", "format": "uuid" },
+          "content_artifact_created": { "type": "boolean", "description": "True when this scan published the managed immutable bytes; false when an identical artifact was reused." }
         },
         "additionalProperties": false
       },

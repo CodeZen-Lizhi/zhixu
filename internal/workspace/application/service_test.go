@@ -161,8 +161,8 @@ func TestServiceOpenWorkspace(t *testing.T) {
 
 func TestServiceScanWorkspace(t *testing.T) {
 	files := []domain.ScannedFile{
-		{RelativePath: "a.md", ByteSize: 12, ContentHash: "hash-a", MediaType: "text/markdown"},
-		{RelativePath: "nested/b.txt", ByteSize: 8, ContentHash: "hash-b", MediaType: "text/plain"},
+		{RelativePath: "a.md", ByteSize: 12, ContentHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", MediaType: "text/markdown"},
+		{RelativePath: "nested/b.txt", ByteSize: 8, ContentHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", MediaType: "text/plain"},
 	}
 	repository := &fakeRepository{workspace: domain.Workspace{ID: testWorkspaceID, RootPath: "/workspace"}}
 	scanner := &fakeFileScanner{scanFiles: files}
@@ -177,8 +177,8 @@ func TestServiceScanWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScanWorkspace() error = %v", err)
 	}
-	if !reflect.DeepEqual(result, files) {
-		t.Fatalf("ScanWorkspace() = %#v, want %#v", result, files)
+	if len(result) != 2 || result[0].SourceID == "" || result[0].SourceVersionID == "" || result[0].ContentArtifactID == "" || !result[0].ContentArtifactCreated {
+		t.Fatalf("ScanWorkspace() = %#v", result)
 	}
 	if !reflect.DeepEqual(scanner.scanRoots, []string{"/workspace"}) {
 		t.Fatalf("Scan roots = %#v", scanner.scanRoots)
@@ -186,7 +186,7 @@ func TestServiceScanWorkspace(t *testing.T) {
 	if len(repository.registrations) != len(files) {
 		t.Fatalf("registrations = %#v", repository.registrations)
 	}
-	if repository.registrations[0].Source.OriginalLocation != "a.md" || repository.registrations[0].Version.ContentHash != "hash-a" {
+	if repository.registrations[0].Source.OriginalLocation != "a.md" || repository.registrations[0].Version.ContentHash != files[0].ContentHash || repository.registrations[0].Artifact.ManagedLocation == "" {
 		t.Fatalf("first registration = %#v", repository.registrations[0])
 	}
 }
@@ -247,7 +247,11 @@ func (f *fakeRepository) RegisterSourceVersion(context.Context, domain.SourceReg
 
 func (f *fakeRepository) RegisterSourceVersions(_ context.Context, registrations []domain.SourceRegistration) ([]domain.SourceRegistrationResult, error) {
 	f.registrations = append(f.registrations, registrations...)
-	return make([]domain.SourceRegistrationResult, len(registrations)), nil
+	results := make([]domain.SourceRegistrationResult, len(registrations))
+	for index, registration := range registrations {
+		results[index] = domain.SourceRegistrationResult{Source: registration.Source, Artifact: registration.Artifact, Version: registration.Version, ArtifactCreated: true, Created: true}
+	}
+	return results, nil
 }
 
 type fakeFileScanner struct {
@@ -265,6 +269,14 @@ func (f *fakeFileScanner) CanonicalRoot(path string) (string, error) {
 func (f *fakeFileScanner) Scan(_ context.Context, rootPath string) ([]domain.ScannedFile, error) {
 	f.scanRoots = append(f.scanRoots, rootPath)
 	return append([]domain.ScannedFile(nil), f.scanFiles...), nil
+}
+
+func (f *fakeFileScanner) Capture(_ context.Context, _ string, file domain.ScannedFile) (domain.ContentCapture, error) {
+	return domain.ContentCapture{ContentHash: file.ContentHash, ByteSize: file.ByteSize, ManagedLocation: ".knowledge/sources/" + file.ContentHash, Created: true}, nil
+}
+
+func (f *fakeFileScanner) ReadArtifact(context.Context, string, domain.ContentArtifact) ([]byte, error) {
+	return nil, nil
 }
 
 type fakeGitStatusReader struct {
