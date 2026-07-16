@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 7
+- **Total Sessions**: 8
 - **Last Active**: 2026-07-17
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~239 | Active |
+| `journal-1.md` | ~272 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 8 | 2026-07-17 | M5 Write Authorization | `87ea888` | `dev` |
 | 7 | 2026-07-17 | 完成 M5 摄取解析与规范化分块 | `2a8e681`, `584ec5d` | `dev` |
 | 6 | 2026-07-16 | 加固 M5 幂等与失效状态 | `abc9f5a` | `dev` |
 | 5 | 2026-07-16 | 完成 M5 Proposal 审批与安全预检 | `315494e` | `dev` |

@@ -237,3 +237,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: M5 Write Authorization
+
+**Date**: 2026-07-17
+**Task**: M5 Write Authorization
+**Branch**: `dev`
+
+### Summary
+
+实现服务端短期 Write Authorization：审批与 Workflow 严格绑定、数据库可信时钟、过期/撤销、完整绑定前置校验、并发一次性幂等消费和 PostgreSQL 约束；明确 M5-04 在文件写入点执行最终 Target Version CAS。完成真实 PostgreSQL、全仓 race/vet、Web/Eino、OpenAPI、Compose build/readiness smoke 与 Go Quality Gate。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `87ea888` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
