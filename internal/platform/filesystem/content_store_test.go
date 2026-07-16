@@ -153,6 +153,28 @@ func TestRootReadArtifactRejectsManagedDirectorySymlink(t *testing.T) {
 	requireFilesystemError(t, err, foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_INVALID")
 }
 
+func TestRootReadArtifactLimitedRejectsBeforeLoadingOversizedArtifact(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	content := []byte("oversized")
+	if err := os.WriteFile(filepath.Join(rootPath, "note.md"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := root.Scan(ScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	location, _, err := root.Capture(context.Background(), "note.md", files[0].SHA256, files[0].Size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = root.ReadArtifactLimited(context.Background(), location, files[0].SHA256, files[0].Size, 4)
+	requireFilesystemError(t, err, foundation.ErrorInvalidInput, "SOURCE_FILE_TOO_LARGE")
+}
+
 func TestRootCaptureRejectsUntrustedGitdirMarker(t *testing.T) {
 	rootPath := t.TempDir()
 	outsideGit := t.TempDir()

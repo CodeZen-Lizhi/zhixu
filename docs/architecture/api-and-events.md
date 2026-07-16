@@ -136,6 +136,14 @@ Command：
 - 输入：文件/URL/文本、处理策略。
 - 输出：Source ID、Workflow Run。
 
+M5 已落地的同步摄取命令为 `POST /api/v1/source-versions/{source_version_id}/ingestion-attempts`：
+
+- 必须携带 `Idempotency-Key` 和 `attempt_number`。
+- 服务端只读取已捕获的 Content Artifact，不读取用户原始路径。
+- 首次完成返回 201；同一幂等键重放返回已持久化 Attempt/Projection 摘要（200）。
+- 响应中的 `chunked` 仅表示 Ingestion 投影完成，不表示 FTS、Embedding 或 `ready`。
+- 超过长任务阈值的异步 Workflow 仍由 Workflow API/Worker 负责；该命令不把同步返回包装成异步成功。
+
 ### Search
 
 - 输入：query、scope、filters、mode。

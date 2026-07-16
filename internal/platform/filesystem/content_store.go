@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
@@ -131,12 +132,22 @@ func (r Root) Capture(ctx context.Context, relative, expectedHash string, expect
 
 // ReadArtifact safely re-reads and verifies an immutable managed content artifact.
 func (r Root) ReadArtifact(ctx context.Context, managedLocation, expectedHash string, expectedSize int64) ([]byte, error) {
+	return r.ReadArtifactLimited(ctx, managedLocation, expectedHash, expectedSize, 0)
+}
+
+// ReadArtifactLimited is the bounded form used by the Workspace Scanner. The
+// size check happens before opening and is repeated while reading so corrupt
+// metadata or a replaced file cannot force unbounded allocation.
+func (r Root) ReadArtifactLimited(ctx context.Context, managedLocation, expectedHash string, expectedSize, maxBytes int64) ([]byte, error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
 	expectedLocation := filepath.ToSlash(filepath.Join(managedSourceDirectory, expectedHash))
-	if !validSHA256(expectedHash) || expectedSize < 0 || filepath.ToSlash(filepath.Clean(managedLocation)) != expectedLocation {
+	if !validSHA256(expectedHash) || expectedSize < 0 || maxBytes < 0 || filepath.ToSlash(filepath.Clean(managedLocation)) != expectedLocation {
 		return nil, fileError(foundation.ErrorInvalidInput, "CONTENT_ARTIFACT_REFERENCE_INVALID", false, errors.New("invalid content artifact reference"))
+	}
+	if maxBytes > 0 && expectedSize > maxBytes {
+		return nil, fileError(foundation.ErrorInvalidInput, "SOURCE_FILE_TOO_LARGE", false, errors.New("content artifact exceeds read limit"))
 	}
 	workspaceRoot, err := os.OpenRoot(r.path)
 	if err != nil {
@@ -156,11 +167,15 @@ func (r Root) ReadArtifact(ctx context.Context, managedLocation, expectedHash st
 	if !info.Mode().IsRegular() {
 		return nil, fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_INVALID", false, errors.New("artifact is not a regular file"))
 	}
-	file, err := workspaceRoot.Open(expectedLocation)
+	file, err := workspaceRoot.OpenFile(expectedLocation, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_READ_FAILED", true, err)
 	}
 	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() {
+		return nil, fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_INVALID", false, errors.New("artifact is not a regular file"))
+	}
 	hash := sha256.New()
 	// Do not use the database-reported size as an allocation request. A corrupt
 	// or malicious metadata row must not be able to trigger an enormous upfront
@@ -174,6 +189,9 @@ func (r Root) ReadArtifact(ctx context.Context, managedLocation, expectedHash st
 		count, readErr := file.Read(buffer)
 		if count > 0 {
 			content = append(content, buffer[:count]...)
+			if maxBytes > 0 && int64(len(content)) > maxBytes {
+				return nil, fileError(foundation.ErrorInvalidInput, "SOURCE_FILE_TOO_LARGE", false, errors.New("content artifact exceeds read limit"))
+			}
 			_, _ = hash.Write(buffer[:count])
 			if int64(len(content)) > expectedSize {
 				return nil, fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_CONTENT_CONFLICT", false, errors.New("artifact size changed"))

@@ -80,3 +80,49 @@ git diff --check
 - 最终数据库 Schema 组织方式、字段长度、时间类型和所有索引名称。
 - 连接池参数、迁移执行入口和 Testcontainers 版本。
 - 中文 FTS 配置、向量维度、HNSW 参数以及 50 万数据容量结果。
+
+## M5 Ingestion Projection Contract
+
+### 1. Scope / Trigger
+
+- Trigger：新增 `ingestion.attempt`、`parse_projection`、`source_version_projection`、`source_span` 和 `canonical_chunk` 迁移及 Repository。
+
+### 2. Signatures
+
+- `Repository.SaveProjection(ctx, ProjectionWrite) (ProjectionResult, error)` 必须在一个 PostgreSQL 事务内完成 Projection、Provenance、Span 和目标 Chunk Strategy。
+- `Repository.GetProjection(ctx, projectionID, chunkStrategyVersion, schemaVersion)` 只返回请求的 Chunk 策略。
+
+### 3. Contracts
+
+- Parse Projection 唯一键：`content_artifact_id + parser_id + parser_version + parser_config_hash + schema_version`。
+- Canonical Chunk 唯一键：`parse_projection_id + chunk_strategy_version + schema_version + sequence`。
+- Span/Chunk 的 parser/schema 版本必须与 Parse Projection 一致；Workspace、Artifact、Projection、Span 归属由触发器交叉校验。
+- Projection/Span/Chunk 只能 INSERT；Attempt 只允许显式状态转移和 `version=old+1`。
+
+### 4. Validation & Error Matrix
+
+- `23505` → `INGESTION_RECORD_CONFLICT`/版本冲突。
+- `23503`、`23514`、版本交叉不一致 → 一致性错误，不自动重试。
+- `40001`、`40P01` → 保留 `RetryableFailure`，Attempt 的 `retryable` 必须为 true。
+- Source Version 与 Artifact 哈希/大小不一致 → 读取前拒绝，不创建成功投影。
+
+### 5. Good / Base / Bad Cases
+
+- Good：两个 Source Version 通过 `source_version_projection` 共享同一 Parse Projection，并保留各自 Provenance。
+- Base：同 Projection 的新 Chunk Strategy 追加新 Chunk 集，旧 Strategy 不被更新或删除。
+- Bad：以 `parse_projection_id` 单独查询 Chunk，或把不同策略的 Chunk 混在一次响应中。
+
+### 6. Tests Required
+
+- 空库执行全部 Up 两次；PostgreSQL race 集成测试。
+- 并发/重复 `SaveProjection`、策略隔离、版本交叉约束、不可变更新/删除拒绝。
+- Query 使用显式列和参数绑定；事务失败后无半批次 Span/Chunk。
+
+### 7. Wrong vs Correct
+
+```sql
+-- Wrong: WHERE parse_projection_id = $1
+-- Correct: WHERE parse_projection_id = $1
+--         AND chunk_strategy_version = $2
+--         AND schema_version = $3
+```

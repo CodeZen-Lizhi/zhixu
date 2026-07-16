@@ -41,7 +41,7 @@
 | M4-02 | M4 | 实现 Outbox、重试/退避、暂停/恢复/取消、Human Task | `internal/workflow/**`, `migrations/**` | M4-01 | crash、lease expire、duplicate event、double submit | 重复副作用 | 子 Agent | 部分完成：Outbox/Human/幂等完成；publisher/暂停取消待实现 |
 | M4-03 | M4 | 实现 Side Effect 执行判定、补偿和 `MANUAL_RECOVERY_REQUIRED` | `internal/workflow/**`, `internal/audit/**` | M4-02 | 未知结果不自动重试；恢复演练 | 状态误判 | 主 Agent + 子 Agent | 待开始 |
 | M5-01 | M5 | 实现 Workspace 安全路径、扫描、Source/Version Hash 和 Git CLI Adapter | `internal/workspace/**`, `internal/platform/{filesystem,gitcli}/**` | M3-03 | path/symlink/dirty workspace/commit failure 测试 | 覆盖用户文件 | 子 Agent | 已完成 |
-| M5-02 | M5 | 实现 Markdown/TXT 解析、Source Span、分块和隔离 | `internal/ingestion/**`, `internal/platform/parser/**` | M5-01,M3-04 | 重复导入、异常编码、代码/表格完整性、隔离测试 | 引用错位 | 子 Agent | 进行中：契约与不可变内容捕获基线 |
+| M5-02 | M5 | 实现 Markdown/TXT 解析、Source Span、分块和隔离 | `internal/ingestion/**`, `internal/platform/parser/**` | M5-01,M3-04 | 重复导入、异常编码、代码/表格完整性、隔离测试 | 引用错位 | 主 Agent + 子 Agent | 已完成：Attempt/Projection/Span/Chunk、API/Workflow Node、Compose/API smoke 与 PostgreSQL/race 验证通过 |
 | M5-03 | M5 | 实现 Proposal/Revision/Approval/Write Authorization/Change Hash | `internal/changecontrol/**`, `internal/tools/**` | M4-01,M5-01,M3-03 | 未批准写入拒绝、版本冲突、过期授权、双审批 | 绕过唯一写入 seam | 主 Agent | 部分完成：Proposal/Approval/Hash/preflight；Write Authorization/expiry 待实现 |
 | M5-04 | M5 | 实现原子写回、Git Commit、DB mapping、增量索引和反向 Commit | `internal/changecontrol/**`, `internal/retrieval/**` | M5-03 | file/git/db/index/regression 故障注入；知识变更 E2E | Saga 半完成 | 主 Agent + 子 Agent | 待开始 |
 | M5-05 | M5 | 实现 Topic/Claim/Relation/Evidence/Conflict 领域规则 | `internal/knowledge/**`, `migrations/**` | M3-03,M5-02 | 五分类关系、条件冲突、证据可达、对称去重 | 关系第二事实源 | 子 Agent | 待开始 |

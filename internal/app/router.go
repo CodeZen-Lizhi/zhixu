@@ -12,6 +12,7 @@ import (
 	"time"
 
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
+	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowhttp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/http"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
@@ -39,6 +40,7 @@ type Dependencies struct {
 	Workspace         *workspacehttp.Handler
 	Workflow          *workflowhttp.Handler
 	ChangeControl     *changecontrolhttp.Handler
+	Ingestion         *ingestionhttp.Handler
 	Logger            *slog.Logger
 }
 
@@ -80,6 +82,9 @@ func NewRouter(deps Dependencies) http.Handler {
 		}
 		if deps.ChangeControl != nil {
 			deps.ChangeControl.Routes(api)
+		}
+		if deps.Ingestion != nil {
+			deps.Ingestion.Routes(api)
 		}
 		api.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 			writeProblem(w, http.StatusNotFound, "NOT_FOUND", "请求的 API 资源不存在", false, nil)

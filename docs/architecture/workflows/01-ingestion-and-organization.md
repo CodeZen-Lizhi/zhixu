@@ -67,6 +67,8 @@ flowchart TD
 - 模型不可用：完成 Index，AI 节点等待。
 - Low Confidence：受控检索或 Human Task。
 
+M5 的 Ingestion Attempt 按 `validating → parsing → parsed → chunking → chunked` 持久化检查点。系统先读取 SourceVersion/ContentArtifact 可信元数据并创建 `validating` Attempt，再执行受限、哈希校验的文件读取，因此超限、读取失败和读取期间取消也会持久化为 `parse_failed`/`cancelled`。Worker/API 重放会从已存在的 Parse Projection 和目标 Chunk Strategy 恢复，不把已有成功投影重新标记为失败；隔离状态保持可追踪，重试使用新的 Attempt/幂等键。
+
 ## 8. 幂等
 
 - source_id + content_hash 保留 Provenance 幂等。

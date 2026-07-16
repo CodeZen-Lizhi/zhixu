@@ -67,12 +67,12 @@ func (Scanner) Capture(ctx context.Context, rootPath string, file domain.Scanned
 }
 
 // ReadArtifact safely re-reads immutable bytes and verifies their metadata.
-func (Scanner) ReadArtifact(ctx context.Context, rootPath string, artifact domain.ContentArtifact) ([]byte, error) {
+func (s Scanner) ReadArtifact(ctx context.Context, rootPath string, artifact domain.ContentArtifact) ([]byte, error) {
 	root, err := NewRoot(rootPath)
 	if err != nil {
 		return nil, fileError(foundation.ErrorInvalidInput, "WORKSPACE_ROOT_INVALID", false, err)
 	}
-	return root.ReadArtifact(ctx, artifact.ManagedLocation, artifact.ContentHash, artifact.ByteSize)
+	return root.ReadArtifactLimited(ctx, artifact.ManagedLocation, artifact.ContentHash, artifact.ByteSize, s.Options.MaxBytes)
 }
 
 var _ domain.FileScanner = Scanner{}

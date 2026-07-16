@@ -3,6 +3,7 @@ package workspacepostgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -94,6 +95,125 @@ func (r *Repository) ListWorkspaceRoots(ctx context.Context) ([]string, error) {
 		return nil, classify(err, "WORKSPACE_ROOTS_QUERY_FAILED")
 	}
 	return roots, nil
+}
+
+// GetSourceMaterial 联合读取 SourceVersion、Source、Workspace 与 ContentArtifact，
+// 并在离开 PostgreSQL Adapter 前校验作用域和不可变内容元数据。
+func (r *Repository) GetSourceMaterial(ctx context.Context, sourceVersionID foundation.ID) (domain.SourceMaterial, error) {
+	if sourceVersionID == "" {
+		return domain.SourceMaterial{}, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_ID_INVALID", false, errors.New("source version id is required"))
+	}
+	var (
+		versionID, versionSourceID, versionArtifactID string
+		version                                       domain.SourceVersion
+		sourceID, sourceWorkspaceID                   string
+		workspaceID, workspaceRootPath                string
+		artifactID, artifactWorkspaceID               string
+		artifact                                      domain.ContentArtifact
+		artifactCreatedAt                             sql.NullTime
+	)
+	err := r.db.QueryRow(ctx, `
+		SELECT
+			sv.id::text,
+			sv.source_id::text,
+			COALESCE(sv.content_artifact_id::text, ''),
+			sv.content_hash,
+			sv.byte_size,
+			sv.mime_type,
+			sv.original_content_location,
+			sv.security_status,
+			COALESCE(sv.parser_version, ''),
+			sv.captured_at,
+			s.id::text,
+			s.workspace_id::text,
+			w.id::text,
+			w.root_path,
+			COALESCE(ca.id::text, ''),
+			COALESCE(ca.workspace_id::text, ''),
+			COALESCE(ca.content_hash, ''),
+			COALESCE(ca.byte_size, -1),
+			COALESCE(ca.managed_location, ''),
+			ca.created_at
+		FROM core.source_version sv
+		JOIN core.source s ON s.id = sv.source_id
+		JOIN core.workspace w ON w.id = s.workspace_id
+		LEFT JOIN core.content_artifact ca ON ca.id = sv.content_artifact_id
+		WHERE sv.id = $1`, string(sourceVersionID)).Scan(
+		&versionID, &versionSourceID, &versionArtifactID,
+		&version.ContentHash, &version.ByteSize, &version.MediaType,
+		&version.OriginalContentLocation, &version.SecurityStatus, &version.ParserVersion, &version.CapturedAt,
+		&sourceID, &sourceWorkspaceID, &workspaceID, &workspaceRootPath,
+		&artifactID, &artifactWorkspaceID, &artifact.ContentHash, &artifact.ByteSize,
+		&artifact.ManagedLocation, &artifactCreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.SourceMaterial{}, foundation.NewError(foundation.ErrorNotFound, "SOURCE_VERSION_NOT_FOUND", false, err)
+	}
+	if err != nil {
+		return domain.SourceMaterial{}, classify(err, "SOURCE_MATERIAL_QUERY_FAILED")
+	}
+	if versionArtifactID == "" {
+		return domain.SourceMaterial{}, foundation.NewError(foundation.ErrorConsistencyViolation, "SOURCE_VERSION_ARTIFACT_MISSING", false, errors.New("legacy source version has no content artifact"))
+	}
+	if artifactID == "" || !artifactCreatedAt.Valid {
+		return domain.SourceMaterial{}, foundation.NewError(foundation.ErrorConsistencyViolation, "SOURCE_MATERIAL_ARTIFACT_MISSING", false, errors.New("source version content artifact is missing"))
+	}
+	parsedVersionID, err := parseMaterialID(versionID, "source version")
+	if err != nil {
+		return domain.SourceMaterial{}, err
+	}
+	parsedVersionSourceID, err := parseMaterialID(versionSourceID, "source version source")
+	if err != nil {
+		return domain.SourceMaterial{}, err
+	}
+	parsedVersionArtifactID, err := parseMaterialID(versionArtifactID, "source version artifact")
+	if err != nil {
+		return domain.SourceMaterial{}, err
+	}
+	parsedSourceID, err := parseMaterialID(sourceID, "source")
+	if err != nil {
+		return domain.SourceMaterial{}, err
+	}
+	parsedSourceWorkspaceID, err := parseMaterialID(sourceWorkspaceID, "source workspace")
+	if err != nil {
+		return domain.SourceMaterial{}, err
+	}
+	parsedWorkspaceID, err := parseMaterialID(workspaceID, "workspace")
+	if err != nil {
+		return domain.SourceMaterial{}, err
+	}
+	parsedArtifactID, err := parseMaterialID(artifactID, "content artifact")
+	if err != nil {
+		return domain.SourceMaterial{}, err
+	}
+	parsedArtifactWorkspaceID, err := parseMaterialID(artifactWorkspaceID, "content artifact workspace")
+	if err != nil {
+		return domain.SourceMaterial{}, err
+	}
+	version.ID = parsedVersionID
+	version.SourceID = parsedVersionSourceID
+	version.ContentArtifactID = parsedVersionArtifactID
+	artifact.ID = parsedArtifactID
+	artifact.WorkspaceID = parsedArtifactWorkspaceID
+	artifact.CreatedAt = artifactCreatedAt.Time
+	if parsedVersionID != sourceVersionID || parsedVersionSourceID != parsedSourceID || parsedSourceWorkspaceID != parsedWorkspaceID || parsedVersionArtifactID != parsedArtifactID || parsedArtifactWorkspaceID != parsedWorkspaceID {
+		return domain.SourceMaterial{}, foundation.NewError(foundation.ErrorConsistencyViolation, "SOURCE_MATERIAL_SCOPE_INVALID", false, errors.New("source material crosses workspace or source scope"))
+	}
+	if version.ContentHash != artifact.ContentHash || version.ByteSize != artifact.ByteSize {
+		return domain.SourceMaterial{}, foundation.NewError(foundation.ErrorConsistencyViolation, "SOURCE_MATERIAL_METADATA_CONFLICT", false, errors.New("source version and content artifact metadata differ"))
+	}
+	return domain.SourceMaterial{
+		WorkspaceID: parsedWorkspaceID, WorkspaceRootPath: workspaceRootPath, SourceID: parsedSourceID,
+		SourceVersion: version, ContentArtifact: artifact,
+	}, nil
+}
+
+func parseMaterialID(value, field string) (foundation.ID, error) {
+	parsed, err := foundation.ParseID(value)
+	if err != nil {
+		return "", foundation.NewError(foundation.ErrorConsistencyViolation, "SOURCE_MATERIAL_ID_INVALID", false, fmt.Errorf("parse %s id: %w", field, err))
+	}
+	return parsed, nil
 }
 
 // RegisterSourceVersion reuses a Source by stable location and a SourceVersion
@@ -363,3 +483,4 @@ func classify(err error, fallbackCode string) error {
 }
 
 var _ domain.Repository = (*Repository)(nil)
+var _ domain.SourceMaterialRepository = (*Repository)(nil)

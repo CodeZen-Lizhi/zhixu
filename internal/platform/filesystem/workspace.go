@@ -37,6 +37,10 @@ type ScanOptions struct {
 	AllowedExtensions map[string]struct{}
 }
 
+// DefaultMaxBytes is the conservative v1 input ceiling shared by scanning
+// and ingestion composition roots unless an explicit policy overrides it.
+const DefaultMaxBytes int64 = 10 * 1024 * 1024
+
 // NewRoot canonicalizes an existing directory and rejects non-directories.
 func NewRoot(path string) (Root, error) {
 	trimmed := strings.TrimSpace(path)

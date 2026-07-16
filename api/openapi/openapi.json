@@ -106,6 +106,27 @@
         }
       }
     },
+    "/api/v1/source-versions/{source_version_id}/ingestion-attempts": {
+      "parameters": [
+        { "name": "source_version_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      ],
+      "post": {
+        "operationId": "processSourceVersion",
+        "description": "Validates, parses and chunks immutable Content Artifact bytes. Replays are idempotent and return persisted Attempt state.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IngestionRequest" } } } },
+        "responses": {
+          "201": { "description": "A new Ingestion Attempt completed and persisted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IngestionResult" } } } },
+          "200": { "description": "An idempotent replay returned the persisted Attempt or Projection.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IngestionResult" } } } },
+          "400": { "description": "Invalid Source Version, request or media/content policy.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "403": { "description": "The source was quarantined.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "Source Version or Content Artifact not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "Attempt, content or projection consistency conflict.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Filesystem, parser or database dependency unavailable.", "content": { "application/json": { "$ref": "#/components/schemas/Problem" } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "$ref": "#/components/schemas/Problem" } } }
+        }
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/workflows": {
       "parameters": [
         { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
@@ -320,6 +341,34 @@
           "workspace_id": { "type": "string", "format": "uuid" },
           "files": { "type": "array", "items": { "$ref": "#/components/schemas/ScannedFile" } },
           "count": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      },
+      "IngestionRequest": {
+        "type": "object",
+        "required": ["attempt_number"],
+        "properties": {
+          "workflow_run_id": { "type": "string", "format": "uuid" },
+          "attempt_number": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "IngestionResult": {
+        "type": "object",
+        "required": ["attempt_id", "attempt_created", "attempt_number", "status", "security_status", "retryable", "projection_created", "chunk_count", "warning_count"],
+        "properties": {
+          "attempt_id": { "type": "string", "format": "uuid" },
+          "attempt_created": { "type": "boolean" },
+          "attempt_number": { "type": "integer", "minimum": 1 },
+          "status": { "type": "string", "enum": ["validating", "parsing", "parsed", "chunking", "chunked", "parse_failed", "cancelled"] },
+          "security_status": { "type": "string", "enum": ["pending", "passed", "quarantined"] },
+          "failure_stage": { "type": "string" },
+          "error_code": { "type": "string" },
+          "retryable": { "type": "boolean" },
+          "parse_projection_id": { "type": "string", "format": "uuid" },
+          "projection_created": { "type": "boolean" },
+          "chunk_count": { "type": "integer", "minimum": 0 },
+          "warning_count": { "type": "integer", "minimum": 0 }
         },
         "additionalProperties": false
       },

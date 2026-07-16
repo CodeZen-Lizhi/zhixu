@@ -82,3 +82,60 @@ git diff --check
 - 是否采用 RFC 9457 `type/title` 兼容字段；当前产品契约只锁定 `error_code/message/retryable/details`。
 - 结构化错误的序列化、SSE 失败事件和多语言 message 策略。
 - 全量错误码清单、客户端生成类型和 OpenAPI Breaking Gate。
+
+## M5 Ingestion API Code-Spec
+
+### 1. Scope / Trigger
+
+- Trigger：Source Version → Parser → Projection → Chunk 横跨文件系统、数据库、Application、API 和 Workflow Node。
+- 目标：同一错误码、幂等语义和恢复状态在 API、Workflow、日志与数据库中保持一致。
+
+### 2. Signatures
+
+```text
+POST /api/v1/source-versions/{source_version_id}/ingestion-attempts
+Header: Idempotency-Key (1..128)
+Body: { workflow_run_id?: uuid, attempt_number: positive integer }
+```
+
+```go
+Process(context.Context, application.ProcessRequest) (application.ProcessResult, error)
+```
+
+### 3. Contracts
+
+- 首次 Attempt 完成返回 201；同一幂等键重放返回 200，并只返回已持久化 Attempt/Projection 摘要。
+- `chunked` 仅表示解析/分块投影完成，不表示 `indexed` 或 `ready`。
+- `quarantined` 固定为 `status=validating + security_status=quarantined`，错误码必须保留在 Attempt。
+- API 不返回原始文件全文；`chunk_count`、`warning_count` 和稳定 ID 足够驱动后续查询。
+
+### 4. Validation & Error Matrix
+
+| 条件 | Attempt 状态 | API 错误 |
+|---|---|---|
+| Idempotency-Key 缺失/超长 | 不创建 | `400 IDEMPOTENCY_KEY_REQUIRED` |
+| MIME、UTF-8、大小不合法 | `parse_failed` | `400`，稳定 `error_code` |
+| NUL/伪二进制 | `validating/quarantined` | `403 SOURCE_BINARY_CONTENT` |
+| Parser/Projection 可重试依赖失败 | `parse_failed + retryable=true` | `503` |
+| 请求取消/超时 | `cancelled + retryable=false` | `503/非重试` |
+| 已有 `parsed/chunking/chunked` Attempt | 从 Projection 检查点恢复 | 不重新执行 Parser |
+
+### 5. Good / Base / Bad Cases
+
+- Good：同一 Artifact + Parser/Config/Schema + Chunk Strategy 重放返回相同 Projection/Chunk ID。
+- Base：同一 Parse Projection 使用新 Chunk Strategy 时只新建对应 Strategy/Schema 的 Chunk，不混合旧策略。
+- Bad：把 `retry_wait` 写入 Attempt、把解析失败返回 200、或从已完成 Projection 重新解析后覆盖状态。
+
+### 6. Tests Required
+
+- Handler：Idempotency-Key、UUID、JSON、201/200、Problem Details。
+- Application：quarantine、retryable error 保真、取消、BOM warning 去重、parsed/chunking/chunked 恢复。
+- PostgreSQL：空库/重复迁移、Attempt 乐观锁、Projection/Span/Chunk 不可变、策略隔离和版本交叉约束。
+- Compose/API smoke：扫描真实文件后首次摄取成功，第二次请求复用 Attempt/Projection。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Parse Projection 已存在 → 直接返回所有 Chunk。
+Correct: Parse Projection 可共享，但查询/写入 Chunk 必须带 chunk_strategy_version + schema_version。
+```

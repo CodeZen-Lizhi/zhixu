@@ -69,6 +69,16 @@ type SourceVersion struct {
 	CapturedAt              time.Time
 }
 
+// SourceMaterial 是 Parser 重读不可变 SourceVersion 所需的只读聚合。
+// Workspace 根路径只用于受控 FileScanner，不应暴露到 HTTP 或 Parser。
+type SourceMaterial struct {
+	WorkspaceID       foundation.ID
+	WorkspaceRootPath string
+	SourceID          foundation.ID
+	SourceVersion     SourceVersion
+	ContentArtifact   ContentArtifact
+}
+
 // SourceRegistration supplies candidate IDs for a new Source and SourceVersion.
 // Existing records keep their original IDs when the stable location or hash matches.
 type SourceRegistration struct {
