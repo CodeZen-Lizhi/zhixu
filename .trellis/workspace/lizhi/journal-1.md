@@ -170,3 +170,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: 加固 M5 幂等与失效状态
+
+**Date**: 2026-07-16
+**Task**: 加固 M5 幂等与失效状态
+**Branch**: `dev`
+
+### Summary
+
+补齐 Proposal 创建 Idempotency-Key 持久化与重放、审批相同决定重放、审批前真实基线检查，以及目标不可用转 needs_revision；完成 PostgreSQL、Compose 和 API 烟测。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `abc9f5a` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

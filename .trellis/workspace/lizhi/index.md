@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
+- **Total Sessions**: 6
 - **Last Active**: 2026-07-16
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~172 | Active |
+| `journal-1.md` | ~205 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-07-16 | 加固 M5 幂等与失效状态 | `abc9f5a` | `dev` |
 | 5 | 2026-07-16 | 完成 M5 Proposal 审批与安全预检 | `315494e` | `dev` |
 | 4 | 2026-07-16 | 完成 M4 Workflow 持久化闭环 | `fa5f7a7` | `dev` |
 | 3 | 2026-07-16 | 完成 M3 Workspace 事实源闭环 | `3546ef1` | `dev` |
