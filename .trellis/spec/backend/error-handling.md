@@ -133,6 +133,19 @@ Process(context.Context, application.ProcessRequest) (application.ProcessResult,
 - PostgreSQL：空库/重复迁移、Attempt 乐观锁、Projection/Span/Chunk 不可变、策略隔离和版本交叉约束。
 - Compose/API smoke：扫描真实文件后首次摄取成功，第二次请求复用 Attempt/Projection。
 
+### M5 Write Authorization Error Matrix
+
+| 条件 | 稳定错误码 | 分类 |
+|---|---|---|
+| Proposal 未批准、已拒绝或已 Needs Revision | `WRITE_AUTHORIZATION_APPROVAL_REQUIRED` | PermissionDenied |
+| 当前目标基线变化 | `TARGET_BASE_HASH_CONFLICT` | VersionConflict，并标记 Needs Revision |
+| Workflow Run/Node 不存在或跨 Workspace | `WRITE_AUTHORIZATION_WORKFLOW_CONTEXT_INVALID` | ConsistencyViolation |
+| 授权字段/Change Hash 不匹配 | `WRITE_AUTHORIZATION_BINDING_CONFLICT` | VersionConflict |
+| 授权过期或已撤销 | `WRITE_AUTHORIZATION_EXPIRED` / `WRITE_AUTHORIZATION_REVOKED` | PermissionDenied |
+| 同一幂等键绑定不同授权 | `WRITE_AUTHORIZATION_IDEMPOTENCY_CONFLICT` | VersionConflict |
+
+Write Authorization 消费成功只确认数据库内的 Proposal/Approval/Revision/Workflow 授权事实，不代表文件或 Git 写回成功。当前文件基线冲突可以在完整绑定校验后提前返回 `TARGET_BASE_HASH_CONFLICT`；Safe Writeback 仍必须在原子替换点重新执行 CAS，不能把消费前读取当作跨存储事务保证。
+
 ### 7. Wrong vs Correct
 
 ```text

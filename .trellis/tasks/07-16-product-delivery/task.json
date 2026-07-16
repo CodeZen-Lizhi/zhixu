@@ -29,7 +29,8 @@
     "07-16-m5-change-control-hardening",
     "07-16-m5-ingestion-contract",
     "07-17-m5-content-artifact",
-    "07-17-m5-ingestion-parser"
+    "07-17-m5-ingestion-parser",
+    "07-17-m5-write-authorization"
   ],
   "parent": null,
   "relatedFiles": [],

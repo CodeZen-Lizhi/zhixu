@@ -65,7 +65,11 @@ flowchart LR
 
 授权令牌只在服务端存在，不发送给模型。
 
-Write Authorization 必须一次性或幂等消费、短时有效，并严格绑定上述字段。Session、API Token、Eino Context、模型 Tool Call 或管理员式 Scope 都不能自行构造、延长或扩大该授权。
+Write Authorization 必须一次性或幂等消费、短时有效，并严格绑定上述字段。Session、API Token、Eino Context、模型 Tool Call 或管理员式 Scope 都不能自行构造、延长或扩大该授权。授权消费只确认数据库中的审批和版本快照；文件/Git 写回必须在 M5-04 的实际原子替换点重新执行 Target Version CAS。
+
+当前实现落在 `internal/changecontrol`：服务端只保存 `token_hash`，授权记录位于 `change_control.tool_authorization`，签发前复核 Proposal/Approval/Change Hash/目标哈希和已持久化 Workflow Run/Node；消费先完成完整绑定校验，再在数据库行锁事务内校验审批快照、过期/撤销状态并将 `issued` 原子转为 `consumed`。当前目标文件哈希仅作快速失败检查，不与数据库形成跨存储原子事务。本切片不执行文件、Git 或索引副作用，后续 M5-04 必须把消费结果接入 Safe Writeback Saga 并在写入点做最终 CAS。
+
+明文 Credential 只在首次签发时返回，服务端不保存可恢复副本；首次响应丢失后的幂等重放不会再次返回 Credential。调用方只能使用新幂等键重新签发或等待短 TTL 过期，不能通过查询接口恢复写凭据。
 
 ## 6. 核心工具
 

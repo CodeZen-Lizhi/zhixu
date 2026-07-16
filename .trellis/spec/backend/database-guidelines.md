@@ -126,3 +126,66 @@ git diff --check
 --         AND chunk_strategy_version = $2
 --         AND schema_version = $3
 ```
+
+## M5 Write Authorization Contract
+
+### 1. Scope / Trigger
+
+- Trigger：Proposal/Revision 已获 Approval 后，需要为 `ApplyApprovedPatch` 或 `CreateGitCommit` 签发服务端短期写权限。
+- Scope：本契约只记录授权事实、过期/撤销和一次性消费；文件/Git/索引副作用由 M5-04 Safe Writeback Saga 执行。
+
+### 2. Signatures
+
+```go
+CreateAuthorization(context.Context, domain.ToolAuthorization) (domain.AuthorizationIssueResult, error)
+GetAuthorization(context.Context, foundation.ID, string, string) (domain.ToolAuthorization, error)
+ConsumeAuthorization(context.Context, domain.AuthorizationConsume) (domain.AuthorizationConsumeResult, error)
+RevokeAuthorization(context.Context, foundation.ID, time.Time) error
+```
+
+数据库表为 `change_control.tool_authorization`。原始 Credential 只在首次签发返回，数据库只保存 SHA-256 `token_hash`。
+
+### 3. Contracts
+
+- 授权绑定 Workspace、Workflow Run/Node、Proposal、Revision、Approval、Tool、Capability、Scope、Change Hash、Target Version、幂等键和最大 5 分钟 TTL。
+- `workspace_id + idempotency_key` 和 `token_hash` 均唯一；同幂等键只有完整身份和 TTL 一致时才是重放。
+- PostgreSQL `CURRENT_TIMESTAMP` 是签发、过期、消费和撤销的可信时钟；Application Clock 不得覆盖数据库生命周期判断。
+- `GetAuthorization` 会在行锁事务内把已到期 `issued` 持久化为 `expired`，然后才允许 Application 进入目标快速检查。
+- 消费先使用 `domain.ValidateAuthorizationConsumeBinding` 校验完整绑定；Repository 在 `SELECT ... FOR UPDATE` 后复用同一领域规则并校验当前 Approval/Workflow 状态。
+- 当前文件哈希只作快速失败检查且不得在消费路径修改 Proposal；文件不进入数据库事务，Safe Writeback 必须在原子替换点最终 CAS。
+- 消费成功只代表授权事实，不代表文件/Git/索引写回成功；跨存储失败进入后续 Saga/补偿。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 错误码 | 状态变化 |
+|---|---|---|
+| 凭据或任一不可变绑定不匹配 | `WRITE_AUTHORIZATION_BINDING_CONFLICT` | 无 |
+| Proposal/Approval/Revision 不再有效 | `WRITE_AUTHORIZATION_APPROVAL_REQUIRED` | 无 |
+| Workflow Run/Node 不可运行或跨 Workspace | `WRITE_AUTHORIZATION_WORKFLOW_CONTEXT_INVALID` | 无 |
+| DB 时间达到 `expires_at` | `WRITE_AUTHORIZATION_EXPIRED` | `issued → expired` |
+| 已撤销 | `WRITE_AUTHORIZATION_REVOKED` | 无 |
+| 同幂等键绑定或 TTL 不同 | `WRITE_AUTHORIZATION_IDEMPOTENCY_CONFLICT` | 无 |
+| 当前文件基线变化 | `TARGET_BASE_HASH_CONFLICT` | 消费路径不修改 Proposal；M5-04 CAS 再次判定 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：相同完整绑定并发消费，只有一次 `issued → consumed`，另一次返回同一 consumed 记录且 `replayed=true`。
+- Base：已 consumed 的同绑定请求在 Proposal 后续进入 completed 后仍可重放，不重新读取目标或执行副作用。
+- Bad：仅凭 Workspace + Idempotency Key 读取授权后就读取调用方指定目标、标记 Needs Revision，最后才校验 Credential。
+- Bad：Application 时间生成 `issued_at`、数据库时间生成 `consumed_at`，导致合法授权因时钟偏差违反时间约束。
+
+### 6. Tests Required
+
+- Domain/Application：完整绑定字段篡改、错误 Credential、Hash 大小写、过期/终态在目标读取前短路、TokenHash 出口清空。
+- PostgreSQL：空库 Up 两次、外键/触发器、终态直插拒绝、时间顺序、TTL 上限、不同 TTL 幂等冲突、撤销/过期、并发单消费和 terminal replay。
+- Safe Writeback（M5-04）：消费前快速检查通过后并发修改目标，最终写入点 CAS 必须拒绝且文件/Git/索引无副作用。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Application Clock 写 issued_at，DB Clock 写 consumed_at。
+Correct: PostgreSQL CURRENT_TIMESTAMP 统一授权生命周期时间。
+
+Wrong: 先 MarkNeedsRevision，再校验 TokenHash/Proposal/Scope 完整绑定。
+Correct: 完整绑定与终态先校验；消费快速失败路径不修改 Proposal；写入点由 M5-04 CAS。
+```

@@ -21,6 +21,9 @@ type DB interface {
 // Repository 是 Change Control 的 PostgreSQL 实现。
 type Repository struct{ db DB }
 
+var _ domain.Repository = (*Repository)(nil)
+var _ domain.AuthorizationRepository = (*Repository)(nil)
+
 // NewRepository 创建 PostgreSQL Repository。
 func NewRepository(db DB) (*Repository, error) {
 	if db == nil {
@@ -171,6 +174,275 @@ func (r *Repository) MarkNeedsRevision(ctx context.Context, proposalID foundatio
 		return foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_STATE_CONFLICT", false, errors.New("proposal is no longer approved"))
 	}
 	return tx.Commit(ctx)
+}
+
+// ValidateWorkflowContext 确认 Run/Node 已持久化且属于同一 Workspace。
+func (r *Repository) ValidateWorkflowContext(ctx context.Context, workspaceID, runID, nodeID foundation.ID) error {
+	var one int
+	err := r.db.QueryRow(ctx, `
+		SELECT 1
+		FROM workflow.run r
+		JOIN workflow.node_run n ON n.run_id=r.id
+		WHERE r.id=$1 AND n.id=$2 AND r.workspace_id=$3
+		  AND r.status IN ('pending','running','waiting_for_human')
+		  AND n.status IN ('pending','running','waiting_for_human')`, string(runID), string(nodeID), string(workspaceID)).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "WRITE_AUTHORIZATION_WORKFLOW_CONTEXT_INVALID", false, err)
+	}
+	if err != nil {
+		return classify(err, "WRITE_AUTHORIZATION_WORKFLOW_CONTEXT_QUERY_FAILED")
+	}
+	return nil
+}
+
+// GetAuthorization loads authorization metadata without exposing the raw credential.
+func (r *Repository) GetAuthorization(ctx context.Context, workspaceID foundation.ID, idempotencyKey, tokenHash string) (domain.ToolAuthorization, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.ToolAuthorization{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var databaseNow time.Time
+	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&databaseNow); err != nil {
+		return domain.ToolAuthorization{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_CLOCK_QUERY_FAILED")
+	}
+	authorization, err := scanAuthorization(tx.QueryRow(ctx, `SELECT `+authorizationColumns+` FROM change_control.tool_authorization WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, string(workspaceID), idempotencyKey))
+	if errors.Is(err, pgx.ErrNoRows) {
+		authorization, err = scanAuthorization(tx.QueryRow(ctx, `SELECT `+authorizationColumns+` FROM change_control.tool_authorization WHERE token_hash=$1 FOR UPDATE`, tokenHash))
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ToolAuthorization{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_NOT_FOUND", false, err)
+	}
+	if err != nil {
+		return domain.ToolAuthorization{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_QUERY_FAILED")
+	}
+	if authorization.Status == domain.AuthorizationIssued && !databaseNow.Before(authorization.ExpiresAt) {
+		expired, updateErr := scanAuthorization(tx.QueryRow(ctx, `UPDATE change_control.tool_authorization SET status='expired',version=version+1 WHERE id=$1 AND status='issued' RETURNING `+authorizationColumns, string(authorization.ID)))
+		if updateErr != nil {
+			return domain.ToolAuthorization{}, classifyAuthorization(updateErr, "WRITE_AUTHORIZATION_EXPIRE_FAILED")
+		}
+		authorization = expired
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ToolAuthorization{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_COMMIT_FAILED")
+	}
+	return authorization, nil
+}
+
+// CreateAuthorization 保存授权绑定；同一 Workspace/幂等键只返回原记录，不重新生成凭据。
+func (r *Repository) CreateAuthorization(ctx context.Context, authorization domain.ToolAuthorization) (domain.AuthorizationIssueResult, error) {
+	requested := authorization
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.AuthorizationIssueResult{}, classify(err, "WRITE_AUTHORIZATION_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var databaseNow time.Time
+	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&databaseNow); err != nil {
+		return domain.AuthorizationIssueResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_CLOCK_QUERY_FAILED")
+	}
+	requestedTTL := authorization.ExpiresAt.Sub(authorization.IssuedAt)
+	authorization.IssuedAt = databaseNow.UTC()
+	authorization.ExpiresAt = databaseNow.UTC().Add(requestedTTL)
+	authorization, err = scanAuthorization(tx.QueryRow(ctx, authorizationInsert+` RETURNING `+authorizationColumns,
+		string(authorization.ID), string(authorization.WorkspaceID), string(authorization.WorkflowRunID), string(authorization.NodeRunID),
+		string(authorization.ProposalID), string(authorization.RevisionID), string(authorization.ApprovalID), authorization.ToolName,
+		string(authorization.Capability), authorization.Scope, authorization.ApprovedChangeHash, authorization.TargetVersion,
+		authorization.TokenHash, authorization.IdempotencyKey, string(authorization.Status), authorization.IssuedAt.UTC(), authorization.ExpiresAt.UTC(),
+		authorizationTimePointer(authorization.RevokedAt), authorizationTimePointer(authorization.ConsumedAt), authorization.Version))
+	if errors.Is(err, pgx.ErrNoRows) {
+		existing, queryErr := scanAuthorization(tx.QueryRow(ctx, `SELECT `+authorizationColumns+` FROM change_control.tool_authorization WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, string(requested.WorkspaceID), requested.IdempotencyKey))
+		if queryErr != nil {
+			return domain.AuthorizationIssueResult{}, classifyAuthorization(queryErr, "WRITE_AUTHORIZATION_IDEMPOTENCY_QUERY_FAILED")
+		}
+		if !sameAuthorizationIdentity(existing, requested) {
+			return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WRITE_AUTHORIZATION_IDEMPOTENCY_CONFLICT", false, errors.New("authorization idempotency key is bound to another request"))
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return domain.AuthorizationIssueResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_COMMIT_FAILED")
+		}
+		return domain.AuthorizationIssueResult{Authorization: existing, Replayed: true}, nil
+	}
+	if err != nil {
+		return domain.AuthorizationIssueResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_CREATE_FAILED")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.AuthorizationIssueResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_COMMIT_FAILED")
+	}
+	return domain.AuthorizationIssueResult{Authorization: authorization}, nil
+}
+
+// ConsumeAuthorization 在数据库事务中执行过期、绑定和一次性消费检查。
+func (r *Repository) ConsumeAuthorization(ctx context.Context, request domain.AuthorizationConsume) (domain.AuthorizationConsumeResult, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.AuthorizationConsumeResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_CONSUME_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var databaseNow time.Time
+	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&databaseNow); err != nil {
+		return domain.AuthorizationConsumeResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_CLOCK_QUERY_FAILED")
+	}
+	authorization, err := scanAuthorization(tx.QueryRow(ctx, `SELECT `+authorizationColumns+` FROM change_control.tool_authorization WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, string(request.WorkspaceID), request.IdempotencyKey))
+	if errors.Is(err, pgx.ErrNoRows) {
+		authorization, err = scanAuthorization(tx.QueryRow(ctx, `SELECT `+authorizationColumns+` FROM change_control.tool_authorization WHERE token_hash=$1 FOR UPDATE`, request.Credential))
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_NOT_FOUND", false, err)
+	}
+	if err != nil {
+		return domain.AuthorizationConsumeResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_QUERY_FAILED")
+	}
+	if !sameAuthorizationBinding(authorization, request) {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WRITE_AUTHORIZATION_BINDING_CONFLICT", false, errors.New("authorization binding does not match request"))
+	}
+	if authorization.Status == domain.AuthorizationConsumed {
+		if authorization.IdempotencyKey != request.IdempotencyKey {
+			return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WRITE_AUTHORIZATION_ALREADY_CONSUMED", false, errors.New("authorization was already consumed"))
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return domain.AuthorizationConsumeResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_COMMIT_FAILED")
+		}
+		return domain.AuthorizationConsumeResult{Authorization: authorization, Replayed: true}, nil
+	}
+	if authorization.Status == domain.AuthorizationRevoked {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_REVOKED", false, errors.New("authorization was revoked"))
+	}
+	if authorization.Status == domain.AuthorizationExpired || !databaseNow.Before(authorization.ExpiresAt) {
+		if authorization.Status == domain.AuthorizationIssued {
+			if _, updateErr := tx.Exec(ctx, `UPDATE change_control.tool_authorization SET status='expired',version=version+1 WHERE id=$1 AND status='issued'`, string(authorization.ID)); updateErr != nil {
+				return domain.AuthorizationConsumeResult{}, classifyAuthorization(updateErr, "WRITE_AUTHORIZATION_EXPIRE_FAILED")
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return domain.AuthorizationConsumeResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_COMMIT_FAILED")
+		}
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_EXPIRED", false, errors.New("authorization has expired"))
+	}
+	if err := verifyCurrentAuthorizationState(ctx, tx, authorization); err != nil {
+		return domain.AuthorizationConsumeResult{}, err
+	}
+	consumed, err := scanAuthorization(tx.QueryRow(ctx, `UPDATE change_control.tool_authorization SET status='consumed',consumed_at=$2,version=version+1 WHERE id=$1 AND status='issued' RETURNING `+authorizationColumns, string(authorization.ID), databaseNow.UTC()))
+	if err != nil {
+		return domain.AuthorizationConsumeResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_CONSUME_FAILED")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.AuthorizationConsumeResult{}, classifyAuthorization(err, "WRITE_AUTHORIZATION_COMMIT_FAILED")
+	}
+	return domain.AuthorizationConsumeResult{Authorization: consumed}, nil
+}
+
+// RevokeAuthorization 使 issued 授权失效；对已终止状态重复撤销保持幂等。
+func (r *Repository) RevokeAuthorization(ctx context.Context, id foundation.ID, at time.Time) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return classifyAuthorization(err, "WRITE_AUTHORIZATION_REVOKE_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var status string
+	err = tx.QueryRow(ctx, `SELECT status FROM change_control.tool_authorization WHERE id=$1 FOR UPDATE`, string(id)).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return foundation.NewError(foundation.ErrorNotFound, "WRITE_AUTHORIZATION_NOT_FOUND", false, err)
+	}
+	if err != nil {
+		return classifyAuthorization(err, "WRITE_AUTHORIZATION_QUERY_FAILED")
+	}
+	if status == string(domain.AuthorizationConsumed) {
+		return foundation.NewError(foundation.ErrorVersionConflict, "WRITE_AUTHORIZATION_ALREADY_CONSUMED", false, errors.New("consumed authorization cannot be revoked"))
+	}
+	if status == string(domain.AuthorizationRevoked) || status == string(domain.AuthorizationExpired) {
+		return classifyAuthorization(tx.Commit(ctx), "WRITE_AUTHORIZATION_COMMIT_FAILED")
+	}
+	if _, err := tx.Exec(ctx, `UPDATE change_control.tool_authorization SET status='revoked',revoked_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=$1 AND status='issued'`, string(id)); err != nil {
+		return classifyAuthorization(err, "WRITE_AUTHORIZATION_REVOKE_FAILED")
+	}
+	return classifyAuthorization(tx.Commit(ctx), "WRITE_AUTHORIZATION_COMMIT_FAILED")
+}
+
+const authorizationColumns = `id::text,workspace_id::text,workflow_run_id::text,node_run_id::text,proposal_id::text,revision_id::text,approval_id::text,tool_name,capability,scope,approved_change_hash,target_version,token_hash,idempotency_key,status,issued_at,expires_at,revoked_at,consumed_at,version`
+
+const authorizationInsert = `INSERT INTO change_control.tool_authorization(
+	id,workspace_id,workflow_run_id,node_run_id,proposal_id,revision_id,approval_id,tool_name,capability,scope,approved_change_hash,target_version,token_hash,idempotency_key,status,issued_at,expires_at,revoked_at,consumed_at,version
+) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+ON CONFLICT(workspace_id,idempotency_key) DO NOTHING`
+
+func scanAuthorization(row pgx.Row) (domain.ToolAuthorization, error) {
+	var authorization domain.ToolAuthorization
+	var id, workspaceID, runID, nodeID, proposalID, revisionID, approvalID, capability, status string
+	if err := row.Scan(&id, &workspaceID, &runID, &nodeID, &proposalID, &revisionID, &approvalID, &authorization.ToolName, &capability, &authorization.Scope, &authorization.ApprovedChangeHash, &authorization.TargetVersion, &authorization.TokenHash, &authorization.IdempotencyKey, &status, &authorization.IssuedAt, &authorization.ExpiresAt, &authorization.RevokedAt, &authorization.ConsumedAt, &authorization.Version); err != nil {
+		return domain.ToolAuthorization{}, err
+	}
+	authorization.ID, authorization.WorkspaceID, authorization.WorkflowRunID, authorization.NodeRunID = foundation.ID(id), foundation.ID(workspaceID), foundation.ID(runID), foundation.ID(nodeID)
+	authorization.ProposalID, authorization.RevisionID, authorization.ApprovalID = foundation.ID(proposalID), foundation.ID(revisionID), foundation.ID(approvalID)
+	authorization.Capability, authorization.Status = domain.Capability(capability), domain.AuthorizationStatus(status)
+	return authorization, nil
+}
+
+func sameAuthorizationIdentity(existing, requested domain.ToolAuthorization) bool {
+	return existing.WorkspaceID == requested.WorkspaceID && existing.WorkflowRunID == requested.WorkflowRunID && existing.NodeRunID == requested.NodeRunID && existing.ProposalID == requested.ProposalID && existing.RevisionID == requested.RevisionID && existing.ApprovalID == requested.ApprovalID && existing.ToolName == requested.ToolName && existing.Capability == requested.Capability && existing.Scope == requested.Scope && existing.ApprovedChangeHash == requested.ApprovedChangeHash && existing.TargetVersion == requested.TargetVersion && existing.IdempotencyKey == requested.IdempotencyKey && existing.ExpiresAt.Sub(existing.IssuedAt) == requested.ExpiresAt.Sub(requested.IssuedAt)
+}
+
+func sameAuthorizationBinding(authorization domain.ToolAuthorization, request domain.AuthorizationConsume) bool {
+	return domain.ValidateAuthorizationConsumeBinding(authorization, request) == nil
+}
+
+func verifyCurrentAuthorizationState(ctx context.Context, tx pgx.Tx, authorization domain.ToolAuthorization) error {
+	var workspaceID, status, targetPath, baseHash, revisionHash, approvalProposal, approvalRevision, approvalHash, decision string
+	err := tx.QueryRow(ctx, `
+		SELECT p.workspace_id,p.status,r.target_path,r.base_hash,r.change_hash,a.proposal_id,a.revision_id,a.change_hash,a.decision
+		FROM change_control.proposal p
+		JOIN change_control.proposal_revision r ON r.id=$2 AND r.proposal_id=p.id
+		JOIN change_control.approval a ON a.id=$3 AND a.proposal_id=p.id AND a.revision_id=r.id
+		WHERE p.id=$1
+		FOR UPDATE OF p`, string(authorization.ProposalID), string(authorization.RevisionID), string(authorization.ApprovalID)).Scan(&workspaceID, &status, &targetPath, &baseHash, &revisionHash, &approvalProposal, &approvalRevision, &approvalHash, &decision)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, err)
+		}
+		return classifyAuthorization(err, "WRITE_AUTHORIZATION_APPROVAL_QUERY_FAILED")
+	}
+	if workspaceID != string(authorization.WorkspaceID) || status != string(domain.StatusApproved) || approvalProposal != string(authorization.ProposalID) || approvalRevision != string(authorization.RevisionID) || decision != string(domain.DecisionApproved) || revisionHash != authorization.ApprovedChangeHash || approvalHash != authorization.ApprovedChangeHash || baseHash != authorization.TargetVersion || authorization.Scope != domain.ExpectedAuthorizationScope(targetPath) {
+		return foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, errors.New("authorization approval state is no longer valid"))
+	}
+	var one int
+	err = tx.QueryRow(ctx, `
+		SELECT 1 FROM workflow.run r JOIN workflow.node_run n ON n.run_id=r.id
+		WHERE r.id=$1 AND n.id=$2 AND r.workspace_id=$3
+		  AND r.status IN ('pending','running','waiting_for_human')
+		  AND n.status IN ('pending','running','waiting_for_human')
+		FOR UPDATE OF r,n`, string(authorization.WorkflowRunID), string(authorization.NodeRunID), string(authorization.WorkspaceID)).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "WRITE_AUTHORIZATION_WORKFLOW_CONTEXT_INVALID", false, err)
+	}
+	if err != nil {
+		return classifyAuthorization(err, "WRITE_AUTHORIZATION_WORKFLOW_CONTEXT_QUERY_FAILED")
+	}
+	return nil
+}
+
+func classifyAuthorization(err error, code string) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23505":
+			return foundation.NewError(foundation.ErrorVersionConflict, "WRITE_AUTHORIZATION_IDEMPOTENCY_CONFLICT", false, err)
+		case "23503", "23514":
+			return foundation.NewError(foundation.ErrorConsistencyViolation, code, false, err)
+		case "40001", "40P01", "57P01", "08000", "08003", "08006":
+			return foundation.NewError(foundation.ErrorRetryableFailure, code, true, err)
+		}
+	}
+	return foundation.NewError(foundation.ErrorNonRetryableFailure, code, false, err)
+}
+
+func authorizationTimePointer(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return value.UTC()
 }
 
 func scanProposal(row pgx.Row) (domain.Proposal, error) {

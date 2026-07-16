@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,10 @@ type fakeRepo struct {
 	approval          domain.Approval
 	err               error
 	markedNeedsReview bool
+	authorization     domain.ToolAuthorization
+	authReplayed      bool
+	consumed          domain.AuthorizationConsume
+	workflowErr       error
 }
 
 func (f *fakeRepo) CreateProposal(_ context.Context, proposal domain.Proposal) (domain.Proposal, error) {
@@ -34,13 +39,41 @@ func (f *fakeRepo) MarkNeedsRevision(_ context.Context, _ foundation.ID, _ time.
 	f.markedNeedsReview = true
 	return f.err
 }
+func (f *fakeRepo) ValidateWorkflowContext(context.Context, foundation.ID, foundation.ID, foundation.ID) error {
+	return f.workflowErr
+}
+func (f *fakeRepo) GetAuthorization(context.Context, foundation.ID, string, string) (domain.ToolAuthorization, error) {
+	return f.authorization, f.err
+}
+func (f *fakeRepo) CreateAuthorization(_ context.Context, authorization domain.ToolAuthorization) (domain.AuthorizationIssueResult, error) {
+	if f.authorization.ID != "" {
+		return domain.AuthorizationIssueResult{Authorization: f.authorization, Replayed: f.authReplayed}, f.err
+	}
+	authorization.ID = "authorization"
+	f.authorization = authorization
+	return domain.AuthorizationIssueResult{Authorization: authorization}, f.err
+}
+func (f *fakeRepo) ConsumeAuthorization(_ context.Context, request domain.AuthorizationConsume) (domain.AuthorizationConsumeResult, error) {
+	f.consumed = request
+	authorization := f.authorization
+	if authorization.Status == domain.AuthorizationExpired {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_EXPIRED", false, errors.New("authorization has expired"))
+	}
+	authorization.Status = domain.AuthorizationConsumed
+	return domain.AuthorizationConsumeResult{Authorization: authorization}, f.err
+}
+func (f *fakeRepo) RevokeAuthorization(_ context.Context, _ foundation.ID, _ time.Time) error {
+	return f.err
+}
 
 type fakeTargets struct {
-	hash string
-	err  error
+	hash  string
+	err   error
+	calls int
 }
 
 func (f *fakeTargets) CurrentHash(context.Context, foundation.ID, string) (string, error) {
+	f.calls++
 	return f.hash, f.err
 }
 
@@ -161,6 +194,160 @@ func TestApplyPreflightRejectsUnapprovedProposalBeforeReadingTarget(t *testing.T
 	service := newTestService(&fakeRepo{proposal: proposal}, &fakeTargets{err: errors.New("must not be called")})
 	if _, err := service.CheckApplyPreflight(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash); err == nil {
 		t.Fatal("CheckApplyPreflight() expected error")
+	}
+}
+
+func TestIssueWriteAuthorizationBindsApprovalAndTarget(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	repository := &fakeRepo{proposal: proposal}
+	service := newTestService(repository, &fakeTargets{hash: testHash})
+	result, err := service.IssueWriteAuthorization(context.Background(), domain.AuthorizationIssue{
+		WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node", ProposalID: proposal.ID,
+		RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", IdempotencyKey: "auth-1", TTL: time.Minute,
+	})
+	if err != nil || result.Credential == "" || result.Authorization.ID == "" || result.Authorization.TokenHash != "" || result.Authorization.TargetVersion != testHash || result.Authorization.Status != domain.AuthorizationIssued {
+		t.Fatalf("authorization = %#v, err=%v", result, err)
+	}
+	consume, err := service.ConsumeWriteAuthorization(context.Background(), domain.AuthorizationConsume{
+		Credential: result.Credential, IdempotencyKey: "auth-1", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node",
+		ProposalID: proposal.ID, RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash,
+	})
+	if err != nil || consume.Authorization.Status != domain.AuthorizationConsumed || repository.consumed.Credential == result.Credential {
+		t.Fatalf("consumption = %#v, err=%v, raw=%q", consume, err, repository.consumed.Credential)
+	}
+}
+
+func TestIssueWriteAuthorizationRejectsStaleOrUnapprovedProposal(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	proposal.Status = domain.StatusNeedsRevision
+	service := newTestService(&fakeRepo{proposal: proposal}, &fakeTargets{hash: testHash})
+	if _, err := service.IssueWriteAuthorization(context.Background(), domain.AuthorizationIssue{
+		WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node", ProposalID: proposal.ID,
+		RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", IdempotencyKey: "auth-1", TTL: time.Minute,
+	}); err == nil {
+		t.Fatal("stale proposal received write authorization")
+	}
+}
+
+func TestIssueWriteAuthorizationRejectsTargetConflict(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	repository := &fakeRepo{proposal: proposal}
+	service := newTestService(repository, &fakeTargets{hash: strings.Repeat("a", 64)})
+	if _, err := service.IssueWriteAuthorization(context.Background(), domain.AuthorizationIssue{
+		WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node", ProposalID: proposal.ID,
+		RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", IdempotencyKey: "auth-1", TTL: time.Minute,
+	}); err == nil || !repository.markedNeedsReview {
+		t.Fatalf("target conflict err=%v marked=%v", err, repository.markedNeedsReview)
+	}
+}
+
+func TestIssueWriteAuthorizationRejectsBroaderScope(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	service := newTestService(&fakeRepo{proposal: proposal}, &fakeTargets{hash: testHash})
+	if _, err := service.IssueWriteAuthorization(context.Background(), domain.AuthorizationIssue{
+		WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node", ProposalID: proposal.ID,
+		RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:other.md", IdempotencyKey: "auth-scope", TTL: time.Minute,
+	}); err == nil {
+		t.Fatal("broader target scope received write authorization")
+	}
+}
+
+func TestConsumeWriteAuthorizationReplaysAfterProposalStateAdvances(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	proposal.Status = domain.StatusCompleted
+	repository := &fakeRepo{proposal: proposal, authorization: domain.ToolAuthorization{
+		ID: "authorization", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node", ProposalID: proposal.ID,
+		RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge,
+		Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash, TokenHash: hashCredential("credential"), IdempotencyKey: "auth-1", Status: domain.AuthorizationConsumed,
+	}}
+	targets := &fakeTargets{err: errors.New("must not be called for replay")}
+	service := newTestService(repository, targets)
+	result, err := service.ConsumeWriteAuthorization(context.Background(), domain.AuthorizationConsume{
+		Credential: "credential", IdempotencyKey: "auth-1", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node",
+		ProposalID: proposal.ID, RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash,
+	})
+	if err != nil || result.Authorization.Status != domain.AuthorizationConsumed || targets.calls != 0 {
+		t.Fatalf("replay=%#v err=%v target calls=%d", result, err, targets.calls)
+	}
+}
+
+func TestConsumeWriteAuthorizationRejectsTamperedBindingBeforeTargetSideEffects(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	repository := &fakeRepo{proposal: proposal, authorization: domain.ToolAuthorization{
+		ID: "authorization", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node", ProposalID: proposal.ID,
+		RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge,
+		Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash, TokenHash: hashCredential("credential"), IdempotencyKey: "auth-1", Status: domain.AuthorizationIssued, ExpiresAt: time.Unix(2, 0),
+	}}
+	targets := &fakeTargets{hash: strings.Repeat("a", 64)}
+	service := newTestService(repository, targets)
+	_, err := service.ConsumeWriteAuthorization(context.Background(), domain.AuthorizationConsume{
+		Credential: "credential", IdempotencyKey: "auth-1", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node",
+		ProposalID: "other-proposal", RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash,
+	})
+	if err == nil || targets.calls != 0 || repository.markedNeedsReview {
+		t.Fatalf("tampered consume err=%v target calls=%d marked=%v", err, targets.calls, repository.markedNeedsReview)
+	}
+}
+
+func TestConsumeWriteAuthorizationRejectsExpiredBeforeTargetSideEffects(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	repository := &fakeRepo{proposal: proposal, authorization: domain.ToolAuthorization{
+		ID: "authorization", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node", ProposalID: proposal.ID,
+		RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge,
+		Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash, TokenHash: hashCredential("credential"), IdempotencyKey: "auth-expired", Status: domain.AuthorizationExpired, ExpiresAt: time.Unix(0, 0),
+	}}
+	targets := &fakeTargets{hash: strings.Repeat("a", 64)}
+	service := newTestService(repository, targets)
+	_, err := service.ConsumeWriteAuthorization(context.Background(), domain.AuthorizationConsume{
+		Credential: "credential", IdempotencyKey: "auth-expired", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node",
+		ProposalID: proposal.ID, RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash,
+	})
+	if err == nil || targets.calls != 0 || repository.markedNeedsReview {
+		t.Fatalf("expired consume err=%v target calls=%d marked=%v", err, targets.calls, repository.markedNeedsReview)
+	}
+}
+
+func TestConsumeWriteAuthorizationTargetConflictHasNoProposalSideEffect(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	repository := &fakeRepo{proposal: proposal, authorization: domain.ToolAuthorization{
+		ID: "authorization", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node", ProposalID: proposal.ID,
+		RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge,
+		Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash, TokenHash: hashCredential("credential"), IdempotencyKey: "auth-target-conflict", Status: domain.AuthorizationIssued,
+	}}
+	service := newTestService(repository, &fakeTargets{hash: strings.Repeat("a", 64)})
+	_, err := service.ConsumeWriteAuthorization(context.Background(), domain.AuthorizationConsume{
+		Credential: "credential", IdempotencyKey: "auth-target-conflict", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node",
+		ProposalID: proposal.ID, RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash,
+	})
+	if err == nil || repository.markedNeedsReview {
+		t.Fatalf("target conflict err=%v marked=%v", err, repository.markedNeedsReview)
+	}
+}
+
+func TestConsumeWriteAuthorizationRejectsWrongCredentialBeforeReplay(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	repository := &fakeRepo{proposal: proposal, authorization: domain.ToolAuthorization{
+		ID: "authorization", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node", ProposalID: proposal.ID,
+		RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge,
+		Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash, TokenHash: hashCredential("correct"), IdempotencyKey: "auth-1", Status: domain.AuthorizationConsumed,
+	}}
+	service := newTestService(repository, &fakeTargets{err: errors.New("must not be called")})
+	_, err := service.ConsumeWriteAuthorization(context.Background(), domain.AuthorizationConsume{
+		Credential: "wrong", IdempotencyKey: "auth-1", WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node",
+		ProposalID: proposal.ID, RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: testHash,
+	})
+	if err == nil {
+		t.Fatal("wrong credential replay accepted")
 	}
 }
 

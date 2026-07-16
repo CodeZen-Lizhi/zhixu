@@ -2,8 +2,13 @@ package application
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -21,6 +26,9 @@ type Service struct {
 	clock   foundation.Clock
 	targets TargetReader
 }
+
+// MaxWriteAuthorizationTTL 是单次写权限的服务端有效期上限。
+const MaxWriteAuthorizationTTL = 5 * time.Minute
 
 // NewService 创建 Change Control 应用服务。
 func NewService(repo domain.Repository, ids foundation.IDGenerator, clock foundation.Clock, targets TargetReader) (*Service, error) {
@@ -196,4 +204,148 @@ func (s *Service) CheckApplyPreflight(ctx context.Context, proposalID, revisionI
 		ProposalID: proposal.ID, RevisionID: proposal.Revision.ID,
 		ChangeHash: proposal.Revision.ChangeHash, BaseHash: proposal.Revision.BaseHash,
 	}, nil
+}
+
+// IssueWriteAuthorization 在批准事实和当前目标版本一致时签发服务端短期写权限。
+// 返回的 Credential 只在首次签发时出现，调用方不得写入日志、模型上下文或 API 响应。
+func (s *Service) IssueWriteAuthorization(ctx context.Context, command domain.AuthorizationIssue) (domain.AuthorizationIssueResult, error) {
+	authorizations, ok := s.repo.(domain.AuthorizationRepository)
+	if !ok {
+		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WRITE_AUTHORIZATION_REPOSITORY_UNAVAILABLE", false, errors.New("authorization repository is unavailable"))
+	}
+	if err := domain.ValidateAuthorizationIssue(command, MaxWriteAuthorizationTTL); err != nil {
+		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITE_AUTHORIZATION_INVALID", false, err)
+	}
+	proposal, err := s.repo.GetProposal(ctx, command.ProposalID)
+	if err != nil {
+		return domain.AuthorizationIssueResult{}, err
+	}
+	if proposal.WorkspaceID != command.WorkspaceID || proposal.Revision.ID != command.RevisionID || proposal.Approval == nil || proposal.Approval.ID != command.ApprovalID || proposal.Status != domain.StatusApproved || proposal.Approval.Decision != domain.DecisionApproved {
+		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, errors.New("proposal approval binding is not valid"))
+	}
+	if strings.TrimSpace(command.Scope) != domain.ExpectedAuthorizationScope(proposal.Revision.TargetPath) {
+		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_SCOPE_INVALID", false, errors.New("authorization scope is broader than the approved target"))
+	}
+	if err := domain.ValidateToolBinding(command.ToolName, command.Capability); err != nil {
+		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITE_AUTHORIZATION_INVALID", false, err)
+	}
+	if proposal.Approval.ChangeHash != proposal.Revision.ChangeHash || proposal.Revision.ChangeHash != domain.ComputeChangeHash(proposal.Revision.TargetPath, proposal.Revision.BaseHash, proposal.Revision.Content) {
+		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WRITE_AUTHORIZATION_CHANGE_HASH_INVALID", false, errors.New("approved change hash is not reproducible"))
+	}
+	currentHash, err := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
+	if err != nil {
+		return domain.AuthorizationIssueResult{}, err
+	}
+	if strings.ToLower(currentHash) != proposal.Revision.BaseHash {
+		if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
+			return domain.AuthorizationIssueResult{}, markErr
+		}
+		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: proposal.Revision.BaseHash, Current: strings.ToLower(currentHash)})
+	}
+	if err := authorizations.ValidateWorkflowContext(ctx, command.WorkspaceID, command.WorkflowRunID, command.NodeRunID); err != nil {
+		return domain.AuthorizationIssueResult{}, err
+	}
+	authorizationID, err := s.ids.New()
+	if err != nil {
+		return domain.AuthorizationIssueResult{}, err
+	}
+	credential, err := newCredential()
+	if err != nil {
+		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WRITE_AUTHORIZATION_RANDOM_UNAVAILABLE", true, err)
+	}
+	now := s.clock.Now()
+	result, err := authorizations.CreateAuthorization(ctx, domain.ToolAuthorization{
+		ID:          authorizationID,
+		WorkspaceID: command.WorkspaceID, WorkflowRunID: command.WorkflowRunID, NodeRunID: command.NodeRunID,
+		ProposalID: command.ProposalID, RevisionID: command.RevisionID, ApprovalID: command.ApprovalID,
+		ToolName: strings.TrimSpace(command.ToolName), Capability: command.Capability, Scope: strings.TrimSpace(command.Scope),
+		ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: proposal.Revision.BaseHash,
+		TokenHash: hashCredential(credential), IdempotencyKey: strings.TrimSpace(command.IdempotencyKey),
+		Status: domain.AuthorizationIssued, IssuedAt: now, ExpiresAt: now.Add(command.TTL), Version: 1,
+	})
+	if err != nil {
+		return domain.AuthorizationIssueResult{}, err
+	}
+	result.Authorization.TokenHash = ""
+	if result.Replayed {
+		return result, nil
+	}
+	result.Credential = credential
+	return result, nil
+}
+
+// ConsumeWriteAuthorization 原子消费一次性写权限，不执行任何文件/Git 副作用。
+func (s *Service) ConsumeWriteAuthorization(ctx context.Context, request domain.AuthorizationConsume) (domain.AuthorizationConsumeResult, error) {
+	authorizations, ok := s.repo.(domain.AuthorizationRepository)
+	if !ok {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WRITE_AUTHORIZATION_REPOSITORY_UNAVAILABLE", false, errors.New("authorization repository is unavailable"))
+	}
+	if strings.TrimSpace(request.Credential) == "" || strings.TrimSpace(request.IdempotencyKey) == "" || len(strings.TrimSpace(request.IdempotencyKey)) > 128 || request.WorkspaceID == "" || request.WorkflowRunID == "" || request.NodeRunID == "" || request.ProposalID == "" || request.RevisionID == "" || request.ApprovalID == "" || strings.TrimSpace(request.ToolName) == "" || len(strings.TrimSpace(request.ToolName)) > 64 || strings.TrimSpace(request.Scope) == "" || len(strings.TrimSpace(request.Scope)) > 512 || !domain.ValidHash(request.ApprovedChangeHash) || !domain.ValidHash(request.TargetVersion) {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITE_AUTHORIZATION_CONSUME_INVALID", false, errors.New("authorization consume binding is incomplete"))
+	}
+	if err := domain.ValidateToolBinding(request.ToolName, request.Capability); err != nil {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITE_AUTHORIZATION_CONSUME_INVALID", false, err)
+	}
+	request.ToolName = strings.TrimSpace(request.ToolName)
+	request.Scope = strings.TrimSpace(request.Scope)
+	request.ApprovedChangeHash = strings.ToLower(request.ApprovedChangeHash)
+	request.TargetVersion = strings.ToLower(request.TargetVersion)
+	request.Credential = hashCredential(request.Credential)
+	existing, err := authorizations.GetAuthorization(ctx, request.WorkspaceID, request.IdempotencyKey, request.Credential)
+	if err != nil {
+		return domain.AuthorizationConsumeResult{}, err
+	}
+	if err := domain.ValidateAuthorizationConsumeBinding(existing, request); err != nil {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WRITE_AUTHORIZATION_BINDING_CONFLICT", false, err)
+	}
+	if existing.Status != domain.AuthorizationIssued {
+		result, consumeErr := authorizations.ConsumeAuthorization(ctx, request)
+		result.Authorization.TokenHash = ""
+		return result, consumeErr
+	}
+	proposal, err := s.repo.GetProposal(ctx, request.ProposalID)
+	if err != nil {
+		return domain.AuthorizationConsumeResult{}, err
+	}
+	if proposal.WorkspaceID != request.WorkspaceID || proposal.Revision.ID != request.RevisionID || proposal.Approval == nil || proposal.Approval.ID != request.ApprovalID || proposal.Status != domain.StatusApproved || proposal.Approval.Decision != domain.DecisionApproved || proposal.Revision.ChangeHash != request.ApprovedChangeHash || proposal.Revision.BaseHash != request.TargetVersion || proposal.Approval.ChangeHash != request.ApprovedChangeHash || strings.TrimSpace(request.Scope) != domain.ExpectedAuthorizationScope(proposal.Revision.TargetPath) || proposal.Revision.ChangeHash != domain.ComputeChangeHash(proposal.Revision.TargetPath, proposal.Revision.BaseHash, proposal.Revision.Content) {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, errors.New("authorization approval binding is no longer valid"))
+	}
+	currentHash, err := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
+	if err != nil {
+		return domain.AuthorizationConsumeResult{}, err
+	}
+	if strings.ToLower(currentHash) != proposal.Revision.BaseHash {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: proposal.Revision.BaseHash, Current: strings.ToLower(currentHash)})
+	}
+	if err := authorizations.ValidateWorkflowContext(ctx, request.WorkspaceID, request.WorkflowRunID, request.NodeRunID); err != nil {
+		return domain.AuthorizationConsumeResult{}, err
+	}
+	result, err := authorizations.ConsumeAuthorization(ctx, request)
+	result.Authorization.TokenHash = ""
+	return result, err
+}
+
+// RevokeWriteAuthorization 使尚未消费的授权立即失效。
+func (s *Service) RevokeWriteAuthorization(ctx context.Context, id foundation.ID) error {
+	authorizations, ok := s.repo.(domain.AuthorizationRepository)
+	if !ok {
+		return foundation.NewError(foundation.ErrorDependencyUnavailable, "WRITE_AUTHORIZATION_REPOSITORY_UNAVAILABLE", false, errors.New("authorization repository is unavailable"))
+	}
+	if id == "" {
+		return foundation.NewError(foundation.ErrorInvalidInput, "WRITE_AUTHORIZATION_ID_INVALID", false, errors.New("authorization id is required"))
+	}
+	return authorizations.RevokeAuthorization(ctx, id, s.clock.Now())
+}
+
+func newCredential() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func hashCredential(credential string) string {
+	digest := sha256.Sum256([]byte(credential))
+	return hex.EncodeToString(digest[:])
 }
