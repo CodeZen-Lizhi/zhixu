@@ -83,6 +83,26 @@ func (r Root) Resolve(relative string) (string, error) {
 	return canonical, nil
 }
 
+// Hash 返回 Workspace 内现有普通文件的 SHA-256，不跟随越界 symlink。
+func (r Root) Hash(relative string) (string, error) {
+	resolved, err := r.Resolve(relative)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("stat workspace file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("workspace target is not a regular file")
+	}
+	digest, err := hashFile(resolved)
+	if err != nil {
+		return "", fmt.Errorf("hash workspace file: %w", err)
+	}
+	return digest, nil
+}
+
 // Scan discovers supported regular files without following directory symlinks.
 func (r Root) Scan(options ScanOptions) ([]File, error) {
 	if r.path == "" {

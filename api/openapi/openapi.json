@@ -3,7 +3,7 @@
   "info": {
     "title": "ZHIXU API",
     "version": "0.1.0",
-    "description": "System health and M3 Workspace contracts. Workspace scan reads files without modifying them and registers immutable Source Version metadata; it does not claim parse or index completion."
+    "description": "System health, Workspace, durable Workflow and M5 Change Control contracts. Apply preflight reads the real Workspace file hash but never writes files or creates Git commits."
   },
   "paths": {
     "/livez": {
@@ -152,6 +152,74 @@
           "404": { "description": "Human Task not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
           "409": { "description": "Task already resolved, expired or version-conflicted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
           "503": { "description": "Workflow dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/proposals": {
+      "parameters": [
+        { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "post": {
+        "operationId": "createProposal",
+        "description": "Creates a ready-for-review Proposal and immutable Revision. No Workspace file is modified.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateProposalRequest" } } } },
+        "responses": {
+          "201": { "description": "Proposal and first Revision created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Proposal" } } } },
+          "400": { "description": "Invalid target, hash or required Proposal field.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "Workspace or persistence consistency conflict.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Change Control dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
+    "/api/v1/proposals/{proposal_id}": {
+      "parameters": [
+        { "name": "proposal_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "get": {
+        "operationId": "getProposal",
+        "responses": {
+          "200": { "description": "Current consistent Proposal, Revision and optional Approval snapshot.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Proposal" } } } },
+          "400": { "description": "Invalid Proposal ID.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "Proposal not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Change Control dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
+    "/api/v1/proposals/{proposal_id}/approvals": {
+      "parameters": [
+        { "name": "proposal_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "post": {
+        "operationId": "decideProposal",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalDecisionRequest" } } } },
+        "responses": {
+          "201": { "description": "Immutable Approval decision created and bound to Revision and Change Hash.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Approval" } } } },
+          "400": { "description": "Invalid decision contract.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "Proposal or Revision not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "Proposal is not ready, already decided, or Change Hash mismatched.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Change Control dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
+    "/api/v1/proposals/{proposal_id}/apply-preflight": {
+      "parameters": [
+        { "name": "proposal_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "post": {
+        "operationId": "checkProposalApplyPreflight",
+        "description": "Reads the real target file hash inside the persisted Workspace and verifies Approval, Revision, Change Hash and base hash. It performs no write and issues no write authorization.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApplyPreflightRequest" } } } },
+        "responses": {
+          "200": { "description": "Current preflight checks passed; write_performed is always false.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApplyPreflightResult" } } } },
+          "400": { "description": "Invalid preflight contract.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "403": { "description": "Proposal has no valid approval.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "Proposal or target not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "Revision, Change Hash or real target base hash conflict; baseline conflict moves Proposal to needs_revision.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Workspace or Change Control dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
           "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
         }
       }
@@ -310,6 +378,96 @@
           "target_version": { "type": "integer", "minimum": 1 },
           "decision": { "type": "object", "additionalProperties": true },
           "submitted_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "CreateProposalRequest": {
+        "type": "object",
+        "required": ["target_path", "base_hash", "content", "evidence_summary", "risk", "rollback_plan"],
+        "properties": {
+          "target_path": { "type": "string", "minLength": 1, "description": "Workspace-relative POSIX path; absolute paths, backslashes and traversal are rejected." },
+          "base_hash": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+          "content": { "type": "string", "minLength": 1 },
+          "evidence_summary": { "type": "string", "minLength": 1 },
+          "risk": { "type": "string", "minLength": 1 },
+          "rollback_plan": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      },
+      "ProposalRevision": {
+        "type": "object",
+        "required": ["id", "revision_no", "base_hash", "content", "evidence_summary", "risk", "rollback_plan", "change_hash", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "revision_no": { "type": "integer", "minimum": 1 },
+          "base_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "content": { "type": "string", "minLength": 1 },
+          "evidence_summary": { "type": "string", "minLength": 1 },
+          "risk": { "type": "string", "minLength": 1 },
+          "rollback_plan": { "type": "string", "minLength": 1 },
+          "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "Approval": {
+        "type": "object",
+        "required": ["id", "proposal_id", "revision_id", "change_hash", "decision", "decided_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "proposal_id": { "type": "string", "format": "uuid" },
+          "revision_id": { "type": "string", "format": "uuid" },
+          "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "decision": { "type": "string", "enum": ["approved", "rejected"] },
+          "decided_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "Proposal": {
+        "type": "object",
+        "required": ["id", "workspace_id", "target_path", "status", "revision", "created_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "target_path": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["draft", "validating", "ready_for_review", "approved", "applying", "applied", "verifying", "completed", "rejected", "needs_revision", "deferred", "apply_failed", "verify_failed", "rolled_back", "cancelled"] },
+          "revision": { "$ref": "#/components/schemas/ProposalRevision" },
+          "approval": { "$ref": "#/components/schemas/Approval" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "ProposalDecisionRequest": {
+        "type": "object",
+        "required": ["revision_id", "change_hash", "decision"],
+        "properties": {
+          "revision_id": { "type": "string", "format": "uuid" },
+          "change_hash": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+          "decision": { "type": "string", "enum": ["approved", "rejected"] }
+        },
+        "additionalProperties": false
+      },
+      "ApplyPreflightRequest": {
+        "type": "object",
+        "required": ["revision_id", "approved_change_hash"],
+        "properties": {
+          "revision_id": { "type": "string", "format": "uuid" },
+          "approved_change_hash": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "ApplyPreflightResult": {
+        "type": "object",
+        "required": ["proposal_id", "revision_id", "change_hash", "base_hash", "preflight_passed", "mode", "write_performed"],
+        "properties": {
+          "proposal_id": { "type": "string", "format": "uuid" },
+          "revision_id": { "type": "string", "format": "uuid" },
+          "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "base_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "preflight_passed": { "const": true },
+          "mode": { "const": "preflight_only" },
+          "write_performed": { "const": false }
         },
         "additionalProperties": false
       },

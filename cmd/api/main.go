@@ -11,6 +11,10 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
+	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
+	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
+	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
+	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
@@ -60,13 +64,14 @@ func main() {
 
 	workspaceHandler := workspacehttp.NewHandler(nil)
 	workflowHandler := workflowhttp.NewHandler(nil)
+	changeControlHandler := changecontrolhttp.NewHandler(nil)
 	if database != nil {
-		repository, repositoryErr := workspacepostgres.NewRepository(database.DB())
+		workspaceRepository, repositoryErr := workspacepostgres.NewRepository(database.DB())
 		if repositoryErr != nil {
 			logger.Error("workspace repository is unavailable", "error_code", "WORKSPACE_DATABASE_UNAVAILABLE")
 		} else {
 			workspaceService := workspaceapplication.NewService(workspaceapplication.Dependencies{
-				Repository:     repository,
+				Repository:     workspaceRepository,
 				Files:          filesystem.Scanner{},
 				Git:            gitcli.New(""),
 				GitInitializer: gitcli.New(""),
@@ -74,6 +79,19 @@ func main() {
 				Clock:          foundation.SystemClock{},
 			})
 			workspaceHandler = workspacehttp.NewHandler(workspaceService)
+
+			changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
+			targetReader, targetReaderErr := changecontrollocalfs.NewReader(workspaceRepository)
+			if changeControlRepositoryErr != nil || targetReaderErr != nil {
+				logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
+			} else {
+				changeControlService, changeControlServiceErr := changecontrolapplication.NewService(changeControlRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, targetReader)
+				if changeControlServiceErr != nil {
+					logger.Error("change control service is unavailable", "error_code", "CHANGE_CONTROL_SERVICE_UNAVAILABLE")
+				} else {
+					changeControlHandler = changecontrolhttp.NewHandler(changeControlService)
+				}
+			}
 		}
 		workflowRepository, workflowRepositoryErr := workflowpostgres.NewRepository(database.DB())
 		if workflowRepositoryErr != nil {
@@ -97,6 +115,7 @@ func main() {
 		Static:            static,
 		Workspace:         workspaceHandler,
 		Workflow:          workflowHandler,
+		ChangeControl:     changeControlHandler,
 		Logger:            logger,
 	}
 	server := &http.Server{

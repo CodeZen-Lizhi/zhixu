@@ -104,3 +104,28 @@ func TestScanDoesNotSilentlyAcceptInvalidRoot(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestRootHashReadsContainedFileAndRejectsOutsideSymlink(t *testing.T) {
+	rootPath := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootPath, "a.md"), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.md"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.md"), filepath.Join(rootPath, "escape.md")); err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := root.Hash("a.md")
+	if err != nil || digest != "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73" {
+		t.Fatalf("Hash() = %q, %v", digest, err)
+	}
+	if _, err := root.Hash("escape.md"); err == nil {
+		t.Fatal("Hash() accepted outside symlink")
+	}
+}
