@@ -1,51 +1,82 @@
-# Database Guidelines
+# 数据库开发规范
 
-> Database patterns and conventions for this project.
+## 适用范围
 
----
+适用于 PostgreSQL、pgvector、Goose 迁移、sqlc 查询、River 任务表以及各领域模块的 Repository/Projection 实现。当前没有数据库迁移或 Go 代码，以下内容是已确认的设计约束和 M1 实现门禁。
 
-## Overview
+## 已确认事实
 
-<!--
-Document your project's database conventions here.
+- PostgreSQL 是领域数据、投影和运行数据的主数据库；pgvector 保存向量，PostgreSQL FTS 保存全文索引（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 第 3 节）。
+- PostgreSQL 驱动为 pgx，SQL 访问采用 sqlc，迁移采用 Goose，River 只负责可运行 Job 的投递和 Worker 获取，不是 Workflow 业务事实源（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 与 [`workflow-engine.md`](../../../docs/architecture/workflow-engine.md)）。
+- 事务边界由维护不变量的领域模块控制：Proposal/Approval、Workflow Node、Review Answer、Relation Confirm 等在数据库内使用 ACID；文件和 Git 不放入数据库事务。
+- Source Version、Article Revision、Proposal Revision、Workflow Definition/Run、Embedding/Index Version 等必须有版本、哈希或状态约束；重复消息不得创建重复 Node、Tool Call、Answer 或 Health Issue。
+- 查询必须支持稳定排序和 cursor 分页；大集合、图谱邻居和 Collection 结果禁止无分页返回（依据 [`api-and-events.md`](../../../docs/architecture/api-and-events.md)）。
 
-Questions to answer:
-- What ORM/query library do you use?
-- How are migrations managed?
-- What are the naming conventions for tables/columns?
-- How do you handle transactions?
--->
+## 目标代码落点（M1 起）
 
-(To be filled by the team)
+- `migrations/`：Goose 前向迁移、约束、索引和必要的数据回填。
+- `internal/platform/postgres/`：pgx 连接池、sqlc 生成代码入口、Repository/Projection Adapter、事务辅助函数。
+- 各领域模块（如 `internal/changecontrol/`、`internal/workflow/`、`internal/review/`）：定义 Repository/Store Interface 和事务不变量；不得暴露 sqlc 类型。
+- `internal/workflow/`：River Job 与 Workflow Node 的映射、租约和 Outbox 协作。
+- 数据库集成测试与 Testcontainers Fixture 的实际路径由 M1 测试布局确认；本规范不虚构文件名。
 
----
+## 查询模式
 
-## Query Patterns
+1. 通过 sqlc 生成类型安全查询；SQL 必须显式列出字段，避免生产路径使用 `SELECT *`。
+2. 所有外部输入使用参数化参数，动态过滤通过受限 Query AST/白名单映射生成，禁止字符串拼接。
+3. 列表查询使用稳定排序字段加稳定 ID 作为游标边界，并限制最大 `limit`；不使用无界 offset 扫描承载大列表。
+4. Embedding、解析、索引和健康扫描使用批量操作；禁止逐 Chunk、逐行循环远程调用或循环查库造成 N+1。
+5. 外键、状态、唯一键、乐观锁版本、幂等键和对称 Relation 规范化优先用数据库约束表达；应用层校验不能替代数据库不变量。
+6. 事务只覆盖同一数据库内的状态变化和 Outbox 写入。文件原子替换、Git Commit、索引切换等跨存储步骤遵循 Change Control Saga。
+7. Worker 获取任务使用安全租约和等价的并发控制（文档明确提出 `SKIP LOCKED` 或安全领取）；完成 Node 时在同一事务中保存输出、更新状态、写后继 Outbox 和 checkpoint。
+8. Vector 只在同一 Index Version 中使用固定维度；变更维度必须新建列/表或 Index Version，不得混写。
 
-<!-- How should queries be written? Batch operations? -->
+## 迁移规则
 
-(To be filled by the team)
+- 迁移只向前执行；DDL 和数据回填拆分，大表索引采用非阻塞策略。
+- Schema 变化遵循 Expand → 双读/迁移 → 切换 → 清理旧字段，避免与运行中的旧代码不兼容。
+- 每次迁移记录应用版本和校验结果；重复执行必须安全失败或明确无操作。
+- 逻辑 Schema（`core`、`change_control`、`workflow`、`retrieval`、`learning`、`ops`）是设计建议；是否采用独立 Schema 或统一 `public` 前缀必须在首批迁移中锁定，不能由单个模块自行决定。
+- 正式 v1 不强制分区；只有 Node Run、Tool Call、Audit 等达到文档规定的容量或查询退化条件后才评估按月归档/分区。
+- Embedding、FTS 等可重建投影不作为永久备份最低要求；Proposal、Approval、Confirmed Relation、Workflow、Audit、Review 等运行/决策数据必须备份。
 
----
+## 命名与约束
 
-## Migrations
+- SQL 表名、列名和索引名采用小写 snake_case；同一业务对象沿用 `workspace_id`、`version`、`status`、`created_at` 等统一语义。最终命名以 M1 首个迁移和 sqlc 配置为准。
+- 外键列以关联对象 `_id` 结尾；时间字段明确时区策略；JSONB 仅用于版本化契约或确实动态的结构，不为所有 JSONB 建无差别索引。
+- 索引名必须表达表、关键列和用途；核心 FTS 使用 GIN，向量先按文档压测选择 HNSW 参数，Relation 使用 source/target/relation_type 组合索引。
+- 对称关系（DUPLICATES、CONFLICTS_WITH）在写入前规范化稳定 ID 顺序，并用唯一约束阻止反向重复。
+- 可变 Aggregate 使用 `version` 乐观锁；Proposal 使用 `base_versions`/Change Hash；Node、Tool、Review Answer 使用作用域内幂等键。
 
-<!-- How to create and run migrations -->
+## 禁止模式
 
-(To be filled by the team)
+- 在业务代码里拼接 SQL、表名或排序字段；不得把用户输入作为 SQL 标识符。
+- 用 ORM/手写 Map 代替已确定的 sqlc 查询边界，或把 sqlc 生成类型泄漏到领域层。
+- 在 HTTP Handler 中开启跨模块事务，或把文件/Git 网络调用放进数据库事务长期占用连接。
+- 通过删除历史记录、覆盖 Revision 或静默修改状态“修复”冲突；正式知识变更必须经过 Proposal/Approval/Safe Writeback。
+- 无约束地 `SELECT *`、无分页大结果、循环查库、逐条远程 Embedding 或无界 JSONB 索引。
+- 混用不同维度或版本的 Embedding；将向量相似度直接写成 Confirmed Relation。
+- 修改已发布迁移、使用破坏性回滚命令或把本机 PostgreSQL 版本当成项目锁定事实。
 
----
+## 验证方式
 
-## Naming Conventions
+### M0 当前（仅规范）
 
-<!-- Table names, column names, index names -->
+```bash
+rg -n 'T(BD)|To[[:space:]]+be[[:space:]]+filled' .trellis/spec/backend
+git diff --check
+```
 
-(To be filled by the team)
+### M1 代码与迁移落地后
 
----
+- Goose 从空数据库执行全部迁移，再次执行不会产生未处理错误。
+- PostgreSQL/Testcontainers 测试覆盖外键、唯一键、乐观锁、幂等、Outbox、租约、FTS、pgvector 和分页稳定性。
+- `EXPLAIN`/容量测试证明核心 Search、Collection、Graph、Workflow 查询使用预期索引；性能门槛以 [`performance.md`](../../../docs/architecture/performance.md) 和任务验收为准。
+- 重复消息、重复审批、重复 Tool Call、重复 Answer 和 Health Scan 不产生重复副作用。
 
-## Common Mistakes
+## 待 M1 代码验证
 
-<!-- Database-related mistakes your team has made -->
-
-(To be filled by the team)
+- sqlc、Goose、River 和 pgvector 的具体版本及配置文件位置；当前仓库没有 manifest 或 lockfile。
+- 最终数据库 Schema 组织方式、字段长度、时间类型和所有索引名称。
+- 连接池参数、迁移执行入口和 Testcontainers 版本。
+- 中文 FTS 配置、向量维度、HNSW 参数以及 50 万数据容量结果。

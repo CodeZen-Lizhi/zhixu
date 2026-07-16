@@ -1,0 +1,8 @@
+{"file": "docs/product/PRD.md", "reason": "M0 baseline verification source"}
+{"file": "docs/architecture/CONTEXT.md", "reason": "M0 baseline verification source"}
+{"file": "docs/architecture/module-architecture.md", "reason": "M0 baseline verification source"}
+{"file": "docs/architecture/technology-stack.md", "reason": "M0 baseline verification source"}
+{"file": "docs/architecture/testing-and-evaluation.md", "reason": "M0 baseline verification source"}
+{"file": ".trellis/spec/guides/index.md", "reason": "M0 baseline verification source"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Spec quality gate"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Spec quality gate"}

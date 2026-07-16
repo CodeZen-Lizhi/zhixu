@@ -1,0 +1,28 @@
+{
+  "id": "product-delivery",
+  "name": "product-delivery",
+  "title": "ZHIXU 产品级建设与交付",
+  "description": "将文档态 ZHIXU 建设为可运行、可测试、可维护、可部署、可恢复、可审计的本地优先知识工作台；先完成规划，再按依赖实现并交付。",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P0",
+  "creator": "lizhi",
+  "assignee": "lizhi",
+  "createdAt": "2026-07-16",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-16-m0-foundation"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

@@ -1,38 +1,60 @@
-# Backend Development Guidelines
+# 后端开发规范
 
-> Best practices for backend development in this project.
+本目录是 Go API、Worker、领域模块、数据库、Adapter、Workflow 和可观测性实现的规范入口。仓库当前处于产品与架构设计阶段；规范引用的是已提交的产品/架构文档，真实代码示例和最终命令需在 M1 骨架完成后补充并以代码为准。
 
----
+## 规范索引
 
-## Overview
+| 规范 | 内容 | 当前状态 |
+|---|---|---|
+| [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | 已按架构文档建立；待 M1 代码验证 |
+| [数据库开发规范](./database-guidelines.md) | pgx/sqlc/Goose/River、查询、事务、迁移和约束 | 已按数据库设计建立；待 M1 迁移验证 |
+| [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已按 API/Workflow 契约建立；待 M1 代码验证 |
+| [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | 已按可观测性设计建立；待 M1 代码验证 |
+| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已按测试与评测架构建立；待 M1 CI 验证 |
 
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+## 开发前检查清单
 
----
+开始修改后端代码前，必须：
 
-## Guidelines Index
+1. 读取本目录与任务的 `prd.md`、`design.md`、`implement.md`，再读取对应 `docs/architecture/` 文档；不得凭经验猜接口、数据库或命令。
+2. 确认任务处于 `in_progress`，明确影响模块、公共契约、数据流、兼容性、测试范围和回滚路径。
+3. 先搜索现有领域术语、错误码、配置字段、查询和工具；共享规则只能有一个事实源。
+4. 对跨层变更阅读 `.trellis/spec/guides/cross-layer-thinking-guide.md`；发现重复实现时阅读 `code-reuse-thinking-guide.md`。
+5. 只有 Composition Root 读取配置并构造 Adapter；领域模块不自行创建数据库、模型或 Git 客户端。
 
-| Guide | Description | Status |
-|-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+## 实现边界
 
----
+- API 与 Worker 可独立运行，但共享领域 Interface 和 Composition Root。
+- 领域层不依赖 HTTP、pgx/sqlc、River、模型 SDK、文件系统实现或具体 Git 命令。
+- 正式知识唯一写入路径是 Proposal → Evidence Validation → Approval → Version Check → Atomic Write → Git Commit → Reindex → Regression Validation。
+- 长任务进入持久化 Workflow；River 只负责投递/领取可运行节点，不取代 Workflow 领域状态。
+- 跨文件/Git/DB 的一致性通过有序 Saga、Outbox、幂等和补偿处理；失败必须可解释、可审计、可恢复。
 
-## How to Fill These Guidelines
+## 质量检查
 
-For each guideline file:
+规范修改阶段执行：
 
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
+```bash
+rg -n 'T(BD)|To[[:space:]]+be[[:space:]]+filled' .trellis/spec/backend
+git diff --check
+```
 
-The goal is to help AI assistants and new team members understand how YOUR project works.
+代码落地后，至少执行 `go test ./...`、`go vet ./...`，并根据影响范围运行数据库/文件/Git/Workflow 集成、API Contract、安全、AI Eval、E2E、Docker Smoke 和恢复演练。未创建 `go.mod`、CI 或 Makefile 前，不把具体版本或工具参数写成已确认事实。
 
----
+## 事实来源
 
-**Language**: All documentation should be written in **English**.
+- 产品不变量、状态和验收：[`docs/product/PRD.md`](../../../docs/product/PRD.md)。
+- 领域术语：[`docs/architecture/CONTEXT.md`](../../../docs/architecture/CONTEXT.md)。
+- 模块边界：[`docs/architecture/module-architecture.md`](../../../docs/architecture/module-architecture.md)。
+- API、分页、SSE 和错误：[`docs/architecture/api-and-events.md`](../../../docs/architecture/api-and-events.md)。
+- 数据库、事务、索引和备份：[`docs/architecture/database-design.md`](../../../docs/architecture/database-design.md) 与 [`data-architecture.md`](../../../docs/architecture/data-architecture.md)。
+- Workflow、租约、重试和补偿：[`docs/architecture/workflow-engine.md`](../../../docs/architecture/workflow-engine.md)。
+- Adapter 与错误分类：[`docs/architecture/interfaces-and-adapters.md`](../../../docs/architecture/interfaces-and-adapters.md)。
+- 安全、日志、Trace、Metrics 和审计：[`security.md`](../../../docs/architecture/security.md)、[`observability.md`](../../../docs/architecture/observability.md)、[`tool-security.md`](../../../docs/architecture/tool-security.md)。
+- 测试与评测：[`docs/architecture/testing-and-evaluation.md`](../../../docs/architecture/testing-and-evaluation.md)。
+
+## 当前明确待验证项
+
+- 目录、包名、迁移、manifest、lockfile、CI、Makefile、OpenAPI 和真实测试目前尚不存在。
+- 具体依赖版本、License、数据库逻辑 Schema 组织、中文 FTS 配置、向量维度、认证实现和 Eino Adapter 必须在对应 M1/M2 任务中通过仓库文件、PoC 和测试锁定。
+- 本规范不提供伪造的实现代码、版本号、数据库字段长度或不存在的测试结果；M1 完成后应将真实文件链接补入各专题规范。

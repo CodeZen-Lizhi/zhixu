@@ -1,54 +1,98 @@
-# Directory Structure
+# 后端目录与模块结构
 
-> How backend code is organized in this project.
+## 适用范围
 
----
+本规范适用于 Go API、Worker、领域模块、应用层和基础设施 Adapter。仓库当前仍处于产品与架构设计阶段，下面的目录是架构文档确认的 M1 实现落点，不代表这些目录已经存在。
 
-## Overview
+## 已确认事实
 
-<!--
-Document your project's backend directory structure here.
+- 系统采用模块化单体；API 与 Worker 是两个可独立运行的进程，共享领域模块和 PostgreSQL（依据 [`module-architecture.md`](../../../docs/architecture/module-architecture.md) 第 1、8 节）。
+- 依赖方向是 `presentation → application → domain modules`，Workflow 只能依赖 Agent、Tools 和领域接口，Adapter 实现领域接口（依据 [`module-architecture.md`](../../../docs/architecture/module-architecture.md) 第 5、6 节）。
+- 领域模块必须隐藏实现复杂度，对外暴露小而稳定的 Interface；事务由维护不变量的模块控制，HTTP Handler 不得发起跨模块事务。
+- API 负责同步查询、命令提交和 Human Decision；Worker 负责租约、长任务和副作用。预计超过 3 秒的任务通过持久化 Workflow 异步执行（依据 [`api-and-events.md`](../../../docs/architecture/api-and-events.md) 与 [`workflow-engine.md`](../../../docs/architecture/workflow-engine.md)）。
+- 当前没有 `go.mod`、Go 源码或可引用的实现示例；不得把规划目录写成已实现事实。
 
-Questions to answer:
-- How are modules/packages organized?
-- Where does business logic live?
-- Where are API endpoints defined?
-- How are utilities and helpers organized?
--->
+## 目标代码落点（M1 起）
 
-(To be filled by the team)
-
----
-
-## Directory Layout
-
+```text
+cmd/
+  api/                         # API 进程入口与 composition root
+  worker/                      # Worker 进程入口与 composition root
+internal/
+  app/                         # Command/Query 编排、HTTP/SSE 边界所需应用服务
+  workspace/                   # Workspace、路径和文件版本边界
+  ingestion/                   # Source、解析、分块和导入流程
+  retrieval/                   # FTS、向量、融合排序和索引版本
+  knowledge/                   # Topic、Claim、Relation、Conflict、Provenance
+  changecontrol/               # Proposal、Approval、Safe Writeback、补偿
+  graph/                       # 图谱查询、候选关联和路径
+  collection/                  # Query AST、集合和视图配置
+  artifact/                    # Artifact 大纲、章节和导出
+  review/                      # Deck、Card、Session、评分和调度
+  health/                      # Health Issue 检测与修复 Proposal
+  workflow/                    # Definition、Run、Node、Human Task、Outbox
+  agent/                       # 结构化 Agent 编排和模型端口
+  tools/                       # Tool Registry、授权、执行和审计
+  memory/                      # 用户确认的长期/情景 Memory
+  audit/                       # 独立审计写入与查询边界
+  platform/
+    postgres/                  # pgx/sqlc/River/Goose 适配实现
+    filesystem/                # WorkspaceStore 本地文件实现
+    gitcli/                    # Git CLI 适配实现
+    models/                    # Chat/Embedding/Reranker 适配实现
+    parser/                    # Markdown/PDF/HTML 解析适配实现
+migrations/                    # Goose 前向迁移
+web/                           # React 构建产物或嵌入边界；不放领域逻辑
 ```
-<!-- Replace with your actual structure -->
-src/
-├── ...
-└── ...
+
+该布局来源于 [`module-architecture.md`](../../../docs/architecture/module-architecture.md) 第 7 节。实际包名、是否使用 `web/` 嵌入以及数据库逻辑 Schema 需在 M1 manifest、迁移和构建配置落地后再以代码为准。
+
+## 模块组织规则
+
+1. 每个领域模块拥有一个对外稳定的领域 Interface；内部实现、持久化细节和策略放在模块内部。
+2. `internal/platform/*` 只实现 Adapter，不承载业务规则；Adapter 不得依赖 Application Command Handler。
+3. `cmd/api` 与 `cmd/worker` 只负责读取配置、构造连接池和 Adapter、注入模块、注册 Workflow/Tool、启动进程。模块不得自行读取环境变量或创建 SDK Client。
+4. Presentation 只调用 Application；禁止直接访问 Repository、pgx、sqlc 生成类型或文件/Git Adapter。
+5. 模块间通过公开 Interface、领域类型或事件协作；禁止引用另一个模块的内部包。
+6. Shared Kernel 仅保留真正共享的 ID、时间、分页和通用错误等概念；不能借此放置业务服务或跨模块数据库模型。
+7. 文件/Git/数据库的一致性通过 Change Control 的有序 Saga、Outbox 和补偿处理；不得试图把文件或 Git 纳入数据库事务。
+
+## 命名约定
+
+- Go 包名使用小写单词，不使用下划线或复数缩写；公开类型和方法按领域术语命名，例如 `Workspace`、`WorkflowRun`、`CreateProposal`。
+- 模块目录使用架构领域名；`changecontrol` 是已确认的目录名，不能在代码中另起 `change_control` 形成第二套称呼。
+- 入口目录使用 `cmd/<process>`；平台实现放在 `internal/platform/<adapter>`。
+- 文件名采用 Go 工具链习惯（小写、必要时下划线），不以 HTTP、数据库表或页面名称替代领域概念。
+- 当前没有代码可供示范；命名以 `CONTEXT.md` 的统一领域语言和模块架构为准，M1 首个实现完成后应补充可链接的真实包示例。
+
+## 禁止模式
+
+- 在 Handler 中实现领域状态机、写文件、创建 Git Commit 或同步执行长 Workflow。
+- 在领域包中导入 HTTP 框架、pgx、sqlc、River、模型 SDK、React 或文件系统实现。
+- 通过模块内部包、全局变量或循环依赖共享业务状态。
+- 以数据库表、前端页面或 Chunk 名称冒充 Source、Document、Claim、Proposal 等领域对象。
+- 将 Agent 逻辑直接绑定文件/Git Adapter，绕过 Change Control、Approval 和 Tool 权限边界。
+- 为了“方便”在 `internal/platform` 中新增业务规则或隐式降级。
+
+## 验证方式
+
+### M0 当前（仅规范）
+
+```bash
+rg -n 'T(BD)|To[[:space:]]+be[[:space:]]+filled' .trellis/spec/backend
+git diff --check
 ```
 
----
+### M1 代码落地后
 
-## Module Organization
+- `go list ./...` 能枚举 `cmd/api`、`cmd/worker` 和各领域包。
+- `go test ./...` 覆盖模块 Interface 及依赖方向相关测试。
+- 对新增跨层依赖执行静态检查；发现 Presentation→Repository、Domain→Adapter 等违规必须阻断合并。
+- API 与 Worker 使用同一 composition root 组装，启动和最小 readiness 烟测均通过。
 
-<!-- How should new features/modules be organized? -->
+## 待 M1 代码验证
 
-(To be filled by the team)
-
----
-
-## Naming Conventions
-
-<!-- File and folder naming rules -->
-
-(To be filled by the team)
-
----
-
-## Examples
-
-<!-- Link to well-organized modules as examples -->
-
-(To be filled by the team)
+- 目录是否按上述布局创建，以及每个模块的实际包名和 Interface 文件位置。
+- `web/` 采用 Go embed 还是反向代理，以及对应构建产物路径。
+- 是否需要额外的 `internal/shared` 包；只有出现至少两个真实调用方且概念确属共享时才能新增。
+- 依赖方向和循环依赖检查命令由 M1 工具链锁定；当前仓库没有可运行 Go 代码。

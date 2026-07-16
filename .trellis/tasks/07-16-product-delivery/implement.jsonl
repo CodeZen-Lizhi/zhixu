@@ -1,0 +1,15 @@
+{"file": "docs/product/PRD.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/CONTEXT.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/module-architecture.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/domain-model.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/database-design.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/api-and-events.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/workflow-engine.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/tool-security.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/testing-and-evaluation.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/security.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/deployment.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/architecture/retrieval-architecture.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend spec entry point; populate before backend implementation"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend spec entry point; populate before frontend implementation"}
