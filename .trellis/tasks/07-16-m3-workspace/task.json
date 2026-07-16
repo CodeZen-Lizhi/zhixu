@@ -3,7 +3,7 @@
   "name": "m3-workspace",
   "title": "M3 Workspace 与事实源闭环",
   "description": "实现单活动 Workspace、安全路径、文件扫描、Source Version Hash、Git 基线和数据库映射。",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
