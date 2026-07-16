@@ -304,3 +304,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 10: M5-04B Filesystem CAS
+
+**Date**: 2026-07-17
+**Task**: M5-04B Filesystem CAS
+**Branch**: `dev`
+
+### Summary
+
+实现本地 POSIX Safe Writeback：device/inode 跨进程锁、真实 Markdown Prepare、最终 Base/identity CAS、独立备份、原子替换、RestoreCAS/Cleanup；补齐路径/特殊文件/篡改/故障注入/helper subprocess 与 20 轮 race，并同步错误与安全规范。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b0a6484` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
