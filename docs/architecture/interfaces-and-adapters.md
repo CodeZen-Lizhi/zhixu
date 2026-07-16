@@ -119,6 +119,16 @@ Adapter：
 - Local Filesystem。
 - In-memory Fake。
 
+### M5 Local Filesystem CAS 契约
+
+- `AcquireTarget` 只接受服务端 Workspace ID 与规范相对 `.md/.markdown` 路径；显式拒绝父目录/目标 symlink、特殊文件、跨 device 目标和非当前进程 owner。
+- 同一目标以 `device+inode` 派生 `.knowledge/locks/<hash>.lock`，通过 context-aware advisory `flock` 跨进程串行；锁文件持久保留，不在释放时 unlink。
+- `Prepare` 将 Execution、Base Hash、批准 Change Hash 与真实 Markdown Parser 校验后的正文绑定；同目录 temp 使用随机名、`O_EXCL|0600`，写入后保留目标 mode 并 `fsync`。
+- `CommitCAS` 在替换前重新验证目标身份和 Base Hash，创建独立 backup，再执行同文件系统 rename、父目录 sync 和 Result Hash 复核。
+- `RestoreCAS` 只在当前目标仍为系统 Result Hash 时恢复 Base；目标已是 Base 视为重放，用户后续编辑或 backup 篡改必须拒绝覆盖。
+- rename、父目录 sync 或结果复核无法证明时返回 `ManualRecoveryRequired` 并保留 Applied 摘要与 backup；结果未确认前禁止 Cleanup recovery evidence。
+- v1 只承诺本地 POSIX 文件系统上的协作写入者串行，不承诺阻止绕过锁的任意本地进程、NFS/SMB 锁一致性、严格内核 CAS 或断电级 durability。
+
 ## 6. GitRepository Interface
 
 职责：

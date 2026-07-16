@@ -105,6 +105,10 @@ Session 要求：
 - 临时文件权限。
 - 文件大小限制。
 - 禁止执行附件。
+- Safe Writeback 目标必须是 Workspace 内现存普通 Markdown，父链与目标执行 `Lstat/Open/Fstat` 身份复核，并拒绝跨 device 和非当前 owner。
+- 同一 inode 的协作写入者使用持久 lock file + advisory `flock` 串行；hardlink、大小写或 Unicode 路径别名不能绕过目标锁。
+- temp/backup 使用目标同目录随机 `O_EXCL|0600` 文件；恢复和清理只接受当前执行生成、身份与 hash 未被篡改的 locator。
+- 文件锁不能阻止恶意本地进程绕过协议；rehash 到 rename 的极小窗口和断电结果不确定性必须通过最终复核、备份与人工恢复处理，不宣称不存在。
 
 ## 9. Prompt Injection
 

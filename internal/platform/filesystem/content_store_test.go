@@ -196,6 +196,62 @@ func TestRootCaptureRejectsUntrustedGitdirMarker(t *testing.T) {
 	requireFilesystemError(t, err, foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_GIT_EXCLUDE_FAILED")
 }
 
+func TestRootEnsureGitExcludePatternsAppendsMissingPatternsOnce(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	excludePath := filepath.Join(rootPath, ".git", "info", "exclude")
+	if err := os.WriteFile(excludePath, []byte("# local rules\n/existing/"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patterns := []string{"/.knowledge/", "**/.zhixu-writeback-*", "/.knowledge/"}
+	if err := root.EnsureGitExcludePatterns(patterns...); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.EnsureGitExcludePatterns(patterns...); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(content)
+	if !strings.HasPrefix(got, "# local rules\n/existing/\n") {
+		t.Fatalf("existing git exclude content changed: %q", got)
+	}
+	for _, pattern := range patterns[:2] {
+		if count := strings.Count(got, pattern+"\n"); count != 1 {
+			t.Fatalf("pattern %q count = %d in %q", pattern, count, got)
+		}
+	}
+}
+
+func TestRootEnsureGitExcludePatternsRejectsUnsafeInputWithoutMutation(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	excludePath := filepath.Join(rootPath, ".git", "info", "exclude")
+	original := []byte("/existing/\n")
+	if err := os.WriteFile(excludePath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pattern := range []string{"", "   ", "bad\npattern", "bad\rpattern", "bad\x00pattern"} {
+		err := root.EnsureGitExcludePatterns(pattern)
+		requireFilesystemError(t, err, foundation.ErrorInvalidInput, "GIT_EXCLUDE_PATTERN_INVALID")
+	}
+	content, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != string(original) {
+		t.Fatalf("git exclude mutated after invalid input: %q", content)
+	}
+}
+
 func TestHashReaderWithContextHonorsCancellation(t *testing.T) {
 	reader := &blockingHashReader{firstRead: make(chan struct{}), unblock: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())

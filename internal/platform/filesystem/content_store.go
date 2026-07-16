@@ -327,6 +327,31 @@ func syncRootDirectory(root *os.Root, relative string) error {
 }
 
 func (r Root) ensureManagedSourceIgnored() error {
+	return r.EnsureGitExcludePatterns("/.knowledge/")
+}
+
+// EnsureGitExcludePatterns adds stable local-only ignore patterns without
+// modifying tracked .gitignore files. It rejects unsafe Git metadata paths.
+func (r Root) EnsureGitExcludePatterns(patterns ...string) error {
+	if r.path == "" {
+		return fileError(foundation.ErrorDependencyUnavailable, "GIT_EXCLUDE_UNAVAILABLE", false, errors.New("workspace root is not initialized"))
+	}
+	requested := make([]string, 0, len(patterns))
+	seen := make(map[string]struct{}, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" || strings.ContainsAny(pattern, "\r\n\x00") {
+			return fileError(foundation.ErrorInvalidInput, "GIT_EXCLUDE_PATTERN_INVALID", false, errors.New("git exclude pattern is invalid"))
+		}
+		if _, ok := seen[pattern]; ok {
+			continue
+		}
+		seen[pattern] = struct{}{}
+		requested = append(requested, pattern)
+	}
+	if len(requested) == 0 {
+		return nil
+	}
 	gitDirectory, err := resolveGitDirectory(r.path)
 	if err != nil {
 		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_GIT_EXCLUDE_FAILED", false, err)
@@ -357,10 +382,18 @@ func (r Root) ensureManagedSourceIgnored() error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_GIT_EXCLUDE_FAILED", false, err)
 	}
+	existing := make(map[string]struct{})
 	for _, line := range strings.Split(string(current), "\n") {
-		if strings.TrimSpace(line) == "/.knowledge/" {
-			return nil
+		existing[strings.TrimSpace(line)] = struct{}{}
+	}
+	missing := make([]string, 0, len(requested))
+	for _, pattern := range requested {
+		if _, ok := existing[pattern]; !ok {
+			missing = append(missing, pattern)
 		}
+	}
+	if len(missing) == 0 {
+		return nil
 	}
 	file, err := os.OpenFile(excludePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -370,7 +403,7 @@ func (r Root) ensureManagedSourceIgnored() error {
 	if len(current) > 0 && current[len(current)-1] != '\n' {
 		prefix = "\n"
 	}
-	_, writeErr := io.WriteString(file, prefix+"/.knowledge/\n")
+	_, writeErr := io.WriteString(file, prefix+strings.Join(missing, "\n")+"\n")
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}

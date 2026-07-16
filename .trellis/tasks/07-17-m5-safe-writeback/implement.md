@@ -13,7 +13,7 @@
 
 1. [x] M5-04A：扩展 Approval Git HEAD、Proposal version/status state machine；新增 Writeback Execution、Proposal Commit Mapping 和 Reindex Outbox 迁移。
 2. [x] M5-04A：实现领域模型、Repository 契约、PostgreSQL 幂等/乐观锁/交叉绑定/发布事务与真实数据库测试。
-3. [ ] M5-04B：实现 WorkspaceStore/TargetLock 领域端口与 localfs Adapter；覆盖 unsafe path/symlink/special file/temp/fsync/CAS/restore。
+3. [x] M5-04B：实现 WorkspaceStore/TargetLock 领域端口与 localfs Adapter；覆盖 unsafe path/symlink/special file/temp/fsync/CAS/restore。
 4. [ ] M5-04C：扩展 Git CLI Adapter 的 clean snapshot、HEAD verify、path diff、fixed commit/trailer、unknown-result lookup 和 reverse commit。
 5. [ ] M5-04D：实现 Application Saga：预签双授权、先建 Execution、分步消费授权、checkpoint、文件补偿、Commit 恢复、DB publish。
 6. [ ] M5-04D：实现 Workflow Node/Composition Root 最小接线；不得增加直接文件/Git HTTP 写接口。
