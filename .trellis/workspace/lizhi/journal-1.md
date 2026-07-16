@@ -203,3 +203,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: 完成 M5 摄取解析与规范化分块
+
+**Date**: 2026-07-17
+**Task**: 完成 M5 摄取解析与规范化分块
+**Branch**: `dev`
+
+### Summary
+
+实现不可变 Artifact 两阶段读取、Ingestion Attempt 状态机、Markdown/TXT Parser、Source Span、Canonical Chunk、API/Workflow Adapter 与 PostgreSQL 约束；通过 race、vet、OpenAPI、真实 PostgreSQL、Compose 和 API 幂等烟测。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2a8e681` | (see git log) |
+| `584ec5d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
