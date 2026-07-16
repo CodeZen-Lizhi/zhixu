@@ -32,6 +32,9 @@
 | 10.22 | 设置/维护 | deployment、data、api | Runbooks |
 | 10.23 | 生命周期 | domain、data、module | workflow 10 |
 | 10.24 | Conflict | domain、agent-rag | workflow 09 |
+| 10.22/export | Markdown/附件/领域元数据导出 | data、api、security、database | export contract、security tests |
+| 附加-Eino | Eino PoC 与可替换 Adapter | ADR-0013、technology-stack、interfaces | Eino PoC、adapter contract、AI eval |
+| 附加-auth | Session、API Token、Approval Write Authorization | ADR-0014、security、api、tool-security | auth/CSRF/token/permission tests |
 
 ## 3. 非功能追踪
 
@@ -45,6 +48,9 @@
 | AI 质量 | testing-and-evaluation、agent-rag |
 | 可替换 | interfaces-and-adapters |
 | 部署 | deployment |
+| API 契约 | api-and-events、OpenAPI（M1 生成） |
+| 认证与授权 | ADR-0014、security、tool-security |
+| 表格与导出 | PRD 10.14/10.22、data-architecture、api-and-events |
 
 ## 4. 验收 seam
 
@@ -62,4 +68,3 @@
 - PRD 新增 Must 功能时必须新增追踪行。
 - 架构文档删除能力前必须检查对应 PRD。
 - 验收失败需要定位到流程、模块、数据或质量文档中的责任点。
-

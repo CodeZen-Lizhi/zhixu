@@ -37,8 +37,22 @@ erDiagram
     PROPOSAL ||--o{ APPROVAL : decisions
     WORKFLOW_RUN ||--o{ NODE_RUN : nodes
     NODE_RUN ||--o{ TOOL_CALL : calls
+    WORKFLOW_RUN ||--o{ HUMAN_TASK : waits_for
+    NODE_RUN ||--o{ COMPENSATION_RECORD : compensates
+    WORKFLOW_RUN ||--o{ TOOL_AUTHORIZATION : grants
     REVIEW_DECK ||--o{ REVIEW_CARD : cards
     REVIEW_CARD ||--|| REVIEW_SCHEDULE : schedule
+    WORKSPACE ||--o{ SMART_COLLECTION : saves
+    WORKSPACE ||--o{ ARTIFACT : derives
+    ARTIFACT ||--o{ ARTIFACT_REVISION : versions
+    WORKSPACE ||--o{ MEMORY : owns
+    WORKSPACE ||--o{ KNOWLEDGE_EVENT : projects
+    WORKSPACE ||--o{ AUDIT : records
+    EVALUATION_DATASET ||--o{ GOLD_SET_CASE : contains
+    EVALUATION_DATASET ||--o{ EVALUATION_RUN : runs
+    EVALUATION_RUN ||--o{ EVALUATION_RESULT : produces
+    WORKSPACE ||--o{ INDEX_VERSION : builds
+    INDEX_VERSION ||--o{ CHUNK : indexes
     HEALTH_ISSUE }o--|| WORKSPACE : found_in
 ```
 
@@ -128,6 +142,7 @@ article_revision：
 - token_count。
 - search_vector tsvector。
 - embedding vector(N)。
+- index_version_id。
 - embedding_version_id。
 - status。
 
@@ -187,6 +202,14 @@ relation_evidence：
 对称关系规范化：
 
 - DUPLICATES、CONFLICTS_WITH 使用稳定 ID 排序，防止反向重复。
+
+多态引用策略：
+
+- `source_type/source_id` 与 `target_type/target_id` 是受限的稳定领域引用；`*_type` 只能来自注册的 Relation Node Type（例如 Topic、Claim、Document、Article Revision），不能接受任意表名、路径或模型文本。
+- PostgreSQL 不能用一个普通外键直接约束多态目标，因此 Knowledge Module 在同一事务内校验目标存在、属于同一 Workspace、处于允许的生命周期状态，并校验 relation_type 与两端类型的兼容性。
+- 数据库负责非空、类型枚举/检查、Workspace 归属、稳定排序后的唯一性和基础版本约束；模块负责语义合法性、禁止自环、证据要求和状态转移。每种类型的查询必须使用固定代码路径，禁止把 type 拼进 SQL 标识符。
+- 目标对象不物理删除；归档、替代或失效通过生命周期状态表达。目标失效时 Relation 保留历史并生成 Health Issue，不得留下无来源的“有效”边。
+- 若未来需要数据库级多态外键，必须先证明约束缺口并新增稳定对象注册表/等价方案；M0 不锁最终 SQL 形态。
 
 ### conflict
 
@@ -296,12 +319,23 @@ tool_call：
 - id。
 - aggregate_type/id。
 - event_type。
+- event_key：由聚合稳定引用、聚合版本/逻辑操作和事件类型计算的事件身份。
+- event_version、schema_version。
 - payload。
 - available_at。
 - published_at。
 - attempt。
+- last_error_code、created_at。
 
-事务内写入，Worker 异步投递。
+事务内写入，Worker 异步投递。Outbox 记录本身是事实源的一部分，不以发布成功与否改变领域状态。
+
+事件身份与幂等作用域：
+
+- 同一聚合一次逻辑状态变化只能产生一个 `event_key`；数据库在聚合/事件版本作用域内阻止重复插入，应用重试应返回既有 Outbox 记录。
+- 投递幂等与业务命令幂等分开：消费者使用 `(consumer_name, event_id)`（或同等明确作用域）去重，不能用一个跨所有 Workspace/聚合的全局业务键。
+- 副作用命令沿用 `workflow_run_id + node_id + logical_operation + target_version` 的作用域；Review Answer、Tool Call、File Write、Git Commit、Index Revision 和 Event Publish 都必须使用明确目标版本/资源。
+- 同一事务内先写领域状态和 Outbox，再由 Worker 发布；发布失败只增加 attempt/错误摘要并重试，不能重新执行已完成的领域副作用。
+- 事件 payload 必须带 schema_version 和最小必要数据；敏感正文不直接放入事件。Knowledge Event、SSE 和审计均从稳定事件身份投影，投影重复必须可去重。
 
 ### health_issue
 
@@ -329,6 +363,201 @@ review_deck、review_card、review_schedule、review_session、review_answer。
 - Active Card 必须至少一个 claim_ref。
 - review_answer.idempotency_key 唯一。
 - schedule 更新与 answer 同事务。
+
+### smart_collection
+
+Smart Collection 是保存的查询和视图配置，不复制任何 Domain 对象，也不成为正式知识事实源。
+
+- id、workspace_id、name、description。
+- query_definition：版本化 Query AST；同时保存 query_schema_version/query_version。
+- view_type：列表、表格或紧凑卡片；view_config 保存列、固定列、排序和分组配置。
+- created_at、updated_at、status、version。
+- cached_result_version、last_executed_at 可作为可丢弃的执行元数据，不能替代实时查询结果。
+
+约束和执行规则：
+
+- Query AST 只允许注册字段、运算符和关系，正式 v1.0 最大嵌套深度为 3；未知字段、无效枚举和已删除对象必须报错，不能静默忽略。
+- 公共查询统一 cursor + limit；表格、列表和卡片必须复用同一 read model，不能各自实现过滤逻辑。
+- 结果随 Domain 状态变化重新计算；删除集合不删除知识。写入类批量操作只创建 Proposal/Workflow。
+- 查询定义的语义校验由 Collection Module 负责，AST 的结构和版本完整性由数据库约束/迁移负责。
+
+### artifact / artifact_revision
+
+Artifact 是由已批准知识派生的学习或面试产物，默认不参加正式知识 RAG。
+
+artifact：
+
+- id、workspace_id、type、title、status。
+- scope_definition、source_coverage、current_revision_id。
+- created_at、updated_at、version。
+
+artifact_revision：
+
+- id、artifact_id、revision_no、outline、content、citations、source_coverage。
+- status、content_hash、created_by_type、created_at。
+- prompt_version、model_version、workflow_definition_version、schema_version（若由 Agent 生成）。
+
+约束和执行规则：
+
+- `artifact_id + revision_no` 唯一；当前 Revision 只能由 Artifact Module 通过乐观锁切换。
+- 大纲变化、正文再生成或用户编辑都创建新 Revision，不覆盖历史内容。
+- 每章/章节计划的来源覆盖状态必须可查询；缺失知识明确记录，不用模型常识静默补齐。
+- 只有 `PUBLISH_ARTIFACT` Proposal 写回后才可创建/关联正式 Document；导出不改变 Artifact 的正式性。
+
+### memory
+
+Memory 保存用户明确确认的偏好或有生命周期的任务情景，不是 Claim、Source 或 RAG 事实。
+
+- id、workspace_id、type（偏好、情景、反馈）、content、source、scope。
+- created_by_type、status、effective_at、expires_at、last_used_at、version、schema_version。
+- 可选的 confirmation_ref 关联明确的 Approval/Feedback；不得把模型推断直接写成已确认 Memory。
+
+约束和执行规则：
+
+- Agent 只能生成 Memory Candidate；ConfirmMemory 才能写入正式 Memory，且写入必须可审计。
+- 情景 Memory 必须有过期策略；删除、暂停或过期后不得进入新任务上下文。
+- Memory 查询按任务范围过滤，不能作为引用显示为知识来源；访问和删除由 Memory Module 负责。
+
+### knowledge_event
+
+Knowledge Event 是正式状态变化的时间线投影，不是独立可写的 Event Sourcing 主存储。
+
+- id、workspace_id、event_type、object_ref、source_event_ref、source_ref。
+- occurred_at、event_version、summary、schema_version、created_at。
+- correlation 字段可关联 proposal、workflow_run、git_commit、audit 等稳定对象。
+
+约束和执行规则：
+
+- 由领域事务产生的 Outbox/正式状态变化驱动投影；客户端和普通业务代码不能直接写任意 Knowledge Event。
+- `source_event_ref`（或等价稳定事件身份）在作用域内唯一，投影重放不得产生重复时间线记录。
+- 事件摘要可查询，完整敏感正文不写入时间线；修正通过新事件表达而不是更新历史事件。
+- 投影失败进入可观测/恢复流程，不得阻塞已提交的领域事务，也不能把投影成功当作事实源。
+
+### audit
+
+Audit 是安全和业务决策的 append-only 记录，独立于普通日志和 Knowledge Event。
+
+- id、workspace_id、occurred_at、actor_type、actor_ref、action/event_type。
+- aggregate_ref、proposal_ref、approval_ref、workflow_run_ref、node_run_ref、tool_call_ref、git_commit_ref（按事件适用）。
+- outcome、error_code、correlation 字段、redacted_metadata、schema_version、idempotency_key。
+
+约束和执行规则：
+
+- 追加记录后禁止业务 API 更新或删除；数据库角色/迁移必须限制 DELETE/UPDATE，保留和归档策略不能被普通清理任务绕过。
+- 同一不可幂等副作用的重试复用原 Audit 身份或通过唯一幂等键返回既有结果，不能重复制造“已写入/已提交”事实。
+- 需要追踪安全边界的事件至少包括登录/认证、Approval、Tool Authorization、File/Git、Memory/Settings、Rollback 和 Security Block。
+- 参数、Prompt、Source、用户回答和 Authorization 只保存摘要或脱敏值；审计可反查但不泄露 Secret。
+- 审计写入责任由产生业务不变量变化的 Module 控制；跨存储副作用在获得结果后追加对应事件，并保留恢复状态。
+
+### evaluation_dataset / gold_set_case / evaluation_run / evaluation_result
+
+评测数据和生产知识分离，Gold Set 版本化且不可被一次运行覆盖。
+
+evaluation_dataset：
+
+- id、name、domain、version、status、schema_version、created_at。
+- baseline_ref、source_policy、redaction_policy；不保存生产 Secret。
+
+gold_set_case：
+
+- id、dataset_id、case_version、input、scope、expected_evidence_refs、expected_refusal、labels、status。
+- 生产反馈必须人工清理/标注后才能成为 Gold Set Case；修订创建新 case_version。
+
+evaluation_run：
+
+- id、dataset_id、dataset_version、status、started_at、ended_at。
+- model_version、prompt_version、embedding_version、chunk_strategy_version、rerank_version、index_version、workflow_definition_version。
+- baseline_run_ref、metrics_summary、schema_version。
+
+evaluation_result：
+
+- id、run_id、case_id、metrics、evidence_summary、error_code、status、created_at。
+
+约束和执行规则：
+
+- `dataset_id + version`、`case_id + case_version` 和 Run/Case 组合必须可去重；发布后的 Gold Set 只能通过新版本更正。
+- 每次 Model、Prompt、Embedding、Chunk Strategy、Rerank 或 Retrieval 版本切换都记录实际版本并运行相应评测；高风险指标下降时不能激活默认版本。
+- 评测结果可归档，但保留数据集版本、运行配置和基线引用，保证结果可复现。
+
+### index_version / embedding_version
+
+Index Version 表示某个 Workspace 的可追踪完整检索投影，包含 FTS、向量及其构建配置。
+
+- id、workspace_id、status（building、active、failed、retired 等）、manifest_hash。
+- parser_version、chunk_strategy_version、embedding_version_id、rerank_version、schema_version。
+- source_snapshot_ref、built_at、activated_at、failure_summary、created_at。
+- embedding_version 记录 provider、model、dimensions、normalization、config_hash。
+
+约束和执行规则：
+
+- 一个 Workspace 同时只能有一个活动且完整的 Index Version；切换必须是数据库内原子状态变化，失败版本不能被默认检索使用。
+- Chunk/Embedding 投影必须引用 Index Version；旧版本可保留用于回滚或重建，但默认 RAG 只读取最新批准正式 Revision 的活动索引。
+- 同一 Index Version 的向量维度固定；维度或模型配置变化创建新 Embedding/Index Version，不在旧版本混写。
+- Index Module 负责构建和激活，Workspace/Database 约束负责唯一活动版本和引用完整性；Embedding 可重建，不属于永久备份最低要求。
+
+### human_task
+
+Human Task 表示 Workflow 等待用户输入的持久化节点，不持有 Worker 租约。
+
+- id、workspace_id、workflow_run_id、node_run_id、task_type、status。
+- expected_input_schema、target_ref、target_version、expires_at。
+- submitted_input、submitted_by、submitted_at、idempotency_key、version、schema_version。
+
+约束和执行规则：
+
+- 一个等待中的 Node 只能有一个有效 Human Task；提交必须校验 Task 状态、目标版本和 Idempotency-Key。
+- Approval/Reject/Defer 与 Human Task 完成、Node 状态更新、后继 Outbox 必须在同一数据库事务内完成。
+- 重复提交返回既有决定；过期或已完成 Task 不得再次推进 Workflow。等待期间不占用 Worker lease。
+- Workflow Module 负责状态机和幂等，数据库负责唯一性/版本约束，API 负责认证、输入 Schema 和审计。
+
+### compensation_record
+
+Compensation Record 追踪已经发生或可能发生的副作用及其补偿结果。
+
+- id、workspace_id、workflow_run_id、node_run_id、side_effect_ref、compensation_type。
+- target_version、status、attempt、idempotency_key、started_at、completed_at。
+- input_summary、result_summary、error_code、manual_recovery_required、schema_version。
+
+约束和执行规则：
+
+- Side Effect 执行前必须登记可查询的幂等身份；成功、失败或未知结果都要有记录。
+- 补偿不是假装撤销：Git 使用反向 Commit，文件恢复基线，索引失败可单独重试；无法安全判断时进入人工恢复。
+- 同一副作用的补偿操作按作用域幂等；补偿失败不能标记原 Workflow 成功，必须保留 Manual Recovery 状态。
+- Workflow Module 负责补偿图和状态，Adapter 负责实际外部动作，Audit 记录每次关键决策。
+
+### tool_authorization
+
+Tool Authorization 是服务端短时、单任务、最小权限的授权记录，不是登录凭据，也不把令牌发送给模型。
+
+- id、workspace_id、workflow_run_id、node_run_id、tool_name、capability。
+- proposal_ref、proposal_revision_ref、approval_ref、approved_change_hash、target_version。
+- scope、issued_at、expires_at、revoked_at、status、consumed_at、token_hash、idempotency_key、version。
+
+约束和执行规则：
+
+- WRITE_KNOWLEDGE/GIT_WRITE 必须同时绑定 Proposal、Approval、Change Hash、Target Version 和当前 Workflow Run；读取能力也必须受 Workflow Definition allowlist 限制。
+- 授权令牌只保留不可逆摘要/版本化引用，模型仅看到工具 Schema；每次执行在 Registry 再次校验权限、参数、租约和目标版本。
+- 同一授权作用域只能成功消费一次；重复执行返回既有 Tool Call 结果，未知副作用进入人工恢复。
+- Tool Module 负责权限判定和消费，Change Control 负责 Proposal/Approval 事实，数据库负责唯一性、过期和状态约束。
+
+### node_run 的实际版本字段
+
+Workflow Definition 只是声明；Node Run 必须记录本次实际执行所使用的版本，避免运行中配置变化导致不可复现。
+
+在现有 `node_run` 逻辑字段基础上补充：
+
+- workflow_definition_id、workflow_definition_version。
+- prompt_template_id、prompt_version（Model 节点适用）。
+- model_adapter、model_id、model_version（Model/Embedding/Rerank 节点按适用记录）。
+- input_schema_version、output_schema_version。
+- index_version_id、embedding_version_id、chunk_strategy_version（Retrieval/Index 节点按适用记录）。
+- schema_version、started_at、completed_at、usage_summary（Token/耗时摘要）。
+
+约束和执行规则：
+
+- 这些实际版本字段在 Node Run 启动时从 Definition/配置快照写入，完成后不可被当前默认配置覆盖。
+- Prompt、Model、Schema、Workflow 的版本引用必须能够反查配置/评测基线；缺失版本时节点失败，不静默使用最新版本。
+- 版本字段由 Workflow Module/Application 负责捕获，数据库负责非空/格式/关联一致性；敏感 Prompt/Model 配置正文不直接存入 Node Run。
 
 ## 5. 向量设计
 
@@ -391,7 +620,24 @@ embedding_version：
 - 文件写入使用目标 Version Token + Workspace File Lock。
 - Proposal 使用 base_versions。
 
-## 9. 数据迁移
+## 9. 约束责任矩阵
+
+数据库设计必须把“能由数据库证明的结构约束”和“只能由领域/应用证明的业务语义”分开，避免把校验散落成多个事实源。
+
+| 约束类别 | 责任方 | 必须保证的内容 |
+|---|---|---|
+| 结构完整性 | PostgreSQL 迁移/约束 | 非空、基础类型/枚举、外键、唯一键、稳定事件身份、版本字段和同 Workspace 关联 |
+| 聚合不变量 | 对应 Domain Module + 同模块事务 | 状态机、Proposal/Approval/Change Hash、Claim/Relation/Conflict 语义、Review 调度、Artifact 当前 Revision |
+| 查询契约 | Collection/Retrieval Module + Application | Query AST 白名单、最大深度、cursor/limit、默认只读最新批准版本、Index Version 选择 |
+| 幂等与并发 | Workflow/Change/Review Module + 数据库唯一约束 | 命令作用域、Node/Tool/Answer/写回/发布去重、乐观锁、租约和 Human Task 双提交 |
+| 安全与权限 | API/Tool Registry/Change Control | 身份、Capability、Approval 绑定、CSRF/Origin、路径/SSRF、敏感字段脱敏；数据库不替代授权判定 |
+| 外部副作用 | Adapter + Workflow/Compensation | 文件/Git/模型/网页动作的超时、未知结果、补偿和资源释放；不放入 DB 事务 |
+| 派生投影 | Index/Knowledge Event/Health Projector | 从事实源重建、事件去重、索引活动切换、投影失败可恢复；投影不覆盖事实源 |
+| 评测门禁 | Evaluation Module/CI | 数据集和 Gold Set 版本、实际模型/Prompt/Schema/Index 版本、基线比较和高风险指标不下降 |
+
+代码审查和集成测试必须按该矩阵定位缺陷：不能用 Controller 的校验替代唯一约束，也不能用数据库记录存在替代 Approval、权限或领域状态机。
+
+## 10. 数据迁移
 
 - 迁移只向前执行。
 - DDL 与数据回填拆分。
@@ -399,7 +645,7 @@ embedding_version：
 - Schema 新版本先支持双读，再切换，再移除旧字段。
 - 每次迁移记录应用版本和校验结果。
 
-## 10. 分区与归档
+## 11. 分区与归档
 
 正式 v1.0 不强制分区。
 
@@ -411,7 +657,7 @@ embedding_version：
 
 优先对 Audit、Node Run 和 Evaluation 按月归档。
 
-## 11. 数据库备份
+## 12. 数据库备份
 
 必须备份：
 
@@ -428,10 +674,16 @@ embedding_version：
 
 详见 [备份与恢复 Runbook](runbooks/backup-and-restore.md)。
 
-## 12. 数据库验收
+## 13. 数据库验收
 
 - 所有外键和唯一约束有对应故障测试。
 - EXPLAIN 验证核心查询使用预期索引。
 - 迁移可在生产等价数据量验证。
 - 重复消息不会创建重复 Node、Tool、Answer 或 Health Issue。
-
+- 无效 Query AST、超过三层嵌套、未知字段和无界 Collection 查询被明确拒绝。
+- Relation 两端不存在、跨 Workspace、类型组合非法、自环或对称反向重复时不能成为有效关系。
+- 同一 Workspace 无法同时激活两个 Index Version，失败构建不会污染当前活动检索。
+- Human Task 重复提交、过期 Tool Authorization、重复补偿和重复 Outbox 投递不会产生第二次副作用。
+- Node Run 能反查实际 Workflow、Prompt、Model、Schema、Index/Embedding 版本，默认配置变化不改写历史运行。
+- Audit 的业务角色无法更新或删除历史记录，脱敏测试证明 Secret、Authorization 和不必要正文不会落库。
+- Evaluation Run 能固定 Gold Set 和全部实际版本，并能与基线结果做可复现对比。

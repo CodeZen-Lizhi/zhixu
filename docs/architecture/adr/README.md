@@ -14,4 +14,5 @@
 | [0010](0010-sse-for-server-events.md) | SSE 任务事件 | accepted |
 | [0011](0011-retrieve-latest-approved-revision.md) | 默认只检索最新批准版本 | accepted |
 | [0012](0012-version-workflows-prompts-schemas.md) | Workflow/Prompt/Schema 版本化 | accepted |
-
+| [0013](0013-eino-adoption-gate.md) | Eino 仅在 PoC 通过后作为可替换边缘实现 | accepted |
+| [0014](0014-single-user-authentication.md) | 单用户 Session、API Token 与写授权分离 | accepted |

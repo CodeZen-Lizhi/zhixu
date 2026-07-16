@@ -44,6 +44,14 @@ flowchart LR
 
 ## 5. 授权上下文
 
+工具执行前先验证调用者身份和普通 Capability：
+
+- Web 请求来自有效 Cookie Session，并通过 CSRF/Origin 校验。
+- 自动化请求来自未过期、未撤销且 Scope 匹配的 API Token。
+- Workflow 内部调用来自服务端持久化的 Run/Node Context，不信任模型自报身份。
+
+身份认证与普通 Capability 只允许调用者请求工具，不能代替一次性 Approval Write Authorization。
+
 写权限要求：
 
 - Workflow Run。
@@ -56,6 +64,8 @@ flowchart LR
 - Expiry。
 
 授权令牌只在服务端存在，不发送给模型。
+
+Write Authorization 必须一次性或幂等消费、短时有效，并严格绑定上述字段。Session、API Token、Eino Context、模型 Tool Call 或管理员式 Scope 都不能自行构造、延长或扩大该授权。
 
 ## 6. 核心工具
 
@@ -106,6 +116,7 @@ flowchart LR
 - Tool Result 标记 data。
 - System Policy 不与 Source 拼接为同等角色。
 - Tool Permission 由服务端 Workflow 决定。
+- Eino 或其他 Agent Framework 只能转交 Tool Request，不参与身份、Capability 或 Write Authorization 决策。
 - 模型不能请求未注册工具。
 
 检测：
@@ -209,6 +220,9 @@ Git 允许命令白名单：
 | 重复 Git Tool Call | Idempotency + Proposal Commit Mapping |
 | Approval 后内容被修改 | Change Hash/Version 校验 |
 | Tool 返回恶意 Prompt | Output 当作 untrusted data |
+| 已登录用户直接调用写工具 | 仍要求一次性 Approval Write Authorization |
+| 高 Scope API Token 申请任意写入 | Scope 只允许发起流程，不绕过 Proposal/Approval |
+| Eino Graph 构造写权限 | 服务端忽略框架权限字段并重新判定 |
 
 ## 16. 测试
 
@@ -220,4 +234,6 @@ Git 允许命令白名单：
 - Command Injection。
 - Duplicate Side Effect。
 - Audit Redaction。
-
+- Session/API Token 与 Tool Capability 映射。
+- 登录成功但缺少 Approval Write Authorization 的拒绝路径。
+- Eino/模型伪造授权上下文。

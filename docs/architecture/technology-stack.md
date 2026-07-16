@@ -47,16 +47,19 @@ PDF 抽取作为 Adapter，因为纯 Go PDF 文本库质量和布局兼容性可
 
 ## 5. AI
 
-| 能力 | 选择 |
-|---|---|
-| Chat | OpenAI-Compatible HTTP Adapter |
-| Local Model | Ollama Adapter |
-| Embedding | OpenAI-Compatible/Local Adapter |
-| Rerank | HTTP Adapter，可禁用 |
-| Structured Output | JSON Schema + 领域校验 |
-| Prompt | 版本化模板 |
+| 能力 | 选择 | 采用约束 |
+|---|---|---|
+| Chat | OpenAI-Compatible HTTP Adapter | 默认可替换实现 |
+| Local Model | Ollama Adapter | 通过统一 Model Interface 接入 |
+| Embedding | OpenAI-Compatible/Local Adapter | 批量调用并记录模型版本 |
+| Rerank | HTTP Adapter，可禁用 | 失败必须显式标记 degraded |
+| Structured Output | JSON Schema + 领域校验 | 框架输出仍需领域校验 |
+| Prompt | 版本化模板 | 运行记录保存实际版本 |
+| Agent 编排 | Eino（PoC 通过后可选采用） | 仅限 Agent/Application/Adapter/Infrastructure |
 
-核心不依赖 LangChain；第三方 AI 工具只能位于 Adapter 内。
+Eino 不是当前已锁定依赖。只有 [ADR-0013](adr/0013-eino-adoption-gate.md) 定义的 PoC 全部通过后，才在项目 Manifest、Lockfile 和 CI 中锁定经验证版本；PoC 失败则继续使用直接 OpenAI-Compatible Adapter。
+
+领域模型、Workflow 持久化与状态机、Proposal/Approval、Tool Permission 和 Write Authorization 不得依赖 Eino 类型或运行时。核心同样不依赖 LangChain；第三方 AI Framework 只能位于 Agent/Application 编排边缘或 Adapter/Infrastructure，且必须通过项目 Interface 隔离。
 
 ## 6. 前端
 
@@ -112,3 +115,4 @@ Graph 库属于可替换展示实现，不进入领域模型。
 - pdftotext 引用页码。
 - Cytoscape.js 5,000 可视节点的聚类/按需展开。
 - Monaco 大 Diff。
+- Eino Chat、Embedding、Streaming、Structured Output、Tool Calling、Callback/Trace、取消、限流、错误映射和 River Node 集成 PoC；未通过不得成为正式依赖。

@@ -47,13 +47,27 @@ flowchart TB
 本地模式：
 
 - 默认绑定 localhost。
-- 可配置本地 Access Token。
+- 回环地址只缩小暴露面，不等同于用户身份。
+- Web UI 使用 Cookie Session，仍校验 Origin/CSRF。
 
 自托管：
 
-- 必须认证。
-- Secure/HttpOnly/SameSite Cookie 或 Bearer Token。
-- Session Rotation。
+- 必须使用 HTTPS 和单用户认证。
+- Web UI 使用 Secure、HttpOnly、SameSite Cookie Session。
+
+自动化客户端：
+
+- 使用可撤销、限 Scope、可过期的 API Token，不复用浏览器 Session Cookie。
+- Token 明文只在创建时返回一次，服务端只保存不可逆摘要或等价安全表示。
+- Token 禁止通过 URL Query 传递，必须支持轮换、撤销、最后使用时间和安全审计。
+
+Session 要求：
+
+- 登录后和敏感设置变化后轮换 Session ID。
+- 登出、凭据变更和主动撤销立即使 Session 失效。
+- Cookie Session 请求执行 CSRF Token 与 Origin 校验；SameSite 不能替代 CSRF 校验。
+
+完整决策见 [ADR-0014](adr/0014-single-user-authentication.md)。
 
 ## 6. 授权
 
@@ -67,6 +81,13 @@ flowchart TB
 - Index Maintenance。
 
 写权限短时、单任务、单 Proposal。
+
+必须区分两层授权：
+
+1. **身份与 Capability Authorization**：Session 或 API Token 证明调用者身份和允许发起的能力范围。
+2. **Approval Write Authorization**：用户批准 Proposal 后，由服务端签发的一次性、短时、绑定 Workflow Run、Proposal Revision、Approval、Change Hash 和 Target Version 的写授权。
+
+登录成功或持有高 Scope API Token 都不能直接获得 Apply Knowledge/Git Write；模型、Eino 和 Tool Request 也不能生成或扩大 Write Authorization。
 
 ## 7. Secret
 
@@ -136,6 +157,7 @@ flowchart TB
 必须审计：
 
 - Login/Auth。
+- Session/API Token 创建、轮换、撤销和拒绝。
 - Approval。
 - Tool Authorization。
 - File/Git。
@@ -161,6 +183,9 @@ flowchart TB
 - Secret Leak。
 - SQL Injection。
 - Unauthorized Write。
+- Session Fixation/Revocation。
+- API Token Scope/Expiry。
+- 已登录但无 Approval Write Authorization 的写入拒绝。
 
 ## 18. 依赖与镜像
 
@@ -169,4 +194,3 @@ flowchart TB
 - 非 root Container。
 - 固定 Base Image。
 - 依赖升级评测和回归。
-

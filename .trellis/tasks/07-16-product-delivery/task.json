@@ -19,7 +19,8 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "07-16-m0-foundation"
+    "07-16-m0-foundation",
+    "07-16-m0-contracts"
   ],
   "parent": null,
   "relatedFiles": [],

@@ -2676,6 +2676,8 @@ Review Card 进入 INVALIDATED，并从调度移除，直到重新审核。
 - 导出领域元数据 JSON。
 - 导出评测结果。
 - 导出审计摘要。
+- 导出任务必须记录字段、查询版本、权限、文件哈希、状态、过期时间和下载审计。
+- 正式 v1.0 不提供 Excel/CSV 模板导入、字段映射或公式字段；Smart Collection 的“表格”仅指 Web 表格视图。
 
 #### 10.22.6 数据清理
 
@@ -3443,7 +3445,7 @@ Knowledge Event：
 - 异步操作返回 Workflow Run ID。
 - 写操作要求 idempotency_key。
 - 修改操作要求目标版本。
-- 列表接口必须分页。
+- 列表接口统一使用 cursor + limit 分页；页面可以将 cursor 映射为页码表现，但公共 API 不使用 offset/page 作为第二套分页契约。
 - 错误返回稳定 error_code、message、retryable 和 details。
 
 ### 14.2 Workspace 接口能力
@@ -3471,7 +3473,8 @@ Knowledge Event：
 - scope。
 - filters。
 - retrieval_mode。
-- page。
+- cursor（可选）。
+- limit（有服务端最大值）。
 
 响应包含：
 
@@ -3562,7 +3565,7 @@ Knowledge Event：
 
 ### 14.13 事件通知
 
-可通过 WebSocket 或 SSE 推送：
+通过 SSE 推送：
 
 - Workflow 状态变化。
 - Human Node 等待。
@@ -3571,7 +3574,7 @@ Knowledge Event：
 - Health Scan 完成。
 - Review 评分完成。
 
-断线重连后客户端根据 last_event_id 补拉事件。
+断线重连后客户端通过 Last-Event-ID 请求保留窗口内事件；超出保留窗口时重新查询资源状态。SSE 只做通知，不是事实源。
 
 ---
 

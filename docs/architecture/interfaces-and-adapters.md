@@ -58,6 +58,18 @@ Adapter：
 - 可以明确降级为融合排序。
 - 返回 degraded 标记，不能静默。
 
+### Agent Framework Boundary
+
+Eino 只能作为 Agent/Application 层的短流程编排实现，或作为 Adapter/Infrastructure 内部实现：
+
+- 对外只实现本文件定义的 ChatModel、EmbeddingModel、Reranker 和 ToolExecutor 等稳定 Interface。
+- Eino Message、Graph、Node、Callback、Tool Schema 和错误类型不得进入领域模块。
+- Workflow Definition、Run、Node Run、租约、重试、Human Task 和补偿仍以 PostgreSQL/River 与领域状态机为事实源。
+- Proposal、Approval、Write Authorization 和 Tool Permission 必须由领域/Application Service 判定，不委托给 Eino Graph 或模型输出。
+- PoC 通过后才锁定 Eino 版本；PoC 失败时 Composition Root 改用直接 OpenAI-Compatible Adapter，不改变调用方契约。
+
+采用门禁见 [ADR-0013](adr/0013-eino-adoption-gate.md)。
+
 ## 4. Parser Interface
 
 职责：
@@ -228,6 +240,7 @@ Adapter 必须映射原始 SDK/命令/数据库错误，不能把外部错误类
 | ChatModel | OpenAI-Compatible | Fake | 本地模型或第二厂商 |
 | Embedding | OpenAI-Compatible | Fake | 本地 Embedding |
 | Reranker | HTTP Adapter | Fake | 可选禁用 |
+| Agent 编排 | Eino Adapter（PoC 通过后）或直接编排 | Deterministic Fake | PoC 证明收益且通过门禁 |
 | Parser | Markdown/PDF/HTML | Fixture Fake | 新格式 |
 | Workspace | Local FS | Memory FS | 远程 Workspace |
 | Git | CLI | Fake | 无明确需求不增加 |
@@ -247,6 +260,8 @@ Adapter 必须映射原始 SDK/命令/数据库错误，不能把外部错误类
 
 领域 Module 不读取环境变量、不自行创建 SDK Client。
 
+认证 Session、API Token 和一次性 Write Authorization 同样由 Composition Root 注入的安全组件实现；领域调用方只接收已验证 Identity/Capability Context，不依赖 Cookie、Header 或 Token 存储细节。
+
 ## 15. Contract Test
 
 每个正式 Adapter 与 Fake Adapter 必须满足同一行为契约：
@@ -257,4 +272,3 @@ Adapter 必须映射原始 SDK/命令/数据库错误，不能把外部错误类
 - 批量顺序。
 - 错误分类。
 - 资源释放。
-

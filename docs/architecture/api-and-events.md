@@ -30,6 +30,7 @@
 /api/v1/review
 /api/v1/workflows
 /api/v1/settings
+/api/v1/auth
 /api/v1/events
 ```
 
@@ -165,10 +166,17 @@ Command：
 
 ## 12. 安全
 
-- 本地模式仍检查 Origin/CSRF。
-- 自托管模式需要单用户认证 Token/Session。
+- 本地模式默认只绑定 localhost；浏览器仍使用 Cookie Session，并检查 Origin/CSRF，不能把回环地址当作身份。
+- 自托管模式必须使用 HTTPS 和单用户认证。
+- Web UI 使用可轮换、可撤销的 Cookie Session；Cookie 必须采用 HttpOnly、SameSite，并在 HTTPS 下使用 Secure。
+- 非浏览器自动化使用可撤销、限 Scope、可过期的 API Token；Token 不进入 URL Query，服务端只保存不可逆摘要或等价安全表示。
+- API Token 不替代浏览器 CSRF 防护，也不得获得超出其 Scope 的能力。
+- 登录身份与普通 Capability Authorization 只证明调用者可以发起操作；Apply Knowledge/Git Write 仍要求绑定 Proposal、Approval、Change Hash、Target Version 和 Expiry 的一次性 Write Authorization。
+- Session/API Token 撤销不追溯改变已完成审计；撤销后所有后续请求必须失败。
 - 不从 URL Query 传 Secret。
 - 文件下载通过 Object ID。
+
+认证 API 至少提供登录、登出、当前 Session、Session 轮换，以及 API Token 创建、列出元数据和撤销能力。创建 Token 时明文只返回一次；响应和日志不得再次暴露完整 Token。
 
 ## 13. API 可观测性
 
@@ -193,4 +201,7 @@ Command：
 - Pagination Stability。
 - SSE Reconnect。
 - Error Mapping。
-
+- Session Rotation/Revocation。
+- CSRF/Origin。
+- API Token Scope/Expiry/Revocation。
+- 登录授权不能绕过 Approval Write Authorization。
