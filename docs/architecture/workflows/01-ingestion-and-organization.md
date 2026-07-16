@@ -46,16 +46,18 @@ flowchart TD
 
 ## 6. Node
 
-1. RegisterSourceVersion：幂等 content hash。
-2. SecurityValidate：不可重试风险进入隔离。
-3. Parse：Parser Adapter。
-4. Chunk：确定性版本。
-5. Index：批量。
-6. ExtractClaims：Model。
-7. RetrieveCandidates。
-8. ClassifyRelations。
-9. ReviewEvidence。
-10. CreateProposal/HumanTask。
+1. RegisterSource：幂等注册逻辑来源路径。
+2. Hash & CaptureContent：按 Workspace + content hash create-only 保存不可变内容。
+3. RegisterSourceVersion：使用 `content_artifact_id` 注册不可变版本和 Provenance。
+4. SecurityValidate：不可重试风险进入隔离。
+5. Parse：Parser Adapter。
+6. Chunk：确定性版本。
+7. Index：批量。
+8. ExtractClaims：Model。
+9. RetrieveCandidates。
+10. ClassifyRelations。
+11. ReviewEvidence。
+12. CreateProposal/HumanTask。
 
 ## 7. 分支
 
@@ -67,7 +69,10 @@ flowchart TD
 
 ## 8. 幂等
 
-- source_id + content_hash。
+- source_id + content_hash 保留 Provenance 幂等。
+- workspace_id + content_hash 复用不可变 Content Artifact。
+- content artifact + parser/config/schema 复用 Parse Projection。
+- parse projection + chunk strategy/schema 复用 canonical Chunk；Source Version 通过映射保留 Provenance。
 - chunk content hash + strategy version。
 - embedding hash + model version。
 - relation candidate fingerprint。
@@ -93,6 +98,7 @@ flowchart TD
 - Prompt Injection 标记。
 - 网页 SSRF。
 - 隔离内容不索引。
+- 重试创建新的 Ingestion Attempt；`RETRY_WAIT` 属于 Workflow，不写入 Source Version。
 
 ## 12. 验收
 
@@ -100,4 +106,3 @@ flowchart TD
 - Source Span 可定位。
 - 单文件失败不影响批次。
 - 未批准候选不进入正式图谱。
-

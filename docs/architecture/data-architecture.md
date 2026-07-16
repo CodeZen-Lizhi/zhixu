@@ -64,6 +64,7 @@ workspace/
   artifacts/
   attachments/
   .knowledge/
+    sources/          # 按 SHA-256 create-only 保存的不可变 Source Content Artifact，普通扫描排除
     manifests/
     exports/
   .git/
@@ -74,7 +75,7 @@ workspace/
 - sources/ 保存原始或抓取版本。
 - knowledge/ 保存批准后的正式 Markdown。
 - artifacts/ 保存用户显式导出的产物。
-- .knowledge/ 只保存可导出、可版本化的应用元数据，不保存密钥。
+- .knowledge/ 保存应用托管的不可变 Content Artifact、清单和导出元数据，不保存密钥；其中 `.knowledge/sources/<sha256>` 必须按内容哈希 create-only 写入，并从普通扫描和 Git 默认跟踪中排除。
 - 数据库 Volume 不放在 Workspace 内。
 
 ## 4. 事实源矩阵
@@ -118,10 +119,11 @@ sequenceDiagram
     participant DB as PostgreSQL
     U->>W: 放入 Source
     W->>I: 发现路径和内容
-    I->>DB: 注册 Source Version/Hash
+    I->>W: 按内容哈希原子捕获不可变 Content Artifact
+    I->>DB: 注册 Source Version/Hash/Artifact Ref
     I->>I: 解析和分块
-    I->>DB: 写入 Document/Chunk
-    I->>DB: 写入 FTS/Vector
+    I->>DB: 原子写入 Ingestion Attempt/Document/Span/Canonical Chunk
+    I->>DB: 创建后续 Retrieval Index Job
 ```
 
 ### 正式写回
@@ -262,4 +264,3 @@ sequenceDiagram
 - 历史 Revision 不进入默认检索。
 - 向量相似不能直接创建 Confirmed Relation。
 - 数据库投影版本必须能关联 Git Commit。
-

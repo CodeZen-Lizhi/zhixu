@@ -22,6 +22,10 @@ _Avoid_: Document、知识
 Source 在某个时间点不可变的内容版本。
 _Avoid_: Revision、快照
 
+**Content Artifact**:
+按 Workspace 和内容哈希 create-only 保存的不可变原始字节。Source Version 通过它重读历史内容；原始路径只是 Provenance。
+_Avoid_: Source Version、用户可变路径
+
 **Document**:
 可以被组织并发布到正式知识目录的文章对象。
 _Avoid_: Source、文件记录
@@ -31,11 +35,11 @@ Document 的一个内容版本，可以是草稿、已批准或已发布状态�
 _Avoid_: Source Version、Document
 
 **Chunk**:
-为检索和引用而从 Revision 中切分出的内容片段，不是独立知识事实。
+由 Ingestion 从 Parse Projection 中确定性切分出的 canonical 内容片段，不是独立知识事实；Retrieval 只建立引用它的索引投影。
 _Avoid_: Claim、知识点
 
 **Source Span**:
-Source 或 Revision 中可以精确定位的内容范围。
+Content Artifact 原始字节中可以精确定位的不可变内容范围；具体导入路径通过 Source Version Provenance 选择。
 _Avoid_: Chunk、引用文本
 
 ## 知识模型

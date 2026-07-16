@@ -414,6 +414,8 @@ Inbox 页面分为：
 | Workspace | 用户控制的一个知识空间、文件根目录和配置集合 |
 | Source | 用户导入的原始资料逻辑对象 |
 | Source Version | 某次导入时不可变的原始内容版本 |
+| Content Artifact | 按 Workspace + 内容哈希 create-only 保存的不可变原始字节，位于 `.knowledge/sources/<sha256>`，普通扫描排除并通过 Git 本地 exclude 避免默认跟踪 |
+| Parse Projection | 按 Content Artifact + Parser/Schema 版本共享的结构化解析结果 |
 | Document | 已解析并可被组织、显示和索引的文档 |
 | Article Revision | 文章原文、优化草稿和批准版本之间的版本节点 |
 | Chunk | 可检索、可引用的结构化内容片段 |
@@ -442,13 +444,15 @@ Inbox 页面分为：
 
 ## 8. 全局状态模型
 
-### 8.1 Source 状态
+### 8.1 资料处理组合状态
 
 ```text
 DISCOVERED
 → VALIDATING
 → PARSING
 → PARSED
+→ CHUNKING
+→ CHUNKED
 → INDEXING
 → READY
 ```
@@ -457,14 +461,18 @@ DISCOVERED
 
 - VALIDATING → QUARANTINED
 - PARSING → PARSE_FAILED
+- CHUNKING → PARSE_FAILED
 - INDEXING → INDEX_FAILED
 - 任意处理中状态 → CANCELLED
 
 规则：
 
+- 该序列是 UI 组合视图，不是单表状态机：Source Version 保存不可变输入，Ingestion Attempt 保存安全/解析/分块状态，Workflow 保存重试，Retrieval 保存索引状态。
+- CHUNKED 只表示确定性解析投影完成，不表示已经索引。
 - READY 只表示资料可检索，不表示已经写入正式知识。
 - QUARANTINED 的内容不得进入默认索引和 Agent 上下文。
 - 失败状态必须保存错误类型、可重试性和最后一次失败节点。
+- 解除隔离必须创建新的 Validation Attempt，不得直接把旧记录改为 PARSED 或 READY。
 
 ### 8.2 Proposal 状态
 
@@ -3142,6 +3150,7 @@ Source Version：
 
 - id。
 - source_id。
+- content_artifact_id。
 - content_hash。
 - size。
 - mime_type。
@@ -3149,6 +3158,8 @@ Source Version：
 - original_content_location。
 - security_status。
 - parser_version。
+
+说明：`original_content_location` 是 Provenance，不是历史版本的唯一内容存储。Source Version 必须关联按内容哈希 create-only 保存的不可变 Content Artifact。`security_status` 和 `parser_version` 仅兼容早期字段，不作为后置处理状态事实源；安全、解析和分块状态记录在 Ingestion Attempt。
 
 ### 13.3 Document、Revision 与 Chunk
 
@@ -3176,14 +3187,26 @@ Article Revision：
 Chunk：
 
 - id。
-- revision_id。
+- parse_projection_id。
 - heading_path。
 - sequence。
 - content。
 - content_hash。
-- source_span。
-- token_count。
-- embedding_version。
+- source_span_id。
+- byte_count。
+- rune_count。
+- parser_version。
+- chunk_strategy_version。
+- schema_version。
+- status。
+
+Source Span：
+
+- id、content_artifact_id、parse_projection_id。
+- span_type、start_line、end_line、start_byte、end_byte、selector、excerpt_hash。
+- Span 不可变；Claim Source 和 Relation Evidence 额外保存 source_version_id 选择具体导入 Provenance。
+
+Source Span 是稳定实体，Chunk 通过 `source_span_id` 引用；行号采用 1-based 闭区间，byte offset 采用不可变 Content Artifact 原始字节中的 0-based 半开区间。Canonical Chunk 属于 Ingestion 投影，不伪造与具体模型相关的 Token 数；Embedding、Token Count、FTS 和 Index Version 属于 Retrieval 投影。
 
 ### 13.4 Topic、Claim 与 Relation
 
@@ -3208,6 +3231,7 @@ Claim Source：
 
 - claim_id。
 - source_span_id。
+- source_version_id（选择具体导入 Provenance）。
 - support_type。
 
 Relation：
@@ -3227,6 +3251,7 @@ Relation Evidence：
 
 - relation_id。
 - source_span_id。
+- source_version_id（选择具体导入 Provenance）。
 - reason。
 - evidence_hash。
 - model_version。

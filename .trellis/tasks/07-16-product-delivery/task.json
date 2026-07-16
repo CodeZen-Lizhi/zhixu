@@ -26,7 +26,8 @@
     "07-16-m3-workspace",
     "07-16-m4-workflow",
     "07-16-m5-change-control",
-    "07-16-m5-change-control-hardening"
+    "07-16-m5-change-control-hardening",
+    "07-16-m5-ingestion-contract"
   ],
   "parent": null,
   "relatedFiles": [],

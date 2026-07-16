@@ -64,13 +64,17 @@ flowchart LR
 实体：
 
 - Source Version。
+- Content Artifact。
 - Source Span。
+- Ingestion Attempt。
 
 不变量：
 
 - Source Version 不可变。
+- Source Version 的原路径是 Provenance；历史重读依赖不可变 Content Artifact。
 - 内容哈希决定版本去重。
 - 隔离版本不能进入默认检索。
+- 安全、解析、分块与索引状态分别由 Ingestion、Workflow 和 Retrieval 事实记录，不能写回 Source Version 冒充单一状态。
 
 ### 3.3 Document Aggregate
 
@@ -85,6 +89,7 @@ flowchart LR
 - 同时只有一个默认 Published Revision。
 - Draft 不参加默认 RAG。
 - Published Revision 必须对应 Git Commit。
+- 解析 Source 产生状态为 SOURCE 的 Revision；SOURCE/CHUNKED 不等于 Published 或 READY。
 
 ### 3.4 Knowledge Aggregate
 
@@ -313,7 +318,8 @@ stateDiagram-v2
 
 - RegisterSource。
 - ParseSourceVersion。
-- IndexRevision。
+
+Ingestion 在 CHUNKED 后发布可索引事件；`IndexRevision/IndexChunks` 属于 Retrieval，由 Workflow/Application 编排，不能由 Ingestion 直接拥有索引生命周期。
 
 ### Knowledge
 
@@ -388,4 +394,3 @@ stateDiagram-v2
 - 不把 AI 置信度视为用户确认。
 - 不把 Artifact 默认视为 Document。
 - 不把数据库记录视为正式文章的唯一原件。
-

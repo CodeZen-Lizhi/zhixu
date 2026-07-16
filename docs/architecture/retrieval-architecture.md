@@ -40,12 +40,17 @@ flowchart LR
 
 Chunk 必须带：
 
-- Revision ID。
+- Parse Projection ID。
 - Heading Path。
-- Source Span。
+- Source Span ID。
 - Content Hash。
-- Parser/Chunk Version。
+- Parser/Chunk Strategy Version。
+- Byte/Rune Count。
 - Status。
+
+这里的 Chunk 指 Ingestion 生成的 canonical Chunk。Retrieval 不重新定义正文、Source Span 或解析状态，只建立引用 `chunk_id` 的 FTS、Embedding 和 Index Version 投影。
+
+如果单个代码块或表格超过结构策略软上限，结构完整性优先：保留一个 `atomic_oversized` Chunk 并产生 `ATOMIC_BLOCK_OVERSIZED` Warning。Canonical Chunk 只记录 byte/rune count；具体模型的 Token Count 在 Retrieval Projection 中由版本化 Tokenizer 计算。超过 Embedding 上下文时 FTS 继续建立，vector_status=`skipped_oversized`，Index Version 保持 `status=active` 并设置 `degraded_capabilities=["vector"]`，API 显式展示，禁止静默拆块或伪装 Embedding 成功。
 
 禁止：
 
@@ -235,4 +240,3 @@ stateDiagram-v2
 - 专用向量库收益覆盖双写与运维成本。
 
 迁移只影响 Retrieval 内部 Adapter。
-

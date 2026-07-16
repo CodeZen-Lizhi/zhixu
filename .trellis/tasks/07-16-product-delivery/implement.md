@@ -1,6 +1,6 @@
 # ZHIXU 产品级建设实施清单
 
-> 本文件是复杂任务的执行顺序和验证门禁。当前任务仍处于 `planning`；未获得规划批准前不得执行实现任务。
+> 本文件是复杂任务的执行顺序和验证门禁。规划已获批准并进入持续实施；状态以代码、子任务归档和实际验证为准，不以早期计划表中的默认值推断完成度。
 
 ## 1. Milestones
 
@@ -23,26 +23,26 @@
 
 | 任务ID | 阶段 | 任务 | 影响文件或模块 | 前置任务 | 验收方式 | 风险 | 执行者 | 状态 |
 |---|---|---|---|---|---|---|---|---|
-| M0-01 | M0 | 收敛 PRD、分页、SSE、表格边界和 Eino 决策记录 | `docs/product/PRD.md`, `docs/architecture/*`, ADR | 无 | 文档链接检查；需求追踪无孤儿；冲突表归零 | 文档与实现分叉 | 主 Agent | 待开始 |
+| M0-01 | M0 | 收敛 PRD、分页、SSE、表格边界和 Eino 决策记录 | `docs/product/PRD.md`, `docs/architecture/*`, ADR | 无 | 文档链接检查；需求追踪无孤儿；冲突表归零 | 文档与实现分叉 | 主 Agent | 已完成 |
 | M0-02 | M0 | 完成 Trellis 后端规范 | `.trellis/spec/backend/**` | M0-01 | 无 `TBD/To be filled`；含事实引用和质量门禁，真实代码示例待 M1 回填 | 规范过度理想化 | 子 Agent，主 Agent 审核 | 已完成（待 M1 代码链接回填） |
 | M0-03 | M0 | 完成 Trellis 前端规范 | `.trellis/spec/frontend/**` | M0-01 | 无 `TBD/To be filled`；含事实引用和可访问性门禁，真实代码示例待 M1 回填 | 与未来代码不一致 | 子 Agent，主 Agent 审核 | 已完成（待 M1 代码链接回填） |
 | M0-04 | M0 | 确定 Go/Node/数据库/依赖版本与 License | `go.mod`, `web/package.json`, `docs/architecture/technology-stack.md` | M0-01 | manifest/lockfile 可复现；License 明确 | 版本选择过早 | 主 Agent | 待开始 |
-| M1-01 | M1 | 初始化 Go module、API/Worker composition root、统一 ID/Clock/Error/Config | `go.mod`, `cmd/**`, `internal/platform/**` | M0-02,M0-04 | `go test ./...`, `go vet ./...`, readiness 单测 | 骨架形成错误依赖 | 子 Agent | 待开始 |
-| M1-02 | M1 | 初始化 React/Vite/TS/Query/Router/Vitest/Playwright | `web/**` | M0-03,M0-04 | `npm ci`, lint/typecheck/test/build；首页非空 | 工具链版本漂移 | 子 Agent | 待开始 |
-| M1-03 | M1 | 建立显式 Compose、PostgreSQL+pgvector、配置样例和 CI | `deploy/compose.yml`, `Dockerfile*`, `.env.example`, `.github/workflows/**` | M1-01 | `docker compose -f deploy/compose.yml config`; Docker smoke | 误读父目录 Compose | 子 Agent | 待开始 |
-| M1-04 | M1 | 建立 OpenAPI-first、Problem Details、cursor、ETag、Idempotency、SSE envelope | `api/openapi/**`, `internal/presentation/**`, `web/src/api/**` | M1-01,M1-02 | contract test、生成客户端无漂移 | 概念契约字段遗漏 | 主 Agent + 子 Agent | 待开始 |
-| M2-01 | M2 | Eino 16 项最小 PoC（模型、Embedding、Retriever、Streaming、Schema、Tool、Callback、River） | 独立 `internal/platform/eino/**`, `research/eino-poc/**` | M1-01,M1-03 | `make test-eino-poc` 逐项报告；race/资源关闭 | 框架类型侵入领域 | 子 Agent，主 Agent 复核 | 待开始 |
-| M2-02 | M2 | 根据 PoC 锁定或拒绝 Eino，建立 Adapter/Fake/ADR | `docs/architecture/adr/0013*`, `internal/agentadapter/**` | M2-01 | Adapter Contract；替换路径测试 | 锁定不可替换 | 主 Agent | 待开始 |
+| M1-01 | M1 | 初始化 Go module、API/Worker composition root、统一 ID/Clock/Error/Config | `go.mod`, `cmd/**`, `internal/platform/**` | M0-02,M0-04 | `go test ./...`, `go vet ./...`, readiness 单测 | 骨架形成错误依赖 | 子 Agent | 已完成 |
+| M1-02 | M1 | 初始化 React/Vite/TS/Query/Router/Vitest/Playwright | `web/**` | M0-03,M0-04 | `npm ci`, lint/typecheck/test/build；首页非空 | 工具链版本漂移 | 子 Agent | 已完成（Playwright 业务用例待页面扩展） |
+| M1-03 | M1 | 建立显式 Compose、PostgreSQL+pgvector、配置样例和 CI | `deploy/compose.yml`, `Dockerfile*`, `.env.example`, `.github/workflows/**` | M1-01 | `docker compose -f deploy/compose.yml config`; Docker smoke | 误读父目录 Compose | 子 Agent | 已完成 |
+| M1-04 | M1 | 建立 OpenAPI-first、Problem Details、cursor、ETag、Idempotency、SSE envelope | `api/openapi/**`, `internal/presentation/**`, `web/src/api/**` | M1-01,M1-02 | contract test、生成客户端无漂移 | 概念契约字段遗漏 | 主 Agent + 子 Agent | 部分完成：OpenAPI/Problem/部分 Idempotency；cursor/ETag/SSE 待实现 |
+| M2-01 | M2 | Eino 16 项最小 PoC（模型、Embedding、Retriever、Streaming、Schema、Tool、Callback、River） | 独立 `internal/platform/eino/**`, `research/eino-poc/**` | M1-01,M1-03 | `make test-eino-poc` 逐项报告；race/资源关闭 | 框架类型侵入领域 | 子 Agent，主 Agent 复核 | 已完成采用门禁，部分验证未通过 |
+| M2-02 | M2 | 根据 PoC 锁定或拒绝 Eino，建立 Adapter/Fake/ADR | `docs/architecture/adr/0013*`, `internal/agentadapter/**` | M2-01 | Adapter Contract；替换路径测试 | 锁定不可替换 | 主 Agent | 已完成：主模块不正式采用 Eino |
 | M3-01 | M3 | 设计并实现 Core/Change/Workflow/Retrieval/Learning/Ops 迁移 | `migrations/**`, `sqlc.yaml`, `queries/**` | M0-01,M1-01 | 空库/升级/重复迁移/回滚前向策略测试 | 漏实体或版本字段 | 子 Agent | 待开始 |
 | M3-02 | M3 | 落实部分唯一索引、FK/多态引用策略、CHECK、乐观锁和幂等作用域 | `migrations/**`, `internal/platform/postgres/**` | M3-01 | 并发约束测试、重复消息测试 | DB 约束弱于领域规则 | 主 Agent + 子 Agent | 待开始 |
 | M3-03 | M3 | 建立领域 ID、状态机、聚合命令、事件和错误契约 | `internal/shared/**`, `internal/{workspace,knowledge,changecontrol,workflow,review}/**` | M0-01,M1-01 | 纯函数/状态机/非法转移测试 | 第三方类型渗透 | 主 Agent | 待开始 |
 | M3-04 | M3 | 建立固定 Workspace、Fake Model/Parser/Git/FS/Retrieval、AI Gold Set 和容量生成器 | `testdata/**`, `internal/testkit/**`, `eval/**` | M3-03 | fixture 校验、确定性复现、无 Secret | 测试数据与生产数据混淆 | 子 Agent | 待开始 |
-| M4-01 | M4 | 实现 Workflow Definition/Run/Node、River job 映射和租约 | `internal/workflow/**`, `cmd/worker/**` | M3-01,M3-03 | Worker claim/heartbeat/complete 集成测试 | 双状态机 | 子 Agent | 待开始 |
-| M4-02 | M4 | 实现 Outbox、重试/退避、暂停/恢复/取消、Human Task | `internal/workflow/**`, `migrations/**` | M4-01 | crash、lease expire、duplicate event、double submit | 重复副作用 | 子 Agent | 待开始 |
+| M4-01 | M4 | 实现 Workflow Definition/Run/Node、River job 映射和租约 | `internal/workflow/**`, `cmd/worker/**` | M3-01,M3-03 | Worker claim/heartbeat/complete 集成测试 | 双状态机 | 子 Agent | 部分完成：持久化状态/租约完成；River/Worker dispatch 待实现 |
+| M4-02 | M4 | 实现 Outbox、重试/退避、暂停/恢复/取消、Human Task | `internal/workflow/**`, `migrations/**` | M4-01 | crash、lease expire、duplicate event、double submit | 重复副作用 | 子 Agent | 部分完成：Outbox/Human/幂等完成；publisher/暂停取消待实现 |
 | M4-03 | M4 | 实现 Side Effect 执行判定、补偿和 `MANUAL_RECOVERY_REQUIRED` | `internal/workflow/**`, `internal/audit/**` | M4-02 | 未知结果不自动重试；恢复演练 | 状态误判 | 主 Agent + 子 Agent | 待开始 |
-| M5-01 | M5 | 实现 Workspace 安全路径、扫描、Source/Version Hash 和 Git CLI Adapter | `internal/workspace/**`, `internal/platform/{filesystem,gitcli}/**` | M3-03 | path/symlink/dirty workspace/commit failure 测试 | 覆盖用户文件 | 子 Agent | 待开始 |
-| M5-02 | M5 | 实现 Markdown/TXT 解析、Source Span、分块和隔离 | `internal/ingestion/**`, `internal/platform/parser/**` | M5-01,M3-04 | 重复导入、异常编码、代码/表格完整性、隔离测试 | 引用错位 | 子 Agent | 待开始 |
-| M5-03 | M5 | 实现 Proposal/Revision/Approval/Write Authorization/Change Hash | `internal/changecontrol/**`, `internal/tools/**` | M4-01,M5-01,M3-03 | 未批准写入拒绝、版本冲突、过期授权、双审批 | 绕过唯一写入 seam | 主 Agent | 待开始 |
+| M5-01 | M5 | 实现 Workspace 安全路径、扫描、Source/Version Hash 和 Git CLI Adapter | `internal/workspace/**`, `internal/platform/{filesystem,gitcli}/**` | M3-03 | path/symlink/dirty workspace/commit failure 测试 | 覆盖用户文件 | 子 Agent | 已完成 |
+| M5-02 | M5 | 实现 Markdown/TXT 解析、Source Span、分块和隔离 | `internal/ingestion/**`, `internal/platform/parser/**` | M5-01,M3-04 | 重复导入、异常编码、代码/表格完整性、隔离测试 | 引用错位 | 子 Agent | 进行中：契约与不可变内容捕获基线 |
+| M5-03 | M5 | 实现 Proposal/Revision/Approval/Write Authorization/Change Hash | `internal/changecontrol/**`, `internal/tools/**` | M4-01,M5-01,M3-03 | 未批准写入拒绝、版本冲突、过期授权、双审批 | 绕过唯一写入 seam | 主 Agent | 部分完成：Proposal/Approval/Hash/preflight；Write Authorization/expiry 待实现 |
 | M5-04 | M5 | 实现原子写回、Git Commit、DB mapping、增量索引和反向 Commit | `internal/changecontrol/**`, `internal/retrieval/**` | M5-03 | file/git/db/index/regression 故障注入；知识变更 E2E | Saga 半完成 | 主 Agent + 子 Agent | 待开始 |
 | M5-05 | M5 | 实现 Topic/Claim/Relation/Evidence/Conflict 领域规则 | `internal/knowledge/**`, `migrations/**` | M3-03,M5-02 | 五分类关系、条件冲突、证据可达、对称去重 | 关系第二事实源 | 子 Agent | 待开始 |
 | M6-01 | M6 | 实现 FTS/pgvector/Embedding/Index Version/RRF/Dedup/Rerank Adapter | `internal/retrieval/**`, `queries/**` | M5-02,M3-01,M2-02 | 检索 contract、过滤正确、降级显式、index switch | 向量维度/中文分词 | 子 Agent | 待开始 |

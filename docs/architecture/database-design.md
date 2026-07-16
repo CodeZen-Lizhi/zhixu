@@ -89,6 +89,7 @@ source_version：
 
 - id。
 - source_id。
+- content_artifact_id。
 - content_hash。
 - byte_size。
 - mime_type。
@@ -96,9 +97,44 @@ source_version：
 - parser_version。
 - captured_at。
 
+`security_status` 与 `parser_version` 是早期兼容字段，不能承载后置处理状态：Source Version 全行不可变。正式实现新增按 Workspace + content_hash 去重的不可变 Content Artifact，并由 Source Version 引用；原路径只保存 Provenance。
+
+约束：`content_artifact_id` 非空 FK；Repository 必须验证 Source、Source Version、Artifact 属于同一 Workspace。旧 Source Version 回填时若原路径内容与记录哈希不一致，迁移必须停止并报告冲突，不能捕获新内容冒充旧版本。
+
 唯一约束：
 
 - source_id + content_hash。
+
+### content_artifact / parse_projection / ingestion_attempt
+
+content_artifact：
+
+- id、workspace_id、content_hash、byte_size、managed_location、created_at。
+- managed_location 位于 Workspace 管理目录，create-only、扫描排除、不可变。
+- workspace_id + content_hash 唯一；不同 Source 路径可共享内容与解析投影。
+
+parse_projection：
+
+- id、workspace_id、content_artifact_id。
+- parser_id、parser_version、parser_config_hash、schema_version。
+- normalized_content_hash、warnings、created_at。
+- content_artifact_id + parser_id + parser_version + parser_config_hash + schema_version 唯一。
+
+source_version_projection：
+
+- source_version_id、parse_projection_id、source_revision_id、created_at。
+- Source Version 保留路径和导入 Provenance；相同内容共享 Parse Projection、Source Span 和 canonical Chunk，不复制解析正文。
+
+ingestion_attempt：
+
+- id、workspace_id、source_version_id、workflow_run_id nullable。
+- status、security_status、failure_stage、error_code、retryable。
+- parser_id、parser_version、parser_config_hash、chunk_strategy_version、schema_version。
+- idempotency_key、attempt、warnings、started_at、completed_at、version。
+- parse_projection_id nullable；成功后指向共享 Parse Projection。
+- status 枚举：validating、parsing、parsed、chunking、chunked、parse_failed、cancelled。
+- security_status 枚举：pending、passed、quarantined；quarantined 时 status 保持 validating 终止组合，不能进入 parsing。
+- 同一 Source Version + Parser + Parser Config + Chunk Strategy + Schema + Idempotency Key 唯一处理请求；重试创建新 Attempt，不覆盖历史失败。
 
 ### document / article_revision
 
@@ -111,6 +147,8 @@ document：
 - current_published_revision_id。
 - lifecycle_status。
 - version。
+
+解析 Source 时每个逻辑 Source 对应一个 SOURCE Document，`canonical_path` 使用经过 Workspace 安全规范化的原始相对路径；Content Artifact/Parse Projection/Chunk 可以跨同哈希 Source 共享，但不合并 Document 身份。
 
 article_revision：
 
@@ -129,29 +167,55 @@ article_revision：
 - 每个 Document 只有一个 Published Current Revision。
 - Published 必须有 git_commit。
 
-### chunk
+### source_span / canonical chunk
+
+source_span：
+
+- id、workspace_id、content_artifact_id、parse_projection_id。
+- span_type、start_line、end_line、start_byte、end_byte。
+- selector JSONB、excerpt_hash、parser_version、schema_version。
+- Source Span 不可变；行号 1-based 闭区间；byte offset 0-based 半开区间，并受 Content Artifact 原始字节长度约束。
+- Citation/Provenance 通过 `source_span_id + source_version_id` 选择具体导入路径；Source Version 必须映射到同一 Parse Projection。
+- v1 每个 canonical Chunk 恰好引用一个连续 Source Span；Span 可以被多个投影消费者引用。
+
+canonical chunk：
 
 - id。
 - workspace_id。
-- revision_id。
+- parse_projection_id。
 - sequence。
 - heading_path。
 - content。
 - content_hash。
-- source_span JSONB。
-- token_count。
-- search_vector tsvector。
-- embedding vector(N)。
-- index_version_id。
-- embedding_version_id。
+- source_span_id。
+- byte_count。
+- rune_count。
+- parser_version。
+- chunk_strategy_version。
+- schema_version。
+- atomic_oversized。
 - status。
+
+唯一约束：parse_projection_id + chunk_strategy_version + schema_version + sequence。相同内容、Parser 和策略只生成一套 canonical Chunk。
+
+Canonical Chunk 属于 Ingestion，可重建但必须可追溯。`search_vector`、`embedding`、模型 Token Count、`index_version_id` 和 `embedding_version_id` 移到 Retrieval 投影表并引用 chunk_id，避免解析生命周期与索引生命周期混合。
+
+retrieval_chunk_projection：
+
+- index_version_id、chunk_id、workspace_id。
+- search_vector、embedding、embedding_version_id、token_count。
+- lexical_status、vector_status、failure_code、created_at。
+- index_version_id + chunk_id 唯一；Workspace 必须与 Chunk/Index Version 一致。
+- vector_status 枚举包含 pending、ready、skipped_oversized、failed；未 ready 的向量不能进入向量检索。
+- 单个超大原子块仍可建立 FTS；向量标记 skipped_oversized。Index Version 保持 lifecycle `status=active`，另存 `degraded_capabilities`（例如 `["vector"]`）并向 API 暴露，不能用 degraded 取代 active，也不得宣称完整能力 READY。
 
 索引：
 
 - GIN(search_vector)。
 - HNSW 或 IVFFlat(embedding)。
-- revision_id + sequence。
-- workspace_id + status。
+- parse_projection_id + sequence（canonical Chunk）。
+- workspace_id + status（canonical Chunk）。
+- index_version_id + chunk_id（Retrieval Projection）。
 
 ### topic / claim
 
@@ -483,14 +547,14 @@ evaluation_result：
 
 Index Version 表示某个 Workspace 的可追踪完整检索投影，包含 FTS、向量及其构建配置。
 
-- id、workspace_id、status（building、active、failed、retired 等）、manifest_hash。
+- id、workspace_id、status（building、active、failed、retired 等）、degraded_capabilities JSONB、manifest_hash。
 - parser_version、chunk_strategy_version、embedding_version_id、rerank_version、schema_version。
 - source_snapshot_ref、built_at、activated_at、failure_summary、created_at。
 - embedding_version 记录 provider、model、dimensions、normalization、config_hash。
 
 约束和执行规则：
 
-- 一个 Workspace 同时只能有一个活动且完整的 Index Version；切换必须是数据库内原子状态变化，失败版本不能被默认检索使用。
+- 一个 Workspace 同时只能有一个活动 Index Version；`status=active` 可同时带 `degraded_capabilities`，例如仅 FTS 可用但 vector 缺失。切换必须是数据库内原子状态变化，失败版本不能被默认检索使用。
 - Chunk/Embedding 投影必须引用 Index Version；旧版本可保留用于回滚或重建，但默认 RAG 只读取最新批准正式 Revision 的活动索引。
 - 同一 Index Version 的向量维度固定；维度或模型配置变化创建新 Embedding/Index Version，不在旧版本混写。
 - Index Module 负责构建和激活，Workspace/Database 约束负责唯一活动版本和引用完整性；Embedding 可重建，不属于永久备份最低要求。

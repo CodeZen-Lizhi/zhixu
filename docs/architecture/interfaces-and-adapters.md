@@ -75,8 +75,15 @@ Eino 只能作为 Agent/Application 层的短流程编排实现，或作为 Adap
 职责：
 
 - 判断是否支持输入类型。
-- 将 Source Version 转换为标准 Document。
+- 将项目自有 `SourceInput`（Source Version ID、媒体类型、不可变原始字节）转换为标准 Document。
 - 返回 Source Span 映射和警告。
+
+约束：
+
+- Parser 不接受任意文件路径，也不自行读取环境变量或 Workspace。
+- 第三方 AST 类型不得进入 Domain/Application 公共契约。
+- Source Span 指向原始字节；BOM/CRLF 标准化必须保留位置映射。
+- 不支持类型明确失败，不使用自由文本或正则静默兜底。
 
 Adapter：
 
