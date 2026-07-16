@@ -34,6 +34,7 @@ func NewService(repo domain.Repository, ids foundation.IDGenerator, clock founda
 type CreateCommand struct {
 	WorkspaceID     foundation.ID
 	TargetPath      string
+	IdempotencyKey  string
 	BaseHash        string
 	Content         string
 	EvidenceSummary string
@@ -41,19 +42,25 @@ type CreateCommand struct {
 	RollbackPlan    string
 }
 
+// CreateResult 包含 Proposal 和是否命中已有幂等请求。
+type CreateResult struct {
+	Proposal domain.Proposal
+	Replayed bool
+}
+
 // CreateProposal 校验并原子创建 ready_for_review Proposal 和 Revision。
-func (s *Service) CreateProposal(ctx context.Context, command CreateCommand) (domain.Proposal, error) {
+func (s *Service) CreateProposal(ctx context.Context, command CreateCommand) (CreateResult, error) {
 	targetPath, pathErr := domain.ValidateTargetPath(command.TargetPath)
-	if command.WorkspaceID == "" || pathErr != nil || !domain.ValidHash(command.BaseHash) || strings.TrimSpace(command.Content) == "" || strings.TrimSpace(command.EvidenceSummary) == "" || strings.TrimSpace(command.Risk) == "" || strings.TrimSpace(command.RollbackPlan) == "" {
-		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("proposal fields are invalid"))
+	if command.WorkspaceID == "" || pathErr != nil || strings.TrimSpace(command.IdempotencyKey) == "" || len(strings.TrimSpace(command.IdempotencyKey)) > 128 || !domain.ValidHash(command.BaseHash) || strings.TrimSpace(command.Content) == "" || strings.TrimSpace(command.EvidenceSummary) == "" || strings.TrimSpace(command.Risk) == "" || strings.TrimSpace(command.RollbackPlan) == "" {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("proposal fields are invalid"))
 	}
 	proposalID, err := s.ids.New()
 	if err != nil {
-		return domain.Proposal{}, err
+		return CreateResult{}, err
 	}
 	revisionID, err := s.ids.New()
 	if err != nil {
-		return domain.Proposal{}, err
+		return CreateResult{}, err
 	}
 	now := s.clock.Now()
 	baseHash := strings.ToLower(command.BaseHash)
@@ -63,10 +70,16 @@ func (s *Service) CreateProposal(ctx context.Context, command CreateCommand) (do
 		Risk: strings.TrimSpace(command.Risk), RollbackPlan: strings.TrimSpace(command.RollbackPlan),
 		ChangeHash: domain.ComputeChangeHash(targetPath, baseHash, command.Content), CreatedAt: now,
 	}
-	return s.repo.CreateProposal(ctx, domain.Proposal{
+	proposal, err := s.repo.CreateProposal(ctx, domain.Proposal{
 		ID: proposalID, WorkspaceID: command.WorkspaceID, TargetPath: targetPath,
-		Status: domain.StatusReady, CreatedAt: now, UpdatedAt: now, Revision: revision,
+		IdempotencyKey: strings.TrimSpace(command.IdempotencyKey),
+		RequestHash:    domain.ComputeRequestHash(command.WorkspaceID, targetPath, baseHash, command.Content, strings.TrimSpace(command.EvidenceSummary), strings.TrimSpace(command.Risk), strings.TrimSpace(command.RollbackPlan)),
+		Status:         domain.StatusReady, CreatedAt: now, UpdatedAt: now, Revision: revision,
 	})
+	if err != nil {
+		return CreateResult{}, err
+	}
+	return CreateResult{Proposal: proposal, Replayed: proposal.ID != proposalID}, nil
 }
 
 // GetProposal 返回 Proposal 当前 Revision 与已有审批决定。
@@ -82,6 +95,25 @@ func (s *Service) DecideProposal(ctx context.Context, proposalID, revisionID fou
 	if proposalID == "" || revisionID == "" || !domain.ValidHash(changeHash) || decision != domain.DecisionApproved && decision != domain.DecisionRejected {
 		return domain.Approval{}, foundation.NewError(foundation.ErrorInvalidInput, "APPROVAL_INVALID", false, errors.New("approval fields are invalid"))
 	}
+	proposal, err := s.repo.GetProposal(ctx, proposalID)
+	if err != nil {
+		return domain.Approval{}, err
+	}
+	if proposal.Revision.ID != revisionID || proposal.Revision.ChangeHash != strings.ToLower(changeHash) {
+		return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_REVISION_CONFLICT", false, errors.New("approval is not bound to requested revision"))
+	}
+	if proposal.Status == domain.StatusReady && decision == domain.DecisionApproved {
+		currentHash, readErr := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
+		if readErr != nil {
+			return s.rejectUnavailableTarget(ctx, proposal.ID, readErr)
+		}
+		if strings.ToLower(currentHash) != proposal.Revision.BaseHash {
+			if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
+				return domain.Approval{}, markErr
+			}
+			return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: proposal.Revision.BaseHash, Current: strings.ToLower(currentHash)})
+		}
+	}
 	approvalID, err := s.ids.New()
 	if err != nil {
 		return domain.Approval{}, err
@@ -90,6 +122,17 @@ func (s *Service) DecideProposal(ctx context.Context, proposalID, revisionID fou
 		ID: approvalID, ProposalID: proposalID, RevisionID: revisionID,
 		ChangeHash: strings.ToLower(changeHash), Decision: decision, DecidedAt: s.clock.Now(),
 	})
+}
+
+func (s *Service) rejectUnavailableTarget(ctx context.Context, proposalID foundation.ID, readErr error) (domain.Approval, error) {
+	var unavailable *domain.TargetUnavailableError
+	if !errors.As(readErr, &unavailable) {
+		return domain.Approval{}, readErr
+	}
+	if markErr := s.repo.MarkNeedsRevision(ctx, proposalID, s.clock.Now()); markErr != nil {
+		return domain.Approval{}, markErr
+	}
+	return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_UNAVAILABLE", false, unavailable)
 }
 
 // ApplyPreflightResult 仅表示服务端当前检查通过，不代表已写回或已签发写权限。
@@ -133,6 +176,13 @@ func (s *Service) CheckApplyPreflight(ctx context.Context, proposalID, revisionI
 	}
 	currentBaseHash, err := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
 	if err != nil {
+		var unavailable *domain.TargetUnavailableError
+		if errors.As(err, &unavailable) {
+			if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
+				return ApplyPreflightResult{}, markErr
+			}
+			return ApplyPreflightResult{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_UNAVAILABLE", false, unavailable)
+		}
 		return ApplyPreflightResult{}, err
 	}
 	currentBaseHash = strings.ToLower(currentBaseHash)

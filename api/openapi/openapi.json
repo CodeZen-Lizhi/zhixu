@@ -158,7 +158,8 @@
     },
     "/api/v1/workspaces/{workspace_id}/proposals": {
       "parameters": [
-        { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
       ],
       "post": {
         "operationId": "createProposal",
@@ -166,6 +167,7 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateProposalRequest" } } } },
         "responses": {
           "201": { "description": "Proposal and first Revision created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Proposal" } } } },
+          "200": { "description": "The same idempotent request was replayed; the existing Proposal is returned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Proposal" } } } },
           "400": { "description": "Invalid target, hash or required Proposal field.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
           "409": { "description": "Workspace or persistence consistency conflict.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
           "503": { "description": "Change Control dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },

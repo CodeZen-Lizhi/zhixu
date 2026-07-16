@@ -62,14 +62,16 @@ func newTestService(repository *fakeRepo, targets *fakeTargets) *Service {
 func TestCreateProposalBindsTargetBaseAndContent(t *testing.T) {
 	repository := &fakeRepo{}
 	service := newTestService(repository, &fakeTargets{})
-	proposal, err := service.CreateProposal(context.Background(), CreateCommand{
+	result, err := service.CreateProposal(context.Background(), CreateCommand{
 		WorkspaceID: "workspace", TargetPath: "notes/../notes/a.md", BaseHash: testHash,
-		Content: "  code\r\n", EvidenceSummary: "evidence", Risk: "low", RollbackPlan: "revert commit",
+		IdempotencyKey: "create-1",
+		Content:        "  code\r\n", EvidenceSummary: "evidence", Risk: "low", RollbackPlan: "revert commit",
 	})
 	if err != nil {
 		t.Fatalf("CreateProposal() error = %v", err)
 	}
-	if proposal.TargetPath != "notes/a.md" || proposal.Revision.TargetPath != "notes/a.md" || proposal.Status != domain.StatusReady {
+	proposal := result.Proposal
+	if proposal.TargetPath != "notes/a.md" || proposal.Revision.TargetPath != "notes/a.md" || proposal.Status != domain.StatusReady || proposal.IdempotencyKey != "create-1" || proposal.RequestHash == "" {
 		t.Fatalf("proposal = %#v", proposal)
 	}
 	wantHash := domain.ComputeChangeHash("notes/a.md", testHash, "  code\r\n")
@@ -83,10 +85,11 @@ func TestCreateProposalBindsTargetBaseAndContent(t *testing.T) {
 
 func TestCreateProposalRejectsUnsafeOrIncompleteInput(t *testing.T) {
 	tests := []CreateCommand{
-		{WorkspaceID: "workspace", TargetPath: "../a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
-		{WorkspaceID: "workspace", TargetPath: "/tmp/a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
-		{WorkspaceID: "workspace", TargetPath: "a.md", BaseHash: "zz" + testHash[2:], Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
-		{WorkspaceID: "workspace", TargetPath: "a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: " ", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "../a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "/tmp/a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "a.md", BaseHash: "zz" + testHash[2:], Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: " ", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", TargetPath: "a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
 	}
 	for _, command := range tests {
 		service := newTestService(&fakeRepo{}, &fakeTargets{})
@@ -97,11 +100,26 @@ func TestCreateProposalRejectsUnsafeOrIncompleteInput(t *testing.T) {
 }
 
 func TestDecideProposalPassesBoundHash(t *testing.T) {
-	repository := &fakeRepo{}
-	service := newTestService(repository, &fakeTargets{})
-	_, err := service.DecideProposal(context.Background(), "proposal", "revision", testHash, domain.DecisionApproved)
-	if err != nil || repository.approval.ChangeHash != testHash || repository.approval.Decision != domain.DecisionApproved {
+	proposal := approvedProposal(testHash)
+	proposal.Status = domain.StatusReady
+	proposal.Approval = nil
+	repository := &fakeRepo{proposal: proposal}
+	service := newTestService(repository, &fakeTargets{hash: testHash})
+	_, err := service.DecideProposal(context.Background(), "proposal", "revision", proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err != nil || repository.approval.ChangeHash != proposal.Revision.ChangeHash || repository.approval.Decision != domain.DecisionApproved {
 		t.Fatalf("approval = %#v, err = %v", repository.approval, err)
+	}
+}
+
+func TestDecideProposalMarksNeedsRevisionWhenTargetUnavailable(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	proposal.Status = domain.StatusReady
+	proposal.Approval = nil
+	repository := &fakeRepo{proposal: proposal}
+	service := newTestService(repository, &fakeTargets{err: &domain.TargetUnavailableError{Cause: errors.New("missing")}})
+	_, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err == nil || !repository.markedNeedsReview {
+		t.Fatalf("err=%v marked=%v", err, repository.markedNeedsReview)
 	}
 }
 
@@ -122,6 +140,16 @@ func TestApplyPreflightMarksNeedsRevisionOnRealBaselineConflict(t *testing.T) {
 	_, err := service.CheckApplyPreflight(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash)
 	var conflict *HashConflict
 	if !errors.As(err, &conflict) || !repository.markedNeedsReview {
+		t.Fatalf("err = %v, marked = %v", err, repository.markedNeedsReview)
+	}
+}
+
+func TestApplyPreflightMarksNeedsRevisionWhenTargetUnavailable(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	repository := &fakeRepo{proposal: proposal}
+	service := newTestService(repository, &fakeTargets{err: &domain.TargetUnavailableError{Cause: errors.New("missing")}})
+	_, err := service.CheckApplyPreflight(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash)
+	if err == nil || !repository.markedNeedsReview {
 		t.Fatalf("err = %v, marked = %v", err, repository.markedNeedsReview)
 	}
 }

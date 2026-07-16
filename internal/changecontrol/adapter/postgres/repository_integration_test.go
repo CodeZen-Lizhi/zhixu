@@ -43,11 +43,25 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	baseHash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	changeHash := domain.ComputeChangeHash("a.md", baseHash, "new content")
 	proposal := domain.Proposal{
-		ID: proposalID, WorkspaceID: workspaceID, TargetPath: "a.md", Status: domain.StatusReady, CreatedAt: now, UpdatedAt: now,
+		ID: proposalID, WorkspaceID: workspaceID, TargetPath: "a.md", IdempotencyKey: "create-one", RequestHash: domain.ComputeRequestHash(workspaceID, "a.md", baseHash, "new content", "source evidence", "low", "revert commit"), Status: domain.StatusReady, CreatedAt: now, UpdatedAt: now,
 		Revision: domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: "a.md", BaseHash: baseHash, Content: "new content", EvidenceSummary: "source evidence", Risk: "low", RollbackPlan: "revert commit", ChangeHash: changeHash, CreatedAt: now},
 	}
 	if _, err := repository.CreateProposal(ctx, proposal); err != nil {
 		t.Fatal(err)
+	}
+	replayedRequest := proposal
+	replayedRequest.ID = integrationID(9)
+	replayedRequest.Revision.ID = integrationID(10)
+	replayed, err := repository.CreateProposal(ctx, replayedRequest)
+	if err != nil || replayed.ID != proposalID {
+		t.Fatalf("replayed=%#v err=%v", replayed, err)
+	}
+	conflictingRequest := replayedRequest
+	conflictingRequest.ID = integrationID(11)
+	conflictingRequest.Revision.ID = integrationID(12)
+	conflictingRequest.RequestHash = domain.ComputeRequestHash(workspaceID, "a.md", baseHash, "different", "source evidence", "low", "revert commit")
+	if _, err := repository.CreateProposal(ctx, conflictingRequest); !hasCode(err, "IDEMPOTENCY_KEY_REUSED") {
+		t.Fatalf("idempotency conflict err=%v", err)
 	}
 	queried, err := repository.GetProposal(ctx, proposalID)
 	if err != nil || queried.TargetPath != "a.md" || queried.Approval != nil {
@@ -58,8 +72,12 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	if _, err := repository.Approve(ctx, approval); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.Approve(ctx, domain.Approval{ID: integrationID(5), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, DecidedAt: now.Add(2 * time.Minute)}); !hasCode(err, "PROPOSAL_NOT_READY_FOR_REVIEW") {
-		t.Fatalf("duplicate approval err=%v", err)
+	replayedApproval, err := repository.Approve(ctx, domain.Approval{ID: integrationID(5), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, DecidedAt: now.Add(2 * time.Minute)})
+	if err != nil || replayedApproval.ID != approval.ID {
+		t.Fatalf("replayed approval=%#v err=%v", replayedApproval, err)
+	}
+	if _, err := repository.Approve(ctx, domain.Approval{ID: integrationID(6), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionRejected, DecidedAt: now.Add(2 * time.Minute)}); !hasCode(err, "PROPOSAL_NOT_READY_FOR_REVIEW") {
+		t.Fatalf("conflicting approval err=%v", err)
 	}
 	queried, err = repository.GetProposal(ctx, proposalID)
 	if err != nil || queried.Status != domain.StatusApproved || queried.Approval == nil || queried.Approval.ChangeHash != changeHash {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
@@ -41,7 +42,7 @@ func (r *Reader) CurrentHash(ctx context.Context, workspaceID foundation.ID, tar
 	}
 	digest, err := root.Hash(targetPath)
 	if err != nil {
-		return "", foundation.NewError(foundation.ErrorVersionConflict, "TARGET_FILE_UNAVAILABLE", false, err)
+		return "", &domain.TargetUnavailableError{Cause: err}
 	}
 	return digest, nil
 }

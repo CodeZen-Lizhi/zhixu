@@ -17,7 +17,7 @@ import (
 
 // Service 定义 Change Control HTTP 所需的最小应用层契约。
 type Service interface {
-	CreateProposal(context.Context, application.CreateCommand) (domain.Proposal, error)
+	CreateProposal(context.Context, application.CreateCommand) (application.CreateResult, error)
 	GetProposal(context.Context, foundation.ID) (domain.Proposal, error)
 	DecideProposal(context.Context, foundation.ID, foundation.ID, string, domain.Decision) (domain.Approval, error)
 	CheckApplyPreflight(context.Context, foundation.ID, foundation.ID, string) (application.ApplyPreflightResult, error)
@@ -114,15 +114,25 @@ func (h *Handler) createProposal(w http.ResponseWriter, r *http.Request) {
 		writeUnavailable(w)
 		return
 	}
-	proposal, err := h.service.CreateProposal(r.Context(), application.CreateCommand{
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idempotencyKey == "" {
+		writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "IDEMPOTENCY_KEY_REQUIRED", false, errors.New("proposal creation requires an Idempotency-Key header")))
+		return
+	}
+	result, err := h.service.CreateProposal(r.Context(), application.CreateCommand{
 		WorkspaceID: workspaceID, TargetPath: request.TargetPath, BaseHash: request.BaseHash, Content: request.Content,
+		IdempotencyKey:  idempotencyKey,
 		EvidenceSummary: request.EvidenceSummary, Risk: request.Risk, RollbackPlan: request.RollbackPlan,
 	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	httpapi.WriteJSON(w, http.StatusCreated, toProposalResponse(proposal))
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	httpapi.WriteJSON(w, status, toProposalResponse(result.Proposal))
 }
 
 func (h *Handler) getProposal(w http.ResponseWriter, r *http.Request) {
@@ -275,6 +285,12 @@ func publicMessage(code string) string {
 		return "审批绑定的 Change Hash 与 Revision 不一致"
 	case "TARGET_BASE_HASH_CONFLICT":
 		return "目标内容在 Proposal 创建后发生变化"
+	case "TARGET_BASE_UNAVAILABLE":
+		return "Proposal 目标文件已不存在或不再安全可读"
+	case "IDEMPOTENCY_KEY_REQUIRED":
+		return "创建 Proposal 必须提供 Idempotency-Key"
+	case "IDEMPOTENCY_KEY_REUSED":
+		return "Idempotency-Key 已绑定到不同的 Proposal 请求"
 	case "PROPOSAL_REVISION_CONFLICT":
 		return "审批未绑定到请求的 Proposal Revision"
 	case "PROPOSAL_NOT_FOUND", "PROPOSAL_REVISION_NOT_FOUND":

@@ -25,7 +25,8 @@
     "07-16-m2-eino-poc",
     "07-16-m3-workspace",
     "07-16-m4-workflow",
-    "07-16-m5-change-control"
+    "07-16-m5-change-control",
+    "07-16-m5-change-control-hardening"
   ],
   "parent": null,
   "relatedFiles": [],

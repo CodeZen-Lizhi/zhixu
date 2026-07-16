@@ -30,6 +30,9 @@ for (const [path, method, successResponse] of requiredOperations) {
 if (!document.paths["/readyz"].get.responses["503"]) {
   throw new Error("missing 503 response for GET /readyz");
 }
+if (!document.paths["/api/v1/workspaces/{workspace_id}/proposals"].post.responses["200"]) {
+  throw new Error("missing idempotent replay response for Proposal creation");
+}
 
 for (const schema of [
   "Liveness",

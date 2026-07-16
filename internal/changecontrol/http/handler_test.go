@@ -42,6 +42,25 @@ func TestCreateProposalContract(t *testing.T) {
 	}
 }
 
+func TestCreateProposalReplayReturnsOK(t *testing.T) {
+	service := &fakeService{proposal: domain.Proposal{ID: testProposalID}, replayed: true}
+	recorder := serve(t, service, http.MethodPost, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", `{"target_path":"notes/a.md","base_hash":"`+testChangeHash+`","content":"new","evidence_summary":"e","risk":"low","rollback_plan":"r"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestCreateProposalRequiresIdempotencyKey(t *testing.T) {
+	router := chi.NewRouter()
+	router.Route("/api/v1", func(api chi.Router) { NewHandler(&fakeService{}).Routes(api) })
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", strings.NewReader(`{"target_path":"a.md"}`))
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "IDEMPOTENCY_KEY_REQUIRED") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestApprovalAndPreflightContracts(t *testing.T) {
 	service := &fakeService{
 		approval:  domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved},
@@ -100,11 +119,12 @@ type fakeService struct {
 	err       error
 	create    application.CreateCommand
 	decision  domain.Decision
+	replayed  bool
 }
 
-func (f *fakeService) CreateProposal(_ context.Context, command application.CreateCommand) (domain.Proposal, error) {
+func (f *fakeService) CreateProposal(_ context.Context, command application.CreateCommand) (application.CreateResult, error) {
 	f.create = command
-	return f.proposal, f.err
+	return application.CreateResult{Proposal: f.proposal, Replayed: f.replayed}, f.err
 }
 func (f *fakeService) GetProposal(context.Context, foundation.ID) (domain.Proposal, error) {
 	return f.proposal, f.err
@@ -122,6 +142,7 @@ func serve(t *testing.T, service Service, method, path, body string) *httptest.R
 	router := chi.NewRouter()
 	router.Route("/api/v1", func(api chi.Router) { NewHandler(service).Routes(api) })
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	request.Header.Set("Idempotency-Key", "test-create")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	return recorder

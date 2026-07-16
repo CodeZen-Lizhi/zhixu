@@ -3,6 +3,7 @@ package domain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -45,12 +46,20 @@ const (
 type Proposal struct {
 	ID, WorkspaceID foundation.ID
 	TargetPath      string
+	IdempotencyKey  string
+	RequestHash     string
 	Status          ProposalStatus
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	Revision        Revision
 	Approval        *Approval
 }
+
+// TargetUnavailableError 表示 Proposal 目标不再是 Workspace 内可安全读取的普通文件。
+type TargetUnavailableError struct{ Cause error }
+
+func (e *TargetUnavailableError) Error() string { return "proposal target is unavailable" }
+func (e *TargetUnavailableError) Unwrap() error { return e.Cause }
 
 // Revision 是带目标、基线和证据的不可变变更快照。
 type Revision struct {
@@ -79,6 +88,22 @@ func ComputeChangeHash(targetPath, baseHash, content string) string {
 	normalizedContent := strings.ReplaceAll(content, "\r\n", "\n")
 	canonical := fmt.Sprintf("zhixu-change-v1\ntarget-path-length:%d\ntarget-path:%s\nbase-hash:%s\ncontent-length:%d\ncontent:\n%s", len(targetPath), targetPath, strings.ToLower(baseHash), len(normalizedContent), normalizedContent)
 	sum := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(sum[:])
+}
+
+// ComputeRequestHash 对 Proposal 创建请求计算稳定哈希，用于幂等键防误用。
+func ComputeRequestHash(workspaceID foundation.ID, targetPath, baseHash, content, evidence, risk, rollback string) string {
+	payload := struct {
+		WorkspaceID string `json:"workspace_id"`
+		TargetPath  string `json:"target_path"`
+		BaseHash    string `json:"base_hash"`
+		Content     string `json:"content"`
+		Evidence    string `json:"evidence"`
+		Risk        string `json:"risk"`
+		Rollback    string `json:"rollback"`
+	}{string(workspaceID), targetPath, strings.ToLower(baseHash), strings.ReplaceAll(content, "\r\n", "\n"), evidence, risk, rollback}
+	encoded, _ := json.Marshal(payload)
+	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])
 }
 
