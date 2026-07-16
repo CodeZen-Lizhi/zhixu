@@ -37,6 +37,12 @@ The project is currently in the product and architecture design stage.
 
 项目目前处于产品需求与架构设计阶段。
 
+## Documentation
+
+- [Documentation index](docs/README.md)
+- [Product requirements](docs/product/PRD.md)
+- [Architecture documentation](docs/architecture/README.md)
+
 ## License
 
 To be determined.
