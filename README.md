@@ -33,9 +33,50 @@
 
 ## Status
 
-The project is currently in the product and architecture design stage.
+The project is under active development. The current skeleton provides a Go API and worker, a React web application, and PostgreSQL with pgvector.
 
-项目目前处于产品需求与架构设计阶段。
+项目正在开发中，当前工程骨架包含 Go API 与 Worker、React Web，以及启用 pgvector 的 PostgreSQL。
+
+## Local development
+
+Prerequisites:
+
+- Go 1.25.4
+- Node.js 24.18.0 and npm 11.7.0
+- Docker with Docker Compose
+
+Install dependencies and run all local quality gates:
+
+```bash
+make web-install
+make test
+```
+
+Start the complete local stack. `.env.example` contains development-only values and must not be used as production secrets.
+
+```bash
+make compose-up
+```
+
+Then open <http://127.0.0.1:8080>. Health and dependency status are available at:
+
+- `GET /livez`: process liveness
+- `GET /readyz`: readiness including PostgreSQL connectivity
+- `GET /api/v1/system/status`: API and database status used by the web page
+
+Stop the stack and remove its local database volume:
+
+```bash
+make compose-down
+```
+
+Useful standalone checks:
+
+```bash
+make go-test go-vet
+make web-lint web-typecheck web-test web-build
+make openapi-check compose-check docker-build
+```
 
 ## Documentation
 

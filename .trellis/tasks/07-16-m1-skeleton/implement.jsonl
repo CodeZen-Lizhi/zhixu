@@ -1,0 +1,9 @@
+{"file": "docs/architecture/technology-stack.md", "reason": "M1 skeleton implementation source"}
+{"file": "docs/architecture/module-architecture.md", "reason": "M1 skeleton implementation source"}
+{"file": "docs/architecture/api-and-events.md", "reason": "M1 skeleton implementation source"}
+{"file": "docs/architecture/deployment.md", "reason": "M1 skeleton implementation source"}
+{"file": "docs/architecture/security.md", "reason": "M1 skeleton implementation source"}
+{"file": ".trellis/spec/backend/index.md", "reason": "M1 skeleton implementation source"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "M1 skeleton implementation source"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "M1 skeleton implementation source"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "M1 skeleton implementation source"}

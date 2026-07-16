@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-仓库当前只有产品和架构文档，没有 React 源码、前端 Manifest、Lockfile 或可执行前端测试。本目录只记录 `docs/` 已确认的设计约束，不虚构代码示例或依赖版本。M1 创建前端骨架后，必须用真实代码链接替换规划示例。
+M1 已创建 React/Vite/TypeScript 前端骨架、Manifest、Lockfile 和可执行测试。本目录只记录稳定约束，具体行为以 `web/` 真实代码和 API 契约为准。
 
 ## 已确认基线
 
@@ -13,7 +13,7 @@
 - 使用 Generated/Typed API Boundary、Domain UI Model、Feature Module 和共享 SSE Event Store。
 - SSE 通过 Last-Event-ID 单向更新；API 可查询状态才是事实源。
 - 支持键盘、可见焦点、非纯颜色状态和 Diff 文本说明。
-- Vitest、Testing Library 和 Playwright 是预期测试类型；版本和确切命令尚未锁定。
+- Vitest、Testing Library 和 Playwright 是测试类型；M1 已锁定 Vitest/Testing Library，浏览器烟测通过内置 Browser skill 执行。
 
 事实来源：`docs/architecture/frontend-architecture.md`、`docs/architecture/api-and-events.md`、`docs/architecture/technology-stack.md`、`docs/architecture/testing-and-evaluation.md`、`docs/product/PRD.md`。
 
@@ -26,7 +26,7 @@
 | [Hook 规范](./hook-guidelines.md) | Query、Command、URL 和 SSE Hook | Query Key Factory 和 Hook Test Harness |
 | [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | Cache Default 和持久化策略 |
 | [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | Compiler、Generator、Runtime Validator |
-| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 确切命令、工具、Coverage 和 Budget |
+| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | M1 命令已落地，Coverage/Budget 随业务模块补充 |
 
 ## 开发前检查清单
 
@@ -59,13 +59,19 @@ Feature 内部实现私有；Generated Wire Type 留在 API 边缘；SSE 只用�
 - Silent Error、Fake Success、无边界数据加载或仅颜色表达状态。
 - Browser Storage 保存 Secret 或受保护 Workflow 事实。
 
+## M1 真实实现入口
+
+- 前端入口与路由：[`web/src/main.tsx`](../../../web/src/main.tsx)、[`web/src/app`](../../../web/src/app)、[`web/src/routes`](../../../web/src/routes)。
+- API 边界与状态页面：[`web/src/api`](../../../web/src/api)、[`web/src/features/system-status`](../../../web/src/features/system-status)。
+- M1 Canonical Gate：`npm ci --prefix web`、`npm run lint --prefix web`、`npm run typecheck --prefix web`、`npm run test --prefix web`、`npm run build --prefix web`。
+
 ## 规范验证
 
-M1 创建可执行前端 Gate 前执行：
+持续执行：
 
 ```bash
 rg -n 'React|TypeScript|TanStack Query|React Router|SSE' docs/architecture/frontend-architecture.md docs/architecture/technology-stack.md
 git diff --check
 ```
 
-M1 后必须定义锁定安装、Lint、Type Check、Test、Build、Generated Client Drift、Accessibility 和 Browser Smoke 的 Canonical 命令，并用实际代码引用更新本索引。
+后续业务模块必须继续维护锁定安装、Lint、Type Check、Test、Build、Generated Client Drift、Accessibility 和 Browser Smoke 的 Canonical 命令，并用实际代码引用更新本索引。

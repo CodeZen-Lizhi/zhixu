@@ -62,7 +62,7 @@ flowchart TB
 
 - pgvector 扩展。
 - 健康检查。
-- Named Volume。
+- Named Volume；Compose 通过 `PGDATA=/var/lib/postgresql/data` 固定 PostgreSQL 18 数据目录。
 
 ### optional model
 
@@ -120,6 +120,9 @@ Worker Ready 需要：
 4. 默认值。
 
 Secret 不写配置导出。
+
+M1 Compose 不把密码直接拼接到 PostgreSQL URL；API/Worker 使用独立的
+`ZHIXU_DATABASE_HOST/PORT/NAME/USER/PASSWORD` 配置，由 Go 配置层负责安全构造连接字符串。
 
 ## 10. 升级
 
@@ -186,4 +189,3 @@ Secret 不写配置导出。
 - Kafka。
 - 独立 Redis 必需依赖。
 - 多区域复制。
-

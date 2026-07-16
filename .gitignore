@@ -15,7 +15,7 @@
 *.test
 *.out
 coverage.*
-vendor/
+# M1 Docker builds use the checked-in module vendor tree for reproducibility.
 
 # Node.js / frontend
 node_modules/

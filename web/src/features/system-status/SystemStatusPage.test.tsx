@@ -1,0 +1,75 @@
+import { fireEvent, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { renderWithAppProviders } from "../../test/render";
+import { SystemStatusPage } from "./SystemStatusPage";
+
+const jsonResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+
+describe("SystemStatusPage", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("先展示 loading，再展示真实 ready 状态", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse({
+        status: "ready",
+        version: "0.1.0",
+        database: { status: "ready" },
+        request_id: "request-ready",
+      }),
+    );
+
+    renderWithAppProviders(<SystemStatusPage />);
+
+    expect(screen.getByText("读取系统真实状态")).toBeInTheDocument();
+    expect(await screen.findByText("所有基础依赖可用")).toBeInTheDocument();
+    expect(screen.getByText("0.1.0")).toBeInTheDocument();
+    expect(screen.getByText("request-ready")).toBeInTheDocument();
+  });
+
+  it("数据库不可用时显示 degraded 和重试入口", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse({
+        status: "degraded",
+        version: "0.1.0",
+        database: { status: "unavailable", message: "数据库连接失败" },
+        request_id: "request-degraded",
+      }),
+    );
+
+    renderWithAppProviders(<SystemStatusPage />);
+
+    expect(await screen.findByText("API 可用，但数据库不可用")).toBeInTheDocument();
+    expect(screen.getByText("数据库连接失败")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled();
+  });
+
+  it("请求失败后允许用户重试并恢复", async () => {
+    vi.mocked(fetch)
+      .mockRejectedValueOnce(new TypeError("network down"))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          status: "ready",
+          version: "0.1.1",
+          database: { status: "ready" },
+          request_id: "request-retry",
+        }),
+      );
+
+    renderWithAppProviders(<SystemStatusPage />);
+
+    const retryButton = await screen.findByRole("button", { name: "重新检查" });
+    expect(screen.getByText("NETWORK_ERROR", { exact: false })).toBeInTheDocument();
+
+    fireEvent.click(retryButton);
+
+    expect(await screen.findByText("所有基础依赖可用")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});

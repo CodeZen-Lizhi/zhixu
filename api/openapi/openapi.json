@@ -1,0 +1,105 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ZHIXU API",
+    "version": "0.1.0",
+    "description": "M1 system status and readiness contract. Domain endpoints are added by later milestones."
+  },
+  "paths": {
+    "/livez": {
+      "get": {
+        "operationId": "getLiveness",
+        "responses": {
+          "200": {
+            "description": "The API process is responding.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Liveness" } } }
+          },
+          "405": {
+            "description": "The method is not supported.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "getReadiness",
+        "responses": {
+          "200": {
+            "description": "Configuration and PostgreSQL are ready.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } }
+          },
+          "503": {
+            "description": "A required dependency is unavailable.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "405": {
+            "description": "The method is not supported.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/system/status": {
+      "get": {
+        "operationId": "getSystemStatus",
+        "responses": {
+          "200": {
+            "description": "Current API and database status.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SystemStatus" } } }
+          },
+          "405": {
+            "description": "The method is not supported.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Liveness": {
+        "type": "object",
+        "required": ["status"],
+        "properties": { "status": { "const": "alive" } }
+      },
+      "Readiness": {
+        "type": "object",
+        "required": ["status"],
+        "properties": { "status": { "const": "ready" } }
+      },
+      "DatabaseStatus": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ready", "unavailable"] },
+          "message": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "SystemStatus": {
+        "type": "object",
+        "required": ["status", "version", "database", "request_id"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ready", "degraded"] },
+          "version": { "type": "string", "minLength": 1 },
+          "database": { "$ref": "#/components/schemas/DatabaseStatus" },
+          "request_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      },
+      "Problem": {
+        "type": "object",
+        "required": ["error_code", "message", "retryable"],
+        "properties": {
+          "error_code": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1 },
+          "retryable": { "type": "boolean" },
+          "workflow_run_id": { "type": "string" },
+          "details": { "type": "object", "additionalProperties": true }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

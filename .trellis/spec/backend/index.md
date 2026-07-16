@@ -1,16 +1,16 @@
 # 后端开发规范
 
-本目录是 Go API、Worker、领域模块、数据库、Adapter、Workflow 和可观测性实现的规范入口。仓库当前处于产品与架构设计阶段；规范引用的是已提交的产品/架构文档，真实代码示例和最终命令需在 M1 骨架完成后补充并以代码为准。
+本目录是 Go API、Worker、领域模块、数据库、Adapter、Workflow 和可观测性实现的规范入口。M1 已建立可运行骨架；后续业务模块必须继续遵守这里的边界，并以真实代码和任务验收结果为准。
 
 ## 规范索引
 
 | 规范 | 内容 | 当前状态 |
 |---|---|---|
-| [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | 已按架构文档建立；待 M1 代码验证 |
-| [数据库开发规范](./database-guidelines.md) | pgx/sqlc/Goose/River、查询、事务、迁移和约束 | 已按数据库设计建立；待 M1 迁移验证 |
-| [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已按 API/Workflow 契约建立；待 M1 代码验证 |
-| [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | 已按可观测性设计建立；待 M1 代码验证 |
-| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已按测试与评测架构建立；待 M1 CI 验证 |
+| [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
+| [数据库开发规范](./database-guidelines.md) | pgx/sqlc/Goose/River、查询、事务、迁移和约束 | M1 pgx 边界与基础迁移已验证；业务迁移待后续任务补充 |
+| [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | M1 Problem/Readiness 契约已验证；业务错误待后续任务补充 |
+| [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M1 slog/request_id 已验证；OTel/Audit 待后续任务补充 |
+| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已按测试与评测架构建立；M1 CI 已验证 |
 
 ## 开发前检查清单
 
@@ -53,8 +53,14 @@ git diff --check
 - 安全、日志、Trace、Metrics 和审计：[`security.md`](../../../docs/architecture/security.md)、[`observability.md`](../../../docs/architecture/observability.md)、[`tool-security.md`](../../../docs/architecture/tool-security.md)。
 - 测试与评测：[`docs/architecture/testing-and-evaluation.md`](../../../docs/architecture/testing-and-evaluation.md)。
 
+## M1 真实实现入口
+
+- API 入口与健康契约：[`cmd/api`](../../../cmd/api)、[`internal/app`](../../../internal/app)、[`api/openapi/openapi.json`](../../../api/openapi/openapi.json)。
+- Worker 与数据库边界：[`cmd/worker`](../../../cmd/worker)、[`internal/platform/postgres`](../../../internal/platform/postgres)、[`migrations`](../../../migrations)。
+- 配置、日志与部署：[`internal/platform/config`](../../../internal/platform/config)、[`internal/platform/observability`](../../../internal/platform/observability)、[`deploy`](../../../deploy)、[`Makefile`](../../../Makefile)。
+- M1 Canonical Gate：`make test`、`make openapi-check`、`make compose-check`、`make compose-up`。
+
 ## 当前明确待验证项
 
-- 目录、包名、迁移、manifest、lockfile、CI、Makefile、OpenAPI 和真实测试目前尚不存在。
-- 具体依赖版本、License、数据库逻辑 Schema 组织、中文 FTS 配置、向量维度、认证实现和 Eino Adapter 必须在对应 M1/M2 任务中通过仓库文件、PoC 和测试锁定。
+- 具体依赖版本、License、数据库逻辑 Schema 组织、中文 FTS 配置、向量维度、认证实现和 Eino Adapter 必须在对应 M2+ 任务中通过仓库文件、PoC 和测试锁定。
 - 本规范不提供伪造的实现代码、版本号、数据库字段长度或不存在的测试结果；M1 完成后应将真实文件链接补入各专题规范。

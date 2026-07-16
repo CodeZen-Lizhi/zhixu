@@ -1,0 +1,11 @@
+.git
+.github
+.trellis
+.env
+.env.*
+!.env.example
+web/node_modules
+web/dist
+coverage
+tmp
+*.log

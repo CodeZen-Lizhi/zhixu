@@ -1,10 +1,10 @@
 # 前端目录结构
 
-> 定义 M1 创建前端骨架前必须遵守的目录和依赖边界。
+> 定义前端骨架与后续 Feature 必须遵守的目录和依赖边界。
 
 ## 适用范围
 
-适用于 React + TypeScript Web 应用。仓库当前没有前端源码、包清单或生产组件，以下路径是依据 `docs/architecture/frontend-architecture.md` 提炼的设计约束，不代表已有实现，必须在 M1 创建应用后验证。
+适用于 React + TypeScript Web 应用。M1 已按以下边界创建 `web/` 骨架；后续 Feature 必须保持依赖方向稳定。
 
 ## 已确认事实
 

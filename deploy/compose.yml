@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.5-pg18-bookworm
+    environment:
+      POSTGRES_DB: ${ZHIXU_POSTGRES_DB:-zhixu}
+      POSTGRES_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
+      POSTGRES_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - zhixu-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: pgvector/pgvector:0.8.5-pg18-bookworm
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${ZHIXU_POSTGRES_DB:-zhixu}
+      POSTGRES_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
+      POSTGRES_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
+    volumes:
+      - ../migrations:/migrations:ro
+      - ./run-migrations.sh:/run-migrations.sh:ro
+    entrypoint: ["/bin/sh", "/run-migrations.sh"]
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
+      ZHIXU_HTTP_ADDR: 0.0.0.0:8080
+      ZHIXU_DATABASE_HOST: postgres
+      ZHIXU_DATABASE_PORT: 5432
+      ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
+      ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
+      ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
+      ZHIXU_WEB_ASSETS_DIR: /app/web
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${ZHIXU_HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/app/zhixu-worker"]
+    environment:
+      ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
+      ZHIXU_DATABASE_HOST: postgres
+      ZHIXU_DATABASE_PORT: 5432
+      ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
+      ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
+      ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: on-failure
+
+volumes:
+  zhixu-postgres:
