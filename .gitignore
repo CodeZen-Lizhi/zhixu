@@ -52,7 +52,13 @@ Thumbs.db
 
 # Test and tooling caches
 .cache/
+__pycache__/
+*.py[cod]
 .pytest_cache/
 .coverage
 playwright-report/
 test-results/
+
+# Local AI tooling and generated design outputs
+/.serena/
+/outputs/
