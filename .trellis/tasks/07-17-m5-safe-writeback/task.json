@@ -20,7 +20,8 @@
   "subtasks": [],
   "children": [
     "07-17-m5-writeback-persistence",
-    "07-17-m5-writeback-filesystem"
+    "07-17-m5-writeback-filesystem",
+    "07-17-m5-writeback-git"
   ],
   "parent": "07-16-product-delivery",
   "relatedFiles": [],

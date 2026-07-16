@@ -45,23 +45,30 @@
 | DB 显示 Applied，无 Commit | 验证文件；创建恢复 Proposal 或回退状态 |
 | Commit 后索引旧 | 重建索引 |
 | 临时文件未知 | 比较 Hash，不自动覆盖 |
+| Writeback Execution 无 Commit Mapping，但历史存在 exact `Zhixu-Writeback-ID` Commit | 验证完整 Trailer、parent、target、Blob/Result/Diff 后补 Mapping/Outbox；不得创建第二个 Commit |
+| `update-ref` 结果未知且 exact Commit 是 HEAD | 标记 recovered，保留 Commit，继续 DB reconcile；Reverse 还需校验并 `revert --quit` 清理预期 REVERT_HEAD |
+| `update-ref` 结果未知且 HEAD 仍为 approved、无 exact Commit | 仅当 target index 仍为系统 Result Blob 时恢复 Base index；随后由 Filesystem RestoreCAS 恢复文件 |
+| target index 已被用户再次 stage、存在其他 staged path 或 HEAD 已漂移 | 不覆盖 index/文件，进入 ManualRecoveryRequired 与 READ_ONLY_RECOVERY |
+| Commit 存在但 parent/path/blob/diff/trailer 不符或候选不唯一 | 视为一致性破坏；保留 ref/index/worktree 现场，禁止自动选择或补偿 |
 
 ## 5. 恢复步骤
 
 1. 导出诊断报告。
 2. 选择 Last Consistent Commit。
 3. 比较 Working Tree。
-4. 为外部编辑创建 Source/Revision。
-5. 重建 Published Revision 映射。
-6. 重放 Knowledge Event Projection。
-7. 标记 Stale Proposal。
-8. 重建受影响索引。
-9. 运行回归评测。
-10. 人工确认退出只读。
+4. 使用 `git log --no-show-signature` 在当前分支有界历史内按 Writeback ID + Operation 查找候选，并逐个验证 raw Commit 对象；禁止 replace/graft 语义。
+5. 为外部编辑创建 Source/Revision。
+6. 重建 Published Revision 映射与 Reindex Outbox。
+7. 重放 Knowledge Event Projection。
+8. 标记 Stale Proposal。
+9. 重建受影响索引。
+10. 运行回归评测。
+11. 人工确认退出只读。
 
 ## 6. 禁止
 
 - reset --hard。
+- checkout/switch、强制 update-ref、删除未知 Commit/backup/index 证据。
 - 强制覆盖用户文件。
 - 删除未知临时文件。
 - 手工修改 DB 状态但不留审计。
@@ -73,4 +80,3 @@
 - 默认检索只返回当前版本。
 - Proposal/Workflow 无假 Completed。
 - Audit 记录恢复操作。
-

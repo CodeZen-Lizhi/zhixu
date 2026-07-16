@@ -133,22 +133,29 @@ Adapter：
 
 职责：
 
-- Status。
-- Diff。
-- Commit。
+- Inspect clean/attached/approved HEAD。
+- DiffApproved。
+- CommitApproved / FindWritebackCommit。
 - CreateReverseCommit。
-- VerifyHead。
 
 约束：
 
-- 命令参数数组化。
-- 不提供 reset --hard。
-- Commit 必须关联 Proposal ID。
+- 只接受服务端 Workspace ID；canonical Git top-level 必须等于 Workspace root。
+- 命令参数数组化、literal pathspec、固定 config/env 和 bounded output；全局禁 Hook、replace object、签名展示、pager/editor/prompt。
+- 正式基线要求 attached branch、approved HEAD、全仓 clean、无 in-progress operation、无 hidden index flags、无 tracked content filter。
+- 目标必须是 approved HEAD 中已跟踪普通 blob；父链/目标不得是 symlink，原始字节、Result SHA-256、Blob OID 和稳定 Diff SHA-256 必须一致。
+- 批准内容使用 `hash-object -w --no-filters` 与受控 NUL index record raw-stage；不执行仓库 clean filter。
+- staged index 先 `write-tree` 固化并复核，Commit 通过 `commit-tree -p approved` 创建，最终使用 `update-ref <branch> <new> <approved>` old-value CAS 发布；不使用会接受漂移 parent/index 的普通 `git commit`。
+- Commit 必须关联 Writeback/Proposal/Revision/Approval/Workflow Run/Node，固定 subject/trailers，不接受调用方 message 或 Git args。
+- unknown result 先在当前分支可达历史最多 256 条内 exact lookup；无法证明发布/未发布时返回 ManualRecoveryRequired。
+- 不提供 reset/checkout/history rewrite/push/fetch/remote；Reverse 只在严格 clean/HEAD 前提下创建反向 Commit，不改写历史。
 
 Adapter：
 
 - Git CLI。
 - Fake Git。
+
+当前真实实现位于 `internal/platform/gitcli/writeback_inspect.go` 与 `writeback_commit.go`；领域端口位于 `internal/changecontrol/domain/git_repository.go`。v1 的本地协作边界仍不能阻止拥有仓库写权限的任意外部进程绕过服务锁，但 Adapter 会在 stage/tree/ref/恢复各阶段复核并拒绝覆盖用户新 staged 内容。
 
 ## 7. RetrievalEngine Interface
 

@@ -154,12 +154,15 @@ Write Authorization 必须一次性或幂等消费、短时有效，并严格绑
 
 Git 允许命令白名单：
 
-- status。
-- diff。
-- add 指定文件。
-- commit 固定参数。
-- show。
-- rev-parse。
+- `rev-parse`、`symbolic-ref`、`var`：canonical root、object format、branch、HEAD、author/committer identity 和 Git 内部 marker。
+- `status --porcelain=v2 -z`、`ls-files`、`ls-tree`、`check-attr`、`cat-file`：clean/index/path/blob/属性与真实 Commit 对象验证。
+- `diff` / `diff --cached` / `diff --check` / `merge-base --is-ancestor`：固定 binary/full-index/no-ext-diff/no-textconv/no-renames Diff 和历史 replay 验证。
+- `hash-object -w --no-filters`、`update-index -z --index-info`、`write-tree`：只 stage 批准 raw blob 并固化 immutable tree。
+- `commit-tree -p <approved> -F -`、`update-ref <branch> <new> <approved>`：固定 message 创建对象并以 expected-old CAS 发布。
+- `log --no-show-signature`：当前分支最多 256 条 exact Trailer recovery。
+- `revert --no-commit --no-edit`、`revert --quit`：严格反向 Commit 与非破坏性 operation marker 清理。
+
+统一禁止：shell、普通自由参数 `git commit`、任意 `git add` filter 路径、reset、checkout、switch、merge、rebase、cherry-pick、push、fetch、remote、branch 创建/切换、submodule/LFS 和 history rewrite。runner 清理继承的全部 `GIT_*`，设置 `GIT_NO_REPLACE_OBJECTS=1`，拒绝 legacy grafts，固定禁 Hook、GPG/signature program、external diff/textconv、pager/editor/prompt，并限制 stdout/stderr。
 
 ## 10. SSRF
 

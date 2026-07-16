@@ -60,6 +60,43 @@ func TestClientStatusReportsContainingRepositoryRoot(t *testing.T) {
 	}
 }
 
+func TestClientStatusIgnoresInheritedGitRepositoryRedirection(t *testing.T) {
+	root := initRepository(t)
+	redirected := initRepository(t)
+	t.Setenv("GIT_DIR", filepath.Join(redirected, ".git"))
+	t.Setenv("GIT_WORK_TREE", redirected)
+
+	status, err := New("").Status(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.RepositoryPath != root {
+		t.Fatalf("repository path = %q, want %q", status.RepositoryPath, root)
+	}
+}
+
+func TestClientInitializeIgnoresInheritedGitRepositoryRedirection(t *testing.T) {
+	root := t.TempDir()
+	redirected := initRepository(t)
+	t.Setenv("GIT_DIR", filepath.Join(redirected, ".git"))
+	t.Setenv("GIT_WORK_TREE", redirected)
+
+	status, err := New("").Initialize(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Present || status.RepositoryPath != canonicalRoot {
+		t.Fatalf("status = %#v", status)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
+		t.Fatalf("initialized repository metadata: %v", err)
+	}
+}
+
 func TestClientStatusClassifiesUnavailableCommand(t *testing.T) {
 	_, err := New(filepath.Join(t.TempDir(), "missing-git")).Status(context.Background(), t.TempDir())
 	var classified *foundation.Error
@@ -83,6 +120,27 @@ func TestClientStatusClassifiesCanceledContext(t *testing.T) {
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorRetryableFailure || classified.Code != "GIT_STATUS_TIMEOUT" || !classified.Retryable {
 		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestClientStatusRejectsTrackedFilterWithoutExecutingIt(t *testing.T) {
+	root := initRepository(t)
+	marker := filepath.Join(root, "filter-ran")
+	filter := writeExecutable(t, "#!/bin/sh\nprintf ran > "+marker+"\ncat\n")
+	if err := os.WriteFile(filepath.Join(root, ".git", "info", "attributes"), []byte("*.md filter=evil\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "config", "filter.evil.clean", filter)
+	runGit(t, root, "config", "filter.evil.smudge", filter)
+	runGit(t, root, "config", "filter.evil.required", "true")
+
+	_, err := New("").Status(context.Background(), root)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorPermissionDenied || classified.Code != "GIT_REPOSITORY_FILTER_UNSAFE" {
+		t.Fatalf("error = %#v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("filter ran or cannot be inspected: %v", err)
 	}
 }
 
@@ -112,4 +170,9 @@ func runGit(t *testing.T, root string, args ...string) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v: %s", args, err, output)
 	}
+}
+
+func isFoundationError(err error, code string) bool {
+	var classified *foundation.Error
+	return errors.As(err, &classified) && classified.Code == code
 }

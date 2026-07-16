@@ -93,10 +93,10 @@ type TargetLock interface {
 
 ```go
 type GitRepository interface {
-    Inspect(context.Context, string, string) (GitSnapshot, error)
+    Inspect(context.Context, foundation.ID, string) (GitSnapshot, error)
     DiffApproved(context.Context, GitDiffRequest) (GitDiff, error)
     CommitApproved(context.Context, GitCommitRequest) (GitCommit, error)
-    FindWritebackCommit(context.Context, string, foundation.ID) (GitCommit, error)
+    FindWritebackCommit(context.Context, GitCommitLookup) (GitCommit, error)
     CreateReverseCommit(context.Context, ReverseCommitRequest) (GitCommit, error)
 }
 ```

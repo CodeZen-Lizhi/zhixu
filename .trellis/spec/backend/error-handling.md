@@ -243,3 +243,70 @@ Correct: 返回 AppliedWrite + ManualRecoveryRequired → 先按 Base/Result Has
 Wrong: Parse Projection 已存在 → 直接返回所有 Chunk。
 Correct: Parse Projection 可共享，但查询/写入 Chunk 必须带 chunk_strategy_version + schema_version。
 ```
+
+## M5 Safe Writeback Git Code-Spec
+
+### 1. Scope / Trigger
+
+- Trigger：批准正文已通过文件 CAS，需要把唯一目标变更安全发布为 Git Commit，并在命令超时、进程取消或反向提交失败时恢复确定事实。
+- 目标：Workspace/HEAD、原始字节、Blob、Diff、Commit Trailer 和恢复行为保持同一不可变绑定；任何未知发布结果不得被上层当作“未提交”。
+
+### 2. Signatures
+
+```go
+type GitRepository interface {
+    Inspect(context.Context, foundation.ID, string) (GitSnapshot, error)
+    DiffApproved(context.Context, GitDiffRequest) (GitDiff, error)
+    CommitApproved(context.Context, GitCommitRequest) (GitCommit, error)
+    FindWritebackCommit(context.Context, GitCommitLookup) (GitCommit, error)
+    CreateReverseCommit(context.Context, ReverseCommitRequest) (GitCommit, error)
+}
+```
+
+`GitCommitLookupLimit` 固定为 256；调用方不能扩大为无界历史扫描。领域接口不暴露 Git CLI 参数、绝对路径或原始 stderr。
+
+### 3. Contracts
+
+- Workspace ID 由服务端 Repository 解析 canonical root，Git top-level 必须等于 Workspace root；正式操作要求 attached HEAD、approved HEAD、全仓 clean、无 hidden index flags 和进行中操作。
+- 目标必须是 approved HEAD 中的 tracked regular blob；结果原始字节同时绑定 Result SHA-256、raw Blob OID 和稳定 binary/full-index Diff SHA-256。
+- Git 发布固定为 `raw hash-object → controlled update-index → write-tree → immutable tree verify → commit-tree -p approved → update-ref expected-old CAS`，禁止 `git add`、普通 `git commit` 和仓库 filter/hook/signature program。
+- Commit Message/Trailer 只由领域绑定生成，Operation 区分 `apply/revert`；同一 Execution+Operation 的恢复必须验证 parent、target、blob、result、diff 和全部 Trailer。
+- 发布命令返回未知结果时使用独立、短时 context 在当前分支可达历史内查询；只有唯一 exact Commit 可返回 `Recovered=true`，否则进入 ManualRecoveryRequired。
+- ref 明确未发布时，只有当前 target index 仍为系统 Result Blob（或已为 Base）且不存在其他 staged path 才允许恢复 Base index；任何用户新 staged 内容都不得覆盖。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 稳定错误码 | 分类 | 自动动作 |
+|---|---|---|---|
+| repo 缺失/root mismatch/unborn/detached/HEAD drift | `GIT_REPOSITORY_NOT_FOUND` / `GIT_REPOSITORY_ROOT_MISMATCH` / `GIT_REPOSITORY_UNBORN` / `GIT_REPOSITORY_DETACHED` / `GIT_HEAD_CONFLICT` | NotFound / PermissionDenied / VersionConflict | 不产生 Git 副作用 |
+| staged/unstaged/untracked/conflict/hidden index flag/in-progress operation | `GIT_REPOSITORY_*` / `GIT_INDEX_FLAGS_UNSAFE` / `GIT_OPERATION_IN_PROGRESS` | VersionConflict / PermissionDenied | 拒绝批准或写回 |
+| tracked/target filter、transform/diff/merge 属性、replace/graft/hook/signature 边界不安全 | `GIT_REPOSITORY_FILTER_UNSAFE` / `GIT_TARGET_*_UNSAFE` / `GIT_OBJECT_OVERRIDES_UNSAFE` | PermissionDenied | 不执行仓库 filter/hook/gpg program |
+| Result/Blob/Diff/mode/index/tree 与批准绑定不符 | `GIT_*_CONFLICT` | VersionConflict | ref 未发布；只有能证明 index 仍是系统 Result 时才恢复 |
+| 同 Execution+Operation 候选多个或 raw Commit 内容冲突 | `GIT_COMMIT_LOOKUP_CONFLICT` / `GIT_COMMIT_*_CONFLICT` | ConsistencyViolation | direct lookup 拒绝选择 |
+| `update-ref`/Reverse 发布结果未知但 exact Commit 可验证且为当前/可达历史 | 返回 `Recovered=true` | 成功恢复 | 不重复 Commit；Reverse 幂等清理预期 REVERT_HEAD |
+| 发布结果未知且无法 exact 证明，或发布后 post-verify/quit 失败 | `GIT_COMMIT_RESULT_UNKNOWN` / `GIT_REVERSE_RESULT_UNKNOWN` / `GIT_*_POSTCONDITION_FAILED` | ManualRecoveryRequired | 保留 Commit/index/worktree/marker，禁止文件补偿 |
+| 明确未发布且 HEAD 仍为 approved，target index 仍为系统 Result | 原命令稳定错误码 | Retryable/NonRetryable | 恢复 Base index 后由 Saga 决定文件 RestoreCAS |
+| index 已被用户再次 stage、含其他 staged path 或 HEAD 漂移 | `GIT_INDEX_RECOVERY_FAILED` | ManualRecoveryRequired | 不覆盖用户 index/文件 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：`update-ref` 已成功但 runner 返回错误，exact Trailer 查询证明 Commit 为当前 HEAD 且完整绑定一致，返回 `Recovered=true` 并继续 DB reconcile。
+- Base：ref 明确未发布、HEAD 仍为 approved、index 仍是系统 Result Blob，安全恢复 Base index，再由 Saga 执行文件 RestoreCAS。
+- Bad：看到 `git commit`/`update-ref` 错误就直接重试、只按 Writeback ID 接受候选、覆盖用户新 staged blob，或在发布后验证失败时恢复文件。
+
+### 6. Tests Required
+
+- Domain：SHA-1/SHA-256 对象 ID、Operation、Trailer 单行值、Diff/Commit/Lookup/Reverse 完整绑定和 256 条查询上限。
+- Inspect/Diff：repo missing/root mismatch/unborn/detached/HEAD drift、dirty/staged/untracked/conflict、hidden index flags、特殊路径、filter/attribute、replace/graft 和 raw blob/diff hash。
+- Commit：Hook/GPG/signature/external diff 禁用、immutable tree staged-path 注入、update-ref old-value CAS、post-publish 完整验证和 replay。
+- Recovery/Reverse：publish success-then-error、无 exact 结果、用户再次 stage、ancestor replay、revert conflict/unknown、REVERT_HEAD 清理；并执行 `go test -race -count=20 ./internal/platform/gitcli`。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: git add target → git commit → 命令报错就再次提交或恢复文件。
+Correct: raw blob → controlled index → immutable tree → commit-tree → update-ref CAS；错误先 exact lookup，无法证明则 ManualRecoveryRequired。
+
+Wrong: index 当前含 target 就恢复 Base，默认它仍是系统 staged 内容。
+Correct: 先核对 target mode/blob、其他 staged path 和 HEAD；发现任何用户漂移都保留现场并转人工恢复。
+```

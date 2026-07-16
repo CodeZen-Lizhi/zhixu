@@ -3,7 +3,6 @@
 package gitcli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,7 +17,7 @@ import (
 
 const defaultExecutable = "git"
 
-// Client reads repository state through the Git CLI without changing files.
+// Client executes project-owned Git operations through the restricted CLI runner.
 type Client struct {
 	executable string
 }
@@ -67,6 +66,13 @@ func (c Client) Status(ctx context.Context, rootPath string) (domain.GitStatus, 
 		}
 		head = ""
 	}
+	unsafeFilter, err := c.hasTrackedContentFilter(ctx, rootPath)
+	if err != nil {
+		return domain.GitStatus{}, classify("GIT_STATUS_FAILED", err)
+	}
+	if unsafeFilter {
+		return domain.GitStatus{}, foundation.NewError(foundation.ErrorPermissionDenied, "GIT_REPOSITORY_FILTER_UNSAFE", false, errors.New("tracked content filter is not allowed"))
+	}
 	porcelain, err := c.outputBytes(ctx, rootPath, "status", "--porcelain=v1", "-z", "--untracked-files=normal")
 	if err != nil {
 		return domain.GitStatus{}, classify("GIT_STATUS_FAILED", err)
@@ -94,7 +100,7 @@ func (c Client) Initialize(ctx context.Context, rootPath string) (domain.GitStat
 	if status.Present {
 		return status, nil
 	}
-	if _, err := c.output(ctx, rootPath, "init"); err != nil {
+	if _, err := c.runCommand(ctx, rootPath, commandOptions{}, "init"); err != nil {
 		return domain.GitStatus{}, classify("GIT_INITIALIZE_FAILED", err)
 	}
 	status, err = c.Status(ctx, rootPath)
@@ -113,38 +119,13 @@ func (c Client) output(ctx context.Context, rootPath string, args ...string) (st
 }
 
 func (c Client) outputBytes(ctx context.Context, rootPath string, args ...string) ([]byte, error) {
-	commandArgs := []string{
-		"-c", "core.fsmonitor=false",
-		"-c", "core.untrackedCache=false",
-		"-C", rootPath,
-	}
-	commandArgs = append(commandArgs, args...)
-	command := exec.CommandContext(ctx, c.executable, commandArgs...)
-	command.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = ctxErr
-		}
-		return nil, &commandError{err: err, stderr: strings.TrimSpace(stderr.String())}
-	}
-	return stdout.Bytes(), nil
+	result, err := c.runCommand(ctx, rootPath, commandOptions{ReadOnly: true}, args...)
+	return result.Stdout, err
 }
-
-type commandError struct {
-	err    error
-	stderr string
-}
-
-func (e *commandError) Error() string { return "git command failed" }
-func (e *commandError) Unwrap() error { return e.err }
 
 func isMissingRepository(err error) bool {
 	var commandErr *commandError
-	return errors.As(err, &commandErr) && strings.Contains(commandErr.stderr, "not a git repository")
+	return errors.As(err, &commandErr) && strings.Contains(commandErr.Stderr(), "not a git repository")
 }
 
 func isUnknownRevision(err error) bool {
@@ -152,23 +133,34 @@ func isUnknownRevision(err error) bool {
 	if !errors.As(err, &commandErr) {
 		return false
 	}
-	return strings.Contains(commandErr.stderr, "Needed a single revision") || strings.Contains(commandErr.stderr, "unknown revision")
+	return strings.Contains(commandErr.Stderr(), "Needed a single revision") || strings.Contains(commandErr.Stderr(), "unknown revision")
 }
 
 func isExitCode(err error, code int) bool {
+	var commandErr *commandError
+	if errors.As(err, &commandErr) {
+		return commandErr.ExitCode() == code
+	}
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr) && exitErr.ExitCode() == code
 }
 
 func classify(code string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return foundation.NewError(foundation.ErrorRetryableFailure, "GIT_STATUS_TIMEOUT", true, err)
+		return foundation.NewError(foundation.ErrorRetryableFailure, commandContextCode(code), true, err)
 	}
 	var pathErr *exec.Error
 	if errors.As(err, &pathErr) || errors.Is(err, os.ErrNotExist) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, "GIT_COMMAND_UNAVAILABLE", false, err)
 	}
 	return foundation.NewError(foundation.ErrorNonRetryableFailure, code, false, err)
+}
+
+func commandContextCode(code string) string {
+	if strings.HasSuffix(code, "_FAILED") {
+		return strings.TrimSuffix(code, "_FAILED") + "_TIMEOUT"
+	}
+	return "GIT_COMMAND_TIMEOUT"
 }
 
 var _ domain.GitStatusReader = Client{}

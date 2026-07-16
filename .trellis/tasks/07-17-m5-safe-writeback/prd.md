@@ -38,7 +38,7 @@
 
 - 写回前要求 Git 仓库存在、非 detached、HEAD 等于 Approval 基线、工作树和 index 干净。
 - 文件替换后只允许目标路径发生变化；执行 path-scoped `git diff --check`，验证目标新 Blob Hash/内容与批准 Revision 一致。
-- 只 `git add -- <target>`，使用固定 Commit Message 和 Trailer（Proposal/Approval/Workflow/Writeback ID）；禁止 shell 拼接、Hook、push、reset、checkout 和任意参数。
+- 只将批准 raw blob 通过受控 index record stage，使用 immutable tree + `commit-tree` + `update-ref expected-old` CAS 发布固定 Commit Message/Trailer（Proposal/Approval/Workflow/Writeback ID）；禁止仓库 filter、shell 拼接、Hook、push、reset、checkout 和任意参数。
 - Commit 超时或结果未知时必须先按 Trailer/HEAD/Commit 内容判定，禁止盲目重复 Commit。
 - 自动反向 Commit 只允许在 HEAD 仍等于系统生成 Commit 且工作区干净时执行；否则进入人工恢复。用户主动回滚仍需新 Proposal + Approval。
 
@@ -60,9 +60,9 @@
 
 ## Acceptance Criteria
 
-- [ ] Approval Git HEAD、Proposal 乐观锁、Writeback Execution、Commit Mapping、Index Request/Outbox 和状态约束有前向迁移与真实 PostgreSQL 集成测试。
-- [ ] Filesystem Adapter 覆盖跨进程目标锁、temp/validate/fsync、最终 CAS、原子替换、备份恢复、路径/symlink/特殊文件和并发外部编辑。
-- [ ] Git Adapter 覆盖 clean/dirty/staged/untracked/detached、HEAD drift、path-scoped Diff、固定 Commit/Trailer、未知结果判定、重复提交和安全反向 Commit。
+- [x] Approval Git HEAD、Proposal 乐观锁、Writeback Execution、Commit Mapping、Index Request/Outbox 和状态约束有前向迁移与真实 PostgreSQL 集成测试。
+- [x] Filesystem Adapter 覆盖跨进程目标锁、temp/validate/fsync、最终 CAS、原子替换、备份恢复、路径/symlink/特殊文件和并发外部编辑。
+- [x] Git Adapter 覆盖 clean/dirty/staged/untracked/detached、HEAD drift、path-scoped Diff、固定 Commit/Trailer、未知结果判定、重复提交和安全反向 Commit。
 - [ ] Application/Saga 在任何副作用前建立 Durable Operation，严格消费双授权，并对重复投递、崩溃恢复和补偿保持幂等。
 - [ ] Commit 与 Proposal/Revision/Approval/Workflow/Writeback 双向可查，Git Commit 后的 DB Publish 与索引 Outbox 原子落库。
 - [ ] M5-04 不创建猜测 Retrieval Schema，不把 `index_pending` 返回为完成；Proposal 只推进到 `verifying`。
