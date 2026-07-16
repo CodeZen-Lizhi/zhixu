@@ -78,6 +78,8 @@ make web-lint web-typecheck web-test web-build
 make openapi-check compose-check docker-build
 ```
 
+The isolated Eino adoption gate is available under `poc/eino` and is included in `make test`. The current decision is not to adopt Eino formally because several real integration gates and the provider smoke remain incomplete; see `poc/eino/report.md`.
+
 ## Documentation
 
 - [Documentation index](docs/README.md)

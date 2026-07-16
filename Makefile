@@ -1,8 +1,8 @@
 SHELL := /bin/sh
 
-.PHONY: test go-test go-vet web-install web-lint web-typecheck web-test web-build openapi-check compose-check docker-build compose-up compose-down
+.PHONY: test go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke openapi-check compose-check docker-build compose-up compose-down
 
-test: go-test go-vet web-lint web-typecheck web-test web-build openapi-check compose-check
+test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet openapi-check compose-check
 
 go-test:
 	go test ./cmd/... ./internal/...
@@ -24,6 +24,15 @@ web-test:
 
 web-build:
 	npm run build --prefix web
+
+eino-test:
+	cd poc/eino && go test -race ./...
+
+eino-vet:
+	cd poc/eino && go vet ./...
+
+eino-live-smoke:
+	cd poc/eino && go test -run TestOpenAICompatibleChatSmoke -v ./live
 
 openapi-check:
 	node api/openapi/check.mjs

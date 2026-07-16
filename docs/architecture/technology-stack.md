@@ -59,6 +59,8 @@ PDF 抽取作为 Adapter，因为纯 Go PDF 文本库质量和布局兼容性可
 
 Eino 不是当前已锁定依赖。只有 [ADR-0013](adr/0013-eino-adoption-gate.md) 定义的 PoC 全部通过后，才在项目 Manifest、Lockfile 和 CI 中锁定经验证版本；PoC 失败则继续使用直接 OpenAI-Compatible Adapter。
 
+M2 已在独立 `poc/eino` module 中验证 Eino `v0.9.12` 的 Chat Graph、ToolsNode、Callback 以及 OpenAI 扩展 `v0.1.13` 的编译/配置边界，但 Streaming、Structured Output、Embedding/Retriever/Rerank、River Node 和真实 Provider Smoke 门禁尚未全部通过。因此当前结论为“不正式采用”，主模块继续保留直接 OpenAI-Compatible Adapter 路线。详见 [`poc/eino/report.md`](../../poc/eino/report.md)。
+
 领域模型、Workflow 持久化与状态机、Proposal/Approval、Tool Permission 和 Write Authorization 不得依赖 Eino 类型或运行时。核心同样不依赖 LangChain；第三方 AI Framework 只能位于 Agent/Application 编排边缘或 Adapter/Infrastructure，且必须通过项目 Interface 隔离。
 
 ## 6. 前端

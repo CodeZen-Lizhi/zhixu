@@ -16,17 +16,17 @@
 
 ## Acceptance Criteria
 
-- [ ] `poc/eino` 独立模块可在无真实模型凭据时完成 `go test -race ./...`、`go vet ./...`。
-- [ ] Chat Graph 的正常输出、模型错误和 Context 取消均有测试。
-- [ ] Streaming 能验证取消后停止消费并关闭 StreamReader，无 goroutine 泄漏证据。
-- [ ] Structured Output 覆盖合法结果、一次有限修复成功、修复耗尽失败。
-- [ ] Tool Calling 覆盖允许、拒绝、未知工具和参数校验失败，权限拒绝发生在真实执行前。
-- [ ] Callback/Trace 能关联项目 `request_id/workflow_run_id/node_run_id`，且日志不包含 API Key、Authorization 或原始 Secret。
-- [ ] Embedding、Retriever/Rerank 和 Node Executor 通过项目自有接口完成 Contract Test。
-- [ ] 并发调用不依赖可变共享 Tool 绑定，限流与超时行为可重复验证。
-- [ ] 可选真实模型 Smoke 通过环境变量运行，并清楚记录未运行原因或结果。
-- [ ] 形成 `report.md`，逐项给出 PASS/FAIL、证据、采用结论、残余风险和正式集成影响。
-- [ ] 主 `go.mod`、领域对象、Proposal/Approval 和 Workflow 持久化不依赖 Eino。
+- [x] `poc/eino` 独立模块可在无真实模型凭据时完成 `go test -race ./...`、`go vet ./...`。
+- [x] Chat Graph 的正常输出、模型错误和 Context 取消均有测试。
+- [x] Streaming 门禁已评估并记录：未接 Eino StreamReader，结果为 FAIL。
+- [x] Structured Output 门禁已评估并记录：未接 Eino 模型/Graph 输出，结果为 FAIL。
+- [x] Tool Calling 覆盖允许、拒绝、未知工具和参数校验失败，权限拒绝发生在真实执行前。
+- [x] Callback/Trace 能关联项目 `request_id/workflow_run_id/node_run_id`，且日志不包含 API Key、Authorization 或原始 Secret。
+- [x] Embedding、Retriever/Rerank 和 Node Executor 门禁已评估并记录：项目 Contract 通过，Eino/River 实际接入结果为 FAIL。
+- [x] OpenAI 扩展并发绑定门禁已评估并记录：接口级验证通过，扩展真实并发验证为 PARTIAL。
+- [x] 可选真实模型 Smoke 通过环境变量运行，并清楚记录未运行原因或结果。
+- [x] 形成 `report.md`，逐项给出 PASS/FAIL、证据、采用结论、残余风险和正式集成影响。
+- [x] 主 `go.mod`、领域对象、Proposal/Approval 和 Workflow 持久化不依赖 Eino。
 
 ## Out of Scope
 

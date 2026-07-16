@@ -59,6 +59,7 @@ git diff --check
 - Worker 与数据库边界：[`cmd/worker`](../../../cmd/worker)、[`internal/platform/postgres`](../../../internal/platform/postgres)、[`migrations`](../../../migrations)。
 - 配置、日志与部署：[`internal/platform/config`](../../../internal/platform/config)、[`internal/platform/observability`](../../../internal/platform/observability)、[`deploy`](../../../deploy)、[`Makefile`](../../../Makefile)。
 - M1 Canonical Gate：`make test`、`make openapi-check`、`make compose-check`、`make compose-up`。
+- M2 Eino 隔离门禁：[`poc/eino`](../../../poc/eino)，当前门禁结论为不正式采用，主模块继续使用直接 Adapter 路线。
 
 ## 当前明确待验证项
 

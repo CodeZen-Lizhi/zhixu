@@ -6,6 +6,7 @@
 !.env.example
 web/node_modules
 web/dist
+poc
 coverage
 tmp
 *.log
