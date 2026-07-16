@@ -270,3 +270,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: M5-04A Safe Writeback Persistence
+
+**Date**: 2026-07-17
+**Task**: M5-04A Safe Writeback Persistence
+**Branch**: `dev`
+
+### Summary
+
+完成 Approval Git HEAD、Proposal 乐观锁、Durable Writeback Execution、Commit Mapping 与 Reindex Outbox；真实 PostgreSQL、全仓 race/vet、make test、Compose readiness 均通过。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `39565ea` | (see git log) |
+| `f53e95b` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
