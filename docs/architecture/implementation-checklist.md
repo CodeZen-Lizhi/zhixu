@@ -29,12 +29,12 @@
 
 ## Workflow
 
-- [ ] Definition Registry。
-- [ ] Run/Node 状态机。
-- [ ] Lease/Heartbeat。
+- [x] Definition Registry（最小版本化 Definition）。
+- [x] Run/Node 状态机（最小持久化状态与约束）。
+- [x] Lease/Heartbeat（领取、续租和过期回收）。
 - [ ] Retry/Backoff。
-- [ ] Human Task。
-- [ ] Idempotency。
+- [x] Human Task（单次、版本校验与过期拒绝）。
+- [x] Idempotency（Definition、Node Completion 与 Outbox event key）。
 - [ ] Compensation。
 
 ## Ingestion/Retrieval

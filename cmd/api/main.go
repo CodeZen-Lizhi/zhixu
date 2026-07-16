@@ -18,6 +18,9 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/webassets"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
+	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
+	workflowhttp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/http"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
@@ -56,6 +59,7 @@ func main() {
 	}
 
 	workspaceHandler := workspacehttp.NewHandler(nil)
+	workflowHandler := workflowhttp.NewHandler(nil)
 	if database != nil {
 		repository, repositoryErr := workspacepostgres.NewRepository(database.DB())
 		if repositoryErr != nil {
@@ -71,6 +75,17 @@ func main() {
 			})
 			workspaceHandler = workspacehttp.NewHandler(workspaceService)
 		}
+		workflowRepository, workflowRepositoryErr := workflowpostgres.NewRepository(database.DB())
+		if workflowRepositoryErr != nil {
+			logger.Error("workflow repository is unavailable", "error_code", "WORKFLOW_DATABASE_UNAVAILABLE")
+		} else {
+			workflowService, workflowServiceErr := workflowapplication.NewService(workflowRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+			if workflowServiceErr != nil {
+				logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
+			} else {
+				workflowHandler = workflowhttp.NewHandler(workflowService)
+			}
+		}
 	}
 
 	deps := app.Dependencies{
@@ -81,6 +96,7 @@ func main() {
 		PingTimeout:       cfg.DatabasePingTimeout,
 		Static:            static,
 		Workspace:         workspaceHandler,
+		Workflow:          workflowHandler,
 		Logger:            logger,
 	}
 	server := &http.Server{

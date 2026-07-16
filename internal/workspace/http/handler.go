@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 
@@ -149,16 +148,7 @@ func toWorkspaceResponse(result application.WorkspaceResult) workspaceResponse {
 }
 
 func decodeJSON(r *http.Request, target any) error {
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return foundation.NewError(foundation.ErrorInvalidInput, "INVALID_JSON", false, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return foundation.NewError(foundation.ErrorInvalidInput, "INVALID_JSON", false, errors.New("request body contains multiple JSON values"))
-		}
+	if err := httpapi.DecodeJSON(r, target); err != nil {
 		return foundation.NewError(foundation.ErrorInvalidInput, "INVALID_JSON", false, err)
 	}
 	return nil

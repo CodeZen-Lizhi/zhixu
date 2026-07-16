@@ -105,6 +105,56 @@
           "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
         }
       }
+    },
+    "/api/v1/workspaces/{workspace_id}/workflows": {
+      "parameters": [
+        { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      ],
+      "post": {
+        "operationId": "startWorkflow",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StartWorkflowRequest" } } } },
+        "responses": {
+          "202": { "description": "Durable Workflow Run accepted; completion is not implied.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowStart" } } } },
+          "400": { "description": "Invalid Workflow definition or input.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "Definition version or workflow state conflict.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Workflow dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
+    "/api/v1/workflows/{run_id}": {
+      "parameters": [
+        { "name": "run_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "get": {
+        "operationId": "getWorkflowRun",
+        "responses": {
+          "200": { "description": "Current durable Workflow Run state.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowRun" } } } },
+          "400": { "description": "Invalid Run ID.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "Workflow Run not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Workflow dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
+    "/api/v1/workflows/{run_id}/human-tasks/{task_id}/decision": {
+      "parameters": [
+        { "name": "run_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "task_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "post": {
+        "operationId": "submitHumanDecision",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HumanDecisionRequest" } } } },
+        "responses": {
+          "200": { "description": "Human Task submitted once and Workflow resumed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HumanTask" } } } },
+          "400": { "description": "Invalid decision contract.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "Human Task not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "Task already resolved, expired or version-conflicted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Workflow dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
     }
   },
   "components": {
@@ -196,6 +246,70 @@
           "workspace_id": { "type": "string", "format": "uuid" },
           "files": { "type": "array", "items": { "$ref": "#/components/schemas/ScannedFile" } },
           "count": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      },
+      "StartWorkflowRequest": {
+        "type": "object",
+        "required": ["definition_key", "definition_version", "graph", "input", "first_node_key", "first_node_type"],
+        "properties": {
+          "definition_key": { "type": "string", "minLength": 1 },
+          "definition_version": { "type": "integer", "minimum": 1 },
+          "graph": { "type": "object", "additionalProperties": true },
+          "input": {},
+          "first_node_key": { "type": "string", "minLength": 1 },
+          "first_node_type": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowStart": {
+        "type": "object",
+        "required": ["workflow_run_id", "status", "status_url"],
+        "properties": {
+          "workflow_run_id": { "type": "string", "format": "uuid" },
+          "status": { "const": "pending" },
+          "status_url": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowRun": {
+        "type": "object",
+        "required": ["id", "workspace_id", "definition_id", "status", "input", "version", "created_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "definition_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["pending", "running", "waiting_for_human", "succeeded", "failed", "cancelled"] },
+          "input": {},
+          "output": {},
+          "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "completed_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "HumanDecisionRequest": {
+        "type": "object",
+        "required": ["workspace_id", "target_version", "decision"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "target_version": { "type": "integer", "minimum": 1 },
+          "decision": { "type": "object", "additionalProperties": true }
+        },
+        "additionalProperties": false
+      },
+      "HumanTask": {
+        "type": "object",
+        "required": ["id", "run_id", "node_run_id", "status", "target_version"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "run_id": { "type": "string", "format": "uuid" },
+          "node_run_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["pending", "submitted", "expired", "cancelled"] },
+          "target_version": { "type": "integer", "minimum": 1 },
+          "decision": { "type": "object", "additionalProperties": true },
+          "submitted_at": { "type": "string", "format": "date-time" }
         },
         "additionalProperties": false
       },

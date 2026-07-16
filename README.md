@@ -70,6 +70,9 @@ Then open <http://127.0.0.1:8080>. Health and dependency status are available at
 - `POST /api/v1/workspaces`: create the single active Workspace and record its Git baseline
 - `GET /api/v1/workspaces/{id}`: reopen the persisted Workspace
 - `POST /api/v1/workspaces/{id}/scan`: scan supported files and register immutable Source Version metadata
+- `POST /api/v1/workspaces/{id}/workflows`: start a durable Workflow Run and return `202 + workflow_run_id`
+- `GET /api/v1/workflows/{id}`: query durable Workflow Run state
+- `POST /api/v1/workflows/{run_id}/human-tasks/{task_id}/decision`: submit one version-checked Human Task decision
 
 Stop the stack and remove its local database volume:
 

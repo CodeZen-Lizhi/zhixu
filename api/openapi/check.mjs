@@ -12,6 +12,9 @@ const requiredOperations = [
   ["/api/v1/workspaces", "post", "201"],
   ["/api/v1/workspaces/{workspace_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/scan", "post", "200"],
+  ["/api/v1/workspaces/{workspace_id}/workflows", "post", "202"],
+  ["/api/v1/workflows/{run_id}", "get", "200"],
+  ["/api/v1/workflows/{run_id}/human-tasks/{task_id}/decision", "post", "200"],
 ];
 for (const [path, method, successResponse] of requiredOperations) {
   const operation = document.paths?.[path]?.[method];
@@ -31,6 +34,11 @@ for (const schema of [
   "CreateWorkspaceRequest",
   "Workspace",
   "WorkspaceScan",
+  "StartWorkflowRequest",
+  "WorkflowStart",
+  "WorkflowRun",
+  "HumanDecisionRequest",
+  "HumanTask",
   "Problem",
 ]) {
   if (!document.components?.schemas?.[schema]) throw new Error(`missing schema ${schema}`);

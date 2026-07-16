@@ -3,6 +3,8 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 )
 
@@ -25,4 +27,21 @@ func WriteJSON(w http.ResponseWriter, status int, value any) {
 // WriteProblem 写入统一 Problem 错误响应。
 func WriteProblem(w http.ResponseWriter, status int, code, message string, retryable bool, details map[string]any) {
 	WriteJSON(w, status, Problem{ErrorCode: code, Message: message, Retryable: retryable, Details: details})
+}
+
+// DecodeJSON 读取有大小上限且只允许一个 JSON 值的请求体。
+func DecodeJSON(r *http.Request, target any) error {
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("request body contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
