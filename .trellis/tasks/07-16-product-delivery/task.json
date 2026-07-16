@@ -21,7 +21,8 @@
   "children": [
     "07-16-m0-foundation",
     "07-16-m0-contracts",
-    "07-16-m1-skeleton"
+    "07-16-m1-skeleton",
+    "07-16-m2-eino-poc"
   ],
   "parent": null,
   "relatedFiles": [],

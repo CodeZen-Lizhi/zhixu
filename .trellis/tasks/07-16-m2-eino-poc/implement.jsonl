@@ -1,0 +1,7 @@
+{"file":"docs/architecture/adr/0013-eino-adoption-gate.md","reason":"Eino adoption gate"}
+{"file":"docs/architecture/technology-stack.md","reason":"AI dependency boundary"}
+{"file":"docs/architecture/interfaces-and-adapters.md","reason":"Project-owned adapter contracts"}
+{"file":"docs/architecture/workflow-engine.md","reason":"Workflow ownership and node integration"}
+{"file":"docs/architecture/tool-security.md","reason":"Tool permission and write authorization"}
+{"file":"docs/architecture/observability.md","reason":"Callback and trace requirements"}
+{"file":".trellis/spec/backend/index.md","reason":"Go implementation conventions"}

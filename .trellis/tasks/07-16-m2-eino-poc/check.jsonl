@@ -1,0 +1,5 @@
+{"file":"docs/architecture/adr/0013-eino-adoption-gate.md","reason":"Verify every adoption gate"}
+{"file":"docs/architecture/interfaces-and-adapters.md","reason":"Verify framework type isolation"}
+{"file":"docs/architecture/tool-security.md","reason":"Verify tool permission isolation"}
+{"file":"docs/architecture/observability.md","reason":"Verify trace and secret handling"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify Go quality gates"}
