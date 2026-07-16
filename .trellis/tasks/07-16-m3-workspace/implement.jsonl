@@ -1,0 +1,8 @@
+{"file":"docs/product/PRD.md","reason":"Workspace requirements and AC-01"}
+{"file":"docs/architecture/domain-model.md","reason":"Workspace aggregate and invariants"}
+{"file":"docs/architecture/data-architecture.md","reason":"Source version and filesystem source of truth"}
+{"file":"docs/architecture/interfaces-and-adapters.md","reason":"WorkspaceStore and adapter boundaries"}
+{"file":"docs/architecture/security.md","reason":"Path traversal and workspace boundary"}
+{"file":"docs/architecture/workflows/01-ingestion-and-organization.md","reason":"Scan and source version flow"}
+{"file":".trellis/spec/backend/index.md","reason":"Backend coding conventions"}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend coding conventions"}

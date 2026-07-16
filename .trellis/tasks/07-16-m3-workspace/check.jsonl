@@ -1,0 +1,6 @@
+{"file":"docs/product/PRD.md","reason":"Verify Workspace acceptance criteria"}
+{"file":"docs/architecture/domain-model.md","reason":"Verify aggregate invariants"}
+{"file":"docs/architecture/security.md","reason":"Verify path security"}
+{"file":"docs/architecture/database-design.md","reason":"Verify persistence constraints"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Backend quality gate"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Frontend quality gate"}
