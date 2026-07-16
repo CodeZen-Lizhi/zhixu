@@ -54,6 +54,10 @@ make test
 
 Start the complete local stack. `.env.example` contains development-only values and must not be used as production secrets.
 
+Docker Compose mounts `ZHIXU_WORKSPACE_ROOT` into the containers at `/workspace`.
+Create that host directory first, or override the value in a local `.env`; the
+Workspace form should use `/workspace` when running through Compose.
+
 ```bash
 make compose-up
 ```
@@ -63,6 +67,9 @@ Then open <http://127.0.0.1:8080>. Health and dependency status are available at
 - `GET /livez`: process liveness
 - `GET /readyz`: readiness including PostgreSQL connectivity
 - `GET /api/v1/system/status`: API and database status used by the web page
+- `POST /api/v1/workspaces`: create the single active Workspace and record its Git baseline
+- `GET /api/v1/workspaces/{id}`: reopen the persisted Workspace
+- `POST /api/v1/workspaces/{id}/scan`: scan supported files and register immutable Source Version metadata
 
 Stop the stack and remove its local database volume:
 

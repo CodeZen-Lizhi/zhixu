@@ -1,10 +1,10 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
-import { SystemStatusPage } from "../features/system-status/SystemStatusPage";
+import { WorkspacePage } from "../features/workspace/WorkspacePage";
 
 export const AppRoutes = () => (
   <Routes>
-    <Route path="/" element={<SystemStatusPage />} />
+    <Route path="/" element={<WorkspacePage />} />
     <Route path="*" element={<Navigate to="/" replace />} />
   </Routes>
 );

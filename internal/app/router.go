@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -33,6 +34,7 @@ type Dependencies struct {
 	DatabaseInitErr   error
 	PingTimeout       time.Duration
 	Static            http.Handler
+	Workspace         *workspacehttp.Handler
 	Logger            *slog.Logger
 }
 
@@ -66,6 +68,9 @@ func NewRouter(deps Dependencies) http.Handler {
 		api.Get("/system/status", func(w http.ResponseWriter, r *http.Request) {
 			handleSystemStatus(w, r, deps)
 		})
+		if deps.Workspace != nil {
+			deps.Workspace.Routes(api)
+		}
 		api.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 			writeProblem(w, http.StatusNotFound, "NOT_FOUND", "请求的 API 资源不存在", false, nil)
 		})

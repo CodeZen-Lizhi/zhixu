@@ -2,25 +2,25 @@
 
 ## Foundation
 
-- [ ] 初始化 Go Module、API、Worker。
-- [ ] 初始化 React/TypeScript。
-- [ ] Docker Compose PostgreSQL + pgvector。
-- [ ] 配置与 Secret。
-- [ ] 统一 ID、Clock、Error。
-- [ ] CI 基线。
+- [x] 初始化 Go Module、API、Worker。
+- [x] 初始化 React/TypeScript。
+- [x] Docker Compose PostgreSQL + pgvector。
+- [x] 配置与 Secret。
+- [x] 统一 ID、Clock、Error。
+- [x] CI 基线。
 
 ## Workspace
 
-- [ ] Workspace 创建校验。
-- [ ] 安全路径解析。
-- [ ] Source Version Hash。
-- [ ] 文件扫描。
-- [ ] Git CLI Adapter。
-- [ ] 一致性检查。
+- [x] Workspace 创建校验。
+- [x] 安全路径解析。
+- [x] Source Version Hash。
+- [x] 文件扫描。
+- [x] Git CLI Adapter。
+- [x] 一致性检查。
 
 ## Database
 
-- [ ] Core Migration。
+- [x] Core Migration。
 - [ ] Workflow/Outbox Migration。
 - [ ] Retrieval Migration。
 - [ ] Review/Health Migration。
@@ -85,9 +85,9 @@
 
 ## Application
 
-- [ ] REST/OpenAPI。
+- [x] REST/OpenAPI（Workspace 创建、详情和扫描；其余领域接口待后续阶段）。
 - [ ] SSE。
-- [ ] Dashboard。
+- [x] Dashboard（M1 系统状态与 M3 Workspace 页面基础）。
 - [ ] Inbox/Document。
 - [ ] Diff/Approval。
 - [ ] Graph UI。
@@ -103,5 +103,4 @@
 - [ ] Capacity Test。
 - [ ] Backup/Restore Drill。
 - [ ] Consistency Recovery Drill。
-- [ ] Docker Smoke。
-
+- [x] Docker Smoke（M1 基线与 M3 Workspace 业务烟测）。

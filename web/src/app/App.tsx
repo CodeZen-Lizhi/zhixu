@@ -7,9 +7,9 @@ export const App = () => (
     <main className="app-shell">
       <header className="hero">
         <p className="brand-mark">知序 · ZHIXU</p>
-        <h1>让知识的运行状态，一眼可知。</h1>
+        <h1>把本地知识，接入一条可信链路。</h1>
         <p className="hero-copy">
-          本页直接读取后端状态，不使用静态数据或假成功结果。
+          创建 Workspace、检查 Git 基线，并安全扫描真实文件；所有状态均来自后端与本地事实源。
         </p>
       </header>
       <AppRoutes />

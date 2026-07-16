@@ -14,7 +14,8 @@ RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-worker ./cmd/worker
 
 FROM alpine:3.22 AS runtime
-RUN addgroup -S -g 10001 zhixu \
+RUN apk add --no-cache ca-certificates git \
+  && addgroup -S -g 10001 zhixu \
   && adduser -S -D -H -u 10001 -G zhixu zhixu
 WORKDIR /app
 COPY --from=go-build /out/zhixu-api /app/zhixu-api

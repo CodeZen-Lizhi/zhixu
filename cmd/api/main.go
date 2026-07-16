@@ -11,10 +11,16 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/webassets"
+	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
+	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
+	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 )
 
 func main() {
@@ -49,6 +55,24 @@ func main() {
 		static = nil
 	}
 
+	workspaceHandler := workspacehttp.NewHandler(nil)
+	if database != nil {
+		repository, repositoryErr := workspacepostgres.NewRepository(database.DB())
+		if repositoryErr != nil {
+			logger.Error("workspace repository is unavailable", "error_code", "WORKSPACE_DATABASE_UNAVAILABLE")
+		} else {
+			workspaceService := workspaceapplication.NewService(workspaceapplication.Dependencies{
+				Repository:     repository,
+				Files:          filesystem.Scanner{},
+				Git:            gitcli.New(""),
+				GitInitializer: gitcli.New(""),
+				IDs:            foundation.NewUUIDGenerator(nil),
+				Clock:          foundation.SystemClock{},
+			})
+			workspaceHandler = workspacehttp.NewHandler(workspaceService)
+		}
+	}
+
 	deps := app.Dependencies{
 		Version:           cfg.Version,
 		Database:          database,
@@ -56,6 +80,7 @@ func main() {
 		DatabaseInitErr:   databaseErr,
 		PingTimeout:       cfg.DatabasePingTimeout,
 		Static:            static,
+		Workspace:         workspaceHandler,
 		Logger:            logger,
 	}
 	server := &http.Server{
