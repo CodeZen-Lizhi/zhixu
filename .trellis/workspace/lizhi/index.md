@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 10
+- **Total Sessions**: 11
 - **Last Active**: 2026-07-17
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~339 | Active |
+| `journal-1.md` | ~372 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 11 | 2026-07-17 | M5 Git writeback adapter | `9894844` | `dev` |
 | 10 | 2026-07-17 | M5-04B Filesystem CAS | `b0a6484` | `dev` |
 | 9 | 2026-07-17 | M5-04A Safe Writeback Persistence | `39565ea`, `f53e95b` | `dev` |
 | 8 | 2026-07-17 | M5 Write Authorization | `87ea888` | `dev` |

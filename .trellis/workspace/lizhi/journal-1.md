@@ -337,3 +337,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: M5 Git writeback adapter
+
+**Date**: 2026-07-17
+**Task**: M5 Git writeback adapter
+**Branch**: `dev`
+
+### Summary
+
+实现受限 Git 写回 Adapter：clean/HEAD/单目标 Diff、raw blob 与 immutable tree/ref CAS Commit、Trailer 幂等恢复、严格 Reverse、安全边界及真实 Git 测试；同步父任务与恢复规范。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9894844` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
