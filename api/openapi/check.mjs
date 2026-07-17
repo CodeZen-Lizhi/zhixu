@@ -34,6 +34,9 @@ if (!document.paths["/readyz"].get.responses["503"]) {
 if (!document.paths["/api/v1/workspaces/{workspace_id}/proposals"].post.responses["200"]) {
   throw new Error("missing idempotent replay response for Proposal creation");
 }
+if (!document.paths["/api/v1/proposals/{proposal_id}/approvals"].post.responses["200"]) {
+  throw new Error("missing exact replay response for Approval decision");
+}
 
 for (const schema of [
   "Liveness",
@@ -52,6 +55,7 @@ for (const schema of [
   "CreateProposalRequest",
   "ProposalRevision",
   "Approval",
+  "ApprovalDecisionResponse",
   "Proposal",
   "ProposalDecisionRequest",
   "ApplyPreflightRequest",

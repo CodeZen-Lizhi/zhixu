@@ -48,7 +48,9 @@ type Proposal struct {
 	TargetPath      string
 	IdempotencyKey  string
 	RequestHash     string
-	Status          ProposalStatus
+	// WorkflowRunID 是 Approved Proposal 原子派发后绑定的唯一 Workflow Run；未派发记录为 nil，绑定后不随后续状态变化清除。
+	WorkflowRunID *foundation.ID
+	Status        ProposalStatus
 	// Version 用于 Proposal 的乐观锁；每次受控状态变更必须递增一。
 	Version   int64
 	CreatedAt time.Time

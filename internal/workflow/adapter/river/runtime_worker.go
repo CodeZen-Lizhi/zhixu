@@ -42,7 +42,7 @@ type RuntimeNodeWorker struct {
 // NewRuntimeNodeWorker constructs the production state-machine worker.
 func NewRuntimeNodeWorker(registry *application.ExecutorRegistry, runtime RuntimeExecutionCoordinator, owner string, leaseDuration, heartbeatInterval time.Duration) (*RuntimeNodeWorker, error) {
 	owner = strings.TrimSpace(owner)
-	if registry == nil || isNilRuntimeCoordinator(runtime) || owner == "" || strings.ContainsAny(owner, "\r\n\t/") || leaseDuration <= 0 || heartbeatInterval <= 0 || heartbeatInterval >= leaseDuration/3 {
+	if registry == nil || isNilRuntimeCoordinator(runtime) || owner == "" || len(owner) > 80 || strings.ContainsAny(owner, "\r\n\t/") || leaseDuration <= 0 || heartbeatInterval <= 0 || heartbeatInterval >= leaseDuration/3 {
 		return nil, jobError(foundation.ErrorInvalidInput, "WORKFLOW_RUNTIME_WORKER_INVALID", errors.New("runtime worker dependencies or lease cadence are invalid"))
 	}
 	return &RuntimeNodeWorker{registry: registry, runtime: runtime, owner: owner, leaseDuration: leaseDuration, heartbeatInterval: heartbeatInterval}, nil
@@ -73,8 +73,14 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	if err := ValidateNodeJobArgs(job.Args); err != nil {
 		return err
 	}
+	if len(job.EncodedArgs) > 0 {
+		if err := validateEncodedNodeJobArgs(job.EncodedArgs, job.Args); err != nil {
+			return err
+		}
+	}
 	deliveryID := fmt.Sprintf("job-%d-attempt-%d", job.ID, job.Attempt)
-	claim, err := w.runtime.Claim(ctx, application.ClaimCommand{NodeRunID: job.Args.NodeRunID, DispatchNo: job.Args.DispatchNo, DeliveryID: deliveryID, RiverJobID: job.ID, RiverJobAttempt: job.Attempt, LeaseOwner: w.owner, LeaseDuration: w.leaseDuration})
+	deliveryOwner := w.owner + ":" + deliveryID
+	claim, err := w.runtime.Claim(ctx, application.ClaimCommand{NodeRunID: job.Args.NodeRunID, DispatchNo: job.Args.DispatchNo, DeliveryID: deliveryID, RiverJobID: job.ID, RiverJobAttempt: job.Attempt, LeaseOwner: deliveryOwner, LeaseDuration: w.leaseDuration})
 	if err != nil {
 		return err
 	}
@@ -93,7 +99,7 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	heartbeatErrors := make(chan error, 1)
 	heartbeatDone := make(chan struct{})
 	go w.heartbeatLoop(executionCtx, cancel, claim, &nodeVersion, heartbeatErrors, heartbeatDone)
-	result, executionErr := executor.Execute(executionCtx, application.ExecutionContext{WorkspaceID: claim.Run.WorkspaceID, RunID: claim.Run.ID, NodeRunID: claim.Node.ID, NodeKind: claim.Node.NodeType, InputSchemaVersion: claim.Node.InputSchemaVersion, AttemptNo: claim.Attempt.AttemptNo, DispatchNo: claim.Node.DispatchNo, RetryNo: claim.Node.RetryNo, LeaseOwner: w.owner, Input: claim.Node.Input})
+	result, executionErr := executor.Execute(executionCtx, application.ExecutionContext{WorkspaceID: claim.Run.WorkspaceID, RunID: claim.Run.ID, NodeRunID: claim.Node.ID, NodeKind: claim.Node.NodeType, InputSchemaVersion: claim.Node.InputSchemaVersion, AttemptNo: claim.Attempt.AttemptNo, DispatchNo: claim.Node.DispatchNo, RetryNo: claim.Node.RetryNo, LeaseOwner: claim.Attempt.LeaseOwner, Input: claim.Node.Input})
 	cancel()
 	<-heartbeatDone
 	controlRequested := false
@@ -112,6 +118,10 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	}
 	binding := deliveryBinding(claim, deliveryID)
 	binding.Fence.NodeVersion = nodeVersion.Load()
+	if controlRequested && (executionErr == nil || errors.Is(executionErr, context.Canceled)) {
+		_, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CONTROL_CHECKPOINT", false, errors.New("workflow control checkpoint requested"))}})
+		return err
+	}
 	if executionErr != nil {
 		_, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: executionErr, CancellationProven: errors.Is(executionErr, context.Canceled) && ctx.Err() != nil}})
 		return err
@@ -161,7 +171,7 @@ func (w *RuntimeNodeWorker) heartbeatLoop(ctx context.Context, cancel context.Ca
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			result, err := w.runtime.Heartbeat(ctx, application.HeartbeatCommand{NodeRunID: claim.Node.ID, Fence: domain.LeaseFence{Owner: w.owner, AttemptNo: claim.Attempt.AttemptNo, NodeVersion: nodeVersion.Load()}, LeaseDuration: w.leaseDuration})
+			result, err := w.runtime.Heartbeat(ctx, application.HeartbeatCommand{NodeRunID: claim.Node.ID, Fence: domain.LeaseFence{Owner: claim.Attempt.LeaseOwner, AttemptNo: claim.Attempt.AttemptNo, NodeVersion: nodeVersion.Load()}, LeaseDuration: w.leaseDuration})
 			if err != nil {
 				select {
 				case errorsCh <- err:

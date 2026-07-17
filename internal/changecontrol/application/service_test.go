@@ -27,6 +27,22 @@ type fakeRepo struct {
 	workflowErr       error
 }
 
+type fakeApprovalDispatcher struct {
+	command ApprovalDispatchCommand
+	result  ApprovalDispatchResult
+	err     error
+	calls   int
+}
+
+func (f *fakeApprovalDispatcher) DecideAndDispatch(_ context.Context, command ApprovalDispatchCommand) (ApprovalDispatchResult, error) {
+	f.calls++
+	f.command = command
+	if f.result.Approval.ID == "" {
+		f.result.Approval = command.Approval
+	}
+	return f.result, f.err
+}
+
 func (f *fakeRepo) CreateProposal(_ context.Context, proposal domain.Proposal) (domain.Proposal, error) {
 	f.proposal = proposal
 	return proposal, f.err
@@ -106,6 +122,14 @@ func newTestService(repository *fakeRepo, targets *fakeTargets) *Service {
 
 func newTestServiceWithGit(repository *fakeRepo, targets *fakeTargets, git ApprovalGitInspector) *Service {
 	service, err := NewService(repository, &seqIDs{}, foundation.FixedClock{Value: time.Unix(1, 0)}, targets, git)
+	if err != nil {
+		panic(err)
+	}
+	return service
+}
+
+func newTestDispatchService(repository *fakeRepo, targets *fakeTargets, git ApprovalGitInspector, dispatcher ApprovalDispatcher) *Service {
+	service, err := NewServiceWithDispatch(repository, &seqIDs{}, foundation.FixedClock{Value: time.Unix(1, 0)}, targets, git, dispatcher)
 	if err != nil {
 		panic(err)
 	}
@@ -215,6 +239,77 @@ func TestDecideProposalReplayDoesNotRecaptureMutableFacts(t *testing.T) {
 	approval, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
 	if err != nil || approval.ID != proposal.Approval.ID || targets.calls != 0 || git.calls != 0 {
 		t.Fatalf("approval=%#v target calls=%d git calls=%d err=%v", approval, targets.calls, git.calls, err)
+	}
+}
+
+func TestDecideProposalWithDispatchExactReplaySkipsMutableFacts(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	runID := foundation.ID("10000000-0000-4000-8000-000000000001")
+	proposal.WorkflowRunID = &runID
+	dispatcher := &fakeApprovalDispatcher{result: ApprovalDispatchResult{
+		Approval: *proposal.Approval, WorkflowRunID: runID,
+		NodeRunID: "10000000-0000-4000-8000-000000000002", JobID: 42,
+		DispatchStatus: DispatchStatusReplayed, Replayed: true,
+	}}
+	targets := &fakeTargets{err: errors.New("must not be called")}
+	git := &fakeApprovalGitInspector{err: errors.New("must not be called")}
+	service := newTestDispatchService(&fakeRepo{proposal: proposal}, targets, git, dispatcher)
+
+	result, err := service.DecideProposalWithDispatch(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err != nil || !result.Replayed || result.Workflow == nil || result.Workflow.RunID != runID || targets.calls != 0 || git.calls != 0 || dispatcher.calls != 1 {
+		t.Fatalf("result=%#v target calls=%d git calls=%d dispatch calls=%d err=%v", result, targets.calls, git.calls, dispatcher.calls, err)
+	}
+	if dispatcher.command.ObservedBaseHash != "" || dispatcher.command.ObservedGitHead != "" {
+		t.Fatalf("exact replay unexpectedly carried mutable facts: %#v", dispatcher.command)
+	}
+}
+
+func TestDecideProposalWithDispatchBackfillsHistoricalApprovalOnlyAfterSafetyGate(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	dispatcher := &fakeApprovalDispatcher{result: ApprovalDispatchResult{
+		Approval:      *proposal.Approval,
+		WorkflowRunID: "10000000-0000-4000-8000-000000000003",
+		NodeRunID:     "10000000-0000-4000-8000-000000000004", JobID: 43,
+		DispatchStatus: DispatchStatusQueued,
+	}}
+	targets := &fakeTargets{hash: testHash}
+	git := &fakeApprovalGitInspector{snapshot: domain.GitSnapshot{WorkspaceID: proposal.WorkspaceID, Branch: "main", Head: testGitHead, ObjectFormat: domain.GitObjectFormatSHA1, Clean: true}}
+	service := newTestDispatchService(&fakeRepo{proposal: proposal}, targets, git, dispatcher)
+
+	result, err := service.DecideProposalWithDispatch(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err != nil || result.Replayed || result.Workflow == nil || targets.calls != 1 || git.calls != 1 || dispatcher.calls != 1 {
+		t.Fatalf("result=%#v target calls=%d git calls=%d dispatch calls=%d err=%v", result, targets.calls, git.calls, dispatcher.calls, err)
+	}
+	if dispatcher.command.ObservedBaseHash != testHash || dispatcher.command.ObservedGitHead != testGitHead {
+		t.Fatalf("dispatch safety facts=%#v", dispatcher.command)
+	}
+}
+
+func TestDecideProposalWithDispatchRejectsHistoricalApprovalWithoutGitBaseline(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	proposal.Approval.ApprovedGitHead = nil
+	dispatcher := &fakeApprovalDispatcher{}
+	service := newTestDispatchService(&fakeRepo{proposal: proposal}, &fakeTargets{hash: testHash}, &fakeApprovalGitInspector{}, dispatcher)
+
+	_, err := service.DecideProposalWithDispatch(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "APPROVAL_GIT_BASELINE_MISSING" || dispatcher.calls != 0 {
+		t.Fatalf("dispatch calls=%d err=%v", dispatcher.calls, err)
+	}
+}
+
+func TestDecideProposalWithDispatchRejectedHasNoWorkflow(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	proposal.Status = domain.StatusReady
+	proposal.Approval = nil
+	dispatcher := &fakeApprovalDispatcher{result: ApprovalDispatchResult{DispatchStatus: ""}}
+	targets := &fakeTargets{err: errors.New("must not be called")}
+	git := &fakeApprovalGitInspector{err: errors.New("must not be called")}
+	service := newTestDispatchService(&fakeRepo{proposal: proposal}, targets, git, dispatcher)
+
+	result, err := service.DecideProposalWithDispatch(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionRejected)
+	if err != nil || result.Approval.Decision != domain.DecisionRejected || result.Workflow != nil || targets.calls != 0 || git.calls != 0 || dispatcher.calls != 1 {
+		t.Fatalf("result=%#v target calls=%d git calls=%d dispatch calls=%d err=%v", result, targets.calls, git.calls, dispatcher.calls, err)
 	}
 }
 

@@ -270,7 +270,8 @@
         "operationId": "decideProposal",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalDecisionRequest" } } } },
         "responses": {
-          "201": { "description": "Immutable Approval decision created and bound to Revision and Change Hash.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Approval" } } } },
+          "201": { "description": "Decision created. Approved responses atomically include the unique Safe Writeback Workflow dispatch; Rejected responses contain no Workflow fields.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApprovalDecisionResponse" } } } },
+          "200": { "description": "The exact immutable decision and, for Approved, the same Workflow/Node/River dispatch binding were replayed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApprovalDecisionResponse" } } } },
           "400": { "description": "Invalid decision contract.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
           "404": { "description": "Proposal or Revision not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
           "409": { "description": "Proposal is not ready, already decided, or Change Hash mismatched.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
@@ -542,6 +543,24 @@
           "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "decision": { "type": "string", "enum": ["approved", "rejected"] },
           "approved_git_head": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" },
+          "decided_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "ApprovalDecisionResponse": {
+        "type": "object",
+        "description": "Approved decisions include workflow_run_id, workflow_status_url and dispatch_status. Rejected decisions omit all three fields.",
+        "required": ["id", "proposal_id", "revision_id", "change_hash", "decision", "decided_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "proposal_id": { "type": "string", "format": "uuid" },
+          "revision_id": { "type": "string", "format": "uuid" },
+          "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "decision": { "type": "string", "enum": ["approved", "rejected"] },
+          "approved_git_head": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" },
+          "workflow_run_id": { "type": "string", "format": "uuid" },
+          "workflow_status_url": { "type": "string", "pattern": "^/api/v1/workflows/[0-9a-f-]{36}$" },
+          "dispatch_status": { "type": "string", "enum": ["queued", "running", "replayed"] },
           "decided_at": { "type": "string", "format": "date-time" }
         },
         "additionalProperties": false

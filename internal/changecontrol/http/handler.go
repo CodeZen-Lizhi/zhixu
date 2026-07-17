@@ -19,7 +19,7 @@ import (
 type Service interface {
 	CreateProposal(context.Context, application.CreateCommand) (application.CreateResult, error)
 	GetProposal(context.Context, foundation.ID) (domain.Proposal, error)
-	DecideProposal(context.Context, foundation.ID, foundation.ID, string, domain.Decision) (domain.Approval, error)
+	DecideProposalWithDispatch(context.Context, foundation.ID, foundation.ID, string, domain.Decision) (application.ApprovalDecisionResult, error)
 	CheckApplyPreflight(context.Context, foundation.ID, foundation.ID, string) (application.ApplyPreflightResult, error)
 }
 
@@ -81,13 +81,16 @@ type revisionResponse struct {
 }
 
 type approvalResponse struct {
-	ID              string  `json:"id"`
-	ProposalID      string  `json:"proposal_id"`
-	RevisionID      string  `json:"revision_id"`
-	ChangeHash      string  `json:"change_hash"`
-	Decision        string  `json:"decision"`
-	ApprovedGitHead *string `json:"approved_git_head,omitempty"`
-	DecidedAt       string  `json:"decided_at"`
+	ID                string  `json:"id"`
+	ProposalID        string  `json:"proposal_id"`
+	RevisionID        string  `json:"revision_id"`
+	ChangeHash        string  `json:"change_hash"`
+	Decision          string  `json:"decision"`
+	ApprovedGitHead   *string `json:"approved_git_head,omitempty"`
+	WorkflowRunID     string  `json:"workflow_run_id,omitempty"`
+	WorkflowStatusURL string  `json:"workflow_status_url,omitempty"`
+	DispatchStatus    string  `json:"dispatch_status,omitempty"`
+	DecidedAt         string  `json:"decided_at"`
 }
 
 type applyPreflightResponse struct {
@@ -174,12 +177,22 @@ func (h *Handler) decideProposal(w http.ResponseWriter, r *http.Request) {
 		writeUnavailable(w)
 		return
 	}
-	approval, err := h.service.DecideProposal(r.Context(), proposalID, revisionID, request.ChangeHash, request.Decision)
+	result, err := h.service.DecideProposalWithDispatch(r.Context(), proposalID, revisionID, request.ChangeHash, request.Decision)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	httpapi.WriteJSON(w, http.StatusCreated, toApprovalResponse(approval))
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	response := toApprovalResponse(result.Approval)
+	if result.Approval.Decision == domain.DecisionApproved && result.Workflow != nil {
+		response.WorkflowRunID = string(result.Workflow.RunID)
+		response.WorkflowStatusURL = "/api/v1/workflows/" + string(result.Workflow.RunID)
+		response.DispatchStatus = string(result.Workflow.Status)
+	}
+	httpapi.WriteJSON(w, status, response)
 }
 
 func (h *Handler) applyPreflight(w http.ResponseWriter, r *http.Request) {

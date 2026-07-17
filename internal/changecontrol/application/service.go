@@ -27,11 +27,25 @@ type ApprovalGitInspector interface {
 
 // Service 协调 Proposal、Approval 与无副作用 Apply 前置校验。
 type Service struct {
-	repo    domain.Repository
-	ids     foundation.IDGenerator
-	clock   foundation.Clock
-	targets TargetReader
-	git     ApprovalGitInspector
+	repo       domain.Repository
+	ids        foundation.IDGenerator
+	clock      foundation.Clock
+	targets    TargetReader
+	git        ApprovalGitInspector
+	dispatcher ApprovalDispatcher
+}
+
+// NewServiceWithDispatch 创建启用 Approval→Workflow/River 原子投递的 Change Control 应用服务。
+func NewServiceWithDispatch(repo domain.Repository, ids foundation.IDGenerator, clock foundation.Clock, targets TargetReader, git ApprovalGitInspector, dispatcher ApprovalDispatcher) (*Service, error) {
+	service, err := NewService(repo, ids, clock, targets, git)
+	if err != nil {
+		return nil, err
+	}
+	if isNilApprovalDispatcher(dispatcher) {
+		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "APPROVAL_DISPATCHER_MISSING", false, errors.New("approval dispatcher is missing"))
+	}
+	service.dispatcher = dispatcher
+	return service, nil
 }
 
 // MaxWriteAuthorizationTTL 是单次写权限的服务端有效期上限。
@@ -107,6 +121,14 @@ func (s *Service) GetProposal(ctx context.Context, proposalID foundation.ID) (do
 
 // DecideProposal 由服务端生成 Approval ID，并绑定 Revision 与 Change Hash。
 func (s *Service) DecideProposal(ctx context.Context, proposalID, revisionID foundation.ID, changeHash string, decision domain.Decision) (domain.Approval, error) {
+	if s.dispatcher != nil {
+		result, err := s.DecideProposalWithDispatch(ctx, proposalID, revisionID, changeHash, decision)
+		return result.Approval, err
+	}
+	return s.decideProposalLegacy(ctx, proposalID, revisionID, changeHash, decision)
+}
+
+func (s *Service) decideProposalLegacy(ctx context.Context, proposalID, revisionID foundation.ID, changeHash string, decision domain.Decision) (domain.Approval, error) {
 	if proposalID == "" || revisionID == "" || !domain.ValidHash(changeHash) || decision != domain.DecisionApproved && decision != domain.DecisionRejected {
 		return domain.Approval{}, foundation.NewError(foundation.ErrorInvalidInput, "APPROVAL_INVALID", false, errors.New("approval fields are invalid"))
 	}
@@ -153,6 +175,89 @@ func (s *Service) DecideProposal(ctx context.Context, proposalID, revisionID fou
 		ID: approvalID, ProposalID: proposalID, RevisionID: revisionID,
 		ChangeHash: strings.ToLower(changeHash), Decision: decision, ApprovedGitHead: approvedGitHead, DecidedAt: s.clock.Now(),
 	})
+}
+
+// DecideProposalWithDispatch 在外部文件/Git 安全门后，通过单一 UoW 保存 Approval 并投递唯一 Safe Writeback Workflow。
+// 只有完整 Approval→Run 绑定重放可以跳过可变文件和 Git 事实读取。
+func (s *Service) DecideProposalWithDispatch(ctx context.Context, proposalID, revisionID foundation.ID, changeHash string, decision domain.Decision) (ApprovalDecisionResult, error) {
+	if s == nil || isNilApprovalDispatcher(s.dispatcher) {
+		return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "APPROVAL_DISPATCHER_MISSING", false, errors.New("approval dispatcher is missing"))
+	}
+	if proposalID == "" || revisionID == "" || !domain.ValidHash(changeHash) || decision != domain.DecisionApproved && decision != domain.DecisionRejected {
+		return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorInvalidInput, "APPROVAL_INVALID", false, errors.New("approval fields are invalid"))
+	}
+	changeHash = strings.ToLower(changeHash)
+	proposal, err := s.repo.GetProposal(ctx, proposalID)
+	if err != nil {
+		return ApprovalDecisionResult{}, err
+	}
+	if proposal.Revision.ID != revisionID || proposal.Revision.ChangeHash != changeHash {
+		return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_REVISION_CONFLICT", false, errors.New("approval is not bound to requested revision"))
+	}
+
+	approval := domain.Approval{ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: decision}
+	if proposal.Approval != nil {
+		if proposal.Approval.RevisionID != revisionID || !strings.EqualFold(proposal.Approval.ChangeHash, changeHash) || proposal.Approval.Decision != decision {
+			return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_DECISION_CONFLICT", false, errors.New("proposal already has a different approval decision"))
+		}
+		approval = *proposal.Approval
+		if decision == domain.DecisionRejected || proposal.WorkflowRunID != nil {
+			return s.dispatchApproval(ctx, ApprovalDispatchCommand{WorkspaceID: proposal.WorkspaceID, Approval: approval})
+		}
+		if approval.ApprovedGitHead == nil || !domain.ValidGitHead(*approval.ApprovedGitHead) {
+			return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_GIT_BASELINE_MISSING", false, errors.New("historical approval has no valid git baseline"))
+		}
+	} else {
+		approvalID, idErr := s.ids.New()
+		if idErr != nil {
+			return ApprovalDecisionResult{}, idErr
+		}
+		approval.ID = approvalID
+		approval.DecidedAt = s.clock.Now()
+	}
+
+	command := ApprovalDispatchCommand{WorkspaceID: proposal.WorkspaceID, Approval: approval}
+	if decision == domain.DecisionApproved {
+		currentHash, readErr := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
+		if readErr != nil {
+			_, rejectionErr := s.rejectUnavailableTarget(ctx, proposal.ID, readErr)
+			return ApprovalDecisionResult{}, rejectionErr
+		}
+		currentHash = strings.ToLower(currentHash)
+		if currentHash != proposal.Revision.BaseHash {
+			if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
+				return ApprovalDecisionResult{}, markErr
+			}
+			return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: proposal.Revision.BaseHash, Current: currentHash})
+		}
+		snapshot, inspectErr := s.git.CaptureApprovalSnapshot(ctx, proposal.WorkspaceID)
+		if inspectErr != nil {
+			return ApprovalDecisionResult{}, inspectErr
+		}
+		if bindingErr := domain.ValidateGitSnapshotBinding(proposal.WorkspaceID, snapshot.Head, snapshot); bindingErr != nil {
+			return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_GIT_SNAPSHOT_INVALID", false, bindingErr)
+		}
+		head := strings.ToLower(snapshot.Head)
+		if approval.ApprovedGitHead != nil && !strings.EqualFold(*approval.ApprovedGitHead, head) {
+			return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "APPROVAL_GIT_HEAD_CONFLICT", false, errors.New("git head differs from approved baseline"))
+		}
+		approval.ApprovedGitHead = &head
+		command.Approval = approval
+		command.ObservedBaseHash = currentHash
+		command.ObservedGitHead = head
+	}
+	return s.dispatchApproval(ctx, command)
+}
+
+func (s *Service) dispatchApproval(ctx context.Context, command ApprovalDispatchCommand) (ApprovalDecisionResult, error) {
+	result, err := s.dispatcher.DecideAndDispatch(ctx, command)
+	if err != nil {
+		return ApprovalDecisionResult{}, err
+	}
+	if err := validateApprovalDispatchResult(command, result); err != nil {
+		return ApprovalDecisionResult{}, err
+	}
+	return decisionResultFromDispatch(result), nil
 }
 
 func (s *Service) rejectUnavailableTarget(ctx context.Context, proposalID foundation.ID, readErr error) (domain.Approval, error) {

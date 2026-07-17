@@ -75,6 +75,8 @@ type RuntimeStartResult struct {
 	FirstNode domain.NodeRun
 	// Job 是首个节点对应的持久任务回执。
 	Job JobReceipt
+	// Replayed 表示 Run 事实与对应唯一 Job 均来自既有幂等绑定。
+	Replayed bool
 }
 
 // StartCommand 只以 Workspace、注册 Definition、Input 与 Idempotency Key 决定启动能力。
@@ -151,11 +153,7 @@ func (s *Service) Start(ctx context.Context, command StartCommand) (domain.Run, 
 	if err := validateLegacyRoot(command.FirstNodeKey, command.FirstNodeType, root); err != nil {
 		return domain.Run{}, err
 	}
-	requestHash, err := computeRuntimeStartRequestHash(command.WorkspaceID, definition, canonicalInput)
-	if err != nil {
-		return domain.Run{}, err
-	}
-	request, err := s.buildRuntimeStartRequest(command.WorkspaceID, idempotencyKey, canonicalInput, requestHash, definition, root)
+	request, err := s.buildRuntimeStartRequest(command.WorkspaceID, idempotencyKey, canonicalInput, definition)
 	if err != nil {
 		return domain.Run{}, err
 	}
@@ -169,20 +167,42 @@ func (s *Service) Start(ctx context.Context, command StartCommand) (domain.Run, 
 	return result.Run, nil
 }
 
-func (s *Service) buildRuntimeStartRequest(workspaceID foundation.ID, idempotencyKey string, input json.RawMessage, requestHash string, definition domain.RegisteredDefinition, root domain.NodeDefinition) (RuntimeStartRequest, error) {
-	definitionID, err := s.ids.New()
+func (s *Service) buildRuntimeStartRequest(workspaceID foundation.ID, idempotencyKey string, input json.RawMessage, definition domain.RegisteredDefinition) (RuntimeStartRequest, error) {
+	return BuildRuntimeStartRequest(s.ids, s.clock, workspaceID, idempotencyKey, input, definition)
+}
+
+// BuildRuntimeStartRequest 使用注册 Definition 构造唯一的 Runtime Start
+// Definition、Run、首节点和 Outbox identity，供跨模块原子 UoW 复用。
+func BuildRuntimeStartRequest(ids foundation.IDGenerator, clock foundation.Clock, workspaceID foundation.ID, idempotencyKey string, input json.RawMessage, definition domain.RegisteredDefinition) (RuntimeStartRequest, error) {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if ids == nil || clock == nil || workspaceID == "" || idempotencyKey == "" || len(idempotencyKey) > 128 || strings.TrimSpace(definition.Key) == "" || definition.Version < 1 || definition.InputSchemaVersion < 1 || definition.GraphHash == "" {
+		return RuntimeStartRequest{}, invalid("WORKFLOW_START_INVALID")
+	}
+	canonicalInput, err := canonicalRuntimeInput(input)
+	if err != nil {
+		return RuntimeStartRequest{}, invalid("WORKFLOW_START_INVALID")
+	}
+	requestHash, err := ComputeRuntimeStartRequestHash(workspaceID, definition, canonicalInput)
 	if err != nil {
 		return RuntimeStartRequest{}, err
 	}
-	runID, err := s.ids.New()
+	root, err := uniqueDefinitionRoot(definition)
 	if err != nil {
 		return RuntimeStartRequest{}, err
 	}
-	nodeID, err := s.ids.New()
+	definitionID, err := ids.New()
 	if err != nil {
 		return RuntimeStartRequest{}, err
 	}
-	eventID, err := s.ids.New()
+	runID, err := ids.New()
+	if err != nil {
+		return RuntimeStartRequest{}, err
+	}
+	nodeID, err := ids.New()
+	if err != nil {
+		return RuntimeStartRequest{}, err
+	}
+	eventID, err := ids.New()
 	if err != nil {
 		return RuntimeStartRequest{}, err
 	}
@@ -190,7 +210,7 @@ func (s *Service) buildRuntimeStartRequest(workspaceID foundation.ID, idempotenc
 	if err != nil {
 		return RuntimeStartRequest{}, foundation.NewError(foundation.ErrorNonRetryableFailure, "WORKFLOW_DEFINITION_CANONICAL_ENCODING_FAILED", false, err)
 	}
-	now := s.clock.Now()
+	now := clock.Now()
 	nodeIdempotencyKey := runtimeNodeIdempotencyKey(definition, root)
 	eventKey := runtimeStartEventKey(workspaceID, idempotencyKey)
 	return RuntimeStartRequest{
@@ -199,12 +219,12 @@ func (s *Service) buildRuntimeStartRequest(workspaceID foundation.ID, idempotenc
 		DefinitionInputSchemaVersion: definition.InputSchemaVersion,
 		Run: domain.Run{
 			ID: runID, WorkspaceID: workspaceID, DefinitionID: definitionID, Status: domain.StatusPending,
-			Input: input, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
+			Input: canonicalInput, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
 			Version: 1, CreatedAt: now, UpdatedAt: now,
 		},
 		FirstNode: domain.NodeRun{
 			ID: nodeID, RunID: runID, NodeKey: root.Key, NodeType: root.Kind, Status: domain.StatusPending,
-			Input: input, IdempotencyKey: nodeIdempotencyKey, InputSchemaVersion: root.InputSchemaVersion,
+			Input: canonicalInput, IdempotencyKey: nodeIdempotencyKey, InputSchemaVersion: root.InputSchemaVersion,
 			OutputSchemaVersion: root.OutputSchemaVersion, DispatchNo: initialDispatchNo,
 			Version: 1, CreatedAt: now, UpdatedAt: now,
 		},
@@ -236,6 +256,16 @@ func canonicalRuntimeInput(input json.RawMessage) (json.RawMessage, error) {
 		return nil, err
 	}
 	return json.Marshal(value)
+}
+
+// ComputeRuntimeStartRequestHash 对输入 JSON canonicalize 后计算与 Workflow
+// Start 完全一致的 Workspace、Definition 和输入契约绑定哈希。
+func ComputeRuntimeStartRequestHash(workspaceID foundation.ID, definition domain.RegisteredDefinition, input json.RawMessage) (string, error) {
+	canonicalInput, err := canonicalRuntimeInput(input)
+	if err != nil {
+		return "", invalid("WORKFLOW_START_INVALID")
+	}
+	return computeRuntimeStartRequestHash(workspaceID, definition, canonicalInput)
 }
 
 func computeRuntimeStartRequestHash(workspaceID foundation.ID, definition domain.RegisteredDefinition, canonicalInput json.RawMessage) (string, error) {
@@ -333,7 +363,8 @@ func validRuntimeStartResult(result RuntimeStartResult, request RuntimeStartRequ
 		result.FirstNode.InputSchemaVersion == request.FirstNode.InputSchemaVersion &&
 		result.FirstNode.OutputSchemaVersion == request.FirstNode.OutputSchemaVersion &&
 		result.FirstNode.DispatchNo == request.FirstNode.DispatchNo &&
-		result.Job.JobID > 0
+		result.Job.JobID > 0 &&
+		result.Replayed == result.Job.Duplicate
 }
 
 func isNilRuntimeStarter(starter RuntimeStarter) bool {

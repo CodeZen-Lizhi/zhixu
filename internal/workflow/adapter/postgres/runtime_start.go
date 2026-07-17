@@ -47,6 +47,46 @@ func (r *RuntimeRepository) Start(ctx context.Context, request application.Runti
 		return application.RuntimeStartResult{}, classify(err, "WORKFLOW_START_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := r.startTx(ctx, tx, request)
+	if err != nil {
+		return application.RuntimeStartResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		event := request.Event
+		event.RunID = &result.Run.ID
+		recovered, found, recoveryErr := r.recoverCommittedStart(ctx, result.Run, result.FirstNode, event, result.Job, result.Replayed)
+		if recoveryErr != nil {
+			return application.RuntimeStartResult{}, errors.Join(classify(err, "WORKFLOW_START_COMMIT_FAILED"), recoveryErr)
+		}
+		if found {
+			return recovered, nil
+		}
+		return application.RuntimeStartResult{}, classify(err, "WORKFLOW_START_COMMIT_FAILED")
+	}
+	return result, nil
+}
+
+// StartTx creates or replays Definition, Run, root Node, Outbox and River Job
+// in a caller-owned transaction. The caller exclusively owns commit/rollback.
+func (r *RuntimeRepository) StartTx(ctx context.Context, tx pgx.Tx, request application.RuntimeStartRequest) (application.RuntimeStartResult, error) {
+	if err := validateRuntimeStartRequest(request); err != nil {
+		return application.RuntimeStartResult{}, err
+	}
+	if r == nil || isNilJobInserter(r.jobs) || isNilRuntimeTx(tx) {
+		return application.RuntimeStartResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_START_TRANSACTION_UNAVAILABLE", true, errors.New("runtime repository, job inserter, or transaction is nil"))
+	}
+	return r.startTx(ctx, tx, request)
+}
+
+func isNilRuntimeTx(tx pgx.Tx) bool {
+	if tx == nil {
+		return true
+	}
+	value := reflect.ValueOf(tx)
+	return value.Kind() == reflect.Pointer && value.IsNil()
+}
+
+func (r *RuntimeRepository) startTx(ctx context.Context, tx pgx.Tx, request application.RuntimeStartRequest) (application.RuntimeStartResult, error) {
 	// Runtime facts use one database-owned timestamp so a skewed caller clock
 	// cannot make the first control/update violate created_at ordering.
 	databaseTimestamp, err := databaseNow(ctx, tx)
@@ -96,20 +136,13 @@ func (r *RuntimeRepository) Start(ctx context.Context, request application.Runti
 	if replayed && !receipt.Duplicate {
 		return application.RuntimeStartResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_START_JOB_MISSING", false, errors.New("replayed workflow facts had no existing River job"))
 	}
-	if err := tx.Commit(ctx); err != nil {
-		recovered, found, recoveryErr := r.recoverCommittedStart(ctx, run, node, eventCandidate, receipt)
-		if recoveryErr != nil {
-			return application.RuntimeStartResult{}, errors.Join(classify(err, "WORKFLOW_START_COMMIT_FAILED"), recoveryErr)
-		}
-		if found {
-			return recovered, nil
-		}
-		return application.RuntimeStartResult{}, classify(err, "WORKFLOW_START_COMMIT_FAILED")
+	if !replayed && receipt.Duplicate {
+		return application.RuntimeStartResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_START_JOB_BINDING_CONFLICT", false, errors.New("new workflow facts resolved to an existing River job"))
 	}
-	return application.RuntimeStartResult{Run: run, FirstNode: node, Job: receipt}, nil
+	return application.RuntimeStartResult{Run: run, FirstNode: node, Job: receipt, Replayed: replayed}, nil
 }
 
-func (r *RuntimeRepository) recoverCommittedStart(ctx context.Context, expectedRun domain.Run, expectedNode domain.NodeRun, expectedEvent domain.OutboxEvent, receipt application.JobReceipt) (application.RuntimeStartResult, bool, error) {
+func (r *RuntimeRepository) recoverCommittedStart(ctx context.Context, expectedRun domain.Run, expectedNode domain.NodeRun, expectedEvent domain.OutboxEvent, receipt application.JobReceipt, replayed bool) (application.RuntimeStartResult, bool, error) {
 	run, err := scanRun(r.db.QueryRow(ctx, runSelect+` WHERE workspace_id=$1 AND idempotency_key=$2`, string(expectedRun.WorkspaceID), expectedRun.IdempotencyKey))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return application.RuntimeStartResult{}, false, nil
@@ -145,7 +178,7 @@ WHERE id=$1 AND kind=$2 AND args->>'node_run_id'=$3 AND (args->>'dispatch_no')::
 	if err != nil {
 		return application.RuntimeStartResult{}, false, classify(err, "WORKFLOW_START_RECOVERY_JOB_FAILED")
 	}
-	return application.RuntimeStartResult{Run: run, FirstNode: node, Job: application.JobReceipt{JobID: jobID, Duplicate: receipt.Duplicate}}, true, nil
+	return application.RuntimeStartResult{Run: run, FirstNode: node, Job: application.JobReceipt{JobID: jobID, Duplicate: receipt.Duplicate}, Replayed: replayed}, true, nil
 }
 
 func validateRuntimeStartRequest(request application.RuntimeStartRequest) error {

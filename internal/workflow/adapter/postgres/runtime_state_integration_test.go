@@ -391,6 +391,46 @@ func TestRuntimeStateConcurrentClaimAndLeaseReclaimFenceOldOwner(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateHigherRiverAttemptWaitsForActiveLeaseThenReclaims(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	defer cleanup()
+	workspaceID := foundation.ID("a9100000-0000-4000-8000-000000000001")
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-transport-retry',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-transport-retry"); err != nil {
+		t.Fatal(err)
+	}
+	client, err := riveradapter.NewClient(pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserter, err := riveradapter.NewJobInserter(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRuntimeRepository(pool, inserter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "transport-retry", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Millisecond, MaxDelay: time.Second}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := repository.Claim(ctx, application.ClaimCommand{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "job-attempt-1", RiverJobID: started.Job.JobID, RiverJobAttempt: 1, LeaseOwner: "worker-attempt-1", LeaseDuration: 100 * time.Millisecond})
+	if err != nil || claimed.Disposition != application.ClaimDispositionClaimed {
+		t.Fatalf("claimed=%+v err=%v", claimed, err)
+	}
+	_, err = repository.Claim(ctx, application.ClaimCommand{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "job-attempt-2", RiverJobID: started.Job.JobID, RiverJobAttempt: 2, LeaseOwner: "worker-attempt-2", LeaseDuration: time.Minute})
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_LEASE_HELD" || !classified.Retryable {
+		t.Fatalf("active lease retry err=%v", err)
+	}
+	time.Sleep(180 * time.Millisecond)
+	reclaimed, err := repository.Claim(ctx, application.ClaimCommand{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "job-attempt-2", RiverJobID: started.Job.JobID, RiverJobAttempt: 2, LeaseOwner: "worker-attempt-2", LeaseDuration: time.Minute})
+	if err != nil || reclaimed.Disposition != application.ClaimDispositionClaimed || reclaimed.Attempt.AttemptNo != claimed.Attempt.AttemptNo+1 {
+		t.Fatalf("reclaimed=%+v err=%v", reclaimed, err)
+	}
+}
+
 func TestRuntimeStateRetryExhaustionFailsWithoutNewJob(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)

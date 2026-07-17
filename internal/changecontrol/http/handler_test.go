@@ -21,6 +21,8 @@ const (
 	testProposalID      foundation.ID = "20000000-0000-4000-8000-000000000001"
 	testRevisionID      foundation.ID = "30000000-0000-4000-8000-000000000001"
 	testApprovalID      foundation.ID = "40000000-0000-4000-8000-000000000001"
+	testWorkflowRunID   foundation.ID = "50000000-0000-4000-8000-000000000001"
+	testNodeRunID       foundation.ID = "60000000-0000-4000-8000-000000000001"
 	testChangeHash                    = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	testApprovedGitHead               = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 )
@@ -65,7 +67,10 @@ func TestCreateProposalRequiresIdempotencyKey(t *testing.T) {
 func TestApprovalAndPreflightContracts(t *testing.T) {
 	approvedGitHead := testApprovedGitHead
 	service := &fakeService{
-		approval:  domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead},
+		decisionResult: application.ApprovalDecisionResult{
+			Approval: domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead},
+			Workflow: &application.ApprovalWorkflowDispatch{RunID: testWorkflowRunID, NodeID: testNodeRunID, JobID: 42, Status: application.DispatchStatusQueued},
+		},
 		preflight: application.ApplyPreflightResult{ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, BaseHash: testChangeHash},
 	}
 	approval := serve(t, service, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/approvals", `{"revision_id":"`+string(testRevisionID)+`","change_hash":"`+testChangeHash+`","decision":"approved"}`)
@@ -74,7 +79,7 @@ func TestApprovalAndPreflightContracts(t *testing.T) {
 	}
 	var responseApproval approvalResponse
 	decode(t, approval, &responseApproval)
-	if responseApproval.ApprovedGitHead == nil || *responseApproval.ApprovedGitHead != strings.ToLower(testApprovedGitHead) {
+	if responseApproval.ApprovedGitHead == nil || *responseApproval.ApprovedGitHead != strings.ToLower(testApprovedGitHead) || responseApproval.WorkflowRunID != string(testWorkflowRunID) || responseApproval.WorkflowStatusURL != "/api/v1/workflows/"+string(testWorkflowRunID) || responseApproval.DispatchStatus != string(application.DispatchStatusQueued) {
 		t.Fatalf("approval response=%#v", responseApproval)
 	}
 	preflight := serve(t, service, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/apply-preflight", `{"revision_id":"`+string(testRevisionID)+`","approved_change_hash":"`+testChangeHash+`"}`)
@@ -91,33 +96,37 @@ func TestApprovalAndPreflightContracts(t *testing.T) {
 	}
 }
 
-func TestApprovalResponseOmitsGitHeadForRejectedAndHistoricalApproval(t *testing.T) {
+func TestApprovalResponseOmitsWorkflowFieldsForRejected(t *testing.T) {
 	approvedGitHead := strings.ToLower(testApprovedGitHead)
-	tests := []struct {
-		name     string
-		approval domain.Approval
-	}{
-		{
-			name:     "rejected",
-			approval: domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionRejected, ApprovedGitHead: &approvedGitHead},
-		},
-		{
-			name:     "historical approved without head",
-			approval: domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved},
-		},
+	result := application.ApprovalDecisionResult{Approval: domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionRejected, ApprovedGitHead: &approvedGitHead}}
+	recorder := serve(t, &fakeService{decisionResult: result}, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/approvals", `{"revision_id":"`+string(testRevisionID)+`","change_hash":"`+testChangeHash+`","decision":"rejected"}`)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			recorder := serve(t, &fakeService{approval: test.approval}, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/approvals", `{"revision_id":"`+string(testRevisionID)+`","change_hash":"`+testChangeHash+`","decision":"`+string(test.approval.Decision)+`"}`)
-			if recorder.Code != http.StatusCreated {
-				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
-			}
-			var response map[string]any
-			decode(t, recorder, &response)
-			if _, exists := response["approved_git_head"]; exists {
-				t.Fatalf("approved_git_head must be omitted: %#v", response)
-			}
-		})
+	var response map[string]any
+	decode(t, recorder, &response)
+	for _, field := range []string{"approved_git_head", "workflow_run_id", "workflow_status_url", "dispatch_status"} {
+		if _, exists := response[field]; exists {
+			t.Fatalf("%s must be omitted: %#v", field, response)
+		}
+	}
+}
+
+func TestApprovalExactReplayReturnsOKAndSameWorkflow(t *testing.T) {
+	approvedGitHead := strings.ToLower(testApprovedGitHead)
+	result := application.ApprovalDecisionResult{
+		Approval: domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead},
+		Workflow: &application.ApprovalWorkflowDispatch{RunID: testWorkflowRunID, NodeID: testNodeRunID, JobID: 42, Status: application.DispatchStatusReplayed},
+		Replayed: true,
+	}
+	recorder := serve(t, &fakeService{decisionResult: result}, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/approvals", `{"revision_id":"`+string(testRevisionID)+`","change_hash":"`+testChangeHash+`","decision":"approved"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response approvalResponse
+	decode(t, recorder, &response)
+	if response.WorkflowRunID != string(testWorkflowRunID) || response.DispatchStatus != string(application.DispatchStatusReplayed) {
+		t.Fatalf("response=%#v", response)
 	}
 }
 
@@ -170,13 +179,13 @@ func TestHandlerRejectsInvalidJSONAndInternalErrorsAreRedacted(t *testing.T) {
 }
 
 type fakeService struct {
-	proposal  domain.Proposal
-	approval  domain.Approval
-	preflight application.ApplyPreflightResult
-	err       error
-	create    application.CreateCommand
-	decision  domain.Decision
-	replayed  bool
+	proposal       domain.Proposal
+	decisionResult application.ApprovalDecisionResult
+	preflight      application.ApplyPreflightResult
+	err            error
+	create         application.CreateCommand
+	decision       domain.Decision
+	replayed       bool
 }
 
 func (f *fakeService) CreateProposal(_ context.Context, command application.CreateCommand) (application.CreateResult, error) {
@@ -186,9 +195,9 @@ func (f *fakeService) CreateProposal(_ context.Context, command application.Crea
 func (f *fakeService) GetProposal(context.Context, foundation.ID) (domain.Proposal, error) {
 	return f.proposal, f.err
 }
-func (f *fakeService) DecideProposal(_ context.Context, _, _ foundation.ID, _ string, decision domain.Decision) (domain.Approval, error) {
+func (f *fakeService) DecideProposalWithDispatch(_ context.Context, _, _ foundation.ID, _ string, decision domain.Decision) (application.ApprovalDecisionResult, error) {
 	f.decision = decision
-	return f.approval, f.err
+	return f.decisionResult, f.err
 }
 func (f *fakeService) CheckApplyPreflight(context.Context, foundation.ID, foundation.ID, string) (application.ApplyPreflightResult, error) {
 	return f.preflight, f.err

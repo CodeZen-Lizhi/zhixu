@@ -19,6 +19,7 @@ import (
 
 var _ domain.WritebackRepository = (*Repository)(nil)
 var _ domain.WritebackSagaRepository = (*Repository)(nil)
+var _ domain.WritebackExecutionLookup = (*Repository)(nil)
 
 // BeginWriteback 在单一事务中校验 lease、消费双授权、创建 Execution 并推进 Proposal。
 // Credential 只在当前调用栈参与哈希绑定比较，绝不写入任何持久化字段。
@@ -58,19 +59,20 @@ func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWri
 
 	// Proposal、Revision、Approval 以固定顺序锁定，正文/目标/Hash 全部从此处派生。
 	var proposalWorkspace, proposalStatus, targetPath, baseHash, content, revisionChangeHash string
+	var proposalWorkflowRunID *string
 	var revisionProposal, approvalProposal, approvalRevision string
 	var approvalChangeHash, approvalDecision string
 	var approvalGitHead *string
 	var revisionID, approvalID string
 	err = tx.QueryRow(ctx, `
-		SELECT p.workspace_id::text,p.status,r.id::text,r.proposal_id::text,r.target_path,r.base_hash,r.content,r.change_hash,
-		       a.id::text,a.proposal_id::text,a.revision_id::text,a.change_hash,a.decision,a.approved_git_head
+			SELECT p.workspace_id::text,p.status,p.workflow_run_id::text,r.id::text,r.proposal_id::text,r.target_path,r.base_hash,r.content,r.change_hash,
+			       a.id::text,a.proposal_id::text,a.revision_id::text,a.change_hash,a.decision,a.approved_git_head
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.id=$2 AND r.proposal_id=p.id
 		JOIN change_control.approval a ON a.id=$3 AND a.proposal_id=p.id AND a.revision_id=r.id
 		WHERE p.id=$1
 		FOR UPDATE OF p,r,a`, string(command.ProposalID), string(writeAuth.RevisionID), string(writeAuth.ApprovalID)).Scan(
-		&proposalWorkspace, &proposalStatus, &revisionID, &revisionProposal, &targetPath, &baseHash, &content, &revisionChangeHash,
+		&proposalWorkspace, &proposalStatus, &proposalWorkflowRunID, &revisionID, &revisionProposal, &targetPath, &baseHash, &content, &revisionChangeHash,
 		&approvalID, &approvalProposal, &approvalRevision, &approvalChangeHash, &approvalDecision, &approvalGitHead)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.WritebackExecution{}, foundation.NewError(foundation.ErrorNotFound, "WRITEBACK_APPROVAL_NOT_FOUND", false, err)
@@ -78,7 +80,7 @@ func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWri
 	if err != nil {
 		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_APPROVAL_QUERY_FAILED")
 	}
-	if proposalWorkspace != string(command.WorkspaceID) || revisionProposal != string(command.ProposalID) || approvalProposal != string(command.ProposalID) || approvalRevision != revisionID || foundation.ID(revisionID) != writeAuth.RevisionID || foundation.ID(approvalID) != writeAuth.ApprovalID || approvalDecision != string(domain.DecisionApproved) || approvalGitHead == nil || !strings.EqualFold(revisionChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(approvalChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(baseHash, writeAuth.TargetVersion) {
+	if proposalWorkspace != string(command.WorkspaceID) || proposalWorkflowRunID == nil || *proposalWorkflowRunID != string(command.WorkflowRunID) || revisionProposal != string(command.ProposalID) || approvalProposal != string(command.ProposalID) || approvalRevision != revisionID || foundation.ID(revisionID) != writeAuth.RevisionID || foundation.ID(approvalID) != writeAuth.ApprovalID || approvalDecision != string(domain.DecisionApproved) || approvalGitHead == nil || !strings.EqualFold(revisionChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(approvalChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(baseHash, writeAuth.TargetVersion) {
 		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackIdentityConflict)
 	}
 
@@ -401,6 +403,24 @@ func (r *Repository) GetWritebackExecution(ctx context.Context, id foundation.ID
 		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_QUERY_FAILED")
 	}
 	return execution, nil
+}
+
+// FindWritebackExecutionByKey 按 Workspace + stable key 做 exact lookup。
+// Bootstrap 依赖 found=false 决定是否签发新 Credential，因此不得回退到 Proposal、Authorization 或其他索引。
+func (r *Repository) FindWritebackExecutionByKey(ctx context.Context, workspaceID foundation.ID, idempotencyKey string) (domain.WritebackExecution, bool, error) {
+	parsedWorkspaceID, err := foundation.ParseID(string(workspaceID))
+	canonicalKey := strings.TrimSpace(idempotencyKey)
+	if err != nil || parsedWorkspaceID != workspaceID || canonicalKey == "" || canonicalKey != idempotencyKey || len(canonicalKey) > 128 {
+		return domain.WritebackExecution{}, false, foundation.NewError(foundation.ErrorInvalidInput, "WRITEBACK_LOOKUP_INVALID", false, errors.Join(err, domain.ErrWritebackInvalidInput))
+	}
+	execution, err := scanWritebackExecution(r.db.QueryRow(ctx, `SELECT `+writebackColumns+` FROM change_control.writeback_execution WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), idempotencyKey))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.WritebackExecution{}, false, nil
+	}
+	if err != nil {
+		return domain.WritebackExecution{}, false, classifyWriteback(err, "WRITEBACK_LOOKUP_FAILED")
+	}
+	return execution, true, nil
 }
 
 // CheckpointWritebackExecution 原子推进单步执行状态，并同步对应 Proposal 状态。

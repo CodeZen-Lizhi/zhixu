@@ -47,8 +47,37 @@ func TestRepositoryWritebackCreateReplayAndIdentityConflict(t *testing.T) {
 	}
 }
 
+func TestRepositoryFindWritebackExecutionByKeyIsExactAndWorkspaceScoped(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	created, err := fixture.repository.CreateWritebackExecution(fixture.ctx, fixture.create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, ok, err := fixture.repository.FindWritebackExecutionByKey(fixture.ctx, fixture.workspaceID, fixture.create.IdempotencyKey)
+	if err != nil || !ok || found.ID != created.ID || found.IdempotencyKey != fixture.create.IdempotencyKey || found.WriteAuthorizationID != fixture.writeAuthorizationID || found.GitAuthorizationID != fixture.gitAuthorizationID {
+		t.Fatalf("found=%#v ok=%v err=%v", found, ok, err)
+	}
+	if _, ok, err := fixture.repository.FindWritebackExecutionByKey(fixture.ctx, fixture.workspaceID, "missing-writeback"); err != nil || ok {
+		t.Fatalf("missing ok=%v err=%v", ok, err)
+	}
+	otherWorkspace := fixture.nextID(t)
+	if _, ok, err := fixture.repository.FindWritebackExecutionByKey(fixture.ctx, otherWorkspace, fixture.create.IdempotencyKey); err != nil || ok {
+		t.Fatalf("cross-workspace ok=%v err=%v", ok, err)
+	}
+	if _, _, err := fixture.repository.FindWritebackExecutionByKey(fixture.ctx, "not-a-uuid", fixture.create.IdempotencyKey); err == nil {
+		t.Fatal("invalid workspace id accepted")
+	}
+	if _, _, err := fixture.repository.FindWritebackExecutionByKey(fixture.ctx, fixture.workspaceID, " "); err == nil {
+		t.Fatal("empty key accepted")
+	}
+	if _, _, err := fixture.repository.FindWritebackExecutionByKey(fixture.ctx, fixture.workspaceID, " "+fixture.create.IdempotencyKey); err == nil {
+		t.Fatal("non-canonical key accepted")
+	}
+}
+
 func TestRepositoryBeginWritebackAtomicDoubleConsumeAndReplay(t *testing.T) {
 	fixture := newWritebackFixture(t)
+	fixture.bindProposalToRun(t)
 	begin := domain.BeginWriteback{
 		WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID,
 		LeaseOwner: "test-owner", IdempotencyKey: "begin-" + string(fixture.executionID),
@@ -71,7 +100,7 @@ func TestRepositoryBeginWritebackAtomicDoubleConsumeAndReplay(t *testing.T) {
 	if created.Status != domain.WritebackStatusPrepared || created.ID == "" || created.ResultHash != wantResultHash {
 		t.Fatalf("created=%#v", created)
 	}
-	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApplying, 3)
+	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApplying, 4)
 	var writeStatus, gitStatus string
 	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT (SELECT status FROM change_control.tool_authorization WHERE id=$1),(SELECT status FROM change_control.tool_authorization WHERE id=$2)`, string(fixture.writeAuthorizationID), string(fixture.gitAuthorizationID)).Scan(&writeStatus, &gitStatus); err != nil {
 		t.Fatal(err)
@@ -94,6 +123,7 @@ func TestRepositoryBeginWritebackAtomicDoubleConsumeAndReplay(t *testing.T) {
 
 func TestRepositoryBeginWritebackRollsBackBothAuthorizations(t *testing.T) {
 	fixture := newWritebackFixture(t)
+	fixture.bindProposalToRun(t)
 	begin := domain.BeginWriteback{
 		ExecutionID: "not-a-uuid", WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID,
 		LeaseOwner: "test-owner", IdempotencyKey: "rollback-" + string(fixture.executionID),
@@ -113,8 +143,34 @@ func TestRepositoryBeginWritebackRollsBackBothAuthorizations(t *testing.T) {
 	assertRowCount(t, fixture.ctx, fixture.tx, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
 }
 
+func TestRepositoryBeginWritebackRejectsProposalBoundToDifferentRun(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	otherRunID := fixture.nextID(t)
+	var definitionID string
+	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT definition_id::text FROM workflow.run WHERE id=$1`, string(fixture.runID)).Scan(&definitionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.tx.Exec(fixture.ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(otherRunID), string(fixture.workspaceID), definitionID, fixture.now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.tx.Exec(fixture.ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(fixture.proposalID), string(otherRunID), fixture.now); err != nil {
+		t.Fatal(err)
+	}
+	begin := domain.BeginWriteback{
+		ExecutionID: fixture.executionID, WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID,
+		LeaseOwner: "test-owner", IdempotencyKey: "wrong-run-" + string(fixture.executionID),
+		WriteAuthorization: domain.AuthorizationConsume{Credential: string(fixture.writeAuthorizationID) + "write-auth", IdempotencyKey: "write-auth-" + string(fixture.writeAuthorizationID), WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash},
+		GitAuthorization:   domain.AuthorizationConsume{Credential: string(fixture.gitAuthorizationID) + "git-auth", IdempotencyKey: "git-auth-" + string(fixture.gitAuthorizationID), WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID, ToolName: "CreateGitCommit", Capability: domain.CapabilityGitWrite, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash},
+	}
+	if _, err := fixture.repository.BeginWriteback(fixture.ctx, begin); !hasCode(err, "WRITEBACK_IDENTITY_CONFLICT") {
+		t.Fatalf("proposal bound to another run err=%v", err)
+	}
+	assertRowCount(t, fixture.ctx, fixture.tx, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
+}
+
 func TestRepositoryBeginWritebackRejectsPreviouslyConsumedAuthorizationsWithoutExecution(t *testing.T) {
 	fixture := newWritebackFixture(t)
+	fixture.bindProposalToRun(t)
 	begin := domain.BeginWriteback{
 		ExecutionID: fixture.executionID, WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID,
 		LeaseOwner: "test-owner", IdempotencyKey: "consumed-before-begin-" + string(fixture.executionID),
@@ -135,11 +191,12 @@ func TestRepositoryBeginWritebackRejectsPreviouslyConsumedAuthorizationsWithoutE
 		t.Fatalf("previously consumed authorizations started writeback: %v", err)
 	}
 	assertRowCount(t, fixture.ctx, fixture.tx, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
-	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApproved, 2)
+	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApproved, 3)
 }
 
 func TestRepositoryBeginWritebackConcurrentReplayCreatesOneExecution(t *testing.T) {
 	fixture := newWritebackFixture(t)
+	fixture.bindProposalToRun(t)
 	if err := fixture.tx.Commit(fixture.ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -185,6 +242,7 @@ func TestRepositoryBeginWritebackConcurrentReplayCreatesOneExecution(t *testing.
 
 func TestRepositoryWritebackPreparedCheckpointsAndLease(t *testing.T) {
 	fixture := newWritebackFixture(t)
+	fixture.bindProposalToRun(t)
 	begin := domain.BeginWriteback{
 		WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID,
 		LeaseOwner: "test-owner", IdempotencyKey: "checkpoint-" + string(fixture.executionID), ExecutionID: fixture.executionID,
@@ -615,7 +673,7 @@ func newWritebackFixture(t *testing.T) *writebackFixture {
 	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(fixture.runID), string(fixture.workspaceID), string(definitionID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,version,created_at,updated_at,lease_owner,lease_until) VALUES($1,$2,'writeback','tool','running',1,'{}',1,$3,$3,'test-owner',$4)`, string(fixture.nodeID), string(fixture.runID), now, now.Add(time.Hour)); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,version,created_at,updated_at,lease_owner,lease_until,idempotency_key,input_schema_version,output_schema_version,dispatch_no) VALUES($1,$2,'writeback','tool','running',1,'{}',1,$3,$3,'test-owner',$4,$5,1,1,1)`, string(fixture.nodeID), string(fixture.runID), now, now.Add(time.Hour), "writeback-node-"+string(fixture.nodeID)); err != nil {
 		t.Fatal(err)
 	}
 	content := "writeback result"
@@ -663,6 +721,13 @@ func (f *writebackFixture) createAuthorization(t *testing.T, id foundation.ID, t
 	})
 	if err != nil || issued.Replayed || issued.Authorization.ID != id {
 		t.Fatalf("authorization=%#v err=%v", issued, err)
+	}
+}
+
+func (f *writebackFixture) bindProposalToRun(t *testing.T) {
+	t.Helper()
+	if _, err := f.tx.Exec(f.ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved' AND workflow_run_id IS NULL`, string(f.proposalID), string(f.runID), f.now); err != nil {
+		t.Fatal(err)
 	}
 }
 

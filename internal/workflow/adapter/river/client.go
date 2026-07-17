@@ -50,8 +50,8 @@ func (c *Client) Schema() string {
 	return c.schema
 }
 
-// Start starts River's delivery runtime. M4-A exposes this boundary for tests;
-// production process lifecycle is intentionally not connected here.
+// Start starts River's delivery runtime. The adapter only exposes the lifecycle
+// boundary; cmd/worker owns production start, signal handling, and shutdown.
 func (c *Client) Start(ctx context.Context) error {
 	if c == nil || c.inner == nil {
 		return jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_MISSING", errors.New("River client is nil"))

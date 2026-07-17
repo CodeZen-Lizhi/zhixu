@@ -177,7 +177,7 @@ func ClassifyFailure(input FailureInput) (FailureEnvelope, error) {
 
 	var class FailureClass
 	switch {
-	case code == "WORKFLOW_LEASE_LOST":
+	case code == "WORKFLOW_LEASE_LOST" || code == "WRITEBACK_LEASE_LOST":
 		class = FailureClassLeaseLost
 	case input.CancellationProven:
 		class = FailureClassCancelled

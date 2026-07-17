@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
+	approvaldispatchpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/approvaldispatchpostgres"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
@@ -77,6 +78,12 @@ func main() {
 	ingestionHandler := ingestionhttp.NewHandler(nil)
 	fileScanner := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
 	if database != nil {
+		workflowService, workflowRuntime, workflowServiceErr := newWorkflowComponents(database.DB())
+		if workflowServiceErr != nil {
+			logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
+		} else {
+			workflowHandler = workflowhttp.NewHandler(workflowService)
+		}
 		workspaceRepository, repositoryErr := workspacepostgres.NewRepository(database.DB())
 		if repositoryErr != nil {
 			logger.Error("workspace repository is unavailable", "error_code", "WORKSPACE_DATABASE_UNAVAILABLE")
@@ -113,22 +120,21 @@ func main() {
 			changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
 			targetReader, targetReaderErr := changecontrollocalfs.NewReader(workspaceRepository)
 			approvalGitInspector, approvalGitInspectorErr := gitcli.NewWritebackClient(gitcli.New(""), workspaceRepository)
-			if changeControlRepositoryErr != nil || targetReaderErr != nil || approvalGitInspectorErr != nil {
+			if changeControlRepositoryErr != nil || targetReaderErr != nil || approvalGitInspectorErr != nil || workflowRuntime == nil {
 				logger.Error("change control dependencies are unavailable", "error_code", "CHANGE_CONTROL_DEPENDENCY_UNAVAILABLE")
 			} else {
-				changeControlService, changeControlServiceErr := changecontrolapplication.NewService(changeControlRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, targetReader, approvalGitInspector)
-				if changeControlServiceErr != nil {
-					logger.Error("change control service is unavailable", "error_code", "CHANGE_CONTROL_SERVICE_UNAVAILABLE")
+				dispatchRepository, dispatchRepositoryErr := approvaldispatchpostgres.NewApprovalDispatchRepository(database.DB(), workflowRuntime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+				if dispatchRepositoryErr != nil {
+					logger.Error("approval dispatch repository is unavailable", "error_code", "APPROVAL_DISPATCH_DEPENDENCY_MISSING")
 				} else {
-					changeControlHandler = changecontrolhttp.NewHandler(changeControlService)
+					changeControlService, changeControlServiceErr := changecontrolapplication.NewServiceWithDispatch(changeControlRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, targetReader, approvalGitInspector, dispatchRepository)
+					if changeControlServiceErr != nil {
+						logger.Error("change control service is unavailable", "error_code", "CHANGE_CONTROL_SERVICE_UNAVAILABLE")
+					} else {
+						changeControlHandler = changecontrolhttp.NewHandler(changeControlService)
+					}
 				}
 			}
-		}
-		workflowService, workflowServiceErr := newWorkflowService(database.DB())
-		if workflowServiceErr != nil {
-			logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
-		} else {
-			workflowHandler = workflowhttp.NewHandler(workflowService)
 		}
 	}
 
@@ -179,21 +185,26 @@ func main() {
 }
 
 func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error) {
+	service, _, err := newWorkflowComponents(pool)
+	return service, err
+}
+
+func newWorkflowComponents(pool *pgxpool.Pool) (*workflowapplication.Service, *workflowpostgres.RuntimeRepository, error) {
 	legacyRepository, err := workflowpostgres.NewRepository(pool)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	client, err := riveradapter.NewClient(pool, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	inserter, err := riveradapter.NewJobInserter(client)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	catalog, err := workflowapplication.NewValidationCatalog(
 		[]int{1},
@@ -207,21 +218,21 @@ func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error
 		},
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	executors, err := workflowapplication.NewExecutorRegistry(catalog)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := executors.Register(workflowapplication.CanonicalJSONHashNodeKind, workflowapplication.CanonicalJSONHashInputSchemaVersion, workflowapplication.NewCanonicalJSONHashExecutor()); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := executors.Freeze(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := definitions.Register(workflowdomain.RegisteredDefinition{
 		Key: "deterministic.hash", Version: 1, InputSchemaVersion: 1,
@@ -231,12 +242,16 @@ func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error
 			RetryPolicy: workflowdomain.RetryPolicy{},
 		}}},
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := definitions.Freeze(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return workflowapplication.NewRuntimeService(legacyRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, workflowapplication.RuntimeDependencies{Definitions: definitions, Starter: runtimeRepository, State: runtimeRepository, Human: runtimeRepository})
+	service, err := workflowapplication.NewRuntimeService(legacyRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, workflowapplication.RuntimeDependencies{Definitions: definitions, Starter: runtimeRepository, State: runtimeRepository, Human: runtimeRepository})
+	if err != nil {
+		return nil, nil, err
+	}
+	return service, runtimeRepository, nil
 }
 
 func firstError(values ...error) error {

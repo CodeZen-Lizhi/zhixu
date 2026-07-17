@@ -84,6 +84,18 @@ func (r *RuntimeRepository) Claim(ctx context.Context, command application.Claim
 		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale})
 	}
 	if node.Status == domain.NodeStatusRunning && node.LeaseUntil != nil && node.LeaseUntil.After(now) {
+		var activeRiverJobID *int64
+		var activeRiverJobAttempt *int
+		if err := tx.QueryRow(ctx, `SELECT river_job_id,river_job_attempt FROM workflow.node_attempt WHERE node_run_id=$1 AND attempt_no=$2 AND status='running'`, string(node.ID), node.Attempt).Scan(&activeRiverJobID, &activeRiverJobAttempt); err != nil {
+			return application.ClaimResult{}, classify(err, "WORKFLOW_ACTIVE_ATTEMPT_QUERY_FAILED")
+		}
+		// A higher River attempt means the previous delivery returned a transport
+		// error after its Workflow Claim committed. A benign stale result would let
+		// River complete the unique Job while the Workflow lease later expires with
+		// no delivery left to reclaim it, so keep the Job retryable until expiry.
+		if activeRiverJobID != nil && activeRiverJobAttempt != nil && *activeRiverJobID == command.RiverJobID && command.RiverJobAttempt > *activeRiverJobAttempt {
+			return application.ClaimResult{}, foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_LEASE_HELD", true, errors.New("previous delivery lease is still active"))
+		}
 		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale})
 	}
 	if node.Status == domain.NodeStatusRunning {

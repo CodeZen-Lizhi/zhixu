@@ -6,13 +6,19 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 )
 
 func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
@@ -37,7 +43,7 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	}
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	workspaceID := integrationID(1)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Change Test',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), "/tmp/change-"+string(workspaceID), now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Change Test',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/change-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -66,9 +72,64 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 		t.Fatalf("idempotency conflict err=%v", err)
 	}
 	queried, err := repository.GetProposal(ctx, proposalID)
-	if err != nil || queried.TargetPath != "a.md" || queried.Approval != nil || queried.Version != 1 {
+	if err != nil || queried.TargetPath != "a.md" || queried.Approval != nil || queried.WorkflowRunID != nil || queried.Version != 1 {
 		t.Fatalf("queried=%#v err=%v", queried, err)
 	}
+	definitionID, workflowRunID := integrationID(7), integrationID(8)
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,'safe-writeback',1,'{}',$3)`, string(definitionID), string(workspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'pending','{}',1,$4,$4)`, string(workflowRunID), string(workspaceID), string(definitionID), now); err != nil {
+		t.Fatal(err)
+	}
+	duplicateProposal := proposal
+	duplicateProposal.ID, duplicateProposal.Revision.ID = integrationID(13), integrationID(14)
+	duplicateProposal.IdempotencyKey = "create-duplicate-binding"
+	duplicateProposal.RequestHash = domain.ComputeRequestHash(workspaceID, "b.md", baseHash, "other content", "source evidence", "low", "revert commit")
+	duplicateProposal.TargetPath = "b.md"
+	duplicateProposal.Revision.ProposalID = duplicateProposal.ID
+	duplicateProposal.Revision.TargetPath = "b.md"
+	duplicateProposal.Revision.Content = "other content"
+	duplicateProposal.Revision.ChangeHash = domain.ComputeChangeHash("b.md", baseHash, "other content")
+	if _, err := repository.CreateProposal(ctx, duplicateProposal); err != nil {
+		t.Fatal(err)
+	}
+	otherWorkspaceID, otherDefinitionID, otherRunID := integrationID(15), integrationID(16), integrationID(17)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Other Change Test',$2,$2,$3,'test',1,$3,$3)`, string(otherWorkspaceID), "/tmp/change-"+string(otherWorkspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,'safe-writeback',1,'{}',$3)`, string(otherDefinitionID), string(otherWorkspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'pending','{}',1,$4,$4)`, string(otherRunID), string(otherWorkspaceID), string(otherDefinitionID), now); err != nil {
+		t.Fatal(err)
+	}
+	crossWorkspaceProposal := proposal
+	crossWorkspaceProposal.ID, crossWorkspaceProposal.Revision.ID = integrationID(18), integrationID(19)
+	crossWorkspaceProposal.IdempotencyKey = "create-cross-workspace-binding"
+	crossWorkspaceProposal.RequestHash = domain.ComputeRequestHash(workspaceID, "c.md", baseHash, "cross content", "source evidence", "low", "revert commit")
+	crossWorkspaceProposal.TargetPath = "c.md"
+	crossWorkspaceProposal.Revision.ProposalID = crossWorkspaceProposal.ID
+	crossWorkspaceProposal.Revision.TargetPath = "c.md"
+	crossWorkspaceProposal.Revision.Content = "cross content"
+	crossWorkspaceProposal.Revision.ChangeHash = domain.ComputeChangeHash("c.md", baseHash, "cross content")
+	if _, err := repository.CreateProposal(ctx, crossWorkspaceProposal); err != nil {
+		t.Fatal(err)
+	}
+	invalidStatusProposal := proposal
+	invalidStatusProposal.ID, invalidStatusProposal.Revision.ID = integrationID(23), integrationID(24)
+	invalidStatusProposal.IdempotencyKey = "create-invalid-status-binding"
+	invalidStatusProposal.RequestHash = domain.ComputeRequestHash(workspaceID, "d.md", baseHash, "invalid status content", "source evidence", "low", "revert commit")
+	invalidStatusProposal.TargetPath = "d.md"
+	invalidStatusProposal.Revision.ProposalID = invalidStatusProposal.ID
+	invalidStatusProposal.Revision.TargetPath = "d.md"
+	invalidStatusProposal.Revision.Content = "invalid status content"
+	invalidStatusProposal.Revision.ChangeHash = domain.ComputeChangeHash("d.md", baseHash, "invalid status content")
+	if _, err := repository.CreateProposal(ctx, invalidStatusProposal); err != nil {
+		t.Fatal(err)
+	}
+	assertSQLState(t, ctx, tx, "23514", `UPDATE change_control.proposal SET status='rejected',workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1`, string(invalidStatusProposal.ID), string(workflowRunID), now.Add(time.Minute))
+	assertSQLState(t, ctx, tx, "55000", `INSERT INTO change_control.proposal(id,workspace_id,status,created_at,updated_at,idempotency_key,request_hash,workflow_run_id) VALUES($1,$2,'ready_for_review',$3,$3,$4,$5,$6)`, string(integrationID(20)), string(workspaceID), now, "insert-bound-proposal", strings.Repeat("0", 64), string(workflowRunID))
 
 	approvedGitHead := "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 	approval := domain.Approval{ID: integrationID(4), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now.Add(time.Minute)}
@@ -86,21 +147,98 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	if _, err := repository.Approve(ctx, domain.Approval{ID: integrationID(6), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionRejected, DecidedAt: now.Add(2 * time.Minute)}); !hasCode(err, "PROPOSAL_NOT_READY_FOR_REVIEW") {
 		t.Fatalf("conflicting approval err=%v", err)
 	}
-	queried, err = repository.GetProposal(ctx, proposalID)
-	if err != nil || queried.Status != domain.StatusApproved || queried.Version != 2 || queried.Approval == nil || queried.Approval.ChangeHash != changeHash || queried.Approval.ApprovedGitHead == nil || *queried.Approval.ApprovedGitHead != "abcdef0123456789abcdef0123456789abcdef01" {
-		t.Fatalf("approved proposal=%#v err=%v", queried, err)
-	}
-
-	if err := repository.MarkNeedsRevision(ctx, proposalID, now.Add(3*time.Minute)); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(proposalID), string(workflowRunID), now.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	queried, err = repository.GetProposal(ctx, proposalID)
-	if err != nil || queried.Status != domain.StatusNeedsRevision || queried.Version != 3 {
+	if err != nil || queried.Status != domain.StatusApproved || queried.Version != 3 || queried.WorkflowRunID == nil || *queried.WorkflowRunID != workflowRunID || queried.Approval == nil || queried.Approval.ChangeHash != changeHash || queried.Approval.ApprovedGitHead == nil || *queried.Approval.ApprovedGitHead != "abcdef0123456789abcdef0123456789abcdef01" {
+		t.Fatalf("approved proposal=%#v err=%v", queried, err)
+	}
+	assertSQLState(t, ctx, tx, "55000", `UPDATE change_control.proposal SET workflow_run_id=NULL,updated_at=$2,version=version+1 WHERE id=$1`, string(proposalID), now.Add(3*time.Minute))
+
+	if _, err := repository.Approve(ctx, domain.Approval{ID: integrationID(21), ProposalID: duplicateProposal.ID, RevisionID: duplicateProposal.Revision.ID, ChangeHash: duplicateProposal.Revision.ChangeHash, Decision: domain.DecisionApproved, DecidedAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	assertSQLState(t, ctx, tx, "23505", `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(duplicateProposal.ID), string(workflowRunID), now.Add(2*time.Minute))
+	if _, err := repository.Approve(ctx, domain.Approval{ID: integrationID(22), ProposalID: crossWorkspaceProposal.ID, RevisionID: crossWorkspaceProposal.Revision.ID, ChangeHash: crossWorkspaceProposal.Revision.ChangeHash, Decision: domain.DecisionApproved, DecidedAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	assertSQLState(t, ctx, tx, "23514", `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(crossWorkspaceProposal.ID), string(otherRunID), now.Add(2*time.Minute))
+
+	if err := repository.MarkNeedsRevision(ctx, proposalID, now.Add(4*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	queried, err = repository.GetProposal(ctx, proposalID)
+	if err != nil || queried.Status != domain.StatusNeedsRevision || queried.Version != 4 || queried.WorkflowRunID == nil || *queried.WorkflowRunID != workflowRunID {
 		t.Fatalf("needs revision proposal=%#v err=%v", queried, err)
 	}
 
 	assertImmutable(t, ctx, tx, `UPDATE change_control.proposal_revision SET content='tampered' WHERE id=$1`, string(revisionID))
 	assertImmutable(t, ctx, tx, `UPDATE change_control.approval SET decision='rejected' WHERE id=$1`, string(approval.ID))
+}
+
+func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
+	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	ids := foundation.NewUUIDGenerator(nil)
+	nextID := func() foundation.ID {
+		id, idErr := ids.New()
+		if idErr != nil {
+			t.Fatal(idErr)
+		}
+		return id
+	}
+	workspaceID, definitionID, runID, proposalID := nextID(), nextID(), nextID(), nextID()
+	now := time.Now().UTC()
+	rootPath := "/tmp/approval-down-guard-" + string(workspaceID)
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Approval Down Guard',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), rootPath, now); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM change_control.proposal WHERE id=$1`, string(proposalID))
+		_, _ = pool.Exec(context.Background(), `DELETE FROM workflow.run WHERE id=$1`, string(runID))
+		_, _ = pool.Exec(context.Background(), `DELETE FROM workflow.definition WHERE id=$1`, string(definitionID))
+		_, _ = pool.Exec(context.Background(), `DELETE FROM core.workspace WHERE id=$1`, string(workspaceID))
+	}()
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,'approval-down-guard',1,'{}',$3)`, string(definitionID), string(workspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'pending','{}',1,$4,$4)`, string(runID), string(workspaceID), string(definitionID), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,status,created_at,updated_at,idempotency_key,request_hash) VALUES($1,$2,'approved',$3,$3,$4,$5)`, string(proposalID), string(workspaceID), now, "down-guard-"+string(proposalID), strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1`, string(proposalID), string(runID), now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
+	annotated, err := platformmigration.NewLegacyAnnotationFS(projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName("goose_db_version"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Down(ctx); err == nil {
+		t.Fatal("00013 Down accepted a persisted Proposal to Workflow Run binding")
+	} else {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
+			t.Fatalf("guarded Down error=%v", err)
+		}
+	}
 }
 
 func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
@@ -329,15 +467,36 @@ func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
 	}
 }
 
-func assertImmutable(t *testing.T, ctx context.Context, parent pgx.Tx, query string, argument any) {
+func assertImmutable(t *testing.T, ctx context.Context, parent pgx.Tx, query string, arguments ...any) {
 	t.Helper()
 	tx, err := parent.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, query, argument); err == nil {
+	if _, err := tx.Exec(ctx, query, arguments...); err == nil {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("immutable mutation succeeded: %s", query)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertSQLState(t *testing.T, ctx context.Context, parent pgx.Tx, sqlState, query string, arguments ...any) {
+	t.Helper()
+	tx, err := parent.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, execErr := tx.Exec(ctx, query, arguments...)
+	if execErr == nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("SQLSTATE %s mutation succeeded: %s", sqlState, query)
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(execErr, &pgErr) || pgErr.Code != sqlState {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("SQLSTATE=%v want=%s query=%s", execErr, sqlState, query)
 	}
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)

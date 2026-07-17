@@ -81,7 +81,7 @@ func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposa
 // GetProposal 使用单条查询返回一致的 Proposal、Revision 和 Approval 快照。
 func (r *Repository) GetProposal(ctx context.Context, proposalID foundation.ID) (domain.Proposal, error) {
 	row := r.db.QueryRow(ctx, `
-		SELECT p.id::text,p.workspace_id::text,p.idempotency_key,p.request_hash,p.status,p.version,p.created_at,p.updated_at,
+		SELECT p.id::text,p.workspace_id::text,p.idempotency_key,p.request_hash,p.workflow_run_id::text,p.status,p.version,p.created_at,p.updated_at,
 			r.id::text,r.revision_no,r.target_path,r.base_hash,r.content,r.evidence_summary,r.risk,r.rollback_plan,r.change_hash,r.created_at,
 			a.id::text,a.change_hash,a.decision,a.approved_git_head,a.decided_at
 		FROM change_control.proposal p
@@ -453,6 +453,7 @@ func authorizationTimePointer(value *time.Time) any {
 
 func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	var proposalID, workspaceID, idempotencyKey, requestHash, status string
+	var workflowRunID *string
 	var revisionID, targetPath, baseHash, content, evidence, risk, rollback, changeHash string
 	var approvalID, approvalHash, decision, approvedGitHead *string
 	var createdAt, updatedAt, revisionCreatedAt time.Time
@@ -460,7 +461,7 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	var revisionNo int
 	var version int64
 	err := row.Scan(
-		&proposalID, &workspaceID, &idempotencyKey, &requestHash, &status, &version, &createdAt, &updatedAt,
+		&proposalID, &workspaceID, &idempotencyKey, &requestHash, &workflowRunID, &status, &version, &createdAt, &updatedAt,
 		&revisionID, &revisionNo, &targetPath, &baseHash, &content, &evidence, &risk, &rollback, &changeHash, &revisionCreatedAt,
 		&approvalID, &approvalHash, &decision, &approvedGitHead, &decidedAt,
 	)
@@ -476,6 +477,10 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 			TargetPath: targetPath, BaseHash: baseHash, Content: content, EvidenceSummary: evidence,
 			Risk: risk, RollbackPlan: rollback, ChangeHash: changeHash, CreatedAt: revisionCreatedAt,
 		},
+	}
+	if workflowRunID != nil {
+		value := foundation.ID(*workflowRunID)
+		proposal.WorkflowRunID = &value
 	}
 	if approvalID != nil && approvalHash != nil && decision != nil && decidedAt != nil {
 		proposal.Approval = &domain.Approval{

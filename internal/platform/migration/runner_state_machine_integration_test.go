@@ -68,7 +68,8 @@ func TestWorkflowRuntimeStateMachineMigrationCompatibility(t *testing.T) {
 		}
 	}
 
-	// A populated new-state row must make the one-step Down fail safely.
+	// 00013 has no Proposal→Run binding in this fixture and can be removed;
+	// the next Down must be 00012 and reject populated Attempt data.
 	db := stdlib.OpenDBFromPool(pool)
 	defer db.Close()
 	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
@@ -78,6 +79,9 @@ func TestWorkflowRuntimeStateMachineMigrationCompatibility(t *testing.T) {
 	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00013 Down rejected unbound runtime fixture: %v", err)
 	}
 	if _, err := provider.Down(ctx); err == nil {
 		t.Fatal("00012 Down accepted node_attempt data")

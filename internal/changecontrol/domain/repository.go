@@ -33,3 +33,9 @@ type WritebackSagaRepository interface {
 	ValidateWritebackLease(context.Context, foundation.ID, string) error
 	FinalizeWritebackCleanup(context.Context, foundation.ID, int64, time.Time) (WritebackExecution, error)
 }
+
+// WritebackExecutionLookup 提供 Bootstrap 在签发 Credential 前使用的 exact 恢复查询。
+// 未找到稳定键是正常分支；实现必须以 found=false 返回，不能退化为其他唯一键搜索。
+type WritebackExecutionLookup interface {
+	FindWritebackExecutionByKey(context.Context, foundation.ID, string) (execution WritebackExecution, found bool, err error)
+}

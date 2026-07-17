@@ -54,7 +54,7 @@ func TestRuntimeRepositoryStartReplayConflictRollbackAndLegacyGuard(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Job.Duplicate || first.Job.JobID < 1 {
+	if first.Replayed || first.Job.Duplicate || first.Job.JobID < 1 {
 		t.Fatalf("first job=%#v", first.Job)
 	}
 	replay := request
@@ -69,7 +69,7 @@ func TestRuntimeRepositoryStartReplayConflictRollbackAndLegacyGuard(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Run.ID != first.Run.ID || second.FirstNode.ID != first.FirstNode.ID || second.Job.JobID != first.Job.JobID || !second.Job.Duplicate {
+	if second.Run.ID != first.Run.ID || second.FirstNode.ID != first.FirstNode.ID || second.Job.JobID != first.Job.JobID || !second.Job.Duplicate || !second.Replayed {
 		t.Fatalf("first=%#v second=%#v", first, second)
 	}
 	conflict := replay
@@ -152,7 +152,7 @@ func TestRuntimeRepositoryConcurrentDuplicateCreatesOneRunNodeOutboxAndJob(t *te
 	if left.err != nil || right.err != nil {
 		t.Fatalf("left=%#v right=%#v", left, right)
 	}
-	if left.result.Run.ID != right.result.Run.ID || left.result.FirstNode.ID != right.result.FirstNode.ID || left.result.Job.JobID != right.result.Job.JobID || left.result.Job.Duplicate == right.result.Job.Duplicate {
+	if left.result.Run.ID != right.result.Run.ID || left.result.FirstNode.ID != right.result.FirstNode.ID || left.result.Job.JobID != right.result.Job.JobID || left.result.Job.Duplicate == right.result.Job.Duplicate || left.result.Replayed == right.result.Replayed || left.result.Replayed != left.result.Job.Duplicate || right.result.Replayed != right.result.Job.Duplicate {
 		t.Fatalf("left=%#v right=%#v", left.result, right.result)
 	}
 	var runs, nodes, events, jobs int
@@ -194,12 +194,81 @@ func TestRuntimeRepositoryRecoversCommitResponseLoss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := repository.Start(ctx, runtimeStartFixture(workspaceID, now))
+	request := runtimeStartFixture(workspaceID, now)
+	result, err := repository.Start(ctx, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Run.ID == "" || result.FirstNode.ID == "" || result.Job.JobID < 1 {
+	if result.Run.ID == "" || result.FirstNode.ID == "" || result.Job.JobID < 1 || result.Replayed {
 		t.Fatalf("recovered result=%#v", result)
+	}
+	replay := request
+	remapRuntimeStartIDs(&replay, "7")
+	replayed, err := repository.Start(ctx, replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayed.Replayed || !replayed.Job.Duplicate || replayed.Run.ID != result.Run.ID || replayed.FirstNode.ID != result.FirstNode.ID || replayed.Job.JobID != result.Job.JobID {
+		t.Fatalf("initial=%#v replayed=%#v", result, replayed)
+	}
+}
+
+func TestRuntimeRepositoryStartTxUsesCallerTransactionAndReportsReplay(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	defer cleanup()
+	workspaceID := foundation.ID("91000000-0000-4000-8000-000000000001")
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A StartTx',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/m4a-start-tx", now); err != nil {
+		t.Fatal(err)
+	}
+	client, err := riveradapter.NewClient(pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserter, err := riveradapter.NewJobInserter(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRuntimeRepository(pool, inserter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	request := runtimeStartFixture(workspaceID, now)
+	first, err := repository.StartTx(ctx, tx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay := request
+	remapRuntimeStartIDs(&replay, "8")
+	second, err := repository.StartTx(ctx, tx, replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Replayed || first.Job.Duplicate || !second.Replayed || !second.Job.Duplicate || second.Run.ID != first.Run.ID || second.FirstNode.ID != first.FirstNode.ID || second.Job.JobID != first.Job.JobID {
+		t.Fatalf("first=%#v second=%#v", first, second)
+	}
+	var inTransaction int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM workflow.run WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), request.Run.IdempotencyKey).Scan(&inTransaction); err != nil || inTransaction != 1 {
+		t.Fatalf("in-transaction runs=%d err=%v", inTransaction, err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var runs, jobs int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.run WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), request.Run.IdempotencyKey).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.river_job WHERE kind=$1 AND args->>'node_run_id'=$2`, riveradapter.NodeJobKind, string(first.FirstNode.ID)).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 0 || jobs != 0 {
+		t.Fatalf("caller rollback left runs=%d jobs=%d", runs, jobs)
 	}
 }
 

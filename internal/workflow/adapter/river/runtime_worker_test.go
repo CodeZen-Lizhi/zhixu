@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,38 @@ func TestRuntimeNodeWorkerCompletesPersistedSuccess(t *testing.T) {
 	}
 	if runtime.completeCalls != 1 || runtime.failCalls != 0 || runtime.completeCommand.Binding.DeliveryID != "job-41-attempt-1" || runtime.completeCommand.OutputSchemaVersion != 1 {
 		t.Fatalf("runtime=%+v", runtime)
+	}
+}
+
+func TestRuntimeNodeWorkerUsesDeliveryScopedLeaseOwner(t *testing.T) {
+	runtime := &runtimeWorkerFake{claim: claimedRuntimeResult()}
+	worker := newRuntimeWorkerFixture(t, runtime, runtimeExecutor{output: json.RawMessage(`{"ok":true}`)})
+	first := runtimeRiverJob()
+	if err := worker.Work(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	firstOwner := runtime.claimCommand.LeaseOwner
+	second := runtimeRiverJob()
+	second.Attempt = 2
+	if err := worker.Work(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	secondOwner := runtime.claimCommand.LeaseOwner
+	if firstOwner == "" || secondOwner == "" || firstOwner == secondOwner || !strings.Contains(firstOwner, "job-41-attempt-1") || !strings.Contains(secondOwner, "job-41-attempt-2") {
+		t.Fatalf("first owner=%q second owner=%q", firstOwner, secondOwner)
+	}
+}
+
+func TestRuntimeNodeWorkerRejectsPersistedArgsWithUnknownFields(t *testing.T) {
+	runtime := &runtimeWorkerFake{claim: claimedRuntimeResult()}
+	worker := newRuntimeWorkerFixture(t, runtime, runtimeExecutor{})
+	job := runtimeRiverJob()
+	job.EncodedArgs = []byte(`{"schema_version":1,"node_run_id":"a0000000-0000-4000-8000-000000000001","dispatch_no":1,"credential":"secret"}`)
+	if err := worker.Work(context.Background(), job); err == nil {
+		t.Fatal("runtime worker accepted persisted args with an unknown secret field")
+	}
+	if runtime.claimCalls != 0 {
+		t.Fatalf("claim calls=%d", runtime.claimCalls)
 	}
 }
 
@@ -72,6 +105,21 @@ func TestRuntimeNodeWorkerCancelsExecutorAfterHeartbeatLoss(t *testing.T) {
 	}
 	if runtime.heartbeatCalls < 1 || runtime.completeCalls != 0 || runtime.failCalls != 0 {
 		t.Fatalf("runtime=%+v", runtime)
+	}
+}
+
+func TestRuntimeNodeWorkerReducesControlCancellationAsCheckpoint(t *testing.T) {
+	runtime := &runtimeWorkerFake{claim: claimedRuntimeResult(), heartbeatErr: foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_PAUSE_REQUESTED", false, errors.New("pause"))}
+	worker, err := NewRuntimeNodeWorker(runtimeExecutorRegistry(t, runtimeExecutor{waitForCancel: true}), runtime, "worker-a", 60*time.Millisecond, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	var classified *foundation.Error
+	if runtime.failCalls != 1 || !errors.As(runtime.failCommand.Failure.Err, &classified) || classified.Code != "WORKFLOW_CONTROL_CHECKPOINT" {
+		t.Fatalf("runtime=%+v failure=%v", runtime, runtime.failCommand.Failure.Err)
 	}
 }
 
@@ -156,6 +204,8 @@ func (e runtimeExecutor) Execute(ctx context.Context, _ application.ExecutionCon
 
 type runtimeWorkerFake struct {
 	claim            application.ClaimResult
+	claimCommand     application.ClaimCommand
+	claimCalls       int
 	claimErr         error
 	heartbeat        application.HeartbeatResult
 	heartbeatErr     error
@@ -172,7 +222,13 @@ type runtimeWorkerFake struct {
 	humanWaitCalls   int
 }
 
-func (f *runtimeWorkerFake) Claim(context.Context, application.ClaimCommand) (application.ClaimResult, error) {
+func (f *runtimeWorkerFake) Claim(_ context.Context, command application.ClaimCommand) (application.ClaimResult, error) {
+	f.claimCalls++
+	f.claimCommand = command
+	if f.claim.Disposition == application.ClaimDispositionClaimed {
+		f.claim.Attempt.LeaseOwner = command.LeaseOwner
+		f.claim.Node.LeaseOwner = command.LeaseOwner
+	}
 	return f.claim, f.claimErr
 }
 func (f *runtimeWorkerFake) Heartbeat(_ context.Context, command application.HeartbeatCommand) (application.HeartbeatResult, error) {
