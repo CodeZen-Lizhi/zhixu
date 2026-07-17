@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 12
+- **Total Sessions**: 13
 - **Last Active**: 2026-07-17
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~406 | Active |
+| `journal-1.md` | ~442 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 13 | 2026-07-17 | 完成 M4-A River Runtime Foundation 并纳入 fault smoke | `ecadffb`, `8cc284d`, `c4df8af`, `bf33c56` | `dev` |
 | 12 | 2026-07-17 | 完成 M5-04D 可恢复安全写回 Saga | `ecadffb`, `f4dd50a` | `dev` |
 | 11 | 2026-07-17 | M5 Git writeback adapter | `9894844` | `dev` |
 | 10 | 2026-07-17 | M5-04B Filesystem CAS | `b0a6484` | `dev` |

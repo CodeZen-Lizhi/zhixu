@@ -404,3 +404,39 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: 完成 M4-A River Runtime Foundation 并纳入 fault smoke
+
+**Date**: 2026-07-17
+**Task**: 完成 M4-A River Runtime Foundation 并纳入 fault smoke
+**Branch**: `dev`
+
+### Summary
+
+纳入 fault smoke 集成测试文件；完成 River/Goose 迁移、legacy FS 兼容、Definition/Executor Registry、River Adapter、PostgreSQL+River Start UoW 与 deterministic smoke；修复单连接池迁移锁阻塞并移除伪 ingest 定义；通过 race/count20/integration/vendor/Makefile/OpenAPI/Compose 门禁；归档 M4-A。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ecadffb` | (see git log) |
+| `8cc284d` | (see git log) |
+| `c4df8af` | (see git log) |
+| `bf33c56` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
