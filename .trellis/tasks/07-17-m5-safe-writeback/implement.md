@@ -18,8 +18,12 @@
 5. [x] M5-04D：实现 Application Saga：Atomic Begin 在同一事务消费双授权并创建/重放 Execution；按 `file_prepared/git_prepared` checkpoint 恢复，执行文件补偿、Commit lookup/recovery、DB publish 和 cleanup finalize。
 6. [x] M5-04D：实现固定 Workflow Node/Composition Root 最小接线；不得增加直接文件/Git HTTP 写接口；明确当前没有 River dispatcher/registry/retry runner。
 7. [x] 同步 OpenAPI 状态查询（若暴露）、架构/数据库/工具安全/恢复/产品文档和父任务状态；M6 Retrieval 仍未完成。
-8. [ ] 执行 domain/application/FS/Git/PostgreSQL unit+race、故障注入、全仓 `go test -race ./...`、`go vet ./...`、`make test`、重复迁移和 Compose readiness smoke。
-9. [ ] 使用 `go-review` + `sql-code-review` + Trellis full-scope check，修复 P0/P1 后提交、归档与 journal。
+8. [x] 执行 domain/application/FS/Git/PostgreSQL unit+race、故障注入、全仓 `go test -race ./...`、`go vet ./...`、`make test`、重复迁移和 Compose readiness smoke。
+9. [x] 使用 `go-review` + `sql-code-review` + Trellis full-scope check，修复 P0/P1 后提交、归档与 journal。
+
+后续 M4-C/D 已将该 Saga 接入 Approved Proposal 的真实 River 自动派发，并补齐
+fault/normal、双 Worker、SIGKILL rescue、readiness、Docker/Compose 与全量门禁。
+M5-04 的完成边界保持 `verifying/index_pending`；Retrieval 消费、索引和回归仍由 M6 推进。
 
 ## Validation Commands
 

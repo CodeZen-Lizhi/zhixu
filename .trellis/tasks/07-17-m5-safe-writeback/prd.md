@@ -72,11 +72,11 @@
 - [x] Approval Git HEAD、Proposal 乐观锁、Writeback Execution、Commit Mapping、Index Request/Outbox 和状态约束有前向迁移与真实 PostgreSQL 集成测试。
 - [x] Filesystem Adapter 覆盖跨进程目标锁、temp/validate/fsync、最终 CAS、原子替换、备份恢复、路径/symlink/特殊文件和并发外部编辑。
 - [x] Git Adapter 覆盖 clean/dirty/staged/untracked/detached、HEAD drift、path-scoped Diff、固定 Commit/Trailer、未知结果判定、重复提交和安全反向 Commit。
-- [ ] Application/Saga 在任何副作用前建立 Durable Operation，严格消费双授权，并对重复投递、崩溃恢复和补偿保持幂等。
-- [ ] Commit 与 Proposal/Revision/Approval/Workflow/Writeback 双向可查，Git Commit 后的 DB Publish 与索引 Outbox 原子落库。
-- [ ] M5-04 不创建猜测 Retrieval Schema，不把 `index_pending` 返回为完成；Proposal 只推进到 `verifying`。
-- [ ] 单元、Filesystem/Git/PostgreSQL 集成、故障注入、`go test -race ./...`、`go vet ./...`、`make test`、OpenAPI/Compose 与 Docker smoke 全通过。
-- [ ] 架构、数据库、工具安全、故障恢复和产品文档同步说明本期范围与 M6 完成条件。
+- [x] Application/Saga 在任何副作用前建立 Durable Operation，严格消费双授权，并对重复投递、崩溃恢复和补偿保持幂等。
+- [x] Commit 与 Proposal/Revision/Approval/Workflow/Writeback 双向可查，Git Commit 后的 DB Publish 与索引 Outbox 原子落库。
+- [x] M5-04 不创建猜测 Retrieval Schema，不把 `index_pending` 返回为完成；Proposal 只推进到 `verifying`。
+- [x] 单元、Filesystem/Git/PostgreSQL 集成、故障注入、`go test -race ./...`、`go vet ./...`、`make test`、OpenAPI/Compose 与 Docker smoke 全通过。
+- [x] 架构、数据库、工具安全、故障恢复和产品文档同步说明本期范围与 M6 完成条件。
 
 ## Out of Scope
 
