@@ -8,7 +8,7 @@
 
 使用 PostgreSQL 持久化领域工作流状态，River 负责可运行节点的任务投递与 Worker 获取；不在正式 v1.0 引入 Temporal。Workflow Definition、Node 状态和补偿语义仍由 Workflow Module 掌握，River 不是业务事实源。
 
-实现边界：当前仓库尚未接入 River dispatcher、Job Registry 或通用 retry runner。M5-04D 已提供 Safe Writeback Node、Application Saga 和 API/Worker Composition，并通过直接 Node 集成烟测验证恢复语义；在 River runtime 任务完成前，不得把该接线描述为自动异步领取、心跳或重试系统。
+实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和无副作用 Deterministic Worker smoke。River 只负责投递/领取，Workflow PostgreSQL 表仍是业务事实源。M4-B 尚未实现 DB-time Claim/Attempt/retry/control 状态机，M4-D 尚未接入生产 Worker lifecycle、health 和 OTel；不得把 M4-A test harness 描述为完整重试或运维交付。
 
 见 [ADR-0006](adr/0006-postgres-durable-workflow.md)。
 

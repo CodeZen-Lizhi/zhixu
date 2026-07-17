@@ -22,7 +22,7 @@ flowchart LR
 ## 2. Version And Migration
 
 - River/riverpgxv5 v0.40.0，Schema=`workflow`，当前 7 migrations；Goose 精确锁 v3.27.0（v3.27.2 的 Go 1.25.7 门禁与项目 1.25.4 不兼容）。
-- `migrations/embed.go` 用 `//go:embed *.sql` 暴露唯一项目 SQL；`internal/platform/migration` 通过 pgx pool 和 `stdlib.OpenDBFromPool` 构造 Goose Provider，执行项目 Up，再用同一 pool 构造 `rivermigrate.New(...Config{Schema:"workflow"})` 执行 River Up 与 Validate。关闭 `*sql.DB` 不关闭底层 pgx pool。
+- `migrations/embed.go` 用 `//go:embed *.sql` 暴露唯一项目 SQL；`internal/platform/migration` 从 pool 配置建立池外专用 pgx session 持有 advisory lock，再通过 pgx pool 和 `stdlib.OpenDBFromPool` 构造 Goose Provider，执行项目 Up，再用同一 pool 构造 `rivermigrate.New(...Config{Schema:"workflow"})` 执行 River Up 与 Validate，因此 `database_max_conns=1` 仍可迁移。关闭 `*sql.DB` 不关闭底层 pgx pool。
 - 00001–00010 含 PL/pgSQL dollar-quoted body 但没有 Goose `StatementBegin/End`，原始文件直接解析已证实失败。Migration Runner 使用只读 `fs.FS` wrapper，仅在读取 legacy 文件时注入 direction 内的 `StatementBegin/StatementEnd`；SQL 原文、版本和仓库文件保持不变。00011 起的新增复杂迁移必须在源文件中原生写 annotation，不继续扩大 compatibility wrapper 范围。
 - River 每版本独立事务；项目与 River history 独立。升级失败再次执行幂等续迁。
 - Docker/Compose 最终接线由 M4-D，但本任务提供可运行 migration binary 和单元/集成测试。

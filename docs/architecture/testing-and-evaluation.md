@@ -87,7 +87,8 @@ Testcontainers：
 - 文件检查点：`file_prepared` rename 前后进程崩溃、temp/backup locator 篡改、目标/temp/backup 同内容同 mode 但不同 inode、用户后续编辑、ResumeTarget 和 Cleanup finalize retry。
 - Git 检查点：`git_prepared` 后 Commit 成功但 checkpoint 前崩溃、exact Trailer lookup、明确 NotFound 才 Commit、unknown 结果进入人工恢复且不 Restore 文件。
 - Publish：Mapping + Reindex Outbox 同事务、重复 delivery 只产生一个事件，结果为 `verifying/index_pending`；M6 Retrieval 未完成前不得断言 completed。
-- Composition：`internal/changecontrol/application/writeback_smoke_integration_test.go` 验证真实 PostgreSQL + LocalFS + Git 正常闭环；`writeback_fault_smoke_integration_test.go` 进一步注入 file/Git checkpoint、Publish 和 cleanup finalize response loss，销毁旧 Service/Writer 后从持久检查点重放，确认只保留一个 Commit/Mapping/Outbox。不以当前尚未实现的 River dispatcher/registry/retry runner 作为测试前提。
+- Composition：`internal/changecontrol/application/writeback_smoke_integration_test.go` 验证真实 PostgreSQL + LocalFS + Git 正常闭环；`writeback_fault_smoke_integration_test.go` 进一步注入 file/Git checkpoint、Publish 和 cleanup finalize response loss，销毁旧 Service/Writer 后从持久检查点重放，确认只保留一个 Commit/Mapping/Outbox。M4-A 的通用 River Registry/InsertTx/Deterministic Worker 与 Safe Writeback Node 仍是不同任务边界，M4-D 才负责生产 lifecycle 接线。
+- M4-A migration gate：`internal/platform/migration` 的 integration tag 测试验证原始 legacy Goose 解析失败、只读 annotation FS、空库/重复 Up、旧 shell-runner history 接管、River `workflow` Schema、one-step Down→Up 与 Runtime identity guarded Down；`internal/workflow/adapter/postgres` 的 integration tag 测试验证 Start replay/conflict、双并发单 Run/Node/Outbox/Job、Job 插入失败回滚和 Commit response-loss 恢复。
 
 ## 9. E2E
 

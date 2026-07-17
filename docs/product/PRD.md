@@ -1408,7 +1408,7 @@ Should：
 8. Publish 成功后清理 temp/backup 恢复证据；清理失败保留 `VERIFYING` 并可重试 finalize，不得伪装成完成。
 9. M6 Retrieval 消费 Outbox 完成解析、索引和回归后，才允许推进 `COMPLETED`。
 
-本期已实现 Safe Writeback Node 与 API/Worker Composition，但仓库尚未接入 River dispatcher、Job Registry 或 retry runner；不能把直接 Node 集成烟测描述为自动异步执行。
+本期已实现 Safe Writeback Node 与 API/Worker Composition；M4-A 已接入通用 River Job Registry、事务型 InsertTx 和 Deterministic Worker 基础，但 Safe Writeback 的生产 dispatcher、lease/retry lifecycle 仍待 M4-C/M4-D，不能把直接 Node 集成烟测描述为该业务已自动异步执行。
 
 #### 10.9.3 Git Commit 规则
 

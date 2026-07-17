@@ -16,3 +16,4 @@
 | [0012](0012-version-workflows-prompts-schemas.md) | Workflow/Prompt/Schema 版本化 | accepted |
 | [0013](0013-eino-adoption-gate.md) | Eino 仅在 PoC 通过后作为可替换边缘实现 | accepted |
 | [0014](0014-single-user-authentication.md) | 单用户 Session、API Token 与写授权分离 | accepted |
+| [0015](0015-river-goose-runtime.md) | River/Goose Runtime 版本、迁移和兼容边界 | accepted |

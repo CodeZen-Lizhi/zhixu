@@ -6,6 +6,10 @@
 
 ## 已确认事实
 
+- M4-A 已锁定 River/riverpgxv5 `v0.40.0` 与 Goose `v3.27.0`。`cmd/migrate` 通过嵌入 SQL 的 Goose Provider 执行项目迁移，再以 `Schema:"workflow"` 执行 River Up/Validate；两套 history 独立，单一 advisory lock 覆盖整个入口。
+- `migrations/00001`–`00010` 的 Goose 兼容只在内存 `fs.FS` 中注入 StatementBegin/End；不得改写历史 SQL。没有 Goose history 的旧 shell-runner 数据库只有在完整 `core.schema_meta` 事实匹配时才能 baseline 接管。
+- `workflow.run`、`workflow.node_run`、`workflow.outbox_event` 的 M4-A Runtime identity 字段允许完整 NULL 的 legacy tuple 或完整非 NULL 的 Runtime tuple；active legacy 行由新 Runtime Application/UoW 返回 `WORKFLOW_LEGACY_RUNTIME_UNSUPPORTED`，数据库不猜测回填。
+
 - PostgreSQL 是领域数据、投影和运行数据的主数据库；pgvector 保存向量，PostgreSQL FTS 保存全文索引（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 第 3 节）。
 - PostgreSQL 驱动为 pgx，SQL 访问采用 sqlc，迁移采用 Goose，River 只负责可运行 Job 的投递和 Worker 获取，不是 Workflow 业务事实源（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 与 [`workflow-engine.md`](../../../docs/architecture/workflow-engine.md)）。
 - 事务边界由维护不变量的领域模块控制：Proposal/Approval、Workflow Node、Review Answer、Relation Confirm 等在数据库内使用 ACID；文件和 Git 不放入数据库事务。

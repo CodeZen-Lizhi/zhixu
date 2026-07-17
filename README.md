@@ -52,6 +52,12 @@ make web-install
 make test
 ```
 
+Apply embedded project migrations followed by River migrations. The command requires the same `ZHIXU_DATABASE_*` configuration as the Worker and never logs the connection string:
+
+```bash
+go run ./cmd/migrate
+```
+
 Start the complete local stack. `.env.example` contains development-only values and must not be used as production secrets.
 
 Docker Compose mounts `ZHIXU_WORKSPACE_ROOT` into the containers at `/workspace`.

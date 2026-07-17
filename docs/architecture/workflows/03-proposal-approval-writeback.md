@@ -64,7 +64,7 @@ sequenceDiagram
     C->>DB: cleanup finalize (retryable)
 ```
 
-Begin 的两份授权、Proposal/Revision/Approval/Target/HEAD 均从持久化事实绑定；Credential 不进入 Node input、Execution、Outbox、日志或返回值。Safe Writeback Node 成功只表示 Publish 与 cleanup finalize 已到 `verifying/index_pending`，不表示 Retrieval/Regression completed。M5-04D 已提供 Node 和 API/Worker Composition，但尚未实现 River dispatcher、registry 或 retry runner，因此直接 Node 集成不代表自动异步执行。
+Begin 的两份授权、Proposal/Revision/Approval/Target/HEAD 均从持久化事实绑定；Credential 不进入 Node input、Execution、Outbox、日志或返回值。Safe Writeback Node 成功只表示 Publish 与 cleanup finalize 已到 `verifying/index_pending`，不表示 Retrieval/Regression completed。M5-04D 已提供 Node 和 API/Worker Composition；M4-A 已提供通用 River Registry/InsertTx 基础，但 Safe Writeback 的生产 dispatcher、lease/retry lifecycle 仍由 M4-C/M4-D 接线，直接 Node 集成不代表该业务路径已自动异步执行。
 
 ## 6. 三方合并
 

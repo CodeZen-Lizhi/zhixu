@@ -67,17 +67,17 @@
 ## Acceptance Criteria
 
 - [x] River v0.40.0 隔离 PoC 在真实 PostgreSQL 18 上通过。
-- [ ] `go.mod/go.sum/vendor` 精确锁定 River/riverpgxv5 v0.40.0 与 Goose v3.27.0，记录 MPL-2.0/MIT license、Go 版本门禁和升级策略。
-- [ ] `zhixu-migrate` 在空库、重复执行、旧项目库升级、River Validate 和失败退出上通过；River 表只存在于 `workflow` Schema。
-- [ ] 原始 legacy SQL 直接 Goose 解析失败的回归用例存在；只读 annotation FS Adapter 在空库和旧 shell-runner 数据库上均能接管 00001–00010 history，且测试证明嵌入 SQL 除注释边界外未被改写。
-- [ ] Registry 对重复/循环/未知 Schema/缺 Executor/权限 fail-fast，客户端 Graph 无法注册或执行任意 Node。
-- [ ] Start 相同 binding 返回同一 Run/Node/Job，不同 binding 冲突；事务 rollback 不残留任何一方。
-- [ ] `UniqueSkippedAsDuplicate`、Args 部分唯一、Job schema version 和 Secret 边界测试通过。
-- [ ] 真实 River Worker 通过 test-only transport harness 自动调用 Deterministic Executor，无 pending-node polling；生产代码不提前实现第二套 Claim/Complete。
-- [ ] Domain/Executor 无 River/pgx import；tx-scoped Inserter 可被后续模块复用。
-- [ ] migration legacy terminal 可读、legacy active 明确失败，Down 有新数据时安全拒绝。
-- [ ] `go test -race ./internal/workflow/... ./cmd/migrate`、`go vet ./...`、migration/real River smoke、go-review/sql-code-review/Trellis check、`git diff --check` 通过。
-- [ ] ADR-0015/依赖清单记录 River/Goose 边界、版本、License、legacy Goose Adapter、升级矩阵与退出方案；项目自身 License 未确定时明确标为发布风险。
+- [x] `go.mod/go.sum/vendor` 精确锁定 River/riverpgxv5 v0.40.0 与 Goose v3.27.0，记录 MPL-2.0/MIT license、Go 版本门禁和升级策略。
+- [x] `zhixu-migrate` 在空库、重复执行、旧项目库升级、River Validate 和失败退出上通过；River 表只存在于 `workflow` Schema。
+- [x] 原始 legacy SQL 直接 Goose 解析失败的回归用例存在；只读 annotation FS Adapter 在空库和旧 shell-runner 数据库上均能接管 00001–00010 history，且测试证明嵌入 SQL 除注释边界外未被改写。
+- [x] Registry 对重复/循环/未知 Schema/缺 Executor/权限 fail-fast，客户端 Graph 无法注册或执行任意 Node。
+- [x] Start 相同 binding 返回同一 Run/Node/Job，不同 binding 冲突；事务 rollback 不残留任何一方。
+- [x] `UniqueSkippedAsDuplicate`、Args 部分唯一、Job schema version 和 Secret 边界测试通过。
+- [x] 真实 River Worker 通过 test-only transport harness 自动调用 Deterministic Executor，无 pending-node polling；生产代码不提前实现第二套 Claim/Complete。
+- [x] Domain/Executor 无 River/pgx import；tx-scoped Inserter 可被后续模块复用。
+- [x] migration legacy terminal 可读、legacy active 明确失败，Down 有新数据时安全拒绝。
+- [x] `go test -race ./internal/workflow/... ./cmd/migrate`、`go vet ./...`、migration/real River smoke、go-review/sql-code-review/Trellis check、`git diff --check` 通过。
+- [x] ADR-0015/依赖清单记录 River/Goose 边界、版本、License、legacy Goose Adapter、升级矩阵与退出方案；项目自身 License 未确定时明确标为发布风险。
 
 ## Stop Gate
 

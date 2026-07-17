@@ -71,7 +71,7 @@ Write Authorization 必须一次性或幂等消费、短时有效，并严格绑
 
 当前实现落在 `internal/changecontrol`：服务端只保存 `token_hash`，授权记录位于 `change_control.tool_authorization`，签发前复核 Proposal/Approval/Change Hash/目标哈希和已持久化 Workflow Run/Node；Atomic Begin 消费前完成完整绑定校验，再在数据库行锁事务内校验审批快照、过期/撤销状态和 running lease，并将两份授权原子转为 `consumed`。Safe Writeback 随后使用 `file_prepared`/`git_prepared` durable intent 进行可重启恢复；Commit 结果先 exact Trailer lookup，unknown 不 Restore 文件；Mapping 与 Reindex Outbox 原子发布后状态为 `verifying/index_pending`。
 
-当前只构造 Safe Writeback Node 与 API/Worker Composition，尚未实现 River dispatcher、Job Registry 或 retry runner；不能通过自制 polling 或日志把异步执行描述为已完成。M6 Retrieval 尚未实现真实索引和回归，不得将 `index_pending` 返回为 completed。
+当前只构造 Safe Writeback Node 与 API/Worker Composition；M4-A 已实现通用 River Job Registry/InsertTx 基础，但 Safe Writeback 的生产 dispatcher、lease/retry lifecycle 尚未接线，不能通过自制 polling 或日志把该业务异步执行描述为已完成。M6 Retrieval 尚未实现真实索引和回归，不得将 `index_pending` 返回为 completed。
 
 明文 Credential 只在首次签发时返回，服务端不保存可恢复副本；首次响应丢失后的幂等重放不会再次返回 Credential。调用方只能使用新幂等键重新签发或等待短 TTL 过期，不能通过查询接口恢复写凭据。
 

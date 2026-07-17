@@ -22,6 +22,8 @@
 | Telemetry | OpenTelemetry | Trace/Metrics |
 | Config | 环境变量 + YAML | 本地与自托管配置 |
 
+M4-A 已在主模块精确锁定 River/riverpgxv5 `v0.40.0` 与 Goose `v3.27.0`。River 使用 MPL-2.0，Goose 使用 MIT；当前 Go/Docker 基线为 `1.25.4`，因此不采用要求 Go `1.25.7` 的 Goose `v3.27.2`。迁移、License、升级与退出门禁见 [ADR-0015](adr/0015-river-goose-runtime.md)。项目自身 License 仍未确定，属于发布前风险。
+
 ## 3. 数据
 
 | 能力 | 选择 |
