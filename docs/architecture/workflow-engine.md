@@ -8,7 +8,7 @@
 
 使用 PostgreSQL 持久化领域工作流状态，River 负责可运行节点的任务投递与 Worker 获取；不在正式 v1.0 引入 Temporal。Workflow Definition、Node 状态和补偿语义仍由 Workflow Module 掌握，River 不是业务事实源。
 
-实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和 Deterministic Worker smoke。M4-B 已接入 PostgreSQL DB-time Claim/Heartbeat、append-only Attempt、Retry/Fail/Complete、DAG 后继、Human Task、Pause/Resume/Cancel。M4-C 已接入 Approval/Safe Writeback 原子 Dispatch、pre-Begin Bootstrap、Execution exact lookup 与真实 River Worker 闭环；每次 delivery 使用唯一 lease owner，持久 Args 严格拒绝额外字段。River 仍只负责投递/领取，Workflow PostgreSQL 表是业务事实源；M4-D 继续负责 readiness、OTel、Compose 与恢复运维。
+实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和 Deterministic Worker smoke。M4-B 已接入 PostgreSQL DB-time Claim/Heartbeat、append-only Attempt、Retry/Fail/Complete、DAG 后继、Human Task、Pause/Resume/Cancel。M4-C 已接入 Approval/Safe Writeback 原子 Dispatch、pre-Begin Bootstrap、Execution exact lookup 与真实 River Worker 闭环；每次 delivery 使用唯一 lease owner，持久 Args 严格拒绝额外字段。M4-D 已将生产 Worker 的 queue/concurrency/timeout/rescue/lease/heartbeat 配置、River migration Validate、独立 `/livez|readyz`、互斥停机控制器、脱敏 observability seam 和 Docker API/Worker/Migrate 交付入口接线。River 仍只负责投递/领取，Workflow PostgreSQL 表是业务事实源。
 
 见 [ADR-0006](adr/0006-postgres-durable-workflow.md)。
 
@@ -97,6 +97,59 @@ sequenceDiagram
 - 同一 River Job 的更高 transport attempt 若在旧 Workflow lease 到期前到达，返回 retryable `WORKFLOW_LEASE_HELD`，不得当作 benign stale 返回成功；否则 River 会完成唯一 Job，而 Node 在 lease 到期后失去 reclaim delivery。终态 Run、旧 dispatch 或同 attempt 的真实 duplicate 仍按 stale no-op 处理。
 - Attempt 历史只允许 running 向一个终态前进；相同 delivery 重放不重复 Attempt，业务 retry 才递增 retry_no。
 
+### 7.1 Worker 运行与健康契约
+
+生产 Worker 启动顺序固定为：加载并校验配置 → 打开并 Ping PostgreSQL →
+River migration `Validate` → 构造并冻结 Definition/Executor Registry 与依赖 →
+启动独立 health server → 启动 River Client → 标记 ready。API `/readyz` 不能
+代表 Worker 状态。
+
+Worker `/livez` 在 health server 存活时返回 200。`/readyz` 只有在以下位全部
+为 true 且进程未进入 shutdown 时返回 200：
+
+- PostgreSQL 当前可用。
+- River `workflow` Schema 通过 migration `Validate`。
+- River Client 已启动。
+- Definition Registry 已冻结。
+- Executor Registry 已冻结。
+- 启用 Definition 的运行依赖已注入。
+
+健康响应只返回 `status/code/version` 白名单，不暴露 DSN、路径、异常 cause、
+队列内容或领域正文。开始 shutdown 后 readiness 不可逆地变为 false。
+
+### 7.2 Worker 配置不变量
+
+| 配置 | 默认值 | 约束 |
+|---|---:|---|
+| `ZHIXU_WORKER_QUEUE` | `workflow` | Producer/Consumer 必须相同；队列名只允许小写字母、数字、`_`、`-` |
+| `ZHIXU_WORKER_MAX_WORKERS` | `4` | 正整数 |
+| `ZHIXU_WORKER_JOB_TIMEOUT` | `15m` | 小于 rescue interval |
+| `ZHIXU_WORKER_RESCUE_STUCK_AFTER` | `30m` | 大于 job timeout |
+| `ZHIXU_WORKFLOW_LEASE` | `2m` | 正时长 |
+| `ZHIXU_WORKFLOW_HEARTBEAT` | `30s` | 小于 lease 的三分之一 |
+| `ZHIXU_WORKER_SOFT_STOP_TIMEOUT` | `30s` | 小于 hard deadline |
+| `ZHIXU_WORKER_HARD_STOP_TIMEOUT` | `60s` | 超时后进程失败退出 |
+| `ZHIXU_WORKER_HEALTH_ADDR` | `0.0.0.0:8081` | 合法且非零的 `host:port` |
+
+同一 queue 配置同时传给事务插入 Client 和消费 Client；Job 插入显式写入
+River queue，禁止 Producer 落入 `default` 而 Worker 只消费 `workflow`。
+
+### 7.3 停机与崩溃恢复
+
+- River `Start` 使用独立进程 Context，不直接绑定 OS signal，避免 signal cancel
+  隐式触发第二种停机路径。
+- SIGINT/SIGTERM 选择 graceful `Stop`；River 在 `SoftStopTimeout` 后取消活动
+  Job Context，但仍等待 Worker 返回。
+- 稳定 fatal invariant 可选择 emergency `StopAndCancel`。生命周期控制器以
+  首次状态转换决定模式，两条 API 互斥，后续 signal/fatal 事件只等待同一结果。
+- 超过 `WorkerHardStopTimeout` 返回非零失败；这不表示文件、Git 或其他外部
+  副作用已经回滚。
+- 非优雅退出后由 River rescue、Workflow lease、Attempt fence 和领域 durable
+  checkpoint 恢复。`worker_kill_smoke_integration_test.go` 已验证真实子进程
+  SIGKILL → River rescue → 新 attempt；文件/Git/DB 副作用唯一性仍由独立
+  Writeback fault smoke、Approval 双 Worker和 lease reclaim 测试共同证明，不能由
+  restart policy 推断。
+
 ## 8. 节点完成事务
 
 同一事务：
@@ -180,6 +233,13 @@ Human Task：
 - 已开始 Side Effect 根据策略完成或补偿。
 - 不假装撤销已提交 Git Commit。
 - 持久化 `cancel_requested_at`；pending/retry/waiting 节点取消，运行节点在 checkpoint 归约 cancelled；数据库/transport 故障不能伪装成成功。
+- 对 Safe Writeback 等已开始外部副作用的 Node，Runtime 在同一事务内查询领域
+  cancellation safety：未创建 Execution，或 Execution 已到 `needs_revision`、
+  `apply_failed`、`compensated`、`manual_recovery_required`、`verify_failed`、
+  `rolled_back`、`completed`，或 `verifying` 且 cleanup 已完成时，才允许 Node/Run
+  进入 terminal cancelled。
+  否则返回 retryable `WORKFLOW_CANCELLATION_DEFERRED` 并保持可恢复执行，禁止
+  留下 terminal Workflow + 非终态 Writeback Execution 的孤儿组合。
 
 恢复：
 
@@ -243,16 +303,22 @@ flowchart TD
 
 Metrics：
 
-- Run 数量/状态。
-- Node 延迟。
-- 重试次数。
-- 租约过期。
-- Human Wait。
-- Compensation。
+- 有界名称包括 queue depth、active workers、Node duration/result、retry、manual
+  recovery、lease expiry、heartbeat failure、duplicate delivery 和 shutdown。
+- Workspace/Proposal/Run/Node/Job ID 只能进入日志和 Trace，不得成为 metric label。
+- queue depth 只统计 River `available` 且已到 `scheduled_at` 的可立即领取 Job；active
+  workers 使用本进程 Work 进入/退出计数。
+- Claim 结果以 `ObservedNodeKind/DuplicateDelivery/LeaseReclaimed` 暴露事务事实；
+  结果事务以 `Replayed` 区分新提交与幂等重放，避免重复发射结果指标。
 
 Trace：
 
-- Workflow Run ID 作为根 Correlation。
+- HTTP/Approval 到 River 异步边界只传播校验后的 W3C `traceparent`；River 保留的
+  `river:*` recovery metadata 可被 transport 更新但不会进入 Application；其余
+  metadata 一律拒绝，Job Args 仍只携带 Node identity。
+- Workflow Run ID 等业务 ID 作为 correlation/trace attribute，不写入 metric label。
+- emergency reporter 只接受 Claim/Heartbeat/Transition/Executor Result 四类契约不变量码；
+  Manual Recovery、依赖错误、lease/control 和非法 Job 不升级为全进程强停。
 
 ## 19. 测试
 
@@ -263,6 +329,8 @@ Trace：
 - Definition version mismatch。
 - Compensation failure。
 - Cancel during model/tool/write。
+- 自定义短 rescue 周期的进程 smoke 必须使用独立数据库或独立 River Schema；只换 queue
+  不能隔离同一 Schema 内的 maintenance leader。
 
 ## 20. 不采用
 

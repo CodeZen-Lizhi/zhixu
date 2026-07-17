@@ -9,7 +9,7 @@
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
 | [数据库开发规范](./database-guidelines.md) | pgx/sqlc/Goose/River、查询、事务、迁移和约束 | M5 Atomic Begin、durable file/Git intent、Publish/cleanup 与迁移恢复约束已验证 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | M5 Write Authorization、可重启 Filesystem/Git Writeback 与人工恢复错误契约已验证 |
-| [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M1 slog/request_id 已验证；OTel/Audit 待后续任务补充 |
+| [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M4-D correlation/脱敏/metrics/trace 生产接线已验证；真实 exporter/Audit 待后续任务补充 |
 | [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已按测试与评测架构建立；M1 CI 已验证 |
 
 ## 开发前检查清单

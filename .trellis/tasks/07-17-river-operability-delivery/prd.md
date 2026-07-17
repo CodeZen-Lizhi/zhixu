@@ -63,17 +63,17 @@
 
 ## Acceptance Criteria
 
-- [ ] Worker Composition 启动真实 River Client/Registry/Runtime，启动失败非零退出，日志不再包含 `workflow_dispatcher=not_configured`。
-- [ ] 配置正常、边界和非法组合测试通过，非法值不会静默使用默认值。
-- [ ] `/livez` 与 `/readyz` 语义分离；DB、River migration、Registry 或依赖失败会使 ready=false。
-- [ ] Compose Worker healthcheck 实际访问容器内 `:8081/readyz`，`up --wait` 同时证明 API 和 Worker ready。
-- [ ] 正常 Stop 等待安全 checkpoint并由 SoftStopTimeout 自动取消；紧急 StopAndCancel 是互斥路径。忽略取消超过 hard deadline 时进程非零退出并可由 lease/checkpoint 恢复。
-- [ ] Safe Writeback 在 Atomic Begin 或任一副作用 checkpoint 后收到 Cancel/forced cancel 时，不会形成 terminal Workflow + 非终态 Execution 的孤儿组合；必须恢复完成、补偿或明确进入 Manual Recovery。
-- [ ] 两 Worker、duplicate、kill -9、数据库短断和重启 smoke 不重复 Execution、Commit、Mapping 或 Outbox。
-- [ ] 日志/metrics/trace correlation 完整，Secret 扫描无泄漏；Telemetry disabled/optional/required 三种模式行为明确。
-- [ ] Docker 镜像仍以非 root 运行，包含 API/Worker/Migrate，Compose migration 顺序和失败退出正确。
-- [ ] Runbook 覆盖 migration、shutdown、stuck job、lease、manual recovery 和回滚。
-- [ ] `go test -race ./...`、关键包 `-count=20`、`go vet ./...`、`make test`、OpenAPI、Compose、Docker build/up/readiness、go-review、sql-code-review、Trellis full-scope check 通过。
+- [x] Worker Composition 启动真实 River Client/Registry/Runtime，启动失败非零退出，日志不再包含 `workflow_dispatcher=not_configured`。
+- [x] 配置正常、边界和非法组合测试通过，非法值不会静默使用默认值。
+- [x] `/livez` 与 `/readyz` 语义分离；DB、River migration、Registry 或依赖失败会使 ready=false。
+- [x] Compose Worker healthcheck 实际访问容器内 `:8081/readyz`，`up --wait` 同时证明 API 和 Worker ready。
+- [x] 正常 Stop 等待安全 checkpoint并由 SoftStopTimeout 自动取消；紧急 StopAndCancel 是互斥路径。忽略取消超过 hard deadline 时进程非零退出并可由 lease/checkpoint 恢复。
+- [x] Safe Writeback 在 Atomic Begin 或任一副作用 checkpoint 后收到 Cancel/forced cancel 时，不会形成 terminal Workflow + 非终态 Execution 的孤儿组合；必须恢复完成、补偿或明确进入 Manual Recovery。
+- [x] 两 Worker、duplicate、kill -9、数据库短断和重启 smoke 不重复 Execution、Commit、Mapping 或 Outbox。
+- [x] 日志/metrics/trace correlation 完整，Secret 扫描无泄漏；Telemetry disabled/optional/required 三种模式行为明确。
+- [x] Docker 镜像仍以非 root 运行，包含 API/Worker/Migrate，Compose migration 顺序和失败退出正确。
+- [x] Runbook 覆盖 migration、shutdown、stuck job、lease、manual recovery 和回滚。
+- [x] `go test -race ./...`、关键包 `-count=20`、`go vet ./...`、`make test`、OpenAPI、Compose、Docker build/up/readiness、go-review、sql-code-review、Trellis full-scope check 通过。
 
 ## Out Of Scope
 

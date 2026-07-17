@@ -24,10 +24,18 @@
 - proposal_id。
 - tool_call_id。
 - document_id。
+- attempt_no。
+- dispatch_no。
+- retry_no。
+- river_job_id。
+
+这些字段由 Context 合并并自动注入日志和 Trace。调用方传入空值不会清除父
+Context 已有的关联字段。高基数 ID 不得进入 Metrics labels。
 
 ## 4. 日志
 
-使用 slog JSON。
+使用项目封装的 slog JSON Handler。Handler 在写出前 fail closed 脱敏，而不是
+依赖每个调用方都记得清洗。
 
 级别：
 
@@ -42,6 +50,13 @@
 - Authorization Header。
 - 完整 Prompt/Source 默认记录。
 - 用户回答全文无保留期限记录。
+- Credential/Password/Token/Cookie/DSN/数据库 URL。
+- 请求/响应正文、Git stderr、lock token 和绝对文件路径。
+- 未知复合对象直接序列化；应改为稳定 code/kind/count/hash 等标量摘要。
+
+敏感 key、内嵌凭据 URL、`key=value` Secret 以及常见绝对路径均替换为
+`<redacted>`；`[]byte` 只输出长度。配置日志使用安全摘要，不输出数据库密码或
+Telemetry endpoint。
 
 ## 5. Trace
 
@@ -64,6 +79,13 @@ Span 属性：
 - retry_attempt。
 - degraded。
 
+当前项目自有异步传播契约只允许 River metadata 中的 W3C `traceparent`。Producer 编码前
+校验 trace/span ID，Consumer 使用严格 JSON 解析；除 River 自身保留且不会向
+Application 暴露的 `river:*` recovery 字段外，拒绝额外字段、非法格式和多 JSON
+值。不传播 baggage、正文、Credential、路径或任意项目 metadata。即使外部 exporter
+disabled，API middleware 仍会为每个请求创建可传播的 child/root trace context，合法
+trace context 可继续跨 Approval、River Job、Runtime Node 与 Safe Writeback 传播。
+
 ## 6. Metrics
 
 ### API
@@ -75,12 +97,33 @@ Span 属性：
 
 ### Workflow
 
-- run_total/status。
-- node_duration。
-- retry_total。
-- lease_expired。
-- human_wait_duration。
-- compensation_total。
+- `river.queue.depth{queue}`。
+- `river.workers.active{queue}`。
+- `workflow.node.duration_ms{node_kind,result}`。
+- `workflow.node.result_total{node_kind,result,error_code?}`。
+- `workflow.retry_total{node_kind,error_code?}`。
+- `workflow.manual_recovery_total{node_kind,error_code?}`。
+- `workflow.lease_expiry_total{node_kind}`。
+- `workflow.heartbeat_failure_total{node_kind,error_code?}`。
+- `river.duplicate_delivery_total{node_kind}`。
+- `worker.shutdown_total{shutdown_kind,result}`。
+
+Metric 名称、kind、允许/必填 label 都由项目 registry 固定。Label value 限长并
+拒绝 UUID、长十六进制、Secret 和未注册字段；`workspace_id`、`proposal_id`、
+`workflow_run_id`、`node_run_id`、`river_job_id` 等只能进入日志或 Trace。
+
+M4-D 的生产发射语义固定如下：
+
+- queue depth 只统计目标 queue 中 `state='available' AND scheduled_at<=数据库当前时间`
+  的可立即领取 River Job；查询失败不发 0。
+- active workers 使用当前进程 `RuntimeNodeWorker` 进入/退出的原子绝对值，不使用可能
+  包含 SIGKILL stuck Job 的数据库 `running` 数量。
+- Node duration/result、retry 和 manual recovery 只在 Workflow 结果事务已提交且不是
+  幂等 replay 时发射；duration 使用持久 Attempt 的 `started_at/ended_at`。
+- lease expiry 只在 Claim 事务已把旧 Attempt 归约为 `lease_lost` 并成功创建新 Attempt
+  后发射；duplicate delivery 只使用 Claim 返回的可信 observation。
+- heartbeat control 信号不计 failure；真实 heartbeat error 才发射 failure。
+- metrics 记录失败只写稳定告警，不改变业务结果，也不触发 emergency shutdown。
 
 ### Retrieval
 
@@ -146,6 +189,20 @@ Span 属性：
 
 可选导出 OTel/Prometheus 到外部平台。
 
+### 9.1 Telemetry mode
+
+| 模式 | Endpoint | 初始化失败 | Runtime 行为 |
+|---|---|---|---|
+| `disabled` | 必须为空 | 不构造 exporter | 使用 noop metrics/tracer，不声称外部导出 |
+| `optional` | 必填绝对 HTTP(S) URL | 稳定 `TELEMETRY_EXPORTER_UNAVAILABLE` | 使用 noop provider 并记录 degraded，Worker 仍可 ready |
+| `required` | 必填绝对 HTTP(S) URL | 稳定失败 | Worker fail-fast，不进入 ready |
+
+环境变量为 `ZHIXU_TELEMETRY_MODE` 与 `OTEL_EXPORTER_OTLP_ENDPOINT`。当前仓库只
+提供项目自有 Provider/Factory seam，Composition 尚未注入真实 exporter factory；
+因此 `optional` 会明确 degraded，`required` 会启动失败，不能把内存/noop Adapter
+包装成“已上报”。后续接入 OpenTelemetry SDK 时，SDK 类型只能位于 Adapter 或
+Composition，不能进入 Workflow Domain/Application。
+
 ## 10. 告警
 
 本地 UI 告警：
@@ -174,4 +231,15 @@ Span 属性：
 - Error Code 可查询。
 - Duplicate Retry 不重复审计副作用。
 - Trace 在异步边界连续。
+- API 在 exporter disabled 时仍生成可传播 trace，合法入站 `traceparent` 保持同一 trace。
+- 项目写入的 River metadata 只含 `traceparent`；River 自身保留的 `river:*` recovery
+  字段可共存但会被忽略且不向 Application 暴露，其他额外字段 fail closed。
+- Metrics 拒绝高基数/敏感/未知 labels。
+- 持久结果 replay 不重复发射 node/retry/manual 指标；租约回收与 duplicate observation
+  来自 PostgreSQL 事务事实，不通过 AttemptNo 猜测。
+- Health payload 只含稳定 `status/code/version`。
+- `disabled/optional/required` 不伪造 exporter 成功，Provider 资源只关闭一次。
 
+发布门禁还应对日志、Metric snapshot、Trace snapshot、River metadata 和 Worker
+health response 做 Secret canary 扫描。单元测试通过不等同于生产 exporter 或
+Compose 网络已验证；真实 exporter 与容器烟测必须单独记录结果。

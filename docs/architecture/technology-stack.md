@@ -19,10 +19,15 @@
 | Migration | Goose | 前向迁移与版本管理 |
 | Job Queue | River | PostgreSQL Job、重试、Worker |
 | Logging | slog | 结构化日志 |
-| Telemetry | OpenTelemetry | Trace/Metrics |
+| Telemetry | 项目自有接口 + OpenTelemetry Adapter seam | Trace/Metrics；真实 exporter 尚未接入 Composition |
 | Config | 环境变量 + YAML | 本地与自托管配置 |
 
 M4-A 已在主模块精确锁定 River/riverpgxv5 `v0.40.0` 与 Goose `v3.27.0`。River 使用 MPL-2.0，Goose 使用 MIT；当前 Go/Docker 基线为 `1.25.4`，因此不采用要求 Go `1.25.7` 的 Goose `v3.27.2`。迁移、License、升级与退出门禁见 [ADR-0015](adr/0015-river-goose-runtime.md)。项目自身 License 仍未确定，属于发布前风险。
+
+M4-D 已提供项目自有 Logger/Metrics/Tracer/Provider 接口、bounded label 与
+`traceparent` 异步传播，并定义 `disabled/optional/required`。当前生产 Composition
+没有注入 OpenTelemetry exporter factory：optional 明确 degraded，required
+fail-fast；在真实 Adapter 和部署 smoke 完成前不得宣称外部 Telemetry 已启用。
 
 ## 3. 数据
 

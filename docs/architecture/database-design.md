@@ -358,6 +358,12 @@ proposal_commit：
 - Mapping、Execution/Proposal verifying 和 `retrieval.revision.reindex_requested` Outbox 在同一事务内发布。
 - Begin 不是“先创建 Execution、再分步消费授权”：PostgreSQL Atomic Begin 按固定锁顺序校验两份绑定、过期时间和 running lease，在同一事务内消费双授权、创建/重放 Execution 并推进 Proposal `approved → applying`；任一步失败全部回滚。已 consumed 授权仅能重放已存在的 exact Execution，不能在无 Execution 时再次发起首次 Begin。
 - Publish 成功后为 `verifying/index_pending`；temp/backup 由可重试 cleanup finalize 标记清理完成，不能把清理或 M6 Retrieval 伪装成 `completed`。
+- Workflow Cancel 在 Runtime 当前事务内查询同一 `node_run_id` 的 Writeback
+  Execution。不存在 Execution，或状态已到 `needs_revision`、`apply_failed`、
+  `compensated`、`manual_recovery_required`、`verify_failed`、`rolled_back`、
+  `completed`，或 `verifying` 且 `cleanup_completed_at` 非空时才可 terminal
+  cancelled；查询失败 fail closed，其他 durable checkpoint 返回
+  `WORKFLOW_CANCELLATION_DEFERRED` 并保留可恢复 Job/lease。
 
 ### workflow
 
@@ -429,7 +435,7 @@ tool_call：
 - 同一聚合一次逻辑状态变化只能产生一个 `event_key`；数据库在聚合/事件版本作用域内阻止重复插入，应用重试应返回既有 Outbox 记录。
 - 投递幂等与业务命令幂等分开：消费者使用 `(consumer_name, event_id)`（或同等明确作用域）去重，不能用一个跨所有 Workspace/聚合的全局业务键。
 - 副作用命令沿用 `workflow_run_id + node_id + logical_operation + target_version` 的作用域；Review Answer、Tool Call、File Write、Git Commit、Index Revision 和 Event Publish 都必须使用明确目标版本/资源。
-- 同一事务内先写 Workflow Definition/Run/Node/Outbox，再由 River `InsertTx` 投递可运行 Node；M4-A 的 Job Kind/Args 只携带 schema version、Node Run ID 和 dispatch no，不能成为业务事实源。M4-B 实现 DB-time Claim/Attempt/retry/control；M4-C 的 `00013_approval_writeback_dispatch.sql` 增加 nullable、partial unique、复合 FK 保证同 Workspace 且不可换绑/移动 Workspace 的 `proposal.workflow_run_id`，并把 Approval/Run/Node/Outbox/Job 纳入单一 UoW。生产 Worker lifecycle 已接入，M4-D 继续补 readiness/OTel/Compose。发布失败只增加 attempt/错误摘要并重试，不能重新执行已完成的领域副作用。
+- 同一事务内先写 Workflow Definition/Run/Node/Outbox，再由 River `InsertTx` 投递可运行 Node；M4-A 的 Job Kind/Args 只携带 schema version、Node Run ID 和 dispatch no，不能成为业务事实源。M4-B 实现 DB-time Claim/Attempt/retry/control；M4-C 的 `00013_approval_writeback_dispatch.sql` 增加 nullable、partial unique、复合 FK 保证同 Workspace 且不可换绑/移动 Workspace 的 `proposal.workflow_run_id`，并把 Approval/Run/Node/Outbox/Job 纳入单一 UoW。M4-D 将同一配置 queue 同时用于 Producer/Consumer，并在 River insert 显式写入 queue；项目自有 River metadata 仅允许校验后的 `traceparent`，River 保留的 `river:*` recovery metadata 可共存但不会进入 Application，正文、Credential、路径或任意标签禁止复制。发布失败只增加 attempt/错误摘要并重试，不能重新执行已完成的领域副作用。
 - 事件 payload 必须带 schema_version 和最小必要数据；敏感正文不直接放入事件。Knowledge Event、SSE 和审计均从稳定事件身份投影，投影重复必须可去重。
 
 ### health_issue

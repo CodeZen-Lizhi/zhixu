@@ -70,8 +70,8 @@ make compose-up
 
 Then open <http://127.0.0.1:8080>. Health and dependency status are available at:
 
-- `GET /livez`: process liveness
-- `GET /readyz`: readiness including PostgreSQL connectivity
+- `GET /livez`: API process liveness
+- `GET /readyz`: API readiness including PostgreSQL connectivity
 - `GET /api/v1/system/status`: API and database status used by the web page
 - `POST /api/v1/workspaces`: create the single active Workspace and record its Git baseline
 - `GET /api/v1/workspaces/{id}`: reopen the persisted Workspace
@@ -79,6 +79,42 @@ Then open <http://127.0.0.1:8080>. Health and dependency status are available at
 - `POST /api/v1/workspaces/{id}/workflows`: start a durable Workflow Run and return `202 + workflow_run_id`
 - `GET /api/v1/workflows/{id}`: query durable Workflow Run state
 - `POST /api/v1/workflows/{run_id}/human-tasks/{task_id}/decision`: submit one version-checked Human Task decision
+
+The Worker has a separate health server on container port `8081`; it is not
+published to the host by Compose. Its liveness only proves that the process and
+health server are alive. Readiness additionally requires PostgreSQL, River
+migration validation, a started River client, frozen Definition/Executor
+registries, and all enabled Workflow dependencies:
+
+```bash
+docker compose -f deploy/compose.yml --env-file .env.example exec -T worker \
+  wget -q -O - http://127.0.0.1:8081/livez
+docker compose -f deploy/compose.yml --env-file .env.example exec -T worker \
+  wget -q -O - http://127.0.0.1:8081/readyz
+```
+
+Worker tuning is explicit in `.env.example`. Producers and consumers must use
+the same `ZHIXU_WORKER_QUEUE`. The configured heartbeat must be less than one
+third of the Workflow lease, the River job timeout must be shorter than the
+stuck-job rescue interval, and the soft stop timeout must be shorter than the
+hard process deadline.
+
+Telemetry defaults to `disabled`. `optional` requires
+`OTEL_EXPORTER_OTLP_ENDPOINT` but may start with a stable degraded status when
+no exporter Adapter is available; `required` fails startup in that case. The
+current repository provides project-owned logging/metrics/tracing contracts and
+no production exporter factory, so it never claims external export succeeded.
+API requests still create propagatable trace context, and the Worker emits
+bounded ready-queue/active/node/retry/manual/lease/heartbeat/duplicate/shutdown
+measurements to the configured project Metrics adapter.
+
+SIGINT/SIGTERM first remove Worker readiness and choose the graceful River
+`Stop` path. A fatal runtime invariant may instead choose `StopAndCancel`; the
+first shutdown mode wins and the two paths are never chained. Exceeding the
+hard deadline is a non-zero process failure, not proof that external side
+effects were rolled back. Recovery uses River delivery plus Workflow
+lease/checkpoint facts; see the
+[Workflow recovery runbook](docs/architecture/runbooks/workflow-recovery.md).
 
 Stop the stack and remove its local database volume:
 
@@ -93,6 +129,13 @@ make go-test go-vet
 make web-lint web-typecheck web-test web-build
 make openapi-check compose-check docker-build
 ```
+
+`compose-check` validates the Compose model. A release candidate must also run
+`make compose-up`, query both API and Worker readiness, exercise the documented
+fault-recovery smoke, and then run `make compose-down`; the SIGKILL smoke creates
+an isolated temporary database so a running Compose Worker cannot own its River
+maintenance leader. Do not treat a successful
+image build or config render as evidence that crash recovery passed.
 
 The isolated Eino adoption gate is available under `poc/eino` and is included in `make test`. The current decision is not to adopt Eino formally because several real integration gates and the provider smoke remain incomplete; see `poc/eino/report.md`.
 

@@ -11,7 +11,11 @@
 ## 2. 第一响应
 
 1. 系统进入 READ_ONLY_RECOVERY。
-2. 停止 Worker 领取 Side Effect；当前 M5-04D 仅构造 Safe Writeback Node/Composition，River dispatcher、Job Registry 和 retry runner 尚未实现，不能用自制 polling 替代恢复流程。
+2. 向 Worker 发送 SIGTERM 并确认独立 `/readyz` 进入
+   `WORKER_SHUTTING_DOWN`；等待 graceful `Stop` 到安全 checkpoint。若已超过 hard
+   deadline 或 Worker 崩溃，保持 River Job、Workflow lease/Attempt 和 Writeback
+   checkpoint，按 Workflow 恢复 Runbook 处理，不能用自制 polling 或手工完成 Job
+   替代正式 River Runtime。
 3. 保留所有临时文件和日志。
 4. 记录：
    - Workspace。

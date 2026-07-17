@@ -64,7 +64,14 @@ sequenceDiagram
     C->>DB: cleanup finalize (retryable)
 ```
 
-Begin 的两份授权、Proposal/Revision/Approval/Target/HEAD 均从持久化事实绑定；Credential 不进入 Node input、Execution、Outbox、日志或返回值。Safe Writeback Node 成功只表示 Publish 与 cleanup finalize 已到 `verifying/index_pending`，不表示 Retrieval/Regression completed。M5-04D 已提供 Node 和 API/Worker Composition；M4-A 已提供通用 River Registry/InsertTx 基础，但 Safe Writeback 的生产 dispatcher、lease/retry lifecycle 仍由 M4-C/M4-D 接线，直接 Node 集成不代表该业务路径已自动异步执行。
+Begin 的两份授权、Proposal/Revision/Approval/Target/HEAD 均从持久化事实绑定；Credential 不进入 Node input、Execution、Outbox、日志或返回值。Safe Writeback Node 成功只表示 Publish 与 cleanup finalize 已到 `verifying/index_pending`，不表示 Retrieval/Regression completed。生产路径已接入 Approved HTTP → 原子 Run/Node/Outbox/River Job → Bootstrap 双授权/Begin → Safe Writeback → Workflow Complete；Producer/Consumer 使用同一显式 queue，River Job Args 只含 Node identity，项目 metadata 只写校验后的 `traceparent`，River 自有 `river:*` recovery 字段不会进入 Application。Workflow PostgreSQL 与 Change Control Execution 仍是事实源，River 仅负责投递和重试。
+
+用户 Cancel 或 Worker forced cancel 不能越过写回恢复边界：未创建 Execution，或
+Execution 已到 `needs_revision`、`apply_failed`、`compensated`、
+`manual_recovery_required`、`verify_failed`、`rolled_back`、`completed`，或
+`verifying` 且 cleanup 已完成时，Runtime 才允许 terminal cancelled；其他状态
+返回 `WORKFLOW_CANCELLATION_DEFERRED`，继续从 durable checkpoint 恢复或进入
+Manual Recovery，禁止 terminal Workflow + 非终态 Execution。
 
 ## 6. 三方合并
 

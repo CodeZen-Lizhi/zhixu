@@ -343,3 +343,74 @@ Correct: 单一 pgx transaction 内 Approval + Proposal binding + Definition/Run
 Wrong: 每次 delivery 都重签 Credential 并 Begin，或把 Credential 放进 River Args 方便恢复。
 Correct: Claim 后先按 safe-writeback:<node_run_id> exact lookup；只有不存在才瞬时签发双授权并 Atomic Begin，响应丢失后再次 exact lookup。
 ```
+
+## M4-D River Operability Contract
+
+### 1. Scope / Trigger
+
+- Trigger：API/Approval Producer 与 Worker Consumer 接入可配置 River queue、进程停机、stuck rescue、trace metadata 和 Writeback cancel safety。
+- Scope：River 只负责 transport；Workflow/Writeback PostgreSQL 事实、lease、checkpoint 和幂等约束仍由领域 Repository 控制。
+
+### 2. Signatures
+
+```go
+riveradapter.NewClientWithOptions(*pgxpool.Pool, *riveradapter.Workers, riveradapter.Options) (*riveradapter.Client, error)
+riveradapter.NewJobInserter(*riveradapter.Client) (riveradapter.JobInserter, error)
+CancellationSafetyGuard.SafeToCancelWorkflowNode(context.Context, any, foundation.ID) (bool, error)
+```
+
+环境契约：`ZHIXU_WORKER_QUEUE`、`ZHIXU_WORKER_MAX_WORKERS`、`ZHIXU_WORKER_JOB_TIMEOUT`、`ZHIXU_WORKER_RESCUE_STUCK_AFTER`、`ZHIXU_WORKFLOW_LEASE`、`ZHIXU_WORKFLOW_HEARTBEAT`、`ZHIXU_WORKER_SOFT_STOP_TIMEOUT`、`ZHIXU_WORKER_HARD_STOP_TIMEOUT`。
+
+### 3. Contracts
+
+- API Producer 与 Worker Consumer 必须读取同一 `ZHIXU_WORKER_QUEUE`；`InsertTx` 必须显式写 `InsertOpts.Queue`，不能依赖 River `default`。
+- 项目自有 Job metadata 只写合法 W3C `traceparent`。Consumer 必须允许 River 保留的 `river:*` recovery metadata（如 `river:rescue_count`）共存，但不得复制到 Application、日志、Metrics 或 Trace；其他字段 fail closed。
+- `JobTimeout < RescueStuckJobsAfter`；真实 SIGKILL 后只能等待同一 Job 被 River rescue，不能手工插入第二 Job。
+- Writeback Execution 处于 `prepared/file_prepared/file_applied/git_prepared/git_committed/publish_recovery/compensating` 时，Cancel 只记录 request，继续 heartbeat/lease reclaim，并返回 retryable `WORKFLOW_CANCELLATION_DEFERRED`；只有安全失败、补偿、人工恢复、完成或已清理恢复证据后才允许 Run terminal cancelled。
+- Cancellation guard 必须使用 Runtime 当前 pgx transaction 查询，保证 Control/Heartbeat/Transition 与 Execution checkpoint 判定原子。
+- Compose PostgreSQL healthcheck 必须执行实际 `SELECT 1`；`pg_isready` 在数据库尚未创建时也可能报告 server accepting，不能作为 Migrate 前置门禁。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 稳定错误/行为 |
+|---|---|
+| queue 空、非法字符、过长或 worker/timeout 非正 | `WORKFLOW_RIVER_OPTIONS_INVALID`，启动失败 |
+| Producer/Consumer queue 不同 | Worker 不消费；Compose/集成测试必须阻断交付 |
+| metadata 含非 `traceparent` 且非 `river:*` 字段 | `WORKFLOW_RIVER_TRACE_METADATA_INVALID` / NonRetryable |
+| `river:rescue_count` 等保留字段 | 忽略并继续恢复，不向 Application 暴露 |
+| Cancel 遇到非安全 Writeback checkpoint | `WORKFLOW_CANCELLATION_DEFERRED` / Retryable，事务不归约终态 |
+| Cancellation guard 查询/transaction 无效 | `WORKFLOW_CANCELLATION_SAFETY_UNAVAILABLE`，fail closed |
+| Worker 超 hard deadline | 进程非零退出；保留 Job/lease/checkpoint 供新实例恢复 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：子进程在 Job running 后 SIGKILL；River 写入 `river:rescue_count` 并 rescue，同一 Job 新 attempt 完成。
+- Base：没有 trace context 时 metadata 为空；有 trace 时只写 `traceparent`。
+- Base：Cancel 发生在 Atomic Begin 后；旧 lease 到期，新 Worker reclaim 并恢复到 ApplyFailed/Compensated/Manual/Completed 后再 terminal cancel。
+- Bad：API 使用 `default` queue，Worker 使用 `workflow` queue；Job 永久 pending。
+- Bad：Consumer 把所有非 `traceparent` 字段都拒绝，导致 River rescue 自有 metadata 触发永久重试。
+- Bad：用 `pg_isready` 声称目标 database 已创建，Migrate 在 initdb 完成前启动并失败。
+
+### 6. Tests Required
+
+- Unit/race：Client options、queue 映射、traceparent、`river:*` 保留字段、lifecycle 首事件互斥、readiness、cancel safety 状态表。
+- PostgreSQL：cancel 后 heartbeat、lease expiry/reclaim、unsafe transition 回滚、安全 checkpoint 后 terminal cancel，至少 `-race -count=20`。
+- Integration：独立空库 Approval 双 Worker、正常 Writeback、fault smoke；断言 Execution/Commit/Mapping/Outbox 唯一。
+- Process smoke：真实测试子进程 SIGKILL → River stuck rescue → 新 attempt completed。
+- River maintenance service 在同一 Schema 内通过 leader election 单实例运行；测试只换
+  queue 不能隔离 rescuer/scheduler 配置。需要自定义短 rescue 周期的进程 smoke 必须为
+  每次运行创建独立临时数据库或独立 River Schema，并执行完整 Goose + River Up/Validate。
+- Compose：`up --wait`、Migrate→API/Worker 顺序、API/Worker readiness、UID 10001、SIGTERM exit 0、DB 短断 503→恢复 200。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Producer 不设置 InsertOpts.Queue，Consumer 只监听 workflow。
+Correct: API/Worker 从同一配置构造 Client，Inserter 显式写同一 queue。
+
+Wrong: metadata 只要不是 traceparent 就拒绝，包括 River 自有 river:rescue_count。
+Correct: 项目只写 traceparent；Consumer 隔离并忽略 river:*，其余字段 fail closed。
+
+Wrong: Cancel 直接把 Run cancelled，再留下 prepared/file_applied Execution。
+Correct: 同一事务调用 CancellationSafetyGuard；不安全时保持可恢复 Job/lease/checkpoint。
+```

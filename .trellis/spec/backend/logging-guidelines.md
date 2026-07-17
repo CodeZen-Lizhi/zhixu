@@ -62,8 +62,20 @@ git diff --check
 - 日志契约测试验证 JSON 可解析、error code 可查询、关键资源可反查且 SSE/用户时间线只暴露摘要。
 - 安全测试和导出测试确认日志、Audit、Trace 和导出包均不泄露 Secret 或未授权全文。
 
-## 待 M1 代码验证
+## M4-D 已验证边界
 
-- `slog` Handler、OpenTelemetry exporter、日志配置和 Audit Repository 的实际包路径。
-- Correlation ID 的生成/传播中间件、采样策略、日志保留和外部 OTel/Prometheus 接入方式。
+- `internal/platform/observability` 已实现 slog JSON safe Handler、Context correlation、Secret/绝对路径 fail-closed redaction、bounded Metrics registry 和 traceparent seam。
+- API request middleware 在 exporter disabled 时也创建 child/root trace；生产
+  `RuntimeNodeWorker` 在 Claim 前解码 metadata、Claim 后补齐 Workspace/Run/Node/
+  Attempt/Dispatch/Retry/River Job correlation。
+- queue/active/node result/retry/manual/lease/heartbeat/duplicate/shutdown 指标已接到真实
+  Worker/PostgreSQL 事实点；持久 transition replay 不重复发射，metric 失败不改变业务结果。
+- 项目自有 River metadata 只写 `traceparent`；River 保留的 `river:*` recovery 字段可共存但不进入 Application 或可观测载荷。
+- `disabled/optional/required` 不伪造 exporter 成功；当前生产 Composition 未提供真实 exporter factory，optional 明确 degraded，required fail-fast。
+- Worker `/livez|readyz` 只返回稳定 `status/code/version`；真实容器日志和 health response 已执行 Secret canary 扫描。
+
+## 后续待验证
+
+- 真实 OpenTelemetry exporter Adapter、采样/保留策略和 Audit Repository。
+- 采样策略、日志保留和外部 OTel/Prometheus 接入方式。
 - Audit 表字段、不可变约束、访问权限和归档策略；当前仅有架构约束，没有迁移。

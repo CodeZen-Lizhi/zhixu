@@ -3,7 +3,7 @@
   "name": "river-operability-delivery",
   "title": "M4-D River Operability And Delivery",
   "description": "完成 Worker readiness、graceful shutdown、指标/Trace、Compose/Docker、文档和全量交付门禁。",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
