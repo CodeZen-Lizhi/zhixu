@@ -62,26 +62,26 @@ func (r *RuntimeRepository) Claim(ctx context.Context, command application.Claim
 		return application.ClaimResult{}, queryErr
 	} else if found {
 		if existing.Status == domain.AttemptStatusRunning && existing.LeaseOwner == command.LeaseOwner && node.Status == domain.NodeStatusRunning && existing.LeaseUntil.After(now) && node.LeaseUntil != nil && node.LeaseUntil.After(now) {
-			return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionClaimed, Run: run, Node: node, Attempt: existing})
+			return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionClaimed, Run: run, Node: node, Attempt: existing, ObservedNodeKind: node.NodeType})
 		}
 		if existing.Status != domain.AttemptStatusRunning || existing.LeaseUntil.After(now) {
-			return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale})
+			return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale, ObservedNodeKind: node.NodeType, DuplicateDelivery: true})
 		}
 		// An expired duplicate delivery may reclaim the same River generation;
 		// the old Attempt is reduced to lease_lost below before a new Attempt is
 		// appended. It must not be treated as a benign stale delivery.
 	}
-	if domain.IsTerminalRunStatus(run.Status) || run.PauseRequestedAt != nil || run.CancelRequestedAt != nil {
+	if domain.IsTerminalRunStatus(run.Status) || run.PauseRequestedAt != nil {
 		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale})
 	}
 	if node.DispatchNo != command.DispatchNo {
-		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale})
+		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale, ObservedNodeKind: node.NodeType, DuplicateDelivery: true})
 	}
 	if node.Status == domain.NodeStatusRetryWait && (node.NextAttemptAt == nil || node.NextAttemptAt.After(now)) {
-		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale})
+		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale, ObservedNodeKind: node.NodeType, DuplicateDelivery: true})
 	}
 	if node.Status != domain.NodeStatusPending && node.Status != domain.NodeStatusRetryWait && node.Status != domain.NodeStatusRunning {
-		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale})
+		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale, ObservedNodeKind: node.NodeType, DuplicateDelivery: true})
 	}
 	if node.Status == domain.NodeStatusRunning && node.LeaseUntil != nil && node.LeaseUntil.After(now) {
 		var activeRiverJobID *int64
@@ -96,8 +96,9 @@ func (r *RuntimeRepository) Claim(ctx context.Context, command application.Claim
 		if activeRiverJobID != nil && activeRiverJobAttempt != nil && *activeRiverJobID == command.RiverJobID && command.RiverJobAttempt > *activeRiverJobAttempt {
 			return application.ClaimResult{}, foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_LEASE_HELD", true, errors.New("previous delivery lease is still active"))
 		}
-		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale})
+		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale, ObservedNodeKind: node.NodeType, DuplicateDelivery: true})
 	}
+	leaseReclaimed := false
 	if node.Status == domain.NodeStatusRunning {
 		if node.Attempt < 1 {
 			return application.ClaimResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_ACTIVE_ATTEMPT_MISSING", false, errors.New("expired running node has no attempt projection"))
@@ -107,6 +108,7 @@ SET status='lease_lost',failure_class='lease_lost',error_kind=$2,error_code='WOR
 WHERE node_run_id=$1 AND attempt_no=$4 AND status='running'`, string(node.ID), string(foundation.ErrorVersionConflict), now, node.Attempt); err != nil {
 			return application.ClaimResult{}, classify(err, "WORKFLOW_ATTEMPT_RECLAIM_FAILED")
 		}
+		leaseReclaimed = true
 	}
 	attemptNo := node.Attempt + 1
 	var maxAttempt int
@@ -141,7 +143,7 @@ VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,0),$8,$9,$10,'running',$11,$11)`, string(atte
 	if err != nil {
 		return application.ClaimResult{}, classify(err, "WORKFLOW_ATTEMPT_QUERY_FAILED")
 	}
-	return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionClaimed, Run: run, Node: node, Attempt: attempt})
+	return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionClaimed, Run: run, Node: node, Attempt: attempt, ObservedNodeKind: node.NodeType, DuplicateDelivery: leaseReclaimed, LeaseReclaimed: leaseReclaimed})
 }
 
 func commitClaim(ctx context.Context, tx pgx.Tx, result application.ClaimResult) (application.ClaimResult, error) {
@@ -171,7 +173,13 @@ func (r *RuntimeRepository) Heartbeat(ctx context.Context, command application.H
 		return application.HeartbeatResult{}, classify(err, "WORKFLOW_RUN_QUERY_FAILED")
 	}
 	if cancelRequestedAt != nil {
-		return application.HeartbeatResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CANCEL_REQUESTED", false, errors.New("workflow cancellation checkpoint requested"))
+		safe, safetyErr := r.safeToCancelWorkflowNode(ctx, tx, command.NodeRunID)
+		if safetyErr != nil {
+			return application.HeartbeatResult{}, safetyErr
+		}
+		if safe {
+			return application.HeartbeatResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CANCEL_REQUESTED", false, errors.New("workflow cancellation checkpoint requested"))
+		}
 	}
 	if pauseRequestedAt != nil {
 		return application.HeartbeatResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_PAUSE_REQUESTED", false, errors.New("workflow pause checkpoint requested"))
@@ -248,13 +256,13 @@ func (r *RuntimeRepository) TransitionDelivery(ctx context.Context, command appl
 			if err := tx.Commit(ctx); err != nil {
 				return application.DeliveryTransitionResult{}, classify(err, "WORKFLOW_DELIVERY_COMMIT_FAILED")
 			}
-			return application.DeliveryTransitionResult{Run: run, Node: node, Attempt: attempt}, nil
+			return application.DeliveryTransitionResult{Run: run, Node: node, Attempt: attempt, Replayed: true}, nil
 		}
 		if sameAttemptResult(attempt, command.Result) {
 			if err := tx.Commit(ctx); err != nil {
 				return application.DeliveryTransitionResult{}, classify(err, "WORKFLOW_DELIVERY_COMMIT_FAILED")
 			}
-			return application.DeliveryTransitionResult{Run: run, Node: node, Attempt: attempt}, nil
+			return application.DeliveryTransitionResult{Run: run, Node: node, Attempt: attempt, Replayed: true}, nil
 		}
 		return application.DeliveryTransitionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_COMPLETION_CONFLICT", false, errors.New("delivery already reduced with a different result"))
 	}
@@ -265,7 +273,14 @@ func (r *RuntimeRepository) TransitionDelivery(ctx context.Context, command appl
 		return application.DeliveryTransitionResult{}, err
 	}
 	if run.CancelRequestedAt != nil {
-		return r.controlCheckpoint(ctx, tx, run, nodes, node, attempt, domain.NodeStatusCancelled, "WORKFLOW_CANCELLED", now)
+		safe, safetyErr := r.safeToCancelWorkflowNode(ctx, tx, node.ID)
+		if safetyErr != nil {
+			return application.DeliveryTransitionResult{}, safetyErr
+		}
+		if safe {
+			return r.controlCheckpoint(ctx, tx, run, nodes, node, attempt, domain.NodeStatusCancelled, "WORKFLOW_CANCELLED", now)
+		}
+		return application.DeliveryTransitionResult{}, foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_CANCELLATION_DEFERRED", true, errors.New("workflow cancellation waits for side-effect recovery checkpoint"))
 	}
 	if run.PauseRequestedAt != nil {
 		return r.controlCheckpoint(ctx, tx, run, nodes, node, attempt, domain.NodeStatusPaused, "WORKFLOW_PAUSED", now)
@@ -384,7 +399,16 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 		if _, err := tx.Exec(ctx, `UPDATE workflow.run SET cancel_requested_at=$2,version=version+1,updated_at=$2 WHERE id=$1`, string(run.ID), now); err != nil {
 			return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_UPDATE_FAILED")
 		}
+		deferredCancellation := false
 		for id, node := range nodes {
+			safe, safetyErr := r.safeToCancelWorkflowNode(ctx, tx, node.ID)
+			if safetyErr != nil {
+				return application.ControlPersistenceResult{}, safetyErr
+			}
+			if !safe {
+				deferredCancellation = true
+				continue
+			}
 			if node.Status != domain.NodeStatusRunning && !domain.IsTerminalNodeStatus(node.Status) {
 				updated, updateErr := cancelNode(ctx, tx, node, now)
 				if updateErr != nil {
@@ -396,7 +420,7 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 				nodes[id] = updated
 			}
 		}
-		if !hasRunningNode(nodes) {
+		if !hasRunningNode(nodes) && !deferredCancellation {
 			status = domain.RunStatusCancelled
 			if _, err := tx.Exec(ctx, `UPDATE workflow.run SET status='cancelled',completed_at=$2,version=version+1,updated_at=$2 WHERE id=$1`, string(run.ID), now); err != nil {
 				return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_UPDATE_FAILED")
@@ -425,6 +449,17 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 		return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_COMMIT_FAILED")
 	}
 	return result, nil
+}
+
+func (r *RuntimeRepository) safeToCancelWorkflowNode(ctx context.Context, transaction any, nodeRunID foundation.ID) (bool, error) {
+	if r == nil || r.cancellation == nil {
+		return true, nil
+	}
+	safe, err := r.cancellation.SafeToCancelWorkflowNode(ctx, transaction, nodeRunID)
+	if err != nil {
+		return false, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_CANCELLATION_SAFETY_UNAVAILABLE", true, err)
+	}
+	return safe, nil
 }
 
 // WaitForHuman releases a leased Attempt and creates a pending Human Task in

@@ -17,16 +17,24 @@ import (
 
 // RuntimeRepository owns the PostgreSQL + River transactional Start unit of work.
 type RuntimeRepository struct {
-	db   DB
-	jobs riveradapter.JobInserter
+	db           DB
+	jobs         riveradapter.JobInserter
+	cancellation application.CancellationSafetyGuard
 }
 
 // NewRuntimeRepository constructs the reusable registered Workflow Start adapter.
-func NewRuntimeRepository(db DB, jobs riveradapter.JobInserter) (*RuntimeRepository, error) {
+func NewRuntimeRepository(db DB, jobs riveradapter.JobInserter, guards ...application.CancellationSafetyGuard) (*RuntimeRepository, error) {
 	if isNilDB(db) || isNilJobInserter(jobs) {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUNTIME_DATABASE_UNAVAILABLE", true, errors.New("runtime database or job inserter is nil"))
 	}
-	return &RuntimeRepository{db: db, jobs: jobs}, nil
+	if len(guards) > 1 || (len(guards) == 1 && isNilCancellationSafetyGuard(guards[0])) {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_CANCELLATION_GUARD_INVALID", false, errors.New("runtime accepts at most one non-nil cancellation guard"))
+	}
+	repository := &RuntimeRepository{db: db, jobs: jobs}
+	if len(guards) == 1 {
+		repository.cancellation = guards[0]
+	}
+	return repository, nil
 }
 
 func isNilJobInserter(inserter riveradapter.JobInserter) bool {
@@ -35,6 +43,19 @@ func isNilJobInserter(inserter riveradapter.JobInserter) bool {
 	}
 	value := reflect.ValueOf(inserter)
 	return value.Kind() == reflect.Pointer && value.IsNil()
+}
+
+func isNilCancellationSafetyGuard(guard application.CancellationSafetyGuard) bool {
+	if guard == nil {
+		return true
+	}
+	value := reflect.ValueOf(guard)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // Start atomically creates or replays Definition, Run, root Node, Outbox and River Job.

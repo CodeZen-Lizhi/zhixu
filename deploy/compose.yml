@@ -9,25 +9,25 @@ services:
     volumes:
       - zhixu-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: ["CMD-SHELL", "PGPASSWORD=$$POSTGRES_PASSWORD psql -U $$POSTGRES_USER -d $$POSTGRES_DB -c 'SELECT 1' >/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 20
 
   migrate:
-    image: pgvector/pgvector:0.8.5-pg18-bookworm
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/app/zhixu-migrate"]
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_DB: ${ZHIXU_POSTGRES_DB:-zhixu}
-      POSTGRES_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
-      POSTGRES_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
-    volumes:
-      - ../migrations:/migrations:ro
-      - ./run-migrations.sh:/run-migrations.sh:ro
-    entrypoint: ["/bin/sh", "/run-migrations.sh"]
+      ZHIXU_DATABASE_HOST: postgres
+      ZHIXU_DATABASE_PORT: 5432
+      ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
+      ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
+      ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
 
   app:
     build:
@@ -42,6 +42,7 @@ services:
       ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
       ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
       ZHIXU_WEB_ASSETS_DIR: /app/web
+      ZHIXU_WORKER_QUEUE: ${ZHIXU_WORKER_QUEUE:-workflow}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -67,11 +68,28 @@ services:
       ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
       ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
       ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
+      ZHIXU_WORKER_HEALTH_ADDR: 0.0.0.0:8081
+      ZHIXU_WORKER_QUEUE: ${ZHIXU_WORKER_QUEUE:-workflow}
+      ZHIXU_WORKER_MAX_WORKERS: ${ZHIXU_WORKER_MAX_WORKERS:-4}
+      ZHIXU_WORKER_JOB_TIMEOUT: ${ZHIXU_WORKER_JOB_TIMEOUT:-15m}
+      ZHIXU_WORKER_RESCUE_STUCK_AFTER: ${ZHIXU_WORKER_RESCUE_STUCK_AFTER:-30m}
+      ZHIXU_WORKFLOW_LEASE: ${ZHIXU_WORKFLOW_LEASE:-2m}
+      ZHIXU_WORKFLOW_HEARTBEAT: ${ZHIXU_WORKFLOW_HEARTBEAT:-30s}
+      ZHIXU_WORKER_SOFT_STOP_TIMEOUT: ${ZHIXU_WORKER_SOFT_STOP_TIMEOUT:-30s}
+      ZHIXU_WORKER_HARD_STOP_TIMEOUT: ${ZHIXU_WORKER_HARD_STOP_TIMEOUT:-60s}
+      ZHIXU_TELEMETRY_MODE: ${ZHIXU_TELEMETRY_MODE:-disabled}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
     volumes:
       - ${ZHIXU_WORKSPACE_ROOT:-../workspace}:/workspace
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: ${ZHIXU_WORKER_STOP_GRACE_PERIOD:-70s}
     restart: on-failure
 
 volumes:

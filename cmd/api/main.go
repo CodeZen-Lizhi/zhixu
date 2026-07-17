@@ -78,11 +78,18 @@ func main() {
 	ingestionHandler := ingestionhttp.NewHandler(nil)
 	fileScanner := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
 	if database != nil {
-		workflowService, workflowRuntime, workflowServiceErr := newWorkflowComponents(database.DB())
-		if workflowServiceErr != nil {
-			logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
+		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
+		var workflowRuntime *workflowpostgres.RuntimeRepository
+		if changeControlRepositoryErr != nil {
+			logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
 		} else {
-			workflowHandler = workflowhttp.NewHandler(workflowService)
+			workflowService, runtime, workflowServiceErr := newWorkflowComponents(database.DB(), cfg, changeControlRepository)
+			if workflowServiceErr != nil {
+				logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
+			} else {
+				workflowRuntime = runtime
+				workflowHandler = workflowhttp.NewHandler(workflowService)
+			}
 		}
 		workspaceRepository, repositoryErr := workspacepostgres.NewRepository(database.DB())
 		if repositoryErr != nil {
@@ -117,7 +124,6 @@ func main() {
 				}
 			}
 
-			changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
 			targetReader, targetReaderErr := changecontrollocalfs.NewReader(workspaceRepository)
 			approvalGitInspector, approvalGitInspectorErr := gitcli.NewWritebackClient(gitcli.New(""), workspaceRepository)
 			if changeControlRepositoryErr != nil || targetReaderErr != nil || approvalGitInspectorErr != nil || workflowRuntime == nil {
@@ -185,16 +191,20 @@ func main() {
 }
 
 func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error) {
-	service, _, err := newWorkflowComponents(pool)
+	service, _, err := newWorkflowComponents(pool, config.Defaults())
 	return service, err
 }
 
-func newWorkflowComponents(pool *pgxpool.Pool) (*workflowapplication.Service, *workflowpostgres.RuntimeRepository, error) {
+func newWorkflowComponents(pool *pgxpool.Pool, cfg config.Config, guards ...workflowapplication.CancellationSafetyGuard) (*workflowapplication.Service, *workflowpostgres.RuntimeRepository, error) {
 	legacyRepository, err := workflowpostgres.NewRepository(pool)
 	if err != nil {
 		return nil, nil, err
 	}
-	client, err := riveradapter.NewClient(pool, nil)
+	client, err := riveradapter.NewClientWithOptions(pool, nil, riveradapter.Options{
+		Queue: cfg.WorkerQueue, MaxWorkers: cfg.WorkerMaxWorkers,
+		JobTimeout: cfg.WorkerJobTimeout, RescueStuckJobsAfter: cfg.WorkerRescueStuckJobsAfter,
+		SoftStopTimeout: cfg.WorkerSoftStopTimeout,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -202,7 +212,7 @@ func newWorkflowComponents(pool *pgxpool.Pool) (*workflowapplication.Service, *w
 	if err != nil {
 		return nil, nil, err
 	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(pool, inserter, guards...)
 	if err != nil {
 		return nil, nil, err
 	}

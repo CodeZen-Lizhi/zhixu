@@ -12,53 +12,99 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/operability"
+
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	defaultHTTPAddr        = "127.0.0.1:8080"
-	defaultVersion         = "dev"
-	defaultPingTimeout     = 2 * time.Second
-	defaultHealthInterval  = 15 * time.Second
-	defaultShutdownTimeout = 10 * time.Second
-	defaultMaxConns        = int32(10)
-	defaultMinConns        = int32(1)
+	defaultHTTPAddr                   = "127.0.0.1:8080"
+	defaultVersion                    = "dev"
+	defaultPingTimeout                = 2 * time.Second
+	defaultHealthInterval             = 15 * time.Second
+	defaultShutdownTimeout            = 10 * time.Second
+	defaultMaxConns                   = int32(10)
+	defaultMinConns                   = int32(1)
+	defaultWorkerQueue                = "workflow"
+	defaultWorkerMaxWorkers           = 4
+	defaultWorkerJobTimeout           = 15 * time.Minute
+	defaultWorkerRescueStuckJobsAfter = 30 * time.Minute
+	defaultWorkflowLeaseDuration      = 2 * time.Minute
+	defaultWorkflowHeartbeatInterval  = 30 * time.Second
+	defaultWorkerSoftStopTimeout      = 30 * time.Second
+	defaultWorkerHardStopTimeout      = 60 * time.Second
+	defaultWorkerHealthAddr           = "0.0.0.0:8081"
 )
 
-// Config contains non-secret process settings. DatabaseURL is supplied by the
-// environment or a local YAML file and is never emitted by logging code.
+// TelemetryMode controls whether telemetry export is disabled or required for
+// process readiness.
+type TelemetryMode string
+
+const (
+	// TelemetryModeDisabled prevents exporter construction.
+	TelemetryModeDisabled TelemetryMode = "disabled"
+	// TelemetryModeOptional enables export without making exporter availability
+	// a readiness requirement.
+	TelemetryModeOptional TelemetryMode = "optional"
+	// TelemetryModeRequired makes exporter availability a readiness requirement.
+	TelemetryModeRequired TelemetryMode = "required"
+)
+
+// Config contains process settings, including connection secrets. Callers must
+// use String or GoString rather than serializing the struct for diagnostics.
 type Config struct {
-	AppName             string        `yaml:"app_name"`
-	Version             string        `yaml:"version"`
-	Environment         string        `yaml:"environment"`
-	HTTPAddr            string        `yaml:"http_addr"`
-	DatabaseURL         string        `yaml:"database_url"`
-	DatabaseHost        string        `yaml:"database_host"`
-	DatabasePort        string        `yaml:"database_port"`
-	DatabaseName        string        `yaml:"database_name"`
-	DatabaseUser        string        `yaml:"database_user"`
-	DatabasePassword    string        `yaml:"database_password"`
-	DatabaseMaxConns    int32         `yaml:"database_max_conns"`
-	DatabaseMinConns    int32         `yaml:"database_min_conns"`
-	DatabasePingTimeout time.Duration `yaml:"database_ping_timeout"`
-	HealthInterval      time.Duration `yaml:"health_interval"`
-	ShutdownTimeout     time.Duration `yaml:"shutdown_timeout"`
-	WebAssetsDir        string        `yaml:"web_assets_dir"`
+	AppName                    string        `yaml:"app_name"`
+	Version                    string        `yaml:"version"`
+	Environment                string        `yaml:"environment"`
+	HTTPAddr                   string        `yaml:"http_addr"`
+	DatabaseURL                string        `yaml:"database_url"`
+	DatabaseHost               string        `yaml:"database_host"`
+	DatabasePort               string        `yaml:"database_port"`
+	DatabaseName               string        `yaml:"database_name"`
+	DatabaseUser               string        `yaml:"database_user"`
+	DatabasePassword           string        `yaml:"database_password"`
+	DatabaseMaxConns           int32         `yaml:"database_max_conns"`
+	DatabaseMinConns           int32         `yaml:"database_min_conns"`
+	DatabasePingTimeout        time.Duration `yaml:"database_ping_timeout"`
+	HealthInterval             time.Duration `yaml:"health_interval"`
+	ShutdownTimeout            time.Duration `yaml:"shutdown_timeout"`
+	WebAssetsDir               string        `yaml:"web_assets_dir"`
+	WorkerQueue                string        `yaml:"worker_queue"`
+	WorkerMaxWorkers           int           `yaml:"worker_max_workers"`
+	WorkerJobTimeout           time.Duration `yaml:"worker_job_timeout"`
+	WorkerRescueStuckJobsAfter time.Duration `yaml:"worker_rescue_stuck_jobs_after"`
+	WorkflowLeaseDuration      time.Duration `yaml:"workflow_lease"`
+	WorkflowHeartbeatInterval  time.Duration `yaml:"workflow_heartbeat"`
+	WorkerSoftStopTimeout      time.Duration `yaml:"worker_soft_stop_timeout"`
+	WorkerHardStopTimeout      time.Duration `yaml:"worker_hard_stop_timeout"`
+	WorkerHealthAddr           string        `yaml:"worker_health_addr"`
+	TelemetryMode              TelemetryMode `yaml:"telemetry_mode"`
+	TelemetryEndpoint          string        `yaml:"telemetry_endpoint"`
 }
 
 // Defaults returns safe non-sensitive defaults. It intentionally leaves the
 // database URL empty so a process cannot silently connect to an unknown DB.
 func Defaults() Config {
 	return Config{
-		AppName:             "zhixu",
-		Version:             defaultVersion,
-		Environment:         "development",
-		HTTPAddr:            defaultHTTPAddr,
-		DatabaseMaxConns:    defaultMaxConns,
-		DatabaseMinConns:    defaultMinConns,
-		DatabasePingTimeout: defaultPingTimeout,
-		HealthInterval:      defaultHealthInterval,
-		ShutdownTimeout:     defaultShutdownTimeout,
+		AppName:                    "zhixu",
+		Version:                    defaultVersion,
+		Environment:                "development",
+		HTTPAddr:                   defaultHTTPAddr,
+		DatabaseMaxConns:           defaultMaxConns,
+		DatabaseMinConns:           defaultMinConns,
+		DatabasePingTimeout:        defaultPingTimeout,
+		HealthInterval:             defaultHealthInterval,
+		ShutdownTimeout:            defaultShutdownTimeout,
+		WorkerQueue:                defaultWorkerQueue,
+		WorkerMaxWorkers:           defaultWorkerMaxWorkers,
+		WorkerJobTimeout:           defaultWorkerJobTimeout,
+		WorkerRescueStuckJobsAfter: defaultWorkerRescueStuckJobsAfter,
+		WorkflowLeaseDuration:      defaultWorkflowLeaseDuration,
+		WorkflowHeartbeatInterval:  defaultWorkflowHeartbeatInterval,
+		WorkerSoftStopTimeout:      defaultWorkerSoftStopTimeout,
+		WorkerHardStopTimeout:      defaultWorkerHardStopTimeout,
+		WorkerHealthAddr:           defaultWorkerHealthAddr,
+		TelemetryMode:              TelemetryModeDisabled,
 	}
 }
 
@@ -97,22 +143,33 @@ func LoadWithLookup(path string, lookup func(string) (string, bool)) (Config, er
 // explicit and consistent across yaml.v3 versions. Pointer fields preserve
 // defaults when a YAML key is omitted.
 type fileConfig struct {
-	AppName             *string `yaml:"app_name"`
-	Version             *string `yaml:"version"`
-	Environment         *string `yaml:"environment"`
-	HTTPAddr            *string `yaml:"http_addr"`
-	DatabaseURL         *string `yaml:"database_url"`
-	DatabaseHost        *string `yaml:"database_host"`
-	DatabasePort        *string `yaml:"database_port"`
-	DatabaseName        *string `yaml:"database_name"`
-	DatabaseUser        *string `yaml:"database_user"`
-	DatabasePassword    *string `yaml:"database_password"`
-	DatabaseMaxConns    *int32  `yaml:"database_max_conns"`
-	DatabaseMinConns    *int32  `yaml:"database_min_conns"`
-	DatabasePingTimeout *string `yaml:"database_ping_timeout"`
-	HealthInterval      *string `yaml:"health_interval"`
-	ShutdownTimeout     *string `yaml:"shutdown_timeout"`
-	WebAssetsDir        *string `yaml:"web_assets_dir"`
+	AppName                    *string        `yaml:"app_name"`
+	Version                    *string        `yaml:"version"`
+	Environment                *string        `yaml:"environment"`
+	HTTPAddr                   *string        `yaml:"http_addr"`
+	DatabaseURL                *string        `yaml:"database_url"`
+	DatabaseHost               *string        `yaml:"database_host"`
+	DatabasePort               *string        `yaml:"database_port"`
+	DatabaseName               *string        `yaml:"database_name"`
+	DatabaseUser               *string        `yaml:"database_user"`
+	DatabasePassword           *string        `yaml:"database_password"`
+	DatabaseMaxConns           *int32         `yaml:"database_max_conns"`
+	DatabaseMinConns           *int32         `yaml:"database_min_conns"`
+	DatabasePingTimeout        *string        `yaml:"database_ping_timeout"`
+	HealthInterval             *string        `yaml:"health_interval"`
+	ShutdownTimeout            *string        `yaml:"shutdown_timeout"`
+	WebAssetsDir               *string        `yaml:"web_assets_dir"`
+	WorkerQueue                *string        `yaml:"worker_queue"`
+	WorkerMaxWorkers           *int           `yaml:"worker_max_workers"`
+	WorkerJobTimeout           *string        `yaml:"worker_job_timeout"`
+	WorkerRescueStuckJobsAfter *string        `yaml:"worker_rescue_stuck_jobs_after"`
+	WorkflowLeaseDuration      *string        `yaml:"workflow_lease"`
+	WorkflowHeartbeatInterval  *string        `yaml:"workflow_heartbeat"`
+	WorkerSoftStopTimeout      *string        `yaml:"worker_soft_stop_timeout"`
+	WorkerHardStopTimeout      *string        `yaml:"worker_hard_stop_timeout"`
+	WorkerHealthAddr           *string        `yaml:"worker_health_addr"`
+	TelemetryMode              *TelemetryMode `yaml:"telemetry_mode"`
+	TelemetryEndpoint          *string        `yaml:"telemetry_endpoint"`
 }
 
 func applyYAMLFile(path string, cfg *Config) error {
@@ -165,10 +222,31 @@ func applyYAMLFile(path string, cfg *Config) error {
 	if raw.WebAssetsDir != nil {
 		cfg.WebAssetsDir = *raw.WebAssetsDir
 	}
+	if raw.WorkerQueue != nil {
+		cfg.WorkerQueue = *raw.WorkerQueue
+	}
+	if raw.WorkerMaxWorkers != nil {
+		cfg.WorkerMaxWorkers = *raw.WorkerMaxWorkers
+	}
+	if raw.WorkerHealthAddr != nil {
+		cfg.WorkerHealthAddr = *raw.WorkerHealthAddr
+	}
+	if raw.TelemetryMode != nil {
+		cfg.TelemetryMode = *raw.TelemetryMode
+	}
+	if raw.TelemetryEndpoint != nil {
+		cfg.TelemetryEndpoint = *raw.TelemetryEndpoint
+	}
 	for name, value := range map[string]*string{
-		"database_ping_timeout": raw.DatabasePingTimeout,
-		"health_interval":       raw.HealthInterval,
-		"shutdown_timeout":      raw.ShutdownTimeout,
+		"database_ping_timeout":          raw.DatabasePingTimeout,
+		"health_interval":                raw.HealthInterval,
+		"shutdown_timeout":               raw.ShutdownTimeout,
+		"worker_job_timeout":             raw.WorkerJobTimeout,
+		"worker_rescue_stuck_jobs_after": raw.WorkerRescueStuckJobsAfter,
+		"workflow_lease":                 raw.WorkflowLeaseDuration,
+		"workflow_heartbeat":             raw.WorkflowHeartbeatInterval,
+		"worker_soft_stop_timeout":       raw.WorkerSoftStopTimeout,
+		"worker_hard_stop_timeout":       raw.WorkerHardStopTimeout,
 	} {
 		if value == nil {
 			continue
@@ -184,6 +262,18 @@ func applyYAMLFile(path string, cfg *Config) error {
 			cfg.HealthInterval = parsed
 		case "shutdown_timeout":
 			cfg.ShutdownTimeout = parsed
+		case "worker_job_timeout":
+			cfg.WorkerJobTimeout = parsed
+		case "worker_rescue_stuck_jobs_after":
+			cfg.WorkerRescueStuckJobsAfter = parsed
+		case "workflow_lease":
+			cfg.WorkflowLeaseDuration = parsed
+		case "workflow_heartbeat":
+			cfg.WorkflowHeartbeatInterval = parsed
+		case "worker_soft_stop_timeout":
+			cfg.WorkerSoftStopTimeout = parsed
+		case "worker_hard_stop_timeout":
+			cfg.WorkerHardStopTimeout = parsed
 		}
 	}
 	return nil
@@ -217,7 +307,67 @@ func (c Config) Validate() error {
 	if c.ShutdownTimeout <= 0 {
 		return errors.New("shutdown_timeout must be positive")
 	}
+	if err := operability.ValidateRiverOptions(c.WorkerQueue, c.WorkerMaxWorkers, c.WorkerJobTimeout, c.WorkerRescueStuckJobsAfter, c.WorkerSoftStopTimeout); err != nil {
+		return err
+	}
+	if c.WorkflowLeaseDuration <= 0 {
+		return errors.New("workflow_lease must be positive")
+	}
+	if c.WorkflowHeartbeatInterval <= 0 {
+		return errors.New("workflow_heartbeat must be positive")
+	}
+	if c.WorkflowHeartbeatInterval > (c.WorkflowLeaseDuration-time.Nanosecond)/3 {
+		return errors.New("workflow_heartbeat must be less than one third of workflow_lease")
+	}
+	if c.WorkerHardStopTimeout <= 0 {
+		return errors.New("worker_hard_stop_timeout must be positive")
+	}
+	if c.WorkerSoftStopTimeout >= c.WorkerHardStopTimeout {
+		return errors.New("worker_soft_stop_timeout must be less than worker_hard_stop_timeout")
+	}
+	if err := validateListenAddress(c.WorkerHealthAddr); err != nil {
+		return err
+	}
+	if err := c.validateTelemetry(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateListenAddress(address string) error {
+	_, port, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return errors.New("worker_health_addr must be a valid host:port address")
+	}
+	parsedPort, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || parsedPort == 0 {
+		return errors.New("worker_health_addr port must be between 1 and 65535")
+	}
+	return nil
+}
+
+func (c Config) validateTelemetry() error {
+	switch c.TelemetryMode {
+	case TelemetryModeDisabled:
+		if strings.TrimSpace(c.TelemetryEndpoint) != "" {
+			return errors.New("telemetry_endpoint must be empty when telemetry_mode is disabled")
+		}
+		return nil
+	case TelemetryModeOptional, TelemetryModeRequired:
+		if strings.TrimSpace(c.TelemetryEndpoint) == "" {
+			return errors.New("telemetry_endpoint is required when telemetry_mode is optional or required")
+		}
+		endpoint, err := url.Parse(c.TelemetryEndpoint)
+		if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+			return errors.New("telemetry_endpoint must be a valid absolute URL")
+		}
+		if endpoint.Scheme != "http" && endpoint.Scheme != "https" {
+			return errors.New("telemetry_endpoint scheme must be http or https")
+		}
+		return nil
+	default:
+		return errors.New("telemetry_mode must be disabled, optional, or required")
+	}
 }
 
 // ValidateDatabase returns the configuration error that prevents a real DB
@@ -226,7 +376,7 @@ func (c Config) Validate() error {
 func (c Config) ValidateDatabase() error {
 	if strings.TrimSpace(c.DatabaseURL) != "" {
 		if _, err := url.Parse(c.DatabaseURL); err != nil {
-			return fmt.Errorf("database_url is invalid: %w", err)
+			return errors.New("database_url is invalid")
 		}
 		return nil
 	}
@@ -264,19 +414,56 @@ func (c Config) DatabaseConnectionString() (string, error) {
 	return databaseURL.String(), nil
 }
 
+// String returns a non-sensitive summary suitable for diagnostics. Connection
+// credentials and exporter endpoints are intentionally omitted.
+func (c Config) String() string {
+	return fmt.Sprintf(
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
+		c.AppName,
+		c.Version,
+		c.Environment,
+		c.HTTPAddr,
+		strings.TrimSpace(c.DatabaseURL) != "" || strings.TrimSpace(c.DatabaseHost) != "",
+		c.DatabaseMaxConns,
+		c.DatabaseMinConns,
+		c.DatabasePingTimeout,
+		c.HealthInterval,
+		c.ShutdownTimeout,
+		c.WebAssetsDir,
+		c.WorkerQueue,
+		c.WorkerMaxWorkers,
+		c.WorkerJobTimeout,
+		c.WorkerRescueStuckJobsAfter,
+		c.WorkflowLeaseDuration,
+		c.WorkflowHeartbeatInterval,
+		c.WorkerSoftStopTimeout,
+		c.WorkerHardStopTimeout,
+		c.WorkerHealthAddr,
+		c.TelemetryMode,
+		strings.TrimSpace(c.TelemetryEndpoint) != "",
+	)
+}
+
+// GoString applies the same secret-safe representation to %#v formatting.
+func (c Config) GoString() string {
+	return c.String()
+}
+
 func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 	values := map[string]*string{
-		"ZHIXU_APP_NAME":          &cfg.AppName,
-		"ZHIXU_VERSION":           &cfg.Version,
-		"ZHIXU_ENVIRONMENT":       &cfg.Environment,
-		"ZHIXU_HTTP_ADDR":         &cfg.HTTPAddr,
-		"ZHIXU_DATABASE_URL":      &cfg.DatabaseURL,
-		"ZHIXU_DATABASE_HOST":     &cfg.DatabaseHost,
-		"ZHIXU_DATABASE_PORT":     &cfg.DatabasePort,
-		"ZHIXU_DATABASE_NAME":     &cfg.DatabaseName,
-		"ZHIXU_DATABASE_USER":     &cfg.DatabaseUser,
-		"ZHIXU_DATABASE_PASSWORD": &cfg.DatabasePassword,
-		"ZHIXU_WEB_ASSETS_DIR":    &cfg.WebAssetsDir,
+		"ZHIXU_APP_NAME":           &cfg.AppName,
+		"ZHIXU_VERSION":            &cfg.Version,
+		"ZHIXU_ENVIRONMENT":        &cfg.Environment,
+		"ZHIXU_HTTP_ADDR":          &cfg.HTTPAddr,
+		"ZHIXU_DATABASE_URL":       &cfg.DatabaseURL,
+		"ZHIXU_DATABASE_HOST":      &cfg.DatabaseHost,
+		"ZHIXU_DATABASE_PORT":      &cfg.DatabasePort,
+		"ZHIXU_DATABASE_NAME":      &cfg.DatabaseName,
+		"ZHIXU_DATABASE_USER":      &cfg.DatabaseUser,
+		"ZHIXU_DATABASE_PASSWORD":  &cfg.DatabasePassword,
+		"ZHIXU_WEB_ASSETS_DIR":     &cfg.WebAssetsDir,
+		"ZHIXU_WORKER_QUEUE":       &cfg.WorkerQueue,
+		"ZHIXU_WORKER_HEALTH_ADDR": &cfg.WorkerHealthAddr,
 	}
 	for key, target := range values {
 		if value, ok := lookup(key); ok {
@@ -298,10 +485,23 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		}
 		cfg.DatabaseMinConns = int32(parsed)
 	}
+	if value, ok := lookup("ZHIXU_WORKER_MAX_WORKERS"); ok {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", "ZHIXU_WORKER_MAX_WORKERS", err)
+		}
+		cfg.WorkerMaxWorkers = parsed
+	}
 	for key, target := range map[string]*time.Duration{
-		"ZHIXU_DATABASE_PING_TIMEOUT": &cfg.DatabasePingTimeout,
-		"ZHIXU_HEALTH_INTERVAL":       &cfg.HealthInterval,
-		"ZHIXU_SHUTDOWN_TIMEOUT":      &cfg.ShutdownTimeout,
+		"ZHIXU_DATABASE_PING_TIMEOUT":     &cfg.DatabasePingTimeout,
+		"ZHIXU_HEALTH_INTERVAL":           &cfg.HealthInterval,
+		"ZHIXU_SHUTDOWN_TIMEOUT":          &cfg.ShutdownTimeout,
+		"ZHIXU_WORKER_JOB_TIMEOUT":        &cfg.WorkerJobTimeout,
+		"ZHIXU_WORKER_RESCUE_STUCK_AFTER": &cfg.WorkerRescueStuckJobsAfter,
+		"ZHIXU_WORKFLOW_LEASE":            &cfg.WorkflowLeaseDuration,
+		"ZHIXU_WORKFLOW_HEARTBEAT":        &cfg.WorkflowHeartbeatInterval,
+		"ZHIXU_WORKER_SOFT_STOP_TIMEOUT":  &cfg.WorkerSoftStopTimeout,
+		"ZHIXU_WORKER_HARD_STOP_TIMEOUT":  &cfg.WorkerHardStopTimeout,
 	} {
 		if value, ok := lookup(key); ok {
 			parsed, err := time.ParseDuration(value)
@@ -309,6 +509,17 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 				return fmt.Errorf("parse %s: %w", key, err)
 			}
 			*target = parsed
+		}
+	}
+	if value, ok := lookup("ZHIXU_TELEMETRY_MODE"); ok {
+		cfg.TelemetryMode = TelemetryMode(value)
+		if cfg.TelemetryMode == TelemetryModeDisabled {
+			cfg.TelemetryEndpoint = ""
+		}
+	}
+	if cfg.TelemetryMode != TelemetryModeDisabled {
+		if value, ok := lookup("OTEL_EXPORTER_OTLP_ENDPOINT"); ok {
+			cfg.TelemetryEndpoint = value
 		}
 	}
 	return nil

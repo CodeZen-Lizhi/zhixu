@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	"github.com/riverqueue/river"
@@ -37,15 +38,22 @@ type RuntimeNodeWorker struct {
 	owner             string
 	leaseDuration     time.Duration
 	heartbeatInterval time.Duration
+	observer          runtimeWorkerObserver
 }
 
 // NewRuntimeNodeWorker constructs the production state-machine worker.
 func NewRuntimeNodeWorker(registry *application.ExecutorRegistry, runtime RuntimeExecutionCoordinator, owner string, leaseDuration, heartbeatInterval time.Duration) (*RuntimeNodeWorker, error) {
+	return NewRuntimeNodeWorkerWithObservability(registry, runtime, owner, leaseDuration, heartbeatInterval, RuntimeWorkerObservability{})
+}
+
+// NewRuntimeNodeWorkerWithObservability 构造带有界指标和 fatal invariant 上报的生产 Runtime Worker。
+func NewRuntimeNodeWorkerWithObservability(registry *application.ExecutorRegistry, runtime RuntimeExecutionCoordinator, owner string, leaseDuration, heartbeatInterval time.Duration, observabilityOptions RuntimeWorkerObservability) (*RuntimeNodeWorker, error) {
 	owner = strings.TrimSpace(owner)
-	if registry == nil || isNilRuntimeCoordinator(runtime) || owner == "" || len(owner) > 80 || strings.ContainsAny(owner, "\r\n\t/") || leaseDuration <= 0 || heartbeatInterval <= 0 || heartbeatInterval >= leaseDuration/3 {
+	if registry == nil || isNilRuntimeCoordinator(runtime) || owner == "" || len(owner) > 80 || strings.ContainsAny(owner, "\r\n\t/") || leaseDuration <= 0 || heartbeatInterval <= 0 || heartbeatInterval >= leaseDuration/3 || (observabilityOptions.Metrics != nil && strings.TrimSpace(observabilityOptions.Queue) == "") {
 		return nil, jobError(foundation.ErrorInvalidInput, "WORKFLOW_RUNTIME_WORKER_INVALID", errors.New("runtime worker dependencies or lease cadence are invalid"))
 	}
-	return &RuntimeNodeWorker{registry: registry, runtime: runtime, owner: owner, leaseDuration: leaseDuration, heartbeatInterval: heartbeatInterval}, nil
+	observabilityOptions.Queue = strings.TrimSpace(observabilityOptions.Queue)
+	return &RuntimeNodeWorker{registry: registry, runtime: runtime, owner: owner, leaseDuration: leaseDuration, heartbeatInterval: heartbeatInterval, observer: newRuntimeWorkerObserver(observabilityOptions)}, nil
 }
 
 func isNilRuntimeCoordinator(runtime RuntimeExecutionCoordinator) bool {
@@ -63,7 +71,10 @@ func isNilRuntimeCoordinator(runtime RuntimeExecutionCoordinator) bool {
 
 // Work treats stale deliveries as benign, and returns a River error only when
 // the Workflow result transaction is not known to have committed.
-func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs]) error {
+func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs]) (workErr error) {
+	if w != nil {
+		defer func() { w.observer.reportFatal(workErr) }()
+	}
 	if w == nil || w.registry == nil || w.runtime == nil {
 		return jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUNTIME_WORKER_UNAVAILABLE", errors.New("runtime worker is not initialized"))
 	}
@@ -78,18 +89,38 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 			return err
 		}
 	}
+	var err error
+	ctx, err = decodeTraceMetadata(ctx, job.Metadata)
+	if err != nil {
+		return err
+	}
 	deliveryID := fmt.Sprintf("job-%d-attempt-%d", job.ID, job.Attempt)
 	deliveryOwner := w.owner + ":" + deliveryID
 	claim, err := w.runtime.Claim(ctx, application.ClaimCommand{NodeRunID: job.Args.NodeRunID, DispatchNo: job.Args.DispatchNo, DeliveryID: deliveryID, RiverJobID: job.ID, RiverJobAttempt: job.Attempt, LeaseOwner: deliveryOwner, LeaseDuration: w.leaseDuration})
 	if err != nil {
 		return err
 	}
+	w.observer.observeClaim(ctx, claim)
 	if claim.Disposition == application.ClaimDispositionStale {
 		return nil
 	}
+	ctx = observability.WithCorrelation(ctx, observability.Correlation{
+		WorkspaceID:   string(claim.Run.WorkspaceID),
+		WorkflowRunID: string(claim.Run.ID),
+		NodeRunID:     string(claim.Node.ID),
+		AttemptNo:     claim.Attempt.AttemptNo,
+		DispatchNo:    claim.Node.DispatchNo,
+		RetryNo:       claim.Node.RetryNo,
+		RiverJobID:    job.ID,
+	})
+	w.observer.beginExecution(ctx)
+	defer w.observer.endExecution(ctx)
 	executor, err := w.registry.Resolve(claim.Node.NodeType, claim.Node.InputSchemaVersion)
 	if err != nil {
-		_, transitionErr := w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: deliveryBinding(claim, deliveryID), Failure: domain.FailureInput{Err: err}})
+		transition, transitionErr := w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: deliveryBinding(claim, deliveryID), Failure: domain.FailureInput{Err: err}})
+		if transitionErr == nil {
+			w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+		}
 		return transitionErr
 	}
 	executionCtx, cancel := context.WithCancel(ctx)
@@ -119,15 +150,27 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	binding := deliveryBinding(claim, deliveryID)
 	binding.Fence.NodeVersion = nodeVersion.Load()
 	if controlRequested && (executionErr == nil || errors.Is(executionErr, context.Canceled)) {
-		_, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CONTROL_CHECKPOINT", false, errors.New("workflow control checkpoint requested"))}})
+		var transition application.DeliveryTransitionResult
+		transition, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CONTROL_CHECKPOINT", false, errors.New("workflow control checkpoint requested"))}})
+		if err == nil {
+			w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+		}
 		return err
 	}
 	if executionErr != nil {
-		_, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: executionErr, CancellationProven: errors.Is(executionErr, context.Canceled) && ctx.Err() != nil}})
+		var transition application.DeliveryTransitionResult
+		transition, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: executionErr, CancellationProven: errors.Is(executionErr, context.Canceled) && ctx.Err() != nil}})
+		if err == nil {
+			w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+		}
 		return err
 	}
 	if controlRequested {
-		_, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CONTROL_CHECKPOINT", false, errors.New("workflow control checkpoint requested"))}})
+		var transition application.DeliveryTransitionResult
+		transition, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CONTROL_CHECKPOINT", false, errors.New("workflow control checkpoint requested"))}})
+		if err == nil {
+			w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+		}
 		return err
 	}
 	if result.HumanWait != nil {
@@ -145,7 +188,11 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 		_, err = humanCoordinator.WaitForHuman(ctx, application.HumanWaitTransition{TaskID: result.HumanWait.TaskID, RunID: claim.Run.ID, NodeRunID: claim.Node.ID, Fence: domain.LeaseFence{Owner: claim.Attempt.LeaseOwner, AttemptNo: claim.Attempt.AttemptNo, NodeVersion: nodeVersion.Load()}, ExpectedInputSchema: result.HumanWait.ExpectedInputSchema, TargetVersion: result.HumanWait.TargetVersion, ExpiresIn: result.HumanWait.ExpiresIn})
 		return err
 	}
-	_, err = w.runtime.Complete(ctx, application.CompleteDeliveryCommand{Binding: binding, Output: result.Output, OutputSchemaVersion: claim.Node.OutputSchemaVersion})
+	var transition application.DeliveryTransitionResult
+	transition, err = w.runtime.Complete(ctx, application.CompleteDeliveryCommand{Binding: binding, Output: result.Output, OutputSchemaVersion: claim.Node.OutputSchemaVersion})
+	if err == nil {
+		w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+	}
 	return err
 }
 
@@ -173,6 +220,8 @@ func (w *RuntimeNodeWorker) heartbeatLoop(ctx context.Context, cancel context.Ca
 		case <-ticker.C:
 			result, err := w.runtime.Heartbeat(ctx, application.HeartbeatCommand{NodeRunID: claim.Node.ID, Fence: domain.LeaseFence{Owner: claim.Attempt.LeaseOwner, AttemptNo: claim.Attempt.AttemptNo, NodeVersion: nodeVersion.Load()}, LeaseDuration: w.leaseDuration})
 			if err != nil {
+				w.observer.observeHeartbeatFailure(ctx, claim.Node.NodeType, err)
+				w.observer.reportFatal(err)
 				select {
 				case errorsCh <- err:
 				default:

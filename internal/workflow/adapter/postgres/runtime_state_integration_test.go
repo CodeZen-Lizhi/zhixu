@@ -379,7 +379,7 @@ func TestRuntimeStateConcurrentClaimAndLeaseReclaimFenceOldOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reclaimed.Disposition != application.ClaimDispositionClaimed || reclaimed.Attempt.AttemptNo != claimed.Attempt.AttemptNo+1 {
+	if reclaimed.Disposition != application.ClaimDispositionClaimed || reclaimed.Attempt.AttemptNo != claimed.Attempt.AttemptNo+1 || !reclaimed.LeaseReclaimed {
 		t.Fatalf("reclaimed=%+v claimed=%+v", reclaimed, claimed)
 	}
 	var leaseLost int
@@ -426,7 +426,7 @@ func TestRuntimeStateHigherRiverAttemptWaitsForActiveLeaseThenReclaims(t *testin
 	}
 	time.Sleep(180 * time.Millisecond)
 	reclaimed, err := repository.Claim(ctx, application.ClaimCommand{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "job-attempt-2", RiverJobID: started.Job.JobID, RiverJobAttempt: 2, LeaseOwner: "worker-attempt-2", LeaseDuration: time.Minute})
-	if err != nil || reclaimed.Disposition != application.ClaimDispositionClaimed || reclaimed.Attempt.AttemptNo != claimed.Attempt.AttemptNo+1 {
+	if err != nil || reclaimed.Disposition != application.ClaimDispositionClaimed || reclaimed.Attempt.AttemptNo != claimed.Attempt.AttemptNo+1 || !reclaimed.LeaseReclaimed {
 		t.Fatalf("reclaimed=%+v err=%v", reclaimed, err)
 	}
 }

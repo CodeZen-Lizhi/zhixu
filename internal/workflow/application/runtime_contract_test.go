@@ -40,6 +40,20 @@ func TestRuntimeCoordinatorClaimAcceptsBenignStaleDelivery(t *testing.T) {
 	}
 }
 
+func TestRuntimeCoordinatorValidatesClaimObservabilityFacts(t *testing.T) {
+	t.Parallel()
+	port := &fakeRuntimeStatePort{claimResult: ClaimResult{Disposition: ClaimDispositionStale, DuplicateDelivery: true}}
+	coordinator, _ := NewRuntimeCoordinator(port)
+	if _, err := coordinator.Claim(context.Background(), validClaimCommand()); workflowErrorCode(err) != "WORKFLOW_CLAIM_RESULT_INVALID" {
+		t.Fatalf("missing duplicate node kind err=%v", err)
+	}
+	claimed := ClaimResult{Disposition: ClaimDispositionClaimed, Run: domain.Run{ID: id(2), Status: domain.RunStatusRunning}, Node: domain.NodeRun{ID: id(1), RunID: id(2), NodeType: "test", Status: domain.NodeStatusRunning}, Attempt: domain.NodeAttempt{NodeRunID: id(1), AttemptNo: 1, DispatchNo: 1, DeliveryID: "job-1-attempt-0", RiverJobID: 1, LeaseOwner: "worker", Status: domain.AttemptStatusRunning}, LeaseReclaimed: true}
+	port.claimResult = claimed
+	if _, err := coordinator.Claim(context.Background(), validClaimCommand()); workflowErrorCode(err) != "WORKFLOW_CLAIM_RESULT_INVALID" {
+		t.Fatalf("reclaim without duplicate err=%v", err)
+	}
+}
+
 func TestRuntimeCoordinatorRejectsInvalidClaimBeforePort(t *testing.T) {
 	t.Parallel()
 
@@ -120,6 +134,16 @@ func TestRuntimeCoordinatorCompletesAndClassifiesFailure(t *testing.T) {
 	}
 	if port.transition.Result.Failure == nil || port.transition.Result.Failure.Class != domain.FailureClassRetryable || port.transition.Result.Failure.Code != "DEPENDENCY_BUSY" || port.transition.Result.Output != nil {
 		t.Fatalf("Fail transition = %+v", port.transition)
+	}
+}
+
+func TestRuntimeCoordinatorPreservesTransitionReplayFact(t *testing.T) {
+	t.Parallel()
+	port := &fakeRuntimeStatePort{transitionResult: DeliveryTransitionResult{Run: domain.Run{ID: id(2), Status: domain.RunStatusRunning}, Node: domain.NodeRun{ID: id(1), RunID: id(2), Status: domain.NodeStatusSucceeded}, Attempt: domain.NodeAttempt{NodeRunID: id(1), AttemptNo: 1, Status: domain.AttemptStatusSucceeded}, Replayed: true}}
+	coordinator, _ := NewRuntimeCoordinator(port)
+	result, err := coordinator.Complete(context.Background(), CompleteDeliveryCommand{Binding: validDeliveryBinding(), Output: json.RawMessage(`{"ok":true}`), OutputSchemaVersion: 1})
+	if err != nil || !result.Replayed {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
 

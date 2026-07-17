@@ -109,6 +109,39 @@ func TestValidateWritebackTransition(t *testing.T) {
 	}
 }
 
+func TestIsWritebackCancellationSafe(t *testing.T) {
+	tests := []struct {
+		name             string
+		status           WritebackStatus
+		cleanupCompleted bool
+		want             bool
+	}{
+		{name: "atomic begin", status: WritebackStatusPrepared},
+		{name: "file intent", status: WritebackStatusFilePrepared},
+		{name: "file applied", status: WritebackStatusFileApplied},
+		{name: "git intent", status: WritebackStatusGitPrepared},
+		{name: "compensating", status: WritebackStatusCompensatingFile},
+		{name: "git committed before publish", status: WritebackStatusGitCommitted},
+		{name: "publish recovery", status: WritebackStatusPublishRecovery},
+		{name: "verifying before cleanup", status: WritebackStatusVerifying},
+		{name: "verifying after cleanup", status: WritebackStatusVerifying, cleanupCompleted: true, want: true},
+		{name: "needs revision", status: WritebackStatusNeedsRevision, want: true},
+		{name: "apply failed", status: WritebackStatusApplyFailed, want: true},
+		{name: "compensated", status: WritebackStatusCompensated, want: true},
+		{name: "manual recovery", status: WritebackStatusManualRecovery, want: true},
+		{name: "verify failed", status: WritebackStatusVerifyFailed, want: true},
+		{name: "rolled back", status: WritebackStatusRolledBack, want: true},
+		{name: "completed", status: WritebackStatusCompleted, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsWritebackCancellationSafe(test.status, test.cleanupCompleted); got != test.want {
+				t.Fatalf("IsWritebackCancellationSafe(%q, %t) = %t, want %t", test.status, test.cleanupCompleted, got, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateWritebackIdentityAndCheckpoint(t *testing.T) {
 	command := validCreateWriteback()
 	current := executionFromCreate(command, WritebackStatusPrepared)

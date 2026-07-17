@@ -129,6 +129,11 @@ func TestSafeWritebackWorkflowNodePostgreSQLGitFilesystemSmoke(t *testing.T) {
 	if err != nil || approval.ApprovedGitHead == nil || *approval.ApprovedGitHead != baseGitHead {
 		t.Fatalf("approval=%#v err=%v", approval, err)
 	}
+	// Direct-node smoke bypasses ApprovalDispatch, so bind the approved Proposal
+	// to the already-created Workflow Run exactly as the production UoW does.
+	if _, err := tx.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND workflow_run_id IS NULL`, string(created.Proposal.ID), string(runID)); err != nil {
+		t.Fatal(err)
+	}
 	issue := func(tool string, capability domain.Capability, key string) domain.AuthorizationIssueResult {
 		result, issueErr := changeService.IssueWriteAuthorization(ctx, domain.AuthorizationIssue{
 			WorkspaceID: workspaceID, WorkflowRunID: runID, NodeRunID: nodeID,

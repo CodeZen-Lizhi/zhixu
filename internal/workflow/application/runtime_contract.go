@@ -55,6 +55,13 @@ type RuntimeStatePort interface {
 	Control(context.Context, ControlTransition) (ControlPersistenceResult, error)
 }
 
+// CancellationSafetyGuard 判断一个 Node 的外部副作用是否已到达可终态取消的持久检查点。
+// transaction 是 Runtime 当前事务的 opaque handle，保证判定与控制状态原子；未开始
+// 副作用的 Node 必须返回 true，查询失败必须返回错误并由 Runtime fail closed。
+type CancellationSafetyGuard interface {
+	SafeToCancelWorkflowNode(context.Context, any, foundation.ID) (bool, error)
+}
+
 // ClaimCommand 只传 lease duration，不允许调用方提交 now 或绝对 lease_until。
 type ClaimCommand struct {
 	NodeRunID       foundation.ID
@@ -68,10 +75,13 @@ type ClaimCommand struct {
 
 // ClaimResult 返回 DB-time Claim 的资格与持久 Attempt。
 type ClaimResult struct {
-	Disposition ClaimDisposition
-	Run         domain.Run
-	Node        domain.NodeRun
-	Attempt     domain.NodeAttempt
+	Disposition       ClaimDisposition
+	Run               domain.Run
+	Node              domain.NodeRun
+	Attempt           domain.NodeAttempt
+	ObservedNodeKind  string
+	DuplicateDelivery bool
+	LeaseReclaimed    bool
 }
 
 // HeartbeatCommand 使用完整 fence 与 duration 请求数据库续租。
@@ -116,9 +126,10 @@ type DeliveryTransition struct {
 
 // DeliveryTransitionResult 返回一次已提交或幂等重放的持久归约。
 type DeliveryTransitionResult struct {
-	Run     domain.Run
-	Node    domain.NodeRun
-	Attempt domain.NodeAttempt
+	Run      domain.Run
+	Node     domain.NodeRun
+	Attempt  domain.NodeAttempt
+	Replayed bool
 }
 
 // RunControlCommand 是 HTTP/Application 可接受的控制命令，不包含 Workspace 覆盖值。
@@ -328,9 +339,9 @@ func isValidClaimCommand(command ClaimCommand) bool {
 
 func isValidClaimResult(command ClaimCommand, result ClaimResult) bool {
 	if result.Disposition == ClaimDispositionStale {
-		return result.Run.ID == "" && result.Node.ID == "" && result.Attempt.NodeRunID == ""
+		return result.Run.ID == "" && result.Node.ID == "" && result.Attempt.NodeRunID == "" && !result.LeaseReclaimed && (!result.DuplicateDelivery || strings.TrimSpace(result.ObservedNodeKind) != "")
 	}
-	return result.Disposition == ClaimDispositionClaimed && result.Run.ID != "" && result.Node.ID == command.NodeRunID && result.Node.RunID == result.Run.ID && result.Node.Status == domain.NodeStatusRunning && result.Attempt.NodeRunID == command.NodeRunID && result.Attempt.AttemptNo >= 1 && result.Attempt.DispatchNo == command.DispatchNo && result.Attempt.DeliveryID == command.DeliveryID && result.Attempt.RiverJobID == command.RiverJobID && result.Attempt.RiverJobAttempt == command.RiverJobAttempt && result.Attempt.LeaseOwner == command.LeaseOwner && result.Attempt.Status == domain.AttemptStatusRunning
+	return result.Disposition == ClaimDispositionClaimed && result.Run.ID != "" && result.Node.ID == command.NodeRunID && result.Node.RunID == result.Run.ID && result.Node.Status == domain.NodeStatusRunning && (result.ObservedNodeKind == "" || result.ObservedNodeKind == result.Node.NodeType) && (!result.LeaseReclaimed || result.DuplicateDelivery) && result.Attempt.NodeRunID == command.NodeRunID && result.Attempt.AttemptNo >= 1 && result.Attempt.DispatchNo == command.DispatchNo && result.Attempt.DeliveryID == command.DeliveryID && result.Attempt.RiverJobID == command.RiverJobID && result.Attempt.RiverJobAttempt == command.RiverJobAttempt && result.Attempt.LeaseOwner == command.LeaseOwner && result.Attempt.Status == domain.AttemptStatusRunning
 }
 
 func isValidDeliveryBinding(binding DeliveryBinding) bool {

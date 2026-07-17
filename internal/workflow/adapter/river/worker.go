@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/riverqueue/river"
 )
@@ -65,6 +67,14 @@ func (w *NodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs]) erro
 		if err := validateEncodedNodeJobArgs(job.EncodedArgs, job.Args); err != nil {
 			return err
 		}
+	}
+	var metadata []byte
+	if job.JobRow != nil {
+		metadata = job.Metadata
+	}
+	ctx, err := decodeTraceMetadata(ctx, metadata)
+	if err != nil {
+		return err
 	}
 	execution, err := w.provider.LoadExecutionContext(ctx, job.Args)
 	if err != nil {
@@ -134,4 +144,55 @@ func AddWorkerSafely(workers *Workers, worker *NodeWorker) error {
 		return jobError(foundation.ErrorVersionConflict, "WORKFLOW_RIVER_WORKER_DUPLICATE", err)
 	}
 	return nil
+}
+
+func decodeTraceMetadata(ctx context.Context, encoded []byte) (context.Context, error) {
+	if len(bytes.TrimSpace(encoded)) == 0 {
+		return ctx, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	var raw map[string]json.RawMessage
+	if err := decoder.Decode(&raw); err != nil || raw == nil {
+		if err == nil {
+			err = errors.New("trace metadata must be a JSON object")
+		}
+		return ctx, traceMetadataError(err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = errors.New("trace metadata contains multiple JSON values")
+		}
+		return ctx, traceMetadataError(err)
+	}
+	var value json.RawMessage
+	for key, candidate := range raw {
+		switch {
+		case key == observability.TraceParentMetadataKey:
+			value = candidate
+		case strings.HasPrefix(key, "river:"):
+			// River owns this reserved namespace and may add recovery metadata
+			// such as river:rescue_count. It is never copied into application
+			// context, logs, metrics, or traces.
+			continue
+		default:
+			return ctx, traceMetadataError(errors.New("trace metadata contains an unknown field"))
+		}
+	}
+	if len(value) == 0 {
+		return ctx, nil
+	}
+	var traceParent string
+	if err := json.Unmarshal(value, &traceParent); err != nil {
+		return ctx, traceMetadataError(err)
+	}
+	decoded, err := observability.DecodeTraceMetadata(ctx, map[string]string{observability.TraceParentMetadataKey: traceParent})
+	if err != nil {
+		return ctx, traceMetadataError(err)
+	}
+	return decoded, nil
+}
+
+func traceMetadataError(cause error) error {
+	return foundation.NewError(foundation.ErrorNonRetryableFailure, "WORKFLOW_RIVER_TRACE_METADATA_INVALID", false, fmt.Errorf("trace metadata rejected: %w", cause))
 }

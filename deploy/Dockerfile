@@ -12,6 +12,7 @@ COPY vendor/ vendor/
 COPY . ./
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-api ./cmd/api
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-worker ./cmd/worker
+RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-migrate ./cmd/migrate
 
 FROM alpine:3.22 AS runtime
 RUN apk add --no-cache ca-certificates git \
@@ -20,9 +21,10 @@ RUN apk add --no-cache ca-certificates git \
 WORKDIR /app
 COPY --from=go-build /out/zhixu-api /app/zhixu-api
 COPY --from=go-build /out/zhixu-worker /app/zhixu-worker
+COPY --from=go-build /out/zhixu-migrate /app/zhixu-migrate
 COPY --from=web-build /src/web/dist /app/web
 USER 10001:10001
 ENV ZHIXU_HTTP_ADDR=0.0.0.0:8080 \
     ZHIXU_WEB_ASSETS_DIR=/app/web
-EXPOSE 8080
+EXPOSE 8080 8081
 ENTRYPOINT ["/app/zhixu-api"]

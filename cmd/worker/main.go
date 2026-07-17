@@ -5,6 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -23,84 +26,203 @@ import (
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
+	workflowhealth "github.com/CodeZen-Lizhi/zhixu/internal/workflow/httphealth"
+	workflowruntime "github.com/CodeZen-Lizhi/zhixu/internal/workflow/runtime"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type workerComponents struct {
-	safeWriteback *changecontrolworkflow.Node
-	runtimeClient *riveradapter.Client
+	safeWriteback   *changecontrolworkflow.Node
+	runtimeClient   *riveradapter.Client
+	definitions     *workflowapplication.DefinitionRegistry
+	executors       *workflowapplication.ExecutorRegistry
+	fatalInvariants <-chan error
 }
 
-const (
-	workflowLeaseDuration     = 30 * time.Second
-	workflowHeartbeatInterval = 5 * time.Second
-)
+type workerHealthServer struct {
+	server  *http.Server
+	errors  <-chan error
+	address string
+}
 
 func main() {
 	configPath := flag.String("config", "", "optional YAML configuration path")
 	flag.Parse()
 	logger := observability.NewLogger("info", os.Stderr)
-	cfg, err := config.Load(*configPath)
+	if err := run(*configPath, logger); err != nil {
+		logger.Error("worker stopped with failure", "error_code", "WORKER_PROCESS_FAILED")
+		os.Exit(1)
+	}
+}
+
+func run(configPath string, logger *slog.Logger) error {
+	if logger == nil {
+		return errors.New("worker logger is nil")
+	}
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Error("configuration is invalid", "error_code", "INVALID_CONFIGURATION")
-		os.Exit(1)
+		return err
+	}
+	telemetry, err := observability.InitializeTelemetry(context.Background(), observability.TelemetryOptions{
+		Mode: observability.TelemetryMode(cfg.TelemetryMode), Endpoint: cfg.TelemetryEndpoint,
+	})
+	if err != nil {
+		logger.Error("telemetry initialization failed", "error_code", "TELEMETRY_EXPORTER_UNAVAILABLE")
+		return err
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		_ = telemetry.Shutdown(shutdownContext)
+	}()
+	telemetryStatus := telemetry.Status()
+	if telemetryStatus.Degraded {
+		logger.Warn("telemetry exporter is unavailable", "error_code", telemetryStatus.Code)
 	}
 	databaseURL, err := cfg.DatabaseConnectionString()
 	if err != nil {
 		logger.Error("database is not configured", "error_code", "DEPENDENCY_UNAVAILABLE")
-		os.Exit(1)
+		return err
 	}
 
 	database, err := postgres.Open(context.Background(), databaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns)
 	if err != nil {
 		logger.Error("database pool could not be opened", "error_code", "DEPENDENCY_UNAVAILABLE")
-		os.Exit(1)
+		return err
 	}
 	defer database.Close()
 
 	if err := ping(database, cfg.DatabasePingTimeout); err != nil {
 		logger.Error("worker startup database check failed", "error_code", "DEPENDENCY_UNAVAILABLE")
-		os.Exit(1)
+		return err
 	}
-	components, err := newWorkerComponents(database.DB())
+	migrator, err := riveradapter.NewMigrator(database.DB())
+	if err != nil {
+		return err
+	}
+	validationContext, cancelValidation := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+	validationErr := migrator.Validate(validationContext)
+	cancelValidation()
+	if validationErr != nil {
+		logger.Error("worker River schema validation failed", "error_code", "WORKFLOW_RIVER_MIGRATION_INVALID")
+		return validationErr
+	}
+	components, err := newWorkerComponents(database.DB(), cfg, logger, telemetry.Metrics())
 	if err != nil {
 		logger.Error("worker components are unavailable", "error_code", "WORKER_COMPONENTS_UNAVAILABLE")
-		os.Exit(1)
+		return err
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	if err := components.runtimeClient.Start(ctx); err != nil {
+
+	readiness := workflowruntime.NewReadiness()
+	readiness.SetDatabaseOK(true)
+	readiness.SetRiverSchemaOK(true)
+	readiness.SetDefinitionsOK(components.definitions != nil)
+	readiness.SetExecutorsOK(components.executors != nil)
+	readiness.SetDependenciesOK(components.safeWriteback != nil)
+	health, err := startWorkerHealthServer(cfg.WorkerHealthAddr, workflowhealth.NewHandler(readiness))
+	if err != nil {
+		logger.Error("worker health server could not be started", "error_code", "WORKER_HEALTH_START_FAILED")
+		return err
+	}
+
+	controller, err := newLifecycleController(components.runtimeClient)
+	if err != nil {
+		_ = health.server.Close()
+		return err
+	}
+	processContext, cancelProcess := context.WithCancel(context.Background())
+	defer cancelProcess()
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	if err := controller.Start(processContext); err != nil {
+		readiness.BeginShutdown()
+		_ = health.server.Close()
 		logger.Error("workflow runtime could not be started", "error_code", "WORKFLOW_RIVER_CLIENT_START_FAILED")
-		os.Exit(1)
+		return err
 	}
-	defer func() {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer stopCancel()
-		if err := components.runtimeClient.Stop(stopCtx); err != nil {
-			logger.Error("workflow runtime could not be stopped", "error_code", "WORKFLOW_RIVER_CLIENT_STOP_FAILED")
-		}
-	}()
+	readiness.SetRiverStarted(true)
 	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil, "workflow_dispatcher", "configured")
 
 	ticker := time.NewTicker(cfg.HealthInterval)
 	defer ticker.Stop()
+	shutdownMode := shutdownGraceful
+	var runErr error
 	for {
 		select {
-		case <-ctx.Done():
-			logger.Info("worker stopping")
-			return
+		case received := <-signals:
+			logger.Info("worker stopping", "signal", received.String())
+			goto shutdown
+		case err := <-health.errors:
+			if err == nil {
+				err = errors.New("worker health server stopped unexpectedly")
+			}
+			runErr = err
+			logger.Error("worker health server failed", "error_code", "WORKER_HEALTH_FAILED")
+			goto shutdown
+		case <-components.runtimeClient.Stopped():
+			readiness.SetRiverStarted(false)
+			runErr = errors.New("workflow River runtime stopped unexpectedly")
+			goto shutdown
+		case fatalErr := <-components.fatalInvariants:
+			if fatalErr == nil {
+				fatalErr = errors.New("workflow runtime reported a fatal invariant violation")
+			}
+			shutdownMode = shutdownEmergency
+			runErr = fatalErr
+			logger.Error("workflow runtime fatal invariant", "error_code", "WORKFLOW_FATAL_INVARIANT")
+			goto shutdown
 		case <-ticker.C:
 			if err := ping(database, cfg.DatabasePingTimeout); err != nil {
+				readiness.SetDatabaseOK(false)
 				logger.Error("worker database health check failed", "error_code", "DEPENDENCY_UNAVAILABLE")
 			} else {
+				readiness.SetDatabaseOK(true)
 				logger.Debug("worker database health check passed")
+				metricContext, cancelMetric := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+				metricErr := recordQueueDepthMetric(metricContext, telemetry.Metrics(), database.DB(), cfg.WorkerQueue)
+				cancelMetric()
+				if metricErr != nil {
+					logger.Warn("worker queue depth metric failed", "error_code", "WORKER_QUEUE_METRIC_FAILED")
+				}
 			}
 		}
 	}
+
+shutdown:
+	readiness.BeginShutdown()
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), cfg.WorkerHardStopTimeout)
+	defer cancelShutdown()
+	if err := controller.Shutdown(shutdownContext, shutdownMode); err != nil && runErr == nil {
+		runErr = err
+	}
+	readiness.SetRiverStarted(false)
+	if err := health.server.Shutdown(shutdownContext); err != nil && runErr == nil {
+		runErr = err
+	}
+	if errors.Is(shutdownContext.Err(), context.DeadlineExceeded) {
+		if err := recordShutdownMetric(telemetry.Metrics(), controller.Mode(), "failure"); err != nil {
+			logger.Warn("worker shutdown metric failed", "error_code", "WORKER_METRIC_RECORD_FAILED")
+		}
+		logger.Error("worker hard shutdown deadline exceeded", "error_code", "WORKER_HARD_SHUTDOWN_TIMEOUT")
+		return context.DeadlineExceeded
+	}
+	result := "success"
+	if runErr != nil {
+		result = "failure"
+	}
+	if err := recordShutdownMetric(telemetry.Metrics(), controller.Mode(), result); err != nil {
+		logger.Warn("worker shutdown metric failed", "error_code", "WORKER_METRIC_RECORD_FAILED")
+	}
+	if err := telemetry.Shutdown(shutdownContext); err != nil && runErr == nil {
+		runErr = err
+	}
+	return runErr
 }
 
-func newWorkerComponents(db *pgxpool.Pool) (workerComponents, error) {
+func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logger, metrics observability.Metrics) (workerComponents, error) {
 	if db == nil {
 		return workerComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_DATABASE_UNAVAILABLE", true, errors.New("database pool is nil"))
 	}
@@ -164,7 +286,22 @@ func newWorkerComponents(db *pgxpool.Pool) (workerComponents, error) {
 	if err := executors.Freeze(); err != nil {
 		return workerComponents{}, err
 	}
-	insertClient, err := riveradapter.NewClient(db, nil)
+	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := definitions.Register(changecontrolworkflow.RegisteredDefinition()); err != nil {
+		return workerComponents{}, err
+	}
+	if err := definitions.Freeze(); err != nil {
+		return workerComponents{}, err
+	}
+	riverOptions := riveradapter.Options{
+		Queue: cfg.WorkerQueue, MaxWorkers: cfg.WorkerMaxWorkers,
+		JobTimeout: cfg.WorkerJobTimeout, RescueStuckJobsAfter: cfg.WorkerRescueStuckJobsAfter,
+		SoftStopTimeout: cfg.WorkerSoftStopTimeout, Logger: logger,
+	}
+	insertClient, err := riveradapter.NewClientWithOptions(db, nil, riverOptions)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -172,7 +309,7 @@ func newWorkerComponents(db *pgxpool.Pool) (workerComponents, error) {
 	if err != nil {
 		return workerComponents{}, err
 	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(db, inserter)
+	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(db, inserter, writebackRepository)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -184,7 +321,10 @@ func newWorkerComponents(db *pgxpool.Pool) (workerComponents, error) {
 	if err != nil {
 		return workerComponents{}, err
 	}
-	runtimeWorker, err := riveradapter.NewRuntimeNodeWorker(executors, runtimeCoordinator, fmt.Sprintf("worker:%s", workerID), workflowLeaseDuration, workflowHeartbeatInterval)
+	fatalInvariants := make(chan error, 1)
+	runtimeWorker, err := riveradapter.NewRuntimeNodeWorkerWithObservability(executors, runtimeCoordinator, fmt.Sprintf("worker:%s", workerID), cfg.WorkflowLeaseDuration, cfg.WorkflowHeartbeatInterval, riveradapter.RuntimeWorkerObservability{
+		Metrics: metrics, Queue: cfg.WorkerQueue, Logger: logger, FatalInvariants: fatalInvariants,
+	})
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -192,11 +332,70 @@ func newWorkerComponents(db *pgxpool.Pool) (workerComponents, error) {
 	if err := riveradapter.AddRuntimeWorkerSafely(workers, runtimeWorker); err != nil {
 		return workerComponents{}, err
 	}
-	runtimeClient, err := riveradapter.NewClient(db, workers)
+	runtimeClient, err := riveradapter.NewClientWithOptions(db, workers, riverOptions)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	return workerComponents{safeWriteback: node, runtimeClient: runtimeClient}, nil
+	return workerComponents{safeWriteback: node, runtimeClient: runtimeClient, definitions: definitions, executors: executors, fatalInvariants: fatalInvariants}, nil
+}
+
+func startWorkerHealthServer(address string, handler http.Handler) (workerHealthServer, error) {
+	if handler == nil {
+		return workerHealthServer{}, errors.New("worker health handler is nil")
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return workerHealthServer{}, err
+	}
+	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	errorsChannel := make(chan error, 1)
+	go func() {
+		err := server.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		errorsChannel <- err
+		close(errorsChannel)
+	}()
+	return workerHealthServer{server: server, errors: errorsChannel, address: listener.Addr().String()}, nil
+}
+
+func recordShutdownMetric(metrics observability.Metrics, mode shutdownMode, result string) error {
+	if metrics == nil {
+		return errors.New("worker metrics are nil")
+	}
+	shutdownKind := "graceful"
+	if mode == shutdownEmergency {
+		shutdownKind = "forced"
+	}
+	labels, err := observability.NewLabels(map[string]string{"shutdown_kind": shutdownKind, "result": result})
+	if err != nil {
+		return err
+	}
+	measurement, err := observability.NewMeasurement(observability.MetricShutdownTotal, observability.MetricKindCounter, 1, labels)
+	if err != nil {
+		return err
+	}
+	return metrics.Record(context.Background(), measurement)
+}
+
+func recordQueueDepthMetric(ctx context.Context, metrics observability.Metrics, database riveradapter.QueueDepthQuerier, queue string) error {
+	if metrics == nil {
+		return errors.New("worker metrics are nil")
+	}
+	depth, err := riveradapter.QueueDepth(ctx, database, queue)
+	if err != nil {
+		return err
+	}
+	labels, err := observability.NewLabels(map[string]string{"queue": queue})
+	if err != nil {
+		return err
+	}
+	measurement, err := observability.NewMeasurement(observability.MetricQueueDepth, observability.MetricKindGauge, float64(depth), labels)
+	if err != nil {
+		return err
+	}
+	return metrics.Record(ctx, measurement)
 }
 
 func ping(database *postgres.Pool, timeout time.Duration) error {

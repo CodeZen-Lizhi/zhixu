@@ -2,10 +2,12 @@ package riveradapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/jackc/pgx/v5"
 	riverlib "github.com/riverqueue/river"
@@ -33,16 +35,19 @@ type riverInsertClient interface {
 }
 
 // RiverJobInserter implements JobInserter with River v0.40's InsertTx.
-type RiverJobInserter struct{ client riverInsertClient }
+type RiverJobInserter struct {
+	client riverInsertClient
+	queue  string
+}
 
 var _ JobInserter = (*RiverJobInserter)(nil)
 
 // NewJobInserter constructs a transactional inserter from a schema-scoped client.
 func NewJobInserter(client *Client) (JobInserter, error) {
-	if client == nil || client.inner == nil {
+	if client == nil || client.insert == nil {
 		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_MISSING", errors.New("River client is nil"))
 	}
-	return &RiverJobInserter{client: client.inner}, nil
+	return &RiverJobInserter{client: client.insert, queue: client.Queue()}, nil
 }
 
 // InsertTx inserts one uniquely identified node dispatch in the caller's
@@ -58,7 +63,11 @@ func (i *RiverJobInserter) InsertTx(ctx context.Context, transaction any, args N
 	if !ok || tx == nil {
 		return JobReceipt{}, jobError(foundation.ErrorInvalidInput, "WORKFLOW_RIVER_TRANSACTION_INVALID", errors.New("transaction is not a pgx transaction"))
 	}
-	opts := &riverlib.InsertOpts{UniqueOpts: riverlib.UniqueOpts{ByArgs: true}}
+	metadata, err := encodeTraceMetadata(ctx)
+	if err != nil {
+		return JobReceipt{}, err
+	}
+	opts := &riverlib.InsertOpts{Metadata: metadata, Queue: i.queue, UniqueOpts: riverlib.UniqueOpts{ByArgs: true}}
 	if !options.ScheduledAt.IsZero() {
 		opts.ScheduledAt = options.ScheduledAt.UTC()
 	}
@@ -70,4 +79,22 @@ func (i *RiverJobInserter) InsertTx(ctx context.Context, transaction any, args N
 		return JobReceipt{}, jobError(foundation.ErrorConsistencyViolation, "WORKFLOW_RIVER_JOB_RESULT_INVALID", errors.New("River insert returned no persisted job"))
 	}
 	return JobReceipt{JobID: result.Job.ID, Duplicate: result.UniqueSkippedAsDuplicate}, nil
+}
+
+func encodeTraceMetadata(ctx context.Context) ([]byte, error) {
+	metadata := observability.EncodeTraceMetadata(ctx)
+	if len(metadata) == 0 {
+		return nil, nil
+	}
+	if len(metadata) != 1 {
+		return nil, jobError(foundation.ErrorConsistencyViolation, "WORKFLOW_RIVER_TRACE_METADATA_INVALID", errors.New("trace metadata contains unexpected fields"))
+	}
+	if _, ok := metadata[observability.TraceParentMetadataKey]; !ok {
+		return nil, jobError(foundation.ErrorConsistencyViolation, "WORKFLOW_RIVER_TRACE_METADATA_INVALID", errors.New("trace metadata does not contain traceparent"))
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, jobError(foundation.ErrorConsistencyViolation, "WORKFLOW_RIVER_TRACE_METADATA_INVALID", err)
+	}
+	return encoded, nil
 }

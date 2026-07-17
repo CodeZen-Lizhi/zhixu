@@ -13,6 +13,10 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
+	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
+	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
+	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,6 +79,33 @@ func TestRepositoryFindWritebackExecutionByKeyIsExactAndWorkspaceScoped(t *testi
 	}
 }
 
+func TestRepositorySafeToCancelWorkflowNodeRequiresSafeCheckpoint(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	if safe, err := fixture.repository.SafeToCancelWorkflowNode(fixture.ctx, fixture.tx, fixture.nodeID); err != nil || !safe {
+		t.Fatalf("node before atomic begin safe=%t err=%v", safe, err)
+	}
+	created, err := fixture.repository.CreateWritebackExecution(fixture.ctx, fixture.create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if safe, err := fixture.repository.SafeToCancelWorkflowNode(fixture.ctx, fixture.tx, fixture.nodeID); err != nil || safe {
+		t.Fatalf("prepared execution safe=%t err=%v", safe, err)
+	}
+	failed, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{
+		ExecutionID: created.ID, ExpectedVersion: created.Version, Status: domain.WritebackStatusApplyFailed,
+		FailureCode: "WRITEBACK_CANCELLED_BEFORE_SIDE_EFFECT", At: fixture.now,
+	})
+	if err != nil || failed.Status != domain.WritebackStatusApplyFailed {
+		t.Fatalf("failed=%#v err=%v", failed, err)
+	}
+	if safe, err := fixture.repository.SafeToCancelWorkflowNode(fixture.ctx, fixture.tx, fixture.nodeID); err != nil || !safe {
+		t.Fatalf("terminal execution safe=%t err=%v", safe, err)
+	}
+	if _, err := fixture.repository.SafeToCancelWorkflowNode(fixture.ctx, nil, fixture.nodeID); !hasCode(err, "WRITEBACK_CANCELLATION_TRANSACTION_INVALID") {
+		t.Fatalf("invalid transaction err=%v", err)
+	}
+}
+
 func TestRepositoryBeginWritebackAtomicDoubleConsumeAndReplay(t *testing.T) {
 	fixture := newWritebackFixture(t)
 	fixture.bindProposalToRun(t)
@@ -118,6 +149,138 @@ func TestRepositoryBeginWritebackAtomicDoubleConsumeAndReplay(t *testing.T) {
 	conflict.WriteAuthorization.Credential = "wrong-token"
 	if _, err := fixture.repository.BeginWriteback(fixture.ctx, conflict); !hasCode(err, "WRITEBACK_AUTHORIZATION_BINDING_CONFLICT") {
 		t.Fatalf("credential conflict err=%v", err)
+	}
+}
+
+func TestWorkflowCancellationWaitsForWritebackRecoveryCheckpoint(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	fixture.bindProposalToRun(t)
+	deliveryID := "cancel-safety-delivery"
+	if _, err := fixture.tx.Exec(fixture.ctx, `
+		INSERT INTO workflow.node_attempt(
+			id,node_run_id,attempt_no,dispatch_no,retry_no,river_job_id,river_job_attempt,
+			delivery_id,lease_owner,lease_until,status,started_at,heartbeat_at
+		) VALUES($1,$2,1,1,0,1,1,$3,'test-owner',$4,'running',$5,$5)`,
+		string(fixture.nextID(t)), string(fixture.nodeID), deliveryID, fixture.now.Add(time.Hour), fixture.now); err != nil {
+		t.Fatal(err)
+	}
+	begin := domain.BeginWriteback{
+		ExecutionID: fixture.executionID, WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID,
+		NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, LeaseOwner: "test-owner",
+		IdempotencyKey: "cancel-safety-" + string(fixture.executionID),
+		WriteAuthorization: domain.AuthorizationConsume{
+			Credential: string(fixture.writeAuthorizationID) + "write-auth", IdempotencyKey: "write-auth-" + string(fixture.writeAuthorizationID),
+			WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID,
+			ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID,
+			ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge,
+			Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash,
+		},
+		GitAuthorization: domain.AuthorizationConsume{
+			Credential: string(fixture.gitAuthorizationID) + "git-auth", IdempotencyKey: "git-auth-" + string(fixture.gitAuthorizationID),
+			WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID,
+			ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID,
+			ToolName: "CreateGitCommit", Capability: domain.CapabilityGitWrite,
+			Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash,
+		},
+	}
+	created, err := fixture.repository.BeginWriteback(fixture.ctx, begin)
+	if err != nil || created.Status != domain.WritebackStatusPrepared {
+		t.Fatalf("created=%#v err=%v", created, err)
+	}
+	if err := fixture.tx.Commit(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	changeRepository, err := NewRepository(fixture.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(fixture.pool, cancellationSafetyJobInserter{}, changeRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := workflowapplication.NewRuntimeCoordinator(runtimeRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := coordinator.Cancel(fixture.ctx, workflowapplication.RunControlCommand{
+		WorkflowRunID: fixture.runID, ExpectedVersion: 1, IdempotencyKey: "cancel-safe-writeback",
+	})
+	if err != nil || cancelled.Status != workflowdomain.RunStatusRunning {
+		t.Fatalf("cancel request=%#v err=%v", cancelled, err)
+	}
+	heartbeat, err := coordinator.Heartbeat(fixture.ctx, workflowapplication.HeartbeatCommand{
+		NodeRunID:     fixture.nodeID,
+		Fence:         workflowdomain.LeaseFence{Owner: "test-owner", AttemptNo: 1, NodeVersion: 1},
+		LeaseDuration: time.Minute,
+	})
+	if err != nil || heartbeat.Node.Status != workflowdomain.NodeStatusRunning {
+		t.Fatalf("unsafe checkpoint heartbeat=%#v err=%v", heartbeat, err)
+	}
+
+	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE workflow.node_run SET lease_until=CURRENT_TIMESTAMP - interval '1 second' WHERE id=$1`, string(fixture.nodeID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE workflow.node_attempt SET lease_until=CURRENT_TIMESTAMP - interval '1 second' WHERE node_run_id=$1 AND status='running'`, string(fixture.nodeID)); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := coordinator.Claim(fixture.ctx, workflowapplication.ClaimCommand{
+		NodeRunID: fixture.nodeID, DispatchNo: 1, DeliveryID: "cancel-safety-recovery",
+		RiverJobID: 1, RiverJobAttempt: 2, LeaseOwner: "recovery-owner", LeaseDuration: time.Minute,
+	})
+	if err != nil || reclaimed.Disposition != workflowapplication.ClaimDispositionClaimed || reclaimed.Attempt.AttemptNo != 2 {
+		t.Fatalf("reclaimed=%#v err=%v", reclaimed, err)
+	}
+	binding := workflowapplication.DeliveryBinding{
+		NodeRunID: fixture.nodeID, DispatchNo: 1, DeliveryID: "cancel-safety-recovery",
+		Fence: workflowdomain.LeaseFence{Owner: "recovery-owner", AttemptNo: reclaimed.Attempt.AttemptNo, NodeVersion: reclaimed.Node.Version},
+	}
+	checkpointFailure := foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CONTROL_CHECKPOINT", false, errors.New("cancel requested"))
+	if _, err := coordinator.Fail(fixture.ctx, workflowapplication.FailDeliveryCommand{Binding: binding, Failure: workflowdomain.FailureInput{Err: checkpointFailure}}); !hasCode(err, "WORKFLOW_CANCELLATION_DEFERRED") {
+		t.Fatalf("unsafe cancellation transition err=%v", err)
+	}
+	var runStatus, attemptStatus string
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT r.status,a.status FROM workflow.run r JOIN workflow.node_run n ON n.run_id=r.id JOIN workflow.node_attempt a ON a.node_run_id=n.id AND a.attempt_no=2 WHERE r.id=$1`, string(fixture.runID)).Scan(&runStatus, &attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != string(workflowdomain.RunStatusRunning) || attemptStatus != string(workflowdomain.AttemptStatusRunning) {
+		t.Fatalf("unsafe cancellation persisted run=%s attempt=%s", runStatus, attemptStatus)
+	}
+
+	safeExecution, err := changeRepository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{
+		ExecutionID: created.ID, ExpectedVersion: created.Version, Status: domain.WritebackStatusApplyFailed,
+		FailureCode: "WRITEBACK_CANCELLED_BEFORE_SIDE_EFFECT", At: fixture.now,
+	})
+	if err != nil || !domain.IsWritebackCancellationSafe(safeExecution.Status, safeExecution.CleanupCompletedAt != nil) {
+		t.Fatalf("safe execution=%#v err=%v", safeExecution, err)
+	}
+	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE workflow.node_run SET lease_until=CURRENT_TIMESTAMP - interval '1 second' WHERE id=$1`, string(fixture.nodeID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE workflow.node_attempt SET lease_until=CURRENT_TIMESTAMP - interval '1 second' WHERE node_run_id=$1 AND status='running'`, string(fixture.nodeID)); err != nil {
+		t.Fatal(err)
+	}
+	finalClaim, err := coordinator.Claim(fixture.ctx, workflowapplication.ClaimCommand{
+		NodeRunID: fixture.nodeID, DispatchNo: 1, DeliveryID: "cancel-safety-finalize",
+		RiverJobID: 1, RiverJobAttempt: 3, LeaseOwner: "finalize-owner", LeaseDuration: time.Minute,
+	})
+	if err != nil || finalClaim.Disposition != workflowapplication.ClaimDispositionClaimed || finalClaim.Attempt.AttemptNo != 3 {
+		t.Fatalf("safe checkpoint cancellation claim=%#v err=%v", finalClaim, err)
+	}
+	finalBinding := workflowapplication.DeliveryBinding{
+		NodeRunID: fixture.nodeID, DispatchNo: 1, DeliveryID: "cancel-safety-finalize",
+		Fence: workflowdomain.LeaseFence{Owner: "finalize-owner", AttemptNo: finalClaim.Attempt.AttemptNo, NodeVersion: finalClaim.Node.Version},
+	}
+	terminal, err := coordinator.Fail(fixture.ctx, workflowapplication.FailDeliveryCommand{Binding: finalBinding, Failure: workflowdomain.FailureInput{Err: checkpointFailure}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Run.Status != workflowdomain.RunStatusCancelled || terminal.Node.Status != workflowdomain.NodeStatusCancelled || terminal.Attempt.Status != workflowdomain.AttemptStatusCancelled {
+		t.Fatalf("terminal cancellation=%#v", terminal)
+	}
+	storedExecution, err := changeRepository.GetWritebackExecution(fixture.ctx, created.ID)
+	if err != nil || !domain.IsWritebackCancellationSafe(storedExecution.Status, storedExecution.CleanupCompletedAt != nil) {
+		t.Fatalf("terminal workflow has unsafe execution=%#v err=%v", storedExecution, err)
 	}
 }
 
@@ -618,6 +781,12 @@ type writebackFixture struct {
 	gitHead, commitHash, parentCommitHash        string
 	diffHash                                     string
 	create                                       domain.CreateWriteback
+}
+
+type cancellationSafetyJobInserter struct{}
+
+func (cancellationSafetyJobInserter) InsertTx(context.Context, any, riveradapter.NodeJobArgs, riveradapter.InsertOptions) (workflowapplication.JobReceipt, error) {
+	return workflowapplication.JobReceipt{JobID: 1}, nil
 }
 
 func newWritebackFixture(t *testing.T) *writebackFixture {

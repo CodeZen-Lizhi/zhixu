@@ -13,6 +13,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -20,6 +21,42 @@ import (
 var _ domain.WritebackRepository = (*Repository)(nil)
 var _ domain.WritebackSagaRepository = (*Repository)(nil)
 var _ domain.WritebackExecutionLookup = (*Repository)(nil)
+var _ workflowapplication.CancellationSafetyGuard = (*Repository)(nil)
+
+// SafeToCancelWorkflowNode 只在未创建 Writeback，或 Durable Execution 已完成、
+// 已补偿、明确人工恢复，或 verifying 的恢复证据已清理时允许 Workflow 终态取消。
+func (r *Repository) SafeToCancelWorkflowNode(ctx context.Context, transaction any, nodeRunID foundation.ID) (bool, error) {
+	parsed, err := foundation.ParseID(string(nodeRunID))
+	if err != nil || parsed != nodeRunID {
+		return false, foundation.NewError(foundation.ErrorInvalidInput, "WRITEBACK_CANCELLATION_SAFETY_INVALID", false, errors.Join(err, domain.ErrWritebackInvalidInput))
+	}
+	tx, ok := transaction.(pgx.Tx)
+	if !ok || tx == nil {
+		return false, foundation.NewError(foundation.ErrorInvalidInput, "WRITEBACK_CANCELLATION_TRANSACTION_INVALID", false, domain.ErrWritebackInvalidInput)
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT status,cleanup_completed_at IS NOT NULL
+		FROM change_control.writeback_execution
+		WHERE node_run_id=$1`, string(nodeRunID))
+	if err != nil {
+		return false, classifyWriteback(err, "WRITEBACK_CANCELLATION_SAFETY_QUERY_FAILED")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status domain.WritebackStatus
+		var cleanupCompleted bool
+		if err := rows.Scan(&status, &cleanupCompleted); err != nil {
+			return false, classifyWriteback(err, "WRITEBACK_CANCELLATION_SAFETY_QUERY_FAILED")
+		}
+		if !domain.IsWritebackCancellationSafe(status, cleanupCompleted) {
+			return false, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, classifyWriteback(err, "WRITEBACK_CANCELLATION_SAFETY_QUERY_FAILED")
+	}
+	return true, nil
+}
 
 // BeginWriteback 在单一事务中校验 lease、消费双授权、创建 Execution 并推进 Proposal。
 // Credential 只在当前调用栈参与哈希绑定比较，绝不写入任何持久化字段。

@@ -13,6 +13,7 @@ import (
 
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowhttp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/http"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
@@ -42,6 +43,7 @@ type Dependencies struct {
 	ChangeControl     *changecontrolhttp.Handler
 	Ingestion         *ingestionhttp.Handler
 	Logger            *slog.Logger
+	Tracer            observability.Tracer
 }
 
 // NewRouter builds the API and static-resource boundary. Domain modules are
@@ -53,8 +55,12 @@ func NewRouter(deps Dependencies) http.Handler {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
+	if deps.Tracer == nil {
+		deps.Tracer = observability.NewNoopTracer()
+	}
 	router := chi.NewRouter()
 	router.Use(requestIDMiddleware)
+	router.Use(requestTraceMiddleware(deps.Tracer))
 	router.Use(requestLogMiddleware(deps.Logger))
 	router.Get("/livez", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
@@ -105,6 +111,31 @@ func NewRouter(deps Dependencies) http.Handler {
 		writeProblem(w, http.StatusNotFound, "WEB_ASSETS_UNAVAILABLE", "Web 静态资源不可用", false, nil)
 	})
 	return router
+}
+
+func requestTraceMiddleware(tracer observability.Tracer) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			if incoming := strings.TrimSpace(r.Header.Get("traceparent")); incoming != "" {
+				if decoded, err := observability.DecodeTraceMetadata(ctx, map[string]string{observability.TraceParentMetadataKey: incoming}); err == nil {
+					ctx = decoded
+				}
+			}
+			ctx = observability.WithCorrelation(ctx, observability.Correlation{RequestID: requestID(ctx)})
+			traced, span, err := tracer.Start(ctx, "http.request")
+			if err == nil {
+				ctx = traced
+				defer span.End()
+				if trace, found := observability.TraceContextFromContext(ctx); found {
+					if traceParent, encodeErr := trace.TraceParent(); encodeErr == nil {
+						w.Header().Set("traceparent", traceParent)
+					}
+				}
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }
 
 func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencies) {
@@ -217,7 +248,7 @@ func requestLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			if status == 0 {
 				status = http.StatusOK
 			}
-			logger.Info("http request completed", "request_id", requestID(r.Context()), "method", r.Method, "path", r.URL.Path, "status", status)
+			logger.InfoContext(r.Context(), "http request completed", "request_id", requestID(r.Context()), "method", r.Method, "path", r.URL.Path, "status", status)
 		})
 	}
 }

@@ -197,6 +197,25 @@ func ValidateWritebackTransition(from, to WritebackStatus) error {
 	return nil
 }
 
+// IsWritebackCancellationSafe 判断 Workflow 是否可在不遗留写回孤儿状态的前提下终态取消。
+// verifying 只有在恢复证据清理完成后才表示本次副作用闭环已安全交付。
+func IsWritebackCancellationSafe(status WritebackStatus, cleanupCompleted bool) bool {
+	switch status {
+	case WritebackStatusNeedsRevision,
+		WritebackStatusApplyFailed,
+		WritebackStatusCompensated,
+		WritebackStatusManualRecovery,
+		WritebackStatusVerifyFailed,
+		WritebackStatusRolledBack,
+		WritebackStatusCompleted:
+		return true
+	case WritebackStatusVerifying:
+		return cleanupCompleted
+	default:
+		return false
+	}
+}
+
 // ValidateWritebackCreate 校验创建命令和所有不可变写回绑定。
 func ValidateWritebackCreate(command CreateWriteback) error {
 	if command.ID == "" || command.WorkspaceID == "" || command.WorkflowRunID == "" || command.NodeRunID == "" || command.ProposalID == "" || command.RevisionID == "" || command.ApprovalID == "" || command.WriteAuthorizationID == "" || command.GitAuthorizationID == "" {

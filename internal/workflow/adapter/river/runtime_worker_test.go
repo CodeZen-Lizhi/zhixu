@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	"github.com/riverqueue/river"
@@ -66,6 +67,50 @@ func TestRuntimeNodeWorkerRejectsPersistedArgsWithUnknownFields(t *testing.T) {
 	}
 	if runtime.claimCalls != 0 {
 		t.Fatalf("claim calls=%d", runtime.claimCalls)
+	}
+}
+
+func TestRuntimeNodeWorkerRejectsInvalidTraceMetadataBeforeClaim(t *testing.T) {
+	runtime := &runtimeWorkerFake{claim: claimedRuntimeResult()}
+	worker := newRuntimeWorkerFixture(t, runtime, runtimeExecutor{})
+	job := runtimeRiverJob()
+	job.Metadata = []byte(`{"traceparent":"invalid"}`)
+	if err := worker.Work(context.Background(), job); err == nil {
+		t.Fatal("runtime worker accepted invalid trace metadata")
+	}
+	if runtime.claimCalls != 0 {
+		t.Fatalf("claim calls=%d", runtime.claimCalls)
+	}
+}
+
+func TestRuntimeNodeWorkerPropagatesTraceAndClaimedCorrelation(t *testing.T) {
+	claim := claimedRuntimeResult()
+	claim.Attempt.AttemptNo = 3
+	claim.Node.DispatchNo = 7
+	claim.Node.RetryNo = 2
+	runtime := &runtimeWorkerFake{claim: claim}
+	executor := &capturingRuntimeExecutor{output: json.RawMessage(`{"ok":true}`)}
+	worker := newRuntimeWorkerFixture(t, runtime, executor)
+	job := runtimeRiverJob()
+	job.Metadata = []byte(`{"traceparent":"00-0123456789abcdef0123456789abcdef-0123456789abcdef-01","river:rescue_count":1}`)
+	if err := worker.Work(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	claimTrace, found := observability.TraceContextFromContext(runtime.claimContext)
+	if !found || claimTrace.TraceID != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("claim trace=%+v found=%t", claimTrace, found)
+	}
+	executionTrace, found := observability.TraceContextFromContext(executor.ctx)
+	if !found || executionTrace != claimTrace {
+		t.Fatalf("execution trace=%+v found=%t", executionTrace, found)
+	}
+	correlation := observability.CorrelationFromContext(executor.ctx)
+	if correlation.WorkspaceID != string(claim.Run.WorkspaceID) ||
+		correlation.WorkflowRunID != string(claim.Run.ID) ||
+		correlation.NodeRunID != string(claim.Node.ID) ||
+		correlation.AttemptNo != 3 || correlation.DispatchNo != 7 ||
+		correlation.RetryNo != 2 || correlation.RiverJobID != job.ID {
+		t.Fatalf("correlation=%+v", correlation)
 	}
 }
 
@@ -148,6 +193,89 @@ func TestNewRuntimeNodeWorkerRejectsInvalidCadenceAndTypedNil(t *testing.T) {
 	}
 }
 
+func TestRuntimeNodeWorkerEmitsCommittedMetricsWithoutReplayDuplication(t *testing.T) {
+	started := time.Now().Add(-25 * time.Millisecond).UTC()
+	ended := started.Add(20 * time.Millisecond)
+	claim := claimedRuntimeResult()
+	claim.ObservedNodeKind = claim.Node.NodeType
+	claim.DuplicateDelivery = true
+	claim.LeaseReclaimed = true
+	runtime := &runtimeWorkerFake{
+		claim: claim,
+		complete: application.DeliveryTransitionResult{Attempt: domain.NodeAttempt{
+			Status: domain.AttemptStatusSucceeded, StartedAt: started, EndedAt: &ended,
+		}},
+	}
+	metrics := observability.NewMemoryMetrics()
+	worker, err := NewRuntimeNodeWorkerWithObservability(runtimeExecutorRegistry(t, runtimeExecutor{output: json.RawMessage(`{"ok":true}`)}), runtime, "worker-a", time.Minute, time.Second, RuntimeWorkerObservability{Metrics: metrics, Queue: "workflow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	counts := map[observability.MetricName]int{}
+	for _, measurement := range metrics.Snapshot() {
+		counts[measurement.Name]++
+	}
+	if counts[observability.MetricDuplicateDeliveryTotal] != 1 || counts[observability.MetricLeaseExpiryTotal] != 1 || counts[observability.MetricActiveWorkers] != 2 || counts[observability.MetricNodeDuration] != 1 || counts[observability.MetricNodeResultTotal] != 1 {
+		t.Fatalf("metric counts=%v", counts)
+	}
+
+	runtime.complete.Replayed = true
+	before := len(metrics.Snapshot())
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	for _, measurement := range metrics.Snapshot()[before:] {
+		if measurement.Name == observability.MetricNodeDuration || measurement.Name == observability.MetricNodeResultTotal {
+			t.Fatalf("replay emitted terminal metric: %+v", measurement)
+		}
+	}
+}
+
+func TestRuntimeNodeWorkerReportsOnlyAllowlistedFatalInvariant(t *testing.T) {
+	fatal := make(chan error, 1)
+	runtime := &runtimeWorkerFake{
+		claim:        claimedRuntimeResult(),
+		heartbeatErr: foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_HEARTBEAT_RESULT_INVALID", false, errors.New("invalid result")),
+	}
+	metrics := observability.NewMemoryMetrics()
+	worker, err := NewRuntimeNodeWorkerWithObservability(runtimeExecutorRegistry(t, runtimeExecutor{waitForCancel: true}), runtime, "worker-a", 60*time.Millisecond, 10*time.Millisecond, RuntimeWorkerObservability{Metrics: metrics, Queue: "workflow", FatalInvariants: fatal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err == nil {
+		t.Fatal("fatal heartbeat invariant was swallowed")
+	}
+	select {
+	case reported := <-fatal:
+		if stableErrorCode(reported) != "WORKFLOW_HEARTBEAT_RESULT_INVALID" {
+			t.Fatalf("fatal=%v", reported)
+		}
+	default:
+		t.Fatal("fatal invariant was not reported")
+	}
+	foundHeartbeat := false
+	for _, measurement := range metrics.Snapshot() {
+		if measurement.Name == observability.MetricHeartbeatFailureTotal {
+			foundHeartbeat = true
+		}
+	}
+	if !foundHeartbeat {
+		t.Fatal("heartbeat failure metric missing")
+	}
+
+	nonFatal := make(chan error, 1)
+	observer := newRuntimeWorkerObserver(RuntimeWorkerObservability{FatalInvariants: nonFatal})
+	observer.reportFatal(foundation.NewError(foundation.ErrorManualRecoveryRequired, "WRITEBACK_EXECUTION_BINDING_CONFLICT", false, errors.New("manual")))
+	select {
+	case err := <-nonFatal:
+		t.Fatalf("manual recovery escalated to fatal: %v", err)
+	default:
+	}
+}
+
 func newRuntimeWorkerFixture(t *testing.T, runtime RuntimeExecutionCoordinator, executor application.Executor) *RuntimeNodeWorker {
 	t.Helper()
 	worker, err := NewRuntimeNodeWorker(runtimeExecutorRegistry(t, executor), runtime, "worker-a", time.Minute, time.Second)
@@ -191,6 +319,16 @@ type runtimeExecutor struct {
 	waitForCancel bool
 }
 
+type capturingRuntimeExecutor struct {
+	ctx    context.Context
+	output json.RawMessage
+}
+
+func (e *capturingRuntimeExecutor) Execute(ctx context.Context, _ application.ExecutionContext) (application.ExecutionResult, error) {
+	e.ctx = ctx
+	return application.ExecutionResult{Output: e.output}, nil
+}
+
 func (e runtimeExecutor) Execute(ctx context.Context, _ application.ExecutionContext) (application.ExecutionResult, error) {
 	if e.waitForCancel {
 		<-ctx.Done()
@@ -204,6 +342,7 @@ func (e runtimeExecutor) Execute(ctx context.Context, _ application.ExecutionCon
 
 type runtimeWorkerFake struct {
 	claim            application.ClaimResult
+	claimContext     context.Context
 	claimCommand     application.ClaimCommand
 	claimCalls       int
 	claimErr         error
@@ -222,8 +361,9 @@ type runtimeWorkerFake struct {
 	humanWaitCalls   int
 }
 
-func (f *runtimeWorkerFake) Claim(_ context.Context, command application.ClaimCommand) (application.ClaimResult, error) {
+func (f *runtimeWorkerFake) Claim(ctx context.Context, command application.ClaimCommand) (application.ClaimResult, error) {
 	f.claimCalls++
+	f.claimContext = ctx
 	f.claimCommand = command
 	if f.claim.Disposition == application.ClaimDispositionClaimed {
 		f.claim.Attempt.LeaseOwner = command.LeaseOwner
