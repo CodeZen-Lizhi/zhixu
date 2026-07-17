@@ -541,3 +541,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: 完成 M6-A Retrieval Index Foundation
+
+**Date**: 2026-07-18
+**Task**: 完成 M6-A Retrieval Index Foundation
+**Branch**: `dev`
+
+### Summary
+
+完成版本化 Embedding/Index、Manifest、FTS/Vector Projection、原子激活回滚、pgvector Pool 注册、真实 PostgreSQL/race/EXPLAIN 门禁与文档同步。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a88a5ce` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
