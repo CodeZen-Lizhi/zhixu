@@ -39,7 +39,6 @@
 
 - None - task complete
 
-
 ## Session 2: M2 Eino 隔离采用门禁
 
 **Date**: 2026-07-16
@@ -428,6 +427,39 @@
 | `8cc284d` | (see git log) |
 | `c4df8af` | (see git log) |
 | `bf33c56` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 14: 收口 M4-B Workflow Runtime State Machine
+
+**Date**: 2026-07-17
+**Task**: 收口 M4-B Workflow Runtime State Machine
+**Branch**: `dev`
+
+### Summary
+
+完成 DB-time Claim/Heartbeat、Attempt reclaim/fencing、Retry/Fail/Manual/Complete、唯一后继、Human wait/submit、Pause/Resume/Cancel checkpoint、River Worker transport/Human outcome、00012 迁移与契约文档；fault smoke 保持历史提交 ecadffb。通过 make test、go test -race、go vet、OpenAPI、PostgreSQL/River integration。M4-C/M4-D 尚未实施。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `63f0a83` | (see git log) |
 
 ### Testing
 
