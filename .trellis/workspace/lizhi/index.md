@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 14
+- **Total Sessions**: 15
 - **Last Active**: 2026-07-17
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~474 | Active |
+| `journal-1.md` | ~508 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 15 | 2026-07-17 | 完成 M4-C Approval Safe Writeback Dispatch | `cda2192`, `db2376f` | `dev` |
 | 14 | 2026-07-17 | 收口 M4-B Workflow Runtime State Machine | `63f0a83` | `dev` |
 | 13 | 2026-07-17 | 完成 M4-A River Runtime Foundation 并纳入 fault smoke | `ecadffb`, `8cc284d`, `c4df8af`, `bf33c56` | `dev` |
 | 12 | 2026-07-17 | 完成 M5-04D 可恢复安全写回 Saga | `ecadffb`, `f4dd50a` | `dev` |

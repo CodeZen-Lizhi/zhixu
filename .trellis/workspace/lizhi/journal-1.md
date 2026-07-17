@@ -472,3 +472,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: 完成 M4-C Approval Safe Writeback Dispatch
+
+**Date**: 2026-07-17
+**Task**: 完成 M4-C Approval Safe Writeback Dispatch
+**Branch**: `dev`
+
+### Summary
+
+完成 Approved HTTP 到 River/Safe Writeback 原子闭环、Proposal-Run 复合绑定、Bootstrap exact recovery、transport lease retry 修复、真实双 Worker smoke、文档与全量门禁；kill-9、可观测性和 side-effect cancel 归 M4-D。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `cda2192` | (see git log) |
+| `db2376f` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
