@@ -370,3 +370,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: 完成 M5-04D 可恢复安全写回 Saga
+
+**Date**: 2026-07-17
+**Task**: 完成 M5-04D 可恢复安全写回 Saga
+**Branch**: `dev`
+
+### Summary
+
+完成原子双授权 Begin、可重启 LocalFS/Git 检查点、发布与补偿、真实 PostgreSQL/LocalFS/Git smoke；修复 response-loss 同内容换 inode 恢复误判，并通过全量门禁与独立复验。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ecadffb` | (see git log) |
+| `f4dd50a` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
