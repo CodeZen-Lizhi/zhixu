@@ -103,29 +103,29 @@
 ## Acceptance Criteria
 
 - [x] River/riverpgxv5 `v0.40.0` 隔离 PoC 通过：Go/pgx 编译、7 个官方 migration、空库/重复/Down→Up、自定义 Schema、事务入队、unique/scheduled job 和生命周期均有真实 PostgreSQL 证据。
-- [ ] 正式引入后 `go.mod/go.sum/vendor` 精确锁定且项目/River migration 在现有库升级上通过。
-- [ ] Registry 对重复 Definition/Executor、未知 Node Kind、未知 Schema 和缺失权限 fail-fast；客户端任意 Graph/Node Type 不能扩大执行能力。
-- [ ] Cross-Schema Unit of Work 的锁顺序、共享 pgx tx 和 tx-scoped River Inserter 有故障注入测试；禁止串联现有多事务 Repository。
-- [ ] Approved 决策与 Approval、Run、首 Node、Outbox、River Job 原子提交；任一点故障全回滚，重复请求只有一套事实。
-- [ ] Approved 新建/重放分别返回 201/200 和同一 `workflow_run_id/workflow_status_url`；Rejected 不产生或暴露 Workflow。
-- [ ] Approval 与 Pause/Resume/Cancel 的 OpenAPI request/response/枚举/400/404/409 契约通过；Run 从数据库绑定 Workspace，不接受调用方伪造 workspace_id。
-- [ ] Rejected 决策不创建 Run/Node/Job；历史 Approval/Run 兼容查询。
-- [ ] 真实 River + PostgreSQL 自动执行 Deterministic Node，无自制 pending polling。
-- [ ] Safe Writeback 真实 River Job 完成 Claim → Authorization → Atomic Begin/Recover → Node Execute → Complete，并达到 `verifying/index_pending`。
-- [ ] 第一/第二 Authorization 签发后崩溃、Begin 提交前崩溃、Begin 提交响应丢失、Execution 恢复后 Resume 前崩溃均可恢复，且只存在一个 Execution、Commit、Mapping 和 Reindex Outbox。
-- [ ] River Args/Node/Attempt/Outbox/日志/数据库 Secret 扫描不含 Credential、正文、绝对路径、Git 参数或 lock token。
-- [ ] 两 Worker 并发、重复 Job 和 kill -9 后只有一个活动 owner、一个逻辑 Node 完成和一个后继 Job。
-- [ ] Heartbeat 续租、数据库断连、lease 过期回收、旧 owner 晚到 Complete/Fail/副作用前检查均有真实 PostgreSQL 测试。
-- [ ] Retryable 按退避/jitter/Retry-After 重试，达到最大次数后失败；NonRetryable 不重试；Manual 不自动重试且保留恢复证据。
-- [ ] Attempt 历史 append-only，错误码和摘要可查询且不泄漏敏感数据。
-- [ ] Success/Failure 互斥、特定 Code 优先于 ErrorKind 的所有分类分支、Retry-After 边界和未分类错误均有测试，每个输入只产生一个 FailureClass。
-- [ ] duplicate delivery、lease reclaim 和业务 Retry 的 `attempt_no/dispatch_no/retry_no` 语义分别验证；infra crash 不消耗最大业务 Retry 次数。
-- [ ] Complete/Fail/Retry/后继创建/Job 插入/Outbox/Run 状态在事务失败和响应丢失下保持幂等一致。
-- [ ] 冻结的 Workflow/Proposal Outbox event type、event key、schema version 和最小 payload 在 replay 下唯一，且 Reindex 事件保持 unpublished。
-- [ ] Human resume、Pause、Resume、Cancel 阻止非法新副作用，并保持已提交 Git 的诚实恢复语义。
-- [ ] Worker graceful stop、强制取消与重启恢复有自动化测试；Compose Worker readiness 能证明 River/Registry 已加载。
-- [ ] OpenAPI、产品/架构/数据库/安全/可观测性/部署文档与实现一致，不把 `index_pending` 描述为 completed。
-- [ ] `go test -race ./...`、关键并发包 `-count=20`、`go vet ./...`、`make test`、真实 PostgreSQL/River smoke、Compose/Docker readiness、go-review、sql-code-review 和 Trellis full-scope check 通过。
+- [x] 正式引入后 `go.mod/go.sum/vendor` 精确锁定且项目/River migration 在现有库升级上通过。
+- [x] Registry 对重复 Definition/Executor、未知 Node Kind、未知 Schema 和缺失权限 fail-fast；客户端任意 Graph/Node Type 不能扩大执行能力。
+- [x] Cross-Schema Unit of Work 的锁顺序、共享 pgx tx 和 tx-scoped River Inserter 有故障注入测试；禁止串联现有多事务 Repository。
+- [x] Approved 决策与 Approval、Run、首 Node、Outbox、River Job 原子提交；任一点故障全回滚，重复请求只有一套事实。
+- [x] Approved 新建/重放分别返回 201/200 和同一 `workflow_run_id/workflow_status_url`；Rejected 不产生或暴露 Workflow。
+- [x] Approval 与 Pause/Resume/Cancel 的 OpenAPI request/response/枚举/400/404/409 契约通过；Run 从数据库绑定 Workspace，不接受调用方伪造 workspace_id。
+- [x] Rejected 决策不创建 Run/Node/Job；历史 Approval/Run 兼容查询。
+- [x] 真实 River + PostgreSQL 自动执行 Deterministic Node，无自制 pending polling。
+- [x] Safe Writeback 真实 River Job 完成 Claim → Authorization → Atomic Begin/Recover → Node Execute → Complete，并达到 `verifying/index_pending`。
+- [x] 第一/第二 Authorization 签发后崩溃、Begin 提交前崩溃、Begin 提交响应丢失、Execution 恢复后 Resume 前崩溃均可恢复，且只存在一个 Execution、Commit、Mapping 和 Reindex Outbox。
+- [x] River Args/Node/Attempt/Outbox/日志/数据库 Secret 扫描不含 Credential、正文、绝对路径、Git 参数或 lock token。
+- [x] 两 Worker 并发、重复 Job 和 kill -9 后只有一个活动 owner、一个逻辑 Node 完成和一个后继 Job。
+- [x] Heartbeat 续租、数据库断连、lease 过期回收、旧 owner 晚到 Complete/Fail/副作用前检查均有真实 PostgreSQL 测试。
+- [x] Retryable 按退避/jitter/Retry-After 重试，达到最大次数后失败；NonRetryable 不重试；Manual 不自动重试且保留恢复证据。
+- [x] Attempt 历史 append-only，错误码和摘要可查询且不泄漏敏感数据。
+- [x] Success/Failure 互斥、特定 Code 优先于 ErrorKind 的所有分类分支、Retry-After 边界和未分类错误均有测试，每个输入只产生一个 FailureClass。
+- [x] duplicate delivery、lease reclaim 和业务 Retry 的 `attempt_no/dispatch_no/retry_no` 语义分别验证；infra crash 不消耗最大业务 Retry 次数。
+- [x] Complete/Fail/Retry/后继创建/Job 插入/Outbox/Run 状态在事务失败和响应丢失下保持幂等一致。
+- [x] 冻结的 Workflow/Proposal Outbox event type、event key、schema version 和最小 payload 在 replay 下唯一，且 Reindex 事件保持 unpublished。
+- [x] Human resume、Pause、Resume、Cancel 阻止非法新副作用，并保持已提交 Git 的诚实恢复语义。
+- [x] Worker graceful stop、强制取消与重启恢复有自动化测试；Compose Worker readiness 能证明 River/Registry 已加载。
+- [x] OpenAPI、产品/架构/数据库/安全/可观测性/部署文档与实现一致，不把 `index_pending` 描述为 completed。
+- [x] `go test -race ./...`、关键并发包 `-count=20`、`go vet ./...`、`make test`、真实 PostgreSQL/River smoke、Compose/Docker readiness、go-review、sql-code-review 和 Trellis full-scope check 通过。
 
 ## Out of Scope
 
