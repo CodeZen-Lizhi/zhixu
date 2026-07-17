@@ -19,23 +19,30 @@ type TargetReader interface {
 	CurrentHash(context.Context, foundation.ID, string) (string, error)
 }
 
+// ApprovalGitInspector 在批准时从服务端 Workspace 读取严格、干净且 attached 的 Git 基线。
+// 调用方不能提供 HEAD；实现返回的快照是 Approval Git HEAD 的唯一来源。
+type ApprovalGitInspector interface {
+	CaptureApprovalSnapshot(context.Context, foundation.ID) (domain.GitSnapshot, error)
+}
+
 // Service 协调 Proposal、Approval 与无副作用 Apply 前置校验。
 type Service struct {
 	repo    domain.Repository
 	ids     foundation.IDGenerator
 	clock   foundation.Clock
 	targets TargetReader
+	git     ApprovalGitInspector
 }
 
 // MaxWriteAuthorizationTTL 是单次写权限的服务端有效期上限。
 const MaxWriteAuthorizationTTL = 5 * time.Minute
 
 // NewService 创建 Change Control 应用服务。
-func NewService(repo domain.Repository, ids foundation.IDGenerator, clock foundation.Clock, targets TargetReader) (*Service, error) {
-	if repo == nil || ids == nil || clock == nil || targets == nil {
+func NewService(repo domain.Repository, ids foundation.IDGenerator, clock foundation.Clock, targets TargetReader, git ApprovalGitInspector) (*Service, error) {
+	if repo == nil || ids == nil || clock == nil || targets == nil || git == nil {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "CHANGE_CONTROL_DEPENDENCY_MISSING", false, errors.New("change control dependency missing"))
 	}
-	return &Service{repo: repo, ids: ids, clock: clock, targets: targets}, nil
+	return &Service{repo: repo, ids: ids, clock: clock, targets: targets, git: git}, nil
 }
 
 // CreateCommand 是创建第一版 Proposal 所需的完整变更快照。
@@ -110,6 +117,13 @@ func (s *Service) DecideProposal(ctx context.Context, proposalID, revisionID fou
 	if proposal.Revision.ID != revisionID || proposal.Revision.ChangeHash != strings.ToLower(changeHash) {
 		return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_REVISION_CONFLICT", false, errors.New("approval is not bound to requested revision"))
 	}
+	if proposal.Approval != nil {
+		if proposal.Approval.RevisionID == revisionID && proposal.Approval.ChangeHash == strings.ToLower(changeHash) && proposal.Approval.Decision == decision {
+			return *proposal.Approval, nil
+		}
+		return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_DECISION_CONFLICT", false, errors.New("proposal already has a different approval decision"))
+	}
+	var approvedGitHead *string
 	if proposal.Status == domain.StatusReady && decision == domain.DecisionApproved {
 		currentHash, readErr := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
 		if readErr != nil {
@@ -121,6 +135,15 @@ func (s *Service) DecideProposal(ctx context.Context, proposalID, revisionID fou
 			}
 			return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: proposal.Revision.BaseHash, Current: strings.ToLower(currentHash)})
 		}
+		snapshot, inspectErr := s.git.CaptureApprovalSnapshot(ctx, proposal.WorkspaceID)
+		if inspectErr != nil {
+			return domain.Approval{}, inspectErr
+		}
+		if bindingErr := domain.ValidateGitSnapshotBinding(proposal.WorkspaceID, snapshot.Head, snapshot); bindingErr != nil {
+			return domain.Approval{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_GIT_SNAPSHOT_INVALID", false, bindingErr)
+		}
+		head := strings.ToLower(snapshot.Head)
+		approvedGitHead = &head
 	}
 	approvalID, err := s.ids.New()
 	if err != nil {
@@ -128,7 +151,7 @@ func (s *Service) DecideProposal(ctx context.Context, proposalID, revisionID fou
 	}
 	return s.repo.Approve(ctx, domain.Approval{
 		ID: approvalID, ProposalID: proposalID, RevisionID: revisionID,
-		ChangeHash: strings.ToLower(changeHash), Decision: decision, DecidedAt: s.clock.Now(),
+		ChangeHash: strings.ToLower(changeHash), Decision: decision, ApprovedGitHead: approvedGitHead, DecidedAt: s.clock.Now(),
 	})
 }
 
@@ -280,7 +303,7 @@ func (s *Service) ConsumeWriteAuthorization(ctx context.Context, request domain.
 	if !ok {
 		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WRITE_AUTHORIZATION_REPOSITORY_UNAVAILABLE", false, errors.New("authorization repository is unavailable"))
 	}
-	if strings.TrimSpace(request.Credential) == "" || strings.TrimSpace(request.IdempotencyKey) == "" || len(strings.TrimSpace(request.IdempotencyKey)) > 128 || request.WorkspaceID == "" || request.WorkflowRunID == "" || request.NodeRunID == "" || request.ProposalID == "" || request.RevisionID == "" || request.ApprovalID == "" || strings.TrimSpace(request.ToolName) == "" || len(strings.TrimSpace(request.ToolName)) > 64 || strings.TrimSpace(request.Scope) == "" || len(strings.TrimSpace(request.Scope)) > 512 || !domain.ValidHash(request.ApprovedChangeHash) || !domain.ValidHash(request.TargetVersion) {
+	if strings.TrimSpace(request.Credential) == "" || len(request.Credential) > domain.MaxAuthorizationCredentialBytes || strings.TrimSpace(request.IdempotencyKey) == "" || len(strings.TrimSpace(request.IdempotencyKey)) > 128 || request.WorkspaceID == "" || request.WorkflowRunID == "" || request.NodeRunID == "" || request.ProposalID == "" || request.RevisionID == "" || request.ApprovalID == "" || strings.TrimSpace(request.ToolName) == "" || len(strings.TrimSpace(request.ToolName)) > 64 || strings.TrimSpace(request.Scope) == "" || len(strings.TrimSpace(request.Scope)) > 512 || !domain.ValidHash(request.ApprovedChangeHash) || !domain.ValidHash(request.TargetVersion) {
 		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITE_AUTHORIZATION_CONSUME_INVALID", false, errors.New("authorization consume binding is incomplete"))
 	}
 	if err := domain.ValidateToolBinding(request.ToolName, request.Capability); err != nil {

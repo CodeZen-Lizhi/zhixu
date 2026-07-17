@@ -45,6 +45,53 @@ func TestWritebackInspectReadsCleanAttachedBaseline(t *testing.T) {
 	}
 }
 
+func TestWritebackCaptureApprovalSnapshotReadsCurrentStrictBaseline(t *testing.T) {
+	repository := newWritebackTestRepository(t, "", "")
+	snapshot, err := repository.client.CaptureApprovalSnapshot(context.Background(), writebackTestWorkspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.WorkspaceID != writebackTestWorkspaceID || snapshot.Branch != "main" || snapshot.Head != repository.head || snapshot.ObjectFormat != changecontrol.GitObjectFormatSHA1 || !snapshot.Clean {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+func TestWritebackCaptureApprovalSnapshotRejectsUnsafeCurrentRepository(t *testing.T) {
+	t.Run("root mismatch", func(t *testing.T) {
+		repository := newWritebackTestRepository(t, "", "")
+		nested := filepath.Join(repository.root, "nested")
+		if err := os.Mkdir(nested, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		client, err := NewWritebackClient(New(""), writebackWorkspaceRepository{workspace: workspacedomain.Workspace{ID: writebackTestWorkspaceID, RootPath: nested}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.CaptureApprovalSnapshot(context.Background(), writebackTestWorkspaceID)
+		requireGitErrorCode(t, err, "GIT_REPOSITORY_ROOT_MISMATCH", foundation.ErrorPermissionDenied)
+	})
+	t.Run("dirty", func(t *testing.T) {
+		repository := newWritebackTestRepository(t, "", "")
+		repository.writeTarget(t, []byte("changed\n"))
+		_, err := repository.client.CaptureApprovalSnapshot(context.Background(), writebackTestWorkspaceID)
+		requireGitErrorCode(t, err, "GIT_REPOSITORY_DIRTY", foundation.ErrorVersionConflict)
+	})
+	t.Run("detached", func(t *testing.T) {
+		repository := newWritebackTestRepository(t, "", "")
+		runWritebackGit(t, repository.root, "checkout", "--detach", repository.head)
+		_, err := repository.client.CaptureApprovalSnapshot(context.Background(), writebackTestWorkspaceID)
+		requireGitErrorCode(t, err, "GIT_REPOSITORY_DETACHED", foundation.ErrorVersionConflict)
+	})
+	t.Run("identity missing", func(t *testing.T) {
+		repository := newWritebackTestRepository(t, "", "")
+		runWritebackGit(t, repository.root, "config", "--local", "--unset-all", "user.name")
+		runWritebackGit(t, repository.root, "config", "--local", "--unset-all", "user.email")
+		t.Setenv("HOME", t.TempDir())
+		_, err := repository.client.CaptureApprovalSnapshot(context.Background(), writebackTestWorkspaceID)
+		requireGitErrorCode(t, err, "GIT_AUTHOR_IDENTITY_MISSING", foundation.ErrorPermissionDenied)
+	})
+}
+
 func TestWritebackInspectRejectsRepositoryAndHeadPreconditions(t *testing.T) {
 	repository := newWritebackTestRepository(t, "", "")
 	tests := []struct {
@@ -281,6 +328,14 @@ func TestWritebackDiffApprovedRejectsUnexpectedWorktreeState(t *testing.T) {
 			requireGitErrorCode(t, err, test.code, foundation.ErrorVersionConflict)
 		})
 	}
+}
+
+func TestWritebackDiffApprovedRejectsDetachedHeadBeforeGitPrepared(t *testing.T) {
+	repository := newWritebackTestRepository(t, "", "")
+	runWritebackGit(t, repository.root, "checkout", "--detach", repository.head)
+	resultHash := repository.writeTarget(t, []byte("# approved\n"))
+	_, err := repository.client.DiffApproved(context.Background(), repository.diffRequest(resultHash))
+	requireGitErrorCode(t, err, "GIT_REPOSITORY_DETACHED", foundation.ErrorVersionConflict)
 }
 
 func TestWritebackDiffApprovedRejectsUnsafeRequestAndTrackedSymlink(t *testing.T) {

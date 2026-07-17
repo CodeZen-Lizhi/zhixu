@@ -24,3 +24,12 @@ type WritebackRepository interface {
 	CheckpointWritebackExecution(context.Context, CheckpointWriteback) (WritebackExecution, error)
 	PublishWriteback(context.Context, PublishWriteback) (PublishWritebackResult, error)
 }
+
+// WritebackSagaRepository 扩展旧 WritebackRepository，提供 M5-04D 原子 Begin、lease guard 与 cleanup finalize。
+// 单独扩展接口可保持已有 Adapter/Fake 的源码兼容。
+type WritebackSagaRepository interface {
+	WritebackRepository
+	BeginWriteback(context.Context, BeginWriteback) (WritebackExecution, error)
+	ValidateWritebackLease(context.Context, foundation.ID, string) error
+	FinalizeWritebackCleanup(context.Context, foundation.ID, int64, time.Time) (WritebackExecution, error)
+}

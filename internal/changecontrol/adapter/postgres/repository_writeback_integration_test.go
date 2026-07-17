@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -42,6 +44,220 @@ func TestRepositoryWritebackCreateReplayAndIdentityConflict(t *testing.T) {
 	conflicting.ResultHash = strings.Repeat("e", 64)
 	if _, err := fixture.repository.CreateWritebackExecution(fixture.ctx, conflicting); !hasCode(err, "WRITEBACK_IDENTITY_CONFLICT") {
 		t.Fatalf("identity conflict err=%v", err)
+	}
+}
+
+func TestRepositoryBeginWritebackAtomicDoubleConsumeAndReplay(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	begin := domain.BeginWriteback{
+		WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID,
+		LeaseOwner: "test-owner", IdempotencyKey: "begin-" + string(fixture.executionID),
+		WriteAuthorization: domain.AuthorizationConsume{
+			Credential: string(fixture.writeAuthorizationID) + "write-auth", IdempotencyKey: "write-auth-" + string(fixture.writeAuthorizationID),
+			WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID,
+			ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash,
+		},
+		GitAuthorization: domain.AuthorizationConsume{
+			Credential: string(fixture.gitAuthorizationID) + "git-auth", IdempotencyKey: "git-auth-" + string(fixture.gitAuthorizationID),
+			WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID,
+			ToolName: "CreateGitCommit", Capability: domain.CapabilityGitWrite, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash,
+		},
+	}
+	created, err := fixture.repository.BeginWriteback(fixture.ctx, begin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantResultHash := domain.ComputeWritebackResultHash([]byte("writeback result"))
+	if created.Status != domain.WritebackStatusPrepared || created.ID == "" || created.ResultHash != wantResultHash {
+		t.Fatalf("created=%#v", created)
+	}
+	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApplying, 3)
+	var writeStatus, gitStatus string
+	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT (SELECT status FROM change_control.tool_authorization WHERE id=$1),(SELECT status FROM change_control.tool_authorization WHERE id=$2)`, string(fixture.writeAuthorizationID), string(fixture.gitAuthorizationID)).Scan(&writeStatus, &gitStatus); err != nil {
+		t.Fatal(err)
+	}
+	if writeStatus != string(domain.AuthorizationConsumed) || gitStatus != string(domain.AuthorizationConsumed) {
+		t.Fatalf("statuses write=%s git=%s", writeStatus, gitStatus)
+	}
+	begin.ExecutionID = fixture.nextID(t)
+	replayed, err := fixture.repository.BeginWriteback(fixture.ctx, begin)
+	if err != nil || replayed.ID != created.ID || replayed.Version != created.Version {
+		t.Fatalf("replayed=%#v err=%v", replayed, err)
+	}
+	conflict := begin
+	conflict.IdempotencyKey = "begin-conflict"
+	conflict.WriteAuthorization.Credential = "wrong-token"
+	if _, err := fixture.repository.BeginWriteback(fixture.ctx, conflict); !hasCode(err, "WRITEBACK_AUTHORIZATION_BINDING_CONFLICT") {
+		t.Fatalf("credential conflict err=%v", err)
+	}
+}
+
+func TestRepositoryBeginWritebackRollsBackBothAuthorizations(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	begin := domain.BeginWriteback{
+		ExecutionID: "not-a-uuid", WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID,
+		LeaseOwner: "test-owner", IdempotencyKey: "rollback-" + string(fixture.executionID),
+		WriteAuthorization: domain.AuthorizationConsume{Credential: string(fixture.writeAuthorizationID) + "write-auth", IdempotencyKey: "write-auth-" + string(fixture.writeAuthorizationID), WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash},
+		GitAuthorization:   domain.AuthorizationConsume{Credential: string(fixture.gitAuthorizationID) + "git-auth", IdempotencyKey: "git-auth-" + string(fixture.gitAuthorizationID), WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID, ToolName: "CreateGitCommit", Capability: domain.CapabilityGitWrite, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash},
+	}
+	if _, err := fixture.repository.BeginWriteback(fixture.ctx, begin); err == nil {
+		t.Fatal("invalid execution id unexpectedly succeeded")
+	}
+	var writeStatus, gitStatus, proposalStatus string
+	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT (SELECT status FROM change_control.tool_authorization WHERE id=$1),(SELECT status FROM change_control.tool_authorization WHERE id=$2),(SELECT status FROM change_control.proposal WHERE id=$3)`, string(fixture.writeAuthorizationID), string(fixture.gitAuthorizationID), string(fixture.proposalID)).Scan(&writeStatus, &gitStatus, &proposalStatus); err != nil {
+		t.Fatal(err)
+	}
+	if writeStatus != string(domain.AuthorizationIssued) || gitStatus != string(domain.AuthorizationIssued) || proposalStatus != string(domain.StatusApproved) {
+		t.Fatalf("rollback statuses write=%s git=%s proposal=%s", writeStatus, gitStatus, proposalStatus)
+	}
+	assertRowCount(t, fixture.ctx, fixture.tx, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
+}
+
+func TestRepositoryBeginWritebackRejectsPreviouslyConsumedAuthorizationsWithoutExecution(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	begin := domain.BeginWriteback{
+		ExecutionID: fixture.executionID, WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID,
+		LeaseOwner: "test-owner", IdempotencyKey: "consumed-before-begin-" + string(fixture.executionID),
+		WriteAuthorization: domain.AuthorizationConsume{Credential: string(fixture.writeAuthorizationID) + "write-auth", IdempotencyKey: "write-auth-" + string(fixture.writeAuthorizationID), WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash},
+		GitAuthorization:   domain.AuthorizationConsume{Credential: string(fixture.gitAuthorizationID) + "git-auth", IdempotencyKey: "git-auth-" + string(fixture.gitAuthorizationID), WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID, ToolName: "CreateGitCommit", Capability: domain.CapabilityGitWrite, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash},
+	}
+	writeConsume := begin.WriteAuthorization
+	writeConsume.Credential = hashText(writeConsume.Credential)
+	if _, err := fixture.repository.ConsumeAuthorization(fixture.ctx, writeConsume); err != nil {
+		t.Fatal(err)
+	}
+	gitConsume := begin.GitAuthorization
+	gitConsume.Credential = hashText(gitConsume.Credential)
+	if _, err := fixture.repository.ConsumeAuthorization(fixture.ctx, gitConsume); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.repository.BeginWriteback(fixture.ctx, begin); !hasCode(err, "WRITEBACK_AUTHORIZATION_ALREADY_CONSUMED") {
+		t.Fatalf("previously consumed authorizations started writeback: %v", err)
+	}
+	assertRowCount(t, fixture.ctx, fixture.tx, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
+	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApproved, 2)
+}
+
+func TestRepositoryBeginWritebackConcurrentReplayCreatesOneExecution(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	if err := fixture.tx.Commit(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRepository(fixture.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := domain.BeginWriteback{
+		WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID,
+		LeaseOwner: "test-owner", IdempotencyKey: "concurrent-begin-" + string(fixture.executionID),
+		WriteAuthorization: domain.AuthorizationConsume{Credential: string(fixture.writeAuthorizationID) + "write-auth", IdempotencyKey: "write-auth-" + string(fixture.writeAuthorizationID), WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash},
+		GitAuthorization:   domain.AuthorizationConsume{Credential: string(fixture.gitAuthorizationID) + "git-auth", IdempotencyKey: "git-auth-" + string(fixture.gitAuthorizationID), WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID, ToolName: "CreateGitCommit", Capability: domain.CapabilityGitWrite, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash},
+	}
+	commands := []domain.BeginWriteback{base, base}
+	commands[0].ExecutionID = fixture.nextID(t)
+	commands[1].ExecutionID = fixture.nextID(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	type result struct {
+		execution domain.WritebackExecution
+		err       error
+	}
+	results := make(chan result, 2)
+	for _, command := range commands {
+		go func(command domain.BeginWriteback) {
+			<-start
+			execution, beginErr := repository.BeginWriteback(ctx, command)
+			results <- result{execution: execution, err: beginErr}
+		}(command)
+	}
+	close(start)
+	first := <-results
+	second := <-results
+	if first.err != nil || second.err != nil || first.execution.ID == "" || first.execution.ID != second.execution.ID {
+		t.Fatalf("first=%#v err=%v second=%#v err=%v", first.execution, first.err, second.execution, second.err)
+	}
+	var count int
+	if err := fixture.pool.QueryRow(context.Background(), `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1 AND idempotency_key=$2`, string(fixture.workspaceID), base.IdempotencyKey).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("execution count=%d err=%v", count, err)
+	}
+}
+
+func TestRepositoryWritebackPreparedCheckpointsAndLease(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	begin := domain.BeginWriteback{
+		WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID,
+		LeaseOwner: "test-owner", IdempotencyKey: "checkpoint-" + string(fixture.executionID), ExecutionID: fixture.executionID,
+		WriteAuthorization: domain.AuthorizationConsume{Credential: string(fixture.writeAuthorizationID) + "write-auth", IdempotencyKey: "write-auth-" + string(fixture.writeAuthorizationID), WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash},
+		GitAuthorization:   domain.AuthorizationConsume{Credential: string(fixture.gitAuthorizationID) + "git-auth", IdempotencyKey: "git-auth-" + string(fixture.gitAuthorizationID), WorkspaceID: fixture.workspaceID, WorkflowRunID: fixture.runID, NodeRunID: fixture.nodeID, ProposalID: fixture.proposalID, RevisionID: fixture.revisionID, ApprovalID: fixture.approvalID, ToolName: "CreateGitCommit", Capability: domain.CapabilityGitWrite, Scope: domain.ExpectedAuthorizationScope(fixture.targetPath), ApprovedChangeHash: fixture.changeHash, TargetVersion: fixture.baseHash},
+	}
+	execution, err := fixture.repository.BeginWriteback(fixture.ctx, begin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.repository.ValidateWritebackLease(fixture.ctx, execution.ID, "test-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.repository.ValidateWritebackLease(fixture.ctx, fixture.nodeID, "test-owner"); !hasCode(err, "WRITEBACK_LEASE_LOST") {
+		t.Fatalf("node id was accepted as execution id: %v", err)
+	}
+	if err := fixture.repository.ValidateWritebackLease(fixture.ctx, execution.ID, "wrong-owner"); !hasCode(err, "WRITEBACK_LEASE_LOST") {
+		t.Fatalf("invalid lease accepted: %v", err)
+	}
+	if _, err := fixture.tx.Exec(fixture.ctx, `UPDATE workflow.node_run SET lease_until=CURRENT_TIMESTAMP-interval '1 second' WHERE id=$1`, string(fixture.nodeID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.repository.ValidateWritebackLease(fixture.ctx, execution.ID, "test-owner"); !hasCode(err, "WRITEBACK_LEASE_LOST") {
+		t.Fatalf("expired lease accepted: %v", err)
+	}
+	if _, err := fixture.tx.Exec(fixture.ctx, `UPDATE workflow.node_run SET lease_until=CURRENT_TIMESTAMP+interval '1 hour' WHERE id=$1`, string(fixture.nodeID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{ExecutionID: execution.ID, ExpectedVersion: execution.Version, Status: domain.WritebackStatusFileApplied, ResultHash: execution.ResultHash}); !hasCode(err, "WRITEBACK_STATUS_CONFLICT") {
+		t.Fatalf("atomic Begin execution skipped file_prepared: %v", err)
+	}
+	filePrepared, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{ExecutionID: execution.ID, ExpectedVersion: execution.Version, Status: domain.WritebackStatusFilePrepared, ResultHash: execution.ResultHash, TemporaryRef: "tmp/checkpoint", BackupRef: "backup/checkpoint", FileByteSize: 15, FileMode: 0o644, FileLockToken: strings.Repeat("1", 64), FileResultLockToken: strings.Repeat("5", 64), FileBackupLockToken: strings.Repeat("6", 64)})
+	if err != nil || filePrepared.Status != domain.WritebackStatusFilePrepared || filePrepared.FileByteSize != 15 || filePrepared.FileMode != 0o644 || filePrepared.FileResultLockToken != strings.Repeat("5", 64) || filePrepared.FileBackupLockToken != strings.Repeat("6", 64) {
+		t.Fatalf("file prepared=%#v err=%v", filePrepared, err)
+	}
+	fileApplied, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{ExecutionID: execution.ID, ExpectedVersion: filePrepared.Version, Status: domain.WritebackStatusFileApplied, ResultHash: execution.ResultHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{ExecutionID: execution.ID, ExpectedVersion: fileApplied.Version, Status: domain.WritebackStatusGitCommitted, ResultHash: execution.ResultHash, GitCommit: fixture.commitHash, ParentGitCommit: fixture.parentCommitHash, DiffHash: fixture.diffHash}); !hasCode(err, "WRITEBACK_STATUS_CONFLICT") {
+		t.Fatalf("durable file execution skipped git_prepared: %v", err)
+	}
+	gitPrepared, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{ExecutionID: execution.ID, ExpectedVersion: fileApplied.Version, Status: domain.WritebackStatusGitPrepared, ResultHash: execution.ResultHash, DiffHash: fixture.diffHash, BaseBlobID: strings.Repeat("3", 40), ResultBlobID: strings.Repeat("4", 40), BaseMode: domain.GitFileModeRegular})
+	if err != nil || gitPrepared.Status != domain.WritebackStatusGitPrepared || gitPrepared.BaseBlobID != strings.Repeat("3", 40) {
+		t.Fatalf("git prepared=%#v err=%v", gitPrepared, err)
+	}
+}
+
+func TestRepositoryFinalizeWritebackCleanupIsReplayable(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	created, err := fixture.repository.CreateWritebackExecution(fixture.ctx, fixture.create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileApplied, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{ExecutionID: created.ID, ExpectedVersion: created.Version, Status: domain.WritebackStatusFileApplied, ResultHash: fixture.resultHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCommitted, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{ExecutionID: created.ID, ExpectedVersion: fileApplied.Version, Status: domain.WritebackStatusGitCommitted, ResultHash: fixture.resultHash, GitCommit: fixture.commitHash, ParentGitCommit: fixture.parentCommitHash, DiffHash: fixture.diffHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := fixture.repository.PublishWriteback(fixture.ctx, fixture.publishCommand(t, gitCommitted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalized, err := fixture.repository.FinalizeWritebackCleanup(fixture.ctx, published.Execution.ID, published.Execution.Version, fixture.now)
+	if err != nil || finalized.CleanupCompletedAt == nil || finalized.Version != published.Execution.Version+1 {
+		t.Fatalf("finalized=%#v err=%v", finalized, err)
+	}
+	replayed, err := fixture.repository.FinalizeWritebackCleanup(fixture.ctx, published.Execution.ID, published.Execution.Version, fixture.now)
+	if err != nil || replayed.ID != finalized.ID || replayed.Version != finalized.Version || replayed.CleanupCompletedAt == nil {
+		t.Fatalf("cleanup replay=%#v err=%v", replayed, err)
 	}
 }
 
@@ -153,6 +369,7 @@ func TestWritebackSQLConstraints(t *testing.T) {
 	}
 	assertSQLRejected(t, fixture.ctx, fixture.tx, `UPDATE change_control.writeback_execution SET target_path='other.md',updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=$1`, string(created.ID))
 	assertSQLRejected(t, fixture.ctx, fixture.tx, `DELETE FROM change_control.writeback_execution WHERE id=$1`, string(created.ID))
+	assertSQLRejected(t, fixture.ctx, fixture.tx, `UPDATE change_control.writeback_execution SET status='needs_revision',failure_code='INVALID_GIT_INTENT',base_blob_id=$2,result_blob_id=$3,base_mode='100644',updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=$1`, string(created.ID), fixture.gitHead, strings.Repeat("e", len(fixture.gitHead)))
 
 	fileApplied, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{ExecutionID: created.ID, ExpectedVersion: 1, Status: domain.WritebackStatusFileApplied, ResultHash: fixture.resultHash})
 	if err != nil {
@@ -254,6 +471,76 @@ func TestRepositoryWritebackCreateAndAuthorizationConsumeDoNotDeadlock(t *testin
 	proposal, err := repository.GetProposal(context.Background(), fixture.proposalID)
 	if err != nil || proposal.Status != domain.StatusApplying {
 		t.Fatalf("proposal=%#v err=%v", proposal, err)
+	}
+}
+
+func TestRepositoryCheckpointAndLegacyInsertUseConsistentLockOrder(t *testing.T) {
+	fixture := newWritebackFixture(t)
+	created, err := fixture.repository.CreateWritebackExecution(fixture.ctx, fixture.create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileApplied, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{
+		ExecutionID: created.ID, ExpectedVersion: created.Version, Status: domain.WritebackStatusFileApplied,
+		ResultHash: fixture.resultHash, TemporaryRef: fixture.create.TemporaryRef, BackupRef: fixture.create.BackupRef,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.tx.Commit(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRepository(fixture.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	type operationResult struct {
+		name string
+		err  error
+	}
+	results := make(chan operationResult, 2)
+	candidate := fixture.create
+	candidate.ID = fixture.nextID(t)
+	candidate.IdempotencyKey = "legacy-conflict-" + string(candidate.ID)
+	go func() {
+		<-start
+		_, checkpointErr := repository.CheckpointWritebackExecution(ctx, domain.CheckpointWriteback{
+			ExecutionID: fileApplied.ID, ExpectedVersion: fileApplied.Version, Status: domain.WritebackStatusGitCommitted,
+			ResultHash: fixture.resultHash, GitCommit: fixture.commitHash, ParentGitCommit: fixture.parentCommitHash, DiffHash: fixture.diffHash,
+		})
+		results <- operationResult{name: "checkpoint", err: checkpointErr}
+	}()
+	go func() {
+		<-start
+		_, insertErr := fixture.pool.Exec(ctx, writebackInsert,
+			string(candidate.ID), string(candidate.WorkspaceID), string(candidate.WorkflowRunID), string(candidate.NodeRunID),
+			string(candidate.ProposalID), string(candidate.RevisionID), string(candidate.ApprovalID),
+			string(candidate.WriteAuthorizationID), string(candidate.GitAuthorizationID), candidate.TargetPath,
+			candidate.BaseHash, candidate.ResultHash, candidate.ApprovedChangeHash, candidate.ApprovedGitHead,
+			string(domain.WritebackStatusPrepared), candidate.IdempotencyKey, candidate.TemporaryRef, candidate.BackupRef,
+			int64(1), fixture.now, fixture.now)
+		results <- operationResult{name: "legacy insert", err: insertErr}
+	}()
+	close(start)
+	for range 2 {
+		select {
+		case result := <-results:
+			var pgErr *pgconn.PgError
+			if errors.As(result.err, &pgErr) && pgErr.Code == "40P01" {
+				t.Fatalf("%s deadlocked: %v", result.name, result.err)
+			}
+			if result.name == "checkpoint" && result.err != nil {
+				t.Fatalf("checkpoint failed: %v", result.err)
+			}
+			if result.name == "legacy insert" && result.err == nil {
+				t.Fatal("conflicting legacy insert unexpectedly succeeded")
+			}
+		case <-ctx.Done():
+			t.Fatalf("checkpoint/legacy insert lock-order test timed out: %v", ctx.Err())
+		}
 	}
 }
 

@@ -16,7 +16,9 @@ type WritebackStatus string
 
 const (
 	WritebackStatusPrepared         WritebackStatus = "prepared"
+	WritebackStatusFilePrepared     WritebackStatus = "file_prepared"
 	WritebackStatusFileApplied      WritebackStatus = "file_applied"
+	WritebackStatusGitPrepared      WritebackStatus = "git_prepared"
 	WritebackStatusGitCommitted     WritebackStatus = "git_committed"
 	WritebackStatusVerifying        WritebackStatus = "verifying"
 	WritebackStatusNeedsRevision    WritebackStatus = "needs_revision"
@@ -44,6 +46,8 @@ var (
 	ErrWritebackInvalidTransition = errors.New("writeback status transition is not allowed")
 	// ErrWritebackPublishBindingConflict 表示 Commit Mapping 与执行绑定不一致。
 	ErrWritebackPublishBindingConflict = errors.New("proposal commit is not bound to writeback")
+	// ErrWritebackLeaseLost 表示当前 Workflow Node 不再持有有效的运行租约。
+	ErrWritebackLeaseLost = errors.New("writeback node lease is not valid")
 )
 
 // WritebackExecution 记录一次可恢复的 Safe Writeback Durable Operation。
@@ -61,6 +65,13 @@ type WritebackExecution struct {
 	FailureCode                               string
 	ManualRecoveryRequired                    bool
 	TemporaryRef, BackupRef                   string
+	FileByteSize                              int64
+	FileMode                                  uint32
+	FileLockToken                             string
+	FileResultLockToken                       string
+	FileBackupLockToken                       string
+	BaseBlobID, ResultBlobID, BaseMode        string
+	CleanupCompletedAt                        *time.Time
 	Version                                   int64
 	CreatedAt, UpdatedAt                      time.Time
 	CompletedAt                               *time.Time
@@ -97,10 +108,29 @@ type CheckpointWriteback struct {
 	FailureCode                string
 	ManualRecoveryRequired     bool
 	TemporaryRef, BackupRef    string
+	FileByteSize               int64
+	FileMode                   uint32
+	FileLockToken              string
+	FileResultLockToken        string
+	FileBackupLockToken        string
+	BaseBlobID, ResultBlobID   string
+	BaseMode                   string
 	GitCommit, ParentGitCommit string
 	DiffHash                   string
 	CompletedAt                *time.Time
 	At                         time.Time
+}
+
+// BeginWriteback 是原子消费双授权并创建 Durable Execution 的命令。
+// 正文、目标、哈希和 Approval 身份必须由 Repository 从持久化 Proposal 派生；请求仅携带稳定身份、一次性凭据和幂等键。
+type BeginWriteback struct {
+	ExecutionID                           foundation.ID
+	WorkspaceID, WorkflowRunID, NodeRunID foundation.ID
+	ProposalID                            foundation.ID
+	LeaseOwner                            string
+	IdempotencyKey                        string
+	WriteAuthorization                    AuthorizationConsume
+	GitAuthorization                      AuthorizationConsume
 }
 
 // PublishWriteback 在同一事务内发布 Commit Mapping、Proposal verifying 和重索引 Outbox。
@@ -134,10 +164,16 @@ type WritebackOutboxEvent struct {
 func ValidateWritebackTransition(from, to WritebackStatus) error {
 	allowed := map[WritebackStatus]map[WritebackStatus]struct{}{
 		WritebackStatusPrepared: {
-			WritebackStatusFileApplied: {}, WritebackStatusNeedsRevision: {}, WritebackStatusApplyFailed: {},
+			WritebackStatusFilePrepared: {}, WritebackStatusFileApplied: {}, WritebackStatusNeedsRevision: {}, WritebackStatusApplyFailed: {},
+		},
+		WritebackStatusFilePrepared: {
+			WritebackStatusFileApplied: {}, WritebackStatusNeedsRevision: {}, WritebackStatusApplyFailed: {}, WritebackStatusManualRecovery: {},
 		},
 		WritebackStatusFileApplied: {
-			WritebackStatusCompensatingFile: {}, WritebackStatusGitCommitted: {},
+			WritebackStatusGitPrepared: {}, WritebackStatusCompensatingFile: {}, WritebackStatusManualRecovery: {}, WritebackStatusGitCommitted: {},
+		},
+		WritebackStatusGitPrepared: {
+			WritebackStatusGitCommitted: {}, WritebackStatusCompensatingFile: {}, WritebackStatusManualRecovery: {},
 		},
 		WritebackStatusCompensatingFile: {
 			WritebackStatusCompensated: {}, WritebackStatusManualRecovery: {},
@@ -193,6 +229,19 @@ func ValidateWritebackCheckpoint(current WritebackExecution, command CheckpointW
 	if err := ValidateWritebackTransition(current.Status, command.Status); err != nil {
 		return err
 	}
+	// 旧 CreateWritebackExecution 记录可保留直达迁移；Atomic Begin 创建的 Saga 必须经过 durable intent。
+	if current.Status == WritebackStatusPrepared && command.Status == WritebackStatusFileApplied && (current.TemporaryRef == "" || current.BackupRef == "") {
+		return ErrWritebackInvalidTransition
+	}
+	if current.Status == WritebackStatusFileApplied && command.Status == WritebackStatusGitCommitted && current.FileLockToken != "" {
+		return ErrWritebackInvalidTransition
+	}
+	if current.BaseBlobID != "" && (!strings.EqualFold(command.DiffHash, current.DiffHash) || !strings.EqualFold(command.BaseBlobID, current.BaseBlobID) || !strings.EqualFold(command.ResultBlobID, current.ResultBlobID) || command.BaseMode != current.BaseMode) {
+		return ErrWritebackIdentityConflict
+	}
+	if current.FileLockToken != "" && (command.TemporaryRef != current.TemporaryRef || command.BackupRef != current.BackupRef || command.FileByteSize != current.FileByteSize || command.FileMode != current.FileMode || !strings.EqualFold(command.FileLockToken, current.FileLockToken) || !strings.EqualFold(command.FileResultLockToken, current.FileResultLockToken) || !strings.EqualFold(command.FileBackupLockToken, current.FileBackupLockToken)) {
+		return ErrWritebackIdentityConflict
+	}
 	if command.ResultHash != "" && !ValidHash(command.ResultHash) {
 		return ErrWritebackInvalidInput
 	}
@@ -201,6 +250,19 @@ func ValidateWritebackCheckpoint(current WritebackExecution, command CheckpointW
 	}
 	if command.Status == WritebackStatusGitCommitted {
 		if !ValidGitHead(command.GitCommit) || !ValidGitHead(command.ParentGitCommit) || !ValidHash(command.DiffHash) || !ValidHash(command.ResultHash) {
+			return ErrWritebackInvalidInput
+		}
+	}
+	if command.Status == WritebackStatusFilePrepared {
+		if command.TemporaryRef == "" || command.BackupRef == "" || command.FileByteSize <= 0 || command.FileByteSize > MaxWritebackContentBytes || command.FileMode&^uint32(0o7777) != 0 || !ValidHash(command.FileLockToken) || !ValidHash(command.FileResultLockToken) || !ValidHash(command.FileBackupLockToken) {
+			return ErrWritebackInvalidInput
+		}
+		if strings.EqualFold(command.FileLockToken, command.FileResultLockToken) || strings.EqualFold(command.FileLockToken, command.FileBackupLockToken) || strings.EqualFold(command.FileResultLockToken, command.FileBackupLockToken) {
+			return ErrWritebackInvalidInput
+		}
+	}
+	if command.Status == WritebackStatusGitPrepared {
+		if !ValidHash(command.DiffHash) || !ValidGitObjectID(command.BaseBlobID) || !ValidGitObjectID(command.ResultBlobID) || len(command.BaseBlobID) != len(current.ApprovedGitHead) || len(command.ResultBlobID) != len(current.ApprovedGitHead) || !ValidGitFileMode(command.BaseMode) {
 			return ErrWritebackInvalidInput
 		}
 	}
@@ -223,6 +285,29 @@ func ValidateWritebackCheckpoint(current WritebackExecution, command CheckpointW
 		if command.FailureCode == "" {
 			return ErrWritebackInvalidInput
 		}
+	}
+	return nil
+}
+
+// ValidateBeginWriteback 校验不会泄露正文或凭据的原子 Begin 请求。
+func ValidateBeginWriteback(command BeginWriteback) error {
+	if command.WorkspaceID == "" || command.WorkflowRunID == "" || command.NodeRunID == "" || command.ProposalID == "" || strings.TrimSpace(command.LeaseOwner) == "" || strings.TrimSpace(command.IdempotencyKey) == "" || len(strings.TrimSpace(command.IdempotencyKey)) > 128 {
+		return ErrWritebackInvalidInput
+	}
+	if command.WriteAuthorization.Credential == "" || len(command.WriteAuthorization.Credential) > MaxAuthorizationCredentialBytes || command.GitAuthorization.Credential == "" || len(command.GitAuthorization.Credential) > MaxAuthorizationCredentialBytes || command.WriteAuthorization.IdempotencyKey == "" || command.GitAuthorization.IdempotencyKey == "" || command.WriteAuthorization.IdempotencyKey == command.GitAuthorization.IdempotencyKey {
+		return ErrWritebackInvalidInput
+	}
+	if command.WriteAuthorization.Capability != CapabilityWriteKnowledge || command.WriteAuthorization.ToolName != "ApplyApprovedPatch" || command.GitAuthorization.Capability != CapabilityGitWrite || command.GitAuthorization.ToolName != "CreateGitCommit" {
+		return ErrWritebackInvalidInput
+	}
+	return nil
+}
+
+// ValidateWritebackLeaseOwner 校验 lease owner 的稳定格式，避免空 owner 形成无保护副作用。
+func ValidateWritebackLeaseOwner(owner string) error {
+	owner = strings.TrimSpace(owner)
+	if owner == "" || len(owner) > 128 || strings.ContainsAny(owner, "\x00\r\n") {
+		return ErrWritebackInvalidInput
 	}
 	return nil
 }

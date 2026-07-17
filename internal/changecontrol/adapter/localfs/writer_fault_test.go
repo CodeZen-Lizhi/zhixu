@@ -44,19 +44,8 @@ func TestWriterFaultInjectionSyncBeforeRenameKeepsTarget(t *testing.T) {
 				}
 			})
 
-			prepared, err := lock.Prepare(context.Background(), faultPrepareCommand(targetPath, baseContent, resultContent))
-			if test.failAtSync == 1 {
-				requireFaultWritebackError(t, err, foundation.ErrorDependencyUnavailable, test.wantCode)
-			} else {
-				if err != nil {
-					t.Fatal(err)
-				}
-				applied, commitErr := lock.CommitCAS(context.Background(), prepared)
-				requireFaultWritebackError(t, commitErr, foundation.ErrorDependencyUnavailable, test.wantCode)
-				if applied != (domain.AppliedWrite{}) {
-					t.Fatalf("CommitCAS() returned applied summary before rename: %+v", applied)
-				}
-			}
+			_, err = lock.Prepare(context.Background(), faultPrepareCommand(targetPath, baseContent, resultContent))
+			requireFaultWritebackError(t, err, foundation.ErrorDependencyUnavailable, test.wantCode)
 			if got := string(readFaultFile(t, absoluteTarget)); got != string(baseContent) {
 				t.Fatalf("target was replaced before rename: %q", got)
 			}
@@ -68,7 +57,7 @@ func TestWriterFaultInjectionSyncBeforeRenameKeepsTarget(t *testing.T) {
 				t.Fatal(err)
 			}
 			if len(matches) != 0 {
-				t.Fatalf("managed files remain after pre-rename failure: %v", matches)
+				t.Fatalf("managed files remain after prepare failure: %v", matches)
 			}
 		})
 	}
@@ -97,7 +86,14 @@ func TestWriterFaultInjectionUnknownCommitResultRequiresManualRecovery(t *testin
 			name:     "parent sync",
 			wantCode: "WRITEBACK_PARENT_SYNC_RESULT_UNKNOWN",
 			mutate: func(operations *writerOperations) {
-				operations.syncDirectory = func(*os.Root, string) error { return injected }
+				calls := 0
+				operations.syncDirectory = func(root *os.Root, relative string) error {
+					calls++
+					if calls == 2 {
+						return injected
+					}
+					return syncDirectoryRoot(root, relative)
+				}
 			},
 		},
 		{
@@ -149,6 +145,120 @@ func TestWriterFaultInjectionUnknownCommitResultRequiresManualRecovery(t *testin
 				t.Fatalf("CommitCAS() retry changed applied summary: got %+v want %+v", replayed, applied)
 			}
 		})
+	}
+}
+
+func TestWriterFaultInjectionUnknownRestoreBlocksCleanupUntilRestartRecovery(t *testing.T) {
+	injected := errors.New("restore rename completed before error")
+	workspaceRoot, targetPath, absoluteTarget, baseContent, resultContent := newFaultWritebackWorkspace(t)
+	renameCalls := 0
+	writer := newFaultWriter(t, workspaceRoot, func(operations *writerOperations) {
+		operations.rename = func(root *os.Root, oldPath, newPath string) error {
+			renameCalls++
+			if err := root.Rename(oldPath, newPath); err != nil {
+				return err
+			}
+			if renameCalls == 2 {
+				return injected
+			}
+			return nil
+		}
+	})
+	lock, err := writer.AcquireTarget(context.Background(), "workspace", targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := lock.Prepare(context.Background(), faultPrepareCommand(targetPath, baseContent, resultContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := lock.CommitCAS(context.Background(), prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = lock.RestoreCAS(context.Background(), applied)
+	requireFaultWritebackError(t, err, foundation.ErrorManualRecoveryRequired, "WRITEBACK_RESTORE_RENAME_RESULT_UNKNOWN")
+	err = lock.Cleanup(context.Background(), applied)
+	requireFaultWritebackError(t, err, foundation.ErrorManualRecoveryRequired, "WRITEBACK_RESULT_STILL_UNKNOWN")
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readFaultFile(t, absoluteTarget)); got != string(baseContent) {
+		t.Fatalf("target after unknown restore = %q", got)
+	}
+
+	recovered, _, recoveredApplied, err := newTestWriter(t, workspaceRoot).ResumeTarget(
+		context.Background(), "workspace", targetPath, domain.ResumeWrite{Prepared: prepared, Applied: &applied, RestoreMayHaveCompleted: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if recoveredApplied == nil || *recoveredApplied != applied {
+		t.Fatalf("recovered applied = %+v", recoveredApplied)
+	}
+	replayed, err := recovered.RestoreCAS(context.Background(), applied)
+	if err != nil || !replayed.Replayed {
+		t.Fatalf("RestoreCAS(replay) = %+v, %v", replayed, err)
+	}
+	if err := recovered.Cleanup(context.Background(), applied); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriterRestartContinuesPersistedRestoreTempBeforeRename(t *testing.T) {
+	injected := errors.New("restore rename did not start")
+	workspaceRoot, targetPath, absoluteTarget, baseContent, resultContent := newFaultWritebackWorkspace(t)
+	renameCalls := 0
+	writer := newFaultWriter(t, workspaceRoot, func(operations *writerOperations) {
+		operations.rename = func(root *os.Root, oldPath, newPath string) error {
+			renameCalls++
+			if renameCalls == 2 {
+				return injected
+			}
+			return root.Rename(oldPath, newPath)
+		}
+	})
+	lock, err := writer.AcquireTarget(context.Background(), "workspace", targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := lock.Prepare(context.Background(), faultPrepareCommand(targetPath, baseContent, resultContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := lock.CommitCAS(context.Background(), prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = lock.RestoreCAS(context.Background(), applied)
+	requireFaultWritebackError(t, err, foundation.ErrorManualRecoveryRequired, "WRITEBACK_RESTORE_RENAME_RESULT_UNKNOWN")
+	if got := string(readFaultFile(t, filepath.Join(workspaceRoot, filepath.FromSlash(applied.BackupRef)))); got != string(baseContent) {
+		t.Fatalf("persisted restore backup = %q", got)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readFaultFile(t, absoluteTarget)); got != string(resultContent) {
+		t.Fatalf("target before resumed restore = %q", got)
+	}
+
+	recovered, _, recoveredApplied, err := newTestWriter(t, workspaceRoot).ResumeTarget(
+		context.Background(), "workspace", targetPath, domain.ResumeWrite{Prepared: prepared, Applied: &applied, RestoreMayHaveCompleted: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if recoveredApplied == nil || *recoveredApplied != applied {
+		t.Fatalf("recovered applied = %+v", recoveredApplied)
+	}
+	restored, err := recovered.RestoreCAS(context.Background(), applied)
+	if err != nil || !restored.Restored {
+		t.Fatalf("RestoreCAS(resume) = %+v, %v", restored, err)
+	}
+	if got := string(readFaultFile(t, absoluteTarget)); got != string(baseContent) {
+		t.Fatalf("target after resumed restore = %q", got)
 	}
 }
 

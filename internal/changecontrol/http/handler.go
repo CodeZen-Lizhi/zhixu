@@ -81,12 +81,13 @@ type revisionResponse struct {
 }
 
 type approvalResponse struct {
-	ID         string `json:"id"`
-	ProposalID string `json:"proposal_id"`
-	RevisionID string `json:"revision_id"`
-	ChangeHash string `json:"change_hash"`
-	Decision   string `json:"decision"`
-	DecidedAt  string `json:"decided_at"`
+	ID              string  `json:"id"`
+	ProposalID      string  `json:"proposal_id"`
+	RevisionID      string  `json:"revision_id"`
+	ChangeHash      string  `json:"change_hash"`
+	Decision        string  `json:"decision"`
+	ApprovedGitHead *string `json:"approved_git_head,omitempty"`
+	DecidedAt       string  `json:"decided_at"`
 }
 
 type applyPreflightResponse struct {
@@ -230,7 +231,12 @@ func toProposalResponse(proposal domain.Proposal) proposalResponse {
 }
 
 func toApprovalResponse(approval domain.Approval) approvalResponse {
-	return approvalResponse{ID: string(approval.ID), ProposalID: string(approval.ProposalID), RevisionID: string(approval.RevisionID), ChangeHash: approval.ChangeHash, Decision: string(approval.Decision), DecidedAt: approval.DecidedAt.UTC().Format(time.RFC3339Nano)}
+	response := approvalResponse{ID: string(approval.ID), ProposalID: string(approval.ProposalID), RevisionID: string(approval.RevisionID), ChangeHash: approval.ChangeHash, Decision: string(approval.Decision), DecidedAt: approval.DecidedAt.UTC().Format(time.RFC3339Nano)}
+	if approval.Decision == domain.DecisionApproved && approval.ApprovedGitHead != nil {
+		head := strings.ToLower(*approval.ApprovedGitHead)
+		response.ApprovedGitHead = &head
+	}
+	return response
 }
 
 func decodeJSON(r *http.Request, target any) error {

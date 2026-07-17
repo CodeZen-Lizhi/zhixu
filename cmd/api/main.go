@@ -109,10 +109,11 @@ func main() {
 
 			changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
 			targetReader, targetReaderErr := changecontrollocalfs.NewReader(workspaceRepository)
-			if changeControlRepositoryErr != nil || targetReaderErr != nil {
-				logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
+			approvalGitInspector, approvalGitInspectorErr := gitcli.NewWritebackClient(gitcli.New(""), workspaceRepository)
+			if changeControlRepositoryErr != nil || targetReaderErr != nil || approvalGitInspectorErr != nil {
+				logger.Error("change control dependencies are unavailable", "error_code", "CHANGE_CONTROL_DEPENDENCY_UNAVAILABLE")
 			} else {
-				changeControlService, changeControlServiceErr := changecontrolapplication.NewService(changeControlRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, targetReader)
+				changeControlService, changeControlServiceErr := changecontrolapplication.NewService(changeControlRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, targetReader, approvalGitInspector)
 				if changeControlServiceErr != nil {
 					logger.Error("change control service is unavailable", "error_code", "CHANGE_CONTROL_SERVICE_UNAVAILABLE")
 				} else {

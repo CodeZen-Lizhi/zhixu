@@ -100,20 +100,9 @@ func (w *Writer) AcquireTarget(ctx context.Context, workspaceID foundation.ID, t
 	if err := domain.ValidateWorkspaceTarget(workspaceID, targetPath); err != nil {
 		return nil, writebackError(foundation.ErrorInvalidInput, "WRITEBACK_TARGET_INVALID", false, err)
 	}
-	workspace, err := w.workspaces.GetWorkspaceByID(ctx, workspaceID)
+	canonicalRoot, root, rootIdentity, err := w.openWorkspaceRoot(ctx, workspaceID)
 	if err != nil {
 		return nil, err
-	}
-	if workspace.ID != workspaceID {
-		return nil, writebackError(foundation.ErrorConsistencyViolation, "WRITEBACK_WORKSPACE_BINDING_INVALID", false, errors.New("workspace repository returned a different workspace"))
-	}
-	canonicalRoot, err := filesystem.NewRoot(workspace.RootPath)
-	if err != nil {
-		return nil, writebackError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
-	}
-	root, err := os.OpenRoot(canonicalRoot.Path())
-	if err != nil {
-		return nil, writebackError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
 	}
 	closeRoot := true
 	defer func() {
@@ -121,10 +110,6 @@ func (w *Writer) AcquireTarget(ctx context.Context, workspaceID foundation.ID, t
 			_ = root.Close()
 		}
 	}()
-	rootIdentity, err := directoryIdentity(root, ".")
-	if err != nil {
-		return nil, writebackError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
-	}
 	if err := validateTargetParents(root, targetPath, rootIdentity.Device); err != nil {
 		return nil, err
 	}
@@ -140,10 +125,27 @@ func (w *Writer) AcquireTarget(ctx context.Context, workspaceID foundation.ID, t
 	if err := ensureLockDirectory(root, rootIdentity.Device); err != nil {
 		return nil, err
 	}
-	lockPath := path.Join(writebackLockDirectory, lockFileName(identity))
-	lockFile, err := root.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	pathLockToken := lockTokenForPath(rootIdentity, targetPath)
+	pathLockFile, err := openAndAcquireTargetLock(ctx, root, rootIdentity.Device, pathLockToken, true, w.ops.lockPollInterval)
 	if err != nil {
-		return nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_LOCK_OPEN_FAILED", true, err)
+		return nil, err
+	}
+	closePathLock := true
+	defer func() {
+		if closePathLock {
+			_ = pathLockFile.Close()
+		}
+	}()
+	pathLocked := true
+	defer func() {
+		if pathLocked {
+			_ = syscall.Flock(int(pathLockFile.Fd()), syscall.LOCK_UN)
+		}
+	}()
+	lockToken := lockTokenForIdentity(identity)
+	lockFile, err := openAndAcquireTargetLock(ctx, root, rootIdentity.Device, lockToken, true, w.ops.lockPollInterval)
+	if err != nil {
+		return nil, err
 	}
 	closeLock := true
 	defer func() {
@@ -151,20 +153,6 @@ func (w *Writer) AcquireTarget(ctx context.Context, workspaceID foundation.ID, t
 			_ = lockFile.Close()
 		}
 	}()
-	lockInfo, err := lockFile.Stat()
-	if err != nil || !lockInfo.Mode().IsRegular() {
-		return nil, writebackError(foundation.ErrorPermissionDenied, "WRITEBACK_TARGET_LOCK_UNSAFE", false, errors.New("lock file is not a regular file"))
-	}
-	lockIdentity, err := identityFromInfo(lockInfo)
-	if err != nil || lockIdentity.Owner != uint32(os.Geteuid()) || lockIdentity.Device != rootIdentity.Device {
-		return nil, writebackError(foundation.ErrorPermissionDenied, "WRITEBACK_TARGET_LOCK_UNSAFE", false, errors.New("lock file ownership or device is unsafe"))
-	}
-	if err := lockFile.Chmod(0o600); err != nil {
-		return nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_LOCK_OPEN_FAILED", true, err)
-	}
-	if err := acquireFileLock(ctx, lockFile, w.ops.lockPollInterval); err != nil {
-		return nil, err
-	}
 	locked := true
 	defer func() {
 		if locked {
@@ -189,11 +177,9 @@ func (w *Writer) AcquireTarget(ctx context.Context, workspaceID foundation.ID, t
 	if err := canonicalRoot.EnsureGitExcludePatterns("/.knowledge/", writebackExcludePattern); err != nil {
 		return nil, err
 	}
-	lockToken, err := randomHex(w.ops.random, sha256.Size)
-	if err != nil {
-		return nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_RANDOM_GENERATION_FAILED", true, err)
-	}
 	closeRoot = false
+	closePathLock = false
+	pathLocked = false
 	closeLock = false
 	locked = false
 	return &targetLock{
@@ -203,12 +189,140 @@ func (w *Writer) AcquireTarget(ctx context.Context, workspaceID foundation.ID, t
 		parentPath:   path.Dir(targetPath),
 		identity:     identity,
 		mode:         mode,
+		pathLockFile: pathLockFile,
 		lockFile:     lockFile,
 		lockToken:    lockToken,
 		validator:    w.validator,
 		ops:          w.ops,
 		managedFiles: make(map[string]fileIdentity),
 	}, nil
+}
+
+// ResumeTarget 使用持久化 file_prepared/file_applied 摘要重新获取原始 inode 锁并恢复受控文件绑定。
+func (w *Writer) ResumeTarget(ctx context.Context, workspaceID foundation.ID, targetPath string, resume domain.ResumeWrite) (domain.TargetLock, domain.PreparedWrite, *domain.AppliedWrite, error) {
+	if ctx == nil {
+		return nil, domain.PreparedWrite{}, nil, writebackError(foundation.ErrorInvalidInput, "WRITEBACK_CONTEXT_INVALID", false, errors.New("context is nil"))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, domain.PreparedWrite{}, nil, writebackContextError("WRITEBACK_TARGET_LOCK_CANCELLED", err)
+	}
+	if err := domain.ValidateWorkspaceTarget(workspaceID, targetPath); err != nil {
+		return nil, domain.PreparedWrite{}, nil, writebackError(foundation.ErrorInvalidInput, "WRITEBACK_TARGET_INVALID", false, err)
+	}
+	if resume.Applied != nil {
+		applied := *resume.Applied
+		resume.Applied = &applied
+	}
+	if err := domain.ValidateResumeWrite(targetPath, resume); err != nil {
+		return nil, domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_BINDING_INVALID", err)
+	}
+	canonicalRoot, root, rootIdentity, err := w.openWorkspaceRoot(ctx, workspaceID)
+	if err != nil {
+		return nil, domain.PreparedWrite{}, nil, err
+	}
+	closeRoot := true
+	defer func() {
+		if closeRoot {
+			_ = root.Close()
+		}
+	}()
+	if err := validateTargetParents(root, targetPath, rootIdentity.Device); err != nil {
+		return nil, domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_TARGET_INVALID", err)
+	}
+	if err := ensureLockDirectory(root, rootIdentity.Device); err != nil {
+		return nil, domain.PreparedWrite{}, nil, err
+	}
+	pathLockToken := lockTokenForPath(rootIdentity, targetPath)
+	pathLockFile, err := openAndAcquireTargetLock(ctx, root, rootIdentity.Device, pathLockToken, false, w.ops.lockPollInterval)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_LOCK_MISSING", err)
+		}
+		return nil, domain.PreparedWrite{}, nil, err
+	}
+	closePathLock := true
+	defer func() {
+		if closePathLock {
+			_ = syscall.Flock(int(pathLockFile.Fd()), syscall.LOCK_UN)
+			_ = pathLockFile.Close()
+		}
+	}()
+	lockFile, err := openAndAcquireTargetLock(ctx, root, rootIdentity.Device, resume.Prepared.LockToken, false, w.ops.lockPollInterval)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_LOCK_MISSING", err)
+		}
+		return nil, domain.PreparedWrite{}, nil, err
+	}
+	closeLock := true
+	defer func() {
+		if closeLock {
+			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+			_ = lockFile.Close()
+		}
+	}()
+	current, err := openSafeRegular(root, targetPath, rootIdentity.Device)
+	if err != nil {
+		return nil, domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_TARGET_INVALID", err)
+	}
+	currentIdentity := current.identity
+	currentMode := current.mode
+	if err := current.file.Close(); err != nil {
+		return nil, domain.PreparedWrite{}, nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_CLOSE_FAILED", true, err)
+	}
+	if err := canonicalRoot.EnsureGitExcludePatterns("/.knowledge/", writebackExcludePattern); err != nil {
+		return nil, domain.PreparedWrite{}, nil, err
+	}
+	lock := &targetLock{
+		root:         root,
+		rootDevice:   rootIdentity.Device,
+		targetPath:   targetPath,
+		parentPath:   path.Dir(targetPath),
+		identity:     currentIdentity,
+		mode:         currentMode,
+		pathLockFile: pathLockFile,
+		lockFile:     lockFile,
+		lockToken:    resume.Prepared.LockToken,
+		validator:    w.validator,
+		ops:          w.ops,
+		managedFiles: make(map[string]fileIdentity),
+	}
+	prepared, applied, err := lock.rehydrate(ctx, resume)
+	if err != nil {
+		_ = lock.Close()
+		closeRoot = false
+		closePathLock = false
+		closeLock = false
+		return nil, domain.PreparedWrite{}, nil, err
+	}
+	closeRoot = false
+	closePathLock = false
+	closeLock = false
+	return lock, prepared, applied, nil
+}
+
+func (w *Writer) openWorkspaceRoot(ctx context.Context, workspaceID foundation.ID) (filesystem.Root, *os.Root, fileIdentity, error) {
+	workspace, err := w.workspaces.GetWorkspaceByID(ctx, workspaceID)
+	if err != nil {
+		return filesystem.Root{}, nil, fileIdentity{}, err
+	}
+	if workspace.ID != workspaceID {
+		return filesystem.Root{}, nil, fileIdentity{}, writebackError(foundation.ErrorConsistencyViolation, "WRITEBACK_WORKSPACE_BINDING_INVALID", false, errors.New("workspace repository returned a different workspace"))
+	}
+	canonicalRoot, err := filesystem.NewRoot(workspace.RootPath)
+	if err != nil {
+		return filesystem.Root{}, nil, fileIdentity{}, writebackError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
+	}
+	root, err := os.OpenRoot(canonicalRoot.Path())
+	if err != nil {
+		return filesystem.Root{}, nil, fileIdentity{}, writebackError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
+	}
+	rootIdentity, err := directoryIdentity(root, ".")
+	if err != nil {
+		_ = root.Close()
+		return filesystem.Root{}, nil, fileIdentity{}, writebackError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
+	}
+	return canonicalRoot, root, rootIdentity, nil
 }
 
 type targetLock struct {
@@ -219,6 +333,7 @@ type targetLock struct {
 	parentPath    string
 	identity      fileIdentity
 	mode          uint32
+	pathLockFile  *os.File
 	lockFile      *os.File
 	lockToken     string
 	validator     domain.ContentValidator
@@ -228,6 +343,7 @@ type targetLock struct {
 	applied       *domain.AppliedWrite
 	managedFiles  map[string]fileIdentity
 	resultUnknown bool
+	cleanupReplay bool
 	closed        bool
 }
 
@@ -247,8 +363,13 @@ func (l *targetLock) Prepare(ctx context.Context, command domain.PrepareWrite) (
 	content := append([]byte(nil), command.Content...)
 	command.Content = content
 	if l.prepared != nil {
-		if err := domain.ValidatePreparedWriteBinding(l.targetPath, command, *l.prepared); err != nil || !equalPrepareWrite(command, *l.prepare) {
+		if err := domain.ValidatePreparedWriteBinding(l.targetPath, command, *l.prepared); err != nil || (l.prepare != nil && !equalPrepareWrite(command, *l.prepare)) {
 			return domain.PreparedWrite{}, writebackError(foundation.ErrorVersionConflict, "WRITEBACK_PREPARED_BINDING_CONFLICT", false, domain.ErrWritebackIdentityConflict)
+		}
+		if l.prepare == nil {
+			if err := l.validator.Validate(ctx, content); err != nil {
+				return domain.PreparedWrite{}, err
+			}
 		}
 		if err := l.verifyManagedFile(ctx, l.prepared.TemporaryRef, l.prepared.ResultHash, l.prepared.ByteSize, l.prepared.Mode); err != nil {
 			return domain.PreparedWrite{}, err
@@ -281,15 +402,71 @@ func (l *targetLock) Prepare(ctx context.Context, command domain.PrepareWrite) (
 	if err := file.Close(); err != nil {
 		return domain.PreparedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TEMP_CLOSE_FAILED", true, err)
 	}
+	backupRef, backup, err := l.createManagedFile(command.ExecutionID, ".bak")
+	if err != nil {
+		return domain.PreparedWrite{}, err
+	}
+	removeBackup := true
+	defer func() {
+		_ = backup.Close()
+		if removeBackup {
+			_ = l.removeManagedFile(backupRef)
+		}
+	}()
+	target, err := openSafeRegular(l.root, l.targetPath, l.rootDevice)
+	if err != nil {
+		return domain.PreparedWrite{}, err
+	}
+	if target.identity != l.identity || target.mode != l.mode {
+		_ = target.file.Close()
+		return domain.PreparedWrite{}, writebackError(foundation.ErrorVersionConflict, "TARGET_IDENTITY_CONFLICT", false, domain.ErrTargetIdentityConflict)
+	}
+	baseHash, _, copyErr := copyAndHashWithContext(ctx, backup, target.file)
+	closeTargetErr := target.file.Close()
+	if copyErr == nil {
+		copyErr = closeTargetErr
+	}
+	if copyErr != nil {
+		return domain.PreparedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_BACKUP_WRITE_FAILED", true, copyErr)
+	}
+	if !strings.EqualFold(baseHash, command.ExpectedBaseHash) {
+		return domain.PreparedWrite{}, writebackError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, domain.ErrTargetBaseHashConflict)
+	}
+	if err := backup.Chmod(fileModeFromUnix(l.mode)); err != nil {
+		return domain.PreparedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_BACKUP_MODE_FAILED", true, err)
+	}
+	if err := l.ops.syncFile(backup); err != nil {
+		return domain.PreparedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_BACKUP_SYNC_FAILED", true, err)
+	}
+	if err := backup.Close(); err != nil {
+		return domain.PreparedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_BACKUP_CLOSE_FAILED", true, err)
+	}
+	if err := l.verifyManagedFileHash(ctx, backupRef, command.ExpectedBaseHash, l.mode); err != nil {
+		return domain.PreparedWrite{}, err
+	}
+	if err := l.ops.syncDirectory(l.root, l.parentPath); err != nil {
+		return domain.PreparedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_PREPARE_DIRECTORY_SYNC_FAILED", true, err)
+	}
+	resultIdentity, ok := l.managedFiles[temporaryRef]
+	if !ok {
+		return domain.PreparedWrite{}, writebackError(foundation.ErrorConsistencyViolation, "WRITEBACK_TEMP_IDENTITY_MISSING", false, errors.New("prepared temp identity is unavailable"))
+	}
+	backupIdentity, ok := l.managedFiles[backupRef]
+	if !ok {
+		return domain.PreparedWrite{}, writebackError(foundation.ErrorConsistencyViolation, "WRITEBACK_BACKUP_IDENTITY_MISSING", false, errors.New("prepared backup identity is unavailable"))
+	}
 	prepared := domain.PreparedWrite{
 		ExecutionID:        command.ExecutionID,
 		TemporaryRef:       temporaryRef,
+		BackupRef:          backupRef,
 		ExpectedBaseHash:   strings.ToLower(command.ExpectedBaseHash),
 		ApprovedChangeHash: strings.ToLower(command.ApprovedChangeHash),
 		ResultHash:         resultHash,
 		ByteSize:           int64(len(content)),
 		Mode:               l.mode,
 		LockToken:          l.lockToken,
+		ResultLockToken:    lockTokenForIdentity(resultIdentity),
+		BackupLockToken:    lockTokenForIdentity(backupIdentity),
 	}
 	if err := domain.ValidatePreparedWriteBinding(l.targetPath, command, prepared); err != nil {
 		return domain.PreparedWrite{}, classifyDomainWritebackError("WRITEBACK_PREPARED_BINDING_CONFLICT", err)
@@ -300,6 +477,7 @@ func (l *targetLock) Prepare(ctx context.Context, command domain.PrepareWrite) (
 	l.prepare = &command
 	l.prepared = &prepared
 	removeTemporary = false
+	removeBackup = false
 	return prepared, nil
 }
 
@@ -310,7 +488,7 @@ func (l *targetLock) CommitCAS(ctx context.Context, prepared domain.PreparedWrit
 	if err := l.usable(ctx); err != nil {
 		return domain.AppliedWrite{}, err
 	}
-	if l.prepared == nil || l.prepare == nil || domain.ValidatePreparedWriteBinding(l.targetPath, *l.prepare, prepared) != nil || prepared != *l.prepared {
+	if l.prepared == nil || domain.ValidatePreparedWriteSummary(l.targetPath, prepared) != nil || prepared != *l.prepared {
 		return domain.AppliedWrite{}, writebackError(foundation.ErrorVersionConflict, "WRITEBACK_PREPARED_BINDING_CONFLICT", false, domain.ErrWritebackIdentityConflict)
 	}
 	if l.applied != nil {
@@ -336,51 +514,38 @@ func (l *targetLock) CommitCAS(ctx context.Context, prepared domain.PreparedWrit
 	if target.identity != l.identity {
 		return domain.AppliedWrite{}, writebackError(foundation.ErrorVersionConflict, "TARGET_IDENTITY_CONFLICT", false, domain.ErrTargetIdentityConflict)
 	}
+	if target.mode != prepared.Mode {
+		return domain.AppliedWrite{}, writebackError(foundation.ErrorVersionConflict, "TARGET_MODE_CONFLICT", false, domain.ErrTargetIdentityConflict)
+	}
 	if err := l.verifyManagedFile(ctx, prepared.TemporaryRef, prepared.ResultHash, prepared.ByteSize, prepared.Mode); err != nil {
 		return domain.AppliedWrite{}, err
 	}
-	backupRef, backup, err := l.createManagedFile(prepared.ExecutionID, ".bak")
+	baseHash, _, err := hashReaderWithContext(ctx, target.file)
 	if err != nil {
-		return domain.AppliedWrite{}, err
-	}
-	removeBackup := true
-	defer func() {
-		_ = backup.Close()
-		if removeBackup {
-			_ = l.removeManagedFile(backupRef)
-		}
-	}()
-	baseHash, _, err := copyAndHashWithContext(ctx, backup, target.file)
-	if err != nil {
-		return domain.AppliedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_BACKUP_WRITE_FAILED", true, err)
+		return domain.AppliedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_HASH_FAILED", true, err)
 	}
 	if !strings.EqualFold(baseHash, prepared.ExpectedBaseHash) {
 		return domain.AppliedWrite{}, writebackError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, domain.ErrTargetBaseHashConflict)
 	}
-	if err := backup.Chmod(fileModeFromUnix(prepared.Mode)); err != nil {
-		return domain.AppliedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_BACKUP_MODE_FAILED", true, err)
-	}
-	if err := l.ops.syncFile(backup); err != nil {
-		return domain.AppliedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_BACKUP_SYNC_FAILED", true, err)
-	}
-	if err := backup.Close(); err != nil {
-		return domain.AppliedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_BACKUP_CLOSE_FAILED", true, err)
+	if err := l.verifyManagedFileHash(ctx, prepared.BackupRef, prepared.ExpectedBaseHash, prepared.Mode); err != nil {
+		return domain.AppliedWrite{}, err
 	}
 	applied := domain.AppliedWrite{
 		ExecutionID:        prepared.ExecutionID,
 		TemporaryRef:       prepared.TemporaryRef,
-		BackupRef:          backupRef,
+		BackupRef:          prepared.BackupRef,
 		BaseHash:           prepared.ExpectedBaseHash,
 		ApprovedChangeHash: prepared.ApprovedChangeHash,
 		ResultHash:         prepared.ResultHash,
 		ByteSize:           prepared.ByteSize,
 		Mode:               prepared.Mode,
 		LockToken:          prepared.LockToken,
+		ResultLockToken:    prepared.ResultLockToken,
+		BackupLockToken:    prepared.BackupLockToken,
 	}
 	if err := domain.ValidateAppliedWriteBinding(prepared, applied); err != nil {
 		return domain.AppliedWrite{}, classifyDomainWritebackError("WRITEBACK_APPLIED_BINDING_INVALID", err)
 	}
-	removeBackup = false
 	l.applied = &applied
 	if err := l.ops.rename(l.root, prepared.TemporaryRef, l.targetPath); err != nil {
 		l.resultUnknown = true
@@ -407,60 +572,35 @@ func (l *targetLock) RestoreCAS(ctx context.Context, applied domain.AppliedWrite
 	if l.prepared == nil || l.applied == nil || domain.ValidateAppliedWriteBinding(*l.prepared, applied) != nil || applied != *l.applied {
 		return domain.RestoreResult{}, writebackError(foundation.ErrorVersionConflict, "WRITEBACK_APPLIED_BINDING_CONFLICT", false, domain.ErrWritebackIdentityConflict)
 	}
-	currentHash, _, _, err := hashSafeRegular(ctx, l.root, l.targetPath, l.rootDevice)
+	currentHash, currentMode, _, currentIdentity, err := inspectSafeRegular(ctx, l.root, l.targetPath, l.rootDevice)
 	if err != nil {
 		return domain.RestoreResult{}, err
 	}
+	if currentMode != applied.Mode {
+		return domain.RestoreResult{}, writebackError(foundation.ErrorVersionConflict, "WRITEBACK_RESTORE_CONFLICT", false, domain.ErrWritebackRestoreConflict)
+	}
 	if strings.EqualFold(currentHash, applied.BaseHash) {
+		if lockTokenForIdentity(currentIdentity) != strings.ToLower(applied.BackupLockToken) {
+			return domain.RestoreResult{}, writebackError(foundation.ErrorVersionConflict, "WRITEBACK_RESTORE_CONFLICT", false, domain.ErrWritebackRestoreConflict)
+		}
 		l.resultUnknown = false
 		return domain.RestoreResult{Replayed: true}, nil
 	}
 	if !strings.EqualFold(currentHash, applied.ResultHash) {
 		return domain.RestoreResult{}, writebackError(foundation.ErrorVersionConflict, "WRITEBACK_RESTORE_CONFLICT", false, domain.ErrWritebackRestoreConflict)
 	}
+	if lockTokenForIdentity(currentIdentity) != strings.ToLower(applied.ResultLockToken) {
+		return domain.RestoreResult{}, writebackError(foundation.ErrorVersionConflict, "WRITEBACK_RESTORE_CONFLICT", false, domain.ErrWritebackRestoreConflict)
+	}
 	if err := l.verifyManagedFileHash(ctx, applied.BackupRef, applied.BaseHash, applied.Mode); err != nil {
 		return domain.RestoreResult{}, err
 	}
-	restoreRef, restore, err := l.createManagedFile(applied.ExecutionID, ".tmp")
-	if err != nil {
-		return domain.RestoreResult{}, err
-	}
-	removeRestore := true
-	defer func() {
-		_ = restore.Close()
-		if removeRestore {
-			_ = l.removeManagedFile(restoreRef)
-		}
-	}()
-	backup, err := l.openManagedRegular(applied.BackupRef)
-	if err != nil {
-		return domain.RestoreResult{}, err
-	}
-	_, _, copyErr := copyAndHashWithContext(ctx, restore, backup.file)
-	closeBackupErr := backup.file.Close()
-	if copyErr == nil {
-		copyErr = closeBackupErr
-	}
-	if copyErr != nil {
-		return domain.RestoreResult{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_RESTORE_TEMP_WRITE_FAILED", true, copyErr)
-	}
-	if err := restore.Chmod(fileModeFromUnix(applied.Mode)); err != nil {
-		return domain.RestoreResult{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_RESTORE_TEMP_MODE_FAILED", true, err)
-	}
-	if err := l.ops.syncFile(restore); err != nil {
-		return domain.RestoreResult{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_RESTORE_TEMP_SYNC_FAILED", true, err)
-	}
-	if err := restore.Close(); err != nil {
-		return domain.RestoreResult{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_RESTORE_TEMP_CLOSE_FAILED", true, err)
-	}
-	if err := l.verifyManagedFileHash(ctx, restoreRef, applied.BaseHash, applied.Mode); err != nil {
-		return domain.RestoreResult{}, err
-	}
-	if err := l.ops.rename(l.root, restoreRef, l.targetPath); err != nil {
+	if err := l.ops.rename(l.root, applied.BackupRef, l.targetPath); err != nil {
+		l.resultUnknown = true
 		return domain.RestoreResult{}, manualRecoveryError("WRITEBACK_RESTORE_RENAME_RESULT_UNKNOWN", err)
 	}
-	removeRestore = false
 	if err := l.ops.syncDirectory(l.root, l.parentPath); err != nil {
+		l.resultUnknown = true
 		return domain.RestoreResult{}, manualRecoveryError("WRITEBACK_RESTORE_PARENT_SYNC_RESULT_UNKNOWN", err)
 	}
 	restoredHash, restoredMode, _, err := hashSafeRegular(ctx, l.root, l.targetPath, l.rootDevice)
@@ -468,6 +608,7 @@ func (l *targetLock) RestoreCAS(ctx context.Context, applied domain.AppliedWrite
 		if err == nil {
 			err = errors.New("restored target does not match base backup")
 		}
+		l.resultUnknown = true
 		return domain.RestoreResult{}, manualRecoveryError("WRITEBACK_RESTORE_VERIFY_UNKNOWN", err)
 	}
 	l.resultUnknown = false
@@ -500,14 +641,18 @@ func (l *targetLock) Cleanup(ctx context.Context, applied domain.AppliedWrite) e
 		removed = removed || wasRemoved
 	}
 	if removed {
+		l.cleanupReplay = true
+	}
+	if l.cleanupReplay {
 		if err := l.ops.syncDirectory(l.root, l.parentPath); err != nil {
 			return writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_CLEANUP_SYNC_FAILED", true, err)
 		}
+		l.cleanupReplay = false
 	}
 	return nil
 }
 
-// Close 清理未提交临时文件并释放 advisory lock 与 Root 文件描述符。
+// Close 释放 advisory lock 与 Root 文件描述符；已返回的 durable temp/backup 必须保留给重启恢复。
 func (l *targetLock) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -515,26 +660,14 @@ func (l *targetLock) Close() error {
 		return nil
 	}
 	var failures []error
-	if l.applied == nil && l.prepared != nil {
-		if _, err := l.removeManagedFileChecked(context.Background(), l.prepared.TemporaryRef, l.prepared.ResultHash, l.prepared.Mode); err != nil {
-			failures = append(failures, err)
+	for _, lockFile := range []*os.File{l.lockFile, l.pathLockFile} {
+		if lockFile == nil {
+			continue
 		}
-	}
-	if l.applied == nil {
-		for locator := range l.managedFiles {
-			if l.prepared != nil && locator == l.prepared.TemporaryRef {
-				continue
-			}
-			if err := l.removeManagedFile(locator); err != nil {
-				failures = append(failures, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_CLOSE_CLEANUP_FAILED", true, err))
-			}
-		}
-	}
-	if l.lockFile != nil {
-		if err := syscall.Flock(int(l.lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
 			failures = append(failures, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_UNLOCK_FAILED", true, err))
 		}
-		if err := l.lockFile.Close(); err != nil {
+		if err := lockFile.Close(); err != nil {
 			failures = append(failures, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_LOCK_CLOSE_FAILED", true, err))
 		}
 	}
@@ -548,7 +681,7 @@ func (l *targetLock) Close() error {
 }
 
 func (l *targetLock) usable(ctx context.Context) error {
-	if l == nil || l.closed || l.root == nil || l.lockFile == nil {
+	if l == nil || l.closed || l.root == nil || l.lockFile == nil || l.pathLockFile == nil {
 		return writebackError(foundation.ErrorNonRetryableFailure, "WRITEBACK_TARGET_LOCK_CLOSED", false, errors.New("target lock is closed"))
 	}
 	if ctx == nil {
@@ -558,6 +691,158 @@ func (l *targetLock) usable(ctx context.Context) error {
 		return writebackContextError("WRITEBACK_OPERATION_CANCELLED", err)
 	}
 	return nil
+}
+
+func (l *targetLock) rehydrate(ctx context.Context, resume domain.ResumeWrite) (domain.PreparedWrite, *domain.AppliedWrite, error) {
+	if err := l.usable(ctx); err != nil {
+		return domain.PreparedWrite{}, nil, err
+	}
+	prepared := resume.Prepared
+	targetHash, targetMode, targetSize, targetIdentity, err := inspectSafeRegular(ctx, l.root, l.targetPath, l.rootDevice)
+	if err != nil {
+		return domain.PreparedWrite{}, nil, err
+	}
+	if targetMode != prepared.Mode {
+		return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_TARGET_MODE_CONFLICT", errors.New("target mode differs from durable file intent"))
+	}
+	backupState, backupErr := l.registerManagedFileState(ctx, prepared.BackupRef)
+	backupExists := backupErr == nil
+	if backupErr != nil && !errors.Is(backupErr, os.ErrNotExist) {
+		return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_BACKUP_INVALID", backupErr)
+	}
+	tempState, tempErr := l.registerManagedFileState(ctx, prepared.TemporaryRef)
+	tempExists := tempErr == nil
+	if tempErr != nil && !errors.Is(tempErr, os.ErrNotExist) {
+		return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_TEMP_INVALID", tempErr)
+	}
+	backupIsBase := backupExists && strings.EqualFold(backupState.hash, prepared.ExpectedBaseHash) && backupState.mode == prepared.Mode && lockTokenForIdentity(backupState.identity) == strings.ToLower(prepared.BackupLockToken)
+	tempIsResult := tempExists && strings.EqualFold(tempState.hash, prepared.ResultHash) && tempState.size == prepared.ByteSize && tempState.mode == prepared.Mode && lockTokenForIdentity(tempState.identity) == strings.ToLower(prepared.ResultLockToken)
+	targetIsBase := strings.EqualFold(targetHash, prepared.ExpectedBaseHash)
+	targetHasResultContent := strings.EqualFold(targetHash, prepared.ResultHash) && targetSize == prepared.ByteSize
+	targetIsResult := targetHasResultContent && lockTokenForIdentity(targetIdentity) == strings.ToLower(prepared.ResultLockToken)
+	targetIsRestoredBase := targetIsBase && lockTokenForIdentity(targetIdentity) == strings.ToLower(prepared.BackupLockToken)
+	derivedApplied := appliedFromPrepared(prepared)
+
+	if resume.CleanupMayHaveCompleted && resume.Applied != nil && targetIsResult && !tempExists && !backupExists {
+		if *resume.Applied != derivedApplied {
+			return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_APPLIED_BINDING_CONFLICT", domain.ErrWritebackIdentityConflict)
+		}
+		l.identity = targetIdentity
+		l.mode = prepared.Mode
+		l.prepared = &prepared
+		l.applied = &derivedApplied
+		l.cleanupReplay = true
+		return prepared, &derivedApplied, nil
+	}
+	// RestoreCAS 直接 rename 已持久化且已 fsync 的 Base backup。若进程在
+	// rename 成功后、记录 compensated 前退出，目标已是 Base 且 backup 已消失；
+	// 此时只允许在调用方明确声明 Restore 响应可能丢失且 inode 仍为 backup 时识别重放。
+	if resume.RestoreMayHaveCompleted && resume.Applied != nil && targetIsRestoredBase && !tempExists && !backupExists {
+		if *resume.Applied != derivedApplied {
+			return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_APPLIED_BINDING_CONFLICT", domain.ErrWritebackIdentityConflict)
+		}
+		l.identity = targetIdentity
+		l.mode = prepared.Mode
+		l.prepared = &prepared
+		l.applied = &derivedApplied
+		return prepared, &derivedApplied, nil
+	}
+	if (resume.CleanupMayHaveCompleted || resume.RestoreMayHaveCompleted) && !tempExists && !backupExists {
+		return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_RESULT_UNKNOWN", errors.New("target identity does not match the declared response-loss recovery intent"))
+	}
+	if !backupExists {
+		return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_BACKUP_INVALID", backupErr)
+	}
+
+	if resume.Applied == nil && targetIsBase && tempIsResult && backupIsBase {
+		if lockTokenForIdentity(targetIdentity) != strings.ToLower(prepared.LockToken) {
+			return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_TARGET_IDENTITY_CONFLICT", domain.ErrTargetIdentityConflict)
+		}
+		l.identity = targetIdentity
+		l.mode = prepared.Mode
+		l.prepared = &prepared
+		return prepared, nil, nil
+	}
+	if targetIsResult && !tempExists && backupIsBase {
+		if resume.Applied != nil && *resume.Applied != derivedApplied {
+			return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_APPLIED_BINDING_CONFLICT", domain.ErrWritebackIdentityConflict)
+		}
+		l.identity = targetIdentity
+		l.mode = prepared.Mode
+		l.prepared = &prepared
+		l.applied = &derivedApplied
+		return prepared, &derivedApplied, nil
+	}
+	return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_RESULT_UNKNOWN", errors.New("target, temp, and backup do not match a recoverable checkpoint"))
+}
+
+type managedFileState struct {
+	hash     string
+	size     int64
+	mode     uint32
+	identity fileIdentity
+}
+
+func (l *targetLock) registerManagedFileState(ctx context.Context, locator string) (managedFileState, error) {
+	if path.Dir(locator) != l.parentPath {
+		return managedFileState{}, domain.ErrWritebackIdentityConflict
+	}
+	file, err := openSafeRegular(l.root, locator, l.rootDevice)
+	if err != nil {
+		return managedFileState{}, err
+	}
+	defer file.file.Close()
+	hash, size, err := hashReaderWithContext(ctx, file.file)
+	if err != nil {
+		return managedFileState{}, err
+	}
+	l.managedFiles[locator] = file.identity
+	return managedFileState{hash: hash, size: size, mode: file.mode, identity: file.identity}, nil
+}
+
+func (l *targetLock) createManagedFileAt(locator string) (*os.File, error) {
+	if path.Dir(locator) != l.parentPath {
+		return nil, writebackError(foundation.ErrorPermissionDenied, "WRITEBACK_MANAGED_FILE_REFERENCE_INVALID", false, domain.ErrWritebackIdentityConflict)
+	}
+	if _, err := l.root.Lstat(locator); err == nil {
+		return nil, writebackError(foundation.ErrorConsistencyViolation, "WRITEBACK_MANAGED_FILE_IDENTITY_CONFLICT", false, errors.New("managed file already exists"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_MANAGED_FILE_CREATE_FAILED", true, err)
+	}
+	file, err := l.root.OpenFile(locator, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	if err != nil {
+		return nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_MANAGED_FILE_CREATE_FAILED", true, err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		_ = l.root.Remove(locator)
+		return nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_MANAGED_FILE_CREATE_FAILED", true, err)
+	}
+	identity, err := identityFromInfo(info)
+	if err != nil || !info.Mode().IsRegular() || identity.Device != l.rootDevice || identity.Owner != uint32(os.Geteuid()) {
+		_ = file.Close()
+		_ = l.root.Remove(locator)
+		return nil, writebackError(foundation.ErrorPermissionDenied, "WRITEBACK_MANAGED_FILE_INVALID", false, errors.New("managed file identity is unsafe"))
+	}
+	l.managedFiles[locator] = identity
+	return file, nil
+}
+
+func appliedFromPrepared(prepared domain.PreparedWrite) domain.AppliedWrite {
+	return domain.AppliedWrite{
+		ExecutionID:        prepared.ExecutionID,
+		TemporaryRef:       prepared.TemporaryRef,
+		BackupRef:          prepared.BackupRef,
+		BaseHash:           prepared.ExpectedBaseHash,
+		ApprovedChangeHash: prepared.ApprovedChangeHash,
+		ResultHash:         prepared.ResultHash,
+		ByteSize:           prepared.ByteSize,
+		Mode:               prepared.Mode,
+		LockToken:          prepared.LockToken,
+		ResultLockToken:    prepared.ResultLockToken,
+		BackupLockToken:    prepared.BackupLockToken,
+	}
 }
 
 type fileIdentity struct {
@@ -734,9 +1019,48 @@ func ensureLockDirectory(root *os.Root, rootDevice uint64) error {
 	return nil
 }
 
-func lockFileName(identity fileIdentity) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%d", identity.Device, identity.Inode)))
-	return hex.EncodeToString(sum[:]) + ".lock"
+func lockTokenForIdentity(identity fileIdentity) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("inode\x00%d:%d", identity.Device, identity.Inode)))
+	return hex.EncodeToString(sum[:])
+}
+
+func lockTokenForPath(rootIdentity fileIdentity, targetPath string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("path\x00%d:%d\x00%s", rootIdentity.Device, rootIdentity.Inode, targetPath)))
+	return hex.EncodeToString(sum[:])
+}
+
+func openAndAcquireTargetLock(ctx context.Context, root *os.Root, rootDevice uint64, lockToken string, create bool, pollInterval time.Duration) (*os.File, error) {
+	if !domain.ValidHash(lockToken) {
+		return nil, writebackError(foundation.ErrorPermissionDenied, "WRITEBACK_TARGET_LOCK_UNSAFE", false, domain.ErrWritebackIdentityConflict)
+	}
+	flags := os.O_RDWR | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
+	if create {
+		flags |= os.O_CREATE
+	}
+	lockPath := path.Join(writebackLockDirectory, strings.ToLower(lockToken)+".lock")
+	lockFile, err := root.OpenFile(lockPath, flags, 0o600)
+	if err != nil {
+		return nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_LOCK_OPEN_FAILED", true, err)
+	}
+	closeLock := true
+	defer func() {
+		if closeLock {
+			_ = lockFile.Close()
+		}
+	}()
+	lockInfo, err := lockFile.Stat()
+	if err != nil || !lockInfo.Mode().IsRegular() || lockInfo.Mode().Perm() != 0o600 {
+		return nil, writebackError(foundation.ErrorPermissionDenied, "WRITEBACK_TARGET_LOCK_UNSAFE", false, errors.New("lock file is not a regular 0600 file"))
+	}
+	lockIdentity, err := identityFromInfo(lockInfo)
+	if err != nil || lockIdentity.Owner != uint32(os.Geteuid()) || lockIdentity.Device != rootDevice {
+		return nil, writebackError(foundation.ErrorPermissionDenied, "WRITEBACK_TARGET_LOCK_UNSAFE", false, errors.New("lock file ownership or device is unsafe"))
+	}
+	if err := acquireFileLock(ctx, lockFile, pollInterval); err != nil {
+		return nil, err
+	}
+	closeLock = false
+	return lockFile, nil
 }
 
 func acquireFileLock(ctx context.Context, file *os.File, pollInterval time.Duration) error {
@@ -762,13 +1086,16 @@ func acquireFileLock(ctx context.Context, file *os.File, pollInterval time.Durat
 }
 
 func (l *targetLock) createManagedFile(executionID foundation.ID, suffix string) (string, *os.File, error) {
-	executionDigest := sha256.Sum256([]byte(executionID))
+	prefix, err := domain.WritebackLocatorPrefix(executionID, l.lockToken)
+	if err != nil {
+		return "", nil, classifyDomainWritebackError("WRITEBACK_MANAGED_FILE_REFERENCE_INVALID", err)
+	}
 	for range 10 {
 		randomPart, err := randomHex(l.ops.random, 16)
 		if err != nil {
 			return "", nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_RANDOM_GENERATION_FAILED", true, err)
 		}
-		name := fmt.Sprintf(".zhixu-writeback-%s-%s%s", hex.EncodeToString(executionDigest[:8]), randomPart, suffix)
+		name := prefix + randomPart + suffix
 		locator := path.Join(l.parentPath, name)
 		file, err := l.root.OpenFile(locator, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 		if errors.Is(err, os.ErrExist) {
@@ -913,27 +1240,32 @@ func (l *targetLock) removeManagedFileChecked(ctx context.Context, locator, expe
 }
 
 func verifyAppliedTarget(ctx context.Context, lock *targetLock, applied domain.AppliedWrite) error {
-	hash, mode, size, err := hashSafeRegular(ctx, lock.root, lock.targetPath, lock.rootDevice)
+	hash, mode, size, identity, err := inspectSafeRegular(ctx, lock.root, lock.targetPath, lock.rootDevice)
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(hash, applied.ResultHash) || size != applied.ByteSize || mode != applied.Mode {
+	if !strings.EqualFold(hash, applied.ResultHash) || size != applied.ByteSize || mode != applied.Mode || lockTokenForIdentity(identity) != strings.ToLower(applied.ResultLockToken) {
 		return errors.New("applied target does not match prepared result")
 	}
 	return nil
 }
 
 func hashSafeRegular(ctx context.Context, root *os.Root, relative string, rootDevice uint64) (string, uint32, int64, error) {
+	hash, mode, size, _, err := inspectSafeRegular(ctx, root, relative, rootDevice)
+	return hash, mode, size, err
+}
+
+func inspectSafeRegular(ctx context.Context, root *os.Root, relative string, rootDevice uint64) (string, uint32, int64, fileIdentity, error) {
 	file, err := openSafeRegular(root, relative, rootDevice)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, fileIdentity{}, err
 	}
 	defer file.file.Close()
 	hash, size, err := hashReaderWithContext(ctx, file.file)
 	if err != nil {
-		return "", 0, 0, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_HASH_FAILED", true, err)
+		return "", 0, 0, fileIdentity{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_HASH_FAILED", true, err)
 	}
-	return hash, file.mode, size, nil
+	return hash, file.mode, size, file.identity, nil
 }
 
 func hashReaderWithContext(ctx context.Context, reader io.Reader) (string, int64, error) {

@@ -9,6 +9,11 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
+const (
+	// MaxAuthorizationCredentialBytes 限制服务端短期凭据的输入大小，避免哈希前接收无界 Secret。
+	MaxAuthorizationCredentialBytes = 256
+)
+
 // AuthorizationStatus 是服务端 Write Authorization 的生命周期。
 type AuthorizationStatus string
 

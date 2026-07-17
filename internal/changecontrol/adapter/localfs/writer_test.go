@@ -48,6 +48,14 @@ func TestWriterPrepareCommitRestoreCleanupLifecycle(t *testing.T) {
 	if err != nil || !temporaryInfo.Mode().IsRegular() || temporaryInfo.Mode().Perm() != 0o640 {
 		t.Fatalf("temporary info = %#v, %v", temporaryInfo, err)
 	}
+	reservedBackup := filepath.Join(workspaceRoot, filepath.FromSlash(prepared.BackupRef))
+	reservedInfo, err := os.Lstat(reservedBackup)
+	if err != nil || !reservedInfo.Mode().IsRegular() || reservedInfo.Mode().Perm() != 0o640 || reservedInfo.Size() != int64(len(baseContent)) {
+		t.Fatalf("reserved backup info = %#v, %v", reservedInfo, err)
+	}
+	if got := readFile(t, reservedBackup); string(got) != string(baseContent) {
+		t.Fatalf("prepared backup = %q", got)
+	}
 
 	applied, err := lock.CommitCAS(context.Background(), prepared)
 	if err != nil {
@@ -132,6 +140,16 @@ func TestWriterCommitCASRejectsBaseAndIdentityChanges(t *testing.T) {
 			},
 			code: "TARGET_IDENTITY_CONFLICT",
 		},
+		{
+			name: "mode",
+			edit: func(t *testing.T, target string) {
+				t.Helper()
+				if err := os.Chmod(target, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+			code: "TARGET_MODE_CONFLICT",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workspaceRoot := newWritebackWorkspace(t)
@@ -187,8 +205,8 @@ func TestWriterRejectsTamperedPreparedAndRestoreUserEdit(t *testing.T) {
 		if got := string(readFile(t, absoluteTarget)); got != string(base) {
 			t.Fatalf("target changed to %q", got)
 		}
-		if err := lock.Close(); err == nil {
-			t.Fatal("Close removed or accepted a tampered temp")
+		if err := lock.Close(); err != nil {
+			t.Fatalf("Close() must preserve durable evidence: %v", err)
 		}
 		if _, err := os.Lstat(temporaryPath); err != nil {
 			t.Fatalf("tampered temp was removed: %v", err)
@@ -223,6 +241,37 @@ func TestWriterRejectsTamperedPreparedAndRestoreUserEdit(t *testing.T) {
 		requireWritebackError(t, err, foundation.ErrorVersionConflict, "WRITEBACK_RESTORE_CONFLICT")
 		if got := string(readFile(t, absoluteTarget)); got != "user after apply\n" {
 			t.Fatalf("user edit overwritten: %q", got)
+		}
+	})
+
+	t.Run("mode edit after commit", func(t *testing.T) {
+		workspaceRoot := newWritebackWorkspace(t)
+		targetPath := "notes/a.md"
+		absoluteTarget := filepath.Join(workspaceRoot, filepath.FromSlash(targetPath))
+		base := []byte("base\n")
+		if err := os.WriteFile(absoluteTarget, base, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lock, err := newTestWriter(t, workspaceRoot).AcquireTarget(context.Background(), "workspace", targetPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lock.Close()
+		prepared, err := lock.Prepare(context.Background(), prepareCommand(targetPath, base, []byte("result\n")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		applied, err := lock.CommitCAS(context.Background(), prepared)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(absoluteTarget, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		_, err = lock.RestoreCAS(context.Background(), applied)
+		requireWritebackError(t, err, foundation.ErrorVersionConflict, "WRITEBACK_RESTORE_CONFLICT")
+		if got := string(readFile(t, absoluteTarget)); got != "result\n" {
+			t.Fatalf("mode edit target was overwritten: %q", got)
 		}
 	})
 }
@@ -264,7 +313,7 @@ func TestWriterRestoreAndCleanupRejectTamperedBackup(t *testing.T) {
 	}
 }
 
-func TestWriterPrepareBindingAndCloseCleanup(t *testing.T) {
+func TestWriterPrepareBindingAndClosePreservesDurableIntent(t *testing.T) {
 	workspaceRoot := newWritebackWorkspace(t)
 	targetPath := "notes/a.md"
 	absoluteTarget := filepath.Join(workspaceRoot, filepath.FromSlash(targetPath))
@@ -294,8 +343,11 @@ func TestWriterPrepareBindingAndCloseCleanup(t *testing.T) {
 	if err := lock.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(temporaryPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("uncommitted temp remains: %v", err)
+	if _, err := os.Lstat(temporaryPath); err != nil {
+		t.Fatalf("durable temp was removed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(workspaceRoot, filepath.FromSlash(prepared.BackupRef))); err != nil {
+		t.Fatalf("reserved backup was removed: %v", err)
 	}
 	if err := lock.Close(); err != nil {
 		t.Fatal(err)

@@ -34,6 +34,7 @@ var (
 // 实现必须通过服务端 Workspace ID 解析根目录，并在返回前持有目标级互斥锁。
 type WorkspaceStore interface {
 	AcquireTarget(context.Context, foundation.ID, string) (TargetLock, error)
+	ResumeTarget(context.Context, foundation.ID, string, ResumeWrite) (TargetLock, PreparedWrite, *AppliedWrite, error)
 }
 
 // TargetLock 封装单个 Workspace 目标的 Prepare、CAS、恢复和清理生命周期。
@@ -61,17 +62,31 @@ type PrepareWrite struct {
 	Content            []byte
 }
 
-// PreparedWrite 是当前 TargetLock 生成的受控临时写入摘要。
-// TemporaryRef 是 Workspace 相对 locator，LockToken 是实现生成的不可伪造锁摘要。
+// PreparedWrite 是当前 TargetLock 生成并完成 fsync 的受控写入摘要。
+// TemporaryRef/BackupRef 是 Workspace 相对 locator；LockToken 绑定原始目标 inode 锁，
+// ResultLockToken 绑定即将 rename 为正式目标的受控 temp inode。
 type PreparedWrite struct {
 	ExecutionID        foundation.ID
 	TemporaryRef       string
+	BackupRef          string
 	ExpectedBaseHash   string
 	ApprovedChangeHash string
 	ResultHash         string
 	ByteSize           int64
 	Mode               uint32
 	LockToken          string
+	ResultLockToken    string
+	BackupLockToken    string
+}
+
+// ResumeWrite 是从持久化 file_prepared/file_applied 检查点重建文件副作用所需的最小摘要。
+// Applied 为 nil 表示尚未持久化 file_applied；非 nil 时必须与 Prepared 保持完全相同的不可变绑定。
+// CleanupMayHaveCompleted 与 RestoreMayHaveCompleted 分别表示对应副作用可能已完成但响应丢失，二者互斥。
+type ResumeWrite struct {
+	Prepared                PreparedWrite
+	Applied                 *AppliedWrite
+	CleanupMayHaveCompleted bool
+	RestoreMayHaveCompleted bool
 }
 
 // AppliedWrite 是完成原子替换后用于 Git 阶段、恢复和清理的稳定摘要。
@@ -86,6 +101,8 @@ type AppliedWrite struct {
 	ByteSize           int64
 	Mode               uint32
 	LockToken          string
+	ResultLockToken    string
+	BackupLockToken    string
 }
 
 // RestoreResult 表示恢复实际执行或识别到已恢复重放；两个状态必须且只能有一个成立。
@@ -154,11 +171,25 @@ func ValidatePreparedWriteBinding(targetPath string, command PrepareWrite, prepa
 		!strings.EqualFold(prepared.ExpectedBaseHash, command.ExpectedBaseHash) ||
 		!strings.EqualFold(prepared.ApprovedChangeHash, command.ApprovedChangeHash) ||
 		!strings.EqualFold(prepared.ResultHash, resultHash) ||
-		prepared.ByteSize != int64(len(command.Content)) ||
-		path.Dir(prepared.TemporaryRef) != path.Dir(targetPath) {
+		prepared.ByteSize != int64(len(command.Content)) {
 		return ErrWritebackIdentityConflict
 	}
+	if err := ValidatePreparedWriteSummary(targetPath, prepared); err != nil {
+		return ErrWritebackIdentityConflict
+	}
+	return nil
+}
+
+// ValidatePreparedWriteSummary 校验可持久化 PreparedWrite 的字段、受控 locator 与目标父目录绑定。
+func ValidatePreparedWriteSummary(targetPath string, prepared PreparedWrite) error {
+	if err := validateWritebackTargetPath(targetPath); err != nil {
+		return ErrWritebackInvalidInput
+	}
 	if err := validatePreparedWrite(prepared); err != nil {
+		return err
+	}
+	targetParent := path.Dir(targetPath)
+	if path.Dir(prepared.TemporaryRef) != targetParent || path.Dir(prepared.BackupRef) != targetParent || prepared.TemporaryRef == prepared.BackupRef {
 		return ErrWritebackIdentityConflict
 	}
 	return nil
@@ -171,17 +202,39 @@ func ValidateAppliedWriteBinding(prepared PreparedWrite, applied AppliedWrite) e
 	}
 	if applied.ExecutionID != prepared.ExecutionID ||
 		applied.TemporaryRef != prepared.TemporaryRef ||
+		applied.BackupRef != prepared.BackupRef ||
 		!strings.EqualFold(applied.BaseHash, prepared.ExpectedBaseHash) ||
 		!strings.EqualFold(applied.ApprovedChangeHash, prepared.ApprovedChangeHash) ||
 		!strings.EqualFold(applied.ResultHash, prepared.ResultHash) ||
 		applied.ByteSize != prepared.ByteSize ||
 		applied.Mode != prepared.Mode ||
 		applied.LockToken != prepared.LockToken ||
-		path.Dir(applied.BackupRef) != path.Dir(prepared.TemporaryRef) {
+		applied.ResultLockToken != prepared.ResultLockToken ||
+		applied.BackupLockToken != prepared.BackupLockToken {
 		return ErrWritebackIdentityConflict
 	}
-	if err := validateWritebackLocator(applied.BackupRef, ".bak"); err != nil {
+	if err := validateWritebackLocator(applied.BackupRef, ".bak", applied.ExecutionID, applied.LockToken); err != nil {
 		return ErrWritebackIdentityConflict
+	}
+	return nil
+}
+
+// ValidateResumeWrite 校验进程重启输入只能引用同一目标、Execution 和受控恢复证据。
+func ValidateResumeWrite(targetPath string, resume ResumeWrite) error {
+	if err := ValidatePreparedWriteSummary(targetPath, resume.Prepared); err != nil {
+		return err
+	}
+	if resume.Applied == nil {
+		if resume.CleanupMayHaveCompleted || resume.RestoreMayHaveCompleted {
+			return ErrWritebackInvalidInput
+		}
+		return nil
+	}
+	if resume.CleanupMayHaveCompleted && resume.RestoreMayHaveCompleted {
+		return ErrWritebackInvalidInput
+	}
+	if err := ValidateAppliedWriteBinding(resume.Prepared, *resume.Applied); err != nil {
+		return err
 	}
 	return nil
 }
@@ -195,20 +248,44 @@ func ValidateRestoreResult(result RestoreResult) error {
 }
 
 func validatePreparedWrite(prepared PreparedWrite) error {
-	if prepared.ExecutionID == "" || !ValidHash(prepared.ExpectedBaseHash) || !ValidHash(prepared.ApprovedChangeHash) || !ValidHash(prepared.ResultHash) || prepared.ByteSize <= 0 || prepared.ByteSize > MaxWritebackContentBytes || prepared.Mode&^uint32(0o7777) != 0 || !ValidHash(prepared.LockToken) {
+	if prepared.ExecutionID == "" || !ValidHash(prepared.ExpectedBaseHash) || !ValidHash(prepared.ApprovedChangeHash) || !ValidHash(prepared.ResultHash) || prepared.ByteSize <= 0 || prepared.ByteSize > MaxWritebackContentBytes || prepared.Mode&^uint32(0o7777) != 0 || !ValidHash(prepared.LockToken) || !ValidHash(prepared.ResultLockToken) || !ValidHash(prepared.BackupLockToken) {
 		return ErrWritebackInvalidInput
 	}
-	return validateWritebackLocator(prepared.TemporaryRef, ".tmp")
+	if strings.EqualFold(prepared.LockToken, prepared.ResultLockToken) || strings.EqualFold(prepared.LockToken, prepared.BackupLockToken) || strings.EqualFold(prepared.ResultLockToken, prepared.BackupLockToken) {
+		return ErrWritebackInvalidInput
+	}
+	if err := validateWritebackLocator(prepared.TemporaryRef, ".tmp", prepared.ExecutionID, prepared.LockToken); err != nil {
+		return err
+	}
+	return validateWritebackLocator(prepared.BackupRef, ".bak", prepared.ExecutionID, prepared.LockToken)
 }
 
-func validateWritebackLocator(value, suffix string) error {
+func validateWritebackLocator(value, suffix string, executionID foundation.ID, lockToken string) error {
 	clean, err := ValidateTargetPath(value)
 	if err != nil || clean != value {
 		return ErrWritebackInvalidInput
 	}
 	base := path.Base(clean)
-	if !strings.HasPrefix(base, writebackLocatorPrefix) || !strings.HasSuffix(base, suffix) || len(base) <= len(writebackLocatorPrefix)+len(suffix) {
+	prefix, err := WritebackLocatorPrefix(executionID, lockToken)
+	if err != nil || !strings.HasPrefix(base, prefix) || !strings.HasSuffix(base, suffix) {
+		return ErrWritebackInvalidInput
+	}
+	randomPart := strings.TrimSuffix(strings.TrimPrefix(base, prefix), suffix)
+	if len(randomPart) != 32 {
+		return ErrWritebackInvalidInput
+	}
+	if _, err := hex.DecodeString(randomPart); err != nil {
 		return ErrWritebackInvalidInput
 	}
 	return nil
+}
+
+// WritebackLocatorPrefix 返回由 Execution 与原始目标锁绑定派生的受控文件名前缀。
+// Adapter 只能在该前缀后追加 16 字节随机十六进制和固定 .tmp/.bak 后缀。
+func WritebackLocatorPrefix(executionID foundation.ID, lockToken string) (string, error) {
+	if executionID == "" || !ValidHash(lockToken) {
+		return "", ErrWritebackInvalidInput
+	}
+	sum := sha256.Sum256([]byte(string(executionID) + "\x00" + strings.ToLower(lockToken)))
+	return writebackLocatorPrefix + hex.EncodeToString(sum[:8]) + "-", nil
 }

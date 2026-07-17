@@ -11,7 +11,10 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
-const testHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const (
+	testHash    = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testGitHead = "abcdef0123456789abcdef0123456789abcdef01"
+)
 
 type fakeRepo struct {
 	proposal          domain.Proposal
@@ -77,6 +80,17 @@ func (f *fakeTargets) CurrentHash(context.Context, foundation.ID, string) (strin
 	return f.hash, f.err
 }
 
+type fakeApprovalGitInspector struct {
+	snapshot domain.GitSnapshot
+	err      error
+	calls    int
+}
+
+func (f *fakeApprovalGitInspector) CaptureApprovalSnapshot(context.Context, foundation.ID) (domain.GitSnapshot, error) {
+	f.calls++
+	return f.snapshot, f.err
+}
+
 type seqIDs struct{ n int }
 
 func (s *seqIDs) New() (foundation.ID, error) {
@@ -85,7 +99,13 @@ func (s *seqIDs) New() (foundation.ID, error) {
 }
 
 func newTestService(repository *fakeRepo, targets *fakeTargets) *Service {
-	service, err := NewService(repository, &seqIDs{}, foundation.FixedClock{Value: time.Unix(1, 0)}, targets)
+	return newTestServiceWithGit(repository, targets, &fakeApprovalGitInspector{snapshot: domain.GitSnapshot{
+		WorkspaceID: "workspace", Branch: "main", Head: testGitHead, ObjectFormat: domain.GitObjectFormatSHA1, Clean: true,
+	}})
+}
+
+func newTestServiceWithGit(repository *fakeRepo, targets *fakeTargets, git ApprovalGitInspector) *Service {
+	service, err := NewService(repository, &seqIDs{}, foundation.FixedClock{Value: time.Unix(1, 0)}, targets, git)
 	if err != nil {
 		panic(err)
 	}
@@ -139,8 +159,62 @@ func TestDecideProposalPassesBoundHash(t *testing.T) {
 	repository := &fakeRepo{proposal: proposal}
 	service := newTestService(repository, &fakeTargets{hash: testHash})
 	_, err := service.DecideProposal(context.Background(), "proposal", "revision", proposal.Revision.ChangeHash, domain.DecisionApproved)
-	if err != nil || repository.approval.ChangeHash != proposal.Revision.ChangeHash || repository.approval.Decision != domain.DecisionApproved {
+	if err != nil || repository.approval.ChangeHash != proposal.Revision.ChangeHash || repository.approval.Decision != domain.DecisionApproved || repository.approval.ApprovedGitHead == nil || *repository.approval.ApprovedGitHead != testGitHead {
 		t.Fatalf("approval = %#v, err = %v", repository.approval, err)
+	}
+}
+
+func TestDecideProposalRejectsGitSnapshotFailureWithoutApproval(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	proposal.Status = domain.StatusReady
+	proposal.Approval = nil
+	repository := &fakeRepo{proposal: proposal}
+	git := &fakeApprovalGitInspector{err: foundation.NewError(foundation.ErrorVersionConflict, "GIT_REPOSITORY_DIRTY", false, errors.New("dirty"))}
+	service := newTestServiceWithGit(repository, &fakeTargets{hash: testHash}, git)
+	_, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err == nil || repository.approval.ID != "" || git.calls != 1 {
+		t.Fatalf("approval=%#v git calls=%d err=%v", repository.approval, git.calls, err)
+	}
+}
+
+func TestDecideProposalRejectsInvalidGitSnapshotBinding(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	proposal.Status = domain.StatusReady
+	proposal.Approval = nil
+	repository := &fakeRepo{proposal: proposal}
+	git := &fakeApprovalGitInspector{snapshot: domain.GitSnapshot{
+		WorkspaceID: "other-workspace", Branch: "main", Head: testGitHead, ObjectFormat: domain.GitObjectFormatSHA1, Clean: true,
+	}}
+	service := newTestServiceWithGit(repository, &fakeTargets{hash: testHash}, git)
+	_, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	var applicationError *foundation.Error
+	if !errors.As(err, &applicationError) || applicationError.Code != "APPROVAL_GIT_SNAPSHOT_INVALID" || repository.approval.ID != "" {
+		t.Fatalf("approval=%#v err=%v", repository.approval, err)
+	}
+}
+
+func TestDecideProposalRejectedDoesNotInspectTargetOrGit(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	proposal.Status = domain.StatusReady
+	proposal.Approval = nil
+	repository := &fakeRepo{proposal: proposal}
+	targets := &fakeTargets{err: errors.New("must not be called")}
+	git := &fakeApprovalGitInspector{err: errors.New("must not be called")}
+	service := newTestServiceWithGit(repository, targets, git)
+	approval, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionRejected)
+	if err != nil || approval.Decision != domain.DecisionRejected || approval.ApprovedGitHead != nil || targets.calls != 0 || git.calls != 0 {
+		t.Fatalf("approval=%#v target calls=%d git calls=%d err=%v", approval, targets.calls, git.calls, err)
+	}
+}
+
+func TestDecideProposalReplayDoesNotRecaptureMutableFacts(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	targets := &fakeTargets{err: errors.New("must not be called")}
+	git := &fakeApprovalGitInspector{err: errors.New("must not be called")}
+	service := newTestServiceWithGit(&fakeRepo{proposal: proposal}, targets, git)
+	approval, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err != nil || approval.ID != proposal.Approval.ID || targets.calls != 0 || git.calls != 0 {
+		t.Fatalf("approval=%#v target calls=%d git calls=%d err=%v", approval, targets.calls, git.calls, err)
 	}
 }
 
@@ -353,9 +427,10 @@ func TestConsumeWriteAuthorizationRejectsWrongCredentialBeforeReplay(t *testing.
 
 func approvedProposal(baseHash string) domain.Proposal {
 	changeHash := domain.ComputeChangeHash("a.md", baseHash, "new content")
+	approvedGitHead := testGitHead
 	return domain.Proposal{
 		ID: "proposal", WorkspaceID: "workspace", TargetPath: "a.md", Status: domain.StatusApproved,
 		Revision: domain.Revision{ID: "revision", ProposalID: "proposal", TargetPath: "a.md", BaseHash: baseHash, Content: "new content", ChangeHash: changeHash},
-		Approval: &domain.Approval{ID: "approval", ProposalID: "proposal", RevisionID: "revision", ChangeHash: changeHash, Decision: domain.DecisionApproved},
+		Approval: &domain.Approval{ID: "approval", ProposalID: "proposal", RevisionID: "revision", ChangeHash: changeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead},
 	}
 }

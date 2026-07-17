@@ -161,3 +161,42 @@ func TestValidateWritebackPublishBinding(t *testing.T) {
 		t.Fatal("commit mapping with another proposal accepted")
 	}
 }
+
+func TestValidateBeginWritebackDoesNotRequireExecutionID(t *testing.T) {
+	command := BeginWriteback{
+		WorkspaceID: "workspace", WorkflowRunID: "run", NodeRunID: "node", ProposalID: "proposal",
+		LeaseOwner: "worker-a", IdempotencyKey: "begin-1",
+		WriteAuthorization: AuthorizationConsume{Credential: "write-token", IdempotencyKey: "write-key", ToolName: "ApplyApprovedPatch", Capability: CapabilityWriteKnowledge},
+		GitAuthorization:   AuthorizationConsume{Credential: "git-token", IdempotencyKey: "git-key", ToolName: "CreateGitCommit", Capability: CapabilityGitWrite},
+	}
+	if err := ValidateBeginWriteback(command); err != nil {
+		t.Fatal(err)
+	}
+	command.GitAuthorization.IdempotencyKey = command.WriteAuthorization.IdempotencyKey
+	if !errors.Is(ValidateBeginWriteback(command), ErrWritebackInvalidInput) {
+		t.Fatal("duplicate authorization idempotency keys accepted")
+	}
+	command.GitAuthorization.IdempotencyKey = "git-key"
+	command.WriteAuthorization.Credential = strings.Repeat("x", MaxAuthorizationCredentialBytes+1)
+	if !errors.Is(ValidateBeginWriteback(command), ErrWritebackInvalidInput) {
+		t.Fatal("oversized authorization credential accepted")
+	}
+}
+
+func TestValidatePreparedAndGitIntentFields(t *testing.T) {
+	current := executionFromCreate(validCreateWriteback(), WritebackStatusPrepared)
+	prepared := CheckpointWriteback{ExecutionID: current.ID, ExpectedVersion: current.Version, Status: WritebackStatusFilePrepared, ResultHash: current.ResultHash, TemporaryRef: "tmp/e", BackupRef: "backup/e", FileByteSize: 10, FileMode: 0o644, FileLockToken: strings.Repeat("1", 64), FileResultLockToken: strings.Repeat("5", 64), FileBackupLockToken: strings.Repeat("6", 64)}
+	if err := ValidateWritebackCheckpoint(current, prepared); err != nil {
+		t.Fatal(err)
+	}
+	prepared.FileLockToken = ""
+	if !errors.Is(ValidateWritebackCheckpoint(current, prepared), ErrWritebackInvalidInput) {
+		t.Fatal("file_prepared without lock token accepted")
+	}
+	fileApplied := current
+	fileApplied.Status = WritebackStatusFileApplied
+	gitPrepared := CheckpointWriteback{ExecutionID: current.ID, ExpectedVersion: current.Version, Status: WritebackStatusGitPrepared, ResultHash: current.ResultHash, DiffHash: strings.Repeat("2", 64), BaseBlobID: strings.Repeat("3", 40), ResultBlobID: strings.Repeat("4", 40), BaseMode: GitFileModeRegular}
+	if err := ValidateWritebackCheckpoint(fileApplied, gitPrepared); err != nil {
+		t.Fatal(err)
+	}
+}

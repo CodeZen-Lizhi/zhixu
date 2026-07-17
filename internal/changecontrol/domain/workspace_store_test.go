@@ -21,15 +21,23 @@ func validPrepareWrite(targetPath string) PrepareWrite {
 }
 
 func preparedFromCommand(command PrepareWrite) PreparedWrite {
+	lockToken := strings.Repeat("b", 64)
+	prefix, err := WritebackLocatorPrefix(command.ExecutionID, lockToken)
+	if err != nil {
+		panic(err)
+	}
 	return PreparedWrite{
 		ExecutionID:        command.ExecutionID,
-		TemporaryRef:       "notes/.zhixu-writeback-execution-random.tmp",
+		TemporaryRef:       "notes/" + prefix + strings.Repeat("1", 32) + ".tmp",
+		BackupRef:          "notes/" + prefix + strings.Repeat("2", 32) + ".bak",
 		ExpectedBaseHash:   command.ExpectedBaseHash,
 		ApprovedChangeHash: command.ApprovedChangeHash,
 		ResultHash:         ComputeWritebackResultHash(command.Content),
 		ByteSize:           int64(len(command.Content)),
 		Mode:               0o640,
-		LockToken:          strings.Repeat("b", 64),
+		LockToken:          lockToken,
+		ResultLockToken:    strings.Repeat("c", 64),
+		BackupLockToken:    strings.Repeat("d", 64),
 	}
 }
 
@@ -37,13 +45,15 @@ func appliedFromPrepared(prepared PreparedWrite) AppliedWrite {
 	return AppliedWrite{
 		ExecutionID:        prepared.ExecutionID,
 		TemporaryRef:       prepared.TemporaryRef,
-		BackupRef:          "notes/.zhixu-writeback-execution-random.bak",
+		BackupRef:          prepared.BackupRef,
 		BaseHash:           prepared.ExpectedBaseHash,
 		ApprovedChangeHash: prepared.ApprovedChangeHash,
 		ResultHash:         prepared.ResultHash,
 		ByteSize:           prepared.ByteSize,
 		Mode:               prepared.Mode,
 		LockToken:          prepared.LockToken,
+		ResultLockToken:    prepared.ResultLockToken,
+		BackupLockToken:    prepared.BackupLockToken,
 	}
 }
 
@@ -118,6 +128,8 @@ func TestValidatePreparedWriteBinding(t *testing.T) {
 	}{
 		{name: "execution", mutate: func(value *PreparedWrite) { value.ExecutionID = "other" }},
 		{name: "temporary locator", mutate: func(value *PreparedWrite) { value.TemporaryRef = "../outside.tmp" }},
+		{name: "backup locator", mutate: func(value *PreparedWrite) { value.BackupRef = "notes/.zhixu-writeback-other.bak" }},
+		{name: "same locator", mutate: func(value *PreparedWrite) { value.BackupRef = value.TemporaryRef }},
 		{name: "temporary parent", mutate: func(value *PreparedWrite) { value.TemporaryRef = "other/.zhixu-writeback-execution-random.tmp" }},
 		{name: "base hash", mutate: func(value *PreparedWrite) { value.ExpectedBaseHash = strings.Repeat("c", 64) }},
 		{name: "change hash", mutate: func(value *PreparedWrite) { value.ApprovedChangeHash = strings.Repeat("d", 64) }},
@@ -125,6 +137,8 @@ func TestValidatePreparedWriteBinding(t *testing.T) {
 		{name: "byte size", mutate: func(value *PreparedWrite) { value.ByteSize++ }},
 		{name: "mode", mutate: func(value *PreparedWrite) { value.Mode = 0o10000 }},
 		{name: "lock token", mutate: func(value *PreparedWrite) { value.LockToken = "token" }},
+		{name: "result lock token", mutate: func(value *PreparedWrite) { value.ResultLockToken = "token" }},
+		{name: "backup lock token", mutate: func(value *PreparedWrite) { value.BackupLockToken = "token" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -160,6 +174,8 @@ func TestValidateAppliedWriteBinding(t *testing.T) {
 		{name: "byte size", mutate: func(value *AppliedWrite) { value.ByteSize++ }},
 		{name: "mode", mutate: func(value *AppliedWrite) { value.Mode = 0o600 }},
 		{name: "lock token", mutate: func(value *AppliedWrite) { value.LockToken = strings.Repeat("f", 64) }},
+		{name: "result lock token", mutate: func(value *AppliedWrite) { value.ResultLockToken = strings.Repeat("f", 64) }},
+		{name: "backup lock token", mutate: func(value *AppliedWrite) { value.BackupLockToken = strings.Repeat("f", 64) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -169,6 +185,39 @@ func TestValidateAppliedWriteBinding(t *testing.T) {
 				t.Fatalf("got %v, want identity conflict", err)
 			}
 		})
+	}
+}
+
+func TestValidateResumeWrite(t *testing.T) {
+	targetPath := "notes/a.md"
+	prepared := preparedFromCommand(validPrepareWrite(targetPath))
+	applied := appliedFromPrepared(prepared)
+	for _, resume := range []ResumeWrite{
+		{Prepared: prepared},
+		{Prepared: prepared, Applied: &applied},
+		{Prepared: prepared, Applied: &applied, CleanupMayHaveCompleted: true},
+		{Prepared: prepared, Applied: &applied, RestoreMayHaveCompleted: true},
+	} {
+		if err := ValidateResumeWrite(targetPath, resume); err != nil {
+			t.Fatalf("valid resume rejected: %+v: %v", resume, err)
+		}
+	}
+	invalid := applied
+	invalid.BackupRef = "notes/.zhixu-writeback-other.bak"
+	if !errors.Is(ValidateResumeWrite(targetPath, ResumeWrite{Prepared: prepared, Applied: &invalid}), ErrWritebackIdentityConflict) {
+		t.Fatal("mismatched applied resume accepted")
+	}
+	if !errors.Is(ValidateResumeWrite("other/a.md", ResumeWrite{Prepared: prepared}), ErrWritebackIdentityConflict) {
+		t.Fatal("wrong target parent accepted")
+	}
+	if !errors.Is(ValidateResumeWrite(targetPath, ResumeWrite{Prepared: prepared, CleanupMayHaveCompleted: true}), ErrWritebackInvalidInput) {
+		t.Fatal("cleanup replay without applied binding accepted")
+	}
+	if !errors.Is(ValidateResumeWrite(targetPath, ResumeWrite{Prepared: prepared, RestoreMayHaveCompleted: true}), ErrWritebackInvalidInput) {
+		t.Fatal("restore replay without applied binding accepted")
+	}
+	if !errors.Is(ValidateResumeWrite(targetPath, ResumeWrite{Prepared: prepared, Applied: &applied, CleanupMayHaveCompleted: true, RestoreMayHaveCompleted: true}), ErrWritebackInvalidInput) {
+		t.Fatal("ambiguous cleanup and restore replay accepted")
 	}
 }
 
@@ -189,6 +238,10 @@ type workspaceStoreStub struct{}
 
 func (workspaceStoreStub) AcquireTarget(context.Context, foundation.ID, string) (TargetLock, error) {
 	return targetLockStub{}, nil
+}
+
+func (workspaceStoreStub) ResumeTarget(context.Context, foundation.ID, string, ResumeWrite) (TargetLock, PreparedWrite, *AppliedWrite, error) {
+	return targetLockStub{}, PreparedWrite{}, nil, nil
 }
 
 type targetLockStub struct{}

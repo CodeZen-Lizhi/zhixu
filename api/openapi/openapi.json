@@ -474,6 +474,7 @@
           "revision_id": { "type": "string", "format": "uuid" },
           "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "decision": { "type": "string", "enum": ["approved", "rejected"] },
+          "approved_git_head": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" },
           "decided_at": { "type": "string", "format": "date-time" }
         },
         "additionalProperties": false

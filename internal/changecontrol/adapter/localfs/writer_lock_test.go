@@ -137,14 +137,14 @@ func TestWriterCloseAllowsReacquireAndPreservesLockFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lockPath := singleWriterLockFile(t, root)
+	lockPaths := writerLockFiles(t, root)
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatalf("second Close() failed: %v", err)
 	}
-	assertWriterLockFile(t, lockPath)
+	assertWriterLockFiles(t, lockPaths)
 
 	second, err := writer.AcquireTarget(context.Background(), writerLockTestWorkspaceID, "note.md")
 	if err != nil {
@@ -153,10 +153,10 @@ func TestWriterCloseAllowsReacquireAndPreservesLockFile(t *testing.T) {
 	if err := second.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if got := singleWriterLockFile(t, root); got != lockPath {
-		t.Fatalf("lock file changed across reacquire: got %q want %q", got, lockPath)
+	if got := writerLockFiles(t, root); !equalStrings(got, lockPaths) {
+		t.Fatalf("lock files changed across reacquire: got %q want %q", got, lockPaths)
 	}
-	assertWriterLockFile(t, lockPath)
+	assertWriterLockFiles(t, lockPaths)
 }
 
 func TestWriterTargetLockTimesOutAcrossProcessesAndProcessExitReleasesIt(t *testing.T) {
@@ -227,6 +227,47 @@ func TestWriterTargetLockUsesFileIdentityAcrossHardLinks(t *testing.T) {
 		t.Fatal("hard-link alias acquired a distinct lock for the same inode")
 	}
 	requireWriterLockError(t, err, foundation.ErrorRetryableFailure, "WRITEBACK_TARGET_LOCK_TIMEOUT")
+}
+
+func TestWriterPathLockRemainsHeldAcrossAtomicRename(t *testing.T) {
+	root := newWriterLockWorkspace(t)
+	targetPath := "note.md"
+	base := []byte("# target\n")
+	result := []byte("# updated\n")
+	writeWriterLockTarget(t, root, targetPath)
+	writer := newWriterLockWriter(t, root)
+
+	first, err := writer.AcquireTarget(context.Background(), writerLockTestWorkspaceID, targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := first.Prepare(context.Background(), prepareCommand(targetPath, base, result))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.CommitCAS(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	second, err := writer.AcquireTarget(ctx, writerLockTestWorkspaceID, targetPath)
+	cancel()
+	if second != nil {
+		_ = second.Close()
+		t.Fatal("same path acquired a new inode lock while the pre-rename writer was active")
+	}
+	requireWriterLockError(t, err, foundation.ErrorRetryableFailure, "WRITEBACK_TARGET_LOCK_TIMEOUT")
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reacquired, err := writer.AcquireTarget(context.Background(), writerLockTestWorkspaceID, targetPath)
+	if err != nil {
+		t.Fatalf("same path was not released after Close: %v", err)
+	}
+	if err := reacquired.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestWriterLockHelperProcess(t *testing.T) {
@@ -420,26 +461,40 @@ func requireWriterLockError(t *testing.T, err error, kind foundation.ErrorKind, 
 	}
 }
 
-func singleWriterLockFile(t *testing.T, root string) string {
+func writerLockFiles(t *testing.T, root string) []string {
 	t.Helper()
 	directory := filepath.Join(root, filepath.FromSlash(writebackLockDirectory))
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("lock file count = %d, want 1", len(entries))
+	if len(entries) != 2 {
+		t.Fatalf("lock file count = %d, want 2", len(entries))
 	}
-	return filepath.Join(directory, entries[0].Name())
+	return []string{filepath.Join(directory, entries[0].Name()), filepath.Join(directory, entries[1].Name())}
 }
 
-func assertWriterLockFile(t *testing.T, lockPath string) {
+func assertWriterLockFiles(t *testing.T, lockPaths []string) {
 	t.Helper()
-	info, err := os.Lstat(lockPath)
-	if err != nil {
-		t.Fatalf("persistent lock file is missing: %v", err)
+	for _, lockPath := range lockPaths {
+		info, err := os.Lstat(lockPath)
+		if err != nil {
+			t.Fatalf("persistent lock file is missing: %v", err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			t.Fatalf("lock file mode = %v, want regular 0600", info.Mode())
+		}
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		t.Fatalf("lock file mode = %v, want regular 0600", info.Mode())
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
 	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

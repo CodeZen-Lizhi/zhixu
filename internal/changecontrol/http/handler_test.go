@@ -17,11 +17,12 @@ import (
 )
 
 const (
-	testWorkspaceID foundation.ID = "10000000-0000-4000-8000-000000000001"
-	testProposalID  foundation.ID = "20000000-0000-4000-8000-000000000001"
-	testRevisionID  foundation.ID = "30000000-0000-4000-8000-000000000001"
-	testApprovalID  foundation.ID = "40000000-0000-4000-8000-000000000001"
-	testChangeHash                = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testWorkspaceID     foundation.ID = "10000000-0000-4000-8000-000000000001"
+	testProposalID      foundation.ID = "20000000-0000-4000-8000-000000000001"
+	testRevisionID      foundation.ID = "30000000-0000-4000-8000-000000000001"
+	testApprovalID      foundation.ID = "40000000-0000-4000-8000-000000000001"
+	testChangeHash                    = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testApprovedGitHead               = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 )
 
 func TestCreateProposalContract(t *testing.T) {
@@ -62,13 +63,19 @@ func TestCreateProposalRequiresIdempotencyKey(t *testing.T) {
 }
 
 func TestApprovalAndPreflightContracts(t *testing.T) {
+	approvedGitHead := testApprovedGitHead
 	service := &fakeService{
-		approval:  domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved},
+		approval:  domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead},
 		preflight: application.ApplyPreflightResult{ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, BaseHash: testChangeHash},
 	}
 	approval := serve(t, service, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/approvals", `{"revision_id":"`+string(testRevisionID)+`","change_hash":"`+testChangeHash+`","decision":"approved"}`)
 	if approval.Code != http.StatusCreated || service.decision != domain.DecisionApproved {
 		t.Fatalf("approval status=%d body=%s", approval.Code, approval.Body.String())
+	}
+	var responseApproval approvalResponse
+	decode(t, approval, &responseApproval)
+	if responseApproval.ApprovedGitHead == nil || *responseApproval.ApprovedGitHead != strings.ToLower(testApprovedGitHead) {
+		t.Fatalf("approval response=%#v", responseApproval)
 	}
 	preflight := serve(t, service, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/apply-preflight", `{"revision_id":"`+string(testRevisionID)+`","approved_change_hash":"`+testChangeHash+`"}`)
 	if preflight.Code != http.StatusOK {
@@ -81,6 +88,56 @@ func TestApprovalAndPreflightContracts(t *testing.T) {
 	}
 	if _, exists := response["eligible"]; exists {
 		t.Fatalf("deprecated authorization field exists: %#v", response)
+	}
+}
+
+func TestApprovalResponseOmitsGitHeadForRejectedAndHistoricalApproval(t *testing.T) {
+	approvedGitHead := strings.ToLower(testApprovedGitHead)
+	tests := []struct {
+		name     string
+		approval domain.Approval
+	}{
+		{
+			name:     "rejected",
+			approval: domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionRejected, ApprovedGitHead: &approvedGitHead},
+		},
+		{
+			name:     "historical approved without head",
+			approval: domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := serve(t, &fakeService{approval: test.approval}, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/approvals", `{"revision_id":"`+string(testRevisionID)+`","change_hash":"`+testChangeHash+`","decision":"`+string(test.approval.Decision)+`"}`)
+			if recorder.Code != http.StatusCreated {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var response map[string]any
+			decode(t, recorder, &response)
+			if _, exists := response["approved_git_head"]; exists {
+				t.Fatalf("approved_git_head must be omitted: %#v", response)
+			}
+		})
+	}
+}
+
+func TestProposalResponseIncludesApprovalGitHead(t *testing.T) {
+	now := time.Date(2026, 7, 17, 8, 0, 0, 0, time.UTC)
+	approvedGitHead := strings.Repeat("a", 64)
+	service := &fakeService{proposal: domain.Proposal{
+		ID: testProposalID, WorkspaceID: testWorkspaceID, TargetPath: "notes/a.md", Status: domain.StatusApproved,
+		CreatedAt: now, UpdatedAt: now,
+		Revision: domain.Revision{ID: testRevisionID, ProposalID: testProposalID, RevisionNo: 1, TargetPath: "notes/a.md", BaseHash: testChangeHash, Content: "new", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r", ChangeHash: testChangeHash, CreatedAt: now},
+		Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now},
+	}}
+	recorder := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID), "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response proposalResponse
+	decode(t, recorder, &response)
+	if response.Approval == nil || response.Approval.ApprovedGitHead == nil || *response.Approval.ApprovedGitHead != approvedGitHead {
+		t.Fatalf("response=%#v", response)
 	}
 }
 

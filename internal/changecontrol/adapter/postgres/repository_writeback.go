@@ -3,8 +3,11 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +18,308 @@ import (
 )
 
 var _ domain.WritebackRepository = (*Repository)(nil)
+var _ domain.WritebackSagaRepository = (*Repository)(nil)
+
+// BeginWriteback 在单一事务中校验 lease、消费双授权、创建 Execution 并推进 Proposal。
+// Credential 只在当前调用栈参与哈希绑定比较，绝不写入任何持久化字段。
+func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWriteback) (domain.WritebackExecution, error) {
+	command.IdempotencyKey = strings.TrimSpace(command.IdempotencyKey)
+	command.LeaseOwner = strings.TrimSpace(command.LeaseOwner)
+	if err := domain.ValidateBeginWriteback(command); err != nil {
+		return domain.WritebackExecution{}, writebackDomainError(err)
+	}
+	if err := domain.ValidateWritebackLeaseOwner(command.LeaseOwner); err != nil {
+		return domain.WritebackExecution{}, writebackDomainError(err)
+	}
+	command.WriteAuthorization.Credential = hashWritebackCredential(command.WriteAuthorization.Credential)
+	command.GitAuthorization.Credential = hashWritebackCredential(command.GitAuthorization.Credential)
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var now time.Time
+	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&now); err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_CLOCK_QUERY_FAILED")
+	}
+	now = now.UTC()
+
+	writeAuth, gitAuth, err := lockBeginAuthorizations(ctx, tx, command)
+	if err != nil {
+		return domain.WritebackExecution{}, err
+	}
+	if writeAuth.WorkspaceID != command.WorkspaceID || writeAuth.WorkflowRunID != command.WorkflowRunID || writeAuth.NodeRunID != command.NodeRunID || writeAuth.ProposalID != command.ProposalID || gitAuth.WorkspaceID != command.WorkspaceID || gitAuth.WorkflowRunID != command.WorkflowRunID || gitAuth.NodeRunID != command.NodeRunID || gitAuth.ProposalID != command.ProposalID {
+		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackIdentityConflict)
+	}
+	if writeAuth.RevisionID != gitAuth.RevisionID || writeAuth.ApprovalID != gitAuth.ApprovalID || !strings.EqualFold(writeAuth.ApprovedChangeHash, gitAuth.ApprovedChangeHash) || !strings.EqualFold(writeAuth.TargetVersion, gitAuth.TargetVersion) || writeAuth.Scope != gitAuth.Scope {
+		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackIdentityConflict)
+	}
+
+	// Proposal、Revision、Approval 以固定顺序锁定，正文/目标/Hash 全部从此处派生。
+	var proposalWorkspace, proposalStatus, targetPath, baseHash, content, revisionChangeHash string
+	var revisionProposal, approvalProposal, approvalRevision string
+	var approvalChangeHash, approvalDecision string
+	var approvalGitHead *string
+	var revisionID, approvalID string
+	err = tx.QueryRow(ctx, `
+		SELECT p.workspace_id::text,p.status,r.id::text,r.proposal_id::text,r.target_path,r.base_hash,r.content,r.change_hash,
+		       a.id::text,a.proposal_id::text,a.revision_id::text,a.change_hash,a.decision,a.approved_git_head
+		FROM change_control.proposal p
+		JOIN change_control.proposal_revision r ON r.id=$2 AND r.proposal_id=p.id
+		JOIN change_control.approval a ON a.id=$3 AND a.proposal_id=p.id AND a.revision_id=r.id
+		WHERE p.id=$1
+		FOR UPDATE OF p,r,a`, string(command.ProposalID), string(writeAuth.RevisionID), string(writeAuth.ApprovalID)).Scan(
+		&proposalWorkspace, &proposalStatus, &revisionID, &revisionProposal, &targetPath, &baseHash, &content, &revisionChangeHash,
+		&approvalID, &approvalProposal, &approvalRevision, &approvalChangeHash, &approvalDecision, &approvalGitHead)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.WritebackExecution{}, foundation.NewError(foundation.ErrorNotFound, "WRITEBACK_APPROVAL_NOT_FOUND", false, err)
+	}
+	if err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_APPROVAL_QUERY_FAILED")
+	}
+	if proposalWorkspace != string(command.WorkspaceID) || revisionProposal != string(command.ProposalID) || approvalProposal != string(command.ProposalID) || approvalRevision != revisionID || foundation.ID(revisionID) != writeAuth.RevisionID || foundation.ID(approvalID) != writeAuth.ApprovalID || approvalDecision != string(domain.DecisionApproved) || approvalGitHead == nil || !strings.EqualFold(revisionChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(approvalChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(baseHash, writeAuth.TargetVersion) {
+		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackIdentityConflict)
+	}
+
+	if err := validateBeginNodeLease(ctx, tx, command, now, writeAuth); err != nil {
+		return domain.WritebackExecution{}, err
+	}
+
+	resultHash := domain.ComputeWritebackResultHash([]byte(content))
+	if !strings.EqualFold(domain.ComputeChangeHash(targetPath, baseHash, content), writeAuth.ApprovedChangeHash) {
+		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackIdentityConflict)
+	}
+	// 幂等重放必须在授权消费前返回同一个 Durable Execution。
+	var existing domain.WritebackExecution
+	existing, existingErr := scanWritebackExecution(tx.QueryRow(ctx, `SELECT `+writebackColumns+` FROM change_control.writeback_execution WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, string(command.WorkspaceID), command.IdempotencyKey))
+	if existingErr == nil {
+		requested := existing
+		requested.ID = existing.ID
+		requested.WorkflowRunID, requested.NodeRunID = command.WorkflowRunID, command.NodeRunID
+		requested.ProposalID, requested.RevisionID, requested.ApprovalID = command.ProposalID, writeAuth.RevisionID, writeAuth.ApprovalID
+		requested.WriteAuthorizationID, requested.GitAuthorizationID = writeAuth.ID, gitAuth.ID
+		requested.TargetPath, requested.BaseHash, requested.ResultHash, requested.ApprovedChangeHash, requested.ApprovedGitHead = targetPath, baseHash, resultHash, writeAuth.ApprovedChangeHash, *approvalGitHead
+		if err := domain.ValidateWritebackIdentity(existing, requested); err != nil {
+			return domain.WritebackExecution{}, writebackDomainError(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_COMMIT_FAILED")
+		}
+		return existing, nil
+	}
+	if !errors.Is(existingErr, pgx.ErrNoRows) {
+		return domain.WritebackExecution{}, classifyWriteback(existingErr, "WRITEBACK_BEGIN_IDEMPOTENCY_QUERY_FAILED")
+	}
+	// consumed 只允许用于上面的 exact Execution replay。若授权曾被旧消费路径
+	// 单独消费却没有 Durable Execution，不能再次把同一凭据用于首次副作用。
+	if writeAuth.Status != domain.AuthorizationIssued || gitAuth.Status != domain.AuthorizationIssued {
+		return domain.WritebackExecution{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITEBACK_AUTHORIZATION_ALREADY_CONSUMED", false, errors.New("authorization was consumed without this writeback execution"))
+	}
+	if proposalStatus != string(domain.StatusApproved) {
+		return domain.WritebackExecution{}, foundation.NewError(foundation.ErrorVersionConflict, "WRITEBACK_PROPOSAL_STATE_CONFLICT", false, errors.New("proposal is no longer approved"))
+	}
+
+	// 授权消费与 Execution INSERT 处于同一事务；任一步失败都会回滚前面的消费。
+	if err := consumeBeginAuthorization(ctx, tx, writeAuth, now); err != nil {
+		return domain.WritebackExecution{}, err
+	}
+	if err := consumeBeginAuthorization(ctx, tx, gitAuth, now); err != nil {
+		return domain.WritebackExecution{}, err
+	}
+	executionID := command.ExecutionID
+	if executionID == "" {
+		executionID, err = foundation.NewUUIDGenerator(nil).New()
+		if err != nil {
+			return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_ID_GENERATION_FAILED")
+		}
+	}
+	requested := domain.CreateWriteback{ID: executionID, WorkspaceID: command.WorkspaceID, WorkflowRunID: command.WorkflowRunID, NodeRunID: command.NodeRunID, ProposalID: command.ProposalID, RevisionID: writeAuth.RevisionID, ApprovalID: writeAuth.ApprovalID, WriteAuthorizationID: writeAuth.ID, GitAuthorizationID: gitAuth.ID, TargetPath: targetPath, BaseHash: baseHash, ResultHash: resultHash, ApprovedChangeHash: strings.ToLower(writeAuth.ApprovedChangeHash), ApprovedGitHead: strings.ToLower(*approvalGitHead), IdempotencyKey: command.IdempotencyKey, CreatedAt: now}
+	if err := domain.ValidateWritebackCreate(requested); err != nil {
+		return domain.WritebackExecution{}, writebackDomainError(err)
+	}
+	persisted, err := scanWritebackExecution(tx.QueryRow(ctx, writebackInsert+` RETURNING `+writebackColumns,
+		string(requested.ID), string(requested.WorkspaceID), string(requested.WorkflowRunID), string(requested.NodeRunID), string(requested.ProposalID), string(requested.RevisionID), string(requested.ApprovalID), string(requested.WriteAuthorizationID), string(requested.GitAuthorizationID), requested.TargetPath, requested.BaseHash, requested.ResultHash, requested.ApprovedChangeHash, requested.ApprovedGitHead, string(domain.WritebackStatusPrepared), requested.IdempotencyKey, nil, nil, int64(1), now, now))
+	if err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_CREATE_FAILED")
+	}
+	proposalTag, err := tx.Exec(ctx, `UPDATE change_control.proposal SET status=$2,updated_at=$3,version=version+1 WHERE id=$1 AND workspace_id=$4 AND status=$5`, string(command.ProposalID), string(domain.StatusApplying), now, string(command.WorkspaceID), string(domain.StatusApproved))
+	if err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_PROPOSAL_FAILED")
+	}
+	if proposalTag.RowsAffected() != 1 {
+		return domain.WritebackExecution{}, foundation.NewError(foundation.ErrorVersionConflict, "WRITEBACK_PROPOSAL_STATE_CONFLICT", false, errors.New("proposal is no longer approved"))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_COMMIT_FAILED")
+	}
+	return persisted, nil
+}
+
+// ValidateWritebackLease 验证 execution 对应 Node 当前仍由 owner 持有有效租约。
+func (r *Repository) ValidateWritebackLease(ctx context.Context, id foundation.ID, owner string) error {
+	if err := domain.ValidateWritebackLeaseOwner(owner); err != nil {
+		return writebackDomainError(err)
+	}
+	var one int
+	err := r.db.QueryRow(ctx, `
+		SELECT 1 FROM change_control.writeback_execution e
+		JOIN workflow.node_run n ON n.id=e.node_run_id
+		WHERE e.id=$1 AND n.status='running' AND n.lease_owner=$2
+		  AND n.lease_until > CURRENT_TIMESTAMP LIMIT 1`, string(id), strings.TrimSpace(owner)).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return foundation.NewError(foundation.ErrorVersionConflict, "WRITEBACK_LEASE_LOST", true, domain.ErrWritebackLeaseLost)
+	}
+	if err != nil {
+		return classifyWriteback(err, "WRITEBACK_LEASE_QUERY_FAILED")
+	}
+	return nil
+}
+
+// FinalizeWritebackCleanup 只记录 cleanup 完成，不改变 Proposal/Execution 业务状态。
+func (r *Repository) FinalizeWritebackCleanup(ctx context.Context, executionID foundation.ID, expectedVersion int64, at time.Time) (domain.WritebackExecution, error) {
+	if executionID == "" || expectedVersion <= 0 {
+		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackInvalidInput)
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_CLEANUP_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	current, err := scanWritebackExecution(tx.QueryRow(ctx, `SELECT `+writebackColumns+` FROM change_control.writeback_execution WHERE id=$1 FOR UPDATE`, string(executionID)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.WritebackExecution{}, foundation.NewError(foundation.ErrorNotFound, "WRITEBACK_NOT_FOUND", false, err)
+	}
+	if err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_CLEANUP_QUERY_FAILED")
+	}
+	if current.Status != domain.WritebackStatusVerifying {
+		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackVersionConflict)
+	}
+	if current.CleanupCompletedAt != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_CLEANUP_COMMIT_FAILED")
+		}
+		return current, nil
+	}
+	if current.Version != expectedVersion {
+		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackVersionConflict)
+	}
+	var databaseNow time.Time
+	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&databaseNow); err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_CLEANUP_CLOCK_QUERY_FAILED")
+	}
+	// PostgreSQL Adapter 始终使用数据库可信时间；At 只保留在端口中供确定性 fake 使用。
+	at = databaseNow
+	updated, err := scanWritebackExecution(tx.QueryRow(ctx, `UPDATE change_control.writeback_execution SET cleanup_completed_at=$2,updated_at=$2,version=version+1 WHERE id=$1 AND version=$3 AND status=$4 RETURNING `+writebackColumns, string(executionID), at.UTC(), expectedVersion, string(domain.WritebackStatusVerifying)))
+	if err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_CLEANUP_UPDATE_FAILED")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_CLEANUP_COMMIT_FAILED")
+	}
+	return updated, nil
+}
+
+func lockBeginAuthorizations(ctx context.Context, tx pgx.Tx, command domain.BeginWriteback) (domain.ToolAuthorization, domain.ToolAuthorization, error) {
+	keys := []string{command.WriteAuthorization.IdempotencyKey, command.GitAuthorization.IdempotencyKey}
+	var ids []string
+	rows, err := tx.Query(ctx, `SELECT id::text FROM change_control.tool_authorization WHERE workspace_id=$1 AND idempotency_key = ANY($2::text[]) ORDER BY id`, string(command.WorkspaceID), keys)
+	if err != nil {
+		return domain.ToolAuthorization{}, domain.ToolAuthorization{}, classifyWriteback(err, "WRITEBACK_BEGIN_AUTHORIZATION_QUERY_FAILED")
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return domain.ToolAuthorization{}, domain.ToolAuthorization{}, classifyWriteback(err, "WRITEBACK_BEGIN_AUTHORIZATION_QUERY_FAILED")
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return domain.ToolAuthorization{}, domain.ToolAuthorization{}, classifyWriteback(err, "WRITEBACK_BEGIN_AUTHORIZATION_QUERY_FAILED")
+	}
+	if len(ids) != 2 || ids[0] == ids[1] {
+		return domain.ToolAuthorization{}, domain.ToolAuthorization{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITEBACK_AUTHORIZATION_NOT_FOUND", false, errors.New("both write authorizations are required"))
+	}
+	sort.Strings(ids)
+	auths := make([]domain.ToolAuthorization, 0, 2)
+	for _, id := range ids {
+		auth, err := scanAuthorization(tx.QueryRow(ctx, `SELECT `+authorizationColumns+` FROM change_control.tool_authorization WHERE id=$1 FOR UPDATE`, id))
+		if err != nil {
+			return domain.ToolAuthorization{}, domain.ToolAuthorization{}, classifyWriteback(err, "WRITEBACK_BEGIN_AUTHORIZATION_QUERY_FAILED")
+		}
+		auths = append(auths, auth)
+	}
+	var writeAuth, gitAuth domain.ToolAuthorization
+	for _, auth := range auths {
+		switch auth.Capability {
+		case domain.CapabilityWriteKnowledge:
+			writeAuth = auth
+		case domain.CapabilityGitWrite:
+			gitAuth = auth
+		}
+	}
+	if writeAuth.ID == "" || gitAuth.ID == "" {
+		return domain.ToolAuthorization{}, domain.ToolAuthorization{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITEBACK_AUTHORIZATION_BINDING_CONFLICT", false, errors.New("authorization capabilities are incomplete"))
+	}
+	if err := validateBeginAuthorization(writeAuth, command.WriteAuthorization); err != nil {
+		return domain.ToolAuthorization{}, domain.ToolAuthorization{}, err
+	}
+	if err := validateBeginAuthorization(gitAuth, command.GitAuthorization); err != nil {
+		return domain.ToolAuthorization{}, domain.ToolAuthorization{}, err
+	}
+	return writeAuth, gitAuth, nil
+}
+
+func validateBeginAuthorization(auth domain.ToolAuthorization, request domain.AuthorizationConsume) error {
+	if err := domain.ValidateAuthorizationConsumeBinding(auth, request); err != nil {
+		return foundation.NewError(foundation.ErrorVersionConflict, "WRITEBACK_AUTHORIZATION_BINDING_CONFLICT", false, err)
+	}
+	if auth.Status != domain.AuthorizationIssued && auth.Status != domain.AuthorizationConsumed {
+		return foundation.NewError(foundation.ErrorPermissionDenied, "WRITEBACK_AUTHORIZATION_NOT_USABLE", false, errors.New("authorization is not issued or consumed"))
+	}
+	return nil
+}
+
+func validateBeginNodeLease(ctx context.Context, tx pgx.Tx, command domain.BeginWriteback, now time.Time, auth domain.ToolAuthorization) error {
+	var status, owner string
+	var leaseUntil *time.Time
+	err := tx.QueryRow(ctx, `SELECT n.status,n.lease_owner,n.lease_until FROM workflow.run r JOIN workflow.node_run n ON n.run_id=r.id WHERE r.id=$1 AND n.id=$2 AND r.workspace_id=$3 FOR UPDATE OF r,n`, string(command.WorkflowRunID), string(command.NodeRunID), string(command.WorkspaceID)).Scan(&status, &owner, &leaseUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "WRITEBACK_WORKFLOW_CONTEXT_INVALID", false, err)
+	}
+	if err != nil {
+		return classifyWriteback(err, "WRITEBACK_WORKFLOW_CONTEXT_QUERY_FAILED")
+	}
+	if auth.WorkflowRunID != command.WorkflowRunID || auth.NodeRunID != command.NodeRunID || status != "running" || strings.TrimSpace(owner) != command.LeaseOwner || leaseUntil == nil || !leaseUntil.After(now) {
+		return foundation.NewError(foundation.ErrorVersionConflict, "WRITEBACK_LEASE_LOST", true, domain.ErrWritebackLeaseLost)
+	}
+	return nil
+}
+
+func consumeBeginAuthorization(ctx context.Context, tx pgx.Tx, auth domain.ToolAuthorization, now time.Time) error {
+	if auth.Status == domain.AuthorizationConsumed {
+		return nil
+	}
+	if auth.Status != domain.AuthorizationIssued || !now.Before(auth.ExpiresAt) {
+		return foundation.NewError(foundation.ErrorPermissionDenied, "WRITEBACK_AUTHORIZATION_EXPIRED", false, errors.New("authorization is expired"))
+	}
+	tag, err := tx.Exec(ctx, `UPDATE change_control.tool_authorization SET status='consumed',consumed_at=$2,version=version+1 WHERE id=$1 AND status='issued'`, string(auth.ID), now)
+	if err != nil {
+		return classifyWriteback(err, "WRITEBACK_AUTHORIZATION_CONSUME_FAILED")
+	}
+	if tag.RowsAffected() != 1 {
+		return foundation.NewError(foundation.ErrorVersionConflict, "WRITEBACK_AUTHORIZATION_CONSUME_CONFLICT", false, errors.New("authorization changed before consumption"))
+	}
+	return nil
+}
+
+func hashWritebackCredential(credential string) string {
+	digest := sha256.Sum256([]byte(credential))
+	return hex.EncodeToString(digest[:])
+}
 
 // CreateWritebackExecution 在任何文件副作用前创建或重放 Durable Writeback Execution。
 func (r *Repository) CreateWritebackExecution(ctx context.Context, command domain.CreateWriteback) (domain.WritebackExecution, error) {
@@ -105,6 +410,10 @@ func (r *Repository) CheckpointWritebackExecution(ctx context.Context, command d
 		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_CHECKPOINT_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	lockedProposalID, err := lockWritebackProposalFirst(ctx, tx, command.ExecutionID)
+	if err != nil {
+		return domain.WritebackExecution{}, err
+	}
 
 	current, err := scanWritebackExecution(tx.QueryRow(ctx, `SELECT `+writebackColumns+` FROM change_control.writeback_execution WHERE id=$1 FOR UPDATE`, string(command.ExecutionID)))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -112,6 +421,9 @@ func (r *Repository) CheckpointWritebackExecution(ctx context.Context, command d
 	}
 	if err != nil {
 		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_QUERY_FAILED")
+	}
+	if current.ProposalID != lockedProposalID {
+		return domain.WritebackExecution{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WRITEBACK_PROPOSAL_BINDING_CONFLICT", false, domain.ErrWritebackIdentityConflict)
 	}
 	command = normalizeCheckpointWriteback(current, command)
 	if err := domain.ValidateWritebackCheckpoint(current, command); err != nil {
@@ -128,11 +440,14 @@ func (r *Repository) CheckpointWritebackExecution(ctx context.Context, command d
 	updated, err := scanWritebackExecution(tx.QueryRow(ctx, `
 		UPDATE change_control.writeback_execution
 		SET status=$2,failure_code=$3,manual_recovery_required=$4,temporary_ref=$5,backup_ref=$6,
-			git_commit=$7,parent_git_commit=$8,diff_hash=$9,completed_at=$10,updated_at=$11,version=version+1
-		WHERE id=$1 AND version=$12 AND status=$13
+			file_byte_size=$7,file_mode=$8,file_lock_token=$9,file_result_lock_token=$10,file_backup_lock_token=$11,
+			base_blob_id=$12,result_blob_id=$13,base_mode=$14,git_commit=$15,parent_git_commit=$16,diff_hash=$17,
+			completed_at=$18,updated_at=$19,version=version+1
+		WHERE id=$1 AND version=$20 AND status=$21
 		RETURNING `+writebackColumns,
 		string(current.ID), string(command.Status), nullableString(command.FailureCode), command.ManualRecoveryRequired,
-		nullableString(command.TemporaryRef), nullableString(command.BackupRef), nullableString(command.GitCommit),
+		nullableString(command.TemporaryRef), nullableString(command.BackupRef), nullableInt64(command.FileByteSize), nullableUint32(command.FileMode), nullableString(command.FileLockToken),
+		nullableString(command.FileResultLockToken), nullableString(command.FileBackupLockToken), nullableString(command.BaseBlobID), nullableString(command.ResultBlobID), nullableString(command.BaseMode), nullableString(command.GitCommit),
 		nullableString(command.ParentGitCommit), nullableString(command.DiffHash), command.CompletedAt, databaseNow.UTC(),
 		command.ExpectedVersion, string(current.Status)))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -161,6 +476,10 @@ func (r *Repository) PublishWriteback(ctx context.Context, command domain.Publis
 		return domain.PublishWritebackResult{}, classifyWriteback(err, "WRITEBACK_PUBLISH_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	lockedProposalID, err := lockWritebackProposalFirst(ctx, tx, command.ExecutionID)
+	if err != nil {
+		return domain.PublishWritebackResult{}, err
+	}
 
 	current, err := scanWritebackExecution(tx.QueryRow(ctx, `SELECT `+writebackColumns+` FROM change_control.writeback_execution WHERE id=$1 FOR UPDATE`, string(command.ExecutionID)))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -168,6 +487,9 @@ func (r *Repository) PublishWriteback(ctx context.Context, command domain.Publis
 	}
 	if err != nil {
 		return domain.PublishWritebackResult{}, classifyWriteback(err, "WRITEBACK_QUERY_FAILED")
+	}
+	if current.ProposalID != lockedProposalID {
+		return domain.PublishWritebackResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WRITEBACK_PROPOSAL_BINDING_CONFLICT", false, domain.ErrWritebackIdentityConflict)
 	}
 	if current.Status == domain.WritebackStatusVerifying {
 		result, replayErr := replayPublishedWriteback(ctx, tx, current, command)
@@ -218,7 +540,7 @@ func (r *Repository) PublishWriteback(ctx context.Context, command domain.Publis
 	return domain.PublishWritebackResult{Execution: updated, Commit: commit}, nil
 }
 
-const writebackColumns = `id::text,workspace_id::text,workflow_run_id::text,node_run_id::text,proposal_id::text,revision_id::text,approval_id::text,write_authorization_id::text,git_authorization_id::text,target_path,base_hash,result_hash,approved_change_hash,approved_git_head,git_commit,parent_git_commit,diff_hash,status,idempotency_key,failure_code,manual_recovery_required,temporary_ref,backup_ref,version,created_at,updated_at,completed_at`
+const writebackColumns = `id::text,workspace_id::text,workflow_run_id::text,node_run_id::text,proposal_id::text,revision_id::text,approval_id::text,write_authorization_id::text,git_authorization_id::text,target_path,base_hash,result_hash,approved_change_hash,approved_git_head,git_commit,parent_git_commit,diff_hash,status,idempotency_key,failure_code,manual_recovery_required,temporary_ref,backup_ref,file_byte_size,file_mode,file_lock_token,file_result_lock_token,file_backup_lock_token,base_blob_id,result_blob_id,base_mode,version,created_at,updated_at,completed_at,cleanup_completed_at`
 
 const writebackInsert = `INSERT INTO change_control.writeback_execution(
 	id,workspace_id,workflow_run_id,node_run_id,proposal_id,revision_id,approval_id,write_authorization_id,git_authorization_id,
@@ -231,12 +553,15 @@ func scanWritebackExecution(row pgx.Row) (domain.WritebackExecution, error) {
 	var execution domain.WritebackExecution
 	var id, workspaceID, runID, nodeID, proposalID, revisionID, approvalID, writeAuthorizationID, gitAuthorizationID string
 	var status string
-	var gitCommit, parentGitCommit, diffHash, failureCode, temporaryRef, backupRef *string
+	var gitCommit, parentGitCommit, diffHash, failureCode, temporaryRef, backupRef, fileLockToken, fileResultLockToken, fileBackupLockToken, baseBlobID, resultBlobID, baseMode *string
+	var fileByteSize *int64
+	var fileMode *int32
 	err := row.Scan(
 		&id, &workspaceID, &runID, &nodeID, &proposalID, &revisionID, &approvalID, &writeAuthorizationID, &gitAuthorizationID,
 		&execution.TargetPath, &execution.BaseHash, &execution.ResultHash, &execution.ApprovedChangeHash, &execution.ApprovedGitHead,
 		&gitCommit, &parentGitCommit, &diffHash, &status, &execution.IdempotencyKey, &failureCode, &execution.ManualRecoveryRequired,
-		&temporaryRef, &backupRef, &execution.Version, &execution.CreatedAt, &execution.UpdatedAt, &execution.CompletedAt,
+		&temporaryRef, &backupRef, &fileByteSize, &fileMode, &fileLockToken, &fileResultLockToken, &fileBackupLockToken, &baseBlobID, &resultBlobID, &baseMode,
+		&execution.Version, &execution.CreatedAt, &execution.UpdatedAt, &execution.CompletedAt, &execution.CleanupCompletedAt,
 	)
 	if err != nil {
 		return domain.WritebackExecution{}, err
@@ -247,6 +572,15 @@ func scanWritebackExecution(row pgx.Row) (domain.WritebackExecution, error) {
 	execution.Status = domain.WritebackStatus(status)
 	execution.GitCommit, execution.ParentGitCommit, execution.DiffHash = stringValue(gitCommit), stringValue(parentGitCommit), stringValue(diffHash)
 	execution.FailureCode, execution.TemporaryRef, execution.BackupRef = stringValue(failureCode), stringValue(temporaryRef), stringValue(backupRef)
+	execution.FileLockToken = stringValue(fileLockToken)
+	execution.FileResultLockToken, execution.FileBackupLockToken = stringValue(fileResultLockToken), stringValue(fileBackupLockToken)
+	execution.BaseBlobID, execution.ResultBlobID, execution.BaseMode = stringValue(baseBlobID), stringValue(resultBlobID), stringValue(baseMode)
+	if fileByteSize != nil {
+		execution.FileByteSize = *fileByteSize
+	}
+	if fileMode != nil {
+		execution.FileMode = uint32(*fileMode)
+	}
 	return execution, nil
 }
 
@@ -392,6 +726,25 @@ func updateProposalForWriteback(ctx context.Context, tx pgx.Tx, proposalID found
 	return nil
 }
 
+// lockWritebackProposalFirst 统一需要同时更新 Proposal/Execution 的事务锁序。
+// Execution 的 proposal_id 由数据库触发器保证不可变，因此可先无锁读取身份，
+// 再锁 Proposal，最后由调用方锁 Execution，避免与 legacy Create trigger 反向死锁。
+func lockWritebackProposalFirst(ctx context.Context, tx pgx.Tx, executionID foundation.ID) (foundation.ID, error) {
+	var proposalID string
+	if err := tx.QueryRow(ctx, `SELECT proposal_id::text FROM change_control.writeback_execution WHERE id=$1`, string(executionID)).Scan(&proposalID); errors.Is(err, pgx.ErrNoRows) {
+		return "", foundation.NewError(foundation.ErrorNotFound, "WRITEBACK_NOT_FOUND", false, err)
+	} else if err != nil {
+		return "", classifyWriteback(err, "WRITEBACK_QUERY_FAILED")
+	}
+	var lockedID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM change_control.proposal WHERE id=$1 FOR UPDATE`, proposalID).Scan(&lockedID); errors.Is(err, pgx.ErrNoRows) {
+		return "", foundation.NewError(foundation.ErrorConsistencyViolation, "WRITEBACK_PROPOSAL_BINDING_CONFLICT", false, err)
+	} else if err != nil {
+		return "", classifyWriteback(err, "WRITEBACK_PROPOSAL_LOCK_FAILED")
+	}
+	return foundation.ID(lockedID), nil
+}
+
 func proposalStatusForCheckpoint(status domain.WritebackStatus) (domain.ProposalStatus, bool) {
 	switch status {
 	case domain.WritebackStatusGitCommitted:
@@ -429,6 +782,11 @@ func normalizeCreateWriteback(command domain.CreateWriteback) domain.CreateWrite
 
 func normalizeCheckpointWriteback(current domain.WritebackExecution, command domain.CheckpointWriteback) domain.CheckpointWriteback {
 	command.ResultHash = strings.ToLower(command.ResultHash)
+	command.FileLockToken = strings.ToLower(command.FileLockToken)
+	command.FileResultLockToken = strings.ToLower(command.FileResultLockToken)
+	command.FileBackupLockToken = strings.ToLower(command.FileBackupLockToken)
+	command.BaseBlobID = strings.ToLower(command.BaseBlobID)
+	command.ResultBlobID = strings.ToLower(command.ResultBlobID)
 	command.GitCommit = strings.ToLower(command.GitCommit)
 	command.ParentGitCommit = strings.ToLower(command.ParentGitCommit)
 	command.DiffHash = strings.ToLower(command.DiffHash)
@@ -440,6 +798,30 @@ func normalizeCheckpointWriteback(current domain.WritebackExecution, command dom
 	}
 	if command.BackupRef == "" {
 		command.BackupRef = current.BackupRef
+	}
+	if command.FileByteSize == 0 {
+		command.FileByteSize = current.FileByteSize
+	}
+	if command.FileMode == 0 {
+		command.FileMode = current.FileMode
+	}
+	if command.FileLockToken == "" {
+		command.FileLockToken = current.FileLockToken
+	}
+	if command.FileResultLockToken == "" {
+		command.FileResultLockToken = current.FileResultLockToken
+	}
+	if command.FileBackupLockToken == "" {
+		command.FileBackupLockToken = current.FileBackupLockToken
+	}
+	if command.BaseBlobID == "" {
+		command.BaseBlobID = current.BaseBlobID
+	}
+	if command.ResultBlobID == "" {
+		command.ResultBlobID = current.ResultBlobID
+	}
+	if command.BaseMode == "" {
+		command.BaseMode = current.BaseMode
 	}
 	if command.GitCommit == "" {
 		command.GitCommit = current.GitCommit
@@ -493,6 +875,20 @@ func nullableString(value string) any {
 	return value
 }
 
+func nullableInt64(value int64) any {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
+
+func nullableUint32(value uint32) any {
+	if value == 0 {
+		return nil
+	}
+	return int32(value)
+}
+
 func stringValue(value *string) string {
 	if value == nil {
 		return ""
@@ -512,6 +908,8 @@ func writebackDomainError(err error) error {
 		return foundation.NewError(foundation.ErrorVersionConflict, "WRITEBACK_STATUS_CONFLICT", false, err)
 	case errors.Is(err, domain.ErrWritebackPublishBindingConflict):
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "WRITEBACK_PUBLISH_BINDING_CONFLICT", false, err)
+	case errors.Is(err, domain.ErrWritebackLeaseLost):
+		return foundation.NewError(foundation.ErrorVersionConflict, "WRITEBACK_LEASE_LOST", true, err)
 	default:
 		return foundation.NewError(foundation.ErrorNonRetryableFailure, "WRITEBACK_FAILED", false, err)
 	}

@@ -66,11 +66,33 @@ func NewWritebackClient(git Client, workspaces WorkspaceRepository) (*WritebackC
 	}, nil
 }
 
-// Inspect 验证 Workspace 根、attached HEAD、对象格式、作者身份和全仓 clean 基线。
+// CaptureApprovalSnapshot 从服务端 Workspace 捕获当前 attached、全仓 clean 的审批 Git 基线。
+func (c *WritebackClient) CaptureApprovalSnapshot(ctx context.Context, workspaceID foundation.ID) (changecontrol.GitSnapshot, error) {
+	if !validWritebackWorkspaceID(workspaceID) {
+		return changecontrol.GitSnapshot{}, gitWritebackError(foundation.ErrorInvalidInput, "GIT_INSPECT_INPUT_INVALID", false, changecontrol.ErrGitInvalidInput)
+	}
+	return c.inspectCurrentSnapshot(ctx, workspaceID)
+}
+
+// Inspect 验证 Workspace 当前严格快照仍与批准 HEAD 完全一致。
 func (c *WritebackClient) Inspect(ctx context.Context, workspaceID foundation.ID, approvedHead string) (changecontrol.GitSnapshot, error) {
 	if !validWritebackWorkspaceID(workspaceID) || !changecontrol.ValidGitObjectID(approvedHead) {
 		return changecontrol.GitSnapshot{}, gitWritebackError(foundation.ErrorInvalidInput, "GIT_INSPECT_INPUT_INVALID", false, changecontrol.ErrGitInvalidInput)
 	}
+	snapshot, err := c.inspectCurrentSnapshot(ctx, workspaceID)
+	if err != nil {
+		return changecontrol.GitSnapshot{}, err
+	}
+	if !strings.EqualFold(snapshot.Head, approvedHead) {
+		return changecontrol.GitSnapshot{}, gitWritebackError(foundation.ErrorVersionConflict, "GIT_HEAD_CONFLICT", false, changecontrol.ErrGitVersionConflict)
+	}
+	if err := changecontrol.ValidateGitSnapshotBinding(workspaceID, approvedHead, snapshot); err != nil {
+		return changecontrol.GitSnapshot{}, gitWritebackError(foundation.ErrorConsistencyViolation, "GIT_SNAPSHOT_BINDING_INVALID", false, err)
+	}
+	return snapshot, nil
+}
+
+func (c *WritebackClient) inspectCurrentSnapshot(ctx context.Context, workspaceID foundation.ID) (changecontrol.GitSnapshot, error) {
 	root, err := c.resolveWritebackRoot(ctx, workspaceID)
 	if err != nil {
 		return changecontrol.GitSnapshot{}, err
@@ -86,18 +108,9 @@ func (c *WritebackClient) Inspect(ctx context.Context, workspaceID foundation.ID
 	if err != nil {
 		return changecontrol.GitSnapshot{}, err
 	}
-	if !strings.EqualFold(head, approvedHead) {
-		return changecontrol.GitSnapshot{}, gitWritebackError(foundation.ErrorVersionConflict, "GIT_HEAD_CONFLICT", false, changecontrol.ErrGitVersionConflict)
-	}
-	branch, err := c.git.output(ctx, root, "symbolic-ref", "--quiet", "--short", "HEAD")
+	branch, err := c.readAttachedBranch(ctx, root)
 	if err != nil {
-		if isExitCode(err, 1) {
-			return changecontrol.GitSnapshot{}, gitWritebackError(foundation.ErrorVersionConflict, "GIT_REPOSITORY_DETACHED", false, changecontrol.ErrGitVersionConflict)
-		}
-		return changecontrol.GitSnapshot{}, classifyGitReadError("GIT_BRANCH_INSPECT_FAILED", err)
-	}
-	if strings.TrimSpace(branch) == "" || strings.ContainsFunc(branch, unicode.IsControl) {
-		return changecontrol.GitSnapshot{}, gitWritebackError(foundation.ErrorConsistencyViolation, "GIT_BRANCH_INVALID", false, changecontrol.ErrGitConsistencyViolation)
+		return changecontrol.GitSnapshot{}, err
 	}
 	if err := c.ensureNoTrackedContentFilters(ctx, root); err != nil {
 		return changecontrol.GitSnapshot{}, err
@@ -132,7 +145,7 @@ func (c *WritebackClient) Inspect(ctx context.Context, workspaceID foundation.ID
 		ObjectFormat: objectFormat,
 		Clean:        true,
 	}
-	if err := changecontrol.ValidateGitSnapshotBinding(workspaceID, approvedHead, snapshot); err != nil {
+	if err := changecontrol.ValidateGitSnapshotBinding(workspaceID, head, snapshot); err != nil {
 		return changecontrol.GitSnapshot{}, gitWritebackError(foundation.ErrorConsistencyViolation, "GIT_SNAPSHOT_BINDING_INVALID", false, err)
 	}
 	return snapshot, nil
@@ -156,6 +169,9 @@ func (c *WritebackClient) DiffApproved(ctx context.Context, request changecontro
 	}
 	if !strings.EqualFold(head, request.ApprovedGitHead) {
 		return changecontrol.GitDiff{}, gitWritebackError(foundation.ErrorVersionConflict, "GIT_HEAD_CONFLICT", false, changecontrol.ErrGitVersionConflict)
+	}
+	if _, err := c.readAttachedBranch(ctx, root); err != nil {
+		return changecontrol.GitDiff{}, err
 	}
 	if err := c.ensureNoOperationInProgress(ctx, root); err != nil {
 		return changecontrol.GitDiff{}, err
@@ -334,6 +350,21 @@ func (c *WritebackClient) readRepositoryHead(ctx context.Context, root string) (
 		return "", gitWritebackError(foundation.ErrorConsistencyViolation, "GIT_HEAD_INVALID", false, changecontrol.ErrGitConsistencyViolation)
 	}
 	return strings.ToLower(head), nil
+}
+
+func (c *WritebackClient) readAttachedBranch(ctx context.Context, root string) (string, error) {
+	branch, err := c.git.output(ctx, root, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil {
+		if isExitCode(err, 1) {
+			return "", gitWritebackError(foundation.ErrorVersionConflict, "GIT_REPOSITORY_DETACHED", false, changecontrol.ErrGitVersionConflict)
+		}
+		return "", classifyGitReadError("GIT_BRANCH_INSPECT_FAILED", err)
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" || strings.ContainsFunc(branch, unicode.IsControl) {
+		return "", gitWritebackError(foundation.ErrorConsistencyViolation, "GIT_BRANCH_INVALID", false, changecontrol.ErrGitConsistencyViolation)
+	}
+	return branch, nil
 }
 
 func (c *WritebackClient) ensureNoOperationInProgress(ctx context.Context, root string) error {
