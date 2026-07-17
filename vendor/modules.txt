@@ -31,6 +31,12 @@ github.com/jackc/puddle/v2/internal/genstack
 # github.com/mfridman/interpolate v0.0.2
 ## explicit; go 1.19
 github.com/mfridman/interpolate
+# github.com/pgvector/pgvector-go v0.4.0
+## explicit; go 1.25.0
+github.com/pgvector/pgvector-go
+# github.com/pgvector/pgvector-go/pgx v0.4.0
+## explicit; go 1.25.0
+github.com/pgvector/pgvector-go/pgx
 # github.com/pmezard/go-difflib v1.0.0
 ## explicit
 github.com/pmezard/go-difflib/difflib
@@ -122,6 +128,9 @@ github.com/tidwall/pretty
 # github.com/tidwall/sjson v1.2.5
 ## explicit; go 1.14
 github.com/tidwall/sjson
+# github.com/x448/float16 v0.8.4
+## explicit; go 1.11
+github.com/x448/float16
 # github.com/yuin/goldmark v1.8.4
 ## explicit; go 1.22
 github.com/yuin/goldmark

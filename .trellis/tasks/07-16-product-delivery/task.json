@@ -32,7 +32,8 @@
     "07-17-m5-ingestion-parser",
     "07-17-m5-write-authorization",
     "07-17-m5-safe-writeback",
-    "07-17-river-workflow-runtime"
+    "07-17-river-workflow-runtime",
+    "07-17-retrieval-indexing-search"
   ],
   "parent": null,
   "relatedFiles": [],

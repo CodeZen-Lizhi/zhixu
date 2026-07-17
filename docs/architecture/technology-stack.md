@@ -15,7 +15,7 @@
 | 语言 | Go | API、Worker、领域模块 |
 | HTTP | net/http + chi | REST、Middleware、SSE |
 | PostgreSQL Driver | pgx | 连接池、事务、COPY |
-| SQL | sqlc | 类型安全查询，保留 SQL 控制 |
+| SQL | pgx 参数化手写 SQL；sqlc 尚未配置 | 当前沿用现有 Repository 风格，后续引入需单独迁移门禁 |
 | Migration | Goose | 前向迁移与版本管理 |
 | Job Queue | River | PostgreSQL Job、重试、Worker |
 | Logging | slog | 结构化日志 |
@@ -29,6 +29,10 @@ M4-D 已提供项目自有 Logger/Metrics/Tracer/Provider 接口、bounded label
 没有注入 OpenTelemetry exporter factory：optional 明确 degraded，required
 fail-fast；在真实 Adapter 和部署 smoke 完成前不得宣称外部 Telemetry 已启用。
 
+M6-A 已锁定官方 `pgvector-go/pgx v0.4.0`（MIT）作为 pgx 向量编解码与连接类型注册实现；
+迁移入口使用不注册扩展类型的专用 Pool，避免空库创建 `vector` 扩展前启动失败。当前不锁定
+全局 HNSW 参数，固定维度部分索引必须在真实模型与容量评测后单独落地。
+
 ## 3. 数据
 
 | 能力 | 选择 |
@@ -36,7 +40,7 @@ fail-fast；在真实 Adapter 和部署 smoke 完成前不得宣称外部 Teleme
 | 主数据库 | PostgreSQL |
 | 向量 | pgvector |
 | 全文 | PostgreSQL FTS |
-| 向量索引 | HNSW |
+| 向量索引 | exact scan 基线；固定维度容量评测后使用部分表达式 HNSW |
 | 图谱 | Relation 表 + PostgreSQL 查询投影 |
 | 任务 | River 表 + Workflow 领域表 |
 

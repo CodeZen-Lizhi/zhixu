@@ -584,10 +584,13 @@ evaluation_result：
 
 Index Version 表示某个 Workspace 的可追踪完整检索投影，包含 FTS、向量及其构建配置。
 
-- id、workspace_id、status（building、active、failed、retired 等）、degraded_capabilities JSONB、manifest_hash。
-- parser_version、chunk_strategy_version、embedding_version_id、rerank_version、schema_version。
-- source_snapshot_ref、built_at、activated_at、failure_summary、created_at。
-- embedding_version 记录 provider、model、dimensions、normalization、config_hash。
+- id、workspace_id、status（building、ready、active、retiring、archived、failed）、
+  degraded_capabilities JSONB、manifest_hash、expected_chunk_count、idempotency_key、version。
+- tokenizer_id、tokenizer_version、tokenizer_config_hash、fusion_config、
+  embedding_version_id、source_snapshot_ref。
+- built_at、activated_at、retired_at、archived_at、failed_at、failure_code、created_at、updated_at。
+- embedding_version 记录 provider、adapter name/version、model、dimensions、normalization、
+  distance_metric、config_hash；不保存 API Key 或 Endpoint Credential。
 
 约束和执行规则：
 
@@ -595,6 +598,11 @@ Index Version 表示某个 Workspace 的可追踪完整检索投影，包含 FTS
 - Chunk/Embedding 投影必须引用 Index Version；旧版本可保留用于回滚或重建，但默认 RAG 只读取最新批准正式 Revision 的活动索引。
 - 同一 Index Version 的向量维度固定；维度或模型配置变化创建新 Embedding/Index Version，不在旧版本混写。
 - Index Module 负责构建和激活，Workspace/Database 约束负责唯一活动版本和引用完整性；Embedding 可重建，不属于永久备份最低要求。
+- Manifest 保存 Chunk ID、Content Hash、Sequence、Parser/Chunk Strategy/Schema Version；创建后
+  不允许更新或删除。Projection 只引用 Canonical Chunk，不复制正文。
+- Activation 是 append-only 切换 Receipt，保存 `activate|rollback` 类型、目标/上一 Index 及
+  切换后版本。首次激活、替换和回滚均锁定 Workspace Index 集合，旧 Active→Retiring、
+  新目标→Active 与 Receipt append 必须同事务提交；延迟重放按 Receipt 重建历史结果快照。
 
 ### human_task
 
@@ -694,9 +702,11 @@ embedding_version：
 
 ### Vector
 
-- 先 HNSW。
-- 通过压测调整 ef_search、m 和 ef_construction。
-- 数据量很小时允许精确扫描。
+- M6-A 使用可变维度 `vector` 支持多个 Embedding Version 共存，并在写入时校验版本维度、
+  非空、有限值和非零范数。
+- 当前不建立跨维度全局 HNSW；数据量较小时使用 exact scan 作为可验证基线。
+- 真实模型、固定维度和容量基线明确后，再按 Embedding Version/维度建立部分表达式 HNSW，
+  并通过压测调整 ef_search、m 和 ef_construction。
 
 ### Relation
 

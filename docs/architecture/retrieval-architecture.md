@@ -172,6 +172,7 @@ stateDiagram-v2
     Building --> Failed
     Ready --> Active
     Active --> Retiring
+    Retiring --> Active: RollbackActivate
     Retiring --> Archived
 ```
 
@@ -182,6 +183,23 @@ stateDiagram-v2
 3. 运行检索评测。
 4. 原子更新 active_index_version。
 5. 保留旧版本观察窗口。
+
+M6-A 已锁定以下实现契约：
+
+- `embedding_version`、`index_version`、`index_manifest_chunk`、`chunk_projection`、
+  `index_activation` 是 Retrieval 数据库事实；Canonical Chunk 正文仍只属于 Ingestion。
+- Begin Index 在同一事务冻结 Manifest，Application 按稳定排序重新计算 SHA-256，数据库
+  冻结 Hash、Count 与逐 Chunk 版本绑定。
+- Lexical Builder 通过单条 `INSERT ... SELECT` 从 Manifest 生成 `simple` tsvector；向量批次
+  只能更新既有 lexical-ready 行，不能接收或覆盖 `search_vector`。
+- M6-A 的 `simple` Tokenizer 将 PostgreSQL `simple` tsvector 的 lexeme 数作为确定性
+  `token_count` 基线；它不是外部 Embedding 模型的计费 Token。更换真实 Tokenizer 必须创建
+  新 Tokenizer/Index Version，不能在旧 Projection 中改写计数。
+- 正常激活和回滚激活都追加 Activation 记录，并在一个 PostgreSQL 事务中切换状态；通用
+  Transition 不能进入 Active。
+- 当前向量列使用可变维度 `vector`，每个 Embedding Version 校验固定维度。M6-A 不建立
+  跨维度全局 ANN 索引；先保留 exact scan 基线，待真实模型和容量评测后按固定维度建立
+  部分表达式 HNSW 索引。
 
 ## 15. 增量索引
 

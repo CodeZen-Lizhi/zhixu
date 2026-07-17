@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-适用于 PostgreSQL、pgvector、Goose 迁移、sqlc 查询、River 任务表以及各领域模块的 Repository/Projection 实现。当前没有数据库迁移或 Go 代码，以下内容是已确认的设计约束和 M1 实现门禁。
+适用于 PostgreSQL、pgvector、Goose 迁移、pgx 参数化查询、River 任务表以及各领域模块的 Repository/Projection 实现。仓库当前尚未配置 sqlc，Repository 沿用显式列、参数化手写 SQL；若后续引入 sqlc，必须作为独立迁移任务验证生成与兼容性。
 
 ## 已确认事实
 
@@ -11,7 +11,7 @@
 - `workflow.run`、`workflow.node_run`、`workflow.outbox_event` 的 M4-A Runtime identity 字段允许完整 NULL 的 legacy tuple 或完整非 NULL 的 Runtime tuple；active legacy 行由新 Runtime Application/UoW 返回 `WORKFLOW_LEGACY_RUNTIME_UNSUPPORTED`，数据库不猜测回填。
 
 - PostgreSQL 是领域数据、投影和运行数据的主数据库；pgvector 保存向量，PostgreSQL FTS 保存全文索引（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 第 3 节）。
-- PostgreSQL 驱动为 pgx，SQL 访问采用 sqlc，迁移采用 Goose，River 只负责可运行 Job 的投递和 Worker 获取，不是 Workflow 业务事实源（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 与 [`workflow-engine.md`](../../../docs/architecture/workflow-engine.md)）。
+- PostgreSQL 驱动为 pgx，当前 SQL 访问采用参数化手写查询，迁移采用 Goose，River 只负责可运行 Job 的投递和 Worker 获取，不是 Workflow 业务事实源（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 与 [`workflow-engine.md`](../../../docs/architecture/workflow-engine.md)）。
 - 事务边界由维护不变量的领域模块控制：Proposal/Approval、Workflow Node、Review Answer、Relation Confirm 等在数据库内使用 ACID；文件和 Git 不放入数据库事务。
 - Source Version、Article Revision、Proposal Revision、Workflow Definition/Run、Embedding/Index Version 等必须有版本、哈希或状态约束；重复消息不得创建重复 Node、Tool Call、Answer 或 Health Issue。
 - 查询必须支持稳定排序和 cursor 分页；大集合、图谱邻居和 Collection 结果禁止无分页返回（依据 [`api-and-events.md`](../../../docs/architecture/api-and-events.md)）。
@@ -26,7 +26,7 @@
 
 ## 查询模式
 
-1. 通过 sqlc 生成类型安全查询；SQL 必须显式列出字段，避免生产路径使用 `SELECT *`。
+1. SQL 必须显式列出字段并参数化，避免生产路径使用 `SELECT *`；若采用 sqlc，生成类型不得泄漏到领域层。
 2. 所有外部输入使用参数化参数，动态过滤通过受限 Query AST/白名单映射生成，禁止字符串拼接。
 3. 列表查询使用稳定排序字段加稳定 ID 作为游标边界，并限制最大 `limit`；不使用无界 offset 扫描承载大列表。
 4. Embedding、解析、索引和健康扫描使用批量操作；禁止逐 Chunk、逐行循环远程调用或循环查库造成 N+1。
@@ -55,7 +55,7 @@
 ## 禁止模式
 
 - 在业务代码里拼接 SQL、表名或排序字段；不得把用户输入作为 SQL 标识符。
-- 用 ORM/手写 Map 代替已确定的 sqlc 查询边界，或把 sqlc 生成类型泄漏到领域层。
+- 用 ORM/手写 Map 绕过已定义的 Repository 查询边界，或把未来的 sqlc 生成类型泄漏到领域层。
 - 在 HTTP Handler 中开启跨模块事务，或把文件/Git 网络调用放进数据库事务长期占用连接。
 - 通过删除历史记录、覆盖 Revision 或静默修改状态“修复”冲突；正式知识变更必须经过 Proposal/Approval/Safe Writeback。
 - 无约束地 `SELECT *`、无分页大结果、循环查库、逐条远程 Embedding 或无界 JSONB 索引。
@@ -413,4 +413,45 @@ Correct: 项目只写 traceparent；Consumer 隔离并忽略 river:*，其余字
 
 Wrong: Cancel 直接把 Run cancelled，再留下 prepared/file_applied Execution。
 Correct: 同一事务调用 CancellationSafetyGuard；不安全时保持可恢复 Job/lease/checkpoint。
+```
+
+## M6-A Retrieval Index Foundation Contract
+
+### 1. Scope / Trigger
+
+- Trigger：Ingestion 已生成 Canonical Chunk，需要建立可重建 FTS/Vector Projection 和可回滚 Active Index。
+- Scope：M6-A 只覆盖 Schema、领域/Application 契约、Lexical/Vector 批量持久化和原子激活；River Consumer、外部 Embedding、Search API 在后续任务实现。
+
+### 2. Contracts
+
+- `embedding_version` 绑定 Provider、Adapter/Version、Model、Dimensions、Normalization、Distance 和非敏感 Config Hash，创建后不可变。
+- Begin Index 同事务写 `index_version` 与完整 `index_manifest_chunk`；Application 按 Sequence+Chunk ID 稳定排序重算 Manifest SHA-256，数据库冻结 Count、Hash 和 Canonical Chunk 版本绑定。
+- Lexical Builder 只能从 Manifest `INSERT ... SELECT` Canonical Chunk 生成 `simple` tsvector；vector-only batch 不含 `SearchVector`/`LexicalStatus`，只能更新既有 lexical-ready 行。
+- M6-A `simple` Tokenizer 的 `token_count` 定义为生成后 tsvector 的 lexeme 数；vector batch 只能证明计数相同，不能修改。真实模型 Tokenizer 必须通过新 Tokenizer/Index Version 演进。
+- 无 Embedding 的 Index 必须显式 `degraded_capabilities=["vector"]`；有 Embedding 时 Ready 根据 `ready/skipped_oversized/failed` 实际计数推导是否 vector degraded。
+- 通用 Transition 只允许 `building→ready|failed`、`active→retiring`、`retiring→archived`；任何 `→active` 必须由 Activate/RollbackActivate 在一个事务内追加 Activation 并切换状态。
+- 当前 `vector` 列允许多维版本共存，但同一 Embedding/Index 固定维度。M6-A 不建立跨维度 HNSW；固定维度和容量评测后再建部分表达式索引。
+
+### 3. Error / Concurrency Rules
+
+- 相同 Embedding contract 或 Workspace+Index idempotency key 只有完整绑定一致时才是 replay；不同绑定返回 VersionConflict/ConsistencyViolation。
+- Projection 批次全有或全无；重复批次只允许向量、Token Count、状态和失败码完全一致，不覆盖全文投影。
+- Activate/Rollback 使用 Workspace advisory transaction lock、Index 行锁和单 Active 部分唯一索引；Activation Receipt 保存 `activate|rollback` 类型和切换后版本，响应丢失或后续状态变化后仍按 idempotency key 重建当次历史快照，不重复切换。
+- `GetActive` 没有 Active 时返回稳定 NotFound，不回退到 Building/Failed/Retiring。
+- Migration Down 在任意 Retrieval 业务数据存在时返回 SQLSTATE `55000`；空库迁移入口不能在 `CREATE EXTENSION vector` 前注册 pgvector 类型。
+
+### 4. Tests Required
+
+- Domain/Application `-race -count=20`：状态矩阵、Manifest Hash、Fusion canonical JSON、vector-only batch、维度/NaN/Inf/零范数、Ready degraded、Activate/Rollback。
+- PostgreSQL：空库/重复 Up/Down→Up、跨 Workspace、不可变、Lexical Builder、批量 replay/conflict、首次/替换/回滚激活、并发双激活、response-loss replay。
+- EXPLAIN：FTS GIN、Canonical Chunk trigram GIN、Workspace/Index/Chunk B-tree；未评测 HNSW 不计入完成证据。
+
+### 5. Wrong vs Correct
+
+```text
+Wrong: Embedding 调用方传 PostgreSQL tsvector 并在 SaveVectorBatch 覆盖 search_vector。
+Correct: Lexical Builder 是唯一全文事实源；vector-only batch 只保存向量结果。
+
+Wrong: 先把新 Index 标 active，再单独退役旧 Index 或补 Activation。
+Correct: 同一 PostgreSQL 事务内 append Activation、旧 Active→Retiring、目标→Active。
 ```

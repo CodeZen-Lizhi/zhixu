@@ -40,7 +40,7 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 13 || applied != 13 {
+	if maxVersion != 14 || applied != 14 {
 		t.Fatalf("project history max=%d applied=%d", maxVersion, applied)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE tablename LIKE 'river_%' AND schemaname <> 'workflow'`).Scan(&wrongSchema); err != nil {
@@ -67,6 +67,11 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	insertRuntimeIdentityFixture(t, ctx, pool)
+	// 00014 has no Retrieval data yet, so remove it before exercising the
+	// earlier M4-A runtime-identity downgrade guard.
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00014 Down rejected an empty Retrieval schema: %v", err)
+	}
 	// 00013 has no Proposal→Run bindings yet, so it can be removed before
 	// removing 00012 and testing the M4-A runtime-identity guard.
 	if _, err := provider.Down(ctx); err != nil {
@@ -82,6 +87,44 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 		if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
 			t.Fatalf("guarded Down error=%v", err)
 		}
+	}
+}
+
+func TestRunnerRetrievalMigrationDownRejectsBusinessData(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+	runner, err := NewRunner(pool, projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO retrieval.embedding_version(
+    id, provider, adapter_name, adapter_version, model, dimensions,
+    normalization, distance_metric, config_hash, created_at
+) VALUES (
+    '60000000-0000-4000-8000-000000000001', 'test', 'test', 'v1', 'test-model', 3,
+    'l2', 'cosine', repeat('1', 64), now()
+)`); err != nil {
+		t.Fatal(err)
+	}
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
+	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.Down(ctx)
+	var pgErr *pgconn.PgError
+	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "55000" {
+		t.Fatalf("00014 Down with Retrieval data error=%v", err)
 	}
 }
 
@@ -101,7 +144,7 @@ func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 13 || applied != 13 {
+	if maxVersion != 14 || applied != 14 {
 		t.Fatalf("adopted history max=%d applied=%d", maxVersion, applied)
 	}
 }

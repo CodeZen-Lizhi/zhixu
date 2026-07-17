@@ -137,6 +137,20 @@ M4-D 于 2026-07-17 已保存以下真实 PostgreSQL/River/容器证据：
 发布候选仍需重复这些命令；正在执行真实 Safe Writeback 时的容器级 SIGTERM 是下一轮
 发布演练的剩余组合场景，不能由空闲 Worker SIGTERM 单独替代。
 
+### 8.3 M6-A Retrieval Index Foundation 专项
+
+- Migration：真实 PostgreSQL 空库 Up、重复 Up、空数据 Down→Up；任意 Retrieval 业务数据
+  存在时 Down 必须返回 SQLSTATE `55000`。迁移入口使用不注册扩展类型的专用 Pool，避免
+  `CREATE EXTENSION vector` 前连接初始化失败。
+- Domain/Application：Embedding/Index 精确绑定、Manifest 稳定 Hash、全部状态迁移、
+  vector-only batch、NaN/Inf/零范数/维度、Ready degraded 推导、Activate/Rollback 期望版本。
+- PostgreSQL：跨 Workspace FK、Manifest/Projection/Activation 不可变、批次全有或全无、
+  Lexical `INSERT ... SELECT`、响应丢失精确重放、并发双激活最多一个 Active。
+- 查询计划：保存 FTS GIN、Canonical Chunk `gin_trgm_ops`、Workspace/Index/Chunk 关键查询的
+  `EXPLAIN` 证据。M6-A 不用未评测的全局 HNSW 伪装容量结论。
+- 当前集成测试从 `ZHIXU_TEST_DATABASE_URL` 连接真实 PostgreSQL，并为每个测试创建独立临时
+  Database；未配置该变量时必须明确失败或跳过，不能降级为内存假实现。
+
 ## 9. E2E
 
 固定 Fixture Workspace，执行 PRD 最终演示场景。

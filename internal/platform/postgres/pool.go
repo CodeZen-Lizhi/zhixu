@@ -4,11 +4,15 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pgxvec "github.com/pgvector/pgvector-go/pgx"
 )
+
+type afterConnectFunc func(context.Context, *pgx.Conn) error
 
 // Pinger is the minimal dependency required by readiness and worker health
 // checks. It keeps handlers testable without a live database.
@@ -34,12 +38,36 @@ func (p *Pool) DB() *pgxpool.Pool {
 // Open parses the configured URL and creates a pool. It does not claim the DB
 // is ready; callers must call Ping with a bounded context.
 func Open(ctx context.Context, databaseURL string, maxConns, minConns int32) (*Pool, error) {
+	return open(ctx, databaseURL, maxConns, minConns, pgxvec.RegisterTypes)
+}
+
+// OpenMigration creates a pool without extension-specific type registration so
+// an empty database can run the migration that installs those extensions.
+func OpenMigration(ctx context.Context, databaseURL string, maxConns, minConns int32) (*Pool, error) {
+	return open(ctx, databaseURL, maxConns, minConns, nil)
+}
+
+func open(ctx context.Context, databaseURL string, maxConns, minConns int32, registerTypes afterConnectFunc) (*Pool, error) {
+	config, err := buildPoolConfig(databaseURL, maxConns, minConns, registerTypes)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("open database pool: %w", err)
+	}
+	return &Pool{pool: pool}, nil
+}
+
+func buildPoolConfig(databaseURL string, maxConns, minConns int32, registerTypes afterConnectFunc) (*pgxpool.Config, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("database URL is empty")
 	}
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse database configuration: %w", err)
+		// pgx parse errors include the original connection string, which may
+		// contain credentials. Keep the public error useful without wrapping it.
+		return nil, errors.New("parse database configuration: invalid connection settings")
 	}
 	if maxConns > 0 {
 		config.MaxConns = maxConns
@@ -47,11 +75,35 @@ func Open(ctx context.Context, databaseURL string, maxConns, minConns int32) (*P
 	if minConns > 0 {
 		config.MinConns = minConns
 	}
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return nil, fmt.Errorf("open database pool: %w", err)
+	if registerTypes != nil {
+		if err := configureAfterConnect(config, registerTypes); err != nil {
+			return nil, err
+		}
 	}
-	return &Pool{pool: pool}, nil
+	return config, nil
+}
+
+func configureAfterConnect(config *pgxpool.Config, registerTypes afterConnectFunc) error {
+	if config == nil {
+		return fmt.Errorf("configure database connection: pool config is nil")
+	}
+	if registerTypes == nil {
+		return fmt.Errorf("configure database connection: pgvector type registrar is nil")
+	}
+
+	existing := config.AfterConnect
+	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		if existing != nil {
+			if err := existing(ctx, conn); err != nil {
+				return err
+			}
+		}
+		if err := registerTypes(ctx, conn); err != nil {
+			return fmt.Errorf("register pgvector types: %w", err)
+		}
+		return nil
+	}
+	return nil
 }
 
 // Ping verifies that PostgreSQL is reachable and accepting requests.

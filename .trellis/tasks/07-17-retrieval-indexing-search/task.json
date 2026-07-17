@@ -1,0 +1,28 @@
+{
+  "id": "retrieval-indexing-search",
+  "name": "retrieval-indexing-search",
+  "title": "M6 Retrieval Indexing And Search",
+  "description": "实现版本化索引、重索引消费、FTS/pgvector/RRF 搜索与 Safe Writeback completed 闭环。",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P0",
+  "creator": "lizhi",
+  "assignee": "lizhi",
+  "createdAt": "2026-07-17",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-17-retrieval-index-foundation"
+  ],
+  "parent": "07-16-product-delivery",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

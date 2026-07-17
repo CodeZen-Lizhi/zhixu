@@ -43,7 +43,7 @@ func run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
-	database, err := postgres.Open(ctx, databaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns)
+	database, err := postgres.OpenMigration(ctx, databaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns)
 	if err != nil {
 		return err
 	}
