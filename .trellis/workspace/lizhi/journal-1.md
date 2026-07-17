@@ -506,3 +506,38 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: 完成 River Runtime M4-D 可运维交付
+
+**Date**: 2026-07-17
+**Task**: 完成 River Runtime M4-D 可运维交付
+**Branch**: `dev`
+
+### Summary
+
+纳入 Safe Writeback fault/normal、Approval River 与独立数据库 SIGKILL rescue smoke；完成 Worker 配置、readiness、lifecycle、可观测性、取消安全、Docker/Compose、文档与全量门禁；归档 M4-D 及 River Runtime 父任务。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `08f0cc8` | (see git log) |
+| `d756e16` | (see git log) |
+| `bf1750d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

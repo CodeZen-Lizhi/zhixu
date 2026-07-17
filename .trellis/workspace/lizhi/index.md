@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 15
+- **Total Sessions**: 16
 - **Last Active**: 2026-07-17
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~508 | Active |
+| `journal-1.md` | ~543 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 16 | 2026-07-17 | 完成 River Runtime M4-D 可运维交付 | `08f0cc8`, `d756e16`, `bf1750d` | `dev` |
 | 15 | 2026-07-17 | 完成 M4-C Approval Safe Writeback Dispatch | `cda2192`, `db2376f` | `dev` |
 | 14 | 2026-07-17 | 收口 M4-B Workflow Runtime State Machine | `63f0a83` | `dev` |
 | 13 | 2026-07-17 | 完成 M4-A River Runtime Foundation 并纳入 fault smoke | `ecadffb`, `8cc284d`, `c4df8af`, `bf33c56` | `dev` |
