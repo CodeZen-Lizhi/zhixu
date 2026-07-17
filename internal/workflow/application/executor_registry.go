@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
@@ -26,7 +27,17 @@ type ExecutionContext struct {
 
 // ExecutionResult is the project-owned successful result returned by an executor.
 type ExecutionResult struct {
-	Output json.RawMessage
+	Output    json.RawMessage
+	HumanWait *HumanWaitResult
+}
+
+// HumanWaitResult is a trusted executor outcome that releases the lease and
+// creates one durable Human Task instead of completing the node.
+type HumanWaitResult struct {
+	TaskID              foundation.ID
+	ExpectedInputSchema json.RawMessage
+	TargetVersion       int64
+	ExpiresIn           time.Duration
 }
 
 // Executor executes one registered workflow node without exposing transport types.

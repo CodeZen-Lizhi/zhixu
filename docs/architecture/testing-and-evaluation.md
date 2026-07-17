@@ -89,6 +89,7 @@ Testcontainers：
 - Publish：Mapping + Reindex Outbox 同事务、重复 delivery 只产生一个事件，结果为 `verifying/index_pending`；M6 Retrieval 未完成前不得断言 completed。
 - Composition：`internal/changecontrol/application/writeback_smoke_integration_test.go` 验证真实 PostgreSQL + LocalFS + Git 正常闭环；`writeback_fault_smoke_integration_test.go` 进一步注入 file/Git checkpoint、Publish 和 cleanup finalize response loss，销毁旧 Service/Writer 后从持久检查点重放，确认只保留一个 Commit/Mapping/Outbox。M4-A 的通用 River Registry/InsertTx/Deterministic Worker 与 Safe Writeback Node 仍是不同任务边界，M4-D 才负责生产 lifecycle 接线。
 - M4-A migration gate：`internal/platform/migration` 的 integration tag 测试验证原始 legacy Goose 解析失败、只读 annotation FS、空库/重复 Up、旧 shell-runner history 接管、River `workflow` Schema、one-step Down→Up 与 Runtime identity guarded Down；`internal/workflow/adapter/postgres` 的 integration tag 测试验证 Start replay/conflict、双并发单 Run/Node/Outbox/Job、Job 插入失败回滚和 Commit response-loss 恢复。
+- M4-B runtime gate：`internal/workflow/adapter/postgres/runtime_state_integration_test.go` 与 `runner_state_machine_integration_test.go` 验证 DB-time Claim/Heartbeat、Attempt append-only、lease reclaim/fencing、业务 Retry/Exhaustion、Complete replay、Pause/Resume/Cancel、Human wait/submit、迁移 guarded Down 和事务型 River Job；旧 legacy Repository lease 测试标记为 `legacy_integration`，不再作为 M4-B Runtime 事实源。
 
 ## 9. E2E
 

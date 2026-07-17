@@ -20,7 +20,10 @@ import (
 type Service interface {
 	Start(context.Context, application.StartCommand) (domain.Run, error)
 	Get(context.Context, foundation.ID) (domain.Run, error)
-	SubmitHumanDecision(context.Context, foundation.ID, int64, json.RawMessage, foundation.ID, foundation.ID) (domain.HumanTask, error)
+	SubmitRuntimeHumanDecision(context.Context, application.HumanDecisionCommand) (application.HumanTransitionResult, error)
+	Pause(context.Context, application.RunControlCommand) (application.RunControlResult, error)
+	Resume(context.Context, application.RunControlCommand) (application.RunControlResult, error)
+	Cancel(context.Context, application.RunControlCommand) (application.RunControlResult, error)
 }
 
 // Handler 负责 Workflow 协议解析、响应编码和错误映射。
@@ -34,6 +37,9 @@ func (h *Handler) Routes(router chi.Router) {
 	router.Post("/workspaces/{workspaceID}/workflows", h.start)
 	router.Get("/workflows/{runID}", h.detail)
 	router.Post("/workflows/{runID}/human-tasks/{taskID}/decision", h.submitHumanDecision)
+	router.Post("/workflows/{runID}/pause", h.pause)
+	router.Post("/workflows/{runID}/resume", h.resume)
+	router.Post("/workflows/{runID}/cancel", h.cancel)
 }
 
 type startRequest struct {
@@ -65,7 +71,6 @@ type runResponse struct {
 }
 
 type humanDecisionRequest struct {
-	WorkspaceID   string          `json:"workspace_id"`
 	TargetVersion int64           `json:"target_version"`
 	Decision      json.RawMessage `json:"decision"`
 }
@@ -78,6 +83,17 @@ type humanTaskResponse struct {
 	TargetVersion int64           `json:"target_version"`
 	Decision      json.RawMessage `json:"decision,omitempty"`
 	SubmittedAt   *string         `json:"submitted_at,omitempty"`
+}
+
+type controlRequest struct {
+	ExpectedVersion int64 `json:"expected_version"`
+}
+
+type controlResponse struct {
+	WorkflowRunID string `json:"workflow_run_id"`
+	Status        string `json:"status"`
+	Version       int64  `json:"version"`
+	StatusURL     string `json:"status_url"`
 }
 
 func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +161,38 @@ func (h *Handler) submitHumanDecision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	workspaceID, err := foundation.ParseID(request.WorkspaceID)
+	if h == nil || h.service == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "WORKFLOW_SERVICE_UNAVAILABLE", "Workflow 服务暂不可用", true, nil)
+		return
+	}
+	result, err := h.service.SubmitRuntimeHumanDecision(r.Context(), application.HumanDecisionCommand{RunID: runID, TaskID: taskID, TargetVersion: request.TargetVersion, Decision: request.Decision})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toHumanResponse(result.Task))
+}
+
+func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {
+	h.control(w, r, func(ctx context.Context, command application.RunControlCommand) (application.RunControlResult, error) {
+		return h.service.Pause(ctx, command)
+	})
+}
+
+func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
+	h.control(w, r, func(ctx context.Context, command application.RunControlCommand) (application.RunControlResult, error) {
+		return h.service.Resume(ctx, command)
+	})
+}
+
+func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
+	h.control(w, r, func(ctx context.Context, command application.RunControlCommand) (application.RunControlResult, error) {
+		return h.service.Cancel(ctx, command)
+	})
+}
+
+func (h *Handler) control(w http.ResponseWriter, r *http.Request, execute func(context.Context, application.RunControlCommand) (application.RunControlResult, error)) {
+	runID, err := foundation.ParseID(chi.URLParam(r, "runID"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -154,12 +201,17 @@ func (h *Handler) submitHumanDecision(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusServiceUnavailable, "WORKFLOW_SERVICE_UNAVAILABLE", "Workflow 服务暂不可用", true, nil)
 		return
 	}
-	task, err := h.service.SubmitHumanDecision(r.Context(), taskID, request.TargetVersion, request.Decision, workspaceID, runID)
+	var request controlRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := execute(r.Context(), application.RunControlCommand{WorkflowRunID: runID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key"))})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toHumanResponse(task))
+	writeJSON(w, http.StatusOK, controlResponse{WorkflowRunID: string(result.WorkflowRunID), Status: string(result.Status), Version: result.Version, StatusURL: result.StatusURL})
 }
 
 func decodeJSON(r *http.Request, target any) error {

@@ -52,14 +52,50 @@ func TestGetWorkflowRunContract(t *testing.T) {
 func TestSubmitHumanDecisionContract(t *testing.T) {
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	service := &fakeService{task: domain.HumanTask{ID: testTaskID, RunID: testRunID, NodeRunID: testWorkspaceID, Status: domain.HumanTaskSubmitted, TargetVersion: 3, Decision: json.RawMessage(`{"action":"approve"}`), SubmittedAt: &now}}
-	recorder := serve(t, service, http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/human-tasks/"+string(testTaskID)+"/decision", `{"workspace_id":"`+string(testWorkspaceID)+`","target_version":3,"decision":{"action":"approve"}}`)
+	recorder := serve(t, service, http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/human-tasks/"+string(testTaskID)+"/decision", `{"target_version":3,"decision":{"action":"approve"}}`)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	var response humanTaskResponse
 	decode(t, recorder, &response)
-	if response.Status != string(domain.HumanTaskSubmitted) || service.submitTaskID != testTaskID || service.submitRunID != testRunID || service.submitWorkspaceID != testWorkspaceID {
+	if response.Status != string(domain.HumanTaskSubmitted) || service.submitTaskID != testTaskID || service.submitRunID != testRunID {
 		t.Fatalf("response=%#v service=%#v", response, service)
+	}
+}
+
+func TestWorkflowControlContract(t *testing.T) {
+	for _, action := range []string{"pause", "resume", "cancel"} {
+		t.Run(action, func(t *testing.T) {
+			service := &fakeService{controlResult: application.RunControlResult{WorkflowRunID: testRunID, Status: domain.RunStatusPaused, Version: 4, StatusURL: "/api/v1/workflows/" + string(testRunID)}}
+			recorder := serve(t, service, http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/"+action, `{"expected_version":3}`)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var response controlResponse
+			decode(t, recorder, &response)
+			if response.WorkflowRunID != string(testRunID) || response.Version != 4 || service.control.WorkflowRunID != testRunID || service.control.ExpectedVersion != 3 || service.control.IdempotencyKey != "test-request" || service.controlAction != action {
+				t.Fatalf("response=%+v service=%+v", response, service)
+			}
+		})
+	}
+}
+
+func TestWorkflowControlRequiresIdempotencyAndPositiveVersion(t *testing.T) {
+	service := &fakeService{}
+	router := chi.NewRouter()
+	router.Route("/api/v1", func(api chi.Router) { NewHandler(service).Routes(api) })
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/pause", strings.NewReader(`{"expected_version":1}`))
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/pause", strings.NewReader(`{"expected_version":0}`))
+	request.Header.Set("Idempotency-Key", "key")
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -102,6 +138,29 @@ type fakeService struct {
 	getID                     foundation.ID
 	submitTaskID, submitRunID foundation.ID
 	submitWorkspaceID         foundation.ID
+	control                   application.RunControlCommand
+	controlResult             application.RunControlResult
+	controlAction             string
+}
+
+func (f *fakeService) Pause(_ context.Context, command application.RunControlCommand) (application.RunControlResult, error) {
+	return f.controlCall(command, "pause")
+}
+func (f *fakeService) Resume(_ context.Context, command application.RunControlCommand) (application.RunControlResult, error) {
+	return f.controlCall(command, "resume")
+}
+func (f *fakeService) Cancel(_ context.Context, command application.RunControlCommand) (application.RunControlResult, error) {
+	return f.controlCall(command, "cancel")
+}
+func (f *fakeService) controlCall(command application.RunControlCommand, action string) (application.RunControlResult, error) {
+	f.control, f.controlAction = command, action
+	if command.IdempotencyKey == "" {
+		return application.RunControlResult{}, foundation.NewError(foundation.ErrorInvalidInput, "IDEMPOTENCY_KEY_REQUIRED", false, errors.New("missing key"))
+	}
+	if command.ExpectedVersion < 1 {
+		return application.RunControlResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_CONTROL_INVALID", false, errors.New("invalid version"))
+	}
+	return f.controlResult, f.err
 }
 
 func (f *fakeService) Start(_ context.Context, command application.StartCommand) (domain.Run, error) {
@@ -115,6 +174,11 @@ func (f *fakeService) Get(_ context.Context, id foundation.ID) (domain.Run, erro
 func (f *fakeService) SubmitHumanDecision(_ context.Context, taskID foundation.ID, _ int64, _ json.RawMessage, workspaceID, runID foundation.ID) (domain.HumanTask, error) {
 	f.submitTaskID, f.submitWorkspaceID, f.submitRunID = taskID, workspaceID, runID
 	return f.task, f.err
+}
+
+func (f *fakeService) SubmitRuntimeHumanDecision(_ context.Context, command application.HumanDecisionCommand) (application.HumanTransitionResult, error) {
+	f.submitTaskID, f.submitRunID = command.TaskID, command.RunID
+	return application.HumanTransitionResult{Task: f.task, Run: f.run, Node: domain.NodeRun{ID: f.task.NodeRunID, RunID: f.task.RunID, Status: domain.NodeStatusSucceeded}}, f.err
 }
 
 func serve(t *testing.T, service Service, method, path, body string) *httptest.ResponseRecorder {

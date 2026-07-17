@@ -159,6 +159,15 @@ M5 已落地的同步摄取命令为 `POST /api/v1/source-versions/{source_versi
 - 输入：proposal_revision、approved_change_hash、action。
 - 输出：Approval + Apply Workflow。
 
+### Workflow Control
+
+`POST /api/v1/workflows/{run_id}/pause|resume|cancel` 是版本化控制命令：
+
+- Header 必须有 `Idempotency-Key`（1..128）；Body 为 `{ "expected_version": <positive integer> }`，不接受客户端 `workspace_id`。
+- 成功返回 `{workflow_run_id,status,version,status_url}`；相同命令键和请求 hash 重放返回持久结果。
+- 稳定错误包括 `IDEMPOTENCY_KEY_REQUIRED`、`WORKFLOW_CONTROL_INVALID`、`WORKFLOW_RUN_NOT_FOUND`、`WORKFLOW_VERSION_CONFLICT`、`WORKFLOW_CONTROL_CONFLICT`。
+- Workspace 绑定由 Run 持久化事实解析，不能由请求体覆盖。
+
 ### Graph
 
 - global clusters。

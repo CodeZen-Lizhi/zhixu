@@ -47,6 +47,18 @@ func (r *RuntimeRepository) Start(ctx context.Context, request application.Runti
 		return application.RuntimeStartResult{}, classify(err, "WORKFLOW_START_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Runtime facts use one database-owned timestamp so a skewed caller clock
+	// cannot make the first control/update violate created_at ordering.
+	databaseTimestamp, err := databaseNow(ctx, tx)
+	if err != nil {
+		return application.RuntimeStartResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
+	}
+	request.Definition.CreatedAt = databaseTimestamp
+	request.Run.CreatedAt = databaseTimestamp
+	request.Run.UpdatedAt = databaseTimestamp
+	request.FirstNode.CreatedAt = databaseTimestamp
+	request.FirstNode.UpdatedAt = databaseTimestamp
+	request.Event.OccurredAt = databaseTimestamp
 
 	definitionID, err := upsertRuntimeDefinition(ctx, tx, request)
 	if err != nil {

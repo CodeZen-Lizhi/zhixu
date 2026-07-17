@@ -14,11 +14,45 @@ import (
 
 // Service owns workflow application invariants and delegates atomic changes to Repository or RuntimeStarter.
 type Service struct {
-	repository  domain.Repository
-	ids         foundation.IDGenerator
-	clock       foundation.Clock
-	definitions *DefinitionRegistry
-	runtime     RuntimeStarter
+	repository       domain.Repository
+	ids              foundation.IDGenerator
+	clock            foundation.Clock
+	definitions      *DefinitionRegistry
+	runtime          RuntimeStarter
+	coordinator      *RuntimeCoordinator
+	humanCoordinator *RuntimeHumanCoordinator
+}
+
+// SubmitRuntimeHumanDecision completes a Human Node using its persisted Run binding.
+func (s *Service) SubmitRuntimeHumanDecision(ctx context.Context, command HumanDecisionCommand) (HumanTransitionResult, error) {
+	if s == nil || s.humanCoordinator == nil {
+		return HumanTransitionResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_HUMAN_STATE_PORT_MISSING", false, errors.New("workflow human coordinator is unavailable"))
+	}
+	return s.humanCoordinator.SubmitHuman(ctx, command)
+}
+
+// Pause requests a durable workflow pause without accepting a Workspace override.
+func (s *Service) Pause(ctx context.Context, command RunControlCommand) (RunControlResult, error) {
+	if s == nil || s.coordinator == nil {
+		return RunControlResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUNTIME_STATE_PORT_MISSING", false, errors.New("workflow runtime coordinator is unavailable"))
+	}
+	return s.coordinator.Pause(ctx, command)
+}
+
+// Resume restores runnable work for a paused workflow.
+func (s *Service) Resume(ctx context.Context, command RunControlCommand) (RunControlResult, error) {
+	if s == nil || s.coordinator == nil {
+		return RunControlResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUNTIME_STATE_PORT_MISSING", false, errors.New("workflow runtime coordinator is unavailable"))
+	}
+	return s.coordinator.Resume(ctx, command)
+}
+
+// Cancel prevents new workflow work and converges the run at a safe checkpoint.
+func (s *Service) Cancel(ctx context.Context, command RunControlCommand) (RunControlResult, error) {
+	if s == nil || s.coordinator == nil {
+		return RunControlResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUNTIME_STATE_PORT_MISSING", false, errors.New("workflow runtime coordinator is unavailable"))
+	}
+	return s.coordinator.Cancel(ctx, command)
 }
 
 // NewService constructs a workflow service.

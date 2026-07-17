@@ -3,7 +3,7 @@
   "name": "workflow-runtime-state-machine",
   "title": "M4-B Workflow Runtime State Machine",
   "description": "实现数据库时间 lease、Attempt、heartbeat、complete/retry/fail、后继、Human 与 pause/resume/cancel 状态机。",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

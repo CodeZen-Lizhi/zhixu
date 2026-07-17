@@ -8,7 +8,7 @@
 
 使用 PostgreSQL 持久化领域工作流状态，River 负责可运行节点的任务投递与 Worker 获取；不在正式 v1.0 引入 Temporal。Workflow Definition、Node 状态和补偿语义仍由 Workflow Module 掌握，River 不是业务事实源。
 
-实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和无副作用 Deterministic Worker smoke。River 只负责投递/领取，Workflow PostgreSQL 表仍是业务事实源。M4-B 尚未实现 DB-time Claim/Attempt/retry/control 状态机，M4-D 尚未接入生产 Worker lifecycle、health 和 OTel；不得把 M4-A test harness 描述为完整重试或运维交付。
+实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和 Deterministic Worker smoke。M4-B 已接入 PostgreSQL DB-time Claim/Heartbeat、append-only Attempt、Retry/Fail/Complete、DAG 后继、Human Task、Pause/Resume/Cancel；River 只负责投递/领取，Workflow PostgreSQL 表仍是业务事实源。M4-C 的 Approval/Safe Writeback Dispatch 与 M4-D 的 readiness、OTel、Compose 运维仍未完成。
 
 见 [ADR-0006](adr/0006-postgres-durable-workflow.md)。
 
@@ -42,11 +42,15 @@ stateDiagram-v2
     [*] --> Pending
     Pending --> Running
     Running --> WaitingForHuman
-    WaitingForHuman --> Running
+    WaitingForHuman --> Succeeded
     Running --> RetryWait
     RetryWait --> Running
     Running --> Paused
-    Paused --> Running
+    Paused --> Pending
+    Paused --> RetryWait
+    Paused --> WaitingForHuman
+    Pending --> Cancelled
+    RetryWait --> Cancelled
     Running --> Succeeded
     Running --> Failed
     Running --> Cancelled
@@ -89,6 +93,8 @@ sequenceDiagram
 - 心跳失败时 Worker 停止执行新副作用。
 - 过期租约可被其他 Worker 回收。
 - Side Effect 执行前再次确认租约。
+- Claim、Heartbeat、Complete、Retry、Fail 和控制命令的资格时间只取 PostgreSQL 时间；旧 owner 使用 owner + attempt + node version + 未过期 lease fence。
+- Attempt 历史只允许 running 向一个终态前进；相同 delivery 重放不重复 Attempt，业务 retry 才递增 retry_no。
 
 ## 8. 节点完成事务
 
@@ -115,6 +121,7 @@ sequenceDiagram
 - 随机抖动。
 - 最大次数。
 - Retry-After 优先。
+- 达到 `max_retries` 后写入 `WORKFLOW_RETRY_EXHAUSTED`，不再创建 River Job。
 
 ## 10. 幂等
 
@@ -156,6 +163,7 @@ Human Task：
 - target_version。
 - expires_at optional。
 - status。
+- Submit 按 `expected_input_schema`、`target_version`、过期时间和 decision hash 校验；同一 decision 重放幂等，不同 decision 冲突。等待期间不占 Worker lease。
 
 ## 12. 暂停、取消与恢复
 
@@ -163,18 +171,21 @@ Human Task：
 
 - 阻止领取新 Node。
 - 不强制中断正在执行的不可中断外部调用。
+- 持久化 `pause_requested_at`；运行节点在安全 checkpoint 归约为 paused，旧 River delivery benign 结束，不产生新 Attempt、Job 或后继。
 
 取消：
 
 - 标记 Workflow Cancel Requested。
 - 已开始 Side Effect 根据策略完成或补偿。
 - 不假装撤销已提交 Git Commit。
+- 持久化 `cancel_requested_at`；pending/retry/waiting 节点取消，运行节点在 checkpoint 归约 cancelled；数据库/transport 故障不能伪装成成功。
 
 恢复：
 
 - 过期租约回收。
 - 检查幂等记录。
 - 从持久化 Output 继续。
+- Resume 只为满足依赖且无有效 generation 的节点入队；未投递节点使用 dispatch_no=1，已有 generation 才递增，retry_no 不变。
 
 ## 13. 补偿
 

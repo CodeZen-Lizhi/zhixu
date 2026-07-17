@@ -236,7 +236,7 @@ func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error
 	if err := definitions.Freeze(); err != nil {
 		return nil, err
 	}
-	return workflowapplication.NewRuntimeService(legacyRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, workflowapplication.RuntimeDependencies{Definitions: definitions, Starter: runtimeRepository})
+	return workflowapplication.NewRuntimeService(legacyRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, workflowapplication.RuntimeDependencies{Definitions: definitions, Starter: runtimeRepository, State: runtimeRepository, Human: runtimeRepository})
 }
 
 func firstError(values ...error) error {

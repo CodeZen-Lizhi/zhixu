@@ -40,7 +40,7 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 11 || applied != 11 {
+	if maxVersion != 12 || applied != 12 {
 		t.Fatalf("project history max=%d applied=%d", maxVersion, applied)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE tablename LIKE 'river_%' AND schemaname <> 'workflow'`).Scan(&wrongSchema); err != nil {
@@ -67,6 +67,11 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	insertRuntimeIdentityFixture(t, ctx, pool)
+	// 00012 has no new-state rows yet, so it can be removed before testing
+	// the M4-A runtime-identity guard on the next historical migration.
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00012 Down rejected legacy-only runtime identity: %v", err)
+	}
 	if _, err := provider.Down(ctx); err == nil {
 		t.Fatal("00011 Down accepted Runtime identity data")
 	} else {
@@ -93,7 +98,7 @@ func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 11 || applied != 11 {
+	if maxVersion != 12 || applied != 12 {
 		t.Fatalf("adopted history max=%d applied=%d", maxVersion, applied)
 	}
 }

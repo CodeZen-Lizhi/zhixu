@@ -159,6 +159,57 @@
         }
       }
     },
+    "/api/v1/workflows/{run_id}/pause": {
+      "parameters": [
+        { "name": "run_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      ],
+      "post": {
+        "operationId": "pauseWorkflow",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowControlRequest" } } } },
+        "responses": {
+          "200": { "description": "Workflow pause command persisted or replayed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowControlResult" } } } },
+          "400": { "description": "Invalid control request or idempotency key.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "Workflow Run not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "Workflow version or control conflict.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Workflow dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
+    "/api/v1/workflows/{run_id}/resume": {
+      "parameters": [
+        { "name": "run_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      ],
+      "post": {
+        "operationId": "resumeWorkflow",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowControlRequest" } } } },
+        "responses": {
+          "200": { "description": "Workflow resume command persisted or replayed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowControlResult" } } } },
+          "400": { "description": "Invalid control request or idempotency key.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "Workflow Run not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "Workflow version or control conflict.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Workflow dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
+    "/api/v1/workflows/{run_id}/cancel": {
+      "parameters": [
+        { "name": "run_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      ],
+      "post": {
+        "operationId": "cancelWorkflow",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowControlRequest" } } } },
+        "responses": {
+          "200": { "description": "Workflow cancel command persisted or replayed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowControlResult" } } } },
+          "400": { "description": "Invalid control request or idempotency key.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "Workflow Run not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "Workflow version or control conflict.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Workflow dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
     "/api/v1/workflows/{run_id}/human-tasks/{task_id}/decision": {
       "parameters": [
         { "name": "run_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
@@ -402,7 +453,7 @@
           "id": { "type": "string", "format": "uuid" },
           "workspace_id": { "type": "string", "format": "uuid" },
           "definition_id": { "type": "string", "format": "uuid" },
-          "status": { "type": "string", "enum": ["pending", "running", "waiting_for_human", "succeeded", "failed", "cancelled"] },
+          "status": { "type": "string", "enum": ["pending", "running", "waiting_for_human", "retry_wait", "paused", "succeeded", "failed", "cancelled"] },
           "input": {},
           "output": {},
           "version": { "type": "integer", "minimum": 1 },
@@ -414,11 +465,27 @@
       },
       "HumanDecisionRequest": {
         "type": "object",
-        "required": ["workspace_id", "target_version", "decision"],
+        "required": ["target_version", "decision"],
         "properties": {
-          "workspace_id": { "type": "string", "format": "uuid" },
           "target_version": { "type": "integer", "minimum": 1 },
           "decision": { "type": "object", "additionalProperties": true }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowControlRequest": {
+        "type": "object",
+        "required": ["expected_version"],
+        "properties": { "expected_version": { "type": "integer", "minimum": 1 } },
+        "additionalProperties": false
+      },
+      "WorkflowControlResult": {
+        "type": "object",
+        "required": ["workflow_run_id", "status", "version", "status_url"],
+        "properties": {
+          "workflow_run_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["pending", "running", "waiting_for_human", "retry_wait", "paused", "succeeded", "failed", "cancelled"] },
+          "version": { "type": "integer", "minimum": 1 },
+          "status_url": { "type": "string", "minLength": 1 }
         },
         "additionalProperties": false
       },

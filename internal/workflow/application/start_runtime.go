@@ -29,6 +29,10 @@ type RuntimeDependencies struct {
 	Definitions *DefinitionRegistry
 	// Starter 原子持久化 Workflow 事实并投递首个 Job。
 	Starter RuntimeStarter
+	// State 提供 DB-time lease、结果归约和控制命令事务。
+	State RuntimeStatePort
+	// Human 提供 DB-time Human Task 等待与提交事务。
+	Human RuntimeHumanStatePort
 }
 
 // RuntimeStarter 隐藏 PostgreSQL 与任务投递实现，并负责 Start replay、冲突和 legacy active 判定。
@@ -105,6 +109,20 @@ func NewRuntimeService(repository domain.Repository, ids foundation.IDGenerator,
 	}
 	service.definitions = runtime.Definitions
 	service.runtime = runtime.Starter
+	if !isNilRuntimeStatePort(runtime.State) {
+		coordinator, coordinatorErr := NewRuntimeCoordinator(runtime.State)
+		if coordinatorErr != nil {
+			return nil, coordinatorErr
+		}
+		service.coordinator = coordinator
+	}
+	if !isNilRuntimeHumanStatePort(runtime.Human) {
+		humanCoordinator, humanErr := NewRuntimeHumanCoordinator(runtime.Human)
+		if humanErr != nil {
+			return nil, humanErr
+		}
+		service.humanCoordinator = humanCoordinator
+	}
 	return service, nil
 }
 

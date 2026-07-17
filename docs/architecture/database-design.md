@@ -37,6 +37,7 @@ erDiagram
     PROPOSAL ||--o{ APPROVAL : decisions
     WORKFLOW_RUN ||--o{ NODE_RUN : nodes
     NODE_RUN ||--o{ TOOL_CALL : calls
+    NODE_RUN ||--o{ NODE_ATTEMPT : leases
     WORKFLOW_RUN ||--o{ HUMAN_TASK : waits_for
     NODE_RUN ||--o{ COMPENSATION_RECORD : compensates
     WORKFLOW_RUN ||--o{ TOOL_AUTHORIZATION : grants
@@ -57,6 +58,17 @@ erDiagram
 ```
 
 ## 4. 核心表
+
+### workflow runtime state machine
+
+M4-B 的前向迁移 `00012_workflow_runtime_state_machine.sql` 在 `workflow` Schema 增加：
+
+- `run/node_run` 独立状态约束：`pending/running/waiting_for_human/retry_wait/paused/succeeded/failed/cancelled`。
+- `node_attempt` append-only 历史，冻结 `attempt_no/dispatch_no/retry_no/delivery_id`、River identity、lease、结果和脱敏错误摘要；只有运行中 Attempt 能续租或一次性归约。
+- `run.pause_requested_at/cancel_requested_at`、Node retry/failure/next-attempt 投影，以及 `control_command` 的 `(run,command,idempotency_key)` 幂等绑定。
+- `(node_run_id, attempt_no)`、`(node_run_id, dispatch_no, delivery_id)` 和单活动 Attempt 唯一索引。
+
+Claim/Heartbeat/结果归约按 Run → Node → Attempt 锁序，时间戳由数据库生成；迁移 Down 在存在 Attempt、控制命令或新状态时以 SQLSTATE `55000` 拒绝。
 
 ### workspace
 
