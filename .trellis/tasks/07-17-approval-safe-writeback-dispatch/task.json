@@ -3,7 +3,7 @@
   "name": "approval-safe-writeback-dispatch",
   "title": "M4-C Approval Safe Writeback Dispatch",
   "description": "把 Approved Proposal 原子接入 Workflow/River，完成 pre-Begin bootstrap、Execution 恢复和真实 Safe Writeback Job 闭环。",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

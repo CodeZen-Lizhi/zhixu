@@ -66,6 +66,7 @@ Eino 只能作为 Agent/Application 层的短流程编排实现，或作为 Adap
 - Eino Message、Graph、Node、Callback、Tool Schema 和错误类型不得进入领域模块。
 - Workflow Definition、Run、Node Run、租约、重试、Human Task 和补偿仍以 PostgreSQL/River 与领域状态机为事实源。M4-A 的 Domain/Application 只依赖 Definition/Executor Registry、RuntimeStarter 和 JobReceipt；River/pgx 类型仅存在于 Adapter。Start 的 Graph/首节点兼容字段不能决定执行能力，能力由服务端冻结 Registry 决定。
 - Proposal、Approval、Write Authorization 和 Tool Permission 必须由领域/Application Service 判定，不委托给 Eino Graph 或模型输出。
+- M4-C 的 `ApprovalDispatcher` 是独立跨 Schema 端口：Application 在数据库事务外完成 Target/Git 安全门，PostgreSQL Adapter 在单一 pgx transaction 内锁定 Proposal→Revision→Approval，并复用 Workflow `StartTx` 原子创建/重放 Definition、Run、Node、Outbox 和 River Job。Bootstrap Executor 只依赖 exact Execution lookup、Authorization Issue、Atomic Begin 与现有 Safe Writeback Node，不依赖 HTTP 或 River 类型。
 - PoC 通过后才锁定 Eino 版本；PoC 失败时 Composition Root 改用直接 OpenAI-Compatible Adapter，不改变调用方契约。
 
 采用门禁见 [ADR-0013](adr/0013-eino-adoption-gate.md)。

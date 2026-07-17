@@ -71,7 +71,7 @@ Write Authorization 必须一次性或幂等消费、短时有效，并严格绑
 
 当前实现落在 `internal/changecontrol`：服务端只保存 `token_hash`，授权记录位于 `change_control.tool_authorization`，签发前复核 Proposal/Approval/Change Hash/目标哈希和已持久化 Workflow Run/Node；Atomic Begin 消费前完成完整绑定校验，再在数据库行锁事务内校验审批快照、过期/撤销状态和 running lease，并将两份授权原子转为 `consumed`。Safe Writeback 随后使用 `file_prepared`/`git_prepared` durable intent 进行可重启恢复；Commit 结果先 exact Trailer lookup，unknown 不 Restore 文件；Mapping 与 Reindex Outbox 原子发布后状态为 `verifying/index_pending`。
 
-当前只构造 Safe Writeback Node 与 API/Worker Composition；M4-A 已实现通用 River Job Registry/InsertTx 基础，但 Safe Writeback 的生产 dispatcher、lease/retry lifecycle 尚未接线，不能通过自制 polling 或日志把该业务异步执行描述为已完成。M6 Retrieval 尚未实现真实索引和回归，不得将 `index_pending` 返回为 completed。
+M4-C 已把 Approved Proposal 原子接入正式 Workflow/River：持久 Job Args 只含 schema version、Node Run ID 与 dispatch no；Bootstrap Node input 只含 Proposal、Revision 和 approved Change Hash。Credential 仅在 Worker 栈帧中存在，Begin 后立即清除引用，任何持久层只允许 Authorization token hash。正文、相对路径与 locator/identity token 只保留在拥有恢复事实的 Change Control Proposal/Execution/Reindex 契约中，不得复制进 River Args、Safe Writeback Node input、Workflow Attempt/dispatch Outbox 或错误摘要；日志/metrics/trace 与 River metadata 由 M4-D 继续做 Secret 扫描。完整 Approval→Run binding 重放不重新读取文件/Git，历史未绑定 Approval 必须重新通过当前安全门。M6 Retrieval 尚未实现真实索引和回归，不得将 `index_pending` 返回为 completed。
 
 明文 Credential 只在首次签发时返回，服务端不保存可恢复副本；首次响应丢失后的幂等重放不会再次返回 Credential。调用方只能使用新幂等键重新签发或等待短 TTL 过期，不能通过查询接口恢复写凭据。
 

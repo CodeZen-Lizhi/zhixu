@@ -8,7 +8,7 @@
 
 使用 PostgreSQL 持久化领域工作流状态，River 负责可运行节点的任务投递与 Worker 获取；不在正式 v1.0 引入 Temporal。Workflow Definition、Node 状态和补偿语义仍由 Workflow Module 掌握，River 不是业务事实源。
 
-实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和 Deterministic Worker smoke。M4-B 已接入 PostgreSQL DB-time Claim/Heartbeat、append-only Attempt、Retry/Fail/Complete、DAG 后继、Human Task、Pause/Resume/Cancel；River 只负责投递/领取，Workflow PostgreSQL 表仍是业务事实源。M4-C 的 Approval/Safe Writeback Dispatch 与 M4-D 的 readiness、OTel、Compose 运维仍未完成。
+实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和 Deterministic Worker smoke。M4-B 已接入 PostgreSQL DB-time Claim/Heartbeat、append-only Attempt、Retry/Fail/Complete、DAG 后继、Human Task、Pause/Resume/Cancel。M4-C 已接入 Approval/Safe Writeback 原子 Dispatch、pre-Begin Bootstrap、Execution exact lookup 与真实 River Worker 闭环；每次 delivery 使用唯一 lease owner，持久 Args 严格拒绝额外字段。River 仍只负责投递/领取，Workflow PostgreSQL 表是业务事实源；M4-D 继续负责 readiness、OTel、Compose 与恢复运维。
 
 见 [ADR-0006](adr/0006-postgres-durable-workflow.md)。
 
@@ -94,6 +94,7 @@ sequenceDiagram
 - 过期租约可被其他 Worker 回收。
 - Side Effect 执行前再次确认租约。
 - Claim、Heartbeat、Complete、Retry、Fail 和控制命令的资格时间只取 PostgreSQL 时间；旧 owner 使用 owner + attempt + node version + 未过期 lease fence。
+- 同一 River Job 的更高 transport attempt 若在旧 Workflow lease 到期前到达，返回 retryable `WORKFLOW_LEASE_HELD`，不得当作 benign stale 返回成功；否则 River 会完成唯一 Job，而 Node 在 lease 到期后失去 reclaim delivery。终态 Run、旧 dispatch 或同 attempt 的真实 duplicate 仍按 stale no-op 处理。
 - Attempt 历史只允许 running 向一个终态前进；相同 delivery 重放不重复 Attempt，业务 retry 才递增 retry_no。
 
 ## 8. 节点完成事务

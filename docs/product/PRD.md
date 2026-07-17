@@ -1408,7 +1408,7 @@ Should：
 8. Publish 成功后清理 temp/backup 恢复证据；清理失败保留 `VERIFYING` 并可重试 finalize，不得伪装成完成。
 9. M6 Retrieval 消费 Outbox 完成解析、索引和回归后，才允许推进 `COMPLETED`。
 
-本期已实现 Safe Writeback Node 与 API/Worker Composition；M4-A 已接入通用 River Job Registry、事务型 InsertTx 和 Deterministic Worker 基础，但 Safe Writeback 的生产 dispatcher、lease/retry lifecycle 仍待 M4-C/M4-D，不能把直接 Node 集成烟测描述为该业务已自动异步执行。
+M4-C 已实现 Approved Proposal 的自动异步写回：Approval、Proposal→Run binding、固定 Safe Writeback Definition/Node、Workflow Outbox 与唯一 River Job 在同一 PostgreSQL 事务提交；Worker Claim 后 exact lookup Durable Execution，缺失时瞬时签发双授权并 Atomic Begin，再调用现有 Safe Writeback Node，最终由 M4-B 原子完成 Node/Run。完整绑定重放直接返回原 Run/Job，不读取已被写回改变的文件或 Git；Rejected 不创建 Workflow。M6 Retrieval 完成前结果仍严格保持 `verifying/index_pending`，M4-D 继续负责 readiness、OTel、Compose 与运维交付。
 
 #### 10.9.3 Git Commit 规则
 

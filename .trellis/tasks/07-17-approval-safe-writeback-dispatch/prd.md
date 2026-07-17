@@ -14,6 +14,8 @@
 - Atomic Begin 要求 Node 已 running/lease owner 匹配；现有 Node 又要求 ExecutionID。采用 Job 先 Claim，再 bootstrap Begin/lookup，再构造 Node Input。
 - Credential 不可持久化且 replay 不重新返回。Bootstrap 只在进程内瞬时签发；Begin 响应丢失通过稳定 Execution key 恢复。
 - 当前 Approve 和 Workflow Start 各自事务。采用跨 Change Control/Workflow/River 的单一 UoW，禁止串联多个 Repository 冒充原子。
+- 原 M4-C 验收把真实 OS `kill -9` 与 Worker rescue/lifecycle 配置放在本任务，但 M4-D 已以此为核心范围并负责 `JobTimeout/RescueStuckJobsAfter`、强制停机和容器重启。M4-C 改为验证真实 River 双 Worker、transport duplicate、故障注入和持久 checkpoint/response-loss；真实进程 `kill -9` 只在 M4-D 以生产配置验证，避免先引入临时第二套生命周期配置。用户价值是不把“业务恢复正确”与“进程运维参数正确”混为一个不可稳定复现的测试；影响仅为验收归属调整，不改变 API、数据库或恢复语义。
+- 原“全库无正文/路径/lock token”与现有 M5 Durable Writeback 契约冲突：Proposal Revision 必须保存批准正文，Writeback Execution 必须保存受控相对 locator/identity token，Reindex Outbox 必须携带版本化相对目标。优化为原始 Credential 永不持久化；正文、路径、locator/token 只能存在于拥有该恢复事实的 Change Control 表，禁止进入 River Args、Safe Writeback Node input、Workflow Attempt/dispatch Outbox、错误摘要和可观测性。M4-C 扫描持久 Runtime payload，日志/metrics/trace 的运行时扫描由 M4-D 完成；兼容现有 M5 数据与恢复能力。
 
 ## Requirements
 
@@ -53,6 +55,7 @@
 - Begin commit 后响应丢失：按 exact key找到唯一 Execution，不再次签发/Begin。
 - Execution lookup binding 冲突进入 Manual，不创建第二 Execution。
 - Saga 副作用后 Workflow Complete 前崩溃：现有 Node/Saga checkpoint 重放，只产生一个 Commit/Mapping/Reindex Outbox。
+- M4-C 使用真实双 River Worker、重复投递与持久故障注入验证上述窗口；真实操作系统 `kill -9`、River stuck rescue 时间和进程重启由 M4-D 运维交付烟测验证。
 
 ### R6. Node And Workflow Result
 
@@ -65,7 +68,9 @@
 
 - 客户端不能提交 expected Git HEAD、ExecutionID、Authorization ID/Credential、路径、正文或 Git 参数。
 - Job payload不是权限凭证；执行前重新加载 Approval/Run/Node/Definition/权限事实。
-- Secret 扫描覆盖 River 表、Workflow/Change Control 表、Outbox、日志和错误。
+- 原始 Credential 不得进入任何持久表、Outbox、Job、错误或响应；数据库只允许 Authorization token hash。
+- 正文、相对路径和 durable locator/identity token 只允许存在于拥有该事实的 Change Control Proposal/Execution/Recovery 记录；不得复制进 River Args、Safe Writeback Node input、Workflow Attempt/dispatch Outbox 或错误摘要。
+- M4-C 扫描上述持久 Runtime payload；日志、metrics、trace 与 River metadata 的 Secret 扫描在 M4-D 完成。
 
 ## Acceptance Criteria
 
@@ -74,9 +79,9 @@
 - [ ] 首次审批或历史不完整 dispatch 不得绕过 Target/Git 安全门，dirty/detached/base drift/NULL baseline 均拒绝；已有完整绑定的 exact replay 即使写回后文件/HEAD 已变化也不访问 FS/Git，仍返回原 Approval/Run/Node/Job。
 - [ ] 真实 River delivery 完成 Claim→Authorization→Begin/lookup→Node Execute→Workflow Complete。
 - [ ] 两次 Authorization、Begin、lookup、Resume、Complete 的全部 crash/response-loss 窗口可恢复。
-- [ ] 并发/duplicate/kill-9 只有一个 Execution、Git Commit、Mapping、Reindex Outbox 和 Workflow completion。
+- [ ] 并发、双 Worker、transport duplicate 与持久 crash/response-loss 只有一个 Execution、Git Commit、Mapping、Reindex Outbox 和 Workflow completion；真实 OS `kill -9` 由 M4-D 使用生产 rescue/lifecycle 配置验证。
 - [ ] exact lookup 绑定冲突进入 Manual，不签发新 Credential、不开始副作用。
-- [ ] River Args/Node/Attempt/Outbox/日志/DB 全库 Secret 扫描无 Credential、正文、路径、Git 参数和 lock token。
+- [ ] River Args、Safe Writeback Node input、Workflow Attempt/dispatch Outbox 与错误摘要不含 Credential、正文、路径、Git 参数和 lock token；Change Control 只持久化既有 M5 恢复契约允许的业务事实，原始 Credential 永不持久化。日志/metrics/trace 扫描由 M4-D 完成。
 - [ ] 结果稳定为 Workflow succeeded + Proposal/Execution `verifying/index_pending`，不伪造 completed/published。
 - [ ] 真实 PostgreSQL/River/LocalFS/Git smoke、`go test -race`、关键 `-count=20`、OpenAPI、go-review/sql-code-review/Trellis check、`git diff --check` 通过。
 

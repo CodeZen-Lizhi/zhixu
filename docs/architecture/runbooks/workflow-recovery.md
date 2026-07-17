@@ -77,3 +77,11 @@ Unknown → MANUAL_RECOVERY_REQUIRED。
 - Audit 连续。
 - 受影响 Proposal 状态正确。
 
+## 10. Approval Safe Writeback Dispatch
+
+- `proposal.workflow_run_id` 非空时，先按原 Approval ID、固定 Definition/Node、Outbox 和 River Job 做 exact replay；禁止重新捕获已变化的文件/Git 基线。
+- Approval 已存在但 `workflow_run_id` 为空时，必须重新执行 Target Hash、strict-clean attached Git HEAD 安全门，再原子补建 Run/Node/Job；`approved_git_head=NULL` 不允许补建。
+- Worker 在 Claim 后先查询 `safe-writeback:<node_run_id>`；Execution 存在则验证 Workspace/Run/Node/Proposal/Revision/Approval/Hash/HEAD 全绑定，冲突进入 `WRITEBACK_EXECUTION_BINDING_CONFLICT` 人工恢复。
+- River transport error 后更高 Job attempt 若遇到尚未过期的旧 Workflow lease，应观察到 retryable `WORKFLOW_LEASE_HELD` 并继续重投；若 Job 已 completed 但 Node 仍 running，先检查是否运行了旧版本 stale 逻辑，禁止手工重复创建领域 Execution。
+- Execution 不存在时必须使用新的 Authorization generation；旧 delivery 的明文 Credential 不可恢复或复用。Begin 响应丢失后按 exact key 查询，禁止创建第二 Execution。
+- Run `succeeded` 只表示写回已到 `verifying/index_pending`；Retrieval/Regression 未完成时不得手工改为 Proposal `completed`。

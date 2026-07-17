@@ -6,7 +6,7 @@
 
 ## Background
 
-- 当前 `cmd/worker` 只有数据库 Ping ticker，Compose 没有 Worker healthcheck，无法证明 River schema、Registry 或 Executor 已就绪。
+- M4-C 已把真实 River Client、Registry/Runtime 与 Safe Writeback Executor 接入 `cmd/worker`；当前仍只有数据库 Ping ticker，Compose 没有 Worker healthcheck，启动 Context 直接绑定 OS signal，也无法证明 River schema、Registry 或 Executor 已就绪。
 - River v0.40.0 PoC 证明 `Start(ctx)` 启动后台循环后返回；`Stop` 等待任务完成，`StopAndCancel` 传播 Context cancel，`SoftStopTimeout` 必须显式配置以避免无限等待。
 - API `/readyz` 不能代表 Worker ready；Worker 需要独立 health server。
 - 产品最终还需要完整 M10 可观测性与安全体系；本任务只交付 Workflow Runtime 所需的 correlation、指标和 trace seam，不实现全产品审计 UI 或告警平台。
@@ -19,6 +19,7 @@
 - `Client.Start(ctx)` 使用独立的进程生命周期 Context 直接调用，不额外包 goroutine；该 Context 不由 `signal.NotifyContext` 在收到停机信号时自动取消。启动任一必需组件失败时进程非零退出。
 - 收到 SIGTERM/SIGINT 时由唯一 lifecycle 状态机选择并只调用一次 `Stop(shutdownCtx)`：River v0.40.0 根据 `SoftStopTimeout` 自动从 soft stop 升级为取消 Worker Context，不再随后重复调用 `StopAndCancel`。`StopAndCancel` 只允许由 Runtime/Supervisor 报告“继续执行可能扩大副作用”的稳定 fatal invariant 事件触发，且仅在 lifecycle 仍为 running、尚未进入 graceful stop 时可被首次选择；测试可注入该事件。两条路径通过一次性状态转换互斥，后续 signal/fatal 事件只记录不再调用另一 API；不得同时通过取消 Start Context触发第二条停机路径。
 - Worker 若忽略取消且超过进程 hard shutdown deadline，记录稳定错误后非零退出；新实例依靠 River rescue、Workflow lease 和领域 checkpoint 恢复，不声称该次停机优雅完成。
+- 对已开始外部副作用的写权限 Node，进程停机或用户 Cancel 只有在领域 Execution 已持久化 cancelled/compensated/manual recovery 事实后，才能把 Workflow 归约为 terminal cancelled；否则必须保持可恢复 Job 或进入 Manual Recovery，禁止留下 `Proposal applying/Execution prepared` 而 Run 已 cancelled 的孤儿状态。
 - 不再输出 `workflow_dispatcher=not_configured`，也不以 DB Ping 冒充业务运行时。
 
 ### R2. Configuration
@@ -67,6 +68,7 @@
 - [ ] `/livez` 与 `/readyz` 语义分离；DB、River migration、Registry 或依赖失败会使 ready=false。
 - [ ] Compose Worker healthcheck 实际访问容器内 `:8081/readyz`，`up --wait` 同时证明 API 和 Worker ready。
 - [ ] 正常 Stop 等待安全 checkpoint并由 SoftStopTimeout 自动取消；紧急 StopAndCancel 是互斥路径。忽略取消超过 hard deadline 时进程非零退出并可由 lease/checkpoint 恢复。
+- [ ] Safe Writeback 在 Atomic Begin 或任一副作用 checkpoint 后收到 Cancel/forced cancel 时，不会形成 terminal Workflow + 非终态 Execution 的孤儿组合；必须恢复完成、补偿或明确进入 Manual Recovery。
 - [ ] 两 Worker、duplicate、kill -9、数据库短断和重启 smoke 不重复 Execution、Commit、Mapping 或 Outbox。
 - [ ] 日志/metrics/trace correlation 完整，Secret 扫描无泄漏；Telemetry disabled/optional/required 三种模式行为明确。
 - [ ] Docker 镜像仍以非 root 运行，包含 API/Worker/Migrate，Compose migration 顺序和失败退出正确。

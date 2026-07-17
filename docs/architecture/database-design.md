@@ -429,7 +429,7 @@ tool_call：
 - 同一聚合一次逻辑状态变化只能产生一个 `event_key`；数据库在聚合/事件版本作用域内阻止重复插入，应用重试应返回既有 Outbox 记录。
 - 投递幂等与业务命令幂等分开：消费者使用 `(consumer_name, event_id)`（或同等明确作用域）去重，不能用一个跨所有 Workspace/聚合的全局业务键。
 - 副作用命令沿用 `workflow_run_id + node_id + logical_operation + target_version` 的作用域；Review Answer、Tool Call、File Write、Git Commit、Index Revision 和 Event Publish 都必须使用明确目标版本/资源。
-- 同一事务内先写 Workflow Definition/Run/Node/Outbox，再由 River `InsertTx` 投递可运行 Node；M4-A 的 Job Kind/Args 只携带 schema version、Node Run ID 和 dispatch no，不能成为业务事实源。M4-B 才实现 DB-time Claim/Attempt/retry/control，M4-D 才接入生产 Worker lifecycle。发布失败只增加 attempt/错误摘要并重试，不能重新执行已完成的领域副作用。
+- 同一事务内先写 Workflow Definition/Run/Node/Outbox，再由 River `InsertTx` 投递可运行 Node；M4-A 的 Job Kind/Args 只携带 schema version、Node Run ID 和 dispatch no，不能成为业务事实源。M4-B 实现 DB-time Claim/Attempt/retry/control；M4-C 的 `00013_approval_writeback_dispatch.sql` 增加 nullable、partial unique、复合 FK 保证同 Workspace 且不可换绑/移动 Workspace 的 `proposal.workflow_run_id`，并把 Approval/Run/Node/Outbox/Job 纳入单一 UoW。生产 Worker lifecycle 已接入，M4-D 继续补 readiness/OTel/Compose。发布失败只增加 attempt/错误摘要并重试，不能重新执行已完成的领域副作用。
 - 事件 payload 必须带 schema_version 和最小必要数据；敏感正文不直接放入事件。Knowledge Event、SSE 和审计均从稳定事件身份投影，投影重复必须可去重。
 
 ### health_issue
