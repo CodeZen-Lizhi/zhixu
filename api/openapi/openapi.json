@@ -374,14 +374,14 @@
       },
       "StartWorkflowRequest": {
         "type": "object",
-        "required": ["definition_key", "definition_version", "graph", "input", "first_node_key", "first_node_type"],
+        "required": ["definition_key", "definition_version", "input"],
         "properties": {
           "definition_key": { "type": "string", "minLength": 1 },
           "definition_version": { "type": "integer", "minimum": 1 },
-          "graph": { "type": "object", "additionalProperties": true },
+          "graph": { "type": "object", "additionalProperties": true, "deprecated": true, "description": "Deprecated compatibility field; must match the server-registered canonical graph." },
           "input": {},
-          "first_node_key": { "type": "string", "minLength": 1 },
-          "first_node_type": { "type": "string", "minLength": 1 }
+          "first_node_key": { "type": "string", "minLength": 1, "deprecated": true },
+          "first_node_type": { "type": "string", "minLength": 1, "deprecated": true }
         },
         "additionalProperties": false
       },

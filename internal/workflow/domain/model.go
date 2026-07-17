@@ -44,18 +44,30 @@ type Run struct {
 	ID, WorkspaceID, DefinitionID foundation.ID
 	Status                        Status
 	Input, Output                 json.RawMessage
-	Version                       int64
-	CreatedAt, UpdatedAt          time.Time
-	CompletedAt                   *time.Time
+	// IdempotencyKey 在 Workspace 内绑定一次 Runtime Start 请求。
+	IdempotencyKey string
+	// RequestHash 固化注册 Definition 与 canonical input 的请求身份。
+	RequestHash          string
+	Version              int64
+	CreatedAt, UpdatedAt time.Time
+	CompletedAt          *time.Time
 }
 
 // NodeRun is one durable execution of a logical workflow node.
 type NodeRun struct {
-	ID, RunID            foundation.ID
-	NodeKey, NodeType    string
-	Status               Status
-	Attempt              int
-	Input, Output        json.RawMessage
+	ID, RunID         foundation.ID
+	NodeKey, NodeType string
+	Status            Status
+	Attempt           int
+	Input, Output     json.RawMessage
+	// IdempotencyKey 在同一 Run 内稳定标识逻辑节点启动。
+	IdempotencyKey string
+	// InputSchemaVersion 固化节点消费的输入契约版本。
+	InputSchemaVersion int
+	// OutputSchemaVersion 固化节点产出的输出契约版本。
+	OutputSchemaVersion int
+	// DispatchNo 是从 1 开始的持久投递序号。
+	DispatchNo           int
 	LeaseOwner           string
 	LeaseUntil           *time.Time
 	Version              int64
@@ -79,6 +91,12 @@ type OutboxEvent struct {
 	ID, WorkspaceID      foundation.ID
 	RunID                *foundation.ID
 	Type, IdempotencyKey string
-	Payload              json.RawMessage
-	OccurredAt           time.Time
+	// EventKey 是事件实例的稳定业务键。
+	EventKey string
+	// SchemaVersion 是事件 Payload 的契约版本。
+	SchemaVersion int
+	// EventVersion 是同一 EventKey 下从 1 开始的版本。
+	EventVersion int64
+	Payload      json.RawMessage
+	OccurredAt   time.Time
 }

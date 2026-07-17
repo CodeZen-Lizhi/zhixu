@@ -29,11 +29,14 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/webassets"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
+	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
+	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	workflowhttp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/http"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
@@ -121,16 +124,11 @@ func main() {
 				}
 			}
 		}
-		workflowRepository, workflowRepositoryErr := workflowpostgres.NewRepository(database.DB())
-		if workflowRepositoryErr != nil {
-			logger.Error("workflow repository is unavailable", "error_code", "WORKFLOW_DATABASE_UNAVAILABLE")
+		workflowService, workflowServiceErr := newWorkflowService(database.DB())
+		if workflowServiceErr != nil {
+			logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
 		} else {
-			workflowService, workflowServiceErr := workflowapplication.NewService(workflowRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
-			if workflowServiceErr != nil {
-				logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
-			} else {
-				workflowHandler = workflowhttp.NewHandler(workflowService)
-			}
+			workflowHandler = workflowhttp.NewHandler(workflowService)
 		}
 	}
 
@@ -178,6 +176,67 @@ func main() {
 			logger.Error("api server shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
 		}
 	}
+}
+
+func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error) {
+	legacyRepository, err := workflowpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	client, err := riveradapter.NewClient(pool, nil)
+	if err != nil {
+		return nil, err
+	}
+	inserter, err := riveradapter.NewJobInserter(client)
+	if err != nil {
+		return nil, err
+	}
+	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	if err != nil {
+		return nil, err
+	}
+	catalog, err := workflowapplication.NewValidationCatalog(
+		[]int{1},
+		[]workflowdomain.Permission{
+			workflowdomain.PermissionReadLocal,
+			workflowdomain.PermissionReadExternal,
+			workflowdomain.PermissionWriteProposal,
+			workflowdomain.PermissionWriteKnowledge,
+			workflowdomain.PermissionGitWrite,
+			workflowdomain.PermissionAdminMaintenance,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	executors, err := workflowapplication.NewExecutorRegistry(catalog)
+	if err != nil {
+		return nil, err
+	}
+	if err := executors.Register(workflowapplication.CanonicalJSONHashNodeKind, workflowapplication.CanonicalJSONHashInputSchemaVersion, workflowapplication.NewCanonicalJSONHashExecutor()); err != nil {
+		return nil, err
+	}
+	if err := executors.Freeze(); err != nil {
+		return nil, err
+	}
+	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
+	if err != nil {
+		return nil, err
+	}
+	if err := definitions.Register(workflowdomain.RegisteredDefinition{
+		Key: "deterministic.hash", Version: 1, InputSchemaVersion: 1,
+		Graph: workflowdomain.CanonicalGraph{Nodes: []workflowdomain.NodeDefinition{{
+			Key: "hash", Kind: workflowapplication.CanonicalJSONHashNodeKind,
+			InputSchemaVersion: 1, OutputSchemaVersion: 1,
+			RetryPolicy: workflowdomain.RetryPolicy{},
+		}}},
+	}); err != nil {
+		return nil, err
+	}
+	if err := definitions.Freeze(); err != nil {
+		return nil, err
+	}
+	return workflowapplication.NewRuntimeService(legacyRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, workflowapplication.RuntimeDependencies{Definitions: definitions, Starter: runtimeRepository})
 }
 
 func firstError(values ...error) error {

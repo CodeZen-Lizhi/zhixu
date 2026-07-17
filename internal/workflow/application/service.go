@@ -12,11 +12,13 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
 
-// Service owns workflow application invariants and delegates atomic changes to Repository.
+// Service owns workflow application invariants and delegates atomic changes to Repository or RuntimeStarter.
 type Service struct {
-	repository domain.Repository
-	ids        foundation.IDGenerator
-	clock      foundation.Clock
+	repository  domain.Repository
+	ids         foundation.IDGenerator
+	clock       foundation.Clock
+	definitions *DefinitionRegistry
+	runtime     RuntimeStarter
 }
 
 // NewService constructs a workflow service.
@@ -25,48 +27,6 @@ func NewService(repository domain.Repository, ids foundation.IDGenerator, clock 
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_SERVICE_DEPENDENCY_MISSING", false, errors.New("workflow service dependency is nil"))
 	}
 	return &Service{repository: repository, ids: ids, clock: clock}, nil
-}
-
-// StartCommand starts a deterministic definition at its first node.
-type StartCommand struct {
-	WorkspaceID                 foundation.ID
-	DefinitionKey               string
-	DefinitionVersion           int64
-	Graph, Input                json.RawMessage
-	FirstNodeKey, FirstNodeType string
-	IdempotencyKey              string
-}
-
-// Start persists the immutable definition, run, first node and outbox event atomically.
-func (s *Service) Start(ctx context.Context, command StartCommand) (domain.Run, error) {
-	idempotencyKey := strings.TrimSpace(command.IdempotencyKey)
-	if command.WorkspaceID == "" || strings.TrimSpace(command.DefinitionKey) == "" || command.DefinitionVersion < 1 || strings.TrimSpace(command.FirstNodeKey) == "" || strings.TrimSpace(command.FirstNodeType) == "" || idempotencyKey == "" || len(idempotencyKey) > 128 || !objectJSON(command.Graph) || !validJSON(command.Input) {
-		return domain.Run{}, invalid("WORKFLOW_START_INVALID")
-	}
-	definitionID, err := s.ids.New()
-	if err != nil {
-		return domain.Run{}, err
-	}
-	runID, err := s.ids.New()
-	if err != nil {
-		return domain.Run{}, err
-	}
-	nodeID, err := s.ids.New()
-	if err != nil {
-		return domain.Run{}, err
-	}
-	eventID, err := s.ids.New()
-	if err != nil {
-		return domain.Run{}, err
-	}
-	now := s.clock.Now()
-	request := domain.StartRequest{
-		Definition: domain.Definition{ID: definitionID, WorkspaceID: command.WorkspaceID, Key: strings.TrimSpace(command.DefinitionKey), Version: command.DefinitionVersion, Graph: command.Graph, CreatedAt: now},
-		Run:        domain.Run{ID: runID, WorkspaceID: command.WorkspaceID, DefinitionID: definitionID, Status: domain.StatusPending, Input: normalizedJSON(command.Input), Version: 1, CreatedAt: now, UpdatedAt: now},
-		FirstNode:  domain.NodeRun{ID: nodeID, RunID: runID, NodeKey: strings.TrimSpace(command.FirstNodeKey), NodeType: strings.TrimSpace(command.FirstNodeType), Status: domain.StatusPending, Input: normalizedJSON(command.Input), Version: 1, CreatedAt: now, UpdatedAt: now},
-		Event:      domain.OutboxEvent{ID: eventID, WorkspaceID: command.WorkspaceID, RunID: &runID, Type: "workflow.run.started", IdempotencyKey: "workflow-start:" + string(command.WorkspaceID) + ":" + idempotencyKey, Payload: json.RawMessage(`{}`), OccurredAt: now},
-	}
-	return s.repository.Start(ctx, request)
 }
 
 // Get returns the persisted run state.

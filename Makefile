@@ -1,8 +1,11 @@
 SHELL := /bin/sh
 
-.PHONY: test go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke openapi-check compose-check docker-build compose-up compose-down
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke openapi-check compose-check docker-build compose-up compose-down
 
 test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet openapi-check compose-check
+
+migrate:
+	go run ./cmd/migrate
 
 go-test:
 	go test ./cmd/... ./internal/...

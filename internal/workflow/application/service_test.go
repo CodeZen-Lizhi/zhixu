@@ -44,6 +44,22 @@ func (f *fakeRepository) SubmitHumanTask(_ context.Context, _ foundation.ID, v i
 	return domain.HumanTask{}, f.err
 }
 
+type fakeRuntimeStarter struct {
+	request RuntimeStartRequest
+	result  RuntimeStartResult
+	err     error
+	calls   int
+}
+
+func (f *fakeRuntimeStarter) Start(_ context.Context, request RuntimeStartRequest) (RuntimeStartResult, error) {
+	f.calls++
+	f.request = request
+	if f.result.Run.ID == "" {
+		f.result = RuntimeStartResult{Run: request.Run, FirstNode: request.FirstNode, Job: JobReceipt{JobID: 42}}
+	}
+	return f.result, f.err
+}
+
 type sequenceIDs struct {
 	values []foundation.ID
 	index  int
@@ -61,29 +77,152 @@ func id(n byte) foundation.ID {
 	return foundation.ID("00000000-0000-4000-8000-00000000000" + string([]byte{'0' + n}))
 }
 
-func TestStartBuildsAtomicRequest(t *testing.T) {
-	repo := &fakeRepository{}
-	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
-	ids := &sequenceIDs{values: []foundation.ID{id(1), id(2), id(3), id(4)}}
-	service, err := NewService(repo, ids, foundation.FixedClock{Value: now})
+func TestStartResolvesRegisteredDefinitionAndBuildsRuntimeIdentity(t *testing.T) {
+	service, runtime, definition := newRuntimeStartService(t, definitionFixture("ingest", []domain.NodeDefinition{
+		{Key: "finish", Kind: "deterministic.test", Dependencies: []string{"scan"}, InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()},
+		{Key: "scan", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()},
+	}))
+
+	run, err := service.Start(context.Background(), StartCommand{
+		WorkspaceID: id(5), DefinitionKey: " ingest ", DefinitionVersion: 1,
+		Input: json.RawMessage(`{"source":"a"}`), IdempotencyKey: " request-1 ",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := service.Start(context.Background(), StartCommand{WorkspaceID: id(5), DefinitionKey: "ingest", DefinitionVersion: 1, Graph: json.RawMessage(`{"nodes":[]}`), Input: json.RawMessage(`{"source":"a"}`), FirstNodeKey: "scan", FirstNodeType: "deterministic", IdempotencyKey: "request-1"})
-	if err != nil {
-		t.Fatal(err)
+	request := runtime.request
+	if runtime.calls != 1 || run.ID != request.Run.ID || request.Definition.Key != "ingest" || request.DefinitionGraphHash != definition.GraphHash || request.DefinitionInputSchemaVersion != 1 {
+		t.Fatalf("run=%#v request=%#v calls=%d", run, request, runtime.calls)
 	}
-	if run.Status != domain.StatusPending || repo.start.FirstNode.RunID != run.ID || repo.start.Event.RunID == nil || *repo.start.Event.RunID != run.ID {
-		t.Fatalf("request=%#v", repo.start)
+	if request.Run.IdempotencyKey != "request-1" || request.Run.RequestHash == "" || request.Run.DefinitionID != request.Definition.ID {
+		t.Fatalf("run identity=%#v", request.Run)
+	}
+	if request.FirstNode.NodeKey != "scan" || request.FirstNode.NodeType != "deterministic.test" || request.FirstNode.InputSchemaVersion != 1 || request.FirstNode.OutputSchemaVersion != 1 || request.FirstNode.DispatchNo != 1 || request.FirstNode.IdempotencyKey == "" {
+		t.Fatalf("node identity=%#v", request.FirstNode)
+	}
+	if request.Event.EventKey == "" || request.Event.EventKey == "workflow.run.started:"+string(request.Run.ID) || request.Event.SchemaVersion != 1 || request.Event.EventVersion != 1 || request.Event.RunID == nil || *request.Event.RunID != request.Run.ID {
+		t.Fatalf("event identity=%#v", request.Event)
 	}
 }
 
-func TestStartRejectsInvalidGraph(t *testing.T) {
-	service, _ := NewService(&fakeRepository{}, &sequenceIDs{}, foundation.FixedClock{})
-	_, err := service.Start(context.Background(), StartCommand{WorkspaceID: id(1), DefinitionKey: "x", DefinitionVersion: 1, Graph: json.RawMessage(`[]`), FirstNodeKey: "n", FirstNodeType: "x", IdempotencyKey: "request-1"})
-	var classified *foundation.Error
-	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_START_INVALID" {
-		t.Fatalf("error=%v", err)
+func TestStartCanonicalizesInputBeforeHashing(t *testing.T) {
+	definition := definitionFixture("ingest", []domain.NodeDefinition{{Key: "root", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()}})
+	left, leftRuntime, _ := newRuntimeStartService(t, definition)
+	right, rightRuntime, _ := newRuntimeStartService(t, definition)
+	right.ids = &sequenceIDs{values: []foundation.ID{id(6), id(7), id(8), id(9)}}
+
+	if _, err := left.Start(context.Background(), StartCommand{WorkspaceID: id(5), DefinitionKey: "ingest", DefinitionVersion: 1, Input: json.RawMessage("{\n  \"b\": 2, \"a\": 1\n}"), IdempotencyKey: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := right.Start(context.Background(), StartCommand{WorkspaceID: id(5), DefinitionKey: "ingest", DefinitionVersion: 1, Input: json.RawMessage(`{"a":1,"b":2}`), IdempotencyKey: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	if string(leftRuntime.request.Run.Input) != `{"a":1,"b":2}` || leftRuntime.request.Run.RequestHash != rightRuntime.request.Run.RequestHash {
+		t.Fatalf("left input/hash=%s/%s right=%s/%s", leftRuntime.request.Run.Input, leftRuntime.request.Run.RequestHash, rightRuntime.request.Run.Input, rightRuntime.request.Run.RequestHash)
+	}
+	if leftRuntime.request.Run.RequestHash != "4f713095c552912de03da30d483499e0f09fa9ee751821e187669f69e5403752" {
+		t.Fatalf("request hash=%s", leftRuntime.request.Run.RequestHash)
+	}
+	if leftRuntime.request.Run.ID == rightRuntime.request.Run.ID || leftRuntime.request.Event.EventKey != rightRuntime.request.Event.EventKey {
+		t.Fatalf("left run/event=%s/%s right=%s/%s", leftRuntime.request.Run.ID, leftRuntime.request.Event.EventKey, rightRuntime.request.Run.ID, rightRuntime.request.Event.EventKey)
+	}
+}
+
+func TestStartRejectsClientGraphOrFirstNodeThatDoesNotMatchRegistry(t *testing.T) {
+	definition := definitionFixture("ingest", []domain.NodeDefinition{{Key: "root", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()}})
+	tests := []struct {
+		name    string
+		command StartCommand
+		code    string
+	}{
+		{name: "graph", command: StartCommand{Graph: json.RawMessage(`{"nodes":[{"key":"other","kind":"deterministic.test","input_schema_version":1,"output_schema_version":1,"retry_policy":{"max_retries":2,"base_delay":1000000000,"max_delay":60000000000}}]}`)}, code: "WORKFLOW_START_GRAPH_MISMATCH"},
+		{name: "first node key", command: StartCommand{FirstNodeKey: "other", FirstNodeType: "deterministic.test"}, code: "WORKFLOW_START_ROOT_MISMATCH"},
+		{name: "first node kind", command: StartCommand{FirstNodeKey: "root", FirstNodeType: "side.effect"}, code: "WORKFLOW_START_ROOT_MISMATCH"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			service, runtime, _ := newRuntimeStartService(t, definition)
+			command := tc.command
+			command.WorkspaceID = id(5)
+			command.DefinitionKey = "ingest"
+			command.DefinitionVersion = 1
+			command.Input = json.RawMessage(`{}`)
+			command.IdempotencyKey = "request-1"
+			_, err := service.Start(context.Background(), command)
+			assertWorkflowErrorCode(t, err, tc.code)
+			if runtime.calls != 0 {
+				t.Fatalf("runtime starter called %d times", runtime.calls)
+			}
+		})
+	}
+}
+
+func TestStartAcceptsCanonicalEquivalentDeprecatedGraphAndRoot(t *testing.T) {
+	definition := definitionFixture("ingest", []domain.NodeDefinition{
+		{Key: "finish", Kind: "deterministic.test", Dependencies: []string{"root"}, InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()},
+		{Key: "root", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()},
+	})
+	service, runtime, _ := newRuntimeStartService(t, definition)
+	graph := json.RawMessage(`{"nodes":[{"key":"root","kind":"deterministic.test","input_schema_version":1,"output_schema_version":1,"retry_policy":{"max_retries":2,"base_delay":1000000000,"max_delay":60000000000}},{"key":"finish","kind":"deterministic.test","dependencies":["root"],"input_schema_version":1,"output_schema_version":1,"retry_policy":{"max_retries":2,"base_delay":1000000000,"max_delay":60000000000}}]}`)
+	_, err := service.Start(context.Background(), StartCommand{
+		WorkspaceID: id(5), DefinitionKey: "ingest", DefinitionVersion: 1, Input: json.RawMessage(`{}`), IdempotencyKey: "request-1",
+		Graph: graph, FirstNodeKey: "root", FirstNodeType: "deterministic.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.calls != 1 || runtime.request.FirstNode.NodeKey != "root" {
+		t.Fatalf("request=%#v calls=%d", runtime.request, runtime.calls)
+	}
+}
+
+func TestStartRequiresExactlyOneRegisteredRoot(t *testing.T) {
+	service, runtime, _ := newRuntimeStartService(t, definitionFixture("two-roots", []domain.NodeDefinition{
+		{Key: "left", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()},
+		{Key: "right", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()},
+	}))
+	_, err := service.Start(context.Background(), StartCommand{WorkspaceID: id(5), DefinitionKey: "two-roots", DefinitionVersion: 1, Input: json.RawMessage(`{}`), IdempotencyKey: "request-1"})
+	assertWorkflowErrorCode(t, err, "WORKFLOW_DEFINITION_ROOT_NOT_UNIQUE")
+	if runtime.calls != 0 {
+		t.Fatalf("runtime starter called %d times", runtime.calls)
+	}
+}
+
+func TestStartPropagatesLegacyActiveRuntimeContract(t *testing.T) {
+	service, runtime, _ := newRuntimeStartService(t, definitionFixture("ingest", []domain.NodeDefinition{{Key: "root", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()}}))
+	runtime.err = foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_LEGACY_RUNTIME_UNSUPPORTED", false, errors.New("active legacy run has no runtime identity"))
+	_, err := service.Start(context.Background(), StartCommand{WorkspaceID: id(5), DefinitionKey: "ingest", DefinitionVersion: 1, Input: json.RawMessage(`{}`), IdempotencyKey: "request-1"})
+	assertWorkflowErrorCode(t, err, "WORKFLOW_LEGACY_RUNTIME_UNSUPPORTED")
+}
+
+func TestStartRejectsIncompleteRuntimeResult(t *testing.T) {
+	service, runtime, _ := newRuntimeStartService(t, definitionFixture("ingest", []domain.NodeDefinition{{Key: "root", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()}}))
+	runtime.result = RuntimeStartResult{Run: domain.Run{ID: id(9), WorkspaceID: id(5)}}
+	_, err := service.Start(context.Background(), StartCommand{WorkspaceID: id(5), DefinitionKey: "ingest", DefinitionVersion: 1, Input: json.RawMessage(`{}`), IdempotencyKey: "request-1"})
+	assertWorkflowErrorCode(t, err, "WORKFLOW_START_RESULT_INVALID")
+}
+
+func TestNewRuntimeServiceRejectsTypedNilStarter(t *testing.T) {
+	var starter *fakeRuntimeStarter
+	_, err := NewRuntimeService(&fakeRepository{}, &sequenceIDs{}, foundation.FixedClock{}, RuntimeDependencies{Definitions: &DefinitionRegistry{}, Starter: starter})
+	assertWorkflowErrorCode(t, err, "WORKFLOW_RUNTIME_DEPENDENCY_MISSING")
+}
+
+func TestStartWithoutRuntimeDependenciesReturnsLegacyUnsupported(t *testing.T) {
+	service, err := NewService(&fakeRepository{}, &sequenceIDs{}, foundation.FixedClock{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Start(context.Background(), StartCommand{WorkspaceID: id(5), DefinitionKey: "ingest", DefinitionVersion: 1, Input: json.RawMessage(`{}`), IdempotencyKey: "request-1"})
+	assertWorkflowErrorCode(t, err, "WORKFLOW_LEGACY_RUNTIME_UNSUPPORTED")
+}
+
+func TestStartReturnsRegistryResolutionError(t *testing.T) {
+	service, runtime, _ := newRuntimeStartService(t, definitionFixture("registered", []domain.NodeDefinition{{Key: "root", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: testRetryPolicy()}}))
+	_, err := service.Start(context.Background(), StartCommand{WorkspaceID: id(5), DefinitionKey: "missing", DefinitionVersion: 1, Input: json.RawMessage(`{}`), IdempotencyKey: "request-1"})
+	assertWorkflowErrorCode(t, err, "WORKFLOW_DEFINITION_NOT_REGISTERED")
+	if runtime.calls != 0 {
+		t.Fatalf("runtime starter called %d times", runtime.calls)
 	}
 }
 
@@ -105,4 +244,35 @@ func TestSubmitRejectsInvalidVersion(t *testing.T) {
 	if _, err := service.SubmitHumanDecision(context.Background(), id(1), 0, json.RawMessage(`{}`), id(2), id(3)); err == nil {
 		t.Fatal("invalid version accepted")
 	}
+}
+
+func newRuntimeStartService(t *testing.T, definition domain.RegisteredDefinition) (*Service, *fakeRuntimeStarter, domain.RegisteredDefinition) {
+	t.Helper()
+	catalog := testValidationCatalog(t)
+	executors := testFrozenExecutors(t, catalog, "deterministic.test")
+	definitions, err := NewDefinitionRegistry(catalog, executors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := definitions.Register(definition); err != nil {
+		t.Fatal(err)
+	}
+	if err := definitions.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := definitions.Resolve(definition.Key, definition.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntimeStarter{}
+	service, err := NewRuntimeService(
+		&fakeRepository{},
+		&sequenceIDs{values: []foundation.ID{id(1), id(2), id(3), id(4)}},
+		foundation.FixedClock{Value: time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)},
+		RuntimeDependencies{Definitions: definitions, Starter: runtime},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service, runtime, resolved
 }

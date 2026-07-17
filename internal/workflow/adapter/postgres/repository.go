@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -26,10 +27,18 @@ type Repository struct{ db DB }
 
 // NewRepository constructs a Repository over a pgx pool or transaction.
 func NewRepository(db DB) (*Repository, error) {
-	if db == nil {
+	if isNilDB(db) {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_DATABASE_UNAVAILABLE", true, errors.New("database is nil"))
 	}
 	return &Repository{db: db}, nil
+}
+
+func isNilDB(db DB) bool {
+	if db == nil {
+		return true
+	}
+	value := reflect.ValueOf(db)
+	return value.Kind() == reflect.Pointer && value.IsNil()
 }
 
 // Start atomically persists a definition, run, first node, and outbox event.
@@ -267,9 +276,9 @@ func (r *Repository) SubmitHumanTask(ctx context.Context, id foundation.ID, targ
 	return persisted, nil
 }
 
-const runColumns = `id::text,workspace_id::text,definition_id::text,status,input,output,version,created_at,updated_at,completed_at`
+const runColumns = `id::text,workspace_id::text,definition_id::text,status,input,output,idempotency_key,request_hash,version,created_at,updated_at,completed_at`
 const runSelect = `SELECT ` + runColumns + ` FROM workflow.run`
-const nodeColumns = `id::text,run_id::text,node_key,node_type,status,attempt,input,output,lease_owner,lease_until,version,created_at,updated_at,completed_at`
+const nodeColumns = `id::text,run_id::text,node_key,node_type,status,attempt,input,output,idempotency_key,input_schema_version,output_schema_version,dispatch_no,lease_owner,lease_until,version,created_at,updated_at,completed_at`
 const nodeSelect = `SELECT ` + nodeColumns + ` FROM workflow.node_run`
 const nodeUpdateReturning = `UPDATE workflow.node_run SET status=$2,attempt=$3,lease_owner=$4,lease_until=$5,updated_at=$6,version=$7`
 const humanColumns = `id::text,run_id::text,node_run_id::text,status,expected_input_schema,target_version,decision,expires_at,submitted_at,created_at`
@@ -303,7 +312,8 @@ func scanRun(row pgx.Row) (domain.Run, error) {
 	var r domain.Run
 	var id, w, d string
 	var output []byte
-	err := row.Scan(&id, &w, &d, &r.Status, &r.Input, &output, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
+	var idempotencyKey, requestHash *string
+	err := row.Scan(&id, &w, &d, &r.Status, &r.Input, &output, &idempotencyKey, &requestHash, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err != nil {
 		return r, err
 	}
@@ -311,6 +321,12 @@ func scanRun(row pgx.Row) (domain.Run, error) {
 	r.WorkspaceID = foundation.ID(w)
 	r.DefinitionID = foundation.ID(d)
 	r.Output = output
+	if idempotencyKey != nil {
+		r.IdempotencyKey = *idempotencyKey
+	}
+	if requestHash != nil {
+		r.RequestHash = *requestHash
+	}
 	return r, nil
 }
 func scanNode(row pgx.Row) (domain.NodeRun, error) {
@@ -318,13 +334,27 @@ func scanNode(row pgx.Row) (domain.NodeRun, error) {
 	var id, run string
 	var output []byte
 	var leaseOwner *string
-	err := row.Scan(&id, &run, &n.NodeKey, &n.NodeType, &n.Status, &n.Attempt, &n.Input, &output, &leaseOwner, &n.LeaseUntil, &n.Version, &n.CreatedAt, &n.UpdatedAt, &n.CompletedAt)
+	var idempotencyKey *string
+	var inputSchemaVersion, outputSchemaVersion, dispatchNo *int
+	err := row.Scan(&id, &run, &n.NodeKey, &n.NodeType, &n.Status, &n.Attempt, &n.Input, &output, &idempotencyKey, &inputSchemaVersion, &outputSchemaVersion, &dispatchNo, &leaseOwner, &n.LeaseUntil, &n.Version, &n.CreatedAt, &n.UpdatedAt, &n.CompletedAt)
 	if err != nil {
 		return n, err
 	}
 	n.ID = foundation.ID(id)
 	n.RunID = foundation.ID(run)
 	n.Output = output
+	if idempotencyKey != nil {
+		n.IdempotencyKey = *idempotencyKey
+	}
+	if inputSchemaVersion != nil {
+		n.InputSchemaVersion = *inputSchemaVersion
+	}
+	if outputSchemaVersion != nil {
+		n.OutputSchemaVersion = *outputSchemaVersion
+	}
+	if dispatchNo != nil {
+		n.DispatchNo = *dispatchNo
+	}
 	if leaseOwner != nil {
 		n.LeaseOwner = *leaseOwner
 	}

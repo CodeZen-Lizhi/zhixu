@@ -8,7 +8,9 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
-// StartRequest contains records atomically created when a run starts.
+// StartRequest contains records atomically created by the pre-Runtime repository path.
+//
+// Deprecated: Registered Workflow Start 使用 application.RuntimeStarter；该类型仅保留给迁移期 Adapter 兼容测试。
 type StartRequest struct {
 	Definition Definition
 	Run        Run
@@ -27,7 +29,6 @@ type Completion struct {
 
 // Repository persists workflow state without exposing pgx types.
 type Repository interface {
-	Start(context.Context, StartRequest) (Run, error)
 	GetRun(context.Context, foundation.ID) (Run, error)
 	ClaimNode(context.Context, foundation.ID, string, time.Time, time.Time) (NodeRun, error)
 	HeartbeatNode(context.Context, foundation.ID, string, time.Time, time.Time) (NodeRun, error)
