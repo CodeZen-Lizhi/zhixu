@@ -65,9 +65,13 @@ flowchart LR
 
 授权令牌只在服务端存在，不发送给模型。
 
-Write Authorization 必须一次性或幂等消费、短时有效，并严格绑定上述字段。Session、API Token、Eino Context、模型 Tool Call 或管理员式 Scope 都不能自行构造、延长或扩大该授权。授权消费只确认数据库中的审批和版本快照；文件/Git 写回必须在 M5-04 的实际原子替换点重新执行 Target Version CAS。
+Approved 决策前由服务端 Git Inspector 捕获 canonical Workspace 的 strict clean、attached 当前 HEAD，并保存为 `approved_git_head`；客户端、模型和 Eino Context 都不能提交或覆盖 expected HEAD。dirty/detached/root mismatch、缺失 identity、tracked filter、hidden index 或 in-progress operation 必须拒绝审批；Rejected 决策不读取 Git。
 
-当前实现落在 `internal/changecontrol`：服务端只保存 `token_hash`，授权记录位于 `change_control.tool_authorization`，签发前复核 Proposal/Approval/Change Hash/目标哈希和已持久化 Workflow Run/Node；消费先完成完整绑定校验，再在数据库行锁事务内校验审批快照、过期/撤销状态并将 `issued` 原子转为 `consumed`。当前目标文件哈希仅作快速失败检查，不与数据库形成跨存储原子事务。本切片不执行文件、Git 或索引副作用，后续 M5-04 必须把消费结果接入 Safe Writeback Saga 并在写入点做最终 CAS。
+Write Authorization 必须一次性或幂等消费、短时有效，并严格绑定上述字段。Session、API Token、Eino Context、模型 Tool Call 或管理员式 Scope 都不能自行构造、延长或扩大该授权。M5-04D 的 Atomic Begin 在同一 PostgreSQL 事务内校验并消费 `WRITE_KNOWLEDGE`/`GIT_WRITE` 两份授权、验证 running Node lease、创建或重放 Durable Execution，并推进 Proposal `approved → applying`；任何一步失败都回滚。文件/Git 写回仍在实际副作用点重新执行 Target Version CAS，授权消费不等于写回成功。
+
+当前实现落在 `internal/changecontrol`：服务端只保存 `token_hash`，授权记录位于 `change_control.tool_authorization`，签发前复核 Proposal/Approval/Change Hash/目标哈希和已持久化 Workflow Run/Node；Atomic Begin 消费前完成完整绑定校验，再在数据库行锁事务内校验审批快照、过期/撤销状态和 running lease，并将两份授权原子转为 `consumed`。Safe Writeback 随后使用 `file_prepared`/`git_prepared` durable intent 进行可重启恢复；Commit 结果先 exact Trailer lookup，unknown 不 Restore 文件；Mapping 与 Reindex Outbox 原子发布后状态为 `verifying/index_pending`。
+
+当前只构造 Safe Writeback Node 与 API/Worker Composition，尚未实现 River dispatcher、Job Registry 或 retry runner；不能通过自制 polling 或日志把异步执行描述为已完成。M6 Retrieval 尚未实现真实索引和回归，不得将 `index_pending` 返回为 completed。
 
 明文 Credential 只在首次签发时返回，服务端不保存可恢复副本；首次响应丢失后的幂等重放不会再次返回 Credential。调用方只能使用新幂等键重新签发或等待短 TTL 过期，不能通过查询接口恢复写凭据。
 
@@ -162,7 +166,7 @@ Git 允许命令白名单：
 - `log --no-show-signature`：当前分支最多 256 条 exact Trailer recovery。
 - `revert --no-commit --no-edit`、`revert --quit`：严格反向 Commit 与非破坏性 operation marker 清理。
 
-统一禁止：shell、普通自由参数 `git commit`、任意 `git add` filter 路径、reset、checkout、switch、merge、rebase、cherry-pick、push、fetch、remote、branch 创建/切换、submodule/LFS 和 history rewrite。runner 清理继承的全部 `GIT_*`，设置 `GIT_NO_REPLACE_OBJECTS=1`，拒绝 legacy grafts，固定禁 Hook、GPG/signature program、external diff/textconv、pager/editor/prompt，并限制 stdout/stderr。
+统一禁止：shell、普通自由参数 `git commit`、任意 `git add` filter 路径、reset、checkout、switch、merge、rebase、cherry-pick、push、fetch、remote、branch 创建/切换、submodule/LFS 和 history rewrite。正式写回使用 raw blob、受控 NUL index record、immutable tree、`commit-tree` 和 `update-ref expected-old`，不执行普通 `git add`/`git commit`。runner 清理继承的全部 `GIT_*`，设置 `GIT_NO_REPLACE_OBJECTS=1`，拒绝 legacy grafts，固定禁 Hook、GPG/signature program、external diff/textconv、pager/editor/prompt，并限制 stdout/stderr。
 
 ## 10. SSRF
 

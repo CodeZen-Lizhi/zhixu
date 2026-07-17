@@ -114,6 +114,8 @@ Adapter：
 - 写入需要 Write Authorization。
 - 不直接创建 Git Commit。
 
+Safe Writeback 的 Application 端口还必须支持可重启恢复：`ResumeTarget(workspaceID, targetPath, ResumeWrite)` 依据持久化 `file_prepared/file_applied` 摘要重新获取锁，并返回可验证的 Prepared/Applied binding。Prepare 先预留受控 temp/backup locator，再由数据库记录 locator、byte size、mode 和 lock binding；Publish/cleanup finalize 前不得删除恢复证据。
+
 Adapter：
 
 - Local Filesystem。
@@ -126,7 +128,8 @@ Adapter：
 - `Prepare` 将 Execution、Base Hash、批准 Change Hash 与真实 Markdown Parser 校验后的正文绑定；同目录 temp 使用随机名、`O_EXCL|0600`，写入后保留目标 mode 并 `fsync`。
 - `CommitCAS` 在替换前重新验证目标身份和 Base Hash，创建独立 backup，再执行同文件系统 rename、父目录 sync 和 Result Hash 复核。
 - `RestoreCAS` 只在当前目标仍为系统 Result Hash 时恢复 Base；目标已是 Base 视为重放，用户后续编辑或 backup 篡改必须拒绝覆盖。
-- rename、父目录 sync 或结果复核无法证明时返回 `ManualRecoveryRequired` 并保留 Applied 摘要与 backup；结果未确认前禁止 Cleanup recovery evidence。
+- `ResumeTarget` 对 Base、Result、locator、owner/device、size、mode 和原始目标/Result/backup 三类 opaque identity token 做完整一致性检查；Base 可继续 CAS，Result+完整 backup 可识别已应用，同内容但 inode 已替换也进入人工恢复。
+- rename、父目录 sync 或结果复核无法证明时返回 `ManualRecoveryRequired` 并保留 Applied 摘要与 backup；补偿通过原子 rename 已 fsync 的 Base backup，结果未确认前禁止 Cleanup recovery evidence。
 - v1 只承诺本地 POSIX 文件系统上的协作写入者串行，不承诺阻止绕过锁的任意本地进程、NFS/SMB 锁一致性、严格内核 CAS 或断电级 durability。
 
 ## 6. GitRepository Interface
@@ -138,6 +141,8 @@ Adapter：
 - CommitApproved / FindWritebackCommit。
 - CreateReverseCommit。
 
+Change Control 的 Approval 还使用独立的 `CaptureApprovalSnapshot(workspaceID)` 端口：服务端在 Approved 决策前捕获 canonical root、attached HEAD、identity、filter/hidden-index/in-progress 检查和全仓 clean 状态，并持久化该 HEAD。Apply 不接受客户端 expected HEAD，也不为历史 `approved_git_head=NULL` 的 Approval 降级执行。
+
 约束：
 
 - 只接受服务端 Workspace ID；canonical Git top-level 必须等于 Workspace root。
@@ -147,7 +152,7 @@ Adapter：
 - 批准内容使用 `hash-object -w --no-filters` 与受控 NUL index record raw-stage；不执行仓库 clean filter。
 - staged index 先 `write-tree` 固化并复核，Commit 通过 `commit-tree -p approved` 创建，最终使用 `update-ref <branch> <new> <approved>` old-value CAS 发布；不使用会接受漂移 parent/index 的普通 `git commit`。
 - Commit 必须关联 Writeback/Proposal/Revision/Approval/Workflow Run/Node，固定 subject/trailers，不接受调用方 message 或 Git args。
-- unknown result 先在当前分支可达历史最多 256 条内 exact lookup；无法证明发布/未发布时返回 ManualRecoveryRequired。
+- `git_prepared` 在 Commit 前持久化 Diff Hash、Base/Result Blob ID 和 Base Mode；unknown result 或进程重启时先按完整 Trailer/immutable binding exact lookup，只有明确 NotFound 且 HEAD/index 安全时才允许 Commit，无法证明发布/未发布时返回 ManualRecoveryRequired，不能 Restore 文件。
 - 不提供 reset/checkout/history rewrite/push/fetch/remote；Reverse 只在严格 clean/HEAD 前提下创建反向 Commit，不改写历史。
 
 Adapter：

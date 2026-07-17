@@ -200,22 +200,28 @@ Correct: 完整绑定与终态先校验；消费快速失败路径不修改 Prop
 ### 2. Signatures
 
 ```go
+BeginWriteback(context.Context, domain.BeginWriteback) (domain.WritebackExecution, error)
 CreateWritebackExecution(context.Context, domain.CreateWriteback) (domain.WritebackExecution, error)
 GetWritebackExecution(context.Context, foundation.ID) (domain.WritebackExecution, error)
 CheckpointWritebackExecution(context.Context, domain.CheckpointWriteback) (domain.WritebackExecution, error)
 PublishWriteback(context.Context, domain.PublishWriteback) (domain.PublishWritebackResult, error)
+ValidateWritebackLease(context.Context, foundation.ID, string) error
+FinalizeWritebackCleanup(context.Context, foundation.ID, int64, time.Time) (domain.WritebackExecution, error)
 ```
 
 数据库事实源：`change_control.writeback_execution`、`change_control.proposal_commit` 与 `workflow.outbox_event`。
 
 ### 3. Contracts
 
-- Create 必须绑定 Workspace/Run/Node/Proposal/Revision/Approval、两份不同 Authorization、Target、Base/Result/Change Hash、Approved Git HEAD 和幂等键；首次写入固定 `prepared/version=1`，Proposal 原子推进 `approved → applying`。
+- Atomic Begin 必须按 Authorization ID 固定顺序加锁，使用数据库时间验证两份 `issued` 授权与 running Node lease，在同一事务内消费双授权、创建 `prepared/version=1` Execution 并推进 Proposal `approved → applying`。已 `consumed` 授权只允许返回已存在的 exact Execution；没有 Execution 时必须返回 `WRITEBACK_AUTHORIZATION_ALREADY_CONSUMED`。
+- Legacy Create 仍用于历史兼容；新 Saga 不得通过 Create + 两次 Consume 绕过 Atomic Begin。
 - `(workspace_id,idempotency_key)` 与 `(proposal_id,revision_id)` 只允许一个逻辑 Execution；同完整身份重放已有记录，不同身份返回冲突。
-- Checkpoint 只允许领域状态机下一跳且 `version=old+1`；`git_committed` 必须一次写入 Git Commit、Parent Commit 与 Diff Hash，并同步 Proposal `applying → applied`。
+- Checkpoint 只允许领域状态机下一跳且 `version=old+1`；`file_prepared` 必须一次写入 temp/backup locator、byte size、mode 与原始目标/Result/backup 三个 opaque identity token；`git_prepared` 写入 Diff/Blob/Mode；`git_committed` 写入 Git Commit/Parent/Diff 并同步 Proposal `applying → applied`。
 - Publish 在一个事务内写 Proposal Commit、Execution `→ verifying`、Proposal `applied → verifying` 与 Outbox；任一步失败全部回滚。
 - Reindex Outbox 固定类型 `retrieval.revision.reindex_requested`，幂等键为 `reindex:<workspace>:<proposal>:<revision>:<commit>`，`schema_version` 固定整数 `1`。
 - Payload 只能有：`schema_version`、`workspace_id`、`workflow_run_id`、`node_run_id`、`proposal_id`、`revision_id`、`approval_id`、`writeback_execution_id`、`target_path`、`result_hash`、`git_commit`；正文、Credential、Token、Embedding/向量维度和绝对路径禁止入库。
+- 原始 Credential 长度最多 256 bytes，只在 Begin 调用栈中 SHA-256；数据库只读既有 `token_hash`，Execution/Outbox/日志/API/Workflow payload 不得包含原始值。
+- `file_lock_token/file_result_lock_token/file_backup_lock_token` 是 64 位小写 SHA-256 identity 摘要，三者必须不同且写入后不可变；它们不作为授权 Secret，也不得进入公开输出。
 - 锁顺序固定为 Authorization → Proposal/Revision/Approval → Workflow，必须与 Authorization Consume 一致，避免 Create/Consume 交叉死锁。
 - Approval `approved_git_head` 使用 nullable expand 保留历史记录；NULL 可读但 Execution Trigger 必须拒绝 Apply。新审批的 Git Inspect/clean/HEAD 注入由 M5-04D Application/Git seam 完成。
 
@@ -225,6 +231,8 @@ PublishWriteback(context.Context, domain.PublishWriteback) (domain.PublishWriteb
 |---|---|---|
 | Create 缺字段、路径/Hash/Git HEAD 非法 | `WRITEBACK_INVALID` / InvalidInput | 无 |
 | 幂等键、Proposal Revision 或 Authorization 已绑定不同身份 | `WRITEBACK_IDENTITY_CONFLICT` / VersionConflict | 无 |
+| 两份授权已被旧路径消费但不存在 exact Execution | `WRITEBACK_AUTHORIZATION_ALREADY_CONSUMED` / PermissionDenied | 无；Proposal 保持 approved |
+| Node ID 被当作 Execution ID、owner 不匹配或 lease 过期 | `WRITEBACK_LEASE_LOST` / VersionConflict | 无副作用 |
 | Checkpoint Expected Version 过期 | `WRITEBACK_VERSION_CONFLICT` / VersionConflict | 无 |
 | 非法状态迁移 | `WRITEBACK_STATUS_CONFLICT` / VersionConflict | 无 |
 | Mapping/Outbox 字段或 Payload 不匹配 | `WRITEBACK_PUBLISH_BINDING_CONFLICT` / ConsistencyViolation | 事务回滚 |
@@ -233,23 +241,25 @@ PublishWriteback(context.Context, domain.PublishWriteback) (domain.PublishWriteb
 
 ### 5. Good / Base / Bad Cases
 
-- Good：相同 Create/Publish 请求重复执行，返回同一 Execution/Mapping/Outbox，不增加版本或第二副作用。
+- Good：相同 Begin/Publish 请求重复执行，返回同一 Execution/Mapping/Outbox，不重复消费授权、不增加版本或第二副作用。
 - Base：历史 Approval 的 Git HEAD 为 NULL 时仍可查询 Proposal，但创建 Execution 被数据库拒绝，要求重新审批。
+- Base：旧 Execution 没有 M5-04D identity token 仍可查询；新 `file_prepared` 必须写齐三个 token，活动恢复记录禁止 Down 删除字段。
+- Bad：先通过旧 ConsumeAuthorization 消费两份授权，再用同凭据首次 Begin 并创建 Execution。
 - Bad：Commit 后分别提交 Mapping、Proposal 状态与 Outbox；中途失败会形成无法证明的完成状态。
 - Bad：Create 先锁 Proposal 再锁 Authorization，而 Consume 先锁 Authorization 再锁 Proposal；并发时可形成死锁环。
 
 ### 6. Tests Required
 
 - Domain：Proposal/Writeback 状态机、完整身份、Result Hash 不可变、Publish Payload 精确字段和 schema version。
-- PostgreSQL：空库全部 Up 两次；Proposal version、Approval Git HEAD、Execution create/replay/conflict、checkpoint、publish/replay、事务回滚。
+- PostgreSQL：空库全部 Up 两次、空数据 Down→Up、活动 checkpoint Down 返回 SQLSTATE `55000`；Atomic Begin 双消费/rollback/concurrent replay、consumed-without-execution 拒绝、lease 只接受 Execution ID、file identity token round-trip/不可变、checkpoint、publish/replay。
 - SQL 负测：交叉 Workspace/Run/Node/Approval/Authorization 绑定、非法状态/version、Execution/Mapping/Outbox update/delete、敏感或额外 Payload 字段。
 - 并发：Create Execution 与 Consume Authorization 使用真实连接并发至少 20 轮，`-race` 下无 `40P01`、超时或重复副作用。
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: 先执行文件/Git，再补建 Execution；崩溃后无法判断副作用是否发生。
-Correct: 任何文件副作用前先 create/replay prepared Execution。
+Wrong: 两次 Consume Authorization → Create Execution；任一步崩溃都会形成已消费但不可恢复的偏态。
+Correct: Atomic Begin 同事务消费两份 issued Authorization、验证 lease、create/replay prepared Execution。
 
 Wrong: Git Commit、Mapping、Proposal verifying 和 Outbox 分事务提交。
 Correct: Commit 之后的数据库发布在一个 PostgreSQL 事务中原子完成；失败保留 Commit并从持久化检查点恢复。

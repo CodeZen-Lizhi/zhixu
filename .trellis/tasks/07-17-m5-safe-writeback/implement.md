@@ -15,9 +15,9 @@
 2. [x] M5-04A：实现领域模型、Repository 契约、PostgreSQL 幂等/乐观锁/交叉绑定/发布事务与真实数据库测试。
 3. [x] M5-04B：实现 WorkspaceStore/TargetLock 领域端口与 localfs Adapter；覆盖 unsafe path/symlink/special file/temp/fsync/CAS/restore。
 4. [x] M5-04C：扩展 Git CLI Adapter 的 clean snapshot、HEAD verify、path diff、fixed commit/trailer、unknown-result lookup 和 reverse commit。
-5. [ ] M5-04D：实现 Application Saga：预签双授权、先建 Execution、分步消费授权、checkpoint、文件补偿、Commit 恢复、DB publish。
-6. [ ] M5-04D：实现 Workflow Node/Composition Root 最小接线；不得增加直接文件/Git HTTP 写接口。
-7. [ ] 同步 OpenAPI 状态查询（若暴露）、架构/数据库/工具安全/恢复/产品文档和父任务状态。
+5. [x] M5-04D：实现 Application Saga：Atomic Begin 在同一事务消费双授权并创建/重放 Execution；按 `file_prepared/git_prepared` checkpoint 恢复，执行文件补偿、Commit lookup/recovery、DB publish 和 cleanup finalize。
+6. [x] M5-04D：实现固定 Workflow Node/Composition Root 最小接线；不得增加直接文件/Git HTTP 写接口；明确当前没有 River dispatcher/registry/retry runner。
+7. [x] 同步 OpenAPI 状态查询（若暴露）、架构/数据库/工具安全/恢复/产品文档和父任务状态；M6 Retrieval 仍未完成。
 8. [ ] 执行 domain/application/FS/Git/PostgreSQL unit+race、故障注入、全仓 `go test -race ./...`、`go vet ./...`、`make test`、重复迁移和 Compose readiness smoke。
 9. [ ] 使用 `go-review` + `sql-code-review` + Trellis full-scope check，修复 P0/P1 后提交、归档与 journal。
 

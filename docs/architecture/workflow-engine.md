@@ -8,6 +8,8 @@
 
 使用 PostgreSQL 持久化领域工作流状态，River 负责可运行节点的任务投递与 Worker 获取；不在正式 v1.0 引入 Temporal。Workflow Definition、Node 状态和补偿语义仍由 Workflow Module 掌握，River 不是业务事实源。
 
+实现边界：当前仓库尚未接入 River dispatcher、Job Registry 或通用 retry runner。M5-04D 已提供 Safe Writeback Node、Application Saga 和 API/Worker Composition，并通过直接 Node 集成烟测验证恢复语义；在 River runtime 任务完成前，不得把该接线描述为自动异步领取、心跳或重试系统。
+
 见 [ADR-0006](adr/0006-postgres-durable-workflow.md)。
 
 ## 3. 核心模型
@@ -131,6 +133,8 @@ workflow_run_id + node_id + logical_operation + target_version
 - Review Answer。
 - Event Publish。
 
+Safe Writeback 额外要求：Begin 在同一 PostgreSQL 事务内消费文件/Git 双授权、校验 running lease、创建或重放 Execution；文件 `file_prepared` 与 Git `git_prepared` 检查点必须先落库再开始对应副作用。Git Commit 重放先 exact Trailer lookup，明确 NotFound 才可提交；Safe Writeback Node 的 `Succeeded` 只表示 Publish 和 cleanup finalize 已到 `verifying/index_pending`，M6 Retrieval 完成前 Proposal 不能标记 `completed`。
+
 ## 11. Human Node
 
 ```mermaid
@@ -187,8 +191,9 @@ flowchart TD
 示例：
 
 - 文件替换后 Commit 失败 → 恢复旧文件。
-- 内容验证失败 → 反向 Commit。
-- 索引失败 → 不回滚文件，重试索引。
+- 内容验证失败 → 在严格 HEAD/clean 前提下创建反向 Commit。
+- Commit 结果未知或已确认提交 → 保留文件，禁止 Restore，走 Trailer/Mapping reconcile。
+- 索引失败 → 不回滚文件，保持 `verifying/index_pending`，由 Retrieval 任务重试。
 
 ## 14. Workflow 升级
 

@@ -278,7 +278,7 @@
 
 所有正式知识写入必须经过：
 
-Proposal → Evidence Validation → User Approval → Version Check → Atomic Write → Git Commit → Reindex → Regression Validation。
+Proposal → Evidence Validation → User Approval（服务端捕获 strict clean Git HEAD）→ Version Check → Atomic Begin（同事务消费文件/Git 双授权并创建 Durable Execution）→ `file_prepared`/`file_applied` → `git_prepared`/`git_committed` → Publish Mapping + Reindex Outbox → `verifying/index_pending` → Retrieval/Regression → `completed`。
 
 任何模块不得绕过该路径直接修改 Markdown。
 
@@ -499,7 +499,8 @@ DRAFT
 规则：
 
 - APPROVED 不等于已写入。
-- COMPLETED 必须同时满足写入、Git Commit、索引和回归验证成功。
+- `verifying/index_pending` 表示文件和 Git Commit 已发布、索引请求已落库，但 Retrieval 尚未完成；M5 阶段不得把它返回为 completed。
+- COMPLETED 必须同时满足写入、Git Commit、索引和回归验证成功，由 M6 Retrieval 及后续验证流程推进。
 - REJECTED Proposal 不得再次直接执行，只能克隆为新版本。
 
 ### 8.3 Workflow Run 状态
@@ -1397,27 +1398,28 @@ Should：
 
 #### 10.9.2 写回流程
 
-1. 获取一次性写权限。
-2. 对目标文件加 Workspace 内部写锁。
-3. 校验目标文件哈希和 Git HEAD。
-4. 在临时位置生成新文件。
-5. 校验 Markdown 结构、编码和链接。
-6. 原子替换目标文件。
-7. 生成 Git Diff。
-8. 校验 Diff 与 Proposal 一致。
-9. 创建 Git Commit。
-10. 释放文件锁。
-11. 增量重新解析和索引。
-12. 执行回归验证。
-13. Proposal 进入 COMPLETED。
+1. 审批时由服务端捕获 Workspace 的 strict clean、attached Git HEAD，并写入 `approved_git_head`；客户端不得提交 expected HEAD。
+2. Begin 在同一个 PostgreSQL 事务内校验 Proposal/Revision/Approval、running Node lease 和两份独立一次性授权，消费 `WRITE_KNOWLEDGE` 与 `GIT_WRITE`，创建或重放 Durable Execution，并推进 Proposal `APPROVED → APPLYING`。
+3. 对目标文件加 Workspace 内部写锁，准备同目录 temp/backup，校验 Markdown、编码、大小、权限和 Change Hash；持久化 `file_prepared`（locator、byte size、mode、lock binding）。
+4. 最终重新校验 Base Hash 后原子替换并复核 Result Hash，持久化 `file_applied`；进程重启时通过 `ResumeTarget` 从 durable intent 继续或识别已应用结果。
+5. 校验批准 HEAD、工作区/index clean 以及仅目标路径 Diff；持久化 `git_prepared`（Diff Hash、Base/Result Blob、Mode）。
+6. 先按完整 Writeback Trailer 和不可变绑定查找 Commit；只有明确 NotFound 且 HEAD/index 仍安全时才创建 Commit。确认 Commit 后持久化 `git_committed` 并推进 Proposal `APPLYING → APPLIED`；结果未知、漂移或绑定冲突进入 `MANUAL_RECOVERY_REQUIRED`，不得盲目重复或恢复文件。
+7. 在同一数据库事务中写入 Commit Mapping、`retrieval.revision.reindex_requested` Outbox，并将 Proposal/Execution 推进到 `VERIFYING`；对外状态为 `verifying/index_pending`。
+8. Publish 成功后清理 temp/backup 恢复证据；清理失败保留 `VERIFYING` 并可重试 finalize，不得伪装成完成。
+9. M6 Retrieval 消费 Outbox 完成解析、索引和回归后，才允许推进 `COMPLETED`。
+
+本期已实现 Safe Writeback Node 与 API/Worker Composition，但仓库尚未接入 River dispatcher、Job Registry 或 retry runner；不能把直接 Node 集成烟测描述为自动异步执行。
 
 #### 10.9.3 Git Commit 规则
 
 Commit Message 包含：
 
-- 操作类型。
-- Proposal ID。
-- 简短变更摘要。
+- 固定 Safe Writeback 操作主题。
+- 操作类型和 Proposal/Revision/Approval/Workflow/Writeback/Target/Hash Trailer。
+
+为保证可验证和不可注入，调用方不能提供自由 Commit Message 或“简短变更摘要”；产品界面可在 Proposal/Timeline 展示摘要，但不把它拼进 Git 命令。
+
+Commit 由受控 Adapter 通过 raw blob、immutable tree、`commit-tree` 和 `update-ref expected-old` 创建；不执行普通 `git add`/`git commit`，不接受调用方 Git 参数。固定 Trailer 必须包含 Proposal、Approval、Workflow 和 Writeback ID，以支持未知结果恢复。
 
 Commit Metadata 关联：
 
@@ -1426,6 +1428,8 @@ Commit Metadata 关联：
 - Source Version。
 - 受影响对象。
 
+M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Workflow/Writeback 的不可变绑定，因此 Commit Trailer 只写入这些已验证事实；Source Version 绑定仍是产品目标，必须在领域模型提供真实 Source Version 关系后实现，禁止填充占位值。
+
 #### 10.9.4 失败补偿
 
 ##### 写文件失败
@@ -1433,6 +1437,12 @@ Commit Metadata 关联：
 - 删除临时文件。
 - 正式文件保持原状。
 - Proposal 进入 APPLY_FAILED。
+
+##### `file_prepared` 或 `git_prepared` 检查点恢复
+
+- 进程重启后先读取持久化 intent 并重新获取目标锁。
+- `file_prepared` 仅在 Base 仍匹配时继续 CAS，或在 Result + 完整 backup 时识别已应用；locator 篡改、内容未知或用户后续编辑进入 MANUAL_RECOVERY_REQUIRED。
+- `git_prepared` 必须先做 exact Trailer lookup；明确 NotFound 才可创建 Commit。unknown/conflict 不得 Restore 文件。
 
 ##### 文件成功但 Commit 失败
 
@@ -1443,9 +1453,8 @@ Commit Metadata 关联：
 ##### Commit 成功但索引失败
 
 - 不撤销 Git Commit。
-- Document 标记 INDEX_STALE。
-- 自动重试索引。
-- 默认 RAG 暂时使用上一完整索引，并提示版本落后。
+- Proposal/Execution 保持 VERIFYING，Index Request 为 PENDING（或后续 STALE）。
+- 由 M6 Retrieval 消费 Outbox 并重试索引；默认 RAG 继续使用上一完整索引，并提示版本落后。
 
 ##### 回归验证失败
 

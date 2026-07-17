@@ -80,6 +80,15 @@ Testcontainers：
 - Compensation Failure。
 - Cancel at Each Node Type。
 
+### 8.1 M5-04D Safe Writeback 专项
+
+- Approval：服务端 strict clean/attached HEAD、dirty/detached/root mismatch、identity/filter/hidden-index/in-progress 拒绝；Rejected 不读取 Git，历史 `approved_git_head=NULL` 不可 Begin。
+- Atomic Begin：双授权绑定、过期和 running lease 在同一事务内消费并创建/重放 Execution；中间失败全部回滚，Credential 不落库。
+- 文件检查点：`file_prepared` rename 前后进程崩溃、temp/backup locator 篡改、目标/temp/backup 同内容同 mode 但不同 inode、用户后续编辑、ResumeTarget 和 Cleanup finalize retry。
+- Git 检查点：`git_prepared` 后 Commit 成功但 checkpoint 前崩溃、exact Trailer lookup、明确 NotFound 才 Commit、unknown 结果进入人工恢复且不 Restore 文件。
+- Publish：Mapping + Reindex Outbox 同事务、重复 delivery 只产生一个事件，结果为 `verifying/index_pending`；M6 Retrieval 未完成前不得断言 completed。
+- Composition：`internal/changecontrol/application/writeback_smoke_integration_test.go` 验证真实 PostgreSQL + LocalFS + Git 正常闭环；`writeback_fault_smoke_integration_test.go` 进一步注入 file/Git checkpoint、Publish 和 cleanup finalize response loss，销毁旧 Service/Writer 后从持久检查点重放，确认只保留一个 Commit/Mapping/Outbox。不以当前尚未实现的 River dispatcher/registry/retry runner 作为测试前提。
+
 ## 9. E2E
 
 固定 Fixture Workspace，执行 PRD 最终演示场景。
@@ -213,4 +222,3 @@ flowchart LR
 - AI Eval。
 - 文档更新。
 - 无未说明降级。
-

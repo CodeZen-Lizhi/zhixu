@@ -12,6 +12,15 @@
 - 产品文档要求：目标锁与版本校验 → 临时写入与校验 → 原子替换 → Diff 校验 → Git Commit → DB Mapping → Reindex → Regression；文件、Git 和数据库不能放入单一事务，必须使用 Saga。
 - 历史决策允许 Workspace 创建时存在 Git Dirty 警告，但正式写回属于更高风险边界，必须在审批/写回时使用可解释的干净 Git 基线，避免把用户无关改动夹带进 Commit。
 
+### M5-04D 已确认的实现边界
+
+- Approved 决策由服务端通过 Git Adapter 捕获严格 clean、attached 的当前 HEAD，并将其写入 `approved_git_head`；客户端不能提交或替换该基线。
+- Safe Writeback 的 Begin 在一个 PostgreSQL 事务内校验并消费两份授权、校验 running Node lease、创建或重放 Durable Execution，并推进 Proposal `approved → applying`。不能使用“先创建 Execution、再分两次 Consume”的旧顺序，因为 Credential 不可恢复且会与状态约束冲突。
+- 文件和 Git 都有持久化意图检查点：`file_prepared` 保存 temp/backup locator、byte size、mode 和 lock binding；`git_prepared` 保存 Diff/Blob/Mode。进程重启必须从这些事实恢复，而不是依赖内存对象。
+- Git 恢复先按完整 Trailer/binding 查找已有 Commit；只有明确 `NotFound` 且 HEAD/index 安全时才允许 Commit。结果未知或绑定不一致时进入人工恢复，不能恢复文件后盲目重试。
+- Commit Mapping 与 `retrieval.revision.reindex_requested` Outbox 在同一事务中发布，成功终态是 Proposal `verifying` / `index_pending`；M6 Retrieval 尚未完成，不能宣称 `completed`。
+- 本仓库目前只有 Safe Writeback Node 和 API/Worker Composition；尚未实现 River dispatcher、Job Registry 或 retry runner，因此本期不得宣称自动异步领取和重试。
+
 ## Requirements
 
 ### R1. 审批与 Git 基线绑定
@@ -44,9 +53,9 @@
 
 ### R5. 数据库映射、状态与索引请求
 
-- Proposal 增加乐观锁版本和受约束状态迁移：`approved → applying → applied → verifying`；失败可进入 `needs_revision/apply_failed/verify_failed/rolled_back`。
+- Proposal 增加乐观锁版本和受约束状态迁移：`approved → applying → applied → verifying`；Safe Writeback Execution 细化为 `prepared → file_prepared → file_applied → git_prepared → git_committed → verifying`，失败可进入 `needs_revision/apply_failed/compensating_file/compensated/publish_recovery_required/manual_recovery_required`。
 - 持久化 Writeback Execution、Proposal Commit Mapping、步骤状态、Base/New Hash、批准/结果 Git HEAD、错误码、补偿与人工恢复标志；不保存 Credential、正文或绝对临时路径。
-- Git Commit 映射与 `retrieval.revision.reindex_requested` Outbox 必须在同一 PostgreSQL 事务内发布，重复请求只产生一个事件。
+- Git Commit 映射与 `retrieval.revision.reindex_requested` Outbox 必须在同一 PostgreSQL 事务内发布，重复请求只产生一个事件；Publish 成功后仅表示 `verifying/index_pending`，清理 temp/backup 通过独立 cleanup finalize 完成且可重试。
 - M5-04 成功终态是 `Proposal=verifying` 且 `index_request=pending`；M6 Retrieval 真正完成解析/索引/回归后才能进入 `completed`。
 
 ### R6. 故障恢复

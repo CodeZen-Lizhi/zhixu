@@ -334,15 +334,18 @@ approval：
 writeback_execution：
 
 - 绑定 workspace、workflow run/node、proposal/revision/approval 和两份 Tool Authorization。
-- 保存 target path、base/result/change hash、approved Git HEAD、Git Commit/Parent/Diff Hash、状态、失败码、受控 temp/backup locator、version 和时间戳。
+- 保存 target path、base/result/change hash、approved Git HEAD、Git Commit/Parent/Diff Hash、状态、失败码、受控 temp/backup locator、`file_byte_size/file_mode/file_lock_token/file_result_lock_token/file_backup_lock_token`、`base_blob_id/result_blob_id/base_mode`、cleanup marker、version 和时间戳。三个 file token 是不暴露裸 device/inode 的 opaque identity binding。
 - 不保存正文、Credential、Token 或绝对路径。
 - `(workspace_id,idempotency_key)` 与 `(proposal_id,revision_id)` 唯一；状态变化必须 `version=old+1`。
+- Safe Writeback Execution 的 durable checkpoints 为 `prepared → file_prepared → file_applied → git_prepared → git_committed → verifying`；`file_prepared` 必须具备完整文件 intent，`git_prepared` 必须具备 Diff/Blob/Mode intent。重启恢复只依赖这些持久字段和 Adapter 重新校验，不依赖进程内对象。
 
 proposal_commit：
 
 - 不可变关联 writeback execution、proposal revision、approval 与 Git Commit。
 - `(writeback_execution_id)`、`(proposal_id,revision_id)`、`(workspace_id,git_commit)` 唯一。
 - Mapping、Execution/Proposal verifying 和 `retrieval.revision.reindex_requested` Outbox 在同一事务内发布。
+- Begin 不是“先创建 Execution、再分步消费授权”：PostgreSQL Atomic Begin 按固定锁顺序校验两份绑定、过期时间和 running lease，在同一事务内消费双授权、创建/重放 Execution 并推进 Proposal `approved → applying`；任一步失败全部回滚。已 consumed 授权仅能重放已存在的 exact Execution，不能在无 Execution 时再次发起首次 Begin。
+- Publish 成功后为 `verifying/index_pending`；temp/backup 由可重试 cleanup finalize 标记清理完成，不能把清理或 M6 Retrieval 伪装成 `completed`。
 
 ### workflow
 
@@ -414,7 +417,7 @@ tool_call：
 - 同一聚合一次逻辑状态变化只能产生一个 `event_key`；数据库在聚合/事件版本作用域内阻止重复插入，应用重试应返回既有 Outbox 记录。
 - 投递幂等与业务命令幂等分开：消费者使用 `(consumer_name, event_id)`（或同等明确作用域）去重，不能用一个跨所有 Workspace/聚合的全局业务键。
 - 副作用命令沿用 `workflow_run_id + node_id + logical_operation + target_version` 的作用域；Review Answer、Tool Call、File Write、Git Commit、Index Revision 和 Event Publish 都必须使用明确目标版本/资源。
-- 同一事务内先写领域状态和 Outbox，再由 Worker 发布；发布失败只增加 attempt/错误摘要并重试，不能重新执行已完成的领域副作用。
+- 同一事务内先写领域状态和 Outbox，再由 Worker 发布；Safe Writeback M5-04 当前只构造 Node/Composition，仓库尚未实现 River dispatcher、Job Registry 或 retry runner。发布失败只增加 attempt/错误摘要并重试，不能重新执行已完成的领域副作用。
 - 事件 payload 必须带 schema_version 和最小必要数据；敏感正文不直接放入事件。Knowledge Event、SSE 和审计均从稳定事件身份投影，投影重复必须可去重。
 
 ### health_issue

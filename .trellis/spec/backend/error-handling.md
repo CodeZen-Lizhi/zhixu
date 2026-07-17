@@ -173,6 +173,7 @@ Write Authorization 消费成功只确认数据库内的 Proposal/Approval/Revis
 ```go
 type WorkspaceStore interface {
     AcquireTarget(context.Context, foundation.ID, string) (TargetLock, error)
+    ResumeTarget(context.Context, foundation.ID, string, ResumeWrite) (TargetLock, PreparedWrite, *AppliedWrite, error)
 }
 
 type TargetLock interface {
@@ -184,7 +185,7 @@ type TargetLock interface {
 }
 ```
 
-`PrepareWrite` 必须绑定 `ExecutionID + ExpectedBaseHash + ApprovedChangeHash + Content`；`PreparedWrite/AppliedWrite` 只持久化 Workspace 相对 temp/backup locator、hash、byte size、mode 和 lock token，不暴露绝对路径或正文。
+`PrepareWrite` 必须绑定 `ExecutionID + ExpectedBaseHash + ApprovedChangeHash + Content`；`PreparedWrite/AppliedWrite` 只持久化 Workspace 相对 temp/backup locator、hash、byte size、mode，以及原始目标 `LockToken`、Result temp/应用后目标 `ResultLockToken`、Base backup `BackupLockToken`，不暴露裸 device/inode、绝对路径或正文。
 
 #### 3. Contracts
 
@@ -193,7 +194,8 @@ type TargetLock interface {
 - temp/backup 与目标同目录，名称匹配 `.zhixu-writeback-*`，创建使用 `O_EXCL|0600`；Git local exclude 同时包含 `/.knowledge/` 与 `**/.zhixu-writeback-*`。
 - `Prepare` 必须通过正式 Markdown Parser、10 MiB 上限、Result Hash 和 `ComputeChangeHash(target,base,content)` 校验，并保留目标 POSIX mode。
 - `CommitCAS` 必须重新验证 inode/Base Hash、独立复制并 sync backup、rename、sync 父目录、复核 Result Hash/size/mode。
-- `RestoreCAS` 只有当前目标为 Result Hash 时才能恢复；当前已为 Base 返回 replay，其他内容一律不覆盖。
+- `ResumeTarget` 必须重新获取 stable path lock + 原始 inode lock，并验证 target/temp/backup 的 owner/device/hash/size/mode 与三个 durable identity token；同内容、同 mode 但不同 inode 也属于篡改。
+- `RestoreCAS` 只有当前目标仍匹配 Result Hash/mode/Result identity 时，才可原子 rename 已 fsync 的 Base backup；当前已为 Base 返回 replay，其他内容或 identity 一律不覆盖。
 - rename 后结果未知时返回非空 `AppliedWrite + ManualRecoveryRequired`，保留 backup；`RestoreCAS` 证明恢复前禁止 Cleanup。
 
 #### 4. Validation & Error Matrix
@@ -209,6 +211,7 @@ type TargetLock interface {
 | temp/backup 在 rename 前写入、mode 或 sync 失败 | `WRITEBACK_TEMP_*` / `WRITEBACK_BACKUP_*` | DependencyUnavailable | 正式文件未替换；清理后按 Workflow 策略重试 |
 | rename、父目录 sync、结果复核无法证明 | `WRITEBACK_RENAME_RESULT_UNKNOWN` / `WRITEBACK_PARENT_SYNC_RESULT_UNKNOWN` / `WRITEBACK_RESULT_VERIFY_UNKNOWN` | ManualRecoveryRequired | 禁止盲目重试；先用 Applied 摘要执行 Restore/人工核对 |
 | Restore 时目标已被用户再次编辑 | `WRITEBACK_RESTORE_CONFLICT` | VersionConflict | 不覆盖用户内容，人工处理 |
+| 目标/temp/backup 内容和 mode 相同但 inode token 不同 | `WRITEBACK_RESTORE_CONFLICT` / `WRITEBACK_RESUME_RESULT_UNKNOWN` | VersionConflict / ManualRecoveryRequired | 不 Commit、不 Restore、不 Cleanup，保留现场 |
 | backup/temp locator、identity、hash 或 mode 被篡改 | `WRITEBACK_MANAGED_FILE_*` / `WRITEBACK_CLEANUP_*` | ConsistencyViolation / PermissionDenied | 保留现场，不删除未知文件 |
 
 Filesystem Adapter 只负责文件副作用与补偿，不消费 Approval/Git Authorization，也不创建 Git Commit。`ManualRecoveryRequired` 必须保留 Base/Result Hash、受控 locator 和 backup；只有 Restore 已证明目标回到 Base 或完整 Saga 成功后才允许 Cleanup。
@@ -216,14 +219,14 @@ Filesystem Adapter 只负责文件副作用与补偿，不消费 Approval/Git Au
 #### 5. Good / Base / Bad Cases
 
 - Good：同一 inode 的大小写、Unicode 或 hardlink alias 竞争同一 flock；最终 Base Hash 未变时生成独立 backup，原子替换并验证 Result Hash。
-- Base：Commit 结果未知但目标仍为 Base，`RestoreCAS` 返回 replay，随后才清理 temp/backup；目标为 Result 时恢复并验证 Base。
+- Base：补偿 rename backup 成功但响应丢失时，重启观察目标已为 Base、backup 已消失，`RestoreCAS` 仅返回 replay，不再写目标。
 - Bad：把审批时的 Hash 读取当作最终 CAS、用 path string 作为锁 key、使用 hardlink backup、rename 报错后盲目重试或在 unknown 状态删除 backup。
 
 #### 6. Tests Required
 
 - Domain：路径/扩展名、10 MiB、Change Hash、Result Hash、locator 父目录、mode/token 和 Prepared→Applied 不可变绑定。
 - Parser Adapter：有效 Markdown、空内容、非法 UTF-8、NUL/控制字节、取消、nil/unsupported Parser 和输入不可变。
-- Filesystem Contract：父/目标 symlink、目录/FIFO/socket、跨 device/owner、mode、Base/identity conflict、独立 backup、restore replay、用户后续编辑、backup/temp 篡改和 Cleanup 幂等。
+- Filesystem Contract：父/目标 symlink、目录/FIFO/socket、跨 device/owner、mode、Base/identity conflict、独立 backup、restore replay、用户后续编辑、目标/temp/backup 同内容不同 inode 篡改和 Cleanup 幂等。
 - Fault：temp sync、backup sync、rename 已执行但报错、parent sync、result verify；断言 rename 前正式文件不变，unknown 时 `errors.Is(ErrWritebackManualRecoveryRequired)` 且 Applied 摘要有效。
 - Concurrency：helper subprocess 验证跨进程 flock、取消/超时、进程退出释放、hardlink 同 inode 和不同目标并行；锁用例执行 `-race -count=20`。
 
@@ -233,8 +236,8 @@ Filesystem Adapter 只负责文件副作用与补偿，不消费 Approval/Git Au
 Wrong: Approval 时 CurrentHash == Base → 直接 os.WriteFile(target) → Git Commit。
 Correct: Acquire inode lock → Prepare/parser/temp fsync → final inode+Base CAS → independent backup → rename+dir sync+Result verify。
 
-Wrong: rename 返回 error → 自动再次 Commit 或 Cleanup backup。
-Correct: 返回 AppliedWrite + ManualRecoveryRequired → 先按 Base/Result Hash 执行 RestoreCAS/人工核对 → 证明状态后 Cleanup。
+Wrong: 只比较 Hash/mode；用户把 Result 或 backup 替换为同内容新 inode 后仍自动 Restore/Cleanup。
+Correct: file_prepared 持久化 target/Result/backup 三个 opaque identity token；恢复逐一比较，任一 identity 漂移都保留现场并进入人工恢复。
 ```
 
 ### 7. Wrong vs Correct
