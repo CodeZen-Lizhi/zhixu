@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 18
+- **Total Sessions**: 19
 - **Last Active**: 2026-07-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~609 | Active |
+| `journal-1.md` | ~642 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 19 | 2026-07-19 | 完成 M6-C Embedding 与混合检索 | `03b199c` | `dev` |
 | 18 | 2026-07-19 | 完成 M6-B Reindex Consumer | `b765075` | `dev` |
 | 17 | 2026-07-18 | 完成 M6-A Retrieval Index Foundation | `a88a5ce` | `dev` |
 | 16 | 2026-07-17 | 完成 River Runtime M4-D 可运维交付 | `08f0cc8`, `d756e16`, `bf1750d` | `dev` |

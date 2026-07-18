@@ -607,3 +607,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 19: 完成 M6-C Embedding 与混合检索
+
+**Date**: 2026-07-19
+**Task**: 完成 M6-C Embedding 与混合检索
+**Branch**: `dev`
+
+### Summary
+
+完成直接 OpenAI-Compatible/Ollama Embedding Adapter、可恢复批量向量构建、Active-only Keyword/Semantic/Hybrid Search、RRF/去重/Rerank、显式降级、真实 PostgreSQL/River fault smoke、规格同步与全量质量门禁，并归档 M6-C。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `03b199c` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
