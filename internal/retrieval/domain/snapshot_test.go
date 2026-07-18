@@ -3,9 +3,11 @@ package domain
 import (
 	"strings"
 	"testing"
+
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
-func TestValidateWorkspaceSnapshotCommandRequiresBoundedFTSOnlyContract(t *testing.T) {
+func TestValidateWorkspaceSnapshotCommandSupportsBoundedFTSOnlyAndHybridContracts(t *testing.T) {
 	t.Parallel()
 	index := validIndexVersion(nil)
 	index.ManifestHash = ""
@@ -32,7 +34,37 @@ func TestValidateWorkspaceSnapshotCommandRequiresBoundedFTSOnlyContract(t *testi
 	command.MaxChunks = DefaultSnapshotMaxChunks
 	embeddingID := validEmbeddingVersion().ID
 	command.IndexVersion.EmbeddingVersionID = &embeddingID
-	if err := ValidateWorkspaceSnapshotCommand(command); err == nil {
-		t.Fatal("M6-B snapshot accepted vector configuration")
+	command.IndexVersion.DegradedCapabilities = nil
+	command.IndexVersion.FusionConfig = mustCanonicalSnapshotRRFConfig(t)
+	if err := ValidateWorkspaceSnapshotCommand(command); err != nil {
+		t.Fatalf("hybrid snapshot rejected: %v", err)
 	}
+
+	command.IndexVersion.DegradedCapabilities = []DegradedCapability{DegradedVector}
+	if err := ValidateWorkspaceSnapshotCommand(command); err == nil {
+		t.Fatal("hybrid snapshot accepted premature vector degradation")
+	}
+	command.IndexVersion.DegradedCapabilities = nil
+	command.IndexVersion.FusionConfig = []byte(`{"method":"rrf","k":60}`)
+	if err := ValidateWorkspaceSnapshotCommand(command); err == nil {
+		t.Fatal("hybrid snapshot accepted legacy fusion config")
+	}
+	command.IndexVersion.FusionConfig = mustCanonicalSnapshotRRFConfig(t)
+	emptyEmbeddingID := foundation.ID("")
+	command.IndexVersion.EmbeddingVersionID = &emptyEmbeddingID
+	if err := ValidateWorkspaceSnapshotCommand(command); err == nil {
+		t.Fatal("hybrid snapshot accepted empty embedding identity")
+	}
+}
+
+func mustCanonicalSnapshotRRFConfig(t *testing.T) []byte {
+	t.Helper()
+	encoded, err := CanonicalRRFConfig(RRFConfig{
+		SchemaVersion: RRFFusionSchemaVersionV1, Method: FusionMethodRRF, K: 60,
+		LexicalCandidateLimit: 200, VectorCandidateLimit: 200, FusedCandidateLimit: 200, RerankCandidateLimit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }

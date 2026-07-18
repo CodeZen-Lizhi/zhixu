@@ -19,6 +19,9 @@ func (r *Repository) RunSnapshotRegression(ctx context.Context, command domain.S
 	if r == nil || r.db == nil {
 		return domain.SnapshotRegressionResult{}, dependency("RETRIEVAL_REGRESSION_DATABASE_UNAVAILABLE", errors.New("database is nil"))
 	}
+	if !domain.IsSnapshotRegressionCode(command.RegressionCode) {
+		return domain.SnapshotRegressionResult{}, domain.SnapshotRegressionFailureFor(command.RegressionCode, "regression code is unsupported")
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return domain.SnapshotRegressionResult{}, classify(err, "RETRIEVAL_REGRESSION_TRANSACTION_FAILED")
@@ -31,16 +34,16 @@ func (r *Repository) RunSnapshotRegression(ctx context.Context, command domain.S
 	index, err := scanIndex(tx.QueryRow(ctx, `SELECT `+indexColumns+` FROM retrieval.index_version
 		WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, string(command.WorkspaceID), string(command.IndexVersionID)))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.SnapshotRegressionResult{}, domain.SnapshotRegressionFailure("regression index does not exist in workspace")
+		return domain.SnapshotRegressionResult{}, domain.SnapshotRegressionFailureFor(command.RegressionCode, "regression index does not exist in workspace")
 	}
 	if err != nil {
 		return domain.SnapshotRegressionResult{}, classify(err, "RETRIEVAL_REGRESSION_INDEX_QUERY_FAILED")
 	}
-	if index.Status == domain.IndexStatusFailed && index.FailureCode == domain.ErrorCodeSnapshotStructureRegressionFailed {
+	if index.Status == domain.IndexStatusFailed && index.FailureCode == snapshotRegressionFailureCode(command.RegressionCode) {
 		if err := tx.Commit(ctx); err != nil {
 			return domain.SnapshotRegressionResult{}, classify(err, "RETRIEVAL_REGRESSION_COMMIT_FAILED")
 		}
-		return domain.SnapshotRegressionResult{}, domain.SnapshotRegressionFailure("snapshot regression previously failed")
+		return domain.SnapshotRegressionResult{}, domain.SnapshotRegressionFailureFor(command.RegressionCode, "snapshot regression previously failed")
 	}
 
 	observation, structuralReason, err := loadSnapshotRegressionObservation(ctx, tx, command, index)
@@ -48,11 +51,11 @@ func (r *Repository) RunSnapshotRegression(ctx context.Context, command domain.S
 		return domain.SnapshotRegressionResult{}, err
 	}
 	if structuralReason != "" {
-		return failSnapshotRegression(ctx, tx, index, structuralReason)
+		return failSnapshotRegression(ctx, tx, command.RegressionCode, index, structuralReason)
 	}
 	proof, err := domain.ValidateSnapshotRegression(command, observation)
 	if err != nil {
-		return failSnapshotRegression(ctx, tx, index, "snapshot regression domain validation failed")
+		return failSnapshotRegression(ctx, tx, command.RegressionCode, index, "snapshot regression domain validation failed")
 	}
 	var passedAt time.Time
 	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&passedAt); err != nil {
@@ -110,14 +113,14 @@ func loadSnapshotRegressionObservation(
 	if !found {
 		return domain.SnapshotRegressionObservation{}, "target source is absent from source manifest", nil
 	}
-	sourceHash, sourceCount, err := hashRegressionSources(ctx, tx, command.WorkspaceID, command.IndexVersionID)
+	sourceHash, sourceCount, err := hashRegressionSources(ctx, tx, command.RegressionCode, command.WorkspaceID, command.IndexVersionID)
 	if err != nil {
 		if isSnapshotRegressionFailure(err) {
 			return domain.SnapshotRegressionObservation{}, "source manifest canonical form is invalid", nil
 		}
 		return domain.SnapshotRegressionObservation{}, "", err
 	}
-	chunkHash, chunkCount, err := hashRegressionChunks(ctx, tx, command.WorkspaceID, command.IndexVersionID)
+	chunkHash, chunkCount, err := hashRegressionChunks(ctx, tx, command.RegressionCode, command.WorkspaceID, command.IndexVersionID)
 	if err != nil {
 		if isSnapshotRegressionFailure(err) {
 			return domain.SnapshotRegressionObservation{}, "chunk manifest canonical form is invalid", nil
@@ -169,7 +172,7 @@ func loadTargetManifestSource(ctx context.Context, tx pgx.Tx, command domain.Sna
 	return source, true, nil
 }
 
-func hashRegressionSources(ctx context.Context, tx pgx.Tx, workspaceID, indexID foundation.ID) (string, int64, error) {
+func hashRegressionSources(ctx context.Context, tx pgx.Tx, regressionCode string, workspaceID, indexID foundation.ID) (string, int64, error) {
 	hasher, err := domain.NewSourceManifestHasher(workspaceID, indexID)
 	if err != nil {
 		return "", 0, err
@@ -194,7 +197,7 @@ func hashRegressionSources(ctx context.Context, tx pgx.Tx, workspaceID, indexID 
 			source.ExclusionCode = domain.SourceExclusionCode(*exclusion)
 		}
 		if err := hasher.Add(source); err != nil {
-			return "", 0, domain.SnapshotRegressionFailure("source manifest canonical form is invalid")
+			return "", 0, domain.SnapshotRegressionFailureFor(regressionCode, "source manifest canonical form is invalid")
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -202,12 +205,12 @@ func hashRegressionSources(ctx context.Context, tx pgx.Tx, workspaceID, indexID 
 	}
 	hashValue, count, _, err := hasher.Result()
 	if err != nil {
-		return "", 0, domain.SnapshotRegressionFailure("source manifest is empty")
+		return "", 0, domain.SnapshotRegressionFailureFor(regressionCode, "source manifest is empty")
 	}
 	return hashValue, count, nil
 }
 
-func hashRegressionChunks(ctx context.Context, tx pgx.Tx, workspaceID, indexID foundation.ID) (string, int64, error) {
+func hashRegressionChunks(ctx context.Context, tx pgx.Tx, regressionCode string, workspaceID, indexID foundation.ID) (string, int64, error) {
 	hasher, err := domain.NewManifestHasher(workspaceID, indexID)
 	if err != nil {
 		return "", 0, err
@@ -226,7 +229,7 @@ func hashRegressionChunks(ctx context.Context, tx pgx.Tx, workspaceID, indexID f
 			return "", 0, classify(err, "RETRIEVAL_REGRESSION_CHUNK_MANIFEST_SCAN_FAILED")
 		}
 		if err := hasher.Add(chunk); err != nil {
-			return "", 0, domain.SnapshotRegressionFailure("chunk manifest canonical form is invalid")
+			return "", 0, domain.SnapshotRegressionFailureFor(regressionCode, "chunk manifest canonical form is invalid")
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -344,13 +347,13 @@ func regressionBuildStatus(ctx context.Context, tx pgx.Tx, workspaceID, indexID 
 	return status, nil
 }
 
-func failSnapshotRegression(ctx context.Context, tx pgx.Tx, index domain.IndexVersion, reason string) (domain.SnapshotRegressionResult, error) {
+func failSnapshotRegression(ctx context.Context, tx pgx.Tx, regressionCode string, index domain.IndexVersion, reason string) (domain.SnapshotRegressionResult, error) {
 	if index.Status == domain.IndexStatusBuilding {
 		tag, err := tx.Exec(ctx, `UPDATE retrieval.index_version SET status='failed',failure_code=$1,version=version+1,
 			updated_at=GREATEST(CURRENT_TIMESTAMP,updated_at,created_at),
 			failed_at=GREATEST(CURRENT_TIMESTAMP,updated_at,created_at)
 			WHERE id=$2 AND workspace_id=$3 AND status='building' AND version=$4`,
-			domain.ErrorCodeSnapshotStructureRegressionFailed, string(index.ID), string(index.WorkspaceID), index.Version)
+			snapshotRegressionFailureCode(regressionCode), string(index.ID), string(index.WorkspaceID), index.Version)
 		if err != nil {
 			return domain.SnapshotRegressionResult{}, classify(err, "RETRIEVAL_REGRESSION_FAIL_INDEX_FAILED")
 		}
@@ -361,7 +364,14 @@ func failSnapshotRegression(ctx context.Context, tx pgx.Tx, index domain.IndexVe
 	if err := tx.Commit(ctx); err != nil {
 		return domain.SnapshotRegressionResult{}, classify(err, "RETRIEVAL_REGRESSION_FAILURE_COMMIT_FAILED")
 	}
-	return domain.SnapshotRegressionResult{}, domain.SnapshotRegressionFailure(reason)
+	return domain.SnapshotRegressionResult{}, domain.SnapshotRegressionFailureFor(regressionCode, reason)
+}
+
+func snapshotRegressionFailureCode(regressionCode string) string {
+	if regressionCode == domain.SnapshotStructureRegressionV2 {
+		return domain.ErrorCodeSnapshotStructureV2RegressionFailed
+	}
+	return domain.ErrorCodeSnapshotStructureRegressionFailed
 }
 
 func optionalRegressionID(value *string) foundation.ID {
@@ -373,5 +383,6 @@ func optionalRegressionID(value *string) foundation.ID {
 
 func isSnapshotRegressionFailure(err error) bool {
 	var classified *foundation.Error
-	return errors.As(err, &classified) && classified.Code == domain.ErrorCodeSnapshotStructureRegressionFailed
+	return errors.As(err, &classified) &&
+		(classified.Code == domain.ErrorCodeSnapshotStructureRegressionFailed || classified.Code == domain.ErrorCodeSnapshotStructureV2RegressionFailed)
 }

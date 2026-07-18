@@ -28,6 +28,7 @@ const (
 	processorIngestionInvalidCode  = "REINDEX_PROCESSOR_INGESTION_RESULT_INVALID"
 	processorSnapshotInvalidCode   = "REINDEX_PROCESSOR_SNAPSHOT_RESULT_INVALID"
 	processorLexicalInvalidCode    = "REINDEX_PROCESSOR_LEXICAL_RESULT_INVALID"
+	processorVectorInvalidCode     = "REINDEX_PROCESSOR_VECTOR_RESULT_INVALID"
 	processorRegressionInvalidCode = "REINDEX_PROCESSOR_REGRESSION_RESULT_INVALID"
 	processorIndexStateInvalidCode = "REINDEX_PROCESSOR_INDEX_STATE_INVALID"
 	processorReadyInvalidCode      = "REINDEX_PROCESSOR_READY_RESULT_INVALID"
@@ -91,9 +92,15 @@ type ProcessorRetrievalPort interface {
 	Ready(context.Context, TransitionRequest) (domain.IndexVersion, error)
 }
 
+// ProcessorVectorPort 是 Hybrid Processor 每次构建一个有界向量页的最小接口。
+type ProcessorVectorPort interface {
+	BuildNextVectorBatch(context.Context, BuildNextVectorBatchRequest) (BuildNextVectorBatchResult, error)
+}
+
 // ProcessorRegressionPort 是 Ready 前结构回归用例的最小接口。
 type ProcessorRegressionPort interface {
 	RunSnapshotStructureV1(context.Context, domain.SnapshotRegressionCommand) (domain.SnapshotRegressionResult, error)
+	RunSnapshotStructureV2(context.Context, domain.SnapshotRegressionCommand) (domain.SnapshotRegressionResult, error)
 }
 
 // ProcessorDependencies 是 Reindex Processor 的显式应用端口。
@@ -102,11 +109,13 @@ type ProcessorDependencies struct {
 	Capture    ProcessorCapturePort
 	Ingestion  ProcessorIngestionPort
 	Retrieval  ProcessorRetrievalPort
+	Vectors    ProcessorVectorPort
 	Regression ProcessorRegressionPort
 }
 
-// ProcessorOptions 冻结 M6-B FTS-only Index 配置、Snapshot 上限与业务退避。
+// ProcessorOptions 冻结新 Snapshot 的 FTS-only/Hybrid 配置、Snapshot 上限与业务退避。
 type ProcessorOptions struct {
+	EmbeddingVersionID  *foundation.ID
 	TokenizerID         string
 	TokenizerVersion    string
 	TokenizerConfigHash string
@@ -168,7 +177,7 @@ type Processor struct {
 	options      ProcessorOptions
 }
 
-// NewProcessor 校验全部端口和固定 FTS-only 配置后创建 Processor。
+// NewProcessor 校验全部端口和新 Snapshot 配置后创建 Processor。
 func NewProcessor(dependencies ProcessorDependencies, options ProcessorOptions) (*Processor, error) {
 	if nilDispatcherDependency(dependencies.Contexts) || nilDispatcherDependency(dependencies.Capture) ||
 		nilDispatcherDependency(dependencies.Ingestion) || nilDispatcherDependency(dependencies.Retrieval) ||
@@ -178,6 +187,9 @@ func NewProcessor(dependencies ProcessorDependencies, options ProcessorOptions) 
 	normalized, err := normalizeProcessorOptions(options)
 	if err != nil {
 		return nil, err
+	}
+	if normalized.EmbeddingVersionID != nil && nilDispatcherDependency(dependencies.Vectors) {
+		return nil, processorError(foundation.ErrorDependencyUnavailable, processorUnavailableCode, false, errors.New("hybrid processor vector dependency is incomplete"))
 	}
 	return &Processor{dependencies: dependencies, options: normalized}, nil
 }
@@ -275,7 +287,7 @@ func (processor *Processor) Process(ctx context.Context, request ProcessorReques
 
 	if state.index == nil {
 		snapshot, snapshotErr := processor.dependencies.Retrieval.BeginWorkspaceSnapshot(ctx, BeginWorkspaceSnapshotRequest{
-			WorkspaceID: loaded.Context.Request.WorkspaceID, TargetSourceID: state.sourceID,
+			WorkspaceID: loaded.Context.Request.WorkspaceID, EmbeddingVersionID: cloneID(processor.options.EmbeddingVersionID), TargetSourceID: state.sourceID,
 			TargetSourceVersionID: state.sourceVersionID, TargetParseProjectionID: state.projectionID,
 			TokenizerID: processor.options.TokenizerID, TokenizerVersion: processor.options.TokenizerVersion,
 			TokenizerConfigHash: processor.options.TokenizerConfigHash, FusionConfig: append(json.RawMessage(nil), processor.options.FusionConfig...),
@@ -330,22 +342,56 @@ func (processor *Processor) Process(ctx context.Context, request ProcessorReques
 		if err := validateProcessorLexical(*state.index, lexical); err != nil {
 			return ProcessorResult{}, processor.manualFailure(processorLexicalInvalidCode, err)
 		}
-		regression, regressionErr := processor.dependencies.Regression.RunSnapshotStructureV1(ctx, domain.SnapshotRegressionCommand{
+		if state.index.EmbeddingVersionID != nil {
+			if nilDispatcherDependency(processor.dependencies.Vectors) {
+				return ProcessorResult{}, processor.classifiedFailure(
+					processorError(foundation.ErrorDependencyUnavailable, processorUnavailableCode, true, errors.New("hybrid vector builder is unavailable")),
+					"hybrid vector build is unavailable",
+				)
+			}
+			for {
+				vector, vectorErr := processor.dependencies.Vectors.BuildNextVectorBatch(ctx, BuildNextVectorBatchRequest{
+					WorkspaceID: loaded.Context.Request.WorkspaceID, IndexVersionID: state.index.ID,
+					ExpectedIndexVersion: state.index.Version,
+				})
+				if vectorErr != nil {
+					return ProcessorResult{}, processor.classifiedFailure(vectorErr, "hybrid vector build failed")
+				}
+				if err := validateProcessorVector(*state.index, vector); err != nil {
+					return ProcessorResult{}, processor.manualFailure(processorVectorInvalidCode, err)
+				}
+				if vector.Done {
+					break
+				}
+			}
+		}
+		regressionCommand := domain.SnapshotRegressionCommand{
 			WorkspaceID: loaded.Context.Request.WorkspaceID, DeliveryID: loaded.Context.Delivery.ID,
 			TargetSourceID: state.sourceID, TargetSourceVersionID: state.sourceVersionID,
 			TargetResultHash: loaded.Context.Request.ResultHash, TargetParseProjectionID: state.projectionID,
 			IndexVersionID: state.index.ID,
-		})
+		}
+		var regression domain.SnapshotRegressionResult
+		var regressionErr error
+		if state.index.EmbeddingVersionID == nil {
+			regression, regressionErr = processor.dependencies.Regression.RunSnapshotStructureV1(ctx, regressionCommand)
+		} else {
+			regression, regressionErr = processor.dependencies.Regression.RunSnapshotStructureV2(ctx, regressionCommand)
+		}
 		if regressionErr != nil {
-			if processorErrorCodeOf(regressionErr) == domain.ErrorCodeSnapshotStructureRegressionFailed {
+			regressionFailureCode := domain.ErrorCodeSnapshotStructureRegressionFailed
+			if state.index.EmbeddingVersionID != nil {
+				regressionFailureCode = domain.ErrorCodeSnapshotStructureV2RegressionFailed
+			}
+			if processorErrorCodeOf(regressionErr) == regressionFailureCode {
 				return ProcessorResult{}, newProcessorFailure(
 					domain.DeliveryFailureNonRetryable, foundation.ErrorNonRetryableFailure,
-					domain.ErrorCodeSnapshotStructureRegressionFailed, "snapshot structural regression failed", 0, regressionErr,
+					regressionFailureCode, "snapshot structural regression failed", 0, regressionErr,
 				)
 			}
 			return ProcessorResult{}, processor.deterministicStageFailure(regressionErr, "snapshot structural regression could not complete")
 		}
-		if err := validateProcessorRegression(regression); err != nil {
+		if err := validateProcessorRegression(*state.index, regression); err != nil {
 			return ProcessorResult{}, processor.manualFailure(processorRegressionInvalidCode, err)
 		}
 		state.regression = &domain.DeliveryRegression{Code: regression.Code, Hash: regression.Hash, PassedAt: regression.PassedAt}
@@ -427,15 +473,27 @@ func normalizeProcessorOptions(options ProcessorOptions) (ProcessorOptions, erro
 	options.TokenizerVersion = strings.TrimSpace(options.TokenizerVersion)
 	options.TokenizerConfigHash = strings.ToLower(strings.TrimSpace(options.TokenizerConfigHash))
 	if !processorText(options.TokenizerID) || !processorText(options.TokenizerVersion) || !processorHash(options.TokenizerConfigHash) ||
-		!processorJSONObject(options.FusionConfig) || options.PageSize < 0 || options.PageSize > domain.MaxSnapshotPageSize ||
+		options.PageSize < 0 || options.PageSize > domain.MaxSnapshotPageSize ||
 		options.MaxSources < 0 || options.MaxChunks < 0 || options.RetryDelay <= 0 || options.RetryDelay > MaxDeliveryRetryDelay {
 		return ProcessorOptions{}, processorError(foundation.ErrorInvalidInput, processorOptionsInvalidCode, false, errors.New("processor options are invalid"))
 	}
-	canonical, err := canonicalJSONObject(options.FusionConfig)
-	if err != nil {
-		return ProcessorOptions{}, processorError(foundation.ErrorInvalidInput, processorOptionsInvalidCode, false, err)
+	if options.EmbeddingVersionID == nil {
+		canonical, err := canonicalJSONObject(options.FusionConfig)
+		if err != nil {
+			return ProcessorOptions{}, processorError(foundation.ErrorInvalidInput, processorOptionsInvalidCode, false, err)
+		}
+		options.FusionConfig = canonical
+	} else {
+		parsed, err := foundation.ParseID(string(*options.EmbeddingVersionID))
+		if err != nil || parsed != *options.EmbeddingVersionID {
+			return ProcessorOptions{}, processorError(foundation.ErrorInvalidInput, processorOptionsInvalidCode, false, errors.New("processor embedding version identity is invalid"))
+		}
+		if _, err := domain.ParseRRFConfig(options.FusionConfig); err != nil {
+			return ProcessorOptions{}, processorError(foundation.ErrorInvalidInput, processorOptionsInvalidCode, false, err)
+		}
+		options.EmbeddingVersionID = cloneID(options.EmbeddingVersionID)
+		options.FusionConfig = append(json.RawMessage(nil), options.FusionConfig...)
 	}
-	options.FusionConfig = canonical
 	return options, nil
 }
 
@@ -535,7 +593,7 @@ func validateProcessorIngestion(contextValue ProcessorContext, sourceVersionID f
 func (processor *Processor) validateSnapshotResult(contextValue ProcessorContext, state processorState, result domain.WorkspaceSnapshotResult) error {
 	index := result.IndexVersion
 	if domain.ValidateIndexVersion(index) != nil || index.WorkspaceID != contextValue.Request.WorkspaceID ||
-		index.Status != domain.IndexStatusBuilding || index.EmbeddingVersionID != nil ||
+		index.Status != domain.IndexStatusBuilding || !processorOptionalIDEqual(index.EmbeddingVersionID, processor.options.EmbeddingVersionID) ||
 		index.SourceSnapshotRef != processorSnapshotRef(contextValue.Delivery.OutboxEventID) ||
 		index.IdempotencyKey != processorSnapshotKey(contextValue.Delivery.OutboxEventID) ||
 		index.TokenizerID != processor.options.TokenizerID || index.TokenizerVersion != processor.options.TokenizerVersion ||
@@ -544,6 +602,13 @@ func (processor *Processor) validateSnapshotResult(contextValue ProcessorContext
 		result.SourceCount <= 0 || result.ChunkCount != index.ExpectedChunkCount || result.ExcludedSourceCount < 0 ||
 		index.ExpectedSourceCount == nil || result.SourceCount != *index.ExpectedSourceCount {
 		return errors.New("snapshot result does not match processor request")
+	}
+	if index.EmbeddingVersionID == nil {
+		if !domain.HasDegradedCapability(index.DegradedCapabilities, domain.DegradedVector) {
+			return errors.New("FTS-only snapshot omitted vector degradation")
+		}
+	} else if len(index.DegradedCapabilities) != 0 {
+		return errors.New("hybrid snapshot declared vector degradation before build")
 	}
 	return nil
 }
@@ -554,6 +619,10 @@ func validateProcessorIndex(contextValue ProcessorContext, state processorState)
 		state.index.IdempotencyKey != processorSnapshotKey(contextValue.Delivery.OutboxEventID) || state.index.ProcessingContract == nil ||
 		state.ingestionAttempt == nil || !domain.SameProcessingContract(state.index.ProcessingContract, processorContractPointer(*state.ingestionAttempt)) {
 		return errors.New("persisted index does not match processor checkpoint")
+	}
+	if state.regression != nil && (!domain.SnapshotRegressionCodeMatchesIndex(state.regression.Code, *state.index) ||
+		!processorHash(state.regression.Hash) || state.regression.PassedAt.IsZero()) {
+		return errors.New("persisted regression does not match processor index kind")
 	}
 	return nil
 }
@@ -568,8 +637,20 @@ func validateProcessorLexical(index domain.IndexVersion, result domain.Projectio
 	return nil
 }
 
-func validateProcessorRegression(result domain.SnapshotRegressionResult) error {
-	if result.Code != domain.SnapshotStructureRegressionV1 || !processorHash(result.Hash) || result.PassedAt.IsZero() {
+func validateProcessorVector(index domain.IndexVersion, result BuildNextVectorBatchResult) error {
+	if index.EmbeddingVersionID == nil || result.IndexVersionID != index.ID || result.ProcessedCount < 0 ||
+		result.ProviderInputs < 0 || result.CacheHitCount < 0 || result.ReadyCount < 0 || result.SkippedCount < 0 ||
+		result.FailedCount < 0 || result.InsertedCount < 0 || result.ReplayedCount < 0 ||
+		result.ReadyCount+result.SkippedCount+result.FailedCount != result.ProcessedCount ||
+		result.InsertedCount+result.ReplayedCount != result.ProcessedCount ||
+		!result.Done && result.ProcessedCount == 0 {
+		return errors.New("vector build result is invalid")
+	}
+	return nil
+}
+
+func validateProcessorRegression(index domain.IndexVersion, result domain.SnapshotRegressionResult) error {
+	if !domain.SnapshotRegressionCodeMatchesIndex(result.Code, index) || !processorHash(result.Hash) || result.PassedAt.IsZero() {
 		return errors.New("snapshot regression result is invalid")
 	}
 	return nil
@@ -578,11 +659,17 @@ func validateProcessorRegression(result domain.SnapshotRegressionResult) error {
 func validateProcessorReady(building, ready domain.IndexVersion) error {
 	if domain.ValidateIndexVersion(ready) != nil || ready.ID != building.ID || ready.WorkspaceID != building.WorkspaceID ||
 		ready.Status != domain.IndexStatusReady || ready.Version <= building.Version || ready.UpdatedAt.Before(building.UpdatedAt) ||
+		!processorOptionalIDEqual(ready.EmbeddingVersionID, building.EmbeddingVersionID) ||
+		ready.TokenizerID != building.TokenizerID || ready.TokenizerVersion != building.TokenizerVersion ||
+		ready.TokenizerConfigHash != building.TokenizerConfigHash || !domain.SameJSONValue(ready.FusionConfig, building.FusionConfig) ||
 		ready.SourceSnapshotRef != building.SourceSnapshotRef || ready.IdempotencyKey != building.IdempotencyKey ||
 		ready.ManifestHash != building.ManifestHash || ready.ExpectedChunkCount != building.ExpectedChunkCount ||
 		ready.SourceManifestHash != building.SourceManifestHash || !optionalInt64Equal(ready.ExpectedSourceCount, building.ExpectedSourceCount) ||
 		!domain.SameProcessingContract(ready.ProcessingContract, building.ProcessingContract) {
 		return errors.New("ready result does not preserve the building index binding")
+	}
+	if ready.EmbeddingVersionID == nil && !domain.HasDegradedCapability(ready.DegradedCapabilities, domain.DegradedVector) {
+		return errors.New("FTS-only ready index omitted vector degradation")
 	}
 	return nil
 }
@@ -642,7 +729,7 @@ func (processor *Processor) deterministicStageFailure(cause error, summary strin
 }
 
 func (processor *Processor) failedIndex(index domain.IndexVersion) error {
-	if index.FailureCode == domain.ErrorCodeSnapshotStructureRegressionFailed {
+	if index.FailureCode == domain.ErrorCodeSnapshotStructureRegressionFailed || index.FailureCode == domain.ErrorCodeSnapshotStructureV2RegressionFailed {
 		return newProcessorFailure(domain.DeliveryFailureNonRetryable, foundation.ErrorNonRetryableFailure,
 			index.FailureCode, "snapshot structural regression failed", 0, errors.New("snapshot index is failed"))
 	}
@@ -696,14 +783,6 @@ func processorHash(value string) bool {
 	return err == nil
 }
 
-func processorJSONObject(value json.RawMessage) bool {
-	if !json.Valid(value) {
-		return false
-	}
-	var object map[string]any
-	return json.Unmarshal(value, &object) == nil && object != nil
-}
-
 func processorCode(value string) bool {
 	if value == "" || len(value) > 128 || value[0] < 'A' || value[0] > 'Z' {
 		return false
@@ -725,6 +804,13 @@ func processorErrorCodeOf(err error) string {
 }
 
 func optionalInt64Equal(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func processorOptionalIDEqual(left, right *foundation.ID) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}

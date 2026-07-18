@@ -22,6 +22,8 @@ const (
 	ErrorCodeDeliveryCheckpointInvalid = "REINDEX_DELIVERY_CHECKPOINT_INVALID"
 	// RegressionCodeSnapshotStructureV1 是 M6-B 冻结的结构回归契约。
 	RegressionCodeSnapshotStructureV1 = "SNAPSHOT_STRUCTURE_V1"
+	// RegressionCodeSnapshotStructureV2 是 M6-C 冻结的 Hybrid 结构回归契约。
+	RegressionCodeSnapshotStructureV2 = "SNAPSHOT_STRUCTURE_V2"
 	// MaxDeliveryFailureSummaryRunes 是数据库错误摘要允许的最大 Unicode 字符数。
 	MaxDeliveryFailureSummaryRunes = 512
 	// RedactedDeliveryFailureSummary 是命中敏感信息规则后的稳定替代摘要。
@@ -294,7 +296,7 @@ func ValidateDeliveryCheckpoint(checkpoint DeliveryCheckpoint) error {
 			return invalid(ErrorCodeDeliveryCheckpointInvalid, "index checkpoint is incomplete")
 		}
 	case DeliveryCheckpointRegressionPassed:
-		if !validIndexCheckpoint(checkpoint) || checkpoint.RegressionCode != RegressionCodeSnapshotStructureV1 || !canonicalDeliveryHash(checkpoint.RegressionHash) {
+		if !validIndexCheckpoint(checkpoint) || !validDeliveryRegressionCode(checkpoint.RegressionCode) || !canonicalDeliveryHash(checkpoint.RegressionHash) {
 			return invalid(ErrorCodeDeliveryCheckpointInvalid, "regression checkpoint is incomplete")
 		}
 	default:
@@ -378,7 +380,7 @@ func validateDeliveryCheckpoints(delivery Delivery) error {
 		return invalid(ErrorCodeDeliveryInvalid, "excluded source count cannot be negative")
 	}
 	if delivery.Regression != nil {
-		if delivery.IndexVersionID == nil || delivery.Regression.Code != RegressionCodeSnapshotStructureV1 || !canonicalDeliveryHash(delivery.Regression.Hash) || delivery.Regression.PassedAt.IsZero() || delivery.Regression.PassedAt.Before(delivery.CreatedAt) {
+		if delivery.IndexVersionID == nil || !validDeliveryRegressionCode(delivery.Regression.Code) || !canonicalDeliveryHash(delivery.Regression.Hash) || delivery.Regression.PassedAt.IsZero() || delivery.Regression.PassedAt.Before(delivery.CreatedAt) {
 			return invalid(ErrorCodeDeliveryInvalid, "regression checkpoint is invalid")
 		}
 	}
@@ -389,6 +391,10 @@ func validateDeliveryCheckpoints(delivery Delivery) error {
 		return invalid(ErrorCodeDeliveryInvalid, "activation is exclusive to succeeded delivery")
 	}
 	return nil
+}
+
+func validDeliveryRegressionCode(code string) bool {
+	return code == RegressionCodeSnapshotStructureV1 || code == RegressionCodeSnapshotStructureV2
 }
 
 func validDeliveryStatus(status DeliveryStatus) bool {

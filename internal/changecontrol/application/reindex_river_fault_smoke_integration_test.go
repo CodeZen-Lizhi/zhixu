@@ -5,12 +5,16 @@ package application_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +25,7 @@ import (
 	ingestiondomain "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
+	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	platformparser "github.com/CodeZen-Lizhi/zhixu/internal/platform/parser"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	reindexriver "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/river"
@@ -33,8 +38,9 @@ import (
 )
 
 const (
-	reindexCredentialCanary = "REINDEX_CREDENTIAL_CANARY_7A2F"
-	reindexDSNCanary        = "postgres://REINDEX_DSN_CANARY_9C4D"
+	reindexCredentialCanary   = "REINDEX_CREDENTIAL_CANARY_7A2F"
+	reindexDSNCanary          = "postgres://REINDEX_DSN_CANARY_9C4D"
+	reindexEmbeddingKeyCanary = "REINDEX_EMBEDDING_KEY_CANARY_4E8B"
 )
 
 func runReindexRiverFaultSmoke(
@@ -95,6 +101,35 @@ func runReindexRiverFaultSmoke(
 	if err != nil {
 		t.Fatal(err)
 	}
+	embedder, closeEmbedder, providerCalls := newReindexSmokeEmbedder(t)
+	defer closeEmbedder()
+	contract := embedder.Contract()
+	registered, err := retrievalService.RegisterEmbedding(ctx, retrievalapplication.RegisterEmbeddingRequest{
+		Provider: contract.Provider, AdapterName: contract.AdapterName, AdapterVersion: contract.AdapterVersion,
+		Model: contract.Model, Dimensions: contract.Dimensions, Normalization: contract.Normalization,
+		DistanceMetric: contract.DistanceMetric, ConfigHash: contract.ConfigHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vectorBuilder, err := retrievalapplication.NewVectorBuilder(retrievalapplication.VectorBuilderDependencies{
+		Store: retrievalRepository, Embedder: embedder, Clock: clock,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	faultVectors := &reindexVectorResponseLoss{builder: vectorBuilder, lose: true}
+	fusion, err := retrievaldomain.CanonicalRRFConfig(retrievaldomain.RRFConfig{
+		SchemaVersion: 1, Method: retrievaldomain.FusionMethodRRF, K: 60,
+		LexicalCandidateLimit: 20, VectorCandidateLimit: 20, FusedCandidateLimit: 10, RerankCandidateLimit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processorOptions := retrievalapplication.DefaultFTSOnlyProcessorOptions(100 * time.Millisecond)
+	embeddingVersionID := registered.EmbeddingVersion.ID
+	processorOptions.EmbeddingVersionID = &embeddingVersionID
+	processorOptions.FusionConfig = fusion
 	deliveryRepository, err := retrievalpostgres.NewDeliveryRepository(pool, ids)
 	if err != nil {
 		t.Fatal(err)
@@ -107,8 +142,8 @@ func runReindexRiverFaultSmoke(
 	faultRetrieval := &reindexReadyResponseLossRetrieval{Service: retrievalService, lose: true}
 	processor, err := retrievalapplication.NewProcessor(retrievalapplication.ProcessorDependencies{
 		Contexts: deliveryRepository, Capture: workspaceService, Ingestion: ingestionService,
-		Retrieval: faultRetrieval, Regression: regressionService,
-	}, retrievalapplication.DefaultFTSOnlyProcessorOptions(100*time.Millisecond))
+		Retrieval: faultRetrieval, Vectors: faultVectors, Regression: regressionService,
+	}, processorOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +211,7 @@ func runReindexRiverFaultSmoke(
 		"REINDEX_CHECKPOINT_RESPONSE_LOST",
 		"REINDEX_CHECKPOINT_RESPONSE_LOST",
 		"REINDEX_CHECKPOINT_RESPONSE_LOST",
+		"REINDEX_VECTOR_RESPONSE_LOST",
 		"REINDEX_CHECKPOINT_RESPONSE_LOST",
 		"REINDEX_READY_RESPONSE_LOST",
 		"REINDEX_COMPLETION_RESPONSE_LOST",
@@ -183,8 +219,8 @@ func runReindexRiverFaultSmoke(
 	for index, code := range faultCodes {
 		waitForReindexRiverRetry(t, ctx, pool, deliveryID, jobID, index+1, code)
 	}
-	if pending := faultRuntime.pendingStages(); len(pending) != 0 || faultRetrieval.pending() || faultCompletion.pending() {
-		t.Fatalf("reindex faults were not all exercised: stages=%v ready=%v completion=%v", pending, faultRetrieval.pending(), faultCompletion.pending())
+	if pending := faultRuntime.pendingStages(); len(pending) != 0 || faultVectors.pending() || faultRetrieval.pending() || faultCompletion.pending() {
+		t.Fatalf("reindex faults were not all exercised: stages=%v vector=%v ready=%v completion=%v", pending, faultVectors.pending(), faultRetrieval.pending(), faultCompletion.pending())
 	}
 
 	waitContext, cancelWait := context.WithTimeout(ctx, 30*time.Second)
@@ -192,6 +228,7 @@ func runReindexRiverFaultSmoke(
 	waitForReindexCompletion(t, waitContext, pool, deliveryID, jobID)
 	assertReindexFaultSmokePayloadsClean(t, ctx, pool, deliveryID, jobID, logs.String(), root, targetPath, approvedContent)
 	assertReindexFaultSmokeFacts(t, ctx, pool, workspaceID, executionID, deliveryID, root, targetPath, approvedContent, driftContent)
+	assertHybridReindexAndSearchSmoke(t, ctx, pool, embedder, workspaceID, deliveryID, registered.EmbeddingVersion.ID, providerCalls)
 }
 
 func newReindexFaultSmokeWorker(
@@ -215,6 +252,32 @@ type reindexCheckpointResponseLossRuntime struct {
 	*retrievalapplication.DeliveryRuntime
 	mu        sync.Mutex
 	remaining map[retrievaldomain.DeliveryCheckpointStage]bool
+}
+
+type reindexVectorResponseLoss struct {
+	builder *retrievalapplication.VectorBuilder
+	mu      sync.Mutex
+	lose    bool
+}
+
+func (vectors *reindexVectorResponseLoss) BuildNextVectorBatch(ctx context.Context, request retrievalapplication.BuildNextVectorBatchRequest) (retrievalapplication.BuildNextVectorBatchResult, error) {
+	result, err := vectors.builder.BuildNextVectorBatch(ctx, request)
+	if err != nil {
+		return result, err
+	}
+	vectors.mu.Lock()
+	defer vectors.mu.Unlock()
+	if vectors.lose && result.ProcessedCount > 0 {
+		vectors.lose = false
+		return result, errors.New("REINDEX_VECTOR_RESPONSE_LOST: durable vector batch committed before response was lost")
+	}
+	return result, nil
+}
+
+func (vectors *reindexVectorResponseLoss) pending() bool {
+	vectors.mu.Lock()
+	defer vectors.mu.Unlock()
+	return vectors.lose
 }
 
 func newReindexCheckpointResponseLossRuntime(runtime *retrievalapplication.DeliveryRuntime) *reindexCheckpointResponseLossRuntime {
@@ -361,7 +424,7 @@ func waitForReindexRiverRetry(t *testing.T, ctx context.Context, pool *pgxpool.P
 		case <-ticker.C:
 		}
 	}
-	assertReindexTextClean(t, "River errors", riverErrors, reindexCredentialCanary, reindexDSNCanary)
+	assertReindexTextClean(t, "River errors", riverErrors, reindexCredentialCanary, reindexDSNCanary, reindexEmbeddingKeyCanary)
 
 	var deliveryStatus string
 	if err := pool.QueryRow(ctx, `SELECT status FROM retrieval.reindex_delivery WHERE id=$1`, string(deliveryID)).Scan(&deliveryStatus); err != nil {
@@ -412,7 +475,7 @@ func assertReindexFaultSmokePayloadsClean(t *testing.T, ctx context.Context, poo
 		"Attempt":       attemptPayload,
 		"logs":          logs,
 	} {
-		assertReindexTextClean(t, label, payload, root, targetPath, approvedContent, reindexCredentialCanary, reindexDSNCanary)
+		assertReindexTextClean(t, label, payload, root, targetPath, approvedContent, reindexCredentialCanary, reindexDSNCanary, reindexEmbeddingKeyCanary)
 	}
 }
 
@@ -516,7 +579,7 @@ func assertReindexFaultSmokeFacts(
 		t.Fatal(err)
 	}
 	if deliveryStatus != string(retrievaldomain.DeliveryStatusSucceeded) || executionStatus != "completed" || proposalStatus != "completed" ||
-		indexStatus != string(retrievaldomain.IndexStatusActive) || attemptNo < 6 || activationCount != 1 || activeCount != 1 || sourceCount != 1 || chunkCount < 1 {
+		indexStatus != string(retrievaldomain.IndexStatusActive) || attemptNo < 7 || activationCount != 1 || activeCount != 1 || sourceCount != 1 || chunkCount < 1 {
 		t.Fatalf("delivery=%s attempts=%d execution=%s proposal=%s index=%s activations=%d active=%d sources=%d chunks=%d",
 			deliveryStatus, attemptNo, executionStatus, proposalStatus, indexStatus, activationCount, activeCount, sourceCount, chunkCount)
 	}
@@ -533,6 +596,106 @@ func assertReindexFaultSmokeFacts(
 	}
 	if string(worktreeBytes) != string(driftContent) || string(worktreeBytes) == string(artifactBytes) {
 		t.Fatalf("worktree=%q artifact=%q", worktreeBytes, artifactBytes)
+	}
+}
+
+func newReindexSmokeEmbedder(t *testing.T) (retrievalapplication.Embedder, func(), *atomic.Int32) {
+	t.Helper()
+	const model = "reindex-smoke-embed-v1"
+	var calls atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		if request.Method != http.MethodPost || request.URL.Path != "/v1/embeddings" ||
+			request.Header.Get("Authorization") != "Bearer "+reindexEmbeddingKeyCanary {
+			http.Error(response, "rejected", http.StatusUnauthorized)
+			return
+		}
+		var payload struct {
+			Input          []string `json:"input"`
+			Model          string   `json:"model"`
+			EncodingFormat string   `json:"encoding_format"`
+			Dimensions     int32    `json:"dimensions"`
+		}
+		decoder := json.NewDecoder(request.Body)
+		if decoder.Decode(&payload) != nil || len(payload.Input) == 0 || payload.Model != model ||
+			payload.EncodingFormat != "float" || payload.Dimensions != 3 {
+			http.Error(response, "invalid", http.StatusBadRequest)
+			return
+		}
+		data := make([]map[string]any, len(payload.Input))
+		for index := range payload.Input {
+			data[index] = map[string]any{"index": index, "embedding": []float32{1, 0, 0}}
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(map[string]any{"model": model, "data": data})
+	}))
+	embedder, err := platformmodels.NewOpenAICompatibleEmbedder(platformmodels.OpenAIEmbeddingOptions{
+		Client: server.Client(), BaseURL: server.URL, APIKey: reindexEmbeddingKeyCanary, Model: model,
+		Dimensions: 3, Normalization: retrievaldomain.NormalizationL2, DistanceMetric: retrievaldomain.DistanceCosine,
+		MaxBatchSize: 128, MaxInputBytes: 64 * 1024, MaxBatchInputBytes: 8 * 1024 * 1024,
+		Timeout: 5 * time.Second, MaxResponseBytes: 1 << 20,
+	})
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	return embedder, server.Close, &calls
+}
+
+func assertHybridReindexAndSearchSmoke(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	embedder retrievalapplication.Embedder,
+	workspaceID foundation.ID,
+	deliveryID foundation.ID,
+	embeddingVersionID foundation.ID,
+	providerCalls *atomic.Int32,
+) {
+	t.Helper()
+	var indexID, persistedEmbeddingID foundation.ID
+	var degraded, regressionCode string
+	var readyVectors, cacheRows int64
+	if err := pool.QueryRow(ctx, `SELECT index_version.id::text,index_version.embedding_version_id::text,
+		index_version.degraded_capabilities::text,delivery.regression_code,
+		(SELECT count(*) FROM retrieval.chunk_projection projection
+		 WHERE projection.index_version_id=index_version.id AND projection.vector_status='ready'),
+		(SELECT count(*) FROM retrieval.embedding_cache cache
+		 WHERE cache.workspace_id=index_version.workspace_id AND cache.embedding_version_id=index_version.embedding_version_id)
+		FROM retrieval.reindex_delivery delivery
+		JOIN retrieval.index_version index_version ON index_version.id=delivery.index_version_id
+		WHERE delivery.id=$1`, string(deliveryID)).Scan(
+		&indexID, &persistedEmbeddingID, &degraded, &regressionCode, &readyVectors, &cacheRows,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if persistedEmbeddingID != embeddingVersionID || degraded != "[]" ||
+		regressionCode != retrievaldomain.SnapshotStructureRegressionV2 || readyVectors < 1 || cacheRows < 1 {
+		t.Fatalf("hybrid index=%s embedding=%s degraded=%s regression=%s vectors=%d cache=%d",
+			indexID, persistedEmbeddingID, degraded, regressionCode, readyVectors, cacheRows)
+	}
+	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchService, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerCallsBeforeSearch := providerCalls.Load()
+	result, err := searchService.Search(ctx, retrievaldomain.SearchRequest{
+		WorkspaceID: workspaceID, Query: "approved", Mode: retrievaldomain.SearchModeHybrid, Limit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IndexVersionID != indexID || result.EffectiveMode != retrievaldomain.SearchModeHybrid || len(result.Items) == 0 ||
+		len(result.Degradations) != 1 || result.Degradations[0].Capability != retrievaldomain.SearchDegradationRerank {
+		t.Fatalf("hybrid search result=%#v", result)
+	}
+	providerCallsAfterSearch := providerCalls.Load()
+	if providerCallsBeforeSearch < 1 || providerCallsAfterSearch != providerCallsBeforeSearch+1 {
+		t.Fatalf("provider calls before=%d after=%d", providerCallsBeforeSearch, providerCallsAfterSearch)
 	}
 }
 

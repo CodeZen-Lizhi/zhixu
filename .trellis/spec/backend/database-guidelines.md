@@ -545,3 +545,108 @@ Correct: Lexical Builder 是唯一全文事实源；vector-only batch 只保存�
 Wrong: 先把新 Index 标 active，再单独退役旧 Index 或补 Activation。
 Correct: 同一 PostgreSQL 事务内 append Activation、旧 Active→Retiring、目标→Active。
 ```
+
+## M6-C Embedding And Hybrid Search Contract
+
+### 1. Scope / Trigger
+
+- Trigger：M6-A/B 已建立 immutable Index/Manifest/Projection 与 Reindex Delivery，需要接入真实
+  Embedding、可恢复向量批处理、Active-only Keyword/Semantic/Hybrid Search 和 Evidence v1。
+- Scope：本契约不包含 HTTP/OpenAPI、权限中间件、Conversation/RAG Answer、Query Rewrite、
+  Document/Topic/Conflict 过滤或 50 万容量 ANN；这些分别归 M6-D、M6-02 和 M10。
+
+### 2. Signatures
+
+```go
+type Embedder interface {
+    Contract() domain.EmbeddingContract
+    Embed(context.Context, application.EmbedRequest) (application.EmbedResult, error)
+}
+
+type VectorBuildStore interface {
+    LoadVectorBuildPage(context.Context, domain.VectorBuildPageCommand) (domain.VectorBuildPage, error)
+    CommitVectorBuildBatch(context.Context, domain.VectorBuildBatch) (domain.VectorBuildCommitResult, error)
+}
+
+type SearchStore interface {
+    LoadActiveSearchIndex(context.Context, foundation.ID) (application.SearchIndex, error)
+    SearchLexical(context.Context, application.LexicalSearchQuery) ([]domain.SearchCandidate, error)
+    SearchVector(context.Context, application.VectorSearchQuery) ([]domain.SearchCandidate, error)
+}
+```
+
+数据库入口为 `migrations/00016_embedding_hybrid_search.sql`。正式 Adapter 为
+OpenAI-Compatible `/v1/embeddings` 与 Ollama `/api/embed`；Reranker 当前只冻结 Port，不提供未批准的
+生产协议空壳。
+
+### 3. Contracts
+
+- `EmbeddingContract` 冻结 Provider、Adapter/Version、Model、Dimensions、Normalization、Distance、
+  Endpoint identity、`MaxBatchSize`、`MaxInputBytes`、`MaxBatchInputBytes` 和不含 Credential 的 Config Hash。
+- 环境键：`ZHIXU_EMBEDDING_PROVIDER|BASE_URL|API_KEY|MODEL|DIMENSIONS|NORMALIZATION|DISTANCE_METRIC|MAX_BATCH_SIZE|MAX_INPUT_BYTES|MAX_BATCH_INPUT_BYTES|TIMEOUT|MAX_RESPONSE_BYTES`；默认 provider 为 `disabled`。
+- `embedding_cache` 主键为 Workspace + Embedding Version + Content Hash，不保存正文；cache 与 Projection
+  terminal update 同事务。cache 使用一条 `INSERT ... SELECT FROM unnest(...)`，Projection 使用一条
+  `UPDATE ... FROM unnest(...)`，随后一次批量 readback exact float32 校验。
+- Page Store 先读取最多 `Limit+1` 条 metadata/cache，再按累计正文上限选择 page，最后一条参数化查询
+  读取被选中的 cache miss 正文；不得先把合法最大配置约 10 GiB 正文加载到 Go 内存。
+- Hybrid Processor 固定顺序为 Lexical → bounded Vector batches → `SNAPSHOT_STRUCTURE_V2` → Ready。
+  Regression 与 Ready 都调用 `DeriveReadyDegradedCapabilities`；skipped/failed 必须得到 `vector` degraded。
+- 历史 Hybrid 已无 pending vector 时，配置 disabled/变化也允许完成 V2 Regression；仍有 pending 时返回
+  `RETRIEVAL_VECTOR_EMBEDDER_VERSION_UNAVAILABLE`，要求恢复匹配版本，不按当前默认配置改写历史任务。
+- Search 两路只读指定 Workspace 当前 Active Index，并复用 Source/SourceVersion/path/captured time filter。
+  Distance 只能由持久 `cosine|inner_product|euclidean` 枚举选择 `<=>|<#>|<->` 固定模板。
+- Lexical trigram `%` 必须在短事务内通过 `set_config(..., true)` 固定 threshold `0.3`；不得继承
+  pool connection 的可变 `pg_trgm.similarity_threshold`，也不得为确定性改成失去 GIN 的无界全表计算。
+- RRF v1 只融合 rank，`k` 范围 `1..500`，分母使用 `int64/float64`；相同 Chunk 只排名一次，Evidence
+  返回稳定有界的多 Source provenance。nil/Retryable Rerank 显式 degraded，损坏 output fail closed。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 稳定错误/行为 |
+|---|---|
+| Provider 数量/顺序/模型/维度/NaN/Inf/零范数损坏 | ConsistencyViolation，整批不提交 |
+| caller cancel/deadline | Adapter error 保留 `errors.Is(context.Canceled/DeadlineExceeded)`；Processor 不持久归约永久失败 |
+| 429/5xx/网络/超时 | Retryable；Hybrid query 可退化 Keyword，Semantic 返回错误 |
+| Credential/Schema/维度确定性错误 | NonRetryable/Consistency，禁止伪向量或空成功 |
+| cache 同 key 不同 float32 | `RETRIEVAL_EMBEDDING_CACHE_REPLAY_CONFLICT`，整个 Projection 事务回滚 |
+| 单输入 oversized atomic/non-atomic | `skipped_oversized/EMBEDDING_INPUT_OVERSIZED` 或 `failed/EMBEDDING_INPUT_CONTRACT_MISMATCH` |
+| 历史 Hybrid pending 且匹配 Provider 不可用 | `RETRIEVAL_VECTOR_EMBEDDER_VERSION_UNAVAILABLE` / DependencyUnavailable |
+| FTS-only Keyword/Hybrid/Semantic | 正常 / Keyword+vector/rerank degraded / `RETRIEVAL_SEMANTIC_UNAVAILABLE` |
+| Rerank nil/Retryable/损坏 output | RRF+degraded / RRF+degraded / fail closed |
+| 00016 已有 cache、V2 Delivery 或 Hybrid Index Down | SQLSTATE `55000` |
+
+### 5. Good / Base / Bad Cases
+
+- Good：同 Content Hash 多 Chunk 只调用一次 Provider，cache/Projection 一次 set-based commit；响应丢失后
+  page 为空并继续 V2 Regression，最终只产生一个 Active/Completion。
+- Base：Embedding disabled 时新 Index 继续 V1 FTS-only；Keyword 可用、Hybrid 明确退化、Semantic 明确不可用。
+- Base：Reranker 未配置，Hybrid 返回 RRF 顺序并只标记 rerank degraded，不返回假失败或假重排分数。
+- Bad：用 `pgx.Batch.Queue` 循环 1000 条 INSERT/UPDATE 后称为“批量”；数据库仍执行 N 条 statement/trigger。
+- Bad：先按 `MaxBatchSize*MaxInputBytes` 读取正文，再在 Application 截断；合法配置可导致 Worker OOM。
+- Bad：V2 Regression 前要求 Building Index 已预写 `degraded_capabilities=["vector"]`；真实 Processor 会先失败。
+
+### 6. Tests Required
+
+- Domain/Application：Embedding hash/limits、RRF overflow、filter/candidate/evidence、vector cache hit/miss、
+  total input bytes、degraded derivation、历史 terminal recovery、Search/Rerank 正常/边界/失败路径。
+- Provider httptest：两协议 batch、状态码、非法/超大响应、redirect、timeout/cancel error chain、Secret canary。
+- PostgreSQL：00016 Up/重复 Up/Down→Up/guard、Workspace cache、set-based commit/replay/conflict、V2
+  Regression/Completion、Active-only Search、filter 等集、bounded provenance、三 distance operator 与 EXPLAIN。
+- Fault smoke：真实 PostgreSQL/River/LocalFS/Git + HTTP Embedder，注入 Vector commit response-loss、四
+  checkpoint、Ready/Completion response-loss；断言唯一 Activation/Active/Completion、最小 Hybrid Search
+  命中，Provider Key/正文/DSN/路径不进入任务载荷、日志或错误。
+- Gate：`go test -race`、关键包 `-count=20`、integration `-p 1`、`go vet ./...`、`make test`、
+  `go mod tidy -diff`、Compose config、go-review、sql-code-review 和独立审查。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: config disabled 后历史 Hybrid 一律失败，或用新默认模型继续旧 Index。
+Correct: page 为空先 Done；仍 pending 时要求恢复精确 Embedding Version，不改写历史绑定。
+
+Wrong: Provider cancel 包装成不含 context.Canceled 的安全错误，Processor 将 shutdown 归约为永久失败。
+Correct: 安全 Error string 隐藏 cause，但 Unwrap 保留 context.Canceled/DeadlineExceeded 供 Worker 判定。
+
+Wrong: Lexical 失败立即返回，后台 Vector goroutine 继续运行并可能泄漏资源。
+Correct: cancel shared context 后等待 Vector worker 收敛，再返回 Lexical 错误。
+```

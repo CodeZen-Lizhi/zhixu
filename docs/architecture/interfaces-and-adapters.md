@@ -46,6 +46,9 @@ Adapter：
 
 - 同一索引版本维度固定。
 - 不允许逐 Chunk 单独远程调用。
+- Contract 同时限制条数、单输入字节和单批累计字节；Config Hash 不包含 Credential。
+- 正式实现为直接 OpenAI-Compatible 与 Ollama HTTP Adapter，严格校验顺序、模型、维度、
+  normalization、取消和响应大小。
 
 ### Reranker
 
@@ -57,6 +60,8 @@ Adapter：
 
 - 可以明确降级为融合排序。
 - 返回 degraded 标记，不能静默。
+- 当前只冻结项目自有 Port 和 exact output validator；仓库尚未批准通用生产 Rerank HTTP 协议，
+  因此 M6-C 不提供伪造供应商 Adapter。
 
 ### Agent Framework Boundary
 
@@ -268,8 +273,8 @@ Adapter 必须映射原始 SDK/命令/数据库错误，不能把外部错误类
 | Seam | 正式 Adapter | 测试 Adapter | 第二实现触发条件 |
 |---|---|---|---|
 | ChatModel | OpenAI-Compatible | Fake | 本地模型或第二厂商 |
-| Embedding | OpenAI-Compatible | Fake | 本地 Embedding |
-| Reranker | HTTP Adapter | Fake | 可选禁用 |
+| Embedding | OpenAI-Compatible / Ollama direct HTTP | Fake | 第二厂商或本地协议 |
+| Reranker | 未配置，待批准真实协议 | Fake | 选定真实 Provider 并通过 Contract Test |
 | Agent 编排 | Eino Adapter（PoC 通过后）或直接编排 | Deterministic Fake | PoC 证明收益且通过门禁 |
 | Parser | Markdown/PDF/HTML | Fixture Fake | 新格式 |
 | Workspace | Local FS | Memory FS | 远程 Workspace |

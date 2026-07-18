@@ -35,6 +35,7 @@ type Store interface {
 // BeginWorkspaceSnapshotRequest 描述一次完整 Workspace Source/Chunk Snapshot 构建。
 type BeginWorkspaceSnapshotRequest struct {
 	WorkspaceID             foundation.ID
+	EmbeddingVersionID      *foundation.ID
 	TargetSourceID          foundation.ID
 	TargetSourceVersionID   foundation.ID
 	TargetParseProjectionID foundation.ID
@@ -50,18 +51,26 @@ type BeginWorkspaceSnapshotRequest struct {
 	MaxChunks               int64
 }
 
-// BeginWorkspaceSnapshot 生成 FTS-only Index 身份并由 Store 在一个 bounded 事务中物化 Snapshot。
+// BeginWorkspaceSnapshot 生成 FTS-only 或 Hybrid Index 身份，并由 Store 在一个 bounded 事务中物化 Snapshot。
 func (s *Service) BeginWorkspaceSnapshot(ctx context.Context, request BeginWorkspaceSnapshotRequest) (domain.WorkspaceSnapshotResult, error) {
 	if err := s.available(); err != nil {
 		return domain.WorkspaceSnapshotResult{}, err
 	}
-	id, err := s.dependencies.IDs.New()
-	if err != nil {
-		return domain.WorkspaceSnapshotResult{}, err
-	}
-	fusion, err := canonicalJSONObject(request.FusionConfig)
-	if err != nil {
-		return domain.WorkspaceSnapshotResult{}, invalidRequest("RETRIEVAL_FUSION_CONFIG_INVALID", err)
+	var err error
+	var fusion json.RawMessage
+	if request.EmbeddingVersionID == nil {
+		fusion, err = canonicalJSONObject(request.FusionConfig)
+		if err != nil {
+			return domain.WorkspaceSnapshotResult{}, invalidRequest(domain.ErrorCodeFusionConfigInvalid, err)
+		}
+	} else {
+		if _, err := domain.ParseRRFConfig(request.FusionConfig); err != nil {
+			return domain.WorkspaceSnapshotResult{}, err
+		}
+		if err := s.validateEmbeddingVersionReference(ctx, *request.EmbeddingVersionID); err != nil {
+			return domain.WorkspaceSnapshotResult{}, err
+		}
+		fusion = append(json.RawMessage(nil), request.FusionConfig...)
 	}
 	pageSize := request.PageSize
 	if pageSize == 0 {
@@ -75,14 +84,19 @@ func (s *Service) BeginWorkspaceSnapshot(ctx context.Context, request BeginWorks
 	if maxChunks == 0 {
 		maxChunks = domain.DefaultSnapshotMaxChunks
 	}
+	id, err := s.dependencies.IDs.New()
+	if err != nil {
+		return domain.WorkspaceSnapshotResult{}, err
+	}
 	now := s.dependencies.Clock.Now()
 	command := domain.WorkspaceSnapshotCommand{
 		IndexVersion: domain.IndexVersion{
 			ID: id, WorkspaceID: request.WorkspaceID,
-			TokenizerID: clean(request.TokenizerID), TokenizerVersion: clean(request.TokenizerVersion),
+			EmbeddingVersionID: cloneID(request.EmbeddingVersionID),
+			TokenizerID:        clean(request.TokenizerID), TokenizerVersion: clean(request.TokenizerVersion),
 			TokenizerConfigHash: cleanHash(request.TokenizerConfigHash), FusionConfig: fusion,
 			SourceSnapshotRef: clean(request.SourceSnapshotRef), IdempotencyKey: clean(request.IdempotencyKey),
-			Status: domain.IndexStatusBuilding, DegradedCapabilities: []domain.DegradedCapability{domain.DegradedVector},
+			Status: domain.IndexStatusBuilding, DegradedCapabilities: snapshotInitialDegradations(request.EmbeddingVersionID),
 			Version: 1, CreatedAt: now, UpdatedAt: now,
 			ProcessingContract: &domain.ProcessingContract{
 				ParserID: clean(request.ProcessingContract.ParserID), ParserVersion: clean(request.ProcessingContract.ParserVersion),
@@ -98,6 +112,13 @@ func (s *Service) BeginWorkspaceSnapshot(ctx context.Context, request BeginWorks
 		return domain.WorkspaceSnapshotResult{}, err
 	}
 	return s.dependencies.Store.BeginWorkspaceSnapshot(ctx, command)
+}
+
+func snapshotInitialDegradations(embeddingVersionID *foundation.ID) []domain.DegradedCapability {
+	if embeddingVersionID == nil {
+		return []domain.DegradedCapability{domain.DegradedVector}
+	}
+	return nil
 }
 
 // Dependencies 是 Retrieval Application Service 的显式依赖。
@@ -200,19 +221,7 @@ func (s *Service) BeginIndex(ctx context.Context, request BeginIndexRequest) (do
 		return domain.IndexVersionResult{}, err
 	}
 	if request.EmbeddingVersionID != nil {
-		embedding, err := s.dependencies.Store.GetEmbeddingVersion(ctx, *request.EmbeddingVersionID)
-		if err != nil {
-			return domain.IndexVersionResult{}, err
-		}
-		if embedding.ID != *request.EmbeddingVersionID {
-			return domain.IndexVersionResult{}, foundation.NewError(
-				foundation.ErrorConsistencyViolation,
-				"RETRIEVAL_EMBEDDING_VERSION_BINDING_INVALID",
-				false,
-				errors.New("embedding version lookup returned a different identity"),
-			)
-		}
-		if err := domain.ValidateEmbeddingVersion(embedding); err != nil {
+		if err := s.validateEmbeddingVersionReference(ctx, *request.EmbeddingVersionID); err != nil {
 			return domain.IndexVersionResult{}, err
 		}
 	}
@@ -260,6 +269,22 @@ func (s *Service) BeginIndex(ctx context.Context, request BeginIndexRequest) (do
 		return domain.IndexVersionResult{}, err
 	}
 	return s.dependencies.Store.BeginIndex(ctx, build)
+}
+
+func (s *Service) validateEmbeddingVersionReference(ctx context.Context, embeddingVersionID foundation.ID) error {
+	embedding, err := s.dependencies.Store.GetEmbeddingVersion(ctx, embeddingVersionID)
+	if err != nil {
+		return err
+	}
+	if embedding.ID != embeddingVersionID {
+		return foundation.NewError(
+			foundation.ErrorConsistencyViolation,
+			"RETRIEVAL_EMBEDDING_VERSION_BINDING_INVALID",
+			false,
+			errors.New("embedding version lookup returned a different identity"),
+		)
+	}
+	return domain.ValidateEmbeddingVersion(embedding)
 }
 
 // BuildLexical 批量生成冻结 Manifest 对应的全文投影。
@@ -361,7 +386,7 @@ func (s *Service) Ready(ctx context.Context, request TransitionRequest) (domain.
 	if err != nil {
 		return domain.IndexVersion{}, err
 	}
-	capabilities := readyCapabilities(index, status)
+	capabilities := domain.DeriveReadyDegradedCapabilities(index, status)
 	candidate := index
 	candidate.DegradedCapabilities = capabilities
 	status.DegradedCapabilities = capabilities
@@ -518,13 +543,6 @@ func (s *Service) GetActive(ctx context.Context, workspaceID foundation.ID) (dom
 func (s *Service) available() error {
 	if s == nil || s.dependencies.Store == nil || s.dependencies.IDs == nil || s.dependencies.Clock == nil {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, serviceUnavailableCode, false, errors.New("retrieval service is unavailable"))
-	}
-	return nil
-}
-
-func readyCapabilities(index domain.IndexVersion, status domain.BuildStatus) []domain.DegradedCapability {
-	if index.EmbeddingVersionID == nil || status.VectorSkippedOversizedCount > 0 || status.VectorFailedCount > 0 {
-		return []domain.DegradedCapability{domain.DegradedVector}
 	}
 	return nil
 }

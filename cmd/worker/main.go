@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,12 +26,14 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
+	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	platformparser "github.com/CodeZen-Lizhi/zhixu/internal/platform/parser"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	reindexriver "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/river"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
+	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	retrievalruntime "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/runtime"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
@@ -418,6 +421,42 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceReposito
 	if err != nil {
 		return reindexComponents{}, err
 	}
+	processorOptions := retrievalapplication.DefaultFTSOnlyProcessorOptions(cfg.ReindexDispatchErrorBackoff)
+	vectorBuilder, err := retrievalapplication.NewVectorRecoveryBuilder(retrievalRepository, clock)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	embedder, err := newConfiguredEmbedder(cfg)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	if embedder != nil {
+		contract := embedder.Contract()
+		registrationContext, cancelRegistration := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+		registered, registrationErr := retrievalService.RegisterEmbedding(registrationContext, retrievalapplication.RegisterEmbeddingRequest{
+			Provider: contract.Provider, AdapterName: contract.AdapterName, AdapterVersion: contract.AdapterVersion,
+			Model: contract.Model, Dimensions: contract.Dimensions, Normalization: contract.Normalization,
+			DistanceMetric: contract.DistanceMetric, ConfigHash: contract.ConfigHash,
+		})
+		cancelRegistration()
+		if registrationErr != nil {
+			return reindexComponents{}, registrationErr
+		}
+		builder, builderErr := retrievalapplication.NewVectorBuilder(retrievalapplication.VectorBuilderDependencies{
+			Store: retrievalRepository, Embedder: embedder, Clock: clock,
+		})
+		if builderErr != nil {
+			return reindexComponents{}, builderErr
+		}
+		fusion, fusionErr := configuredRRF(cfg)
+		if fusionErr != nil {
+			return reindexComponents{}, fusionErr
+		}
+		embeddingVersionID := registered.EmbeddingVersion.ID
+		processorOptions.EmbeddingVersionID = &embeddingVersionID
+		processorOptions.FusionConfig = fusion
+		vectorBuilder = builder
+	}
 	deliveryRepository, err := retrievalpostgres.NewDeliveryRepository(db, ids)
 	if err != nil {
 		return reindexComponents{}, err
@@ -428,8 +467,8 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceReposito
 	}
 	processor, err := retrievalapplication.NewProcessor(retrievalapplication.ProcessorDependencies{
 		Contexts: deliveryRepository, Capture: workspaceService, Ingestion: ingestionService,
-		Retrieval: retrievalService, Regression: regressionService,
-	}, retrievalapplication.DefaultFTSOnlyProcessorOptions(cfg.ReindexDispatchErrorBackoff))
+		Retrieval: retrievalService, Vectors: vectorBuilder, Regression: regressionService,
+	}, processorOptions)
 	if err != nil {
 		return reindexComponents{}, err
 	}
@@ -458,6 +497,36 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceReposito
 		ErrorBackoff: cfg.ReindexDispatchErrorBackoff,
 	})
 	return reindexComponents{worker: worker, dispatcher: runner}, nil
+}
+
+func newConfiguredEmbedder(cfg config.Config) (retrievalapplication.Embedder, error) {
+	switch cfg.EmbeddingProvider {
+	case config.EmbeddingProviderDisabled:
+		return nil, nil
+	case config.EmbeddingProviderOpenAICompatible:
+		return platformmodels.NewOpenAICompatibleEmbedder(platformmodels.OpenAIEmbeddingOptions{
+			BaseURL: cfg.EmbeddingBaseURL, APIKey: cfg.EmbeddingAPIKey, Model: cfg.EmbeddingModel,
+			Dimensions: cfg.EmbeddingDimensions, Normalization: cfg.EmbeddingNormalization,
+			DistanceMetric: cfg.EmbeddingDistanceMetric, MaxBatchSize: cfg.EmbeddingMaxBatchSize,
+			MaxInputBytes: cfg.EmbeddingMaxInputBytes, MaxBatchInputBytes: cfg.EmbeddingMaxBatchInputBytes,
+			Timeout:          cfg.EmbeddingTimeout,
+			MaxResponseBytes: cfg.EmbeddingMaxResponseBytes,
+		})
+	case config.EmbeddingProviderOllama:
+		return platformmodels.NewOllamaEmbedder(platformmodels.OllamaEmbeddingOptions{
+			BaseURL: cfg.EmbeddingBaseURL, Model: cfg.EmbeddingModel, Dimensions: cfg.EmbeddingDimensions,
+			Normalization: cfg.EmbeddingNormalization, DistanceMetric: cfg.EmbeddingDistanceMetric,
+			MaxBatchSize: cfg.EmbeddingMaxBatchSize, MaxInputBytes: cfg.EmbeddingMaxInputBytes,
+			MaxBatchInputBytes: cfg.EmbeddingMaxBatchInputBytes,
+			Timeout:            cfg.EmbeddingTimeout, MaxResponseBytes: cfg.EmbeddingMaxResponseBytes,
+		})
+	default:
+		return nil, errors.New("embedding provider is unsupported")
+	}
+}
+
+func configuredRRF(cfg config.Config) (json.RawMessage, error) {
+	return retrievaldomain.CanonicalRRFConfig(cfg.RetrievalRRFConfig())
 }
 
 func startWorkerHealthServer(address string, handler http.Handler) (workerHealthServer, error) {

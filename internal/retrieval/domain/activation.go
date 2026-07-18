@@ -89,6 +89,15 @@ type BuildStatus struct {
 	DegradedCapabilities        []DegradedCapability
 }
 
+// DeriveReadyDegradedCapabilities 根据持久 Projection 终态推导 Ready Index 的唯一能力声明。
+// Snapshot/Regression/Ready 必须复用该规则，避免在生命周期不同阶段形成第二套降级语义。
+func DeriveReadyDegradedCapabilities(index IndexVersion, status BuildStatus) []DegradedCapability {
+	if index.EmbeddingVersionID == nil || status.VectorSkippedOversizedCount > 0 || status.VectorFailedCount > 0 {
+		return []DegradedCapability{DegradedVector}
+	}
+	return nil
+}
+
 // ValidateActivationCommand 校验 Ready 目标、当前 Active 和所有期望版本绑定。
 func ValidateActivationCommand(currentActive *IndexVersion, target IndexVersion, command ActivationCommand) error {
 	if err := ValidateActivationCommandInput(command); err != nil {

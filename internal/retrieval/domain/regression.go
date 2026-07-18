@@ -16,13 +16,19 @@ import (
 const (
 	// SnapshotStructureRegressionV1 是 M6-B 完整 Workspace Snapshot 的结构回归契约。
 	SnapshotStructureRegressionV1 = "SNAPSHOT_STRUCTURE_V1"
+	// SnapshotStructureRegressionV2 是绑定 Embedding Version 与 vector 终态的 Hybrid Snapshot 契约。
+	SnapshotStructureRegressionV2 = "SNAPSHOT_STRUCTURE_V2"
 	// ErrorCodeSnapshotStructureRegressionFailed 是结构回归失败后写入 Index 的稳定失败码。
 	ErrorCodeSnapshotStructureRegressionFailed = "SNAPSHOT_STRUCTURE_V1_FAILED"
-	snapshotRegressionHashPrefix               = "snapshot-regression-v1"
+	// ErrorCodeSnapshotStructureV2RegressionFailed 是 Hybrid 结构回归失败后的稳定失败码。
+	ErrorCodeSnapshotStructureV2RegressionFailed = "SNAPSHOT_STRUCTURE_V2_FAILED"
+	snapshotRegressionHashPrefix                 = "snapshot-regression-v1"
+	snapshotRegressionV2HashPrefix               = "snapshot-regression-v2"
 )
 
 // SnapshotRegressionCommand 绑定一次结构回归所验证的 Delivery、目标 Source 与 Building Index。
 type SnapshotRegressionCommand struct {
+	RegressionCode          string
 	WorkspaceID             foundation.ID
 	DeliveryID              foundation.ID
 	TargetSourceID          foundation.ID
@@ -61,56 +67,76 @@ type SnapshotRegressionResult struct {
 	PassedAt time.Time
 }
 
-// ValidateSnapshotRegression 证明 source-bound FTS-only Building Index 满足 Ready 前结构闭包。
+// ValidateSnapshotRegression 按显式版本证明 FTS-only V1 或 Hybrid V2 满足 Ready 前结构闭包。
 func ValidateSnapshotRegression(command SnapshotRegressionCommand, observation SnapshotRegressionObservation) (SnapshotRegressionProof, error) {
 	if !validSnapshotRegressionCommand(command) {
-		return SnapshotRegressionProof{}, snapshotRegressionFailure("regression command binding is invalid")
+		return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "regression command binding is invalid")
 	}
 	index := observation.Index
 	if err := ValidateIndexVersion(index); err != nil {
-		return SnapshotRegressionProof{}, snapshotRegressionFailure("index binding is invalid")
+		return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "index binding is invalid")
 	}
 	if index.ID != command.IndexVersionID || index.WorkspaceID != command.WorkspaceID || index.Status != IndexStatusBuilding ||
-		index.EmbeddingVersionID != nil || !equalCapabilities(index.DegradedCapabilities, []DegradedCapability{DegradedVector}) ||
 		index.ExpectedSourceCount == nil || index.ProcessingContract == nil {
-		return SnapshotRegressionProof{}, snapshotRegressionFailure("index is not a source-bound FTS-only building index")
+		return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "index is not a source-bound building index")
+	}
+	switch command.RegressionCode {
+	case SnapshotStructureRegressionV1:
+		if index.EmbeddingVersionID != nil || !equalCapabilities(index.DegradedCapabilities, []DegradedCapability{DegradedVector}) {
+			return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "v1 index is not FTS-only")
+		}
+	case SnapshotStructureRegressionV2:
+		if index.EmbeddingVersionID == nil {
+			return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "v2 index has no embedding version")
+		}
+		if _, err := DecodeRRFConfig(index.FusionConfig); err != nil {
+			return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "v2 fusion config is invalid")
+		}
 	}
 	target := observation.TargetManifestSource
 	if target.IndexVersionID != index.ID || target.WorkspaceID != command.WorkspaceID ||
 		target.SourceID != command.TargetSourceID || target.SourceVersionID != command.TargetSourceVersionID ||
 		target.ParseProjectionID != command.TargetParseProjectionID || target.SelectionStatus != SourceSelectionIncluded ||
 		target.ExclusionCode != "" || observation.TargetSourceResultHash != command.TargetResultHash {
-		return SnapshotRegressionProof{}, snapshotRegressionFailure("target source binding is absent or inconsistent")
+		return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "target source binding is absent or inconsistent")
 	}
 	if observation.SourceManifestHash != index.SourceManifestHash || observation.SourceManifestCount != *index.ExpectedSourceCount ||
 		observation.ChunkManifestHash != index.ManifestHash || observation.ChunkManifestCount != index.ExpectedChunkCount ||
 		observation.ExpectedUnionChunkCount != index.ExpectedChunkCount || observation.MissingChunkCount != 0 || observation.ExtraChunkCount != 0 {
-		return SnapshotRegressionProof{}, snapshotRegressionFailure("source or chunk manifest closure is inconsistent")
+		return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "source or chunk manifest closure is inconsistent")
 	}
 	if observation.InvalidIncludedSourceCount != 0 {
-		return SnapshotRegressionProof{}, snapshotRegressionFailure("included source processing evidence is inconsistent")
+		return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "included source processing evidence is inconsistent")
 	}
-	if err := ValidateBuildReady(index, observation.BuildStatus); err != nil {
-		return SnapshotRegressionProof{}, snapshotRegressionFailure("build status is not ready-complete")
+	readyCapabilities := DeriveReadyDegradedCapabilities(index, observation.BuildStatus)
+	observation.Index.DegradedCapabilities = readyCapabilities
+	observation.BuildStatus.DegradedCapabilities = readyCapabilities
+	if err := ValidateBuildReady(observation.Index, observation.BuildStatus); err != nil {
+		return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "build status is not ready-complete")
 	}
-	if observation.BuildStatus.VectorDisabledCount != index.ExpectedChunkCount ||
-		observation.BuildStatus.VectorPendingCount != 0 || observation.BuildStatus.VectorReadyCount != 0 ||
-		observation.BuildStatus.VectorSkippedOversizedCount != 0 || observation.BuildStatus.VectorFailedCount != 0 {
-		return SnapshotRegressionProof{}, snapshotRegressionFailure("FTS-only vector state is inconsistent")
+	if command.RegressionCode == SnapshotStructureRegressionV1 &&
+		(observation.BuildStatus.VectorDisabledCount != index.ExpectedChunkCount ||
+			observation.BuildStatus.VectorPendingCount != 0 || observation.BuildStatus.VectorReadyCount != 0 ||
+			observation.BuildStatus.VectorSkippedOversizedCount != 0 || observation.BuildStatus.VectorFailedCount != 0) {
+		return SnapshotRegressionProof{}, snapshotRegressionFailure(command.RegressionCode, "FTS-only vector state is inconsistent")
 	}
-	return SnapshotRegressionProof{Code: SnapshotStructureRegressionV1, Hash: snapshotRegressionHash(command, observation)}, nil
+	return SnapshotRegressionProof{Code: command.RegressionCode, Hash: snapshotRegressionHash(command, observation)}, nil
 }
 
 func validSnapshotRegressionCommand(command SnapshotRegressionCommand) bool {
-	return command.WorkspaceID != "" && command.DeliveryID != "" && command.TargetSourceID != "" &&
+	return IsSnapshotRegressionCode(command.RegressionCode) && command.WorkspaceID != "" && command.DeliveryID != "" && command.TargetSourceID != "" &&
 		command.TargetSourceVersionID != "" && command.TargetParseProjectionID != "" && command.IndexVersionID != "" &&
 		isCanonicalHash(command.TargetResultHash)
 }
 
-func snapshotRegressionFailure(message string) error {
+func snapshotRegressionFailure(code, message string) error {
+	errorCode := ErrorCodeSnapshotStructureRegressionFailed
+	if code == SnapshotStructureRegressionV2 {
+		errorCode = ErrorCodeSnapshotStructureV2RegressionFailed
+	}
 	return foundation.NewError(
 		foundation.ErrorConsistencyViolation,
-		ErrorCodeSnapshotStructureRegressionFailed,
+		errorCode,
 		false,
 		errors.New(message),
 	)
@@ -118,13 +144,33 @@ func snapshotRegressionFailure(message string) error {
 
 // SnapshotRegressionFailure 创建结构回归 Store 对外返回的稳定非重试一致性错误。
 func SnapshotRegressionFailure(message string) error {
-	return snapshotRegressionFailure(message)
+	return snapshotRegressionFailure(SnapshotStructureRegressionV1, message)
+}
+
+// SnapshotRegressionFailureFor 创建指定版本的稳定结构回归错误。
+func SnapshotRegressionFailureFor(code, message string) error {
+	return snapshotRegressionFailure(code, message)
+}
+
+// IsSnapshotRegressionCode 判断 Delivery/Regression 是否使用已冻结的结构版本。
+func IsSnapshotRegressionCode(code string) bool {
+	return code == SnapshotStructureRegressionV1 || code == SnapshotStructureRegressionV2
+}
+
+// SnapshotRegressionCodeMatchesIndex 证明 V1 只用于 FTS-only，V2 只用于 Hybrid。
+func SnapshotRegressionCodeMatchesIndex(code string, index IndexVersion) bool {
+	return code == SnapshotStructureRegressionV1 && index.EmbeddingVersionID == nil ||
+		code == SnapshotStructureRegressionV2 && index.EmbeddingVersionID != nil
 }
 
 func snapshotRegressionHash(command SnapshotRegressionCommand, observation SnapshotRegressionObservation) string {
 	digest := sha256.New()
-	writeHashField(digest, snapshotRegressionHashPrefix)
-	writeHashField(digest, SnapshotStructureRegressionV1)
+	prefix := snapshotRegressionHashPrefix
+	if command.RegressionCode == SnapshotStructureRegressionV2 {
+		prefix = snapshotRegressionV2HashPrefix
+	}
+	writeHashField(digest, prefix)
+	writeHashField(digest, command.RegressionCode)
 	writeHashField(digest, string(command.WorkspaceID))
 	writeHashField(digest, string(command.DeliveryID))
 	writeHashField(digest, string(command.TargetSourceID))
@@ -132,6 +178,9 @@ func snapshotRegressionHash(command SnapshotRegressionCommand, observation Snaps
 	writeHashField(digest, command.TargetResultHash)
 	writeHashField(digest, string(command.TargetParseProjectionID))
 	writeHashField(digest, string(command.IndexVersionID))
+	if command.RegressionCode == SnapshotStructureRegressionV2 {
+		writeHashField(digest, string(*observation.Index.EmbeddingVersionID))
+	}
 	writeHashField(digest, observation.SourceManifestHash)
 	writeRegressionInt64(digest, observation.SourceManifestCount)
 	writeHashField(digest, observation.ChunkManifestHash)

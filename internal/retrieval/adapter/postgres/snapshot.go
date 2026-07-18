@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -96,18 +97,26 @@ func (r *Repository) BeginWorkspaceSnapshot(ctx context.Context, command domain.
 	if err := domain.ValidateIndexVersion(index); err != nil {
 		return domain.WorkspaceSnapshotResult{}, err
 	}
+	degradedCapabilities := index.DegradedCapabilities
+	if degradedCapabilities == nil {
+		degradedCapabilities = []domain.DegradedCapability{}
+	}
+	degraded, err := json.Marshal(degradedCapabilities)
+	if err != nil {
+		return domain.WorkspaceSnapshotResult{}, consistency("REINDEX_INDEX_DEGRADATION_INVALID", err)
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO retrieval.index_version(
         id,workspace_id,embedding_version_id,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
         source_snapshot_ref,manifest_hash,expected_chunk_count,source_manifest_hash,expected_source_count,
 		source_parser_id,source_parser_version,source_parser_config_hash,source_chunk_strategy_version,source_schema_version,
         idempotency_key,status,degraded_capabilities,failure_code,version,created_at,updated_at
-    ) VALUES($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'building','["vector"]',NULL,1,$18,$18)`,
-		string(index.ID), string(index.WorkspaceID), index.TokenizerID, index.TokenizerVersion,
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'building',$19::jsonb,NULL,1,$20,$20)`,
+		string(index.ID), string(index.WorkspaceID), optionalID(index.EmbeddingVersionID), index.TokenizerID, index.TokenizerVersion,
 		index.TokenizerConfigHash, index.FusionConfig, index.SourceSnapshotRef, index.ManifestHash,
 		index.ExpectedChunkCount, index.SourceManifestHash, sourceCount, index.ProcessingContract.ParserID,
 		index.ProcessingContract.ParserVersion, index.ProcessingContract.ParserConfigHash,
 		index.ProcessingContract.ChunkStrategyVersion, index.ProcessingContract.SchemaVersion,
-		index.IdempotencyKey, index.CreatedAt.UTC()); err != nil {
+		index.IdempotencyKey, degraded, index.CreatedAt.UTC()); err != nil {
 		return domain.WorkspaceSnapshotResult{}, classify(err, "REINDEX_INDEX_CREATE_FAILED")
 	}
 	if err := copyStagedSources(ctx, tx, command); err != nil {
@@ -651,12 +660,31 @@ func replayWorkspaceSnapshot(ctx context.Context, tx pgx.Tx, command domain.Work
 }
 
 func sameSnapshotIndexConfig(existing, requested domain.IndexVersion) bool {
-	return existing.WorkspaceID == requested.WorkspaceID && existing.EmbeddingVersionID == nil &&
+	return existing.WorkspaceID == requested.WorkspaceID && sameSnapshotEmbeddingID(existing.EmbeddingVersionID, requested.EmbeddingVersionID) &&
 		existing.TokenizerID == requested.TokenizerID && existing.TokenizerVersion == requested.TokenizerVersion &&
 		existing.TokenizerConfigHash == requested.TokenizerConfigHash && domain.SameJSONValue(existing.FusionConfig, requested.FusionConfig) &&
 		existing.SourceSnapshotRef == requested.SourceSnapshotRef && existing.IdempotencyKey == requested.IdempotencyKey &&
 		domain.SameProcessingContract(existing.ProcessingContract, requested.ProcessingContract) &&
-		domain.HasDegradedCapability(existing.DegradedCapabilities, domain.DegradedVector)
+		sameSnapshotDegradations(existing.DegradedCapabilities, requested.DegradedCapabilities)
+}
+
+func sameSnapshotEmbeddingID(left, right *foundation.ID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func sameSnapshotDegradations(left, right []domain.DegradedCapability) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func optionalStringID(value foundation.ID) any {

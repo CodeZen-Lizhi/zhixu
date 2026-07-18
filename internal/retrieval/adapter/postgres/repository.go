@@ -247,6 +247,70 @@ func (r *Repository) SaveVectorBatch(ctx context.Context, batch domain.VectorPro
 	if err := domain.ValidateVectorProjectionBatch(index, embedding, batch); err != nil {
 		return domain.ProjectionBatchResult{}, err
 	}
+	cacheAwareBatch, err := vectorBuildBatchFromProjectionBatch(ctx, tx, batch)
+	if err != nil {
+		return domain.ProjectionBatchResult{}, err
+	}
+	if err := domain.ValidateVectorBuildBatch(index, embedding, cacheAwareBatch); err != nil {
+		return domain.ProjectionBatchResult{}, err
+	}
+	if err := validateVectorBuildTargets(ctx, tx, cacheAwareBatch); err != nil {
+		return domain.ProjectionBatchResult{}, err
+	}
+	if err := commitEmbeddingCache(ctx, tx, cacheAwareBatch); err != nil {
+		return domain.ProjectionBatchResult{}, err
+	}
+	result, err := saveVectorProjectionBatchTx(ctx, tx, batch)
+	if err != nil {
+		return domain.ProjectionBatchResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ProjectionBatchResult{}, classify(err, "RETRIEVAL_VECTOR_COMMIT_FAILED")
+	}
+	return result, nil
+}
+
+func vectorBuildBatchFromProjectionBatch(ctx context.Context, tx pgx.Tx, batch domain.VectorProjectionBatch) (domain.VectorBuildBatch, error) {
+	chunkIDs := make([]string, len(batch.Projections))
+	for index, write := range batch.Projections {
+		chunkIDs[index] = string(write.ChunkID)
+	}
+	rows, err := tx.Query(ctx, `SELECT chunk_id::text,content_hash FROM retrieval.index_manifest_chunk
+		WHERE index_version_id=$1 AND workspace_id=$2 AND chunk_id=ANY($3::uuid[]) ORDER BY chunk_id`,
+		string(batch.IndexVersionID), string(batch.WorkspaceID), chunkIDs)
+	if err != nil {
+		return domain.VectorBuildBatch{}, classify(err, "RETRIEVAL_VECTOR_MANIFEST_QUERY_FAILED")
+	}
+	defer rows.Close()
+	hashes := make(map[foundation.ID]string, len(batch.Projections))
+	for rows.Next() {
+		var chunkID foundation.ID
+		var contentHash string
+		if err := rows.Scan(&chunkID, &contentHash); err != nil {
+			return domain.VectorBuildBatch{}, classify(err, "RETRIEVAL_VECTOR_MANIFEST_SCAN_FAILED")
+		}
+		hashes[chunkID] = contentHash
+	}
+	if err := rows.Err(); err != nil {
+		return domain.VectorBuildBatch{}, classify(err, "RETRIEVAL_VECTOR_MANIFEST_SCAN_FAILED")
+	}
+	if len(hashes) != len(batch.Projections) {
+		return domain.VectorBuildBatch{}, notFound("RETRIEVAL_VECTOR_TARGET_NOT_FOUND", errors.New("vector batch does not exactly cover manifest chunks"))
+	}
+	writes := make([]domain.VectorBuildWrite, len(batch.Projections))
+	for index, projection := range batch.Projections {
+		writes[index] = domain.VectorBuildWrite{
+			ChunkID: projection.ChunkID, ContentHash: hashes[projection.ChunkID], Embedding: append([]float32(nil), projection.Embedding...),
+			TokenCount: projection.TokenCount, VectorStatus: projection.VectorStatus, FailureCode: projection.FailureCode,
+		}
+	}
+	return domain.VectorBuildBatch{
+		WorkspaceID: batch.WorkspaceID, IndexVersionID: batch.IndexVersionID, EmbeddingVersionID: batch.EmbeddingVersionID,
+		ExpectedIndexVersion: batch.ExpectedIndexVersion, Writes: writes, At: batch.At,
+	}, nil
+}
+
+func saveVectorProjectionBatchTx(ctx context.Context, tx pgx.Tx, batch domain.VectorProjectionBatch) (domain.ProjectionBatchResult, error) {
 	chunkIDs := make([]string, len(batch.Projections))
 	for i, write := range batch.Projections {
 		chunkIDs[i] = string(write.ChunkID)
@@ -289,7 +353,10 @@ func (r *Repository) SaveVectorBatch(ctx context.Context, batch domain.VectorPro
 		return domain.ProjectionBatchResult{}, notFound("RETRIEVAL_PROJECTION_NOT_FOUND", errors.New("vector batch does not exactly match persisted projections"))
 	}
 	var inserted, replayed int64
-	updates := &pgx.Batch{}
+	updateChunkIDs := make([]string, 0, len(batch.Projections))
+	updateEmbeddings := make([]string, 0, len(batch.Projections))
+	updateStatuses := make([]string, 0, len(batch.Projections))
+	updateFailures := make([]string, 0, len(batch.Projections))
 	for _, write := range batch.Projections {
 		current := existing[write.ChunkID]
 		if current.token != write.TokenCount {
@@ -302,35 +369,42 @@ func (r *Repository) SaveVectorBatch(ctx context.Context, batch domain.VectorPro
 		if current.status != "pending" {
 			return domain.ProjectionBatchResult{}, conflict("RETRIEVAL_VECTOR_REPLAY_CONFLICT", errors.New("vector projection already has a different terminal result"))
 		}
-		var vector any
+		embedding := ""
 		if write.VectorStatus == domain.VectorStatusReady {
-			vector = pgvector.NewVector(write.Embedding)
+			embedding = pgvector.NewVector(write.Embedding).String()
 		}
-		updates.Queue(`UPDATE retrieval.chunk_projection SET embedding=$1,vector_status=$2,failure_code=$3,updated_at=$4
-			WHERE index_version_id=$5 AND chunk_id=$6 AND workspace_id=$7 AND lexical_status='ready' AND vector_status='pending'`, vector, string(write.VectorStatus), nullableString(write.FailureCode), batch.At.UTC(), string(batch.IndexVersionID), string(write.ChunkID), string(batch.WorkspaceID))
+		updateChunkIDs = append(updateChunkIDs, string(write.ChunkID))
+		updateEmbeddings = append(updateEmbeddings, embedding)
+		updateStatuses = append(updateStatuses, string(write.VectorStatus))
+		updateFailures = append(updateFailures, write.FailureCode)
 		inserted++
 	}
 	if inserted > 0 {
-		results := tx.SendBatch(ctx, updates)
-		for i := int64(0); i < inserted; i++ {
-			tag, err := results.Exec()
-			if err != nil {
-				_ = results.Close()
-				return domain.ProjectionBatchResult{}, classify(err, "RETRIEVAL_VECTOR_UPDATE_FAILED")
-			}
-			if tag.RowsAffected() != 1 {
-				_ = results.Close()
-				return domain.ProjectionBatchResult{}, conflict("RETRIEVAL_VECTOR_VERSION_CONFLICT", errors.New("projection changed during vector write"))
-			}
-		}
-		if err := results.Close(); err != nil {
+		var updated int64
+		if err := tx.QueryRow(ctx, `WITH input AS (
+				SELECT * FROM unnest($1::uuid[],$2::text[],$3::text[],$4::text[])
+					AS value(chunk_id,embedding_text,vector_status,failure_code)
+			), updated AS (
+				UPDATE retrieval.chunk_projection projection
+				SET embedding=CASE WHEN input.vector_status='ready' THEN input.embedding_text::vector ELSE NULL END,
+					vector_status=input.vector_status,
+					failure_code=NULLIF(input.failure_code,''),
+					updated_at=$5
+				FROM input
+				WHERE projection.index_version_id=$6 AND projection.workspace_id=$7
+				  AND projection.chunk_id=input.chunk_id AND projection.lexical_status='ready'
+				  AND projection.vector_status='pending'
+				RETURNING projection.chunk_id
+			)
+			SELECT count(*) FROM updated`, updateChunkIDs, updateEmbeddings, updateStatuses, updateFailures,
+			batch.At.UTC(), string(batch.IndexVersionID), string(batch.WorkspaceID)).Scan(&updated); err != nil {
 			return domain.ProjectionBatchResult{}, classify(err, "RETRIEVAL_VECTOR_UPDATE_FAILED")
 		}
+		if updated != inserted {
+			return domain.ProjectionBatchResult{}, conflict("RETRIEVAL_VECTOR_VERSION_CONFLICT", errors.New("projection changed during vector write"))
+		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.ProjectionBatchResult{}, classify(err, "RETRIEVAL_VECTOR_COMMIT_FAILED")
-	}
-	return domain.ProjectionBatchResult{IndexVersionID: index.ID, AttemptedCount: int64(len(batch.Projections)), InsertedCount: inserted, ReplayedCount: replayed}, nil
+	return domain.ProjectionBatchResult{IndexVersionID: batch.IndexVersionID, AttemptedCount: int64(len(batch.Projections)), InsertedCount: inserted, ReplayedCount: replayed}, nil
 }
 
 // TransitionIndex 以乐观锁执行不包含进入 Active 的通用状态迁移。

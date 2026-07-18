@@ -20,7 +20,8 @@
   "subtasks": [],
   "children": [
     "07-17-retrieval-index-foundation",
-    "07-18-reindex-consumer"
+    "07-18-reindex-consumer",
+    "07-19-embedding-hybrid-search"
   ],
   "parent": "07-16-product-delivery",
   "relatedFiles": [],

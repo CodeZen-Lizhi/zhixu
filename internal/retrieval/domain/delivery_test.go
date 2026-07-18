@@ -125,6 +125,11 @@ func TestValidateAndMatchDeliveryCheckpointUsesFullReplayBinding(t *testing.T) {
 			t.Errorf("case %d error=%v", index, err)
 		}
 	}
+	v2 := checkpoints[len(checkpoints)-1]
+	v2.RegressionCode = RegressionCodeSnapshotStructureV2
+	if err := ValidateDeliveryCheckpoint(v2); err != nil {
+		t.Fatalf("V2 checkpoint error=%v", err)
+	}
 
 	delivery := validPendingDelivery()
 	delivery.Status, delivery.DispatchNo, delivery.AttemptNo = DeliveryStatusProcessing, 1, 1
@@ -141,6 +146,10 @@ func TestValidateAndMatchDeliveryCheckpointUsesFullReplayBinding(t *testing.T) {
 	wrong.RegressionHash = strings.Repeat("b", 64)
 	if DeliveryCheckpointMatches(delivery, attempt, wrong) {
 		t.Fatal("mismatched regression hash was accepted")
+	}
+	delivery.Regression.Code = RegressionCodeSnapshotStructureV2
+	if err := ValidateDelivery(delivery); err != nil {
+		t.Fatalf("V2 delivery checkpoint error=%v", err)
 	}
 }
 

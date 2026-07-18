@@ -79,6 +79,50 @@ func TestRepositorySnapshotRegressionFailsClosedForStructuralMismatch(t *testing
 	}
 }
 
+func TestRepositorySnapshotRegressionV2PassesCompleteAndDegradedHybrid(t *testing.T) {
+	repository, database, ctx := newRetrievalTestRepository(t)
+	for _, test := range []struct {
+		name     string
+		ordinal  int
+		degraded bool
+	}{
+		{name: "complete", ordinal: 660},
+		{name: "degraded", ordinal: 670, degraded: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := seedSnapshotRegressionFixture(t, ctx, repository, database.DB(), test.ordinal)
+			upgradeSnapshotRegressionFixtureToHybrid(t, ctx, database.DB(), &fixture, test.ordinal, test.degraded)
+			first, err := repository.RunSnapshotRegression(ctx, fixture.Command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replay, err := repository.RunSnapshotRegression(ctx, fixture.Command)
+			if err != nil || first.Code != domain.SnapshotStructureRegressionV2 || replay.Hash != first.Hash {
+				t.Fatalf("first=%#v replay=%#v err=%v", first, replay, err)
+			}
+			assertRegressionIndexState(t, ctx, database.DB(), fixture.Command.IndexVersionID, domain.IndexStatusBuilding, "", 1)
+		})
+	}
+}
+
+func TestRepositorySnapshotRegressionV2FailureUsesVersionedFailureCode(t *testing.T) {
+	repository, database, ctx := newRetrievalTestRepository(t)
+	fixture := seedSnapshotRegressionFixture(t, ctx, repository, database.DB(), 680)
+	upgradeSnapshotRegressionFixtureToHybrid(t, ctx, database.DB(), &fixture, 680, false)
+	withReplicaRole(t, ctx, database.DB(), func(connection *pgxpool.Conn) {
+		if _, err := connection.Exec(ctx, `UPDATE retrieval.index_version SET fusion_config='{}'::jsonb WHERE id=$1`, string(fixture.Command.IndexVersionID)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	_, err := repository.RunSnapshotRegression(ctx, fixture.Command)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != domain.ErrorCodeSnapshotStructureV2RegressionFailed {
+		t.Fatalf("error=%#v", err)
+	}
+	assertRegressionIndexState(t, ctx, database.DB(), fixture.Command.IndexVersionID, domain.IndexStatusFailed,
+		domain.ErrorCodeSnapshotStructureV2RegressionFailed, 2)
+}
+
 type snapshotRegressionFixture struct {
 	Command domain.SnapshotRegressionCommand
 	Target  snapshotSourceFixture
@@ -121,13 +165,62 @@ func seedSnapshotRegressionFixture(
 	})
 	return snapshotRegressionFixture{
 		Command: domain.SnapshotRegressionCommand{
-			WorkspaceID: workspaceID, DeliveryID: deliveryID, TargetSourceID: target.SourceID,
+			RegressionCode: domain.SnapshotStructureRegressionV1,
+			WorkspaceID:    workspaceID, DeliveryID: deliveryID, TargetSourceID: target.SourceID,
 			TargetSourceVersionID: target.VersionID, TargetResultHash: target.ContentHash,
 			TargetParseProjectionID: target.ProjectionID, IndexVersionID: created.IndexVersion.ID,
 		},
 		Target: target,
 		Now:    now,
 	}
+}
+
+func upgradeSnapshotRegressionFixtureToHybrid(
+	t *testing.T,
+	ctx context.Context,
+	database *pgxpool.Pool,
+	fixture *snapshotRegressionFixture,
+	ordinal int,
+	degraded bool,
+) {
+	t.Helper()
+	embeddingID := snapshotID(ordinal + 35_000)
+	if _, err := database.Exec(ctx, `INSERT INTO retrieval.embedding_version(
+		id,provider,adapter_name,adapter_version,model,dimensions,normalization,distance_metric,config_hash,created_at
+	) VALUES($1,'test','direct','v1',$2,3,'l2','cosine',$3,$4)`, string(embeddingID), fmt.Sprintf("embed-%d", ordinal),
+		snapshotHash("embedding-config", ordinal), fixture.Now); err != nil {
+		t.Fatal(err)
+	}
+	fusion, err := domain.CanonicalRRFConfig(domain.RRFConfig{
+		SchemaVersion: 1, Method: domain.FusionMethodRRF, K: 60,
+		LexicalCandidateLimit: 200, VectorCandidateLimit: 200,
+		FusedCandidateLimit: 100, RerankCandidateLimit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withReplicaRole(t, ctx, database, func(connection *pgxpool.Conn) {
+		if _, err := connection.Exec(ctx, `UPDATE retrieval.index_version
+			SET embedding_version_id=$2,fusion_config=$3::jsonb,degraded_capabilities='[]'::jsonb
+			WHERE id=$1`, string(fixture.Command.IndexVersionID), string(embeddingID), fusion); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connection.Exec(ctx, `UPDATE retrieval.chunk_projection
+			SET embedding_version_id=$2,embedding='[1,0,0]'::vector,vector_status='ready',failure_code=NULL
+			WHERE index_version_id=$1`, string(fixture.Command.IndexVersionID), string(embeddingID)); err != nil {
+			t.Fatal(err)
+		}
+		if degraded {
+			if _, err := connection.Exec(ctx, `UPDATE retrieval.chunk_projection
+				SET embedding=NULL,vector_status='skipped_oversized',failure_code='EMBEDDING_INPUT_OVERSIZED'
+				WHERE index_version_id=$1 AND chunk_id=(
+					SELECT chunk_id FROM retrieval.chunk_projection WHERE index_version_id=$1 ORDER BY chunk_id LIMIT 1
+				)`, string(fixture.Command.IndexVersionID)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	fixture.Command.RegressionCode = domain.SnapshotStructureRegressionV2
 }
 
 func addSnapshotRegressionExtraChunk(t *testing.T, ctx context.Context, database *pgxpool.Pool, fixture *snapshotRegressionFixture, ordinal int) {

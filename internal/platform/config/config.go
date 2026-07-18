@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/operability"
 
 	"gopkg.in/yaml.v3"
@@ -34,6 +35,24 @@ const (
 	defaultWorkerSoftStopTimeout      = 30 * time.Second
 	defaultWorkerHardStopTimeout      = 60 * time.Second
 	defaultWorkerHealthAddr           = "0.0.0.0:8081"
+)
+
+const (
+	defaultEmbeddingMaxBatchSize       = int32(128)
+	defaultEmbeddingMaxInputBytes      = int32(64 * 1024)
+	defaultEmbeddingMaxBatchInputBytes = int64(8 * 1024 * 1024)
+	defaultEmbeddingTimeout            = 30 * time.Second
+	defaultEmbeddingMaxResponseBytes   = int64(64 << 20)
+
+	defaultRetrievalRRFK                     = int32(60)
+	defaultRetrievalRRFLexicalCandidateLimit = int32(200)
+	defaultRetrievalRRFVectorCandidateLimit  = int32(200)
+	defaultRetrievalRRFFusedCandidateLimit   = int32(100)
+	defaultRetrievalRRFRerankCandidateLimit  = int32(50)
+
+	maxEmbeddingDimensions       = int32(16_000)
+	maxEmbeddingTimeout          = 5 * time.Minute
+	maxEmbeddingMaxResponseBytes = int64(128 << 20)
 )
 
 const (
@@ -62,6 +81,19 @@ const (
 	TelemetryModeOptional TelemetryMode = "optional"
 	// TelemetryModeRequired makes exporter availability a readiness requirement.
 	TelemetryModeRequired TelemetryMode = "required"
+)
+
+// EmbeddingProvider controls whether and how production embeddings are
+// generated.
+type EmbeddingProvider string
+
+const (
+	// EmbeddingProviderDisabled keeps new indexes FTS-only.
+	EmbeddingProviderDisabled EmbeddingProvider = "disabled"
+	// EmbeddingProviderOpenAICompatible uses the OpenAI-compatible HTTP protocol.
+	EmbeddingProviderOpenAICompatible EmbeddingProvider = "openai-compatible"
+	// EmbeddingProviderOllama uses Ollama's native HTTP protocol.
+	EmbeddingProviderOllama EmbeddingProvider = "ollama"
 )
 
 // Config contains process settings, including connection secrets. Callers must
@@ -96,6 +128,25 @@ type Config struct {
 	ReindexLeaseDuration        time.Duration `yaml:"reindex_lease_duration"`
 	ReindexHeartbeatInterval    time.Duration `yaml:"reindex_heartbeat_interval"`
 
+	EmbeddingProvider           EmbeddingProvider             `yaml:"embedding_provider"`
+	EmbeddingBaseURL            string                        `yaml:"embedding_base_url"`
+	EmbeddingAPIKey             string                        `yaml:"embedding_api_key"`
+	EmbeddingModel              string                        `yaml:"embedding_model"`
+	EmbeddingDimensions         int32                         `yaml:"embedding_dimensions"`
+	EmbeddingNormalization      domain.EmbeddingNormalization `yaml:"embedding_normalization"`
+	EmbeddingDistanceMetric     domain.DistanceMetric         `yaml:"embedding_distance_metric"`
+	EmbeddingMaxBatchSize       int32                         `yaml:"embedding_max_batch_size"`
+	EmbeddingMaxInputBytes      int32                         `yaml:"embedding_max_input_bytes"`
+	EmbeddingMaxBatchInputBytes int64                         `yaml:"embedding_max_batch_input_bytes"`
+	EmbeddingTimeout            time.Duration                 `yaml:"embedding_timeout"`
+	EmbeddingMaxResponseBytes   int64                         `yaml:"embedding_max_response_bytes"`
+
+	RetrievalRRFK                     int32 `yaml:"retrieval_rrf_k"`
+	RetrievalRRFLexicalCandidateLimit int32 `yaml:"retrieval_rrf_lexical_candidate_limit"`
+	RetrievalRRFVectorCandidateLimit  int32 `yaml:"retrieval_rrf_vector_candidate_limit"`
+	RetrievalRRFFusedCandidateLimit   int32 `yaml:"retrieval_rrf_fused_candidate_limit"`
+	RetrievalRRFRerankCandidateLimit  int32 `yaml:"retrieval_rrf_rerank_candidate_limit"`
+
 	WorkerSoftStopTimeout time.Duration `yaml:"worker_soft_stop_timeout"`
 	WorkerHardStopTimeout time.Duration `yaml:"worker_hard_stop_timeout"`
 	WorkerHealthAddr      string        `yaml:"worker_health_addr"`
@@ -128,6 +179,21 @@ func Defaults() Config {
 		ReindexDispatchErrorBackoff: defaultReindexDispatchErrorBackoff,
 		ReindexLeaseDuration:        defaultReindexLeaseDuration,
 		ReindexHeartbeatInterval:    defaultReindexHeartbeatInterval,
+
+		EmbeddingProvider:           EmbeddingProviderDisabled,
+		EmbeddingNormalization:      domain.NormalizationL2,
+		EmbeddingDistanceMetric:     domain.DistanceCosine,
+		EmbeddingMaxBatchSize:       defaultEmbeddingMaxBatchSize,
+		EmbeddingMaxInputBytes:      defaultEmbeddingMaxInputBytes,
+		EmbeddingMaxBatchInputBytes: defaultEmbeddingMaxBatchInputBytes,
+		EmbeddingTimeout:            defaultEmbeddingTimeout,
+		EmbeddingMaxResponseBytes:   defaultEmbeddingMaxResponseBytes,
+
+		RetrievalRRFK:                     defaultRetrievalRRFK,
+		RetrievalRRFLexicalCandidateLimit: defaultRetrievalRRFLexicalCandidateLimit,
+		RetrievalRRFVectorCandidateLimit:  defaultRetrievalRRFVectorCandidateLimit,
+		RetrievalRRFFusedCandidateLimit:   defaultRetrievalRRFFusedCandidateLimit,
+		RetrievalRRFRerankCandidateLimit:  defaultRetrievalRRFRerankCandidateLimit,
 
 		WorkerSoftStopTimeout: defaultWorkerSoftStopTimeout,
 		WorkerHardStopTimeout: defaultWorkerHardStopTimeout,
@@ -200,6 +266,25 @@ type fileConfig struct {
 	ReindexLeaseDuration        *string `yaml:"reindex_lease_duration"`
 	ReindexHeartbeatInterval    *string `yaml:"reindex_heartbeat_interval"`
 
+	EmbeddingProvider           *EmbeddingProvider             `yaml:"embedding_provider"`
+	EmbeddingBaseURL            *string                        `yaml:"embedding_base_url"`
+	EmbeddingAPIKey             *string                        `yaml:"embedding_api_key"`
+	EmbeddingModel              *string                        `yaml:"embedding_model"`
+	EmbeddingDimensions         *int32                         `yaml:"embedding_dimensions"`
+	EmbeddingNormalization      *domain.EmbeddingNormalization `yaml:"embedding_normalization"`
+	EmbeddingDistanceMetric     *domain.DistanceMetric         `yaml:"embedding_distance_metric"`
+	EmbeddingMaxBatchSize       *int32                         `yaml:"embedding_max_batch_size"`
+	EmbeddingMaxInputBytes      *int32                         `yaml:"embedding_max_input_bytes"`
+	EmbeddingMaxBatchInputBytes *int64                         `yaml:"embedding_max_batch_input_bytes"`
+	EmbeddingTimeout            *string                        `yaml:"embedding_timeout"`
+	EmbeddingMaxResponseBytes   *int64                         `yaml:"embedding_max_response_bytes"`
+
+	RetrievalRRFK                     *int32 `yaml:"retrieval_rrf_k"`
+	RetrievalRRFLexicalCandidateLimit *int32 `yaml:"retrieval_rrf_lexical_candidate_limit"`
+	RetrievalRRFVectorCandidateLimit  *int32 `yaml:"retrieval_rrf_vector_candidate_limit"`
+	RetrievalRRFFusedCandidateLimit   *int32 `yaml:"retrieval_rrf_fused_candidate_limit"`
+	RetrievalRRFRerankCandidateLimit  *int32 `yaml:"retrieval_rrf_rerank_candidate_limit"`
+
 	WorkerSoftStopTimeout *string        `yaml:"worker_soft_stop_timeout"`
 	WorkerHardStopTimeout *string        `yaml:"worker_hard_stop_timeout"`
 	WorkerHealthAddr      *string        `yaml:"worker_health_addr"`
@@ -266,6 +351,54 @@ func applyYAMLFile(path string, cfg *Config) error {
 	if raw.ReindexDispatchBatchSize != nil {
 		cfg.ReindexDispatchBatchSize = *raw.ReindexDispatchBatchSize
 	}
+	if raw.EmbeddingProvider != nil {
+		cfg.EmbeddingProvider = *raw.EmbeddingProvider
+	}
+	if raw.EmbeddingBaseURL != nil {
+		cfg.EmbeddingBaseURL = *raw.EmbeddingBaseURL
+	}
+	if raw.EmbeddingAPIKey != nil {
+		cfg.EmbeddingAPIKey = *raw.EmbeddingAPIKey
+	}
+	if raw.EmbeddingModel != nil {
+		cfg.EmbeddingModel = *raw.EmbeddingModel
+	}
+	if raw.EmbeddingDimensions != nil {
+		cfg.EmbeddingDimensions = *raw.EmbeddingDimensions
+	}
+	if raw.EmbeddingNormalization != nil {
+		cfg.EmbeddingNormalization = *raw.EmbeddingNormalization
+	}
+	if raw.EmbeddingDistanceMetric != nil {
+		cfg.EmbeddingDistanceMetric = *raw.EmbeddingDistanceMetric
+	}
+	if raw.EmbeddingMaxBatchSize != nil {
+		cfg.EmbeddingMaxBatchSize = *raw.EmbeddingMaxBatchSize
+	}
+	if raw.EmbeddingMaxInputBytes != nil {
+		cfg.EmbeddingMaxInputBytes = *raw.EmbeddingMaxInputBytes
+	}
+	if raw.EmbeddingMaxBatchInputBytes != nil {
+		cfg.EmbeddingMaxBatchInputBytes = *raw.EmbeddingMaxBatchInputBytes
+	}
+	if raw.EmbeddingMaxResponseBytes != nil {
+		cfg.EmbeddingMaxResponseBytes = *raw.EmbeddingMaxResponseBytes
+	}
+	if raw.RetrievalRRFK != nil {
+		cfg.RetrievalRRFK = *raw.RetrievalRRFK
+	}
+	if raw.RetrievalRRFLexicalCandidateLimit != nil {
+		cfg.RetrievalRRFLexicalCandidateLimit = *raw.RetrievalRRFLexicalCandidateLimit
+	}
+	if raw.RetrievalRRFVectorCandidateLimit != nil {
+		cfg.RetrievalRRFVectorCandidateLimit = *raw.RetrievalRRFVectorCandidateLimit
+	}
+	if raw.RetrievalRRFFusedCandidateLimit != nil {
+		cfg.RetrievalRRFFusedCandidateLimit = *raw.RetrievalRRFFusedCandidateLimit
+	}
+	if raw.RetrievalRRFRerankCandidateLimit != nil {
+		cfg.RetrievalRRFRerankCandidateLimit = *raw.RetrievalRRFRerankCandidateLimit
+	}
 	if raw.WorkerHealthAddr != nil {
 		cfg.WorkerHealthAddr = *raw.WorkerHealthAddr
 	}
@@ -287,6 +420,7 @@ func applyYAMLFile(path string, cfg *Config) error {
 		"reindex_dispatch_error_backoff": raw.ReindexDispatchErrorBackoff,
 		"reindex_lease_duration":         raw.ReindexLeaseDuration,
 		"reindex_heartbeat_interval":     raw.ReindexHeartbeatInterval,
+		"embedding_timeout":              raw.EmbeddingTimeout,
 		"worker_soft_stop_timeout":       raw.WorkerSoftStopTimeout,
 		"worker_hard_stop_timeout":       raw.WorkerHardStopTimeout,
 	} {
@@ -320,6 +454,8 @@ func applyYAMLFile(path string, cfg *Config) error {
 			cfg.ReindexLeaseDuration = parsed
 		case "reindex_heartbeat_interval":
 			cfg.ReindexHeartbeatInterval = parsed
+		case "embedding_timeout":
+			cfg.EmbeddingTimeout = parsed
 		case "worker_soft_stop_timeout":
 			cfg.WorkerSoftStopTimeout = parsed
 		case "worker_hard_stop_timeout":
@@ -399,6 +535,12 @@ func (c Config) Validate() error {
 	if err := c.validateTelemetry(); err != nil {
 		return err
 	}
+	if err := c.validateEmbedding(); err != nil {
+		return err
+	}
+	if err := domain.ValidateRRFConfig(c.RetrievalRRFConfig()); err != nil {
+		return errors.New("retrieval RRF configuration is invalid")
+	}
 	return nil
 }
 
@@ -435,6 +577,101 @@ func (c Config) validateTelemetry() error {
 		return nil
 	default:
 		return errors.New("telemetry_mode must be disabled, optional, or required")
+	}
+}
+
+func (c Config) validateEmbedding() error {
+	if c.EmbeddingMaxBatchSize <= 0 || c.EmbeddingMaxBatchSize > domain.MaxEmbeddingBatchSize {
+		return errors.New("embedding_max_batch_size must be between 1 and 1000")
+	}
+	if c.EmbeddingMaxInputBytes <= 0 || c.EmbeddingMaxInputBytes > domain.MaxEmbeddingInputBytes {
+		return errors.New("embedding_max_input_bytes must be between 1 and 10485760")
+	}
+	if c.EmbeddingMaxBatchInputBytes < int64(c.EmbeddingMaxInputBytes) || c.EmbeddingMaxBatchInputBytes > domain.MaxEmbeddingBatchInputBytes {
+		return errors.New("embedding_max_batch_input_bytes must be at least embedding_max_input_bytes and at most 67108864")
+	}
+	if c.EmbeddingTimeout <= 0 || c.EmbeddingTimeout > maxEmbeddingTimeout {
+		return errors.New("embedding_timeout must be positive and at most 5m")
+	}
+	if c.EmbeddingMaxResponseBytes <= 0 || c.EmbeddingMaxResponseBytes > maxEmbeddingMaxResponseBytes {
+		return errors.New("embedding_max_response_bytes must be between 1 and 134217728")
+	}
+	if c.EmbeddingNormalization != domain.NormalizationNone && c.EmbeddingNormalization != domain.NormalizationL2 {
+		return errors.New("embedding_normalization must be none or l2")
+	}
+	switch c.EmbeddingDistanceMetric {
+	case domain.DistanceCosine, domain.DistanceInnerProduct, domain.DistanceEuclidean:
+	default:
+		return errors.New("embedding_distance_metric must be cosine, inner_product, or euclidean")
+	}
+
+	switch c.EmbeddingProvider {
+	case EmbeddingProviderDisabled:
+		if c.EmbeddingBaseURL != "" || c.EmbeddingAPIKey != "" || c.EmbeddingModel != "" || c.EmbeddingDimensions != 0 {
+			return errors.New("embedding provider settings must be empty when embedding_provider is disabled")
+		}
+		return nil
+	case EmbeddingProviderOpenAICompatible, EmbeddingProviderOllama:
+		if c.EmbeddingModel == "" || c.EmbeddingModel != strings.TrimSpace(c.EmbeddingModel) {
+			return errors.New("embedding_model must be non-empty and canonical when embedding is enabled")
+		}
+		if c.EmbeddingDimensions <= 0 || c.EmbeddingDimensions > maxEmbeddingDimensions {
+			return errors.New("embedding_dimensions must be between 1 and 16000 when embedding is enabled")
+		}
+		if err := validateEmbeddingBaseURL(c.EmbeddingBaseURL, c.EmbeddingProvider == EmbeddingProviderOllama); err != nil {
+			return err
+		}
+		if c.EmbeddingProvider == EmbeddingProviderOpenAICompatible {
+			if strings.TrimSpace(c.EmbeddingAPIKey) == "" || c.EmbeddingAPIKey != strings.TrimSpace(c.EmbeddingAPIKey) {
+				return errors.New("embedding_api_key must be non-empty and canonical for openai-compatible")
+			}
+			return nil
+		}
+		if c.EmbeddingAPIKey != "" {
+			return errors.New("embedding_api_key must be empty for ollama")
+		}
+		return nil
+	default:
+		return errors.New("embedding_provider must be disabled, openai-compatible, or ollama")
+	}
+}
+
+func validateEmbeddingBaseURL(raw string, allowLoopbackHTTP bool) error {
+	if raw == "" || raw != strings.TrimSpace(raw) || len(raw) > 2048 {
+		return errors.New("embedding_base_url is invalid")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
+		return errors.New("embedding_base_url is invalid")
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	if parsed.Scheme != "http" || !allowLoopbackHTTP || !isLoopbackHost(parsed.Hostname()) {
+		return errors.New("embedding_base_url must use https, except loopback ollama may use http")
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
+}
+
+// RetrievalRRFConfig returns the strict versioned fusion configuration.
+func (c Config) RetrievalRRFConfig() domain.RRFConfig {
+	return domain.RRFConfig{
+		SchemaVersion:         domain.RRFFusionSchemaVersionV1,
+		Method:                domain.FusionMethodRRF,
+		K:                     c.RetrievalRRFK,
+		LexicalCandidateLimit: c.RetrievalRRFLexicalCandidateLimit,
+		VectorCandidateLimit:  c.RetrievalRRFVectorCandidateLimit,
+		FusedCandidateLimit:   c.RetrievalRRFFusedCandidateLimit,
+		RerankCandidateLimit:  c.RetrievalRRFRerankCandidateLimit,
 	}
 }
 
@@ -486,7 +723,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -509,6 +746,22 @@ func (c Config) String() string {
 		c.ReindexDispatchErrorBackoff,
 		c.ReindexLeaseDuration,
 		c.ReindexHeartbeatInterval,
+		c.EmbeddingProvider,
+		c.EmbeddingProvider != EmbeddingProviderDisabled,
+		c.EmbeddingModel,
+		c.EmbeddingDimensions,
+		c.EmbeddingNormalization,
+		c.EmbeddingDistanceMetric,
+		c.EmbeddingMaxBatchSize,
+		c.EmbeddingMaxInputBytes,
+		c.EmbeddingMaxBatchInputBytes,
+		c.EmbeddingTimeout,
+		c.EmbeddingMaxResponseBytes,
+		c.RetrievalRRFK,
+		c.RetrievalRRFLexicalCandidateLimit,
+		c.RetrievalRRFVectorCandidateLimit,
+		c.RetrievalRRFFusedCandidateLimit,
+		c.RetrievalRRFRerankCandidateLimit,
 		c.WorkerSoftStopTimeout,
 		c.WorkerHardStopTimeout,
 		c.WorkerHealthAddr,
@@ -523,6 +776,15 @@ func (c Config) GoString() string {
 }
 
 func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
+	if value, ok := lookup("ZHIXU_EMBEDDING_PROVIDER"); ok {
+		cfg.EmbeddingProvider = EmbeddingProvider(value)
+		if cfg.EmbeddingProvider == EmbeddingProviderDisabled {
+			cfg.EmbeddingBaseURL = ""
+			cfg.EmbeddingAPIKey = ""
+			cfg.EmbeddingModel = ""
+			cfg.EmbeddingDimensions = 0
+		}
+	}
 	values := map[string]*string{
 		"ZHIXU_APP_NAME":           &cfg.AppName,
 		"ZHIXU_VERSION":            &cfg.Version,
@@ -542,6 +804,23 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		if value, ok := lookup(key); ok {
 			*target = value
 		}
+	}
+	if cfg.EmbeddingProvider != EmbeddingProviderDisabled {
+		for key, target := range map[string]*string{
+			"ZHIXU_EMBEDDING_BASE_URL": &cfg.EmbeddingBaseURL,
+			"ZHIXU_EMBEDDING_API_KEY":  &cfg.EmbeddingAPIKey,
+			"ZHIXU_EMBEDDING_MODEL":    &cfg.EmbeddingModel,
+		} {
+			if value, ok := lookup(key); ok {
+				*target = value
+			}
+		}
+	}
+	if value, ok := lookup("ZHIXU_EMBEDDING_NORMALIZATION"); ok {
+		cfg.EmbeddingNormalization = domain.EmbeddingNormalization(value)
+	}
+	if value, ok := lookup("ZHIXU_EMBEDDING_DISTANCE_METRIC"); ok {
+		cfg.EmbeddingDistanceMetric = domain.DistanceMetric(value)
 	}
 
 	if value, ok := lookup("ZHIXU_DATABASE_MAX_CONNS"); ok {
@@ -572,6 +851,46 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		}
 		cfg.ReindexDispatchBatchSize = parsed
 	}
+	if cfg.EmbeddingProvider != EmbeddingProviderDisabled {
+		if value, ok := lookup("ZHIXU_EMBEDDING_DIMENSIONS"); ok {
+			parsed, err := strconv.ParseInt(value, 10, 32)
+			if err != nil {
+				return errors.New("parse ZHIXU_EMBEDDING_DIMENSIONS: invalid integer")
+			}
+			cfg.EmbeddingDimensions = int32(parsed)
+		}
+	}
+	for key, target := range map[string]*int32{
+		"ZHIXU_EMBEDDING_MAX_BATCH_SIZE":              &cfg.EmbeddingMaxBatchSize,
+		"ZHIXU_EMBEDDING_MAX_INPUT_BYTES":             &cfg.EmbeddingMaxInputBytes,
+		"ZHIXU_RETRIEVAL_RRF_K":                       &cfg.RetrievalRRFK,
+		"ZHIXU_RETRIEVAL_RRF_LEXICAL_CANDIDATE_LIMIT": &cfg.RetrievalRRFLexicalCandidateLimit,
+		"ZHIXU_RETRIEVAL_RRF_VECTOR_CANDIDATE_LIMIT":  &cfg.RetrievalRRFVectorCandidateLimit,
+		"ZHIXU_RETRIEVAL_RRF_FUSED_CANDIDATE_LIMIT":   &cfg.RetrievalRRFFusedCandidateLimit,
+		"ZHIXU_RETRIEVAL_RRF_RERANK_CANDIDATE_LIMIT":  &cfg.RetrievalRRFRerankCandidateLimit,
+	} {
+		if value, ok := lookup(key); ok {
+			parsed, err := strconv.ParseInt(value, 10, 32)
+			if err != nil {
+				return fmt.Errorf("parse %s: invalid integer", key)
+			}
+			*target = int32(parsed)
+		}
+	}
+	if value, ok := lookup("ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES"); ok {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return errors.New("parse ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES: invalid integer")
+		}
+		cfg.EmbeddingMaxResponseBytes = parsed
+	}
+	if value, ok := lookup("ZHIXU_EMBEDDING_MAX_BATCH_INPUT_BYTES"); ok {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return errors.New("parse ZHIXU_EMBEDDING_MAX_BATCH_INPUT_BYTES: invalid integer")
+		}
+		cfg.EmbeddingMaxBatchInputBytes = parsed
+	}
 	for key, target := range map[string]*time.Duration{
 		"ZHIXU_DATABASE_PING_TIMEOUT":     &cfg.DatabasePingTimeout,
 		"ZHIXU_HEALTH_INTERVAL":           &cfg.HealthInterval,
@@ -585,6 +904,7 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		"ZHIXU_REINDEX_DISPATCH_ERROR_BACKOFF": &cfg.ReindexDispatchErrorBackoff,
 		"ZHIXU_REINDEX_LEASE_DURATION":         &cfg.ReindexLeaseDuration,
 		"ZHIXU_REINDEX_HEARTBEAT_INTERVAL":     &cfg.ReindexHeartbeatInterval,
+		"ZHIXU_EMBEDDING_TIMEOUT":              &cfg.EmbeddingTimeout,
 
 		"ZHIXU_WORKER_SOFT_STOP_TIMEOUT": &cfg.WorkerSoftStopTimeout,
 		"ZHIXU_WORKER_HARD_STOP_TIMEOUT": &cfg.WorkerHardStopTimeout,
@@ -592,6 +912,9 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		if value, ok := lookup(key); ok {
 			parsed, err := time.ParseDuration(value)
 			if err != nil {
+				if key == "ZHIXU_EMBEDDING_TIMEOUT" {
+					return errors.New("parse ZHIXU_EMBEDDING_TIMEOUT: invalid duration")
+				}
 				return fmt.Errorf("parse %s: %w", key, err)
 			}
 			*target = parsed

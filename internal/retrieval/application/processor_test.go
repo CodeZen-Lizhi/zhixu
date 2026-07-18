@@ -77,6 +77,44 @@ func TestDefaultFTSOnlyProcessorOptionsMatchLexicalBuilderContract(t *testing.T)
 	}
 }
 
+func TestProcessorBuildsHybridVectorsAndRunsSnapshotRegressionV2(t *testing.T) {
+	fixture := newProcessorFixture(t, processorCheckpointNone, domain.IndexStatusBuilding)
+	embeddingID, fusion := makeProcessorFixtureHybrid(t, fixture)
+	fixture.vectors.results = []BuildNextVectorBatchResult{
+		{IndexVersionID: fixture.index.ID, ProcessedCount: 1, ProviderInputs: 1, ReadyCount: 1, InsertedCount: 1},
+		{IndexVersionID: fixture.index.ID, Done: true},
+	}
+	processor := fixture.hybridProcessor(t, embeddingID, fusion)
+
+	result, err := processor.Process(context.Background(), ProcessorRequest{Lease: fixture.lease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Disposition != ProcessorReady || fixture.vectors.calls != 2 || fixture.regression.v2Calls != 1 ||
+		fixture.regression.result.Code != domain.SnapshotStructureRegressionV2 {
+		t.Fatalf("result=%#v vector calls=%d regression=%#v", result, fixture.vectors.calls, fixture.regression.result)
+	}
+	request := fixture.retrieval.snapshotRequest
+	if request.EmbeddingVersionID == nil || *request.EmbeddingVersionID != embeddingID || string(request.FusionConfig) != string(fusion) {
+		t.Fatalf("hybrid snapshot request=%#v", request)
+	}
+}
+
+func TestProcessorResumesHybridIndexByPersistedKindAfterOptionsChange(t *testing.T) {
+	fixture := newProcessorFixture(t, processorCheckpointIndex, domain.IndexStatusBuilding)
+	_, _ = makeProcessorFixtureHybrid(t, fixture)
+	fixture.vectors.results = []BuildNextVectorBatchResult{{IndexVersionID: fixture.index.ID, Done: true}}
+
+	result, err := fixture.processor(t).Process(context.Background(), ProcessorRequest{Lease: fixture.lease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Disposition != ProcessorReady || fixture.retrieval.snapshotCalls != 0 || fixture.vectors.calls != 1 || fixture.regression.v2Calls != 1 ||
+		fixture.regression.result.Code != domain.SnapshotStructureRegressionV2 {
+		t.Fatalf("result=%#v snapshot=%d vectors=%d regression=%#v", result, fixture.retrieval.snapshotCalls, fixture.vectors.calls, fixture.regression.result)
+	}
+}
+
 func TestProcessorResumesFromEveryPersistedCheckpoint(t *testing.T) {
 	for _, test := range []struct {
 		name            string
@@ -173,6 +211,31 @@ func TestProcessorRejectsReadyIndexWithoutRegressionCheckpoint(t *testing.T) {
 	}
 }
 
+func TestProcessorRejectsPersistedRegressionKindMismatch(t *testing.T) {
+	fixture := newProcessorFixture(t, processorCheckpointRegression, domain.IndexStatusBuilding)
+	_, _ = makeProcessorFixtureHybrid(t, fixture)
+	fixture.context.Delivery.Regression.Code = domain.SnapshotStructureRegressionV1
+	fixture.loader.result.Context = fixture.context
+	_, err := fixture.processor(t).Process(context.Background(), ProcessorRequest{Lease: fixture.lease})
+	if processorErrorCode(err) != processorIndexStateInvalidCode || fixture.retrieval.lexicalCalls != 0 {
+		t.Fatalf("error=%v lexical=%d", err, fixture.retrieval.lexicalCalls)
+	}
+}
+
+func TestValidateProcessorReadyPreservesImmutableHybridConfiguration(t *testing.T) {
+	fixture := newProcessorFixture(t, processorCheckpointNone, domain.IndexStatusBuilding)
+	_, _ = makeProcessorFixtureHybrid(t, fixture)
+	ready := processorReadyIndex(fixture.index)
+	ready.DegradedCapabilities = []domain.DegradedCapability{domain.DegradedVector}
+	if err := validateProcessorReady(fixture.index, ready); err != nil {
+		t.Fatal(err)
+	}
+	ready.TokenizerVersion = "v2"
+	if err := validateProcessorReady(fixture.index, ready); err == nil {
+		t.Fatal("ready result changed immutable tokenizer configuration")
+	}
+}
+
 func TestProcessorReturnsTypedFailureOnlyForProvenBusinessReduction(t *testing.T) {
 	t.Run("persisted retryable ingestion", func(t *testing.T) {
 		fixture := newProcessorFixture(t, processorCheckpointSource, domain.IndexStatusBuilding)
@@ -198,6 +261,19 @@ func TestProcessorReturnsTypedFailureOnlyForProvenBusinessReduction(t *testing.T
 		var failure *DeliveryFailureError
 		if !errors.As(err, &failure) || failure.Failure.Class != domain.DeliveryFailureNonRetryable ||
 			failure.Failure.Code != domain.ErrorCodeSnapshotStructureRegressionFailed || failure.RetryDelay != 0 {
+			t.Fatalf("failure=%#v err=%v", failure, err)
+		}
+	})
+
+	t.Run("committed hybrid regression failure", func(t *testing.T) {
+		fixture := newProcessorFixture(t, processorCheckpointIndex, domain.IndexStatusBuilding)
+		_, _ = makeProcessorFixtureHybrid(t, fixture)
+		fixture.vectors.results = []BuildNextVectorBatchResult{{IndexVersionID: fixture.index.ID, Done: true}}
+		fixture.regression.err = domain.SnapshotRegressionFailureFor(domain.SnapshotStructureRegressionV2, "manifest closure failed")
+		_, err := fixture.processor(t).Process(context.Background(), ProcessorRequest{Lease: fixture.lease})
+		var failure *DeliveryFailureError
+		if !errors.As(err, &failure) || failure.Failure.Class != domain.DeliveryFailureNonRetryable ||
+			failure.Failure.Code != domain.ErrorCodeSnapshotStructureV2RegressionFailed || failure.RetryDelay != 0 {
 			t.Fatalf("failure=%#v err=%v", failure, err)
 		}
 	})
@@ -279,6 +355,7 @@ type processorFixture struct {
 	capture          *processorCaptureFake
 	ingestion        *processorIngestionFake
 	retrieval        *processorRetrievalFake
+	vectors          *processorVectorFake
 	regression       *processorRegressionFake
 	runtime          *processorLeaseRuntime
 	lease            *DeliveryLeaseSession
@@ -392,6 +469,7 @@ func newProcessorFixture(t *testing.T, checkpoint processorCheckpoint, indexStat
 			lexical:  domain.ProjectionBatchResult{IndexVersionID: index.ID, AttemptedCount: 1, InsertedCount: 1},
 			ready:    processorReadyIndex(index),
 		},
+		vectors:    &processorVectorFake{},
 		regression: &processorRegressionFake{result: domain.SnapshotRegressionResult{Code: domain.SnapshotStructureRegressionV1, Hash: processorTestHash("regression"), PassedAt: now.Add(30 * time.Second)}},
 		runtime:    runtime, lease: lease,
 	}
@@ -402,7 +480,7 @@ func (fixture *processorFixture) processor(t *testing.T) *Processor {
 	t.Helper()
 	processor, err := NewProcessor(ProcessorDependencies{
 		Contexts: fixture.loader, Capture: fixture.capture, Ingestion: fixture.ingestion,
-		Retrieval: fixture.retrieval, Regression: fixture.regression,
+		Retrieval: fixture.retrieval, Vectors: fixture.vectors, Regression: fixture.regression,
 	}, ProcessorOptions{
 		TokenizerID: "postgres-simple", TokenizerVersion: "v1", TokenizerConfigHash: processorTestHash("tokenizer"),
 		FusionConfig: json.RawMessage(`{"method":"fts_only"}`), PageSize: 1000, MaxSources: 10_000, MaxChunks: 500_000,
@@ -412,6 +490,52 @@ func (fixture *processorFixture) processor(t *testing.T) *Processor {
 		t.Fatal(err)
 	}
 	return processor
+}
+
+func (fixture *processorFixture) hybridProcessor(t *testing.T, embeddingID foundation.ID, fusion json.RawMessage) *Processor {
+	t.Helper()
+	processor, err := NewProcessor(ProcessorDependencies{
+		Contexts: fixture.loader, Capture: fixture.capture, Ingestion: fixture.ingestion,
+		Retrieval: fixture.retrieval, Vectors: fixture.vectors, Regression: fixture.regression,
+	}, ProcessorOptions{
+		EmbeddingVersionID: &embeddingID,
+		TokenizerID:        "postgres-simple", TokenizerVersion: "v1", TokenizerConfigHash: processorTestHash("tokenizer"),
+		FusionConfig: fusion, PageSize: 1000, MaxSources: 10_000, MaxChunks: 500_000, RetryDelay: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return processor
+}
+
+func makeProcessorFixtureHybrid(t *testing.T, fixture *processorFixture) (foundation.ID, json.RawMessage) {
+	t.Helper()
+	embeddingID := processorID(80)
+	fusion, err := domain.CanonicalRRFConfig(domain.RRFConfig{
+		SchemaVersion: domain.RRFFusionSchemaVersionV1, Method: domain.FusionMethodRRF, K: 60,
+		LexicalCandidateLimit: 200, VectorCandidateLimit: 200, FusedCandidateLimit: 200, RerankCandidateLimit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate := func(index *domain.IndexVersion) {
+		if index == nil {
+			return
+		}
+		index.EmbeddingVersionID = &embeddingID
+		index.FusionConfig = append(json.RawMessage(nil), fusion...)
+		index.DegradedCapabilities = nil
+	}
+	mutate(&fixture.index)
+	mutate(fixture.context.IndexVersion)
+	mutate(&fixture.retrieval.snapshot.IndexVersion)
+	fixture.retrieval.ready = processorReadyIndex(fixture.index)
+	fixture.regression.result.Code = domain.SnapshotStructureRegressionV2
+	if fixture.context.Delivery.Regression != nil {
+		fixture.context.Delivery.Regression.Code = domain.SnapshotStructureRegressionV2
+	}
+	fixture.loader.result.Context = fixture.context
+	return embeddingID, fusion
 }
 
 type processorLoaderFake struct {
@@ -489,10 +613,40 @@ type processorRegressionFake struct {
 	err     error
 	command domain.SnapshotRegressionCommand
 	calls   int
+	v1Calls int
+	v2Calls int
+}
+
+type processorVectorFake struct {
+	results  []BuildNextVectorBatchResult
+	err      error
+	requests []BuildNextVectorBatchRequest
+	calls    int
+}
+
+func (fake *processorVectorFake) BuildNextVectorBatch(_ context.Context, request BuildNextVectorBatchRequest) (BuildNextVectorBatchResult, error) {
+	fake.requests = append(fake.requests, request)
+	position := fake.calls
+	fake.calls++
+	if fake.err != nil {
+		return BuildNextVectorBatchResult{}, fake.err
+	}
+	if position >= len(fake.results) {
+		return BuildNextVectorBatchResult{}, errors.New("unexpected vector batch call")
+	}
+	return fake.results[position], nil
 }
 
 func (fake *processorRegressionFake) RunSnapshotStructureV1(_ context.Context, command domain.SnapshotRegressionCommand) (domain.SnapshotRegressionResult, error) {
 	fake.calls++
+	fake.v1Calls++
+	fake.command = command
+	return fake.result, fake.err
+}
+
+func (fake *processorRegressionFake) RunSnapshotStructureV2(_ context.Context, command domain.SnapshotRegressionCommand) (domain.SnapshotRegressionResult, error) {
+	fake.calls++
+	fake.v2Calls++
 	fake.command = command
 	return fake.result, fake.err
 }

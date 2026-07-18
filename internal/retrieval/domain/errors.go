@@ -10,6 +10,20 @@ import (
 const (
 	// ErrorCodeEmbeddingVersionInvalid 表示 Embedding Version 字段或枚举非法。
 	ErrorCodeEmbeddingVersionInvalid = "RETRIEVAL_EMBEDDING_VERSION_INVALID"
+	// ErrorCodeEmbeddingContractInvalid 表示运行时 Embedder Contract 不完整或与版本绑定冲突。
+	ErrorCodeEmbeddingContractInvalid = "RETRIEVAL_EMBEDDING_CONTRACT_INVALID"
+	// ErrorCodeEmbedRequestInvalid 表示发给 Embedder 的批量输入不满足 Contract。
+	ErrorCodeEmbedRequestInvalid = "RETRIEVAL_EMBED_REQUEST_INVALID"
+	// ErrorCodeEmbedResultInvalid 表示 Embedder 返回的模型、数量或向量损坏。
+	ErrorCodeEmbedResultInvalid = "RETRIEVAL_EMBED_RESULT_INVALID"
+	// ErrorCodeFusionConfigInvalid 表示版本化融合配置不满足严格 Schema。
+	ErrorCodeFusionConfigInvalid = "RETRIEVAL_FUSION_CONFIG_INVALID"
+	// ErrorCodeSearchRequestInvalid 表示检索请求、过滤或服务端上限非法。
+	ErrorCodeSearchRequestInvalid = "RETRIEVAL_SEARCH_REQUEST_INVALID"
+	// ErrorCodeSearchCandidateInvalid 表示候选、证据或阶段分数绑定非法。
+	ErrorCodeSearchCandidateInvalid = "RETRIEVAL_SEARCH_CANDIDATE_INVALID"
+	// ErrorCodeSearchResultInvalid 表示检索模式、降级或结果绑定不一致。
+	ErrorCodeSearchResultInvalid = "RETRIEVAL_SEARCH_RESULT_INVALID"
 	// ErrorCodeIndexVersionInvalid 表示 Index Version 或构建请求不满足领域约束。
 	ErrorCodeIndexVersionInvalid = "RETRIEVAL_INDEX_VERSION_INVALID"
 	// ErrorCodeIndexTransitionInvalid 表示尝试绕过冻结的 Index 生命周期。

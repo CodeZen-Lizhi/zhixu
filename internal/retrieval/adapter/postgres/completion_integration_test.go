@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -88,6 +89,53 @@ func TestCompleteReindexTxRequiresCleanupAndSucceededWorkflowWithoutMutatingInde
 		t.Fatalf("workflow gate error=%v", err)
 	}
 	assertCompletionRolledBack(t, ctx, database.DB(), fixture)
+}
+
+func TestCompleteReindexTxSupportsV2HybridAndRejectsVersionKindMismatch(t *testing.T) {
+	t.Run("v2 hybrid", func(t *testing.T) {
+		repository, database, ctx := newRetrievalTestRepository(t)
+		fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 712)
+		upgradeCompletionFixtureToHybrid(t, ctx, database.DB(), fixture, 712)
+		satisfyCompletionGates(t, ctx, database.DB(), fixture)
+		result, err := repository.CompleteReindexTx(ctx, fixture.Command)
+		if err != nil || result.ActiveIndexVersion.EmbeddingVersionID == nil {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		assertCompletionCommitted(t, ctx, database.DB(), fixture)
+	})
+
+	t.Run("v2 cannot complete fts only", func(t *testing.T) {
+		repository, database, ctx := newRetrievalTestRepository(t)
+		fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 713)
+		withReplicaRole(t, ctx, database.DB(), func(connection *pgxpool.Conn) {
+			if _, err := connection.Exec(ctx, `UPDATE retrieval.reindex_delivery SET regression_code=$2 WHERE id=$1`,
+				string(fixture.DeliveryID), domain.RegressionCodeSnapshotStructureV2); err != nil {
+				t.Fatal(err)
+			}
+		})
+		satisfyCompletionGates(t, ctx, database.DB(), fixture)
+		if _, err := repository.CompleteReindexTx(ctx, fixture.Command); completionErrorCode(err) != "REINDEX_COMPLETION_GATE_FAILED" {
+			t.Fatalf("mismatch error=%v", err)
+		}
+		assertCompletionRolledBack(t, ctx, database.DB(), fixture)
+	})
+
+	t.Run("v1 cannot complete hybrid", func(t *testing.T) {
+		repository, database, ctx := newRetrievalTestRepository(t)
+		fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 714)
+		upgradeCompletionFixtureToHybrid(t, ctx, database.DB(), fixture, 714)
+		withReplicaRole(t, ctx, database.DB(), func(connection *pgxpool.Conn) {
+			if _, err := connection.Exec(ctx, `UPDATE retrieval.reindex_delivery SET regression_code=$2 WHERE id=$1`,
+				string(fixture.DeliveryID), domain.RegressionCodeSnapshotStructureV1); err != nil {
+				t.Fatal(err)
+			}
+		})
+		satisfyCompletionGates(t, ctx, database.DB(), fixture)
+		if _, err := repository.CompleteReindexTx(ctx, fixture.Command); completionErrorCode(err) != "REINDEX_COMPLETION_GATE_FAILED" {
+			t.Fatalf("mismatch error=%v", err)
+		}
+		assertCompletionRolledBack(t, ctx, database.DB(), fixture)
+	})
 }
 
 func TestCompleteReindexTxRequiresLatestFullFenceAndLiveDatabaseLease(t *testing.T) {
@@ -340,7 +388,8 @@ func seedCompletionFixture(t *testing.T, ctx context.Context, repository *Reposi
 		t.Fatal(err)
 	}
 	regression, err := repository.RunSnapshotRegression(ctx, domain.SnapshotRegressionCommand{
-		WorkspaceID: writeback.WorkspaceID, DeliveryID: deliveryID, TargetSourceID: target.SourceID,
+		RegressionCode: domain.SnapshotStructureRegressionV1,
+		WorkspaceID:    writeback.WorkspaceID, DeliveryID: deliveryID, TargetSourceID: target.SourceID,
 		TargetSourceVersionID: target.VersionID, TargetResultHash: resultHash,
 		TargetParseProjectionID: target.ProjectionID, IndexVersionID: created.IndexVersion.ID,
 	})
@@ -373,6 +422,41 @@ func seedCompletionFixture(t *testing.T, ctx context.Context, repository *Reposi
 		RunID: runID, NodeID: nodeID, DeliveryID: deliveryID, AttemptID: claimed.Attempt.ID,
 		TargetIndexID: ready.ID, OldActiveID: oldActivated.ActiveIndexVersion.ID,
 	}
+}
+
+func upgradeCompletionFixtureToHybrid(t *testing.T, ctx context.Context, database *pgxpool.Pool, fixture completionFixture, ordinal int) {
+	t.Helper()
+	embeddingID := snapshotID(ordinal + 550_000)
+	if _, err := database.Exec(ctx, `INSERT INTO retrieval.embedding_version(
+		id,provider,adapter_name,adapter_version,model,dimensions,normalization,distance_metric,config_hash,created_at
+	) VALUES($1,'test','direct','v1',$2,3,'l2','cosine',$3,now())`, string(embeddingID),
+		"completion-embed-"+string(fixture.DeliveryID), snapshotHash("completion-embedding", ordinal)); err != nil {
+		t.Fatal(err)
+	}
+	fusion, err := domain.CanonicalRRFConfig(domain.RRFConfig{
+		SchemaVersion: 1, Method: domain.FusionMethodRRF, K: 60,
+		LexicalCandidateLimit: 200, VectorCandidateLimit: 200,
+		FusedCandidateLimit: 100, RerankCandidateLimit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withReplicaRole(t, ctx, database, func(connection *pgxpool.Conn) {
+		if _, err := connection.Exec(ctx, `UPDATE retrieval.index_version
+			SET embedding_version_id=$2,fusion_config=$3::jsonb,degraded_capabilities=$4::jsonb
+			WHERE id=$1`, string(fixture.TargetIndexID), string(embeddingID), fusion, json.RawMessage(`[]`)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connection.Exec(ctx, `UPDATE retrieval.chunk_projection
+			SET embedding_version_id=$2,embedding='[1,0,0]'::vector,vector_status='ready',failure_code=NULL
+			WHERE index_version_id=$1`, string(fixture.TargetIndexID), string(embeddingID)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connection.Exec(ctx, `UPDATE retrieval.reindex_delivery SET regression_code=$2 WHERE id=$1`,
+			string(fixture.DeliveryID), domain.RegressionCodeSnapshotStructureV2); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func satisfyCompletionGates(t *testing.T, ctx context.Context, database *pgxpool.Pool, fixture completionFixture) {

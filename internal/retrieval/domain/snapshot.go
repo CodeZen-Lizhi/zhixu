@@ -49,17 +49,31 @@ type WorkspaceSnapshotResult struct {
 }
 
 // ValidateWorkspaceSnapshotCommand 校验 Store 查询与 Index 配置边界，不接受预先计算的 Manifest 身份。
+// FTS-only Snapshot 保持历史 JSON 兼容并显式声明 vector degraded；Hybrid Snapshot 必须绑定
+// Embedding Version、使用 canonical RRF v1，且不能预先声明 vector degraded。
 func ValidateWorkspaceSnapshotCommand(command WorkspaceSnapshotCommand) error {
 	index := command.IndexVersion
-	if index.ID == "" || index.WorkspaceID == "" || index.EmbeddingVersionID != nil ||
+	if index.ID == "" || index.WorkspaceID == "" ||
 		!isCanonicalText(index.TokenizerID) || !isCanonicalText(index.TokenizerVersion) ||
-		!isCanonicalHash(index.TokenizerConfigHash) || !validJSONObject(index.FusionConfig) ||
+		!isCanonicalHash(index.TokenizerConfigHash) ||
 		!isCanonicalText(index.SourceSnapshotRef) || !strings.HasPrefix(index.SourceSnapshotRef, "reindex-v1:") ||
 		!isCanonicalText(index.IdempotencyKey) || len(index.IdempotencyKey) > 128 ||
 		index.ManifestHash != "" || index.ExpectedChunkCount != 0 || index.SourceManifestHash != "" || index.ExpectedSourceCount != nil ||
-		index.Status != IndexStatusBuilding || !equalCapabilities(index.DegradedCapabilities, []DegradedCapability{DegradedVector}) ||
+		index.Status != IndexStatusBuilding ||
 		index.Version != 1 || index.CreatedAt.IsZero() || !index.CreatedAt.Equal(index.UpdatedAt) || index.FailureCode != "" {
 		return invalid(ErrorCodeIndexVersionInvalid, "workspace snapshot index configuration is invalid")
+	}
+	if index.EmbeddingVersionID == nil {
+		if !validJSONObject(index.FusionConfig) || !equalCapabilities(index.DegradedCapabilities, []DegradedCapability{DegradedVector}) {
+			return invalid(ErrorCodeIndexVersionInvalid, "FTS-only workspace snapshot configuration is invalid")
+		}
+	} else {
+		if *index.EmbeddingVersionID == "" || len(index.DegradedCapabilities) != 0 {
+			return invalid(ErrorCodeIndexVersionInvalid, "hybrid workspace snapshot embedding binding is invalid")
+		}
+		if _, err := ParseRRFConfig(index.FusionConfig); err != nil {
+			return err
+		}
 	}
 	if index.ProcessingContract == nil {
 		return invalid(ErrorCodeManifestInvalid, "workspace snapshot processing contract is required")

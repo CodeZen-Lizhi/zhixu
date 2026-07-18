@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"math"
 	"strings"
 	"time"
 
@@ -239,19 +238,8 @@ func validateVectorWrite(embeddingVersion EmbeddingVersion, projection VectorPro
 }
 
 func validateReadyVector(embeddingVersion EmbeddingVersion, embedding []float32) error {
-	if len(embedding) != int(embeddingVersion.Dimensions) {
-		return invalid(ErrorCodeProjectionInvalid, "ready vector dimensions do not match embedding version")
-	}
-	norm := float64(0)
-	for _, value := range embedding {
-		component := float64(value)
-		if math.IsNaN(component) || math.IsInf(component, 0) {
-			return invalid(ErrorCodeProjectionInvalid, "ready vector contains a non-finite value")
-		}
-		norm += component * component
-	}
-	if norm == 0 || math.IsNaN(norm) || math.IsInf(norm, 0) {
-		return invalid(ErrorCodeProjectionInvalid, "ready vector must have a finite non-zero norm")
+	if err := ValidateEmbeddingVector(embeddingVersion, embedding); err != nil {
+		return invalid(ErrorCodeProjectionInvalid, "ready vector does not satisfy embedding version")
 	}
 	return nil
 }

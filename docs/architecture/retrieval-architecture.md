@@ -60,11 +60,15 @@ Chunk 必须带：
 
 ## 5. Embedding
 
-- 批量请求。
-- 记录 Model、Dimensions、Config Hash。
-- 对 Content Hash 去重缓存。
+- 通过项目自有 `Embedder` Port 批量请求；正式 Adapter 为 OpenAI-Compatible `/v1/embeddings`
+  与 Ollama `/api/embed`，不把供应商类型带入领域层。
+- Contract 冻结 Provider、Adapter/Version、Model、Dimensions、Normalization、Distance、Endpoint
+  identity、条数上限、单输入字节上限和单批累计字节上限；Config Hash 不包含 Credential。
+- 对 Workspace + Embedding Version + Content Hash 去重缓存；缓存不保存正文，cache 写入和
+  Projection 终态在同一事务中完成。
 - 新模型建立新 Index Version。
 - 新索引激活前旧索引继续服务。
+- Provider 数量、顺序、维度、NaN/Inf、零范数或模型绑定不符时 fail closed，不生成伪向量。
 
 ## 6. 混合检索
 
@@ -73,7 +77,7 @@ flowchart TD
     Q["Query"] --> Rewrite["Query Rewrite"]
     Rewrite --> Lexical["FTS Search"]
     Rewrite --> Semantic["Vector Search"]
-    Filter["Workspace/Status/Version/Topic/Time"] --> Lexical
+    Filter["Workspace/Source/Path/Captured Time"] --> Lexical
     Filter --> Semantic
     Lexical --> Fusion["RRF Fusion"]
     Semantic --> Fusion
@@ -110,7 +114,7 @@ flowchart TD
 
 ## 9. 向量检索
 
-- 使用 cosine 或 inner product，依据 Embedding 模型归一化约定。
+- 使用 cosine、inner product 或 euclidean，依据持久 Embedding Version 的白名单枚举选择固定 SQL operator。
 - 过滤 workspace_id、status、revision。
 - ANN 参数由压测确定。
 - 低数据量允许 exact scan 作为基线。
@@ -123,7 +127,7 @@ flowchart TD
 score(d) = Σ 1 / (k + rank_i(d))
 ```
 
-k 通过评测选择并版本化。
+k 通过评测选择并版本化；v1 安全范围为 `1..500`，计算前提升到 `int64/float64`，禁止整数溢出。
 
 ## 11. 去重
 
@@ -154,14 +158,16 @@ k 通过评测选择并版本化。
 每个 Evidence Item：
 
 - Chunk ID。
-- Document/Revision。
-- Source Span。
+- Source、Source Version 和 Parse Projection。
+- Source Span 行/字节范围与受控相对路径。
 - Snippet。
-- Retrieval Scores。
+- Content Hash、Heading Path、各阶段原始 rank/score。
 - Rerank Score。
-- Status。
-- Conflict Flags。
 - Index Version。
+- 稳定有界的多 Source provenance 与显式截断标志。
+
+M6-C Evidence v1 只返回仓库当前真实存在的 Source/SourceVersion/Chunk/Span 字段；Document、
+Revision、Topic、Conflict 等知识模型字段只能在对应领域模型落地后扩展，不能提前返回空壳字段。
 
 ## 14. 版本与切换
 
@@ -219,6 +225,29 @@ M6-B 已锁定以下 Reindex 契约：
   Delivery、Writeback Execution 与 Proposal。结构回归失败保留旧 Active 和 Git Commit，
   不自动反向 Commit。
 
+M6-C 已锁定以下 Embedding 与 Hybrid Search 契约：
+
+- `00016_embedding_hybrid_search.sql` 新增 Workspace-scoped immutable `embedding_cache`，扩展
+  `SNAPSHOT_STRUCTURE_V2` Regression/Completion；有 cache、V2 Delivery 或 Hybrid Index 数据时
+  Down 以 SQLSTATE `55000` 拒绝。
+- Vector Builder 先批量读取 pending/cache metadata，再按 `MaxBatchInputBytes` 一次读取有界正文；
+  cache miss 只触发一次 Provider batch。cache 使用单条 `INSERT ... SELECT FROM unnest(...)`，
+  Projection 使用单条 `UPDATE ... FROM unnest(...)`，随后批量 readback 精确比较 float32。
+- Hybrid Processor 执行 Lexical → bounded Vector batches → V2 Regression → Ready。skipped/failed
+  从 Projection 终态推导 `degraded_capabilities=["vector"]`，V2 Regression 与 Ready 共用同一规则。
+- Worker 配置变化后，历史 Hybrid 若已无 pending vector，可在不调用旧 Provider 的情况下完成
+  Regression；仍有 pending 时必须恢复匹配的 Embedding Version 配置，并返回明确依赖不可用，
+  不按当前默认配置改写历史任务。
+- Search 只读 Workspace 当前 Active Index；Keyword 使用 `simple` FTS + trigram，Semantic 使用
+  exact pgvector scan，Hybrid 并行双路后执行 strict RRF v1、相邻 Chunk 去重和可选 Rerank。
+  trigram `%` 在短事务内固定 `pg_trgm.similarity_threshold=0.3`，不继承连接级可变 GUC。
+  FTS-only Hybrid 显式退化为 Keyword；FTS-only Semantic 返回 capability unavailable；真实零命中
+  返回空 items。
+- 当前没有已批准的通用生产 Rerank 协议，只冻结 Port 与 exact output validator。nil 或 Retryable
+  故障保留 RRF 顺序并显式 degraded；缺失、重复或额外输出 fail closed。
+- 真实 River fault smoke 已覆盖 Vector commit response-loss、V2 Regression、唯一 Active/Completion
+  和最小 Hybrid Search；Provider Key、正文、DSN 与完整 Endpoint 不进入 River payload、日志或错误。
+
 ## 15. 增量索引
 
 触发：
@@ -261,6 +290,7 @@ M6-B 已锁定以下 Reindex 契约：
 ## 19. 故障
 
 - Embedding 不可用：Keyword 可用。
+- FTS-only Active 的 Semantic 明确不可用；Hybrid 返回 Keyword 结果并标记 vector/rerank degraded。
 - Rerank 不可用：Hybrid degraded。
 - 新索引失败：旧 Active 继续。
 - Reindex 结构回归失败：Git Commit 保留，Proposal/Execution 保持 verifying，按 Delivery

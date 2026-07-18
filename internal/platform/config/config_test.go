@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 )
 
 func TestDefaultsWorkerRuntime(t *testing.T) {
@@ -38,6 +40,28 @@ func TestDefaultsWorkerRuntime(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("defaults must be valid: %v", err)
+	}
+}
+
+func TestDefaultsEmbeddingAndRetrievalRRF(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	if cfg.EmbeddingProvider != EmbeddingProviderDisabled || cfg.EmbeddingBaseURL != "" || cfg.EmbeddingAPIKey != "" || cfg.EmbeddingModel != "" || cfg.EmbeddingDimensions != 0 {
+		t.Fatalf("embedding must default to explicitly disabled: %s", cfg)
+	}
+	if cfg.EmbeddingNormalization != domain.NormalizationL2 || cfg.EmbeddingDistanceMetric != domain.DistanceCosine ||
+		cfg.EmbeddingMaxBatchSize != 128 || cfg.EmbeddingMaxInputBytes != 64*1024 ||
+		cfg.EmbeddingMaxBatchInputBytes != 8*1024*1024 ||
+		cfg.EmbeddingTimeout != 30*time.Second || cfg.EmbeddingMaxResponseBytes != 64<<20 {
+		t.Fatalf("unexpected embedding safety defaults: %s", cfg)
+	}
+	wantRRF := domain.RRFConfig{
+		SchemaVersion: 1, Method: domain.FusionMethodRRF, K: 60,
+		LexicalCandidateLimit: 200, VectorCandidateLimit: 200,
+		FusedCandidateLimit: 100, RerankCandidateLimit: 50,
+	}
+	if got := cfg.RetrievalRRFConfig(); got != wantRRF {
+		t.Fatalf("unexpected retrieval RRF defaults: %+v", got)
 	}
 }
 
@@ -226,6 +250,112 @@ telemetry_endpoint: http://collector:4318
 	}
 }
 
+func TestLoadWithLookupEmbeddingYAML(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte(`embedding_provider: openai-compatible
+embedding_base_url: https://embedding.example.test/v1
+embedding_api_key: yaml-key
+embedding_model: text-embedding-v3
+embedding_dimensions: 1536
+embedding_normalization: none
+embedding_distance_metric: inner_product
+embedding_max_batch_size: 64
+embedding_max_input_bytes: 32768
+embedding_max_batch_input_bytes: 4194304
+embedding_timeout: 45s
+embedding_max_response_bytes: 33554432
+retrieval_rrf_k: 70
+retrieval_rrf_lexical_candidate_limit: 250
+retrieval_rrf_vector_candidate_limit: 240
+retrieval_rrf_fused_candidate_limit: 120
+retrieval_rrf_rerank_candidate_limit: 60
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWithLookup(path, func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EmbeddingProvider != EmbeddingProviderOpenAICompatible || cfg.EmbeddingBaseURL != "https://embedding.example.test/v1" ||
+		cfg.EmbeddingAPIKey != "yaml-key" || cfg.EmbeddingModel != "text-embedding-v3" || cfg.EmbeddingDimensions != 1536 ||
+		cfg.EmbeddingNormalization != domain.NormalizationNone || cfg.EmbeddingDistanceMetric != domain.DistanceInnerProduct ||
+		cfg.EmbeddingMaxBatchSize != 64 || cfg.EmbeddingMaxInputBytes != 32768 || cfg.EmbeddingMaxBatchInputBytes != 4194304 || cfg.EmbeddingTimeout != 45*time.Second ||
+		cfg.EmbeddingMaxResponseBytes != 33554432 {
+		t.Fatalf("embedding YAML not loaded: %s", cfg)
+	}
+	if cfg.RetrievalRRFK != 70 || cfg.RetrievalRRFLexicalCandidateLimit != 250 || cfg.RetrievalRRFVectorCandidateLimit != 240 ||
+		cfg.RetrievalRRFFusedCandidateLimit != 120 || cfg.RetrievalRRFRerankCandidateLimit != 60 {
+		t.Fatalf("retrieval RRF YAML not loaded: %s", cfg)
+	}
+}
+
+func TestLoadWithLookupEmbeddingEnvironment(t *testing.T) {
+	t.Parallel()
+	values := map[string]string{
+		"ZHIXU_EMBEDDING_PROVIDER":                    "ollama",
+		"ZHIXU_EMBEDDING_BASE_URL":                    "http://127.0.0.1:11434/models",
+		"ZHIXU_EMBEDDING_MODEL":                       "nomic-embed-text",
+		"ZHIXU_EMBEDDING_DIMENSIONS":                  "768",
+		"ZHIXU_EMBEDDING_NORMALIZATION":               "l2",
+		"ZHIXU_EMBEDDING_DISTANCE_METRIC":             "cosine",
+		"ZHIXU_EMBEDDING_MAX_BATCH_SIZE":              "32",
+		"ZHIXU_EMBEDDING_MAX_INPUT_BYTES":             "16384",
+		"ZHIXU_EMBEDDING_MAX_BATCH_INPUT_BYTES":       "2097152",
+		"ZHIXU_EMBEDDING_TIMEOUT":                     "20s",
+		"ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES":          "16777216",
+		"ZHIXU_RETRIEVAL_RRF_K":                       "55",
+		"ZHIXU_RETRIEVAL_RRF_LEXICAL_CANDIDATE_LIMIT": "180",
+		"ZHIXU_RETRIEVAL_RRF_VECTOR_CANDIDATE_LIMIT":  "170",
+		"ZHIXU_RETRIEVAL_RRF_FUSED_CANDIDATE_LIMIT":   "90",
+		"ZHIXU_RETRIEVAL_RRF_RERANK_CANDIDATE_LIMIT":  "40",
+	}
+	cfg, err := LoadWithLookup("", func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EmbeddingProvider != EmbeddingProviderOllama || cfg.EmbeddingBaseURL != "http://127.0.0.1:11434/models" ||
+		cfg.EmbeddingAPIKey != "" || cfg.EmbeddingModel != "nomic-embed-text" || cfg.EmbeddingDimensions != 768 ||
+		cfg.EmbeddingMaxBatchSize != 32 || cfg.EmbeddingMaxInputBytes != 16384 || cfg.EmbeddingMaxBatchInputBytes != 2097152 || cfg.EmbeddingTimeout != 20*time.Second ||
+		cfg.EmbeddingMaxResponseBytes != 16777216 || cfg.RetrievalRRFK != 55 || cfg.RetrievalRRFRerankCandidateLimit != 40 {
+		t.Fatalf("embedding environment not loaded: %s", cfg)
+	}
+}
+
+func TestLoadWithLookupDisabledEmbeddingDoesNotConsumeSecrets(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("embedding_provider: openai-compatible\nembedding_base_url: https://yaml-secret.example.test\nembedding_api_key: yaml-secret\nembedding_model: yaml-model\nembedding_dimensions: 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWithLookup(path, func(key string) (string, bool) {
+		switch key {
+		case "ZHIXU_EMBEDDING_PROVIDER":
+			return "disabled", true
+		case "ZHIXU_EMBEDDING_BASE_URL":
+			return "https://env-secret.example.test", true
+		case "ZHIXU_EMBEDDING_API_KEY":
+			return "env-secret", true
+		case "ZHIXU_EMBEDDING_DIMENSIONS":
+			return "not-a-number", true
+		default:
+			return "", false
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EmbeddingBaseURL != "" || cfg.EmbeddingAPIKey != "" || cfg.EmbeddingModel != "" || cfg.EmbeddingDimensions != 0 {
+		t.Fatalf("disabled embedding must not consume provider settings: %s", cfg)
+	}
+}
+
 func TestValidateWorkerBoundaryCombinations(t *testing.T) {
 	t.Parallel()
 	cfg := Defaults()
@@ -333,6 +463,138 @@ func TestValidateTelemetryModes(t *testing.T) {
 	}
 }
 
+func TestValidateEmbeddingProviderGroups(t *testing.T) {
+	t.Parallel()
+	enabled := func(provider EmbeddingProvider) Config {
+		cfg := Defaults()
+		cfg.EmbeddingProvider = provider
+		cfg.EmbeddingBaseURL = "https://embedding.example.test/base"
+		cfg.EmbeddingModel = "embed-v1"
+		cfg.EmbeddingDimensions = 3
+		if provider == EmbeddingProviderOpenAICompatible {
+			cfg.EmbeddingAPIKey = "test-key"
+		}
+		return cfg
+	}
+	valid := []Config{
+		Defaults(),
+		enabled(EmbeddingProviderOpenAICompatible),
+		func() Config {
+			cfg := enabled(EmbeddingProviderOllama)
+			cfg.EmbeddingBaseURL = "http://localhost:11434"
+			return cfg
+		}(),
+	}
+	for _, cfg := range valid {
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid embedding group rejected: %s: %v", cfg, err)
+		}
+	}
+
+	tests := []struct {
+		name   string
+		change func(*Config)
+		want   string
+	}{
+		{name: "unknown provider", change: func(c *Config) { c.EmbeddingProvider = "other" }, want: "embedding_provider"},
+		{name: "disabled endpoint", change: func(c *Config) { c.EmbeddingBaseURL = "https://secret.example.test" }, want: "must be empty"},
+		{name: "openai missing key", change: func(c *Config) { *c = enabled(EmbeddingProviderOpenAICompatible); c.EmbeddingAPIKey = "" }, want: "embedding_api_key"},
+		{name: "openai key whitespace", change: func(c *Config) { *c = enabled(EmbeddingProviderOpenAICompatible); c.EmbeddingAPIKey = " key " }, want: "embedding_api_key"},
+		{name: "openai loopback http", change: func(c *Config) {
+			*c = enabled(EmbeddingProviderOpenAICompatible)
+			c.EmbeddingBaseURL = "http://localhost:8080"
+		}, want: "https"},
+		{name: "ollama remote http", change: func(c *Config) {
+			*c = enabled(EmbeddingProviderOllama)
+			c.EmbeddingBaseURL = "http://models.example.test"
+		}, want: "https"},
+		{name: "ollama api key", change: func(c *Config) { *c = enabled(EmbeddingProviderOllama); c.EmbeddingAPIKey = "not-allowed" }, want: "embedding_api_key"},
+		{name: "endpoint userinfo", change: func(c *Config) {
+			*c = enabled(EmbeddingProviderOpenAICompatible)
+			c.EmbeddingBaseURL = "https://user:secret@models.example.test"
+		}, want: "embedding_base_url"},
+		{name: "endpoint query", change: func(c *Config) {
+			*c = enabled(EmbeddingProviderOpenAICompatible)
+			c.EmbeddingBaseURL = "https://models.example.test?secret=query"
+		}, want: "embedding_base_url"},
+		{name: "endpoint fragment", change: func(c *Config) {
+			*c = enabled(EmbeddingProviderOpenAICompatible)
+			c.EmbeddingBaseURL = "https://models.example.test#secret"
+		}, want: "embedding_base_url"},
+		{name: "empty model", change: func(c *Config) { *c = enabled(EmbeddingProviderOllama); c.EmbeddingModel = "" }, want: "embedding_model"},
+		{name: "model whitespace", change: func(c *Config) { *c = enabled(EmbeddingProviderOllama); c.EmbeddingModel = " model " }, want: "embedding_model"},
+		{name: "zero dimensions", change: func(c *Config) { *c = enabled(EmbeddingProviderOllama); c.EmbeddingDimensions = 0 }, want: "embedding_dimensions"},
+		{name: "dimensions too large", change: func(c *Config) { *c = enabled(EmbeddingProviderOllama); c.EmbeddingDimensions = 16_001 }, want: "embedding_dimensions"},
+		{name: "bad normalization", change: func(c *Config) { c.EmbeddingNormalization = "unit" }, want: "embedding_normalization"},
+		{name: "bad distance", change: func(c *Config) { c.EmbeddingDistanceMetric = "manhattan" }, want: "embedding_distance_metric"},
+		{name: "zero batch", change: func(c *Config) { c.EmbeddingMaxBatchSize = 0 }, want: "embedding_max_batch_size"},
+		{name: "batch too large", change: func(c *Config) { c.EmbeddingMaxBatchSize = domain.MaxEmbeddingBatchSize + 1 }, want: "embedding_max_batch_size"},
+		{name: "zero input bytes", change: func(c *Config) { c.EmbeddingMaxInputBytes = 0 }, want: "embedding_max_input_bytes"},
+		{name: "input too large", change: func(c *Config) { c.EmbeddingMaxInputBytes = domain.MaxEmbeddingInputBytes + 1 }, want: "embedding_max_input_bytes"},
+		{name: "batch input below single input", change: func(c *Config) { c.EmbeddingMaxBatchInputBytes = int64(c.EmbeddingMaxInputBytes) - 1 }, want: "embedding_max_batch_input_bytes"},
+		{name: "batch input too large", change: func(c *Config) { c.EmbeddingMaxBatchInputBytes = domain.MaxEmbeddingBatchInputBytes + 1 }, want: "embedding_max_batch_input_bytes"},
+		{name: "zero timeout", change: func(c *Config) { c.EmbeddingTimeout = 0 }, want: "embedding_timeout"},
+		{name: "timeout too large", change: func(c *Config) { c.EmbeddingTimeout = 5*time.Minute + time.Nanosecond }, want: "embedding_timeout"},
+		{name: "zero response", change: func(c *Config) { c.EmbeddingMaxResponseBytes = 0 }, want: "embedding_max_response_bytes"},
+		{name: "response too large", change: func(c *Config) { c.EmbeddingMaxResponseBytes = (128 << 20) + 1 }, want: "embedding_max_response_bytes"},
+		{name: "rrf zero k", change: func(c *Config) { c.RetrievalRRFK = 0 }, want: "retrieval RRF"},
+		{name: "rrf k too large", change: func(c *Config) { c.RetrievalRRFK = domain.MaxRRFK + 1 }, want: "retrieval RRF"},
+		{name: "rrf candidate too large", change: func(c *Config) { c.RetrievalRRFVectorCandidateLimit = domain.MaxFusionCandidateLimit + 1 }, want: "retrieval RRF"},
+		{name: "rrf rerank exceeds fused", change: func(c *Config) { c.RetrievalRRFRerankCandidateLimit = c.RetrievalRRFFusedCandidateLimit + 1 }, want: "retrieval RRF"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Defaults()
+			test.change(&cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected error containing %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestLoadWithLookupRejectsInvalidEmbeddingEnvironmentWithoutEchoingValue(t *testing.T) {
+	t.Parallel()
+	const secret = "numeric-secret-canary"
+	tests := []string{
+		"ZHIXU_EMBEDDING_DIMENSIONS",
+		"ZHIXU_EMBEDDING_MAX_BATCH_SIZE",
+		"ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES",
+		"ZHIXU_EMBEDDING_TIMEOUT",
+		"ZHIXU_RETRIEVAL_RRF_K",
+	}
+	for _, key := range tests {
+		key := key
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			_, err := LoadWithLookup("", func(candidate string) (string, bool) {
+				switch candidate {
+				case "ZHIXU_EMBEDDING_PROVIDER":
+					return "ollama", true
+				case "ZHIXU_EMBEDDING_BASE_URL":
+					return "http://localhost:11434", true
+				case "ZHIXU_EMBEDDING_MODEL":
+					return "embed-v1", true
+				case "ZHIXU_EMBEDDING_DIMENSIONS":
+					if key != candidate {
+						return "3", true
+					}
+				}
+				if candidate == key {
+					return secret, true
+				}
+				return "", false
+			})
+			if err == nil || !strings.Contains(err.Error(), key) || strings.Contains(err.Error(), secret) {
+				t.Fatalf("expected secret-safe parse error for %s, got %v", key, err)
+			}
+		})
+	}
+}
+
 func TestLoadWithLookupDisabledTelemetryDoesNotConsumeEndpoint(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -364,6 +626,8 @@ func TestConfigFormattingAndErrorsDoNotExposeSecrets(t *testing.T) {
 		password       = "database-password-secret"
 		databaseURL    = "postgres://app:database-url-secret@db/zhixu"
 		telemetryToken = "telemetry-token-secret"
+		embeddingKey   = "embedding-api-key-secret"
+		embeddingURL   = "https://embedding-endpoint-secret.example.test/private"
 	)
 	cfg := Defaults()
 	cfg.DatabasePassword = password
@@ -375,8 +639,13 @@ func TestConfigFormattingAndErrorsDoNotExposeSecrets(t *testing.T) {
 	cfg.ReindexDispatchErrorBackoff = 7 * time.Second
 	cfg.ReindexLeaseDuration = 4 * time.Minute
 	cfg.ReindexHeartbeatInterval = 50 * time.Second
+	cfg.EmbeddingProvider = EmbeddingProviderOpenAICompatible
+	cfg.EmbeddingBaseURL = embeddingURL
+	cfg.EmbeddingAPIKey = embeddingKey
+	cfg.EmbeddingModel = "embed-v1"
+	cfg.EmbeddingDimensions = 3
 	for _, formatted := range []string{fmt.Sprint(cfg), fmt.Sprintf("%+v", cfg), fmt.Sprintf("%#v", cfg)} {
-		for _, secret := range []string{password, databaseURL, telemetryToken} {
+		for _, secret := range []string{password, databaseURL, telemetryToken, embeddingKey, embeddingURL} {
 			if strings.Contains(formatted, secret) {
 				t.Fatalf("formatted config exposed secret %q: %s", secret, formatted)
 			}
@@ -402,6 +671,12 @@ func TestConfigFormattingAndErrorsDoNotExposeSecrets(t *testing.T) {
 	cfg.TelemetryEndpoint = "https://collector:invalid-endpoint-secret@%zz"
 	if err := cfg.Validate(); err == nil || strings.Contains(err.Error(), "invalid-endpoint-secret") {
 		t.Fatalf("telemetry validation error must be stable and secret-safe: %v", err)
+	}
+	cfg.TelemetryMode = TelemetryModeDisabled
+	cfg.TelemetryEndpoint = ""
+	cfg.EmbeddingBaseURL = "https://embedding-url-secret@%zz"
+	if err := cfg.Validate(); err == nil || strings.Contains(err.Error(), "embedding-url-secret") || strings.Contains(err.Error(), embeddingKey) {
+		t.Fatalf("embedding validation error must be stable and secret-safe: %v", err)
 	}
 }
 

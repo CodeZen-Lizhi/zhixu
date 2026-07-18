@@ -248,7 +248,7 @@ func validateFirstCompletion(ctx context.Context, tx pgx.Tx, proposal completion
 	if execution.cleanupCompletedAt == nil {
 		return completionPrerequisitePending("writeback cleanup has not completed")
 	}
-	if delivery.Regression == nil || delivery.Regression.Code != domain.RegressionCodeSnapshotStructureV1 ||
+	if delivery.Regression == nil || !domain.SnapshotRegressionCodeMatchesIndex(delivery.Regression.Code, target) ||
 		delivery.SourceVersionID == nil || delivery.ParseProjectionID == nil || delivery.ExcludedSourceCount == nil ||
 		attempt.IngestionAttemptID == nil || target.Status != domain.IndexStatusReady || target.ProcessingContract == nil || target.ExpectedSourceCount == nil {
 		return consistency("REINDEX_COMPLETION_GATE_FAILED", errors.New("delivery regression or ready index gate is not satisfied"))
@@ -335,7 +335,8 @@ func replayCompletedReindex(ctx context.Context, tx pgx.Tx, command domain.Compl
 		delivery.ExcludedSourceCount == nil || delivery.Regression == nil || attempt.IngestionAttemptID == nil ||
 		execution.status != "completed" || execution.cleanupCompletedAt == nil || proposal.status != "completed" ||
 		proposal.workspaceID != delivery.WorkspaceID || proposal.workflowRunID == nil || *proposal.workflowRunID != execution.workflowRunID ||
-		proposal.id != execution.proposalID || execution.id != delivery.WritebackExecutionID || execution.workspaceID != delivery.WorkspaceID {
+		proposal.id != execution.proposalID || execution.id != delivery.WritebackExecutionID || execution.workspaceID != delivery.WorkspaceID ||
+		!domain.SnapshotRegressionCodeMatchesIndex(delivery.Regression.Code, locked.target) {
 		return domain.CompleteReindexResult{}, conflict("REINDEX_COMPLETION_REPLAY_CONFLICT", errors.New("terminal completion does not match the requested fence"))
 	}
 	activation, found, err := getActivationByKey(ctx, tx, command.WorkspaceID, command.ActivationIdempotencyKey)

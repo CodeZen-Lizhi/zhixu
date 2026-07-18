@@ -43,5 +43,20 @@ func (service *RegressionService) RunSnapshotStructureV1(ctx context.Context, co
 			errors.New("retrieval regression service is unavailable"),
 		)
 	}
+	command.RegressionCode = domain.SnapshotStructureRegressionV1
+	return service.store.RunSnapshotRegression(ctx, command)
+}
+
+// RunSnapshotStructureV2 在 Building 状态执行绑定 Embedding Version 的 SNAPSHOT_STRUCTURE_V2。
+func (service *RegressionService) RunSnapshotStructureV2(ctx context.Context, command domain.SnapshotRegressionCommand) (domain.SnapshotRegressionResult, error) {
+	if service == nil || service.store == nil {
+		return domain.SnapshotRegressionResult{}, foundation.NewError(
+			foundation.ErrorDependencyUnavailable,
+			regressionServiceUnavailableCode,
+			false,
+			errors.New("retrieval regression service is unavailable"),
+		)
+	}
+	command.RegressionCode = domain.SnapshotStructureRegressionV2
 	return service.store.RunSnapshotRegression(ctx, command)
 }

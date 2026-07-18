@@ -133,6 +133,51 @@ func TestSnapshotRegressionHashChangesWhenVerifiedFactChanges(t *testing.T) {
 	}
 }
 
+func TestValidateSnapshotRegressionV2FreezesEmbeddingAndVectorTerminalCounts(t *testing.T) {
+	command, observation := validSnapshotRegressionFixture()
+	command.RegressionCode = SnapshotStructureRegressionV2
+	embeddingID := foundation.ID("a0000000-0000-4000-8000-000000000090")
+	observation.Index.EmbeddingVersionID = &embeddingID
+	observation.Index.FusionConfig, _ = CanonicalRRFConfig(validRRFConfig())
+	observation.Index.DegradedCapabilities = nil
+	observation.BuildStatus.VectorDisabledCount = 0
+	observation.BuildStatus.VectorReadyCount = observation.Index.ExpectedChunkCount
+	observation.BuildStatus.DegradedCapabilities = nil
+	proof, err := ValidateSnapshotRegression(command, observation)
+	if err != nil || proof.Code != SnapshotStructureRegressionV2 {
+		t.Fatalf("proof=%#v err=%v", proof, err)
+	}
+
+	changed := observation
+	otherEmbeddingID := foundation.ID("a0000000-0000-4000-8000-000000000091")
+	changed.Index.EmbeddingVersionID = &otherEmbeddingID
+	changedProof, err := ValidateSnapshotRegression(command, changed)
+	if err != nil || changedProof.Hash == proof.Hash {
+		t.Fatalf("embedding change proof=%#v err=%v", changedProof, err)
+	}
+
+	degraded := observation
+	degraded.BuildStatus.VectorReadyCount = 1
+	degraded.BuildStatus.VectorSkippedOversizedCount = 1
+	degradedProof, err := ValidateSnapshotRegression(command, degraded)
+	if err != nil || degradedProof.Hash == proof.Hash {
+		t.Fatalf("degraded proof=%#v err=%v", degradedProof, err)
+	}
+}
+
+func TestSnapshotRegressionVersionCannotBeReinterpretedAcrossIndexKinds(t *testing.T) {
+	command, observation := validSnapshotRegressionFixture()
+	command.RegressionCode = SnapshotStructureRegressionV2
+	_, err := ValidateSnapshotRegression(command, observation)
+	assertSnapshotRegressionFailureCode(t, err, ErrorCodeSnapshotStructureV2RegressionFailed)
+
+	command, observation = validSnapshotRegressionFixture()
+	embeddingID := foundation.ID("a0000000-0000-4000-8000-000000000090")
+	observation.Index.EmbeddingVersionID = &embeddingID
+	_, err = ValidateSnapshotRegression(command, observation)
+	assertSnapshotRegressionFailureCode(t, err, ErrorCodeSnapshotStructureRegressionFailed)
+}
+
 func validSnapshotRegressionFixture() (SnapshotRegressionCommand, SnapshotRegressionObservation) {
 	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
 	workspaceID := foundation.ID("a0000000-0000-4000-8000-000000000001")
@@ -162,7 +207,8 @@ func validSnapshotRegressionFixture() (SnapshotRegressionCommand, SnapshotRegres
 		DegradedCapabilities: []DegradedCapability{DegradedVector},
 	}
 	command := SnapshotRegressionCommand{
-		WorkspaceID: workspaceID, DeliveryID: "a0000000-0000-4000-8000-000000000006",
+		RegressionCode: SnapshotStructureRegressionV1,
+		WorkspaceID:    workspaceID, DeliveryID: "a0000000-0000-4000-8000-000000000006",
 		TargetSourceID: targetSourceID, TargetSourceVersionID: targetVersionID,
 		TargetResultHash: strings.Repeat("5", 64), TargetParseProjectionID: projectionID, IndexVersionID: indexID,
 	}
@@ -182,10 +228,14 @@ func validSnapshotRegressionFixture() (SnapshotRegressionCommand, SnapshotRegres
 }
 
 func assertSnapshotRegressionFailure(t *testing.T, err error) {
+	assertSnapshotRegressionFailureCode(t, err, ErrorCodeSnapshotStructureRegressionFailed)
+}
+
+func assertSnapshotRegressionFailureCode(t *testing.T, err error, code string) {
 	t.Helper()
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorConsistencyViolation ||
-		classified.Code != ErrorCodeSnapshotStructureRegressionFailed || classified.Retryable {
+		classified.Code != code || classified.Retryable {
 		t.Fatalf("regression error = %#v", err)
 	}
 }

@@ -161,14 +161,34 @@ M4-D 于 2026-07-17 已保存以下真实 PostgreSQL/River/容器证据：
   恢复；确定性错误归约 failed/manual，事务结果未知才由同一 River dispatch 重投。
 - 真实 smoke：`approval_dispatch_river_smoke_integration_test.go` 联合
   `reindex_river_fault_smoke_integration_test.go` 执行 HTTP Approval→Safe Writeback→Reindex Outbox→
-  committed Source→Ingestion→FTS-only Snapshot→Regression→Active→Completed；Commit 后工作树漂移不
-  污染 committed artifact，四个 checkpoint、Ready 与 Completion response-loss 均恢复，两个真实
-  River Worker 最终只产生一个 Activation/Active/Completion。
+  committed Source→Ingestion→Snapshot→Regression→Active→Completed；M6-B 首次落地时使用 FTS-only，
+  M6-C 已将同一 smoke 升级为真实 HTTP Embedding + Hybrid V2。Commit 后工作树漂移不污染 committed
+  artifact，四个 checkpoint、Ready 与 Completion response-loss 均恢复，两个真实 River Worker
+  最终只产生一个 Activation/Active/Completion。
 - M6-B 不包含生产 Embedding、Vector/RRF/Search API；这些能力未实现时不得用 fake 或 degraded
   空壳冒充 M6-C/D 验收。
 - 全仓 integration 复用同一个 disposable 基准数据库时使用 `-p 1` 串行 Go package；历史测试
   包含全局“单 Active Workspace”约束，包级并行会让夹具互相污染。真实并发仍由各自创建
   独立临时数据库的 Dispatcher、Completion、Activation 和 River smoke 覆盖。
+
+### 8.5 M6-C Embedding And Hybrid Search 专项
+
+- Provider Contract：共享 httptest 覆盖 OpenAI-Compatible `/v1/embeddings` 与 Ollama `/api/embed` 的
+  batch 顺序、模型/维度、L2、429/5xx/4xx、非法/超大响应、redirect、timeout/cancel 和 `errors.Is`
+  取消链；错误、String/GoString 不包含 Key、正文或完整 Endpoint。
+- Vector Build：Domain/Application 覆盖 cache hit/miss、同 hash fan-out、atomic oversized、普通契约
+  mismatch、Provider 损坏和 response-loss replay。真实 PostgreSQL 覆盖 Workspace cache 隔离、
+  set-based cache/Projection 写入、并发冲突回滚、总批次正文上限和 search_vector 不被覆盖。
+- V2 Regression：完整 Hybrid 与 skipped/failed degraded Hybrid 均从 Projection 终态推导最终
+  `degraded_capabilities`；测试不得预先把 `vector` degradation 写入 Building Index 来绕过真实顺序。
+- Search：真实 PostgreSQL 覆盖 Active-only、Source/SourceVersion/path/time filter 等集、bounded 多来源
+  provenance、FTS/trigram 索引、三种固定 distance operator 与 exact scan EXPLAIN；Application 覆盖
+  Keyword/Semantic/Hybrid、RRF、相邻去重、Rerank exact validator、显式降级和真实空结果。
+- 端到端 fault smoke 使用真实 River/PostgreSQL/LocalFS/Git 和 OpenAI-Compatible httptest Adapter，覆盖
+  Vector commit response-loss 后的同 dispatch 重投、V2 Regression/Completion、唯一 Active、最小
+  Hybrid Search，以及 Provider Key、正文、DSN、路径不进入 River payload、日志或错误。
+- 当前 EXPLAIN 只证明索引/operator/过滤正确，不作为 50 万 Chunk 的 P95 或 ANN 参数结论；容量结论
+  归 M10。
 
 ## 9. E2E
 

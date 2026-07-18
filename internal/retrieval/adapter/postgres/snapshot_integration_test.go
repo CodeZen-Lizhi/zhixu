@@ -75,6 +75,88 @@ func TestRepositoryBeginWorkspaceSnapshotSelectsLatestEligibleSourcesAndReplays(
 	}
 }
 
+func TestRepositoryBeginWorkspaceSnapshotPersistsHybridBindingAndPendingVectors(t *testing.T) {
+	repository, database, ctx := newRetrievalTestRepository(t)
+	now := time.Date(2026, 7, 18, 1, 20, 0, 0, time.UTC)
+	workspaceID := seedSnapshotWorkspace(t, ctx, database.DB(), 8, now)
+	target := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 32, 1, true, now, now, 2)
+	embedding := domain.EmbeddingVersion{
+		ID: snapshotID(310), Provider: "openai", AdapterName: "compatible", AdapterVersion: "v1", Model: "embed-v1",
+		Dimensions: 3, Normalization: domain.NormalizationL2, DistanceMetric: domain.DistanceCosine,
+		ConfigHash: strings.Repeat("9", 64), CreatedAt: now,
+	}
+	if _, err := repository.RegisterEmbeddingVersion(ctx, embedding); err != nil {
+		t.Fatal(err)
+	}
+	command := snapshotCommand(workspaceID, 311, target, "snapshot-hybrid", now.Add(time.Minute))
+	command.IndexVersion.EmbeddingVersionID = &embedding.ID
+	command.IndexVersion.DegradedCapabilities = nil
+	fusion, err := domain.CanonicalRRFConfig(domain.RRFConfig{
+		SchemaVersion: domain.RRFFusionSchemaVersionV1, Method: domain.FusionMethodRRF, K: 60,
+		LexicalCandidateLimit: 200, VectorCandidateLimit: 200, FusedCandidateLimit: 200, RerankCandidateLimit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.IndexVersion.FusionConfig = fusion
+	created, err := repository.BeginWorkspaceSnapshot(ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.IndexVersion.EmbeddingVersionID == nil || *created.IndexVersion.EmbeddingVersionID != embedding.ID ||
+		len(created.IndexVersion.DegradedCapabilities) != 0 || created.ChunkCount != 2 {
+		t.Fatalf("hybrid snapshot=%#v", created)
+	}
+	if _, err := repository.BuildLexical(ctx, domain.LexicalBuildCommand{
+		WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID, ExpectedIndexVersion: 1, At: now.Add(2 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var pending int64
+	if err := database.QueryRow(ctx, `SELECT count(*) FROM retrieval.chunk_projection
+		WHERE index_version_id=$1 AND embedding_version_id=$2 AND lexical_status='ready' AND vector_status='pending'`,
+		string(created.IndexVersion.ID), string(embedding.ID)).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != created.ChunkCount {
+		t.Fatalf("pending vectors=%d want=%d", pending, created.ChunkCount)
+	}
+
+	replay := command
+	replay.IndexVersion.ID = snapshotID(312)
+	replay.IndexVersion.CreatedAt = replay.IndexVersion.CreatedAt.Add(time.Hour)
+	replay.IndexVersion.UpdatedAt = replay.IndexVersion.CreatedAt
+	replayed, err := repository.BeginWorkspaceSnapshot(ctx, replay)
+	if err != nil || !replayed.Replayed || replayed.IndexVersion.ID != created.IndexVersion.ID {
+		t.Fatalf("hybrid replay=%#v err=%v", replayed, err)
+	}
+	otherEmbeddingID := snapshotID(313)
+	replay.IndexVersion.EmbeddingVersionID = &otherEmbeddingID
+	if _, err := repository.BeginWorkspaceSnapshot(ctx, replay); !retrievalErrorCode(err, "REINDEX_SNAPSHOT_IDEMPOTENCY_CONFLICT") {
+		t.Fatalf("embedding mutation error=%#v", err)
+	}
+	replay = command
+	replay.IndexVersion.ID = snapshotID(314)
+	replay.IndexVersion.FusionConfig, err = domain.CanonicalRRFConfig(domain.RRFConfig{
+		SchemaVersion: domain.RRFFusionSchemaVersionV1, Method: domain.FusionMethodRRF, K: 61,
+		LexicalCandidateLimit: 200, VectorCandidateLimit: 200, FusedCandidateLimit: 200, RerankCandidateLimit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.BeginWorkspaceSnapshot(ctx, replay); !retrievalErrorCode(err, "REINDEX_SNAPSHOT_IDEMPOTENCY_CONFLICT") {
+		t.Fatalf("fusion mutation error=%#v", err)
+	}
+	replay = command
+	replay.IndexVersion.ID = snapshotID(315)
+	replay.IndexVersion.EmbeddingVersionID = nil
+	replay.IndexVersion.DegradedCapabilities = []domain.DegradedCapability{domain.DegradedVector}
+	replay.IndexVersion.FusionConfig = []byte(`{"method":"fts_only"}`)
+	if _, err := repository.BeginWorkspaceSnapshot(ctx, replay); !retrievalErrorCode(err, "REINDEX_SNAPSHOT_IDEMPOTENCY_CONFLICT") {
+		t.Fatalf("hybrid-to-v1 mutation error=%#v", err)
+	}
+}
+
 func TestRepositoryBeginWorkspaceSnapshotIncrementallyReplacesTargetsWithoutLosingSources(t *testing.T) {
 	repository, database, ctx := newRetrievalTestRepository(t)
 	now := time.Date(2026, 7, 18, 1, 30, 0, 0, time.UTC)

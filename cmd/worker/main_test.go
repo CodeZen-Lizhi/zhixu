@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
+	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	workflowhealth "github.com/CodeZen-Lizhi/zhixu/internal/workflow/httphealth"
 	workflowruntime "github.com/CodeZen-Lizhi/zhixu/internal/workflow/runtime"
 )
@@ -17,6 +20,52 @@ func TestNewWorkerComponentsRequiresDatabase(t *testing.T) {
 	components, err := newWorkerComponents(nil, config.Defaults(), nil, nil)
 	if err == nil || components.safeWriteback != nil {
 		t.Fatalf("components=%#v err=%v", components, err)
+	}
+}
+
+func TestConfiguredEmbedderSupportsDisabledOpenAIAndOllama(t *testing.T) {
+	disabled, err := newConfiguredEmbedder(config.Defaults())
+	if err != nil || disabled != nil {
+		t.Fatalf("disabled embedder=%#v err=%v", disabled, err)
+	}
+	base := config.Defaults()
+	base.EmbeddingModel = "embed-v1"
+	base.EmbeddingDimensions = 3
+	base.EmbeddingNormalization = retrievaldomain.NormalizationL2
+	base.EmbeddingDistanceMetric = retrievaldomain.DistanceCosine
+	base.EmbeddingMaxBatchSize = 8
+	base.EmbeddingMaxInputBytes = 1024
+	base.EmbeddingMaxBatchInputBytes = 8192
+	base.EmbeddingTimeout = time.Second
+	base.EmbeddingMaxResponseBytes = 1 << 20
+
+	openAI := base
+	openAI.EmbeddingProvider = config.EmbeddingProviderOpenAICompatible
+	openAI.EmbeddingBaseURL = "https://models.example.test"
+	openAI.EmbeddingAPIKey = "secret-canary"
+	openAIEmbedder, err := newConfiguredEmbedder(openAI)
+	if err != nil || openAIEmbedder.Contract().Provider != "openai-compatible" || strings.Contains(fmt.Sprintf("%#v", openAIEmbedder), openAI.EmbeddingAPIKey) {
+		t.Fatalf("openai contract=%#v err=%v", openAIEmbedder, err)
+	}
+
+	ollama := base
+	ollama.EmbeddingProvider = config.EmbeddingProviderOllama
+	ollama.EmbeddingBaseURL = "http://127.0.0.1:11434"
+	ollamaEmbedder, err := newConfiguredEmbedder(ollama)
+	if err != nil || ollamaEmbedder.Contract().Provider != "ollama" {
+		t.Fatalf("ollama contract=%#v err=%v", ollamaEmbedder, err)
+	}
+}
+
+func TestConfiguredRRFUsesVersionedTypedLimits(t *testing.T) {
+	cfg := config.Defaults()
+	raw, err := configuredRRF(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rrf, err := retrievaldomain.ParseRRFConfig(raw)
+	if err != nil || rrf.K != cfg.RetrievalRRFK || rrf.FusedCandidateLimit != cfg.RetrievalRRFFusedCandidateLimit {
+		t.Fatalf("rrf=%#v raw=%s err=%v", rrf, raw, err)
 	}
 }
 

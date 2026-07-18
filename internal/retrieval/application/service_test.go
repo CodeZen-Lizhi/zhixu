@@ -95,6 +95,57 @@ func TestBeginWorkspaceSnapshotOwnsBoundedFTSOnlyConfiguration(t *testing.T) {
 	}
 }
 
+func TestBeginWorkspaceSnapshotBindsEmbeddingAndStrictRRF(t *testing.T) {
+	t.Parallel()
+	embedding := validEmbedding(testIDs[1])
+	store := &fakeStore{embedding: embedding}
+	service := newTestService(t, store)
+	fusion, err := domain.CanonicalRRFConfig(domain.RRFConfig{
+		SchemaVersion: domain.RRFFusionSchemaVersionV1, Method: domain.FusionMethodRRF, K: 60,
+		LexicalCandidateLimit: 200, VectorCandidateLimit: 200, FusedCandidateLimit: 200, RerankCandidateLimit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.BeginWorkspaceSnapshot(context.Background(), BeginWorkspaceSnapshotRequest{
+		WorkspaceID: testWorkspaceID, EmbeddingVersionID: &embedding.ID,
+		TargetSourceID: "91000000-0000-4000-8000-000000000001", TargetSourceVersionID: "92000000-0000-4000-8000-000000000001",
+		TargetParseProjectionID: "93000000-0000-4000-8000-000000000001", TokenizerID: "simple", TokenizerVersion: "v1",
+		TokenizerConfigHash: hashA, FusionConfig: fusion, SourceSnapshotRef: "reindex-v1:event", IdempotencyKey: "snapshot-hybrid",
+		ProcessingContract: domain.ProcessingContract{ParserID: "goldmark", ParserVersion: "v1", ParserConfigHash: hashB, ChunkStrategyVersion: "structure-v1", SchemaVersion: "v1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := store.snapshot
+	if command.IndexVersion.EmbeddingVersionID == nil || *command.IndexVersion.EmbeddingVersionID != embedding.ID ||
+		len(command.IndexVersion.DegradedCapabilities) != 0 || string(command.IndexVersion.FusionConfig) != string(fusion) {
+		t.Fatalf("hybrid snapshot command=%#v", command)
+	}
+
+	nonCanonical := append(json.RawMessage(nil), fusion...)
+	nonCanonical = append(json.RawMessage{' '}, nonCanonical...)
+	lookupsBefore := store.embeddingLookupCalls
+	_, err = service.BeginWorkspaceSnapshot(context.Background(), BeginWorkspaceSnapshotRequest{
+		WorkspaceID: testWorkspaceID, EmbeddingVersionID: &embedding.ID, FusionConfig: nonCanonical,
+	})
+	if err == nil || store.embeddingLookupCalls != lookupsBefore {
+		t.Fatalf("non-canonical hybrid fusion config error=%v lookups=%d", err, store.embeddingLookupCalls-lookupsBefore)
+	}
+
+	store.embedding.ID = testIDs[0]
+	_, err = service.BeginWorkspaceSnapshot(context.Background(), BeginWorkspaceSnapshotRequest{
+		WorkspaceID: testWorkspaceID, EmbeddingVersionID: &embedding.ID,
+		TargetSourceID: "91000000-0000-4000-8000-000000000001", TargetSourceVersionID: "92000000-0000-4000-8000-000000000001",
+		TargetParseProjectionID: "93000000-0000-4000-8000-000000000001", TokenizerID: "simple", TokenizerVersion: "v1",
+		TokenizerConfigHash: hashA, FusionConfig: fusion, SourceSnapshotRef: "reindex-v1:event", IdempotencyKey: "snapshot-hybrid-mismatch",
+		ProcessingContract: domain.ProcessingContract{ParserID: "goldmark", ParserVersion: "v1", ParserConfigHash: hashB, ChunkStrategyVersion: "structure-v1", SchemaVersion: "v1"},
+	})
+	if err == nil {
+		t.Fatal("mismatched embedding lookup accepted")
+	}
+}
+
 func TestBeginIndexRequiresOneCanonicalJSONObject(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -350,21 +401,22 @@ func TestQueryMethodsDelegateExactScope(t *testing.T) {
 }
 
 type fakeStore struct {
-	registered    domain.EmbeddingVersion
-	registerCalls int
-	begun         domain.IndexBuild
-	snapshot      domain.WorkspaceSnapshotCommand
-	index         domain.IndexVersion
-	embedding     domain.EmbeddingVersion
-	saved         domain.VectorProjectionBatch
-	lexical       domain.LexicalBuildCommand
-	transition    domain.IndexTransition
-	status        domain.BuildStatus
-	active        domain.IndexVersion
-	hasActive     bool
-	activation    domain.ActivationCommand
-	rollback      domain.RollbackActivationCommand
-	lookupKey     string
+	registered           domain.EmbeddingVersion
+	registerCalls        int
+	begun                domain.IndexBuild
+	snapshot             domain.WorkspaceSnapshotCommand
+	index                domain.IndexVersion
+	embedding            domain.EmbeddingVersion
+	embeddingLookupCalls int
+	saved                domain.VectorProjectionBatch
+	lexical              domain.LexicalBuildCommand
+	transition           domain.IndexTransition
+	status               domain.BuildStatus
+	active               domain.IndexVersion
+	hasActive            bool
+	activation           domain.ActivationCommand
+	rollback             domain.RollbackActivationCommand
+	lookupKey            string
 }
 
 func (f *fakeStore) RegisterEmbeddingVersion(_ context.Context, value domain.EmbeddingVersion) (domain.EmbeddingVersionResult, error) {
@@ -402,6 +454,7 @@ func (f *fakeStore) RollbackActivate(_ context.Context, value domain.RollbackAct
 	return domain.ActivationResult{}, nil
 }
 func (f *fakeStore) GetEmbeddingVersion(context.Context, foundation.ID) (domain.EmbeddingVersion, error) {
+	f.embeddingLookupCalls++
 	if f.embedding.ID == "" {
 		return domain.EmbeddingVersion{}, errors.New("missing")
 	}

@@ -604,6 +604,21 @@ Index Version 表示某个 Workspace 的可追踪完整检索投影，包含 FTS
   切换后版本。首次激活、替换和回滚均锁定 Workspace Index 集合，旧 Active→Retiring、
   新目标→Active 与 Receipt append 必须同事务提交；延迟重放按 Receipt 重建历史结果快照。
 
+M6-C `embedding_cache`：
+
+- 主键为 `workspace_id + embedding_version_id + content_hash`，不保存正文、Source 或路径；Workspace
+  维度提供缓存隔离，FK 证明全局不可变 Embedding Version 存在，不把同配置跨 Workspace 缓存共享。
+- INSERT 时数据库再次校验维度、有限值和非零范数；UPDATE/DELETE 禁止。相同 key 的精确向量
+  是 replay，不同向量是 ConsistencyViolation。
+- Cache 写入使用单条参数化 `INSERT ... SELECT FROM unnest(...) ON CONFLICT DO NOTHING`，随后一次
+  批量 readback；Projection 终态使用单条 `UPDATE ... FROM unnest(...)`。两者位于同一事务，禁止
+  以 `pgx.Batch` 包装逐行 statement 冒充集合写入。
+- `00016_embedding_hybrid_search.sql` 同时扩展 V2 Regression/Completion。存在 cache、V2 Delivery
+  或 Hybrid Index 数据时 Down 返回 SQLSTATE `55000`，历史 `00014/00015` 不修改。
+- Search Lexical/Vector 两路复用同一参数化 filter builder，只读取 Workspace 当前 Active Index、
+  included Source Manifest、active Canonical Chunk 与 ready Projection。distance operator 只能由
+  持久 `cosine|inner_product|euclidean` 枚举选择三个固定 SQL 模板。
+
 ### reindex_delivery / index_manifest_source
 
 M6-B 使用独立 Delivery 事实消费 Safe Writeback Reindex Outbox，不复用 Outbox `published_at`

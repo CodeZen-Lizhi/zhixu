@@ -29,8 +29,15 @@ func TestRegressionServiceRunsIndependentStoreSeam(t *testing.T) {
 	}
 
 	got, err := service.RunSnapshotStructureV1(context.Background(), command)
-	if err != nil || got != want || store.command != command {
+	wantCommand := command
+	wantCommand.RegressionCode = domain.SnapshotStructureRegressionV1
+	if err != nil || got != want || store.command != wantCommand {
 		t.Fatalf("RunSnapshotStructureV1() = %#v, %v, command=%#v", got, err, store.command)
+	}
+
+	store.result.Code = domain.SnapshotStructureRegressionV2
+	if _, err := service.RunSnapshotStructureV2(context.Background(), command); err != nil || store.command.RegressionCode != domain.SnapshotStructureRegressionV2 {
+		t.Fatalf("RunSnapshotStructureV2() error=%v command=%#v", err, store.command)
 	}
 }
 

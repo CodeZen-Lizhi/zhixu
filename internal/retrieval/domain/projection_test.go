@@ -23,7 +23,7 @@ func TestValidateChunkProjectionAcceptsFTSOnlyAndHybridReady(t *testing.T) {
 	hybrid := validProjection(hybridIndex)
 	hybrid.EmbeddingVersionID = &embedding.ID
 	hybrid.VectorStatus = VectorStatusReady
-	hybrid.Embedding = []float32{0.1, 0.2, 0.3}
+	hybrid.Embedding = []float32{1, 0, 0}
 	if err := ValidateChunkProjection(hybridIndex, &embedding, hybrid); err != nil {
 		t.Fatalf("hybrid projection error = %v", err)
 	}
@@ -43,6 +43,7 @@ func TestValidateChunkProjectionRejectsInvalidVectorValues(t *testing.T) {
 		{name: "nan", vector: []float32{1, float32(math.NaN()), 2}},
 		{name: "infinite", vector: []float32{1, float32(math.Inf(1)), 2}},
 		{name: "zero norm", vector: []float32{0, 0, 0}},
+		{name: "non unit l2", vector: []float32{1, 1, 0}},
 	}
 
 	for _, test := range tests {

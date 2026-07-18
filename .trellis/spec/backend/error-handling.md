@@ -30,6 +30,8 @@
 4. Retryable 错误必须有最大次数、指数退避、抖动和必要的 `Retry-After`；未知副作用结果不得盲目重试，应先查询幂等记录或进入人工恢复。
 5. 同一错误在 API、Workflow、日志、Trace 和 Audit 中共享 error code；SSE 只推送摘要，客户端重新查询资源状态，SSE 本身不是事实源。
 6. 每个失败路径都要保留状态、错误类别、可重试性和最后失败节点；不要通过捕获异常后标记成功来隐藏失败。
+7. Adapter 可以用安全 `foundation.Error` 隐藏底层消息，但 caller cancel/deadline 必须作为 Cause 保留，
+   使 `errors.Is(err, context.Canceled|DeadlineExceeded)` 成立；否则 Worker 可能把停机取消持久归约为业务失败。
 
 ## API 与 SSE 响应
 

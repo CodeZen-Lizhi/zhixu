@@ -729,7 +729,9 @@ IGNORED 必须保存证据指纹；只有证据变化时才能自动 REOPENED。
 - 目录不可写：阻止创建。
 - Git 命令不可用：阻止创建并提供安装提示。
 - 数据库不可用：阻止完成，但保留未完成配置草稿。
-- Embedding 不可用：允许进入系统，但扫描只能完成解析，索引状态为 WAITING_DEPENDENCY。
+- Embedding 未配置或暂时不可用：允许建立 FTS-only Active Index，Keyword 正常可用；Hybrid
+  显式退化为 Keyword 并展示 vector/rerank degraded，Semantic 返回能力不可用。不得用
+  `WAITING_DEPENDENCY` 阻断已经具备的全文检索，也不得以空结果冒充语义检索成功。
 
 #### 10.1.8 验收标准
 
