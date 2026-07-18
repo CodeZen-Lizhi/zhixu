@@ -640,3 +640,50 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 20: 完成 M6-D Search API 与 M6 Retrieval 收口
+
+**Date**: 2026-07-19
+**Task**: 完成 M6-D Search API And Integration，并归档 M6 Retrieval 父任务
+**Branch**: `dev`
+
+### Summary
+
+交付 Workspace-scoped Keyword/Semantic/Hybrid Search HTTP/OpenAPI、top-100 HMAC Cursor、可打开的不可变
+Source Version/Span Evidence、API/Worker 共享 Embedder Factory、严格 Web Decoder，以及真实 PostgreSQL/River/
+Compose 的 Approval→Writeback→Reindex→Search→Evidence→Completion 闭环；M6-01 已完成并归档。
+
+### Main Changes
+
+- 新增 `POST /api/v1/search` 与两个 Evidence GET 资源，严格拒绝未知字段、非法 UTF-8、孤立 surrogate、
+  显式 null/错误类型、空 mode/cursor，并保持稳定 Problem 分类。
+- Cursor 绑定规范请求、Active Index、完整 top-100 结果 Hash 与 offset；篡改、跨请求和结果漂移 fail closed。
+- Evidence 通过 PostgreSQL 全绑定与不可变 Artifact Reader 复核，最多返回 4 KiB UTF-8 excerpt，不泄漏路径/locator。
+- 新增真实生产 SQL JSON EXPLAIN、River response-loss fault smoke、disposable Compose 黑盒 smoke 与安全输出 canary。
+- OpenAPI、Web Decoder、产品/架构/部署/安全/测试文档及 backend/frontend code-spec 已同步。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0cee7b1` | `feat: 完成 Search API 与集成闭环` |
+| `5290713` | `chore(task): 归档 M6 Retrieval` |
+
+### Testing
+
+- `go test -race ./internal/retrieval/... ./internal/httpapi ./internal/app ./cmd/api ./cmd/worker ./internal/platform/models`
+- `go test -race -count=20 ./internal/retrieval/domain ./internal/retrieval/application ./internal/retrieval/http`
+- 全新迁移 disposable PostgreSQL：`go test -race -tags=integration -count=1 -p 1 ./...`
+- `go vet ./...`、`make test`、`go mod tidy -diff`
+- Web lint/typecheck/test/build：5 files、41 tests 通过
+- `node api/openapi/check.mjs`、Compose config、`make compose-search-smoke`、`make docker-build`、`git diff --check`
+- 主 `go-review`、`sql-code-review`、`code-review-and-quality` 与两路独立复验均无剩余 P0/P1/P2。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 按依赖先实施 M5-05 Knowledge Domain，再进入 M6-02 Agent 结构化输出、引用校验、拒答与冲突处理。
