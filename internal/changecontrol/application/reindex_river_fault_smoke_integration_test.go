@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/app"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	ingestionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/postgres"
 	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
@@ -29,8 +31,10 @@ import (
 	platformparser "github.com/CodeZen-Lizhi/zhixu/internal/platform/parser"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	reindexriver "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/river"
+	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
+	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
 	workflowriver "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
@@ -450,8 +454,8 @@ func failReindexRiverRetryWait(t *testing.T, pool *pgxpool.Pool, deliveryID foun
 	var riverAttempt, deliveryAttempt int
 	_ = pool.QueryRow(context.Background(), `SELECT state,attempt,errors::text FROM workflow.river_job WHERE id=$1`, jobID).Scan(&jobState, &riverAttempt, &riverErrors)
 	_ = pool.QueryRow(context.Background(), `SELECT status,attempt_no FROM retrieval.reindex_delivery WHERE id=$1`, string(deliveryID)).Scan(&deliveryStatus, &deliveryAttempt)
-	t.Fatalf("River retry attempt %d code=%s was not recorded: job_state=%s river_attempt=%d delivery=%s delivery_attempt=%d errors=%s err=%v",
-		attempt, code, jobState, riverAttempt, deliveryStatus, deliveryAttempt, riverErrors, waitErr)
+	t.Fatalf("River retry attempt %d code=%s was not recorded: job_state=%s river_attempt=%d delivery=%s delivery_attempt=%d errors_bytes=%d err=%v",
+		attempt, code, jobState, riverAttempt, deliveryStatus, deliveryAttempt, len(riverErrors), waitErr)
 }
 
 func assertReindexFaultSmokePayloadsClean(t *testing.T, ctx context.Context, pool *pgxpool.Pool, deliveryID foundation.ID, jobID int64, logs, root, targetPath, approvedContent string) {
@@ -482,9 +486,9 @@ func assertReindexFaultSmokePayloadsClean(t *testing.T, ctx context.Context, poo
 func assertReindexTextClean(t *testing.T, label, payload string, forbidden ...string) {
 	t.Helper()
 	lower := strings.ToLower(payload)
-	for _, value := range forbidden {
+	for index, value := range forbidden {
 		if value != "" && strings.Contains(lower, strings.ToLower(value)) {
-			t.Fatalf("%s leaked %q: %s", label, value, payload)
+			t.Fatalf("%s contained forbidden value index=%d payload_bytes=%d", label, index, len(payload))
 		}
 	}
 }
@@ -543,8 +547,8 @@ func failReindexCompletionWait(t *testing.T, pool *pgxpool.Pool, deliveryID foun
 		FROM retrieval.reindex_delivery delivery
 		JOIN retrieval.reindex_delivery_attempt attempt ON attempt.id=delivery.current_attempt_id
 		WHERE delivery.id=$1`, string(deliveryID)).Scan(&attemptStatus, &leaseOwner, &leaseUntil)
-	t.Fatalf("reindex did not complete: delivery=%s job=%s attempt=%s owner=%s lease_until=%s errors=%s err=%v",
-		deliveryStatus, jobState, attemptStatus, leaseOwner, leaseUntil.UTC().Format(time.RFC3339Nano), jobErrors, waitErr)
+	t.Fatalf("reindex did not complete: delivery=%s job=%s attempt=%s owner=%s lease_until=%s errors_bytes=%d err=%v",
+		deliveryStatus, jobState, attemptStatus, leaseOwner, leaseUntil.UTC().Format(time.RFC3339Nano), len(jobErrors), waitErr)
 }
 
 func assertReindexFaultSmokeFacts(
@@ -588,14 +592,14 @@ func assertReindexFaultSmokeFacts(
 		t.Fatal(err)
 	}
 	if string(artifactBytes) != approvedContent {
-		t.Fatalf("committed artifact=%q want=%q", artifactBytes, approvedContent)
+		t.Fatalf("committed artifact differs from approved content: artifact_bytes=%d approved_bytes=%d", len(artifactBytes), len(approvedContent))
 	}
 	worktreeBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(targetPath)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(worktreeBytes) != string(driftContent) || string(worktreeBytes) == string(artifactBytes) {
-		t.Fatalf("worktree=%q artifact=%q", worktreeBytes, artifactBytes)
+		t.Fatalf("worktree/artifact drift contract failed: worktree_bytes=%d drift_bytes=%d artifact_bytes=%d", len(worktreeBytes), len(driftContent), len(artifactBytes))
 	}
 }
 
@@ -682,21 +686,107 @@ func assertHybridReindexAndSearchSmoke(
 	if err != nil {
 		t.Fatal(err)
 	}
+	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactReader, err := retrievalworkspace.NewReader(
+		workspaceRepository,
+		filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceService, err := retrievalapplication.NewEvidenceReferenceService(searchRepository, artifactReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursors, err := retrievalhttp.NewCursorCodec(bytes.Repeat([]byte{0x5a}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := app.NewRouter(app.Dependencies{
+		Retrieval: retrievalhttp.NewHandler(searchService, evidenceService, cursors),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
 	providerCallsBeforeSearch := providerCalls.Load()
-	result, err := searchService.Search(ctx, retrievaldomain.SearchRequest{
-		WorkspaceID: workspaceID, Query: "approved", Mode: retrievaldomain.SearchModeHybrid, Limit: 5,
+	requestBody, err := json.Marshal(map[string]any{
+		"workspace_id": string(workspaceID), "query": "approved", "retrieval_mode": "hybrid", "limit": 5,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.IndexVersionID != indexID || result.EffectiveMode != retrievaldomain.SearchModeHybrid || len(result.Items) == 0 ||
-		len(result.Degradations) != 1 || result.Degradations[0].Capability != retrievaldomain.SearchDegradationRerank {
-		t.Fatalf("hybrid search result=%#v", result)
+	searchResponse := serveReindexRetrievalRequest(t, ctx, router, http.MethodPost, "/api/v1/search", requestBody)
+	if searchResponse.Code != http.StatusOK {
+		t.Fatalf("search status=%d response_bytes=%d", searchResponse.Code, searchResponse.Body.Len())
+	}
+	var result struct {
+		IndexVersionID string `json:"index_version_id"`
+		EffectiveMode  string `json:"effective_mode"`
+		Degradations   []struct {
+			Capability string `json:"capability"`
+		} `json:"degradations"`
+		Items []struct {
+			Provenances []struct {
+				SourceVersionHref string `json:"source_version_href"`
+				SourceSpanHref    string `json:"source_span_href"`
+			} `json:"provenances"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(searchResponse.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.IndexVersionID != string(indexID) || result.EffectiveMode != string(retrievaldomain.SearchModeHybrid) || len(result.Items) == 0 ||
+		len(result.Degradations) != 1 || result.Degradations[0].Capability != string(retrievaldomain.SearchDegradationRerank) ||
+		len(result.Items[0].Provenances) == 0 {
+		t.Fatalf("hybrid search contract mismatch: index=%s mode=%s degradations=%d items=%d", result.IndexVersionID, result.EffectiveMode, len(result.Degradations), len(result.Items))
 	}
 	providerCallsAfterSearch := providerCalls.Load()
 	if providerCallsBeforeSearch < 1 || providerCallsAfterSearch != providerCallsBeforeSearch+1 {
 		t.Fatalf("provider calls before=%d after=%d", providerCallsBeforeSearch, providerCallsAfterSearch)
 	}
+	provenance := result.Items[0].Provenances[0]
+	versionResponse := serveReindexRetrievalRequest(t, ctx, router, http.MethodGet, provenance.SourceVersionHref, nil)
+	if versionResponse.Code != http.StatusOK {
+		t.Fatalf("source version status=%d response_bytes=%d", versionResponse.Code, versionResponse.Body.Len())
+	}
+	if strings.Contains(versionResponse.Body.String(), ".knowledge/sources/") {
+		t.Fatal("source version response exposed an internal artifact locator")
+	}
+	spanResponse := serveReindexRetrievalRequest(t, ctx, router, http.MethodGet, provenance.SourceSpanHref, nil)
+	if spanResponse.Code != http.StatusOK {
+		t.Fatalf("source span status=%d response_bytes=%d", spanResponse.Code, spanResponse.Body.Len())
+	}
+	var span struct {
+		Excerpt string `json:"excerpt"`
+	}
+	if err := json.Unmarshal(spanResponse.Body.Bytes(), &span); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(span.Excerpt, "approved") || strings.Contains(span.Excerpt, "worktree drift") {
+		t.Fatalf("source span did not come from immutable approved artifact: excerpt_bytes=%d", len(span.Excerpt))
+	}
+}
+
+func serveReindexRetrievalRequest(
+	t *testing.T,
+	ctx context.Context,
+	router http.Handler,
+	method string,
+	path string,
+	body []byte,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	request, err := http.NewRequestWithContext(ctx, method, path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	return response
 }
 
 func reindexSmokeResponseLost(code string) error {

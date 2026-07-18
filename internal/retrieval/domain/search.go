@@ -64,7 +64,7 @@ func CanonicalizeSearchRequest(request SearchRequest) (SearchRequest, error) {
 		return SearchRequest{}, invalid(ErrorCodeSearchRequestInvalid, "search workspace, mode, or limit is invalid")
 	}
 	query := strings.TrimSpace(request.Query)
-	if query == "" || len(query) > MaxSearchQueryBytes || !utf8.ValidString(query) {
+	if query == "" || len(query) > MaxSearchQueryBytes || !utf8.ValidString(query) || strings.ContainsRune(query, '\x00') {
 		return SearchRequest{}, invalid(ErrorCodeSearchRequestInvalid, "search query is empty, oversized, or invalid utf-8")
 	}
 	sourceIDs, err := canonicalIDList(request.Filter.SourceIDs)

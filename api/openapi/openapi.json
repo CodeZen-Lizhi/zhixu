@@ -298,6 +298,63 @@
           "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
         }
       }
+    },
+    "/api/v1/search": {
+      "post": {
+        "operationId": "searchKnowledge",
+        "description": "Runs an Active-only bounded Keyword, Semantic or Hybrid retrieval query. This is a read-only query and does not require Idempotency-Key.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "A stable page from the current top-100 Search window, including explicit degraded capabilities.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchResponse" } } } },
+          "400": { "description": "Invalid JSON, query, filter, mode, limit or cursor.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "The Workspace has no Active Search Index.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "The cursor is stale or a persisted Search/Evidence binding is inconsistent.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "500": { "description": "An unexpected internal Search failure occurred.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Semantic capability or a required Search dependency is unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}": {
+      "parameters": [
+        { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "source_version_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "get": {
+        "operationId": "getEvidenceSourceVersion",
+        "responses": {
+          "200": { "description": "Immutable Source Version metadata for an Evidence provenance.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EvidenceSourceVersion" } } } },
+          "400": { "description": "Invalid Workspace or Source Version identity.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "The Source Version is absent or does not belong to this Workspace.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "The immutable Source Version/Artifact binding is inconsistent.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "500": { "description": "An unexpected internal Evidence Reference failure occurred.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Evidence Reference storage is unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/spans/{source_span_id}": {
+      "parameters": [
+        { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "source_version_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "source_span_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "get": {
+        "operationId": "getEvidenceSourceSpan",
+        "description": "Reads a bounded excerpt from the immutable Content Artifact after verifying Workspace, Source Version, Projection and Span bindings.",
+        "responses": {
+          "200": { "description": "An immutable Source Span and at most 4 KiB of verified UTF-8 excerpt.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EvidenceSourceSpan" } } } },
+          "400": { "description": "Invalid Workspace, Source Version or Span identity.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "404": { "description": "The Source Version/Span is absent or not bound inside this Workspace.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "409": { "description": "The immutable Artifact, Projection, Span or excerpt hash is inconsistent.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "500": { "description": "An unexpected internal Evidence Reference failure occurred.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "503": { "description": "Evidence Reference storage or managed Artifact reading is unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+          "405": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        }
+      }
     }
   },
   "components": {
@@ -613,6 +670,201 @@
         },
         "additionalProperties": false
       },
+      "SearchFilter": {
+        "type": "object",
+        "properties": {
+          "source_ids": { "type": "array", "maxItems": 100, "items": { "type": "string", "format": "uuid" } },
+          "source_version_ids": { "type": "array", "maxItems": 100, "items": { "type": "string", "format": "uuid" } },
+          "path_prefixes": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1 } },
+          "captured_at_from": { "type": "string", "format": "date-time" },
+          "captured_at_before": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "SearchCursor": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048,
+        "description": "Opaque process-lifetime HMAC cursor bound to the canonical request, Active Index and complete top-100 result fingerprint. Clients restart from the first page after an invalid or stale cursor."
+      },
+      "SearchRequest": {
+        "type": "object",
+        "required": ["workspace_id", "query"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "pattern": "^(?![\\s\\S]*\\u0000)[\\s\\S]*\\S[\\s\\S]*$",
+            "x-max-utf8-bytes": 8192,
+            "description": "After trimming leading and trailing whitespace, the query must be non-empty, valid UTF-8, contain no NUL code point, and use at most 8192 UTF-8 bytes. maxLength remains a conservative code-point bound; x-max-utf8-bytes is the authoritative byte limit."
+          },
+          "retrieval_mode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "hybrid" },
+          "filters": { "$ref": "#/components/schemas/SearchFilter" },
+          "cursor": { "$ref": "#/components/schemas/SearchCursor" },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+        },
+        "additionalProperties": false
+      },
+      "SearchDegradation": {
+        "type": "object",
+        "required": ["capability", "error_code", "retryable"],
+        "properties": {
+          "capability": { "type": "string", "enum": ["vector", "rerank"] },
+          "error_code": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "retryable": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "EvidenceSpan": {
+        "type": "object",
+        "required": ["span_id", "start_line", "end_line", "start_byte", "end_byte"],
+        "properties": {
+          "span_id": { "type": "string", "format": "uuid" },
+          "start_line": { "type": "integer", "minimum": 1 },
+          "end_line": { "type": "integer", "minimum": 1 },
+          "start_byte": { "type": "integer", "minimum": 0 },
+          "end_byte": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      },
+      "EvidenceProvenance": {
+        "type": "object",
+        "required": ["source_id", "source_version_id", "relative_path", "captured_at", "source_version_href", "source_span_href"],
+        "properties": {
+          "source_id": { "type": "string", "format": "uuid" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "relative_path": { "type": "string", "minLength": 1 },
+          "captured_at": { "type": "string", "format": "date-time" },
+          "source_version_href": { "type": "string", "pattern": "^/api/v1/workspaces/[0-9a-f-]{36}/source-versions/[0-9a-f-]{36}$" },
+          "source_span_href": { "type": "string", "pattern": "^/api/v1/workspaces/[0-9a-f-]{36}/source-versions/[0-9a-f-]{36}/spans/[0-9a-f-]{36}$" }
+        },
+        "additionalProperties": false
+      },
+      "StageScore": {
+        "type": "object",
+        "required": ["rank", "score"],
+        "properties": {
+          "rank": { "type": "integer", "minimum": 1, "maximum": 500 },
+          "score": { "type": "number" }
+        },
+        "additionalProperties": false
+      },
+      "LexicalScore": {
+        "type": "object",
+        "required": ["rank", "score", "fts_score", "trigram_score"],
+        "properties": {
+          "rank": { "type": "integer", "minimum": 1, "maximum": 500 },
+          "score": { "type": "number" },
+          "fts_score": { "type": "number" },
+          "trigram_score": { "type": "number" }
+        },
+        "additionalProperties": false
+      },
+      "VectorDistance": {
+        "type": "object",
+        "description": "The raw distance produced by the Active Embedding Version's persisted pgvector distance operator; lower ranks first and values are not comparable across models.",
+        "required": ["rank", "distance"],
+        "properties": {
+          "rank": { "type": "integer", "minimum": 1, "maximum": 500 },
+          "distance": { "type": "number" }
+        },
+        "additionalProperties": false
+      },
+      "RerankScore": {
+        "type": "object",
+        "required": ["rank", "score", "model_version"],
+        "properties": {
+          "rank": { "type": "integer", "minimum": 1, "maximum": 500 },
+          "score": { "type": "number" },
+          "model_version": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "additionalProperties": false
+      },
+      "EvidenceScores": {
+        "type": "object",
+        "required": ["lexical", "vector", "fusion", "rerank"],
+        "properties": {
+          "lexical": { "oneOf": [{ "$ref": "#/components/schemas/LexicalScore" }, { "type": "null" }] },
+          "vector": { "oneOf": [{ "$ref": "#/components/schemas/VectorDistance" }, { "type": "null" }] },
+          "fusion": { "$ref": "#/components/schemas/StageScore" },
+          "rerank": { "oneOf": [{ "$ref": "#/components/schemas/RerankScore" }, { "type": "null" }] }
+        },
+        "additionalProperties": false
+      },
+      "SearchEvidence": {
+        "type": "object",
+        "required": ["chunk_id", "parse_projection_id", "sequence", "content_hash", "heading_path", "span", "snippet", "provenances", "provenance_truncated", "scores"],
+        "properties": {
+          "chunk_id": { "type": "string", "format": "uuid" },
+          "parse_projection_id": { "type": "string", "format": "uuid" },
+          "sequence": { "type": "integer", "minimum": 0 },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "heading_path": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 256 } },
+          "span": { "$ref": "#/components/schemas/EvidenceSpan" },
+          "snippet": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "provenances": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "$ref": "#/components/schemas/EvidenceProvenance" } },
+          "provenance_truncated": { "type": "boolean" },
+          "scores": { "$ref": "#/components/schemas/EvidenceScores" }
+        },
+        "additionalProperties": false
+      },
+      "SearchResponse": {
+        "type": "object",
+        "required": ["workspace_id", "index_version_id", "embedding_version_id", "requested_mode", "effective_mode", "index_degraded_capabilities", "degradations", "items"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "index_version_id": { "type": "string", "format": "uuid" },
+          "embedding_version_id": { "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }] },
+          "requested_mode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"] },
+          "effective_mode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"] },
+          "index_degraded_capabilities": { "type": "array", "maxItems": 1, "uniqueItems": true, "items": { "const": "vector" } },
+          "degradations": { "type": "array", "maxItems": 2, "items": { "$ref": "#/components/schemas/SearchDegradation" } },
+          "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/SearchEvidence" } },
+          "next_cursor": { "$ref": "#/components/schemas/SearchCursor" }
+        },
+        "additionalProperties": false
+      },
+      "EvidenceSourceVersion": {
+        "type": "object",
+        "required": ["workspace_id", "source_id", "source_version_id", "source_type", "logical_name", "relative_path", "content_hash", "byte_size", "media_type", "security_status", "captured_at"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "source_id": { "type": "string", "format": "uuid" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "source_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "logical_name": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "relative_path": { "type": "string", "minLength": 1 },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "byte_size": { "type": "integer", "minimum": 0 },
+          "media_type": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "security_status": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "captured_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "EvidenceSourceSpan": {
+        "type": "object",
+        "required": ["source_version", "parse_projection_id", "span_id", "span_type", "start_line", "end_line", "start_byte", "end_byte", "selector", "excerpt_hash", "parser_version", "schema_version", "excerpt", "excerpt_truncated"],
+        "properties": {
+          "source_version": { "$ref": "#/components/schemas/EvidenceSourceVersion" },
+          "parse_projection_id": { "type": "string", "format": "uuid" },
+          "span_id": { "type": "string", "format": "uuid" },
+          "span_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "start_line": { "type": "integer", "minimum": 1 },
+          "end_line": { "type": "integer", "minimum": 1 },
+          "start_byte": { "type": "integer", "minimum": 0 },
+          "end_byte": { "type": "integer", "minimum": 0 },
+          "selector": { "type": "object", "additionalProperties": true },
+          "excerpt_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "parser_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "schema_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "excerpt": { "type": "string", "maxLength": 4096 },
+          "excerpt_truncated": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
       "Problem": {
         "type": "object",
         "required": ["error_code", "message", "retryable"],
@@ -620,7 +872,7 @@
           "error_code": { "type": "string", "minLength": 1 },
           "message": { "type": "string", "minLength": 1 },
           "retryable": { "type": "boolean" },
-          "workflow_run_id": { "type": "string" },
+          "workflow_run_id": { "type": "string", "format": "uuid" },
           "details": { "type": "object", "additionalProperties": true }
         },
         "additionalProperties": false

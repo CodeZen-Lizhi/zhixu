@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -69,6 +70,24 @@ func TestSearchRepositoryActiveFiltersAndBoundedProvenance(t *testing.T) {
 	}
 	if len(lexical) != 3 || len(vector) != 3 {
 		t.Fatalf("all candidates lexical=%d vector=%d", len(lexical), len(vector))
+	}
+	lexicalArguments := []any{
+		string(workspaceID), string(active.ID), strings.TrimSpace(lexicalQuery.Query), lexicalQuery.Limit,
+		domain.MaxEvidenceProvenance,
+	}
+	lexicalPlan := explainSearchQuery(t, ctx, database.DB(), fmt.Sprintf(
+		lexicalCandidateSQL, appendSearchFilter(&lexicalArguments, lexicalQuery.Filter), searchSnippetCharacterLimit, searchRerankCharacterLimit,
+	), lexicalArguments...)
+	for _, marker := range []string{
+		"uq_retrieval_index_version_active",
+		"idx_retrieval_projection_workspace_index_chunk",
+		"idx_retrieval_source_manifest_workspace_index_source",
+		"lexical_match_chunks",
+		"ranked_provenance",
+	} {
+		if !strings.Contains(lexicalPlan, marker) {
+			t.Fatalf("production lexical EXPLAIN did not expose %s", marker)
+		}
 	}
 	replayedLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
 	if err != nil || len(replayedLexical) != len(lexical) {
@@ -499,22 +518,15 @@ func explainSearchQuery(t *testing.T, ctx context.Context, database *pgxpool.Poo
 	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := tx.Query(ctx, "EXPLAIN (COSTS OFF, VERBOSE) "+query, arguments...)
-	if err != nil {
+	if _, err := tx.Exec(ctx, `SELECT set_config('pg_trgm.similarity_threshold',$1,true)`, searchTrigramThreshold); err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	var plan strings.Builder
-	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
-			t.Fatal(err)
-		}
-		plan.WriteString(line)
-		plan.WriteByte('\n')
-	}
-	if err := rows.Err(); err != nil {
+	var plan []byte
+	if err := tx.QueryRow(ctx, "EXPLAIN (FORMAT JSON, COSTS OFF, VERBOSE) "+query, arguments...).Scan(&plan); err != nil {
 		t.Fatal(err)
 	}
-	return plan.String()
+	if !json.Valid(plan) {
+		t.Fatal("EXPLAIN did not return valid JSON")
+	}
+	return string(plan)
 }

@@ -5,6 +5,8 @@
 ## 当前状态
 
 M1 已创建 React/Vite/TypeScript 前端骨架、Manifest、Lockfile 和可执行测试。本目录只记录稳定约束，具体行为以 `web/` 真实代码和 API 契约为准。
+M6-D 已新增 `web/src/api/search.ts` 作为 Search wire 的严格 Decoder/Client 边界；Search 页面仍归 M9，
+当前不得在组件中重复解析或用假页面冒充功能交付。
 
 ## 已确认基线
 
@@ -19,14 +21,14 @@ M1 已创建 React/Vite/TypeScript 前端骨架、Manifest、Lockfile 和可执�
 
 ## 规范索引
 
-| 规范 | 职责 | M1 待验证 |
+| 规范 | 职责 | 当前状态/后续门禁 |
 | --- | --- | --- |
 | [目录结构](./directory-structure.md) | Feature 边界和依赖方向 | 实际根目录、Alias、Public Export |
 | [组件规范](./component-guidelines.md) | 组合、Props、UI 状态和可访问性 | UI/样式方案和代表性组件 |
 | [Hook 规范](./hook-guidelines.md) | Query、Command、URL 和 SSE Hook | Query Key Factory 和 Hook Test Harness |
 | [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | Cache Default 和持久化策略 |
-| [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | Compiler、Generator、Runtime Validator |
-| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | M1 命令已落地，Coverage/Budget 随业务模块补充 |
+| [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | M6-D Search 使用手写严格 Decoder；Generator/通用 Runtime Validator 仍待后续统一 |
+| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | M6-D 需运行 Search decoder 单测、Lint、Type Check、Test、Build 与 OpenAPI drift gate |
 
 ## 开发前检查清单
 
@@ -50,6 +52,15 @@ Shared UI ----> Feature Modules
 ```
 
 Feature 内部实现私有；Generated Wire Type 留在 API 边缘；SSE 只用于 Refetch/Invalidation，不是第二事实源。
+
+Search 当前边界固定为：
+
+```text
+unknown HTTP JSON -> web/src/api/search.ts strict decoder -> SearchResponse -> future M9 feature/component
+```
+
+Decoder 必须保留 Workspace、Cursor、Index/Embedding Version、requested/effective mode、degradation、
+Evidence href 与 vector `distance`；不得把 distance 重命名为 similarity 或静默丢弃未知 capability。
 
 ## 项目级禁止模式
 

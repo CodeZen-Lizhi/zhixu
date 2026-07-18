@@ -12,11 +12,24 @@ import (
 	"testing"
 	"time"
 
+	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
+
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 )
 
 type fakePinger struct {
 	err error
+}
+
+func TestRouterRegistersRetrievalRoutes(t *testing.T) {
+	router := NewRouter(Dependencies{Version: "test", Retrieval: retrievalhttp.NewHandler(nil, nil, nil)})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/search", strings.NewReader(`{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"q"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "RETRIEVAL_SEARCH_SERVICE_UNAVAILABLE") {
+		t.Fatalf("retrieval route status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func (f fakePinger) Ping(context.Context) error { return f.err }

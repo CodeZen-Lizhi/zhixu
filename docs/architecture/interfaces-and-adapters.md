@@ -49,6 +49,9 @@ Adapter：
 - Contract 同时限制条数、单输入字节和单批累计字节；Config Hash 不包含 Credential。
 - 正式实现为直接 OpenAI-Compatible 与 Ollama HTTP Adapter，严格校验顺序、模型、维度、
   normalization、取消和响应大小。
+- API Query Embedding 与 Worker Index Embedding 必须经同一个 Configured Embedder Factory 从
+  `config.Config` 构造；Provider、Model、Dimensions、Normalization、Distance、Endpoint identity 与
+  Config Hash 不能在两个进程各写一套转换逻辑。`provider=disabled` 返回 nil capability，不创建假 Adapter。
 
 ### Reranker
 
@@ -180,15 +183,15 @@ Adapter：
 Search 输入：
 
 - Query。
-- Scope。
-- Filters。
-- Limit。
+- Workspace ID。
+- Source/Source Version/Path/Captured Time Filters。
+- 有界候选与最终 Limit。
 - Retrieval Mode。
 
 Search 输出：
 
 - Evidence Items。
-- 分数解释。
+- Lexical/Fusion/Rerank 分数与 Vector 原始 Distance。
 - Index Version。
 - Degraded Capabilities。
 
@@ -198,6 +201,26 @@ Adapter：
 - In-memory deterministic Fake。
 
 未来独立向量库是 Retrieval 内部实现，不扩大 Interface。
+
+M6-D 的 HTTP 分页不扩大 `SearchStore`：Application 每次读取规范请求的 top-100，HTTP `CursorCodec`
+使用进程内 HMAC 绑定 canonical request、Active Index、完整结果与 offset 后切片。Cursor 不是领域实体、
+数据库游标或授权凭据，API 重启后失效。
+
+### EvidenceReference
+
+职责：
+
+- `EvidenceReferenceStore` 通过参数化 Workspace-scoped 查询返回 Source Version 或 Source Version →
+  Content Artifact → Parse Projection → Span 的完整数据库绑定。
+- `EvidenceArtifactReader` 只接受 Workspace ID 与 Source Version ID，不接受调用方路径；Adapter 通过
+  Workspace Repository 和 managed Content Artifact 读取不可变字节，并复核身份、Hash 与大小。
+- Application 从 `[start_byte,end_byte)` 生成最大 4 KiB 的 UTF-8 excerpt，并校验 excerpt Hash。
+
+约束：
+
+- Source Version/Span 不存在、跨 Workspace 或绑定不匹配使用统一 Not Found，不能泄漏对象身份。
+- 公开响应不得包含 Workspace root、managed locator、绝对路径或完整 Artifact；不得回退读取当前工作树。
+- HTTP 只生成两个稳定 href，不拥有数据库 JOIN、Artifact 路径解析或 excerpt 完整性规则。
 
 ## 8. WorkflowExecutor Interface
 
@@ -292,10 +315,15 @@ Adapter 必须映射原始 SDK/命令/数据库错误，不能把外部错误类
 - 注入 Module。
 - 注册 Workflow 和 Tool。
 - 启动 API/Worker。
+- API 与 Worker 共用 `internal/platform/models.NewConfiguredEmbedder(config.Config)`；Compose 必须向两个
+  进程注入同一组 Embedding 配置。API 额外将同一 Embedder 注入 Query Search，Worker 注入 Vector Build。
 
 领域 Module 不读取环境变量、不自行创建 SDK Client。
 
 认证 Session、API Token 和一次性 Write Authorization 同样由 Composition Root 注入的安全组件实现；领域调用方只接收已验证 Identity/Capability Context，不依赖 Cookie、Header 或 Token 存储细节。
+
+M6-D 尚未注入正式 Auth/Session/Token/CSRF/Capability Middleware，只实现 Workspace 查询隔离并要求
+loopback 部署；M10 完成前不得增加 allow-all Authorizer 或把 `workspace_id` 当作 Identity。
 
 ## 15. Contract Test
 

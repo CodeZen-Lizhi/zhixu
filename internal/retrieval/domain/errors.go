@@ -24,6 +24,12 @@ const (
 	ErrorCodeSearchCandidateInvalid = "RETRIEVAL_SEARCH_CANDIDATE_INVALID"
 	// ErrorCodeSearchResultInvalid 表示检索模式、降级或结果绑定不一致。
 	ErrorCodeSearchResultInvalid = "RETRIEVAL_SEARCH_RESULT_INVALID"
+	// ErrorCodeEvidenceReferenceInvalid 表示 Source Version/Span 引用或不可变绑定损坏。
+	ErrorCodeEvidenceReferenceInvalid = "RETRIEVAL_EVIDENCE_REFERENCE_INVALID"
+	// ErrorCodeSearchCursorInvalid 表示 opaque cursor 损坏、过期或与当前规范请求不匹配。
+	ErrorCodeSearchCursorInvalid = "RETRIEVAL_SEARCH_CURSOR_INVALID"
+	// ErrorCodeSearchCursorStale 表示 Active Index 或完整排序结果已变化，需要从第一页重启。
+	ErrorCodeSearchCursorStale = "RETRIEVAL_SEARCH_CURSOR_STALE"
 	// ErrorCodeIndexVersionInvalid 表示 Index Version 或构建请求不满足领域约束。
 	ErrorCodeIndexVersionInvalid = "RETRIEVAL_INDEX_VERSION_INVALID"
 	// ErrorCodeIndexTransitionInvalid 表示尝试绕过冻结的 Index 生命周期。

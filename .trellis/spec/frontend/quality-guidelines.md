@@ -4,7 +4,8 @@
 
 ## 适用范围
 
-适用于前端实现、测试、生成契约和浏览器行为。当前没有前端 Manifest 或可执行质量命令，具体命令和工具版本由 M1 确定。
+适用于前端实现、测试、生成契约和浏览器行为。仓库已有前端 Manifest、Lockfile 与可执行命令；
+M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
 
 ## 已确认事实
 
@@ -22,6 +23,8 @@
 - 对相应 Feature 实施 Route-level Code Splitting、大表虚拟滚动、Graph 增量加载、大 Diff 分段和 Artifact Chapter Lazy Load。
 - 测试断言用户可观察行为和可访问语义，不依赖私有实现细节。
 - 确定性前端测试使用受控 API/SSE Fixture；真实 AI 行为属于独立 Evaluation Suite。
+- Search 网络响应只能由 `web/src/api/search.ts` 从 `unknown` 严格解码；Feature/Component 必须保留
+  requested/effective mode、degradation、Evidence href、Cursor 与 vector `distance`，不能静默归一为假成功。
 
 ## 禁止模式
 
@@ -32,6 +35,8 @@
 - Approval、Diff、Evidence、Workflow、Graph 或 Recovery 仅做 Snapshot Test。
 - 测试 Mock 被测单元，或删除目标行为后测试仍能通过。
 - 新增依赖或版本但没有锁定 Manifest 和相关回归检查。
+- 把 `distance` 改名为 similarity、忽略未知 mode/capability、缺失 href 仍渲染 Evidence，或解析
+  HMAC Cursor 内部结构并长期持久化。
 
 ## 测试要求
 
@@ -41,6 +46,10 @@
 - Playwright E2E 覆盖 `docs/architecture/testing-and-evaluation.md` 定义的六条最高层 Seam，并在适用时使用确定性 Fixture 和 Fake Model。
 - Security Test 覆盖 XSS/Markdown Sanitization、客户端可观察的 CSRF/Origin 行为、Secret Redaction 和 Unauthorized Write 展示。
 - Performance Check 覆盖大表、Graph Interaction、Route Bundle 和分段 Diff，基于文档容量假设执行。
+- M6-D Search Decoder 单测覆盖成功/空结果、请求 snake_case 映射、三模式/显式降级、vector distance、
+  UUID/Hash/RFC3339、NaN/Inf、未知 mode/capability、缺失 href、错误 cursor 与 Problem；不得只测 happy path。
+- M6-D 至少执行 `npm run lint --prefix web`、`npm run typecheck --prefix web`、
+  `npm run test --prefix web` 和 `npm run build --prefix web`；只有实际输出可标记通过。
 
 ## Review 清单
 
@@ -53,6 +62,9 @@
 - List、Graph Expansion 和 Source Content 是否有边界？
 - 测试是否覆盖正常、边界、失败、重连和重复提交？
 - 生成产物是否可复现，依赖变更是否锁定？
+- Search 是否只有一个 Decoder owner，并拒绝未知字段语义、非有限分数和不可打开 Evidence？
+- Cursor invalid/stale 是否显式要求从第一页重启，而不是静默复用旧结果？
+- UI 是否没有把 M6-D Workspace 隔离误当作 M10 Auth/CSRF/Capability 已完成？
 
 ## 验证
 
@@ -65,6 +77,7 @@ git diff --check
 
 M1 后运行 Canonical Frontend 的锁定安装验证、Lint、Type Check、Unit/Integration Test、Production Build 和选定 Playwright Smoke；M1 必须记录确切命令，不依赖开发者全局工具。
 
-## M1 待代码验证
+## 当前后续门禁
 
-M1 必须锁定 Formatter/Linter/Test/Browser 版本，定义 Coverage 和 Bundle Budget，建立 API/SSE Fixture，并添加真实 Component Test 和 Integration Test 示例。当前文档只有要求，没有可执行证据。
+Coverage/Bundle Budget、通用 API/SSE Fixture 与 M9 Search 页面 Component/Route/Browser 测试仍待后续任务。
+M6-D 只交付 Decoder/Client，不得用其单测声称 Search UI 已完成。

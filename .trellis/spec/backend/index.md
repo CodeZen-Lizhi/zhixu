@@ -7,10 +7,10 @@
 | 规范 | 内容 | 当前状态 |
 |---|---|---|
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
-| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | M6-C Embedding Cache、V2 Regression、set-based Vector Build、Active-only Hybrid Search 与恢复约束已验证 |
-| [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | M5 Write Authorization、可重启 Filesystem/Git Writeback 与人工恢复错误契约已验证 |
+| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | M6-D Workspace-scoped Search/Evidence、top-100 Cursor 与 exact-scan 基线已记录；真实 PG HTTP/River/Compose smoke 已验证一轮 |
+| [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 M6-D Search/Cursor/Evidence 稳定 Problem 映射；正式 Auth/CSRF/Capability 仍归 M10 |
 | [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M4-D correlation/脱敏/metrics/trace 生产接线已验证；真实 exporter/Audit 待后续任务补充 |
-| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已按测试与评测架构建立；M1 CI 已验证 |
+| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | M6-D 真实 PG HTTP/River/Compose smoke 已验证；前端/全仓门禁与独立审查以任务最终记录为准 |
 
 ## 开发前检查清单
 
@@ -25,6 +25,7 @@
 ## 实现边界
 
 - API 与 Worker 可独立运行，但共享领域 Interface 和 Composition Root。
+- API 与 Worker 的 Embedding Adapter 必须由同一 Configured Embedder Factory 构造，禁止两套配置转换。
 - 领域层不依赖 HTTP、pgx/sqlc、River、模型 SDK、文件系统实现或具体 Git 命令。
 - 正式知识唯一写入路径是 Proposal → Evidence Validation → Approval → Version Check → Atomic Write → Git Commit → Reindex → Regression Validation。
 - 长任务进入持久化 Workflow；River 只负责投递/领取可运行节点，不取代 Workflow 领域状态。
@@ -63,5 +64,6 @@ git diff --check
 
 ## 当前明确待验证项
 
-- 具体依赖版本、License、数据库逻辑 Schema 组织、中文 FTS 配置、向量维度、认证实现和 Eino Adapter 必须在对应 M2+ 任务中通过仓库文件、PoC 和测试锁定。
+- License、认证实现、50 万 Chunk ANN/P95 和 Eino Adapter 必须在对应后续任务中通过仓库文件、PoC
+  和测试锁定；M6-D 的 exact vector scan/EXPLAIN 只作为正确性基线。
 - 本规范不提供伪造的实现代码、版本号、数据库字段长度或不存在的测试结果；M1 完成后应将真实文件链接补入各专题规范。

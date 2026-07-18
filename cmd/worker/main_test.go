@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -23,37 +24,46 @@ func TestNewWorkerComponentsRequiresDatabase(t *testing.T) {
 	}
 }
 
-func TestConfiguredEmbedderSupportsDisabledOpenAIAndOllama(t *testing.T) {
-	disabled, err := newConfiguredEmbedder(config.Defaults())
-	if err != nil || disabled != nil {
-		t.Fatalf("disabled embedder=%#v err=%v", disabled, err)
+func TestWorkerCompositionUsesSharedConfiguredEmbedderFactory(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	base := config.Defaults()
-	base.EmbeddingModel = "embed-v1"
-	base.EmbeddingDimensions = 3
-	base.EmbeddingNormalization = retrievaldomain.NormalizationL2
-	base.EmbeddingDistanceMetric = retrievaldomain.DistanceCosine
-	base.EmbeddingMaxBatchSize = 8
-	base.EmbeddingMaxInputBytes = 1024
-	base.EmbeddingMaxBatchInputBytes = 8192
-	base.EmbeddingTimeout = time.Second
-	base.EmbeddingMaxResponseBytes = 1 << 20
-
-	openAI := base
-	openAI.EmbeddingProvider = config.EmbeddingProviderOpenAICompatible
-	openAI.EmbeddingBaseURL = "https://models.example.test"
-	openAI.EmbeddingAPIKey = "secret-canary"
-	openAIEmbedder, err := newConfiguredEmbedder(openAI)
-	if err != nil || openAIEmbedder.Contract().Provider != "openai-compatible" || strings.Contains(fmt.Sprintf("%#v", openAIEmbedder), openAI.EmbeddingAPIKey) {
-		t.Fatalf("openai contract=%#v err=%v", openAIEmbedder, err)
+	var reindexFactoryCalls int
+	var foundReindexComposition bool
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if function.Name.Name == "newConfiguredEmbedder" {
+			t.Fatal("worker must not own a private configured embedder factory")
+		}
+		if function.Name.Name != "newReindexComponents" {
+			continue
+		}
+		foundReindexComposition = true
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "NewConfiguredEmbedder" {
+				return true
+			}
+			packageName, ok := selector.X.(*ast.Ident)
+			if ok && packageName.Name == "platformmodels" {
+				reindexFactoryCalls++
+			}
+			return true
+		})
 	}
-
-	ollama := base
-	ollama.EmbeddingProvider = config.EmbeddingProviderOllama
-	ollama.EmbeddingBaseURL = "http://127.0.0.1:11434"
-	ollamaEmbedder, err := newConfiguredEmbedder(ollama)
-	if err != nil || ollamaEmbedder.Contract().Provider != "ollama" {
-		t.Fatalf("ollama contract=%#v err=%v", ollamaEmbedder, err)
+	if !foundReindexComposition {
+		t.Fatal("worker reindex composition root was not found")
+	}
+	if reindexFactoryCalls != 1 {
+		t.Fatalf("reindex shared configured embedder factory calls=%d want=1", reindexFactoryCalls)
 	}
 }
 

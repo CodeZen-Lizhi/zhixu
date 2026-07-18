@@ -86,17 +86,17 @@
 
 ## Acceptance Criteria
 
-- [ ] 迁移支持空库 Up、重复 Up、空数据 Down→Up；任意 Retrieval 业务数据存在时 Down fail closed。
-- [ ] 单 Workspace 只有一个 Active Index；失败构建不改变旧 Active。
-- [ ] Build Manifest 冻结目标 Chunk 集合；缺一 Projection 或 Hash 不匹配时不能 Ready/Active。
-- [ ] Chunk Projection 与 Canonical Chunk/Workspace/Embedding Version 的交叉绑定由数据库和领域共同约束。
-- [ ] FTS 可检索新 Chunk；Embedding 未配置时返回明确 `degraded_capabilities=["vector"]`。
-- [ ] OpenAI-Compatible/Ollama Embedding Adapter 批量、超时、取消、错误映射和维度校验通过 Contract Test。
-- [ ] Keyword/vector/RRF/dedup/filter 的确定性测试和 PostgreSQL EXPLAIN 通过。
-- [ ] 重复 Outbox/River delivery、响应丢失和进程重启不重复激活索引或完成状态。
-- [ ] Safe Writeback → Reindex → Active Index → Proposal/Execution completed 的真实 PostgreSQL/River smoke 通过。
-- [ ] Search API 返回可打开 Source Version/Source Span、阶段分数、Index Version 和显式降级，OpenAPI 无漂移。
-- [ ] `go test -race ./...`、关键包 `-count=20`、`go vet ./...`、`make test`、迁移、Compose、go-review、sql-code-review 与 Trellis full-scope check 通过。
+- [x] 迁移支持空库 Up、重复 Up、空数据 Down→Up；任意 Retrieval 业务数据存在时 Down fail closed。
+- [x] 单 Workspace 只有一个 Active Index；失败构建不改变旧 Active。
+- [x] Build Manifest 冻结目标 Chunk 集合；缺一 Projection 或 Hash 不匹配时不能 Ready/Active。
+- [x] Chunk Projection 与 Canonical Chunk/Workspace/Embedding Version 的交叉绑定由数据库和领域共同约束。
+- [x] FTS 可检索新 Chunk；Embedding 未配置时返回明确 `degraded_capabilities=["vector"]`。
+- [x] OpenAI-Compatible/Ollama Embedding Adapter 批量、超时、取消、错误映射和维度校验通过 Contract Test。
+- [x] Keyword/vector/RRF/dedup/filter 的确定性测试和 PostgreSQL EXPLAIN 通过。
+- [x] 重复 Outbox/River delivery、响应丢失和进程重启不重复激活索引或完成状态。
+- [x] Safe Writeback → Reindex → Active Index → Proposal/Execution completed 的真实 PostgreSQL/River smoke 通过。
+- [x] Search API 返回可打开 Source Version/Source Span、阶段分数、Index Version 和显式降级，OpenAPI 无漂移。
+- [x] `go test -race ./...`、关键包 `-count=20`、`go vet ./...`、`make test`、迁移、Compose、go-review、sql-code-review 与 Trellis full-scope check 通过。
 
 ## Out Of Scope
 

@@ -25,9 +25,14 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
+	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	platformparser "github.com/CodeZen-Lizhi/zhixu/internal/platform/parser"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
+	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
+	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
+	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/webassets"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
@@ -36,6 +41,7 @@ import (
 	workflowhttp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/http"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
+	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -76,6 +82,7 @@ func main() {
 	workflowHandler := workflowhttp.NewHandler(nil)
 	changeControlHandler := changecontrolhttp.NewHandler(nil)
 	ingestionHandler := ingestionhttp.NewHandler(nil)
+	retrievalHandler := retrievalhttp.NewHandler(nil, nil, nil)
 	fileScanner := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
 	if database != nil {
 		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
@@ -104,6 +111,12 @@ func main() {
 				Clock:          foundation.SystemClock{},
 			})
 			workspaceHandler = workspacehttp.NewHandler(workspaceService)
+			configuredRetrievalHandler, retrievalHandlerErr := newRetrievalHandler(database.DB(), cfg, workspaceRepository, fileScanner)
+			if retrievalHandlerErr != nil {
+				logger.Error("retrieval search service is unavailable", "error_code", "RETRIEVAL_SEARCH_SERVICE_UNAVAILABLE")
+			} else {
+				retrievalHandler = configuredRetrievalHandler
+			}
 
 			ingestionRepository, ingestionRepositoryErr := ingestionpostgres.NewRepository(database.DB())
 			sourceReader, sourceReaderErr := ingestionworkspace.NewReader(workspaceRepository, fileScanner)
@@ -155,6 +168,7 @@ func main() {
 		Workflow:          workflowHandler,
 		ChangeControl:     changeControlHandler,
 		Ingestion:         ingestionHandler,
+		Retrieval:         retrievalHandler,
 		Logger:            logger,
 	}
 	server := &http.Server{
@@ -188,6 +202,42 @@ func main() {
 			logger.Error("api server shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
 		}
 	}
+}
+
+func newRetrievalHandler(
+	pool *pgxpool.Pool,
+	cfg config.Config,
+	workspaceRepository workspacedomain.SourceMaterialRepository,
+	files workspacedomain.FileScanner,
+) (*retrievalhttp.Handler, error) {
+	if pool == nil || workspaceRepository == nil || files == nil {
+		return nil, errors.New("retrieval search dependencies are unavailable")
+	}
+	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	artifactReader, err := retrievalworkspace.NewReader(workspaceRepository, files)
+	if err != nil {
+		return nil, err
+	}
+	evidenceService, err := retrievalapplication.NewEvidenceReferenceService(searchRepository, artifactReader)
+	if err != nil {
+		return nil, err
+	}
+	embedder, err := platformmodels.NewConfiguredEmbedder(cfg)
+	if err != nil {
+		return nil, err
+	}
+	searchService, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
+	if err != nil {
+		return nil, err
+	}
+	cursors, err := retrievalhttp.NewRandomCursorCodec()
+	if err != nil {
+		return nil, err
+	}
+	return retrievalhttp.NewHandler(searchService, evidenceService, cursors), nil
 }
 
 func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error) {

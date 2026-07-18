@@ -21,7 +21,8 @@
   "children": [
     "07-17-retrieval-index-foundation",
     "07-18-reindex-consumer",
-    "07-19-embedding-hybrid-search"
+    "07-19-embedding-hybrid-search",
+    "07-19-search-api-integration"
   ],
   "parent": "07-16-product-delivery",
   "relatedFiles": [],

@@ -69,6 +69,10 @@ Session 要求：
 
 完整决策见 [ADR-0014](adr/0014-single-user-authentication.md)。
 
+M6-D 的现实边界是：Search/Evidence 只实现持久数据的 Workspace 隔离，部署继续绑定 loopback；正式
+Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 实现。回环来源、请求中的
+`workspace_id` 和 HMAC Search Cursor 均不能证明身份，也不能作为授权通过依据。
+
 ## 6. 授权
 
 即使单用户，也按 Capability：
@@ -96,6 +100,9 @@ Session 要求：
 - 不进入 DB 导出。
 - 不发送给模型。
 - 轮换后旧 Client 释放。
+- Search Cursor 只包含版本、请求/结果 Hash、Index ID 与 offset，并使用进程内随机 HMAC 密钥签名；
+  不得写入 Provider Key、Query 正文、DSN、绝对路径或 Artifact locator。密钥不持久化，进程重启后
+  旧 Cursor fail closed。
 
 ## 8. 文件
 
@@ -109,6 +116,9 @@ Session 要求：
 - 同一 inode 的协作写入者使用持久 lock file + advisory `flock` 串行；hardlink、大小写或 Unicode 路径别名不能绕过目标锁。
 - temp/backup 使用目标同目录随机 `O_EXCL|0600` 文件；恢复和清理只接受当前执行生成、身份与 hash 未被篡改的 locator。
 - 文件锁不能阻止恶意本地进程绕过协议；rehash 到 rename 的极小窗口和断电结果不确定性必须通过最终复核、备份与人工恢复处理，不宣称不存在。
+- Evidence Span 读取不接受调用方文件路径，也不读取当前 Workspace 工作树。服务端必须从数据库绑定的
+  Source Version/Content Artifact 身份解析 managed artifact，复核 Workspace、Artifact ID、全文 Hash、
+  大小、Span byte range 与 excerpt Hash 后，最多返回 4 KiB UTF-8 excerpt；任何绑定损坏 fail closed。
 
 ## 9. Prompt Injection
 
@@ -141,6 +151,9 @@ Session 要求：
 - 参数化 SQL。
 - 不将 DB 端口暴露公网。
 - Backup Encryption。
+- Search 与 Evidence 查询必须参数化并带 Workspace 约束；跨 Workspace、Source Version/Span 不关联与
+  不存在使用相同 404，避免对象 ID 枚举。Distance operator 只能由持久白名单枚举选择固定 SQL 模板，
+  不能接受用户输入 SQL operator 或排序表达式。
 
 ## 13. Git
 
@@ -190,6 +203,11 @@ Session 要求：
 - Session Fixation/Revocation。
 - API Token Scope/Expiry。
 - 已登录但无 Approval Write Authorization 的写入拒绝。
+- Search Cursor 篡改、跨请求复用、进程重启失效和结果 stale；错误不得回显 Query、Key、DSN 或路径。
+- Evidence 跨 Workspace、Source Version/Span 错绑、managed locator 越界、Hash/大小/byte range/excerpt
+  不一致；均不得回退到工作树或泄漏其他 Workspace 元数据。
+- 在 M10 完成前验证 Compose/API 只发布 loopback；不得把 Workspace 隔离测试冒充身份、CSRF 或
+  Capability 测试已完成。
 
 ## 18. 依赖与镜像
 

@@ -426,7 +426,7 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceReposito
 	if err != nil {
 		return reindexComponents{}, err
 	}
-	embedder, err := newConfiguredEmbedder(cfg)
+	embedder, err := platformmodels.NewConfiguredEmbedder(cfg)
 	if err != nil {
 		return reindexComponents{}, err
 	}
@@ -497,32 +497,6 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceReposito
 		ErrorBackoff: cfg.ReindexDispatchErrorBackoff,
 	})
 	return reindexComponents{worker: worker, dispatcher: runner}, nil
-}
-
-func newConfiguredEmbedder(cfg config.Config) (retrievalapplication.Embedder, error) {
-	switch cfg.EmbeddingProvider {
-	case config.EmbeddingProviderDisabled:
-		return nil, nil
-	case config.EmbeddingProviderOpenAICompatible:
-		return platformmodels.NewOpenAICompatibleEmbedder(platformmodels.OpenAIEmbeddingOptions{
-			BaseURL: cfg.EmbeddingBaseURL, APIKey: cfg.EmbeddingAPIKey, Model: cfg.EmbeddingModel,
-			Dimensions: cfg.EmbeddingDimensions, Normalization: cfg.EmbeddingNormalization,
-			DistanceMetric: cfg.EmbeddingDistanceMetric, MaxBatchSize: cfg.EmbeddingMaxBatchSize,
-			MaxInputBytes: cfg.EmbeddingMaxInputBytes, MaxBatchInputBytes: cfg.EmbeddingMaxBatchInputBytes,
-			Timeout:          cfg.EmbeddingTimeout,
-			MaxResponseBytes: cfg.EmbeddingMaxResponseBytes,
-		})
-	case config.EmbeddingProviderOllama:
-		return platformmodels.NewOllamaEmbedder(platformmodels.OllamaEmbeddingOptions{
-			BaseURL: cfg.EmbeddingBaseURL, Model: cfg.EmbeddingModel, Dimensions: cfg.EmbeddingDimensions,
-			Normalization: cfg.EmbeddingNormalization, DistanceMetric: cfg.EmbeddingDistanceMetric,
-			MaxBatchSize: cfg.EmbeddingMaxBatchSize, MaxInputBytes: cfg.EmbeddingMaxInputBytes,
-			MaxBatchInputBytes: cfg.EmbeddingMaxBatchInputBytes,
-			Timeout:            cfg.EmbeddingTimeout, MaxResponseBytes: cfg.EmbeddingMaxResponseBytes,
-		})
-	default:
-		return nil, errors.New("embedding provider is unsupported")
-	}
 }
 
 func configuredRRF(cfg config.Config) (json.RawMessage, error) {

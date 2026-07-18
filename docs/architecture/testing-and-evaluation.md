@@ -190,6 +190,34 @@ M4-D 于 2026-07-17 已保存以下真实 PostgreSQL/River/容器证据：
 - 当前 EXPLAIN 只证明索引/operator/过滤正确，不作为 50 万 Chunk 的 P95 或 ANN 参数结论；容量结论
   归 M10。
 
+### 8.6 M6-D Search API And Integration 专项
+
+M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一轮运行证据；以下完整清单仍是
+归档和后续发布的可重复门禁，不能据此推断最终全仓质量检查已经全部通过：
+
+- Handler/Domain：严格 JSON 与单值 EOF、UUID/UTF-8/时间/模式/过滤器/limit、默认 Hybrid/20、
+  Keyword/Semantic/Hybrid、真实空结果、FTS-only 显式降级和稳定 Problem 映射。
+- Cursor：top-100 窗口、canonical request + page limit + Active Index + 完整有序结果 Hash + offset
+  绑定；正常翻页、篡改、跨请求、窗口越界、Active/结果变化 stale，以及使用新进程密钥模拟重启失效。
+- Evidence：Source Version 与 Span href 必须经真实 Router 打开；PostgreSQL 查询证明 Workspace 隔离、
+  Source Version/Content Artifact/Parse Projection/Span 全绑定与统一 404。Workspace Artifact Reader 必须
+  复核 managed locator、全文 Hash、大小、byte range 与 excerpt Hash，并验证 4 KiB UTF-8 截断边界。
+- Composition：API/Worker 都调用同一 Configured Embedder Factory；Embedding disabled 时 Keyword 可用、
+  Hybrid effective mode 为 Keyword 且 vector/rerank degraded、Semantic 返回 503。Secret canary 不得进入
+  Problem、Cursor、日志或测试失败输出。
+- Frontend：`web/src/api/search.ts` 是严格 decoder/client 边界，测试覆盖未知 mode/capability、NaN/Inf、
+  非法 UUID/RFC3339、缺失 href、错误 cursor/Problem 类型，以及请求字段 canonical 映射；页面不得重复解析。
+- 真实 PostgreSQL HTTP：通过 `httptest.Server` 走生产 Router 与 PostgreSQL Adapter，覆盖三模式、过滤、
+  Cursor、Workspace 隔离、Evidence GET；生产 Search SQL 保存 FTS GIN、trigram GIN、Active/Manifest B-tree
+  与 cosine/inner-product/euclidean exact operator 的 `EXPLAIN (FORMAT JSON)` 基线。
+- River fault smoke：唯一 Completion 后必须通过同一真实 Router Search 命中新正文并打开 Source Version/Span；
+  Vector/Ready/Completion response-loss 和重复 Delivery 后仍只有一个 Activation、Active 与 Completion。
+- Compose API smoke：每次使用唯一 Compose project、disposable Git Workspace 和清理 trap，经公开 API 完成
+  Scan/Ingestion/Proposal/Approval，等待 Worker FTS-only Reindex，再执行 Hybrid→Keyword degraded Search
+  与 Evidence GET；结束必须删除 volume 和临时目录。仅 `up --wait`、readiness 或 404 检查不构成验收。
+- 性能边界：M6-D 只证明 exact scan/索引计划正确；ANN、500,000 Chunk 容量与 P95 归 M10，不得把
+  小夹具 EXPLAIN 当作容量达标。
+
 ## 9. E2E
 
 固定 Fixture Workspace，执行 PRD 最终演示场景。
@@ -313,6 +341,9 @@ flowchart LR
 - Security。
 - Evaluation。
 - Docker Smoke。
+
+Search API 进入发布候选时，还必须运行真实 PostgreSQL HTTP、Retrieval/River fault 与 Compose API
+smoke；三者分别证明查询边界、异步唯一性和部署黑盒闭环，不能互相替代。
 
 ## 21. Definition of Done
 

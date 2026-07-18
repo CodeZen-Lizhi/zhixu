@@ -2,7 +2,9 @@
 
 ## 适用范围
 
-适用于领域模块、Application Command/Query、HTTP/SSE 边界、Worker/Workflow、数据库、文件、Git、Parser、Model 和 Tool Adapter。当前没有可运行实现，规范中的代码落点和验证命令将在 M1 代码基线落地后校验。
+适用于领域模块、Application Command/Query、HTTP/SSE 边界、Worker/Workflow、数据库、文件、Git、Parser、
+Model 和 Tool Adapter。仓库已有可运行实现；M6-D 的 Search/Cursor/Evidence Problem 契约以当前代码、
+OpenAPI 和实际测试为准，未执行的全仓门禁不得仅凭规范视为通过。
 
 ## 已确认事实
 
@@ -314,4 +316,95 @@ Correct: raw blob → controlled index → immutable tree → commit-tree → up
 
 Wrong: index 当前含 target 就恢复 Base，默认它仍是系统 staged 内容。
 Correct: 先核对 target mode/blob、其他 staged path 和 HEAD；发现任何用户漂移都保留现场并转人工恢复。
+```
+
+## M6-D Search HTTP And Evidence Error Contract
+
+### 1. Scope / Trigger
+
+- Trigger：Retrieval Domain/Application 错误需要稳定映射到 Search、Source Version 和 Span HTTP Problem，
+  且 Cursor/Workspace 隔离不能通过空结果或差异化 404 隐藏错误。
+- Scope：只覆盖 M6-D 查询边界；正式身份、Session、Token、CSRF/Origin 与 Capability 拒绝归 M10。
+
+### 2. Signatures
+
+```json
+{
+  "error_code": "RETRIEVAL_SEARCH_CURSOR_STALE",
+  "message": "安全且可本地化的消息",
+  "retryable": false,
+  "details": {}
+}
+```
+
+```text
+POST /api/v1/search
+GET /api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}
+GET /api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/spans/{source_span_id}
+```
+
+### 3. Contracts
+
+- HTTP Handler 使用统一 `foundation.Error` → Problem 状态映射；Domain/Application/Adapter 保留稳定 code
+  与 retryable，不向客户端暴露 SQL、Provider cause、DSN、Query 正文、绝对路径或 managed locator。
+- Search JSON 必须严格拒绝未知字段和多 JSON 值；Domain Canonicalization 失败不能转换为 `items=[]`。
+- 共享 JSON 边界必须读取 `limit+1` 字节后再判断上限，不能让“合法 JSON + 超长尾随空白”绕过请求大小限制；
+  解码前还必须拒绝原始非法 UTF-8，字符串 escape 必须拒绝未配对 surrogate，同时允许合法 surrogate pair。
+- Search 可选字段必须区分“省略”与“显式 null”：只有省略可以触发默认值；显式 null 的 mode/filter/limit/
+  filter 子字段统一返回 `RETRIEVAL_SEARCH_REQUEST_INVALID`，显式 null 或空 cursor 返回
+  `RETRIEVAL_SEARCH_CURSOR_INVALID`，显式空 mode 也不得被当作默认 Hybrid。
+- JSON 语法合法但字段类型错误时也必须按字段语义分类：Workspace/Query/mode/filter/limit 及 filter 子字段
+  返回 `RETRIEVAL_SEARCH_REQUEST_INVALID`，cursor 类型错误返回 `RETRIEVAL_SEARCH_CURSOR_INVALID`；
+  不能把 `json.UnmarshalTypeError` 直接暴露成漂移的 `INVALID_JSON`。
+- mode、filter time 与 UUID 必须在 wire 解码后显式校验，使语法合法但业务非法的输入稳定归类为
+  `RETRIEVAL_SEARCH_REQUEST_INVALID`，不能因直接解码为 `time.Time` 而漂移成 `INVALID_JSON`。
+- Cursor invalid 与 stale 分离：签名/请求/格式/进程 key 失配是 400；Active Index 或完整结果漂移是 409。
+- Source Version/Span 的不存在、跨 Workspace 与错绑统一 `404 RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND`，
+  不通过状态码、code、message 或 details 暴露其他 Workspace 对象是否存在。
+- caller cancel 映射为安全 503，并在内部保留 Context cause；Handler 不启动脱离 request Context 的检索。
+- FTS-only Semantic 是明确 503 capability unavailable；Hybrid 只有在 SearchService 返回受控降级结果时
+  才能 200，不允许 Handler 捕获任意 Provider 错误后自行回退。
+
+### 4. Validation & Error Matrix
+
+| 条件 | HTTP | 稳定 code | retryable |
+|---|---:|---|---:|
+| 非法 JSON/未知字段/多值 | 400 | `INVALID_JSON` | false |
+| UUID/Query/mode/filter/limit 非法 | 400 | `RETRIEVAL_SEARCH_REQUEST_INVALID` | false |
+| Cursor 签名/请求/版本/offset/进程 key 失配 | 400 | `RETRIEVAL_SEARCH_CURSOR_INVALID` | false |
+| Active Index 或完整结果变化 | 409 | `RETRIEVAL_SEARCH_CURSOR_STALE` | false |
+| Source Version/Span miss、跨 Workspace、错绑 | 404 | `RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND` | false |
+| FTS-only Semantic | 503 | `RETRIEVAL_SEMANTIC_UNAVAILABLE` | false |
+| Search/Evidence/Cursor 依赖未构造 | 503 | 对应 `*_SERVICE_UNAVAILABLE`/`*_CURSOR_UNAVAILABLE` | false |
+| 请求取消 | 503 | `RETRIEVAL_SEARCH_CANCELLED` | false |
+| 持久候选、Evidence 或 Artifact 绑定损坏 | 409 | 原稳定 Consistency code | false |
+| 暂时 DB/Provider 故障 | 503 | 原稳定 dependency/retryable code | 保留原值 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：第二页重算发现结果 Hash 变化，返回 409 stale 与空 details；客户端从第一页重启，不返回部分页。
+- Base：Embedding disabled 的 Hybrid 返回 200 effective Keyword + degradation；Semantic 返回 503；
+  Keyword 零命中返回 200 空 items。
+- Bad：把所有 Retrieval 错误映射成 500，或把 Semantic unavailable 当作 200 空 items。
+- Bad：跨 Workspace Source Version 返回“对象存在但无权限”，从而帮助枚举 ID。
+
+### 6. Tests Required
+
+- Handler table test 覆盖每个错误分类、状态、code、retryable 和无敏感 details。
+- 共享 DecodeJSON test 覆盖 `limit+1`、超长尾随空白、原始非法 UTF-8、未配对 surrogate 与合法 surrogate pair。
+- Handler table test 覆盖省略默认值，以及 Workspace/Query/mode/cursor/filter/limit/全部 filter 子字段的显式
+  null 与错误类型；嵌套未知字段仍必须拒绝。
+- Cursor test 覆盖篡改、跨请求、重启 key、stale Index/结果与 100 窗口边界。
+- PostgreSQL HTTP test 覆盖跨 Workspace/错绑统一 404、Artifact consistency 409 与 Provider/DB 503。
+- Secret canary 覆盖 Problem、Cursor、日志和测试失败输出；Query/正文/DSN/绝对路径不得出现。
+- M10 之前仅验证 Workspace isolation + loopback，不得把 Auth/CSRF/Capability 负测标记为已完成。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: if semanticErr != nil { return 200 items=[] }
+Correct: Semantic capability unavailable 返回稳定 503；只有 Hybrid 的受控降级结果返回 200。
+
+Wrong: evidence miss 根据“跨 workspace”或“span 不存在”返回不同 code/details。
+Correct: 所有不可见绑定统一 RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND。
 ```

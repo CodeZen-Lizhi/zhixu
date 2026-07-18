@@ -15,6 +15,7 @@ import (
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
 	workflowhttp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/http"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 	"github.com/go-chi/chi/v5"
@@ -42,6 +43,7 @@ type Dependencies struct {
 	Workflow          *workflowhttp.Handler
 	ChangeControl     *changecontrolhttp.Handler
 	Ingestion         *ingestionhttp.Handler
+	Retrieval         *retrievalhttp.Handler
 	Logger            *slog.Logger
 	Tracer            observability.Tracer
 }
@@ -91,6 +93,9 @@ func NewRouter(deps Dependencies) http.Handler {
 		}
 		if deps.Ingestion != nil {
 			deps.Ingestion.Routes(api)
+		}
+		if deps.Retrieval != nil {
+			deps.Retrieval.Routes(api)
 		}
 		api.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 			writeProblem(w, http.StatusNotFound, "NOT_FOUND", "请求的 API 资源不存在", false, nil)

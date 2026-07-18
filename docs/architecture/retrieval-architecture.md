@@ -118,6 +118,8 @@ flowchart TD
 - 过滤 workspace_id、status、revision。
 - ANN 参数由压测确定。
 - 低数据量允许 exact scan 作为基线。
+- API wire 返回的是当前距离度量的原始 `distance`，不是跨模型可比较的 similarity；客户端必须保留
+  `embedding_version_id` 与距离语义，不能只看一个无上下文的数值。
 
 ## 10. RRF 融合
 
@@ -248,6 +250,29 @@ M6-C 已锁定以下 Embedding 与 Hybrid Search 契约：
 - 真实 River fault smoke 已覆盖 Vector commit response-loss、V2 Regression、唯一 Active/Completion
   和最小 Hybrid Search；Provider Key、正文、DSN 与完整 Endpoint 不进入 River payload、日志或错误。
 
+M6-D 已锁定以下 Search API 与可打开 Evidence 契约：
+
+- `POST /api/v1/search` 只接受 Workspace、Query、`keyword|semantic|hybrid`、Source/SourceVersion/
+  path/captured-time 统一过滤、opaque cursor 与 `limit=1..100`；默认 Hybrid、默认页大小 20。
+  Handler 只做严格 wire 解码/映射，Search/RRF/过滤规范化仍由 Domain/Application 拥有。
+- Search 实际请求固定 top-100 有界窗口。Cursor v1 使用 API 进程内随机 HMAC-SHA256 密钥，绑定
+  canonical request、页大小、Active Index Version、完整有序 SearchResult Hash 和下一 offset；
+  篡改、跨请求或进程重启返回 invalid，索引/结果变化返回 stale，最后一页不返回伪 cursor。
+- Response 保留 requested/effective mode、Index/Embedding Version、持久 Index degradation、单次 Query
+  degradation、完整 Evidence stage；Vector stage wire 字段为 `distance`，不改写成 similarity。
+- 两个 Workspace-scoped 只读资源打开 provenance：Source Version GET 返回受控公开元数据；Span GET
+  验证 Source Version、Content Artifact、Parse Projection 与 Span 全绑定，从不可变 Artifact 复核全文
+  Hash/大小和 excerpt Hash 后读取 `[start_byte,end_byte)`，最多返回 4 KiB UTF-8 excerpt。不得从当前
+  工作树相对路径读取可能漂移的正文。
+- API 与 Worker 通过同一 `NewConfiguredEmbedder(config.Config)` Factory 构造 Provider Adapter，避免
+  Provider/Model/Dimensions/Config Hash 出现第二事实源。Embedding disabled 时 Keyword 仍可用，Hybrid
+  显式退化到 Keyword，Semantic 返回 `RETRIEVAL_SEMANTIC_UNAVAILABLE`。
+- M6-D 只提供 Workspace 数据隔离；正式 Auth/Session/Token/CSRF/Capability 归 M10，完成前部署保持
+  loopback。exact vector scan 与生产 SQL `EXPLAIN` 只作为正确性基线，50 万容量 ANN/P95 归 M10。
+- 真实 PostgreSQL HTTP、River Completion 后经 Router Search/Evidence、以及 disposable Workspace 的
+  Compose API smoke 是归档门禁；M6-D 已通过一轮实际运行，后续发布仍需重跑，不能用单元 Fake 或
+  readiness 替代，也不能据此推断最终全仓门禁已经完成。
+
 ## 15. 增量索引
 
 触发：
@@ -277,6 +302,8 @@ M6-C 已锁定以下 Embedding 与 Hybrid Search 契约：
 - Rerank 只处理融合 Top N。
 - Evidence Context 有 Token Budget。
 - 大 Collection 先过滤再向量检索。
+- 当前 exact vector scan 只用于低数据量与查询计划基线；HNSW/IVFFlat、参数选择、500,000 Chunk
+  容量数据和 P95 达标证据必须在 M10 压测后冻结，M6-D 不提前宣称完成。
 
 ## 18. 评测
 

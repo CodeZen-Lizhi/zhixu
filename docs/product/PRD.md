@@ -918,7 +918,11 @@ IGNORED 必须保存证据指纹；只有证据变化时才能自动 REOPENED。
 
 - 搜索结果显示标题、命中片段、路径、来源类型、版本和匹配原因。
 - 用户可以切换综合、关键词、语义三种排序解释。
-- 高级面板显示全文分数、向量分数和重排分数。
+- 高级面板显示全文分数、向量距离和重排分数。
+
+M6-D 的 API wire 对向量阶段明确返回 `distance`，它是当前 Embedding Version 固定距离度量的
+原始距离，不得标记为跨模型可比较的 similarity。页面若需要“相似度”文案，必须先根据
+Embedding Version 的距离度量做受控解释，不能直接把 `distance` 改名。
 
 #### 10.4.7 异常与降级
 
@@ -933,6 +937,27 @@ IGNORED 必须保存证据指纹；只有证据变化时才能自动 REOPENED。
 - 过滤条件对全文和向量结果一致生效。
 - 每个结果可以打开到原文位置。
 - 检索失败类型对用户可见。
+
+#### 10.4.9 M6-D Search 与可打开引用契约
+
+- `POST /api/v1/search` 是无业务副作用的复杂 Query。请求必须包含 `workspace_id` 和 `query`，
+  可选 `retrieval_mode=keyword|semantic|hybrid`、统一过滤器、opaque `cursor` 与 `limit=1..100`；
+  默认模式为 Hybrid、默认页大小为 20。
+- Search 只读取请求 Workspace 当前 Active Index。过滤器当前只包含 Source ID、Source Version ID、
+  受控相对路径前缀和 `[captured_at_from,captured_at_before)`；Document、Topic、Claim、Relation、
+  Conflict 等模型落地前不得返回空壳过滤字段。
+- 分页窗口固定为同一规范请求的 top-100。Cursor v1 由 API 进程内随机 HMAC-SHA256 密钥签名，
+  绑定规范请求、页大小、Active Index、完整有序结果指纹和下一 offset；结果或索引变化返回 stale，
+  API 重启或切换实例后旧 Cursor 失效，客户端从第一页重新请求。
+- 每个 Evidence provenance 必须返回可请求的 Source Version/Span URL：
+  `GET /api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}` 与
+  `GET /api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/spans/{source_span_id}`。
+- Span 必须从 Source Version 绑定的不可变 Content Artifact 读取并复核 Hash/大小/字节范围，
+  返回最多 4 KiB 的 UTF-8 excerpt；不得从写回后可能变化的 Workspace 工作树路径读取引用正文。
+- Embedding disabled 时 Keyword 仍可用，Hybrid 显式退化为 Keyword 并标记 vector/rerank degraded，
+  Semantic 返回 503 capability unavailable；真实零命中返回 200 与空 items。
+- 当前只完成 Workspace 数据隔离。正式 Auth、Session、API Token、CSRF/Origin 与 Capability
+  Authorization 属于 M10；这些门禁完成前，API 交付范围保持 loopback，不得把 Cursor 当作授权凭据。
 
 ### 10.5 文章优化与版本管理
 
@@ -1410,7 +1435,7 @@ Should：
 8. Publish 成功后清理 temp/backup 恢复证据；清理失败保留 `VERIFYING` 并可重试 finalize，不得伪装成完成。
 9. M6 Retrieval 消费 Outbox 完成解析、索引和回归后，才允许推进 `COMPLETED`。
 
-M4-C 已实现 Approved Proposal 的自动异步写回：Approval、Proposal→Run binding、固定 Safe Writeback Definition/Node、Workflow Outbox 与唯一 River Job 在同一 PostgreSQL 事务提交；Worker Claim 后 exact lookup Durable Execution，缺失时瞬时签发双授权并 Atomic Begin，再调用现有 Safe Writeback Node，最终由 M4-B 原子完成 Node/Run。完整绑定重放直接返回原 Run/Job，不读取已被写回改变的文件或 Git；Rejected 不创建 Workflow。M6-B 已消费 Reindex Outbox，从指定 Commit 捕获不可变 SourceVersion，完成真实 FTS-only Workspace Snapshot、结构回归与原子 Activation，并在同一数据库事务将 Delivery、Execution、Proposal 推进到 completed；Embedding、Hybrid Search 与 Search API 仍属于 M6-C/D。
+M4-C 已实现 Approved Proposal 的自动异步写回：Approval、Proposal→Run binding、固定 Safe Writeback Definition/Node、Workflow Outbox 与唯一 River Job 在同一 PostgreSQL 事务提交；Worker Claim 后 exact lookup Durable Execution，缺失时瞬时签发双授权并 Atomic Begin，再调用现有 Safe Writeback Node，最终由 M4-B 原子完成 Node/Run。完整绑定重放直接返回原 Run/Job，不读取已被写回改变的文件或 Git；Rejected 不创建 Workflow。M6-B 已消费 Reindex Outbox，从指定 Commit 捕获不可变 SourceVersion，完成真实 FTS-only Workspace Snapshot、结构回归与原子 Activation，并在同一数据库事务将 Delivery、Execution、Proposal 推进到 completed；M6-C 已实现配置化 Embedding、可恢复向量构建和 Active-only Keyword/Semantic/Hybrid Search。M6-D 已建立 `POST /api/v1/search`、两个 Workspace-scoped Source Version/Span 只读资源、top-100 HMAC Cursor、API/Worker 共用 Configured Embedder Factory 和严格 Web Decoder；真实 PostgreSQL HTTP/River fault、disposable Compose API smoke、Go race/count/integration/vet、Web lint/typecheck/test/build、OpenAPI、Docker 与独立审查均已通过，Search/Evidence 和唯一 Completion 闭环已完成 M6-01 收口。
 
 #### 10.9.3 Git Commit 规则
 
@@ -3504,20 +3529,25 @@ Knowledge Event：
 
 请求包含：
 
+- workspace_id（必填）。
 - query。
-- scope。
-- filters。
-- retrieval_mode。
+- filters：source_ids、source_version_ids、path_prefixes、captured_at_from、captured_at_before。
+- retrieval_mode：keyword、semantic 或 hybrid；默认 hybrid。
 - cursor（可选）。
-- limit（有服务端最大值）。
+- limit（默认 20，范围 1..100）。
 
 响应包含：
 
 - result items。
-- source spans。
-- scores。
-- retrieval version。
-- degraded capabilities。
+- 可打开的 Source Version/Source Span href。
+- lexical score、vector distance、fusion score 和可选 rerank score。
+- index_version_id 和可选 embedding_version_id。
+- requested/effective mode、Index degraded capabilities 与单次 Query degradations。
+- top-100 窗口内的可选 next_cursor。
+
+当前公开 Search API 为 `POST /api/v1/search`。Cursor 是当前 API 进程内签名的结果一致性凭据，
+不是 Session 或权限凭据；重启后失效。Source Version/Span GET 必须同时校验 Workspace 归属，
+跨 Workspace 与绑定不存在统一返回 Not Found，避免对象身份枚举。
 
 ### 14.5 RAG 接口能力
 
@@ -3639,6 +3669,10 @@ Knowledge Event：
 - 长任务必须异步，不阻塞请求线程。
 
 模型耗时单独统计，不纳入本地处理指标。
+
+M6-D 的向量查询只保留 exact pgvector scan 与 `EXPLAIN (FORMAT JSON)` 基线，用于证明固定距离
+operator、过滤和查询计划正确；它不证明 500,000 Chunk 下的 ANN 参数或 P95。HNSW/IVFFlat、
+容量数据集与最终 P95 锁定属于 M10 性能交付。
 
 ### 15.3 可用性
 

@@ -2,7 +2,8 @@
 
 ## 适用范围
 
-适用于后端所有领域模块、API、Worker、数据库/文件/Git/模型 Adapter、迁移、Workflow 和安全边界。仓库当前没有业务代码，因此本文件定义 M1 起的可执行质量门禁，不声称已有测试或工具配置。
+适用于后端所有领域模块、API、Worker、数据库/文件/Git/模型 Adapter、迁移、Workflow 和安全边界。
+仓库已进入 M6-D；本文件记录可执行质量门禁，但只有实际命令输出才能证明某项测试或 smoke 已通过。
 
 ## 已确认事实
 
@@ -39,6 +40,10 @@
 4. 通过参数化 SQL、Workspace Root/Symlink 检查、SSRF 逐跳校验、Tool Registry 权限和敏感信息脱敏保护边界。
 5. Adapter Contract 必须验证 Success、Timeout、Retryable/NonRetryable、Idempotency、Version Conflict 和 Resource Cleanup。
 6. 代码变更后按影响面运行 Unit → Contract → Integration → E2E/Smoke；模型、Prompt、Retrieval、Workflow 或 Schema 版本变更需要 AI Eval 和回归门禁。
+7. Search API 的 Handler 只拥有严格 wire 解码、href 和 top-100 page slicing；Canonicalization、Active-only
+   Search、RRF、Evidence binding 与降级属于 Domain/Application/Adapter，禁止复制到 HTTP。
+8. API/Worker 的 Embedding 构造必须复用 Configured Embedder Factory；前端原始 Search JSON 只能通过
+   `web/src/api/search.ts` 严格 Decoder 进入 Feature。
 
 ## 测试要求
 
@@ -50,6 +55,18 @@
 - 涉及 AI 的结构化输出、Schema Repair、Citation/Refusal、冲突披露和高风险指标回归。
 - 涉及安全的负测；涉及文件/Git 的原子写、并发修改、Commit 失败、反向 Commit 和 Symlink Escape。
 - 核心闭环的最小业务烟测与可追踪审计。
+
+M6-D 已通过真实 PostgreSQL HTTP、River fault 与 Compose API smoke 一轮；以下仍是后续发布必须重复的
+独立交付门禁，且不代表前端、全仓静态检查或独立审查已经完成：
+
+- 真实 PostgreSQL HTTP integration：生产 Router/Repository、三模式/过滤、Cursor、Workspace isolation、
+  Source Version/Span href、Artifact 完整性和生产 SQL `EXPLAIN (FORMAT JSON)`。
+- 真实 PostgreSQL/River fault smoke：Completion 后通过 Router Search/Evidence，并在 response-loss/
+  duplicate delivery 下断言唯一 Activation、Active 与 Completion。
+- Compose API smoke：唯一 project + disposable Git Workspace，经公开 API 完成 Approval→Reindex→
+  Hybrid-to-Keyword degraded Search→Evidence GET，成功/失败都清理 volume/临时目录。
+- Web strict decoder 单测与 lint/typecheck/test/build；OpenAPI 三路径及关键 Schema drift check。
+- go-review、sql-code-review 和独立只读审查。上述 gate 不能用单元 Fake、readiness 或文档描述替代。
 
 架构文档给出的 CI 事实是：PR 运行 Unit、Lint/Static、Migration、Contract 和选定 Integration；主分支/发布运行 Full Integration、E2E、Security、Evaluation、Docker Smoke。具体 CI 配置在 M1 创建后以仓库文件为准。
 
@@ -63,6 +80,10 @@
 - 是否覆盖主路径、边界、失败、安全负测、集成和最小烟测？
 - 是否运行并记录受影响包测试、静态检查、构建和迁移验证？
 - 是否同步更新真实文档，并明确待确认项，而不是用未经证实的版本、路径或 API？
+- Cursor 是否绑定 canonical request、Active Index、完整 top-100 结果与 offset，并明确进程重启失效？
+- Vector wire 是否为 `distance`；Evidence 是否只从不可变 Artifact 读取最多 4 KiB excerpt？
+- 是否误把 Workspace 隔离/loopback 声称为 M10 Auth、CSRF 或 Capability 已完成？
+- 是否误把 exact vector scan/小夹具 EXPLAIN 声称为 500,000 Chunk ANN/P95 已完成？
 
 ## 验证方式
 
@@ -84,9 +105,9 @@ go vet ./...
 
 并按影响范围补充迁移/集成、API Contract、E2E、Security、AI Eval、Docker Smoke 和恢复演练。`go.mod`、CI 和 Makefile 未创建前，不把具体 lint 工具、版本或命令参数当成既定事实。
 
-## 待 M1 代码验证
+## 当前后续门禁
 
-- Go、Node、包管理器、PostgreSQL/pgvector、River、Goose、sqlc 的具体版本和 lockfile 位置。
-- 统一 lint/static 工具、覆盖率阈值、CI job 名称和 canonical `make verify` 入口。
-- 每个模块的真实测试文件、Testcontainers 生命周期、E2E Fixture 和性能基准。
+- M6-D 前端、全仓静态/构建/测试、Review 与归档的最终运行结果；真实 PG HTTP/River/Compose smoke
+  已完成一轮，后续发布仍需重跑。
+- 统一覆盖率阈值、完整 E2E Fixture 和性能容量基准。
 - License、发布门禁、SBOM 和镜像扫描配置；README 当前仍未确定许可证。

@@ -100,6 +100,10 @@ Command：
 - limit 有最大值。
 - 图谱邻居使用 cursor。
 - Collection 大结果禁止无分页。
+- Search Cursor 是单独的有界结果窗口契约：服务端每次重算规范请求的 top-100，Cursor v1 使用
+  API 进程内随机 HMAC-SHA256 密钥签名，并绑定规范请求、页大小、Active Index、完整有序结果指纹
+  和下一 offset。签名/请求不匹配返回 invalid；Index 或完整结果变化返回 stale；进程重启后旧
+  Cursor 失效。它不是通用列表游标、持久 Search Session 或授权凭据。
 
 ## 9. SSE
 
@@ -146,8 +150,27 @@ M5 已落地的同步摄取命令为 `POST /api/v1/source-versions/{source_versi
 
 ### Search
 
-- 输入：query、scope、filters、mode。
-- 输出：Evidence Items、scores、index_version、degraded。
+- `POST /api/v1/search`；无业务副作用，不要求 `Idempotency-Key`，不得创建 Workflow。
+- 输入：必填 `workspace_id`、`query`；可选 `retrieval_mode=keyword|semantic|hybrid`、
+  `filters.source_ids|source_version_ids|path_prefixes|captured_at_from|captured_at_before`、
+  opaque `cursor` 和 `limit`。默认 Hybrid、默认 limit 20，公开范围为 `1..100`。
+- 输出：Workspace、requested/effective mode、Active Index Version、可选 Embedding Version、
+  Index degraded capabilities、单次 Query degradations、Evidence Items 与可选 `next_cursor`。
+- Evidence stage 字段分型：Lexical 返回 rank/score/FTS/trigram 原始值；Vector 返回 rank 与原始
+  `distance`，不得冒充 similarity；Fusion 返回 rank/score；Rerank 仅在真实执行时返回
+  rank/score/model version。
+- Embedding disabled 或 FTS-only Active 时，Keyword 正常；Hybrid 返回 Keyword 结果并显式标记
+  vector/rerank degraded；Semantic 返回 `503 RETRIEVAL_SEMANTIC_UNAVAILABLE`。零命中返回
+  `200` 与 `items=[]`，不转换成错误或假语义成功。
+
+可打开 Evidence 资源：
+
+- `GET /api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}`。
+- `GET /api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/spans/{source_span_id}`。
+- Source Version 响应不返回 Workspace 绝对根路径或 Content Artifact locator。
+- Span 必须验证 Workspace → Source Version → Content Artifact → Parse Projection → Span 绑定，
+  从不可变 Artifact 读取并复核 Hash/大小/字节范围，最多返回 4 KiB UTF-8 excerpt；不得读取当前
+  工作树路径。跨 Workspace、版本/Span 不关联和不存在均按相同 Not Found 契约处理。
 
 ### RAG
 
@@ -193,6 +216,10 @@ M5 已落地的同步摄取命令为 `POST /api/v1/source-versions/{source_versi
 - 不从 URL Query 传 Secret。
 - 文件下载通过 Object ID。
 
+M6-D 当前只完成 Search/Evidence 的 Workspace 数据隔离，并保持 API loopback 部署。正式 Auth、
+Session、API Token、CSRF/Origin 与 Capability Middleware 仍属于 M10；在这些门禁落地前不得把
+`workspace_id`、回环来源或 Search Cursor 当作已认证身份，也不得将自托管公网入口描述为安全可交付。
+
 认证 API 至少提供登录、登出、当前 Session、Session 轮换，以及 API Token 创建、列出元数据和撤销能力。创建 Token 时明文只返回一次；响应和日志不得再次暴露完整 Token。
 
 ## 13. API 可观测性
@@ -206,9 +233,13 @@ M5 已落地的同步摄取命令为 `POST /api/v1/source-versions/{source_versi
 
 ## 14. OpenAPI
 
-- 从契约生成 OpenAPI。
+- OpenAPI 3.1 JSON 是 API wire 契约事实源；Search、Source Version、Source Span、Cursor、Evidence、
+  Score/Distance、Degradation 和 Problem 必须声明完整 Schema 与 405。
 - CI 校验 Breaking Change。
 - Generated Client 只在前端边缘，领域模块不依赖。
+- `web/src/api/search.ts` 是当前 Search wire 的严格 Decoder/Client 边界；它必须把网络 JSON 当作
+  `unknown`，拒绝未知 mode/capability、非有限分数、非法 UUID/时间、缺失 href 和错误 cursor 类型，
+  Feature/Component 不得直接断言原始响应。
 
 ## 15. 测试
 
@@ -222,3 +253,10 @@ M5 已落地的同步摄取命令为 `POST /api/v1/source-versions/{source_versi
 - CSRF/Origin。
 - API Token Scope/Expiry/Revocation。
 - 登录授权不能绕过 Approval Write Authorization。
+- Search Handler：严格 JSON、默认值、三种模式、统一过滤、top-100 分页、Cursor 篡改/跨请求/
+  stale/重启失效、零命中、显式降级和稳定 Problem 映射。
+- 真实 PostgreSQL HTTP：Workspace 隔离、三模式/过滤、Source Version/Span 可打开与 404 防枚举、
+  FTS/trigram/三种 vector distance operator 的 `EXPLAIN (FORMAT JSON)` 基线。
+- 真实 River fault 与 Compose API smoke：Approved Proposal → Safe Writeback → Reindex → 唯一 Active/
+  Completion → Search 命中新正文 → 打开 Evidence。上述 smoke 是 M6-D 归档门禁，不能以单元测试、
+  readiness 或内存 Fake 代替。

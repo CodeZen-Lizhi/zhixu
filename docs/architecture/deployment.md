@@ -59,6 +59,8 @@ flowchart TB
 - Readiness 检查 DB 和 API 依赖。
 - Liveness 只检查进程。
 - 宿主默认只发布 `127.0.0.1:8080`。
+- M6-D 起 API 构造 PostgreSQL Retrieval Search/Evidence 与 Query Embedder；缺失 Search/Evidence/Cursor
+  依赖时保留路由并显式返回 503，不返回假空结果。
 
 ### worker
 
@@ -97,6 +99,10 @@ flowchart TB
 - Worker 无外部入口。
 - 自托管仅 Proxy 暴露公网。
 - 模型和网页使用受控出站。
+
+正式 Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 归 M10。M6-D 只提供
+Workspace 数据隔离，因此在 M10 门禁完成前必须保持宿主 loopback 发布；不得通过 `0.0.0.0`、反向代理
+或公网端口把当前 Search/Evidence API 描述为已具备自托管安全边界。
 
 ## 7. 启动顺序
 
@@ -192,6 +198,11 @@ Embedding 配置按 Provider 分组 fail-fast：`disabled` 不消费 Base URL、
 归一化、距离、Endpoint identity 与 batch/input limits 共同冻结为 Embedding Config Hash；
 Credential、timeout 和 response limit 不进入持久版本身份。
 
+API 与 Worker 必须通过同一 Configured Embedder Factory 解释上述配置，Compose 使用共享环境配置块向
+两个进程注入完全相同的 Provider/Model/Dimensions/Normalization/Distance/limits。Worker 用于构建
+Index Vector，API 用于 Semantic/Hybrid Query Embedding；两进程不得各自维护配置转换。`disabled`
+仍允许 Keyword 和明确退化的 Hybrid，Semantic 返回 503，不应阻断 API 启动或 FTS-only Active。
+
 ## 10. 升级
 
 1. 创建备份 Marker。
@@ -275,6 +286,22 @@ health 端口未发布宿主、API/Worker 同时 ready、SIGTERM 退出码为 0�
 stuck rescue 由 `worker_kill_smoke_integration_test.go` 覆盖；双 Worker 与领域副作用
 唯一性由 Approval/Reindex River fault smoke 和 Workflow lease/cancel 集成测试覆盖。发布前应执行
 `ZHIXU_TEST_DATABASE_URL=... go test -race -tags=integration ./internal/changecontrol/application -run TestApprovalDispatchRealRiverSafeWritebackSmoke -count=1`，证明 Reindex Dispatcher/Worker、checkpoint 恢复、Completion response-loss 和单一 Active。发布时仍不得用 `restart: on-failure` 或一次 readiness 代替这些独立证据。
+
+### 15.2 M6-D Search API 发布门禁
+
+M6-D 归档与后续发布候选必须额外执行仓库锁定的 Compose Search smoke target。该 smoke 必须：
+
+1. 使用唯一 Compose project 与 disposable Git Workspace，避免污染开发 volume/目录。
+2. 通过公开 API 执行 Scan/Ingestion/Proposal/Approval，等待真实 Worker Reindex 与唯一 Completion。
+3. 在 `ZHIXU_EMBEDDING_PROVIDER=disabled` 基线下调用 `POST /api/v1/search`，断言 Hybrid 实际返回
+   Keyword 命中并显式报告 vector/rerank degraded，而不是空结果或假 Semantic。
+4. 打开返回的 Source Version/Span href，证明 excerpt 来自不可变 Content Artifact。
+5. 使用 trap 在成功和失败路径都删除 Compose volume 与临时 Workspace，并检查输出不包含 Secret、DSN、
+   绝对路径或 Artifact locator。
+
+本任务已独立通过真实 PostgreSQL HTTP integration、River fault smoke 与 Compose API smoke：Compose
+黑盒证明部署契约，PostgreSQL HTTP 证明 Workspace/SQL/Evidence 边界，River fault smoke 证明
+response-loss 下唯一 Activation/Completion。后续发布候选仍必须重复执行；这不代表最终全仓门禁已完成。
 
 ## 16. 不采用
 

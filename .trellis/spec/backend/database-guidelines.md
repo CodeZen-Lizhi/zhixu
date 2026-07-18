@@ -650,3 +650,103 @@ Correct: 安全 Error string 隐藏 cause，但 Unwrap 保留 context.Canceled/D
 Wrong: Lexical 失败立即返回，后台 Vector goroutine 继续运行并可能泄漏资源。
 Correct: cancel shared context 后等待 Vector worker 收敛，再返回 Lexical 错误。
 ```
+
+## M6-D Search API And Evidence Reference Contract
+
+### 1. Scope / Trigger
+
+- Trigger：M6-C Active-only Search 需要通过真实 HTTP/OpenAPI 对外提供稳定分页 Evidence，并让每个
+  provenance 的 Source Version/Span 可打开。
+- Scope：本契约覆盖 Workspace-scoped PostgreSQL 查询、top-100 HTTP Cursor、不可变 Artifact 引用与
+  API/Worker Embedder composition；不新增迁移，不修改 `00014`–`00016`。正式 Auth/Session/Token/
+  CSRF/Capability 与 500,000 Chunk ANN/P95 归 M10。
+
+### 2. Signatures
+
+```text
+POST /api/v1/search
+GET /api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}
+GET /api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/spans/{source_span_id}
+```
+
+```go
+type EvidenceReferenceStore interface {
+    LoadSourceVersionReference(context.Context, foundation.ID, foundation.ID) (domain.SourceVersionReference, error)
+    LoadSourceSpanReference(context.Context, foundation.ID, foundation.ID, foundation.ID) (domain.SourceSpanReference, error)
+}
+
+type EvidenceArtifactReader interface {
+    ReadEvidenceArtifact(context.Context, foundation.ID, foundation.ID) (application.EvidenceArtifact, error)
+}
+```
+
+Search Store 继续使用 M6-C `LoadActiveSearchIndex/SearchLexical/SearchVector`；HTTP 分页不得引入第二套
+offset SQL 或持久 Search Session。API 与 Worker 都只能调用
+`models.NewConfiguredEmbedder(config.Config)` 构造 Embedding Adapter。
+
+### 3. Contracts
+
+- Search 请求必须经过领域 Canonicalization：Workspace、trim 后非空且最大 8 KiB Query、
+  `keyword|semantic|hybrid`、Source/SourceVersion/path/captured-time filter；底层查询固定请求 top-100。
+- Cursor v1 使用进程内随机 32-byte HMAC-SHA256 key，绑定 canonical SearchRequest、page limit、
+  Active Index Version、完整有序 SearchResult Hash 与下一 offset；它不存 DB、不跨进程有效、不授权访问。
+- Source Version 查询必须以 Workspace + Source Version 参数化限制，并只返回 Source/type/logical name、
+  受控相对路径、Content Hash/size/media/security/captured time；不得选择 Workspace root 或 managed locator。
+- Span 查询必须通过参数化 JOIN 证明 Workspace → Source Version → Source → Content Artifact →
+  `source_version_projection` → Parse Projection → Source Span 全绑定。Application 再从不可变 Artifact
+  复核全文 Hash/大小、`[start_byte,end_byte)` 与 excerpt Hash，最多返回 4 KiB UTF-8 excerpt。
+- Vector wire 字段固定为 `distance`；数据库只按持久 `cosine|inner_product|euclidean` 枚举选择
+  `<=>|<#>|<->` 固定 SQL 模板，不接受用户 operator/sort 输入。
+- `provider=disabled` 时 Factory 返回 nil Embedder：Keyword 正常，Hybrid 显式 effective Keyword +
+  vector/rerank degraded，Semantic 返回 503；不得阻断 FTS-only Search 或返回假向量。
+- exact vector scan 与生产 `EXPLAIN (FORMAT JSON)` 只证明 operator、过滤与查询计划正确；ANN 参数和
+  P95 不得从小夹具外推。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 稳定错误/行为 |
+|---|---|
+| Search JSON/UUID/Query/mode/filter/limit 非法 | `400 RETRIEVAL_SEARCH_REQUEST_INVALID` 或 `INVALID_JSON`，不执行 Store |
+| Cursor 签名、版本、请求绑定或 offset 非法 | `400 RETRIEVAL_SEARCH_CURSOR_INVALID` |
+| Active Index 或完整结果 Hash 变化 | `409 RETRIEVAL_SEARCH_CURSOR_STALE`，客户端从第一页重启 |
+| API 进程重启后旧 Cursor | 新随机 key 校验失败，`400 RETRIEVAL_SEARCH_CURSOR_INVALID` |
+| FTS-only Semantic | `503 RETRIEVAL_SEMANTIC_UNAVAILABLE` |
+| Source Version/Span 不存在、跨 Workspace、错绑 | `404 RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND`，不区分原因 |
+| Artifact ID/Hash/大小/range/excerpt 不一致 | ConsistencyViolation，`RETRIEVAL_EVIDENCE_ARTIFACT_INVALID` |
+| DB/Provider 暂时不可用 | 503 并保留稳定 retryable 分类；Hybrid 仅在既有规则允许时退化 Keyword |
+
+### 5. Good / Base / Bad Cases
+
+- Good：同一规范请求第一页返回 Cursor；第二页重算同一 top-100、验证 Active/完整 Hash 后切片，
+  无重复或漏项；Evidence href 可经真实 Router 打开不可变 excerpt。
+- Base：Embedding disabled 的 Active FTS-only Index 仍由 API 返回 Keyword 结果；Hybrid 明确退化，
+  Semantic 明确失败，真实零命中仍是 `200 items=[]`。
+- Bad：Cursor 只存 offset、跨 API 重启继续有效，或后续页直接对 SQL 使用 offset，导致 Active 切换后
+  拼接不同排序。
+- Bad：Span 直接读取 provenance.relative_path 的工作树文件，写回后把新正文冒充历史 Evidence。
+
+### 6. Tests Required
+
+- Unit/Handler：严格 JSON、默认值、过滤 canonicalization、三模式/零结果/降级、Cursor 正常/篡改/
+  跨请求/stale/重启、Problem 映射和 405。
+- PostgreSQL HTTP：真实 Router + Repository，Workspace 隔离、三模式/过滤、Source Version/Span href、
+  404 防枚举、Artifact 完整性与 4 KiB UTF-8 截断。
+- SQL plan：FTS GIN、trigram GIN、Active/Manifest B-tree、三种 exact vector operator 的生产查询
+  `EXPLAIN (FORMAT JSON)`；不把结果登记为 ANN/P95 证据。
+- Fault/Compose：唯一 River Completion 后经 Router Search 并打开 Evidence；disposable Git Workspace
+  黑盒完成 Approval→Reindex→Hybrid-to-Keyword Search，成功/失败均清理 project volume/临时目录。
+- Gate：Go race/count/integration/vet/test/tidy、OpenAPI drift、frontend lint/typecheck/test/build、Compose、
+  go-review、sql-code-review 和独立审查。只有实际命令结果才能标记通过。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: SELECT span by source_span_id，再在 Handler 比较 workspace_id；或跨 Workspace 返回不同 404 文案。
+Correct: 参数化 JOIN 在数据库入口同时限制 Workspace/SourceVersion/Span，miss 统一 NotFound。
+
+Wrong: 返回 vector.score/similarity，客户端假设值越大越相似。
+Correct: 返回 vector.distance，并保留 Embedding Version/Distance Metric 语义。
+
+Wrong: API 与 Worker 各自 switch provider、拼 Options，配置变化后查询与索引绑定漂移。
+Correct: 两个 Composition Root 复用同一 Configured Embedder Factory。
+```

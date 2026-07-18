@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke openapi-check compose-check docker-build compose-up compose-down
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke openapi-check compose-check docker-build compose-up compose-down compose-search-smoke
 
 test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet openapi-check compose-check
 
@@ -51,3 +51,6 @@ compose-up:
 
 compose-down:
 	docker compose -f deploy/compose.yml --env-file .env.example down -v
+
+compose-search-smoke:
+	bash deploy/compose-search-smoke.sh
