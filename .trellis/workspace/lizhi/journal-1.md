@@ -574,3 +574,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: 完成 M6-B Reindex Consumer
+
+**Date**: 2026-07-19
+**Task**: 完成 M6-B Reindex Consumer
+**Branch**: `dev`
+
+### Summary
+
+实现 Safe Writeback Reindex Outbox 消费、committed source 捕获、完整 Workspace FTS Snapshot、Delivery/River 恢复、原子 Completion 与真实 fault smoke，并通过全量门禁和独立复验。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b765075` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

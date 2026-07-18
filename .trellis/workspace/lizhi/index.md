@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 17
-- **Last Active**: 2026-07-18
+- **Total Sessions**: 18
+- **Last Active**: 2026-07-19
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~576 | Active |
+| `journal-1.md` | ~609 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 18 | 2026-07-19 | 完成 M6-B Reindex Consumer | `b765075` | `dev` |
 | 17 | 2026-07-18 | 完成 M6-A Retrieval Index Foundation | `a88a5ce` | `dev` |
 | 16 | 2026-07-17 | 完成 River Runtime M4-D 可运维交付 | `08f0cc8`, `d756e16`, `bf1750d` | `dev` |
 | 15 | 2026-07-17 | 完成 M4-C Approval Safe Writeback Dispatch | `cda2192`, `db2376f` | `dev` |
