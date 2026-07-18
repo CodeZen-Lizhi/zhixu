@@ -14,7 +14,7 @@
 12. [x] 实现可选 Reranker Port、exact output validator 与 nil/retryable degraded；损坏输出 fail closed。
 13. [x] 增加真实 PostgreSQL Integration/EXPLAIN、Provider httptest Contract、Hybrid Reindex fault smoke、race/故障/安全 canary 和最小检索 smoke；Vector commit response-loss 已在真实 River 重投恢复。
 14. [x] 同步产品 PRD、Retrieval/Database/Testing/Deployment/Config 与 backend code-spec，修正 FTS-only、Rerank、cache FK 和 trigram threshold 文档冲突并明确 exact scan、Token 和 Rerank 边界。
-15. [ ] 执行 `go test -race`、关键包 `-count=20`、全仓 integration `-p 1`、`go vet`、`make test`、go-review、sql-code-review、独立审查、提交、归档和 journal。
+15. [x] 执行 `go test -race`、关键包 `-count=20`、全仓 integration `-p 1`、`go vet`、`make test`、go-review、sql-code-review、独立审查、提交、归档和 journal。
 
 ## Dependency Order
 
