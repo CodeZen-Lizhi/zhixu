@@ -105,7 +105,7 @@ M5-04D 当前不实现自动三方合并；任何 Base/HEAD 冲突只进入 Need
 | DB Publish | Commit 已存在时保留文件，重建 Mapping + Outbox；Read-only Recovery/Reconcile，禁止恢复文件 |
 | Cleanup finalize | 保持 `verifying/index_pending`，保留恢复证据并可重试 |
 | Index | M6 Retrieval 消费 Outbox，保持 `index_pending/stale`，不撤销 Commit |
-| Regression | 严格 HEAD/clean 前提下创建反向 Commit，否则人工恢复；不得重写历史 |
+| Regression | M6-B 结构回归失败保留 Git Commit 与旧 Active，Proposal/Execution 保持 verifying；反向 Commit 必须由新的 Proposal/Approval 发起 |
 
 ## 8. 权限
 

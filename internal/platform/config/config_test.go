@@ -21,6 +21,12 @@ func TestDefaultsWorkerRuntime(t *testing.T) {
 	if cfg.WorkflowLeaseDuration != 2*time.Minute || cfg.WorkflowHeartbeatInterval != 30*time.Second {
 		t.Fatalf("unexpected workflow lease defaults: %s", cfg)
 	}
+	if cfg.ReindexDispatchPollInterval != time.Second || cfg.ReindexDispatchBatchSize != 10 || cfg.ReindexDispatchErrorBackoff != 5*time.Second {
+		t.Fatalf("unexpected reindex dispatcher defaults: %s", cfg)
+	}
+	if cfg.ReindexLeaseDuration != 2*time.Minute || cfg.ReindexHeartbeatInterval != 30*time.Second {
+		t.Fatalf("unexpected reindex lease defaults: %s", cfg)
+	}
 	if cfg.WorkerSoftStopTimeout != 30*time.Second || cfg.WorkerHardStopTimeout != time.Minute {
 		t.Fatalf("unexpected shutdown defaults: %s", cfg)
 	}
@@ -100,6 +106,29 @@ func TestLoadWithLookupRejectsInvalidEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadWithLookupRejectsInvalidReindexEnvironment(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"ZHIXU_REINDEX_DISPATCH_BATCH_SIZE":    "not-a-number",
+		"ZHIXU_REINDEX_DISPATCH_POLL_INTERVAL": "not-a-duration",
+	}
+	for key, value := range tests {
+		key, value := key, value
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			_, err := LoadWithLookup("", func(candidate string) (string, bool) {
+				if candidate == key {
+					return value, true
+				}
+				return "", false
+			})
+			if err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("expected error containing %q, got %v", key, err)
+			}
+		})
+	}
+}
+
 func TestLoadWithLookupWorkerEnvironmentOverrides(t *testing.T) {
 	t.Parallel()
 	values := map[string]string{
@@ -109,11 +138,18 @@ func TestLoadWithLookupWorkerEnvironmentOverrides(t *testing.T) {
 		"ZHIXU_WORKER_RESCUE_STUCK_AFTER": "45m",
 		"ZHIXU_WORKFLOW_LEASE":            "3m",
 		"ZHIXU_WORKFLOW_HEARTBEAT":        "45s",
-		"ZHIXU_WORKER_SOFT_STOP_TIMEOUT":  "40s",
-		"ZHIXU_WORKER_HARD_STOP_TIMEOUT":  "90s",
-		"ZHIXU_WORKER_HEALTH_ADDR":        "127.0.0.1:9091",
-		"ZHIXU_TELEMETRY_MODE":            "required",
-		"OTEL_EXPORTER_OTLP_ENDPOINT":     "https://otel.example.test:4318",
+
+		"ZHIXU_REINDEX_DISPATCH_POLL_INTERVAL": "2s",
+		"ZHIXU_REINDEX_DISPATCH_BATCH_SIZE":    "25",
+		"ZHIXU_REINDEX_DISPATCH_ERROR_BACKOFF": "7s",
+		"ZHIXU_REINDEX_LEASE_DURATION":         "4m",
+		"ZHIXU_REINDEX_HEARTBEAT_INTERVAL":     "50s",
+
+		"ZHIXU_WORKER_SOFT_STOP_TIMEOUT": "40s",
+		"ZHIXU_WORKER_HARD_STOP_TIMEOUT": "90s",
+		"ZHIXU_WORKER_HEALTH_ADDR":       "127.0.0.1:9091",
+		"ZHIXU_TELEMETRY_MODE":           "required",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":    "https://otel.example.test:4318",
 	}
 	cfg, err := LoadWithLookup("", func(key string) (string, bool) {
 		value, ok := values[key]
@@ -130,6 +166,12 @@ func TestLoadWithLookupWorkerEnvironmentOverrides(t *testing.T) {
 	}
 	if cfg.WorkflowLeaseDuration != 3*time.Minute || cfg.WorkflowHeartbeatInterval != 45*time.Second {
 		t.Fatalf("workflow environment override failed: %s", cfg)
+	}
+	if cfg.ReindexDispatchPollInterval != 2*time.Second || cfg.ReindexDispatchBatchSize != 25 || cfg.ReindexDispatchErrorBackoff != 7*time.Second {
+		t.Fatalf("reindex dispatcher environment override failed: %s", cfg)
+	}
+	if cfg.ReindexLeaseDuration != 4*time.Minute || cfg.ReindexHeartbeatInterval != 50*time.Second {
+		t.Fatalf("reindex lease environment override failed: %s", cfg)
 	}
 	if cfg.WorkerSoftStopTimeout != 40*time.Second || cfg.WorkerHardStopTimeout != 90*time.Second {
 		t.Fatalf("shutdown environment override failed: %s", cfg)
@@ -152,6 +194,11 @@ worker_job_timeout: 10m
 worker_rescue_stuck_jobs_after: 25m
 workflow_lease: 90s
 workflow_heartbeat: 20s
+reindex_dispatch_poll_interval: 3s
+reindex_dispatch_batch_size: 40
+reindex_dispatch_error_backoff: 9s
+reindex_lease_duration: 5m
+reindex_heartbeat_interval: 55s
 worker_soft_stop_timeout: 15s
 worker_hard_stop_timeout: 45s
 worker_health_addr: ":8181"
@@ -168,6 +215,12 @@ telemetry_endpoint: http://collector:4318
 	if cfg.WorkerQueue != "batch" || cfg.WorkerMaxWorkers != 2 || cfg.WorkerHealthAddr != ":8181" {
 		t.Fatalf("worker YAML not loaded: %s", cfg)
 	}
+	if cfg.ReindexDispatchPollInterval != 3*time.Second || cfg.ReindexDispatchBatchSize != 40 || cfg.ReindexDispatchErrorBackoff != 9*time.Second {
+		t.Fatalf("reindex dispatcher YAML not loaded: %s", cfg)
+	}
+	if cfg.ReindexLeaseDuration != 5*time.Minute || cfg.ReindexHeartbeatInterval != 55*time.Second {
+		t.Fatalf("reindex lease YAML not loaded: %s", cfg)
+	}
 	if cfg.TelemetryMode != TelemetryModeOptional || cfg.TelemetryEndpoint != "http://collector:4318" {
 		t.Fatalf("telemetry YAML not loaded: %s", cfg)
 	}
@@ -180,6 +233,11 @@ func TestValidateWorkerBoundaryCombinations(t *testing.T) {
 	cfg.WorkerRescueStuckJobsAfter = time.Second + time.Nanosecond
 	cfg.WorkflowLeaseDuration = 4 * time.Nanosecond
 	cfg.WorkflowHeartbeatInterval = time.Nanosecond
+	cfg.ReindexDispatchPollInterval = time.Minute
+	cfg.ReindexDispatchBatchSize = 1_000
+	cfg.ReindexDispatchErrorBackoff = time.Minute
+	cfg.ReindexLeaseDuration = time.Minute + time.Nanosecond
+	cfg.ReindexHeartbeatInterval = time.Minute
 	cfg.WorkerSoftStopTimeout = time.Second
 	cfg.WorkerHardStopTimeout = time.Second + time.Nanosecond
 	if err := cfg.Validate(); err != nil {
@@ -205,6 +263,18 @@ func TestValidateRejectsInvalidWorkerConfiguration(t *testing.T) {
 		{name: "zero heartbeat", change: func(c *Config) { c.WorkflowHeartbeatInterval = 0 }, want: "workflow_heartbeat"},
 		{name: "heartbeat equals lease third", change: func(c *Config) { c.WorkflowHeartbeatInterval = c.WorkflowLeaseDuration / 3 }, want: "workflow_heartbeat"},
 		{name: "heartbeat exceeds lease third", change: func(c *Config) { c.WorkflowHeartbeatInterval = c.WorkflowLeaseDuration / 2 }, want: "workflow_heartbeat"},
+		{name: "zero reindex poll interval", change: func(c *Config) { c.ReindexDispatchPollInterval = 0 }, want: "reindex_dispatch_poll_interval"},
+		{name: "reindex poll interval exceeds maximum", change: func(c *Config) { c.ReindexDispatchPollInterval = time.Minute + time.Nanosecond }, want: "reindex_dispatch_poll_interval"},
+		{name: "zero reindex batch size", change: func(c *Config) { c.ReindexDispatchBatchSize = 0 }, want: "reindex_dispatch_batch_size"},
+		{name: "reindex batch size exceeds maximum", change: func(c *Config) { c.ReindexDispatchBatchSize = 1_001 }, want: "reindex_dispatch_batch_size"},
+		{name: "zero reindex error backoff", change: func(c *Config) { c.ReindexDispatchErrorBackoff = 0 }, want: "reindex_dispatch_error_backoff"},
+		{name: "reindex error backoff exceeds maximum", change: func(c *Config) { c.ReindexDispatchErrorBackoff = time.Minute + time.Nanosecond }, want: "reindex_dispatch_error_backoff"},
+		{name: "zero reindex lease", change: func(c *Config) { c.ReindexLeaseDuration = 0 }, want: "reindex_lease_duration"},
+		{name: "reindex lease exceeds maximum", change: func(c *Config) { c.ReindexLeaseDuration = 24*time.Hour + time.Nanosecond }, want: "reindex_lease_duration"},
+		{name: "zero reindex heartbeat", change: func(c *Config) { c.ReindexHeartbeatInterval = 0 }, want: "reindex_heartbeat_interval"},
+		{name: "reindex heartbeat exceeds maximum", change: func(c *Config) { c.ReindexHeartbeatInterval = time.Minute + time.Nanosecond }, want: "reindex_heartbeat_interval"},
+		{name: "reindex heartbeat equals lease", change: func(c *Config) { c.ReindexHeartbeatInterval = c.ReindexLeaseDuration }, want: "reindex_heartbeat_interval"},
+		{name: "reindex heartbeat exceeds lease", change: func(c *Config) { c.ReindexHeartbeatInterval = c.ReindexLeaseDuration + time.Nanosecond }, want: "reindex_heartbeat_interval"},
 		{name: "zero soft stop", change: func(c *Config) { c.WorkerSoftStopTimeout = 0 }, want: "worker_soft_stop_timeout"},
 		{name: "zero hard stop", change: func(c *Config) { c.WorkerHardStopTimeout = 0 }, want: "worker_hard_stop_timeout"},
 		{name: "soft equals hard", change: func(c *Config) { c.WorkerSoftStopTimeout = c.WorkerHardStopTimeout }, want: "worker_soft_stop_timeout"},
@@ -300,10 +370,26 @@ func TestConfigFormattingAndErrorsDoNotExposeSecrets(t *testing.T) {
 	cfg.DatabaseURL = databaseURL
 	cfg.TelemetryMode = TelemetryModeRequired
 	cfg.TelemetryEndpoint = "https://collector:" + telemetryToken + "@otel.example.test"
+	cfg.ReindexDispatchPollInterval = 2 * time.Second
+	cfg.ReindexDispatchBatchSize = 25
+	cfg.ReindexDispatchErrorBackoff = 7 * time.Second
+	cfg.ReindexLeaseDuration = 4 * time.Minute
+	cfg.ReindexHeartbeatInterval = 50 * time.Second
 	for _, formatted := range []string{fmt.Sprint(cfg), fmt.Sprintf("%+v", cfg), fmt.Sprintf("%#v", cfg)} {
 		for _, secret := range []string{password, databaseURL, telemetryToken} {
 			if strings.Contains(formatted, secret) {
 				t.Fatalf("formatted config exposed secret %q: %s", secret, formatted)
+			}
+		}
+		for _, value := range []string{
+			"ReindexDispatchPollInterval:2s",
+			"ReindexDispatchBatchSize:25",
+			"ReindexDispatchErrorBackoff:7s",
+			"ReindexLeaseDuration:4m0s",
+			"ReindexHeartbeatInterval:50s",
+		} {
+			if !strings.Contains(formatted, value) {
+				t.Fatalf("formatted config omitted %q: %s", value, formatted)
 			}
 		}
 	}

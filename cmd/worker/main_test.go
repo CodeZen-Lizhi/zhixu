@@ -48,6 +48,7 @@ func TestStartWorkerHealthServerServesReadinessAndCloses(t *testing.T) {
 	readiness.SetDefinitionsOK(true)
 	readiness.SetExecutorsOK(true)
 	readiness.SetDependenciesOK(true)
+	readiness.SetReindexDispatcherStarted(true)
 
 	health, err := startWorkerHealthServer("127.0.0.1:0", workflowhealth.NewHandler(readiness))
 	if err != nil {

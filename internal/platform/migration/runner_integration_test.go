@@ -40,7 +40,7 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 14 || applied != 14 {
+	if maxVersion != 15 || applied != 15 {
 		t.Fatalf("project history max=%d applied=%d", maxVersion, applied)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE tablename LIKE 'river_%' AND schemaname <> 'workflow'`).Scan(&wrongSchema); err != nil {
@@ -67,6 +67,10 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	insertRuntimeIdentityFixture(t, ctx, pool)
+	// 00015 has no Source Manifest or Delivery data in this fixture.
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00015 Down rejected an empty Reindex Consumer schema: %v", err)
+	}
 	// 00014 has no Retrieval data yet, so remove it before exercising the
 	// earlier M4-A runtime-identity downgrade guard.
 	if _, err := provider.Down(ctx); err != nil {
@@ -121,11 +125,333 @@ INSERT INTO retrieval.embedding_version(
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00015 Down rejected empty Reindex Consumer schema: %v", err)
+	}
 	_, err = provider.Down(ctx)
 	var pgErr *pgconn.PgError
 	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "55000" {
 		t.Fatalf("00014 Down with Retrieval data error=%v", err)
 	}
+}
+
+func TestRunnerReindexConsumerRejectsPartialProcessingContractTuple(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+	runner, err := NewRunner(pool, projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	workspaceID := "71000000-0000-4000-8000-000000000001"
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
+		id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at
+	) VALUES($1,'partial-contract','/tmp/partial-contract','/tmp/partial-contract',now(),'test',now(),now())`, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	base := []any{strings.Repeat("2", 64), int64(1), "goldmark", "v1", strings.Repeat("3", 64), "structure-v1", "v1"}
+	for missing := range base {
+		values := append([]any(nil), base...)
+		values[missing] = nil
+		assertPartialProcessingContractRejected(t, ctx, pool, workspaceID, 720+missing, values)
+	}
+	processingOnly := append([]any(nil), base...)
+	processingOnly[0], processingOnly[1] = nil, nil
+	assertPartialProcessingContractRejected(t, ctx, pool, workspaceID, 730, processingOnly)
+}
+
+func assertPartialProcessingContractRejected(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID string, ordinal int, tuple []any) {
+	t.Helper()
+	_, err := pool.Exec(ctx, `INSERT INTO retrieval.index_version(
+		id,workspace_id,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
+		source_snapshot_ref,manifest_hash,expected_chunk_count,source_manifest_hash,expected_source_count,
+		source_parser_id,source_parser_version,source_parser_config_hash,source_chunk_strategy_version,source_schema_version,
+		idempotency_key,status,degraded_capabilities,version,created_at,updated_at
+	) VALUES($1,$2,'simple','v1',$3,'{}',$4,$5,0,$6,$7,$8,$9,$10,$11,$12,$13,'building','["vector"]',1,now(),now())`,
+		fmt.Sprintf("72000000-0000-4000-8000-%012d", ordinal), workspaceID, strings.Repeat("1", 64),
+		fmt.Sprintf("reindex-v1:partial-%d", ordinal), strings.Repeat("4", 64), tuple[0], tuple[1], tuple[2], tuple[3], tuple[4], tuple[5], tuple[6],
+		fmt.Sprintf("partial-contract-%d", ordinal),
+	)
+	assertPostgresCode(t, err, "23514")
+}
+
+func TestRunnerReindexConsumerMigrationSchemaAndDownGuards(t *testing.T) {
+	t.Run("source manifest", func(t *testing.T) {
+		ctx := context.Background()
+		pool, cleanup := newMigrationTestDatabase(t, ctx)
+		defer cleanup()
+		runner, err := NewRunner(pool, projectmigrations.FS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := runner.Up(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var tableCount, columnCount, constraintTriggerCount, writebackIndexCount, outboxIndexCount int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema='retrieval' AND table_name IN ('index_manifest_source','reindex_delivery','reindex_delivery_attempt')`).Scan(&tableCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema='retrieval' AND table_name='index_version' AND column_name IN (
+			'source_manifest_hash','expected_source_count','source_parser_id','source_parser_version',
+			'source_parser_config_hash','source_chunk_strategy_version','source_schema_version'
+		)`).Scan(&columnCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname IN ('reindex_delivery_verify_completion','writeback_execution_verify_reindex_completion','proposal_verify_reindex_completion') AND tgconstraint <> 0`).Scan(&constraintTriggerCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname='retrieval'
+			AND tablename='reindex_delivery' AND indexname='idx_reindex_delivery_writeback_execution'`).Scan(&writebackIndexCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname='workflow'
+			AND tablename='outbox_event' AND indexname='idx_workflow_outbox_reindex_unpublished'`).Scan(&outboxIndexCount); err != nil {
+			t.Fatal(err)
+		}
+		if tableCount != 3 || columnCount != 7 || constraintTriggerCount != 3 || writebackIndexCount != 1 || outboxIndexCount != 1 {
+			t.Fatalf("tables=%d columns=%d constraint_triggers=%d writeback_indexes=%d outbox_indexes=%d", tableCount, columnCount, constraintTriggerCount, writebackIndexCount, outboxIndexCount)
+		}
+		if _, err := pool.Exec(ctx, `
+INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at)
+VALUES('10000000-0000-4000-8000-000000000001','reindex','/tmp/reindex','/tmp/reindex',now(),'active',now(),now());
+INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at)
+VALUES('20000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','markdown','a','notes/a.md',now());
+INSERT INTO retrieval.index_version(
+    id,workspace_id,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
+    source_snapshot_ref,manifest_hash,expected_chunk_count,source_manifest_hash,expected_source_count,
+    source_parser_id,source_parser_version,source_parser_config_hash,source_chunk_strategy_version,source_schema_version,
+    idempotency_key,status,degraded_capabilities,version,created_at,updated_at
+) VALUES(
+    '30000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001',
+    'simple','v1',repeat('1',64),'{}','reindex-v1:event',repeat('2',64),0,repeat('3',64),1,
+    'goldmark','v1',repeat('4',64),'structure-v1','v1',
+    'reindex-index-1','building','["vector"]',1,now(),now()
+);
+INSERT INTO retrieval.index_manifest_source(
+    index_version_id,workspace_id,source_id,selection_status,exclusion_code,created_at
+) VALUES(
+    '30000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001',
+    '20000000-0000-4000-8000-000000000001','excluded','NO_CURRENT_SUCCESSFUL_PROJECTION',now()
+);`); err != nil {
+			t.Fatal(err)
+		}
+		provider := migrationProvider(t, pool)
+		_, err = provider.Down(ctx)
+		var pgErr *pgconn.PgError
+		if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "55000" {
+			t.Fatalf("00015 Down with Source Manifest error=%v", err)
+		}
+	})
+
+	t.Run("delivery", func(t *testing.T) {
+		ctx := context.Background()
+		pool, cleanup := newMigrationTestDatabase(t, ctx)
+		defer cleanup()
+		runner, err := NewRunner(pool, projectmigrations.FS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := runner.Up(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `
+SET session_replication_role = replica;
+INSERT INTO retrieval.reindex_delivery(
+    id,consumer_name,outbox_event_id,workspace_id,writeback_execution_id,status,
+    dispatch_no,attempt_no,version,manual_recovery_required,created_at,updated_at
+) VALUES(
+    '40000000-0000-4000-8000-000000000001','test-consumer',
+    '50000000-0000-4000-8000-000000000001','60000000-0000-4000-8000-000000000001',
+    '70000000-0000-4000-8000-000000000001','pending',0,0,1,false,now(),now()
+);
+SET session_replication_role = origin;`); err != nil {
+			t.Fatal(err)
+		}
+		provider := migrationProvider(t, pool)
+		_, err = provider.Down(ctx)
+		var pgErr *pgconn.PgError
+		if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "55000" {
+			t.Fatalf("00015 Down with Delivery error=%v", err)
+		}
+	})
+
+	t.Run("orphan source-bound index", func(t *testing.T) {
+		ctx := context.Background()
+		pool, cleanup := newMigrationTestDatabase(t, ctx)
+		defer cleanup()
+		runner, err := NewRunner(pool, projectmigrations.FS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := runner.Up(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `
+INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at)
+VALUES('81000000-0000-4000-8000-000000000001','orphan','/tmp/orphan','/tmp/orphan',now(),'active',now(),now());
+INSERT INTO retrieval.index_version(
+    id,workspace_id,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
+    source_snapshot_ref,manifest_hash,expected_chunk_count,source_manifest_hash,expected_source_count,
+    source_parser_id,source_parser_version,source_parser_config_hash,source_chunk_strategy_version,source_schema_version,
+    idempotency_key,status,degraded_capabilities,version,created_at,updated_at
+) VALUES(
+    '82000000-0000-4000-8000-000000000001','81000000-0000-4000-8000-000000000001',
+    'simple','v1',repeat('1',64),'{}','reindex-v1:orphan',repeat('2',64),0,repeat('3',64),1,
+    'goldmark','v1',repeat('4',64),'structure-v1','v1',
+    'orphan-index','building','["vector"]',1,now(),now()
+);`); err != nil {
+			t.Fatal(err)
+		}
+		_, err = migrationProvider(t, pool).Down(ctx)
+		assertPostgresCode(t, err, "55000")
+	})
+}
+
+func TestReindexConsumerMigrationRejectsDirectProposalCompletion(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+	runner, err := NewRunner(pool, projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at)
+VALUES('83000000-0000-4000-8000-000000000001','completion','/tmp/completion','/tmp/completion',now(),'active',now(),now());
+INSERT INTO change_control.proposal(id,workspace_id,status,idempotency_key,request_hash,version,created_at,updated_at)
+VALUES('84000000-0000-4000-8000-000000000001','83000000-0000-4000-8000-000000000001','completed','direct-completed',repeat('a',64),1,now(),now());`); err != nil {
+		t.Fatal(err)
+	}
+	assertPostgresCode(t, tx.Commit(ctx), "55000")
+}
+
+func TestReindexConsumerMigrationEnforcesLeaseRetryAndAppendOnlyAttempts(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+	runner, err := NewRunner(pool, projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deliveryID := "85000000-0000-4000-8000-000000000001"
+	attemptID := "86000000-0000-4000-8000-000000000001"
+	insertSyntheticReindexDelivery(t, ctx, pool, deliveryID)
+	if _, err := pool.Exec(ctx, `INSERT INTO retrieval.reindex_delivery_attempt(
+        id,delivery_id,attempt_no,dispatch_no,river_job_id,river_attempt,delivery_key,
+        lease_owner,lease_until,status,started_at,heartbeat_at
+    ) VALUES($1,$2,1,1,1,1,'delivery-1','worker-a',CURRENT_TIMESTAMP + INTERVAL '5 minutes','processing',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, attemptID, deliveryID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE retrieval.reindex_delivery SET status='processing',attempt_no=1,current_attempt_id=$2,version=2,updated_at=CURRENT_TIMESTAMP WHERE id=$1`, deliveryID, attemptID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt SET lease_until=lease_until + INTERVAL '1 minute' WHERE id=$1`, attemptID)
+	assertPostgresCode(t, err, "23514")
+	_, err = pool.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt SET status='lease_lost',failure_class='retryable',error_kind='version_conflict',error_code='LEASE_LOST',error_summary='lease lost',ended_at=CURRENT_TIMESTAMP WHERE id=$1`, attemptID)
+	assertPostgresCode(t, err, "23514")
+	_, err = pool.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt SET status='retry_wait',failure_class='non_retryable',error_kind='invalid_input',error_code='BAD',error_summary='bad',ended_at=CURRENT_TIMESTAMP WHERE id=$1`, attemptID)
+	assertPostgresCode(t, err, "23514")
+	if _, err := pool.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt SET status='retry_wait',failure_class='retryable',error_kind='dependency_unavailable',error_code='RETRY',error_summary='retry',ended_at=CURRENT_TIMESTAMP WHERE id=$1`, attemptID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt SET heartbeat_at=CURRENT_TIMESTAMP WHERE id=$1`, attemptID)
+	assertPostgresCode(t, err, "55000")
+	if _, err := pool.Exec(ctx, `UPDATE retrieval.reindex_delivery SET status='retry_wait',next_attempt_at=CURRENT_TIMESTAMP + INTERVAL '1 minute',failure_class='retryable',error_kind='dependency_unavailable',error_code='RETRY',error_summary='retry',version=3,updated_at=CURRENT_TIMESTAMP WHERE id=$1`, deliveryID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `UPDATE retrieval.reindex_delivery SET status='dispatched',next_attempt_at=NULL,failure_class=NULL,error_kind=NULL,error_code=NULL,error_summary=NULL,version=4,updated_at=CURRENT_TIMESTAMP WHERE id=$1`, deliveryID)
+	assertPostgresCode(t, err, "23514")
+	if _, err := pool.Exec(ctx, `UPDATE retrieval.reindex_delivery SET status='dispatched',dispatch_no=2,next_attempt_at=NULL,failure_class=NULL,error_kind=NULL,error_code=NULL,error_summary=NULL,version=4,updated_at=CURRENT_TIMESTAMP WHERE id=$1`, deliveryID); err != nil {
+		t.Fatal(err)
+	}
+
+	secondDelivery := "85000000-0000-4000-8000-000000000002"
+	secondAttempt := "86000000-0000-4000-8000-000000000002"
+	insertSyntheticReindexDelivery(t, ctx, pool, secondDelivery)
+	if _, err := pool.Exec(ctx, `INSERT INTO retrieval.reindex_delivery_attempt(
+        id,delivery_id,attempt_no,dispatch_no,river_job_id,river_attempt,delivery_key,
+        lease_owner,lease_until,status,started_at,heartbeat_at
+    ) VALUES($1,$2,1,1,2,1,'delivery-2','worker-b',CURRENT_TIMESTAMP + INTERVAL '5 minutes','processing',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, secondAttempt, secondDelivery); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE retrieval.reindex_delivery SET status='processing',attempt_no=1,current_attempt_id=$2,version=2,updated_at=CURRENT_TIMESTAMP WHERE id=$1`, secondDelivery, secondAttempt); err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt SET status='succeeded',ended_at=CURRENT_TIMESTAMP WHERE id=$1`, secondAttempt)
+	assertPostgresCode(t, err, "23514")
+
+	thirdDelivery := "85000000-0000-4000-8000-000000000003"
+	insertSyntheticReindexDelivery(t, ctx, pool, thirdDelivery)
+	_, err = pool.Exec(ctx, `INSERT INTO retrieval.reindex_delivery_attempt(
+        id,delivery_id,attempt_no,dispatch_no,river_job_id,river_attempt,delivery_key,
+        lease_owner,lease_until,status,started_at,heartbeat_at
+    ) VALUES('86000000-0000-4000-8000-000000000003',$1,1,1,3,1,'delivery-3','worker-c',CURRENT_TIMESTAMP - INTERVAL '1 second','processing',CURRENT_TIMESTAMP - INTERVAL '2 seconds',CURRENT_TIMESTAMP - INTERVAL '2 seconds')`, thirdDelivery)
+	assertPostgresCode(t, err, "23514")
+}
+
+func insertSyntheticReindexDelivery(t *testing.T, ctx context.Context, pool *pgxpool.Pool, deliveryID string) {
+	t.Helper()
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Release()
+	if _, err := connection.Exec(ctx, `SET session_replication_role = replica`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = connection.Exec(context.Background(), `SET session_replication_role = origin`) }()
+	if _, err := connection.Exec(ctx, `INSERT INTO retrieval.reindex_delivery(
+    id,consumer_name,outbox_event_id,workspace_id,writeback_execution_id,status,
+    dispatch_no,attempt_no,version,manual_recovery_required,created_at,updated_at
+) VALUES($1,'test-consumer',$2,$3,$4,'dispatched',1,0,1,false,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, deliveryID, randomFixtureUUID(deliveryID, '5'), randomFixtureUUID(deliveryID, '6'), randomFixtureUUID(deliveryID, '7')); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(ctx, `SET session_replication_role = origin`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func randomFixtureUUID(value string, replacement byte) string {
+	result := []byte(value)
+	result[0] = replacement
+	return string(result)
+}
+
+func assertPostgresCode(t *testing.T, err error, code string) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != code {
+		t.Fatalf("postgres error=%v want code=%s", err, code)
+	}
+}
+
+func migrationProvider(t *testing.T, pool *pgxpool.Pool) *goose.Provider {
+	t.Helper()
+	db := stdlib.OpenDBFromPool(pool)
+	t.Cleanup(func() { _ = db.Close() })
+	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return provider
 }
 
 func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
@@ -144,7 +470,7 @@ func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 14 || applied != 14 {
+	if maxVersion != 15 || applied != 15 {
 		t.Fatalf("adopted history max=%d applied=%d", maxVersion, applied)
 	}
 }

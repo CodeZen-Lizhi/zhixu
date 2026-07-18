@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +71,66 @@ func TestServiceCreateWorkspace(t *testing.T) {
 	}
 	if !reflect.DeepEqual(repository.created, result.Workspace) {
 		t.Fatalf("Persisted workspace = %#v, result = %#v", repository.created, result.Workspace)
+	}
+}
+
+func TestCaptureCommittedSourceVersionRegistersExactCommitBytes(t *testing.T) {
+	now := time.Date(2026, time.July, 18, 3, 0, 0, 0, time.UTC)
+	content := []byte("# committed\n")
+	hash := "f5f02ed4eafb1ac662a6d59553b89bfebe6db2f3c9c0ea7d1e5ca558e9ee8572"
+	workspace := domain.Workspace{ID: testWorkspaceID, RootPath: "/workspace"}
+	repository := &fakeRepository{workspace: workspace}
+	git := &fakeCommittedBlobReader{blob: domain.CommittedBlob{
+		WorkspaceID: testWorkspaceID, Commit: strings.Repeat("a", 40), RelativePath: "notes/a.md", Bytes: content,
+	}}
+	store := &fakeCommittedContentStore{capture: domain.ContentCapture{ContentHash: hash, ByteSize: int64(len(content)), ManagedLocation: ".knowledge/sources/" + hash, Created: true}}
+	ids := &sequenceIDGenerator{ids: []foundation.ID{
+		"91000000-0000-4000-8000-000000000001",
+		"92000000-0000-4000-8000-000000000001",
+		"93000000-0000-4000-8000-000000000001",
+	}}
+	service := NewService(Dependencies{
+		Repository: repository, CommittedGit: git, CommittedFiles: store, IDs: ids,
+		Clock: foundation.FixedClock{Value: now},
+	})
+
+	result, err := service.CaptureCommittedSourceVersion(context.Background(), CaptureCommittedSourceRequest{
+		WorkspaceID: testWorkspaceID, GitCommit: strings.Repeat("a", 40), RelativePath: "notes/a.md", ExpectedHash: hash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if git.requestedCommit != strings.Repeat("a", 40) || git.requestedPath != "notes/a.md" {
+		t.Fatalf("git request=%q %q", git.requestedCommit, git.requestedPath)
+	}
+	if store.root != "/workspace" || string(store.content) != string(content) || store.expectedHash != hash {
+		t.Fatalf("content capture=%#v", store)
+	}
+	if result.Source.ID != "91000000-0000-4000-8000-000000000001" || result.Version.ID != "92000000-0000-4000-8000-000000000001" || result.Artifact.ID != "93000000-0000-4000-8000-000000000001" {
+		t.Fatalf("result=%#v", result)
+	}
+	if repository.registration.Source.OriginalLocation != "notes/a.md" || repository.registration.Version.ContentHash != hash || repository.registration.Version.MediaType != "text/markdown" || !repository.registration.Version.CapturedAt.Equal(now) {
+		t.Fatalf("registration=%#v", repository.registration)
+	}
+}
+
+func TestCaptureCommittedSourceVersionRejectsHashMismatchBeforePublishing(t *testing.T) {
+	workspace := domain.Workspace{ID: testWorkspaceID, RootPath: "/workspace"}
+	repository := &fakeRepository{workspace: workspace}
+	git := &fakeCommittedBlobReader{blob: domain.CommittedBlob{
+		WorkspaceID: testWorkspaceID, Commit: strings.Repeat("a", 40), RelativePath: "notes/a.md", Bytes: []byte("different"),
+	}}
+	store := &fakeCommittedContentStore{}
+	service := NewService(Dependencies{
+		Repository: repository, CommittedGit: git, CommittedFiles: store,
+		IDs:   &sequenceIDGenerator{ids: []foundation.ID{"91000000-0000-4000-8000-000000000001"}},
+		Clock: foundation.FixedClock{Value: time.Now().UTC()},
+	})
+	_, err := service.CaptureCommittedSourceVersion(context.Background(), CaptureCommittedSourceRequest{
+		WorkspaceID: testWorkspaceID, GitCommit: strings.Repeat("a", 40), RelativePath: "notes/a.md", ExpectedHash: strings.Repeat("b", 64),
+	})
+	if err == nil || store.calls != 0 || repository.registerCalls != 0 {
+		t.Fatalf("err=%v store_calls=%d register_calls=%d", err, store.calls, repository.registerCalls)
 	}
 }
 
@@ -213,12 +274,15 @@ func requireClassifiedError(t *testing.T, err error, kind foundation.ErrorKind, 
 }
 
 type fakeRepository struct {
-	roots         []string
-	workspace     domain.Workspace
-	created       domain.Workspace
-	requestedRoot string
-	createCalls   int
-	registrations []domain.SourceRegistration
+	roots          []string
+	workspace      domain.Workspace
+	created        domain.Workspace
+	requestedRoot  string
+	createCalls    int
+	registrations  []domain.SourceRegistration
+	registration   domain.SourceRegistration
+	registerCalls  int
+	registerResult domain.SourceRegistrationResult
 }
 
 func (f *fakeRepository) CreateWorkspace(_ context.Context, workspace domain.Workspace) (domain.Workspace, error) {
@@ -241,8 +305,13 @@ func (f *fakeRepository) ListWorkspaceRoots(context.Context) ([]string, error) {
 	return append([]string(nil), f.roots...), nil
 }
 
-func (f *fakeRepository) RegisterSourceVersion(context.Context, domain.SourceRegistration) (domain.SourceRegistrationResult, error) {
-	return domain.SourceRegistrationResult{}, nil
+func (f *fakeRepository) RegisterSourceVersion(_ context.Context, registration domain.SourceRegistration) (domain.SourceRegistrationResult, error) {
+	f.registerCalls++
+	f.registration = registration
+	if f.registerResult.Source.ID != "" {
+		return f.registerResult, nil
+	}
+	return domain.SourceRegistrationResult{Source: registration.Source, Artifact: registration.Artifact, Version: registration.Version, ArtifactCreated: true, Created: true}, nil
 }
 
 func (f *fakeRepository) RegisterSourceVersions(_ context.Context, registrations []domain.SourceRegistration) ([]domain.SourceRegistrationResult, error) {
@@ -285,6 +354,36 @@ type fakeGitStatusReader struct {
 	calls  int
 }
 
+type fakeCommittedBlobReader struct {
+	blob            domain.CommittedBlob
+	requestedCommit string
+	requestedPath   string
+}
+
+func (f *fakeCommittedBlobReader) ReadCommittedBlob(_ context.Context, _ foundation.ID, commit, relativePath string) (domain.CommittedBlob, error) {
+	f.requestedCommit = commit
+	f.requestedPath = relativePath
+	return f.blob, nil
+}
+
+type fakeCommittedContentStore struct {
+	capture      domain.ContentCapture
+	root         string
+	relativePath string
+	content      []byte
+	expectedHash string
+	calls        int
+}
+
+func (f *fakeCommittedContentStore) CaptureCommitted(_ context.Context, rootPath, relativePath string, content []byte, expectedHash string) (domain.ContentCapture, error) {
+	f.calls++
+	f.root = rootPath
+	f.relativePath = relativePath
+	f.content = append([]byte(nil), content...)
+	f.expectedHash = expectedHash
+	return f.capture, nil
+}
+
 func (f *fakeGitStatusReader) Status(_ context.Context, rootPath string) (domain.GitStatus, error) {
 	f.calls++
 	f.roots = append(f.roots, rootPath)
@@ -296,14 +395,31 @@ type fakeIDGenerator struct {
 	calls int
 }
 
+type sequenceIDGenerator struct {
+	ids []foundation.ID
+	n   int
+}
+
+func (g *sequenceIDGenerator) New() (foundation.ID, error) {
+	if g.n >= len(g.ids) {
+		return "", errors.New("no id available")
+	}
+	id := g.ids[g.n]
+	g.n++
+	return id, nil
+}
+
 func (f *fakeIDGenerator) New() (foundation.ID, error) {
 	f.calls++
 	return f.id, nil
 }
 
 var (
-	_ domain.Repository      = (*fakeRepository)(nil)
-	_ domain.FileScanner     = (*fakeFileScanner)(nil)
-	_ domain.GitStatusReader = (*fakeGitStatusReader)(nil)
-	_ foundation.IDGenerator = (*fakeIDGenerator)(nil)
+	_ domain.Repository            = (*fakeRepository)(nil)
+	_ domain.FileScanner           = (*fakeFileScanner)(nil)
+	_ domain.GitStatusReader       = (*fakeGitStatusReader)(nil)
+	_ domain.CommittedBlobReader   = (*fakeCommittedBlobReader)(nil)
+	_ domain.CommittedContentStore = (*fakeCommittedContentStore)(nil)
+	_ foundation.IDGenerator       = (*fakeIDGenerator)(nil)
+	_ foundation.IDGenerator       = (*sequenceIDGenerator)(nil)
 )

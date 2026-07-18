@@ -1,20 +1,21 @@
 package domain
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	reindexcontract "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/contract"
 )
 
 const testSHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func validCreateWriteback() CreateWriteback {
 	return CreateWriteback{
-		ID: "execution", WorkspaceID: "workspace", WorkflowRunID: "run", NodeRunID: "node",
-		ProposalID: "proposal", RevisionID: "revision", ApprovalID: "approval",
-		WriteAuthorizationID: "write-auth", GitAuthorizationID: "git-auth", TargetPath: "notes/a.md",
+		ID: "10000000-0000-4000-8000-000000000001", WorkspaceID: "20000000-0000-4000-8000-000000000001", WorkflowRunID: "30000000-0000-4000-8000-000000000001", NodeRunID: "40000000-0000-4000-8000-000000000001",
+		ProposalID: "50000000-0000-4000-8000-000000000001", RevisionID: "60000000-0000-4000-8000-000000000001", ApprovalID: "70000000-0000-4000-8000-000000000001",
+		WriteAuthorizationID: "80000000-0000-4000-8000-000000000001", GitAuthorizationID: "90000000-0000-4000-8000-000000000001", TargetPath: "notes/a.md",
 		BaseHash: testSHA256, ResultHash: strings.Repeat("a", 64), ApprovedChangeHash: strings.Repeat("b", 64), ApprovedGitHead: strings.Repeat("c", 40),
 		IdempotencyKey: "writeback-1", TemporaryRef: ".knowledge/tmp/execution", BackupRef: ".knowledge/backup/execution", CreatedAt: time.Now(),
 	}
@@ -180,14 +181,33 @@ func TestValidateWritebackPublishBinding(t *testing.T) {
 		GitCommit: strings.Repeat("d", 40), ParentGitCommit: strings.Repeat("e", 40), TargetPath: current.TargetPath,
 		DiffHash: strings.Repeat("f", 64), ResultHash: current.ResultHash,
 	}
-	event := WritebackOutboxEvent{ID: "event", WorkspaceID: current.WorkspaceID, RunID: current.WorkflowRunID, Type: "retrieval.revision.reindex_requested", IdempotencyKey: ExpectedWritebackReindexKey(current), Payload: json.RawMessage(`{"schema_version":1,"workspace_id":"workspace","workflow_run_id":"run","node_run_id":"node","proposal_id":"proposal","revision_id":"revision","approval_id":"approval","writeback_execution_id":"execution","target_path":"notes/a.md","result_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","git_commit":"dddddddddddddddddddddddddddddddddddddddd"}`)}
+	payload, err := reindexcontract.EncodeCanonical(reindexcontract.RequestV1{
+		SchemaVersion: reindexcontract.SchemaVersionV1, WorkspaceID: current.WorkspaceID, WorkflowRunID: current.WorkflowRunID,
+		NodeRunID: current.NodeRunID, ProposalID: current.ProposalID, RevisionID: current.RevisionID,
+		ApprovalID: current.ApprovalID, WritebackExecutionID: current.ID, TargetPath: current.TargetPath,
+		ResultHash: current.ResultHash, GitCommit: current.GitCommit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := WritebackOutboxEvent{ID: "event", WorkspaceID: current.WorkspaceID, RunID: current.WorkflowRunID, Type: reindexcontract.EventTypeReindexRequested, IdempotencyKey: ExpectedWritebackReindexKey(current), Payload: payload}
 	if err := ValidateWritebackPublish(current, PublishWriteback{ExecutionID: current.ID, ExpectedVersion: current.Version, Commit: commit, Event: event}); err != nil {
 		t.Fatal(err)
 	}
 	invalidEvent := event
-	invalidEvent.Payload = json.RawMessage(strings.Replace(string(event.Payload), `"schema_version":1`, `"schema_version":2`, 1))
+	invalidEvent.Payload = []byte(strings.Replace(string(event.Payload), `"schema_version":1`, `"schema_version":2`, 1))
 	if !errors.Is(ValidateWritebackPublish(current, PublishWriteback{ExecutionID: current.ID, ExpectedVersion: current.Version, Commit: commit, Event: invalidEvent}), ErrWritebackPublishBindingConflict) {
 		t.Fatal("unsupported outbox schema version accepted")
+	}
+	duplicateEvent := event
+	duplicateEvent.Payload = append([]byte(`{"schema_version":1,`), event.Payload[1:]...)
+	if !errors.Is(ValidateWritebackPublish(current, PublishWriteback{ExecutionID: current.ID, ExpectedVersion: current.Version, Commit: commit, Event: duplicateEvent}), ErrWritebackPublishBindingConflict) {
+		t.Fatal("duplicate outbox field accepted")
+	}
+	nonCanonicalEvent := event
+	nonCanonicalEvent.Payload = []byte(strings.Replace(string(event.Payload), `"target_path":"notes/a.md"`, `"target_path":"notes/../a.md"`, 1))
+	if !errors.Is(ValidateWritebackPublish(current, PublishWriteback{ExecutionID: current.ID, ExpectedVersion: current.Version, Commit: commit, Event: nonCanonicalEvent}), ErrWritebackPublishBindingConflict) {
+		t.Fatal("noncanonical outbox path did not preserve binding conflict")
 	}
 	commit.ProposalID = "other"
 	if !errors.Is(ValidateProposalCommitBinding(current, commit), ErrWritebackPublishBindingConflict) {

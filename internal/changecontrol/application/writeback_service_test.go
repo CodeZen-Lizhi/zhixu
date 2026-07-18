@@ -10,6 +10,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	reindexcontract "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/contract"
 )
 
 const (
@@ -487,6 +488,28 @@ func TestBuildPublishWritebackUsesStableIDsAndPayload(t *testing.T) {
 	}
 	if first.Commit.ID != second.Commit.ID || first.Event.ID != second.Event.ID || string(first.Event.Payload) != string(second.Event.Payload) || first.Commit.ID == first.Event.ID {
 		t.Fatalf("first=%#v second=%#v", first, second)
+	}
+	request, err := reindexcontract.DecodeStrict(first.Event.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reindexcontract.ValidateBinding(request, reindexcontract.Binding{
+		WorkspaceID: execution.WorkspaceID, WorkflowRunID: execution.WorkflowRunID, NodeRunID: execution.NodeRunID,
+		ProposalID: execution.ProposalID, RevisionID: execution.RevisionID, ApprovalID: execution.ApprovalID,
+		WritebackExecutionID: execution.ID, TargetPath: execution.TargetPath,
+		ResultHash: execution.ResultHash, GitCommit: execution.GitCommit,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBuildPublishWritebackPreservesEncodingErrorContract(t *testing.T) {
+	execution := executionFixture(domain.WritebackStatusGitCommitted)
+	execution.TargetPath = "notes/../unsafe.md"
+	_, err := buildPublishWriteback(execution, time.Unix(1, 0))
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorNonRetryableFailure || classified.Code != "WRITEBACK_OUTBOX_ENCODING_FAILED" {
+		t.Fatalf("error=%#v", err)
 	}
 }
 

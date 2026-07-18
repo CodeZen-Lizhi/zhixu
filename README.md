@@ -97,7 +97,9 @@ Worker tuning is explicit in `.env.example`. Producers and consumers must use
 the same `ZHIXU_WORKER_QUEUE`. The configured heartbeat must be less than one
 third of the Workflow lease, the River job timeout must be shorter than the
 stuck-job rescue interval, and the soft stop timeout must be shorter than the
-hard process deadline.
+hard process deadline. Reindex Dispatcher poll/batch/backoff and its independent
+database lease/heartbeat are configured through the `ZHIXU_REINDEX_*` variables;
+the Reindex heartbeat must be shorter than its lease.
 
 Telemetry defaults to `disabled`. `optional` requires
 `OTEL_EXPORTER_OTLP_ENDPOINT` but may start with a stable degraded status when

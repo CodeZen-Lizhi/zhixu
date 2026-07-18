@@ -8,7 +8,7 @@
 
 使用 PostgreSQL 持久化领域工作流状态，River 负责可运行节点的任务投递与 Worker 获取；不在正式 v1.0 引入 Temporal。Workflow Definition、Node 状态和补偿语义仍由 Workflow Module 掌握，River 不是业务事实源。
 
-实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和 Deterministic Worker smoke。M4-B 已接入 PostgreSQL DB-time Claim/Heartbeat、append-only Attempt、Retry/Fail/Complete、DAG 后继、Human Task、Pause/Resume/Cancel。M4-C 已接入 Approval/Safe Writeback 原子 Dispatch、pre-Begin Bootstrap、Execution exact lookup 与真实 River Worker 闭环；每次 delivery 使用唯一 lease owner，持久 Args 严格拒绝额外字段。M4-D 已将生产 Worker 的 queue/concurrency/timeout/rescue/lease/heartbeat 配置、River migration Validate、独立 `/livez|readyz`、互斥停机控制器、脱敏 observability seam 和 Docker API/Worker/Migrate 交付入口接线。River 仍只负责投递/领取，Workflow PostgreSQL 表是业务事实源。
+实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和 Deterministic Worker smoke。M4-B 已接入 PostgreSQL DB-time Claim/Heartbeat、append-only Attempt、Retry/Fail/Complete、DAG 后继、Human Task、Pause/Resume/Cancel。M4-C 已接入 Approval/Safe Writeback 原子 Dispatch、pre-Begin Bootstrap、Execution exact lookup 与真实 River Worker 闭环；每次 delivery 使用唯一 lease owner，持久 Args 严格拒绝额外字段。M4-D 已将生产 Worker 的 queue/concurrency/timeout/rescue/lease/heartbeat 配置、River migration Validate、独立 `/livez|readyz`、互斥停机控制器、脱敏 observability seam 和 Docker API/Worker/Migrate 交付入口接线。M6-B 在同一 River Client、Workers bundle 和 queue 注册 Reindex Worker，并运行独立 Dispatcher；Reindex Delivery/Attempt 使用自己的 DB-time lease、fence 与 checkpoint，但 River 仍只负责 transport，Workflow 与 Retrieval PostgreSQL 表分别是业务事实源。
 
 见 [ADR-0006](adr/0006-postgres-durable-workflow.md)。
 
@@ -127,6 +127,11 @@ Worker `/livez` 在 health server 存活时返回 200。`/readyz` 只有在以�
 | `ZHIXU_WORKER_RESCUE_STUCK_AFTER` | `30m` | 大于 job timeout |
 | `ZHIXU_WORKFLOW_LEASE` | `2m` | 正时长 |
 | `ZHIXU_WORKFLOW_HEARTBEAT` | `30s` | 小于 lease 的三分之一 |
+| `ZHIXU_REINDEX_DISPATCH_POLL_INTERVAL` | `1s` | Reindex Outbox 轮询间隔，最大 `1m` |
+| `ZHIXU_REINDEX_DISPATCH_BATCH_SIZE` | `10` | 每轮最多派发数量，范围 `1..1000` |
+| `ZHIXU_REINDEX_DISPATCH_ERROR_BACKOFF` | `5s` | Dispatcher 瞬时错误与业务 retry 默认退避，最大 `1m` |
+| `ZHIXU_REINDEX_LEASE_DURATION` | `2m` | Reindex Delivery 数据库租约 |
+| `ZHIXU_REINDEX_HEARTBEAT_INTERVAL` | `30s` | 必须小于 Reindex lease |
 | `ZHIXU_WORKER_SOFT_STOP_TIMEOUT` | `30s` | 小于 hard deadline |
 | `ZHIXU_WORKER_HARD_STOP_TIMEOUT` | `60s` | 超时后进程失败退出 |
 | `ZHIXU_WORKER_HEALTH_ADDR` | `0.0.0.0:8081` | 合法且非零的 `host:port` |
@@ -263,7 +268,8 @@ flowchart TD
 示例：
 
 - 文件替换后 Commit 失败 → 恢复旧文件。
-- 内容验证失败 → 在严格 HEAD/clean 前提下创建反向 Commit。
+- 写回前内容验证失败 → 不创建 Commit；已提交后的语义回滚必须创建新的 Proposal/Approval，
+  M6-B 结构回归失败本身不自动反向 Commit。
 - Commit 结果未知或已确认提交 → 保留文件，禁止 Restore，走 Trailer/Mapping reconcile。
 - 索引失败 → 不回滚文件，保持 `verifying/index_pending`，由 Retrieval 任务重试。
 
@@ -331,6 +337,8 @@ Trace：
 - Cancel during model/tool/write。
 - 自定义短 rescue 周期的进程 smoke 必须使用独立数据库或独立 River Schema；只换 queue
   不能隔离同一 Schema 内的 maintenance leader。
+- Reindex fault smoke 必须覆盖 committed blob 与工作树漂移隔离、每个持久 checkpoint/Ready
+  response-loss、双 Worker、Completion response-loss、单一 Activation 与 River terminal replay。
 
 ## 20. 不采用
 

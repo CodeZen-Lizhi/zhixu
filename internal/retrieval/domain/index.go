@@ -29,6 +29,9 @@ type IndexVersion struct {
 	SourceSnapshotRef    string
 	ManifestHash         string
 	ExpectedChunkCount   int64
+	SourceManifestHash   string
+	ExpectedSourceCount  *int64
+	ProcessingContract   *ProcessingContract
 	IdempotencyKey       string
 	Status               IndexStatus
 	DegradedCapabilities []DegradedCapability
@@ -109,6 +112,18 @@ func ValidateIndexVersion(index IndexVersion) error {
 	if index.ExpectedChunkCount < 0 || !IsValidIndexStatus(index.Status) || index.Version <= 0 ||
 		index.CreatedAt.IsZero() || index.UpdatedAt.IsZero() || index.UpdatedAt.Before(index.CreatedAt) {
 		return invalid(ErrorCodeIndexVersionInvalid, "index lifecycle metadata is invalid")
+	}
+	if (index.SourceManifestHash == "") != (index.ExpectedSourceCount == nil) {
+		return invalid(ErrorCodeIndexVersionInvalid, "source manifest hash and count must be present together")
+	}
+	if index.ExpectedSourceCount != nil && (!isCanonicalHash(index.SourceManifestHash) || *index.ExpectedSourceCount <= 0) {
+		return invalid(ErrorCodeIndexVersionInvalid, "source manifest binding is invalid")
+	}
+	if (index.ExpectedSourceCount == nil) != (index.ProcessingContract == nil) {
+		return invalid(ErrorCodeIndexVersionInvalid, "source manifest processing contract must be present as one tuple")
+	}
+	if index.ProcessingContract != nil && !validProcessingContract(*index.ProcessingContract) {
+		return invalid(ErrorCodeIndexVersionInvalid, "source manifest processing contract is invalid")
 	}
 	normalized, err := NormalizeDegradedCapabilities(index.DegradedCapabilities)
 	if err != nil {
@@ -191,11 +206,22 @@ func SameIndexBuildBinding(left, right IndexBuild) bool {
 		left.IndexVersion.SourceSnapshotRef != right.IndexVersion.SourceSnapshotRef ||
 		left.IndexVersion.ManifestHash != right.IndexVersion.ManifestHash ||
 		left.IndexVersion.ExpectedChunkCount != right.IndexVersion.ExpectedChunkCount ||
+		left.IndexVersion.SourceManifestHash != right.IndexVersion.SourceManifestHash ||
+		!optionalInt64Equal(left.IndexVersion.ExpectedSourceCount, right.IndexVersion.ExpectedSourceCount) ||
+		!SameProcessingContract(left.IndexVersion.ProcessingContract, right.IndexVersion.ProcessingContract) ||
 		left.IndexVersion.IdempotencyKey != right.IndexVersion.IdempotencyKey ||
 		!equalCapabilities(left.IndexVersion.DegradedCapabilities, right.IndexVersion.DegradedCapabilities) {
 		return false
 	}
 	return true
+}
+
+// SameProcessingContract 判断两个可选 Snapshot 处理契约是否完全相同。
+func SameProcessingContract(left, right *ProcessingContract) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func sameJSONValue(left, right json.RawMessage) bool {
@@ -209,6 +235,11 @@ func sameJSONValue(left, right json.RawMessage) bool {
 		return false
 	}
 	return sameDecodedJSONValue(leftValue, rightValue)
+}
+
+// SameJSONValue 判断两个 JSON 值在忽略对象字段顺序后是否语义相同。
+func SameJSONValue(left, right json.RawMessage) bool {
+	return sameJSONValue(left, right)
 }
 
 func sameDecodedJSONValue(left, right any) bool {
@@ -270,6 +301,13 @@ func equalCapabilities(left, right []DegradedCapability) bool {
 }
 
 func optionalIDEqual(left, right *foundation.ID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func optionalInt64Equal(left, right *int64) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}

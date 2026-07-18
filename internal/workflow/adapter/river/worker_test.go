@@ -40,6 +40,16 @@ func (*nilWorkerContextProvider) LoadExecutionContext(context.Context, NodeJobAr
 	return application.ExecutionContext{}, nil
 }
 
+type genericWorkerArgs struct{}
+
+func (genericWorkerArgs) Kind() string { return "workflow_generic_worker_test" }
+
+type genericWorker struct {
+	river.WorkerDefaults[genericWorkerArgs]
+}
+
+func (*genericWorker) Work(context.Context, *river.Job[genericWorkerArgs]) error { return nil }
+
 func TestNodeWorkerResolvesExecutorAndExecutesWithoutWritingBusinessState(t *testing.T) {
 	catalog, err := application.NewValidationCatalog([]int{1}, nil)
 	if err != nil {
@@ -261,6 +271,20 @@ func TestNodeWorkerAllowsRiverOwnedRescueMetadataWithoutExposingIt(t *testing.T)
 	}
 }
 
+func TestDecodeTraceMetadataIsSharedAcrossTypedWorkers(t *testing.T) {
+	ctx, err := DecodeTraceMetadata(context.Background(), []byte(`{"traceparent":"00-0123456789abcdef0123456789abcdef-0123456789abcdef-01","river:rescue_count":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace, found := observability.TraceContextFromContext(ctx)
+	if !found || trace.TraceID != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("trace=%+v found=%t", trace, found)
+	}
+	if _, err := DecodeTraceMetadata(context.Background(), []byte(`{"credential":"secret"}`)); stableErrorCode(err) != "WORKFLOW_RIVER_TRACE_METADATA_INVALID" {
+		t.Fatalf("unknown metadata error=%v", err)
+	}
+}
+
 func TestAddWorkerSafelyRejectsDuplicateKind(t *testing.T) {
 	workers := NewWorkers()
 	registry, err := application.NewExecutorRegistry(mustCatalog())
@@ -274,8 +298,43 @@ func TestAddWorkerSafelyRejectsDuplicateKind(t *testing.T) {
 	if err := AddWorkerSafely(workers, worker); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddWorkerSafely(workers, worker); err == nil {
-		t.Fatal("duplicate worker registration unexpectedly succeeded")
+	err = AddWorkerSafely(workers, worker)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_RIVER_WORKER_DUPLICATE" || classified.Kind != foundation.ErrorVersionConflict {
+		t.Fatalf("duplicate error = %v", err)
+	}
+}
+
+func TestAddWorkerSafelyRegistersArbitraryTypedWorker(t *testing.T) {
+	workers := NewWorkers()
+	worker := &genericWorker{}
+	if err := AddWorkerSafely(workers, worker); err != nil {
+		t.Fatal(err)
+	}
+	err := AddWorkerSafely(workers, worker)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_RIVER_WORKER_DUPLICATE" || classified.Kind != foundation.ErrorVersionConflict {
+		t.Fatalf("duplicate error = %v", err)
+	}
+}
+
+func TestAddWorkerSafelyPreservesNodeWorkerNilErrorCode(t *testing.T) {
+	workers := NewWorkers()
+	var worker *NodeWorker
+	err := AddWorkerSafely(workers, worker)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_NODE_WORKER_INVALID" || classified.Kind != foundation.ErrorInvalidInput {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestAddWorkerSafelyRejectsGenericTypedNil(t *testing.T) {
+	workers := NewWorkers()
+	var worker *genericWorker
+	err := AddWorkerSafely(workers, worker)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_RIVER_WORKER_INVALID" || classified.Kind != foundation.ErrorInvalidInput {
+		t.Fatalf("error = %v", err)
 	}
 }
 

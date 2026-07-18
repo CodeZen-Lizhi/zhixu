@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	reindexcontract "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/contract"
 )
 
 // WritebackStatus 是 Safe Writeback Durable Operation 的持久化状态。
@@ -376,7 +376,7 @@ func ValidateWritebackPublish(execution WritebackExecution, command PublishWrite
 		return err
 	}
 	event := command.Event
-	if event.ID == "" || event.WorkspaceID != execution.WorkspaceID || event.RunID != execution.WorkflowRunID || event.Type != "retrieval.revision.reindex_requested" || event.IdempotencyKey != ExpectedWritebackReindexKey(execution) || !validWritebackOutboxPayload(execution, event.Payload) {
+	if event.ID == "" || event.WorkspaceID != execution.WorkspaceID || event.RunID != execution.WorkflowRunID || event.Type != reindexcontract.EventTypeReindexRequested || event.IdempotencyKey != ExpectedWritebackReindexKey(execution) || !validWritebackOutboxPayload(execution, event.Payload) {
 		return ErrWritebackPublishBindingConflict
 	}
 	return nil
@@ -400,48 +400,17 @@ func ValidGitHead(value string) bool {
 	return true
 }
 
-func isJSONObject(payload []byte) bool {
-	if len(bytes.TrimSpace(payload)) == 0 {
-		return false
-	}
-	var value map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &value); err != nil || value == nil {
-		return false
-	}
-	return true
-}
-
 func validWritebackOutboxPayload(execution WritebackExecution, payload []byte) bool {
-	if !isJSONObject(payload) {
+	request, err := reindexcontract.DecodeStrict(payload)
+	if err != nil {
 		return false
 	}
-	var value map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &value); err != nil || len(value) != 11 {
-		return false
-	}
-	required := map[string]string{
-		"workspace_id":           string(execution.WorkspaceID),
-		"workflow_run_id":        string(execution.WorkflowRunID),
-		"node_run_id":            string(execution.NodeRunID),
-		"proposal_id":            string(execution.ProposalID),
-		"revision_id":            string(execution.RevisionID),
-		"approval_id":            string(execution.ApprovalID),
-		"writeback_execution_id": string(execution.ID),
-		"target_path":            execution.TargetPath,
-		"result_hash":            strings.ToLower(execution.ResultHash),
-		"git_commit":             strings.ToLower(execution.GitCommit),
-	}
-	for key, expected := range required {
-		var actual string
-		if err := json.Unmarshal(value[key], &actual); err != nil || actual != expected {
-			return false
-		}
-	}
-	schemaVersion, ok := value["schema_version"]
-	if !ok || !bytes.Equal(bytes.TrimSpace(schemaVersion), []byte("1")) {
-		return false
-	}
-	return true
+	return reindexcontract.ValidateBinding(request, reindexcontract.Binding{
+		WorkspaceID: execution.WorkspaceID, WorkflowRunID: execution.WorkflowRunID, NodeRunID: execution.NodeRunID,
+		ProposalID: execution.ProposalID, RevisionID: execution.RevisionID, ApprovalID: execution.ApprovalID,
+		WritebackExecutionID: execution.ID, TargetPath: execution.TargetPath,
+		ResultHash: execution.ResultHash, GitCommit: execution.GitCommit,
+	}) == nil
 }
 
 func validateWritebackRef(value string) error {

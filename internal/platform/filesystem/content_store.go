@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 )
 
 const managedSourceDirectory = ".knowledge/sources"
@@ -92,6 +94,60 @@ func (r Root) Capture(ctx context.Context, relative, expectedHash string, expect
 		}
 		return "", false, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_WRITE_FAILED", true, copyErr)
 	}
+	return finalizeManagedCapture(ctx, workspaceRoot, temporaryRelative, expectedHash, expectedSize, &removeTemporary)
+}
+
+// CaptureBytes create-only 发布已由 Git Commit 边界读取并校验的确切 bytes。
+func (r Root) CaptureBytes(ctx context.Context, relative string, content []byte, expectedHash string) (string, bool, error) {
+	if err := contextError(ctx); err != nil {
+		return "", false, err
+	}
+	if int64(len(content)) > domain.MaxCommittedSourceBytes || !validSHA256(expectedHash) || !canonicalBytesPath(relative) {
+		return "", false, fileError(foundation.ErrorInvalidInput, "COMMITTED_SOURCE_CAPTURE_INVALID", false, errors.New("invalid committed content metadata"))
+	}
+	digest := sha256.Sum256(content)
+	if hex.EncodeToString(digest[:]) != expectedHash {
+		return "", false, fileError(foundation.ErrorVersionConflict, "SOURCE_RESULT_HASH_CONFLICT", false, errors.New("committed content hash does not match"))
+	}
+	workspaceRoot, err := os.OpenRoot(r.path)
+	if err != nil {
+		return "", false, fileError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
+	}
+	defer workspaceRoot.Close()
+	if err := ensureManagedSourceDirectoryRoot(workspaceRoot); err != nil {
+		return "", false, err
+	}
+	if err := r.ensureManagedSourceIgnored(); err != nil {
+		return "", false, err
+	}
+	temporary, temporaryRelative, err := createManagedTemp(workspaceRoot)
+	if err != nil {
+		return "", false, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_TEMP_CREATE_FAILED", true, err)
+	}
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = workspaceRoot.Remove(temporaryRelative)
+		}
+	}()
+	writeErr := copyWithContext(ctx, temporary, bytes.NewReader(content))
+	if writeErr == nil {
+		writeErr = temporary.Sync()
+	}
+	closeErr := temporary.Close()
+	if writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		if errors.Is(writeErr, context.Canceled) || errors.Is(writeErr, context.DeadlineExceeded) {
+			return "", false, contextError(ctx)
+		}
+		return "", false, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_WRITE_FAILED", true, writeErr)
+	}
+	return finalizeManagedCapture(ctx, workspaceRoot, temporaryRelative, expectedHash, int64(len(content)), &removeTemporary)
+}
+
+func finalizeManagedCapture(ctx context.Context, workspaceRoot *os.Root, temporaryRelative, expectedHash string, expectedSize int64, removeTemporary *bool) (string, bool, error) {
 	actualHash, actualSize, err := hashRootFileWithSize(ctx, workspaceRoot, temporaryRelative)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -126,7 +182,7 @@ func (r Root) Capture(ctx context.Context, relative, expectedHash string, expect
 	if err := workspaceRoot.Remove(temporaryRelative); err != nil {
 		return "", false, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_TEMP_CLEANUP_FAILED", true, err)
 	}
-	removeTemporary = false
+	*removeTemporary = false
 	return filepath.ToSlash(filepath.Join(managedSourceDirectory, expectedHash)), created, nil
 }
 
@@ -262,7 +318,8 @@ func createManagedTemp(root *os.Root) (*os.File, string, error) {
 }
 
 func validateRelativePath(relative string) error {
-	if strings.TrimSpace(relative) == "" || filepath.IsAbs(relative) {
+	if strings.TrimSpace(relative) == "" || strings.TrimSpace(relative) != relative || filepath.IsAbs(relative) ||
+		strings.Contains(relative, "\\") || strings.ContainsRune(relative, '\x00') {
 		return errors.New("relative path is required")
 	}
 	clean := filepath.Clean(relative)
@@ -270,6 +327,13 @@ func validateRelativePath(relative string) error {
 		return errors.New("path escapes workspace root")
 	}
 	return nil
+}
+
+func canonicalBytesPath(relative string) bool {
+	if err := validateRelativePath(relative); err != nil {
+		return false
+	}
+	return filepath.ToSlash(filepath.Clean(relative)) == relative
 }
 
 func hashRootFileWithSize(ctx context.Context, root *os.Root, relative string) (string, int64, error) {

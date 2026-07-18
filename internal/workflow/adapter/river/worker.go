@@ -72,7 +72,7 @@ func (w *NodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs]) erro
 	if job.JobRow != nil {
 		metadata = job.Metadata
 	}
-	ctx, err := decodeTraceMetadata(ctx, metadata)
+	ctx, err := DecodeTraceMetadata(ctx, metadata)
 	if err != nil {
 		return err
 	}
@@ -130,15 +130,19 @@ func (w *Workers) riverWorkers() (*river.Workers, error) {
 	return w.inner, nil
 }
 
-// AddWorkerSafely registers the typed node worker and reports duplicate-kind
-// errors without panicking. Duplicate registration is a readiness failure.
-func AddWorkerSafely(workers *Workers, worker *NodeWorker) error {
+// AddWorkerSafely registers any typed River worker and reports invalid or
+// duplicate configuration without panicking. Duplicate registration is a
+// readiness failure.
+func AddWorkerSafely[T river.JobArgs](workers *Workers, worker river.Worker[T]) error {
 	inner, err := workers.riverWorkers()
 	if err != nil {
 		return err
 	}
-	if worker == nil {
-		return jobError(foundation.ErrorInvalidInput, "WORKFLOW_NODE_WORKER_INVALID", errors.New("worker is nil"))
+	if isNilRiverWorker(worker) {
+		if _, isNodeWorker := any(worker).(*NodeWorker); isNodeWorker {
+			return jobError(foundation.ErrorInvalidInput, "WORKFLOW_NODE_WORKER_INVALID", errors.New("worker is nil"))
+		}
+		return jobError(foundation.ErrorInvalidInput, "WORKFLOW_RIVER_WORKER_INVALID", errors.New("worker is nil"))
 	}
 	if err := river.AddWorkerSafely(inner, worker); err != nil {
 		return jobError(foundation.ErrorVersionConflict, "WORKFLOW_RIVER_WORKER_DUPLICATE", err)
@@ -146,7 +150,22 @@ func AddWorkerSafely(workers *Workers, worker *NodeWorker) error {
 	return nil
 }
 
-func decodeTraceMetadata(ctx context.Context, encoded []byte) (context.Context, error) {
+func isNilRiverWorker[T river.JobArgs](worker river.Worker[T]) bool {
+	if worker == nil {
+		return true
+	}
+	value := reflect.ValueOf(worker)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+// DecodeTraceMetadata 严格恢复项目拥有的 traceparent，并忽略 River 保留的恢复元数据。
+// 其他字段在进入 Application 前拒绝，避免正文或凭证穿过 transport 边界。
+func DecodeTraceMetadata(ctx context.Context, encoded []byte) (context.Context, error) {
 	if len(bytes.TrimSpace(encoded)) == 0 {
 		return ctx, nil
 	}

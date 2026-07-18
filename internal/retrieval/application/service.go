@@ -19,6 +19,7 @@ const serviceUnavailableCode = "RETRIEVAL_SERVICE_UNAVAILABLE"
 type Store interface {
 	RegisterEmbeddingVersion(context.Context, domain.EmbeddingVersion) (domain.EmbeddingVersionResult, error)
 	BeginIndex(context.Context, domain.IndexBuild) (domain.IndexVersionResult, error)
+	BeginWorkspaceSnapshot(context.Context, domain.WorkspaceSnapshotCommand) (domain.WorkspaceSnapshotResult, error)
 	BuildLexical(context.Context, domain.LexicalBuildCommand) (domain.ProjectionBatchResult, error)
 	SaveVectorBatch(context.Context, domain.VectorProjectionBatch) (domain.ProjectionBatchResult, error)
 	TransitionIndex(context.Context, domain.IndexTransition) (domain.IndexVersion, error)
@@ -29,6 +30,74 @@ type Store interface {
 	GetIndexByIdempotencyKey(context.Context, foundation.ID, string) (domain.IndexVersion, error)
 	GetBuildStatus(context.Context, foundation.ID, foundation.ID) (domain.BuildStatus, error)
 	GetActive(context.Context, foundation.ID) (domain.IndexVersion, error)
+}
+
+// BeginWorkspaceSnapshotRequest 描述一次完整 Workspace Source/Chunk Snapshot 构建。
+type BeginWorkspaceSnapshotRequest struct {
+	WorkspaceID             foundation.ID
+	TargetSourceID          foundation.ID
+	TargetSourceVersionID   foundation.ID
+	TargetParseProjectionID foundation.ID
+	TokenizerID             string
+	TokenizerVersion        string
+	TokenizerConfigHash     string
+	FusionConfig            json.RawMessage
+	SourceSnapshotRef       string
+	IdempotencyKey          string
+	ProcessingContract      domain.ProcessingContract
+	PageSize                int32
+	MaxSources              int64
+	MaxChunks               int64
+}
+
+// BeginWorkspaceSnapshot 生成 FTS-only Index 身份并由 Store 在一个 bounded 事务中物化 Snapshot。
+func (s *Service) BeginWorkspaceSnapshot(ctx context.Context, request BeginWorkspaceSnapshotRequest) (domain.WorkspaceSnapshotResult, error) {
+	if err := s.available(); err != nil {
+		return domain.WorkspaceSnapshotResult{}, err
+	}
+	id, err := s.dependencies.IDs.New()
+	if err != nil {
+		return domain.WorkspaceSnapshotResult{}, err
+	}
+	fusion, err := canonicalJSONObject(request.FusionConfig)
+	if err != nil {
+		return domain.WorkspaceSnapshotResult{}, invalidRequest("RETRIEVAL_FUSION_CONFIG_INVALID", err)
+	}
+	pageSize := request.PageSize
+	if pageSize == 0 {
+		pageSize = domain.DefaultSnapshotPageSize
+	}
+	maxSources := request.MaxSources
+	if maxSources == 0 {
+		maxSources = domain.DefaultSnapshotMaxSources
+	}
+	maxChunks := request.MaxChunks
+	if maxChunks == 0 {
+		maxChunks = domain.DefaultSnapshotMaxChunks
+	}
+	now := s.dependencies.Clock.Now()
+	command := domain.WorkspaceSnapshotCommand{
+		IndexVersion: domain.IndexVersion{
+			ID: id, WorkspaceID: request.WorkspaceID,
+			TokenizerID: clean(request.TokenizerID), TokenizerVersion: clean(request.TokenizerVersion),
+			TokenizerConfigHash: cleanHash(request.TokenizerConfigHash), FusionConfig: fusion,
+			SourceSnapshotRef: clean(request.SourceSnapshotRef), IdempotencyKey: clean(request.IdempotencyKey),
+			Status: domain.IndexStatusBuilding, DegradedCapabilities: []domain.DegradedCapability{domain.DegradedVector},
+			Version: 1, CreatedAt: now, UpdatedAt: now,
+			ProcessingContract: &domain.ProcessingContract{
+				ParserID: clean(request.ProcessingContract.ParserID), ParserVersion: clean(request.ProcessingContract.ParserVersion),
+				ParserConfigHash:     cleanHash(request.ProcessingContract.ParserConfigHash),
+				ChunkStrategyVersion: clean(request.ProcessingContract.ChunkStrategyVersion), SchemaVersion: clean(request.ProcessingContract.SchemaVersion),
+			},
+		},
+		TargetSourceID: request.TargetSourceID, TargetSourceVersionID: request.TargetSourceVersionID,
+		TargetParseProjectionID: request.TargetParseProjectionID,
+		PageSize:                pageSize, MaxSources: maxSources, MaxChunks: maxChunks,
+	}
+	if err := domain.ValidateWorkspaceSnapshotCommand(command); err != nil {
+		return domain.WorkspaceSnapshotResult{}, err
+	}
+	return s.dependencies.Store.BeginWorkspaceSnapshot(ctx, command)
 }
 
 // Dependencies 是 Retrieval Application Service 的显式依赖。

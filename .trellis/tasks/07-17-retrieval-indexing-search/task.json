@@ -19,7 +19,8 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "07-17-retrieval-index-foundation"
+    "07-17-retrieval-index-foundation",
+    "07-18-reindex-consumer"
   ],
   "parent": "07-16-product-delivery",
   "relatedFiles": [],

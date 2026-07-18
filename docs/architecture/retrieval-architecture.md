@@ -201,6 +201,24 @@ M6-A 已锁定以下实现契约：
   跨维度全局 ANN 索引；先保留 exact scan 基线，待真实模型和容量评测后按固定维度建立
   部分表达式 HNSW 索引。
 
+M6-B 已锁定以下 Reindex 契约：
+
+- `retrieval.revision.reindex_requested` 由事务型 Dispatcher 转为独立 `reindex_delivery` 与
+  三字段 River Job；`published_at` 只表示派发成功，业务成功只由 Delivery `succeeded` 表示。
+- Consumer 只读取 payload 指定 Git Commit 的 Blob；工作树后续漂移不参与捕获。不可变
+  Content Artifact、SourceVersion、Ingestion Attempt 与 Parse Projection 都按稳定幂等键恢复。
+- `index_manifest_source` 冻结 included/excluded Source；Snapshot 在 Workspace advisory lock
+  与 repeatable-read 事务中分页计算 Hash/Count、分批物化 Source/Chunk Manifest。处理契约
+  变化或 legacy Active 没有 Source Manifest 时执行有界全量重建。
+- M6-B 只构建真实 FTS-only Index，并显式保存 `degraded_capabilities=["vector"]`；不写伪向量，
+  不宣称 Hybrid Search 已完成。
+- Capture、Ingestion、Snapshot、Regression checkpoint 与 Ready/Completion response-loss 均从
+  PostgreSQL 事实恢复。确定性业务失败归约到 failed/manual_recovery；事务结果未知才交同一
+  River dispatch 重投。
+- `CompleteReindexTx` 以固定锁序在一个事务内追加 Activation、切换唯一 Active，并完成
+  Delivery、Writeback Execution 与 Proposal。结构回归失败保留旧 Active 和 Git Commit，
+  不自动反向 Commit。
+
 ## 15. 增量索引
 
 触发：
@@ -245,6 +263,8 @@ M6-A 已锁定以下实现契约：
 - Embedding 不可用：Keyword 可用。
 - Rerank 不可用：Hybrid degraded。
 - 新索引失败：旧 Active 继续。
+- Reindex 结构回归失败：Git Commit 保留，Proposal/Execution 保持 verifying，按 Delivery
+  错误分类重试或人工恢复；任何反向 Commit 必须经过新的 Proposal/Approval。
 - Active 索引损坏：切回上一 Ready。
 - Source Span 失效：证据不用于回答并创建 Health Issue。
 

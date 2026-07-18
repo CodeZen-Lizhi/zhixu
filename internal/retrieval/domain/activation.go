@@ -72,6 +72,11 @@ type BuildStatus struct {
 	IndexVersion                int64
 	ExpectedChunkCount          int64
 	ManifestChunkCount          int64
+	SourceManifestHash          string
+	ExpectedSourceCount         *int64
+	SourceManifestCount         int64
+	IncludedSourceCount         int64
+	ExcludedSourceCount         int64
 	ProjectionCount             int64
 	LexicalPendingCount         int64
 	LexicalReadyCount           int64
@@ -185,6 +190,18 @@ func ValidateBuildReady(index IndexVersion, status BuildStatus) error {
 		status.IndexStatus != index.Status || status.IndexVersion != index.Version || status.ExpectedChunkCount != index.ExpectedChunkCount {
 		return inconsistent(ErrorCodeBuildIncomplete, "build status does not match current building index")
 	}
+	if status.SourceManifestHash != index.SourceManifestHash || !optionalInt64Equal(status.ExpectedSourceCount, index.ExpectedSourceCount) {
+		return inconsistent(ErrorCodeBuildIncomplete, "source manifest status does not match current index")
+	}
+	if index.ExpectedSourceCount == nil {
+		if status.SourceManifestCount != 0 || status.IncludedSourceCount != 0 || status.ExcludedSourceCount != 0 {
+			return inconsistent(ErrorCodeBuildIncomplete, "legacy index cannot contain source manifest rows")
+		}
+	} else if status.SourceManifestCount != *index.ExpectedSourceCount ||
+		status.IncludedSourceCount+status.ExcludedSourceCount != status.SourceManifestCount ||
+		status.IncludedSourceCount <= 0 {
+		return inconsistent(ErrorCodeBuildIncomplete, "source manifest is incomplete")
+	}
 	if hasNegativeBuildCount(status) || status.ManifestChunkCount != index.ExpectedChunkCount ||
 		status.ProjectionCount != index.ExpectedChunkCount || status.LexicalReadyCount != index.ExpectedChunkCount ||
 		status.LexicalPendingCount != 0 || status.LexicalFailedCount != 0 {
@@ -233,7 +250,8 @@ func validateActivationFields(activationID, workspaceID, targetID foundation.ID,
 }
 
 func hasNegativeBuildCount(status BuildStatus) bool {
-	return status.ExpectedChunkCount < 0 || status.ManifestChunkCount < 0 || status.ProjectionCount < 0 ||
+	return status.ExpectedChunkCount < 0 || status.ManifestChunkCount < 0 || status.SourceManifestCount < 0 ||
+		status.IncludedSourceCount < 0 || status.ExcludedSourceCount < 0 || status.ProjectionCount < 0 ||
 		status.LexicalPendingCount < 0 || status.LexicalReadyCount < 0 || status.LexicalFailedCount < 0 ||
 		status.VectorDisabledCount < 0 || status.VectorPendingCount < 0 || status.VectorReadyCount < 0 ||
 		status.VectorSkippedOversizedCount < 0 || status.VectorFailedCount < 0

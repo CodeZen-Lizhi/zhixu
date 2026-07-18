@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 )
 
@@ -19,6 +20,11 @@ type riverLifecycle interface {
 	StopAndCancel(context.Context) error
 }
 
+type dispatcherLifecycle interface {
+	Start(context.Context) error
+	Stop(context.Context) error
+}
+
 type lifecycleState uint8
 
 const (
@@ -29,10 +35,11 @@ const (
 	lifecycleStopped
 )
 
-// lifecycleController owns the single River start/stop decision. The first
-// shutdown event wins; later signal or fatal events only wait for that result.
+// lifecycleController owns Dispatcher/River ordering. The first shutdown
+// event wins; later signal or fatal events only wait for that result.
 type lifecycleController struct {
-	client riverLifecycle
+	client     riverLifecycle
+	dispatcher dispatcherLifecycle
 
 	mu       sync.Mutex
 	state    lifecycleState
@@ -41,11 +48,24 @@ type lifecycleController struct {
 	stopDone chan struct{}
 }
 
-func newLifecycleController(client riverLifecycle) (*lifecycleController, error) {
-	if client == nil {
-		return nil, errors.New("river lifecycle client is nil")
+func newLifecycleController(client riverLifecycle, dispatcher dispatcherLifecycle) (*lifecycleController, error) {
+	if nilLifecycleDependency(client) || nilLifecycleDependency(dispatcher) {
+		return nil, errors.New("worker lifecycle dependencies are nil")
 	}
-	return &lifecycleController{client: client, state: lifecycleIdle, stopDone: make(chan struct{})}, nil
+	return &lifecycleController{client: client, dispatcher: dispatcher, state: lifecycleIdle, stopDone: make(chan struct{})}, nil
+}
+
+func nilLifecycleDependency(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 func (c *lifecycleController) Start(ctx context.Context) error {
@@ -60,18 +80,33 @@ func (c *lifecycleController) Start(ctx context.Context) error {
 	c.state = lifecycleStarting
 	c.mu.Unlock()
 
+	if c.dispatcher != nil {
+		if err := c.dispatcher.Start(ctx); err != nil {
+			c.finishFailedStart(err)
+			return err
+		}
+	}
 	if err := c.client.Start(ctx); err != nil {
-		c.mu.Lock()
-		c.state = lifecycleStopped
-		c.stopErr = err
-		close(c.stopDone)
-		c.mu.Unlock()
+		var dispatcherErr error
+		if c.dispatcher != nil {
+			dispatcherErr = c.dispatcher.Stop(ctx)
+		}
+		err = errors.Join(err, dispatcherErr)
+		c.finishFailedStart(err)
 		return err
 	}
 	c.mu.Lock()
 	c.state = lifecycleRunning
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *lifecycleController) finishFailedStart(err error) {
+	c.mu.Lock()
+	c.state = lifecycleStopped
+	c.stopErr = err
+	close(c.stopDone)
+	c.mu.Unlock()
 }
 
 func (c *lifecycleController) Shutdown(ctx context.Context, mode shutdownMode) error {
@@ -88,12 +123,17 @@ func (c *lifecycleController) Shutdown(ctx context.Context, mode shutdownMode) e
 		c.state = lifecycleStopping
 		c.mode = mode
 		c.mu.Unlock()
-		var err error
-		if mode == shutdownEmergency {
-			err = c.client.StopAndCancel(ctx)
-		} else {
-			err = c.client.Stop(ctx)
+		var dispatcherErr error
+		if c.dispatcher != nil {
+			dispatcherErr = c.dispatcher.Stop(ctx)
 		}
+		var riverErr error
+		if mode == shutdownEmergency {
+			riverErr = c.client.StopAndCancel(ctx)
+		} else {
+			riverErr = c.client.Stop(ctx)
+		}
+		err := errors.Join(dispatcherErr, riverErr)
 		c.mu.Lock()
 		c.stopErr = err
 		c.state = lifecycleStopped

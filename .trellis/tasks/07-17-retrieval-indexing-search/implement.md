@@ -3,7 +3,7 @@
 ## Child Task Map
 
 1. [x] M6-A Retrieval Index Foundation：Schema、Build Manifest、Lexical Builder、领域模型、Repository、批量 Projection 和原子激活。
-2. [ ] M6-B Reindex Consumer：Outbox Delivery、`CaptureCommittedSourceVersion`、River Job、Index Build 和共享事务完成归约。
+2. [x] M6-B Reindex Consumer：Outbox Delivery、`CaptureCommittedSourceVersion`、River Job、Index Build 和共享事务完成归约。
 3. [ ] M6-C Embedding And Hybrid Search：直接 Provider Adapter、Keyword/Trigram/Vector Query、RRF/dedup/rerank/显式降级。
 4. [ ] M6-D Search API And Integration：OpenAPI、Evidence、EXPLAIN、Compose 与完整写回闭环 smoke。
 

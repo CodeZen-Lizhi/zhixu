@@ -231,6 +231,16 @@ func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		if _, upErr := provider.Up(context.Background()); upErr != nil {
+			t.Errorf("restore latest migrations: %v", upErr)
+		}
+	}()
+	for _, version := range []int{15, 14} {
+		if _, err := provider.Down(ctx); err != nil {
+			t.Fatalf("down migration %d before 00013 guard: %v", version, err)
+		}
+	}
 	if _, err := provider.Down(ctx); err == nil {
 		t.Fatal("00013 Down accepted a persisted Proposal to Workflow Run binding")
 	} else {

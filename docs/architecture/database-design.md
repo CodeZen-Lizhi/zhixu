@@ -604,6 +604,27 @@ Index Version 表示某个 Workspace 的可追踪完整检索投影，包含 FTS
   切换后版本。首次激活、替换和回滚均锁定 Workspace Index 集合，旧 Active→Retiring、
   新目标→Active 与 Receipt append 必须同事务提交；延迟重放按 Receipt 重建历史结果快照。
 
+### reindex_delivery / index_manifest_source
+
+M6-B 使用独立 Delivery 事实消费 Safe Writeback Reindex Outbox，不复用 Outbox `published_at`
+表示业务完成。
+
+- `index_manifest_source` 以 `(index_version_id,source_id)` 冻结 included/excluded Source；included
+  必须绑定同 Workspace 的 SourceVersion 与 ParseProjection，excluded 必须保存受限排除码。
+- `reindex_delivery` 保存 Outbox/Workspace/Writeback identity、dispatch/attempt/version、Source/
+  Projection/Index/Regression/Activation checkpoint、失败分类和 completed 时间。
+- `reindex_delivery_attempt` append-only 保存 River transport identity、DB-time lease、owner、
+  heartbeat、Ingestion Attempt 与终态；旧 owner 不能越过 fence 修改新 Attempt。
+- 同 Workspace 同时最多一个 pending/dispatched/processing/retry_wait/manual_recovery Delivery；
+  Dispatcher 使用 Reindex unpublished partial index 与 `SKIP LOCKED`，retry 路径使用 try advisory
+  lock，避免扫描其他事件类型并避免与 Completion 锁序反转。
+- `CompleteReindexTx` 按 Workspace→Proposal→Execution→Delivery→Attempt→Index 固定锁序，在一个
+  事务内追加 Activation、切换唯一 Active、完成 Delivery/Execution/Proposal。deferred constraint
+  trigger 在提交时验证 Outbox、Commit Mapping、Source/Chunk closure、cleanup、Workflow、Regression
+  与 Activation 全绑定；任何不一致全部回滚。
+- `activation_id IS NOT NULL` 当且仅当 Delivery succeeded；Down 只允许空 Source Manifest/
+  Delivery，已有 M6-B 数据时返回 SQLSTATE `55000`。
+
 ### human_task
 
 Human Task 表示 Workflow 等待用户输入的持久化节点，不持有 Worker 租约。

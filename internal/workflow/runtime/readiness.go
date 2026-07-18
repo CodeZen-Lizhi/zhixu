@@ -7,29 +7,31 @@ import "sync"
 const ReadinessVersion = "v1"
 
 const (
-	CodeReady                   = "WORKER_READY"
-	CodeShuttingDown            = "WORKER_SHUTTING_DOWN"
-	CodeDatabaseUnavailable     = "WORKER_DATABASE_UNAVAILABLE"
-	CodeRiverSchemaUnavailable  = "WORKER_RIVER_SCHEMA_UNAVAILABLE"
-	CodeRiverNotStarted         = "WORKER_RIVER_NOT_STARTED"
-	CodeDefinitionsUnavailable  = "WORKER_DEFINITIONS_UNAVAILABLE"
-	CodeExecutorsUnavailable    = "WORKER_EXECUTORS_UNAVAILABLE"
-	CodeDependenciesUnavailable = "WORKER_DEPENDENCIES_UNAVAILABLE"
+	CodeReady                       = "WORKER_READY"
+	CodeShuttingDown                = "WORKER_SHUTTING_DOWN"
+	CodeDatabaseUnavailable         = "WORKER_DATABASE_UNAVAILABLE"
+	CodeRiverSchemaUnavailable      = "WORKER_RIVER_SCHEMA_UNAVAILABLE"
+	CodeRiverNotStarted             = "WORKER_RIVER_NOT_STARTED"
+	CodeDefinitionsUnavailable      = "WORKER_DEFINITIONS_UNAVAILABLE"
+	CodeExecutorsUnavailable        = "WORKER_EXECUTORS_UNAVAILABLE"
+	CodeDependenciesUnavailable     = "WORKER_DEPENDENCIES_UNAVAILABLE"
+	CodeReindexDispatcherNotStarted = "WORKER_REINDEX_DISPATCHER_NOT_STARTED"
 )
 
 // ReadinessSnapshot is an immutable point-in-time view of worker readiness.
 // Code and Version are derived from the boolean state and never contain an
 // underlying dependency error.
 type ReadinessSnapshot struct {
-	DatabaseOK     bool
-	RiverSchemaOK  bool
-	RiverStarted   bool
-	DefinitionsOK  bool
-	ExecutorsOK    bool
-	DependenciesOK bool
-	ShuttingDown   bool
-	Code           string
-	Version        string
+	DatabaseOK               bool
+	RiverSchemaOK            bool
+	RiverStarted             bool
+	DefinitionsOK            bool
+	ExecutorsOK              bool
+	DependenciesOK           bool
+	ReindexDispatcherStarted bool
+	ShuttingDown             bool
+	Code                     string
+	Version                  string
 }
 
 // Ready reports whether the worker may accept workflow jobs.
@@ -40,7 +42,8 @@ func (s ReadinessSnapshot) Ready() bool {
 		s.RiverStarted &&
 		s.DefinitionsOK &&
 		s.ExecutorsOK &&
-		s.DependenciesOK
+		s.DependenciesOK &&
+		s.ReindexDispatcherStarted
 }
 
 // Readiness stores independently updated worker readiness checks.
@@ -82,6 +85,11 @@ func (r *Readiness) SetExecutorsOK(ok bool) {
 // SetDependenciesOK updates the enabled-definition dependency check.
 func (r *Readiness) SetDependenciesOK(ok bool) {
 	r.update(func(s *ReadinessSnapshot) { s.DependenciesOK = ok })
+}
+
+// SetReindexDispatcherStarted updates the Reindex Dispatcher lifecycle check.
+func (r *Readiness) SetReindexDispatcherStarted(started bool) {
+	r.update(func(s *ReadinessSnapshot) { s.ReindexDispatcherStarted = started })
 }
 
 // BeginShutdown permanently removes this process from readiness.
@@ -126,6 +134,8 @@ func finalize(snapshot ReadinessSnapshot) ReadinessSnapshot {
 		snapshot.Code = CodeExecutorsUnavailable
 	case !snapshot.DependenciesOK:
 		snapshot.Code = CodeDependenciesUnavailable
+	case !snapshot.ReindexDispatcherStarted:
+		snapshot.Code = CodeReindexDispatcherNotStarted
 	default:
 		snapshot.Code = CodeReady
 	}

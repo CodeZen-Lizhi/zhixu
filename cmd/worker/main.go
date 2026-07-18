@@ -18,10 +18,20 @@ import (
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	ingestionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/postgres"
+	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
+	ingestionapplication "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/application"
+	ingestiondomain "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
+	platformparser "github.com/CodeZen-Lizhi/zhixu/internal/platform/parser"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
+	reindexriver "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/river"
+	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
+	retrievalruntime "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/runtime"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -29,11 +39,14 @@ import (
 	workflowhealth "github.com/CodeZen-Lizhi/zhixu/internal/workflow/httphealth"
 	workflowruntime "github.com/CodeZen-Lizhi/zhixu/internal/workflow/runtime"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
+	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type workerComponents struct {
 	safeWriteback   *changecontrolworkflow.Node
+	reindexWorker   *reindexriver.Worker
+	dispatcher      *retrievalruntime.Runner
 	runtimeClient   *riveradapter.Client
 	definitions     *workflowapplication.DefinitionRegistry
 	executors       *workflowapplication.ExecutorRegistry
@@ -120,14 +133,14 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetRiverSchemaOK(true)
 	readiness.SetDefinitionsOK(components.definitions != nil)
 	readiness.SetExecutorsOK(components.executors != nil)
-	readiness.SetDependenciesOK(components.safeWriteback != nil)
+	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil)
 	health, err := startWorkerHealthServer(cfg.WorkerHealthAddr, workflowhealth.NewHandler(readiness))
 	if err != nil {
 		logger.Error("worker health server could not be started", "error_code", "WORKER_HEALTH_START_FAILED")
 		return err
 	}
 
-	controller, err := newLifecycleController(components.runtimeClient)
+	controller, err := newLifecycleController(components.runtimeClient, components.dispatcher)
 	if err != nil {
 		_ = health.server.Close()
 		return err
@@ -144,7 +157,8 @@ func run(configPath string, logger *slog.Logger) error {
 		return err
 	}
 	readiness.SetRiverStarted(true)
-	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil, "workflow_dispatcher", "configured")
+	readiness.SetReindexDispatcherStarted(components.dispatcher.Started())
+	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil, "reindex_dispatcher", components.dispatcher.Started())
 
 	ticker := time.NewTicker(cfg.HealthInterval)
 	defer ticker.Stop()
@@ -166,13 +180,22 @@ func run(configPath string, logger *slog.Logger) error {
 			readiness.SetRiverStarted(false)
 			runErr = errors.New("workflow River runtime stopped unexpectedly")
 			goto shutdown
+		case fatalErr := <-components.dispatcher.Errors():
+			if fatalErr == nil {
+				fatalErr = errors.New("reindex dispatcher stopped without a fatal error")
+			}
+			readiness.SetReindexDispatcherStarted(false)
+			shutdownMode = shutdownEmergency
+			runErr = fatalErr
+			logger.Error("reindex dispatcher fatal invariant", "error_code", "REINDEX_DISPATCHER_FATAL_INVARIANT")
+			goto shutdown
 		case fatalErr := <-components.fatalInvariants:
 			if fatalErr == nil {
-				fatalErr = errors.New("workflow runtime reported a fatal invariant violation")
+				fatalErr = errors.New("worker runtime reported a fatal invariant violation")
 			}
 			shutdownMode = shutdownEmergency
 			runErr = fatalErr
-			logger.Error("workflow runtime fatal invariant", "error_code", "WORKFLOW_FATAL_INVARIANT")
+			logger.Error("worker runtime fatal invariant", "error_code", "WORKER_FATAL_INVARIANT")
 			goto shutdown
 		case <-ticker.C:
 			if err := ping(database, cfg.DatabasePingTimeout); err != nil {
@@ -193,6 +216,7 @@ func run(configPath string, logger *slog.Logger) error {
 
 shutdown:
 	readiness.BeginShutdown()
+	readiness.SetReindexDispatcherStarted(false)
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), cfg.WorkerHardStopTimeout)
 	defer cancelShutdown()
 	if err := controller.Shutdown(shutdownContext, shutdownMode); err != nil && runErr == nil {
@@ -328,15 +352,112 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
+	reindex, err := newReindexComponents(db, cfg, workspaceRepository, gitRepository, insertClient, workerID, logger, metrics, fatalInvariants)
+	if err != nil {
+		return workerComponents{}, err
+	}
 	workers := riveradapter.NewWorkers()
 	if err := riveradapter.AddRuntimeWorkerSafely(workers, runtimeWorker); err != nil {
+		return workerComponents{}, err
+	}
+	if err := reindexriver.AddWorkerSafely(workers, reindex.worker); err != nil {
 		return workerComponents{}, err
 	}
 	runtimeClient, err := riveradapter.NewClientWithOptions(db, workers, riverOptions)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	return workerComponents{safeWriteback: node, runtimeClient: runtimeClient, definitions: definitions, executors: executors, fatalInvariants: fatalInvariants}, nil
+	return workerComponents{
+		safeWriteback: node, reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
+		runtimeClient: runtimeClient, definitions: definitions, executors: executors, fatalInvariants: fatalInvariants,
+	}, nil
+}
+
+type reindexComponents struct {
+	worker     *reindexriver.Worker
+	dispatcher *retrievalruntime.Runner
+}
+
+func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, committedGit *gitcli.WritebackClient, insertClient *riveradapter.Client, workerID foundation.ID, logger *slog.Logger, metrics observability.Metrics, fatalInvariants chan<- error) (reindexComponents, error) {
+	ids := foundation.NewUUIDGenerator(nil)
+	clock := foundation.SystemClock{}
+	files := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
+	workspaceService := workspaceapplication.NewService(workspaceapplication.Dependencies{
+		Repository: workspaceRepository, CommittedFiles: files, CommittedGit: committedGit, IDs: ids, Clock: clock,
+	})
+	ingestionRepository, err := ingestionpostgres.NewRepository(db)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	sourceReader, err := ingestionworkspace.NewReader(workspaceRepository, files)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	ingestionService, err := ingestionapplication.NewService(ingestionapplication.Dependencies{
+		Repository: ingestionRepository, Sources: sourceReader,
+		Parsers: platformparser.NewRegistry(platformparser.Options{MaxBytes: filesystem.DefaultMaxBytes}),
+		IDs:     ids, Clock: clock,
+		ContentPolicy: ingestionapplication.ContentPolicy{MaxBytes: ingestionapplication.DefaultContentMaxBytes},
+		ChunkOptions: ingestiondomain.ChunkOptions{
+			StrategyVersion: "structure-v1", SchemaVersion: platformparser.ParseSchemaVersion,
+			SoftMaxBytes: ingestiondomain.DefaultChunkSoftMaxBytes,
+		},
+	})
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	retrievalRepository, err := retrievalpostgres.NewRepository(db)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	retrievalService, err := retrievalapplication.NewService(retrievalapplication.Dependencies{Store: retrievalRepository, IDs: ids, Clock: clock})
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	regressionService, err := retrievalapplication.NewRegressionService(retrievalRepository)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	deliveryRepository, err := retrievalpostgres.NewDeliveryRepository(db, ids)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	deliveryRuntime, err := retrievalapplication.NewDeliveryRuntime(deliveryRepository)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	processor, err := retrievalapplication.NewProcessor(retrievalapplication.ProcessorDependencies{
+		Contexts: deliveryRepository, Capture: workspaceService, Ingestion: ingestionService,
+		Retrieval: retrievalService, Regression: regressionService,
+	}, retrievalapplication.DefaultFTSOnlyProcessorOptions(cfg.ReindexDispatchErrorBackoff))
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	completion, err := retrievalapplication.NewCompletionService(retrievalRepository, ids, cfg.ReindexDispatchErrorBackoff)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	worker, err := reindexriver.NewWorker(deliveryRuntime, processor, completion, reindexriver.WorkerOptions{
+		Owner: fmt.Sprintf("reindex-worker:%s", workerID), LeaseDuration: cfg.ReindexLeaseDuration,
+		HeartbeatInterval: cfg.ReindexHeartbeatInterval, Metrics: metrics, Logger: logger,
+		FatalInvariants: fatalInvariants,
+	})
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	inserter, err := reindexriver.NewInserter(insertClient)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	dispatcher, err := retrievalpostgres.NewDispatcher(db, ids, inserter)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	runner := retrievalruntime.NewRunner(dispatcher, retrievalruntime.Options{
+		PollInterval: cfg.ReindexDispatchPollInterval, BatchSize: cfg.ReindexDispatchBatchSize,
+		ErrorBackoff: cfg.ReindexDispatchErrorBackoff,
+	})
+	return reindexComponents{worker: worker, dispatcher: runner}, nil
 }
 
 func startWorkerHealthServer(address string, handler http.Handler) (workerHealthServer, error) {

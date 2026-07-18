@@ -34,20 +34,43 @@ type riverInsertClient interface {
 	InsertTx(context.Context, pgx.Tx, riverlib.JobArgs, *riverlib.InsertOpts) (*rivertype.JobInsertResult, error)
 }
 
-// RiverJobInserter implements JobInserter with River v0.40's InsertTx.
+// TypedJobInserter inserts one validated River job type through an opaque
+// caller-owned transaction.
+type TypedJobInserter[T riverlib.JobArgs] struct {
+	client   riverInsertClient
+	queue    string
+	validate func(T) error
+}
+
+// NewTypedJobInserter constructs a typed transactional inserter from the
+// schema-scoped Workflow River client.
+func NewTypedJobInserter[T riverlib.JobArgs](client *Client, validate func(T) error) (*TypedJobInserter[T], error) {
+	if client == nil || client.insert == nil {
+		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_MISSING", errors.New("River client is nil"))
+	}
+	if validate == nil {
+		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_JOB_VALIDATOR_MISSING", errors.New("River job validator is nil"))
+	}
+	return &TypedJobInserter[T]{client: client.insert, queue: client.Queue(), validate: validate}, nil
+}
+
+// RiverJobInserter is the backward-compatible NodeJobArgs wrapper around the
+// generic typed inserter.
 type RiverJobInserter struct {
 	client riverInsertClient
 	queue  string
+	typed  *TypedJobInserter[NodeJobArgs]
 }
 
 var _ JobInserter = (*RiverJobInserter)(nil)
 
 // NewJobInserter constructs a transactional inserter from a schema-scoped client.
 func NewJobInserter(client *Client) (JobInserter, error) {
-	if client == nil || client.insert == nil {
-		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_MISSING", errors.New("River client is nil"))
+	typed, err := NewTypedJobInserter(client, ValidateNodeJobArgs)
+	if err != nil {
+		return nil, err
 	}
-	return &RiverJobInserter{client: client.insert, queue: client.Queue()}, nil
+	return &RiverJobInserter{client: typed.client, queue: typed.queue, typed: typed}, nil
 }
 
 // InsertTx inserts one uniquely identified node dispatch in the caller's
@@ -56,7 +79,32 @@ func (i *RiverJobInserter) InsertTx(ctx context.Context, transaction any, args N
 	if err := ValidateNodeJobArgs(args); err != nil {
 		return JobReceipt{}, err
 	}
+	if i == nil {
+		return JobReceipt{}, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_INSERTER_MISSING", errors.New("River job inserter is nil"))
+	}
+	if i.typed != nil {
+		return insertValidatedJobTx(ctx, i.typed.client, i.typed.queue, transaction, args, options)
+	}
+	return insertValidatedJobTx(ctx, i.client, i.queue, transaction, args, options)
+}
+
+// InsertTx validates and inserts one typed job in the caller's transaction. A
+// unique skip is returned as the existing job receipt.
+func (i *TypedJobInserter[T]) InsertTx(ctx context.Context, transaction any, args T, options InsertOptions) (JobReceipt, error) {
 	if i == nil || i.client == nil {
+		return JobReceipt{}, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_INSERTER_MISSING", errors.New("River job inserter is nil"))
+	}
+	if i.validate == nil {
+		return JobReceipt{}, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_JOB_VALIDATOR_MISSING", errors.New("River job validator is nil"))
+	}
+	if err := i.validate(args); err != nil {
+		return JobReceipt{}, err
+	}
+	return insertValidatedJobTx(ctx, i.client, i.queue, transaction, args, options)
+}
+
+func insertValidatedJobTx[T riverlib.JobArgs](ctx context.Context, client riverInsertClient, queue string, transaction any, args T, options InsertOptions) (JobReceipt, error) {
+	if client == nil {
 		return JobReceipt{}, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_INSERTER_MISSING", errors.New("River job inserter is nil"))
 	}
 	tx, ok := transaction.(pgx.Tx)
@@ -67,11 +115,11 @@ func (i *RiverJobInserter) InsertTx(ctx context.Context, transaction any, args N
 	if err != nil {
 		return JobReceipt{}, err
 	}
-	opts := &riverlib.InsertOpts{Metadata: metadata, Queue: i.queue, UniqueOpts: riverlib.UniqueOpts{ByArgs: true}}
+	opts := &riverlib.InsertOpts{Metadata: metadata, Queue: queue, UniqueOpts: riverlib.UniqueOpts{ByArgs: true}}
 	if !options.ScheduledAt.IsZero() {
 		opts.ScheduledAt = options.ScheduledAt.UTC()
 	}
-	result, err := i.client.InsertTx(ctx, tx, args, opts)
+	result, err := client.InsertTx(ctx, tx, args, opts)
 	if err != nil {
 		return JobReceipt{}, foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_RIVER_JOB_INSERT_FAILED", true, err)
 	}

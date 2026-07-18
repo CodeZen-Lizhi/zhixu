@@ -2,6 +2,8 @@ package filesystem
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -109,6 +111,46 @@ func TestRootCaptureConcurrentSameHashIsCreateOnly(t *testing.T) {
 	}
 }
 
+func TestRootCaptureBytesPublishesCommitContentWithoutReadingWorktree(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	if err := os.WriteFile(filepath.Join(rootPath, "note.md"), []byte("drifted worktree"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("committed bytes")
+	hash := testContentHash(content)
+	location, created, err := root.CaptureBytes(context.Background(), "note.md", content, hash)
+	if err != nil || !created {
+		t.Fatalf("CaptureBytes()=%q %t %v", location, created, err)
+	}
+	replayedLocation, replayCreated, err := root.CaptureBytes(context.Background(), "note.md", content, hash)
+	if err != nil || replayCreated || replayedLocation != location {
+		t.Fatalf("replay=%q %t %v", replayedLocation, replayCreated, err)
+	}
+	got, err := root.ReadArtifact(context.Background(), location, hash, int64(len(content)))
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("artifact=%q err=%v", got, err)
+	}
+}
+
+func TestScannerCaptureCommittedRejectsUnsupportedAndOversizedContent(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	scanner := Scanner{Options: ScanOptions{MaxBytes: 4}}
+	content := []byte("hello")
+	if _, err := scanner.CaptureCommitted(context.Background(), rootPath, "notes/a.pdf", content, testContentHash(content)); err == nil {
+		t.Fatal("unsupported committed extension accepted")
+	}
+	if _, err := scanner.CaptureCommitted(context.Background(), rootPath, "notes/a.md", content, testContentHash(content)); err == nil {
+		t.Fatal("oversized committed content accepted")
+	}
+	if _, err := scanner.CaptureCommitted(context.Background(), rootPath, "notes/../a.md", []byte("ok"), testContentHash([]byte("ok"))); err == nil {
+		t.Fatal("noncanonical committed path accepted")
+	}
+}
+
 func TestRootCaptureHonorsCancelledContext(t *testing.T) {
 	rootPath := newGitWorkspace(t)
 	if err := os.WriteFile(filepath.Join(rootPath, "note.md"), []byte("content"), 0o600); err != nil {
@@ -122,6 +164,11 @@ func TestRootCaptureHonorsCancelledContext(t *testing.T) {
 	cancel()
 	_, _, err = root.Capture(ctx, "note.md", strings.Repeat("a", 64), 7)
 	requireFilesystemError(t, err, foundation.ErrorNonRetryableFailure, "OPERATION_CANCELLED")
+}
+
+func testContentHash(content []byte) string {
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:])
 }
 
 func TestRootReadArtifactRejectsManagedDirectorySymlink(t *testing.T) {

@@ -395,94 +395,14 @@ func (r *Repository) activate(ctx context.Context, command domain.ActivationComm
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(command.WorkspaceID)); err != nil {
 		return domain.ActivationResult{}, classify(err, "RETRIEVAL_ACTIVATION_LOCK_FAILED")
 	}
-	if existing, found, queryErr := getActivationByKey(ctx, tx, command.WorkspaceID, command.IdempotencyKey); queryErr != nil {
-		return domain.ActivationResult{}, queryErr
-	} else if found {
-		expectedTargetNext := command.ExpectedTargetVersion + 1
-		var expectedPreviousNext *int64
-		if command.ExpectedCurrentVersion != nil {
-			v := *command.ExpectedCurrentVersion + 1
-			expectedPreviousNext = &v
-		}
-		if existing.Kind != kind || existing.TargetIndexVersionID != command.TargetIndexVersionID ||
-			!sameOptionalID(existing.PreviousIndexVersionID, command.ExpectedCurrentIndexVersionID) ||
-			existing.ReasonCode != command.ReasonCode || existing.TargetVersion != expectedTargetNext ||
-			!sameOptionalInt64(existing.PreviousVersion, expectedPreviousNext) {
-			return domain.ActivationResult{}, conflict("RETRIEVAL_ACTIVATION_IDEMPOTENCY_CONFLICT", errors.New("activation idempotency key has a different binding"))
-		}
-		activeCurrent, err := getIndexTx(ctx, tx, command.WorkspaceID, existing.TargetIndexVersionID)
-		if err != nil {
-			return domain.ActivationResult{}, err
-		}
-		active := activationIndexSnapshot(activeCurrent, domain.IndexStatusActive, existing.TargetVersion, existing.CreatedAt)
-		var previous *domain.IndexVersion
-		if existing.PreviousIndexVersionID != nil {
-			currentPrevious, e := getIndexTx(ctx, tx, command.WorkspaceID, *existing.PreviousIndexVersionID)
-			if e != nil {
-				return domain.ActivationResult{}, e
-			}
-			v := activationIndexSnapshot(currentPrevious, domain.IndexStatusRetiring, *existing.PreviousVersion, existing.CreatedAt)
-			previous = &v
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return domain.ActivationResult{}, classify(err, "RETRIEVAL_ACTIVATION_COMMIT_FAILED")
-		}
-		return domain.ActivationResult{Activation: existing, ActiveIndexVersion: active, PreviousIndexVersion: previous, Replayed: true}, nil
-	}
-	target, err := getIndexForUpdate(ctx, tx, command.WorkspaceID, command.TargetIndexVersionID)
+	result, err := activateTx(ctx, tx, command, kind, nil)
 	if err != nil {
 		return domain.ActivationResult{}, err
-	}
-	var current *domain.IndexVersion
-	active, activeErr := scanIndex(tx.QueryRow(ctx, `SELECT `+indexColumns+` FROM retrieval.index_version WHERE workspace_id=$1 AND status='active' FOR UPDATE`, string(command.WorkspaceID)))
-	if activeErr == nil {
-		current = &active
-	} else if !errors.Is(activeErr, pgx.ErrNoRows) {
-		return domain.ActivationResult{}, classify(activeErr, "RETRIEVAL_ACTIVE_QUERY_FAILED")
-	}
-	if rollback {
-		if current == nil {
-			return domain.ActivationResult{}, notFound("RETRIEVAL_ACTIVE_NOT_FOUND", pgx.ErrNoRows)
-		}
-		rc := domain.RollbackActivationCommand{ActivationID: command.ActivationID, WorkspaceID: command.WorkspaceID, TargetIndexVersionID: command.TargetIndexVersionID, ExpectedTargetVersion: command.ExpectedTargetVersion, ExpectedCurrentIndexVersionID: *command.ExpectedCurrentIndexVersionID, ExpectedCurrentVersion: *command.ExpectedCurrentVersion, IdempotencyKey: command.IdempotencyKey, ReasonCode: command.ReasonCode, At: command.At}
-		if err := domain.ValidateRollbackActivationCommand(*current, target, rc); err != nil {
-			return domain.ActivationResult{}, err
-		}
-	} else if err := domain.ValidateActivationCommand(current, target, command); err != nil {
-		return domain.ActivationResult{}, err
-	}
-	activation := domain.Activation{
-		ID: command.ActivationID, Kind: kind, WorkspaceID: command.WorkspaceID,
-		TargetIndexVersionID: command.TargetIndexVersionID, PreviousIndexVersionID: command.ExpectedCurrentIndexVersionID,
-		TargetVersion: command.ExpectedTargetVersion + 1, IdempotencyKey: command.IdempotencyKey,
-		ReasonCode: command.ReasonCode, CreatedAt: command.At,
-	}
-	var previousNext any
-	if command.ExpectedCurrentVersion != nil {
-		value := *command.ExpectedCurrentVersion + 1
-		activation.PreviousVersion = &value
-		previousNext = value
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO retrieval.index_activation(id,kind,workspace_id,target_index_version_id,previous_index_version_id,target_version,previous_version,idempotency_key,reason_code,created_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, string(command.ActivationID), string(kind), string(command.WorkspaceID), string(command.TargetIndexVersionID), optionalID(command.ExpectedCurrentIndexVersionID), command.ExpectedTargetVersion+1, previousNext, command.IdempotencyKey, command.ReasonCode, command.At.UTC()); err != nil {
-		return domain.ActivationResult{}, classify(err, "RETRIEVAL_ACTIVATION_CREATE_FAILED")
-	}
-	var previous *domain.IndexVersion
-	if current != nil {
-		updated, e := scanIndex(tx.QueryRow(ctx, `UPDATE retrieval.index_version SET status='retiring',version=version+1,updated_at=$1,retired_at=$1 WHERE id=$2 AND workspace_id=$3 AND status='active' AND version=$4 RETURNING `+indexColumns, command.At.UTC(), string(current.ID), string(command.WorkspaceID), current.Version))
-		if e != nil {
-			return domain.ActivationResult{}, classify(e, "RETRIEVAL_PREVIOUS_RETIRE_FAILED")
-		}
-		previous = &updated
-	}
-	updatedTarget, err := scanIndex(tx.QueryRow(ctx, `UPDATE retrieval.index_version SET status='active',version=version+1,updated_at=$1,activated_at=$1 WHERE id=$2 AND workspace_id=$3 AND status=$4 AND version=$5 RETURNING `+indexColumns, command.At.UTC(), string(target.ID), string(command.WorkspaceID), string(target.Status), target.Version))
-	if err != nil {
-		return domain.ActivationResult{}, classify(err, "RETRIEVAL_TARGET_ACTIVATE_FAILED")
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.ActivationResult{}, classify(err, "RETRIEVAL_ACTIVATION_COMMIT_FAILED")
 	}
-	return domain.ActivationResult{Activation: activation, ActiveIndexVersion: updatedTarget, PreviousIndexVersion: previous}, nil
+	return result, nil
 }
 
 // GetIndex 按 Workspace 与稳定 ID 返回 Index Version。
@@ -525,19 +445,37 @@ func (r *Repository) GetActive(ctx context.Context, workspaceID foundation.ID) (
 func (r *Repository) GetBuildStatus(ctx context.Context, workspaceID, indexID foundation.ID) (domain.BuildStatus, error) {
 	var s domain.BuildStatus
 	var degraded []byte
-	err := r.db.QueryRow(ctx, `SELECT i.workspace_id::text,i.id::text,i.status,i.version,i.expected_chunk_count,i.degraded_capabilities,
-		(SELECT count(*) FROM retrieval.index_manifest_chunk m WHERE m.index_version_id=i.id),count(p.index_version_id),
+	var sourceManifestHash *string
+	var expectedSourceCount *int64
+	err := r.db.QueryRow(ctx, `SELECT i.workspace_id::text,i.id::text,i.status,i.version,i.expected_chunk_count,
+		i.source_manifest_hash,i.expected_source_count,i.degraded_capabilities,
+		(SELECT count(*) FROM retrieval.index_manifest_chunk m WHERE m.index_version_id=i.id),
+		(SELECT count(*) FROM retrieval.index_manifest_source s WHERE s.index_version_id=i.id),
+		(SELECT count(*) FROM retrieval.index_manifest_source s WHERE s.index_version_id=i.id AND s.selection_status='included'),
+		(SELECT count(*) FROM retrieval.index_manifest_source s WHERE s.index_version_id=i.id AND s.selection_status='excluded'),
+		count(p.index_version_id),
 		count(*) FILTER(WHERE p.lexical_status='pending'),count(*) FILTER(WHERE p.lexical_status='ready'),count(*) FILTER(WHERE p.lexical_status='failed'),
 		count(*) FILTER(WHERE p.vector_status='disabled'),count(*) FILTER(WHERE p.vector_status='pending'),count(*) FILTER(WHERE p.vector_status='ready'),
 		count(*) FILTER(WHERE p.vector_status='skipped_oversized'),count(*) FILTER(WHERE p.vector_status='failed')
 		FROM retrieval.index_version i LEFT JOIN retrieval.chunk_projection p ON p.index_version_id=i.id
-		WHERE i.workspace_id=$1 AND i.id=$2 GROUP BY i.id`, string(workspaceID), string(indexID)).Scan(&s.WorkspaceID, &s.IndexVersionID, &s.IndexStatus, &s.IndexVersion, &s.ExpectedChunkCount, &degraded, &s.ManifestChunkCount, &s.ProjectionCount, &s.LexicalPendingCount, &s.LexicalReadyCount, &s.LexicalFailedCount, &s.VectorDisabledCount, &s.VectorPendingCount, &s.VectorReadyCount, &s.VectorSkippedOversizedCount, &s.VectorFailedCount)
+		WHERE i.workspace_id=$1 AND i.id=$2 GROUP BY i.id`, string(workspaceID), string(indexID)).Scan(
+		&s.WorkspaceID, &s.IndexVersionID, &s.IndexStatus, &s.IndexVersion, &s.ExpectedChunkCount,
+		&sourceManifestHash, &expectedSourceCount, &degraded, &s.ManifestChunkCount,
+		&s.SourceManifestCount, &s.IncludedSourceCount, &s.ExcludedSourceCount,
+		&s.ProjectionCount, &s.LexicalPendingCount, &s.LexicalReadyCount, &s.LexicalFailedCount,
+		&s.VectorDisabledCount, &s.VectorPendingCount, &s.VectorReadyCount,
+		&s.VectorSkippedOversizedCount, &s.VectorFailedCount,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.BuildStatus{}, notFound("RETRIEVAL_INDEX_NOT_FOUND", err)
 	}
 	if err != nil {
 		return domain.BuildStatus{}, classify(err, "RETRIEVAL_BUILD_STATUS_QUERY_FAILED")
 	}
+	if sourceManifestHash != nil {
+		s.SourceManifestHash = *sourceManifestHash
+	}
+	s.ExpectedSourceCount = expectedSourceCount
 	if err := json.Unmarshal(degraded, &s.DegradedCapabilities); err != nil {
 		return domain.BuildStatus{}, consistency("RETRIEVAL_DEGRADED_CAPABILITIES_INVALID", err)
 	}

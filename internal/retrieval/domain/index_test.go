@@ -46,6 +46,31 @@ func TestValidateIndexVersionEnforcesFTSOnlyCapabilityContract(t *testing.T) {
 	}
 }
 
+func TestValidateIndexVersionSupportsLegacyAndRequiresCompleteSourceBinding(t *testing.T) {
+	t.Parallel()
+	legacy := validIndexVersion(nil)
+	if err := ValidateIndexVersion(legacy); err != nil {
+		t.Fatal(err)
+	}
+	count := int64(2)
+	sourceBound := legacy
+	sourceBound.SourceManifestHash = strings.Repeat("a", 64)
+	sourceBound.ExpectedSourceCount = &count
+	sourceBound.ProcessingContract = testProcessingContract()
+	if err := ValidateIndexVersion(sourceBound); err != nil {
+		t.Fatal(err)
+	}
+	sourceBound.ExpectedSourceCount = nil
+	if err := ValidateIndexVersion(sourceBound); err == nil {
+		t.Fatal("source hash without count accepted")
+	}
+	zero := int64(0)
+	sourceBound.ExpectedSourceCount = &zero
+	if err := ValidateIndexVersion(sourceBound); err == nil {
+		t.Fatal("zero source count accepted")
+	}
+}
+
 func TestValidateIndexBuildFreezesCanonicalManifest(t *testing.T) {
 	t.Parallel()
 
@@ -143,6 +168,26 @@ func TestSameIndexBuildBindingDetectsDifferentIdempotentRequest(t *testing.T) {
 	right.IndexVersion.TokenizerVersion = "v2"
 	if SameIndexBuildBinding(left, right) {
 		t.Fatal("different tokenizer binding accepted as replay")
+	}
+}
+
+func TestSameIndexBuildBindingIncludesSourceManifestIdentity(t *testing.T) {
+	t.Parallel()
+	left := IndexBuild{IndexVersion: validIndexVersion(nil)}
+	right := left
+	count := int64(1)
+	right.IndexVersion.SourceManifestHash = strings.Repeat("a", 64)
+	right.IndexVersion.ExpectedSourceCount = &count
+	right.IndexVersion.ProcessingContract = testProcessingContract()
+	if SameIndexBuildBinding(left, right) {
+		t.Fatal("different source manifest binding accepted as replay")
+	}
+}
+
+func testProcessingContract() *ProcessingContract {
+	return &ProcessingContract{
+		ParserID: "goldmark", ParserVersion: "v1", ParserConfigHash: strings.Repeat("b", 64),
+		ChunkStrategyVersion: "structure-v1", SchemaVersion: "v1",
 	}
 }
 

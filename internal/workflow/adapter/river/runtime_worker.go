@@ -90,7 +90,7 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 		}
 	}
 	var err error
-	ctx, err = decodeTraceMetadata(ctx, job.Metadata)
+	ctx, err = DecodeTraceMetadata(ctx, job.Metadata)
 	if err != nil {
 		return err
 	}

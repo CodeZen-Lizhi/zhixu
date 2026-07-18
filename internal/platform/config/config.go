@@ -36,6 +36,20 @@ const (
 	defaultWorkerHealthAddr           = "0.0.0.0:8081"
 )
 
+const (
+	defaultReindexDispatchPollInterval = time.Second
+	defaultReindexDispatchBatchSize    = 10
+	defaultReindexDispatchErrorBackoff = 5 * time.Second
+	defaultReindexLeaseDuration        = 2 * time.Minute
+	defaultReindexHeartbeatInterval    = 30 * time.Second
+
+	maxReindexDispatchPollInterval = time.Minute
+	maxReindexDispatchBatchSize    = 1_000
+	maxReindexDispatchErrorBackoff = time.Minute
+	maxReindexLeaseDuration        = 24 * time.Hour
+	maxReindexHeartbeatInterval    = time.Minute
+)
+
 // TelemetryMode controls whether telemetry export is disabled or required for
 // process readiness.
 type TelemetryMode string
@@ -75,11 +89,18 @@ type Config struct {
 	WorkerRescueStuckJobsAfter time.Duration `yaml:"worker_rescue_stuck_jobs_after"`
 	WorkflowLeaseDuration      time.Duration `yaml:"workflow_lease"`
 	WorkflowHeartbeatInterval  time.Duration `yaml:"workflow_heartbeat"`
-	WorkerSoftStopTimeout      time.Duration `yaml:"worker_soft_stop_timeout"`
-	WorkerHardStopTimeout      time.Duration `yaml:"worker_hard_stop_timeout"`
-	WorkerHealthAddr           string        `yaml:"worker_health_addr"`
-	TelemetryMode              TelemetryMode `yaml:"telemetry_mode"`
-	TelemetryEndpoint          string        `yaml:"telemetry_endpoint"`
+
+	ReindexDispatchPollInterval time.Duration `yaml:"reindex_dispatch_poll_interval"`
+	ReindexDispatchBatchSize    int           `yaml:"reindex_dispatch_batch_size"`
+	ReindexDispatchErrorBackoff time.Duration `yaml:"reindex_dispatch_error_backoff"`
+	ReindexLeaseDuration        time.Duration `yaml:"reindex_lease_duration"`
+	ReindexHeartbeatInterval    time.Duration `yaml:"reindex_heartbeat_interval"`
+
+	WorkerSoftStopTimeout time.Duration `yaml:"worker_soft_stop_timeout"`
+	WorkerHardStopTimeout time.Duration `yaml:"worker_hard_stop_timeout"`
+	WorkerHealthAddr      string        `yaml:"worker_health_addr"`
+	TelemetryMode         TelemetryMode `yaml:"telemetry_mode"`
+	TelemetryEndpoint     string        `yaml:"telemetry_endpoint"`
 }
 
 // Defaults returns safe non-sensitive defaults. It intentionally leaves the
@@ -101,10 +122,17 @@ func Defaults() Config {
 		WorkerRescueStuckJobsAfter: defaultWorkerRescueStuckJobsAfter,
 		WorkflowLeaseDuration:      defaultWorkflowLeaseDuration,
 		WorkflowHeartbeatInterval:  defaultWorkflowHeartbeatInterval,
-		WorkerSoftStopTimeout:      defaultWorkerSoftStopTimeout,
-		WorkerHardStopTimeout:      defaultWorkerHardStopTimeout,
-		WorkerHealthAddr:           defaultWorkerHealthAddr,
-		TelemetryMode:              TelemetryModeDisabled,
+
+		ReindexDispatchPollInterval: defaultReindexDispatchPollInterval,
+		ReindexDispatchBatchSize:    defaultReindexDispatchBatchSize,
+		ReindexDispatchErrorBackoff: defaultReindexDispatchErrorBackoff,
+		ReindexLeaseDuration:        defaultReindexLeaseDuration,
+		ReindexHeartbeatInterval:    defaultReindexHeartbeatInterval,
+
+		WorkerSoftStopTimeout: defaultWorkerSoftStopTimeout,
+		WorkerHardStopTimeout: defaultWorkerHardStopTimeout,
+		WorkerHealthAddr:      defaultWorkerHealthAddr,
+		TelemetryMode:         TelemetryModeDisabled,
 	}
 }
 
@@ -143,33 +171,40 @@ func LoadWithLookup(path string, lookup func(string) (string, bool)) (Config, er
 // explicit and consistent across yaml.v3 versions. Pointer fields preserve
 // defaults when a YAML key is omitted.
 type fileConfig struct {
-	AppName                    *string        `yaml:"app_name"`
-	Version                    *string        `yaml:"version"`
-	Environment                *string        `yaml:"environment"`
-	HTTPAddr                   *string        `yaml:"http_addr"`
-	DatabaseURL                *string        `yaml:"database_url"`
-	DatabaseHost               *string        `yaml:"database_host"`
-	DatabasePort               *string        `yaml:"database_port"`
-	DatabaseName               *string        `yaml:"database_name"`
-	DatabaseUser               *string        `yaml:"database_user"`
-	DatabasePassword           *string        `yaml:"database_password"`
-	DatabaseMaxConns           *int32         `yaml:"database_max_conns"`
-	DatabaseMinConns           *int32         `yaml:"database_min_conns"`
-	DatabasePingTimeout        *string        `yaml:"database_ping_timeout"`
-	HealthInterval             *string        `yaml:"health_interval"`
-	ShutdownTimeout            *string        `yaml:"shutdown_timeout"`
-	WebAssetsDir               *string        `yaml:"web_assets_dir"`
-	WorkerQueue                *string        `yaml:"worker_queue"`
-	WorkerMaxWorkers           *int           `yaml:"worker_max_workers"`
-	WorkerJobTimeout           *string        `yaml:"worker_job_timeout"`
-	WorkerRescueStuckJobsAfter *string        `yaml:"worker_rescue_stuck_jobs_after"`
-	WorkflowLeaseDuration      *string        `yaml:"workflow_lease"`
-	WorkflowHeartbeatInterval  *string        `yaml:"workflow_heartbeat"`
-	WorkerSoftStopTimeout      *string        `yaml:"worker_soft_stop_timeout"`
-	WorkerHardStopTimeout      *string        `yaml:"worker_hard_stop_timeout"`
-	WorkerHealthAddr           *string        `yaml:"worker_health_addr"`
-	TelemetryMode              *TelemetryMode `yaml:"telemetry_mode"`
-	TelemetryEndpoint          *string        `yaml:"telemetry_endpoint"`
+	AppName                    *string `yaml:"app_name"`
+	Version                    *string `yaml:"version"`
+	Environment                *string `yaml:"environment"`
+	HTTPAddr                   *string `yaml:"http_addr"`
+	DatabaseURL                *string `yaml:"database_url"`
+	DatabaseHost               *string `yaml:"database_host"`
+	DatabasePort               *string `yaml:"database_port"`
+	DatabaseName               *string `yaml:"database_name"`
+	DatabaseUser               *string `yaml:"database_user"`
+	DatabasePassword           *string `yaml:"database_password"`
+	DatabaseMaxConns           *int32  `yaml:"database_max_conns"`
+	DatabaseMinConns           *int32  `yaml:"database_min_conns"`
+	DatabasePingTimeout        *string `yaml:"database_ping_timeout"`
+	HealthInterval             *string `yaml:"health_interval"`
+	ShutdownTimeout            *string `yaml:"shutdown_timeout"`
+	WebAssetsDir               *string `yaml:"web_assets_dir"`
+	WorkerQueue                *string `yaml:"worker_queue"`
+	WorkerMaxWorkers           *int    `yaml:"worker_max_workers"`
+	WorkerJobTimeout           *string `yaml:"worker_job_timeout"`
+	WorkerRescueStuckJobsAfter *string `yaml:"worker_rescue_stuck_jobs_after"`
+	WorkflowLeaseDuration      *string `yaml:"workflow_lease"`
+	WorkflowHeartbeatInterval  *string `yaml:"workflow_heartbeat"`
+
+	ReindexDispatchPollInterval *string `yaml:"reindex_dispatch_poll_interval"`
+	ReindexDispatchBatchSize    *int    `yaml:"reindex_dispatch_batch_size"`
+	ReindexDispatchErrorBackoff *string `yaml:"reindex_dispatch_error_backoff"`
+	ReindexLeaseDuration        *string `yaml:"reindex_lease_duration"`
+	ReindexHeartbeatInterval    *string `yaml:"reindex_heartbeat_interval"`
+
+	WorkerSoftStopTimeout *string        `yaml:"worker_soft_stop_timeout"`
+	WorkerHardStopTimeout *string        `yaml:"worker_hard_stop_timeout"`
+	WorkerHealthAddr      *string        `yaml:"worker_health_addr"`
+	TelemetryMode         *TelemetryMode `yaml:"telemetry_mode"`
+	TelemetryEndpoint     *string        `yaml:"telemetry_endpoint"`
 }
 
 func applyYAMLFile(path string, cfg *Config) error {
@@ -228,6 +263,9 @@ func applyYAMLFile(path string, cfg *Config) error {
 	if raw.WorkerMaxWorkers != nil {
 		cfg.WorkerMaxWorkers = *raw.WorkerMaxWorkers
 	}
+	if raw.ReindexDispatchBatchSize != nil {
+		cfg.ReindexDispatchBatchSize = *raw.ReindexDispatchBatchSize
+	}
 	if raw.WorkerHealthAddr != nil {
 		cfg.WorkerHealthAddr = *raw.WorkerHealthAddr
 	}
@@ -245,6 +283,10 @@ func applyYAMLFile(path string, cfg *Config) error {
 		"worker_rescue_stuck_jobs_after": raw.WorkerRescueStuckJobsAfter,
 		"workflow_lease":                 raw.WorkflowLeaseDuration,
 		"workflow_heartbeat":             raw.WorkflowHeartbeatInterval,
+		"reindex_dispatch_poll_interval": raw.ReindexDispatchPollInterval,
+		"reindex_dispatch_error_backoff": raw.ReindexDispatchErrorBackoff,
+		"reindex_lease_duration":         raw.ReindexLeaseDuration,
+		"reindex_heartbeat_interval":     raw.ReindexHeartbeatInterval,
 		"worker_soft_stop_timeout":       raw.WorkerSoftStopTimeout,
 		"worker_hard_stop_timeout":       raw.WorkerHardStopTimeout,
 	} {
@@ -270,6 +312,14 @@ func applyYAMLFile(path string, cfg *Config) error {
 			cfg.WorkflowLeaseDuration = parsed
 		case "workflow_heartbeat":
 			cfg.WorkflowHeartbeatInterval = parsed
+		case "reindex_dispatch_poll_interval":
+			cfg.ReindexDispatchPollInterval = parsed
+		case "reindex_dispatch_error_backoff":
+			cfg.ReindexDispatchErrorBackoff = parsed
+		case "reindex_lease_duration":
+			cfg.ReindexLeaseDuration = parsed
+		case "reindex_heartbeat_interval":
+			cfg.ReindexHeartbeatInterval = parsed
 		case "worker_soft_stop_timeout":
 			cfg.WorkerSoftStopTimeout = parsed
 		case "worker_hard_stop_timeout":
@@ -318,6 +368,24 @@ func (c Config) Validate() error {
 	}
 	if c.WorkflowHeartbeatInterval > (c.WorkflowLeaseDuration-time.Nanosecond)/3 {
 		return errors.New("workflow_heartbeat must be less than one third of workflow_lease")
+	}
+	if c.ReindexDispatchPollInterval <= 0 || c.ReindexDispatchPollInterval > maxReindexDispatchPollInterval {
+		return errors.New("reindex_dispatch_poll_interval must be positive and at most 1m")
+	}
+	if c.ReindexDispatchBatchSize <= 0 || c.ReindexDispatchBatchSize > maxReindexDispatchBatchSize {
+		return errors.New("reindex_dispatch_batch_size must be between 1 and 1000")
+	}
+	if c.ReindexDispatchErrorBackoff <= 0 || c.ReindexDispatchErrorBackoff > maxReindexDispatchErrorBackoff {
+		return errors.New("reindex_dispatch_error_backoff must be positive and at most 1m")
+	}
+	if c.ReindexLeaseDuration <= 0 || c.ReindexLeaseDuration > maxReindexLeaseDuration {
+		return errors.New("reindex_lease_duration must be positive and at most 24h")
+	}
+	if c.ReindexHeartbeatInterval <= 0 || c.ReindexHeartbeatInterval > maxReindexHeartbeatInterval {
+		return errors.New("reindex_heartbeat_interval must be positive and at most 1m")
+	}
+	if c.ReindexHeartbeatInterval >= c.ReindexLeaseDuration {
+		return errors.New("reindex_heartbeat_interval must be less than reindex_lease_duration")
 	}
 	if c.WorkerHardStopTimeout <= 0 {
 		return errors.New("worker_hard_stop_timeout must be positive")
@@ -418,7 +486,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -436,6 +504,11 @@ func (c Config) String() string {
 		c.WorkerRescueStuckJobsAfter,
 		c.WorkflowLeaseDuration,
 		c.WorkflowHeartbeatInterval,
+		c.ReindexDispatchPollInterval,
+		c.ReindexDispatchBatchSize,
+		c.ReindexDispatchErrorBackoff,
+		c.ReindexLeaseDuration,
+		c.ReindexHeartbeatInterval,
 		c.WorkerSoftStopTimeout,
 		c.WorkerHardStopTimeout,
 		c.WorkerHealthAddr,
@@ -492,6 +565,13 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		}
 		cfg.WorkerMaxWorkers = parsed
 	}
+	if value, ok := lookup("ZHIXU_REINDEX_DISPATCH_BATCH_SIZE"); ok {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", "ZHIXU_REINDEX_DISPATCH_BATCH_SIZE", err)
+		}
+		cfg.ReindexDispatchBatchSize = parsed
+	}
 	for key, target := range map[string]*time.Duration{
 		"ZHIXU_DATABASE_PING_TIMEOUT":     &cfg.DatabasePingTimeout,
 		"ZHIXU_HEALTH_INTERVAL":           &cfg.HealthInterval,
@@ -500,8 +580,14 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		"ZHIXU_WORKER_RESCUE_STUCK_AFTER": &cfg.WorkerRescueStuckJobsAfter,
 		"ZHIXU_WORKFLOW_LEASE":            &cfg.WorkflowLeaseDuration,
 		"ZHIXU_WORKFLOW_HEARTBEAT":        &cfg.WorkflowHeartbeatInterval,
-		"ZHIXU_WORKER_SOFT_STOP_TIMEOUT":  &cfg.WorkerSoftStopTimeout,
-		"ZHIXU_WORKER_HARD_STOP_TIMEOUT":  &cfg.WorkerHardStopTimeout,
+
+		"ZHIXU_REINDEX_DISPATCH_POLL_INTERVAL": &cfg.ReindexDispatchPollInterval,
+		"ZHIXU_REINDEX_DISPATCH_ERROR_BACKOFF": &cfg.ReindexDispatchErrorBackoff,
+		"ZHIXU_REINDEX_LEASE_DURATION":         &cfg.ReindexLeaseDuration,
+		"ZHIXU_REINDEX_HEARTBEAT_INTERVAL":     &cfg.ReindexHeartbeatInterval,
+
+		"ZHIXU_WORKER_SOFT_STOP_TIMEOUT": &cfg.WorkerSoftStopTimeout,
+		"ZHIXU_WORKER_HARD_STOP_TIMEOUT": &cfg.WorkerHardStopTimeout,
 	} {
 		if value, ok := lookup(key); ok {
 			parsed, err := time.ParseDuration(value)

@@ -344,6 +344,96 @@ Wrong: 每次 delivery 都重签 Credential 并 Begin，或把 Credential 放进
 Correct: Claim 后先按 safe-writeback:<node_run_id> exact lookup；只有不存在才瞬时签发双授权并 Atomic Begin，响应丢失后再次 exact lookup。
 ```
 
+## M6-B Reindex Consumer Persistence Contract
+
+### 1. Scope / Trigger
+
+- Trigger：Safe Writeback 已原子发布 `retrieval.revision.reindex_requested`，需要构建 committed
+  Source/FTS Snapshot 并完成 Delivery、Execution 与 Proposal。
+- Scope：M6-B 只实现 FTS-only Reindex；Embedding、Hybrid Search 与 Search API 不在本契约。
+
+### 2. Signatures
+
+```go
+func NewDispatcher(
+    db DispatcherDB,
+    ids foundation.IDGenerator,
+    jobs ReindexRiverInserter,
+) (*application.Dispatcher, error)
+
+func (r *Repository) BeginWorkspaceSnapshot(
+    context.Context,
+    domain.WorkspaceSnapshotCommand,
+) (domain.WorkspaceSnapshotResult, error)
+
+func (r *Repository) CompleteReindexTx(
+    context.Context,
+    domain.CompleteReindexCommand,
+) (domain.CompleteReindexResult, error)
+```
+
+数据库入口为 `migrations/00015_reindex_consumer.sql`；River Args 固定为
+`schema_version/delivery_id/dispatch_no`，Outbox Payload 固定为 Reindex v1 的 11 个字段。
+
+### 3. Contracts
+
+- Outbox v1 使用唯一 11 字段公共 codec；River Args 只允许 `schema_version/delivery_id/dispatch_no`。
+- `published_at` 只证明 Dispatcher 与 River `InsertTx` 同事务成功；业务终态只看
+  `retrieval.reindex_delivery.status`。Reindex unpublished Outbox 必须使用 event-type partial index，
+  不能在大量其他事件中只依赖全局 unpublished 索引过滤。
+- `reindex_delivery_attempt` append-only；Claim/Heartbeat/Checkpoint/Fail 使用数据库
+  `clock_timestamp()`、完整 owner/attempt/version fence，并同时更新 heartbeat 与 lease。
+- Snapshot 在 Workspace advisory lock + repeatable-read 中分页 Hash/Count 与分批 COPY；
+  `index_manifest_source`/`index_manifest_chunk` 创建后不可变，超限整事务回滚。
+- Processor 的确定性 Invalid/NotFound/NonRetryable 归约 failed，Version/Consistency/Manual 归约
+  manual_recovery；连接、锁或 Commit 结果未知原样交同一 River dispatch 重投。
+- `CompleteReindexTx` 固定锁序并在单事务切换唯一 Active、追加 Activation、完成 Delivery/
+  Execution/Proposal；deferred invariant 在提交时验证 Outbox/Commit/Workflow/cleanup/Manifest/
+  Regression/Activation 全绑定。
+- 结构回归失败保留 Git Commit 和旧 Active，不自动反向 Commit；语义回滚必须创建新的
+  Proposal/Approval。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 稳定错误/归约 | 数据结果 |
+|---|---|---|
+| Outbox 缺字段、额外字段、未知版本或跨绑定 | `REINDEX_OUTBOX_CONTRACT_INVALID`，fatal/readiness=false | 不创建伪 Delivery，不设置 `published_at` |
+| Commit/Path/Hash 或 committed blob 不一致 | Invalid/NotFound/NonRetryable → `failed` | 保留 Git Commit 与旧 Active |
+| Delivery Fence、Version 或跨域绑定损坏 | Version/Consistency/Manual → `manual_recovery` | 阻止同 Workspace 后续自动 Reindex |
+| 连接、锁或 Commit 结果未知 | 原错误返回 River transport 重投 | 不创建新的业务 retry generation |
+| cleanup 或原 Workflow 尚未 succeeded | `REINDEX_COMPLETION_PREREQUISITE_PENDING` → `retry_wait` | Active/Execution/Proposal 不变 |
+| Snapshot Source/Chunk 超过配置上限 | 稳定 capacity error | 整个 Snapshot 事务回滚，无部分 Manifest |
+| Completion 任一步或 deferred invariant 失败 | 事务错误或稳定 binding error | Activation、Active、Delivery、Execution、Proposal 全部回滚 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：同一 Outbox 并发派发只创建一个 Delivery/Job；响应丢失后重放既有 checkpoint，最终只产生一个 Activation。
+- Base：历史 Active 没有 Source Manifest 时执行全量 eligible rebuild，不复制不完整的旧 Chunk 集合。
+- Base：合法 legacy Outbox 的 Runtime tuple 全 NULL 时仍可通过 11 字段 payload 建立业务绑定。
+- Bad：从漂移的工作树读取正文，或把正文、路径、Credential、Git 参数放入 River Args/日志。
+- Bad：把 `published_at` 当作业务成功，或在事务外串联 Activate、Execution completed、Proposal completed。
+
+### 6. Tests Required
+
+- 00015 空库/重复 Up、空数据 Down→Up、有业务数据 Down `55000`。
+- Dispatcher rollback/response-loss/并发，Delivery lease/fence/checkpoint，Snapshot capacity/
+  incremental，Regression closure，Completion fault injection/replay。
+- 真实 PostgreSQL/River smoke 覆盖 committed blob 与工作树漂移、四 checkpoint、Ready/
+  Completion response-loss、双 Worker、单一 Activation/Active/Completion。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: published_at 非空后直接把 Proposal/Execution 标 completed，或为每次 River redelivery 创建新 Delivery。
+Correct: published_at 只表示 transport 已派发；Delivery checkpoint 与固定 Fence 驱动业务恢复和唯一完成事务。
+
+Wrong: Commit 后从工作树重新扫描目标文件，再增量追加本次 Chunk。
+Correct: 从指定 Commit 捕获受控 Blob；基于完整 Source Manifest 重建目标 Workspace Chunk 并集。
+
+Wrong: 先 Activate，再分别提交 Delivery/Execution/Proposal；失败后依赖补偿修复半完成状态。
+Correct: CompleteReindexTx 按固定锁序在单一事务中追加 Activation、切换 Active 并完成三方状态，提交时由 deferred invariant 统一验闭包。
+```
+
 ## M4-D River Operability Contract
 
 ### 1. Scope / Trigger

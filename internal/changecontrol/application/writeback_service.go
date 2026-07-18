@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha1" // #nosec G505 -- SHA-1 is required by the UUID v5 format, not used for security.
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	reindexcontract "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/contract"
 )
 
 const (
@@ -586,22 +586,10 @@ func buildPublishWriteback(execution domain.WritebackExecution, at time.Time) (d
 	if err != nil {
 		return domain.PublishWriteback{}, err
 	}
-	payload, err := json.Marshal(struct {
-		SchemaVersion        int    `json:"schema_version"`
-		WorkspaceID          string `json:"workspace_id"`
-		WorkflowRunID        string `json:"workflow_run_id"`
-		NodeRunID            string `json:"node_run_id"`
-		ProposalID           string `json:"proposal_id"`
-		RevisionID           string `json:"revision_id"`
-		ApprovalID           string `json:"approval_id"`
-		WritebackExecutionID string `json:"writeback_execution_id"`
-		TargetPath           string `json:"target_path"`
-		ResultHash           string `json:"result_hash"`
-		GitCommit            string `json:"git_commit"`
-	}{
-		SchemaVersion: SafeWritebackSchemaVersion, WorkspaceID: string(execution.WorkspaceID), WorkflowRunID: string(execution.WorkflowRunID),
-		NodeRunID: string(execution.NodeRunID), ProposalID: string(execution.ProposalID), RevisionID: string(execution.RevisionID),
-		ApprovalID: string(execution.ApprovalID), WritebackExecutionID: string(execution.ID), TargetPath: execution.TargetPath,
+	payload, err := reindexcontract.EncodeCanonical(reindexcontract.RequestV1{
+		SchemaVersion: reindexcontract.SchemaVersionV1, WorkspaceID: execution.WorkspaceID, WorkflowRunID: execution.WorkflowRunID,
+		NodeRunID: execution.NodeRunID, ProposalID: execution.ProposalID, RevisionID: execution.RevisionID,
+		ApprovalID: execution.ApprovalID, WritebackExecutionID: execution.ID, TargetPath: execution.TargetPath,
 		ResultHash: strings.ToLower(execution.ResultHash), GitCommit: strings.ToLower(execution.GitCommit),
 	})
 	if err != nil {
@@ -617,7 +605,7 @@ func buildPublishWriteback(execution domain.WritebackExecution, at time.Time) (d
 		},
 		Event: domain.WritebackOutboxEvent{
 			ID: eventID, WorkspaceID: execution.WorkspaceID, RunID: execution.WorkflowRunID,
-			Type: "retrieval.revision.reindex_requested", IdempotencyKey: domain.ExpectedWritebackReindexKey(execution),
+			Type: reindexcontract.EventTypeReindexRequested, IdempotencyKey: domain.ExpectedWritebackReindexKey(execution),
 			Payload: payload, OccurredAt: at,
 		},
 	}, nil

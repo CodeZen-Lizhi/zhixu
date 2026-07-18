@@ -18,12 +18,13 @@ func TestHealthHandlerLivenessIsIndependentOfReadiness(t *testing.T) {
 
 func TestHealthHandlerReadinessFailureMatrix(t *testing.T) {
 	allReady := workflowruntime.ReadinessSnapshot{
-		DatabaseOK:     true,
-		RiverSchemaOK:  true,
-		RiverStarted:   true,
-		DefinitionsOK:  true,
-		ExecutorsOK:    true,
-		DependenciesOK: true,
+		DatabaseOK:               true,
+		RiverSchemaOK:            true,
+		RiverStarted:             true,
+		DefinitionsOK:            true,
+		ExecutorsOK:              true,
+		DependenciesOK:           true,
+		ReindexDispatcherStarted: true,
 	}
 	tests := []struct {
 		name     string
@@ -36,6 +37,7 @@ func TestHealthHandlerReadinessFailureMatrix(t *testing.T) {
 		{"definitions", func(s *workflowruntime.ReadinessSnapshot) { s.DefinitionsOK = false }, workflowruntime.CodeDefinitionsUnavailable},
 		{"executors", func(s *workflowruntime.ReadinessSnapshot) { s.ExecutorsOK = false }, workflowruntime.CodeExecutorsUnavailable},
 		{"dependencies", func(s *workflowruntime.ReadinessSnapshot) { s.DependenciesOK = false }, workflowruntime.CodeDependenciesUnavailable},
+		{"reindex dispatcher", func(s *workflowruntime.ReadinessSnapshot) { s.ReindexDispatcherStarted = false }, workflowruntime.CodeReindexDispatcherNotStarted},
 		{"shutdown", func(s *workflowruntime.ReadinessSnapshot) { s.ShuttingDown = true }, workflowruntime.CodeShuttingDown},
 	}
 	for _, test := range tests {
@@ -58,6 +60,7 @@ func TestHealthHandlerReadyContract(t *testing.T) {
 	readiness.SetDefinitionsOK(true)
 	readiness.SetExecutorsOK(true)
 	readiness.SetDependenciesOK(true)
+	readiness.SetReindexDispatcherStarted(true)
 
 	recorder := request(t, NewHandler(readiness), http.MethodGet, "/readyz")
 	assertResponse(t, recorder, http.StatusOK, response{Status: "ready", Code: workflowruntime.CodeReady, Version: workflowruntime.ReadinessVersion})

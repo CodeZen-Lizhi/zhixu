@@ -13,6 +13,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	reindexcontract "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/contract"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -902,11 +903,11 @@ func (f *writebackFixture) bindProposalToRun(t *testing.T) {
 
 func (f *writebackFixture) publishCommand(t *testing.T, execution domain.WritebackExecution) domain.PublishWriteback {
 	t.Helper()
-	payload, err := json.Marshal(map[string]any{
-		"schema_version": 1, "workspace_id": string(f.workspaceID), "workflow_run_id": string(f.runID),
-		"node_run_id": string(f.nodeID), "proposal_id": string(f.proposalID), "revision_id": string(f.revisionID),
-		"approval_id": string(f.approvalID), "writeback_execution_id": string(execution.ID), "target_path": f.targetPath,
-		"result_hash": f.resultHash, "git_commit": f.commitHash,
+	payload, err := reindexcontract.EncodeCanonical(reindexcontract.RequestV1{
+		SchemaVersion: reindexcontract.SchemaVersionV1, WorkspaceID: f.workspaceID, WorkflowRunID: f.runID,
+		NodeRunID: f.nodeID, ProposalID: f.proposalID, RevisionID: f.revisionID,
+		ApprovalID: f.approvalID, WritebackExecutionID: execution.ID, TargetPath: f.targetPath,
+		ResultHash: f.resultHash, GitCommit: f.commitHash,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -922,7 +923,7 @@ func (f *writebackFixture) publishCommand(t *testing.T, execution domain.Writeba
 		},
 		Event: domain.WritebackOutboxEvent{
 			ID: eventID, WorkspaceID: f.workspaceID, RunID: f.runID,
-			Type: "retrieval.revision.reindex_requested", IdempotencyKey: domain.ExpectedWritebackReindexKey(execution), Payload: payload,
+			Type: reindexcontract.EventTypeReindexRequested, IdempotencyKey: domain.ExpectedWritebackReindexKey(execution), Payload: payload,
 		},
 	}
 }

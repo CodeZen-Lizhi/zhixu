@@ -20,7 +20,8 @@ func TestReadinessTransitions(t *testing.T) {
 		{readiness.SetRiverStarted, CodeDefinitionsUnavailable},
 		{readiness.SetDefinitionsOK, CodeExecutorsUnavailable},
 		{readiness.SetExecutorsOK, CodeDependenciesUnavailable},
-		{readiness.SetDependenciesOK, CodeReady},
+		{readiness.SetDependenciesOK, CodeReindexDispatcherNotStarted},
+		{readiness.SetReindexDispatcherStarted, CodeReady},
 	}
 	for _, step := range steps {
 		step.set(true)
@@ -31,6 +32,12 @@ func TestReadinessTransitions(t *testing.T) {
 	if !readiness.Snapshot().Ready() {
 		t.Fatal("fully initialized readiness is not ready")
 	}
+
+	readiness.SetReindexDispatcherStarted(false)
+	if got := readiness.Snapshot(); got.Ready() || got.Code != CodeReindexDispatcherNotStarted {
+		t.Fatalf("stopped reindex dispatcher snapshot = %+v", got)
+	}
+	readiness.SetReindexDispatcherStarted(true)
 
 	readiness.BeginShutdown()
 	if got := readiness.Snapshot(); got.Ready() || got.Code != CodeShuttingDown {
@@ -47,6 +54,7 @@ func TestReadinessConcurrentUpdatesAndSnapshots(t *testing.T) {
 		readiness.SetDefinitionsOK,
 		readiness.SetExecutorsOK,
 		readiness.SetDependenciesOK,
+		readiness.SetReindexDispatcherStarted,
 	}
 
 	var wait sync.WaitGroup
@@ -75,6 +83,7 @@ func TestReadinessConcurrentUpdatesAndSnapshots(t *testing.T) {
 	ready.SetDefinitionsOK(true)
 	ready.SetExecutorsOK(true)
 	ready.SetDependenciesOK(true)
+	ready.SetReindexDispatcherStarted(true)
 	if got := ready.Snapshot(); !got.Ready() || got.Code != CodeReady {
 		t.Fatalf("final snapshot = %+v", got)
 	}
@@ -86,6 +95,7 @@ func TestReadinessConcurrentUpdatesAndSnapshots(t *testing.T) {
 	readiness.SetDefinitionsOK(true)
 	readiness.SetExecutorsOK(true)
 	readiness.SetDependenciesOK(true)
+	readiness.SetReindexDispatcherStarted(true)
 	if got := readiness.Snapshot(); got.Ready() || got.Code != CodeShuttingDown {
 		t.Fatalf("shutdown snapshot became ready again = %+v", got)
 	}

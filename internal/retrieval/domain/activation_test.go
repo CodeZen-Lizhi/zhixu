@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +151,25 @@ func TestValidateBuildReadyRejectsIncompleteOrFalseCapabilityClaims(t *testing.T
 	}
 }
 
+func TestValidateBuildReadyRequiresCompleteSourceManifestForSourceBoundIndex(t *testing.T) {
+	t.Parallel()
+	index := validIndexVersion(nil)
+	count := int64(2)
+	index.SourceManifestHash = strings.Repeat("a", 64)
+	index.ExpectedSourceCount = &count
+	index.ProcessingContract = testProcessingContract()
+	status := completeBuildStatus(index)
+	status.IncludedSourceCount = 1
+	status.ExcludedSourceCount = 1
+	if err := ValidateBuildReady(index, status); err != nil {
+		t.Fatal(err)
+	}
+	status.SourceManifestCount--
+	if err := ValidateBuildReady(index, status); err == nil {
+		t.Fatal("incomplete source manifest accepted")
+	}
+}
+
 func validActivationCommand(target IndexVersion) ActivationCommand {
 	return ActivationCommand{
 		ActivationID:          "50000000-0000-4000-8000-000000000001",
@@ -170,9 +190,15 @@ func completeBuildStatus(index IndexVersion) BuildStatus {
 		IndexVersion:         index.Version,
 		ExpectedChunkCount:   index.ExpectedChunkCount,
 		ManifestChunkCount:   index.ExpectedChunkCount,
+		SourceManifestHash:   index.SourceManifestHash,
+		ExpectedSourceCount:  index.ExpectedSourceCount,
 		ProjectionCount:      index.ExpectedChunkCount,
 		LexicalReadyCount:    index.ExpectedChunkCount,
 		DegradedCapabilities: append([]DegradedCapability(nil), index.DegradedCapabilities...),
+	}
+	if index.ExpectedSourceCount != nil {
+		status.SourceManifestCount = *index.ExpectedSourceCount
+		status.IncludedSourceCount = *index.ExpectedSourceCount
 	}
 	if index.EmbeddingVersionID == nil {
 		status.VectorDisabledCount = index.ExpectedChunkCount

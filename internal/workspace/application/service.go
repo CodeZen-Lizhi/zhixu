@@ -16,6 +16,8 @@ const WarningGitDirty = "GIT_WORKTREE_DIRTY"
 type Dependencies struct {
 	Repository     domain.Repository
 	Files          domain.FileScanner
+	CommittedFiles domain.CommittedContentStore
+	CommittedGit   domain.CommittedBlobReader
 	Git            domain.GitStatusReader
 	GitInitializer domain.GitInitializer
 	IDs            foundation.IDGenerator

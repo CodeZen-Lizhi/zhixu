@@ -47,7 +47,7 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git executable is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	pool, cleanup := newApprovalRiverSmokeDatabase(t, ctx)
 	defer cleanup()
@@ -55,7 +55,7 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	root := t.TempDir()
 	targetPath := "docs/approval-river-smoke.md"
 	baseContent := []byte("# Approval River Smoke\n\nbase\n")
-	approvedContent := "# Approval River Smoke\n\napproved\n"
+	approvedContent := "# Approval River Smoke\n\napproved\n\ncredential=" + reindexCredentialCanary + "\ndsn=" + reindexDSNCanary + "\n"
 	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -253,6 +253,17 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 		}
 	}
 	assertApprovalRuntimePayloadsClean(t, ctx, pool, workflowRunID, foundation.ID(workflowNodeID), root, targetPath, approvedContent)
+	stopContext, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	for _, client := range workerClients {
+		if err := client.Stop(stopContext); err != nil {
+			stopCancel()
+			t.Fatal(err)
+		}
+	}
+	stopCancel()
+	workerClients = nil
+	runReindexRiverFaultSmoke(t, ctx, pool, workspaceRepository, gitRepository, insertClient,
+		workspaceID, foundation.ID(executionID), root, targetPath, approvedContent)
 }
 
 type riverSmokeApprovalResponse struct {

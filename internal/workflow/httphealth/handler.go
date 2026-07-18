@@ -83,7 +83,8 @@ func publicReadinessCode(code string) string {
 		workflowruntime.CodeRiverNotStarted,
 		workflowruntime.CodeDefinitionsUnavailable,
 		workflowruntime.CodeExecutorsUnavailable,
-		workflowruntime.CodeDependenciesUnavailable:
+		workflowruntime.CodeDependenciesUnavailable,
+		workflowruntime.CodeReindexDispatcherNotStarted:
 		return code
 	default:
 		return codeReadinessUnavailable

@@ -68,6 +68,33 @@ func TestBeginIndexFreezesCanonicalManifest(t *testing.T) {
 	}
 }
 
+func TestBeginWorkspaceSnapshotOwnsBoundedFTSOnlyConfiguration(t *testing.T) {
+	t.Parallel()
+	store := &fakeStore{}
+	service := newTestService(t, store)
+	_, err := service.BeginWorkspaceSnapshot(context.Background(), BeginWorkspaceSnapshotRequest{
+		WorkspaceID:             testWorkspaceID,
+		TargetSourceID:          "91000000-0000-4000-8000-000000000001",
+		TargetSourceVersionID:   "92000000-0000-4000-8000-000000000001",
+		TargetParseProjectionID: "93000000-0000-4000-8000-000000000001",
+		TokenizerID:             " simple ", TokenizerVersion: " v1 ", TokenizerConfigHash: hashA,
+		FusionConfig: json.RawMessage(`{"method":"rrf"}`), SourceSnapshotRef: " reindex-v1:event ", IdempotencyKey: " snapshot-1 ",
+		ProcessingContract: domain.ProcessingContract{
+			ParserID: " goldmark ", ParserVersion: " v1 ", ParserConfigHash: hashB,
+			ChunkStrategyVersion: " structure-v1 ", SchemaVersion: " v1 ",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := store.snapshot
+	if command.IndexVersion.ID != testIDs[0] || command.PageSize != domain.DefaultSnapshotPageSize ||
+		command.MaxSources != domain.DefaultSnapshotMaxSources || command.MaxChunks != domain.DefaultSnapshotMaxChunks ||
+		!domain.HasDegradedCapability(command.IndexVersion.DegradedCapabilities, domain.DegradedVector) || command.IndexVersion.EmbeddingVersionID != nil {
+		t.Fatalf("snapshot command=%#v", command)
+	}
+}
+
 func TestBeginIndexRequiresOneCanonicalJSONObject(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -326,6 +353,7 @@ type fakeStore struct {
 	registered    domain.EmbeddingVersion
 	registerCalls int
 	begun         domain.IndexBuild
+	snapshot      domain.WorkspaceSnapshotCommand
 	index         domain.IndexVersion
 	embedding     domain.EmbeddingVersion
 	saved         domain.VectorProjectionBatch
@@ -347,6 +375,11 @@ func (f *fakeStore) RegisterEmbeddingVersion(_ context.Context, value domain.Emb
 func (f *fakeStore) BeginIndex(_ context.Context, value domain.IndexBuild) (domain.IndexVersionResult, error) {
 	f.begun = value
 	return domain.IndexVersionResult{IndexVersion: value.IndexVersion, Manifest: value.Manifest, Created: true}, nil
+}
+
+func (f *fakeStore) BeginWorkspaceSnapshot(_ context.Context, value domain.WorkspaceSnapshotCommand) (domain.WorkspaceSnapshotResult, error) {
+	f.snapshot = value
+	return domain.WorkspaceSnapshotResult{IndexVersion: value.IndexVersion}, nil
 }
 func (f *fakeStore) BuildLexical(_ context.Context, value domain.LexicalBuildCommand) (domain.ProjectionBatchResult, error) {
 	f.lexical = value

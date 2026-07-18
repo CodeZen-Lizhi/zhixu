@@ -1408,7 +1408,7 @@ Should：
 8. Publish 成功后清理 temp/backup 恢复证据；清理失败保留 `VERIFYING` 并可重试 finalize，不得伪装成完成。
 9. M6 Retrieval 消费 Outbox 完成解析、索引和回归后，才允许推进 `COMPLETED`。
 
-M4-C 已实现 Approved Proposal 的自动异步写回：Approval、Proposal→Run binding、固定 Safe Writeback Definition/Node、Workflow Outbox 与唯一 River Job 在同一 PostgreSQL 事务提交；Worker Claim 后 exact lookup Durable Execution，缺失时瞬时签发双授权并 Atomic Begin，再调用现有 Safe Writeback Node，最终由 M4-B 原子完成 Node/Run。完整绑定重放直接返回原 Run/Job，不读取已被写回改变的文件或 Git；Rejected 不创建 Workflow。M6 Retrieval 完成前结果仍严格保持 `verifying/index_pending`，M4-D 继续负责 readiness、OTel、Compose 与运维交付。
+M4-C 已实现 Approved Proposal 的自动异步写回：Approval、Proposal→Run binding、固定 Safe Writeback Definition/Node、Workflow Outbox 与唯一 River Job 在同一 PostgreSQL 事务提交；Worker Claim 后 exact lookup Durable Execution，缺失时瞬时签发双授权并 Atomic Begin，再调用现有 Safe Writeback Node，最终由 M4-B 原子完成 Node/Run。完整绑定重放直接返回原 Run/Job，不读取已被写回改变的文件或 Git；Rejected 不创建 Workflow。M6-B 已消费 Reindex Outbox，从指定 Commit 捕获不可变 SourceVersion，完成真实 FTS-only Workspace Snapshot、结构回归与原子 Activation，并在同一数据库事务将 Delivery、Execution、Proposal 推进到 completed；Embedding、Hybrid Search 与 Search API 仍属于 M6-C/D。
 
 #### 10.9.3 Git Commit 规则
 
@@ -1458,10 +1458,9 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 
 ##### 回归验证失败
 
-- 根据失败类型决定：
-  - 内容或引用错误：创建反向 Git Commit 回滚。
-  - 仅索引错误：保持文件并重试索引。
-- 所有自动回滚生成独立审计事件。
+- M6-B 的 `SNAPSHOT_STRUCTURE_V1` 失败不自动创建反向 Git Commit，也不污染旧 Active Index。
+- Proposal/Execution 保持 VERIFYING；可确定的索引失败进入 failed，可重试依赖进入 retry_wait，绑定或结果未知进入 manual_recovery。
+- 内容语义需要回滚时必须创建新的回滚 Proposal，由用户重新审批后生成反向 Commit；本期不允许 Reindex Worker 绕过 Approval 自动改写 Git。
 
 #### 10.9.5 用户手动回滚
 
@@ -3045,7 +3044,7 @@ flowchart TD
     F -->|"失败"| K["清理临时文件并保持原文件"]
     H -->|"失败"| L["恢复写入前文件和 Git 基线"]
     I -->|"失败"| M["标记 INDEX_STALE 并重试"]
-    J -->|"内容失败"| N["创建反向 Commit 回滚"]
+    J -->|"失败"| N["保留旧 Active 与 VERIFYING，重试或人工恢复"]
     J -->|"通过"| O["Proposal 完成"]
 ```
 
