@@ -15,7 +15,7 @@
 13. [x] 接入 `cmd/worker` Composition、配置、readiness/metrics/trace；Reindex 不新增第三 River Client或第二 queue。
 14. [x] 增加真实 PostgreSQL/River 集成与 fault smoke：派发回滚、各 checkpoint kill/restart、双 Worker、完成故障注入、上游 response-loss 并发和完整 Safe Writeback→Completed 闭环。
 15. [x] 同步父任务、产品 PRD、Workflow/Retrieval/Database/Testing/Deployment、backend Spec，统一“回归失败不自动反向 Commit”的本期语义。
-16. [ ] 执行全量门禁、go-review、sql-code-review、独立审查、提交、归档和 journal。
+16. [x] 执行全量门禁、go-review、sql-code-review、独立审查、提交、归档和 journal。
 
 ## Dependency Order
 
