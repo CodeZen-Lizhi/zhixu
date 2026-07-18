@@ -122,7 +122,7 @@ Proposal/Execution completed 的唯一事实闭环。
 - [x] PostgreSQL Search/EXPLAIN、真实 River fault smoke 和 Compose API smoke 全部通过，闭环只产生一个 Active/Completion。
 - [x] `go test -race`、关键包 `-count=20`、全仓 integration `-p 1`、`go vet ./...`、`make test`、
   `go mod tidy -diff`、Compose config/build/up/down、go-review、sql-code-review、独立审查和 Trellis full-scope check 通过。
-- [ ] 父任务 M6 Retrieval Indexing And Search 的全部 AC 有当前代码、测试或运行日志证据后归档；M6-01 标记完成。
+- [x] 父任务 M6 Retrieval Indexing And Search 的全部 AC 有当前代码、测试或运行日志证据后归档；M6-01 标记完成。
 
 ## Out Of Scope
 

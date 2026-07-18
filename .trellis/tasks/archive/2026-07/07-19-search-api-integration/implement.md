@@ -13,7 +13,7 @@
 11. [x] 新增 disposable Compose API smoke：Git Workspace → Scan/Ingestion → Proposal/Approval → Worker Reindex → Hybrid Search degraded → Evidence GET；确保 trap 清理和敏感信息 canary。
 12. [x] 同步 PRD、API/Retrieval/Interfaces/Testing/Deployment、安全边界与 backend/frontend code-spec；明确 top-100 cursor、distance、Auth/M10 和 exact-scan/M10 边界。
 13. [x] 执行 `go test -race`、关键包 `-count=20`、全仓 integration `-p 1`、`go vet ./...`、`make test`、`go mod tidy -diff`、Docker/Compose smoke、go-review、sql-code-review、独立审查和 Trellis full-scope check。
-14. [ ] 更新父任务全部 AC 与 M6-01 状态，提交 M6-D、归档子任务/父任务并记录 journal；不 push。
+14. [x] 更新父任务全部 AC 与 M6-01 状态，提交 M6-D、归档子任务/父任务并记录 journal；不 push。
 
 ## Dependency Order
 
