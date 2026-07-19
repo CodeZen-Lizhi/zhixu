@@ -756,3 +756,36 @@ Applicability v1、Provenance、确认、状态机、端点兼容、Conflict 和
 ### Next Steps
 
 - None - task complete
+
+
+## Session 23: 完成 M6-03 Tool Registry 与安全闭环
+
+**Date**: 2026-07-19
+**Task**: 完成 M6-03 Tool Registry 与安全闭环
+**Branch**: `dev`
+
+### Summary
+
+交付版本化 Tool Registry、canonical Capability、严格 Tool Schema、持久 Workflow Policy/Tool Call、SSRF/命令/路径与输出安全、Safe Writeback audit bridge，以及真实 PostgreSQL/River/Compose fault smoke；主审查与独立两轮复验关闭全部当前范围 P0/P1/P2。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `648b0d4` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
