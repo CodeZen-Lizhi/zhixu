@@ -13,7 +13,7 @@
 11. [x] 执行 Knowledge 定向 race/count、迁移/PG integration、Ingestion/Retrieval/ChangeControl/Workflow 回归、vet、make test、tidy diff、Compose config/build/readiness 和 diff check。
 12. [x] 主 Agent 使用 `go-review`、`sql-code-review` 和 `code-review-and-quality`；启动独立只读审查，按需求完整性、逻辑、边界、质量、测试和运行结果复验，修复后最多两轮。
 13. [x] 更新父任务 M5-05 状态、任务 AC 与 journal，提交业务改动；归档子任务并提交归档记录，不 push。
-14. [ ] 创建并规划下一依赖 M6-02 Agent 任务，读取 Knowledge Application seam 后继续实施，不把 M5-05 当项目终点。
+14. [x] 创建并规划下一依赖 M6-02 Agent 任务，读取 Knowledge Application seam 后继续实施，不把 M5-05 当项目终点。
 
 ## Dependency Order
 

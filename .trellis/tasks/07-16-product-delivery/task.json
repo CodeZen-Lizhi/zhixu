@@ -34,7 +34,8 @@
     "07-17-m5-safe-writeback",
     "07-17-river-workflow-runtime",
     "07-17-retrieval-indexing-search",
-    "07-19-knowledge-domain"
+    "07-19-knowledge-domain",
+    "07-19-agent-structured-output-citation"
   ],
   "parent": null,
   "relatedFiles": [],
