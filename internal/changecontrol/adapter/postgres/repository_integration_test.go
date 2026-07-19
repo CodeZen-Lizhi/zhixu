@@ -236,7 +236,7 @@ func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
 			t.Errorf("restore latest migrations: %v", upErr)
 		}
 	}()
-	for _, version := range []int{16, 15, 14} {
+	for _, version := range []int{17, 16, 15, 14} {
 		if _, err := provider.Down(ctx); err != nil {
 			t.Fatalf("down migration %d before 00013 guard: %v", version, err)
 		}

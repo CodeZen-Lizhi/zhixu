@@ -245,10 +245,14 @@ E2E 使用 Fake Model 保证确定性；单独 AI Evaluation 使用真实模型�
 
 ## 11. Relation Evaluation
 
-- 五分类 Precision/Recall/F1。
+- Relation Assessment 五分类 Precision/Recall/F1；它与正式 RelationType 分开统计。
 - Conflict→Duplicate 高风险错误。
 - Evidence Support。
 - Low Confidence Appropriateness。
+
+Knowledge Domain 还必须用确定性单元/数据库测试覆盖：NEW/LOW_CONFIDENCE 不落 Relation、端点兼容矩阵、
+对称正反/并发去重、Confirmed Claim/Relation 的 Provenance、Conflict 2..N 原子性、Applicability EXACT/
+REVIEWED_OVERLAP、乐观锁和幂等重放。模型评测通过不能替代这些不变量测试。
 
 ## 12. Article Evaluation
 

@@ -68,8 +68,9 @@ func TestWorkflowRuntimeStateMachineMigrationCompatibility(t *testing.T) {
 		}
 	}
 
-	// 00016/00015/00014 have no Retrieval data and 00013 has no Proposal→Run binding
-	// in this fixture; after removing all four, 00012 must reject populated Attempt data.
+	// 00017 has no Knowledge data, 00016/00015/00014 have no Retrieval data,
+	// and 00013 has no Proposal→Run binding in this fixture; after removing all
+	// five, 00012 must reject populated Attempt data.
 	db := stdlib.OpenDBFromPool(pool)
 	defer db.Close()
 	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
@@ -79,6 +80,9 @@ func TestWorkflowRuntimeStateMachineMigrationCompatibility(t *testing.T) {
 	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00017 Down rejected empty Knowledge Domain schema: %v", err)
 	}
 	if _, err := provider.Down(ctx); err != nil {
 		t.Fatalf("00016 Down rejected empty Embedding Hybrid Search schema: %v", err)

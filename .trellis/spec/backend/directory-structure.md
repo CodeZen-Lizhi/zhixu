@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-本规范适用于 Go API、Worker、领域模块、应用层和基础设施 Adapter。仓库当前仍处于产品与架构设计阶段，下面的目录是架构文档确认的 M1 实现落点，不代表这些目录已经存在。
+本规范适用于 Go API、Worker、领域模块、应用层和基础设施 Adapter。仓库已进入 M5/M6 实施阶段；目录存在性和示例以当前代码为准，下面的边界仍是后续模块的约束。
 
 ## 已确认事实
 
@@ -10,7 +10,7 @@
 - 依赖方向是 `presentation → application → domain modules`，Workflow 只能依赖 Agent、Tools 和领域接口，Adapter 实现领域接口（依据 [`module-architecture.md`](../../../docs/architecture/module-architecture.md) 第 5、6 节）。
 - 领域模块必须隐藏实现复杂度，对外暴露小而稳定的 Interface；事务由维护不变量的模块控制，HTTP Handler 不得发起跨模块事务。
 - API 负责同步查询、命令提交和 Human Decision；Worker 负责租约、长任务和副作用。预计超过 3 秒的任务通过持久化 Workflow 异步执行（依据 [`api-and-events.md`](../../../docs/architecture/api-and-events.md) 与 [`workflow-engine.md`](../../../docs/architecture/workflow-engine.md)）。
-- 当前没有 `go.mod`、Go 源码或可引用的实现示例；不得把规划目录写成已实现事实。
+- 当前已有 Go module、API/Worker、Workspace、Workflow、Ingestion、Change Control 和 Retrieval 实现；新增模块必须复用相同的 domain/application/adapter 分层与 Composition Root 模式。
 
 ## 目标代码落点（M1 起）
 
@@ -63,7 +63,7 @@ web/                           # React 构建产物或嵌入边界；不放领�
 - 模块目录使用架构领域名；`changecontrol` 是已确认的目录名，不能在代码中另起 `change_control` 形成第二套称呼。
 - 入口目录使用 `cmd/<process>`；平台实现放在 `internal/platform/<adapter>`。
 - 文件名采用 Go 工具链习惯（小写、必要时下划线），不以 HTTP、数据库表或页面名称替代领域概念。
-- 当前没有代码可供示范；命名以 `CONTEXT.md` 的统一领域语言和模块架构为准，M1 首个实现完成后应补充可链接的真实包示例。
+- 真实分层示例见 `internal/ingestion/{domain,application,adapter}`、`internal/retrieval/{domain,application,adapter}`；新模块应遵循相同依赖方向，不复制其业务语义。
 
 ## 禁止模式
 
@@ -90,9 +90,22 @@ git diff --check
 - 对新增跨层依赖执行静态检查；发现 Presentation→Repository、Domain→Adapter 等违规必须阻断合并。
 - API 与 Worker 使用同一 composition root 组装，启动和最小 readiness 烟测均通过。
 
-## 待 M1 代码验证
+## 当前待验证
 
-- 目录是否按上述布局创建，以及每个模块的实际包名和 Interface 文件位置。
-- `web/` 采用 Go embed 还是反向代理，以及对应构建产物路径。
+- 尚未实施模块的实际包名和 Interface 文件位置。
+- 新模块是否继续满足 domain 不依赖 Adapter、Presentation 不直连 Repository。
 - 是否需要额外的 `internal/shared` 包；只有出现至少两个真实调用方且概念确属共享时才能新增。
-- 依赖方向和循环依赖检查命令由 M1 工具链锁定；当前仓库没有可运行 Go 代码。
+- 项目尚无独立循环依赖 lint target，当前通过 `go list/go test/go vet` 和 import review 检查。
+
+## M5-05 Knowledge Module Contract
+
+- `internal/knowledge/domain` 拥有 Topic、Claim、Claim Source、Relation、Relation Evidence、Conflict、
+  Applicability 与 Relation Assessment；只能依赖 `internal/foundation`。
+- `internal/knowledge/application` 拥有短事务命令、Provenance/Confirmation Port、幂等和批量查询上限；
+  不调用模型、不读取文件路径、不直接依赖 Retrieval DTO。
+- `internal/knowledge/adapter/postgres` 是唯一 SQL/UoW 实现；Graph、Collection、Agent 不得直接写知识表。
+- Relation 是 Topic–Claim `BELONGS_TO` 的唯一正式事实；不得再建可独立写入的 `topic_claim`。
+- Claim Source、Relation Evidence、Search Evidence、Proposal Evidence 保持不同语义；共享的只有
+  Workspace → Source Version → Source Span Provenance 绑定规则。
+- 当前文件型 Change Control Proposal 不能用假路径/Hash/正文复用为 Knowledge Proposal；typed proposal
+  由后续任务以向后兼容方式扩展。

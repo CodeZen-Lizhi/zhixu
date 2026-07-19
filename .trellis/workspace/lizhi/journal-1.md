@@ -687,3 +687,39 @@ Compose 的 Approval→Writeback→Reindex→Search→Evidence→Completion 闭�
 ### Next Steps
 
 - 按依赖先实施 M5-05 Knowledge Domain，再进入 M6-02 Agent 结构化输出、引用校验、拒答与冲突处理。
+
+
+## Session 21: 完成 M5-05 Knowledge Domain
+
+**Date**: 2026-07-19
+**Task**: 完成 Topic、Claim、Relation、Evidence、Conflict 统一领域事实边界
+**Branch**: `dev`
+
+### Summary
+
+新增 Knowledge Domain/Application/PostgreSQL 深模块与 `00017_knowledge_domain.sql`，冻结 Relation Assessment、
+Applicability v1、Provenance、确认、状态机、端点兼容、Conflict 和幂等收据契约；完成真实 PostgreSQL、
+全仓 integration、race、Web/Go 构建与 Compose readiness 门禁。
+
+### Main Changes
+
+- 九个写命令均 receipt-first，重放不再调用 Provenance/Confirmation/ID/Clock；CAS、固定锁序和 response-loss 可恢复。
+- Topic alias、Relation Evidence、Conflict Member 批量写入；Conflict Transition 按 NodeType 固定两批加锁，消除成员级 N+1。
+- Relation Evidence 区分 owner-bound 持久 Hash 与业务语义 Hash，支持不同幂等键的 fingerprint replay。
+- 迁移新增九张表、Provenance/生命周期/deferred constraints、命令-聚合矩阵、索引和有数据 `55000` Down guard。
+- 同步领域、数据库、模块、测试文档与 backend spec；两轮独立复验发现的 P1/P2 均已修复并关闭。
+
+### Testing
+
+- `go test -race -count=20 ./internal/knowledge/domain ./internal/knowledge/application ./internal/knowledge/adapter/postgres`
+- 全新 PostgreSQL：`go test -race -tags=integration -count=1 -p 1 ./...`
+- `go test -race ./...`、`go vet ./...`、`make test`、`go mod tidy -diff`、`git diff --check`
+- `make docker-build`；Compose migrate/API/Worker healthy；`/readyz` 与首页 smoke 通过并清理卷。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 归档 M5-05 后创建并实施 M6-02 Agent：结构化输出、Schema Repair、引用校验、拒答、冲突与模型版本记录。

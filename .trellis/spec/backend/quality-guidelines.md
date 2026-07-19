@@ -111,3 +111,16 @@ go vet ./...
   已完成一轮，后续发布仍需重跑。
 - 统一覆盖率阈值、完整 E2E Fixture 和性能容量基准。
 - License、发布门禁、SBOM 和镜像扫描配置；README 当前仍未确定许可证。
+
+## M5-05 Knowledge Quality Gate
+
+- `RelationAssessment` 与 `RelationType` 必须为不同类型；NEW/LOW_CONFIDENCE 不得产生 Relation 行。
+- Domain 单测覆盖 Topic/Claim/Relation/Conflict 状态机、Applicability canonicalization、端点兼容矩阵、
+  对称规范化、Evidence hash 和 Conflict fingerprint，关键纯函数执行 `-race -count=20`。
+- Application/Repository 测试覆盖 Provenance/Confirmation fail-closed、Workspace 隔离、幂等重放、CAS、
+  同事务 Confirm/OpenConflict、损坏对象 readback 和批量无 N+1。
+- PostgreSQL integration 覆盖 00017 Up/Down guard、复合约束、deferred constraints、对称并发去重和
+  response-loss replay；模型评测、文档或 Fake 不能替代真实数据库证据。
+- 回归至少覆盖 Ingestion SourceSpan、Retrieval Search/Evidence、Change Control、Workflow；本任务不新增
+  空壳 HTTP/OpenAPI，也不得把 Workspace 隔离误报为 M10 Auth 已完成。
+- 提交前主 Agent 必须执行 go-review、sql-code-review、通用 review 和独立只读审查。

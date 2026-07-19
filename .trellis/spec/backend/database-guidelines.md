@@ -85,6 +85,36 @@ git diff --check
 - 连接池参数、迁移执行入口和 Testcontainers 版本。
 - 中文 FTS 配置、向量维度、HNSW 参数以及 50 万数据容量结果。
 
+## M5-05 Knowledge Domain Contract
+
+### Scope
+
+- Migration `00017_knowledge_domain.sql` owns Topic、Claim、Claim Source、Relation、Relation Evidence、
+  Conflict、Conflict Member 和 Knowledge Command Receipt。
+- PostgreSQL 保存领域事实和确认历史；Graph/Collection 只保存可重建投影，不形成 Relation 第二事实源。
+
+### Persistence Rules
+
+- 不建通用 Evidence 表或可独立写入的 `topic_claim`；Topic–Claim 归属只使用 `BELONGS_TO` Relation。
+- Claim Source/Relation Evidence 必须同时保存 `source_version_id + source_span_id`，并通过固定 JOIN/trigger
+  证明 Workspace → Source Version → Content Artifact → Source Version Projection → Source Span。
+- Relation NodeType 首期只允许 `TOPIC|CLAIM`；兼容矩阵在 Domain 中唯一维护，数据库函数镜像最小防线。
+- `DUPLICATES|CONFLICTS_WITH` 写入前 canonicalize，数据库唯一键防止正反/并发重复。
+- Confirmed Claim 至少一条 SUPPORTS Claim Source；Confirmed Relation 至少一条可达 Evidence 和有效确认。
+- Claim 退出 SUGGESTED/CONFIRMED/DISPUTED 生命周期前，所有关联的 SUGGESTED/CONFIRMED Relation 必须先进入历史状态；提交时 deferred constraint 兜底。
+- Topic 退出 ACTIVE 前遵循同一规则；Relation 激活时使用与生命周期 UPDATE 冲突的端点共享锁，禁止并发创建有效边绕过 deferred 检查。
+- Conflict 在提交时至少两个不同 Claim；OpenConflict 与 Member 插入、Claim→DISPUTED 在同一事务。
+- Applicability 是版本化 canonical JSON object；数据库验证 JSON 类型/hash 格式，语义比较由 Domain 负责。
+- 可变聚合 `version=expected+1`；命令 receipt 只保存 request hash 与 aggregate binding，不缓存第二份响应事实。
+- 有任一 Knowledge 业务数据时 `00017 Down` 必须返回 SQLSTATE `55000`；发布回滚保留数据并 forward fix。
+
+### Required Tests
+
+- 空库/重复 Up、空数据 Down→Up、有数据 guarded Down、迁移版本和旧 Down 顺序。
+- Provenance 错绑/跨 Workspace、自环/非法端点组合、无 Evidence Confirm、Conflict 少成员。
+- 对称正反/并发去重、CAS、同幂等键不同请求、response-loss replay 和事务半失败回滚。
+- 批量 Claims/Relations/Evidence 查询使用显式列、固定上限和稳定排序，不逐 owner N+1。
+
 ## M5 Ingestion Projection Contract
 
 ### 1. Scope / Trigger

@@ -52,9 +52,21 @@ _Avoid_: 标签、目录
 带适用条件、可以被证据支持或反驳的最小知识主张。
 _Avoid_: 摘要、Chunk、观点标签
 
+**Applicability**:
+Claim 或 Relation 成立所依赖的适用条件；条件相同、重叠或不同必须被明确表达。
+_Avoid_: 模型置信度、检索过滤器
+
+**Claim Source**:
+支持或反驳 Claim 的可追溯来源绑定。
+_Avoid_: 通用 Evidence、Search Evidence
+
 **Relation**:
 两个知识节点之间带明确类型的关系。
 _Avoid_: 向量相似、图谱边候选
+
+**Relation Assessment**:
+对新旧 Claim 关系作出的 NEW、COMPLEMENTARY、DUPLICATE、CONFLICT 或 LOW_CONFIDENCE 分类判断；它不是正式 Relation。
+_Avoid_: Relation Type、图谱边
 
 **Relation Evidence**:
 支撑 Relation 的来源、理由、适用条件和确认信息。

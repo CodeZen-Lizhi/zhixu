@@ -191,6 +191,9 @@ classDiagram
       +SourceSpan
       +EmbeddingVersion
     }
+    class KnowledgeNode {
+      <<abstract>>
+    }
     class Topic
     class Claim {
       +Statement
@@ -230,8 +233,9 @@ classDiagram
     Document "1" --> "*" ArticleRevision
     ArticleRevision "1" --> "*" Chunk
     Chunk "*" --> "*" Claim : supports
-    Topic "*" --> "*" Claim : organizes
-    Relation "*" --> "2" Claim : connects
+    KnowledgeNode <|-- Topic
+    KnowledgeNode <|-- Claim
+    Relation "*" --> "2" KnowledgeNode : connects
     Conflict "1" --> "2..*" Claim
     Proposal "*" --> "*" Document : changes
     Proposal "1" --> "0..*" Approval
@@ -243,6 +247,9 @@ classDiagram
 ```
 
 ## 5. 关系类型语义
+
+关系分析先产生 `Relation Assessment`：`NEW`、`COMPLEMENTARY`、`DUPLICATE`、`CONFLICT`、`LOW_CONFIDENCE`。
+它是判断结果，不是正式 RelationType；`NEW` 和 `LOW_CONFIDENCE` 不得落为数据库关系边。
 
 | 类型 | source → target 语义 | 对称 |
 |---|---|---|
@@ -256,6 +263,11 @@ classDiagram
 | PREREQUISITE_OF | source 是理解 target 的前置知识 | 否 |
 | VERSION_OF | source 是 target 的版本 | 否 |
 | IMPACTS | source 变化可能影响 target | 否 |
+
+M5-05 首个端点注册表只包含 Topic 和 Claim：CITES、DERIVED_FROM、SUPPORTS、CONFLICTS_WITH 为
+Claim→Claim，BELONGS_TO 为 Claim→Topic；COMPLEMENTS、DUPLICATES、PREREQUISITE_OF、VERSION_OF
+只允许同类型端点；IMPACTS 允许当前两种类型的组合。Topic 与 Claim 的正式归属只使用 BELONGS_TO，
+不维护可独立写入的第二套关联事实。
 
 ## 6. 核心状态机
 
@@ -291,6 +303,24 @@ stateDiagram-v2
     Disputed --> Superseded
     Confirmed --> Superseded
     Confirmed --> Deprecated
+    Confirmed --> Invalid
+    Disputed --> Deprecated
+    Disputed --> Invalid
+```
+
+### Relation
+
+```mermaid
+stateDiagram-v2
+    [*] --> Suggested
+    Suggested --> Confirmed
+    Suggested --> Rejected
+    Confirmed --> Stale
+    Confirmed --> Deprecated
+    Stale --> Confirmed
+    Stale --> Rejected
+    Stale --> Deprecated
+    Rejected --> Suggested: evidence changed
 ```
 
 ### Conflict
@@ -302,6 +332,7 @@ stateDiagram-v2
     Investigating --> ResolutionProposed
     ResolutionProposed --> Resolved
     ResolutionProposed --> AcceptedDivergence
+    ResolutionProposed --> Investigating
     Investigating --> Deferred
     Deferred --> Investigating
 ```
@@ -323,10 +354,12 @@ Ingestion 在 CHUNKED 后发布可索引事件；`IndexRevision/IndexChunks` 属
 
 ### Knowledge
 
-- SuggestClaims。
-- ClassifyRelation。
-- RegisterConflict。
-- ResolveConflict。
+- SuggestClaim / ConfirmClaim。
+- AssessRelation / SuggestRelation / ConfirmRelation。
+- OpenConflict / TransitionConflict / ResolveConflict。
+
+Applicability 使用版本化 canonical value；领域层只自动判断完全相同的条件。条件仅“相近/重叠”时，
+必须携带可追踪的 reviewed overlap 理由；JSON 不相等不能自动推断冲突或条件分歧。
 
 ### Change Control
 

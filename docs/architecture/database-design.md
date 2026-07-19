@@ -26,10 +26,11 @@ erDiagram
     WORKSPACE ||--o{ DOCUMENT : owns
     DOCUMENT ||--o{ ARTICLE_REVISION : revisions
     ARTICLE_REVISION ||--o{ CHUNK : chunks
-    ARTICLE_REVISION ||--o{ CLAIM_SOURCE : supports
+    SOURCE_VERSION ||--o{ CLAIM_SOURCE : selects_provenance
+    SOURCE_VERSION ||--o{ RELATION_EVIDENCE : selects_provenance
     CLAIM ||--o{ CLAIM_SOURCE : proven_by
-    TOPIC ||--o{ TOPIC_CLAIM : groups
-    CLAIM ||--o{ TOPIC_CLAIM : belongs
+    TOPIC ||--o{ RELATION : endpoint
+    CLAIM ||--o{ RELATION : endpoint
     RELATION ||--o{ RELATION_EVIDENCE : evidenced_by
     CONFLICT ||--o{ CONFLICT_MEMBER : contains
     CLAIM ||--o{ CONFLICT_MEMBER : participates
@@ -237,8 +238,16 @@ topic：
 - workspace_id。
 - name。
 - normalized_name。
-- aliases JSONB。
-- status。
+- description。
+- status：ACTIVE、MERGED、DEPRECATED。
+- merged_into_topic_id nullable。
+- version。
+
+topic_alias：
+
+- topic_id/workspace_id。
+- alias/normalized_alias。
+- Workspace 内规范化名称和别名不得互相冲突；记录不可变。
 
 claim：
 
@@ -251,29 +260,44 @@ claim：
 - confidence_factors JSONB。
 - version。
 
+claim_source：
+
+- claim_id/workspace_id。
+- source_version_id/source_span_id。
+- support_type：SUPPORTS、REFUTES。
+- reason/evidence_hash/model_run_ref。
+- Claim Source 不复制正文、Search score 或当前工作树路径；插入时验证完整 Provenance 绑定。
+
 ### relation / relation_evidence
 
 relation：
 
 - id。
 - workspace_id。
-- source_type/source_id。
-- target_type/target_id。
+- source_node_type/source_node_id。
+- target_node_type/target_node_id。
 - relation_type。
 - status。
-- confidence。
+- confidence_score。
+- fingerprint/evidence_fingerprint。
+- confirmation_method/confirmation_ref；REJECTED 可保留历史确认，Evidence 保存各自确认来源。
 - valid_from/valid_to。
 - version。
 
 relation_evidence：
 
 - id。
-- relation_id。
-- source_span_ref。
+- relation_id/workspace_id。
+- source_version_id/source_span_id。
 - reason。
 - evidence_hash。
+- applicability/applicability_schema_version/applicability_hash。
 - model_run_ref。
+- confirmation_method。
 - confirmed_by。
+
+Claim Source 与 Relation Evidence 是不同语义实体，但共用一套 Workspace → Source Version → Content Artifact →
+Source Version Projection → Source Span 绑定验证。Search Evidence 和 Proposal Evidence 不写入这两张表。
 
 对称关系规范化：
 
@@ -281,11 +305,20 @@ relation_evidence：
 
 多态引用策略：
 
-- `source_type/source_id` 与 `target_type/target_id` 是受限的稳定领域引用；`*_type` 只能来自注册的 Relation Node Type（例如 Topic、Claim、Document、Article Revision），不能接受任意表名、路径或模型文本。
+- `source_node_type/source_node_id` 与 `target_node_type/target_node_id` 是受限的稳定领域引用。M5-05 只注册 `TOPIC`、`CLAIM`；Document、Article Revision 等必须在真实领域对象和查询契约落地后扩展，不能接受任意表名、路径或模型文本。
 - PostgreSQL 不能用一个普通外键直接约束多态目标，因此 Knowledge Module 在同一事务内校验目标存在、属于同一 Workspace、处于允许的生命周期状态，并校验 relation_type 与两端类型的兼容性。
 - 数据库负责非空、类型枚举/检查、Workspace 归属、稳定排序后的唯一性和基础版本约束；模块负责语义合法性、禁止自环、证据要求和状态转移。每种类型的查询必须使用固定代码路径，禁止把 type 拼进 SQL 标识符。
 - 目标对象不物理删除；归档、替代或失效通过生命周期状态表达。目标失效时 Relation 保留历史并生成 Health Issue，不得留下无来源的“有效”边。
+- Claim 进入 SUPERSEDED、DEPRECATED 或 INVALID 前，相关 SUGGESTED/CONFIRMED Relation 必须先在同一事务或更早提交中进入历史状态；数据库以 deferred constraint 阻止有效 Relation 指向失效 Claim。
+- Topic 进入 MERGED 或 DEPRECATED 前同样必须先退休相关有效 Relation；Relation 创建/重新激活以 `FOR SHARE` 锁定端点，与 Topic/Claim 生命周期更新串行，避免并发穿透。
 - 若未来需要数据库级多态外键，必须先证明约束缺口并新增稳定对象注册表/等价方案；M0 不锁最终 SQL 形态。
+
+端点兼容矩阵：
+
+- CITES、DERIVED_FROM、SUPPORTS、CONFLICTS_WITH：Claim → Claim。
+- BELONGS_TO：Claim → Topic；它是 Topic–Claim 正式归属的唯一写入事实。
+- COMPLEMENTS、DUPLICATES、PREREQUISITE_OF、VERSION_OF：同类型 Topic → Topic 或 Claim → Claim。
+- IMPACTS：当前已注册 Topic/Claim 的任意组合。
 
 ### conflict
 
@@ -296,6 +329,10 @@ relation_evidence：
 - severity。
 - summary。
 - resolution。
+- resolution_reference/resolved_at。
+- applicability_assessment：EXACT、REVIEWED_OVERLAP。
+- applicability_hash（EXACT）或 overlap_reason（REVIEWED_OVERLAP）。
+- fingerprint。
 - version。
 
 conflict_member：
@@ -304,6 +341,12 @@ conflict_member：
 - claim_id。
 - applicability。
 - position_summary。
+
+Conflict fingerprint 绑定 Workspace、Applicability Assessment，以及排序后的 `Claim ID + Applicability Hash`
+成员集合；未终结的相同 fingerprint 只能有一个。提交时至少两个不同成员；OpenConflict 与成员写入、
+Claim→DISPUTED 在同一事务。
+未终结 Conflict 的成员 Claim 必须持续保持 DISPUTED；Claim 进入 CONFIRMED、SUPERSEDED、DEPRECATED 或
+INVALID 前，必须在同一事务或更早提交中终结所有相关 Conflict，数据库以 deferred constraint 在提交时校验。
 
 ### proposal / proposal_revision / approval
 

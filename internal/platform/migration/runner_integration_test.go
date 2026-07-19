@@ -40,7 +40,7 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 16 || applied != 16 {
+	if maxVersion != 17 || applied != 17 {
 		t.Fatalf("project history max=%d applied=%d", maxVersion, applied)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE tablename LIKE 'river_%' AND schemaname <> 'workflow'`).Scan(&wrongSchema); err != nil {
@@ -67,6 +67,7 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	insertRuntimeIdentityFixture(t, ctx, pool)
+	downEmptyKnowledgeMigration(t, ctx, provider)
 	// 00016 has no cache, V2 Delivery, or Hybrid Index data in this fixture.
 	if _, err := provider.Down(ctx); err != nil {
 		t.Fatalf("00016 Down rejected an empty Embedding Hybrid Search schema: %v", err)
@@ -129,6 +130,7 @@ INSERT INTO retrieval.embedding_version(
 	if err != nil {
 		t.Fatal(err)
 	}
+	downEmptyKnowledgeMigration(t, ctx, provider)
 	if _, err := provider.Down(ctx); err != nil {
 		t.Fatalf("00016 Down rejected empty Embedding Hybrid Search schema: %v", err)
 	}
@@ -213,7 +215,9 @@ INSERT INTO retrieval.embedding_cache(workspace_id,embedding_version_id,content_
 		_, err = pool.Exec(ctx, `DELETE FROM retrieval.embedding_cache
 			WHERE workspace_id='91000000-0000-4000-8000-000000000001' AND content_hash=repeat('a',64)`)
 		assertPostgresCode(t, err, "55000")
-		_, err = migrationProvider(t, pool).Down(ctx)
+		provider := migrationProvider(t, pool)
+		downEmptyKnowledgeMigration(t, ctx, provider)
+		_, err = provider.Down(ctx)
 		assertPostgresCode(t, err, "55000")
 	})
 
@@ -243,7 +247,9 @@ INSERT INTO retrieval.index_version(
 );`); err != nil {
 			t.Fatal(err)
 		}
-		_, err = migrationProvider(t, pool).Down(ctx)
+		provider := migrationProvider(t, pool)
+		downEmptyKnowledgeMigration(t, ctx, provider)
+		_, err = provider.Down(ctx)
 		assertPostgresCode(t, err, "55000")
 	})
 
@@ -273,7 +279,9 @@ INSERT INTO retrieval.reindex_delivery(
 SET session_replication_role = origin;`); err != nil {
 			t.Fatal(err)
 		}
-		_, err = migrationProvider(t, pool).Down(ctx)
+		provider := migrationProvider(t, pool)
+		downEmptyKnowledgeMigration(t, ctx, provider)
+		_, err = provider.Down(ctx)
 		assertPostgresCode(t, err, "55000")
 	})
 }
@@ -382,6 +390,7 @@ INSERT INTO retrieval.index_manifest_source(
 			t.Fatal(err)
 		}
 		provider := migrationProvider(t, pool)
+		downEmptyKnowledgeMigration(t, ctx, provider)
 		if _, err := provider.Down(ctx); err != nil {
 			t.Fatalf("00016 Down rejected V1 source manifest data: %v", err)
 		}
@@ -417,6 +426,7 @@ SET session_replication_role = origin;`); err != nil {
 			t.Fatal(err)
 		}
 		provider := migrationProvider(t, pool)
+		downEmptyKnowledgeMigration(t, ctx, provider)
 		if _, err := provider.Down(ctx); err != nil {
 			t.Fatalf("00016 Down rejected V1 delivery data: %v", err)
 		}
@@ -455,6 +465,7 @@ INSERT INTO retrieval.index_version(
 			t.Fatal(err)
 		}
 		provider := migrationProvider(t, pool)
+		downEmptyKnowledgeMigration(t, ctx, provider)
 		if _, err := provider.Down(ctx); err != nil {
 			t.Fatalf("00016 Down rejected V1 source-bound index: %v", err)
 		}
@@ -607,6 +618,13 @@ func migrationProvider(t *testing.T, pool *pgxpool.Pool) *goose.Provider {
 	return provider
 }
 
+func downEmptyKnowledgeMigration(t *testing.T, ctx context.Context, provider *goose.Provider) {
+	t.Helper()
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00017 Down rejected empty Knowledge Domain schema: %v", err)
+	}
+}
+
 func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
@@ -623,7 +641,7 @@ func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 16 || applied != 16 {
+	if maxVersion != 17 || applied != 17 {
 		t.Fatalf("adopted history max=%d applied=%d", maxVersion, applied)
 	}
 }

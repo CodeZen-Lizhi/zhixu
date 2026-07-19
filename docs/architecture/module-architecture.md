@@ -115,10 +115,12 @@ Interface：
 Interface：
 
 - ConfirmClaim。
+- AssessRelation。
 - SuggestRelation。
 - ConfirmRelation。
 - OpenConflict。
 - ResolveConflict。
+- BatchGetClaims/Relations/Conflicts。
 
 隐藏：
 
@@ -126,6 +128,11 @@ Interface：
 - 关系不变量。
 - 冲突状态。
 - Provenance 校验。
+- Relation Assessment 到正式命令的映射。
+- NodeType × RelationType 兼容矩阵和对称端点规范化。
+
+Knowledge Module 是 Relation 唯一写入 owner。Graph、Collection、Agent 只能通过公开查询/命令 seam 消费，
+不得直接写 Relation 表或维护可独立写入的 topic_claim。当前文件型 Proposal 也不能用假字段冒充关系审批。
 
 ### Change Control Module
 
@@ -399,4 +406,3 @@ Adapter Contract Test：
 - 新 Artifact：增加 Artifact Type 与 Workflow。
 - 换向量库：替换 Retrieval 内部 Adapter，不改调用者。
 - 引入 Graph DB：仅替换 Graph Query Adapter，正式 Relation 仍由 Knowledge Module 管理。
-
