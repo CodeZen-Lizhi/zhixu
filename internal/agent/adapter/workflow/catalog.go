@@ -7,7 +7,9 @@ import (
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
+	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	foundationstrictjson "github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	toolagent "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/agent"
 )
 
@@ -28,7 +30,7 @@ func DefaultPromptRef() agentdomain.PromptRef {
 	return agentdomain.PromptRef{ID: defaultPromptID, Version: defaultPromptVersion}
 }
 
-// NewRuntimeCatalog 注册四类既有 Schema、Relation Reduced Schema、独立 Tool Request Schema、Prompt 与模型 Profile。
+// NewRuntimeCatalog 注册 Agent/Conversation Workflow 既有与增量 Schema、Relation Reduced Schema、独立 Tool Request Schema、Prompt 与模型 Profile。
 func NewRuntimeCatalog(options CatalogOptions) (*agentapplication.RuntimeCatalog, error) {
 	if options.Model.Validate() != nil || options.Timeout <= 0 || options.MaxOutputTokens <= 0 {
 		return nil, workflowError(foundation.ErrorInvalidInput, ErrorCodeInputInvalid, false, errors.New("agent workflow catalog options are invalid"))
@@ -54,9 +56,12 @@ func NewRuntimeCatalog(options CatalogOptions) (*agentapplication.RuntimeCatalog
 	}{
 		{agentdomain.SchemaRef{ID: agentdomain.RelationAssessmentSchemaID, Version: agentdomain.OutputSchemaVersionV1}, agentdomain.ResultTypeRelationAssessment, relationDecoder},
 		{agentdomain.SchemaRef{ID: agentapplication.RelationAssessmentReducedSchemaID, Version: agentdomain.OutputSchemaVersionV1}, agentdomain.ResultTypeRelationAssessment, reducedRelationDecoder},
+		{agentdomain.SchemaRef{ID: agentdomain.RAGQueryPlanSchemaID, Version: agentdomain.OutputSchemaVersionV1}, agentdomain.ResultTypeRAGQueryPlan, queryPlanDecoder},
 		{agentdomain.SchemaRef{ID: agentdomain.RAGAnswerSchemaID, Version: agentdomain.OutputSchemaVersionV1}, agentdomain.ResultTypeRAGAnswer, ragDecoder},
+		{agentdomain.SchemaRef{ID: agentdomain.RAGAnswerSchemaID, Version: agentdomain.OutputSchemaVersionV2}, agentdomain.ResultTypeRAGAnswer, ragV2Decoder},
 		{agentdomain.SchemaRef{ID: agentdomain.RefusalSchemaID, Version: agentdomain.OutputSchemaVersionV1}, agentdomain.ResultTypeRefusal, refusalDecoder},
 		{agentdomain.SchemaRef{ID: agentdomain.FaithfulnessReviewSchemaID, Version: agentdomain.OutputSchemaVersionV1}, agentdomain.ResultTypeFaithfulnessReview, faithfulnessDecoder},
+		{agentdomain.SchemaRef{ID: conversationdomain.ClarificationSchemaID, Version: conversationdomain.ClarificationSchemaVersionV1}, agentdomain.ResultTypeClarification, clarificationDecoder},
 	}
 	for _, registration := range registrations {
 		document, err := taskSchema(registration.ref, registration.result)
@@ -92,7 +97,7 @@ func taskSchema(ref agentdomain.SchemaRef, resultType string) ([]byte, error) {
 		"properties": map[string]any{
 			"result_type":    map[string]any{"const": resultType},
 			"schema_id":      map[string]any{"const": envelopeSchemaID(ref)},
-			"schema_version": map[string]any{"const": agentdomain.OutputSchemaVersionV1},
+			"schema_version": map[string]any{"const": ref.Version},
 			"model_run_ref":  map[string]any{"type": "string", "format": "uuid"},
 			"payload":        payload,
 		},
@@ -105,17 +110,23 @@ func taskSchema(ref agentdomain.SchemaRef, resultType string) ([]byte, error) {
 }
 
 func taskPayloadSchema(ref agentdomain.SchemaRef) (map[string]any, error) {
-	switch ref.ID {
-	case agentdomain.RelationAssessmentSchemaID:
+	switch {
+	case ref.ID == agentdomain.RelationAssessmentSchemaID && ref.Version == agentdomain.OutputSchemaVersionV1:
 		return relationPayloadSchema(false), nil
-	case agentapplication.RelationAssessmentReducedSchemaID:
+	case ref.ID == agentapplication.RelationAssessmentReducedSchemaID && ref.Version == agentdomain.OutputSchemaVersionV1:
 		return relationPayloadSchema(true), nil
-	case agentdomain.RAGAnswerSchemaID:
+	case ref.ID == agentdomain.RAGQueryPlanSchemaID && ref.Version == agentdomain.OutputSchemaVersionV1:
+		return queryPlanPayloadSchema(), nil
+	case ref.ID == agentdomain.RAGAnswerSchemaID && ref.Version == agentdomain.OutputSchemaVersionV1:
 		return ragPayloadSchema(), nil
-	case agentdomain.RefusalSchemaID:
+	case ref.ID == agentdomain.RAGAnswerSchemaID && ref.Version == agentdomain.OutputSchemaVersionV2:
+		return ragPayloadSchemaV2(), nil
+	case ref.ID == agentdomain.RefusalSchemaID && ref.Version == agentdomain.OutputSchemaVersionV1:
 		return refusalPayloadSchema(), nil
-	case agentdomain.FaithfulnessReviewSchemaID:
+	case ref.ID == agentdomain.FaithfulnessReviewSchemaID && ref.Version == agentdomain.OutputSchemaVersionV1:
 		return faithfulnessPayloadSchema(), nil
+	case ref.ID == conversationdomain.ClarificationSchemaID && ref.Version == conversationdomain.ClarificationSchemaVersionV1:
+		return clarificationPayloadSchema(), nil
 	default:
 		return nil, workflowError(foundation.ErrorInvalidInput, ErrorCodeInputInvalid, false, errors.New("agent task schema is unsupported"))
 	}
@@ -168,6 +179,31 @@ func ragPayloadSchema() map[string]any {
 	)
 }
 
+func ragPayloadSchemaV2() map[string]any {
+	payload := ragPayloadSchema()
+	properties := payload["properties"].(map[string]any)
+	properties["related_topics"] = arraySchema(1, 50, strictObject([]string{"topic_id", "name", "citation_ids"}, map[string]any{
+		"topic_id": uuidSchema(), "name": stringSchema(1, 256), "citation_ids": stringArraySchema(1, 500, 128),
+	}))
+	properties["follow_up_questions"] = stringArraySchema(1, 5, 2048)
+	payload["required"] = []string{"conclusion", "assertions", "citations", "conflict_positions", "conflict_summary", "related_topics", "follow_up_questions"}
+	return payload
+}
+
+func queryPlanPayloadSchema() map[string]any {
+	return strictObject(
+		[]string{"intent", "requires_clarification", "rewrites", "clarification_reason", "clarification_question", "suggested_scopes"},
+		map[string]any{
+			"intent":                 stringSchema(1, 2048),
+			"requires_clarification": map[string]any{"type": "boolean"},
+			"rewrites":               stringArraySchema(0, 3, 8192),
+			"clarification_reason":   stringSchema(0, 2048),
+			"clarification_question": stringSchema(0, 8192),
+			"suggested_scopes":       stringArraySchema(0, 10, 2048),
+		},
+	)
+}
+
 func refusalPayloadSchema() map[string]any {
 	return strictObject(
 		[]string{"reason_code", "summary", "retrieval_scope", "missing_requirements", "suggested_actions"},
@@ -193,6 +229,17 @@ func faithfulnessPayloadSchema() map[string]any {
 				"citation_ids": stringArraySchema(0, 500, 128), "reason": stringSchema(1, 2048),
 			})),
 			"summary": stringSchema(1, 4096),
+		},
+	)
+}
+
+func clarificationPayloadSchema() map[string]any {
+	return strictObject(
+		[]string{"reason", "question", "suggested_scopes"},
+		map[string]any{
+			"reason":           stringSchema(1, 2048),
+			"question":         stringSchema(1, conversationdomain.MaxClarificationQuestionBytes),
+			"suggested_scopes": stringArraySchema(0, 10, 2048),
 		},
 	)
 }
@@ -261,8 +308,22 @@ func reducedRelationDecoder(raw []byte) (json.RawMessage, error) {
 	return append(json.RawMessage(nil), raw...), nil
 }
 
+func queryPlanDecoder(raw []byte) (json.RawMessage, error) {
+	if _, err := agentdomain.DecodeRAGQueryPlan(raw, agentdomain.DefaultDecodeLimits()); err != nil {
+		return nil, err
+	}
+	return append(json.RawMessage(nil), raw...), nil
+}
+
 func ragDecoder(raw []byte) (json.RawMessage, error) {
 	if _, err := agentdomain.DecodeRAGAnswer(raw, agentdomain.DefaultDecodeLimits()); err != nil {
+		return nil, err
+	}
+	return append(json.RawMessage(nil), raw...), nil
+}
+
+func ragV2Decoder(raw []byte) (json.RawMessage, error) {
+	if _, err := agentdomain.DecodeRAGAnswerV2(raw, agentdomain.DefaultDecodeLimits()); err != nil {
 		return nil, err
 	}
 	return append(json.RawMessage(nil), raw...), nil
@@ -277,6 +338,13 @@ func refusalDecoder(raw []byte) (json.RawMessage, error) {
 
 func faithfulnessDecoder(raw []byte) (json.RawMessage, error) {
 	if _, err := agentdomain.DecodeFaithfulnessReview(raw, agentdomain.DefaultDecodeLimits()); err != nil {
+		return nil, err
+	}
+	return append(json.RawMessage(nil), raw...), nil
+}
+
+func clarificationDecoder(raw []byte) (json.RawMessage, error) {
+	if _, err := conversationdomain.DecodeClarification(raw, foundationstrictjson.DefaultLimits()); err != nil {
 		return nil, err
 	}
 	return append(json.RawMessage(nil), raw...), nil

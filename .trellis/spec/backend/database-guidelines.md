@@ -923,6 +923,13 @@ ops.server_event
   Domain 必须在进入 Repository 前拒绝超限，不能让领域有效请求在数据库 CHECK 才失败。
 - Question 正文与历史只存在 Conversation 事实源。Workflow input、Model Call、Server Event 和日志不得复制正文；
   执行上下文最多 8 个已发布 Turn、合计 32 KiB，并由稳定 context hash 绑定。
+- RAG Executor 通过窄 `QuestionExecutionContextLoader` 读取当前 Question、Answer slot 和冻结历史；实现最多执行
+  一次 Question/Answer/Run 联合查询与一次有界历史查询。调用前先拒绝非法或复用的身份与非 canonical hash，
+  读回后必须校验 Workspace/Conversation/Question/Answer/Run/ordinal 完整绑定并重算历史 hash；持久字段彼此相同
+  但与实际历史不一致时仍按 consistency failure 拒绝，不能只信任 Workflow input 或 Question 行中的 hash。
+- RAG Workflow output 只允许 `schema_version/answer_id/publication_status/result_type/model_run_id/result_hash`
+  六字段 canonical receipt；发布状态到结果类型的映射由 Conversation Domain 唯一维护。receipt 不保存 Answer、
+  retrieval summary、Prompt、Evidence、Provider 或 Tool 数据，消费端必须回查 Answer 事实源。
 - Answer 在接收 Question 时预分配为 `pending/version=1`，只允许一次 CAS 发布到
   `completed|refused|clarification_required/version=2`。终态必须绑定同 Workspace 的 Question、Workflow Run、
   terminal Model Run、canonical result bytes/hash 和不可变 retrieval summary；JSONB readback 必须先重建 canonical

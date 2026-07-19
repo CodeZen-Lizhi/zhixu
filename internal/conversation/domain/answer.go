@@ -93,7 +93,7 @@ func ValidateAnswer(answer Answer) error {
 	if _, duplicate := seen[modelRunID]; duplicate {
 		return invalid(ErrorCodeAnswerInvalid, "answer model run identity is reused", nil)
 	}
-	expectedType := answerResultTypeForStatus(answer.PublicationStatus)
+	expectedType := ResultTypeForPublicationStatus(answer.PublicationStatus)
 	if expectedType == "" || answer.ResultType != expectedType {
 		return invalid(ErrorCodeAnswerInvalid, "answer status and result type are inconsistent", nil)
 	}
@@ -195,7 +195,8 @@ func ValidateAnswerPublicationTransition(from, to AnswerPublicationStatus) error
 	return versionConflict(ErrorCodeAnswerTransitionInvalid, "answer publication transition is not allowed")
 }
 
-func answerResultTypeForStatus(status AnswerPublicationStatus) AnswerResultType {
+// ResultTypeForPublicationStatus 返回一个 Answer 发布终态唯一允许的结果类型；非终态或未知状态返回空值。
+func ResultTypeForPublicationStatus(status AnswerPublicationStatus) AnswerResultType {
 	switch status {
 	case AnswerPublicationCompleted:
 		return AnswerResultRAGAnswer

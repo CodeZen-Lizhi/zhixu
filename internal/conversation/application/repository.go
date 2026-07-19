@@ -115,6 +115,30 @@ type PublishedContextQuery struct {
 	ThroughOrdinal int64
 }
 
+// QuestionExecutionContextQuery 绑定一次 RAG Workflow 必须重新加载的持久身份与冻结上下文。
+type QuestionExecutionContextQuery struct {
+	WorkspaceID     foundation.ID
+	WorkflowRunID   foundation.ID
+	ConversationID  foundation.ID
+	QuestionID      foundation.ID
+	AnswerID        foundation.ID
+	QuestionOrdinal int64
+	ContextHash     string
+}
+
+// QuestionExecutionContext 返回当前 Question、Answer slot 与冻结的有界已发布历史。
+type QuestionExecutionContext struct {
+	Question conversationdomain.Question
+	Answer   conversationdomain.Answer
+	History  []conversationdomain.PublishedTurn
+}
+
+// QuestionExecutionContextLoader 是 Agent RAG Executor 读取 Conversation 事实的窄端口。
+type QuestionExecutionContextLoader interface {
+	// LoadQuestionExecutionContext 校验完整持久绑定并重算冻结上下文哈希。
+	LoadQuestionExecutionContext(context.Context, QuestionExecutionContextQuery) (QuestionExecutionContext, error)
+}
+
 // QuestionDispatcher 原子创建或精确重放 Question、Answer、Workflow、Job 与通知。
 type QuestionDispatcher interface {
 	// SubmitQuestion 保证跨 Conversation、Workflow、River 与 Server Event 的单事务提交。

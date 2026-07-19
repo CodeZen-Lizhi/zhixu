@@ -98,7 +98,7 @@ func ValidateQuestion(question Question) error {
 	id, err := foundation.ParseID(string(question.ID))
 	if err != nil || id != question.ID || id == question.Request.WorkspaceID || id == question.Request.ConversationID ||
 		question.Ordinal < 1 || question.ContextThroughOrdinal < 0 || question.ContextThroughOrdinal >= question.Ordinal ||
-		!validLowerHash(question.ContextHash) || !validLowerHash(question.RequestHash) || question.CreatedAt.IsZero() {
+		ValidateContextHash(question.ContextHash) != nil || !validLowerHash(question.RequestHash) || question.CreatedAt.IsZero() {
 		return invalid(ErrorCodeQuestionInvalid, "question identity, context, or lifecycle is invalid", err)
 	}
 	canonical, err := CanonicalizeQuestionRequest(question.Request)

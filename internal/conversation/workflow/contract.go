@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	foundationstrictjson "github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
@@ -30,6 +31,30 @@ const (
 	graphHash     = "f57decff412db222c531384812cb42fce7353b3d41940fe69c53a8734a5528a5"
 )
 
+// PublicationStatus 表示 Workflow receipt 中允许持久化的 Answer 终态。
+type PublicationStatus = conversationdomain.AnswerPublicationStatus
+
+const (
+	// PublicationStatusCompleted 表示 Answer 已发布为正式 RAG 回答。
+	PublicationStatusCompleted = conversationdomain.AnswerPublicationCompleted
+	// PublicationStatusRefused 表示 Answer 已发布为结构化拒答。
+	PublicationStatusRefused = conversationdomain.AnswerPublicationRefused
+	// PublicationStatusClarificationRequired 表示 Answer 已发布为结构化澄清请求。
+	PublicationStatusClarificationRequired = conversationdomain.AnswerPublicationClarificationRequired
+)
+
+// ResultType 表示 Workflow receipt 中允许持久化的最终结果类型。
+type ResultType = conversationdomain.AnswerResultType
+
+const (
+	// ResultTypeRAGAnswer 表示完成态正式回答结果。
+	ResultTypeRAGAnswer = conversationdomain.AnswerResultRAGAnswer
+	// ResultTypeRefusal 表示拒答结果。
+	ResultTypeRefusal = conversationdomain.AnswerResultRefusal
+	// ResultTypeClarification 表示澄清结果。
+	ResultTypeClarification = conversationdomain.AnswerResultClarification
+)
+
 // Input 是 Question Workflow 的最小持久输入；正文和历史必须由执行端重新加载。
 type Input struct {
 	SchemaVersion   int           `json:"schema_version"`
@@ -47,6 +72,25 @@ type persistedInput struct {
 	AnswerID        *foundation.ID `json:"answer_id"`
 	QuestionOrdinal *int64         `json:"question_ordinal"`
 	ContextHash     *string        `json:"context_hash"`
+}
+
+// OutputReceipt 是 Workflow 节点输出的稳定发布回执；正文和检索细节必须由执行端重新加载。
+type OutputReceipt struct {
+	SchemaVersion     int               `json:"schema_version"`
+	AnswerID          foundation.ID     `json:"answer_id"`
+	PublicationStatus PublicationStatus `json:"publication_status"`
+	ResultType        ResultType        `json:"result_type"`
+	ModelRunID        foundation.ID     `json:"model_run_id"`
+	ResultHash        string            `json:"result_hash"`
+}
+
+type persistedOutputReceipt struct {
+	SchemaVersion     *int               `json:"schema_version"`
+	AnswerID          *foundation.ID     `json:"answer_id"`
+	PublicationStatus *PublicationStatus `json:"publication_status"`
+	ResultType        *ResultType        `json:"result_type"`
+	ModelRunID        *foundation.ID     `json:"model_run_id"`
+	ResultHash        *string            `json:"result_hash"`
 }
 
 // RegisteredDefinition 返回带稳定 Graph Hash 的单节点 RAG Definition。
@@ -97,6 +141,41 @@ func DecodeInput(raw json.RawMessage) (Input, error) {
 	return input, nil
 }
 
+// EncodeOutputReceipt 校验并编码不含正文、检索摘要或 Provider 数据的 canonical 发布回执。
+func EncodeOutputReceipt(output OutputReceipt) (json.RawMessage, error) {
+	if err := validateOutputReceipt(output); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(output)
+	if err != nil {
+		return nil, outputContractError(err)
+	}
+	return encoded, nil
+}
+
+// DecodeOutputReceipt 严格拒绝 unknown、duplicate、trailing、null 与不一致的发布回执。
+func DecodeOutputReceipt(raw json.RawMessage) (OutputReceipt, error) {
+	limits := foundationstrictjson.DefaultLimits()
+	limits.MaxDocumentBytes = maxInputBytes
+	limits.MaxStringBytes = 128
+	limits.MaxArrayItems = 0
+	limits.MaxObjectFields = 6
+	persisted, err := foundationstrictjson.DecodeObject[persistedOutputReceipt](raw, limits, nil)
+	if err != nil || persisted.SchemaVersion == nil || persisted.AnswerID == nil || persisted.PublicationStatus == nil ||
+		persisted.ResultType == nil || persisted.ModelRunID == nil || persisted.ResultHash == nil {
+		return OutputReceipt{}, outputContractError(err)
+	}
+	output := OutputReceipt{
+		SchemaVersion: *persisted.SchemaVersion, AnswerID: *persisted.AnswerID,
+		PublicationStatus: *persisted.PublicationStatus, ResultType: *persisted.ResultType,
+		ModelRunID: *persisted.ModelRunID, ResultHash: *persisted.ResultHash,
+	}
+	if err := validateOutputReceipt(output); err != nil {
+		return OutputReceipt{}, err
+	}
+	return output, nil
+}
+
 func validateInput(input Input) error {
 	if input.SchemaVersion != InputSchemaVersion || input.QuestionOrdinal < 1 || !validHash(input.ContextHash) {
 		return contractError(errors.New("RAG workflow input version, ordinal, or context hash is invalid"))
@@ -109,6 +188,28 @@ func validateInput(input Input) error {
 		}
 		if _, duplicate := seen[id]; duplicate {
 			return contractError(errors.New("RAG workflow input identity is reused"))
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+func validateOutputReceipt(output OutputReceipt) error {
+	if output.SchemaVersion != OutputSchemaVersion || !validHash(output.ResultHash) {
+		return outputContractError(errors.New("RAG workflow output version or result hash is invalid"))
+	}
+	expectedType := conversationdomain.ResultTypeForPublicationStatus(output.PublicationStatus)
+	if expectedType == "" || output.ResultType != expectedType {
+		return outputContractError(errors.New("RAG workflow output publication status and result type are inconsistent"))
+	}
+	seen := make(map[foundation.ID]struct{}, 2)
+	for _, id := range []foundation.ID{output.AnswerID, output.ModelRunID} {
+		parsed, err := foundation.ParseID(string(id))
+		if err != nil || parsed != id {
+			return outputContractError(errors.New("RAG workflow output identity is invalid"))
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return outputContractError(errors.New("RAG workflow output identity is reused"))
 		}
 		seen[id] = struct{}{}
 	}
@@ -128,4 +229,11 @@ func contractError(cause error) error {
 		cause = errors.New("RAG workflow input is invalid")
 	}
 	return foundation.NewError(foundation.ErrorInvalidInput, "CONVERSATION_WORKFLOW_INPUT_INVALID", false, cause)
+}
+
+func outputContractError(cause error) error {
+	if cause == nil {
+		cause = errors.New("RAG workflow output is invalid")
+	}
+	return foundation.NewError(foundation.ErrorInvalidInput, "CONVERSATION_WORKFLOW_OUTPUT_INVALID", false, cause)
 }

@@ -859,3 +859,36 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 实施 T07 Query Plan/RAG Workflow output receipt、严格 catalog 注册与 Conversation execution-context loader。
+
+
+## Session 26: M6-04 RAG Workflow 契约与执行上下文检查点
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T07）
+**Branch**: `dev`
+
+### Summary
+
+完成 Conversation RAG Workflow 的严格发布回执、PLAN/RAG v2/Clarification Runtime Catalog 注册，以及从持久 Question/Answer/Workflow 事实恢复冻结执行上下文的窄端口。
+
+### Main Changes
+
+- Workflow output 只保存六字段 canonical receipt；Answer 发布状态到结果类型由 Conversation Domain 唯一维护，不复制正文、检索摘要或 Provider 数据。
+- Runtime Catalog 保留全部既有 v1 Schema，并精确新增 `agent.rag-query-plan/v1`、`agent.rag-answer/v2` 与 `conversation.clarification/v1`；每个 envelope 的 `schema_version` 绑定精确 `SchemaRef.Version`。
+- `QuestionExecutionContextLoader` 使用一次 Question/Answer/Run 联合查询和一次有界历史查询，恢复 scope、depth、format、当前 Question 与最多 8 Turn/32 KiB 历史。
+- Loader 校验 Workspace/Conversation/Question/Answer/Run/ordinal/hash 完整绑定，并重算实际持久历史 hash；字段彼此一致但历史被篡改时仍 fail closed。
+
+### Testing
+
+- `go test -race -count=1 ./internal/agent/... ./internal/conversation/...`
+- 真实 PostgreSQL：`go test -race -tags=integration -count=1 -p 1 ./internal/conversation/... ./internal/agent/adapter/workflow`
+- `go vet ./internal/conversation/... ./internal/agent/...`、`go mod tidy -diff`、`git diff --check`
+- 主 Agent 执行 Trellis、Go、SQL 与通用五轴审查，修复状态/结果类型重复映射并补齐三终态回执、精确两次数据库调用断言；独立只读审查未发现 P0-P2。
+
+### Status
+
+[OK] M6-04 T07 completed; T08-T17 pending.
+
+### Next Steps
+
+- 实施 T08 retrieval-first Query Plan 与 RAG Executor，保持 Search 直接走 Retrieval Application seam，并把终态原子发布留给 T09 finalizer。

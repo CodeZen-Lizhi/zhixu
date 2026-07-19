@@ -19,6 +19,14 @@ const (
 	maxContextAssistantBytes = 16 * 1024
 )
 
+// ValidateContextHash 校验 Workflow 与 Question 共享的 canonical SHA-256 上下文哈希。
+func ValidateContextHash(value string) error {
+	if !validLowerHash(value) {
+		return invalid(ErrorCodeContextInvalid, "conversation context hash is invalid", nil)
+	}
+	return nil
+}
+
 // PublishedTurn 是 Query Plan 可消费的一组已发布 Question/Answer 文本投影。
 type PublishedTurn struct {
 	QuestionID    foundation.ID

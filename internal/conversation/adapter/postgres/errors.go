@@ -33,6 +33,10 @@ const (
 	ErrorCodeQuestionConversationArchived = "CONVERSATION_QUESTION_CONVERSATION_ARCHIVED"
 	// ErrorCodeQuestionDispatchCorrupt 表示 Question 到 Workflow/Job 的持久绑定不完整。
 	ErrorCodeQuestionDispatchCorrupt = "CONVERSATION_QUESTION_DISPATCH_CORRUPT"
+	// ErrorCodeExecutionContextInvalid 表示 Agent 请求的 Conversation 执行绑定不合法。
+	ErrorCodeExecutionContextInvalid = "CONVERSATION_EXECUTION_CONTEXT_INVALID"
+	// ErrorCodeExecutionContextCorrupt 表示持久 Question、Answer、Workflow 或历史哈希绑定损坏。
+	ErrorCodeExecutionContextCorrupt = "CONVERSATION_EXECUTION_CONTEXT_CORRUPT"
 	// ErrorCodePersistenceInvalid 表示调用方提供的持久化事实不合法。
 	ErrorCodePersistenceInvalid = "CONVERSATION_PERSISTENCE_INVALID"
 	// ErrorCodePersistenceCorrupt 表示数据库读回事实违反领域不变量。
