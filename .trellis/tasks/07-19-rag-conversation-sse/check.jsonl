@@ -1,0 +1,8 @@
+{"file": ".trellis/tasks/07-19-rag-conversation-sse/prd.md", "reason": "Verify every acceptance criterion"}
+{"file": ".trellis/tasks/07-19-rag-conversation-sse/design.md", "reason": "Verify fact-source and compatibility decisions"}
+{"file": ".trellis/tasks/07-19-rag-conversation-sse/implement.md", "reason": "Verify all task gates and rollback points"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Go/backend quality gate"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Migration, SQL and concurrency review"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Frontend behavior and build review"}
+{"file": "docs/architecture/api-and-events.md", "reason": "REST/SSE contract compliance"}
+{"file": "docs/product/PRD.md", "reason": "Product requirement completeness"}

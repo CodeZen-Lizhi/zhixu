@@ -36,7 +36,8 @@
     "07-17-retrieval-indexing-search",
     "07-19-knowledge-domain",
     "07-19-agent-structured-output-citation",
-    "07-19-tool-registry-security"
+    "07-19-tool-registry-security",
+    "07-19-rag-conversation-sse"
   ],
   "parent": null,
   "relatedFiles": [],

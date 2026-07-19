@@ -165,6 +165,26 @@ Agent 或 Workflow 对精确版本 Tool Contract 的一次受控调用；绑定�
 Schema、状态和稳定 receipt。`workflow.tool_call` 不保存 raw Prompt、参数/输出或 Credential。
 _Avoid_: 任意函数调用、模型文本指令、普通日志、Write Authorization
 
+**Conversation**:
+一组按顺序发生的短期 RAG 问答上下文；只用于当前会话消歧和查询改写，不自动成为长期 Memory 或正式知识。
+_Avoid_: Review Session、Workflow Run、Memory
+
+**Question**:
+用户在 Conversation 中提交、并绑定一次 Answer Workflow 的不可变问题事实。
+_Avoid_: 通用 Message、Prompt、Search Query
+
+**Answer**:
+通过 Citation 与 Faithfulness 门禁后发布的 RAG 结果，或按稳定原因发布的 Refusal；执行中草稿不是 Answer。
+_Avoid_: 模型原始响应、流式草稿、Workflow Output
+
+**Clarification**:
+当 Question 的语义或范围无法从显式 Scope 和当前 Conversation 合理确定时，系统向用户发布的结构化补充信息请求；它既不是 Answer，也不是证据不足 Refusal。
+_Avoid_: Error、Refusal、Human Task
+
+**Answer Feedback**:
+用户对已发布 Answer 或其 Citation 提交的评测事实；用于 Evaluation，不直接修改 Answer 或正式知识。
+_Avoid_: Approval、Proposal、Review Score
+
 **Memory**:
 用户确认的长期偏好，或具有生命周期的任务情景信息。
 _Avoid_: Claim、聊天历史、知识事实

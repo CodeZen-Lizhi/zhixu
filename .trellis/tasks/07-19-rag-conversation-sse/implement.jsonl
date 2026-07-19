@@ -1,0 +1,8 @@
+{"file": ".trellis/tasks/07-19-rag-conversation-sse/prd.md", "reason": "M6-04 requirements and acceptance criteria"}
+{"file": ".trellis/tasks/07-19-rag-conversation-sse/design.md", "reason": "Chosen cross-layer architecture and contracts"}
+{"file": ".trellis/tasks/07-19-rag-conversation-sse/implement.md", "reason": "Ordered implementation and verification plan"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Database to API to frontend data-flow rules"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "PostgreSQL migration and transaction requirements"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Problem, retry and SSE error semantics"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Strict API and SSE decoder ownership"}
+{"file": "docs/architecture/workflows/04-rag-question-answering.md", "reason": "Authoritative RAG workflow semantics"}
