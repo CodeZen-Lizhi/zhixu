@@ -725,7 +725,7 @@ Applicability v1、Provenance、确认、状态机、端点兼容、Conflict 和
 - 归档 M5-05 后创建并实施 M6-02 Agent：结构化输出、Schema Repair、引用校验、拒答、冲突与模型版本记录。
 
 
-## Session 20: 完成 M6-02 Agent 结构化输出与引用闭环
+## Session 22: 完成 M6-02 Agent 结构化输出与引用闭环
 
 **Date**: 2026-07-19
 **Task**: 完成 M6-02 Agent 结构化输出与引用闭环
