@@ -723,3 +723,36 @@ Applicability v1、Provenance、确认、状态机、端点兼容、Conflict 和
 ### Next Steps
 
 - 归档 M5-05 后创建并实施 M6-02 Agent：结构化输出、Schema Repair、引用校验、拒答、冲突与模型版本记录。
+
+
+## Session 20: 完成 M6-02 Agent 结构化输出与引用闭环
+
+**Date**: 2026-07-19
+**Task**: 完成 M6-02 Agent 结构化输出与引用闭环
+**Branch**: `dev`
+
+### Summary
+
+交付严格四类 Schema、INITIAL/REPAIR/REDUCED、完整 Citation tuple、Knowledge Eligibility 与 Formal Claim、Disputed Conflict disclosure、Faithfulness Review、可查询 Model Run/Call 实际版本、真实 PostgreSQL/Workflow/Eval/Docker 门禁；两轮独立复验关闭全部 P1/P2，并归档 M6-02。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b56cd32` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

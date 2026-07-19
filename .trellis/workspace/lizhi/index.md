@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 19
+- **Total Sessions**: 20
 - **Last Active**: 2026-07-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~642 | Active |
+| `journal-1.md` | ~758 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 20 | 2026-07-19 | 完成 M6-02 Agent 结构化输出与引用闭环 | `b56cd32` | `dev` |
 | 19 | 2026-07-19 | 完成 M6-C Embedding 与混合检索 | `03b199c` | `dev` |
 | 18 | 2026-07-19 | 完成 M6-B Reindex Consumer | `b765075` | `dev` |
 | 17 | 2026-07-18 | 完成 M6-A Retrieval Index Foundation | `a88a5ce` | `dev` |
