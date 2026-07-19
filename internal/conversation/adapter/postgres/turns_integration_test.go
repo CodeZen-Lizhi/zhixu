@@ -275,6 +275,11 @@ func seedPublishedTurn(
 		result.Document, result.Hash, summary, publishedAt); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow.run SET
+		status='succeeded',version=version+1,updated_at=$2,completed_at=$2 WHERE id=$1`,
+		string(fixture.runID(ordinal)), publishedAt.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func seedWorkflowRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture conversationRuntimeFixture, ordinal int64, at time.Time) {

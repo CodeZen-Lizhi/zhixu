@@ -13,21 +13,24 @@ import (
 )
 
 const (
-	errorCodeServiceUnavailable = "CONVERSATION_SERVICE_UNAVAILABLE"
-	errorCodeRequestInvalid     = "CONVERSATION_REQUEST_INVALID"
-	errorCodeResultInconsistent = "CONVERSATION_RESULT_INCONSISTENT"
+	errorCodeServiceUnavailable    = "CONVERSATION_SERVICE_UNAVAILABLE"
+	errorCodeSubmissionUnavailable = "CONVERSATION_QUESTION_SUBMISSION_UNAVAILABLE"
+	errorCodeRequestInvalid        = "CONVERSATION_REQUEST_INVALID"
+	errorCodeResultInconsistent    = "CONVERSATION_RESULT_INCONSISTENT"
 )
 
 // Dependencies 是 Conversation Application Service 的显式端口集合。
 type Dependencies struct {
-	Repository Repository
-	IDs        foundation.IDGenerator
-	Clock      foundation.Clock
+	Repository         Repository
+	QuestionDispatcher QuestionDispatcher
+	IDs                foundation.IDGenerator
+	Clock              foundation.Clock
 }
 
 // Service 编排 Conversation 命令和查询，不复制 Workflow 或 Answer 状态机。
 type Service struct {
 	repository Repository
+	questions  QuestionDispatcher
 	ids        foundation.IDGenerator
 	clock      foundation.Clock
 }
@@ -37,7 +40,10 @@ func NewService(dependencies Dependencies) (*Service, error) {
 	if dependencies.Repository == nil || dependencies.IDs == nil || dependencies.Clock == nil {
 		return nil, serviceUnavailable()
 	}
-	return &Service{repository: dependencies.Repository, ids: dependencies.IDs, clock: dependencies.Clock}, nil
+	return &Service{
+		repository: dependencies.Repository, questions: dependencies.QuestionDispatcher,
+		ids: dependencies.IDs, clock: dependencies.Clock,
+	}, nil
 }
 
 // CreateConversation 规范化请求并创建或精确重放一个 Conversation。
@@ -80,6 +86,35 @@ func (service *Service) CreateConversation(ctx context.Context, command CreateCo
 	}
 	if err := validateCreateConversationResult(request, result); err != nil {
 		return CreateConversationResult{}, err
+	}
+	return result, nil
+}
+
+// SubmitQuestion 规范化 Question 命令并交给跨 Schema 原子派发端口。
+func (service *Service) SubmitQuestion(ctx context.Context, command SubmitQuestionCommand) (SubmitQuestionResult, error) {
+	if service == nil || isNilQuestionDispatcher(service.questions) {
+		return SubmitQuestionResult{}, submissionUnavailable()
+	}
+	request, err := conversationdomain.CanonicalizeQuestionRequest(command.Request)
+	if err != nil {
+		return SubmitQuestionResult{}, err
+	}
+	idempotencyKey, err := canonicalIdempotencyKey(command.IdempotencyKey)
+	if err != nil {
+		return SubmitQuestionResult{}, err
+	}
+	requestHash, err := conversationdomain.ComputeQuestionRequestHash(request)
+	if err != nil {
+		return SubmitQuestionResult{}, err
+	}
+	result, err := service.questions.SubmitQuestion(ctx, SubmitQuestionRecord{
+		Request: request, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
+	})
+	if err != nil {
+		return SubmitQuestionResult{}, err
+	}
+	if err := validateSubmitQuestionResult(request, result); err != nil {
+		return SubmitQuestionResult{}, err
 	}
 	return result, nil
 }
@@ -195,6 +230,28 @@ func validateCreateConversationResult(request conversationdomain.ConversationCre
 		result.Conversation.WorkspaceID != request.WorkspaceID || result.Conversation.Status != conversationdomain.ConversationStatusOpen ||
 		!reflect.DeepEqual(result.Conversation.Title, request.Title) {
 		return resultInconsistent(err)
+	}
+	return nil
+}
+
+func validateSubmitQuestionResult(request conversationdomain.QuestionRequest, result SubmitQuestionResult) error {
+	if err := conversationdomain.ValidateQuestion(result.Question); err != nil || !reflect.DeepEqual(result.Question.Request, request) {
+		return resultInconsistent(err)
+	}
+	if err := conversationdomain.ValidateAnswer(result.Answer); err != nil || result.Answer.WorkspaceID != request.WorkspaceID ||
+		result.Answer.ConversationID != request.ConversationID || result.Answer.QuestionID != result.Question.ID ||
+		result.Workflow.RunID != result.Answer.WorkflowRunID || result.Workflow.Version < 1 || result.Workflow.UpdatedAt.IsZero() ||
+		!validRunStatus(result.Workflow.Status) || result.JobID < 1 {
+		return resultInconsistent(err)
+	}
+	nodeID, err := foundation.ParseID(string(result.NodeRunID))
+	if err != nil || nodeID != result.NodeRunID || result.NodeRunID == request.WorkspaceID || result.NodeRunID == request.ConversationID ||
+		result.NodeRunID == result.Question.ID || result.NodeRunID == result.Answer.ID || result.NodeRunID == result.Workflow.RunID {
+		return resultInconsistent(err)
+	}
+	if !result.Replayed && (result.Answer.PublicationStatus != conversationdomain.AnswerPublicationPending ||
+		result.Workflow.Status != workflowdomain.RunStatusPending) {
+		return resultInconsistent(nil)
 	}
 	return nil
 }
@@ -318,6 +375,23 @@ func validateScopedIDs(workspaceID, resourceID foundation.ID) error {
 
 func serviceUnavailable() error {
 	return foundation.NewError(foundation.ErrorDependencyUnavailable, errorCodeServiceUnavailable, false, errors.New("conversation service dependencies are incomplete"))
+}
+
+func submissionUnavailable() error {
+	return foundation.NewError(foundation.ErrorDependencyUnavailable, errorCodeSubmissionUnavailable, false, errors.New("question dispatch is not configured"))
+}
+
+func isNilQuestionDispatcher(dispatcher QuestionDispatcher) bool {
+	if dispatcher == nil {
+		return true
+	}
+	value := reflect.ValueOf(dispatcher)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func requestInvalid(cause error) error {

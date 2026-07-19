@@ -29,7 +29,7 @@ func TestToolRegistrySecurityMigrationUpRepeatAndEmptyDownUp(t *testing.T) {
 	assertToolRegistryMigrationShape(t, ctx, pool)
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.Down(ctx); err != nil {
+	if _, err := provider.DownTo(ctx, 18); err != nil {
 		t.Fatalf("00019 empty Down failed: %v", err)
 	}
 	var tables int
@@ -171,7 +171,7 @@ func TestToolRegistrySecurityMigrationBindingsLifecycleAndGuardedDown(t *testing
 	invalidVersion.version = 2
 	assertPostgresCode(t, insertToolCall(ctx, pool, invalidVersion), "23514")
 
-	_, err = migrationProvider(t, pool).Down(ctx)
+	_, err = migrationProvider(t, pool).DownTo(ctx, 18)
 	assertPostgresCode(t, err, "55000")
 }
 

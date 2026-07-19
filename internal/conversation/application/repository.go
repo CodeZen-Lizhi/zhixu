@@ -36,6 +36,29 @@ type CreateConversationResult struct {
 	Replayed     bool
 }
 
+// SubmitQuestionCommand 是在一个 Conversation 内启动 RAG Workflow 的应用命令。
+type SubmitQuestionCommand struct {
+	Request        conversationdomain.QuestionRequest
+	IdempotencyKey string
+}
+
+// SubmitQuestionRecord 是原子派发端口接收的 canonical Question 绑定。
+type SubmitQuestionRecord struct {
+	Request        conversationdomain.QuestionRequest
+	IdempotencyKey string
+	RequestHash    string
+}
+
+// SubmitQuestionResult 返回 Question、Answer slot 与持久 Workflow/Job 身份。
+type SubmitQuestionResult struct {
+	Question  conversationdomain.Question
+	Answer    conversationdomain.Answer
+	Workflow  WorkflowRunView
+	NodeRunID foundation.ID
+	JobID     int64
+	Replayed  bool
+}
+
 // ListConversationsQuery 是 Workspace 内按活动时间稳定分页的查询。
 type ListConversationsQuery struct {
 	WorkspaceID foundation.ID
@@ -90,6 +113,12 @@ type PublishedContextQuery struct {
 	WorkspaceID    foundation.ID
 	ConversationID foundation.ID
 	ThroughOrdinal int64
+}
+
+// QuestionDispatcher 原子创建或精确重放 Question、Answer、Workflow、Job 与通知。
+type QuestionDispatcher interface {
+	// SubmitQuestion 保证跨 Conversation、Workflow、River 与 Server Event 的单事务提交。
+	SubmitQuestion(context.Context, SubmitQuestionRecord) (SubmitQuestionResult, error)
 }
 
 // Repository 是 Conversation 持久化和读模型的唯一应用端口。

@@ -120,6 +120,14 @@ func (scan *questionScan) build() (conversationdomain.Question, error) {
 	return question, nil
 }
 
+func scanQuestion(row scanner) (conversationdomain.Question, error) {
+	fields := &questionScan{}
+	if err := row.Scan(fields.destinations()...); err != nil {
+		return conversationdomain.Question{}, classify(err, ErrorCodeDatabaseUnavailable)
+	}
+	return fields.build()
+}
+
 type answerScan struct {
 	id, workspaceID, conversationID, questionID, workflowRunID *string
 	modelRunID                                                 *string

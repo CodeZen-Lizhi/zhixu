@@ -68,9 +68,7 @@ func TestWorkflowRuntimeStateMachineMigrationCompatibility(t *testing.T) {
 		}
 	}
 
-	// 00019 has no Tool Call data, 00018 has no Agent data, 00017 has no Knowledge data,
-	// 00016/00015/00014 have no Retrieval data,
-	// and 00013 has no Proposal→Run binding in this fixture; after removing these
+	// 00021..00013 have no facts that block downgrade in this fixture; after removing these
 	// later migrations, 00012 must reject populated Attempt data.
 	db := stdlib.OpenDBFromPool(pool)
 	defer db.Close()
@@ -82,28 +80,7 @@ func TestWorkflowRuntimeStateMachineMigrationCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00019 Down rejected empty Tool Registry Security schema: %v", err)
-	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00018 Down rejected empty Agent Runtime schema: %v", err)
-	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00017 Down rejected empty Knowledge Domain schema: %v", err)
-	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00016 Down rejected empty Embedding Hybrid Search schema: %v", err)
-	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00015 Down rejected empty Reindex Consumer schema: %v", err)
-	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00014 Down rejected empty Retrieval schema: %v", err)
-	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00013 Down rejected unbound runtime fixture: %v", err)
-	}
-	if _, err := provider.Down(ctx); err == nil {
+	if _, err := provider.DownTo(ctx, 11); err == nil {
 		t.Fatal("00012 Down accepted node_attempt data")
 	} else {
 		var pgErr *pgconn.PgError

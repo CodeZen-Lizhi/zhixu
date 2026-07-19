@@ -120,6 +120,12 @@ Migration `00020_rag_conversation_sse.sql` adds:
 - `pending` bundle must contain no result/model/summary; terminal bundle must be complete;
 - mutation trigger permits only exact `pending -> completed|refused|clarification_required` with `version+1`.
 
+`pending` is a publication state, not a Workflow liveness state. Forward migration `00021_conversation_active_workflow.sql`
+removes the initial pending-Answer partial unique index and replaces it with an Answer-insert trigger that first locks the
+Conversation and rejects only an existing Run outside `succeeded|failed|cancelled`. This preserves one active Answer
+Workflow while allowing a new Question after a failed or cancelled Run; multiple historical pending slots remain valid
+because runtime failures are not fabricated as Refusal publications.
+
 `retrieval_summary` is the recoverable source for the user-facing explanation panel. It stores at most three bounded rewrites, requested/effective mode, scope summary, Index/Embedding version IDs, candidate/selected/conflict counts and explicit degradations. It stores no Evidence excerpt, prompt or Provider response.
 
 ### 3.4 `agent.answer_feedback`
@@ -144,7 +150,9 @@ An insert trigger projects future `workflow.outbox_event` rows to `ops.server_ev
 
 ### 3.7 Migration rollback
 
-Down is allowed only when the four Agent tables and `ops.server_event` contain no rows. Existing data returns SQLSTATE `55000`; production rollback is application rollback plus forward migration, not destructive data loss.
+`00020` Down is allowed only when the four Agent tables and `ops.server_event` contain no rows. `00021` Down additionally
+refuses with SQLSTATE `55000` when multiple historical pending slots would make the old index destructive. Production
+rollback is application rollback plus forward migration, not data deletion.
 
 ## 4. Transaction Boundaries
 
@@ -158,16 +166,20 @@ The cross-schema UoW follows the existing Approval dispatch pattern and reuses `
 
 1. lock Conversation;
 2. detect exact replay or idempotency conflict;
-3. reject another active Workflow;
+3. reject another active Workflow by authoritative Run status; do not lock Answer after Conversation because the finalizer
+   owns the opposite Answer-to-Conversation update path;
 4. read the bounded published context and compute canonical context hash;
 5. allocate Question/Answer IDs and insert immutable Question;
 6. build Workflow Input containing only IDs, ordinal, context hash and schema version;
 7. atomically insert/replay Workflow Definition/Run/Node/Outbox/River Job;
 8. insert pending Answer bound to returned Run;
 9. advance Conversation version/activity;
-10. insert summary events and commit.
+10. insert the redacted `answer.pending` summary event and commit.
 
 Commit response loss is handled by re-running the same command and proving the exact Question/Answer/Workflow/Job binding.
+Conversation lifecycle checks apply only after existing Question idempotency lookup, so archiving rejects new commands without
+changing the replay/conflict result of an already accepted command. The Answer trigger exposes stable constraint names for
+active-Workflow and archived-Conversation guards so the Adapter preserves the same public error codes on database fallback.
 
 ### 4.3 Publish Answer And Model Run
 
@@ -333,5 +345,5 @@ The client has one strict decoder owner for Conversation/RAG JSON and `web/src/e
 | SSE becomes truth | envelope contains summaries only; every consumer refetches |
 | event retention creates unbounded scans | `(workspace_id,seq)` and expiry indexes, bounded pages; physical cleanup promoted in M9/M10 |
 | unapproved/web evidence presented as fact | approved-only publication gate; unsupported modes fail explicitly |
-| Conversation context races | one active Answer per Conversation and frozen ordinal/hash |
+| Conversation context races | Conversation row lock plus DB insert trigger enforce one nonterminal Answer Workflow; frozen ordinal/hash |
 | M6 scope expands into full UI/auth/tool loop | explicit M9/M10/M11 and Tool Loop exclusions |

@@ -826,3 +826,36 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 实施 T06 Question → pending Answer → Workflow/Outbox/River Job/Event 的原子派发与 response-loss recovery。
+
+
+## Session 25: M6-04 Question 原子派发检查点
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T06）
+**Branch**: `dev`
+
+### Summary
+
+完成 Question、pending Answer、Workflow Run/Node/Outbox、River Job 与 `answer.pending` Server Event 的单事务派发；同键精确重放、异键活动 Workflow 冲突、归档语义、failed/cancelled 后继续及 response-loss 恢复均由真实 PostgreSQL 验证。
+
+### Main Changes
+
+- 复用 `BuildRuntimeStartRequest` 与 `RuntimeRepository.StartTx`，未复制 Workflow/River SQL。
+- `00021` 以 Conversation 锁和非终态 Run 约束替代 pending Answer 唯一索引，并提供稳定 trigger constraint 与 guarded Down。
+- Workflow Input 只保存 ID、ordinal 和 context hash；Question/历史正文不进入 Workflow 或 Server Event。
+- 修复 exact replay 与 Worker Claim 并发时的旧 Run 快照误判；锁后重读最新 Answer/Workflow 投影。
+
+### Testing
+
+- 新并发重放真实 PostgreSQL 回归：修复前稳定失败，修复后 `-race -count=20` 通过。
+- Conversation 与 Migration 真实 PostgreSQL integration `-race` 通过。
+- `go test -race -count=1 ./...`、`go vet ./...`、`go mod tidy -diff`、`make test`、`git diff --check` 通过。
+- 主 Agent go/SQL/通用五轴审查与独立两轮复验通过，全部 P1/P2 已关闭。
+
+### Status
+
+[OK] M6-04 T06 completed; T07-T17 pending.
+
+### Next Steps
+
+- 实施 T07 Query Plan/RAG Workflow output receipt、严格 catalog 注册与 Conversation execution-context loader。

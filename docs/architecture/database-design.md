@@ -790,6 +790,17 @@ Tool Authorization 是服务端短时、单任务、最小权限的授权记录�
 - 同一授权作用域只能成功消费一次；重复写回通过既有 Writeback Execution 与 Tool Call receipt 恢复，未知副作用进入人工恢复。
 - Tools Module 负责普通 Capability、Workflow `allowed_tools` 和 Tool Call receipt；Change Control 的 Atomic Begin 负责写授权签发、完整绑定校验与双授权单事务消费，数据库负责唯一性、过期和状态约束。
 
+### agent.conversation / question / answer / answer_feedback
+
+M6-04 使用显式 Conversation、Question 和 Answer 事实，不建立通用 Message 第二事实源。
+
+- Question append-only，保存 canonical Scope/Options、Context Hash、Conversation 内 ordinal 与幂等绑定；正文和历史不复制到 Workflow Input、Server Event 或日志。
+- Answer 在 Question 接收事务中预分配为 `pending`，只允许一次发布为 `completed|refused|clarification_required`；Workflow failed/cancelled/retry 状态继续由 `workflow.run` 拥有。
+- `pending` 表示“尚未发布”，不表示 Workflow 一定仍活动。初始 `00020` 的 pending 部分唯一索引会在 failed/cancelled 后封死会话，`00021_conversation_active_workflow.sql` 已以前向迁移移除。
+- Question UoW 先锁 Conversation 并按 Run 状态拒绝非终态 Workflow；Answer INSERT Trigger 获取同一 Conversation 锁并执行数据库兜底，因此同一 Conversation 最多一个非终态 Answer Workflow，但允许保留多个终态故障对应的历史 pending slot。
+- Conversation 归档只阻止新 Question；既有幂等键仍优先完成 exact replay 或冲突判定。Trigger 通过稳定 constraint 名区分 active Workflow 与 archived Conversation，确保数据库兜底错误与应用层错误码一致。
+- `00021` Down 仅在可无损恢复旧索引时允许；存在多个历史 pending slot 时返回 SQLSTATE `55000`，发布回滚保留数据并 forward fix。
+
 ### node_run 与 model_run 的版本职责
 
 Workflow Definition 只是声明；Node Run 记录 Workflow/输入输出/Retrieval 等通用节点快照，Model Run/Call 记录 ChatModel

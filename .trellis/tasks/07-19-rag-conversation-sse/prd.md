@@ -33,6 +33,7 @@
 - 用户可以幂等创建 Conversation，并按 Workspace 分页查看、打开 Conversation。
 - Conversation 是短期问答上下文，不自动写入长期 Memory。
 - 本期保留 `open/archived` 生命周期的数据契约；页面只要求创建、列表和打开，归档命令留到通用会话管理任务。
+- Archived Conversation 拒绝新的 Question，但既有 Question 命令仍按原幂等键稳定 exact replay 或返回幂等冲突。
 - 列表按最近活动时间和稳定 ID 排序，禁止无分页返回。
 
 ### RAG-02 Question submission and sequential context
@@ -129,7 +130,7 @@
 | ID | Original gap or conflict | Adopted requirement | User value | Impact and compatibility |
 |---|---|---|---|---|
 | O-01 | 文档使用 Conversation/Question/Answer，但调研初稿曾建议通用 Message | 领域与数据库采用显式 Question/Answer；`Turn` 仅为查询投影 | 状态和发布门禁更清楚，不混入 system/tool transcript | 新模块，无既有 API 兼容风险；术语同步到 `CONTEXT.md` |
-| O-02 | 文档未定义并发提问语义 | 一个 Conversation 同时只允许一个非终态 Answer Workflow | 避免后发问题读取未完成答案并形成歧义上下文 | 当前无既有调用方；未来若支持分支需新显式 Parent Question 契约 |
+| O-02 | 文档未定义并发提问语义；初始迁移曾把 `pending` Answer 误当成活动 Workflow，导致 failed/cancelled 后会话永久不可继续 | 一个 Conversation 同时只允许一个非终态 Answer Workflow；Answer `pending` 仅表示未发布，旧 Workflow 终态后可创建下一 Answer slot | 避免后发问题读取未完成答案，同时保证运行故障不会封死会话 | `00021` 前向迁移以 Conversation 锁和非终态 Run 触发器替代 pending 唯一索引；HTTP 契约不变，未来若支持分支需新显式 Parent Question 契约 |
 | O-03 | M6-04 要 SSE，M9-04 又负责统一 Event Store | 本期落 `ops.server_event` 的稳定数据库/API 契约并仅接 RAG/Workflow 生产者；M9 扩展其他领域和共享前端 Store | 当前即可重连，后续不需要迁移第二套事件游标 | M9 继续拥有全站生产者、失效矩阵与单例连接，不重复建表/API |
 | O-04 | “流式展示”未明确草稿还是阶段 | v1 只流式发送真实阶段和资源状态，不发送未校验文本 delta | 消除草稿被复制、朗读或误认为事实的风险 | 不破坏最终 Answer；未来文本流需新增明确 draft/retract 契约 |
 | O-05 | Feedback 未定义重复、撤回和用户唯一性 | append-only + Idempotency-Key；本期不编辑/撤回、不做用户唯一 | 重试不重复写，也不假装已有身份体系 | M10 有身份后可新增 actor 维度，不改现有反馈事实 |
@@ -139,7 +140,7 @@
 ## Acceptance Criteria
 
 - [ ] AC-01：创建、列表、打开 Conversation 和提交 Question 的 HTTP/OpenAPI 契约可运行；首次与精确重放分别返回正确状态，冲突不重复创建记录或 Workflow。
-- [ ] AC-02：Question、Answer pending、Workflow、Outbox、River Job 和初始 Server Event 原子创建；注入任一步失败时全部回滚，commit response-loss 可精确重放。
+- [x] AC-02：Question、Answer pending、Workflow、Outbox、River Job 和初始 Server Event 原子创建；注入任一步失败时全部回滚，commit response-loss 可精确重放。
 - [ ] AC-03：公开 Conversation API 经真实 PostgreSQL/River/Worker 完成至少一条 approved-knowledge RAG Answer v2；事实 assertion 有可打开 Citation，Related Topic 受服务端绑定验证，并返回 1..5 个后续问题。
 - [ ] AC-04：无证据、未批准证据、Citation 不可打开、Faithfulness 不通过和校验耗尽样本均得到稳定 Refusal；不得产生 completed Answer。
 - [ ] AC-05：冲突 Evidence 生成显式 Conflict positions；缺少完整披露时拒答。

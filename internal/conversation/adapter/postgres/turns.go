@@ -14,6 +14,10 @@ const questionViewColumns = `
 	q.id::text,q.workspace_id::text,q.conversation_id::text,q.ordinal,q.question_text,q.scope::text,
 	q.answer_depth,q.output_format,q.context_through_ordinal,q.context_hash,q.request_hash,q.created_at`
 
+const questionColumns = `
+	id::text,workspace_id::text,conversation_id::text,ordinal,question_text,scope::text,
+	answer_depth,output_format,context_through_ordinal,context_hash,request_hash,created_at`
+
 const answerViewColumns = `
 	a.id::text,a.workspace_id::text,a.conversation_id::text,a.question_id::text,a.workflow_run_id::text,
 	a.model_run_id::text,a.publication_status,a.result_type,a.result::text,a.result_hash,a.retrieval_summary::text,
@@ -118,10 +122,18 @@ func (repository *Repository) LoadPublishedContext(ctx context.Context, query co
 	if _, err := repository.GetConversation(ctx, query.WorkspaceID, query.ConversationID); err != nil {
 		return nil, err
 	}
+	return loadPublishedContext(ctx, repository.db, query)
+}
+
+type publishedContextQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func loadPublishedContext(ctx context.Context, queryer publishedContextQueryer, query conversationapplication.PublishedContextQuery) ([]conversationdomain.PublishedTurn, error) {
 	if query.ThroughOrdinal == 0 {
 		return []conversationdomain.PublishedTurn{}, nil
 	}
-	rows, err := repository.db.Query(ctx, `SELECT `+turnViewColumns+`
+	rows, err := queryer.Query(ctx, `SELECT `+turnViewColumns+`
 		FROM agent.question q
 		JOIN agent.answer a ON a.question_id=q.id AND a.workspace_id=q.workspace_id AND a.conversation_id=q.conversation_id
 		JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id

@@ -29,8 +29,8 @@ func TestConversationSSEMigrationUpRepeatAndEmptyDownUp(t *testing.T) {
 	assertConversationSSEMigrationShape(t, ctx, pool)
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00020 empty Down failed: %v", err)
+	if _, err := provider.DownTo(ctx, 19); err != nil {
+		t.Fatalf("00021/00020 empty Down failed: %v", err)
 	}
 	var tables int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
@@ -130,6 +130,11 @@ func TestConversationSSEMigrationContractsProjectionAndGuardedDown(t *testing.T)
 		WHERE id=$1`,
 		answer1.id, fixture.modelRun1ID, ragAnswerResultV2JSON("citation-1"),
 		`{"requested_mode":"hybrid","effective_mode":"hybrid","rewrite_count":1}`, completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow.run SET
+		status='succeeded',version=version+1,updated_at=$2,completed_at=$2 WHERE id=$1`,
+		fixture.run1ID, completedAt.Add(time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
 	_, err = pool.Exec(ctx, `UPDATE agent.answer SET result_hash=repeat('c',64),version=4 WHERE id=$1`, answer1.id)
@@ -293,7 +298,7 @@ func TestConversationSSEMigrationContractsProjectionAndGuardedDown(t *testing.T)
 		fixture.otherWorkspaceID, fixture.conversationID, "manual:cross-workspace", fixture.outboxOccurredAt, fixture.outboxOccurredAt.Add(24*time.Hour))
 	assertPostgresCode(t, err, "23503")
 
-	_, err = migrationProvider(t, pool).Down(ctx)
+	_, err = migrationProvider(t, pool).DownTo(ctx, 19)
 	assertPostgresCode(t, err, "55000")
 }
 
@@ -325,7 +330,7 @@ func TestConversationSSEMigrationDownRejectsPlanAndClarificationFacts(t *testing
 		t.Fatal(err)
 	}
 
-	_, err := migrationProvider(t, pool).Down(ctx)
+	_, err := migrationProvider(t, pool).DownTo(ctx, 19)
 	assertPostgresCode(t, err, "55000")
 }
 
@@ -397,7 +402,7 @@ func migrateConversationSSETestDatabase(t *testing.T, ctx context.Context, pool 
 
 func assertConversationSSEMigrationShape(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	var tables, meta int
+	var tables, meta, activeMeta, activeTrigger, pendingIndex int
 	var conversationIndex string
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
 		WHERE (table_schema='agent' AND table_name IN ('conversation','question','answer','answer_feedback'))
@@ -408,12 +413,27 @@ func assertConversationSSEMigrationShape(t *testing.T, ctx context.Context, pool
 		WHERE key='rag_conversation_sse' AND value='m6-04'`).Scan(&meta); err != nil {
 		t.Fatal(err)
 	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.schema_meta
+		WHERE key='conversation_active_workflow' AND value='m6-04-t06'`).Scan(&activeMeta); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.triggers
+		WHERE event_object_schema='agent' AND event_object_table='answer'
+		  AND trigger_name='agent_answer_validate_active_workflow'`).Scan(&activeTrigger); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes
+		WHERE schemaname='agent' AND indexname='uq_agent_answer_conversation_pending'`).Scan(&pendingIndex); err != nil {
+		t.Fatal(err)
+	}
 	if err := pool.QueryRow(ctx, `SELECT indexdef FROM pg_indexes
 		WHERE schemaname='agent' AND indexname='idx_agent_conversation_workspace_activity'`).Scan(&conversationIndex); err != nil {
 		t.Fatal(err)
 	}
-	if tables != 5 || meta != 1 || !strings.Contains(conversationIndex, "(workspace_id, last_activity_at DESC, id)") {
-		t.Fatalf("tables=%d meta=%d conversation_index=%q", tables, meta, conversationIndex)
+	if tables != 5 || meta != 1 || activeMeta != 1 || activeTrigger != 1 || pendingIndex != 0 ||
+		!strings.Contains(conversationIndex, "(workspace_id, last_activity_at DESC, id)") {
+		t.Fatalf("tables=%d meta=%d active_meta=%d active_trigger=%d pending_index=%d conversation_index=%q",
+			tables, meta, activeMeta, activeTrigger, pendingIndex, conversationIndex)
 	}
 }
 

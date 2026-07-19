@@ -21,6 +21,18 @@ const (
 	ErrorCodeAnswerNotFound = "CONVERSATION_ANSWER_NOT_FOUND"
 	// ErrorCodeIdempotencyConflict 表示幂等键已绑定不同创建请求。
 	ErrorCodeIdempotencyConflict = "CONVERSATION_IDEMPOTENCY_CONFLICT"
+	// ErrorCodeQuestionDispatchUnavailable 表示 Question 原子派发依赖不可用。
+	ErrorCodeQuestionDispatchUnavailable = "CONVERSATION_QUESTION_DISPATCH_UNAVAILABLE"
+	// ErrorCodeQuestionDispatchInvalid 表示 Question 派发记录不是 canonical 领域请求。
+	ErrorCodeQuestionDispatchInvalid = "CONVERSATION_QUESTION_DISPATCH_INVALID"
+	// ErrorCodeQuestionIdempotencyConflict 表示 Question 幂等键已绑定不同请求。
+	ErrorCodeQuestionIdempotencyConflict = "CONVERSATION_QUESTION_IDEMPOTENCY_CONFLICT"
+	// ErrorCodeQuestionActiveWorkflow 表示 Conversation 已有非终态 Answer Workflow。
+	ErrorCodeQuestionActiveWorkflow = "CONVERSATION_QUESTION_ACTIVE_WORKFLOW"
+	// ErrorCodeQuestionConversationArchived 表示已归档 Conversation 不再接受 Question。
+	ErrorCodeQuestionConversationArchived = "CONVERSATION_QUESTION_CONVERSATION_ARCHIVED"
+	// ErrorCodeQuestionDispatchCorrupt 表示 Question 到 Workflow/Job 的持久绑定不完整。
+	ErrorCodeQuestionDispatchCorrupt = "CONVERSATION_QUESTION_DISPATCH_CORRUPT"
 	// ErrorCodePersistenceInvalid 表示调用方提供的持久化事实不合法。
 	ErrorCodePersistenceInvalid = "CONVERSATION_PERSISTENCE_INVALID"
 	// ErrorCodePersistenceCorrupt 表示数据库读回事实违反领域不变量。
@@ -30,6 +42,10 @@ const (
 func classify(cause error, code string) error {
 	if cause == nil {
 		return nil
+	}
+	var classified *foundation.Error
+	if errors.As(cause, &classified) {
+		return cause
 	}
 	switch {
 	case errors.Is(cause, context.Canceled):

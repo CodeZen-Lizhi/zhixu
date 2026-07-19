@@ -140,9 +140,6 @@ func TestAgentRuntimeMigrationStateMachineWorkspaceAndGuardedDown(t *testing.T) 
 	assertPostgresCode(t, err, "55000")
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00019 empty Down failed: %v", err)
-	}
-	_, err = provider.Down(ctx)
+	_, err = provider.DownTo(ctx, 17)
 	assertPostgresCode(t, err, "55000")
 }

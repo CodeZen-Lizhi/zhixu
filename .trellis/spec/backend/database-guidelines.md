@@ -929,7 +929,15 @@ ops.server_event
   document，再进入领域校验/API，不能把 PostgreSQL 的键顺序作为哈希输入。
 - Retrieval summary 的 requested/effective mode 与 degradation 必须复用 Retrieval Domain 的唯一模式矩阵：
   Semantic 不得退化，Keyword 不得携带 query degradation，Hybrid→Keyword 必须显式 Vector degradation。
-- 一个 Conversation 最多一个 pending Answer，由数据库部分唯一约束而不是“先查后写”保证。
+- Answer `pending` 只表示尚未发布，不能替代 Workflow 活动状态。`00021_conversation_active_workflow.sql` 删除初始
+  pending 部分唯一索引；Question UoW 先锁 Conversation、按 Run 状态拒绝非终态 Workflow，Answer INSERT Trigger
+  复用同一 Conversation 锁并只拒绝 `succeeded|failed|cancelled` 之外的既有 Run。failed/cancelled 的历史 pending
+  slot 不进入上下文，也不阻止下一 Question。
+- Conversation 归档只拒绝新 Question；既有幂等键的 exact replay/冲突判定必须先执行。Answer Trigger 使用稳定
+  constraint 名区分 active Workflow 与 archived Conversation，Adapter 将数据库兜底映射回同一稳定错误码。
+- Question exact replay 可与 Worker 推进 Run 状态并发。重放前只读取不可变 Answer ID；必须在 Workflow `StartTx`
+  replay 锁定并返回最新 Run 后重新读取 Answer/Workflow 投影，再比较 status/version/updated_at。不得把锁前旧快照与
+  锁后新状态的正常差异归类为持久绑定损坏。
 - Feedback append-only 且按 canonical request hash 幂等。只允许已发布 Answer/Refusal；Clarification 和 pending
   不可反馈。Citation 类反馈必须绑定 RAG v2 Answer 中真实 Citation，其他类型不得携带 Citation。
 - `ops.server_event.seq` 是浏览器重放游标，按 Workspace 单调读取，逻辑保留 24 小时。它是通知投影，不是
@@ -948,13 +956,14 @@ ops.server_event
 | Question 非法 UTF-8、NUL、超过 8 KiB，或 scope/options 非 canonical | `CONVERSATION_QUESTION_INVALID`，零持久副作用 |
 | canonical Scope 或 retrieval summary 超过 16 KiB | 领域 InvalidInput，不进入 SQL |
 | 同 Workspace/Conversation 幂等键同 hash | exact replay，不增加 ordinal/version |
-| 同幂等键不同 hash，或已有 pending Answer | Version/Idempotency conflict，不创建第二条 Workflow |
+| 同幂等键不同 hash，或已有非终态 Answer Workflow | Version/Idempotency conflict，不创建第二条活动 Workflow |
+| Archived Conversation 上的新 key / 既有 key | 新 key 拒绝；既有 key 继续 exact replay 或稳定 Idempotency conflict |
 | Answer 跨 Workspace/Question/Workflow/Model Run 或非法 CAS | FK/CHECK/trigger/Repository consistency failure |
 | RAG v2/Refusal/Clarification result 非 canonical，或与发布状态、Model Run/hash 不匹配 | `ANSWER_INVALID`，不发布 |
 | Semantic→Keyword、Keyword degradation 或 PLAN→REPAIR 等非法模式/阶段序列 | 领域或 SQL consistency failure |
 | Clarification/pending 收到 Feedback，或 Citation 绑定不闭合 | `ANSWER_FEEDBACK_INVALID`，Answer/Knowledge 不变 |
 | Server Event 非法、未来或过期序号 | 稳定 `SSE_*` Problem；不得回放其他 Workspace 或全量历史 |
-| `00020` 含业务数据时 Down | SQLSTATE `55000` |
+| `00020` 含业务数据，或 `00021` Down 会恢复冲突的 pending 唯一索引 | SQLSTATE `55000` |
 
 ### 5. Good / Base / Bad Cases
 
@@ -971,7 +980,8 @@ ops.server_event
   Feedback 的正常/边界/失败路径；固定 canonical hash 样例，覆盖 invalid UTF-8、NUL、大小、重复和 unknown field。
 - Agent：v1 decoder 继续拒绝 v2-only 字段；PLAN 为 call_no 1、随后 INITIAL 为 2；Clarification 为 additive
   Model Run 结果类型，不改变旧三阶段/REVIEW 行为；真实 PG 拒绝 PLAN 后跳入 REPAIR。
-- Migration real PostgreSQL：空库 Up、重复 Up、空数据 Down/Up、Workspace 复合 FK、单 pending Answer、CAS、
+- Migration real PostgreSQL：空库 Up、重复 Up、空数据 Down/Up、Workspace 复合 FK、单非终态 Answer Workflow、
+  failed/cancelled 后下一 pending slot、`00021` guarded Down、CAS、
   append-only、缺失 Answer schema 字段、Feedback eligibility、24 小时 event expiry、安全 Outbox 投影和有数据 guarded Down。
 - Repository/HTTP/SSE 后续门禁必须补并发 exact replay、response-loss、稳定 cursor、批量上下文/Turn 查询、
   future/expired Last-Event-ID、heartbeat/cancel 和正文 canary 扫描；单元 Fake 不替代真实 PostgreSQL 证据。
