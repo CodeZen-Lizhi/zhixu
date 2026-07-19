@@ -16,7 +16,7 @@
 14. [x] 新增 Prompt Injection/Secret/Prompt/Source/raw response canary，验证日志、Trace、错误、Model Run metadata 不泄漏。
 15. [x] 执行 Agent 定向 count/race、Chat Contract、Knowledge/PG/migration/Workflow integration、全仓 race/vet/make test/tidy、Docker/Compose smoke。
 16. [x] 主 Agent 使用 `go-review`、`sql-code-review`、`code-review-and-quality`，独立两轮复验，修复全部 P0/P1 和当前范围 P2。
-17. [ ] 更新父任务 M6-02 状态、AC、spec、journal；提交业务改动，归档任务，不 push；继续 M6-03/M6-04。
+17. [x] 更新父任务 M6-02 状态、AC、spec、journal；提交业务改动，归档任务，不 push；继续 M6-03/M6-04。
 
 ## Dependency Order
 
