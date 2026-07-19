@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +99,82 @@ func TestCanonicalizeQuestionRequestRejectsUnsafeBoundaries(t *testing.T) {
 			value := base
 			test.mutate(&value)
 			_, err := CanonicalizeQuestionRequest(value)
+			var typed *foundation.Error
+			if !errors.As(err, &typed) || typed.Code != ErrorCodeQuestionInvalid || typed.Kind != foundation.ErrorInvalidInput {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeQuestionScopeStrictlyRestoresCanonicalPersistenceDocument(t *testing.T) {
+	raw := json.RawMessage(`{
+		"allow_web":false,
+		"captured_at_before":null,
+		"source_version_ids":[],
+		"path_prefixes":["docs/runtime"],
+		"retrieval_mode":"hybrid",
+		"allow_original_sources":true,
+		"source_ids":["10000000-0000-4000-8000-000000000003"],
+		"captured_at_from":"2026-07-19T00:00:00Z"
+	}`)
+
+	decoded, err := DecodeQuestionScope(testWorkspaceID, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)
+	want := QuestionScope{
+		RetrievalMode: retrievaldomain.SearchModeHybrid,
+		Filter: retrievaldomain.SearchFilter{
+			SourceIDs:        []foundation.ID{"10000000-0000-4000-8000-000000000003"},
+			SourceVersionIDs: []foundation.ID{},
+			PathPrefixes:     []string{"docs/runtime"},
+			CapturedAtFrom:   &from,
+		},
+		AllowOriginalSources: true,
+	}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded=%#v want=%#v", decoded, want)
+	}
+
+	request := QuestionRequest{
+		WorkspaceID: testWorkspaceID, ConversationID: testConversationID, QuestionText: "question", Scope: decoded,
+	}
+	encoded, err := EncodeQuestionScope(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := DecodeQuestionScope(testWorkspaceID, encoded)
+	if err != nil || !reflect.DeepEqual(roundTrip, decoded) {
+		t.Fatalf("round trip=%#v err=%v encoded=%s", roundTrip, err, encoded)
+	}
+}
+
+func TestDecodeQuestionScopeRejectsPersistenceDrift(t *testing.T) {
+	valid := `{"retrieval_mode":"hybrid","source_ids":[],"source_version_ids":[],"path_prefixes":[],"captured_at_from":null,"captured_at_before":null,"allow_original_sources":false,"allow_web":false}`
+	tests := []struct {
+		name        string
+		workspaceID foundation.ID
+		raw         string
+	}{
+		{name: "invalid workspace", workspaceID: "bad", raw: valid},
+		{name: "unknown field", workspaceID: testWorkspaceID, raw: valid[:len(valid)-1] + `,"unknown":true}`},
+		{name: "duplicate field", workspaceID: testWorkspaceID, raw: valid[:len(valid)-1] + `,"allow_web":false}`},
+		{name: "trailing value", workspaceID: testWorkspaceID, raw: valid + `{}`},
+		{name: "invalid type", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"allow_web":false`, `"allow_web":"false"`, 1)},
+		{name: "null boolean", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"allow_web":false`, `"allow_web":null`, 1)},
+		{name: "missing boolean", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `,"allow_web":false`, "", 1)},
+		{name: "missing nullable time", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"captured_at_from":null,`, "", 1)},
+		{name: "missing required list", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"source_ids":[],`, "", 1)},
+		{name: "invalid time", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"captured_at_from":null`, `"captured_at_from":"tomorrow"`, 1)},
+		{name: "non canonical time", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"captured_at_from":null`, `"captured_at_from":"2026-07-19T08:00:00+08:00"`, 1)},
+		{name: "non canonical list", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"source_ids":[]`, `"source_ids":["10000000-0000-4000-8000-000000000004","10000000-0000-4000-8000-000000000003"]`, 1)},
+		{name: "oversized document", workspaceID: testWorkspaceID, raw: strings.Repeat(" ", MaxQuestionScopeBytes) + valid},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := DecodeQuestionScope(test.workspaceID, json.RawMessage(test.raw))
 			var typed *foundation.Error
 			if !errors.As(err, &typed) || typed.Code != ErrorCodeQuestionInvalid || typed.Kind != foundation.ErrorInvalidInput {
 				t.Fatalf("err=%v", err)

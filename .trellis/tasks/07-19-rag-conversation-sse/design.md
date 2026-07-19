@@ -100,7 +100,7 @@ Migration `00020_rag_conversation_sse.sql` adds:
 - `last_activity_at`, `created_at`, `updated_at`, nullable `archived_at`;
 - create `idempotency_key` and `request_hash`;
 - unique `(workspace_id,idempotency_key)` and composite identity for Workspace-safe FKs;
-- list indexes `(workspace_id,status,last_activity_at DESC,id DESC)`.
+- list index `(workspace_id,last_activity_at DESC,id ASC)`, matching the stable list order.
 
 ### 3.2 `agent.question`
 

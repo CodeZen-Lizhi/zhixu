@@ -1,12 +1,59 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
 const maxConversationTitleBytes = 512
+
+// ConversationCreateRequest 是创建短期 RAG 会话前参与幂等绑定的领域输入。
+type ConversationCreateRequest struct {
+	WorkspaceID foundation.ID
+	Title       *string
+}
+
+// CanonicalizeConversationCreateRequest 校验并返回不保留调用方指针的规范创建请求。
+func CanonicalizeConversationCreateRequest(request ConversationCreateRequest) (ConversationCreateRequest, error) {
+	workspaceID, err := foundation.ParseID(string(request.WorkspaceID))
+	if err != nil || workspaceID != request.WorkspaceID {
+		return ConversationCreateRequest{}, invalid(ErrorCodeConversationInvalid, "conversation workspace is invalid", err)
+	}
+	canonical := ConversationCreateRequest{WorkspaceID: workspaceID}
+	if request.Title == nil {
+		return canonical, nil
+	}
+	title := strings.TrimSpace(*request.Title)
+	if !validBoundedText(title, maxConversationTitleBytes, true) {
+		return ConversationCreateRequest{}, invalid(ErrorCodeConversationInvalid, "conversation title is invalid", nil)
+	}
+	canonical.Title = &title
+	return canonical, nil
+}
+
+// ComputeConversationCreateRequestHash 计算绑定 Workspace 与可选标题的稳定幂等哈希。
+func ComputeConversationCreateRequestHash(request ConversationCreateRequest) (string, error) {
+	canonical, err := CanonicalizeConversationCreateRequest(request)
+	if err != nil {
+		return "", err
+	}
+	payload := struct {
+		SchemaVersion int           `json:"schema_version"`
+		WorkspaceID   foundation.ID `json:"workspace_id"`
+		Title         *string       `json:"title"`
+	}{SchemaVersion: 1, WorkspaceID: canonical.WorkspaceID, Title: canonical.Title}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", inconsistent(ErrorCodeConversationInvalid, "conversation create request hash payload is invalid")
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 // ConversationStatus 是短期 RAG 会话的受控生命周期。
 type ConversationStatus string

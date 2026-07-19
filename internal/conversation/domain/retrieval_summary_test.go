@@ -1,8 +1,12 @@
 package domain
 
 import (
+	"encoding/json"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
@@ -84,6 +88,91 @@ func TestCanonicalizeRetrievalSummaryPreservesExplainableBoundedFacts(t *testing
 	clarification.CandidateCount = 1
 	if err := ValidateRetrievalSummary(testWorkspaceID, AnswerPublicationClarificationRequired, clarification); errorCode(err) != ErrorCodeRetrievalSummaryInvalid {
 		t.Fatalf("clarification with retrieval err=%v", err)
+	}
+}
+
+func TestDecodeRetrievalSummaryStrictlyRestoresCanonicalDocument(t *testing.T) {
+	raw := json.RawMessage(`{
+		"selected_count":1,
+		"candidate_count":2,
+		"conflict_count":0,
+		"degradations":[
+			{"capability":"rerank","code":"RERANK_UNAVAILABLE","retryable":true},
+			{"capability":"vector","code":"EMBEDDING_UNAVAILABLE","retryable":true}
+		],
+		"scope":{
+			"allow_web":false,
+			"captured_at_before":null,
+			"source_version_ids":[],
+			"path_prefixes":[" docs/runtime/ ","docs/runtime"],
+			"allow_original_sources":false,
+			"source_ids":[
+				"10000000-0000-4000-8000-000000000004",
+				"10000000-0000-4000-8000-000000000003",
+				"10000000-0000-4000-8000-000000000004"
+			],
+			"captured_at_from":"2026-07-19T08:00:00+08:00"
+		},
+		"requested_mode":"hybrid",
+		"effective_mode":"keyword",
+		"rewrites":["runtime recovery"],
+		"index_version_id":"10000000-0000-4000-8000-000000000020",
+		"embedding_version_id":null
+	}`)
+
+	decoded, err := DecodeRetrievalSummary(testWorkspaceID, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Scope.SourceIDs) != 2 || decoded.Scope.SourceIDs[0] != "10000000-0000-4000-8000-000000000003" ||
+		len(decoded.Scope.PathPrefixes) != 1 || decoded.Scope.PathPrefixes[0] != "docs/runtime" ||
+		decoded.Scope.CapturedAtFrom == nil || !decoded.Scope.CapturedAtFrom.Equal(time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)) ||
+		decoded.Scope.CapturedAtFrom.Location() != time.UTC || len(decoded.Degradations) != 2 ||
+		decoded.Degradations[0].Capability != retrievaldomain.SearchDegradationVector {
+		t.Fatalf("decoded=%#v", decoded)
+	}
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := DecodeRetrievalSummary(testWorkspaceID, encoded)
+	if err != nil || !reflect.DeepEqual(roundTrip, decoded) {
+		t.Fatalf("round trip=%#v err=%v encoded=%s", roundTrip, err, encoded)
+	}
+}
+
+func TestDecodeRetrievalSummaryRejectsMalformedPersistenceDocument(t *testing.T) {
+	valid := `{"rewrites":[],"requested_mode":"hybrid","effective_mode":"hybrid","scope":{"source_ids":[],"source_version_ids":[],"path_prefixes":[],"captured_at_from":null,"captured_at_before":null,"allow_original_sources":false,"allow_web":false},"index_version_id":null,"embedding_version_id":null,"candidate_count":0,"selected_count":0,"conflict_count":0,"degradations":[]}`
+	tests := []struct {
+		name        string
+		workspaceID foundation.ID
+		raw         string
+	}{
+		{name: "invalid workspace", workspaceID: "bad", raw: valid},
+		{name: "unknown field", workspaceID: testWorkspaceID, raw: valid[:len(valid)-1] + `,"unknown":true}`},
+		{name: "unknown nested field", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"allow_web":false}`, `"allow_web":false,"unknown":true}`, 1)},
+		{name: "duplicate field", workspaceID: testWorkspaceID, raw: valid[:len(valid)-1] + `,"candidate_count":0}`},
+		{name: "trailing value", workspaceID: testWorkspaceID, raw: valid + `{}`},
+		{name: "invalid type", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"candidate_count":0`, `"candidate_count":"0"`, 1)},
+		{name: "null count", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"candidate_count":0`, `"candidate_count":null`, 1)},
+		{name: "missing count", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `,"candidate_count":0`, "", 1)},
+		{name: "null scope boolean", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"allow_web":false`, `"allow_web":null`, 1)},
+		{name: "missing nullable id", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"index_version_id":null,`, "", 1)},
+		{name: "null degradation boolean", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"degradations":[]`, `"degradations":[{"capability":"vector","code":"EMBEDDING_UNAVAILABLE","retryable":null}]`, 1)},
+		{name: "null required list", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"rewrites":[]`, `"rewrites":null`, 1)},
+		{name: "invalid mode", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"requested_mode":"hybrid"`, `"requested_mode":"magic"`, 1)},
+		{name: "invalid time", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"captured_at_from":null`, `"captured_at_from":"tomorrow"`, 1)},
+		{name: "duplicate rewrite", workspaceID: testWorkspaceID, raw: strings.Replace(valid, `"rewrites":[]`, `"rewrites":["same","same"]`, 1)},
+		{name: "oversized document", workspaceID: testWorkspaceID, raw: strings.Repeat(" ", MaxRetrievalSummaryBytes) + valid},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := DecodeRetrievalSummary(test.workspaceID, json.RawMessage(test.raw))
+			var typed *foundation.Error
+			if !errors.As(err, &typed) || typed.Code != ErrorCodeRetrievalSummaryInvalid || typed.Kind != foundation.ErrorInvalidInput {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	}
 }
 

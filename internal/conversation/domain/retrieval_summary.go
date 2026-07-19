@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	foundationstrictjson "github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 )
 
@@ -46,6 +47,123 @@ type RetrievalSummary struct {
 	SelectedCount      int                        `json:"selected_count"`
 	ConflictCount      int                        `json:"conflict_count"`
 	Degradations       []RetrievalDegradation     `json:"degradations"`
+}
+
+type retrievalScopeSummaryPersistenceDocument struct {
+	SourceIDs            *[]foundation.ID `json:"source_ids"`
+	SourceVersionIDs     *[]foundation.ID `json:"source_version_ids"`
+	PathPrefixes         *[]string        `json:"path_prefixes"`
+	CapturedAtFrom       json.RawMessage  `json:"captured_at_from"`
+	CapturedAtBefore     json.RawMessage  `json:"captured_at_before"`
+	AllowOriginalSources *bool            `json:"allow_original_sources"`
+	AllowWeb             *bool            `json:"allow_web"`
+}
+
+type retrievalDegradationPersistenceDocument struct {
+	Capability *retrievaldomain.SearchDegradationCapability `json:"capability"`
+	Code       *string                                      `json:"code"`
+	Retryable  *bool                                        `json:"retryable"`
+}
+
+type retrievalSummaryPersistenceDocument struct {
+	Rewrites           *[]string                                  `json:"rewrites"`
+	RequestedMode      *retrievaldomain.SearchMode                `json:"requested_mode"`
+	EffectiveMode      *retrievaldomain.SearchMode                `json:"effective_mode"`
+	Scope              *retrievalScopeSummaryPersistenceDocument  `json:"scope"`
+	IndexVersionID     json.RawMessage                            `json:"index_version_id"`
+	EmbeddingVersionID json.RawMessage                            `json:"embedding_version_id"`
+	CandidateCount     *int                                       `json:"candidate_count"`
+	SelectedCount      *int                                       `json:"selected_count"`
+	ConflictCount      *int                                       `json:"conflict_count"`
+	Degradations       *[]retrievalDegradationPersistenceDocument `json:"degradations"`
+}
+
+// DecodeRetrievalSummary 严格解析持久化 JSON，并返回规范化的检索摘要副本。
+func DecodeRetrievalSummary(workspaceID foundation.ID, raw json.RawMessage) (RetrievalSummary, error) {
+	parsedWorkspaceID, err := foundation.ParseID(string(workspaceID))
+	if err != nil || parsedWorkspaceID != workspaceID {
+		return RetrievalSummary{}, invalid(ErrorCodeRetrievalSummaryInvalid, "retrieval summary workspace is invalid", err)
+	}
+	limits := foundationstrictjson.DefaultLimits()
+	limits.MaxDocumentBytes = MaxRetrievalSummaryBytes
+	limits.MaxStringBytes = MaxRetrievalSummaryBytes
+	limits.MaxArrayItems = retrievaldomain.MaxSearchFilterValues
+	limits.MaxObjectFields = 10
+	persisted, err := foundationstrictjson.DecodeObject[retrievalSummaryPersistenceDocument](raw, limits, nil)
+	if err != nil || persisted.Rewrites == nil || persisted.RequestedMode == nil || persisted.EffectiveMode == nil ||
+		persisted.Scope == nil || persisted.CandidateCount == nil || persisted.SelectedCount == nil ||
+		persisted.ConflictCount == nil || persisted.Degradations == nil {
+		return RetrievalSummary{}, invalid(ErrorCodeRetrievalSummaryInvalid, "retrieval summary document is invalid", err)
+	}
+	scope := persisted.Scope
+	if scope.SourceIDs == nil || scope.SourceVersionIDs == nil || scope.PathPrefixes == nil ||
+		scope.AllowOriginalSources == nil || scope.AllowWeb == nil {
+		return RetrievalSummary{}, invalid(ErrorCodeRetrievalSummaryInvalid, "retrieval summary scope document is invalid", nil)
+	}
+	fromText, err := decodeNullableJSONString(scope.CapturedAtFrom)
+	if err != nil {
+		return RetrievalSummary{}, invalid(ErrorCodeRetrievalSummaryInvalid, "retrieval summary scope start time is invalid", err)
+	}
+	from, err := parseQuestionScopeTime(fromText)
+	if err != nil {
+		return RetrievalSummary{}, invalid(ErrorCodeRetrievalSummaryInvalid, "retrieval summary scope start time is invalid", err)
+	}
+	beforeText, err := decodeNullableJSONString(scope.CapturedAtBefore)
+	if err != nil {
+		return RetrievalSummary{}, invalid(ErrorCodeRetrievalSummaryInvalid, "retrieval summary scope end time is invalid", err)
+	}
+	before, err := parseQuestionScopeTime(beforeText)
+	if err != nil {
+		return RetrievalSummary{}, invalid(ErrorCodeRetrievalSummaryInvalid, "retrieval summary scope end time is invalid", err)
+	}
+	indexVersionID, err := decodeNullableFoundationID(persisted.IndexVersionID)
+	if err != nil {
+		return RetrievalSummary{}, invalid(ErrorCodeRetrievalSummaryInvalid, "retrieval summary index version is invalid", err)
+	}
+	embeddingVersionID, err := decodeNullableFoundationID(persisted.EmbeddingVersionID)
+	if err != nil {
+		return RetrievalSummary{}, invalid(ErrorCodeRetrievalSummaryInvalid, "retrieval summary embedding version is invalid", err)
+	}
+	degradations := make([]RetrievalDegradation, len(*persisted.Degradations))
+	for index, degradation := range *persisted.Degradations {
+		if degradation.Capability == nil || degradation.Code == nil || degradation.Retryable == nil {
+			return RetrievalSummary{}, invalid(ErrorCodeRetrievalSummaryInvalid, "retrieval summary degradation document is invalid", nil)
+		}
+		degradations[index] = RetrievalDegradation{
+			Capability: *degradation.Capability,
+			Code:       *degradation.Code,
+			Retryable:  *degradation.Retryable,
+		}
+	}
+	decoded := RetrievalSummary{
+		Rewrites:      append([]string{}, (*persisted.Rewrites)...),
+		RequestedMode: *persisted.RequestedMode,
+		EffectiveMode: *persisted.EffectiveMode,
+		Scope: RetrievalScopeSummary{
+			SourceIDs:        append([]foundation.ID{}, (*scope.SourceIDs)...),
+			SourceVersionIDs: append([]foundation.ID{}, (*scope.SourceVersionIDs)...),
+			PathPrefixes:     append([]string{}, (*scope.PathPrefixes)...),
+			CapturedAtFrom:   from, CapturedAtBefore: before,
+			AllowOriginalSources: *scope.AllowOriginalSources, AllowWeb: *scope.AllowWeb,
+		},
+		IndexVersionID: indexVersionID, EmbeddingVersionID: embeddingVersionID,
+		CandidateCount: *persisted.CandidateCount, SelectedCount: *persisted.SelectedCount,
+		ConflictCount: *persisted.ConflictCount, Degradations: degradations,
+	}
+	canonical, err := CanonicalizeRetrievalSummary(workspaceID, decoded)
+	if err != nil {
+		return RetrievalSummary{}, err
+	}
+	return canonical, nil
+}
+
+func decodeNullableFoundationID(raw json.RawMessage) (*foundation.ID, error) {
+	value, err := decodeNullableJSONString(raw)
+	if err != nil || value == nil {
+		return nil, err
+	}
+	id := foundation.ID(*value)
+	return &id, nil
 }
 
 // CanonicalizeRetrievalSummary 校验、复制并规范化范围和降级顺序。

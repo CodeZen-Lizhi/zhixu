@@ -39,6 +39,7 @@
 
 - None - task complete
 
+
 ## Session 2: M2 Eino 隔离采用门禁
 
 **Date**: 2026-07-16
@@ -789,3 +790,39 @@ Applicability v1、Provenance、确认、状态机、端点兼容、Conflict 和
 ### Next Steps
 
 - None - task complete
+
+
+## Session 24: M6-04 Conversation 与 SSE 持久层检查点
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T04-T05）
+**Branch**: `dev`
+
+### Summary
+
+完成 Conversation create/list/read/turn/answer Repository、8 Turn/32 KiB Published Context、JSONB canonical
+readback、持久 Server Event Store、caller-owned AppendTx 与 SSE replay/heartbeat/cancel。主审修复了 Conversation
+exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创建仍以 Conversation 权威事实恢复。
+
+### Main Changes
+
+- Conversation 创建与 `conversation.created` 首次写入保持同一事务；event append failure 全部回滚。
+- commit response-loss、并发同键、不同请求冲突、事件投影清理后的 exact replay 均有真实 PostgreSQL 证据。
+- Conversation/Turn 使用稳定 keyset pagination；Turn/Answer/Workflow 与 Published Context 均为有界批量查询。
+- Server Event 只公开稳定 ID、状态、版本和计数；Last-Event-ID 支持 invalid/future/expired、窗口内补发和无游标水位起步。
+- 两轮独立只读审查无剩余问题；生产 `/api/v1/events` Router/Composition Root 接线按计划归 T11。
+
+### Testing
+
+- `go test ./internal/conversation/... ./internal/events/... ./internal/platform/migration -count=1`
+- `go test -race ./internal/conversation/... ./internal/events/... -count=1`
+- 真实 PostgreSQL：`go test -race -tags=integration -count=1 -p 1 ./internal/conversation/... ./internal/events/...`
+- `go vet ./internal/conversation/... ./internal/events/...`、`go mod tidy -diff`、`gofmt`、`git diff --check`
+
+### Status
+
+[IN PROGRESS] M6-04 T01-T05 completed; T06-T17 pending.
+
+### Next Steps
+
+- 实施 T06 Question → pending Answer → Workflow/Outbox/River Job/Event 的原子派发与 response-loss recovery。

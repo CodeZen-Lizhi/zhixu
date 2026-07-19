@@ -37,6 +37,68 @@ func TestCanonicalizePublishedResultOwnsStrictDocumentAndHash(t *testing.T) {
 	}
 }
 
+func TestProjectPublishedAnswerOwnsCanonicalAssistantTextAndCitations(t *testing.T) {
+	rag := validRAGPublishedResult(t)
+	ragProjection, err := ProjectPublishedAnswer(AnswerResultRAGAnswer, append([]byte(" \n"), rag.Document...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ragProjection.Type != AnswerResultRAGAnswer || ragProjection.ModelRunID != rag.ModelRunID ||
+		ragProjection.Hash != rag.Hash || string(ragProjection.Document) != string(rag.Document) ||
+		ragProjection.AssistantText != "Approved evidence supports the answer." || len(ragProjection.Citations) != 1 ||
+		ragProjection.Citations[0].ID != "citation-1" {
+		t.Fatalf("rag projection=%#v", ragProjection)
+	}
+
+	refusalRaw := mustJSON(t, agentdomain.RefusalResult{
+		ResultType: agentdomain.ResultTypeRefusal, SchemaID: agentdomain.RefusalSchemaID,
+		SchemaVersion: agentdomain.OutputSchemaVersionV1, ModelRunRef: "10000000-0000-4000-8000-000000000007",
+		Payload: agentdomain.RefusalPayload{
+			ReasonCode: agentdomain.RefusalNoRelevantEvidence, Summary: "No approved evidence was found.",
+			RetrievalScope: "Workspace approved knowledge", MissingRequirements: []string{"Approved evidence"},
+			SuggestedActions: []string{"Narrow the question"},
+		},
+	})
+	refusalProjection, err := ProjectPublishedAnswer(AnswerResultRefusal, refusalRaw)
+	if err != nil || refusalProjection.AssistantText != "No approved evidence was found." || refusalProjection.Citations == nil || len(refusalProjection.Citations) != 0 {
+		t.Fatalf("refusal projection=%#v err=%v", refusalProjection, err)
+	}
+
+	clarificationRaw := mustJSON(t, ClarificationResult{
+		ResultType: agentdomain.ResultTypeClarification, SchemaID: ClarificationSchemaID,
+		SchemaVersion: ClarificationSchemaVersionV1, ModelRunRef: "10000000-0000-4000-8000-000000000008",
+		Payload: ClarificationPayload{
+			Reason: "scope is ambiguous", Question: "Which environment?", SuggestedScopes: []string{},
+		},
+	})
+	clarificationProjection, err := ProjectPublishedAnswer(AnswerResultClarification, clarificationRaw)
+	if err != nil || clarificationProjection.AssistantText != "Which environment?" || clarificationProjection.Citations == nil || len(clarificationProjection.Citations) != 0 {
+		t.Fatalf("clarification projection=%#v err=%v", clarificationProjection, err)
+	}
+}
+
+func TestProjectPublishedAnswerRejectsResultContractDrift(t *testing.T) {
+	rag := validRAGPublishedResult(t)
+	tests := []struct {
+		name       string
+		resultType AnswerResultType
+		raw        json.RawMessage
+	}{
+		{name: "mismatched type", resultType: AnswerResultRefusal, raw: rag.Document},
+		{name: "unsupported type", resultType: "draft", raw: rag.Document},
+		{name: "unknown field", resultType: AnswerResultRAGAnswer, raw: append(append([]byte(nil), rag.Document[:len(rag.Document)-1]...), []byte(`,"unknown":true}`)...)},
+		{name: "malformed", resultType: AnswerResultRAGAnswer, raw: json.RawMessage(`{"result_type":`)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ProjectPublishedAnswer(test.resultType, test.raw)
+			if errorCode(err) != ErrorCodeAnswerInvalid {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestValidateAnswerRequiresOneCanonicalTerminalPublication(t *testing.T) {
 	now := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
 	pending := Answer{
@@ -167,4 +229,13 @@ func validCompletedRetrievalSummary(t *testing.T) RetrievalSummary {
 		t.Fatal(err)
 	}
 	return summary
+}
+
+func mustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }

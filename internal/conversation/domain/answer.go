@@ -31,6 +31,13 @@ type PublishedResult struct {
 	Hash       string
 }
 
+// PublishedAnswerProjection 是 Repository、HTTP 与有界会话上下文共享的最终结果投影。
+type PublishedAnswerProjection struct {
+	PublishedResult
+	AssistantText string
+	Citations     []agentdomain.Citation
+}
+
 // Answer 是 Question 接受时预分配、并由 Workflow 单次发布的持久结果槽。
 type Answer struct {
 	ID                foundation.ID
@@ -102,11 +109,26 @@ func ValidateAnswer(answer Answer) error {
 
 // CanonicalizePublishedResult 严格验证并规范化一个最终 Answer 结果。
 func CanonicalizePublishedResult(resultType AnswerResultType, raw json.RawMessage) (PublishedResult, error) {
+	projection, err := projectPublishedAnswer(resultType, raw)
+	if err != nil {
+		return PublishedResult{}, err
+	}
+	return projection.PublishedResult, nil
+}
+
+// ProjectPublishedAnswer 严格规范化最终结果，并投影可进入上下文的主文本与稳定引用。
+func ProjectPublishedAnswer(resultType AnswerResultType, raw json.RawMessage) (PublishedAnswerProjection, error) {
+	return projectPublishedAnswer(resultType, raw)
+}
+
+func projectPublishedAnswer(resultType AnswerResultType, raw json.RawMessage) (PublishedAnswerProjection, error) {
 	limits := agentdomain.DefaultDecodeLimits()
 	var (
-		modelRunID foundation.ID
-		document   json.RawMessage
-		err        error
+		modelRunID    foundation.ID
+		document      json.RawMessage
+		assistantText string
+		citations     = make([]agentdomain.Citation, 0)
+		err           error
 	)
 	switch resultType {
 	case AnswerResultRAGAnswer:
@@ -114,6 +136,8 @@ func CanonicalizePublishedResult(resultType AnswerResultType, raw json.RawMessag
 		decoded, err = agentdomain.DecodeRAGAnswerV2(raw, limits)
 		if err == nil {
 			modelRunID = decoded.ModelRunRef
+			assistantText = decoded.Payload.Conclusion
+			citations = append(citations, decoded.Payload.Citations...)
 			document, err = json.Marshal(decoded)
 		}
 	case AnswerResultRefusal:
@@ -121,6 +145,7 @@ func CanonicalizePublishedResult(resultType AnswerResultType, raw json.RawMessag
 		decoded, err = agentdomain.DecodeRefusal(raw, limits)
 		if err == nil {
 			modelRunID = decoded.ModelRunRef
+			assistantText = decoded.Payload.Summary
 			document, err = json.Marshal(decoded)
 		}
 	case AnswerResultClarification:
@@ -128,16 +153,23 @@ func CanonicalizePublishedResult(resultType AnswerResultType, raw json.RawMessag
 		decoded, err = DecodeClarification(raw, limits)
 		if err == nil {
 			modelRunID = decoded.ModelRunRef
+			assistantText = decoded.Payload.Question
 			document, err = json.Marshal(decoded)
 		}
 	default:
-		return PublishedResult{}, invalid(ErrorCodeAnswerInvalid, "answer result type is unsupported", nil)
+		return PublishedAnswerProjection{}, invalid(ErrorCodeAnswerInvalid, "answer result type is unsupported", nil)
 	}
 	if err != nil {
-		return PublishedResult{}, invalid(ErrorCodeAnswerInvalid, "answer result document is invalid", err)
+		return PublishedAnswerProjection{}, invalid(ErrorCodeAnswerInvalid, "answer result document is invalid", err)
 	}
 	digest := sha256.Sum256(document)
-	return PublishedResult{Type: resultType, ModelRunID: modelRunID, Document: document, Hash: hex.EncodeToString(digest[:])}, nil
+	return PublishedAnswerProjection{
+		PublishedResult: PublishedResult{
+			Type: resultType, ModelRunID: modelRunID, Document: document, Hash: hex.EncodeToString(digest[:]),
+		},
+		AssistantText: assistantText,
+		Citations:     citations,
+	}, nil
 }
 
 // AnswerPublicationStatus 是 Answer 持久发布槽的单向生命周期。

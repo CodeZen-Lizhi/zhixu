@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	foundationstrictjson "github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 )
 
@@ -27,6 +29,17 @@ type questionScopeDocument struct {
 	CapturedAtBefore     *string                    `json:"captured_at_before"`
 	AllowOriginalSources bool                       `json:"allow_original_sources"`
 	AllowWeb             bool                       `json:"allow_web"`
+}
+
+type questionScopePersistenceDocument struct {
+	RetrievalMode        *retrievaldomain.SearchMode `json:"retrieval_mode"`
+	SourceIDs            *[]foundation.ID            `json:"source_ids"`
+	SourceVersionIDs     *[]foundation.ID            `json:"source_version_ids"`
+	PathPrefixes         *[]string                   `json:"path_prefixes"`
+	CapturedAtFrom       json.RawMessage             `json:"captured_at_from"`
+	CapturedAtBefore     json.RawMessage             `json:"captured_at_before"`
+	AllowOriginalSources *bool                       `json:"allow_original_sources"`
+	AllowWeb             *bool                       `json:"allow_web"`
 }
 
 // AnswerDepth 是用户选择的回答详细程度。
@@ -170,6 +183,73 @@ func EncodeQuestionScope(request QuestionRequest) (json.RawMessage, error) {
 	return encoded, nil
 }
 
+// DecodeQuestionScope 严格解析持久化 Scope，并拒绝非规范过滤器或时间表示。
+func DecodeQuestionScope(workspaceID foundation.ID, raw json.RawMessage) (QuestionScope, error) {
+	parsedWorkspaceID, err := foundation.ParseID(string(workspaceID))
+	if err != nil || parsedWorkspaceID != workspaceID {
+		return QuestionScope{}, invalid(ErrorCodeQuestionInvalid, "question scope workspace is invalid", err)
+	}
+	limits := foundationstrictjson.DefaultLimits()
+	limits.MaxDocumentBytes = MaxQuestionScopeBytes
+	limits.MaxStringBytes = MaxQuestionScopeBytes
+	limits.MaxArrayItems = retrievaldomain.MaxSearchFilterValues
+	limits.MaxObjectFields = 8
+	persisted, err := foundationstrictjson.DecodeObject[questionScopePersistenceDocument](raw, limits, nil)
+	if err != nil || persisted.RetrievalMode == nil || persisted.SourceIDs == nil || persisted.SourceVersionIDs == nil ||
+		persisted.PathPrefixes == nil || persisted.AllowOriginalSources == nil || persisted.AllowWeb == nil {
+		return QuestionScope{}, invalid(ErrorCodeQuestionInvalid, "question scope document is invalid", err)
+	}
+	fromText, err := decodeNullableJSONString(persisted.CapturedAtFrom)
+	if err != nil {
+		return QuestionScope{}, invalid(ErrorCodeQuestionInvalid, "question scope start time is invalid", err)
+	}
+	from, err := parseQuestionScopeTime(fromText)
+	if err != nil {
+		return QuestionScope{}, invalid(ErrorCodeQuestionInvalid, "question scope start time is invalid", err)
+	}
+	beforeText, err := decodeNullableJSONString(persisted.CapturedAtBefore)
+	if err != nil {
+		return QuestionScope{}, invalid(ErrorCodeQuestionInvalid, "question scope end time is invalid", err)
+	}
+	before, err := parseQuestionScopeTime(beforeText)
+	if err != nil {
+		return QuestionScope{}, invalid(ErrorCodeQuestionInvalid, "question scope end time is invalid", err)
+	}
+	document := questionScopeDocument{
+		RetrievalMode:        *persisted.RetrievalMode,
+		SourceIDs:            append([]foundation.ID{}, (*persisted.SourceIDs)...),
+		SourceVersionIDs:     append([]foundation.ID{}, (*persisted.SourceVersionIDs)...),
+		PathPrefixes:         append([]string{}, (*persisted.PathPrefixes)...),
+		CapturedAtFrom:       fromText,
+		CapturedAtBefore:     beforeText,
+		AllowOriginalSources: *persisted.AllowOriginalSources,
+		AllowWeb:             *persisted.AllowWeb,
+	}
+	search, err := retrievaldomain.CanonicalizeSearchRequest(retrievaldomain.SearchRequest{
+		WorkspaceID: workspaceID,
+		Query:       "question-scope",
+		Mode:        document.RetrievalMode,
+		Filter: retrievaldomain.SearchFilter{
+			SourceIDs: document.SourceIDs, SourceVersionIDs: document.SourceVersionIDs,
+			PathPrefixes: document.PathPrefixes, CapturedAtFrom: from, CapturedAtBefore: before,
+		},
+		Limit: 1,
+	})
+	if err != nil {
+		return QuestionScope{}, invalid(ErrorCodeQuestionInvalid, "question scope document contains an invalid filter", err)
+	}
+	scope := QuestionScope{
+		RetrievalMode:        search.Mode,
+		Filter:               search.Filter,
+		AllowOriginalSources: document.AllowOriginalSources,
+		AllowWeb:             document.AllowWeb,
+	}
+	if !reflect.DeepEqual(canonicalQuestionScopeDocument(scope), document) {
+		return QuestionScope{}, invalid(ErrorCodeQuestionInvalid, "question scope document is not canonical", nil)
+	}
+	return scope, nil
+}
+
 // ComputeQuestionRequestHash 计算绑定正文、Scope 和回答选项的稳定幂等哈希。
 func ComputeQuestionRequestHash(request QuestionRequest) (string, error) {
 	canonical, err := CanonicalizeQuestionRequest(request)
@@ -221,4 +301,28 @@ func canonicalTime(value *time.Time) *string {
 	}
 	formatted := value.UTC().Format(time.RFC3339Nano)
 	return &formatted
+}
+
+func parseQuestionScopeTime(value *string) (*time.Time, error) {
+	if value == nil {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, *value)
+	if err != nil {
+		return nil, err
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
+}
+
+func decodeNullableJSONString(raw json.RawMessage) (*string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	var value string
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
