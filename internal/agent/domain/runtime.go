@@ -28,6 +28,8 @@ const (
 type ModelCallPhase string
 
 const (
+	// ModelCallPlan 表示生成检索改写或澄清判断的计划调用。
+	ModelCallPlan    ModelCallPhase = "PLAN"
 	ModelCallInitial ModelCallPhase = "INITIAL"
 	ModelCallRepair  ModelCallPhase = "REPAIR"
 	ModelCallReduced ModelCallPhase = "REDUCED"
@@ -217,7 +219,7 @@ func ValidateModelCallTransition(from, to ModelCallStatus) error {
 }
 
 func validModelCallPhase(value ModelCallPhase) bool {
-	return value == ModelCallInitial || value == ModelCallRepair || value == ModelCallReduced || value == ModelCallReview
+	return value == ModelCallPlan || value == ModelCallInitial || value == ModelCallRepair || value == ModelCallReduced || value == ModelCallReview
 }
 
 func validCompletionTime(completedAt *time.Time, earliest time.Time) bool {
@@ -229,7 +231,7 @@ func validModelRunCompletionTime(completedAt *time.Time, updatedAt time.Time) bo
 }
 
 func validSuccessfulResultType(value string) bool {
-	return value == ResultTypeRelationAssessment || value == ResultTypeRAGAnswer || value == ResultTypeFaithfulnessReview || value == ResultTypeToolRequest
+	return value == ResultTypeRelationAssessment || value == ResultTypeRAGAnswer || value == ResultTypeFaithfulnessReview || value == ResultTypeToolRequest || value == ResultTypeClarification
 }
 
 func canonicalErrorCode(value string) bool {

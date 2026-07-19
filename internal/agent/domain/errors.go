@@ -32,6 +32,8 @@ const (
 	ErrorCodeAssertionInvalid = "AGENT_ASSERTION_INVALID"
 	// ErrorCodeAnswerInvalid 表示 RAG Answer 载荷不合法。
 	ErrorCodeAnswerInvalid = "AGENT_ANSWER_INVALID"
+	// ErrorCodeQueryPlanInvalid 表示 RAG Query Plan 或澄清判断不合法。
+	ErrorCodeQueryPlanInvalid = "AGENT_QUERY_PLAN_INVALID"
 	// ErrorCodeRefusalInvalid 表示 Refusal 载荷不合法。
 	ErrorCodeRefusalInvalid = "AGENT_REFUSAL_INVALID"
 	// ErrorCodeFaithfulnessReviewInvalid 表示 Faithfulness Review 载荷不合法。

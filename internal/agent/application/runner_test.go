@@ -280,6 +280,22 @@ func TestChatContractAllowsReviewAndRejectsIdentityDrift(t *testing.T) {
 	}
 }
 
+func TestChatContractAllowsPlanPhase(t *testing.T) {
+	request := ChatRequest{
+		Phase:           domain.ModelCallPlan,
+		ProfileRef:      domain.ModelProfileRef{ID: "plan", Version: "v1"},
+		PromptRef:       domain.PromptRef{ID: "rag-query-plan", Version: "v1"},
+		SchemaRef:       domain.SchemaRef{ID: "agent.rag-query-plan", Version: "v1"},
+		Model:           testModelRef(),
+		Messages:        []ChatMessage{{Role: MessageRoleSystem, Content: "plan policy"}, {Role: MessageRoleUser, Content: "bounded context"}},
+		OutputSchema:    []byte(`{"type":"object"}`),
+		MaxOutputTokens: 100,
+	}
+	if err := ValidateChatRequest(request); err != nil {
+		t.Fatalf("plan request error = %v", err)
+	}
+}
+
 func testCatalog(t *testing.T, profileTimeout time.Duration) (*RuntimeCatalog, StructuredRunRequest, ModelProfile) {
 	t.Helper()
 	catalog := NewRuntimeCatalog()

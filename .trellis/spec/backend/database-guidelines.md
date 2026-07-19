@@ -879,3 +879,109 @@ Correct: Knowledge Application 提供服务端事实；所有 generation/REVIEW 
 - 迁移 `00019_tool_registry_security.sql` 只前向新增；有 Tool Call 数据时 Down 返回 SQLSTATE `55000`。
 
 Required real-PG tests：跨 Workspace/Run/Node/Attempt、RecordRefused、STARTED/CAS/replay/conflict、commit response-loss、两 Worker recovery、Heartbeat race、trusted write 新 Attempt 资格、guarded Down 和稳定 Timeline。
+
+## M6-04 Conversation And SSE Persistence Contract
+
+### 1. Scope / Trigger
+
+- Trigger：新增或修改 Conversation、Question、Answer、Answer Feedback、RAG v2/Clarification Model Run，或浏览器 SSE 重放投影。
+- Scope：`migrations/00020_rag_conversation_sse.sql`、`internal/conversation`、Agent PLAN/RAG v2 增量契约和
+  `ops.server_event`；Workflow retry/failure 仍由 `workflow.*` 拥有，正式 Auth/CSRF/Audit 仍归 M10。
+
+### 2. Signatures
+
+```go
+CanonicalizeQuestionRequest(QuestionRequest) (QuestionRequest, error)
+EncodeQuestionScope(QuestionRequest) (json.RawMessage, error)
+ComputeQuestionRequestHash(QuestionRequest) (string, error)
+ComputeContextHash([]PublishedTurn) (string, int64, int, error)
+CanonicalizePublishedResult(AnswerResultType, json.RawMessage) (PublishedResult, error)
+CanonicalizeFeedbackRequest(FeedbackRequest, Answer) (FeedbackRequest, error)
+ComputeFeedbackRequestHash(FeedbackRequest, Answer) (string, error)
+ValidateSearchModeOutcome(SearchMode, SearchMode, bool, []SearchDegradation) error
+```
+
+数据库事实源固定为：
+
+```text
+agent.conversation
+agent.question
+agent.answer
+agent.answer_feedback
+ops.server_event
+```
+
+`agent.model_call.phase` 增量接受 `PLAN`；同一 RAG Model Run 的调用序列允许
+`PLAN(1) -> INITIAL(2) -> REPAIR(3) -> REDUCED(4) -> REVIEW(>=2)`，没有 PLAN 的历史序列继续有效。
+`agent.model_run.final_result_type` 增量接受 `clarification`，既有结果类型保持可读。
+
+### 3. Contracts
+
+- Conversation 用 `(workspace_id,id)`、version CAS 和 `last_activity_at,id` 稳定排序；Question append-only，
+  `ordinal`、canonical scope/options、request/context hash 和幂等绑定创建后不可变。
+- Question Scope 与 retrieval summary 分别复用唯一字段定义编码为 canonical JSON，均不得超过 16 KiB；
+  Domain 必须在进入 Repository 前拒绝超限，不能让领域有效请求在数据库 CHECK 才失败。
+- Question 正文与历史只存在 Conversation 事实源。Workflow input、Model Call、Server Event 和日志不得复制正文；
+  执行上下文最多 8 个已发布 Turn、合计 32 KiB，并由稳定 context hash 绑定。
+- Answer 在接收 Question 时预分配为 `pending/version=1`，只允许一次 CAS 发布到
+  `completed|refused|clarification_required/version=2`。终态必须绑定同 Workspace 的 Question、Workflow Run、
+  terminal Model Run、canonical result bytes/hash 和不可变 retrieval summary；JSONB readback 必须先重建 canonical
+  document，再进入领域校验/API，不能把 PostgreSQL 的键顺序作为哈希输入。
+- Retrieval summary 的 requested/effective mode 与 degradation 必须复用 Retrieval Domain 的唯一模式矩阵：
+  Semantic 不得退化，Keyword 不得携带 query degradation，Hybrid→Keyword 必须显式 Vector degradation。
+- 一个 Conversation 最多一个 pending Answer，由数据库部分唯一约束而不是“先查后写”保证。
+- Feedback append-only 且按 canonical request hash 幂等。只允许已发布 Answer/Refusal；Clarification 和 pending
+  不可反馈。Citation 类反馈必须绑定 RAG v2 Answer 中真实 Citation，其他类型不得携带 Citation。
+- `ops.server_event.seq` 是浏览器重放游标，按 Workspace 单调读取，逻辑保留 24 小时。它是通知投影，不是
+  Conversation/Workflow/Audit 事实源；事件消费者必须回查权威资源。
+- Workflow Outbox 投影只复制 Workspace、Run、event type、source event ID 和受限资源摘要；不得复制
+  `workflow.outbox_event.payload`、Question/Answer 正文、Evidence、Tool 输出、Credential 或绝对路径。
+- `00020` 只做前向 additive 变更；五张新表任一有数据、存在 PLAN Call 或 Clarification Model Run 时，Down
+  返回 SQLSTATE `55000`。发布回滚保留数据并 forward fix。
+- SQL JSON 字段必填判断使用 `IS DISTINCT FROM`，避免缺失字段产生 NULL 后绕过 PL/pgSQL `IF`；Model Call
+  额外验证前驱 phase，禁止 `PLAN -> REPAIR/REDUCED/REVIEW` 跳过 INITIAL。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| Question 非法 UTF-8、NUL、超过 8 KiB，或 scope/options 非 canonical | `CONVERSATION_QUESTION_INVALID`，零持久副作用 |
+| canonical Scope 或 retrieval summary 超过 16 KiB | 领域 InvalidInput，不进入 SQL |
+| 同 Workspace/Conversation 幂等键同 hash | exact replay，不增加 ordinal/version |
+| 同幂等键不同 hash，或已有 pending Answer | Version/Idempotency conflict，不创建第二条 Workflow |
+| Answer 跨 Workspace/Question/Workflow/Model Run 或非法 CAS | FK/CHECK/trigger/Repository consistency failure |
+| RAG v2/Refusal/Clarification result 非 canonical，或与发布状态、Model Run/hash 不匹配 | `ANSWER_INVALID`，不发布 |
+| Semantic→Keyword、Keyword degradation 或 PLAN→REPAIR 等非法模式/阶段序列 | 领域或 SQL consistency failure |
+| Clarification/pending 收到 Feedback，或 Citation 绑定不闭合 | `ANSWER_FEEDBACK_INVALID`，Answer/Knowledge 不变 |
+| Server Event 非法、未来或过期序号 | 稳定 `SSE_*` Problem；不得回放其他 Workspace 或全量历史 |
+| `00020` 含业务数据时 Down | SQLSTATE `55000` |
+
+### 5. Good / Base / Bad Cases
+
+- Good：Question、pending Answer、Workflow/Outbox/River Job 和首个摘要事件在一个事务提交；最终 Answer 与
+  Model Run 在一个事务发布；响应丢失后按相同 hash 返回既有绑定。
+- Base：旧 RAG v1、无 PLAN 的 Model Call 序列和既有 Relation/Tool Workflow 继续可用；未启用 RAG 时不注册
+  Fake executor，Conversation 只读数据仍可保留。
+- Bad：Handler 先写 Question 再单独启动 Workflow；把 Workflow failed/cancelled 复制成 Answer 终态；直接把
+  Outbox raw payload 作为 SSE data；用 Clarification 冒充 Refusal 或允许其进入 Feedback。
+
+### 6. Tests Required
+
+- Domain：Question/options/scope/context/cursor、Query Plan、RAG v2、Clarification、Answer 发布、retrieval summary、
+  Feedback 的正常/边界/失败路径；固定 canonical hash 样例，覆盖 invalid UTF-8、NUL、大小、重复和 unknown field。
+- Agent：v1 decoder 继续拒绝 v2-only 字段；PLAN 为 call_no 1、随后 INITIAL 为 2；Clarification 为 additive
+  Model Run 结果类型，不改变旧三阶段/REVIEW 行为；真实 PG 拒绝 PLAN 后跳入 REPAIR。
+- Migration real PostgreSQL：空库 Up、重复 Up、空数据 Down/Up、Workspace 复合 FK、单 pending Answer、CAS、
+  append-only、缺失 Answer schema 字段、Feedback eligibility、24 小时 event expiry、安全 Outbox 投影和有数据 guarded Down。
+- Repository/HTTP/SSE 后续门禁必须补并发 exact replay、response-loss、稳定 cursor、批量上下文/Turn 查询、
+  future/expired Last-Event-ID、heartbeat/cancel 和正文 canary 扫描；单元 Fake 不替代真实 PostgreSQL 证据。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Question commit -> 另起事务启动 Workflow；SSE payload 保存正文以便客户端直接渲染。
+Correct: 同一 PostgreSQL UoW 原子创建 Question/Answer/Workflow/Job/Event；SSE 仅通知并触发权威查询。
+
+Wrong: Answer 表复制 Workflow failed/retry 状态，或 completed 后再单独完成 Model Run。
+Correct: Answer 只保存 pending/三个发布终态；运行状态从 Workflow 投影，Answer 与 Model Run 原子终结。
+```

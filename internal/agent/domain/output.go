@@ -25,6 +25,8 @@ const (
 	ToolRequestSchemaID = "agent.tool-request"
 	// OutputSchemaVersionV1 是项目自有 Agent 结构化输出的首个版本。
 	OutputSchemaVersionV1 = "v1"
+	// OutputSchemaVersionV2 是 RAG Answer 增量字段使用的第二个版本。
+	OutputSchemaVersionV2 = "v2"
 
 	ResultTypeRelationAssessment = "relation_assessment"
 	ResultTypeRAGAnswer          = "rag_answer"
@@ -32,12 +34,16 @@ const (
 	ResultTypeFaithfulnessReview = "faithfulness_review"
 	// ResultTypeToolRequest 是独立 Tool Request 的稳定 Agent 结果类型。
 	ResultTypeToolRequest = "tool_request"
+	// ResultTypeClarification 是会话澄清终态使用的稳定 Agent 结果类型。
+	ResultTypeClarification = "clarification"
 
 	maxOutputTextBytes = 16 * 1024
 	maxSummaryBytes    = 4 * 1024
 	maxReasonBytes     = 2 * 1024
 	maxExcerptBytes    = 32 * 1024
 	maxPayloadItems    = 500
+	maxRelatedTopics   = 50
+	maxFollowUps       = 5
 )
 
 // Citation 唯一选择一个 Workspace 内的 Chunk、Source Version 与 Source Span。
@@ -250,6 +256,60 @@ func (payload RAGAnswerPayload) Validate() error {
 		}
 	} else if len(payload.ConflictPositions) < 2 || !boundedText(payload.ConflictSummary, maxSummaryBytes, true) {
 		return invalid(ErrorCodeAnswerInvalid, "conflict answer requires both positions and a summary")
+	}
+	return nil
+}
+
+// RelatedTopic 是由服务端 Knowledge 候选绑定到实际引用的相关主题。
+type RelatedTopic struct {
+	TopicID     foundation.ID `json:"topic_id"`
+	Name        string        `json:"name"`
+	CitationIDs []string      `json:"citation_ids"`
+}
+
+// RAGAnswerPayloadV2 在 v1 回答上增加可验证的相关主题和后续问题。
+type RAGAnswerPayloadV2 struct {
+	RAGAnswerPayload
+	RelatedTopics     []RelatedTopic `json:"related_topics"`
+	FollowUpQuestions []string       `json:"follow_up_questions"`
+}
+
+// Validate 校验 v2 扩展字段与 v1 Citation 闭包保持一致。
+func (payload RAGAnswerPayloadV2) Validate() error {
+	if err := payload.RAGAnswerPayload.Validate(); err != nil {
+		return err
+	}
+	if len(payload.RelatedTopics) == 0 || len(payload.RelatedTopics) > maxRelatedTopics ||
+		len(payload.FollowUpQuestions) == 0 || len(payload.FollowUpQuestions) > maxFollowUps ||
+		!canonicalTextList(payload.FollowUpQuestions, true, maxFollowUps, maxReasonBytes) {
+		return invalid(ErrorCodeAnswerInvalid, "rag answer v2 topics or follow-up questions are invalid")
+	}
+	citationIDs := make(map[string]struct{}, len(payload.Citations))
+	for _, citation := range payload.Citations {
+		citationIDs[citation.ID] = struct{}{}
+	}
+	seenTopics := make(map[foundation.ID]struct{}, len(payload.RelatedTopics))
+	for _, topic := range payload.RelatedTopics {
+		displayName, _, err := knowledgedomain.NormalizeTopicText(topic.Name)
+		if err != nil || displayName != topic.Name || !canonicalID(topic.TopicID) || !canonicalUniqueReferences(topic.CitationIDs, true) {
+			return invalid(ErrorCodeAnswerInvalid, "related topic binding is invalid")
+		}
+		if _, duplicate := seenTopics[topic.TopicID]; duplicate {
+			return invalid(ErrorCodeAnswerInvalid, "related topic is duplicated")
+		}
+		seenTopics[topic.TopicID] = struct{}{}
+		for _, citationID := range topic.CitationIDs {
+			if _, exists := citationIDs[citationID]; !exists {
+				return invalid(ErrorCodeAnswerInvalid, "related topic references an unknown citation")
+			}
+		}
+	}
+	seenQuestions := make(map[string]struct{}, len(payload.FollowUpQuestions))
+	for _, question := range payload.FollowUpQuestions {
+		if _, duplicate := seenQuestions[question]; duplicate {
+			return invalid(ErrorCodeAnswerInvalid, "follow-up question is duplicated")
+		}
+		seenQuestions[question] = struct{}{}
 	}
 	return nil
 }
@@ -472,6 +532,24 @@ type RAGAnswerResult struct {
 	Payload       RAGAnswerPayload `json:"payload"`
 }
 
+// RAGAnswerResultV2 是向后兼容增加相关主题和后续问题的回答 Envelope。
+type RAGAnswerResultV2 struct {
+	ResultType    string             `json:"result_type"`
+	SchemaID      string             `json:"schema_id"`
+	SchemaVersion string             `json:"schema_version"`
+	ModelRunRef   foundation.ID      `json:"model_run_ref"`
+	Payload       RAGAnswerPayloadV2 `json:"payload"`
+}
+
+// Validate 校验 RAG Answer v2 Envelope 与扩展载荷。
+func (result RAGAnswerResultV2) Validate() error {
+	if result.ResultType != ResultTypeRAGAnswer || result.SchemaID != RAGAnswerSchemaID ||
+		result.SchemaVersion != OutputSchemaVersionV2 || !canonicalID(result.ModelRunRef) {
+		return invalid(ErrorCodeSchemaInvalid, "rag answer v2 envelope is invalid")
+	}
+	return result.Payload.Validate()
+}
+
 // Validate 校验 RAG Answer Envelope 与载荷。
 func (result RAGAnswerResult) Validate() error {
 	if result.ResultType != ResultTypeRAGAnswer || result.SchemaID != RAGAnswerSchemaID ||
@@ -527,6 +605,11 @@ func DecodeRAGAnswer(raw []byte, limits DecodeLimits) (RAGAnswerResult, error) {
 	return DecodeStrict(raw, limits, RAGAnswerResult.Validate)
 }
 
+// DecodeRAGAnswerV2 严格解析一个 RAG answer v2 文档。
+func DecodeRAGAnswerV2(raw []byte, limits DecodeLimits) (RAGAnswerResultV2, error) {
+	return DecodeStrict(raw, limits, RAGAnswerResultV2.Validate)
+}
+
 // DecodeRefusal 严格解析一个 refusal v1 文档。
 func DecodeRefusal(raw []byte, limits DecodeLimits) (RefusalResult, error) {
 	return DecodeStrict(raw, limits, RefusalResult.Validate)
@@ -564,7 +647,7 @@ func canonicalID(value foundation.ID) bool {
 }
 
 func boundedText(value string, maximum int, required bool) bool {
-	if !utf8.ValidString(value) || strings.TrimSpace(value) != value || len(value) > maximum {
+	if !utf8.ValidString(value) || strings.TrimSpace(value) != value || strings.ContainsRune(value, '\x00') || len(value) > maximum {
 		return false
 	}
 	return !required || value != ""

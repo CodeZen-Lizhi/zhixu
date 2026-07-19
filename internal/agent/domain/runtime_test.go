@@ -111,6 +111,24 @@ func TestSuccessfulModelRunAcceptsIndependentToolRequestResultType(t *testing.T)
 	}
 }
 
+func TestPlanCallAndClarificationResultRemainAdditive(t *testing.T) {
+	call := validStartedCall()
+	call.Phase = ModelCallPlan
+	if err := ValidateModelCall(call); err != nil {
+		t.Fatalf("plan model call rejected: %v", err)
+	}
+
+	run := validModelRun()
+	completed := run.UpdatedAt.Add(time.Second)
+	run.Status = ModelRunSucceeded
+	run.FinalResultType = ResultTypeClarification
+	run.CompletedAt = &completed
+	run.UpdatedAt = completed
+	if err := ValidateModelRun(run); err != nil {
+		t.Fatalf("clarification model run rejected: %v", err)
+	}
+}
+
 func TestModelCallValidationPreservesUnknownOutcome(t *testing.T) {
 	call := validStartedCall()
 	if err := ValidateModelCall(call); err != nil {

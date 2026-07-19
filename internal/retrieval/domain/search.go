@@ -376,30 +376,41 @@ func validateEvidenceV1(item EvidenceV1) error {
 	return nil
 }
 
-func validateSearchModeMatrix(requested SearchMode, result SearchResult) error {
-	vectorDegraded := hasSearchDegradation(result.Degradations, SearchDegradationVector)
+// ValidateSearchModeOutcome 校验请求模式、实际模式、Embedding 与查询降级的共享结果矩阵。
+func ValidateSearchModeOutcome(requested, effective SearchMode, hasEmbedding bool, degradations []SearchDegradation) error {
+	canonical, err := NormalizeSearchDegradations(degradations)
+	if err != nil || !equalSearchDegradations(canonical, degradations) || !validSearchMode(requested) || !validSearchMode(effective) {
+		return inconsistent(ErrorCodeSearchResultInvalid, "search mode outcome is invalid")
+	}
+	vectorDegraded := hasSearchDegradation(degradations, SearchDegradationVector)
 	switch requested {
 	case SearchModeKeyword:
-		if result.EffectiveMode != SearchModeKeyword || len(result.Degradations) != 0 {
+		if effective != SearchModeKeyword || len(degradations) != 0 {
 			return inconsistent(ErrorCodeSearchResultInvalid, "keyword search cannot change mode or report query degradation")
 		}
 	case SearchModeSemantic:
-		if result.EffectiveMode != SearchModeSemantic || result.EmbeddingVersionID == nil ||
-			HasDegradedCapability(result.IndexDegradedCapabilities, DegradedVector) || vectorDegraded {
+		if effective != SearchModeSemantic || !hasEmbedding || vectorDegraded {
 			return inconsistent(ErrorCodeSearchResultInvalid, "semantic search requires complete vector capability")
 		}
 	case SearchModeHybrid:
-		if result.EffectiveMode != SearchModeHybrid && result.EffectiveMode != SearchModeKeyword {
+		if effective != SearchModeHybrid && effective != SearchModeKeyword {
 			return inconsistent(ErrorCodeSearchResultInvalid, "hybrid search effective mode is invalid")
 		}
-		if result.EffectiveMode == SearchModeKeyword && !vectorDegraded {
+		if effective == SearchModeKeyword && !vectorDegraded {
 			return inconsistent(ErrorCodeSearchResultInvalid, "hybrid keyword fallback requires vector degradation")
 		}
-		if result.EffectiveMode == SearchModeHybrid && result.EmbeddingVersionID == nil {
+		if effective == SearchModeHybrid && !hasEmbedding {
 			return inconsistent(ErrorCodeSearchResultInvalid, "effective hybrid search requires an embedding version")
 		}
 	}
 	return nil
+}
+
+func validateSearchModeMatrix(requested SearchMode, result SearchResult) error {
+	if requested == SearchModeSemantic && HasDegradedCapability(result.IndexDegradedCapabilities, DegradedVector) {
+		return inconsistent(ErrorCodeSearchResultInvalid, "semantic search requires complete vector capability")
+	}
+	return ValidateSearchModeOutcome(requested, result.EffectiveMode, result.EmbeddingVersionID != nil, result.Degradations)
 }
 
 func validSearchMode(mode SearchMode) bool {

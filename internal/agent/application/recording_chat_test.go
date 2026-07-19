@@ -66,6 +66,48 @@ func TestRecordingChatModelContinuesCallNumbersForReviewWithoutQueryingMax(t *te
 	}
 }
 
+func TestRecordingChatModelPersistsPlanBeforeGenerationWithStableCallNumbers(t *testing.T) {
+	modelRef := domain.ModelRef{AdapterName: "test-adapter", AdapterVersion: "v1", ModelID: "test-model", ModelVersion: "v1"}
+	response := ChatResponse{Model: modelRef, Content: []byte(`{"ok":true}`), Usage: domain.TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}
+	repository := &recordingRepository{}
+	model, err := NewRecordingChatModel(RecordingChatModelDependencies{
+		Model: NewDeterministicChatModel(
+			DeterministicChatStep{Response: response},
+			DeterministicChatStep{Response: response},
+		),
+		Repository:  repository,
+		WorkspaceID: "81000000-0000-4000-8000-000000000001",
+		ModelRunID:  "81000000-0000-4000-8000-000000000002",
+		IDs:         &recordingIDs{next: 30},
+		Clock:       foundation.FixedClock{Value: time.Date(2026, 7, 19, 1, 0, 0, 0, time.UTC)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan := recordingRequest(modelRef, domain.ModelCallPlan)
+	plan.PromptRef = domain.PromptRef{ID: "rag-query-plan", Version: "v1"}
+	plan.SchemaRef = domain.SchemaRef{ID: domain.RAGQueryPlanSchemaID, Version: domain.OutputSchemaVersionV1}
+	initial := recordingRequest(modelRef, domain.ModelCallInitial)
+	initial.PromptRef = domain.PromptRef{ID: "rag-answer", Version: "v2"}
+	initial.SchemaRef = domain.SchemaRef{ID: domain.RAGAnswerSchemaID, Version: domain.OutputSchemaVersionV2}
+	for _, request := range []ChatRequest{plan, initial} {
+		if _, err := model.Chat(context.Background(), request); err != nil {
+			t.Fatalf("phase=%s err=%v", request.Phase, err)
+		}
+	}
+
+	if len(repository.calls) != 2 {
+		t.Fatalf("calls=%d", len(repository.calls))
+	}
+	for index, phase := range []domain.ModelCallPhase{domain.ModelCallPlan, domain.ModelCallInitial} {
+		call := repository.calls[index]
+		if call.CallNo != index+1 || call.Phase != phase || call.Status != domain.ModelCallSucceeded {
+			t.Fatalf("call[%d]=%+v", index, call)
+		}
+	}
+}
+
 func recordingRequest(model domain.ModelRef, phase domain.ModelCallPhase) ChatRequest {
 	return ChatRequest{
 		Phase:      phase,

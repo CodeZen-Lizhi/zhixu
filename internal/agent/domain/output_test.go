@@ -129,6 +129,55 @@ func TestRAGAnswerEnforcesAssertionCitationClosureAndConflictDisclosure(t *testi
 	}
 }
 
+func TestRAGAnswerV2AddsBoundTopicsAndFollowUpsWithoutChangingV1(t *testing.T) {
+	payload := validAnswerPayloadV2()
+	result := RAGAnswerResultV2{
+		ResultType: ResultTypeRAGAnswer, SchemaID: RAGAnswerSchemaID,
+		SchemaVersion: OutputSchemaVersionV2, ModelRunRef: testModelRunID, Payload: payload,
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeRAGAnswerV2(encoded, DefaultDecodeLimits())
+	if err != nil {
+		t.Fatalf("decode rag answer v2: %v", err)
+	}
+	if len(decoded.Payload.RelatedTopics) != 1 || len(decoded.Payload.FollowUpQuestions) != 2 {
+		t.Fatalf("decoded v2 payload=%#v", decoded.Payload)
+	}
+	if _, err := DecodeRAGAnswer(encoded, DefaultDecodeLimits()); err == nil {
+		t.Fatal("v1 decoder accepted v2-only fields")
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*RAGAnswerPayloadV2)
+	}{
+		{name: "missing related topic", mutate: func(value *RAGAnswerPayloadV2) { value.RelatedTopics = nil }},
+		{name: "topic without citation", mutate: func(value *RAGAnswerPayloadV2) { value.RelatedTopics[0].CitationIDs = nil }},
+		{name: "topic with unknown citation", mutate: func(value *RAGAnswerPayloadV2) { value.RelatedTopics[0].CitationIDs = []string{"missing"} }},
+		{name: "duplicate topic", mutate: func(value *RAGAnswerPayloadV2) {
+			value.RelatedTopics = append(value.RelatedTopics, value.RelatedTopics[0])
+		}},
+		{name: "missing follow up", mutate: func(value *RAGAnswerPayloadV2) { value.FollowUpQuestions = nil }},
+		{name: "too many follow ups", mutate: func(value *RAGAnswerPayloadV2) {
+			value.FollowUpQuestions = []string{"one?", "two?", "three?", "four?", "five?", "six?"}
+		}},
+		{name: "duplicate follow up", mutate: func(value *RAGAnswerPayloadV2) { value.FollowUpQuestions = []string{"next?", "next?"} }},
+		{name: "nul follow up", mutate: func(value *RAGAnswerPayloadV2) { value.FollowUpQuestions = []string{"next?\x00"} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := validAnswerPayloadV2()
+			test.mutate(&value)
+			if err := value.Validate(); errorCode(err) != ErrorCodeAnswerInvalid {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestEvidenceRequiresConflictBindingOnlyForDisputed(t *testing.T) {
 	evidence := Evidence{Citation: testCitation(), Excerpt: "supported text", Eligibility: knowledgedomain.EvidenceEligible}
 	if err := evidence.Validate(); err != nil {
@@ -340,6 +389,17 @@ func validAnswerPayload() RAGAnswerPayload {
 			{ClaimID: "10000000-0000-4000-8000-000000000011", Position: "use B", Applicability: json.RawMessage(`{"environment":"dev"}`), CitationIDs: []string{"cite-2"}, UpdatedAt: now},
 		},
 		ConflictSummary: "The positions apply to different environments.",
+	}
+}
+
+func validAnswerPayloadV2() RAGAnswerPayloadV2 {
+	return RAGAnswerPayloadV2{
+		RAGAnswerPayload: validAnswerPayload(),
+		RelatedTopics: []RelatedTopic{{
+			TopicID: "10000000-0000-4000-8000-000000000016",
+			Name:    "Runtime safety", CitationIDs: []string{"cite-1"},
+		}},
+		FollowUpQuestions: []string{"Which condition applies to production?", "What evidence would resolve the choice?"},
 	}
 }
 
