@@ -542,6 +542,95 @@ func TestRepositoryOpenConflictIsAtomicAndReplayable(t *testing.T) {
 	assertTerminalConflictAllowsClaimTransition(t, ctx, tx, fixture.workspaceID, conflict.ID, first.Claim.ID, now.Add(20*time.Second))
 }
 
+func TestRepositoryEvidenceEligibilityBatchesFiveHundredWithoutNPlusOne(t *testing.T) {
+	repository, database, ctx := integrationPoolRepository(t)
+	primary := seedProvenance(t, ctx, database, "eligibility-primary")
+	alternate := seedProvenanceForWorkspace(t, ctx, database, primary.workspaceID, "eligibility-alternate", true)
+	applicability := mustApplicability(t, `{"release":"v1"}`)
+	now := time.Now().UTC().Add(-time.Minute)
+	first := confirmClaim(t, ctx, repository, suggestClaim(t, ctx, repository, primary.workspaceID, "资格主张一", applicability, "eligibility-claim-a", now), primary, "eligibility-confirm-a", now.Add(time.Second))
+	second := confirmClaim(t, ctx, repository, suggestClaim(t, ctx, repository, primary.workspaceID, "资格主张二", applicability, "eligibility-claim-b", now.Add(2*time.Second)), alternate, "eligibility-confirm-b", now.Add(3*time.Second))
+
+	relation := newRelation(t, primary.workspaceID, domain.RelationSupports,
+		domain.NodeRef{Type: domain.NodeTypeClaim, ID: first.Claim.ID},
+		domain.NodeRef{Type: domain.NodeTypeClaim, ID: second.Claim.ID}, now.Add(4*time.Second))
+	initialEvidence := relationEvidence(t, primary.workspaceID, "来源支持候选关系", applicability, primary, now.Add(4*time.Second), nil)
+	initialEvidence.RelationID = relation.ID
+	if _, err := repository.SuggestRelation(ctx, domain.SuggestRelationRecord{
+		Relation: relation, Evidence: []domain.RelationEvidence{initialEvidence},
+		IdempotencyKey: "eligibility-relation-suggest", RequestHash: testHash("eligibility-relation-suggest"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	confirmation := domain.Confirmation{Method: domain.ConfirmationUserApproval, Reference: "approval:eligibility:1"}
+	confirmedEvidence := relationEvidence(t, primary.workspaceID, "审批确认正式关系", applicability, alternate, now.Add(5*time.Second), nil)
+	confirmedEvidence.RelationID = relation.ID
+	if _, err := repository.ConfirmRelation(ctx, domain.ConfirmRelationRecord{
+		WorkspaceID: primary.workspaceID, RelationID: relation.ID, ExpectedVersion: 1,
+		Evidence: confirmedEvidence, Confirmation: confirmation,
+		IdempotencyKey: "eligibility-relation-confirm", RequestHash: testHash("eligibility-relation-confirm"), At: now.Add(5 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	requested := make([]domain.ProvenanceRef, 0, domain.MaxBatchLimit)
+	requested = append(requested,
+		domain.ProvenanceRef{WorkspaceID: primary.workspaceID, SourceVersionID: alternate.sourceVersionID, SourceSpanID: alternate.sourceSpanID},
+		domain.ProvenanceRef{WorkspaceID: primary.workspaceID, SourceVersionID: primary.sourceVersionID, SourceSpanID: primary.sourceSpanID},
+	)
+	for len(requested) < domain.MaxBatchLimit {
+		requested = append(requested, domain.ProvenanceRef{WorkspaceID: primary.workspaceID, SourceVersionID: newID(t), SourceSpanID: newID(t)})
+	}
+	eligible, err := repository.BatchCheckEvidenceEligibility(ctx, domain.EvidenceEligibilityQuery{WorkspaceID: primary.workspaceID, Provenance: requested})
+	if err != nil || len(eligible) != domain.MaxBatchLimit {
+		t.Fatalf("initial eligibility count=%d err=%v", len(eligible), err)
+	}
+	primaryResult := findEligibility(t, eligible, requested[1])
+	alternateResult := findEligibility(t, eligible, requested[0])
+	if primaryResult.Eligibility != domain.EvidenceEligible || alternateResult.Eligibility != domain.EvidenceEligible ||
+		len(primaryResult.Bindings) != 2 || len(alternateResult.Bindings) != 2 {
+		t.Fatalf("confirmed eligibility primary=%#v alternate=%#v", primaryResult, alternateResult)
+	}
+
+	conflict, members := newConflict(t, primary.workspaceID, first.Claim, second.Claim, now.Add(6*time.Second))
+	if _, err := repository.OpenConflict(ctx, domain.OpenConflictRecord{
+		Conflict: conflict, Members: members, IdempotencyKey: "eligibility-conflict-open", RequestHash: testHash("eligibility-conflict-open"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	disputed, err := repository.BatchCheckEvidenceEligibility(ctx, domain.EvidenceEligibilityQuery{WorkspaceID: primary.workspaceID, Provenance: requested})
+	if err != nil || len(disputed) != domain.MaxBatchLimit {
+		t.Fatalf("disputed eligibility count=%d err=%v", len(disputed), err)
+	}
+	expectedClaims := map[domain.ProvenanceRef]foundation.ID{requested[0]: second.Claim.ID, requested[1]: first.Claim.ID}
+	for _, ref := range requested[:2] {
+		result := findEligibility(t, disputed, ref)
+		if result.Eligibility != domain.EvidenceEligibleWithConflict {
+			t.Fatalf("disputed eligibility=%#v", result)
+		}
+		foundConflict := false
+		foundDisputedClaim := false
+		for _, binding := range result.Bindings {
+			if binding.OwnerType == domain.EvidenceOwnerClaim && binding.OwnerID == expectedClaims[ref] {
+				foundDisputedClaim = binding.ClaimStatus == domain.ClaimStatusDisputed &&
+					binding.DisputedApplicability.Hash == applicability.Hash &&
+					string(binding.DisputedApplicability.CanonicalJSON) == string(applicability.CanonicalJSON) &&
+					binding.DisputedClaimUpdatedAtUTC.Equal(conflict.CreatedAt.UTC())
+			}
+			for _, conflictID := range binding.ConflictIDs {
+				foundConflict = foundConflict || conflictID == conflict.ID
+			}
+		}
+		if !foundConflict || !foundDisputedClaim {
+			t.Fatalf("conflict metadata missing: %#v", result)
+		}
+	}
+	unbound := findEligibility(t, disputed, requested[2])
+	if unbound.Eligibility != domain.EvidenceIneligible || len(unbound.Bindings) != 0 {
+		t.Fatalf("unbound provenance became eligible: %#v", unbound)
+	}
+}
+
 func TestDatabaseConfirmedRelationRequiresMatchingConfirmationEvidence(t *testing.T) {
 	repository, pool, ctx := integrationPoolRepository(t)
 	fixture := seedProvenance(t, ctx, pool, "relation-confirmation-guard")
@@ -955,6 +1044,17 @@ func mustApplicability(t *testing.T, raw string) domain.Applicability {
 		t.Fatal(err)
 	}
 	return value
+}
+
+func findEligibility(t *testing.T, values []domain.ProvenanceEligibility, ref domain.ProvenanceRef) domain.ProvenanceEligibility {
+	t.Helper()
+	for _, value := range values {
+		if value.Provenance == ref {
+			return value
+		}
+	}
+	t.Fatalf("eligibility result missing provenance %#v", ref)
+	return domain.ProvenanceEligibility{}
 }
 
 func newID(t *testing.T) foundation.ID {

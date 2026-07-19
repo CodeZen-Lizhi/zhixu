@@ -15,14 +15,14 @@ import (
 
 // ExecutionContext is the project-owned input passed to a registered workflow executor.
 type ExecutionContext struct {
-	WorkspaceID, RunID, NodeRunID foundation.ID
-	NodeKind                      string
-	InputSchemaVersion            int
-	AttemptNo                     int
-	DispatchNo                    int
-	RetryNo                       int
-	LeaseOwner                    string
-	Input                         json.RawMessage
+	WorkspaceID, RunID, NodeRunID, NodeAttemptID foundation.ID
+	NodeKind                                     string
+	InputSchemaVersion                           int
+	AttemptNo                                    int
+	DispatchNo                                   int
+	RetryNo                                      int
+	LeaseOwner                                   string
+	Input                                        json.RawMessage
 }
 
 // ExecutionResult is the project-owned successful result returned by an executor.
@@ -102,6 +102,7 @@ type ExecutorRegistry struct {
 	mu        sync.RWMutex
 	catalog   ValidationCatalog
 	executors map[executorKey]Executor
+	contracts map[executorKey]struct{}
 	frozen    bool
 }
 
@@ -110,7 +111,25 @@ func NewExecutorRegistry(catalog ValidationCatalog) (*ExecutorRegistry, error) {
 	if len(catalog.schemaVersions) == 0 {
 		return nil, registryError(foundation.ErrorDependencyUnavailable, "WORKFLOW_VALIDATION_CATALOG_MISSING", errors.New("validation catalog is not initialized"))
 	}
-	return &ExecutorRegistry{catalog: catalog, executors: make(map[executorKey]Executor)}, nil
+	return &ExecutorRegistry{catalog: catalog, executors: make(map[executorKey]Executor), contracts: make(map[executorKey]struct{})}, nil
+}
+
+// RegisterContract 登记 API 与 Worker 共享的 Node kind/schema 契约，不构造可执行实现。
+func (r *ExecutorRegistry) RegisterContract(kind string, inputSchemaVersion int) error {
+	if r == nil {
+		return registryError(foundation.ErrorDependencyUnavailable, "WORKFLOW_EXECUTOR_REGISTRY_MISSING", errors.New("executor registry is nil"))
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key, err := r.validateRegistration(kind, inputSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if _, exists := r.contracts[key]; exists {
+		return registryError(foundation.ErrorVersionConflict, "WORKFLOW_EXECUTOR_CONTRACT_DUPLICATE", errors.New("executor contract is already registered"))
+	}
+	r.contracts[key] = struct{}{}
+	return nil
 }
 
 // Register adds an executor under its stable node kind and input schema version.
@@ -120,22 +139,33 @@ func (r *ExecutorRegistry) Register(kind string, inputSchemaVersion int, executo
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.frozen {
-		return registryError(foundation.ErrorVersionConflict, "WORKFLOW_EXECUTOR_REGISTRY_FROZEN", errors.New("executor registry is frozen"))
+	key, err := r.validateRegistration(kind, inputSchemaVersion)
+	if err != nil {
+		return err
 	}
-	kind = strings.TrimSpace(kind)
-	if kind == "" || isNilExecutor(executor) {
+	if isNilExecutor(executor) {
 		return registryError(foundation.ErrorInvalidInput, "WORKFLOW_EXECUTOR_INVALID", errors.New("executor kind or dependency is missing"))
 	}
-	if !r.catalog.knowsSchema(inputSchemaVersion) {
-		return registryError(foundation.ErrorInvalidInput, "WORKFLOW_EXECUTOR_SCHEMA_UNKNOWN", errors.New("executor input schema version is unknown"))
-	}
-	key := executorKey{kind: kind, inputSchemaVersion: inputSchemaVersion}
 	if _, exists := r.executors[key]; exists {
 		return registryError(foundation.ErrorVersionConflict, "WORKFLOW_EXECUTOR_DUPLICATE", errors.New("executor key is already registered"))
 	}
 	r.executors[key] = executor
+	r.contracts[key] = struct{}{}
 	return nil
+}
+
+func (r *ExecutorRegistry) validateRegistration(kind string, inputSchemaVersion int) (executorKey, error) {
+	if r.frozen {
+		return executorKey{}, registryError(foundation.ErrorVersionConflict, "WORKFLOW_EXECUTOR_REGISTRY_FROZEN", errors.New("executor registry is frozen"))
+	}
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return executorKey{}, registryError(foundation.ErrorInvalidInput, "WORKFLOW_EXECUTOR_INVALID", errors.New("executor kind is missing"))
+	}
+	if !r.catalog.knowsSchema(inputSchemaVersion) {
+		return executorKey{}, registryError(foundation.ErrorInvalidInput, "WORKFLOW_EXECUTOR_SCHEMA_UNKNOWN", errors.New("executor input schema version is unknown"))
+	}
+	return executorKey{kind: kind, inputSchemaVersion: inputSchemaVersion}, nil
 }
 
 // Freeze makes the executor registry read-only.
@@ -148,11 +178,25 @@ func (r *ExecutorRegistry) Freeze() error {
 	if r.frozen {
 		return nil
 	}
-	if len(r.executors) == 0 {
+	if len(r.contracts) == 0 {
 		return registryError(foundation.ErrorDependencyUnavailable, "WORKFLOW_EXECUTOR_REGISTRY_EMPTY", errors.New("executor registry is empty"))
 	}
 	r.frozen = true
 	return nil
+}
+
+// SupportsContract 判断冻结 Registry 是否声明了指定 Node kind/schema 契约。
+func (r *ExecutorRegistry) SupportsContract(kind string, inputSchemaVersion int) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if !r.frozen {
+		return false
+	}
+	_, exists := r.contracts[executorKey{kind: strings.TrimSpace(kind), inputSchemaVersion: inputSchemaVersion}]
+	return exists
 }
 
 // Resolve returns the frozen executor registered for a node kind and input schema version.

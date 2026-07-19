@@ -40,7 +40,7 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 17 || applied != 17 {
+	if maxVersion != 18 || applied != 18 {
 		t.Fatalf("project history max=%d applied=%d", maxVersion, applied)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE tablename LIKE 'river_%' AND schemaname <> 'workflow'`).Scan(&wrongSchema); err != nil {
@@ -621,6 +621,9 @@ func migrationProvider(t *testing.T, pool *pgxpool.Pool) *goose.Provider {
 func downEmptyKnowledgeMigration(t *testing.T, ctx context.Context, provider *goose.Provider) {
 	t.Helper()
 	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00018 Down rejected empty Agent Runtime schema: %v", err)
+	}
+	if _, err := provider.Down(ctx); err != nil {
 		t.Fatalf("00017 Down rejected empty Knowledge Domain schema: %v", err)
 	}
 }
@@ -641,7 +644,7 @@ func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 17 || applied != 17 {
+	if maxVersion != 18 || applied != 18 {
 		t.Fatalf("adopted history max=%d applied=%d", maxVersion, applied)
 	}
 }

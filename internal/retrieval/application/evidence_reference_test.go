@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,58 @@ func TestEvidenceReferenceServiceReturnsSourceVersionWithoutReadingArtifact(t *t
 	}
 }
 
+func TestEvidenceReferenceServiceOpensCompleteCitationTuple(t *testing.T) {
+	content := []byte("trusted citation excerpt")
+	reference := applicationSourceSpanReference(content, content)
+	store := &fakeEvidenceReferenceStore{sourceSpan: reference}
+	reader := &fakeEvidenceArtifactReader{artifact: EvidenceArtifact{
+		WorkspaceID: reference.SourceVersion.WorkspaceID, SourceVersionID: reference.SourceVersion.SourceVersionID,
+		ContentArtifactID: reference.SourceVersion.ContentArtifactID, ContentHash: sha256Hex(content), ByteSize: int64(len(content)), Bytes: content,
+	}}
+	service, err := NewEvidenceReferenceService(store, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := domain.CitationReferenceQuery{
+		WorkspaceID: reference.SourceVersion.WorkspaceID, IndexVersionID: "91000000-0000-4000-8000-000000000017",
+		ChunkID: "91000000-0000-4000-8000-000000000018", SourceVersionID: reference.SourceVersion.SourceVersionID, SourceSpanID: reference.Span.ID,
+	}
+	opened, err := service.OpenCitationEvidence(context.Background(), query)
+	if err != nil || opened.Excerpt != string(content) || store.citationQuery != query {
+		t.Fatalf("opened=%+v query=%+v err=%v", opened, store.citationQuery, err)
+	}
+}
+
+func TestEvidenceReferenceServiceBatchesFiveHundredCitationsAndReadsArtifactOnce(t *testing.T) {
+	content := []byte("shared immutable evidence")
+	reference := applicationSourceSpanReference(content, content)
+	store := &fakeEvidenceReferenceStore{sourceSpan: reference}
+	reader := &fakeEvidenceArtifactReader{artifact: EvidenceArtifact{
+		WorkspaceID: reference.SourceVersion.WorkspaceID, SourceVersionID: reference.SourceVersion.SourceVersionID,
+		ContentArtifactID: reference.SourceVersion.ContentArtifactID, ContentHash: sha256Hex(content), ByteSize: int64(len(content)), Bytes: content,
+	}}
+	service, err := NewEvidenceReferenceService(store, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queries := make([]domain.CitationReferenceQuery, 500)
+	for index := range queries {
+		queries[index] = domain.CitationReferenceQuery{
+			WorkspaceID: reference.SourceVersion.WorkspaceID, IndexVersionID: "91000000-0000-4000-8000-000000000017",
+			ChunkID:         foundation.ID(fmt.Sprintf("92%06d-0000-4000-8000-%012d", index, index+1)),
+			SourceVersionID: reference.SourceVersion.SourceVersionID,
+			SourceSpanID:    foundation.ID(fmt.Sprintf("93%06d-0000-4000-8000-%012d", index, index+1)),
+		}
+	}
+	opened, err := service.OpenCitationEvidenceBatch(context.Background(), queries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opened) != 500 || store.citationCalls != 1 || reader.calls != 1 {
+		t.Fatalf("opened=%d store_calls=%d reader_calls=%d", len(opened), store.citationCalls, reader.calls)
+	}
+}
+
 func TestEvidenceReferenceServiceFailsClosedOnArtifactOrExcerptMismatch(t *testing.T) {
 	content := []byte("immutable evidence")
 	reference := applicationSourceSpanReference(content, content)
@@ -96,6 +149,14 @@ func TestEvidenceReferenceServiceFailsClosedOnArtifactOrExcerptMismatch(t *testi
 			if !errors.As(err, &classified) || classified.Kind != foundation.ErrorConsistencyViolation || classified.Code != evidenceArtifactInvalidCode {
 				t.Fatalf("expected evidence artifact consistency error, got %v", err)
 			}
+			_, err = service.OpenCitationEvidence(context.Background(), domain.CitationReferenceQuery{
+				WorkspaceID: reference.SourceVersion.WorkspaceID, IndexVersionID: "91000000-0000-4000-8000-000000000017",
+				ChunkID: "91000000-0000-4000-8000-000000000018", SourceVersionID: reference.SourceVersion.SourceVersionID, SourceSpanID: reference.Span.ID,
+			})
+			classified = nil
+			if !errors.As(err, &classified) || classified.Kind != foundation.ErrorConsistencyViolation || classified.Code != evidenceArtifactInvalidCode {
+				t.Fatalf("expected citation artifact consistency error, got %v", err)
+			}
 		})
 	}
 }
@@ -128,6 +189,8 @@ func sha256Hex(value []byte) string {
 type fakeEvidenceReferenceStore struct {
 	sourceVersion domain.SourceVersionReference
 	sourceSpan    domain.SourceSpanReference
+	citationQuery domain.CitationReferenceQuery
+	citationCalls int
 	err           error
 }
 
@@ -137,6 +200,21 @@ func (f *fakeEvidenceReferenceStore) LoadSourceVersionReference(context.Context,
 
 func (f *fakeEvidenceReferenceStore) LoadSourceSpanReference(context.Context, foundation.ID, foundation.ID, foundation.ID) (domain.SourceSpanReference, error) {
 	return f.sourceSpan, f.err
+}
+
+func (f *fakeEvidenceReferenceStore) LoadCitationSourceSpanReferences(_ context.Context, queries []domain.CitationReferenceQuery) ([]CitationSourceSpanBinding, error) {
+	f.citationCalls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.citationQuery = queries[0]
+	result := make([]CitationSourceSpanBinding, len(queries))
+	for index, query := range queries {
+		reference := f.sourceSpan
+		reference.Span.ID = query.SourceSpanID
+		result[index] = CitationSourceSpanBinding{Query: query, Reference: reference}
+	}
+	return result, nil
 }
 
 type fakeEvidenceArtifactReader struct {

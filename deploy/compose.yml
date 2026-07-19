@@ -12,6 +12,17 @@ x-embedding-environment: &embedding-environment
   ZHIXU_EMBEDDING_TIMEOUT: ${ZHIXU_EMBEDDING_TIMEOUT:-30s}
   ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES: ${ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES:-67108864}
 
+x-chat-environment: &chat-environment
+  ZHIXU_CHAT_PROVIDER: ${ZHIXU_CHAT_PROVIDER:-disabled}
+  ZHIXU_CHAT_BASE_URL: ${ZHIXU_CHAT_BASE_URL:-}
+  ZHIXU_CHAT_API_KEY: ${ZHIXU_CHAT_API_KEY:-}
+  ZHIXU_CHAT_MODEL: ${ZHIXU_CHAT_MODEL:-}
+  ZHIXU_CHAT_MODEL_VERSION: ${ZHIXU_CHAT_MODEL_VERSION:-}
+  ZHIXU_CHAT_ADAPTER_VERSION: ${ZHIXU_CHAT_ADAPTER_VERSION:-v1}
+  ZHIXU_CHAT_TIMEOUT: ${ZHIXU_CHAT_TIMEOUT:-30s}
+  ZHIXU_CHAT_MAX_REQUEST_BYTES: ${ZHIXU_CHAT_MAX_REQUEST_BYTES:-4194304}
+  ZHIXU_CHAT_MAX_RESPONSE_BYTES: ${ZHIXU_CHAT_MAX_RESPONSE_BYTES:-4194304}
+
 services:
   postgres:
     image: pgvector/pgvector:0.8.5-pg18-bookworm
@@ -48,7 +59,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     environment:
-      <<: *embedding-environment
+      <<: [*embedding-environment, *chat-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
       ZHIXU_HTTP_ADDR: 0.0.0.0:8080
       ZHIXU_DATABASE_HOST: postgres
@@ -77,7 +88,7 @@ services:
       dockerfile: deploy/Dockerfile
     entrypoint: ["/app/zhixu-worker"]
     environment:
-      <<: *embedding-environment
+      <<: [*embedding-environment, *chat-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
       ZHIXU_DATABASE_HOST: postgres
       ZHIXU_DATABASE_PORT: 5432

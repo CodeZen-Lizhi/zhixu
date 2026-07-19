@@ -130,7 +130,7 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	heartbeatErrors := make(chan error, 1)
 	heartbeatDone := make(chan struct{})
 	go w.heartbeatLoop(executionCtx, cancel, claim, &nodeVersion, heartbeatErrors, heartbeatDone)
-	result, executionErr := executor.Execute(executionCtx, application.ExecutionContext{WorkspaceID: claim.Run.WorkspaceID, RunID: claim.Run.ID, NodeRunID: claim.Node.ID, NodeKind: claim.Node.NodeType, InputSchemaVersion: claim.Node.InputSchemaVersion, AttemptNo: claim.Attempt.AttemptNo, DispatchNo: claim.Node.DispatchNo, RetryNo: claim.Node.RetryNo, LeaseOwner: claim.Attempt.LeaseOwner, Input: claim.Node.Input})
+	result, executionErr := executor.Execute(executionCtx, application.ExecutionContext{WorkspaceID: claim.Run.WorkspaceID, RunID: claim.Run.ID, NodeRunID: claim.Node.ID, NodeAttemptID: claim.Attempt.ID, NodeKind: claim.Node.NodeType, InputSchemaVersion: claim.Node.InputSchemaVersion, AttemptNo: claim.Attempt.AttemptNo, DispatchNo: claim.Node.DispatchNo, RetryNo: claim.Node.RetryNo, LeaseOwner: claim.Attempt.LeaseOwner, Input: claim.Node.Input})
 	cancel()
 	<-heartbeatDone
 	controlRequested := false

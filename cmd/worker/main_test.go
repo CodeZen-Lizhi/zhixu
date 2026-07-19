@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
+	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
@@ -21,6 +23,26 @@ func TestNewWorkerComponentsRequiresDatabase(t *testing.T) {
 	components, err := newWorkerComponents(nil, config.Defaults(), nil, nil)
 	if err == nil || components.safeWriteback != nil {
 		t.Fatalf("components=%#v err=%v", components, err)
+	}
+}
+
+func TestDisabledChatLeavesWorkerAgentCapabilityExplicitlyUnavailable(t *testing.T) {
+	components, err := newAgentWorkflowComponents(nil, config.Defaults(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if components.executor != nil || components.capability.available || components.capability.code != agentworkflow.ErrorCodeCapabilityUnavailable {
+		t.Fatalf("components=%+v", components)
+	}
+}
+
+func TestAgentApplicationBudgetAccountsForAllThreeStructuredCalls(t *testing.T) {
+	cfg := config.Defaults()
+	budget := agentApplicationBudget(cfg)
+	if budget.MaxRequestBytes != cfg.ChatMaxRequestBytes*agentapplication.StructuredCallLimit ||
+		budget.MaxResponseBytes != cfg.ChatMaxResponseBytes*agentapplication.StructuredCallLimit ||
+		budget.Timeout != cfg.ChatTimeout*time.Duration(agentapplication.StructuredCallLimit) {
+		t.Fatalf("budget=%+v", budget)
 	}
 }
 

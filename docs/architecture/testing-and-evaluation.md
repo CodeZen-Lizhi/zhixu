@@ -33,6 +33,8 @@ flowchart TB
 - Query AST。
 - RRF。
 - Relation Applicability。
+- 四类 Agent Schema 的 strict decoder 与领域校验。
+- INITIAL/REPAIR/REDUCED 调用预算与稳定拒答。
 - Scheduler 幂等。
 - Error Mapping。
 
@@ -58,6 +60,8 @@ Testcontainers：
 - Outbox。
 - Unique Idempotency。
 - Explain Plan。
+- Model Run/Call 状态机、CAS、crash→UNKNOWN 与 guarded Down。
+- Knowledge Evidence Eligibility 500 条单批查询与 Workspace 隔离。
 
 ## 7. Filesystem/Git
 
@@ -218,6 +222,39 @@ M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一�
 - 性能边界：M6-D 只证明 exact scan/索引计划正确；ANN、500,000 Chunk 容量与 P95 归 M10，不得把
   小夹具 EXPLAIN 当作容量达标。
 
+### 8.7 M6-02 Agent Structured Output And Citation 专项
+
+- Schema/Domain：Relation Assessment、RAG Answer、Refusal、Faithfulness Review 四类 Schema 独立版本化；
+  strict decoder 必须覆盖非法 UTF-8、重复 key、unknown field、尾随值、错误类型/枚举、字符串/数组/深度越界，
+  并证明 JSON 合法后仍执行 Evidence、Workspace、Applicability 和动作权限校验。
+- Repair Budget：精确断言一次 Structured Run 只有 `INITIAL -> REPAIR -> REDUCED` 三次响应上限；REPAIR 仅接收
+  脱敏错误摘要，REDUCED 使用任务最小安全 Schema。耗尽返回 `VALIDATION_EXHAUSTED`，不得进入 regex、Markdown
+  fence、默认对象、自由文本或 Fake fallback。
+- Chat Contract：正式 OpenAI-Compatible httptest 覆盖成功、429/502/503/504、401/403/其他 4xx、timeout/cancel、
+  redirect、Content-Type、超大/非法响应、模型与 usage 回显、版本快照和 Secret/error-body canary；Adapter 本身
+  调用次数始终为一次，不隐藏 retry 或 Provider/Model 切换。Ollama 只测试 OpenAI-Compatible endpoint。
+- Eligibility：真实 PostgreSQL 对最多 500 个 Provenance 做一次参数化批量查询，覆盖 Confirmed Claim/Relation、
+  Disputed+Conflict、Suggested/Rejected/Deprecated、无正式绑定、多 Provenance、跨 Workspace 和稳定排序；SQL 调用
+  计数证明无 N+1，Active Index Evidence 不能被当作 eligible。
+- Citation/Faithfulness：依次覆盖 Identity、Openability、Eligibility、Semantic Support；具体 Citation 必须包含
+  Workspace、Chunk、Source Version、Source Span。每个事实 Assertion 有 eligible Citation 或显式
+  `model_inference`；前三层失败直接 Refusal，Review Schema 失败/不可用时高风险回答不可发布。
+- Relation/Conflict：固定五分类样本验证 NEW/LOW_CONFIDENCE 不创建 Relation、CONFLICT 不映射为 Duplicate 或
+  直接确认；非 NEW 判断含双侧 Evidence、canonical Applicability、reason、confidence factors 和 uncertainty。
+  冲突回答分别披露观点、条件、来源和更新时间，不可条件化时返回稳定 Refusal。
+- Existing Claim：模型调用前用 Knowledge `FormalClaimReader` 核对 Workspace、正文、Applicability、Sources 与
+  Confirmed/Disputed 状态；Existing Evidence 必须同时命中 Claim Source 和 `CLAIM + owner_id` Eligibility。
+  Disputed disclosure 的 claim/conflict/Applicability/UTC updated_at 遗漏、增加或漂移均应失败。
+- Citation Batch：真实 PostgreSQL 覆盖多元素乱序输入、完整 tuple 任一字段损坏时整批失败、稳定 ordinality；
+  Application 用计数 Reader 证明同一 Source Version 的 Artifact 只读取一次。
+- Model Run/Call：真实 PostgreSQL 覆盖一个 Node Attempt 一个 Run、INITIAL/REPAIR/REDUCED/REVIEW 唯一 call_no、
+  调用前 STARTED、CAS finalize、response loss/replay、crash→UNKNOWN、同 Workspace/FK、版本冻结、Knowledge
+  `model_run_ref` 反查和有数据 Down `55000`。每条 Call 必须能直接查询实际 Adapter/Model/Profile/Prompt/Schema
+  与 max_output_tokens，不能只依赖 request hash。断言数据库、日志、Trace 和错误不含完整 Prompt/Evidence/raw response、
+  Credential 或绝对路径。
+- Fake 与真实评测：Deterministic Fake 只证明 Pipeline/错误路径/E2E 确定性；真实 Provider 未配置时必须明确 SKIP，
+  不能计为模型质量 PASS，也不能让生产 Factory 构造 Fake。
+
 ## 9. E2E
 
 固定 Fixture Workspace，执行 PRD 最终演示场景。
@@ -241,7 +278,10 @@ E2E 使用 Fake Model 保证确定性；单独 AI Evaluation 使用真实模型�
 - Citation Precision/Coverage。
 - Faithfulness。
 - Conflict Disclosure。
-- Refusal。
+- Appropriate Refusal。
+
+Citation/Faithfulness 的安全不变量先由确定性测试 fail closed；模型 Semantic Support 使用独立 Faithfulness Review
+Schema 和版本化 Gold Set。Review Model 自评不能单独证明事实保持，真实 Provider 缺失只能标记 SKIP。
 
 ## 11. Relation Evaluation
 
@@ -253,6 +293,10 @@ E2E 使用 Fake Model 保证确定性；单独 AI Evaluation 使用真实模型�
 Knowledge Domain 还必须用确定性单元/数据库测试覆盖：NEW/LOW_CONFIDENCE 不落 Relation、端点兼容矩阵、
 对称正反/并发去重、Confirmed Claim/Relation 的 Provenance、Conflict 2..N 原子性、Applicability EXACT/
 REVIEWED_OVERLAP、乐观锁和幂等重放。模型评测通过不能替代这些不变量测试。
+
+Agent 评测 Run 必须冻结实际 Model Adapter/Model、Prompt、四类 Schema、Review Model、Index/Embedding/Rerank、
+Workflow Definition 和 Dataset 版本；运行中“最新默认”变化不得改写历史。M6-02 建立版本化 baseline schema 和报告，
+最终质量阈值由 M11 锁定，不能凭小样本自行填数。
 
 ## 12. Article Evaluation
 

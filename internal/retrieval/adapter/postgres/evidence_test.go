@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -92,6 +93,60 @@ func TestLoadSourceSpanReferenceUsesFullBindingJoin(t *testing.T) {
 	}
 }
 
+func TestLoadCitationSourceSpanReferenceUsesFullFrozenTupleInOneQuery(t *testing.T) {
+	database := &evidenceTestDB{row: evidenceTestRow{values: []any{citationReferenceJSON(t, "docs/evidence.md")}}}
+	repository, err := NewSearchRepository(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := domain.CitationReferenceQuery{
+		WorkspaceID: evidenceTestWorkspaceID, IndexVersionID: evidenceTestIndexID, ChunkID: evidenceTestChunkID,
+		SourceVersionID: evidenceTestSourceVersionID, SourceSpanID: evidenceTestSpanID,
+	}
+	reference, err := repository.LoadCitationSourceSpanReference(context.Background(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reference.SourceVersion.SourceVersionID != evidenceTestSourceVersionID || reference.Span.ID != evidenceTestSpanID {
+		t.Fatalf("reference=%+v", reference)
+	}
+	for _, predicate := range []string{
+		"FROM unnest($1::uuid[],$2::uuid[],$3::uuid[],$4::uuid[],$5::uuid[])",
+		"JOIN retrieval.index_version AS idx", "manifest.index_version_id=idx.id", "manifest.chunk_id=requested.chunk_id",
+		"chunk.id=manifest.chunk_id", "source_manifest.source_version_id=requested.source_version_id",
+		"source_manifest.parse_projection_id=chunk.parse_projection_id", "source_manifest.selection_status='included'",
+		"sp.id=chunk.source_span_id", "sp.id=requested.source_span_id", "idx.id=requested.index_version_id", "idx.workspace_id=requested.workspace_id",
+	} {
+		if !strings.Contains(database.query, predicate) {
+			t.Fatalf("citation query missing %q:\n%s", predicate, database.query)
+		}
+	}
+	wantArgs := []any{
+		[]string{string(evidenceTestWorkspaceID)}, []string{string(evidenceTestIndexID)}, []string{string(evidenceTestChunkID)},
+		[]string{string(evidenceTestSourceVersionID)}, []string{string(evidenceTestSpanID)},
+	}
+	if !reflect.DeepEqual(database.args, wantArgs) {
+		t.Fatalf("args=%#v", database.args)
+	}
+}
+
+func citationReferenceJSON(t *testing.T, relativePath string) []byte {
+	t.Helper()
+	encoded, err := json.Marshal([]map[string]any{{
+		"WorkspaceID": string(evidenceTestWorkspaceID), "IndexVersionID": string(evidenceTestIndexID), "ChunkID": string(evidenceTestChunkID),
+		"SourceID": string(evidenceTestSourceID), "SourceVersionID": string(evidenceTestSourceVersionID), "ArtifactID": string(evidenceTestArtifactID),
+		"ProjectionID": string(evidenceTestProjectionID), "SpanID": string(evidenceTestSpanID), "SourceType": "file", "LogicalName": "Evidence",
+		"RelativePath": relativePath, "VersionRelativePath": relativePath, "ContentHash": strings.Repeat("a", 64), "ByteSize": int64(7),
+		"MediaType": "text/plain", "SecurityStatus": "passed", "CapturedAt": time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC),
+		"StartLine": int32(1), "EndLine": int32(1), "StartByte": int64(0), "EndByte": int64(7), "SpanType": "paragraph",
+		"Selector": json.RawMessage(`{"kind":"paragraph"}`), "ExcerptHash": strings.Repeat("b", 64), "ParserVersion": "parser-v1", "SchemaVersion": "schema-v1",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
 func TestEvidenceReferenceLoadsUnifyNotFoundAndFailClosed(t *testing.T) {
 	tests := []struct {
 		name string
@@ -164,6 +219,8 @@ const (
 	evidenceTestArtifactID      foundation.ID = "96000000-0000-4000-8000-000000000004"
 	evidenceTestProjectionID    foundation.ID = "96000000-0000-4000-8000-000000000005"
 	evidenceTestSpanID          foundation.ID = "96000000-0000-4000-8000-000000000006"
+	evidenceTestIndexID         foundation.ID = "96000000-0000-4000-8000-000000000007"
+	evidenceTestChunkID         foundation.ID = "96000000-0000-4000-8000-000000000008"
 )
 
 func evidenceSourceRowValues(relativePath string) []any {

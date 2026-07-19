@@ -1,0 +1,16 @@
+{
+  "dataset_id": "agent-core-offline",
+  "dataset_version": "v1",
+  "relation_cases": [
+    {"id":"relation-new","expected":"NEW","predicted":"NEW"},
+    {"id":"relation-complementary","expected":"COMPLEMENTARY","predicted":"COMPLEMENTARY"},
+    {"id":"relation-duplicate","expected":"DUPLICATE","predicted":"DUPLICATE"},
+    {"id":"relation-conflict","expected":"CONFLICT","predicted":"CONFLICT"},
+    {"id":"relation-low","expected":"LOW_CONFIDENCE","predicted":"LOW_CONFIDENCE"}
+  ],
+  "answer_cases": [
+    {"id":"answer-supported","assertion_count":2,"cited_assertion_count":2,"citation_count":2,"supported_citation_count":2,"expected_faithful":true,"observed_faithful":true,"conflict_expected":false,"conflict_disclosed":false,"refusal_expected":false,"refused":false},
+    {"id":"answer-conflict","assertion_count":2,"cited_assertion_count":2,"citation_count":3,"supported_citation_count":3,"expected_faithful":true,"observed_faithful":true,"conflict_expected":true,"conflict_disclosed":true,"refusal_expected":false,"refused":false},
+    {"id":"answer-refusal","assertion_count":0,"cited_assertion_count":0,"citation_count":0,"supported_citation_count":0,"expected_faithful":true,"observed_faithful":true,"conflict_expected":false,"conflict_disclosed":false,"refusal_expected":true,"refused":true}
+  ]
+}

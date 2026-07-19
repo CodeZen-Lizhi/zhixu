@@ -1,8 +1,8 @@
 SHELL := /bin/sh
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke openapi-check compose-check docker-build compose-up compose-down compose-search-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval openapi-check compose-check docker-build compose-up compose-down compose-search-smoke
 
-test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet openapi-check compose-check
+test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet agent-eval openapi-check compose-check
 
 migrate:
 	go run ./cmd/migrate
@@ -36,6 +36,9 @@ eino-vet:
 
 eino-live-smoke:
 	cd poc/eino && go test -run TestOpenAICompatibleChatSmoke -v ./live
+
+agent-eval:
+	go run ./eval/agent/cmd
 
 openapi-check:
 	node api/openapi/check.mjs

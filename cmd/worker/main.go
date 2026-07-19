@@ -14,6 +14,10 @@ import (
 	"syscall"
 	"time"
 
+	agentknowledge "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/knowledge"
+	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
+	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
+	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
@@ -23,6 +27,8 @@ import (
 	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
 	ingestionapplication "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/application"
 	ingestiondomain "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/domain"
+	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
+	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
@@ -32,6 +38,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	reindexriver "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/river"
+	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	retrievalruntime "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/runtime"
@@ -46,14 +53,25 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	// agentRelationMaxOutputTokens 是 Relation Assessment 单次响应的生产上限。
+	agentRelationMaxOutputTokens = 8192
+)
+
 type workerComponents struct {
 	safeWriteback   *changecontrolworkflow.Node
+	agentCapability agentCapabilityStatus
 	reindexWorker   *reindexriver.Worker
 	dispatcher      *retrievalruntime.Runner
 	runtimeClient   *riveradapter.Client
 	definitions     *workflowapplication.DefinitionRegistry
 	executors       *workflowapplication.ExecutorRegistry
 	fatalInvariants <-chan error
+}
+
+type agentCapabilityStatus struct {
+	available bool
+	code      string
 }
 
 type workerHealthServer struct {
@@ -161,7 +179,9 @@ func run(configPath string, logger *slog.Logger) error {
 	}
 	readiness.SetRiverStarted(true)
 	readiness.SetReindexDispatcherStarted(components.dispatcher.Started())
-	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil, "reindex_dispatcher", components.dispatcher.Started())
+	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil,
+		"agent_available", components.agentCapability.available, "agent_capability_code", components.agentCapability.code,
+		"reindex_dispatcher", components.dispatcher.Started())
 
 	ticker := time.NewTicker(cfg.HealthInterval)
 	defer ticker.Stop()
@@ -310,6 +330,15 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err := executors.Register(changecontrolworkflow.SafeWritebackNodeKind, changecontrolworkflow.SafeWritebackBootstrapInputSchemaVersion, bootstrap); err != nil {
 		return workerComponents{}, err
 	}
+	agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if agentComponents.executor != nil {
+		if err := executors.Register(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion, agentComponents.executor); err != nil {
+			return workerComponents{}, err
+		}
+	}
 	if err := executors.Freeze(); err != nil {
 		return workerComponents{}, err
 	}
@@ -319,6 +348,11 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	}
 	if err := definitions.Register(changecontrolworkflow.RegisteredDefinition()); err != nil {
 		return workerComponents{}, err
+	}
+	if agentComponents.executor != nil {
+		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
+			return workerComponents{}, err
+		}
 	}
 	if err := definitions.Freeze(); err != nil {
 		return workerComponents{}, err
@@ -371,9 +405,90 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 		return workerComponents{}, err
 	}
 	return workerComponents{
-		safeWriteback: node, reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
+		safeWriteback: node, agentCapability: agentComponents.capability,
+		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
 		runtimeClient: runtimeClient, definitions: definitions, executors: executors, fatalInvariants: fatalInvariants,
 	}, nil
+}
+
+type agentWorkflowComponents struct {
+	executor   *agentworkflow.Executor
+	capability agentCapabilityStatus
+}
+
+func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository) (agentWorkflowComponents, error) {
+	if cfg.ChatProvider == config.ChatProviderDisabled {
+		return agentWorkflowComponents{capability: agentCapabilityStatus{code: agentworkflow.ErrorCodeCapabilityUnavailable}}, nil
+	}
+	model, err := platformmodels.NewConfiguredChatModel(cfg)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	contractProvider, ok := model.(interface {
+		Contract() platformmodels.ChatContract
+	})
+	if !ok {
+		return agentWorkflowComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, "AGENT_CHAT_CONTRACT_UNAVAILABLE", false, errors.New("configured chat model does not expose its frozen contract"))
+	}
+	contract := contractProvider.Contract()
+	catalog, err := agentworkflow.NewRuntimeCatalog(agentworkflow.CatalogOptions{
+		Model: contract.Model, Timeout: contract.Timeout, MaxOutputTokens: agentRelationMaxOutputTokens,
+	})
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	repository, err := agentpostgres.NewRepository(db)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	knowledgeRepository, err := knowledgepostgres.NewRepository(db)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	eligibility, err := knowledgeapplication.NewEvidenceEligibilityService(knowledgeRepository)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	formalClaims, err := knowledgeapplication.NewFormalClaimReader(knowledgeRepository)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	knowledgePort, err := agentknowledge.NewAdapter(eligibility, formalClaims)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	searchRepository, err := retrievalpostgres.NewSearchRepository(db)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	artifactReader, err := retrievalworkspace.NewReader(workspaceRepository, filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}})
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	evidenceReference, err := retrievalapplication.NewEvidenceReferenceService(searchRepository, artifactReader)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	evidenceOpener, err := agentworkflow.NewReferenceOpener(evidenceReference)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	executor, err := agentworkflow.NewExecutor(agentworkflow.ExecutorDependencies{
+		Model: model, Catalog: catalog, Repository: repository, Knowledge: knowledgePort, Evidence: evidenceOpener,
+		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(cfg),
+	})
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	return agentWorkflowComponents{executor: executor, capability: agentCapabilityStatus{available: true}}, nil
+}
+
+func agentApplicationBudget(cfg config.Config) agentapplication.RunBudget {
+	budget := agentapplication.DefaultRunBudget()
+	budget.MaxRequestBytes = min(cfg.ChatMaxRequestBytes*agentapplication.StructuredCallLimit, agentapplication.MaxRunRequestBytes)
+	budget.MaxResponseBytes = min(cfg.ChatMaxResponseBytes*agentapplication.StructuredCallLimit, agentapplication.MaxRunResponseBytes)
+	budget.Timeout = min(cfg.ChatTimeout*time.Duration(agentapplication.StructuredCallLimit), agentapplication.MaxRunTimeout)
+	return budget
 }
 
 type reindexComponents struct {

@@ -97,8 +97,8 @@ func (r *DefinitionRegistry) Freeze() error {
 					return registryError(foundation.ErrorPermissionDenied, "WORKFLOW_DEFINITION_PERMISSION_UNKNOWN", errors.New("node permission is not allowed"))
 				}
 			}
-			if _, err := r.executors.Resolve(node.Kind, node.InputSchemaVersion); err != nil {
-				return registryError(foundation.ErrorDependencyUnavailable, "WORKFLOW_DEFINITION_EXECUTOR_MISSING", err)
+			if !r.executors.SupportsContract(node.Kind, node.InputSchemaVersion) {
+				return registryError(foundation.ErrorDependencyUnavailable, "WORKFLOW_DEFINITION_EXECUTOR_MISSING", errors.New("node executor contract is not registered"))
 			}
 		}
 	}

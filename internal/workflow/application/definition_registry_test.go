@@ -137,6 +137,33 @@ func TestDefinitionRegistryFreezeRejectsUnknownSchemaPermissionAndExecutor(t *te
 	}
 }
 
+func TestDefinitionRegistryAcceptsDeclaredContractWithoutLocalExecutor(t *testing.T) {
+	catalog := testValidationCatalog(t)
+	executors, err := NewExecutorRegistry(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executors.RegisterContract("agent.relation-assessment", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := executors.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewDefinitionRegistry(catalog, executors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := definitionFixture("agent-relation-assessment", []domain.NodeDefinition{{
+		Key: "relation-assessment", Kind: "agent.relation-assessment", InputSchemaVersion: 1, OutputSchemaVersion: 1,
+	}})
+	if err := registry.Register(definition); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testValidationCatalog(t *testing.T) ValidationCatalog {
 	t.Helper()
 	catalog, err := NewValidationCatalog([]int{1}, []domain.Permission{domain.PermissionReadLocal, domain.PermissionReadExternal})

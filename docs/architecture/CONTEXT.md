@@ -80,6 +80,14 @@ _Avoid_: 错误提示、重复
 知识的来源链路，包括原始资料、位置、版本和形成过程。
 _Avoid_: 单个 URL、备注
 
+**Evidence Eligibility**:
+Knowledge Application 根据正式 Claim Source、Relation Evidence 和 Conflict 绑定，对一批 Provenance 判断其是否可用于发布回答的资格；默认拒绝未绑定或未确认的证据。Retrieval 的 Active Index 只表示可检索，不能替代该资格判断。
+_Avoid_: Active Index、检索排名、模型置信度、Approved 标志猜测
+
+**Citation**:
+回答中的可验证来源引用，必须绑定 Workspace、Chunk、Source Version 和 Source Span，并依次通过身份、可打开性、发布资格和语义支持校验。
+_Avoid_: 仅 Chunk ID、模型生成的 URL、当前工作树路径
+
 ## 变更控制
 
 **Proposal**:
@@ -135,8 +143,22 @@ Workflow Definition 的一次持久化执行实例。
 _Avoid_: Review Session、HTTP 请求
 
 **Node Run**:
-Workflow Run 中某个节点的一次执行尝试。
-_Avoid_: Tool Call
+Workflow Run 中某个逻辑节点的持久化执行状态；重试不会创建第二个逻辑 Node Run。
+_Avoid_: Node Attempt、Tool Call
+
+**Node Attempt**:
+Node Run 的一次带租约、dispatch 和 retry 身份的实际执行尝试；历史 append-only。
+_Avoid_: Node Run、Model Call
+
+**Model Run**:
+一个 Node Attempt 内一次 Agent 模型流水线的专用持久化事实，冻结 Adapter、Model、Prompt、Schema、Retrieval 版本和最终状态；不能只用日志或 Node output 代替。
+_Avoid_: Node Run、单次 Provider 请求、日志事件
+
+**Model Call**:
+Model Run 内一次 INITIAL、REPAIR、REDUCED 或 REVIEW Provider 调用，直接冻结该次实际 Adapter/Model/Profile/
+Prompt/Schema 版本和 max output tokens，并记录顺序、哈希、Token、耗时、状态和稳定错误；不保存完整 Prompt、
+Evidence 或原始响应。
+_Avoid_: Model Run、Tool Call、自动重试
 
 **Tool Call**:
 Agent 或 Workflow 对已注册工具的一次受控调用。

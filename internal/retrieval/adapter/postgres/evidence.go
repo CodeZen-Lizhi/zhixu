@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
@@ -14,6 +15,7 @@ import (
 const evidenceReferenceNotFoundCode = "RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND"
 
 var _ application.EvidenceReferenceStore = (*SearchRepository)(nil)
+var _ application.CitationEvidenceStore = (*SearchRepository)(nil)
 
 // LoadSourceVersionReference 读取指定 Workspace 内完整绑定的 Source Version 引用。
 func (r *SearchRepository) LoadSourceVersionReference(
@@ -176,6 +178,220 @@ func (r *SearchRepository) LoadSourceSpanReference(
 	}
 	return reference, nil
 }
+
+// LoadCitationSourceSpanReference 用单条参数化 SQL 证明完整 frozen Index Citation tuple。
+func (r *SearchRepository) LoadCitationSourceSpanReference(
+	ctx context.Context,
+	query domain.CitationReferenceQuery,
+) (domain.SourceSpanReference, error) {
+	bindings, err := r.LoadCitationSourceSpanReferences(ctx, []domain.CitationReferenceQuery{query})
+	if err != nil {
+		return domain.SourceSpanReference{}, err
+	}
+	if len(bindings) != 1 || bindings[0].Query != query {
+		return domain.SourceSpanReference{}, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("citation source span binding is incomplete"))
+	}
+	return bindings[0].Reference, nil
+}
+
+// LoadCitationSourceSpanReferences 用单条参数化 SQL 批量证明完整 frozen Index Citation tuple。
+func (r *SearchRepository) LoadCitationSourceSpanReferences(
+	ctx context.Context,
+	queries []domain.CitationReferenceQuery,
+) ([]application.CitationSourceSpanBinding, error) {
+	if len(queries) == 0 || len(queries) > 500 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("citation reference batch count is invalid"))
+	}
+	workspaceIDs := make([]string, len(queries))
+	indexIDs := make([]string, len(queries))
+	chunkIDs := make([]string, len(queries))
+	sourceVersionIDs := make([]string, len(queries))
+	spanIDs := make([]string, len(queries))
+	seen := make(map[domain.CitationReferenceQuery]struct{}, len(queries))
+	for index, query := range queries {
+		if err := domain.ValidateCitationReferenceQuery(query); err != nil {
+			return nil, err
+		}
+		if index > 0 && (query.WorkspaceID != queries[0].WorkspaceID || query.IndexVersionID != queries[0].IndexVersionID) {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("citation reference batch crosses workspace or index"))
+		}
+		if _, duplicate := seen[query]; duplicate {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("citation reference batch contains duplicates"))
+		}
+		seen[query] = struct{}{}
+		workspaceIDs[index], indexIDs[index], chunkIDs[index] = string(query.WorkspaceID), string(query.IndexVersionID), string(query.ChunkID)
+		sourceVersionIDs[index], spanIDs[index] = string(query.SourceVersionID), string(query.SourceSpanID)
+	}
+	var encoded []byte
+	err := r.db.QueryRow(ctx, citationReferenceBatchSQL, workspaceIDs, indexIDs, chunkIDs, sourceVersionIDs, spanIDs).Scan(&encoded)
+	if err != nil {
+		return nil, classify(err, "RETRIEVAL_EVIDENCE_REFERENCE_QUERY_FAILED")
+	}
+	var stored []storedCitationReference
+	if err := json.Unmarshal(encoded, &stored); err != nil {
+		return nil, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("citation reference batch payload is invalid"))
+	}
+	if len(stored) != len(queries) {
+		return nil, notFound(evidenceReferenceNotFoundCode, pgx.ErrNoRows)
+	}
+	result := make([]application.CitationSourceSpanBinding, len(stored))
+	for index, value := range stored {
+		binding, parseErr := value.binding()
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if binding.Query != queries[index] {
+			return nil, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("citation reference batch is out of order"))
+		}
+		result[index] = binding
+	}
+	return result, nil
+}
+
+type storedCitationReference struct {
+	WorkspaceID, IndexVersionID, ChunkID  string
+	SourceID, SourceVersionID, ArtifactID string
+	ProjectionID, SpanID                  string
+	SourceType, LogicalName               string
+	RelativePath, VersionRelativePath     string
+	ContentHash, MediaType                string
+	SecurityStatus                        string
+	ByteSize                              int64
+	CapturedAt                            time.Time
+	StartLine, EndLine                    int32
+	StartByte, EndByte                    int64
+	SpanType                              string
+	Selector                              json.RawMessage
+	ExcerptHash, ParserVersion            string
+	SchemaVersion                         string
+}
+
+func (value storedCitationReference) binding() (application.CitationSourceSpanBinding, error) {
+	queryIDs := []string{value.WorkspaceID, value.IndexVersionID, value.ChunkID, value.SourceVersionID, value.SpanID}
+	parsedQuery := make([]foundation.ID, len(queryIDs))
+	for index, text := range queryIDs {
+		id, err := foundation.ParseID(text)
+		if err != nil {
+			return application.CitationSourceSpanBinding{}, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("citation query identity is invalid"))
+		}
+		parsedQuery[index] = id
+	}
+	query := domain.CitationReferenceQuery{
+		WorkspaceID: parsedQuery[0], IndexVersionID: parsedQuery[1], ChunkID: parsedQuery[2],
+		SourceVersionID: parsedQuery[3], SourceSpanID: parsedQuery[4],
+	}
+	if err := domain.ValidateCitationReferenceQuery(query); err != nil {
+		return application.CitationSourceSpanBinding{}, err
+	}
+	reference := domain.SourceSpanReference{
+		SourceVersion: domain.SourceVersionReference{
+			SourceType: value.SourceType, LogicalName: value.LogicalName, RelativePath: value.RelativePath,
+			ContentHash: value.ContentHash, ByteSize: value.ByteSize, MediaType: value.MediaType,
+			SecurityStatus: value.SecurityStatus, CapturedAt: value.CapturedAt,
+		},
+		Span: domain.EvidenceSpan{
+			StartLine: value.StartLine, EndLine: value.EndLine, StartByte: value.StartByte, EndByte: value.EndByte,
+		},
+		SpanType: value.SpanType, Selector: append(json.RawMessage(nil), value.Selector...), ExcerptHash: value.ExcerptHash,
+		ParserVersion: value.ParserVersion, SchemaVersion: value.SchemaVersion,
+	}
+	if err := parseEvidenceReferenceIDs(&reference, value.WorkspaceID, value.SourceID, value.SourceVersionID, value.ArtifactID, value.ProjectionID, value.SpanID); err != nil {
+		return application.CitationSourceSpanBinding{}, err
+	}
+	if value.RelativePath != value.VersionRelativePath || reference.SourceVersion.WorkspaceID != query.WorkspaceID ||
+		reference.SourceVersion.SourceVersionID != query.SourceVersionID || reference.Span.ID != query.SourceSpanID {
+		return application.CitationSourceSpanBinding{}, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("citation source span binding is inconsistent"))
+	}
+	if err := domain.ValidateSourceSpanReference(reference); err != nil {
+		return application.CitationSourceSpanBinding{}, err
+	}
+	return application.CitationSourceSpanBinding{Query: query, Reference: reference}, nil
+}
+
+const citationReferenceBatchSQL = `
+WITH requested AS MATERIALIZED (
+	SELECT
+		workspace_id,
+		index_version_id,
+		chunk_id,
+		source_version_id,
+		source_span_id,
+		ordinality
+	FROM unnest($1::uuid[],$2::uuid[],$3::uuid[],$4::uuid[],$5::uuid[])
+		WITH ORDINALITY AS value(workspace_id,index_version_id,chunk_id,source_version_id,source_span_id,ordinality)
+), bound AS (
+	SELECT requested.ordinality,
+		jsonb_build_object(
+			'WorkspaceID',s.workspace_id::text,
+			'IndexVersionID',idx.id::text,
+			'ChunkID',chunk.id::text,
+			'SourceID',s.id::text,
+			'SourceVersionID',sv.id::text,
+			'ArtifactID',ca.id::text,
+			'ProjectionID',pp.id::text,
+			'SpanID',sp.id::text,
+			'SourceType',s.type,
+			'LogicalName',s.logical_name,
+			'RelativePath',s.original_location,
+			'VersionRelativePath',sv.original_content_location,
+			'ContentHash',sv.content_hash,
+			'ByteSize',sv.byte_size,
+			'MediaType',sv.mime_type,
+			'SecurityStatus',sv.security_status,
+			'CapturedAt',sv.captured_at,
+			'StartLine',sp.start_line,
+			'EndLine',sp.end_line,
+			'StartByte',sp.start_byte,
+			'EndByte',sp.end_byte,
+			'SpanType',sp.span_type,
+			'Selector',sp.selector,
+			'ExcerptHash',sp.excerpt_hash,
+			'ParserVersion',sp.parser_version,
+			'SchemaVersion',sp.schema_version
+		) AS reference
+	FROM requested
+	JOIN retrieval.index_version AS idx
+	  ON idx.id=requested.index_version_id
+	 AND idx.workspace_id=requested.workspace_id
+	JOIN retrieval.index_manifest_chunk AS manifest
+	  ON manifest.index_version_id=idx.id
+	 AND manifest.workspace_id=idx.workspace_id
+	 AND manifest.chunk_id=requested.chunk_id
+	JOIN ingestion.canonical_chunk AS chunk
+	  ON chunk.id=manifest.chunk_id
+	 AND chunk.workspace_id=manifest.workspace_id
+	 AND chunk.content_hash=manifest.content_hash
+	JOIN retrieval.index_manifest_source AS source_manifest
+	  ON source_manifest.index_version_id=idx.id
+	 AND source_manifest.workspace_id=idx.workspace_id
+	 AND source_manifest.source_version_id=requested.source_version_id
+	 AND source_manifest.parse_projection_id=chunk.parse_projection_id
+	 AND source_manifest.selection_status='included'
+	JOIN core.source_version AS sv
+	  ON sv.id=source_manifest.source_version_id
+	 AND sv.source_id=source_manifest.source_id
+	JOIN core.source AS s
+	  ON s.id=source_manifest.source_id
+	 AND s.workspace_id=idx.workspace_id
+	JOIN core.content_artifact AS ca
+	  ON ca.id=sv.content_artifact_id
+	 AND ca.workspace_id=idx.workspace_id
+	 AND ca.content_hash=sv.content_hash
+	 AND ca.byte_size=sv.byte_size
+	JOIN ingestion.parse_projection AS pp
+	  ON pp.id=source_manifest.parse_projection_id
+	 AND pp.workspace_id=idx.workspace_id
+	 AND pp.content_artifact_id=ca.id
+	JOIN ingestion.source_span AS sp
+	  ON sp.id=chunk.source_span_id
+	 AND sp.id=requested.source_span_id
+	 AND sp.workspace_id=idx.workspace_id
+	 AND sp.content_artifact_id=ca.id
+	 AND sp.parse_projection_id=pp.id
+	 AND sp.parser_version=pp.parser_version
+	 AND sp.schema_version=pp.schema_version
+)
+SELECT COALESCE(jsonb_agg(reference ORDER BY ordinality),'[]'::jsonb) FROM bound`
 
 func scanSourceVersionReference(row pgx.Row) (domain.SourceVersionReference, string, error) {
 	var reference domain.SourceVersionReference

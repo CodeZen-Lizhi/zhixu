@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
 	approvaldispatchpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/approvaldispatchpostgres"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
@@ -284,7 +285,7 @@ func newWorkflowComponents(pool *pgxpool.Pool, cfg config.Config, guards ...work
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := executors.Register(workflowapplication.CanonicalJSONHashNodeKind, workflowapplication.CanonicalJSONHashInputSchemaVersion, workflowapplication.NewCanonicalJSONHashExecutor()); err != nil {
+	if err := registerAPIWorkflowExecutors(cfg, executors); err != nil {
 		return nil, nil, err
 	}
 	if err := executors.Freeze(); err != nil {
@@ -294,14 +295,7 @@ func newWorkflowComponents(pool *pgxpool.Pool, cfg config.Config, guards ...work
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := definitions.Register(workflowdomain.RegisteredDefinition{
-		Key: "deterministic.hash", Version: 1, InputSchemaVersion: 1,
-		Graph: workflowdomain.CanonicalGraph{Nodes: []workflowdomain.NodeDefinition{{
-			Key: "hash", Kind: workflowapplication.CanonicalJSONHashNodeKind,
-			InputSchemaVersion: 1, OutputSchemaVersion: 1,
-			RetryPolicy: workflowdomain.RetryPolicy{},
-		}}},
-	}); err != nil {
+	if err := registerAPIWorkflowDefinitions(cfg, definitions); err != nil {
 		return nil, nil, err
 	}
 	if err := definitions.Freeze(); err != nil {
@@ -312,6 +306,33 @@ func newWorkflowComponents(pool *pgxpool.Pool, cfg config.Config, guards ...work
 		return nil, nil, err
 	}
 	return service, runtimeRepository, nil
+}
+
+func registerAPIWorkflowExecutors(cfg config.Config, executors *workflowapplication.ExecutorRegistry) error {
+	if err := executors.Register(workflowapplication.CanonicalJSONHashNodeKind, workflowapplication.CanonicalJSONHashInputSchemaVersion, workflowapplication.NewCanonicalJSONHashExecutor()); err != nil {
+		return err
+	}
+	if cfg.ChatProvider != config.ChatProviderDisabled {
+		return executors.RegisterContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion)
+	}
+	return nil
+}
+
+func registerAPIWorkflowDefinitions(cfg config.Config, definitions *workflowapplication.DefinitionRegistry) error {
+	if err := definitions.Register(workflowdomain.RegisteredDefinition{
+		Key: "deterministic.hash", Version: 1, InputSchemaVersion: 1,
+		Graph: workflowdomain.CanonicalGraph{Nodes: []workflowdomain.NodeDefinition{{
+			Key: "hash", Kind: workflowapplication.CanonicalJSONHashNodeKind,
+			InputSchemaVersion: 1, OutputSchemaVersion: 1,
+			RetryPolicy: workflowdomain.RetryPolicy{},
+		}}},
+	}); err != nil {
+		return err
+	}
+	if cfg.ChatProvider != config.ChatProviderDisabled {
+		return definitions.Register(agentworkflow.RegisteredDefinition())
+	}
+	return nil
 }
 
 func firstError(values ...error) error {

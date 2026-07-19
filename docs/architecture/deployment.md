@@ -177,6 +177,15 @@ Worker 运行参数：
 | `ZHIXU_EMBEDDING_MAX_BATCH_INPUT_BYTES` | `8388608` | 单批正文累计字节上限，必须不小于单输入上限且最大 `67108864`，属于 Config Hash |
 | `ZHIXU_EMBEDDING_TIMEOUT` | `30s` | 单次 Embedding HTTP 超时，最大 `5m` |
 | `ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES` | `67108864` | 响应读取上限，最大 `134217728` bytes |
+| `ZHIXU_CHAT_PROVIDER` | `disabled` | `disabled/openai-compatible`；禁用时旧 API/Worker 正常，Agent capability 明确 unavailable |
+| `ZHIXU_CHAT_BASE_URL` | 无 | 启用时必填；远程仅 HTTPS，loopback OpenAI-compatible endpoint 可用 HTTP，禁止 userinfo/query/fragment |
+| `ZHIXU_CHAT_API_KEY` | 无 | OpenAI-compatible Credential；本地兼容端点可为空，不写日志、Model Run 或配置摘要 |
+| `ZHIXU_CHAT_MODEL` | 无 | Provider 请求使用的 canonical 模型 ID |
+| `ZHIXU_CHAT_MODEL_VERSION` | 无 | Provider 响应必须精确回显的实际模型版本，不允许运行中漂移 |
+| `ZHIXU_CHAT_ADAPTER_VERSION` | `v1` | 直接 HTTP Adapter 的稳定版本 |
+| `ZHIXU_CHAT_TIMEOUT` | `30s` | 单次 Chat Provider timeout，最大 `5m`；三阶段仍受 Agent 总预算约束 |
+| `ZHIXU_CHAT_MAX_REQUEST_BYTES` | `4194304` | 单次 Provider 请求上限，最大 `16777216` bytes |
+| `ZHIXU_CHAT_MAX_RESPONSE_BYTES` | `4194304` | 单次 Provider 响应上限，最大 `16777216` bytes |
 | `ZHIXU_RETRIEVAL_RRF_K` | `60` | RRF v1 的 `k`，必须为正数 |
 | `ZHIXU_RETRIEVAL_RRF_LEXICAL_CANDIDATE_LIMIT` | `200` | Lexical 候选上限，范围 `1..500` |
 | `ZHIXU_RETRIEVAL_RRF_VECTOR_CANDIDATE_LIMIT` | `200` | Vector 候选上限，范围 `1..500` |
@@ -197,6 +206,12 @@ Embedding 配置按 Provider 分组 fail-fast：`disabled` 不消费 Base URL、
 模型、维度、限制和“是否已配置”，不会输出 API Key 或完整 Base URL。Provider、模型、维度、
 归一化、距离、Endpoint identity 与 batch/input limits 共同冻结为 Embedding Config Hash；
 Credential、timeout 和 response limit 不进入持久版本身份。
+
+Chat 配置同样由 Configured Factory 唯一解释。`disabled` 不读取 Endpoint、API Key、Model 或 Model Version，
+不注入 Deterministic Fake，也不阻断不依赖 Agent 的 Worker Definition；启用后 Worker 才注册 Agent Executor/Definition。
+每个 Model Run 固定 generation/retrieval 基线，每条 Model Call 固定该次实际 Adapter/Model/Profile/Prompt/Schema
+版本和 max output tokens；Provider 不在 Adapter 内自动重试或静默切换模型。
+Compose 的共享 Chat 环境块同时注入 API 与 Worker，为 M6-04 API 接线保留同一配置语义。
 
 API 与 Worker 必须通过同一 Configured Embedder Factory 解释上述配置，Compose 使用共享环境配置块向
 两个进程注入完全相同的 Provider/Model/Dimensions/Normalization/Distance/limits。Worker 用于构建

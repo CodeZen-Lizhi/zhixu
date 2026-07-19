@@ -31,9 +31,15 @@
 
 Adapter：
 
-- OpenAI-Compatible。
-- Ollama/本地模型。
-- Fake Model。
+- 正式实现是直接 OpenAI-Compatible HTTP Adapter；Ollama 只通过 OpenAI-Compatible endpoint 接入。
+- Deterministic Fake 只用于单元、Contract 和 E2E，不是生产 fallback。
+
+约束：
+
+- 项目自有 ChatModel 请求/响应、usage、版本和错误类型是公共契约，Provider SDK 类型不得进入 Domain/Application。
+- Adapter 禁止 redirect，限制请求/响应字节，严格校验 Content-Type、JSON、模型回显、usage、timeout/cancel 和错误体脱敏。
+- Adapter 不自动重试；deadline、429、502/503/504 可标为 transient，由 Workflow 决定是否重试整个 Node Attempt。Schema、领域、Citation 和 caller cancel 不可重试。
+- 同一 Node Attempt 不静默切换 Provider/Model；`provider=disabled` 返回 unavailable capability，不创建 Fake 或空成功 Adapter。
 
 ### EmbeddingModel
 
@@ -68,16 +74,18 @@ Adapter：
 
 ### Agent Framework Boundary
 
-Eino 只能作为 Agent/Application 层的短流程编排实现，或作为 Adapter/Infrastructure 内部实现：
+M2 PoC 已决定主模块不正式采用 Eino；M6-02 使用项目自有 Interface 与 Application 直接编排：
 
-- 对外只实现本文件定义的 ChatModel、EmbeddingModel、Reranker 和 ToolExecutor 等稳定 Interface。
-- Eino Message、Graph、Node、Callback、Tool Schema 和错误类型不得进入领域模块。
-- Workflow Definition、Run、Node Run、租约、重试、Human Task 和补偿仍以 PostgreSQL/River 与领域状态机为事实源。M4-A 的 Domain/Application 只依赖 Definition/Executor Registry、RuntimeStarter 和 JobReceipt；River/pgx 类型仅存在于 Adapter。Start 的 Graph/首节点兼容字段不能决定执行能力，能力由服务端冻结 Registry 决定。
-- Proposal、Approval、Write Authorization 和 Tool Permission 必须由领域/Application Service 判定，不委托给 Eino Graph 或模型输出。
+- 对外只暴露本文件定义的 ChatModel、EmbeddingModel、Reranker、EvidenceEligibility 和 ToolExecutor 等稳定 Interface。
+- Provider Message、Tool Schema、回调和错误类型不得进入领域模块；未来替换 Provider 只改 Adapter/Composition Root。
+- Workflow Definition、Run、Node Run、Node Attempt、租约、重试、Human Task 和补偿仍以 PostgreSQL/River 与领域状态机为事实源；Model Run/Call 是模型流水线的专用事实源，两者不能互相替代。
+- Model Run 保存 pipeline 的 generation/retrieval 基线；Recording Chat Adapter 必须让每条 Model Call 在 Provider
+  前冻结实际 Model/Profile/Prompt/Schema 与 max output tokens。REVIEW 可使用独立受信 Catalog，但不能只留下
+  request hash 或内存 RuntimeRefs。
+- Proposal、Approval、Write Authorization 和 Tool Permission 必须由领域/Application Service 判定，不委托给模型输出。
 - M4-C 的 `ApprovalDispatcher` 是独立跨 Schema 端口：Application 在数据库事务外完成 Target/Git 安全门，PostgreSQL Adapter 在单一 pgx transaction 内锁定 Proposal→Revision→Approval，并复用 Workflow `StartTx` 原子创建/重放 Definition、Run、Node、Outbox 和 River Job。Bootstrap Executor 只依赖 exact Execution lookup、Authorization Issue、Atomic Begin 与现有 Safe Writeback Node，不依赖 HTTP 或 River 类型。
-- PoC 通过后才锁定 Eino 版本；PoC 失败时 Composition Root 改用直接 OpenAI-Compatible Adapter，不改变调用方契约。
 
-采用门禁见 [ADR-0013](adr/0013-eino-adoption-gate.md)。
+历史 PoC 与采用门禁见 [ADR-0013](adr/0013-eino-adoption-gate.md)；它不再表示 Eino 是 M6-02 候选实现。
 
 ## 4. Parser Interface
 
@@ -222,6 +230,43 @@ M6-D 的 HTTP 分页不扩大 `SearchStore`：Application 每次读取规范请�
 - 公开响应不得包含 Workspace root、managed locator、绝对路径或完整 Artifact；不得回退读取当前工作树。
 - HTTP 只生成两个稳定 href，不拥有数据库 JOIN、Artifact 路径解析或 excerpt 完整性规则。
 
+### EvidenceEligibility
+
+职责：
+
+- 接收同一 Workspace 下最多 500 个具体 Provenance 引用，单批返回稳定排序的 Knowledge 资格结果。
+- Confirmed Claim/Relation Evidence 返回 eligible；Disputed Claim Evidence 返回 eligible 且携带 Conflict；Suggested、Rejected、Deprecated 或无正式绑定返回 ineligible。
+- 资格判断只由 Knowledge Application/Repository seam 提供；Agent Adapter 不直接查询 `claim_source`、`relation_evidence` 或 `conflict` 表。
+
+约束：
+
+- Retrieval 的 Active Index、rank、score 和可打开性都不能替代 Approved Evidence Eligibility。
+- 跨 Workspace、重复/损坏引用、缺少正式绑定或查询失败时 fail closed；不得因 Provider 判断或调用方标志升级资格。
+- 批量接口必须避免逐条查询，并保留一个 Provenance 关联多个正式 Claim/Relation/Conflict 的完整结果。
+
+### FormalClaimReader
+
+职责：
+
+- Relation Analyzer 按 Workspace 和 Claim ID 读取 Confirmed/Disputed Existing Claim 的服务端事实，包括正文、
+  canonical Applicability、Sources、状态、版本和更新时间。
+- 调用方提供的 Existing Claim 只能作为待核对请求，不能覆盖服务端 Claim 或 Conflict 事实。
+
+约束：
+
+- Agent 只能调用 Knowledge Application seam，不得直接查询 Knowledge SQL。
+- Workspace、正文、Applicability、Sources 或状态不一致时在模型调用前 fail closed。
+- Existing Evidence 必须同时命中 Claim Source 和 `CLAIM + owner_id` Eligibility binding；Disputed Claim 的
+  Conflict disclosure 由服务端生成并要求模型逐字段精确复制。
+
+### CitationEvidenceStore
+
+职责：按 `workspace + index_version + chunk + source_version + source_span` 完整 tuple，在一条参数化查询中批量证明
+最多 500 个 Citation 的 frozen Index 绑定并保留输入顺序。
+
+约束：任一 tuple 缺失、重复、跨 Workspace/Index 或乱序映射都使整批失败；Application 对同一 Source Version
+只读取一次 Artifact，不能形成数据库或 Artifact N+1。
+
 ## 8. WorkflowExecutor Interface
 
 职责：
@@ -295,14 +340,15 @@ Adapter 必须映射原始 SDK/命令/数据库错误，不能把外部错误类
 
 | Seam | 正式 Adapter | 测试 Adapter | 第二实现触发条件 |
 |---|---|---|---|
-| ChatModel | OpenAI-Compatible | Fake | 本地模型或第二厂商 |
+| ChatModel | 直接 OpenAI-Compatible HTTP（Ollama 走兼容 endpoint） | Deterministic Fake | 第二厂商提供已验证的兼容协议 |
 | Embedding | OpenAI-Compatible / Ollama direct HTTP | Fake | 第二厂商或本地协议 |
 | Reranker | 未配置，待批准真实协议 | Fake | 选定真实 Provider 并通过 Contract Test |
-| Agent 编排 | Eino Adapter（PoC 通过后）或直接编排 | Deterministic Fake | PoC 证明收益且通过门禁 |
+| Agent 编排 | 项目自有 Application 直接编排 | Deterministic Fake | 架构决策显式变更并重新通过门禁 |
 | Parser | Markdown/PDF/HTML | Fixture Fake | 新格式 |
 | Workspace | Local FS | Memory FS | 远程 Workspace |
 | Git | CLI | Fake | 无明确需求不增加 |
 | Retrieval | PostgreSQL | Memory | 已证明需要专用引擎 |
+| Evidence Eligibility | Knowledge PostgreSQL/Application | Deterministic Fake | Article/Document Approval read model 落地后扩展同一 Port |
 | Scheduler | FSRS | Deterministic | 新算法 |
 
 ## 14. Composition Root
@@ -315,6 +361,10 @@ Adapter 必须映射原始 SDK/命令/数据库错误，不能把外部错误类
 - 注入 Module。
 - 注册 Workflow 和 Tool。
 - 启动 API/Worker。
+- Chat 配置由同一 Configured Factory 构造；`provider=disabled` 明确返回 unavailable capability，不能注入 Fake。
+- Knowledge 提供独立只读 `EvidenceEligibilityService`，只依赖 Knowledge Repository，并复用与完整 Service 相同的
+  canonical query/result 校验；Agent 只能经该 Application seam 获取 Confirmed/Disputed 资格、Conflict、Claim
+  Applicability 和更新时间，不能为了 Worker 接线直接查询 Knowledge SQL。
 - API 与 Worker 共用 `internal/platform/models.NewConfiguredEmbedder(config.Config)`；Compose 必须向两个
   进程注入同一组 Embedding 配置。API 额外将同一 Embedder 注入 Query Search，Worker 注入 Vector Build。
 

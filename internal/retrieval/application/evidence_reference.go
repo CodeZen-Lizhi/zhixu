@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -22,6 +23,24 @@ type EvidenceReferenceStore interface {
 	LoadSourceVersionReference(context.Context, foundation.ID, foundation.ID) (domain.SourceVersionReference, error)
 	// LoadSourceSpanReference 必须证明 Source Version、Parse Projection、Content Artifact 与 Span 全绑定。
 	LoadSourceSpanReference(context.Context, foundation.ID, foundation.ID, foundation.ID) (domain.SourceSpanReference, error)
+}
+
+// CitationEvidenceStore 按完整 frozen Index Citation tuple 加载 Source Span 绑定。
+type CitationEvidenceStore interface {
+	// LoadCitationSourceSpanReferences 必须单批证明 Index、Chunk、Source Version、Projection 与 Span。
+	LoadCitationSourceSpanReferences(context.Context, []domain.CitationReferenceQuery) ([]CitationSourceSpanBinding, error)
+}
+
+// CitationSourceSpanBinding 保留完整 Citation 查询与不可变 Source Span 的精确对应。
+type CitationSourceSpanBinding struct {
+	Query     domain.CitationReferenceQuery
+	Reference domain.SourceSpanReference
+}
+
+// OpenedCitationEvidence 返回完整 Citation 查询与经 Artifact 复核的 Source Span。
+type OpenedCitationEvidence struct {
+	Query domain.CitationReferenceQuery
+	View  SourceSpanView
 }
 
 // EvidenceArtifactReader 通过安全 Workspace/Content Artifact 边界读取不可变原始字节。
@@ -102,6 +121,75 @@ func (service *EvidenceReferenceService) GetSourceSpan(
 	if err != nil {
 		return SourceSpanView{}, err
 	}
+	return service.openSourceSpan(ctx, reference, workspaceID, sourceVersionID, spanID)
+}
+
+// OpenCitationEvidence 按完整 frozen Index Citation tuple 打开不可变 Source Span。
+func (service *EvidenceReferenceService) OpenCitationEvidence(ctx context.Context, query domain.CitationReferenceQuery) (SourceSpanView, error) {
+	opened, err := service.OpenCitationEvidenceBatch(ctx, []domain.CitationReferenceQuery{query})
+	if err != nil {
+		return SourceSpanView{}, err
+	}
+	if len(opened) != 1 || opened[0].Query != query {
+		return SourceSpanView{}, evidenceArtifactConsistency("citation evidence batch returned an invalid single result")
+	}
+	return opened[0].View, nil
+}
+
+// OpenCitationEvidenceBatch 单批验证 Citation tuple，并且每个 Source Version 只读取一次 Artifact。
+func (service *EvidenceReferenceService) OpenCitationEvidenceBatch(ctx context.Context, queries []domain.CitationReferenceQuery) ([]OpenedCitationEvidence, error) {
+	if service == nil || nilDispatcherDependency(service.store) || nilDispatcherDependency(service.reader) {
+		return nil, evidenceReferenceDependencyError("citation evidence service is unavailable")
+	}
+	canonical, err := canonicalCitationQueries(queries)
+	if err != nil {
+		return nil, err
+	}
+	store, ok := service.store.(CitationEvidenceStore)
+	if !ok || nilDispatcherDependency(store) {
+		return nil, evidenceReferenceDependencyError("citation evidence store is unavailable")
+	}
+	bindings, err := store.LoadCitationSourceSpanReferences(ctx, canonical)
+	if err != nil {
+		return nil, err
+	}
+	if len(bindings) != len(canonical) {
+		return nil, evidenceArtifactConsistency("citation evidence store returned an incomplete batch")
+	}
+	artifacts := make(map[foundation.ID]EvidenceArtifact)
+	result := make([]OpenedCitationEvidence, len(canonical))
+	for index, query := range canonical {
+		binding := bindings[index]
+		if binding.Query != query {
+			return nil, evidenceArtifactConsistency("citation evidence store returned an out-of-order binding")
+		}
+		artifact, exists := artifacts[query.SourceVersionID]
+		if !exists {
+			artifact, err = service.reader.ReadEvidenceArtifact(ctx, query.WorkspaceID, query.SourceVersionID)
+			if err != nil {
+				return nil, err
+			}
+			if err := validateEvidenceArtifact(binding.Reference.SourceVersion, artifact); err != nil {
+				return nil, err
+			}
+			artifacts[query.SourceVersionID] = artifact
+		}
+		view, err := openSourceSpanFromArtifact(binding.Reference, artifact, query.WorkspaceID, query.SourceVersionID, query.SourceSpanID)
+		if err != nil {
+			return nil, err
+		}
+		result[index] = OpenedCitationEvidence{Query: query, View: view}
+	}
+	return result, nil
+}
+
+func (service *EvidenceReferenceService) openSourceSpan(
+	ctx context.Context,
+	reference domain.SourceSpanReference,
+	workspaceID foundation.ID,
+	sourceVersionID foundation.ID,
+	spanID foundation.ID,
+) (SourceSpanView, error) {
 	if err := domain.ValidateSourceSpanReference(reference); err != nil ||
 		reference.SourceVersion.WorkspaceID != workspaceID ||
 		reference.SourceVersion.SourceVersionID != sourceVersionID || reference.Span.ID != spanID {
@@ -114,6 +202,18 @@ func (service *EvidenceReferenceService) GetSourceSpan(
 	if err := validateEvidenceArtifact(reference.SourceVersion, artifact); err != nil {
 		return SourceSpanView{}, err
 	}
+	return openSourceSpanFromArtifact(reference, artifact, workspaceID, sourceVersionID, spanID)
+}
+
+func openSourceSpanFromArtifact(
+	reference domain.SourceSpanReference,
+	artifact EvidenceArtifact,
+	workspaceID, sourceVersionID, spanID foundation.ID,
+) (SourceSpanView, error) {
+	if err := domain.ValidateSourceSpanReference(reference); err != nil || reference.SourceVersion.WorkspaceID != workspaceID ||
+		reference.SourceVersion.SourceVersionID != sourceVersionID || reference.Span.ID != spanID {
+		return SourceSpanView{}, evidenceArtifactConsistency("source span store returned an invalid binding")
+	}
 	excerpt, truncated, err := evidenceExcerpt(reference, artifact.Bytes)
 	if err != nil {
 		return SourceSpanView{}, err
@@ -121,6 +221,38 @@ func (service *EvidenceReferenceService) GetSourceSpan(
 	reference.SourceVersion.CapturedAt = reference.SourceVersion.CapturedAt.UTC()
 	reference.Selector = append([]byte(nil), reference.Selector...)
 	return SourceSpanView{Reference: reference, Excerpt: excerpt, ExcerptTruncated: truncated}, nil
+}
+
+func canonicalCitationQueries(queries []domain.CitationReferenceQuery) ([]domain.CitationReferenceQuery, error) {
+	if len(queries) == 0 || len(queries) > 500 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("citation reference batch count is invalid"))
+	}
+	canonical := append([]domain.CitationReferenceQuery(nil), queries...)
+	for _, query := range canonical {
+		if err := domain.ValidateCitationReferenceQuery(query); err != nil {
+			return nil, err
+		}
+		if query.WorkspaceID != canonical[0].WorkspaceID || query.IndexVersionID != canonical[0].IndexVersionID {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("citation reference batch crosses workspace or index"))
+		}
+	}
+	slices.SortFunc(canonical, func(left, right domain.CitationReferenceQuery) int {
+		for _, pair := range [][2]foundation.ID{{left.ChunkID, right.ChunkID}, {left.SourceVersionID, right.SourceVersionID}, {left.SourceSpanID, right.SourceSpanID}} {
+			if pair[0] < pair[1] {
+				return -1
+			}
+			if pair[0] > pair[1] {
+				return 1
+			}
+		}
+		return 0
+	})
+	for index := 1; index < len(canonical); index++ {
+		if canonical[index] == canonical[index-1] {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("citation reference batch contains duplicates"))
+		}
+	}
+	return canonical, nil
 }
 
 func validateEvidenceReferenceRequest(values ...foundation.ID) error {

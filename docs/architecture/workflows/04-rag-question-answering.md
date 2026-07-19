@@ -40,7 +40,7 @@ flowchart TD
 
 ## 5. Evidence
 
-- 只用 Ready + Approved。
+- Retrieval 只返回 Ready/Active 可打开候选；发布前必须通过 Knowledge Evidence Eligibility，Active 不等于 Approved。
 - Historical/Source 仅显式允许。
 - Conflict 标记。
 - Source Span 可打开。
@@ -99,4 +99,3 @@ flowchart TD
 - 冲突不被隐藏。
 - 草稿不默认检索。
 - 拒答样本通过评测。
-

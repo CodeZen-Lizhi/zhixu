@@ -30,6 +30,9 @@ func TestKnowledgeDomainMigrationSchemaAndEmptyDownUp(t *testing.T) {
 	assertKnowledgeMigrationShape(t, ctx, pool)
 	provider := migrationProvider(t, pool)
 	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00018 empty Down failed: %v", err)
+	}
+	if _, err := provider.Down(ctx); err != nil {
 		t.Fatalf("00017 empty Down failed: %v", err)
 	}
 	var tables, schemaMeta int
@@ -81,7 +84,11 @@ INSERT INTO core.topic(
 );`); err != nil {
 		t.Fatal(err)
 	}
-	_, err = migrationProvider(t, pool).Down(ctx)
+	provider := migrationProvider(t, pool)
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00018 empty Down failed: %v", err)
+	}
+	_, err = provider.Down(ctx)
 	assertPostgresCode(t, err, "55000")
 }
 

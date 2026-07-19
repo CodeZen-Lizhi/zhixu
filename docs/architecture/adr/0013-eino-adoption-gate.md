@@ -2,7 +2,7 @@
 status: accepted
 ---
 
-# Eino 仅在 PoC 通过后作为可替换边缘实现
+# Eino 采用门禁与 M2 不采用结论
 
 项目需要验证 Eino 是否能降低 Chat、Embedding、Streaming、Structured Output、Tool Calling 和可观测回调的集成成本，但不能让未经验证的框架成为领域或持久化执行模型的事实源。
 
@@ -15,6 +15,13 @@ status: accepted
 - 只有 PoC 验证 Chat、Embedding、Retriever/Rerank 接入、Streaming 取消与资源释放、Structured Output/有限修复、Tool Calling 权限隔离、Callback/Trace、错误分类、限流和 River Node 集成后，才能在 Manifest、Lockfile 和 CI 中锁定经验证版本。
 - 任一关键门禁失败时，默认回退直接 OpenAI-Compatible Adapter；调用方 Interface 和领域契约不变。
 
+## M2 Outcome
+
+M2 PoC 已完成。Streaming、Structured Output、Embedding/Retriever/Rerank、River Node 和真实 Provider Smoke
+未全部通过采用门禁，因此主模块不正式采用 Eino。M6-02 使用项目自有 Application 编排和直接
+OpenAI-Compatible HTTP Adapter；Ollama 仅通过兼容 endpoint 接入。重新评估 Eino 需要新的 ADR 和完整门禁，
+不能把本 ADR 当作当前候选实现授权。
+
 ## Considered Options
 
 - 将 Eino 作为核心 Agent/Workflow 框架。
@@ -24,7 +31,7 @@ status: accepted
 ## Consequences
 
 - M2 必须先提供可重复 PoC 报告和 Contract Test，当前 ADR 不锁定任何未经验证版本。
-- Composition Root 负责选择 Eino Adapter 或直接 Adapter。
+- Composition Root 当前只构造直接 OpenAI-Compatible Chat Adapter；测试使用 Deterministic Fake。
 - 需要维护少量项目自有 Model、Retrieval、Tool 和 Workflow Interface。
 - 框架升级或回退不需要迁移领域对象、Proposal 或 Workflow 持久化状态。
 

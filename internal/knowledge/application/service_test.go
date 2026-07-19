@@ -678,6 +678,7 @@ type fakeRepository struct {
 	batchClaims        func(context.Context, domain.BatchGetClaimsQuery) ([]domain.ClaimWithSources, error)
 	batchRelations     func(context.Context, domain.BatchGetRelationsQuery) ([]domain.RelationWithEvidence, error)
 	batchConflicts     func(context.Context, domain.BatchGetConflictsQuery) ([]domain.ConflictWithMembers, error)
+	batchEligibility   func(context.Context, domain.EvidenceEligibilityQuery) ([]domain.ProvenanceEligibility, error)
 }
 
 func (f *fakeRepository) LookupCommandReceipt(c context.Context, q domain.CommandReceiptQuery) (domain.CommandReceiptLookup, error) {
@@ -764,6 +765,12 @@ func (f *fakeRepository) BatchGetConflicts(c context.Context, q domain.BatchGetC
 		return nil, unexpected()
 	}
 	return f.batchConflicts(c, q)
+}
+func (f *fakeRepository) BatchCheckEvidenceEligibility(c context.Context, q domain.EvidenceEligibilityQuery) ([]domain.ProvenanceEligibility, error) {
+	if f.batchEligibility == nil {
+		return nil, unexpected()
+	}
+	return f.batchEligibility(c, q)
 }
 
 type fakeProvenanceVerifier struct {

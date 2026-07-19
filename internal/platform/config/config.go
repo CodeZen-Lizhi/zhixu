@@ -53,6 +53,14 @@ const (
 	maxEmbeddingDimensions       = int32(16_000)
 	maxEmbeddingTimeout          = 5 * time.Minute
 	maxEmbeddingMaxResponseBytes = int64(128 << 20)
+
+	defaultChatAdapterVersion   = "v1"
+	defaultChatTimeout          = 30 * time.Second
+	defaultChatMaxRequestBytes  = int64(4 << 20)
+	defaultChatMaxResponseBytes = int64(4 << 20)
+	maxChatTimeout              = 5 * time.Minute
+	maxChatRequestBytes         = int64(16 << 20)
+	maxChatResponseBytes        = int64(16 << 20)
 )
 
 const (
@@ -94,6 +102,16 @@ const (
 	EmbeddingProviderOpenAICompatible EmbeddingProvider = "openai-compatible"
 	// EmbeddingProviderOllama uses Ollama's native HTTP protocol.
 	EmbeddingProviderOllama EmbeddingProvider = "ollama"
+)
+
+// ChatProvider 控制生产环境是否以及如何执行结构化 Chat 调用。
+type ChatProvider string
+
+const (
+	// ChatProviderDisabled 明确关闭 Chat capability。
+	ChatProviderDisabled ChatProvider = "disabled"
+	// ChatProviderOpenAICompatible 使用 OpenAI-Compatible HTTP 协议。
+	ChatProviderOpenAICompatible ChatProvider = "openai-compatible"
 )
 
 // Config contains process settings, including connection secrets. Callers must
@@ -140,6 +158,16 @@ type Config struct {
 	EmbeddingMaxBatchInputBytes int64                         `yaml:"embedding_max_batch_input_bytes"`
 	EmbeddingTimeout            time.Duration                 `yaml:"embedding_timeout"`
 	EmbeddingMaxResponseBytes   int64                         `yaml:"embedding_max_response_bytes"`
+
+	ChatProvider         ChatProvider  `yaml:"chat_provider"`
+	ChatBaseURL          string        `yaml:"chat_base_url"`
+	ChatAPIKey           string        `yaml:"chat_api_key"`
+	ChatModel            string        `yaml:"chat_model"`
+	ChatModelVersion     string        `yaml:"chat_model_version"`
+	ChatAdapterVersion   string        `yaml:"chat_adapter_version"`
+	ChatTimeout          time.Duration `yaml:"chat_timeout"`
+	ChatMaxRequestBytes  int64         `yaml:"chat_max_request_bytes"`
+	ChatMaxResponseBytes int64         `yaml:"chat_max_response_bytes"`
 
 	RetrievalRRFK                     int32 `yaml:"retrieval_rrf_k"`
 	RetrievalRRFLexicalCandidateLimit int32 `yaml:"retrieval_rrf_lexical_candidate_limit"`
@@ -188,6 +216,12 @@ func Defaults() Config {
 		EmbeddingMaxBatchInputBytes: defaultEmbeddingMaxBatchInputBytes,
 		EmbeddingTimeout:            defaultEmbeddingTimeout,
 		EmbeddingMaxResponseBytes:   defaultEmbeddingMaxResponseBytes,
+
+		ChatProvider:         ChatProviderDisabled,
+		ChatAdapterVersion:   defaultChatAdapterVersion,
+		ChatTimeout:          defaultChatTimeout,
+		ChatMaxRequestBytes:  defaultChatMaxRequestBytes,
+		ChatMaxResponseBytes: defaultChatMaxResponseBytes,
 
 		RetrievalRRFK:                     defaultRetrievalRRFK,
 		RetrievalRRFLexicalCandidateLimit: defaultRetrievalRRFLexicalCandidateLimit,
@@ -278,6 +312,16 @@ type fileConfig struct {
 	EmbeddingMaxBatchInputBytes *int64                         `yaml:"embedding_max_batch_input_bytes"`
 	EmbeddingTimeout            *string                        `yaml:"embedding_timeout"`
 	EmbeddingMaxResponseBytes   *int64                         `yaml:"embedding_max_response_bytes"`
+
+	ChatProvider         *ChatProvider `yaml:"chat_provider"`
+	ChatBaseURL          *string       `yaml:"chat_base_url"`
+	ChatAPIKey           *string       `yaml:"chat_api_key"`
+	ChatModel            *string       `yaml:"chat_model"`
+	ChatModelVersion     *string       `yaml:"chat_model_version"`
+	ChatAdapterVersion   *string       `yaml:"chat_adapter_version"`
+	ChatTimeout          *string       `yaml:"chat_timeout"`
+	ChatMaxRequestBytes  *int64        `yaml:"chat_max_request_bytes"`
+	ChatMaxResponseBytes *int64        `yaml:"chat_max_response_bytes"`
 
 	RetrievalRRFK                     *int32 `yaml:"retrieval_rrf_k"`
 	RetrievalRRFLexicalCandidateLimit *int32 `yaml:"retrieval_rrf_lexical_candidate_limit"`
@@ -384,6 +428,30 @@ func applyYAMLFile(path string, cfg *Config) error {
 	if raw.EmbeddingMaxResponseBytes != nil {
 		cfg.EmbeddingMaxResponseBytes = *raw.EmbeddingMaxResponseBytes
 	}
+	if raw.ChatProvider != nil {
+		cfg.ChatProvider = *raw.ChatProvider
+	}
+	if raw.ChatBaseURL != nil {
+		cfg.ChatBaseURL = *raw.ChatBaseURL
+	}
+	if raw.ChatAPIKey != nil {
+		cfg.ChatAPIKey = *raw.ChatAPIKey
+	}
+	if raw.ChatModel != nil {
+		cfg.ChatModel = *raw.ChatModel
+	}
+	if raw.ChatModelVersion != nil {
+		cfg.ChatModelVersion = *raw.ChatModelVersion
+	}
+	if raw.ChatAdapterVersion != nil {
+		cfg.ChatAdapterVersion = *raw.ChatAdapterVersion
+	}
+	if raw.ChatMaxRequestBytes != nil {
+		cfg.ChatMaxRequestBytes = *raw.ChatMaxRequestBytes
+	}
+	if raw.ChatMaxResponseBytes != nil {
+		cfg.ChatMaxResponseBytes = *raw.ChatMaxResponseBytes
+	}
 	if raw.RetrievalRRFK != nil {
 		cfg.RetrievalRRFK = *raw.RetrievalRRFK
 	}
@@ -421,6 +489,7 @@ func applyYAMLFile(path string, cfg *Config) error {
 		"reindex_lease_duration":         raw.ReindexLeaseDuration,
 		"reindex_heartbeat_interval":     raw.ReindexHeartbeatInterval,
 		"embedding_timeout":              raw.EmbeddingTimeout,
+		"chat_timeout":                   raw.ChatTimeout,
 		"worker_soft_stop_timeout":       raw.WorkerSoftStopTimeout,
 		"worker_hard_stop_timeout":       raw.WorkerHardStopTimeout,
 	} {
@@ -456,6 +525,8 @@ func applyYAMLFile(path string, cfg *Config) error {
 			cfg.ReindexHeartbeatInterval = parsed
 		case "embedding_timeout":
 			cfg.EmbeddingTimeout = parsed
+		case "chat_timeout":
+			cfg.ChatTimeout = parsed
 		case "worker_soft_stop_timeout":
 			cfg.WorkerSoftStopTimeout = parsed
 		case "worker_hard_stop_timeout":
@@ -536,6 +607,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateEmbedding(); err != nil {
+		return err
+	}
+	if err := c.validateChat(); err != nil {
 		return err
 	}
 	if err := domain.ValidateRRFConfig(c.RetrievalRRFConfig()); err != nil {
@@ -662,6 +736,86 @@ func isLoopbackHost(host string) bool {
 	return address != nil && address.IsLoopback()
 }
 
+func (c Config) validateChat() error {
+	if c.ChatTimeout <= 0 || c.ChatTimeout > maxChatTimeout {
+		return errors.New("chat_timeout must be positive and at most 5m")
+	}
+	if c.ChatMaxRequestBytes <= 0 || c.ChatMaxRequestBytes > maxChatRequestBytes {
+		return errors.New("chat_max_request_bytes must be between 1 and 16777216")
+	}
+	if c.ChatMaxResponseBytes <= 0 || c.ChatMaxResponseBytes > maxChatResponseBytes {
+		return errors.New("chat_max_response_bytes must be between 1 and 16777216")
+	}
+	if !canonicalChatSetting(c.ChatAdapterVersion, 64) {
+		return errors.New("chat_adapter_version must be non-empty and canonical")
+	}
+	switch c.ChatProvider {
+	case ChatProviderDisabled:
+		if c.ChatBaseURL != "" || c.ChatAPIKey != "" || c.ChatModel != "" || c.ChatModelVersion != "" {
+			return errors.New("chat provider settings must be empty when chat_provider is disabled")
+		}
+		return nil
+	case ChatProviderOpenAICompatible:
+		if !canonicalChatSetting(c.ChatModel, 128) {
+			return errors.New("chat_model must be non-empty and canonical when chat is enabled")
+		}
+		if !canonicalChatSetting(c.ChatModelVersion, 64) {
+			return errors.New("chat_model_version must be non-empty and canonical when chat is enabled")
+		}
+		if c.ChatAPIKey != "" && !canonicalChatSecret(c.ChatAPIKey) {
+			return errors.New("chat_api_key must be canonical when configured")
+		}
+		if err := validateChatBaseURL(c.ChatBaseURL); err != nil {
+			return err
+		}
+		return nil
+	default:
+		return errors.New("chat_provider must be disabled or openai-compatible")
+	}
+}
+
+func validateChatBaseURL(raw string) error {
+	if raw == "" || raw != strings.TrimSpace(raw) || len(raw) > 2048 {
+		return errors.New("chat_base_url is invalid")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
+		return errors.New("chat_base_url is invalid")
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	if parsed.Scheme != "http" || !isLoopbackHost(parsed.Hostname()) {
+		return errors.New("chat_base_url must use https, except loopback compatible endpoints may use http")
+	}
+	return nil
+}
+
+func canonicalChatSetting(value string, maximum int) bool {
+	if value == "" || len(value) > maximum || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x21 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalChatSecret(value string) bool {
+	if len(value) > 8192 || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 // RetrievalRRFConfig returns the strict versioned fusion configuration.
 func (c Config) RetrievalRRFConfig() domain.RRFConfig {
 	return domain.RRFConfig{
@@ -723,7 +877,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -757,6 +911,14 @@ func (c Config) String() string {
 		c.EmbeddingMaxBatchInputBytes,
 		c.EmbeddingTimeout,
 		c.EmbeddingMaxResponseBytes,
+		c.ChatProvider,
+		c.ChatProvider != ChatProviderDisabled,
+		c.ChatModel,
+		c.ChatModelVersion,
+		c.ChatAdapterVersion,
+		c.ChatTimeout,
+		c.ChatMaxRequestBytes,
+		c.ChatMaxResponseBytes,
 		c.RetrievalRRFK,
 		c.RetrievalRRFLexicalCandidateLimit,
 		c.RetrievalRRFVectorCandidateLimit,
@@ -776,6 +938,15 @@ func (c Config) GoString() string {
 }
 
 func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
+	if value, ok := lookup("ZHIXU_CHAT_PROVIDER"); ok {
+		cfg.ChatProvider = ChatProvider(value)
+		if cfg.ChatProvider == ChatProviderDisabled {
+			cfg.ChatBaseURL = ""
+			cfg.ChatAPIKey = ""
+			cfg.ChatModel = ""
+			cfg.ChatModelVersion = ""
+		}
+	}
 	if value, ok := lookup("ZHIXU_EMBEDDING_PROVIDER"); ok {
 		cfg.EmbeddingProvider = EmbeddingProvider(value)
 		if cfg.EmbeddingProvider == EmbeddingProviderDisabled {
@@ -810,6 +981,19 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 			"ZHIXU_EMBEDDING_BASE_URL": &cfg.EmbeddingBaseURL,
 			"ZHIXU_EMBEDDING_API_KEY":  &cfg.EmbeddingAPIKey,
 			"ZHIXU_EMBEDDING_MODEL":    &cfg.EmbeddingModel,
+		} {
+			if value, ok := lookup(key); ok {
+				*target = value
+			}
+		}
+	}
+	if cfg.ChatProvider != ChatProviderDisabled {
+		for key, target := range map[string]*string{
+			"ZHIXU_CHAT_BASE_URL":        &cfg.ChatBaseURL,
+			"ZHIXU_CHAT_API_KEY":         &cfg.ChatAPIKey,
+			"ZHIXU_CHAT_MODEL":           &cfg.ChatModel,
+			"ZHIXU_CHAT_MODEL_VERSION":   &cfg.ChatModelVersion,
+			"ZHIXU_CHAT_ADAPTER_VERSION": &cfg.ChatAdapterVersion,
 		} {
 			if value, ok := lookup(key); ok {
 				*target = value
@@ -891,6 +1075,18 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		}
 		cfg.EmbeddingMaxBatchInputBytes = parsed
 	}
+	for key, target := range map[string]*int64{
+		"ZHIXU_CHAT_MAX_REQUEST_BYTES":  &cfg.ChatMaxRequestBytes,
+		"ZHIXU_CHAT_MAX_RESPONSE_BYTES": &cfg.ChatMaxResponseBytes,
+	} {
+		if value, ok := lookup(key); ok {
+			parsed, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return fmt.Errorf("parse %s: invalid integer", key)
+			}
+			*target = parsed
+		}
+	}
 	for key, target := range map[string]*time.Duration{
 		"ZHIXU_DATABASE_PING_TIMEOUT":     &cfg.DatabasePingTimeout,
 		"ZHIXU_HEALTH_INTERVAL":           &cfg.HealthInterval,
@@ -905,6 +1101,7 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		"ZHIXU_REINDEX_LEASE_DURATION":         &cfg.ReindexLeaseDuration,
 		"ZHIXU_REINDEX_HEARTBEAT_INTERVAL":     &cfg.ReindexHeartbeatInterval,
 		"ZHIXU_EMBEDDING_TIMEOUT":              &cfg.EmbeddingTimeout,
+		"ZHIXU_CHAT_TIMEOUT":                   &cfg.ChatTimeout,
 
 		"ZHIXU_WORKER_SOFT_STOP_TIMEOUT": &cfg.WorkerSoftStopTimeout,
 		"ZHIXU_WORKER_HARD_STOP_TIMEOUT": &cfg.WorkerHardStopTimeout,
@@ -912,8 +1109,8 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		if value, ok := lookup(key); ok {
 			parsed, err := time.ParseDuration(value)
 			if err != nil {
-				if key == "ZHIXU_EMBEDDING_TIMEOUT" {
-					return errors.New("parse ZHIXU_EMBEDDING_TIMEOUT: invalid duration")
+				if key == "ZHIXU_EMBEDDING_TIMEOUT" || key == "ZHIXU_CHAT_TIMEOUT" {
+					return fmt.Errorf("parse %s: invalid duration", key)
 				}
 				return fmt.Errorf("parse %s: %w", key, err)
 			}

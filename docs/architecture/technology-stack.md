@@ -61,14 +61,14 @@ PDF 抽取作为 Adapter，因为纯 Go PDF 文本库质量和布局兼容性可
 | 能力 | 选择 | 采用约束 |
 |---|---|---|
 | Chat | OpenAI-Compatible HTTP Adapter | 默认可替换实现 |
-| Local Model | Ollama Adapter | 通过统一 Model Interface 接入 |
+| Local Model | Ollama OpenAI-Compatible Endpoint | 通过统一 ChatModel Interface 接入，不维护第二套原生 Chat 协议 |
 | Embedding | OpenAI-Compatible/Local Adapter | 批量调用并记录模型版本 |
 | Rerank | HTTP Adapter，可禁用 | 失败必须显式标记 degraded |
 | Structured Output | JSON Schema + 领域校验 | 框架输出仍需领域校验 |
 | Prompt | 版本化模板 | 运行记录保存实际版本 |
-| Agent 编排 | Eino（PoC 通过后可选采用） | 仅限 Agent/Application/Adapter/Infrastructure |
+| Agent 编排 | 项目自有 Application | 直接编排稳定 Interface，不采用 Eino 主模块依赖 |
 
-Eino 不是当前已锁定依赖。只有 [ADR-0013](adr/0013-eino-adoption-gate.md) 定义的 PoC 全部通过后，才在项目 Manifest、Lockfile 和 CI 中锁定经验证版本；PoC 失败则继续使用直接 OpenAI-Compatible Adapter。
+Eino 不是当前依赖。[ADR-0013](adr/0013-eino-adoption-gate.md) 定义的采用门禁已由 M2 执行，因关键项未全部通过，主模块正式选择项目自有 Application + 直接 OpenAI-Compatible Adapter。
 
 M2 已在独立 `poc/eino` module 中验证 Eino `v0.9.12` 的 Chat Graph、ToolsNode、Callback 以及 OpenAI 扩展 `v0.1.13` 的编译/配置边界，但 Streaming、Structured Output、Embedding/Retriever/Rerank、River Node 和真实 Provider Smoke 门禁尚未全部通过。因此当前结论为“不正式采用”，主模块继续保留直接 OpenAI-Compatible Adapter 路线。详见 [`poc/eino/report.md`](../../poc/eino/report.md)。
 

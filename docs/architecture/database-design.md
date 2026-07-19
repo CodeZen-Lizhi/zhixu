@@ -11,6 +11,7 @@
 - core：Workspace、Source、Document、Knowledge。
 - change_control：Proposal、Approval。
 - workflow：Workflow、Node、Tool、Outbox。
+- agent：Model Run、Model Call。
 - retrieval：Chunk、Embedding、Index Version。
 - learning：Artifact、Review、Memory。
 - ops：Audit、Evaluation、Health。
@@ -39,6 +40,8 @@ erDiagram
     WORKFLOW_RUN ||--o{ NODE_RUN : nodes
     NODE_RUN ||--o{ TOOL_CALL : calls
     NODE_RUN ||--o{ NODE_ATTEMPT : leases
+    NODE_ATTEMPT ||--o| MODEL_RUN : executes
+    MODEL_RUN ||--o{ MODEL_CALL : invokes
     WORKFLOW_RUN ||--o{ HUMAN_TASK : waits_for
     NODE_RUN ||--o{ COMPENSATION_RECORD : compensates
     WORKFLOW_RUN ||--o{ TOOL_AUTHORIZATION : grants
@@ -299,6 +302,14 @@ relation_evidence：
 Claim Source 与 Relation Evidence 是不同语义实体，但共用一套 Workspace → Source Version → Content Artifact →
 Source Version Projection → Source Span 绑定验证。Search Evidence 和 Proposal Evidence 不写入这两张表。
 
+M6-02 的 Evidence Eligibility 不新增可由 Agent 写入的 Approved 标志，而是由 Knowledge Repository 对最多 500 个
+Provenance 做一次参数化、Workspace-scoped 批量查询：Confirmed Claim/Relation Evidence 为 eligible；Disputed Claim
+Evidence 为 eligible 但必须返回 Conflict 绑定、Claim canonical Applicability 与 Claim `updated_at`；Suggested、Rejected、
+Deprecated 和无正式绑定默认 ineligible。Applicability Schema/Hash 在 Adapter 中重新规范化校验，避免把 PostgreSQL JSONB
+文本格式当作 Domain canonical JSON；冲突回答的条件和更新时间必须精确匹配该 Knowledge 事实，不能来自模型猜测或
+Retrieval Source 捕获时间。
+Retrieval `index_version.status=active` 只决定可检索投影，不能升级知识资格；Agent 不得直接查询 Knowledge 表。
+
 对称关系规范化：
 
 - DUPLICATES、CONFLICTS_WITH 使用稳定 ID 排序，防止反向重复。
@@ -458,6 +469,38 @@ tool_call：
 - idempotency_key。
 - status。
 
+### agent.model_run / agent.model_call
+
+M6-02 使用专用 Model Run/Call 事实源记录模型流水线，不能把多次调用压入 `node_run.output`、日志或 Trace。
+前向迁移 `00018_agent_runtime.sql` 只新增 `agent` Schema 和相关约束，不修改历史迁移。
+
+model_run：
+
+- id、workspace_id、workflow_run_id、node_run_id、node_attempt_id。
+- adapter_name、adapter_version、model_id、model_version。
+- prompt_template_id、prompt_template_version、output_schema_id、output_schema_version、reduced_schema_id、reduced_schema_version。
+- retrieval_index_version_id、embedding_version_id nullable、rerank_model_version nullable。
+- status：RUNNING、SUCCEEDED、REFUSED、FAILED、UNKNOWN。
+- final_result_type、error_code、version、started_at、completed_at。
+
+model_call：
+
+- id、model_run_id、call_no、phase：INITIAL、REPAIR、REDUCED、REVIEW。
+- 该次实际 adapter/model、profile、prompt template、output schema 的 ID/version，以及 max_output_tokens。
+- request_hash、response_hash、request_bytes、response_bytes。
+- input_tokens、output_tokens、latency_ms、error_code。
+- status：STARTED、SUCCEEDED、FAILED、UNKNOWN；started_at、completed_at。
+
+约束和执行规则：
+
+- 一个 Node Attempt 最多一个 Model Run；`(model_run_id, call_no)` 唯一，Call No 严格递增且实际 phase 可审计。
+- Run/Call 都在 Provider 请求前持久化，完成通过版本 CAS 归约；`RUNNING/STARTED` 崩溃恢复为 UNKNOWN，不自动标成功。
+- Model Run 创建时冻结 generation/retrieval 基线；每条 Model Call 再冻结该次实际 Model/Profile/Prompt/Schema，
+  包括 REVIEW 的独立版本。运行中默认配置变化不得改写历史，也不得用 request hash 代替可查询版本字段。
+- 只保存 canonical request/response hash、字节数、Token、耗时、状态和稳定错误；完整 Prompt、Evidence、Source、原始响应、Credential、Endpoint Secret 和绝对路径禁止入库。
+- Workspace、Workflow Run、Node Run、Node Attempt 必须同 Workspace 且保持不可换绑；Knowledge `model_run_ref` 指向稳定 Run ID。
+- Down 只允许空表；已有 Run/Call 时返回 SQLSTATE `55000`，应用回滚保留数据并采用 forward fix。
+
 ### outbox
 
 - id。
@@ -610,7 +653,7 @@ gold_set_case：
 evaluation_run：
 
 - id、dataset_id、dataset_version、status、started_at、ended_at。
-- model_version、prompt_version、embedding_version、chunk_strategy_version、rerank_version、index_version、workflow_definition_version。
+- model_adapter/model_version、prompt_template_version、output_schema_version、embedding_version、chunk_strategy_version、rerank_version、index_version、workflow_definition_version、review_model_version。
 - baseline_run_ref、metrics_summary、schema_version。
 
 evaluation_result：
@@ -728,24 +771,24 @@ Tool Authorization 是服务端短时、单任务、最小权限的授权记录�
 - 同一授权作用域只能成功消费一次；重复执行返回既有 Tool Call 结果，未知副作用进入人工恢复。
 - Tool Module 负责权限判定和消费，Change Control 负责 Proposal/Approval 事实，数据库负责唯一性、过期和状态约束。
 
-### node_run 的实际版本字段
+### node_run 与 model_run 的版本职责
 
-Workflow Definition 只是声明；Node Run 必须记录本次实际执行所使用的版本，避免运行中配置变化导致不可复现。
+Workflow Definition 只是声明；Node Run 记录 Workflow/输入输出/Retrieval 等通用节点快照，Model Run/Call 记录 ChatModel
+流水线的专用版本和调用历史。两者通过 Node Attempt 关联，但不复制成两个可独立修改的模型事实源。
 
 在现有 `node_run` 逻辑字段基础上补充：
 
 - workflow_definition_id、workflow_definition_version。
-- prompt_template_id、prompt_version（Model 节点适用）。
-- model_adapter、model_id、model_version（Model/Embedding/Rerank 节点按适用记录）。
 - input_schema_version、output_schema_version。
 - index_version_id、embedding_version_id、chunk_strategy_version（Retrieval/Index 节点按适用记录）。
-- schema_version、started_at、completed_at、usage_summary（Token/耗时摘要）。
+- schema_version、started_at、completed_at。
 
 约束和执行规则：
 
 - 这些实际版本字段在 Node Run 启动时从 Definition/配置快照写入，完成后不可被当前默认配置覆盖。
+- ChatModel 的 Adapter/Model/Prompt/输出 Schema、每次调用 Token/耗时/错误只写 Model Run/Call；Node Run 可保存其稳定引用或结果摘要，但不得复制调用明细。
 - Prompt、Model、Schema、Workflow 的版本引用必须能够反查配置/评测基线；缺失版本时节点失败，不静默使用最新版本。
-- 版本字段由 Workflow Module/Application 负责捕获，数据库负责非空/格式/关联一致性；敏感 Prompt/Model 配置正文不直接存入 Node Run。
+- Workflow 与 Agent Application 分别捕获自身版本快照，数据库负责非空、格式、唯一性和同 Workspace 关联；敏感配置正文不直接存入 Node Run 或 Model Run。
 
 ## 5. 向量设计
 
@@ -874,6 +917,7 @@ embedding_version：
 - Relation 两端不存在、跨 Workspace、类型组合非法、自环或对称反向重复时不能成为有效关系。
 - 同一 Workspace 无法同时激活两个 Index Version，失败构建不会污染当前活动检索。
 - Human Task 重复提交、过期 Tool Authorization、重复补偿和重复 Outbox 投递不会产生第二次副作用。
-- Node Run 能反查实际 Workflow、Prompt、Model、Schema、Index/Embedding 版本，默认配置变化不改写历史运行。
+- Node Run 能反查实际 Workflow/Index/Embedding 版本，并通过 Node Attempt 唯一 Model Run 反查 Prompt、Model、Schema 及 INITIAL/REPAIR/REDUCED/REVIEW 调用；默认配置变化不改写历史运行。
+- Model Run/Call 的状态机、调用前 STARTED、CAS 归约、crash→UNKNOWN、同 Workspace FK、唯一 call_no 和 guarded Down 均有真实 PostgreSQL 故障测试。
 - Audit 的业务角色无法更新或删除历史记录，脱敏测试证明 Secret、Authorization 和不必要正文不会落库。
 - Evaluation Run 能固定 Gold Set 和全部实际版本，并能与基线结果做可复现对比。

@@ -73,6 +73,29 @@ func TestExecutorRegistryRejectsInvalidRegistrationAndUnknownExecutor(t *testing
 	}
 }
 
+func TestExecutorRegistrySeparatesDefinitionContractFromProcessImplementation(t *testing.T) {
+	catalog, err := NewValidationCatalog([]int{1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewExecutorRegistry(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterContract("agent.relation-assessment", 1); err != nil {
+		t.Fatal(err)
+	}
+	assertWorkflowErrorCode(t, registry.RegisterContract("agent.relation-assessment", 1), "WORKFLOW_EXECUTOR_CONTRACT_DUPLICATE")
+	if err := registry.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	if !registry.SupportsContract("agent.relation-assessment", 1) {
+		t.Fatal("frozen registry lost the declared node contract")
+	}
+	_, err = registry.Resolve("agent.relation-assessment", 1)
+	assertWorkflowErrorCode(t, err, "WORKFLOW_EXECUTOR_NOT_REGISTERED")
+}
+
 func assertWorkflowErrorCode(t *testing.T, err error, code string) {
 	t.Helper()
 	var classified *foundation.Error

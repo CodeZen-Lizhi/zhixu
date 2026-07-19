@@ -780,3 +780,90 @@ Correct: 返回 vector.distance，并保留 Embedding Version/Distance Metric �
 Wrong: API 与 Worker 各自 switch provider、拼 Options，配置变化后查询与索引绑定漂移。
 Correct: 两个 Composition Root 复用同一 Configured Embedder Factory。
 ```
+
+## M6-02 Agent Citation、Eligibility And Model Run Contract
+
+### 1. Scope / Trigger
+
+- Trigger：Agent 使用 Retrieval Evidence 评估 Existing Claim、生成 Relation/RAG 结果或执行 Faithfulness Review。
+- Scope：完整 frozen Index Citation tuple、Knowledge 正式资格、Existing Claim 服务端事实、Model Run/Call 持久化；
+  不包含 M6-03 Tool 执行或 M6-04 Conversation/SSE。
+
+### 2. Signatures
+
+```go
+LoadCitationSourceSpanReferences(context.Context, []CitationReferenceQuery) ([]CitationSourceSpanBinding, error)
+OpenCitationEvidenceBatch(context.Context, []CitationReferenceQuery) ([]OpenedCitationEvidence, error)
+EvaluateEvidence(context.Context, EvidenceEligibilityQuery) ([]ProvenanceEligibility, error)
+ReadFormalClaims(context.Context, FormalClaimQuery) ([]FormalClaim, error)
+StartModelRun(context.Context, ModelRun) (ModelRun, bool, error)
+StartModelCall(context.Context, foundation.ID, ModelCall) (ModelCall, bool, error)
+```
+
+数据库事实源为 `agent.model_run`、`agent.model_call`；Knowledge Claim/Source/Conflict 仍由 `core` Schema 拥有，
+Agent 不创建第二套 Claim、Eligibility 或 Conflict 表。
+
+### 3. Contracts
+
+- Citation Identity 固定为 `workspace_id + index_version_id + chunk_id + source_version_id + source_span_id`；
+  同一批最多 500 条，只允许一个 Workspace/Index，重复 tuple 拒绝。
+- PostgreSQL 用一条参数化 SQL 联合 Index Manifest、Chunk、Source Version、Projection 与 Span，并按输入 ordinality
+  返回；任一 tuple 缺失使整批 fail closed。Application 对同一 Source Version 只读取/哈希一次 Artifact。
+- Evidence Eligibility 用一条参数化查询返回 Confirmed Claim/Relation 与 Disputed Claim 绑定；Conflict 聚合只由
+  本批 `bindings` 中去重的 Disputed Claim ID 驱动，不扫描 Workspace 全量 Conflict。
+- Existing Claim 必须由 Knowledge `FormalClaimReader` 读取并核对 Workspace、正文、canonical Applicability、Sources、
+  状态和版本；Existing Evidence 还必须命中 `owner_type=CLAIM && owner_id=existing_claim_id`。
+- Disputed disclosure 固定包含 `claim_id/conflict_ids/canonical applicability/UTC updated_at`；模型输出必须精确复制。
+- 一个 Node Attempt 最多一个 Model Run；每次 `INITIAL/REPAIR/REDUCED/REVIEW` 为独立 Model Call。调用前写
+  `STARTED`，完成 CAS；未知结果归 `UNKNOWN`，不得自动重放 Provider 或伪装成功。
+- Model Run 保存 generation/retrieval 基线；每条 Model Call 必须显式保存该次实际 Adapter/Model/Profile/Prompt/Schema
+  的 ID/version 与 `max_output_tokens`。REVIEW 可以使用独立受信 Catalog，但不能只留下不可逆 request hash。
+- 只保存版本、Hash、字节、Token、耗时、状态和稳定错误码；Prompt、Evidence、Source、raw response、Credential、
+  Endpoint Secret 和绝对路径禁止入库。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+|---|---|
+| 空批次、超过 500、重复或跨 Workspace/Index | `INVALID_INPUT` / Citation invalid |
+| Index/Chunk/Source Version/Span 任一绑定缺失或乱序 | 整批 Evidence reference fail closed |
+| Artifact Hash/Byte Range/Excerpt 不一致 | Evidence consistency violation |
+| Suggested/Rejected/Deprecated/无正式绑定 | Ineligible，不得发布为正式事实 |
+| Existing Claim 正文/Applicability/Source/Owner 漂移 | 模型调用前 Relation invalid |
+| Conflict disclosure 遗漏、增加、条件或时间漂移 | Structured result invalid |
+| 同 Node Attempt 第二个 Model Run、call_no gap 或 active predecessor | 数据库/Repository consistency violation |
+| Provider 结果未知或 crash 后仍为 STARTED | 恢复为 `UNKNOWN`，进入显式恢复路径 |
+| 有 Model Run/Call 时执行 Down | SQLSTATE `55000` |
+
+### 5. Good / Base / Bad Cases
+
+- Good：500 个 Citation 单 SQL 验证；同一 Source Version 多个 Span 只读一次 Artifact；Disputed Claim 返回完整
+  Conflict disclosure，REVIEW Call 与 generation calls 使用同一 Model Run 的连续 call_no。
+- Base：Chat disabled 时 API/Worker 不注册可执行 Agent capability；既有 Retrieval/Knowledge 功能继续可用。
+- Bad：把 Active Index 当 Approved Evidence、按 Citation 循环查库/读 Artifact、信任调用方 Existing Claim、让模型
+  自造 Conflict/更新时间、把 REVIEW 绕过 RecordingChatModel、保存完整 Prompt 或 raw response。
+
+### 6. Tests Required
+
+- Strict JSON：unknown、duplicate、trailing、invalid UTF-8、required `null`、类型/枚举/大小边界。
+- Retrieval PG：多元素/500 条、乱序 ordinality、任一 tuple 篡改整批失败；Application Reader 计数证明 Artifact 去重。
+- Knowledge PG：500 条单批、Workspace 隔离、多 owner、Disputed Conflict；SQL shape 锁定 Conflict 只由 requested
+  disputed Claim 驱动。
+- Workflow PG：真实 Retrieval + Knowledge production adapters 覆盖 Existing/Disputed disclosure，并反查 Model Run/Call。
+- REVIEW PG：generation 后从连续 call_no 记录 `phase=REVIEW`，断言 Hash/Token/latency/status 且 canary 不落库。
+- Version PG：INITIAL 与不同 REVIEW refs 均可由 `GetModelRun` 直接反查；replay 时任一 call ref 漂移都返回冲突。
+- Migration：空库/重复 Up、CAS/FK/Workspace/call sequence/crash→UNKNOWN、空数据 Down→Up、有数据 guarded Down。
+- 全量门禁：Agent count/race、`go test -race ./...`、真实 PG integration、vet、Make、Eval、Docker/Compose smoke。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: workspace + chunk 足以作为 Citation；逐条打开后再检查 Source/Span。
+Correct: 一次查询证明 workspace + index + chunk + source_version + source_span，任一缺失整批失败。
+
+Wrong: WHERE conflict_member.workspace_id=$1 后聚合整个 Workspace，再筛本批 Claim。
+Correct: 先从本批 bindings 提取 DISTINCT Disputed Claim ID，再按 workspace + claim_id 聚合 Conflict。
+
+Wrong: Workflow 输入或模型输出决定 Existing Claim/Conflict；REVIEW 直接调用裸 ChatModel。
+Correct: Knowledge Application 提供服务端事实；所有 generation/REVIEW 调用经 RecordingChatModel 连续持久化。
+```

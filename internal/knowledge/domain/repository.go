@@ -238,6 +238,8 @@ type Repository interface {
 	BatchGetRelations(context.Context, BatchGetRelationsQuery) ([]RelationWithEvidence, error)
 	// BatchGetConflicts 单批返回有界 Conflict 与成员，禁止 N+1。
 	BatchGetConflicts(context.Context, BatchGetConflictsQuery) ([]ConflictWithMembers, error)
+	// BatchCheckEvidenceEligibility 单批判断最多 500 个 Provenance 的正式知识资格。
+	BatchCheckEvidenceEligibility(context.Context, EvidenceEligibilityQuery) ([]ProvenanceEligibility, error)
 }
 
 // ComputeRequestHash 计算版本化命令载荷的稳定 SHA-256；payload 应先由领域规范化。

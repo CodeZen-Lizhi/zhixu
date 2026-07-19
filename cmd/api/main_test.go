@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
+	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
+	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -16,6 +20,59 @@ import (
 func TestNewWorkflowServiceRequiresDatabase(t *testing.T) {
 	if service, err := newWorkflowService(nil); err == nil || service != nil {
 		t.Fatalf("service=%#v err=%v", service, err)
+	}
+}
+
+func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "disabled"},
+		{name: "enabled", enabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			if test.enabled {
+				cfg.ChatProvider = config.ChatProviderOpenAICompatible
+			}
+			catalog, err := workflowapplication.NewValidationCatalog([]int{1}, []workflowdomain.Permission{
+				workflowdomain.PermissionReadLocal, workflowdomain.PermissionReadExternal, workflowdomain.PermissionWriteProposal,
+				workflowdomain.PermissionWriteKnowledge, workflowdomain.PermissionGitWrite, workflowdomain.PermissionAdminMaintenance,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			executors, err := workflowapplication.NewExecutorRegistry(catalog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := registerAPIWorkflowExecutors(cfg, executors); err != nil {
+				t.Fatal(err)
+			}
+			if err := executors.Freeze(); err != nil {
+				t.Fatal(err)
+			}
+			definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := registerAPIWorkflowDefinitions(cfg, definitions); err != nil {
+				t.Fatal(err)
+			}
+			if err := definitions.Freeze(); err != nil {
+				t.Fatal(err)
+			}
+			definition, resolveErr := definitions.Resolve(agentworkflow.RelationAssessmentDefinitionKey, agentworkflow.RelationAssessmentDefinitionVersion)
+			if test.enabled {
+				if resolveErr != nil || len(definition.Graph.Nodes) != 1 || definition.Graph.Nodes[0].Kind != agentworkflow.RelationAssessmentNodeKind ||
+					!executors.SupportsContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion) {
+					t.Fatalf("definition=%+v err=%v", definition, resolveErr)
+				}
+			} else if resolveErr == nil || executors.SupportsContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion) {
+				t.Fatalf("disabled chat exposed agent definition=%+v err=%v", definition, resolveErr)
+			}
+		})
 	}
 }
 
@@ -55,6 +112,50 @@ func TestNewRetrievalHandlerComposesDisabledAndEnabledEmbedderWithoutSecretLeak(
 	}
 	if strings.Contains(fmt.Sprintf("%v", err), cfg.EmbeddingAPIKey) {
 		t.Fatal("retrieval composition error leaked embedding credential")
+	}
+}
+
+func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t *testing.T) {
+	catalog, err := workflowapplication.NewValidationCatalog([]int{1}, []workflowdomain.Permission{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executors, err := workflowapplication.NewExecutorRegistry(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.ChatProvider = config.ChatProviderOpenAICompatible
+	if err := registerAPIWorkflowExecutors(cfg, executors); err != nil {
+		t.Fatal(err)
+	}
+	if err := executors.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	if !executors.SupportsContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion) {
+		t.Fatal("api did not register the agent node contract")
+	}
+	if _, err := executors.Resolve(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err == nil {
+		t.Fatal("api constructed a fake agent executor")
+	}
+	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registerAPIWorkflowDefinitions(cfg, definitions); err != nil {
+		t.Fatal(err)
+	}
+	if err := definitions.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := definitions.Resolve(agentworkflow.RelationAssessmentDefinitionKey, agentworkflow.RelationAssessmentDefinitionVersion)
+	if err != nil || len(resolved.Graph.Nodes) != 1 {
+		t.Fatalf("definition=%+v err=%v", resolved, err)
+	}
+	var classified *foundation.Error
+	_, resolveErr := executors.Resolve(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion)
+	if !errors.As(resolveErr, &classified) || classified.Code != "WORKFLOW_EXECUTOR_NOT_REGISTERED" {
+		t.Fatalf("resolve err=%v", resolveErr)
 	}
 }
 
