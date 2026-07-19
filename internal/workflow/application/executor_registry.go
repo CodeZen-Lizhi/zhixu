@@ -9,20 +9,30 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
 
-// ExecutionContext is the project-owned input passed to a registered workflow executor.
+// ExecutionContext 是从持久 Workflow Claim 构造并交给注册 Executor 的可信上下文。
 type ExecutionContext struct {
-	WorkspaceID, RunID, NodeRunID, NodeAttemptID foundation.ID
-	NodeKind                                     string
-	InputSchemaVersion                           int
-	AttemptNo                                    int
-	DispatchNo                                   int
-	RetryNo                                      int
-	LeaseOwner                                   string
-	Input                                        json.RawMessage
+	WorkspaceID       foundation.ID
+	DefinitionID      foundation.ID
+	DefinitionVersion int64
+	DefinitionHash    string
+	RunID             foundation.ID
+	NodeKey           string
+	NodeRunID         foundation.ID
+	NodeAttemptID     foundation.ID
+	NodeKind          string
+	// NodeVersion 是 Claim 提交后的持久乐观锁版本，可与 Attempt/LeaseOwner 共同构造执行 Fence。
+	NodeVersion        int64
+	InputSchemaVersion int
+	AttemptNo          int
+	DispatchNo         int
+	RetryNo            int
+	LeaseOwner         string
+	Input              json.RawMessage
 }
 
 // ExecutionResult is the project-owned successful result returned by an executor.
@@ -70,10 +80,11 @@ func NewValidationCatalog(schemaVersions []int, permissions []domain.Permission)
 		return ValidationCatalog{}, registryError(foundation.ErrorInvalidInput, "WORKFLOW_SCHEMA_CATALOG_EMPTY", errors.New("schema catalog is empty"))
 	}
 	for _, permission := range permissions {
-		permission = domain.Permission(strings.TrimSpace(string(permission)))
-		if permission == "" {
-			return ValidationCatalog{}, registryError(foundation.ErrorInvalidInput, "WORKFLOW_PERMISSION_INVALID", errors.New("permission is empty"))
+		parsed, err := capability.Parse(string(permission))
+		if err != nil {
+			return ValidationCatalog{}, registryError(foundation.ErrorInvalidInput, "WORKFLOW_PERMISSION_INVALID", errors.New("permission is not canonical"))
 		}
+		permission = parsed
 		if _, exists := catalog.permissions[permission]; exists {
 			return ValidationCatalog{}, registryError(foundation.ErrorVersionConflict, "WORKFLOW_PERMISSION_DUPLICATE", errors.New("permission is duplicated"))
 		}

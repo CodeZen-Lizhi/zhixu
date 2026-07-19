@@ -8,9 +8,13 @@ import (
 	"testing"
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
+	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
+	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
+	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
@@ -20,6 +24,26 @@ import (
 func TestNewWorkflowServiceRequiresDatabase(t *testing.T) {
 	if service, err := newWorkflowService(nil); err == nil || service != nil {
 		t.Fatalf("service=%#v err=%v", service, err)
+	}
+}
+
+func TestAPIHasAllToolContractsWithoutExecutors(t *testing.T) {
+	registry, err := newToolContractRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracts, err := toolcatalog.Contracts()
+	if err != nil || len(contracts) != 11 {
+		t.Fatalf("contracts=%d err=%v", len(contracts), err)
+	}
+	for _, expected := range contracts {
+		resolved, err := registry.ResolveContract(expected.Definition.Ref)
+		if err != nil || resolved.Definition.DefinitionHash != expected.Definition.DefinitionHash {
+			t.Fatalf("resolve %s: resolved=%+v err=%v", expected.Definition.Ref.Name, resolved.Definition.Ref, err)
+		}
+		if _, err := registry.ResolveExecutor(expected.Definition.Ref); err == nil {
+			t.Fatalf("API contract registry exposed executor for %s", expected.Definition.Ref.Name)
+		}
 	}
 }
 
@@ -36,10 +60,7 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 			if test.enabled {
 				cfg.ChatProvider = config.ChatProviderOpenAICompatible
 			}
-			catalog, err := workflowapplication.NewValidationCatalog([]int{1}, []workflowdomain.Permission{
-				workflowdomain.PermissionReadLocal, workflowdomain.PermissionReadExternal, workflowdomain.PermissionWriteProposal,
-				workflowdomain.PermissionWriteKnowledge, workflowdomain.PermissionGitWrite, workflowdomain.PermissionAdminMaintenance,
-			})
+			catalog, err := workflowapplication.NewValidationCatalog([]int{1}, capability.All())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -156,6 +177,50 @@ func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t
 	_, resolveErr := executors.Resolve(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion)
 	if !errors.As(resolveErr, &classified) || classified.Code != "WORKFLOW_EXECUTOR_NOT_REGISTERED" {
 		t.Fatalf("resolve err=%v", resolveErr)
+	}
+}
+
+func TestAPINeverExposesInternalToolWorkflowThroughGenericStartRegistry(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		cfg := config.Defaults()
+		if enabled {
+			cfg.ToolRuntimeMode = config.ToolModeEnabled
+		}
+		catalog, err := workflowapplication.NewValidationCatalog([]int{1}, capability.All())
+		if err != nil {
+			t.Fatal(err)
+		}
+		executors, err := workflowapplication.NewExecutorRegistry(catalog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := registerAPIWorkflowExecutors(cfg, executors); err != nil {
+			t.Fatal(err)
+		}
+		if err := executors.Freeze(); err != nil {
+			t.Fatal(err)
+		}
+		toolContracts, err := newToolContractRegistry()
+		if err != nil {
+			t.Fatal(err)
+		}
+		definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors, toolContracts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := registerAPIWorkflowDefinitions(cfg, definitions); err != nil {
+			t.Fatal(err)
+		}
+		if err := definitions.Freeze(); err != nil {
+			t.Fatal(err)
+		}
+		definition, resolveErr := definitions.Resolve(toolworkflow.DefinitionKey, toolworkflow.DefinitionVersion)
+		if resolveErr == nil || executors.SupportsContract(toolworkflow.NodeKind, toolworkflow.InputSchemaVersion) {
+			t.Fatalf("generic API exposed internal tool workflow enabled=%t definition=%+v err=%v", enabled, definition, resolveErr)
+		}
+		if _, err := toolContracts.ResolveContract(toolsdomain.ToolRef{Name: "ReadGitStatus", Version: 1}); err != nil {
+			t.Fatalf("API tool contract catalog unavailable enabled=%t err=%v", enabled, err)
+		}
 	}
 }
 

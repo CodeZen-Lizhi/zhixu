@@ -61,6 +61,26 @@ const (
 	maxChatTimeout              = 5 * time.Minute
 	maxChatRequestBytes         = int64(16 << 20)
 	maxChatResponseBytes        = int64(16 << 20)
+
+	defaultWebFetchTimeout                = 30 * time.Second
+	defaultWebFetchResponseHeaderTimeout  = 10 * time.Second
+	defaultWebFetchTLSHandshakeTimeout    = 10 * time.Second
+	defaultWebFetchMaxRedirects           = 5
+	defaultWebFetchMaxURLBytes            = 8 * 1024
+	defaultWebFetchMaxResponseHeaderBytes = int64(64 * 1024)
+	defaultWebFetchMaxBodyBytes           = int64(2 * 1024 * 1024)
+	defaultWebFetchMaxTextBytes           = 512 * 1024
+	defaultWebFetchMaxResolvedIPs         = 16
+
+	maxWebFetchTimeout               = 2 * time.Minute
+	maxWebFetchResponseHeaderTimeout = 30 * time.Second
+	maxWebFetchTLSHandshakeTimeout   = 30 * time.Second
+	maxWebFetchRedirects             = 20
+	maxWebFetchURLBytes              = 64 * 1024
+	maxWebFetchResponseHeaderBytes   = int64(2 * 1024 * 1024)
+	maxWebFetchBodyBytes             = int64(32 * 1024 * 1024)
+	maxWebFetchResolvedIPs           = 64
+	maxWebFetchAllowedContentTypes   = 2
 )
 
 const (
@@ -112,6 +132,16 @@ const (
 	ChatProviderDisabled ChatProvider = "disabled"
 	// ChatProviderOpenAICompatible 使用 OpenAI-Compatible HTTP 协议。
 	ChatProviderOpenAICompatible ChatProvider = "openai-compatible"
+)
+
+// ToolMode 控制 Tool runtime 或单项 Tool capability 是否进入生产组合。
+type ToolMode string
+
+const (
+	// ToolModeDisabled 明确关闭对应 Tool runtime 或 capability。
+	ToolModeDisabled ToolMode = "disabled"
+	// ToolModeEnabled 允许 Composition Root 继续验证并组合对应能力。
+	ToolModeEnabled ToolMode = "enabled"
 )
 
 // Config contains process settings, including connection secrets. Callers must
@@ -169,6 +199,20 @@ type Config struct {
 	ChatMaxRequestBytes  int64         `yaml:"chat_max_request_bytes"`
 	ChatMaxResponseBytes int64         `yaml:"chat_max_response_bytes"`
 
+	ToolRuntimeMode ToolMode `yaml:"tool_runtime_mode"`
+	WebFetchMode    ToolMode `yaml:"web_fetch_mode"`
+
+	WebFetchTimeout                time.Duration `yaml:"web_fetch_timeout"`
+	WebFetchResponseHeaderTimeout  time.Duration `yaml:"web_fetch_response_header_timeout"`
+	WebFetchTLSHandshakeTimeout    time.Duration `yaml:"web_fetch_tls_handshake_timeout"`
+	WebFetchMaxRedirects           int           `yaml:"web_fetch_max_redirects"`
+	WebFetchMaxURLBytes            int           `yaml:"web_fetch_max_url_bytes"`
+	WebFetchMaxResponseHeaderBytes int64         `yaml:"web_fetch_max_response_header_bytes"`
+	WebFetchMaxBodyBytes           int64         `yaml:"web_fetch_max_body_bytes"`
+	WebFetchMaxTextBytes           int           `yaml:"web_fetch_max_text_bytes"`
+	WebFetchMaxResolvedIPs         int           `yaml:"web_fetch_max_resolved_ips"`
+	WebFetchAllowedContentTypes    []string      `yaml:"web_fetch_allowed_content_types"`
+
 	RetrievalRRFK                     int32 `yaml:"retrieval_rrf_k"`
 	RetrievalRRFLexicalCandidateLimit int32 `yaml:"retrieval_rrf_lexical_candidate_limit"`
 	RetrievalRRFVectorCandidateLimit  int32 `yaml:"retrieval_rrf_vector_candidate_limit"`
@@ -222,6 +266,20 @@ func Defaults() Config {
 		ChatTimeout:          defaultChatTimeout,
 		ChatMaxRequestBytes:  defaultChatMaxRequestBytes,
 		ChatMaxResponseBytes: defaultChatMaxResponseBytes,
+
+		ToolRuntimeMode: ToolModeDisabled,
+		WebFetchMode:    ToolModeDisabled,
+
+		WebFetchTimeout:                defaultWebFetchTimeout,
+		WebFetchResponseHeaderTimeout:  defaultWebFetchResponseHeaderTimeout,
+		WebFetchTLSHandshakeTimeout:    defaultWebFetchTLSHandshakeTimeout,
+		WebFetchMaxRedirects:           defaultWebFetchMaxRedirects,
+		WebFetchMaxURLBytes:            defaultWebFetchMaxURLBytes,
+		WebFetchMaxResponseHeaderBytes: defaultWebFetchMaxResponseHeaderBytes,
+		WebFetchMaxBodyBytes:           defaultWebFetchMaxBodyBytes,
+		WebFetchMaxTextBytes:           defaultWebFetchMaxTextBytes,
+		WebFetchMaxResolvedIPs:         defaultWebFetchMaxResolvedIPs,
+		WebFetchAllowedContentTypes:    []string{"text/plain", "text/html"},
 
 		RetrievalRRFK:                     defaultRetrievalRRFK,
 		RetrievalRRFLexicalCandidateLimit: defaultRetrievalRRFLexicalCandidateLimit,
@@ -322,6 +380,20 @@ type fileConfig struct {
 	ChatTimeout          *string       `yaml:"chat_timeout"`
 	ChatMaxRequestBytes  *int64        `yaml:"chat_max_request_bytes"`
 	ChatMaxResponseBytes *int64        `yaml:"chat_max_response_bytes"`
+
+	ToolRuntimeMode *ToolMode `yaml:"tool_runtime_mode"`
+	WebFetchMode    *ToolMode `yaml:"web_fetch_mode"`
+
+	WebFetchTimeout                *string   `yaml:"web_fetch_timeout"`
+	WebFetchResponseHeaderTimeout  *string   `yaml:"web_fetch_response_header_timeout"`
+	WebFetchTLSHandshakeTimeout    *string   `yaml:"web_fetch_tls_handshake_timeout"`
+	WebFetchMaxRedirects           *int      `yaml:"web_fetch_max_redirects"`
+	WebFetchMaxURLBytes            *int      `yaml:"web_fetch_max_url_bytes"`
+	WebFetchMaxResponseHeaderBytes *int64    `yaml:"web_fetch_max_response_header_bytes"`
+	WebFetchMaxBodyBytes           *int64    `yaml:"web_fetch_max_body_bytes"`
+	WebFetchMaxTextBytes           *int      `yaml:"web_fetch_max_text_bytes"`
+	WebFetchMaxResolvedIPs         *int      `yaml:"web_fetch_max_resolved_ips"`
+	WebFetchAllowedContentTypes    *[]string `yaml:"web_fetch_allowed_content_types"`
 
 	RetrievalRRFK                     *int32 `yaml:"retrieval_rrf_k"`
 	RetrievalRRFLexicalCandidateLimit *int32 `yaml:"retrieval_rrf_lexical_candidate_limit"`
@@ -452,6 +524,33 @@ func applyYAMLFile(path string, cfg *Config) error {
 	if raw.ChatMaxResponseBytes != nil {
 		cfg.ChatMaxResponseBytes = *raw.ChatMaxResponseBytes
 	}
+	if raw.ToolRuntimeMode != nil {
+		cfg.ToolRuntimeMode = *raw.ToolRuntimeMode
+	}
+	if raw.WebFetchMode != nil {
+		cfg.WebFetchMode = *raw.WebFetchMode
+	}
+	if raw.WebFetchMaxRedirects != nil {
+		cfg.WebFetchMaxRedirects = *raw.WebFetchMaxRedirects
+	}
+	if raw.WebFetchMaxURLBytes != nil {
+		cfg.WebFetchMaxURLBytes = *raw.WebFetchMaxURLBytes
+	}
+	if raw.WebFetchMaxResponseHeaderBytes != nil {
+		cfg.WebFetchMaxResponseHeaderBytes = *raw.WebFetchMaxResponseHeaderBytes
+	}
+	if raw.WebFetchMaxBodyBytes != nil {
+		cfg.WebFetchMaxBodyBytes = *raw.WebFetchMaxBodyBytes
+	}
+	if raw.WebFetchMaxTextBytes != nil {
+		cfg.WebFetchMaxTextBytes = *raw.WebFetchMaxTextBytes
+	}
+	if raw.WebFetchMaxResolvedIPs != nil {
+		cfg.WebFetchMaxResolvedIPs = *raw.WebFetchMaxResolvedIPs
+	}
+	if raw.WebFetchAllowedContentTypes != nil {
+		cfg.WebFetchAllowedContentTypes = append([]string(nil), (*raw.WebFetchAllowedContentTypes)...)
+	}
 	if raw.RetrievalRRFK != nil {
 		cfg.RetrievalRRFK = *raw.RetrievalRRFK
 	}
@@ -477,27 +576,33 @@ func applyYAMLFile(path string, cfg *Config) error {
 		cfg.TelemetryEndpoint = *raw.TelemetryEndpoint
 	}
 	for name, value := range map[string]*string{
-		"database_ping_timeout":          raw.DatabasePingTimeout,
-		"health_interval":                raw.HealthInterval,
-		"shutdown_timeout":               raw.ShutdownTimeout,
-		"worker_job_timeout":             raw.WorkerJobTimeout,
-		"worker_rescue_stuck_jobs_after": raw.WorkerRescueStuckJobsAfter,
-		"workflow_lease":                 raw.WorkflowLeaseDuration,
-		"workflow_heartbeat":             raw.WorkflowHeartbeatInterval,
-		"reindex_dispatch_poll_interval": raw.ReindexDispatchPollInterval,
-		"reindex_dispatch_error_backoff": raw.ReindexDispatchErrorBackoff,
-		"reindex_lease_duration":         raw.ReindexLeaseDuration,
-		"reindex_heartbeat_interval":     raw.ReindexHeartbeatInterval,
-		"embedding_timeout":              raw.EmbeddingTimeout,
-		"chat_timeout":                   raw.ChatTimeout,
-		"worker_soft_stop_timeout":       raw.WorkerSoftStopTimeout,
-		"worker_hard_stop_timeout":       raw.WorkerHardStopTimeout,
+		"database_ping_timeout":             raw.DatabasePingTimeout,
+		"health_interval":                   raw.HealthInterval,
+		"shutdown_timeout":                  raw.ShutdownTimeout,
+		"worker_job_timeout":                raw.WorkerJobTimeout,
+		"worker_rescue_stuck_jobs_after":    raw.WorkerRescueStuckJobsAfter,
+		"workflow_lease":                    raw.WorkflowLeaseDuration,
+		"workflow_heartbeat":                raw.WorkflowHeartbeatInterval,
+		"reindex_dispatch_poll_interval":    raw.ReindexDispatchPollInterval,
+		"reindex_dispatch_error_backoff":    raw.ReindexDispatchErrorBackoff,
+		"reindex_lease_duration":            raw.ReindexLeaseDuration,
+		"reindex_heartbeat_interval":        raw.ReindexHeartbeatInterval,
+		"embedding_timeout":                 raw.EmbeddingTimeout,
+		"chat_timeout":                      raw.ChatTimeout,
+		"web_fetch_timeout":                 raw.WebFetchTimeout,
+		"web_fetch_response_header_timeout": raw.WebFetchResponseHeaderTimeout,
+		"web_fetch_tls_handshake_timeout":   raw.WebFetchTLSHandshakeTimeout,
+		"worker_soft_stop_timeout":          raw.WorkerSoftStopTimeout,
+		"worker_hard_stop_timeout":          raw.WorkerHardStopTimeout,
 	} {
 		if value == nil {
 			continue
 		}
 		parsed, err := time.ParseDuration(strings.TrimSpace(*value))
 		if err != nil {
+			if strings.HasPrefix(name, "web_fetch_") {
+				return fmt.Errorf("parse %s: invalid duration", name)
+			}
 			return fmt.Errorf("parse %s: %w", name, err)
 		}
 		switch name {
@@ -527,6 +632,12 @@ func applyYAMLFile(path string, cfg *Config) error {
 			cfg.EmbeddingTimeout = parsed
 		case "chat_timeout":
 			cfg.ChatTimeout = parsed
+		case "web_fetch_timeout":
+			cfg.WebFetchTimeout = parsed
+		case "web_fetch_response_header_timeout":
+			cfg.WebFetchResponseHeaderTimeout = parsed
+		case "web_fetch_tls_handshake_timeout":
+			cfg.WebFetchTLSHandshakeTimeout = parsed
 		case "worker_soft_stop_timeout":
 			cfg.WorkerSoftStopTimeout = parsed
 		case "worker_hard_stop_timeout":
@@ -612,8 +723,71 @@ func (c Config) Validate() error {
 	if err := c.validateChat(); err != nil {
 		return err
 	}
+	if err := c.validateTools(); err != nil {
+		return err
+	}
 	if err := domain.ValidateRRFConfig(c.RetrievalRRFConfig()); err != nil {
 		return errors.New("retrieval RRF configuration is invalid")
+	}
+	return nil
+}
+
+func (c Config) validateTools() error {
+	if c.ToolRuntimeMode != ToolModeDisabled && c.ToolRuntimeMode != ToolModeEnabled {
+		return errors.New("tool_runtime_mode must be disabled or enabled")
+	}
+	if c.WebFetchMode != ToolModeDisabled && c.WebFetchMode != ToolModeEnabled {
+		return errors.New("web_fetch_mode must be disabled or enabled")
+	}
+	if c.WebFetchMode == ToolModeEnabled && c.ToolRuntimeMode != ToolModeEnabled {
+		return errors.New("web_fetch_mode cannot be enabled when tool_runtime_mode is disabled")
+	}
+	if c.WebFetchTimeout <= 0 || c.WebFetchTimeout > maxWebFetchTimeout {
+		return errors.New("web_fetch_timeout must be positive and at most 2m")
+	}
+	if c.WebFetchResponseHeaderTimeout <= 0 || c.WebFetchResponseHeaderTimeout > maxWebFetchResponseHeaderTimeout {
+		return errors.New("web_fetch_response_header_timeout must be positive and at most 30s")
+	}
+	if c.WebFetchTLSHandshakeTimeout <= 0 || c.WebFetchTLSHandshakeTimeout > maxWebFetchTLSHandshakeTimeout {
+		return errors.New("web_fetch_tls_handshake_timeout must be positive and at most 30s")
+	}
+	if c.WebFetchMaxRedirects < 0 || c.WebFetchMaxRedirects > maxWebFetchRedirects {
+		return errors.New("web_fetch_max_redirects must be between 0 and 20")
+	}
+	if c.WebFetchMaxURLBytes <= 0 || c.WebFetchMaxURLBytes > maxWebFetchURLBytes {
+		return errors.New("web_fetch_max_url_bytes must be between 1 and 65536")
+	}
+	if c.WebFetchMaxResponseHeaderBytes <= 0 || c.WebFetchMaxResponseHeaderBytes > maxWebFetchResponseHeaderBytes {
+		return errors.New("web_fetch_max_response_header_bytes must be between 1 and 2097152")
+	}
+	if c.WebFetchMaxBodyBytes <= 0 || c.WebFetchMaxBodyBytes > maxWebFetchBodyBytes {
+		return errors.New("web_fetch_max_body_bytes must be between 1 and 33554432")
+	}
+	if c.WebFetchMaxTextBytes <= 0 || int64(c.WebFetchMaxTextBytes) > c.WebFetchMaxBodyBytes {
+		return errors.New("web_fetch_max_text_bytes must be positive and at most web_fetch_max_body_bytes")
+	}
+	if c.WebFetchMaxResolvedIPs <= 0 || c.WebFetchMaxResolvedIPs > maxWebFetchResolvedIPs {
+		return errors.New("web_fetch_max_resolved_ips must be between 1 and 64")
+	}
+	if err := validateWebFetchContentTypes(c.WebFetchAllowedContentTypes); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateWebFetchContentTypes(values []string) error {
+	if len(values) == 0 || len(values) > maxWebFetchAllowedContentTypes {
+		return errors.New("web_fetch_allowed_content_types must contain one or two supported types")
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value != strings.TrimSpace(value) || (value != "text/plain" && value != "text/html") {
+			return errors.New("web_fetch_allowed_content_types supports only text/plain and text/html")
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return errors.New("web_fetch_allowed_content_types must not contain duplicates")
+		}
+		seen[value] = struct{}{}
 	}
 	return nil
 }
@@ -877,7 +1051,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -919,6 +1093,18 @@ func (c Config) String() string {
 		c.ChatTimeout,
 		c.ChatMaxRequestBytes,
 		c.ChatMaxResponseBytes,
+		c.ToolRuntimeMode,
+		c.WebFetchMode,
+		c.WebFetchTimeout,
+		c.WebFetchResponseHeaderTimeout,
+		c.WebFetchTLSHandshakeTimeout,
+		c.WebFetchMaxRedirects,
+		c.WebFetchMaxURLBytes,
+		c.WebFetchMaxResponseHeaderBytes,
+		c.WebFetchMaxBodyBytes,
+		c.WebFetchMaxTextBytes,
+		c.WebFetchMaxResolvedIPs,
+		len(c.WebFetchAllowedContentTypes),
 		c.RetrievalRRFK,
 		c.RetrievalRRFLexicalCandidateLimit,
 		c.RetrievalRRFVectorCandidateLimit,
@@ -938,6 +1124,12 @@ func (c Config) GoString() string {
 }
 
 func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
+	if value, ok := lookup("ZHIXU_TOOL_RUNTIME_MODE"); ok {
+		cfg.ToolRuntimeMode = ToolMode(value)
+	}
+	if value, ok := lookup("ZHIXU_WEB_FETCH_MODE"); ok {
+		cfg.WebFetchMode = ToolMode(value)
+	}
 	if value, ok := lookup("ZHIXU_CHAT_PROVIDER"); ok {
 		cfg.ChatProvider = ChatProvider(value)
 		if cfg.ChatProvider == ChatProviderDisabled {
@@ -1000,6 +1192,13 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 			}
 		}
 	}
+	if value, ok := lookup("ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES"); ok {
+		contentTypes, err := parseWebFetchContentTypes(value)
+		if err != nil {
+			return err
+		}
+		cfg.WebFetchAllowedContentTypes = contentTypes
+	}
 	if value, ok := lookup("ZHIXU_EMBEDDING_NORMALIZATION"); ok {
 		cfg.EmbeddingNormalization = domain.EmbeddingNormalization(value)
 	}
@@ -1034,6 +1233,20 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 			return fmt.Errorf("parse %s: %w", "ZHIXU_REINDEX_DISPATCH_BATCH_SIZE", err)
 		}
 		cfg.ReindexDispatchBatchSize = parsed
+	}
+	for key, target := range map[string]*int{
+		"ZHIXU_WEB_FETCH_MAX_REDIRECTS":    &cfg.WebFetchMaxRedirects,
+		"ZHIXU_WEB_FETCH_MAX_URL_BYTES":    &cfg.WebFetchMaxURLBytes,
+		"ZHIXU_WEB_FETCH_MAX_TEXT_BYTES":   &cfg.WebFetchMaxTextBytes,
+		"ZHIXU_WEB_FETCH_MAX_RESOLVED_IPS": &cfg.WebFetchMaxResolvedIPs,
+	} {
+		if value, ok := lookup(key); ok {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("parse %s: invalid integer", key)
+			}
+			*target = parsed
+		}
 	}
 	if cfg.EmbeddingProvider != EmbeddingProviderDisabled {
 		if value, ok := lookup("ZHIXU_EMBEDDING_DIMENSIONS"); ok {
@@ -1076,8 +1289,10 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		cfg.EmbeddingMaxBatchInputBytes = parsed
 	}
 	for key, target := range map[string]*int64{
-		"ZHIXU_CHAT_MAX_REQUEST_BYTES":  &cfg.ChatMaxRequestBytes,
-		"ZHIXU_CHAT_MAX_RESPONSE_BYTES": &cfg.ChatMaxResponseBytes,
+		"ZHIXU_CHAT_MAX_REQUEST_BYTES":              &cfg.ChatMaxRequestBytes,
+		"ZHIXU_CHAT_MAX_RESPONSE_BYTES":             &cfg.ChatMaxResponseBytes,
+		"ZHIXU_WEB_FETCH_MAX_RESPONSE_HEADER_BYTES": &cfg.WebFetchMaxResponseHeaderBytes,
+		"ZHIXU_WEB_FETCH_MAX_BODY_BYTES":            &cfg.WebFetchMaxBodyBytes,
 	} {
 		if value, ok := lookup(key); ok {
 			parsed, err := strconv.ParseInt(value, 10, 64)
@@ -1096,12 +1311,15 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		"ZHIXU_WORKFLOW_LEASE":            &cfg.WorkflowLeaseDuration,
 		"ZHIXU_WORKFLOW_HEARTBEAT":        &cfg.WorkflowHeartbeatInterval,
 
-		"ZHIXU_REINDEX_DISPATCH_POLL_INTERVAL": &cfg.ReindexDispatchPollInterval,
-		"ZHIXU_REINDEX_DISPATCH_ERROR_BACKOFF": &cfg.ReindexDispatchErrorBackoff,
-		"ZHIXU_REINDEX_LEASE_DURATION":         &cfg.ReindexLeaseDuration,
-		"ZHIXU_REINDEX_HEARTBEAT_INTERVAL":     &cfg.ReindexHeartbeatInterval,
-		"ZHIXU_EMBEDDING_TIMEOUT":              &cfg.EmbeddingTimeout,
-		"ZHIXU_CHAT_TIMEOUT":                   &cfg.ChatTimeout,
+		"ZHIXU_REINDEX_DISPATCH_POLL_INTERVAL":    &cfg.ReindexDispatchPollInterval,
+		"ZHIXU_REINDEX_DISPATCH_ERROR_BACKOFF":    &cfg.ReindexDispatchErrorBackoff,
+		"ZHIXU_REINDEX_LEASE_DURATION":            &cfg.ReindexLeaseDuration,
+		"ZHIXU_REINDEX_HEARTBEAT_INTERVAL":        &cfg.ReindexHeartbeatInterval,
+		"ZHIXU_EMBEDDING_TIMEOUT":                 &cfg.EmbeddingTimeout,
+		"ZHIXU_CHAT_TIMEOUT":                      &cfg.ChatTimeout,
+		"ZHIXU_WEB_FETCH_TIMEOUT":                 &cfg.WebFetchTimeout,
+		"ZHIXU_WEB_FETCH_RESPONSE_HEADER_TIMEOUT": &cfg.WebFetchResponseHeaderTimeout,
+		"ZHIXU_WEB_FETCH_TLS_HANDSHAKE_TIMEOUT":   &cfg.WebFetchTLSHandshakeTimeout,
 
 		"ZHIXU_WORKER_SOFT_STOP_TIMEOUT": &cfg.WorkerSoftStopTimeout,
 		"ZHIXU_WORKER_HARD_STOP_TIMEOUT": &cfg.WorkerHardStopTimeout,
@@ -1109,7 +1327,7 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		if value, ok := lookup(key); ok {
 			parsed, err := time.ParseDuration(value)
 			if err != nil {
-				if key == "ZHIXU_EMBEDDING_TIMEOUT" || key == "ZHIXU_CHAT_TIMEOUT" {
+				if key == "ZHIXU_EMBEDDING_TIMEOUT" || key == "ZHIXU_CHAT_TIMEOUT" || strings.HasPrefix(key, "ZHIXU_WEB_FETCH_") {
 					return fmt.Errorf("parse %s: invalid duration", key)
 				}
 				return fmt.Errorf("parse %s: %w", key, err)
@@ -1129,4 +1347,15 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		}
 	}
 	return nil
+}
+
+func parseWebFetchContentTypes(raw string) ([]string, error) {
+	if raw == "" || raw != strings.TrimSpace(raw) {
+		return nil, errors.New("parse ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES: invalid content type list")
+	}
+	values := strings.Split(raw, ",")
+	if err := validateWebFetchContentTypes(values); err != nil {
+		return nil, errors.New("parse ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES: invalid content type list")
+	}
+	return append([]string(nil), values...), nil
 }

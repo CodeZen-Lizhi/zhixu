@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
@@ -94,6 +95,26 @@ func TestExecutorRegistrySeparatesDefinitionContractFromProcessImplementation(t 
 	}
 	_, err = registry.Resolve("agent.relation-assessment", 1)
 	assertWorkflowErrorCode(t, err, "WORKFLOW_EXECUTOR_NOT_REGISTERED")
+}
+
+func TestValidationCatalogAcceptsCanonicalCapabilitiesAndRejectsLegacyOrUnknownValues(t *testing.T) {
+	catalog, err := NewValidationCatalog([]int{1}, capability.All())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, permission := range capability.All() {
+		if !catalog.knowsPermission(permission) {
+			t.Fatalf("catalog does not know %q", permission)
+		}
+	}
+
+	for _, permission := range []domain.Permission{"ADMIN_MAINTENANCE", "UNKNOWN"} {
+		_, err := NewValidationCatalog([]int{1}, []domain.Permission{permission})
+		assertWorkflowErrorCode(t, err, "WORKFLOW_PERMISSION_INVALID")
+	}
+
+	_, err = NewValidationCatalog([]int{1}, []domain.Permission{domain.PermissionReadLocal, " READ_LOCAL "})
+	assertWorkflowErrorCode(t, err, "WORKFLOW_PERMISSION_DUPLICATE")
 }
 
 func assertWorkflowErrorCode(t *testing.T, err error, code string) {

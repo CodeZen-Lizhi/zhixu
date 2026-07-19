@@ -220,6 +220,10 @@ M6-D 当前只完成 Search/Evidence 的 Workspace 数据隔离，并保持 API 
 Session、API Token、CSRF/Origin 与 Capability Middleware 仍属于 M10；在这些门禁落地前不得把
 `workspace_id`、回环来源或 Search Cursor 当作已认证身份，也不得将自托管公网入口描述为安全可交付。
 
+M6-03 不暴露通用 `/tools/{name}:execute` HTTP API。Tool 只能由服务端持久 Workflow Node 间接执行；
+Agent Tool Request 不能携带 Workspace、Capability、Approval、Credential、path、command 或 Git args。
+Conversation/RAG API、SSE 与反馈由 M6-04 设计，正式 Session/API Token/CSRF/Capability Middleware 仍由 M10 提供。
+
 认证 API 至少提供登录、登出、当前 Session、Session 轮换，以及 API Token 创建、列出元数据和撤销能力。创建 Token 时明文只返回一次；响应和日志不得再次暴露完整 Token。
 
 ## 13. API 可观测性

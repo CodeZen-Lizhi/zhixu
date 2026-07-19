@@ -39,6 +39,7 @@ type WritebackServiceDependencies struct {
 	Repository writebackRepository
 	Workspace  domain.WorkspaceStore
 	Git        domain.GitRepository
+	Audit      WritebackAuditRecorder
 	IDs        foundation.IDGenerator
 	Clock      foundation.Clock
 }
@@ -48,19 +49,21 @@ type WritebackService struct {
 	repository writebackRepository
 	workspace  domain.WorkspaceStore
 	git        domain.GitRepository
+	audit      WritebackAuditRecorder
 	ids        foundation.IDGenerator
 	clock      foundation.Clock
 }
 
 // NewWritebackService 创建 Safe Writeback Application Saga。
 func NewWritebackService(dependencies WritebackServiceDependencies) (*WritebackService, error) {
-	if dependencies.Repository == nil || dependencies.Workspace == nil || dependencies.Git == nil || dependencies.IDs == nil || dependencies.Clock == nil {
+	if dependencies.Repository == nil || dependencies.Workspace == nil || dependencies.Git == nil || dependencies.Audit == nil || dependencies.IDs == nil || dependencies.Clock == nil {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WRITEBACK_DEPENDENCY_MISSING", false, errors.New("writeback dependency missing"))
 	}
 	return &WritebackService{
 		repository: dependencies.Repository,
 		workspace:  dependencies.Workspace,
 		git:        dependencies.Git,
+		audit:      dependencies.Audit,
 		ids:        dependencies.IDs,
 		clock:      dependencies.Clock,
 	}, nil
@@ -138,43 +141,55 @@ func (s *WritebackService) Begin(ctx context.Context, command BeginWritebackComm
 }
 
 // Resume 从持久化 Execution 检查点继续，直到 verifying/index_pending、终态或需要稍后重试。
-func (s *WritebackService) Resume(ctx context.Context, executionID foundation.ID, leaseOwner string) (WritebackResult, error) {
-	if ctx == nil || executionID == "" || domain.ValidateWritebackLeaseOwner(leaseOwner) != nil {
+func (s *WritebackService) Resume(ctx context.Context, executionID foundation.ID, identity WritebackResumeIdentity) (WritebackResult, error) {
+	if ctx == nil || executionID == "" || identity.Validate() != nil {
 		return WritebackResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITEBACK_RESUME_INVALID", false, domain.ErrWritebackInvalidInput)
 	}
-	leaseOwner = strings.TrimSpace(leaseOwner)
+	identity.LeaseOwner = strings.TrimSpace(identity.LeaseOwner)
 	for range maxWritebackResumeSteps {
 		execution, err := s.repository.GetWritebackExecution(ctx, executionID)
 		if err != nil {
 			return WritebackResult{}, err
 		}
+		if execution.ID != executionID || execution.WorkspaceID != identity.WorkspaceID || execution.WorkflowRunID != identity.WorkflowRunID || execution.NodeRunID != identity.NodeRunID {
+			return resultFromExecution(execution), foundation.NewError(foundation.ErrorConsistencyViolation, "WRITEBACK_RESUME_BINDING_INVALID", false, domain.ErrWritebackIdentityConflict)
+		}
 		switch execution.Status {
 		case domain.WritebackStatusPrepared:
-			if execution, err = s.resumePrepared(ctx, execution, leaseOwner); err != nil {
+			if execution, err = s.resumePrepared(ctx, execution, identity); err != nil {
 				return resultFromExecution(execution), err
 			}
 		case domain.WritebackStatusFilePrepared:
-			if execution, err = s.resumeFilePrepared(ctx, execution, leaseOwner); err != nil {
+			if execution, err = s.resumeFilePrepared(ctx, execution, identity); err != nil {
 				return resultFromExecution(execution), err
 			}
 		case domain.WritebackStatusFileApplied:
-			if execution, err = s.resumeFileApplied(ctx, execution, leaseOwner); err != nil {
+			if execution, err = s.resumeFileApplied(ctx, execution, identity); err != nil {
 				return resultFromExecution(execution), err
 			}
 		case domain.WritebackStatusGitPrepared:
-			if execution, err = s.resumeGitPrepared(ctx, execution, leaseOwner); err != nil {
+			if execution, err = s.resumeGitPrepared(ctx, execution, identity); err != nil {
 				return resultFromExecution(execution), err
 			}
 		case domain.WritebackStatusCompensatingFile:
-			if execution, err = s.resumeCompensatingFile(ctx, execution, leaseOwner); err != nil {
+			if execution, err = s.resumeCompensatingFile(ctx, execution, identity.LeaseOwner); err != nil {
 				return resultFromExecution(execution), err
 			}
 		case domain.WritebackStatusGitCommitted, domain.WritebackStatusPublishRecovery:
-			if execution, err = s.resumePublish(ctx, execution, leaseOwner); err != nil {
+			if err = s.audit.RecordSucceeded(ctx, identity, execution, WritebackAuditGit); err != nil {
+				return resultFromExecution(execution), err
+			}
+			if execution, err = s.resumePublish(ctx, execution, identity.LeaseOwner); err != nil {
 				return resultFromExecution(execution), err
 			}
 		case domain.WritebackStatusVerifying:
-			return s.resumeCleanup(ctx, execution, leaseOwner)
+			if err = s.audit.RecordSucceeded(ctx, identity, execution, WritebackAuditApply); err != nil {
+				return resultFromExecution(execution), err
+			}
+			if err = s.audit.RecordSucceeded(ctx, identity, execution, WritebackAuditGit); err != nil {
+				return resultFromExecution(execution), err
+			}
+			return s.resumeCleanup(ctx, execution, identity.LeaseOwner)
 		case domain.WritebackStatusNeedsRevision:
 			return resultFromExecution(execution), terminalWritebackError(execution, foundation.ErrorVersionConflict, "WRITEBACK_NEEDS_REVISION")
 		case domain.WritebackStatusApplyFailed:
@@ -190,7 +205,8 @@ func (s *WritebackService) Resume(ctx context.Context, executionID foundation.ID
 	return WritebackResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WRITEBACK_RESUME_STEP_LIMIT", false, errors.New("writeback resume exceeded state transition limit"))
 }
 
-func (s *WritebackService) resumePrepared(ctx context.Context, execution domain.WritebackExecution, leaseOwner string) (result domain.WritebackExecution, retErr error) {
+func (s *WritebackService) resumePrepared(ctx context.Context, execution domain.WritebackExecution, identity WritebackResumeIdentity) (result domain.WritebackExecution, retErr error) {
+	leaseOwner := identity.LeaseOwner
 	proposal, err := s.repository.GetProposal(ctx, execution.ProposalID)
 	if err != nil {
 		return execution, err
@@ -234,14 +250,21 @@ func (s *WritebackService) resumePrepared(ctx context.Context, execution domain.
 	if err := s.validateLease(ctx, execution, leaseOwner); err != nil {
 		return execution, err
 	}
+	if err := s.audit.EnsureStarted(ctx, identity, execution, WritebackAuditApply); err != nil {
+		return execution, err
+	}
+	if err := s.validateLease(ctx, execution, leaseOwner); err != nil {
+		return execution, err
+	}
 	applied, err := lock.CommitCAS(ctx, prepared)
 	if err != nil {
 		return s.checkpointFileError(ctx, execution, err)
 	}
-	return s.checkpointFileApplied(ctx, execution, applied)
+	return s.checkpointFileApplied(ctx, execution, applied, identity)
 }
 
-func (s *WritebackService) resumeFilePrepared(ctx context.Context, execution domain.WritebackExecution, leaseOwner string) (result domain.WritebackExecution, retErr error) {
+func (s *WritebackService) resumeFilePrepared(ctx context.Context, execution domain.WritebackExecution, identity WritebackResumeIdentity) (result domain.WritebackExecution, retErr error) {
+	leaseOwner := identity.LeaseOwner
 	if err := s.validateLease(ctx, execution, leaseOwner); err != nil {
 		return execution, err
 	}
@@ -251,6 +274,9 @@ func (s *WritebackService) resumeFilePrepared(ctx context.Context, execution dom
 	}
 	defer joinTargetCloseError(lock, &retErr)
 	if applied == nil {
+		if err := s.audit.EnsureStarted(ctx, identity, execution, WritebackAuditApply); err != nil {
+			return execution, err
+		}
 		if err := s.validateLease(ctx, execution, leaseOwner); err != nil {
 			return execution, err
 		}
@@ -259,11 +285,17 @@ func (s *WritebackService) resumeFilePrepared(ctx context.Context, execution dom
 			return s.checkpointFileError(ctx, execution, commitErr)
 		}
 		applied = &value
+	} else if err := s.audit.RequireStarted(ctx, identity, execution, WritebackAuditApply); err != nil {
+		return execution, err
 	}
-	return s.checkpointFileApplied(ctx, execution, *applied)
+	return s.checkpointFileApplied(ctx, execution, *applied, identity)
 }
 
-func (s *WritebackService) resumeFileApplied(ctx context.Context, execution domain.WritebackExecution, leaseOwner string) (result domain.WritebackExecution, retErr error) {
+func (s *WritebackService) resumeFileApplied(ctx context.Context, execution domain.WritebackExecution, identity WritebackResumeIdentity) (result domain.WritebackExecution, retErr error) {
+	leaseOwner := identity.LeaseOwner
+	if err := s.audit.RecordSucceeded(ctx, identity, execution, WritebackAuditApply); err != nil {
+		return execution, err
+	}
 	lock, _, applied, err := s.resumeAppliedTarget(ctx, execution, leaseOwner)
 	if err != nil {
 		if retryWithoutCheckpoint(err) {
@@ -298,7 +330,8 @@ func (s *WritebackService) resumeFileApplied(ctx context.Context, execution doma
 	})
 }
 
-func (s *WritebackService) resumeGitPrepared(ctx context.Context, execution domain.WritebackExecution, leaseOwner string) (result domain.WritebackExecution, retErr error) {
+func (s *WritebackService) resumeGitPrepared(ctx context.Context, execution domain.WritebackExecution, identity WritebackResumeIdentity) (result domain.WritebackExecution, retErr error) {
+	leaseOwner := identity.LeaseOwner
 	lock, _, applied, err := s.resumeAppliedTarget(ctx, execution, leaseOwner)
 	if err != nil {
 		if retryWithoutCheckpoint(err) {
@@ -322,6 +355,9 @@ func (s *WritebackService) resumeGitPrepared(ctx context.Context, execution doma
 			}
 			return s.checkpointManual(ctx, execution, errorCode(err, "GIT_COMMIT_LOOKUP_UNVERIFIED"), err)
 		}
+		if err := s.audit.EnsureStarted(ctx, identity, execution, WritebackAuditGit); err != nil {
+			return execution, err
+		}
 		if err := s.validateLease(ctx, execution, leaseOwner); err != nil {
 			return execution, err
 		}
@@ -334,6 +370,8 @@ func (s *WritebackService) resumeGitPrepared(ctx context.Context, execution doma
 			// 从未发布过同一 Commit；任何 Commit 错误都不得再恢复文件。
 			return s.checkpointManual(ctx, execution, errorCode(err, "GIT_COMMIT_RESULT_UNKNOWN"), err)
 		}
+	} else if err := s.audit.RequireStarted(ctx, identity, execution, WritebackAuditGit); err != nil {
+		return execution, err
 	}
 	if commit.Recovered || commit.Replayed {
 		if err := domain.ValidateGitCommitLookupBinding(lookup, commit); err != nil {
@@ -342,12 +380,19 @@ func (s *WritebackService) resumeGitPrepared(ctx context.Context, execution doma
 	} else if err := domain.ValidateGitCommitBinding(gitCommitRequestFromExecution(execution), commit); err != nil {
 		return s.checkpointManual(ctx, execution, "GIT_COMMIT_BINDING_INVALID", err)
 	}
-	return s.repository.CheckpointWritebackExecution(ctx, domain.CheckpointWriteback{
+	checkpointed, err := s.repository.CheckpointWritebackExecution(ctx, domain.CheckpointWriteback{
 		ExecutionID: execution.ID, ExpectedVersion: execution.Version, Status: domain.WritebackStatusGitCommitted,
 		ResultHash: commit.ResultHash, GitCommit: commit.GitCommit, ParentGitCommit: commit.ParentGitCommit,
 		DiffHash: commit.DiffHash, BaseBlobID: commit.BaseBlobID, ResultBlobID: commit.ResultBlobID, BaseMode: commit.BaseMode,
 		At: s.clock.Now(),
 	})
+	if err != nil {
+		return execution, err
+	}
+	if err := s.audit.RecordSucceeded(ctx, identity, checkpointed, WritebackAuditGit); err != nil {
+		return checkpointed, err
+	}
+	return checkpointed, nil
 }
 
 func (s *WritebackService) resumeCompensatingFile(ctx context.Context, execution domain.WritebackExecution, leaseOwner string) (result domain.WritebackExecution, retErr error) {
@@ -484,13 +529,20 @@ func (s *WritebackService) checkpointFileError(ctx context.Context, execution do
 	}
 }
 
-func (s *WritebackService) checkpointFileApplied(ctx context.Context, execution domain.WritebackExecution, applied domain.AppliedWrite) (domain.WritebackExecution, error) {
-	return s.repository.CheckpointWritebackExecution(ctx, domain.CheckpointWriteback{
+func (s *WritebackService) checkpointFileApplied(ctx context.Context, execution domain.WritebackExecution, applied domain.AppliedWrite, identity WritebackResumeIdentity) (domain.WritebackExecution, error) {
+	checkpointed, err := s.repository.CheckpointWritebackExecution(ctx, domain.CheckpointWriteback{
 		ExecutionID: execution.ID, ExpectedVersion: execution.Version, Status: domain.WritebackStatusFileApplied,
 		ResultHash: applied.ResultHash, TemporaryRef: applied.TemporaryRef, BackupRef: applied.BackupRef,
 		FileByteSize: applied.ByteSize, FileMode: applied.Mode, FileLockToken: applied.LockToken,
 		FileResultLockToken: applied.ResultLockToken, FileBackupLockToken: applied.BackupLockToken, At: s.clock.Now(),
 	})
+	if err != nil {
+		return execution, err
+	}
+	if err := s.audit.RecordSucceeded(ctx, identity, checkpointed, WritebackAuditApply); err != nil {
+		return checkpointed, err
+	}
+	return checkpointed, nil
 }
 
 func (s *WritebackService) beginCompensation(ctx context.Context, execution domain.WritebackExecution, err error) (domain.WritebackExecution, error) {

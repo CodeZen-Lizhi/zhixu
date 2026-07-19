@@ -14,21 +14,23 @@ import (
 )
 
 const (
-	bootstrapWorkspaceID foundation.ID = "81000000-0000-4000-8000-000000000001"
-	bootstrapRunID       foundation.ID = "82000000-0000-4000-8000-000000000001"
-	bootstrapNodeID      foundation.ID = "83000000-0000-4000-8000-000000000001"
-	bootstrapProposalID  foundation.ID = "84000000-0000-4000-8000-000000000001"
-	bootstrapRevisionID  foundation.ID = "85000000-0000-4000-8000-000000000001"
-	bootstrapApprovalID  foundation.ID = "86000000-0000-4000-8000-000000000001"
-	bootstrapExecutionID foundation.ID = "87000000-0000-4000-8000-000000000001"
-	bootstrapWriteAuthID foundation.ID = "88000000-0000-4000-8000-000000000001"
-	bootstrapGitAuthID   foundation.ID = "89000000-0000-4000-8000-000000000001"
-	bootstrapGeneration  foundation.ID = "8a000000-0000-4000-8000-000000000001"
-	bootstrapBaseHash                  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	bootstrapGitHead                   = "dddddddddddddddddddddddddddddddddddddddd"
-	bootstrapGitCommit                 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-	bootstrapResultHash                = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-	bootstrapDiffHash                  = "1111111111111111111111111111111111111111111111111111111111111111"
+	bootstrapWorkspaceID  foundation.ID = "81000000-0000-4000-8000-000000000001"
+	bootstrapRunID        foundation.ID = "82000000-0000-4000-8000-000000000001"
+	bootstrapNodeID       foundation.ID = "83000000-0000-4000-8000-000000000001"
+	bootstrapProposalID   foundation.ID = "84000000-0000-4000-8000-000000000001"
+	bootstrapRevisionID   foundation.ID = "85000000-0000-4000-8000-000000000001"
+	bootstrapApprovalID   foundation.ID = "86000000-0000-4000-8000-000000000001"
+	bootstrapExecutionID  foundation.ID = "87000000-0000-4000-8000-000000000001"
+	bootstrapWriteAuthID  foundation.ID = "88000000-0000-4000-8000-000000000001"
+	bootstrapGitAuthID    foundation.ID = "89000000-0000-4000-8000-000000000001"
+	bootstrapGeneration   foundation.ID = "8a000000-0000-4000-8000-000000000001"
+	bootstrapDefinitionID foundation.ID = "8b000000-0000-4000-8000-000000000001"
+	bootstrapAttemptID    foundation.ID = "8c000000-0000-4000-8000-000000000001"
+	bootstrapBaseHash                   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	bootstrapGitHead                    = "dddddddddddddddddddddddddddddddddddddddd"
+	bootstrapGitCommit                  = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	bootstrapResultHash                 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	bootstrapDiffHash                   = "1111111111111111111111111111111111111111111111111111111111111111"
 )
 
 func TestBootstrapExecutorResumesExactExecutionWithoutIssuingCredentials(t *testing.T) {
@@ -55,8 +57,8 @@ func TestBootstrapExecutorResumesExactExecutionWithoutIssuingCredentials(t *test
 	if output.ExecutionID != execution.ID || output.Status != domain.WritebackStatusVerifying || output.IndexStatus != changecontrolapplication.WritebackIndexStatusPending {
 		t.Fatalf("output=%#v", output)
 	}
-	if len(changeControl.issues) != 0 || beginner.calls != 0 || resumer.executionID != execution.ID || resumer.leaseOwner != "worker-delivery" {
-		t.Fatalf("issues=%#v begin_calls=%d resume=%s owner=%q", changeControl.issues, beginner.calls, resumer.executionID, resumer.leaseOwner)
+	if len(changeControl.issues) != 0 || beginner.calls != 0 || resumer.executionID != execution.ID || resumer.identity.LeaseOwner != "worker-delivery" || resumer.identity.NodeAttemptID != bootstrapAttemptID {
+		t.Fatalf("issues=%#v begin_calls=%d resume=%s identity=%+v", changeControl.issues, beginner.calls, resumer.executionID, resumer.identity)
 	}
 }
 
@@ -202,8 +204,10 @@ func bootstrapExecutionContext(t *testing.T) workflowapplication.ExecutionContex
 		t.Fatal(err)
 	}
 	return workflowapplication.ExecutionContext{
-		WorkspaceID: bootstrapWorkspaceID, RunID: bootstrapRunID, NodeRunID: bootstrapNodeID,
-		NodeKind: SafeWritebackNodeKind, InputSchemaVersion: SafeWritebackBootstrapInputSchemaVersion,
+		WorkspaceID: bootstrapWorkspaceID, DefinitionID: bootstrapDefinitionID, DefinitionVersion: SafeWritebackDefinitionVersion,
+		DefinitionHash: safeWritebackGraphHash, RunID: bootstrapRunID, NodeKey: SafeWritebackNodeKey, NodeRunID: bootstrapNodeID,
+		NodeAttemptID: bootstrapAttemptID,
+		NodeKind:      SafeWritebackNodeKind, InputSchemaVersion: SafeWritebackBootstrapInputSchemaVersion,
 		AttemptNo: 1, DispatchNo: 1, LeaseOwner: "worker-delivery", Input: input,
 	}
 }
@@ -322,12 +326,12 @@ type bootstrapResumer struct {
 	result      changecontrolapplication.WritebackResult
 	err         error
 	executionID foundation.ID
-	leaseOwner  string
+	identity    changecontrolapplication.WritebackResumeIdentity
 }
 
-func (f *bootstrapResumer) Resume(_ context.Context, executionID foundation.ID, leaseOwner string) (changecontrolapplication.WritebackResult, error) {
+func (f *bootstrapResumer) Resume(_ context.Context, executionID foundation.ID, identity changecontrolapplication.WritebackResumeIdentity) (changecontrolapplication.WritebackResult, error) {
 	f.executionID = executionID
-	f.leaseOwner = leaseOwner
+	f.identity = identity
 	return f.result, f.err
 }
 

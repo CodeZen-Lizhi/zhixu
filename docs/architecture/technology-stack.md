@@ -50,11 +50,16 @@ M6-A 已锁定官方 `pgvector-go/pgx v0.4.0`（MIT）作为 pgx 向量编解码
 |---|---|
 | Markdown | goldmark |
 | HTML 正文 | go-readability Adapter |
+| Tool Web HTML 安全文本 | `golang.org/x/net/html v0.56.0` token parser |
 | PDF | pdftotext/Poppler Adapter |
 | Hash | 标准库 SHA-256 |
 | Git | Git CLI Adapter |
 
 PDF 抽取作为 Adapter，因为纯 Go PDF 文本库质量和布局兼容性可能变化。
+
+M6-03 使用 BSD-3-Clause 的 `golang.org/x/net/html v0.56.0` 解析受控 Web Tool HTML 文本；
+不使用正则清理 HTML。parser 只位于 SSRF-safe Web Adapter，script/style/事件内容和超出节点/深度/
+解压后字节预算的响应必须拒绝或截断为受控输出，不能把第三方 DOM 类型带入领域层。
 
 ## 5. AI
 

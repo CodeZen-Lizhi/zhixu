@@ -56,7 +56,12 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 		}
 		return id
 	}
-	workspaceID, definitionID, runID, nodeID := nextID(), nextID(), nextID(), nextID()
+	workspaceID, definitionID, runID, nodeID, attemptID := nextID(), nextID(), nextID(), nextID(), nextID()
+	resumeIdentity := WritebackResumeIdentity{
+		WorkspaceID: workspaceID, DefinitionID: definitionID, DefinitionVersion: 1, DefinitionHash: strings.Repeat("a", 64),
+		WorkflowRunID: runID, NodeKey: "safe-writeback", NodeRunID: nodeID, NodeAttemptID: attemptID,
+		LeaseOwner: "fault-worker", LeaseFence: 1,
+	}
 	root := t.TempDir()
 	targetPath := "docs/fault-smoke.md"
 	baseContent := []byte("# Fault Smoke\n\nbase\n")
@@ -83,6 +88,10 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	databaseNow = databaseNow.UTC()
+	// 共享的真实 PostgreSQL 基准库可能已有一个 active Workspace；本测试在回滚事务内临时释放唯一约束。
+	if _, err := tx.Exec(ctx, `UPDATE core.workspace SET status='fault_smoke_inactive',version=version+1,updated_at=$1 WHERE status='active'`, databaseNow); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := workspaceRepository.CreateWorkspace(ctx, workspacedomain.Workspace{
 		ID: workspaceID, Name: "Safe Writeback Fault Smoke", RootPath: root,
 		Git:    workspacedomain.GitBaseline{RepositoryPath: root, Branch: "main", Head: baseGitHead, CheckedAt: databaseNow},
@@ -167,7 +176,7 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 			t.Fatal(gitErr)
 		}
 		service, serviceErr := NewWritebackService(WritebackServiceDependencies{
-			Repository: repository, Workspace: workspaceStore, Git: gitClient,
+			Repository: repository, Workspace: workspaceStore, Git: gitClient, Audit: &sagaAuditRecorder{},
 			IDs: ids, Clock: foundation.FixedClock{Value: databaseNow.Add(time.Minute)},
 		})
 		if serviceErr != nil {
@@ -184,7 +193,7 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 
 	// file_prepared 已经提交，但响应丢失；销毁旧 Service/Writer 后从 durable checkpoint 继续。
 	filePreparedFault := &faultWritebackRepository{writebackRepository: changeRepository, checkpointStatus: domain.WritebackStatusFilePrepared}
-	if _, err := realService(filePreparedFault).Resume(ctx, begin.ExecutionID, "fault-worker"); !isRetryableWritebackError(err) {
+	if _, err := realService(filePreparedFault).Resume(ctx, begin.ExecutionID, resumeIdentity); !isRetryableWritebackError(err) {
 		t.Fatalf("file_prepared response loss err=%v", err)
 	}
 	filePrepared, err := changeRepository.GetWritebackExecution(ctx, begin.ExecutionID)
@@ -194,7 +203,7 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 
 	// git_prepared 已经提交，但响应丢失；下一实例必须 exact lookup 后只创建一个 Commit。
 	gitPreparedFault := &faultWritebackRepository{writebackRepository: changeRepository, checkpointStatus: domain.WritebackStatusGitPrepared}
-	if _, err := realService(gitPreparedFault).Resume(ctx, begin.ExecutionID, "fault-worker"); !isRetryableWritebackError(err) {
+	if _, err := realService(gitPreparedFault).Resume(ctx, begin.ExecutionID, resumeIdentity); !isRetryableWritebackError(err) {
 		t.Fatalf("git_prepared response loss err=%v", err)
 	}
 	gitPrepared, err := changeRepository.GetWritebackExecution(ctx, begin.ExecutionID)
@@ -204,14 +213,14 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 
 	// Publish 与 cleanup finalize 的响应同时丢失；下一实例只能重放发布/清理，不能重复 Commit。
 	publishFault := &faultWritebackRepository{writebackRepository: changeRepository, publishFault: true, finalizeFault: true}
-	if _, err := realService(publishFault).Resume(ctx, begin.ExecutionID, "fault-worker"); !isRetryableWritebackError(err) {
+	if _, err := realService(publishFault).Resume(ctx, begin.ExecutionID, resumeIdentity); !isRetryableWritebackError(err) {
 		t.Fatalf("publish/finalize response loss err=%v", err)
 	}
 	verifying, err := changeRepository.GetWritebackExecution(ctx, begin.ExecutionID)
 	if err != nil || verifying.Status != domain.WritebackStatusVerifying || verifying.CleanupCompletedAt == nil {
 		t.Fatalf("verifying=%#v err=%v", verifying, err)
 	}
-	result, err := realService(changeRepository).Resume(ctx, begin.ExecutionID, "fault-worker")
+	result, err := realService(changeRepository).Resume(ctx, begin.ExecutionID, resumeIdentity)
 	if err != nil || result.Status != domain.WritebackStatusVerifying || result.CleanupPending || result.GitCommit == "" {
 		t.Fatalf("replayed result=%#v err=%v", result, err)
 	}

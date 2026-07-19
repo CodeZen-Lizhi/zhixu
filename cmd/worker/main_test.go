@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -12,9 +13,13 @@ import (
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
+	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
+	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
+	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workflowhealth "github.com/CodeZen-Lizhi/zhixu/internal/workflow/httphealth"
 	workflowruntime "github.com/CodeZen-Lizhi/zhixu/internal/workflow/runtime"
 )
@@ -33,6 +38,58 @@ func TestDisabledChatLeavesWorkerAgentCapabilityExplicitlyUnavailable(t *testing
 	}
 	if components.executor != nil || components.capability.available || components.capability.code != agentworkflow.ErrorCodeCapabilityUnavailable {
 		t.Fatalf("components=%+v", components)
+	}
+}
+
+func TestWorkerToolSubsetContainsOnlyFiveRealReadExecutors(t *testing.T) {
+	want := []toolsdomain.ToolRef{
+		{Name: "SearchKnowledge", Version: 1}, {Name: "ReadSource", Version: 1},
+		{Name: "ValidateCitation", Version: 1}, {Name: "CalculateDiff", Version: 1},
+		{Name: "ReadGitStatus", Version: 1},
+	}
+	got := enabledReadToolRefs()
+	if len(got) != len(want) {
+		t.Fatalf("enabled refs=%+v", got)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("enabled[%d]=%+v want=%+v", index, got[index], want[index])
+		}
+	}
+	for _, unavailable := range []string{"ReadDocument", "FetchWebPage", "RebuildIndex", "RunRegressionEvaluation", "ApplyApprovedPatch", "CreateGitCommit"} {
+		for _, ref := range got {
+			if ref.Name == unavailable {
+				t.Fatalf("unavailable or trusted-only tool entered execution subset: %s", unavailable)
+			}
+		}
+	}
+}
+
+func TestWorkerWebFetchEnabledFailsBeforeComposition(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.ToolRuntimeMode = config.ToolModeEnabled
+	cfg.WebFetchMode = config.ToolModeEnabled
+	err := validateToolCompositionMode(cfg)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "WORKER_WEB_FETCH_POLICY_UNAVAILABLE" {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestToolWorkflowReadinessRequiresReachableNodeAndDefinition(t *testing.T) {
+	disabled := workerComponents{tools: toolRuntimeComponents{contracts: &toolsapplication.Registry{}}}
+	contractsOK, executorsOK, dependenciesOK := toolWorkflowReadiness(disabled)
+	if !contractsOK || !executorsOK || !dependenciesOK {
+		t.Fatalf("disabled readiness contracts=%t executors=%t dependencies=%t", contractsOK, executorsOK, dependenciesOK)
+	}
+	incomplete := workerComponents{tools: toolRuntimeComponents{runtimeEnabled: true, contracts: &toolsapplication.Registry{}}}
+	contractsOK, executorsOK, dependenciesOK = toolWorkflowReadiness(incomplete)
+	if !contractsOK || executorsOK || dependenciesOK {
+		t.Fatalf("incomplete readiness contracts=%t executors=%t dependencies=%t", contractsOK, executorsOK, dependenciesOK)
+	}
+	production := toolworkflow.ModelReadToolRefsV1()
+	if len(production) != 3 || len(enabledReadToolRefs()) != 5 {
+		t.Fatalf("production Tool refs=%d execution refs=%d", len(production), len(enabledReadToolRefs()))
 	}
 }
 

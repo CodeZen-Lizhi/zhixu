@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -178,16 +180,7 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 }
 
 func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	pool, ctx := newChangeControlMigrationTestPool(t)
 	ids := foundation.NewUUIDGenerator(nil)
 	nextID := func() foundation.ID {
 		id, idErr := ids.New()
@@ -236,7 +229,17 @@ func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
 			t.Errorf("restore latest migrations: %v", upErr)
 		}
 	}()
-	for _, version := range []int{17, 16, 15, 14} {
+	for {
+		version, versionErr := provider.GetDBVersion(ctx)
+		if versionErr != nil {
+			t.Fatal(versionErr)
+		}
+		if version == 13 {
+			break
+		}
+		if version < 13 {
+			t.Fatalf("migration version=%d before 00013 guard", version)
+		}
 		if _, err := provider.Down(ctx); err != nil {
 			t.Fatalf("down migration %d before 00013 guard: %v", version, err)
 		}
@@ -249,6 +252,52 @@ func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
 			t.Fatalf("guarded Down error=%v", err)
 		}
 	}
+}
+
+func newChangeControlMigrationTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
+	t.Helper()
+	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
+	if baseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL for Change Control migration integration tests")
+	}
+	ctx := context.Background()
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := pgxpool.New(ctx, baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	databaseName := fmt.Sprintf("zhixu_change_down_%d", time.Now().UnixNano())
+	identifier := pgx.Identifier{databaseName}.Sanitize()
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
+		admin.Close()
+		t.Fatal(err)
+	}
+	parsed.Path = "/" + databaseName
+	pool, err := pgxpool.New(ctx, parsed.String())
+	if err == nil {
+		var runner *platformmigration.Runner
+		runner, err = platformmigration.NewRunner(pool, projectmigrations.FS)
+		if err == nil {
+			err = runner.Up(ctx)
+		}
+	}
+	if err != nil {
+		if pool != nil {
+			pool.Close()
+		}
+		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
+		admin.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
+		admin.Close()
+	})
+	return pool, ctx
 }
 
 func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {

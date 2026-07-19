@@ -30,6 +30,9 @@ func TestKnowledgeDomainMigrationSchemaAndEmptyDownUp(t *testing.T) {
 	assertKnowledgeMigrationShape(t, ctx, pool)
 	provider := migrationProvider(t, pool)
 	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00019 empty Down failed: %v", err)
+	}
+	if _, err := provider.Down(ctx); err != nil {
 		t.Fatalf("00018 empty Down failed: %v", err)
 	}
 	if _, err := provider.Down(ctx); err != nil {
@@ -85,6 +88,9 @@ INSERT INTO core.topic(
 		t.Fatal(err)
 	}
 	provider := migrationProvider(t, pool)
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00019 empty Down failed: %v", err)
+	}
 	if _, err := provider.Down(ctx); err != nil {
 		t.Fatalf("00018 empty Down failed: %v", err)
 	}

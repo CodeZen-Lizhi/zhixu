@@ -70,6 +70,7 @@ Domain 不持有 Executor、不查 Workflow/Approval、不解析路径、不执�
 - `WorkflowPolicyReader`：从持久 Definition/Run/Node/Attempt/lease 解析不可变 Policy。
 - `ToolCallRepository`：RecordRefused、Start/Replay、Finalize、MarkUnknown、Query timeline。
 - `TrustedSideEffectRecorder`：为现有 Safe Writeback 记录两个逻辑写 Tool 与同一 durable execution ref，不拥有授权消费或副作用。
+- Safe Writeback v1 的 frozen graph/hash 与空 `allowed_tools` 保持不变；两个写 Tool 不走普通模型 Tool allowlist，也不注册独立 File/Git Executor。它们由仅限既有 `writeback_execution`、已消费双授权和当前可信 lease 的分阶段 audit recorder 在真实文件/Git checkpoint 周围记录。
 
 ### 3.3 Adapters
 
@@ -154,6 +155,14 @@ Tool Request v1 是单请求，而非无界数组：
 
 M6-03 注册独立 Schema/Result Type，不修改 Relation/RAG/Refusal/Faithfulness v1。M6-04 负责 Tool loop、调用预算与将 `untrusted_data` Tool Result 重新交给模型；Provider 原生 `tool_calls` 在本期继续拒绝。
 
+模型 Tool Request 先经过 strict decoder，再转换为独立 `PersistedToolInvocationV1`；持久 Node input 只包含
+`schema_version/tool_name/arguments`，不保存模型自由文本 `reason`。M6-03 生产 `agent-rag` Definition 只允许
+空参数或稳定 ID tuple 的 `ReadSource`、`ValidateCitation`、`ReadGitStatus`。`SearchKnowledge` query 与
+`CalculateDiff` before/after 属于内容型参数，虽有真实 typed Executor，也不进入本期生产持久 Tool 目录；
+M6-04 必须设计不复制 raw 内容的 request receipt 或同一受控 Agent Attempt 内执行 seam 后才能开放。
+Workflow input 仍拒绝 Workspace、Capability、Approval、Credential、timeout、endpoint、path、command 和 Git args，
+且不能复制到 `workflow.tool_call`、Node output、日志、Trace 或错误。Executor 使用受控常量 reason，不恢复模型原文。
+
 ## 7. Execution Pipeline
 
 ```mermaid
@@ -164,7 +173,6 @@ sequenceDiagram
     participant R as Registry
     participant C as Tool Call Store
     participant E as Typed Executor
-    participant W as Existing Writeback seam
 
     A->>S: ToolRequestV1 + trusted identity
     S->>P: Resolve persisted policy
@@ -176,13 +184,8 @@ sequenceDiagram
         S-->>A: Stable denied/invalid error
     else allowed
         S->>C: Start or replay STARTED
-        alt trusted write tool
-            S->>W: Existing Atomic Begin / durable execution
-            W-->>S: Canonical execution ref / error
-        else ordinary tool
-            S->>E: Execute with bounded deadline
-            E-->>S: Typed result/error
-        end
+		S->>E: Execute typed adapter with bounded deadline
+		E-->>S: Typed result/error
         S->>S: Output bytes/schema/redaction/untrusted envelope
         S->>C: CAS SUCCEEDED/FAILED/UNKNOWN
         S-->>A: Result or stable error
@@ -233,6 +236,7 @@ stateDiagram-v2
 - `FAILED` 只用于能证明没有未记录副作用或副作用已由权威 receipt 明确失败的情况。
 - 进程退出、连接断开、timeout 时无法证明结果，归 `UNKNOWN`；恢复器先查询 canonical domain receipt/side-effect ref，证明成功后 CAS 恢复，否则保持人工恢复。
 - Safe Writeback 的 Tool Call 关联现有 `writeback_execution`，不会改变双授权消费、文件/Git checkpoint、Mapping/Reindex Outbox 或反向 Commit 语义。
+- Safe Writeback audit 在 Atomic Begin 成功并完成 exact binding lookup 后创建：Apply Call 在文件副作用前 STARTED、`file_applied` checkpoint 后 SUCCEEDED；Git Call 在 `git_prepared` 后且 Commit 前 STARTED、`git_committed` checkpoint 后 SUCCEEDED。lease loss 由新 Attempt 根据权威 `writeback_execution`/FS/Git receipt reconciliation，不由通用 stale recovery 抢先归约 UNKNOWN。
 
 ## 10. SSRF-Safe Web Fetch
 
@@ -262,8 +266,8 @@ stateDiagram-v2
 | ReadGitStatus | READ_LOCAL | model requestable | existing Git Inspector, Workspace ID only |
 | ApplyApprovedPatch | WRITE_KNOWLEDGE | trusted workflow only | existing Safe Writeback audit bridge |
 | CreateGitCommit | GIT_WRITE | trusted workflow only | existing Safe Writeback audit bridge |
-| RebuildIndex | INDEX_MAINTENANCE | maintenance workflow only | versioned Reindex service/outbox |
-| RunRegressionEvaluation | EVALUATION_RUN | evaluation workflow only | existing Regression service |
+| RebuildIndex | INDEX_MAINTENANCE | maintenance workflow only | v1 contract-only unavailable；现有 Safe Writeback River Delivery 不接受同步 Tool 冒充 lease owner |
+| RunRegressionEvaluation | EVALUATION_RUN | evaluation workflow only | v1 contract-only unavailable；现有 Reindex 结构回归与离线 Agent fixture 均不是 Dataset Evaluation |
 
 `CalculateDiff` 不需要外部 Capability，但仍必须在 Node exact allowlist 中；“无 Capability”不等于任意 Workflow 可调用。
 
@@ -288,7 +292,8 @@ stateDiagram-v2
 - Tool contract catalog 在 API/Worker 共享构造并冻结。
 - API 根据相同配置标记 enabled contracts，但不注入 Executor；Worker 为 enabled contracts 注入真实 Executor。
 - Web Fetch 配置默认 disabled，包含 bounded timeout、max redirects、max decompressed bytes 和 allowed content types；不支持私网例外或环境代理。
-- disabled/unconfigured dependency 不注册可执行能力，Workflow Definition 引用时启动/Freeze 失败。
+- disabled 不注册普通 ExecutionService/可启动 Tool Definition，但进程仍可 ready；enabled 时 dependency/Executor/Definition 缺失才 readiness fail closed。
+- `ReadDocument`、`RebuildIndex`、`RunRegressionEvaluation` 在真实 Application seam 落地前只存在 contract，不进入 Worker enabled executor subset 或模型目录；`SearchKnowledge`、`CalculateDiff` 虽有 typed Executor，也因内容型 request 尚无安全持久 receipt，不进入 M6-03 生产持久目录。后续补齐能力时发布新的 Workflow/Tool 版本，不原地扩展历史 Definition。
 - M6-03 不增加公共 Tool execute API；可选 Tool timeline 只作为 Workflow 内部/未来查询 port，本期不扩大 HTTP 面。
 
 ## 14. Compatibility, Rollout And Rollback
@@ -305,6 +310,7 @@ stateDiagram-v2
 - 使用项目自有 strict Tool Request 而非 Provider tool_calls：多一层 Schema/编排，但保留版本、repair、权限和持久事实的唯一控制面。
 - Contract 与 Executor 分离：允许 API 校验 11 个稳定定义，同时不会为未配置能力创建 Fake；代价是 Composition readiness 需要双侧一致性测试。
 - Tool Call 专表而非普通日志：增加迁移和恢复复杂度，但可证明 STARTED/UNKNOWN/幂等并满足敏感信息边界。
+- 持久 Tool Workflow 只接受空参数/稳定 ID tuple：暂不在生产目录开放 Search query 与 Diff 正文，牺牲本期可见工具数量，换取 raw 内容不落 DB；M6-04 需用专用 request receipt 或同 Attempt 执行 seam 扩展。
 - 每跳 validated-IP pinning 而非“解析一次再普通 HTTP”：实现更复杂，但这是阻止 DNS rebinding 和 redirect SSRF 的必要条件。
 - HTML 输出纯文本而非通用 sanitizer HTML：能力更保守，但减少 XSS/事件属性和 Prompt 指令面，符合 RAG 数据用途。
 - `ADMIN_MAINTENANCE` 不做兼容扩权 alias：旧不明确 Definition 需要人工迁移，但避免一个旧 Scope 同时获得索引与评测能力。

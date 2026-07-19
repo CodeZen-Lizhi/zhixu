@@ -21,13 +21,17 @@ const (
 	RefusalSchemaID = "agent.refusal"
 	// FaithfulnessReviewSchemaID 是逐 assertion 审查输出的稳定 Schema ID。
 	FaithfulnessReviewSchemaID = "agent.faithfulness-review"
-	// OutputSchemaVersionV1 是 M6-02 四类结构化输出的首个版本。
+	// ToolRequestSchemaID 是项目自有单次 Tool Request 的稳定 Schema ID。
+	ToolRequestSchemaID = "agent.tool-request"
+	// OutputSchemaVersionV1 是项目自有 Agent 结构化输出的首个版本。
 	OutputSchemaVersionV1 = "v1"
 
 	ResultTypeRelationAssessment = "relation_assessment"
 	ResultTypeRAGAnswer          = "rag_answer"
 	ResultTypeRefusal            = "refusal"
 	ResultTypeFaithfulnessReview = "faithfulness_review"
+	// ResultTypeToolRequest 是独立 Tool Request 的稳定 Agent 结果类型。
+	ResultTypeToolRequest = "tool_request"
 
 	maxOutputTextBytes = 16 * 1024
 	maxSummaryBytes    = 4 * 1024

@@ -83,6 +83,11 @@ Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 �
 - Apply Knowledge。
 - Git Write。
 - Index Maintenance。
+- Evaluation Run。
+
+代码中的 canonical 值固定为 `READ_LOCAL`、`READ_EXTERNAL`、`WRITE_PROPOSAL`、
+`WRITE_KNOWLEDGE`、`GIT_WRITE`、`INDEX_MAINTENANCE`、`EVALUATION_RUN`。旧
+`ADMIN_MAINTENANCE` 不自动展开为两个权限；历史 Definition 无法唯一迁移时禁止启动新 Run。
 
 写权限短时、单任务、单 Proposal。
 
@@ -127,6 +132,8 @@ Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 �
 - 权限不由模型控制。
 - Tool Request 重新校验。
 - 敏感操作需要 Approval。
+- Tool Request 只提供项目自有严格 Schema；Workspace、Capability、Approval、Credential、timeout、endpoint、path、command 和 Git args 均由服务端忽略或拒绝，不能成为授权来源。
+- Tool Result、Source 和网页正文统一标记为 untrusted data，不递归解释为新的 Tool Request，也不进入 System Message。
 
 ## 10. SSRF
 
@@ -134,6 +141,8 @@ Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 �
 - 阻止私网/回环/元数据。
 - DNS Rebinding 防护。
 - 出站超时和大小。
+- 公开域名 Allowlist 只能收窄访问范围，不能允许 loopback、private、link-local、multicast、unspecified、metadata 或其他保留地址。
+- 每一跳固定使用本次校验后的 IP snapshot，保留 Host/TLS ServerName，禁止环境代理和校验后的二次 DNS。
 
 ## 11. Web
 
@@ -180,6 +189,10 @@ Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 �
 - File/Git。
 - Settings/Secret 更新。
 - Security Block。
+
+M6-03 的 `workflow.tool_call` 是 Tool 执行事实和受限安全记录，不等同于 M10 的通用 append-only Audit：
+它只保存版本化身份、状态、Hash、字节数、受控摘要和稳定引用，不保存 raw Prompt/参数/输出、正文、
+Credential、Authorization、Cookie、绝对路径或 stderr。M10 仍需实现跨模块 Audit 查询、留存和 UI。
 
 ## 16. 安全失败模式
 

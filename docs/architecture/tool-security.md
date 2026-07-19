@@ -10,11 +10,16 @@
 flowchart LR
     Agent["Agent Tool Request"] --> Registry["Tool Registry"]
     Registry --> Schema["Schema Validation"]
-    Schema --> Auth["Permission Decision"]
+    Schema --> Auth["Persisted Workflow Policy"]
     Auth --> Executor["Tool Executor"]
     Executor --> Adapter["Concrete Adapter"]
-    Adapter --> Audit["Tool Call Audit"]
+    Adapter --> Audit["workflow.tool_call"]
 ```
+
+M6-03 的执行身份不是模型或 HTTP 参数：Worker 从持久 Workflow Definition/Run/Node/Attempt 解析
+Workspace、Definition version/hash、Node key/run、Attempt、lease owner/fence、精确 Capability 与
+`allowed_tools`。Registry、Schema、Workflow binding、Capability、lease 和业务输入全部通过后才允许
+Executor；任一步失败都不得调用 Adapter。
 
 ## 3. Tool Definition
 
@@ -44,13 +49,17 @@ flowchart LR
 
 ## 5. 授权上下文
 
-工具执行前先验证调用者身份和普通 Capability：
+M10 对公共 API 的目标是先验证调用者身份和普通 Capability：
 
 - Web 请求来自有效 Cookie Session，并通过 CSRF/Origin 校验。
 - 自动化请求来自未过期、未撤销且 Scope 匹配的 API Token。
 - Workflow 内部调用来自服务端持久化的 Run/Node Context，不信任模型自报身份。
 
 身份认证与普通 Capability 只允许调用者请求工具，不能代替一次性 Approval Write Authorization。
+
+M6-03 当前没有公共 Tool Execute API，也未实现 Cookie Session、API Token、CSRF/Origin 或公共 Capability
+Middleware；当前可执行 Tool 只接受服务端持久 Workflow/Node/Attempt 身份。M10 完成前不得把 loopback 或
+`workspace_id` 当作已认证调用者。
 
 写权限要求：
 
@@ -75,6 +84,13 @@ M4-C 已把 Approved Proposal 原子接入正式 Workflow/River：持久 Job Arg
 
 明文 Credential 只在首次签发时返回，服务端不保存可恢复副本；首次响应丢失后的幂等重放不会再次返回 Credential。调用方只能使用新幂等键重新签发或等待短 TTL 过期，不能通过查询接口恢复写凭据。
 
+M6-03 在 Safe Writeback 两个真实副作用点增加逻辑 Tool Call 审计，但不增加文件或 Git Executor：
+
+- Apply 使用固定 `call_no=1`，在文件 `CommitCAS` 前写入 `STARTED`，`file_applied` checkpoint 后写入 `SUCCEEDED`。
+- Git 使用固定 `call_no=2`，在 `git_prepared` 后且 Commit 前写入 `STARTED`，`git_committed` checkpoint 后写入 `SUCCEEDED`。
+- 两条 Call 都引用同一 `writeback_execution:<uuid>`；历史 Call 保留首次 STARTED 的 Attempt，新 Attempt 必须先通过持久 Definition/Node/Attempt/lease 校验才可 reconciliation。
+- 已发现文件或 Commit receipt 但缺少历史 STARTED 时进入人工恢复，禁止事后补造审计；通用 stale recovery 不处理这类 trusted write Call。
+
 ## 6. 核心工具
 
 ### SearchKnowledge
@@ -82,6 +98,7 @@ M4-C 已把 Approved Proposal 原子接入正式 Workflow/River：持久 Job Arg
 - 只读。
 - 返回 Evidence Items。
 - 不返回密钥和任意文件。
+- 首次执行可调用配置化 Retrieval/Embedding；成功 Call 的 replay loader 不得重新调用 Search 或远程 Embedding。当前没有权威 Search 输出 receipt 时明确返回 `TOOL_SEARCH_KNOWLEDGE_RECEIPT_UNAVAILABLE`，由 Workflow 的显式重试策略决定是否建立新 Attempt，不能返回空成功。
 
 ### ReadSource/ReadDocument
 
@@ -115,6 +132,21 @@ M4-C 已把 Approved Proposal 原子接入正式 Workflow/River：持久 Job Arg
 
 - INDEX_MAINTENANCE。
 - 需要范围和 Index Version。
+
+### RunRegressionEvaluation
+
+- EVALUATION_RUN。
+- 与 INDEX_MAINTENANCE 不互相替代。
+- v1 只有 Contract；在版本化 Evaluation Application、持久 receipt 和 Workflow 全部存在前保持 unavailable。
+
+### 当前 Availability
+
+- API 冻结全部 11 个 Tool Contract，但不注册 Executor。
+- Worker 只注册配置启用、真实依赖存在且具备完整边界的只读 Executor；显式 disabled 表示 Tool capability unavailable 但进程仍可 ready，enabled 时缺 Executor/Workflow/依赖才 readiness fail closed。
+- M6-03 先把 strict Agent Tool Request 转换为不含模型 `reason` 的持久 invocation；生产 `agent-rag` Definition 只允许 `ReadSource`、`ValidateCitation`、`ReadGitStatus` 的空参数/稳定 ID tuple。Search query 与 Diff before/after 在 M6-04 建立安全 request receipt 或同 Attempt 执行 seam 前不进入持久模型目录。
+- `ApplyApprovedPatch`、`CreateGitCommit` 只通过 trusted Safe Writeback audit bridge 使用。
+- `FetchWebPage` 默认关闭；持久 Web Policy 未实现前不能进入生产执行目录。
+- `ReadDocument`、`RebuildIndex`、`RunRegressionEvaluation` 缺少本版本真实闭环时不注册 Fake。
 
 ## 7. Prompt Injection
 
@@ -180,14 +212,18 @@ Git 允许命令白名单：
 ## 11. Tool Output
 
 - 输出通过 Schema。
-- 截断超大响应。
+- 超出响应预算时 fail closed，不截断后发布部分成功结果。
 - Secret 脱敏。
 - HTML 清理。
 - 不直接作为下一条 System Message。
 
-## 12. 幂等
+## 12. 持久 Tool Call 与幂等
 
-有副作用工具必须：
+`workflow.tool_call` 保存 Workspace/Run/Node/Attempt、精确 Tool/Schema/Capability、请求 Hash/字节数/受控摘要、状态、稳定结果或副作用引用、错误码、耗时和版本。它不保存 raw Prompt、参数/输出、Source/网页正文、Credential、Authorization、Cookie、绝对路径或 stderr。
+
+状态只允许：`STARTED`、`SUCCEEDED`、`FAILED`、`REFUSED`、`UNKNOWN`。Executor 前先写 `STARTED`；Schema/Policy/Capability 拒绝写受限 `REFUSED`；成功/失败使用 version CAS；无法证明副作用结果只能进入 `UNKNOWN`/人工恢复。
+
+`DOMAIN_WRITE` 或 `IRREVERSIBLE_OR_UNKNOWN` 工具必须：
 
 - 要求 idempotency_key。
 - 执行前查询已有结果。
@@ -196,7 +232,7 @@ Git 允许命令白名单：
 
 ## 13. 超时与重试
 
-- Read/Search 可安全重试。
+- Read/Search 只能按冻结 Workflow Retry Policy 建立显式重试；同一成功 Call 的 receipt replay 不得再次产生网络调用。
 - Web Fetch 可安全重试但受频率限制。
 - File/Git 根据幂等记录重试。
 - 非幂等未知结果进入人工恢复。
@@ -245,6 +281,6 @@ Git 允许命令白名单：
 - Command Injection。
 - Duplicate Side Effect。
 - Audit Redaction。
-- Session/API Token 与 Tool Capability 映射。
-- 登录成功但缺少 Approval Write Authorization 的拒绝路径。
+- M10：Session/API Token 与 Tool Capability 映射。
+- M10：登录成功但缺少 Approval Write Authorization 的拒绝路径。
 - Eino/模型伪造授权上下文。

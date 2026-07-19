@@ -252,6 +252,21 @@ func TestOpenAICompatibleChatModelRejectsMalformedOrInconsistentResponses(t *tes
 	}
 }
 
+func TestOpenAICompatibleChatModelRejectsProviderNativeToolCalls(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"id":"call-1","object":"chat.completion","created":1,"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{\"schema_version\":1,\"tool_name\":\"SearchKnowledge\",\"arguments\":{},\"reason\":\"need evidence\"}","refusal":null,"tool_calls":[{"id":"provider-call","type":"function","function":{"name":"SearchKnowledge","arguments":"{}"}}]},"finish_reason":"stop","logprobs":null}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10,"prompt_tokens_details":null,"completion_tokens_details":null},"system_fingerprint":null,"service_tier":null}`)
+	}))
+	defer server.Close()
+	model, err := models.NewOpenAICompatibleChatModel(chatOptions(server.URL, server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = model.Chat(context.Background(), validChatRequest(model.Contract().Model))
+	assertChatError(t, err, foundation.ErrorConsistencyViolation, models.ErrorCodeChatResponseInvalid, false)
+}
+
 func TestOpenAICompatibleChatModelClassifiesUnknownTransportFailureAsNonRetryableAndRedactsCause(t *testing.T) {
 	t.Parallel()
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

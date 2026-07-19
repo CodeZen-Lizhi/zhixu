@@ -35,6 +35,9 @@ func TestSafeWritebackWorkflowContractIsStableAndPermissionBound(t *testing.T) {
 	if len(node.RequiredPermissions) != 2 || node.RequiredPermissions[0] != workflowdomain.PermissionGitWrite || node.RequiredPermissions[1] != workflowdomain.PermissionWriteKnowledge {
 		t.Fatalf("permissions=%#v", node.RequiredPermissions)
 	}
+	if len(node.AllowedTools) != 0 {
+		t.Fatalf("safe writeback v1 unexpectedly gained tools=%#v", node.AllowedTools)
+	}
 	encodedGraph, err := json.Marshal(definition.Graph)
 	if err != nil {
 		t.Fatal(err)
@@ -42,6 +45,10 @@ func TestSafeWritebackWorkflowContractIsStableAndPermissionBound(t *testing.T) {
 	digest := sha256.Sum256(encodedGraph)
 	if definition.GraphHash != hex.EncodeToString(digest[:]) {
 		t.Fatalf("graph hash=%q graph=%s", definition.GraphHash, encodedGraph)
+	}
+	const stableV1GraphHash = "4ef937969e5856c0efcf8ad9035f3fffe386d2f419e58443822a968d578172a6"
+	if definition.GraphHash != stableV1GraphHash || bytes.Contains(encodedGraph, []byte("allowed_tools")) {
+		t.Fatalf("safe writeback v1 graph drifted hash=%q graph=%s", definition.GraphHash, encodedGraph)
 	}
 }
 

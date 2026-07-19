@@ -28,6 +28,10 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
+	toolchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/changecontrol"
+	toolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
+	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -140,7 +144,23 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writebackService, err := application.NewWritebackService(application.WritebackServiceDependencies{Repository: changeRepository, Workspace: workspaceStore, Git: gitRepository, IDs: ids, Clock: foundation.SystemClock{}})
+	contractRegistry, err := toolcatalog.NewFrozenContractRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolRepository, err := toolpostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditService, err := toolsapplication.NewTrustedWriteAuditService(contractRegistry, toolRepository, ids, foundation.SystemClock{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditRecorder, err := toolchangecontrol.NewWritebackAuditRecorder(auditService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writebackService, err := application.NewWritebackService(application.WritebackServiceDependencies{Repository: changeRepository, Workspace: workspaceStore, Git: gitRepository, Audit: auditRecorder, IDs: ids, Clock: foundation.SystemClock{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,11 +265,16 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 		{query: `SELECT count(*) FROM change_control.proposal_commit WHERE writeback_execution_id=$1`, args: []any{executionID}},
 		{query: `SELECT count(*) FROM workflow.outbox_event WHERE run_id=$1 AND event_type='retrieval.revision.reindex_requested'`, args: []any{string(workflowRunID)}},
 		{query: `SELECT count(*) FROM workflow.river_job WHERE kind=$1 AND args->>'node_run_id'=$2`, args: []any{riveradapter.NodeJobKind, workflowNodeID}},
+		{query: `SELECT count(*) FROM workflow.tool_call WHERE workflow_run_id=$1 AND node_run_id=$2 AND status='SUCCEEDED' AND side_effect_type='writeback_execution' AND side_effect_id=$3`, args: []any{string(workflowRunID), workflowNodeID, executionID}},
 	}
-	for _, check := range checks {
+	for index, check := range checks {
 		var count int
-		if err := pool.QueryRow(ctx, check.query, check.args...).Scan(&count); err != nil || count != 1 {
-			t.Fatalf("count=%d want=1 err=%v query=%s", count, err, check.query)
+		want := 1
+		if index == len(checks)-1 {
+			want = 2
+		}
+		if err := pool.QueryRow(ctx, check.query, check.args...).Scan(&count); err != nil || count != want {
+			t.Fatalf("count=%d want=%d err=%v query=%s", count, want, err, check.query)
 		}
 	}
 	assertApprovalRuntimePayloadsClean(t, ctx, pool, workflowRunID, foundation.ID(workflowNodeID), root, targetPath, approvedContent)

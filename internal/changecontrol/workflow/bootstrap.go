@@ -27,7 +27,7 @@ type WritebackBeginner interface {
 
 // SafeWritebackNode 是 Begin/lookup 后继续现有 Saga 的瞬时 Node 端口。
 type SafeWritebackNode interface {
-	Execute(context.Context, Input, string) (Output, error)
+	Execute(context.Context, Input, changecontrolapplication.WritebackResumeIdentity) (Output, error)
 }
 
 // BootstrapExecutorDependencies 是 Safe Writeback Bootstrap Executor 的受信依赖。
@@ -169,7 +169,12 @@ func (e *BootstrapExecutor) executeNode(ctx context.Context, execution workflowa
 		SchemaVersion: changecontrolapplication.SafeWritebackSchemaVersion,
 		ExecutionID:   durable.ID, WorkspaceID: durable.WorkspaceID,
 		WorkflowRunID: durable.WorkflowRunID, NodeRunID: durable.NodeRunID,
-	}, execution.LeaseOwner)
+	}, changecontrolapplication.WritebackResumeIdentity{
+		WorkspaceID: execution.WorkspaceID, DefinitionID: execution.DefinitionID,
+		DefinitionVersion: execution.DefinitionVersion, DefinitionHash: execution.DefinitionHash,
+		WorkflowRunID: execution.RunID, NodeKey: execution.NodeKey, NodeRunID: execution.NodeRunID,
+		NodeAttemptID: execution.NodeAttemptID, LeaseOwner: execution.LeaseOwner, LeaseFence: int64(execution.AttemptNo),
+	})
 	if err != nil {
 		return workflowapplication.ExecutionResult{}, err
 	}

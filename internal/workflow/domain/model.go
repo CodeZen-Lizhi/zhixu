@@ -107,7 +107,9 @@ type Definition struct {
 	Key             string
 	Version         int64
 	Graph           json.RawMessage
-	CreatedAt       time.Time
+	// GraphHash 是从不可变持久 Graph 重新计算的 canonical SHA-256。
+	GraphHash string
+	CreatedAt time.Time
 }
 
 // Run is one execution pinned to a Definition version.

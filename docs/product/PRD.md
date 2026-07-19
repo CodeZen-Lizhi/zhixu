@@ -2551,7 +2551,8 @@ Review Card 进入 INVALIDATED，并从调度移除，直到重新审核。
 - WRITE_PROPOSAL：创建候选和 Proposal。
 - WRITE_KNOWLEDGE：批准后的一次性写权限。
 - GIT_WRITE：批准后的 Git 提交权限。
-- ADMIN_MAINTENANCE：索引重建等维护权限。
+- INDEX_MAINTENANCE：索引构建、切换等维护权限。
+- EVALUATION_RUN：运行版本化评测；不能替代索引维护权限。
 
 #### 10.20.5 调用规则
 
@@ -2566,7 +2567,7 @@ Review Card 进入 INVALIDATED，并从调度移除，直到重新审核。
 - 默认关闭。
 - 用户可在单次任务或 Workspace 中允许。
 - 仅访问 HTTP/HTTPS。
-- 阻止 localhost、内网和云元数据地址，除非显式配置可信列表。
+- 阻止 localhost、内网、保留地址和云元数据地址；公开域名 Allowlist 只能进一步收窄，不能绕过地址类别阻断。
 - 保存 URL、抓取时间和内容哈希。
 
 #### 10.20.7 审计
@@ -2583,7 +2584,20 @@ Review Card 进入 INVALIDATED，并从调度移除，直到重新审核。
 - 错误。
 - 幂等键。
 
-#### 10.20.8 验收标准
+不保存 raw Prompt、完整参数/输出、网页或 Source 正文、Credential、Authorization、Cookie、绝对路径和命令 stderr；只保存受控摘要、Hash、字节数和稳定结果/副作用引用。
+
+#### 10.20.8 M6-03 运行边界
+
+- Tool Contract Registry 由服务端拥有并冻结 `name + version`；API 只注册 Contract，Worker 只注册具备真实 Adapter 和安全闭环的 Executor。
+- Workflow Node 的精确 `allowed_tools`、Capability、Workspace、Run、Node、Attempt、lease/fence 均来自持久事实，Tool Request 不能携带或扩大这些权限。
+- Agent Tool Request v1 只包含 `schema_version`、`tool_name`、`arguments` 和 `reason`；Provider 原生 `tool_calls` 仍然拒绝。
+- `ApplyApprovedPatch` 与 `CreateGitCommit` 仅作为 Safe Writeback 内两个固定逻辑审计身份，不进入普通 Agent 目录，也不创建第二条文件/Git 写入路径。
+- `FetchWebPage` 默认关闭；持久 Workspace/Workflow Web Policy 尚未接线时即使配置启用也必须 readiness fail closed。
+- `RebuildIndex` 与 `RunRegressionEvaluation` v1 仅保留 Contract；缺少版本化 Application seam、持久 receipt 或 Workflow 时不注册 Executor，不返回 Fake 或空成功。
+- M6-03 先把 strict Agent Tool Request 转换为不含模型自由文本 `reason` 的持久 invocation，并只开放空参数或稳定 ID tuple 的 `ReadSource`、`ValidateCitation`、`ReadGitStatus`。`SearchKnowledge` 和 `CalculateDiff` typed Adapter 已建立，但 query/before/after 属于内容型参数；M6-04 在提供不复制 raw 内容的 request receipt 或同一 Agent Attempt 内执行 seam 前，不得把它们加入持久模型目录。
+- 不提供公共 `/tools/{name}:execute` API；M6-04 才负责 Conversation、RAG HTTP API、SSE、反馈与前端，M10 才负责 Session/API Token、CSRF/Origin、公共 Capability Middleware 和通用 Audit UI。
+
+#### 10.20.9 验收标准
 
 - 未审批任务无法调用写工具。
 - Prompt Injection 无法提升工具权限。

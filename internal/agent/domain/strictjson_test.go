@@ -114,6 +114,15 @@ func errorCode(err error) string {
 
 func TestDefaultDecodeLimitsAreFinite(t *testing.T) {
 	limits := DefaultDecodeLimits()
+	if limits != (DecodeLimits{
+		MaxDocumentBytes: 256 * 1024,
+		MaxDepth:         16,
+		MaxStringBytes:   32 * 1024,
+		MaxArrayItems:    500,
+		MaxObjectFields:  128,
+	}) {
+		t.Fatalf("default compatibility limits=%#v", limits)
+	}
 	if limits.MaxDocumentBytes <= 0 || limits.MaxDocumentBytes > 1024*1024 || limits.MaxDepth <= 0 ||
 		limits.MaxStringBytes <= 0 || limits.MaxArrayItems <= 0 || limits.MaxObjectFields <= 0 {
 		t.Fatalf("limits=%#v", limits)

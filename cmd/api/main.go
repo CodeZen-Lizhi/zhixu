@@ -12,6 +12,7 @@ import (
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	approvaldispatchpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/approvaldispatchpostgres"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
@@ -34,6 +35,8 @@ import (
 	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
+	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
+	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/webassets"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
@@ -267,17 +270,7 @@ func newWorkflowComponents(pool *pgxpool.Pool, cfg config.Config, guards ...work
 	if err != nil {
 		return nil, nil, err
 	}
-	catalog, err := workflowapplication.NewValidationCatalog(
-		[]int{1},
-		[]workflowdomain.Permission{
-			workflowdomain.PermissionReadLocal,
-			workflowdomain.PermissionReadExternal,
-			workflowdomain.PermissionWriteProposal,
-			workflowdomain.PermissionWriteKnowledge,
-			workflowdomain.PermissionGitWrite,
-			workflowdomain.PermissionAdminMaintenance,
-		},
-	)
+	catalog, err := workflowapplication.NewValidationCatalog([]int{1}, capability.All())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -291,7 +284,11 @@ func newWorkflowComponents(pool *pgxpool.Pool, cfg config.Config, guards ...work
 	if err := executors.Freeze(); err != nil {
 		return nil, nil, err
 	}
-	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
+	toolContracts, err := newToolContractRegistry()
+	if err != nil {
+		return nil, nil, err
+	}
+	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors, toolContracts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -308,12 +305,18 @@ func newWorkflowComponents(pool *pgxpool.Pool, cfg config.Config, guards ...work
 	return service, runtimeRepository, nil
 }
 
+func newToolContractRegistry() (*toolsapplication.Registry, error) {
+	return toolcatalog.NewFrozenContractRegistry()
+}
+
 func registerAPIWorkflowExecutors(cfg config.Config, executors *workflowapplication.ExecutorRegistry) error {
 	if err := executors.Register(workflowapplication.CanonicalJSONHashNodeKind, workflowapplication.CanonicalJSONHashInputSchemaVersion, workflowapplication.NewCanonicalJSONHashExecutor()); err != nil {
 		return err
 	}
 	if cfg.ChatProvider != config.ChatProviderDisabled {
-		return executors.RegisterContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion)
+		if err := executors.RegisterContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -330,7 +333,9 @@ func registerAPIWorkflowDefinitions(cfg config.Config, definitions *workflowappl
 		return err
 	}
 	if cfg.ChatProvider != config.ChatProviderDisabled {
-		return definitions.Register(agentworkflow.RegisteredDefinition())
+		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
+			return err
+		}
 	}
 	return nil
 }

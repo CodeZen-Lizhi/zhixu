@@ -756,6 +756,25 @@ Compensation Record 追踪已经发生或可能发生的副作用及其补偿结
 - 同一副作用的补偿操作按作用域幂等；补偿失败不能标记原 Workflow 成功，必须保留 Manual Recovery 状态。
 - Workflow Module 负责补偿图和状态，Adapter 负责实际外部动作，Audit 记录每次关键决策。
 
+### workflow.tool_call
+
+`workflow.tool_call` 是 M6-03 的版本化 Tool 执行事实，不保存可重放 raw payload。
+
+- 身份：`workspace_id`、`workflow_run_id`、`node_run_id`、`node_attempt_id`、`call_no`。
+- Contract：`requested_tool_name`、`tool_version`、`definition_hash`、输入/输出 Schema、Capability、side-effect level、invocation policy。
+- 请求：可选幂等键、request hash、字节数和受控 JSON 摘要。
+- 结果：response hash、字节数和受控摘要，以及稳定 `result_ref` 或 `side_effect_type/id`；不保存 raw Prompt、arguments/output、Source/网页正文、Credential、Authorization、Cookie、绝对路径或 stderr。
+- 生命周期：`STARTED`、`SUCCEEDED`、`FAILED`、`REFUSED`、`UNKNOWN`，使用 version CAS；拒绝和终态字段组合由 CHECK/Trigger 双重约束。
+
+数据库约束：
+
+- `(node_attempt_id, call_no)` 唯一；同 Attempt 最多一个活动 STARTED。
+- 有副作用调用按 `(workspace_id, idempotency_key)` 唯一，重复绑定只返回历史事实，不同绑定冲突。
+- 外键同时约束 Workspace/Run、Run/Node、Node/Attempt，防止跨 Workspace 或跨 Run 拼接身份。
+- INSERT 要求 active Run/Node/Attempt 和一致的数据库时间 lease；终态更新只能从 STARTED 迁移并保持所有身份/请求/副作用绑定不可变。
+- 通用 stale recovery 使用 `SKIP LOCKED` 和数据库时间重检，只把失租且无法证明结果的普通 STARTED 归约 UNKNOWN；带 `writeback_execution` 预期 receipt 的 trusted write Call 由 Safe Writeback reconciliation 处理。
+- 有 Tool Call 数据时 `00019_tool_registry_security.sql` Down 返回 SQLSTATE `55000`；应用回滚保留表并 forward fix。
+
 ### tool_authorization
 
 Tool Authorization 是服务端短时、单任务、最小权限的授权记录，不是登录凭据，也不把令牌发送给模型。
@@ -768,8 +787,8 @@ Tool Authorization 是服务端短时、单任务、最小权限的授权记录�
 
 - WRITE_KNOWLEDGE/GIT_WRITE 必须同时绑定 Proposal、Approval、Change Hash、Target Version 和当前 Workflow Run；读取能力也必须受 Workflow Definition allowlist 限制。
 - 授权令牌只保留不可逆摘要/版本化引用，模型仅看到工具 Schema；每次执行在 Registry 再次校验权限、参数、租约和目标版本。
-- 同一授权作用域只能成功消费一次；重复执行返回既有 Tool Call 结果，未知副作用进入人工恢复。
-- Tool Module 负责权限判定和消费，Change Control 负责 Proposal/Approval 事实，数据库负责唯一性、过期和状态约束。
+- 同一授权作用域只能成功消费一次；重复写回通过既有 Writeback Execution 与 Tool Call receipt 恢复，未知副作用进入人工恢复。
+- Tools Module 负责普通 Capability、Workflow `allowed_tools` 和 Tool Call receipt；Change Control 的 Atomic Begin 负责写授权签发、完整绑定校验与双授权单事务消费，数据库负责唯一性、过期和状态约束。
 
 ### node_run 与 model_run 的版本职责
 

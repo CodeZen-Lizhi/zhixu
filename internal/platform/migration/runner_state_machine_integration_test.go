@@ -68,9 +68,10 @@ func TestWorkflowRuntimeStateMachineMigrationCompatibility(t *testing.T) {
 		}
 	}
 
-	// 00018 has no Agent data, 00017 has no Knowledge data, 00016/00015/00014 have no Retrieval data,
-	// and 00013 has no Proposal→Run binding in this fixture; after removing all
-	// five, 00012 must reject populated Attempt data.
+	// 00019 has no Tool Call data, 00018 has no Agent data, 00017 has no Knowledge data,
+	// 00016/00015/00014 have no Retrieval data,
+	// and 00013 has no Proposal→Run binding in this fixture; after removing these
+	// later migrations, 00012 must reject populated Attempt data.
 	db := stdlib.OpenDBFromPool(pool)
 	defer db.Close()
 	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
@@ -80,6 +81,9 @@ func TestWorkflowRuntimeStateMachineMigrationCompatibility(t *testing.T) {
 	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00019 Down rejected empty Tool Registry Security schema: %v", err)
 	}
 	if _, err := provider.Down(ctx); err != nil {
 		t.Fatalf("00018 Down rejected empty Agent Runtime schema: %v", err)

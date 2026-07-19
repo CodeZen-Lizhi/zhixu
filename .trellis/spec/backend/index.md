@@ -7,10 +7,10 @@
 | 规范 | 内容 | 当前状态 |
 |---|---|---|
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
-| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | M6-02 Citation/Eligibility/Model Run 与 M6-D Search/Evidence 契约已记录；真实 PG/Workflow/Compose 门禁按任务验证 |
-| [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 M6-D Search/Cursor/Evidence 稳定 Problem 映射；正式 Auth/CSRF/Capability 仍归 M10 |
-| [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M4-D correlation/脱敏/metrics/trace 生产接线已验证；真实 exporter/Audit 待后续任务补充 |
-| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | M6-D 真实 PG HTTP/River/Compose smoke 已验证；前端/全仓门禁与独立审查以任务最终记录为准 |
+| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M6-03 `workflow.tool_call`、CAS/recovery/trusted receipt 与 guarded Down；真实 PG/River 门禁按任务验证 |
+| [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool Context/Permission/receipt/UNKNOWN/Web Policy 稳定错误；正式 Auth/CSRF 仍归 M10 |
+| [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M6-03 Tool/Observability 共享脱敏与受限 Tool Call 事实已记录；通用 append-only Audit/真实 exporter 归 M10 |
+| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已记录 M6-03 真实 River Tool、SSRF/命令/路径、Safe Writeback audit 与 Docker smoke 门禁；结果以任务最终记录为准 |
 
 ## 开发前检查清单
 

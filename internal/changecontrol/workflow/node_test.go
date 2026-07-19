@@ -28,11 +28,11 @@ type fakeResumer struct {
 	result    application.WritebackResult
 	err       error
 	execution foundation.ID
-	owner     string
+	identity  application.WritebackResumeIdentity
 }
 
-func (f *fakeResumer) Resume(_ context.Context, execution foundation.ID, owner string) (application.WritebackResult, error) {
-	f.execution, f.owner = execution, owner
+func (f *fakeResumer) Resume(_ context.Context, execution foundation.ID, identity application.WritebackResumeIdentity) (application.WritebackResult, error) {
+	f.execution, f.identity = execution, identity
 	return f.result, f.err
 }
 
@@ -43,9 +43,11 @@ func TestNodeExecutesOnlyStableBoundWriteback(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := validNodeInput()
-	output, err := node.Execute(context.Background(), input, " worker-a ")
-	if err != nil || output.Status != domain.WritebackStatusVerifying || output.IndexStatus != application.WritebackIndexStatusPending || output.GitCommit != nodeGitCommit || resumer.execution != nodeExecutionID || resumer.owner != "worker-a" {
-		t.Fatalf("output=%#v execution=%s owner=%q err=%v", output, resumer.execution, resumer.owner, err)
+	identity := validNodeResumeIdentity()
+	identity.LeaseOwner = " worker-a "
+	output, err := node.Execute(context.Background(), input, identity)
+	if err != nil || output.Status != domain.WritebackStatusVerifying || output.IndexStatus != application.WritebackIndexStatusPending || output.GitCommit != nodeGitCommit || resumer.execution != nodeExecutionID || resumer.identity.LeaseOwner != "worker-a" {
+		t.Fatalf("output=%#v execution=%s identity=%+v err=%v", output, resumer.execution, resumer.identity, err)
 	}
 	encodedInput, _ := json.Marshal(input)
 	encodedOutput, _ := json.Marshal(output)
@@ -77,7 +79,7 @@ func TestNodeRejectsBindingMismatchAndIncompleteResult(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := node.Execute(context.Background(), validNodeInput(), "worker-a"); err == nil {
+			if _, err := node.Execute(context.Background(), validNodeInput(), validNodeResumeIdentity()); err == nil {
 				t.Fatal("invalid result was accepted")
 			}
 		})
@@ -90,7 +92,7 @@ func TestNodePropagatesSagaFailureWithoutOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := node.Execute(context.Background(), validNodeInput(), "worker-a")
+	output, err := node.Execute(context.Background(), validNodeInput(), validNodeResumeIdentity())
 	if !errors.Is(err, want) || output != (Output{}) {
 		t.Fatalf("output=%#v err=%v", output, err)
 	}
@@ -98,6 +100,15 @@ func TestNodePropagatesSagaFailureWithoutOutput(t *testing.T) {
 
 func validNodeInput() Input {
 	return Input{SchemaVersion: application.SafeWritebackSchemaVersion, ExecutionID: nodeExecutionID, WorkspaceID: nodeWorkspaceID, WorkflowRunID: nodeRunID, NodeRunID: nodeNodeID}
+}
+
+func validNodeResumeIdentity() application.WritebackResumeIdentity {
+	return application.WritebackResumeIdentity{
+		WorkspaceID: nodeWorkspaceID, DefinitionID: "80000000-0000-4000-8000-000000000001", DefinitionVersion: 1,
+		DefinitionHash: strings.Repeat("d", 64), WorkflowRunID: nodeRunID, NodeKey: SafeWritebackNodeKey,
+		NodeRunID: nodeNodeID, NodeAttemptID: "90000000-0000-4000-8000-000000000001",
+		LeaseOwner: "worker-a", LeaseFence: 1,
+	}
 }
 
 func successfulNodeResult() application.WritebackResult {

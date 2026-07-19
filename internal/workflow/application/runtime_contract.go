@@ -76,6 +76,7 @@ type ClaimCommand struct {
 // ClaimResult 返回 DB-time Claim 的资格与持久 Attempt。
 type ClaimResult struct {
 	Disposition       ClaimDisposition
+	Definition        domain.Definition
 	Run               domain.Run
 	Node              domain.NodeRun
 	Attempt           domain.NodeAttempt
@@ -339,9 +340,38 @@ func isValidClaimCommand(command ClaimCommand) bool {
 
 func isValidClaimResult(command ClaimCommand, result ClaimResult) bool {
 	if result.Disposition == ClaimDispositionStale {
-		return result.Run.ID == "" && result.Node.ID == "" && result.Attempt.NodeRunID == "" && !result.LeaseReclaimed && (!result.DuplicateDelivery || strings.TrimSpace(result.ObservedNodeKind) != "")
+		return result.Definition.ID == "" && result.Run.ID == "" && result.Node.ID == "" && result.Attempt.NodeRunID == "" && !result.LeaseReclaimed && (!result.DuplicateDelivery || strings.TrimSpace(result.ObservedNodeKind) != "")
 	}
-	return result.Disposition == ClaimDispositionClaimed && result.Run.ID != "" && result.Node.ID == command.NodeRunID && result.Node.RunID == result.Run.ID && result.Node.Status == domain.NodeStatusRunning && (result.ObservedNodeKind == "" || result.ObservedNodeKind == result.Node.NodeType) && (!result.LeaseReclaimed || result.DuplicateDelivery) && result.Attempt.NodeRunID == command.NodeRunID && result.Attempt.AttemptNo >= 1 && result.Attempt.DispatchNo == command.DispatchNo && result.Attempt.DeliveryID == command.DeliveryID && result.Attempt.RiverJobID == command.RiverJobID && result.Attempt.RiverJobAttempt == command.RiverJobAttempt && result.Attempt.LeaseOwner == command.LeaseOwner && result.Attempt.Status == domain.AttemptStatusRunning
+	return result.Disposition == ClaimDispositionClaimed && validClaimDefinition(result) && result.Run.ID != "" && result.Node.ID == command.NodeRunID && result.Node.RunID == result.Run.ID && result.Node.Status == domain.NodeStatusRunning && (result.ObservedNodeKind == "" || result.ObservedNodeKind == result.Node.NodeType) && (!result.LeaseReclaimed || result.DuplicateDelivery) && result.Attempt.ID != "" && result.Attempt.NodeRunID == command.NodeRunID && result.Attempt.AttemptNo >= 1 && result.Attempt.DispatchNo == command.DispatchNo && result.Attempt.DeliveryID == command.DeliveryID && result.Attempt.RiverJobID == command.RiverJobID && result.Attempt.RiverJobAttempt == command.RiverJobAttempt && result.Attempt.LeaseOwner == command.LeaseOwner && result.Attempt.Status == domain.AttemptStatusRunning
+}
+
+func validClaimDefinition(result ClaimResult) bool {
+	definition := result.Definition
+	if definition.ID == "" || definition.ID != result.Run.DefinitionID || definition.WorkspaceID == "" || definition.WorkspaceID != result.Run.WorkspaceID || strings.TrimSpace(definition.Key) == "" || definition.Version < 1 || !validRuntimeContractHash(definition.GraphHash) {
+		return false
+	}
+	graph, err := DecodeCanonicalGraph(definition.Graph)
+	if err != nil {
+		return false
+	}
+	graphHash, err := ComputeCanonicalGraphHash(graph)
+	if err != nil || graphHash != definition.GraphHash {
+		return false
+	}
+	for _, node := range graph.Nodes {
+		if node.Key == result.Node.NodeKey {
+			return node.Kind == result.Node.NodeType && node.InputSchemaVersion == result.Node.InputSchemaVersion && node.OutputSchemaVersion == result.Node.OutputSchemaVersion
+		}
+	}
+	return false
+}
+
+func validRuntimeContractHash(value string) bool {
+	if len(value) != 64 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func isValidDeliveryBinding(binding DeliveryBinding) bool {

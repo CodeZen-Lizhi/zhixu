@@ -124,3 +124,55 @@ go vet ./...
 - 回归至少覆盖 Ingestion SourceSpan、Retrieval Search/Evidence、Change Control、Workflow；本任务不新增
   空壳 HTTP/OpenAPI，也不得把 Workspace 隔离误报为 M10 Auth 已完成。
 - 提交前主 Agent 必须执行 go-review、sql-code-review、通用 review 和独立只读审查。
+
+## Scenario: M6-03 Tool Security Quality Gate
+
+### 1. Scope / Trigger
+
+- 新增或修改 Tool Definition、Workflow `allowed_tools`、Tool Call 迁移、Executor、Safe Writeback audit、Web Fetch 或 Tool Runtime 配置时应用本门禁。
+- Domain/Application/Adapter 依赖方向为 `adapter -> application -> domain -> capability/foundation`；Tools Domain 不得导入 Workflow、Change Control、HTTP、pgx、模型、文件系统或 Git。
+
+### 2. Signatures
+
+- 普通执行入口：`ExecutionService.Execute(context.Context, ExecuteToolCommand) (ToolExecutionResult, error)`。
+- 持久策略入口：`WorkflowPolicyReader.ResolveToolPolicy(context.Context, TrustedExecutionIdentity) (WorkflowToolPolicy, error)`。
+- 持久事实：`workflow.tool_call`，写入只能从 `REFUSED` 或 `STARTED` 开始，终态只能由 `STARTED` 通过 version CAS 产生。
+
+### 3. Contracts
+
+- API Contract Registry、Worker Execution Registry 与 Workflow Definition/Node contract 必须来自同一冻结 catalog；配置 enabled 但生产调用链不可达属于 P1，不得只靠 readiness 测试通过。
+- strict Agent Tool Request 必须先转换为不含模型 `reason` 的持久 invocation；Node input 只允许空参数或稳定 ID tuple。Search query、Diff before/after、Prompt、正文、Credential、路径或授权字段不得进入生产 Node input。
+- `ZHIXU_TOOL_RUNTIME_MODE` 默认 `disabled`；Web Fetch 还要求 `ZHIXU_WEB_FETCH_MODE=enabled` 和持久 Web Policy，任一条件缺失均不得访问网络。
+- Safe Writeback v1 graph/hash 保持不变；ApplyApprovedPatch/CreateGitCommit 只能通过 trusted audit bridge 关联既有 Atomic Begin/Saga，不新增 File/Git Executor。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| nil context、非法 Tool Request/Input/Output | 稳定 InvalidInput；Executor 调用数为 0 或不发布部分结果 |
+| Definition/Run/Node/Attempt/lease 漂移 | `TOOL_CONTEXT_STALE`，不执行 Adapter |
+| exact allowlist/Capability/Workflow binding 不满足 | 稳定拒绝并记录脱敏 `REFUSED` |
+| 配置启用但 Executor、Workflow、Repository 或 Policy 缺失 | readiness fail closed，不构造 Fake |
+| 成功 Call 无权威 replay receipt | 稳定 receipt unavailable，不重新执行网络或写入 |
+| 副作用结果无法证明 | `UNKNOWN`/人工恢复，不自动成功或隐藏重试 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：真实 River Node 从 strict Tool Request 解析稳定参数，经持久策略与精确版本校验，写入 Tool Call，再返回 `untrusted_data=true` 的受控摘要。
+- Base：Tool Runtime disabled 时 API/Worker 可 ready，但 Tool capability 明确 unavailable；未配置外部 Provider 的测试明确 SKIP。
+- Bad：把模型 reason、Search query、Diff 正文、Credential、路径或权限复制到 Node input/Tool Call，或用 Fake/空对象冒充未实现 Executor。
+
+### 6. Tests Required
+
+- 至少一条只读 Tool 必须由真实 River Workflow Node 完成 Agent ToolRequest -> Registry -> persisted policy -> Tool Call -> untrusted output；直接调用 ExecutionService 不是业务 smoke。
+- `ResultReceiptLoader` 禁止网络、写入和副作用；Search replay 测试必须断言 Embedder/Search 调用数为 0。
+- SSRF、command、path、output security 必须执行负测；Web Fetch 不访问真实互联网，使用受控 Resolver/Dialer/httptest 覆盖 rebinding/redirect/TLS/代理/解压后上限。
+- 全量门禁包括定向 `-race -count=20`、真实 PostgreSQL/River/Filesystem/Git、M5 回归、`go test -race ./...`、`go vet ./...`、`make test`、`go mod tidy -diff`、Docker/Compose Tool smoke 和 `git diff --check`。
+- M6-03 文档不得把 M6-04 Conversation/RAG API/SSE/前端或 M10 Auth/CSRF/通用 Audit/容量基线标记为完成。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 模型参数决定 Workspace/Capability/timeout/path，Executor 成功后才补写 STARTED，receipt 丢失时重新执行。
+Correct: 服务端持久身份和冻结 catalog 决定策略，Executor 前写 STARTED；重放只读取权威 receipt，无法证明时进入 UNKNOWN。
+```

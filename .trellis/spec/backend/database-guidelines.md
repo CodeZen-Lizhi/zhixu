@@ -867,3 +867,15 @@ Correct: 先从本批 bindings 提取 DISTINCT Disputed Claim ID，再按 worksp
 Wrong: Workflow 输入或模型输出决定 Existing Claim/Conflict；REVIEW 直接调用裸 ChatModel。
 Correct: Knowledge Application 提供服务端事实；所有 generation/REVIEW 调用经 RecordingChatModel 连续持久化。
 ```
+
+## M6-03 Tool Call Persistence Contract
+
+- `workflow.tool_call` 是 Tool 执行唯一持久事实；只保存版本化身份、请求/响应 Hash、字节数、受控摘要和稳定 result/side-effect ref，禁止 raw Prompt、arguments/output、正文、Credential、URL Secret、绝对路径和 stderr。
+- `(node_attempt_id, call_no)`、活动 STARTED、Workspace 幂等键和复合 FK 由数据库约束；应用不得只靠先查后写。
+- INSERT 必须由 Trigger 复核 running Run/Node/Attempt、attempt_no=fence、相同 owner/lease 和数据库时间未过期；终态只允许 STARTED→SUCCEEDED/FAILED/UNKNOWN 且 immutable binding 不变。
+- `RecordRefused` 不占有副作用幂等键；Schema/Policy/Capability 失败不得创建 STARTED 或调用 Executor。
+- stale recovery 使用 Node→Attempt→Tool Call 锁序、`SKIP LOCKED` 和锁后数据库时间重检；与 Heartbeat 并发时不能误收回新 lease。
+- `writeback_execution` trusted Call 不由通用 recovery 归约 UNKNOWN。历史 Call 保留首次 STARTED Attempt；新 Attempt 在读取历史 receipt 前必须验证 Definition version/hash、Node key/run、Attempt/fence/owner/lease、Workflow binding 与 exact Capability。
+- 迁移 `00019_tool_registry_security.sql` 只前向新增；有 Tool Call 数据时 Down 返回 SQLSTATE `55000`。
+
+Required real-PG tests：跨 Workspace/Run/Node/Attempt、RecordRefused、STARTED/CAS/replay/conflict、commit response-loss、两 Worker recovery、Heartbeat race、trusted write 新 Attempt 资格、guarded Down 和稳定 Timeline。

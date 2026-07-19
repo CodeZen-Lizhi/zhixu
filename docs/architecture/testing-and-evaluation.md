@@ -255,6 +255,17 @@ M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一�
 - Fake 与真实评测：Deterministic Fake 只证明 Pipeline/错误路径/E2E 确定性；真实 Provider 未配置时必须明确 SKIP，
   不能计为模型质量 PASS，也不能让生产 Factory 构造 Fake。
 
+### 8.8 M6-03 Tool Registry And Security 专项
+
+- Registry/Schema：11 个 Contract 的 `name/version`、Definition Hash 和 Decoder golden；duplicate/freeze/deep-copy/latest/unknown contract/executor；Tool Request 与输入输出覆盖 invalid UTF-8、duplicate、unknown、trailing、null、类型/枚举和全部 size/depth 上限。
+- Persisted Policy：真实 PostgreSQL 覆盖 Workspace/Definition/Run/Node/Attempt/lease/fence、精确 `allowed_tools`、七项 Capability matrix、旧 `ADMIN_MAINTENANCE` 拒绝、跨 Workspace/Run/Node 拼接和数据库时间 lease。
+- Tool Call：STARTED/REFUSED/version CAS terminal、幂等冲突、commit response-loss、双 Worker stale recovery、Heartbeat 并发、UNKNOWN 与稳定 Timeline；有数据 `00019` Down 必须返回 SQLSTATE `55000`。
+- Output/Replay：Schema 失败前后均无部分结果；日志/Trace/DB/error canary 不含 Credential、Authorization、Cookie、raw Prompt/正文、绝对路径、URL userinfo 或 stderr。纯函数/不可变 receipt 可重放；Search 无权威 receipt 时必须稳定失败且 Embedder 调用数保持 0，不能返回空成功。
+- SSRF/命令/路径：mixed IP、DNS rebinding、public→private redirect、TLS SNI、环境代理禁用、gzip/chunked/Content-Length 解压后上限、slow header/body、HTML script/style/prompt canary；固定 executable/argv/cwd/env、leading option/NUL、traversal/symlink/TOCTOU 和 stdout/stderr 上限。
+- Safe Writeback Audit：真实 PostgreSQL + LocalFS + Git 与真实 River Approval smoke 断言 Apply/Git 两条逻辑 Call、同一 `writeback_execution` receipt、双授权只消费一次；response-loss 新 Attempt 必须通过 Definition/hash/Node/Attempt/lease，历史 Call 保留原 Attempt，缺 STARTED 禁止事后补造。
+- Composition/Workflow：API Contract Registry 与 Worker Execution Registry 分离；Tool disabled 时 capability 明确 unavailable但进程可 ready，enabled 时 Executor/Workflow/依赖不完整或 Web Policy 缺失才 readiness fail closed；至少一条只读 Tool 必须由真实 River Node 执行 Agent Request→Registry→Tool Call→untrusted result，不能用直接调用 `ExecutionService` 的测试冒充。生产持久 Definition 只允许空参数/稳定 ID 工具；CalculateDiff River 测试只验证通用 Node Executor，不表示 raw Diff 内容已进入生产目录。
+- 最终门禁：定向 count/race、安全 suite、M5 回归、全仓 `go test -race ./...`、`go vet ./...`、`make test`、`go mod tidy -diff`、真实 PostgreSQL/River/Filesystem/Git、Docker/Compose Tool smoke 与 `git diff --check`。
+
 ## 9. E2E
 
 固定 Fixture Workspace，执行 PRD 最终演示场景。

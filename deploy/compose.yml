@@ -23,6 +23,20 @@ x-chat-environment: &chat-environment
   ZHIXU_CHAT_MAX_REQUEST_BYTES: ${ZHIXU_CHAT_MAX_REQUEST_BYTES:-4194304}
   ZHIXU_CHAT_MAX_RESPONSE_BYTES: ${ZHIXU_CHAT_MAX_RESPONSE_BYTES:-4194304}
 
+x-tool-environment: &tool-environment
+  ZHIXU_TOOL_RUNTIME_MODE: ${ZHIXU_TOOL_RUNTIME_MODE:-disabled}
+  ZHIXU_WEB_FETCH_MODE: ${ZHIXU_WEB_FETCH_MODE:-disabled}
+  ZHIXU_WEB_FETCH_TIMEOUT: ${ZHIXU_WEB_FETCH_TIMEOUT:-30s}
+  ZHIXU_WEB_FETCH_RESPONSE_HEADER_TIMEOUT: ${ZHIXU_WEB_FETCH_RESPONSE_HEADER_TIMEOUT:-10s}
+  ZHIXU_WEB_FETCH_TLS_HANDSHAKE_TIMEOUT: ${ZHIXU_WEB_FETCH_TLS_HANDSHAKE_TIMEOUT:-10s}
+  ZHIXU_WEB_FETCH_MAX_REDIRECTS: ${ZHIXU_WEB_FETCH_MAX_REDIRECTS:-5}
+  ZHIXU_WEB_FETCH_MAX_URL_BYTES: ${ZHIXU_WEB_FETCH_MAX_URL_BYTES:-8192}
+  ZHIXU_WEB_FETCH_MAX_RESPONSE_HEADER_BYTES: ${ZHIXU_WEB_FETCH_MAX_RESPONSE_HEADER_BYTES:-65536}
+  ZHIXU_WEB_FETCH_MAX_BODY_BYTES: ${ZHIXU_WEB_FETCH_MAX_BODY_BYTES:-2097152}
+  ZHIXU_WEB_FETCH_MAX_TEXT_BYTES: ${ZHIXU_WEB_FETCH_MAX_TEXT_BYTES:-524288}
+  ZHIXU_WEB_FETCH_MAX_RESOLVED_IPS: ${ZHIXU_WEB_FETCH_MAX_RESOLVED_IPS:-16}
+  ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES: ${ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
+
 services:
   postgres:
     image: pgvector/pgvector:0.8.5-pg18-bookworm
@@ -59,7 +73,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     environment:
-      <<: [*embedding-environment, *chat-environment]
+      <<: [*embedding-environment, *chat-environment, *tool-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
       ZHIXU_HTTP_ADDR: 0.0.0.0:8080
       ZHIXU_DATABASE_HOST: postgres
@@ -88,7 +102,7 @@ services:
       dockerfile: deploy/Dockerfile
     entrypoint: ["/app/zhixu-worker"]
     environment:
-      <<: [*embedding-environment, *chat-environment]
+      <<: [*embedding-environment, *chat-environment, *tool-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
       ZHIXU_DATABASE_HOST: postgres
       ZHIXU_DATABASE_PORT: 5432

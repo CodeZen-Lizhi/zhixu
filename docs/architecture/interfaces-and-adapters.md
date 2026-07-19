@@ -283,23 +283,30 @@ M6-D 的 HTTP 分页不扩大 `SearchStore`：Application 每次读取规范请�
 - Worker 心跳。
 - 退避算法。
 
-## 9. ToolExecutor Interface
+## 9. Tool Registry、Execution 与 Receipt Interface
 
 职责：
 
-- 查找工具定义。
-- 校验权限和参数。
-- 执行工具。
-- 记录审计。
+- `ContractRegistry` 冻结精确 `name/version`、Schema decoder、Capability、Workflow binding、预算和安全策略；API 只依赖该接口。
+- `ExecutionRegistry` 只为 Worker 当前真实可用的 Contract 注入 typed Executor，Freeze 时缺失依赖即失败。
+- `WorkflowPolicyReader` 从持久 Definition/Run/Node/Attempt 解析服务端身份、精确 `allowed_tools`、Capability 和有效 lease。
+- `ExecutionService` 固定执行 Registry → Policy → Input → STARTED/REFUSED → Executor → Output/redaction → CAS terminal 流水线。
+- `ResultReceiptLoader` 只能读取已有权威 receipt 或重算无 IO 纯函数；不得重新执行写入、网络或其他副作用。无法恢复 canonical 输出时明确失败，不能返回空成功。
+- `TrustedWriteCallRepository` 只服务于 Safe Writeback 逻辑审计；读取历史 Call 前必须验证当前新 Attempt 的 Definition/Node/lease 资格，历史 Call 不改写原 Attempt。
 
 工具 Adapter：
 
-- SearchKnowledge。
-- ReadSource。
-- FetchWeb。
-- Git。
-- Index。
-- Evaluation。
+- Retrieval：SearchKnowledge、ReadSource、ValidateCitation。
+- Document：ReadDocument v1 目前仅有 Contract；缺少稳定 Document reader/receipt 时不注册 Executor。
+- Change Control：CalculateDiff；ApplyApprovedPatch/CreateGitCommit 仅为 trusted audit bridge，不执行第二次文件/Git 副作用。
+- Workspace/Git：ReadGitStatus，使用固定 Git Inspector，不接受任意 argv、cwd、env 或 pathspec。
+- Web：SSRF-safe FetchWebPage Adapter 已有安全 Contract，但持久 Web Policy 未接线前生产不注册。
+- Index/Evaluation：v1 Contract 存在；真实版本化 Application/receipt/Workflow 缺失时保持 unavailable。
+
+Composition Root 必须保证 API/Worker 共享同一冻结 Contract catalog；领域模块不读取 Tool 配置，也不直接创建数据库、HTTP、文件或 Git 客户端。
+M6-03 的生产持久 Tool Definition 仅组合 `ReadSource`、`ValidateCitation`、`ReadGitStatus`；Agent Request 先转换为
+不含模型 `reason` 的安全 invocation。内容型 Search/Diff request 只有 typed Adapter，不进入持久 Workflow，避免
+raw query/before/after 进入 Node input。
 
 ## 10. ReviewScheduler Interface
 

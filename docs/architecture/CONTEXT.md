@@ -161,8 +161,9 @@ Evidence 或原始响应。
 _Avoid_: Model Run、Tool Call、自动重试
 
 **Tool Call**:
-Agent 或 Workflow 对已注册工具的一次受控调用。
-_Avoid_: 任意函数调用、模型文本指令
+Agent 或 Workflow 对精确版本 Tool Contract 的一次受控调用；绑定服务端 Workspace/Run/Node/Attempt、Capability、
+Schema、状态和稳定 receipt。`workflow.tool_call` 不保存 raw Prompt、参数/输出或 Credential。
+_Avoid_: 任意函数调用、模型文本指令、普通日志、Write Authorization
 
 **Memory**:
 用户确认的长期偏好，或具有生命周期的任务情景信息。

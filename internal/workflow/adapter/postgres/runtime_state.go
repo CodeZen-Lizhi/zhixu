@@ -51,6 +51,17 @@ func (r *RuntimeRepository) Claim(ctx context.Context, command application.Claim
 	if err != nil {
 		return application.ClaimResult{}, classify(err, "WORKFLOW_RUN_QUERY_FAILED")
 	}
+	definition, err := scanClaimDefinition(tx.QueryRow(ctx, `SELECT id::text,workspace_id::text,key,version,graph,created_at FROM workflow.definition WHERE id=$1`, string(run.DefinitionID)))
+	if err != nil {
+		var classified *foundation.Error
+		if errors.As(err, &classified) {
+			return application.ClaimResult{}, err
+		}
+		return application.ClaimResult{}, classify(err, "WORKFLOW_DEFINITION_QUERY_FAILED")
+	}
+	if definition.ID != run.DefinitionID || definition.WorkspaceID != run.WorkspaceID {
+		return application.ClaimResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_DEFINITION_BINDING_INVALID", false, errors.New("workflow run definition binding differs"))
+	}
 	node, err := scanRuntimeNode(tx.QueryRow(ctx, `SELECT `+runtimeNodeColumns+` FROM workflow.node_run WHERE id=$1 FOR UPDATE`, string(command.NodeRunID)))
 	if err != nil {
 		return application.ClaimResult{}, classify(err, "WORKFLOW_NODE_QUERY_FAILED")
@@ -62,7 +73,7 @@ func (r *RuntimeRepository) Claim(ctx context.Context, command application.Claim
 		return application.ClaimResult{}, queryErr
 	} else if found {
 		if existing.Status == domain.AttemptStatusRunning && existing.LeaseOwner == command.LeaseOwner && node.Status == domain.NodeStatusRunning && existing.LeaseUntil.After(now) && node.LeaseUntil != nil && node.LeaseUntil.After(now) {
-			return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionClaimed, Run: run, Node: node, Attempt: existing, ObservedNodeKind: node.NodeType})
+			return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionClaimed, Definition: definition, Run: run, Node: node, Attempt: existing, ObservedNodeKind: node.NodeType})
 		}
 		if existing.Status != domain.AttemptStatusRunning || existing.LeaseUntil.After(now) {
 			return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale, ObservedNodeKind: node.NodeType, DuplicateDelivery: true})
@@ -143,7 +154,33 @@ VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,0),$8,$9,$10,'running',$11,$11)`, string(atte
 	if err != nil {
 		return application.ClaimResult{}, classify(err, "WORKFLOW_ATTEMPT_QUERY_FAILED")
 	}
-	return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionClaimed, Run: run, Node: node, Attempt: attempt, ObservedNodeKind: node.NodeType, DuplicateDelivery: leaseReclaimed, LeaseReclaimed: leaseReclaimed})
+	return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionClaimed, Definition: definition, Run: run, Node: node, Attempt: attempt, ObservedNodeKind: node.NodeType, DuplicateDelivery: leaseReclaimed, LeaseReclaimed: leaseReclaimed})
+}
+
+func scanClaimDefinition(row pgx.Row) (domain.Definition, error) {
+	var definition domain.Definition
+	var id, workspaceID string
+	var graphJSON []byte
+	if err := row.Scan(&id, &workspaceID, &definition.Key, &definition.Version, &graphJSON, &definition.CreatedAt); err != nil {
+		return domain.Definition{}, err
+	}
+	graph, err := application.DecodeCanonicalGraph(graphJSON)
+	if err != nil {
+		return domain.Definition{}, err
+	}
+	canonicalGraph, err := json.Marshal(graph)
+	if err != nil {
+		return domain.Definition{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_DEFINITION_GRAPH_INVALID", false, err)
+	}
+	graphHash, err := application.ComputeCanonicalGraphHash(graph)
+	if err != nil {
+		return domain.Definition{}, err
+	}
+	definition.ID = foundation.ID(id)
+	definition.WorkspaceID = foundation.ID(workspaceID)
+	definition.Graph = canonicalGraph
+	definition.GraphHash = graphHash
+	return definition, nil
 }
 
 func commitClaim(ctx context.Context, tx pgx.Tx, result application.ClaimResult) (application.ClaimResult, error) {

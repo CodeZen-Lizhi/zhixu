@@ -229,7 +229,7 @@ func validModelRunCompletionTime(completedAt *time.Time, updatedAt time.Time) bo
 }
 
 func validSuccessfulResultType(value string) bool {
-	return value == ResultTypeRelationAssessment || value == ResultTypeRAGAnswer || value == ResultTypeFaithfulnessReview
+	return value == ResultTypeRelationAssessment || value == ResultTypeRAGAnswer || value == ResultTypeFaithfulnessReview || value == ResultTypeToolRequest
 }
 
 func canonicalErrorCode(value string) bool {

@@ -165,6 +165,18 @@ Worker 运行参数：
 | `ZHIXU_REINDEX_DISPATCH_ERROR_BACKOFF` | `5s` | Dispatcher/业务重试退避，最大 `1m` |
 | `ZHIXU_REINDEX_LEASE_DURATION` | `2m` | Reindex Delivery DB-time lease |
 | `ZHIXU_REINDEX_HEARTBEAT_INTERVAL` | `30s` | 必须小于 Reindex lease |
+| `ZHIXU_TOOL_RUNTIME_MODE` | `disabled` | Compose 模板默认关闭；仓库 `.env.example` 为本地 Tool smoke 显式启用。启用时 API/Worker 必须共享冻结 Contract 且 Worker真实 Executor/Workflow 全部可达 |
+| `ZHIXU_WEB_FETCH_MODE` | `disabled` | 默认关闭；持久 Workspace/Workflow Web Policy 未接线时显式 `enabled` 也必须 fail closed |
+| `ZHIXU_WEB_FETCH_TIMEOUT` | `30s` | 每次 Fetch 总 deadline，包含逐跳解析、TLS、Header 与 Body |
+| `ZHIXU_WEB_FETCH_RESPONSE_HEADER_TIMEOUT` | `10s` | 响应 Header 上限时间 |
+| `ZHIXU_WEB_FETCH_TLS_HANDSHAKE_TIMEOUT` | `10s` | TLS 握手上限时间 |
+| `ZHIXU_WEB_FETCH_MAX_REDIRECTS` | `5` | 每一跳重新执行 URL/DNS/IP 安全校验 |
+| `ZHIXU_WEB_FETCH_MAX_URL_BYTES` | `8192` | 输入 URL 字节上限；禁止 userinfo、opaque URL、非法 host/port |
+| `ZHIXU_WEB_FETCH_MAX_RESPONSE_HEADER_BYTES` | `65536` | 响应 Header 累计上限 |
+| `ZHIXU_WEB_FETCH_MAX_BODY_BYTES` | `2097152` | 解压后 Body 读取上限，不信任 Content-Length |
+| `ZHIXU_WEB_FETCH_MAX_TEXT_BYTES` | `524288` | HTML parser 输出受控文本上限 |
+| `ZHIXU_WEB_FETCH_MAX_RESOLVED_IPS` | `16` | 单跳 DNS 地址上限；任一禁止地址使整跳拒绝 |
+| `ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES` | `text/plain,text/html` | 固定 Content-Type allowlist，不接受响应自行扩大 |
 | `ZHIXU_EMBEDDING_PROVIDER` | `disabled` | `disabled/openai-compatible/ollama`；显式启用后新 Reindex 才构建向量 |
 | `ZHIXU_EMBEDDING_BASE_URL` | 无 | 启用时必填；禁止 userinfo/query/fragment，OpenAI-compatible 仅 HTTPS，Ollama 仅 loopback 可用 HTTP |
 | `ZHIXU_EMBEDDING_API_KEY` | 无 | 仅 `openai-compatible` 必填；`ollama` 必须为空 |
@@ -212,6 +224,11 @@ Chat 配置同样由 Configured Factory 唯一解释。`disabled` 不读取 Endp
 每个 Model Run 固定 generation/retrieval 基线，每条 Model Call 固定该次实际 Adapter/Model/Profile/Prompt/Schema
 版本和 max output tokens；Provider 不在 Adapter 内自动重试或静默切换模型。
 Compose 的共享 Chat 环境块同时注入 API 与 Worker，为 M6-04 API 接线保留同一配置语义。
+
+Tool Runtime 同样由 API/Worker 共享配置解释：API 只验证/冻结 Contract 和可启动 Definition，Worker 才注入真实 Executor。
+`disabled` 不构造普通 Tool ExecutionService或可启动 Tool Definition，Tool capability 明确 unavailable但进程仍可 ready；Safe Writeback trusted audit 仍必须可用。`enabled` 时缺 Contract、Executor、
+Repository、Workflow Node 或 Retrieval/Git 依赖均 readiness fail closed。Web Fetch 的配置预算已存在，但在持久 Web Policy 与
+Executor wrapper 完成前不能因 `ZHIXU_WEB_FETCH_MODE=enabled` 而访问 DNS 或网络。
 
 API 与 Worker 必须通过同一 Configured Embedder Factory 解释上述配置，Compose 使用共享环境配置块向
 两个进程注入完全相同的 Provider/Model/Dimensions/Normalization/Distance/limits。Worker 用于构建
@@ -317,6 +334,34 @@ M6-D 归档与后续发布候选必须额外执行仓库锁定的 Compose Search
 本任务已独立通过真实 PostgreSQL HTTP integration、River fault smoke 与 Compose API smoke：Compose
 黑盒证明部署契约，PostgreSQL HTTP 证明 Workspace/SQL/Evidence 边界，River fault smoke 证明
 response-loss 下唯一 Activation/Completion。后续发布候选仍必须重复执行；这不代表最终全仓门禁已完成。
+
+### 15.3 M6-03 Tool Runtime 发布门禁
+
+执行：
+
+```bash
+make compose-tool-smoke
+```
+
+该 target 使用唯一 Compose project、随机数据库 Credential 和临时 Git Workspace，显式启用 Tool Runtime、关闭
+Web Fetch/Chat/Embedding，构建并启动真实 API/Worker/Migrate/PostgreSQL 镜像，检查 API/Worker readiness；随后测试
+容器只通过 RuntimeRepository 投递生产 `agent-rag` Definition 的 `ReadGitStatus` Job 并观察数据库，不构造或启动第二个
+Worker。Job 必须由 Compose 内 `/app/zhixu-worker` 完成，结果包含 untrusted summary 且只产生一条 Tool Call。
+
+独立真实 PostgreSQL/River integration `TestPersistedWorkflowRiverToolRequestExecutesRefusesAndReplays` 继续验证通用 Node
+Executor 的 Prompt Injection REFUSED、同 Attempt completion response-loss canonical replay 和 Executor 次数；其中
+CalculateDiff 只用于 disposable test Definition，不表示内容型 Diff request 已进入生产持久 Tool 目录。成功或失败都删除
+volume 与临时目录。
+
+Compose target 还会在同一一次性数据库上执行 Safe Writeback 的 response-loss fault recovery 与两条 Tool audit 断言。
+在 Compose 外部使用已迁移的一次性 PostgreSQL 时，可执行：
+
+```bash
+ZHIXU_TEST_DATABASE_URL='postgres://...' make tool-integration
+```
+
+该 target 在 URL 缺失时直接失败，避免把集成测试 SKIP 误报为通过。这个 smoke 不表示 Web Fetch 已启用，也不替代
+SSRF/命令/路径安全 suite 或 M10 Auth/通用 Audit；仅 readiness 或 `docker compose config` 不能作为 Tool 业务闭环证据。
 
 ## 16. 不采用
 

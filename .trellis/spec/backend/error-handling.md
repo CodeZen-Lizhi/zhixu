@@ -408,3 +408,13 @@ Correct: Semantic capability unavailable 返回稳定 503；只有 Hybrid 的受
 Wrong: evidence miss 根据“跨 workspace”或“span 不存在”返回不同 code/details。
 Correct: 所有不可见绑定统一 RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND。
 ```
+
+## M6-03 Tool Error Contract
+
+- Registry/Contract/Executor 缺失必须返回稳定 DependencyUnavailable；API 不注入 Fake，Worker enabled 时缺真实 Executor/Workflow/依赖 readiness fail closed。
+- Tool Request/Input/Output Schema 错误为 InvalidInput，且 Executor 调用数为 0；输出错误不能发布部分结果或把空对象记为成功。
+- Workflow Definition/Run/Node/Attempt/lease 漂移返回 `TOOL_CONTEXT_STALE`；Permission、exact allowlist 和 Workflow binding 使用独立稳定错误，不互相降级。
+- 成功 Tool Call 的 replay 只有在 `ResultReceiptLoader` 能读取权威 receipt 或重算无 IO 纯函数时才返回；不得重新执行网络/写入。无权威 Search receipt 返回 `TOOL_SEARCH_KNOWLEDGE_RECEIPT_UNAVAILABLE`，不能空成功。
+- 副作用结果无法证明时只允许 UNKNOWN/ManualRecoveryRequired，不自动重试或标记成功。
+- Safe Writeback `RequireStarted` 只把真正 NotFound 映射为 `TOOL_TRUSTED_WRITE_AUDIT_MISSING`；ContextStale、Permission 和 retryable DB 错误必须保留原分类，防止 lease-loss 被伪装成缺审计。
+- Web Fetch policy 未持久接线时配置 enabled 返回 `WORKER_WEB_FETCH_POLICY_UNAVAILABLE`，且不得开始 DNS/Dial。

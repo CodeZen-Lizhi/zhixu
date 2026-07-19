@@ -2,6 +2,7 @@ package application_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -19,6 +20,10 @@ import (
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
+	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
+	toolchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/changecontrol"
+	toolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
+	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	"github.com/jackc/pgx/v5"
@@ -57,7 +62,13 @@ func TestSafeWritebackWorkflowNodePostgreSQLGitFilesystemSmoke(t *testing.T) {
 		}
 		return id
 	}
-	workspaceID, definitionID, runID, nodeID := nextID(), nextID(), nextID(), nextID()
+	workspaceID, definitionID, runID, nodeID, attemptID := nextID(), nextID(), nextID(), nextID(), nextID()
+	registeredDefinition := changecontrolworkflow.RegisteredDefinition()
+	resumeIdentity := application.WritebackResumeIdentity{
+		WorkspaceID: workspaceID, DefinitionID: definitionID, DefinitionVersion: registeredDefinition.Version, DefinitionHash: registeredDefinition.GraphHash,
+		WorkflowRunID: runID, NodeKey: changecontrolworkflow.SafeWritebackNodeKey, NodeRunID: nodeID, NodeAttemptID: attemptID,
+		LeaseOwner: "smoke-worker", LeaseFence: 1,
+	}
 	root := t.TempDir()
 	targetPath := "docs/safe-writeback.md"
 	baseContent := []byte("# Safe Writeback\n\nbase\n")
@@ -84,20 +95,34 @@ func TestSafeWritebackWorkflowNodePostgreSQLGitFilesystemSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	databaseNow = databaseNow.UTC()
+	// 测试事务内临时释放“全库唯一 active workspace”约束，结束时随事务回滚。
+	if _, err := tx.Exec(ctx, `UPDATE core.workspace SET status='smoke_inactive',version=version+1,updated_at=$1 WHERE status='active'`, databaseNow); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := workspaceRepository.CreateWorkspace(ctx, workspacedomain.Workspace{
-		ID: workspaceID, Name: "Safe Writeback Smoke", RootPath: root,
+		ID: workspaceID, Name: "Safe Writeback Smoke " + string(workspaceID), RootPath: root,
 		Git:    workspacedomain.GitBaseline{RepositoryPath: root, Branch: "main", Head: baseGitHead, CheckedAt: databaseNow},
 		Status: workspacedomain.WorkspaceStatusActive, Version: 1, CreatedAt: databaseNow, UpdatedAt: databaseNow,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,1,'{}',$4)`, string(definitionID), string(workspaceID), "safe-writeback-smoke-"+string(definitionID), databaseNow); err != nil {
+	graph, err := json.Marshal(registeredDefinition.Graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,$4,$5,$6)`, string(definitionID), string(workspaceID), registeredDefinition.Key, registeredDefinition.Version, graph, databaseNow); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(runID), string(workspaceID), string(definitionID), databaseNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,lease_owner,lease_until,version,created_at,updated_at) VALUES($1,$2,'safe-writeback','side_effect','running',1,'{}','smoke-worker',$3,1,$4,$4)`, string(nodeID), string(runID), databaseNow.Add(10*time.Minute), databaseNow); err != nil {
+	leaseUntil := databaseNow.Add(10 * time.Minute)
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,idempotency_key,input_schema_version,output_schema_version,dispatch_no,lease_owner,lease_until,version,created_at,updated_at)
+		VALUES($1,$2,$3,$4,'running',1,'{}',$5,1,1,1,'smoke-worker',$6,2,$7,$7)`, string(nodeID), string(runID), changecontrolworkflow.SafeWritebackNodeKey, changecontrolworkflow.SafeWritebackNodeKind, "safe-writeback-smoke-node", leaseUntil, databaseNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_attempt(id,node_run_id,attempt_no,dispatch_no,retry_no,delivery_id,lease_owner,lease_until,status,started_at,heartbeat_at)
+		VALUES($1,$2,1,1,0,$3,'smoke-worker',$4,'running',$5,$5)`, string(attemptID), string(nodeID), "safe-writeback-smoke-delivery", leaseUntil, databaseNow); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,6 +180,31 @@ func TestSafeWritebackWorkflowNodePostgreSQLGitFilesystemSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	contracts, err := toolcatalog.Contracts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractRegistry := toolsapplication.NewContractRegistry()
+	for _, contract := range contracts {
+		if err := contractRegistry.RegisterContract(contract); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := contractRegistry.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	toolRepository, err := toolpostgres.NewRepository(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditService, err := toolsapplication.NewTrustedWriteAuditService(contractRegistry, toolRepository, ids, foundation.FixedClock{Value: databaseNow.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditRecorder, err := toolchangecontrol.NewWritebackAuditRecorder(auditService)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writebackService, err := application.NewWritebackService(application.WritebackServiceDependencies{
 		Repository: &smokeFaultRepository{
 			WritebackSagaRepository: changeRepository,
@@ -163,7 +213,7 @@ func TestSafeWritebackWorkflowNodePostgreSQLGitFilesystemSmoke(t *testing.T) {
 			losePublishResponse:     true,
 			loseCleanupResponse:     true,
 		},
-		Workspace: workspaceStore, Git: gitRepository, IDs: ids, Clock: foundation.FixedClock{Value: databaseNow.Add(time.Minute)},
+		Workspace: workspaceStore, Git: gitRepository, Audit: auditRecorder, IDs: ids, Clock: foundation.FixedClock{Value: databaseNow.Add(time.Minute)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -193,23 +243,23 @@ func TestSafeWritebackWorkflowNodePostgreSQLGitFilesystemSmoke(t *testing.T) {
 		WorkflowRunID: runID,
 		NodeRunID:     nodeID,
 	}
-	if _, err := node.Execute(ctx, nodeInput, "smoke-worker"); !hasSmokeErrorCode(err, "SMOKE_FILE_APPLIED_CHECKPOINT_LOST") {
+	if _, err := node.Execute(ctx, nodeInput, resumeIdentity); !hasSmokeErrorCode(err, "SMOKE_FILE_APPLIED_CHECKPOINT_LOST") {
 		t.Fatalf("file checkpoint crash err=%v", err)
 	}
 	assertSmokeExecutionState(t, ctx, tx, begin.ExecutionID, domain.WritebackStatusFilePrepared, false)
-	if _, err := node.Execute(ctx, nodeInput, "smoke-worker"); !hasSmokeErrorCode(err, "SMOKE_GIT_COMMITTED_CHECKPOINT_LOST") {
+	if _, err := node.Execute(ctx, nodeInput, resumeIdentity); !hasSmokeErrorCode(err, "SMOKE_GIT_COMMITTED_CHECKPOINT_LOST") {
 		t.Fatalf("git checkpoint crash err=%v", err)
 	}
 	assertSmokeExecutionState(t, ctx, tx, begin.ExecutionID, domain.WritebackStatusGitPrepared, false)
-	if _, err := node.Execute(ctx, nodeInput, "smoke-worker"); !hasSmokeErrorCode(err, "SMOKE_CLEANUP_RESPONSE_LOST") {
+	if _, err := node.Execute(ctx, nodeInput, resumeIdentity); !hasSmokeErrorCode(err, "SMOKE_CLEANUP_RESPONSE_LOST") {
 		t.Fatalf("cleanup response loss err=%v", err)
 	}
 	assertSmokeExecutionState(t, ctx, tx, begin.ExecutionID, domain.WritebackStatusVerifying, true)
-	result, err := node.Execute(ctx, nodeInput, "smoke-worker")
+	result, err := node.Execute(ctx, nodeInput, resumeIdentity)
 	if err != nil || result.Status != domain.WritebackStatusVerifying || result.IndexStatus != application.WritebackIndexStatusPending || result.GitCommit == "" {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
-	replayedResult, err := node.Execute(ctx, nodeInput, "smoke-worker")
+	replayedResult, err := node.Execute(ctx, nodeInput, resumeIdentity)
 	if err != nil || replayedResult.GitCommit != result.GitCommit || replayedResult != result {
 		t.Fatalf("replayed result=%#v err=%v", replayedResult, err)
 	}
@@ -230,6 +280,8 @@ func TestSafeWritebackWorkflowNodePostgreSQLGitFilesystemSmoke(t *testing.T) {
 	}
 	assertSmokeCount(t, ctx, tx, `SELECT count(*) FROM change_control.proposal_commit WHERE writeback_execution_id=$1`, 1, string(begin.ExecutionID))
 	assertSmokeCount(t, ctx, tx, `SELECT count(*) FROM workflow.outbox_event WHERE idempotency_key=$1`, 1, domain.ExpectedWritebackReindexKey(domain.WritebackExecution{WorkspaceID: workspaceID, ProposalID: created.Proposal.ID, RevisionID: created.Proposal.Revision.ID, GitCommit: result.GitCommit}))
+	assertSmokeCount(t, ctx, tx, `SELECT count(*) FROM workflow.tool_call WHERE workflow_run_id=$1 AND node_run_id=$2 AND status='SUCCEEDED' AND side_effect_type='writeback_execution' AND side_effect_id=$3`, 2, string(runID), string(nodeID), string(begin.ExecutionID))
+	assertSmokeCount(t, ctx, tx, `SELECT count(*) FROM workflow.tool_call WHERE node_attempt_id=$1 AND call_no IN (1,2)`, 2, string(attemptID))
 	assertSmokeCount(t, ctx, tx, `SELECT count(*) FROM change_control.tool_authorization WHERE id IN ($1,$2) AND status='consumed'`, 2, string(writeAuthorization.Authorization.ID), string(gitAuthorization.Authorization.ID))
 	assertSmokeCount(t, ctx, tx, `SELECT count(*) FROM change_control.tool_authorization WHERE token_hash IN ($1,$2)`, 0, writeAuthorization.Credential, gitAuthorization.Credential)
 	assertSmokeCount(t, ctx, tx, `SELECT count(*) FROM change_control.writeback_execution e WHERE to_jsonb(e)::text LIKE '%' || $1 || '%' OR to_jsonb(e)::text LIKE '%' || $2 || '%'`, 0, writeAuthorization.Credential, gitAuthorization.Credential)

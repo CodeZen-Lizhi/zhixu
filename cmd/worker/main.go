@@ -18,6 +18,7 @@ import (
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
@@ -42,6 +43,14 @@ import (
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	retrievalruntime "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/runtime"
+	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
+	toolchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/changecontrol"
+	toolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
+	toolretrieval "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/retrieval"
+	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
+	toolworkspace "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workspace"
+	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
+	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -60,6 +69,7 @@ const (
 
 type workerComponents struct {
 	safeWriteback   *changecontrolworkflow.Node
+	tools           toolRuntimeComponents
 	agentCapability agentCapabilityStatus
 	reindexWorker   *reindexriver.Worker
 	dispatcher      *retrievalruntime.Runner
@@ -67,6 +77,18 @@ type workerComponents struct {
 	definitions     *workflowapplication.DefinitionRegistry
 	executors       *workflowapplication.ExecutorRegistry
 	fatalInvariants <-chan error
+}
+
+type toolRuntimeComponents struct {
+	contracts      *toolsapplication.Registry
+	executions     *toolsapplication.Registry
+	execution      *toolsapplication.ExecutionService
+	repository     *toolpostgres.Repository
+	writebackAudit *toolchangecontrol.WritebackAuditRecorder
+	workflow       *toolworkflow.Executor
+	definition     *workflowdomain.RegisteredDefinition
+	enabledRefs    []toolsdomain.ToolRef
+	runtimeEnabled bool
 }
 
 type agentCapabilityStatus struct {
@@ -155,6 +177,10 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetDefinitionsOK(components.definitions != nil)
 	readiness.SetExecutorsOK(components.executors != nil)
 	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil)
+	toolEnabled := cfg.ToolRuntimeMode == config.ToolModeEnabled
+	toolContractsOK, toolExecutorsOK, toolDependenciesOK := toolWorkflowReadiness(components)
+	readiness.SetToolRuntimeState(toolEnabled, toolContractsOK, toolExecutorsOK, toolDependenciesOK)
+	readiness.SetWebFetchState(cfg.WebFetchMode == config.ToolModeEnabled, false)
 	health, err := startWorkerHealthServer(cfg.WorkerHealthAddr, workflowhealth.NewHandler(readiness))
 	if err != nil {
 		logger.Error("worker health server could not be started", "error_code", "WORKER_HEALTH_START_FAILED")
@@ -181,7 +207,8 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetReindexDispatcherStarted(components.dispatcher.Started())
 	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil,
 		"agent_available", components.agentCapability.available, "agent_capability_code", components.agentCapability.code,
-		"reindex_dispatcher", components.dispatcher.Started())
+		"tool_runtime_enabled", components.tools.runtimeEnabled, "tool_executor_count", len(components.tools.enabledRefs),
+		"web_fetch_enabled", cfg.WebFetchMode == config.ToolModeEnabled, "reindex_dispatcher", components.dispatcher.Started())
 
 	ticker := time.NewTicker(cfg.HealthInterval)
 	defer ticker.Stop()
@@ -293,18 +320,22 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
+	targetReader, err := changecontrollocalfs.NewReader(workspaceRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	toolComponents, err := newToolRuntimeComponents(db, cfg, workspaceRepository, gitRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
 	service, err := changecontrolapplication.NewWritebackService(changecontrolapplication.WritebackServiceDependencies{
-		Repository: writebackRepository, Workspace: workspaceStore, Git: gitRepository,
+		Repository: writebackRepository, Workspace: workspaceStore, Git: gitRepository, Audit: toolComponents.writebackAudit,
 		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
 	})
 	if err != nil {
 		return workerComponents{}, err
 	}
 	node, err := changecontrolworkflow.NewNode(service)
-	if err != nil {
-		return workerComponents{}, err
-	}
-	targetReader, err := changecontrollocalfs.NewReader(workspaceRepository)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -319,7 +350,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
-	catalog, err := workflowapplication.NewValidationCatalog([]int{1}, []workflowdomain.Permission{workflowdomain.PermissionWriteKnowledge, workflowdomain.PermissionGitWrite})
+	catalog, err := workflowapplication.NewValidationCatalog([]int{1}, capability.All())
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -339,10 +370,18 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 			return workerComponents{}, err
 		}
 	}
+	if toolComponents.runtimeEnabled {
+		if toolComponents.workflow == nil || toolComponents.definition == nil {
+			return workerComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_TOOL_EXECUTORS_UNAVAILABLE", false, errors.New("tool workflow executor or definition is unavailable"))
+		}
+		if err := executors.Register(toolworkflow.NodeKind, toolworkflow.InputSchemaVersion, toolComponents.workflow); err != nil {
+			return workerComponents{}, err
+		}
+	}
 	if err := executors.Freeze(); err != nil {
 		return workerComponents{}, err
 	}
-	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
+	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors, toolComponents.contracts)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -351,6 +390,11 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	}
 	if agentComponents.executor != nil {
 		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
+			return workerComponents{}, err
+		}
+	}
+	if toolComponents.runtimeEnabled {
+		if err := definitions.Register(*toolComponents.definition); err != nil {
 			return workerComponents{}, err
 		}
 	}
@@ -405,10 +449,166 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 		return workerComponents{}, err
 	}
 	return workerComponents{
-		safeWriteback: node, agentCapability: agentComponents.capability,
+		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability,
 		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
 		runtimeClient: runtimeClient, definitions: definitions, executors: executors, fatalInvariants: fatalInvariants,
 	}, nil
+}
+
+func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, gitInspector *gitcli.WritebackClient) (toolRuntimeComponents, error) {
+	if err := validateToolCompositionMode(cfg); err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	contracts, err := toolcatalog.NewFrozenContractRegistry()
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	repository, err := toolpostgres.NewRepository(db)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	auditService, err := toolsapplication.NewTrustedWriteAuditService(contracts, repository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	writebackAudit, err := toolchangecontrol.NewWritebackAuditRecorder(auditService)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	components := toolRuntimeComponents{contracts: contracts, repository: repository, writebackAudit: writebackAudit}
+	if cfg.ToolRuntimeMode == config.ToolModeDisabled {
+		return components, nil
+	}
+	if workspaceRepository == nil || gitInspector == nil {
+		return toolRuntimeComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_TOOL_DEPENDENCIES_UNAVAILABLE", false, errors.New("tool workspace dependencies are unavailable"))
+	}
+
+	searchRepository, err := retrievalpostgres.NewSearchRepository(db)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	artifactReader, err := retrievalworkspace.NewReader(workspaceRepository, filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}})
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	evidenceReference, err := retrievalapplication.NewEvidenceReferenceService(searchRepository, artifactReader)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	embedder, err := platformmodels.NewConfiguredEmbedder(cfg)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	searchService, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	knowledgeRepository, err := knowledgepostgres.NewRepository(db)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	eligibility, err := knowledgeapplication.NewEvidenceEligibilityService(knowledgeRepository)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	searchExecutor, err := toolretrieval.NewSearchKnowledgeExecutor(searchService)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	readSourceExecutor, err := toolretrieval.NewReadSourceExecutor(evidenceReference)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	citationExecutor, err := toolretrieval.NewValidateCitationExecutor(evidenceReference, eligibility)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	gitStatusExecutor, err := toolworkspace.NewReadGitStatusExecutor(gitInspector)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+
+	executionRegistry := toolsapplication.NewExecutionRegistry()
+	refs := enabledReadToolRefs()
+	enabled := []struct {
+		ref      toolsdomain.ToolRef
+		executor toolsapplication.Executor
+	}{
+		{refs[0], searchExecutor},
+		{refs[1], readSourceExecutor},
+		{refs[2], citationExecutor},
+		{refs[3], toolchangecontrol.NewCalculateDiffExecutor()},
+		{refs[4], gitStatusExecutor},
+	}
+	for _, item := range enabled {
+		contract, err := contracts.ResolveContract(item.ref)
+		if err != nil {
+			return toolRuntimeComponents{}, err
+		}
+		if err := executionRegistry.RegisterContract(contract); err != nil {
+			return toolRuntimeComponents{}, err
+		}
+		if err := executionRegistry.RegisterExecutor(item.ref, item.executor); err != nil {
+			return toolRuntimeComponents{}, err
+		}
+		components.enabledRefs = append(components.enabledRefs, item.ref)
+	}
+	if err := executionRegistry.Freeze(); err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	executionService, err := toolsapplication.NewExecutionService(executionRegistry, repository, repository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	components.executions = executionRegistry
+	components.execution = executionService
+	workflowExecutor, err := toolworkflow.NewExecutor(executionService)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	workflowDefinition, err := toolworkflow.NewProductionRegisteredDefinition(contracts)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	components.workflow = workflowExecutor
+	components.definition = &workflowDefinition
+	components.runtimeEnabled = true
+	return components, nil
+}
+
+func validateToolCompositionMode(cfg config.Config) error {
+	if cfg.WebFetchMode == config.ToolModeEnabled {
+		return foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_WEB_FETCH_POLICY_UNAVAILABLE", false, errors.New("persisted web fetch policy and executor wrapper are unavailable"))
+	}
+	return nil
+}
+
+func enabledReadToolRefs() []toolsdomain.ToolRef {
+	return []toolsdomain.ToolRef{
+		{Name: "SearchKnowledge", Version: 1},
+		{Name: "ReadSource", Version: 1},
+		{Name: "ValidateCitation", Version: 1},
+		{Name: "CalculateDiff", Version: 1},
+		{Name: "ReadGitStatus", Version: 1},
+	}
+}
+
+func toolWorkflowReadiness(components workerComponents) (bool, bool, bool) {
+	if !components.tools.runtimeEnabled {
+		return components.tools.contracts != nil, true, true
+	}
+	contractsOK := components.tools.contracts != nil
+	executorsOK := components.tools.executions != nil && components.tools.execution != nil && components.tools.workflow != nil && components.executors != nil
+	if executorsOK {
+		_, err := components.executors.Resolve(toolworkflow.NodeKind, toolworkflow.InputSchemaVersion)
+		executorsOK = err == nil
+	}
+	dependenciesOK := components.tools.repository != nil && components.tools.definition != nil && components.definitions != nil
+	if dependenciesOK {
+		definition, err := components.definitions.Resolve(toolworkflow.DefinitionKey, toolworkflow.DefinitionVersion)
+		dependenciesOK = err == nil && len(definition.Graph.Nodes) == 1 && definition.Graph.Nodes[0].Kind == toolworkflow.NodeKind
+	}
+	return contractsOK, executorsOK, dependenciesOK
 }
 
 type agentWorkflowComponents struct {

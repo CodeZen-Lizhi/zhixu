@@ -38,6 +38,16 @@ func TestReadinessTransitions(t *testing.T) {
 		t.Fatalf("stopped reindex dispatcher snapshot = %+v", got)
 	}
 	readiness.SetReindexDispatcherStarted(true)
+	readiness.SetToolRuntimeState(true, true, false, false)
+	if got := readiness.Snapshot(); got.Ready() || got.Code != CodeToolExecutorsUnavailable {
+		t.Fatalf("tool executor snapshot = %+v", got)
+	}
+	readiness.SetToolRuntimeState(true, true, true, true)
+	readiness.SetWebFetchState(true, false)
+	if got := readiness.Snapshot(); got.Ready() || got.Code != CodeWebFetchPolicyUnavailable {
+		t.Fatalf("web policy snapshot = %+v", got)
+	}
+	readiness.SetWebFetchState(false, false)
 
 	readiness.BeginShutdown()
 	if got := readiness.Snapshot(); got.Ready() || got.Code != CodeShuttingDown {
@@ -83,6 +93,8 @@ func TestReadinessConcurrentUpdatesAndSnapshots(t *testing.T) {
 	ready.SetDefinitionsOK(true)
 	ready.SetExecutorsOK(true)
 	ready.SetDependenciesOK(true)
+	ready.SetToolRuntimeState(false, false, false, false)
+	ready.SetWebFetchState(false, false)
 	ready.SetReindexDispatcherStarted(true)
 	if got := ready.Snapshot(); !got.Ready() || got.Code != CodeReady {
 		t.Fatalf("final snapshot = %+v", got)

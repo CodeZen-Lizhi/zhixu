@@ -16,6 +16,7 @@
 
 - 父任务 `.trellis/tasks/07-16-product-delivery/{prd,design,implement}.md` 的事实优先级高于正式 PRD、其他架构文档和当前代码。
 - 当前仓库没有 `internal/tools`、通用 Tool Registry、`workflow.tool_call` 表或 `FetchWebPage` Adapter；迁移最新为 `00018_agent_runtime.sql`。
+- 仓库现有 Reindex 只能由 River Worker 持有 `DeliveryLeaseSession` 后处理 Safe Writeback Delivery；不存在只凭 `reindex_delivery_id` 可安全同步执行的 Application seam。现有 `RegressionService` 是 Reindex 构建期结构校验，不是版本化 Dataset/Index Evaluation；仓库也没有 Evaluation Run 领域、持久化或 Workflow。因此 `RebuildIndex` 与 `RunRegressionEvaluation` v1 在 M6-03 保持 contract-only、生产显式 unavailable，不注册 Fake Executor；真实能力后续发布新 Tool 版本。
 - Workflow 已有冻结 Definition/Executor Registry，但 Node 只有 `required_permissions`，没有版本化 `allowed_tools`；Runtime ExecutionContext 也没有完整 Definition/Node policy 身份。
 - Agent v1 四类结构化输出不包含 Tool Request；OpenAI-Compatible Adapter 当前明确拒绝 Provider 原生 `tool_calls`。本任务新增独立版本化 Tool Request，不改变既有 v1 Schema，也不直接执行 Provider raw tool call。
 - M5-03 的 `change_control.tool_authorization` 和 M5-04 的双授权 Atomic Begin/Safe Writeback 是唯一写授权与文件/Git 副作用事实源；M6-03 只做普通 Capability、Tool allowlist、Schema、执行编排和 Tool Call 记录。
@@ -78,7 +79,9 @@
 
 - 11 个核心 Tool：`SearchKnowledge`、`ReadSource`、`ReadDocument`、`FetchWebPage`、`ValidateCitation`、`CalculateDiff`、`ReadGitStatus`、`ApplyApprovedPatch`、`CreateGitCommit`、`RebuildIndex`、`RunRegressionEvaluation`。
 - Search/Read/Citation 复用 Retrieval/Artifact/Evidence application seam；Diff 使用纯领域能力；Git Status 复用现有 Git Inspector；Rebuild/Evaluation 复用版本化 Retrieval/Workflow service；写工具复用 Change Control。
+- Rebuild/Evaluation 只有在对应版本化 Retrieval Maintenance / Evaluation Application seam、持久 receipt 和 Workflow 全部存在时才能注册 Executor；当前 v1 不把 River Processor、Reindex 结构回归或离线 fixture 冒充该 seam。
 - 无真实 Adapter、配置关闭或依赖不可用时 capability 明确 unavailable，Workflow Definition Freeze/Worker readiness fail closed；不得注册 Fake、返回空数组或把未配置记为 PASS。
+- 本期生产持久 Tool Workflow 先把 strict Agent Tool Request 转换为不含模型 `reason` 的安全 invocation，只暴露空参数或稳定 ID tuple 的 `ReadSource`、`ValidateCitation`、`ReadGitStatus`。`SearchKnowledge` 与 `CalculateDiff` typed Adapter 仍需完成测试，但其 query/before/after 是内容型 request；在 M6-04 建立不复制 raw 内容的 request receipt 或同 Attempt 执行 seam 前，不进入生产持久模型目录。
 - 至少一条真实 Workflow 集成覆盖 Agent Tool Request → Registry → 只读 Tool → Tool Call persistence → untrusted result；至少一条批准 Safe Writeback 集成证明逻辑写 Tool audit 不改变 Atomic Begin 和恢复语义。
 
 ### R9. Documentation, Compatibility And Delivery
@@ -90,25 +93,25 @@
 
 ## Acceptance Criteria
 
-- [ ] AC-T01：Registry 对 `name+version` 唯一注册，拒绝非法定义、重复、冻结后修改、未冻结解析、unknown schema/capability/workflow/executor，并证明深拷贝与并发读取无 race。
-- [ ] AC-T02：11 个核心 Tool 均有 Definition contract；模型可见目录只包含当前 Worker 有真实 Executor、配置启用且 Workflow/Node 允许的精确版本。
-- [ ] AC-T03：Tool Request/typed input/output 覆盖 invalid UTF-8、duplicate、unknown、trailing、null、type/enum 和所有 size/depth limits；失败前 Executor 调用数为 0，输出失败不发布部分结果。
-- [ ] AC-T04：Workflow `allowed_tools`、required capability、Tool→Workflow binding、Workspace/Run/Node/Attempt/lease 全部来自持久事实并交叉校验；空 allowlist 拒绝全部。
-- [ ] AC-T05：七项 Capability permission matrix 通过；`ADMIN_MAINTENANCE` 被拒绝，索引维护与评测权限不可互相替代。
-- [ ] AC-T06：模型或 Source 伪造 Workspace、Capability、Approval、Credential、endpoint、timeout、path、command、Git args 和未注册工具全部 fail closed，并留下无敏感信息的稳定拒绝记录。
-- [ ] AC-T07：ApplyApprovedPatch/CreateGitCommit 不可由普通 Agent 分别执行；合法写回仍只原子消费现有双授权一次，所有绑定错误均零副作用。
-- [ ] AC-T08：`workflow.tool_call` 覆盖 STARTED/REFUSED/CAS terminal、并发 replay/conflict、crash/response-loss → UNKNOWN、Workspace/FK/lease/immutability 和有数据 guarded Down。
-- [ ] AC-T09：Tool Call/日志/Trace/错误 canary 证明不包含 Credential、Authorization、Cookie、raw Prompt、正文、绝对路径、URL secret 或 stderr；只保存受控摘要/hash/bytes/ref。
-- [ ] AC-T10：FetchWebPage 覆盖默认关闭、协议、所有禁止地址类别、mixed IP、DNS rebinding、public→private redirect、redirect loop/limit、TLS SNI、环境代理禁用和敏感 URL 脱敏。
-- [ ] AC-T11：Web Fetch 覆盖 malformed Content-Type、gzip 解压后超限、chunked/Content-Length 超限、slow header/body、timeout/cancel、HTML script/style/prompt-injection，且不访问真实互联网。
-- [ ] AC-T12：命令/路径测试覆盖 shell 元字符、leading option、NUL、任意 executable/subcommand/env/cwd/path、绝对路径、穿越、symlink/TOCTOU 和输出超限；未注册命令不会执行。
-- [ ] AC-T13：同 idempotency key + 同完整 binding 只执行一次并重放 canonical receipt；不同 request/tool/context 冲突；有副作用 UNKNOWN 不自动重试。
-- [ ] AC-T14：真实 PostgreSQL/River 只读 Tool smoke 和批准 Safe Writeback Tool audit smoke 通过；不会重复文件、Commit、Mapping、Reindex Outbox 或终态。
-- [ ] AC-T15：API/Worker contract/executor 分离；Chat/Web/Tool disabled 时 readiness/capability 明确，生产无 Fake/空成功/静默 fallback。
-- [ ] AC-T16：升级检查证明无旧 `ADMIN_MAINTENANCE`，或已通过新 Definition Version 唯一迁移；旧不可变行未被修改。
-- [ ] AC-T17：定向 count/race、Schema fuzz、SSRF/command/path/output security suite、M5 回归、全仓 `go test -race ./...`、`go vet ./...`、`make test`、`go mod tidy -diff`、Docker/Compose Tool smoke 和 `git diff --check` 通过。
-- [ ] AC-T18：主 Agent 完成 Go、SQL、通用质量审查；独立只读 Agent从需求、权限、数据库、并发、安全和运行证据复验，P0/P1 与当前范围明确 P2 全部关闭。
-- [ ] AC-T19：正式 PRD、架构、数据库、测试、运行和 Trellis spec 与实际行为同步；未把 M6-04 RAG API/SSE 或 M10 Auth/通用 Audit 标记为完成。
+- [x] AC-T01：Registry 对 `name+version` 唯一注册，拒绝非法定义、重复、冻结后修改、未冻结解析、unknown schema/capability/workflow/executor，并证明深拷贝与并发读取无 race。
+- [x] AC-T02：11 个核心 Tool 均有 Definition contract；模型可见目录只包含当前 Worker 有真实 Executor、配置启用且 Workflow/Node 允许的精确版本。
+- [x] AC-T03：Tool Request/typed input/output 覆盖 invalid UTF-8、duplicate、unknown、trailing、null、type/enum 和所有 size/depth limits；失败前 Executor 调用数为 0，输出失败不发布部分结果。
+- [x] AC-T04：Workflow `allowed_tools`、required capability、Tool→Workflow binding、Workspace/Run/Node/Attempt/lease 全部来自持久事实并交叉校验；空 allowlist 拒绝全部。
+- [x] AC-T05：七项 Capability permission matrix 通过；`ADMIN_MAINTENANCE` 被拒绝，索引维护与评测权限不可互相替代。
+- [x] AC-T06：模型或 Source 伪造 Workspace、Capability、Approval、Credential、endpoint、timeout、path、command、Git args 和未注册工具全部 fail closed，并留下无敏感信息的稳定拒绝记录。
+- [x] AC-T07：ApplyApprovedPatch/CreateGitCommit 不可由普通 Agent 分别执行；合法写回仍只原子消费现有双授权一次，所有绑定错误均零副作用。
+- [x] AC-T08：`workflow.tool_call` 覆盖 STARTED/REFUSED/CAS terminal、并发 replay/conflict、crash/response-loss → UNKNOWN、Workspace/FK/lease/immutability 和有数据 guarded Down。
+- [x] AC-T09：Tool Call/日志/Trace/错误 canary 证明不包含 Credential、Authorization、Cookie、raw Prompt、正文、绝对路径、URL secret 或 stderr；只保存受控摘要/hash/bytes/ref。
+- [x] AC-T10：FetchWebPage 覆盖默认关闭、协议、所有禁止地址类别、mixed IP、DNS rebinding、public→private redirect、redirect loop/limit、TLS SNI、环境代理禁用和敏感 URL 脱敏。
+- [x] AC-T11：Web Fetch 覆盖 malformed Content-Type、gzip 解压后超限、chunked/Content-Length 超限、slow header/body、timeout/cancel、HTML script/style/prompt-injection，且不访问真实互联网。
+- [x] AC-T12：命令/路径测试覆盖 shell 元字符、leading option、NUL、任意 executable/subcommand/env/cwd/path、绝对路径、穿越、symlink/TOCTOU 和输出超限；未注册命令不会执行。
+- [x] AC-T13：同 idempotency key + 同完整 binding 只执行一次并重放 canonical receipt；不同 request/tool/context 冲突；有副作用 UNKNOWN 不自动重试。
+- [x] AC-T14：真实 PostgreSQL/River 只读 Tool smoke 和批准 Safe Writeback Tool audit smoke 通过；不会重复文件、Commit、Mapping、Reindex Outbox 或终态。
+- [x] AC-T15：API/Worker contract/executor 分离；Chat/Web/Tool disabled 时 readiness/capability 明确，生产无 Fake/空成功/静默 fallback。
+- [x] AC-T16：升级检查证明无旧 `ADMIN_MAINTENANCE`，或已通过新 Definition Version 唯一迁移；旧不可变行未被修改。
+- [x] AC-T17：定向 count/race、Schema fuzz、SSRF/command/path/output security suite、M5 回归、全仓 `go test -race ./...`、`go vet ./...`、`make test`、`go mod tidy -diff`、Docker/Compose Tool smoke 和 `git diff --check` 通过。
+- [x] AC-T18：主 Agent 完成 Go、SQL、通用质量审查；独立只读 Agent从需求、权限、数据库、并发、安全和运行证据复验，P0/P1 与当前范围明确 P2 全部关闭。
+- [x] AC-T19：正式 PRD、架构、数据库、测试、运行和 Trellis spec 与实际行为同步；未把 M6-04 RAG API/SSE 或 M10 Auth/通用 Audit 标记为完成。
 
 ## Out Of Scope
 

@@ -24,6 +24,8 @@ const (
 	sagaWriteAuthID  foundation.ID = "80000000-0000-4000-8000-000000000001"
 	sagaGitAuthID    foundation.ID = "90000000-0000-4000-8000-000000000001"
 	sagaSecondExecID foundation.ID = "10000000-0000-4000-8000-000000000002"
+	sagaDefinitionID foundation.ID = "a0000000-0000-4000-8000-000000000001"
+	sagaAttemptID    foundation.ID = "b0000000-0000-4000-8000-000000000001"
 	sagaTarget                     = "docs/safe-writeback.md"
 	sagaBaseHash                   = "1111111111111111111111111111111111111111111111111111111111111111"
 	sagaResultHash                 = "2222222222222222222222222222222222222222222222222222222222222222"
@@ -35,6 +37,28 @@ const (
 	sagaResultBlob                 = "dddddddddddddddddddddddddddddddddddddddd"
 	sagaLockToken                  = "5555555555555555555555555555555555555555555555555555555555555555"
 )
+
+type sagaAuditRecorder struct{}
+
+func (*sagaAuditRecorder) EnsureStarted(context.Context, WritebackResumeIdentity, domain.WritebackExecution, WritebackAuditStep) error {
+	return nil
+}
+
+func (*sagaAuditRecorder) RequireStarted(context.Context, WritebackResumeIdentity, domain.WritebackExecution, WritebackAuditStep) error {
+	return nil
+}
+
+func (*sagaAuditRecorder) RecordSucceeded(context.Context, WritebackResumeIdentity, domain.WritebackExecution, WritebackAuditStep) error {
+	return nil
+}
+
+func sagaResumeIdentity(owner string) WritebackResumeIdentity {
+	return WritebackResumeIdentity{
+		WorkspaceID: sagaWorkspaceID, DefinitionID: sagaDefinitionID, DefinitionVersion: 1,
+		DefinitionHash: strings.Repeat("a", 64), WorkflowRunID: sagaRunID, NodeKey: "safe-writeback",
+		NodeRunID: sagaNodeID, NodeAttemptID: sagaAttemptID, LeaseOwner: owner, LeaseFence: 1,
+	}
+}
 
 type sagaIDGenerator struct {
 	ids []foundation.ID
@@ -334,7 +358,7 @@ func TestWritebackResumeCompletesStrictSagaAndCleanup(t *testing.T) {
 	workspace := &sagaWorkspace{lock: lock}
 	git := &sagaGit{}
 	service := newSagaService(t, repository, workspace, git, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
-	result, err := service.Resume(context.Background(), sagaExecutionID, "worker-a")
+	result, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +393,7 @@ func TestWritebackResumeMapsResponseLossIntentByStatus(t *testing.T) {
 			workspace := &sagaWorkspace{lock: targetLockFixture(t)}
 			service := newSagaService(t, repository, workspace, &sagaGit{}, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
 
-			_, _ = service.Resume(context.Background(), sagaExecutionID, "worker-a")
+			_, _ = service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
 			if len(workspace.resumes) == 0 {
 				t.Fatal("resume intent was not sent to workspace")
 			}
@@ -391,10 +415,10 @@ func TestWritebackCommitCheckpointCrashRecoversByLookupWithoutSecondCommit(t *te
 	lock := targetLockFixture(t)
 	git := &sagaGit{}
 	service := newSagaService(t, repository, &sagaWorkspace{lock: lock}, git, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
-	if _, err := service.Resume(context.Background(), sagaExecutionID, "worker-a"); err == nil {
+	if _, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a")); err == nil {
 		t.Fatal("checkpoint failure was not returned")
 	}
-	result, err := service.Resume(context.Background(), sagaExecutionID, "worker-a")
+	result, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
 	if err != nil || result.Status != domain.WritebackStatusVerifying || git.commitCalls != 1 || git.findCalls < 2 {
 		t.Fatalf("result=%#v err=%v commit=%d find=%d", result, err, git.commitCalls, git.findCalls)
 	}
@@ -405,7 +429,7 @@ func TestWritebackCommitUnknownMovesToManualWithoutFileRestore(t *testing.T) {
 	lock := targetLockFixture(t)
 	git := &sagaGit{commitErr: foundation.NewError(foundation.ErrorManualRecoveryRequired, "GIT_COMMIT_RESULT_UNKNOWN", false, domain.ErrGitManualRecoveryRequired)}
 	service := newSagaService(t, repository, &sagaWorkspace{lock: lock}, git, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
-	result, err := service.Resume(context.Background(), sagaExecutionID, "worker-a")
+	result, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
 	if err == nil || result.Status != domain.WritebackStatusManualRecovery || lock.restoreCalls != 0 || git.commitCalls != 1 {
 		t.Fatalf("result=%#v err=%v restore=%d commit=%d", result, err, lock.restoreCalls, git.commitCalls)
 	}
@@ -416,7 +440,7 @@ func TestWritebackCommitVersionConflictAfterLookupMissDoesNotRestoreFile(t *test
 	lock := targetLockFixture(t)
 	git := &sagaGit{commitErr: foundation.NewError(foundation.ErrorVersionConflict, "GIT_HEAD_CONFLICT", false, domain.ErrGitVersionConflict)}
 	service := newSagaService(t, repository, &sagaWorkspace{lock: lock}, git, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
-	result, err := service.Resume(context.Background(), sagaExecutionID, "worker-a")
+	result, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
 	if err == nil || result.Status != domain.WritebackStatusManualRecovery || lock.restoreCalls != 0 || git.commitCalls != 1 {
 		t.Fatalf("result=%#v err=%v restore=%d commit=%d", result, err, lock.restoreCalls, git.commitCalls)
 	}
@@ -429,7 +453,7 @@ func TestWritebackPublishFailureNeverRestoresFile(t *testing.T) {
 	}
 	lock := targetLockFixture(t)
 	service := newSagaService(t, repository, &sagaWorkspace{lock: lock}, &sagaGit{}, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
-	result, err := service.Resume(context.Background(), sagaExecutionID, "worker-a")
+	result, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
 	if err == nil || result.Status != domain.WritebackStatusPublishRecovery || lock.restoreCalls != 0 || len(repository.publishCommands) != 1 {
 		t.Fatalf("result=%#v err=%v restore=%d publish=%d", result, err, lock.restoreCalls, len(repository.publishCommands))
 	}
@@ -443,7 +467,7 @@ func TestWritebackLeaseLossStopsBeforeNewSideEffect(t *testing.T) {
 	workspace := &sagaWorkspace{lock: targetLockFixture(t)}
 	git := &sagaGit{}
 	service := newSagaService(t, repository, workspace, git, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
-	if _, err := service.Resume(context.Background(), sagaExecutionID, "worker-a"); err == nil || workspace.acquireCalls != 0 || git.inspectCalls != 0 {
+	if _, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a")); err == nil || workspace.acquireCalls != 0 || git.inspectCalls != 0 {
 		t.Fatalf("err=%v acquire=%d inspect=%d", err, workspace.acquireCalls, git.inspectCalls)
 	}
 }
@@ -455,7 +479,7 @@ func TestWritebackLeaseLossAtDurableFileStateDoesNotBecomeManual(t *testing.T) {
 	}
 	workspace := &sagaWorkspace{lock: targetLockFixture(t)}
 	service := newSagaService(t, repository, workspace, &sagaGit{}, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
-	result, err := service.Resume(context.Background(), sagaExecutionID, "worker-a")
+	result, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
 	if err == nil || result.Status != domain.WritebackStatusGitPrepared || repository.execution.Status != domain.WritebackStatusGitPrepared || len(repository.checkpointStatuses) != 0 || workspace.resumeCalls != 0 {
 		t.Fatalf("result=%#v execution=%#v checkpoints=%v resume=%d err=%v", result, repository.execution, repository.checkpointStatuses, workspace.resumeCalls, err)
 	}
@@ -470,7 +494,7 @@ func TestWritebackLeaseLossAfterAcquireStopsBeforePrepare(t *testing.T) {
 	lock := targetLockFixture(t)
 	workspace := &sagaWorkspace{lock: lock}
 	service := newSagaService(t, repository, workspace, &sagaGit{}, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
-	result, err := service.Resume(context.Background(), sagaExecutionID, "worker-a")
+	result, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
 	if err == nil || result.Status != domain.WritebackStatusPrepared || workspace.acquireCalls != 1 || lock.prepareCalls != 0 || len(repository.checkpointStatuses) != 0 {
 		t.Fatalf("result=%#v acquire=%d prepare=%d checkpoints=%v err=%v", result, workspace.acquireCalls, lock.prepareCalls, repository.checkpointStatuses, err)
 	}
@@ -516,7 +540,7 @@ func TestBuildPublishWritebackPreservesEncodingErrorContract(t *testing.T) {
 func newSagaService(t *testing.T, repository *sagaRepository, workspace *sagaWorkspace, git *sagaGit, ids foundation.IDGenerator) *WritebackService {
 	t.Helper()
 	service, err := NewWritebackService(WritebackServiceDependencies{
-		Repository: repository, Workspace: workspace, Git: git, IDs: ids,
+		Repository: repository, Workspace: workspace, Git: git, Audit: &sagaAuditRecorder{}, IDs: ids,
 		Clock: foundation.FixedClock{Value: time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)},
 	})
 	if err != nil {

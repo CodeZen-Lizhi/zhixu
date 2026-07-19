@@ -4,23 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"time"
+
+	foundationredaction "github.com/CodeZen-Lizhi/zhixu/internal/foundation/redaction"
 )
 
 // RedactedValue is the only replacement emitted when a sensitive value is
 // detected. The original value is never included in errors or telemetry.
 const RedactedValue = "<redacted>"
-
-var (
-	sensitiveAssignmentPattern = regexp.MustCompile(`(?i)(authorization|bearer|api[_-]?key|credential|password|passwd|secret|token|cookie|dsn|database[_-]?url)\s*[:=]\s*\S+`)
-	bearerTokenPattern         = regexp.MustCompile(`(?i)\bbearer\s+\S+`)
-	credentialURLPattern       = regexp.MustCompile(`(?i)\b(postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqp)://\S+`)
-	windowsAbsolutePathPattern = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
-)
 
 type safeHandler struct {
 	next      slog.Handler
@@ -174,7 +167,7 @@ func redactString(key, value string) string {
 }
 
 func containsSecret(value string) bool {
-	return sensitiveAssignmentPattern.MatchString(value) || bearerTokenPattern.MatchString(value) || credentialURLPattern.MatchString(value)
+	return foundationredaction.ContainsSecret(value)
 }
 
 func isSensitiveKey(key string) bool {
@@ -218,13 +211,8 @@ func isAbsoluteFilesystemPath(key, value string) bool {
 	pathKey := strings.Contains(normalizedKey, "file") || strings.Contains(normalizedKey, "directory") ||
 		strings.Contains(normalizedKey, "workspace") || strings.Contains(normalizedKey, "root") ||
 		strings.Contains(normalizedKey, "targetpath") || strings.Contains(normalizedKey, "absolutepath")
-	if pathKey && (filepath.IsAbs(trimmed) || windowsAbsolutePathPattern.MatchString(trimmed)) {
+	if pathKey && foundationredaction.ContainsAbsolutePath(trimmed) {
 		return true
 	}
-	for _, prefix := range []string{"/Users/", "/home/", "/root/", "/tmp/", "/private/", "/var/", "/etc/", "/opt/", "/Volumes/", "/workspace/"} {
-		if strings.Contains(trimmed, prefix) {
-			return true
-		}
-	}
-	return windowsAbsolutePathPattern.MatchString(trimmed)
+	return foundationredaction.ContainsAbsolutePath(trimmed)
 }

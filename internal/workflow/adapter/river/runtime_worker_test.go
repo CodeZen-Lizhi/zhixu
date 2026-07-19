@@ -112,6 +112,12 @@ func TestRuntimeNodeWorkerPropagatesTraceAndClaimedCorrelation(t *testing.T) {
 		correlation.RetryNo != 2 || correlation.RiverJobID != job.ID {
 		t.Fatalf("correlation=%+v", correlation)
 	}
+	if executor.execution.WorkspaceID != claim.Run.WorkspaceID || executor.execution.DefinitionID != claim.Definition.ID ||
+		executor.execution.DefinitionVersion != claim.Definition.Version || executor.execution.DefinitionHash != claim.Definition.GraphHash ||
+		executor.execution.RunID != claim.Run.ID || executor.execution.NodeKey != claim.Node.NodeKey || executor.execution.NodeRunID != claim.Node.ID ||
+		executor.execution.NodeAttemptID != claim.Attempt.ID || executor.execution.NodeVersion != claim.Node.Version {
+		t.Fatalf("execution identity=%+v claim=%+v", executor.execution, claim)
+	}
 }
 
 func TestRuntimeNodeWorkerPersistsExecutorFailure(t *testing.T) {
@@ -309,7 +315,16 @@ func runtimeRiverJob() *river.Job[NodeJobArgs] {
 }
 
 func claimedRuntimeResult() application.ClaimResult {
-	return application.ClaimResult{Disposition: application.ClaimDispositionClaimed, Run: domain.Run{ID: foundation.ID("a0000000-0000-4000-8000-000000000002"), WorkspaceID: foundation.ID("a0000000-0000-4000-8000-000000000003"), Status: domain.RunStatusRunning}, Node: domain.NodeRun{ID: foundation.ID("a0000000-0000-4000-8000-000000000001"), RunID: foundation.ID("a0000000-0000-4000-8000-000000000002"), NodeType: application.CanonicalJSONHashNodeKind, Status: domain.NodeStatusRunning, InputSchemaVersion: 1, OutputSchemaVersion: 1, DispatchNo: 1, Version: 2, Input: json.RawMessage(`{"value":1}`)}, Attempt: domain.NodeAttempt{NodeRunID: foundation.ID("a0000000-0000-4000-8000-000000000001"), AttemptNo: 1, DispatchNo: 1, DeliveryID: "job-41-attempt-1", RiverJobID: 41, RiverJobAttempt: 1, LeaseOwner: "worker-a", Status: domain.AttemptStatusRunning}}
+	graph := domain.CanonicalGraph{Nodes: []domain.NodeDefinition{{Key: "hash", Kind: application.CanonicalJSONHashNodeKind, InputSchemaVersion: 1, OutputSchemaVersion: 1}}}
+	graphJSON, _ := json.Marshal(graph)
+	graphHash, _ := application.ComputeCanonicalGraphHash(graph)
+	return application.ClaimResult{
+		Disposition: application.ClaimDispositionClaimed,
+		Definition:  domain.Definition{ID: foundation.ID("a0000000-0000-4000-8000-000000000004"), WorkspaceID: foundation.ID("a0000000-0000-4000-8000-000000000003"), Key: "test-workflow", Version: 1, Graph: graphJSON, GraphHash: graphHash},
+		Run:         domain.Run{ID: foundation.ID("a0000000-0000-4000-8000-000000000002"), WorkspaceID: foundation.ID("a0000000-0000-4000-8000-000000000003"), DefinitionID: foundation.ID("a0000000-0000-4000-8000-000000000004"), Status: domain.RunStatusRunning},
+		Node:        domain.NodeRun{ID: foundation.ID("a0000000-0000-4000-8000-000000000001"), RunID: foundation.ID("a0000000-0000-4000-8000-000000000002"), NodeKey: "hash", NodeType: application.CanonicalJSONHashNodeKind, Status: domain.NodeStatusRunning, InputSchemaVersion: 1, OutputSchemaVersion: 1, DispatchNo: 1, Version: 2, Input: json.RawMessage(`{"value":1}`)},
+		Attempt:     domain.NodeAttempt{ID: foundation.ID("a0000000-0000-4000-8000-000000000005"), NodeRunID: foundation.ID("a0000000-0000-4000-8000-000000000001"), AttemptNo: 1, DispatchNo: 1, DeliveryID: "job-41-attempt-1", RiverJobID: 41, RiverJobAttempt: 1, LeaseOwner: "worker-a", Status: domain.AttemptStatusRunning},
+	}
 }
 
 type runtimeExecutor struct {
@@ -320,12 +335,14 @@ type runtimeExecutor struct {
 }
 
 type capturingRuntimeExecutor struct {
-	ctx    context.Context
-	output json.RawMessage
+	ctx       context.Context
+	execution application.ExecutionContext
+	output    json.RawMessage
 }
 
-func (e *capturingRuntimeExecutor) Execute(ctx context.Context, _ application.ExecutionContext) (application.ExecutionResult, error) {
+func (e *capturingRuntimeExecutor) Execute(ctx context.Context, execution application.ExecutionContext) (application.ExecutionResult, error) {
 	e.ctx = ctx
+	e.execution = execution
 	return application.ExecutionResult{Output: e.output}, nil
 }
 

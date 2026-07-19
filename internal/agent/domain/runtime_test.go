@@ -97,6 +97,20 @@ func TestModelRunValidationAndTerminalTransitions(t *testing.T) {
 	}
 }
 
+func TestSuccessfulModelRunAcceptsIndependentToolRequestResultType(t *testing.T) {
+	run := validModelRun()
+	completed := run.UpdatedAt.Add(time.Second)
+	run.Schema = SchemaRef{ID: ToolRequestSchemaID, Version: OutputSchemaVersionV1}
+	run.ReducedSchema = run.Schema
+	run.Status = ModelRunSucceeded
+	run.FinalResultType = ResultTypeToolRequest
+	run.CompletedAt = &completed
+	run.UpdatedAt = completed
+	if err := ValidateModelRun(run); err != nil {
+		t.Fatalf("tool request model run rejected: %v", err)
+	}
+}
+
 func TestModelCallValidationPreservesUnknownOutcome(t *testing.T) {
 	call := validStartedCall()
 	if err := ValidateModelCall(call); err != nil {

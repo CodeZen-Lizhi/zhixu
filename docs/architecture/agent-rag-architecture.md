@@ -265,9 +265,14 @@ Review Agent 防止无证据过度评分。
 
 Agent 只输出 Tool Request：
 
+- schema_version。
 - tool_name。
 - arguments。
 - reason。
+
+通用请求不接受 Workspace、Workflow identity、Capability、Approval、Credential、Target Version、
+timeout、endpoint、path、command 或 Git args。Provider 原生 `tool_calls` 继续 fail closed；项目只解析
+独立版本化 Tool Request v1，且 Tool Request 本身不直接执行。
 
 Tool Registry 负责：
 
@@ -276,6 +281,19 @@ Tool Registry 负责：
 - 权限。
 - 执行。
 - 审计。
+
+M6-04 构建模型可见 Tool 目录时，只能使用 Worker 当前真实可执行、配置启用且持久 Workflow Node 精确允许的 Tool 版本。
+M6-03 的 API 只冻结 11 个 Contract 用于 Definition 校验，尚未把动态目录接入模型；不能用 Fake Executor 冒充 Worker 能力。Tool Result
+必须经过输出 Schema、大小限制和共享脱敏，并标记 `untrusted_data=true`；Source 或 Tool Result 不得递归
+成为新的 Tool Request。
+
+M6-03 先把 strict Agent Tool Request 转换为不含模型自由文本 `reason` 的 `PersistedToolInvocationV1`。持久
+`agent-rag` Definition 只包含 `ReadSource`、`ValidateCitation`、`ReadGitStatus`：它们的输入为空或稳定 ID tuple。
+Search query 与 Diff before/after 是内容型参数，不得作为 raw Workflow input 持久化；M6-04
+需先提供安全 request receipt 或同一 Agent Attempt 内执行 seam，再发布新 Definition 版本开放这些能力。
+
+M6-03 只提供安全 Tool seam 和持久 Tool Call；Conversation、RAG HTTP API、SSE、反馈、Tool loop 预算与
+前端展示仍属于 M6-04，不能把内部 Tool Workflow smoke 声称为会话产品已完成。
 
 ## 17. 模型路由
 

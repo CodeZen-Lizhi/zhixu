@@ -79,3 +79,11 @@ git diff --check
 - 真实 OpenTelemetry exporter Adapter、采样/保留策略和 Audit Repository。
 - 采样策略、日志保留和外部 OTel/Prometheus 接入方式。
 - Audit 表字段、不可变约束、访问权限和归档策略；当前仅有架构约束，没有迁移。
+
+## M6-03 Tool Redaction Boundary
+
+- Tool Output 与 observability 必须复用 `internal/foundation/redaction` 单一事实源；不得在 Adapter、Service 和 logger 分别维护 Secret/path 规则。
+- 脱敏至少覆盖 password/passwd、Authorization/Cookie/Credential、DSN/database URL、通用 URL userinfo、Unix/Windows/file 绝对路径和嵌入文本路径；HTTP(S) URL 的普通 path 不能误判成本地文件路径。
+- `workflow.tool_call` 是受限业务执行事实，不等同 M10 通用 append-only Audit；它只允许受控摘要、Hash、bytes 和稳定 ref。
+- error、String/GoString、日志、Trace、readyz 和测试失败输出不得包含 raw Prompt/arguments/output、网页/Source 正文、Credential、完整 Endpoint、绝对路径或命令 stderr。
+- Safe Writeback Apply/Git 逻辑 Tool Call 与同一 `writeback_execution` receipt 关联；retry/reconciliation 不新增第二条审计或改写历史 Attempt。

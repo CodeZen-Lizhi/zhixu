@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,12 +15,12 @@ import (
 func TestRuntimeCoordinatorClaimUsesLeaseDurationAndStableDelivery(t *testing.T) {
 	t.Parallel()
 
-	port := &fakeRuntimeStatePort{claimResult: ClaimResult{Disposition: ClaimDispositionClaimed, Run: domain.Run{ID: id(2), Status: domain.RunStatusRunning}, Node: domain.NodeRun{ID: id(1), RunID: id(2), Status: domain.NodeStatusRunning}, Attempt: domain.NodeAttempt{NodeRunID: id(1), AttemptNo: 1, DispatchNo: 2, DeliveryID: "job-91-attempt-0", RiverJobID: 91, RiverJobAttempt: 0, LeaseOwner: "worker-a", Status: domain.AttemptStatusRunning}}}
+	command := ClaimCommand{NodeRunID: id(1), DispatchNo: 2, DeliveryID: "job-91-attempt-0", RiverJobID: 91, RiverJobAttempt: 0, LeaseOwner: " worker-a ", LeaseDuration: 30 * time.Second}
+	port := &fakeRuntimeStatePort{claimResult: validRuntimeClaimResult(command)}
 	coordinator, err := NewRuntimeCoordinator(port)
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := ClaimCommand{NodeRunID: id(1), DispatchNo: 2, DeliveryID: "job-91-attempt-0", RiverJobID: 91, RiverJobAttempt: 0, LeaseOwner: " worker-a ", LeaseDuration: 30 * time.Second}
 	result, err := coordinator.Claim(context.Background(), command)
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
@@ -47,10 +48,32 @@ func TestRuntimeCoordinatorValidatesClaimObservabilityFacts(t *testing.T) {
 	if _, err := coordinator.Claim(context.Background(), validClaimCommand()); workflowErrorCode(err) != "WORKFLOW_CLAIM_RESULT_INVALID" {
 		t.Fatalf("missing duplicate node kind err=%v", err)
 	}
-	claimed := ClaimResult{Disposition: ClaimDispositionClaimed, Run: domain.Run{ID: id(2), Status: domain.RunStatusRunning}, Node: domain.NodeRun{ID: id(1), RunID: id(2), NodeType: "test", Status: domain.NodeStatusRunning}, Attempt: domain.NodeAttempt{NodeRunID: id(1), AttemptNo: 1, DispatchNo: 1, DeliveryID: "job-1-attempt-0", RiverJobID: 1, LeaseOwner: "worker", Status: domain.AttemptStatusRunning}, LeaseReclaimed: true}
+	claimed := validRuntimeClaimResult(validClaimCommand())
+	claimed.LeaseReclaimed = true
 	port.claimResult = claimed
 	if _, err := coordinator.Claim(context.Background(), validClaimCommand()); workflowErrorCode(err) != "WORKFLOW_CLAIM_RESULT_INVALID" {
 		t.Fatalf("reclaim without duplicate err=%v", err)
+	}
+	claimed = validRuntimeClaimResult(validClaimCommand())
+	claimed.Definition.Graph = json.RawMessage(`{"nodes":[{"key":"test-node","kind":"test","input_schema_version":1,"output_schema_version":1,"retry_policy":{"max_retries":0,"base_delay":0,"max_delay":0},"permissions_from_transport":["READ_LOCAL"]}]}`)
+	port.claimResult = claimed
+	if _, err := coordinator.Claim(context.Background(), validClaimCommand()); workflowErrorCode(err) != "WORKFLOW_CLAIM_RESULT_INVALID" {
+		t.Fatalf("unknown persisted graph field err=%v", err)
+	}
+}
+
+func validRuntimeClaimResult(command ClaimCommand) ClaimResult {
+	graph := domain.CanonicalGraph{Nodes: []domain.NodeDefinition{{Key: "test-node", Kind: "test", InputSchemaVersion: 1, OutputSchemaVersion: 1}}}
+	graphJSON, _ := json.Marshal(graph)
+	graphHash, _ := ComputeCanonicalGraphHash(graph)
+	return ClaimResult{
+		Disposition: ClaimDispositionClaimed,
+		Definition:  domain.Definition{ID: id(3), WorkspaceID: id(4), Key: "test-workflow", Version: 1, Graph: graphJSON, GraphHash: graphHash},
+		Run:         domain.Run{ID: id(2), WorkspaceID: id(4), DefinitionID: id(3), Status: domain.RunStatusRunning},
+		Node: domain.NodeRun{ID: command.NodeRunID, RunID: id(2), NodeKey: "test-node", NodeType: "test", Status: domain.NodeStatusRunning,
+			InputSchemaVersion: 1, OutputSchemaVersion: 1},
+		Attempt: domain.NodeAttempt{ID: id(5), NodeRunID: command.NodeRunID, AttemptNo: 1, DispatchNo: command.DispatchNo, DeliveryID: strings.TrimSpace(command.DeliveryID), RiverJobID: command.RiverJobID,
+			RiverJobAttempt: command.RiverJobAttempt, LeaseOwner: strings.TrimSpace(command.LeaseOwner), Status: domain.AttemptStatusRunning},
 	}
 }
 

@@ -139,6 +139,10 @@ func TestAgentRuntimeMigrationStateMachineWorkspaceAndGuardedDown(t *testing.T) 
 	_, err = pool.Exec(ctx, `DELETE FROM agent.model_run WHERE id=$1`, modelRunID)
 	assertPostgresCode(t, err, "55000")
 
-	_, err = migrationProvider(t, pool).Down(ctx)
+	provider := migrationProvider(t, pool)
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("00019 empty Down failed: %v", err)
+	}
+	_, err = provider.Down(ctx)
 	assertPostgresCode(t, err, "55000")
 }

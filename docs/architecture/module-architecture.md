@@ -266,16 +266,22 @@ Interface：
 
 Interface：
 
-- Register。
-- Authorize。
-- Execute。
+- Contract Registry：冻结版本化 Definition/Schema。
+- Execution Service：使用服务端 Workflow policy 执行 typed Tool。
+- Tool Call Repository：STARTED/REFUSED/CAS terminal、replay 与 recovery。
+- Trusted Write Audit：关联 Safe Writeback receipt，不拥有文件/Git 副作用。
 
 隐藏：
 
 - Schema。
-- 权限。
-- 超时。
-- 审计。
+- Capability/allowed_tools/Workflow binding 判定。
+- timeout、retry、idempotency 和输出预算。
+- PostgreSQL、Retrieval、Web、文件/Git Adapter 细节。
+- 脱敏摘要和 Tool Call 持久状态。
+
+依赖方向固定为 `tools/adapter → tools/application → tools/domain → capability/foundation`；Tools Domain
+不得依赖 Workflow、Change Control、HTTP、pgx、模型、文件系统或 Git。Safe Writeback 通过窄 audit bridge
+调用 Tools Application，Tools 不得反向创建第二条文件/Git 写入路径。
 
 ### Memory Module
 

@@ -47,6 +47,18 @@ func TestRuntimeStateClaimHeartbeatCompleteAndReplay(t *testing.T) {
 	if err != nil || claimed.Disposition != application.ClaimDispositionClaimed {
 		t.Fatalf("claim=%+v err=%v", claimed, err)
 	}
+	var persistedGraph domain.CanonicalGraph
+	if err := json.Unmarshal(request.Definition.Graph, &persistedGraph); err != nil {
+		t.Fatal(err)
+	}
+	wantDefinitionHash, err := application.ComputeCanonicalGraphHash(persistedGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.Definition.ID != request.Definition.ID || claimed.Definition.WorkspaceID != workspaceID || claimed.Definition.Version != request.Definition.Version ||
+		claimed.Definition.GraphHash != wantDefinitionHash || claimed.Node.NodeKey != request.FirstNode.NodeKey {
+		t.Fatalf("claim identity=%+v node=%+v", claimed.Definition, claimed.Node)
+	}
 	heartbeat, err := repository.Heartbeat(ctx, application.HeartbeatCommand{NodeRunID: started.FirstNode.ID, Fence: domain.LeaseFence{Owner: "worker-a", AttemptNo: claimed.Attempt.AttemptNo, NodeVersion: claimed.Node.Version}, LeaseDuration: time.Minute})
 	if err != nil {
 		t.Fatalf("heartbeat: %v cause=%v", err, errors.Unwrap(err))

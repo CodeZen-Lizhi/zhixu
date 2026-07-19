@@ -834,10 +834,19 @@ func newWritebackFixture(t *testing.T) *writebackFixture {
 	}
 	definitionID := next()
 	rootPath := "/tmp/writeback-" + string(fixture.workspaceID)
+	definitionGraph, err := json.Marshal(workflowdomain.CanonicalGraph{Nodes: []workflowdomain.NodeDefinition{{
+		Key: "writeback", Kind: "tool", InputSchemaVersion: 1, OutputSchemaVersion: 1,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workflowapplication.DecodeCanonicalGraph(definitionGraph); err != nil {
+		t.Fatalf("writeback fixture graph is not canonical: %v", err)
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Writeback Test',$2,$2,$3,'test',1,$3,$3)`, string(fixture.workspaceID), rootPath, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,1,'{}',$4)`, string(definitionID), string(fixture.workspaceID), "writeback-"+string(definitionID), now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,1,$4,$5)`, string(definitionID), string(fixture.workspaceID), "writeback-"+string(definitionID), definitionGraph, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(fixture.runID), string(fixture.workspaceID), string(definitionID), now); err != nil {

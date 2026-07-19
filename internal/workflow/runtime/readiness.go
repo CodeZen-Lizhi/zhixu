@@ -15,6 +15,10 @@ const (
 	CodeDefinitionsUnavailable      = "WORKER_DEFINITIONS_UNAVAILABLE"
 	CodeExecutorsUnavailable        = "WORKER_EXECUTORS_UNAVAILABLE"
 	CodeDependenciesUnavailable     = "WORKER_DEPENDENCIES_UNAVAILABLE"
+	CodeToolContractsUnavailable    = "WORKER_TOOL_CONTRACTS_UNAVAILABLE"
+	CodeToolExecutorsUnavailable    = "WORKER_TOOL_EXECUTORS_UNAVAILABLE"
+	CodeToolDependenciesUnavailable = "WORKER_TOOL_DEPENDENCIES_UNAVAILABLE"
+	CodeWebFetchPolicyUnavailable   = "WORKER_WEB_FETCH_POLICY_UNAVAILABLE"
 	CodeReindexDispatcherNotStarted = "WORKER_REINDEX_DISPATCHER_NOT_STARTED"
 )
 
@@ -28,6 +32,12 @@ type ReadinessSnapshot struct {
 	DefinitionsOK            bool
 	ExecutorsOK              bool
 	DependenciesOK           bool
+	ToolRuntimeEnabled       bool
+	ToolContractsOK          bool
+	ToolExecutorsOK          bool
+	ToolDependenciesOK       bool
+	WebFetchEnabled          bool
+	WebFetchPolicyOK         bool
 	ReindexDispatcherStarted bool
 	ShuttingDown             bool
 	Code                     string
@@ -43,6 +53,8 @@ func (s ReadinessSnapshot) Ready() bool {
 		s.DefinitionsOK &&
 		s.ExecutorsOK &&
 		s.DependenciesOK &&
+		(!s.ToolRuntimeEnabled || (s.ToolContractsOK && s.ToolExecutorsOK && s.ToolDependenciesOK)) &&
+		(!s.WebFetchEnabled || s.WebFetchPolicyOK) &&
 		s.ReindexDispatcherStarted
 }
 
@@ -85,6 +97,24 @@ func (r *Readiness) SetExecutorsOK(ok bool) {
 // SetDependenciesOK updates the enabled-definition dependency check.
 func (r *Readiness) SetDependenciesOK(ok bool) {
 	r.update(func(s *ReadinessSnapshot) { s.DependenciesOK = ok })
+}
+
+// SetToolRuntimeState 更新 Tool runtime 的显式启用状态和三个 fail-closed 依赖门禁。
+func (r *Readiness) SetToolRuntimeState(enabled, contractsOK, executorsOK, dependenciesOK bool) {
+	r.update(func(s *ReadinessSnapshot) {
+		s.ToolRuntimeEnabled = enabled
+		s.ToolContractsOK = contractsOK
+		s.ToolExecutorsOK = executorsOK
+		s.ToolDependenciesOK = dependenciesOK
+	})
+}
+
+// SetWebFetchState 更新 Web Fetch 的显式启用状态与持久 Policy 门禁。
+func (r *Readiness) SetWebFetchState(enabled, policyOK bool) {
+	r.update(func(s *ReadinessSnapshot) {
+		s.WebFetchEnabled = enabled
+		s.WebFetchPolicyOK = policyOK
+	})
 }
 
 // SetReindexDispatcherStarted updates the Reindex Dispatcher lifecycle check.
@@ -134,6 +164,14 @@ func finalize(snapshot ReadinessSnapshot) ReadinessSnapshot {
 		snapshot.Code = CodeExecutorsUnavailable
 	case !snapshot.DependenciesOK:
 		snapshot.Code = CodeDependenciesUnavailable
+	case snapshot.ToolRuntimeEnabled && !snapshot.ToolContractsOK:
+		snapshot.Code = CodeToolContractsUnavailable
+	case snapshot.ToolRuntimeEnabled && !snapshot.ToolExecutorsOK:
+		snapshot.Code = CodeToolExecutorsUnavailable
+	case snapshot.ToolRuntimeEnabled && !snapshot.ToolDependenciesOK:
+		snapshot.Code = CodeToolDependenciesUnavailable
+	case snapshot.WebFetchEnabled && !snapshot.WebFetchPolicyOK:
+		snapshot.Code = CodeWebFetchPolicyUnavailable
 	case !snapshot.ReindexDispatcherStarted:
 		snapshot.Code = CodeReindexDispatcherNotStarted
 	default:

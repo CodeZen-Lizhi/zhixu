@@ -8,6 +8,7 @@ import (
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	toolagent "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/agent"
 )
 
 // CatalogOptions 是 Worker Composition Root 注入的实际模型契约。
@@ -27,7 +28,7 @@ func DefaultPromptRef() agentdomain.PromptRef {
 	return agentdomain.PromptRef{ID: defaultPromptID, Version: defaultPromptVersion}
 }
 
-// NewRuntimeCatalog 注册四类独立 Schema、Relation Reduced Schema、Prompt 与模型 Profile。
+// NewRuntimeCatalog 注册四类既有 Schema、Relation Reduced Schema、独立 Tool Request Schema、Prompt 与模型 Profile。
 func NewRuntimeCatalog(options CatalogOptions) (*agentapplication.RuntimeCatalog, error) {
 	if options.Model.Validate() != nil || options.Timeout <= 0 || options.MaxOutputTokens <= 0 {
 		return nil, workflowError(foundation.ErrorInvalidInput, ErrorCodeInputInvalid, false, errors.New("agent workflow catalog options are invalid"))
@@ -65,6 +66,9 @@ func NewRuntimeCatalog(options CatalogOptions) (*agentapplication.RuntimeCatalog
 		if err := catalog.RegisterSchema(agentapplication.SchemaDefinition{Ref: registration.ref, JSONSchema: document, Decode: registration.decode}); err != nil {
 			return nil, err
 		}
+	}
+	if err := catalog.RegisterSchema(toolagent.SchemaDefinition()); err != nil {
+		return nil, err
 	}
 	if err := catalog.RegisterProfile(agentapplication.ModelProfile{
 		Ref: DefaultProfileRef(), Model: options.Model, Timeout: options.Timeout, MaxOutputTokens: options.MaxOutputTokens,

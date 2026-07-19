@@ -14,7 +14,7 @@ import (
 
 // Resumer 是固定 Safe Writeback Node 使用的 Application 端口。
 type Resumer interface {
-	Resume(context.Context, foundation.ID, string) (application.WritebackResult, error)
+	Resume(context.Context, foundation.ID, application.WritebackResumeIdentity) (application.WritebackResult, error)
 }
 
 // Node 执行一条已由 Atomic Begin 创建的 Durable Writeback Execution。
@@ -52,14 +52,16 @@ type Output struct {
 }
 
 // Execute 使用 Worker 当前 lease owner 继续 Saga；lease owner 不写入持久化 Node input。
-func (n *Node) Execute(ctx context.Context, input Input, leaseOwner string) (Output, error) {
+func (n *Node) Execute(ctx context.Context, input Input, identity application.WritebackResumeIdentity) (Output, error) {
 	if n == nil || n.resumer == nil {
 		return Output{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WRITEBACK_WORKFLOW_NODE_UNAVAILABLE", false, errors.New("writeback node is unavailable"))
 	}
-	if input.SchemaVersion != application.SafeWritebackSchemaVersion || input.ExecutionID == "" || input.WorkspaceID == "" || input.WorkflowRunID == "" || input.NodeRunID == "" || strings.TrimSpace(leaseOwner) == "" {
+	if input.SchemaVersion != application.SafeWritebackSchemaVersion || input.ExecutionID == "" || input.WorkspaceID == "" || input.WorkflowRunID == "" || input.NodeRunID == "" || identity.Validate() != nil ||
+		identity.WorkspaceID != input.WorkspaceID || identity.WorkflowRunID != input.WorkflowRunID || identity.NodeRunID != input.NodeRunID {
 		return Output{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITEBACK_WORKFLOW_INPUT_INVALID", false, errors.New("writeback workflow input is incomplete"))
 	}
-	result, err := n.resumer.Resume(ctx, input.ExecutionID, strings.TrimSpace(leaseOwner))
+	identity.LeaseOwner = strings.TrimSpace(identity.LeaseOwner)
+	result, err := n.resumer.Resume(ctx, input.ExecutionID, identity)
 	if err != nil {
 		return Output{}, err
 	}
