@@ -19,6 +19,7 @@ import (
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -540,9 +541,331 @@ func TestRepositoryDepthOneNeighborhoodTruncatesFiveHundredEdgeWindow(t *testing
 	}
 }
 
+func TestRepositoryFindPathIsDeterministicAndDirectionAware(t *testing.T) {
+	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	seedTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedGraphFixture(t, ctx, seedTx)
+	now := time.Now().UTC()
+	left := seedConfirmedClaimWithSource(t, ctx, seedTx, fixture.workspaceID, "Diamond left", now)
+	right := seedConfirmedClaimWithSource(t, ctx, seedTx, fixture.workspaceID, "Diamond right", now.Add(time.Microsecond))
+	leftSupport := seedConfirmedRelationEvidence(t, ctx, seedTx, fixture.workspaceID, fixture.firstClaimID, left, knowledge.RelationSupports, now)
+	rightSupport := seedConfirmedRelationEvidence(t, ctx, seedTx, fixture.workspaceID, fixture.firstClaimID, right, knowledge.RelationSupports, now.Add(time.Microsecond))
+	leftMembership := seedConfirmedClaimTopicRelationEvidence(t, ctx, seedTx, fixture.workspaceID, left, fixture.secondaryTopicID, now.Add(2*time.Microsecond))
+	rightMembership := seedConfirmedClaimTopicRelationEvidence(t, ctx, seedTx, fixture.workspaceID, right, fixture.secondaryTopicID, now.Add(3*time.Microsecond))
+	duplicateSource, duplicateTarget := left, right
+	if duplicateTarget < duplicateSource {
+		duplicateSource, duplicateTarget = duplicateTarget, duplicateSource
+	}
+	duplicateRelation := seedConfirmedRelationEvidence(t, ctx, seedTx, fixture.workspaceID, duplicateSource, duplicateTarget, knowledge.RelationDuplicates, now.Add(4*time.Microsecond))
+	if err := seedTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupCommittedGraphFixture(pool, fixture.workspaceID) })
+	repository, err := NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := graphdomain.PathRequest{
+		WorkspaceID: fixture.workspaceID,
+		From:        knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: fixture.firstClaimID},
+		To:          knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.primaryTopicID},
+		Direction:   graphdomain.TraversalOutbound,
+		RelationTypes: []knowledge.RelationType{
+			knowledge.RelationBelongsTo,
+		},
+		MaxDepth:   4,
+		MaxVisited: 20,
+	}
+	result, err := repository.FindPath(ctx, request)
+	if err != nil || result.Status != graphdomain.PathFound || result.HopCount != 1 || len(result.Nodes) != 2 || len(result.Edges) != 1 || result.Edges[0].Traversal != graphdomain.EdgeTraversalForward {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if err := graphdomain.ValidatePathResult(request, result); err != nil {
+		t.Fatal(err)
+	}
+	request.From = knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.primaryTopicID}
+	request.To = knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.secondaryTopicID}
+	request.Direction = graphdomain.TraversalBoth
+	request.RelationTypes = []knowledge.RelationType{knowledge.RelationImpacts}
+	result, err = repository.FindPath(ctx, request)
+	if err != nil || result.Status != graphdomain.PathNotFound || len(result.Nodes) != 0 || len(result.Edges) != 0 {
+		t.Fatalf("not found=%#v err=%v", result, err)
+	}
+	request.From = knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: fixture.firstClaimID}
+	request.To = knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: fixture.longClaimID}
+	result, err = repository.FindPath(ctx, request)
+	if err != nil || result.Status != graphdomain.PathNotFound || len(result.CommonTopicSuggestions) != 1 || result.CommonTopicSuggestions[0].Ref.ID != fixture.primaryTopicID {
+		t.Fatalf("common topics=%#v err=%v", result, err)
+	}
+
+	request.From = knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: fixture.firstClaimID}
+	request.To = knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.secondaryTopicID}
+	request.Direction = graphdomain.TraversalOutbound
+	request.RelationTypes = []knowledge.RelationType{knowledge.RelationSupports, knowledge.RelationBelongsTo}
+	request.MaxDepth = 1
+	request.MaxVisited = 20
+	result, err = repository.FindPath(ctx, request)
+	if err != nil || result.Status != graphdomain.PathNotFound {
+		t.Fatalf("max depth one=%#v err=%v", result, err)
+	}
+	request.MaxDepth = 2
+	result, err = repository.FindPath(ctx, request)
+	wantMiddle := left
+	leftKey := fmt.Sprintf("CLAIM\x00%s\x00%s\x00CLAIM\x00%s\x00%s\x00TOPIC\x00%s", fixture.firstClaimID, leftSupport, left, leftMembership, fixture.secondaryTopicID)
+	rightKey := fmt.Sprintf("CLAIM\x00%s\x00%s\x00CLAIM\x00%s\x00%s\x00TOPIC\x00%s", fixture.firstClaimID, rightSupport, right, rightMembership, fixture.secondaryTopicID)
+	if rightKey < leftKey {
+		wantMiddle = right
+	}
+	if err != nil || result.Status != graphdomain.PathFound || result.HopCount != 2 || len(result.Nodes) != 3 || result.Nodes[1].Ref().ID != wantMiddle {
+		t.Fatalf("diamond=%#v want_middle=%s err=%v", result, wantMiddle, err)
+	}
+
+	request.From, request.To = request.To, request.From
+	request.Direction = graphdomain.TraversalInbound
+	result, err = repository.FindPath(ctx, request)
+	if err != nil || result.Status != graphdomain.PathFound || result.HopCount != 2 || result.Edges[0].Traversal != graphdomain.EdgeTraversalReverse || result.Edges[1].Traversal != graphdomain.EdgeTraversalReverse {
+		t.Fatalf("inbound=%#v err=%v", result, err)
+	}
+	request.Direction = graphdomain.TraversalOutbound
+	result, err = repository.FindPath(ctx, request)
+	if err != nil || result.Status != graphdomain.PathNotFound {
+		t.Fatalf("reverse outbound=%#v err=%v", result, err)
+	}
+	request.From = knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: duplicateTarget}
+	request.To = knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: duplicateSource}
+	request.Direction = graphdomain.TraversalOutbound
+	request.RelationTypes = []knowledge.RelationType{knowledge.RelationDuplicates}
+	request.MaxDepth = 1
+	result, err = repository.FindPath(ctx, request)
+	if err != nil || result.Status != graphdomain.PathFound || result.HopCount != 1 || result.Edges[0].RelationID != duplicateRelation || result.Edges[0].Traversal != graphdomain.EdgeTraversalReverse {
+		t.Fatalf("symmetric=%#v err=%v", result, err)
+	}
+
+	request.From = knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: fixture.firstClaimID}
+	request.To = knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.secondaryTopicID}
+	request.Direction = graphdomain.TraversalOutbound
+	request.RelationTypes = []knowledge.RelationType{knowledge.RelationSupports, knowledge.RelationBelongsTo}
+	request.MaxDepth = 2
+	request.MaxVisited = 3
+	if _, err := repository.FindPath(ctx, request); !hasGraphCode(err, graphdomain.ErrorCodeQueryBudgetExceeded) {
+		t.Fatalf("budget err=%v", err)
+	}
+}
+
+func TestRepositoryFindPathKeepsRepeatableReadSnapshotDuringConcurrentChange(t *testing.T) {
+	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	seedTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedGraphFixture(t, ctx, seedTx)
+	if err := seedTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupCommittedGraphFixture(pool, fixture.workspaceID) })
+	entered, release := make(chan struct{}), make(chan struct{})
+	repository, err := NewRepository(&pathBarrierDB{Pool: pool, entered: entered, release: release})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := graphdomain.PathRequest{
+		WorkspaceID: fixture.workspaceID,
+		From:        knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: fixture.firstClaimID},
+		To:          knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.primaryTopicID},
+		Direction:   graphdomain.TraversalOutbound,
+		RelationTypes: []knowledge.RelationType{
+			knowledge.RelationBelongsTo,
+		},
+		MaxDepth: 2, MaxVisited: 10,
+	}
+	type pathOutcome struct {
+		result graphdomain.PathResult
+		err    error
+	}
+	outcome := make(chan pathOutcome, 1)
+	go func() {
+		result, queryErr := repository.FindPath(ctx, request)
+		outcome <- pathOutcome{result: result, err: queryErr}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("path query did not reach frontier barrier")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE core.relation SET status='STALE',version=version+1,updated_at=updated_at+interval '1 second' WHERE workspace_id=$1 AND id=$2`, string(fixture.workspaceID), string(fixture.firstMembershipID)); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	first := <-outcome
+	if first.err != nil || first.result.Status != graphdomain.PathFound || first.result.HopCount != 1 {
+		t.Fatalf("snapshot result=%#v err=%v", first.result, first.err)
+	}
+	freshRepository, err := NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := freshRepository.FindPath(ctx, request)
+	if err != nil || second.Status != graphdomain.PathNotFound {
+		t.Fatalf("fresh result=%#v err=%v", second, err)
+	}
+}
+
+func TestRepositoryFindPathReturnsFrontierCancellationAndTimeoutWithoutPartial(t *testing.T) {
+	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	seedTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedGraphFixture(t, ctx, seedTx)
+	if err := seedTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupCommittedGraphFixture(pool, fixture.workspaceID) })
+	request := graphdomain.PathRequest{
+		WorkspaceID: fixture.workspaceID,
+		From:        knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: fixture.firstClaimID},
+		To:          knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.primaryTopicID},
+		Direction:   graphdomain.TraversalOutbound,
+		MaxDepth:    2,
+		MaxVisited:  10,
+	}
+	for _, testCase := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "cancel", err: context.Canceled, code: graphdomain.ErrorCodeDependencyUnavailable},
+		{name: "deadline", err: context.DeadlineExceeded, code: graphdomain.ErrorCodeQueryTimeout},
+		{name: "statement timeout", err: &pgconn.PgError{Code: "57014", Message: "statement timeout"}, code: graphdomain.ErrorCodeQueryTimeout},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			repository, createErr := NewRepository(&pathFrontierErrorDB{Pool: pool, frontierErr: testCase.err})
+			if createErr != nil {
+				t.Fatal(createErr)
+			}
+			result, queryErr := repository.FindPath(ctx, request)
+			if !hasGraphCode(queryErr, testCase.code) || result.Status != "" || len(result.Nodes) != 0 || len(result.Edges) != 0 {
+				t.Fatalf("result=%#v err=%v", result, queryErr)
+			}
+		})
+	}
+}
+
+type pathBarrierDB struct {
+	*pgxpool.Pool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (database *pathBarrierDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
+	tx, err := database.Pool.BeginTx(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return &pathBarrierTx{Tx: tx, entered: database.entered, release: database.release}, nil
+}
+
+type pathBarrierTx struct {
+	pgx.Tx
+	entered chan struct{}
+	release chan struct{}
+	once    bool
+}
+
+func (tx *pathBarrierTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
+	if !tx.once && query == pathFrontierSQL {
+		tx.once = true
+		close(tx.entered)
+		select {
+		case <-tx.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return tx.Tx.Query(ctx, query, args...)
+}
+
+type pathFrontierErrorDB struct {
+	*pgxpool.Pool
+	frontierErr error
+}
+
+func (database *pathFrontierErrorDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
+	tx, err := database.Pool.BeginTx(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return &pathFrontierErrorTx{Tx: tx, frontierErr: database.frontierErr}, nil
+}
+
+type pathFrontierErrorTx struct {
+	pgx.Tx
+	frontierErr error
+}
+
+func (tx *pathFrontierErrorTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
+	if query == pathFrontierSQL {
+		return nil, tx.frontierErr
+	}
+	return tx.Tx.Query(ctx, query, args...)
+}
+
+func cleanupCommittedGraphFixture(pool *pgxpool.Pool, workspaceID foundation.ID) {
+	ctx := context.Background()
+	statements := []string{
+		`DELETE FROM core.relation_evidence WHERE workspace_id=$1`,
+		`DELETE FROM core.relation WHERE workspace_id=$1`,
+		`DELETE FROM core.claim_source WHERE workspace_id=$1`,
+		`DELETE FROM core.claim WHERE workspace_id=$1`,
+		`DELETE FROM core.topic_alias WHERE workspace_id=$1`,
+		`DELETE FROM core.topic WHERE workspace_id=$1`,
+		`DELETE FROM ingestion.canonical_chunk WHERE workspace_id=$1`,
+		`DELETE FROM ingestion.source_version_projection WHERE workspace_id=$1`,
+		`DELETE FROM ingestion.source_span WHERE workspace_id=$1`,
+		`DELETE FROM ingestion.parse_projection WHERE workspace_id=$1`,
+		`DELETE FROM core.source_version WHERE source_id IN (SELECT id FROM core.source WHERE workspace_id=$1)`,
+		`DELETE FROM core.source WHERE workspace_id=$1`,
+		`DELETE FROM core.content_artifact WHERE workspace_id=$1`,
+		`DELETE FROM core.workspace WHERE id=$1`,
+	}
+	for _, statement := range statements {
+		_, _ = pool.Exec(ctx, statement, string(workspaceID))
+	}
+}
+
 type graphFixture struct {
-	workspaceID, primaryTopicID, secondaryTopicID foundation.ID
-	firstClaimID, longClaimID, supportRelationID  foundation.ID
+	workspaceID, primaryTopicID, secondaryTopicID                   foundation.ID
+	firstClaimID, longClaimID, firstMembershipID, supportRelationID foundation.ID
 }
 
 func seedGraphWorkspace(t *testing.T, ctx context.Context, tx pgx.Tx, now time.Time) foundation.ID {
@@ -623,7 +946,41 @@ func seedConfirmedRelationEvidence(t *testing.T, ctx context.Context, tx pgx.Tx,
 	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'CLAIM',$3,'CLAIM',$4,$5,'CONFIRMED',0.9,$6,$7,'SOURCE_DERIVED','deep fixture',1,$8,$8)`, string(relationID), string(workspaceID), string(sourceID), string(targetID), string(relationType), graphHash("deep-relation-"+string(relationID)), graphHash("deep-evidence-"+string(relationID)), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'deep evidence',$6,$7,$8,$9,'SOURCE_DERIVED','fixture',$10)`, string(graphTestID(t)), string(workspaceID), string(relationID), sourceVersionID, sourceSpanID, graphHash("deep-evidence-row-"+string(relationID)), applicability, schemaVersion, applicabilityHash, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'deep evidence',$6,$7,$8,$9,'SOURCE_DERIVED','deep fixture',$10)`, string(graphTestID(t)), string(workspaceID), string(relationID), sourceVersionID, sourceSpanID, graphHash("deep-evidence-row-"+string(relationID)), applicability, schemaVersion, applicabilityHash, now); err != nil {
+		t.Fatal(err)
+	}
+	return relationID
+}
+
+func seedConfirmedClaimWithSource(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, statement string, now time.Time) foundation.ID {
+	t.Helper()
+	claimID := seedGraphClaim(t, ctx, tx, workspaceID, statement, knowledge.ClaimStatusSuggested, floatPointer(0.9), now)
+	var sourceVersionID, sourceSpanID string
+	if err := tx.QueryRow(ctx, `SELECT source_version_id::text,source_span_id::text FROM core.relation_evidence WHERE workspace_id=$1 LIMIT 1`, string(workspaceID)).Scan(&sourceVersionID, &sourceSpanID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO core.claim_source(id,workspace_id,claim_id,source_version_id,source_span_id,support_type,reason,evidence_hash,created_at) VALUES($1,$2,$3,$4,$5,'SUPPORTS','path fixture',$6,$7)`, string(graphTestID(t)), string(workspaceID), string(claimID), sourceVersionID, sourceSpanID, graphHash("path-claim-source-"+string(claimID)), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE core.claim SET status='CONFIRMED',version=version+1,updated_at=updated_at+interval '1 microsecond' WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(claimID)); err != nil {
+		t.Fatal(err)
+	}
+	return claimID
+}
+
+func seedConfirmedClaimTopicRelationEvidence(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID, claimID, topicID foundation.ID, now time.Time) foundation.ID {
+	t.Helper()
+	var sourceVersionID, sourceSpanID string
+	var applicability []byte
+	var schemaVersion, applicabilityHash string
+	if err := tx.QueryRow(ctx, `SELECT source_version_id::text,source_span_id::text,applicability,applicability_schema_version,applicability_hash FROM core.relation_evidence WHERE workspace_id=$1 LIMIT 1`, string(workspaceID)).Scan(&sourceVersionID, &sourceSpanID, &applicability, &schemaVersion, &applicabilityHash); err != nil {
+		t.Fatal(err)
+	}
+	relationID := graphTestID(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'CLAIM',$3,'TOPIC',$4,'BELONGS_TO','CONFIRMED',0.9,$5,$6,'SOURCE_DERIVED','path fixture',1,$7,$7)`, string(relationID), string(workspaceID), string(claimID), string(topicID), graphHash("path-membership-"+string(relationID)), graphHash("path-membership-evidence-"+string(relationID)), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'path membership evidence',$6,$7,$8,$9,'SOURCE_DERIVED','path fixture',$10)`, string(graphTestID(t)), string(workspaceID), string(relationID), sourceVersionID, sourceSpanID, graphHash("path-membership-row-"+string(relationID)), applicability, schemaVersion, applicabilityHash, now); err != nil {
 		t.Fatal(err)
 	}
 	return relationID
@@ -685,7 +1042,7 @@ func seedGraphFixture(t *testing.T, ctx context.Context, tx pgx.Tx) graphFixture
 			t.Fatal(err)
 		}
 	}
-	return graphFixture{workspaceID: workspaceID, primaryTopicID: primaryTopicID, secondaryTopicID: secondaryTopicID, firstClaimID: firstClaimID, longClaimID: longClaimID, supportRelationID: relations[2].id}
+	return graphFixture{workspaceID: workspaceID, primaryTopicID: primaryTopicID, secondaryTopicID: secondaryTopicID, firstClaimID: firstClaimID, longClaimID: longClaimID, firstMembershipID: relations[0].id, supportRelationID: relations[2].id}
 }
 
 type graphProvenance struct{ sourceVersionID, sourceSpanID foundation.ID }

@@ -82,6 +82,18 @@ func TestValidatePathResultEnforcesContinuityAndNoPartialNotFound(t *testing.T) 
 	if err := ValidatePathResult(request, result); err != nil {
 		t.Fatalf("ValidatePathResult() error = %v", err)
 	}
+	formal := result
+	formal.Nodes = append([]GraphNode(nil), result.Nodes...)
+	invalidClaim := *formal.Nodes[0].Claim
+	invalidClaim.Status = knowledge.ClaimStatusSuggested
+	formal.Nodes[0] = GraphNode{Claim: &invalidClaim}
+	assertCode(t, ValidatePathResult(request, formal), ErrorCodeProjectionInconsistent)
+	invalidTopic := *result.Nodes[2].Topic
+	invalidTopic.Status = knowledge.TopicStatusMerged
+	formal = result
+	formal.Nodes = append([]GraphNode(nil), result.Nodes...)
+	formal.Nodes[2] = GraphNode{Topic: &invalidTopic}
+	assertCode(t, ValidatePathResult(request, formal), ErrorCodeProjectionInconsistent)
 
 	broken := result
 	broken.Edges[1].Traversal = EdgeTraversalForward

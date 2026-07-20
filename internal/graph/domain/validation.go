@@ -245,6 +245,14 @@ func ValidatePathResult(request PathRequest, result PathResult) error {
 	if err != nil {
 		return err
 	}
+	for _, node := range result.Nodes {
+		if node.Topic != nil && node.Topic.Status != knowledge.TopicStatusActive {
+			return inconsistent("path topic is not active")
+		}
+		if node.Claim != nil && node.Claim.Status != knowledge.ClaimStatusConfirmed && node.Claim.Status != knowledge.ClaimStatusDisputed {
+			return inconsistent("path claim is outside the formal projection")
+		}
+	}
 	if err := validateEdges(request.WorkspaceID, result.Edges, nodes, nil, false); err != nil {
 		return err
 	}

@@ -56,7 +56,7 @@ Neighborhood 过滤适用于中心节点和邻接节点。`node_types` 明确排
 
 ### Path
 
-应用层双向 BFS：默认 traversal=`BOTH`，每轮把较小 frontier 作为数组参数一次展开，维护两侧 distance/predecessor；同一只读 `REPEATABLE READ` 事务提供稳定快照。有向 Relation 在 BOTH 下可正反探索但记录实际 traversal direction，对称 Relation 始终双向；请求可收紧为 `OUTBOUND|INBOUND`。发现 meeting 后继续处理所有“下一可能总深度 ≤ 当前 best hop”的 frontier，收集所有 best-hop candidates，再重建并按完整 `(node_type,node_id,relation_id...)` path key 选最小。达到 deadline/max depth/max visited 时返回明确 Problem。不得在循环中为每个节点单独查库。
+`QueryPort.FindPath` 保持原子查询边界，PostgreSQL Adapter 在单个只读 `REPEATABLE READ` 事务中编排双向 BFS；不把 snapshot open/close 生命周期泄漏到 Application 公共接口。默认 traversal=`BOTH`，每轮把较小 frontier 作为数组参数一次展开，维护两侧完整层与每个节点的 lexicographically-minimal shortest prefix/suffix。有向 Relation 在 BOTH 下可正反探索但记录实际 traversal direction，对称 Relation 始终双向；请求可收紧为 `OUTBOUND|INBOUND`。发现 meeting 后继续到 `forward_depth + backward_depth >= best_hop`，收集所有 best-hop candidates，再按完整 `(node_type,node_id,relation_id...)` path key 选最小。达到 deadline/max depth/max visited 时返回明确 Problem。Frontier SQL 只读取轻量 Relation arc；最终选中路径后一次批量 hydrate Relation/Evidence summary，禁止逐节点或逐 Evidence 查询。
 
 无路径时用独立、受限查询返回最多 5 个 Active Topic：Claim 的 membership 是其 Confirmed BELONGS_TO Topic 集，Topic 的 membership 是只含自身的 singleton；两端 membership 取交集。不同 Topic→Topic 固定为空，Topic→Claim 仅当 Claim 属于该 Topic 时返回它。该字段明确不是 path edge。语义相似建议不在本任务实现。
 

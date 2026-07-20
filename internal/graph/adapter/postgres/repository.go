@@ -7,7 +7,6 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
-	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -26,11 +25,6 @@ func NewRepository(db DB) (*Repository, error) {
 		return nil, unavailable(errors.New("graph database is nil"))
 	}
 	return &Repository{db: db}, nil
-}
-
-// FindPath 由 T05 实现；当前明确失败而不是返回无路径假成功。
-func (*Repository) FindPath(context.Context, graphdomain.PathRequest) (graphdomain.PathResult, error) {
-	return graphdomain.PathResult{}, unavailable(errors.New("graph path query is not implemented"))
 }
 
 // RelationEvidenceWindow 由 T06 实现；当前明确失败而不是返回空 Evidence 假成功。
