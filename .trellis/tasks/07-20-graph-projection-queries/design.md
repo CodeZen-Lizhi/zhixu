@@ -5,7 +5,7 @@
 1. 新建 `internal/graph` 只读深模块；Knowledge 继续唯一拥有 Topic/Claim/Relation 写模型。
 2. v1 先使用 PostgreSQL canonical facts 的 direct query projection，不新增 Graph 表或双写。仅以 EXPLAIN/压测证据触发可重建 projection。
 3. Global 与 depth-1 pagination 使用“规范请求 + 有界结果 fingerprint + HMAC offset cursor”，结果变化显式 stale；depth 2/3 是单次有界快照。
-4. Neighborhood 使用双向参数化 adjacency SQL；depth 2/3 使用有界 recursive CTE。Path 使用应用层批量双向 BFS，并在只读 repeatable-read 快照中批量展开 frontier，禁止逐节点 N+1。
+4. Neighborhood 使用双向参数化 adjacency SQL；depth 2/3 按完整 frontier 分层批量展开，最多三次固定查询。这样可以在进入下一层前可靠执行 node/edge/frontier 硬预算，避免 recursive CTE 先生成不完整层或无界中间结果。Path 使用应用层批量双向 BFS，并在只读 repeatable-read 快照中批量展开 frontier，禁止逐节点 N+1。
 5. Graph edge 只带 Evidence summary/href；Relation Evidence 独立分页延迟加载。
 6. 前端先交付 bounded SVG/CSS + 列表 fallback，不为尚未证明的容量需要提前引入图可视化依赖。
 
@@ -48,9 +48,11 @@ Application 必须验证：Workspace 一致、NodeRef 合法、edge closure、�
 
 ### Neighborhood
 
-- depth=1：source/target 两侧 `UNION ALL`，固定过滤和 `(relation_type, neighbor_type, neighbor_id, relation_id)` 顺序，生成有界结果窗口/cursor。
-- depth=2/3：recursive CTE 维护 visited NodeRef，按层批量扩展，只有完整层进入响应；达到 node/edge/frontier/time budget 时返回 completed depth + truncated reason。
+- depth=1：source/target 两侧 `UNION ALL`，固定过滤并按 `(relation_type, source_type, source_id, target_type, target_id, relation_id)` 排序，生成有界结果窗口/cursor。
+- depth=2/3：每层把完整 frontier 作为 typed ID 数组一次展开，最多执行三次固定 adjacency 查询并维护 visited NodeRef；只有完整层进入响应。请求显式携带 `max_frontier`（1..500），任一下一层超过 node、edge 或 frontier budget 时整层丢弃并返回上一 completed depth + `NODE_BUDGET|EDGE_BUDGET|FRONTIER_BUDGET`。该方案替代无法在递归中安全停止不完整层的无界 recursive CTE；固定层数批查询不是逐节点 N+1。context/statement timeout返回 Problem，不伪造 partial success。
 - 每次结果批量 union hydration Topic/Claim；Evidence 只 `COUNT`/fingerprint，不加载正文。
+
+Neighborhood 过滤适用于中心节点和邻接节点。`node_types` 明确排除中心类型，或中心为 Topic 且 `topic_ids` 明确不包含中心时，请求直接非法；其余中心节点因生命周期、状态、置信度或更新时间过滤不可见时，与不存在/跨 Workspace 统一返回 Node Not Found。`topic_ids` 限制结果中的所有 Topic 节点，Claim 不直接受该字段限制。depth=1 的 `max_edges` 仍是最多 1000 的业务预算，但 application result-window 固定最多 500 条边；超过窗口返回 `RESULT_WINDOW_LIMIT`，不把 page `limit` 误作 SQL 总窗口上限。
 
 ### Path
 

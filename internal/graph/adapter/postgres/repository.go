@@ -28,11 +28,6 @@ func NewRepository(db DB) (*Repository, error) {
 	return &Repository{db: db}, nil
 }
 
-// NeighborhoodWindow 由 T04 实现；当前明确失败而不是返回空图假成功。
-func (*Repository) NeighborhoodWindow(context.Context, graphdomain.NeighborhoodRequest) (graphdomain.Neighborhood, error) {
-	return graphdomain.Neighborhood{}, unavailable(errors.New("graph neighborhood query is not implemented"))
-}
-
 // FindPath 由 T05 实现；当前明确失败而不是返回无路径假成功。
 func (*Repository) FindPath(context.Context, graphdomain.PathRequest) (graphdomain.PathResult, error) {
 	return graphdomain.PathResult{}, unavailable(errors.New("graph path query is not implemented"))

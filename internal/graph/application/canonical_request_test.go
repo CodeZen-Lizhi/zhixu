@@ -30,7 +30,7 @@ func TestCanonicalNeighborhoodDepth1HashNormalizesDefaultsAndTimeZone(t *testing
 	first := graphdomain.NeighborhoodRequest{WorkspaceID: graphServiceID(90), Center: graphServiceRef(knowledge.NodeTypeTopic, 1), Depth: 1, Filter: graphdomain.GraphFilter{UpdatedAfter: &at}}
 	utc := at.UTC()
 	second := first
-	second.Depth, second.Limit, second.Direction, second.MaxNodes, second.MaxEdges = 3, 100, graphdomain.TraversalBoth, graphdomain.MaxNodes, graphdomain.MaxEdges
+	second.Depth, second.Limit, second.Direction, second.MaxNodes, second.MaxEdges, second.MaxFrontier = 3, 100, graphdomain.TraversalBoth, graphdomain.MaxNodes, graphdomain.MaxEdges, graphdomain.MaxNodes
 	second.Filter.UpdatedAfter = &utc
 	assertSameCanonicalHash(t, CanonicalNeighborhoodDepth1RequestHash, first, second)
 }

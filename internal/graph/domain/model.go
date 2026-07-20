@@ -176,6 +176,7 @@ type NeighborhoodRequest struct {
 	Filter      GraphFilter
 	MaxNodes    int
 	MaxEdges    int
+	MaxFrontier int
 }
 
 // PathRequest 是有界最短路径请求。

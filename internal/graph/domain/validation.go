@@ -139,8 +139,14 @@ func ValidateNeighborhoodRequest(request NeighborhoodRequest) error {
 	if !validID(request.WorkspaceID) || !validRef(request.Center) || request.Depth < 1 || request.Depth > MaxDepth || request.Limit < 1 || request.Limit > MaxLimit || !validDirection(request.Direction) {
 		return invalid("neighborhood request identity, depth, limit, or direction is invalid")
 	}
-	if request.MaxNodes < 1 || request.MaxNodes > MaxNodes || request.MaxEdges < 1 || request.MaxEdges > MaxEdges {
+	if request.MaxNodes < 1 || request.MaxNodes > MaxNodes || request.MaxEdges < 1 || request.MaxEdges > MaxEdges || request.MaxFrontier < 1 || request.MaxFrontier > MaxNodes {
 		return invalid("neighborhood budget exceeds hard limits")
+	}
+	if len(request.Filter.NodeTypes) > 0 && !containsNodeType(request.Filter.NodeTypes, request.Center.Type) {
+		return invalid("neighborhood center type is excluded by node filter")
+	}
+	if request.Center.Type == knowledge.NodeTypeTopic && len(request.Filter.TopicIDs) > 0 && !containsID(request.Filter.TopicIDs, request.Center.ID) {
+		return invalid("neighborhood center is excluded by topic filter")
 	}
 	return ValidateFilter(request.Filter)
 }
@@ -260,7 +266,18 @@ func ValidateNeighborhoodResultFilters(request NeighborhoodRequest, result Neigh
 		if len(request.Filter.NodeTypes) > 0 && !containsNodeType(request.Filter.NodeTypes, node.Ref().Type) {
 			return inconsistent("neighborhood node violates node type filter")
 		}
+		if node.Topic != nil {
+			if node.Topic.Status != knowledge.TopicStatusActive {
+				return inconsistent("neighborhood topic is not active")
+			}
+			if len(request.Filter.TopicIDs) > 0 && !containsID(request.Filter.TopicIDs, node.Topic.Ref.ID) {
+				return inconsistent("neighborhood topic violates topic filter")
+			}
+		}
 		if node.Claim != nil {
+			if len(request.Filter.ClaimStatuses) == 0 && node.Claim.Status != knowledge.ClaimStatusConfirmed && node.Claim.Status != knowledge.ClaimStatusDisputed {
+				return inconsistent("neighborhood claim violates default status filter")
+			}
 			if len(request.Filter.ClaimStatuses) > 0 && !containsClaimStatus(request.Filter.ClaimStatuses, node.Claim.Status) {
 				return inconsistent("neighborhood claim violates status filter")
 			}
@@ -270,6 +287,14 @@ func ValidateNeighborhoodResultFilters(request NeighborhoodRequest, result Neigh
 		}
 		if request.Filter.UpdatedAfter != nil && !nodeUpdatedAt(node).After(*request.Filter.UpdatedAfter) {
 			return inconsistent("neighborhood node violates updated filter")
+		}
+	}
+	for _, ref := range result.BoundaryNodes {
+		if len(request.Filter.NodeTypes) > 0 && !containsNodeType(request.Filter.NodeTypes, ref.Type) {
+			return inconsistent("neighborhood boundary violates node type filter")
+		}
+		if ref.Type == knowledge.NodeTypeTopic && len(request.Filter.TopicIDs) > 0 && !containsID(request.Filter.TopicIDs, ref.ID) {
+			return inconsistent("neighborhood boundary violates topic filter")
 		}
 	}
 	for _, edge := range result.Edges {

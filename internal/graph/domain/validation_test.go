@@ -27,7 +27,7 @@ func TestValidateGraphNodeRequiresDiscriminatedTopicOrClaim(t *testing.T) {
 
 func TestValidateRequestsEnforceFiltersLimitsAndDirection(t *testing.T) {
 	confidence := 0.5
-	request := NeighborhoodRequest{WorkspaceID: id(9), Center: ref(knowledge.NodeTypeTopic, 1), Depth: 3, Limit: MaxLimit, Direction: TraversalBoth, MaxNodes: MaxNodes, MaxEdges: MaxEdges, Filter: GraphFilter{NodeTypes: []knowledge.NodeType{knowledge.NodeTypeTopic, knowledge.NodeTypeClaim}, RelationTypes: []knowledge.RelationType{knowledge.RelationBelongsTo}, RelationStatuses: []knowledge.RelationStatus{knowledge.RelationStatusConfirmed, knowledge.RelationStatusStale}, ClaimStatuses: []knowledge.ClaimStatus{knowledge.ClaimStatusConfirmed, knowledge.ClaimStatusDisputed}, ClaimMinConfidence: &confidence}}
+	request := NeighborhoodRequest{WorkspaceID: id(9), Center: ref(knowledge.NodeTypeTopic, 1), Depth: 3, Limit: MaxLimit, Direction: TraversalBoth, MaxNodes: MaxNodes, MaxEdges: MaxEdges, MaxFrontier: MaxNodes, Filter: GraphFilter{NodeTypes: []knowledge.NodeType{knowledge.NodeTypeTopic, knowledge.NodeTypeClaim}, RelationTypes: []knowledge.RelationType{knowledge.RelationBelongsTo}, RelationStatuses: []knowledge.RelationStatus{knowledge.RelationStatusConfirmed, knowledge.RelationStatusStale}, ClaimStatuses: []knowledge.ClaimStatus{knowledge.ClaimStatusConfirmed, knowledge.ClaimStatusDisputed}, ClaimMinConfidence: &confidence}}
 	if err := ValidateNeighborhoodRequest(request); err != nil {
 		t.Fatalf("ValidateNeighborhoodRequest() error = %v", err)
 	}
@@ -48,7 +48,7 @@ func TestValidateRequestsEnforceFiltersLimitsAndDirection(t *testing.T) {
 
 func TestValidateNeighborhoodEnforcesClosureOrderingAndUniqueness(t *testing.T) {
 	now := time.Now().UTC()
-	request := NeighborhoodRequest{WorkspaceID: id(9), Center: ref(knowledge.NodeTypeClaim, 1), Depth: 1, Limit: 25, Direction: TraversalBoth, MaxNodes: 10, MaxEdges: 10}
+	request := NeighborhoodRequest{WorkspaceID: id(9), Center: ref(knowledge.NodeTypeClaim, 1), Depth: 1, Limit: 25, Direction: TraversalBoth, MaxNodes: 10, MaxEdges: 10, MaxFrontier: 10}
 	claim, topic := claimNode(1, 9, now), topicNode(2, 9, now)
 	result := Neighborhood{WorkspaceID: id(9), Center: request.Center, Nodes: []GraphNode{{Claim: &claim}, {Topic: &topic}}, Edges: []GraphEdge{edge(3, 9, claim.Ref, topic.Ref, EdgeTraversalForward)}, LayerCounts: []int{1}, CompletedDepth: 1, Meta: completeMeta()}
 	if err := ValidateNeighborhood(request, result); err != nil {
@@ -117,7 +117,7 @@ func TestValidateGlobalAndSearchContracts(t *testing.T) {
 func TestValidateEdgeRequiresCompatibleTypeAndEvidenceSummary(t *testing.T) {
 	now := time.Now().UTC()
 	claim, topic := claimNode(1, 9, now), topicNode(2, 9, now)
-	request := NeighborhoodRequest{WorkspaceID: id(9), Center: claim.Ref, Depth: 1, Limit: 25, Direction: TraversalBoth, MaxNodes: 10, MaxEdges: 10}
+	request := NeighborhoodRequest{WorkspaceID: id(9), Center: claim.Ref, Depth: 1, Limit: 25, Direction: TraversalBoth, MaxNodes: 10, MaxEdges: 10, MaxFrontier: 10}
 	result := Neighborhood{WorkspaceID: id(9), Center: claim.Ref, Nodes: []GraphNode{{Claim: &claim}, {Topic: &topic}}, Edges: []GraphEdge{edge(3, 9, claim.Ref, topic.Ref, EdgeTraversalForward)}, LayerCounts: []int{1}, CompletedDepth: 1, Meta: completeMeta()}
 	result.Edges[0].Type = knowledge.RelationSupports
 	assertCode(t, ValidateNeighborhood(request, result), ErrorCodeProjectionInconsistent)
@@ -130,7 +130,7 @@ func TestSymmetricEdgesRemainTraversableInEitherDirection(t *testing.T) {
 	a, b := claimNode(1, 9, now), claimNode(2, 9, now)
 	edge := edge(3, 9, a.Ref, b.Ref, EdgeTraversalReverse)
 	edge.Type = knowledge.RelationDuplicates
-	request := NeighborhoodRequest{WorkspaceID: id(9), Center: b.Ref, Depth: 1, Limit: 25, Direction: TraversalOutbound, MaxNodes: 10, MaxEdges: 10}
+	request := NeighborhoodRequest{WorkspaceID: id(9), Center: b.Ref, Depth: 1, Limit: 25, Direction: TraversalOutbound, MaxNodes: 10, MaxEdges: 10, MaxFrontier: 10}
 	result := Neighborhood{WorkspaceID: id(9), Center: b.Ref, Nodes: []GraphNode{{Claim: &a}, {Claim: &b}}, Edges: []GraphEdge{edge}, LayerCounts: []int{1}, CompletedDepth: 1, Meta: PageMeta{Fingerprint: strings.Repeat("a", 64), Complete: true}}
 	if err := ValidateNeighborhood(request, result); err != nil {
 		t.Fatalf("symmetric reverse traversal rejected: %v", err)
@@ -142,7 +142,7 @@ func TestValidateAdapterResultsFailClosedAgainstFiltersAndDirection(t *testing.T
 	confidence, threshold := 0.8, 0.7
 	claim, topic := claimNode(1, 9, now), topicNode(2, 9, now)
 	claim.Confidence = &confidence
-	baseRequest := NeighborhoodRequest{WorkspaceID: id(9), Center: claim.Ref, Depth: 1, Limit: 25, Direction: TraversalOutbound, MaxNodes: 10, MaxEdges: 10, Filter: GraphFilter{NodeTypes: []knowledge.NodeType{knowledge.NodeTypeClaim, knowledge.NodeTypeTopic}, RelationTypes: []knowledge.RelationType{knowledge.RelationBelongsTo}, ClaimStatuses: []knowledge.ClaimStatus{knowledge.ClaimStatusConfirmed}, ClaimMinConfidence: &threshold, RelationMinConfidence: &threshold, UpdatedAfter: ptrTime(now.Add(-time.Minute))}}
+	baseRequest := NeighborhoodRequest{WorkspaceID: id(9), Center: claim.Ref, Depth: 1, Limit: 25, Direction: TraversalOutbound, MaxNodes: 10, MaxEdges: 10, MaxFrontier: 10, Filter: GraphFilter{NodeTypes: []knowledge.NodeType{knowledge.NodeTypeClaim, knowledge.NodeTypeTopic}, RelationTypes: []knowledge.RelationType{knowledge.RelationBelongsTo}, ClaimStatuses: []knowledge.ClaimStatus{knowledge.ClaimStatusConfirmed}, ClaimMinConfidence: &threshold, RelationMinConfidence: &threshold, UpdatedAfter: ptrTime(now.Add(-time.Minute))}}
 	makeResult := func() Neighborhood {
 		claimValue, topicValue := claim, topic
 		edgeValue := edge(3, 9, claimValue.Ref, topicValue.Ref, EdgeTraversalForward)
@@ -169,6 +169,42 @@ func TestValidateAdapterResultsFailClosedAgainstFiltersAndDirection(t *testing.T
 	nodeTypeRequest := baseRequest
 	nodeTypeRequest.Filter.NodeTypes = []knowledge.NodeType{knowledge.NodeTypeClaim}
 	assertCode(t, ValidateNeighborhood(nodeTypeRequest, makeResult()), ErrorCodeProjectionInconsistent)
+
+	t.Run("default claim status", func(t *testing.T) {
+		value := makeResult()
+		value.Nodes[0].Claim.Status = knowledge.ClaimStatusSuggested
+		request := baseRequest
+		request.Filter.ClaimStatuses = nil
+		assertCode(t, ValidateNeighborhood(request, value), ErrorCodeProjectionInconsistent)
+	})
+	t.Run("active topic", func(t *testing.T) {
+		value := makeResult()
+		value.Nodes[1].Topic.Status = knowledge.TopicStatusMerged
+		assertCode(t, ValidateNeighborhood(baseRequest, value), ErrorCodeProjectionInconsistent)
+	})
+	t.Run("topic scope", func(t *testing.T) {
+		request := baseRequest
+		request.Filter.TopicIDs = []foundation.ID{id(99)}
+		assertCode(t, ValidateNeighborhood(request, makeResult()), ErrorCodeProjectionInconsistent)
+	})
+	t.Run("boundary node type", func(t *testing.T) {
+		value := makeResult()
+		value.Nodes = value.Nodes[:1]
+		value.BoundaryNodes = []knowledge.NodeRef{topic.Ref}
+		value.LayerCounts = []int{0}
+		request := baseRequest
+		request.Filter.NodeTypes = []knowledge.NodeType{knowledge.NodeTypeClaim}
+		assertCode(t, ValidateNeighborhood(request, value), ErrorCodeProjectionInconsistent)
+	})
+	t.Run("boundary topic scope", func(t *testing.T) {
+		value := makeResult()
+		value.Nodes = value.Nodes[:1]
+		value.BoundaryNodes = []knowledge.NodeRef{topic.Ref}
+		value.LayerCounts = []int{0}
+		request := baseRequest
+		request.Filter.TopicIDs = []foundation.ID{id(99)}
+		assertCode(t, ValidateNeighborhood(request, value), ErrorCodeProjectionInconsistent)
+	})
 
 	pathRequest := PathRequest{WorkspaceID: id(9), From: claim.Ref, To: topic.Ref, Direction: TraversalOutbound, RelationTypes: []knowledge.RelationType{knowledge.RelationBelongsTo}, MaxDepth: 2, MaxVisited: 10}
 	path := PathResult{WorkspaceID: id(9), From: claim.Ref, To: topic.Ref, Status: PathFound, Nodes: []GraphNode{{Claim: &claim}, {Topic: &topic}}, Edges: []GraphEdge{makeResult().Edges[0]}, HopCount: 1, ExploredNodes: 2}

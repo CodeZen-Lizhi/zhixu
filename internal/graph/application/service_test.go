@@ -70,7 +70,7 @@ func TestServiceRejectsAdapterOverReturnAcrossQueryShapes(t *testing.T) {
 	assertServiceError(t, err, foundation.ErrorConsistencyViolation, graphdomain.ErrorCodeProjectionInconsistent)
 
 	center := graphServiceRef(knowledge.NodeTypeTopic, 1)
-	_, err = service.Neighborhood(ctx, graphdomain.NeighborhoodRequest{WorkspaceID: workspaceID, Center: center, Depth: 1, Limit: 25, Direction: graphdomain.TraversalBoth, MaxNodes: 10, MaxEdges: 10})
+	_, err = service.Neighborhood(ctx, graphdomain.NeighborhoodRequest{WorkspaceID: workspaceID, Center: center, Depth: 1, Limit: 25, Direction: graphdomain.TraversalBoth, MaxNodes: 10, MaxEdges: 10, MaxFrontier: 10})
 	assertServiceError(t, err, foundation.ErrorConsistencyViolation, graphdomain.ErrorCodeProjectionInconsistent)
 
 	_, err = service.FindPath(ctx, graphdomain.PathRequest{WorkspaceID: workspaceID, From: center, To: graphServiceRef(knowledge.NodeTypeClaim, 2), Direction: graphdomain.TraversalBoth, MaxDepth: 6, MaxVisited: 20})

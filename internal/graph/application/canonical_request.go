@@ -38,6 +38,7 @@ type canonicalNeighborhoodDepth1Request struct {
 	Filter      canonicalFilter                `json:"filter"`
 	MaxNodes    int                            `json:"max_nodes"`
 	MaxEdges    int                            `json:"max_edges"`
+	MaxFrontier int                            `json:"max_frontier"`
 }
 
 type canonicalRelationEvidenceRequest struct {
@@ -56,16 +57,19 @@ func CanonicalNeighborhoodDepth1RequestHash(request graphdomain.NeighborhoodRequ
 	if direction == "" {
 		direction = graphdomain.TraversalBoth
 	}
-	maxNodes, maxEdges := request.MaxNodes, request.MaxEdges
+	maxNodes, maxEdges, maxFrontier := request.MaxNodes, request.MaxEdges, request.MaxFrontier
 	if maxNodes == 0 {
 		maxNodes = graphdomain.MaxNodes
 	}
 	if maxEdges == 0 {
 		maxEdges = graphdomain.MaxEdges
 	}
+	if maxFrontier == 0 {
+		maxFrontier = graphdomain.MaxNodes
+	}
 	return hashCanonicalCursorValue(canonicalNeighborhoodDepth1Request{
 		WorkspaceID: request.WorkspaceID, Center: request.Center, Direction: direction,
-		Filter: normalizeFilter(request.Filter), MaxNodes: maxNodes, MaxEdges: maxEdges,
+		Filter: normalizeFilter(request.Filter), MaxNodes: maxNodes, MaxEdges: maxEdges, MaxFrontier: maxFrontier,
 	})
 }
 
