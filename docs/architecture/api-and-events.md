@@ -116,6 +116,12 @@ Command：
 - index.activated。
 - health.scan.completed。
 - review.scored。
+- conversation.created。
+- answer.pending。
+- rag.plan.started / rag.plan.completed。
+- rag.retrieval.started / rag.retrieval.completed。
+- rag.validation.started / rag.validation.completed。
+- answer.completed / answer.refused / answer.clarification_required。
 
 事件字段：
 
@@ -125,6 +131,13 @@ Command：
 - workspace_id。
 - resource_ref。
 - payload_summary。
+- schema_version。
+
+M6-04 已实现 `GET /api/v1/events?workspace_id=...`。Wire 使用持久单调序号作为 `id`，Envelope
+包含 `id/type/occurred_at/workspace_id/resource_ref/resource_version/payload_summary/schema_version`；
+heartbeat 使用 SSE comment，不承载业务数据。`Last-Event-ID` 必须是正十进制序号，非法/未来游标
+返回 400，早于保留窗口返回 409 和 `details.action=refetch`。未提供游标时从连接建立水位开始，
+不会补发全部历史。
 
 ## 10. 断线恢复
 
@@ -174,8 +187,24 @@ M5 已落地的同步摄取命令为 `POST /api/v1/source-versions/{source_versi
 
 ### RAG
 
-- 输入：question、conversation、scope、web policy。
-- 输出：Workflow Run；完成后 Answer。
+M6-04 已实现以下公开契约，精确 Schema、状态码、Problem 和 405 以 `api/openapi/openapi.json` 为准：
+
+- `POST /api/v1/conversations`：严格 JSON + `Idempotency-Key`，首次 201、精确重放 200。
+- `GET /api/v1/conversations?workspace_id=&cursor=&limit=`：按最近活动时间稳定分页。
+- `GET /api/v1/conversations/{conversation_id}?workspace_id=`：Conversation + weak ETag。
+- `POST /api/v1/conversations/{conversation_id}/questions`：Question、Scope、`answer_depth`、
+  `output_format`；首次 202、精确重放 200，并返回 Answer 与 `status_url`。
+- `GET /api/v1/conversations/{conversation_id}/turns?workspace_id=&cursor=&limit=&latest=`：按
+  `(ordinal,id)` 恢复 Question/Answer 投影；`latest=true` 返回最新一条恢复投影。
+- `GET /api/v1/answers/{answer_id}?workspace_id=`：四态发布结果（pending/completed/refused/
+  clarification_required）、Workflow 当前阶段、RAG v2 结果、可打开 Citation 和 retrieval summary。
+- `POST /api/v1/answers/{answer_id}/feedback`：五类 append-only 反馈；首次 201、精确重放 200。
+
+Question 的持久 Workflow Input 只含稳定 ID、版本和 Hash；正文与有界历史由 Conversation 事实源加载。
+同一 Conversation 同时只允许一个非终态 Answer Workflow。事实性 Answer 经过 Query Plan、Retrieval、
+Knowledge Eligibility、结构化生成、Citation 与 Faithfulness 门禁后才原子发布；Provider/数据库故障保留为
+Workflow 失败，不伪装成业务 Refusal。`allow_original_sources/allow_web` 当前没有可发布资格时显式拒绝，
+不会静默忽略。
 
 ### Approval
 
@@ -222,7 +251,7 @@ Session、API Token、CSRF/Origin 与 Capability Middleware 仍属于 M10；在�
 
 M6-03 不暴露通用 `/tools/{name}:execute` HTTP API。Tool 只能由服务端持久 Workflow Node 间接执行；
 Agent Tool Request 不能携带 Workspace、Capability、Approval、Credential、path、command 或 Git args。
-Conversation/RAG API、SSE 与反馈由 M6-04 设计，正式 Session/API Token/CSRF/Capability Middleware 仍由 M10 提供。
+Conversation/RAG API、SSE 与反馈已由 M6-04 落地；正式 Session/API Token/CSRF/Capability Middleware 仍由 M10 提供。
 
 认证 API 至少提供登录、登出、当前 Session、Session 轮换，以及 API Token 创建、列出元数据和撤销能力。创建 Token 时明文只返回一次；响应和日志不得再次暴露完整 Token。
 
@@ -244,6 +273,8 @@ Conversation/RAG API、SSE 与反馈由 M6-04 设计，正式 Session/API Token/
 - `web/src/api/search.ts` 是当前 Search wire 的严格 Decoder/Client 边界；它必须把网络 JSON 当作
   `unknown`，拒绝未知 mode/capability、非有限分数、非法 UUID/时间、缺失 href 和错误 cursor 类型，
   Feature/Component 不得直接断言原始响应。
+- `web/src/api/conversation.ts`（Conversation/RAG JSON）与 `web/src/events/**`（SSE fetch-stream）分别是
+  M6-04 的唯一严格 wire owner；Feature/Component 不得重复解析，SSE 只能定向失效 Query，最终状态必须回查。
 
 ## 15. 测试
 

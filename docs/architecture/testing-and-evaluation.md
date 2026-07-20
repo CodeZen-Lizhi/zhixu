@@ -266,6 +266,26 @@ M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一�
 - Composition/Workflow：API Contract Registry 与 Worker Execution Registry 分离；Tool disabled 时 capability 明确 unavailable但进程可 ready，enabled 时 Executor/Workflow/依赖不完整或 Web Policy 缺失才 readiness fail closed；至少一条只读 Tool 必须由真实 River Node 执行 Agent Request→Registry→Tool Call→untrusted result，不能用直接调用 `ExecutionService` 的测试冒充。生产持久 Definition 只允许空参数/稳定 ID 工具；CalculateDiff River 测试只验证通用 Node Executor，不表示 raw Diff 内容已进入生产目录。
 - 最终门禁：定向 count/race、安全 suite、M5 回归、全仓 `go test -race ./...`、`go vet ./...`、`make test`、`go mod tidy -diff`、真实 PostgreSQL/River/Filesystem/Git、Docker/Compose Tool smoke 与 `git diff --check`。
 
+### 8.9 M6-04 RAG Conversation And SSE 专项
+
+- Domain/PostgreSQL：Conversation/Question/Answer/Feedback 严格输入、canonical hash、Workspace 隔离、稳定
+  cursor、最多 8 Turn/32 KiB 上下文、单 active Answer Workflow、幂等重放/冲突及 Answer/Model Run 原子终态。
+- HTTP/OpenAPI：7 条 Conversation/Answer REST 与 `GET /api/v1/events`，覆盖严格 JSON、202/status URL、
+  ETag、四态 Answer、Clarification、Citation href、retrieval summary、Problem/404 防枚举和 405。
+- SSE：持久单调 ID、连接水位、heartbeat、取消释放、保留窗口内重放，以及 invalid/future 400、expired 409
+  `action=refetch`；Payload 脱敏且只触发权威 Query 回查。
+- Agent/Workflow：冻结上下文、PLAN、Retrieval/Eligibility/Topic、RAG v2、Citation/Faithfulness、阶段事件和
+  terminal-first replay。正常 completed seam 精确断言 PLAN+ANSWER+REVIEW 三次 Model Call，Question 重放不再调用 Provider。
+- Frontend：严格 API/SSE decoder、Infinite Query、latest Turn/current_stage 恢复、有界轮询、四态 Answer、
+  Clarification/Conflict/Citation/summary/topic/follow-up/Feedback，以及桌面/移动无横向溢出和焦点恢复。
+- `ZHIXU_TEST_DATABASE_URL=... make rag-integration` 走公共 HTTP→River→Retrieval→Knowledge→Model→Answer→
+  SSE→Feedback；不能直接 seed Conversation/Question/Answer/Workflow 或绕过 Worker。
+- `make compose-rag-smoke` 使用唯一 Compose project、随机端口/数据库密码/Chat canary、disposable Git Workspace
+  和 volume；经公开 Scan/Ingestion/Approval/Reindex 后只补无公开 API 的正式 Knowledge 资格，再执行会话闭环与
+  exact replay，结束 trap 必须清理。request-aware OpenAI-compatible fixture 按 Schema/请求生成，不按调用序号返回。
+- 上述确定性 fixture 证明产品 seam 和失败安全，不是现实模型质量证据；真实 Provider Gold Set、阈值和全产品
+  Playwright E2E 仍归 M11。
+
 ## 9. E2E
 
 固定 Fixture Workspace，执行 PRD 最终演示场景。
@@ -403,6 +423,10 @@ flowchart LR
 
 Search API 进入发布候选时，还必须运行真实 PostgreSQL HTTP、Retrieval/River fault 与 Compose API
 smoke；三者分别证明查询边界、异步唯一性和部署黑盒闭环，不能互相替代。
+
+Conversation/RAG 进入发布候选时还必须重复 `make rag-integration` 与 `make compose-rag-smoke`；前者证明
+单进程公开契约到真实 PostgreSQL/River 的精确状态闭环，后者证明容器网络、配置、Worker 消费、SSE 和清理。
+二者均不能替代 M10 Auth/容量/备份恢复或 M11 全量 E2E/真实模型评测。
 
 ## 21. Definition of Done
 

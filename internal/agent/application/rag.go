@@ -174,7 +174,7 @@ func (e *RAGExecutor) Execute(ctx context.Context, request RAGExecutionRequest) 
 		return RAGTerminalProposal{}, applicationError(foundation.ErrorDependencyUnavailable, errorCodeRAGExecutorMissing, false, errors.New("rag executor is unavailable"))
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		return RAGTerminalProposal{}, applicationError(foundation.ErrorInvalidInput, errorCodeRAGRequestInvalid, false, errors.New("rag execution context is required"))
 	}
 	if !canonicalApplicationID(request.WorkspaceID) || !canonicalApplicationID(request.ModelRunRef) ||
 		len(request.PlanInput) == 0 || len(request.AnswerInput) == 0 || len(request.AnswerInput) > MaxStructuredInputBytes ||

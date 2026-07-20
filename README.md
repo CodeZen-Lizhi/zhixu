@@ -13,10 +13,10 @@
 - Versioned knowledge：使用 Markdown 与 Git 保存正式知识及历史。
 - Durable agents：Agent 工作流支持持久化、恢复、重试和审计。
 
-## Planned capabilities
+## Capabilities and roadmap
 
 - 文章优化与版本管理
-- 混合检索与带引用 RAG 问答
+- 混合检索与带引用 RAG 问答（已提供 Conversation API、可恢复 SSE 和 `/chat` 页面）
 - 知识关系分析与可操作知识图谱
 - 语义反向链接与知识健康检查
 - Proposal、人工审批与 Git 安全写回
@@ -35,7 +35,10 @@
 
 The project is under active development. The current skeleton provides a Go API and worker, a React web application, and PostgreSQL with pgvector.
 
-项目正在开发中，当前工程骨架包含 Go API 与 Worker、React Web，以及启用 pgvector 的 PostgreSQL。
+项目正在开发中。当前仓库已经提供 Go API/Worker、React Web、PostgreSQL + pgvector，以及可运行的
+Workspace→摄取→索引→Search/Evidence 和 Conversation→RAG Answer→SSE→Feedback 闭环。Graph、
+Collection/表格、Artifact/Review/Interview、正式认证、安全/容量/备份门禁和最终发布验收仍属于后续
+M7–M11，不能把当前状态视为整个产品已经交付。
 
 ## Local development
 
@@ -79,6 +82,18 @@ Then open <http://127.0.0.1:8080>. Health and dependency status are available at
 - `POST /api/v1/workspaces/{id}/workflows`: start a durable Workflow Run and return `202 + workflow_run_id`
 - `GET /api/v1/workflows/{id}`: query durable Workflow Run state
 - `POST /api/v1/workflows/{run_id}/human-tasks/{task_id}/decision`: submit one version-checked Human Task decision
+- `POST/GET /api/v1/conversations`: create and page Conversations
+- `POST /api/v1/conversations/{id}/questions`: submit an idempotent RAG Question and receive `202 + status_url`
+- `GET /api/v1/conversations/{id}/turns`: restore paged Question/Answer turns
+- `GET /api/v1/answers/{id}`: read the authoritative Answer, Workflow stage and retrieval summary
+- `POST /api/v1/answers/{id}/feedback`: append idempotent evaluation feedback
+- `GET /api/v1/events?workspace_id=...`: replayable SSE notifications; clients refetch authoritative resources
+
+Open `/chat` to create/select a Conversation and `/chat/{conversationId}` to continue it. Chat is fail-closed by
+default because `.env.example` sets `ZHIXU_CHAT_PROVIDER=disabled`. To execute Questions, configure the same
+`ZHIXU_CHAT_*` OpenAI-compatible provider/model values for API and Worker through the Compose environment; never
+commit the API key. This local loopback mode provides Workspace isolation, not authentication. Session/API Token,
+CSRF/Origin and Capability middleware remain M10 work, so do not expose the current API as a secure public service.
 
 The Worker has a separate health server on container port `8081`; it is not
 published to the host by Compose. Its liveness only proves that the process and
@@ -130,7 +145,14 @@ Useful standalone checks:
 make go-test go-vet
 make web-lint web-typecheck web-test web-build
 make openapi-check compose-check docker-build
+ZHIXU_TEST_DATABASE_URL='postgres://...' make rag-integration
+make compose-rag-smoke
 ```
+
+`rag-integration` uses a caller-supplied disposable PostgreSQL target and proves the public HTTP→River→Retrieval→
+Knowledge eligibility→three model phases (`PLAN`, `ANSWER`, `REVIEW`)→validated Answer→SSE→Feedback path plus
+exact replay. `compose-rag-smoke` creates an isolated Compose project, ports, database volume, Git workspace and
+credential canary, exercises the same black-box product path, then removes all disposable state.
 
 `compose-check` validates the Compose model. A release candidate must also run
 `make compose-up`, query both API and Worker readiness, exercise the documented

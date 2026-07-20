@@ -282,18 +282,31 @@ Tool Registry 负责：
 - 执行。
 - 审计。
 
-M6-04 构建模型可见 Tool 目录时，只能使用 Worker 当前真实可执行、配置启用且持久 Workflow Node 精确允许的 Tool 版本。
+模型可见 Tool 目录只能使用 Worker 当前真实可执行、配置启用且持久 Workflow Node 精确允许的 Tool 版本。
 M6-03 的 API 只冻结 11 个 Contract 用于 Definition 校验，尚未把动态目录接入模型；不能用 Fake Executor 冒充 Worker 能力。Tool Result
 必须经过输出 Schema、大小限制和共享脱敏，并标记 `untrusted_data=true`；Source 或 Tool Result 不得递归
 成为新的 Tool Request。
 
 M6-03 先把 strict Agent Tool Request 转换为不含模型自由文本 `reason` 的 `PersistedToolInvocationV1`。持久
 `agent-rag` Definition 只包含 `ReadSource`、`ValidateCitation`、`ReadGitStatus`：它们的输入为空或稳定 ID tuple。
-Search query 与 Diff before/after 是内容型参数，不得作为 raw Workflow input 持久化；M6-04
-需先提供安全 request receipt 或同一 Agent Attempt 内执行 seam，再发布新 Definition 版本开放这些能力。
+Search query 与 Diff before/after 是内容型参数，不得作为 raw Workflow input 持久化。M6-04 的
+retrieval-first RAG 在同一 Agent Attempt 内通过 Retrieval Application seam 执行 Search；持久 RAG Workflow
+Input 只保存 Conversation/Question/Answer、请求/上下文 Hash 和版本绑定，仍未开放通用模型 Tool Loop。
 
-M6-03 只提供安全 Tool seam 和持久 Tool Call；Conversation、RAG HTTP API、SSE、反馈、Tool loop 预算与
-前端展示仍属于 M6-04，不能把内部 Tool Workflow smoke 声称为会话产品已完成。
+M6-04 已完成 Conversation、RAG HTTP API、持久阶段/SSE、Feedback 和真实 `/chat` 页面；通用模型 Tool Loop
+预算仍未实现，不能把 retrieval-first 单节点 Workflow 描述为任意 Tool Calling 会话。
+
+## 16.1 Conversation RAG v2 执行契约
+
+- 执行顺序为冻结上下文→Query Plan/Clarification→1..3 rewrites→Retrieval/Dedup→Eligibility/Topic
+  批量绑定→RAG Answer v2→Citation→Faithfulness Review→原子发布。
+- Query Plan 与 Faithfulness Review 的内存模型输入由服务端注入对应 `model_run_ref`；调用方不得伪造保留字段。
+  持久 Workflow Input 不保存上述模型输入、Question 正文、历史或 Evidence。
+- 正常 completed 路径固定形成 PLAN、ANSWER、REVIEW 三次 Model Call；每次仍使用 Structured Runner 的严格
+  Schema/Domain 门禁，修复调用只在该阶段输出非法时按既有预算发生。
+- RAG Answer v2 在 v1 基础上增加服务端验证的 `related_topics` 和 1..5 个 follow-up questions；Topic 必须来自
+  Knowledge binding 并关联实际 Citation，不能信任模型自造 ID/名称。
+- Retrieval summary、真实阶段事件和最终 Answer 都持久化；阶段通知不含正文/Evidence，刷新从数据库投影恢复。
 
 ## 17. 模型路由
 

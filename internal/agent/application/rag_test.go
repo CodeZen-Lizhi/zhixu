@@ -44,6 +44,19 @@ func TestRAGExecutorRejectsInvalidScopeBeforeProviderCall(t *testing.T) {
 	}
 }
 
+func TestRAGExecutorRejectsNilContextBeforeProviderCall(t *testing.T) {
+	ports := &ragPorts{}
+	executor := newTestRAGExecutor(t, ports)
+
+	_, err := executor.Execute(nil, testRAGRequest())
+	if applicationErrorCode(err) != errorCodeRAGRequestInvalid {
+		t.Fatalf("err=%v", err)
+	}
+	if ports.planCalls != 0 || ports.searchCalls != 0 || ports.runCalls != 0 {
+		t.Fatalf("unexpected calls: %#v", ports)
+	}
+}
+
 func TestRAGExecutorTurnsClarificationPlanIntoCanonicalProposal(t *testing.T) {
 	ports := &ragPorts{plan: domain.RAGQueryPlanResult{
 		ResultType: domain.ResultTypeRAGQueryPlan, SchemaID: domain.RAGQueryPlanSchemaID,

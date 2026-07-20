@@ -59,6 +59,7 @@ TanStack Query：
 - Workflow。
 - Graph。
 - Collections。
+- Conversation pages、Turns、Answer/Clarification、retrieval summary 和 Feedback results。
 
 ### URL State
 
@@ -66,18 +67,21 @@ TanStack Query：
 - 排序。
 - 当前对象。
 - 图谱中心节点。
+- 当前 Conversation ID 与可选 Citation 选择。
 
 ### Local Draft
 
 - Proposal 编辑。
 - Article Diff 选择。
 - Artifact 大纲。
+- 未提交 Question、检索范围、回答深度/格式和面板开关。
 
 ### Event State
 
 - Workflow 进度。
 - Human Task。
 - Index 激活。
+- RAG 阶段通知与 SSE 重连游标。
 
 SSE 事件触发 Query Invalidations，不作为唯一数据源。
 
@@ -89,6 +93,7 @@ SSE 事件触发 Query Invalidations，不作为唯一数据源。
 /documents/:id
 /optimize/:revisionId
 /search
+/chat
 /chat/:conversationId
 /proposals
 /proposals/:id
@@ -138,10 +143,17 @@ Diff Draft 保存服务器 Proposal Revision，不只存浏览器。
 
 ## 10. RAG
 
-- Streaming 仅用于展示生成阶段/文本。
-- 最终 Answer 以服务端校验结果为准。
-- 引用面板可定位 Source Span。
-- 冲突卡片独立显示。
+- `/chat` 和 `/chat/:conversationId` 已实现。前者创建/选择 Conversation，后者提供 Conversation rail、
+  Answer timeline/composer 和 Evidence 区；移动端改为单列与 Citation drawer。
+- `web/src/api/conversation.ts` 是 Conversation/RAG JSON 的唯一严格 decoder/client 边界，
+  `web/src/events/**` 是唯一 SSE fetch-stream owner。事件只做定向 Query invalidation。
+- Answer 严格区分 pending、completed、refused、clarification_required；刷新时通过最新 Turn、Answer 的
+  `current_stage` 与 Workflow 投影恢复，不把客户端内存或流式草稿当最终事实。
+- SSE 断线显示重连状态并执行有界轮询；过期游标先重查权威资源，再无游标重连。轮询成功或失败都计预算，
+  禁止无限后台请求。
+- 页面已覆盖 Scope、depth/format、Clarification、Conflict、Citation、retrieval summary、Related Topic、
+  follow-up 和五类 Feedback；Citation drawer 关闭后恢复触发控件焦点。
+- M6-04 SSE 传输阶段/终态摘要，不传逐 token 正文；最终 Answer 始终以服务端校验结果为准。
 
 ## 11. Review
 
@@ -189,6 +201,9 @@ Diff Draft 保存服务器 Proposal Revision，不只存浏览器。
 - Integration：Command→Workflow→SSE。
 - E2E：六个最高层 Seam。
 - Accessibility：键盘、颜色、焦点。
+
+M6-04 已有组件/路由测试和真实临时 PostgreSQL/API 的桌面 1280px、移动 390px 浏览器烟测；全产品
+Playwright 六 seam、其他主要业务页面、统一全站 SSE 扩展与最终可访问性验收仍归 M9/M11。
 
 ## 17. 构建产物
 

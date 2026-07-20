@@ -30,7 +30,7 @@
 | M1-01 | M1 | 初始化 Go module、API/Worker composition root、统一 ID/Clock/Error/Config | `go.mod`, `cmd/**`, `internal/platform/**` | M0-02,M0-04 | `go test ./...`, `go vet ./...`, readiness 单测 | 骨架形成错误依赖 | 子 Agent | 已完成 |
 | M1-02 | M1 | 初始化 React/Vite/TS/Query/Router/Vitest；Playwright 由 M11 E2E 正式接入 | `web/**` | M0-03,M0-04 | `npm ci`, lint/typecheck/test/build；首页非空 | 工具链版本漂移 | 子 Agent | React/Vite/TS/Query/Router/Vitest 已完成；Playwright 尚未安装 |
 | M1-03 | M1 | 建立显式 Compose、PostgreSQL+pgvector、配置样例和 CI | `deploy/compose.yml`, `Dockerfile*`, `.env.example`, `.github/workflows/**` | M1-01 | `docker compose -f deploy/compose.yml config`; Docker smoke | 误读父目录 Compose | 子 Agent | 已完成 |
-| M1-04 | M1 | 建立 OpenAPI-first、Problem Details、cursor、ETag、Idempotency、SSE envelope | `api/openapi/**`, `internal/presentation/**`, `web/src/api/**` | M1-01,M1-02 | contract test、生成客户端无漂移 | 概念契约字段遗漏 | 主 Agent + 子 Agent | 部分完成：OpenAPI/Problem/部分 Idempotency；cursor/ETag/SSE 待实现 |
+| M1-04 | M1 | 建立 OpenAPI-first、Problem Details、cursor、ETag、Idempotency、SSE envelope | `api/openapi/**`, `internal/presentation/**`, `web/src/api/**` | M1-01,M1-02 | contract test、生成客户端无漂移 | 概念契约字段遗漏 | 主 Agent + 子 Agent | 已完成当前已发布 API 基线：OpenAPI/Problem、稳定 cursor、ETag、幂等与持久 SSE envelope/replay；后续领域接口继续 additive 演进 |
 | M2-01 | M2 | Eino 16 项最小 PoC（模型、Embedding、Retriever、Streaming、Schema、Tool、Callback、River） | 独立 `internal/platform/eino/**`, `research/eino-poc/**` | M1-01,M1-03 | `make test-eino-poc` 逐项报告；race/资源关闭 | 框架类型侵入领域 | 子 Agent，主 Agent 复核 | 已完成采用门禁，部分验证未通过 |
 | M2-02 | M2 | 根据 PoC 锁定或拒绝 Eino，建立 Adapter/Fake/ADR | `docs/architecture/adr/0013*`, `internal/agentadapter/**` | M2-01 | Adapter Contract；替换路径测试 | 锁定不可替换 | 主 Agent | 已完成：主模块不正式采用 Eino |
 | M3-01 | M3 | 设计并实现 Core/Change/Workflow/Retrieval/Learning/Ops 迁移 | `migrations/**`, `sqlc.yaml`, `queries/**` | M0-01,M1-01 | 空库/升级/重复迁移/回滚前向策略测试 | 漏实体或版本字段 | 子 Agent | 待开始 |
@@ -48,7 +48,7 @@
 | M6-01 | M6 | 实现 FTS/pgvector/Embedding/Index Version/RRF/Dedup/Rerank Adapter | `internal/retrieval/**`, `queries/**` | M5-02,M3-01,M2-02 | 检索 contract、过滤正确、降级显式、index switch | 向量维度/中文分词 | 子 Agent | 已完成：M6-A/B/C/D、Search/Evidence HTTP/OpenAPI、top-100 Cursor、真实 PostgreSQL/River/Compose 闭环及全量质量门禁通过；ANN/P95 归 M10 |
 | M6-02 | M6 | 实现 Agent 结构化输出、引用校验、拒答、冲突和模型版本记录 | `internal/agent/**`, `internal/platform/models/**`, `internal/{knowledge,retrieval}/**`, `eval/**` | M2-02,M5-05,M6-01 | RAG eval、schema repair、citation/refusal test | 幻觉与假成功 | 主 Agent + 子 Agent | 已完成：严格四类 Schema、三阶段 Repair、完整 Citation tuple、Eligibility/Formal Claim、Conflict disclosure、Model Run/Call、真实 PostgreSQL/Workflow/Compose 与两轮审查通过；真实 Provider 质量阈值归 M11 |
 | M6-03 | M6 | 实现 Tool Registry、Schema、Capability、SSRF、命令和输出安全 | `internal/tools/**`, `internal/platform/**` | M5-03,M2-02 | permission matrix、prompt injection、SSRF、command injection | 模型文本越权 | 主 Agent + 子 Agent | 已完成：版本化 Registry/Schema、持久 Workflow Policy/Tool Call、SSRF/命令/路径/脱敏、trusted write audit 与真实 PG/River/Compose fault smoke 全部通过 |
-| M6-04 | M6 | 实现 RAG API、会话、SSE 流式展示和反馈评测 | `internal/app/**`, `web/src/features/rag/**` | M1-04,M6-02,M6-03 | RAG E2E、SSE reconnect、拒答样本 | 流式草稿被误当完成 | 主 Agent + 子 Agent | 进行中：T01-T07 契约、迁移、领域、Conversation Repository、持久 SSE、原子派发、严格 Workflow receipt/catalog 与执行上下文加载已完成；T08-T11 RAG 执行/HTTP/生产装配及 T12-T17 前端/E2E/交付门禁待实施 |
+| M6-04 | M6 | 实现 RAG API、会话、SSE 流式展示和反馈评测 | `internal/app/**`, `web/src/features/rag/**` | M1-04,M6-02,M6-03 | RAG E2E、SSE reconnect、拒答样本 | 流式草稿被误当完成 | 主 Agent + 子 Agent | 已完成：T01-T17 已交付 Conversation/Question/Answer/Feedback、RAG v2、持久阶段/SSE、`/chat`、真实 PostgreSQL/River integration、disposable Compose smoke、文档同步、全量审查和归档 |
 | M7-01 | M7 | 实现 Graph Projection、局部/全局/路径查询和证据延迟加载 | `internal/graph/**`, `web/src/features/graph/**` | M5-05,M6-01 | 分页、路径正确、超时降级、非全量渲染 | 图谱毛线球 | 子 Agent | 待开始 |
 | M7-02 | M7 | 实现 Semantic Link Candidate、fingerprint、确认/忽略 Proposal | `internal/graph/**`, `internal/changecontrol/**` | M7-01,M5-03 | 忽略候选不重复；内容变化再评估 | 候选噪声 | 子 Agent | 待开始 |
 | M7-03 | M7 | 实现 Smart Collection Query AST、列表/表格/卡片和健康扫描 | `internal/collection/**`, `internal/health/**` | M3-01,M5-05,M1-04 | cursor、列/过滤/分组、fingerprint、Issue 幂等 | 查询注入/第二事实源 | 子 Agent | 待开始 |
@@ -92,7 +92,8 @@
 
 ## 5. Canonical Verification Commands
 
-最终应提供并持续维护以下命令；当前仓库尚未具备这些入口：
+最终应提供并持续维护以下命令。当前 `make test`、`rag-integration`、`openapi-check`、Compose
+Search/Tool/RAG smoke 等入口已存在；下列尚不存在的最终发布命令仍由 M10/M11 补齐，不能视为已通过：
 
 ```bash
 make verify

@@ -139,19 +139,19 @@
 
 ## Acceptance Criteria
 
-- [ ] AC-01：创建、列表、打开 Conversation 和提交 Question 的 HTTP/OpenAPI 契约可运行；首次与精确重放分别返回正确状态，冲突不重复创建记录或 Workflow。
+- [x] AC-01：创建、列表、打开 Conversation 和提交 Question 的 HTTP/OpenAPI 契约可运行；首次与精确重放分别返回正确状态，冲突不重复创建记录或 Workflow。
 - [x] AC-02：Question、Answer pending、Workflow、Outbox、River Job 和初始 Server Event 原子创建；注入任一步失败时全部回滚，commit response-loss 可精确重放。
-- [ ] AC-03：公开 Conversation API 经真实 PostgreSQL/River/Worker 完成至少一条 approved-knowledge RAG Answer v2；事实 assertion 有可打开 Citation，Related Topic 受服务端绑定验证，并返回 1..5 个后续问题。
-- [ ] AC-04：无证据、未批准证据、Citation 不可打开、Faithfulness 不通过和校验耗尽样本均得到稳定 Refusal；不得产生 completed Answer。
-- [ ] AC-05：冲突 Evidence 生成显式 Conflict positions；缺少完整披露时拒答。
-- [ ] AC-06：歧义问题产生 Clarification 并可由下一 Question 继续；Query Plan 的 1..3 个 rewrite 与检索摘要在刷新后仍可查询，且正文不进入 SSE/日志。
-- [ ] AC-07：最终 Answer/Refusal/Clarification 与 Model Run 终态原子一致；故障和响应丢失测试不存在双发布、重复 Provider 副作用或半完成事实。
-- [ ] AC-08：SSE 使用单调 ID；Last-Event-ID 能补发窗口内事件，非法/未来/超窗游标分别返回稳定 Problem；SSE 内容扫描无正文、Secret 和绝对路径。
-- [ ] AC-09：刷新或 SSE 中断后，前端从 Conversation/Answer/Workflow Query 恢复；阶段事件和轮询都不会把 pending 草稿标为完成。
-- [ ] AC-10：五类 Feedback 可幂等记录；Citation 类绑定受验证；反馈前后正式 Knowledge/Proposal 数量和 Answer 内容不变。
-- [ ] AC-11：`/chat/:conversationId` 在桌面和移动端完成创建会话、提问、澄清、观察阶段、显示 Answer/Refusal、打开 Citation、查看检索摘要/Related Topic/后续问题并提交 Feedback；键盘和焦点可用。
-- [ ] AC-12：`go test -race ./...`、`go vet ./...`、`go mod tidy -diff`、`make test`、`make rag-integration`、OpenAPI gate、前端 lint/typecheck/test/build 和 `make compose-rag-smoke` 全部通过。
-- [ ] AC-13：API、数据库、事件、配置、运行/回滚文档同步；M6-04 的边界不被描述成 M9 全站 UI、M10 Auth 或 M11 最终发布验收已完成。
+- [x] AC-03：公开 Conversation API 经真实 PostgreSQL/River/Worker 完成至少一条 approved-knowledge RAG Answer v2；事实 assertion 有可打开 Citation，Related Topic 受服务端绑定验证，并返回 1..5 个后续问题。
+- [x] AC-04：无证据、未批准证据、Citation 不可打开、Faithfulness 不通过和校验耗尽样本均得到稳定 Refusal；不得产生 completed Answer。
+- [x] AC-05：冲突 Evidence 生成显式 Conflict positions；缺少完整披露时拒答。
+- [x] AC-06：歧义问题产生 Clarification 并可由下一 Question 继续；Query Plan 的 1..3 个 rewrite 与检索摘要在刷新后仍可查询，且正文不进入 SSE/日志。
+- [x] AC-07：最终 Answer/Refusal/Clarification 与 Model Run 终态原子一致；故障和响应丢失测试不存在双发布、重复 Provider 副作用或半完成事实。
+- [x] AC-08：SSE 使用单调 ID；Last-Event-ID 能补发窗口内事件，非法/未来/超窗游标分别返回稳定 Problem；SSE 内容扫描无正文、Secret 和绝对路径。
+- [x] AC-09：刷新或 SSE 中断后，前端从 Conversation/Answer/Workflow Query 恢复；阶段事件和轮询都不会把 pending 草稿标为完成。
+- [x] AC-10：五类 Feedback 可幂等记录；Citation 类绑定受验证；反馈前后正式 Knowledge/Proposal 数量和 Answer 内容不变。
+- [x] AC-11：`/chat/:conversationId` 在桌面和移动端完成创建会话、提问、澄清、观察阶段、显示 Answer/Refusal、打开 Citation、查看检索摘要/Related Topic/后续问题并提交 Feedback；键盘和焦点可用。
+- [x] AC-12：`go test -race ./...`、`go vet ./...`、`go mod tidy -diff`、`make test`、`make rag-integration`、OpenAPI gate、前端 lint/typecheck/test/build 和 `make compose-rag-smoke` 全部通过。
+- [x] AC-13：API、数据库、事件、配置、运行/回滚文档同步；M6-04 的边界不被描述成 M9 全站 UI、M10 Auth 或 M11 最终发布验收已完成。
 
 ## Out Of Scope
 

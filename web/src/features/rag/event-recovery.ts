@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
+  ServerEventClientError,
   connectServerEvents,
+  type ServerEventConnection,
   type ServerEventConnectionState,
   type ServerEventEnvelope,
 } from "../../events";
@@ -50,9 +52,16 @@ export const useRagEventRecovery = (workspaceId: string) => {
     }
     const storageKey = cursorKey(workspaceId);
     const lastEventId = window.sessionStorage.getItem(storageKey) ?? undefined;
-    const connection = connectServerEvents({
+    let connection: ServerEventConnection | undefined;
+    let cancelled = false;
+    const recover = async (): Promise<void> => {
+      await queryClient.resetQueries({ queryKey: ragQueryKeys.conversations(workspaceId), exact: true });
+      await queryClient.invalidateQueries({ queryKey: ragQueryKeys.all(workspaceId) });
+      window.sessionStorage.removeItem(storageKey);
+    };
+    const connect = (cursor?: string): ServerEventConnection => connectServerEvents({
       workspaceId,
-      ...(lastEventId === undefined ? {} : { lastEventId }),
+      ...(cursor === undefined ? {} : { lastEventId: cursor }),
       onStateChange: setState,
       onEvent: async (event) => {
         if (event.invalidations.some((target) => target.resource === "conversation")) {
@@ -62,13 +71,23 @@ export const useRagEventRecovery = (workspaceId: string) => {
           queryClient.invalidateQueries({ queryKey }));
         window.sessionStorage.setItem(storageKey, event.id);
       },
-      onRecoveryRequired: async () => {
-        await queryClient.resetQueries({ queryKey: ragQueryKeys.conversations(workspaceId), exact: true });
-        await queryClient.invalidateQueries({ queryKey: ragQueryKeys.all(workspaceId) });
-        window.sessionStorage.removeItem(storageKey);
-      },
+      onRecoveryRequired: recover,
     });
-    return () => connection.close();
+    try {
+      connection = connect(lastEventId);
+    } catch (error) {
+      if (!(error instanceof ServerEventClientError) || error.code !== "CURSOR_REJECTED") throw error;
+      void recover().then(() => {
+        if (!cancelled) connection = connect();
+      }).catch((recoveryError: unknown) => {
+        setState("closed");
+        console.error("RAG SSE cursor recovery failed", recoveryError);
+      });
+    }
+    return () => {
+      cancelled = true;
+      connection?.close();
+    };
   }, [queryClient, workspaceId]);
 
   return state;

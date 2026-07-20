@@ -1088,3 +1088,64 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 实施 T15 文档/规范同步与全量门禁，再进行 T16 独立跨层复审和 T17 提交归档。
+
+## Session 33: M6-04 文档同步与全量门禁
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T15）
+**Branch**: `dev`
+
+### Summary
+
+把 M6-04 的真实 HTTP、数据库、Worker、模型、SSE 与前端行为同步到 README、架构、测试、部署和父任务状态，并执行全仓质量门禁。
+
+### Main Changes
+
+- README 增加 Conversation/RAG API、`/chat`、Chat fail-closed 配置和 RAG 两条真实门禁说明。
+- API/Agent/Workflow/Frontend/Testing/Deployment 文档同步 RAG v2、四态 Answer、阶段恢复、三次 Model Call、SSE 重放和明确 M9/M10/M11 边界。
+- Implementation Checklist 与父任务更新已实现切片，保留 Graph/Collection/Artifact/Review/Auth/容量/最终发布未完成事实。
+
+### Testing
+
+- `go test -race -count=1 ./...` 与 `go vet ./...` 通过。
+- `make test`、前端 lint/typecheck/106 tests/build、OpenAPI、tidy、task validate 与 diff check 通过。
+- `make rag-integration` 与 `make compose-rag-smoke` 通过；T13 已完成 1280/390 真实浏览器烟测，无横向溢出或应用 console error。
+
+### Status
+
+[OK] M6-04 T15 completed; T16 in progress, T17 pending.
+
+### Next Steps
+
+- 对 M6-04 全任务提交范围执行独立跨层/Go/SQL/frontend 审查，修复后归档任务。
+
+## Session 34: M6-04 全量审查与恢复边界收口
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T16-T17）
+**Branch**: `dev`
+
+### Summary
+
+完成 M6-04 独立跨层第二轮审查，关闭本地 SSE cursor 污染、nil Context 和验收追踪问题，进入提交归档。
+
+### Main Changes
+
+- RAG SSE Hook 对浏览器损坏 cursor 先回查权威 Query，成功后清理并无游标重连；回查失败保留 cursor、关闭状态并显式报告错误。
+- RAG Executor 对 nil Context 返回稳定 invalid input，不再用 Background 绕过调用方取消链路。
+- PRD AC-01..13、父子任务状态和前端测试数同步到真实结果。
+
+### Testing
+
+- `go test -race -count=1 ./...`、`go vet ./...`、`go mod tidy -diff`、`make test` 通过。
+- 前端 lint、typecheck、108 tests、production build 通过。
+- OpenAPI、Trellis task validate 与 `git diff --check` 通过。
+- 独立审查第二轮 P0/P1/P2 均为 0；主 Agent Go 与通用五轴审查未发现当前范围内明显问题。
+
+### Status
+
+[OK] M6-04 T01-T16 completed; T17 commit/archive in progress.
+
+### Next Steps
+
+- 提交当前任务改动，记录 Trellis session 并归档 M6-04；随后返回父任务选择下一项依赖就绪工作。

@@ -61,6 +61,8 @@ flowchart TB
 - 宿主默认只发布 `127.0.0.1:8080`。
 - M6-D 起 API 构造 PostgreSQL Retrieval Search/Evidence 与 Query Embedder；缺失 Search/Evidence/Cursor
   依赖时保留路由并显式返回 503，不返回假空结果。
+- M6-04 起 API 构造 Conversation/Answer/Feedback Repository 与共享 Server Event Store。Question 命令只在
+  Chat 显式启用且 RAG Definition/Dispatcher 依赖完整时开放；否则读 API/SSE 保持可用，提交返回稳定 503。
 
 ### worker
 
@@ -71,6 +73,8 @@ flowchart TB
 - Compose healthcheck 实际请求 `http://127.0.0.1:8081/readyz`。
 - SIGINT/SIGTERM 使用 graceful `Stop`；fatal invariant 可选择互斥的
   `StopAndCancel`，hard deadline 超时非零退出。
+- Chat 启用时同时注册 Relation 与 RAG Definition/Executor；任一 Chat/Retrieval/Knowledge/Conversation/
+  Event/Workflow 依赖不完整都 readiness fail closed，不注册 fake executor。
 
 ### postgres
 
@@ -223,7 +227,9 @@ Chat 配置同样由 Configured Factory 唯一解释。`disabled` 不读取 Endp
 不注入 Deterministic Fake，也不阻断不依赖 Agent 的 Worker Definition；启用后 Worker 才注册 Agent Executor/Definition。
 每个 Model Run 固定 generation/retrieval 基线，每条 Model Call 固定该次实际 Adapter/Model/Profile/Prompt/Schema
 版本和 max output tokens；Provider 不在 Adapter 内自动重试或静默切换模型。
-Compose 的共享 Chat 环境块同时注入 API 与 Worker，为 M6-04 API 接线保留同一配置语义。
+Compose 的共享 Chat 环境块同时注入 API 与 Worker。API 用它决定 Question dispatch capability，Worker 用它
+构造真实 RAG Model/Executor；两端 Provider/Model/Version 必须一致。`ZHIXU_CHAT_PROVIDER=disabled` 是默认的
+明确关闭状态，此时 `/chat` 可查看/创建 Conversation，但 Question 提交不可用且不得假成功。
 
 Tool Runtime 同样由 API/Worker 共享配置解释：API 只验证/冻结 Contract 和可启动 Definition，Worker 才注入真实 Executor。
 `disabled` 不构造普通 Tool ExecutionService或可启动 Tool Definition，Tool capability 明确 unavailable但进程仍可 ready；Safe Writeback trusted audit 仍必须可用。`enabled` 时缺 Contract、Executor、
@@ -311,6 +317,22 @@ docker compose -f deploy/compose.yml --env-file .env.example exec -T worker \
   wget -q -O - http://127.0.0.1:8081/readyz
 docker compose -f deploy/compose.yml --env-file .env.example down -v
 ```
+
+RAG Conversation 的可重复黑盒门禁为：
+
+```bash
+ZHIXU_TEST_DATABASE_URL='postgres://...' make rag-integration
+make compose-rag-smoke
+```
+
+`compose-rag-smoke` 叠加 `deploy/compose.rag-smoke.yml`，随机创建 Compose project、宿主端口、PostgreSQL
+密码和 Chat Bearer canary。模型 fixture 与 Worker 共用 network namespace，使生产 Adapter 仍访问 loopback；
+fixture 只接受匹配 Bearer、已知 strict Schema 和有界 JSON。脚本经公共 Workspace/Scan/Ingestion/Approval/
+Reindex 与 Conversation/Question/Answer/SSE/Feedback API 运行真实 Worker，只用测试 harness 补目前没有公开命令的
+Knowledge Eligibility 事实；不会直接 seed Conversation、Answer 或 Workflow。退出时必须删除容器、volume 和临时目录。
+
+该门禁证明 M6-04 容器闭环，不证明正式 Provider 质量、Auth/CSRF/Capability、50 万容量、备份恢复或最终发布包；
+这些仍由 M10/M11 验收。
 
 本轮已确认镜像以 UID `10001` 运行、Migrate 在 API/Worker 前成功完成、Worker
 health 端口未发布宿主、API/Worker 同时 ready、SIGTERM 退出码为 0，并验证 PostgreSQL
