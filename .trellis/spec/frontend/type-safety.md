@@ -95,3 +95,14 @@ Hash/非有限分数、未知 mode/capability、缺失 href、空 `heading_path`
 OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Feature Status Union 生成方式仍待
 后续任务统一；Manifest 和 Lockfile 证明前不得增加包名或版本。当前 Search 手写 Decoder 是明确边界，
 不是允许其他 Feature 复制 DTO/Decoder 的先例。
+
+## M6-04 Conversation/RAG Wire Contract
+
+- `web/src/api/conversation.ts` 是 Conversation、Question、Turn、Answer、Feedback 与 RAG 结果的唯一传输边界；
+  Feature/Component 禁止再次解析 snake_case、枚举、UUID、时间或 Problem。
+- Answer 必须解码为 `pending|completed|refused|clarification_required` 四态判别联合；状态与 result/result_type、
+  citation、retrieval summary 不一致时拒绝整个响应，禁止静默补默认值。
+- `current_stage` 只接受六个持久 RAG 阶段或 null；Answer ETag 同时绑定 Answer version、Workflow version 和
+  stage，200/304 都必须校验该格式。
+- `web/src/events/**` 是唯一 SSE Envelope、frame、cursor 与恢复 owner；未知或非法 payload 不进入 Feature，
+  成功处理事件后才推进 Last-Event-ID。

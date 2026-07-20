@@ -34,6 +34,12 @@ func TestRepositoryReadsTurnsAnswersAndPublishedContextWithoutCrossWorkspaceLeak
 	seedPublishedTurn(t, ctx, pool, fixture, 1, conversationdomain.AnswerPublicationCompleted, "First question", "Approved answer", now.Add(time.Minute))
 	seedPublishedTurn(t, ctx, pool, fixture, 3, conversationdomain.AnswerPublicationRefused, "Third question", "No approved evidence", now.Add(3*time.Minute))
 	seedPendingTurn(t, ctx, pool, fixture, 2, "Second question", now.Add(2*time.Minute))
+	pendingRunID := fixture.runID(2)
+	completedRunID := fixture.runID(1)
+	seedRAGStageEvent(t, ctx, pool, workspaceB, nil, nil, fixture.answerID(2), "validation.completed", now.Add(4*time.Minute), "cross-workspace-stage")
+	seedRAGStageEvent(t, ctx, pool, workspaceA, &conversationRecord.Conversation.ID, &pendingRunID, fixture.answerID(2), "plan.started", now.Add(5*time.Minute), "pending-plan-started")
+	seedRAGStageEvent(t, ctx, pool, workspaceA, &conversationRecord.Conversation.ID, &pendingRunID, fixture.answerID(2), "retrieval.completed", now.Add(6*time.Minute), "pending-retrieval-completed")
+	seedRAGStageEvent(t, ctx, pool, workspaceA, &conversationRecord.Conversation.ID, &completedRunID, fixture.answerID(1), "validation.completed", now.Add(7*time.Minute), "completed-validation")
 
 	counted, counter := countingConversationRepository(t, pool)
 	first, err := counted.ListTurns(ctx, conversationapplication.ListTurnsQuery{
@@ -52,7 +58,8 @@ func TestRepositoryReadsTurnsAnswersAndPublishedContextWithoutCrossWorkspaceLeak
 		t.Fatalf("completed turn = %#v", first.Items[0])
 	}
 	if first.Items[1].Answer == nil || first.Items[1].Answer.Answer.PublicationStatus != conversationdomain.AnswerPublicationPending ||
-		first.Items[1].Answer.Workflow.Status != "running" || first.Items[1].Answer.AssistantText != "" {
+		first.Items[1].Answer.Workflow.Status != "running" || first.Items[1].Answer.AssistantText != "" ||
+		first.Items[1].Answer.CurrentStage == nil || *first.Items[1].Answer.CurrentStage != conversationapplication.RAGCurrentStageRetrievalCompleted {
 		t.Fatalf("pending turn = %#v", first.Items[1])
 	}
 	second, err := counted.ListTurns(ctx, conversationapplication.ListTurnsQuery{
@@ -64,11 +71,15 @@ func TestRepositoryReadsTurnsAnswersAndPublishedContextWithoutCrossWorkspaceLeak
 	if second.Items[0].Answer == nil || second.Items[0].Answer.AssistantText != "No approved evidence" || len(second.Items[0].Answer.Citations) != 0 {
 		t.Fatalf("refused turn = %#v", second.Items[0])
 	}
+	if second.Items[0].Answer.CurrentStage != nil {
+		t.Fatalf("answer without RAG event stage = %#v", second.Items[0].Answer.CurrentStage)
+	}
 
 	completedAnswerID := fixture.answerID(1)
 	answer, err := counted.GetAnswer(ctx, workspaceA, completedAnswerID)
 	if err != nil || answer.Answer.ID != completedAnswerID || answer.AssistantText != "Approved answer" ||
-		len(answer.Citations) != 1 || answer.Citations[0].ID != "citation-1" {
+		len(answer.Citations) != 1 || answer.Citations[0].ID != "citation-1" || answer.CurrentStage == nil ||
+		*answer.CurrentStage != conversationapplication.RAGCurrentStageValidationCompleted {
 		t.Fatalf("GetAnswer() = %#v, %v", answer, err)
 	}
 	_, crossWorkspaceErr := counted.GetAnswer(ctx, workspaceB, completedAnswerID)
@@ -90,6 +101,68 @@ func TestRepositoryReadsTurnsAnswersAndPublishedContextWithoutCrossWorkspaceLeak
 		contextTurns[0].AssistantText != "Approved answer" || contextTurns[1].AssistantText != "No approved evidence" {
 		t.Fatalf("published context = %#v", contextTurns)
 	}
+}
+
+func seedRAGStageEvent(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	workspaceID foundation.ID,
+	conversationID, workflowRunID *foundation.ID,
+	answerID foundation.ID,
+	stage string,
+	at time.Time,
+	sourceRef string,
+) {
+	t.Helper()
+	eventType := "rag." + stage
+	resourceRef := "answer:" + string(answerID)
+	payload, err := json.Marshal(map[string]string{"answer_id": string(answerID), "stage": stage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO ops.server_event(
+		workspace_id,conversation_id,workflow_run_id,event_type,resource_ref,resource_version,
+		payload_summary,schema_version,source_event_ref,occurred_at,expires_at
+	) VALUES($1,$2,$3,$4,$5,1,$6::jsonb,1,$7,$8::timestamptz,$8::timestamptz + interval '24 hours')`,
+		string(workspaceID), optionalID(conversationID), optionalID(workflowRunID), eventType, resourceRef, payload,
+		sourceRef, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRepositoryRejectsMismatchedLatestRAGStageEvent(t *testing.T) {
+	repository, pool, ctx := newConversationTestRepository(t)
+	workspaceID := conversationTurnID(4)
+	seedConversationWorkspaces(t, ctx, pool, workspaceID)
+	now := time.Date(2026, 7, 19, 15, 30, 0, 0, time.UTC)
+	conversationRecord := conversationCreateRecord(t, workspaceID, conversationTurnID(5), "Invalid stage", "invalid-stage-conversation", now)
+	if _, err := repository.CreateConversation(ctx, conversationRecord); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedConversationRuntimeBase(t, ctx, pool, workspaceID, conversationRecord.Conversation.ID, 1500, now)
+	seedPendingTurn(t, ctx, pool, fixture, 1, "Question", now.Add(time.Minute))
+	payload, err := json.Marshal(map[string]string{"answer_id": string(fixture.answerID(1)), "stage": "retrieval.started"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO ops.server_event(
+		workspace_id,conversation_id,workflow_run_id,event_type,resource_ref,resource_version,
+		payload_summary,schema_version,source_event_ref,occurred_at,expires_at
+	) VALUES($1,$2,$3,'rag.plan.started',$4,1,$5::jsonb,1,'mismatched-stage',$6::timestamptz,$6::timestamptz + interval '24 hours')`,
+		string(workspaceID), string(conversationRecord.Conversation.ID), string(fixture.runID(1)),
+		"answer:"+string(fixture.answerID(1)), payload, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = repository.GetAnswer(ctx, workspaceID, fixture.answerID(1))
+	requireConversationRepositoryError(t, err, foundation.ErrorConsistencyViolation, ErrorCodePersistenceCorrupt)
+}
+
+func optionalID(value *foundation.ID) any {
+	if value == nil {
+		return nil
+	}
+	return string(*value)
 }
 
 func TestRepositoryPublishedContextUsesLatestEightAndThirtyTwoKiBBudget(t *testing.T) {

@@ -118,10 +118,41 @@ type WorkflowRunView struct {
 	UpdatedAt time.Time
 }
 
+// RAGCurrentStage 是刷新后可从持久事件恢复的冻结执行阶段。
+type RAGCurrentStage string
+
+const (
+	// RAGCurrentStagePlanStarted 表示查询规划已开始。
+	RAGCurrentStagePlanStarted RAGCurrentStage = "plan.started"
+	// RAGCurrentStagePlanCompleted 表示查询规划已完成。
+	RAGCurrentStagePlanCompleted RAGCurrentStage = "plan.completed"
+	// RAGCurrentStageRetrievalStarted 表示检索已开始。
+	RAGCurrentStageRetrievalStarted RAGCurrentStage = "retrieval.started"
+	// RAGCurrentStageRetrievalCompleted 表示检索已完成。
+	RAGCurrentStageRetrievalCompleted RAGCurrentStage = "retrieval.completed"
+	// RAGCurrentStageValidationStarted 表示回答校验已开始。
+	RAGCurrentStageValidationStarted RAGCurrentStage = "validation.started"
+	// RAGCurrentStageValidationCompleted 表示回答校验已完成。
+	RAGCurrentStageValidationCompleted RAGCurrentStage = "validation.completed"
+)
+
+// Valid 报告阶段是否属于公开查询契约冻结的六个值。
+func (stage RAGCurrentStage) Valid() bool {
+	switch stage {
+	case RAGCurrentStagePlanStarted, RAGCurrentStagePlanCompleted,
+		RAGCurrentStageRetrievalStarted, RAGCurrentStageRetrievalCompleted,
+		RAGCurrentStageValidationStarted, RAGCurrentStageValidationCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
 // AnswerView 返回 Answer 事实、Workflow 状态和统一结果投影。
 type AnswerView struct {
 	Answer        conversationdomain.Answer
 	Workflow      WorkflowRunView
+	CurrentStage  *RAGCurrentStage
 	AssistantText string
 	Citations     []agentdomain.Citation
 }

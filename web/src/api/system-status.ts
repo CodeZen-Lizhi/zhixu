@@ -1,5 +1,6 @@
 export type SystemOverallStatus = "ready" | "degraded";
 export type DatabaseStatus = "ready" | "unavailable";
+export type RAGCapabilityStatus = "ready" | "disabled" | "unavailable";
 
 export interface SystemStatus {
   status: SystemOverallStatus;
@@ -7,6 +8,10 @@ export interface SystemStatus {
   database: {
     status: DatabaseStatus;
     message?: string;
+  };
+  rag: {
+    status: RAGCapabilityStatus;
+    reason?: "rag_dependencies_unavailable";
   };
   requestId: string;
 }
@@ -70,14 +75,22 @@ const readDatabaseStatus = (value: unknown): DatabaseStatus => {
   );
 };
 
+const readRAGStatus = (value: unknown): RAGCapabilityStatus => {
+  if (value === "ready" || value === "disabled" || value === "unavailable") return value;
+  throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含未知 rag.status", false);
+};
+
 export const decodeSystemStatus = (value: unknown): SystemStatus => {
-  if (!isRecord(value) || !isRecord(value.database)) {
+  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.rag)) {
     throw new ApiBoundaryError(
       "INVALID_RESPONSE",
       "系统状态响应结构无效",
       false,
     );
   }
+  assertExactKeys(value, ["status", "version", "database", "rag", "request_id"], "root");
+  assertExactKeys(value.database, ["status", "message"], "database");
+  assertExactKeys(value.rag, ["status", "reason"], "rag");
 
   const message = value.database.message;
   if (message !== undefined && typeof message !== "string") {
@@ -87,6 +100,10 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
       false,
     );
   }
+  const reason = value.rag.reason;
+  if (reason !== undefined && reason !== "rag_dependencies_unavailable") {
+    throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含无效 rag.reason", false);
+  }
 
   return {
     status: readOverallStatus(value.status),
@@ -94,6 +111,10 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
     database: {
       status: readDatabaseStatus(value.database.status),
       ...(message === undefined ? {} : { message }),
+    },
+    rag: {
+      status: readRAGStatus(value.rag.status),
+      ...(reason === undefined ? {} : { reason }),
     },
     requestId: readNonEmptyString(value.request_id, "request_id"),
   };
@@ -143,4 +164,10 @@ export const fetchSystemStatus = async (
   }
 
   return decodeSystemStatus(payload);
+};
+const assertExactKeys = (value: Record<string, unknown>, allowed: readonly string[], field: string): void => {
+  const keys = new Set(allowed);
+  if (Object.keys(value).some((key) => !keys.has(key))) {
+    throw new ApiBoundaryError("INVALID_RESPONSE", `系统状态响应包含未知字段：${field}`, false);
+  }
 };

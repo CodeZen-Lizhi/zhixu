@@ -1065,3 +1065,14 @@ Correct: RAG RUNNING 延迟绑定真实 Retrieval；post-provider 持久化失�
 Wrong: 每次进度重放重新生成 occurred_at，导致 Event exact binding 冲突。
 Correct: 首次记录真实时钟；重放在 advisory lock 内恢复既有 occurred_at，并校验其余 binding。
 ```
+
+## M6-04 RAG Stage Query Projection Contract
+
+- Answer/Turn Query 的 `current_stage` 只从同 Workspace、同 Answer `resource_ref` 与 `answer_id` 绑定的
+  `ops.server_event` 最新阶段事件恢复；不在 Answer 表复制第二套执行状态。
+- 对外只允许 `plan.started|plan.completed|retrieval.started|retrieval.completed|validation.started|validation.completed`；
+  无阶段返回 NULL，终态 Answer 可保留最后一次 `validation.completed`。
+- 列表必须在单条有界 Turn 查询内投影阶段，禁止逐 Answer 回查。`00023_rag_stage_projection_index.sql` 使用
+  `(workspace_id, resource_ref, seq DESC)` 的 RAG 事件部分索引支撑最新事件读取。
+- Answer ETag 必须包含当前阶段；阶段事件不会修改 Answer/Workflow version，若 ETag 只含两者会错误返回 304。
+- 真实 PostgreSQL 测试必须覆盖最新阶段、无阶段、跨 Workspace 隔离、终态保留、索引执行计划和迁移 Down/Up。

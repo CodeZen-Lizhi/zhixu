@@ -385,9 +385,9 @@
     "/api/v1/events": {
       "get": {
         "operationId": "subscribeServerEvents",
-        "parameters": [{ "$ref": "#/components/parameters/WorkspaceIDQuery" }, { "name": "Last-Event-ID", "in": "header", "required": false, "schema": { "type": "string", "pattern": "^[0-9]+$", "maxLength": 19 } }],
+        "parameters": [{ "$ref": "#/components/parameters/WorkspaceIDQuery" }, { "name": "Last-Event-ID", "in": "header", "required": false, "schema": { "type": "string", "pattern": "^[1-9][0-9]*$", "maxLength": 19 } }],
         "responses": {
-          "200": { "description": "SSE stream. Each data field is a ServerEventEnvelope; heartbeat comments carry no data.", "headers": { "Cache-Control": { "schema": { "type": "string", "const": "no-cache" } } }, "content": { "text/event-stream": { "schema": { "$ref": "#/components/schemas/ServerEventEnvelope" } } } },
+          "200": { "description": "SSE stream. Each data field is a ServerEventEnvelope; heartbeat comments carry no data.", "headers": { "Cache-Control": { "schema": { "type": "string", "const": "no-store" } } }, "content": { "text/event-stream": { "schema": { "$ref": "#/components/schemas/ServerEventEnvelope" } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/Conflict" },
           "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }
         }
@@ -460,7 +460,7 @@
       "Cursor": { "name": "cursor", "in": "query", "required": false, "schema": { "$ref": "#/components/schemas/PageCursor" } },
       "Limit": { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } }
     },
-    "headers": { "ETag": { "description": "Weak resource projection tag. Answer tags bind both Answer and Workflow versions.", "schema": { "type": "string", "pattern": "^W/\\\"(?:[1-9][0-9]*|answer-[1-9][0-9]*-workflow-[1-9][0-9]*)\\\"$" } } },
+    "headers": { "ETag": { "description": "Weak resource projection tag. Answer tags bind Answer, Workflow and persisted RAG stage projections.", "schema": { "type": "string", "pattern": "^W/\\\"(?:[1-9][0-9]*|answer-[1-9][0-9]*-workflow-[1-9][0-9]*-stage-(?:none|plan\\.(?:started|completed)|retrieval\\.(?:started|completed)|validation\\.(?:started|completed)))\\\"$" } } },
     "responses": {
       "BadRequest": { "description": "Invalid strict JSON, identifier, cursor or option.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
       "UnsupportedMediaType": { "description": "JSON command body did not use application/json.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
@@ -990,14 +990,14 @@
       "PageCursor": { "type": "string", "minLength": 1, "maxLength": 2048, "description": "Opaque versioned base64url cursor bound to the resource and sort order." },
       "CreateConversationRequest": {
         "type": "object", "required": ["workspace_id"],
-        "properties": { "workspace_id": { "type": "string", "format": "uuid" }, "title": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 } },
+        "properties": { "workspace_id": { "type": "string", "format": "uuid" }, "title": { "type": ["string", "null"], "minLength": 1, "maxLength": 512, "x-max-utf8-bytes": 512 } },
         "additionalProperties": false
       },
       "Conversation": {
         "type": "object", "required": ["id", "workspace_id", "status", "version", "last_activity_at", "created_at", "updated_at", "archived_at"],
         "properties": {
           "id": { "type": "string", "format": "uuid" }, "workspace_id": { "type": "string", "format": "uuid" },
-          "status": { "type": "string", "enum": ["open", "archived"] }, "title": { "type": ["string", "null"], "maxLength": 256 },
+          "status": { "type": "string", "enum": ["open", "archived"] }, "title": { "type": ["string", "null"], "maxLength": 512, "x-max-utf8-bytes": 512 },
           "version": { "type": "integer", "minimum": 1 }, "last_activity_at": { "type": "string", "format": "date-time" },
           "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "archived_at": { "type": ["string", "null"], "format": "date-time" }
         }, "additionalProperties": false
@@ -1007,7 +1007,7 @@
         "properties": { "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/Conversation" } }, "next_cursor": { "$ref": "#/components/schemas/PageCursor" } },
         "additionalProperties": false
       },
-      "QuestionScope": {
+      "QuestionScopeRequest": {
         "type": "object",
         "properties": {
           "retrieval_mode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "hybrid" },
@@ -1018,12 +1018,23 @@
           "allow_original_sources": { "type": "boolean", "default": false }, "allow_web": { "type": "boolean", "default": false }
         }, "additionalProperties": false
       },
+      "QuestionScope": {
+        "type": "object", "required": ["retrieval_mode", "source_ids", "source_version_ids", "path_prefixes", "captured_at_from", "captured_at_before", "allow_original_sources", "allow_web"],
+        "properties": {
+          "retrieval_mode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"] },
+          "source_ids": { "type": "array", "maxItems": 100, "items": { "type": "string", "format": "uuid" } },
+          "source_version_ids": { "type": "array", "maxItems": 100, "items": { "type": "string", "format": "uuid" } },
+          "path_prefixes": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+          "captured_at_from": { "type": ["string", "null"], "format": "date-time" }, "captured_at_before": { "type": ["string", "null"], "format": "date-time" },
+          "allow_original_sources": { "type": "boolean" }, "allow_web": { "type": "boolean" }
+        }, "additionalProperties": false
+      },
       "SubmitQuestionRequest": {
         "type": "object", "required": ["workspace_id", "question"],
         "properties": {
           "workspace_id": { "type": "string", "format": "uuid" },
           "question": { "type": "string", "minLength": 1, "maxLength": 8192, "x-max-utf8-bytes": 8192, "pattern": "^[^\\u0000]+$", "description": "Non-blank UTF-8 text, at most 8192 bytes, with no NUL." },
-          "scope": { "$ref": "#/components/schemas/QuestionScope" },
+          "scope": { "$ref": "#/components/schemas/QuestionScopeRequest" },
           "answer_depth": { "type": "string", "enum": ["concise", "standard", "detailed"], "default": "standard" },
           "output_format": { "type": "string", "enum": ["markdown", "outline"], "default": "markdown" }
         }, "additionalProperties": false
@@ -1038,7 +1049,7 @@
         }, "additionalProperties": false
       },
       "WorkflowProjection": {
-        "type": "object", "required": ["run_id", "status", "version", "updated_at"],
+        "type": "object", "required": ["run_id", "status", "version", "updated_at", "status_url"],
         "properties": { "run_id": { "type": "string", "format": "uuid" }, "status": { "type": "string", "enum": ["pending", "running", "paused", "waiting_for_human", "retry_wait", "succeeded", "failed", "cancelled"] }, "version": { "type": "integer", "minimum": 1 }, "updated_at": { "type": "string", "format": "date-time" }, "status_url": { "type": "string", "format": "uri-reference" } },
         "additionalProperties": false
       },
@@ -1064,7 +1075,17 @@
       },
       "RelatedTopic": {
         "type": "object", "required": ["topic_id", "name", "citation_ids"],
-        "properties": { "topic_id": { "type": "string", "format": "uuid" }, "name": { "type": "string", "minLength": 1, "maxLength": 256 }, "citation_ids": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+        "properties": { "topic_id": { "type": "string", "format": "uuid" }, "name": { "type": "string", "minLength": 1, "maxLength": 256 }, "citation_ids": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+        "additionalProperties": false
+      },
+      "RAGAssertion": {
+        "type": "object", "required": ["id", "text", "kind", "citation_ids"],
+        "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 128 }, "text": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 }, "kind": { "type": "string", "enum": ["FACTUAL", "MODEL_INFERENCE"] }, "citation_ids": { "type": "array", "maxItems": 500, "items": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+        "additionalProperties": false
+      },
+      "RAGConflictPosition": {
+        "type": "object", "required": ["claim_id", "position", "applicability", "citation_ids", "updated_at"],
+        "properties": { "claim_id": { "type": "string", "format": "uuid" }, "position": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 }, "applicability": { "type": "object", "additionalProperties": true }, "citation_ids": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "type": "string", "minLength": 1, "maxLength": 128 } }, "updated_at": { "type": "string", "format": "date-time" } },
         "additionalProperties": false
       },
       "RAGAnswerPayload": {
@@ -1073,8 +1094,8 @@
           "conclusion": { "type": "string", "minLength": 1 }, "citations": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "$ref": "#/components/schemas/RAGResultCitation" } },
           "related_topics": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "$ref": "#/components/schemas/RelatedTopic" } },
           "follow_up_questions": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "type": "string", "minLength": 1, "maxLength": 2048, "x-max-utf8-bytes": 2048 } },
-          "assertions": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "type": "object", "additionalProperties": true } },
-          "conflict_positions": { "type": "array", "maxItems": 500, "items": { "type": "object", "additionalProperties": true } }, "conflict_summary": { "type": "string" }
+          "assertions": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "$ref": "#/components/schemas/RAGAssertion" } },
+          "conflict_positions": { "type": "array", "maxItems": 500, "items": { "$ref": "#/components/schemas/RAGConflictPosition" } }, "conflict_summary": { "type": "string" }
         }, "additionalProperties": false
       },
       "RAGAnswerResult": { "type": "object", "required": ["result_type", "schema_id", "schema_version", "model_run_ref", "payload"], "properties": { "result_type": { "const": "rag_answer" }, "schema_id": { "const": "agent.rag-answer" }, "schema_version": { "const": "v2" }, "model_run_ref": { "type": "string", "format": "uuid" }, "payload": { "$ref": "#/components/schemas/RAGAnswerPayload" } }, "additionalProperties": false },
@@ -1085,31 +1106,43 @@
       },
       "ClarificationResult": {
         "type": "object", "required": ["result_type", "schema_id", "schema_version", "model_run_ref", "payload"],
-        "properties": { "result_type": { "const": "clarification" }, "schema_id": { "const": "conversation.clarification" }, "schema_version": { "const": "v1" }, "model_run_ref": { "type": "string", "format": "uuid" }, "payload": { "type": "object", "required": ["reason", "question", "suggested_scopes"], "properties": { "reason": { "type": "string", "minLength": 1 }, "question": { "type": "string", "minLength": 1 }, "suggested_scopes": { "type": "array", "maxItems": 10, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } }, "additionalProperties": false } } },
+        "properties": {
+          "result_type": { "const": "clarification" }, "schema_id": { "const": "conversation.clarification" }, "schema_version": { "const": "v1" }, "model_run_ref": { "type": "string", "format": "uuid" },
+          "payload": { "type": "object", "required": ["reason", "question", "suggested_scopes"], "properties": { "reason": { "type": "string", "minLength": 1 }, "question": { "type": "string", "minLength": 1 }, "suggested_scopes": { "type": "array", "maxItems": 10, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } } }, "additionalProperties": false }
+        },
         "additionalProperties": false
       },
       "RetrievalDegradation": {
         "type": "object", "required": ["capability", "code", "retryable"],
-        "properties": { "capability": { "type": "string", "enum": ["embedding", "rerank"] }, "code": { "type": "string", "minLength": 1, "maxLength": 128 }, "retryable": { "type": "boolean" } }, "additionalProperties": false
+        "properties": { "capability": { "type": "string", "enum": ["vector", "rerank"] }, "code": { "type": "string", "minLength": 1, "maxLength": 128 }, "retryable": { "type": "boolean" } }, "additionalProperties": false
+      },
+      "RetrievalScopeSummary": {
+        "type": "object", "required": ["source_ids", "source_version_ids", "path_prefixes", "captured_at_from", "captured_at_before", "allow_original_sources", "allow_web"],
+        "properties": {
+          "source_ids": { "type": "array", "maxItems": 100, "items": { "type": "string", "format": "uuid" } }, "source_version_ids": { "type": "array", "maxItems": 100, "items": { "type": "string", "format": "uuid" } },
+          "path_prefixes": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1024 } }, "captured_at_from": { "type": ["string", "null"], "format": "date-time" }, "captured_at_before": { "type": ["string", "null"], "format": "date-time" },
+          "allow_original_sources": { "type": "boolean" }, "allow_web": { "type": "boolean" }
+        }, "additionalProperties": false
       },
       "RetrievalSummary": {
         "type": "object", "required": ["rewrites", "requested_mode", "effective_mode", "scope", "candidate_count", "selected_count", "conflict_count", "degradations"],
         "properties": {
           "rewrites": { "type": "array", "minItems": 0, "maxItems": 3, "items": { "type": "string", "minLength": 1, "maxLength": 8192 } },
           "requested_mode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"] }, "effective_mode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"] },
-          "scope": { "$ref": "#/components/schemas/QuestionScope" }, "index_version_id": { "type": ["string", "null"], "format": "uuid" }, "embedding_version_id": { "type": ["string", "null"], "format": "uuid" },
+          "scope": { "$ref": "#/components/schemas/RetrievalScopeSummary" }, "index_version_id": { "type": ["string", "null"], "format": "uuid" }, "embedding_version_id": { "type": ["string", "null"], "format": "uuid" },
           "candidate_count": { "type": "integer", "minimum": 0 }, "selected_count": { "type": "integer", "minimum": 0, "maximum": 100 }, "conflict_count": { "type": "integer", "minimum": 0 },
           "degradations": { "type": "array", "maxItems": 2, "items": { "$ref": "#/components/schemas/RetrievalDegradation" } }
         }, "additionalProperties": false
       },
       "Answer": {
-        "type": "object", "required": ["id", "workspace_id", "conversation_id", "question_id", "publication_status", "citations", "retrieval_summary", "workflow", "version", "created_at", "updated_at"],
+        "type": "object", "required": ["id", "workspace_id", "conversation_id", "question_id", "publication_status", "citations", "retrieval_summary", "current_stage", "workflow", "version", "created_at", "updated_at"],
         "properties": {
           "id": { "type": "string", "format": "uuid" }, "workspace_id": { "type": "string", "format": "uuid" }, "conversation_id": { "type": "string", "format": "uuid" }, "question_id": { "type": "string", "format": "uuid" },
           "publication_status": { "type": "string", "enum": ["pending", "completed", "refused", "clarification_required"] }, "workflow": { "$ref": "#/components/schemas/WorkflowProjection" },
           "result_type": { "type": "string", "enum": ["rag_answer", "refusal", "clarification"] }, "assistant_text": { "type": "string" }, "citations": { "type": "array", "maxItems": 500, "items": { "$ref": "#/components/schemas/AnswerCitation" } },
           "result": { "oneOf": [{ "$ref": "#/components/schemas/RAGAnswerResult" }, { "$ref": "#/components/schemas/RefusalResult" }, { "$ref": "#/components/schemas/ClarificationResult" }] },
-          "retrieval_summary": { "oneOf": [{ "$ref": "#/components/schemas/RetrievalSummary" }, { "type": "null" }] }, "version": { "type": "integer", "minimum": 1 },
+          "retrieval_summary": { "oneOf": [{ "$ref": "#/components/schemas/RetrievalSummary" }, { "type": "null" }] },
+          "current_stage": { "type": ["string", "null"], "enum": ["plan.started", "plan.completed", "retrieval.started", "retrieval.completed", "validation.started", "validation.completed", null] }, "version": { "type": "integer", "minimum": 1 },
           "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }
         }, "additionalProperties": false
       },

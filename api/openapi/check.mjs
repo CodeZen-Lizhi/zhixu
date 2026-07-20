@@ -125,6 +125,7 @@ for (const schema of [
   "CreateConversationRequest",
   "Conversation",
   "ConversationPage",
+  "QuestionScopeRequest",
   "QuestionScope",
   "SubmitQuestionRequest",
   "Question",
@@ -132,12 +133,15 @@ for (const schema of [
   "QuestionAcceptance",
   "AnswerCitation",
   "RAGResultCitation",
+  "RAGAssertion",
+  "RAGConflictPosition",
   "RelatedTopic",
   "RAGAnswerPayload",
   "RAGAnswerResult",
   "RefusalResult",
   "ClarificationResult",
   "RetrievalDegradation",
+  "RetrievalScopeSummary",
   "RetrievalSummary",
   "Answer",
   "Turn",
@@ -180,9 +184,9 @@ function resolveRef(value) {
 }
 
 for (const schemaName of [
-  "CreateConversationRequest", "Conversation", "ConversationPage", "QuestionScope", "SubmitQuestionRequest", "Question",
-  "WorkflowProjection", "QuestionAcceptance", "AnswerCitation", "RAGResultCitation", "RelatedTopic", "RAGAnswerPayload", "RAGAnswerResult", "RefusalResult",
-  "ClarificationResult", "RetrievalDegradation", "RetrievalSummary", "Answer", "Turn", "TurnPage",
+  "CreateConversationRequest", "Conversation", "ConversationPage", "QuestionScopeRequest", "QuestionScope", "SubmitQuestionRequest", "Question",
+  "WorkflowProjection", "QuestionAcceptance", "AnswerCitation", "RAGResultCitation", "RAGAssertion", "RAGConflictPosition", "RelatedTopic", "RAGAnswerPayload", "RAGAnswerResult", "RefusalResult",
+  "ClarificationResult", "RetrievalDegradation", "RetrievalScopeSummary", "RetrievalSummary", "Answer", "Turn", "TurnPage",
   "SubmitFeedbackRequest", "AnswerFeedback", "ServerEventPayloadSummary", "ServerEventEnvelope",
 ]) {
   if (schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must reject unknown properties`);
@@ -206,8 +210,11 @@ for (const requestName of ["CreateConversationRequest", "SubmitQuestionRequest",
 if (schemas.PageCursor.maxLength !== 2048 || document.components.parameters.Limit.schema.maximum !== 100) {
   throw new Error("Conversation cursor/limit bounds drifted");
 }
-if (schemas.SubmitQuestionRequest.properties.answer_depth.default !== "standard" || schemas.SubmitQuestionRequest.properties.output_format.default !== "markdown" || schemas.QuestionScope.properties.retrieval_mode.default !== "hybrid" || schemas.SubmitQuestionRequest.properties.scope.$ref !== "#/components/schemas/QuestionScope") {
+if (schemas.SubmitQuestionRequest.properties.answer_depth.default !== "standard" || schemas.SubmitQuestionRequest.properties.output_format.default !== "markdown" || schemas.QuestionScopeRequest.properties.retrieval_mode.default !== "hybrid" || schemas.SubmitQuestionRequest.properties.scope.$ref !== "#/components/schemas/QuestionScopeRequest") {
   throw new Error("Question option defaults drifted");
+}
+if (!schemas.WorkflowProjection.required.includes("status_url")) {
+  throw new Error("WorkflowProjection must require status_url");
 }
 if (schemas.SubmitQuestionRequest.properties.question["x-max-utf8-bytes"] !== 8192 || schemas.SubmitFeedbackRequest.properties.comment["x-max-utf8-bytes"] !== 2048) {
   throw new Error("Question or Feedback UTF-8 byte bounds drifted");
@@ -215,6 +222,9 @@ if (schemas.SubmitQuestionRequest.properties.question["x-max-utf8-bytes"] !== 81
 if (document.paths["/api/v1/conversations/{conversation_id}"].get.responses["200"].headers?.ETag?.$ref !== "#/components/headers/ETag" ||
     document.paths["/api/v1/answers/{answer_id}"].get.responses["200"].headers?.ETag?.$ref !== "#/components/headers/ETag") {
   throw new Error("Conversation and Answer reads must expose ETag");
+}
+if (!document.components.headers.ETag.schema.pattern.includes("-stage-")) {
+  throw new Error("Answer ETag must bind the persisted RAG stage projection");
 }
 if (document.paths["/api/v1/conversations/{conversation_id}/questions"].post.responses["202"].content?.["application/json"]?.schema?.$ref !== "#/components/schemas/QuestionAcceptance" ||
     schemas.QuestionAcceptance.required.includes("status_url") === false) {
@@ -254,6 +264,20 @@ if (schemas.RetrievalSummary.properties.rewrites.minItems !== 0 ||
     schemas.Answer.properties.citations.maxItems !== 500 ||
     schemas.Answer.properties.citations.items.$ref !== "#/components/schemas/AnswerCitation") {
   throw new Error("RAG v2 and retrieval summary public bounds drifted from domain contracts");
+}
+if (schemas.RetrievalDegradation.properties.capability.enum.join(",") !== "vector,rerank" ||
+    schemas.RAGAnswerPayload.properties.assertions.items.$ref !== "#/components/schemas/RAGAssertion" ||
+    schemas.RAGAnswerPayload.properties.conflict_positions.items.$ref !== "#/components/schemas/RAGConflictPosition") {
+  throw new Error("RAG typed payload schemas drifted from runtime wire contracts");
+}
+if (!schemas.Answer.required.includes("current_stage") ||
+    schemas.Answer.properties.current_stage.enum.join(",") !== "plan.started,plan.completed,retrieval.started,retrieval.completed,validation.started,validation.completed,") {
+  throw new Error("Answer current_stage must remain nullable and limited to the six persisted RAG stages");
+}
+const lastEventID = document.paths["/api/v1/events"].get.parameters.find((item) => item.name === "Last-Event-ID");
+if (lastEventID?.schema?.pattern !== "^[1-9][0-9]*$" ||
+    document.paths["/api/v1/events"].get.responses["200"].headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+  throw new Error("SSE cursor or cache-control contract drifted");
 }
 if (schemas.SearchCursor.type !== "string" || schemas.SearchCursor.maxLength !== 2048) {
   throw new Error("SearchCursor must remain an opaque string with maxLength 2048");

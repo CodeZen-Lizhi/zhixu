@@ -48,7 +48,7 @@ describe("WorkspacePage", () => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = requestURL(input);
       if (url.endsWith("/api/v1/system/status")) {
-        return Promise.resolve(jsonResponse({ status: "ready", version: "dev", database: { status: "ready" }, request_id: "req" }));
+        return Promise.resolve(jsonResponse({ status: "ready", version: "dev", database: { status: "ready" }, rag: { status: "disabled" }, request_id: "req" }));
       }
       return Promise.reject(new Error(`unexpected request: ${url}`));
     }));
@@ -58,7 +58,7 @@ describe("WorkspacePage", () => {
     vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
       const url = requestURL(input);
       if (url.endsWith("/api/v1/system/status")) {
-        return Promise.resolve(jsonResponse({ status: "ready", version: "dev", database: { status: "ready" }, request_id: "req" }));
+        return Promise.resolve(jsonResponse({ status: "ready", version: "dev", database: { status: "ready" }, rag: { status: "disabled" }, request_id: "req" }));
       }
       if (url.endsWith("/api/v1/workspaces")) return Promise.resolve(jsonResponse(workspace, 201));
       return Promise.reject(new Error(`unexpected request: ${url}`));
@@ -78,7 +78,7 @@ describe("WorkspacePage", () => {
     vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
       const url = requestURL(input);
       if (url.endsWith("/api/v1/system/status")) {
-        return Promise.resolve(jsonResponse({ status: "ready", version: "dev", database: { status: "ready" }, request_id: "req" }));
+        return Promise.resolve(jsonResponse({ status: "ready", version: "dev", database: { status: "ready" }, rag: { status: "disabled" }, request_id: "req" }));
       }
       if (url.endsWith(`/api/v1/workspaces/${workspace.id}/scan`)) {
         return Promise.resolve(jsonResponse({

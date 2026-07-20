@@ -58,8 +58,9 @@ export const SystemStatusPage = () => {
     );
   }
 
-  const { database, requestId, status, version } = statusQuery.data;
+  const { database, rag, requestId, status, version } = statusQuery.data;
   const isReady = status === "ready" && database.status === "ready";
+  const databaseUnavailable = database.status === "unavailable";
 
   return (
     <section
@@ -69,11 +70,13 @@ export const SystemStatusPage = () => {
       <span className="status-mark" aria-hidden="true" />
       <div className="state-content">
         <p className="eyebrow">{isReady ? "系统就绪" : "服务降级"}</p>
-        <h2>{isReady ? "所有基础依赖可用" : "API 可用，但数据库不可用"}</h2>
+        <h2>{isReady ? "所有基础依赖可用" : databaseUnavailable ? "API 可用，但数据库不可用" : "RAG 能力暂不可用"}</h2>
         <p>
           {isReady
             ? "ZHIXU 已连接数据库，可以继续后续功能开发。"
-            : database.message ?? "数据库依赖暂时不可用，请检查服务配置和运行状态。"}
+            : databaseUnavailable
+              ? database.message ?? "数据库依赖暂时不可用，请检查服务配置和运行状态。"
+              : "会话读取仍可用，但新问题提交已暂停，请检查 RAG 运行依赖。"}
         </p>
 
         <dl className="status-grid">
@@ -87,6 +90,10 @@ export const SystemStatusPage = () => {
               <span aria-hidden="true">{database.status === "ready" ? "●" : "▲"}</span>{" "}
               {database.status === "ready" ? "可用" : "不可用"}
             </dd>
+          </div>
+          <div>
+            <dt>RAG</dt>
+            <dd><span aria-hidden="true">{rag.status === "unavailable" ? "▲" : "●"}</span> {rag.status === "ready" ? "可用" : rag.status === "disabled" ? "已关闭" : "不可用"}</dd>
           </div>
           <div>
             <dt>版本</dt>

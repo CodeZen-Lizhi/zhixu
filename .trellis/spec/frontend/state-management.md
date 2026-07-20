@@ -69,3 +69,12 @@ M1 后，测试必须证明刷新恢复、Workspace Cache 隔离、URL Round Tri
 ## M1 待代码验证
 
 M1 必须记录实际 Query Default、Cache Retention、URL Parsing、Local Draft Reducer、SSE Connection Owner 和 Browser Persistence；Manifest 和代码出现前不得推断额外 State Library 或存储策略。
+
+## M6-04 RAG Event Recovery Contract
+
+- SSE 只提供 typed invalidation hint，不保存 Answer、Workflow 或 current stage 业务终态；刷新与断线恢复必须
+  回查 Conversation/Turn/Answer Query。
+- 409 expired cursor 必须先完成 Workspace 范围的权威资源回查，成功后才清除 cursor 并无游标重连；
+  回查失败保留 cursor，避免把恢复失败伪装成成功。
+- `onEvent` 可以异步；只有 handler 成功完成才提交 cursor，失败时重连必须重放同一事件。
+- 400 invalid/future cursor 停止自动重连；网络失败使用有界抖动退避，Abort 必须释放 reader 与 fetch。

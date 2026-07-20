@@ -991,3 +991,35 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 实施 T12 typed frontend Conversation/RAG clients 与唯一 SSE owner，再进入 T13 真实 RAG 页面。
+
+## Session 30: M6-04 Typed Conversation 与 SSE 恢复检查点
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T12）
+**Branch**: `dev`
+
+### Summary
+
+完成前端 Conversation/RAG 严格传输边界、唯一 SSE fetch-stream owner，以及刷新后从持久事件恢复 Answer 当前阶段的后端投影。
+
+### Main Changes
+
+- Conversation client 从 `unknown` 严格解码 Conversation、Question、Turn、四态 Answer、RAG v2、Refusal、Clarification、Retrieval Summary、Problem 与 ETag/304。
+- SSE owner 支持 CRLF/heartbeat/UTF-8/frame bound、Last-Event-ID、409 权威回查后恢复、400 停止、有界退避、异步事件提交与 Abort 资源释放。
+- Answer/Turn Query 从同 Workspace、同 Answer 的最新持久 RAG Event 恢复六态 `current_stage`；Answer ETag 同时绑定 stage。
+- 新增 `00023` 部分索引与真实 PostgreSQL Down/Up、EXPLAIN、跨 Workspace、终态和非法绑定门禁；OpenAPI 与 System Status 前端同步。
+
+### Testing
+
+- Go focused race、vet、tidy 和 OpenAPI gate 通过。
+- 真实 PostgreSQL Conversation/Events/Migration/API integration 通过。
+- 前端 lint、typecheck、93 tests 与 production build 通过。
+- 主 Agent Go/SQL/通用五轴审查未发现当前范围内明确问题；阶段投影与前端最终独立复验均无 P0-P2。
+
+### Status
+
+[OK] M6-04 T12 completed; T13-T17 pending.
+
+### Next Steps
+
+- 实施 T13 `/chat` 与 `/chat/:conversationId` 真实 RAG 页面、Query owner、阶段/轮询恢复和桌面/移动端浏览器烟测。

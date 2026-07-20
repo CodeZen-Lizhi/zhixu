@@ -9,13 +9,14 @@ describe("decodeSystemStatus", () => {
         status: "ready",
         version: "0.1.0",
         database: { status: "ready" },
+        rag: { status: "disabled" },
         request_id: "request-1",
-        ignored_field: true,
       }),
     ).toEqual({
       status: "ready",
       version: "0.1.0",
       database: { status: "ready" },
+      rag: { status: "disabled" },
       requestId: "request-1",
     });
   });
@@ -26,8 +27,13 @@ describe("decodeSystemStatus", () => {
         status: "healthy",
         version: "0.1.0",
         database: { status: "ready" },
+        rag: { status: "ready" },
         request_id: "request-1",
       }),
     ).toThrow(ApiBoundaryError);
+    expect(() => decodeSystemStatus({
+      status: "ready", version: "0.1.0", database: { status: "ready" },
+      rag: { status: "ready" }, request_id: "request-1", ignored_field: true,
+    })).toThrow(ApiBoundaryError);
   });
 });

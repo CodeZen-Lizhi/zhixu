@@ -147,6 +147,7 @@ type answerResponse struct {
 	AssistantText     string                               `json:"assistant_text,omitempty"`
 	Citations         []citationResponse                   `json:"citations"`
 	RetrievalSummary  *conversationdomain.RetrievalSummary `json:"retrieval_summary"`
+	CurrentStage      *string                              `json:"current_stage"`
 	Workflow          workflowResponse                     `json:"workflow"`
 	Version           int64                                `json:"version"`
 	CreatedAt         string                               `json:"created_at"`
@@ -362,7 +363,7 @@ func (handler *Handler) getAnswer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if notModifiedWithTag(w, r, answerETag(view.Answer.Version, view.Workflow.Version)) {
+	if notModifiedWithTag(w, r, answerETag(view.Answer.Version, view.Workflow.Version, view.CurrentStage)) {
 		return
 	}
 	httpapi.WriteJSON(w, http.StatusOK, toAnswerResponse(view))
@@ -453,7 +454,12 @@ func toAnswerResponse(view application.AnswerView) answerResponse {
 	for i, citation := range view.Citations {
 		citations[i] = toCitationResponse(citation)
 	}
-	return answerResponse{ID: string(answer.ID), WorkspaceID: string(answer.WorkspaceID), ConversationID: string(answer.ConversationID), QuestionID: string(answer.QuestionID), PublicationStatus: string(answer.PublicationStatus), ResultType: string(answer.ResultType), Result: append(json.RawMessage(nil), answer.Result...), AssistantText: view.AssistantText, Citations: citations, RetrievalSummary: answer.RetrievalSummary, Workflow: workflowResponse{RunID: string(view.Workflow.RunID), Status: string(view.Workflow.Status), Version: view.Workflow.Version, UpdatedAt: formatTime(view.Workflow.UpdatedAt), StatusURL: "/api/v1/workflows/" + url.PathEscape(string(view.Workflow.RunID))}, Version: answer.Version, CreatedAt: formatTime(answer.CreatedAt), UpdatedAt: formatTime(answer.UpdatedAt)}
+	var currentStage *string
+	if view.CurrentStage != nil {
+		value := string(*view.CurrentStage)
+		currentStage = &value
+	}
+	return answerResponse{ID: string(answer.ID), WorkspaceID: string(answer.WorkspaceID), ConversationID: string(answer.ConversationID), QuestionID: string(answer.QuestionID), PublicationStatus: string(answer.PublicationStatus), ResultType: string(answer.ResultType), Result: append(json.RawMessage(nil), answer.Result...), AssistantText: view.AssistantText, Citations: citations, RetrievalSummary: answer.RetrievalSummary, CurrentStage: currentStage, Workflow: workflowResponse{RunID: string(view.Workflow.RunID), Status: string(view.Workflow.Status), Version: view.Workflow.Version, UpdatedAt: formatTime(view.Workflow.UpdatedAt), StatusURL: "/api/v1/workflows/" + url.PathEscape(string(view.Workflow.RunID))}, Version: answer.Version, CreatedAt: formatTime(answer.CreatedAt), UpdatedAt: formatTime(answer.UpdatedAt)}
 }
 
 func toCitationResponse(value agentdomain.Citation) citationResponse {
@@ -539,8 +545,12 @@ func etag(version int64) string { return fmt.Sprintf("W/\"%d\"", version) }
 func notModified(w http.ResponseWriter, r *http.Request, version int64) bool {
 	return notModifiedWithTag(w, r, etag(version))
 }
-func answerETag(answerVersion, workflowVersion int64) string {
-	return fmt.Sprintf("W/\"answer-%d-workflow-%d\"", answerVersion, workflowVersion)
+func answerETag(answerVersion, workflowVersion int64, currentStage *application.RAGCurrentStage) string {
+	stage := "none"
+	if currentStage != nil {
+		stage = string(*currentStage)
+	}
+	return fmt.Sprintf("W/\"answer-%d-workflow-%d-stage-%s\"", answerVersion, workflowVersion, stage)
 }
 func notModifiedWithTag(w http.ResponseWriter, r *http.Request, value string) bool {
 	w.Header().Set("ETag", value)

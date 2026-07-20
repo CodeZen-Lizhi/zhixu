@@ -21,6 +21,7 @@ describe("SystemStatusPage", () => {
         status: "ready",
         version: "0.1.0",
         database: { status: "ready" },
+        rag: { status: "disabled" },
         request_id: "request-ready",
       }),
     );
@@ -39,6 +40,7 @@ describe("SystemStatusPage", () => {
         status: "degraded",
         version: "0.1.0",
         database: { status: "unavailable", message: "数据库连接失败" },
+        rag: { status: "unavailable", reason: "rag_dependencies_unavailable" },
         request_id: "request-degraded",
       }),
     );
@@ -58,6 +60,7 @@ describe("SystemStatusPage", () => {
           status: "ready",
           version: "0.1.1",
           database: { status: "ready" },
+          rag: { status: "ready" },
           request_id: "request-retry",
         }),
       );

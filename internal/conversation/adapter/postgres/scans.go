@@ -139,6 +139,7 @@ type answerScan struct {
 	workflowID, workflowStatus                                 *string
 	workflowVersion                                            *int64
 	workflowUpdatedAt                                          *time.Time
+	currentStage                                               *string
 }
 
 func (scan *answerScan) destinations() []any {
@@ -147,6 +148,7 @@ func (scan *answerScan) destinations() []any {
 		&scan.modelRunID, &scan.publicationStatus, &scan.resultType, &scan.result, &scan.resultHash, &scan.retrievalSummary,
 		&scan.version, &scan.createdAt, &scan.updatedAt, &scan.publishedAt,
 		&scan.workflowID, &scan.workflowStatus, &scan.workflowVersion, &scan.workflowUpdatedAt,
+		&scan.currentStage,
 	}
 }
 
@@ -217,14 +219,22 @@ func (scan *answerScan) build() (conversationapplication.AnswerView, error) {
 	if err := conversationdomain.ValidateAnswer(answer); err != nil {
 		return conversationapplication.AnswerView{}, consistency(ErrorCodePersistenceCorrupt, err)
 	}
-	return conversationapplication.AnswerView{
+	view := conversationapplication.AnswerView{
 		Answer: answer,
 		Workflow: conversationapplication.WorkflowRunView{
 			RunID: workflowID, Status: workflowdomain.RunStatus(*scan.workflowStatus), Version: *scan.workflowVersion, UpdatedAt: *scan.workflowUpdatedAt,
 		},
 		AssistantText: projection.AssistantText,
 		Citations:     append([]agentdomain.Citation(nil), projection.Citations...),
-	}, nil
+	}
+	if scan.currentStage != nil {
+		stage := conversationapplication.RAGCurrentStage(*scan.currentStage)
+		if !stage.Valid() {
+			return conversationapplication.AnswerView{}, consistency(ErrorCodePersistenceCorrupt, errors.New("answer current stage is invalid"))
+		}
+		view.CurrentStage = &stage
+	}
+	return view, nil
 }
 
 func scanTurnView(row scanner) (conversationapplication.TurnView, error) {

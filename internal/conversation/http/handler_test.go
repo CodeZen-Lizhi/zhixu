@@ -85,10 +85,27 @@ func TestAnswerETagIncludesWorkflowVersion(t *testing.T) {
 	router := testRouter(service)
 	path := "/api/v1/answers/" + string(testAnswerID) + "?workspace_id=" + string(testWorkspaceID)
 	request := httptest.NewRequest(http.MethodGet, path, nil)
-	request.Header.Set("If-None-Match", `W/"answer-1-workflow-6"`)
+	request.Header.Set("If-None-Match", `W/"answer-1-workflow-6-stage-none"`)
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || recorder.Header().Get("ETag") != `W/"answer-1-workflow-7"` {
+	if recorder.Code != http.StatusOK || recorder.Header().Get("ETag") != `W/"answer-1-workflow-7-stage-none"` {
+		t.Fatalf("response = %d %#v %s", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+}
+
+func TestAnswerReturnsCurrentStageAndUsesItInETag(t *testing.T) {
+	t.Parallel()
+	view := validAnswerView()
+	stage := application.RAGCurrentStageValidationCompleted
+	view.CurrentStage = &stage
+	router := testRouter(&fakeService{answer: view})
+	path := "/api/v1/answers/" + string(testAnswerID) + "?workspace_id=" + string(testWorkspaceID)
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.Header.Set("If-None-Match", `W/"answer-1-workflow-7-stage-none"`)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Header().Get("ETag") != `W/"answer-1-workflow-7-stage-validation.completed"` ||
+		!strings.Contains(recorder.Body.String(), `"current_stage":"validation.completed"`) {
 		t.Fatalf("response = %d %#v %s", recorder.Code, recorder.Header(), recorder.Body.String())
 	}
 }
