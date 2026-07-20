@@ -29,6 +29,14 @@ func PaginateResultWindow[T any](codec *CursorCodec, request ResultWindowRequest
 	return paginateResultWindow(codec, request, orderedWindow, orderedWindow)
 }
 
+func paginateResultWindowWithState[T any](codec *CursorCodec, request ResultWindowRequest, orderedWindow []T, fingerprintValue any, truncated bool, reason string) (ResultWindowPage[T], error) {
+	return paginateResultWindow(codec, request, orderedWindow, struct {
+		Window    any    `json:"window"`
+		Truncated bool   `json:"truncated"`
+		Reason    string `json:"reason"`
+	}{Window: fingerprintValue, Truncated: truncated, Reason: reason})
+}
+
 func paginateResultWindow[T any](codec *CursorCodec, request ResultWindowRequest, orderedWindow []T, fingerprintValue any) (ResultWindowPage[T], error) {
 	if codec == nil || !codec.initialized || !validQueryKind(request.QueryKind) || !validWorkspaceID(request.WorkspaceID) ||
 		!canonicalCursorHash(request.CanonicalRequestHash) || request.Limit < 1 || request.Limit > graphdomain.MaxLimit {

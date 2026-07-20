@@ -1121,6 +1121,8 @@ type QueryPort interface {
   扩展与最终 hydration 必须在同一快照完成。取消或超时不能泄漏事务，也不能返回未经证明的 partial path。
 - Global、depth-1 Neighborhood 和 Relation Evidence 先生成最多 500 项的有界结果窗口，再由 Application
   生成 opaque HMAC cursor。Adapter 不生成 cursor；depth 2/3 只返回有界完整层快照。
+- Result-window cursor 的 fingerprint 必须覆盖稳定排序项及 `truncated/reason` 窗口元数据；任一元数据变化都必须
+  返回 `GRAPH_CURSOR_STALE`，不能让客户端沿用旧页语义。
 - Neighborhood 按完整 frontier 批量查询并批量 hydrate Topic/Claim；Evidence 只做 count/fingerprint，正文和
   每条 reason/applicability 只在独立 Evidence page 返回。禁止逐节点查库和逐边加载 Evidence。
 - 功能与容量 fixture 必须写入真实 canonical 表：功能 fixture 使用 Knowledge canonicalization/validation，
@@ -1160,7 +1162,8 @@ type QueryPort interface {
 - `make graph-smoke`：已提交 fixture + 真实 API 进程 + 公共 HTTP；成功清理、失败保留 `0700` 诊断目录。
   响应扫描数据库 URL、绝对路径、managed storage 与未公开来源正文；日志额外扫描 Claim/Evidence/provenance
   正文 canary，不得误删公开 Graph 响应要求的 Claim statement 或 Evidence reason。
-- `make graph-benchmark`：20k Topic/100k Relation/100k Evidence，5 次预热 + 30 次采样，单次固定 6 SQL，
+- `make graph-benchmark`：20k Active Topic/100k Confirmed IMPACTS Relation/100k Evidence 参考拓扑，
+  5 次预热 + 30 次采样，单次固定 6 SQL，
   p95 <= 1.5s；保存 Neighborhood/Path/Evidence 的 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` 和 `0600` 产物。
 - SQL 改动完成后执行 `sql-code-review`；500,000 Relation 最终 P95/FPS 与正式 Auth/Capability 仍由 M10
   验收，Workspace 参数和 HMAC cursor 均不是认证。

@@ -15,22 +15,47 @@ const errorTitle = (error: Error): string => {
   }
 };
 
-export const GraphErrorNotice = ({ error, onRetry }: { error: Error; onRetry?: () => void }) => (
-  <div className="graph-notice graph-notice--error" role="alert">
-    <div>
-      <strong>{errorTitle(error)}</strong>
-      <span>{error.message}</span>
-      {error instanceof GraphApiError ? <code>{error.errorCode}</code> : null}
-    </div>
-    {onRetry === undefined ? null : <button type="button" className="graph-text-button" onClick={onRetry}>重新查询</button>}
-  </div>
-);
+const isCursorRecoveryError = (error: Error): boolean => error instanceof GraphApiError
+  && (error.errorCode === "GRAPH_CURSOR_STALE" || error.errorCode === "GRAPH_CURSOR_INVALID");
 
-export const GraphResultNotice = ({ meta }: { meta: GraphPageMeta | undefined }) => {
+export const GraphErrorNotice = ({
+  error,
+  onRetry,
+  onResetToFirstPage,
+}: {
+  error: Error;
+  onRetry?: () => void;
+  onResetToFirstPage?: () => void;
+}) => {
+  const resetToFirstPage = isCursorRecoveryError(error) && onResetToFirstPage !== undefined;
+  const action = resetToFirstPage ? onResetToFirstPage : onRetry;
+  return (
+    <div className="graph-notice graph-notice--error" role="alert">
+      <div>
+        <strong>{errorTitle(error)}</strong>
+        <span>{error.message}</span>
+        {error instanceof GraphApiError ? <code>{error.errorCode}</code> : null}
+      </div>
+      {action === undefined ? null : <button type="button" className="graph-text-button" onClick={action}>{resetToFirstPage ? "从第一页重新加载" : "重新查询"}</button>}
+    </div>
+  );
+};
+
+export const GraphResultNotice = ({
+  meta,
+  title = "结果已截断",
+  message = "请缩小过滤范围或降低展开深度。",
+  ariaLabel = "图谱结果状态",
+}: {
+  meta: GraphPageMeta | undefined;
+  title?: string;
+  message?: string;
+  ariaLabel?: string;
+}) => {
   if (meta?.truncated !== true) return null;
   return (
-    <div className="graph-notice graph-notice--warning" role="status" aria-label="图谱结果状态">
-      <div><strong>结果已截断</strong><span>请缩小过滤范围或降低展开深度。</span></div>
+    <div className="graph-notice graph-notice--warning" role="status" aria-label={ariaLabel}>
+      <div><strong>{title}</strong><span>{message}</span></div>
       {meta.reason === undefined ? null : <code>{meta.reason}</code>}
     </div>
   );

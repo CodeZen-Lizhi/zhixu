@@ -103,6 +103,8 @@ M6-D 只交付 Decoder/Client，不得用其单测声称 Search UI 已完成。
   href、有限数值、RFC3339/UUID、数组上限和 Problem；未知字段或语义漂移必须失败，不能丢字段后继续渲染。
 - Query Key 必须包含 Workspace 与规范请求；集合顺序、显式默认值和等价 RFC3339 时刻不得制造第二份缓存。
   Global/depth-1 使用 cursor infinite query，depth 2/3 是单个快照，Abort signal 必须传到 fetch。
+- Relation Evidence 只在详情显式展开时启用；折叠、切换 Relation/Workspace 或详情卸载时，按
+  `workspace + relation` 清除所有 Evidence 分页缓存，但保留 Relation detail，防止重开先回放旧事实。
 - URL 只保存可恢复查询状态；非法、重复冲突或跨字段冲突值恢复到明确安全默认。锁定坐标、固定布局、选择和
   drawer 开关不得写入 URL、Browser Storage 或 Server State。
 - 超过 60 node/100 edge 或布局不一致时返回完整列表；No Path、Truncated、Timeout/Cancel、Stale、Empty 和
@@ -120,12 +122,13 @@ M6-D 只交付 Decoder/Client，不得用其单测声称 Search UI 已完成。
 | Path `not_found` | 显示 explored count 和可选共同 Topic 建议，不生成边 |
 | 画布超限或布局损坏 | 强制完整列表 fallback，节点/关系仍可键盘选择 |
 | Relation 详情未展开 Evidence | Evidence 请求数为 0；展开后才分页请求 |
+| Evidence 折叠后再次展开 | 旧 Evidence 不得先渲染；应重新从第一页请求 |
 | 移动 drawer 关闭 | Escape/按钮均关闭，焦点返回原触发控件 |
 
 ### 5. Good / Base / Bad Cases
 
 - Good：URL 恢复规范请求，TanStack Query 返回严格 domain UI model；有界画布与完整列表共享选择语义，
-  Relation Evidence 只在详情中按需加载。
+  Relation Evidence 只在详情中按需加载，关闭后不会回放旧分页事实。
 - Base：没有结果时展示模式对应 Empty；超过视觉上限仍能用完整列表完成检查，不要求浏览器绘制全部边。
 - Bad：组件 `as GraphResponse` 强转、在前端解析 HMAC cursor、只渲染前 60 个节点却隐藏其余事实、打开
   Relation 详情即预取全部 Evidence，或用颜色区分 Topic/Claim/STALE。
@@ -133,7 +136,7 @@ M6-D 只交付 Decoder/Client，不得用其单测声称 Search UI 已完成。
 ### 6. Tests Required
 
 - API/Query：7 endpoint strict decoder/encoder、Problem/network/Abort、Workspace query key、规范过滤、
-  Global/depth-1 cursor、depth 2/3 snapshot、Search gating、Evidence lazy pagination。
+  Global/depth-1 cursor、depth 2/3 snapshot、Search gating、Evidence lazy pagination 和折叠/切换缓存清理。
 - Projection/Component/Route：分页去重、60/100 fallback、确定性 Global/Local/Path 布局、端点不被裁切、
   URL round-trip、三模式、锁定/固定布局、详情选择、全部显式状态、键盘和移动 drawer 焦点闭环。
 - Canonical 命令：
@@ -156,6 +159,9 @@ npm run build --prefix web
 ```text
 Wrong: 画布布局失败后显示空白；Relation drawer 打开即请求全部 Evidence；移动端只缩小桌面 panel。
 Correct: 布局失败切完整列表；Evidence 由用户展开后分页；移动 drawer 约束焦点并在关闭后恢复触发控件。
+
+Wrong: Evidence drawer 收起后保留分页缓存，重开时先显示旧页再后台刷新。
+Correct: 详情生命周期结束即按 Workspace/Relation 清除 Evidence 分页缓存，重开只显示新第一页结果。
 
 Wrong: Workspace query key 和 URL 能隔离数据，因此把页面标记为已认证。
 Correct: Workspace/URL/cursor 只用于查询绑定；认证、Session、CSRF 与 Capability 等待 M10。

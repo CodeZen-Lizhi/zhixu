@@ -337,7 +337,7 @@ Retrieval `index_version.status=active` 只决定可检索投影，不能升级�
 - `internal/graph/adapter/postgres` 直接参数化读取上述 canonical facts，首版正式端点只投影 Topic/Claim。默认正式图只读 `CONFIRMED` Relation；`STALE` 只能由显式过滤读取，其他状态不能伪装为正式关系。
 - 每个 Graph Repository 公共查询由 Adapter 自己持有一个 PostgreSQL `READ ONLY REPEATABLE READ` 事务，并以 transaction-local `statement_timeout=1500ms` 限制语句。Neighborhood 按完整 frontier 批量展开，Path 在同一快照内批量双向 BFS，Evidence 独立分页；禁止逐节点或逐 Evidence 查询。
 - 邻接与证据分页复用 `00017_knowledge_domain.sql` 已有索引：出边使用 `idx_knowledge_relation_source (workspace_id, source_node_type, source_node_id, relation_type, id)`，入边使用 `idx_knowledge_relation_target (workspace_id, target_node_type, target_node_id, relation_type, id)`，Evidence owner 分页使用 `idx_knowledge_relation_evidence_owner (workspace_id, relation_id, created_at, id)`。
-- 在 20,000 Topic、100,000 Relation、100,000 Relation Evidence 的确定性夹具上，Neighborhood、Path、Evidence 三类生产 SQL 的 `EXPLAIN (ANALYZE, BUFFERS)` 均命中上述既有索引，目标 Relation/Evidence 表的 Seq Scan 均为 0。该证据不支持新增 `00024` 索引迁移或持久 Graph projection，因此 M7-01 没有 Schema 变化，也不修改历史迁移；完整实测记录见 [性能与容量设计](performance.md#8-graph)。
+- 在 20,000 Active Topic、100,000 Confirmed IMPACTS Relation、100,000 Relation Evidence 的确定性参考拓扑上，Neighborhood、Path、Evidence 三类生产 SQL 的 `EXPLAIN (ANALYZE, BUFFERS)` 均命中上述既有索引，目标 Relation/Evidence 表的 Seq Scan 均为 0。Mixed Topic/Claim 与 BELONGS_TO 正确性由功能集成门禁覆盖；该证据不覆盖 claim-heavy/mixed 容量或 500k/FPS，也不支持新增 `00024` 索引迁移或持久 Graph projection，因此 M7-01 没有 Schema 变化，也不修改历史迁移；完整实测记录见 [性能与容量设计](performance.md#8-graph)。
 
 功能 fixture 使用已配置的测试数据库，`seed` 输出的 `workspace_id` 必须用于对应清理：
 

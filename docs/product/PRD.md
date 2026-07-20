@@ -3733,10 +3733,10 @@ M6-D 的向量查询只保留 exact pgvector scan 与 `EXPLAIN (FORMAT JSON)` �
 operator、过滤和查询计划正确；它不证明 500,000 Chunk 下的 ANN 参数或 P95。HNSW/IVFFlat、
 容量数据集与最终 P95 锁定属于 M10 性能交付。
 
-M7-01 Graph 使用确定性的 20,000 Topic、100,000 Relation、100,000 Evidence fixture，对一跳查询执行
-5 次预热和 30 次采样，并验证固定查询数及代表性索引计划。该阶段证明查询可在 100,000 Relation 规模下
-满足 1.5 秒目标，但不代表 AC-31 已完成：500,000 Relation、正式资源预算和前端交互 FPS 仍由 M10 最终
-容量门禁验收。
+M7-01 Graph 使用确定性的 20,000 Active Topic、100,000 Confirmed IMPACTS Relation、100,000 Evidence
+参考拓扑，对一跳查询执行 5 次预热和 30 次采样，并验证固定查询数及代表性索引计划。Mixed Topic/Claim
+与 BELONGS_TO 正确性由功能集成验证；该阶段证明参考拓扑可满足 1.5 秒目标，但不代表 AC-31 已完成：
+claim-heavy/mixed 拓扑、500,000 Relation、正式资源预算和前端交互 FPS 仍由 M10 最终容量门禁验收。
 
 ### 15.3 可用性
 

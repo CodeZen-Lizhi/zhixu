@@ -396,9 +396,10 @@ python3 ./.trellis/scripts/task.py validate 07-20-graph-projection-queries
 git diff --check
 ```
 
-本门禁证明 20k Topic/100k Relation 参考环境的一跳查询和有界前端闭环，不证明 500,000 Relation 的最终
-P95、图谱 FPS/交互预算或正式 Auth/Session/API Token/CSRF/Capability。后三者仍由 M10 验收；在此之前
-Workspace 隔离和 loopback 部署不得被描述为认证完成。
+本门禁证明 20k Active Topic/100k Confirmed IMPACTS Relation/100k Evidence 参考拓扑的一跳查询和有界
+前端闭环；Mixed Topic/Claim 与 BELONGS_TO 正确性由 integration/smoke 覆盖。它不证明 claim-heavy/mixed、
+500,000 Relation 的最终 P95、图谱 FPS/交互预算或正式 Auth/Session/API Token/CSRF/Capability。后三者仍由
+M10 验收；在此之前 Workspace 隔离和 loopback 部署不得被描述为认证完成。
 
 ## 14. Review Evaluation
 

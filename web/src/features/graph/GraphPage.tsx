@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -11,6 +12,7 @@ import { GraphFilterPanel } from "./GraphFilterPanel";
 import { GraphErrorNotice, GraphLoading, GraphResultNotice } from "./feedback";
 import { graphDepths, graphModes, graphTraversalDirections, type GraphMode } from "./options";
 import {
+  clearGraphWorkspaceDetails,
   useGraphGlobal,
   useGraphNeighborhood,
   useGraphNodeSearch,
@@ -49,6 +51,7 @@ const sameRef = (left: GraphNodeRef | null, right: GraphNodeRef | null): boolean
   left !== null && right !== null && left.type === right.type && left.id === right.id;
 
 const emptyRef: GraphNodeRef = { type: "TOPIC", id: "" };
+const emptyLockedPositions: GraphLockedPositions = {};
 
 const SearchPanel = ({
   mode,
@@ -99,8 +102,10 @@ const EmptyGraph = ({ mode }: { mode: GraphMode }) => (
 
 export const GraphPage = () => {
   const workspaceId = useActiveWorkspaceId();
+  const queryClient = useQueryClient();
   const [parameters, setParameters] = useSearchParams();
   const urlState = useMemo(() => parseGraphUrlState(parameters), [parameters]);
+  const graphIdentity = `${workspaceId}\0${parameters.toString()}`;
   const setUrlState = (next: GraphUrlState) => setParameters(serializeGraphUrlState(next));
   const filter = urlState.filter;
   const localReady = urlState.mode === "local" && urlState.center !== null;
@@ -149,22 +154,32 @@ export const GraphPage = () => {
   const detailTrigger = useRef<HTMLElement | null>(null);
   const [lockedPositions, setLockedPositions] = useState<GraphLockedPositions>({});
   const [fixedLayout, setFixedLayout] = useState(false);
+  const [sessionIdentity, setSessionIdentity] = useState(graphIdentity);
+  const [detailCacheClearRequest, setDetailCacheClearRequest] = useState({ workspaceId: "", sequence: 0 });
   const compactDetail = useSyncExternalStore(subscribeCompactGraph, getCompactGraphSnapshot, () => false);
+  const sessionActive = sessionIdentity === graphIdentity;
+  const activeSelection = sessionActive ? selection : null;
+  const activeLockedPositions = sessionActive ? lockedPositions : emptyLockedPositions;
+  const activeFixedLayout = sessionActive ? fixedLayout : false;
 
-  const graphIdentity = parameters.toString();
   useEffect(() => {
     setSelection(null);
     setLockedPositions({});
     setFixedLayout(false);
+    setSessionIdentity(graphIdentity);
   }, [graphIdentity]);
   useEffect(() => setSearchTarget(urlState.mode === "path" ? "from" : "center"), [urlState.mode]);
   useEffect(() => {
+    if (detailCacheClearRequest.sequence === 0) return;
+    clearGraphWorkspaceDetails(queryClient, detailCacheClearRequest.workspaceId);
+  }, [detailCacheClearRequest, queryClient]);
+  useEffect(() => {
     const trigger = detailTrigger.current;
-    if (selection === null && trigger?.isConnected === true) {
+    if (activeSelection === null && trigger?.isConnected === true) {
       trigger.focus();
       detailTrigger.current = null;
     }
-  }, [selection]);
+  }, [activeSelection]);
 
   const changeMode = (mode: GraphMode) => setUrlState({ ...urlState, mode });
   const selectSearchResult = (ref: GraphNodeRef) => {
@@ -193,6 +208,15 @@ export const GraphPage = () => {
   const closeDetail = () => {
     setSelection(null);
   };
+  const resetActiveToFirstPage = () => {
+    detailTrigger.current = null;
+    setSelection(null);
+    setLockedPositions({});
+    setFixedLayout(false);
+    setDetailCacheClearRequest((current) => ({ workspaceId, sequence: current.sequence + 1 }));
+    if (urlState.mode === "global") void globalQuery.resetToFirstPage();
+    else if (urlState.mode === "local") void neighborhoodQuery.resetToFirstPage();
+  };
   const retryActive = () => {
     if (urlState.mode === "global") void globalQuery.refetch();
     else if (urlState.mode === "local") void neighborhoodQuery.refetch();
@@ -205,15 +229,23 @@ export const GraphPage = () => {
   const hasNextPage = urlState.mode === "global" ? globalQuery.hasNextPage : urlState.mode === "local" ? neighborhoodQuery.hasNextPage : false;
   const fetchingNextPage = urlState.mode === "global" ? globalQuery.isFetchingNextPage : urlState.mode === "local" ? neighborhoodQuery.isFetchingNextPage : false;
   const graphLayout = useMemo(
-    () => createGraphLayout(model, urlState.mode, lockedPositions),
-    [lockedPositions, model, urlState.mode],
+    () => createGraphLayout(model, urlState.mode, activeLockedPositions),
+    [activeLockedPositions, model, urlState.mode],
   );
-  const selectedNodeKey = selection?.kind === "node" ? graphNodeKey(selection.ref) : undefined;
-  const selectedEdgeKey = selection?.kind === "relation" ? selection.relationId : undefined;
+  const displayedLockedPositions = graphLayout.kind === "canvas" ? activeLockedPositions : emptyLockedPositions;
+  const displayedFixedLayout = graphLayout.kind === "canvas" && activeFixedLayout;
+  const selectedNodeKey = activeSelection?.kind === "node" ? graphNodeKey(activeSelection.ref) : undefined;
+  const selectedEdgeKey = activeSelection?.kind === "relation" ? activeSelection.relationId : undefined;
   const selectedNodePosition = graphLayout.kind === "canvas" && selectedNodeKey !== undefined
     ? graphLayout.nodes.find((node) => node.key === selectedNodeKey)?.position
     : undefined;
-  const detailModalOpen = compactDetail && selection !== null;
+  const detailModalOpen = compactDetail && activeSelection !== null;
+
+  useEffect(() => {
+    if (graphLayout.kind !== "list") return;
+    setLockedPositions((current) => Object.keys(current).length === 0 ? current : {});
+    setFixedLayout((current) => current ? false : current);
+  }, [graphLayout.kind]);
 
   const toggleSelectedNodePin = () => {
     if (selectedNodeKey === undefined || selectedNodePosition === undefined) return;
@@ -226,7 +258,7 @@ export const GraphPage = () => {
     setFixedLayout(false);
   };
   const toggleFixedLayout = () => {
-    if (fixedLayout) {
+    if (activeFixedLayout) {
       setFixedLayout(false);
       setLockedPositions({});
       return;
@@ -262,17 +294,18 @@ export const GraphPage = () => {
         <GraphLegend />
       </aside>
       <main className="graph-workspace" {...(detailModalOpen ? { inert: true } : {})}>
-        <div className="graph-toolbar"><div><span>{modeLabels[urlState.mode]}</span><strong>{String(model.nodes.length)} nodes · {String(model.edges.length)} edges</strong></div><button type="button" className="graph-secondary-command" aria-pressed={fixedLayout} disabled={model.nodes.length === 0 || graphLayout.kind !== "canvas"} onClick={toggleFixedLayout}>{fixedLayout ? "释放固定布局" : "固定当前布局"}</button></div>
+        <div className="graph-toolbar"><div><span>{modeLabels[urlState.mode]}</span><strong>{String(model.nodes.length)} nodes · {String(model.edges.length)} edges</strong></div><button type="button" className="graph-secondary-command" aria-pressed={displayedFixedLayout} disabled={model.nodes.length === 0 || graphLayout.kind !== "canvas"} onClick={toggleFixedLayout}>{displayedFixedLayout ? "释放固定布局" : "固定当前布局"}</button></div>
         <GraphResultNotice meta={meta} />
-        {queryError instanceof Error ? <GraphErrorNotice error={queryError} onRetry={retryActive} /> : null}
+        {queryError instanceof Error ? <GraphErrorNotice error={queryError} onRetry={retryActive} {...(urlState.mode === "global" || urlState.mode === "local"
+          ? { onResetToFirstPage: resetActiveToFirstPage } : {})} /> : null}
         {queryPending ? <GraphLoading /> : null}
         {missingScope ? <section className="graph-empty"><span className="graph-kicker">Scope</span><h2>{urlState.mode === "local" ? "选择一个中心节点" : "选择不同的起点和终点"}</h2></section> : null}
         {pathNotFound === undefined ? null : <section className="graph-path-result" role="status" aria-label="路径查询结果"><strong>未找到正式关系路径</strong><span>已探索 {pathNotFound.exploredNodes} 个节点。</span>{pathNotFound.commonTopicSuggestions.map((topic) => <button type="button" className="graph-text-button" key={topic.id} onClick={() => setUrlState({ ...urlState, mode: "local", center: { type: "TOPIC", id: topic.id }, depth: 1 })}>共同 Topic 建议：{topic.name}</button>)}</section>}
         {!queryPending && queryError === null && !missingScope && pathNotFound === undefined && model.nodes.length === 0 ? <EmptyGraph mode={urlState.mode} /> : null}
-        {model.nodes.length === 0 ? null : <GraphCanvas model={model} mode={urlState.mode} lockedPositions={lockedPositions} selectedNodeKey={selectedNodeKey} selectedEdgeKey={selectedEdgeKey} onSelectNode={selectNode} onSelectEdge={selectEdge} />}
+        {model.nodes.length === 0 ? null : <GraphCanvas model={model} mode={urlState.mode} lockedPositions={displayedLockedPositions} selectedNodeKey={selectedNodeKey} selectedEdgeKey={selectedEdgeKey} onSelectNode={selectNode} onSelectEdge={selectEdge} />}
         {hasNextPage ? <button type="button" className="graph-load-more" disabled={fetchingNextPage} onClick={loadNext}>{fetchingNextPage ? "正在加载" : "加载下一页"}</button> : null}
       </main>
-      <GraphDetailPanel workspaceId={workspaceId} selection={selection} edges={model.edges.map((edge) => edge.edge)} pinned={selectedNodeKey !== undefined && lockedPositions[selectedNodeKey] !== undefined} canPin={selectedNodePosition !== undefined} modal={compactDetail} onTogglePin={toggleSelectedNodePin} onClose={closeDetail} />
+      <GraphDetailPanel workspaceId={workspaceId} selection={activeSelection} edges={model.edges.map((edge) => edge.edge)} pinned={selectedNodeKey !== undefined && displayedLockedPositions[selectedNodeKey] !== undefined} canPin={selectedNodePosition !== undefined} modal={compactDetail} onTogglePin={toggleSelectedNodePin} onClose={closeDetail} />
     </div>
   </div>;
 };

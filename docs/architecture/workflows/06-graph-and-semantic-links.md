@@ -140,10 +140,11 @@ ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-benchmark
 - `graph-smoke` 启动真实 API 进程执行最小闭环；成功后幂等清理 fixture，失败时保留 0700 诊断目录。
   响应不得泄露数据库 URL、绝对路径、managed storage 字段或未公开来源正文；API/fixture 日志还不得记录
   Claim statement、Evidence reason 或 provenance 正文 canary。
-- `graph-benchmark` 确定性生成 20,000 Active Topic、100,000 Confirmed Relation 和 100,000 Evidence，
-  经过 5 次预热执行 30 次一跳采样，要求 p95 不超过 1.5 秒、每次固定 6 条数据库 statement，并保存
-  Neighborhood/Path/Evidence 的 EXPLAIN 证据。M10 才在 500,000 Relation 和正式资源预算下执行最终
-  P95 与图 UI FPS 门禁；M7 结果不能宣称提前完成 M10 容量验收。
+- `graph-benchmark` 确定性生成 20,000 Active Topic、100,000 Confirmed IMPACTS Relation 和 100,000
+  Evidence 作为 M7 参考拓扑，经过 5 次预热执行 30 次一跳采样，要求 p95 不超过 1.5 秒、每次固定 6 条
+  数据库 statement，并保存 Neighborhood/Path/Evidence 的 EXPLAIN 证据。Mixed Topic/Claim 与
+  BELONGS_TO 正确性由 integration/smoke 覆盖；M10 才在 claim-heavy/mixed 拓扑、500,000 Relation 和
+  正式资源预算下执行最终 P95 与图 UI FPS 门禁，M7 结果不能宣称提前完成 M10 容量验收。
 - Graph v1 没有新增 Graph 表或写入链路。发布回滚使用上一版 API binary 与 Web assets，停用 Graph
   route/UI 和只读 adapter 即可；必须保留 Knowledge Topic/Claim/Relation/Evidence 事实，不以删除事实
   数据作为回滚手段。

@@ -88,10 +88,10 @@ func (service *Service) GlobalPage(ctx context.Context, query GlobalPageRequest)
 	if err != nil {
 		return graphdomain.GlobalPage{}, err
 	}
-	page, err := PaginateResultWindow(service.cursor, ResultWindowRequest{
+	page, err := paginateResultWindowWithState(service.cursor, ResultWindowRequest{
 		QueryKind: QueryKindGlobal, WorkspaceID: request.WorkspaceID,
 		CanonicalRequestHash: requestHash, Limit: request.Limit, Cursor: query.Cursor,
-	}, window.Items)
+	}, window.Items, window.Items, window.Truncated, window.Reason)
 	if err != nil {
 		return graphdomain.GlobalPage{}, err
 	}
@@ -167,10 +167,10 @@ func (service *Service) NeighborhoodPage(ctx context.Context, query Neighborhood
 		Edges         []graphdomain.GraphEdge `json:"edges"`
 		BoundaryNodes []knowledge.NodeRef     `json:"boundary_nodes"`
 	}{result.Nodes, result.Edges, result.BoundaryNodes}
-	page, err := paginateResultWindow(service.cursor, ResultWindowRequest{
+	page, err := paginateResultWindowWithState(service.cursor, ResultWindowRequest{
 		QueryKind: QueryKindNeighborhoodDepth1, WorkspaceID: request.WorkspaceID,
 		CanonicalRequestHash: requestHash, Limit: request.Limit, Cursor: query.Cursor,
-	}, result.Edges, fingerprintValue)
+	}, result.Edges, fingerprintValue, result.Meta.Truncated, result.Meta.Reason)
 	if err != nil {
 		return graphdomain.Neighborhood{}, err
 	}
@@ -302,10 +302,10 @@ func (service *Service) RelationEvidencePage(ctx context.Context, request Relati
 	if err != nil {
 		return graphdomain.RelationEvidencePage{}, err
 	}
-	page, err := PaginateResultWindow(service.cursor, ResultWindowRequest{
+	page, err := paginateResultWindowWithState(service.cursor, ResultWindowRequest{
 		QueryKind: QueryKindRelationEvidence, WorkspaceID: workspaceID,
 		CanonicalRequestHash: requestHash, Limit: limit, Cursor: request.Cursor,
-	}, window.Items)
+	}, window.Items, window.Items, window.Truncated, window.Reason)
 	if err != nil {
 		return graphdomain.RelationEvidencePage{}, err
 	}

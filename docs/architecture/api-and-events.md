@@ -337,7 +337,8 @@ Conversation/RAG API、SSE 与反馈已由 M6-04 落地；正式 Session/API Tok
 - `make graph-smoke`：启动真实 API 进程执行相同最小闭环，验证响应不泄露数据库 URL、绝对路径、
   managed storage 字段或未公开来源正文，并验证 API/fixture 日志不记录 Claim statement、Evidence reason
   或 provenance 正文 canary；成功幂等清理已提交 fixture，失败时保留权限为 0700 的诊断目录。
-- `make graph-benchmark`：确定性生成 20,000 Active Topic、100,000 Confirmed Relation 和 100,000
-  Relation Evidence，执行 5 次预热、30 次一跳采样和 Neighborhood/Path/Evidence EXPLAIN，p95 门槛为
-  1.5 秒且每次一跳查询固定 6 条数据库 statement。产物默认写入 `tmp/graph-benchmark/` 且文件权限为
-  0600；M10 才在 500,000 Relation 和正式资源预算下执行最终 P95/FPS 门禁。
+- `make graph-benchmark`：确定性生成 20,000 Active Topic、100,000 Confirmed IMPACTS Relation 和
+  100,000 Relation Evidence 参考拓扑，执行 5 次预热、30 次一跳采样和 Neighborhood/Path/Evidence
+  EXPLAIN，p95 门槛为 1.5 秒且每次一跳查询固定 6 条数据库 statement。Mixed Topic/Claim 与
+  BELONGS_TO 正确性由 integration/smoke 覆盖；产物默认写入 `tmp/graph-benchmark/` 且文件权限为 0600；
+  M10 才在 claim-heavy/mixed 拓扑、500,000 Relation 和正式资源预算下执行最终 P95/FPS 门禁。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +126,46 @@ func TestServiceGlobalOwnsCursorAndRejectsResultDrift(t *testing.T) {
 	assertServiceError(t, err, foundation.ErrorVersionConflict, graphdomain.ErrorCodeCursorStale)
 }
 
+func TestServiceGlobalCursorRejectsWindowMetadataDrift(t *testing.T) {
+	workspaceID := graphServiceID(90)
+	now := time.Now().UTC()
+	clusters := make([]graphdomain.GlobalCluster, 3)
+	for index := range clusters {
+		topic := graphdomain.TopicNode{Ref: graphServiceRef(knowledge.NodeTypeTopic, index+1), WorkspaceID: workspaceID, Name: fmt.Sprintf("Topic %d", index), Status: knowledge.TopicStatusActive, Version: 1, UpdatedAt: now.Add(-time.Duration(index) * time.Second)}
+		clusters[index] = graphdomain.GlobalCluster{Topic: topic, ClusterScore: 3 - index, DirectClaimCount: 3 - index, UpdatedAt: topic.UpdatedAt}
+	}
+
+	for _, testCase := range []struct {
+		name             string
+		initialTruncated bool
+		initialReason    string
+		currentTruncated bool
+		currentReason    string
+	}{
+		{name: "truncation changes", initialTruncated: true, initialReason: "RESULT_WINDOW_LIMIT"},
+		{name: "reason changes", initialTruncated: true, initialReason: "RESULT_WINDOW_LIMIT", currentTruncated: true, currentReason: "FILTER_WINDOW_LIMIT"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			port := &graphQueryPortStub{global: GlobalResultWindow{Items: clusters, Truncated: testCase.initialTruncated, Reason: testCase.initialReason}}
+			service, err := NewService(port, mustGraphCursorCodec(t, 'q'))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := validGlobalRequest()
+			request.Limit = 2
+			first, err := service.GlobalPage(context.Background(), GlobalPageRequest{Request: request})
+			if err != nil || first.Meta.NextCursor == "" {
+				t.Fatalf("first=%#v err=%v", first, err)
+			}
+
+			port.global.Truncated = testCase.currentTruncated
+			port.global.Reason = testCase.currentReason
+			_, err = service.GlobalPage(context.Background(), GlobalPageRequest{Request: request, Cursor: first.Meta.NextCursor})
+			assertServiceError(t, err, foundation.ErrorVersionConflict, graphdomain.ErrorCodeCursorStale)
+		})
+	}
+}
+
 func TestServicePreservesBoundedWindowTruncationAcrossPages(t *testing.T) {
 	workspaceID := graphServiceID(90)
 	now := time.Now().UTC()
@@ -150,12 +191,77 @@ func TestServicePreservesBoundedWindowTruncationAcrossPages(t *testing.T) {
 	}
 }
 
+func TestServiceNeighborhoodCursorRejectsWindowMetadataDrift(t *testing.T) {
+	for _, testCase := range []struct {
+		name             string
+		initialTruncated bool
+		initialReason    string
+		currentTruncated bool
+		currentReason    string
+	}{
+		{name: "truncation changes", initialTruncated: true, initialReason: "RESULT_WINDOW_LIMIT"},
+		{name: "reason changes", initialTruncated: true, initialReason: "RESULT_WINDOW_LIMIT", currentTruncated: true, currentReason: "FILTER_WINDOW_LIMIT"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			request, neighborhood := validNeighborhoodWindow(t, testCase.initialTruncated, testCase.initialReason)
+			port := &graphQueryPortStub{neighborhood: neighborhood}
+			service, err := NewService(port, mustGraphCursorCodec(t, 'q'))
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err := service.NeighborhoodPage(context.Background(), NeighborhoodPageRequest{Request: request})
+			if err != nil || first.Meta.NextCursor == "" {
+				t.Fatalf("first=%#v err=%v", first, err)
+			}
+
+			port.neighborhood.Meta.Truncated = testCase.currentTruncated
+			port.neighborhood.Meta.Reason = testCase.currentReason
+			port.neighborhood.Meta.Complete = !testCase.currentTruncated
+			_, err = service.NeighborhoodPage(context.Background(), NeighborhoodPageRequest{Request: request, Cursor: first.Meta.NextCursor})
+			assertServiceError(t, err, foundation.ErrorVersionConflict, graphdomain.ErrorCodeCursorStale)
+		})
+	}
+}
+
+func TestServiceRelationEvidenceCursorRejectsWindowMetadataDrift(t *testing.T) {
+	workspaceID, relationID := graphServiceID(90), graphServiceID(80)
+	items := validRelationEvidenceItems(t, workspaceID, relationID, 3)
+	for _, testCase := range []struct {
+		name             string
+		initialTruncated bool
+		initialReason    string
+		currentTruncated bool
+		currentReason    string
+	}{
+		{name: "truncation changes", initialTruncated: true, initialReason: "RESULT_WINDOW_LIMIT"},
+		{name: "reason changes", initialTruncated: true, initialReason: "RESULT_WINDOW_LIMIT", currentTruncated: true, currentReason: "FILTER_WINDOW_LIMIT"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			port := &graphQueryPortStub{evidence: RelationEvidenceResultWindow{Items: items, Truncated: testCase.initialTruncated, Reason: testCase.initialReason}}
+			service, err := NewService(port, mustGraphCursorCodec(t, 'q'))
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err := service.RelationEvidencePage(context.Background(), RelationEvidencePageRequest{WorkspaceID: workspaceID, RelationID: relationID, Limit: 2})
+			if err != nil || first.Meta.NextCursor == "" {
+				t.Fatalf("first=%#v err=%v", first, err)
+			}
+
+			port.evidence.Truncated = testCase.currentTruncated
+			port.evidence.Reason = testCase.currentReason
+			_, err = service.RelationEvidencePage(context.Background(), RelationEvidencePageRequest{WorkspaceID: workspaceID, RelationID: relationID, Limit: 2, Cursor: first.Meta.NextCursor})
+			assertServiceError(t, err, foundation.ErrorVersionConflict, graphdomain.ErrorCodeCursorStale)
+		})
+	}
+}
+
 type graphQueryPortStub struct {
-	global      GlobalResultWindow
-	globalError error
-	globalCalls int
-	search      graphdomain.NodeSearchResult
-	evidence    RelationEvidenceResultWindow
+	global       GlobalResultWindow
+	globalError  error
+	globalCalls  int
+	search       graphdomain.NodeSearchResult
+	neighborhood graphdomain.Neighborhood
+	evidence     RelationEvidenceResultWindow
 }
 
 func (port *graphQueryPortStub) GlobalWindow(context.Context, graphdomain.GlobalRequest) (GlobalResultWindow, error) {
@@ -165,8 +271,8 @@ func (port *graphQueryPortStub) GlobalWindow(context.Context, graphdomain.Global
 func (port *graphQueryPortStub) SearchNodes(context.Context, graphdomain.NodeSearchRequest) (graphdomain.NodeSearchResult, error) {
 	return port.search, nil
 }
-func (*graphQueryPortStub) NeighborhoodWindow(context.Context, graphdomain.NeighborhoodRequest) (graphdomain.Neighborhood, error) {
-	return graphdomain.Neighborhood{}, nil
+func (port *graphQueryPortStub) NeighborhoodWindow(context.Context, graphdomain.NeighborhoodRequest) (graphdomain.Neighborhood, error) {
+	return port.neighborhood, nil
 }
 func (*graphQueryPortStub) FindPath(context.Context, graphdomain.PathRequest) (graphdomain.PathResult, error) {
 	return graphdomain.PathResult{}, nil
@@ -191,6 +297,44 @@ func graphServiceRef(nodeType knowledge.NodeType, value int) knowledge.NodeRef {
 
 func graphServiceID(value int) foundation.ID {
 	return foundation.ID(fmt.Sprintf("00000000-0000-4000-8000-%012d", value))
+}
+
+func validNeighborhoodWindow(t *testing.T, truncated bool, reason string) (graphdomain.NeighborhoodRequest, graphdomain.Neighborhood) {
+	t.Helper()
+	workspaceID := graphServiceID(90)
+	now := time.Now().UTC()
+	applicability, err := knowledge.ParseApplicability([]byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	center := graphdomain.ClaimNode{Ref: graphServiceRef(knowledge.NodeTypeClaim, 1), WorkspaceID: workspaceID, Statement: "center claim", Status: knowledge.ClaimStatusConfirmed, Applicability: applicability, Version: 1, UpdatedAt: now}
+	nodes := []graphdomain.GraphNode{{Claim: &center}}
+	edges := make([]graphdomain.GraphEdge, 3)
+	for index := range edges {
+		topic := graphdomain.TopicNode{Ref: graphServiceRef(knowledge.NodeTypeTopic, index+2), WorkspaceID: workspaceID, Name: fmt.Sprintf("Topic %d", index), Status: knowledge.TopicStatusActive, Version: 1, UpdatedAt: now}
+		nodes = append(nodes, graphdomain.GraphNode{Topic: &topic})
+		edges[index] = graphdomain.GraphEdge{RelationID: graphServiceID(index + 10), WorkspaceID: workspaceID, Source: center.Ref, Target: topic.Ref, Type: knowledge.RelationBelongsTo, Status: knowledge.RelationStatusConfirmed, Traversal: graphdomain.EdgeTraversalForward, Version: 1, EvidenceHref: "/evidence", UpdatedAt: now}
+	}
+	request := graphdomain.NeighborhoodRequest{WorkspaceID: workspaceID, Center: center.Ref, Depth: 1, Limit: 2, Direction: graphdomain.TraversalBoth, MaxNodes: 10, MaxEdges: 10, MaxFrontier: 10}
+	result := graphdomain.Neighborhood{WorkspaceID: workspaceID, Center: center.Ref, Nodes: nodes, Edges: edges, LayerCounts: []int{3}, CompletedDepth: 1, Meta: graphdomain.PageMeta{Fingerprint: strings.Repeat("a", 64), Complete: !truncated, Truncated: truncated, Reason: reason}}
+	return request, result
+}
+
+func validRelationEvidenceItems(t *testing.T, workspaceID, relationID foundation.ID, count int) []graphdomain.RelationEvidenceItem {
+	t.Helper()
+	applicability, err := knowledge.ParseApplicability([]byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := make([]graphdomain.RelationEvidenceItem, count)
+	for index := range items {
+		items[index] = graphdomain.RelationEvidenceItem{
+			ID: graphServiceID(index + 20), WorkspaceID: workspaceID, RelationID: relationID,
+			Provenance: knowledge.ProvenanceRef{WorkspaceID: workspaceID, SourceVersionID: graphServiceID(index + 30), SourceSpanID: graphServiceID(index + 40)},
+			Reason:     "evidence reason", Applicability: applicability, SourceHref: "/source", SpanHref: "/span", CreatedAt: time.Unix(int64(index+1), 0).UTC(),
+		}
+	}
+	return items
 }
 
 func assertServiceError(t *testing.T, err error, kind foundation.ErrorKind, code string) {

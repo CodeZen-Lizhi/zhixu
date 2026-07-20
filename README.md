@@ -173,10 +173,12 @@ credential canary, exercises the same black-box product path, then removes all d
 The three Graph gates require a caller-supplied disposable PostgreSQL database. `graph-integration` exercises the
 public HTTP Global→Local→Path→Evidence flow, cursor replay/staleness, Workspace isolation and timeout mapping;
 `graph-smoke` seeds a committed fixture, starts the real API process and cleans the fixture idempotently;
-`graph-benchmark` deterministically creates 20,000 Active Topics, 100,000 Confirmed Relations and 100,000 Evidence
-items, then runs 5 warmups and 30 one-hop samples with a 1.5-second p95 gate and representative EXPLAIN checks.
-Benchmark artifacts default to `tmp/graph-benchmark/`. This M7 reference gate does not replace M10 validation at
-500,000 Relations or the final graph UI FPS gate. Graph v1 adds no Graph table or write path; release rollback uses
+`graph-benchmark` deterministically creates 20,000 Active Topics, 100,000 Confirmed IMPACTS Relations and 100,000
+Evidence items as the M7 reference topology, then runs 5 warmups and 30 one-hop samples with a 1.5-second p95 gate
+and representative EXPLAIN checks. Mixed Topic/Claim correctness, including BELONGS_TO membership semantics, is
+covered by the integration/smoke gates rather than this capacity shape. Benchmark artifacts default to
+`tmp/graph-benchmark/`. This M7 reference gate does not replace M10 validation for claim-heavy or mixed topologies,
+500,000 Relations, or the final graph UI FPS gate. Graph v1 adds no Graph table or write path; release rollback uses
 the previous binary/web assets and must retain the canonical Knowledge facts.
 
 `compose-check` validates the Compose model. A release candidate must also run

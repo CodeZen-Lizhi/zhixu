@@ -224,9 +224,10 @@ Diff Draft 保存服务器 Proposal Revision，不只存浏览器。
 - Artifact 章节懒加载。
 - Bundle 按路由拆分。
 
-M7-01 的容量验证是 20,000 Topic、100,000 Relation、100,000 Evidence，5 次预热加 30 次采样；它证明
-查询有界和无 N+1，不是最终 500,000 Relation 或 UI FPS 验收。正式资源预算下的 500,000 Relation 与
-交互 FPS 门禁属于 M10；只有该证据表明当前渲染方案不足时，才评估 Cytoscape/Web Worker。
+M7-01 的容量验证是 20,000 Active Topic、100,000 Confirmed IMPACTS Relation、100,000 Evidence 的
+参考拓扑，执行 5 次预热加 30 次采样；Mixed Topic/Claim 与 BELONGS_TO 正确性由功能集成门禁覆盖。
+该结果证明参考拓扑查询有界和无 N+1，不是 claim-heavy/mixed、最终 500,000 Relation 或 UI FPS 验收。
+正式资源预算下的这些门禁属于 M10；只有该证据表明当前渲染方案不足时，才评估 Cytoscape/Web Worker。
 
 ## 16. 测试
 

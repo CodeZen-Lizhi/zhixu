@@ -264,8 +264,10 @@ Correct: Retrieval Adapter 边界裁剪首尾空白，裁剪后为空则明确�
   statement、Evidence reason 或 provenance 正文 canary。Smoke 失败控制输出只能额外打印用于运维恢复的
   私有 `0700` 诊断目录位置，不得打印 DSN、fixture 路径或正文；benchmark 的 summary/samples/EXPLAIN
   文件必须为 `0600`。
-- 容量门禁固定 20k Active Topic/100k Confirmed Relation/100k Evidence、单客户端一跳、5 次预热和 30 次
-  采样；每个样本必须为 6 条数据库语句，p95 <= 1.5s，并保存 Neighborhood/Path/Evidence 的索引计划。
+- 容量门禁固定 20k Active Topic/100k Confirmed IMPACTS Relation/100k Evidence 参考拓扑、单客户端一跳、
+  5 次预热和 30 次采样；每个样本必须为 6 条数据库语句，p95 <= 1.5s，并保存
+  Neighborhood/Path/Evidence 的索引计划。Mixed Topic/Claim 与 BELONGS_TO 正确性由
+  `graph-integration`/`graph-smoke` 覆盖；claim-heavy/mixed 拓扑和 500,000 Relation/FPS 仍归 M10。
 - 前端必须通过严格 Graph decoder、Workspace-scoped query key、URL round-trip、60 node/100 edge 画布上限、
   完整列表 fallback、Relation Evidence lazy load 和键盘/焦点测试；浏览器同时验证桌面 1440x900 与移动
   390x844，无横向溢出和控制台 warning/error。

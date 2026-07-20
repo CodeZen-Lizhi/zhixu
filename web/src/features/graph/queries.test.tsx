@@ -4,6 +4,8 @@ import type { PropsWithChildren } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  clearGraphRelationEvidence,
+  clearGraphWorkspaceDetails,
   useGraphGlobal,
   useGraphNeighborhood,
   useGraphNodeDetail,
@@ -12,6 +14,7 @@ import {
   useGraphRelationDetail,
   useGraphRelationEvidence,
 } from "./queries";
+import { graphQueryKeys } from "./query-keys";
 
 const workspaceId = "92000000-0000-4000-8000-000000000001";
 const topicId = "92000000-0000-4000-8000-000000000002";
@@ -182,6 +185,32 @@ const createWrapper = () => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Graph query hooks", () => {
+  it("按 Relation 清理全部 Evidence 分页缓存且保留 Relation detail", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(graphQueryKeys.relation({ workspaceId, relationId }), { detail: true });
+    queryClient.setQueryData(graphQueryKeys.evidence({ workspaceId, relationId, limit: 20 }), { pageSize: 20 });
+    queryClient.setQueryData(graphQueryKeys.evidence({ workspaceId, relationId, limit: 50 }), { pageSize: 50 });
+
+    clearGraphRelationEvidence(queryClient, workspaceId, relationId);
+
+    expect(queryClient.getQueryData(graphQueryKeys.relation({ workspaceId, relationId }))).toEqual({ detail: true });
+    expect(queryClient.getQueryData(graphQueryKeys.evidence({ workspaceId, relationId, limit: 20 }))).toBeUndefined();
+    expect(queryClient.getQueryData(graphQueryKeys.evidence({ workspaceId, relationId, limit: 50 }))).toBeUndefined();
+  });
+
+  it("恢复列表时只清理详情与 Evidence，不删除 Node Search 缓存", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(graphQueryKeys.node({ workspaceId, nodeType: "CLAIM", nodeId: claimId }), { detail: true });
+    queryClient.setQueryData(graphQueryKeys.evidence({ workspaceId, relationId, limit: 20 }), { evidence: true });
+    queryClient.setQueryData(graphQueryKeys.nodeSearch({ workspaceId, query: "Graph", limit: 20 }), { matches: true });
+
+    clearGraphWorkspaceDetails(queryClient, workspaceId);
+
+    expect(queryClient.getQueryData(graphQueryKeys.node({ workspaceId, nodeType: "CLAIM", nodeId: claimId }))).toBeUndefined();
+    expect(queryClient.getQueryData(graphQueryKeys.evidence({ workspaceId, relationId, limit: 20 }))).toBeUndefined();
+    expect(queryClient.getQueryData(graphQueryKeys.nodeSearch({ workspaceId, query: "Graph", limit: 20 }))).toEqual({ matches: true });
+  });
+
   it("Global 使用服务端 cursor 加载下一页", async () => {
     const fingerprint = "b".repeat(64);
     const fetchMock = vi.fn<typeof fetch>()

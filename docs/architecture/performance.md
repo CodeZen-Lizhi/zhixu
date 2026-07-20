@@ -90,31 +90,31 @@ Citation Validation variable
 
 ### M7-01 参考实测
 
-本次 `tmp/graph-benchmark/summary.json` 的 `generated_at` 为 `2026-07-20T16:45:34.982247Z`，来自
+本次 `tmp/graph-benchmark/summary.json` 的 `generated_at` 为 `2026-07-20T19:18:31.993598Z`，来自
 `graph-capacity/v1`、seed `m7-01-reference-v1`。参考环境为 PostgreSQL 18.4
 （`shared_buffers=128MB`、`work_mem=4MB`）、Go 1.25.4、Darwin arm64、10 logical CPU、单客户端并发；
 结果只代表该环境和数据拓扑。
 
 | 指标 | 当前结果 |
 |---|---:|
-| Topic | 20,000 |
-| Relation | 100,000 |
+| Active Topic | 20,000 |
+| Confirmed IMPACTS Relation | 100,000 |
 | Relation Evidence | 100,000 |
 | 热点中心度数 | 499 |
 | 预热 / 采样 | 5 / 30 |
 | 每次一跳查询数据库 statements | 固定 6 |
-| P50 | 8.730208 ms |
-| P95 | 15.287917 ms |
-| Max | 16.634 ms |
+| P50 | 6.949708 ms |
+| P95 | 7.445958 ms |
+| Max | 9.513333 ms |
 | M7-01 P95 门槛 | 1,500 ms，通过 |
 
 30 个采样和 5 次预热均保持 6 statements，证明查询数量不随返回节点或边逐项增长。三类生产 SQL 的 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` 结果如下：
 
 | 查询 | 必须命中的现有索引 | Planning | Execution | Relation Seq Scan | Evidence Seq Scan |
 |---|---|---:|---:|---:|---:|
-| Neighborhood | `idx_knowledge_relation_source`、`idx_knowledge_relation_target`、`idx_knowledge_relation_evidence_owner` | 0.272 ms | 5.003 ms | 0 | 0 |
-| Path frontier | `idx_knowledge_relation_source`、`idx_knowledge_relation_target` | 0.290 ms | 8.610 ms | 0 | 0 |
-| Relation Evidence | `idx_knowledge_relation_evidence_owner` | 0.257 ms | 0.072 ms | 0 | 0 |
+| Neighborhood | `idx_knowledge_relation_source`、`idx_knowledge_relation_target`、`idx_knowledge_relation_evidence_owner` | 0.263 ms | 4.639 ms | 0 | 0 |
+| Path frontier | `idx_knowledge_relation_source`、`idx_knowledge_relation_target` | 0.281 ms | 2.228 ms | 0 | 0 |
+| Relation Evidence | `idx_knowledge_relation_evidence_owner` | 0.097 ms | 0.023 ms | 0 | 0 |
 
 运行方式：
 
@@ -125,7 +125,7 @@ make graph-benchmark
 
 基准会确定性生成容量 fixture，执行 5 次预热和 30 次采样，写出 `summary.json`、`samples.jsonl` 及 Neighborhood/Path/Evidence 三份 EXPLAIN 后自动清理已提交 fixture。产物默认位于 `tmp/graph-benchmark/`、权限为 `0600` 且不纳入 Git；可用 `ZHIXU_GRAPH_BENCHMARK_ARTIFACT_DIR` 指定其他目录。
 
-上述结果只完成 M7-01 的 100,000 Relation 本地参考门禁，不能线性外推为 500,000 Relation 的性能，也不包含浏览器布局 FPS。M10 仍须在正式资源预算下生成 500,000 Relation，重新验证 Graph 查询 P95 和前端 FPS/交互；只有届时 direct PostgreSQL projection 的实际计划不达标，才评估 additive 索引、可重建持久投影或图数据库。
+上述结果只完成 M7-01 的 Active Topic/Confirmed IMPACTS 本地参考拓扑门禁；Mixed Topic/Claim 与 BELONGS_TO 正确性由 Graph integration/smoke 覆盖，该容量夹具不覆盖 claim-heavy/mixed 图。结果不能线性外推为 500,000 Relation 的性能，也不包含浏览器布局 FPS。M10 仍须在正式资源预算下验证 claim-heavy/mixed 与 500,000 Relation，重新验证 Graph 查询 P95 和前端 FPS/交互；只有届时 direct PostgreSQL projection 的实际计划不达标，才评估 additive 索引、可重建持久投影或图数据库。
 
 ## 9. Vector
 
