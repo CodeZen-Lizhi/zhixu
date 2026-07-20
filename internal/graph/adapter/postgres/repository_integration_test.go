@@ -781,6 +781,79 @@ func TestRepositoryFindPathReturnsFrontierCancellationAndTimeoutWithoutPartial(t
 	}
 }
 
+func TestRepositoryRelationEvidenceWindowPaginatesLazyProvenance(t *testing.T) {
+	repository, tx, ctx := graphIntegrationRepository(t)
+	fixture := seedGraphFixture(t, ctx, tx)
+	var sourceVersionID, sourceSpanID string
+	var applicability []byte
+	var schemaVersion, applicabilityHash string
+	if err := tx.QueryRow(ctx, `SELECT source_version_id::text,source_span_id::text,applicability,applicability_schema_version,applicability_hash FROM core.relation_evidence WHERE workspace_id=$1 AND relation_id=$2 LIMIT 1`, string(fixture.workspaceID), string(fixture.supportRelationID)).Scan(&sourceVersionID, &sourceSpanID, &applicability, &schemaVersion, &applicabilityHash); err != nil {
+		t.Fatal(err)
+	}
+	insertEvidence := func(reason string, createdAt time.Time) {
+		t.Helper()
+		if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'SOURCE_DERIVED','fixture',$11)`, string(graphTestID(t)), string(fixture.workspaceID), string(fixture.supportRelationID), sourceVersionID, sourceSpanID, reason, graphHash(reason+createdAt.String()), applicability, schemaVersion, applicabilityHash, createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertEvidence("second evidence", time.Now().UTC())
+	codec, err := graphapp.NewCursorCodec(bytes.Repeat([]byte{0x3e}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := graphapp.NewService(repository, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.RelationEvidencePage(ctx, graphapp.RelationEvidencePageRequest{WorkspaceID: fixture.workspaceID, RelationID: fixture.supportRelationID, Limit: 1})
+	if err != nil || len(first.Items) != 1 || first.Meta.NextCursor == "" || first.Items[0].Reason == "" || first.Items[0].Applicability.SchemaVersion == "" || first.Items[0].Confirmation == nil || first.Items[0].SourceHref != "/api/v1/workspaces/"+string(fixture.workspaceID)+"/source-versions/"+sourceVersionID || first.Items[0].SpanHref != first.Items[0].SourceHref+"/spans/"+sourceSpanID {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	second, err := service.RelationEvidencePage(ctx, graphapp.RelationEvidencePageRequest{WorkspaceID: fixture.workspaceID, RelationID: fixture.supportRelationID, Limit: 1, Cursor: first.Meta.NextCursor})
+	if err != nil || len(second.Items) != 1 || second.Meta.NextCursor != "" || !second.Meta.Complete || second.Items[0].ID == first.Items[0].ID {
+		t.Fatalf("second=%#v err=%v", second, err)
+	}
+	insertEvidence("third evidence", time.Now().UTC().Add(time.Second))
+	if _, err := service.RelationEvidencePage(ctx, graphapp.RelationEvidencePageRequest{WorkspaceID: fixture.workspaceID, RelationID: fixture.supportRelationID, Limit: 1, Cursor: first.Meta.NextCursor}); !hasGraphCode(err, graphdomain.ErrorCodeCursorStale) {
+		t.Fatalf("stale err=%v", err)
+	}
+	otherWorkspace := graphTestID(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'evidence other',$2,$2,$3,'test',1,$3,$3)`, string(otherWorkspace), "/tmp/graph-evidence-other-"+string(otherWorkspace), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.RelationEvidenceWindow(ctx, otherWorkspace, fixture.supportRelationID); !hasGraphCode(err, graphdomain.ErrorCodeRelationNotFound) {
+		t.Fatalf("cross workspace err=%v", err)
+	}
+	suggestedRelation := seedGraphRelation(t, ctx, tx, fixture.workspaceID, fixture.firstClaimID, knowledge.NodeTypeClaim, fixture.longClaimID, knowledge.NodeTypeClaim, knowledge.RelationComplements, knowledge.RelationStatusSuggested, nil, time.Now().UTC())
+	if _, err := repository.RelationEvidenceWindow(ctx, fixture.workspaceID, suggestedRelation); !hasGraphCode(err, graphdomain.ErrorCodeRelationNotFound) {
+		t.Fatalf("non-formal relation err=%v", err)
+	}
+}
+
+func TestRepositoryRelationEvidenceWindowTruncatesAtFiveHundred(t *testing.T) {
+	repository, tx, ctx := graphIntegrationRepository(t)
+	fixture := seedGraphFixture(t, ctx, tx)
+	var sourceVersionID, sourceSpanID string
+	var applicability []byte
+	var schemaVersion, applicabilityHash string
+	if err := tx.QueryRow(ctx, `SELECT source_version_id::text,source_span_id::text,applicability,applicability_schema_version,applicability_hash FROM core.relation_evidence WHERE workspace_id=$1 AND relation_id=$2 LIMIT 1`, string(fixture.workspaceID), string(fixture.supportRelationID)).Scan(&sourceVersionID, &sourceSpanID, &applicability, &schemaVersion, &applicabilityHash); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	batch := &pgx.Batch{}
+	for index := 0; index < graphapp.MaxResultWindowItems; index++ {
+		batch.Queue(`INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'SOURCE_DERIVED','fixture',$11)`, string(graphTestID(t)), string(fixture.workspaceID), string(fixture.supportRelationID), sourceVersionID, sourceSpanID, fmt.Sprintf("window evidence %03d", index), graphHash(fmt.Sprintf("relation-window-evidence-%03d", index)), applicability, schemaVersion, applicabilityHash, now.Add(time.Duration(index)*time.Microsecond))
+	}
+	results := tx.SendBatch(ctx, batch)
+	if err := results.Close(); err != nil {
+		t.Fatal(err)
+	}
+	window, err := repository.RelationEvidenceWindow(ctx, fixture.workspaceID, fixture.supportRelationID)
+	if err != nil || len(window.Items) != graphapp.MaxResultWindowItems || !window.Truncated || window.Reason != "RESULT_WINDOW_LIMIT" {
+		t.Fatalf("items=%d truncated=%v reason=%q err=%v", len(window.Items), window.Truncated, window.Reason, err)
+	}
+}
+
 type pathBarrierDB struct {
 	*pgxpool.Pool
 	entered chan struct{}

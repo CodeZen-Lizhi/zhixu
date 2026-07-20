@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	"github.com/jackc/pgx/v5"
 )
@@ -25,11 +24,6 @@ func NewRepository(db DB) (*Repository, error) {
 		return nil, unavailable(errors.New("graph database is nil"))
 	}
 	return &Repository{db: db}, nil
-}
-
-// RelationEvidenceWindow 由 T06 实现；当前明确失败而不是返回空 Evidence 假成功。
-func (*Repository) RelationEvidenceWindow(context.Context, foundation.ID, foundation.ID) (graphapp.RelationEvidenceResultWindow, error) {
-	return graphapp.RelationEvidenceResultWindow{}, unavailable(errors.New("graph relation evidence query is not implemented"))
 }
 
 var _ graphapp.QueryPort = (*Repository)(nil)
