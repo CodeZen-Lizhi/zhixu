@@ -1056,3 +1056,35 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 实施 T14 `make rag-integration` 与 `make compose-rag-smoke`，贯通公开 API、River Worker、Retrieval、Agent、Answer、SSE 和 Feedback。
+
+## Session 32: M6-04 真实 RAG 集成与 Compose 门禁
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T14）
+**Branch**: `dev`
+
+### Summary
+
+完成公共 Conversation HTTP→River Worker→Retrieval/Knowledge→PLAN/Answer/Review→原子 Answer→SSE→Feedback 的真实 PostgreSQL 与 disposable Compose 门禁。
+
+### Main Changes
+
+- 新增 request-driven OpenAI-compatible fixture，严格 Bearer canary、Schema 三元组和单 JSON 文档，不依赖调用顺序。
+- `make rag-integration` 与 `make compose-rag-smoke` 验证 Citation、Related Topic、Follow-up、检索摘要、SSE/Feedback/Question exact replay，并证明首次恰好三次 Model Call、重放零新增。
+- 修复 PLAN/REVIEW 缺少 `model_run_ref`、空 Degradation/Citation slice 退化为 nil、Markdown snippet/source excerpt 首尾空白导致 Evidence/Citation gate 失败。
+- Compose seed 仅通过 Knowledge Domain/Repository 补无公开 API 的正式资格，不创建或修改 Conversation/Question/Answer/Workflow。
+
+### Testing
+
+- focused Go race/vet、`go mod tidy -diff`、OpenAPI、`make test` 与 106 个前端测试/构建通过。
+- `make rag-integration` 真实 PostgreSQL通过。
+- `make compose-rag-smoke` 真实 Compose 全链路通过，退出自动清理容器、网络、volume 与临时目录。
+- 主 Agent Go/SQL/通用五轴审查无 P0/P1；独立审查两项 P2 中 Compose 调用计数已修，PLAN 输入项确认总预算以服务端绑定后输入为准并同步规范。
+
+### Status
+
+[OK] M6-04 T14 completed; T15-T17 pending.
+
+### Next Steps
+
+- 实施 T15 文档/规范同步与全量门禁，再进行 T16 独立跨层复审和 T17 提交归档。

@@ -68,7 +68,8 @@ func TestRepositoryReadsTurnsAnswersAndPublishedContextWithoutCrossWorkspaceLeak
 	if err != nil || len(second.Items) != 1 || second.Items[0].Question.Ordinal != 3 || second.NextCursor != nil {
 		t.Fatalf("second turn page = %#v, %v", second, err)
 	}
-	if second.Items[0].Answer == nil || second.Items[0].Answer.AssistantText != "No approved evidence" || len(second.Items[0].Answer.Citations) != 0 {
+	if second.Items[0].Answer == nil || second.Items[0].Answer.AssistantText != "No approved evidence" ||
+		second.Items[0].Answer.Citations == nil || len(second.Items[0].Answer.Citations) != 0 {
 		t.Fatalf("refused turn = %#v", second.Items[0])
 	}
 	if second.Items[0].Answer.CurrentStage != nil {
@@ -87,6 +88,11 @@ func TestRepositoryReadsTurnsAnswersAndPublishedContextWithoutCrossWorkspaceLeak
 		len(answer.Citations) != 1 || answer.Citations[0].ID != "citation-1" || answer.CurrentStage == nil ||
 		*answer.CurrentStage != conversationapplication.RAGCurrentStageValidationCompleted {
 		t.Fatalf("GetAnswer() = %#v, %v", answer, err)
+	}
+	refusedAnswer, err := counted.GetAnswer(ctx, workspaceA, fixture.answerID(3))
+	if err != nil || refusedAnswer.Answer.PublicationStatus != conversationdomain.AnswerPublicationRefused ||
+		refusedAnswer.Citations == nil || len(refusedAnswer.Citations) != 0 {
+		t.Fatalf("GetAnswer(refused) = %#v, %v", refusedAnswer, err)
 	}
 	_, crossWorkspaceErr := counted.GetAnswer(ctx, workspaceB, completedAnswerID)
 	_, missingErr := counted.GetAnswer(ctx, workspaceA, conversationTurnID(999))

@@ -355,7 +355,7 @@ func (e *RAGExecutor) retrieve(ctx context.Context, request RAGExecutionRequest,
 		if merged.WorkspaceID == "" {
 			merged = RetrievalBatch{WorkspaceID: request.WorkspaceID, IndexVersionID: searchResult.IndexVersionID, EmbeddingVersionID: cloneID(searchResult.EmbeddingVersionID)}
 			summary.EffectiveMode, summary.IndexVersionID, summary.EmbeddingVersionID = searchResult.EffectiveMode, searchResult.IndexVersionID, cloneID(searchResult.EmbeddingVersionID)
-			summary.Degradations = append([]retrievaldomain.SearchDegradation(nil), searchResult.Degradations...)
+			summary.Degradations = append([]retrievaldomain.SearchDegradation{}, searchResult.Degradations...)
 		} else if merged.IndexVersionID != searchResult.IndexVersionID || !sameID(merged.EmbeddingVersionID, searchResult.EmbeddingVersionID) || summary.EffectiveMode != searchResult.EffectiveMode || !slices.Equal(summary.Degradations, searchResult.Degradations) {
 			return RetrievalBatch{}, summary, driftError()
 		}

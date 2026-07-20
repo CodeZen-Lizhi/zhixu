@@ -87,6 +87,30 @@ func TestAdapterSearchExpandsAllProvenanceAndMarksTruncation(t *testing.T) {
 	}
 }
 
+func TestAdapterSearchCanonicalizesEvidenceExcerptAndRejectsWhitespaceOnly(t *testing.T) {
+	result := validSearchResult()
+	result.Items[0].Snippet = "\n  bounded evidence  \t"
+	adapter, err := NewAdapter(&fakeSearcher{result: result}, &fakeReference{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := adapter.Search(context.Background(), retrievaldomain.SearchRequest{
+		WorkspaceID: testWorkspaceID, Query: "q", Mode: retrievaldomain.SearchModeHybrid, Limit: 1,
+	})
+	if err != nil || len(scoped.RetrievalBatch.Items) == 0 || scoped.RetrievalBatch.Items[0].SearchExcerpt != "bounded evidence" {
+		t.Fatalf("scoped=%#v err=%v", scoped, err)
+	}
+	result.Items[0].Snippet = " \n\t "
+	adapter, err = NewAdapter(&fakeSearcher{result: result}, &fakeReference{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = adapter.Search(context.Background(), retrievaldomain.SearchRequest{
+		WorkspaceID: testWorkspaceID, Query: "q", Mode: retrievaldomain.SearchModeHybrid, Limit: 1,
+	})
+	requireCode(t, err, errorCodeResultInvalid)
+}
+
 func TestAdapterSearchPreservesRequestedMode(t *testing.T) {
 	for _, mode := range []retrievaldomain.SearchMode{retrievaldomain.SearchModeKeyword, retrievaldomain.SearchModeSemantic} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -205,7 +229,7 @@ func TestAdapterOpenUsesOnlyCitationIdentity(t *testing.T) {
 }
 
 func TestAdapterOpenBatchUsesOneReferenceCallAndPreservesInputOrder(t *testing.T) {
-	reference := &fakeReference{excerpt: "immutable source span"}
+	reference := &fakeReference{excerpt: "\n  immutable source span  \t"}
 	adapter, err := NewAdapter(&fakeSearcher{result: validSearchResult()}, reference)
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +242,8 @@ func TestAdapterOpenBatchUsesOneReferenceCallAndPreservesInputOrder(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reference.calls != 1 || len(opened) != 2 || opened[0].Citation != batch.Items[1].Citation || opened[1].Citation != batch.Items[0].Citation {
+	if reference.calls != 1 || len(opened) != 2 || opened[0].Citation != batch.Items[1].Citation || opened[1].Citation != batch.Items[0].Citation ||
+		opened[0].Excerpt != "immutable source span" || opened[1].Excerpt != "immutable source span" {
 		t.Fatalf("calls=%d opened=%+v", reference.calls, opened)
 	}
 }

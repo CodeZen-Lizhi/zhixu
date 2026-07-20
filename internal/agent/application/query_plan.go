@@ -3,6 +3,7 @@ package application
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"unicode/utf8"
 
@@ -59,11 +60,15 @@ func (planner *QueryPlanner) Plan(ctx context.Context, request QueryPlanRequest)
 	if err := validateQueryPlanRequest(request); err != nil {
 		return QueryPlanRunResult{}, err
 	}
+	boundInput, err := bindQueryPlanModelRunRef(request.Input, request.ModelRunRef)
+	if err != nil {
+		return QueryPlanRunResult{}, err
+	}
 	snapshot, err := planner.catalog.Snapshot(request.PromptRef, request.SchemaRef, request.SchemaRef, request.ProfileRef)
 	if err != nil {
 		return QueryPlanRunResult{}, err
 	}
-	chatRequest := buildChatRequest(snapshot, snapshot.Schema, domain.ModelCallPlan, snapshot.Prompt.InitialInstruction, request.Input, "")
+	chatRequest := buildChatRequest(snapshot, snapshot.Schema, domain.ModelCallPlan, snapshot.Prompt.InitialInstruction, boundInput, "")
 	requestBytes, err := encodedChatRequestBytes(chatRequest)
 	if err != nil {
 		return QueryPlanRunResult{}, err
@@ -100,6 +105,27 @@ func (planner *QueryPlanner) Plan(ctx context.Context, request QueryPlanRequest)
 		Plan: plan, Usage: response.Usage, RequestBytes: requestBytes, ResponseBytes: int64(len(response.Content)),
 		Runtime: FrozenRuntimeRefs{Profile: snapshot.Profile.Ref, Prompt: snapshot.Prompt.Ref, Schema: snapshot.Schema.Ref, Model: snapshot.Profile.Model},
 	}, nil
+}
+
+// bindQueryPlanModelRunRef 把服务端分配的 Model Run 身份加入仅存在内存的 PLAN 输入，供 Provider 精确回显绑定。
+func bindQueryPlanModelRunRef(input []byte, modelRunRef foundation.ID) ([]byte, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(input, &document); err != nil || document == nil {
+		return nil, applicationError(foundation.ErrorInvalidInput, errorCodeQueryPlanRequestInvalid, false, errors.New("query plan input must be a JSON object"))
+	}
+	if _, exists := document["model_run_ref"]; exists {
+		return nil, applicationError(foundation.ErrorInvalidInput, errorCodeQueryPlanRequestInvalid, false, errors.New("query plan input reserves model_run_ref for the server"))
+	}
+	encodedRef, err := json.Marshal(modelRunRef)
+	if err != nil {
+		return nil, applicationError(foundation.ErrorNonRetryableFailure, errorCodeQueryPlanRequestInvalid, false, err)
+	}
+	document["model_run_ref"] = encodedRef
+	bound, err := json.Marshal(document)
+	if err != nil || len(bound) > MaxStructuredInputBytes {
+		return nil, applicationError(foundation.ErrorInvalidInput, errorCodeQueryPlanRequestInvalid, false, errors.New("bound query plan input exceeds the structured input budget"))
+	}
+	return bound, nil
 }
 
 func validateQueryPlanRequest(request QueryPlanRequest) error {

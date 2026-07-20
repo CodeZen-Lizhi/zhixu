@@ -87,7 +87,7 @@ func TestRAGExecutorClassifiesEmptyRetrievalAsNoRelevantEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if proposal.Refusal == nil || proposal.Refusal.Payload.ReasonCode != domain.RefusalNoRelevantEvidence || proposal.Retrieval == nil || len(proposal.Retrieval.Rewrites) != 2 {
+	if proposal.Refusal == nil || proposal.Refusal.Payload.ReasonCode != domain.RefusalNoRelevantEvidence || proposal.Retrieval == nil || len(proposal.Retrieval.Rewrites) != 2 || proposal.Retrieval.Degradations == nil {
 		t.Fatalf("proposal=%#v", proposal)
 	}
 }
@@ -215,7 +215,7 @@ func TestRAGExecutorProducesValidatedV2TerminalProposal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if proposal.Answer == nil || proposal.Answer.SchemaVersion != domain.OutputSchemaVersionV2 || proposal.Retrieval == nil ||
-		proposal.Retrieval.CandidateCount != 1 || proposal.Retrieval.SelectedCount != 1 || ports.runCalls != 1 || ports.publishCalls != 1 {
+		proposal.Retrieval.CandidateCount != 1 || proposal.Retrieval.SelectedCount != 1 || proposal.Retrieval.Degradations == nil || ports.runCalls != 1 || ports.publishCalls != 1 {
 		t.Fatalf("proposal=%#v ports=%#v", proposal, ports)
 	}
 	wantStages := []RAGProgressStage{

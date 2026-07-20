@@ -225,7 +225,7 @@ func (scan *answerScan) build() (conversationapplication.AnswerView, error) {
 			RunID: workflowID, Status: workflowdomain.RunStatus(*scan.workflowStatus), Version: *scan.workflowVersion, UpdatedAt: *scan.workflowUpdatedAt,
 		},
 		AssistantText: projection.AssistantText,
-		Citations:     append([]agentdomain.Citation(nil), projection.Citations...),
+		Citations:     append([]agentdomain.Citation{}, projection.Citations...),
 	}
 	if scan.currentStage != nil {
 		stage := conversationapplication.RAGCurrentStage(*scan.currentStage)

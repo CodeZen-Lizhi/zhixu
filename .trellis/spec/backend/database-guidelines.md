@@ -1076,3 +1076,11 @@ Correct: 首次记录真实时钟；重放在 advisory lock 内恢复既有 occu
   `(workspace_id, resource_ref, seq DESC)` 的 RAG 事件部分索引支撑最新事件读取。
 - Answer ETag 必须包含当前阶段；阶段事件不会修改 Answer/Workflow version，若 ETag 只含两者会错误返回 304。
 - 真实 PostgreSQL 测试必须覆盖最新阶段、无阶段、跨 Workspace 隔离、终态保留、索引执行计划和迁移 Down/Up。
+
+## M6-04 Model Binding And Published Empty-Collection Contract
+
+- PLAN 和 Faithfulness REVIEW 的 Provider 输入必须包含服务端分配的 `model_run_ref`，模型响应必须精确回显；该字段只加入内存 Chat Request，不得复制进持久 Workflow Input。
+- PLAN 调用方不得提供保留字段 `model_run_ref`；输入必须是 JSON object，绑定后的完整输入受 `MaxStructuredInputBytes` 限制。
+- `RAGRetrievalSummary.Rewrites/Degradations` 与 published `Citations` 的空集合是显式 `[]`，不是 `null`。Repository/Adapter 防御性复制必须使用非 nil 空 slice 作为起点。
+- Search snippet 与 Source Span excerpt 进入 Agent Evidence 前在 Retrieval Adapter 边界规范化首尾空白；空白-only 结果属于一致性失败。
+- 真实 PostgreSQL/Compose 回归必须覆盖 Refusal 可查询、Markdown Evidence 可打开、completed Answer 三次 Model Call 以及 exact replay 零新增调用。

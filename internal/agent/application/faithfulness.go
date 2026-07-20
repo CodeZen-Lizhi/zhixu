@@ -222,10 +222,11 @@ func encodeFaithfulnessInput(request FaithfulnessReviewRequest) ([]byte, error) 
 	}
 	payload := struct {
 		SchemaVersion string                     `json:"schema_version"`
+		ModelRunRef   foundation.ID              `json:"model_run_ref"`
 		Answer        domain.RAGAnswerPayload    `json:"answer"`
 		ReviewTargets []faithfulnessReviewTarget `json:"review_targets"`
 		Evidence      []domain.Evidence          `json:"evidence"`
-	}{SchemaVersion: "agent-faithfulness-input/v1", Answer: request.Answer.Payload, ReviewTargets: targets, Evidence: request.Evidence}
+	}{SchemaVersion: "agent-faithfulness-input/v1", ModelRunRef: request.Answer.ModelRunRef, Answer: request.Answer.Payload, ReviewTargets: targets, Evidence: request.Evidence}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return nil, applicationError(foundation.ErrorNonRetryableFailure, errorCodeFaithfulnessRequestInvalid, false, err)

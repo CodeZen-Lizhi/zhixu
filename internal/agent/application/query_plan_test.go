@@ -62,7 +62,11 @@ func TestQueryPlannerRejectsInvalidReferencesAndInputBeforeProvider(t *testing.T
 		"invalid utf8": func(value *QueryPlanRequest) {
 			value.Input = []byte{0xff}
 		},
-		"nul": func(value *QueryPlanRequest) { value.Input = []byte("bad\x00input") },
+		"nul":        func(value *QueryPlanRequest) { value.Input = []byte("bad\x00input") },
+		"non object": func(value *QueryPlanRequest) { value.Input = []byte(`[]`) },
+		"reserved model run": func(value *QueryPlanRequest) {
+			value.Input = []byte(`{"model_run_ref":"61000000-0000-4000-8000-000000000099"}`)
+		},
 		"oversized": func(value *QueryPlanRequest) {
 			value.Input = make([]byte, MaxStructuredInputBytes+1)
 		},
@@ -196,7 +200,8 @@ func assertSinglePlanCall(t *testing.T, model *DeterministicChatModel, request Q
 	if call.Phase != domain.ModelCallPlan || call.ProfileRef != request.ProfileRef || call.PromptRef != request.PromptRef ||
 		call.SchemaRef != request.SchemaRef || call.Model != profile.Model || len(call.Messages) != 3 ||
 		call.Messages[0].Role != MessageRoleSystem || call.Messages[1].Content != "return one strict plan" ||
-		!strings.Contains(call.Messages[2].Content, "UNTRUSTED TASK INPUT") || !strings.Contains(call.Messages[2].Content, string(request.Input)) {
+		!strings.Contains(call.Messages[2].Content, "UNTRUSTED TASK INPUT") || !strings.Contains(call.Messages[2].Content, `"model_run_ref":"`+string(request.ModelRunRef)+`"`) ||
+		!strings.Contains(call.Messages[2].Content, `"question":"where is the policy?"`) {
 		t.Fatalf("call = %+v", call)
 	}
 }

@@ -1,0 +1,44 @@
+# Explicit deterministic model override for `compose-rag-smoke` only.
+# The Worker shares the fixture network namespace so the production adapter
+# still enforces its HTTP-loopback-only transport rule.
+services:
+  rag-model-fixture:
+    image: golang:1.25.4-bookworm
+    working_dir: /src
+    command: ["go", "run", "-mod=vendor", "./cmd/rag-model-fixture"]
+    environment:
+      ZHIXU_RAG_FIXTURE_ADDR: 127.0.0.1:18080
+      ZHIXU_RAG_FIXTURE_API_KEY: ${ZHIXU_RAG_SMOKE_CHAT_API_KEY:-rag-smoke-placeholder-token}
+      ZHIXU_RAG_FIXTURE_MODEL_VERSION: rag-smoke-v1
+    volumes:
+      - ..:/src:ro
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/18080; printf 'GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3; grep -q '204 No Content' <&3"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  app:
+    environment:
+      ZHIXU_CHAT_PROVIDER: openai-compatible
+      ZHIXU_CHAT_BASE_URL: http://127.0.0.1:18080
+      ZHIXU_CHAT_API_KEY: ${ZHIXU_RAG_SMOKE_CHAT_API_KEY:-rag-smoke-placeholder-token}
+      ZHIXU_CHAT_MODEL: rag-smoke
+      ZHIXU_CHAT_MODEL_VERSION: rag-smoke-v1
+      ZHIXU_CHAT_ADAPTER_VERSION: fixture-v1
+    depends_on:
+      rag-model-fixture:
+        condition: service_healthy
+
+  worker:
+    network_mode: service:rag-model-fixture
+    environment:
+      ZHIXU_CHAT_PROVIDER: openai-compatible
+      ZHIXU_CHAT_BASE_URL: http://127.0.0.1:18080
+      ZHIXU_CHAT_API_KEY: ${ZHIXU_RAG_SMOKE_CHAT_API_KEY:-rag-smoke-placeholder-token}
+      ZHIXU_CHAT_MODEL: rag-smoke
+      ZHIXU_CHAT_MODEL_VERSION: rag-smoke-v1
+      ZHIXU_CHAT_ADAPTER_VERSION: fixture-v1
+    depends_on:
+      rag-model-fixture:
+        condition: service_healthy

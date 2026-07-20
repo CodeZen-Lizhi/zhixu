@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"reflect"
+	"strings"
 	"unicode/utf8"
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
@@ -101,6 +102,10 @@ func expandRetrievalBatch(result retrievaldomain.SearchResult) (agentapplication
 	}
 	batch.Truncated = batch.Truncated || totalProvenance > agentapplication.MaxRetrievedEvidence
 	for _, item := range result.Items {
+		excerpt := strings.TrimSpace(item.Snippet)
+		if excerpt == "" {
+			return agentapplication.RetrievalBatch{}, invalidResult("retrieval evidence excerpt is empty after canonicalization", nil)
+		}
 		for _, provenance := range item.Provenances {
 			if len(batch.Items) == agentapplication.MaxRetrievedEvidence {
 				batch.Truncated = true
@@ -118,7 +123,7 @@ func expandRetrievalBatch(result retrievaldomain.SearchResult) (agentapplication
 				return agentapplication.RetrievalBatch{}, invalidResult("retrieval evidence cannot form a citation", err)
 			}
 			batch.Items = append(batch.Items, agentapplication.RetrievedEvidence{
-				Citation: citation, SearchExcerpt: item.Snippet, CapturedAt: provenance.CapturedAt.UTC(),
+				Citation: citation, SearchExcerpt: excerpt, CapturedAt: provenance.CapturedAt.UTC(),
 			})
 		}
 		if len(batch.Items) == agentapplication.MaxRetrievedEvidence {
@@ -173,15 +178,16 @@ func (adapter *Adapter) OpenBatch(ctx context.Context, citations []agentdomain.C
 	openedByQuery := make(map[retrievaldomain.CitationReferenceQuery]agentapplication.OpenedEvidence, len(views))
 	for _, item := range views {
 		citation, exists := byQuery[item.Query]
+		excerpt := strings.TrimSpace(item.View.Excerpt)
 		if !exists || item.View.Reference.SourceVersion.WorkspaceID != citation.WorkspaceID ||
 			item.View.Reference.SourceVersion.SourceVersionID != citation.SourceVersionID || item.View.Reference.Span.ID != citation.SourceSpanID ||
-			item.View.Excerpt == "" || !utf8.ValidString(item.View.Excerpt) {
+			excerpt == "" || !utf8.ValidString(item.View.Excerpt) {
 			return nil, invalidResult("opened source span does not match citation identity", nil)
 		}
 		if _, duplicate := openedByQuery[item.Query]; duplicate {
 			return nil, invalidResult("opened citation batch contains duplicates", nil)
 		}
-		openedByQuery[item.Query] = agentapplication.OpenedEvidence{Citation: citation, Excerpt: item.View.Excerpt}
+		openedByQuery[item.Query] = agentapplication.OpenedEvidence{Citation: citation, Excerpt: excerpt}
 	}
 	result := make([]agentapplication.OpenedEvidence, len(citations))
 	for index, query := range queries {

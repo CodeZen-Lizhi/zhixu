@@ -176,3 +176,58 @@ go vet ./...
 Wrong: 模型参数决定 Workspace/Capability/timeout/path，Executor 成功后才补写 STARTED，receipt 丢失时重新执行。
 Correct: 服务端持久身份和冻结 catalog 决定策略，Executor 前写 STARTED；重放只读取权威 receipt，无法证明时进入 UNKNOWN。
 ```
+
+## Scenario: M6-04 RAG Real Integration And Compose Smoke
+
+### 1. Scope / Trigger
+
+- 修改 Conversation RAG Workflow、Provider Adapter、Retrieval Evidence、Answer/SSE/Feedback 或 Compose 生产组装时，必须重跑本门禁。
+- Smoke 只允许补没有公开写 API 的正式 Knowledge 资格；Conversation、Question、Answer、Workflow、Model Call、Event 和 Feedback 必须由真实产品链路创建。
+
+### 2. Signatures
+
+- `make rag-integration`：要求 `ZHIXU_TEST_DATABASE_URL`，运行公开 HTTP→River→RAG→SSE→Feedback 的真实 PostgreSQL 集成。
+- `make compose-rag-smoke`：启动 disposable Compose stack 与 request-driven OpenAI-compatible fixture。
+- Fixture 环境：`ZHIXU_RAG_FIXTURE_API_KEY` 必填；Worker 使用相同随机 `ZHIXU_CHAT_API_KEY` 发送精确 Bearer。
+
+### 3. Contracts
+
+- PLAN 与 REVIEW 的模型输入只在内存中增加服务端 `model_run_ref`；持久 Workflow Input 仍只保存稳定 ID/hash。`MaxStructuredInputBytes` 约束绑定后的完整模型输入，不承诺原始 JSON 可占满全部预算。
+- Query Plan fixture 从请求 Schema 与输入生成结果，不依赖调用序号；只接受 PLAN v1、RAG Answer v2、Faithfulness v1 的精确三元组。
+- Retrieval Search snippet 与重新打开的 Source Span excerpt 在 Agent Adapter 边界统一 `TrimSpace`；裁剪后为空必须 fail closed。
+- 空 rewrite/degradation/citation 集合必须保持非 nil 空数组语义，禁止在 Adapter copy 时退化成 `null`。
+- Compose 首次回答必须恰好持久化 `PLAN:SUCCEEDED,INITIAL:SUCCEEDED,REVIEW:SUCCEEDED`，Question exact replay 后 Model Call 投影不变。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| Fixture Bearer 缺失、错误、大小写漂移或重复 Header | 401，不记录 Header/Token |
+| Schema result type/id/version 非白名单组合 | 422，不生成近似响应 |
+| Search/Open excerpt 只有空白 | Retrieval Adapter consistency error，不进入模型 |
+| Answer/Refusal 空集合被扫描成 nil | Repository 回归测试失败；Service 不得返回 409 假损坏 |
+| Seed 创建或改变 Conversation/Question/Answer/Workflow | Smoke 立即失败 |
+| Question replay 新增 Model Call | Smoke 立即失败 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：公开摄取→审批→重建索引，受限 harness 通过 Knowledge Repository 补资格，再经公共 Conversation API 和真实 Worker 发布带 Citation 的 Answer，SSE/Feedback 可重放。
+- Base：未配置测试数据库时 `rag-integration` 明确失败；fixture 默认只允许 loopback，Compose 通过共享 network namespace 保持该边界。
+- Bad：手写不经 Domain 的 Claim/Relation hash、直接 seed Answer/Workflow、按第几次调用返回模型结果、把 409/Refusal 当 smoke 成功。
+
+### 6. Tests Required
+
+- Agent/Conversation/Fixture focused race、Go vet、`go mod tidy -diff`、OpenAPI、前端 lint/typecheck/test/build。
+- 真实 PostgreSQL `make rag-integration` 断言三次 Provider 调用、Citation/Topic/Follow-up、SSE、Feedback 与 exact replay。
+- `make compose-rag-smoke` 断言生产 HTTP Adapter 的 Bearer、精确三阶段 Model Call、重放零新增、Citation 可打开、SSE 无正文/Secret、Feedback 不修改 Answer。
+- 主 Agent 执行 Go/SQL/通用五轴审查，并由独立只读 reviewer 复验。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Compose 脚本直接 INSERT 假 hash 的正式知识，模型 fixture 按调用顺序返回，Question 重放只比较 Answer ID。
+Correct: 受限 Go harness 复用 Knowledge Domain/Repository；fixture 按 Schema+输入生成；重放同时证明 Model Call 三阶段投影不变。
+
+Wrong: 原样把 Markdown snippet/source excerpt 送入要求 canonical text 的 Agent Evidence。
+Correct: Retrieval Adapter 边界裁剪首尾空白，裁剪后为空则明确失败。
+```

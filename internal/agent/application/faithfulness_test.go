@@ -39,7 +39,8 @@ func TestStructuredFaithfulnessReviewerUsesIndependentReviewPhaseAndSchema(t *te
 	}
 	call := model.Calls()[0]
 	if call.Phase != domain.ModelCallReview || call.SchemaRef != schema.Ref || len(call.Messages) != 3 ||
-		!strings.Contains(call.Messages[2].Content, "UNTRUSTED TASK INPUT") {
+		!strings.Contains(call.Messages[2].Content, "UNTRUSTED TASK INPUT") ||
+		!strings.Contains(call.Messages[2].Content, `"model_run_ref":"`+string(answer.ModelRunRef)+`"`) {
 		t.Fatalf("review call=%#v", call)
 	}
 }
