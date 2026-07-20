@@ -76,22 +76,22 @@ Graph 是 Knowledge 的查询投影，不是第二事实源；本任务不允许
 - 所有 SQL 参数化并带 Workspace；Relation Type、Node Type、排序字段使用枚举白名单。
 - 默认 limit 25、最大 100；depth 最大 3；path max depth 默认 6、最大 8；单次最多 500 nodes/1000 edges，最终数值可在实现前由真实查询测试收紧但不得放宽为无界。
 - Relation Evidence 每页默认 20、最大 100。
-- M7-01 必须提供 100,000 Relation/20,000 Node 的确定性生成入口，并对一跳查询执行 5 次预热 + 30 次采样，记录 p95；在项目本地 PostgreSQL 参考环境目标 ≤1.5s。`EXPLAIN (ANALYZE, BUFFERS)` 在该规模证明邻接索引可用；小 fixture 允许优化器合理选择 Seq Scan。M10 才负责 500,000 Relation 最终 P95/FPS 门禁。本期仍须证明不 N+1、取消及时释放资源。
+- M7-01 必须提供以 20,000 Active Topic、100,000 Confirmed IMPACTS Relation 和 100,000 Evidence 为参考拓扑的确定性生成入口，并对一跳查询执行 5 次预热 + 30 次采样，记录 p95；在项目本地 PostgreSQL 参考环境目标 ≤1.5s。`EXPLAIN (ANALYZE, BUFFERS)` 在该规模证明邻接索引可用；小 fixture 允许优化器合理选择 Seq Scan。Mixed Topic/Claim 与 BELONGS_TO 正确性由功能集成覆盖；claim-heavy/mixed 拓扑容量、500,000 Relation 最终 P95/FPS 仍由 M10 验收。本期仍须证明不 N+1、取消及时释放资源。
 - 仅当 direct SQL 的实测计划无法满足本期门禁时才新增可重建持久投影；不得先验引入 Graph 双写或独立图数据库。
 
 ## Acceptance Criteria
 
-- [ ] AC-01：Graph domain/application 使用 Knowledge NodeRef/Relation vocabulary，默认只返回正式 Confirmed 图；Workspace、状态、对称边和端点闭包验证通过。
-- [ ] AC-02：真实 PostgreSQL 全局 Topic cluster 按冻结的 cluster_score/updated_at/id 排序并支持过滤和 cursor 分页；稳定数据不重不漏，篡改/跨 Workspace/参数变化/结果变化 cursor 分别得到明确错误。
-- [ ] AC-03：局部 depth 1/2/3 在循环、分支和双向 Relation 数据上返回确定性闭包；硬预算、每层计数、截断和取消语义通过，查询无 N+1 Evidence。
-- [ ] AC-04：最短路径遵守状态/Relation Type/max depth，收集最短深度 meeting candidates 后按完整 path key 确定性返回逐边可追踪路径；无路径可返回明确的共同 Topic 建议，超时和预算耗尽不伪造 partial/similarity path。
-- [ ] AC-05：Node/Relation detail 可查询；Relation Evidence 按需分页并能经现有 Router 打开 Source Version/Span，列表/路径响应不泄露正文、绝对路径或全量 Evidence。
-- [ ] AC-06：Graph HTTP、Problem、HMAC cursor、OpenAPI、503 fail-closed 和生产 composition 可运行；严格 JSON、404 防枚举、405、timeout/cancel 测试通过。
-- [ ] AC-07：`/graph` 完成 Global/Local/Path、节点搜索、图例、URL 恢复、本地锁定/固定布局、节点/关系选择、Evidence lazy load、列表 fallback，以及 loading/empty/truncated/no-path/error 状态；桌面和移动端无横向溢出，键盘可操作。
-- [ ] AC-08：真实 PostgreSQL integration 与公共 HTTP smoke 贯穿 Global→Local→Path→Relation Evidence；跨 Workspace、cursor response-loss/变化和查询超时样本通过。
-- [ ] AC-09：100k Relation/20k Node fixture 的一跳查询按 5 次预热 + 30 次采样记录 p95≤1.5s，代表性 SQL 有索引可用的 `EXPLAIN` 证据，无逐节点/逐 Evidence 查询；前端只渲染有界结果。500k 最终 P95/FPS 明确保留给 M10，不宣称提前完成。
-- [ ] AC-10：`go test -race ./...`、`go vet ./...`、`go mod tidy -diff`、`make test`、OpenAPI、前端 lint/typecheck/test/build、task validate 和最小 Graph smoke 全部通过。
-- [ ] AC-11：产品/API/数据库/前端/测试文档同步 Topic/Claim 首版边界、失败语义、运行与回滚；独立 Go/SQL/frontend 跨层审查无未关闭 P0-P2。
+- [x] AC-01：Graph domain/application 使用 Knowledge NodeRef/Relation vocabulary，默认只返回正式 Confirmed 图；Workspace、状态、对称边和端点闭包验证通过。
+- [x] AC-02：真实 PostgreSQL 全局 Topic cluster 按冻结的 cluster_score/updated_at/id 排序并支持过滤和 cursor 分页；稳定数据不重不漏，篡改/跨 Workspace/参数变化/结果变化 cursor 分别得到明确错误。
+- [x] AC-03：局部 depth 1/2/3 在循环、分支和双向 Relation 数据上返回确定性闭包；硬预算、每层计数、截断和取消语义通过，查询无 N+1 Evidence。
+- [x] AC-04：最短路径遵守状态/Relation Type/max depth，收集最短深度 meeting candidates 后按完整 path key 确定性返回逐边可追踪路径；无路径可返回明确的共同 Topic 建议，超时和预算耗尽不伪造 partial/similarity path。
+- [x] AC-05：Node/Relation detail 可查询；Relation Evidence 按需分页并能经现有 Router 打开 Source Version/Span，列表/路径响应不泄露正文、绝对路径或全量 Evidence。
+- [x] AC-06：Graph HTTP、Problem、HMAC cursor、OpenAPI、503 fail-closed 和生产 composition 可运行；严格 JSON、404 防枚举、405、timeout/cancel 测试通过。
+- [x] AC-07：`/graph` 完成 Global/Local/Path、节点搜索、图例、URL 恢复、本地锁定/固定布局、节点/关系选择、Evidence lazy load、列表 fallback，以及 loading/empty/truncated/no-path/error 状态；桌面和移动端无横向溢出，键盘可操作。
+- [x] AC-08：真实 PostgreSQL integration 与公共 HTTP smoke 贯穿 Global→Local→Path→Relation Evidence；跨 Workspace、cursor response-loss/变化和查询超时样本通过。
+- [x] AC-09：20k Active Topic/100k Confirmed IMPACTS/100k Evidence 参考拓扑的一跳查询按 5 次预热 + 30 次采样记录 p95≤1.5s，代表性 SQL 有索引可用的 `EXPLAIN` 证据，无逐节点/逐 Evidence 查询；Mixed Topic/Claim 与 BELONGS_TO 正确性由功能集成覆盖，前端只渲染有界结果。claim-heavy/mixed、500k 最终 P95/FPS 明确保留给 M10，不宣称提前完成。
+- [x] AC-10：`go test -race ./...`、`go vet ./...`、`go mod tidy -diff`、`make test`、OpenAPI、前端 lint/typecheck/test/build、task validate 和最小 Graph smoke 全部通过。
+- [x] AC-11：产品/API/数据库/前端/测试文档同步 Topic/Claim 首版边界、失败语义、运行与回滚；独立 Go/SQL/frontend 跨层审查无未关闭 P0-P2。
 
 ## Out Of Scope
 

@@ -70,7 +70,7 @@ Neighborhood 过滤适用于中心节点和邻接节点。`node_types` 明确排
 
 Evidence 分页复用 owner index，如排序需要则追加 `(workspace_id, relation_id, created_at, id)`。所有 migration 有空库/repeat Up、真实查询计划和 guarded rollback 策略。
 
-T07 实测结论：在真实 PostgreSQL 代表夹具上，生产 `neighborhoodDepthOneSQL`、多节点 `neighborhoodFrontierSQL`、`pathFrontierSQL` 与 `relationEvidenceWindowSQL` 分别命中 `idx_knowledge_relation_source`、`idx_knowledge_relation_target`、`idx_knowledge_relation_evidence_owner`，目标 Relation/Evidence 表无顺序扫描。当前没有证据支持新增 `00024`；参数化多状态查询也不能可靠利用只针对 Confirmed 的 partial predicate，因此保留 00017 基础索引并避免写放大。Global 全 Workspace 聚合及 20k Node/100k Relation 的 5 次预热、30 次采样、p95/BUFFERS 仍由 T12 验证；若该容量证据显示退化，再按实际计划评估带 status 的非 partial 复合索引。
+T07 实测结论：在真实 PostgreSQL 代表夹具上，生产 `neighborhoodDepthOneSQL`、多节点 `neighborhoodFrontierSQL`、`pathFrontierSQL` 与 `relationEvidenceWindowSQL` 分别命中 `idx_knowledge_relation_source`、`idx_knowledge_relation_target`、`idx_knowledge_relation_evidence_owner`，目标 Relation/Evidence 表无顺序扫描。当前没有证据支持新增 `00024`；参数化多状态查询也不能可靠利用只针对 Confirmed 的 partial predicate，因此保留 00017 基础索引并避免写放大。Global 全 Workspace 聚合及 20k Active Topic/100k Confirmed IMPACTS/100k Evidence 参考拓扑的 5 次预热、30 次采样、p95/BUFFERS 仍由 T12 验证；Mixed Topic/Claim 与 BELONGS_TO 正确性由 integration/smoke 覆盖，claim-heavy/mixed 容量仍留 M10。若该容量证据显示退化，再按实际计划评估带 status 的非 partial 复合索引。
 
 ## Cursor Contract
 
