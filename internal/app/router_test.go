@@ -13,6 +13,7 @@ import (
 	"time"
 
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
+	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
@@ -43,6 +44,16 @@ func TestRouterRegistersConversationRoutes(t *testing.T) {
 	}
 }
 
+func TestRouterRegistersEventsRoutes(t *testing.T) {
+	router := NewRouter(Dependencies{Version: "test", Events: eventshttp.NewHandler(nil)})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/events?workspace_id=92000000-0000-4000-8000-000000000001", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "SSE_SERVICE_UNAVAILABLE") {
+		t.Fatalf("events route status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func (f fakePinger) Ping(context.Context) error { return f.err }
 
 func TestRouterLivezDoesNotNeedDatabase(t *testing.T) {
@@ -65,6 +76,36 @@ func TestRouterReadyzFailsWhenDatabaseUnavailable(t *testing.T) {
 	}
 	if got := res.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("content type = %q", got)
+	}
+}
+
+func TestRouterReadyzFailsClosedOnlyWhenEnabledRAGIsUnavailable(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		ragEnabled bool
+		wantStatus int
+	}{
+		{name: "disabled remains ready", wantStatus: http.StatusOK},
+		{name: "enabled fails closed", ragEnabled: true, wantStatus: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			router := NewRouter(Dependencies{
+				Version: "test", Database: fakePinger{}, RAGEnabled: test.ragEnabled,
+				RAGInitErr: errors.New("private rag composition detail"),
+			})
+			request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("readyz status=%d body=%s", response.Code, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "private rag composition detail") {
+				t.Fatalf("readiness leaked composition detail: %s", response.Body.String())
+			}
+			if test.ragEnabled && !strings.Contains(response.Body.String(), "rag_dependencies_unavailable") {
+				t.Fatalf("readiness omitted stable RAG reason: %s", response.Body.String())
+			}
+		})
 	}
 }
 
@@ -107,6 +148,23 @@ func TestRouterSystemStatusReady(t *testing.T) {
 	}
 	if !strings.Contains(res.Body.String(), `"status":"ready"`) {
 		t.Fatalf("body = %s", res.Body.String())
+	}
+}
+
+func TestRouterSystemStatusReportsEnabledRAGCompositionFailure(t *testing.T) {
+	router := NewRouter(Dependencies{
+		Version: "v-test", Database: fakePinger{}, RAGEnabled: true,
+		RAGInitErr: errors.New("private dependency failure"),
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"degraded"`) ||
+		!strings.Contains(response.Body.String(), `"reason":"rag_dependencies_unavailable"`) {
+		t.Fatalf("system status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "private dependency failure") {
+		t.Fatalf("system status leaked dependency detail: %s", response.Body.String())
 	}
 }
 

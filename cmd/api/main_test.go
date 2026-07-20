@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
+	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
@@ -16,8 +19,8 @@ import (
 	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -85,13 +88,20 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 				t.Fatal(err)
 			}
 			definition, resolveErr := definitions.Resolve(agentworkflow.RelationAssessmentDefinitionKey, agentworkflow.RelationAssessmentDefinitionVersion)
+			ragDefinition, ragResolveErr := definitions.Resolve(conversationworkflow.DefinitionKey, conversationworkflow.DefinitionVersion)
 			if test.enabled {
 				if resolveErr != nil || len(definition.Graph.Nodes) != 1 || definition.Graph.Nodes[0].Kind != agentworkflow.RelationAssessmentNodeKind ||
 					!executors.SupportsContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion) {
 					t.Fatalf("definition=%+v err=%v", definition, resolveErr)
 				}
+				if ragResolveErr != nil || len(ragDefinition.Graph.Nodes) != 1 || ragDefinition.Graph.Nodes[0].Kind != conversationworkflow.NodeKind ||
+					!executors.SupportsContract(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion) {
+					t.Fatalf("rag definition=%+v err=%v", ragDefinition, ragResolveErr)
+				}
 			} else if resolveErr == nil || executors.SupportsContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion) {
 				t.Fatalf("disabled chat exposed agent definition=%+v err=%v", definition, resolveErr)
+			} else if ragResolveErr == nil || executors.SupportsContract(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion) {
+				t.Fatalf("disabled chat exposed rag definition=%+v err=%v", ragDefinition, ragResolveErr)
 			}
 		})
 	}
@@ -100,6 +110,48 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 func TestNewRetrievalHandlerRequiresDependencies(t *testing.T) {
 	if handler, err := newRetrievalHandler(nil, config.Defaults(), nil, nil); err == nil || handler != nil {
 		t.Fatalf("handler=%#v err=%v", handler, err)
+	}
+}
+
+func TestNewConversationHandlersKeepReadFeedbackAndSSECompositionWhenChatDisabled(t *testing.T) {
+	conversationHandler, eventsHandler, err := newConversationHandlers(&pgxpool.Pool{}, nil, false)
+	if err != nil || conversationHandler == nil || eventsHandler == nil {
+		t.Fatalf("disabled conversation=%#v events=%#v err=%v", conversationHandler, eventsHandler, err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/92000000-0000-4000-8000-000000000002/questions", strings.NewReader(`{"workspace_id":"92000000-0000-4000-8000-000000000001","question":"q"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "disabled-question")
+	response := httptest.NewRecorder()
+	router := chi.NewRouter()
+	router.Route("/api/v1", conversationHandler.Routes)
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "CONVERSATION_QUESTION_SUBMISSION_UNAVAILABLE") {
+		t.Fatalf("disabled question status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	if handler, stream, enabledErr := newConversationHandlers(&pgxpool.Pool{}, nil, true); enabledErr == nil || handler != nil || stream != nil {
+		t.Fatalf("enabled missing runtime conversation=%#v events=%#v err=%v", handler, stream, enabledErr)
+	}
+}
+
+func TestQuestionDispatchRequiresEnabledAndFullyInitializedRAG(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		enabled bool
+		initErr error
+		want    bool
+	}{
+		{name: "enabled and initialized", enabled: true, want: true},
+		{name: "enabled but initialization failed", enabled: true, initErr: errors.New("dependency failed")},
+		{name: "disabled"},
+		{name: "disabled with irrelevant error", initErr: errors.New("ignored while disabled")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := questionDispatchEnabled(test.enabled, test.initErr); got != test.want {
+				t.Fatalf("questionDispatchEnabled(%t,%v)=%t want=%t", test.enabled, test.initErr, got, test.want)
+			}
+		})
 	}
 }
 
@@ -137,7 +189,7 @@ func TestNewRetrievalHandlerComposesDisabledAndEnabledEmbedderWithoutSecretLeak(
 }
 
 func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t *testing.T) {
-	catalog, err := workflowapplication.NewValidationCatalog([]int{1}, []workflowdomain.Permission{})
+	catalog, err := workflowapplication.NewValidationCatalog([]int{1}, capability.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,6 +211,12 @@ func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t
 	if _, err := executors.Resolve(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err == nil {
 		t.Fatal("api constructed a fake agent executor")
 	}
+	if !executors.SupportsContract(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion) {
+		t.Fatal("api did not register the RAG node contract")
+	}
+	if _, err := executors.Resolve(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion); err == nil {
+		t.Fatal("api constructed a fake RAG executor")
+	}
 	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +230,10 @@ func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t
 	resolved, err := definitions.Resolve(agentworkflow.RelationAssessmentDefinitionKey, agentworkflow.RelationAssessmentDefinitionVersion)
 	if err != nil || len(resolved.Graph.Nodes) != 1 {
 		t.Fatalf("definition=%+v err=%v", resolved, err)
+	}
+	rag, err := definitions.Resolve(conversationworkflow.DefinitionKey, conversationworkflow.DefinitionVersion)
+	if err != nil || rag.GraphHash != conversationworkflow.RegisteredDefinition().GraphHash {
+		t.Fatalf("rag definition=%+v err=%v", rag, err)
 	}
 	var classified *foundation.Error
 	_, resolveErr := executors.Resolve(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion)

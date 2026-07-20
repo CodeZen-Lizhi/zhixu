@@ -87,6 +87,7 @@ for (const schema of [
   "Liveness",
   "Readiness",
   "SystemStatus",
+  "RAGCapabilityStatus",
   "CreateWorkspaceRequest",
   "Workspace",
   "WorkspaceScan",
@@ -167,6 +168,10 @@ if (document.paths["/api/v1/search"].post.requestBody?.content?.["application/js
 }
 
 const schemas = document.components.schemas;
+if (!schemas.SystemStatus.required.includes("rag") || schemas.SystemStatus.properties.rag.$ref !== "#/components/schemas/RAGCapabilityStatus" ||
+    schemas.RAGCapabilityStatus.additionalProperties !== false) {
+  throw new Error("SystemStatus must expose the strict RAG capability state");
+}
 function resolveRef(value) {
   if (!value?.$ref) return value;
   const prefix = "#/components/responses/";

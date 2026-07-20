@@ -492,12 +492,22 @@
       },
       "SystemStatus": {
         "type": "object",
-        "required": ["status", "version", "database", "request_id"],
+        "required": ["status", "version", "database", "rag", "request_id"],
         "properties": {
           "status": { "type": "string", "enum": ["ready", "degraded"] },
           "version": { "type": "string", "minLength": 1 },
           "database": { "$ref": "#/components/schemas/DatabaseStatus" },
+          "rag": { "$ref": "#/components/schemas/RAGCapabilityStatus" },
           "request_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      },
+      "RAGCapabilityStatus": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ready", "disabled", "unavailable"] },
+          "reason": { "type": "string", "enum": ["rag_dependencies_unavailable"] }
         },
         "additionalProperties": false
       },

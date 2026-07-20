@@ -957,3 +957,37 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 实施 T11 API/Worker production composition 与 readiness，确保真实 RAG definition/executor 依赖缺失时 fail closed。
+
+## Session 29: M6-04 RAG Production Composition 检查点
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T11）
+**Branch**: `dev`
+
+### Summary
+
+完成 API/Worker 的真实 RAG 依赖组装、SSE 生产路由和 capability readiness；显式关闭保持只读能力，启用但依赖不完整时禁止接收 Question 或启动半注册 Worker。
+
+### Main Changes
+
+- API 使用同一 PostgreSQL Event Store 组装 Conversation 写事件与 SSE replay，并复用唯一 Workflow Runtime 原子派发 Question。
+- API 注册冻结 RAG contract/definition；完整 RAG composition 失败时保留 read/feedback/SSE，但 Question Dispatcher 不注入，readiness 返回脱敏 503。
+- Worker 真实组装 Chat/Catalog、Agent PG、Conversation Context/Finalizer、Event Progress、Retrieval、Knowledge Eligibility/Topic，并同时注册 Relation 与 RAG Executor/Definition。
+- Worker readiness 校验 Relation/RAG 双 Executor 与双 Definition 可达；Chat disabled 不注册 Agent，Tool/Safe Writeback/Reindex 保持独立。
+- System Status/OpenAPI 新增 strict RAG capability 状态。
+
+### Testing
+
+- `make openapi-check`
+- API/Worker/App 与 Agent/Conversation/Knowledge/Retrieval/Events/Workflow 定向 `go test -race`
+- 真实 PostgreSQL：Worker 测试创建临时数据库、执行全量迁移、Ping/关键表检查，再 Resolve RAG/Relation/SafeWriteback Executor 与 Definition。
+- `go vet`、`go mod tidy -diff`、`git diff --check`
+- 主 Agent Go/SQL/通用五轴审查；独立审查修复 init failure 仍可提交 Question 和伪真实 PG composition 两项问题。
+
+### Status
+
+[OK] M6-04 T11 completed; T12-T17 pending.
+
+### Next Steps
+
+- 实施 T12 typed frontend Conversation/RAG clients 与唯一 SSE owner，再进入 T13 真实 RAG 页面。

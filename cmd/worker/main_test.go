@@ -36,8 +36,35 @@ func TestDisabledChatLeavesWorkerAgentCapabilityExplicitlyUnavailable(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if components.executor != nil || components.capability.available || components.capability.code != agentworkflow.ErrorCodeCapabilityUnavailable {
+	if components.relation != nil || components.rag != nil || components.capability.available || components.capability.code != agentworkflow.ErrorCodeCapabilityUnavailable {
 		t.Fatalf("components=%+v", components)
+	}
+}
+
+func TestEnabledChatFailsClosedWithoutProductionDependencies(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.ChatProvider = config.ChatProviderOpenAICompatible
+	cfg.ChatBaseURL = "http://127.0.0.1:11434/v1"
+	cfg.ChatModel = "composition-test"
+	cfg.ChatModelVersion = "composition-test-v1"
+	components, err := newAgentWorkflowComponents(nil, cfg, nil)
+	if err == nil || components.relation != nil || components.rag != nil || components.capability.available {
+		t.Fatalf("components=%+v err=%v", components, err)
+	}
+}
+
+func TestAgentWorkflowReadinessRejectsPartialChatComposition(t *testing.T) {
+	disabled := workerComponents{agentCapability: agentCapabilityStatus{code: agentworkflow.ErrorCodeCapabilityUnavailable}}
+	if !agentWorkflowReadiness(disabled) {
+		t.Fatal("disabled Chat must not make legacy workers unready")
+	}
+	for _, partial := range []workerComponents{
+		{agentCapability: agentCapabilityStatus{available: true}},
+		{agentCapability: agentCapabilityStatus{code: "unexpected"}},
+	} {
+		if agentWorkflowReadiness(partial) {
+			t.Fatalf("partial Agent composition reported ready: %+v", partial.agentCapability)
+		}
 	}
 }
 

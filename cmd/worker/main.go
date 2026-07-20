@@ -16,6 +16,7 @@ import (
 
 	agentknowledge "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/knowledge"
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
+	agentretrieval "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/retrieval"
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
@@ -23,6 +24,8 @@ import (
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
+	conversationpostgres "github.com/CodeZen-Lizhi/zhixu/internal/conversation/adapter/postgres"
+	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	ingestionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/postgres"
 	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
@@ -63,8 +66,8 @@ import (
 )
 
 const (
-	// agentRelationMaxOutputTokens 是 Relation Assessment 单次响应的生产上限。
-	agentRelationMaxOutputTokens = 8192
+	// agentStructuredMaxOutputTokens 是 Agent 各结构化阶段单次响应的生产上限。
+	agentStructuredMaxOutputTokens = 8192
 )
 
 type workerComponents struct {
@@ -176,7 +179,7 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetRiverSchemaOK(true)
 	readiness.SetDefinitionsOK(components.definitions != nil)
 	readiness.SetExecutorsOK(components.executors != nil)
-	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil)
+	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && agentWorkflowReadiness(components))
 	toolEnabled := cfg.ToolRuntimeMode == config.ToolModeEnabled
 	toolContractsOK, toolExecutorsOK, toolDependenciesOK := toolWorkflowReadiness(components)
 	readiness.SetToolRuntimeState(toolEnabled, toolContractsOK, toolExecutorsOK, toolDependenciesOK)
@@ -365,8 +368,14 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
-	if agentComponents.executor != nil {
-		if err := executors.Register(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion, agentComponents.executor); err != nil {
+	if agentComponents.relation != nil {
+		if err := executors.Register(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion, agentComponents.relation); err != nil {
+			return workerComponents{}, err
+		}
+		if agentComponents.rag == nil {
+			return workerComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_RAG_EXECUTOR_UNAVAILABLE", false, errors.New("chat is enabled but the RAG executor is unavailable"))
+		}
+		if err := executors.Register(agentworkflow.RAGWorkflowNodeKind, agentworkflow.RAGWorkflowInputSchemaVersion, agentComponents.rag); err != nil {
 			return workerComponents{}, err
 		}
 	}
@@ -388,8 +397,11 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err := definitions.Register(changecontrolworkflow.RegisteredDefinition()); err != nil {
 		return workerComponents{}, err
 	}
-	if agentComponents.executor != nil {
+	if agentComponents.relation != nil {
 		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
+			return workerComponents{}, err
+		}
+		if err := definitions.Register(agentworkflow.RegisteredRAGDefinition()); err != nil {
 			return workerComponents{}, err
 		}
 	}
@@ -611,8 +623,30 @@ func toolWorkflowReadiness(components workerComponents) (bool, bool, bool) {
 	return contractsOK, executorsOK, dependenciesOK
 }
 
+// agentWorkflowReadiness 保证 Chat capability 要么显式关闭，要么 Relation 与 RAG 都在冻结 Registry 可达。
+func agentWorkflowReadiness(components workerComponents) bool {
+	if !components.agentCapability.available {
+		return components.agentCapability.code == agentworkflow.ErrorCodeCapabilityUnavailable
+	}
+	if components.agentCapability.code != "" || components.executors == nil || components.definitions == nil {
+		return false
+	}
+	if _, err := components.executors.Resolve(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err != nil {
+		return false
+	}
+	if _, err := components.executors.Resolve(agentworkflow.RAGWorkflowNodeKind, agentworkflow.RAGWorkflowInputSchemaVersion); err != nil {
+		return false
+	}
+	if _, err := components.definitions.Resolve(agentworkflow.RelationAssessmentDefinitionKey, agentworkflow.RelationAssessmentDefinitionVersion); err != nil {
+		return false
+	}
+	_, err := components.definitions.Resolve(agentworkflow.RAGWorkflowDefinitionKey, agentworkflow.RAGWorkflowDefinitionVersion)
+	return err == nil
+}
+
 type agentWorkflowComponents struct {
-	executor   *agentworkflow.Executor
+	relation   *agentworkflow.Executor
+	rag        *agentworkflow.RAGWorkflowExecutor
 	capability agentCapabilityStatus
 }
 
@@ -632,7 +666,7 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 	}
 	contract := contractProvider.Contract()
 	catalog, err := agentworkflow.NewRuntimeCatalog(agentworkflow.CatalogOptions{
-		Model: contract.Model, Timeout: contract.Timeout, MaxOutputTokens: agentRelationMaxOutputTokens,
+		Model: contract.Model, Timeout: contract.Timeout, MaxOutputTokens: agentStructuredMaxOutputTokens,
 	})
 	if err != nil {
 		return agentWorkflowComponents{}, err
@@ -673,14 +707,59 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	executor, err := agentworkflow.NewExecutor(agentworkflow.ExecutorDependencies{
+	relation, err := agentworkflow.NewExecutor(agentworkflow.ExecutorDependencies{
 		Model: model, Catalog: catalog, Repository: repository, Knowledge: knowledgePort, Evidence: evidenceOpener,
 		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(cfg),
 	})
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	return agentWorkflowComponents{executor: executor, capability: agentCapabilityStatus{available: true}}, nil
+	eventStore, err := eventspostgres.NewStore(db)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	conversationRepository, err := conversationpostgres.NewRepository(db, eventStore)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	finalizer, err := conversationpostgres.NewAnswerFinalizer(db, repository, eventStore, foundation.SystemClock{})
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	progress, err := agentpostgres.NewRAGProgressStore(db, eventStore)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	embedder, err := platformmodels.NewConfiguredEmbedder(cfg)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	searchService, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	retrievalAdapter, err := agentretrieval.NewAdapter(searchService, evidenceReference)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	topicService, err := knowledgeapplication.NewEvidenceTopicService(knowledgeRepository)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	topicAdapter, err := agentknowledge.NewTopicAdapter(topicService)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	rag, err := agentworkflow.NewRAGWorkflowExecutor(agentworkflow.RAGWorkflowExecutorDependencies{
+		Model: model, Catalog: catalog, Repository: repository, Context: conversationRepository,
+		Search: retrievalAdapter, Retrieval: retrievalAdapter, Eligibility: knowledgePort, Topics: topicAdapter,
+		Finalizer: finalizer, Progress: progress, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+		Budget: agentApplicationBudget(cfg),
+	})
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	return agentWorkflowComponents{relation: relation, rag: rag, capability: agentCapabilityStatus{available: true}}, nil
 }
 
 func agentApplicationBudget(cfg config.Config) agentapplication.RunBudget {

@@ -13,6 +13,7 @@ import (
 
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
+	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
@@ -46,6 +47,9 @@ type Dependencies struct {
 	Ingestion         *ingestionhttp.Handler
 	Retrieval         *retrievalhttp.Handler
 	Conversation      *conversationhttp.Handler
+	Events            *eventshttp.Handler
+	RAGEnabled        bool
+	RAGInitErr        error
 	Logger            *slog.Logger
 	Tracer            observability.Tracer
 }
@@ -78,6 +82,13 @@ func NewRouter(deps Dependencies) http.Handler {
 			})
 			return
 		}
+		if deps.RAGEnabled && deps.RAGInitErr != nil {
+			writeProblem(w, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", "服务尚未就绪", true, map[string]any{
+				"dependency": "rag",
+				"reason":     "rag_dependencies_unavailable",
+			})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 	router.Route("/api/v1", func(api chi.Router) {
@@ -101,6 +112,9 @@ func NewRouter(deps Dependencies) http.Handler {
 		}
 		if deps.Conversation != nil {
 			deps.Conversation.Routes(api)
+		}
+		if deps.Events != nil {
+			deps.Events.Routes(api)
 		}
 		api.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 			writeProblem(w, http.StatusNotFound, "NOT_FOUND", "请求的 API 资源不存在", false, nil)
@@ -150,6 +164,7 @@ func requestTraceMiddleware(tracer observability.Tracer) func(http.Handler) http
 
 func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencies) {
 	databaseStatus := map[string]string{"status": "unavailable"}
+	ragStatus := map[string]string{"status": "disabled"}
 	status := "degraded"
 	if err := checkDatabase(r.Context(), deps); err == nil {
 		databaseStatus["status"] = "ready"
@@ -157,10 +172,19 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 	} else {
 		databaseStatus["message"] = readinessReason(err)
 	}
+	if deps.RAGEnabled {
+		ragStatus["status"] = "ready"
+		if deps.RAGInitErr != nil {
+			ragStatus["status"] = "unavailable"
+			ragStatus["reason"] = "rag_dependencies_unavailable"
+			status = "degraded"
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":     status,
 		"version":    deps.Version,
 		"database":   databaseStatus,
+		"rag":        ragStatus,
 		"request_id": requestID(r.Context()),
 	})
 }

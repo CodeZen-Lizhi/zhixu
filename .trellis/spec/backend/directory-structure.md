@@ -57,6 +57,14 @@ web/                           # React 构建产物或嵌入边界；不放领�
 6. Shared Kernel 仅保留真正共享的 ID、时间、分页和通用错误等概念；不能借此放置业务服务或跨模块数据库模型。
 7. 文件/Git/数据库的一致性通过 Change Control 的有序 Saga、Outbox 和补偿处理；不得试图把文件或 Git 纳入数据库事务。
 
+### M6-04 RAG Production Composition
+
+- API 的 Conversation Repository、Question Dispatcher、Feedback Service 与 SSE Handler 必须共享同一个 PostgreSQL pool 和同一个 `events` Store/Appender；Question Dispatcher 复用 API 唯一 Workflow RuntimeRepository。
+- Chat 显式 disabled 时，Conversation create/read、Answer/Turn read、Feedback 与 SSE 仍可用，但不得注册 RAG Definition/Executor，也不得注入 Question Dispatcher。
+- Chat enabled 时，API 只有在 Workflow、Workspace/Retrieval 和 Conversation/Event 全部组装成功后才注入 Question Dispatcher；`/readyz` 对任何缺失依赖 fail closed，`system/status` 只暴露稳定、脱敏的 RAG 状态。
+- Worker 的 Relation 与 RAG Executor 共享冻结 Chat contract、Runtime Catalog、Agent Repository 和预算；RAG 另注入真实 Conversation Context/Finalizer、Retrieval、Knowledge Topic、Event Progress，禁止从 Tool runtime 借用 Search 或受 Tool disabled 状态影响。
+- Worker ExecutorRegistry 与 DefinitionRegistry 必须同时可解析 Relation 和 RAG；任一半注册状态都不能 ready，Safe Writeback、Tool 与 Reindex 的既有注册保持独立。
+
 ## 命名约定
 
 - Go 包名使用小写单词，不使用下划线或复数缩写；公开类型和方法按领域术语命名，例如 `Workspace`、`WorkflowRun`、`CreateProposal`。

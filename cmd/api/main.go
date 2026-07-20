@@ -18,7 +18,12 @@ import (
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
+	conversationpostgres "github.com/CodeZen-Lizhi/zhixu/internal/conversation/adapter/postgres"
+	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
+	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
+	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
+	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	ingestionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/postgres"
 	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
@@ -89,6 +94,9 @@ func main() {
 	ingestionHandler := ingestionhttp.NewHandler(nil)
 	retrievalHandler := retrievalhttp.NewHandler(nil, nil, nil)
 	conversationHandler := conversationhttp.NewHandler(nil, conversationhttp.NewCursorCodec())
+	eventsHandler := eventshttp.NewHandler(nil)
+	ragEnabled := cfg.ChatProvider != config.ChatProviderDisabled
+	var ragInitErr error
 	fileScanner := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
 	if database != nil {
 		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
@@ -99,6 +107,9 @@ func main() {
 			workflowService, runtime, workflowServiceErr := newWorkflowComponents(database.DB(), cfg, changeControlRepository)
 			if workflowServiceErr != nil {
 				logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
+				if ragEnabled {
+					ragInitErr = firstError(ragInitErr, workflowServiceErr)
+				}
 			} else {
 				workflowRuntime = runtime
 				workflowHandler = workflowhttp.NewHandler(workflowService)
@@ -107,6 +118,9 @@ func main() {
 		workspaceRepository, repositoryErr := workspacepostgres.NewRepository(database.DB())
 		if repositoryErr != nil {
 			logger.Error("workspace repository is unavailable", "error_code", "WORKSPACE_DATABASE_UNAVAILABLE")
+			if ragEnabled {
+				ragInitErr = firstError(ragInitErr, errors.New("RAG workspace dependency is unavailable"))
+			}
 		} else {
 			workspaceService := workspaceapplication.NewService(workspaceapplication.Dependencies{
 				Repository:     workspaceRepository,
@@ -120,6 +134,9 @@ func main() {
 			configuredRetrievalHandler, retrievalHandlerErr := newRetrievalHandler(database.DB(), cfg, workspaceRepository, fileScanner)
 			if retrievalHandlerErr != nil {
 				logger.Error("retrieval search service is unavailable", "error_code", "RETRIEVAL_SEARCH_SERVICE_UNAVAILABLE")
+				if ragEnabled {
+					ragInitErr = firstError(ragInitErr, retrievalHandlerErr)
+				}
 			} else {
 				retrievalHandler = configuredRetrievalHandler
 			}
@@ -161,6 +178,16 @@ func main() {
 				}
 			}
 		}
+		configuredConversation, configuredEvents, conversationErr := newConversationHandlers(database.DB(), workflowRuntime, questionDispatchEnabled(ragEnabled, ragInitErr))
+		if conversationErr != nil {
+			logger.Error("conversation service is unavailable", "error_code", "CONVERSATION_SERVICE_UNAVAILABLE")
+			if ragEnabled {
+				ragInitErr = firstError(ragInitErr, conversationErr)
+			}
+		} else {
+			conversationHandler = configuredConversation
+			eventsHandler = configuredEvents
+		}
 	}
 
 	deps := app.Dependencies{
@@ -176,6 +203,9 @@ func main() {
 		Ingestion:         ingestionHandler,
 		Retrieval:         retrievalHandler,
 		Conversation:      conversationHandler,
+		Events:            eventsHandler,
+		RAGEnabled:        ragEnabled,
+		RAGInitErr:        ragInitErr,
 		Logger:            logger,
 	}
 	server := &http.Server{
@@ -245,6 +275,47 @@ func newRetrievalHandler(
 		return nil, err
 	}
 	return retrievalhttp.NewHandler(searchService, evidenceService, cursors), nil
+}
+
+// questionDispatchEnabled 只在显式启用且全部 API RAG 依赖组装成功时开放异步 Question 命令。
+func questionDispatchEnabled(ragEnabled bool, ragInitErr error) bool {
+	return ragEnabled && ragInitErr == nil
+}
+
+// newConversationHandlers 使用同一个持久 Event Store 组装 Conversation 写事件与 SSE 重放边界。
+func newConversationHandlers(
+	pool *pgxpool.Pool,
+	runtime *workflowpostgres.RuntimeRepository,
+	ragEnabled bool,
+) (*conversationhttp.Handler, *eventshttp.Handler, error) {
+	if pool == nil {
+		return nil, nil, errors.New("conversation database is unavailable")
+	}
+	eventStore, err := eventspostgres.NewStore(pool)
+	if err != nil {
+		return nil, nil, err
+	}
+	repository, err := conversationpostgres.NewRepository(pool, eventStore)
+	if err != nil {
+		return nil, nil, err
+	}
+	var dispatcher conversationapplication.QuestionDispatcher
+	if ragEnabled {
+		dispatcher, err = conversationpostgres.NewQuestionDispatcher(
+			pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	service, err := conversationapplication.NewService(conversationapplication.Dependencies{
+		Repository: repository, QuestionDispatcher: dispatcher, FeedbackRepository: repository,
+		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return conversationhttp.NewHandler(service, conversationhttp.NewCursorCodec()), eventshttp.NewHandler(eventStore), nil
 }
 
 func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error) {
@@ -320,6 +391,9 @@ func registerAPIWorkflowExecutors(cfg config.Config, executors *workflowapplicat
 		if err := executors.RegisterContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err != nil {
 			return err
 		}
+		if err := executors.RegisterContract(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -337,6 +411,9 @@ func registerAPIWorkflowDefinitions(cfg config.Config, definitions *workflowappl
 	}
 	if cfg.ChatProvider != config.ChatProviderDisabled {
 		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
+			return err
+		}
+		if err := definitions.Register(conversationworkflow.RegisteredDefinition()); err != nil {
 			return err
 		}
 	}
