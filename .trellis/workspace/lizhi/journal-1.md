@@ -1182,3 +1182,36 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 25: 完成 Graph M7-01 收口
+
+**Date**: 2026-07-21
+**Task**: 完成 Graph M7-01 收口
+**Branch**: `dev`
+
+### Summary
+
+完成 Graph Topic/Claim Global、Local、Path、Relation Evidence 查询与真实前端；补齐 cursor window metadata stale 绑定、Evidence 生命周期缓存清理和 Workspace cache boundary。通过 Go race/vet/tidy、make test、OpenAPI、真实 PostgreSQL integration/smoke/benchmark、前端 230 tests/lint/typecheck/build、桌面移动浏览器 smoke 与独立跨层复验；M7-02/M7-03/M7-04、M8-M11 和正式 Auth 仍未完成。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7a83de3` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
