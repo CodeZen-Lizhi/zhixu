@@ -72,6 +72,22 @@ _Avoid_: Relation Type、图谱边
 支撑 Relation 的来源、理由、适用条件和确认信息。
 _Avoid_: 相似度分数
 
+**Graph Query Projection**:
+从 Topic、Claim、Relation 和 Relation Evidence 权威事实即时构建或可重建的只读图谱查询模型；它只负责探索、分页和路径，不接受独立写入。
+_Avoid_: 图谱事实表、Relation 副本、可直接编辑的网络图
+
+**Global Graph**:
+按 Topic 聚合并有界分页的全局知识关系视图；默认只展示重要聚类，不代表 Workspace 全量节点已加载。
+_Avoid_: 全表导出、一次性完整图
+
+**Local Graph**:
+以一个 Topic 或 Claim 为中心、按一至三跳有界展开的邻域视图。
+_Avoid_: Global Graph、无限递归遍历
+
+**Graph Path**:
+两个正式 Topic 或 Claim 之间由已有 Relation 构成、经过方向与类型过滤验证的最短连接路径。
+_Avoid_: 向量相似建议、共同 Topic、模型猜测路径
+
 **Conflict**:
 两个或多个 Claim 在相同或相近适用条件下无法同时成立的持续性知识对象。
 _Avoid_: 错误提示、重复
