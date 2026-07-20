@@ -24,8 +24,7 @@ func scanModelRun(row rowScanner) (domain.ModelRun, error) {
 	var adapterName, adapterVersion, modelID, modelVersion string
 	var profileID, profileVersion, promptID, promptVersion, schemaID, schemaVersion string
 	var reducedSchemaID, reducedSchemaVersion string
-	var indexVersionID string
-	var embeddingVersionID, rerankVersion, finalResultType, errorCode *string
+	var indexVersionID, embeddingVersionID, rerankVersion, finalResultType, errorCode *string
 	var status string
 	if err := row.Scan(
 		&id, &workspaceID, &workflowRunID, &nodeRunID, &nodeAttemptID,
@@ -44,7 +43,9 @@ func scanModelRun(row rowScanner) (domain.ModelRun, error) {
 	run.Prompt = domain.PromptRef{ID: promptID, Version: promptVersion}
 	run.Schema = domain.SchemaRef{ID: schemaID, Version: schemaVersion}
 	run.ReducedSchema = domain.SchemaRef{ID: reducedSchemaID, Version: reducedSchemaVersion}
-	run.Retrieval = domain.RetrievalRef{IndexVersionID: foundation.ID(indexVersionID)}
+	if indexVersionID != nil {
+		run.Retrieval.IndexVersionID = foundation.ID(*indexVersionID)
+	}
 	if embeddingVersionID != nil {
 		value := foundation.ID(*embeddingVersionID)
 		run.Retrieval.EmbeddingVersionID = &value
@@ -159,6 +160,20 @@ func sameModelRunBinding(left, right domain.ModelRun) bool {
 		sameRetrieval(left.Retrieval, right.Retrieval) && left.CreatedAt.Equal(right.CreatedAt)
 }
 
+func sameModelRunCreateBinding(existing, requested domain.ModelRun) bool {
+	if !sameModelRunBindingWithoutRetrieval(existing, requested) {
+		return false
+	}
+	return sameRetrieval(existing.Retrieval, requested.Retrieval) ||
+		(!requested.Retrieval.IsBound() && requested.Schema.ID == domain.RAGAnswerSchemaID)
+}
+
+func sameModelRunBindingWithoutRetrieval(left, right domain.ModelRun) bool {
+	return left.WorkspaceID == right.WorkspaceID && left.WorkflowRunID == right.WorkflowRunID && left.NodeRunID == right.NodeRunID &&
+		left.NodeAttemptID == right.NodeAttemptID && left.Model == right.Model && left.Profile == right.Profile && left.Prompt == right.Prompt &&
+		left.Schema == right.Schema && left.ReducedSchema == right.ReducedSchema && left.CreatedAt.Equal(right.CreatedAt)
+}
+
 func sameRetrieval(left, right domain.RetrievalRef) bool {
 	return left.IndexVersionID == right.IndexVersionID && optionalID(left.EmbeddingVersionID) == optionalID(right.EmbeddingVersionID) &&
 		left.RerankModelVersion == right.RerankModelVersion
@@ -193,6 +208,13 @@ func optionalID(value *foundation.ID) any {
 		return nil
 	}
 	return string(*value)
+}
+
+func optionalFoundationID(value foundation.ID) any {
+	if value == "" {
+		return nil
+	}
+	return string(value)
 }
 
 func optionalText(value string) any {

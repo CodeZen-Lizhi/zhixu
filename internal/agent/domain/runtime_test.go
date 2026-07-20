@@ -129,6 +129,39 @@ func TestPlanCallAndClarificationResultRemainAdditive(t *testing.T) {
 	}
 }
 
+func TestRAGModelRunMayBindRetrievalWhenItFinalizes(t *testing.T) {
+	run := validModelRun()
+	run.Schema.Version = OutputSchemaVersionV2
+	run.Retrieval = RetrievalRef{}
+	if err := ValidateModelRun(run); err != nil {
+		t.Fatalf("running rag run without retrieval rejected: %v", err)
+	}
+
+	completed := run.UpdatedAt.Add(time.Second)
+	run.Status = ModelRunSucceeded
+	run.FinalResultType = ResultTypeRAGAnswer
+	run.Retrieval = RetrievalRef{IndexVersionID: testIndexVersionID}
+	run.CompletedAt = &completed
+	run.UpdatedAt = completed
+	if err := ValidateModelRun(run); err != nil {
+		t.Fatalf("terminal rag answer with retrieval rejected: %v", err)
+	}
+
+	run.Retrieval = RetrievalRef{}
+	if err := ValidateModelRun(run); errorCode(err) != ErrorCodeModelRunInvalid {
+		t.Fatalf("terminal rag answer without retrieval err=%v", err)
+	}
+}
+
+func TestOnlyRunningRAGModelRunMayOmitRetrieval(t *testing.T) {
+	run := validModelRun()
+	run.Retrieval = RetrievalRef{}
+	run.Schema = SchemaRef{ID: RelationAssessmentSchemaID, Version: OutputSchemaVersionV1}
+	if err := ValidateModelRun(run); errorCode(err) != ErrorCodeModelRunInvalid {
+		t.Fatalf("relation run without retrieval err=%v", err)
+	}
+}
+
 func TestModelCallValidationPreservesUnknownOutcome(t *testing.T) {
 	call := validStartedCall()
 	if err := ValidateModelCall(call); err != nil {

@@ -40,7 +40,7 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 21 || applied != 21 {
+	if maxVersion != 22 || applied != 22 {
 		t.Fatalf("project history max=%d applied=%d", maxVersion, applied)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE tablename LIKE 'river_%' AND schemaname <> 'workflow'`).Scan(&wrongSchema); err != nil {
@@ -641,7 +641,7 @@ func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 21 || applied != 21 {
+	if maxVersion != 22 || applied != 22 {
 		t.Fatalf("adopted history max=%d applied=%d", maxVersion, applied)
 	}
 }

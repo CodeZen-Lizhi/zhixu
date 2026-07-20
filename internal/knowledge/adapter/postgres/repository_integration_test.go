@@ -631,6 +631,84 @@ func TestRepositoryEvidenceEligibilityBatchesFiveHundredWithoutNPlusOne(t *testi
 	}
 }
 
+func TestRepositoryResolveEvidenceTopicsUsesFormalKnowledgeAndTopicEndpoints(t *testing.T) {
+	repository, database, ctx := integrationPoolRepository(t)
+	primary := seedProvenance(t, ctx, database, "evidence-topic-primary")
+	relationProvenance := seedProvenanceForWorkspace(t, ctx, database, primary.workspaceID, "evidence-topic-relation", true)
+	crossWorkspace := seedProvenance(t, ctx, database, "evidence-topic-cross-workspace")
+	applicability := mustApplicability(t, `{"release":"v1"}`)
+	now := time.Now().UTC().Add(-time.Minute)
+
+	topic := newTopic(t, primary.workspaceID, "证据主题", now)
+	createdTopic, err := repository.CreateTopic(ctx, domain.CreateTopicRecord{
+		Topic: topic, IdempotencyKey: "evidence-topic-create", RequestHash: testHash("evidence-topic-create"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := confirmClaim(t, ctx, repository, suggestClaim(t, ctx, repository, primary.workspaceID, "正式主张一", applicability, "evidence-topic-claim-a", now), primary, "evidence-topic-confirm-a", now.Add(time.Second))
+	second := confirmClaim(t, ctx, repository, suggestClaim(t, ctx, repository, primary.workspaceID, "正式主张二", applicability, "evidence-topic-claim-b", now.Add(2*time.Second)), relationProvenance, "evidence-topic-confirm-b", now.Add(3*time.Second))
+
+	belongsTo := newRelation(t, primary.workspaceID, domain.RelationBelongsTo,
+		domain.NodeRef{Type: domain.NodeTypeClaim, ID: first.Claim.ID},
+		domain.NodeRef{Type: domain.NodeTypeTopic, ID: createdTopic.Topic.ID}, now.Add(4*time.Second))
+	initialEvidence := relationEvidence(t, primary.workspaceID, "主题归属候选", applicability, primary, now.Add(4*time.Second), nil)
+	initialEvidence.RelationID = belongsTo.ID
+	if _, err := repository.SuggestRelation(ctx, domain.SuggestRelationRecord{
+		Relation: belongsTo, Evidence: []domain.RelationEvidence{initialEvidence},
+		IdempotencyKey: "evidence-topic-relation-suggest", RequestHash: testHash("evidence-topic-relation-suggest"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	primaryRef := domain.ProvenanceRef{WorkspaceID: primary.workspaceID, SourceVersionID: primary.sourceVersionID, SourceSpanID: primary.sourceSpanID}
+	if bindings, err := repository.ResolveEvidenceTopics(ctx, primary.workspaceID, []domain.ProvenanceRef{primaryRef}); err != nil || len(bindings) != 0 {
+		t.Fatalf("suggested relation bindings=%#v err=%v", bindings, err)
+	}
+	confirmation := domain.Confirmation{Method: domain.ConfirmationUserApproval, Reference: "approval:evidence-topic:1"}
+	confirmedEvidence := relationEvidence(t, primary.workspaceID, "主题归属确认", applicability, relationProvenance, now.Add(5*time.Second), nil)
+	confirmedEvidence.RelationID = belongsTo.ID
+	if _, err := repository.ConfirmRelation(ctx, domain.ConfirmRelationRecord{
+		WorkspaceID: primary.workspaceID, RelationID: belongsTo.ID, ExpectedVersion: 1,
+		Evidence: confirmedEvidence, Confirmation: confirmation,
+		IdempotencyKey: "evidence-topic-relation-confirm", RequestHash: testHash("evidence-topic-relation-confirm"), At: now.Add(5 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	conflict, members := newConflict(t, primary.workspaceID, first.Claim, second.Claim, now.Add(6*time.Second))
+	if _, err := repository.OpenConflict(ctx, domain.OpenConflictRecord{
+		Conflict: conflict, Members: members, IdempotencyKey: "evidence-topic-conflict", RequestHash: testHash("evidence-topic-conflict"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	requested := []domain.ProvenanceRef{
+		primaryRef,
+		{WorkspaceID: primary.workspaceID, SourceVersionID: relationProvenance.sourceVersionID, SourceSpanID: relationProvenance.sourceSpanID},
+		{WorkspaceID: primary.workspaceID, SourceVersionID: crossWorkspace.sourceVersionID, SourceSpanID: crossWorkspace.sourceSpanID},
+	}
+	bindings, err := repository.ResolveEvidenceTopics(ctx, primary.workspaceID, requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := make(map[domain.ProvenanceRef]bool, len(bindings))
+	for _, binding := range bindings {
+		resolved[binding.Provenance] = binding.TopicID == createdTopic.Topic.ID && binding.TopicName == createdTopic.Topic.Name
+	}
+	if len(bindings) != 2 || !resolved[requested[0]] || !resolved[requested[1]] || resolved[requested[2]] {
+		t.Fatalf("bindings=%#v", bindings)
+	}
+
+	if _, err := database.Exec(ctx, `UPDATE core.topic SET status='DEPRECATED',version=version+1,updated_at=$3 WHERE id=$1 AND workspace_id=$2`,
+		string(createdTopic.Topic.ID), string(primary.workspaceID), now.Add(7*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	bindings, err = repository.ResolveEvidenceTopics(ctx, primary.workspaceID, requested)
+	if err != nil || len(bindings) != 0 {
+		t.Fatalf("deprecated topic bindings=%#v err=%v", bindings, err)
+	}
+}
+
 func TestDatabaseConfirmedRelationRequiresMatchingConfirmationEvidence(t *testing.T) {
 	repository, pool, ctx := integrationPoolRepository(t)
 	fixture := seedProvenance(t, ctx, pool, "relation-confirmation-guard")

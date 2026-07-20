@@ -8,6 +8,17 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
+// ModelRunTxFinalizer 允许跨领域调用方在其拥有的数据库事务内复用 Agent 终结规则。
+// transaction 必须是 Adapter 支持的真实事务；该端口不提交或回滚事务。
+type ModelRunTxFinalizer interface {
+	// GetModelRunTx 在调用方事务内读取并可选锁定 Model Run。
+	GetModelRunTx(context.Context, any, foundation.ID, foundation.ID, bool) (domain.ModelRun, error)
+	// GetModelRunByAttemptTx 按唯一 Node Attempt 查找 Model Run；不存在时返回 found=false。
+	GetModelRunByAttemptTx(context.Context, any, foundation.ID, foundation.ID, bool) (domain.ModelRun, bool, error)
+	// FinalizeModelRunTx 以 CAS 终结 Model Run，并返回是否为精确重放。
+	FinalizeModelRunTx(context.Context, any, FinalizeModelRunCommand) (domain.ModelRun, bool, error)
+}
+
 // ModelRunRecord 返回 Model Run 及按 call_no 排序的全部调用历史。
 type ModelRunRecord struct {
 	Run   domain.ModelRun

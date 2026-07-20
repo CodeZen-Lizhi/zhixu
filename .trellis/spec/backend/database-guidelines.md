@@ -1002,3 +1002,66 @@ Correct: 同一 PostgreSQL UoW 原子创建 Question/Answer/Workflow/Job/Event�
 Wrong: Answer 表复制 Workflow failed/retry 状态，或 completed 后再单独完成 Model Run。
 Correct: Answer 只保存 pending/三个发布终态；运行状态从 Workflow 投影，Answer 与 Model Run 原子终结。
 ```
+
+## M6-04 RAG Execution And Atomic Publication Contract
+
+### 1. Scope / Trigger
+
+- Trigger：RAG Workflow 需要在 PLAN 后才知道真实 Retrieval tuple，并将 Answer/Refusal/Clarification 与 Model Run、Conversation activity、Server Event 原子发布。
+- Scope：`00022_agent_rag_deferred_retrieval.sql`、Agent Model Run/Call、Conversation Answer finalizer、RAG progress event；不包含 HTTP、Worker composition 或前端页面。
+
+### 2. Signatures
+
+```go
+type AnswerFinalizer interface {
+    Lookup(context.Context, AnswerPublicationLookup) (workflow.OutputReceipt, bool, error)
+    Finalize(context.Context, FinalizeAnswerCommand) (workflow.OutputReceipt, bool, error)
+}
+
+type RAGProgressRecorder interface {
+    RecordRAGProgress(context.Context, RAGProgressRecord) error
+}
+```
+
+### 3. Contracts
+
+- RAG `RUNNING` Model Run 可暂时没有 Retrieval；只有同一次 `RUNNING -> terminal` 更新允许首次绑定完整 tuple。已有非空 tuple 永远不可变。
+- `SUCCEEDED/rag_answer` 必须绑定 Retrieval；Clarification、零 Provider 的确定性 Refusal、FAILED/UNKNOWN 可保持未绑定。
+- Finalizer 在一个 PostgreSQL 事务中锁 Conversation、Answer、Model Run，依次终结 Run、发布 Answer、更新 Conversation、追加 terminal event。
+- Workflow 在任何 Provider 调用前执行 terminal receipt Lookup；命中后零 Provider、零 Context load 返回稳定 receipt。
+- PLAN/retrieval/validation 的 started/completed 使用真实注入时钟写 Server Event；payload 只含 ID、阶段和计数。
+- Progress exact replay 先按 Workspace/source ref advisory lock，恢复首次 `occurred_at`，再由 Event Store 校验完整业务 binding。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| RAG Answer terminal 没有 Retrieval | Domain/DB consistency failure |
+| 非 RAG Run 使用空 Retrieval，或 RUNNING 状态单独补 tuple | SQLSTATE `23514/55000` |
+| Answer/Run CAS、Workspace/Attempt/result hash 任一漂移 | Finalize conflict/corrupt，零部分提交 |
+| Finalizer commit response loss | `CONVERSATION_ANSWER_FINALIZE_UNKNOWN`；重放回查 Answer 返回 exact receipt |
+| Provider 后 progress/finalizer 失败 | Manual Recovery，禁止 Workflow 自动重试造成重复 Provider |
+| 同 stage 重放携带新时钟 | 恢复首次真实 `occurred_at` 后 exact replay |
+
+### 5. Good / Base / Bad Cases
+
+- Good：PLAN→检索→验证事件按真实时间持久化，最终 Answer 与 Model Run/Event 同事务提交；commit 响应丢失后零 Provider 重放。
+- Base：旧 Relation/Tool Model Run 继续在创建时绑定 Retrieval；既有非空 tuple、Call phase 和 FK 行为不变。
+- Bad：用 sentinel Index 创建 Run；先单独 `FinalizeModelRun` 再更新 Answer；progress event 使用合成百分比或 `run_started_at + 微秒` 伪造阶段时间。
+
+### 6. Tests Required
+
+- Domain/Agent：空/完整 Retrieval 生命周期、PLAN=call 1、同一 Recorder 连续 generation/review、Reduced Refusal、Provider failure/UNKNOWN。
+- Progress PG：真实时间、started/completed 顺序、不同时间重放、payload canary 脱敏。
+- Finalizer PG：三终态、同/异 proposal 并发、event failure 回滚、commit response-loss、retention 后 replay、跨 Workspace/Attempt、pending+terminal split 检测。
+- Migration PG：Up/repeat Up/Down、guarded Down、零调用 Refusal、有调用但无成功 Call 的 Refusal 拒绝。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 创建 Model Run 时写假 Index UUID，或 Provider 成功后把 finalizer transient error交给 Workflow自动重试。
+Correct: RAG RUNNING 延迟绑定真实 Retrieval；post-provider 持久化失败进入 Manual Recovery，避免重复 Provider。
+
+Wrong: 每次进度重放重新生成 occurred_at，导致 Event exact binding 冲突。
+Correct: 首次记录真实时钟；重放在 advisory lock 内恢复既有 occurred_at，并校验其余 binding。
+```

@@ -51,24 +51,43 @@ func (adapter *Adapter) Retrieve(ctx context.Context, request agentapplication.R
 	if err := agentapplication.ValidateRetrievalRequest(request); err != nil {
 		return agentapplication.RetrievalBatch{}, err
 	}
-	searchRequest := retrievaldomain.SearchRequest{
+	scoped, err := adapter.Search(ctx, retrievaldomain.SearchRequest{
 		WorkspaceID: request.WorkspaceID,
 		Query:       request.Query,
 		Mode:        retrievaldomain.SearchModeHybrid,
 		Limit:       request.Limit,
-	}
-	canonical, err := retrievaldomain.CanonicalizeSearchRequest(searchRequest)
+	})
 	if err != nil {
 		return agentapplication.RetrievalBatch{}, err
+	}
+	return scoped.RetrievalBatch, nil
+}
+
+// Search 执行完整的 scoped Retrieval 请求，严格校验原始结果并展开每个 Provenance。
+func (adapter *Adapter) Search(ctx context.Context, request retrievaldomain.SearchRequest) (agentapplication.ScopedRetrievalResult, error) {
+	if adapter == nil || nilDependency(adapter.searcher) {
+		return agentapplication.ScopedRetrievalResult{}, unavailable("retrieval adapter is unavailable")
+	}
+	canonical, err := retrievaldomain.CanonicalizeSearchRequest(request)
+	if err != nil {
+		return agentapplication.ScopedRetrievalResult{}, err
 	}
 	result, err := adapter.searcher.Search(ctx, canonical)
 	if err != nil {
-		return agentapplication.RetrievalBatch{}, err
+		return agentapplication.ScopedRetrievalResult{}, err
 	}
 	if err := retrievaldomain.ValidateSearchResult(canonical, result); err != nil {
-		return agentapplication.RetrievalBatch{}, invalidResult("retrieval search returned an invalid result", err)
+		return agentapplication.ScopedRetrievalResult{}, invalidResult("retrieval search returned an invalid result", err)
 	}
 
+	batch, err := expandRetrievalBatch(result)
+	if err != nil {
+		return agentapplication.ScopedRetrievalResult{}, err
+	}
+	return agentapplication.ScopedRetrievalResult{SearchResult: result, RetrievalBatch: batch}, nil
+}
+
+func expandRetrievalBatch(result retrievaldomain.SearchResult) (agentapplication.RetrievalBatch, error) {
 	batch := agentapplication.RetrievalBatch{
 		WorkspaceID:        result.WorkspaceID,
 		IndexVersionID:     result.IndexVersionID,
@@ -215,3 +234,4 @@ func invalidResult(message string, cause error) error {
 }
 
 var _ agentapplication.RetrievalPort = (*Adapter)(nil)
+var _ agentapplication.ScopedRetrievalPort = (*Adapter)(nil)

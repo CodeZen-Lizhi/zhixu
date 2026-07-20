@@ -3,6 +3,7 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,131 @@ import (
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 )
+
+func TestAdapterSearchPreservesScopedRequestAndResultMetadata(t *testing.T) {
+	result := validSearchResult()
+	result.EmbeddingVersionID = nil
+	result.EffectiveMode = retrievaldomain.SearchModeKeyword
+	result.IndexDegradedCapabilities = []retrievaldomain.DegradedCapability{retrievaldomain.DegradedVector}
+	result.Degradations = []retrievaldomain.SearchDegradation{{Capability: retrievaldomain.SearchDegradationVector, Code: "EMBEDDING_UNAVAILABLE", Retryable: true}}
+	result.Items[0].EmbeddingVersionID = nil
+	result.Items[0].Vector = nil
+	search := &fakeSearcher{result: result}
+	adapter, err := NewAdapter(search, &fakeReference{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := time.Date(2026, 7, 1, 8, 0, 0, 123, time.FixedZone("UTC+8", 8*60*60))
+	request := retrievaldomain.SearchRequest{
+		WorkspaceID: testWorkspaceID, Query: "  approved knowledge  ", Mode: retrievaldomain.SearchModeHybrid, Limit: 10,
+		Filter: retrievaldomain.SearchFilter{
+			SourceIDs:        []foundation.ID{testSourceID2, testSourceID1, testSourceID1},
+			SourceVersionIDs: []foundation.ID{testSourceVersion2}, PathPrefixes: []string{"docs/", "docs"}, CapturedAtFrom: &from,
+		},
+	}
+	scoped, err := adapter.Search(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if search.request.Query != "approved knowledge" || search.request.Mode != retrievaldomain.SearchModeHybrid ||
+		len(search.request.Filter.SourceIDs) != 2 || len(search.request.Filter.PathPrefixes) != 1 ||
+		search.request.Filter.CapturedAtFrom == nil || search.request.Filter.CapturedAtFrom.Location() != time.UTC {
+		t.Fatalf("canonical request=%#v", search.request)
+	}
+	if scoped.SearchResult.RequestedMode != retrievaldomain.SearchModeHybrid ||
+		scoped.SearchResult.EffectiveMode != retrievaldomain.SearchModeKeyword ||
+		len(scoped.SearchResult.IndexDegradedCapabilities) != 1 || len(scoped.SearchResult.Degradations) != 1 ||
+		len(scoped.RetrievalBatch.Items) != 2 {
+		t.Fatalf("scoped=%#v", scoped)
+	}
+}
+
+func TestAdapterSearchExpandsAllProvenanceAndMarksTruncation(t *testing.T) {
+	result := validSearchResult()
+	result.Items = make([]retrievaldomain.EvidenceV1, 63)
+	for index := range result.Items {
+		item := validSearchResult().Items[0]
+		item.ChunkID = foundation.ID(fmt.Sprintf("51000000-0000-4000-8000-%012d", 100+index))
+		item.ParseProjectionID = foundation.ID(fmt.Sprintf("51000000-0000-4000-8001-%012d", 100+index))
+		item.Span.ID = foundation.ID(fmt.Sprintf("51000000-0000-4000-8002-%012d", 100+index))
+		item.Provenances = make([]retrievaldomain.EvidenceProvenance, 8)
+		for provenanceIndex := range item.Provenances {
+			item.Provenances[provenanceIndex] = retrievaldomain.EvidenceProvenance{
+				SourceID:        foundation.ID(fmt.Sprintf("51000000-0000-4000-8003-%012d", index*8+provenanceIndex)),
+				SourceVersionID: foundation.ID(fmt.Sprintf("51000000-0000-4000-8004-%012d", index*8+provenanceIndex)),
+				RelativePath:    fmt.Sprintf("docs/%03d-%d.md", index, provenanceIndex), CapturedAt: time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC),
+			}
+		}
+		result.Items[index] = item
+	}
+	result.Items[0].ProvenanceTruncated = true
+	adapter, err := NewAdapter(&fakeSearcher{result: result}, &fakeReference{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := adapter.Search(context.Background(), retrievaldomain.SearchRequest{
+		WorkspaceID: testWorkspaceID, Query: "q", Mode: retrievaldomain.SearchModeHybrid, Limit: 63,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scoped.SearchResult.Items) != 63 || len(scoped.RetrievalBatch.Items) != agentapplication.MaxRetrievedEvidence || !scoped.RetrievalBatch.Truncated {
+		t.Fatalf("raw=%d expanded=%d truncated=%v", len(scoped.SearchResult.Items), len(scoped.RetrievalBatch.Items), scoped.RetrievalBatch.Truncated)
+	}
+}
+
+func TestAdapterSearchPreservesRequestedMode(t *testing.T) {
+	for _, mode := range []retrievaldomain.SearchMode{retrievaldomain.SearchModeKeyword, retrievaldomain.SearchModeSemantic} {
+		t.Run(string(mode), func(t *testing.T) {
+			result := validSearchResult()
+			result.RequestedMode, result.EffectiveMode = mode, mode
+			if mode == retrievaldomain.SearchModeKeyword {
+				result.EmbeddingVersionID, result.Items[0].EmbeddingVersionID, result.Items[0].Vector = nil, nil, nil
+			} else {
+				result.Items[0].Lexical, result.Items[0].LexicalFTSScore, result.Items[0].LexicalTrigramScore = nil, nil, nil
+			}
+			search := &fakeSearcher{result: result}
+			adapter, err := NewAdapter(search, &fakeReference{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			scoped, err := adapter.Search(context.Background(), retrievaldomain.SearchRequest{
+				WorkspaceID: testWorkspaceID, Query: "q", Mode: mode, Limit: 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if search.request.Mode != mode || scoped.SearchResult.RequestedMode != mode || scoped.SearchResult.EffectiveMode != mode {
+				t.Fatalf("request=%#v result=%#v", search.request, scoped.SearchResult)
+			}
+		})
+	}
+}
+
+func TestAdapterSearchFailsClosedAndPreservesSearchError(t *testing.T) {
+	invalid := validSearchResult()
+	invalid.RequestedMode = retrievaldomain.SearchModeKeyword
+	adapter, err := NewAdapter(&fakeSearcher{result: invalid}, &fakeReference{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = adapter.Search(context.Background(), retrievaldomain.SearchRequest{
+		WorkspaceID: testWorkspaceID, Query: "q", Mode: retrievaldomain.SearchModeHybrid, Limit: 1,
+	})
+	requireCode(t, err, errorCodeResultInvalid)
+
+	dependencyErr := foundation.NewError(foundation.ErrorRetryableFailure, "SEARCH_DOWN", true, errors.New("down"))
+	adapter, err = NewAdapter(&fakeSearcher{err: dependencyErr}, &fakeReference{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, actual := adapter.Search(context.Background(), retrievaldomain.SearchRequest{
+		WorkspaceID: testWorkspaceID, Query: "q", Mode: retrievaldomain.SearchModeHybrid, Limit: 1,
+	})
+	if !errors.Is(actual, dependencyErr) {
+		t.Fatalf("error=%v", actual)
+	}
+}
 
 const (
 	testWorkspaceID    foundation.ID = "51000000-0000-4000-8000-000000000001"

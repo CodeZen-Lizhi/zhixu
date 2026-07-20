@@ -10,6 +10,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledgedomain "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 )
 
 const (
@@ -51,6 +52,12 @@ type RetrievalBatch struct {
 	Truncated          bool
 }
 
+// ScopedRetrievalResult 同时保留 Retrieval 的完整检索事实与 Agent 使用的逐 Provenance 证据批次。
+type ScopedRetrievalResult struct {
+	SearchResult   retrievaldomain.SearchResult
+	RetrievalBatch RetrievalBatch
+}
+
 // OpenedEvidence 是通过 Retrieval EvidenceReference seam 复核后的不可变 Span。
 type OpenedEvidence struct {
 	Citation domain.Citation
@@ -65,6 +72,12 @@ type RetrievalPort interface {
 	Open(context.Context, domain.Citation) (OpenedEvidence, error)
 	// OpenBatch 单批复核最多 500 个 Citation，并避免逐条数据库与 Artifact 读取。
 	OpenBatch(context.Context, []domain.Citation) ([]OpenedEvidence, error)
+}
+
+// ScopedRetrievalPort 为需要保留检索模式、降级和版本事实的 Application Workflow 提供有界 Search seam。
+type ScopedRetrievalPort interface {
+	// Search 执行完整的 scoped Retrieval 请求，并返回原始检索事实及展开后的 Agent 证据批次。
+	Search(context.Context, retrievaldomain.SearchRequest) (ScopedRetrievalResult, error)
 }
 
 // EvidenceEligibilityPort 复用 Knowledge Application 的单批资格查询契约。

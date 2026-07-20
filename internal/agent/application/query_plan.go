@@ -1,0 +1,113 @@
+package application
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"unicode/utf8"
+
+	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+)
+
+const (
+	errorCodeQueryPlannerMissing       = "AGENT_QUERY_PLANNER_MISSING"
+	errorCodeQueryPlanRequestInvalid   = "AGENT_QUERY_PLAN_REQUEST_INVALID"
+	errorCodeQueryPlanResponseMismatch = "AGENT_QUERY_PLAN_RESPONSE_MISMATCH"
+)
+
+// QueryPlanRequest 冻结一次 PLAN 调用的模型运行身份、运行时版本和有界未信任输入。
+type QueryPlanRequest struct {
+	ModelRunRef foundation.ID
+	ProfileRef  domain.ModelProfileRef
+	PromptRef   domain.PromptRef
+	SchemaRef   domain.SchemaRef
+	Input       []byte
+}
+
+// QueryPlanRunResult 返回严格 Query Plan、精确使用量和实际运行时版本。
+type QueryPlanRunResult struct {
+	Plan          domain.RAGQueryPlanResult
+	Usage         domain.TokenUsage
+	RequestBytes  int64
+	ResponseBytes int64
+	Runtime       FrozenRuntimeRefs
+}
+
+// QueryPlanner 使用版本化 Catalog 和 ChatModel 执行单次严格 PLAN 调用。
+type QueryPlanner struct {
+	model   ChatModel
+	catalog *RuntimeCatalog
+}
+
+// NewQueryPlanner 创建不执行 repair、retry、reduced 或 Tool Loop 的 Query Planner。
+func NewQueryPlanner(model ChatModel, catalog *RuntimeCatalog) (*QueryPlanner, error) {
+	if isNilChatModel(model) || catalog == nil {
+		return nil, applicationError(foundation.ErrorDependencyUnavailable, errorCodeQueryPlannerMissing, false, errors.New("query planner model and catalog are required"))
+	}
+	return &QueryPlanner{model: model, catalog: catalog}, nil
+}
+
+// Plan 使用 phase=PLAN 调用 Provider 恰好一次，并原样接受严格 Decoder 通过的文档。
+func (planner *QueryPlanner) Plan(ctx context.Context, request QueryPlanRequest) (QueryPlanRunResult, error) {
+	if planner == nil || isNilChatModel(planner.model) || planner.catalog == nil {
+		return QueryPlanRunResult{}, applicationError(foundation.ErrorDependencyUnavailable, errorCodeQueryPlannerMissing, false, errors.New("query planner is unavailable"))
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateQueryPlanRequest(request); err != nil {
+		return QueryPlanRunResult{}, err
+	}
+	snapshot, err := planner.catalog.Snapshot(request.PromptRef, request.SchemaRef, request.SchemaRef, request.ProfileRef)
+	if err != nil {
+		return QueryPlanRunResult{}, err
+	}
+	chatRequest := buildChatRequest(snapshot, snapshot.Schema, domain.ModelCallPlan, snapshot.Prompt.InitialInstruction, request.Input, "")
+	requestBytes, err := encodedChatRequestBytes(chatRequest)
+	if err != nil {
+		return QueryPlanRunResult{}, err
+	}
+
+	planCtx, cancel := context.WithTimeout(ctx, snapshot.Profile.Timeout)
+	response, callErr := planner.model.Chat(planCtx, cloneChatRequest(chatRequest))
+	contextErr := planCtx.Err()
+	cancel()
+	if callErr != nil {
+		if contextErr != nil {
+			return QueryPlanRunResult{}, operationContextError(contextErr)
+		}
+		return QueryPlanRunResult{}, callErr
+	}
+	if err := ValidateChatResponse(chatRequest, response); err != nil {
+		return QueryPlanRunResult{}, err
+	}
+	decoded, err := snapshot.Schema.Decode(append([]byte(nil), response.Content...))
+	if err != nil {
+		return QueryPlanRunResult{}, err
+	}
+	if !bytes.Equal(decoded, response.Content) {
+		return QueryPlanRunResult{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeDecoderContract, false, errors.New("query plan decoder transformed the accepted document"))
+	}
+	plan, err := domain.DecodeRAGQueryPlan(decoded, domain.DefaultDecodeLimits())
+	if err != nil {
+		return QueryPlanRunResult{}, err
+	}
+	if plan.ModelRunRef != request.ModelRunRef {
+		return QueryPlanRunResult{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeQueryPlanResponseMismatch, false, errors.New("query plan model run reference differs from the frozen request"))
+	}
+	return QueryPlanRunResult{
+		Plan: plan, Usage: response.Usage, RequestBytes: requestBytes, ResponseBytes: int64(len(response.Content)),
+		Runtime: FrozenRuntimeRefs{Profile: snapshot.Profile.Ref, Prompt: snapshot.Prompt.Ref, Schema: snapshot.Schema.Ref, Model: snapshot.Profile.Model},
+	}, nil
+}
+
+func validateQueryPlanRequest(request QueryPlanRequest) error {
+	if !canonicalApplicationID(request.ModelRunRef) || request.ProfileRef.Validate() != nil || request.PromptRef.Validate() != nil ||
+		request.SchemaRef.Validate() != nil || request.SchemaRef.ID != domain.RAGQueryPlanSchemaID ||
+		request.SchemaRef.Version != domain.OutputSchemaVersionV1 || len(request.Input) == 0 ||
+		len(request.Input) > MaxStructuredInputBytes || !utf8.Valid(request.Input) || bytes.IndexByte(request.Input, 0) >= 0 {
+		return applicationError(foundation.ErrorInvalidInput, errorCodeQueryPlanRequestInvalid, false, errors.New("query plan references or bounded input are invalid"))
+	}
+	return nil
+}

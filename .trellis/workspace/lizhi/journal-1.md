@@ -892,3 +892,35 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 实施 T08 retrieval-first Query Plan 与 RAG Executor，保持 Search 直接走 Retrieval Application seam，并把终态原子发布留给 T09 finalizer。
+
+## Session 27: M6-04 RAG Executor 与原子发布检查点
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T08-T09）
+**Branch**: `dev`
+
+### Summary
+
+完成 retrieval-first RAG Executor、真实阶段事件、deferred Retrieval 与 Model Run/Answer/Conversation/Event 原子 finalizer；Provider 后持久化不确定状态统一禁止自动重试。
+
+### Main Changes
+
+- 单次严格 PLAN、1..3 rewrite、scoped Search、跨 rewrite 去重、Eligibility/Conflict/Topic allowlist、RAG v2 与 Citation/Faithfulness gate。
+- Workflow 只从 `QuestionExecutionContextLoader` 构建不持久化模型输入；terminal receipt 在 Provider 前恢复。
+- `00022` 允许 RAG RUNNING 延迟绑定 Retrieval，终态一次性绑定；旧 Relation 行为保持。
+- Finalizer 单事务完成 Model Run、Answer、Conversation activity 与 terminal event，覆盖 CAS、并发和 response-loss。
+- PLAN/retrieval/validation 阶段事件使用真实时钟，按 source ref advisory lock 精确重放且 payload 脱敏。
+
+### Testing
+
+- affected packages `go test -race`、`go vet`、`go mod tidy -diff`、`git diff --check` 全通过。
+- 真实 PostgreSQL agent/conversation/knowledge/events/migration integration 通过；Migration legacy adoption 已更新到版本 22。
+- 独立三轮审查关闭 progress 假时间、Reduced Refusal 未闭合、post-provider 重试、progress replay 等 P1/P2，最终无剩余 P0-P2。
+
+### Status
+
+[OK] M6-04 T08-T09 completed; T10-T17 pending.
+
+### Next Steps
+
+- 实施 T10 Conversation/Answer/Feedback HTTP 与 OpenAPI，再进入 T11 生产 API/Worker composition。

@@ -67,6 +67,11 @@ func (ref RetrievalRef) Validate() error {
 	return nil
 }
 
+// IsBound 表示 Model Run 已冻结实际使用的 Retrieval 版本。
+func (ref RetrievalRef) IsBound() bool {
+	return ref.IndexVersionID != "" || ref.EmbeddingVersionID != nil || ref.RerankModelVersion != ""
+}
+
 // TokenUsage 保存 Provider 回显的非负 Token 计数。
 type TokenUsage struct {
 	InputTokens  int64 `json:"input_tokens"`
@@ -109,9 +114,16 @@ type ModelRun struct {
 func ValidateModelRun(run ModelRun) error {
 	ids := []foundation.ID{run.ID, run.WorkspaceID, run.WorkflowRunID, run.NodeRunID, run.NodeAttemptID}
 	if !canonicalUniqueIDs(ids, true) || run.Model.Validate() != nil || run.Profile.Validate() != nil ||
-		run.Prompt.Validate() != nil || run.Schema.Validate() != nil || run.ReducedSchema.Validate() != nil || run.Retrieval.Validate() != nil ||
+		run.Prompt.Validate() != nil || run.Schema.Validate() != nil || run.ReducedSchema.Validate() != nil ||
 		run.Version < 1 || run.CreatedAt.IsZero() || run.UpdatedAt.Before(run.CreatedAt) {
 		return invalid(ErrorCodeModelRunInvalid, "model run binding or version snapshot is invalid")
+	}
+	retrievalBound := run.Retrieval.IsBound()
+	if retrievalBound && run.Retrieval.Validate() != nil {
+		return invalid(ErrorCodeModelRunInvalid, "model run retrieval snapshot is invalid")
+	}
+	if !retrievalBound && run.Schema.ID != RAGAnswerSchemaID {
+		return invalid(ErrorCodeModelRunInvalid, "model run retrieval snapshot is required")
 	}
 	switch run.Status {
 	case ModelRunRunning:
@@ -124,6 +136,9 @@ func ValidateModelRun(run ModelRun) error {
 		}
 		if run.Status == ModelRunSucceeded && (!validSuccessfulResultType(run.FinalResultType) || run.FinalErrorCode != "") {
 			return inconsistent(ErrorCodeModelRunInvalid, "successful model run cannot have an error code")
+		}
+		if run.FinalResultType == ResultTypeRAGAnswer && !retrievalBound {
+			return inconsistent(ErrorCodeModelRunInvalid, "rag answer model run requires a retrieval snapshot")
 		}
 		if run.Status == ModelRunRefused && (run.FinalResultType != ResultTypeRefusal || !canonicalErrorCode(run.FinalErrorCode)) {
 			return inconsistent(ErrorCodeModelRunInvalid, "refused model run requires a stable reason code")

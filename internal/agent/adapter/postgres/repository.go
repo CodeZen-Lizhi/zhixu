@@ -51,7 +51,7 @@ func (r *Repository) CreateModelRun(ctx context.Context, run domain.ModelRun) (d
 		}
 		return domain.ModelRun{}, false, classify(err)
 	}
-	if !sameModelRunBinding(existing, run) {
+	if !sameModelRunCreateBinding(existing, run) {
 		return domain.ModelRun{}, false, replayConflict()
 	}
 	return existing, true, nil
@@ -96,7 +96,7 @@ func modelRunArgs(run domain.ModelRun) []any {
 		run.Model.AdapterName, run.Model.AdapterVersion, run.Model.ModelID, run.Model.ModelVersion,
 		run.Profile.ID, run.Profile.Version, run.Prompt.ID, run.Prompt.Version, run.Schema.ID, run.Schema.Version,
 		run.ReducedSchema.ID, run.ReducedSchema.Version,
-		string(run.Retrieval.IndexVersionID), optionalID(run.Retrieval.EmbeddingVersionID), optionalText(run.Retrieval.RerankModelVersion),
+		optionalFoundationID(run.Retrieval.IndexVersionID), optionalID(run.Retrieval.EmbeddingVersionID), optionalText(run.Retrieval.RerankModelVersion),
 		string(run.Status), optionalText(run.FinalResultType), optionalText(run.FinalErrorCode), run.Version,
 		run.CreatedAt.UTC(), run.UpdatedAt.UTC(), optionalTime(run.CompletedAt),
 	}

@@ -185,6 +185,136 @@ func TestRepositoryModelRunCallReplayCASAndUnknownRecovery(t *testing.T) {
 	}
 }
 
+func TestRepositoryRAGRunDefersAndAtomicallyBindsRetrieval(t *testing.T) {
+	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	seedAgentRuntime(t, ctx, pool)
+	repository, err := NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+	run := testModelRun(testAgentID(27), testAgentID(5), started)
+	run.Schema.Version = domain.OutputSchemaVersionV2
+	run.Retrieval = domain.RetrievalRef{}
+	if _, replayed, err := repository.CreateModelRun(ctx, run); err != nil || replayed {
+		t.Fatalf("CreateModelRun replayed=%t err=%v", replayed, err)
+	}
+
+	call := domain.ModelCall{
+		ID: testAgentID(28), ModelRunID: run.ID, CallNo: 1, Phase: domain.ModelCallInitial,
+		Model: run.Model, Profile: run.Profile, Prompt: run.Prompt, Schema: run.Schema, MaxOutputTokens: 128,
+		Status: domain.ModelCallStarted, RequestHash: hash64('f'), RequestBytes: 128, Version: 1,
+		StartedAt: started.Add(time.Second),
+	}
+	if _, _, err := repository.StartModelCall(ctx, run.WorkspaceID, call); err != nil {
+		t.Fatal(err)
+	}
+	callCompletedAt := started.Add(2 * time.Second)
+	completedCall := call
+	completedCall.Status = domain.ModelCallSucceeded
+	completedCall.ResponseHash = hash64('e')
+	completedCall.ResponseBytes = 64
+	completedCall.Usage = domain.TokenUsage{InputTokens: 3, OutputTokens: 2, TotalTokens: 5}
+	completedCall.LatencyMillis = 10
+	completedCall.Version = 2
+	completedCall.CompletedAt = &callCompletedAt
+	if _, _, err := repository.CompleteModelCall(ctx, application.CompleteModelCallCommand{
+		WorkspaceID: run.WorkspaceID, ExpectedVersion: 1, Call: completedCall,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	finalizedAt := started.Add(3 * time.Second)
+	terminal := run
+	terminal.Retrieval = domain.RetrievalRef{IndexVersionID: testAgentID(9)}
+	terminal.Status = domain.ModelRunSucceeded
+	terminal.FinalResultType = domain.ResultTypeRAGAnswer
+	terminal.Version = 2
+	terminal.UpdatedAt = finalizedAt
+	terminal.CompletedAt = &finalizedAt
+	finalized, replayed, err := repository.FinalizeModelRun(ctx, application.FinalizeModelRunCommand{ExpectedVersion: 1, Run: terminal})
+	if err != nil || replayed || finalized.Retrieval.IndexVersionID != testAgentID(9) {
+		t.Fatalf("FinalizeModelRun=%#v replayed=%t err=%v", finalized, replayed, err)
+	}
+	if finalized, replayed, err = repository.FinalizeModelRun(ctx, application.FinalizeModelRunCommand{ExpectedVersion: 1, Run: terminal}); err != nil || !replayed || finalized.Retrieval.IndexVersionID != testAgentID(9) {
+		t.Fatalf("FinalizeModelRun replay=%#v replayed=%t err=%v", finalized, replayed, err)
+	}
+	replay := run
+	replay.ID = testAgentID(29)
+	if existing, replayed, err := repository.CreateModelRun(ctx, replay); err != nil || !replayed || existing.ID != run.ID || !existing.Retrieval.IsBound() {
+		t.Fatalf("CreateModelRun terminal replay=%#v replayed=%t err=%v", existing, replayed, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent.model_run SET retrieval_index_version_id=NULL WHERE id=$1`, string(run.ID)); err == nil {
+		t.Fatal("bound retrieval tuple was mutable")
+	}
+}
+
+func TestRepositoryRAGRefusalCallRequirements(t *testing.T) {
+	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	seedAgentRuntime(t, ctx, pool)
+	repository, err := NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+
+	zeroCallRun := testModelRun(testAgentID(37), testAgentID(5), started)
+	zeroCallRun.Schema.Version = domain.OutputSchemaVersionV2
+	zeroCallRun.Retrieval = domain.RetrievalRef{}
+	if _, _, err := repository.CreateModelRun(ctx, zeroCallRun); err != nil {
+		t.Fatal(err)
+	}
+	refusedAt := started.Add(time.Second)
+	zeroCallRefusal := zeroCallRun
+	zeroCallRefusal.Status = domain.ModelRunRefused
+	zeroCallRefusal.FinalResultType = domain.ResultTypeRefusal
+	zeroCallRefusal.FinalErrorCode = "RAG_SCOPE_UNSUPPORTED"
+	zeroCallRefusal.Version = 2
+	zeroCallRefusal.UpdatedAt = refusedAt
+	zeroCallRefusal.CompletedAt = &refusedAt
+	if _, replayed, err := repository.FinalizeModelRun(ctx, application.FinalizeModelRunCommand{ExpectedVersion: 1, Run: zeroCallRefusal}); err != nil || replayed {
+		t.Fatalf("zero-call refusal replayed=%t err=%v", replayed, err)
+	}
+
+	failedCallRun := testModelRun(testAgentID(47), testAgentID(15), started)
+	failedCallRun.Schema.Version = domain.OutputSchemaVersionV2
+	failedCallRun.Retrieval = domain.RetrievalRef{}
+	if _, _, err := repository.CreateModelRun(ctx, failedCallRun); err != nil {
+		t.Fatal(err)
+	}
+	call := domain.ModelCall{
+		ID: testAgentID(48), ModelRunID: failedCallRun.ID, CallNo: 1, Phase: domain.ModelCallInitial,
+		Model: failedCallRun.Model, Profile: failedCallRun.Profile, Prompt: failedCallRun.Prompt, Schema: failedCallRun.Schema,
+		MaxOutputTokens: 128, Status: domain.ModelCallStarted, RequestHash: hash64('9'), RequestBytes: 64,
+		Version: 1, StartedAt: started.Add(time.Second),
+	}
+	if _, _, err := repository.StartModelCall(ctx, failedCallRun.WorkspaceID, call); err != nil {
+		t.Fatal(err)
+	}
+	callFailedAt := started.Add(2 * time.Second)
+	failedCall := call
+	failedCall.Status = domain.ModelCallFailed
+	failedCall.ErrorCode = "MODEL_PROVIDER_REJECTED"
+	failedCall.LatencyMillis = 10
+	failedCall.Version = 2
+	failedCall.CompletedAt = &callFailedAt
+	if _, _, err := repository.CompleteModelCall(ctx, application.CompleteModelCallCommand{
+		WorkspaceID: failedCallRun.WorkspaceID, ExpectedVersion: 1, Call: failedCall,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failedCallRefusal := failedCallRun
+	failedCallRefusal.Status = domain.ModelRunRefused
+	failedCallRefusal.FinalResultType = domain.ResultTypeRefusal
+	failedCallRefusal.FinalErrorCode = "RAG_SCOPE_UNSUPPORTED"
+	failedCallRefusal.Version = 2
+	failedCallRefusal.UpdatedAt = callFailedAt.Add(time.Second)
+	failedCallRefusal.CompletedAt = &failedCallRefusal.UpdatedAt
+	if _, _, err := repository.FinalizeModelRun(ctx, application.FinalizeModelRunCommand{ExpectedVersion: 1, Run: failedCallRefusal}); err == nil {
+		t.Fatal("refusal with failed call but no succeeded call was accepted")
+	}
+}
+
 func newAgentRepositoryIntegrationPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Helper()
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
