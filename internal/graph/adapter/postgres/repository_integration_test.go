@@ -1,0 +1,419 @@
+//go:build integration
+
+package postgres
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
+	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
+	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+func TestRepositoryGlobalSearchAndDetailsUseCanonicalKnowledgeFacts(t *testing.T) {
+	repository, tx, ctx := graphIntegrationRepository(t)
+	fixture := seedGraphFixture(t, ctx, tx)
+
+	window, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: fixture.workspaceID, Limit: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window.Truncated || len(window.Items) != 2 || window.Items[0].Topic.Ref.ID != fixture.primaryTopicID || window.Items[0].DirectClaimCount != 2 || window.Items[0].IncidentRelationCount != 3 || window.Items[0].ClusterScore != 5 {
+		t.Fatalf("window=%#v", window)
+	}
+	codec, err := graphapp.NewCursorCodec(bytes.Repeat([]byte{0x5a}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := graphapp.NewService(repository, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageRequest := graphdomain.GlobalRequest{WorkspaceID: fixture.workspaceID, Limit: 1}
+	firstPage, err := service.GlobalPage(ctx, graphapp.GlobalPageRequest{Request: pageRequest})
+	if err != nil || len(firstPage.Clusters) != 1 || firstPage.Meta.NextCursor == "" {
+		t.Fatalf("first page=%#v err=%v", firstPage, err)
+	}
+	secondPage, err := service.GlobalPage(ctx, graphapp.GlobalPageRequest{Request: pageRequest, Cursor: firstPage.Meta.NextCursor})
+	if err != nil || len(secondPage.Clusters) != 1 || secondPage.Meta.NextCursor != "" {
+		t.Fatalf("second page=%#v err=%v", secondPage, err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE core.topic SET description='changed',version=version+1,updated_at=updated_at+interval '1 second' WHERE workspace_id=$1 AND id=$2`, string(fixture.workspaceID), string(fixture.secondaryTopicID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.GlobalPage(ctx, graphapp.GlobalPageRequest{Request: pageRequest, Cursor: firstPage.Meta.NextCursor}); !hasGraphCode(err, graphdomain.ErrorCodeCursorStale) {
+		t.Fatalf("stale cursor err=%v", err)
+	}
+	filtered, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: fixture.workspaceID, Limit: 25, Filter: graphdomain.GraphFilter{TopicIDs: []foundation.ID{fixture.secondaryTopicID}}})
+	if err != nil || len(filtered.Items) != 1 || filtered.Items[0].Topic.Ref.ID != fixture.secondaryTopicID {
+		t.Fatalf("filtered=%#v err=%v", filtered, err)
+	}
+
+	search, err := repository.SearchNodes(ctx, graphdomain.NodeSearchRequest{WorkspaceID: fixture.workspaceID, Query: "golang", Limit: 20})
+	if err != nil || len(search.Matches) != 1 || search.Matches[0].Kind != graphdomain.NodeSearchExact || search.Matches[0].Node.Ref().ID != fixture.primaryTopicID {
+		t.Fatalf("search=%#v err=%v", search, err)
+	}
+	claimSearch, err := repository.SearchNodes(ctx, graphdomain.NodeSearchRequest{WorkspaceID: fixture.workspaceID, Query: "Graph", Limit: 20})
+	if err != nil || len(claimSearch.Matches) != 1 || claimSearch.Matches[0].Node.Ref().ID != fixture.longClaimID || len(claimSearch.Matches[0].Node.Claim.Statement) > 512 {
+		t.Fatalf("claim search=%#v err=%v", claimSearch, err)
+	}
+
+	node, err := repository.NodeDetail(ctx, fixture.workspaceID, knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: fixture.longClaimID})
+	if err != nil || node.Claim == nil || len(node.Claim.Statement) > 512 {
+		t.Fatalf("node=%#v err=%v", node, err)
+	}
+	detail, err := repository.RelationDetail(ctx, fixture.workspaceID, fixture.supportRelationID)
+	if err != nil || detail.Edge.EvidenceCount != 1 || detail.Edge.EvidenceFingerprint == "" || detail.Confirmation == nil || detail.Edge.EvidenceHref == "" {
+		t.Fatalf("detail=%#v err=%v", detail, err)
+	}
+
+	otherWorkspace := graphTestID(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'other',$2,$2,$3,'test',1,$3,$3)`, string(otherWorkspace), "/tmp/graph-other-"+string(otherWorkspace), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.NodeDetail(ctx, otherWorkspace, knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.primaryTopicID}); !hasGraphCode(err, graphdomain.ErrorCodeNodeNotFound) {
+		t.Fatalf("cross workspace err=%v", err)
+	}
+	if _, err := repository.RelationDetail(ctx, otherWorkspace, fixture.supportRelationID); !hasGraphCode(err, graphdomain.ErrorCodeRelationNotFound) {
+		t.Fatalf("cross workspace relation err=%v", err)
+	}
+}
+
+func TestRepositoryGlobalFiltersRecomputeClusterFromEligibleFacts(t *testing.T) {
+	repository, tx, ctx := graphIntegrationRepository(t)
+	now := time.Now().UTC().Add(-time.Hour)
+	workspaceID := seedGraphWorkspace(t, ctx, tx, now)
+	topicID := seedGraphTopic(t, ctx, tx, workspaceID, "Filter Topic", "filter topic", now)
+	confirmedHigh := seedGraphClaim(t, ctx, tx, workspaceID, "Confirmed high", knowledge.ClaimStatusConfirmed, floatPointer(0.9), now)
+	confirmedLow := seedGraphClaim(t, ctx, tx, workspaceID, "Confirmed low", knowledge.ClaimStatusConfirmed, floatPointer(0.4), now)
+	disputedNull := seedGraphClaim(t, ctx, tx, workspaceID, "Disputed null", knowledge.ClaimStatusDisputed, nil, now)
+	highMembership := seedGraphRelation(t, ctx, tx, workspaceID, confirmedHigh, knowledge.NodeTypeClaim, topicID, knowledge.NodeTypeTopic, knowledge.RelationBelongsTo, knowledge.RelationStatusConfirmed, floatPointer(0.95), now)
+	seedGraphRelation(t, ctx, tx, workspaceID, confirmedLow, knowledge.NodeTypeClaim, topicID, knowledge.NodeTypeTopic, knowledge.RelationBelongsTo, knowledge.RelationStatusConfirmed, floatPointer(0.3), now)
+	seedGraphRelation(t, ctx, tx, workspaceID, disputedNull, knowledge.NodeTypeClaim, topicID, knowledge.NodeTypeTopic, knowledge.RelationBelongsTo, knowledge.RelationStatusConfirmed, nil, now)
+	seedGraphRelation(t, ctx, tx, workspaceID, confirmedHigh, knowledge.NodeTypeClaim, confirmedLow, knowledge.NodeTypeClaim, knowledge.RelationSupports, knowledge.RelationStatusConfirmed, floatPointer(0.8), now)
+	seedGraphRelation(t, ctx, tx, workspaceID, confirmedHigh, knowledge.NodeTypeClaim, disputedNull, knowledge.NodeTypeClaim, knowledge.RelationComplements, knowledge.RelationStatusStale, floatPointer(0.7), now)
+
+	assertGlobalCluster := func(t *testing.T, filter graphdomain.GraphFilter, directClaims, incidentRelations int) {
+		t.Helper()
+		window, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: workspaceID, Limit: 25, Filter: filter})
+		if err != nil || len(window.Items) != 1 {
+			t.Fatalf("window=%#v err=%v", window, err)
+		}
+		cluster := window.Items[0]
+		if cluster.Topic.Ref.ID != topicID || cluster.DirectClaimCount != directClaims || cluster.IncidentRelationCount != incidentRelations || cluster.ClusterScore != directClaims+incidentRelations {
+			t.Fatalf("cluster=%#v", cluster)
+		}
+	}
+
+	assertGlobalCluster(t, graphdomain.GraphFilter{ClaimMinConfidence: floatPointer(0.8)}, 1, 2)
+	assertGlobalCluster(t, graphdomain.GraphFilter{RelationMinConfidence: floatPointer(0.75)}, 3, 2)
+	assertGlobalCluster(t, graphdomain.GraphFilter{ClaimStatuses: []knowledge.ClaimStatus{knowledge.ClaimStatusDisputed}}, 1, 1)
+	assertGlobalCluster(t, graphdomain.GraphFilter{RelationStatuses: []knowledge.RelationStatus{knowledge.RelationStatusStale}}, 3, 1)
+	assertGlobalCluster(t, graphdomain.GraphFilter{RelationTypes: []knowledge.RelationType{knowledge.RelationSupports}}, 3, 1)
+
+	claimOnly, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: workspaceID, Limit: 25, Filter: graphdomain.GraphFilter{NodeTypes: []knowledge.NodeType{knowledge.NodeTypeClaim}}})
+	if err != nil || len(claimOnly.Items) != 0 {
+		t.Fatalf("claim-only window=%#v err=%v", claimOnly, err)
+	}
+	topicOnly, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: workspaceID, Limit: 25, Filter: graphdomain.GraphFilter{NodeTypes: []knowledge.NodeType{knowledge.NodeTypeTopic}}})
+	if err != nil || len(topicOnly.Items) != 1 || topicOnly.Items[0].DirectClaimCount != 0 || topicOnly.Items[0].IncidentRelationCount != 3 {
+		t.Fatalf("topic-only window=%#v err=%v", topicOnly, err)
+	}
+
+	detail, err := repository.RelationDetail(ctx, workspaceID, highMembership)
+	if err != nil || detail.Edge.Confidence == nil || *detail.Edge.Confidence != 0.95 {
+		t.Fatalf("relation detail=%#v err=%v", detail, err)
+	}
+}
+
+func TestRepositoryUpdatedAfterIncludesOldClaimWithNewMembership(t *testing.T) {
+	repository, tx, ctx := graphIntegrationRepository(t)
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	cutoff := old.Add(time.Hour)
+	newer := cutoff.Add(time.Minute)
+	workspaceID := seedGraphWorkspace(t, ctx, tx, old)
+	topicID := seedGraphTopic(t, ctx, tx, workspaceID, "Fresh Membership", "fresh membership", old)
+	claimID := seedGraphClaim(t, ctx, tx, workspaceID, "Old claim", knowledge.ClaimStatusConfirmed, floatPointer(0.8), old)
+	seedGraphRelation(t, ctx, tx, workspaceID, claimID, knowledge.NodeTypeClaim, topicID, knowledge.NodeTypeTopic, knowledge.RelationBelongsTo, knowledge.RelationStatusConfirmed, floatPointer(0.8), newer)
+
+	window, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: workspaceID, Limit: 25, Filter: graphdomain.GraphFilter{UpdatedAfter: &cutoff}})
+	if err != nil || len(window.Items) != 1 || window.Items[0].DirectClaimCount != 1 || window.Items[0].IncidentRelationCount != 1 || !window.Items[0].UpdatedAt.Equal(newer) {
+		t.Fatalf("window=%#v err=%v", window, err)
+	}
+}
+
+func TestRepositoryCountsIncidentRelationOncePerCluster(t *testing.T) {
+	repository, tx, ctx := graphIntegrationRepository(t)
+	now := time.Now().UTC().Add(-time.Hour)
+	workspaceID := seedGraphWorkspace(t, ctx, tx, now)
+	topicID := seedGraphTopic(t, ctx, tx, workspaceID, "Dedup Topic", "dedup topic", now)
+	firstClaimID := seedGraphClaim(t, ctx, tx, workspaceID, "First member", knowledge.ClaimStatusConfirmed, floatPointer(0.9), now)
+	secondClaimID := seedGraphClaim(t, ctx, tx, workspaceID, "Second member", knowledge.ClaimStatusConfirmed, floatPointer(0.9), now)
+	seedGraphRelation(t, ctx, tx, workspaceID, firstClaimID, knowledge.NodeTypeClaim, topicID, knowledge.NodeTypeTopic, knowledge.RelationBelongsTo, knowledge.RelationStatusConfirmed, floatPointer(0.9), now)
+	seedGraphRelation(t, ctx, tx, workspaceID, secondClaimID, knowledge.NodeTypeClaim, topicID, knowledge.NodeTypeTopic, knowledge.RelationBelongsTo, knowledge.RelationStatusConfirmed, floatPointer(0.9), now)
+	seedGraphRelation(t, ctx, tx, workspaceID, firstClaimID, knowledge.NodeTypeClaim, secondClaimID, knowledge.NodeTypeClaim, knowledge.RelationSupports, knowledge.RelationStatusConfirmed, floatPointer(0.9), now)
+
+	window, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: workspaceID, Limit: 25})
+	if err != nil || len(window.Items) != 1 || window.Items[0].DirectClaimCount != 2 || window.Items[0].IncidentRelationCount != 3 {
+		t.Fatalf("window=%#v err=%v", window, err)
+	}
+}
+
+func TestRepositorySearchDistinguishesAliasAndClaimExactPrefix(t *testing.T) {
+	repository, tx, ctx := graphIntegrationRepository(t)
+	now := time.Now().UTC().Add(-time.Hour)
+	workspaceID := seedGraphWorkspace(t, ctx, tx, now)
+	topicID := seedGraphTopic(t, ctx, tx, workspaceID, "Concurrency", "concurrency", now)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.topic_alias(id,workspace_id,topic_id,alias,normalized_alias,created_at) VALUES($1,$2,$3,'Golang Runtime','golang runtime',$4)`, string(graphTestID(t)), string(workspaceID), string(topicID), now); err != nil {
+		t.Fatal(err)
+	}
+	exactClaimID := seedGraphClaim(t, ctx, tx, workspaceID, "Graph query", knowledge.ClaimStatusConfirmed, floatPointer(0.9), now)
+	prefixClaimID := seedGraphClaim(t, ctx, tx, workspaceID, "Graph query projection", knowledge.ClaimStatusDisputed, nil, now)
+	seedGraphClaim(t, ctx, tx, workspaceID, "Graph query hidden", knowledge.ClaimStatusSuggested, floatPointer(0.9), now)
+
+	aliasMatches, err := repository.SearchNodes(ctx, graphdomain.NodeSearchRequest{WorkspaceID: workspaceID, Query: "gola", Limit: 20})
+	if err != nil || len(aliasMatches.Matches) != 1 || aliasMatches.Matches[0].Kind != graphdomain.NodeSearchPrefix || aliasMatches.Matches[0].Node.Ref().ID != topicID {
+		t.Fatalf("alias matches=%#v err=%v", aliasMatches, err)
+	}
+	claimMatches, err := repository.SearchNodes(ctx, graphdomain.NodeSearchRequest{WorkspaceID: workspaceID, Query: "Graph query", Limit: 20})
+	if err != nil || len(claimMatches.Matches) != 2 || claimMatches.Matches[0].Kind != graphdomain.NodeSearchExact || claimMatches.Matches[0].Node.Ref().ID != exactClaimID || claimMatches.Matches[1].Kind != graphdomain.NodeSearchPrefix || claimMatches.Matches[1].Node.Ref().ID != prefixClaimID {
+		t.Fatalf("claim matches=%#v err=%v", claimMatches, err)
+	}
+}
+
+func TestRepositoryGlobalWindowTruncatesAtFiveHundredClusters(t *testing.T) {
+	repository, tx, ctx := graphIntegrationRepository(t)
+	now := time.Now().UTC().Add(-time.Hour)
+	workspaceID := seedGraphWorkspace(t, ctx, tx, now)
+	batch := &pgx.Batch{}
+	for index := 0; index < graphapp.MaxResultWindowItems+1; index++ {
+		batch.Queue(`INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,$3,$4,'','ACTIVE',1,$5,$5)`, string(graphTestID(t)), string(workspaceID), fmt.Sprintf("Topic %03d", index), fmt.Sprintf("topic %03d", index), now.Add(time.Duration(index)*time.Microsecond))
+	}
+	results := tx.SendBatch(ctx, batch)
+	if err := results.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	window, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: workspaceID, Limit: 25})
+	if err != nil || !window.Truncated || window.Reason != "RESULT_WINDOW_LIMIT" || len(window.Items) != graphapp.MaxResultWindowItems {
+		t.Fatalf("items=%d truncated=%v reason=%q err=%v", len(window.Items), window.Truncated, window.Reason, err)
+	}
+}
+
+type graphFixture struct {
+	workspaceID, primaryTopicID, secondaryTopicID foundation.ID
+	longClaimID, supportRelationID                foundation.ID
+}
+
+func seedGraphWorkspace(t *testing.T, ctx context.Context, tx pgx.Tx, now time.Time) foundation.ID {
+	t.Helper()
+	workspaceID := graphTestID(t)
+	root := "/tmp/graph-" + string(workspaceID)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'graph',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), root, now); err != nil {
+		t.Fatal(err)
+	}
+	return workspaceID
+}
+
+func seedGraphTopic(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, name, normalizedName string, now time.Time) foundation.ID {
+	t.Helper()
+	topicID := graphTestID(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,$3,$4,'','ACTIVE',1,$5,$5)`, string(topicID), string(workspaceID), name, normalizedName, now); err != nil {
+		t.Fatal(err)
+	}
+	return topicID
+}
+
+func seedGraphClaim(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, statement string, status knowledge.ClaimStatus, confidence *float64, now time.Time) foundation.ID {
+	t.Helper()
+	applicability, err := knowledge.ParseApplicability([]byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimID := graphTestID(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.claim(id,workspace_id,statement,normalized_statement,applicability,applicability_schema_version,applicability_hash,status,confidence_score,confidence_factors,fingerprint,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,$5,$6,'SUGGESTED',$7,'{}',$8,1,$9,$9)`, string(claimID), string(workspaceID), statement, string(applicability.CanonicalJSON), applicability.SchemaVersion, applicability.Hash, confidence, graphHash("claim-"+string(claimID)), now); err != nil {
+		t.Fatal(err)
+	}
+	if status != knowledge.ClaimStatusSuggested {
+		if _, err := tx.Exec(ctx, `UPDATE core.claim SET status='CONFIRMED',version=version+1,updated_at=updated_at+interval '1 microsecond' WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(claimID)); err != nil {
+			t.Fatal(err)
+		}
+		if status != knowledge.ClaimStatusConfirmed {
+			if _, err := tx.Exec(ctx, `UPDATE core.claim SET status=$3,version=version+1,updated_at=updated_at+interval '1 microsecond' WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(claimID), string(status)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return claimID
+}
+
+func seedGraphRelation(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID, sourceID foundation.ID, sourceType knowledge.NodeType, targetID foundation.ID, targetType knowledge.NodeType, relationType knowledge.RelationType, status knowledge.RelationStatus, confidence *float64, now time.Time) foundation.ID {
+	t.Helper()
+	relationID := graphTestID(t)
+	var confirmationMethod, confirmationRef, evidenceFingerprint any
+	storedStatus := status
+	if status == knowledge.RelationStatusStale || status == knowledge.RelationStatusDeprecated {
+		storedStatus = knowledge.RelationStatusConfirmed
+	}
+	if storedStatus == knowledge.RelationStatusConfirmed {
+		confirmationMethod = string(knowledge.ConfirmationSourceDerived)
+		confirmationRef = "integration fixture"
+		evidenceFingerprint = graphHash("evidence-" + string(relationID))
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,$14,$14)`, string(relationID), string(workspaceID), string(sourceType), string(sourceID), string(targetType), string(targetID), string(relationType), string(storedStatus), confidence, graphHash("relation-"+string(relationID)), evidenceFingerprint, confirmationMethod, confirmationRef, now); err != nil {
+		t.Fatal(err)
+	}
+	if status != storedStatus {
+		if _, err := tx.Exec(ctx, `UPDATE core.relation SET status=$3,version=version+1,updated_at=updated_at+interval '1 microsecond' WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(relationID), string(status)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return relationID
+}
+
+func floatPointer(value float64) *float64 { return &value }
+
+func seedGraphFixture(t *testing.T, ctx context.Context, tx pgx.Tx) graphFixture {
+	t.Helper()
+	now := time.Now().UTC().Add(-time.Minute)
+	workspaceID := graphTestID(t)
+	root := "/tmp/graph-" + string(workspaceID)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'graph',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), root, now); err != nil {
+		t.Fatal(err)
+	}
+	provenance := seedGraphProvenance(t, ctx, tx, workspaceID, now)
+	primaryTopicID, secondaryTopicID := graphTestID(t), graphTestID(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,'Go Concurrency','go concurrency','goroutine','ACTIVE',1,$3,$3),($4,$2,'Databases','databases','','ACTIVE',1,$3,$3)`, string(primaryTopicID), string(workspaceID), now, string(secondaryTopicID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO core.topic_alias(id,workspace_id,topic_id,alias,normalized_alias,created_at) VALUES($1,$2,$3,'Golang','golang',$4)`, string(graphTestID(t)), string(workspaceID), string(primaryTopicID), now); err != nil {
+		t.Fatal(err)
+	}
+	applicability, err := knowledge.ParseApplicability([]byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstClaimID, longClaimID := graphTestID(t), graphTestID(t)
+	longStatement := "Graph " + strings.Repeat("knowledge projection ", 60)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.claim(id,workspace_id,statement,normalized_statement,applicability,applicability_schema_version,applicability_hash,status,confidence_score,confidence_factors,fingerprint,version,created_at,updated_at) VALUES
+		($1,$2,'Channels coordinate goroutines','Channels coordinate goroutines',$3,$4,$5,'SUGGESTED',0.9,'{}',$6,1,$7,$7),
+		($8,$2,$9,$9,$3,$4,$5,'SUGGESTED',0.8,'{}',$10,1,$7,$7)`, string(firstClaimID), string(workspaceID), string(applicability.CanonicalJSON), applicability.SchemaVersion, applicability.Hash, graphHash("claim-1"), now, string(longClaimID), longStatement, graphHash("claim-2")); err != nil {
+		t.Fatal(err)
+	}
+	for index, claimID := range []foundation.ID{firstClaimID, longClaimID} {
+		if _, err := tx.Exec(ctx, `INSERT INTO core.claim_source(id,workspace_id,claim_id,source_version_id,source_span_id,support_type,reason,evidence_hash,created_at) VALUES($1,$2,$3,$4,$5,'SUPPORTS','fixture support',$6,$7)`, string(graphTestID(t)), string(workspaceID), string(claimID), string(provenance.sourceVersionID), string(provenance.sourceSpanID), graphHash(fmt.Sprintf("claim-source-%d", index)), now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE core.claim SET status='CONFIRMED',version=2,updated_at=$3 WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(claimID), now.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE core.claim SET status='DISPUTED',version=3,updated_at=$3 WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(longClaimID), now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	relations := []struct {
+		id, source, target foundation.ID
+		typeName           string
+	}{
+		{graphTestID(t), firstClaimID, primaryTopicID, "BELONGS_TO"},
+		{graphTestID(t), longClaimID, primaryTopicID, "BELONGS_TO"},
+		{graphTestID(t), firstClaimID, longClaimID, "SUPPORTS"},
+	}
+	for index, relation := range relations {
+		if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'CLAIM',$3,$4,$5,$6,'CONFIRMED',0.9,$7,$8,'SOURCE_DERIVED',$9,1,$10,$10)`, string(relation.id), string(workspaceID), string(relation.source), targetType(relation.typeName), string(relation.target), relation.typeName, graphHash(fmt.Sprintf("relation-%d", index)), graphHash(fmt.Sprintf("evidence-set-%d", index)), "fixture", now.Add(time.Duration(index)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'fixture evidence',$6,$7,$8,$9,'SOURCE_DERIVED','fixture',$10)`, string(graphTestID(t)), string(workspaceID), string(relation.id), string(provenance.sourceVersionID), string(provenance.sourceSpanID), graphHash(fmt.Sprintf("relation-evidence-%d", index)), string(applicability.CanonicalJSON), applicability.SchemaVersion, applicability.Hash, now.Add(time.Duration(index)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return graphFixture{workspaceID: workspaceID, primaryTopicID: primaryTopicID, secondaryTopicID: secondaryTopicID, longClaimID: longClaimID, supportRelationID: relations[2].id}
+}
+
+type graphProvenance struct{ sourceVersionID, sourceSpanID foundation.ID }
+
+func seedGraphProvenance(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, now time.Time) graphProvenance {
+	t.Helper()
+	artifactID, sourceID, sourceVersionID := graphTestID(t), graphTestID(t), graphTestID(t)
+	projectionID, sourceSpanID := graphTestID(t), graphTestID(t)
+	contentHash := graphHash("content")
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at) VALUES($1,$2,$3,4,$4,$5)`, []any{string(artifactID), string(workspaceID), contentHash, ".knowledge/sources/" + contentHash, now}},
+		{`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at) VALUES($1,$2,'text','graph.txt','graph.txt',$3)`, []any{string(sourceID), string(workspaceID), now}},
+		{`INSERT INTO core.source_version(id,source_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) VALUES($1,$2,$3,$4,4,'text/plain','graph.txt','pending',$5)`, []any{string(sourceVersionID), string(sourceID), string(artifactID), contentHash, now}},
+		{`INSERT INTO ingestion.parse_projection(id,workspace_id,content_artifact_id,parser_id,parser_version,parser_config_hash,schema_version,normalized_content_hash,warnings,created_at) VALUES($1,$2,$3,'text','v1',$4,'v1',$5,'[]',$6)`, []any{string(projectionID), string(workspaceID), string(artifactID), graphHash("parser"), graphHash("normalized"), now}},
+		{`INSERT INTO ingestion.source_span(id,workspace_id,content_artifact_id,parse_projection_id,span_type,start_line,end_line,start_byte,end_byte,selector,excerpt_hash,parser_version,schema_version,created_at) VALUES($1,$2,$3,$4,'paragraph',1,1,0,4,'{}',$5,'v1','v1',$6)`, []any{string(sourceSpanID), string(workspaceID), string(artifactID), string(projectionID), graphHash("excerpt"), now}},
+		{`INSERT INTO ingestion.source_version_projection(source_version_id,parse_projection_id,workspace_id,created_at) VALUES($1,$2,$3,$4)`, []any{string(sourceVersionID), string(projectionID), string(workspaceID), now}},
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return graphProvenance{sourceVersionID: sourceVersionID, sourceSpanID: sourceSpanID}
+}
+
+func targetType(relationType string) string {
+	if relationType == "BELONGS_TO" {
+		return "TOPIC"
+	}
+	return "CLAIM"
+}
+
+func graphIntegrationRepository(t *testing.T) (*Repository, pgx.Tx, context.Context) {
+	t.Helper()
+	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	repository, err := NewRepository(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository, tx, ctx
+}
+
+func graphTestID(t *testing.T) foundation.ID {
+	t.Helper()
+	id, err := foundation.NewUUIDGenerator(nil).New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func graphHash(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+func hasGraphCode(err error, code string) bool {
+	var classified *foundation.Error
+	return errors.As(err, &classified) && classified.Code == code
+}
