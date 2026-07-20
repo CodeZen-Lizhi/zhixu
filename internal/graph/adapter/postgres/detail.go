@@ -15,6 +15,15 @@ func (repository *Repository) NodeDetail(ctx context.Context, workspaceID founda
 	if repository == nil || repository.db == nil {
 		return graphdomain.GraphNode{}, unavailable(errors.New("graph repository is unavailable"))
 	}
+	if ref.Type != knowledge.NodeTypeTopic && ref.Type != knowledge.NodeTypeClaim {
+		return graphdomain.GraphNode{}, notFound(graphdomain.ErrorCodeNodeNotFound, pgx.ErrNoRows)
+	}
+	return inReadSnapshot(ctx, repository, func(snapshot *Repository) (graphdomain.GraphNode, error) {
+		return snapshot.nodeDetail(ctx, workspaceID, ref)
+	})
+}
+
+func (repository *Repository) nodeDetail(ctx context.Context, workspaceID foundation.ID, ref knowledge.NodeRef) (graphdomain.GraphNode, error) {
 	switch ref.Type {
 	case knowledge.NodeTypeTopic:
 		node, err := scanTopicNode(repository.db.QueryRow(ctx, topicDetailSQL, string(workspaceID), string(ref.ID)))
@@ -44,6 +53,12 @@ func (repository *Repository) RelationDetail(ctx context.Context, workspaceID, r
 	if repository == nil || repository.db == nil {
 		return graphdomain.RelationDetail{}, unavailable(errors.New("graph repository is unavailable"))
 	}
+	return inReadSnapshot(ctx, repository, func(snapshot *Repository) (graphdomain.RelationDetail, error) {
+		return snapshot.relationDetail(ctx, workspaceID, relationID)
+	})
+}
+
+func (repository *Repository) relationDetail(ctx context.Context, workspaceID, relationID foundation.ID) (graphdomain.RelationDetail, error) {
 	var detail graphdomain.RelationDetail
 	var id, storedWorkspace, sourceType, sourceID, targetType, targetID, relationType, status string
 	var confirmationMethod, confirmationRef, evidenceFingerprint *string
@@ -67,7 +82,7 @@ func (repository *Repository) RelationDetail(ctx context.Context, workspaceID, r
 	detail.Edge.Status = knowledge.RelationStatus(status)
 	detail.Edge.Traversal = graphdomain.EdgeTraversalForward
 	detail.Edge.UpdatedAt = detail.UpdatedAt
-	detail.Edge.EvidenceHref = nodeEvidenceHref(detail.Edge.RelationID)
+	detail.Edge.EvidenceHref = relationEvidenceHref(detail.Edge.WorkspaceID, detail.Edge.RelationID)
 	if evidenceFingerprint != nil {
 		detail.Edge.EvidenceFingerprint = *evidenceFingerprint
 	}
@@ -97,4 +112,4 @@ SELECT r.id::text,r.workspace_id::text,r.source_node_type,r.source_node_id::text
        r.fingerprint,r.evidence_fingerprint,r.version,r.created_at,r.updated_at,
        (SELECT COUNT(*)::int FROM core.relation_evidence e WHERE e.workspace_id=r.workspace_id AND e.relation_id=r.id)
 FROM core.relation r
-WHERE r.workspace_id=$1 AND r.id=$2`
+WHERE r.workspace_id=$1 AND r.id=$2 AND r.status IN ('CONFIRMED','STALE')`

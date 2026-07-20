@@ -17,6 +17,12 @@ func (repository *Repository) RelationEvidenceWindow(ctx context.Context, worksp
 	if repository == nil || repository.db == nil {
 		return graphapp.RelationEvidenceResultWindow{}, unavailable(errors.New("graph repository is unavailable"))
 	}
+	return inReadSnapshot(ctx, repository, func(snapshot *Repository) (graphapp.RelationEvidenceResultWindow, error) {
+		return snapshot.relationEvidenceWindow(ctx, workspaceID, relationID)
+	})
+}
+
+func (repository *Repository) relationEvidenceWindow(ctx context.Context, workspaceID, relationID foundation.ID) (graphapp.RelationEvidenceResultWindow, error) {
 	rows, err := repository.db.Query(ctx, relationEvidenceWindowSQL, string(workspaceID), string(relationID), graphapp.MaxResultWindowItems+1)
 	if err != nil {
 		return graphapp.RelationEvidenceResultWindow{}, classify(err)

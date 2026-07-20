@@ -7,9 +7,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"unicode/utf8"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 )
 
 const maxJSONRequestBytes = 1 << 20
@@ -62,7 +62,7 @@ func DecodeJSON(r *http.Request, target any) error {
 	if len(body) > maxJSONRequestBytes {
 		return errors.New("request body exceeds JSON size limit")
 	}
-	if !utf8.Valid(body) || !validJSONSurrogatePairs(body) {
+	if !strictjson.ValidUnicode(body) {
 		return errors.New("request body contains invalid Unicode")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -78,66 +78,4 @@ func DecodeJSON(r *http.Request, target any) error {
 		return err
 	}
 	return nil
-}
-
-func validJSONSurrogatePairs(body []byte) bool {
-	inString := false
-	for index := 0; index < len(body); index++ {
-		switch body[index] {
-		case '"':
-			inString = !inString
-		case '\\':
-			if !inString {
-				continue
-			}
-			index++
-			if index >= len(body) {
-				return false
-			}
-			if body[index] != 'u' {
-				continue
-			}
-			code, ok := decodeJSONHex4(body, index+1)
-			if !ok {
-				return false
-			}
-			index += 4
-			if code >= 0xdc00 && code <= 0xdfff {
-				return false
-			}
-			if code < 0xd800 || code > 0xdbff {
-				continue
-			}
-			if index+6 >= len(body) || body[index+1] != '\\' || body[index+2] != 'u' {
-				return false
-			}
-			low, ok := decodeJSONHex4(body, index+3)
-			if !ok || low < 0xdc00 || low > 0xdfff {
-				return false
-			}
-			index += 6
-		}
-	}
-	return true
-}
-
-func decodeJSONHex4(body []byte, start int) (uint16, bool) {
-	if start < 0 || start+4 > len(body) {
-		return 0, false
-	}
-	var value uint16
-	for _, character := range body[start : start+4] {
-		value <<= 4
-		switch {
-		case character >= '0' && character <= '9':
-			value |= uint16(character - '0')
-		case character >= 'a' && character <= 'f':
-			value |= uint16(character-'a') + 10
-		case character >= 'A' && character <= 'F':
-			value |= uint16(character-'A') + 10
-		default:
-			return 0, false
-		}
-	}
-	return value, true
 }

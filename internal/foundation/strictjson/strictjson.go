@@ -57,7 +57,7 @@ func DecodeObject[T any](raw []byte, limits Limits, validate func(T) error) (T, 
 	if len(raw) == 0 || len(raw) > limits.MaxDocumentBytes {
 		return zero, limitError("structured output document exceeds byte limit")
 	}
-	if !utf8.Valid(raw) {
+	if !ValidUnicode(raw) {
 		return zero, invalidError("structured output is not valid utf-8")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -85,6 +85,72 @@ func DecodeObject[T any](raw []byte, limits Limits, validate func(T) error) (T, 
 		}
 	}
 	return decoded, nil
+}
+
+// ValidUnicode 报告 JSON 文档是否为有效 UTF-8 且不含未配对的 Unicode surrogate 转义。
+func ValidUnicode(raw []byte) bool {
+	if !utf8.Valid(raw) {
+		return false
+	}
+	inString := false
+	for index := 0; index < len(raw); index++ {
+		switch raw[index] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString {
+				continue
+			}
+			index++
+			if index >= len(raw) {
+				return false
+			}
+			if raw[index] != 'u' {
+				continue
+			}
+			code, ok := decodeHex4(raw, index+1)
+			if !ok {
+				return false
+			}
+			index += 4
+			if code >= 0xdc00 && code <= 0xdfff {
+				return false
+			}
+			if code < 0xd800 || code > 0xdbff {
+				continue
+			}
+			if index+6 >= len(raw) || raw[index+1] != '\\' || raw[index+2] != 'u' {
+				return false
+			}
+			low, ok := decodeHex4(raw, index+3)
+			if !ok || low < 0xdc00 || low > 0xdfff {
+				return false
+			}
+			index += 6
+		}
+	}
+	return true
+}
+
+func decodeHex4(raw []byte, start int) (uint16, bool) {
+	if start < 0 || start+4 > len(raw) {
+		return 0, false
+	}
+	var value uint16
+	for _, character := range raw[start : start+4] {
+		value <<= 4
+		switch {
+		case character >= '0' && character <= '9':
+			value |= uint16(character - '0')
+		case character >= 'a' && character <= 'f':
+			value |= uint16(character-'a') + 10
+		case character >= 'A' && character <= 'F':
+			value |= uint16(character-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
 }
 
 // KindOf 返回严格 JSON 边界错误的稳定分类。

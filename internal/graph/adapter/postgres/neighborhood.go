@@ -22,6 +22,12 @@ func (repository *Repository) NeighborhoodWindow(ctx context.Context, request gr
 	if err := graphdomain.ValidateNeighborhoodRequest(request); err != nil {
 		return graphdomain.Neighborhood{}, err
 	}
+	return inReadSnapshot(ctx, repository, func(snapshot *Repository) (graphdomain.Neighborhood, error) {
+		return snapshot.neighborhoodWindow(ctx, request)
+	})
+}
+
+func (repository *Repository) neighborhoodWindow(ctx context.Context, request graphdomain.NeighborhoodRequest) (graphdomain.Neighborhood, error) {
 	center, err := repository.NodeDetail(ctx, request.WorkspaceID, request.Center)
 	if err != nil {
 		return graphdomain.Neighborhood{}, err
@@ -324,7 +330,7 @@ func scanNeighborhoodEdge(row rowScanner) (graphdomain.GraphEdge, error) {
 	if evidenceFingerprint != nil {
 		edge.EvidenceFingerprint = *evidenceFingerprint
 	}
-	edge.EvidenceHref = nodeEvidenceHref(edge.RelationID)
+	edge.EvidenceHref = relationEvidenceHref(edge.WorkspaceID, edge.RelationID)
 	return edge, nil
 }
 

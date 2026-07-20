@@ -23,6 +23,32 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func TestNewRepositoryRejectsExternallyOwnedTransaction(t *testing.T) {
+	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	repository, err := NewRepository(tx)
+	if repository != nil || !hasGraphCode(err, graphdomain.ErrorCodeDependencyUnavailable) {
+		t.Fatalf("repository=%#v err=%v", repository, err)
+	}
+	var one int
+	if err := tx.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("external transaction was changed: one=%d err=%v", one, err)
+	}
+}
+
 func TestRepositoryGlobalSearchAndDetailsUseCanonicalKnowledgeFacts(t *testing.T) {
 	repository, tx, ctx := graphIntegrationRepository(t)
 	fixture := seedGraphFixture(t, ctx, tx)
@@ -76,7 +102,8 @@ func TestRepositoryGlobalSearchAndDetailsUseCanonicalKnowledgeFacts(t *testing.T
 		t.Fatalf("node=%#v err=%v", node, err)
 	}
 	detail, err := repository.RelationDetail(ctx, fixture.workspaceID, fixture.supportRelationID)
-	if err != nil || detail.Edge.EvidenceCount != 1 || detail.Edge.EvidenceFingerprint == "" || detail.Confirmation == nil || detail.Edge.EvidenceHref == "" {
+	wantEvidenceHref := "/api/v1/graph/relations/" + string(fixture.supportRelationID) + "/evidence?workspace_id=" + string(fixture.workspaceID)
+	if err != nil || detail.Edge.EvidenceCount != 1 || detail.Edge.EvidenceFingerprint == "" || detail.Confirmation == nil || detail.Edge.EvidenceHref != wantEvidenceHref {
 		t.Fatalf("detail=%#v err=%v", detail, err)
 	}
 
@@ -89,6 +116,20 @@ func TestRepositoryGlobalSearchAndDetailsUseCanonicalKnowledgeFacts(t *testing.T
 	}
 	if _, err := repository.RelationDetail(ctx, otherWorkspace, fixture.supportRelationID); !hasGraphCode(err, graphdomain.ErrorCodeRelationNotFound) {
 		t.Fatalf("cross workspace relation err=%v", err)
+	}
+
+	now := time.Now().UTC()
+	staleRelation := seedGraphRelation(t, ctx, tx, fixture.workspaceID, fixture.firstClaimID, knowledge.NodeTypeClaim, fixture.longClaimID, knowledge.NodeTypeClaim, knowledge.RelationComplements, knowledge.RelationStatusStale, nil, now)
+	suggestedRelation := seedGraphRelation(t, ctx, tx, fixture.workspaceID, fixture.firstClaimID, knowledge.NodeTypeClaim, fixture.longClaimID, knowledge.NodeTypeClaim, knowledge.RelationDerivedFrom, knowledge.RelationStatusSuggested, nil, now.Add(time.Microsecond))
+	rejectedRelation := seedGraphRelation(t, ctx, tx, fixture.workspaceID, fixture.firstClaimID, knowledge.NodeTypeClaim, fixture.longClaimID, knowledge.NodeTypeClaim, knowledge.RelationVersionOf, knowledge.RelationStatusRejected, nil, now.Add(2*time.Microsecond))
+	staleDetail, err := repository.RelationDetail(ctx, fixture.workspaceID, staleRelation)
+	if err != nil || staleDetail.Edge.Status != knowledge.RelationStatusStale {
+		t.Fatalf("stale detail=%#v err=%v", staleDetail, err)
+	}
+	for _, relationID := range []foundation.ID{suggestedRelation, rejectedRelation} {
+		if _, err := repository.RelationDetail(ctx, fixture.workspaceID, relationID); !hasGraphCode(err, graphdomain.ErrorCodeRelationNotFound) {
+			t.Fatalf("non-formal relation %s err=%v", relationID, err)
+		}
 	}
 }
 
@@ -498,7 +539,7 @@ func TestRepositoryNeighborhoodHonorsCanceledContext(t *testing.T) {
 		MaxEdges:    10,
 		MaxFrontier: 10,
 	}
-	if _, err := repository.NeighborhoodWindow(canceled, request); !hasGraphCode(err, graphdomain.ErrorCodeDependencyUnavailable) {
+	if _, err := repository.NeighborhoodWindow(canceled, request); !hasGraphCode(err, graphdomain.ErrorCodeQueryCanceled) {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -731,6 +772,41 @@ func TestRepositoryFindPathKeepsRepeatableReadSnapshotDuringConcurrentChange(t *
 	}
 }
 
+func TestRepositoryAppliesPostgresStatementTimeoutToReadSnapshot(t *testing.T) {
+	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	}
+	ctx := context.Background()
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolConfig.MinConns = 0
+	poolConfig.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	repository, err := NewRepository(&statementTimeoutDB{Pool: pool, delayQuery: topicDetailSQL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository.statementTimeout = 10 * time.Millisecond
+	_, err = repository.NodeDetail(ctx,
+		foundation.ID("10000000-0000-4000-8000-000000000001"),
+		knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: foundation.ID("10000000-0000-4000-8000-000000000002")},
+	)
+	requirePostgresStatementTimeout(t, err)
+	reuseContext, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	var one int
+	if err := pool.QueryRow(reuseContext, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("pool was not reusable after statement timeout: one=%d err=%v", one, err)
+	}
+}
+
 func TestRepositoryFindPathReturnsFrontierCancellationAndTimeoutWithoutPartial(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -760,13 +836,15 @@ func TestRepositoryFindPathReturnsFrontierCancellationAndTimeoutWithoutPartial(t
 		MaxVisited:  10,
 	}
 	for _, testCase := range []struct {
-		name string
-		err  error
-		code string
+		name      string
+		err       error
+		code      string
+		retryable bool
 	}{
-		{name: "cancel", err: context.Canceled, code: graphdomain.ErrorCodeDependencyUnavailable},
-		{name: "deadline", err: context.DeadlineExceeded, code: graphdomain.ErrorCodeQueryTimeout},
-		{name: "statement timeout", err: &pgconn.PgError{Code: "57014", Message: "statement timeout"}, code: graphdomain.ErrorCodeQueryTimeout},
+		{name: "cancel", err: context.Canceled, code: graphdomain.ErrorCodeQueryCanceled},
+		{name: "deadline", err: context.DeadlineExceeded, code: graphdomain.ErrorCodeQueryTimeout, retryable: true},
+		{name: "statement timeout", err: &pgconn.PgError{Code: "57014", Message: "statement timeout"}, code: graphdomain.ErrorCodeQueryTimeout, retryable: true},
+		{name: "postgres explicit cancel", err: &pgconn.PgError{Code: "57014", Message: "canceling statement due to user request"}, code: graphdomain.ErrorCodeQueryCanceled},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			repository, createErr := NewRepository(&pathFrontierErrorDB{Pool: pool, frontierErr: testCase.err})
@@ -774,10 +852,21 @@ func TestRepositoryFindPathReturnsFrontierCancellationAndTimeoutWithoutPartial(t
 				t.Fatal(createErr)
 			}
 			result, queryErr := repository.FindPath(ctx, request)
-			if !hasGraphCode(queryErr, testCase.code) || result.Status != "" || len(result.Nodes) != 0 || len(result.Edges) != 0 {
+			var classified *foundation.Error
+			if !hasGraphCode(queryErr, testCase.code) || !errors.As(queryErr, &classified) || classified.Retryable != testCase.retryable || result.Status != "" || len(result.Nodes) != 0 || len(result.Edges) != 0 {
 				t.Fatalf("result=%#v err=%v", result, queryErr)
 			}
 		})
+	}
+	delayedRepository, err := NewRepository(&statementTimeoutDB{Pool: pool, delayQuery: pathFrontierSQL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delayedRepository.statementTimeout = 10 * time.Millisecond
+	result, queryErr := delayedRepository.FindPath(ctx, request)
+	requirePostgresStatementTimeout(t, queryErr)
+	if result.Status != "" || len(result.Nodes) != 0 || len(result.Edges) != 0 {
+		t.Fatalf("statement timeout returned partial path: %#v", result)
 	}
 }
 
@@ -913,6 +1002,44 @@ func (tx *pathFrontierErrorTx) Query(ctx context.Context, query string, args ...
 	return tx.Tx.Query(ctx, query, args...)
 }
 
+type statementTimeoutDB struct {
+	*pgxpool.Pool
+	delayQuery string
+}
+
+func (database *statementTimeoutDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
+	if options.IsoLevel != pgx.RepeatableRead || options.AccessMode != pgx.ReadOnly {
+		return nil, errors.New("graph snapshot transaction options are not repeatable-read read-only")
+	}
+	tx, err := database.Pool.BeginTx(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return &statementTimeoutTx{Tx: tx, delayQuery: database.delayQuery}, nil
+}
+
+type statementTimeoutTx struct {
+	pgx.Tx
+	delayQuery string
+}
+
+func (tx *statementTimeoutTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
+	if query == tx.delayQuery {
+		if _, err := tx.Tx.Exec(ctx, `SELECT pg_sleep(0.1)`); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("delayed graph query unexpectedly completed")
+	}
+	return tx.Tx.Query(ctx, query, args...)
+}
+
+func (tx *statementTimeoutTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
+	if query == tx.delayQuery {
+		return tx.Tx.QueryRow(ctx, `SELECT pg_sleep(0.1)`)
+	}
+	return tx.Tx.QueryRow(ctx, query, args...)
+}
+
 func cleanupCommittedGraphFixture(pool *pgxpool.Pool, workspaceID foundation.ID) {
 	ctx := context.Background()
 	statements := []string{
@@ -990,6 +1117,8 @@ func seedGraphRelation(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID
 	storedStatus := status
 	if status == knowledge.RelationStatusStale || status == knowledge.RelationStatusDeprecated {
 		storedStatus = knowledge.RelationStatusConfirmed
+	} else if status == knowledge.RelationStatusRejected {
+		storedStatus = knowledge.RelationStatusSuggested
 	}
 	if storedStatus == knowledge.RelationStatusConfirmed {
 		confirmationMethod = string(knowledge.ConfirmationSourceDerived)
@@ -1168,10 +1297,9 @@ func graphIntegrationRepository(t *testing.T) (*Repository, pgx.Tx, context.Cont
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(ctx) })
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// These projection tests must see fixture rows staged in the caller-owned transaction.
+	// Production construction rejects external transactions and always owns its read snapshot.
+	repository := &Repository{db: tx, statementTimeout: defaultStatementTimeout, inReadSnapshot: true}
 	return repository, tx, ctx
 }
 
@@ -1192,4 +1320,14 @@ func graphHash(value string) string {
 func hasGraphCode(err error, code string) bool {
 	var classified *foundation.Error
 	return errors.As(err, &classified) && classified.Code == code
+}
+
+func requirePostgresStatementTimeout(t *testing.T, err error) {
+	t.Helper()
+	var classified *foundation.Error
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &classified) || classified.Code != graphdomain.ErrorCodeQueryTimeout || !classified.Retryable ||
+		!errors.As(err, &postgresError) || postgresError.Code != "57014" {
+		t.Fatalf("err=%v classified=%#v postgres=%#v", err, classified, postgresError)
+	}
 }

@@ -35,6 +35,8 @@ func TestDecodeObjectAcceptsOneBoundedDocument(t *testing.T) {
 func TestDecodeObjectRejectsInvalidDocuments(t *testing.T) {
 	tests := map[string][]byte{
 		"invalid utf8":        append([]byte(`{"name":"`), 0xff, '"', '}'),
+		"unpaired high":       []byte(`{"name":"\uD800"}`),
+		"unpaired low":        []byte(`{"name":"\uDC00"}`),
 		"duplicate root":      []byte(`{"name":"a","name":"b","nested":{"state":"READY","items":["x"]}}`),
 		"duplicate nested":    []byte(`{"name":"a","nested":{"state":"READY","state":"READY","items":["x"]}}`),
 		"unknown root":        []byte(`{"name":"a","unknown":1,"nested":{"state":"READY","items":["x"]}}`),
@@ -51,6 +53,16 @@ func TestDecodeObjectRejectsInvalidDocuments(t *testing.T) {
 				t.Fatalf("KindOf(%v) = %q, %t", err, kind, ok)
 			}
 		})
+	}
+}
+
+func TestDecodeObjectAcceptsPairedUnicodeSurrogates(t *testing.T) {
+	type unicodeFixture struct {
+		Name string `json:"name"`
+	}
+	value, err := DecodeObject[unicodeFixture]([]byte(`{"name":"\uD83D\uDE00"}`), DefaultLimits(), nil)
+	if err != nil || value.Name != "\U0001F600" {
+		t.Fatalf("DecodeObject() = %#v, %v", value, err)
 	}
 }
 

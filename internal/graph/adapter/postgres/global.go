@@ -22,6 +22,12 @@ func (repository *Repository) GlobalWindow(ctx context.Context, request graphdom
 	if len(request.Filter.NodeTypes) > 0 && !containsNodeType(request.Filter.NodeTypes, knowledge.NodeTypeTopic) {
 		return graphapp.GlobalResultWindow{Items: []graphdomain.GlobalCluster{}}, nil
 	}
+	return inReadSnapshot(ctx, repository, func(snapshot *Repository) (graphapp.GlobalResultWindow, error) {
+		return snapshot.globalWindow(ctx, request)
+	})
+}
+
+func (repository *Repository) globalWindow(ctx context.Context, request graphdomain.GlobalRequest) (graphapp.GlobalResultWindow, error) {
 	claimStatuses := request.Filter.ClaimStatuses
 	if len(claimStatuses) == 0 {
 		claimStatuses = []knowledge.ClaimStatus{knowledge.ClaimStatusConfirmed, knowledge.ClaimStatusDisputed}

@@ -25,6 +25,12 @@ func (repository *Repository) SearchNodes(ctx context.Context, request graphdoma
 	if err != nil {
 		return graphdomain.NodeSearchResult{}, err
 	}
+	return inReadSnapshot(ctx, repository, func(snapshot *Repository) (graphdomain.NodeSearchResult, error) {
+		return snapshot.searchNodes(ctx, request, topicQuery, claimQuery)
+	})
+}
+
+func (repository *Repository) searchNodes(ctx context.Context, request graphdomain.NodeSearchRequest, topicQuery, claimQuery string) (graphdomain.NodeSearchResult, error) {
 	matches := make([]graphdomain.NodeSearchMatch, 0, request.Limit*2)
 	topicRows, err := repository.db.Query(ctx, topicSearchSQL, string(request.WorkspaceID), topicQuery, request.Limit)
 	if err != nil {

@@ -21,6 +21,13 @@ const requiredOperations = [
   ["/api/v1/proposals/{proposal_id}/approvals", "post", "201"],
   ["/api/v1/proposals/{proposal_id}/apply-preflight", "post", "200"],
   ["/api/v1/search", "post", "200"],
+  ["/api/v1/graph/global", "post", "200"],
+  ["/api/v1/graph/neighborhood", "post", "200"],
+  ["/api/v1/graph/path", "post", "200"],
+  ["/api/v1/graph/nodes", "get", "200"],
+  ["/api/v1/graph/nodes/{node_type}/{node_id}", "get", "200"],
+  ["/api/v1/graph/relations/{relation_id}", "get", "200"],
+  ["/api/v1/graph/relations/{relation_id}/evidence", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/spans/{source_span_id}", "get", "200"],
   ["/api/v1/conversations", "post", "201"],
@@ -65,6 +72,29 @@ for (const [path, method, statuses] of conversationOperations) {
     if (!responses[status]) throw new Error(`missing ${status} response for ${method.toUpperCase()} ${path}`);
     if (Number(status) >= 400 && resolveRef(responses[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
       throw new Error(`invalid ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+
+const graphOperations = [
+  ["/api/v1/graph/global", "post", "GraphGlobalResponse", ["400", "409", "415", "500", "503", "405"]],
+  ["/api/v1/graph/neighborhood", "post", "GraphNeighborhoodResponse", ["400", "404", "409", "415", "500", "503", "405"]],
+  ["/api/v1/graph/path", "post", "GraphPathResponse", ["400", "404", "409", "415", "422", "500", "503", "405"]],
+  ["/api/v1/graph/nodes", "get", "GraphNodeSearchResponse", ["400", "409", "500", "503", "405"]],
+  ["/api/v1/graph/nodes/{node_type}/{node_id}", "get", "GraphNode", ["400", "404", "409", "500", "503", "405"]],
+  ["/api/v1/graph/relations/{relation_id}", "get", "GraphRelationDetailResponse", ["400", "404", "409", "500", "503", "405"]],
+  ["/api/v1/graph/relations/{relation_id}/evidence", "get", "GraphRelationEvidenceResponse", ["400", "404", "409", "500", "503", "405"]],
+];
+for (const [path, method, successSchema, errorStatuses] of graphOperations) {
+  const operation = document.paths[path][method];
+  const actual = operation.responses["200"]?.content?.["application/json"]?.schema?.$ref;
+  if (actual !== `#/components/schemas/${successSchema}`) {
+    throw new Error(`invalid Graph success schema for ${method.toUpperCase()} ${path}: ${String(actual)}`);
+  }
+  for (const status of errorStatuses) {
+    const response = resolveRef(operation.responses[status]);
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Graph ${status} Problem schema for ${method.toUpperCase()} ${path}`);
     }
   }
 }
@@ -121,6 +151,30 @@ for (const schema of [
   "SearchResponse",
   "EvidenceSourceVersion",
   "EvidenceSourceSpan",
+  "GraphCanonicalJSONValue",
+  "GraphCanonicalJSONObject",
+  "GraphNodeRef",
+  "GraphApplicability",
+  "GraphTopicNode",
+  "GraphClaimNode",
+  "GraphNode",
+  "GraphConfirmation",
+  "GraphEdge",
+  "GraphPageMeta",
+  "GraphFilter",
+  "GraphGlobalRequest",
+  "GraphGlobalCluster",
+  "GraphGlobalResponse",
+  "GraphNodeSearchMatch",
+  "GraphNodeSearchResponse",
+  "GraphNeighborhoodRequest",
+  "GraphNeighborhoodResponse",
+  "GraphPathRequest",
+  "GraphPathResponse",
+  "GraphRelationDetailResponse",
+  "GraphProvenance",
+  "GraphRelationEvidenceItem",
+  "GraphRelationEvidenceResponse",
   "PageCursor",
   "CreateConversationRequest",
   "Conversation",
@@ -157,6 +211,13 @@ for (const schema of [
 
 const expectedSuccessSchemas = [
   ["/api/v1/search", "post", "SearchResponse"],
+  ["/api/v1/graph/global", "post", "GraphGlobalResponse"],
+  ["/api/v1/graph/neighborhood", "post", "GraphNeighborhoodResponse"],
+  ["/api/v1/graph/path", "post", "GraphPathResponse"],
+  ["/api/v1/graph/nodes", "get", "GraphNodeSearchResponse"],
+  ["/api/v1/graph/nodes/{node_type}/{node_id}", "get", "GraphNode"],
+  ["/api/v1/graph/relations/{relation_id}", "get", "GraphRelationDetailResponse"],
+  ["/api/v1/graph/relations/{relation_id}/evidence", "get", "GraphRelationEvidenceResponse"],
   ["/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}", "get", "EvidenceSourceVersion"],
   ["/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/spans/{source_span_id}", "get", "EvidenceSourceSpan"],
 ];
@@ -169,6 +230,17 @@ for (const [path, method, schema] of expectedSuccessSchemas) {
 
 if (document.paths["/api/v1/search"].post.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/SearchRequest") {
   throw new Error("POST /api/v1/search request body must reference SearchRequest");
+}
+for (const [path, schema] of [
+  ["/api/v1/graph/global", "GraphGlobalRequest"],
+  ["/api/v1/graph/neighborhood", "GraphNeighborhoodRequest"],
+  ["/api/v1/graph/path", "GraphPathRequest"],
+]) {
+  const requestBody = document.paths[path].post.requestBody;
+  if (requestBody?.required !== true || requestBody?.["x-max-body-bytes"] !== 65536 ||
+      requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${schema}`) {
+    throw new Error(`${path} must use its strict Graph request schema and 64 KiB body limit`);
+  }
 }
 
 const schemas = document.components.schemas;
@@ -188,6 +260,11 @@ for (const schemaName of [
   "WorkflowProjection", "QuestionAcceptance", "AnswerCitation", "RAGResultCitation", "RAGAssertion", "RAGConflictPosition", "RelatedTopic", "RAGAnswerPayload", "RAGAnswerResult", "RefusalResult",
   "ClarificationResult", "RetrievalDegradation", "RetrievalScopeSummary", "RetrievalSummary", "Answer", "Turn", "TurnPage",
   "SubmitFeedbackRequest", "AnswerFeedback", "ServerEventPayloadSummary", "ServerEventEnvelope",
+  "GraphCanonicalJSONObject", "GraphNodeRef", "GraphApplicability", "GraphTopicNode", "GraphClaimNode",
+  "GraphConfirmation", "GraphEdge", "GraphPageMeta", "GraphFilter", "GraphGlobalRequest", "GraphGlobalCluster",
+  "GraphGlobalResponse", "GraphNodeSearchMatch", "GraphNodeSearchResponse", "GraphNeighborhoodRequest",
+  "GraphNeighborhoodResponse", "GraphPathRequest", "GraphPathResponse", "GraphRelationDetailResponse",
+  "GraphProvenance", "GraphRelationEvidenceItem", "GraphRelationEvidenceResponse",
 ]) {
   if (schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must reject unknown properties`);
 }
@@ -209,6 +286,52 @@ for (const requestName of ["CreateConversationRequest", "SubmitQuestionRequest",
 }
 if (schemas.PageCursor.maxLength !== 2048 || document.components.parameters.Limit.schema.maximum !== 100) {
   throw new Error("Conversation cursor/limit bounds drifted");
+}
+const graphNodeRefs = schemas.GraphNode.oneOf?.map((item) => item.$ref).join(",");
+if (graphNodeRefs !== "#/components/schemas/GraphTopicNode,#/components/schemas/GraphClaimNode" ||
+    schemas.GraphNode.discriminator?.propertyName !== "type" ||
+    schemas.GraphNode.discriminator?.mapping?.TOPIC !== "#/components/schemas/GraphTopicNode" ||
+    schemas.GraphNode.discriminator?.mapping?.CLAIM !== "#/components/schemas/GraphClaimNode" ||
+    schemas.GraphTopicNode.properties?.type?.const !== "TOPIC" || schemas.GraphClaimNode.properties?.type?.const !== "CLAIM") {
+  throw new Error("GraphNode must remain a strict TOPIC/CLAIM discriminated union");
+}
+if (schemas.GraphEdge.properties.status.enum.join(",") !== "CONFIRMED,STALE" ||
+    schemas.GraphFilter.properties.relation_statuses.items.enum.join(",") !== "CONFIRMED,STALE" ||
+    schemas.GraphFilter.properties.claim_statuses.items.enum.join(",") !== "CONFIRMED,DISPUTED" ||
+    schemas.GraphFilter.properties.relation_statuses.maxItems !== 2 ||
+    schemas.GraphFilter.properties.claim_statuses.maxItems !== 2 ||
+    schemas.GraphFilter.properties.topic_ids.maxItems !== 500) {
+  throw new Error("Graph formal status or filter bounds drifted from the domain validators");
+}
+if (schemas.GraphEdge.properties.evidence_href.pattern !== "^/api/v1/graph/relations/[0-9a-f-]{36}/evidence\\?workspace_id=[0-9a-f-]{36}$" ||
+    schemas.GraphRelationEvidenceItem.properties.source_href.pattern !== "^/api/v1/workspaces/[0-9a-f-]{36}/source-versions/[0-9a-f-]{36}$" ||
+    schemas.GraphRelationEvidenceItem.properties.span_href.pattern !== "^/api/v1/workspaces/[0-9a-f-]{36}/source-versions/[0-9a-f-]{36}/spans/[0-9a-f-]{36}$") {
+  throw new Error("Graph Evidence hrefs must remain directly followable and Workspace scoped");
+}
+if (schemas.GraphGlobalRequest.properties.limit.default !== 25 || schemas.GraphGlobalRequest.properties.limit.maximum !== 100 ||
+    schemas.GraphNeighborhoodRequest.properties.depth.default !== 1 || schemas.GraphNeighborhoodRequest.properties.depth.maximum !== 3 ||
+    schemas.GraphNeighborhoodRequest.properties.limit.default !== 25 || schemas.GraphNeighborhoodRequest.properties.max_nodes.maximum !== 500 ||
+    schemas.GraphNeighborhoodRequest.properties.max_edges.maximum !== 1000 || schemas.GraphNeighborhoodRequest.properties.max_frontier.maximum !== 500 ||
+    schemas.GraphPathRequest.properties.max_depth.default !== 6 || schemas.GraphPathRequest.properties.max_depth.maximum !== 8 ||
+    schemas.GraphPathRequest.properties.max_visited.default !== 500 || schemas.GraphPathRequest.properties.max_visited.maximum !== 500 ||
+    schemas.GraphNeighborhoodResponse.properties.boundary_nodes.maxItems !== 2000) {
+  throw new Error("Graph limit, depth or hard budget contract drifted");
+}
+for (const requestName of ["GraphGlobalRequest", "GraphNeighborhoodRequest", "GraphPathRequest"]) {
+  if (!schemas[requestName].required.includes("workspace_id") || schemas[requestName].properties.cursor?.$ref && schemas[requestName].properties.cursor.$ref !== "#/components/schemas/PageCursor") {
+    throw new Error(`${requestName} Workspace or opaque cursor contract drifted`);
+  }
+}
+if (!schemas.GraphNeighborhoodRequest.required.includes("center") ||
+    !schemas.GraphPathRequest.required.includes("from") || !schemas.GraphPathRequest.required.includes("to") ||
+    schemas.GraphPageMeta.properties.next_cursor.$ref !== "#/components/schemas/PageCursor") {
+  throw new Error("Graph required endpoint or cursor fields drifted");
+}
+const graphSearchQuery = document.paths["/api/v1/graph/nodes"].get.parameters.find((item) => item.name === "query")?.schema;
+const graphSearchLimit = document.paths["/api/v1/graph/nodes"].get.parameters.find((item) => item.name === "limit")?.schema;
+if (graphSearchQuery?.minLength !== 1 || graphSearchQuery?.["x-min-utf8-bytes"] !== 2 || graphSearchQuery?.["x-max-utf8-bytes"] !== 256 ||
+    graphSearchLimit?.default !== 20 || graphSearchLimit?.maximum !== 50) {
+  throw new Error("Graph node search UTF-8 or limit bounds drifted");
 }
 if (schemas.SubmitQuestionRequest.properties.answer_depth.default !== "standard" || schemas.SubmitQuestionRequest.properties.output_format.default !== "markdown" || schemas.QuestionScopeRequest.properties.retrieval_mode.default !== "hybrid" || schemas.SubmitQuestionRequest.properties.scope.$ref !== "#/components/schemas/QuestionScopeRequest") {
   throw new Error("Question option defaults drifted");

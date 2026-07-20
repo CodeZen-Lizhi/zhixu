@@ -9,7 +9,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 type pathChain struct {
@@ -25,25 +24,9 @@ func (repository *Repository) FindPath(ctx context.Context, request graphdomain.
 	if err := graphdomain.ValidatePathRequest(request); err != nil {
 		return graphdomain.PathResult{}, err
 	}
-	beginner, ok := repository.db.(interface {
-		BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	return inReadSnapshot(ctx, repository, func(snapshot *Repository) (graphdomain.PathResult, error) {
+		return snapshot.findPathInSnapshot(ctx, request)
 	})
-	if !ok {
-		return graphdomain.PathResult{}, unavailable(errors.New("graph path repeatable-read snapshot is unavailable"))
-	}
-	tx, err := beginner.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return graphdomain.PathResult{}, classify(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	result, err := (&Repository{db: tx}).findPathInSnapshot(ctx, request)
-	if err != nil {
-		return graphdomain.PathResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return graphdomain.PathResult{}, classify(err)
-	}
-	return result, nil
 }
 
 func (repository *Repository) findPathInSnapshot(ctx context.Context, request graphdomain.PathRequest) (graphdomain.PathResult, error) {
@@ -304,7 +287,7 @@ func scanPathHydratedEdge(row rowScanner) (graphdomain.GraphEdge, error) {
 	if evidenceFingerprint != nil {
 		edge.EvidenceFingerprint = *evidenceFingerprint
 	}
-	edge.EvidenceHref = nodeEvidenceHref(edge.RelationID)
+	edge.EvidenceHref = relationEvidenceHref(edge.WorkspaceID, edge.RelationID)
 	return edge, nil
 }
 

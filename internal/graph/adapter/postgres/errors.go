@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
@@ -18,16 +19,20 @@ func classify(err error) error {
 		return err
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return foundation.NewError(foundation.ErrorDependencyUnavailable, graphdomain.ErrorCodeQueryTimeout, false, err)
+		return foundation.NewError(foundation.ErrorDependencyUnavailable, graphdomain.ErrorCodeQueryTimeout, true, err)
 	}
 	if errors.Is(err, context.Canceled) {
-		return foundation.NewError(foundation.ErrorDependencyUnavailable, graphdomain.ErrorCodeDependencyUnavailable, false, err)
+		return foundation.NewError(foundation.ErrorNonRetryableFailure, graphdomain.ErrorCodeQueryCanceled, false, err)
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
 		case "57014":
-			return foundation.NewError(foundation.ErrorDependencyUnavailable, graphdomain.ErrorCodeQueryTimeout, false, err)
+			// PostgreSQL uses query_canceled for both statement timeouts and explicit cancellation.
+			if strings.Contains(strings.ToLower(pgErr.Message), "statement timeout") {
+				return foundation.NewError(foundation.ErrorDependencyUnavailable, graphdomain.ErrorCodeQueryTimeout, true, err)
+			}
+			return foundation.NewError(foundation.ErrorNonRetryableFailure, graphdomain.ErrorCodeQueryCanceled, false, err)
 		case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01":
 			return foundation.NewError(foundation.ErrorRetryableFailure, graphdomain.ErrorCodeDependencyUnavailable, true, err)
 		case "23502", "23503", "23514":

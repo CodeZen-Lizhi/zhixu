@@ -88,9 +88,9 @@ Cursor v1 属于 Application 基础契约，在 SQL 分页前实现 codec port �
 - `GET /api/v1/graph/relations/{id}`
 - `GET /api/v1/graph/relations/{id}/evidence`
 
-Workspace 通过既有 header/请求约定显式传入并进入 canonical hash。POST 用于复杂过滤且保持纯 Query。
+Workspace 显式传入并进入 canonical hash：Graph POST 在严格 JSON body 使用 `workspace_id`，Graph GET 使用必填且不可重复的 `workspace_id` query。POST 用于复杂过滤且保持纯 Query；Edge 返回的 Evidence href 必须携带同一 Workspace query，可被客户端直接打开。
 
-稳定错误至少包括：`GRAPH_REQUEST_INVALID`、`GRAPH_CURSOR_INVALID`、`GRAPH_CURSOR_STALE`、`GRAPH_NODE_NOT_FOUND`、`GRAPH_RELATION_NOT_FOUND`、`GRAPH_QUERY_TIMEOUT`、`GRAPH_QUERY_BUDGET_EXCEEDED`、`GRAPH_DEPENDENCY_UNAVAILABLE`、`GRAPH_PROJECTION_INCONSISTENT`。
+稳定错误至少包括：`GRAPH_REQUEST_INVALID`、`GRAPH_CURSOR_INVALID`、`GRAPH_CURSOR_STALE`、`GRAPH_NODE_NOT_FOUND`、`GRAPH_RELATION_NOT_FOUND`、`GRAPH_QUERY_CANCELLED`、`GRAPH_QUERY_TIMEOUT`、`GRAPH_QUERY_BUDGET_EXCEEDED`、`GRAPH_DEPENDENCY_UNAVAILABLE`、`GRAPH_PROJECTION_INCONSISTENT`。
 
 ## Frontend
 
@@ -101,7 +101,7 @@ Workspace 通过既有 header/请求约定显式传入并进入 canonical hash�
 ## Security, Performance And Operability
 
 - SQL 全参数化；enum 白名单；统一 Workspace Not Found。
-- Handler deadline 略大于 DB `statement_timeout`；路径事务只读且每轮批量。
+- Graph PostgreSQL 查询在只读 `REPEATABLE READ` 快照内使用默认 1500ms `statement_timeout`，Handler 默认 deadline 为 2s；路径每轮保持批量展开。
 - 日志只记录 Workspace/Node/Relation ID、计数、耗时、错误码，不记录 Claim 正文、Evidence、绝对路径。
 - Graph 依赖缺失时 route 返回 503，普通 API/readiness 不被假装 healthy。
 - 监控/测试记录 query kind、nodes/edges、completed depth、explored、truncated、DB duration。

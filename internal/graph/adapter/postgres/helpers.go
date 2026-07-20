@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
@@ -18,6 +19,7 @@ func ids[T ~string](values []T) []string {
 
 func stringsOf[T ~string](values []T) []string { return ids(values) }
 
-func nodeEvidenceHref(relationID foundation.ID) string {
-	return fmt.Sprintf("/api/v1/graph/relations/%s/evidence", relationID)
+func relationEvidenceHref(workspaceID, relationID foundation.ID) string {
+	query := url.Values{"workspace_id": []string{string(workspaceID)}}
+	return fmt.Sprintf("/api/v1/graph/relations/%s/evidence?%s", relationID, query.Encode())
 }

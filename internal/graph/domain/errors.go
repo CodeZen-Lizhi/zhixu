@@ -13,6 +13,7 @@ const (
 	ErrorCodeCursorStale            = "GRAPH_CURSOR_STALE"
 	ErrorCodeNodeNotFound           = "GRAPH_NODE_NOT_FOUND"
 	ErrorCodeRelationNotFound       = "GRAPH_RELATION_NOT_FOUND"
+	ErrorCodeQueryCanceled          = "GRAPH_QUERY_CANCELLED"
 	ErrorCodeQueryTimeout           = "GRAPH_QUERY_TIMEOUT"
 	ErrorCodeQueryBudgetExceeded    = "GRAPH_QUERY_BUDGET_EXCEEDED"
 	ErrorCodeDependencyUnavailable  = "GRAPH_DEPENDENCY_UNAVAILABLE"
