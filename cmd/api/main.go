@@ -25,6 +25,9 @@ import (
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	graphpostgres "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/postgres"
+	graphapplication "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
+	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
 	ingestionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/postgres"
 	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
 	ingestionapplication "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/application"
@@ -93,12 +96,19 @@ func main() {
 	changeControlHandler := changecontrolhttp.NewHandler(nil)
 	ingestionHandler := ingestionhttp.NewHandler(nil)
 	retrievalHandler := retrievalhttp.NewHandler(nil, nil, nil)
+	graphHandler := graphhttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	conversationHandler := conversationhttp.NewHandler(nil, conversationhttp.NewCursorCodec())
 	eventsHandler := eventshttp.NewHandler(nil)
 	ragEnabled := cfg.ChatProvider != config.ChatProviderDisabled
 	var ragInitErr error
 	fileScanner := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
 	if database != nil {
+		configuredGraphHandler, graphHandlerErr := newGraphHandler(database.DB(), cfg.GraphQueryTimeout)
+		if graphHandlerErr != nil {
+			logger.Error("graph query service is unavailable", "error_code", "GRAPH_DEPENDENCY_UNAVAILABLE")
+		} else {
+			graphHandler = configuredGraphHandler
+		}
 		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
 		var workflowRuntime *workflowpostgres.RuntimeRepository
 		if changeControlRepositoryErr != nil {
@@ -204,6 +214,7 @@ func main() {
 		Retrieval:         retrievalHandler,
 		Conversation:      conversationHandler,
 		Events:            eventsHandler,
+		Graph:             graphHandler,
 		RAGEnabled:        ragEnabled,
 		RAGInitErr:        ragInitErr,
 		Logger:            logger,
@@ -239,6 +250,26 @@ func main() {
 			logger.Error("api server shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
 		}
 	}
+}
+
+// newGraphHandler 以 canonical Knowledge facts 组装只读 Graph 查询链路。
+func newGraphHandler(pool *pgxpool.Pool, timeout time.Duration) (*graphhttp.Handler, error) {
+	if pool == nil {
+		return nil, errors.New("graph database is unavailable")
+	}
+	repository, err := graphpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	cursors, err := graphapplication.NewRandomCursorCodec()
+	if err != nil {
+		return nil, err
+	}
+	service, err := graphapplication.NewService(repository, cursors)
+	if err != nil {
+		return nil, err
+	}
+	return graphhttp.NewHandler(service, timeout), nil
 }
 
 func newRetrievalHandler(

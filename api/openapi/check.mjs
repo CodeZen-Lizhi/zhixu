@@ -248,6 +248,13 @@ if (!schemas.SystemStatus.required.includes("rag") || schemas.SystemStatus.prope
     schemas.RAGCapabilityStatus.additionalProperties !== false) {
   throw new Error("SystemStatus must expose the strict RAG capability state");
 }
+if (!schemas.SystemStatus.required.includes("graph") || schemas.SystemStatus.properties.graph.$ref !== "#/components/schemas/GraphCapabilityStatus" ||
+    schemas.GraphCapabilityStatus.additionalProperties !== false ||
+    !schemas.GraphCapabilityStatus.properties.status.enum.includes("ready") ||
+    !schemas.GraphCapabilityStatus.properties.status.enum.includes("unavailable") ||
+    !schemas.GraphCapabilityStatus.properties.reason.enum.includes("graph_dependencies_unavailable")) {
+  throw new Error("SystemStatus must expose the strict Graph capability state");
+}
 function resolveRef(value) {
   if (!value?.$ref) return value;
   const prefix = "#/components/responses/";

@@ -35,6 +35,9 @@ func TestDefaultsWorkerRuntime(t *testing.T) {
 	if cfg.WorkerHealthAddr != "0.0.0.0:8081" {
 		t.Fatalf("unexpected worker health address: %q", cfg.WorkerHealthAddr)
 	}
+	if cfg.GraphQueryTimeout != 2*time.Second {
+		t.Fatalf("unexpected Graph query timeout default: %s", cfg)
+	}
 	if cfg.TelemetryMode != TelemetryModeDisabled || cfg.TelemetryEndpoint != "" {
 		t.Fatalf("telemetry must default to explicitly disabled: %s", cfg)
 	}
@@ -69,7 +72,7 @@ func TestLoadWithLookupYAMLThenEnvironment(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("http_addr: 127.0.0.1:9090\ndatabase_url: yaml-value\nhealth_interval: 1m\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("http_addr: 127.0.0.1:9090\ndatabase_url: yaml-value\nhealth_interval: 1m\ngraph_query_timeout: 3s\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	lookup := func(key string) (string, bool) {
@@ -78,6 +81,9 @@ func TestLoadWithLookupYAMLThenEnvironment(t *testing.T) {
 		}
 		if key == "ZHIXU_DATABASE_URL" {
 			return "env-value", true
+		}
+		if key == "ZHIXU_GRAPH_QUERY_TIMEOUT" {
+			return "4s", true
 		}
 		return "", false
 	}
@@ -91,6 +97,9 @@ func TestLoadWithLookupYAMLThenEnvironment(t *testing.T) {
 	if cfg.HealthInterval != time.Minute {
 		t.Fatalf("YAML duration not loaded: %s", cfg.HealthInterval)
 	}
+	if cfg.GraphQueryTimeout != 4*time.Second {
+		t.Fatalf("Graph query timeout environment override not loaded: %s", cfg.GraphQueryTimeout)
+	}
 }
 
 func TestLoadWithLookupRejectsInvalidYAMLDuration(t *testing.T) {
@@ -102,6 +111,22 @@ func TestLoadWithLookupRejectsInvalidYAMLDuration(t *testing.T) {
 	}
 	if _, err := LoadWithLookup(path, func(string) (string, bool) { return "", false }); err == nil {
 		t.Fatal("expected invalid YAML duration error")
+	}
+}
+
+func TestLoadWithLookupGraphQueryTimeoutYAML(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("graph_query_timeout: 3s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWithLookup(path, func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GraphQueryTimeout != 3*time.Second {
+		t.Fatalf("Graph query timeout YAML not loaded: %s", cfg.GraphQueryTimeout)
 	}
 }
 
@@ -127,6 +152,30 @@ func TestLoadWithLookupRejectsInvalidEnvironment(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected invalid duration error")
+	}
+}
+
+func TestLoadWithLookupRejectsInvalidGraphQueryTimeout(t *testing.T) {
+	t.Parallel()
+	_, err := LoadWithLookup("", func(key string) (string, bool) {
+		if key == "ZHIXU_GRAPH_QUERY_TIMEOUT" {
+			return "not-a-duration", true
+		}
+		return "", false
+	})
+	if err == nil || !strings.Contains(err.Error(), "ZHIXU_GRAPH_QUERY_TIMEOUT") {
+		t.Fatalf("expected Graph query timeout parse error, got %v", err)
+	}
+}
+
+func TestValidateRejectsNonPositiveGraphQueryTimeout(t *testing.T) {
+	t.Parallel()
+	for _, value := range []time.Duration{0, -time.Nanosecond} {
+		cfg := Defaults()
+		cfg.GraphQueryTimeout = value
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "graph_query_timeout") {
+			t.Fatalf("GraphQueryTimeout=%s error=%v", value, err)
+		}
 	}
 }
 
@@ -639,6 +688,7 @@ func TestConfigFormattingAndErrorsDoNotExposeSecrets(t *testing.T) {
 	cfg.ReindexDispatchErrorBackoff = 7 * time.Second
 	cfg.ReindexLeaseDuration = 4 * time.Minute
 	cfg.ReindexHeartbeatInterval = 50 * time.Second
+	cfg.GraphQueryTimeout = 3 * time.Second
 	cfg.EmbeddingProvider = EmbeddingProviderOpenAICompatible
 	cfg.EmbeddingBaseURL = embeddingURL
 	cfg.EmbeddingAPIKey = embeddingKey
@@ -656,6 +706,7 @@ func TestConfigFormattingAndErrorsDoNotExposeSecrets(t *testing.T) {
 			"ReindexDispatchErrorBackoff:7s",
 			"ReindexLeaseDuration:4m0s",
 			"ReindexHeartbeatInterval:50s",
+			"GraphQueryTimeout:3s",
 		} {
 			if !strings.Contains(formatted, value) {
 				t.Fatalf("formatted config omitted %q: %s", value, formatted)

@@ -7,7 +7,7 @@ const LoadingState = () => (
     <div>
       <p className="eyebrow">正在连接</p>
       <h2>读取系统真实状态</h2>
-      <p>正在检查 API、数据库和当前应用版本。</p>
+      <p>正在检查 API、数据库、Graph 和当前应用版本。</p>
     </div>
   </section>
 );
@@ -58,9 +58,24 @@ export const SystemStatusPage = () => {
     );
   }
 
-  const { database, rag, requestId, status, version } = statusQuery.data;
-  const isReady = status === "ready" && database.status === "ready";
+  const { database, graph, rag, requestId, status, version } = statusQuery.data;
+  const isReady = status === "ready" && database.status === "ready" && graph.status === "ready";
   const databaseUnavailable = database.status === "unavailable";
+  const graphUnavailable = graph.status === "unavailable";
+  const headline = isReady
+    ? "所有基础依赖可用"
+    : databaseUnavailable
+      ? "API 可用，但数据库不可用"
+      : graphUnavailable
+        ? "Graph 查询暂不可用"
+        : "RAG 能力暂不可用";
+  const summary = isReady
+    ? "ZHIXU 已连接数据库，Graph 查询可用。"
+    : databaseUnavailable
+      ? database.message ?? "数据库依赖暂时不可用，请检查服务配置和运行状态。"
+      : graphUnavailable
+        ? "知识图谱查询已暂停，请稍后重试；若持续失败，请检查服务日志。"
+        : "会话读取仍可用，但新问题提交已暂停，请检查 RAG 运行依赖。";
 
   return (
     <section
@@ -70,14 +85,8 @@ export const SystemStatusPage = () => {
       <span className="status-mark" aria-hidden="true" />
       <div className="state-content">
         <p className="eyebrow">{isReady ? "系统就绪" : "服务降级"}</p>
-        <h2>{isReady ? "所有基础依赖可用" : databaseUnavailable ? "API 可用，但数据库不可用" : "RAG 能力暂不可用"}</h2>
-        <p>
-          {isReady
-            ? "ZHIXU 已连接数据库，可以继续后续功能开发。"
-            : databaseUnavailable
-              ? database.message ?? "数据库依赖暂时不可用，请检查服务配置和运行状态。"
-              : "会话读取仍可用，但新问题提交已暂停，请检查 RAG 运行依赖。"}
-        </p>
+        <h2>{headline}</h2>
+        <p>{summary}</p>
 
         <dl className="status-grid">
           <div>
@@ -89,6 +98,13 @@ export const SystemStatusPage = () => {
             <dd>
               <span aria-hidden="true">{database.status === "ready" ? "●" : "▲"}</span>{" "}
               {database.status === "ready" ? "可用" : "不可用"}
+            </dd>
+          </div>
+          <div>
+            <dt>Graph</dt>
+            <dd>
+              <span aria-hidden="true">{graph.status === "ready" ? "●" : "▲"}</span>{" "}
+              {graph.status === "ready" ? "可用" : "不可用"}
             </dd>
           </div>
           <div>

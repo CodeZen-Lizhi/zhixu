@@ -581,6 +581,19 @@ func TestHandleNilServiceRoutesReturnDependencyUnavailable(t *testing.T) {
 	}
 }
 
+func TestHandlerAvailabilityRejectsNilInterfaces(t *testing.T) {
+	t.Parallel()
+	var typedNil *graphapp.Service
+	for _, service := range []Service{nil, typedNil} {
+		if handler := NewHandler(service, time.Second); handler.Available() {
+			t.Fatalf("handler with service %#v reported available", service)
+		}
+	}
+	if handler := NewHandler(&fakeGraphService{}, time.Second); !handler.Available() {
+		t.Fatal("handler with a concrete service reported unavailable")
+	}
+}
+
 func TestHandleRelationDetailAndEvidencePageContract(t *testing.T) {
 	t.Parallel()
 

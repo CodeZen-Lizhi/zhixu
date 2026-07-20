@@ -14,6 +14,7 @@ import (
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
 	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
+	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
@@ -46,6 +47,7 @@ type Dependencies struct {
 	ChangeControl     *changecontrolhttp.Handler
 	Ingestion         *ingestionhttp.Handler
 	Retrieval         *retrievalhttp.Handler
+	Graph             *graphhttp.Handler
 	Conversation      *conversationhttp.Handler
 	Events            *eventshttp.Handler
 	RAGEnabled        bool
@@ -65,6 +67,9 @@ func NewRouter(deps Dependencies) http.Handler {
 	}
 	if deps.Tracer == nil {
 		deps.Tracer = observability.NewNoopTracer()
+	}
+	if deps.Graph == nil {
+		deps.Graph = graphhttp.NewHandler(nil, 0)
 	}
 	router := chi.NewRouter()
 	router.Use(requestIDMiddleware)
@@ -89,6 +94,13 @@ func NewRouter(deps Dependencies) http.Handler {
 			})
 			return
 		}
+		if !deps.Graph.Available() {
+			writeProblem(w, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", "服务尚未就绪", true, map[string]any{
+				"dependency": "graph",
+				"reason":     "graph_dependencies_unavailable",
+			})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 	router.Route("/api/v1", func(api chi.Router) {
@@ -110,6 +122,7 @@ func NewRouter(deps Dependencies) http.Handler {
 		if deps.Retrieval != nil {
 			deps.Retrieval.Routes(api)
 		}
+		deps.Graph.Routes(api)
 		if deps.Conversation != nil {
 			deps.Conversation.Routes(api)
 		}
@@ -164,6 +177,7 @@ func requestTraceMiddleware(tracer observability.Tracer) func(http.Handler) http
 
 func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencies) {
 	databaseStatus := map[string]string{"status": "unavailable"}
+	graphStatus := map[string]string{"status": "ready"}
 	ragStatus := map[string]string{"status": "disabled"}
 	status := "degraded"
 	if err := checkDatabase(r.Context(), deps); err == nil {
@@ -180,10 +194,16 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 			status = "degraded"
 		}
 	}
+	if !deps.Graph.Available() {
+		graphStatus["status"] = "unavailable"
+		graphStatus["reason"] = "graph_dependencies_unavailable"
+		status = "degraded"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":     status,
 		"version":    deps.Version,
 		"database":   databaseStatus,
+		"graph":      graphStatus,
 		"rag":        ragStatus,
 		"request_id": requestID(r.Context()),
 	})

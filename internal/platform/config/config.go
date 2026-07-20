@@ -22,6 +22,7 @@ const (
 	defaultHTTPAddr                   = "127.0.0.1:8080"
 	defaultVersion                    = "dev"
 	defaultPingTimeout                = 2 * time.Second
+	defaultGraphQueryTimeout          = 2 * time.Second
 	defaultHealthInterval             = 15 * time.Second
 	defaultShutdownTimeout            = 10 * time.Second
 	defaultMaxConns                   = int32(10)
@@ -160,6 +161,7 @@ type Config struct {
 	DatabaseMaxConns           int32         `yaml:"database_max_conns"`
 	DatabaseMinConns           int32         `yaml:"database_min_conns"`
 	DatabasePingTimeout        time.Duration `yaml:"database_ping_timeout"`
+	GraphQueryTimeout          time.Duration `yaml:"graph_query_timeout"`
 	HealthInterval             time.Duration `yaml:"health_interval"`
 	ShutdownTimeout            time.Duration `yaml:"shutdown_timeout"`
 	WebAssetsDir               string        `yaml:"web_assets_dir"`
@@ -237,6 +239,7 @@ func Defaults() Config {
 		DatabaseMaxConns:           defaultMaxConns,
 		DatabaseMinConns:           defaultMinConns,
 		DatabasePingTimeout:        defaultPingTimeout,
+		GraphQueryTimeout:          defaultGraphQueryTimeout,
 		HealthInterval:             defaultHealthInterval,
 		ShutdownTimeout:            defaultShutdownTimeout,
 		WorkerQueue:                defaultWorkerQueue,
@@ -342,6 +345,7 @@ type fileConfig struct {
 	DatabaseMaxConns           *int32  `yaml:"database_max_conns"`
 	DatabaseMinConns           *int32  `yaml:"database_min_conns"`
 	DatabasePingTimeout        *string `yaml:"database_ping_timeout"`
+	GraphQueryTimeout          *string `yaml:"graph_query_timeout"`
 	HealthInterval             *string `yaml:"health_interval"`
 	ShutdownTimeout            *string `yaml:"shutdown_timeout"`
 	WebAssetsDir               *string `yaml:"web_assets_dir"`
@@ -577,6 +581,7 @@ func applyYAMLFile(path string, cfg *Config) error {
 	}
 	for name, value := range map[string]*string{
 		"database_ping_timeout":             raw.DatabasePingTimeout,
+		"graph_query_timeout":               raw.GraphQueryTimeout,
 		"health_interval":                   raw.HealthInterval,
 		"shutdown_timeout":                  raw.ShutdownTimeout,
 		"worker_job_timeout":                raw.WorkerJobTimeout,
@@ -600,7 +605,7 @@ func applyYAMLFile(path string, cfg *Config) error {
 		}
 		parsed, err := time.ParseDuration(strings.TrimSpace(*value))
 		if err != nil {
-			if strings.HasPrefix(name, "web_fetch_") {
+			if name == "graph_query_timeout" || strings.HasPrefix(name, "web_fetch_") {
 				return fmt.Errorf("parse %s: invalid duration", name)
 			}
 			return fmt.Errorf("parse %s: %w", name, err)
@@ -608,6 +613,8 @@ func applyYAMLFile(path string, cfg *Config) error {
 		switch name {
 		case "database_ping_timeout":
 			cfg.DatabasePingTimeout = parsed
+		case "graph_query_timeout":
+			cfg.GraphQueryTimeout = parsed
 		case "health_interval":
 			cfg.HealthInterval = parsed
 		case "shutdown_timeout":
@@ -668,6 +675,9 @@ func (c Config) Validate() error {
 	}
 	if c.DatabasePingTimeout <= 0 {
 		return errors.New("database_ping_timeout must be positive")
+	}
+	if c.GraphQueryTimeout <= 0 {
+		return errors.New("graph_query_timeout must be positive")
 	}
 	if c.HealthInterval <= 0 {
 		return errors.New("health_interval must be positive")
@@ -1051,7 +1061,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -1060,6 +1070,7 @@ func (c Config) String() string {
 		c.DatabaseMaxConns,
 		c.DatabaseMinConns,
 		c.DatabasePingTimeout,
+		c.GraphQueryTimeout,
 		c.HealthInterval,
 		c.ShutdownTimeout,
 		c.WebAssetsDir,
@@ -1304,6 +1315,7 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 	}
 	for key, target := range map[string]*time.Duration{
 		"ZHIXU_DATABASE_PING_TIMEOUT":     &cfg.DatabasePingTimeout,
+		"ZHIXU_GRAPH_QUERY_TIMEOUT":       &cfg.GraphQueryTimeout,
 		"ZHIXU_HEALTH_INTERVAL":           &cfg.HealthInterval,
 		"ZHIXU_SHUTDOWN_TIMEOUT":          &cfg.ShutdownTimeout,
 		"ZHIXU_WORKER_JOB_TIMEOUT":        &cfg.WorkerJobTimeout,
@@ -1327,7 +1339,7 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		if value, ok := lookup(key); ok {
 			parsed, err := time.ParseDuration(value)
 			if err != nil {
-				if key == "ZHIXU_EMBEDDING_TIMEOUT" || key == "ZHIXU_CHAT_TIMEOUT" || strings.HasPrefix(key, "ZHIXU_WEB_FETCH_") {
+				if key == "ZHIXU_GRAPH_QUERY_TIMEOUT" || key == "ZHIXU_EMBEDDING_TIMEOUT" || key == "ZHIXU_CHAT_TIMEOUT" || strings.HasPrefix(key, "ZHIXU_WEB_FETCH_") {
 					return fmt.Errorf("parse %s: invalid duration", key)
 				}
 				return fmt.Errorf("parse %s: %w", key, err)

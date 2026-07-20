@@ -1,5 +1,6 @@
 export type SystemOverallStatus = "ready" | "degraded";
 export type DatabaseStatus = "ready" | "unavailable";
+export type GraphCapabilityStatus = "ready" | "unavailable";
 export type RAGCapabilityStatus = "ready" | "disabled" | "unavailable";
 
 export interface SystemStatus {
@@ -8,6 +9,10 @@ export interface SystemStatus {
   database: {
     status: DatabaseStatus;
     message?: string;
+  };
+  graph: {
+    status: GraphCapabilityStatus;
+    reason?: "graph_dependencies_unavailable";
   };
   rag: {
     status: RAGCapabilityStatus;
@@ -75,21 +80,27 @@ const readDatabaseStatus = (value: unknown): DatabaseStatus => {
   );
 };
 
+const readGraphStatus = (value: unknown): GraphCapabilityStatus => {
+  if (value === "ready" || value === "unavailable") return value;
+  throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含未知 graph.status", false);
+};
+
 const readRAGStatus = (value: unknown): RAGCapabilityStatus => {
   if (value === "ready" || value === "disabled" || value === "unavailable") return value;
   throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含未知 rag.status", false);
 };
 
 export const decodeSystemStatus = (value: unknown): SystemStatus => {
-  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.rag)) {
+  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.graph) || !isRecord(value.rag)) {
     throw new ApiBoundaryError(
       "INVALID_RESPONSE",
       "系统状态响应结构无效",
       false,
     );
   }
-  assertExactKeys(value, ["status", "version", "database", "rag", "request_id"], "root");
+  assertExactKeys(value, ["status", "version", "database", "graph", "rag", "request_id"], "root");
   assertExactKeys(value.database, ["status", "message"], "database");
+  assertExactKeys(value.graph, ["status", "reason"], "graph");
   assertExactKeys(value.rag, ["status", "reason"], "rag");
 
   const message = value.database.message;
@@ -99,6 +110,10 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
       "系统状态响应包含无效 database.message",
       false,
     );
+  }
+  const graphReason = value.graph.reason;
+  if (graphReason !== undefined && graphReason !== "graph_dependencies_unavailable") {
+    throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含无效 graph.reason", false);
   }
   const reason = value.rag.reason;
   if (reason !== undefined && reason !== "rag_dependencies_unavailable") {
@@ -111,6 +126,10 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
     database: {
       status: readDatabaseStatus(value.database.status),
       ...(message === undefined ? {} : { message }),
+    },
+    graph: {
+      status: readGraphStatus(value.graph.status),
+      ...(graphReason === undefined ? {} : { reason: graphReason }),
     },
     rag: {
       status: readRAGStatus(value.rag.status),

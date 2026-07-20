@@ -45,7 +45,7 @@
         "operationId": "getSystemStatus",
         "responses": {
           "200": {
-            "description": "Current API and database status.",
+            "description": "Current API, database, Graph, and RAG status.",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SystemStatus" } } }
           },
           "405": {
@@ -632,13 +632,23 @@
       },
       "SystemStatus": {
         "type": "object",
-        "required": ["status", "version", "database", "rag", "request_id"],
+        "required": ["status", "version", "database", "graph", "rag", "request_id"],
         "properties": {
           "status": { "type": "string", "enum": ["ready", "degraded"] },
           "version": { "type": "string", "minLength": 1 },
           "database": { "$ref": "#/components/schemas/DatabaseStatus" },
+          "graph": { "$ref": "#/components/schemas/GraphCapabilityStatus" },
           "rag": { "$ref": "#/components/schemas/RAGCapabilityStatus" },
           "request_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      },
+      "GraphCapabilityStatus": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ready", "unavailable"] },
+          "reason": { "type": "string", "enum": ["graph_dependencies_unavailable"] }
         },
         "additionalProperties": false
       },

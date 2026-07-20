@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
@@ -109,6 +110,19 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 
 func TestNewRetrievalHandlerRequiresDependencies(t *testing.T) {
 	if handler, err := newRetrievalHandler(nil, config.Defaults(), nil, nil); err == nil || handler != nil {
+		t.Fatalf("handler=%#v err=%v", handler, err)
+	}
+}
+
+func TestNewGraphHandlerRequiresDatabase(t *testing.T) {
+	if handler, err := newGraphHandler(nil, time.Second); err == nil || handler != nil {
+		t.Fatalf("handler=%#v err=%v", handler, err)
+	}
+}
+
+func TestNewGraphHandlerComposesProductionDependencies(t *testing.T) {
+	handler, err := newGraphHandler(&pgxpool.Pool{}, time.Second)
+	if err != nil || handler == nil || !handler.Available() {
 		t.Fatalf("handler=%#v err=%v", handler, err)
 	}
 }

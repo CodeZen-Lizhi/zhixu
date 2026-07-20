@@ -21,6 +21,7 @@ describe("SystemStatusPage", () => {
         status: "ready",
         version: "0.1.0",
         database: { status: "ready" },
+        graph: { status: "ready" },
         rag: { status: "disabled" },
         request_id: "request-ready",
       }),
@@ -40,6 +41,7 @@ describe("SystemStatusPage", () => {
         status: "degraded",
         version: "0.1.0",
         database: { status: "unavailable", message: "数据库连接失败" },
+        graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
         rag: { status: "unavailable", reason: "rag_dependencies_unavailable" },
         request_id: "request-degraded",
       }),
@@ -52,6 +54,25 @@ describe("SystemStatusPage", () => {
     expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled();
   });
 
+  it("Graph 依赖不可用时显示独立降级状态", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse({
+        status: "degraded",
+        version: "0.1.0",
+        database: { status: "ready" },
+        graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
+        rag: { status: "disabled" },
+        request_id: "request-graph",
+      }),
+    );
+
+    renderWithAppProviders(<SystemStatusPage />);
+
+    expect(await screen.findByText("Graph 查询暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("Graph", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled();
+  });
+
   it("请求失败后允许用户重试并恢复", async () => {
     vi.mocked(fetch)
       .mockRejectedValueOnce(new TypeError("network down"))
@@ -60,6 +81,7 @@ describe("SystemStatusPage", () => {
           status: "ready",
           version: "0.1.1",
           database: { status: "ready" },
+          graph: { status: "ready" },
           rag: { status: "ready" },
           request_id: "request-retry",
         }),

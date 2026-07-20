@@ -14,6 +14,11 @@ import (
 
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
 	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	graphapplication "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
+	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
+	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
+	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
@@ -21,6 +26,40 @@ import (
 
 type fakePinger struct {
 	err error
+}
+
+type routerGraphService struct{}
+
+func (routerGraphService) GlobalPage(context.Context, graphapplication.GlobalPageRequest) (graphdomain.GlobalPage, error) {
+	return graphdomain.GlobalPage{}, nil
+}
+
+func (routerGraphService) SearchNodes(context.Context, graphdomain.NodeSearchRequest) (graphdomain.NodeSearchResult, error) {
+	return graphdomain.NodeSearchResult{}, nil
+}
+
+func (routerGraphService) NeighborhoodPage(context.Context, graphapplication.NeighborhoodPageRequest) (graphdomain.Neighborhood, error) {
+	return graphdomain.Neighborhood{}, nil
+}
+
+func (routerGraphService) FindPath(context.Context, graphdomain.PathRequest) (graphdomain.PathResult, error) {
+	return graphdomain.PathResult{}, nil
+}
+
+func (routerGraphService) NodeDetail(context.Context, foundation.ID, knowledge.NodeRef) (graphdomain.GraphNode, error) {
+	return graphdomain.GraphNode{}, nil
+}
+
+func (routerGraphService) RelationDetail(context.Context, foundation.ID, foundation.ID) (graphdomain.RelationDetail, error) {
+	return graphdomain.RelationDetail{}, nil
+}
+
+func (routerGraphService) RelationEvidencePage(context.Context, graphapplication.RelationEvidencePageRequest) (graphdomain.RelationEvidencePage, error) {
+	return graphdomain.RelationEvidencePage{}, nil
+}
+
+func readyGraphHandler() *graphhttp.Handler {
+	return graphhttp.NewHandler(routerGraphService{}, time.Second)
 }
 
 func TestRouterRegistersRetrievalRoutes(t *testing.T) {
@@ -51,6 +90,51 @@ func TestRouterRegistersEventsRoutes(t *testing.T) {
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "SSE_SERVICE_UNAVAILABLE") {
 		t.Fatalf("events route status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRouterRegistersGraphRoutesAndFailsClosedWithoutService(t *testing.T) {
+	router := NewRouter(Dependencies{Version: "test", Graph: graphhttp.NewHandler(nil, time.Second)})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/graph/global", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "GRAPH_DEPENDENCY_UNAVAILABLE") {
+		t.Fatalf("graph route status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRouterGraphMethodNotAllowedReturnsProblem(t *testing.T) {
+	router := NewRouter(Dependencies{Version: "test", Graph: graphhttp.NewHandler(nil, time.Second)})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/graph/global", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusMethodNotAllowed || !strings.Contains(response.Body.String(), `"error_code":"METHOD_NOT_ALLOWED"`) {
+		t.Fatalf("graph method status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRouterMissingGraphHandlerRetainsRoutesAndFailsReadiness(t *testing.T) {
+	router := NewRouter(Dependencies{Version: "test", Database: fakePinger{}})
+
+	readyRequest := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	readyResponse := httptest.NewRecorder()
+	router.ServeHTTP(readyResponse, readyRequest)
+	if readyResponse.Code != http.StatusServiceUnavailable || !strings.Contains(readyResponse.Body.String(), "graph_dependencies_unavailable") {
+		t.Fatalf("readyz status=%d body=%s", readyResponse.Code, readyResponse.Body.String())
+	}
+
+	graphRequest := httptest.NewRequest(http.MethodPost, "/api/v1/graph/global", nil)
+	graphResponse := httptest.NewRecorder()
+	router.ServeHTTP(graphResponse, graphRequest)
+	if graphResponse.Code != http.StatusServiceUnavailable || !strings.Contains(graphResponse.Body.String(), "GRAPH_DEPENDENCY_UNAVAILABLE") {
+		t.Fatalf("graph status=%d body=%s", graphResponse.Code, graphResponse.Body.String())
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
+	statusResponse := httptest.NewRecorder()
+	router.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"graph":{"reason":"graph_dependencies_unavailable","status":"unavailable"}`) {
+		t.Fatalf("system status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
 	}
 }
 
@@ -90,7 +174,7 @@ func TestRouterReadyzFailsClosedOnlyWhenEnabledRAGIsUnavailable(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			router := NewRouter(Dependencies{
-				Version: "test", Database: fakePinger{}, RAGEnabled: test.ragEnabled,
+				Version: "test", Database: fakePinger{}, Graph: readyGraphHandler(), RAGEnabled: test.ragEnabled,
 				RAGInitErr: errors.New("private rag composition detail"),
 			})
 			request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
@@ -106,6 +190,18 @@ func TestRouterReadyzFailsClosedOnlyWhenEnabledRAGIsUnavailable(t *testing.T) {
 				t.Fatalf("readiness omitted stable RAG reason: %s", response.Body.String())
 			}
 		})
+	}
+}
+
+func TestRouterReadyzFailsClosedWhenGraphCompositionIsUnavailable(t *testing.T) {
+	router := NewRouter(Dependencies{
+		Version: "test", Database: fakePinger{}, Graph: graphhttp.NewHandler(nil, time.Second),
+	})
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "graph_dependencies_unavailable") {
+		t.Fatalf("readyz status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -139,21 +235,21 @@ func TestRouterSystemStatusReturnsDegradedButOK(t *testing.T) {
 }
 
 func TestRouterSystemStatusReady(t *testing.T) {
-	router := NewRouter(Dependencies{Version: "v-test", Database: fakePinger{}})
+	router := NewRouter(Dependencies{Version: "v-test", Database: fakePinger{}, Graph: readyGraphHandler()})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
 	res := httptest.NewRecorder()
 	router.ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("status code = %d", res.Code)
 	}
-	if !strings.Contains(res.Body.String(), `"status":"ready"`) {
+	if !strings.Contains(res.Body.String(), `"status":"ready"`) || !strings.Contains(res.Body.String(), `"graph":{"status":"ready"}`) {
 		t.Fatalf("body = %s", res.Body.String())
 	}
 }
 
 func TestRouterSystemStatusReportsEnabledRAGCompositionFailure(t *testing.T) {
 	router := NewRouter(Dependencies{
-		Version: "v-test", Database: fakePinger{}, RAGEnabled: true,
+		Version: "v-test", Database: fakePinger{}, Graph: readyGraphHandler(), RAGEnabled: true,
 		RAGInitErr: errors.New("private dependency failure"),
 	})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
@@ -165,6 +261,19 @@ func TestRouterSystemStatusReportsEnabledRAGCompositionFailure(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "private dependency failure") {
 		t.Fatalf("system status leaked dependency detail: %s", response.Body.String())
+	}
+}
+
+func TestRouterSystemStatusReportsGraphCompositionFailure(t *testing.T) {
+	router := NewRouter(Dependencies{
+		Version: "v-test", Database: fakePinger{}, Graph: graphhttp.NewHandler(nil, time.Second),
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"degraded"`) ||
+		!strings.Contains(response.Body.String(), `"graph":{"reason":"graph_dependencies_unavailable","status":"unavailable"}`) {
+		t.Fatalf("system status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

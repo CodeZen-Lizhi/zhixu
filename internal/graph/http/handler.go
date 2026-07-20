@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
@@ -56,6 +57,20 @@ func (handler *Handler) Routes(router chi.Router) {
 	router.Get("/graph/nodes/{node_type}/{node_id}", handler.handleNodeDetail)
 	router.Get("/graph/relations/{relation_id}", handler.handleRelationDetail)
 	router.Get("/graph/relations/{relation_id}/evidence", handler.handleRelationEvidence)
+}
+
+// Available 报告 Handler 是否持有可调用的真实 Graph Application Service。
+func (handler *Handler) Available() bool {
+	if handler == nil || handler.service == nil {
+		return false
+	}
+	value := reflect.ValueOf(handler.service)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
 }
 
 func (handler *Handler) handleGlobal(w http.ResponseWriter, r *http.Request) {
@@ -235,7 +250,7 @@ func (handler *Handler) handleRelationEvidence(w http.ResponseWriter, r *http.Re
 }
 
 func (handler *Handler) available(w http.ResponseWriter) bool {
-	if handler == nil || handler.service == nil {
+	if !handler.Available() {
 		httpapi.WriteProblem(w, http.StatusServiceUnavailable, graphdomain.ErrorCodeDependencyUnavailable, "Graph 服务暂不可用", false, nil)
 		return false
 	}
