@@ -1149,3 +1149,36 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 提交当前任务改动，记录 Trellis session 并归档 M6-04；随后返回父任务选择下一项依赖就绪工作。
+
+
+## Session 24: M6-04 RAG Conversation 交付归档
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation 交付归档
+**Branch**: `dev`
+
+### Summary
+
+完成 RAG SSE 恢复边界、nil Context fail-closed、文档验收同步、全量质量门禁与独立复验，并归档 M6-04。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `338e041` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
