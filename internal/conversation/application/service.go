@@ -15,6 +15,7 @@ import (
 const (
 	errorCodeServiceUnavailable    = "CONVERSATION_SERVICE_UNAVAILABLE"
 	errorCodeSubmissionUnavailable = "CONVERSATION_QUESTION_SUBMISSION_UNAVAILABLE"
+	errorCodeFeedbackUnavailable   = "CONVERSATION_FEEDBACK_UNAVAILABLE"
 	errorCodeRequestInvalid        = "CONVERSATION_REQUEST_INVALID"
 	errorCodeResultInconsistent    = "CONVERSATION_RESULT_INCONSISTENT"
 )
@@ -23,6 +24,7 @@ const (
 type Dependencies struct {
 	Repository         Repository
 	QuestionDispatcher QuestionDispatcher
+	FeedbackRepository FeedbackRepository
 	IDs                foundation.IDGenerator
 	Clock              foundation.Clock
 }
@@ -31,6 +33,7 @@ type Dependencies struct {
 type Service struct {
 	repository Repository
 	questions  QuestionDispatcher
+	feedback   FeedbackRepository
 	ids        foundation.IDGenerator
 	clock      foundation.Clock
 }
@@ -41,9 +44,51 @@ func NewService(dependencies Dependencies) (*Service, error) {
 		return nil, serviceUnavailable()
 	}
 	return &Service{
-		repository: dependencies.Repository, questions: dependencies.QuestionDispatcher,
+		repository: dependencies.Repository, questions: dependencies.QuestionDispatcher, feedback: dependencies.FeedbackRepository,
 		ids: dependencies.IDs, clock: dependencies.Clock,
 	}, nil
+}
+
+// SubmitFeedback 校验 Answer、Citation 闭包和幂等绑定后追加一个评测事实。
+func (service *Service) SubmitFeedback(ctx context.Context, command SubmitFeedbackCommand) (SubmitFeedbackResult, error) {
+	if service == nil || service.repository == nil || service.feedback == nil || service.ids == nil || service.clock == nil {
+		return SubmitFeedbackResult{}, feedbackUnavailable()
+	}
+	answerView, err := service.GetAnswer(ctx, command.Request.WorkspaceID, command.Request.AnswerID)
+	if err != nil {
+		return SubmitFeedbackResult{}, err
+	}
+	request, err := conversationdomain.CanonicalizeFeedbackRequest(command.Request, answerView.Answer)
+	if err != nil {
+		return SubmitFeedbackResult{}, err
+	}
+	idempotencyKey, err := canonicalIdempotencyKey(command.IdempotencyKey)
+	if err != nil {
+		return SubmitFeedbackResult{}, err
+	}
+	requestHash, err := conversationdomain.ComputeFeedbackRequestHash(request, answerView.Answer)
+	if err != nil {
+		return SubmitFeedbackResult{}, err
+	}
+	id, err := service.ids.New()
+	if err != nil {
+		return SubmitFeedbackResult{}, err
+	}
+	feedback := conversationdomain.AnswerFeedback{
+		ID: id, Request: request, RequestHash: requestHash, CreatedAt: service.clock.Now().UTC(),
+	}
+	if err := conversationdomain.ValidateAnswerFeedback(feedback, answerView.Answer); err != nil {
+		return SubmitFeedbackResult{}, err
+	}
+	result, err := service.feedback.RecordFeedback(ctx, RecordFeedbackRecord{Feedback: feedback, IdempotencyKey: idempotencyKey})
+	if err != nil {
+		return SubmitFeedbackResult{}, err
+	}
+	if err := conversationdomain.ValidateAnswerFeedback(result.Feedback, answerView.Answer); err != nil ||
+		result.Feedback.RequestHash != requestHash || !reflect.DeepEqual(result.Feedback.Request, request) {
+		return SubmitFeedbackResult{}, resultInconsistent(err)
+	}
+	return result, nil
 }
 
 // CreateConversation 规范化请求并创建或精确重放一个 Conversation。
@@ -379,6 +424,10 @@ func serviceUnavailable() error {
 
 func submissionUnavailable() error {
 	return foundation.NewError(foundation.ErrorDependencyUnavailable, errorCodeSubmissionUnavailable, false, errors.New("question dispatch is not configured"))
+}
+
+func feedbackUnavailable() error {
+	return foundation.NewError(foundation.ErrorDependencyUnavailable, errorCodeFeedbackUnavailable, true, errors.New("conversation feedback repository is unavailable"))
 }
 
 func isNilQuestionDispatcher(dispatcher QuestionDispatcher) bool {

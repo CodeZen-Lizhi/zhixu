@@ -55,6 +55,14 @@ API 错误响应至少包含：
 - `details` 只放帮助客户端恢复的字段（如 `current_version`、`expected_version`、`conflict_type`、`resolution_actions`）；不放 Secret、完整 Prompt、内部堆栈或任意文件路径。
 - SSE 事件带 `id`、`type`、`occurred_at`、`workspace_id`、`resource_ref`、`payload_summary`。断线后通过 Last-Event-ID 补发保留窗口或改为重新查询。
 
+### M6-04 Conversation HTTP 契约
+
+- Conversation 命令只接受单个严格 `application/json` 文档；未知字段、多 JSON、非法 Unicode、错误媒体类型和缺失幂等键在进入 Application 前失败。
+- M10 身份上下文落地前，Conversation detail、Turn 与 Answer Query 显式携带 `workspace_id`；Repository 必须以 Workspace 联合条件查询，跨 Workspace 与不存在统一 NotFound。
+- Answer ETag 绑定 Answer 与 Workflow 两个版本，因为 pending Answer 的 Workflow 状态可以在 Answer 版本不变时推进；Conversation ETag 只绑定自身版本。
+- 持久 RAG result 内 Citation 不含可导航链接；HTTP 外层 `Answer.citations` 由服务端稳定身份生成 `href`，OpenAPI 分别使用 `RAGResultCitation` 与 `AnswerCitation`，禁止混为同一 wire schema。
+- Feedback 为 append-only 幂等事实；首次返回 201、精确重放返回 200，同键异请求返回 409，任何 Feedback 都不得修改 Answer 或正式 Knowledge。
+
 ## 禁止模式
 
 - `panic` 或空 `catch`/空 error 分支处理普通业务输入、外部依赖和用户可恢复错误。

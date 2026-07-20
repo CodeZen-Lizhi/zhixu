@@ -924,3 +924,36 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 实施 T10 Conversation/Answer/Feedback HTTP 与 OpenAPI，再进入 T11 生产 API/Worker composition。
+
+## Session 28: M6-04 Conversation HTTP 与 OpenAPI 检查点
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T10）
+**Branch**: `dev`
+
+### Summary
+
+完成 Conversation、Question、Turn、Answer 与 Feedback 的 REST 边界、Feedback append-only PostgreSQL 持久化，以及 Conversation/RAG/SSE OpenAPI 契约；生产真实依赖组装继续由 T11 负责。
+
+### Main Changes
+
+- 7 条 Conversation/Answer/Feedback REST 路径支持严格 JSON、`application/json`、Idempotency-Key、稳定 scoped cursor、分页、202/200 replay、ETag/304、Problem 与跨 Workspace 防枚举。
+- Feedback Application/Repository 校验五类反馈、Citation 闭包与 canonical hash；真实 PostgreSQL 覆盖创建、exact replay、异请求冲突、跨 Workspace 和 Answer/Knowledge 不变。
+- Answer ETag 同时绑定 Answer/Workflow version，避免 Workflow 独立推进时错误 304。
+- OpenAPI 新增 Conversation/Question/Turn/Answer/Feedback/SSE 契约和结构 gate；RAG result Citation 与外层可打开 Citation 分离，数量/字节上限与领域一致。
+
+### Testing
+
+- `make openapi-check`
+- `go test -race -count=1 ./internal/conversation/... ./internal/app ./cmd/api`
+- 真实 PostgreSQL：`go test -race -tags=integration -count=1 -p 1 ./internal/conversation/adapter/postgres ./internal/app`
+- `go vet ./internal/conversation/... ./internal/app ./cmd/api`、`go mod tidy -diff`、`git diff --check`
+- 主 Agent Go/SQL/通用五轴审查修复 ETag、wire schema、媒体类型与公开上限漂移；独立两轮复验最终无剩余 P0-P2。
+
+### Status
+
+[OK] M6-04 T10 completed; T11-T17 pending.
+
+### Next Steps
+
+- 实施 T11 API/Worker production composition 与 readiness，确保真实 RAG definition/executor 依赖缺失时 fail closed。

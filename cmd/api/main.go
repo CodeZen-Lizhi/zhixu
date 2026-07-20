@@ -18,6 +18,7 @@ import (
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
+	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	ingestionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/postgres"
 	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
@@ -87,6 +88,7 @@ func main() {
 	changeControlHandler := changecontrolhttp.NewHandler(nil)
 	ingestionHandler := ingestionhttp.NewHandler(nil)
 	retrievalHandler := retrievalhttp.NewHandler(nil, nil, nil)
+	conversationHandler := conversationhttp.NewHandler(nil, conversationhttp.NewCursorCodec())
 	fileScanner := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
 	if database != nil {
 		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
@@ -173,6 +175,7 @@ func main() {
 		ChangeControl:     changeControlHandler,
 		Ingestion:         ingestionHandler,
 		Retrieval:         retrievalHandler,
+		Conversation:      conversationHandler,
 		Logger:            logger,
 	}
 	server := &http.Server{

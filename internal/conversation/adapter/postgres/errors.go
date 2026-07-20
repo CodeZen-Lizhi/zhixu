@@ -19,6 +19,12 @@ const (
 	ErrorCodeConversationNotFound = "CONVERSATION_NOT_FOUND"
 	// ErrorCodeAnswerNotFound 表示 Answer 不存在或不属于指定 Workspace。
 	ErrorCodeAnswerNotFound = "CONVERSATION_ANSWER_NOT_FOUND"
+	// ErrorCodeFeedbackIdempotencyConflict 表示 Answer Feedback 幂等键已绑定不同请求。
+	ErrorCodeFeedbackIdempotencyConflict = "CONVERSATION_FEEDBACK_IDEMPOTENCY_CONFLICT"
+	// ErrorCodeFeedbackPersistenceInvalid 表示 Feedback 持久化输入不合法。
+	ErrorCodeFeedbackPersistenceInvalid = "CONVERSATION_FEEDBACK_PERSISTENCE_INVALID"
+	// ErrorCodeFeedbackPersistenceCorrupt 表示 Feedback 持久事实违反领域不变量。
+	ErrorCodeFeedbackPersistenceCorrupt = "CONVERSATION_FEEDBACK_PERSISTENCE_CORRUPT"
 	// ErrorCodeIdempotencyConflict 表示幂等键已绑定不同创建请求。
 	ErrorCodeIdempotencyConflict = "CONVERSATION_IDEMPOTENCY_CONFLICT"
 	// ErrorCodeQuestionDispatchUnavailable 表示 Question 原子派发依赖不可用。

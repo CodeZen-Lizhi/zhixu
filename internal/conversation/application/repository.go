@@ -59,6 +59,24 @@ type SubmitQuestionResult struct {
 	Replayed  bool
 }
 
+// SubmitFeedbackCommand 是向已发布 Answer 追加评测事实的应用命令。
+type SubmitFeedbackCommand struct {
+	Request        conversationdomain.FeedbackRequest
+	IdempotencyKey string
+}
+
+// RecordFeedbackRecord 是 Feedback Repository 接收的规范幂等事实。
+type RecordFeedbackRecord struct {
+	Feedback       conversationdomain.AnswerFeedback
+	IdempotencyKey string
+}
+
+// SubmitFeedbackResult 区分首次记录和精确幂等重放。
+type SubmitFeedbackResult struct {
+	Feedback conversationdomain.AnswerFeedback
+	Replayed bool
+}
+
 // ListConversationsQuery 是 Workspace 内按活动时间稳定分页的查询。
 type ListConversationsQuery struct {
 	WorkspaceID foundation.ID
@@ -143,6 +161,12 @@ type QuestionExecutionContextLoader interface {
 type QuestionDispatcher interface {
 	// SubmitQuestion 保证跨 Conversation、Workflow、River 与 Server Event 的单事务提交。
 	SubmitQuestion(context.Context, SubmitQuestionRecord) (SubmitQuestionResult, error)
+}
+
+// FeedbackRepository 是 append-only Answer Feedback 的窄持久化端口。
+type FeedbackRepository interface {
+	// RecordFeedback 原子创建反馈；相同 Answer、幂等键与请求返回精确重放。
+	RecordFeedback(context.Context, RecordFeedbackRecord) (SubmitFeedbackResult, error)
 }
 
 // Repository 是 Conversation 持久化和读模型的唯一应用端口。

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
@@ -29,6 +30,16 @@ func TestRouterRegistersRetrievalRoutes(t *testing.T) {
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "RETRIEVAL_SEARCH_SERVICE_UNAVAILABLE") {
 		t.Fatalf("retrieval route status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRouterRegistersConversationRoutes(t *testing.T) {
+	router := NewRouter(Dependencies{Version: "test", Conversation: conversationhttp.NewHandler(nil, nil)})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?workspace_id=92000000-0000-4000-8000-000000000001", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "CONVERSATION_HTTP_UNAVAILABLE") {
+		t.Fatalf("conversation route status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

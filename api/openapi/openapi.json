@@ -299,6 +299,100 @@
         }
       }
     },
+    "/api/v1/conversations": {
+      "post": {
+        "operationId": "createConversation",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateConversationRequest" } } } },
+        "responses": {
+          "201": { "description": "Conversation created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Conversation" } } } },
+          "200": { "description": "Exact idempotent replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Conversation" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      },
+      "get": {
+        "operationId": "listConversations",
+        "parameters": [
+          { "$ref": "#/components/parameters/WorkspaceIDQuery" }, { "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }
+        ],
+        "responses": {
+          "200": { "description": "Stable activity-ordered page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConversationPage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
+    "/api/v1/conversations/{conversation_id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ConversationID" }, { "$ref": "#/components/parameters/WorkspaceIDQuery" }],
+      "get": {
+        "operationId": "getConversation",
+        "responses": {
+          "200": { "description": "Conversation resource.", "headers": { "ETag": { "$ref": "#/components/headers/ETag" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Conversation" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
+    "/api/v1/conversations/{conversation_id}/questions": {
+      "parameters": [{ "$ref": "#/components/parameters/ConversationID" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+      "post": {
+        "operationId": "submitQuestion",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubmitQuestionRequest" } } } },
+        "responses": {
+          "202": { "description": "Question accepted; poll status_url or subscribe to events.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuestionAcceptance" } } } },
+          "200": { "description": "Exact idempotent replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuestionAcceptance" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
+    "/api/v1/conversations/{conversation_id}/turns": {
+      "parameters": [{ "$ref": "#/components/parameters/ConversationID" }, { "$ref": "#/components/parameters/WorkspaceIDQuery" }, { "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }],
+      "get": {
+        "operationId": "listConversationTurns",
+        "responses": {
+          "200": { "description": "Stable ordinal-ordered Turn page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TurnPage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
+    "/api/v1/answers/{answer_id}": {
+      "parameters": [{ "$ref": "#/components/parameters/AnswerID" }, { "$ref": "#/components/parameters/WorkspaceIDQuery" }],
+      "get": {
+        "operationId": "getAnswer",
+        "responses": {
+          "200": { "description": "Authoritative Answer and Workflow projection.", "headers": { "ETag": { "$ref": "#/components/headers/ETag" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Answer" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
+    "/api/v1/answers/{answer_id}/feedback": {
+      "parameters": [{ "$ref": "#/components/parameters/AnswerID" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+      "post": {
+        "operationId": "submitAnswerFeedback",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubmitFeedbackRequest" } } } },
+        "responses": {
+          "201": { "description": "Feedback recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AnswerFeedback" } } } },
+          "200": { "description": "Exact idempotent replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AnswerFeedback" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "operationId": "subscribeServerEvents",
+        "parameters": [{ "$ref": "#/components/parameters/WorkspaceIDQuery" }, { "name": "Last-Event-ID", "in": "header", "required": false, "schema": { "type": "string", "pattern": "^[0-9]+$", "maxLength": 19 } }],
+        "responses": {
+          "200": { "description": "SSE stream. Each data field is a ServerEventEnvelope; heartbeat comments carry no data.", "headers": { "Cache-Control": { "schema": { "type": "string", "const": "no-cache" } } }, "content": { "text/event-stream": { "schema": { "$ref": "#/components/schemas/ServerEventEnvelope" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/Conflict" },
+          "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
     "/api/v1/search": {
       "post": {
         "operationId": "searchKnowledge",
@@ -358,6 +452,24 @@
     }
   },
   "components": {
+    "parameters": {
+      "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } },
+      "WorkspaceIDQuery": { "name": "workspace_id", "in": "query", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "ConversationID": { "name": "conversation_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "AnswerID": { "name": "answer_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "Cursor": { "name": "cursor", "in": "query", "required": false, "schema": { "$ref": "#/components/schemas/PageCursor" } },
+      "Limit": { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } }
+    },
+    "headers": { "ETag": { "description": "Weak resource projection tag. Answer tags bind both Answer and Workflow versions.", "schema": { "type": "string", "pattern": "^W/\\\"(?:[1-9][0-9]*|answer-[1-9][0-9]*-workflow-[1-9][0-9]*)\\\"$" } } },
+    "responses": {
+      "BadRequest": { "description": "Invalid strict JSON, identifier, cursor or option.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+      "UnsupportedMediaType": { "description": "JSON command body did not use application/json.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+      "NotFound": { "description": "Resource absent or outside the supplied Workspace; both are indistinguishable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+      "Conflict": { "description": "Idempotency, lifecycle, active workflow or event cursor conflict.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+      "InternalError": { "description": "Internal consistency failure.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+      "Unavailable": { "description": "Required dependency unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+      "MethodNotAllowed": { "description": "The method is not supported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+    },
     "schemas": {
       "Liveness": {
         "type": "object",
@@ -863,6 +975,157 @@
           "excerpt": { "type": "string", "maxLength": 4096 },
           "excerpt_truncated": { "type": "boolean" }
         },
+        "additionalProperties": false
+      },
+      "PageCursor": { "type": "string", "minLength": 1, "maxLength": 2048, "description": "Opaque versioned base64url cursor bound to the resource and sort order." },
+      "CreateConversationRequest": {
+        "type": "object", "required": ["workspace_id"],
+        "properties": { "workspace_id": { "type": "string", "format": "uuid" }, "title": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 } },
+        "additionalProperties": false
+      },
+      "Conversation": {
+        "type": "object", "required": ["id", "workspace_id", "status", "version", "last_activity_at", "created_at", "updated_at", "archived_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" }, "workspace_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["open", "archived"] }, "title": { "type": ["string", "null"], "maxLength": 256 },
+          "version": { "type": "integer", "minimum": 1 }, "last_activity_at": { "type": "string", "format": "date-time" },
+          "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "archived_at": { "type": ["string", "null"], "format": "date-time" }
+        }, "additionalProperties": false
+      },
+      "ConversationPage": {
+        "type": "object", "required": ["items"],
+        "properties": { "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/Conversation" } }, "next_cursor": { "$ref": "#/components/schemas/PageCursor" } },
+        "additionalProperties": false
+      },
+      "QuestionScope": {
+        "type": "object",
+        "properties": {
+          "retrieval_mode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "hybrid" },
+          "source_ids": { "type": "array", "maxItems": 100, "items": { "type": "string", "format": "uuid" } },
+          "source_version_ids": { "type": "array", "maxItems": 100, "items": { "type": "string", "format": "uuid" } },
+          "path_prefixes": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+          "captured_at_from": { "type": ["string", "null"], "format": "date-time" }, "captured_at_before": { "type": ["string", "null"], "format": "date-time" },
+          "allow_original_sources": { "type": "boolean", "default": false }, "allow_web": { "type": "boolean", "default": false }
+        }, "additionalProperties": false
+      },
+      "SubmitQuestionRequest": {
+        "type": "object", "required": ["workspace_id", "question"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "question": { "type": "string", "minLength": 1, "maxLength": 8192, "x-max-utf8-bytes": 8192, "pattern": "^[^\\u0000]+$", "description": "Non-blank UTF-8 text, at most 8192 bytes, with no NUL." },
+          "scope": { "$ref": "#/components/schemas/QuestionScope" },
+          "answer_depth": { "type": "string", "enum": ["concise", "standard", "detailed"], "default": "standard" },
+          "output_format": { "type": "string", "enum": ["markdown", "outline"], "default": "markdown" }
+        }, "additionalProperties": false
+      },
+      "Question": {
+        "type": "object", "required": ["id", "workspace_id", "conversation_id", "ordinal", "context_through_ordinal", "question", "scope", "answer_depth", "output_format", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" }, "workspace_id": { "type": "string", "format": "uuid" }, "conversation_id": { "type": "string", "format": "uuid" },
+          "ordinal": { "type": "integer", "minimum": 1 }, "context_through_ordinal": { "type": "integer", "minimum": 0 }, "question": { "type": "string", "minLength": 1, "maxLength": 8192 }, "scope": { "$ref": "#/components/schemas/QuestionScope" },
+          "answer_depth": { "type": "string", "enum": ["concise", "standard", "detailed"] }, "output_format": { "type": "string", "enum": ["markdown", "outline"] },
+          "created_at": { "type": "string", "format": "date-time" }
+        }, "additionalProperties": false
+      },
+      "WorkflowProjection": {
+        "type": "object", "required": ["run_id", "status", "version", "updated_at"],
+        "properties": { "run_id": { "type": "string", "format": "uuid" }, "status": { "type": "string", "enum": ["pending", "running", "paused", "waiting_for_human", "retry_wait", "succeeded", "failed", "cancelled"] }, "version": { "type": "integer", "minimum": 1 }, "updated_at": { "type": "string", "format": "date-time" }, "status_url": { "type": "string", "format": "uri-reference" } },
+        "additionalProperties": false
+      },
+      "QuestionAcceptance": {
+        "type": "object", "required": ["question", "answer", "status_url"],
+        "properties": { "question": { "$ref": "#/components/schemas/Question" }, "answer": { "$ref": "#/components/schemas/Answer" }, "status_url": { "type": "string", "format": "uri-reference", "pattern": "^/api/v1/answers/" } },
+        "additionalProperties": false
+      },
+      "AnswerCitation": {
+        "type": "object", "required": ["id", "workspace_id", "index_version_id", "chunk_id", "source_version_id", "source_span_id", "href"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 128 }, "workspace_id": { "type": "string", "format": "uuid" }, "index_version_id": { "type": "string", "format": "uuid" }, "chunk_id": { "type": "string", "format": "uuid" },
+          "source_version_id": { "type": "string", "format": "uuid" }, "source_span_id": { "type": "string", "format": "uuid" },
+          "href": { "type": "string", "format": "uri-reference", "pattern": "^/api/v1/workspaces/" }
+        }, "additionalProperties": false
+      },
+      "RAGResultCitation": {
+        "type": "object", "required": ["id", "workspace_id", "index_version_id", "chunk_id", "source_version_id", "source_span_id"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 128 }, "workspace_id": { "type": "string", "format": "uuid" }, "index_version_id": { "type": "string", "format": "uuid" }, "chunk_id": { "type": "string", "format": "uuid" },
+          "source_version_id": { "type": "string", "format": "uuid" }, "source_span_id": { "type": "string", "format": "uuid" }
+        }, "additionalProperties": false
+      },
+      "RelatedTopic": {
+        "type": "object", "required": ["topic_id", "name", "citation_ids"],
+        "properties": { "topic_id": { "type": "string", "format": "uuid" }, "name": { "type": "string", "minLength": 1, "maxLength": 256 }, "citation_ids": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+        "additionalProperties": false
+      },
+      "RAGAnswerPayload": {
+        "type": "object", "required": ["conclusion", "assertions", "citations", "conflict_positions", "conflict_summary", "related_topics", "follow_up_questions"],
+        "properties": {
+          "conclusion": { "type": "string", "minLength": 1 }, "citations": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "$ref": "#/components/schemas/RAGResultCitation" } },
+          "related_topics": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "$ref": "#/components/schemas/RelatedTopic" } },
+          "follow_up_questions": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "type": "string", "minLength": 1, "maxLength": 2048, "x-max-utf8-bytes": 2048 } },
+          "assertions": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "type": "object", "additionalProperties": true } },
+          "conflict_positions": { "type": "array", "maxItems": 500, "items": { "type": "object", "additionalProperties": true } }, "conflict_summary": { "type": "string" }
+        }, "additionalProperties": false
+      },
+      "RAGAnswerResult": { "type": "object", "required": ["result_type", "schema_id", "schema_version", "model_run_ref", "payload"], "properties": { "result_type": { "const": "rag_answer" }, "schema_id": { "const": "agent.rag-answer" }, "schema_version": { "const": "v2" }, "model_run_ref": { "type": "string", "format": "uuid" }, "payload": { "$ref": "#/components/schemas/RAGAnswerPayload" } }, "additionalProperties": false },
+      "RefusalResult": {
+        "type": "object", "required": ["result_type", "schema_id", "schema_version", "model_run_ref", "payload"],
+        "properties": { "result_type": { "const": "refusal" }, "schema_id": { "type": "string", "minLength": 1 }, "schema_version": { "type": "string", "minLength": 1 }, "model_run_ref": { "type": "string", "format": "uuid" }, "payload": { "type": "object", "required": ["reason_code", "summary", "retrieval_scope", "missing_requirements", "suggested_actions"], "properties": { "reason_code": { "type": "string", "minLength": 1, "maxLength": 128 }, "summary": { "type": "string", "minLength": 1 }, "retrieval_scope": { "type": "string", "minLength": 1 }, "missing_requirements": { "type": "array", "maxItems": 50, "items": { "type": "string" } }, "suggested_actions": { "type": "array", "maxItems": 50, "items": { "type": "string" } } }, "additionalProperties": false } },
+        "additionalProperties": false
+      },
+      "ClarificationResult": {
+        "type": "object", "required": ["result_type", "schema_id", "schema_version", "model_run_ref", "payload"],
+        "properties": { "result_type": { "const": "clarification" }, "schema_id": { "const": "conversation.clarification" }, "schema_version": { "const": "v1" }, "model_run_ref": { "type": "string", "format": "uuid" }, "payload": { "type": "object", "required": ["reason", "question", "suggested_scopes"], "properties": { "reason": { "type": "string", "minLength": 1 }, "question": { "type": "string", "minLength": 1 }, "suggested_scopes": { "type": "array", "maxItems": 10, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } }, "additionalProperties": false } } },
+        "additionalProperties": false
+      },
+      "RetrievalDegradation": {
+        "type": "object", "required": ["capability", "code", "retryable"],
+        "properties": { "capability": { "type": "string", "enum": ["embedding", "rerank"] }, "code": { "type": "string", "minLength": 1, "maxLength": 128 }, "retryable": { "type": "boolean" } }, "additionalProperties": false
+      },
+      "RetrievalSummary": {
+        "type": "object", "required": ["rewrites", "requested_mode", "effective_mode", "scope", "candidate_count", "selected_count", "conflict_count", "degradations"],
+        "properties": {
+          "rewrites": { "type": "array", "minItems": 0, "maxItems": 3, "items": { "type": "string", "minLength": 1, "maxLength": 8192 } },
+          "requested_mode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"] }, "effective_mode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"] },
+          "scope": { "$ref": "#/components/schemas/QuestionScope" }, "index_version_id": { "type": ["string", "null"], "format": "uuid" }, "embedding_version_id": { "type": ["string", "null"], "format": "uuid" },
+          "candidate_count": { "type": "integer", "minimum": 0 }, "selected_count": { "type": "integer", "minimum": 0, "maximum": 100 }, "conflict_count": { "type": "integer", "minimum": 0 },
+          "degradations": { "type": "array", "maxItems": 2, "items": { "$ref": "#/components/schemas/RetrievalDegradation" } }
+        }, "additionalProperties": false
+      },
+      "Answer": {
+        "type": "object", "required": ["id", "workspace_id", "conversation_id", "question_id", "publication_status", "citations", "retrieval_summary", "workflow", "version", "created_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" }, "workspace_id": { "type": "string", "format": "uuid" }, "conversation_id": { "type": "string", "format": "uuid" }, "question_id": { "type": "string", "format": "uuid" },
+          "publication_status": { "type": "string", "enum": ["pending", "completed", "refused", "clarification_required"] }, "workflow": { "$ref": "#/components/schemas/WorkflowProjection" },
+          "result_type": { "type": "string", "enum": ["rag_answer", "refusal", "clarification"] }, "assistant_text": { "type": "string" }, "citations": { "type": "array", "maxItems": 500, "items": { "$ref": "#/components/schemas/AnswerCitation" } },
+          "result": { "oneOf": [{ "$ref": "#/components/schemas/RAGAnswerResult" }, { "$ref": "#/components/schemas/RefusalResult" }, { "$ref": "#/components/schemas/ClarificationResult" }] },
+          "retrieval_summary": { "oneOf": [{ "$ref": "#/components/schemas/RetrievalSummary" }, { "type": "null" }] }, "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }
+        }, "additionalProperties": false
+      },
+      "Turn": { "type": "object", "required": ["question", "answer"], "properties": { "question": { "$ref": "#/components/schemas/Question" }, "answer": { "$ref": "#/components/schemas/Answer" } }, "additionalProperties": false },
+      "TurnPage": { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/Turn" } }, "next_cursor": { "$ref": "#/components/schemas/PageCursor" } }, "additionalProperties": false },
+      "SubmitFeedbackRequest": {
+        "type": "object", "required": ["workspace_id", "feedback_type"],
+        "properties": { "workspace_id": { "type": "string", "format": "uuid" }, "feedback_type": { "type": "string", "enum": ["helpful", "incorrect", "irrelevant_citation", "broken_citation", "missing_source"] }, "citation_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 }, "comment": { "type": ["string", "null"], "maxLength": 2048, "x-max-utf8-bytes": 2048, "pattern": "^[^\\u0000]*$" } },
+        "additionalProperties": false
+      },
+      "AnswerFeedback": {
+        "type": "object", "required": ["id", "workspace_id", "answer_id", "feedback_type", "citation_id", "comment", "created_at"],
+        "properties": { "id": { "type": "string", "format": "uuid" }, "workspace_id": { "type": "string", "format": "uuid" }, "answer_id": { "type": "string", "format": "uuid" }, "feedback_type": { "type": "string", "enum": ["helpful", "incorrect", "irrelevant_citation", "broken_citation", "missing_source"] }, "citation_id": { "type": ["string", "null"], "maxLength": 128 }, "comment": { "type": ["string", "null"], "maxLength": 2048 }, "created_at": { "type": "string", "format": "date-time" } },
+        "additionalProperties": false
+      },
+      "ServerEventPayloadSummary": {
+        "type": "object",
+        "properties": {
+          "source_event_id": { "type": "string", "format": "uuid" }, "conversation_id": { "type": "string", "format": "uuid" }, "workflow_run_id": { "type": "string", "format": "uuid" }, "question_id": { "type": "string", "format": "uuid" }, "answer_id": { "type": "string", "format": "uuid" }, "model_run_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" }, "publication_status": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" }, "result_type": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" }, "stage": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" },
+          "candidate_count": { "type": "integer", "minimum": 0 }, "selected_count": { "type": "integer", "minimum": 0 }, "conflict_count": { "type": "integer", "minimum": 0 }, "degradation_count": { "type": "integer", "minimum": 0 }, "rewrite_count": { "type": "integer", "minimum": 0 }, "citation_count": { "type": "integer", "minimum": 0 }
+        }, "additionalProperties": false
+      },
+      "ServerEventEnvelope": {
+        "type": "object", "required": ["schema_version", "id", "type", "occurred_at", "workspace_id", "resource_ref", "resource_version", "payload_summary"],
+        "properties": { "schema_version": { "type": "integer", "minimum": 1 }, "id": { "type": "string", "pattern": "^[1-9][0-9]*$" }, "type": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$" }, "occurred_at": { "type": "string", "format": "date-time" }, "workspace_id": { "type": "string", "format": "uuid" }, "resource_ref": { "type": "string", "minLength": 3, "maxLength": 256 }, "resource_version": { "type": "integer", "minimum": 1 }, "payload_summary": { "$ref": "#/components/schemas/ServerEventPayloadSummary" } },
         "additionalProperties": false
       },
       "Problem": {
