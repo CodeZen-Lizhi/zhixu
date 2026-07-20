@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type SyntheticEvent, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { setActiveWorkspaceId, useActiveWorkspaceId } from "../../app/active-workspace";
 
@@ -121,6 +122,10 @@ export const WorkspacePage = () => {
         <p className="brand-mark">知序 · ZHIXU</p>
         <h1>把本地知识，接入一条可信链路。</h1>
         <p className="hero-copy">创建 Workspace、检查 Git 基线，并安全扫描真实文件；所有状态均来自后端与本地事实源。</p>
+        <nav className="workspace-product-nav" aria-label="产品工作区">
+          <Link to="/graph">知识图谱</Link>
+          <Link to="/chat">证据研究台</Link>
+        </nav>
       </header>
       <SystemStatusPage />
 

@@ -65,6 +65,8 @@ describe("WorkspacePage", () => {
     });
 
     renderWithAppProviders(<WorkspacePage />);
+    expect(screen.getByRole("link", { name: "知识图谱" })).toHaveAttribute("href", "/graph");
+    expect(screen.getByRole("link", { name: "证据研究台" })).toHaveAttribute("href", "/chat");
     fireEvent.change(screen.getByLabelText("Workspace 名称"), { target: { value: "知识库" } });
     fireEvent.change(screen.getByLabelText("根目录绝对路径"), { target: { value: "/tmp/knowledge" } });
     fireEvent.click(screen.getByRole("button", { name: "创建 Workspace" }));

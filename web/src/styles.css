@@ -484,6 +484,20 @@ h1 {
 .rag-notice code { font-size: .75rem; }
 .rag-muted { color: #74766c; }
 
+.workspace-product-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  margin-top: 1.5rem;
+}
+
+.workspace-product-nav a {
+  border-bottom: 2px solid currentColor;
+  padding-bottom: 0.2rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }

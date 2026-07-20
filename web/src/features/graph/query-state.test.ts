@@ -77,6 +77,16 @@ describe("Graph query state", () => {
     }));
   });
 
+  it("时区换算跨出四位年份时保留 API 可接受值", () => {
+    const underflow = "0001-01-01T00:00:00+23:00";
+    const overflow = "9999-12-31T23:59:59-23:00";
+
+    expect(graphQueryKeys.global({ workspaceId, filter: { updatedAfter: underflow } })[3].filter.updatedAfter)
+      .toBe(underflow);
+    expect(graphQueryKeys.global({ workspaceId, filter: { updatedAfter: overflow } })[3].filter.updatedAfter)
+      .toBe(overflow);
+  });
+
   it("中心、路径、关系和搜索条件都参与 key", () => {
     expect(graphQueryKeys.neighborhood({ workspaceId, center: { type: "TOPIC", id: topicId } })).not.toEqual(
       graphQueryKeys.neighborhood({ workspaceId, center: { type: "CLAIM", id: claimId } }),
