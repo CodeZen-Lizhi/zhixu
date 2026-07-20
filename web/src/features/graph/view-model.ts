@@ -225,12 +225,13 @@ const compareStableKeys = (left: string, right: string): number => {
 const globalPositions = (nodes: readonly GraphViewNode[]): Map<string, GraphPoint> => {
   const positions = new Map<string, GraphPoint>();
   const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const outerIndex = Math.max(1, nodes.length - 1);
   nodes.forEach((node, index) => {
     if (index === 0) {
       positions.set(node.key, canvasCenter);
       return;
     }
-    const radius = Math.sqrt(index / (GRAPH_MAX_VISUAL_NODES - 1));
+    const radius = Math.sqrt(index / outerIndex);
     const angle = (index - 1) * goldenAngle - Math.PI / 2;
     positions.set(node.key, {
       x: canvasCenter.x + Math.cos(angle) * 400 * radius,
@@ -296,6 +297,7 @@ const localPositions = (model: GraphViewModel): Map<string, GraphPoint> => {
 
 const pathPositions = (nodes: readonly GraphViewNode[]): Map<string, GraphPoint> => {
   const positions = new Map<string, GraphPoint>();
+  const horizontalInset = 160;
   if (nodes.length === 1) {
     const onlyNode = nodes[0];
     if (onlyNode !== undefined) positions.set(onlyNode.key, canvasCenter);
@@ -303,7 +305,7 @@ const pathPositions = (nodes: readonly GraphViewNode[]): Map<string, GraphPoint>
   }
   nodes.forEach((node, index) => {
     positions.set(node.key, {
-      x: 90 + (index / Math.max(1, nodes.length - 1)) * (GRAPH_CANVAS_WIDTH - 180),
+      x: horizontalInset + (index / Math.max(1, nodes.length - 1)) * (GRAPH_CANVAS_WIDTH - horizontalInset * 2),
       y: canvasCenter.y,
     });
   });

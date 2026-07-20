@@ -299,20 +299,37 @@ describe("Graph view model", () => {
       edges: [],
     };
 
-    expect(createGraphLayout(globalModel, "global")).toMatchObject({
+    const global = createGraphLayout(globalModel, "global");
+    expect(global).toMatchObject({
       kind: "canvas",
       nodes: [
         { key: `TOPIC:${topicId}`, position: { x: 500, y: 320 } },
         { key: `TOPIC:${secondTopic.id}` },
       ],
     });
-    expect(createGraphLayout(pathModel, "path")).toMatchObject({
+    if (global.kind === "canvas") {
+      const firstPosition = global.nodes[0]?.position;
+      const secondPosition = global.nodes[1]?.position;
+      expect(firstPosition).toBeDefined();
+      expect(secondPosition).toBeDefined();
+      if (firstPosition !== undefined && secondPosition !== undefined) {
+        const horizontallySeparated = Math.abs(firstPosition.x - secondPosition.x) >= 220;
+        const verticallySeparated = Math.abs(firstPosition.y - secondPosition.y) >= 120;
+        expect(horizontallySeparated || verticallySeparated).toBe(true);
+      }
+    }
+    const path = createGraphLayout(pathModel, "path");
+    expect(path).toMatchObject({
       kind: "canvas",
       nodes: [
-        { key: `TOPIC:${topicId}`, position: { x: 90, y: 320 } },
-        { key: `TOPIC:${secondTopic.id}`, position: { x: 910, y: 320 } },
+        { key: `TOPIC:${topicId}`, position: { y: 320 } },
+        { key: `TOPIC:${secondTopic.id}`, position: { y: 320 } },
       ],
     });
+    if (path.kind === "canvas") {
+      expect(path.nodes[0]?.position.x).toBeGreaterThanOrEqual(160);
+      expect(path.nodes[1]?.position.x).toBeLessThanOrEqual(840);
+    }
   });
 
   it("非法锁定坐标或断边会明确要求列表 fallback", () => {

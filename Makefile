@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval openapi-check tool-integration rag-integration compose-check docker-build compose-up compose-down compose-search-smoke compose-tool-smoke compose-rag-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval openapi-check tool-integration rag-integration graph-integration graph-smoke graph-benchmark compose-check docker-build compose-up compose-down compose-search-smoke compose-tool-smoke compose-rag-smoke
 
 test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet agent-eval openapi-check compose-check
 
@@ -51,6 +51,19 @@ tool-integration:
 rag-integration:
 	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
 	go test -race -tags=integration -count=1 -p 1 -run '^TestPublicConversationRunsThroughRiverRAGAndFeedback$$' ./cmd/worker
+
+graph-integration:
+	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
+	go test -race -tags=integration -count=1 -p 1 -run '^TestGraphPublicHTTPIntegration$$' ./cmd/api
+
+graph-smoke:
+	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
+	bash deploy/graph-smoke.sh
+
+graph-benchmark:
+	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
+	ZHIXU_GRAPH_BENCHMARK_ARTIFACT_DIR="$${ZHIXU_GRAPH_BENCHMARK_ARTIFACT_DIR:-$(CURDIR)/tmp/graph-benchmark}" \
+		go test -tags=integration -count=1 -p 1 -run '^TestGraphCapacityBenchmark$$' ./internal/graph/adapter/postgres
 
 compose-check:
 	docker compose -f deploy/compose.yml --env-file .env.example config --quiet
