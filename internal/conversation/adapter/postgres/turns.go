@@ -64,7 +64,15 @@ func (repository *Repository) ListTurns(ctx context.Context, query conversationa
 	pageSize := query.Limit + 1
 	var rows pgx.Rows
 	var err error
-	if query.Cursor == nil {
+	if query.Latest {
+		rows, err = repository.db.Query(ctx, `SELECT `+turnViewColumns+`
+			FROM agent.question q
+			LEFT JOIN agent.answer a ON a.question_id=q.id AND a.workspace_id=q.workspace_id AND a.conversation_id=q.conversation_id
+			LEFT JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id
+			WHERE q.workspace_id=$1 AND q.conversation_id=$2
+			ORDER BY q.ordinal DESC,q.id DESC
+			LIMIT 1`, string(query.WorkspaceID), string(query.ConversationID))
+	} else if query.Cursor == nil {
 		rows, err = repository.db.Query(ctx, `SELECT `+turnViewColumns+`
 			FROM agent.question q
 			LEFT JOIN agent.answer a ON a.question_id=q.id AND a.workspace_id=q.workspace_id AND a.conversation_id=q.conversation_id
@@ -103,6 +111,9 @@ func (repository *Repository) ListTurns(ctx context.Context, query conversationa
 		return conversationapplication.TurnPage{}, classify(err, ErrorCodeDatabaseUnavailable)
 	}
 	page := conversationapplication.TurnPage{Items: items}
+	if query.Latest {
+		return page, nil
+	}
 	if len(items) > query.Limit {
 		last := items[query.Limit-1].Question
 		page.Items = items[:query.Limit]

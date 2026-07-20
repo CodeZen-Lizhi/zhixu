@@ -74,6 +74,12 @@ func TestRepositoryReadsTurnsAnswersAndPublishedContextWithoutCrossWorkspaceLeak
 	if second.Items[0].Answer.CurrentStage != nil {
 		t.Fatalf("answer without RAG event stage = %#v", second.Items[0].Answer.CurrentStage)
 	}
+	latest, err := counted.ListTurns(ctx, conversationapplication.ListTurnsQuery{
+		WorkspaceID: workspaceA, ConversationID: conversationRecord.Conversation.ID, Limit: 1, Latest: true,
+	})
+	if err != nil || len(latest.Items) != 1 || latest.Items[0].Question.Ordinal != 3 || latest.NextCursor != nil {
+		t.Fatalf("latest turn projection = %#v, %v", latest, err)
+	}
 
 	completedAnswerID := fixture.answerID(1)
 	answer, err := counted.GetAnswer(ctx, workspaceA, completedAnswerID)

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ConversationApiError, createConversation, decodeAnswer, decodeConversationPage, decodeProblem,
-  decodeQuestionAcceptance, decodeTurnPage, getAnswer, listConversations, submitFeedback, submitQuestion,
+  decodeQuestionAcceptance, decodeTurnPage, getAnswer, getLatestTurn, listConversations, submitFeedback, submitQuestion,
 } from "./conversation";
 
 const workspaceId = "92000000-0000-4000-8000-000000000001";
@@ -169,6 +169,13 @@ describe("Conversation request clients", () => {
     await expect(getAnswer({ workspaceId, id: answerId })).resolves.toMatchObject({ resource: { publicationStatus: "completed" }, etag: 'W/"answer-2-workflow-3-stage-none"', notModified: false });
     await expect(getAnswer({ workspaceId, id: answerId, ifNoneMatch: 'W/"answer-2-workflow-3-stage-plan.started"' })).resolves.toEqual({ resource: null, etag: 'W/"answer-2-workflow-3-stage-plan.started"', notModified: true });
     expect(fetchMock.mock.calls[2]?.[1]?.headers).toMatchObject({ "If-None-Match": 'W/"answer-2-workflow-3-stage-plan.started"' });
+  });
+
+  it("latest Turn 使用有界恢复查询", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ items: [{ question, answer: pendingAnswer }] }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(getLatestTurn({ workspaceId, conversationId })).resolves.toMatchObject({ question: { ordinal: 1 }, answer: { publicationStatus: "pending" } });
+    expect(fetchMock.mock.calls[0]?.[0]).toContain(`/conversations/${conversationId}/turns?workspace_id=${workspaceId}&latest=true`);
   });
 
   it("拒绝 Answer ETag 的未知 stage", async () => {

@@ -96,6 +96,7 @@ type ListTurnsQuery struct {
 	ConversationID foundation.ID
 	Cursor         *conversationdomain.TurnCursor
 	Limit          int
+	Latest         bool
 }
 
 // TurnPage 是 Question 与 Answer 读投影的有界页面。

@@ -1023,3 +1023,36 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 实施 T13 `/chat` 与 `/chat/:conversationId` 真实 RAG 页面、Query owner、阶段/轮询恢复和桌面/移动端浏览器烟测。
+
+## Session 31: M6-04 真实 RAG 页面检查点
+
+**Date**: 2026-07-20
+**Task**: M6-04 RAG Conversation API And SSE（T13）
+**Branch**: `dev`
+
+### Summary
+
+完成 `/chat` 与 `/chat/:conversationId` 的真实证据研究台、Workspace 单一 owner、分页/最新 Turn 恢复、SSE/轮询状态层和桌面/移动端交互。
+
+### Main Changes
+
+- 三栏 Conversation rail、Turn timeline、Evidence panel；移动端单列及 Citation 聚焦 drawer。
+- Composer 支持 Scope、Retrieval Mode、Depth、Format、Enter/Shift+Enter 与幂等重试；Clarification/Follow-up 可回填下一问题。
+- 四态 Answer 穷尽展示，包含真实阶段、Refusal、Conflict、Citation、Retrieval Summary、Related Topic、Follow-up 与 Feedback；Pending 不展示草稿。
+- Conversation/Turn Infinite Query 接入 cursor；新增 `latest=true` 单条 Turn 投影保证超过 50 Turn 时仍恢复最新 Answer；断线轮询失败也计入 12 次预算。
+- Workspace 页面增加已有 ID 恢复入口，避免浏览器存储丢失后被单 Workspace 限制封死。
+
+### Testing
+
+- `go test -race ./internal/conversation/...`、`go vet`、`go mod tidy -diff`、真实 PostgreSQL latest Turn integration 与 OpenAPI gate 通过。
+- 前端 lint、typecheck、105 tests、production build 与 diff check 通过。
+- 临时空 PostgreSQL + 真实 API 浏览器烟测：创建 Workspace、Conversation、Chat disabled 明确失败；1280 桌面三栏和 390 移动单列均无横向溢出，console 无应用错误。
+- 独立审查发现并关闭 Clarification 假反馈、分页/latest恢复、失败无界轮询、移动Citation、旧cursor与旧latest投影问题。
+
+### Status
+
+[OK] M6-04 T13 completed; T14-T17 pending.
+
+### Next Steps
+
+- 实施 T14 `make rag-integration` 与 `make compose-rag-smoke`，贯通公开 API、River Worker、Retrieval、Agent、Answer、SSE 和 Feedback。

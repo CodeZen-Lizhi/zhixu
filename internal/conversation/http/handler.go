@@ -324,12 +324,21 @@ func (handler *Handler) listTurns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	latest := false
+	if raw := r.URL.Query().Get("latest"); raw != "" {
+		if raw != "true" {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, conversationdomain.ErrorCodeCursorInvalid, false, errors.New("latest must be true")))
+			return
+		}
+		latest = true
+		limit = 1
+	}
 	cursor, err := handler.cursors.decodeTurn(r.URL.Query().Get("cursor"), workspaceID, conversationID)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	page, err := handler.service.ListTurns(r.Context(), application.ListTurnsQuery{WorkspaceID: workspaceID, ConversationID: conversationID, Cursor: cursor, Limit: limit})
+	page, err := handler.service.ListTurns(r.Context(), application.ListTurnsQuery{WorkspaceID: workspaceID, ConversationID: conversationID, Cursor: cursor, Limit: limit, Latest: latest})
 	if err != nil {
 		writeError(w, err)
 		return

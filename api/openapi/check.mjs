@@ -230,6 +230,8 @@ if (document.paths["/api/v1/conversations/{conversation_id}/questions"].post.res
     schemas.QuestionAcceptance.required.includes("status_url") === false) {
   throw new Error("Question 202 must return QuestionAcceptance with status_url");
 }
+const latestTurn = document.paths["/api/v1/conversations/{conversation_id}/turns"].parameters.find((item) => item.name === "latest");
+if (latestTurn?.schema?.const !== true) throw new Error("Turn latest recovery query contract drifted");
 const sse = document.paths["/api/v1/events"].get;
 if (sse.responses["200"].content?.["text/event-stream"]?.schema?.$ref !== "#/components/schemas/ServerEventEnvelope" ||
     !sse.parameters.some((item) => item.name === "Last-Event-ID" && item.in === "header")) {

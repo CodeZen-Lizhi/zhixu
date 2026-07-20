@@ -71,3 +71,12 @@ M1 后，Component Test 必须覆盖语义 Role、键盘、焦点、Loading/Erro
 ## M1 待代码验证
 
 M1 必须确定样式与组件库策略、测试渲染器、可访问性工具和代表性组件模式；只有 Manifest 和源码存在后才添加真实代码链接。
+
+## M6-04 RAG 页面模式
+
+- `/chat` 与 `/chat/:conversationId` 使用“会话栏—回答工作区—证据栏”研究台布局；移动端收敛单列，
+  Citation 选择后以可聚焦 drawer 呈现，关闭后焦点返回触发按钮。
+- Pending 只展示 Workflow/current_stage；Completed、Refusal、Clarification 必须穷尽分支，Clarification 不展示
+  后端必然拒绝的 Feedback。
+- Answer 正文按纯文本 `white-space: pre-wrap` 展示；Citation href 只使用服务端值，不执行 Markdown/HTML。
+- Composer 支持 Enter 提交、Shift+Enter 换行，并显式提供 Scope、Depth、Format 与不可用能力说明。

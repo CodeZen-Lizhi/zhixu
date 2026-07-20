@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type SyntheticEvent, useState } from "react";
 
+import { setActiveWorkspaceId, useActiveWorkspaceId } from "../../app/active-workspace";
+
 import {
   createWorkspace,
   getWorkspace,
@@ -10,10 +12,6 @@ import {
   WorkspaceApiError,
 } from "../../api/workspace";
 import { SystemStatusPage } from "../system-status/SystemStatusPage";
-
-const workspaceStorageKey = "zhixu.active-workspace-id";
-
-const storedWorkspaceID = () => window.localStorage.getItem(workspaceStorageKey) ?? "";
 
 const formatBytes = (bytes: number) => {
   if (bytes < 1024) return `${String(bytes)} B`;
@@ -81,9 +79,11 @@ const ScanTable = ({ scan }: { scan: WorkspaceScan }) => (
 
 export const WorkspacePage = () => {
   const queryClient = useQueryClient();
-  const [workspaceID, setWorkspaceID] = useState(storedWorkspaceID);
+  const workspaceID = useActiveWorkspaceId();
   const [name, setName] = useState("");
   const [rootPath, setRootPath] = useState("");
+  const [existingWorkspaceID, setExistingWorkspaceID] = useState("");
+  const [existingWorkspaceError, setExistingWorkspaceError] = useState<Error>();
   const [initializeGit, setInitializeGit] = useState(false);
   const [scan, setScan] = useState<WorkspaceScan>();
 
@@ -97,8 +97,7 @@ export const WorkspacePage = () => {
   const createMutation = useMutation({
     mutationFn: createWorkspace,
     onSuccess: (workspace) => {
-      window.localStorage.setItem(workspaceStorageKey, workspace.id);
-      setWorkspaceID(workspace.id);
+      setActiveWorkspaceId(workspace.id);
       setScan(undefined);
       queryClient.setQueryData(["workspace", workspace.id], workspace);
     },
@@ -118,6 +117,11 @@ export const WorkspacePage = () => {
 
   return (
     <div className="workspace-page">
+      <header className="hero">
+        <p className="brand-mark">知序 · ZHIXU</p>
+        <h1>把本地知识，接入一条可信链路。</h1>
+        <p className="hero-copy">创建 Workspace、检查 Git 基线，并安全扫描真实文件；所有状态均来自后端与本地事实源。</p>
+      </header>
       <SystemStatusPage />
 
       <section className="workspace-section" aria-labelledby="workspace-setup-title">
@@ -130,7 +134,7 @@ export const WorkspacePage = () => {
         </div>
 
         {workspaceID === "" ? (
-          <form className="workspace-form" onSubmit={submit}>
+          <><form className="workspace-form" onSubmit={submit}>
             <label>
               <span>Workspace 名称</span>
               <input value={name} onChange={(event) => setName(event.target.value)} required />
@@ -147,7 +151,13 @@ export const WorkspacePage = () => {
               {createMutation.isPending ? "正在校验并创建…" : "创建 Workspace"}
             </button>
           </form>
+          <form className="workspace-open-form" onSubmit={(event) => { event.preventDefault(); try { setActiveWorkspaceId(existingWorkspaceID.trim()); setExistingWorkspaceError(undefined); } catch (error: unknown) { setExistingWorkspaceError(error instanceof Error ? error : new Error("Workspace ID 无效")); } }}>
+            <label><span>已有 Workspace ID</span><input value={existingWorkspaceID} onChange={(event) => setExistingWorkspaceID(event.target.value)} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" title="请输入规范 UUID" required /></label>
+            <button type="submit" className="secondary-button">打开已有 Workspace</button>
+          </form></>
         ) : null}
+
+        {existingWorkspaceError === undefined ? null : <ErrorNotice error={existingWorkspaceError} />}
 
         {createMutation.isError ? <ErrorNotice error={createMutation.error} /> : null}
         {workspaceQuery.isPending && workspaceID !== "" ? <p>正在打开上次 Workspace…</p> : null}
@@ -155,8 +165,7 @@ export const WorkspacePage = () => {
           <>
             <ErrorNotice error={workspaceQuery.error} />
             <button type="button" className="secondary-button" onClick={() => {
-              window.localStorage.removeItem(workspaceStorageKey);
-              setWorkspaceID("");
+              setActiveWorkspaceId("");
             }}>清除本地引用并重新创建</button>
           </>
         ) : null}

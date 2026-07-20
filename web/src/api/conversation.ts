@@ -561,6 +561,12 @@ export const submitQuestion = async (input: SubmitQuestionInput, signal?: AbortS
   return (await request(`/api/v1/conversations/${input.conversationId}/questions`, { method: "POST", headers: jsonHeaders(key), body: JSON.stringify(body), ...withSignal(signal) }, decodeQuestionAcceptance)).value;
 };
 export const listTurns = async (input: ListInput & { conversationId: string }, signal?: AbortSignal): Promise<Page<Turn>> => { validateUuid(input.conversationId, "conversationId"); return (await request(`/api/v1/conversations/${input.conversationId}/turns?${query(input)}`, { method: "GET", headers: { Accept: "application/json" }, ...withSignal(signal) }, decodeTurnPage)).value };
+export const getLatestTurn = async (input: { workspaceId: string; conversationId: string }, signal?: AbortSignal): Promise<Turn | null> => {
+  validateUuid(input.workspaceId, "workspaceId"); validateUuid(input.conversationId, "conversationId");
+  const page = (await request(`/api/v1/conversations/${input.conversationId}/turns?workspace_id=${input.workspaceId}&latest=true`, { method: "GET", headers: { Accept: "application/json" }, ...withSignal(signal) }, decodeTurnPage)).value;
+  if (page.items.length > 1 || page.nextCursor !== undefined) throw invalidResponse("latest_turn");
+  return page.items[0] ?? null;
+};
 export const getAnswer = (input: GetInput, signal?: AbortSignal): Promise<VersionedResource<Answer>> => getVersioned(`/api/v1/answers/${validateUuid(input.id, "id")}`, input, decodeAnswer, signal);
 export const submitFeedback = async (input: SubmitFeedbackInput, signal?: AbortSignal): Promise<AnswerFeedback> => {
   validateUuid(input.workspaceId, "workspaceId"); validateUuid(input.answerId, "answerId"); const key = validateKey(input.idempotencyKey); if (!["helpful", "incorrect", "irrelevant_citation", "broken_citation", "missing_source"].includes(input.feedbackType)) throw invalidRequest("feedbackType");

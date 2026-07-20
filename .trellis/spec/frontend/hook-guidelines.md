@@ -64,3 +64,12 @@ M1 后，Hook Test 必须覆盖 Query Key 隔离、Cursor 推进、Mutation Inva
 ## M1 待代码验证
 
 M1 必须建立 Query Key Factory、Generated Client Wrapper、URL Schema、EventSource 实现、取消策略和 Hook Test Harness，之后用真实 Hook 链接替代规划描述。
+
+## M6-04 RAG Query 与恢复约束
+
+- Conversation/Turn 使用 Workspace scoped Infinite Query；活动时间重排或 cursor-expired 时必须先把 Conversation
+  列表 exact reset 到第一页，再沿新 cursor 加载，禁止用旧 cursor 重查多页。
+- Turn 首屏分页不能承担“最新执行状态”恢复；使用 `latest=true` 的单条有界 Turn 投影找到最新 Answer，
+  并按 Question ID 替换分页中的旧投影。
+- SSE 断线时 pending Answer 最多轮询 12 次、每次 2 秒；成功与失败请求都消耗预算，Answer ID 变化才重置。
+- Create/Question/Feedback 的一次逻辑重试复用 Idempotency-Key；成功后才生成下一命令 Key。

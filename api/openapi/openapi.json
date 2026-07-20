@@ -348,11 +348,11 @@
       }
     },
     "/api/v1/conversations/{conversation_id}/turns": {
-      "parameters": [{ "$ref": "#/components/parameters/ConversationID" }, { "$ref": "#/components/parameters/WorkspaceIDQuery" }, { "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }],
+      "parameters": [{ "$ref": "#/components/parameters/ConversationID" }, { "$ref": "#/components/parameters/WorkspaceIDQuery" }, { "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }, { "name": "latest", "in": "query", "required": false, "description": "When true, return only the latest Turn as a bounded refresh-recovery projection; cursor must be omitted.", "schema": { "type": "boolean", "const": true } }],
       "get": {
         "operationId": "listConversationTurns",
         "responses": {
-          "200": { "description": "Stable ordinal-ordered Turn page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TurnPage" } } } },
+          "200": { "description": "Stable ordinal-ordered Turn page, or one latest Turn when latest=true.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TurnPage" } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" },
           "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }
         }

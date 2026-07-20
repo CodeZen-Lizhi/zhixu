@@ -221,6 +221,9 @@ func (service *Service) ListTurns(ctx context.Context, query ListTurnsQuery) (Tu
 			return TurnPage{}, err
 		}
 	}
+	if query.Latest && (query.Cursor != nil || query.Limit != 1) {
+		return TurnPage{}, foundation.NewError(foundation.ErrorInvalidInput, conversationdomain.ErrorCodeCursorInvalid, false, errors.New("latest turn query requires limit one without cursor"))
+	}
 	if err := conversationdomain.ValidatePageLimit(query.Limit); err != nil {
 		return TurnPage{}, err
 	}

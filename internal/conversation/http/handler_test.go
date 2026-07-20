@@ -110,6 +110,19 @@ func TestAnswerReturnsCurrentStageAndUsesItInETag(t *testing.T) {
 	}
 }
 
+func TestListTurnsLatestBuildsBoundedRecoveryQuery(t *testing.T) {
+	t.Parallel()
+	service := &fakeService{}
+	router := testRouter(service)
+	path := "/api/v1/conversations/" + string(testConversationID) + "/turns?workspace_id=" + string(testWorkspaceID) + "&latest=true"
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !service.turnsQuery.Latest || service.turnsQuery.Limit != 1 || service.turnsQuery.Cursor != nil {
+		t.Fatalf("response=%d query=%#v body=%s", recorder.Code, service.turnsQuery, recorder.Body.String())
+	}
+}
+
 func TestNotFoundIsAntiEnumerationProblem(t *testing.T) {
 	t.Parallel()
 	service := &fakeService{err: foundation.NewError(foundation.ErrorNotFound, "CONVERSATION_NOT_FOUND", false, errors.New("secret database detail"))}
@@ -173,6 +186,7 @@ type fakeService struct {
 	feedback     application.SubmitFeedbackCommand
 	conversation conversationdomain.Conversation
 	answer       application.AnswerView
+	turnsQuery   application.ListTurnsQuery
 	err          error
 }
 
@@ -198,7 +212,8 @@ func (service *fakeService) GetConversation(context.Context, foundation.ID, foun
 	}
 	return service.conversation, service.err
 }
-func (service *fakeService) ListTurns(context.Context, application.ListTurnsQuery) (application.TurnPage, error) {
+func (service *fakeService) ListTurns(_ context.Context, query application.ListTurnsQuery) (application.TurnPage, error) {
+	service.turnsQuery = query
 	return application.TurnPage{}, service.err
 }
 func (service *fakeService) GetAnswer(context.Context, foundation.ID, foundation.ID) (application.AnswerView, error) {
