@@ -331,6 +331,26 @@ Retrieval `index_version.status=active` 只决定可检索投影，不能升级�
 - COMPLEMENTS、DUPLICATES、PREREQUISITE_OF、VERSION_OF：同类型 Topic → Topic 或 Claim → Claim。
 - IMPACTS：当前已注册 Topic/Claim 的任意组合。
 
+#### Graph 只读查询投影（M7-01）
+
+- Knowledge Module 及 `core.topic`、`core.claim`、`core.relation`、`core.relation_evidence` 继续是 Topic、Claim、Relation 和 Evidence 的唯一事实源。Graph 不拥有写模型，不新增 Graph 表、物化视图、独立图数据库或双写链路；Graph 页面和 API 也不能直接创建、确认或修改 Relation。
+- `internal/graph/adapter/postgres` 直接参数化读取上述 canonical facts，首版正式端点只投影 Topic/Claim。默认正式图只读 `CONFIRMED` Relation；`STALE` 只能由显式过滤读取，其他状态不能伪装为正式关系。
+- 每个 Graph Repository 公共查询由 Adapter 自己持有一个 PostgreSQL `READ ONLY REPEATABLE READ` 事务，并以 transaction-local `statement_timeout=1500ms` 限制语句。Neighborhood 按完整 frontier 批量展开，Path 在同一快照内批量双向 BFS，Evidence 独立分页；禁止逐节点或逐 Evidence 查询。
+- 邻接与证据分页复用 `00017_knowledge_domain.sql` 已有索引：出边使用 `idx_knowledge_relation_source (workspace_id, source_node_type, source_node_id, relation_type, id)`，入边使用 `idx_knowledge_relation_target (workspace_id, target_node_type, target_node_id, relation_type, id)`，Evidence owner 分页使用 `idx_knowledge_relation_evidence_owner (workspace_id, relation_id, created_at, id)`。
+- 在 20,000 Topic、100,000 Relation、100,000 Relation Evidence 的确定性夹具上，Neighborhood、Path、Evidence 三类生产 SQL 的 `EXPLAIN (ANALYZE, BUFFERS)` 均命中上述既有索引，目标 Relation/Evidence 表的 Seq Scan 均为 0。该证据不支持新增 `00024` 索引迁移或持久 Graph projection，因此 M7-01 没有 Schema 变化，也不修改历史迁移；完整实测记录见 [性能与容量设计](performance.md#8-graph)。
+
+功能 fixture 使用已配置的测试数据库，`seed` 输出的 `workspace_id` 必须用于对应清理：
+
+```bash
+test -n "$ZHIXU_TEST_DATABASE_URL"
+fixture_json="$(go run -tags=integration ./internal/graph/testfixture/cmd/graphfixture seed)"
+printf '%s\n' "$fixture_json"
+workspace_id="$(printf '%s\n' "$fixture_json" | jq -er '.workspace_id')"
+go run -tags=integration ./internal/graph/testfixture/cmd/graphfixture cleanup --workspace-id "$workspace_id"
+```
+
+清理只接受 canonical Workspace ID，并要求测试 Workspace 的 name/root marker 精确匹配；不得用 fixture 清理业务 Workspace。`make graph-benchmark` 会自动创建并清理容量 fixture。M7-01 发布回滚只需撤下 `/graph` 前端入口和 Graph route/adapter，Knowledge 事实不变且没有数据库 Down；若未来容量证据要求新增索引或可重建投影，必须作为新的前向迁移单独评审和回滚。
+
 ### conflict
 
 - id。

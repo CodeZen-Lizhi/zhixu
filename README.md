@@ -36,9 +36,10 @@
 The project is under active development. The current skeleton provides a Go API and worker, a React web application, and PostgreSQL with pgvector.
 
 项目正在开发中。当前仓库已经提供 Go API/Worker、React Web、PostgreSQL + pgvector，以及可运行的
-Workspace→摄取→索引→Search/Evidence 和 Conversation→RAG Answer→SSE→Feedback 闭环。Graph、
-Collection/表格、Artifact/Review/Interview、正式认证、安全/容量/备份门禁和最终发布验收仍属于后续
-M7–M11，不能把当前状态视为整个产品已经交付。
+Workspace→摄取→索引→Search/Evidence、Conversation→RAG Answer→SSE→Feedback 闭环和 Graph v1。
+Graph v1 只读投影 Knowledge 中同一 Workspace 的 Topic、Claim 和 canonical Relation，不是第二事实源；
+语义关联候选、Health/Timeline、Collection/表格、Artifact/Review/Interview、正式认证、安全/50 万容量/
+备份门禁和最终发布验收仍属于后续 M7–M11，不能把当前状态视为整个产品已经交付。
 
 ## Local development
 
@@ -77,17 +78,29 @@ Then open <http://127.0.0.1:8080>. Health and dependency status are available at
 - `GET /readyz`: API readiness including PostgreSQL connectivity
 - `GET /api/v1/system/status`: API and database status used by the web page
 - `POST /api/v1/workspaces`: create the single active Workspace and record its Git baseline
-- `GET /api/v1/workspaces/{id}`: reopen the persisted Workspace
-- `POST /api/v1/workspaces/{id}/scan`: scan supported files and register immutable Source Version metadata
-- `POST /api/v1/workspaces/{id}/workflows`: start a durable Workflow Run and return `202 + workflow_run_id`
-- `GET /api/v1/workflows/{id}`: query durable Workflow Run state
+- `GET /api/v1/workspaces/{workspace_id}`: reopen the persisted Workspace
+- `POST /api/v1/workspaces/{workspace_id}/scan`: scan supported files and register immutable Source Version metadata
+- `POST /api/v1/workspaces/{workspace_id}/workflows`: start a durable Workflow Run and return `202 + workflow_run_id`
+- `GET /api/v1/workflows/{run_id}`: query durable Workflow Run state
 - `POST /api/v1/workflows/{run_id}/human-tasks/{task_id}/decision`: submit one version-checked Human Task decision
 - `POST/GET /api/v1/conversations`: create and page Conversations
-- `POST /api/v1/conversations/{id}/questions`: submit an idempotent RAG Question and receive `202 + status_url`
-- `GET /api/v1/conversations/{id}/turns`: restore paged Question/Answer turns
-- `GET /api/v1/answers/{id}`: read the authoritative Answer, Workflow stage and retrieval summary
-- `POST /api/v1/answers/{id}/feedback`: append idempotent evaluation feedback
+- `POST /api/v1/conversations/{conversation_id}/questions`: submit an idempotent RAG Question and receive `202 + status_url`
+- `GET /api/v1/conversations/{conversation_id}/turns`: restore paged Question/Answer turns
+- `GET /api/v1/answers/{answer_id}`: read the authoritative Answer, Workflow stage and retrieval summary
+- `POST /api/v1/answers/{answer_id}/feedback`: append idempotent evaluation feedback
 - `GET /api/v1/events?workspace_id=...`: replayable SSE notifications; clients refetch authoritative resources
+- `POST /api/v1/graph/global`: page bounded Topic cluster summaries with canonical filters and an opaque cursor
+- `POST /api/v1/graph/neighborhood`: read a bounded one-to-three-hop Topic/Claim neighborhood
+- `POST /api/v1/graph/path`: find a bounded deterministic shortest path or return an explicit no-path result
+- `GET /api/v1/graph/nodes?workspace_id=...&query=...`: search server-side Topic/Claim summaries
+- `GET /api/v1/graph/nodes/{node_type}/{node_id}?workspace_id=...`: read one Graph node projection
+- `GET /api/v1/graph/relations/{relation_id}?workspace_id=...`: read one formal Relation projection
+- `GET /api/v1/graph/relations/{relation_id}/evidence?workspace_id=...`: lazily page Relation Evidence
+
+Open `/graph` for the real Global, Local and Path views. The three Graph `POST` endpoints are still side-effect-free
+queries; they use JSON bodies for structured filters and traversal bounds, while the four `GET` endpoints require a
+single `workspace_id` query parameter. Graph cursors are process-local HMAC-signed pagination tokens, not
+authorization credentials. The current loopback-only security boundary described below also applies to Graph.
 
 Open `/chat` to create/select a Conversation and `/chat/{conversationId}` to continue it. Chat is fail-closed by
 default because `.env.example` sets `ZHIXU_CHAT_PROVIDER=disabled`. To execute Questions, configure the same
@@ -146,6 +159,9 @@ make go-test go-vet
 make web-lint web-typecheck web-test web-build
 make openapi-check compose-check docker-build
 ZHIXU_TEST_DATABASE_URL='postgres://...' make rag-integration
+ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-integration
+ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-smoke
+ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-benchmark
 make compose-rag-smoke
 ```
 
@@ -153,6 +169,15 @@ make compose-rag-smoke
 Knowledge eligibility→three model phases (`PLAN`, `ANSWER`, `REVIEW`)→validated Answer→SSE→Feedback path plus
 exact replay. `compose-rag-smoke` creates an isolated Compose project, ports, database volume, Git workspace and
 credential canary, exercises the same black-box product path, then removes all disposable state.
+
+The three Graph gates require a caller-supplied disposable PostgreSQL database. `graph-integration` exercises the
+public HTTP Global→Local→Path→Evidence flow, cursor replay/staleness, Workspace isolation and timeout mapping;
+`graph-smoke` seeds a committed fixture, starts the real API process and cleans the fixture idempotently;
+`graph-benchmark` deterministically creates 20,000 Active Topics, 100,000 Confirmed Relations and 100,000 Evidence
+items, then runs 5 warmups and 30 one-hop samples with a 1.5-second p95 gate and representative EXPLAIN checks.
+Benchmark artifacts default to `tmp/graph-benchmark/`. This M7 reference gate does not replace M10 validation at
+500,000 Relations or the final graph UI FPS gate. Graph v1 adds no Graph table or write path; release rollback uses
+the previous binary/web assets and must retain the canonical Knowledge facts.
 
 `compose-check` validates the Compose model. A release candidate must also run
 `make compose-up`, query both API and Worker readiness, exercise the documented

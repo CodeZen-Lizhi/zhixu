@@ -231,3 +231,95 @@ Correct: 受限 Go harness 复用 Knowledge Domain/Repository；fixture 按 Sche
 Wrong: 原样把 Markdown snippet/source excerpt 送入要求 canonical text 的 Agent Evidence。
 Correct: Retrieval Adapter 边界裁剪首尾空白，裁剪后为空则明确失败。
 ```
+
+## Scenario: M7-01 Graph Real Query Quality Gate
+
+### 1. Scope / Trigger
+
+- 修改 Graph Domain/Application/PostgreSQL/HTTP、生产 composition、fixture、前端 client/page 或公开契约时，
+  必须运行本跨层门禁。
+- M7-01 只交付 Topic/Claim canonical facts 的只读 Graph；门禁不得用 Fake Repository、直接 Handler 调用、
+  readiness 或静态页面替代真实 PostgreSQL 和公共 HTTP。
+
+### 2. Signatures
+
+- 公共查询：`POST /api/v1/graph/global`、`POST /api/v1/graph/neighborhood`、
+  `POST /api/v1/graph/path`、`GET /api/v1/graph/nodes`、
+  `GET /api/v1/graph/nodes/{node_type}/{node_id}`、`GET /api/v1/graph/relations/{relation_id}`、
+  `GET /api/v1/graph/relations/{relation_id}/evidence`。
+- 真实门禁：`make graph-integration`、`make graph-smoke`、`make graph-benchmark`；三者都要求显式设置
+  `ZHIXU_TEST_DATABASE_URL`，benchmark 可用 `ZHIXU_GRAPH_BENCHMARK_ARTIFACT_DIR` 指定产物目录。
+- 前端门禁：`npm run lint --prefix web`、`npm run typecheck --prefix web`、
+  `npm run test --prefix web`、`npm run build --prefix web`；浏览器实际访问 `/graph`。
+
+### 3. Contracts
+
+- `graph-integration` 必须通过生产 Router/Repository 贯穿 Global -> Local -> Path -> Evidence，并验证 cursor
+  response-loss replay/stale、Workspace 防枚举和 timeout；它证明进程内公共契约，不替代真实进程 smoke。
+- `graph-smoke` 必须启动真实 `cmd/api` 子进程、等待 readiness 后执行相同核心 HTTP 链路。成功删除临时状态；
+  失败停止进程、尝试幂等清理 canonical fixture，并保留权限为 `0700` 的诊断目录及位置；清理失败继续保持
+  非零结果。
+- HTTP 响应不得包含数据库 URL、fixture/storage 绝对路径、managed storage 字段或未公开来源正文；公开
+  Graph 契约要求的 Claim statement 与 Evidence reason 必须保留。API/fixture 进程日志还不得包含 Claim
+  statement、Evidence reason 或 provenance 正文 canary。Smoke 失败控制输出只能额外打印用于运维恢复的
+  私有 `0700` 诊断目录位置，不得打印 DSN、fixture 路径或正文；benchmark 的 summary/samples/EXPLAIN
+  文件必须为 `0600`。
+- 容量门禁固定 20k Active Topic/100k Confirmed Relation/100k Evidence、单客户端一跳、5 次预热和 30 次
+  采样；每个样本必须为 6 条数据库语句，p95 <= 1.5s，并保存 Neighborhood/Path/Evidence 的索引计划。
+- 前端必须通过严格 Graph decoder、Workspace-scoped query key、URL round-trip、60 node/100 edge 画布上限、
+  完整列表 fallback、Relation Evidence lazy load 和键盘/焦点测试；浏览器同时验证桌面 1440x900 与移动
+  390x844，无横向溢出和控制台 warning/error。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| 缺少测试数据库环境变量或数据库不可达 | 门禁明确非零退出，不回退 Fake/内存实现 |
+| public integration 只通过 Handler/Repository 私有入口 | 不计为通过，必须经过 Router 和 HTTP wire |
+| API 子进程未 ready、提前退出或请求失败 | smoke 失败、停止进程、清理 fixture、保留诊断目录 |
+| 响应命中基础设施/未公开来源 canary，或日志命中 DSN、路径、Claim/Evidence/provenance canary | smoke 失败，不以“测试数据”名义豁免 |
+| cursor stale/timeout 被显示为空结果 | 契约或浏览器验收失败，必须提供可操作错误状态 |
+| 容量样本 SQL 数不是 6、P95 超阈值或索引缺失 | benchmark 非零退出 |
+| 仅通过桌面或仅启动 dev server | 浏览器门禁未完成 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：同一 canonical fixture 由真实 PostgreSQL 提供事实，integration 验证 wire/failure contract，真实进程
+  smoke 验证 composition/清理/日志，capacity benchmark 独立验证性能和执行计划。
+- Base：开发者只运行 focused 单元测试可作为中间反馈，但 T13/T14 归档前必须完成全部门禁；临时数据库未配置
+  时应报告未验证，不能标记 PASS。
+- Bad：用 mock fetch 截图声称真实页面完成、只检查 `/readyz` 声称 Graph smoke 完成、保留成功 smoke 临时目录，
+  或把一次低延迟样本宣称为容量结论。
+
+### 6. Tests Required
+
+```bash
+go test -race -count=1 ./...
+go vet ./...
+go mod tidy -diff
+make test
+make graph-integration
+make graph-smoke
+make graph-benchmark
+npm run lint --prefix web
+npm run typecheck --prefix web
+npm run test --prefix web
+npm run build --prefix web
+python3 ./.trellis/scripts/task.py validate 07-20-graph-projection-queries
+git diff --check
+```
+
+- 主 Agent 执行 Go、SQL 和通用质量审查；Graph 涉及公共 API、数据库查询计划、cursor 安全和前端，必须再由
+  独立只读 reviewer 复验需求、逻辑、边界、质量、测试和真实运行结果。
+- 500,000 Relation 的最终 P95/FPS、正式 Auth/Session/API Token/CSRF/Capability 仍归 M10；Workspace 隔离、
+  loopback 或 HMAC cursor 不是认证。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: integration、真实进程 smoke、容量 benchmark 三选一；页面能打开就跳过移动端、焦点和控制台检查。
+Correct: 三类后端门禁分别验证 wire、composition 和容量；前端命令通过后仍在桌面/移动完成真实浏览器闭环。
+
+Wrong: 将 20k/100k 一跳 P95 和 Workspace 隔离标记为 500k/FPS/Auth 已完成。
+Correct: 只声明 M7-01 的参考容量与只读闭环，M10 边界保持显式待验收。
+```

@@ -87,12 +87,13 @@ M2 已在独立 `poc/eino` module 中验证 Eino `v0.9.12` 的 Chat Graph、Tool
 | Build | Vite |
 | Server State | TanStack Query |
 | Routing | React Router |
-| Graph | Cytoscape.js | 知识图谱、路径与聚类展示 |
+| Graph | M7-01 使用有界 SVG/CSS + 语义列表；Cytoscape.js 仅作后续候选 |
 | Diff | Monaco Diff Editor |
 | Realtime | EventSource/SSE |
 | Test | Vitest + Testing Library + Playwright |
 
-Graph 库属于可替换展示实现，不进入领域模型。
+Graph 展示实现不进入领域模型。当前 `web/package.json` 未引入 Cytoscape.js；只有 M10 的 500,000 Relation
+容量与前端 FPS/交互证据证明有必要时，才单独评估 Cytoscape.js/Web Worker 并锁定依赖。
 
 ## 7. 测试
 
@@ -131,6 +132,7 @@ Graph 库属于可替换展示实现，不进入领域模型。
 - pgvector 50 万向量检索。
 - River Node Job 与事务插入。
 - pdftotext 引用页码。
-- Cytoscape.js 5,000 可视节点的聚类/按需展开。
+- Graph 在 500,000 Relation 正式资源预算下的有界渲染与 FPS/交互；若当前 SVG/CSS + 列表方案不达标，
+  再验证 Cytoscape.js/Web Worker 候选，不预设 5,000 节点全量渲染。
 - Monaco 大 Diff。
 - Eino Chat、Embedding、Streaming、Structured Output、Tool Calling、Callback/Trace、取消、限流、错误映射和 River Node 集成 PoC；未通过不得成为正式依赖。

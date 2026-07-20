@@ -80,3 +80,23 @@ M1 必须确定样式与组件库策略、测试渲染器、可访问性工具�
   后端必然拒绝的 Feedback。
 - Answer 正文按纯文本 `white-space: pre-wrap` 展示；Citation href 只使用服务端值，不执行 Markdown/HTML。
 - Composer 支持 Enter 提交、Shift+Enter 换行，并显式提供 Scope、Depth、Format 与不可用能力说明。
+
+## M7-01 Graph 页面模式
+
+- `/graph` 是真实查询工作台，首版只呈现 Topic/Claim 与 canonical Relation，不提供创建、确认或修改 Relation
+  的控件。Global/Local/Path 使用同一模式切换；Local 的 center、Path 的 from/to、depth/direction/filter 和
+  当前 mode 由 URL State 持有，刷新和深链必须恢复为规范值。
+- TanStack Query 只持有 Workspace-scoped Server State；节点锁定坐标、固定布局和画布/列表选择是会话内 Local
+  State。切换到不同查询投影时清除旧锁定布局，选择节点不得隐式锁定或写回 Knowledge。
+- `GraphCanvas` 最多绘制 60 个节点和 100 条边。超过上限、端点断裂、重复 key 或非法锁定坐标时必须强制
+  显示完整列表 fallback，不能裁掉剩余事实或呈现空白画布；未超限时仍允许用户主动切换画布/列表。
+- 节点用 Topic/Claim 的形状、标签和文字共同区分；Relation 用类型文字、状态文字和实线/虚线共同表达，
+  不只依赖颜色。SVG edge 仅作视觉层，节点/边选择使用可聚焦 button，完整列表提供等价键盘入口。
+- 选择节点或 Relation 后才查询详情；Relation Evidence 初始关闭，只有用户展开后才按 cursor 请求，并使用
+  服务端 `span_href` 打开来源。无 Evidence、加载、失败和下一页必须分别可见，不得预取正文或自行拼接 href。
+- 紧凑视口（当前断点 `max-width: 1080px`）的详情面板作为 modal drawer：背景 inert，焦点进入面板，Tab
+  保持在 drawer 内，Escape/关闭按钮关闭后把焦点恢复到触发控件；桌面详情保持 complementary panel。
+- Loading、Empty、Truncated、No Path、Cursor Stale、Timeout/Cancel 和 Layout Fallback 必须使用不同的可操作
+  状态。共同 Topic 只能标为无路径建议，不能画成或描述为正式 path。
+- Workspace selector、URL State 和 opaque cursor 只表达查询范围，不是身份或授权凭据；组件不得据此隐藏
+  服务端授权失败或声称 Auth 已完成，正式 Session/CSRF/Capability 仍等待 M10。

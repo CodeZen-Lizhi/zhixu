@@ -222,11 +222,46 @@ Workflow 失败，不伪装成业务 Refusal。`allow_original_sources/allow_web
 
 ### Graph
 
-- global clusters。
-- neighborhood。
-- path。
-- relation details。
-- candidates。
+Graph v1 是 Knowledge Topic/Claim/Relation 的只读 PostgreSQL 投影，不是第二事实源。正式节点端点只接受
+`TOPIC|CLAIM`；默认关系状态是 `CONFIRMED`，只有显式过滤时才返回并标记 `STALE`。`SUGGESTED`、
+`REJECTED` 和 `DEPRECATED` 不会伪装成正式图。Graph API 不创建、确认或修改 Relation，候选关联归
+M7-02。
+
+当前 OpenAPI 3.1 定义 7 个端点：
+
+| 方法与路径 | 语义 |
+|---|---|
+| `POST /api/v1/graph/global` | 以严格 JSON 提交 Workspace、过滤器、limit 和可选 cursor，分页返回有界 Topic cluster summary。 |
+| `POST /api/v1/graph/neighborhood` | 以严格 JSON 提交中心节点、方向、深度和硬预算；depth=1 支持 cursor，depth=2/3 返回单个有界完整层快照。 |
+| `POST /api/v1/graph/path` | 以严格 JSON 提交两个端点、方向、Relation Type 和访问预算，返回已证明的确定性最短路径或 `status=not_found`。 |
+| `GET /api/v1/graph/nodes?workspace_id=&query=&limit=` | 在服务端搜索 Active Topic name/alias 与 Confirmed/Disputed Claim statement；默认 20，最大 50。 |
+| `GET /api/v1/graph/nodes/{node_type}/{node_id}?workspace_id=` | 返回一个 Workspace-scoped Topic 或 Claim 判别节点。 |
+| `GET /api/v1/graph/relations/{relation_id}?workspace_id=` | 返回 Relation 本体、确认/有效期和 Evidence count/fingerprint/href，不返回 Evidence 正文。 |
+| `GET /api/v1/graph/relations/{relation_id}/evidence?workspace_id=&cursor=&limit=` | 按需分页返回每条 Evidence 自有的 reason、applicability、provenance 和可打开 Source/Span href；默认 20，最大 100。 |
+
+三个 `POST` 只是为复杂过滤和遍历参数提供结构化请求体，仍是无业务副作用的 Query，不要求
+`Idempotency-Key`。四个 `GET` 的 `workspace_id` 必填且只能出现一次；未知或重复 query key、未知 JSON
+字段、非法 UUID/enum/depth/limit/budget 均明确失败。Global、Neighborhood、Path 响应只携带
+Evidence summary/href；前端打开 Relation 详情并明确展开 Evidence 后才请求 Evidence page。
+
+Global、depth=1 Neighborhood 和 Relation Evidence 使用独立的 opaque result-window cursor。Cursor v1
+由 API 进程生命周期内的随机密钥进行 HMAC-SHA256 签名，并绑定 query kind、Workspace、规范请求
+hash、结果 fingerprint、limit 和 offset：篡改、跨 Workspace/查询、请求参数变化或进程重启返回
+`400 GRAPH_CURSOR_INVALID`；结果变化返回 `409 GRAPH_CURSOR_STALE`。Cursor 不是授权凭据或持久
+session。
+
+失败语义保持可区分：
+
+- 不存在、跨 Workspace 或不在正式投影中的节点/Relation 返回相同 404，避免资源枚举；Path 端点不存在
+  也返回 404，但在完整预算内证明“没有路径”返回 200 和 `status=not_found`。
+- Path 的访问预算耗尽返回 `422 GRAPH_QUERY_BUDGET_EXCEEDED`，不返回未经证明的 partial path；
+  Neighborhood 的 node/edge/frontier/result-window 截断通过 200 响应的 `meta.truncated/reason` 暴露，并
+  只保留完整层。
+- Handler 或 PostgreSQL deadline 超时返回可重试的 `503 GRAPH_QUERY_TIMEOUT`；请求取消返回不可重试的
+  `503 GRAPH_QUERY_CANCELLED`；真实 Graph 依赖未组装时路由仍保留并返回
+  `503 GRAPH_DEPENDENCY_UNAVAILABLE`。
+- 投影不一致返回 `409 GRAPH_PROJECTION_INCONSISTENT`；未知内部错误返回 500。空 Global、空 Evidence
+  和 no-path 不伪装成依赖故障。
 
 ### Review Answer
 
@@ -266,7 +301,7 @@ Conversation/RAG API、SSE 与反馈已由 M6-04 落地；正式 Session/API Tok
 
 ## 14. OpenAPI
 
-- OpenAPI 3.1 JSON 是 API wire 契约事实源；Search、Source Version、Source Span、Cursor、Evidence、
+- OpenAPI 3.1 JSON 是 API wire 契约事实源；Search、Graph、Source Version、Source Span、Cursor、Evidence、
   Score/Distance、Degradation 和 Problem 必须声明完整 Schema 与 405。
 - CI 校验 Breaking Change。
 - Generated Client 只在前端边缘，领域模块不依赖。
@@ -275,6 +310,8 @@ Conversation/RAG API、SSE 与反馈已由 M6-04 落地；正式 Session/API Tok
   Feature/Component 不得直接断言原始响应。
 - `web/src/api/conversation.ts`（Conversation/RAG JSON）与 `web/src/events/**`（SSE fetch-stream）分别是
   M6-04 的唯一严格 wire owner；Feature/Component 不得重复解析，SSE 只能定向失效 Query，最终状态必须回查。
+- `web/src/api/graph.ts` 是 Graph 7 个端点的唯一严格 decoder/client 边界；Global/Local/Path 使用
+  TanStack Query 持有 Server State，Relation Evidence 只能在用户展开 Relation 详情后按需请求。
 
 ## 15. 测试
 
@@ -295,3 +332,12 @@ Conversation/RAG API、SSE 与反馈已由 M6-04 落地；正式 Session/API Tok
 - 真实 River fault 与 Compose API smoke：Approved Proposal → Safe Writeback → Reindex → 唯一 Active/
   Completion → Search 命中新正文 → 打开 Evidence。上述 smoke 是 M6-D 归档门禁，不能以单元测试、
   readiness 或内存 Fake 代替。
+- `make graph-integration`：真实 PostgreSQL 上从公共 HTTP 执行 Global→Local→Path→Evidence，并验证
+  response-loss replay、cursor stale、Workspace 防枚举和 timeout 映射。
+- `make graph-smoke`：启动真实 API 进程执行相同最小闭环，验证响应不泄露数据库 URL、绝对路径、
+  managed storage 字段或未公开来源正文，并验证 API/fixture 日志不记录 Claim statement、Evidence reason
+  或 provenance 正文 canary；成功幂等清理已提交 fixture，失败时保留权限为 0700 的诊断目录。
+- `make graph-benchmark`：确定性生成 20,000 Active Topic、100,000 Confirmed Relation 和 100,000
+  Relation Evidence，执行 5 次预热、30 次一跳采样和 Neighborhood/Path/Evidence EXPLAIN，p95 门槛为
+  1.5 秒且每次一跳查询固定 6 条数据库 statement。产物默认写入 `tmp/graph-benchmark/` 且文件权限为
+  0600；M10 才在 500,000 Relation 和正式资源预算下执行最终 P95/FPS 门禁。

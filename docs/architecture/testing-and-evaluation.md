@@ -346,6 +346,60 @@ Workflow Definition 和 Dataset 版本；运行中“最新默认”变化不得
 - Ignored Candidate Reappearance。
 - Path Correctness。
 
+### 13.1 M7-01 Graph Projection And Queries 专项
+
+M7-01 只验收 Knowledge canonical facts 的只读查询投影：正式节点为 `TOPIC|CLAIM`，正式边来自同一
+Workspace 的 canonical Relation；Graph API、Application 查询和页面不得创建、确认或修改 Relation。测试
+fixture 只负责建立并清理隔离的 canonical Knowledge 事实，不得建立 Graph 第二事实源。Source、Document、
+Conflict、Artifact 节点，以及 Candidate/Health 写流程不属于本专项。
+
+- Domain/Application：覆盖 Topic/Claim 判别联合、正式/非正式 Relation 状态、对称端点与 traversal、
+  Neighborhood 端点闭包、Path 连续性/确定性 tie-break、预算截断、无路径和 timeout/cancel 不返回伪造
+  partial path。Global、depth-1 Neighborhood 和 Relation Evidence 的 cursor 必须绑定 Workspace、规范请求、
+  页大小和结果 fingerprint；响应丢失重放保持结果身份，数据变化明确返回 stale。
+- 真实 PostgreSQL 公共 HTTP integration：`make graph-integration` 通过生产 Router 和 PostgreSQL Adapter
+  贯穿 Global 第一页/下一页、response-loss replay、Local、Path、followable Relation Evidence；同时验证
+  跨 Workspace 与不存在统一 404、结果变化 cursor stale，以及极短查询预算稳定映射 timeout/cancel。
+- 真实 API 进程 smoke：`make graph-smoke` 使用已提交的 canonical fixture，启动真实 `cmd/api` 进程，等待
+  readiness 后经公共 HTTP 执行 Global -> Neighborhood -> Path -> Relation Evidence。清理必须幂等；成功删除
+  临时状态，失败保留权限为 `0700` 的诊断目录并输出位置。HTTP 响应不得包含数据库 URL、绝对路径、
+  managed storage 字段或未公开来源正文；API/fixture 日志还不得包含 Claim statement、Evidence reason
+  或 provenance 正文 canary。公开契约要求的 Claim statement 和 Evidence reason 必须继续出现在对应响应。
+- 容量基准：`make graph-benchmark` 确定性生成 20,000 个 Active Topic、100,000 条 Confirmed IMPACTS
+  Relation 和 100,000 条 Relation Evidence；以单客户端、depth=1、page limit=100 的热中心查询执行 5 次预热
+  和 30 次采样。每次样本必须固定为 6 条数据库语句以阻止逐节点/逐 Evidence N+1，并记录 p50、nearest-rank
+  p95、max；p95 超过 1.5 秒时命令必须非零退出。
+- 查询计划与产物：同一次容量门禁保存 Neighborhood、Path、Evidence 的
+  `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`，必须命中 Relation source/target 与 Evidence owner 索引，并且
+  在该容量夹具上 Relation/Evidence Seq Scan 均为 0。`summary.json`、`samples.jsonl` 和三份 EXPLAIN 产物
+  使用 `0600` 权限，包含 fixture seed/version、PostgreSQL/Go/CPU/memory、工作负载、原始样本和阈值结果。
+- 前端与浏览器：Graph client、query、URL、projection/layout 和组件测试必须覆盖 Global/Local/Path、
+  cursor、Workspace query key、严格 decoder、列表 fallback、Evidence lazy load、错误/空/截断/无路径状态、
+  Escape、焦点约束与恢复。浏览器门禁实际打开 `/graph`，至少检查 1440x900 桌面和 390x844 移动视口，
+  验证 URL 恢复、固定布局、节点/关系详情、完整列表、无横向溢出且控制台无 warning/error；只启动服务不算通过。
+
+`ZHIXU_TEST_DATABASE_URL` 是三个真实数据库门禁的必需输入。归档/发布候选必须执行：
+
+```bash
+go test -race -count=1 ./...
+go vet ./...
+go mod tidy -diff
+make test
+make graph-integration
+make graph-smoke
+make graph-benchmark
+npm run lint --prefix web
+npm run typecheck --prefix web
+npm run test --prefix web
+npm run build --prefix web
+python3 ./.trellis/scripts/task.py validate 07-20-graph-projection-queries
+git diff --check
+```
+
+本门禁证明 20k Topic/100k Relation 参考环境的一跳查询和有界前端闭环，不证明 500,000 Relation 的最终
+P95、图谱 FPS/交互预算或正式 Auth/Session/API Token/CSRF/Capability。后三者仍由 M10 验收；在此之前
+Workspace 隔离和 loopback 部署不得被描述为认证完成。
+
 ## 14. Review Evaluation
 
 - Question Answerability。

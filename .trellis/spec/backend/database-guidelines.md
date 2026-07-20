@@ -1084,3 +1084,93 @@ Correct: 首次记录真实时钟；重放在 advisory lock 内恢复既有 occu
 - `RAGRetrievalSummary.Rewrites/Degradations` 与 published `Citations` 的空集合是显式 `[]`，不是 `null`。Repository/Adapter 防御性复制必须使用非 nil 空 slice 作为起点。
 - Search snippet 与 Source Span excerpt 进入 Agent Evidence 前在 Retrieval Adapter 边界规范化首尾空白；空白-only 结果属于一致性失败。
 - 真实 PostgreSQL/Compose 回归必须覆盖 Refusal 可查询、Markdown Evidence 可打开、completed Answer 三次 Model Call 以及 exact replay 零新增调用。
+
+## Scenario: M7-01 Graph Canonical Read Projection
+
+### 1. Scope / Trigger
+
+- 修改 `internal/graph` 的 PostgreSQL 查询、cursor result window、Relation Evidence、Graph fixture 或查询索引时，
+  必须应用本契约。
+- Graph 只投影 Knowledge canonical facts，不拥有写模型：首版端点仅允许 `TOPIC|CLAIM`，不得新增 Graph 表、
+  Relation 双写、隐式状态修复或读路径副作用。
+
+### 2. Signatures
+
+```go
+type QueryPort interface {
+    GlobalWindow(context.Context, graphdomain.GlobalRequest) (GlobalResultWindow, error)
+    SearchNodes(context.Context, graphdomain.NodeSearchRequest) (graphdomain.NodeSearchResult, error)
+    NeighborhoodWindow(context.Context, graphdomain.NeighborhoodRequest) (graphdomain.Neighborhood, error)
+    FindPath(context.Context, graphdomain.PathRequest) (graphdomain.PathResult, error)
+    NodeDetail(context.Context, foundation.ID, knowledge.NodeRef) (graphdomain.GraphNode, error)
+    RelationDetail(context.Context, foundation.ID, foundation.ID) (graphdomain.RelationDetail, error)
+    RelationEvidenceWindow(context.Context, foundation.ID, foundation.ID) (RelationEvidenceResultWindow, error)
+}
+```
+
+- 功能夹具：`SeedFunctional(context.Context, *pgxpool.Pool) (Fixture, error)` 与
+  `Cleanup(context.Context, *pgxpool.Pool, foundation.ID) error`。
+- 容量夹具：`SeedCapacity(context.Context, *pgxpool.Pool, string) (CapacityFixture, error)` 与
+  `CleanupCapacity(context.Context, *pgxpool.Pool, foundation.ID) error`。
+
+### 3. Contracts
+
+- 所有 SQL 显式列、参数化并绑定 Workspace；Node Type、Relation Type/Status 和 traversal 只能来自领域枚举
+  白名单。默认正式图只读取 Confirmed Relation，STALE 只能由显式过滤请求，不能伪装成正式边。
+- Repository 拥有单个 `REPEATABLE READ READ ONLY` 查询快照并设置事务内 `statement_timeout`；Path 的 frontier
+  扩展与最终 hydration 必须在同一快照完成。取消或超时不能泄漏事务，也不能返回未经证明的 partial path。
+- Global、depth-1 Neighborhood 和 Relation Evidence 先生成最多 500 项的有界结果窗口，再由 Application
+  生成 opaque HMAC cursor。Adapter 不生成 cursor；depth 2/3 只返回有界完整层快照。
+- Neighborhood 按完整 frontier 批量查询并批量 hydrate Topic/Claim；Evidence 只做 count/fingerprint，正文和
+  每条 reason/applicability 只在独立 Evidence page 返回。禁止逐节点查库和逐边加载 Evidence。
+- 功能与容量 fixture 必须写入真实 canonical 表：功能 fixture 使用 Knowledge canonicalization/validation，
+  容量 fixture 复用冻结领域枚举、canonical hash 和数据库约束并校验精确计数。清理只有在 Workspace ID、
+  固定测试 name、root/git path、`status=test` 和 version marker 全部匹配时才允许执行；缺行视为幂等成功，
+  marker 不匹配必须中止且不删除。事务局部的 replica role 只允许测试清理，不得进入生产 session。
+- 容量 fixture 由 canonical bounded UTF-8 seed 确定性生成 20,000 个 Active Topic、100,000 条 Confirmed
+  IMPACTS Relation 和 100,000 条 Evidence；批量写入后执行 `ANALYZE` 并校验精确计数与热中心 degree=499。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| Node/Relation 不存在或跨 Workspace | 相同 Not Found 语义，不暴露对象是否存在 |
+| cursor 被篡改、跨查询/Workspace 使用或结果变化 | invalid/stale 明确失败，不静默换页 |
+| context 或 PostgreSQL statement timeout/cancel | 稳定 timeout/cancel Problem；事务释放且无 partial path |
+| 结果窗口、node/edge/frontier 预算超限 | 显式 `truncated/reason` 或请求错误，不执行无界查询 |
+| fixture seed 输出失败或 commit 结果未知 | 按精确 marker 尝试清理；清理失败必须合并报告，不能伪装成功 |
+| cleanup marker 任一字段不匹配 | 清理失败并保留 Workspace，不按 ID 盲删 |
+| 容量计数、6-statement 不变量、P95 或 EXPLAIN 索引门禁失败 | benchmark 非零退出；已经原子写出的产物保留，不能把旧产物冒充本次结果 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：从 canonical Topic/Claim/Relation/Evidence 生成 Workspace-scoped 有界窗口，一跳容量请求无论 degree
+  大小都固定执行 6 条数据库语句，Evidence 只在详情展开后分页读取。
+- Base：小 fixture 的 PostgreSQL planner 可合理选择 Seq Scan；只有 20k/100k 容量门禁要求指定 source/target/
+  owner 索引出现且 Relation/Evidence Seq Scan 为 0。
+- Bad：新增 Graph 双写表、逐节点展开、把 Evidence reason 压到 Relation 单值、解析 HMAC cursor 做 SQL 条件，
+  或仅凭 Workspace UUID 删除测试/用户数据。
+
+### 6. Tests Required
+
+- Domain/Application/Repository：端点闭包、对称 canonical identity、稳定顺序、cursor replay/stale、预算、
+  timeout/cancel、read-only snapshot、Workspace 隔离和 Evidence lazy page。
+- `make graph-integration`：真实 PostgreSQL + 生产 Router 的 Global -> Local -> Path -> Evidence，并覆盖
+  response-loss、跨 Workspace、stale 与 timeout。
+- `make graph-smoke`：已提交 fixture + 真实 API 进程 + 公共 HTTP；成功清理、失败保留 `0700` 诊断目录。
+  响应扫描数据库 URL、绝对路径、managed storage 与未公开来源正文；日志额外扫描 Claim/Evidence/provenance
+  正文 canary，不得误删公开 Graph 响应要求的 Claim statement 或 Evidence reason。
+- `make graph-benchmark`：20k Topic/100k Relation/100k Evidence，5 次预热 + 30 次采样，单次固定 6 SQL，
+  p95 <= 1.5s；保存 Neighborhood/Path/Evidence 的 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` 和 `0600` 产物。
+- SQL 改动完成后执行 `sql-code-review`；500,000 Relation 最终 P95/FPS 与正式 Auth/Capability 仍由 M10
+  验收，Workspace 参数和 HMAC cursor 均不是认证。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Graph 写一份自己的 Relation，并对 frontier 中每个节点、每条边分别查询邻居和 Evidence。
+Correct: Knowledge 保持唯一事实源；Graph 在只读快照中批量展开 frontier、批量 hydrate，并按需分页 Evidence。
+
+Wrong: cleanup 只接收 Workspace UUID 后级联删除，benchmark 只报告一次最快耗时。
+Correct: cleanup 先锁行并核对全部测试 marker；benchmark 固定 seed、5 次预热、30 次样本、6 SQL 和索引计划。
+```

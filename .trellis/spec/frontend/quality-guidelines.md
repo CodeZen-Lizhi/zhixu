@@ -81,3 +81,82 @@ M1 后运行 Canonical Frontend 的锁定安装验证、Lint、Type Check、Unit
 
 Coverage/Bundle Budget、通用 API/SSE Fixture 与 M9 Search 页面 Component/Route/Browser 测试仍待后续任务。
 M6-D 只交付 Decoder/Client，不得用其单测声称 Search UI 已完成。
+
+## Scenario: M7-01 Graph Frontend Quality Gate
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/graph.ts`、Graph query/query key、URL state、view model/layout、`/graph` 组件或样式时，
+  必须应用本门禁。
+- Graph 是跨层只读查询 UI；组件不得重新解释 wire、解析 cursor、执行授权决策或引入 Relation 写状态。
+
+### 2. Signatures
+
+- 唯一 wire owner：`web/src/api/graph.ts`；网络 JSON 从 `unknown` 严格解码后才能进入 Feature。
+- 路由：`/graph`；模式为 `global|local|path`，节点类型为 `TOPIC|CLAIM`，画布上限为 60 node/100 edge。
+- 查询入口对应三条 POST（Global/Neighborhood/Path）和四条 GET（Node Search/Detail、Relation Detail/Evidence）；
+  Relation Evidence query 只有详情中显式展开后才 enabled。
+
+### 3. Contracts
+
+- decoder 校验完整 discriminated union、Workspace/请求 binding、稳定顺序、端点闭包、path 连续性、Evidence
+  href、有限数值、RFC3339/UUID、数组上限和 Problem；未知字段或语义漂移必须失败，不能丢字段后继续渲染。
+- Query Key 必须包含 Workspace 与规范请求；集合顺序、显式默认值和等价 RFC3339 时刻不得制造第二份缓存。
+  Global/depth-1 使用 cursor infinite query，depth 2/3 是单个快照，Abort signal 必须传到 fetch。
+- URL 只保存可恢复查询状态；非法、重复冲突或跨字段冲突值恢复到明确安全默认。锁定坐标、固定布局、选择和
+  drawer 开关不得写入 URL、Browser Storage 或 Server State。
+- 超过 60 node/100 edge 或布局不一致时返回完整列表；No Path、Truncated、Timeout/Cancel、Stale、Empty 和
+  Network/Decode Error 必须保持不同用户语义。共同 Topic 建议不是 path。
+- compact drawer 必须约束焦点、支持 Escape、关闭后恢复触发焦点；节点类型和 Relation 状态不能只靠颜色。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| 无 Active Workspace | 显示可操作入口且 Graph 网络请求数为 0 |
+| 节点搜索不足 2 或超过 256 UTF-8 bytes | query 保持 idle，不发送近似请求 |
+| success JSON 未知/缺失字段、顺序或端点不一致 | `GraphApiError(INVALID_RESPONSE)`，不渲染部分事实 |
+| cursor stale、timeout/cancel 或请求失败 | 显式错误与重试/从第一页恢复，不显示 Empty/Fake Success |
+| Path `not_found` | 显示 explored count 和可选共同 Topic 建议，不生成边 |
+| 画布超限或布局损坏 | 强制完整列表 fallback，节点/关系仍可键盘选择 |
+| Relation 详情未展开 Evidence | Evidence 请求数为 0；展开后才分页请求 |
+| 移动 drawer 关闭 | Escape/按钮均关闭，焦点返回原触发控件 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：URL 恢复规范请求，TanStack Query 返回严格 domain UI model；有界画布与完整列表共享选择语义，
+  Relation Evidence 只在详情中按需加载。
+- Base：没有结果时展示模式对应 Empty；超过视觉上限仍能用完整列表完成检查，不要求浏览器绘制全部边。
+- Bad：组件 `as GraphResponse` 强转、在前端解析 HMAC cursor、只渲染前 60 个节点却隐藏其余事实、打开
+  Relation 详情即预取全部 Evidence，或用颜色区分 Topic/Claim/STALE。
+
+### 6. Tests Required
+
+- API/Query：7 endpoint strict decoder/encoder、Problem/network/Abort、Workspace query key、规范过滤、
+  Global/depth-1 cursor、depth 2/3 snapshot、Search gating、Evidence lazy pagination。
+- Projection/Component/Route：分页去重、60/100 fallback、确定性 Global/Local/Path 布局、端点不被裁切、
+  URL round-trip、三模式、锁定/固定布局、详情选择、全部显式状态、键盘和移动 drawer 焦点闭环。
+- Canonical 命令：
+
+```bash
+npm run lint --prefix web
+npm run typecheck --prefix web
+npm run test --prefix web
+npm run build --prefix web
+```
+
+- 浏览器必须实际打开真实 API 支撑的 `/graph`，分别以 1440x900 和 390x844 验证 Global/Local/Path、URL
+  恢复、列表、固定布局、Evidence lazy load、Escape/焦点恢复、无横向溢出和零 console warning/error。
+- 归档还需执行后端 `make graph-integration`、`make graph-smoke`、`make graph-benchmark` 与全仓门禁；前端
+  mock 测试不能替代真实 PostgreSQL/API。
+- 500,000 Relation 的 FPS/最终交互预算和正式 Auth/CSRF/Capability 仍由 M10 验收。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 画布布局失败后显示空白；Relation drawer 打开即请求全部 Evidence；移动端只缩小桌面 panel。
+Correct: 布局失败切完整列表；Evidence 由用户展开后分页；移动 drawer 约束焦点并在关闭后恢复触发控件。
+
+Wrong: Workspace query key 和 URL 能隔离数据，因此把页面标记为已认证。
+Correct: Workspace/URL/cursor 只用于查询绑定；认证、Session、CSRF 与 Capability 等待 M10。
+```

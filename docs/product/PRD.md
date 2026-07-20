@@ -382,6 +382,10 @@ Inbox 页面分为：
 - 节点详情抽屉。
 - 候选关系和健康问题操作入口。
 
+阶段交付边界：M7-01 已交付只读的 Topic/Claim 正式图谱，包括 Global、Local、Path、服务端节点搜索、
+节点/关系详情和 Relation Evidence 按需查看。候选关系、Health、Timeline、写操作以及 Source、Document、
+Conflict、Artifact 正式端点仍属于后续切片；这些最终产品需求不因首版查询边界而删除。
+
 ### 6.7 审批中心
 
 统一处理：
@@ -1717,6 +1721,10 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 
 节点视觉必须区分类型，不能仅依靠颜色；同时使用形状、图标或标签。
 
+M7-01 阶段只把 Knowledge 当前已注册为 Relation 端点的 Topic、Claim 纳入正式图。Source、Document、
+Conflict、Artifact 仍是正式 v1.0 的最终节点类型，须在各自领域事实与 Relation 端点契约落地后以兼容扩展
+加入，不得用虚构节点或绕过端点约束的方式提前交付。
+
 #### 10.12.3 关系类型
 
 - CITES：引用。
@@ -1761,6 +1769,11 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 - 置信度。
 - 健康状态。
 
+M7-01 的 Global 视图按 Topic 返回有界聚类摘要，使用服务端 cursor 分页；当前可按节点类型、Relation
+类型、Topic、Claim/Relation 状态、Claim/Relation 最低置信度和更新时间过滤。Source 与健康状态过滤
+保留为最终产品要求，待对应领域投影落地后加入。结果窗口超限时必须明确显示截断原因，不能一次加载整个
+Workspace 或把截断伪装为空结果。
+
 #### 10.12.6 局部图谱
 
 - 以当前节点为中心。
@@ -1768,6 +1781,10 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 - 用户可调整到深度 2 或 3。
 - 每次展开显示新增节点数量。
 - 支持锁定节点和固定布局。
+
+M7-01 支持围绕 Topic/Claim 的 1 至 3 跳查询；一跳使用服务端 cursor，多跳返回有节点、关系和 frontier
+预算的单次快照。中心节点通过 Workspace 范围的服务端搜索选择，不是只过滤当前已加载页面。节点锁定和
+固定当前布局只属于本次页面会话，切换查询或刷新后不恢复。
 
 #### 10.12.7 路径查询
 
@@ -1777,6 +1794,10 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 - 可限制关系类型。
 - 展示每条边的证据。
 - 路径不存在时推荐共同 Topic 或相似节点，但不得伪造正式路径。
+
+M7-01 查询 Topic/Claim 之间经过正式 Relation 的确定性无权最短路径，默认双向探索并保留每条有向边的
+实际遍历方向；可收紧方向和 Relation 类型。无路径时明确返回 `not_found`，当前只提供共同 Topic 建议；
+相似节点建议属于 M7-02。超时或预算耗尽必须显示错误，不得返回未经证明的部分路径。
 
 #### 10.12.8 节点详情抽屉
 
@@ -1792,6 +1813,9 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 - 时间线。
 - 可执行操作。
 
+M7-01 节点详情只展示 Topic/Claim 自身已有的标题或主张摘要、状态、版本、置信度/适用条件、更新时间和
+当前结果内关系数；来源、Conflict、Health、Timeline 与可执行操作仍是后续最终详情能力。
+
 #### 10.12.9 关系详情
 
 包含：
@@ -1803,6 +1827,10 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 - 置信度组成。
 - 用户确认状态。
 - 关联 Proposal 和 Workflow Run。
+
+M7-01 关系详情展示 Relation 自身的端点、类型、状态、方向、置信度、版本、确认方式和 Evidence 计数；
+Reason、Applicability 与不可变 Source Version/Span 定位由用户展开 Evidence 后独立分页加载。Global、
+Local 和 Path 首屏不得预取 Evidence 正文；关联 Proposal、Workflow Run 与更完整的置信度解释保留后续。
 
 #### 10.12.10 可执行操作
 
@@ -1823,6 +1851,9 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 - 布局属于个人视图配置。
 - 删除布局不影响知识关系。
 
+跨刷新布局保存是最终产品需求，不属于 M7-01。当前锁定坐标和固定布局只在页面会话内保存，不能被描述为
+已持久化的个人视图。
+
 #### 10.12.12 性能规则
 
 - 查询和布局分离。
@@ -1831,12 +1862,21 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 - 聚类结果可缓存。
 - 图谱查询超时不得阻塞其他功能。
 
+M7-01 前端使用有界 SVG/CSS 画布：超过 60 个可视节点、100 条可视边或布局失败时，明确切换到包含完整
+当前结果的键盘可访问列表；服务端查询仍执行独立的节点、边和遍历预算。Cytoscape、Web Worker 和最终大图
+交互只有在后续容量与交互证据证明必要时才引入，不是本阶段既定依赖。
+
 #### 10.12.13 验收标准
 
 - 正式关系可打开证据。
 - AI 候选与正式关系视觉上可区分。
 - 全局图谱在容量基线下保持可交互。
 - 图谱操作不会绕过 Proposal。
+
+M7-01 阶段验收还要求：`/graph` 支持 Global/Local/Path、服务端节点搜索、URL 查询状态恢复、会话内锁定/
+固定布局、画布/列表切换和 Evidence lazy drawer；loading、empty、truncated、no-path、stale cursor、STALE
+Relation 与 timeout 均有可区分状态。桌面和移动端须无横向溢出，节点、关系、drawer 及关闭后的焦点恢复
+可通过键盘操作。
 
 ### 10.13 语义反向链接与潜在关联
 
@@ -3598,6 +3638,11 @@ Knowledge Event：
 - 创建 Relation Proposal。
 - 保存布局和过滤视图。
 
+M7-01 已交付的接口是只读 Query：全局 Topic 聚类、Topic/Claim 服务端搜索与详情、1 至 3 跳局部邻居、
+确定性最短路径、Relation 详情和 Relation Evidence cursor 分页。候选关系、Relation Proposal、布局/
+过滤视图持久化仍是最终产品接口范围，不得由当前查询接口伪装实现；Graph cursor 是结果窗口状态，不是授权
+凭据或持久会话。
+
 ### 14.8 Collection 接口能力
 
 - 校验查询定义。
@@ -3687,6 +3732,11 @@ Knowledge Event：
 M6-D 的向量查询只保留 exact pgvector scan 与 `EXPLAIN (FORMAT JSON)` 基线，用于证明固定距离
 operator、过滤和查询计划正确；它不证明 500,000 Chunk 下的 ANN 参数或 P95。HNSW/IVFFlat、
 容量数据集与最终 P95 锁定属于 M10 性能交付。
+
+M7-01 Graph 使用确定性的 20,000 Topic、100,000 Relation、100,000 Evidence fixture，对一跳查询执行
+5 次预热和 30 次采样，并验证固定查询数及代表性索引计划。该阶段证明查询可在 100,000 Relation 规模下
+满足 1.5 秒目标，但不代表 AC-31 已完成：500,000 Relation、正式资源预算和前端交互 FPS 仍由 M10 最终
+容量门禁验收。
 
 ### 15.3 可用性
 
@@ -4365,6 +4415,12 @@ Should：
 - 图例。
 
 图谱加载中使用骨架或进度，不显示空白画布。
+
+M7-01 已交付的 `/graph` 首屏支持 Topic/Claim 的 Global、Local、Path 三种模式、服务端节点搜索、过滤器、
+图例、URL 恢复、会话内节点锁定/固定布局、节点/关系详情及 Evidence 延迟加载。画布有明确的 60 节点/
+100 边视觉上限并保留完整列表；empty、truncated、no-path、STALE、cursor stale、timeout 等状态不能互相
+替代。Source/Document/Conflict/Artifact 节点、候选关系、Health/Timeline、跨刷新布局和 Graph 写操作
+仍按最终页面需求在后续切片加入。
 
 ### 21.10 Smart Collection 页面
 
