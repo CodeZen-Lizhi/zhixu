@@ -1,0 +1,24 @@
+{
+  "schema_version": "semantic-link-eval/v1",
+  "versions": {
+    "dataset": "semantic-link-gold/v1",
+    "rule": "semantic-link-rules/v1",
+    "workflow": "graph.semantic-link-topic-scan/v1",
+    "provider_mode": "DETERMINISTIC_FAKE"
+  },
+  "k": 3,
+  "expected": [
+    { "key": "claim-001|claim-002", "relation_type": "DUPLICATES" },
+    { "key": "claim-003|claim-004", "relation_type": "COMPLEMENTS" },
+    { "key": "claim-005|claim-006", "relation_type": "COMPLEMENTS" }
+  ],
+  "ignored_unchanged": [
+    "claim-007|claim-008",
+    "claim-009|claim-010"
+  ],
+  "predictions": [
+    { "key": "claim-001|claim-002", "relation_type": "DUPLICATES", "evidence_supported": true, "score": 0.95 },
+    { "key": "claim-003|claim-004", "relation_type": "COMPLEMENTS", "evidence_supported": true, "score": 0.85 },
+    { "key": "claim-005|claim-006", "relation_type": "COMPLEMENTS", "evidence_supported": true, "score": 0.80 }
+  ]
+}
