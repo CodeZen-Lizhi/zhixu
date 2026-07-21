@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Graph Candidate、Knowledge、Change Control 与 Workflow 模块边界和依赖方向"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"迁移、Workspace 约束、参数化 SQL、事务、幂等、批量与 EXPLAIN 门禁"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"稳定错误、Problem、恢复与 fail-closed 语义"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go/集成/fault/smoke 质量门禁"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"Graph 候选面板、对话框、可访问性和移动端组件契约"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Server/URL/local mutation 状态、刷新恢复和 query invalidation"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"OpenAPI wire 的 strict unknown decoder 与判别联合"}
+{"file":".trellis/tasks/07-21-semantic-link-candidates/research/requirements.md","reason":"权威需求、冲突收敛、范围与候选评测指标"}
+{"file":".trellis/tasks/07-21-semantic-link-candidates/research/codebase.md","reason":"现有 Knowledge/Graph/Retrieval/Agent/Workflow/Change Control 可复用 seam 与缺口"}
+{"file":".trellis/tasks/07-21-semantic-link-candidates/research/architecture-decisions.md","reason":"Candidate ownership、typed Proposal Expand、fingerprint/reopen 和首版扫描决策"}

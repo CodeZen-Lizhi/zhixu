@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"审查迁移、约束、事务、并发、幂等、查询计划和 N+1"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"审查稳定错误、fail-closed、重试和恢复语义"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"审查单元/集成/fault/smoke 与交付门禁"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"审查严格 decoder、交互状态、可访问性、浏览器和构建门禁"}
+{"file":".trellis/tasks/07-21-semantic-link-candidates/research/requirements.md","reason":"按原始需求与验收检查完整性和范围"}
+{"file":".trellis/tasks/07-21-semantic-link-candidates/research/architecture-decisions.md","reason":"检查 Candidate/Relation/Proposal 边界和兼容性决策"}
