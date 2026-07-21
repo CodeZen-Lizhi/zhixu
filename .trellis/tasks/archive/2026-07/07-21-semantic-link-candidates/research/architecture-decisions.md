@@ -46,3 +46,19 @@ schema + workspace
 ## D5 Formal Relation Apply
 
 Candidate Confirm 与 Proposal Approval 是两个动作。Confirm 创建 ready-for-review Relation Proposal；Approval 重新验证 Candidate fingerprint、端点版本和 Evidence，再通过 Knowledge command 幂等写入 canonical Confirmed Relation，confirmation ref 使用 Approval ID。任何基线漂移进入 needs_revision，Candidate 只显示 Proposal 状态，不声称正式关系已存在。
+
+## D6 Topic-scoped Candidate Membership Projection
+
+真实 Topic scan 生成同一 Topic 成员之间的 Claim↔Claim Candidate，而旧列表查询把 `node_type=TOPIC` 解释为
+Candidate 端点必须直接等于 Topic。结果是 Scan 已 `SUCCEEDED` 且 `candidate_count>0`，Topic 页面却稳定返回空
+列表。这是跨层契约与集成覆盖缺口，不是 River、持久化或轮询时序故障。
+
+选择保留现有 Topic node scope，并定义为：直接引用 Topic 的 Candidate，或两端 Claim 都通过正式
+CLAIM→TOPIC/BELONGS_TO/CONFIRMED Relation 属于该 Topic。PostgreSQL 使用两个 `EXISTS` 读取 Knowledge 事实，
+避免 membership JOIN 复制 Candidate 行；Domain/HTTP/前端只校验 Topic 下允许 Claim-pair 形态，Claim scope 仍
+精确匹配端点。未选择 Workspace 全量 fallback，因为它会混入其他 Topic；也未增加 scan_id 绑定，因为 Candidate
+当前不保存 scan 归属，Topic membership 已是可验证且可跨刷新恢复的正式事实。
+
+预防机制包括真实 PostgreSQL 正/负 membership 回归、真实 Claim-pair 前端 fixture、OpenAPI scope 描述和
+桌面/移动浏览器 smoke。后续修改 Candidate scope 时必须同时核对 discovery 产物形态、Repository 过滤、Domain
+page validation、前端 decoder 与真实 API 浏览器结果。

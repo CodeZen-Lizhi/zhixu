@@ -63,7 +63,7 @@
 ### CAND-06 Asynchronous bounded scanning
 
 - 用户可以按 Topic 发起首版扫描；目录和 Smart Collection scope 只有在其稳定对象/查询契约可用时 additive 扩展，首版不得用路径或任意 JSON 伪装已支持。
-- 扫描通过现有 Workflow/River 运行，HTTP 返回 `202 + workflow_run_id + status_url`；刷新后可恢复进度，River 不是业务事实源。
+- 扫描通过现有 Workflow/River 运行，HTTP 返回 `202 + workflow_run_id + status_url`；`status_url` 必须指向带 Workspace 的 Candidate Scan 业务投影而非通用 Workflow URL，刷新后可恢复进度，River 不是业务事实源。
 - Scan 保存稳定 scope、版本、fingerprint、总数/已处理/候选/忽略/失败计数和终态；相同 scope/version/idempotency key 精确重放。
 - 扫描按有界页读取节点、批量检索/分类/持久化，支持取消、超时、失败重试和 response-loss replay；单个候选失败不得被记作成功，模型不可用不得降级成空候选。
 - 批量确认只编排多个独立 Confirm 命令和独立 Proposal；一项失败不得把其他项伪装为同一 Proposal 或一个不可追踪的大变更。
@@ -71,7 +71,7 @@
 ### CAND-07 API and frontend experience
 
 - OpenAPI 提供候选分页查询、单节点发现/重评、扫描创建/查询、Candidate 决策和 Relation Proposal 查询/审批所需的严格契约；所有未知字段、非法 enum/UUID/limit/cursor 均明确失败。
-- 候选列表支持按状态、Relation Type、置信度和重开原因过滤/分组，使用稳定 cursor + limit；跨 Workspace、不存在或不可见统一 Not Found。
+- 候选列表支持按状态、Relation Type、置信度和重开原因过滤/分组，使用稳定 cursor + limit；`CLAIM` scope 精确匹配 Candidate 端点，`TOPIC` scope 还包含直接 Topic Candidate 与双方都通过正式 `CONFIRMED BELONGS_TO` 归属该 Topic 的 Claim pair；跨 Workspace、不存在或不可见统一 Not Found。
 - `/graph` 保留正式图查询，在独立候选面板中展示 Candidate 卡片；视觉上使用标签、线型/图标和文字区分候选与正式 Relation，不能只靠颜色。
 - 卡片展示双方摘要、对应 Evidence 段落、建议关系、理由、置信度、发现方式、版本和重开原因；提供确认、改类型确认、忽略、误报、稍后处理和恢复动作。
 - 所有 mutation 显示 pending、成功、冲突和可恢复错误；刷新后从服务端事实恢复，不能把乐观 UI 当作已创建 Proposal 或正式 Relation。

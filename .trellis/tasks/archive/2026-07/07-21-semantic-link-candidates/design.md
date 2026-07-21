@@ -191,6 +191,12 @@ Approval：
 - `GET /api/v1/proposals/{proposal_id}` 扩展 discriminated response；现有 file response 字段保持兼容。
 - `POST /api/v1/proposals/{proposal_id}/approvals` 按 Proposal Type 分流；请求仍绑定 Revision/change hash。
 
+Candidate node scope 是判别契约：`CLAIM` 必须精确命中 source/target；`TOPIC` 可命中直接 Topic 端点，或命中
+两端 Claim 都有该 Topic 正式 `CONFIRMED BELONGS_TO` membership 的 Claim pair。membership 由 PostgreSQL
+Repository 用两个 `EXISTS` 保证，避免 JOIN 重复行；Domain/HTTP/前端只放宽 Topic 下的 Claim-pair 响应形态，
+不得改成 Workspace 全量 fallback。Scan `status_url` 使用带 Workspace 的 Candidate Scan 自链接，Workflow ID
+继续作为 runtime binding。
+
 Discover 可在有界、预计小于 3 秒且无需模型时同步返回；涉及 semantic/model 或批量时创建 scan 并返回 202。实现若无法可靠预判，统一走 scan 比静默超时更安全。
 
 错误码至少覆盖：`SEMANTIC_LINK_REQUEST_INVALID`、`SEMANTIC_LINK_NOT_FOUND`、`SEMANTIC_LINK_VERSION_CONFLICT`、`SEMANTIC_LINK_CURSOR_INVALID|STALE`、`SEMANTIC_LINK_DEPENDENCY_UNAVAILABLE`、`SEMANTIC_LINK_SCAN_*`、`RELATION_PROPOSAL_*`、`RELATION_PROPOSAL_BASE_STALE`。
@@ -199,6 +205,8 @@ Discover 可在有界、预计小于 3 秒且无需模型时同步返回；涉�
 
 - 保留 `/graph` Global/Local/Path 和现有查询 key；候选使用独立 key factory，以 Workspace + node + filters 为 key。
 - `web/src/api/semantic-links.ts` 是唯一 unknown-to-domain decoder/client，Proposal discriminated decoder 保留 file patch 兼容。
+- Topic scope decoder 接受直接 Topic 端点和 Claim-pair 形态，但不在浏览器重查 membership；Claim scope 仍按
+  `(type,id)` 精确绑定，其他形态 fail closed。
 - 节点选择后显示未处理数和独立候选面板；Candidate 不进入 `GraphCanvas` edges。
 - 卡片/列表按 confidence 和 Relation Type 分组，Evidence 按需展开；mutation 成功后失效 candidate/proposal keys，不清除正式 Graph，只有 Relation apply 成功事件/重新查询后才刷新 Graph。
 - Ignore/False Positive 使用 modal/radio reason，Confirm type 使用菜单/segmented select；按钮使用既有图标库和 tooltip，移动端对话框有焦点闭环。
