@@ -6,6 +6,7 @@ import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { setActiveWorkspaceId } from "../../app/active-workspace";
 import { GraphWorkspaceCacheBoundary } from "./GraphWorkspaceCacheBoundary";
 import { graphQueryKeys } from "./query-keys";
+import { semanticLinkQueryKeys } from "./semantic-link-query-keys";
 
 const workspaceId = "96000000-0000-4000-8000-000000000001";
 const otherWorkspaceId = "97000000-0000-4000-8000-000000000001";
@@ -29,6 +30,8 @@ describe("GraphWorkspaceCacheBoundary", () => {
   it("Graph 路由卸载后切换 Workspace 仍清理旧 Graph 缓存", async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
     queryClient.setQueryData(graphQueryKeys.evidence({ workspaceId, relationId, limit: 20 }), { sensitive: "old evidence" });
+    queryClient.setQueryData(semanticLinkQueryKeys.candidates({ workspaceId }), { candidate: "old" });
+    queryClient.setQueryData(semanticLinkQueryKeys.candidates({ workspaceId: otherWorkspaceId }), { candidate: "current" });
     queryClient.setQueryData(graphQueryKeys.global({ workspaceId: otherWorkspaceId, limit: 25 }), { current: true });
 
     render(
@@ -49,6 +52,8 @@ describe("GraphWorkspaceCacheBoundary", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "切换 Workspace" }));
     await waitFor(() => expect(queryClient.getQueryCache().findAll({ queryKey: graphQueryKeys.all(workspaceId) })).toHaveLength(0));
+    expect(queryClient.getQueryCache().findAll({ queryKey: semanticLinkQueryKeys.all(workspaceId) })).toHaveLength(0);
+    expect(queryClient.getQueryCache().findAll({ queryKey: semanticLinkQueryKeys.all(otherWorkspaceId) })).toHaveLength(1);
     expect(queryClient.getQueryCache().findAll({ queryKey: graphQueryKeys.all(otherWorkspaceId) })).toHaveLength(1);
   });
 });

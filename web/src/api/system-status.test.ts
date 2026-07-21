@@ -10,6 +10,7 @@ describe("decodeSystemStatus", () => {
         version: "0.1.0",
         database: { status: "ready" },
         graph: { status: "ready" },
+        semantic_links: { status: "ready" },
         rag: { status: "disabled" },
         request_id: "request-1",
       }),
@@ -18,6 +19,7 @@ describe("decodeSystemStatus", () => {
       version: "0.1.0",
       database: { status: "ready" },
       graph: { status: "ready" },
+      semanticLinks: { status: "ready" },
       rag: { status: "disabled" },
       requestId: "request-1",
     });
@@ -30,13 +32,14 @@ describe("decodeSystemStatus", () => {
         version: "0.1.0",
         database: { status: "ready" },
         graph: { status: "ready" },
+        semantic_links: { status: "ready" },
         rag: { status: "ready" },
         request_id: "request-1",
       }),
     ).toThrow(ApiBoundaryError);
     expect(() => decodeSystemStatus({
       status: "ready", version: "0.1.0", database: { status: "ready" }, graph: { status: "ready" },
-      rag: { status: "ready" }, request_id: "request-1", ignored_field: true,
+      semantic_links: { status: "ready" }, rag: { status: "ready" }, request_id: "request-1", ignored_field: true,
     })).toThrow(ApiBoundaryError);
   });
 
@@ -46,6 +49,7 @@ describe("decodeSystemStatus", () => {
       version: "0.1.0",
       database: { status: "ready" },
       graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
+      semantic_links: { status: "ready" },
       rag: { status: "disabled" },
       request_id: "request-graph",
     }).graph).toEqual({ status: "unavailable", reason: "graph_dependencies_unavailable" });
@@ -60,8 +64,37 @@ describe("decodeSystemStatus", () => {
         version: "0.1.0",
         database: { status: "ready" },
         graph,
+        semantic_links: { status: "ready" },
         rag: { status: "disabled" },
         request_id: "request-graph",
+      })).toThrow(ApiBoundaryError);
+    }
+  });
+
+  it("解码语义候选降级并拒绝未知状态或原因", () => {
+    expect(decodeSystemStatus({
+      status: "degraded",
+      version: "0.1.0",
+      database: { status: "ready" },
+      graph: { status: "ready" },
+      semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
+      rag: { status: "disabled" },
+      request_id: "request-semantic-links",
+    }).semanticLinks).toEqual({ status: "unavailable", reason: "semantic_link_dependencies_unavailable" });
+
+    for (const semanticLinks of [
+      { status: "disabled" },
+      { status: "unavailable", reason: "private_failure" },
+      { status: "ready", ignored: true },
+    ]) {
+      expect(() => decodeSystemStatus({
+        status: "degraded",
+        version: "0.1.0",
+        database: { status: "ready" },
+        graph: { status: "ready" },
+        semantic_links: semanticLinks,
+        rag: { status: "disabled" },
+        request_id: "request-semantic-links",
       })).toThrow(ApiBoundaryError);
     }
   });

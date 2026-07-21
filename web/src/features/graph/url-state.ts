@@ -40,6 +40,7 @@ export interface GraphUrlState {
   to: GraphNodeRef | null;
   depth: GraphDepth;
   direction: TraversalDirection;
+  candidateScanId: string | null;
   filter: GraphUrlFilter;
 }
 
@@ -158,6 +159,10 @@ export const parseGraphUrlState = (parameters: URLSearchParams): GraphUrlState =
     to,
     depth,
     direction,
+    candidateScanId: (() => {
+      const value = singleValue(parameters, "candidate_scan_id");
+      return value !== undefined && uuidPattern.test(value) ? value : null;
+    })(),
     filter,
   };
 };
@@ -208,6 +213,9 @@ export const serializeGraphUrlState = (state: GraphUrlState): URLSearchParams =>
   }
   if (from !== null && to !== null && from.type === to.type && from.id === to.id) to = null;
   parameters.set("mode", mode);
+  if (state.candidateScanId !== null && uuidPattern.test(state.candidateScanId)) {
+    parameters.set("candidate_scan_id", state.candidateScanId);
+  }
 
   if (mode === "local") {
     if (center !== null) {

@@ -529,7 +529,7 @@ const readTraversal = (value: unknown, field: string): EdgeTraversal => {
   throw invalidResponse(field);
 };
 
-const refIdentity = (value: GraphNodeRef): string => `${value.type}\u0000${value.id}`;
+export const graphNodeRefIdentity = (value: GraphNodeRef): string => `${value.type}\u0000${value.id}`;
 const sameRef = (left: GraphNodeRef, right: GraphNodeRef): boolean => left.type === right.type && left.id === right.id;
 
 const compareStrings = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
@@ -657,7 +657,7 @@ export const decodeGraphNode = (value: unknown, expected?: GraphNodeDetailInput)
   return node;
 };
 
-const relationTypeCompatible = (type: RelationType, source: NodeType, target: NodeType): boolean => {
+export const graphRelationTypeCompatible = (type: RelationType, source: NodeType, target: NodeType): boolean => {
   switch (type) {
     case "CITES": case "DERIVED_FROM": case "SUPPORTS": case "CONFLICTS_WITH":
       return source === "CLAIM" && target === "CLAIM";
@@ -670,7 +670,7 @@ const relationTypeCompatible = (type: RelationType, source: NodeType, target: No
   }
 };
 
-const isSymmetricRelation = (type: RelationType): boolean => type === "DUPLICATES" || type === "CONFLICTS_WITH";
+export const isSymmetricGraphRelationType = (type: RelationType): boolean => type === "DUPLICATES" || type === "CONFLICTS_WITH";
 
 const decodeEdge = (value: unknown, field: string, expectedWorkspaceId?: string): GraphEdge => {
   if (!isRecord(value)) throw invalidResponse(field);
@@ -688,8 +688,8 @@ const decodeEdge = (value: unknown, field: string, expectedWorkspaceId?: string)
   const evidenceHref = readString(value.evidence_href, `${field}.evidence_href`);
   const expectedHref = `/api/v1/graph/relations/${relationId}/evidence?workspace_id=${workspaceId}`;
   if (expectedWorkspaceId !== undefined && workspaceId !== expectedWorkspaceId ||
-      sameRef(source, target) || !relationTypeCompatible(type, source.type, target.type) ||
-      isSymmetricRelation(type) && refIdentity(source) > refIdentity(target) ||
+      sameRef(source, target) || !graphRelationTypeCompatible(type, source.type, target.type) ||
+      isSymmetricGraphRelationType(type) && graphNodeRefIdentity(source) > graphNodeRefIdentity(target) ||
       evidenceCount === 0 && evidenceFingerprint !== "" || evidenceCount > 0 && !hashPattern.test(evidenceFingerprint) ||
       evidenceHref !== expectedHref) {
     throw invalidResponse(field);
@@ -736,7 +736,7 @@ const decodePageMeta = (value: unknown, field: string): GraphPageMeta => {
 };
 
 const assertUniqueNodes = (nodes: GraphNode[], field: string): void => {
-  requireUnique(nodes, field, (node) => refIdentity(node));
+  requireUnique(nodes, field, (node) => graphNodeRefIdentity(node));
 };
 
 const assertUniqueEdges = (edges: GraphEdge[], field: string): void => {
@@ -744,7 +744,7 @@ const assertUniqueEdges = (edges: GraphEdge[], field: string): void => {
 };
 
 const edgeOrderKey = (edge: GraphEdge): string =>
-  `${edge.type}\u0000${refIdentity(edge.source)}\u0000${refIdentity(edge.target)}\u0000${edge.relationId}`;
+  `${edge.type}\u0000${graphNodeRefIdentity(edge.source)}\u0000${graphNodeRefIdentity(edge.target)}\u0000${edge.relationId}`;
 
 const isFormalNode = (node: GraphNode): boolean =>
   node.type === "TOPIC" ? node.topicStatus === "ACTIVE" : node.claimStatus === "CONFIRMED" || node.claimStatus === "DISPUTED";
@@ -780,8 +780,8 @@ const validateEdgeFilter = (
       filter?.relationTypes !== undefined && filter.relationTypes.length > 0 && !filter.relationTypes.includes(edge.type) ||
       filter?.relationMinConfidence !== undefined && (edge.confidence === null || edge.confidence < filter.relationMinConfidence) ||
       filter?.updatedAfter !== undefined && timestampNanoseconds(edge.updatedAt) <= timestampNanoseconds(filter.updatedAfter) ||
-      !isSymmetricRelation(edge.type) && direction === "OUTBOUND" && edge.traversal === "REVERSE" ||
-      !isSymmetricRelation(edge.type) && direction === "INBOUND" && edge.traversal === "FORWARD") {
+      !isSymmetricGraphRelationType(edge.type) && direction === "OUTBOUND" && edge.traversal === "REVERSE" ||
+      !isSymmetricGraphRelationType(edge.type) && direction === "INBOUND" && edge.traversal === "FORWARD") {
     throw invalidResponse(field);
   }
 };
@@ -837,11 +837,11 @@ export const decodeGraphNodeSearchResult = (value: unknown, expected?: GraphNode
     if (!isFormalNode(node)) throw invalidResponse(`${field}.node`);
     return { kind: item.kind, node };
   });
-  requireUnique(matches, "matches", (match) => refIdentity(match.node));
+  requireUnique(matches, "matches", (match) => graphNodeRefIdentity(match.node));
   assertStableOrder(matches, "matches.order", (left, right) => {
     const leftRank = left.kind === "EXACT" ? 0 : 1;
     const rightRank = right.kind === "EXACT" ? 0 : 1;
-    return leftRank === rightRank ? compareStrings(refIdentity(left.node), refIdentity(right.node)) : leftRank - rightRank;
+    return leftRank === rightRank ? compareStrings(graphNodeRefIdentity(left.node), graphNodeRefIdentity(right.node)) : leftRank - rightRank;
   });
   if (expected !== undefined && (workspaceId !== expected.workspaceId || matches.length > (expected.limit ?? 20))) {
     throw invalidResponse("response.binding");
@@ -862,25 +862,25 @@ export const decodeGraphNeighborhood = (value: unknown, expected?: GraphNeighbor
   const meta = decodePageMeta(value.meta, "meta");
   assertUniqueNodes(nodes, "nodes");
   assertUniqueEdges(edges, "edges");
-  assertStableOrder(nodes, "nodes.order", (left, right) => compareStrings(refIdentity(left), refIdentity(right)));
+  assertStableOrder(nodes, "nodes.order", (left, right) => compareStrings(graphNodeRefIdentity(left), graphNodeRefIdentity(right)));
   assertStableOrder(edges, "edges.order", (left, right) => compareStrings(edgeOrderKey(left), edgeOrderKey(right)));
-  requireUnique(boundaryNodes, "boundary_nodes", refIdentity);
-  const hydrated = new Set(nodes.map((node) => refIdentity(node)));
-  const boundary = new Set(boundaryNodes.map(refIdentity));
-  if (!hydrated.has(refIdentity(center)) || layerCounts.length !== completedDepth ||
+  requireUnique(boundaryNodes, "boundary_nodes", graphNodeRefIdentity);
+  const hydrated = new Set(nodes.map((node) => graphNodeRefIdentity(node)));
+  const boundary = new Set(boundaryNodes.map(graphNodeRefIdentity));
+  if (!hydrated.has(graphNodeRefIdentity(center)) || layerCounts.length !== completedDepth ||
       layerCounts.reduce((sum, count) => sum + count, 0) !== nodes.length - 1 ||
-      boundaryNodes.some((node) => hydrated.has(refIdentity(node)))) {
+      boundaryNodes.some((node) => hydrated.has(graphNodeRefIdentity(node)))) {
     throw invalidResponse("response.closure");
   }
   const referencedBoundary = new Set<string>();
   for (const edge of edges) {
     for (const endpoint of [edge.source, edge.target]) {
-      const identity = refIdentity(endpoint);
+      const identity = graphNodeRefIdentity(endpoint);
       if (!hydrated.has(identity) && !boundary.has(identity)) throw invalidResponse("edges.closure");
       if (boundary.has(identity)) referencedBoundary.add(identity);
     }
   }
-  if (boundaryNodes.some((node) => !referencedBoundary.has(refIdentity(node)))) throw invalidResponse("boundary_nodes.closure");
+  if (boundaryNodes.some((node) => !referencedBoundary.has(graphNodeRefIdentity(node)))) throw invalidResponse("boundary_nodes.closure");
   for (const node of nodes) validateNodeFilter(node, expected?.filter, "nodes.filter");
   const direction = expected?.direction ?? "BOTH";
   for (const edge of edges) validateEdgeFilter(edge, expected?.filter, direction, "edges.filter");
@@ -943,8 +943,8 @@ export const decodeGraphPathResult = (value: unknown, expected?: GraphPathInput)
     const traversedTo = edge.traversal === "REVERSE" ? edge.source : edge.target;
     if (!sameRef(current, traversedFrom) || !sameRef(next, traversedTo) ||
         expected?.relationTypes !== undefined && expected.relationTypes.length > 0 && !expected.relationTypes.includes(edge.type) ||
-        !isSymmetricRelation(edge.type) && expected?.direction === "OUTBOUND" && edge.traversal === "REVERSE" ||
-        !isSymmetricRelation(edge.type) && expected?.direction === "INBOUND" && edge.traversal === "FORWARD") {
+        !isSymmetricGraphRelationType(edge.type) && expected?.direction === "OUTBOUND" && edge.traversal === "REVERSE" ||
+        !isSymmetricGraphRelationType(edge.type) && expected?.direction === "INBOUND" && edge.traversal === "FORWARD") {
       throw invalidResponse("edges.path");
     }
   }

@@ -13,6 +13,8 @@ const otherWorkspaceId = "93000000-0000-4000-8000-000000000001";
 const topicId = "92000000-0000-4000-8000-000000000002";
 const claimId = "92000000-0000-4000-8000-000000000003";
 const relationId = "92000000-0000-4000-8000-000000000004";
+const candidateScanId = "92000000-0000-4000-8000-000000000015";
+const candidateScanWorkflowRunId = "92000000-0000-4000-8000-000000000016";
 const evidenceId = "92000000-0000-4000-8000-000000000005";
 const sourceVersionId = "92000000-0000-4000-8000-000000000006";
 const sourceSpanId = "92000000-0000-4000-8000-000000000007";
@@ -355,6 +357,56 @@ describe("GraphPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "全局" }));
     expect(await screen.findByRole("button", { name: "选择主题：Graph Projection" })).not.toHaveAttribute("data-locked", "true");
+  });
+
+  it("候选 scan URL 更新不清除正式 Graph 详情、锁定位置或固定布局", async () => {
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input);
+      if (url.pathname.endsWith("/neighborhood")) return Promise.resolve(jsonResponse(neighborhoodResponse));
+      if (url.pathname === `/api/v1/graph/nodes/TOPIC/${topicId}`) return Promise.resolve(jsonResponse(topicNode));
+      if (url.pathname.endsWith("/candidate-scans")) return Promise.resolve(jsonResponse({
+        scan_id: candidateScanId,
+        workflow_run_id: candidateScanWorkflowRunId,
+        status: "PENDING",
+        version: 1,
+        status_url: `/api/v1/workflows/${candidateScanWorkflowRunId}`,
+      }, 202));
+      if (url.pathname.endsWith(`/candidate-scans/${candidateScanId}`)) return Promise.resolve(jsonResponse({
+        id: candidateScanId,
+        workspace_id: workspaceId,
+        scope: { kind: "TOPIC", topic_id: topicId },
+        status: "RUNNING",
+        workflow_run_id: candidateScanWorkflowRunId,
+        version: 2,
+        status_url: `/api/v1/workflows/${candidateScanWorkflowRunId}`,
+        total_count: 2,
+        processed_count: 1,
+        candidate_count: 0,
+        ignored_count: 0,
+        failed_count: 0,
+        last_error: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+        completed_at: null,
+      }));
+      if (url.pathname.endsWith("/candidates")) return Promise.resolve(jsonResponse({ workspace_id: workspaceId, items: [] }));
+      return Promise.reject(new Error(`Unexpected Graph request: ${url.pathname}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage(`/graph?mode=local&center_type=TOPIC&center_id=${topicId}&depth=1&direction=BOTH`);
+
+    fireEvent.click(await screen.findByRole("button", { name: "选择主题：Graph Projection" }));
+    fireEvent.click(await screen.findByRole("button", { name: "锁定节点位置" }));
+    fireEvent.click(screen.getByRole("button", { name: "固定当前布局" }));
+    expect(screen.getByRole("button", { name: "释放固定布局" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "已锁定，选择主题：Graph Projection" })).toHaveAttribute("data-locked", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "扫描当前 Topic" }));
+    expect(await screen.findByText("Topic 扫描 · RUNNING")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "释放固定布局" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "已锁定，选择主题：Graph Projection" })).toHaveAttribute("data-locked", "true");
+    expect(screen.getByRole("heading", { name: "Graph Projection" })).toBeInTheDocument();
   });
 
   it("结果进入完整列表 fallback 时清除锁定和固定布局", async () => {

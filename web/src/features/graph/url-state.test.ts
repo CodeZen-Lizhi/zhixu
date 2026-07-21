@@ -31,6 +31,7 @@ describe("Graph URL state", () => {
       to: null,
       depth: 1,
       direction: "BOTH",
+      candidateScanId: null,
       filter: {
         nodeTypes: [...graphNodeTypes],
         relationTypes: [...graphRelationTypes],
@@ -72,6 +73,7 @@ describe("Graph URL state", () => {
       to: null,
       depth: 3,
       direction: "INBOUND",
+      candidateScanId: null,
       filter: {
         nodeTypes: ["CLAIM", "TOPIC"],
         relationTypes: ["BELONGS_TO", "SUPPORTS"],
@@ -109,6 +111,7 @@ describe("Graph URL state", () => {
       to: null,
       depth: 1,
       direction: "BOTH",
+      candidateScanId: null,
       filter: {
         nodeTypes: [...graphNodeTypes],
         relationTypes: [...graphRelationTypes],
@@ -265,5 +268,13 @@ describe("Graph URL state", () => {
 
     repeated.append("mode", "path");
     expect(parseGraphUrlState(repeated).mode).toBe("global");
+  });
+
+  it("候选 scan ID 严格 round-trip 并拒绝非法值", () => {
+    const scanId = "92000000-0000-4000-8000-00000000000a";
+    const recovered = parseGraphUrlState(new URLSearchParams({ candidate_scan_id: scanId }));
+    expect(recovered.candidateScanId).toBe(scanId);
+    expect(serializeGraphUrlState(recovered).get("candidate_scan_id")).toBe(scanId);
+    expect(parseGraphUrlState(new URLSearchParams({ candidate_scan_id: "invalid" })).candidateScanId).toBeNull();
   });
 });

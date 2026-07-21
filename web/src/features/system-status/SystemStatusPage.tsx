@@ -58,24 +58,29 @@ export const SystemStatusPage = () => {
     );
   }
 
-  const { database, graph, rag, requestId, status, version } = statusQuery.data;
-  const isReady = status === "ready" && database.status === "ready" && graph.status === "ready";
+  const { database, graph, semanticLinks, rag, requestId, status, version } = statusQuery.data;
+  const isReady = status === "ready" && database.status === "ready" && graph.status === "ready" && semanticLinks.status === "ready";
   const databaseUnavailable = database.status === "unavailable";
   const graphUnavailable = graph.status === "unavailable";
+  const semanticLinksUnavailable = semanticLinks.status === "unavailable";
   const headline = isReady
     ? "所有基础依赖可用"
     : databaseUnavailable
       ? "API 可用，但数据库不可用"
       : graphUnavailable
         ? "Graph 查询暂不可用"
-        : "RAG 能力暂不可用";
+        : semanticLinksUnavailable
+          ? "语义候选能力暂不可用"
+          : "RAG 能力暂不可用";
   const summary = isReady
     ? "ZHIXU 已连接数据库，Graph 查询可用。"
     : databaseUnavailable
       ? database.message ?? "数据库依赖暂时不可用，请检查服务配置和运行状态。"
       : graphUnavailable
         ? "知识图谱查询已暂停，请稍后重试；若持续失败，请检查服务日志。"
-        : "会话读取仍可用，但新问题提交已暂停，请检查 RAG 运行依赖。";
+        : semanticLinksUnavailable
+          ? "正式 Graph 查询仍可用，但候选扫描与审阅暂不可用，请检查语义候选依赖。"
+          : "会话读取仍可用，但新问题提交已暂停，请检查 RAG 运行依赖。";
 
   return (
     <section
@@ -105,6 +110,13 @@ export const SystemStatusPage = () => {
             <dd>
               <span aria-hidden="true">{graph.status === "ready" ? "●" : "▲"}</span>{" "}
               {graph.status === "ready" ? "可用" : "不可用"}
+            </dd>
+          </div>
+          <div>
+            <dt>语义候选</dt>
+            <dd>
+              <span aria-hidden="true">{semanticLinks.status === "ready" ? "●" : "▲"}</span>{" "}
+              {semanticLinks.status === "ready" ? "可用" : "不可用"}
             </dd>
           </div>
           <div>

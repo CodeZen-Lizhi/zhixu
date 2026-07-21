@@ -1,6 +1,7 @@
 export type SystemOverallStatus = "ready" | "degraded";
 export type DatabaseStatus = "ready" | "unavailable";
 export type GraphCapabilityStatus = "ready" | "unavailable";
+export type SemanticLinkCapabilityStatus = "ready" | "unavailable";
 export type RAGCapabilityStatus = "ready" | "disabled" | "unavailable";
 
 export interface SystemStatus {
@@ -13,6 +14,10 @@ export interface SystemStatus {
   graph: {
     status: GraphCapabilityStatus;
     reason?: "graph_dependencies_unavailable";
+  };
+  semanticLinks: {
+    status: SemanticLinkCapabilityStatus;
+    reason?: "semantic_link_dependencies_unavailable";
   };
   rag: {
     status: RAGCapabilityStatus;
@@ -85,22 +90,28 @@ const readGraphStatus = (value: unknown): GraphCapabilityStatus => {
   throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含未知 graph.status", false);
 };
 
+const readSemanticLinkStatus = (value: unknown): SemanticLinkCapabilityStatus => {
+  if (value === "ready" || value === "unavailable") return value;
+  throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含未知 semantic_links.status", false);
+};
+
 const readRAGStatus = (value: unknown): RAGCapabilityStatus => {
   if (value === "ready" || value === "disabled" || value === "unavailable") return value;
   throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含未知 rag.status", false);
 };
 
 export const decodeSystemStatus = (value: unknown): SystemStatus => {
-  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.graph) || !isRecord(value.rag)) {
+  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.graph) || !isRecord(value.semantic_links) || !isRecord(value.rag)) {
     throw new ApiBoundaryError(
       "INVALID_RESPONSE",
       "系统状态响应结构无效",
       false,
     );
   }
-  assertExactKeys(value, ["status", "version", "database", "graph", "rag", "request_id"], "root");
+  assertExactKeys(value, ["status", "version", "database", "graph", "semantic_links", "rag", "request_id"], "root");
   assertExactKeys(value.database, ["status", "message"], "database");
   assertExactKeys(value.graph, ["status", "reason"], "graph");
+  assertExactKeys(value.semantic_links, ["status", "reason"], "semantic_links");
   assertExactKeys(value.rag, ["status", "reason"], "rag");
 
   const message = value.database.message;
@@ -114,6 +125,10 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
   const graphReason = value.graph.reason;
   if (graphReason !== undefined && graphReason !== "graph_dependencies_unavailable") {
     throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含无效 graph.reason", false);
+  }
+  const semanticLinkReason = value.semantic_links.reason;
+  if (semanticLinkReason !== undefined && semanticLinkReason !== "semantic_link_dependencies_unavailable") {
+    throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含无效 semantic_links.reason", false);
   }
   const reason = value.rag.reason;
   if (reason !== undefined && reason !== "rag_dependencies_unavailable") {
@@ -130,6 +145,10 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
     graph: {
       status: readGraphStatus(value.graph.status),
       ...(graphReason === undefined ? {} : { reason: graphReason }),
+    },
+    semanticLinks: {
+      status: readSemanticLinkStatus(value.semantic_links.status),
+      ...(semanticLinkReason === undefined ? {} : { reason: semanticLinkReason }),
     },
     rag: {
       status: readRAGStatus(value.rag.status),

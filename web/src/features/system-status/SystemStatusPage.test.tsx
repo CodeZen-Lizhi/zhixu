@@ -22,6 +22,7 @@ describe("SystemStatusPage", () => {
         version: "0.1.0",
         database: { status: "ready" },
         graph: { status: "ready" },
+        semantic_links: { status: "ready" },
         rag: { status: "disabled" },
         request_id: "request-ready",
       }),
@@ -42,6 +43,7 @@ describe("SystemStatusPage", () => {
         version: "0.1.0",
         database: { status: "unavailable", message: "数据库连接失败" },
         graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
+        semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
         rag: { status: "unavailable", reason: "rag_dependencies_unavailable" },
         request_id: "request-degraded",
       }),
@@ -61,6 +63,7 @@ describe("SystemStatusPage", () => {
         version: "0.1.0",
         database: { status: "ready" },
         graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
+        semantic_links: { status: "ready" },
         rag: { status: "disabled" },
         request_id: "request-graph",
       }),
@@ -73,6 +76,26 @@ describe("SystemStatusPage", () => {
     expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled();
   });
 
+  it("语义候选依赖不可用时保持 Graph 可用并显示独立降级状态", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse({
+        status: "degraded",
+        version: "0.1.0",
+        database: { status: "ready" },
+        graph: { status: "ready" },
+        semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
+        rag: { status: "disabled" },
+        request_id: "request-semantic-links",
+      }),
+    );
+
+    renderWithAppProviders(<SystemStatusPage />);
+
+    expect(await screen.findByText("语义候选能力暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("正式 Graph 查询仍可用，但候选扫描与审阅暂不可用，请检查语义候选依赖。")).toBeInTheDocument();
+    expect(screen.getByText("语义候选", { selector: "dt" })).toBeInTheDocument();
+  });
+
   it("请求失败后允许用户重试并恢复", async () => {
     vi.mocked(fetch)
       .mockRejectedValueOnce(new TypeError("network down"))
@@ -82,6 +105,7 @@ describe("SystemStatusPage", () => {
           version: "0.1.1",
           database: { status: "ready" },
           graph: { status: "ready" },
+          semantic_links: { status: "ready" },
           rag: { status: "ready" },
           request_id: "request-retry",
         }),
