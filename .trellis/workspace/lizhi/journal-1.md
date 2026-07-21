@@ -1251,3 +1251,37 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 27: 完成语义关联候选复验与归档
+
+**Date**: 2026-07-21
+**Task**: 完成语义关联候选复验与归档
+**Branch**: `dev`
+
+### Summary
+
+修复评测忽略样本预排除与跨 Topic scan 恢复问题，完成 Approval 到正式 Relation、持久 Topic scan/River、fault/eval/browser smoke、全量门禁和两轮独立复审，并同步最终契约后归档。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `13bf907` | (see git log) |
+| `f452525` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
