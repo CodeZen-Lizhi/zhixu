@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 25
+- **Total Sessions**: 26
 - **Last Active**: 2026-07-21
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1217 | Active |
+| `journal-1.md` | ~1253 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 26 | 2026-07-21 | 交付 M7-02 Semantic Link Candidates | `fccd262`, `6075ea6`, `1a9a37d`, `0eefb99` | `dev` |
 | 25 | 2026-07-21 | 完成 Graph M7-01 收口 | `7a83de3` | `dev` |
 | 24 | 2026-07-20 | M6-04 RAG Conversation 交付归档 | `338e041` | `dev` |
 | 23 | 2026-07-19 | 完成 M6-03 Tool Registry 与安全闭环 | `648b0d4` | `dev` |

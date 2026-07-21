@@ -1215,3 +1215,39 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 26: 交付 M7-02 Semantic Link Candidates
+
+**Date**: 2026-07-21
+**Task**: 交付 M7-02 Semantic Link Candidates
+**Branch**: `dev`
+
+### Summary
+
+完成 Candidate/Decision/fingerprint、typed Relation Proposal、Approval 后 Knowledge Relation apply、durable Topic scan/River、严格前端面板、五项离线评测、fault/browser/full gates；修复 Topic pair 无界执行与 PostgreSQL 微秒时间精度导致的 Scan/Run 终态不一致，并通过主审与独立后端 SQL/前端复验。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `fccd262` | (see git log) |
+| `6075ea6` | (see git log) |
+| `1a9a37d` | (see git log) |
+| `0eefb99` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
