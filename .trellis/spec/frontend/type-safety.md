@@ -106,3 +106,69 @@ OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Fea
   stage，200/304 都必须校验该格式。
 - `web/src/events/**` 是唯一 SSE Envelope、frame、cursor 与恢复 owner；未知或非法 payload 不进入 Feature，
   成功处理事件后才推进 Last-Event-ID。
+
+## Scenario: M7-02 Semantic Link Candidate Wire And UI State
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/semantic-links.ts`、Candidate query/mutation、Topic scan、Graph URL 绑定、Candidate panel 或
+  system status 时，必须应用本契约。
+- Candidate/Scan/Proposal 是独立服务端事实；正式 Graph node/edge model 不得包含 Candidate edge。
+
+### 2. Signatures
+
+- 唯一 wire owner：`web/src/api/semantic-links.ts`；Graph canonical helper 复用 `web/src/api/graph.ts`。
+- 公共类型包括 `SemanticLinkCandidate`、`SemanticLinkCandidatePage`、`SemanticLinkScan`、
+  `SemanticLinkDecisionResult` 和 typed `knowledge_change` Proposal 判别分支。
+- `/graph` URL 可保存 `candidate_scan_id`；query key 必须绑定 Workspace、中心节点 scope、过滤器和 cursor。
+
+### 3. Contracts
+
+- 所有 HTTP success body 从 `unknown` 严格解码；Candidate source/target 必须精确绑定请求节点 scope，拒绝自环、
+  Relation Type 不兼容、非 canonical 对称端点、未知 enum/字段和非法 Evidence href。
+- FAILED Scan 必须带 `{stage,code,retryable}`；非 FAILED Scan 禁止携带 error。System Status 必须独立解码
+  `graph` 与 `semantic_links`，Candidate unavailable 不能让正式 Graph 状态消失。
+- Start scan 的响应丢失重试必须复用原 mutation variables 和原 Idempotency-Key；已有终态 Scan A 不能让新
+  Scan B 的重试退回 A 或重新调用 key factory。
+- URL 的 `candidate_scan_id` 只恢复 Candidate scan；它不属于 Graph query identity，不能重置当前详情、锁定节点
+  或固定布局。Candidate panel 刷新后从服务端 Scan/Candidate 状态恢复。
+- Mutation 只有服务端确认后才显示 Proposal/Decision 成功；error、conflict、pending 和 recovery 各自显式，
+  不能用 optimistic local state 冒充正式 Relation。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| Candidate node scope、canonical endpoint 或 Relation compatibility 不匹配 | `INVALID_RESPONSE`，不渲染部分卡片 |
+| FAILED scan 缺 error，或非 FAILED scan 带 error | 拒绝整个响应 |
+| Start response-loss | 相同 request body + Idempotency-Key 重试，不创建新命令 |
+| Candidate service unavailable | Candidate panel 可恢复错误；Graph canvas/query 继续可用 |
+| `candidate_scan_id` 变化 | 更新 Candidate 绑定，不重置 Graph selection/layout identity |
+| Confirm/Ignore/Defer 冲突 | 保留服务端错误与重新获取入口，不显示假成功 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：严格 decoder 产生 Domain UI model，Scan 刷新恢复，Candidate 卡片展示 Evidence/版本/重开原因；正式
+  canvas 只接收 canonical Relation。
+- Base：无 Candidate 或 Semantic/RAG unsupported 时展示明确 empty/capability 状态，确定性 Rule 结果仍可审阅。
+- Bad：组件本地 cast snake_case、scan 重试生成新 key、把 Candidate 画成正式边、用 scan ID 作为整个 Graph
+  workspace identity，或只靠颜色区分候选/正式关系。
+
+### 6. Tests Required
+
+- API decoder：正常/空/未知字段、node scope、自环、Relation compatibility、canonical 对称端点、Scan error
+  判别联合、typed Proposal、Problem 和 system status 独立能力。
+- Query/Component：Workspace key、cursor、response-loss 同 key、刷新恢复、mutation invalidation、全部决策、
+  focus loop、移动端、候选不进入 GraphCanvas、scan ID 不重置详情/布局。
+- Canonical `lint/typecheck/test/build`，并在真实 API 支撑的桌面与 390x844 移动 `/graph` 检查零横向溢出、
+  零 console warning/error 和 URL scan 恢复。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: scan POST 失败后调用 start factory 生成新 Idempotency-Key；Candidate scan ID 加入 Graph identity。
+Correct: 重试 mutation.variables；scan ID 只恢复 Candidate server state，Graph selection/layout 保持不变。
+
+Wrong: decoder 只校验 node ID 出现于任一端，或忽略未知 semantic_links status。
+Correct: 校验精确 source/target `(type,id)`、关系兼容和 canonical 端点；独立解码并展示能力状态。
+```

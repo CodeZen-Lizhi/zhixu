@@ -2,15 +2,20 @@
 
 本目录是 Go API、Worker、领域模块、数据库、Adapter、Workflow 和可观测性实现的规范入口。M1 已建立可运行骨架；后续业务模块必须继续遵守这里的边界，并以真实代码和任务验收结果为准。
 
+M7-01 已补充 Graph canonical read projection、公共 HTTP/真实进程 smoke、容量 benchmark 与跨层质量门禁；
+首版只读 Topic/Claim，500,000 Relation/FPS 与正式认证仍归 M10。
+M7-02 已补充 Semantic Link Candidate、typed Relation Proposal、Approval 后 Knowledge apply、durable Topic scan、
+严格故障隔离与执行计划门禁；Candidate 仍不是正式 Relation，目录/Smart Collection scope 仍未实现。
+
 ## 规范索引
 
 | 规范 | 内容 | 当前状态 |
 |---|---|---|
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
-| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M6-04 Conversation/Answer/Feedback、PLAN/RAG v2、SSE 投影、CAS 与 guarded Down；Repository/HTTP 闭环按任务继续验证 |
+| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-02 Candidate/Decision/Scan、typed Proposal、Approval→Relation UoW、LATERAL/部分索引与时间精度契约 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool Context/Permission/receipt/UNKNOWN/Web Policy 稳定错误；正式 Auth/CSRF 仍归 M10 |
 | [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M6-03 Tool/Observability 共享脱敏与受限 Tool Call 事实已记录；通用 append-only Audit/真实 exporter 归 M10 |
-| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已记录 M6-03 真实 River Tool、SSRF/命令/路径、Safe Writeback audit 与 Docker smoke 门禁；结果以任务最终记录为准 |
+| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | M7-01 Graph 与 M7-02 Semantic Link 的公共契约、River fault、eval、浏览器和独立审查门禁均已记录 |
 
 ## 开发前检查清单
 

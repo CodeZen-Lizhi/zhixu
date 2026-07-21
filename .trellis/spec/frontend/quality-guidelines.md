@@ -166,3 +166,48 @@ Correct: 详情生命周期结束即按 Workspace/Relation 清除 Evidence 分�
 Wrong: Workspace query key 和 URL 能隔离数据，因此把页面标记为已认证。
 Correct: Workspace/URL/cursor 只用于查询绑定；认证、Session、CSRF 与 Capability 等待 M10。
 ```
+
+## Scenario: M7-02 Semantic Link Frontend Quality Gate
+
+### 1. Scope / Trigger
+
+- 修改 Candidate decoder/query/panel、Topic scan、Graph URL/cache boundary 或 Semantic Link system status 时执行。
+
+### 2. Signatures
+
+- `web/src/api/semantic-links.ts`、`semantic-link-queries.ts`、`SemanticLinkCandidatePanel.tsx` 与 `/graph`。
+- Canonical 命令：前端 lint、typecheck、全部 test、production build；浏览器桌面与 390x844 移动 smoke。
+
+### 3. Contracts
+
+- Candidate 与 formal Relation 视觉、类型和数据流分离；Candidate 永不进入 GraphCanvas edge。
+- mutation pending/success/conflict/recovery 来自服务端事实，scan response-loss 复用原 Idempotency-Key。
+- `candidate_scan_id` 可恢复 scan，但不能重置 Graph detail、selection、locked position 或 fixed layout。
+- status 同时保留 `graph` 与 `semantic_links`，任一未知/缺失字段都由严格 decoder 拒绝。
+
+### 4. Validation & Error Matrix
+
+| Failure | Required result |
+|---|---|
+| Candidate/Scan response 语义漂移 | `INVALID_RESPONSE`，不显示部分卡片 |
+| Start response-loss | 同 key 重试；factory 不再次调用 |
+| Candidate unavailable | panel 显示可恢复错误，Graph 仍可操作 |
+| 移动端 dialog/drawer 关闭 | 焦点恢复，页面无横向溢出 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：刷新由 URL+服务端恢复 scan，所有决策可键盘完成，正式图不混入候选边。
+- Base：空列表/unsupported capability 显式展示，不是假成功。
+- Bad：组件 cast 原始 JSON、错误重试生成新 key、只测桌面、或以颜色单独表达 Candidate 状态。
+
+### 6. Tests Required
+
+- Decoder、query key/cursor、response-loss、mutation invalidation、Graph cache identity、全部决策、focus loop。
+- 浏览器验证真实 API、scan URL 恢复、system status、桌面/移动 overflow 与 console；后端 integration/fault/eval 仍必需。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Candidate 面板测试通过就宣称完整 Graph 交付，或 scan ID 变化时重建整个 workspace cache boundary。
+Correct: 前端全量门禁加真实 API 浏览器；scan ID 只影响 Candidate server state。
+```

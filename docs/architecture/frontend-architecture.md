@@ -170,6 +170,18 @@ Diff Draft 保存服务器 Proposal Revision，不只存浏览器。
 - 布局失败或结果超过视觉上限时只降级渲染方式，不丢失服务端节点/关系事实；Graph 查询失败不由 Error
   Boundary 吞掉，并保留稳定错误码及重新查询入口。
 
+### M7-02 Semantic Link Candidate
+
+- `web/src/api/semantic-links.ts` 是 Candidate、Decision、Topic Scan 与 typed Proposal 的唯一严格 wire owner；
+  节点 canonicalization 复用 `web/src/api/graph.ts`，组件不重复解释端点或 Relation compatibility。
+- Candidate 面板与正式 Graph canvas 分离。卡片展示双方摘要、Evidence、建议关系、理由、置信度、发现方式、
+  生成版本和 `CONTENT_CHANGED` 重开原因；支持 Confirm、改类型 Confirm、Ignore、False Positive、Defer、Resume。
+- Topic scan 的 `candidate_scan_id` 可写入 URL 用于刷新恢复，但不属于 Graph query/layout identity；变化时不能
+  重置节点/Relation 详情、锁定坐标或固定布局。
+- Start response-loss 重试复用原 mutation variables 与 Idempotency-Key。FAILED Scan 必须显示服务端
+  stage/code/retryable，非 FAILED 不接受 error；Mutation 未经服务端确认不能显示 Proposal 或正式 Relation 成功。
+- `system.status.graph` 与 `semantic_links` 独立展示；Candidate unavailable 时正式 Global/Local/Path 仍可使用。
+
 ## 10. RAG
 
 - `/chat` 和 `/chat/:conversationId` 已实现。前者创建/选择 Conversation，后者提供 Conversation rail、
@@ -244,6 +256,10 @@ PostgreSQL/API 的 Global→Local→Path→Relation Evidence smoke。浏览器�
 390×844 移动视口的三种模式、URL 恢复、画布/列表、会话布局、Evidence lazy drawer、Escape 与焦点恢复；
 两种视口均无横向溢出或应用 console warning/error。该结果不等同于 M10 的 500,000 Relation/FPS 或全产品
 六 seam 最终验收。
+
+M7-02 已通过 Candidate/Scan/typed Proposal strict decoder、Workspace query key、response-loss 同 key、刷新恢复、
+全部决策、focus loop 和 Candidate 不进入 GraphCanvas 的测试；真实 API 浏览器验收覆盖桌面与 390×844 移动
+Candidate 面板、scan URL 恢复、独立能力状态、无横向溢出和零 console warning/error。
 
 ## 17. 构建产物
 

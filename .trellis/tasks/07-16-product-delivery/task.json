@@ -38,7 +38,8 @@
     "07-19-agent-structured-output-citation",
     "07-19-tool-registry-security",
     "07-19-rag-conversation-sse",
-    "07-20-graph-projection-queries"
+    "07-20-graph-projection-queries",
+    "07-21-semantic-link-candidates"
   ],
   "parent": null,
   "relatedFiles": [],

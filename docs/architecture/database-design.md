@@ -351,6 +351,22 @@ go run -tags=integration ./internal/graph/testfixture/cmd/graphfixture cleanup -
 
 清理只接受 canonical Workspace ID，并要求测试 Workspace 的 name/root marker 精确匹配；不得用 fixture 清理业务 Workspace。`make graph-benchmark` 会自动创建并清理容量 fixture。M7-01 发布回滚只需撤下 `/graph` 前端入口和 Graph route/adapter，Knowledge 事实不变且没有数据库 Down；若未来容量证据要求新增索引或可重建投影，必须作为新的前向迁移单独评审和回滚。
 
+#### Semantic Link Candidate 与 Topic Scan（M7-02）
+
+- `graph.semantic_link_candidate`、Evidence、Decision、Command Receipt 与 Scan 保存待审阅发现和运行状态，
+  不属于正式 Graph Projection，也不替代 `core.relation`。Decision append-only，Candidate 当前状态通过 CAS 投影。
+- `change_control.proposal` 以 additive `knowledge_change` discriminator 保存结构化 Relation Revision；历史
+  `file_patch` 行不回填假路径或假正文。Approval 后由 Knowledge apply 在同一事务重新校验端点版本、Evidence、
+  Candidate/Proposal binding，并幂等写一条 Confirmed Relation。
+- Candidate fingerprint 在 Workspace 内稳定去重；Scan 只对 `(workspace_id,idempotency_key)` 唯一。
+  FAILED/CANCELLED 的旧 key 精确重放，新 key 可以创建同 fingerprint 的新 attempt。
+- Topic scan 每页最多 100 source；生产 pair SQL 使用 `CROSS JOIN LATERAL` 在每个 source 内 `LIMIT 100`。
+  部分索引 `idx_knowledge_relation_semantic_scan_topic_claim(workspace_id,target_node_id,source_node_id)` 只覆盖
+  CLAIM→TOPIC/BELONGS_TO/CONFIRMED。205 Claim 集成与 EXPLAIN 门禁证明三页 pair 数 `10000/5440/10`、
+  索引命中、Relation 无 Seq Scan、每 source 的 Limit 实际执行。
+- PostgreSQL `timestamptz` 按微秒持久化；Application 对 terminal command 与返回 projection 的时间比较允许
+  小于 1 微秒差异，防止 Scan 已提交成功后因纳秒丢失把 Workflow Run 误判为 failed。
+
 ### conflict
 
 - id。

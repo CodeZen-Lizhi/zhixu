@@ -1177,3 +1177,90 @@ Correct: Knowledge 保持唯一事实源；Graph 在只读快照中批量展开 
 Wrong: cleanup 只接收 Workspace UUID 后级联删除，benchmark 只报告一次最快耗时。
 Correct: cleanup 先锁行并核对全部测试 marker；benchmark 固定 seed、5 次预热、30 次样本、6 SQL 和索引计划。
 ```
+
+## Scenario: M7-02 Semantic Link Candidate And Durable Scan
+
+### 1. Scope / Trigger
+
+- 修改 Candidate/Decision/Evidence/Scan、typed Relation Proposal、Approval apply、Topic scan SQL 或迁移 `00024`
+  时，必须应用本契约。
+- Candidate 是 Graph 拥有的待审阅事实，不是 `core.relation`；只有 `knowledge_change` Proposal 获批并通过
+  Knowledge apply 后，才允许创建一条 canonical Confirmed Relation。
+
+### 2. Signatures
+
+```go
+type SemanticLinkScanStatePort interface {
+    Get(context.Context, foundation.ID, foundation.ID) (graphdomain.SemanticLinkScan, error)
+    AdvancePage(context.Context, graphdomain.SemanticLinkScanProgress) (graphdomain.SemanticLinkScan, error)
+    Finish(context.Context, graphdomain.SemanticLinkScanTerminal) (graphdomain.SemanticLinkScan, error)
+}
+
+type ApprovedKnowledgeChangeApplier interface {
+    ApplyApprovedKnowledgeChange(context.Context, changecontrol.ApprovedKnowledgeChange) error
+}
+```
+
+- 数据库事实：`graph.semantic_link_candidate`、`semantic_link_candidate_evidence`、
+  `semantic_link_candidate_decision`、`semantic_link_command_receipt`、`semantic_link_scan`；Change Control 以
+  additive `proposal_type=knowledge_change` 保存 typed revision，Knowledge 继续拥有 `core.relation`。
+- 公共入口：`GET /api/v1/graph/candidates`、Candidate detail/decision、
+  `POST /api/v1/graph/candidate-scans`、Scan detail，以及既有 Proposal Approval。
+
+### 3. Contracts
+
+- Candidate fingerprint 绑定 Workspace、canonical 端点及版本、Relation Type、排序 Evidence semantic hash 和
+  实际 Rule/Model/Index/Embedding/Rerank/Prompt/Schema 版本；并发重复只能形成一个当前 fingerprint 记录。
+- Evidence 行 ID 是 Candidate-owned identity；同一 Claim Source 可支撑多个 Candidate，但每个 Candidate 的
+  Evidence 必须重新生成独立 UUID，不能直接复用 `claim_source.id` 作为全局主键。
+- Ignore/False Positive/Defer/Resume/Confirm 决策 append-only；当前状态用 expected version CAS 更新。
+  同一 Candidate 最多绑定一个独立 Relation Proposal，批量确认不得合并成一个大 Proposal。
+- Approval apply 在同一数据库事务内重新校验 Candidate fingerprint、端点版本、Evidence 可达性和已有
+  canonical Relation；stale 进入 `needs_revision`，事务失败不留下半条 Relation/Proposal 状态。
+- Topic scan 通过 Workflow/River 持久化 checkpoint。`(workspace_id,idempotency_key)` 唯一保证精确重放；
+  fingerprint 仅用于查询，不得唯一化 FAILED/CANCELLED attempt，新 key 可以启动同 fingerprint 的新 attempt。
+- Topic Claim pair SQL 必须使用每个 source 的 `CROSS JOIN LATERAL ... ORDER BY claim.id LIMIT 100`；部分索引
+  `idx_knowledge_relation_semantic_scan_topic_claim` 与 CLAIM→TOPIC/BELONGS_TO/CONFIRMED 谓词完全一致。
+- PostgreSQL `timestamptz` 只有微秒精度。Application 校验持久化终态时间时允许小于 1 微秒差异；禁止把
+  纳秒级严格相等失败解释为业务失败，否则会出现 Scan 已成功而 Workflow Run 被误记 failed。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| Candidate/Scan 不存在或跨 Workspace | 相同 Not Found，不暴露资源是否存在 |
+| 同幂等键不同请求、过期 expected version、非法状态迁移 | 稳定 conflict/invalid，不覆盖历史 Decision |
+| Candidate 端点/Evidence 在 Approval 前漂移 | Proposal `needs_revision`，不创建 Relation |
+| Knowledge apply 或 Evidence 写入失败 | 整个事务回滚，Candidate 不伪装成正式确认 |
+| FAILED/CANCELLED scan 使用旧 key 重放 | 返回原 attempt；新 key 创建同 fingerprint 新 attempt |
+| Provider/Repository/Scan dependency 缺失 | Semantic Link 独立 unavailable；七个正式 Graph 查询保持 ready |
+| 持久时间与命令时间仅相差 PostgreSQL 子微秒精度 | 视为同一终态；差异达到 1 微秒仍判 projection mismatch |
+| Pair SQL 未命中部分索引、出现 relation Seq Scan 或内层 Limit 未按 source 执行 | EXPLAIN 集成门禁失败 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：用户确认 Candidate 后创建独立 typed Proposal；Approval 在重新校验后幂等写一条 Relation，重复响应
+  丢失重放不新增 Proposal、Relation 或 Evidence。
+- Base：Semantic/RAG signal 未配置时明确标记 unsupported；确定性 Rule signal 仍执行，不能把未运行能力标成
+  success 或空结果。
+- Bad：Candidate 直接写 `core.relation`、共享 `claim_source.id` 作为多个 Candidate Evidence 主键、给 scan
+  fingerprint 加唯一约束、先展开 source×全部 target 再 top-100，或严格比较纳秒时间。
+
+### 6. Tests Required
+
+- Domain/Application：fingerprint、状态机、typed Proposal hash、Approval stale/rollback/replay、终态时间精度。
+- 真实 PostgreSQL：Candidate 并发/分页/Decision、每 Candidate Evidence 唯一 ID、FAILED/CANCELLED restart、
+  205 Claim 三页 pair 数 `10000/5440/10`、跨页边界和同一生产 SQL 的 EXPLAIN。
+- `make semantic-link-integration`、`make semantic-link-fault-smoke`、`make semantic-link-eval`、
+  `make semantic-link-smoke`、迁移空库/重复/Down-Up/guarded Down、OpenAPI 与全仓 race/vet/tidy。
+- SQL 改动必须追加 `sql-code-review`；公共 API、Workflow、Proposal/Approval 和前端跨层变更必须有独立只读复验。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Scan Finish 已提交后，因为 PostgreSQL 丢失纳秒精度而返回 consistency error，Worker 再把 Run 标为 failed。
+Correct: 终态身份、版本、状态严格比较；持久时间按 PostgreSQL 微秒精度比较，避免把已提交成功误判失败。
+
+Wrong: 用 row_number() 生成全部 source×target 后筛 rank<=100。
+Correct: 对每个 source 使用 LATERAL 内层 LIMIT 100，并以部分索引和 EXPLAIN 证明执行量有界。
+```

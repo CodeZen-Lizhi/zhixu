@@ -401,6 +401,25 @@ git diff --check
 500,000 Relation 的最终 P95、图谱 FPS/交互预算或正式 Auth/Session/API Token/CSRF/Capability。后三者仍由
 M10 验收；在此之前 Workspace 隔离和 loopback 部署不得被描述为认证完成。
 
+### 13.2 M7-02 Semantic Link Candidate 专项
+
+- Gold Set 固定输出 Relation Type Accuracy、Evidence Support Rate、Candidate Precision@K、Candidate Recall、
+  Ignored Candidate Reappearance Rate；确定性 Fake 只证明管线和阈值门禁，不冒充真实模型质量。
+- `make semantic-link-integration` 贯穿 Candidate→独立 typed Proposal→Approval→一条 canonical Relation，并覆盖
+  ignore/reopen、幂等和真实 River 成功路径；`make semantic-link-fault-smoke` 覆盖 retry exhaustion、cancel、
+  completion response-loss、stale→needs_revision 和事务回滚。
+- Topic scan 的执行层回归必须覆盖大于 201 Claim、跨页 pair、每 source 100 上限和生产 SQL EXPLAIN；
+  PostgreSQL terminal timestamp 测试必须使用非整微秒输入，防止已提交成功被 Workflow 误判失败。
+- 前端覆盖 strict Candidate/Scan/Proposal decoder、response-loss 同 key、刷新恢复、所有决策、焦点与移动端；
+  浏览器必须证明 Candidate 不进入正式 canvas、system status 独立、无溢出和零 console warning/error。
+
+```bash
+ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-integration
+ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-fault-smoke
+make semantic-link-eval
+make semantic-link-smoke
+```
+
 ## 14. Review Evaluation
 
 - Question Answerability。

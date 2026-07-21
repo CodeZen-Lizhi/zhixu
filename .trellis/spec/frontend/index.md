@@ -7,6 +7,10 @@
 M1 已创建 React/Vite/TypeScript 前端骨架、Manifest、Lockfile 和可执行测试。本目录只记录稳定约束，具体行为以 `web/` 真实代码和 API 契约为准。
 M6-D 已新增 `web/src/api/search.ts` 作为 Search wire 的严格 Decoder/Client 边界；Search 页面仍归 M9，
 当前不得在组件中重复解析或用假页面冒充功能交付。
+M7-01 已交付 `/graph` 的 Topic/Claim Global/Local/Path、严格 Graph client、会话布局、完整列表 fallback、
+Evidence lazy drawer 与桌面/移动浏览器门禁；500,000 Relation/FPS 和正式认证仍归 M10。
+M7-02 已在同一 `/graph` 页面增加独立 Semantic Link Candidate 面板、durable Topic scan、严格 decoder、
+刷新恢复和完整决策 UX；Candidate 不进入正式 Graph canvas，正式认证仍归 M10。
 
 ## 已确认基线
 
@@ -24,11 +28,11 @@ M6-D 已新增 `web/src/api/search.ts` 作为 Search wire 的严格 Decoder/Clie
 | 规范 | 职责 | 当前状态/后续门禁 |
 | --- | --- | --- |
 | [目录结构](./directory-structure.md) | Feature 边界和依赖方向 | 实际根目录、Alias、Public Export |
-| [组件规范](./component-guidelines.md) | 组合、Props、UI 状态和可访问性 | UI/样式方案和代表性组件 |
+| [组件规范](./component-guidelines.md) | 组合、Props、UI 状态和可访问性 | 已记录 M7-01 Graph 画布/列表、会话布局、Evidence lazy load 与移动 drawer 焦点契约 |
 | [Hook 规范](./hook-guidelines.md) | Query、Command、URL 和 SSE Hook | Query Key Factory 和 Hook Test Harness |
 | [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | Cache Default 和持久化策略 |
-| [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | M6-D Search 使用手写严格 Decoder；Generator/通用 Runtime Validator 仍待后续统一 |
-| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | M6-D 需运行 Search decoder 单测、Lint、Type Check、Test、Build 与 OpenAPI drift gate |
+| [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 M7-02 Candidate/Scan/typed Proposal 的判别联合、scope binding 与 system status 独立能力状态 |
+| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 M7-01 Graph 与 M7-02 Candidate 的 decoder、URL/query、交互、浏览器和后端真实门禁 |
 
 ## 开发前检查清单
 

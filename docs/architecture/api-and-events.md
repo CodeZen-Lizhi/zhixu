@@ -224,10 +224,10 @@ Workflow 失败，不伪装成业务 Refusal。`allow_original_sources/allow_web
 
 Graph v1 是 Knowledge Topic/Claim/Relation 的只读 PostgreSQL 投影，不是第二事实源。正式节点端点只接受
 `TOPIC|CLAIM`；默认关系状态是 `CONFIRMED`，只有显式过滤时才返回并标记 `STALE`。`SUGGESTED`、
-`REJECTED` 和 `DEPRECATED` 不会伪装成正式图。Graph API 不创建、确认或修改 Relation，候选关联归
-M7-02。
+`REJECTED` 和 `DEPRECATED` 不会伪装成正式图。七个正式 Graph Query API 不创建、确认或修改 Relation。
+M7-02 另设 Candidate/Scan 命令边界；Candidate 确认只创建 typed Proposal，Approval 后才由 Knowledge 写 Relation。
 
-当前 OpenAPI 3.1 定义 7 个端点：
+当前 OpenAPI 3.1 定义七个正式 Graph Query 端点和五个 Candidate/Scan 端点：
 
 | 方法与路径 | 语义 |
 |---|---|
@@ -238,11 +238,20 @@ M7-02。
 | `GET /api/v1/graph/nodes/{node_type}/{node_id}?workspace_id=` | 返回一个 Workspace-scoped Topic 或 Claim 判别节点。 |
 | `GET /api/v1/graph/relations/{relation_id}?workspace_id=` | 返回 Relation 本体、确认/有效期和 Evidence count/fingerprint/href，不返回 Evidence 正文。 |
 | `GET /api/v1/graph/relations/{relation_id}/evidence?workspace_id=&cursor=&limit=` | 按需分页返回每条 Evidence 自有的 reason、applicability、provenance 和可打开 Source/Span href；默认 20，最大 100。 |
+| `GET /api/v1/graph/candidates?workspace_id=&node_type=&node_id=&cursor=&limit=` | 按 Workspace 和可选节点 scope 分页返回可审阅 Candidate；支持状态、关系类型、置信度与重开原因过滤。 |
+| `GET /api/v1/graph/candidates/{candidate_id}?workspace_id=` | 返回 Candidate、双方版本摘要、Evidence、决策历史摘要和 Proposal 绑定。 |
+| `POST /api/v1/graph/candidates/{candidate_id}/decisions` | 使用 `Idempotency-Key` 与 `expected_version` 执行 Confirm/改类型 Confirm/Ignore/False Positive/Defer/Resume。 |
+| `POST /api/v1/graph/candidate-scans` | 只接受 TOPIC scope，返回 `202 + workflow_run_id + status_url`；相同 key 精确重放。 |
+| `GET /api/v1/graph/candidate-scans/{scan_id}?workspace_id=` | 返回持久进度、计数、checkpoint、终态和安全错误摘要。 |
 
-三个 `POST` 只是为复杂过滤和遍历参数提供结构化请求体，仍是无业务副作用的 Query，不要求
-`Idempotency-Key`。四个 `GET` 的 `workspace_id` 必填且只能出现一次；未知或重复 query key、未知 JSON
+前三个正式 Graph `POST` 只是为复杂过滤和遍历参数提供结构化请求体，仍是无业务副作用的 Query，不要求
+`Idempotency-Key`。四个正式 Graph `GET` 的 `workspace_id` 必填且只能出现一次；未知或重复 query key、未知 JSON
 字段、非法 UUID/enum/depth/limit/budget 均明确失败。Global、Neighborhood、Path 响应只携带
 Evidence summary/href；前端打开 Relation 详情并明确展开 Evidence 后才请求 Evidence page。
+
+Candidate decision/scan 的 POST 是有副作用命令，必须严格 JSON 并使用 `Idempotency-Key`；跨 Workspace 或不可见
+统一 Not Found。Candidate 依赖缺失返回独立 503，`system.status.semantic_links` 与 `graph` 分开报告，不能把
+Candidate 故障伪装为 Graph 故障或空候选。
 
 Global、depth=1 Neighborhood 和 Relation Evidence 使用独立的 opaque result-window cursor。Cursor v1
 由 API 进程生命周期内的随机密钥进行 HMAC-SHA256 签名，并绑定 query kind、Workspace、规范请求

@@ -72,6 +72,18 @@ _Avoid_: Relation Type、图谱边
 支撑 Relation 的来源、理由、适用条件和确认信息。
 _Avoid_: 相似度分数
 
+**Semantic Link Candidate**:
+系统根据可追踪证据发现、等待用户处理的潜在 Topic 或 Claim 关系；它不是 Relation，确认前不进入正式图谱。
+_Avoid_: Suggested Relation、Relation Assessment、Search Candidate、正式图谱边
+
+**Candidate Evidence**:
+支撑一次 Semantic Link Candidate 评估的不可变来源定位和判断依据；只有 Relation Proposal 获批并再次校验后，才能形成 Relation Evidence。
+_Avoid_: Relation Evidence、Search 排名、模型原始响应
+
+**Candidate Fingerprint**:
+绑定候选双方版本、建议关系类型、证据和实际生成版本的稳定身份；相同身份用于去重，重要输入变化产生新的候选评估。
+_Avoid_: Relation Fingerprint、Evidence Fingerprint、缓存键
+
 **Graph Query Projection**:
 从 Topic、Claim、Relation 和 Relation Evidence 权威事实即时构建或可重建的只读图谱查询模型；它只负责探索、分页和路径，不接受独立写入。
 _Avoid_: 图谱事实表、Relation 副本、可直接编辑的网络图
@@ -113,6 +125,10 @@ _Avoid_: 已执行修改、草稿全文
 **Approval**:
 用户对某个 Proposal 版本作出的明确决定。
 _Avoid_: 自动校验、写回成功
+
+**Relation Proposal**:
+由用户确认 Semantic Link Candidate 后形成、等待统一 Approval 的结构化关系变更建议；它不等于已经创建或确认 Relation。
+_Avoid_: Candidate、Relation、文件补丁 Proposal
 
 **Safe Writeback**:
 将已批准 Proposal 应用为正式文件和版本变更并完成验证的过程。

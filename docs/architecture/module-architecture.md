@@ -159,12 +159,14 @@ Interface：
 - QueryNeighborhood。
 - FindPath。
 - DiscoverCandidates。
+- ReviewCandidate / StartTopicScan。
 
 隐藏：
 
 - 聚类。
 - 图查询投影。
 - 候选去重。
+- Candidate/Decision/Scan 持久化与 typed Proposal 编排。
 - 布局缓存。
 
 ### Collection Module

@@ -76,8 +76,8 @@
 
 - [ ] Article Optimization。
 - [ ] Artifact。
-- [ ] Graph。
-- [ ] Semantic Links。
+- [x] Graph（M7-01 Topic/Claim canonical read projection）。
+- [x] Semantic Links（M7-02 Candidate→typed Proposal→Approval→Relation，Topic scan）。
 - [ ] Smart Collection。
 - [ ] Knowledge Health。
 - [ ] Timeline/Impact。
@@ -91,7 +91,7 @@
 - [x] Dashboard（M1 系统状态与 M3 Workspace 页面基础）。
 - [ ] Inbox/Document。
 - [ ] Diff/Approval。
-- [ ] Graph UI。
+- [x] Graph UI（Global/Local/Path、Evidence 与 Candidate panel）。
 - [ ] Review UI。
 - [ ] Workflow UI。
 - [x] RAG Conversation UI（`/chat`、阶段恢复、Citation/Feedback、桌面/移动）。

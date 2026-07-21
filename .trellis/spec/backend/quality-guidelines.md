@@ -325,3 +325,49 @@ Correct: 三类后端门禁分别验证 wire、composition 和容量；前端命
 Wrong: 将 20k/100k 一跳 P95 和 Workspace 隔离标记为 500k/FPS/Auth 已完成。
 Correct: 只声明 M7-01 的参考容量与只读闭环，M10 边界保持显式待验收。
 ```
+
+## Scenario: M7-02 Semantic Link Cross-Layer Quality Gate
+
+### 1. Scope / Trigger
+
+- Candidate、typed Proposal、Approval apply、Topic scan、OpenAPI、production wiring 或 `/graph` Candidate UI 任一变化时执行。
+
+### 2. Signatures
+
+- 门禁：`semantic-link-integration`、`semantic-link-fault-smoke`、`semantic-link-eval`、`semantic-link-smoke`。
+- 最终还必须执行全仓 Go race/vet/tidy、`make test`、迁移测试、OpenAPI、前端 lint/typecheck/test/build、
+  Trellis validate、diff/secret/body scan。
+
+### 3. Contracts
+
+- integration 使用真实 PostgreSQL/River，证明 Candidate→独立 typed Proposal→Approval→一条 Relation。
+- fault 覆盖 retry exhaustion、cancel、response-loss、stale→needs_revision 和事务回滚，不允许 Scan/Run 假一致。
+- eval 固定五项指标和全部版本；Fake 结果只标记 deterministic pipeline。
+- 正式 Graph readiness 与 Semantic Link readiness 独立，候选故障不能让七个查询端点失效。
+
+### 4. Validation & Error Matrix
+
+| Failure | Required result |
+|---|---|
+| Scan 成功但 Workflow failed，或反之 | 门禁失败并查根因，不标 flake 跳过 |
+| Approval 已提交但返回错误 | exact replay 恢复同 Relation，不重复副作用 |
+| Candidate dependency unavailable | 独立 503/status；Graph 仍 ready |
+| eval 版本缺失或 Fake 冒充真实质量 | 门禁失败 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：真实数据库、真实 River、公共 HTTP、浏览器和离线指标各自提供不同层证据。
+- Base：Semantic/RAG unsupported 是显式 capability，不影响 Rule 信号和正式 Graph。
+- Bad：只跑 mock/unit、把一次 flaky 重跑通过当关闭、或用 readiness 代替业务 smoke。
+
+### 6. Tests Required
+
+- 任务 `implement.md` Checkpoint C/D 全部命令；迁移空库/重复/Down-Up/guarded Down。
+- 主 Agent 使用 `go-review`、`code-review-and-quality`、`sql-code-review`；公共 API/DB/Workflow/前端由独立 reviewer 复验。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: fault smoke 偶发出现 Scan=SUCCEEDED/Run=failed，重跑一次通过后忽略。
+Correct: 提高复现率、锁定持久时间精度根因、加入真实 PostgreSQL 回归，再连续运行原场景。
+```

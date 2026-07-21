@@ -4,7 +4,8 @@
 
 Graph v1 把 Knowledge 中同一 Workspace 的 Topic、Claim 和 canonical Relation 投影为可探索、可验证的
 只读图。Knowledge 仍是唯一事实源；Graph 查询和 `/graph` 页面不创建、确认、修改或删除 Relation。
-语义候选关联及其 Proposal 流程归 M7-02，不是当前 Graph v1 的已交付能力。
+M7-02 在独立边界交付 Semantic Link Candidate：候选可审阅、忽略、误报、稍后处理或确认，但确认只创建
+typed Relation Proposal；只有统一 Approval 和 Knowledge apply 成功后才产生正式 Relation。
 
 ## 2. 图谱查询
 
@@ -90,42 +91,50 @@ flowchart TD
 - 空 Global、空 Evidence、no-path、预算截断、timeout 和 stale 是不同状态，页面分别显示并提供重试、
   返回第一页或缩小范围的恢复动作。
 
-## 9. 后续候选关联（M7-02，未在 v1 实现）
+## 9. 语义候选关联（M7-02 已交付）
 
 ```mermaid
 flowchart TD
-    A["Target Node"] --> B["Lexical/Semantic Candidate Search"]
-    B --> C["Exclude Confirmed/Rejected"]
-    C --> D["Classify Relation"]
-    D --> E["Review Evidence"]
-    E --> F["Save Candidate Fingerprint"]
-    F --> G{"User"}
-    G -->|"Confirm"| H["Relation Proposal"]
-    G -->|"Ignore"| I["Ignore Fingerprint"]
+    A["Topic scan or node discovery"] --> B["Bounded deterministic signals"]
+    B --> C["Exclude formal Relation and active Proposal"]
+    C --> D["Validate relation and Evidence"]
+    D --> E["Persist Candidate fingerprint"]
+    E --> F{"User decision"}
+    F -->|"Confirm / change type"| G["Independent typed Relation Proposal"]
+    F -->|"Ignore / false positive / defer"| H["Append-only decision"]
+    G --> I["Unified Approval"]
+    I --> J["Knowledge recheck and atomic apply"]
+    J --> K["Canonical Confirmed Relation"]
 ```
 
-### 候选去重
+### 范围、发现与去重
 
-Fingerprint：
+- 首版只支持当前 Workspace 的 Topic/Claim；Document、目录和 Smart Collection 等待稳定对象契约后扩展。
+- 标题/别名、术语、共同 Topic、同 Source 四类确定性信号有真实数据路径；Semantic/RAG 在当前未配置时
+  显式 `unsupported`，不能静默标成已执行或返回假空结果。
+- Topic scan 使用 Workflow/River，按 100 节点页持久化 checkpoint；每个 source 最多查询 100 个后续
+  Topic Claim，SQL 在 LATERAL 内层提前 Limit，避免先展开全量 pair。
+- Candidate fingerprint 绑定：
 
-- Node Versions。
-- Relation Type。
-- Evidence Hash。
-- Model/Rule Version。
+  - Node Versions。
+  - Relation Type。
+  - 排序后的 Evidence semantic hash。
+  - 实际参与的 Model/Rule/Index/Embedding/Rerank/Prompt/Schema Version。
 
-内容变化后才重新推荐。
+相同 fingerprint 并发只形成一个 Candidate；Ignore/False Positive 后不重复 Active。内容、Evidence 或生成版本
+变化才创建新评估，并以 `CONTENT_CHANGED` 解释重开。
 
-### 后续图谱操作
+### 决策、Proposal 与正式写入
 
-- 建立/修改关系。
-- 合并重复。
-- 打开 Conflict。
-- 补来源。
-- 创建 Collection/Artifact/Review。
+- Candidate 决策使用 `Idempotency-Key + expected_version`，历史 append-only；Confirm 和改类型 Confirm 为每项
+  创建独立 `knowledge_change` Proposal，不把批量项合并为一个不可追踪变更。
+- Approval 绑定唯一 Revision/change hash；Knowledge apply 重新校验端点版本、Evidence 和 Candidate 绑定，
+  stale 进入 `needs_revision`，失败事务回滚，response-loss 重放不新增 Relation。
+- `/graph` 的 Candidate 面板展示双方摘要、Evidence、建议关系、置信度、发现方式、版本和重开原因；Candidate
+  不进入正式 canvas/list edge。Candidate 能力故障与 Graph readiness/status 分离。
 
-修改类操作全部 Proposal。
-
-候选模型不可用时，已经确认的 Graph 查询仍应可用；本条是 M7-02 的隔离要求，不代表当前已有候选 API。
+当前 API 以 OpenAPI 3.1 为准，包括 Candidate page/detail/decision 和 Candidate Scan create/detail；正式 Graph
+七个只读端点继续无副作用。
 
 ## 10. 验证、性能边界与回滚
 
@@ -133,6 +142,10 @@ Fingerprint：
 ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-integration
 ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-smoke
 ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-benchmark
+ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-integration
+ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-fault-smoke
+make semantic-link-eval
+make semantic-link-smoke
 ```
 
 - `graph-integration` 用真实 PostgreSQL 和公共 HTTP 验证 Global→Local→Path→Evidence、response-loss
@@ -148,10 +161,13 @@ ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-benchmark
 - Graph v1 没有新增 Graph 表或写入链路。发布回滚使用上一版 API binary 与 Web assets，停用 Graph
   route/UI 和只读 adapter 即可；必须保留 Knowledge Topic/Claim/Relation/Evidence 事实，不以删除事实
   数据作为回滚手段。
+- M7-02 回滚停用 Candidate route/panel 和 Semantic Link Worker definition；保留 Candidate/Decision/Scan、typed
+  Proposal 和已确认 Relation 数据，迁移只前进，不能通过 Down 删除业务事实。
 
 ## 11. 验收
 
 - Global/Local/Path 只返回当前 Workspace 的 Topic/Claim 正式投影，状态、方向、闭包和截断语义明确。
 - Relation 可打开按需分页的 Evidence 和 Source/Span href，列表/路径响应不提前加载正文。
 - Cursor 篡改、跨查询和 stale 可区分；no-path、404、422、503 和布局 fallback 不互相伪装。
-- Graph 查询无写副作用，候选和所有修改操作继续通过后续 Candidate/Proposal/Approval 流程实现。
+- Graph 查询无写副作用；Candidate 与正式 Relation 明确分离，所有确认都经 typed Proposal→Approval→Knowledge
+  apply，Topic scan 可恢复且 Candidate 故障不拖垮正式 Graph。

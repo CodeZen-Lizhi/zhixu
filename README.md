@@ -38,7 +38,8 @@ The project is under active development. The current skeleton provides a Go API 
 项目正在开发中。当前仓库已经提供 Go API/Worker、React Web、PostgreSQL + pgvector，以及可运行的
 Workspace→摄取→索引→Search/Evidence、Conversation→RAG Answer→SSE→Feedback 闭环和 Graph v1。
 Graph v1 只读投影 Knowledge 中同一 Workspace 的 Topic、Claim 和 canonical Relation，不是第二事实源；
-语义关联候选、Health/Timeline、Collection/表格、Artifact/Review/Interview、正式认证、安全/50 万容量/
+M7-02 已交付独立 Semantic Link Candidate、Topic scan、typed Relation Proposal 与 Approval 后 Knowledge apply；
+Health/Timeline、Collection/表格、Artifact/Review/Interview、正式认证、安全/50 万容量/
 备份门禁和最终发布验收仍属于后续 M7–M11，不能把当前状态视为整个产品已经交付。
 
 ## Local development
@@ -96,11 +97,19 @@ Then open <http://127.0.0.1:8080>. Health and dependency status are available at
 - `GET /api/v1/graph/nodes/{node_type}/{node_id}?workspace_id=...`: read one Graph node projection
 - `GET /api/v1/graph/relations/{relation_id}?workspace_id=...`: read one formal Relation projection
 - `GET /api/v1/graph/relations/{relation_id}/evidence?workspace_id=...`: lazily page Relation Evidence
+- `GET /api/v1/graph/candidates?workspace_id=...`: page reviewable Semantic Link Candidates
+- `GET /api/v1/graph/candidates/{candidate_id}?workspace_id=...`: read Candidate Evidence and current decision state
+- `POST /api/v1/graph/candidates/{candidate_id}/decisions`: confirm/change type/ignore/false-positive/defer/resume with idempotency and expected version
+- `POST /api/v1/graph/candidate-scans`: start a durable Topic scan and return `202 + workflow_run_id`
+- `GET /api/v1/graph/candidate-scans/{scan_id}?workspace_id=...`: restore persisted scan progress and terminal error summary
 
 Open `/graph` for the real Global, Local and Path views. The three Graph `POST` endpoints are still side-effect-free
 queries; they use JSON bodies for structured filters and traversal bounds, while the four `GET` endpoints require a
 single `workspace_id` query parameter. Graph cursors are process-local HMAC-signed pagination tokens, not
 authorization credentials. The current loopback-only security boundary described below also applies to Graph.
+The Candidate panel is visually and structurally separate from canonical edges. Confirm creates a typed Proposal;
+only Approval plus Knowledge apply creates a formal Relation. Candidate dependency failures do not disable the seven
+canonical Graph query endpoints.
 
 Open `/chat` to create/select a Conversation and `/chat/{conversationId}` to continue it. Chat is fail-closed by
 default because `.env.example` sets `ZHIXU_CHAT_PROVIDER=disabled`. To execute Questions, configure the same
@@ -162,6 +171,9 @@ ZHIXU_TEST_DATABASE_URL='postgres://...' make rag-integration
 ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-integration
 ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-smoke
 ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-benchmark
+ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-integration
+ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-fault-smoke
+make semantic-link-eval semantic-link-smoke
 make compose-rag-smoke
 ```
 
@@ -180,6 +192,11 @@ covered by the integration/smoke gates rather than this capacity shape. Benchmar
 `tmp/graph-benchmark/`. This M7 reference gate does not replace M10 validation for claim-heavy or mixed topologies,
 500,000 Relations, or the final graph UI FPS gate. Graph v1 adds no Graph table or write path; release rollback uses
 the previous binary/web assets and must retain the canonical Knowledge facts.
+
+The Semantic Link gates verify real River Topic scans, bounded cross-page discovery, Candidate decisions, typed
+Proposal/Approval→Relation apply, retry/cancel/response-loss faults, OpenAPI, deterministic evaluation and frontend
+decoder/component behavior. Rollback disables the Candidate routes/panel and scan worker while retaining Candidate,
+Proposal and already confirmed Relation facts; migrations are forward-only.
 
 `compose-check` validates the Compose model. A release candidate must also run
 `make compose-up`, query both API and Worker readiness, exercise the documented
