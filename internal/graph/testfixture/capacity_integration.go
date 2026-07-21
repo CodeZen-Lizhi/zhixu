@@ -122,7 +122,7 @@ func SeedCapacity(ctx context.Context, pool *pgxpool.Pool, seed string) (Capacit
 
 // CleanupCapacity 仅删除 marker 完整匹配的 Graph 容量测试 Workspace。
 func CleanupCapacity(ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID) error {
-	return cleanupWorkspace(ctx, pool, workspaceID, capacityWorkspaceName, capacityWorkspaceRoot(workspaceID))
+	return cleanupWorkspace(ctx, pool, workspaceID, capacityWorkspaceName, capacityWorkspaceRoot(workspaceID), false)
 }
 
 func capacityWorkspaceRoot(workspaceID foundation.ID) string {

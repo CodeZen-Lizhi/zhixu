@@ -15,6 +15,7 @@ const claimId = "92000000-0000-4000-8000-000000000003";
 const relationId = "92000000-0000-4000-8000-000000000004";
 const candidateScanId = "92000000-0000-4000-8000-000000000015";
 const candidateScanWorkflowRunId = "92000000-0000-4000-8000-000000000016";
+const candidateScanStatusUrl = `/api/v1/graph/candidate-scans/${candidateScanId}?workspace_id=${workspaceId}`;
 const evidenceId = "92000000-0000-4000-8000-000000000005";
 const sourceVersionId = "92000000-0000-4000-8000-000000000006";
 const sourceSpanId = "92000000-0000-4000-8000-000000000007";
@@ -369,7 +370,7 @@ describe("GraphPage", () => {
         workflow_run_id: candidateScanWorkflowRunId,
         status: "PENDING",
         version: 1,
-        status_url: `/api/v1/workflows/${candidateScanWorkflowRunId}`,
+        status_url: candidateScanStatusUrl,
       }, 202));
       if (url.pathname.endsWith(`/candidate-scans/${candidateScanId}`)) return Promise.resolve(jsonResponse({
         id: candidateScanId,
@@ -378,7 +379,7 @@ describe("GraphPage", () => {
         status: "RUNNING",
         workflow_run_id: candidateScanWorkflowRunId,
         version: 2,
-        status_url: `/api/v1/workflows/${candidateScanWorkflowRunId}`,
+        status_url: candidateScanStatusUrl,
         total_count: 2,
         processed_count: 1,
         candidate_count: 0,

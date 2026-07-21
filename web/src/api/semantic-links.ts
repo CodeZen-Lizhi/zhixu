@@ -822,11 +822,15 @@ export const decodeSemanticLinkCandidatePage = (
         candidate.source.type === request.nodeType && candidate.source.id === request.nodeId;
       const targetMatchesNode = request.nodeType !== undefined && request.nodeId !== undefined &&
         candidate.target.type === request.nodeType && candidate.target.id === request.nodeId;
+      // Topic-scoped results may be Claim pairs produced by a Topic scan. The
+      // backend repository owns the persisted BELONGS_TO membership predicate.
+      const matchesTopicClaimPair = request.nodeType === "TOPIC" &&
+        candidate.source.type === "CLAIM" && candidate.target.type === "CLAIM";
       if ((statuses !== null && !statuses.has(candidate.status)) ||
           (relationTypes !== null && !relationTypes.has(candidate.proposedRelationType)) ||
           (reopenedReasons !== null && (candidate.reopenedReason === null || !reopenedReasons.has(candidate.reopenedReason))) ||
           (request.minConfidence !== undefined && candidate.confidence < request.minConfidence) ||
-          (request.nodeType !== undefined && request.nodeId !== undefined && !sourceMatchesNode && !targetMatchesNode)) {
+          (request.nodeType !== undefined && request.nodeId !== undefined && !sourceMatchesNode && !targetMatchesNode && !matchesTopicClaimPair)) {
         throw invalidResponse(`candidate_page.items[${String(index)}]`);
       }
       const previous = items[index - 1];
@@ -904,16 +908,21 @@ const readScanScope = (value: unknown, field: string): SemanticLinkScanScope => 
   };
 };
 
-export const decodeSemanticLinkScanAcceptance = (value: unknown): SemanticLinkScanAcceptance => {
+const semanticLinkScanStatusHref = (scanId: string, workspaceId: string): string =>
+  `/api/v1/graph/candidate-scans/${scanId}?workspace_id=${workspaceId}`;
+
+export const decodeSemanticLinkScanAcceptance = (value: unknown, workspaceId: string): SemanticLinkScanAcceptance => {
   if (!isRecord(value)) throw invalidResponse("scan_acceptance");
   assertExactKeys(value, ["scan_id", "workflow_run_id", "status", "version", "status_url"], "scan_acceptance");
+  const scanId = readUuid(value.scan_id, "scan_acceptance.scan_id");
   const workflowRunId = readUuid(value.workflow_run_id, "scan_acceptance.workflow_run_id");
+  const expectedWorkspaceId = readUuid(workspaceId, "scan_acceptance.workspace_id");
   return {
-    scanId: readUuid(value.scan_id, "scan_acceptance.scan_id"),
+    scanId,
     workflowRunId,
     status: readScanStatus(value.status, "scan_acceptance.status"),
     version: readInteger(value.version, "scan_acceptance.version", 1),
-    statusUrl: readHref(value.status_url, `/api/v1/workflows/${workflowRunId}`, "scan_acceptance.status_url"),
+    statusUrl: readHref(value.status_url, semanticLinkScanStatusHref(scanId, expectedWorkspaceId), "scan_acceptance.status_url"),
   };
 };
 
@@ -961,7 +970,7 @@ export const decodeSemanticLinkScan = (value: unknown, request?: GetSemanticLink
     status,
     workflowRunId,
     version: readInteger(value.version, "scan.version", 1),
-    statusUrl: readHref(value.status_url, `/api/v1/workflows/${workflowRunId}`, "scan.status_url"),
+    statusUrl: readHref(value.status_url, semanticLinkScanStatusHref(id, workspaceId), "scan.status_url"),
     totalCount: readInteger(value.total_count, "scan.total_count", 0),
     processedCount: readInteger(value.processed_count, "scan.processed_count", 0),
     candidateCount: readInteger(value.candidate_count, "scan.candidate_count", 0),
@@ -1312,8 +1321,9 @@ export const decideSemanticLinkCandidate = async (
   }, (payload) => readDecisionReceipt(payload, input));
 };
 
-export const startSemanticLinkScan = async (input: StartSemanticLinkScanInput): Promise<SemanticLinkScanAcceptance> =>
-  request("/api/v1/graph/candidate-scans", {
+export const startSemanticLinkScan = async (input: StartSemanticLinkScanInput): Promise<SemanticLinkScanAcceptance> => {
+  const workspaceId = readUuid(input.workspaceId, "workspaceId", invalidRequest);
+  return request("/api/v1/graph/candidate-scans", {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -1321,10 +1331,11 @@ export const startSemanticLinkScan = async (input: StartSemanticLinkScanInput): 
       "Idempotency-Key": validateIdempotencyKey(input.idempotencyKey),
     },
     body: JSON.stringify({
-      workspace_id: readUuid(input.workspaceId, "workspaceId", invalidRequest),
+      workspace_id: workspaceId,
       scope: serializeScanScope(input.scope),
     }),
-  }, decodeSemanticLinkScanAcceptance);
+  }, (payload) => decodeSemanticLinkScanAcceptance(payload, workspaceId));
+};
 
 export const getSemanticLinkScan = async (
   input: GetSemanticLinkScanInput,

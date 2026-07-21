@@ -234,6 +234,16 @@ func TestValidateSemanticLinkCandidateQueryAndPage(t *testing.T) {
 	if err := ValidateSemanticLinkCandidatePage(query, page); err != nil {
 		t.Fatalf("ValidateSemanticLinkCandidatePage() error = %v", err)
 	}
+	topicRef := candidateRef(knowledge.NodeTypeTopic, 99)
+	topicQuery := query
+	topicQuery.NodeRef = &topicRef
+	if err := ValidateSemanticLinkCandidatePage(topicQuery, page); err != nil {
+		t.Fatalf("Topic-scoped Claim pair page error = %v", err)
+	}
+	unrelatedClaimRef := candidateRef(knowledge.NodeTypeClaim, 99)
+	unrelatedClaimQuery := query
+	unrelatedClaimQuery.NodeRef = &unrelatedClaimRef
+	assertCandidateCode(t, ValidateSemanticLinkCandidatePage(unrelatedClaimQuery, page), ErrorCodeSemanticLinkCandidateResultInvalid)
 
 	badOrder := page
 	badOrder.Items = []SemanticLinkCandidate{second, active}

@@ -49,8 +49,8 @@ func (writer *SemanticLinkDiscoveryCandidateWriter) PersistDiscoveryCandidates(c
 	}
 	result := graphapp.SemanticLinkDiscoveryCandidateWriteResult{}
 	for _, hit := range request.Discovery.Items {
-		relationType, confidence, reason, eligible := classifyRuleDiscoveryHit(hit)
-		if !eligible {
+		classification := graphdomain.ClassifySemanticLinkRuleDiscoveryHit(hit)
+		if !classification.Eligible {
 			continue
 		}
 		key := discoveryPairKey(hit.Source, hit.Target)
@@ -79,8 +79,8 @@ func (writer *SemanticLinkDiscoveryCandidateWriter) PersistDiscoveryCandidates(c
 		candidate := graphdomain.SemanticLinkCandidate{
 			ID: candidateID, WorkspaceID: request.WorkspaceID,
 			Source: pair.Source.Endpoint, Target: pair.Target.Endpoint,
-			SuggestedRelationType: relationType, Status: graphdomain.SemanticLinkCandidateStatusActive,
-			Reason: reason, Confidence: confidence,
+			SuggestedRelationType: classification.RelationType, Status: graphdomain.SemanticLinkCandidateStatusActive,
+			Reason: classification.Reason, Confidence: classification.Confidence,
 			DiscoveryMethods: append([]graphdomain.SemanticLinkDiscoveryMethod(nil), hit.Methods...),
 			Evidence:         candidateEvidence, Generation: request.Generation.Rule,
 			Version: 1, CreatedAt: now, UpdatedAt: now,
@@ -202,33 +202,6 @@ func discoveryPairKey(left, right knowledge.NodeRef) string {
 		leftKey, rightKey = rightKey, leftKey
 	}
 	return leftKey + "\x00" + rightKey
-}
-
-func classifyRuleDiscoveryHit(hit graphdomain.SemanticLinkDiscoveryHit) (knowledge.RelationType, float64, string, bool) {
-	deterministic := 0
-	titleAlias := false
-	for _, method := range hit.Methods {
-		switch method {
-		case graphdomain.SemanticLinkDiscoveryMethodTitleAlias:
-			titleAlias = true
-			deterministic++
-		case graphdomain.SemanticLinkDiscoveryMethodTermMatch,
-			graphdomain.SemanticLinkDiscoveryMethodCommonTopic,
-			graphdomain.SemanticLinkDiscoveryMethodSharedSource:
-			deterministic++
-		}
-	}
-	if titleAlias {
-		return knowledge.RelationDuplicates, 0.95, "Matching normalized statements suggest a duplicate Claim; review the evidence before approval.", true
-	}
-	if deterministic < 2 {
-		return "", 0, "", false
-	}
-	confidence := 0.65 + float64(deterministic-2)*0.05
-	if confidence > 0.85 {
-		confidence = 0.85
-	}
-	return knowledge.RelationComplements, confidence, "Multiple deterministic signals suggest complementary Claims; review the evidence before approval.", true
 }
 
 func mergeCandidateEvidence(groups ...[]graphdomain.SemanticLinkCandidateEvidence) []graphdomain.SemanticLinkCandidateEvidence {

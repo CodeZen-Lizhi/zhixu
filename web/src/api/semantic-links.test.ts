@@ -31,6 +31,7 @@ const targetCandidateId = "92000000-0000-4000-8000-00000000000e";
 const scanId = "92000000-0000-4000-8000-00000000000f";
 const workflowRunId = "92000000-0000-4000-8000-000000000010";
 const decisionId = "92000000-0000-4000-8000-000000000011";
+const scanStatusUrl = `/api/v1/graph/candidate-scans/${scanId}?workspace_id=${workspaceId}`;
 const at = "2026-07-20T08:10:12.123456789Z";
 const later = "2026-07-20T09:10:12.123456789Z";
 const fingerprint = "a".repeat(64);
@@ -126,6 +127,19 @@ describe("Semantic Link decoders", () => {
     });
   });
 
+  it("Topic scope 接受由正式 membership 约束的 Claim pair", () => {
+    const result = decodeSemanticLinkCandidatePage({
+      workspace_id: workspaceId,
+      items: [candidatePayload],
+    }, { workspaceId, nodeType: "TOPIC", nodeId: topicId });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      source: { type: "CLAIM", id: claimId },
+      target: { type: "CLAIM", id: otherClaimId },
+    });
+  });
+
   it("解码 Go domain 的 rule generation 和 index-only generation", () => {
     const rule = decodeSemanticLinkCandidatePage({
       workspace_id: workspaceId,
@@ -196,7 +210,11 @@ describe("Semantic Link decoders", () => {
 
   it.each([
     ["同类型但不同 ID 的请求范围", candidatePayload, { workspaceId, nodeType: "CLAIM" as const, nodeId: targetCandidateId }],
-    ["同 ID 但不同类型的请求范围", candidatePayload, { workspaceId, nodeType: "TOPIC" as const, nodeId: claimId }],
+    ["同 ID 但不同类型的请求范围", {
+      ...candidatePayload,
+      target: { ...candidatePayload.target, type: "TOPIC", id: targetCandidateId },
+      proposed_relation_type: "BELONGS_TO",
+    }, { workspaceId, nodeType: "TOPIC" as const, nodeId: claimId }],
     ["自环端点", { ...candidatePayload, target: { ...candidatePayload.source } }, { workspaceId }],
     ["不兼容关系类型", { ...candidatePayload, proposed_relation_type: "BELONGS_TO" }, { workspaceId }],
     ["未规范化的对称端点", {
@@ -340,7 +358,7 @@ describe("Semantic Link clients", () => {
       workflow_run_id: workflowRunId,
       status: "PENDING",
       version: 1,
-      status_url: `/api/v1/workflows/${workflowRunId}`,
+      status_url: scanStatusUrl,
     }, 202));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -479,7 +497,7 @@ describe("Semantic Link clients", () => {
       status: "RUNNING",
       workflow_run_id: workflowRunId,
       version: 2,
-      status_url: `/api/v1/workflows/${workflowRunId}`,
+      status_url: scanStatusUrl,
       total_count: 10,
       processed_count: 4,
       candidate_count: 2,
@@ -505,7 +523,7 @@ describe("Semantic Link clients", () => {
       status: "FAILED",
       workflow_run_id: workflowRunId,
       version: 4,
-      status_url: `/api/v1/workflows/${workflowRunId}`,
+      status_url: scanStatusUrl,
       total_count: 10,
       processed_count: 4,
       candidate_count: 2,

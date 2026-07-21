@@ -30,6 +30,11 @@ type seedOutput struct {
 	SupportRelationID    string `json:"support_relation_id"`
 }
 
+type semanticLinkSeedOutput struct {
+	seedOutput
+	DiscoveryClaimID string `json:"discovery_claim_id"`
+}
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -85,6 +90,37 @@ func run(args []string, writer io.Writer) error {
 			return errors.New("graph fixture output failed")
 		}
 		return nil
+	case "seed-semantic-link":
+		fixture, seedErr := testfixture.SeedSemanticLinkBrowser(ctx, pool)
+		if seedErr != nil {
+			return errors.New("semantic-link browser fixture seed failed")
+		}
+		output := semanticLinkSeedOutput{
+			seedOutput: seedOutput{
+				WorkspaceID:          string(fixture.WorkspaceID),
+				PrimaryTopicID:       string(fixture.PrimaryTopicID),
+				SecondaryTopicID:     string(fixture.SecondaryTopicID),
+				FirstClaimID:         string(fixture.FirstClaimID),
+				SecondClaimID:        string(fixture.SecondClaimID),
+				MembershipRelationID: string(fixture.MembershipRelationID),
+				SupportRelationID:    string(fixture.SupportRelationID),
+			},
+			DiscoveryClaimID: string(fixture.DiscoveryClaimID),
+		}
+		if err := json.NewEncoder(writer).Encode(output); err != nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cleanupCancel()
+			if cleanupErr := testfixture.CleanupSemanticLinkBrowser(cleanupCtx, pool, fixture.WorkspaceID); cleanupErr != nil {
+				return errors.Join(errors.New("semantic-link browser fixture output failed"), errors.New("semantic-link browser fixture cleanup after output failure failed"))
+			}
+			return errors.New("semantic-link browser fixture output failed")
+		}
+		return nil
+	case "cleanup-semantic-link":
+		if err := testfixture.CleanupSemanticLinkBrowser(ctx, pool, workspaceID); err != nil {
+			return errors.New("semantic-link browser fixture cleanup failed")
+		}
+		return nil
 	case "cleanup":
 		if err := testfixture.Cleanup(ctx, pool, workspaceID); err != nil {
 			return errors.New("graph fixture cleanup failed")
@@ -99,6 +135,9 @@ func parseArgs(args []string) (string, foundation.ID, error) {
 	if len(args) == 1 && args[0] == "seed" {
 		return "seed", "", nil
 	}
+	if len(args) == 1 && args[0] == "seed-semantic-link" {
+		return "seed-semantic-link", "", nil
+	}
 	if len(args) == 3 && args[0] == "cleanup" && args[1] == "--workspace-id" {
 		workspaceID, err := foundation.ParseID(args[2])
 		if err != nil || string(workspaceID) != args[2] {
@@ -106,5 +145,12 @@ func parseArgs(args []string) (string, foundation.ID, error) {
 		}
 		return "cleanup", workspaceID, nil
 	}
-	return "", "", errors.New("usage: graphfixture seed | graphfixture cleanup --workspace-id <uuid>")
+	if len(args) == 3 && args[0] == "cleanup-semantic-link" && args[1] == "--workspace-id" {
+		workspaceID, err := foundation.ParseID(args[2])
+		if err != nil || string(workspaceID) != args[2] {
+			return "", "", errors.New("cleanup-semantic-link requires a canonical --workspace-id")
+		}
+		return "cleanup-semantic-link", workspaceID, nil
+	}
+	return "", "", errors.New("usage: graphfixture seed | seed-semantic-link | cleanup --workspace-id <uuid> | cleanup-semantic-link --workspace-id <uuid>")
 }

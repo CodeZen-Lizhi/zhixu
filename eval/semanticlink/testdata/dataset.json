@@ -1,11 +1,7 @@
 {
-  "schema_version": "semantic-link-eval/v1",
-  "versions": {
-    "dataset": "semantic-link-gold/v1",
-    "rule": "semantic-link-rules/v1",
-    "workflow": "graph.semantic-link-topic-scan/v1",
-    "provider_mode": "DETERMINISTIC_FAKE"
-  },
+  "schema_version": "semantic-link-eval/v2",
+  "dataset_version": "semantic-link-gold/v2",
+  "workspace_id": "10000000-0000-4000-8000-000000000001",
   "k": 3,
   "expected": [
     { "key": "claim-001|claim-002", "relation_type": "DUPLICATES" },
@@ -13,12 +9,45 @@
     { "key": "claim-005|claim-006", "relation_type": "COMPLEMENTS" }
   ],
   "ignored_unchanged": [
-    "claim-007|claim-008",
-    "claim-009|claim-010"
+    { "key": "claim-007|claim-008", "fingerprint": "ecabcaad6446af64e8a5af46d39d2e1ccae2a14c2dd8d970eff5971e328f68bb" },
+    { "key": "claim-009|claim-010", "fingerprint": "1f247f5e14b111d6f34950e78dbbd29fb177eb864be3fbf1e6c18ddf2f65aa7c" }
   ],
-  "predictions": [
-    { "key": "claim-001|claim-002", "relation_type": "DUPLICATES", "evidence_supported": true, "score": 0.95 },
-    { "key": "claim-003|claim-004", "relation_type": "COMPLEMENTS", "evidence_supported": true, "score": 0.85 },
-    { "key": "claim-005|claim-006", "relation_type": "COMPLEMENTS", "evidence_supported": true, "score": 0.80 }
+  "pairs": [
+    {
+      "key": "claim-001|claim-002",
+      "source": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000001", "version": 1, "summary": "Event loop semantics", "excerpt": "A deterministic event loop statement.", "labels": ["Event loop semantics"], "terms": ["scheduler-a"], "topic_ids": [], "source_version_ids": [] },
+      "target": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000002", "version": 1, "summary": "Equivalent event loop semantics", "excerpt": "The same statement with a normalized alias.", "labels": ["event loop semantics"], "terms": ["scheduler-b"], "topic_ids": [], "source_version_ids": [] },
+      "evidence": [{ "id": "50000000-0000-4000-8000-000000000001", "source_version_id": "60000000-0000-4000-8000-000000000001", "source_span_id": "61000000-0000-4000-8000-000000000001", "semantic_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reason": "Both confirmed claims use the same normalized statement.", "excerpt": "Event loop semantics are equivalent." }]
+    },
+    {
+      "key": "claim-003|claim-004",
+      "source": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000003", "version": 1, "summary": "Backpressure limits producers", "excerpt": "Producer pressure is bounded.", "labels": ["Producer limits"], "terms": ["backpressure"], "topic_ids": ["30000000-0000-4000-8000-000000000001"], "source_version_ids": [] },
+      "target": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000004", "version": 1, "summary": "Consumers signal demand", "excerpt": "Consumer demand complements producer limits.", "labels": ["Consumer demand"], "terms": ["backpressure"], "topic_ids": ["30000000-0000-4000-8000-000000000001"], "source_version_ids": [] },
+      "evidence": [{ "id": "50000000-0000-4000-8000-000000000002", "source_version_id": "60000000-0000-4000-8000-000000000002", "source_span_id": "61000000-0000-4000-8000-000000000002", "semantic_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "reason": "The claims share a term and a confirmed Topic.", "excerpt": "Backpressure connects producer limits and consumer demand." }]
+    },
+    {
+      "key": "claim-005|claim-006",
+      "source": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000005", "version": 1, "summary": "Retries require idempotency", "excerpt": "Retry safety depends on stable request identity.", "labels": ["Retry identity"], "terms": ["retry"], "topic_ids": ["30000000-0000-4000-8000-000000000002"], "source_version_ids": ["60000000-0000-4000-8000-000000000003"] },
+      "target": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000006", "version": 1, "summary": "Receipts recover lost responses", "excerpt": "A receipt makes response loss recoverable.", "labels": ["Response recovery"], "terms": ["receipt"], "topic_ids": ["30000000-0000-4000-8000-000000000002"], "source_version_ids": ["60000000-0000-4000-8000-000000000003"] },
+      "evidence": [{ "id": "50000000-0000-4000-8000-000000000003", "source_version_id": "60000000-0000-4000-8000-000000000003", "source_span_id": "61000000-0000-4000-8000-000000000003", "semantic_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "reason": "The claims share a Topic and an immutable Source Version.", "excerpt": "Idempotency and receipts jointly handle retry response loss." }]
+    },
+    {
+      "key": "claim-007|claim-008",
+      "source": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000007", "version": 1, "summary": "Ignored duplicate alpha", "excerpt": "An unchanged ignored statement.", "labels": ["Ignored duplicate"], "terms": [], "topic_ids": [], "source_version_ids": [] },
+      "target": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000008", "version": 1, "summary": "Ignored duplicate beta", "excerpt": "The matching ignored statement.", "labels": ["ignored duplicate"], "terms": [], "topic_ids": [], "source_version_ids": [] },
+      "evidence": [{ "id": "50000000-0000-4000-8000-000000000004", "source_version_id": "60000000-0000-4000-8000-000000000004", "source_span_id": "61000000-0000-4000-8000-000000000004", "semantic_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "reason": "This exact fingerprint was previously ignored.", "excerpt": "The ignored evidence remains unchanged." }]
+    },
+    {
+      "key": "claim-009|claim-010",
+      "source": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000009", "version": 1, "summary": "Ignored complement alpha", "excerpt": "An ignored complementary statement.", "labels": ["Ignored alpha"], "terms": ["unchanged"], "topic_ids": ["30000000-0000-4000-8000-000000000003"], "source_version_ids": [] },
+      "target": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000010", "version": 1, "summary": "Ignored complement beta", "excerpt": "A second ignored complementary statement.", "labels": ["Ignored beta"], "terms": ["unchanged"], "topic_ids": ["30000000-0000-4000-8000-000000000003"], "source_version_ids": [] },
+      "evidence": [{ "id": "50000000-0000-4000-8000-000000000005", "source_version_id": "60000000-0000-4000-8000-000000000005", "source_span_id": "61000000-0000-4000-8000-000000000005", "semantic_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "reason": "This exact complementary fingerprint was previously ignored.", "excerpt": "The ignored complementary evidence remains unchanged." }]
+    },
+    {
+      "key": "claim-011|claim-012",
+      "source": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000011", "version": 1, "summary": "Single signal alpha", "excerpt": "Only one deterministic signal is present.", "labels": ["Single alpha"], "terms": ["single-signal"], "topic_ids": [], "source_version_ids": [] },
+      "target": { "type": "CLAIM", "id": "20000000-0000-4000-8000-000000000012", "version": 1, "summary": "Single signal beta", "excerpt": "The rule threshold should reject this pair.", "labels": ["Single beta"], "terms": ["single-signal"], "topic_ids": [], "source_version_ids": [] },
+      "evidence": [{ "id": "50000000-0000-4000-8000-000000000006", "source_version_id": "60000000-0000-4000-8000-000000000006", "source_span_id": "61000000-0000-4000-8000-000000000006", "semantic_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "reason": "One deterministic signal is intentionally below the candidate threshold.", "excerpt": "A lone term match must not create a Candidate." }]
+    }
   ]
 }

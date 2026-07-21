@@ -380,9 +380,37 @@ func queryCandidateWindow(ctx context.Context, db DB, request graphdomain.Semant
 	args := []any{string(request.WorkspaceID)}
 	next := 2
 	if request.NodeRef != nil {
-		query.WriteString(fmt.Sprintf(" AND ((c.source_node_type=$%d AND c.source_node_id=$%d) OR (c.target_node_type=$%d AND c.target_node_id=$%d))", next, next+1, next, next+1))
-		args = append(args, string(request.NodeRef.Type), string(request.NodeRef.ID))
-		next += 2
+		if request.NodeRef.Type == knowledge.NodeTypeTopic {
+			// Topic scan evaluates pairs of confirmed member Claims, so Topic scope
+			// includes those pairs without weakening Claim endpoint filtering.
+			query.WriteString(fmt.Sprintf(` AND (
+				(c.source_node_type='TOPIC' AND c.source_node_id=$%d) OR
+				(c.target_node_type='TOPIC' AND c.target_node_id=$%d) OR
+				(c.source_node_type='CLAIM' AND c.target_node_type='CLAIM' AND
+				 EXISTS (SELECT 1 FROM core.relation source_membership
+					WHERE source_membership.workspace_id=c.workspace_id
+					  AND source_membership.source_node_type='CLAIM'
+					  AND source_membership.source_node_id=c.source_node_id
+					  AND source_membership.target_node_type='TOPIC'
+					  AND source_membership.target_node_id=$%d
+					  AND source_membership.relation_type='BELONGS_TO'
+					  AND source_membership.status='CONFIRMED')
+				 AND EXISTS (SELECT 1 FROM core.relation target_membership
+					WHERE target_membership.workspace_id=c.workspace_id
+					  AND target_membership.source_node_type='CLAIM'
+					  AND target_membership.source_node_id=c.target_node_id
+					  AND target_membership.target_node_type='TOPIC'
+					  AND target_membership.target_node_id=$%d
+					  AND target_membership.relation_type='BELONGS_TO'
+					  AND target_membership.status='CONFIRMED'))
+			)`, next, next, next, next))
+			args = append(args, string(request.NodeRef.ID))
+			next++
+		} else {
+			query.WriteString(fmt.Sprintf(" AND ((c.source_node_type=$%d AND c.source_node_id=$%d) OR (c.target_node_type=$%d AND c.target_node_id=$%d))", next, next+1, next, next+1))
+			args = append(args, string(request.NodeRef.Type), string(request.NodeRef.ID))
+			next += 2
+		}
 	}
 	if len(request.Statuses) > 0 {
 		query.WriteString(fmt.Sprintf(" AND c.status=ANY($%d::text[])", next))

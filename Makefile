@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check tool-integration rag-integration graph-integration graph-smoke graph-benchmark semantic-link-integration semantic-link-fault-smoke semantic-link-smoke compose-check docker-build compose-up compose-down compose-search-smoke compose-tool-smoke compose-rag-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check tool-integration rag-integration graph-integration graph-smoke graph-benchmark semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke compose-check docker-build compose-up compose-down compose-search-smoke compose-tool-smoke compose-rag-smoke
 
 test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet agent-eval openapi-check compose-check
 
@@ -77,8 +77,12 @@ semantic-link-fault-smoke:
 	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
 	go test -race -tags=integration -count=1 -p 1 -run 'TestSemanticLinkTopicScan(ReplaysAfterWorkflowCompletionResponseLoss|CancellationConvergesWithWorkflow)|TestSemanticLinkTopicScanRiver(RecoversFromRetryablePageFault|PersistsFaultAfterRetryBudget)|TestApprovedCandidateApply(MarksNeedsRevisionOnEndpointOrProvenanceDrift|RollsBackRelationAndProposalOnEvidenceFailure|RecoversCommitResponseLoss)' ./internal/graph/adapter/postgres ./internal/changecontrol/... ./internal/knowledge/...
 
-semantic-link-smoke: openapi-check semantic-link-eval
-	go test -race ./internal/graph/... ./internal/changecontrol/... ./internal/knowledge/... ./internal/workflow/...
+semantic-link-browser-smoke:
+	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
+	bash deploy/semantic-link-browser-smoke.sh
+
+semantic-link-smoke: openapi-check semantic-link-eval semantic-link-browser-smoke
+	ZHIXU_TEST_DATABASE_URL= go test -race ./internal/graph/... ./internal/changecontrol/... ./internal/knowledge/... ./internal/workflow/...
 	npm run test --prefix web -- --run src/api/semantic-links.test.ts src/features/graph/semantic-link-queries.test.tsx src/features/graph/SemanticLinkCandidatePanel.test.tsx
 
 compose-check:

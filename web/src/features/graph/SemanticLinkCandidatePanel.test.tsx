@@ -8,6 +8,7 @@ import { SemanticLinkCandidatePanel } from "./SemanticLinkCandidatePanel";
 const workspaceId = "92000000-0000-4000-8000-000000000001";
 const claimId = "92000000-0000-4000-8000-000000000002";
 const topicId = "92000000-0000-4000-8000-000000000003";
+const otherClaimId = "92000000-0000-4000-8000-00000000000c";
 const candidateId = "92000000-0000-4000-8000-000000000004";
 const sourceVersionId = "92000000-0000-4000-8000-000000000005";
 const sourceSpanId = "92000000-0000-4000-8000-000000000006";
@@ -17,6 +18,7 @@ const proposalId = "92000000-0000-4000-8000-000000000009";
 const at = "2026-07-20T08:10:12.123456789Z";
 const candidateHref = `/api/v1/workspaces/${workspaceId}/source-versions/${sourceVersionId}`;
 const spanHref = `${candidateHref}/spans/${sourceSpanId}`;
+const scanStatusUrl = (scanId: string): string => `/api/v1/graph/candidate-scans/${scanId}?workspace_id=${workspaceId}`;
 
 const candidatePayload = {
   id: candidateId,
@@ -50,6 +52,15 @@ const candidatePayload = {
 };
 
 const pagePayload = { workspace_id: workspaceId, items: [candidatePayload] };
+const topicScanPagePayload = {
+  workspace_id: workspaceId,
+  items: [{
+    ...candidatePayload,
+    target: { ...candidatePayload.target, type: "CLAIM", id: otherClaimId, summary: "Related claim", excerpt: "Related claim context" },
+    proposed_relation_type: "COMPLEMENTS",
+    reason: "The Topic scan found complementary Claim evidence.",
+  }],
+};
 
 const jsonResponse = (payload: unknown, status = 200): Response => new Response(JSON.stringify(payload), {
   status,
@@ -90,7 +101,7 @@ describe("SemanticLinkCandidatePanel", () => {
         workflow_run_id: workflowRunId,
         status: "PENDING",
         version: 1,
-        status_url: `/api/v1/workflows/${workflowRunId}`,
+        status_url: scanStatusUrl(scanId),
       }, 202));
       if (url.pathname.endsWith(`/candidate-scans/${scanId}`)) {
         scanReads += 1;
@@ -101,7 +112,7 @@ describe("SemanticLinkCandidatePanel", () => {
           status: "SUCCEEDED",
           workflow_run_id: workflowRunId,
           version: 3,
-          status_url: `/api/v1/workflows/${workflowRunId}`,
+          status_url: scanStatusUrl(scanId),
           total_count: 2,
           processed_count: 2,
           candidate_count: 1,
@@ -115,7 +126,7 @@ describe("SemanticLinkCandidatePanel", () => {
       }
       if (url.pathname.endsWith("/candidates")) {
         candidateCalls += 1;
-        return Promise.resolve(jsonResponse(pagePayload));
+        return Promise.resolve(jsonResponse(topicScanPagePayload));
       }
       return Promise.reject(new Error(`unexpected request ${url.pathname}`));
     });
@@ -123,6 +134,7 @@ describe("SemanticLinkCandidatePanel", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "扫描当前 Topic" }));
     expect(await screen.findByText("Topic 扫描 · SUCCEEDED")).toBeInTheDocument();
+    expect(await screen.findByText("Candidate · 未进入正式图")).toBeInTheDocument();
     await waitFor(() => expect(candidateCalls).toBeGreaterThanOrEqual(1));
     expect(scanReads).toBe(1);
 
@@ -154,7 +166,7 @@ describe("SemanticLinkCandidatePanel", () => {
           workflow_run_id: workflowRunId,
           status: "PENDING",
           version: 1,
-          status_url: `/api/v1/workflows/${workflowRunId}`,
+          status_url: scanStatusUrl(scanId),
         }, 202));
       }
       if (url.pathname.endsWith(`/candidate-scans/${scanId}`)) return Promise.resolve(jsonResponse({
@@ -164,7 +176,7 @@ describe("SemanticLinkCandidatePanel", () => {
         status: "SUCCEEDED",
         workflow_run_id: workflowRunId,
         version: 3,
-        status_url: `/api/v1/workflows/${workflowRunId}`,
+        status_url: scanStatusUrl(scanId),
         total_count: 2,
         processed_count: 2,
         candidate_count: 1,
@@ -215,7 +227,7 @@ describe("SemanticLinkCandidatePanel", () => {
         status: "SUCCEEDED",
         workflow_run_id: oldWorkflowRunId,
         version: 3,
-        status_url: `/api/v1/workflows/${oldWorkflowRunId}`,
+        status_url: scanStatusUrl(oldScanId),
         total_count: 2,
         processed_count: 2,
         candidate_count: 1,
@@ -234,7 +246,7 @@ describe("SemanticLinkCandidatePanel", () => {
           workflow_run_id: newWorkflowRunId,
           status: "PENDING",
           version: 1,
-          status_url: `/api/v1/workflows/${newWorkflowRunId}`,
+          status_url: scanStatusUrl(newScanId),
         }, 202));
       }
       if (url.pathname.endsWith(`/candidate-scans/${newScanId}`)) return Promise.resolve(jsonResponse({
@@ -244,7 +256,7 @@ describe("SemanticLinkCandidatePanel", () => {
         status: "RUNNING",
         workflow_run_id: newWorkflowRunId,
         version: 2,
-        status_url: `/api/v1/workflows/${newWorkflowRunId}`,
+        status_url: scanStatusUrl(newScanId),
         total_count: 2,
         processed_count: 1,
         candidate_count: 0,
@@ -290,7 +302,7 @@ describe("SemanticLinkCandidatePanel", () => {
         status: "RUNNING",
         workflow_run_id: workflowRunId,
         version: 2,
-        status_url: `/api/v1/workflows/${workflowRunId}`,
+        status_url: scanStatusUrl(scanId),
         total_count: 10,
         processed_count: 4,
         candidate_count: 2,
@@ -317,6 +329,57 @@ describe("SemanticLinkCandidatePanel", () => {
     expect(screen.getByText("4 / 10 节点")).toBeInTheDocument();
   });
 
+  it("切换到其他 Topic 时清除不匹配的持久 scan 绑定", async () => {
+    const scanId = "92000000-0000-4000-8000-00000000000a";
+    const workflowRunId = "92000000-0000-4000-8000-00000000000b";
+    const otherTopicId = "93000000-0000-4000-8000-000000000002";
+    const onPersistedScanIdChange = vi.fn();
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input);
+      if (url.pathname.endsWith(`/candidate-scans/${scanId}`)) return Promise.resolve(jsonResponse({
+        id: scanId,
+        workspace_id: workspaceId,
+        scope: { kind: "TOPIC", topic_id: topicId },
+        status: "RUNNING",
+        workflow_run_id: workflowRunId,
+        version: 2,
+        status_url: scanStatusUrl(scanId),
+        total_count: 10,
+        processed_count: 4,
+        candidate_count: 2,
+        ignored_count: 1,
+        failed_count: 0,
+        last_error: null,
+        created_at: at,
+        updated_at: at,
+        completed_at: null,
+      }));
+      if (url.pathname.endsWith("/candidates")) return Promise.resolve(jsonResponse({ workspace_id: workspaceId, items: [] }));
+      return Promise.reject(new Error(`unexpected request ${url.pathname}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const view = render(<QueryClientProvider client={queryClient}><MemoryRouter><SemanticLinkCandidatePanel
+      workspaceId={workspaceId}
+      nodeScope={{ type: "TOPIC", id: topicId }}
+      persistedScanId={scanId}
+      onPersistedScanIdChange={onPersistedScanIdChange}
+    /></MemoryRouter></QueryClientProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "审阅候选" }));
+    expect(await screen.findByText("Topic 扫描 · RUNNING")).toBeInTheDocument();
+
+    view.rerender(<QueryClientProvider client={queryClient}><MemoryRouter><SemanticLinkCandidatePanel
+      workspaceId={workspaceId}
+      nodeScope={{ type: "TOPIC", id: otherTopicId }}
+      persistedScanId={scanId}
+      onPersistedScanIdChange={onPersistedScanIdChange}
+    /></MemoryRouter></QueryClientProvider>);
+
+    await waitFor(() => expect(onPersistedScanIdChange).toHaveBeenCalledWith(null));
+    expect(screen.queryByText("Topic 扫描 · RUNNING")).not.toBeInTheDocument();
+  });
+
   it("刷新后展示持久 FAILED scan 的稳定错误和重新发起入口", async () => {
     const scanId = "92000000-0000-4000-8000-00000000000a";
     const workflowRunId = "92000000-0000-4000-8000-00000000000b";
@@ -329,7 +392,7 @@ describe("SemanticLinkCandidatePanel", () => {
         status: "FAILED",
         workflow_run_id: workflowRunId,
         version: 4,
-        status_url: `/api/v1/workflows/${workflowRunId}`,
+        status_url: scanStatusUrl(scanId),
         total_count: 10,
         processed_count: 4,
         candidate_count: 2,

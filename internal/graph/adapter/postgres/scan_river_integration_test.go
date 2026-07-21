@@ -16,6 +16,7 @@ import (
 	graphworkflow "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/workflow"
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
+	"github.com/CodeZen-Lizhi/zhixu/internal/graph/testfixture"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
@@ -60,7 +61,7 @@ func TestSemanticLinkTopicScanRunsThroughRealRiverToCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if started.Replayed || started.StatusURL != "/api/v1/workflows/"+string(started.Scan.WorkflowRunID) {
+	if started.Replayed || started.StatusURL != "/api/v1/graph/candidate-scans/"+string(started.Scan.ID)+"?workspace_id="+string(started.Scan.WorkspaceID) {
 		t.Fatalf("start=%+v", started)
 	}
 	if err := waitForSemanticLinkRiverScan(ctx, pool, started.Scan.ID, graphdomain.SemanticLinkScanStatusSucceeded, workflowdomain.RunStatusSucceeded); err != nil {
@@ -73,6 +74,93 @@ func TestSemanticLinkTopicScanRunsThroughRealRiverToCandidate(t *testing.T) {
 	})
 	if err != nil || !replayed.Replayed || replayed.Scan.ID != started.Scan.ID || replayed.Scan.WorkflowRunID != started.Scan.WorkflowRunID {
 		t.Fatalf("replay=%+v err=%v", replayed, err)
+	}
+}
+
+func TestSemanticLinkBrowserFixtureCleanupRemovesScanWorkflowAndRiverFacts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	pool := newSemanticLinkScanTestPool(t, ctx)
+	fixture, err := testfixture.SeedSemanticLinkBrowser(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureCleaned := false
+	t.Cleanup(func() {
+		if fixtureCleaned {
+			return
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cleanupCancel()
+		if cleanupErr := testfixture.CleanupSemanticLinkBrowser(cleanupCtx, pool, fixture.WorkspaceID); cleanupErr != nil {
+			t.Errorf("cleanup semantic-link browser fixture: %v", cleanupErr)
+		}
+	})
+
+	command, registry, coordinator := newSemanticLinkRiverRuntime(t, pool)
+	workerClient := startSemanticLinkTestWorker(t, ctx, pool, registry, coordinator, "semantic-link-browser-cleanup")
+	workerStopped := false
+	t.Cleanup(func() {
+		if !workerStopped {
+			stopSemanticLinkTestWorker(workerClient)
+		}
+	})
+	started, err := command.StartTopicScan(ctx, graphapp.SemanticLinkTopicScanRequest{
+		WorkspaceID:    fixture.WorkspaceID,
+		TopicID:        fixture.PrimaryTopicID,
+		IdempotencyKey: "semantic-link-browser-cleanup",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForSemanticLinkRiverScan(ctx, pool, started.Scan.ID, graphdomain.SemanticLinkScanStatusSucceeded, workflowdomain.RunStatusSucceeded); err != nil {
+		t.Fatal(err)
+	}
+	stopSemanticLinkTestWorker(workerClient)
+	workerStopped = true
+
+	var nodeID foundation.ID
+	var jobID int64
+	var candidates int
+	if err := pool.QueryRow(ctx, `SELECT node.id,job.id
+		FROM workflow.node_run node
+		JOIN workflow.river_job job ON job.kind=$2 AND job.args->>'node_run_id'=node.id::text
+		WHERE node.run_id=$1`, string(started.Scan.WorkflowRunID), riveradapter.NodeJobKind).Scan(&nodeID, &jobID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph.semantic_link_candidate WHERE workspace_id=$1`, string(fixture.WorkspaceID)).Scan(&candidates); err != nil {
+		t.Fatal(err)
+	}
+	if candidates == 0 {
+		t.Fatal("semantic-link browser fixture produced no candidates")
+	}
+
+	if err := testfixture.CleanupSemanticLinkBrowser(ctx, pool, fixture.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	fixtureCleaned = true
+	if err := testfixture.CleanupSemanticLinkBrowser(ctx, pool, fixture.WorkspaceID); err != nil {
+		t.Fatalf("semantic-link browser cleanup must be idempotent: %v", err)
+	}
+
+	var workspaces, remainingCandidates, scans, definitions, runs, nodes, attempts, outbox, jobs int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM core.workspace WHERE id=$1),
+		(SELECT count(*) FROM graph.semantic_link_candidate WHERE workspace_id=$1),
+		(SELECT count(*) FROM graph.semantic_link_scan WHERE id=$2),
+		(SELECT count(*) FROM workflow.definition WHERE workspace_id=$1),
+		(SELECT count(*) FROM workflow.run WHERE id=$3),
+		(SELECT count(*) FROM workflow.node_run WHERE id=$4),
+		(SELECT count(*) FROM workflow.node_attempt WHERE node_run_id=$4),
+		(SELECT count(*) FROM workflow.outbox_event WHERE run_id=$3),
+		(SELECT count(*) FROM workflow.river_job WHERE id=$5)`,
+		string(fixture.WorkspaceID), string(started.Scan.ID), string(started.Scan.WorkflowRunID), string(nodeID), jobID,
+	).Scan(&workspaces, &remainingCandidates, &scans, &definitions, &runs, &nodes, &attempts, &outbox, &jobs); err != nil {
+		t.Fatal(err)
+	}
+	if workspaces+remainingCandidates+scans+definitions+runs+nodes+attempts+outbox+jobs != 0 {
+		t.Fatalf("cleanup residue workspace=%d candidates=%d scans=%d definitions=%d runs=%d nodes=%d attempts=%d outbox=%d jobs=%d",
+			workspaces, remainingCandidates, scans, definitions, runs, nodes, attempts, outbox, jobs)
 	}
 }
 

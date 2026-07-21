@@ -195,6 +195,9 @@ export const SemanticLinkCandidatePanel = ({
   const scanQuery = useSemanticLinkScan({ workspaceId, scanId }, scanId !== "");
   const refreshedScanRef = useRef("");
   const topicScope = nodeScope?.type === "TOPIC" ? nodeScope : null;
+  const scanScopeMismatch = topicScope !== null
+    && scanQuery.data !== undefined
+    && scanQuery.data.scope.topicId !== topicScope.id;
 
   const queryInput = useMemo(() => ({
     workspaceId,
@@ -245,10 +248,16 @@ export const SemanticLinkCandidatePanel = ({
   }, [scanMutation.reset, setScanId, workspaceId]);
 
   useEffect(() => {
-    if (scanQuery.data?.status !== "SUCCEEDED" || refreshedScanRef.current === scanQuery.data.id) return;
+    if (scanScopeMismatch || scanQuery.data?.status !== "SUCCEEDED" || refreshedScanRef.current === scanQuery.data.id) return;
     refreshedScanRef.current = scanQuery.data.id;
     void candidateQuery.refetch();
-  }, [candidateQuery, scanQuery.data]);
+  }, [candidateQuery, scanQuery.data, scanScopeMismatch]);
+
+  useEffect(() => {
+    if (!scanScopeMismatch) return;
+    refreshedScanRef.current = "";
+    setScanId("");
+  }, [scanScopeMismatch, setScanId]);
 
   const restoreDecisionFocus = (): void => {
     const trigger = decisionTriggerRef.current;
@@ -373,7 +382,7 @@ export const SemanticLinkCandidatePanel = ({
   const scanError = scanMutation.isError
     ? errorSummary(scanMutation.error)
     : scanQuery.isError ? errorSummary(scanQuery.error) : null;
-  const scan = scanQuery.data;
+  const scan = scanScopeMismatch ? undefined : scanQuery.data;
   const scanActive = scan?.status === "PENDING" || scan?.status === "RUNNING";
   const compatibleRelationTypes = decision === null ? [] : compatibleSemanticLinkRelationTypes(decision.candidate);
   const pageCountLabel = candidateQuery.data === undefined

@@ -98,7 +98,7 @@ func (handler *CandidateHandler) getScan(w http.ResponseWriter, r *http.Request)
 
 func validateCandidateScanStartResult(request graphapp.SemanticLinkTopicScanRequest, result graphapp.SemanticLinkScanStartResult) error {
 	scan := result.Scan
-	if err := graphdomain.ValidateSemanticLinkScan(scan); err != nil || scan.WorkspaceID != request.WorkspaceID || scan.Scope.Type != graphdomain.SemanticLinkScanScopeTopic || scan.Scope.Ref != string(request.TopicID) || result.StatusURL != "/api/v1/workflows/"+string(scan.WorkflowRunID) {
+	if err := graphdomain.ValidateSemanticLinkScan(scan); err != nil || scan.WorkspaceID != request.WorkspaceID || scan.Scope.Type != graphdomain.SemanticLinkScanScopeTopic || scan.Scope.Ref != string(request.TopicID) || result.StatusURL != graphapp.SemanticLinkScanStatusURL(scan.WorkspaceID, scan.ID) {
 		return semanticLinkResultInvalid(errors.New("candidate scan start response is inconsistent"))
 	}
 	return nil

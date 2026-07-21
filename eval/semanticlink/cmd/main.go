@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	dataset, err := semanticlinkeval.LoadV1()
+	dataset, err := semanticlinkeval.LoadV2()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "semantic link eval dataset invalid")
 		os.Exit(1)

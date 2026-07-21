@@ -93,3 +93,43 @@ func TestFunctionalFixtureCommitsAndCleansCanonicalFacts(t *testing.T) {
 		t.Fatalf("cleanup removed an unmarked workspace: %d", workspaces)
 	}
 }
+
+func TestSemanticLinkBrowserFixtureAddsDiscoverableClaimWithoutFormalRelation(t *testing.T) {
+	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	fixture, err := SeedSemanticLinkBrowser(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cleanupCancel()
+		if err := CleanupSemanticLinkBrowser(cleanupCtx, pool, fixture.WorkspaceID); err != nil {
+			t.Errorf("clean semantic-link browser fixture: %v", err)
+		}
+	})
+
+	var claims, memberships, claimRelations int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM core.claim WHERE workspace_id=$1),
+		(SELECT count(*) FROM core.relation WHERE workspace_id=$1 AND relation_type='BELONGS_TO' AND status='CONFIRMED'),
+		(SELECT count(*) FROM core.relation WHERE workspace_id=$1 AND source_node_type='CLAIM' AND target_node_type='CLAIM'
+			AND (source_node_id=$2 OR target_node_id=$2) AND status IN ('CONFIRMED','STALE'))`,
+		string(fixture.WorkspaceID), string(fixture.DiscoveryClaimID),
+	).Scan(&claims, &memberships, &claimRelations); err != nil {
+		t.Fatal(err)
+	}
+	if claims != 3 || memberships != 4 || claimRelations != 0 {
+		t.Fatalf("fixture counts claims=%d memberships=%d discovery_claim_relations=%d", claims, memberships, claimRelations)
+	}
+}

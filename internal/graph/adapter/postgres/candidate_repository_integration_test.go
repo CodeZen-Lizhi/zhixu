@@ -147,6 +147,72 @@ func TestSemanticLinkCandidateRepositoryLifecycleAndBatchHydration(t *testing.T)
 	}
 }
 
+func TestSemanticLinkCandidateRepositoryListsClaimPairsByTopicMembership(t *testing.T) {
+	repository, tx, ctx := graphIntegrationRepository(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	workspaceID := seedGraphWorkspace(t, ctx, tx, now)
+	provenance := seedGraphProvenance(t, ctx, tx, workspaceID, now)
+	firstTopicID := seedGraphTopic(t, ctx, tx, workspaceID, "Topic A", "topic a", now)
+	secondTopicID := seedGraphTopic(t, ctx, tx, workspaceID, "Topic B", "topic b", now)
+	firstClaimID := seedGraphClaim(t, ctx, tx, workspaceID, "first topic candidate", knowledge.ClaimStatusConfirmed, floatPointer(0.9), now)
+	secondClaimID := seedGraphClaim(t, ctx, tx, workspaceID, "second topic candidate", knowledge.ClaimStatusConfirmed, floatPointer(0.8), now)
+	thirdClaimID := seedGraphClaim(t, ctx, tx, workspaceID, "unrelated topic candidate", knowledge.ClaimStatusConfirmed, floatPointer(0.7), now)
+	for _, membership := range []struct {
+		claimID foundation.ID
+		topicID foundation.ID
+	}{
+		{claimID: firstClaimID, topicID: firstTopicID},
+		{claimID: secondClaimID, topicID: firstTopicID},
+		{claimID: secondClaimID, topicID: secondTopicID},
+		{claimID: thirdClaimID, topicID: secondTopicID},
+	} {
+		seedGraphRelation(t, ctx, tx, workspaceID, membership.claimID, knowledge.NodeTypeClaim,
+			membership.topicID, knowledge.NodeTypeTopic, knowledge.RelationBelongsTo,
+			knowledge.RelationStatusConfirmed, floatPointer(0.9), now)
+	}
+
+	firstCandidate := candidateFixture(t, workspaceID, firstClaimID, secondClaimID, provenance, now, "topic-a", 2, 2)
+	secondCandidate := candidateFixture(t, workspaceID, secondClaimID, thirdClaimID, provenance, now.Add(time.Microsecond), "topic-b", 2, 2)
+	directTopicCandidate := candidateFixture(t, workspaceID, thirdClaimID, firstTopicID, provenance, now.Add(2*time.Microsecond), "topic-direct", 2, 1)
+	directTopicCandidate.Target.Ref.Type = knowledge.NodeTypeTopic
+	directTopicCandidate.SuggestedRelationType = knowledge.RelationBelongsTo
+	directTopicCandidate.Fingerprint = ""
+	directTopicFingerprint, err := graphdomain.ComputeSemanticLinkCandidateFingerprint(directTopicCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directTopicCandidate.Fingerprint = directTopicFingerprint
+	if err := graphdomain.ValidateSemanticLinkCandidate(directTopicCandidate); err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range []graphdomain.SemanticLinkCandidate{firstCandidate, secondCandidate, directTopicCandidate} {
+		if _, err := repository.UpsertSemanticLinkCandidate(ctx, candidate); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	topicRef := knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: firstTopicID}
+	page, err := repository.ListSemanticLinkCandidates(ctx, graphdomain.SemanticLinkCandidateQuery{
+		WorkspaceID: workspaceID,
+		NodeRef:     &topicRef,
+		Statuses:    []graphdomain.SemanticLinkCandidateStatus{graphdomain.SemanticLinkCandidateStatusActive},
+		Limit:       20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("topic-scoped candidates=%+v, want direct Topic endpoint and member Claim pair", page.Items)
+	}
+	returned := map[foundation.ID]bool{}
+	for _, candidate := range page.Items {
+		returned[candidate.ID] = true
+	}
+	if !returned[firstCandidate.ID] || !returned[directTopicCandidate.ID] || returned[secondCandidate.ID] {
+		t.Fatalf("topic-scoped candidate ids=%v", returned)
+	}
+}
+
 func TestSemanticLinkCandidateRepositoryFingerprintConcurrency(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
 	if databaseURL == "" {

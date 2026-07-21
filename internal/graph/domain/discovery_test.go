@@ -238,6 +238,44 @@ func TestValidateSemanticLinkScanRejectsFailureWithoutSummary(t *testing.T) {
 	}
 }
 
+func TestClassifySemanticLinkRuleDiscoveryHitUsesProductionRulePolicy(t *testing.T) {
+	tests := []struct {
+		name         string
+		methods      []SemanticLinkDiscoveryMethod
+		relationType knowledge.RelationType
+		confidence   float64
+		eligible     bool
+	}{
+		{
+			name:         "normalized title or alias is a duplicate",
+			methods:      []SemanticLinkDiscoveryMethod{SemanticLinkDiscoveryMethodTitleAlias},
+			relationType: knowledge.RelationDuplicates,
+			confidence:   0.95,
+			eligible:     true,
+		},
+		{
+			name:         "two deterministic signals are complementary",
+			methods:      []SemanticLinkDiscoveryMethod{SemanticLinkDiscoveryMethodTermMatch, SemanticLinkDiscoveryMethodCommonTopic},
+			relationType: knowledge.RelationComplements,
+			confidence:   0.65,
+			eligible:     true,
+		},
+		{
+			name:     "one deterministic signal plus an external signal remains below the rule threshold",
+			methods:  []SemanticLinkDiscoveryMethod{SemanticLinkDiscoveryMethodTermMatch, SemanticLinkDiscoveryMethodClaimSemanticSimilarity},
+			eligible: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			classification := ClassifySemanticLinkRuleDiscoveryHit(SemanticLinkDiscoveryHit{Methods: test.methods})
+			if classification.Eligible != test.eligible || classification.RelationType != test.relationType || classification.Confidence != test.confidence {
+				t.Fatalf("classification = %+v", classification)
+			}
+		})
+	}
+}
+
 func discoveryNode(workspaceID foundation.ID, nodeType knowledge.NodeType, number int, label string, terms []string, topicNumber int) SemanticLinkDiscoveryNode {
 	return SemanticLinkDiscoveryNode{
 		WorkspaceID: workspaceID,

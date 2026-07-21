@@ -156,6 +156,15 @@ type SemanticLinkDiscoveryHit struct {
 	SignalScores   map[SemanticLinkDiscoveryMethod]float64
 }
 
+// SemanticLinkRuleClassification 是确定性规则对 discovery hit 的候选分类结果。
+// Eligible=false 表示信号不足以形成可审阅 Candidate。
+type SemanticLinkRuleClassification struct {
+	RelationType knowledge.RelationType
+	Confidence   float64
+	Reason       string
+	Eligible     bool
+}
+
 // SemanticLinkDiscoveryResult 是 discovery engine 的确定性输出。
 type SemanticLinkDiscoveryResult struct {
 	WorkspaceID    foundation.ID
@@ -375,6 +384,44 @@ func EvaluateSemanticLinkDiscovery(request SemanticLinkDiscoveryRequest) (Semant
 	result.Signals = append(result.Signals, externalSignalReport(request.Semantic, SemanticLinkDiscoveryMethodClaimSemanticSimilarity, hitCounts[SemanticLinkDiscoveryMethodClaimSemanticSimilarity]))
 	result.Signals = append(result.Signals, externalSignalReport(request.RAG, SemanticLinkDiscoveryMethodRAGCoRetrieval, hitCounts[SemanticLinkDiscoveryMethodRAGCoRetrieval]))
 	return result, nil
+}
+
+// ClassifySemanticLinkRuleDiscoveryHit 执行生产 Candidate writer 使用的确定性分类策略。
+func ClassifySemanticLinkRuleDiscoveryHit(hit SemanticLinkDiscoveryHit) SemanticLinkRuleClassification {
+	deterministic := 0
+	titleAlias := false
+	for _, method := range hit.Methods {
+		switch method {
+		case SemanticLinkDiscoveryMethodTitleAlias:
+			titleAlias = true
+			deterministic++
+		case SemanticLinkDiscoveryMethodTermMatch,
+			SemanticLinkDiscoveryMethodCommonTopic,
+			SemanticLinkDiscoveryMethodSharedSource:
+			deterministic++
+		}
+	}
+	if titleAlias {
+		return SemanticLinkRuleClassification{
+			RelationType: knowledge.RelationDuplicates,
+			Confidence:   0.95,
+			Reason:       "Matching normalized statements suggest a duplicate Claim; review the evidence before approval.",
+			Eligible:     true,
+		}
+	}
+	if deterministic < 2 {
+		return SemanticLinkRuleClassification{}
+	}
+	confidence := 0.65 + float64(deterministic-2)*0.05
+	if confidence > 0.85 {
+		confidence = 0.85
+	}
+	return SemanticLinkRuleClassification{
+		RelationType: knowledge.RelationComplements,
+		Confidence:   confidence,
+		Reason:       "Multiple deterministic signals suggest complementary Claims; review the evidence before approval.",
+		Eligible:     true,
+	}
 }
 
 func validateSemanticLinkDiscoveryRequest(request SemanticLinkDiscoveryRequest) error {

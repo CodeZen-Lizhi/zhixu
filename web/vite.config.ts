@@ -12,6 +12,7 @@ export default defineConfig({
     port: 4173,
   },
   test: {
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
     clearMocks: true,

@@ -39,9 +39,10 @@ const (
 func TestCandidateScanStartAndGetStrictTopicContract(t *testing.T) {
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	scan := candidateHTTPScanFixture(now)
+	statusURL := "/api/v1/graph/candidate-scans/" + string(candidateHTTPScanID) + "?workspace_id=" + string(candidateHTTPWorkspaceID)
 	service := &fakeCandidateScanService{
 		start: graphapp.SemanticLinkScanStartResult{
-			Scan: scan, StatusURL: "/api/v1/workflows/" + string(candidateHTTPWorkflowRunID),
+			Scan: scan, StatusURL: statusURL,
 		},
 		scan: scan,
 	}
@@ -55,7 +56,7 @@ func TestCandidateScanStartAndGetStrictTopicContract(t *testing.T) {
 	}
 	var accepted candidateScanAcceptanceResponse
 	decodeCandidateResponse(t, response, &accepted)
-	if accepted.ScanID != string(candidateHTTPScanID) || accepted.WorkflowRunID != string(candidateHTTPWorkflowRunID) || accepted.StatusURL != "/api/v1/workflows/"+string(candidateHTTPWorkflowRunID) {
+	if accepted.ScanID != string(candidateHTTPScanID) || accepted.WorkflowRunID != string(candidateHTTPWorkflowRunID) || accepted.StatusURL != statusURL {
 		t.Fatalf("accepted=%+v", accepted)
 	}
 
@@ -66,7 +67,7 @@ func TestCandidateScanStartAndGetStrictTopicContract(t *testing.T) {
 	}
 	var payload candidateScanResponse
 	decodeCandidateResponse(t, response, &payload)
-	if payload.Scope.Kind != "TOPIC" || payload.Scope.TopicID != string(candidateHTTPTopicID) || payload.ProcessedCount != 2 || payload.CandidateCount != 1 || payload.IgnoredCount != 1 || payload.LastError != nil {
+	if payload.Scope.Kind != "TOPIC" || payload.Scope.TopicID != string(candidateHTTPTopicID) || payload.StatusURL != statusURL || payload.ProcessedCount != 2 || payload.CandidateCount != 1 || payload.IgnoredCount != 1 || payload.LastError != nil {
 		t.Fatalf("payload=%+v", payload)
 	}
 
@@ -183,6 +184,36 @@ func TestCandidateListStrictContractAndSafeResponse(t *testing.T) {
 	}
 	if !service.listDeadline.After(time.Now()) {
 		t.Fatalf("candidate list request did not receive a deadline")
+	}
+}
+
+func TestCandidateListTopicScopeReturnsClaimPair(t *testing.T) {
+	candidate := candidateHTTPFixture(t)
+	candidate.Target = graphdomain.SemanticLinkCandidateEndpoint{
+		Ref: knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: candidateHTTPTargetID}, Version: 2,
+		Summary: "Related Claim", Excerpt: "Related Claim excerpt",
+	}
+	candidate.SuggestedRelationType = knowledge.RelationComplements
+	candidate.Fingerprint = ""
+	fingerprint, err := graphdomain.ComputeSemanticLinkCandidateFingerprint(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.Fingerprint = fingerprint
+	service := &fakeCandidateService{page: graphdomain.SemanticLinkCandidatePage{
+		WorkspaceID: candidateHTTPWorkspaceID,
+		Items:       []graphdomain.SemanticLinkCandidate{candidate},
+		Meta:        graphdomain.PageMeta{Fingerprint: strings.Repeat("d", 64), Complete: true},
+	}}
+	path := "/api/v1/graph/candidates?workspace_id=" + string(candidateHTTPWorkspaceID) +
+		"&node_type=TOPIC&node_id=" + string(candidateHTTPTopicID) + "&status=ACTIVE&limit=20"
+	response := serveCandidateRequest(t, service, time.Second, http.MethodGet, path, "", "", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	request := service.listRequest.Query
+	if request.NodeRef == nil || request.NodeRef.Type != knowledge.NodeTypeTopic || request.NodeRef.ID != candidateHTTPTopicID {
+		t.Fatalf("topic request=%+v", request)
 	}
 }
 

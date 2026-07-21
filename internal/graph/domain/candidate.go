@@ -709,7 +709,12 @@ func candidateMatchesQuery(request SemanticLinkCandidateQuery, candidate Semanti
 		return false
 	}
 	if request.NodeRef != nil && candidate.Source.Ref != *request.NodeRef && candidate.Target.Ref != *request.NodeRef {
-		return false
+		// Topic scans produce Claim pairs. Membership is a persisted Relation fact
+		// enforced by the repository query and cannot be re-derived from this page item.
+		if request.NodeRef.Type != knowledge.NodeTypeTopic ||
+			candidate.Source.Ref.Type != knowledge.NodeTypeClaim || candidate.Target.Ref.Type != knowledge.NodeTypeClaim {
+			return false
+		}
 	}
 	return true
 }

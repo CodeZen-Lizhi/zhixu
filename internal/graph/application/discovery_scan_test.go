@@ -95,7 +95,7 @@ func TestSemanticLinkScanServiceStartsWithWorkflowBindingAndStatusURL(t *testing
 	if starter.calls != 1 || starter.request.IdempotencyKey != "scan-one" || starter.request.WorkflowDefinitionKey != SemanticLinkScanWorkflowDefinitionKey || starter.request.WorkflowDefinitionVersion != 1 || starter.request.WorkflowInputSchemaVersion != 1 {
 		t.Fatalf("start request = %+v", starter.request)
 	}
-	wantURL := "/api/v1/workflows/" + string(result.Scan.WorkflowRunID)
+	wantURL := "/api/v1/graph/candidate-scans/" + string(result.Scan.ID) + "?workspace_id=" + string(result.Scan.WorkspaceID)
 	if result.StatusURL != wantURL || result.Scan.WorkflowRunID == "" || result.Scan.TotalNodes != 42 {
 		t.Fatalf("start result = %+v", result)
 	}
@@ -128,7 +128,7 @@ func TestSemanticLinkScanCommandServicePlansServerOwnedTopicScope(t *testing.T) 
 		starter.request.Generation.Rule.RuleID == nil || *starter.request.Generation.Rule.RuleID != SemanticLinkScanRuleID ||
 		starter.request.Generation.Rule.RuleVersion != SemanticLinkScanRuleVersion ||
 		starter.request.Generation.WorkflowVersion != SemanticLinkScanWorkflowGenerationVersion ||
-		result.StatusURL != "/api/v1/workflows/"+string(result.Scan.WorkflowRunID) {
+		result.StatusURL != "/api/v1/graph/candidate-scans/"+string(result.Scan.ID)+"?workspace_id="+string(result.Scan.WorkspaceID) {
 		t.Fatalf("plan=%#v start=%#v result=%#v", planner.plan, starter.request, result)
 	}
 }

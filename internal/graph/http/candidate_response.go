@@ -207,7 +207,7 @@ func toCandidateScanResponse(scan graphdomain.SemanticLinkScan) candidateScanRes
 		ID: string(scan.ID), WorkspaceID: string(scan.WorkspaceID),
 		Scope:  candidateScanScopeResponse{Kind: string(scan.Scope.Type), TopicID: scan.Scope.Ref},
 		Status: string(scan.Status), WorkflowRunID: string(scan.WorkflowRunID), Version: scan.Version,
-		StatusURL:  "/api/v1/workflows/" + string(scan.WorkflowRunID),
+		StatusURL:  graphapp.SemanticLinkScanStatusURL(scan.WorkspaceID, scan.ID),
 		TotalCount: scan.TotalNodes, ProcessedCount: scan.ProcessedNodes, CandidateCount: scan.CandidateCount,
 		IgnoredCount: scan.SuppressedCount, FailedCount: scan.FailedCount,
 		LastError: lastError,

@@ -13,6 +13,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -27,6 +28,12 @@ type Fixture struct {
 	MembershipRelationID          foundation.ID
 	SupportRelationID             foundation.ID
 	SecondaryMembershipRelationID foundation.ID
+}
+
+// SemanticLinkBrowserFixture 在正式 Graph fixture 上增加可被 Topic scan 发现的第三条 Claim。
+type SemanticLinkBrowserFixture struct {
+	Fixture
+	DiscoveryClaimID foundation.ID
 }
 
 // SeedFunctional 写入可用于 Global→Local→Path→Evidence 公共 HTTP 链路的已提交夹具。
@@ -142,9 +149,87 @@ func SeedFunctional(ctx context.Context, pool *pgxpool.Pool) (Fixture, error) {
 	}, nil
 }
 
+// SeedSemanticLinkBrowser 写入同时覆盖正式 Graph 与 Semantic Link Candidate 的浏览器夹具。
+func SeedSemanticLinkBrowser(ctx context.Context, pool *pgxpool.Pool) (result SemanticLinkBrowserFixture, resultErr error) {
+	base, err := SeedFunctional(ctx, pool)
+	if err != nil {
+		return SemanticLinkBrowserFixture{}, err
+	}
+	cleanupRequired := true
+	defer func() {
+		if !cleanupRequired {
+			return
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cleanupCancel()
+		if cleanupErr := CleanupSemanticLinkBrowser(cleanupCtx, pool, base.WorkspaceID); cleanupErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("cleanup semantic-link browser fixture: %w", cleanupErr))
+		}
+	}()
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return SemanticLinkBrowserFixture{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(context.Background())
+		}
+	}()
+
+	var sourceVersionID, sourceSpanID string
+	if err := tx.QueryRow(ctx, `SELECT source_version_id::text,source_span_id::text
+		FROM core.claim_source WHERE workspace_id=$1 AND claim_id=$2 ORDER BY id LIMIT 1`,
+		string(base.WorkspaceID), string(base.FirstClaimID),
+	).Scan(&sourceVersionID, &sourceSpanID); err != nil {
+		return SemanticLinkBrowserFixture{}, err
+	}
+	provenance := provenanceBinding{sourceVersionID: foundation.ID(sourceVersionID), sourceSpanID: foundation.ID(sourceSpanID)}
+	ids, err := newIDs(2)
+	if err != nil {
+		return SemanticLinkBrowserFixture{}, err
+	}
+	discoveryClaimID, membershipRelationID := ids[0], ids[1]
+	now := time.Date(2026, 7, 20, 9, 0, 10, 0, time.UTC)
+	claim, err := newClaim(base.WorkspaceID, discoveryClaimID, "Durable channels coordinate concurrent workers", 0.91, now)
+	if err != nil {
+		return SemanticLinkBrowserFixture{}, err
+	}
+	if err := insertConfirmedClaim(ctx, tx, claim, provenance, "semantic browser candidate evidence"); err != nil {
+		return SemanticLinkBrowserFixture{}, err
+	}
+	membership, err := newRelation(
+		base.WorkspaceID,
+		membershipRelationID,
+		knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: discoveryClaimID},
+		knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: base.PrimaryTopicID},
+		knowledge.RelationBelongsTo,
+		0.92,
+		now.Add(time.Second),
+	)
+	if err != nil {
+		return SemanticLinkBrowserFixture{}, err
+	}
+	if err := insertConfirmedRelation(ctx, tx, membership, provenance, "semantic browser topic membership"); err != nil {
+		return SemanticLinkBrowserFixture{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return SemanticLinkBrowserFixture{}, err
+	}
+	committed = true
+	cleanupRequired = false
+	return SemanticLinkBrowserFixture{Fixture: base, DiscoveryClaimID: discoveryClaimID}, nil
+}
+
 // Cleanup 按外键依赖顺序删除指定 Workspace 的集成夹具。
 func Cleanup(ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID) error {
-	return cleanupWorkspace(ctx, pool, workspaceID, functionalWorkspaceName, functionalWorkspaceRoot(workspaceID))
+	return cleanupWorkspace(ctx, pool, workspaceID, functionalWorkspaceName, functionalWorkspaceRoot(workspaceID), false)
+}
+
+// CleanupSemanticLinkBrowser 删除浏览器夹具及其 Candidate、Scan、Workflow 和 River 事实。
+func CleanupSemanticLinkBrowser(ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID) error {
+	return cleanupWorkspace(ctx, pool, workspaceID, functionalWorkspaceName, functionalWorkspaceRoot(workspaceID), true)
 }
 
 func cleanupWorkspace(
@@ -153,6 +238,7 @@ func cleanupWorkspace(
 	workspaceID foundation.ID,
 	expectedName string,
 	expectedRoot string,
+	semanticLinkBrowser bool,
 ) error {
 	if pool == nil {
 		return errors.New("graph integration cleanup pool is nil")
@@ -199,6 +285,37 @@ func cleanupWorkspace(
 	// a transaction-local replica role so cleanup cannot weaken runtime sessions.
 	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
 		return err
+	}
+	if semanticLinkBrowser {
+		if _, err := tx.Exec(ctx, `DELETE FROM workflow.river_job
+			WHERE kind=$2 AND args->>'node_run_id' IN (
+				SELECT node.id::text
+				FROM workflow.node_run node
+				JOIN workflow.run run ON run.id=node.run_id
+				WHERE run.workspace_id=$1
+			)`, string(workspaceID), riveradapter.NodeJobKind); err != nil {
+			return err
+		}
+		semanticLinkStatements := []string{
+			`DELETE FROM graph.semantic_link_candidate_decision WHERE workspace_id=$1`,
+			`DELETE FROM graph.semantic_link_candidate_evidence WHERE workspace_id=$1`,
+			`DELETE FROM graph.semantic_link_candidate WHERE workspace_id=$1`,
+			`DELETE FROM workflow.control_command WHERE run_id IN (SELECT id FROM workflow.run WHERE workspace_id=$1)`,
+			`DELETE FROM workflow.human_task WHERE run_id IN (SELECT id FROM workflow.run WHERE workspace_id=$1)`,
+			`DELETE FROM workflow.node_attempt WHERE node_run_id IN (
+				SELECT node.id FROM workflow.node_run node JOIN workflow.run run ON run.id=node.run_id WHERE run.workspace_id=$1
+			)`,
+			`DELETE FROM workflow.outbox_event WHERE workspace_id=$1`,
+			`DELETE FROM graph.semantic_link_scan WHERE workspace_id=$1`,
+			`DELETE FROM workflow.node_run WHERE run_id IN (SELECT id FROM workflow.run WHERE workspace_id=$1)`,
+			`DELETE FROM workflow.run WHERE workspace_id=$1`,
+			`DELETE FROM workflow.definition WHERE workspace_id=$1`,
+		}
+		for _, statement := range semanticLinkStatements {
+			if _, err := tx.Exec(ctx, statement, string(workspaceID)); err != nil {
+				return err
+			}
+		}
 	}
 	statements := []string{
 		`DELETE FROM ingestion.canonical_chunk WHERE workspace_id=$1`,

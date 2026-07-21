@@ -204,8 +204,13 @@ func (service *SemanticLinkScanService) StartTopicScan(ctx context.Context, comm
 	if err := validateScanStartResult(canonical, request, result); err != nil {
 		return SemanticLinkScanStartResult{}, err
 	}
-	result.StatusURL = "/api/v1/workflows/" + string(result.Scan.WorkflowRunID)
+	result.StatusURL = SemanticLinkScanStatusURL(result.Scan.WorkspaceID, result.Scan.ID)
 	return result, nil
+}
+
+// SemanticLinkScanStatusURL 返回可恢复 Scan 业务进度与计数的权威资源地址。
+func SemanticLinkScanStatusURL(workspaceID, scanID foundation.ID) string {
+	return "/api/v1/graph/candidate-scans/" + string(scanID) + "?workspace_id=" + string(workspaceID)
 }
 
 // Get 返回 Workspace-scoped Scan 事实；跨 Workspace 结果统一视为 NotFound。

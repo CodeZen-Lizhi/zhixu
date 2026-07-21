@@ -555,11 +555,11 @@
     "/api/v1/graph/candidates": {
       "get": {
         "operationId": "listSemanticLinkCandidates",
-        "description": "Lists a stable bounded page of reviewable Semantic Link Candidates. Candidates are not formal Graph relations.",
+        "description": "Lists a stable bounded page of reviewable Semantic Link Candidates. Candidates are not formal Graph relations. A TOPIC node scope includes Candidates that directly reference the Topic and Claim-pair Candidates whose endpoints both have a Confirmed BELONGS_TO membership in that Topic.",
         "parameters": [
           { "$ref": "#/components/parameters/WorkspaceIDQuery" },
-          { "name": "node_type", "in": "query", "required": false, "schema": { "$ref": "#/components/schemas/SemanticLinkNodeType" }, "description": "Must be supplied together with node_id." },
-          { "name": "node_id", "in": "query", "required": false, "schema": { "type": "string", "format": "uuid" }, "description": "Must be supplied together with node_type." },
+          { "name": "node_type", "in": "query", "required": false, "schema": { "$ref": "#/components/schemas/SemanticLinkNodeType" }, "description": "Must be supplied together with node_id. CLAIM is an exact endpoint scope; TOPIC also includes Claim pairs whose endpoints are both Confirmed members." },
+          { "name": "node_id", "in": "query", "required": false, "schema": { "type": "string", "format": "uuid" }, "description": "Must be supplied together with node_type and identifies the exact node or Topic membership scope." },
           { "name": "status", "in": "query", "required": false, "style": "form", "explode": true, "schema": { "type": "array", "uniqueItems": true, "maxItems": 6, "items": { "$ref": "#/components/schemas/SemanticLinkCandidateStatus" } } },
           { "name": "relation_type", "in": "query", "required": false, "style": "form", "explode": true, "schema": { "type": "array", "uniqueItems": true, "maxItems": 10, "items": { "$ref": "#/components/schemas/SemanticLinkRelationType" } } },
           { "name": "reopened_reason", "in": "query", "required": false, "style": "form", "explode": true, "schema": { "type": "array", "uniqueItems": true, "maxItems": 1, "items": { "const": "CONTENT_CHANGED" } } },
@@ -1830,7 +1830,7 @@
           "workflow_run_id": { "type": "string", "format": "uuid" },
           "status": { "$ref": "#/components/schemas/SemanticLinkScanStatus" },
           "version": { "type": "integer", "minimum": 1 },
-          "status_url": { "type": "string", "format": "uri-reference", "pattern": "^/api/v1/workflows/[0-9a-f-]{36}$" }
+          "status_url": { "type": "string", "format": "uri-reference", "description": "Workspace-scoped authoritative Semantic Link Scan projection URL; workflow_run_id remains the runtime binding.", "pattern": "^/api/v1/graph/candidate-scans/[0-9a-f-]{36}\\?workspace_id=[0-9a-f-]{36}$" }
         },
         "additionalProperties": false
       },
@@ -1854,7 +1854,7 @@
           "status": { "$ref": "#/components/schemas/SemanticLinkScanStatus" },
           "workflow_run_id": { "type": "string", "format": "uuid" },
           "version": { "type": "integer", "minimum": 1 },
-          "status_url": { "type": "string", "format": "uri-reference", "pattern": "^/api/v1/workflows/[0-9a-f-]{36}$" },
+          "status_url": { "type": "string", "format": "uri-reference", "description": "Workspace-scoped self URL for this durable Scan projection.", "pattern": "^/api/v1/graph/candidate-scans/[0-9a-f-]{36}\\?workspace_id=[0-9a-f-]{36}$" },
           "total_count": { "type": "integer", "minimum": 0 },
           "processed_count": { "type": "integer", "minimum": 0 },
           "candidate_count": { "type": "integer", "minimum": 0 },
