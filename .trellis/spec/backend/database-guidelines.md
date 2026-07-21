@@ -1221,6 +1221,9 @@ type ApprovedKnowledgeChangeApplier interface {
   fingerprint 仅用于查询，不得唯一化 FAILED/CANCELLED attempt，新 key 可以启动同 fingerprint 的新 attempt。
 - Topic Claim pair SQL 必须使用每个 source 的 `CROSS JOIN LATERAL ... ORDER BY claim.id LIMIT 100`；部分索引
   `idx_knowledge_relation_semantic_scan_topic_claim` 与 CLAIM→TOPIC/BELONGS_TO/CONFIRMED 谓词完全一致。
+- Candidate query 的 `CLAIM` scope 精确匹配 source/target；`TOPIC` scope 还可匹配直接 Topic 端点或两端 Claim
+  都通过正式 CLAIM→TOPIC/BELONGS_TO/CONFIRMED Relation 归属该 Topic 的 pair。membership 使用两个参数化
+  `EXISTS`，不能用可能复制分页行的普通 JOIN，也不能退化成 Workspace 全量或 discovery-method 猜测。
 - PostgreSQL `timestamptz` 只有微秒精度。Application 校验持久化终态时间时允许小于 1 微秒差异；禁止把
   纳秒级严格相等失败解释为业务失败，否则会出现 Scan 已成功而 Workflow Run 被误记 failed。
 
@@ -1234,6 +1237,7 @@ type ApprovedKnowledgeChangeApplier interface {
 | Knowledge apply 或 Evidence 写入失败 | 整个事务回滚，Candidate 不伪装成正式确认 |
 | FAILED/CANCELLED scan 使用旧 key 重放 | 返回原 attempt；新 key 创建同 fingerprint 新 attempt |
 | Provider/Repository/Scan dependency 缺失 | Semantic Link 独立 unavailable；七个正式 Graph 查询保持 ready |
+| Topic scope 下只有一端 Claim 属于该 Topic，或 pair 属于其他 Topic | 从结果排除；不能因 Scan 成功而放宽到 Workspace 全量 |
 | 持久时间与命令时间仅相差 PostgreSQL 子微秒精度 | 视为同一终态；差异达到 1 微秒仍判 projection mismatch |
 | Pair SQL 未命中部分索引、出现 relation Seq Scan 或内层 Limit 未按 source 执行 | EXPLAIN 集成门禁失败 |
 
@@ -1241,6 +1245,7 @@ type ApprovedKnowledgeChangeApplier interface {
 
 - Good：用户确认 Candidate 后创建独立 typed Proposal；Approval 在重新校验后幂等写一条 Relation，重复响应
   丢失重放不新增 Proposal、Relation 或 Evidence。
+- Good：Topic scope 同时返回直接 Topic Candidate 与双方均为正式成员的 Claim pair，并保持稳定无重复分页。
 - Base：Semantic/RAG signal 未配置时明确标记 unsupported；确定性 Rule signal 仍执行，不能把未运行能力标成
   success 或空结果。
 - Bad：Candidate 直接写 `core.relation`、共享 `claim_source.id` 作为多个 Candidate Evidence 主键、给 scan
@@ -1250,9 +1255,12 @@ type ApprovedKnowledgeChangeApplier interface {
 
 - Domain/Application：fingerprint、状态机、typed Proposal hash、Approval stale/rollback/replay、终态时间精度。
 - 真实 PostgreSQL：Candidate 并发/分页/Decision、每 Candidate Evidence 唯一 ID、FAILED/CANCELLED restart、
-  205 Claim 三页 pair 数 `10000/5440/10`、跨页边界和同一生产 SQL 的 EXPLAIN。
-- `make semantic-link-integration`、`make semantic-link-fault-smoke`、`make semantic-link-eval`、
-  `make semantic-link-smoke`、迁移空库/重复/Down-Up/guarded Down、OpenAPI 与全仓 race/vet/tidy。
+  Topic 直接端点/双边 membership/单边排除、205 Claim 三页 pair 数 `10000/5440/10`、跨页边界和同一生产
+  SQL 的 EXPLAIN。
+- `ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-integration`、
+  `ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-fault-smoke`、`make semantic-link-eval`、
+  `ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-smoke`、迁移空库/重复/Down-Up/guarded Down、OpenAPI
+  与全仓 race/vet/tidy。
 - SQL 改动必须追加 `sql-code-review`；公共 API、Workflow、Proposal/Approval 和前端跨层变更必须有独立只读复验。
 
 ### 7. Wrong vs Correct
@@ -1263,4 +1271,7 @@ Correct: 终态身份、版本、状态严格比较；持久时间按 PostgreSQL
 
 Wrong: 用 row_number() 生成全部 source×target 后筛 rank<=100。
 Correct: 对每个 source 使用 LATERAL 内层 LIMIT 100，并以部分索引和 EXPLAIN 证明执行量有界。
+
+Wrong: Topic scan 成功后用 Workspace 全量 Candidate 填充面板，或 JOIN membership 导致候选重复。
+Correct: Topic scope 对两端 Claim 分别使用 EXISTS 验证正式 membership；Claim scope 仍精确匹配端点。
 ```

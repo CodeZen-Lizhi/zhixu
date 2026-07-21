@@ -124,8 +124,10 @@ OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Fea
 
 ### 3. Contracts
 
-- 所有 HTTP success body 从 `unknown` 严格解码；Candidate source/target 必须精确绑定请求节点 scope，拒绝自环、
-  Relation Type 不兼容、非 canonical 对称端点、未知 enum/字段和非法 Evidence href。
+- 所有 HTTP success body 从 `unknown` 严格解码；`CLAIM` scope 的 Candidate source/target 必须精确绑定请求节点，
+  `TOPIC` scope 只额外接受直接 Topic 端点或 Claim↔Claim 形态，双方正式 membership 由后端 Repository 保证。
+  其余 scope 漂移、自环、Relation Type 不兼容、非 canonical 对称端点、未知 enum/字段和非法 Evidence href
+  都必须拒绝。
 - FAILED Scan 必须带 `{stage,code,retryable}`；非 FAILED Scan 禁止携带 error。System Status 必须独立解码
   `graph` 与 `semantic_links`，Candidate unavailable 不能让正式 Graph 状态消失。
 - Start scan 的响应丢失重试必须复用原 mutation variables 和原 Idempotency-Key；已有终态 Scan A 不能让新
@@ -139,7 +141,7 @@ OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Fea
 
 | Condition | Required result |
 |---|---|
-| Candidate node scope、canonical endpoint 或 Relation compatibility 不匹配 | `INVALID_RESPONSE`，不渲染部分卡片 |
+| Claim scope 不精确、Topic scope 既非直接端点也非 Claim pair、canonical endpoint 或 Relation compatibility 不匹配 | `INVALID_RESPONSE`，不渲染部分卡片 |
 | FAILED scan 缺 error，或非 FAILED scan 带 error | 拒绝整个响应 |
 | Start response-loss | 相同 request body + Idempotency-Key 重试，不创建新命令 |
 | Candidate service unavailable | Candidate panel 可恢复错误；Graph canvas/query 继续可用 |
@@ -156,8 +158,8 @@ OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Fea
 
 ### 6. Tests Required
 
-- API decoder：正常/空/未知字段、node scope、自环、Relation compatibility、canonical 对称端点、Scan error
-  判别联合、typed Proposal、Problem 和 system status 独立能力。
+- API decoder：正常/空/未知字段、Claim 精确 scope、Topic Claim-pair scope、自环、Relation compatibility、
+  canonical 对称端点、Scan error 判别联合、typed Proposal、Problem 和 system status 独立能力。
 - Query/Component：Workspace key、cursor、response-loss 同 key、刷新恢复、mutation invalidation、全部决策、
   focus loop、移动端、候选不进入 GraphCanvas、scan ID 不重置详情/布局。
 - Canonical `lint/typecheck/test/build`，并在真实 API 支撑的桌面与 390x844 移动 `/graph` 检查零横向溢出、
@@ -169,6 +171,6 @@ OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Fea
 Wrong: scan POST 失败后调用 start factory 生成新 Idempotency-Key；Candidate scan ID 加入 Graph identity。
 Correct: 重试 mutation.variables；scan ID 只恢复 Candidate server state，Graph selection/layout 保持不变。
 
-Wrong: decoder 只校验 node ID 出现于任一端，或忽略未知 semantic_links status。
-Correct: 校验精确 source/target `(type,id)`、关系兼容和 canonical 端点；独立解码并展示能力状态。
+Wrong: Topic scan 产出 Claim pair 后把 node scope 校验全部关闭，或在浏览器复制 BELONGS_TO 查询规则。
+Correct: Claim scope 精确校验 `(type,id)`；Topic scope 只允许直接 Topic/Claim-pair 形态，membership 由后端保证。
 ```

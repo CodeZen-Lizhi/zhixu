@@ -410,6 +410,8 @@ M10 验收；在此之前 Workspace 隔离和 loopback 部署不得被描述为�
   completion response-loss、stale→needs_revision 和事务回滚。
 - Topic scan 的执行层回归必须覆盖大于 201 Claim、跨页 pair、每 source 100 上限和生产 SQL EXPLAIN；
   PostgreSQL terminal timestamp 测试必须使用非整微秒输入，防止已提交成功被 Workflow 误判失败。
+- Candidate page 的真实 PostgreSQL 回归必须证明 Topic scope 同时保留直接 Topic Candidate 和双方均为正式成员的
+  Claim pair，排除仅一端属于该 Topic 的 pair；Claim scope 仍要求精确端点。
 - 前端覆盖 strict Candidate/Scan/Proposal decoder、response-loss 同 key、刷新恢复、所有决策、焦点与移动端；
   浏览器必须证明 Candidate 不进入正式 canvas、system status 独立、无溢出和零 console warning/error。
 
@@ -417,7 +419,7 @@ M10 验收；在此之前 Workspace 隔离和 loopback 部署不得被描述为�
 ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-integration
 ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-fault-smoke
 make semantic-link-eval
-make semantic-link-smoke
+ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-smoke
 ```
 
 ## 14. Review Evaluation

@@ -114,6 +114,8 @@ flowchart TD
   显式 `unsupported`，不能静默标成已执行或返回假空结果。
 - Topic scan 使用 Workflow/River，按 100 节点页持久化 checkpoint；每个 source 最多查询 100 个后续
   Topic Claim，SQL 在 LATERAL 内层提前 Limit，避免先展开全量 pair。
+- Topic 页面查询 Candidate 时，直接 Topic 端点与双方都通过正式 `CONFIRMED BELONGS_TO` 归属该 Topic 的
+  Claim pair 都属于该 scope；只归属一端或其他 Topic 的 pair 必须排除，不能回退为 Workspace 全量候选。
 - Candidate fingerprint 绑定：
 
   - Node Versions。
@@ -133,8 +135,9 @@ flowchart TD
 - `/graph` 的 Candidate 面板展示双方摘要、Evidence、建议关系、置信度、发现方式、版本和重开原因；Candidate
   不进入正式 canvas/list edge。Candidate 能力故障与 Graph readiness/status 分离。
 
-当前 API 以 OpenAPI 3.1 为准，包括 Candidate page/detail/decision 和 Candidate Scan create/detail；正式 Graph
-七个只读端点继续无副作用。
+当前 API 以 OpenAPI 3.1 为准，包括 Candidate page/detail/decision 和 Candidate Scan create/detail；Scan create
+返回的 `status_url` 是带 Workspace 的 Candidate Scan 自链接，`workflow_run_id` 只作运行时绑定；正式 Graph 七个
+只读端点继续无副作用。
 
 ## 10. 验证、性能边界与回滚
 
@@ -145,7 +148,7 @@ ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-benchmark
 ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-integration
 ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-fault-smoke
 make semantic-link-eval
-make semantic-link-smoke
+ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-smoke
 ```
 
 - `graph-integration` 用真实 PostgreSQL 和公共 HTTP 验证 Global→Local→Path→Evidence、response-loss

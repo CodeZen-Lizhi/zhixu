@@ -342,7 +342,12 @@ Correct: 只声明 M7-01 的参考容量与只读闭环，M10 边界保持显式
 
 - integration 使用真实 PostgreSQL/River，证明 Candidate→独立 typed Proposal→Approval→一条 Relation。
 - fault 覆盖 retry exhaustion、cancel、response-loss、stale→needs_revision 和事务回滚，不允许 Scan/Run 假一致。
-- eval 固定五项指标和全部版本；Fake 结果只标记 deterministic pipeline。
+- eval 固定五项指标和全部版本；Fake 结果只标记 deterministic pipeline。`ignored_unchanged` 样本必须先完整
+  经过生产 discovery、规则分类和 Candidate fingerprint，再用数据集冻结的历史 fingerprint 投影抑制结果；
+  禁止把 ignored 样本伪装成正式 Relation/active Proposal exclusion 而在 discovery 前删除。
+- `semantic-link-smoke` 的 browser 前置步骤使用真实测试数据库；随后普通 Go race 子命令必须局部清空
+  `ZHIXU_TEST_DATABASE_URL`，避免把未隔离的默认数据库测试误启用到共享质量库。真实数据库行为由 integration、
+  fault 和 browser 目标分别负责。
 - 正式 Graph readiness 与 Semantic Link readiness 独立，候选故障不能让七个查询端点失效。
 
 ### 4. Validation & Error Matrix

@@ -97,10 +97,10 @@ Then open <http://127.0.0.1:8080>. Health and dependency status are available at
 - `GET /api/v1/graph/nodes/{node_type}/{node_id}?workspace_id=...`: read one Graph node projection
 - `GET /api/v1/graph/relations/{relation_id}?workspace_id=...`: read one formal Relation projection
 - `GET /api/v1/graph/relations/{relation_id}/evidence?workspace_id=...`: lazily page Relation Evidence
-- `GET /api/v1/graph/candidates?workspace_id=...`: page reviewable Semantic Link Candidates
+- `GET /api/v1/graph/candidates?workspace_id=...`: page reviewable Semantic Link Candidates; Claim scope is an exact endpoint, while Topic scope also includes Claim pairs whose endpoints are Confirmed members of that Topic
 - `GET /api/v1/graph/candidates/{candidate_id}?workspace_id=...`: read Candidate Evidence and current decision state
 - `POST /api/v1/graph/candidates/{candidate_id}/decisions`: confirm/change type/ignore/false-positive/defer/resume with idempotency and expected version
-- `POST /api/v1/graph/candidate-scans`: start a durable Topic scan and return `202 + workflow_run_id`
+- `POST /api/v1/graph/candidate-scans`: start a durable Topic scan and return `202 + workflow_run_id +` a Workspace-scoped Candidate Scan `status_url`
 - `GET /api/v1/graph/candidate-scans/{scan_id}?workspace_id=...`: restore persisted scan progress and terminal error summary
 
 Open `/graph` for the real Global, Local and Path views. The three Graph `POST` endpoints are still side-effect-free
@@ -109,7 +109,8 @@ single `workspace_id` query parameter. Graph cursors are process-local HMAC-sign
 authorization credentials. The current loopback-only security boundary described below also applies to Graph.
 The Candidate panel is visually and structurally separate from canonical edges. Confirm creates a typed Proposal;
 only Approval plus Knowledge apply creates a formal Relation. Candidate dependency failures do not disable the seven
-canonical Graph query endpoints.
+canonical Graph query endpoints. Topic-scoped Candidate pages include direct Topic endpoints and Claim pairs only when
+both Claims have a formal `CONFIRMED BELONGS_TO` membership in that Topic; they never fall back to Workspace-wide results.
 
 Open `/chat` to create/select a Conversation and `/chat/{conversationId}` to continue it. Chat is fail-closed by
 default because `.env.example` sets `ZHIXU_CHAT_PROVIDER=disabled`. To execute Questions, configure the same
@@ -173,7 +174,8 @@ ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-smoke
 ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-benchmark
 ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-integration
 ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-fault-smoke
-make semantic-link-eval semantic-link-smoke
+make semantic-link-eval
+ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-smoke
 make compose-rag-smoke
 ```
 
@@ -195,8 +197,10 @@ the previous binary/web assets and must retain the canonical Knowledge facts.
 
 The Semantic Link gates verify real River Topic scans, bounded cross-page discovery, Candidate decisions, typed
 Proposal/Approval→Relation apply, retry/cancel/response-loss faults, OpenAPI, deterministic evaluation and frontend
-decoder/component behavior. Rollback disables the Candidate routes/panel and scan worker while retaining Candidate,
-Proposal and already confirmed Relation facts; migrations are forward-only.
+decoder/component behavior. `semantic-link-smoke` also runs a real desktop/mobile browser flow and therefore requires
+Chrome/Chromium (or `ZHIXU_PLAYWRIGHT_EXECUTABLE_PATH`) plus the disposable database URL. Rollback disables the
+Candidate routes/panel and scan worker while retaining Candidate, Proposal and already confirmed Relation facts;
+migrations are forward-only.
 
 `compose-check` validates the Compose model. A release candidate must also run
 `make compose-up`, query both API and Worker readiness, exercise the documented

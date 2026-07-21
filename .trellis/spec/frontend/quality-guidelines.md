@@ -181,8 +181,14 @@ Correct: Workspace/URL/cursor 只用于查询绑定；认证、Session、CSRF �
 ### 3. Contracts
 
 - Candidate 与 formal Relation 视觉、类型和数据流分离；Candidate 永不进入 GraphCanvas edge。
+- Topic scope 的测试数据必须使用真实 Claim↔Claim scan 产物；decoder 只放宽该形态，不能把 node scope 关闭或
+  退化为 Workspace 全量 Candidate。
+- Vitest 只收集 `src/` 内单元/组件测试，Playwright 只收集 `e2e/` 浏览器 smoke；两套 runner 不得因共享
+  `*.spec.ts` 命名互相加载对方的环境前置条件。
 - mutation pending/success/conflict/recovery 来自服务端事实，scan response-loss 复用原 Idempotency-Key。
 - `candidate_scan_id` 可恢复 scan，但不能重置 Graph detail、selection、locked position 或 fixed layout。
+- 当前 Candidate scope 为 Topic 时，恢复的 Scan `scope.topic_id` 必须与当前 Topic 相同；跨 Topic 的旧 scan
+  立即隐藏并清除 URL 绑定，不能用 Topic A 的进度驱动 Topic B 的候选刷新。
 - status 同时保留 `graph` 与 `semantic_links`，任一未知/缺失字段都由严格 decoder 拒绝。
 
 ### 4. Validation & Error Matrix
@@ -202,7 +208,8 @@ Correct: Workspace/URL/cursor 只用于查询绑定；认证、Session、CSRF �
 
 ### 6. Tests Required
 
-- Decoder、query key/cursor、response-loss、mutation invalidation、Graph cache identity、全部决策、focus loop。
+- Decoder、Claim 精确 scope、Topic Claim-pair scope、query key/cursor、response-loss、mutation invalidation、
+  Graph cache identity、跨 Topic scan 恢复拒绝、全部决策、focus loop。
 - 浏览器验证真实 API、scan URL 恢复、system status、桌面/移动 overflow 与 console；后端 integration/fault/eval 仍必需。
 
 ### 7. Wrong vs Correct

@@ -364,6 +364,9 @@ go run -tags=integration ./internal/graph/testfixture/cmd/graphfixture cleanup -
   部分索引 `idx_knowledge_relation_semantic_scan_topic_claim(workspace_id,target_node_id,source_node_id)` 只覆盖
   CLAIM→TOPIC/BELONGS_TO/CONFIRMED。205 Claim 集成与 EXPLAIN 门禁证明三页 pair 数 `10000/5440/10`、
   索引命中、Relation 无 Seq Scan、每 source 的 Limit 实际执行。
+- Candidate page 的 `CLAIM` scope 继续按 source/target 精确匹配；`TOPIC` scope 还可返回 Claim↔Claim Candidate，
+  但两端都必须分别通过参数化 `EXISTS` 命中该 Topic 的 CLAIM→TOPIC/BELONGS_TO/CONFIRMED Relation。使用
+  `EXISTS` 而非 membership JOIN，避免重复 Relation 让候选分页出现重复行；禁止退化为 Workspace 全量结果。
 - PostgreSQL `timestamptz` 按微秒持久化；Application 对 terminal command 与返回 projection 的时间比较允许
   小于 1 微秒差异，防止 Scan 已提交成功后因纳秒丢失把 Workflow Run 误判为 failed。
 

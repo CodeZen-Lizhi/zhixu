@@ -238,10 +238,10 @@ M7-02 另设 Candidate/Scan 命令边界；Candidate 确认只创建 typed Propo
 | `GET /api/v1/graph/nodes/{node_type}/{node_id}?workspace_id=` | 返回一个 Workspace-scoped Topic 或 Claim 判别节点。 |
 | `GET /api/v1/graph/relations/{relation_id}?workspace_id=` | 返回 Relation 本体、确认/有效期和 Evidence count/fingerprint/href，不返回 Evidence 正文。 |
 | `GET /api/v1/graph/relations/{relation_id}/evidence?workspace_id=&cursor=&limit=` | 按需分页返回每条 Evidence 自有的 reason、applicability、provenance 和可打开 Source/Span href；默认 20，最大 100。 |
-| `GET /api/v1/graph/candidates?workspace_id=&node_type=&node_id=&cursor=&limit=` | 按 Workspace 和可选节点 scope 分页返回可审阅 Candidate；支持状态、关系类型、置信度与重开原因过滤。 |
+| `GET /api/v1/graph/candidates?workspace_id=&node_type=&node_id=&cursor=&limit=` | 按 Workspace 和可选节点 scope 分页返回可审阅 Candidate；`CLAIM` 是精确端点 scope，`TOPIC` 还包含双方都以正式 `CONFIRMED BELONGS_TO` 归属该 Topic 的 Claim pair；支持状态、关系类型、置信度与重开原因过滤。 |
 | `GET /api/v1/graph/candidates/{candidate_id}?workspace_id=` | 返回 Candidate、双方版本摘要、Evidence、决策历史摘要和 Proposal 绑定。 |
 | `POST /api/v1/graph/candidates/{candidate_id}/decisions` | 使用 `Idempotency-Key` 与 `expected_version` 执行 Confirm/改类型 Confirm/Ignore/False Positive/Defer/Resume。 |
-| `POST /api/v1/graph/candidate-scans` | 只接受 TOPIC scope，返回 `202 + workflow_run_id + status_url`；相同 key 精确重放。 |
+| `POST /api/v1/graph/candidate-scans` | 只接受 TOPIC scope，返回 `202 + workflow_run_id + status_url`；`status_url` 指向 `/api/v1/graph/candidate-scans/{scan_id}?workspace_id=...` 的权威业务投影，`workflow_run_id` 保留运行时绑定；相同 key 精确重放。 |
 | `GET /api/v1/graph/candidate-scans/{scan_id}?workspace_id=` | 返回持久进度、计数、checkpoint、终态和安全错误摘要。 |
 
 前三个正式 Graph `POST` 只是为复杂过滤和遍历参数提供结构化请求体，仍是无业务副作用的 Query，不要求
@@ -252,6 +252,10 @@ Evidence summary/href；前端打开 Relation 详情并明确展开 Evidence 后
 Candidate decision/scan 的 POST 是有副作用命令，必须严格 JSON 并使用 `Idempotency-Key`；跨 Workspace 或不可见
 统一 Not Found。Candidate 依赖缺失返回独立 503，`system.status.semantic_links` 与 `graph` 分开报告，不能把
 Candidate 故障伪装为 Graph 故障或空候选。
+
+Topic scope 不等于 Workspace 全量，也不依赖 Candidate 的 discovery method 猜测归属。PostgreSQL Repository
+使用两侧 Claim 的正式 membership 事实筛选；公共响应只允许直接 Topic 端点或 Claim-pair 形态，前端不得自行
+重建 `BELONGS_TO` 事实。
 
 Global、depth=1 Neighborhood 和 Relation Evidence 使用独立的 opaque result-window cursor。Cursor v1
 由 API 进程生命周期内的随机密钥进行 HMAC-SHA256 签名，并绑定 query kind、Workspace、规范请求
