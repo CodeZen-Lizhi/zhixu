@@ -33,6 +33,7 @@ import (
 	ingestionapplication "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/application"
 	ingestiondomain "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/domain"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
+	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
@@ -97,6 +98,7 @@ func main() {
 	ingestionHandler := ingestionhttp.NewHandler(nil)
 	retrievalHandler := retrievalhttp.NewHandler(nil, nil, nil)
 	graphHandler := graphhttp.NewHandler(nil, cfg.GraphQueryTimeout)
+	candidateHandler := graphhttp.NewCandidateHandler(nil, cfg.GraphQueryTimeout)
 	conversationHandler := conversationhttp.NewHandler(nil, conversationhttp.NewCursorCodec())
 	eventsHandler := eventshttp.NewHandler(nil)
 	ragEnabled := cfg.ChatProvider != config.ChatProviderDisabled
@@ -114,7 +116,17 @@ func main() {
 		if changeControlRepositoryErr != nil {
 			logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
 		} else {
-			workflowService, runtime, workflowServiceErr := newWorkflowComponents(database.DB(), cfg, changeControlRepository)
+			cancellationGuard, cancellationGuardErr := workflowapplication.NewCompositeCancellationSafetyGuard(
+				changeControlRepository,
+				graphpostgres.NewSemanticLinkScanCancellationGuard(),
+			)
+			if cancellationGuardErr != nil {
+				logger.Error("workflow cancellation guard is unavailable", "error_code", "WORKFLOW_CANCELLATION_GUARD_UNAVAILABLE")
+			}
+			workflowService, runtime, workflowServiceErr := newWorkflowComponents(database.DB(), cfg, cancellationGuard)
+			if cancellationGuardErr != nil {
+				workflowServiceErr = cancellationGuardErr
+			}
 			if workflowServiceErr != nil {
 				logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
 				if ragEnabled {
@@ -179,7 +191,11 @@ func main() {
 				if dispatchRepositoryErr != nil {
 					logger.Error("approval dispatch repository is unavailable", "error_code", "APPROVAL_DISPATCH_DEPENDENCY_MISSING")
 				} else {
-					changeControlService, changeControlServiceErr := changecontrolapplication.NewServiceWithDispatch(changeControlRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, targetReader, approvalGitInspector, dispatchRepository)
+					knowledgeRelationApplier, knowledgeRelationApplierErr := knowledgepostgres.NewApprovedRelationApplyRepository(database.DB(), foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+					if knowledgeRelationApplierErr != nil {
+						logger.Error("knowledge relation apply service is unavailable", "error_code", "KNOWLEDGE_RELATION_APPLIER_UNAVAILABLE")
+					}
+					changeControlService, changeControlServiceErr := changecontrolapplication.NewServiceWithDispatch(changeControlRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, targetReader, approvalGitInspector, dispatchRepository, knowledgeRelationApplier)
 					if changeControlServiceErr != nil {
 						logger.Error("change control service is unavailable", "error_code", "CHANGE_CONTROL_SERVICE_UNAVAILABLE")
 					} else {
@@ -187,6 +203,12 @@ func main() {
 					}
 				}
 			}
+		}
+		configuredCandidateHandler, candidateHandlerErr := newCandidateHandler(database.DB(), workflowRuntime, cfg.GraphQueryTimeout)
+		if candidateHandlerErr != nil {
+			logger.Error("semantic link candidate service is unavailable", "error_code", "SEMANTIC_LINK_DEPENDENCY_UNAVAILABLE")
+		} else {
+			candidateHandler = configuredCandidateHandler
 		}
 		configuredConversation, configuredEvents, conversationErr := newConversationHandlers(database.DB(), workflowRuntime, questionDispatchEnabled(ragEnabled, ragInitErr))
 		if conversationErr != nil {
@@ -215,6 +237,7 @@ func main() {
 		Conversation:      conversationHandler,
 		Events:            eventsHandler,
 		Graph:             graphHandler,
+		Candidate:         candidateHandler,
 		RAGEnabled:        ragEnabled,
 		RAGInitErr:        ragInitErr,
 		Logger:            logger,
@@ -270,6 +293,54 @@ func newGraphHandler(pool *pgxpool.Pool, timeout time.Duration) (*graphhttp.Hand
 		return nil, err
 	}
 	return graphhttp.NewHandler(service, timeout), nil
+}
+
+// newCandidateHandler 组装独立候选查询与 Confirm Proposal 写入链路。
+// 候选不可用不会改变正式 Graph 查询的 readiness。
+func newCandidateHandler(pool *pgxpool.Pool, runtime *workflowpostgres.RuntimeRepository, timeout time.Duration) (*graphhttp.CandidateHandler, error) {
+	if pool == nil {
+		return nil, errors.New("semantic link candidate database is unavailable")
+	}
+	repository, err := graphpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	confirmer, err := graphpostgres.NewCandidateConfirmRepository(
+		pool,
+		foundation.NewUUIDGenerator(nil),
+		foundation.SystemClock{},
+	)
+	if err != nil {
+		return nil, err
+	}
+	cursors, err := graphapplication.NewRandomCursorCodec()
+	if err != nil {
+		return nil, err
+	}
+	service, err := graphapplication.NewSemanticLinkCandidateService(repository, confirmer, cursors)
+	if err != nil {
+		return nil, err
+	}
+	if runtime == nil {
+		return graphhttp.NewCandidateHandler(service, timeout), nil
+	}
+	scanRepository, err := graphpostgres.NewSemanticLinkScanRepository(pool, runtime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	if err != nil {
+		return nil, err
+	}
+	scanService, err := graphapplication.NewSemanticLinkScanService(scanRepository, scanRepository)
+	if err != nil {
+		return nil, err
+	}
+	planner, err := graphpostgres.NewSemanticLinkTopicScanPlanner(pool)
+	if err != nil {
+		return nil, err
+	}
+	scanCommands, err := graphapplication.NewSemanticLinkScanCommandService(planner, scanService)
+	if err != nil {
+		return nil, err
+	}
+	return graphhttp.NewCandidateHandler(service, timeout, scanCommands), nil
 }
 
 func newRetrievalHandler(

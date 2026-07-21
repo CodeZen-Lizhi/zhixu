@@ -494,6 +494,10 @@ func (r *RuntimeRepository) safeToCancelWorkflowNode(ctx context.Context, transa
 	}
 	safe, err := r.cancellation.SafeToCancelWorkflowNode(ctx, transaction, nodeRunID)
 	if err != nil {
+		var classified *foundation.Error
+		if errors.As(err, &classified) && classified.Kind == foundation.ErrorVersionConflict {
+			return false, err
+		}
 		return false, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_CANCELLATION_SAFETY_UNAVAILABLE", true, err)
 	}
 	return safe, nil

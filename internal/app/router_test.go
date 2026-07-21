@@ -30,6 +30,29 @@ type fakePinger struct {
 
 type routerGraphService struct{}
 
+type routerCandidateService struct{}
+type routerCandidateScanService struct{}
+
+func (routerCandidateService) List(context.Context, graphapplication.CandidateListRequest) (graphdomain.SemanticLinkCandidatePage, error) {
+	return graphdomain.SemanticLinkCandidatePage{}, nil
+}
+
+func (routerCandidateService) Get(context.Context, foundation.ID, foundation.ID) (graphdomain.SemanticLinkCandidate, error) {
+	return graphdomain.SemanticLinkCandidate{}, nil
+}
+
+func (routerCandidateService) Decide(context.Context, graphapplication.SemanticLinkCandidateDecisionCommand) (graphapplication.CandidateDecisionReceipt, error) {
+	return graphapplication.CandidateDecisionReceipt{}, nil
+}
+
+func (routerCandidateScanService) StartTopicScan(context.Context, graphapplication.SemanticLinkTopicScanRequest) (graphapplication.SemanticLinkScanStartResult, error) {
+	return graphapplication.SemanticLinkScanStartResult{}, nil
+}
+
+func (routerCandidateScanService) Get(context.Context, foundation.ID, foundation.ID) (graphdomain.SemanticLinkScan, error) {
+	return graphdomain.SemanticLinkScan{}, nil
+}
+
 func (routerGraphService) GlobalPage(context.Context, graphapplication.GlobalPageRequest) (graphdomain.GlobalPage, error) {
 	return graphdomain.GlobalPage{}, nil
 }
@@ -60,6 +83,10 @@ func (routerGraphService) RelationEvidencePage(context.Context, graphapplication
 
 func readyGraphHandler() *graphhttp.Handler {
 	return graphhttp.NewHandler(routerGraphService{}, time.Second)
+}
+
+func readyCandidateHandler() *graphhttp.CandidateHandler {
+	return graphhttp.NewCandidateHandler(routerCandidateService{}, time.Second, routerCandidateScanService{})
 }
 
 func TestRouterRegistersRetrievalRoutes(t *testing.T) {
@@ -110,6 +137,36 @@ func TestRouterGraphMethodNotAllowedReturnsProblem(t *testing.T) {
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusMethodNotAllowed || !strings.Contains(response.Body.String(), `"error_code":"METHOD_NOT_ALLOWED"`) {
 		t.Fatalf("graph method status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRouterRegistersSemanticLinkRoutesAndFailsClosedWithoutService(t *testing.T) {
+	router := NewRouter(Dependencies{Version: "test", Candidate: graphhttp.NewCandidateHandler(nil, time.Second)})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/graph/candidates?workspace_id=92000000-0000-4000-8000-000000000001", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "SEMANTIC_LINK_DEPENDENCY_UNAVAILABLE") {
+		t.Fatalf("semantic link route status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRouterSemanticLinkFailureDoesNotAffectReadiness(t *testing.T) {
+	router := NewRouter(Dependencies{
+		Version: "test", Database: fakePinger{}, Graph: readyGraphHandler(),
+		Candidate: graphhttp.NewCandidateHandler(nil, time.Second),
+	})
+	readyRequest := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	readyResponse := httptest.NewRecorder()
+	router.ServeHTTP(readyResponse, readyRequest)
+	if readyResponse.Code != http.StatusOK {
+		t.Fatalf("readyz status=%d body=%s", readyResponse.Code, readyResponse.Body.String())
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
+	statusResponse := httptest.NewRecorder()
+	router.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"semantic_links":{"reason":"semantic_link_dependencies_unavailable","status":"unavailable"}`) {
+		t.Fatalf("system status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
 	}
 }
 
@@ -235,15 +292,30 @@ func TestRouterSystemStatusReturnsDegradedButOK(t *testing.T) {
 }
 
 func TestRouterSystemStatusReady(t *testing.T) {
-	router := NewRouter(Dependencies{Version: "v-test", Database: fakePinger{}, Graph: readyGraphHandler()})
+	router := NewRouter(Dependencies{Version: "v-test", Database: fakePinger{}, Graph: readyGraphHandler(), Candidate: readyCandidateHandler()})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
 	res := httptest.NewRecorder()
 	router.ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("status code = %d", res.Code)
 	}
-	if !strings.Contains(res.Body.String(), `"status":"ready"`) || !strings.Contains(res.Body.String(), `"graph":{"status":"ready"}`) {
+	if !strings.Contains(res.Body.String(), `"status":"ready"`) || !strings.Contains(res.Body.String(), `"graph":{"status":"ready"}`) ||
+		!strings.Contains(res.Body.String(), `"semantic_links":{"status":"ready"}`) {
 		t.Fatalf("body = %s", res.Body.String())
+	}
+}
+
+func TestRouterSystemStatusReportsMissingSemanticLinkScanDependency(t *testing.T) {
+	router := NewRouter(Dependencies{
+		Version: "v-test", Database: fakePinger{}, Graph: readyGraphHandler(),
+		Candidate: graphhttp.NewCandidateHandler(routerCandidateService{}, time.Second),
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"graph":{"status":"ready"}`) ||
+		!strings.Contains(response.Body.String(), `"semantic_links":{"reason":"semantic_link_dependencies_unavailable","status":"unavailable"}`) {
+		t.Fatalf("system status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

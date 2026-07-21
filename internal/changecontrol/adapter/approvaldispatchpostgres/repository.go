@@ -61,19 +61,22 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var workspaceID, status, revisionHash, baseHash string
+	var workspaceID, proposalType, status, revisionHash, baseHash string
 	var workflowRunID *string
 	err = tx.QueryRow(ctx, `
-		SELECT p.workspace_id::text,p.status,p.workflow_run_id::text,r.change_hash,r.base_hash
+		SELECT p.workspace_id::text,p.proposal_type,p.status,p.workflow_run_id::text,r.change_hash,r.base_hash
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.proposal_id=p.id AND r.id=$2
 		WHERE p.id=$1
-		FOR UPDATE OF p,r`, string(command.Approval.ProposalID), string(command.Approval.RevisionID)).Scan(&workspaceID, &status, &workflowRunID, &revisionHash, &baseHash)
+		FOR UPDATE OF p,r`, string(command.Approval.ProposalID), string(command.Approval.RevisionID)).Scan(&workspaceID, &proposalType, &status, &workflowRunID, &revisionHash, &baseHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return changedispatch.Result{}, foundation.NewError(foundation.ErrorNotFound, "PROPOSAL_REVISION_NOT_FOUND", false, err)
 	}
 	if err != nil {
 		return changedispatch.Result{}, classifyDispatch(err, "APPROVAL_DISPATCH_PROPOSAL_QUERY_FAILED")
+	}
+	if domain.NormalizeProposalType(domain.ProposalType(proposalType)) != domain.ProposalTypeFilePatch {
+		return changedispatch.Result{}, foundation.NewError(foundation.ErrorInvalidInput, "APPROVAL_DISPATCH_PROPOSAL_TYPE_UNSUPPORTED", false, errors.New("approval dispatch only supports file patch proposals"))
 	}
 	if workspaceID != string(command.WorkspaceID) || !strings.EqualFold(revisionHash, command.Approval.ChangeHash) {
 		return changedispatch.Result{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_DISPATCH_BINDING_CONFLICT", false, errors.New("proposal revision binding differs"))

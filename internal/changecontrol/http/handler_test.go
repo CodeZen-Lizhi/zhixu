@@ -13,6 +13,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -147,6 +148,65 @@ func TestProposalResponseIncludesApprovalGitHead(t *testing.T) {
 	decode(t, recorder, &response)
 	if response.Approval == nil || response.Approval.ApprovedGitHead == nil || *response.Approval.ApprovedGitHead != approvedGitHead {
 		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestKnowledgeChangeProposalUsesDiscriminatedTypedResponse(t *testing.T) {
+	now := time.Date(2026, 7, 21, 8, 0, 0, 0, time.UTC)
+	sourceID := foundation.ID("70000000-0000-4000-8000-000000000001")
+	targetID := foundation.ID("70000000-0000-4000-8000-000000000002")
+	evidenceID := foundation.ID("70000000-0000-4000-8000-000000000003")
+	change := domain.KnowledgeChange{
+		TargetRefs: []domain.KnowledgeTargetRef{{
+			Type: domain.KnowledgeTargetRefRelationCandidate, ID: testProposalID, Fingerprint: testChangeHash,
+		}},
+		BaseVersions: []domain.KnowledgeBaseVersion{
+			{NodeType: knowledge.NodeTypeClaim, NodeID: sourceID, Version: 3},
+			{NodeType: knowledge.NodeTypeClaim, NodeID: targetID, Version: 5},
+		},
+		ChangeSet: domain.KnowledgeChangeSet{
+			Operation:    domain.KnowledgeChangeOperationCreateRelation,
+			Source:       knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: sourceID},
+			Target:       knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: targetID},
+			RelationType: knowledge.RelationComplements,
+		},
+		EvidenceRefs:  []domain.KnowledgeEvidenceRef{{CandidateEvidenceID: evidenceID, SemanticHash: testChangeHash}},
+		SchemaVersion: domain.KnowledgeChangeSchemaVersion,
+	}
+	changeHash, err := domain.ComputeKnowledgeChangeHash(change, "review relation", "retire through a compensating proposal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &fakeService{proposal: domain.Proposal{
+		ID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeKnowledgeChange,
+		Status: domain.StatusReady, CreatedAt: now, UpdatedAt: now,
+		Revision: domain.Revision{
+			ID: testRevisionID, ProposalID: testProposalID, RevisionNo: 1,
+			Risk: "review relation", RollbackPlan: "retire through a compensating proposal",
+			ChangeHash: changeHash, KnowledgeChange: &change, CreatedAt: now,
+		},
+	}}
+	recorder := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID), "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	decode(t, recorder, &response)
+	if response["proposal_type"] != string(domain.ProposalTypeKnowledgeChange) {
+		t.Fatalf("proposal=%#v", response)
+	}
+	if _, exists := response["target_path"]; exists {
+		t.Fatalf("knowledge proposal leaked file target: %#v", response)
+	}
+	revision, ok := response["revision"].(map[string]any)
+	if !ok || revision["schema_version"] != domain.KnowledgeChangeSchemaVersion {
+		t.Fatalf("revision=%#v", response["revision"])
+	}
+	changeSet := revision["change_set"].(map[string]any)
+	if changeSet["relation_type"] != string(knowledge.RelationComplements) ||
+		changeSet["source"].(map[string]any)["version"] != float64(3) ||
+		changeSet["target"].(map[string]any)["version"] != float64(5) {
+		t.Fatalf("change_set=%#v", changeSet)
 	}
 }
 

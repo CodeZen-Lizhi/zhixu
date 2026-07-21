@@ -552,6 +552,118 @@
         }
       }
     },
+    "/api/v1/graph/candidates": {
+      "get": {
+        "operationId": "listSemanticLinkCandidates",
+        "description": "Lists a stable bounded page of reviewable Semantic Link Candidates. Candidates are not formal Graph relations.",
+        "parameters": [
+          { "$ref": "#/components/parameters/WorkspaceIDQuery" },
+          { "name": "node_type", "in": "query", "required": false, "schema": { "$ref": "#/components/schemas/SemanticLinkNodeType" }, "description": "Must be supplied together with node_id." },
+          { "name": "node_id", "in": "query", "required": false, "schema": { "type": "string", "format": "uuid" }, "description": "Must be supplied together with node_type." },
+          { "name": "status", "in": "query", "required": false, "style": "form", "explode": true, "schema": { "type": "array", "uniqueItems": true, "maxItems": 6, "items": { "$ref": "#/components/schemas/SemanticLinkCandidateStatus" } } },
+          { "name": "relation_type", "in": "query", "required": false, "style": "form", "explode": true, "schema": { "type": "array", "uniqueItems": true, "maxItems": 10, "items": { "$ref": "#/components/schemas/SemanticLinkRelationType" } } },
+          { "name": "reopened_reason", "in": "query", "required": false, "style": "form", "explode": true, "schema": { "type": "array", "uniqueItems": true, "maxItems": 1, "items": { "const": "CONTENT_CHANGED" } } },
+          { "name": "min_confidence", "in": "query", "required": false, "schema": { "type": "number", "minimum": 0, "maximum": 1 } },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "responses": {
+          "200": { "description": "A stable Candidate page. Items remain separate from formal Graph edges.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SemanticLinkCandidatePage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
+    "/api/v1/graph/candidates/{candidate_id}": {
+      "parameters": [
+        { "name": "candidate_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "$ref": "#/components/parameters/WorkspaceIDQuery" }
+      ],
+      "get": {
+        "operationId": "getSemanticLinkCandidate",
+        "responses": {
+          "200": { "description": "A Workspace-scoped Candidate with bounded evidence excerpts.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SemanticLinkCandidate" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
+    "/api/v1/graph/candidates/{candidate_id}/decisions": {
+      "parameters": [
+        { "name": "candidate_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "$ref": "#/components/parameters/IdempotencyKey" }
+      ],
+      "post": {
+        "operationId": "decideSemanticLinkCandidate",
+        "description": "Records one versioned Candidate decision. Confirm creates a typed Relation Proposal but never writes a formal Relation directly.",
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 65536,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SemanticLinkCandidateDecisionRequest" } } }
+        },
+        "responses": {
+          "201": { "description": "A new append-only Candidate decision was persisted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SemanticLinkCandidateDecisionReceipt" } } } },
+          "200": { "description": "An exact Idempotency-Key replay returned the persisted decision receipt.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SemanticLinkCandidateDecisionReceipt" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
+    "/api/v1/graph/candidate-scans": {
+      "post": {
+        "operationId": "startSemanticLinkCandidateScan",
+        "description": "Starts or exactly replays a durable bounded Topic scan. The scan is a Candidate workflow and never writes a formal Graph relation.",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 65536,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SemanticLinkScanStartRequest" } } }
+        },
+        "responses": {
+          "202": { "description": "The durable Topic scan was created or exactly replayed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SemanticLinkScanAcceptance" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
+    "/api/v1/graph/candidate-scans/{scan_id}": {
+      "parameters": [
+        { "name": "scan_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "$ref": "#/components/parameters/WorkspaceIDQuery" }
+      ],
+      "get": {
+        "operationId": "getSemanticLinkCandidateScan",
+        "description": "Reads the Workspace-scoped durable Topic scan projection and its persisted counters.",
+        "responses": {
+          "200": { "description": "The durable Topic scan projection.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SemanticLinkScan" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" }
+        }
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}": {
       "parameters": [
         { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
@@ -632,12 +744,13 @@
       },
       "SystemStatus": {
         "type": "object",
-        "required": ["status", "version", "database", "graph", "rag", "request_id"],
+        "required": ["status", "version", "database", "graph", "semantic_links", "rag", "request_id"],
         "properties": {
           "status": { "type": "string", "enum": ["ready", "degraded"] },
           "version": { "type": "string", "minLength": 1 },
           "database": { "$ref": "#/components/schemas/DatabaseStatus" },
           "graph": { "$ref": "#/components/schemas/GraphCapabilityStatus" },
+          "semantic_links": { "$ref": "#/components/schemas/SemanticLinkCapabilityStatus" },
           "rag": { "$ref": "#/components/schemas/RAGCapabilityStatus" },
           "request_id": { "type": "string", "minLength": 1 }
         },
@@ -649,6 +762,15 @@
         "properties": {
           "status": { "type": "string", "enum": ["ready", "unavailable"] },
           "reason": { "type": "string", "enum": ["graph_dependencies_unavailable"] }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkCapabilityStatus": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ready", "unavailable"] },
+          "reason": { "type": "string", "enum": ["semantic_link_dependencies_unavailable"] }
         },
         "additionalProperties": false
       },
@@ -895,6 +1017,19 @@
         "additionalProperties": false
       },
       "Proposal": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/FilePatchProposal" },
+          { "$ref": "#/components/schemas/KnowledgeChangeProposal" }
+        ],
+        "discriminator": {
+          "propertyName": "proposal_type",
+          "mapping": {
+            "file_patch": "#/components/schemas/FilePatchProposal",
+            "knowledge_change": "#/components/schemas/KnowledgeChangeProposal"
+          }
+        }
+      },
+      "FilePatchProposal": {
         "type": "object",
         "required": ["id", "workspace_id", "target_path", "status", "revision", "created_at", "updated_at"],
         "properties": {
@@ -903,7 +1038,90 @@
           "target_path": { "type": "string", "minLength": 1 },
           "status": { "type": "string", "enum": ["draft", "validating", "ready_for_review", "approved", "applying", "applied", "verifying", "completed", "rejected", "needs_revision", "deferred", "apply_failed", "verify_failed", "rolled_back", "cancelled"] },
           "revision": { "$ref": "#/components/schemas/ProposalRevision" },
-          "approval": { "$ref": "#/components/schemas/Approval" },
+          "approval": { "oneOf": [{ "$ref": "#/components/schemas/Approval" }, { "type": "null" }] },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeChangeTargetRef": {
+        "type": "object",
+        "required": ["type", "id", "fingerprint"],
+        "properties": {
+          "type": { "const": "RELATION_CANDIDATE" },
+          "id": { "type": "string", "format": "uuid" },
+          "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeChangeBaseVersion": {
+        "type": "object",
+        "required": ["node_type", "node_id", "version"],
+        "properties": {
+          "node_type": { "$ref": "#/components/schemas/SemanticLinkNodeType" },
+          "node_id": { "type": "string", "format": "uuid" },
+          "version": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeChangeEndpoint": {
+        "type": "object",
+        "required": ["type", "id", "version"],
+        "properties": {
+          "type": { "$ref": "#/components/schemas/SemanticLinkNodeType" },
+          "id": { "type": "string", "format": "uuid" },
+          "version": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeChangeSet": {
+        "type": "object",
+        "required": ["operation", "source", "target", "relation_type"],
+        "properties": {
+          "operation": { "const": "CREATE_RELATION" },
+          "source": { "$ref": "#/components/schemas/KnowledgeChangeEndpoint" },
+          "target": { "$ref": "#/components/schemas/KnowledgeChangeEndpoint" },
+          "relation_type": { "$ref": "#/components/schemas/SemanticLinkRelationType" }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeChangeEvidenceRef": {
+        "type": "object",
+        "required": ["candidate_evidence_id", "semantic_hash"],
+        "properties": {
+          "candidate_evidence_id": { "type": "string", "format": "uuid" },
+          "semantic_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeChangeRevision": {
+        "type": "object",
+        "required": ["id", "revision_no", "schema_version", "target_refs", "base_versions", "change_set", "evidence_refs", "risk", "rollback_plan", "change_hash", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "revision_no": { "type": "integer", "minimum": 1 },
+          "schema_version": { "const": "knowledge-relation-change/v1" },
+          "target_refs": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/components/schemas/KnowledgeChangeTargetRef" } },
+          "base_versions": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "$ref": "#/components/schemas/KnowledgeChangeBaseVersion" } },
+          "change_set": { "$ref": "#/components/schemas/KnowledgeChangeSet" },
+          "evidence_refs": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/components/schemas/KnowledgeChangeEvidenceRef" } },
+          "risk": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "rollback_plan": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeChangeProposal": {
+        "type": "object",
+        "required": ["proposal_type", "id", "workspace_id", "status", "revision", "created_at", "updated_at"],
+        "properties": {
+          "proposal_type": { "const": "knowledge_change" },
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["draft", "validating", "ready_for_review", "approved", "applying", "applied", "verifying", "completed", "rejected", "needs_revision", "deferred", "apply_failed", "verify_failed", "rolled_back", "cancelled"] },
+          "revision": { "$ref": "#/components/schemas/KnowledgeChangeRevision" },
+          "approval": { "oneOf": [{ "$ref": "#/components/schemas/Approval" }, { "type": "null" }] },
           "created_at": { "type": "string", "format": "date-time" },
           "updated_at": { "type": "string", "format": "date-time" }
         },
@@ -1433,6 +1651,219 @@
           "relation_id": { "type": "string", "format": "uuid" },
           "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/GraphRelationEvidenceItem" } },
           "meta": { "$ref": "#/components/schemas/GraphPageMeta" }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkNodeType": {
+        "type": "string",
+        "enum": ["TOPIC", "CLAIM"]
+      },
+      "SemanticLinkRelationType": {
+        "type": "string",
+        "enum": ["CITES", "DERIVED_FROM", "BELONGS_TO", "SUPPORTS", "COMPLEMENTS", "DUPLICATES", "CONFLICTS_WITH", "PREREQUISITE_OF", "VERSION_OF", "IMPACTS"]
+      },
+      "SemanticLinkCandidateStatus": {
+        "type": "string",
+        "enum": ["ACTIVE", "DEFERRED", "IGNORED", "FALSE_POSITIVE", "PROPOSAL_CREATED", "SUPERSEDED"]
+      },
+      "SemanticLinkDiscoveryMethod": {
+        "type": "string",
+        "enum": ["TITLE_ALIAS", "TERM_MATCH", "CLAIM_SEMANTIC_SIMILARITY", "COMMON_TOPIC", "SHARED_SOURCE", "RAG_CO_RETRIEVAL"]
+      },
+      "SemanticLinkCandidateEndpoint": {
+        "type": "object",
+        "required": ["type", "id", "version", "summary", "excerpt"],
+        "properties": {
+          "type": { "$ref": "#/components/schemas/SemanticLinkNodeType" },
+          "id": { "type": "string", "format": "uuid" },
+          "version": { "type": "integer", "minimum": 1 },
+          "summary": { "type": "string", "maxLength": 4096, "x-max-utf8-bytes": 4096 },
+          "excerpt": { "type": "string", "maxLength": 4096, "x-max-utf8-bytes": 4096 }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkCandidateEvidence": {
+        "type": "object",
+        "required": ["id", "semantic_hash", "source_version_id", "source_span_id", "source_version_href", "source_span_href", "excerpt", "reason"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "semantic_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "source_span_id": { "type": "string", "format": "uuid" },
+          "source_version_href": { "type": "string", "format": "uri-reference", "pattern": "^/api/v1/workspaces/[0-9a-f-]{36}/source-versions/[0-9a-f-]{36}$" },
+          "source_span_href": { "type": "string", "format": "uri-reference", "pattern": "^/api/v1/workspaces/[0-9a-f-]{36}/source-versions/[0-9a-f-]{36}/spans/[0-9a-f-]{36}$" },
+          "excerpt": { "type": "string", "maxLength": 4096, "x-max-utf8-bytes": 4096 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkGeneration": {
+        "type": "object",
+        "required": ["index_version_id", "embedding_version_id", "rerank_version_id"],
+        "properties": {
+          "index_version_id": { "type": ["string", "null"], "format": "uuid" },
+          "embedding_version_id": { "type": ["string", "null"], "format": "uuid" },
+          "rerank_version_id": { "type": ["string", "null"], "format": "uuid" },
+          "model_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "model_profile_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "prompt_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "schema_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "model_run_id": { "type": ["string", "null"], "format": "uuid" },
+          "rule_id": { "type": ["string", "null"], "format": "uuid" },
+          "rule_version": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkCandidate": {
+        "type": "object",
+        "required": ["id", "workspace_id", "fingerprint", "status", "version", "source", "target", "proposed_relation_type", "confidence", "reason", "discovery_methods", "evidence", "generation", "reopened_reason", "reopened_from_candidate_id", "proposal_id", "deferred_until", "created_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "status": { "$ref": "#/components/schemas/SemanticLinkCandidateStatus" },
+          "version": { "type": "integer", "minimum": 1 },
+          "source": { "$ref": "#/components/schemas/SemanticLinkCandidateEndpoint" },
+          "target": { "$ref": "#/components/schemas/SemanticLinkCandidateEndpoint" },
+          "proposed_relation_type": { "$ref": "#/components/schemas/SemanticLinkRelationType" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 },
+          "discovery_methods": { "type": "array", "minItems": 1, "maxItems": 6, "uniqueItems": true, "items": { "$ref": "#/components/schemas/SemanticLinkDiscoveryMethod" } },
+          "evidence": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/components/schemas/SemanticLinkCandidateEvidence" } },
+          "generation": { "$ref": "#/components/schemas/SemanticLinkGeneration" },
+          "reopened_reason": { "oneOf": [{ "const": "CONTENT_CHANGED" }, { "type": "null" }] },
+          "reopened_from_candidate_id": { "type": ["string", "null"], "format": "uuid" },
+          "proposal_id": { "type": ["string", "null"], "format": "uuid" },
+          "deferred_until": { "type": ["string", "null"], "format": "date-time" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkCandidatePage": {
+        "type": "object",
+        "required": ["workspace_id", "items"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/SemanticLinkCandidate" } },
+          "next_cursor": { "$ref": "#/components/schemas/PageCursor" }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkCandidateDecisionRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["workspace_id", "action", "expected_version"],
+            "properties": { "workspace_id": { "type": "string", "format": "uuid" }, "action": { "const": "CONFIRM" }, "expected_version": { "type": "integer", "minimum": 1 } },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["workspace_id", "action", "expected_version", "relation_type"],
+            "properties": { "workspace_id": { "type": "string", "format": "uuid" }, "action": { "const": "CONFIRM_WITH_RELATION_TYPE" }, "expected_version": { "type": "integer", "minimum": 1 }, "relation_type": { "$ref": "#/components/schemas/SemanticLinkRelationType" } },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["workspace_id", "action", "expected_version", "reason"],
+            "properties": { "workspace_id": { "type": "string", "format": "uuid" }, "action": { "enum": ["IGNORE", "FALSE_POSITIVE"] }, "expected_version": { "type": "integer", "minimum": 1 }, "reason": { "type": "string", "minLength": 1, "maxLength": 4096 } },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["workspace_id", "action", "expected_version"],
+            "properties": { "workspace_id": { "type": "string", "format": "uuid" }, "action": { "const": "DEFER" }, "expected_version": { "type": "integer", "minimum": 1 }, "deferred_until": { "type": ["string", "null"], "format": "date-time" } },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["workspace_id", "action", "expected_version"],
+            "properties": { "workspace_id": { "type": "string", "format": "uuid" }, "action": { "const": "RESUME" }, "expected_version": { "type": "integer", "minimum": 1 }, "deferred_until": { "const": null } },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "SemanticLinkCandidateDecisionReceipt": {
+        "type": "object",
+        "required": ["id", "candidate_id", "workspace_id", "action", "status", "version", "proposal_id", "created_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "candidate_id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "action": { "type": "string", "enum": ["CONFIRM", "CONFIRM_WITH_RELATION_TYPE", "IGNORE", "FALSE_POSITIVE", "DEFER", "RESUME"] },
+          "status": { "$ref": "#/components/schemas/SemanticLinkCandidateStatus" },
+          "version": { "type": "integer", "minimum": 1 },
+          "proposal_id": { "type": ["string", "null"], "format": "uuid" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkScanStatus": {
+        "type": "string",
+        "enum": ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
+      },
+      "SemanticLinkTopicScanScope": {
+        "type": "object",
+        "required": ["kind", "topic_id"],
+        "properties": {
+          "kind": { "const": "TOPIC" },
+          "topic_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkScanStartRequest": {
+        "type": "object",
+        "required": ["workspace_id", "scope"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "scope": { "$ref": "#/components/schemas/SemanticLinkTopicScanScope" }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkScanAcceptance": {
+        "type": "object",
+        "required": ["scan_id", "workflow_run_id", "status", "version", "status_url"],
+        "properties": {
+          "scan_id": { "type": "string", "format": "uuid" },
+          "workflow_run_id": { "type": "string", "format": "uuid" },
+          "status": { "$ref": "#/components/schemas/SemanticLinkScanStatus" },
+          "version": { "type": "integer", "minimum": 1 },
+          "status_url": { "type": "string", "format": "uri-reference", "pattern": "^/api/v1/workflows/[0-9a-f-]{36}$" }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkScanError": {
+        "type": "object",
+        "required": ["stage", "code", "retryable"],
+        "properties": {
+          "stage": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "code": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "retryable": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "SemanticLinkScan": {
+        "type": "object",
+        "required": ["id", "workspace_id", "scope", "status", "workflow_run_id", "version", "status_url", "total_count", "processed_count", "candidate_count", "ignored_count", "failed_count", "last_error", "created_at", "updated_at", "completed_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "scope": { "$ref": "#/components/schemas/SemanticLinkTopicScanScope" },
+          "status": { "$ref": "#/components/schemas/SemanticLinkScanStatus" },
+          "workflow_run_id": { "type": "string", "format": "uuid" },
+          "version": { "type": "integer", "minimum": 1 },
+          "status_url": { "type": "string", "format": "uri-reference", "pattern": "^/api/v1/workflows/[0-9a-f-]{36}$" },
+          "total_count": { "type": "integer", "minimum": 0 },
+          "processed_count": { "type": "integer", "minimum": 0 },
+          "candidate_count": { "type": "integer", "minimum": 0 },
+          "ignored_count": { "type": "integer", "minimum": 0 },
+          "failed_count": { "type": "integer", "minimum": 0 },
+          "last_error": { "oneOf": [{ "$ref": "#/components/schemas/SemanticLinkScanError" }, { "type": "null" }] },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "completed_at": { "type": ["string", "null"], "format": "date-time" }
         },
         "additionalProperties": false
       },

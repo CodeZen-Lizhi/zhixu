@@ -58,14 +58,15 @@ type applyPreflightRequest struct {
 }
 
 type proposalResponse struct {
-	ID          string            `json:"id"`
-	WorkspaceID string            `json:"workspace_id"`
-	TargetPath  string            `json:"target_path"`
-	Status      string            `json:"status"`
-	Revision    revisionResponse  `json:"revision"`
-	Approval    *approvalResponse `json:"approval,omitempty"`
-	CreatedAt   string            `json:"created_at"`
-	UpdatedAt   string            `json:"updated_at"`
+	ProposalType string            `json:"proposal_type,omitempty"`
+	ID           string            `json:"id"`
+	WorkspaceID  string            `json:"workspace_id"`
+	TargetPath   string            `json:"target_path,omitempty"`
+	Status       string            `json:"status"`
+	Revision     any               `json:"revision"`
+	Approval     *approvalResponse `json:"approval,omitempty"`
+	CreatedAt    string            `json:"created_at"`
+	UpdatedAt    string            `json:"updated_at"`
 }
 
 type revisionResponse struct {
@@ -78,6 +79,50 @@ type revisionResponse struct {
 	RollbackPlan    string `json:"rollback_plan"`
 	ChangeHash      string `json:"change_hash"`
 	CreatedAt       string `json:"created_at"`
+}
+
+type knowledgeTargetRefResponse struct {
+	Type        string `json:"type"`
+	ID          string `json:"id"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+type knowledgeBaseVersionResponse struct {
+	NodeType string `json:"node_type"`
+	NodeID   string `json:"node_id"`
+	Version  int64  `json:"version"`
+}
+
+type knowledgeChangeEndpointResponse struct {
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Version int64  `json:"version"`
+}
+
+type knowledgeChangeSetResponse struct {
+	Operation    string                          `json:"operation"`
+	Source       knowledgeChangeEndpointResponse `json:"source"`
+	Target       knowledgeChangeEndpointResponse `json:"target"`
+	RelationType string                          `json:"relation_type"`
+}
+
+type knowledgeEvidenceRefResponse struct {
+	CandidateEvidenceID string `json:"candidate_evidence_id"`
+	SemanticHash        string `json:"semantic_hash"`
+}
+
+type knowledgeRevisionResponse struct {
+	ID            string                         `json:"id"`
+	RevisionNo    int                            `json:"revision_no"`
+	SchemaVersion string                         `json:"schema_version"`
+	TargetRefs    []knowledgeTargetRefResponse   `json:"target_refs"`
+	BaseVersions  []knowledgeBaseVersionResponse `json:"base_versions"`
+	ChangeSet     knowledgeChangeSetResponse     `json:"change_set"`
+	EvidenceRefs  []knowledgeEvidenceRefResponse `json:"evidence_refs"`
+	Risk          string                         `json:"risk"`
+	RollbackPlan  string                         `json:"rollback_plan"`
+	ChangeHash    string                         `json:"change_hash"`
+	CreatedAt     string                         `json:"created_at"`
 }
 
 type approvalResponse struct {
@@ -229,16 +274,64 @@ func (h *Handler) applyPreflight(w http.ResponseWriter, r *http.Request) {
 func toProposalResponse(proposal domain.Proposal) proposalResponse {
 	response := proposalResponse{
 		ID: string(proposal.ID), WorkspaceID: string(proposal.WorkspaceID), TargetPath: proposal.TargetPath,
-		Status: string(proposal.Status), Revision: revisionResponse{
+		Status: string(proposal.Status), CreatedAt: proposal.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt: proposal.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeKnowledgeChange {
+		response.ProposalType = string(domain.ProposalTypeKnowledgeChange)
+		response.TargetPath = ""
+		response.Revision = toKnowledgeRevisionResponse(proposal.Revision)
+	} else {
+		response.Revision = revisionResponse{
 			ID: string(proposal.Revision.ID), RevisionNo: proposal.Revision.RevisionNo, BaseHash: proposal.Revision.BaseHash,
 			Content: proposal.Revision.Content, EvidenceSummary: proposal.Revision.EvidenceSummary, Risk: proposal.Revision.Risk,
 			RollbackPlan: proposal.Revision.RollbackPlan, ChangeHash: proposal.Revision.ChangeHash,
 			CreatedAt: proposal.Revision.CreatedAt.UTC().Format(time.RFC3339Nano),
-		}, CreatedAt: proposal.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: proposal.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		}
 	}
 	if proposal.Approval != nil {
 		approval := toApprovalResponse(*proposal.Approval)
 		response.Approval = &approval
+	}
+	return response
+}
+
+func toKnowledgeRevisionResponse(revision domain.Revision) knowledgeRevisionResponse {
+	response := knowledgeRevisionResponse{
+		ID: string(revision.ID), RevisionNo: revision.RevisionNo, Risk: revision.Risk,
+		RollbackPlan: revision.RollbackPlan, ChangeHash: revision.ChangeHash,
+		CreatedAt: revision.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if revision.KnowledgeChange == nil {
+		return response
+	}
+	change := revision.KnowledgeChange
+	response.SchemaVersion = change.SchemaVersion
+	response.TargetRefs = make([]knowledgeTargetRefResponse, len(change.TargetRefs))
+	for index, item := range change.TargetRefs {
+		response.TargetRefs[index] = knowledgeTargetRefResponse{Type: string(item.Type), ID: string(item.ID), Fingerprint: item.Fingerprint}
+	}
+	response.BaseVersions = make([]knowledgeBaseVersionResponse, len(change.BaseVersions))
+	versions := make(map[string]int64, len(change.BaseVersions))
+	for index, item := range change.BaseVersions {
+		response.BaseVersions[index] = knowledgeBaseVersionResponse{NodeType: string(item.NodeType), NodeID: string(item.NodeID), Version: item.Version}
+		versions[string(item.NodeType)+":"+string(item.NodeID)] = item.Version
+	}
+	response.ChangeSet = knowledgeChangeSetResponse{
+		Operation: string(change.ChangeSet.Operation),
+		Source: knowledgeChangeEndpointResponse{
+			Type: string(change.ChangeSet.Source.Type), ID: string(change.ChangeSet.Source.ID),
+			Version: versions[string(change.ChangeSet.Source.Type)+":"+string(change.ChangeSet.Source.ID)],
+		},
+		Target: knowledgeChangeEndpointResponse{
+			Type: string(change.ChangeSet.Target.Type), ID: string(change.ChangeSet.Target.ID),
+			Version: versions[string(change.ChangeSet.Target.Type)+":"+string(change.ChangeSet.Target.ID)],
+		},
+		RelationType: string(change.ChangeSet.RelationType),
+	}
+	response.EvidenceRefs = make([]knowledgeEvidenceRefResponse, len(change.EvidenceRefs))
+	for index, item := range change.EvidenceRefs {
+		response.EvidenceRefs[index] = knowledgeEvidenceRefResponse{CandidateEvidenceID: string(item.CandidateEvidenceID), SemanticHash: item.SemanticHash}
 	}
 	return response
 }

@@ -48,6 +48,7 @@ type Dependencies struct {
 	Ingestion         *ingestionhttp.Handler
 	Retrieval         *retrievalhttp.Handler
 	Graph             *graphhttp.Handler
+	Candidate         *graphhttp.CandidateHandler
 	Conversation      *conversationhttp.Handler
 	Events            *eventshttp.Handler
 	RAGEnabled        bool
@@ -70,6 +71,9 @@ func NewRouter(deps Dependencies) http.Handler {
 	}
 	if deps.Graph == nil {
 		deps.Graph = graphhttp.NewHandler(nil, 0)
+	}
+	if deps.Candidate == nil {
+		deps.Candidate = graphhttp.NewCandidateHandler(nil, 0)
 	}
 	router := chi.NewRouter()
 	router.Use(requestIDMiddleware)
@@ -123,6 +127,7 @@ func NewRouter(deps Dependencies) http.Handler {
 			deps.Retrieval.Routes(api)
 		}
 		deps.Graph.Routes(api)
+		deps.Candidate.Routes(api)
 		if deps.Conversation != nil {
 			deps.Conversation.Routes(api)
 		}
@@ -178,6 +183,7 @@ func requestTraceMiddleware(tracer observability.Tracer) func(http.Handler) http
 func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencies) {
 	databaseStatus := map[string]string{"status": "unavailable"}
 	graphStatus := map[string]string{"status": "ready"}
+	semanticLinksStatus := map[string]string{"status": "ready"}
 	ragStatus := map[string]string{"status": "disabled"}
 	status := "degraded"
 	if err := checkDatabase(r.Context(), deps); err == nil {
@@ -199,13 +205,19 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 		graphStatus["reason"] = "graph_dependencies_unavailable"
 		status = "degraded"
 	}
+	if !deps.Candidate.Available() {
+		semanticLinksStatus["status"] = "unavailable"
+		semanticLinksStatus["reason"] = "semantic_link_dependencies_unavailable"
+		status = "degraded"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":     status,
-		"version":    deps.Version,
-		"database":   databaseStatus,
-		"graph":      graphStatus,
-		"rag":        ragStatus,
-		"request_id": requestID(r.Context()),
+		"status":         status,
+		"version":        deps.Version,
+		"database":       databaseStatus,
+		"graph":          graphStatus,
+		"semantic_links": semanticLinksStatus,
+		"rag":            ragStatus,
+		"request_id":     requestID(r.Context()),
 	})
 }
 

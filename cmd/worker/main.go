@@ -27,6 +27,9 @@ import (
 	conversationpostgres "github.com/CodeZen-Lizhi/zhixu/internal/conversation/adapter/postgres"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	graphpostgres "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/postgres"
+	graphworkflow "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/workflow"
+	graphapplication "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	ingestionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/postgres"
 	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
 	ingestionapplication "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/application"
@@ -79,6 +82,7 @@ type workerComponents struct {
 	runtimeClient   *riveradapter.Client
 	definitions     *workflowapplication.DefinitionRegistry
 	executors       *workflowapplication.ExecutorRegistry
+	semanticScan    *graphworkflow.SemanticLinkScanExecutor
 	fatalInvariants <-chan error
 }
 
@@ -209,6 +213,7 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetRiverStarted(true)
 	readiness.SetReindexDispatcherStarted(components.dispatcher.Started())
 	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil,
+		"semantic_link_scan", components.semanticScan != nil,
 		"agent_available", components.agentCapability.available, "agent_capability_code", components.agentCapability.code,
 		"tool_runtime_enabled", components.tools.runtimeEnabled, "tool_executor_count", len(components.tools.enabledRefs),
 		"web_fetch_enabled", cfg.WebFetchMode == config.ToolModeEnabled, "reindex_dispatcher", components.dispatcher.Started())
@@ -364,6 +369,37 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err := executors.Register(changecontrolworkflow.SafeWritebackNodeKind, changecontrolworkflow.SafeWritebackBootstrapInputSchemaVersion, bootstrap); err != nil {
 		return workerComponents{}, err
 	}
+	graphRepository, err := graphpostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	scanState, err := graphpostgres.NewSemanticLinkScanStateRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	scanService, err := graphapplication.NewSemanticLinkScanStateService(scanState)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	pageSource, err := graphpostgres.NewSemanticLinkTopicScanPageRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	candidateWriter, err := graphpostgres.NewSemanticLinkDiscoveryCandidateWriter(db, graphRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	pageExecutor, err := graphapplication.NewSemanticLinkTopicScanExecutor(pageSource, graphapplication.NewSemanticLinkDiscoveryService(nil, nil), candidateWriter)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	semanticScan, err := graphworkflow.NewSemanticLinkScanExecutor(scanState, scanService, pageExecutor, foundation.SystemClock{})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := executors.Register(graphapplication.SemanticLinkScanNodeKind, graphapplication.SemanticLinkScanInputSchemaVersion, semanticScan); err != nil {
+		return workerComponents{}, err
+	}
 	agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository)
 	if err != nil {
 		return workerComponents{}, err
@@ -397,6 +433,13 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err := definitions.Register(changecontrolworkflow.RegisteredDefinition()); err != nil {
 		return workerComponents{}, err
 	}
+	semanticScanDefinition, err := graphapplication.RegisteredSemanticLinkScanDefinition()
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := definitions.Register(semanticScanDefinition); err != nil {
+		return workerComponents{}, err
+	}
 	if agentComponents.relation != nil {
 		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
 			return workerComponents{}, err
@@ -426,7 +469,14 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(db, inserter, writebackRepository)
+	cancellationGuard, err := workflowapplication.NewCompositeCancellationSafetyGuard(
+		writebackRepository,
+		graphpostgres.NewSemanticLinkScanCancellationGuard(),
+	)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(db, inserter, cancellationGuard)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -463,7 +513,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	return workerComponents{
 		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability,
 		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
-		runtimeClient: runtimeClient, definitions: definitions, executors: executors, fatalInvariants: fatalInvariants,
+		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, fatalInvariants: fatalInvariants,
 	}, nil
 }
 

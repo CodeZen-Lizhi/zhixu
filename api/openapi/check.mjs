@@ -28,6 +28,11 @@ const requiredOperations = [
   ["/api/v1/graph/nodes/{node_type}/{node_id}", "get", "200"],
   ["/api/v1/graph/relations/{relation_id}", "get", "200"],
   ["/api/v1/graph/relations/{relation_id}/evidence", "get", "200"],
+  ["/api/v1/graph/candidates", "get", "200"],
+  ["/api/v1/graph/candidates/{candidate_id}", "get", "200"],
+  ["/api/v1/graph/candidates/{candidate_id}/decisions", "post", "201"],
+  ["/api/v1/graph/candidate-scans", "post", "202"],
+  ["/api/v1/graph/candidate-scans/{scan_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/spans/{source_span_id}", "get", "200"],
   ["/api/v1/conversations", "post", "201"],
@@ -99,6 +104,45 @@ for (const [path, method, successSchema, errorStatuses] of graphOperations) {
   }
 }
 
+const semanticLinkOperations = [
+  ["/api/v1/graph/candidates", "get", "SemanticLinkCandidatePage", ["400", "409", "500", "503", "405"]],
+  ["/api/v1/graph/candidates/{candidate_id}", "get", "SemanticLinkCandidate", ["400", "404", "409", "500", "503", "405"]],
+  ["/api/v1/graph/candidates/{candidate_id}/decisions", "post", "SemanticLinkCandidateDecisionReceipt", ["200", "400", "404", "409", "415", "500", "503", "405"]],
+];
+for (const [path, method, successSchema, errorStatuses] of semanticLinkOperations) {
+  const operation = document.paths[path][method];
+  const successStatus = method === "post" ? "201" : "200";
+  const actual = operation.responses[successStatus]?.content?.["application/json"]?.schema?.$ref;
+  if (actual !== `#/components/schemas/${successSchema}`) {
+    throw new Error(`invalid Semantic Link success schema for ${method.toUpperCase()} ${path}: ${String(actual)}`);
+  }
+  for (const status of errorStatuses) {
+    if (status === successStatus || (method === "post" && status === "200")) continue;
+    const response = resolveRef(operation.responses[status]);
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Semantic Link ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+
+const semanticLinkScanOperations = [
+  ["/api/v1/graph/candidate-scans", "post", "202", "SemanticLinkScanAcceptance", ["400", "404", "409", "415", "500", "503", "405"]],
+  ["/api/v1/graph/candidate-scans/{scan_id}", "get", "200", "SemanticLinkScan", ["400", "404", "409", "500", "503", "405"]],
+];
+for (const [path, method, successStatus, successSchema, errorStatuses] of semanticLinkScanOperations) {
+  const operation = document.paths[path][method];
+  const actual = operation.responses[successStatus]?.content?.["application/json"]?.schema?.$ref;
+  if (actual !== `#/components/schemas/${successSchema}`) {
+    throw new Error(`invalid Semantic Link scan success schema for ${method.toUpperCase()} ${path}: ${String(actual)}`);
+  }
+  for (const status of errorStatuses) {
+    const response = resolveRef(operation.responses[status]);
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Semantic Link scan ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+
 for (const [path, method] of [
   ["/api/v1/search", "post"],
   ["/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}", "get"],
@@ -133,6 +177,14 @@ for (const schema of [
   "Approval",
   "ApprovalDecisionResponse",
   "Proposal",
+  "FilePatchProposal",
+  "KnowledgeChangeTargetRef",
+  "KnowledgeChangeBaseVersion",
+  "KnowledgeChangeEndpoint",
+  "KnowledgeChangeSet",
+  "KnowledgeChangeEvidenceRef",
+  "KnowledgeChangeRevision",
+  "KnowledgeChangeProposal",
   "ProposalDecisionRequest",
   "ApplyPreflightRequest",
   "ApplyPreflightResult",
@@ -175,6 +227,23 @@ for (const schema of [
   "GraphProvenance",
   "GraphRelationEvidenceItem",
   "GraphRelationEvidenceResponse",
+  "SemanticLinkNodeType",
+  "SemanticLinkRelationType",
+  "SemanticLinkCandidateStatus",
+  "SemanticLinkDiscoveryMethod",
+  "SemanticLinkCandidateEndpoint",
+  "SemanticLinkCandidateEvidence",
+  "SemanticLinkGeneration",
+  "SemanticLinkCandidate",
+  "SemanticLinkCandidatePage",
+  "SemanticLinkCandidateDecisionRequest",
+  "SemanticLinkCandidateDecisionReceipt",
+  "SemanticLinkScanStatus",
+  "SemanticLinkTopicScanScope",
+  "SemanticLinkScanStartRequest",
+  "SemanticLinkScanAcceptance",
+  "SemanticLinkScan",
+  "SemanticLinkCapabilityStatus",
   "PageCursor",
   "CreateConversationRequest",
   "Conversation",
@@ -255,6 +324,10 @@ if (!schemas.SystemStatus.required.includes("graph") || schemas.SystemStatus.pro
     !schemas.GraphCapabilityStatus.properties.reason.enum.includes("graph_dependencies_unavailable")) {
   throw new Error("SystemStatus must expose the strict Graph capability state");
 }
+if (!schemas.SystemStatus.required.includes("semantic_links") || schemas.SystemStatus.properties.semantic_links.$ref !== "#/components/schemas/SemanticLinkCapabilityStatus" ||
+    schemas.SemanticLinkCapabilityStatus.additionalProperties !== false) {
+  throw new Error("SystemStatus must expose the strict Semantic Link capability state");
+}
 function resolveRef(value) {
   if (!value?.$ref) return value;
   const prefix = "#/components/responses/";
@@ -272,8 +345,26 @@ for (const schemaName of [
   "GraphGlobalResponse", "GraphNodeSearchMatch", "GraphNodeSearchResponse", "GraphNeighborhoodRequest",
   "GraphNeighborhoodResponse", "GraphPathRequest", "GraphPathResponse", "GraphRelationDetailResponse",
   "GraphProvenance", "GraphRelationEvidenceItem", "GraphRelationEvidenceResponse",
+  "SemanticLinkCandidateEndpoint", "SemanticLinkCandidateEvidence", "SemanticLinkGeneration", "SemanticLinkCandidate",
+  "SemanticLinkCandidatePage", "SemanticLinkCandidateDecisionReceipt",
+  "FilePatchProposal", "KnowledgeChangeTargetRef", "KnowledgeChangeBaseVersion", "KnowledgeChangeEndpoint",
+  "KnowledgeChangeSet", "KnowledgeChangeEvidenceRef", "KnowledgeChangeRevision", "KnowledgeChangeProposal",
 ]) {
   if (schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must reject unknown properties`);
+}
+if (schemas.SemanticLinkCandidate.properties.discovery_methods.maxItems !== 6 ||
+    schemas.SemanticLinkCandidate.properties.evidence.maxItems !== 100 ||
+    schemas.SemanticLinkCandidatePage.properties.items.maxItems !== 100 ||
+    schemas.SemanticLinkGeneration.required.join(",") !== "index_version_id,embedding_version_id,rerank_version_id") {
+  throw new Error("Semantic Link Candidate bounds or generation contract drifted");
+}
+if (schemas.Proposal.oneOf?.map((item) => item.$ref).join(",") !==
+      "#/components/schemas/FilePatchProposal,#/components/schemas/KnowledgeChangeProposal" ||
+    schemas.KnowledgeChangeProposal.properties.proposal_type.const !== "knowledge_change" ||
+    schemas.KnowledgeChangeRevision.properties.schema_version.const !== "knowledge-relation-change/v1" ||
+    schemas.KnowledgeChangeRevision.properties.base_versions.minItems !== 2 ||
+    schemas.KnowledgeChangeRevision.properties.base_versions.maxItems !== 2) {
+  throw new Error("typed Proposal discriminated response contract drifted");
 }
 for (const operation of [
   document.paths["/api/v1/conversations"].post,

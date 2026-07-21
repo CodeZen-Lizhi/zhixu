@@ -45,6 +45,7 @@ const (
 // Proposal 聚合包含当前 Revision 和可选 Approval 快照。
 type Proposal struct {
 	ID, WorkspaceID foundation.ID
+	Type            ProposalType
 	TargetPath      string
 	IdempotencyKey  string
 	RequestHash     string
@@ -76,6 +77,7 @@ type Revision struct {
 	Risk            string
 	RollbackPlan    string
 	ChangeHash      string
+	KnowledgeChange *KnowledgeChange
 	CreatedAt       time.Time
 }
 

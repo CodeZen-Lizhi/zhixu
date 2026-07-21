@@ -12,6 +12,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 )
 
 // TargetReader 从服务端受控的 Workspace 边界读取目标文件当前哈希。
@@ -33,11 +34,14 @@ type Service struct {
 	targets    TargetReader
 	git        ApprovalGitInspector
 	dispatcher ApprovalDispatcher
+	// knowledgeApplier 是 typed knowledge_change 的唯一正式 Relation apply seam。
+	// 为空时 file_patch 仍可用，但批准 knowledge_change 必须 fail closed。
+	knowledgeApplier knowledgeapplication.ApprovedRelationApplyPort
 }
 
 // NewServiceWithDispatch 创建启用 Approval→Workflow/River 原子投递的 Change Control 应用服务。
-func NewServiceWithDispatch(repo domain.Repository, ids foundation.IDGenerator, clock foundation.Clock, targets TargetReader, git ApprovalGitInspector, dispatcher ApprovalDispatcher) (*Service, error) {
-	service, err := NewService(repo, ids, clock, targets, git)
+func NewServiceWithDispatch(repo domain.Repository, ids foundation.IDGenerator, clock foundation.Clock, targets TargetReader, git ApprovalGitInspector, dispatcher ApprovalDispatcher, knowledgeAppliers ...knowledgeapplication.ApprovedRelationApplyPort) (*Service, error) {
+	service, err := NewService(repo, ids, clock, targets, git, knowledgeAppliers...)
 	if err != nil {
 		return nil, err
 	}
@@ -52,11 +56,18 @@ func NewServiceWithDispatch(repo domain.Repository, ids foundation.IDGenerator, 
 const MaxWriteAuthorizationTTL = 5 * time.Minute
 
 // NewService 创建 Change Control 应用服务。
-func NewService(repo domain.Repository, ids foundation.IDGenerator, clock foundation.Clock, targets TargetReader, git ApprovalGitInspector) (*Service, error) {
+func NewService(repo domain.Repository, ids foundation.IDGenerator, clock foundation.Clock, targets TargetReader, git ApprovalGitInspector, knowledgeAppliers ...knowledgeapplication.ApprovedRelationApplyPort) (*Service, error) {
 	if repo == nil || ids == nil || clock == nil || targets == nil || git == nil {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "CHANGE_CONTROL_DEPENDENCY_MISSING", false, errors.New("change control dependency missing"))
 	}
-	return &Service{repo: repo, ids: ids, clock: clock, targets: targets, git: git}, nil
+	if len(knowledgeAppliers) > 1 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "KNOWLEDGE_RELATION_APPLIER_INVALID", false, errors.New("only one knowledge relation applier may be configured"))
+	}
+	service := &Service{repo: repo, ids: ids, clock: clock, targets: targets, git: git}
+	if len(knowledgeAppliers) == 1 && !isNilKnowledgeRelationApplier(knowledgeAppliers[0]) {
+		service.knowledgeApplier = knowledgeAppliers[0]
+	}
+	return service, nil
 }
 
 // CreateCommand 是创建第一版 Proposal 所需的完整变更快照。
@@ -67,6 +78,15 @@ type CreateCommand struct {
 	BaseHash        string
 	Content         string
 	EvidenceSummary string
+	Risk            string
+	RollbackPlan    string
+}
+
+// CreateKnowledgeChangeCommand 是创建 `knowledge_change` Proposal 的结构化命令。
+type CreateKnowledgeChangeCommand struct {
+	WorkspaceID     foundation.ID
+	IdempotencyKey  string
+	KnowledgeChange domain.KnowledgeChange
 	Risk            string
 	RollbackPlan    string
 }
@@ -99,8 +119,11 @@ func (s *Service) CreateProposal(ctx context.Context, command CreateCommand) (Cr
 		Risk: strings.TrimSpace(command.Risk), RollbackPlan: strings.TrimSpace(command.RollbackPlan),
 		ChangeHash: domain.ComputeChangeHash(targetPath, baseHash, command.Content), CreatedAt: now,
 	}
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeFilePatch, revision); err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
 	proposal, err := s.repo.CreateProposal(ctx, domain.Proposal{
-		ID: proposalID, WorkspaceID: command.WorkspaceID, TargetPath: targetPath,
+		ID: proposalID, WorkspaceID: command.WorkspaceID, Type: domain.ProposalTypeFilePatch, TargetPath: targetPath,
 		IdempotencyKey: strings.TrimSpace(command.IdempotencyKey),
 		RequestHash:    domain.ComputeRequestHash(command.WorkspaceID, targetPath, baseHash, command.Content, strings.TrimSpace(command.EvidenceSummary), strings.TrimSpace(command.Risk), strings.TrimSpace(command.RollbackPlan)),
 		Status:         domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: revision,
@@ -108,7 +131,59 @@ func (s *Service) CreateProposal(ctx context.Context, command CreateCommand) (Cr
 	if err != nil {
 		return CreateResult{}, err
 	}
-	return CreateResult{Proposal: proposal, Replayed: proposal.ID != proposalID}, nil
+	return CreateResult{Proposal: proposal, Replayed: !proposal.CreatedAt.Equal(now)}, nil
+}
+
+// CreateKnowledgeChangeProposal 校验并创建结构化 `knowledge_change` Proposal。
+func (s *Service) CreateKnowledgeChangeProposal(ctx context.Context, command CreateKnowledgeChangeCommand) (CreateResult, error) {
+	repository, ok := s.repo.(domain.KnowledgeChangeProposalRepository)
+	if !ok {
+		return CreateResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "KNOWLEDGE_CHANGE_PROPOSAL_REPOSITORY_UNAVAILABLE", false, errors.New("knowledge change proposal repository is unavailable"))
+	}
+	if command.WorkspaceID == "" || strings.TrimSpace(command.IdempotencyKey) == "" || len(strings.TrimSpace(command.IdempotencyKey)) > 128 || strings.TrimSpace(command.Risk) == "" || strings.TrimSpace(command.RollbackPlan) == "" {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, errors.New("knowledge change proposal fields are invalid"))
+	}
+	canonicalChange, err := domain.ValidateKnowledgeChange(command.KnowledgeChange)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, err)
+	}
+	proposalID, err := s.ids.New()
+	if err != nil {
+		return CreateResult{}, err
+	}
+	revisionID, err := s.ids.New()
+	if err != nil {
+		return CreateResult{}, err
+	}
+	now := s.clock.Now()
+	risk := strings.TrimSpace(command.Risk)
+	rollbackPlan := strings.TrimSpace(command.RollbackPlan)
+	changeHash, err := domain.ComputeKnowledgeChangeHash(canonicalChange, risk, rollbackPlan)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, err)
+	}
+	requestHash, err := domain.ComputeKnowledgeChangeRequestHash(command.WorkspaceID, canonicalChange, risk, rollbackPlan)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, err)
+	}
+	revision := domain.Revision{
+		ID: revisionID, ProposalID: proposalID, RevisionNo: 1,
+		Risk: risk, RollbackPlan: rollbackPlan,
+		ChangeHash: changeHash, KnowledgeChange: &canonicalChange, CreatedAt: now,
+	}
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeKnowledgeChange, revision); err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, err)
+	}
+	proposal, err := repository.CreateKnowledgeChangeProposal(ctx, domain.Proposal{
+		ID: proposalID, WorkspaceID: command.WorkspaceID, Type: domain.ProposalTypeKnowledgeChange,
+		IdempotencyKey: strings.TrimSpace(command.IdempotencyKey),
+		RequestHash:    requestHash,
+		Status:         domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: revision,
+	})
+	if err != nil {
+		return CreateResult{}, err
+	}
+	return CreateResult{Proposal: proposal, Replayed: !proposal.CreatedAt.Equal(now)}, nil
 }
 
 // GetProposal 返回 Proposal 当前 Revision 与已有审批决定。
@@ -139,14 +214,25 @@ func (s *Service) decideProposalLegacy(ctx context.Context, proposalID, revision
 	if proposal.Revision.ID != revisionID || proposal.Revision.ChangeHash != strings.ToLower(changeHash) {
 		return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_REVISION_CONFLICT", false, errors.New("approval is not bound to requested revision"))
 	}
+	if err := validateProposalForApproval(proposal); err != nil {
+		return domain.Approval{}, err
+	}
+	if proposalType(proposal) == domain.ProposalTypeKnowledgeChange && decision == domain.DecisionApproved && isNilKnowledgeRelationApplier(s.knowledgeApplier) {
+		return domain.Approval{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "KNOWLEDGE_RELATION_APPLIER_UNAVAILABLE", false, errors.New("knowledge relation apply seam is not configured"))
+	}
 	if proposal.Approval != nil {
 		if proposal.Approval.RevisionID == revisionID && proposal.Approval.ChangeHash == strings.ToLower(changeHash) && proposal.Approval.Decision == decision {
+			if proposalType(proposal) == domain.ProposalTypeKnowledgeChange && decision == domain.DecisionApproved {
+				if _, err := s.applyApprovedKnowledgeRelation(ctx, *proposal.Approval); err != nil {
+					return domain.Approval{}, err
+				}
+			}
 			return *proposal.Approval, nil
 		}
 		return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_DECISION_CONFLICT", false, errors.New("proposal already has a different approval decision"))
 	}
 	var approvedGitHead *string
-	if proposal.Status == domain.StatusReady && decision == domain.DecisionApproved {
+	if proposal.Status == domain.StatusReady && decision == domain.DecisionApproved && proposalType(proposal) == domain.ProposalTypeFilePatch {
 		currentHash, readErr := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
 		if readErr != nil {
 			return s.rejectUnavailableTarget(ctx, proposal.ID, readErr)
@@ -171,10 +257,19 @@ func (s *Service) decideProposalLegacy(ctx context.Context, proposalID, revision
 	if err != nil {
 		return domain.Approval{}, err
 	}
-	return s.repo.Approve(ctx, domain.Approval{
+	approval, err := s.repo.Approve(ctx, domain.Approval{
 		ID: approvalID, ProposalID: proposalID, RevisionID: revisionID,
 		ChangeHash: strings.ToLower(changeHash), Decision: decision, ApprovedGitHead: approvedGitHead, DecidedAt: s.clock.Now(),
 	})
+	if err != nil {
+		return domain.Approval{}, err
+	}
+	if proposalType(proposal) == domain.ProposalTypeKnowledgeChange && approval.Decision == domain.DecisionApproved {
+		if _, err := s.applyApprovedKnowledgeRelation(ctx, approval); err != nil {
+			return domain.Approval{}, err
+		}
+	}
+	return approval, nil
 }
 
 // DecideProposalWithDispatch 在外部文件/Git 安全门后，通过单一 UoW 保存 Approval 并投递唯一 Safe Writeback Workflow。
@@ -193,6 +288,19 @@ func (s *Service) DecideProposalWithDispatch(ctx context.Context, proposalID, re
 	}
 	if proposal.Revision.ID != revisionID || proposal.Revision.ChangeHash != changeHash {
 		return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_REVISION_CONFLICT", false, errors.New("approval is not bound to requested revision"))
+	}
+	if err := validateProposalForApproval(proposal); err != nil {
+		return ApprovalDecisionResult{}, err
+	}
+	if proposalType(proposal) == domain.ProposalTypeKnowledgeChange {
+		if decision == domain.DecisionApproved && isNilKnowledgeRelationApplier(s.knowledgeApplier) {
+			return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "KNOWLEDGE_RELATION_APPLIER_UNAVAILABLE", false, errors.New("knowledge relation apply seam is not configured"))
+		}
+		approval, approvalErr := s.decideProposalLegacy(ctx, proposalID, revisionID, changeHash, decision)
+		if approvalErr != nil {
+			return ApprovalDecisionResult{}, approvalErr
+		}
+		return ApprovalDecisionResult{Approval: approval, Replayed: proposal.Approval != nil}, nil
 	}
 
 	approval := domain.Approval{ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: decision}
@@ -297,6 +405,9 @@ func (s *Service) CheckApplyPreflight(ctx context.Context, proposalID, revisionI
 	if err != nil {
 		return ApplyPreflightResult{}, err
 	}
+	if err := requireFilePatchProposal(proposal, "APPLY_PREFLIGHT_PROPOSAL_TYPE_UNSUPPORTED"); err != nil {
+		return ApplyPreflightResult{}, err
+	}
 	if proposal.Status != domain.StatusApproved || proposal.Approval == nil || proposal.Approval.Decision != domain.DecisionApproved {
 		return ApplyPreflightResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "PROPOSAL_NOT_APPROVED", false, errors.New("proposal has no approved decision"))
 	}
@@ -346,6 +457,9 @@ func (s *Service) IssueWriteAuthorization(ctx context.Context, command domain.Au
 	}
 	proposal, err := s.repo.GetProposal(ctx, command.ProposalID)
 	if err != nil {
+		return domain.AuthorizationIssueResult{}, err
+	}
+	if err := requireFilePatchProposal(proposal, "WRITE_AUTHORIZATION_PROPOSAL_TYPE_UNSUPPORTED"); err != nil {
 		return domain.AuthorizationIssueResult{}, err
 	}
 	if proposal.WorkspaceID != command.WorkspaceID || proposal.Revision.ID != command.RevisionID || proposal.Approval == nil || proposal.Approval.ID != command.ApprovalID || proposal.Status != domain.StatusApproved || proposal.Approval.Decision != domain.DecisionApproved {
@@ -435,6 +549,9 @@ func (s *Service) ConsumeWriteAuthorization(ctx context.Context, request domain.
 	if err != nil {
 		return domain.AuthorizationConsumeResult{}, err
 	}
+	if err := requireFilePatchProposal(proposal, "WRITE_AUTHORIZATION_PROPOSAL_TYPE_UNSUPPORTED"); err != nil {
+		return domain.AuthorizationConsumeResult{}, err
+	}
 	if proposal.WorkspaceID != request.WorkspaceID || proposal.Revision.ID != request.RevisionID || proposal.Approval == nil || proposal.Approval.ID != request.ApprovalID || proposal.Status != domain.StatusApproved || proposal.Approval.Decision != domain.DecisionApproved || proposal.Revision.ChangeHash != request.ApprovedChangeHash || proposal.Revision.BaseHash != request.TargetVersion || proposal.Approval.ChangeHash != request.ApprovedChangeHash || strings.TrimSpace(request.Scope) != domain.ExpectedAuthorizationScope(proposal.Revision.TargetPath) || proposal.Revision.ChangeHash != domain.ComputeChangeHash(proposal.Revision.TargetPath, proposal.Revision.BaseHash, proposal.Revision.Content) {
 		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, errors.New("authorization approval binding is no longer valid"))
 	}
@@ -476,4 +593,25 @@ func newCredential() (string, error) {
 func hashCredential(credential string) string {
 	digest := sha256.Sum256([]byte(credential))
 	return hex.EncodeToString(digest[:])
+}
+
+func proposalType(proposal domain.Proposal) domain.ProposalType {
+	return domain.NormalizeProposalType(proposal.Type)
+}
+
+func validateProposalForApproval(proposal domain.Proposal) error {
+	if proposalType(proposal) == domain.ProposalTypeKnowledgeChange && strings.TrimSpace(proposal.TargetPath) != "" {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, errors.New("knowledge change proposal must not carry file target fields"))
+	}
+	if err := domain.ValidateProposalRevisionForType(proposalType(proposal), proposal.Revision); err != nil {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_REVISION_INVALID", false, err)
+	}
+	return nil
+}
+
+func requireFilePatchProposal(proposal domain.Proposal, code string) error {
+	if proposalType(proposal) != domain.ProposalTypeFilePatch {
+		return foundation.NewError(foundation.ErrorPermissionDenied, code, false, errors.New("proposal type does not support file writeback"))
+	}
+	return nil
 }

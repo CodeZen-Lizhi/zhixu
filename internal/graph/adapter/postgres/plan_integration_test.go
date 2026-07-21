@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -75,10 +76,10 @@ func TestGraphAdjacencyAndEvidencePlansUseKnowledgeIndexes(t *testing.T) {
 		[]string{"idx_knowledge_relation_evidence_owner"})
 }
 
-func assertPlanUsesIndexWithoutRelationScan(t *testing.T, ctx context.Context, tx pgx.Tx, query string, args []any, indexName, relationName string) {
+func assertPlanUsesIndexWithoutRelationScan(t *testing.T, ctx context.Context, db DB, query string, args []any, indexName, relationName string) {
 	t.Helper()
 	var raw []byte
-	if err := tx.QueryRow(ctx, query, args...).Scan(&raw); err != nil {
+	if err := db.QueryRow(ctx, query, args...).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var documents []map[string]any
@@ -99,6 +100,36 @@ func assertPlanUsesIndexWithoutRelationScan(t *testing.T, ctx context.Context, t
 	}
 }
 
+func assertSemanticLinkTopicPairPlan(t *testing.T, ctx context.Context, db DB, workspaceID, topicID foundation.ID, sourceIDs []string) {
+	t.Helper()
+	var raw []byte
+	if err := db.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+semanticLinkTopicClaimPairsSQL,
+		string(workspaceID), string(topicID), sourceIDs, graphapp.MaxSemanticLinkScanPagePairsPerNode).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var documents []map[string]any
+	if err := json.Unmarshal(raw, &documents); err != nil || len(documents) != 1 {
+		t.Fatalf("invalid semantic link pair explain json: %v %s", err, raw)
+	}
+	foundIndex, foundSequentialScan, foundPerSourceLimit := false, false, false
+	visitPlanNodes(documents[0]["Plan"], func(node map[string]any) {
+		if node["Index Name"] == "idx_knowledge_relation_semantic_scan_topic_claim" {
+			foundIndex = true
+		}
+		if node["Node Type"] == "Seq Scan" && node["Relation Name"] == "relation" {
+			foundSequentialScan = true
+		}
+		if node["Node Type"] == "Limit" {
+			if loops, ok := node["Actual Loops"].(float64); ok && loops >= float64(len(sourceIDs)) {
+				foundPerSourceLimit = true
+			}
+		}
+	})
+	if !foundIndex || foundSequentialScan || !foundPerSourceLimit {
+		t.Fatalf("semantic link pair plan index=%v seq_scan=%v per_source_limit=%v plan=%s", foundIndex, foundSequentialScan, foundPerSourceLimit, raw)
+	}
+}
+
 func visitPlanNodes(value any, visit func(map[string]any)) {
 	node, ok := value.(map[string]any)
 	if !ok {
@@ -111,10 +142,10 @@ func visitPlanNodes(value any, visit func(map[string]any)) {
 	}
 }
 
-func assertGraphPlan(t *testing.T, ctx context.Context, tx pgx.Tx, query string, args []any, expectedIndexes []string) {
+func assertGraphPlan(t *testing.T, ctx context.Context, db DB, query string, args []any, expectedIndexes []string) {
 	t.Helper()
 	var raw []byte
-	if err := tx.QueryRow(ctx, query, args...).Scan(&raw); err != nil {
+	if err := db.QueryRow(ctx, query, args...).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var documents []map[string]any

@@ -3,6 +3,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ type DB interface {
 type Repository struct{ db DB }
 
 var _ domain.Repository = (*Repository)(nil)
+var _ domain.KnowledgeChangeProposalRepository = (*Repository)(nil)
 var _ domain.AuthorizationRepository = (*Repository)(nil)
 
 // NewRepository 创建 PostgreSQL Repository。
@@ -35,15 +37,22 @@ func NewRepository(db DB) (*Repository, error) {
 
 // CreateProposal 在同一事务中创建 Proposal 和不可变 Revision。
 func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposal) (domain.Proposal, error) {
+	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeKnowledgeChange {
+		return r.CreateKnowledgeChangeProposal(ctx, proposal)
+	}
+	proposal.Type = domain.ProposalTypeFilePatch
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return domain.Proposal{}, classify(err, "PROPOSAL_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeFilePatch, proposal.Revision); err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
 	var insertedID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO change_control.proposal(id,workspace_id,idempotency_key,request_hash,status,version,created_at,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+		INSERT INTO change_control.proposal(id,workspace_id,proposal_type,idempotency_key,request_hash,status,version,created_at,updated_at)
+		VALUES($1,$2,'file_patch',$3,$4,$5,$6,$7,$8)
 		ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
 		RETURNING id::text`,
 		string(proposal.ID), string(proposal.WorkspaceID), proposal.IdempotencyKey, proposal.RequestHash,
@@ -78,15 +87,92 @@ func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposa
 	return proposal, nil
 }
 
+// CreateKnowledgeChangeProposal 在同一事务中创建 typed knowledge_change Proposal 和不可变 Revision。
+func (r *Repository) CreateKnowledgeChangeProposal(ctx context.Context, proposal domain.Proposal) (domain.Proposal, error) {
+	proposal.Type = domain.ProposalTypeKnowledgeChange
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeKnowledgeChange, proposal.Revision); err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	if proposal.Revision.KnowledgeChange == nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("knowledge change revision payload is required"))
+	}
+	expectedRequestHash, err := domain.ComputeKnowledgeChangeRequestHash(proposal.WorkspaceID, *proposal.Revision.KnowledgeChange, proposal.Revision.Risk, proposal.Revision.RollbackPlan)
+	if err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	if proposal.RequestHash != expectedRequestHash {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("knowledge change request hash mismatch"))
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var insertedID string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO change_control.proposal(id,workspace_id,proposal_type,idempotency_key,request_hash,status,version,created_at,updated_at)
+		VALUES($1,$2,'knowledge_change',$3,$4,$5,$6,$7,$8)
+		ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
+		RETURNING id::text`,
+		string(proposal.ID), string(proposal.WorkspaceID), proposal.IdempotencyKey, proposal.RequestHash,
+		string(proposal.Status), proposal.Version, proposal.CreatedAt.UTC(), proposal.UpdatedAt.UTC()).Scan(&insertedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var existingID, requestHash string
+		if queryErr := tx.QueryRow(ctx, `SELECT id::text,request_hash FROM change_control.proposal WHERE workspace_id=$1 AND idempotency_key=$2`, string(proposal.WorkspaceID), proposal.IdempotencyKey).Scan(&existingID, &requestHash); queryErr != nil {
+			return domain.Proposal{}, classify(queryErr, "PROPOSAL_IDEMPOTENCY_QUERY_FAILED")
+		}
+		if requestHash != proposal.RequestHash {
+			return domain.Proposal{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
+		}
+		_ = tx.Rollback(ctx)
+		return r.GetProposal(ctx, foundation.ID(existingID))
+	}
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_CREATE_FAILED")
+	}
+	targetRefs, err := json.Marshal(proposal.Revision.KnowledgeChange.TargetRefs)
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_REVISION_CREATE_FAILED")
+	}
+	baseVersions, err := json.Marshal(proposal.Revision.KnowledgeChange.BaseVersions)
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_REVISION_CREATE_FAILED")
+	}
+	changeSet, err := json.Marshal(proposal.Revision.KnowledgeChange.ChangeSet)
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_REVISION_CREATE_FAILED")
+	}
+	evidenceRefs, err := json.Marshal(proposal.Revision.KnowledgeChange.EvidenceRefs)
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_REVISION_CREATE_FAILED")
+	}
+	revision := proposal.Revision
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO change_control.proposal_revision(
+			id,proposal_id,revision_no,target_path,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,
+			target_refs,base_versions,change_set,evidence_refs,schema_version,created_at
+		) VALUES($1,$2,$3,NULL,NULL,NULL,NULL,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		string(revision.ID), string(proposal.ID), revision.RevisionNo, revision.Risk, revision.RollbackPlan, revision.ChangeHash,
+		targetRefs, baseVersions, changeSet, evidenceRefs, revision.KnowledgeChange.SchemaVersion, revision.CreatedAt.UTC()); err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_REVISION_CREATE_FAILED")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_COMMIT_FAILED")
+	}
+	return proposal, nil
+}
+
 // GetProposal 使用单条查询返回一致的 Proposal、Revision 和 Approval 快照。
 func (r *Repository) GetProposal(ctx context.Context, proposalID foundation.ID) (domain.Proposal, error) {
 	row := r.db.QueryRow(ctx, `
-		SELECT p.id::text,p.workspace_id::text,p.idempotency_key,p.request_hash,p.workflow_run_id::text,p.status,p.version,p.created_at,p.updated_at,
-			r.id::text,r.revision_no,r.target_path,r.base_hash,r.content,r.evidence_summary,r.risk,r.rollback_plan,r.change_hash,r.created_at,
+		SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.idempotency_key,p.request_hash,p.workflow_run_id::text,p.status,p.version,p.created_at,p.updated_at,
+			r.id::text,r.revision_no,r.target_path,r.base_hash,r.content,r.evidence_summary,r.risk,r.rollback_plan,r.change_hash,
+			r.target_refs,r.base_versions,r.change_set,r.evidence_refs,r.schema_version,r.created_at,
 			a.id::text,a.change_hash,a.decision,a.approved_git_head,a.decided_at
 		FROM change_control.proposal p
 		JOIN LATERAL (
-			SELECT id,revision_no,target_path,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,created_at
+			SELECT id,revision_no,target_path,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,
+			       target_refs,base_versions,change_set,evidence_refs,schema_version,created_at
 			FROM change_control.proposal_revision
 			WHERE proposal_id=p.id ORDER BY revision_no DESC LIMIT 1
 		) r ON true
@@ -452,31 +538,75 @@ func authorizationTimePointer(value *time.Time) any {
 }
 
 func scanProposal(row pgx.Row) (domain.Proposal, error) {
-	var proposalID, workspaceID, idempotencyKey, requestHash, status string
+	var proposalID, workspaceID, proposalType, idempotencyKey, requestHash, status string
 	var workflowRunID *string
-	var revisionID, targetPath, baseHash, content, evidence, risk, rollback, changeHash string
+	var revisionID, risk, rollback, changeHash string
+	var targetPath, baseHash, content, evidence, schemaVersion *string
+	var targetRefsRaw, baseVersionsRaw, changeSetRaw, evidenceRefsRaw []byte
 	var approvalID, approvalHash, decision, approvedGitHead *string
 	var createdAt, updatedAt, revisionCreatedAt time.Time
 	var decidedAt *time.Time
 	var revisionNo int
 	var version int64
 	err := row.Scan(
-		&proposalID, &workspaceID, &idempotencyKey, &requestHash, &workflowRunID, &status, &version, &createdAt, &updatedAt,
-		&revisionID, &revisionNo, &targetPath, &baseHash, &content, &evidence, &risk, &rollback, &changeHash, &revisionCreatedAt,
+		&proposalID, &workspaceID, &proposalType, &idempotencyKey, &requestHash, &workflowRunID, &status, &version, &createdAt, &updatedAt,
+		&revisionID, &revisionNo, &targetPath, &baseHash, &content, &evidence, &risk, &rollback, &changeHash,
+		&targetRefsRaw, &baseVersionsRaw, &changeSetRaw, &evidenceRefsRaw, &schemaVersion, &revisionCreatedAt,
 		&approvalID, &approvalHash, &decision, &approvedGitHead, &decidedAt,
 	)
 	if err != nil {
 		return domain.Proposal{}, err
 	}
 	proposal := domain.Proposal{
-		ID: foundation.ID(proposalID), WorkspaceID: foundation.ID(workspaceID), TargetPath: targetPath,
+		ID: foundation.ID(proposalID), WorkspaceID: foundation.ID(workspaceID), Type: domain.ProposalType(proposalType),
 		IdempotencyKey: idempotencyKey, RequestHash: requestHash,
 		Status: domain.ProposalStatus(status), Version: version, CreatedAt: createdAt, UpdatedAt: updatedAt,
 		Revision: domain.Revision{
 			ID: foundation.ID(revisionID), ProposalID: foundation.ID(proposalID), RevisionNo: revisionNo,
-			TargetPath: targetPath, BaseHash: baseHash, Content: content, EvidenceSummary: evidence,
 			Risk: risk, RollbackPlan: rollback, ChangeHash: changeHash, CreatedAt: revisionCreatedAt,
 		},
+	}
+	switch domain.NormalizeProposalType(proposal.Type) {
+	case domain.ProposalTypeFilePatch:
+		if targetPath == nil || baseHash == nil || content == nil || evidence == nil || schemaVersion != nil ||
+			targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil {
+			return domain.Proposal{}, errors.New("file patch proposal revision payload is inconsistent")
+		}
+		proposal.Type = domain.ProposalTypeFilePatch
+		proposal.TargetPath = *targetPath
+		proposal.Revision.TargetPath = *targetPath
+		proposal.Revision.BaseHash = *baseHash
+		proposal.Revision.Content = *content
+		proposal.Revision.EvidenceSummary = *evidence
+	case domain.ProposalTypeKnowledgeChange:
+		if targetPath != nil || baseHash != nil || content != nil || evidence != nil || schemaVersion == nil ||
+			targetRefsRaw == nil || baseVersionsRaw == nil || changeSetRaw == nil || evidenceRefsRaw == nil {
+			return domain.Proposal{}, errors.New("knowledge change proposal revision payload is inconsistent")
+		}
+		change := domain.KnowledgeChange{SchemaVersion: *schemaVersion}
+		if err := json.Unmarshal(targetRefsRaw, &change.TargetRefs); err != nil {
+			return domain.Proposal{}, err
+		}
+		if err := json.Unmarshal(baseVersionsRaw, &change.BaseVersions); err != nil {
+			return domain.Proposal{}, err
+		}
+		if err := json.Unmarshal(changeSetRaw, &change.ChangeSet); err != nil {
+			return domain.Proposal{}, err
+		}
+		if err := json.Unmarshal(evidenceRefsRaw, &change.EvidenceRefs); err != nil {
+			return domain.Proposal{}, err
+		}
+		canonical, err := domain.ValidateKnowledgeChange(change)
+		if err != nil {
+			return domain.Proposal{}, err
+		}
+		proposal.Type = domain.ProposalTypeKnowledgeChange
+		proposal.Revision.KnowledgeChange = &canonical
+	default:
+		return domain.Proposal{}, errors.New("proposal type is unsupported")
+	}
+	if err := domain.ValidateProposalRevisionForType(proposal.Type, proposal.Revision); err != nil {
+		return domain.Proposal{}, err
 	}
 	if workflowRunID != nil {
 		value := foundation.ID(*workflowRunID)

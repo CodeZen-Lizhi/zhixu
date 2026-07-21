@@ -1,0 +1,322 @@
+//go:build integration
+
+package postgres
+
+import (
+	"context"
+	"errors"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
+	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
+	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+func TestSemanticLinkCandidateRepositoryLifecycleAndBatchHydration(t *testing.T) {
+	repository, tx, ctx := graphIntegrationRepository(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	workspaceID := seedGraphWorkspace(t, ctx, tx, now)
+	firstClaimID := seedGraphClaim(t, ctx, tx, workspaceID, "first candidate claim", knowledge.ClaimStatusSuggested, floatPointer(0.9), now)
+	secondClaimID := seedGraphClaim(t, ctx, tx, workspaceID, "second candidate claim", knowledge.ClaimStatusSuggested, floatPointer(0.8), now)
+	provenance := seedGraphProvenance(t, ctx, tx, workspaceID, now)
+
+	candidate := candidateFixture(t, workspaceID, firstClaimID, secondClaimID, provenance, now, "first", 1, 1)
+	created, err := repository.UpsertSemanticLinkCandidate(ctx, candidate)
+	if err != nil || !created.Created || created.Candidate.ID != candidate.ID || created.Suppressed || created.Reopened {
+		var classified *foundation.Error
+		if errors.As(err, &classified) {
+			t.Fatalf("created=%+v err=%v cause=%v", created, err, classified.Cause)
+		}
+		t.Fatalf("created=%+v err=%v", created, err)
+	}
+	replayed, err := repository.UpsertSemanticLinkCandidate(ctx, candidate)
+	if err != nil || replayed.Created || replayed.Candidate.ID != candidate.ID || replayed.Candidate.Fingerprint != candidate.Fingerprint {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+
+	countingDB := &candidateQueryCountingDB{DB: tx}
+	repository.db = countingDB
+	page, err := repository.ListSemanticLinkCandidates(ctx, graphdomain.SemanticLinkCandidateQuery{WorkspaceID: workspaceID, Limit: 20})
+	if err != nil || len(page.Items) != 1 || len(page.Items[0].Evidence) != 1 || page.Items[0].Source.Excerpt != candidate.Source.Excerpt || page.Items[0].Target.Excerpt != candidate.Target.Excerpt {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	if countingDB.queryCount != 2 {
+		t.Fatalf("candidate list queries=%d, want 2", countingDB.queryCount)
+	}
+	if page.Items[0].Evidence[0].Excerpt != candidate.Evidence[0].Excerpt {
+		t.Fatalf("evidence was not hydrated: %+v", page.Items[0].Evidence)
+	}
+	repository.db = tx
+
+	otherWorkspaceID := seedGraphWorkspace(t, ctx, tx, now.Add(time.Microsecond))
+	otherClaimID := seedGraphClaim(t, ctx, tx, otherWorkspaceID, "cross workspace claim", knowledge.ClaimStatusSuggested, floatPointer(0.7), now)
+	crossWorkspace := candidateFixture(t, workspaceID, firstClaimID, otherClaimID, provenance, now.Add(time.Microsecond), "cross-workspace", 1, 1)
+	if _, err := repository.UpsertSemanticLinkCandidate(ctx, crossWorkspace); !hasGraphCode(err, "GRAPH_CANDIDATE_ENDPOINT_NOT_FOUND") {
+		t.Fatalf("cross-workspace candidate err=%v", err)
+	}
+	futureVersion := candidateFixture(t, workspaceID, firstClaimID, secondClaimID, provenance, now.Add(2*time.Microsecond), "future-version", 2, 1)
+	if _, err := repository.UpsertSemanticLinkCandidate(ctx, futureVersion); !hasGraphCode(err, graphdomain.ErrorCodeSemanticLinkCandidateTransitionInvalid) {
+		t.Fatalf("future-version candidate err=%v", err)
+	}
+
+	ignore := graphapp.SemanticLinkCandidateDecisionCommand{
+		WorkspaceID: workspaceID, CandidateID: candidate.ID, ExpectedVersion: 1, IdempotencyKey: "candidate-ignore-1",
+		Decision: graphdomain.SemanticLinkCandidateDecision{Action: graphdomain.SemanticLinkCandidateDecisionIgnore, Reason: "not enough independent support"},
+	}
+	ignored, err := repository.DecideSemanticLinkCandidate(ctx, ignore, nil)
+	if err != nil || ignored.Candidate.Status != graphdomain.SemanticLinkCandidateStatusIgnored || ignored.Candidate.Version != 2 {
+		var classified *foundation.Error
+		if errors.As(err, &classified) {
+			t.Fatalf("ignored=%+v err=%v cause=%v", ignored, err, classified.Cause)
+		}
+		t.Fatalf("ignored=%+v err=%v", ignored, err)
+	}
+	ignoreReplay, err := repository.DecideSemanticLinkCandidate(ctx, ignore, nil)
+	if err != nil || ignoreReplay.Candidate.Status != ignored.Candidate.Status || ignoreReplay.Candidate.Version != ignored.Candidate.Version {
+		t.Fatalf("ignore replay=%+v err=%v", ignoreReplay, err)
+	}
+	conflictingReplay := ignore
+	conflictingReplay.Decision.Reason = "different payload"
+	if _, err := repository.DecideSemanticLinkCandidate(ctx, conflictingReplay, nil); !hasGraphCode(err, graphdomain.ErrorCodeSemanticLinkCandidateTransitionInvalid) {
+		t.Fatalf("idempotency conflict err=%v", err)
+	}
+	if replay, err := repository.UpsertSemanticLinkCandidate(ctx, candidate); err != nil || !replay.Suppressed || replay.Candidate.Status != graphdomain.SemanticLinkCandidateStatusIgnored {
+		t.Fatalf("suppressed replay=%+v err=%v", replay, err)
+	}
+
+	changed := candidateFixture(t, workspaceID, firstClaimID, secondClaimID, provenance, now.Add(time.Second), "changed", 1, 1)
+	reopened, err := repository.UpsertSemanticLinkCandidate(ctx, changed)
+	if err != nil || !reopened.Created || !reopened.Reopened || reopened.Candidate.ReopenedFromCandidateID == nil || *reopened.Candidate.ReopenedFromCandidateID != candidate.ID || reopened.Candidate.ReopenedReason != graphdomain.SemanticLinkCandidateReopenedReasonContentChanged {
+		t.Fatalf("reopened=%+v err=%v", reopened, err)
+	}
+	old, err := repository.GetSemanticLinkCandidate(ctx, workspaceID, candidate.ID)
+	if err != nil || old.Status != graphdomain.SemanticLinkCandidateStatusSuperseded || old.Version != 3 {
+		t.Fatalf("old=%+v err=%v", old, err)
+	}
+	filtered, err := repository.ListSemanticLinkCandidates(ctx, graphdomain.SemanticLinkCandidateQuery{
+		WorkspaceID: workspaceID, Statuses: []graphdomain.SemanticLinkCandidateStatus{graphdomain.SemanticLinkCandidateStatusActive},
+		ReopenedReasons: []graphdomain.SemanticLinkCandidateReopenedReason{graphdomain.SemanticLinkCandidateReopenedReasonContentChanged}, Limit: 20,
+	})
+	if err != nil || len(filtered.Items) != 1 || filtered.Items[0].ID != changed.ID {
+		t.Fatalf("filtered=%+v err=%v", filtered, err)
+	}
+
+	deferred := candidateFixture(t, workspaceID, firstClaimID, secondClaimID, provenance, now.Add(2*time.Second), "defer", 1, 1)
+	deferredResult, err := repository.UpsertSemanticLinkCandidate(ctx, deferred)
+	if err != nil || !deferredResult.Created {
+		t.Fatalf("deferred candidate=%+v err=%v", deferredResult, err)
+	}
+	resumeAt := now.Add(10 * time.Minute)
+	deferCommand := graphapp.SemanticLinkCandidateDecisionCommand{
+		WorkspaceID: workspaceID, CandidateID: deferred.ID, ExpectedVersion: 1, IdempotencyKey: "candidate-defer-1",
+		Decision: graphdomain.SemanticLinkCandidateDecision{Action: graphdomain.SemanticLinkCandidateDecisionDefer, Reason: "review after source refresh", ResumeAfter: &resumeAt},
+	}
+	deferredDecision, err := repository.DecideSemanticLinkCandidate(ctx, deferCommand, nil)
+	if err != nil || deferredDecision.Candidate.Status != graphdomain.SemanticLinkCandidateStatusDeferred || deferredDecision.Candidate.ResumeAfter == nil || !deferredDecision.Candidate.ResumeAfter.Equal(resumeAt) {
+		t.Fatalf("deferred result=%+v err=%v", deferredDecision, err)
+	}
+	resumed, err := repository.DecideSemanticLinkCandidate(ctx, graphapp.SemanticLinkCandidateDecisionCommand{
+		WorkspaceID: workspaceID, CandidateID: deferred.ID, ExpectedVersion: 2, IdempotencyKey: "candidate-resume-1",
+		Decision: graphdomain.SemanticLinkCandidateDecision{Action: graphdomain.SemanticLinkCandidateDecisionResume},
+	}, nil)
+	if err != nil || resumed.Candidate.Status != graphdomain.SemanticLinkCandidateStatusActive || resumed.Candidate.ResumeAfter != nil {
+		t.Fatalf("resumed=%+v err=%v", resumed, err)
+	}
+	staleDefer := deferCommand
+	staleDefer.IdempotencyKey = "candidate-defer-stale"
+	if _, err := repository.DecideSemanticLinkCandidate(ctx, staleDefer, nil); !hasGraphCode(err, graphdomain.ErrorCodeSemanticLinkCandidateTransitionInvalid) {
+		t.Fatalf("stale decision err=%v", err)
+	}
+
+	var decisionCount int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM graph.semantic_link_candidate_decision WHERE workspace_id=$1`, string(workspaceID)).Scan(&decisionCount); err != nil {
+		t.Fatal(err)
+	}
+	if decisionCount != 3 {
+		t.Fatalf("decision history count=%d", decisionCount)
+	}
+	_, err = tx.Exec(ctx, `UPDATE graph.semantic_link_candidate_decision SET reason='mutated' WHERE workspace_id=$1`, string(workspaceID))
+	if err == nil {
+		t.Fatal("append-only decision update unexpectedly succeeded")
+	}
+}
+
+func TestSemanticLinkCandidateRepositoryFingerprintConcurrency(t *testing.T) {
+	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	seedTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	workspaceID := seedGraphWorkspace(t, ctx, seedTx, now)
+	provenance := seedGraphProvenance(t, ctx, seedTx, workspaceID, now)
+	firstClaimID := seedGraphClaim(t, ctx, seedTx, workspaceID, "concurrent first", knowledge.ClaimStatusSuggested, floatPointer(0.9), now)
+	secondClaimID := seedGraphClaim(t, ctx, seedTx, workspaceID, "concurrent second", knowledge.ClaimStatusSuggested, floatPointer(0.8), now)
+	if err := seedTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupCandidateWorkspace(pool, workspaceID) })
+	candidate := candidateFixture(t, workspaceID, firstClaimID, secondClaimID, provenance, now, "concurrent", 1, 1)
+
+	const workers = 8
+	results := make(chan SemanticLinkCandidateUpsertResult, workers)
+	errorsCh := make(chan error, workers)
+	var waitGroup sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			repository, repositoryErr := NewRepository(pool)
+			if repositoryErr != nil {
+				errorsCh <- repositoryErr
+				return
+			}
+			result, upsertErr := repository.UpsertSemanticLinkCandidate(ctx, candidate)
+			if upsertErr != nil {
+				errorsCh <- upsertErr
+				return
+			}
+			results <- result
+		}()
+	}
+	waitGroup.Wait()
+	close(results)
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatalf("concurrent upsert error: %v", err)
+		}
+	}
+	createdCount := 0
+	var winner foundation.ID
+	for result := range results {
+		if result.Created {
+			createdCount++
+		}
+		if winner == "" {
+			winner = result.Candidate.ID
+		}
+		if result.Candidate.ID != winner || result.Candidate.Fingerprint != candidate.Fingerprint {
+			t.Fatalf("concurrent result=%+v winner=%s", result, winner)
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("created_count=%d", createdCount)
+	}
+	var persisted int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph.semantic_link_candidate WHERE workspace_id=$1 AND fingerprint=$2`, string(workspaceID), candidate.Fingerprint).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != 1 {
+		t.Fatalf("persisted=%d", persisted)
+	}
+
+	decision := graphapp.SemanticLinkCandidateDecisionCommand{
+		WorkspaceID: workspaceID, CandidateID: candidate.ID, ExpectedVersion: 1, IdempotencyKey: "concurrent-ignore",
+		Decision: graphdomain.SemanticLinkCandidateDecision{Action: graphdomain.SemanticLinkCandidateDecisionIgnore, Reason: "concurrent exact replay"},
+	}
+	decisionResults := make(chan graphapp.SemanticLinkCandidateDecisionResult, workers)
+	decisionErrors := make(chan error, workers)
+	for index := 0; index < workers; index++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			repository, repositoryErr := NewRepository(pool)
+			if repositoryErr != nil {
+				decisionErrors <- repositoryErr
+				return
+			}
+			result, decisionErr := repository.DecideSemanticLinkCandidate(ctx, decision, nil)
+			if decisionErr != nil {
+				decisionErrors <- decisionErr
+				return
+			}
+			decisionResults <- result
+		}()
+	}
+	waitGroup.Wait()
+	close(decisionResults)
+	close(decisionErrors)
+	for err := range decisionErrors {
+		if err != nil {
+			t.Fatalf("concurrent decision error: %v", err)
+		}
+	}
+	for result := range decisionResults {
+		if result.Candidate.ID != candidate.ID || result.Candidate.Status != graphdomain.SemanticLinkCandidateStatusIgnored || result.Candidate.Version != 2 {
+			t.Fatalf("concurrent decision result=%+v", result)
+		}
+	}
+	var receiptCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph.semantic_link_candidate_decision WHERE workspace_id=$1 AND candidate_id=$2`, string(workspaceID), string(candidate.ID)).Scan(&receiptCount); err != nil {
+		t.Fatal(err)
+	}
+	if receiptCount != 1 {
+		t.Fatalf("decision receipts=%d", receiptCount)
+	}
+}
+
+func candidateFixture(t *testing.T, workspaceID, sourceID, targetID foundation.ID, provenance graphProvenance, now time.Time, label string, sourceVersion, targetVersion int64) graphdomain.SemanticLinkCandidate {
+	t.Helper()
+	evidenceHash := graphHash("candidate-evidence-" + label)
+	evidence := graphdomain.SemanticLinkCandidateEvidence{
+		ID:           graphTestID(t),
+		Provenance:   knowledge.ProvenanceRef{WorkspaceID: workspaceID, SourceVersionID: provenance.sourceVersionID, SourceSpanID: provenance.sourceSpanID},
+		SemanticHash: evidenceHash, Reason: "bounded source support", Excerpt: "bounded evidence excerpt",
+	}
+	candidate := graphdomain.SemanticLinkCandidate{
+		ID: graphTestID(t), WorkspaceID: workspaceID,
+		Source:                graphdomain.SemanticLinkCandidateEndpoint{Ref: knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: sourceID}, Version: sourceVersion, Summary: "source summary " + label, Excerpt: "source excerpt " + label},
+		Target:                graphdomain.SemanticLinkCandidateEndpoint{Ref: knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: targetID}, Version: targetVersion, Summary: "target summary " + label, Excerpt: "target excerpt " + label},
+		SuggestedRelationType: knowledge.RelationComplements, Status: graphdomain.SemanticLinkCandidateStatusActive,
+		Reason: "shared evidence suggests a complementary relation", Confidence: 0.82,
+		DiscoveryMethods: []graphdomain.SemanticLinkDiscoveryMethod{graphdomain.SemanticLinkDiscoveryMethodCommonTopic, graphdomain.SemanticLinkDiscoveryMethodTitleAlias},
+		Evidence:         []graphdomain.SemanticLinkCandidateEvidence{evidence},
+		Generation:       graphdomain.SemanticLinkCandidateGeneration{RuleID: ptrID(graphTestID(t)), RuleVersion: "semantic-rule-v1"},
+		Version:          1, CreatedAt: now, UpdatedAt: now,
+	}
+	fingerprint, err := graphdomain.ComputeSemanticLinkCandidateFingerprint(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.Fingerprint = fingerprint
+	if err := graphdomain.ValidateSemanticLinkCandidate(candidate); err != nil {
+		t.Fatal(err)
+	}
+	return candidate
+}
+
+func ptrID(value foundation.ID) *foundation.ID { return &value }
+
+func cleanupCandidateWorkspace(pool *pgxpool.Pool, workspaceID foundation.ID) {
+	ctx := context.Background()
+	_, _ = pool.Exec(ctx, `DELETE FROM graph.semantic_link_candidate_decision WHERE workspace_id=$1`, string(workspaceID))
+	_, _ = pool.Exec(ctx, `DELETE FROM graph.semantic_link_candidate_evidence WHERE workspace_id=$1`, string(workspaceID))
+	_, _ = pool.Exec(ctx, `DELETE FROM graph.semantic_link_candidate WHERE workspace_id=$1`, string(workspaceID))
+	cleanupCommittedGraphFixture(pool, workspaceID)
+}
+
+type candidateQueryCountingDB struct {
+	DB
+	queryCount int
+}
+
+func (database *candidateQueryCountingDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	database.queryCount++
+	return database.DB.Query(ctx, sql, args...)
+}

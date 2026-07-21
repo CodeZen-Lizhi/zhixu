@@ -9,6 +9,8 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
+	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 )
 
 const (
@@ -34,6 +36,33 @@ type fakeApprovalDispatcher struct {
 	calls   int
 }
 
+type fakeKnowledgeRelationApplier struct {
+	command knowledgeapplication.ApprovedRelationApplyCommand
+	result  knowledgeapplication.ApprovedRelationApplyResult
+	err     error
+	calls   int
+}
+
+func (f *fakeKnowledgeRelationApplier) ApplyApprovedRelation(_ context.Context, command knowledgeapplication.ApprovedRelationApplyCommand) (knowledgeapplication.ApprovedRelationApplyResult, error) {
+	f.calls++
+	f.command = command
+	if f.result.Relation.WorkspaceID == "" {
+		f.result = knowledgeapplication.ApprovedRelationApplyResult{
+			Relation: knowledge.Relation{
+				WorkspaceID: command.WorkspaceID,
+				Status:      knowledge.RelationStatusConfirmed,
+				Confirmation: &knowledge.Confirmation{
+					Method: knowledge.ConfirmationUserApproval, Reference: string(command.ApprovalID),
+				},
+			},
+			Evidence:        []knowledge.RelationEvidence{{}},
+			ProposalStatus:  domain.StatusApplied,
+			ProposalVersion: 4,
+		}
+	}
+	return f.result, f.err
+}
+
 func (f *fakeApprovalDispatcher) DecideAndDispatch(_ context.Context, command ApprovalDispatchCommand) (ApprovalDispatchResult, error) {
 	f.calls++
 	f.command = command
@@ -44,6 +73,10 @@ func (f *fakeApprovalDispatcher) DecideAndDispatch(_ context.Context, command Ap
 }
 
 func (f *fakeRepo) CreateProposal(_ context.Context, proposal domain.Proposal) (domain.Proposal, error) {
+	f.proposal = proposal
+	return proposal, f.err
+}
+func (f *fakeRepo) CreateKnowledgeChangeProposal(_ context.Context, proposal domain.Proposal) (domain.Proposal, error) {
 	f.proposal = proposal
 	return proposal, f.err
 }
@@ -128,8 +161,24 @@ func newTestServiceWithGit(repository *fakeRepo, targets *fakeTargets, git Appro
 	return service
 }
 
+func newTestServiceWithKnowledgeApply(repository *fakeRepo, targets *fakeTargets, git ApprovalGitInspector, applier knowledgeapplication.ApprovedRelationApplyPort) *Service {
+	service, err := NewService(repository, &seqIDs{}, foundation.FixedClock{Value: time.Unix(1, 0)}, targets, git, applier)
+	if err != nil {
+		panic(err)
+	}
+	return service
+}
+
 func newTestDispatchService(repository *fakeRepo, targets *fakeTargets, git ApprovalGitInspector, dispatcher ApprovalDispatcher) *Service {
 	service, err := NewServiceWithDispatch(repository, &seqIDs{}, foundation.FixedClock{Value: time.Unix(1, 0)}, targets, git, dispatcher)
+	if err != nil {
+		panic(err)
+	}
+	return service
+}
+
+func newTestDispatchServiceWithKnowledgeApply(repository *fakeRepo, targets *fakeTargets, git ApprovalGitInspector, dispatcher ApprovalDispatcher, applier knowledgeapplication.ApprovedRelationApplyPort) *Service {
+	service, err := NewServiceWithDispatch(repository, &seqIDs{}, foundation.FixedClock{Value: time.Unix(1, 0)}, targets, git, dispatcher, applier)
 	if err != nil {
 		panic(err)
 	}
@@ -148,7 +197,7 @@ func TestCreateProposalBindsTargetBaseAndContent(t *testing.T) {
 		t.Fatalf("CreateProposal() error = %v", err)
 	}
 	proposal := result.Proposal
-	if proposal.TargetPath != "notes/a.md" || proposal.Revision.TargetPath != "notes/a.md" || proposal.Status != domain.StatusReady || proposal.IdempotencyKey != "create-1" || proposal.RequestHash == "" {
+	if proposal.Type != domain.ProposalTypeFilePatch || proposal.TargetPath != "notes/a.md" || proposal.Revision.TargetPath != "notes/a.md" || proposal.Status != domain.StatusReady || proposal.IdempotencyKey != "create-1" || proposal.RequestHash == "" {
 		t.Fatalf("proposal = %#v", proposal)
 	}
 	wantHash := domain.ComputeChangeHash("notes/a.md", testHash, "  code\r\n")
@@ -157,6 +206,37 @@ func TestCreateProposalBindsTargetBaseAndContent(t *testing.T) {
 	}
 	if wantHash == domain.ComputeChangeHash("notes/a.md", testHash, "code\r\n") || wantHash == domain.ComputeChangeHash("other.md", testHash, "  code\r\n") {
 		t.Fatal("change hash did not bind semantic content and target")
+	}
+}
+
+func TestCreateKnowledgeChangeProposalUsesTypedCanonicalHash(t *testing.T) {
+	repository := &fakeRepo{}
+	service := newTestService(repository, &fakeTargets{})
+	change := knowledgeChangeFixture()
+	result, err := service.CreateKnowledgeChangeProposal(context.Background(), CreateKnowledgeChangeCommand{
+		WorkspaceID: "workspace", IdempotencyKey: "knowledge-create", KnowledgeChange: change, Risk: " medium ", RollbackPlan: " restore relation ",
+	})
+	if err != nil {
+		t.Fatalf("CreateKnowledgeChangeProposal() error = %v", err)
+	}
+	proposal := result.Proposal
+	if proposal.Type != domain.ProposalTypeKnowledgeChange || proposal.Revision.KnowledgeChange == nil || proposal.TargetPath != "" || proposal.Revision.TargetPath != "" || proposal.Revision.BaseHash != "" || proposal.Revision.Content != "" {
+		t.Fatalf("proposal = %#v", proposal)
+	}
+	if proposal.Revision.ChangeHash == "" || proposal.RequestHash == "" {
+		t.Fatalf("proposal hash missing: %#v", proposal)
+	}
+	expectedHash, err := domain.ComputeKnowledgeChangeHash(*proposal.Revision.KnowledgeChange, "medium", "restore relation")
+	if err != nil || proposal.Revision.ChangeHash != expectedHash {
+		t.Fatalf("knowledge change hash = %s want %s err=%v", proposal.Revision.ChangeHash, expectedHash, err)
+	}
+}
+
+func TestKnowledgeChangeProposalRejectsFilePatchFields(t *testing.T) {
+	change := knowledgeChangeFixture()
+	revision := domain.Revision{TargetPath: "notes/a.md", BaseHash: testHash, Content: "new content", EvidenceSummary: "evidence", Risk: "medium", RollbackPlan: "restore relation", ChangeHash: testHash, KnowledgeChange: &change}
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeKnowledgeChange, revision); err == nil {
+		t.Fatal("knowledge_change revision accepted file patch fields")
 	}
 }
 
@@ -185,6 +265,30 @@ func TestDecideProposalPassesBoundHash(t *testing.T) {
 	_, err := service.DecideProposal(context.Background(), "proposal", "revision", proposal.Revision.ChangeHash, domain.DecisionApproved)
 	if err != nil || repository.approval.ChangeHash != proposal.Revision.ChangeHash || repository.approval.Decision != domain.DecisionApproved || repository.approval.ApprovedGitHead == nil || *repository.approval.ApprovedGitHead != testGitHead {
 		t.Fatalf("approval = %#v, err = %v", repository.approval, err)
+	}
+}
+
+func TestDecideKnowledgeChangeProposalBypassesFileMutableFacts(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	repository := &fakeRepo{proposal: proposal}
+	targets := &fakeTargets{err: errors.New("must not be called")}
+	git := &fakeApprovalGitInspector{err: errors.New("must not be called")}
+	applier := &fakeKnowledgeRelationApplier{}
+	service := newTestServiceWithKnowledgeApply(repository, targets, git, applier)
+	approval, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err != nil || approval.Decision != domain.DecisionApproved || approval.ApprovedGitHead != nil || targets.calls != 0 || git.calls != 0 || applier.calls != 1 ||
+		applier.command.WorkspaceID != proposal.WorkspaceID || applier.command.ProposalID != proposal.ID || applier.command.RevisionID != proposal.Revision.ID || applier.command.ApprovalID != proposal.Approval.ID {
+		t.Fatalf("approval=%#v apply=%#v target calls=%d git calls=%d err=%v", approval, applier.command, targets.calls, git.calls, err)
+	}
+}
+
+func TestDecideKnowledgeChangeProposalFailsClosedWithoutApplySeam(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	_, err := newTestServiceWithGit(&fakeRepo{proposal: proposal}, &fakeTargets{}, &fakeApprovalGitInspector{}).
+		DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "KNOWLEDGE_RELATION_APPLIER_UNAVAILABLE" {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -313,6 +417,21 @@ func TestDecideProposalWithDispatchRejectedHasNoWorkflow(t *testing.T) {
 	}
 }
 
+func TestDecideProposalWithDispatchRoutesKnowledgeChangeWithoutDispatcher(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	repository := &fakeRepo{proposal: proposal}
+	targets := &fakeTargets{err: errors.New("must not be called")}
+	git := &fakeApprovalGitInspector{err: errors.New("must not be called")}
+	dispatcher := &fakeApprovalDispatcher{err: errors.New("must not be called")}
+	applier := &fakeKnowledgeRelationApplier{}
+	service := newTestDispatchServiceWithKnowledgeApply(repository, targets, git, dispatcher, applier)
+
+	result, err := service.DecideProposalWithDispatch(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err != nil || result.Workflow != nil || result.Approval.Decision != domain.DecisionApproved || targets.calls != 0 || git.calls != 0 || dispatcher.calls != 0 || applier.calls != 1 {
+		t.Fatalf("result=%#v target calls=%d git calls=%d dispatch calls=%d apply calls=%d err=%v", result, targets.calls, git.calls, dispatcher.calls, applier.calls, err)
+	}
+}
+
 func TestDecideProposalMarksNeedsRevisionWhenTargetUnavailable(t *testing.T) {
 	proposal := approvedProposal(testHash)
 	proposal.Status = domain.StatusReady
@@ -366,6 +485,14 @@ func TestApplyPreflightRejectsUnapprovedProposalBeforeReadingTarget(t *testing.T
 	}
 }
 
+func TestApplyPreflightRejectsKnowledgeChangeProposalBeforeReadingTarget(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	service := newTestService(&fakeRepo{proposal: proposal}, &fakeTargets{err: errors.New("must not be called")})
+	if _, err := service.CheckApplyPreflight(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash); err == nil {
+		t.Fatal("CheckApplyPreflight() expected error")
+	}
+}
+
 func TestIssueWriteAuthorizationBindsApprovalAndTarget(t *testing.T) {
 	proposal := approvedProposal(testHash)
 	repository := &fakeRepo{proposal: proposal}
@@ -398,6 +525,18 @@ func TestIssueWriteAuthorizationRejectsStaleOrUnapprovedProposal(t *testing.T) {
 		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", IdempotencyKey: "auth-1", TTL: time.Minute,
 	}); err == nil {
 		t.Fatal("stale proposal received write authorization")
+	}
+}
+
+func TestIssueWriteAuthorizationRejectsKnowledgeChangeProposal(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	service := newTestService(&fakeRepo{proposal: proposal}, &fakeTargets{hash: testHash})
+	if _, err := service.IssueWriteAuthorization(context.Background(), domain.AuthorizationIssue{
+		WorkspaceID: proposal.WorkspaceID, WorkflowRunID: "run", NodeRunID: "node", ProposalID: proposal.ID,
+		RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID, ToolName: "ApplyApprovedPatch",
+		Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", IdempotencyKey: "auth-knowledge", TTL: time.Minute,
+	}); err == nil {
+		t.Fatal("knowledge_change proposal received write authorization")
 	}
 }
 
@@ -524,8 +663,48 @@ func approvedProposal(baseHash string) domain.Proposal {
 	changeHash := domain.ComputeChangeHash("a.md", baseHash, "new content")
 	approvedGitHead := testGitHead
 	return domain.Proposal{
-		ID: "proposal", WorkspaceID: "workspace", TargetPath: "a.md", Status: domain.StatusApproved,
+		ID: "proposal", WorkspaceID: "workspace", Type: domain.ProposalTypeFilePatch, TargetPath: "a.md", Status: domain.StatusApproved,
 		Revision: domain.Revision{ID: "revision", ProposalID: "proposal", TargetPath: "a.md", BaseHash: baseHash, Content: "new content", ChangeHash: changeHash},
 		Approval: &domain.Approval{ID: "approval", ProposalID: "proposal", RevisionID: "revision", ChangeHash: changeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead},
+	}
+}
+
+func knowledgeChangeFixture() domain.KnowledgeChange {
+	change := domain.KnowledgeChange{
+		TargetRefs: []domain.KnowledgeTargetRef{{
+			Type: domain.KnowledgeTargetRefRelationCandidate, ID: "70000000-0000-4000-8000-000000000001", Fingerprint: strings.ToUpper(strings.Repeat("a", 64)),
+		}},
+		BaseVersions: []domain.KnowledgeBaseVersion{
+			{NodeType: knowledge.NodeTypeClaim, NodeID: "90000000-0000-4000-8000-000000000003", Version: 8},
+			{NodeType: knowledge.NodeTypeTopic, NodeID: "90000000-0000-4000-8000-000000000002", Version: 4},
+		},
+		ChangeSet: domain.KnowledgeChangeSet{
+			Operation:    domain.KnowledgeChangeOperationCreateRelation,
+			Source:       knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: "90000000-0000-4000-8000-000000000003"},
+			Target:       knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: "90000000-0000-4000-8000-000000000002"},
+			RelationType: knowledge.RelationBelongsTo,
+		},
+		EvidenceRefs: []domain.KnowledgeEvidenceRef{{
+			CandidateEvidenceID: "80000000-0000-4000-8000-000000000004", SemanticHash: strings.ToUpper(strings.Repeat("b", 64)),
+		}},
+		SchemaVersion: domain.KnowledgeChangeSchemaVersion,
+	}
+	normalized, err := domain.ValidateKnowledgeChange(change)
+	if err != nil {
+		panic(err)
+	}
+	return normalized
+}
+
+func knowledgeChangeProposal() domain.Proposal {
+	change := knowledgeChangeFixture()
+	hash, err := domain.ComputeKnowledgeChangeHash(change, "medium", "restore relation")
+	if err != nil {
+		panic(err)
+	}
+	return domain.Proposal{
+		ID: "60000000-0000-4000-8000-000000000002", WorkspaceID: "60000000-0000-4000-8000-000000000001", Type: domain.ProposalTypeKnowledgeChange, Status: domain.StatusApproved, Version: 2,
+		Revision: domain.Revision{ID: "60000000-0000-4000-8000-000000000003", ProposalID: "60000000-0000-4000-8000-000000000002", Risk: "medium", RollbackPlan: "restore relation", ChangeHash: hash, KnowledgeChange: &change},
+		Approval: &domain.Approval{ID: "60000000-0000-4000-8000-000000000004", ProposalID: "60000000-0000-4000-8000-000000000002", RevisionID: "60000000-0000-4000-8000-000000000003", ChangeHash: hash, Decision: domain.DecisionApproved},
 	}
 }

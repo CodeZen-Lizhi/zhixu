@@ -14,6 +14,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
@@ -251,6 +252,80 @@ func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
 		if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
 			t.Fatalf("guarded Down error=%v", err)
 		}
+	}
+}
+
+func TestRepositoryKnowledgeChangeProposalCompatibility(t *testing.T) {
+	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	repository, err := NewRepository(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(-time.Second)
+	workspaceID := integrationID(31)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Knowledge Typed Test',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/knowledge-"+string(workspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+	change := knowledgeChangeFixtureForIntegration()
+	requestHash, err := domain.ComputeKnowledgeChangeRequestHash(workspaceID, change, "medium", "restore relation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changeHash, err := domain.ComputeKnowledgeChangeHash(change, "medium", "restore relation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalID, revisionID, approvalID := integrationID(32), integrationID(33), integrationID(34)
+	proposal := domain.Proposal{
+		ID: proposalID, WorkspaceID: workspaceID, Type: domain.ProposalTypeKnowledgeChange,
+		IdempotencyKey: "knowledge-create", RequestHash: requestHash,
+		Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
+		Revision: domain.Revision{
+			ID: revisionID, ProposalID: proposalID, RevisionNo: 1,
+			Risk: "medium", RollbackPlan: "restore relation", ChangeHash: changeHash,
+			KnowledgeChange: &change, CreatedAt: now,
+		},
+	}
+	created, err := repository.CreateProposal(ctx, proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Type != domain.ProposalTypeKnowledgeChange || created.Revision.KnowledgeChange == nil {
+		t.Fatalf("created=%#v", created)
+	}
+	queried, err := repository.GetProposal(ctx, proposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queried.Type != domain.ProposalTypeKnowledgeChange || queried.TargetPath != "" || queried.Revision.TargetPath != "" || queried.Revision.BaseHash != "" || queried.Revision.Content != "" || queried.Revision.KnowledgeChange == nil {
+		t.Fatalf("queried=%#v", queried)
+	}
+	if queried.Revision.KnowledgeChange.ChangeSet.RelationType != knowledge.RelationBelongsTo || queried.Revision.KnowledgeChange.SchemaVersion != domain.KnowledgeChangeSchemaVersion {
+		t.Fatalf("queried typed revision=%#v", queried.Revision.KnowledgeChange)
+	}
+	approved, err := repository.Approve(ctx, domain.Approval{ID: approvalID, ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, DecidedAt: now.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Decision != domain.DecisionApproved {
+		t.Fatalf("approved=%#v", approved)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -575,6 +650,36 @@ func hexDigit(n byte) byte {
 
 func ptrTime(value time.Time) *time.Time {
 	return &value
+}
+
+func knowledgeChangeFixtureForIntegration() domain.KnowledgeChange {
+	change := domain.KnowledgeChange{
+		TargetRefs: []domain.KnowledgeTargetRef{{
+			Type:        domain.KnowledgeTargetRefRelationCandidate,
+			ID:          integrationID(40),
+			Fingerprint: strings.Repeat("a", 64),
+		}},
+		BaseVersions: []domain.KnowledgeBaseVersion{
+			{NodeType: knowledge.NodeTypeClaim, NodeID: integrationID(41), Version: 4},
+			{NodeType: knowledge.NodeTypeTopic, NodeID: integrationID(42), Version: 2},
+		},
+		ChangeSet: domain.KnowledgeChangeSet{
+			Operation:    domain.KnowledgeChangeOperationCreateRelation,
+			Source:       knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: integrationID(41)},
+			Target:       knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: integrationID(42)},
+			RelationType: knowledge.RelationBelongsTo,
+		},
+		EvidenceRefs: []domain.KnowledgeEvidenceRef{{
+			CandidateEvidenceID: integrationID(43),
+			SemanticHash:        strings.Repeat("b", 64),
+		}},
+		SchemaVersion: domain.KnowledgeChangeSchemaVersion,
+	}
+	normalized, err := domain.ValidateKnowledgeChange(change)
+	if err != nil {
+		panic(err)
+	}
+	return normalized
 }
 
 func hasCode(err error, code string) bool {

@@ -15,6 +15,12 @@ type Repository interface {
 	MarkNeedsRevision(context.Context, foundation.ID, time.Time) error
 }
 
+// KnowledgeChangeProposalRepository 是支持持久化 `knowledge_change` Proposal 的可选扩展。
+// 在 typed Proposal 迁移落地前，Adapter 可以不实现该接口并返回 fail-closed。
+type KnowledgeChangeProposalRepository interface {
+	CreateKnowledgeChangeProposal(context.Context, Proposal) (Proposal, error)
+}
+
 // WritebackRepository 持有 Safe Writeback Durable Operation 的幂等、状态和发布事务边界。
 // Adapter 必须在数据库内再次执行领域校验，不能只依赖调用方传入的状态或版本。
 type WritebackRepository interface {
