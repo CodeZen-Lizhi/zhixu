@@ -183,8 +183,8 @@ FROM core.source_version sv WHERE sv.id=$1`, oldSourceVersion).Scan(&sourceID, &
 		t.Fatal(err)
 	}
 	newSourceVersion := testDetectorID(t)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.source_version(id,source_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, newSourceVersion, sourceID, artifactID, strings.Repeat("9", 64), byteSize, mimeType, location, security, time.Now().UTC().Add(time.Hour)); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, newSourceVersion, sourceID, string(fixture.WorkspaceID), artifactID, strings.Repeat("9", 64), byteSize, mimeType, location, security, time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	for index := 0; index < 2; index++ {

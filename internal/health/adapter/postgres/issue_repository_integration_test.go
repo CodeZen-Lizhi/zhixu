@@ -81,7 +81,7 @@ func TestIssueRepositoryObservationReopenDecisionAndHistory(t *testing.T) {
 	}
 	availableRepairOptions := []domain.RepairOption{{Code: "health.repair.verify-provenance", Title: "绑定来源并重新验证", Available: true}}
 	proposalID := repositoryTestID(t, "71000000-0000-4000-8000-000000000008")
-	if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,proposal_type,status,idempotency_key,request_hash,version,created_at,updated_at) VALUES($1,$2,'knowledge_change','ready_for_review','health-repair-proposal',repeat('e',64),1,$3,$3)`, string(proposalID), string(workspaceID), now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at) VALUES($1,$2,'knowledge_change','HIGH','ready_for_review','health-repair-proposal',repeat('e',64),1,$3,$3)`, string(proposalID), string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
 	proposalDecision := domain.IssueDecision{ExpectedVersion: reopened.Version, IdempotencyKey: "health-proposal-1", Action: domain.IssueDecisionCreateRepairProposal, ProposalID: &proposalID, RepairOptionCode: availableRepairOptions[0].Code}
@@ -291,7 +291,7 @@ func TestIssueRepositoryResolveMissingFinalizesOnlyAutoResolvableStatusesAndCoun
 			decision.DeferredUntil = &deferUntil
 		case domain.IssueStatusProposalCreated:
 			proposalID := repositoryTestID(t, "76000000-0000-4000-8000-000000000001")
-			if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,proposal_type,status,idempotency_key,request_hash,version,created_at,updated_at) VALUES($1,$2,'knowledge_change','ready_for_review','resolve-status-proposal',repeat('a',64),1,$3,$3)`, string(proposalID), string(workspaceID), now); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at) VALUES($1,$2,'knowledge_change','HIGH','ready_for_review','resolve-status-proposal',repeat('a',64),1,$3,$3)`, string(proposalID), string(workspaceID), now); err != nil {
 				t.Fatal(err)
 			}
 			decision.Action, decision.ProposalID, decision.RepairOptionCode = domain.IssueDecisionCreateRepairProposal, &proposalID, options[0].Code

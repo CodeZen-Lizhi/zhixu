@@ -489,7 +489,7 @@ func insertCollectionSourceVersion(t *testing.T, ctx context.Context, pool *pgxp
 	if _, err := tx.Exec(ctx, `INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at) VALUES($1,$2,$3,1,$4,$5)`, string(artifactID), string(workspaceID), hash, ".knowledge/sources/"+hash, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO core.source_version(id,source_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) SELECT $1,s.id,$2,$3,1,'text/plain','cursor-version-2.txt','pending',$4 FROM core.source s WHERE s.workspace_id=$5 ORDER BY s.id LIMIT 1`, string(versionID), string(artifactID), hash, now, string(workspaceID)); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) SELECT $1,s.id,$5,$2,$3,1,'text/plain','cursor-version-2.txt','pending',$4 FROM core.source s WHERE s.workspace_id=$5 ORDER BY s.id LIMIT 1`, string(versionID), string(artifactID), hash, now, string(workspaceID)); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {

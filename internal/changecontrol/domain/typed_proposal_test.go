@@ -108,6 +108,10 @@ func TestKnowledgeChangeRequestHashBindsWorkspaceAndRollbackPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first hash error = %v", err)
 	}
+	const wantV1 = "2d23a69a5734cccd86e34cb168080aacea6cf5c1e2ed01d9f58f7fb286f22bc9"
+	if firstHash != wantV1 {
+		t.Fatalf("knowledge change v1 request hash = %s, want %s", firstHash, wantV1)
+	}
 	secondHash, err := ComputeKnowledgeChangeRequestHash("10000000-0000-4000-8000-000000000002", change, "medium", "restore relation")
 	if err != nil {
 		t.Fatalf("second hash error = %v", err)
@@ -118,5 +122,16 @@ func TestKnowledgeChangeRequestHashBindsWorkspaceAndRollbackPlan(t *testing.T) {
 	}
 	if firstHash == secondHash || firstHash == thirdHash {
 		t.Fatalf("request hash did not bind workspace and rollback: %s %s %s", firstHash, secondHash, thirdHash)
+	}
+	mediumV2, err := ComputeKnowledgeChangeRequestHashWithRiskLevel("10000000-0000-4000-8000-000000000001", change, ProposalRiskLevelMedium, "medium", "restore relation")
+	if err != nil {
+		t.Fatalf("medium v2 hash error = %v", err)
+	}
+	highV2, err := ComputeKnowledgeChangeRequestHashWithRiskLevel("10000000-0000-4000-8000-000000000001", change, ProposalRiskLevelHigh, "medium", "restore relation")
+	if err != nil {
+		t.Fatalf("high v2 hash error = %v", err)
+	}
+	if mediumV2 == highV2 || mediumV2 == firstHash || highV2 == firstHash {
+		t.Fatalf("knowledge request hashes do not bind schema and risk level: v1=%s medium=%s high=%s", firstHash, mediumV2, highV2)
 	}
 }

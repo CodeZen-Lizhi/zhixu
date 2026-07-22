@@ -87,13 +87,14 @@
 ## Application
 
 - [x] REST/OpenAPI（Workspace、Workflow、Ingestion、Search/Evidence、Proposal/Knowledge、Conversation/RAG 等已实现范围）。
-- [x] 持久 Server Event Store 与 RAG SSE replay（全站事件矩阵扩展仍归 M9）。
-- [x] Dashboard（M1 系统状态与 M3 Workspace 页面基础）。
-- [ ] Inbox/Document。
-- [ ] Diff/Approval。
+- [x] 持久 Server Event Store、Last-Event-ID 恢复与 Workspace 唯一 SSE Owner（M9-04）。
+- [x] Dashboard（M9-01 真实 Workspace/依赖/待办投影）。
+- [x] Inbox/资料版本（M9-01 Source Version 列表与详情；正式 Document 聚合仍未交付）。
+- [x] Diff/Approval（M9-02 File/Relation Diff、批准/驳回、Hash 冲突与 Apply Preflight）。
 - [x] Graph UI（Global/Local/Path、Evidence 与 Candidate panel）。
 - [ ] Review UI。
-- [ ] Workflow UI。
+- [x] Workflow UI（M9-01 列表/详情与 pause/resume/cancel）。
+- [x] Settings UI（M9-01 只展示和操作已有服务端契约）。
 - [x] RAG Conversation UI（`/chat`、阶段恢复、Citation/Feedback、桌面/移动）。
 
 ## Quality
@@ -108,4 +109,5 @@
 - [x] Docker Smoke（基础、Workspace、Search、Tool 与 RAG Conversation 独立闭环）。
 
 > 边界：上述勾选只表示对应已实现切片已有代码和门禁，不表示项目整体完成。PDF/Web Parser、HNSW/容量、
-> M7/M8 业务模块、M9 其余页面与表格、M10 Auth/安全/可观测/备份恢复、M11 全量 E2E/发布交付仍未完成。
+> M7-04 Timeline/Impact、M8、M9-03 异步导出/脱敏/结果追踪、正式 Document/Article Revision、M10 Auth/安全/
+> 可观测/备份恢复，以及 M11 全量 E2E/发布交付仍未完成。

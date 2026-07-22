@@ -419,11 +419,7 @@ func assertSemanticLinkCandidatesMigrationShape(t *testing.T, ctx context.Contex
 
 func migrateSemanticLinkCandidatesTestDatabase(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
+	if _, err := migrationProvider(t, pool).UpTo(ctx, 24); err != nil {
 		t.Fatal(err)
 	}
 }
