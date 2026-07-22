@@ -103,7 +103,7 @@ const collection: Collection = {
   createdAt: at,
   updatedAt: at,
 };
-const page: CollectionResultPage = { workspaceId, collectionId, queryHash: "a".repeat(64), items: [item(3, "TOPIC"), item(4, "CLAIM")], exactCount: 2, nextCursor: null, revisionHash: "b".repeat(64) };
+const page: CollectionResultPage = { workspaceId, collectionId, queryHash: "a".repeat(64), items: [item(3, "TOPIC"), item(4, "CLAIM")], exactCount: 2, nextCursor: null, revisionHash: "b".repeat(64), scanRevisionHash: "c".repeat(64) };
 
 afterEach(() => {
   hooks.activeWorkspaceId = workspaceId;
@@ -247,7 +247,7 @@ describe("CollectionsPage", () => {
     expect(fixedTitle).toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: /启动 Health Scan/ }));
     const [healthPayload] = healthScan.mock.calls[0] ?? [];
-    expect(healthPayload?.scope).toMatchObject({ type: "SMART_COLLECTION", ref: collectionId, readModelRevision: emptyPage.revisionHash, exactCount: 0 });
+    expect(healthPayload?.scope).toMatchObject({ type: "SMART_COLLECTION", ref: collectionId, readModelRevision: emptyPage.scanRevisionHash, exactCount: 0 });
     fireEvent.click(screen.getByRole("button", { name: /启动 Health Scan/ }));
     expect(healthScan.mock.calls[1]?.[0].idempotencyKey).toBe(healthPayload?.idempotencyKey);
     fireEvent.click(screen.getByRole("button", { name: /启动关系分析/ }));

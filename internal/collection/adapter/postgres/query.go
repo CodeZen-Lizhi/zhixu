@@ -258,9 +258,9 @@ func (r *Repository) executePlanSnapshot(ctx context.Context, db DB, execution q
 	if plan.Canonical.Hash != execution.queryHash {
 		return collectionapp.ResultPage{}, inconsistent(errors.New("collection query hash is inconsistent"))
 	}
-	// 结果页总是 hydrate active Health 摘要，因此游标必须绑定 health revision，
-	// 即使 Query AST 没有直接引用 health_issue_type。
-	revision, err := readCollectionResultRevision(ctx, db, execution.workspaceID)
+	// 结果页总是 hydrate active Health 摘要，因此游标必须绑定 health revision；
+	// durable scan revision 则只绑定会改变成员集合的事实，避免 Health scan 被自己的输出打断。
+	revision, scanRevision, err := readCollectionResultRevisions(ctx, db, execution.workspaceID, plan)
 	if err != nil {
 		return collectionapp.ResultPage{}, err
 	}
@@ -315,7 +315,7 @@ func (r *Repository) executePlanSnapshot(ctx context.Context, db DB, execution q
 	if err := rows.Err(); err != nil {
 		return collectionapp.ResultPage{}, classify(err)
 	}
-	page := collectionapp.ResultPage{ExactCount: count, QueryHash: execution.queryHash, RevisionHash: revision, Items: items}
+	page := collectionapp.ResultPage{ExactCount: count, QueryHash: execution.queryHash, RevisionHash: revision, ScanRevisionHash: scanRevision, Items: items}
 	if len(items) > execution.limit {
 		last := items[execution.limit-1]
 		items = items[:execution.limit]
@@ -342,27 +342,56 @@ type revisionOptions struct {
 	includeHealthIssues bool
 }
 
-func readModelRevisionWithOptions(ctx context.Context, db DB, workspaceID foundation.ID, options revisionOptions) (string, error) {
-	var knowledgeRevision, conflictRevision, healthRevision int64
+type readModelRevisionVector struct {
+	knowledge int64
+	conflict  int64
+	health    int64
+}
+
+func loadReadModelRevisionVector(ctx context.Context, db DB, workspaceID foundation.ID) (readModelRevisionVector, error) {
+	var vector readModelRevisionVector
 	const revisionSQL = `SELECT
  COALESCE(revision.knowledge_revision,0),
- CASE WHEN $2::boolean THEN COALESCE(revision.conflict_revision,0) ELSE 0 END,
- CASE WHEN $3::boolean THEN COALESCE(revision.health_revision,0) ELSE 0 END
+ COALESCE(revision.conflict_revision,0),
+ COALESCE(revision.health_revision,0)
 FROM core.workspace workspace
 LEFT JOIN core.workspace_read_model_revision revision ON revision.workspace_id=workspace.id
 WHERE workspace.id=$1`
-	if err := db.QueryRow(ctx, revisionSQL, string(workspaceID), options.includeConflicts, options.includeHealthIssues).Scan(&knowledgeRevision, &conflictRevision, &healthRevision); err != nil {
-		return "", classify(err)
+	if err := db.QueryRow(ctx, revisionSQL, string(workspaceID)).Scan(&vector.knowledge, &vector.conflict, &vector.health); err != nil {
+		return readModelRevisionVector{}, classify(err)
 	}
-	value := fmt.Sprintf("collection-revision/v5|conflicts=%t|health=%t|knowledge=%d|conflict=%d|health_issue=%d", options.includeConflicts, options.includeHealthIssues, knowledgeRevision, conflictRevision, healthRevision)
-	digest := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(digest[:]), nil
+	return vector, nil
 }
 
-func readCollectionResultRevision(ctx context.Context, db DB, workspaceID foundation.ID) (string, error) {
-	return readModelRevisionWithOptions(ctx, db, workspaceID, revisionOptions{
-		includeHealthIssues: true,
-	})
+func hashReadModelRevision(vector readModelRevisionVector, options revisionOptions) string {
+	conflictRevision, healthRevision := int64(0), int64(0)
+	if options.includeConflicts {
+		conflictRevision = vector.conflict
+	}
+	if options.includeHealthIssues {
+		healthRevision = vector.health
+	}
+	value := fmt.Sprintf("collection-revision/v5|conflicts=%t|health=%t|knowledge=%d|conflict=%d|health_issue=%d", options.includeConflicts, options.includeHealthIssues, vector.knowledge, conflictRevision, healthRevision)
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+func readModelRevisionWithOptions(ctx context.Context, db DB, workspaceID foundation.ID, options revisionOptions) (string, error) {
+	vector, err := loadReadModelRevisionVector(ctx, db, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	return hashReadModelRevision(vector, options), nil
+}
+
+func readCollectionResultRevisions(ctx context.Context, db DB, workspaceID foundation.ID, plan collectionapp.QueryPlan) (string, string, error) {
+	vector, err := loadReadModelRevisionVector(ctx, db, workspaceID)
+	if err != nil {
+		return "", "", err
+	}
+	resultRevision := hashReadModelRevision(vector, revisionOptions{includeHealthIssues: true})
+	scanRevision := hashReadModelRevision(vector, revisionOptions{includeHealthIssues: queryPlanReferencesField(plan, "health_issue_type")})
+	return resultRevision, scanRevision, nil
 }
 
 func configureCollectionStatementTimeout(ctx context.Context, db DB, timeout time.Duration) error {

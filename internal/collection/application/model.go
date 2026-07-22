@@ -131,11 +131,12 @@ type CollectionItem struct {
 
 // ResultPage 是列表、表格和卡片共享的有界结果页。
 type ResultPage struct {
-	Items        []CollectionItem
-	ExactCount   int64
-	NextCursor   string
-	QueryHash    string
-	RevisionHash string
+	Items            []CollectionItem
+	ExactCount       int64
+	NextCursor       string
+	QueryHash        string
+	RevisionHash     string
+	ScanRevisionHash string
 }
 
 // DurableScanBinding 冻结跨进程扫描所依赖的 Collection 与 read-model 快照身份。

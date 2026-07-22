@@ -111,12 +111,15 @@ OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Fea
 
 ### 1. Scope / Trigger
 
-- 修改 Collection/Health API DTO、OpenAPI、strict decoder、query/hash/cursor、Issue/Scan/Decision/Schedule UI 时应用。
+- 修改 Collection/Health API DTO、OpenAPI、strict decoder、query/hash/cursor、page/scan revision、
+  Issue/Scan/Decision/Schedule UI 时应用。
 
 ### 2. Signatures
 
 - `decodeCollectionList/Detail/Preview/Results` 与 `decodeHealthSummary/Issues/Scan/Decision/Schedule` 必须接收 `unknown`，
   返回领域 UI model 或 `INVALID_RESPONSE`。
+- `CollectionResultPage` 必须区分 `revisionHash`（页面/cursor）与 `scanRevisionHash`（durable scan binding）；两者都是
+  必填 64 位十六进制 hash。
 
 ### 3. Contracts
 
@@ -124,6 +127,8 @@ OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Fea
 - Collection result 首项为严格 `TOPIC|CLAIM` union；三视图不得接收 wire DTO 或重复解码。
 - Collection list/result 最多 100 项；result 还必须满足 `exact_count >= items.length`、`(object_type,id)` 唯一，
   saved response 的 `collection_id/query_hash` 与请求完全一致。
+- Collection detail 启动 SMART_COLLECTION Health scan 时必须提交 `scanRevisionHash`；页面展示和 next cursor 仍使用
+  `revisionHash`。禁止缺字段时互相 fallback，因为 Health hydration 可改变 page revision 而不改变 scan membership。
 - Health Issue/Scan/Detector Coverage/Decision/Schedule 状态必须穷尽；unavailable、partial、failed、reopened、deferred 和
   response-loss 不得被转成 empty/succeeded。
 
@@ -132,26 +137,32 @@ OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Fea
 | 条件 | 结果 |
 |---|---|
 | Workspace/route/query hash 漂移 | `INVALID_RESPONSE` |
+| `revision_hash` 或 `scan_revision_hash` 缺失、非法或被互相替代 | `INVALID_RESPONSE`；不得启用 Scan |
 | cursor invalid/stale | 保留稳定 `ApiError`，由 Query 恢复第一页 |
 | unknown enum/field/duplicate key | 拒绝整个响应 |
 | unavailable capability | typed unavailable reason，不构造假对象 |
 
 ### 5. Good / Base / Bad Cases
 
-- Good：raw JSON 只在 `web/src/api/{collections,health}.ts` 进入 camelCase domain model。
+- Good：raw JSON 只在 `web/src/api/{collections,health}.ts` 进入 camelCase domain model；Health scan payload 显式使用
+  `result.scanRevisionHash`。
 - Base：空数组保持 `[]`；cursor opaque，不解析/持久化内部 payload。
-- Bad：组件 `as CollectionResult`、以 `query_hash` 缺失时默认空字符串、或把 `HealthScan.status` 任意 cast 成终态。
+- Bad：组件 `as CollectionResult`、以 `query_hash` 缺失时默认空字符串、把 `revisionHash` 当作 scan revision，或把
+  `HealthScan.status` 任意 cast 成终态。
 
 ### 6. Tests Required
 
 - normal/empty/unknown/duplicate/mismatch/invalid cursor/Problem/Abort decoder；query key、three-view refs、scan recovery、
   Workspace isolation 和 browser smoke。
+- 双 revision 回归使用不同 hash fixture，断言 decoder 保留 `scanRevisionHash`、缺字段 fail closed、Health scan payload
+  不读取 `revisionHash`；真实浏览器 smoke 必须贯穿 Collection detail → Health scan 接受与跳转。
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: `const data = response as HealthScan`。
-Correct: unknown -> strict decoder -> exhaustive domain union -> feature projection。
+Wrong: `readModelRevision: result.revisionHash`，或 `scan_revision_hash` 缺失时 fallback 到 `revision_hash`。
+Correct: unknown -> strict decoder 保留两个必填 hash；页面/cursor 使用 `revisionHash`，durable scan 只使用
+`scanRevisionHash`。
 ```
 
 ## Scenario: M7-02 Semantic Link Candidate Wire And UI State

@@ -139,6 +139,10 @@ func TestCollectionRoutesLifecycleAndStrictBoundaries(t *testing.T) {
 	if response.Code != http.StatusOK || service.resultsQuery.Limit != 2 || service.resultsQuery.Cursor != "opaque" {
 		t.Fatalf("results status=%d query=%+v body=%s", response.Code, service.resultsQuery, response.Body.String())
 	}
+	var results collectionResultResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &results); err != nil || results.RevisionHash != strings.Repeat("a", 64) || results.ScanRevisionHash != strings.Repeat("b", 64) {
+		t.Fatalf("results=%+v err=%v", results, err)
+	}
 }
 
 func TestCollectionValidateAndPreviewUseCanonicalBoundary(t *testing.T) {
@@ -163,7 +167,7 @@ func TestCollectionValidateAndPreviewUseCanonicalBoundary(t *testing.T) {
 		t.Fatalf("preview status=%d query=%+v body=%s", response.Code, service.previewQuery, response.Body.String())
 	}
 	var preview collectionPreviewResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &preview); err != nil || preview.QueryHash == "" || preview.ExactCount != service.page.ExactCount {
+	if err := json.Unmarshal(response.Body.Bytes(), &preview); err != nil || preview.QueryHash == "" || preview.ExactCount != service.page.ExactCount || preview.ScanRevisionHash != service.page.ScanRevisionHash {
 		t.Fatalf("preview=%+v err=%v", preview, err)
 	}
 	for _, suffix := range []string{`,"limit":0}`, `,"cursor":" "}`} {
@@ -321,7 +325,7 @@ func collectionFixture(status collectionapp.CollectionStatus) collectionapp.Coll
 }
 
 func resultFixture() collectionapp.ResultPage {
-	return collectionapp.ResultPage{Items: []collectionapp.CollectionItem{{ObjectType: "TOPIC", ID: httpTopicID, Title: "Topic", Summary: "Summary", Status: "ACTIVE", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}}, ExactCount: 1, RevisionHash: strings.Repeat("a", 64), NextCursor: "next"}
+	return collectionapp.ResultPage{Items: []collectionapp.CollectionItem{{ObjectType: "TOPIC", ID: httpTopicID, Title: "Topic", Summary: "Summary", Status: "ACTIVE", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}}, ExactCount: 1, RevisionHash: strings.Repeat("a", 64), ScanRevisionHash: strings.Repeat("b", 64), NextCursor: "next"}
 }
 
 func commandResult(collection collectionapp.Collection, command string, version int64, replayed bool) collectionapp.CommandResult {

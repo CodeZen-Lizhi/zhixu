@@ -278,7 +278,7 @@ func (handler *Handler) preview(w http.ResponseWriter, r *http.Request) {
 	}
 	httpapi.WriteJSON(w, http.StatusOK, collectionPreviewResponse{
 		WorkspaceID: string(workspaceID), QueryHash: canonical.Hash, Items: items,
-		ExactCount: page.ExactCount, NextCursor: optionalCursor(page.NextCursor), RevisionHash: page.RevisionHash,
+		ExactCount: page.ExactCount, NextCursor: optionalCursor(page.NextCursor), RevisionHash: page.RevisionHash, ScanRevisionHash: page.ScanRevisionHash,
 	})
 }
 
@@ -451,7 +451,7 @@ func (handler *Handler) results(w http.ResponseWriter, r *http.Request) {
 	for _, item := range page.Items {
 		items = append(items, toCollectionItemResponse(item))
 	}
-	response := collectionResultResponse{WorkspaceID: string(workspaceID), CollectionID: string(collectionID), QueryHash: page.QueryHash, Items: items, ExactCount: page.ExactCount, RevisionHash: page.RevisionHash}
+	response := collectionResultResponse{WorkspaceID: string(workspaceID), CollectionID: string(collectionID), QueryHash: page.QueryHash, Items: items, ExactCount: page.ExactCount, RevisionHash: page.RevisionHash, ScanRevisionHash: page.ScanRevisionHash}
 	if page.NextCursor != "" {
 		response.NextCursor = &page.NextCursor
 	}
@@ -525,22 +525,24 @@ type collectionValidationResponse struct {
 }
 
 type collectionResultResponse struct {
-	WorkspaceID  string                   `json:"workspace_id"`
-	CollectionID string                   `json:"collection_id"`
-	QueryHash    string                   `json:"query_hash"`
-	Items        []collectionItemResponse `json:"items"`
-	ExactCount   int64                    `json:"exact_count"`
-	NextCursor   *string                  `json:"next_cursor,omitempty"`
-	RevisionHash string                   `json:"revision_hash"`
+	WorkspaceID      string                   `json:"workspace_id"`
+	CollectionID     string                   `json:"collection_id"`
+	QueryHash        string                   `json:"query_hash"`
+	Items            []collectionItemResponse `json:"items"`
+	ExactCount       int64                    `json:"exact_count"`
+	NextCursor       *string                  `json:"next_cursor,omitempty"`
+	RevisionHash     string                   `json:"revision_hash"`
+	ScanRevisionHash string                   `json:"scan_revision_hash"`
 }
 
 type collectionPreviewResponse struct {
-	WorkspaceID  string                   `json:"workspace_id"`
-	QueryHash    string                   `json:"query_hash"`
-	Items        []collectionItemResponse `json:"items"`
-	ExactCount   int64                    `json:"exact_count"`
-	NextCursor   *string                  `json:"next_cursor,omitempty"`
-	RevisionHash string                   `json:"revision_hash"`
+	WorkspaceID      string                   `json:"workspace_id"`
+	QueryHash        string                   `json:"query_hash"`
+	Items            []collectionItemResponse `json:"items"`
+	ExactCount       int64                    `json:"exact_count"`
+	NextCursor       *string                  `json:"next_cursor,omitempty"`
+	RevisionHash     string                   `json:"revision_hash"`
+	ScanRevisionHash string                   `json:"scan_revision_hash"`
 }
 
 type collectionItemResponse struct {
@@ -762,11 +764,14 @@ func validateCollectionProjection(collection collectionapp.Collection, workspace
 }
 
 func validateResultProjection(page collectionapp.ResultPage, limit int) error {
-	if page.ExactCount < int64(len(page.Items)) || len(page.Items) > limit || !validCursor(page.NextCursor, true) || len(page.RevisionHash) != 64 {
+	if page.ExactCount < int64(len(page.Items)) || len(page.Items) > limit || !validCursor(page.NextCursor, true) || len(page.RevisionHash) != 64 || len(page.ScanRevisionHash) != 64 {
 		return resultInvalid("collection result page metadata is invalid")
 	}
 	if _, err := hex.DecodeString(page.RevisionHash); err != nil {
 		return resultInvalid("collection result revision is invalid")
+	}
+	if _, err := hex.DecodeString(page.ScanRevisionHash); err != nil {
+		return resultInvalid("collection scan revision is invalid")
 	}
 	for _, item := range page.Items {
 		if !validID(item.ID) || (item.ObjectType != "TOPIC" && item.ObjectType != "CLAIM") || item.CreatedAt.IsZero() || item.UpdatedAt.IsZero() || item.Confidence != nil && (*item.Confidence < 0 || *item.Confidence > 1) {

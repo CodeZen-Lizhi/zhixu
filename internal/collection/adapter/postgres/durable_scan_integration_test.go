@@ -185,6 +185,13 @@ func TestCollectionDurableScanIgnoresOwnHealthOutputsUnlessHealthDefinesMembersh
 	if err != nil {
 		t.Fatal(err)
 	}
+	result, err := service.Results(ctx, collectionapp.ResultsQuery{WorkspaceID: fixture.WorkspaceID, CollectionID: created.Collection.ID, Limit: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ScanRevisionHash != binding.ReadModelRevision || result.RevisionHash == result.ScanRevisionHash {
+		t.Fatalf("result revisions=%s/%s durable=%s", result.RevisionHash, result.ScanRevisionHash, binding.ReadModelRevision)
+	}
 	first, err := service.ReadDurableScanPage(ctx, collectionapp.DurableScanPageRequest{Binding: binding, Limit: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +201,13 @@ func TestCollectionDurableScanIgnoresOwnHealthOutputsUnlessHealthDefinesMembersh
 	}
 	insertDurableHealthIssue(t, ctx, pool, fixture.WorkspaceID, fixture.FirstClaimID, "ORPHAN", "health.detector.orphan/v1", "a", now.Add(time.Second))
 	insertDurableHealthIssue(t, ctx, pool, fixture.WorkspaceID, fixture.SecondClaimID, "LOW_CONFIDENCE", "health.detector.low-confidence/v1", "b", now.Add(2*time.Second))
+	refreshed, err := service.Results(ctx, collectionapp.ResultsQuery{WorkspaceID: fixture.WorkspaceID, CollectionID: created.Collection.ID, Limit: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.RevisionHash == result.RevisionHash || refreshed.ScanRevisionHash != binding.ReadModelRevision {
+		t.Fatalf("health output revisions before=%s/%s after=%s/%s", result.RevisionHash, result.ScanRevisionHash, refreshed.RevisionHash, refreshed.ScanRevisionHash)
+	}
 	second, err := service.ReadDurableScanPage(ctx, collectionapp.DurableScanPageRequest{Binding: binding, After: first.Next, Limit: 1})
 	if err != nil {
 		t.Fatalf("health outputs must not stale object-type membership: %v", err)
@@ -222,7 +236,21 @@ func TestCollectionDurableScanIgnoresOwnHealthOutputsUnlessHealthDefinesMembersh
 	if healthBinding.ExactCount != 1 {
 		t.Fatalf("health binding=%+v", healthBinding)
 	}
+	healthResult, err := service.Results(ctx, collectionapp.ResultsQuery{WorkspaceID: fixture.WorkspaceID, CollectionID: healthCollection.Collection.ID, Limit: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healthResult.ScanRevisionHash != healthBinding.ReadModelRevision || healthResult.RevisionHash != healthResult.ScanRevisionHash {
+		t.Fatalf("health membership revisions=%s/%s durable=%s", healthResult.RevisionHash, healthResult.ScanRevisionHash, healthBinding.ReadModelRevision)
+	}
 	insertDurableHealthIssue(t, ctx, pool, fixture.WorkspaceID, fixture.SecondClaimID, "ORPHAN", "health.detector.orphan-external/v1", "c", now.Add(3*time.Second))
+	refreshedHealthResult, err := service.Results(ctx, collectionapp.ResultsQuery{WorkspaceID: fixture.WorkspaceID, CollectionID: healthCollection.Collection.ID, Limit: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshedHealthResult.ScanRevisionHash == healthResult.ScanRevisionHash || refreshedHealthResult.RevisionHash != refreshedHealthResult.ScanRevisionHash {
+		t.Fatalf("health membership revisions before=%s/%s after=%s/%s", healthResult.RevisionHash, healthResult.ScanRevisionHash, refreshedHealthResult.RevisionHash, refreshedHealthResult.ScanRevisionHash)
+	}
 	if _, err := service.ReadDurableScanPage(ctx, collectionapp.DurableScanPageRequest{Binding: healthBinding, Limit: 1}); !hasCollectionCode(err, collectionapp.ErrorCodeCursorStale) {
 		t.Fatalf("health membership change stale error=%v", err)
 	}

@@ -172,3 +172,14 @@ OpenAPI、生产 composition 与 Web 页面。未落地的 Document/Directory/Ta
   锁顺序风险已通过 UUID 固定排序和真实 PostgreSQL 并发回归关闭。
 - AC-14 已由主 Agent `go-review`、`code-review-and-quality`、`sql-code-review` 与独立 backend/frontend 复验关闭；工作提交 `9ac2a9d`、Trellis 归档提交 `b0078bb` 已创建，journal 在本轮 Finish 中记录完成；
   不把 M7-04、Tag/Review/Directory owner、认证、Artifact/Review 批量动作或 M10 最终容量认证宣称为本任务完成。
+
+## Post-archive correction（2026-07-22）
+
+- 归档后的 canonical browser smoke 首轮真实暴露 `POST /api/v1/health/scans -> 409 HEALTH_SCAN_SCOPE_STALE`；页面未跳转，
+  因而不能把归档后的复验描述为“首次即通过”。
+- 根因是 Collection `revision_hash` 正确包含 Health hydration revision，但 Web 错把它当 durable scan membership
+  revision；Health 写出的 Issue 会推进该 hash，使扫描被自身输出稳定打断。
+- follow-up 保留 `revision_hash` 的 cursor/page 语义，并为 result/preview 增加必填 `scan_revision_hash`。两个 hash
+  从同一 O(1) Workspace revision-vector 查询计算；仅 Query 引用 `health_issue_type` 时 scan hash 包含 Health revision。
+- 回归证明 Health 输出会改变 page hash，但不会改变无 Health membership Query 的 scan hash；fresh migrated DB 的
+  integration/fault/benchmark、全量 Go/Web/OpenAPI、安全门禁和真实 API/Worker/Vite browser smoke 已重新通过。

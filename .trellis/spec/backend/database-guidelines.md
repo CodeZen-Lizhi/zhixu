@@ -90,11 +90,12 @@ git diff --check
 ### 1. Scope / Trigger
 
 - 适用于 `migrations/00025`–`00029`、`internal/collection`、`internal/health`、SMART_COLLECTION Candidate scan、
-  schedule delivery 和 affected-change outbox 的任何修改。
+  schedule delivery、affected-change outbox，以及 Collection result/preview revision 字段的任何修改。
 
 ### 2. Signatures
 
 - Collection query：`PlanDurableScan(workspace_id, collection_id)`、`ReadDurableScanPage(binding, after, limit)`。
+- Collection result/preview：同时返回 64 位十六进制 `revision_hash` 与 `scan_revision_hash`。
 - Health scan：`Start(scope snapshot, detector coverage, max_items, idempotency_key)`，Scan/Issue/Workflow 状态均以
   PostgreSQL 持久行读取。
 - Schedule command：Workspace + Idempotency-Key + request hash + command type + complete response snapshot。
@@ -104,6 +105,9 @@ git diff --check
 - SQL 标识符只能来自 `collection-query/v1` registry；值全部参数化，Workspace predicate 必须出现在每个 root。
 - Collection receipt 保存历史 snapshot；replay 不读取当前 Collection。结果 cursor 绑定 Workspace、query/version/hash、
   sort、limit、read-model revision 和最后 key。
+- `revision_hash` 绑定页面成员、排序和固定批量 hydration，必须包含 active Health revision；`scan_revision_hash`
+  绑定 durable scan membership，只在 Query predicate/sort 引用 `health_issue_type` 时包含 Health revision。两者必须从
+  同一 repeatable-read snapshot 的单次 O(1) Workspace revision-vector 查询计算，禁止为第二个 hash 再查一次数据库。
 - Health Issue 以 `identity_hash` 找回、以 `fingerprint` 判断 unchanged/reopen；detector 完整 coverage 之前不得
   自动 resolve。Schedule 默认 DISABLED，due/lease 使用 DB time + `FOR UPDATE SKIP LOCKED`。
 - Smart Collection scope 必须同时绑定 collection version、query hash、read-model revision 和 exact count；任何漂移
@@ -116,28 +120,36 @@ git diff --check
 | 未知字段、动态排序、超深/超大 AST | `COLLECTION_*` invalid，拒绝 SQL 生成 |
 | receipt schema/hash/Workspace/snapshot 篡改 | consistency error，fail closed |
 | scope version/query/revision/count 漂移 | stale/invalid，不创建新的 Candidate/Scan |
+| Health 输出改变 hydration，但 Query 不引用 `health_issue_type` | `revision_hash` 改变，`scan_revision_hash` 保持；继续 durable scan |
+| Query 引用 `health_issue_type` 后 Health revision 改变 | 两个 hash 都改变，旧 scan binding 返回 stale |
 | partial/failed/cancelled detector | 保留 Issue，不执行 missing-set resolve |
 | pending schedule 或重复 key 不同 payload | conflict；相同 payload exact replay |
 | guarded Down 存在业务行 | SQLSTATE `55000`，不得静默删除 |
 
 ### 5. Good / Base / Bad Cases
 
-- Good：统一 read model 先分页，再批量 hydration；后继 detector page 使用有界缓存但结束时重新验证 durable revision。
+- Good：统一 read model 先分页，再批量 hydration；同一次 revision-vector 读取派生 page/scan 两个 hash，后继
+  detector page 使用 `scan_revision_hash` 重新验证 durable revision。
 - Base：Tag/Review/Directory owner 或无 apply seam 的 repair 返回 capability unavailable，不写空事实。
-- Bad：用 JSON AST 直接拼 SQL、把 Collection snapshot 当知识副本、或把 River job 当 Scan/Issue 状态。
+- Bad：用 `revision_hash` 启动 Health scan、为两个 hash 执行两次 revision 查询、用 JSON AST 直接拼 SQL，或把
+  River job 当 Scan/Issue 状态。
 
 ### 6. Tests Required
 
 - 空库/重复 Up、空数据 Down→Up、业务数据 guarded Down；Workspace 复合约束和 append-only receipt trigger。
 - Collection lifecycle exact replay/CAS、全字段 operator、cursor invalid/stale、统一结果 refs 和 EXPLAIN/index。
+- 回归必须证明：Health Issue 写入会使 `revision_hash` 变化；不依赖 Health membership 的 `scan_revision_hash` 与
+  `PlanDurableScan().ReadModelRevision` 相等且保持稳定；依赖 `health_issue_type` 的旧 binding 明确 stale；query-count
+  契约仍只有一次 O(1) revision 查询。
 - Health unchanged/reopen/resolve、typed target cursor、schedule claim/reclaim/missed-once/exact replay、affected-change
   outbox rollback/response-loss，以及 SMART_COLLECTION 跨页 drift fail-closed。
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: Collection 查询把用户字段/排序拼入 SQL，Health 每页重新 COUNT 全表并以 River job 作为 scan 事实。
-Correct: registry 只映射白名单模板，值走参数；durable binding 由 PostgreSQL 证明，River 只投递并可重放。
+Wrong: 前端把含 Health hydration 的 `revision_hash` 作为 durable scan binding，Health 写出 Issue 后扫描被自身稳定打断。
+Correct: cursor/page 使用 `revision_hash`；Health/Semantic durable binding 使用服务端同 snapshot 返回的
+`scan_revision_hash`，并由 PostgreSQL 在每页验证，River 只投递并可重放。
 ```
 
 ## M5-05 Knowledge Domain Contract

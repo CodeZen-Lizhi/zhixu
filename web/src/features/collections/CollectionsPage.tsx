@@ -199,7 +199,7 @@ export const CollectionDetailPage = () => {
   const scanStatus = result.isError ? "结果读取失败，修复后才能启动 Health Scan。" : result.isPending || result.isFetching ? "结果加载完成后才能启动 Health Scan。" : !resultMatchesCollection ? "结果与当前集合版本不一致，刷新后再扫描。" : exceedsHealthScanCapacity ? `当前集合有 ${String(resultBinding.exactCount)} 个对象，单次 Health Scan 最多处理 5000 个；请收窄 Collection 条件后重试。` : `将扫描 ${String(resultBinding.exactCount)} 个对象。`;
   const scan = () => {
     if (resultBinding === undefined || !resultMatchesCollection || exceedsHealthScanCapacity) return;
-    const scope = { type: "SMART_COLLECTION" as const, ref: item.id, version: item.version, schemaVersion: "health-scope/smart-collection/v1", hash: item.queryHash, readModelRevision: resultBinding.revisionHash, exactCount: resultBinding.exactCount };
+    const scope = { type: "SMART_COLLECTION" as const, ref: item.id, version: item.version, schemaVersion: "health-scope/smart-collection/v1", hash: item.queryHash, readModelRevision: resultBinding.scanRevisionHash, exactCount: resultBinding.exactCount };
     const signature = JSON.stringify({ scope, maxItems: 5000, preventScopeConcurrency: true });
     startScan.mutate({ scope, maxItems: 5000, preventScopeConcurrency: true, idempotencyKey: attemptKey(healthScanAttempt, "health-scan", signature) }, { onSuccess: (accepted) => { healthScanAttempt.current = null; void navigate(`/health?scan=${accepted.healthScanId}`); } });
   };

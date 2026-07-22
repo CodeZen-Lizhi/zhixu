@@ -149,6 +149,7 @@ export interface CollectionResultPage {
   exactCount: number;
   nextCursor: string | null;
   revisionHash: string;
+  scanRevisionHash: string;
 }
 
 export interface CollectionValidation {
@@ -587,7 +588,7 @@ const decodeList = (value: unknown): CollectionList => {
 };
 const decodeResultPageBase = (value: unknown, kind: "saved" | "preview"): CollectionResultPage => {
   if (!isRecord(value)) throw invalidResponse("collection.result_page");
-  exact(value, ["workspace_id", "collection_id", "query_hash", "items", "exact_count", "next_cursor", "revision_hash"], "collection.result_page");
+  exact(value, ["workspace_id", "collection_id", "query_hash", "items", "exact_count", "next_cursor", "revision_hash", "scan_revision_hash"], "collection.result_page");
   if (!Array.isArray(value.items) || value.items.length > 100) throw invalidResponse("collection.result_page.items");
   let collectionId: string | null = null;
   if (kind === "saved") collectionId = uuid(value.collection_id, "collection.result_page.collection_id");
@@ -596,7 +597,7 @@ const decodeResultPageBase = (value: unknown, kind: "saved" | "preview"): Collec
   if (new Set(items.map((item) => `${item.objectType}:${item.id}`)).size !== items.length) throw invalidResponse("collection.result_page.items.id");
   const exactCount = integer(value.exact_count, "collection.result_page.exact_count");
   if (exactCount < items.length) throw invalidResponse("collection.result_page.exact_count");
-  return { workspaceId: uuid(value.workspace_id, "collection.result_page.workspace_id"), collectionId, queryHash: hash(value.query_hash, "collection.result_page.query_hash"), items, exactCount, nextCursor: cursor(value.next_cursor, "collection.result_page.next_cursor", 32768), revisionHash: hash(value.revision_hash, "collection.result_page.revision_hash") };
+  return { workspaceId: uuid(value.workspace_id, "collection.result_page.workspace_id"), collectionId, queryHash: hash(value.query_hash, "collection.result_page.query_hash"), items, exactCount, nextCursor: cursor(value.next_cursor, "collection.result_page.next_cursor", 32768), revisionHash: hash(value.revision_hash, "collection.result_page.revision_hash"), scanRevisionHash: hash(value.scan_revision_hash, "collection.result_page.scan_revision_hash") };
 };
 const decodeSavedResultPage = (value: unknown): CollectionResultPage => decodeResultPageBase(value, "saved");
 const decodePreviewResultPage = (value: unknown): CollectionResultPage => decodeResultPageBase(value, "preview");

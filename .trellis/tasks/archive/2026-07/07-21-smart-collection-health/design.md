@@ -4,7 +4,8 @@
 
 1. 新建 `internal/collection` 和 `internal/health` 两个深模块；Knowledge、Change Control、Workflow 继续拥有正式事实和写入。
 2. Collection Query AST 先编译到统一 Topic/Claim read model，所有字段/运算符/排序由版本化 registry 白名单映射；三种视图只消费同一结果 DTO。
-3. Collection cursor 使用 HMAC keyset，并绑定 Collection/query、limit、排序和 read-model revision vector；事实变化明确 stale，不持久化无限结果集。
+3. Collection cursor 使用 HMAC keyset，并绑定 Collection/query、limit、排序和含 Health hydration 的 page revision；
+   durable scan 使用独立 membership revision，避免 Health scan 被自身输出打断，同时在 Health 定义 membership 时继续 fail closed。
 4. Health 以 `identity_hash` 表达逻辑问题、以 `fingerprint` 表达当前证据；Issue 保留稳定 ID，Evidence/规则变化追加 observation 并 REOPENED。
 5. Health Scan 复用现有 Workflow/River 基础，但拥有独立 scan/Issue 事实、detector coverage、checkpoint 和完成规则。
 6. Collection scope 是真实稳定对象：Candidate/Health scan 只接收 Collection ID/version/query hash，不接受任意 AST 或路径替代。
@@ -74,11 +75,16 @@ List/Table/Card 都接收相同 `CollectionResultPage`；view config 只是可�
 首次执行在单个 read-only repeatable-read 事务中：
 
 1. 读取 Collection/version 或 canonical ad-hoc query。
-2. 计算参与事实表的 revision vector：每张表的 row count、max updated_at/version，按固定 schema 哈希。
+2. O(1) 读取 Workspace 的 knowledge/conflict/health revision vector，并从同一 snapshot 派生两个固定 schema hash：
+   `revision_hash` 总是包含 Health hydration revision；`scan_revision_hash` 仅在 Query predicate/sort 引用
+   `health_issue_type` 时包含 Health revision。
 3. 执行参数化 count 和 keyset page；sort 最后追加 object_type/id。
 4. cursor 写入 query hash、revision hash、sort、limit 和 last key，经进程随机 HMAC 签名。
 
-后续页先重算 revision vector；不匹配返回 `COLLECTION_CURSOR_STALE`。cursor 过期/重启、签名错误、跨 Workspace/Collection/query 分别返回 invalid。事实表不物理删除且应用写入同步推进 version/updated_at；迁移和 integration test 必须保护该假设。
+后续页先重算 page revision；不匹配返回 `COLLECTION_CURSOR_STALE`。Health/Semantic durable consumer 必须使用
+`scan_revision_hash`，并在每页验证 membership revision；不得把 page hash 当 scan binding。cursor 过期/重启、
+签名错误、跨 Workspace/Collection/query 分别返回 invalid。revision trigger 与 integration test 必须保护同事务推进和
+Workspace 隔离。
 
 ## Persistence
 

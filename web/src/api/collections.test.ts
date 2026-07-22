@@ -6,6 +6,7 @@ const workspaceId = "11000000-0000-4000-8000-000000000001";
 const collectionId = "11000000-0000-4000-8000-000000000002";
 const at = "2026-07-22T00:00:00Z";
 const hash = "a".repeat(64);
+const scanHash = "b".repeat(64);
 const query: CollectionQuery = { schema_version: "collection-query/v1", root: { kind: "group", operator: "AND", clauses: [{ kind: "predicate", field: "object_type", operator: "EQ", value: "TOPIC" }] }, sort: [{ field: "updated_at", direction: "DESC" }] };
 const viewConfig = { columns: ["object_type", "title"], fixed_columns: ["title"], sort: [{ field: "updated_at", direction: "DESC" }], group_by: null, density: "COMFORTABLE" };
 const collectionPayload = {
@@ -65,9 +66,11 @@ describe("Collection API boundary", () => {
       exact_count: 1,
       next_cursor: "opaque.cursor",
       revision_hash: hash,
+      scan_revision_hash: scanHash,
     });
     expect(page.items[0]).toMatchObject({ objectType: "CLAIM", aliases: [], sourceSummaries: [{ filePath: "docs/topic.md" }], relationTypes: ["BELONGS_TO"], healthSummary: { count: 1, maxSeverity: "HIGH" }, healthIssueType: "STALE" });
     expect(page.nextCursor).toBe("opaque.cursor");
+    expect(page.scanRevisionHash).toBe(scanHash);
   });
 
   it("preserves idempotency key and canonical request body for create", async () => {
@@ -123,19 +126,23 @@ describe("Collection API boundary", () => {
 
   it("rejects cross-kind CollectionItem fields", () => {
     const topic = { object_type: "TOPIC", id: "11000000-0000-4000-8000-000000000003", topic_id: null, title: "Topic", summary: "", status: "ACTIVE", confidence: null, aliases: ["Topic alias"], source_summaries: [], relation_types: [], health_summary: null, relation_type: null, health_issue_type: null, source_type: null, file_path: null, created_at: at, updated_at: at };
-    expect(() => decodeResultPage({ workspace_id: workspaceId, collection_id: collectionId, query_hash: hash, items: [{ ...topic, confidence: 0.5 }], exact_count: 1, next_cursor: null, revision_hash: hash })).toThrow(CollectionApiError);
-    expect(() => decodeResultPage({ workspace_id: workspaceId, collection_id: collectionId, query_hash: hash, items: [{ ...topic, source_summaries: [{ source_type: "FILE", file_path: "a.md", support_type: "SUPPORTS", created_at: at }] }], exact_count: 1, next_cursor: null, revision_hash: hash })).toThrow(CollectionApiError);
+    expect(() => decodeResultPage({ workspace_id: workspaceId, collection_id: collectionId, query_hash: hash, items: [{ ...topic, confidence: 0.5 }], exact_count: 1, next_cursor: null, revision_hash: hash, scan_revision_hash: scanHash })).toThrow(CollectionApiError);
+    expect(() => decodeResultPage({ workspace_id: workspaceId, collection_id: collectionId, query_hash: hash, items: [{ ...topic, source_summaries: [{ source_type: "FILE", file_path: "a.md", support_type: "SUPPORTS", created_at: at }] }], exact_count: 1, next_cursor: null, revision_hash: hash, scan_revision_hash: scanHash })).toThrow(CollectionApiError);
   });
 
   it("separates saved result and preview bindings and enforces bounded unique items", () => {
     const topic = { object_type: "TOPIC", id: "11000000-0000-4000-8000-000000000003", topic_id: null, title: "Topic", summary: "", status: "ACTIVE", confidence: null, aliases: [], source_summaries: [], relation_types: [], health_summary: null, relation_type: null, health_issue_type: null, source_type: null, file_path: null, created_at: at, updated_at: at };
-    const saved = { workspace_id: workspaceId, collection_id: collectionId, query_hash: hash, items: [topic], exact_count: 1, next_cursor: null, revision_hash: hash };
-    expect(decodeResultPage(saved)).toMatchObject({ collectionId, queryHash: hash, exactCount: 1 });
+    const saved = { workspace_id: workspaceId, collection_id: collectionId, query_hash: hash, items: [topic], exact_count: 1, next_cursor: null, revision_hash: hash, scan_revision_hash: scanHash };
+    expect(decodeResultPage(saved)).toMatchObject({ collectionId, queryHash: hash, exactCount: 1, scanRevisionHash: scanHash });
+    const missingScanRevision: Record<string, unknown> = { ...saved };
+    delete missingScanRevision.scan_revision_hash;
+    expect(() => decodeResultPage(missingScanRevision)).toThrow(CollectionApiError);
+    expect(() => decodeResultPage({ ...saved, scan_revision_hash: "g".repeat(64) })).toThrow(CollectionApiError);
     expect(() => decodeResultPage({ ...saved, collection_id: null })).toThrow(CollectionApiError);
     expect(() => decodeResultPage({ ...saved, query_hash: null })).toThrow(CollectionApiError);
     expect(decodePreviewResultPage({ ...saved, collection_id: null })).toMatchObject({ collectionId: null, queryHash: hash });
-    const previewWithoutCollection = { workspace_id: workspaceId, query_hash: hash, items: [topic], exact_count: 1, next_cursor: null, revision_hash: hash };
-    expect(decodePreviewResultPage(previewWithoutCollection)).toMatchObject({ collectionId: null, queryHash: hash });
+    const previewWithoutCollection = { workspace_id: workspaceId, query_hash: hash, items: [topic], exact_count: 1, next_cursor: null, revision_hash: hash, scan_revision_hash: scanHash };
+    expect(decodePreviewResultPage(previewWithoutCollection)).toMatchObject({ collectionId: null, queryHash: hash, scanRevisionHash: scanHash });
     expect(() => decodePreviewResultPage(saved)).toThrow(CollectionApiError);
     expect(() => decodePreviewResultPage({ ...previewWithoutCollection, query_hash: undefined })).toThrow(CollectionApiError);
     expect(() => decodeResultPage({ ...saved, items: [topic, topic], exact_count: 2 })).toThrow(CollectionApiError);
@@ -150,7 +157,7 @@ describe("Collection API boundary", () => {
   });
 
   it("binds saved results to query hash and uses the 25 item default", async () => {
-    const response = { workspace_id: workspaceId, collection_id: collectionId, query_hash: "b".repeat(64), items: [], exact_count: 0, revision_hash: hash };
+    const response = { workspace_id: workspaceId, collection_id: collectionId, query_hash: "b".repeat(64), items: [], exact_count: 0, revision_hash: hash, scan_revision_hash: scanHash };
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(response));
     vi.stubGlobal("fetch", fetchMock);
     await expect(getCollectionResults(workspaceId, collectionId, hash)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });

@@ -148,3 +148,16 @@ Do not mark tag/review/directory, final 500k capacity, authentication, Artifact/
 ## Completion Rule
 
 T17 may run only after every AC in `prd.md` has direct evidence, all T01-T16 rows are completed, full gates and both independent review tracks are closed, and the worktree contains only intentional task bookkeeping. No push unless the user explicitly requests it.
+
+## Post-archive follow-up（2026-07-22）
+
+- Canonical browser smoke 在归档后首轮失败：Health SMART_COLLECTION start 返回
+  `409 HEALTH_SCAN_SCOPE_STALE`，诊断目录为
+  `/var/folders/fg/bzpd9ft96g976xqf_w4lwbrr0000gn/T/zhixu-collection-health-browser-smoke.mdJjXD`。
+- 修复：result/preview 新增必填 `scan_revision_hash`；后端同一次 revision-vector 读取派生 page/scan hash，Web strict
+  decoder 保留两者并用 scan hash 启动 Health。未修改 `revision_hash` 的 Health hydration/cursor stale 语义。
+- 回归：`TestCollectionDurableScanIgnoresOwnHealthOutputsUnlessHealthDefinesMembership` 证明无 Health membership 的
+  scan 不被自身输出打断，而 Health 定义 membership 时继续 stale；HTTP、OpenAPI 和 Web 测试使用不同 hash 防止误接线。
+- 复验：全量 Go race/vet/tidy、`make test`、Web lint/typecheck/381 tests/build、fresh DB integration/fault、独立 fresh
+  DB benchmark、OpenAPI、secret/audit high、bash syntax、task validate、diff check 与真实 browser smoke 通过。
+- 归档状态保持不变；follow-up 只创建 scoped 修复提交，不重新归档、不 push，也不纳入并行 M9 改动。

@@ -9585,7 +9585,8 @@
           "query_hash",
           "items",
           "exact_count",
-          "revision_hash"
+          "revision_hash",
+          "scan_revision_hash"
         ],
         "properties": {
           "workspace_id": {
@@ -9619,6 +9620,10 @@
           "revision_hash": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
+          },
+          "scan_revision_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
           }
         },
         "additionalProperties": false
@@ -9630,7 +9635,8 @@
           "query_hash",
           "items",
           "exact_count",
-          "revision_hash"
+          "revision_hash",
+          "scan_revision_hash"
         ],
         "properties": {
           "workspace_id": {
@@ -9658,6 +9664,10 @@
             "maxLength": 32768
           },
           "revision_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "scan_revision_hash": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
           }
