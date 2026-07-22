@@ -219,7 +219,8 @@ func ComputeKnowledgeChangeHash(change KnowledgeChange, risk, rollbackPlan strin
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// ComputeKnowledgeChangeRequestHash 计算 `knowledge_change` Proposal 创建请求的稳定哈希。
+// ComputeKnowledgeChangeRequestHash 重现历史 `knowledge_change` Proposal 创建请求的 v1 哈希。
+// 该函数只用于已持久化历史记录的精确重放；新 Proposal 必须使用包含 RiskLevel 的 v2 哈希。
 func ComputeKnowledgeChangeRequestHash(workspaceID foundation.ID, change KnowledgeChange, risk, rollbackPlan string) (string, error) {
 	canonicalChange, err := ValidateKnowledgeChange(change)
 	if err != nil {
@@ -237,6 +238,41 @@ func ComputeKnowledgeChangeRequestHash(workspaceID foundation.ID, change Knowled
 		Change:       canonicalChange,
 		Risk:         strings.TrimSpace(risk),
 		RollbackPlan: strings.TrimSpace(rollbackPlan),
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// ComputeKnowledgeChangeRequestHashWithRiskLevel 将显式风险等级纳入知识变更创建请求的幂等绑定。
+func ComputeKnowledgeChangeRequestHashWithRiskLevel(workspaceID foundation.ID, change KnowledgeChange, riskLevel ProposalRiskLevel, risk, rollbackPlan string) (string, error) {
+	canonicalChange, err := ValidateKnowledgeChange(change)
+	if err != nil {
+		return "", err
+	}
+	normalizedRiskLevel, err := ParseProposalRiskLevel(riskLevel)
+	if err != nil {
+		return "", err
+	}
+	payload := struct {
+		RequestSchema string            `json:"request_schema"`
+		WorkspaceID   foundation.ID     `json:"workspace_id"`
+		ProposalType  ProposalType      `json:"proposal_type"`
+		Change        KnowledgeChange   `json:"change"`
+		RiskLevel     ProposalRiskLevel `json:"risk_level"`
+		Risk          string            `json:"risk"`
+		RollbackPlan  string            `json:"rollback_plan"`
+	}{
+		RequestSchema: "knowledge-change-proposal-request/v2",
+		WorkspaceID:   workspaceID,
+		ProposalType:  ProposalTypeKnowledgeChange,
+		Change:        canonicalChange,
+		RiskLevel:     normalizedRiskLevel,
+		Risk:          strings.TrimSpace(risk),
+		RollbackPlan:  strings.TrimSpace(rollbackPlan),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

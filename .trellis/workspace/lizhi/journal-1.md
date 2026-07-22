@@ -1362,3 +1362,37 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 30: 完成 M9 业务前端与统一 SSE 交付
+
+**Date**: 2026-07-23
+**Task**: 完成 M9 业务前端与统一 SSE 交付
+**Branch**: `dev`
+
+### Summary
+
+完成 M9 业务契约与安全读模型、业务前端、Proposal/Diff/审批、Workflow、统一 SSE Event Store 与 Search recovery；全量 Go/Web/OpenAPI/Trellis/数据库/浏览器门禁和主审查、独立复验通过。已完成两个 scoped commit 并归档 07-22-m9-business-frontend；保留并行 M7 未提交改动，不 push。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d84829e` | (see git log) |
+| `f89acec` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
