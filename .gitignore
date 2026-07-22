@@ -15,6 +15,7 @@
 *.test
 *.out
 coverage.*
+!vendor/golang.org/x/text/internal/language/coverage.go
 !vendor/golang.org/x/text/language/coverage.go
 # M1 Docker builds use the checked-in module vendor tree for reproducibility.
 
