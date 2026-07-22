@@ -17,7 +17,7 @@
 | T11 | 路由 lazy split、全局导航、URL filters、Workspace cache isolation | T08-T10 | deep-link/refresh/mobile tests | completed |
 | T12 | 真实 PostgreSQL/API/浏览器 smoke、性能/secret/audit gate | T02-T11 | all gates pass | completed：全量 Go/Web/OpenAPI/Trellis/diff 门禁通过；新建迁移至 33 的 disposable PostgreSQL 后，Workspace/Proposal/Workflow 三条列表 `-race` integration、M9 migration contract 与 Semantic Link fault smoke 通过；浏览器真实链路证据保持有效 |
 | T13 | 同步 PRD/架构/OpenAPI/spec/父任务状态并执行主审查和独立复审 | T12 | no open P0-P2 | completed：补齐产品/前端/API/数据库/Checklist 状态；主 Agent 使用 `go-review`、`code-review-and-quality`、`sql-code-review` 完成审查；独立 reviewer 第三轮关闭 Semantic Link detail `approval` fail-open 后未发现新的 P0-P2 |
-| T14 | scoped commit、archive、journal；不 push | T13 | clean scoped task result | completed：后端 `d84829e` 与前端 `f89acec` 已完成 scoped commit；未 push，待执行归档与 journal |
+| T14 | scoped commit、archive、journal；不 push | T13 | clean scoped task result | completed：后端 `d84829e` 与前端 `f89acec` 已完成 scoped commit，任务已归档并记录 journal；未 push |
 
 ## Verification Commands
 
