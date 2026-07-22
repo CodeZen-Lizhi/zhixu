@@ -1318,3 +1318,47 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 29: 收口 M7-03 归档后修正
+
+**Date**: 2026-07-22
+**Task**: 收口 M7-03 归档后修正
+**Branch**: `dev`
+
+### Summary
+
+完成 Collection page/scan 双 revision 的归档后修正、clean-checkout vendor 补漏与确定性 cursor 篡改回归；在隔离 worktree 和 fresh PostgreSQL 上重跑全量门禁及主审/独立复审。任务保持已归档，不纳入 M9 改动，不 push。
+
+### Main Changes
+
+- 修复归档后真实 browser smoke 暴露的 `HEALTH_SCAN_SCOPE_STALE`：保留 `revision_hash` 页面/Health hydration 语义，新增 `scan_revision_hash` 绑定 durable membership。
+- 修复 clean checkout 缺失的 `golang.org/x/text` 两个必需 vendor coverage 源文件。
+- 修复 Collection list cursor 篡改集成测试的 RawURL Base64 尾部等价脆弱性，改为确定性篡改 HMAC 签名段首字符。
+- 验证：目标 PostgreSQL 回归 `-race -count=50`；fresh DB integration、fault smoke、benchmark、真实 API/Worker/Vite browser smoke；全仓 `go test -race -count=1 ./...`、`make test`、`go mod tidy -diff`、npm audit high、secret scan、Trellis validate、diff check 全部通过。
+- Review：主 Agent 使用 `go-review` 五轴门禁未发现问题；独立 reviewer 复跑 `-race -count=20`、application race、integration vet、gofmt/diff check，P0-P3 均为 0。
+- Git 边界：提交 `2fb87ab`、`fd1ef44`、`8fcda37`、`be98708` 均为 scoped follow-up；现有 M9 暂存/未暂存改动保持原样。
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2fb87ab` | (see git log) |
+| `fd1ef44` | (see git log) |
+| `8fcda37` | (see git log) |
+| `be98708` | (see git log) |
+
+### Testing
+
+- `go test -race -tags=integration -count=50 -run '^TestCollectionRepositoryLifecycleIdempotencyCASAndWorkspaceIsolation$' ./internal/collection/adapter/postgres` 通过。
+- fresh migrated PostgreSQL 上 `make collection-health-integration`、`make collection-health-fault-smoke`、`make collection-health-benchmark`、`make collection-health-browser-smoke` 通过。
+- clean worktree 上 `go test -race -count=1 ./...`、`make test`、`go mod tidy -diff`、npm audit high、secret scan、归档任务 validate 与 `git diff --check` 通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
