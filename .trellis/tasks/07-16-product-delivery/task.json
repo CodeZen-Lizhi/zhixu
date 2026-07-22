@@ -39,7 +39,8 @@
     "07-19-tool-registry-security",
     "07-19-rag-conversation-sse",
     "07-20-graph-projection-queries",
-    "07-21-semantic-link-candidates"
+    "07-21-semantic-link-candidates",
+    "07-21-smart-collection-health"
   ],
   "parent": null,
   "relatedFiles": [],

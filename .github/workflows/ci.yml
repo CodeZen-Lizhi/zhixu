@@ -13,6 +13,20 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.5-pg18-bookworm
+        env:
+          POSTGRES_DB: zhixu_test
+          POSTGRES_USER: zhixu_test
+          POSTGRES_PASSWORD: ci_only_change_me
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zhixu_test -d zhixu_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
 
@@ -33,8 +47,34 @@ jobs:
       - name: Install web dependencies
         run: make web-install
 
+      - name: Install Playwright Chrome
+        working-directory: web
+        run: npx playwright install --with-deps chrome
+
       - name: Run quality gates
         run: make test
+
+      - name: Run Collection and Health static delivery gates
+        run: |
+          bash -n deploy/collection-health-*.sh
+          make collection-health-secret-scan
+          npm audit --prefix web --audit-level=high
+
+      - name: Run Collection and Health PostgreSQL gates
+        env:
+          ZHIXU_DATABASE_HOST: 127.0.0.1
+          ZHIXU_DATABASE_PORT: "5432"
+          ZHIXU_DATABASE_NAME: zhixu_test
+          ZHIXU_DATABASE_USER: zhixu_test
+          ZHIXU_DATABASE_PASSWORD: ci_only_change_me
+          ZHIXU_DATABASE_SSLMODE: disable
+        run: |
+          export ZHIXU_TEST_DATABASE_URL="$(python3 -c 'import os; print("postgres" + "://" + os.environ["ZHIXU_DATABASE_USER"] + ":" + os.environ["ZHIXU_DATABASE_PASSWORD"] + "@" + os.environ["ZHIXU_DATABASE_HOST"] + ":" + os.environ["ZHIXU_DATABASE_PORT"] + "/" + os.environ["ZHIXU_DATABASE_NAME"] + "?sslmode=" + os.environ["ZHIXU_DATABASE_SSLMODE"])')"
+          go run ./cmd/migrate
+          make collection-health-integration
+          make collection-health-fault-smoke
+          make collection-health-benchmark
+          make collection-health-browser-smoke
 
       - name: Build runtime image
         run: make docker-build

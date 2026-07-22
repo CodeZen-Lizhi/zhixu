@@ -1,14 +1,17 @@
 import { BrowserRouter } from "react-router-dom";
 
-import { GraphWorkspaceCacheBoundary } from "../features/graph/GraphWorkspaceCacheBoundary";
+import { CollectionHealthEventBridge } from "../events/collection-health-events";
 import { AppRoutes } from "../routes/AppRoutes";
+import { WorkspaceCacheBoundary } from "./WorkspaceCacheBoundary";
 
 export const App = () => (
-  <GraphWorkspaceCacheBoundary>
+  <WorkspaceCacheBoundary>
     <BrowserRouter>
-      <main className="app-shell">
-        <AppRoutes />
-      </main>
+      <CollectionHealthEventBridge>
+        <main className="app-shell">
+          <AppRoutes />
+        </main>
+      </CollectionHealthEventBridge>
     </BrowserRouter>
-  </GraphWorkspaceCacheBoundary>
+  </WorkspaceCacheBoundary>
 );

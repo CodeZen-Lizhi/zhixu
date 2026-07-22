@@ -109,7 +109,8 @@ flowchart TD
 
 ### 范围、发现与去重
 
-- 首版只支持当前 Workspace 的 Topic/Claim；Document、目录和 Smart Collection 等待稳定对象契约后扩展。
+- 当前支持 Topic 与绑定 Collection ID/version/query hash/read-model revision 的 SMART_COLLECTION scan；Document、
+  目录仍等待稳定对象契约后扩展。两类 scope 都只生成 Candidate，不直接写 Relation。
 - 标题/别名、术语、共同 Topic、同 Source 四类确定性信号有真实数据路径；Semantic/RAG 在当前未配置时
   显式 `unsupported`，不能静默标成已执行或返回假空结果。
 - Topic scan 使用 Workflow/River，按 100 节点页持久化 checkpoint；每个 source 最多查询 100 个后续

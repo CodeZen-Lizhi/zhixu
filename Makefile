@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check tool-integration rag-integration graph-integration graph-smoke graph-benchmark semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke compose-check docker-build compose-up compose-down compose-search-smoke compose-tool-smoke compose-rag-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check tool-integration rag-integration graph-integration graph-smoke graph-benchmark semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke compose-check docker-build compose-up compose-down compose-search-smoke compose-tool-smoke compose-rag-smoke
 
 test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet agent-eval openapi-check compose-check
 
@@ -84,6 +84,24 @@ semantic-link-browser-smoke:
 semantic-link-smoke: openapi-check semantic-link-eval semantic-link-browser-smoke
 	ZHIXU_TEST_DATABASE_URL= go test -race ./internal/graph/... ./internal/changecontrol/... ./internal/knowledge/... ./internal/workflow/...
 	npm run test --prefix web -- --run src/api/semantic-links.test.ts src/features/graph/semantic-link-queries.test.tsx src/features/graph/SemanticLinkCandidatePanel.test.tsx
+
+collection-health-integration:
+	bash deploy/collection-health-go-gate.sh integration
+
+collection-health-fault-smoke:
+	bash deploy/collection-health-go-gate.sh fault
+
+collection-health-benchmark:
+	bash deploy/collection-health-go-gate.sh benchmark
+
+collection-health-browser-smoke:
+	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
+	bash deploy/collection-health-browser-smoke.sh
+
+collection-health-secret-scan:
+	bash deploy/collection-health-secret-scan.sh --source
+
+collection-health-smoke: collection-health-browser-smoke
 
 compose-check:
 	docker compose -f deploy/compose.yml --env-file .env.example config --quiet

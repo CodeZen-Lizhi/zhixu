@@ -422,6 +422,39 @@ make semantic-link-eval
 ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-smoke
 ```
 
+### 13.3 M7-03 Smart Collection 与 Knowledge Health 专项
+
+- Domain/unit：AST registry/canonical hash/depth/node/size、view config、cursor、identity/fingerprint、Issue 状态机、
+  severity、decision/CAS、schedule cadence 和 complete-only resolve。
+- 真实 PostgreSQL：`00025`–`00029` 空库/重复/Down-Up/guarded Down、Collection lifecycle exact replay、全字段
+  operator、Workspace 隔离、cursor invalid/stale、Health unchanged/reopen/resolve、typed detector cursor、
+  schedule missed-once/claim/replay、affected-change outbox 和 SMART_COLLECTION Candidate/Health scope。
+- Workflow/River fault：retry exhaustion、cancel、worker restart、checkpoint、completion response-loss、source commit
+  与 dispatch failure 解耦；River job 不得替代 Scan/Issue/Workflow 事实。
+- 前端/browser：strict Collection/Health decoder、Workspace query key、三视图相同 refs、Evidence lazy load、
+  decision/scan recovery、desktop/390×844、零 console warning/error 和无横向溢出。
+- 性能/安全：参考 P95/EXPLAIN、固定 statement count、secret/DSN/path/body scan、OpenAPI、migration、Go race/vet/tidy、
+  npm lint/typecheck/test/build、`npm audit --audit-level=high` 与 Trellis validate。
+
+归档前执行：
+
+```bash
+go test -race -count=1 ./...
+go vet ./...
+go mod tidy -diff
+make test
+ZHIXU_TEST_DATABASE_URL='postgres://...' make collection-health-integration
+ZHIXU_TEST_DATABASE_URL='postgres://...' make collection-health-fault-smoke
+ZHIXU_TEST_DATABASE_URL='postgres://...' make collection-health-benchmark
+ZHIXU_TEST_DATABASE_URL='postgres://...' make collection-health-browser-smoke
+make collection-health-secret-scan
+make openapi-check
+python3 ./.trellis/scripts/task.py validate 07-21-smart-collection-health
+git diff --check
+```
+
+该门禁不证明 tag/review/directory owner、认证、Artifact/Review 批量动作、M7-04 Timeline/Impact 或 M10 最终容量。
+
 ## 14. Review Evaluation
 
 - Question Answerability。

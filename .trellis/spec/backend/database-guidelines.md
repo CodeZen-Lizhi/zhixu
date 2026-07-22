@@ -85,6 +85,61 @@ git diff --check
 - 连接池参数、迁移执行入口和 Testcontainers 版本。
 - 中文 FTS 配置、向量维度、HNSW 参数以及 50 万数据容量结果。
 
+## Scenario: M7-03 Collection / Health Persistence Contract
+
+### 1. Scope / Trigger
+
+- 适用于 `migrations/00025`–`00029`、`internal/collection`、`internal/health`、SMART_COLLECTION Candidate scan、
+  schedule delivery 和 affected-change outbox 的任何修改。
+
+### 2. Signatures
+
+- Collection query：`PlanDurableScan(workspace_id, collection_id)`、`ReadDurableScanPage(binding, after, limit)`。
+- Health scan：`Start(scope snapshot, detector coverage, max_items, idempotency_key)`，Scan/Issue/Workflow 状态均以
+  PostgreSQL 持久行读取。
+- Schedule command：Workspace + Idempotency-Key + request hash + command type + complete response snapshot。
+
+### 3. Contracts
+
+- SQL 标识符只能来自 `collection-query/v1` registry；值全部参数化，Workspace predicate 必须出现在每个 root。
+- Collection receipt 保存历史 snapshot；replay 不读取当前 Collection。结果 cursor 绑定 Workspace、query/version/hash、
+  sort、limit、read-model revision 和最后 key。
+- Health Issue 以 `identity_hash` 找回、以 `fingerprint` 判断 unchanged/reopen；detector 完整 coverage 之前不得
+  自动 resolve。Schedule 默认 DISABLED，due/lease 使用 DB time + `FOR UPDATE SKIP LOCKED`。
+- Smart Collection scope 必须同时绑定 collection version、query hash、read-model revision 和 exact count；任何漂移
+  返回 stale/invalid，不退化为 Workspace scope。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+|---|---|
+| 未知字段、动态排序、超深/超大 AST | `COLLECTION_*` invalid，拒绝 SQL 生成 |
+| receipt schema/hash/Workspace/snapshot 篡改 | consistency error，fail closed |
+| scope version/query/revision/count 漂移 | stale/invalid，不创建新的 Candidate/Scan |
+| partial/failed/cancelled detector | 保留 Issue，不执行 missing-set resolve |
+| pending schedule 或重复 key 不同 payload | conflict；相同 payload exact replay |
+| guarded Down 存在业务行 | SQLSTATE `55000`，不得静默删除 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：统一 read model 先分页，再批量 hydration；后继 detector page 使用有界缓存但结束时重新验证 durable revision。
+- Base：Tag/Review/Directory owner 或无 apply seam 的 repair 返回 capability unavailable，不写空事实。
+- Bad：用 JSON AST 直接拼 SQL、把 Collection snapshot 当知识副本、或把 River job 当 Scan/Issue 状态。
+
+### 6. Tests Required
+
+- 空库/重复 Up、空数据 Down→Up、业务数据 guarded Down；Workspace 复合约束和 append-only receipt trigger。
+- Collection lifecycle exact replay/CAS、全字段 operator、cursor invalid/stale、统一结果 refs 和 EXPLAIN/index。
+- Health unchanged/reopen/resolve、typed target cursor、schedule claim/reclaim/missed-once/exact replay、affected-change
+  outbox rollback/response-loss，以及 SMART_COLLECTION 跨页 drift fail-closed。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Collection 查询把用户字段/排序拼入 SQL，Health 每页重新 COUNT 全表并以 River job 作为 scan 事实。
+Correct: registry 只映射白名单模板，值走参数；durable binding 由 PostgreSQL 证明，River 只投递并可重放。
+```
+
 ## M5-05 Knowledge Domain Contract
 
 ### Scope

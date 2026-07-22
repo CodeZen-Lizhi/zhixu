@@ -85,6 +85,21 @@ describe("decodeServerEventEnvelope", () => {
     });
   });
 
+  it("将 Collection 与 Health resource_ref 解码为失效提示", () => {
+    expect(decodeServerEventEnvelope({
+      ...envelope("43"),
+      type: "health.scan.completed",
+      resource_ref: `health_scan:${workflowRunId}`,
+      payload_summary: {},
+    }).invalidations).toEqual([{ resource: "health_scan", id: workflowRunId }]);
+    expect(decodeServerEventEnvelope({
+      ...envelope("44"),
+      type: "collection.updated",
+      resource_ref: `collection:${answerId}`,
+      payload_summary: {},
+    }).invalidations).toEqual([{ resource: "collection", id: answerId }]);
+  });
+
   it.each([
     ["未来 schema", { ...envelope(), schema_version: 2 }],
     ["额外 Envelope 字段", { ...envelope(), answer_text: "secret" }],

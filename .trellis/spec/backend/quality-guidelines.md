@@ -326,6 +326,57 @@ Wrong: 将 20k/100k 一跳 P95 和 Workspace 隔离标记为 500k/FPS/Auth 已�
 Correct: 只声明 M7-01 的参考容量与只读闭环，M10 边界保持显式待验收。
 ```
 
+## Scenario: M7-03 Smart Collection / Knowledge Health Quality Gate
+
+### 1. Scope / Trigger
+
+- 修改 Collection AST/read model/cursor、Health Issue/detector/scan/schedule、migrations `00025`–`00029`、SMART_COLLECTION
+  Candidate scan、OpenAPI、API/Worker composition 或 `/collections`/`/health` 时执行。
+
+### 2. Signatures
+
+- Collection public seams：`Validate`、`Preview`、`Results`、`Create/Update/Archive`、`PlanDurableScan`。
+- Health public seams：`Summary/Issues`、`Start/GetScan`、`Decide/Repair`、`Get/PutSchedule`。
+- SMART_COLLECTION scan payload 必须包含 Workspace、Collection ID/version、query hash、read-model revision 和 exact count。
+
+### 3. Contracts
+
+- Query AST 只接受 `collection-query/v1` 的 registry field/operator/value，最大深度 3、64 nodes、32 KiB、IN 100。
+- LIST/TABLE/COMPACT_CARD 共享同一个 result page；Collection 不复制 Knowledge，Health/scan/decision 不直接写正式知识。
+- Issue identity/fingerprint 语义、complete-only resolve、partial coverage、Decision CAS/idempotency、Schedule disabled-by-default
+  和 affected-scope outbox 必须在 Domain + PostgreSQL 同时成立。
+- API/Worker/Graph/Health 故障隔离；River 只投递。SSE 只触发 REST Query invalidation，不能成为事实源。
+
+### 4. Validation & Error Matrix
+
+| Failure | Required result |
+|---|---|
+| unknown/duplicate JSON、非法 cursor/UUID/enum/limit | stable 400 Problem，不能静默默认 |
+| Workspace/resource mismatch | 404 anti-enumeration |
+| Collection dependency/owner unavailable | 独立 unavailable/503，不返回假空集合 |
+| partial/failed/cancelled Health scan | coverage 可见，不 resolve active Issue |
+| same identity+fingerprint | 只更新 `last_verified_at` |
+| fingerprint changed | 原 Issue ID + observation + `REOPENED` |
+
+### 5. Good / Base / Bad Cases
+
+- Good：真实 PostgreSQL/River/API/browser 贯穿 Collection → Health scan → Evidence/Decision，response-loss 可 exact replay。
+- Base：Tag、Review/Directory、Artifact/Review Deck 和无真实 apply seam 的 repair 显式 unavailable。
+- Bad：页面本地过滤三份结果、把 scan ID/Workflow event 当终态、或用 Workspace scope 替代 stale Collection binding。
+
+### 6. Tests Required
+
+- `go test -race ./...`、`go vet ./...`、`go mod tidy -diff`、`make test`、OpenAPI/migration/integration/fault/benchmark/browser/
+  secret gates、前端 lint/typecheck/test/build、Trellis validate。
+- 独立 backend/SQL 与 frontend/cross-layer reviewer 必须按 AC-01..AC-14 复验；P0–P2 全部关闭后才能归档。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 只测 handler Fake 或只启动 Vite 就声称 Collection/Health 已交付。
+Correct: 以真实 PostgreSQL/Workflow/HTTP/browser 分层证据证明动态结果、持久 scan、错误隔离和移动端闭环。
+```
+
 ## Scenario: M7-02 Semantic Link Cross-Layer Quality Gate
 
 ### 1. Scope / Trigger

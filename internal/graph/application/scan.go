@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
@@ -19,8 +20,12 @@ const (
 	SemanticLinkScanWorkflowDefinitionKey = "graph.semantic-link-topic-scan"
 	// SemanticLinkScanWorkflowDefinitionVersion 是冻结的 Workflow graph 版本。
 	SemanticLinkScanWorkflowDefinitionVersion int64 = 1
+	// SemanticLinkSmartCollectionScanWorkflowDefinitionVersion 是 SMART_COLLECTION scan 的冻结 Workflow graph 版本。
+	SemanticLinkSmartCollectionScanWorkflowDefinitionVersion int64 = 2
 	// SemanticLinkScanInputSchemaVersion 是 Workflow 输入 Schema 版本。
 	SemanticLinkScanInputSchemaVersion = 1
+	// SemanticLinkSmartCollectionScanInputSchemaVersion 是 SMART_COLLECTION Workflow 输入 Schema 版本。
+	SemanticLinkSmartCollectionScanInputSchemaVersion = 2
 	// SemanticLinkScanOutputSchemaVersion 是 Workflow 输出 Schema 版本。
 	SemanticLinkScanOutputSchemaVersion = 1
 	// SemanticLinkScanRuleID 是首版确定性发现规则的稳定身份。
@@ -29,8 +34,12 @@ const (
 	SemanticLinkScanRuleVersion = "semantic-link-rules/v1"
 	// SemanticLinkTopicScanScopeSchemaVersion 是 Topic scope 的冻结契约版本。
 	SemanticLinkTopicScanScopeSchemaVersion = "semantic-link-topic-scan-scope/v1"
+	// SemanticLinkSmartCollectionScanScopeSchemaVersion 是 Smart Collection scope 的冻结契约版本。
+	SemanticLinkSmartCollectionScanScopeSchemaVersion = "semantic-link-smart-collection-scope/v1"
 	// SemanticLinkScanWorkflowGenerationVersion 进入 scan fingerprint，和 Workflow Definition 版本分开冻结。
 	SemanticLinkScanWorkflowGenerationVersion = "graph.semantic-link-topic-scan/v1"
+	// SemanticLinkSmartCollectionScanWorkflowGenerationVersion 冻结 SMART_COLLECTION scan 的运行代际。
+	SemanticLinkSmartCollectionScanWorkflowGenerationVersion = "graph.semantic-link-smart-collection-scan/v2"
 	// MaxSemanticLinkScanPageNodes 是单个 Workflow page 的节点上限。
 	MaxSemanticLinkScanPageNodes = 100
 	// MaxSemanticLinkScanPagePairsPerNode 是单节点允许的有界候选 pair 数。
@@ -55,9 +64,61 @@ type SemanticLinkTopicScanPlan struct {
 	TotalNodes   int64
 }
 
+// SemanticLinkSmartCollectionScanPlan 是服务端从 Collection read model 生成的冻结扫描计划。
+type SemanticLinkSmartCollectionScanPlan struct {
+	WorkspaceID       foundation.ID
+	CollectionID      foundation.ID
+	CollectionVersion int64
+	QueryHash         string
+	ReadModelRevision string
+	TotalNodes        int64
+}
+
 // SemanticLinkTopicScanPlanner 读取正式 Topic version 和有资格 Claim 计数。
 type SemanticLinkTopicScanPlanner interface {
 	PlanTopicScan(context.Context, foundation.ID, foundation.ID) (SemanticLinkTopicScanPlan, error)
+}
+
+// SemanticLinkSmartCollectionScanPlanner 读取 active Collection 的版本、Query hash、read-model revision 和精确数量。
+type SemanticLinkSmartCollectionScanPlanner interface {
+	PlanSmartCollectionScan(context.Context, foundation.ID, foundation.ID) (SemanticLinkSmartCollectionScanPlan, error)
+}
+
+// SemanticLinkScanPlannerSet 将 Topic 与可选 Smart Collection planner 收敛为一个 Composition Root 端口。
+// Smart Collection 依赖缺失时，Topic scan 仍保持可用；Smart 请求由命令服务 fail closed。
+type SemanticLinkScanPlannerSet struct {
+	topic SemanticLinkTopicScanPlanner
+	smart SemanticLinkSmartCollectionScanPlanner
+}
+
+// NewSemanticLinkScanPlannerSet 创建 Topic 必选、Smart 可选的 planner 组合。
+func NewSemanticLinkScanPlannerSet(topic SemanticLinkTopicScanPlanner, smart SemanticLinkSmartCollectionScanPlanner) (*SemanticLinkScanPlannerSet, error) {
+	if nilInterface(topic) {
+		return nil, scanUnavailable(errors.New("semantic-link topic scan planner is unavailable"))
+	}
+	return &SemanticLinkScanPlannerSet{topic: topic, smart: smart}, nil
+}
+
+// PlanTopicScan 委托正式 Topic planner。
+func (set *SemanticLinkScanPlannerSet) PlanTopicScan(ctx context.Context, workspaceID, topicID foundation.ID) (SemanticLinkTopicScanPlan, error) {
+	if set == nil || nilInterface(set.topic) {
+		return SemanticLinkTopicScanPlan{}, scanUnavailable(errors.New("semantic-link topic scan planner is unavailable"))
+	}
+	return set.topic.PlanTopicScan(ctx, workspaceID, topicID)
+}
+
+// PlanSmartCollectionScan 委托 Smart planner；缺失时明确返回不可用。
+func (set *SemanticLinkScanPlannerSet) PlanSmartCollectionScan(ctx context.Context, workspaceID, collectionID foundation.ID) (SemanticLinkSmartCollectionScanPlan, error) {
+	if set == nil || nilInterface(set.smart) {
+		return SemanticLinkSmartCollectionScanPlan{}, scanUnavailable(errors.New("semantic-link smart collection planner is unavailable"))
+	}
+	return set.smart.PlanSmartCollectionScan(ctx, workspaceID, collectionID)
+}
+
+// SmartCollectionScanReader 是 Graph 对 Collection 统一 read model 的只读接缝。
+type SmartCollectionScanReader interface {
+	PlanDurableScan(context.Context, foundation.ID, foundation.ID) (collectionapp.DurableScanBinding, error)
+	ReadDurableScanPage(context.Context, collectionapp.DurableScanPageRequest) (collectionapp.DurableScanPage, error)
 }
 
 // SemanticLinkTopicScanRequest 是公共 HTTP 边界允许提交的最小命令。
@@ -67,10 +128,22 @@ type SemanticLinkTopicScanRequest struct {
 	IdempotencyKey string
 }
 
+// SemanticLinkSmartCollectionScanRequest 是公共边界提交的最小 Smart Collection 命令。
+type SemanticLinkSmartCollectionScanRequest struct {
+	WorkspaceID    foundation.ID
+	CollectionID   foundation.ID
+	IdempotencyKey string
+}
+
 // SemanticLinkScanHTTPService 是候选 HTTP 依赖的持久扫描端口。
 type SemanticLinkScanHTTPService interface {
 	StartTopicScan(context.Context, SemanticLinkTopicScanRequest) (SemanticLinkScanStartResult, error)
 	Get(context.Context, foundation.ID, foundation.ID) (graphdomain.SemanticLinkScan, error)
+}
+
+// SemanticLinkSmartScanHTTPService 是可选的 Smart Collection scan HTTP 扩展；旧 Topic fake 不需要实现它。
+type SemanticLinkSmartScanHTTPService interface {
+	StartSmartCollectionScan(context.Context, SemanticLinkSmartCollectionScanRequest) (SemanticLinkScanStartResult, error)
 }
 
 // SemanticLinkScanCommandService 将公开 Topic 命令收敛为冻结的内部 StartCommand。
@@ -112,6 +185,41 @@ func (service *SemanticLinkScanCommandService) StartTopicScan(ctx context.Contex
 		Generation: graphdomain.SemanticLinkScanGeneration{
 			Rule:            graphdomain.SemanticLinkCandidateGeneration{RuleID: &ruleID, RuleVersion: SemanticLinkScanRuleVersion},
 			WorkflowVersion: SemanticLinkScanWorkflowGenerationVersion,
+		},
+		TotalNodes: plan.TotalNodes, IdempotencyKey: request.IdempotencyKey,
+	})
+}
+
+// StartSmartCollectionScan 从 active Collection 快照生成 scope、计数和冻结版本后创建/重放 Scan。
+func (service *SemanticLinkScanCommandService) StartSmartCollectionScan(ctx context.Context, request SemanticLinkSmartCollectionScanRequest) (SemanticLinkScanStartResult, error) {
+	if service == nil || service.scans == nil {
+		return SemanticLinkScanStartResult{}, scanUnavailable(errors.New("smart collection scan planner is unavailable"))
+	}
+	planner, ok := service.planner.(SemanticLinkSmartCollectionScanPlanner)
+	if !ok {
+		return SemanticLinkScanStartResult{}, scanUnavailable(errors.New("smart collection scan planner is unavailable"))
+	}
+	if ctx == nil || !validID(request.WorkspaceID) || !validID(request.CollectionID) {
+		return SemanticLinkScanStartResult{}, scanInvalid(errors.New("smart collection scan identity is invalid"))
+	}
+	plan, err := planner.PlanSmartCollectionScan(ctx, request.WorkspaceID, request.CollectionID)
+	if err != nil {
+		return SemanticLinkScanStartResult{}, err
+	}
+	if plan.WorkspaceID != request.WorkspaceID || plan.CollectionID != request.CollectionID || plan.CollectionVersion < 1 || plan.TotalNodes < 0 || !canonicalHash(plan.QueryHash) || !canonicalHash(plan.ReadModelRevision) {
+		return SemanticLinkScanStartResult{}, scanConsistency(errors.New("smart collection scan plan is inconsistent"))
+	}
+	ruleID := SemanticLinkScanRuleID
+	return service.scans.StartTopicScan(ctx, SemanticLinkScanStartCommand{
+		WorkspaceID: request.WorkspaceID,
+		Scope: graphdomain.SemanticLinkScanScope{
+			Type: graphdomain.SemanticLinkScanScopeSmartCollection, Ref: string(request.CollectionID),
+			Version: plan.CollectionVersion, SchemaVersion: SemanticLinkSmartCollectionScanScopeSchemaVersion,
+			QueryHash: plan.QueryHash, ReadModelRevision: plan.ReadModelRevision,
+		},
+		Generation: graphdomain.SemanticLinkScanGeneration{
+			Rule:            graphdomain.SemanticLinkCandidateGeneration{RuleID: &ruleID, RuleVersion: SemanticLinkScanRuleVersion},
+			WorkflowVersion: SemanticLinkSmartCollectionScanWorkflowGenerationVersion,
 		},
 		TotalNodes: plan.TotalNodes, IdempotencyKey: request.IdempotencyKey,
 	})
@@ -295,21 +403,25 @@ type SemanticLinkTopicScanPageRequest struct {
 	Scope       graphdomain.SemanticLinkScanScope
 	Generation  graphdomain.SemanticLinkScanGeneration
 	Cursor      string
+	LastNode    *knowledge.NodeRef
+	TotalNodes  int64
 	Limit       int
 }
 
 // SemanticLinkTopicScanPage 是页读取 Adapter 返回的有界候选 pair。
 type SemanticLinkTopicScanPage struct {
-	WorkspaceID    foundation.ID
-	ScanID         foundation.ID
-	ScopeVersion   int64
-	Cursor         string
-	NextCursor     string
-	Complete       bool
-	ProcessedNodes int64
-	LastNode       *knowledge.NodeRef
-	Pairs          []graphdomain.SemanticLinkDiscoveryPair
-	Exclusions     []graphdomain.SemanticLinkDiscoveryExclusion
+	WorkspaceID       foundation.ID
+	ScanID            foundation.ID
+	ScopeVersion      int64
+	ScopeHash         string
+	ReadModelRevision string
+	Cursor            string
+	NextCursor        string
+	Complete          bool
+	ProcessedNodes    int64
+	LastNode          *knowledge.NodeRef
+	Pairs             []graphdomain.SemanticLinkDiscoveryPair
+	Exclusions        []graphdomain.SemanticLinkDiscoveryExclusion
 }
 
 // SemanticLinkDiscoveryCandidateWriteRequest 将一页真实节点快照与信号结果交给 Candidate 持久化边界。
@@ -337,6 +449,42 @@ type SemanticLinkDiscoveryCandidateWriter interface {
 // 实现必须按页返回，不能让 executor 逐节点查询。
 type SemanticLinkTopicScanPageSource interface {
 	LoadPage(context.Context, SemanticLinkTopicScanPageRequest) (SemanticLinkTopicScanPage, error)
+}
+
+// SemanticLinkScanPageSourceRouter 按冻结 scope 将 Topic/Smart Collection 页请求路由到对应 read source。
+// Router 不改变 page 合同，避免 Workflow Executor 为每种 scope 维护第二套状态机。
+type SemanticLinkScanPageSourceRouter struct {
+	topic SemanticLinkTopicScanPageSource
+	smart SemanticLinkTopicScanPageSource
+}
+
+// NewSemanticLinkScanPageSourceRouter 创建支持 Topic 与 SMART_COLLECTION 的页源路由器。
+func NewSemanticLinkScanPageSourceRouter(topic, smart SemanticLinkTopicScanPageSource) (*SemanticLinkScanPageSourceRouter, error) {
+	if nilInterface(topic) && nilInterface(smart) {
+		return nil, scanUnavailable(errors.New("semantic link scan page source router dependencies are unavailable"))
+	}
+	return &SemanticLinkScanPageSourceRouter{topic: topic, smart: smart}, nil
+}
+
+// LoadPage 将请求路由到与 scope 类型匹配的页源；未知 scope fail closed。
+func (router *SemanticLinkScanPageSourceRouter) LoadPage(ctx context.Context, request SemanticLinkTopicScanPageRequest) (SemanticLinkTopicScanPage, error) {
+	if router == nil {
+		return SemanticLinkTopicScanPage{}, scanUnavailable(errors.New("semantic link scan page source router is unavailable"))
+	}
+	switch request.Scope.Type {
+	case graphdomain.SemanticLinkScanScopeTopic:
+		if nilInterface(router.topic) {
+			return SemanticLinkTopicScanPage{}, scanUnavailable(errors.New("semantic link topic scan page source is unavailable"))
+		}
+		return router.topic.LoadPage(ctx, request)
+	case graphdomain.SemanticLinkScanScopeSmartCollection:
+		if nilInterface(router.smart) {
+			return SemanticLinkTopicScanPage{}, scanUnavailable(errors.New("smart collection scan page source is unavailable"))
+		}
+		return router.smart.LoadPage(ctx, request)
+	default:
+		return SemanticLinkTopicScanPage{}, scanInvalid(errors.New("semantic link scan page source scope is unsupported"))
+	}
 }
 
 // SemanticLinkTopicScanPageResult 是 executor 一页的确定性结果，供 state port CAS 提交。
@@ -439,13 +587,19 @@ func canonicalScanStart(command SemanticLinkScanStartCommand) (SemanticLinkScanS
 	if err != nil {
 		return SemanticLinkScanStartCommand{}, SemanticLinkScanStartRequest{}, err
 	}
+	definitionVersion := SemanticLinkScanWorkflowDefinitionVersion
+	inputSchemaVersion := SemanticLinkScanInputSchemaVersion
+	if command.Scope.Type == graphdomain.SemanticLinkScanScopeSmartCollection {
+		definitionVersion = SemanticLinkSmartCollectionScanWorkflowDefinitionVersion
+		inputSchemaVersion = SemanticLinkSmartCollectionScanInputSchemaVersion
+	}
 	return command, SemanticLinkScanStartRequest{
 		WorkspaceID: command.WorkspaceID, Scope: command.Scope, Generation: command.Generation,
 		Fingerprint: fingerprint, RequestHash: requestHash, TotalNodes: command.TotalNodes,
 		IdempotencyKey:             command.IdempotencyKey,
 		WorkflowDefinitionKey:      SemanticLinkScanWorkflowDefinitionKey,
-		WorkflowDefinitionVersion:  SemanticLinkScanWorkflowDefinitionVersion,
-		WorkflowInputSchemaVersion: SemanticLinkScanInputSchemaVersion,
+		WorkflowDefinitionVersion:  definitionVersion,
+		WorkflowInputSchemaVersion: inputSchemaVersion,
 	}, nil
 }
 
@@ -529,7 +683,7 @@ func validateScanTerminal(terminal graphdomain.SemanticLinkScanTerminal) error {
 }
 
 func validateTopicScanPageRequest(request SemanticLinkTopicScanPageRequest) error {
-	if !validID(request.WorkspaceID) || !validID(request.ScanID) || request.Limit < 1 || request.Limit > MaxSemanticLinkScanPageNodes || len(request.Cursor) > 512 {
+	if !validID(request.WorkspaceID) || !validID(request.ScanID) || request.TotalNodes < 0 || request.Limit < 1 || request.Limit > MaxSemanticLinkScanPageNodes || len(request.Cursor) > 512 || (request.LastNode != nil && !validNodeRef(*request.LastNode)) {
 		return scanInvalid(errors.New("topic scan page request is invalid"))
 	}
 	if err := graphdomain.ValidateSemanticLinkScanScope(request.Scope); err != nil {
@@ -538,8 +692,11 @@ func validateTopicScanPageRequest(request SemanticLinkTopicScanPageRequest) erro
 	if err := graphdomain.ValidateSemanticLinkScanGeneration(request.Generation); err != nil {
 		return err
 	}
-	if request.Scope.Type != graphdomain.SemanticLinkScanScopeTopic && request.Scope.Type != graphdomain.SemanticLinkScanScopeNode {
-		return scanInvalid(errors.New("topic scan page scope is unsupported"))
+	if request.Scope.Type != graphdomain.SemanticLinkScanScopeTopic && request.Scope.Type != graphdomain.SemanticLinkScanScopeNode && request.Scope.Type != graphdomain.SemanticLinkScanScopeSmartCollection {
+		return scanInvalid(errors.New("semantic link scan page scope is unsupported"))
+	}
+	if request.Scope.Type == graphdomain.SemanticLinkScanScopeSmartCollection && request.Cursor != "" {
+		return scanInvalid(errors.New("smart collection scan must use a structured checkpoint"))
 	}
 	return nil
 }
@@ -585,9 +742,19 @@ func externalSignalGenerationMatches(report graphdomain.SemanticLinkDiscoverySig
 }
 
 func validateTopicScanPage(request SemanticLinkTopicScanPageRequest, page SemanticLinkTopicScanPage) error {
-	if page.WorkspaceID != request.WorkspaceID || page.ScanID != request.ScanID || page.ScopeVersion != request.Scope.Version || page.Cursor != request.Cursor || len(page.NextCursor) > 512 || (!page.Complete && strings.TrimSpace(page.NextCursor) == "") || (page.Complete && page.NextCursor != "") || page.ProcessedNodes < 0 || page.ProcessedNodes > MaxSemanticLinkScanPageNodes || len(page.Pairs) > int(page.ProcessedNodes)*MaxSemanticLinkScanPagePairsPerNode || (page.ProcessedNodes == 0) != (page.LastNode == nil) || (page.LastNode != nil && !validNodeRef(*page.LastNode)) {
+	if page.WorkspaceID != request.WorkspaceID || page.ScanID != request.ScanID || page.ScopeVersion != request.Scope.Version || page.ScopeHash != request.Scope.QueryHash || page.ReadModelRevision != request.Scope.ReadModelRevision || page.Cursor != request.Cursor || len(page.NextCursor) > 512 || page.ProcessedNodes < 0 || page.ProcessedNodes > int64(request.Limit) || page.ProcessedNodes > MaxSemanticLinkScanPageNodes || len(page.Pairs) > int(page.ProcessedNodes)*MaxSemanticLinkScanPagePairsPerNode || (page.ProcessedNodes == 0) != (page.LastNode == nil) || (page.LastNode != nil && !validNodeRef(*page.LastNode)) {
 		return scanConsistency(errors.New("topic scan page is not bounded or request-bound"))
 	}
+	if request.Scope.Type == graphdomain.SemanticLinkScanScopeSmartCollection {
+		if page.NextCursor != "" || page.Cursor != "" {
+			return scanConsistency(errors.New("smart collection scan page leaked an opaque cursor"))
+		}
+	} else if (!page.Complete && strings.TrimSpace(page.NextCursor) == "") || (page.Complete && page.NextCursor != "") {
+		return scanConsistency(errors.New("topic scan page cursor is inconsistent"))
+	}
+	pairs := make(map[graphdomain.SemanticLinkDiscoveryPairKey]struct{}, len(page.Pairs))
+	pairCounts := make(map[knowledge.NodeRef]int, int(page.ProcessedNodes))
+	var previous *graphdomain.SemanticLinkDiscoveryPairKey
 	for _, pair := range page.Pairs {
 		if err := graphdomain.ValidateSemanticLinkDiscoveryNode(request.WorkspaceID, pair.Source); err != nil {
 			return err
@@ -595,8 +762,69 @@ func validateTopicScanPage(request SemanticLinkTopicScanPageRequest, page Semant
 		if err := graphdomain.ValidateSemanticLinkDiscoveryNode(request.WorkspaceID, pair.Target); err != nil {
 			return err
 		}
+		key, err := pair.PairKey()
+		if err != nil {
+			return err
+		}
+		if key.Left != pair.Source.Endpoint.Ref || key.Right != pair.Target.Endpoint.Ref {
+			return scanConsistency(errors.New("topic scan pair is not canonically directed"))
+		}
+		if _, duplicate := pairs[key]; duplicate {
+			return scanConsistency(errors.New("topic scan page contains duplicate pairs"))
+		}
+		if previous != nil && !scanPairKeyLess(*previous, key) {
+			return scanConsistency(errors.New("topic scan page pairs are not strictly ordered"))
+		}
+		pairCounts[key.Left]++
+		if pairCounts[key.Left] > MaxSemanticLinkScanPagePairsPerNode {
+			return scanConsistency(errors.New("topic scan pair source exceeds its target limit"))
+		}
+		pairs[key] = struct{}{}
+		value := key
+		previous = &value
+	}
+	exclusions := make(map[graphdomain.SemanticLinkDiscoveryPairKey]struct{}, len(page.Exclusions))
+	for _, exclusion := range page.Exclusions {
+		if !validNodeRef(exclusion.Source) || !validNodeRef(exclusion.Target) || exclusion.Source == exclusion.Target {
+			return scanConsistency(errors.New("topic scan exclusion endpoints are invalid"))
+		}
+		key := canonicalScanPairKey(exclusion.Source, exclusion.Target)
+		if _, requested := pairs[key]; !requested {
+			return scanConsistency(errors.New("topic scan exclusion is not bound to a page pair"))
+		}
+		if _, duplicate := exclusions[key]; duplicate {
+			return scanConsistency(errors.New("topic scan page contains duplicate exclusions"))
+		}
+		reason := strings.TrimSpace(exclusion.Reason)
+		if reason == "" || len(reason) > 128 || strings.ContainsAny(reason, "\r\n") {
+			return scanConsistency(errors.New("topic scan exclusion reason is invalid"))
+		}
+		exclusions[key] = struct{}{}
 	}
 	return nil
+}
+
+func canonicalScanPairKey(left, right knowledge.NodeRef) graphdomain.SemanticLinkDiscoveryPairKey {
+	if scanNodeRefLess(right, left) {
+		left, right = right, left
+	}
+	return graphdomain.SemanticLinkDiscoveryPairKey{Left: left, Right: right}
+}
+
+func scanPairKeyLess(left, right graphdomain.SemanticLinkDiscoveryPairKey) bool {
+	return scanNodeRefLess(left.Left, right.Left) || (left.Left == right.Left && scanNodeRefLess(left.Right, right.Right))
+}
+
+func scanNodeRefLess(left, right knowledge.NodeRef) bool {
+	return left.Type < right.Type || (left.Type == right.Type && left.ID < right.ID)
+}
+
+func canonicalHash(value string) bool {
+	if len(value) != 64 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func cloneScanNodeRef(value *knowledge.NodeRef) *knowledge.NodeRef {

@@ -24,6 +24,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "ready" },
         semantic_links: { status: "ready" },
         rag: { status: "disabled" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" },
         request_id: "request-ready",
       }),
     );
@@ -45,6 +46,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
         semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
         rag: { status: "unavailable", reason: "rag_dependencies_unavailable" },
+        collections: { status: "unavailable" }, knowledge_health: { status: "unavailable" },
         request_id: "request-degraded",
       }),
     );
@@ -65,6 +67,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
         semantic_links: { status: "ready" },
         rag: { status: "disabled" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" },
         request_id: "request-graph",
       }),
     );
@@ -85,6 +88,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "ready" },
         semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
         rag: { status: "disabled" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" },
         request_id: "request-semantic-links",
       }),
     );
@@ -107,6 +111,7 @@ describe("SystemStatusPage", () => {
           graph: { status: "ready" },
           semantic_links: { status: "ready" },
           rag: { status: "ready" },
+          collections: { status: "ready" }, knowledge_health: { status: "ready" },
           request_id: "request-retry",
         }),
       );

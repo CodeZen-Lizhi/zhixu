@@ -24,12 +24,20 @@ import (
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
+	collectionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/collection/adapter/postgres"
+	collectionapplication "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	conversationpostgres "github.com/CodeZen-Lizhi/zhixu/internal/conversation/adapter/postgres"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphpostgres "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/postgres"
 	graphworkflow "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/workflow"
 	graphapplication "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
+	healthcollection "github.com/CodeZen-Lizhi/zhixu/internal/health/adapter/collection"
+	healthpostgres "github.com/CodeZen-Lizhi/zhixu/internal/health/adapter/postgres"
+	healthworkflowadapter "github.com/CodeZen-Lizhi/zhixu/internal/health/adapter/workflow"
+	healthapplication "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
+	healthdetector "github.com/CodeZen-Lizhi/zhixu/internal/health/detector"
+	healthworkflow "github.com/CodeZen-Lizhi/zhixu/internal/health/workflow"
 	ingestionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/postgres"
 	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
 	ingestionapplication "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/application"
@@ -83,6 +91,10 @@ type workerComponents struct {
 	definitions     *workflowapplication.DefinitionRegistry
 	executors       *workflowapplication.ExecutorRegistry
 	semanticScan    *graphworkflow.SemanticLinkScanExecutor
+	healthScan      *healthworkflowadapter.HealthScanExecutor
+	healthScanStart *healthapplication.ScanService
+	healthSchedule  *healthapplication.ScheduleService
+	healthAffected  *healthapplication.AffectedChangeDispatcher
 	fatalInvariants <-chan error
 }
 
@@ -268,6 +280,22 @@ func run(configPath string, logger *slog.Logger) error {
 				if metricErr != nil {
 					logger.Warn("worker queue depth metric failed", "error_code", "WORKER_QUEUE_METRIC_FAILED")
 				}
+				if components.healthSchedule != nil {
+					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+					_, dispatchErr := components.healthSchedule.DispatchDue(dispatchContext, 10)
+					cancelDispatch()
+					if dispatchErr != nil {
+						logger.Warn("health schedule dispatch failed", "error_code", "HEALTH_SCHEDULE_DISPATCH_FAILED")
+					}
+				}
+				if components.healthAffected != nil {
+					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+					_, dispatchErr := components.healthAffected.DispatchBatch(dispatchContext, 10)
+					cancelDispatch()
+					if dispatchErr != nil {
+						logger.Warn("health affected-change dispatch failed", "error_code", "HEALTH_AFFECTED_CHANGE_DISPATCH_FAILED")
+					}
+				}
 			}
 		}
 	}
@@ -358,7 +386,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
-	catalog, err := workflowapplication.NewValidationCatalog([]int{1}, capability.All())
+	catalog, err := workflowapplication.NewValidationCatalog([]int{1, 2}, capability.All())
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -385,11 +413,29 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
+	collectionRepository, err := collectionpostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	collectionService, err := collectionapplication.NewService(collectionapplication.Dependencies{
+		Repository: collectionRepository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	smartPageSource, err := graphpostgres.NewSmartCollectionScanPageRepository(collectionService, db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	pageRouter, err := graphapplication.NewSemanticLinkScanPageSourceRouter(pageSource, smartPageSource)
+	if err != nil {
+		return workerComponents{}, err
+	}
 	candidateWriter, err := graphpostgres.NewSemanticLinkDiscoveryCandidateWriter(db, graphRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		return workerComponents{}, err
 	}
-	pageExecutor, err := graphapplication.NewSemanticLinkTopicScanExecutor(pageSource, graphapplication.NewSemanticLinkDiscoveryService(nil, nil), candidateWriter)
+	pageExecutor, err := graphapplication.NewSemanticLinkTopicScanExecutor(pageRouter, graphapplication.NewSemanticLinkDiscoveryService(nil, nil), candidateWriter)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -398,6 +444,44 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 		return workerComponents{}, err
 	}
 	if err := executors.Register(graphapplication.SemanticLinkScanNodeKind, graphapplication.SemanticLinkScanInputSchemaVersion, semanticScan); err != nil {
+		return workerComponents{}, err
+	}
+	if err := executors.Register(graphapplication.SemanticLinkScanNodeKind, graphapplication.SemanticLinkSmartCollectionScanInputSchemaVersion, semanticScan); err != nil {
+		return workerComponents{}, err
+	}
+	healthMembership, err := healthcollection.NewMembership(collectionService)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthFactReader, err := healthpostgres.NewFactReader(db, healthMembership)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthRegistry, err := healthdetector.NewDefaultRegistry(healthFactReader, healthdetector.DefaultConfig())
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthEvents, err := eventspostgres.NewStore(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthScanState, err := healthpostgres.NewScanStateRepository(db, healthEvents)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthScanService, err := healthapplication.NewScanStateService(healthScanState)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthIssueRepository, err := healthpostgres.NewSmartCollectionIssueRepository(db, healthMembership, foundation.NewUUIDGenerator(nil))
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthScan, err := healthworkflowadapter.NewHealthScanExecutor(healthRegistry, healthScanService, healthIssueRepository, foundation.SystemClock{})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := executors.Register(healthapplication.HealthScanNodeKind, healthapplication.HealthScanInputSchemaVersion, healthScan); err != nil {
 		return workerComponents{}, err
 	}
 	agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository)
@@ -440,6 +524,20 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err := definitions.Register(semanticScanDefinition); err != nil {
 		return workerComponents{}, err
 	}
+	semanticSmartScanDefinition, err := graphapplication.RegisteredSemanticLinkSmartCollectionScanDefinition()
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := definitions.Register(semanticSmartScanDefinition); err != nil {
+		return workerComponents{}, err
+	}
+	healthScanDefinition, err := healthworkflow.RegisteredDefinition()
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := definitions.Register(healthScanDefinition); err != nil {
+		return workerComponents{}, err
+	}
 	if agentComponents.relation != nil {
 		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
 			return workerComponents{}, err
@@ -469,14 +567,47 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
+	healthCancellationGuard, err := healthpostgres.NewScanCancellationGuard(healthEvents)
+	if err != nil {
+		return workerComponents{}, err
+	}
 	cancellationGuard, err := workflowapplication.NewCompositeCancellationSafetyGuard(
 		writebackRepository,
 		graphpostgres.NewSemanticLinkScanCancellationGuard(),
+		healthCancellationGuard,
 	)
 	if err != nil {
 		return workerComponents{}, err
 	}
 	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(db, inserter, cancellationGuard)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthScanStartRepository, err := healthpostgres.NewScanRepository(db, runtimeRepository, healthEvents, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthcollection.DurableBindingVerifier{})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthScanStartService, err := healthapplication.NewSmartCollectionScanService(healthScanStartRepository, healthScanStartRepository, healthRegistry, healthMembership)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthScheduleRepository, err := healthpostgres.NewScheduleRepository(db, foundation.NewUUIDGenerator(nil))
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthSchedule, err := healthapplication.NewScheduleDispatcher(healthScheduleRepository, healthScanStartService, healthRegistry)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthAffectedPlanner, err := healthapplication.NewAffectedChangePlanner(healthRegistry)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthAffectedRepository, err := healthpostgres.NewAffectedChangeDispatchRepository(healthScanStartRepository, healthAffectedPlanner)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	healthAffected, err := healthapplication.NewAffectedChangeDispatcher(healthAffectedRepository)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -513,7 +644,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	return workerComponents{
 		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability,
 		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
-		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, fatalInvariants: fatalInvariants,
+		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, fatalInvariants: fatalInvariants,
 	}, nil
 }
 

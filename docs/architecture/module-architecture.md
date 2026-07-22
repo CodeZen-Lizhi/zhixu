@@ -174,14 +174,15 @@ Interface：
 Interface：
 
 - ValidateCollection。
-- ExecuteCollection。
-- SaveCollection。
+- PreviewCollection / ExecuteCollection。
+- CreateCollection / UpdateCollection / ArchiveCollection。
+- PlanDurableScan / ReadDurableScanPage。
 
 隐藏：
 
-- 查询 AST。
-- 字段映射。
-- 缓存与分页。
+- `collection-query/v1` AST、字段/operator/sort registry 与 canonical hash。
+- 参数化 Topic/Claim 统一 read model、hydration 和 query-dependent revision。
+- HMAC cursor、完整历史命令 receipt 与有界 durable membership cache。
 
 ### Artifact Module
 
@@ -222,6 +223,7 @@ Interface：
 - ListIssues。
 - DecideIssue。
 - CreateRepairProposal。
+- ScheduleScan / DispatchAffectedChange。
 
 隐藏：
 
@@ -229,6 +231,12 @@ Interface：
 - Fingerprint。
 - 严重度。
 - 忽略与重新打开。
+- detector coverage、checkpoint、complete-only resolve、schedule due/lease 与 affected-scope outbox。
+
+M7-03 中 Collection/Health 是独立深模块：HTTP -> Application -> Domain Ports -> PostgreSQL/Workflow Adapter。
+Graph 的 SMART_COLLECTION Candidate Scan 和 Health 的 Smart Collection scope 只消费 Collection owner 提供的
+ID/version/query hash/read-model revision/exact count；任何漂移都 fail closed。River 只负责投递，Scan、Issue、
+Schedule 和 receipt 的业务状态仍以 PostgreSQL 为事实源。
 
 ### Workflow Module
 

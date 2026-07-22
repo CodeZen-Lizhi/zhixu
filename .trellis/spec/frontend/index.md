@@ -11,6 +11,9 @@ M7-01 已交付 `/graph` 的 Topic/Claim Global/Local/Path、严格 Graph client
 Evidence lazy drawer 与桌面/移动浏览器门禁；500,000 Relation/FPS 和正式认证仍归 M10。
 M7-02 已在同一 `/graph` 页面增加独立 Semantic Link Candidate 面板、durable Topic scan、严格 decoder、
 刷新恢复和完整决策 UX；Candidate 不进入正式 Graph canvas，正式认证仍归 M10。
+M7-03 已交付 Collection/Knowledge Health strict decoder、Workspace-bound Query keys、三视图、Evidence/Decision/Scan
+恢复、Vite 同源 proxy 和桌面/移动真实浏览器 smoke；cursor 仍是 opaque server state，SSE 只做 invalidation，Tag/
+Review/Directory/Artifact owner 和最终容量/认证不在本任务范围。
 
 ## 已确认基线
 
@@ -30,9 +33,9 @@ M7-02 已在同一 `/graph` 页面增加独立 Semantic Link Candidate 面板、
 | [目录结构](./directory-structure.md) | Feature 边界和依赖方向 | 实际根目录、Alias、Public Export |
 | [组件规范](./component-guidelines.md) | 组合、Props、UI 状态和可访问性 | 已记录 M7-01 Graph 画布/列表、会话布局、Evidence lazy load 与移动 drawer 焦点契约 |
 | [Hook 规范](./hook-guidelines.md) | Query、Command、URL 和 SSE Hook | Query Key Factory 和 Hook Test Harness |
-| [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | Cache Default 和持久化策略 |
-| [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 M7-02 Candidate/Scan/typed Proposal 的判别联合、scope binding 与 system status 独立能力状态 |
-| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 M7-01 Graph 与 M7-02 Candidate 的 decoder、URL/query、交互、浏览器和后端真实门禁 |
+| [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | 已记录 M7-03 Workspace cache、Collection/Health cursor 与 SSE invalidation 契约 |
+| [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 M7-03 Collection/Health strict decoder、Workspace/资源/hash 绑定与穷尽状态 |
+| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 M7-03 decoder、URL/query、三视图、Evidence/Scan 恢复与真实浏览器门禁 |
 
 ## 开发前检查清单
 

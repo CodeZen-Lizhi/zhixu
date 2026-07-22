@@ -206,10 +206,14 @@ func TestValidateSemanticLinkScanScopeAndTransition(t *testing.T) {
 	if err != nil || first == second {
 		t.Fatalf("scan fingerprint did not bind external generation: %q %q err=%v", first, second, err)
 	}
-	for _, unsupported := range []SemanticLinkScanScopeType{SemanticLinkScanScopeDirectory, SemanticLinkScanScopeSmartCollection} {
+	for _, unsupported := range []SemanticLinkScanScopeType{SemanticLinkScanScopeDirectory} {
 		if err := ValidateSemanticLinkScanScope(SemanticLinkScanScope{Type: unsupported, Ref: string(discoveryTestID(905)), Version: 1, SchemaVersion: "v1"}); err == nil {
 			t.Fatalf("expected unsupported scope error for %s", unsupported)
 		}
+	}
+	smartScope := SemanticLinkScanScope{Type: SemanticLinkScanScopeSmartCollection, Ref: string(discoveryTestID(906)), Version: 2, SchemaVersion: "semantic-link-smart-collection-scope/v1", QueryHash: strings.Repeat("a", 64), ReadModelRevision: strings.Repeat("b", 64)}
+	if err := ValidateSemanticLinkScanScope(smartScope); err != nil {
+		t.Fatalf("smart collection scope should be supported: %v", err)
 	}
 	for _, transition := range [][2]SemanticLinkScanStatus{{SemanticLinkScanStatusPending, SemanticLinkScanStatusRunning}, {SemanticLinkScanStatusRunning, SemanticLinkScanStatusSucceeded}, {SemanticLinkScanStatusRunning, SemanticLinkScanStatusFailed}, {SemanticLinkScanStatusRunning, SemanticLinkScanStatusCancelled}} {
 		if err := ValidateSemanticLinkScanTransition(transition[0], transition[1]); err != nil {

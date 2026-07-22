@@ -167,6 +167,57 @@ Wrong: Workspace query key 和 URL 能隔离数据，因此把页面标记为已
 Correct: Workspace/URL/cursor 只用于查询绑定；认证、Session、CSRF 与 Capability 等待 M10。
 ```
 
+## Scenario: M7-03 Collection / Knowledge Health Frontend Quality Gate
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/collections.ts`、`health.ts`、Collection/Health feature、Workspace cache boundary、Vite proxy、OpenAPI
+  contract 或浏览器 smoke 时执行。
+
+### 2. Signatures
+
+- 唯一 wire owners：Collection 与 Health client/decoder；Feature 只消费 domain UI model。
+- Query keys 必须包含 Workspace、canonical request、Collection/version/query hash 或 Scan/Issue identity。
+
+### 3. Contracts
+
+- `query_hash`、read-model revision、cursor、resource ID 和 Workspace 必须互相绑定；未知/重复 JSON 字段和漂移响应拒绝。
+- `/collections`、`/collections/:id` 三视图消费同一个 result page；`/health` 的 summary/issues/scan/decision/repair/schedule
+  均从 REST 恢复，SSE 只做定向 invalidation。
+- URL 只保存可恢复 view/filter/sort/group/selection/scan ID；cursor 不进入 URL/Storage。Workspace 切换清理旧 cache。
+- `/collections` 列表必须消费 `next_cursor`；Collection/Workspace/version/query hash 或 Issue filter 变化必须从第一页开始。
+- Smart Collection Health Scan 在 `exact_count <= 5000` 时可启动，超过该容量必须禁用并显示具体原因，不能假装已启动。
+- Loading、Empty、Invalid、Stale、Partial、Unavailable、Conflict、Retryable Failure 分开显示；移动端无横向溢出、
+  长 detector ID 可换行、关键操作支持键盘和焦点恢复。
+
+### 4. Validation & Error Matrix
+
+| Failure | Required result |
+|---|---|
+| Workspace/resource/query hash mismatch | `INVALID_RESPONSE`，不渲染部分事实 |
+| 400 invalid / 409 stale cursor | 明确恢复第一页，不当 Empty |
+| unavailable capability | 文本化说明和下一步，不显示假成功 |
+| decision/repair/schedule 409 | 保留服务端错误并回查，不 optimistic 成功 |
+| mobile 390×844 overflow/console warning | browser gate 失败 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：LIST/TABLE/CARD refs 完全一致，Evidence 按需加载，刷新/Workspace switch 后由 Query cache 恢复正确事实。
+- Base：Tag/Review/Directory/Artifact unavailable 显示独立状态；开发 Vite proxy 仅用于同源本地 smoke。
+- Bad：组件重新过滤结果、读取 raw snake_case、把 SSE payload 当 Scan 终态或保存 opaque cursor。
+
+### 6. Tests Required
+
+- decoder/query key/URL/cache/component tests；lint/typecheck/test/build；真实 API desktop 1440×900 与 mobile 390×844 smoke，
+  zero console warning/error、zero horizontal overflow、focus/dialog recovery。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Collection 三视图各自请求/过滤，Health 通过本地 state 直接显示 scan succeeded。
+Correct: 三视图只投影同一 page；SSE 失效 Query 后以 REST Scan/Issue 状态渲染。
+```
+
 ## Scenario: M7-02 Semantic Link Frontend Quality Gate
 
 ### 1. Scope / Trigger

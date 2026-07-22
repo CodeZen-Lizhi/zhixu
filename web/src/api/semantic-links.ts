@@ -190,7 +190,15 @@ export interface TopicScope {
   topicId: string;
 }
 
-export type SemanticLinkScanScope = TopicScope;
+export interface SmartCollectionScope {
+  kind: "SMART_COLLECTION";
+  collectionId: string;
+  collectionVersion?: number;
+  queryHash?: string;
+  readModelRevision?: string;
+}
+
+export type SemanticLinkScanScope = TopicScope | SmartCollectionScope;
 
 export interface StartSemanticLinkScanInput {
   workspaceId: string;
@@ -900,7 +908,17 @@ const readDecisionReceipt = (
 
 const readScanScope = (value: unknown, field: string): SemanticLinkScanScope => {
   if (!isRecord(value)) throw invalidResponse(field);
-  const kind = readEnum(value.kind, `${field}.kind`, ["TOPIC"] as const);
+  const kind = readEnum(value.kind, `${field}.kind`, ["TOPIC", "SMART_COLLECTION"] as const);
+  if (kind === "SMART_COLLECTION") {
+    assertExactKeys(value, ["kind", "collection_id", "collection_version", "query_hash", "read_model_revision"], field);
+    return {
+      kind,
+      collectionId: readUuid(value.collection_id, `${field}.collection_id`),
+      collectionVersion: readInteger(value.collection_version, `${field}.collection_version`, 1),
+      queryHash: readHash(value.query_hash, `${field}.query_hash`),
+      readModelRevision: readHash(value.read_model_revision, `${field}.read_model_revision`),
+    };
+  }
   assertExactKeys(value, ["kind", "topic_id"], field);
   return {
     kind,
@@ -1225,6 +1243,12 @@ const validateIdempotencyKey = (value: string): string => {
 };
 
 const serializeScanScope = (scope: SemanticLinkScanScope): Record<string, unknown> => {
+  if (scope.kind === "SMART_COLLECTION") {
+    return {
+      kind: scope.kind,
+      collection_id: readUuid(scope.collectionId, "scope.collectionId", invalidRequest),
+    };
+  }
   return {
     kind: scope.kind,
     topic_id: readUuid(scope.topicId, "scope.topicId", invalidRequest),

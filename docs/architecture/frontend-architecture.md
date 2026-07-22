@@ -265,6 +265,25 @@ response-loss 同 key、刷新恢复、全部决策、focus loop 和 Candidate �
 验收覆盖桌面与 390×844 移动 Candidate 面板、scan URL 恢复、独立能力状态、无横向溢出和零 console
 warning/error。
 
+### M7-03 Collection 与 Knowledge Health
+
+- `web/src/api/collections.ts` 与 `web/src/api/health.ts` 是各自唯一 `unknown` 到领域模型的严格边界；响应必须
+  绑定请求 Workspace/资源 ID，Collection result 的 `query_hash` 必须与 saved query 一致。组件不得解析 raw
+  snake_case、cursor 或自行重建 membership/fingerprint。
+- `/collections` 与 `/collections/:id` 共享同一 result page；LIST/TABLE/COMPACT_CARD 只改变投影，不能重新
+  过滤或排序。Saved list 必须消费 `next_cursor`；Workspace、Collection、version 或 query hash 变化立即清理旧
+  cursor。URL 只保存可恢复 view/filter/sort/group/selection，opaque cursor 只存在于 TanStack Query。
+- `/health` 从 REST summary/issues/scan 恢复服务端事实；SSE 只 invalidates。Evidence 在详情打开后加载，
+  decision/repair/schedule mutation 必须显示 pending/conflict/retryable failure，不能 optimistic 冒充成功。
+- Workspace 切换通过 cache boundary 清除旧 Workspace 的 Collection/Health query；桌面和 390×844 移动端均
+  要求无横向溢出、长 detector ID 可换行、dialog/drawer 焦点闭环且 console 无 warning/error。
+- Collection decoder 拒绝重复 JSON key、超过 100 个 item、`exact_count < items.length`、重复 `(object_type,id)`
+  以及 saved `collection_id/query_hash` 漂移；Health Scan 对超过 5,000 个成员的 Collection 显示明确容量状态。
+- `health.scan.completed` 除 Health summary/issues/scan 外还失效 Collection results/health summary；事件游标只在
+  全部 invalidation 成功后提交。
+- Vite 开发烟测通过可选 `VITE_API_PROXY_TARGET` 走同源 `/api` proxy；它只服务本地真实 API/browser gate，
+  不写入生产 API base，也不把开发 proxy 当成认证或跨域策略。
+
 ## 17. 构建产物
 
 React 静态资源可：

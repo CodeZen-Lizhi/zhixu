@@ -78,3 +78,50 @@ M1 必须记录实际 Query Default、Cache Retention、URL Parsing、Local Draf
   回查失败保留 cursor，避免把恢复失败伪装成成功。
 - `onEvent` 可以异步；只有 handler 成功完成才提交 cursor，失败时重连必须重放同一事件。
 - 400 invalid/future cursor 停止自动重连；网络失败使用有界抖动退避，Abort 必须释放 reader 与 fetch。
+
+## Scenario: M7-03 Collection / Knowledge Health State Ownership
+
+### 1. Scope / Trigger
+
+- 修改 Collection/Health Query、Mutation、URL state、Workspace cache、SSE invalidation 或 scan recovery 时应用。
+
+### 2. Signatures
+
+- TanStack Query key：`['collections', workspaceId, canonicalRequest]`、`['collection-results', workspaceId, collectionId, version, queryHash, request]`、
+  `['health', workspaceId, canonicalRequest]`。
+- URL 只承载 view/filter/sort/group/selection/scan ID；opaque result cursor 仅由 Query 分页持有。
+
+### 3. Contracts
+
+- Collection/Health REST response 是 Server State 唯一事实源；SSE 只触发对应 Query invalidation。
+- Workspace 切换先停止旧连接/请求，再清理旧 Collection/Health cache；旧回调不得写入新 Workspace。
+- LIST/TABLE/COMPACT_CARD 不复制结果 membership；Evidence、Decision、Schedule pending 状态不写入全局 store。
+- Saved Collection list 必须消费服务端 `next_cursor`；Workspace、Collection、version、query hash 或 Issue filter
+  变化时，下一次请求的 cursor 必须为 undefined。
+- Health completion event 同时 invalidates Health 与 Collection result family；所有 invalidation 成功后才推进 SSE cursor。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+|---|---|
+| query hash/version/revision 不一致 | Query 进入 stale/error，重新从第一页加载 |
+| invalid/stale cursor | 清理分页状态并显式恢复第一页 |
+| mutation 409/response-loss | 保留服务端错误或使用同 key 回查，不 optimistic 成功 |
+| Workspace switch | 旧 cache/事件回调不可见 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：SSE `health.scan.completed` 只 invalidate scan/issues/summary，REST 回查后更新页面。
+- Base：没有 Active Workspace 时不发请求，显示明确 empty/unavailable。
+- Bad：把 scan event payload 直接写成 succeeded、把 cursor 放 URL/localStorage 或跨 Workspace 复用 Query key。
+
+### 6. Tests Required
+
+- Query key canonicalization、URL round-trip、cursor recovery、Workspace cache isolation、SSE invalidation、response-loss mutation。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 收到 SSE 后直接 setScan({status:'SUCCEEDED'})。
+Correct: 仅 invalidation，重新 GET Scan/Issue projection 后再渲染终态。
+```

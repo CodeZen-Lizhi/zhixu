@@ -58,7 +58,7 @@ export const SystemStatusPage = () => {
     );
   }
 
-  const { database, graph, semanticLinks, rag, requestId, status, version } = statusQuery.data;
+  const { collections, database, graph, knowledgeHealth, semanticLinks, rag, requestId, status, version } = statusQuery.data;
   const isReady = status === "ready" && database.status === "ready" && graph.status === "ready" && semanticLinks.status === "ready";
   const databaseUnavailable = database.status === "unavailable";
   const graphUnavailable = graph.status === "unavailable";
@@ -122,6 +122,14 @@ export const SystemStatusPage = () => {
           <div>
             <dt>RAG</dt>
             <dd><span aria-hidden="true">{rag.status === "unavailable" ? "▲" : "●"}</span> {rag.status === "ready" ? "可用" : rag.status === "disabled" ? "已关闭" : "不可用"}</dd>
+          </div>
+          <div>
+            <dt>Collections</dt>
+            <dd><span aria-hidden="true">{collections.status === "ready" ? "●" : "▲"}</span> {collections.status === "ready" ? "可用" : "不可用"}</dd>
+          </div>
+          <div>
+            <dt>知识健康</dt>
+            <dd><span aria-hidden="true">{knowledgeHealth.status === "ready" ? "●" : "▲"}</span> {knowledgeHealth.status === "ready" ? "可用" : "不可用"}</dd>
           </div>
           <div>
             <dt>版本</dt>

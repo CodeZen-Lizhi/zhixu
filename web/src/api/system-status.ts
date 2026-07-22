@@ -3,6 +3,8 @@ export type DatabaseStatus = "ready" | "unavailable";
 export type GraphCapabilityStatus = "ready" | "unavailable";
 export type SemanticLinkCapabilityStatus = "ready" | "unavailable";
 export type RAGCapabilityStatus = "ready" | "disabled" | "unavailable";
+export type CollectionCapabilityStatus = "ready" | "unavailable";
+export type KnowledgeHealthCapabilityStatus = "ready" | "unavailable";
 
 export interface SystemStatus {
   status: SystemOverallStatus;
@@ -22,6 +24,12 @@ export interface SystemStatus {
   rag: {
     status: RAGCapabilityStatus;
     reason?: "rag_dependencies_unavailable";
+  };
+  collections: {
+    status: CollectionCapabilityStatus;
+  };
+  knowledgeHealth: {
+    status: KnowledgeHealthCapabilityStatus;
   };
   requestId: string;
 }
@@ -100,19 +108,26 @@ const readRAGStatus = (value: unknown): RAGCapabilityStatus => {
   throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含未知 rag.status", false);
 };
 
+const readBoundedCapabilityStatus = (value: unknown, field: string): "ready" | "unavailable" => {
+  if (value === "ready" || value === "unavailable") return value;
+  throw new ApiBoundaryError("INVALID_RESPONSE", `系统状态响应包含未知 ${field}.status`, false);
+};
+
 export const decodeSystemStatus = (value: unknown): SystemStatus => {
-  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.graph) || !isRecord(value.semantic_links) || !isRecord(value.rag)) {
+  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.graph) || !isRecord(value.semantic_links) || !isRecord(value.rag) || !isRecord(value.collections) || !isRecord(value.knowledge_health)) {
     throw new ApiBoundaryError(
       "INVALID_RESPONSE",
       "系统状态响应结构无效",
       false,
     );
   }
-  assertExactKeys(value, ["status", "version", "database", "graph", "semantic_links", "rag", "request_id"], "root");
+  assertExactKeys(value, ["status", "version", "database", "graph", "semantic_links", "rag", "collections", "knowledge_health", "request_id"], "root");
   assertExactKeys(value.database, ["status", "message"], "database");
   assertExactKeys(value.graph, ["status", "reason"], "graph");
   assertExactKeys(value.semantic_links, ["status", "reason"], "semantic_links");
   assertExactKeys(value.rag, ["status", "reason"], "rag");
+  assertExactKeys(value.collections, ["status"], "collections");
+  assertExactKeys(value.knowledge_health, ["status"], "knowledge_health");
 
   const message = value.database.message;
   if (message !== undefined && typeof message !== "string") {
@@ -154,6 +169,8 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
       status: readRAGStatus(value.rag.status),
       ...(reason === undefined ? {} : { reason }),
     },
+    collections: { status: readBoundedCapabilityStatus(value.collections.status, "collections") },
+    knowledgeHealth: { status: readBoundedCapabilityStatus(value.knowledge_health.status, "knowledge_health") },
     requestId: readNonEmptyString(value.request_id, "request_id"),
   };
 };

@@ -874,6 +874,10 @@ type SemanticLinkScanScope struct {
 	Ref           string
 	Version       int64
 	SchemaVersion string
+	// QueryHash 绑定 Smart Collection 的 canonical Query；非 Smart scope 必须为空。
+	QueryHash string
+	// ReadModelRevision 绑定扫描启动时的 Collection read-model revision；非 Smart scope 必须为空。
+	ReadModelRevision string
 }
 
 // SemanticLinkScanGeneration 冻结一次 scan 实际参与的规则、外部 signal 与 Workflow 版本。
@@ -951,10 +955,10 @@ type SemanticLinkScanTerminal struct {
 	At              time.Time
 }
 
-// ValidateSemanticLinkScanScope 校验首版真实支持的 Node/Topic scope。
+// ValidateSemanticLinkScanScope 校验真实支持的 Node、Topic 和 Smart Collection scope。
 func ValidateSemanticLinkScanScope(scope SemanticLinkScanScope) error {
-	if scope.Type != SemanticLinkScanScopeNode && scope.Type != SemanticLinkScanScopeTopic {
-		if scope.Type == SemanticLinkScanScopeDirectory || scope.Type == SemanticLinkScanScopeSmartCollection {
+	if scope.Type != SemanticLinkScanScopeNode && scope.Type != SemanticLinkScanScopeTopic && scope.Type != SemanticLinkScanScopeSmartCollection {
+		if scope.Type == SemanticLinkScanScopeDirectory {
 			return foundation.NewError(foundation.ErrorDependencyUnavailable, ErrorCodeSemanticLinkDiscoveryUnavailable, false, errors.New("scan scope is not implemented in this release"))
 		}
 		return foundation.NewError(foundation.ErrorInvalidInput, ErrorCodeSemanticLinkScanInvalid, false, errors.New("scan scope type is invalid"))
@@ -962,6 +966,13 @@ func ValidateSemanticLinkScanScope(scope SemanticLinkScanScope) error {
 	parsed, parseErr := foundation.ParseID(scope.Ref)
 	if parseErr != nil || parsed != foundation.ID(scope.Ref) || scope.Version < 1 || strings.TrimSpace(scope.SchemaVersion) == "" || len(scope.SchemaVersion) > 128 || strings.ContainsAny(scope.SchemaVersion, "\r\n") {
 		return foundation.NewError(foundation.ErrorInvalidInput, ErrorCodeSemanticLinkScanInvalid, false, errors.New("scan scope identity or version is invalid"))
+	}
+	if scope.Type == SemanticLinkScanScopeSmartCollection {
+		if !canonicalDiscoveryHash(scope.QueryHash) || !canonicalDiscoveryHash(scope.ReadModelRevision) {
+			return foundation.NewError(foundation.ErrorInvalidInput, ErrorCodeSemanticLinkScanInvalid, false, errors.New("smart collection scope requires query and read-model hashes"))
+		}
+	} else if scope.QueryHash != "" || scope.ReadModelRevision != "" {
+		return foundation.NewError(foundation.ErrorInvalidInput, ErrorCodeSemanticLinkScanInvalid, false, errors.New("only smart collection scope can carry query and read-model hashes"))
 	}
 	return nil
 }

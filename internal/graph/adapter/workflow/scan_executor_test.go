@@ -69,6 +69,33 @@ func TestSemanticLinkScanExecutorCompletesEmptyTopic(t *testing.T) {
 	assertScanExecutionOutput(t, result.Output, scan.ID, graphdomain.SemanticLinkScanStatusSucceeded, 0)
 }
 
+func TestSemanticLinkScanExecutorUsesStructuredCheckpointForSmartCollectionV2(t *testing.T) {
+	now := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+	scan, execution := smartScanExecutorFixture(t, now, 3)
+	firstNode := knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: scanExecutorID(41)}
+	lastNode := knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: scanExecutorID(42)}
+	source := &scanExecutorPageSource{pages: []graphapp.SemanticLinkTopicScanPage{
+		{WorkspaceID: scan.WorkspaceID, ScanID: scan.ID, ScopeVersion: scan.Scope.Version, ScopeHash: scan.Scope.QueryHash, ReadModelRevision: scan.Scope.ReadModelRevision, ProcessedNodes: 2, LastNode: &firstNode},
+		{WorkspaceID: scan.WorkspaceID, ScanID: scan.ID, ScopeVersion: scan.Scope.Version, ScopeHash: scan.Scope.QueryHash, ReadModelRevision: scan.Scope.ReadModelRevision, Complete: true, ProcessedNodes: 1, LastNode: &lastNode},
+	}}
+	executor, state := newScanExecutorForTest(t, scan, source, now.Add(time.Hour))
+
+	result, err := executor.Execute(context.Background(), execution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(source.requests) != 2 || source.requests[0].Cursor != "" || source.requests[0].LastNode != nil || source.requests[0].TotalNodes != 3 {
+		t.Fatalf("first request=%#v", source.requests)
+	}
+	if source.requests[1].Cursor != "" || source.requests[1].LastNode == nil || *source.requests[1].LastNode != firstNode || source.requests[1].TotalNodes != 3 {
+		t.Fatalf("second request=%#v", source.requests[1])
+	}
+	if state.scan.Checkpoint.LastNode == nil || *state.scan.Checkpoint.LastNode != lastNode || state.scan.Checkpoint.Cursor != "" || state.scan.ProcessedNodes != 3 {
+		t.Fatalf("scan=%#v", state.scan)
+	}
+	assertScanExecutionOutput(t, result.Output, scan.ID, graphdomain.SemanticLinkScanStatusSucceeded, 3)
+}
+
 func TestSemanticLinkScanExecutorRetriesThenPersistsFinalFailure(t *testing.T) {
 	now := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
 	scan, execution := scanExecutorFixture(t, now, 2)
@@ -166,13 +193,15 @@ func (state *scanExecutorState) Finish(_ context.Context, terminal graphdomain.S
 }
 
 type scanExecutorPageSource struct {
-	pages []graphapp.SemanticLinkTopicScanPage
-	err   error
-	calls int
+	pages    []graphapp.SemanticLinkTopicScanPage
+	err      error
+	calls    int
+	requests []graphapp.SemanticLinkTopicScanPageRequest
 }
 
 func (source *scanExecutorPageSource) LoadPage(_ context.Context, request graphapp.SemanticLinkTopicScanPageRequest) (graphapp.SemanticLinkTopicScanPage, error) {
 	source.calls++
+	source.requests = append(source.requests, request)
 	if source.err != nil {
 		return graphapp.SemanticLinkTopicScanPage{}, source.err
 	}
@@ -241,6 +270,50 @@ func scanExecutorFixture(t *testing.T, now time.Time, totalNodes int64) (graphdo
 		WorkspaceID: workspaceID, DefinitionVersion: definition.Version, DefinitionHash: definition.GraphHash,
 		RunID: runID, NodeKey: graphapp.SemanticLinkScanNodeKey, NodeKind: graphapp.SemanticLinkScanNodeKind,
 		InputSchemaVersion: graphapp.SemanticLinkScanInputSchemaVersion, Input: input,
+	}
+	return scan, execution
+}
+
+func smartScanExecutorFixture(t *testing.T, now time.Time, totalNodes int64) (graphdomain.SemanticLinkScan, workflowapplication.ExecutionContext) {
+	t.Helper()
+	workspaceID := scanExecutorID(1)
+	scanID := scanExecutorID(12)
+	runID := scanExecutorID(13)
+	collectionID := scanExecutorID(14)
+	fingerprint := strings.Repeat("c", 64)
+	requestHash := strings.Repeat("d", 64)
+	scope := graphdomain.SemanticLinkScanScope{
+		Type: graphdomain.SemanticLinkScanScopeSmartCollection, Ref: string(collectionID), Version: 7,
+		SchemaVersion: graphapp.SemanticLinkSmartCollectionScanScopeSchemaVersion,
+		QueryHash:     strings.Repeat("e", 64), ReadModelRevision: strings.Repeat("f", 64),
+	}
+	generation := scanExecutorGeneration()
+	generation.WorkflowVersion = graphapp.SemanticLinkSmartCollectionScanWorkflowGenerationVersion
+	request := graphapp.SemanticLinkScanStartRequest{
+		WorkspaceID: workspaceID, Scope: scope, Generation: generation, Fingerprint: fingerprint,
+		RequestHash: requestHash, TotalNodes: totalNodes, IdempotencyKey: "smart-scan-executor-test",
+		WorkflowDefinitionKey:      graphapp.SemanticLinkScanWorkflowDefinitionKey,
+		WorkflowDefinitionVersion:  graphapp.SemanticLinkSmartCollectionScanWorkflowDefinitionVersion,
+		WorkflowInputSchemaVersion: graphapp.SemanticLinkSmartCollectionScanInputSchemaVersion,
+	}
+	input, err := graphapp.EncodeSemanticLinkScanWorkflowInput(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := graphapp.RegisteredSemanticLinkSmartCollectionScanDefinition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := graphdomain.SemanticLinkScan{
+		ID: scanID, WorkspaceID: workspaceID, Scope: scope, Fingerprint: fingerprint,
+		IdempotencyKey: request.IdempotencyKey, RequestHash: requestHash, WorkflowRunID: runID,
+		Status: graphdomain.SemanticLinkScanStatusPending, TotalNodes: totalNodes, Version: 1,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	execution := workflowapplication.ExecutionContext{
+		WorkspaceID: workspaceID, DefinitionVersion: definition.Version, DefinitionHash: definition.GraphHash,
+		RunID: runID, NodeKey: graphapp.SemanticLinkScanNodeKey, NodeKind: graphapp.SemanticLinkScanNodeKind,
+		InputSchemaVersion: graphapp.SemanticLinkSmartCollectionScanInputSchemaVersion, Input: input,
 	}
 	return scan, execution
 }

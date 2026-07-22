@@ -128,6 +128,20 @@ func TestCandidateScanRejectsInconsistentServiceProjection(t *testing.T) {
 	requireCandidateProblem(t, response, http.StatusInternalServerError, errorCodeSemanticLinkResultInvalid, false)
 }
 
+func TestCandidateScanResponseBindsSmartCollectionScope(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	scan := candidateHTTPScanFixture(now)
+	scan.Scope = graphdomain.SemanticLinkScanScope{
+		Type: graphdomain.SemanticLinkScanScopeSmartCollection, Ref: string(candidateHTTPTopicID), Version: 7,
+		SchemaVersion: graphapp.SemanticLinkSmartCollectionScanScopeSchemaVersion,
+		QueryHash:     strings.Repeat("a", 64), ReadModelRevision: strings.Repeat("b", 64),
+	}
+	response := toCandidateScanResponse(scan)
+	if response.Scope.Kind != "SMART_COLLECTION" || response.Scope.CollectionID != string(candidateHTTPTopicID) || response.Scope.CollectionVersion != 7 || response.Scope.QueryHash != strings.Repeat("a", 64) || response.Scope.ReadModelRevision != strings.Repeat("b", 64) || response.Scope.TopicID != "" {
+		t.Fatalf("smart response scope=%#v", response.Scope)
+	}
+}
+
 func TestCandidateListStrictContractAndSafeResponse(t *testing.T) {
 	candidate := candidateHTTPFixture(t)
 	service := &fakeCandidateService{page: graphdomain.SemanticLinkCandidatePage{

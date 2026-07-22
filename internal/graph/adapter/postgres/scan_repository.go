@@ -11,11 +11,14 @@ import (
 	"strings"
 	"time"
 
+	collectionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/collection/adapter/postgres"
+	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
+	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -28,7 +31,7 @@ type SemanticLinkScanRuntimeStarter interface {
 
 type semanticLinkScanDB interface {
 	DB
-	Begin(context.Context) (pgx.Tx, error)
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
 }
 
 // SemanticLinkScanRepository 持久化 Semantic Link scan 事实，并在 Start 时复用
@@ -36,7 +39,7 @@ type semanticLinkScanDB interface {
 type SemanticLinkScanRepository struct {
 	db    DB
 	begin interface {
-		Begin(context.Context) (pgx.Tx, error)
+		BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
 	}
 	runtime SemanticLinkScanRuntimeStarter
 	ids     foundation.IDGenerator
@@ -61,7 +64,7 @@ func NewSemanticLinkScanStateRepository(db DB) (*SemanticLinkScanRepository, err
 	}
 	repository := &SemanticLinkScanRepository{db: db}
 	if beginner, ok := db.(interface {
-		Begin(context.Context) (pgx.Tx, error)
+		BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
 	}); ok {
 		repository.begin = beginner
 	}
@@ -76,13 +79,28 @@ func (repository *SemanticLinkScanRepository) StartOrReplay(ctx context.Context,
 	if err := validateScanStartRequest(request); err != nil {
 		return graphapp.SemanticLinkScanStartResult{}, err
 	}
-	tx, err := repository.begin.Begin(ctx)
+	tx, err := repository.begin.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return graphapp.SemanticLinkScanStartResult{}, scanRepositoryClassify(err, "GRAPH_SEMANTIC_LINK_SCAN_START_FAILED")
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	result, err := repository.startOrReplayTx(ctx, tx, request)
 	if err != nil {
+		// Repeatable-read transactions are aborted by PostgreSQL after a
+		// concurrent idempotent winner causes a serialization failure. Release
+		// that transaction before checking the committed receipt on a fresh
+		// connection; querying the aborted transaction only returns 25P02.
+		rollbackErr := tx.Rollback(context.Background())
+		if isRetryableScanStartError(err) {
+			if recovered, found, recoveryErr := repository.recoverCommittedScanStart(ctx, request); recoveryErr != nil {
+				return graphapp.SemanticLinkScanStartResult{}, errors.Join(err, recoveryErr)
+			} else if found {
+				return recovered, nil
+			}
+		}
+		if rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			return graphapp.SemanticLinkScanStartResult{}, errors.Join(err, scanRepositoryClassify(rollbackErr, "GRAPH_SEMANTIC_LINK_SCAN_ROLLBACK_FAILED"))
+		}
 		return graphapp.SemanticLinkScanStartResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -96,11 +114,28 @@ func (repository *SemanticLinkScanRepository) StartOrReplay(ctx context.Context,
 	return result, nil
 }
 
+func isRetryableScanStartError(err error) bool {
+	var classified *foundation.Error
+	return errors.As(err, &classified) && classified.Retryable
+}
+
 func (repository *SemanticLinkScanRepository) startOrReplayTx(ctx context.Context, tx pgx.Tx, request graphapp.SemanticLinkScanStartRequest) (graphapp.SemanticLinkScanStartResult, error) {
 	if existing, found, err := loadScanByIdempotency(ctx, tx, request.WorkspaceID, request.IdempotencyKey, true); err != nil {
 		return graphapp.SemanticLinkScanStartResult{}, err
 	} else if found {
 		return replayScanStart(request, existing)
+	}
+	if request.Scope.Type == graphdomain.SemanticLinkScanScopeSmartCollection {
+		collectionID, err := foundation.ParseID(request.Scope.Ref)
+		if err != nil {
+			return graphapp.SemanticLinkScanStartResult{}, scanRepositoryInvalid(errors.New("smart collection scan identity is invalid"))
+		}
+		if err := collectionpostgres.VerifyDurableScanBinding(ctx, tx, collectionapp.DurableScanBinding{
+			WorkspaceID: request.WorkspaceID, CollectionID: collectionID, CollectionVersion: request.Scope.Version,
+			QueryHash: request.Scope.QueryHash, ReadModelRevision: request.Scope.ReadModelRevision, ExactCount: request.TotalNodes,
+		}); err != nil {
+			return graphapp.SemanticLinkScanStartResult{}, err
+		}
 	}
 
 	scanID, err := repository.ids.New()
@@ -111,7 +146,7 @@ func (repository *SemanticLinkScanRepository) startOrReplayTx(ctx context.Contex
 	if err != nil {
 		return graphapp.SemanticLinkScanStartResult{}, err
 	}
-	definition, err := graphapp.RegisteredSemanticLinkScanDefinition()
+	definition, err := semanticLinkScanDefinition(request)
 	if err != nil {
 		return graphapp.SemanticLinkScanStartResult{}, err
 	}
@@ -128,11 +163,6 @@ func (repository *SemanticLinkScanRepository) startOrReplayTx(ctx context.Contex
 	}
 	runtimeResult, err := repository.runtime.StartTx(ctx, tx, runtimeRequest)
 	if err != nil {
-		if existing, found, replayErr := loadScanByIdempotency(ctx, tx, request.WorkspaceID, request.IdempotencyKey, true); replayErr != nil {
-			return graphapp.SemanticLinkScanStartResult{}, replayErr
-		} else if found {
-			return replayScanStart(request, existing)
-		}
 		return graphapp.SemanticLinkScanStartResult{}, scanRepositoryClassify(err, "GRAPH_SEMANTIC_LINK_SCAN_WORKFLOW_START_FAILED")
 	}
 	now, err := candidateDatabaseNow(ctx, tx)
@@ -155,7 +185,7 @@ func (repository *SemanticLinkScanRepository) startOrReplayTx(ctx context.Contex
 			return graphapp.SemanticLinkScanStartResult{}, err
 		}
 		if !found {
-			return graphapp.SemanticLinkScanStartResult{}, scanRepositoryConsistency(errors.New("semantic link scan idempotency winner is missing"))
+			return graphapp.SemanticLinkScanStartResult{}, foundation.NewError(foundation.ErrorRetryableFailure, graphdomain.ErrorCodeDependencyUnavailable, true, errors.New("semantic link scan idempotency winner is not visible in the current snapshot"))
 		}
 		return replayScanStart(request, existing)
 	}
@@ -300,14 +330,14 @@ func insertSemanticLinkScan(ctx context.Context, db DB, scan graphdomain.Semanti
 	var id string
 	err = db.QueryRow(ctx, `
 		INSERT INTO graph.semantic_link_scan(
-			id,workspace_id,scope_type,scope_ref,scope_version,scope_schema_version,
+			id,workspace_id,scope_type,scope_ref,scope_version,scope_schema_version,scope_hash,read_model_revision,
 			fingerprint,idempotency_key,request_hash,workflow_run_id,status,total_nodes,
 			processed_nodes,candidate_count,suppressed_count,reopened_count,failed_count,
 			checkpoint,last_error,version,created_at,updated_at,completed_at
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19::jsonb,$20,$21,$22,$23)
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21::jsonb,$22,$23,$24,$25)
 		ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
 		RETURNING id::text`,
-		string(scan.ID), string(scan.WorkspaceID), string(scan.Scope.Type), scan.Scope.Ref, scan.Scope.Version, scan.Scope.SchemaVersion,
+		string(scan.ID), string(scan.WorkspaceID), string(scan.Scope.Type), scan.Scope.Ref, scan.Scope.Version, scan.Scope.SchemaVersion, nullableScanHash(scan.Scope.QueryHash), nullableScanHash(scan.Scope.ReadModelRevision),
 		scan.Fingerprint, scan.IdempotencyKey, scan.RequestHash, string(scan.WorkflowRunID), string(scan.Status), scan.TotalNodes,
 		scan.ProcessedNodes, scan.CandidateCount, scan.SuppressedCount, scan.ReopenedCount, scan.FailedCount,
 		checkpoint, lastError, scan.Version, scan.CreatedAt.UTC(), scan.UpdatedAt.UTC(), optionalTime(scan.CompletedAt)).Scan(&id)
@@ -378,8 +408,20 @@ func validateScanStartRequest(request graphapp.SemanticLinkScanStartRequest) err
 	if !validID(request.WorkspaceID) || strings.TrimSpace(request.IdempotencyKey) == "" || len(request.IdempotencyKey) > 128 || strings.ContainsAny(request.IdempotencyKey, "\r\n") || request.TotalNodes < 0 || !canonicalScanHash(request.Fingerprint) || !canonicalScanHash(request.RequestHash) {
 		return scanRepositoryInvalid(errors.New("semantic link scan start request is invalid"))
 	}
-	if request.WorkflowDefinitionKey != graphapp.SemanticLinkScanWorkflowDefinitionKey || request.WorkflowDefinitionVersion != graphapp.SemanticLinkScanWorkflowDefinitionVersion || request.WorkflowInputSchemaVersion != graphapp.SemanticLinkScanInputSchemaVersion {
+	if request.WorkflowDefinitionKey != graphapp.SemanticLinkScanWorkflowDefinitionKey {
 		return scanRepositoryInvalid(errors.New("semantic link scan workflow binding is invalid"))
+	}
+	switch request.Scope.Type {
+	case graphdomain.SemanticLinkScanScopeTopic:
+		if request.WorkflowDefinitionVersion != graphapp.SemanticLinkScanWorkflowDefinitionVersion || request.WorkflowInputSchemaVersion != graphapp.SemanticLinkScanInputSchemaVersion {
+			return scanRepositoryInvalid(errors.New("semantic link Topic scan workflow binding is invalid"))
+		}
+	case graphdomain.SemanticLinkScanScopeSmartCollection:
+		if request.WorkflowDefinitionVersion != graphapp.SemanticLinkSmartCollectionScanWorkflowDefinitionVersion || request.WorkflowInputSchemaVersion != graphapp.SemanticLinkSmartCollectionScanInputSchemaVersion {
+			return scanRepositoryInvalid(errors.New("semantic link SMART_COLLECTION scan workflow binding is invalid"))
+		}
+	default:
+		return scanRepositoryInvalid(errors.New("semantic link scan scope has no registered workflow"))
 	}
 	if err := graphdomain.ValidateSemanticLinkScanScope(request.Scope); err != nil {
 		return err
@@ -395,6 +437,17 @@ func validateScanStartRequest(request graphapp.SemanticLinkScanStartRequest) err
 		return scanRepositoryInvalid(errors.New("semantic link scan fingerprint is inconsistent"))
 	}
 	return nil
+}
+
+func semanticLinkScanDefinition(request graphapp.SemanticLinkScanStartRequest) (workflowdomain.RegisteredDefinition, error) {
+	switch request.Scope.Type {
+	case graphdomain.SemanticLinkScanScopeTopic:
+		return graphapp.RegisteredSemanticLinkScanDefinition()
+	case graphdomain.SemanticLinkScanScopeSmartCollection:
+		return graphapp.RegisteredSemanticLinkSmartCollectionScanDefinition()
+	default:
+		return workflowdomain.RegisteredDefinition{}, scanRepositoryInvalid(errors.New("semantic link scan scope has no registered workflow"))
+	}
 }
 
 func semanticLinkScanWorkflowIdempotencyKey(request graphapp.SemanticLinkScanStartRequest) string {
@@ -499,7 +552,7 @@ func scanSemanticLinkScan(row rowScanner, target *graphdomain.SemanticLinkScan) 
 	var errorRaw []byte
 	var completedAt *time.Time
 	if err := row.Scan(
-		&id, &workspaceID, &scopeType, &target.Scope.Ref, &target.Scope.Version, &target.Scope.SchemaVersion,
+		&id, &workspaceID, &scopeType, &target.Scope.Ref, &target.Scope.Version, &target.Scope.SchemaVersion, &target.Scope.QueryHash, &target.Scope.ReadModelRevision,
 		&fingerprint, &idempotencyKey, &requestHash, &workflowRunID, &status,
 		&target.TotalNodes, &target.ProcessedNodes, &target.CandidateCount, &target.SuppressedCount, &target.ReopenedCount, &target.FailedCount,
 		&checkpointRaw, &errorRaw, &target.Version, &target.CreatedAt, &target.UpdatedAt, &completedAt,
@@ -540,6 +593,13 @@ func canonicalScanHash(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+func nullableScanHash(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func optionalTime(value *time.Time) any {
@@ -611,7 +671,7 @@ func scanRepositoryClassify(err error, code string) error {
 }
 
 const scanColumns = `
-	id::text,workspace_id::text,scope_type,scope_ref,scope_version,scope_schema_version,
+	id::text,workspace_id::text,scope_type,scope_ref,scope_version,scope_schema_version,COALESCE(scope_hash,''),COALESCE(read_model_revision,''),
 	fingerprint,idempotency_key,request_hash,workflow_run_id::text,status,
 	total_nodes,processed_nodes,candidate_count,suppressed_count,reopened_count,failed_count,
 	checkpoint,last_error,version,created_at,updated_at,completed_at`

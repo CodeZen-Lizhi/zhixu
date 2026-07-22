@@ -31,6 +31,7 @@ const targetCandidateId = "92000000-0000-4000-8000-00000000000e";
 const scanId = "92000000-0000-4000-8000-00000000000f";
 const workflowRunId = "92000000-0000-4000-8000-000000000010";
 const decisionId = "92000000-0000-4000-8000-000000000011";
+const collectionId = "92000000-0000-4000-8000-000000000012";
 const scanStatusUrl = `/api/v1/graph/candidate-scans/${scanId}?workspace_id=${workspaceId}`;
 const at = "2026-07-20T08:10:12.123456789Z";
 const later = "2026-07-20T09:10:12.123456789Z";
@@ -378,6 +379,30 @@ describe("Semantic Link clients", () => {
     });
   });
 
+  it("启动 SMART Collection scan 时只提交 collection_id", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      scan_id: scanId,
+      workflow_run_id: workflowRunId,
+      status: "PENDING",
+      version: 1,
+      status_url: scanStatusUrl,
+    }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(startSemanticLinkScan({
+      workspaceId,
+      idempotencyKey: "scan-smart",
+      scope: { kind: "SMART_COLLECTION", collectionId },
+    })).resolves.toMatchObject({ scanId });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    if (typeof init?.body !== "string") throw new Error("missing body");
+    expect(JSON.parse(init.body)).toEqual({
+      workspace_id: workspaceId,
+      scope: { kind: "SMART_COLLECTION", collection_id: collectionId },
+    });
+  });
+
   it("typed confirm 绑定 expected_version 和 relation_type 且不携带无关字段", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
       id: decisionId,
@@ -513,6 +538,46 @@ describe("Semantic Link clients", () => {
     const result = await getSemanticLinkScan({ scanId, workspaceId });
     expect(result.scope).toMatchObject({ kind: "TOPIC", topicId });
     expect(fetchMock.mock.calls[0]?.[0]).toContain(`/api/v1/graph/candidate-scans/${scanId}?workspace_id=${workspaceId}`);
+  });
+
+  it("解码 SMART Collection scan 的服务端冻结 binding", () => {
+    const result = decodeSemanticLinkScan({
+      id: scanId,
+      workspace_id: workspaceId,
+      scope: { kind: "SMART_COLLECTION", collection_id: collectionId, collection_version: 3, query_hash: fingerprint, read_model_revision: semanticHash },
+      status: "RUNNING",
+      workflow_run_id: workflowRunId,
+      version: 2,
+      status_url: scanStatusUrl,
+      total_count: 10,
+      processed_count: 4,
+      candidate_count: 2,
+      ignored_count: 1,
+      failed_count: 0,
+      last_error: null,
+      created_at: at,
+      updated_at: later,
+      completed_at: null,
+    }, { scanId, workspaceId });
+    expect(result.scope).toMatchObject({ kind: "SMART_COLLECTION", collectionId, collectionVersion: 3, queryHash: fingerprint, readModelRevision: semanticHash });
+    expect(() => decodeSemanticLinkScan({
+      id: scanId,
+      workspace_id: workspaceId,
+      scope: { kind: "SMART_COLLECTION", collection_id: collectionId },
+      status: "RUNNING",
+      workflow_run_id: workflowRunId,
+      version: 2,
+      status_url: scanStatusUrl,
+      total_count: 10,
+      processed_count: 4,
+      candidate_count: 2,
+      ignored_count: 1,
+      failed_count: 0,
+      last_error: null,
+      created_at: at,
+      updated_at: later,
+      completed_at: null,
+    }, { scanId, workspaceId })).toThrow(SemanticLinkApiError);
   });
 
   it("严格解码 FAILED scan 的持久错误并拒绝非法状态组合", async () => {

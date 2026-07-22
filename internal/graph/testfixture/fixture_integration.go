@@ -559,9 +559,9 @@ func insertConfirmedRelation(ctx context.Context, tx pgx.Tx, relation knowledge.
 		confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at
 	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		string(relation.ID), string(relation.WorkspaceID), string(relation.Source.Type), string(relation.Source.ID),
-		string(relation.Target.Type), string(relation.Target.ID), string(relation.Type), string(relation.Status),
-		relation.ConfidenceScore, relation.Fingerprint, relation.EvidenceFingerprint,
-		string(relation.Confirmation.Method), relation.Confirmation.Reference, relation.Version, relation.CreatedAt, relation.UpdatedAt,
+		string(relation.Target.Type), string(relation.Target.ID), string(relation.Type), string(knowledge.RelationStatusSuggested),
+		relation.ConfidenceScore, relation.Fingerprint, nil,
+		nil, nil, 1, relation.CreatedAt, relation.CreatedAt,
 	); err != nil {
 		return err
 	}
@@ -574,6 +574,10 @@ func insertConfirmedRelation(ctx context.Context, tx pgx.Tx, relation knowledge.
 		string(evidence.Applicability.CanonicalJSON), evidence.Applicability.SchemaVersion, evidence.Applicability.Hash,
 		string(evidence.Confirmation.Method), "graph integration fixture", evidence.CreatedAt,
 	)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE core.relation SET status='CONFIRMED',evidence_fingerprint=$3,confirmation_method=$4,confirmation_ref=$5,version=2,updated_at=$6 WHERE workspace_id=$1 AND id=$2`, string(relation.WorkspaceID), string(relation.ID), relation.EvidenceFingerprint, string(relation.Confirmation.Method), relation.Confirmation.Reference, relation.UpdatedAt)
 	return err
 }
 

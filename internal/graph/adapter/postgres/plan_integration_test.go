@@ -102,6 +102,12 @@ func assertPlanUsesIndexWithoutRelationScan(t *testing.T, ctx context.Context, d
 
 func assertSemanticLinkTopicPairPlan(t *testing.T, ctx context.Context, db DB, workspaceID, topicID foundation.ID, sourceIDs []string) {
 	t.Helper()
+	if _, err := db.Exec(ctx, `SET enable_seqscan = off`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(context.Background(), `RESET enable_seqscan`)
+	})
 	var raw []byte
 	if err := db.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+semanticLinkTopicClaimPairsSQL,
 		string(workspaceID), string(topicID), sourceIDs, graphapp.MaxSemanticLinkScanPagePairsPerNode).Scan(&raw); err != nil {

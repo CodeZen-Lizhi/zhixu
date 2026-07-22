@@ -133,6 +133,69 @@ func TestSemanticLinkScanCommandServicePlansServerOwnedTopicScope(t *testing.T) 
 	}
 }
 
+func TestSemanticLinkScanCommandServiceBindsSmartCollectionScope(t *testing.T) {
+	now := time.Date(2026, 7, 21, 2, 0, 0, 0, time.UTC)
+	workspaceID, collectionID := discoveryAppID(900), discoveryAppID(220)
+	queryHash, revision := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	planner := &smartCollectionScanPlannerFake{plan: SemanticLinkSmartCollectionScanPlan{
+		WorkspaceID: workspaceID, CollectionID: collectionID, CollectionVersion: 9,
+		QueryHash: queryHash, ReadModelRevision: revision, TotalNodes: 31,
+	}}
+	starter := &scanStarterFake{now: now}
+	scans, err := NewSemanticLinkScanService(starter, &scanStateFake{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewSemanticLinkScanCommandService(planner, scans)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.StartSmartCollectionScan(context.Background(), SemanticLinkSmartCollectionScanRequest{
+		WorkspaceID: workspaceID, CollectionID: collectionID, IdempotencyKey: "collection-scan",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := starter.request.Scope
+	if planner.calls != 1 || scope.Type != graphdomain.SemanticLinkScanScopeSmartCollection || scope.Ref != string(collectionID) || scope.Version != 9 || scope.SchemaVersion != SemanticLinkSmartCollectionScanScopeSchemaVersion || scope.QueryHash != queryHash || scope.ReadModelRevision != revision || starter.request.TotalNodes != 31 || result.Scan.Scope != scope {
+		t.Fatalf("planner=%#v request=%#v result=%#v", planner.plan, starter.request, result)
+	}
+}
+
+func TestSemanticLinkScanPageSourceRouterDispatchesByScope(t *testing.T) {
+	topic := &scanPageSourceFake{}
+	smart := &scanPageSourceFake{}
+	router, err := NewSemanticLinkScanPageSourceRouter(topic, smart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := SemanticLinkTopicScanPageRequest{Scope: graphdomain.SemanticLinkScanScope{Type: graphdomain.SemanticLinkScanScopeTopic}}
+	if _, err := router.LoadPage(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	request.Scope.Type = graphdomain.SemanticLinkScanScopeSmartCollection
+	if _, err := router.LoadPage(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if topic.calls != 1 || smart.calls != 1 {
+		t.Fatalf("topic calls=%d smart calls=%d", topic.calls, smart.calls)
+	}
+}
+
+func TestSemanticLinkScanPageSourceRouterKeepsTopicAvailableWithoutCollection(t *testing.T) {
+	topic := &scanPageSourceFake{}
+	router, err := NewSemanticLinkScanPageSourceRouter(topic, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.LoadPage(context.Background(), SemanticLinkTopicScanPageRequest{Scope: graphdomain.SemanticLinkScanScope{Type: graphdomain.SemanticLinkScanScopeTopic}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.LoadPage(context.Background(), SemanticLinkTopicScanPageRequest{Scope: graphdomain.SemanticLinkScanScope{Type: graphdomain.SemanticLinkScanScopeSmartCollection}}); err == nil {
+		t.Fatal("expected unavailable smart source")
+	}
+}
+
 func TestSemanticLinkScanServiceValidatesProgressAndTerminalProjection(t *testing.T) {
 	now := time.Date(2026, 7, 21, 2, 0, 0, 0, time.UTC)
 	state := &scanStateFake{now: now}
@@ -262,6 +325,73 @@ func TestSemanticLinkTopicScanExecutorRejectsProviderGenerationDrift(t *testing.
 	}
 }
 
+func TestSemanticLinkTopicScanPageRejectsUnboundedOrUnstableAdapterResults(t *testing.T) {
+	workspaceID := discoveryAppID(907)
+	request := SemanticLinkTopicScanPageRequest{
+		WorkspaceID: workspaceID, ScanID: discoveryAppID(52),
+		Scope:      graphdomain.SemanticLinkScanScope{Type: graphdomain.SemanticLinkScanScopeTopic, Ref: string(discoveryAppID(62)), Version: 1, SchemaVersion: "v1"},
+		Generation: discoveryAppScanGeneration(), Limit: 100,
+	}
+	first := discoveryAppPair(workspaceID, 1, 2, "shared")
+	second := discoveryAppPair(workspaceID, 1, 3, "shared")
+	valid := SemanticLinkTopicScanPage{
+		WorkspaceID: workspaceID, ScanID: request.ScanID, ScopeVersion: request.Scope.Version,
+		Complete: true, ProcessedNodes: 1, LastNode: &first.Source.Endpoint.Ref,
+		Pairs: []graphdomain.SemanticLinkDiscoveryPair{first, second},
+		Exclusions: []graphdomain.SemanticLinkDiscoveryExclusion{{
+			Source: second.Target.Endpoint.Ref, Target: second.Source.Endpoint.Ref, Reason: "FORMAL_RELATION",
+		}},
+	}
+	if err := validateTopicScanPage(request, valid); err != nil {
+		t.Fatalf("valid page: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*SemanticLinkTopicScanPage)
+	}{
+		{name: "request limit exceeded", mutate: func(page *SemanticLinkTopicScanPage) {
+			page.ProcessedNodes = 2
+			page.LastNode = &second.Target.Endpoint.Ref
+		}},
+		{name: "duplicate pair", mutate: func(page *SemanticLinkTopicScanPage) { page.Pairs = append(page.Pairs, second) }},
+		{name: "reverse pair", mutate: func(page *SemanticLinkTopicScanPage) {
+			page.Pairs[0].Source, page.Pairs[0].Target = page.Pairs[0].Target, page.Pairs[0].Source
+		}},
+		{name: "unordered pair", mutate: func(page *SemanticLinkTopicScanPage) { page.Pairs[0], page.Pairs[1] = page.Pairs[1], page.Pairs[0] }},
+		{name: "foreign exclusion", mutate: func(page *SemanticLinkTopicScanPage) {
+			page.Exclusions[0].Target = discoveryAppPair(workspaceID, 4, 5, "other").Target.Endpoint.Ref
+		}},
+		{name: "duplicate exclusion", mutate: func(page *SemanticLinkTopicScanPage) { page.Exclusions = append(page.Exclusions, page.Exclusions[0]) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			page := valid
+			page.Pairs = append([]graphdomain.SemanticLinkDiscoveryPair(nil), valid.Pairs...)
+			page.Exclusions = append([]graphdomain.SemanticLinkDiscoveryExclusion(nil), valid.Exclusions...)
+			test.mutate(&page)
+			localRequest := request
+			if test.name == "request limit exceeded" {
+				localRequest.Limit = 1
+			}
+			if err := validateTopicScanPage(localRequest, page); err == nil {
+				t.Fatal("expected inconsistent page rejection")
+			}
+		})
+	}
+
+	many := valid
+	many.ProcessedNodes = 2
+	many.Pairs = make([]graphdomain.SemanticLinkDiscoveryPair, 0, MaxSemanticLinkScanPagePairsPerNode+1)
+	for target := 2; target <= MaxSemanticLinkScanPagePairsPerNode+2; target++ {
+		many.Pairs = append(many.Pairs, discoveryAppPair(workspaceID, 1, target, "shared"))
+	}
+	many.Exclusions = nil
+	if err := validateTopicScanPage(request, many); err == nil {
+		t.Fatal("expected per-source pair limit rejection")
+	}
+}
+
 type discoverySignalFake struct {
 	method         graphdomain.SemanticLinkDiscoveryMethod
 	hash           string
@@ -325,6 +455,21 @@ type topicScanPlannerFake struct {
 	plan  SemanticLinkTopicScanPlan
 	err   error
 	calls int
+}
+
+type smartCollectionScanPlannerFake struct {
+	plan  SemanticLinkSmartCollectionScanPlan
+	err   error
+	calls int
+}
+
+func (fake *smartCollectionScanPlannerFake) PlanTopicScan(context.Context, foundation.ID, foundation.ID) (SemanticLinkTopicScanPlan, error) {
+	return SemanticLinkTopicScanPlan{}, errors.New("topic plan should not be called")
+}
+
+func (fake *smartCollectionScanPlannerFake) PlanSmartCollectionScan(context.Context, foundation.ID, foundation.ID) (SemanticLinkSmartCollectionScanPlan, error) {
+	fake.calls++
+	return fake.plan, fake.err
 }
 
 func (fake *topicScanPlannerFake) PlanTopicScan(context.Context, foundation.ID, foundation.ID) (SemanticLinkTopicScanPlan, error) {

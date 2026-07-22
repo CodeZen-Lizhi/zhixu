@@ -266,25 +266,32 @@ func (repository *SemanticLinkTopicScanPageRepository) loadTopicClaimNodes(ctx c
 }
 
 func (repository *SemanticLinkTopicScanPageRepository) loadTopicPairExclusions(ctx context.Context, workspaceID foundation.ID, pairs []graphdomain.SemanticLinkDiscoveryPair) ([]graphdomain.SemanticLinkDiscoveryExclusion, error) {
+	return loadTopicPairExclusions(ctx, repository.db, workspaceID, pairs)
+}
+
+func loadTopicPairExclusions(ctx context.Context, db DB, workspaceID foundation.ID, pairs []graphdomain.SemanticLinkDiscoveryPair) ([]graphdomain.SemanticLinkDiscoveryExclusion, error) {
 	if len(pairs) == 0 {
 		return nil, nil
 	}
-	left, right := make([]string, len(pairs)), make([]string, len(pairs))
+	leftTypes, leftIDs := make([]string, len(pairs)), make([]string, len(pairs))
+	rightTypes, rightIDs := make([]string, len(pairs)), make([]string, len(pairs))
 	for index, pair := range pairs {
-		left[index], right[index] = string(pair.Source.Endpoint.Ref.ID), string(pair.Target.Endpoint.Ref.ID)
+		leftTypes[index], leftIDs[index] = string(pair.Source.Endpoint.Ref.Type), string(pair.Source.Endpoint.Ref.ID)
+		rightTypes[index], rightIDs[index] = string(pair.Target.Endpoint.Ref.Type), string(pair.Target.Endpoint.Ref.ID)
 	}
-	rows, err := repository.db.Query(ctx, `
+	rows, err := db.Query(ctx, `
 		WITH requested AS (
-			SELECT input.left_id,input.right_id
-			FROM unnest($2::uuid[],$3::uuid[]) AS input(left_id,right_id)
+			SELECT input.left_type,input.left_id,input.right_type,input.right_id,input.ordinality
+			FROM unnest($2::text[],$3::uuid[],$4::text[],$5::uuid[]) WITH ORDINALITY
+				AS input(left_type,left_id,right_type,right_id,ordinality)
 		)
-		SELECT requested.left_id::text,requested.right_id::text,
+		SELECT requested.left_type,requested.left_id::text,requested.right_type,requested.right_id::text,
 			CASE
 			WHEN EXISTS (
 				SELECT 1 FROM core.relation relation
 				WHERE relation.workspace_id=$1 AND relation.status IN ('CONFIRMED','STALE')
-				  AND ((relation.source_node_type='CLAIM' AND relation.source_node_id=requested.left_id AND relation.target_node_type='CLAIM' AND relation.target_node_id=requested.right_id)
-				    OR (relation.source_node_type='CLAIM' AND relation.source_node_id=requested.right_id AND relation.target_node_type='CLAIM' AND relation.target_node_id=requested.left_id))
+				  AND ((relation.source_node_type=requested.left_type AND relation.source_node_id=requested.left_id AND relation.target_node_type=requested.right_type AND relation.target_node_id=requested.right_id)
+				    OR (relation.source_node_type=requested.right_type AND relation.source_node_id=requested.right_id AND relation.target_node_type=requested.left_type AND relation.target_node_id=requested.left_id))
 			) THEN 'FORMAL_RELATION'
 			WHEN EXISTS (
 				SELECT 1
@@ -292,25 +299,32 @@ func (repository *SemanticLinkTopicScanPageRepository) loadTopicPairExclusions(c
 				JOIN change_control.proposal_revision revision ON revision.proposal_id=proposal.id
 				WHERE proposal.workspace_id=$1 AND proposal.proposal_type='knowledge_change'
 				  AND proposal.status NOT IN ('rejected','needs_revision','completed','cancelled','rolled_back')
-				  AND ((revision.change_set->'source'->>'id'=requested.left_id::text AND revision.change_set->'target'->>'id'=requested.right_id::text)
-				    OR (revision.change_set->'source'->>'id'=requested.right_id::text AND revision.change_set->'target'->>'id'=requested.left_id::text))
+				  AND ((COALESCE(revision.change_set->'source'->>'Type',revision.change_set->'source'->>'type')=requested.left_type
+				        AND COALESCE(revision.change_set->'source'->>'ID',revision.change_set->'source'->>'id')=requested.left_id::text
+				        AND COALESCE(revision.change_set->'target'->>'Type',revision.change_set->'target'->>'type')=requested.right_type
+				        AND COALESCE(revision.change_set->'target'->>'ID',revision.change_set->'target'->>'id')=requested.right_id::text)
+				    OR (COALESCE(revision.change_set->'source'->>'Type',revision.change_set->'source'->>'type')=requested.right_type
+				        AND COALESCE(revision.change_set->'source'->>'ID',revision.change_set->'source'->>'id')=requested.right_id::text
+				        AND COALESCE(revision.change_set->'target'->>'Type',revision.change_set->'target'->>'type')=requested.left_type
+				        AND COALESCE(revision.change_set->'target'->>'ID',revision.change_set->'target'->>'id')=requested.left_id::text))
 			) THEN 'ACTIVE_PROPOSAL'
 			ELSE '' END AS reason
-		FROM requested`, string(workspaceID), left, right)
+		FROM requested
+		ORDER BY requested.ordinality`, string(workspaceID), leftTypes, leftIDs, rightTypes, rightIDs)
 	if err != nil {
 		return nil, scanRepositoryClassify(err, "GRAPH_SEMANTIC_LINK_SCAN_EXCLUSION_QUERY_FAILED")
 	}
 	defer rows.Close()
 	result := make([]graphdomain.SemanticLinkDiscoveryExclusion, 0)
 	for rows.Next() {
-		var leftID, rightID, reason string
-		if err := rows.Scan(&leftID, &rightID, &reason); err != nil {
+		var leftType, leftID, rightType, rightID, reason string
+		if err := rows.Scan(&leftType, &leftID, &rightType, &rightID, &reason); err != nil {
 			return nil, scanRepositoryClassify(err, "GRAPH_SEMANTIC_LINK_SCAN_EXCLUSION_QUERY_FAILED")
 		}
 		if reason != "" {
 			result = append(result, graphdomain.SemanticLinkDiscoveryExclusion{
-				Source: knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: foundation.ID(leftID)},
-				Target: knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: foundation.ID(rightID)}, Reason: reason,
+				Source: knowledge.NodeRef{Type: knowledge.NodeType(leftType), ID: foundation.ID(leftID)},
+				Target: knowledge.NodeRef{Type: knowledge.NodeType(rightType), ID: foundation.ID(rightID)}, Reason: reason,
 			})
 		}
 	}

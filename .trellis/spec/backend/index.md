@@ -5,17 +5,20 @@
 M7-01 已补充 Graph canonical read projection、公共 HTTP/真实进程 smoke、容量 benchmark 与跨层质量门禁；
 首版只读 Topic/Claim，500,000 Relation/FPS 与正式认证仍归 M10。
 M7-02 已补充 Semantic Link Candidate、typed Relation Proposal、Approval 后 Knowledge apply、durable Topic scan、
-严格故障隔离与执行计划门禁；Candidate 仍不是正式 Relation，目录/Smart Collection scope 仍未实现。
+严格故障隔离与执行计划门禁；Candidate 仍不是正式 Relation。
+M7-03 已补充版本化 Smart Collection、统一 read model/cursor、持久 Health Scan/Issue/Schedule、SMART_COLLECTION
+Candidate scope、affected-change outbox、真实 PostgreSQL/River/API/浏览器门禁；Tag/Review/Directory owner、Artifact/
+Review 批量动作、认证和 M10 最终容量仍未实现。
 
 ## 规范索引
 
 | 规范 | 内容 | 当前状态 |
 |---|---|---|
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
-| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-02 Candidate/Decision/Scan、typed Proposal、Approval→Relation UoW、LATERAL/部分索引与时间精度契约 |
+| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health 持久化、read-model revision、schedule/outbox、guarded migration 与真实 PG 门禁 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool Context/Permission/receipt/UNKNOWN/Web Policy 稳定错误；正式 Auth/CSRF 仍归 M10 |
 | [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M6-03 Tool/Observability 共享脱敏与受限 Tool Call 事实已记录；通用 append-only Audit/真实 exporter 归 M10 |
-| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | M7-01 Graph 与 M7-02 Semantic Link 的公共契约、River fault、eval、浏览器和独立审查门禁均已记录 |
+| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | M7-01 Graph、M7-02 Semantic Link 与 M7-03 Collection/Health 的跨层、fault、性能、浏览器和独立审查门禁均已记录 |
 
 ## 开发前检查清单
 

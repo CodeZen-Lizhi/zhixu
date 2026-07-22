@@ -91,7 +91,7 @@ func TestRAGStageProjectionIndexSupportsScopedLatestEventLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := migrationProvider(t, pool)
-	if _, err := provider.Down(ctx); err != nil {
+	if _, err := provider.DownTo(ctx, 22); err != nil {
 		t.Fatal(err)
 	}
 	var count int

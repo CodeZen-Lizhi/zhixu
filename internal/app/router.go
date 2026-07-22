@@ -12,9 +12,11 @@ import (
 	"time"
 
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
+	collectionhttp "github.com/CodeZen-Lizhi/zhixu/internal/collection/http"
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
 	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
 	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
+	healthhttp "github.com/CodeZen-Lizhi/zhixu/internal/health/http"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
@@ -45,6 +47,8 @@ type Dependencies struct {
 	Workspace         *workspacehttp.Handler
 	Workflow          *workflowhttp.Handler
 	ChangeControl     *changecontrolhttp.Handler
+	Collection        *collectionhttp.Handler
+	Health            *healthhttp.Handler
 	Ingestion         *ingestionhttp.Handler
 	Retrieval         *retrievalhttp.Handler
 	Graph             *graphhttp.Handler
@@ -120,6 +124,12 @@ func NewRouter(deps Dependencies) http.Handler {
 		if deps.ChangeControl != nil {
 			deps.ChangeControl.Routes(api)
 		}
+		if deps.Collection != nil {
+			deps.Collection.Routes(api)
+		}
+		if deps.Health != nil {
+			deps.Health.Routes(api)
+		}
 		if deps.Ingestion != nil {
 			deps.Ingestion.Routes(api)
 		}
@@ -185,6 +195,8 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 	graphStatus := map[string]string{"status": "ready"}
 	semanticLinksStatus := map[string]string{"status": "ready"}
 	ragStatus := map[string]string{"status": "disabled"}
+	collectionsStatus := map[string]string{"status": "unavailable"}
+	knowledgeHealthStatus := map[string]string{"status": "unavailable"}
 	status := "degraded"
 	if err := checkDatabase(r.Context(), deps); err == nil {
 		databaseStatus["status"] = "ready"
@@ -210,14 +222,22 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 		semanticLinksStatus["reason"] = "semantic_link_dependencies_unavailable"
 		status = "degraded"
 	}
+	if deps.Collection != nil && deps.Collection.Available() {
+		collectionsStatus["status"] = "ready"
+	}
+	if deps.Health != nil && deps.Health.Available() {
+		knowledgeHealthStatus["status"] = "ready"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":         status,
-		"version":        deps.Version,
-		"database":       databaseStatus,
-		"graph":          graphStatus,
-		"semantic_links": semanticLinksStatus,
-		"rag":            ragStatus,
-		"request_id":     requestID(r.Context()),
+		"status":           status,
+		"version":          deps.Version,
+		"database":         databaseStatus,
+		"graph":            graphStatus,
+		"semantic_links":   semanticLinksStatus,
+		"rag":              ragStatus,
+		"collections":      collectionsStatus,
+		"knowledge_health": knowledgeHealthStatus,
+		"request_id":       requestID(r.Context()),
 	})
 }
 

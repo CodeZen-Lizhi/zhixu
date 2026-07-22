@@ -5,13 +5,15 @@ const readOptionalEnvironment = (name: string): string | undefined => {
   return value === undefined || value === "" ? undefined : value;
 };
 
-const baseURL = readOptionalEnvironment("ZHIXU_SEMANTIC_LINK_SMOKE_BASE_URL");
+const baseURL = readOptionalEnvironment("ZHIXU_PLAYWRIGHT_BASE_URL")
+  ?? readOptionalEnvironment("ZHIXU_SEMANTIC_LINK_SMOKE_BASE_URL")
+  ?? readOptionalEnvironment("ZHIXU_COLLECTION_HEALTH_SMOKE_BASE_URL");
 if (baseURL === undefined) {
-  throw new Error("ZHIXU_SEMANTIC_LINK_SMOKE_BASE_URL is required");
+  throw new Error("ZHIXU_PLAYWRIGHT_BASE_URL is required");
 }
 
 const executablePath = readOptionalEnvironment("ZHIXU_PLAYWRIGHT_EXECUTABLE_PATH");
-const outputDir = readOptionalEnvironment("ZHIXU_PLAYWRIGHT_OUTPUT_DIR") ?? "test-results/semantic-link";
+const outputDir = readOptionalEnvironment("ZHIXU_PLAYWRIGHT_OUTPUT_DIR") ?? "test-results/browser-smoke";
 
 export default defineConfig({
   testDir: "./e2e",

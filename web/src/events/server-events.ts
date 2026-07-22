@@ -3,7 +3,11 @@ export type ServerEventResource =
   | "question"
   | "answer"
   | "workflow"
-  | "model_run";
+  | "model_run"
+  | "collection"
+  | "health_issue"
+  | "health_scan"
+  | "knowledge_health";
 
 export interface ServerEventInvalidation {
   resource: ServerEventResource;
@@ -267,7 +271,11 @@ const invalidationsFor = (
         resource === "question" ||
         resource === "answer" ||
         resource === "workflow" ||
-        resource === "model_run")
+        resource === "model_run" ||
+        resource === "collection" ||
+        resource === "health_issue" ||
+        resource === "health_scan" ||
+        resource === "knowledge_health")
     ) {
       append(resource, id);
     }

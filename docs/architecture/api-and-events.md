@@ -241,7 +241,7 @@ M7-02 另设 Candidate/Scan 命令边界；Candidate 确认只创建 typed Propo
 | `GET /api/v1/graph/candidates?workspace_id=&node_type=&node_id=&cursor=&limit=` | 按 Workspace 和可选节点 scope 分页返回可审阅 Candidate；`CLAIM` 是精确端点 scope，`TOPIC` 还包含双方都以正式 `CONFIRMED BELONGS_TO` 归属该 Topic 的 Claim pair；支持状态、关系类型、置信度与重开原因过滤。 |
 | `GET /api/v1/graph/candidates/{candidate_id}?workspace_id=` | 返回 Candidate、双方版本摘要、Evidence、决策历史摘要和 Proposal 绑定。 |
 | `POST /api/v1/graph/candidates/{candidate_id}/decisions` | 使用 `Idempotency-Key` 与 `expected_version` 执行 Confirm/改类型 Confirm/Ignore/False Positive/Defer/Resume。 |
-| `POST /api/v1/graph/candidate-scans` | 只接受 TOPIC scope，返回 `202 + workflow_run_id + status_url`；`status_url` 指向 `/api/v1/graph/candidate-scans/{scan_id}?workspace_id=...` 的权威业务投影，`workflow_run_id` 保留运行时绑定；相同 key 精确重放。 |
+| `POST /api/v1/graph/candidate-scans` | 接受 TOPIC 或已冻结的 SMART_COLLECTION scope。Smart Collection 必须绑定 collection ID/version/query hash/read-model revision；返回 `202 + workflow_run_id + status_url`，相同 key 精确重放且漂移 fail closed。 |
 | `GET /api/v1/graph/candidate-scans/{scan_id}?workspace_id=` | 返回持久进度、计数、checkpoint、终态和安全错误摘要。 |
 
 前三个正式 Graph `POST` 只是为复杂过滤和遍历参数提供结构化请求体，仍是无业务副作用的 Query，不要求
@@ -262,6 +262,24 @@ Global、depth=1 Neighborhood 和 Relation Evidence 使用独立的 opaque resul
 hash、结果 fingerprint、limit 和 offset：篡改、跨 Workspace/查询、请求参数变化或进程重启返回
 `400 GRAPH_CURSOR_INVALID`；结果变化返回 `409 GRAPH_CURSOR_STALE`。Cursor 不是授权凭据或持久
 session。
+
+### Collection 与 Knowledge Health
+
+M7-03 的公共契约由 OpenAPI 3.1、`internal/collection/http`、`internal/health/http` 和前端 strict decoder 共同约束：
+
+- Collection：Workspace-scoped list/get/create/update/archive、validate、preview、results。命令要求唯一
+  `Idempotency-Key`，update/archive 要求 expected version；results 返回与当前 saved execution 绑定的
+  `query_hash`、read-model revision、精确 count、同一有序 refs 和 opaque cursor。
+- Health：summary、issues/detail、decision、repair proposal、scan start/status、schedule get/put。Scan 返回
+  `202 + health_scan_id + workflow_run_id + status_url`；Issue Evidence 由详情按需加载，Decision/Schedule PUT
+  使用幂等键和 CAS。
+- 所有 JSON body 拒绝未知/重复字段；query/header 的重复值、非法 UUID/enum/time/limit/cursor/content-type
+  明确失败。跨 Workspace 与不存在统一 Not Found；Problem 不回显 Query、SQL、DSN、绝对路径、Evidence 原文
+  或 cursor key。
+- `system.status.collections` 与 `knowledge_health` 独立于 `graph` 和 `semantic_links`；
+  `health.scan.completed` SSE 只触发 Query invalidation，刷新后仍从 REST Scan/Issue 投影恢复。
+- Tag、Review/Directory、Review Deck、Artifact 与无真实 apply seam 的 repair 均返回 capability unavailable，
+  不能用空结果或假 Proposal 冒充成功。
 
 失败语义保持可区分：
 

@@ -127,6 +127,18 @@ make graph-benchmark
 
 上述结果只完成 M7-01 的 Active Topic/Confirmed IMPACTS 本地参考拓扑门禁；Mixed Topic/Claim 与 BELONGS_TO 正确性由 Graph integration/smoke 覆盖，该容量夹具不覆盖 claim-heavy/mixed 图。结果不能线性外推为 500,000 Relation 的性能，也不包含浏览器布局 FPS。M10 仍须在正式资源预算下验证 claim-heavy/mixed 与 500,000 Relation，重新验证 Graph 查询 P95 和前端 FPS/交互；只有届时 direct PostgreSQL projection 的实际计划不达标，才评估 additive 索引、可重建持久投影或图数据库。
 
+## 8.1 M7-03 Collection / Health 参考门禁
+
+- Collection preview/results 使用同一参数化 read model 和固定批量 hydration；durable scan 首次线性读取成员，
+  后继 detector page 复用最多 8 个 binding 的有界缓存，并用 Workspace-scoped 增量 revision verifier 与结束时
+  完整校验 fail closed；后继页不再执行跨表 `count/max/string_agg` 聚合。
+- 516-item 参考 fixture 执行 5 次预热、25 次采样，Collection 首屏 P95 为 `5.627375 ms`，低于本任务 2 秒门槛；
+  Relation source/target 查询拆为 `UNION ALL` 后，EXPLAIN 命中 canonical source/target 索引。
+- Health detector page 使用 typed `(target_type,target_id)` keyset 和批量 SQL；Issue reconcile 的 statement 数不随
+  observation 数逐项增长，取消测试证明被阻塞连接可及时释放。
+- 上述仅证明 M7-03 参考 fixture 的有界查询、无逐对象 N+1 和索引计划，不是最终 100,000 Claim/
+  500,000 Relation 容量认证；正式容量、并发与资源预算仍归 M10。
+
 ## 9. Vector
 
 - HNSW。

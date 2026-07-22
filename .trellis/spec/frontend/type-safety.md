@@ -107,6 +107,53 @@ OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Fea
 - `web/src/events/**` 是唯一 SSE Envelope、frame、cursor 与恢复 owner；未知或非法 payload 不进入 Feature，
   成功处理事件后才推进 Last-Event-ID。
 
+## Scenario: M7-03 Collection / Health Wire Boundary
+
+### 1. Scope / Trigger
+
+- 修改 Collection/Health API DTO、OpenAPI、strict decoder、query/hash/cursor、Issue/Scan/Decision/Schedule UI 时应用。
+
+### 2. Signatures
+
+- `decodeCollectionList/Detail/Preview/Results` 与 `decodeHealthSummary/Issues/Scan/Decision/Schedule` 必须接收 `unknown`，
+  返回领域 UI model 或 `INVALID_RESPONSE`。
+
+### 3. Contracts
+
+- 必须校验 `workspace_id`、资源 ID、`query_hash`、read-model revision、version、cursor、枚举、时间和数组上限；未知/重复字段拒绝。
+- Collection result 首项为严格 `TOPIC|CLAIM` union；三视图不得接收 wire DTO 或重复解码。
+- Collection list/result 最多 100 项；result 还必须满足 `exact_count >= items.length`、`(object_type,id)` 唯一，
+  saved response 的 `collection_id/query_hash` 与请求完全一致。
+- Health Issue/Scan/Detector Coverage/Decision/Schedule 状态必须穷尽；unavailable、partial、failed、reopened、deferred 和
+  response-loss 不得被转成 empty/succeeded。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+|---|---|
+| Workspace/route/query hash 漂移 | `INVALID_RESPONSE` |
+| cursor invalid/stale | 保留稳定 `ApiError`，由 Query 恢复第一页 |
+| unknown enum/field/duplicate key | 拒绝整个响应 |
+| unavailable capability | typed unavailable reason，不构造假对象 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：raw JSON 只在 `web/src/api/{collections,health}.ts` 进入 camelCase domain model。
+- Base：空数组保持 `[]`；cursor opaque，不解析/持久化内部 payload。
+- Bad：组件 `as CollectionResult`、以 `query_hash` 缺失时默认空字符串、或把 `HealthScan.status` 任意 cast 成终态。
+
+### 6. Tests Required
+
+- normal/empty/unknown/duplicate/mismatch/invalid cursor/Problem/Abort decoder；query key、three-view refs、scan recovery、
+  Workspace isolation 和 browser smoke。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: `const data = response as HealthScan`。
+Correct: unknown -> strict decoder -> exhaustive domain union -> feature projection。
+```
+
 ## Scenario: M7-02 Semantic Link Candidate Wire And UI State
 
 ### 1. Scope / Trigger

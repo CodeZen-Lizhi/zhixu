@@ -22,10 +22,11 @@ type candidateScanStartRequest struct {
 }
 
 type candidateScanScopeRequest struct {
-	Kind     optional[string] `json:"kind"`
-	TopicID  optional[string] `json:"topic_id"`
-	NodeType optional[string] `json:"node_type"`
-	NodeID   optional[string] `json:"node_id"`
+	Kind         optional[string] `json:"kind"`
+	TopicID      optional[string] `json:"topic_id"`
+	CollectionID optional[string] `json:"collection_id"`
+	NodeType     optional[string] `json:"node_type"`
+	NodeID       optional[string] `json:"node_id"`
 }
 
 func (handler *CandidateHandler) startScan(w http.ResponseWriter, r *http.Request) {
@@ -43,14 +44,27 @@ func (handler *CandidateHandler) startScan(w http.ResponseWriter, r *http.Reques
 		writeSemanticLinkError(w, err)
 		return
 	}
-	request, err := wire.toTopicRequest(idempotencyKey)
+	request, err := wire.toStartRequest(idempotencyKey)
 	if err != nil {
 		writeSemanticLinkError(w, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), handler.timeout)
 	defer cancel()
-	result, err := handler.scans.StartTopicScan(ctx, request)
+	var result graphapp.SemanticLinkScanStartResult
+	switch request.kind {
+	case string(graphdomain.SemanticLinkScanScopeTopic):
+		result, err = handler.scans.StartTopicScan(ctx, graphapp.SemanticLinkTopicScanRequest{WorkspaceID: request.workspaceID, TopicID: request.scopeID, IdempotencyKey: idempotencyKey})
+	case string(graphdomain.SemanticLinkScanScopeSmartCollection):
+		smart, ok := handler.scans.(graphapp.SemanticLinkSmartScanHTTPService)
+		if !ok {
+			writeSemanticLinkError(w, foundation.NewError(foundation.ErrorDependencyUnavailable, graphdomain.ErrorCodeSemanticLinkDiscoveryUnavailable, false, errors.New("smart collection scan service is unavailable")))
+			return
+		}
+		result, err = smart.StartSmartCollectionScan(ctx, graphapp.SemanticLinkSmartCollectionScanRequest{WorkspaceID: request.workspaceID, CollectionID: request.scopeID, IdempotencyKey: idempotencyKey})
+	default:
+		err = semanticLinkRequestInvalid(errors.New("candidate scan scope is unsupported"))
+	}
 	if err != nil {
 		writeSemanticLinkError(w, err)
 		return
@@ -89,16 +103,22 @@ func (handler *CandidateHandler) getScan(w http.ResponseWriter, r *http.Request)
 		writeSemanticLinkError(w, err)
 		return
 	}
-	if err := graphdomain.ValidateSemanticLinkScan(scan); err != nil || scan.ID != scanID || scan.WorkspaceID != workspaceID || scan.Scope.Type != graphdomain.SemanticLinkScanScopeTopic {
+	if err := graphdomain.ValidateSemanticLinkScan(scan); err != nil || scan.ID != scanID || scan.WorkspaceID != workspaceID || (scan.Scope.Type != graphdomain.SemanticLinkScanScopeTopic && scan.Scope.Type != graphdomain.SemanticLinkScanScopeSmartCollection) {
 		writeSemanticLinkError(w, semanticLinkResultInvalid(errors.New("candidate scan response is inconsistent")))
 		return
 	}
 	httpapi.WriteJSON(w, http.StatusOK, toCandidateScanResponse(scan))
 }
 
-func validateCandidateScanStartResult(request graphapp.SemanticLinkTopicScanRequest, result graphapp.SemanticLinkScanStartResult) error {
+type candidateScanStartCommand struct {
+	workspaceID foundation.ID
+	kind        string
+	scopeID     foundation.ID
+}
+
+func validateCandidateScanStartResult(request candidateScanStartCommand, result graphapp.SemanticLinkScanStartResult) error {
 	scan := result.Scan
-	if err := graphdomain.ValidateSemanticLinkScan(scan); err != nil || scan.WorkspaceID != request.WorkspaceID || scan.Scope.Type != graphdomain.SemanticLinkScanScopeTopic || scan.Scope.Ref != string(request.TopicID) || result.StatusURL != graphapp.SemanticLinkScanStatusURL(scan.WorkspaceID, scan.ID) {
+	if err := graphdomain.ValidateSemanticLinkScan(scan); err != nil || scan.WorkspaceID != request.workspaceID || string(scan.Scope.Type) != request.kind || scan.Scope.Ref != string(request.scopeID) || result.StatusURL != graphapp.SemanticLinkScanStatusURL(scan.WorkspaceID, scan.ID) {
 		return semanticLinkResultInvalid(errors.New("candidate scan start response is inconsistent"))
 	}
 	return nil
@@ -122,21 +142,38 @@ func decodeCandidateScanStartRequest(r *http.Request) (candidateScanStartRequest
 	return decoded, nil
 }
 
-func (request candidateScanStartRequest) toTopicRequest(idempotencyKey string) (graphapp.SemanticLinkTopicScanRequest, error) {
+func (request candidateScanStartRequest) toStartRequest(idempotencyKey string) (candidateScanStartCommand, error) {
 	if !request.WorkspaceID.Present || request.WorkspaceID.Null || !request.Scope.Present || request.Scope.Null {
-		return graphapp.SemanticLinkTopicScanRequest{}, semanticLinkRequestInvalid(errors.New("candidate scan required fields are missing"))
+		return candidateScanStartCommand{}, semanticLinkRequestInvalid(errors.New("candidate scan required fields are missing"))
 	}
 	workspaceID, err := parseCandidateID(request.WorkspaceID.Value)
 	if err != nil {
-		return graphapp.SemanticLinkTopicScanRequest{}, err
+		return candidateScanStartCommand{}, err
 	}
 	scope := request.Scope.Value
-	if !scope.Kind.Present || scope.Kind.Null || scope.Kind.Value != "TOPIC" || !scope.TopicID.Present || scope.TopicID.Null || scope.NodeType.Present || scope.NodeID.Present {
-		return graphapp.SemanticLinkTopicScanRequest{}, semanticLinkRequestInvalid(errors.New("only TOPIC scan scope is supported"))
+	if !scope.Kind.Present || scope.Kind.Null || scope.NodeType.Present || scope.NodeID.Present {
+		return candidateScanStartCommand{}, semanticLinkRequestInvalid(errors.New("candidate scan scope is invalid"))
 	}
-	topicID, err := parseCandidateID(scope.TopicID.Value)
-	if err != nil {
-		return graphapp.SemanticLinkTopicScanRequest{}, err
+	switch scope.Kind.Value {
+	case string(graphdomain.SemanticLinkScanScopeTopic):
+		if !scope.TopicID.Present || scope.TopicID.Null || scope.CollectionID.Present {
+			return candidateScanStartCommand{}, semanticLinkRequestInvalid(errors.New("topic scan scope is invalid"))
+		}
+		topicID, parseErr := parseCandidateID(scope.TopicID.Value)
+		if parseErr != nil {
+			return candidateScanStartCommand{}, parseErr
+		}
+		return candidateScanStartCommand{workspaceID: workspaceID, kind: scope.Kind.Value, scopeID: topicID}, nil
+	case string(graphdomain.SemanticLinkScanScopeSmartCollection):
+		if !scope.CollectionID.Present || scope.CollectionID.Null || scope.TopicID.Present {
+			return candidateScanStartCommand{}, semanticLinkRequestInvalid(errors.New("smart collection scan scope is invalid"))
+		}
+		collectionID, parseErr := parseCandidateID(scope.CollectionID.Value)
+		if parseErr != nil {
+			return candidateScanStartCommand{}, parseErr
+		}
+		return candidateScanStartCommand{workspaceID: workspaceID, kind: scope.Kind.Value, scopeID: collectionID}, nil
+	default:
+		return candidateScanStartCommand{}, semanticLinkRequestInvalid(errors.New("candidate scan scope is unsupported"))
 	}
-	return graphapp.SemanticLinkTopicScanRequest{WorkspaceID: workspaceID, TopicID: topicID, IdempotencyKey: idempotencyKey}, nil
 }

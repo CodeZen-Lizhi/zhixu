@@ -42,18 +42,15 @@ func (executor *SemanticLinkScanExecutor) Execute(ctx context.Context, execution
 	if executor == nil || executor.lookup == nil || executor.scans == nil || executor.pages == nil || executor.clock == nil {
 		return workflowapplication.ExecutionResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "SEMANTIC_LINK_SCAN_EXECUTOR_UNAVAILABLE", false, errors.New("semantic link scan executor is unavailable"))
 	}
-	if ctx == nil || execution.NodeKind != graphapp.SemanticLinkScanNodeKind || execution.NodeKey != graphapp.SemanticLinkScanNodeKey || execution.InputSchemaVersion != graphapp.SemanticLinkScanInputSchemaVersion {
+	if ctx == nil || execution.NodeKind != graphapp.SemanticLinkScanNodeKind || execution.NodeKey != graphapp.SemanticLinkScanNodeKey ||
+		(execution.InputSchemaVersion != graphapp.SemanticLinkScanInputSchemaVersion && execution.InputSchemaVersion != graphapp.SemanticLinkSmartCollectionScanInputSchemaVersion) {
 		return workflowapplication.ExecutionResult{}, foundation.NewError(foundation.ErrorInvalidInput, "SEMANTIC_LINK_SCAN_EXECUTION_INVALID", false, errors.New("semantic link scan execution binding is invalid"))
 	}
-	input, err := graphapp.DecodeSemanticLinkScanWorkflowInput(execution.Input)
+	input, err := decodeSemanticLinkScanExecutionInput(execution)
 	if err != nil {
 		return workflowapplication.ExecutionResult{}, err
 	}
-	definition, err := graphapp.RegisteredSemanticLinkScanDefinition()
-	if err != nil {
-		return workflowapplication.ExecutionResult{}, err
-	}
-	if input.WorkspaceID != execution.WorkspaceID || execution.DefinitionVersion != definition.Version || execution.DefinitionHash != definition.GraphHash {
+	if input.workspaceID != execution.WorkspaceID || execution.DefinitionVersion != input.definitionVersion || execution.DefinitionHash != input.definitionHash {
 		return workflowapplication.ExecutionResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "SEMANTIC_LINK_SCAN_EXECUTION_INVALID", false, errors.New("semantic link scan workflow identity drifted"))
 	}
 	scan, err := executor.lookup.GetByWorkflowRun(ctx, execution.WorkspaceID, execution.RunID)
@@ -71,11 +68,17 @@ func (executor *SemanticLinkScanExecutor) Execute(ctx context.Context, execution
 	}
 
 	for pageNo := 0; pageNo < maxSemanticLinkScanPagesPerDelivery; pageNo++ {
-		page, pageErr := executor.pages.ProcessPage(ctx, graphapp.SemanticLinkTopicScanPageRequest{
+		pageRequest := graphapp.SemanticLinkTopicScanPageRequest{
 			WorkspaceID: execution.WorkspaceID, ScanID: scan.ID,
-			Scope: input.Scope(), Generation: input.Generation(), Cursor: scan.Checkpoint.Cursor,
+			Scope: input.scope, Generation: input.generation, Cursor: scan.Checkpoint.Cursor,
 			Limit: graphapp.MaxSemanticLinkScanPageNodes,
-		})
+		}
+		if input.scope.Type == graphdomain.SemanticLinkScanScopeSmartCollection {
+			pageRequest.Cursor = ""
+			pageRequest.LastNode = scan.Checkpoint.LastNode
+			pageRequest.TotalNodes = scan.TotalNodes
+		}
+		page, pageErr := executor.pages.ProcessPage(ctx, pageRequest)
 		if pageErr != nil {
 			return workflowapplication.ExecutionResult{}, executor.failIfTerminalRetry(ctx, execution, scan, pageErr)
 		}
@@ -110,6 +113,52 @@ func (executor *SemanticLinkScanExecutor) Execute(ctx context.Context, execution
 	return workflowapplication.ExecutionResult{}, foundation.NewError(foundation.ErrorManualRecoveryRequired, "SEMANTIC_LINK_SCAN_PAGE_LIMIT_EXCEEDED", false, errors.New("semantic link scan exceeded the bounded page limit"))
 }
 
+type semanticLinkScanExecutionInput struct {
+	workspaceID       foundation.ID
+	scope             graphdomain.SemanticLinkScanScope
+	generation        graphdomain.SemanticLinkScanGeneration
+	fingerprint       string
+	requestHash       string
+	idempotencyKey    string
+	definitionVersion int64
+	definitionHash    string
+}
+
+func decodeSemanticLinkScanExecutionInput(execution workflowapplication.ExecutionContext) (semanticLinkScanExecutionInput, error) {
+	switch execution.InputSchemaVersion {
+	case graphapp.SemanticLinkScanInputSchemaVersion:
+		input, err := graphapp.DecodeSemanticLinkScanWorkflowInput(execution.Input)
+		if err != nil {
+			return semanticLinkScanExecutionInput{}, err
+		}
+		definition, err := graphapp.RegisteredSemanticLinkScanDefinition()
+		if err != nil {
+			return semanticLinkScanExecutionInput{}, err
+		}
+		return semanticLinkScanExecutionInput{
+			workspaceID: input.WorkspaceID, scope: input.Scope(), generation: input.Generation(),
+			fingerprint: input.Fingerprint, requestHash: input.RequestHash, idempotencyKey: input.IdempotencyKey,
+			definitionVersion: definition.Version, definitionHash: definition.GraphHash,
+		}, nil
+	case graphapp.SemanticLinkSmartCollectionScanInputSchemaVersion:
+		input, err := graphapp.DecodeSemanticLinkSmartCollectionScanWorkflowInput(execution.Input)
+		if err != nil {
+			return semanticLinkScanExecutionInput{}, err
+		}
+		definition, err := graphapp.RegisteredSemanticLinkSmartCollectionScanDefinition()
+		if err != nil {
+			return semanticLinkScanExecutionInput{}, err
+		}
+		return semanticLinkScanExecutionInput{
+			workspaceID: input.WorkspaceID, scope: input.Scope(), generation: input.Generation(),
+			fingerprint: input.Fingerprint, requestHash: input.RequestHash, idempotencyKey: input.IdempotencyKey,
+			definitionVersion: definition.Version, definitionHash: definition.GraphHash,
+		}, nil
+	default:
+		return semanticLinkScanExecutionInput{}, foundation.NewError(foundation.ErrorInvalidInput, "SEMANTIC_LINK_SCAN_EXECUTION_INVALID", false, errors.New("semantic link scan input schema is unsupported"))
+	}
+}
+
 func (executor *SemanticLinkScanExecutor) failIfTerminalRetry(ctx context.Context, execution workflowapplication.ExecutionContext, scan graphdomain.SemanticLinkScan, cause error) error {
 	var classified *foundation.Error
 	nonRetryable := errors.As(cause, &classified) && !classified.Retryable
@@ -133,9 +182,9 @@ func (executor *SemanticLinkScanExecutor) failIfTerminalRetry(ctx context.Contex
 	return errors.Join(cause, finishErr)
 }
 
-func validateExecutionScanBinding(scan graphdomain.SemanticLinkScan, input graphapp.SemanticLinkScanWorkflowInput, execution workflowapplication.ExecutionContext) error {
-	if scan.WorkspaceID != execution.WorkspaceID || scan.WorkflowRunID != execution.RunID || scan.Scope != input.Scope() ||
-		scan.Fingerprint != input.Fingerprint || scan.RequestHash != input.RequestHash || scan.IdempotencyKey != input.IdempotencyKey {
+func validateExecutionScanBinding(scan graphdomain.SemanticLinkScan, input semanticLinkScanExecutionInput, execution workflowapplication.ExecutionContext) error {
+	if scan.WorkspaceID != execution.WorkspaceID || scan.WorkflowRunID != execution.RunID || scan.Scope != input.scope ||
+		scan.Fingerprint != input.fingerprint || scan.RequestHash != input.requestHash || scan.IdempotencyKey != input.idempotencyKey {
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "SEMANTIC_LINK_SCAN_EXECUTION_BINDING_INVALID", false, errors.New("semantic link scan does not match workflow input"))
 	}
 	return nil

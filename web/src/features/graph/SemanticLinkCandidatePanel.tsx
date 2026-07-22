@@ -196,7 +196,7 @@ export const SemanticLinkCandidatePanel = ({
   const refreshedScanRef = useRef("");
   const topicScope = nodeScope?.type === "TOPIC" ? nodeScope : null;
   const scanScopeMismatch = topicScope !== null
-    && scanQuery.data !== undefined
+    && scanQuery.data?.scope.kind === "TOPIC"
     && scanQuery.data.scope.topicId !== topicScope.id;
 
   const queryInput = useMemo(() => ({
@@ -392,7 +392,7 @@ export const SemanticLinkCandidatePanel = ({
   const startTopicScan = (reuseFailedRequest: boolean): void => {
     if (topicScope === null) return;
     const previous = scanMutation.variables;
-    const input = reuseFailedRequest && previous?.workspaceId === workspaceId && previous.scope.topicId === topicScope.id
+    const input = reuseFailedRequest && previous?.workspaceId === workspaceId && previous.scope.kind === "TOPIC" && previous.scope.topicId === topicScope.id
       ? previous
       : {
         workspaceId,

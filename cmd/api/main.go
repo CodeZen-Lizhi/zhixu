@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"net/http"
@@ -18,6 +19,9 @@ import (
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
+	collectionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/collection/adapter/postgres"
+	collectionapplication "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
+	collectionhttp "github.com/CodeZen-Lizhi/zhixu/internal/collection/http"
 	conversationpostgres "github.com/CodeZen-Lizhi/zhixu/internal/conversation/adapter/postgres"
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
@@ -28,6 +32,12 @@ import (
 	graphpostgres "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/postgres"
 	graphapplication "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
+	healthcollection "github.com/CodeZen-Lizhi/zhixu/internal/health/adapter/collection"
+	healthpostgres "github.com/CodeZen-Lizhi/zhixu/internal/health/adapter/postgres"
+	healthapplication "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
+	healthdetector "github.com/CodeZen-Lizhi/zhixu/internal/health/detector"
+	healthhttp "github.com/CodeZen-Lizhi/zhixu/internal/health/http"
+	healthworkflow "github.com/CodeZen-Lizhi/zhixu/internal/health/workflow"
 	ingestionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/postgres"
 	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
 	ingestionapplication "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/application"
@@ -93,6 +103,8 @@ func main() {
 	}
 
 	workspaceHandler := workspacehttp.NewHandler(nil)
+	collectionHandler := collectionhttp.NewHandler(nil, cfg.GraphQueryTimeout)
+	healthHandler := healthhttp.NewHandler(nil, nil, nil, nil, nil)
 	workflowHandler := workflowhttp.NewHandler(nil)
 	changeControlHandler := changecontrolhttp.NewHandler(nil)
 	ingestionHandler := ingestionhttp.NewHandler(nil)
@@ -105,21 +117,32 @@ func main() {
 	var ragInitErr error
 	fileScanner := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
 	if database != nil {
+		if err := configureCollectionHealth(database, cfg, &collectionHandler, &healthHandler, nil); err != nil {
+			logger.Error("collection and health services are unavailable", "error_code", "COLLECTION_HEALTH_DEPENDENCY_UNAVAILABLE")
+		}
 		configuredGraphHandler, graphHandlerErr := newGraphHandler(database.DB(), cfg.GraphQueryTimeout)
 		if graphHandlerErr != nil {
 			logger.Error("graph query service is unavailable", "error_code", "GRAPH_DEPENDENCY_UNAVAILABLE")
 		} else {
 			graphHandler = configuredGraphHandler
 		}
+		healthEvents, healthEventsErr := eventspostgres.NewStore(database.DB())
 		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
 		var workflowRuntime *workflowpostgres.RuntimeRepository
 		if changeControlRepositoryErr != nil {
 			logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
+		} else if healthEventsErr != nil {
+			logger.Error("health event store is unavailable", "error_code", "HEALTH_EVENT_STORE_UNAVAILABLE")
 		} else {
+			healthCancellationGuard, healthCancellationGuardErr := healthpostgres.NewScanCancellationGuard(healthEvents)
 			cancellationGuard, cancellationGuardErr := workflowapplication.NewCompositeCancellationSafetyGuard(
 				changeControlRepository,
 				graphpostgres.NewSemanticLinkScanCancellationGuard(),
+				healthCancellationGuard,
 			)
+			if healthCancellationGuardErr != nil {
+				cancellationGuardErr = healthCancellationGuardErr
+			}
 			if cancellationGuardErr != nil {
 				logger.Error("workflow cancellation guard is unavailable", "error_code", "WORKFLOW_CANCELLATION_GUARD_UNAVAILABLE")
 			}
@@ -135,6 +158,9 @@ func main() {
 			} else {
 				workflowRuntime = runtime
 				workflowHandler = workflowhttp.NewHandler(workflowService)
+				if err := configureCollectionHealth(database, cfg, &collectionHandler, &healthHandler, workflowRuntime); err != nil {
+					logger.Error("collection and health workflow services are unavailable", "error_code", "COLLECTION_HEALTH_WORKFLOW_DEPENDENCY_UNAVAILABLE")
+				}
 			}
 		}
 		workspaceRepository, repositoryErr := workspacepostgres.NewRepository(database.DB())
@@ -230,6 +256,8 @@ func main() {
 		PingTimeout:       cfg.DatabasePingTimeout,
 		Static:            static,
 		Workspace:         workspaceHandler,
+		Collection:        collectionHandler,
+		Health:            healthHandler,
 		Workflow:          workflowHandler,
 		ChangeControl:     changeControlHandler,
 		Ingestion:         ingestionHandler,
@@ -336,7 +364,25 @@ func newCandidateHandler(pool *pgxpool.Pool, runtime *workflowpostgres.RuntimeRe
 	if err != nil {
 		return nil, err
 	}
-	scanCommands, err := graphapplication.NewSemanticLinkScanCommandService(planner, scanService)
+	collectionRepository, err := collectionpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	collectionService, err := collectionapplication.NewService(collectionapplication.Dependencies{
+		Repository: collectionRepository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	smartPlanner, err := graphpostgres.NewSmartCollectionScanPlanner(collectionService)
+	if err != nil {
+		return nil, err
+	}
+	plannerSet, err := graphapplication.NewSemanticLinkScanPlannerSet(planner, smartPlanner)
+	if err != nil {
+		return nil, err
+	}
+	scanCommands, err := graphapplication.NewSemanticLinkScanCommandService(plannerSet, scanService)
 	if err != nil {
 		return nil, err
 	}
@@ -489,6 +535,9 @@ func registerAPIWorkflowExecutors(cfg config.Config, executors *workflowapplicat
 	if err := executors.Register(workflowapplication.CanonicalJSONHashNodeKind, workflowapplication.CanonicalJSONHashInputSchemaVersion, workflowapplication.NewCanonicalJSONHashExecutor()); err != nil {
 		return err
 	}
+	if err := executors.RegisterContract(healthapplication.HealthScanNodeKind, healthapplication.HealthScanInputSchemaVersion); err != nil {
+		return err
+	}
 	if cfg.ChatProvider != config.ChatProviderDisabled {
 		if err := executors.RegisterContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err != nil {
 			return err
@@ -511,6 +560,13 @@ func registerAPIWorkflowDefinitions(cfg config.Config, definitions *workflowappl
 	}); err != nil {
 		return err
 	}
+	healthDefinition, err := healthworkflow.RegisteredDefinition()
+	if err != nil {
+		return err
+	}
+	if err := definitions.Register(healthDefinition); err != nil {
+		return err
+	}
 	if cfg.ChatProvider != config.ChatProviderDisabled {
 		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
 			return err
@@ -528,5 +584,81 @@ func firstError(values ...error) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// configureCollectionHealth 组装 Collection/Health 的真实 API seam；构造失败时由调用方显式保持路由不可用。
+func configureCollectionHealth(database *postgres.Pool, cfg config.Config, collectionHandler **collectionhttp.Handler, healthHandler **healthhttp.Handler, runtime *workflowpostgres.RuntimeRepository) error {
+	if database == nil || collectionHandler == nil || healthHandler == nil {
+		return errors.New("collection and health composition dependencies are unavailable")
+	}
+	repository, err := collectionpostgres.NewRepository(database.DB())
+	if err != nil {
+		return err
+	}
+	service, err := collectionapplication.NewService(collectionapplication.Dependencies{Repository: repository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}})
+	if err != nil {
+		return err
+	}
+	membership, err := healthcollection.NewMembership(service)
+	if err != nil {
+		return err
+	}
+	*collectionHandler = collectionhttp.NewHandler(service, cfg.GraphQueryTimeout)
+
+	issueRepository, err := healthpostgres.NewSmartCollectionIssueRepository(database.DB(), membership, foundation.NewUUIDGenerator(nil))
+	if err != nil {
+		return err
+	}
+	readRepository, err := healthpostgres.NewReadRepository(database.DB())
+	if err != nil {
+		return err
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	cursor, err := healthapplication.NewIssueCursorCodec(key)
+	if err != nil {
+		return err
+	}
+	readService, err := healthapplication.NewIssueReadService(readRepository, cursor)
+	if err != nil {
+		return err
+	}
+
+	factReader, err := healthpostgres.NewFactReader(database.DB(), membership)
+	if err != nil {
+		return err
+	}
+	registry, err := healthdetector.NewDefaultRegistry(factReader, healthdetector.DefaultConfig())
+	if err != nil {
+		return err
+	}
+	var scanService *healthapplication.ScanService
+	var scheduleService *healthapplication.ScheduleService
+	if runtime != nil {
+		healthEvents, err := eventspostgres.NewStore(database.DB())
+		if err != nil {
+			return err
+		}
+		scanRepository, err := healthpostgres.NewScanRepository(database.DB(), runtime, healthEvents, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthcollection.DurableBindingVerifier{})
+		if err != nil {
+			return err
+		}
+		scanService, err = healthapplication.NewSmartCollectionScanService(scanRepository, scanRepository, registry, membership)
+		if err != nil {
+			return err
+		}
+		scheduleRepository, err := healthpostgres.NewScheduleRepository(database.DB(), foundation.NewUUIDGenerator(nil))
+		if err != nil {
+			return err
+		}
+		scheduleService, err = healthapplication.NewScheduleDispatcher(scheduleRepository, scanService, registry)
+		if err != nil {
+			return err
+		}
+	}
+	*healthHandler = healthhttp.NewHandler(readService, scanService, scheduleService, registry, issueRepository)
 	return nil
 }

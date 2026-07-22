@@ -93,8 +93,12 @@ type candidateScanAcceptanceResponse struct {
 }
 
 type candidateScanScopeResponse struct {
-	Kind    string `json:"kind"`
-	TopicID string `json:"topic_id"`
+	Kind              string `json:"kind"`
+	TopicID           string `json:"topic_id,omitempty"`
+	CollectionID      string `json:"collection_id,omitempty"`
+	CollectionVersion int64  `json:"collection_version,omitempty"`
+	QueryHash         string `json:"query_hash,omitempty"`
+	ReadModelRevision string `json:"read_model_revision,omitempty"`
 }
 
 type candidateScanErrorResponse struct {
@@ -203,9 +207,18 @@ func toCandidateScanResponse(scan graphdomain.SemanticLinkScan) candidateScanRes
 	if scan.LastError != nil {
 		lastError = &candidateScanErrorResponse{Stage: scan.LastError.Stage, Code: scan.LastError.Code, Retryable: scan.LastError.Retryable}
 	}
+	scope := candidateScanScopeResponse{Kind: string(scan.Scope.Type)}
+	if scan.Scope.Type == graphdomain.SemanticLinkScanScopeSmartCollection {
+		scope.CollectionID = scan.Scope.Ref
+		scope.CollectionVersion = scan.Scope.Version
+		scope.QueryHash = scan.Scope.QueryHash
+		scope.ReadModelRevision = scan.Scope.ReadModelRevision
+	} else {
+		scope.TopicID = scan.Scope.Ref
+	}
 	return candidateScanResponse{
 		ID: string(scan.ID), WorkspaceID: string(scan.WorkspaceID),
-		Scope:  candidateScanScopeResponse{Kind: string(scan.Scope.Type), TopicID: scan.Scope.Ref},
+		Scope:  scope,
 		Status: string(scan.Status), WorkflowRunID: string(scan.WorkflowRunID), Version: scan.Version,
 		StatusURL:  graphapp.SemanticLinkScanStatusURL(scan.WorkspaceID, scan.ID),
 		TotalCount: scan.TotalNodes, ProcessedCount: scan.ProcessedNodes, CandidateCount: scan.CandidateCount,

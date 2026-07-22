@@ -580,6 +580,16 @@ model_call：
 
 - workspace_id + fingerprint + active status。
 
+M7-03 的实际持久化模型使用稳定 `identity_hash` 找回逻辑 Issue，使用包含 Evidence/Object/Detector Version 的
+`fingerprint` 判断 unchanged 或 reopen；相同 fingerprint 只推进 `last_verified_at`，不改变业务 version、状态、
+Evidence 或检测时间。`ops.health_issue_observation`、`ops.health_issue_evidence` 和 append-only decision receipt
+保留历史；只有 detector/scope 完整覆盖后才能把本轮未出现的 active Issue 自动 RESOLVED。
+
+`ops.health_scan`、`ops.health_scan_detector` 保存 Workflow 绑定、scope snapshot、coverage、checkpoint、计数和
+终态；`ops.health_schedule` 保存默认关闭的 DAILY/WEEKLY/Cron 配置与持久 due/lease，命令 exact replay 由
+`ops.health_schedule_command` receipt 证明。`migrations/00025` 至 `00029` 还增加受影响事实 outbox、查询索引、
+append-only/复合 Workspace 约束和有业务数据时 SQLSTATE `55000` 的 guarded Down。
+
 ### review
 
 review_deck、review_card、review_schedule、review_session、review_answer。
@@ -606,6 +616,17 @@ Smart Collection 是保存的查询和视图配置，不复制任何 Domain 对�
 - 公共查询统一 cursor + limit；表格、列表和卡片必须复用同一 read model，不能各自实现过滤逻辑。
 - 结果随 Domain 状态变化重新计算；删除集合不删除知识。写入类批量操作只创建 Proposal/Workflow。
 - 查询定义的语义校验由 Collection Module 负责，AST 的结构和版本完整性由数据库约束/迁移负责。
+
+M7-03 已落地 `learning.smart_collection`、append-only command receipt 和统一 PostgreSQL read model。
+Collection create/update/archive 使用 Workspace-scoped `Idempotency-Key` 与 expected version；receipt 保存完整历史
+snapshot，后续更新或归档不能改变旧命令的 replay 响应。结果 cursor 绑定 Workspace、Collection/version 或
+canonical preview、query hash、sort、limit、read-model revision 和 keyset；篡改、跨请求、事实变化或进程重启
+必须返回 invalid/stale，不能回退为新第一页或静默重排。
+
+`core.workspace_read_model_revision` 按 Workspace 保存 `knowledge_revision`、`conflict_revision` 和
+`health_revision`。Canonical fact/Health Issue trigger 在同一事务中原子递增对应维度；Collection 后续页只做
+O(1) revision 校验，首屏/最终页仍执行完整 binding、count 和 keyset 约束。跨 Workspace move 同时使旧、新
+Workspace 失效；`00029` 的 Down 在存在业务数据时返回 SQLSTATE `55000`。
 
 ### artifact / artifact_revision
 

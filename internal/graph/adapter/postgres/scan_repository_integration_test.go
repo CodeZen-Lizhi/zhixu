@@ -482,13 +482,18 @@ func seedScanMembership(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceI
 		t.Fatal(err)
 	}
 	relationID := graphTestID(t)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'CLAIM',$3,'TOPIC',$4,'BELONGS_TO','CONFIRMED',0.9,$5,$6,'SOURCE_DERIVED','semantic scan fixture',1,$7,$7)`,
+	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,version,created_at,updated_at) VALUES($1,$2,'CLAIM',$3,'TOPIC',$4,'BELONGS_TO','SUGGESTED',0.9,$5,$6,1,$7,$7)`,
 		string(relationID), string(workspaceID), string(claimID), string(topicID), graphHash(fmt.Sprintf("scan-membership-%d-%s", index, claimID)), graphHash(fmt.Sprintf("scan-membership-set-%d-%s", index, claimID)), now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'semantic scan membership evidence',$6,$7,$8,$9,'SOURCE_DERIVED','semantic scan fixture',$10)`,
 		string(graphTestID(t)), string(workspaceID), string(relationID), string(provenance.sourceVersionID), string(provenance.sourceSpanID),
 		graphHash(fmt.Sprintf("scan-membership-evidence-%d-%s", index, claimID)), string(applicability.CanonicalJSON), applicability.SchemaVersion, applicability.Hash, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE core.relation
+SET status='CONFIRMED',confirmation_method='SOURCE_DERIVED',confirmation_ref='semantic scan fixture',version=2,updated_at=$3
+WHERE id=$1 AND workspace_id=$2`, string(relationID), string(workspaceID), now.Add(time.Microsecond)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -507,8 +512,8 @@ func (d scanCommitLossDB) Exec(ctx context.Context, sql string, args ...any) (pg
 	return d.pool.Exec(ctx, sql, args...)
 }
 
-func (d scanCommitLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := d.pool.Begin(ctx)
+func (d scanCommitLossDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
+	tx, err := d.pool.BeginTx(ctx, options)
 	if err != nil {
 		return nil, err
 	}
