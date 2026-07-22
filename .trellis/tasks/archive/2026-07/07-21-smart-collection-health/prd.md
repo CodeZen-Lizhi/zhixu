@@ -133,7 +133,7 @@ OpenAPI、生产 composition 与 Web 页面。未落地的 Document/Directory/Ta
 - [x] AC-11：`/collections`、`/collections/:id`、`/health` 完成严格 decoder、URL/query cache、三视图、Query Builder、overview、lazy Evidence、决策与 scan 恢复；桌面/移动浏览器 smoke 无 console error/overflow。
 - [x] AC-12：参考 fixture 下 Collection 首屏 P95 <= 2 秒且 EXPLAIN 命中预期索引；Health 分页查询无逐对象 N+1，取消及时释放资源。
 - [x] AC-13：全量 Go/Web/Make/OpenAPI/migration/integration/fault/browser/secret/Trellis 门禁通过，规范和权威文档与实际行为一致。
-- [ ] AC-14：主 Agent Go/general/SQL review 与独立 backend/frontend 跨层 review 无未关闭 P0-P2；工作提交、归档和 journal 完成且不 push。
+- [x] AC-14：主 Agent Go/general/SQL review 与独立 backend/frontend 跨层 review 无未关闭 P0-P2；工作提交、归档和 journal 完成且不 push。
 
 ## Out Of Scope
 
@@ -170,5 +170,5 @@ OpenAPI、生产 composition 与 Web 页面。未落地的 Document/Directory/Ta
 - Review：主 Agent 已执行 `go-review`、`code-review-and-quality`、`sql-code-review`；backend/SQL reviewer
   两轮复验与 frontend/cross-layer reviewer 最终复验均未发现未关闭 P0-P2。主审发现的跨 Workspace 反向 move
   锁顺序风险已通过 UUID 固定排序和真实 PostgreSQL 并发回归关闭。
-- AC-14（精确提交/归档/journal）在 Trellis Finish 阶段完成后勾选；
+- AC-14 已由主 Agent `go-review`、`code-review-and-quality`、`sql-code-review` 与独立 backend/frontend 复验关闭；工作提交 `9ac2a9d` 已创建，Trellis 归档和 journal 正在本轮 Finish bookkeeping 完成；
   不把 M7-04、Tag/Review/Directory owner、认证、Artifact/Review 批量动作或 M10 最终容量认证宣称为本任务完成。
