@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,7 +164,15 @@ func TestCollectionRepositoryLifecycleIdempotencyCASAndWorkspaceIsolation(t *tes
 	if _, err := service.List(ctx, collectionapp.ListQuery{WorkspaceID: otherWorkspaceID, Limit: 1, Cursor: firstPage.NextCursor}); !hasCollectionCode(err, collectionapp.ErrorCodeCursorInvalid) {
 		t.Fatalf("cross workspace list cursor err=%v", err)
 	}
-	tampered := firstPage.NextCursor[:len(firstPage.NextCursor)-1] + "x"
+	parts := strings.Split(firstPage.NextCursor, ".")
+	if len(parts) != 2 || parts[1] == "" {
+		t.Fatalf("invalid fixture cursor")
+	}
+	replacement := byte('A')
+	if parts[1][0] == replacement {
+		replacement = 'B'
+	}
+	tampered := parts[0] + "." + string(replacement) + parts[1][1:]
 	if _, err := service.List(ctx, collectionapp.ListQuery{WorkspaceID: workspaceID, Limit: 1, Cursor: tampered}); !hasCollectionCode(err, collectionapp.ErrorCodeCursorInvalid) {
 		t.Fatalf("tampered list cursor err=%v", err)
 	}
