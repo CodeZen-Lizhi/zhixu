@@ -202,6 +202,7 @@ type TargetLock interface {
 #### 3. Contracts
 
 - 目标必须是服务端 Workspace ID 下现存、规范相对 `.md/.markdown` 普通文件；父链/目标不能是 symlink，目标必须与 Workspace 根同 device 且归当前进程 owner。
+- LocalFS 在解析 Workspace 根目录前必须校验 `WorkspaceStore.GetWorkspaceByID` 返回对象的 `ID` 与请求 `workspace_id` 精确一致；不一致是内部事实源绑定错误，返回 `PROPOSAL_WORKSPACE_BINDING_INVALID`/`ConsistencyViolation`，不得继续读取或计算 Hash。
 - `.knowledge/locks/<sha256(device:inode)>.lock` 使用 `0600 + flock`；释放只 unlock/close，不 unlink。
 - temp/backup 与目标同目录，名称匹配 `.zhixu-writeback-*`，创建使用 `O_EXCL|0600`；Git local exclude 同时包含 `/.knowledge/` 与 `**/.zhixu-writeback-*`。
 - `Prepare` 必须通过正式 Markdown Parser、10 MiB 上限、Result Hash 和 `ComputeChangeHash(target,base,content)` 校验，并保留目标 POSIX mode。
@@ -214,6 +215,7 @@ type TargetLock interface {
 
 | 条件 | 稳定错误码 | 分类 | 是否重试/恢复 |
 |---|---|---|---|
+| Workspace Store 返回的对象 ID 与请求 `workspace_id` 不一致 | `PROPOSAL_WORKSPACE_BINDING_INVALID` | ConsistencyViolation | 否，修复 Store/调用绑定 |
 | Workspace/目标路径、扩展名或大小非法 | `WRITEBACK_TARGET_INVALID` / `WRITEBACK_TARGET_TOO_LARGE` | InvalidInput | 否 |
 | 父/目标 symlink、特殊文件、跨 device、owner 不匹配 | `WRITEBACK_TARGET_PARENT_UNSAFE` / `WRITEBACK_TARGET_UNSAFE` / `WRITEBACK_TARGET_CROSS_DEVICE` / `WRITEBACK_TARGET_OWNER_INVALID` | PermissionDenied | 否，修复文件边界后重试 |
 | 同一 device/inode 锁等待超时 | `WRITEBACK_TARGET_LOCK_TIMEOUT` | RetryableFailure | 是，退避并重新 Acquire |
@@ -238,7 +240,7 @@ Filesystem Adapter 只负责文件副作用与补偿，不消费 Approval/Git Au
 
 - Domain：路径/扩展名、10 MiB、Change Hash、Result Hash、locator 父目录、mode/token 和 Prepared→Applied 不可变绑定。
 - Parser Adapter：有效 Markdown、空内容、非法 UTF-8、NUL/控制字节、取消、nil/unsupported Parser 和输入不可变。
-- Filesystem Contract：父/目标 symlink、目录/FIFO/socket、跨 device/owner、mode、Base/identity conflict、独立 backup、restore replay、用户后续编辑、目标/temp/backup 同内容不同 inode 篡改和 Cleanup 幂等。
+- Filesystem Contract：父/目标 symlink、目录/FIFO/socket、跨 device/owner、mode、Base/identity conflict、Workspace Store 错绑（`CurrentHash` 与 `CurrentContent` 双路径）、独立 backup、restore replay、用户后续编辑、目标/temp/backup 同内容不同 inode 篡改和 Cleanup 幂等。
 - Fault：temp sync、backup sync、rename 已执行但报错、parent sync、result verify；断言 rename 前正式文件不变，unknown 时 `errors.Is(ErrWritebackManualRecoveryRequired)` 且 Applied 摘要有效。
 - Concurrency：helper subprocess 验证跨进程 flock、取消/超时、进程退出释放、hardlink 同 inode 和不同目标并行；锁用例执行 `-race -count=20`。
 
@@ -250,6 +252,9 @@ Correct: Acquire inode lock → Prepare/parser/temp fsync → final inode+Base C
 
 Wrong: 只比较 Hash/mode；用户把 Result 或 backup 替换为同内容新 inode 后仍自动 Restore/Cleanup。
 Correct: file_prepared 持久化 target/Result/backup 三个 opaque identity token；恢复逐一比较，任一 identity 漂移都保留现场并进入人工恢复。
+
+Wrong: 信任 Workspace Store 按 ID 返回的根目录对象，直接按其路径读取 Proposal 当前文件。
+Correct: 先比较返回对象 `ID == workspace_id`，不一致立即返回 `PROPOSAL_WORKSPACE_BINDING_INVALID`，不触碰文件系统。
 ```
 
 ### 7. Wrong vs Correct
@@ -426,3 +431,55 @@ Correct: 所有不可见绑定统一 RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND。
 - 副作用结果无法证明时只允许 UNKNOWN/ManualRecoveryRequired，不自动重试或标记成功。
 - Safe Writeback `RequireStarted` 只把真正 NotFound 映射为 `TOOL_TRUSTED_WRITE_AUDIT_MISSING`；ContextStale、Permission 和 retryable DB 错误必须保留原分类，防止 lease-loss 被伪装成缺审计。
 - Web Fetch policy 未持久接线时配置 enabled 返回 `WORKER_WEB_FETCH_POLICY_UNAVAILABLE`，且不得开始 DNS/Dial。
+
+## M9 Proposal Detail Success Contract
+
+### 1. Scope / Trigger
+
+- 修改 Proposal detail/create response DTO、Approval snapshot、OpenAPI Proposal 判别联合或前端严格 decoder 时应用。
+- 目标是区分“详情尚未审批”与“列表摘要未加载 Approval”，防止 Go `omitempty` 造成跨层契约漂移。
+
+### 2. Signatures
+
+```text
+GET /api/v1/proposals/{proposal_id}
+POST /api/v1/workspaces/{workspace_id}/proposals
+
+Proposal detail/create: approval: Approval | null  # required
+Proposal summary:       approval?: Approval        # optional, non-null
+```
+
+### 3. Contracts
+
+- `file_patch` 与 `knowledge_change` 两种 Proposal detail 都必须显式序列化 `approval`；未审批时为 `null`，
+  已审批时为与当前 Proposal、Revision 和 Change Hash 绑定的持久快照。
+- Detail 的 Go response tag 不得使用 `omitempty`；Summary 必须继续使用 `omitempty`，且出现时只能是合法对象。
+- OpenAPI 两个 detail schema 必须同时把 `approval` 声明为 required 和 nullable；前端缺字段时 fail closed。
+
+### 4. Validation & Error Matrix
+
+| Wire 状态 | Detail decoder | Summary decoder |
+|---|---|---|
+| `approval: null` | 接受，表示尚未审批 | 拒绝 |
+| `approval: { ... }` 且绑定一致 | 接受 | 接受 |
+| 缺少 `approval` | 拒绝 | 接受 |
+| Approval 与 Proposal/Revision/Change Hash 错绑 | 拒绝 | 拒绝 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：已批准详情返回完整 Approval snapshot，前后端共同校验当前 Revision 与 Change Hash 绑定。
+- Base：`ready_for_review` 详情返回显式 `approval: null`，列表摘要可以完全省略该字段。
+- Bad：detail DTO 使用 `json:"approval,omitempty"`，导致严格前端把合法未审批资源判为 `INVALID_RESPONSE`。
+
+### 6. Tests Required
+
+- Handler HTTP 回归分别断言未审批 `file_patch` 与 `knowledge_change` 的 JSON 含显式 null。
+- OpenAPI drift gate 断言两个 detail schema 均 required + nullable，Summary 保持 optional non-null。
+- 前端 decoder 覆盖 detail null/缺字段与 summary 省略/null，并运行 Go、Web、OpenAPI 全量门禁。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: detail 与 summary 共用 `omitempty`，让字段缺失同时代表“未审批”和“未加载”。
+Correct: detail 必需 nullable；summary optional non-null；HTTP、OpenAPI 与 decoder 用回归测试共同锁定。
+```

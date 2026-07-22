@@ -206,10 +206,26 @@ Knowledge Eligibility、结构化生成、Citation 与 Faithfulness 门禁后才
 Workflow 失败，不伪装成业务 Refusal。`allow_original_sources/allow_web` 当前没有可发布资格时显式拒绝，
 不会静默忽略。
 
+### M9 Workspace 业务列表
+
+M9-01 为页面增加三个 Workspace-scoped 只读投影，详情仍由各领域已有接口拥有：
+
+- `GET /api/v1/workspaces/{workspace_id}/source-versions`：按 security/ingestion/workflow/index/mime 筛选，
+  返回 Source Version、最新 Ingestion Attempt、Workflow 和 Active Index 选择状态。
+- `GET /api/v1/workspaces/{workspace_id}/proposals`：按 status、proposal_type、risk、created_after 筛选，
+  返回最新 Revision 与可选 Approval summary。
+- `GET /api/v1/workspaces/{workspace_id}/workflows`：按 status 筛选，返回持久 Run、Definition 和 waiting-human 摘要。
+
+三者均使用 `limit=1..100` 和最大 2048 字节 opaque keyset cursor。Cursor 必须绑定版本、资源 kind、Workspace、
+规范化筛选和最后 `(time,id)`；损坏、跨资源、跨 Workspace 或跨筛选复用返回 400，不能静默回到第一页。
+这些列表不创建 Dashboard 第二事实表，也不把 Workspace ID/cursor 当成认证凭据。
+
 ### Approval
 
 - 输入：proposal_revision、approved_change_hash、action。
 - 输出：Approval + Apply Workflow。
+- Proposal detail 的 `approval` 字段必须始终显式存在：未决定时为 `null`，决定后为与当前
+  Proposal/Revision/Change Hash 绑定的 Approval snapshot。Proposal summary 仍允许省略该字段，但不得返回显式 `null`。
 
 ### Workflow Control
 

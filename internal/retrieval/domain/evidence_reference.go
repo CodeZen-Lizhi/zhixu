@@ -33,7 +33,13 @@ type SourceVersionReference struct {
 	ByteSize          int64
 	MediaType         string
 	SecurityStatus    string
-	CapturedAt        time.Time
+	// IngestionStatus 是该 Source Version 最近一次摄取 Attempt 的持久状态；没有 Attempt 时为空。
+	IngestionStatus string
+	// WorkflowStatus 是最近一次摄取 Attempt 绑定的 Workflow Run 状态；没有绑定时为空。
+	WorkflowStatus string
+	// IndexStatus 是当前 Active Index 对该 Source 的 included/excluded 选择；没有 Active Index 事实时为空。
+	IndexStatus string
+	CapturedAt  time.Time
 }
 
 // SourceSpanReference 将 Source Version、Content Artifact、Parse Projection 与 Source Span 绑定为一个引用。
@@ -61,10 +67,34 @@ func ValidateSourceVersionReference(value SourceVersionReference) error {
 		!canonicalEvidenceText(value.LogicalName, maxEvidenceLogicalNameBytes) ||
 		!canonicalRelativePath(value.RelativePath) || !isCanonicalHash(value.ContentHash) || value.ByteSize < 0 ||
 		!canonicalEvidenceText(value.MediaType, maxEvidenceMediaTypeBytes) ||
-		!canonicalEvidenceText(value.SecurityStatus, maxEvidenceSecurityStatusBytes) || value.CapturedAt.IsZero() {
+		!canonicalEvidenceText(value.SecurityStatus, maxEvidenceSecurityStatusBytes) ||
+		!validOptionalIngestionStatus(value.IngestionStatus) || !validOptionalWorkflowStatus(value.WorkflowStatus) ||
+		!validOptionalIndexStatus(value.IndexStatus) || value.CapturedAt.IsZero() {
 		return inconsistent(ErrorCodeEvidenceReferenceInvalid, "source version reference metadata is invalid")
 	}
 	return nil
+}
+
+func validOptionalIngestionStatus(value string) bool {
+	switch value {
+	case "", "validating", "parsing", "parsed", "chunking", "chunked", "parse_failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func validOptionalWorkflowStatus(value string) bool {
+	switch value {
+	case "", "pending", "running", "waiting_for_human", "retry_wait", "paused", "succeeded", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func validOptionalIndexStatus(value string) bool {
+	return value == "" || value == "included" || value == "excluded"
 }
 
 // ValidateSourceSpanReference 校验 Source Span 的版本、Artifact、范围与解析契约。

@@ -105,6 +105,7 @@ source_version：
 
 - id。
 - source_id。
+- workspace_id：所属 Source Workspace 的持久镜像键，只用于隔离和有界列表查询。
 - content_artifact_id。
 - content_hash。
 - byte_size。
@@ -116,6 +117,13 @@ source_version：
 `security_status` 与 `parser_version` 是早期兼容字段，不能承载后置处理状态：Source Version 全行不可变。正式实现新增按 Workspace + content_hash 去重的不可变 Content Artifact，并由 Source Version 引用；原路径只保存 Provenance。
 
 约束：`content_artifact_id` 非空 FK；Repository 必须验证 Source、Source Version、Artifact 属于同一 Workspace。旧 Source Version 回填时若原路径内容与记录哈希不一致，迁移必须停止并报告冲突，不能捕获新内容冒充旧版本。
+M9 的 `workspace_id` 不建立第二套归属状态：新写入必须与 `core.source.workspace_id` 一致，最终由
+`(source_id,workspace_id)` 和 `(workspace_id,content_artifact_id)` 两条复合外键约束，错绑写入和后续漂移均被拒绝。
+
+`migrations/00030` 至 `00033` 按 Expand → concurrent indexes → exact backfill → Contract 执行：先增加 nullable
+`source_version.workspace_id` 与 `proposal.risk_level`，再建立 Workspace keyset/read-model 索引，原子回填并核验历史
+所有权，最后设为无默认 `NOT NULL`、验证复合外键并收紧不可变 trigger。存在 Proposal 或 Source Version 业务数据时，
+相关 Down 以 SQLSTATE `55000` 拒绝，发布回滚使用兼容应用和前向修复，不能静默丢弃已持久事实。
 
 唯一约束：
 
@@ -410,8 +418,11 @@ proposal：
 - target_refs JSONB。
 - base_versions JSONB。
 - workflow_run_id。
-- risk_level。
+- risk_level：审批、筛选和 API 响应的唯一等级事实，只允许 `CRITICAL|HIGH|MEDIUM|LOW`。
 - version。
+
+`risk_level` 与 Revision 自由文本 `risk` 相互独立；新 Proposal 必须显式提交并纳入请求 Hash，后续状态迁移不得
+修改。历史 `knowledge_change` 固定回填为 `HIGH`，其他历史值只保留精确 canonical token，否则保守回填 `HIGH`。
 
 proposal_revision：
 

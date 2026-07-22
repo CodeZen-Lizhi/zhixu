@@ -134,10 +134,10 @@ func TestRepositoryWorkspaceAndSourceVersionLifecycle(t *testing.T) {
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO core.source_version (
-			id, source_id, content_artifact_id, content_hash, byte_size, mime_type,
+			id, source_id, workspace_id, content_artifact_id, content_hash, byte_size, mime_type,
 			original_content_location, security_status, captured_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		"35000000-0000-4000-8000-000000000001", string(first.Source.ID), string(first.Artifact.ID), strings.Repeat("c", 64), int64(12), "text/markdown", "sources/mismatch.md", "pending", now); err == nil {
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		"35000000-0000-4000-8000-000000000001", string(first.Source.ID), string(first.Source.WorkspaceID), string(first.Artifact.ID), strings.Repeat("c", 64), int64(12), "text/markdown", "sources/mismatch.md", "pending", now); err == nil {
 		t.Fatal("source version accepted mismatched artifact metadata")
 	}
 }
@@ -172,6 +172,7 @@ func TestRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T)
 	for _, statement := range []string{
 		`ALTER TABLE core.source_version DISABLE TRIGGER source_version_verify_artifact_workspace`,
 		`ALTER TABLE core.source_version DROP CONSTRAINT source_version_content_artifact_required`,
+		`ALTER TABLE core.source_version DROP CONSTRAINT fk_source_version_artifact_workspace`,
 	} {
 		if _, err := tx.Exec(ctx, statement); err != nil {
 			t.Fatal(err)
@@ -199,10 +200,10 @@ func TestRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO core.source_version (
-			id,source_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
+			id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
 		) VALUES
-			($1,$3,NULL,$5,7,'text/markdown','legacy.md','pending',$7),
-			($2,$3,$4,$6,7,'text/markdown','legacy.md','pending',$7)`, legacyVersionID, crossScopeVersionID, sourceID, otherArtifactID, legacyHash, crossScopeHash, now); err != nil {
+			($1,$3,$8,NULL,$5,7,'text/markdown','legacy.md','pending',$7),
+			($2,$3,$8,$4,$6,7,'text/markdown','legacy.md','pending',$7)`, legacyVersionID, crossScopeVersionID, sourceID, otherArtifactID, legacyHash, crossScopeHash, now, workspaceID); err != nil {
 		t.Fatal(err)
 	}
 	_, err = repository.GetSourceMaterial(ctx, mustID(t, legacyVersionID))

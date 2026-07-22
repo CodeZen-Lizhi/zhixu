@@ -378,10 +378,24 @@ func seedDispatcherWriteback(t *testing.T, ctx context.Context, pool *pgxpool.Po
 	resultHash := dispatcherHash(label + "-result")
 	content := "dispatcher content " + label
 	changeHash := ccdomain.ComputeChangeHash(targetPath, baseHash, content)
+	requestHash, err := ccdomain.ComputeRequestHashWithRiskLevel(
+		workspaceID,
+		targetPath,
+		baseHash,
+		content,
+		"verified",
+		ccdomain.ProposalRiskLevelLow,
+		"low",
+		"revert",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	proposal := ccdomain.Proposal{
 		ID: proposalID, WorkspaceID: workspaceID, TargetPath: targetPath,
 		IdempotencyKey: "proposal-" + string(proposalID),
-		RequestHash:    ccdomain.ComputeRequestHash(workspaceID, targetPath, baseHash, content, "verified", "low", "revert"),
+		RiskLevel:      ccdomain.ProposalRiskLevelLow,
+		RequestHash:    requestHash,
 		Status:         ccdomain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
 		Revision: ccdomain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: targetPath,
 			BaseHash: baseHash, Content: content, EvidenceSummary: "verified", Risk: "low", RollbackPlan: "revert", ChangeHash: changeHash, CreatedAt: now},

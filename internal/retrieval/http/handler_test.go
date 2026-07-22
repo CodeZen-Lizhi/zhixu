@@ -226,7 +226,8 @@ func TestHandlerOpensSourceVersionAndImmutableSpan(t *testing.T) {
 		t.Fatalf("source version status=%d response_bytes=%d", versionResponse.Code, versionResponse.Body.Len())
 	}
 	var version sourceVersionResponse
-	if err := json.Unmarshal(versionResponse.Body.Bytes(), &version); err != nil || version.SourceVersionID != string(reference.SourceVersion.SourceVersionID) || version.RelativePath != "docs/evidence.md" {
+	if err := json.Unmarshal(versionResponse.Body.Bytes(), &version); err != nil || version.SourceVersionID != string(reference.SourceVersion.SourceVersionID) || version.RelativePath != "docs/evidence.md" ||
+		version.IngestionStatus != "parsed" || version.WorkflowStatus != "running" || version.IndexStatus != "included" {
 		t.Fatalf("unexpected source version response: source_version_id=%q relative_path=%q err=%v", version.SourceVersionID, version.RelativePath, err)
 	}
 
@@ -339,6 +340,7 @@ func handlerSourceSpanReference() domain.SourceSpanReference {
 			SourceVersionID: "93000000-0000-4000-8000-000000000003", ContentArtifactID: "93000000-0000-4000-8000-000000000004",
 			SourceType: "local_file", LogicalName: "evidence.md", RelativePath: "docs/evidence.md",
 			ContentHash: strings.Repeat("a", 64), ByteSize: 64, MediaType: "text/markdown", SecurityStatus: "passed",
+			IngestionStatus: "parsed", WorkflowStatus: "running", IndexStatus: "included",
 			CapturedAt: time.Date(2026, 7, 19, 1, 2, 3, 0, time.UTC),
 		},
 		ParseProjectionID: "93000000-0000-4000-8000-000000000005",

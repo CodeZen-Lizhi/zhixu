@@ -71,6 +71,18 @@ func (s *Service) Get(ctx context.Context, id foundation.ID) (domain.Run, error)
 	return s.repository.GetRun(ctx, id)
 }
 
+// ListRuns 返回按更新时间和 ID 倒序排列的 Workflow 摘要页。
+func (s *Service) ListRuns(ctx context.Context, query domain.RunListQuery) ([]domain.RunListItem, bool, error) {
+	if query.WorkspaceID == "" || query.Limit < 1 || query.Limit > 100 {
+		return nil, false, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_LIST_INVALID", false, errors.New("invalid workflow list scope"))
+	}
+	repository, ok := s.repository.(domain.RunListRepository)
+	if !ok {
+		return nil, false, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_LIST_UNAVAILABLE", true, errors.New("workflow list repository is unavailable"))
+	}
+	return repository.ListRuns(ctx, query)
+}
+
 // Claim leases a pending node or reclaims an expired running node.
 func (s *Service) Claim(ctx context.Context, nodeID foundation.ID, owner string, lease time.Duration) (domain.NodeRun, error) {
 	if nodeID == "" || strings.TrimSpace(owner) == "" || lease <= 0 {

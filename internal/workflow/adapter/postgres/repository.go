@@ -92,6 +92,63 @@ func (r *Repository) GetRun(ctx context.Context, id foundation.ID) (domain.Run, 
 	return run, nil
 }
 
+// ListRuns 返回 Workspace 绑定的 Workflow Run 摘要页。
+func (r *Repository) ListRuns(ctx context.Context, request domain.RunListQuery) ([]domain.RunListItem, bool, error) {
+	if request.WorkspaceID == "" || request.Limit < 1 || request.Limit > 100 {
+		return nil, false, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_LIST_INVALID", false, errors.New("invalid workflow list scope"))
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, false, classify(err, "WORKFLOW_LIST_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	query, args := buildRunListQuery(request)
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, false, classify(err, "WORKFLOW_LIST_QUERY_FAILED")
+	}
+	defer rows.Close()
+	items := make([]domain.RunListItem, 0, request.Limit)
+	for rows.Next() {
+		var id, scope, key, status string
+		var definitionVersion, version int64
+		var createdAt, updatedAt time.Time
+		var completedAt, pauseRequestedAt, cancelRequestedAt *time.Time
+		var waiting bool
+		if err := rows.Scan(&id, &scope, &key, &definitionVersion, &status, &version, &createdAt, &updatedAt, &completedAt, &pauseRequestedAt, &cancelRequestedAt, &waiting); err != nil {
+			return nil, false, classify(err, "WORKFLOW_LIST_SCAN_FAILED")
+		}
+		items = append(items, domain.RunListItem{Run: domain.Run{ID: foundation.ID(id), WorkspaceID: foundation.ID(scope), Status: domain.RunStatus(status), Version: version, CreatedAt: createdAt, UpdatedAt: updatedAt, CompletedAt: completedAt, PauseRequestedAt: pauseRequestedAt, CancelRequestedAt: cancelRequestedAt}, DefinitionKey: key, DefinitionVersion: definitionVersion, WaitingForHuman: waiting})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, classify(err, "WORKFLOW_LIST_ROWS_FAILED")
+	}
+	hasMore := len(items) > request.Limit
+	if hasMore {
+		items = items[:request.Limit]
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, classify(err, "WORKFLOW_LIST_COMMIT_FAILED")
+	}
+	return items, hasMore, nil
+}
+
+func buildRunListQuery(request domain.RunListQuery) (string, []any) {
+	query := `SELECT r.id::text,r.workspace_id::text,d.key,d.version,r.status,r.version,r.created_at,r.updated_at,r.completed_at,r.pause_requested_at,r.cancel_requested_at,EXISTS(SELECT 1 FROM workflow.human_task h WHERE h.run_id=r.id AND h.status='pending') FROM workflow.run r JOIN workflow.definition d ON d.id=r.definition_id AND d.workspace_id=r.workspace_id WHERE r.workspace_id=$1`
+	args := []any{string(request.WorkspaceID)}
+	if request.Status != "" {
+		args = append(args, string(request.Status))
+		query += ` AND r.status=$` + fmt.Sprint(len(args))
+	}
+	if request.CursorTime != nil {
+		args = append(args, request.CursorTime.UTC(), string(request.CursorID))
+		query += ` AND (r.updated_at,r.id)<($` + fmt.Sprint(len(args)-1) + `,$` + fmt.Sprint(len(args)) + `)`
+	}
+	query += ` ORDER BY r.updated_at DESC,r.id DESC LIMIT $` + fmt.Sprint(len(args)+1)
+	args = append(args, request.Limit+1)
+	return query, args
+}
+
 // ClaimNode leases a pending node or reclaims a node after its lease expired.
 func (r *Repository) ClaimNode(ctx context.Context, id foundation.ID, owner string, now, until time.Time) (domain.NodeRun, error) {
 	tx, err := r.db.Begin(ctx)
@@ -276,7 +333,7 @@ func (r *Repository) SubmitHumanTask(ctx context.Context, id foundation.ID, targ
 	return persisted, nil
 }
 
-const runColumns = `id::text,workspace_id::text,definition_id::text,status,input,output,idempotency_key,request_hash,version,created_at,updated_at,completed_at`
+const runColumns = `id::text,workspace_id::text,definition_id::text,status,input,output,idempotency_key,request_hash,version,created_at,updated_at,completed_at,pause_requested_at,cancel_requested_at`
 const runSelect = `SELECT ` + runColumns + ` FROM workflow.run`
 const nodeColumns = `id::text,run_id::text,node_key,node_type,status,attempt,input,output,idempotency_key,input_schema_version,output_schema_version,dispatch_no,lease_owner,lease_until,version,created_at,updated_at,completed_at`
 const nodeSelect = `SELECT ` + nodeColumns + ` FROM workflow.node_run`
@@ -313,7 +370,7 @@ func scanRun(row pgx.Row) (domain.Run, error) {
 	var id, w, d string
 	var output []byte
 	var idempotencyKey, requestHash *string
-	err := row.Scan(&id, &w, &d, &r.Status, &r.Input, &output, &idempotencyKey, &requestHash, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
+	err := row.Scan(&id, &w, &d, &r.Status, &r.Input, &output, &idempotencyKey, &requestHash, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.PauseRequestedAt, &r.CancelRequestedAt)
 	if err != nil {
 		return r, err
 	}

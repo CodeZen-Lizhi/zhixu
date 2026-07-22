@@ -2,6 +2,7 @@ package changecontrolhttp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -31,26 +32,56 @@ const (
 func TestCreateProposalContract(t *testing.T) {
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	service := &fakeService{proposal: domain.Proposal{
-		ID: testProposalID, WorkspaceID: testWorkspaceID, TargetPath: "notes/a.md", Status: domain.StatusReady,
+		ID: testProposalID, WorkspaceID: testWorkspaceID, TargetPath: "notes/a.md", RiskLevel: domain.ProposalRiskLevelLow, Status: domain.StatusReady,
 		CreatedAt: now, UpdatedAt: now,
-		Revision: domain.Revision{ID: testRevisionID, ProposalID: testProposalID, RevisionNo: 1, TargetPath: "notes/a.md", BaseHash: testChangeHash, Content: "new", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r", ChangeHash: testChangeHash, CreatedAt: now},
+		Revision: domain.Revision{ID: testRevisionID, ProposalID: testProposalID, RevisionNo: 1, TargetPath: "notes/a.md", BaseHash: testChangeHash, Content: "new", EvidenceSummary: "e", Risk: "reviewer narrative", RollbackPlan: "r", ChangeHash: testChangeHash, CreatedAt: now},
 	}}
-	recorder := serve(t, service, http.MethodPost, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", `{"target_path":"notes/a.md","base_hash":"`+testChangeHash+`","content":"new","evidence_summary":"e","risk":"low","rollback_plan":"r"}`)
+	recorder := serve(t, service, http.MethodPost, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", `{"target_path":"notes/a.md","base_hash":"`+testChangeHash+`","content":"new","evidence_summary":"e","risk_level":"LOW","risk":"reviewer narrative","rollback_plan":"r"}`)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+	body := append([]byte(nil), recorder.Body.Bytes()...)
 	var response proposalResponse
 	decode(t, recorder, &response)
-	if response.ID != string(testProposalID) || service.create.WorkspaceID != testWorkspaceID || service.create.TargetPath != "notes/a.md" {
+	if response.ProposalType != string(domain.ProposalTypeFilePatch) || response.ID != string(testProposalID) || response.RiskLevel != string(domain.ProposalRiskLevelLow) || service.create.WorkspaceID != testWorkspaceID || service.create.TargetPath != "notes/a.md" || service.create.RiskLevel != domain.ProposalRiskLevelLow || service.create.Risk != "reviewer narrative" {
 		t.Fatalf("response=%#v command=%#v", response, service.create)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	approval, exists := raw["approval"]
+	if !exists || approval != nil {
+		t.Fatalf("created proposal approval must be explicit null: %#v", raw)
 	}
 }
 
 func TestCreateProposalReplayReturnsOK(t *testing.T) {
-	service := &fakeService{proposal: domain.Proposal{ID: testProposalID}, replayed: true}
-	recorder := serve(t, service, http.MethodPost, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", `{"target_path":"notes/a.md","base_hash":"`+testChangeHash+`","content":"new","evidence_summary":"e","risk":"low","rollback_plan":"r"}`)
+	service := &fakeService{proposal: domain.Proposal{ID: testProposalID, RiskLevel: domain.ProposalRiskLevelLow}, replayed: true}
+	recorder := serve(t, service, http.MethodPost, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", `{"target_path":"notes/a.md","base_hash":"`+testChangeHash+`","content":"new","evidence_summary":"e","risk_level":"LOW","risk":"reviewer narrative","rollback_plan":"r"}`)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestCreateProposalRequiresExactRiskLevel(t *testing.T) {
+	tests := []struct {
+		name      string
+		riskField string
+	}{
+		{name: "missing", riskField: ""},
+		{name: "lowercase", riskField: `,"risk_level":"low"`},
+		{name: "surrounding whitespace", riskField: `,"risk_level":" LOW "`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeService{}
+			body := `{"target_path":"notes/a.md","base_hash":"` + testChangeHash + `","content":"new","evidence_summary":"e","risk":"free text","rollback_plan":"r"` + test.riskField + `}`
+			recorder := serve(t, service, http.MethodPost, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", body)
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "PROPOSAL_RISK_LEVEL_INVALID") || service.createCalls != 0 {
+				t.Fatalf("status=%d calls=%d body=%s", recorder.Code, service.createCalls, recorder.Body.String())
+			}
+		})
 	}
 }
 
@@ -78,7 +109,7 @@ func TestApprovalAndPreflightContracts(t *testing.T) {
 	if approval.Code != http.StatusCreated || service.decision != domain.DecisionApproved {
 		t.Fatalf("approval status=%d body=%s", approval.Code, approval.Body.String())
 	}
-	var responseApproval approvalResponse
+	var responseApproval approvalDecisionResponse
 	decode(t, approval, &responseApproval)
 	if responseApproval.ApprovedGitHead == nil || *responseApproval.ApprovedGitHead != strings.ToLower(testApprovedGitHead) || responseApproval.WorkflowRunID != string(testWorkflowRunID) || responseApproval.WorkflowStatusURL != "/api/v1/workflows/"+string(testWorkflowRunID) || responseApproval.DispatchStatus != string(application.DispatchStatusQueued) {
 		t.Fatalf("approval response=%#v", responseApproval)
@@ -95,6 +126,136 @@ func TestApprovalAndPreflightContracts(t *testing.T) {
 	if _, exists := response["eligible"]; exists {
 		t.Fatalf("deprecated authorization field exists: %#v", response)
 	}
+}
+
+func TestProposalCurrentContentContract(t *testing.T) {
+	service := &fakeService{currentContent: application.ProposalCurrentContent{
+		ProposalID: testProposalID, WorkspaceID: testWorkspaceID, TargetPath: "notes/a.md", Content: "current",
+		CurrentHash: testChangeHash, BaseHash: testChangeHash, BaseHashMatch: true,
+	}}
+	recorder := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID)+"/current-content", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control=%q", recorder.Header().Get("Cache-Control"))
+	}
+	var response proposalCurrentContentResponse
+	decode(t, recorder, &response)
+	if response.ProposalID != string(testProposalID) || response.WorkspaceID != string(testWorkspaceID) || response.Content != "current" || !response.BaseHashMatch {
+		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestProposalListBindsFiltersToCursor(t *testing.T) {
+	now := time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC)
+	service := &fakeService{listItems: []domain.ProposalListItem{{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelLow, RevisionID: testRevisionID, CreatedAt: now, UpdatedAt: now}}, listHasMore: true}
+	first := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?status=ready_for_review&proposal_type=file_patch&limit=1", "")
+	if first.Code != http.StatusOK || service.listQuery.Status != domain.StatusReady || service.listQuery.Type != domain.ProposalTypeFilePatch {
+		t.Fatalf("status=%d query=%+v body=%s", first.Code, service.listQuery, first.Body.String())
+	}
+	var page proposalPageResponse
+	decode(t, first, &page)
+	legacyCursor := cursorWithoutProposalKind(t, page.NextCursor)
+	legacy := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?status=ready_for_review&proposal_type=file_patch&limit=1&cursor="+legacyCursor, "")
+	if legacy.Code != http.StatusBadRequest || service.listCalls != 1 {
+		t.Fatalf("legacy status=%d calls=%d body=%s", legacy.Code, service.listCalls, legacy.Body.String())
+	}
+	second := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?status=rejected&proposal_type=file_patch&limit=1&cursor="+page.NextCursor, "")
+	if second.Code != http.StatusBadRequest || service.listCalls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", second.Code, service.listCalls, second.Body.String())
+	}
+}
+
+func TestProposalListRejectsLowercaseRiskFilter(t *testing.T) {
+	service := &fakeService{listItems: []domain.ProposalListItem{{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID}}}
+	recorder := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?risk=high", "")
+	if recorder.Code != http.StatusBadRequest || service.listCalls != 0 {
+		t.Fatalf("status=%d risk=%q body=%s", recorder.Code, service.listQuery.RiskLevel, recorder.Body.String())
+	}
+}
+
+func TestProposalListRejectsPaddedRiskFilter(t *testing.T) {
+	service := &fakeService{listItems: []domain.ProposalListItem{{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID}}}
+	recorder := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?risk=%20HIGH%20", "")
+	if recorder.Code != http.StatusBadRequest || service.listCalls != 0 {
+		t.Fatalf("status=%d risk=%q body=%s", recorder.Code, service.listQuery.RiskLevel, recorder.Body.String())
+	}
+}
+
+func TestProposalListAcceptsUppercaseRiskFilter(t *testing.T) {
+	service := &fakeService{listItems: []domain.ProposalListItem{{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID}}}
+	recorder := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?risk=HIGH", "")
+	if recorder.Code != http.StatusOK || service.listQuery.RiskLevel != domain.ProposalRiskLevelHigh {
+		t.Fatalf("status=%d risk=%q body=%s", recorder.Code, service.listQuery.RiskLevel, recorder.Body.String())
+	}
+}
+
+func TestProposalListIncludesLegalDurableApprovalBindings(t *testing.T) {
+	now := time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC)
+	approvedGitHead := testApprovedGitHead
+	service := &fakeService{listItems: []domain.ProposalListItem{
+		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelLow, RevisionID: testRevisionID, ChangeHash: testChangeHash, CreatedAt: now, UpdatedAt: now},
+		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusRejected, RiskLevel: domain.ProposalRiskLevelLow, RevisionID: testRevisionID, ChangeHash: testChangeHash, Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionRejected, DecidedAt: now}, CreatedAt: now, UpdatedAt: now},
+		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusApproved, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID, ChangeHash: testChangeHash, Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now}, WorkflowRunID: proposalWorkflowRunID(testWorkflowRunID), CreatedAt: now, UpdatedAt: now},
+		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeKnowledgeChange, Status: domain.StatusApproved, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID, ChangeHash: testChangeHash, Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, DecidedAt: now}, CreatedAt: now, UpdatedAt: now},
+	}}
+	recorder := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Items []map[string]any `json:"items"`
+	}
+	decode(t, recorder, &response)
+	if len(response.Items) != 4 {
+		t.Fatalf("items=%#v", response.Items)
+	}
+	if _, exists := response.Items[0]["approval"]; exists {
+		t.Fatalf("unapproved item contains approval: %#v", response.Items[0])
+	}
+	rejected := response.Items[1]["approval"].(map[string]any)
+	for _, field := range []string{"approved_git_head", "workflow_run_id", "workflow_status_url", "dispatch_status"} {
+		if _, exists := rejected[field]; exists {
+			t.Fatalf("rejected approval contains %s: %#v", field, rejected)
+		}
+	}
+	approved := response.Items[2]["approval"].(map[string]any)
+	if approved["workflow_run_id"] != string(testWorkflowRunID) || approved["workflow_status_url"] != "/api/v1/workflows/"+string(testWorkflowRunID) || approved["approved_git_head"] != strings.ToLower(testApprovedGitHead) {
+		t.Fatalf("approved file patch binding=%#v", approved)
+	}
+	if _, exists := approved["dispatch_status"]; exists {
+		t.Fatalf("durable approval snapshot contains dispatch_status: %#v", approved)
+	}
+	knowledge := response.Items[3]["approval"].(map[string]any)
+	for _, field := range []string{"approved_git_head", "workflow_run_id", "workflow_status_url", "dispatch_status"} {
+		if _, exists := knowledge[field]; exists {
+			t.Fatalf("knowledge approval contains %s: %#v", field, knowledge)
+		}
+	}
+}
+
+func proposalWorkflowRunID(value foundation.ID) *foundation.ID {
+	return &value
+}
+
+func cursorWithoutProposalKind(t *testing.T, cursor string) string {
+	t.Helper()
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	delete(payload, "version")
+	delete(payload, "kind")
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
 func TestApprovalResponseOmitsWorkflowFieldsForRejected(t *testing.T) {
@@ -124,18 +285,19 @@ func TestApprovalExactReplayReturnsOKAndSameWorkflow(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	var response approvalResponse
+	var response approvalDecisionResponse
 	decode(t, recorder, &response)
 	if response.WorkflowRunID != string(testWorkflowRunID) || response.DispatchStatus != string(application.DispatchStatusReplayed) {
 		t.Fatalf("response=%#v", response)
 	}
 }
 
-func TestProposalResponseIncludesApprovalGitHead(t *testing.T) {
+func TestProposalResponseIncludesDurableApprovalWorkflowWithoutDispatchStatus(t *testing.T) {
 	now := time.Date(2026, 7, 17, 8, 0, 0, 0, time.UTC)
 	approvedGitHead := strings.Repeat("a", 64)
+	workflowRunID := testWorkflowRunID
 	service := &fakeService{proposal: domain.Proposal{
-		ID: testProposalID, WorkspaceID: testWorkspaceID, TargetPath: "notes/a.md", Status: domain.StatusApproved,
+		ID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, RiskLevel: domain.ProposalRiskLevelHigh, TargetPath: "notes/a.md", Status: domain.StatusApproved, WorkflowRunID: &workflowRunID,
 		CreatedAt: now, UpdatedAt: now,
 		Revision: domain.Revision{ID: testRevisionID, ProposalID: testProposalID, RevisionNo: 1, TargetPath: "notes/a.md", BaseHash: testChangeHash, Content: "new", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r", ChangeHash: testChangeHash, CreatedAt: now},
 		Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now},
@@ -144,10 +306,46 @@ func TestProposalResponseIncludesApprovalGitHead(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+	body := append([]byte(nil), recorder.Body.Bytes()...)
 	var response proposalResponse
 	decode(t, recorder, &response)
-	if response.Approval == nil || response.Approval.ApprovedGitHead == nil || *response.Approval.ApprovedGitHead != approvedGitHead {
+	if response.Approval == nil || response.Approval.ApprovedGitHead == nil || *response.Approval.ApprovedGitHead != approvedGitHead || response.Approval.WorkflowRunID != string(testWorkflowRunID) || response.Approval.WorkflowStatusURL != "/api/v1/workflows/"+string(testWorkflowRunID) {
 		t.Fatalf("response=%#v", response)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["proposal_type"] != string(domain.ProposalTypeFilePatch) {
+		t.Fatalf("file patch discriminator missing: %#v", raw)
+	}
+	approval := raw["approval"].(map[string]any)
+	if _, exists := approval["dispatch_status"]; exists {
+		t.Fatalf("durable approval snapshot contains dispatch_status: %#v", approval)
+	}
+}
+
+func TestFilePatchProposalDetailIncludesExplicitNullApproval(t *testing.T) {
+	now := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
+	service := &fakeService{proposal: domain.Proposal{
+		ID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch,
+		RiskLevel: domain.ProposalRiskLevelLow, TargetPath: "notes/a.md", Status: domain.StatusReady,
+		CreatedAt: now, UpdatedAt: now,
+		Revision: domain.Revision{
+			ID: testRevisionID, ProposalID: testProposalID, RevisionNo: 1, TargetPath: "notes/a.md",
+			BaseHash: testChangeHash, Content: "new", EvidenceSummary: "evidence", Risk: "low",
+			RollbackPlan: "revert", ChangeHash: testChangeHash, CreatedAt: now,
+		},
+	}}
+	recorder := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID), "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	decode(t, recorder, &response)
+	approval, exists := response["approval"]
+	if !exists || approval != nil {
+		t.Fatalf("ready file patch approval must be explicit null: %#v", response)
 	}
 }
 
@@ -178,7 +376,7 @@ func TestKnowledgeChangeProposalUsesDiscriminatedTypedResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := &fakeService{proposal: domain.Proposal{
-		ID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeKnowledgeChange,
+		ID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeKnowledgeChange, RiskLevel: domain.ProposalRiskLevelHigh,
 		Status: domain.StatusReady, CreatedAt: now, UpdatedAt: now,
 		Revision: domain.Revision{
 			ID: testRevisionID, ProposalID: testProposalID, RevisionNo: 1,
@@ -198,6 +396,10 @@ func TestKnowledgeChangeProposalUsesDiscriminatedTypedResponse(t *testing.T) {
 	if _, exists := response["target_path"]; exists {
 		t.Fatalf("knowledge proposal leaked file target: %#v", response)
 	}
+	approval, exists := response["approval"]
+	if !exists || approval != nil {
+		t.Fatalf("ready knowledge change approval must be explicit null: %#v", response)
+	}
 	revision, ok := response["revision"].(map[string]any)
 	if !ok || revision["schema_version"] != domain.KnowledgeChangeSchemaVersion {
 		t.Fatalf("revision=%#v", response["revision"])
@@ -207,6 +409,25 @@ func TestKnowledgeChangeProposalUsesDiscriminatedTypedResponse(t *testing.T) {
 		changeSet["source"].(map[string]any)["version"] != float64(3) ||
 		changeSet["target"].(map[string]any)["version"] != float64(5) {
 		t.Fatalf("change_set=%#v", changeSet)
+	}
+}
+
+func TestProposalResponseRejectsInvalidPersistedRiskLevel(t *testing.T) {
+	service := &fakeService{proposal: domain.Proposal{ID: testProposalID, WorkspaceID: testWorkspaceID, RiskLevel: "high"}}
+	recorder := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID), "")
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "PROPOSAL_RISK_LEVEL_INVALID") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestProposalResponseRejectsNonHighKnowledgeRiskLevel(t *testing.T) {
+	service := &fakeService{proposal: domain.Proposal{
+		ID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeKnowledgeChange,
+		RiskLevel: domain.ProposalRiskLevelMedium,
+	}}
+	recorder := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID), "")
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "PROPOSAL_RISK_LEVEL_INVALID") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -246,9 +467,26 @@ type fakeService struct {
 	create         application.CreateCommand
 	decision       domain.Decision
 	replayed       bool
+	currentContent application.ProposalCurrentContent
+	listItems      []domain.ProposalListItem
+	listHasMore    bool
+	listQuery      domain.ProposalListQuery
+	listCalls      int
+	createCalls    int
+}
+
+func (f *fakeService) ListProposals(_ context.Context, query domain.ProposalListQuery) ([]domain.ProposalListItem, bool, error) {
+	f.listCalls++
+	f.listQuery = query
+	return append([]domain.ProposalListItem(nil), f.listItems...), f.listHasMore, f.err
+}
+
+func (f *fakeService) GetProposalCurrentContent(context.Context, foundation.ID) (application.ProposalCurrentContent, error) {
+	return f.currentContent, f.err
 }
 
 func (f *fakeService) CreateProposal(_ context.Context, command application.CreateCommand) (application.CreateResult, error) {
+	f.createCalls++
 	f.create = command
 	return application.CreateResult{Proposal: f.proposal, Replayed: f.replayed}, f.err
 }

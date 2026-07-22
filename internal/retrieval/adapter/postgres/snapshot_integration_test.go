@@ -397,8 +397,8 @@ func seedSnapshotSourceVersionForSourceContract(
 		t.Fatal(err)
 	}
 	if _, err := database.Exec(ctx, `INSERT INTO core.source_version(
-		id,source_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
-	) VALUES($1,$2,$3,$4,$5,'text/plain',$6,'passed',$7)`, string(versionID), string(sourceID), string(artifactID), artifactHash,
+		id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
+	) VALUES($1,$2,$3,$4,$5,$6,'text/plain',$7,'passed',$8)`, string(versionID), string(sourceID), string(workspaceID), string(artifactID), artifactHash,
 		int64(len(content)), fmt.Sprintf("notes/%d.txt", ordinal), capturedAt); err != nil {
 		t.Fatal(err)
 	}
@@ -477,8 +477,8 @@ func seedSnapshotSourceSharingProjection(
 		t.Fatal(err)
 	}
 	if _, err := database.Exec(ctx, `INSERT INTO core.source_version(
-		id,source_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
-	) VALUES($1,$2,$3,$4,$5,'text/plain',$6,'passed',$7)`, string(versionID), string(sourceID), string(shared.ArtifactID), shared.ContentHash, size, location, now); err != nil {
+		id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
+	) VALUES($1,$2,$3,$4,$5,$6,'text/plain',$7,'passed',$8)`, string(versionID), string(sourceID), string(workspaceID), string(shared.ArtifactID), shared.ContentHash, size, location, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.Exec(ctx, `INSERT INTO ingestion.source_version_projection(source_version_id,parse_projection_id,workspace_id,created_at)

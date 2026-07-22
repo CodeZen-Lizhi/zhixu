@@ -227,7 +227,7 @@ func seedSourceVersion(t *testing.T, ctx context.Context, tx pgx.Tx, prefix, has
 		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'test', $4,$4)`, []any{string(workspaceID), prefix, root, now}},
 		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at) VALUES($1,$2,$3,4,$4,$5)`, []any{string(artifactID), string(workspaceID), hash, ".knowledge/sources/" + hash, now}},
 		{`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at) VALUES($1,$2,'text',$3,$3,$4)`, []any{string(sourceID), string(workspaceID), prefix + ".txt", now}},
-		{`INSERT INTO core.source_version(id,source_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) VALUES($1,$2,$3,$4,4,'text/plain',$5,'pending',$6)`, []any{string(versionID), string(sourceID), string(artifactID), hash, prefix + ".txt", now}},
+		{`INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) VALUES($1,$2,$3,$4,$5,4,'text/plain',$6,'pending',$7)`, []any{string(versionID), string(sourceID), string(workspaceID), string(artifactID), hash, prefix + ".txt", now}},
 	}
 	for _, statement := range statements {
 		if _, err := tx.Exec(ctx, statement.query, statement.args...); err != nil {

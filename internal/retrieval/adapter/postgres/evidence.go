@@ -39,7 +39,10 @@ func (r *SearchRepository) LoadSourceVersionReference(
 			sv.content_hash,
 			sv.byte_size,
 			sv.mime_type,
-			sv.security_status,
+			COALESCE(attempt.security_status,sv.security_status),
+			COALESCE(attempt.status,''),
+			COALESCE(run.status,''),
+			COALESCE(manifest.selection_status,''),
 			sv.captured_at
 		FROM core.source_version AS sv
 		JOIN core.source AS s
@@ -50,6 +53,21 @@ func (r *SearchRepository) LoadSourceVersionReference(
 		 AND ca.workspace_id=s.workspace_id
 		 AND ca.content_hash=sv.content_hash
 		 AND ca.byte_size=sv.byte_size
+		LEFT JOIN LATERAL (
+			SELECT status,security_status,workflow_run_id
+			FROM ingestion.attempt
+			WHERE source_version_id=sv.id
+			ORDER BY started_at DESC,id DESC
+			LIMIT 1
+		) AS attempt ON true
+		LEFT JOIN workflow.run AS run ON run.id=attempt.workflow_run_id
+		LEFT JOIN retrieval.index_version AS active_index
+		  ON active_index.workspace_id=s.workspace_id
+		 AND active_index.status='active'
+		LEFT JOIN retrieval.index_manifest_source AS manifest
+		  ON manifest.index_version_id=active_index.id
+		 AND manifest.source_id=s.id
+		 AND (manifest.selection_status='excluded' OR manifest.source_version_id=sv.id)
 		WHERE sv.id=$2`, string(workspaceID), string(sourceVersionID)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.SourceVersionReference{}, notFound(evidenceReferenceNotFoundCode, err)
@@ -410,6 +428,9 @@ func scanSourceVersionReference(row pgx.Row) (domain.SourceVersionReference, str
 		&reference.ByteSize,
 		&reference.MediaType,
 		&reference.SecurityStatus,
+		&reference.IngestionStatus,
+		&reference.WorkflowStatus,
+		&reference.IndexStatus,
 		&reference.CapturedAt,
 	); err != nil {
 		return domain.SourceVersionReference{}, "", err

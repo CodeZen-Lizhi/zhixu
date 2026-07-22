@@ -24,7 +24,8 @@ func TestLoadSourceVersionReferenceUsesBoundParameterizedJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reference.WorkspaceID != evidenceTestWorkspaceID || reference.SourceVersionID != evidenceTestSourceVersionID || reference.RelativePath != "docs/evidence.md" {
+	if reference.WorkspaceID != evidenceTestWorkspaceID || reference.SourceVersionID != evidenceTestSourceVersionID || reference.RelativePath != "docs/evidence.md" ||
+		reference.IngestionStatus != "parsed" || reference.WorkflowStatus != "running" || reference.IndexStatus != "included" {
 		t.Fatalf("reference = %#v", reference)
 	}
 	for _, predicate := range []string{
@@ -35,6 +36,12 @@ func TestLoadSourceVersionReferenceUsesBoundParameterizedJoin(t *testing.T) {
 		"ca.workspace_id=s.workspace_id",
 		"ca.content_hash=sv.content_hash",
 		"ca.byte_size=sv.byte_size",
+		"LEFT JOIN LATERAL",
+		"FROM ingestion.attempt",
+		"COALESCE(attempt.security_status,sv.security_status)",
+		"LEFT JOIN workflow.run AS run",
+		"active_index.status='active'",
+		"manifest.selection_status='excluded' OR manifest.source_version_id=sv.id",
 		"sv.original_content_location",
 		"WHERE sv.id=$2",
 	} {
@@ -228,6 +235,12 @@ func evidenceSourceRowValues(relativePath string) []any {
 }
 
 func evidenceSourceRowValuesWithVersionPath(relativePath, versionRelativePath string) []any {
+	values := evidenceImmutableSourceRowValues(relativePath, versionRelativePath)
+	capturedAt := values[len(values)-1]
+	return append(values[:len(values)-1], "parsed", "running", "included", capturedAt)
+}
+
+func evidenceImmutableSourceRowValues(relativePath, versionRelativePath string) []any {
 	return []any{
 		string(evidenceTestWorkspaceID),
 		string(evidenceTestSourceID),
@@ -250,7 +263,7 @@ func evidenceSpanRowValues(relativePath string) []any {
 }
 
 func evidenceSpanRowValuesWithVersionPath(relativePath, versionRelativePath string) []any {
-	values := evidenceSourceRowValuesWithVersionPath(relativePath, versionRelativePath)
+	values := evidenceImmutableSourceRowValues(relativePath, versionRelativePath)
 	return append(values,
 		string(evidenceTestProjectionID),
 		string(evidenceTestSpanID),

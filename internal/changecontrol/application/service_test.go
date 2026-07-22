@@ -119,14 +119,20 @@ func (f *fakeRepo) RevokeAuthorization(_ context.Context, _ foundation.ID, _ tim
 }
 
 type fakeTargets struct {
-	hash  string
-	err   error
-	calls int
+	hash    string
+	content []byte
+	err     error
+	calls   int
 }
 
 func (f *fakeTargets) CurrentHash(context.Context, foundation.ID, string) (string, error) {
 	f.calls++
 	return f.hash, f.err
+}
+
+func (f *fakeTargets) CurrentContent(context.Context, foundation.ID, string, int64) ([]byte, string, error) {
+	f.calls++
+	return append([]byte(nil), f.content...), f.hash, f.err
 }
 
 type fakeApprovalGitInspector struct {
@@ -190,15 +196,19 @@ func TestCreateProposalBindsTargetBaseAndContent(t *testing.T) {
 	service := newTestService(repository, &fakeTargets{})
 	result, err := service.CreateProposal(context.Background(), CreateCommand{
 		WorkspaceID: "workspace", TargetPath: "notes/../notes/a.md", BaseHash: testHash,
-		IdempotencyKey: "create-1",
-		Content:        "  code\r\n", EvidenceSummary: "evidence", Risk: "low", RollbackPlan: "revert commit",
+		IdempotencyKey: "create-1", RiskLevel: domain.ProposalRiskLevelLow,
+		Content: "  code\r\n", EvidenceSummary: "evidence", Risk: "may change editorial structure", RollbackPlan: "revert commit",
 	})
 	if err != nil {
 		t.Fatalf("CreateProposal() error = %v", err)
 	}
 	proposal := result.Proposal
-	if proposal.Type != domain.ProposalTypeFilePatch || proposal.TargetPath != "notes/a.md" || proposal.Revision.TargetPath != "notes/a.md" || proposal.Status != domain.StatusReady || proposal.IdempotencyKey != "create-1" || proposal.RequestHash == "" {
+	if proposal.Type != domain.ProposalTypeFilePatch || proposal.RiskLevel != domain.ProposalRiskLevelLow || proposal.TargetPath != "notes/a.md" || proposal.Revision.TargetPath != "notes/a.md" || proposal.Status != domain.StatusReady || proposal.IdempotencyKey != "create-1" || proposal.RequestHash == "" {
 		t.Fatalf("proposal = %#v", proposal)
+	}
+	expectedRequestHash, err := domain.ComputeRequestHashWithRiskLevel("workspace", "notes/a.md", testHash, "  code\r\n", "evidence", domain.ProposalRiskLevelLow, "may change editorial structure", "revert commit")
+	if err != nil || proposal.RequestHash != expectedRequestHash {
+		t.Fatalf("request hash = %s, want %s, err=%v", proposal.RequestHash, expectedRequestHash, err)
 	}
 	wantHash := domain.ComputeChangeHash("notes/a.md", testHash, "  code\r\n")
 	if proposal.Revision.ChangeHash != wantHash {
@@ -209,12 +219,60 @@ func TestCreateProposalBindsTargetBaseAndContent(t *testing.T) {
 	}
 }
 
+func TestCreateProposalRequiresExplicitRiskLevel(t *testing.T) {
+	repository := &fakeRepo{}
+	service := newTestService(repository, &fakeTargets{})
+	_, err := service.CreateProposal(context.Background(), CreateCommand{
+		WorkspaceID: "workspace", TargetPath: "notes/a.md", BaseHash: testHash, IdempotencyKey: "legacy-create",
+		Content: "new", EvidenceSummary: "evidence", Risk: "LOW", RollbackPlan: "rollback",
+	})
+	if err == nil || repository.proposal.ID != "" {
+		t.Fatalf("CreateProposal() proposal=%#v err=%v", repository.proposal, err)
+	}
+}
+
+func TestGetProposalCurrentContentReportsBaselineDrift(t *testing.T) {
+	baseHash := strings.Repeat("a", 64)
+	currentHash := strings.Repeat("b", 64)
+	repository := &fakeRepo{proposal: domain.Proposal{
+		ID: "proposal", WorkspaceID: "workspace", Type: domain.ProposalTypeFilePatch, TargetPath: "notes/a.md",
+		Revision: domain.Revision{BaseHash: baseHash, TargetPath: "notes/a.md"},
+	}}
+	service := newTestService(repository, &fakeTargets{hash: currentHash, content: []byte("current")})
+	result, err := service.GetProposalCurrentContent(context.Background(), "proposal")
+	if err != nil {
+		t.Fatalf("GetProposalCurrentContent() error = %v", err)
+	}
+	if result.WorkspaceID != "workspace" || result.Content != "current" || result.CurrentHash != currentHash || result.BaseHash != baseHash || result.BaseHashMatch {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestGetProposalCurrentContentRejectsPersistedUnsafeTarget(t *testing.T) {
+	for _, target := range []string{".env", ".git/config", ".git/README.md", ".knowledge/secret.md", "notes/a.txt"} {
+		t.Run(target, func(t *testing.T) {
+			repository := &fakeRepo{proposal: domain.Proposal{
+				ID: "proposal", WorkspaceID: "workspace", Type: domain.ProposalTypeFilePatch, TargetPath: target,
+				Revision: domain.Revision{TargetPath: target, BaseHash: testHash},
+			}}
+			targets := &fakeTargets{content: []byte("must not read"), hash: testHash}
+			service := newTestService(repository, targets)
+			if _, err := service.GetProposalCurrentContent(context.Background(), "proposal"); err == nil {
+				t.Fatal("GetProposalCurrentContent() accepted persisted unsafe target")
+			}
+			if targets.calls != 0 {
+				t.Fatalf("unsafe target reached reader: %d calls", targets.calls)
+			}
+		})
+	}
+}
+
 func TestCreateKnowledgeChangeProposalUsesTypedCanonicalHash(t *testing.T) {
 	repository := &fakeRepo{}
 	service := newTestService(repository, &fakeTargets{})
 	change := knowledgeChangeFixture()
 	result, err := service.CreateKnowledgeChangeProposal(context.Background(), CreateKnowledgeChangeCommand{
-		WorkspaceID: "workspace", IdempotencyKey: "knowledge-create", KnowledgeChange: change, Risk: " medium ", RollbackPlan: " restore relation ",
+		WorkspaceID: "workspace", IdempotencyKey: "knowledge-create", KnowledgeChange: change, RiskLevel: domain.ProposalRiskLevelHigh, Risk: " semantic relation impact ", RollbackPlan: " restore relation ",
 	})
 	if err != nil {
 		t.Fatalf("CreateKnowledgeChangeProposal() error = %v", err)
@@ -226,9 +284,27 @@ func TestCreateKnowledgeChangeProposalUsesTypedCanonicalHash(t *testing.T) {
 	if proposal.Revision.ChangeHash == "" || proposal.RequestHash == "" {
 		t.Fatalf("proposal hash missing: %#v", proposal)
 	}
-	expectedHash, err := domain.ComputeKnowledgeChangeHash(*proposal.Revision.KnowledgeChange, "medium", "restore relation")
+	expectedRequestHash, err := domain.ComputeKnowledgeChangeRequestHashWithRiskLevel("workspace", *proposal.Revision.KnowledgeChange, domain.ProposalRiskLevelHigh, "semantic relation impact", "restore relation")
+	if err != nil || proposal.RequestHash != expectedRequestHash {
+		t.Fatalf("request hash = %s, want %s, err=%v", proposal.RequestHash, expectedRequestHash, err)
+	}
+	expectedHash, err := domain.ComputeKnowledgeChangeHash(*proposal.Revision.KnowledgeChange, "semantic relation impact", "restore relation")
 	if err != nil || proposal.Revision.ChangeHash != expectedHash {
 		t.Fatalf("knowledge change hash = %s want %s err=%v", proposal.Revision.ChangeHash, expectedHash, err)
+	}
+}
+
+func TestCreateKnowledgeChangeProposalRequiresExplicitHighRiskLevel(t *testing.T) {
+	for _, riskLevel := range []domain.ProposalRiskLevel{"", domain.ProposalRiskLevelMedium, "high", " HIGH "} {
+		repository := &fakeRepo{}
+		service := newTestService(repository, &fakeTargets{})
+		_, err := service.CreateKnowledgeChangeProposal(context.Background(), CreateKnowledgeChangeCommand{
+			WorkspaceID: "workspace", IdempotencyKey: "knowledge-risk", KnowledgeChange: knowledgeChangeFixture(),
+			RiskLevel: riskLevel, Risk: "independent risk explanation", RollbackPlan: "restore relation",
+		})
+		if err == nil || repository.proposal.ID != "" {
+			t.Fatalf("risk level %q proposal=%#v err=%v", riskLevel, repository.proposal, err)
+		}
 	}
 }
 
@@ -242,11 +318,18 @@ func TestKnowledgeChangeProposalRejectsFilePatchFields(t *testing.T) {
 
 func TestCreateProposalRejectsUnsafeOrIncompleteInput(t *testing.T) {
 	tests := []CreateCommand{
-		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "../a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
-		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "/tmp/a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
-		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "a.md", BaseHash: "zz" + testHash[2:], Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
-		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: " ", RollbackPlan: "r"},
-		{WorkspaceID: "workspace", TargetPath: "a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "../a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "/tmp/a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: ".env", BaseHash: testHash, Content: "x", EvidenceSummary: "e", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: ".git/config", BaseHash: testHash, Content: "x", EvidenceSummary: "e", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: ".git/README.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: ".knowledge/secret.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "notes/a.txt", BaseHash: testHash, Content: "x", EvidenceSummary: "e", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "a.md", BaseHash: "zz" + testHash[2:], Content: "x", EvidenceSummary: "e", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", RiskLevel: domain.ProposalRiskLevelLow, Risk: " ", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", TargetPath: "a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", Risk: "low", RollbackPlan: "r"},
+		{WorkspaceID: "workspace", IdempotencyKey: "key", TargetPath: "a.md", BaseHash: testHash, Content: "x", EvidenceSummary: "e", RiskLevel: "low", Risk: "low", RollbackPlan: "r"},
 	}
 	for _, command := range tests {
 		service := newTestService(&fakeRepo{}, &fakeTargets{})
@@ -265,6 +348,19 @@ func TestDecideProposalPassesBoundHash(t *testing.T) {
 	_, err := service.DecideProposal(context.Background(), "proposal", "revision", proposal.Revision.ChangeHash, domain.DecisionApproved)
 	if err != nil || repository.approval.ChangeHash != proposal.Revision.ChangeHash || repository.approval.Decision != domain.DecisionApproved || repository.approval.ApprovedGitHead == nil || *repository.approval.ApprovedGitHead != testGitHead {
 		t.Fatalf("approval = %#v, err = %v", repository.approval, err)
+	}
+}
+
+func TestDecideProposalRejectsInvalidPersistedRiskLevel(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	proposal.Status = domain.StatusReady
+	proposal.Approval = nil
+	proposal.RiskLevel = "high"
+	repository := &fakeRepo{proposal: proposal}
+	_, err := newTestService(repository, &fakeTargets{hash: testHash}).DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "PROPOSAL_RISK_LEVEL_INVALID" || repository.approval.ID != "" {
+		t.Fatalf("approval=%#v err=%v", repository.approval, err)
 	}
 }
 
@@ -663,7 +759,7 @@ func approvedProposal(baseHash string) domain.Proposal {
 	changeHash := domain.ComputeChangeHash("a.md", baseHash, "new content")
 	approvedGitHead := testGitHead
 	return domain.Proposal{
-		ID: "proposal", WorkspaceID: "workspace", Type: domain.ProposalTypeFilePatch, TargetPath: "a.md", Status: domain.StatusApproved,
+		ID: "proposal", WorkspaceID: "workspace", Type: domain.ProposalTypeFilePatch, RiskLevel: domain.ProposalRiskLevelHigh, TargetPath: "a.md", Status: domain.StatusApproved,
 		Revision: domain.Revision{ID: "revision", ProposalID: "proposal", TargetPath: "a.md", BaseHash: baseHash, Content: "new content", ChangeHash: changeHash},
 		Approval: &domain.Approval{ID: "approval", ProposalID: "proposal", RevisionID: "revision", ChangeHash: changeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead},
 	}
@@ -703,7 +799,7 @@ func knowledgeChangeProposal() domain.Proposal {
 		panic(err)
 	}
 	return domain.Proposal{
-		ID: "60000000-0000-4000-8000-000000000002", WorkspaceID: "60000000-0000-4000-8000-000000000001", Type: domain.ProposalTypeKnowledgeChange, Status: domain.StatusApproved, Version: 2,
+		ID: "60000000-0000-4000-8000-000000000002", WorkspaceID: "60000000-0000-4000-8000-000000000001", Type: domain.ProposalTypeKnowledgeChange, RiskLevel: domain.ProposalRiskLevelHigh, Status: domain.StatusApproved, Version: 2,
 		Revision: domain.Revision{ID: "60000000-0000-4000-8000-000000000003", ProposalID: "60000000-0000-4000-8000-000000000002", Risk: "medium", RollbackPlan: "restore relation", ChangeHash: hash, KnowledgeChange: &change},
 		Approval: &domain.Approval{ID: "60000000-0000-4000-8000-000000000004", ProposalID: "60000000-0000-4000-8000-000000000002", RevisionID: "60000000-0000-4000-8000-000000000003", ChangeHash: hash, Decision: domain.DecisionApproved},
 	}

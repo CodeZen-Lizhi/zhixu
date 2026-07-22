@@ -436,16 +436,6 @@
             "type": "string",
             "format": "uuid"
           }
-        },
-        {
-          "name": "Idempotency-Key",
-          "in": "header",
-          "required": true,
-          "schema": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          }
         }
       ],
       "post": {
@@ -510,6 +500,79 @@
                 }
               }
             }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      },
+      "get": {
+        "operationId": "listWorkflowRuns",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 30
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "waiting_for_human",
+                "retry_wait",
+                "paused",
+                "succeeded",
+                "failed",
+                "cancelled"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stable Workspace-bound Workflow Run page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowRunPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -953,21 +1016,11 @@
             "type": "string",
             "format": "uuid"
           }
-        },
-        {
-          "name": "Idempotency-Key",
-          "in": "header",
-          "required": true,
-          "schema": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          }
         }
       ],
       "post": {
         "operationId": "createProposal",
-        "description": "Creates a ready-for-review Proposal and immutable Revision. No Workspace file is modified.",
+        "description": "Creates a ready-for-review Proposal with an explicit immutable risk level and an immutable Revision. No Workspace file is modified.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1039,6 +1092,112 @@
               }
             }
           }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      },
+      "get": {
+        "operationId": "listProposals",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 30
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "validating",
+                "ready_for_review",
+                "approved",
+                "applying",
+                "applied",
+                "verifying",
+                "completed",
+                "rejected",
+                "needs_revision",
+                "deferred",
+                "apply_failed",
+                "verify_failed",
+                "rolled_back",
+                "cancelled"
+              ]
+            }
+          },
+          {
+            "name": "proposal_type",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "file_patch",
+                "knowledge_change"
+              ]
+            }
+          },
+          {
+            "name": "risk",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/ProposalRiskLevel"
+            }
+          },
+          {
+            "name": "created_after",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stable Workspace-bound Proposal summary page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
         }
       }
     },
@@ -1058,7 +1217,7 @@
         "operationId": "getProposal",
         "responses": {
           "200": {
-            "description": "Current consistent Proposal, Revision and optional Approval snapshot.",
+            "description": "Current consistent Proposal and Revision with an explicit nullable Approval snapshot.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1136,7 +1295,7 @@
         },
         "responses": {
           "200": {
-            "description": "The exact immutable decision and, for Approved, the same Workflow/Node/River dispatch binding were replayed.",
+            "description": "The exact immutable decision was replayed. Only approved file_patch responses include the same Git and Safe Writeback Workflow bindings.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1146,7 +1305,7 @@
             }
           },
           "201": {
-            "description": "Decision created. Approved responses atomically include the unique Safe Writeback Workflow dispatch; Rejected responses contain no Workflow fields.",
+            "description": "Decision created. Approved file_patch responses atomically include Git and Safe Writeback Workflow bindings; approved knowledge_change responses and all rejected responses omit those writeback fields.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2889,7 +3048,7 @@
         "operationId": "getEvidenceSourceVersion",
         "responses": {
           "200": {
-            "description": "Immutable Source Version metadata for an Evidence provenance.",
+            "description": "Immutable Source Version metadata plus current ingestion, Workflow and Active Index projections for this Workspace.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3889,6 +4048,180 @@
           }
         }
       }
+    },
+    "/api/v1/proposals/{proposal_id}/current-content": {
+      "parameters": [
+        {
+          "name": "proposal_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getProposalCurrentContent",
+        "description": "Reads a bounded UTF-8 current Workspace file snapshot for a file_patch Proposal and reports whether it still matches the immutable base hash. It performs no write.",
+        "responses": {
+          "200": {
+            "description": "Current target content and baseline comparison.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalCurrentContent"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/source-versions": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "listSourceVersions",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 30
+            }
+          },
+          {
+            "name": "security_status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "passed",
+                "quarantined"
+              ],
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "ingestion_status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "validating",
+                "parsing",
+                "parsed",
+                "chunking",
+                "chunked",
+                "parse_failed",
+                "cancelled"
+              ],
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "workflow_status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "waiting_for_human",
+                "retry_wait",
+                "paused",
+                "succeeded",
+                "failed",
+                "cancelled"
+              ],
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "index_status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "included",
+                "excluded"
+              ],
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "mime_type",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stable Workspace-bound Source Version page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceVersionPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4551,7 +4884,9 @@
           "input",
           "version",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "pause_requested",
+          "cancel_requested"
         ],
         "properties": {
           "id": {
@@ -4596,6 +4931,12 @@
           "completed_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "pause_requested": {
+            "type": "boolean"
+          },
+          "cancel_requested": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -4637,7 +4978,9 @@
           "workflow_run_id",
           "status",
           "version",
-          "status_url"
+          "status_url",
+          "pause_requested",
+          "cancel_requested"
         ],
         "properties": {
           "workflow_run_id": {
@@ -4664,6 +5007,12 @@
           "status_url": {
             "type": "string",
             "minLength": 1
+          },
+          "pause_requested": {
+            "type": "boolean"
+          },
+          "cancel_requested": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -4714,6 +5063,16 @@
         },
         "additionalProperties": false
       },
+      "ProposalRiskLevel": {
+        "type": "string",
+        "description": "Explicit immutable Proposal-level approval and list-filter fact. Revision risk remains an independent free-form explanation and never derives this level.",
+        "enum": [
+          "CRITICAL",
+          "HIGH",
+          "MEDIUM",
+          "LOW"
+        ]
+      },
       "CreateProposalRequest": {
         "type": "object",
         "required": [
@@ -4721,6 +5080,7 @@
           "base_hash",
           "content",
           "evidence_summary",
+          "risk_level",
           "risk",
           "rollback_plan"
         ],
@@ -4741,6 +5101,9 @@
           "evidence_summary": {
             "type": "string",
             "minLength": 1
+          },
+          "risk_level": {
+            "$ref": "#/components/schemas/ProposalRiskLevel"
           },
           "risk": {
             "type": "string",
@@ -4847,13 +5210,22 @@
           "decided_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "workflow_run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workflow_status_url": {
+            "type": "string",
+            "pattern": "^/api/v1/workflows/[0-9a-f-]{36}$"
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "description": "Persistent Approval snapshot returned by Proposal detail and list reads. New approved file_patch snapshots include the durable Git and Workflow binding. Historical approved file_patch snapshots may omit workflow_run_id/workflow_status_url while awaiting an exact approval replay; snapshots that also omit approved_git_head are read-only manual-recovery records. Approved knowledge_change and rejected snapshots omit all Git and Workflow fields. The transient dispatch_status exists only on ApprovalDecisionResponse."
       },
       "ApprovalDecisionResponse": {
         "type": "object",
-        "description": "Approved decisions include workflow_run_id, workflow_status_url and dispatch_status. Rejected decisions omit all three fields.",
+        "description": "Approved file_patch decisions include approved_git_head, workflow_run_id, workflow_status_url and dispatch_status. Approved knowledge_change decisions and rejected decisions omit all Git and Workflow writeback fields.",
         "required": [
           "id",
           "proposal_id",
@@ -4933,15 +5305,21 @@
       "FilePatchProposal": {
         "type": "object",
         "required": [
+          "proposal_type",
           "id",
           "workspace_id",
           "target_path",
           "status",
+          "risk_level",
           "revision",
+          "approval",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "proposal_type": {
+            "const": "file_patch"
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -4973,6 +5351,9 @@
               "rolled_back",
               "cancelled"
             ]
+          },
+          "risk_level": {
+            "$ref": "#/components/schemas/ProposalRiskLevel"
           },
           "revision": {
             "$ref": "#/components/schemas/ProposalRevision"
@@ -5145,6 +5526,7 @@
             "type": "array",
             "minItems": 2,
             "maxItems": 2,
+            "uniqueItems": true,
             "items": {
               "$ref": "#/components/schemas/KnowledgeChangeBaseVersion"
             }
@@ -5188,7 +5570,9 @@
           "id",
           "workspace_id",
           "status",
+          "risk_level",
           "revision",
+          "approval",
           "created_at",
           "updated_at"
         ],
@@ -5223,6 +5607,9 @@
               "rolled_back",
               "cancelled"
             ]
+          },
+          "risk_level": {
+            "const": "HIGH"
           },
           "revision": {
             "$ref": "#/components/schemas/KnowledgeChangeRevision"
@@ -5847,11 +6234,49 @@
           "security_status": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "enum": [
+              "pending",
+              "passed",
+              "quarantined"
+            ]
           },
           "captured_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "ingestion_status": {
+            "type": "string",
+            "enum": [
+              "validating",
+              "parsing",
+              "parsed",
+              "chunking",
+              "chunked",
+              "parse_failed",
+              "cancelled"
+            ]
+          },
+          "workflow_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "waiting_for_human",
+              "retry_wait",
+              "paused",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "index_status": {
+            "type": "string",
+            "enum": [
+              "included",
+              "excluded"
+            ],
+            "description": "Current Active Index selection for this Source. included binds this Source Version; excluded is Source-scoped."
           }
         },
         "additionalProperties": false
@@ -11029,6 +11454,355 @@
           "read_model_revision": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowRunPage": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunSummary"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowRunSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "definition_key",
+          "definition_version",
+          "status",
+          "version",
+          "created_at",
+          "updated_at",
+          "waiting_for_human",
+          "pause_requested",
+          "cancel_requested"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "definition_key": {
+            "type": "string"
+          },
+          "definition_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "waiting_for_human",
+              "retry_wait",
+              "paused",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "waiting_for_human": {
+            "type": "boolean"
+          },
+          "pause_requested": {
+            "type": "boolean"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProposalPage": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/ProposalSummary"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProposalCurrentContent": {
+        "type": "object",
+        "x-invariant": "base_hash_match == (current_hash == base_hash)",
+        "required": [
+          "proposal_id",
+          "workspace_id",
+          "target_path",
+          "content",
+          "current_hash",
+          "base_hash",
+          "base_hash_match"
+        ],
+        "properties": {
+          "proposal_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 1048576
+          },
+          "current_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "base_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "base_hash_match": {
+            "type": "boolean",
+            "description": "True exactly when current_hash equals base_hash."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProposalSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "proposal_type",
+          "status",
+          "target",
+          "risk_level",
+          "risk",
+          "revision_id",
+          "change_hash",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "proposal_type": {
+            "type": "string",
+            "enum": [
+              "file_patch",
+              "knowledge_change"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "validating",
+              "ready_for_review",
+              "approved",
+              "applying",
+              "applied",
+              "verifying",
+              "completed",
+              "rejected",
+              "needs_revision",
+              "deferred",
+              "apply_failed",
+              "verify_failed",
+              "rolled_back",
+              "cancelled"
+            ]
+          },
+          "target": {
+            "type": "string"
+          },
+          "risk_level": {
+            "$ref": "#/components/schemas/ProposalRiskLevel"
+          },
+          "risk": {
+            "type": "string"
+          },
+          "revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "change_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "approval": {
+            "$ref": "#/components/schemas/Approval"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SourceVersionPage": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/SourceVersionSummary"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "additionalProperties": false
+      },
+      "SourceVersionSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "source_id",
+          "workspace_id",
+          "path",
+          "mime_type",
+          "byte_size",
+          "captured_at",
+          "content_hash",
+          "security_status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "path": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "byte_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "captured_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "security_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "passed",
+              "quarantined"
+            ]
+          },
+          "ingestion_status": {
+            "type": "string",
+            "enum": [
+              "validating",
+              "parsing",
+              "parsed",
+              "chunking",
+              "chunked",
+              "parse_failed",
+              "cancelled"
+            ]
+          },
+          "workflow_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "waiting_for_human",
+              "retry_wait",
+              "paused",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "index_status": {
+            "type": "string",
+            "enum": [
+              "included",
+              "excluded"
+            ],
+            "description": "Active Index selection. included binds this Source Version; excluded is Source-scoped and therefore applies to every historical version of the excluded Source."
           }
         },
         "additionalProperties": false

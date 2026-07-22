@@ -857,10 +857,14 @@ func newWritebackFixture(t *testing.T) *writebackFixture {
 	}
 	content := "writeback result"
 	fixture.changeHash = domain.ComputeChangeHash(fixture.targetPath, fixture.baseHash, content)
+	requestHash, err := domain.ComputeRequestHashWithRiskLevel(fixture.workspaceID, fixture.targetPath, fixture.baseHash, content, "verified evidence", domain.ProposalRiskLevelLow, "low", "revert commit")
+	if err != nil {
+		t.Fatal(err)
+	}
 	proposal := domain.Proposal{
-		ID: fixture.proposalID, WorkspaceID: fixture.workspaceID, TargetPath: fixture.targetPath,
+		ID: fixture.proposalID, WorkspaceID: fixture.workspaceID, RiskLevel: domain.ProposalRiskLevelLow, TargetPath: fixture.targetPath,
 		IdempotencyKey: "proposal-" + string(fixture.proposalID),
-		RequestHash:    domain.ComputeRequestHash(fixture.workspaceID, fixture.targetPath, fixture.baseHash, content, "verified evidence", "low", "revert commit"),
+		RequestHash:    requestHash,
 		Status:         domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
 		Revision: domain.Revision{ID: fixture.revisionID, ProposalID: fixture.proposalID, RevisionNo: 1, TargetPath: fixture.targetPath, BaseHash: fixture.baseHash, Content: content, EvidenceSummary: "verified evidence", Risk: "low", RollbackPlan: "revert commit", ChangeHash: fixture.changeHash, CreatedAt: now},
 	}

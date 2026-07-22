@@ -9,6 +9,8 @@ import (
 	"time"
 
 	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
+	changecontroleventcontract "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/eventcontract"
+	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
@@ -19,22 +21,37 @@ import (
 
 const candidateFingerprintSchemaV1 = "semantic-link-candidate/v1"
 
+type relationProposalRequestHashVersion string
+
+const (
+	relationProposalRequestHashV1 relationProposalRequestHashVersion = "v1"
+	relationProposalRequestHashV2 relationProposalRequestHashVersion = "v2"
+)
+
 // ApprovedRelationApplyRepository 在一个 PostgreSQL 事务内把已批准的
 // knowledge_change Proposal 应用为唯一的 canonical Relation。
 type ApprovedRelationApplyRepository struct {
-	db    DB
-	ids   foundation.IDGenerator
-	clock foundation.Clock
+	db     DB
+	ids    foundation.IDGenerator
+	clock  foundation.Clock
+	events eventsapplication.Appender
 }
 
 var _ knowledgeapplication.ApprovedRelationApplyPort = (*ApprovedRelationApplyRepository)(nil)
 
-// NewApprovedRelationApplyRepository 创建 Approval 到 Knowledge 的正式写入 adapter。
-func NewApprovedRelationApplyRepository(db DB, ids foundation.IDGenerator, clock foundation.Clock) (*ApprovedRelationApplyRepository, error) {
+// NewApprovedRelationApplyRepository 创建 Approval 到 Knowledge 的正式写入 adapter；可选事件追加器与 Relation apply 共用事务。
+func NewApprovedRelationApplyRepository(db DB, ids foundation.IDGenerator, clock foundation.Clock, appenders ...eventsapplication.Appender) (*ApprovedRelationApplyRepository, error) {
 	if isNilRelationApplyDependency(db) || isNilRelationApplyDependency(ids) || isNilRelationApplyDependency(clock) {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "RELATION_PROPOSAL_APPLY_DEPENDENCY_MISSING", false, errors.New("relation apply dependency is missing"))
 	}
-	return &ApprovedRelationApplyRepository{db: db, ids: ids, clock: clock}, nil
+	if len(appenders) > 1 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "RELATION_PROPOSAL_APPLY_EVENT_APPENDER_INVALID", false, errors.New("only one relation apply event appender may be configured"))
+	}
+	var events eventsapplication.Appender
+	if len(appenders) == 1 && !isNilRelationApplyDependency(appenders[0]) {
+		events = appenders[0]
+	}
+	return &ApprovedRelationApplyRepository{db: db, ids: ids, clock: clock, events: events}, nil
 }
 
 // ApplyApprovedRelation 重新校验 Approval、typed Revision、Candidate、端点版本和
@@ -89,13 +106,12 @@ func (repository *ApprovedRelationApplyRepository) applyApprovedRelationTx(
 	if err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPLY_RECEIPT_QUERY_FAILED")
 	}
-	if receipt != nil {
-		return replayApprovedRelationApply(ctx, tx, command, requestHash, receipt)
-	}
-
 	proposal, err := loadApprovedRelationProposal(ctx, tx, command)
 	if err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, err
+	}
+	if receipt != nil {
+		return repository.replayApprovedRelationApply(ctx, tx, command, requestHash, proposal, receipt)
 	}
 	if proposal.Status != changecontroldomain.StatusApproved {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyApprovalRequired(errors.New("knowledge relation proposal is not approved"))
@@ -218,6 +234,15 @@ func (repository *ApprovedRelationApplyRepository) applyApprovedRelationTx(
 	if err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, err
 	}
+	if !isNilRelationApplyDependency(repository.events) {
+		request := changecontroleventcontract.ProposalStatusRequest(
+			command.WorkspaceID, proposal.ID, command.ApprovalID,
+			changecontroleventcontract.ProposalAppliedEventType, string(changecontroldomain.StatusApplied), appliedVersion, at,
+		)
+		if _, _, err := repository.events.AppendTx(ctx, tx, request); err != nil {
+			return knowledgeapplication.ApprovedRelationApplyResult{}, err
+		}
+	}
 	return knowledgeapplication.ApprovedRelationApplyResult{
 		Relation: confirmed, Evidence: evidence,
 		ProposalStatus: changecontroldomain.StatusApplied, ProposalVersion: appliedVersion,
@@ -226,6 +251,8 @@ func (repository *ApprovedRelationApplyRepository) applyApprovedRelationTx(
 
 type approvedRelationProposal struct {
 	ID, WorkspaceID foundation.ID
+	Type            changecontroldomain.ProposalType
+	RiskLevel       changecontroldomain.ProposalRiskLevel
 	Status          changecontroldomain.ProposalStatus
 	Version         int64
 	RequestHash     string
@@ -237,13 +264,13 @@ type approvedRelationProposal struct {
 
 func loadApprovedRelationProposal(ctx context.Context, tx pgx.Tx, command knowledgeapplication.ApprovedRelationApplyCommand) (approvedRelationProposal, error) {
 	var proposal approvedRelationProposal
-	var proposalID, workspaceID, proposalType, status, revisionID, revisionProposalID string
+	var proposalID, workspaceID, proposalType, riskLevel, status, revisionID, revisionProposalID string
 	var approvalID, approvalProposalID, approvalRevisionID, approvalDecision string
 	var targetRefsRaw, baseVersionsRaw, changeSetRaw, evidenceRefsRaw []byte
 	var schemaVersion string
 	var approvedGitHead *string
 	err := tx.QueryRow(ctx, `
-		SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.status,p.version,p.request_hash,p.updated_at,
+			SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.risk_level,p.status,p.version,p.request_hash,p.updated_at,
 			r.id::text,r.proposal_id::text,r.revision_no,r.risk,r.rollback_plan,r.change_hash,
 			r.target_refs,r.base_versions,r.change_set,r.evidence_refs,r.schema_version,r.created_at,
 			a.id::text,a.proposal_id::text,a.revision_id::text,a.change_hash,a.decision,a.approved_git_head,a.decided_at
@@ -254,7 +281,7 @@ func loadApprovedRelationProposal(ctx context.Context, tx pgx.Tx, command knowle
 		FOR UPDATE OF p,r,a`,
 		string(command.ProposalID), string(command.RevisionID), string(command.ApprovalID), string(command.WorkspaceID),
 	).Scan(
-		&proposalID, &workspaceID, &proposalType, &status, &proposal.Version, &proposal.RequestHash, &proposal.UpdatedAt,
+		&proposalID, &workspaceID, &proposalType, &riskLevel, &status, &proposal.Version, &proposal.RequestHash, &proposal.UpdatedAt,
 		&revisionID, &revisionProposalID, &proposal.Revision.RevisionNo, &proposal.Revision.Risk, &proposal.Revision.RollbackPlan, &proposal.Revision.ChangeHash,
 		&targetRefsRaw, &baseVersionsRaw, &changeSetRaw, &evidenceRefsRaw, &schemaVersion, &proposal.Revision.CreatedAt,
 		&approvalID, &approvalProposalID, &approvalRevisionID, &proposal.Approval.ChangeHash, &approvalDecision, &approvedGitHead, &proposal.Approval.DecidedAt,
@@ -266,19 +293,17 @@ func loadApprovedRelationProposal(ctx context.Context, tx pgx.Tx, command knowle
 		return approvedRelationProposal{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPLY_BINDING_QUERY_FAILED")
 	}
 	proposal.ID, proposal.WorkspaceID = foundation.ID(proposalID), foundation.ID(workspaceID)
+	proposal.Type = changecontroldomain.ProposalType(proposalType)
+	proposal.RiskLevel, err = changecontroldomain.ValidateProposalRiskLevelForType(proposal.Type, changecontroldomain.ProposalRiskLevel(riskLevel))
+	if err != nil {
+		return approvedRelationProposal{}, relationApplyConsistency(err)
+	}
 	proposal.Status = changecontroldomain.ProposalStatus(status)
 	proposal.Revision.ID, proposal.Revision.ProposalID = foundation.ID(revisionID), foundation.ID(revisionProposalID)
 	proposal.Approval.ID = foundation.ID(approvalID)
 	proposal.Approval.ProposalID, proposal.Approval.RevisionID = foundation.ID(approvalProposalID), foundation.ID(approvalRevisionID)
 	proposal.Approval.Decision = changecontroldomain.Decision(approvalDecision)
 	proposal.Approval.ApprovedGitHead = approvedGitHead
-	if changecontroldomain.NormalizeProposalType(changecontroldomain.ProposalType(proposalType)) != changecontroldomain.ProposalTypeKnowledgeChange ||
-		proposal.ID != command.ProposalID || proposal.WorkspaceID != command.WorkspaceID ||
-		proposal.Revision.ID != command.RevisionID || proposal.Revision.ProposalID != proposal.ID ||
-		proposal.Approval.ID != command.ApprovalID || proposal.Approval.ProposalID != proposal.ID || proposal.Approval.RevisionID != proposal.Revision.ID ||
-		proposal.Approval.Decision != changecontroldomain.DecisionApproved || approvedGitHead != nil {
-		return approvedRelationProposal{}, relationApplyConsistency(errors.New("knowledge relation approval binding is inconsistent"))
-	}
 	proposal.change.SchemaVersion = schemaVersion
 	if json.Unmarshal(targetRefsRaw, &proposal.change.TargetRefs) != nil ||
 		json.Unmarshal(baseVersionsRaw, &proposal.change.BaseVersions) != nil ||
@@ -292,14 +317,59 @@ func loadApprovedRelationProposal(ctx context.Context, tx pgx.Tx, command knowle
 	}
 	proposal.change = canonicalChange
 	proposal.Revision.KnowledgeChange = &proposal.change
-	if err := changecontroldomain.ValidateProposalRevisionForType(changecontroldomain.ProposalTypeKnowledgeChange, proposal.Revision); err != nil {
+	if _, err := validateApprovedRelationProposalBinding(proposal, command); err != nil {
 		return approvedRelationProposal{}, relationApplyConsistency(err)
 	}
-	wantRequestHash, err := changecontroldomain.ComputeKnowledgeChangeRequestHash(proposal.WorkspaceID, proposal.change, proposal.Revision.Risk, proposal.Revision.RollbackPlan)
-	if err != nil || proposal.RequestHash != wantRequestHash || proposal.Approval.ChangeHash != proposal.Revision.ChangeHash {
-		return approvedRelationProposal{}, relationApplyConsistency(errors.New("knowledge relation proposal hash binding is inconsistent"))
-	}
 	return proposal, nil
+}
+
+func validateApprovedRelationProposalBinding(proposal approvedRelationProposal, command knowledgeapplication.ApprovedRelationApplyCommand) (relationProposalRequestHashVersion, error) {
+	if proposal.Type != changecontroldomain.ProposalTypeKnowledgeChange ||
+		proposal.ID != command.ProposalID || proposal.WorkspaceID != command.WorkspaceID ||
+		proposal.Revision.ID != command.RevisionID || proposal.Revision.ProposalID != proposal.ID ||
+		proposal.Approval.ID != command.ApprovalID || proposal.Approval.ProposalID != proposal.ID || proposal.Approval.RevisionID != proposal.Revision.ID ||
+		proposal.Approval.Decision != changecontroldomain.DecisionApproved || proposal.Approval.ApprovedGitHead != nil {
+		return "", errors.New("knowledge relation approval binding is inconsistent")
+	}
+	riskLevel, err := changecontroldomain.ValidateProposalRiskLevelForType(changecontroldomain.ProposalTypeKnowledgeChange, proposal.RiskLevel)
+	if err != nil {
+		return "", errors.New("knowledge relation proposal risk level is invalid")
+	}
+	if err := changecontroldomain.ValidateProposalRevisionForType(changecontroldomain.ProposalTypeKnowledgeChange, proposal.Revision); err != nil {
+		return "", err
+	}
+	requestHashV2, err := changecontroldomain.ComputeKnowledgeChangeRequestHashWithRiskLevel(
+		proposal.WorkspaceID,
+		proposal.change,
+		riskLevel,
+		proposal.Revision.Risk,
+		proposal.Revision.RollbackPlan,
+	)
+	if err != nil {
+		return "", err
+	}
+	requestHashV1, err := changecontroldomain.ComputeKnowledgeChangeRequestHash(
+		proposal.WorkspaceID,
+		proposal.change,
+		proposal.Revision.Risk,
+		proposal.Revision.RollbackPlan,
+	)
+	if err != nil {
+		return "", err
+	}
+	var version relationProposalRequestHashVersion
+	switch proposal.RequestHash {
+	case requestHashV2:
+		version = relationProposalRequestHashV2
+	case requestHashV1:
+		version = relationProposalRequestHashV1
+	default:
+		return "", errors.New("knowledge relation proposal request hash binding is inconsistent")
+	}
+	if proposal.Approval.ChangeHash != proposal.Revision.ChangeHash {
+		return "", errors.New("knowledge relation approval change hash binding is inconsistent")
+	}
+	return version, nil
 }
 
 func loadRelationApplyCandidate(ctx context.Context, tx pgx.Tx, workspaceID, candidateID foundation.ID) (graphdomain.SemanticLinkCandidate, error) {
@@ -572,7 +642,7 @@ func (repository *ApprovedRelationApplyRepository) buildConfirmedRelationEvidenc
 	return result, nil
 }
 
-func replayApprovedRelationApply(ctx context.Context, tx pgx.Tx, command knowledgeapplication.ApprovedRelationApplyCommand, requestHash string, receipt *commandReceipt) (knowledgeapplication.ApprovedRelationApplyResult, error) {
+func (repository *ApprovedRelationApplyRepository) replayApprovedRelationApply(ctx context.Context, tx pgx.Tx, command knowledgeapplication.ApprovedRelationApplyCommand, requestHash string, proposal approvedRelationProposal, receipt *commandReceipt) (knowledgeapplication.ApprovedRelationApplyResult, error) {
 	if receipt.RequestHash != requestHash || receipt.CommandType != commandConfirmRelation || receipt.AggregateType != aggregateRelation {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeIdempotencyConflict, false, errors.New("relation apply idempotency binding differs"))
 	}
@@ -580,20 +650,36 @@ func replayApprovedRelationApply(ctx context.Context, tx pgx.Tx, command knowled
 	if err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyConsistency(err)
 	}
-	if result.Relation.Version != receipt.AggregateVersion || result.Relation.Confirmation == nil ||
-		result.Relation.Confirmation.Method != domain.ConfirmationUserApproval || result.Relation.Confirmation.Reference != string(command.ApprovalID) {
-		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyConsistency(errors.New("relation apply receipt points to a different relation fact"))
-	}
-	var status string
-	var version int64
-	if err := tx.QueryRow(ctx, `SELECT status,version FROM change_control.proposal WHERE id=$1 AND workspace_id=$2`, string(command.ProposalID), string(command.WorkspaceID)).Scan(&status, &version); err != nil {
+	if err := validateRelationApplyReplayFact(command, proposal, receipt, result.Relation); err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyConsistency(err)
+	}
+	if !isNilRelationApplyDependency(repository.events) {
+		request := changecontroleventcontract.ProposalStatusRequest(
+			command.WorkspaceID, proposal.ID, command.ApprovalID,
+			changecontroleventcontract.ProposalAppliedEventType, string(changecontroldomain.StatusApplied), proposal.Version, proposal.UpdatedAt,
+		)
+		if _, _, err := repository.events.AppendTx(ctx, tx, request); err != nil {
+			return knowledgeapplication.ApprovedRelationApplyResult{}, err
+		}
 	}
 	return knowledgeapplication.ApprovedRelationApplyResult{
 		Relation: result.Relation, Evidence: result.Evidence,
-		ProposalStatus: changecontroldomain.ProposalStatus(status), ProposalVersion: version,
+		ProposalStatus: proposal.Status, ProposalVersion: proposal.Version,
 		Replayed: true,
 	}, nil
+}
+
+func validateRelationApplyReplayFact(command knowledgeapplication.ApprovedRelationApplyCommand, proposal approvedRelationProposal, receipt *commandReceipt, relation domain.Relation) error {
+	if proposal.Status != changecontroldomain.StatusApplied {
+		return errors.New("relation apply receipt and proposal state are inconsistent")
+	}
+	if receipt == nil || relation.ID != receipt.AggregateID || relation.Version != receipt.AggregateVersion || relation.Confirmation == nil ||
+		relation.Confirmation.Method != domain.ConfirmationUserApproval || relation.Confirmation.Reference != string(command.ApprovalID) ||
+		relation.WorkspaceID != proposal.WorkspaceID || relation.Source != proposal.change.ChangeSet.Source ||
+		relation.Target != proposal.change.ChangeSet.Target || relation.Type != proposal.change.ChangeSet.RelationType {
+		return errors.New("relation apply receipt points to a different relation fact")
+	}
+	return nil
 }
 
 func lockRelationApplyReceipt(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, idempotencyKey string) error {

@@ -315,8 +315,8 @@ func seedHTTPWorkspace(
 		  VALUES($1,$2,'file',$3,$4,$5)`, []any{string(sourceID), string(workspaceID), fmt.Sprintf("Evidence %d", ordinal), relativePath, capturedAt}},
 		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at)
 		  VALUES($1,$2,$3,$4,$5,$6)`, []any{string(artifactID), string(workspaceID), artifactHash, int64(len(artifactContent)), capture.ManagedLocation, capturedAt}},
-		{`INSERT INTO core.source_version(id,source_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at)
-		  VALUES($1,$2,$3,$4,$5,'text/markdown',$6,'passed',$7)`, []any{string(sourceVersionID), string(sourceID), string(artifactID), artifactHash, int64(len(artifactContent)), relativePath, capturedAt}},
+		{`INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at)
+		  VALUES($1,$2,$3,$4,$5,$6,'text/markdown',$7,'passed',$8)`, []any{string(sourceVersionID), string(sourceID), string(workspaceID), string(artifactID), artifactHash, int64(len(artifactContent)), relativePath, capturedAt}},
 		{`INSERT INTO ingestion.parse_projection(id,workspace_id,content_artifact_id,parser_id,parser_version,parser_config_hash,schema_version,normalized_content_hash,created_at)
 		  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, []any{string(projectionID), string(workspaceID), string(artifactID), processing.ParserID, processing.ParserVersion, processing.ParserConfigHash, processing.SchemaVersion, artifactHash, capturedAt}},
 		{`INSERT INTO ingestion.source_version_projection(source_version_id,parse_projection_id,workspace_id,created_at)

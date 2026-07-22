@@ -81,8 +81,8 @@ func insertTypedExclusionProposal(t *testing.T, ctx context.Context, tx pgx.Tx, 
 	t.Helper()
 	proposalID, revisionID := graphTestID(t), graphTestID(t)
 	if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(
-		id,workspace_id,proposal_type,status,idempotency_key,request_hash,version,created_at,updated_at)
-		VALUES($1,$2,'knowledge_change','ready_for_review',$3,$4,1,$5,$5)`,
+		id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at)
+		VALUES($1,$2,'knowledge_change','HIGH','ready_for_review',$3,$4,1,$5,$5)`,
 		string(proposalID), string(workspaceID), "typed-exclusion-"+key, graphHash("proposal-"+key), now); err != nil {
 		t.Fatal(err)
 	}

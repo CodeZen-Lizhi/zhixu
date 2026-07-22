@@ -238,7 +238,7 @@ main() {
   local approved_content proposal_payload proposal_id revision_id change_hash approval_payload workflow_path
   approved_content="$(printf '# Compose Search Smoke\n\n%s proves approved writeback and indexed retrieval.\n' "${search_token}")"
   proposal_payload="$(jq -cn --arg path "${target_path}" --arg base "${base_hash}" --arg content "${approved_content}" \
-    '{target_path:$path,base_hash:$base,content:$content,evidence_summary:"compose search smoke",risk:"low",rollback_plan:"revert generated commit"}')"
+    '{target_path:$path,base_hash:$base,content:$content,evidence_summary:"compose search smoke",risk_level:"LOW",risk:"low",rollback_plan:"revert generated commit"}')"
   request_with_idempotency POST "/api/v1/workspaces/${workspace_id}/proposals" 201 \
     "proposal-${run_id}" "${proposal_payload}" "proposal creation"
   proposal_id="$(jq -er '.id | select(test("^[0-9a-f-]{36}$"))' "${LAST_RESPONSE_FILE}")" || fail "proposal response did not contain a valid id"

@@ -3,9 +3,13 @@ package workflowhttp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +30,10 @@ type Service interface {
 	Cancel(context.Context, application.RunControlCommand) (application.RunControlResult, error)
 }
 
+type listService interface {
+	ListRuns(context.Context, domain.RunListQuery) ([]domain.RunListItem, bool, error)
+}
+
 // Handler 负责 Workflow 协议解析、响应编码和错误映射。
 type Handler struct{ service Service }
 
@@ -35,11 +43,150 @@ func NewHandler(service Service) *Handler { return &Handler{service: service} }
 // Routes 注册 Workflow 资源路由。
 func (h *Handler) Routes(router chi.Router) {
 	router.Post("/workspaces/{workspaceID}/workflows", h.start)
+	router.Get("/workspaces/{workspaceID}/workflows", h.list)
 	router.Get("/workflows/{runID}", h.detail)
 	router.Post("/workflows/{runID}/human-tasks/{taskID}/decision", h.submitHumanDecision)
 	router.Post("/workflows/{runID}/pause", h.pause)
 	router.Post("/workflows/{runID}/resume", h.resume)
 	router.Post("/workflows/{runID}/cancel", h.cancel)
+}
+
+type runPageResponse struct {
+	Items      []runListResponse `json:"items"`
+	NextCursor string            `json:"next_cursor,omitempty"`
+}
+
+const (
+	workflowCursorVersion = 1
+	workflowCursorKind    = "workflow_list"
+)
+
+type workflowListCursor struct {
+	Version     int    `json:"version"`
+	Kind        string `json:"kind"`
+	WorkspaceID string `json:"workspace_id"`
+	At          string `json:"at"`
+	ID          string `json:"id"`
+	Filter      string `json:"filter"`
+}
+
+type runListResponse struct {
+	ID                string  `json:"id"`
+	WorkspaceID       string  `json:"workspace_id"`
+	DefinitionKey     string  `json:"definition_key"`
+	DefinitionVersion int64   `json:"definition_version"`
+	Status            string  `json:"status"`
+	Version           int64   `json:"version"`
+	CreatedAt         string  `json:"created_at"`
+	UpdatedAt         string  `json:"updated_at"`
+	CompletedAt       *string `json:"completed_at,omitempty"`
+	WaitingForHuman   bool    `json:"waiting_for_human"`
+	PauseRequested    bool    `json:"pause_requested"`
+	CancelRequested   bool    `json:"cancel_requested"`
+}
+
+func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
+	service, ok := h.service.(listService)
+	if !ok {
+		writeProblem(w, http.StatusServiceUnavailable, "WORKFLOW_LIST_UNAVAILABLE", "Workflow 列表暂不可用", true, nil)
+		return
+	}
+	workspaceID, err := foundation.ParseID(chi.URLParam(r, "workspaceID"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	allowed := map[string]struct{}{"cursor": {}, "limit": {}, "status": {}}
+	for key, values := range r.URL.Query() {
+		if _, ok := allowed[key]; !ok {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_LIST_FILTER_INVALID", false, fmt.Errorf("unknown query parameter %q", key)))
+			return
+		}
+		if len(values) != 1 {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_LIST_FILTER_INVALID", false, fmt.Errorf("query parameter %q must appear once", key)))
+			return
+		}
+	}
+	status := domain.RunStatus(strings.TrimSpace(r.URL.Query().Get("status")))
+	if status != "" && !validRunListStatus(status) {
+		writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_LIST_FILTER_INVALID", false, errors.New("workflow status filter is invalid")))
+		return
+	}
+	filterJSON, _ := json.Marshal(struct {
+		Status domain.RunStatus `json:"status,omitempty"`
+	}{Status: status})
+	limit := 30
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, scanErr := strconv.Atoi(raw)
+		if scanErr != nil {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_LIST_LIMIT_INVALID", false, scanErr))
+			return
+		}
+		limit = parsed
+	}
+	if limit < 1 || limit > 100 {
+		writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_LIST_LIMIT_INVALID", false, errors.New("limit must be between 1 and 100")))
+		return
+	}
+	var cursorTime *time.Time
+	var cursorID foundation.ID
+	if raw := strings.TrimSpace(r.URL.Query().Get("cursor")); raw != "" {
+		if len(raw) > 2048 {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_CURSOR_INVALID", false, errors.New("cursor is too long")))
+			return
+		}
+		decoded, decodeErr := base64.RawURLEncoding.DecodeString(raw)
+		if decodeErr != nil {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_CURSOR_INVALID", false, decodeErr))
+			return
+		}
+		var cursor workflowListCursor
+		decoder := json.NewDecoder(strings.NewReader(string(decoded)))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&cursor) != nil || decoder.Decode(&struct{}{}) != io.EOF || cursor.Version != workflowCursorVersion || cursor.Kind != workflowCursorKind || cursor.WorkspaceID != string(workspaceID) || cursor.Filter != string(filterJSON) {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_CURSOR_INVALID", false, errors.New("cursor payload is invalid")))
+			return
+		}
+		parsed, parseErr := time.Parse(time.RFC3339Nano, cursor.At)
+		if parseErr != nil {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_CURSOR_INVALID", false, parseErr))
+			return
+		}
+		id, idErr := foundation.ParseID(cursor.ID)
+		if idErr != nil {
+			writeError(w, idErr)
+			return
+		}
+		cursorTime, cursorID = &parsed, id
+	}
+	items, hasMore, err := service.ListRuns(r.Context(), domain.RunListQuery{WorkspaceID: workspaceID, Status: status, CursorTime: cursorTime, CursorID: cursorID, Limit: limit})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response := runPageResponse{Items: make([]runListResponse, len(items))}
+	for index, item := range items {
+		response.Items[index] = runListResponse{ID: string(item.ID), WorkspaceID: string(item.WorkspaceID), DefinitionKey: item.DefinitionKey, DefinitionVersion: item.DefinitionVersion, Status: string(item.Status), Version: item.Version, CreatedAt: item.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: item.UpdatedAt.UTC().Format(time.RFC3339Nano), WaitingForHuman: item.WaitingForHuman, PauseRequested: item.PauseRequestedAt != nil, CancelRequested: item.CancelRequestedAt != nil}
+		if item.CompletedAt != nil {
+			completed := item.CompletedAt.UTC().Format(time.RFC3339Nano)
+			response.Items[index].CompletedAt = &completed
+		}
+	}
+	if hasMore && len(items) > 0 {
+		tail := items[len(items)-1]
+		payload, _ := json.Marshal(workflowListCursor{Version: workflowCursorVersion, Kind: workflowCursorKind, WorkspaceID: string(workspaceID), At: tail.UpdatedAt.UTC().Format(time.RFC3339Nano), ID: string(tail.ID), Filter: string(filterJSON)})
+		response.NextCursor = base64.RawURLEncoding.EncodeToString(payload)
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func validRunListStatus(status domain.RunStatus) bool {
+	switch status {
+	case domain.RunStatusPending, domain.RunStatusRunning, domain.RunStatusWaitingForHuman, domain.RunStatusRetryWait, domain.RunStatusPaused, domain.RunStatusSucceeded, domain.RunStatusFailed, domain.RunStatusCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 type startRequest struct {
@@ -58,16 +205,18 @@ type startResponse struct {
 }
 
 type runResponse struct {
-	ID           string          `json:"id"`
-	WorkspaceID  string          `json:"workspace_id"`
-	DefinitionID string          `json:"definition_id"`
-	Status       string          `json:"status"`
-	Input        json.RawMessage `json:"input"`
-	Output       json.RawMessage `json:"output,omitempty"`
-	Version      int64           `json:"version"`
-	CreatedAt    string          `json:"created_at"`
-	UpdatedAt    string          `json:"updated_at"`
-	CompletedAt  *string         `json:"completed_at,omitempty"`
+	ID              string          `json:"id"`
+	WorkspaceID     string          `json:"workspace_id"`
+	DefinitionID    string          `json:"definition_id"`
+	Status          string          `json:"status"`
+	Input           json.RawMessage `json:"input"`
+	Output          json.RawMessage `json:"output,omitempty"`
+	Version         int64           `json:"version"`
+	CreatedAt       string          `json:"created_at"`
+	UpdatedAt       string          `json:"updated_at"`
+	CompletedAt     *string         `json:"completed_at,omitempty"`
+	PauseRequested  bool            `json:"pause_requested"`
+	CancelRequested bool            `json:"cancel_requested"`
 }
 
 type humanDecisionRequest struct {
@@ -90,10 +239,12 @@ type controlRequest struct {
 }
 
 type controlResponse struct {
-	WorkflowRunID string `json:"workflow_run_id"`
-	Status        string `json:"status"`
-	Version       int64  `json:"version"`
-	StatusURL     string `json:"status_url"`
+	WorkflowRunID   string `json:"workflow_run_id"`
+	Status          string `json:"status"`
+	Version         int64  `json:"version"`
+	StatusURL       string `json:"status_url"`
+	PauseRequested  bool   `json:"pause_requested"`
+	CancelRequested bool   `json:"cancel_requested"`
 }
 
 func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +362,7 @@ func (h *Handler) control(w http.ResponseWriter, r *http.Request, execute func(c
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, controlResponse{WorkflowRunID: string(result.WorkflowRunID), Status: string(result.Status), Version: result.Version, StatusURL: result.StatusURL})
+	writeJSON(w, http.StatusOK, controlResponse{WorkflowRunID: string(result.WorkflowRunID), Status: string(result.Status), Version: result.Version, StatusURL: result.StatusURL, PauseRequested: result.PauseRequested, CancelRequested: result.CancelRequested})
 }
 
 func decodeJSON(r *http.Request, target any) error {
@@ -222,7 +373,7 @@ func decodeJSON(r *http.Request, target any) error {
 }
 
 func toRunResponse(run domain.Run) runResponse {
-	response := runResponse{ID: string(run.ID), WorkspaceID: string(run.WorkspaceID), DefinitionID: string(run.DefinitionID), Status: string(run.Status), Input: run.Input, Output: run.Output, Version: run.Version, CreatedAt: run.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: run.UpdatedAt.UTC().Format(time.RFC3339Nano)}
+	response := runResponse{ID: string(run.ID), WorkspaceID: string(run.WorkspaceID), DefinitionID: string(run.DefinitionID), Status: string(run.Status), Input: run.Input, Output: run.Output, Version: run.Version, CreatedAt: run.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: run.UpdatedAt.UTC().Format(time.RFC3339Nano), PauseRequested: run.PauseRequestedAt != nil, CancelRequested: run.CancelRequestedAt != nil}
 	if run.CompletedAt != nil {
 		value := run.CompletedAt.UTC().Format(time.RFC3339Nano)
 		response.CompletedAt = &value

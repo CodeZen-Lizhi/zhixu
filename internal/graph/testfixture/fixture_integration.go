@@ -390,9 +390,9 @@ func insertProvenance(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID,
 		},
 		{
 			query: `INSERT INTO core.source_version(
-				id,source_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
-			) VALUES($1,$2,$3,$4,$5,'text/plain',$6,'pending',$7)`,
-			args: []any{string(sourceVersionID), string(sourceID), string(artifactID), contentHash, len(content), "graph-http-fixture.txt", now},
+				id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
+			) VALUES($1,$2,$3,$4,$5,$6,'text/plain',$7,'pending',$8)`,
+			args: []any{string(sourceVersionID), string(sourceID), string(workspaceID), string(artifactID), contentHash, len(content), "graph-http-fixture.txt", now},
 		},
 		{
 			query: `INSERT INTO ingestion.parse_projection(

@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	projectMigrationTable = "goose_db_version"
-	migrationLockName     = "zhixu:migrate"
+	projectMigrationTable      = "goose_db_version"
+	migrationLockName          = "zhixu:migrate"
+	migrationLockRetryInterval = 25 * time.Millisecond
 )
 
 // Runner applies the project schema first and the River schema second while a
@@ -56,7 +57,7 @@ func (r *Runner) Up(ctx context.Context) (retErr error) {
 		return fmt.Errorf("acquire migration lock connection: %w", err)
 	}
 	defer lockConnection.Close(context.Background())
-	if _, err := lockConnection.Exec(ctx, "SELECT pg_advisory_lock(hashtextextended($1, 0))", migrationLockName); err != nil {
+	if err := acquireMigrationAdvisoryLock(ctx, lockConnection); err != nil {
 		return fmt.Errorf("acquire migration advisory lock: %w", err)
 	}
 	defer func() {
@@ -94,6 +95,29 @@ func (r *Runner) Up(ctx context.Context) (retErr error) {
 		return fmt.Errorf("validate River migrations: %s", validationMessage(validation))
 	}
 	return nil
+}
+
+// acquireMigrationAdvisoryLock polls on the dedicated session so every failed
+// attempt completes its PostgreSQL statement and releases its MVCC snapshot.
+// A blocking pg_advisory_lock statement can otherwise deadlock with CREATE
+// INDEX CONCURRENTLY running under the current lock owner.
+func acquireMigrationAdvisoryLock(ctx context.Context, connection *pgx.Conn) error {
+	retry := time.NewTicker(migrationLockRetryInterval)
+	defer retry.Stop()
+	for {
+		var acquired bool
+		if err := connection.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtextextended($1, 0))", migrationLockName).Scan(&acquired); err != nil {
+			return err
+		}
+		if acquired {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-retry.C:
+		}
+	}
 }
 
 // openLockConnection creates a dedicated session outside the application pool.

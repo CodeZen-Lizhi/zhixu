@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
+	changecontroleventcontract "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/eventcontract"
+	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,18 +25,28 @@ type DB interface {
 }
 
 // Repository 是 Change Control 的 PostgreSQL 实现。
-type Repository struct{ db DB }
+type Repository struct {
+	db     DB
+	events eventsapplication.Appender
+}
 
 var _ domain.Repository = (*Repository)(nil)
 var _ domain.KnowledgeChangeProposalRepository = (*Repository)(nil)
 var _ domain.AuthorizationRepository = (*Repository)(nil)
 
-// NewRepository 创建 PostgreSQL Repository。
-func NewRepository(db DB) (*Repository, error) {
+// NewRepository 创建 PostgreSQL Repository；可选事件追加器用于在同一事务发布 Proposal 状态通知。
+func NewRepository(db DB, appenders ...eventsapplication.Appender) (*Repository, error) {
 	if db == nil {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "CHANGE_CONTROL_DATABASE_UNAVAILABLE", true, errors.New("database is nil"))
 	}
-	return &Repository{db: db}, nil
+	if len(appenders) > 1 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "CHANGE_CONTROL_EVENT_APPENDER_INVALID", false, errors.New("only one change control event appender may be configured"))
+	}
+	var events eventsapplication.Appender
+	if len(appenders) == 1 && !isNilChangeControlDependency(appenders[0]) {
+		events = appenders[0]
+	}
+	return &Repository{db: db, events: events}, nil
 }
 
 // CreateProposal 在同一事务中创建 Proposal 和不可变 Revision。
@@ -41,28 +55,73 @@ func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposa
 		return r.CreateKnowledgeChangeProposal(ctx, proposal)
 	}
 	proposal.Type = domain.ProposalTypeFilePatch
+	riskLevel, riskErr := domain.ValidateProposalRiskLevelForType(proposal.Type, proposal.RiskLevel)
+	if riskErr != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, riskErr)
+	}
+	proposal.RiskLevel = riskLevel
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeFilePatch, proposal.Revision); err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	expectedRequestHash, err := domain.ComputeRequestHashWithRiskLevel(
+		proposal.WorkspaceID,
+		proposal.Revision.TargetPath,
+		proposal.Revision.BaseHash,
+		proposal.Revision.Content,
+		proposal.Revision.EvidenceSummary,
+		proposal.RiskLevel,
+		proposal.Revision.Risk,
+		proposal.Revision.RollbackPlan,
+	)
+	if err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	legacyRequestHash := domain.ComputeRequestHash(
+		proposal.WorkspaceID,
+		proposal.Revision.TargetPath,
+		proposal.Revision.BaseHash,
+		proposal.Revision.Content,
+		proposal.Revision.EvidenceSummary,
+		proposal.Revision.Risk,
+		proposal.Revision.RollbackPlan,
+	)
+	legacyRequest := proposal.RequestHash == legacyRequestHash
+	if proposal.RequestHash != expectedRequestHash && !legacyRequest {
+		return r.resolveInvalidRequestHash(ctx, proposal, "file patch request hash mismatch")
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return domain.Proposal{}, classify(err, "PROPOSAL_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeFilePatch, proposal.Revision); err != nil {
-		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	if legacyRequest {
+		existingID, storedType, storedRequestHash, storedRiskLevel, loadErr := loadProposalCreateBinding(ctx, tx, proposal.WorkspaceID, proposal.IdempotencyKey)
+		if errors.Is(loadErr, pgx.ErrNoRows) {
+			return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("legacy file patch request hash is only valid for persisted replay"))
+		}
+		if loadErr != nil {
+			return domain.Proposal{}, classify(loadErr, "PROPOSAL_IDEMPOTENCY_QUERY_FAILED")
+		}
+		if storedType != proposal.Type || storedRiskLevel != proposal.RiskLevel || !proposalRequestHashReplayMatches(storedRequestHash, proposal.RequestHash, expectedRequestHash, legacyRequestHash) {
+			return domain.Proposal{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
+		}
+		_ = tx.Rollback(ctx)
+		return r.GetProposal(ctx, existingID)
 	}
 	var insertedID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO change_control.proposal(id,workspace_id,proposal_type,idempotency_key,request_hash,status,version,created_at,updated_at)
-		VALUES($1,$2,'file_patch',$3,$4,$5,$6,$7,$8)
-		ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
-		RETURNING id::text`,
-		string(proposal.ID), string(proposal.WorkspaceID), proposal.IdempotencyKey, proposal.RequestHash,
+			INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,idempotency_key,request_hash,status,version,created_at,updated_at)
+			VALUES($1,$2,'file_patch',$3,$4,$5,$6,$7,$8,$9)
+			ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
+			RETURNING id::text`,
+		string(proposal.ID), string(proposal.WorkspaceID), string(proposal.RiskLevel), proposal.IdempotencyKey, proposal.RequestHash,
 		string(proposal.Status), proposal.Version, proposal.CreatedAt.UTC(), proposal.UpdatedAt.UTC()).Scan(&insertedID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var existingID, requestHash string
-		if queryErr := tx.QueryRow(ctx, `SELECT id::text,request_hash FROM change_control.proposal WHERE workspace_id=$1 AND idempotency_key=$2`, string(proposal.WorkspaceID), proposal.IdempotencyKey).Scan(&existingID, &requestHash); queryErr != nil {
+		existingID, storedType, requestHash, storedRiskLevel, queryErr := loadProposalCreateBinding(ctx, tx, proposal.WorkspaceID, proposal.IdempotencyKey)
+		if queryErr != nil {
 			return domain.Proposal{}, classify(queryErr, "PROPOSAL_IDEMPOTENCY_QUERY_FAILED")
 		}
-		if requestHash != proposal.RequestHash {
+		if storedType != proposal.Type || storedRiskLevel != proposal.RiskLevel || !proposalRequestHashReplayMatches(requestHash, proposal.RequestHash, expectedRequestHash, legacyRequestHash) {
 			return domain.Proposal{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
 		}
 		_ = tx.Rollback(ctx)
@@ -90,38 +149,62 @@ func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposa
 // CreateKnowledgeChangeProposal 在同一事务中创建 typed knowledge_change Proposal 和不可变 Revision。
 func (r *Repository) CreateKnowledgeChangeProposal(ctx context.Context, proposal domain.Proposal) (domain.Proposal, error) {
 	proposal.Type = domain.ProposalTypeKnowledgeChange
+	riskLevel, riskErr := domain.ValidateProposalRiskLevelForType(proposal.Type, proposal.RiskLevel)
+	if riskErr != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, riskErr)
+	}
+	proposal.RiskLevel = riskLevel
 	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeKnowledgeChange, proposal.Revision); err != nil {
 		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
 	}
 	if proposal.Revision.KnowledgeChange == nil {
 		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("knowledge change revision payload is required"))
 	}
-	expectedRequestHash, err := domain.ComputeKnowledgeChangeRequestHash(proposal.WorkspaceID, *proposal.Revision.KnowledgeChange, proposal.Revision.Risk, proposal.Revision.RollbackPlan)
+	expectedRequestHash, err := domain.ComputeKnowledgeChangeRequestHashWithRiskLevel(proposal.WorkspaceID, *proposal.Revision.KnowledgeChange, proposal.RiskLevel, proposal.Revision.Risk, proposal.Revision.RollbackPlan)
 	if err != nil {
 		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
 	}
-	if proposal.RequestHash != expectedRequestHash {
-		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("knowledge change request hash mismatch"))
+	legacyRequestHash, err := domain.ComputeKnowledgeChangeRequestHash(proposal.WorkspaceID, *proposal.Revision.KnowledgeChange, proposal.Revision.Risk, proposal.Revision.RollbackPlan)
+	if err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	legacyRequest := proposal.RequestHash == legacyRequestHash
+	if proposal.RequestHash != expectedRequestHash && !legacyRequest {
+		return r.resolveInvalidRequestHash(ctx, proposal, "knowledge change request hash mismatch")
 	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return domain.Proposal{}, classify(err, "PROPOSAL_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if legacyRequest {
+		existingID, storedType, storedRequestHash, storedRiskLevel, loadErr := loadProposalCreateBinding(ctx, tx, proposal.WorkspaceID, proposal.IdempotencyKey)
+		if errors.Is(loadErr, pgx.ErrNoRows) {
+			return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("legacy knowledge change request hash is only valid for persisted replay"))
+		}
+		if loadErr != nil {
+			return domain.Proposal{}, classify(loadErr, "PROPOSAL_IDEMPOTENCY_QUERY_FAILED")
+		}
+		if storedType != proposal.Type || storedRiskLevel != proposal.RiskLevel || !proposalRequestHashReplayMatches(storedRequestHash, proposal.RequestHash, expectedRequestHash, legacyRequestHash) {
+			return domain.Proposal{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
+		}
+		_ = tx.Rollback(ctx)
+		return r.GetProposal(ctx, existingID)
+	}
 	var insertedID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO change_control.proposal(id,workspace_id,proposal_type,idempotency_key,request_hash,status,version,created_at,updated_at)
-		VALUES($1,$2,'knowledge_change',$3,$4,$5,$6,$7,$8)
-		ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
-		RETURNING id::text`,
-		string(proposal.ID), string(proposal.WorkspaceID), proposal.IdempotencyKey, proposal.RequestHash,
+			INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,idempotency_key,request_hash,status,version,created_at,updated_at)
+			VALUES($1,$2,'knowledge_change',$3,$4,$5,$6,$7,$8,$9)
+			ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
+			RETURNING id::text`,
+		string(proposal.ID), string(proposal.WorkspaceID), string(proposal.RiskLevel), proposal.IdempotencyKey, proposal.RequestHash,
 		string(proposal.Status), proposal.Version, proposal.CreatedAt.UTC(), proposal.UpdatedAt.UTC()).Scan(&insertedID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var existingID, requestHash string
-		if queryErr := tx.QueryRow(ctx, `SELECT id::text,request_hash FROM change_control.proposal WHERE workspace_id=$1 AND idempotency_key=$2`, string(proposal.WorkspaceID), proposal.IdempotencyKey).Scan(&existingID, &requestHash); queryErr != nil {
+		existingID, storedType, requestHash, storedRiskLevel, queryErr := loadProposalCreateBinding(ctx, tx, proposal.WorkspaceID, proposal.IdempotencyKey)
+		if queryErr != nil {
 			return domain.Proposal{}, classify(queryErr, "PROPOSAL_IDEMPOTENCY_QUERY_FAILED")
 		}
-		if requestHash != proposal.RequestHash {
+		if storedType != proposal.Type || storedRiskLevel != proposal.RiskLevel || !proposalRequestHashReplayMatches(requestHash, proposal.RequestHash, expectedRequestHash, legacyRequestHash) {
 			return domain.Proposal{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
 		}
 		_ = tx.Rollback(ctx)
@@ -162,10 +245,53 @@ func (r *Repository) CreateKnowledgeChangeProposal(ctx context.Context, proposal
 	return proposal, nil
 }
 
+func (r *Repository) resolveInvalidRequestHash(ctx context.Context, proposal domain.Proposal, mismatchMessage string) (domain.Proposal, error) {
+	var existingID string
+	err := r.db.QueryRow(ctx, `SELECT id::text FROM change_control.proposal WHERE workspace_id=$1 AND idempotency_key=$2`, string(proposal.WorkspaceID), proposal.IdempotencyKey).Scan(&existingID)
+	if err == nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return domain.Proposal{}, classify(err, "PROPOSAL_IDEMPOTENCY_QUERY_FAILED")
+	}
+	return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New(mismatchMessage))
+}
+
+func loadProposalCreateBinding(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, idempotencyKey string) (foundation.ID, domain.ProposalType, string, domain.ProposalRiskLevel, error) {
+	var proposalID, proposalType, requestHash, riskLevel string
+	err := tx.QueryRow(ctx, `
+			SELECT p.id::text,p.proposal_type,p.request_hash,p.risk_level
+			FROM change_control.proposal p
+			WHERE p.workspace_id=$1 AND p.idempotency_key=$2
+			FOR UPDATE OF p`, string(workspaceID), idempotencyKey).Scan(&proposalID, &proposalType, &requestHash, &riskLevel)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	storedType := domain.NormalizeProposalType(domain.ProposalType(proposalType))
+	parsedRiskLevel, err := domain.ValidateProposalRiskLevelForType(storedType, domain.ProposalRiskLevel(riskLevel))
+	if err != nil {
+		return "", "", "", "", foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_RISK_LEVEL_INVALID", false, err)
+	}
+	return foundation.ID(proposalID), storedType, requestHash, parsedRiskLevel, nil
+}
+
+// proposalRequestHashReplayMatches 保持单向兼容：历史 v1 可由同一 v1 或等价 v2 重放，
+// 新建 v2 只能由 v2 重放，禁止 v1 请求反向匹配 v2 持久事实。
+func proposalRequestHashReplayMatches(storedHash, requestedHash, requestHashV2, requestHashV1 string) bool {
+	switch storedHash {
+	case requestHashV2:
+		return requestedHash == requestHashV2
+	case requestHashV1:
+		return requestedHash == requestHashV1 || requestedHash == requestHashV2
+	default:
+		return false
+	}
+}
+
 // GetProposal 使用单条查询返回一致的 Proposal、Revision 和 Approval 快照。
 func (r *Repository) GetProposal(ctx context.Context, proposalID foundation.ID) (domain.Proposal, error) {
 	row := r.db.QueryRow(ctx, `
-		SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.idempotency_key,p.request_hash,p.workflow_run_id::text,p.status,p.version,p.created_at,p.updated_at,
+			SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.idempotency_key,p.request_hash,p.risk_level,p.workflow_run_id::text,p.status,p.version,p.created_at,p.updated_at,
 			r.id::text,r.revision_no,r.target_path,r.base_hash,r.content,r.evidence_summary,r.risk,r.rollback_plan,r.change_hash,
 			r.target_refs,r.base_versions,r.change_set,r.evidence_refs,r.schema_version,r.created_at,
 			a.id::text,a.change_hash,a.decision,a.approved_git_head,a.decided_at
@@ -188,6 +314,125 @@ func (r *Repository) GetProposal(ctx context.Context, proposalID foundation.ID) 
 	return proposal, nil
 }
 
+// ListProposals 返回 Workspace 绑定的 Proposal 摘要，使用更新时间和 ID 的 keyset 游标。
+func (r *Repository) ListProposals(ctx context.Context, request domain.ProposalListQuery) ([]domain.ProposalListItem, bool, error) {
+	if request.WorkspaceID == "" || request.Limit < 1 || request.Limit > 100 {
+		return nil, false, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_LIST_INVALID", false, errors.New("invalid list scope"))
+	}
+	if request.RiskLevel != "" {
+		normalized, riskErr := domain.ParseProposalRiskLevel(request.RiskLevel)
+		if riskErr != nil {
+			return nil, false, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_LIST_INVALID", false, riskErr)
+		}
+		request.RiskLevel = normalized
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, false, classify(err, "PROPOSAL_LIST_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	query, args := buildProposalListQuery(request)
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, false, classify(err, "PROPOSAL_LIST_QUERY_FAILED")
+	}
+	defer rows.Close()
+	items := make([]domain.ProposalListItem, 0, request.Limit)
+	for rows.Next() {
+		var proposalID, scopeID, proposalType, status, revisionID, target, riskLevel, risk, changeHash string
+		var workflowRunID, approvalID, approvalHash, approvalDecision, approvedGitHead *string
+		var createdAt, updatedAt time.Time
+		var approvalDecidedAt *time.Time
+		if err := rows.Scan(
+			&proposalID, &scopeID, &proposalType, &status, &createdAt, &updatedAt,
+			&revisionID, &target, &riskLevel, &risk, &changeHash, &workflowRunID,
+			&approvalID, &approvalHash, &approvalDecision, &approvedGitHead, &approvalDecidedAt,
+		); err != nil {
+			return nil, false, classify(err, "PROPOSAL_LIST_SCAN_FAILED")
+		}
+		item := domain.ProposalListItem{
+			ProposalID: foundation.ID(proposalID), WorkspaceID: foundation.ID(scopeID), Type: domain.ProposalType(proposalType),
+			Status: domain.ProposalStatus(status), Target: target, RiskLevel: domain.ProposalRiskLevel(riskLevel), Risk: risk, RevisionID: foundation.ID(revisionID),
+			ChangeHash: changeHash, CreatedAt: createdAt, UpdatedAt: updatedAt,
+		}
+		item.Type = domain.NormalizeProposalType(item.Type)
+		parsedRiskLevel, riskErr := domain.ValidateProposalRiskLevelForType(item.Type, item.RiskLevel)
+		if riskErr != nil {
+			return nil, false, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_LIST_RISK_LEVEL_INVALID", false, riskErr)
+		}
+		item.RiskLevel = parsedRiskLevel
+		approvalPresent := approvalID != nil || approvalHash != nil || approvalDecision != nil || approvedGitHead != nil || approvalDecidedAt != nil
+		approvalComplete := approvalID != nil && approvalHash != nil && approvalDecision != nil && approvalDecidedAt != nil
+		if approvalPresent && !approvalComplete || workflowRunID != nil && !approvalComplete {
+			return nil, false, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_LIST_BINDING_INVALID", false, errors.New("proposal approval and workflow projection is incomplete"))
+		}
+		if approvalComplete {
+			item.Approval = &domain.Approval{
+				ID: foundation.ID(*approvalID), ProposalID: item.ProposalID, RevisionID: item.RevisionID,
+				ChangeHash: *approvalHash, Decision: domain.Decision(*approvalDecision), ApprovedGitHead: approvedGitHead,
+				DecidedAt: *approvalDecidedAt,
+			}
+			if item.Approval.Decision == domain.DecisionRejected && (item.Approval.ApprovedGitHead != nil || workflowRunID != nil) ||
+				domain.NormalizeProposalType(item.Type) == domain.ProposalTypeKnowledgeChange && (item.Approval.ApprovedGitHead != nil || workflowRunID != nil) ||
+				workflowRunID != nil && (item.Approval.Decision != domain.DecisionApproved || item.Approval.ApprovedGitHead == nil) {
+				return nil, false, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_LIST_BINDING_INVALID", false, errors.New("proposal approval contains an invalid durable writeback binding"))
+			}
+		}
+		if workflowRunID != nil {
+			value := foundation.ID(*workflowRunID)
+			item.WorkflowRunID = &value
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, classify(err, "PROPOSAL_LIST_ROWS_FAILED")
+	}
+	hasMore := len(items) > request.Limit
+	if hasMore {
+		items = items[:request.Limit]
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, classify(err, "PROPOSAL_LIST_COMMIT_FAILED")
+	}
+	return items, hasMore, nil
+}
+
+func buildProposalListQuery(request domain.ProposalListQuery) (string, []any) {
+	query := `SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.status,p.created_at,p.updated_at,
+			r.id::text,COALESCE(r.target_path,'知识关系'),p.risk_level,r.risk,r.change_hash,p.workflow_run_id::text,
+		a.id::text,a.change_hash,a.decision,a.approved_git_head,a.decided_at
+		FROM change_control.proposal p
+		JOIN LATERAL (
+			SELECT id,target_path,risk,change_hash
+			FROM change_control.proposal_revision
+			WHERE proposal_id=p.id ORDER BY revision_no DESC LIMIT 1
+		) r ON true
+		LEFT JOIN change_control.approval a ON a.revision_id=r.id
+		WHERE p.workspace_id=$1`
+	args := []any{string(request.WorkspaceID)}
+	appendFilter := func(column string, value string) {
+		if value == "" {
+			return
+		}
+		args = append(args, value)
+		query += ` AND ` + column + `=$` + fmt.Sprint(len(args))
+	}
+	appendFilter("p.status", string(request.Status))
+	appendFilter("p.proposal_type", string(request.Type))
+	appendFilter("p.risk_level", string(request.RiskLevel))
+	if request.CreatedAfter != nil {
+		args = append(args, request.CreatedAfter.UTC())
+		query += ` AND p.created_at>=$` + fmt.Sprint(len(args))
+	}
+	if request.CursorTime != nil {
+		args = append(args, request.CursorTime.UTC(), string(request.CursorID))
+		query += ` AND (p.updated_at,p.id)<($` + fmt.Sprint(len(args)-1) + `,$` + fmt.Sprint(len(args)) + `)`
+	}
+	query += ` ORDER BY p.updated_at DESC,p.id DESC LIMIT $` + fmt.Sprint(len(args)+1)
+	args = append(args, request.Limit+1)
+	return query, args
+}
+
 // Approve 只允许 ready_for_review Proposal 被一次性批准或拒绝。
 func (r *Repository) Approve(ctx context.Context, approval domain.Approval) (domain.Approval, error) {
 	if approval.ApprovedGitHead != nil {
@@ -199,13 +444,13 @@ func (r *Repository) Approve(ctx context.Context, approval domain.Approval) (dom
 		return domain.Approval{}, classify(err, "APPROVAL_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var status, revisionHash string
+	var workspaceID, status, revisionHash string
 	var proposalVersion int64
 	err = tx.QueryRow(ctx, `
-		SELECT p.status,p.version,r.change_hash
+		SELECT p.workspace_id::text,p.status,p.version,r.change_hash
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.proposal_id=p.id AND r.id=$2
-		WHERE p.id=$1 FOR UPDATE`, string(approval.ProposalID), string(approval.RevisionID)).Scan(&status, &proposalVersion, &revisionHash)
+		WHERE p.id=$1 FOR UPDATE`, string(approval.ProposalID), string(approval.RevisionID)).Scan(&workspaceID, &status, &proposalVersion, &revisionHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Approval{}, foundation.NewError(foundation.ErrorNotFound, "PROPOSAL_REVISION_NOT_FOUND", false, err)
 	}
@@ -215,6 +460,22 @@ func (r *Repository) Approve(ctx context.Context, approval domain.Approval) (dom
 	if status != string(domain.StatusReady) {
 		existing, existingErr := getApproval(ctx, tx, approval.RevisionID)
 		if existingErr == nil && existing.ProposalID == approval.ProposalID && existing.ChangeHash == approval.ChangeHash && existing.Decision == approval.Decision && sameOptionalString(existing.ApprovedGitHead, approval.ApprovedGitHead) {
+			if !isNilChangeControlDependency(r.events) {
+				eventType, eventStatus := changecontroleventcontract.ProposalRejectedEventType, string(domain.StatusRejected)
+				if existing.Decision == domain.DecisionApproved {
+					eventType, eventStatus = changecontroleventcontract.ProposalApprovedEventType, string(domain.StatusApproved)
+				}
+				request := changecontroleventcontract.ProposalStatusRequest(
+					foundation.ID(workspaceID), existing.ProposalID, existing.ID,
+					eventType, eventStatus, proposalVersion, existing.DecidedAt,
+				)
+				if _, _, appendErr := r.events.AppendTx(ctx, tx, request); appendErr != nil {
+					return domain.Approval{}, appendErr
+				}
+				if commitErr := tx.Commit(ctx); commitErr != nil {
+					return domain.Approval{}, classify(commitErr, "APPROVAL_COMMIT_FAILED")
+				}
+			}
 			return existing, nil
 		}
 		if existingErr != nil && !errors.Is(existingErr, pgx.ErrNoRows) {
@@ -242,6 +503,19 @@ func (r *Repository) Approve(ctx context.Context, approval domain.Approval) (dom
 	}
 	if command.RowsAffected() != 1 {
 		return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_NOT_READY_FOR_REVIEW", false, errors.New("proposal state changed"))
+	}
+	if !isNilChangeControlDependency(r.events) {
+		eventType, eventStatus := changecontroleventcontract.ProposalRejectedEventType, string(domain.StatusRejected)
+		if approval.Decision == domain.DecisionApproved {
+			eventType, eventStatus = changecontroleventcontract.ProposalApprovedEventType, string(domain.StatusApproved)
+		}
+		request := changecontroleventcontract.ProposalStatusRequest(
+			foundation.ID(workspaceID), approval.ProposalID, approval.ID,
+			eventType, eventStatus, proposalVersion+1, approval.DecidedAt,
+		)
+		if _, _, err := r.events.AppendTx(ctx, tx, request); err != nil {
+			return domain.Approval{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.Approval{}, classify(err, "APPROVAL_COMMIT_FAILED")
@@ -538,7 +812,7 @@ func authorizationTimePointer(value *time.Time) any {
 }
 
 func scanProposal(row pgx.Row) (domain.Proposal, error) {
-	var proposalID, workspaceID, proposalType, idempotencyKey, requestHash, status string
+	var proposalID, workspaceID, proposalType, idempotencyKey, requestHash, riskLevel, status string
 	var workflowRunID *string
 	var revisionID, risk, rollback, changeHash string
 	var targetPath, baseHash, content, evidence, schemaVersion *string
@@ -549,7 +823,7 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	var revisionNo int
 	var version int64
 	err := row.Scan(
-		&proposalID, &workspaceID, &proposalType, &idempotencyKey, &requestHash, &workflowRunID, &status, &version, &createdAt, &updatedAt,
+		&proposalID, &workspaceID, &proposalType, &idempotencyKey, &requestHash, &riskLevel, &workflowRunID, &status, &version, &createdAt, &updatedAt,
 		&revisionID, &revisionNo, &targetPath, &baseHash, &content, &evidence, &risk, &rollback, &changeHash,
 		&targetRefsRaw, &baseVersionsRaw, &changeSetRaw, &evidenceRefsRaw, &schemaVersion, &revisionCreatedAt,
 		&approvalID, &approvalHash, &decision, &approvedGitHead, &decidedAt,
@@ -559,13 +833,19 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	}
 	proposal := domain.Proposal{
 		ID: foundation.ID(proposalID), WorkspaceID: foundation.ID(workspaceID), Type: domain.ProposalType(proposalType),
-		IdempotencyKey: idempotencyKey, RequestHash: requestHash,
+		IdempotencyKey: idempotencyKey, RequestHash: requestHash, RiskLevel: domain.ProposalRiskLevel(riskLevel),
 		Status: domain.ProposalStatus(status), Version: version, CreatedAt: createdAt, UpdatedAt: updatedAt,
 		Revision: domain.Revision{
 			ID: foundation.ID(revisionID), ProposalID: foundation.ID(proposalID), RevisionNo: revisionNo,
 			Risk: risk, RollbackPlan: rollback, ChangeHash: changeHash, CreatedAt: revisionCreatedAt,
 		},
 	}
+	proposal.Type = domain.NormalizeProposalType(proposal.Type)
+	parsedRiskLevel, riskErr := domain.ValidateProposalRiskLevelForType(proposal.Type, domain.ProposalRiskLevel(riskLevel))
+	if riskErr != nil {
+		return domain.Proposal{}, riskErr
+	}
+	proposal.RiskLevel = parsedRiskLevel
 	switch domain.NormalizeProposalType(proposal.Type) {
 	case domain.ProposalTypeFilePatch:
 		if targetPath == nil || baseHash == nil || content == nil || evidence == nil || schemaVersion != nil ||
@@ -639,6 +919,19 @@ func sameOptionalString(left, right *string) bool {
 		return left == nil && right == nil
 	}
 	return strings.EqualFold(*left, *right)
+}
+
+func isNilChangeControlDependency(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 func classify(err error, code string) error {

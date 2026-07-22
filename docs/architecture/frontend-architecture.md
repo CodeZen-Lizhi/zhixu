@@ -251,8 +251,9 @@ M7-01 的容量验证是 20,000 Active Topic、100,000 Confirmed IMPACTS Relatio
 - E2E：六个最高层 Seam。
 - Accessibility：键盘、颜色、焦点。
 
-M6-04 已有组件/路由测试和真实临时 PostgreSQL/API 的桌面 1280px、移动 390px 浏览器烟测；全产品
-Playwright 六 seam、其他主要业务页面、统一全站 SSE 扩展与最终可访问性验收仍归 M9/M11。
+M6-04 已有组件/路由测试和真实临时 PostgreSQL/API 的桌面 1280px、移动 390px 浏览器烟测；M9-01/02/04
+已补齐主要业务页面、Proposal Diff/审批与 Workspace 唯一 SSE Owner。全产品 Playwright 六 seam、最终可访问性
+与发布验收仍归 M11。
 
 M7-01 Graph 已通过 strict decoder/query key/URL round-trip/view model/component/route 测试，以及真实
 PostgreSQL/API 的 Global→Local→Path→Relation Evidence smoke。浏览器验收覆盖 1440×900 桌面与
@@ -283,6 +284,20 @@ warning/error。
   全部 invalidation 成功后提交。
 - Vite 开发烟测通过可选 `VITE_API_PROXY_TARGET` 走同源 `/api` proxy；它只服务本地真实 API/browser gate，
   不写入生产 API base，也不把开发 proxy 当成认证或跨域策略。
+
+### M9 业务工作台与统一 SSE
+
+- `web/src/api/business.ts` 是 Workspace-scoped Source Version、Proposal、Workflow 列表和详情的严格 wire owner；
+  Dashboard、Inbox、资料版本、Proposal、Workflow 与 Settings 组件只消费绑定 Workspace/资源 ID 后的领域模型。
+- Proposal detail 的 `approval` 是必需 nullable 字段：缺失必须拒绝，显式 `null` 表示尚未决定；summary 可以省略，
+  但一旦出现就必须是合法 Approval object。`file_patch` 与 `knowledge_change` 使用穷尽判别联合和各自 Diff。
+- App Shell 提供桌面侧栏、移动 Sheet、Workspace 状态、路由级 lazy loading 和可见焦点；未有服务端契约的正式
+  Document 正文、编辑后批准、三方合并、Secret 保存和导出只显示明确 unavailable，不构造浏览器事实。
+- `web/src/events/event-store.tsx` 对每个 Active Workspace 只持有一个连接；Last-Event-ID 只有在事件完成定向 Query
+  invalidation 后推进。expired/invalid cursor 必须先回查权威 REST 资源，Workspace 切换关闭旧连接并清理旧 cache。
+- M9 桌面 1440×900 与移动 390×844 真实 API smoke 覆盖 Dashboard→Inbox→Document→Proposal→Workflow→Settings、
+  URL 恢复、Hash/Version conflict、Dialog/Sheet 焦点、唯一 SSE 连接和零 console warning/error。该证据不替代 M11
+  六条最高层 seam 的正式 Playwright E2E。
 
 ## 17. 构建产物
 

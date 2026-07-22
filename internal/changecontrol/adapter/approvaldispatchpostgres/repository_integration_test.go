@@ -16,6 +16,8 @@ import (
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changedispatch "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/dispatch"
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
+	eventcontract "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/eventcontract"
+	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
@@ -147,7 +149,7 @@ func TestApprovalDispatchRejectedNeverCreatesWorkflow(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newApprovalDispatchTestDatabase(t, ctx)
 	defer cleanup()
-	repository, dispatcher := approvalDispatchFixture(t, ctx, pool)
+	repository, dispatcher := approvalDispatchEventFixture(t, ctx, pool)
 	workspaceID, proposal := createDispatchProposal(t, ctx, pool, repository, "rejected")
 	command := changedispatch.Command{WorkspaceID: workspaceID, Approval: domain.Approval{
 		ID: mustDispatchID(t), ProposalID: proposal.ID, RevisionID: proposal.Revision.ID,
@@ -170,6 +172,25 @@ func TestApprovalDispatchRejectedNeverCreatesWorkflow(t *testing.T) {
 	}
 	if runs != 0 || jobs != 0 {
 		t.Fatalf("runs=%d jobs=%d", runs, jobs)
+	}
+	var eventCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.server_event
+		WHERE workspace_id=$1 AND event_type=$2 AND resource_ref=$3`,
+		string(workspaceID), eventcontract.ProposalRejectedEventType, "proposal:"+string(proposal.ID)).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("proposal rejected event count=%d, want 1", eventCount)
+	}
+	var eventVersion int64
+	var sourceRef, status string
+	if err := pool.QueryRow(ctx, `SELECT resource_version,source_event_ref,payload_summary->>'status'
+		FROM ops.server_event WHERE workspace_id=$1 AND event_type=$2`,
+		string(workspaceID), eventcontract.ProposalRejectedEventType).Scan(&eventVersion, &sourceRef, &status); err != nil {
+		t.Fatal(err)
+	}
+	if eventVersion != 2 || sourceRef != eventcontract.ProposalRejectedEventType+":"+string(first.Approval.ID)+":v1" || status != string(domain.StatusRejected) {
+		t.Fatalf("proposal rejected event version=%d source=%s status=%s", eventVersion, sourceRef, status)
 	}
 }
 
@@ -264,6 +285,35 @@ func approvalDispatchFixture(t *testing.T, ctx context.Context, pool *pgxpool.Po
 	return repository, dispatcher
 }
 
+func approvalDispatchEventFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (*changecontrolpostgres.Repository, *ApprovalDispatchRepository) {
+	t.Helper()
+	events, err := eventspostgres.NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := changecontrolpostgres.NewRepository(pool, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := riveradapter.NewClient(pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserter, err := riveradapter.NewJobInserter(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := NewApprovalDispatchRepository(pool, runtime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository, dispatcher
+}
+
 func createDispatchProposal(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repository *changecontrolpostgres.Repository, suffix string) (foundation.ID, domain.Proposal) {
 	t.Helper()
 	workspaceID := mustDispatchID(t)
@@ -275,9 +325,13 @@ func createDispatchProposal(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	proposalID, revisionID := mustDispatchID(t), mustDispatchID(t)
 	baseHash := strings.Repeat("a", 64)
 	content := "# approved dispatch\n"
+	requestHash, err := domain.ComputeRequestHashWithRiskLevel(workspaceID, "notes/a.md", baseHash, content, "evidence", domain.ProposalRiskLevelLow, "low", "revert")
+	if err != nil {
+		t.Fatal(err)
+	}
 	proposal := domain.Proposal{
-		ID: proposalID, WorkspaceID: workspaceID, TargetPath: "notes/a.md", IdempotencyKey: "proposal-" + suffix,
-		RequestHash: domain.ComputeRequestHash(workspaceID, "notes/a.md", baseHash, content, "evidence", "low", "revert"),
+		ID: proposalID, WorkspaceID: workspaceID, RiskLevel: domain.ProposalRiskLevelLow, TargetPath: "notes/a.md", IdempotencyKey: "proposal-" + suffix,
+		RequestHash: requestHash,
 		Status:      domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
 		Revision: domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: "notes/a.md", BaseHash: baseHash, Content: content, EvidenceSummary: "evidence", Risk: "low", RollbackPlan: "revert", ChangeHash: domain.ComputeChangeHash("notes/a.md", baseHash, content), CreatedAt: now},
 	}

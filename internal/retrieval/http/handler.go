@@ -242,6 +242,9 @@ type sourceVersionResponse struct {
 	ByteSize        int64  `json:"byte_size"`
 	MediaType       string `json:"media_type"`
 	SecurityStatus  string `json:"security_status"`
+	IngestionStatus string `json:"ingestion_status,omitempty"`
+	WorkflowStatus  string `json:"workflow_status,omitempty"`
+	IndexStatus     string `json:"index_status,omitempty"`
 	CapturedAt      string `json:"captured_at"`
 }
 
@@ -537,7 +540,9 @@ func toSourceVersionResponse(reference domain.SourceVersionReference) sourceVers
 		WorkspaceID: string(reference.WorkspaceID), SourceID: string(reference.SourceID), SourceVersionID: string(reference.SourceVersionID),
 		SourceType: reference.SourceType, LogicalName: reference.LogicalName, RelativePath: reference.RelativePath,
 		ContentHash: reference.ContentHash, ByteSize: reference.ByteSize, MediaType: reference.MediaType,
-		SecurityStatus: reference.SecurityStatus, CapturedAt: reference.CapturedAt.UTC().Format(time.RFC3339Nano),
+		SecurityStatus: reference.SecurityStatus, IngestionStatus: reference.IngestionStatus,
+		WorkflowStatus: reference.WorkflowStatus, IndexStatus: reference.IndexStatus,
+		CapturedAt: reference.CapturedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 

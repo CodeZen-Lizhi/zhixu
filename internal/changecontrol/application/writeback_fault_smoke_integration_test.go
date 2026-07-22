@@ -128,7 +128,7 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 	baseHash := domain.ComputeWritebackResultHash(baseContent)
 	created, err := changeService.CreateProposal(ctx, CreateCommand{
 		WorkspaceID: workspaceID, TargetPath: targetPath, IdempotencyKey: "fault-proposal-" + string(nextID()),
-		BaseHash: baseHash, Content: approvedContent, EvidenceSummary: "fault smoke evidence", Risk: "low", RollbackPlan: "strict reverse commit",
+		BaseHash: baseHash, Content: approvedContent, EvidenceSummary: "fault smoke evidence", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "strict reverse commit",
 	})
 	if err != nil {
 		t.Fatal(err)

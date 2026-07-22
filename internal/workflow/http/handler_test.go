@@ -2,6 +2,7 @@ package workflowhttp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -37,16 +38,58 @@ func TestStartWorkflowReturnsAcceptedRun(t *testing.T) {
 
 func TestGetWorkflowRunContract(t *testing.T) {
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
-	service := &fakeService{run: domain.Run{ID: testRunID, WorkspaceID: testWorkspaceID, DefinitionID: testTaskID, Status: domain.StatusRunning, Input: json.RawMessage(`{}`), Version: 2, CreatedAt: now, UpdatedAt: now}}
+	service := &fakeService{run: domain.Run{ID: testRunID, WorkspaceID: testWorkspaceID, DefinitionID: testTaskID, Status: domain.StatusRunning, Input: json.RawMessage(`{}`), Version: 2, CreatedAt: now, UpdatedAt: now, PauseRequestedAt: &now}}
 	recorder := serve(t, service, http.MethodGet, "/api/v1/workflows/"+string(testRunID), "")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	var response runResponse
 	decode(t, recorder, &response)
-	if response.ID != string(testRunID) || response.Status != string(domain.StatusRunning) || service.getID != testRunID {
+	if response.ID != string(testRunID) || response.Status != string(domain.StatusRunning) || !response.PauseRequested || response.CancelRequested || service.getID != testRunID {
 		t.Fatalf("response=%#v getID=%q", response, service.getID)
 	}
+}
+
+func TestWorkflowListBindsStatusToCursor(t *testing.T) {
+	now := time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC)
+	service := &fakeService{listItems: []domain.RunListItem{{Run: domain.Run{ID: testRunID, WorkspaceID: testWorkspaceID, Status: domain.RunStatusRunning, CreatedAt: now, UpdatedAt: now, CancelRequestedAt: &now}}}, listHasMore: true}
+	first := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/workflows?status=running&limit=1", "")
+	if first.Code != http.StatusOK || service.listQuery.Status != domain.RunStatusRunning {
+		t.Fatalf("status=%d query=%+v body=%s", first.Code, service.listQuery, first.Body.String())
+	}
+	var page runPageResponse
+	decode(t, first, &page)
+	if len(page.Items) != 1 || page.Items[0].PauseRequested || !page.Items[0].CancelRequested {
+		t.Fatalf("pending projection=%+v", page.Items)
+	}
+	legacyCursor := cursorWithoutWorkflowKind(t, page.NextCursor)
+	legacy := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/workflows?status=running&limit=1&cursor="+legacyCursor, "")
+	if legacy.Code != http.StatusBadRequest || service.listCalls != 1 {
+		t.Fatalf("legacy status=%d calls=%d body=%s", legacy.Code, service.listCalls, legacy.Body.String())
+	}
+	second := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/workflows?status=failed&limit=1&cursor="+page.NextCursor, "")
+	if second.Code != http.StatusBadRequest || service.listCalls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", second.Code, service.listCalls, second.Body.String())
+	}
+}
+
+func cursorWithoutWorkflowKind(t *testing.T, cursor string) string {
+	t.Helper()
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	delete(payload, "version")
+	delete(payload, "kind")
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
 func TestSubmitHumanDecisionContract(t *testing.T) {
@@ -66,14 +109,14 @@ func TestSubmitHumanDecisionContract(t *testing.T) {
 func TestWorkflowControlContract(t *testing.T) {
 	for _, action := range []string{"pause", "resume", "cancel"} {
 		t.Run(action, func(t *testing.T) {
-			service := &fakeService{controlResult: application.RunControlResult{WorkflowRunID: testRunID, Status: domain.RunStatusPaused, Version: 4, StatusURL: "/api/v1/workflows/" + string(testRunID)}}
+			service := &fakeService{controlResult: application.RunControlResult{WorkflowRunID: testRunID, Status: domain.RunStatusPaused, Version: 4, StatusURL: "/api/v1/workflows/" + string(testRunID), PauseRequested: true, CancelRequested: false}}
 			recorder := serve(t, service, http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/"+action, `{"expected_version":3}`)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 			}
 			var response controlResponse
 			decode(t, recorder, &response)
-			if response.WorkflowRunID != string(testRunID) || response.Version != 4 || service.control.WorkflowRunID != testRunID || service.control.ExpectedVersion != 3 || service.control.IdempotencyKey != "test-request" || service.controlAction != action {
+			if response.WorkflowRunID != string(testRunID) || response.Version != 4 || !response.PauseRequested || response.CancelRequested || service.control.WorkflowRunID != testRunID || service.control.ExpectedVersion != 3 || service.control.IdempotencyKey != "test-request" || service.controlAction != action {
 				t.Fatalf("response=%+v service=%+v", response, service)
 			}
 		})
@@ -141,6 +184,16 @@ type fakeService struct {
 	control                   application.RunControlCommand
 	controlResult             application.RunControlResult
 	controlAction             string
+	listItems                 []domain.RunListItem
+	listHasMore               bool
+	listQuery                 domain.RunListQuery
+	listCalls                 int
+}
+
+func (f *fakeService) ListRuns(_ context.Context, query domain.RunListQuery) ([]domain.RunListItem, bool, error) {
+	f.listCalls++
+	f.listQuery = query
+	return append([]domain.RunListItem(nil), f.listItems...), f.listHasMore, f.err
 }
 
 func (f *fakeService) Pause(_ context.Context, command application.RunControlCommand) (application.RunControlResult, error) {

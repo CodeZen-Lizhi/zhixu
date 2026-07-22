@@ -160,21 +160,21 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pause: %v cause=%v", err, errors.Unwrap(err))
 	}
-	if paused.Status != domain.RunStatusPaused {
+	if paused.Status != domain.RunStatusPaused || !paused.PauseRequested || paused.CancelRequested {
 		t.Fatalf("paused=%+v", paused)
 	}
 	replayed, err := coordinator.Pause(ctx, application.RunControlCommand{WorkflowRunID: started.Run.ID, ExpectedVersion: 1, IdempotencyKey: "pause-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replayed.Version != paused.Version || replayed.Status != paused.Status {
+	if replayed.Version != paused.Version || replayed.Status != paused.Status || replayed.PauseRequested != paused.PauseRequested || replayed.CancelRequested != paused.CancelRequested {
 		t.Fatalf("replayed=%+v paused=%+v", replayed, paused)
 	}
 	resumed, err := coordinator.Resume(ctx, application.RunControlCommand{WorkflowRunID: started.Run.ID, ExpectedVersion: paused.Version, IdempotencyKey: "resume-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resumed.Status != domain.RunStatusRunning {
+	if resumed.Status != domain.RunStatusRunning || resumed.PauseRequested || resumed.CancelRequested {
 		t.Fatalf("resumed=%+v", resumed)
 	}
 	cancelRequest := runtimeStateStartFixture(workspaceID, "state-cancel", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second})
@@ -192,7 +192,7 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != domain.RunStatusCancelled {
+	if result.Status != domain.RunStatusCancelled || result.PauseRequested || !result.CancelRequested {
 		t.Fatalf("cancelled=%+v", result)
 	}
 }
@@ -231,18 +231,18 @@ func TestRuntimeStateRunningPauseAndCancelConvergeAtDeliveryCheckpoint(t *testin
 		t.Fatal(err)
 	}
 	pauseRequest, err := coordinator.Pause(ctx, application.RunControlCommand{WorkflowRunID: started.Run.ID, ExpectedVersion: claimed.Run.Version, IdempotencyKey: "pause-running"})
-	if err != nil || pauseRequest.Status != domain.RunStatusRunning {
+	if err != nil || pauseRequest.Status != domain.RunStatusRunning || !pauseRequest.PauseRequested || pauseRequest.CancelRequested {
 		t.Fatalf("pause request=%+v err=%v", pauseRequest, err)
 	}
 	paused, err := coordinator.Complete(ctx, application.CompleteDeliveryCommand{Binding: application.DeliveryBinding{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "pause-delivery", Fence: domain.LeaseFence{Owner: "worker-p", AttemptNo: claimed.Attempt.AttemptNo, NodeVersion: claimed.Node.Version}}, Output: json.RawMessage(`{"ignored":true}`), OutputSchemaVersion: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paused.Run.Status != domain.RunStatusPaused || paused.Node.Status != domain.NodeStatusPaused || paused.Attempt.Status != domain.AttemptStatusCancelled {
+	if paused.Run.Status != domain.RunStatusPaused || paused.Run.PauseRequestedAt == nil || paused.Run.CancelRequestedAt != nil || paused.Node.Status != domain.NodeStatusPaused || paused.Attempt.Status != domain.AttemptStatusCancelled {
 		t.Fatalf("paused checkpoint=%+v", paused)
 	}
 	resumed, err := coordinator.Resume(ctx, application.RunControlCommand{WorkflowRunID: started.Run.ID, ExpectedVersion: paused.Run.Version, IdempotencyKey: "resume-running"})
-	if err != nil || resumed.Status != domain.RunStatusRunning {
+	if err != nil || resumed.Status != domain.RunStatusRunning || resumed.PauseRequested || resumed.CancelRequested {
 		t.Fatalf("resume=%+v err=%v", resumed, err)
 	}
 	var dispatchNo int
@@ -250,9 +250,9 @@ func TestRuntimeStateRunningPauseAndCancelConvergeAtDeliveryCheckpoint(t *testin
 		t.Fatalf("dispatch_no=%d err=%v", dispatchNo, err)
 	}
 
-	cancelRequest := runtimeStateStartFixture(workspaceID, "state-running-cancel", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Millisecond, MaxDelay: time.Second})
-	remapRuntimeStartIDs(&cancelRequest, "c")
-	cancelledStart, err := repository.Start(ctx, cancelRequest)
+	cancelStartRequest := runtimeStateStartFixture(workspaceID, "state-running-cancel", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Millisecond, MaxDelay: time.Second})
+	remapRuntimeStartIDs(&cancelStartRequest, "c")
+	cancelledStart, err := repository.Start(ctx, cancelStartRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,8 +260,12 @@ func TestRuntimeStateRunningPauseAndCancelConvergeAtDeliveryCheckpoint(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := coordinator.Cancel(ctx, application.RunControlCommand{WorkflowRunID: cancelledStart.Run.ID, ExpectedVersion: cancelClaim.Run.Version, IdempotencyKey: "cancel-running"}); err != nil {
+	cancelControl, err := coordinator.Cancel(ctx, application.RunControlCommand{WorkflowRunID: cancelledStart.Run.ID, ExpectedVersion: cancelClaim.Run.Version, IdempotencyKey: "cancel-running"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !cancelControl.CancelRequested || cancelControl.PauseRequested {
+		t.Fatalf("cancel request=%+v", cancelControl)
 	}
 	cancelled, err := coordinator.Complete(ctx, application.CompleteDeliveryCommand{Binding: application.DeliveryBinding{NodeRunID: cancelledStart.FirstNode.ID, DispatchNo: 1, DeliveryID: "cancel-delivery", Fence: domain.LeaseFence{Owner: "worker-c", AttemptNo: cancelClaim.Attempt.AttemptNo, NodeVersion: cancelClaim.Node.Version}}, Output: json.RawMessage(`{"ignored":true}`), OutputSchemaVersion: 1})
 	if err != nil {

@@ -101,7 +101,8 @@ func (service *SemanticLinkCandidateService) Decide(ctx context.Context, command
 			WorkspaceID: canonical.WorkspaceID, CandidateID: canonical.CandidateID,
 			ExpectedVersion: canonical.ExpectedVersion, IdempotencyKey: canonical.IdempotencyKey,
 			Action: canonical.Decision.Action, RelationType: canonical.Decision.RelationType,
-			Risk: semanticLinkConfirmRisk, RollbackPlan: semanticLinkConfirmRollbackPlan,
+			RiskLevel: candidateconfirm.ProposalRiskLevel,
+			Risk:      semanticLinkConfirmRisk, RollbackPlan: semanticLinkConfirmRollbackPlan,
 		})
 		if confirmErr != nil {
 			return CandidateDecisionReceipt{}, confirmErr

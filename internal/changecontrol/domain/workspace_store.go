@@ -125,7 +125,7 @@ func validateWritebackTargetPath(targetPath string) error {
 		return ErrWritebackInvalidInput
 	}
 	first, _, _ := strings.Cut(clean, "/")
-	if first == ".knowledge" {
+	if first == ".knowledge" || first == ".git" {
 		return ErrWritebackInvalidInput
 	}
 	switch strings.ToLower(path.Ext(clean)) {

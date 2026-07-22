@@ -11,6 +11,8 @@ import (
 
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
+	eventcontract "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/eventcontract"
+	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/graph/candidateconfirm"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
@@ -23,10 +25,15 @@ import (
 
 func TestApprovedCandidateAppliesOneConfirmedRelationAndExactlyReplays(t *testing.T) {
 	fixture := prepareApprovedCandidateApply(t, "approved-apply")
+	events, err := eventspostgres.NewStore(fixture.tx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
 		fixture.tx,
 		foundation.NewUUIDGenerator(nil),
 		foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
+		events,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -61,6 +68,25 @@ func TestApprovedCandidateAppliesOneConfirmedRelationAndExactlyReplays(t *testin
 	}
 	if relationCount != 1 || evidenceCount != len(fixture.candidate.Evidence) || receiptCount != 1 || writebackCount != 0 {
 		t.Fatalf("relation=%d evidence=%d receipt=%d writeback=%d", relationCount, evidenceCount, receiptCount, writebackCount)
+	}
+	var eventCount int
+	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM ops.server_event
+		WHERE workspace_id=$1 AND event_type=$2 AND resource_ref=$3`,
+		string(fixture.workspaceID), eventcontract.ProposalAppliedEventType, "proposal:"+string(fixture.proposal.ID)).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("proposal applied event count=%d, want 1", eventCount)
+	}
+	var eventVersion int64
+	var sourceRef, status string
+	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT resource_version,source_event_ref,payload_summary->>'status'
+		FROM ops.server_event WHERE workspace_id=$1 AND event_type=$2`,
+		string(fixture.workspaceID), eventcontract.ProposalAppliedEventType).Scan(&eventVersion, &sourceRef, &status); err != nil {
+		t.Fatal(err)
+	}
+	if eventVersion != result.ProposalVersion || sourceRef != eventcontract.ProposalAppliedEventType+":"+string(fixture.approvalID)+":v1" || status != string(changecontroldomain.StatusApplied) {
+		t.Fatalf("proposal applied event version=%d source=%s status=%s", eventVersion, sourceRef, status)
 	}
 	var candidateStatus string
 	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT status FROM graph.semantic_link_candidate WHERE id=$1`, string(fixture.candidate.ID)).Scan(&candidateStatus); err != nil {
@@ -199,7 +225,8 @@ func prepareApprovedCandidateApply(t *testing.T, label string) approvedCandidate
 	confirmed, err := confirmer.Confirm(ctx, candidateconfirm.Command{
 		WorkspaceID: workspaceID, CandidateID: candidate.ID, ExpectedVersion: candidate.Version,
 		IdempotencyKey: "confirm-" + label, Action: graphdomain.SemanticLinkCandidateDecisionConfirm,
-		Risk: "medium relation change", RollbackPlan: "create a corrective relation proposal",
+		RiskLevel: candidateconfirm.ProposalRiskLevel,
+		Risk:      "medium relation change", RollbackPlan: "create a corrective relation proposal",
 	})
 	if err != nil {
 		t.Fatal(err)

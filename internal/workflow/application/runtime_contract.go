@@ -154,6 +154,9 @@ type ControlPersistenceResult struct {
 	WorkflowRunID foundation.ID
 	Status        domain.RunStatus
 	Version       int64
+	// PauseRequested/CancelRequested 表示安全检查点请求是否仍在持久化投影中。
+	PauseRequested  bool
+	CancelRequested bool
 }
 
 // RunControlResult 是 Pause、Resume、Cancel 的统一应用响应。
@@ -162,6 +165,9 @@ type RunControlResult struct {
 	Status        domain.RunStatus
 	Version       int64
 	StatusURL     string
+	// PauseRequested/CancelRequested 让客户端在异步安全检查点期间保持控制按钮禁用。
+	PauseRequested  bool
+	CancelRequested bool
 }
 
 // RuntimeCoordinator 负责 Runtime Application 边界校验和纯编排。
@@ -331,7 +337,7 @@ func (c *RuntimeCoordinator) control(ctx context.Context, action ControlAction, 
 	if persisted.WorkflowRunID != command.WorkflowRunID || persisted.Version <= command.ExpectedVersion || !knownRunStatus(persisted.Status) {
 		return RunControlResult{}, runtimeContractError(foundation.ErrorConsistencyViolation, "WORKFLOW_CONTROL_RESULT_INVALID")
 	}
-	return RunControlResult{WorkflowRunID: persisted.WorkflowRunID, Status: persisted.Status, Version: persisted.Version, StatusURL: "/api/v1/workflows/" + string(persisted.WorkflowRunID)}, nil
+	return RunControlResult{WorkflowRunID: persisted.WorkflowRunID, Status: persisted.Status, Version: persisted.Version, StatusURL: "/api/v1/workflows/" + string(persisted.WorkflowRunID), PauseRequested: persisted.PauseRequested, CancelRequested: persisted.CancelRequested}, nil
 }
 
 func isValidClaimCommand(command ClaimCommand) bool {

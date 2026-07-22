@@ -4500,6 +4500,14 @@ detector coverage、Issue Evidence、Decision、Schedule 和可用 repair option
 - 数据导出。
 - 危险操作确认。
 
+M9-01、M9-02 与 M9-04 已交付当前真实契约切片：响应式 App Shell、Dashboard、Inbox、资料版本详情、Proposal、
+Workflow、Settings，以及每个 Active Workspace 唯一 SSE Owner。Inbox/详情展示的是 Source Version、摄取、解析、
+索引和 Workflow 事实，不能假称正式 Document 或伪造标准化正文。Proposal 支持 `file_patch|knowledge_change`、
+File/Relation Diff、证据、风险、回滚、批准/驳回、Hash/Version conflict 和 Approval 后 Apply Preflight；编辑后批准、
+三方合并、暂缓、批量审批和请求重分析仍未交付。Workflow 页面只展示公共 Run 字段和允许的 pause/resume/cancel；
+Node/Tool/Token 明细、Settings Secret 保存/导出/危险清理没有正式接口时必须显示 unavailable。M9-03 异步导出、
+脱敏、权限/过期与结果追踪仍是后续任务。
+
 ### 21.16 全局视觉与交互要求
 
 - 状态必须同时使用文字和视觉标识。

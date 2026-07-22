@@ -1342,3 +1342,77 @@ Correct: 对每个 source 使用 LATERAL 内层 LIMIT 100，并以部分索引�
 Wrong: Topic scan 成功后用 Workspace 全量 Candidate 填充面板，或 JOIN membership 导致候选重复。
 Correct: Topic scope 对两端 Claim 分别使用 EXISTS 验证正式 membership；Claim scope 仍精确匹配端点。
 ```
+
+## Scenario: M9 Workspace Business List Read Models
+
+### 1. Scope / Trigger
+
+- 修改 Source Version、Proposal、Workflow 的 Workspace 列表接口、筛选、keyset cursor 或 SQL 投影时应用。
+- 这些列表是领域事实的只读投影，不新增 Dashboard/Inbox 状态表，也不推进 Proposal、Workflow、Ingestion 或 Index 状态机。
+
+### 2. Signatures
+
+```text
+GET /api/v1/workspaces/{workspace_id}/source-versions
+GET /api/v1/workspaces/{workspace_id}/proposals
+GET /api/v1/workspaces/{workspace_id}/workflows
+```
+
+- Repository 输入必须包含 `WorkspaceID`、白名单筛选、`CursorTime + CursorID` 和 `Limit=1..100`。
+- 排序分别固定为 `captured_at DESC,id DESC` 或 `updated_at DESC,id DESC`，查询使用 `limit + 1` 判断下一页。
+
+### 3. Contracts
+
+- Cursor 是最大 2048 字节的 opaque base64url JSON，必须绑定 `version=1`、资源 `kind`、Workspace、canonical filters、最后时间和 ID；缺失、未知字段、跨资源、跨 Workspace 或跨筛选复用全部拒绝。
+- SQL 只使用显式列和参数绑定；动态列名只来自代码内固定白名单，不接受请求值作为标识符。
+- `change_control.proposal.risk_level` 是审批、响应和筛选的唯一等级事实，只允许精确
+  `CRITICAL|HIGH|MEDIUM|LOW`；`proposal_revision.risk` 是独立自由文本，任何读路径、API 或审批不得从它派生等级。
+- 新 Proposal 必须显式等级并使用包含 `risk_level` 的 v2 request hash。v1 只允许已持久历史精确重放；等价
+  v2 可以重放历史 v1，v1 不可反向重放新建 v2。Semantic Candidate Proposal 固定 `HIGH`，其 v1/v2 重放都必须核对持久等级。
+- `core.source_version.workspace_id` 只镜像所属 `core.source.workspace_id`：新生产写入显式携带已持久 Source 的
+  Workspace，兼容 trigger 只为旧 writer 补空值并拒绝错值；最终由 `(source_id,workspace_id)` 与
+  `(workspace_id,content_artifact_id)` 两条复合外键以及不可变 trigger 防止漂移。
+- M9 hardening 必须拆为 `00030` Expand、`00031` non-transactional concurrent indexes、`00032` exact backfill、
+  `00033` Contract。Contract 后 `risk_level` 与 Source Version `workspace_id` 均为无默认 `NOT NULL`。
+- Source Version 的 Index Status 只来自 Workspace 当前 `retrieval.index_version.status='active'`：`included` 绑定具体 Source Version，`excluded` 绑定 Source，不能按最新 manifest 时间猜测当前状态。
+- Proposal 摘要读取最新 Revision；Workflow 摘要读取持久 Run 与 pending Human Task，不逐项二次查库。
+- Workspace ID/cursor 只限定查询范围，不是认证凭据；正式 Auth/Capability 仍由 M10 执行。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| 未知/重复 query、limit 越界、非法枚举 | 400，Repository 调用次数为 0 |
+| cursor 超长、损坏、缺 kind/version 或 kind 不匹配 | 400，不降级为第一页 |
+| cursor Workspace/filter 不匹配 | 400，不执行 SQL |
+| Source 被 active manifest 排除 | 对该 Source 投影 `excluded`；不得因 `source_version_id IS NULL` 丢失 |
+| 较新的 building/failed manifest 存在 | 仍只显示 active index 选择状态 |
+| 无 active index/manifest | Index Status 为空，不伪造 included/excluded |
+| Proposal 创建缺少/填充小写或空白等级 | 400/Domain invalid，不从 Revision risk 猜测 |
+| 历史 Candidate 的 Revision risk 为 `MEDIUM` | 精确回填并保持 Proposal `risk_level=HIGH` |
+| Source Version 显式 Workspace 与 Source/Artifact 不一致 | 数据库拒绝，事务无半写 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：同一时间戳多行按 ID 稳定翻页；Proposal/Workflow/Source cursor 不能互换；Active Index 的 included/excluded 与真实 manifest 一致。
+- Base：空列表返回 `items: []` 且没有 cursor；无 Active Index 时 Source 仍可显示安全、解析和 Workflow 状态。
+- Bad：共享 `{workspace,at,id,filter}` cursor 导致跨资源错页；按 manifest `created_at DESC` 取“最新”选择；用 offset 或无界 total 扫描。
+
+### 6. Tests Required
+
+- HTTP：正常/空、未知与重复参数、全部枚举、limit 边界、cursor 超长/损坏/旧格式/跨 kind/Workspace/filter。
+- PostgreSQL：Workspace 隔离、同时间戳稳定顺序、Proposal 最新 Revision、Workflow waiting-human、Source included/excluded/无 Active Index/building 比 active 更新；v1/v2 Proposal replay、Candidate HIGH、Source Version 历史回填/旧写兼容/错绑拒绝和复合 FK。
+- 迁移：空库 Up、重复 Up、空数据 Down→Up、业务数据 guarded Down、脏数据回填原子失败、并发索引 valid/ready。
+- 对三条生产 SQL执行 `EXPLAIN (ANALYZE, BUFFERS)`；Source Version 根路径必须命中
+  `idx_source_version_workspace_captured_id`，latest Attempt 必须命中 `idx_ingestion_attempt_source_started_id`，
+  两条访问路径都不得出现 Seq Scan 或全量 Sort。未配置 `ZHIXU_TEST_DATABASE_URL` 时必须标为未验证。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 三类列表共用无 kind/version cursor，或把 Workspace cursor 当成身份授权。
+Correct: 每个 cursor 绑定 version/kind/workspace/filters；后端授权边界独立存在。
+
+Wrong: index_manifest_source 按 source_version_id 连接 excluded 行，或选最新 created_at manifest。
+Correct: 先锁定 Workspace active index，再按 source_id 连接；included 额外匹配 source_version_id，excluded 保持 source 级语义。
+```

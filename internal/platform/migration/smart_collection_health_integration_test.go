@@ -980,8 +980,8 @@ func insertHealthTopic(t *testing.T, ctx context.Context, pool *pgxpool.Pool, wo
 func insertKnowledgeChangeProposal(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, proposalID, key string) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `INSERT INTO change_control.proposal(
-		id,workspace_id,proposal_type,status,idempotency_key,request_hash,version,created_at,updated_at
-	) VALUES($1,$2,'knowledge_change','ready_for_review',$3,repeat('9',64),1,now(),now())`,
+		id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at
+	) VALUES($1,$2,'knowledge_change','HIGH','ready_for_review',$3,repeat('9',64),1,now(),now())`,
 		proposalID, workspaceID, key); err != nil {
 		t.Fatal(err)
 	}

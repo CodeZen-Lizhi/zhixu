@@ -13,11 +13,15 @@ const requiredOperations = [
   ["/api/v1/workspaces/{workspace_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/scan", "post", "200"],
   ["/api/v1/source-versions/{source_version_id}/ingestion-attempts", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/source-versions", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/workflows", "post", "202"],
+  ["/api/v1/workspaces/{workspace_id}/workflows", "get", "200"],
   ["/api/v1/workflows/{run_id}", "get", "200"],
   ["/api/v1/workflows/{run_id}/human-tasks/{task_id}/decision", "post", "200"],
   ["/api/v1/workspaces/{workspace_id}/proposals", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/proposals", "get", "200"],
   ["/api/v1/proposals/{proposal_id}", "get", "200"],
+  ["/api/v1/proposals/{proposal_id}/current-content", "get", "200"],
   ["/api/v1/proposals/{proposal_id}/approvals", "post", "201"],
   ["/api/v1/proposals/{proposal_id}/apply-preflight", "post", "200"],
   ["/api/v1/search", "post", "200"],
@@ -170,13 +174,19 @@ for (const schema of [
   "StartWorkflowRequest",
   "WorkflowStart",
   "WorkflowRun",
+  "WorkflowRunPage",
+  "WorkflowRunSummary",
   "HumanDecisionRequest",
   "HumanTask",
   "CreateProposalRequest",
+  "ProposalRiskLevel",
   "ProposalRevision",
   "Approval",
   "ApprovalDecisionResponse",
   "Proposal",
+  "ProposalPage",
+  "ProposalSummary",
+  "ProposalCurrentContent",
   "FilePatchProposal",
   "KnowledgeChangeTargetRef",
   "KnowledgeChangeBaseVersion",
@@ -202,6 +212,8 @@ for (const schema of [
   "SearchEvidence",
   "SearchResponse",
   "EvidenceSourceVersion",
+  "SourceVersionPage",
+  "SourceVersionSummary",
   "EvidenceSourceSpan",
   "GraphCanonicalJSONValue",
   "GraphCanonicalJSONObject",
@@ -279,6 +291,11 @@ for (const schema of [
 }
 
 const expectedSuccessSchemas = [
+  ["/api/v1/workspaces/{workspace_id}/source-versions", "get", "SourceVersionPage"],
+  ["/api/v1/workspaces/{workspace_id}/proposals", "get", "ProposalPage"],
+  ["/api/v1/workspaces/{workspace_id}/workflows", "get", "WorkflowRunPage"],
+  ["/api/v1/proposals/{proposal_id}", "get", "Proposal"],
+  ["/api/v1/proposals/{proposal_id}/current-content", "get", "ProposalCurrentContent"],
   ["/api/v1/search", "post", "SearchResponse"],
   ["/api/v1/graph/global", "post", "GraphGlobalResponse"],
   ["/api/v1/graph/neighborhood", "post", "GraphNeighborhoodResponse"],
@@ -294,6 +311,34 @@ for (const [path, method, schema] of expectedSuccessSchemas) {
   const actual = document.paths[path][method].responses["200"]?.content?.["application/json"]?.schema?.$ref;
   if (actual !== `#/components/schemas/${schema}`) {
     throw new Error(`invalid success schema for ${method.toUpperCase()} ${path}: ${String(actual)}`);
+  }
+}
+
+for (const status of ["200", "201"]) {
+  const actual = document.paths["/api/v1/workspaces/{workspace_id}/proposals"].post.responses[status]?.content?.["application/json"]?.schema?.$ref;
+  if (actual !== "#/components/schemas/Proposal") {
+    throw new Error(`Proposal creation ${status} must return Proposal`);
+  }
+}
+
+for (const [path, method, statuses] of [
+  ["/api/v1/workspaces/{workspace_id}/source-versions", "get", ["400", "503", "405"]],
+  ["/api/v1/workspaces/{workspace_id}/proposals", "get", ["400", "503", "405"]],
+  ["/api/v1/workspaces/{workspace_id}/workflows", "get", ["400", "503", "405"]],
+  ["/api/v1/proposals/{proposal_id}/current-content", "get", ["400", "404", "503", "405"]],
+]) {
+  const responses = document.paths[path][method].responses;
+  for (const status of statuses) {
+    const response = resolveRef(responses[status]);
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Business read ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+for (const status of ["200", "201"]) {
+  const actual = document.paths["/api/v1/proposals/{proposal_id}/approvals"].post.responses[status]?.content?.["application/json"]?.schema?.$ref;
+  if (actual !== "#/components/schemas/ApprovalDecisionResponse") {
+    throw new Error(`Approval decision ${status} must return ApprovalDecisionResponse`);
   }
 }
 
@@ -313,6 +358,119 @@ for (const [path, schema] of [
 }
 
 const schemas = document.components.schemas;
+const workflowStatuses = ["pending", "running", "waiting_for_human", "retry_wait", "paused", "succeeded", "failed", "cancelled"];
+const proposalStatuses = ["draft", "validating", "ready_for_review", "approved", "applying", "applied", "verifying", "completed", "rejected", "needs_revision", "deferred", "apply_failed", "verify_failed", "rolled_back", "cancelled"];
+const proposalRiskLevels = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
+const sourceSecurityStatuses = ["pending", "passed", "quarantined"];
+const sourceIngestionStatuses = ["validating", "parsing", "parsed", "chunking", "chunked", "parse_failed", "cancelled"];
+const sourceIndexStatuses = ["included", "excluded"];
+const queryParameter = (path, name) => document.paths[path].get.parameters.find((parameter) => parameter.name === name)?.schema;
+for (const [path, pageSchema, summarySchema] of [
+  ["/api/v1/workspaces/{workspace_id}/source-versions", "SourceVersionPage", "SourceVersionSummary"],
+  ["/api/v1/workspaces/{workspace_id}/proposals", "ProposalPage", "ProposalSummary"],
+  ["/api/v1/workspaces/{workspace_id}/workflows", "WorkflowRunPage", "WorkflowRunSummary"],
+]) {
+  const cursor = queryParameter(path, "cursor");
+  const limit = queryParameter(path, "limit");
+  if (cursor?.maxLength !== 2048 || limit?.minimum !== 1 || limit?.maximum !== 100 || limit?.default !== 30) {
+    throw new Error(`${path} cursor or limit contract drifted`);
+  }
+  if (schemas[pageSchema].properties.items.maxItems !== 100 ||
+      schemas[pageSchema].properties.items.items.$ref !== `#/components/schemas/${summarySchema}` ||
+      schemas[pageSchema].properties.next_cursor.minLength !== 1 ||
+      schemas[pageSchema].properties.next_cursor.maxLength !== 2048 ||
+      schemas[pageSchema].type !== "object" || schemas[pageSchema].additionalProperties !== false ||
+      schemas[pageSchema].required?.join(",") !== "items") {
+    throw new Error(`${pageSchema} pagination schema drifted`);
+  }
+}
+if (queryParameter("/api/v1/workspaces/{workspace_id}/proposals", "status")?.enum?.join(",") !== proposalStatuses.join(",") ||
+    schemas.ProposalSummary.properties.status.enum?.join(",") !== proposalStatuses.join(",")) {
+  throw new Error("Proposal list status enum drifted from the domain contract");
+}
+if (schemas.ProposalRiskLevel.type !== "string" || schemas.ProposalRiskLevel.enum?.join(",") !== proposalRiskLevels.join(",") ||
+    queryParameter("/api/v1/workspaces/{workspace_id}/proposals", "risk")?.$ref !== "#/components/schemas/ProposalRiskLevel") {
+  throw new Error("Proposal risk query must use the frozen uppercase ProposalRiskLevel contract");
+}
+const createProposalRequired = ["target_path", "base_hash", "content", "evidence_summary", "risk_level", "risk", "rollback_plan"];
+if (schemas.CreateProposalRequest.required?.join(",") !== createProposalRequired.join(",") ||
+    schemas.CreateProposalRequest.properties.risk_level?.$ref !== "#/components/schemas/ProposalRiskLevel") {
+  throw new Error("CreateProposalRequest must require the explicit Proposal-level risk contract");
+}
+for (const schemaName of ["ProposalSummary", "FilePatchProposal"]) {
+  if (!schemas[schemaName].required.includes("risk_level") ||
+      schemas[schemaName].properties.risk_level?.$ref !== "#/components/schemas/ProposalRiskLevel") {
+    throw new Error(`${schemaName} must require top-level risk_level`);
+  }
+}
+if (!schemas.KnowledgeChangeProposal.required.includes("risk_level") ||
+    schemas.KnowledgeChangeProposal.properties.risk_level?.const !== "HIGH" ||
+    schemas.KnowledgeChangeRevision.properties.base_versions?.uniqueItems !== true) {
+  throw new Error("KnowledgeChangeProposal must be HIGH and expose unique endpoint base versions");
+}
+if (!schemas.ProposalSummary.required.includes("risk") || schemas.ProposalSummary.properties.risk?.type !== "string") {
+  throw new Error("ProposalSummary must retain the human-readable risk description");
+}
+for (const schemaName of ["ProposalRevision", "KnowledgeChangeRevision"]) {
+  if (!schemas[schemaName].required.includes("risk") || schemas[schemaName].properties.risk?.type !== "string" ||
+      schemas[schemaName].properties.risk_level !== undefined) {
+    throw new Error(`${schemaName} must retain risk as description without owning risk_level`);
+  }
+}
+if (queryParameter("/api/v1/workspaces/{workspace_id}/workflows", "status")?.enum?.join(",") !== workflowStatuses.join(",") ||
+    schemas.WorkflowRunSummary.properties.status.enum?.join(",") !== workflowStatuses.join(",")) {
+  throw new Error("Workflow list status enum drifted from the domain contract");
+}
+for (const [field, expected] of [
+  ["security_status", sourceSecurityStatuses],
+  ["ingestion_status", sourceIngestionStatuses],
+  ["workflow_status", workflowStatuses],
+  ["index_status", sourceIndexStatuses],
+]) {
+  if (queryParameter("/api/v1/workspaces/{workspace_id}/source-versions", field)?.enum?.join(",") !== expected.join(",") ||
+      schemas.SourceVersionSummary.properties[field].enum?.join(",") !== expected.join(",")) {
+    throw new Error(`Source Version list ${field} enum drifted from the domain contract`);
+  }
+}
+if (schemas.EvidenceSourceVersion.properties.security_status.enum?.join(",") !== sourceSecurityStatuses.join(",") ||
+    schemas.EvidenceSourceVersion.properties.ingestion_status.enum?.join(",") !== sourceIngestionStatuses.join(",") ||
+    schemas.EvidenceSourceVersion.properties.workflow_status.enum?.join(",") !== workflowStatuses.join(",") ||
+    schemas.EvidenceSourceVersion.properties.index_status.enum?.join(",") !== sourceIndexStatuses.join(",")) {
+  throw new Error("Source Version detail status projections drifted from the handler contract");
+}
+const approvalRequired = ["id", "proposal_id", "revision_id", "change_hash", "decision", "decided_at"];
+if (schemas.ProposalSummary.properties.approval?.$ref !== "#/components/schemas/Approval" ||
+    approvalRequired.some((field) => !schemas.Approval.required.includes(field)) ||
+    approvalRequired.some((field) => !schemas.ApprovalDecisionResponse.required.includes(field)) ||
+    schemas.Approval.properties.workflow_run_id?.format !== "uuid" ||
+    schemas.Approval.properties.workflow_status_url?.pattern !== "^/api/v1/workflows/[0-9a-f-]{36}$" ||
+    schemas.Approval.properties.dispatch_status ||
+    schemas.ApprovalDecisionResponse.properties.approved_git_head?.pattern !== "^([0-9a-f]{40}|[0-9a-f]{64})$" ||
+    schemas.ApprovalDecisionResponse.properties.workflow_run_id?.format !== "uuid" ||
+    schemas.ApprovalDecisionResponse.properties.workflow_status_url?.pattern !== "^/api/v1/workflows/[0-9a-f-]{36}$" ||
+    schemas.ApprovalDecisionResponse.properties.dispatch_status?.enum?.join(",") !== "queued,running,replayed") {
+  throw new Error("Proposal Approval snapshot and decision response contracts are not separated");
+}
+for (const schemaName of ["FilePatchProposal", "KnowledgeChangeProposal"]) {
+  if (!schemas[schemaName].required.includes("approval") ||
+      schemas[schemaName].properties.approval.oneOf?.[0]?.$ref !== "#/components/schemas/Approval" ||
+      schemas[schemaName].properties.approval.oneOf?.[1]?.type !== "null") {
+    throw new Error(`${schemaName} must require a nullable persistent Approval snapshot`);
+  }
+}
+const currentContent = schemas.ProposalCurrentContent;
+for (const field of ["proposal_id", "workspace_id", "target_path", "content", "current_hash", "base_hash", "base_hash_match"]) {
+  if (!currentContent.required.includes(field)) throw new Error(`ProposalCurrentContent must require ${field}`);
+}
+if (currentContent.additionalProperties !== false || currentContent.properties.content.maxLength !== 1048576 ||
+    currentContent.properties.proposal_id.format !== "uuid" || currentContent.properties.workspace_id.format !== "uuid" ||
+    currentContent.properties.target_path.minLength !== 1 ||
+    currentContent.properties.current_hash.pattern !== "^[0-9a-f]{64}$" || currentContent.properties.base_hash.pattern !== "^[0-9a-f]{64}$" ||
+    currentContent.properties.base_hash_match.type !== "boolean" ||
+    currentContent["x-invariant"] !== "base_hash_match == (current_hash == base_hash)" ||
+    document.paths["/api/v1/proposals/{proposal_id}/current-content"].get.responses["200"].headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+  throw new Error("Proposal current-content body or no-store contract drifted");
+}
 if (!schemas.SystemStatus.required.includes("rag") || schemas.SystemStatus.properties.rag.$ref !== "#/components/schemas/RAGCapabilityStatus" ||
     schemas.RAGCapabilityStatus.additionalProperties !== false) {
   throw new Error("SystemStatus must expose the strict RAG capability state");
@@ -360,6 +518,12 @@ if (schemas.SemanticLinkCandidate.properties.discovery_methods.maxItems !== 6 ||
 }
 if (schemas.Proposal.oneOf?.map((item) => item.$ref).join(",") !==
       "#/components/schemas/FilePatchProposal,#/components/schemas/KnowledgeChangeProposal" ||
+    schemas.Proposal.discriminator?.propertyName !== "proposal_type" ||
+    schemas.Proposal.discriminator?.mapping?.file_patch !== "#/components/schemas/FilePatchProposal" ||
+    schemas.Proposal.discriminator?.mapping?.knowledge_change !== "#/components/schemas/KnowledgeChangeProposal" ||
+    !schemas.FilePatchProposal.required.includes("proposal_type") ||
+    schemas.FilePatchProposal.properties.proposal_type?.const !== "file_patch" ||
+    !schemas.KnowledgeChangeProposal.required.includes("proposal_type") ||
     schemas.KnowledgeChangeProposal.properties.proposal_type.const !== "knowledge_change" ||
     schemas.KnowledgeChangeRevision.properties.schema_version.const !== "knowledge-relation-change/v1" ||
     schemas.KnowledgeChangeRevision.properties.base_versions.minItems !== 2 ||

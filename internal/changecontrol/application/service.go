@@ -20,6 +20,25 @@ type TargetReader interface {
 	CurrentHash(context.Context, foundation.ID, string) (string, error)
 }
 
+// CurrentContentReader 在同一次受限读取中返回目标正文与哈希，供审阅 UI 展示真实 Diff。
+type CurrentContentReader interface {
+	CurrentContent(context.Context, foundation.ID, string, int64) ([]byte, string, error)
+}
+
+// MaxProposalCurrentContentBytes 是审阅接口允许返回的当前文件正文上限。
+const MaxProposalCurrentContentBytes int64 = 1024 * 1024
+
+// ProposalCurrentContent 是当前 Workspace 文件与 Proposal 基线的只读比较结果。
+type ProposalCurrentContent struct {
+	ProposalID    foundation.ID
+	WorkspaceID   foundation.ID
+	TargetPath    string
+	Content       string
+	CurrentHash   string
+	BaseHash      string
+	BaseHashMatch bool
+}
+
 // ApprovalGitInspector 在批准时从服务端 Workspace 读取严格、干净且 attached 的 Git 基线。
 // 调用方不能提供 HEAD；实现返回的快照是 Approval Git HEAD 的唯一来源。
 type ApprovalGitInspector interface {
@@ -78,6 +97,7 @@ type CreateCommand struct {
 	BaseHash        string
 	Content         string
 	EvidenceSummary string
+	RiskLevel       domain.ProposalRiskLevel
 	Risk            string
 	RollbackPlan    string
 }
@@ -87,6 +107,7 @@ type CreateKnowledgeChangeCommand struct {
 	WorkspaceID     foundation.ID
 	IdempotencyKey  string
 	KnowledgeChange domain.KnowledgeChange
+	RiskLevel       domain.ProposalRiskLevel
 	Risk            string
 	RollbackPlan    string
 }
@@ -100,8 +121,14 @@ type CreateResult struct {
 // CreateProposal 校验并原子创建 ready_for_review Proposal 和 Revision。
 func (s *Service) CreateProposal(ctx context.Context, command CreateCommand) (CreateResult, error) {
 	targetPath, pathErr := domain.ValidateTargetPath(command.TargetPath)
-	if command.WorkspaceID == "" || pathErr != nil || strings.TrimSpace(command.IdempotencyKey) == "" || len(strings.TrimSpace(command.IdempotencyKey)) > 128 || !domain.ValidHash(command.BaseHash) || strings.TrimSpace(command.Content) == "" || strings.TrimSpace(command.EvidenceSummary) == "" || strings.TrimSpace(command.Risk) == "" || strings.TrimSpace(command.RollbackPlan) == "" {
+	workspaceTargetErr := domain.ValidateWorkspaceTarget(command.WorkspaceID, targetPath)
+	if command.WorkspaceID == "" || pathErr != nil || workspaceTargetErr != nil || strings.TrimSpace(command.IdempotencyKey) == "" || len(strings.TrimSpace(command.IdempotencyKey)) > 128 || !domain.ValidHash(command.BaseHash) || strings.TrimSpace(command.Content) == "" || strings.TrimSpace(command.EvidenceSummary) == "" || strings.TrimSpace(command.Risk) == "" || strings.TrimSpace(command.RollbackPlan) == "" {
 		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("proposal fields are invalid"))
+	}
+	risk := strings.TrimSpace(command.Risk)
+	riskLevel, riskErr := proposalRiskLevelForCreate(command.RiskLevel)
+	if riskErr != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, riskErr)
 	}
 	proposalID, err := s.ids.New()
 	if err != nil {
@@ -116,16 +143,21 @@ func (s *Service) CreateProposal(ctx context.Context, command CreateCommand) (Cr
 	revision := domain.Revision{
 		ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: targetPath,
 		BaseHash: baseHash, Content: command.Content, EvidenceSummary: strings.TrimSpace(command.EvidenceSummary),
-		Risk: strings.TrimSpace(command.Risk), RollbackPlan: strings.TrimSpace(command.RollbackPlan),
+		Risk: risk, RollbackPlan: strings.TrimSpace(command.RollbackPlan),
 		ChangeHash: domain.ComputeChangeHash(targetPath, baseHash, command.Content), CreatedAt: now,
 	}
 	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeFilePatch, revision); err != nil {
 		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
 	}
+	requestHash, err := domain.ComputeRequestHashWithRiskLevel(command.WorkspaceID, targetPath, baseHash, command.Content, strings.TrimSpace(command.EvidenceSummary), riskLevel, risk, strings.TrimSpace(command.RollbackPlan))
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
 	proposal, err := s.repo.CreateProposal(ctx, domain.Proposal{
 		ID: proposalID, WorkspaceID: command.WorkspaceID, Type: domain.ProposalTypeFilePatch, TargetPath: targetPath,
+		RiskLevel:      riskLevel,
 		IdempotencyKey: strings.TrimSpace(command.IdempotencyKey),
-		RequestHash:    domain.ComputeRequestHash(command.WorkspaceID, targetPath, baseHash, command.Content, strings.TrimSpace(command.EvidenceSummary), strings.TrimSpace(command.Risk), strings.TrimSpace(command.RollbackPlan)),
+		RequestHash:    requestHash,
 		Status:         domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: revision,
 	})
 	if err != nil {
@@ -157,12 +189,19 @@ func (s *Service) CreateKnowledgeChangeProposal(ctx context.Context, command Cre
 	}
 	now := s.clock.Now()
 	risk := strings.TrimSpace(command.Risk)
+	riskLevel, err := proposalRiskLevelForCreate(command.RiskLevel)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, err)
+	}
+	if _, err := domain.ValidateProposalRiskLevelForType(domain.ProposalTypeKnowledgeChange, riskLevel); err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, err)
+	}
 	rollbackPlan := strings.TrimSpace(command.RollbackPlan)
 	changeHash, err := domain.ComputeKnowledgeChangeHash(canonicalChange, risk, rollbackPlan)
 	if err != nil {
 		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, err)
 	}
-	requestHash, err := domain.ComputeKnowledgeChangeRequestHash(command.WorkspaceID, canonicalChange, risk, rollbackPlan)
+	requestHash, err := domain.ComputeKnowledgeChangeRequestHashWithRiskLevel(command.WorkspaceID, canonicalChange, riskLevel, risk, rollbackPlan)
 	if err != nil {
 		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, err)
 	}
@@ -176,6 +215,7 @@ func (s *Service) CreateKnowledgeChangeProposal(ctx context.Context, command Cre
 	}
 	proposal, err := repository.CreateKnowledgeChangeProposal(ctx, domain.Proposal{
 		ID: proposalID, WorkspaceID: command.WorkspaceID, Type: domain.ProposalTypeKnowledgeChange,
+		RiskLevel:      riskLevel,
 		IdempotencyKey: strings.TrimSpace(command.IdempotencyKey),
 		RequestHash:    requestHash,
 		Status:         domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: revision,
@@ -192,6 +232,48 @@ func (s *Service) GetProposal(ctx context.Context, proposalID foundation.ID) (do
 		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_ID_INVALID", false, errors.New("proposal id is required"))
 	}
 	return s.repo.GetProposal(ctx, proposalID)
+}
+
+// GetProposalCurrentContent 安全读取 file_patch Proposal 的当前目标正文，不执行写入。
+func (s *Service) GetProposalCurrentContent(ctx context.Context, proposalID foundation.ID) (ProposalCurrentContent, error) {
+	if proposalID == "" {
+		return ProposalCurrentContent{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_ID_INVALID", false, errors.New("proposal id is required"))
+	}
+	proposal, err := s.repo.GetProposal(ctx, proposalID)
+	if err != nil {
+		return ProposalCurrentContent{}, err
+	}
+	if domain.NormalizeProposalType(proposal.Type) != domain.ProposalTypeFilePatch {
+		return ProposalCurrentContent{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_CURRENT_CONTENT_UNSUPPORTED", false, errors.New("current content is only available for file patch proposals"))
+	}
+	if err := domain.ValidateWorkspaceTarget(proposal.WorkspaceID, proposal.TargetPath); err != nil {
+		return ProposalCurrentContent{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_TARGET_INVALID", false, err)
+	}
+	reader, ok := s.targets.(CurrentContentReader)
+	if !ok {
+		return ProposalCurrentContent{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "PROPOSAL_CURRENT_CONTENT_UNAVAILABLE", true, errors.New("current content reader is unavailable"))
+	}
+	content, currentHash, err := reader.CurrentContent(ctx, proposal.WorkspaceID, proposal.TargetPath, MaxProposalCurrentContentBytes)
+	if err != nil {
+		return ProposalCurrentContent{}, err
+	}
+	return ProposalCurrentContent{
+		ProposalID: proposal.ID, WorkspaceID: proposal.WorkspaceID, TargetPath: proposal.TargetPath, Content: string(content),
+		CurrentHash: currentHash, BaseHash: proposal.Revision.BaseHash,
+		BaseHashMatch: currentHash == proposal.Revision.BaseHash,
+	}, nil
+}
+
+// ListProposals 返回按更新时间和 ID 倒序排列的 Proposal 摘要页。
+func (s *Service) ListProposals(ctx context.Context, query domain.ProposalListQuery) ([]domain.ProposalListItem, bool, error) {
+	if query.WorkspaceID == "" || query.Limit < 1 || query.Limit > 100 {
+		return nil, false, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_LIST_INVALID", false, errors.New("workspace and bounded limit are required"))
+	}
+	repository, ok := s.repo.(domain.ProposalListRepository)
+	if !ok {
+		return nil, false, foundation.NewError(foundation.ErrorDependencyUnavailable, "PROPOSAL_LIST_UNAVAILABLE", true, errors.New("proposal list repository is unavailable"))
+	}
+	return repository.ListProposals(ctx, query)
 }
 
 // DecideProposal 由服务端生成 Approval ID，并绑定 Revision 与 Change Hash。
@@ -600,6 +682,9 @@ func proposalType(proposal domain.Proposal) domain.ProposalType {
 }
 
 func validateProposalForApproval(proposal domain.Proposal) error {
+	if _, err := domain.ValidateProposalRiskLevelForType(proposalType(proposal), proposal.RiskLevel); err != nil {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_RISK_LEVEL_INVALID", false, err)
+	}
 	if proposalType(proposal) == domain.ProposalTypeKnowledgeChange && strings.TrimSpace(proposal.TargetPath) != "" {
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, errors.New("knowledge change proposal must not carry file target fields"))
 	}
@@ -607,6 +692,11 @@ func validateProposalForApproval(proposal domain.Proposal) error {
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_REVISION_INVALID", false, err)
 	}
 	return nil
+}
+
+// proposalRiskLevelForCreate 只接受调用方显式提供的冻结枚举，不从自由文本 Risk 推导等级。
+func proposalRiskLevelForCreate(level domain.ProposalRiskLevel) (domain.ProposalRiskLevel, error) {
+	return domain.ParseProposalRiskLevel(level)
 }
 
 func requireFilePatchProposal(proposal domain.Proposal, code string) error {

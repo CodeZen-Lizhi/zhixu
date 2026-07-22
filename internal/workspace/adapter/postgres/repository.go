@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
@@ -60,6 +61,62 @@ func (r *Repository) GetWorkspaceByID(ctx context.Context, id foundation.ID) (do
 // GetWorkspaceByRootPath returns one Workspace by canonical root path.
 func (r *Repository) GetWorkspaceByRootPath(ctx context.Context, rootPath string) (domain.Workspace, error) {
 	return r.getWorkspace(ctx, "root_path = $1", rootPath)
+}
+
+// ListSourceVersions 返回按捕获时间和 ID 倒序排列的 Source Version 摘要。
+func (r *Repository) ListSourceVersions(ctx context.Context, request domain.SourceVersionListQuery) ([]domain.SourceVersionListItem, bool, error) {
+	if request.WorkspaceID == "" || request.Limit < 1 || request.Limit > 100 {
+		return nil, false, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_LIST_INVALID", false, errors.New("invalid source version list scope"))
+	}
+	query, args := buildSourceVersionListQuery(request)
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, false, classify(err, "SOURCE_VERSION_LIST_QUERY_FAILED")
+	}
+	defer rows.Close()
+	items := make([]domain.SourceVersionListItem, 0, request.Limit)
+	for rows.Next() {
+		var id, sourceID, scopeID, path, mime, hash, security, ingestion, workflow, index string
+		var size int64
+		var captured time.Time
+		if err := rows.Scan(&id, &sourceID, &scopeID, &path, &mime, &size, &captured, &hash, &security, &ingestion, &workflow, &index); err != nil {
+			return nil, false, classify(err, "SOURCE_VERSION_LIST_SCAN_FAILED")
+		}
+		items = append(items, domain.SourceVersionListItem{ID: foundation.ID(id), SourceID: foundation.ID(sourceID), WorkspaceID: foundation.ID(scopeID), Path: path, MimeType: mime, ByteSize: size, CapturedAt: captured, ContentHash: hash, SecurityStatus: security, IngestionStatus: ingestion, WorkflowStatus: workflow, IndexStatus: index})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, classify(err, "SOURCE_VERSION_LIST_ROWS_FAILED")
+	}
+	hasMore := len(items) > request.Limit
+	if hasMore {
+		items = items[:request.Limit]
+	}
+	return items, hasMore, nil
+}
+
+func buildSourceVersionListQuery(request domain.SourceVersionListQuery) (string, []any) {
+	// included 绑定具体 Source Version；excluded 的 source_version_id 按 Schema 必须为空，表示整个 Source 未进入 Active Index。
+	query := `SELECT sv.id::text,sv.source_id::text,sv.workspace_id::text,s.original_location,sv.mime_type,sv.byte_size,sv.captured_at,sv.content_hash,COALESCE(a.security_status,sv.security_status),COALESCE(a.status,''),COALESCE(wr.status,''),COALESCE(im.selection_status,'') FROM core.source_version sv JOIN core.source s ON s.id=sv.source_id AND s.workspace_id=sv.workspace_id LEFT JOIN LATERAL (SELECT ia.status,ia.security_status,ia.workflow_run_id FROM ingestion.attempt ia WHERE ia.source_version_id=sv.id AND ia.workspace_id=sv.workspace_id ORDER BY ia.started_at DESC,ia.id DESC LIMIT 1) a ON true LEFT JOIN workflow.run wr ON wr.id=a.workflow_run_id AND wr.workspace_id=sv.workspace_id LEFT JOIN retrieval.index_version active_index ON active_index.workspace_id=sv.workspace_id AND active_index.status='active' LEFT JOIN retrieval.index_manifest_source im ON im.index_version_id=active_index.id AND im.workspace_id=sv.workspace_id AND im.source_id=sv.source_id AND (im.selection_status='excluded' OR im.source_version_id=sv.id) WHERE sv.workspace_id=$1`
+	args := []any{string(request.WorkspaceID)}
+	appendFilter := func(column string, value string) {
+		if value == "" {
+			return
+		}
+		args = append(args, value)
+		query += ` AND ` + column + `=$` + fmt.Sprint(len(args))
+	}
+	appendFilter("COALESCE(a.security_status,sv.security_status)", request.SecurityStatus)
+	appendFilter("COALESCE(a.status,'')", request.IngestionStatus)
+	appendFilter("COALESCE(wr.status,'')", request.WorkflowStatus)
+	appendFilter("COALESCE(im.selection_status,'')", request.IndexStatus)
+	appendFilter("sv.mime_type", request.MimeType)
+	if request.CursorTime != nil {
+		args = append(args, request.CursorTime.UTC(), string(request.CursorID))
+		query += ` AND (sv.captured_at,sv.id)<($` + fmt.Sprint(len(args)-1) + `,$` + fmt.Sprint(len(args)) + `)`
+	}
+	query += ` ORDER BY sv.captured_at DESC,sv.id DESC LIMIT $` + fmt.Sprint(len(args)+1)
+	args = append(args, request.Limit+1)
+	return query, args
 }
 
 func (r *Repository) getWorkspace(ctx context.Context, predicate string, argument any) (domain.Workspace, error) {
@@ -248,7 +305,7 @@ func (r *Repository) RegisterSourceVersions(ctx context.Context, registrations [
 		}
 		registration.Version.SourceID = source.ID
 		registration.Version.ContentArtifactID = artifact.ID
-		version, created, err := insertOrGetSourceVersion(ctx, tx, registration.Version)
+		version, created, err := insertOrGetSourceVersion(ctx, tx, source.WorkspaceID, registration.Version)
 		if err != nil {
 			return nil, classify(err, "SOURCE_VERSION_REGISTER_FAILED")
 		}
@@ -313,16 +370,16 @@ func insertOrGetSource(ctx context.Context, tx pgx.Tx, source domain.Source) (do
 	))
 }
 
-func insertOrGetSourceVersion(ctx context.Context, tx pgx.Tx, version domain.SourceVersion) (domain.SourceVersion, bool, error) {
+func insertOrGetSourceVersion(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, version domain.SourceVersion) (domain.SourceVersion, bool, error) {
 	row := tx.QueryRow(ctx, `
 		INSERT INTO core.source_version (
-			id, source_id, content_artifact_id, content_hash, byte_size, mime_type, original_content_location,
+			id, source_id, workspace_id, content_artifact_id, content_hash, byte_size, mime_type, original_content_location,
 			security_status, parser_version, captured_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), $11)
 		ON CONFLICT (source_id, content_hash) DO NOTHING
 		RETURNING id::text, source_id::text, content_artifact_id::text, content_hash, byte_size, mime_type,
 			original_content_location, security_status, COALESCE(parser_version, ''), captured_at`,
-		string(version.ID), string(version.SourceID), string(version.ContentArtifactID), version.ContentHash, version.ByteSize,
+		string(version.ID), string(version.SourceID), string(workspaceID), string(version.ContentArtifactID), version.ContentHash, version.ByteSize,
 		version.MediaType, version.OriginalContentLocation, version.SecurityStatus,
 		version.ParserVersion, version.CapturedAt.UTC(),
 	)
@@ -334,12 +391,12 @@ func insertOrGetSourceVersion(ctx context.Context, tx pgx.Tx, version domain.Sou
 		return domain.SourceVersion{}, false, err
 	}
 	persisted, err = scanSourceVersion(tx.QueryRow(ctx, `
-		UPDATE core.source_version
-		SET content_artifact_id = $3
-		WHERE source_id = $1 AND content_hash = $2 AND content_artifact_id IS NULL
+		UPDATE core.source_version AS sv
+		SET content_artifact_id = $4
+		WHERE sv.workspace_id = $1 AND sv.source_id = $2 AND sv.content_hash = $3 AND sv.content_artifact_id IS NULL
 		RETURNING id::text, source_id::text, content_artifact_id::text, content_hash, byte_size, mime_type,
 			original_content_location, security_status, COALESCE(parser_version, ''), captured_at`,
-		string(version.SourceID), version.ContentHash, string(version.ContentArtifactID),
+		string(workspaceID), string(version.SourceID), version.ContentHash, string(version.ContentArtifactID),
 	))
 	if err == nil {
 		return persisted, false, nil
@@ -350,8 +407,9 @@ func insertOrGetSourceVersion(ctx context.Context, tx pgx.Tx, version domain.Sou
 	persisted, err = scanSourceVersion(tx.QueryRow(ctx, `
 		SELECT id::text, source_id::text, content_artifact_id::text, content_hash, byte_size, mime_type,
 			original_content_location, security_status, COALESCE(parser_version, ''), captured_at
-		FROM core.source_version WHERE source_id = $1 AND content_hash = $2`,
-		string(version.SourceID), version.ContentHash,
+		FROM core.source_version sv
+		WHERE sv.workspace_id = $1 AND sv.source_id = $2 AND sv.content_hash = $3`,
+		string(workspaceID), string(version.SourceID), version.ContentHash,
 	))
 	if err == nil && !sameSourceVersionMetadata(persisted, version) {
 		return domain.SourceVersion{}, false, foundation.NewError(foundation.ErrorConsistencyViolation, "SOURCE_VERSION_METADATA_CONFLICT", false, errors.New("existing source version metadata differs from the requested registration"))

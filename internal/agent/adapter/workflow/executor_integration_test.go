@@ -513,8 +513,8 @@ func seedAgentCitationEvidence(
 		  VALUES($1,$2,'file',$3,$4,$5)`, []any{string(seed.sourceID), string(testWorkspaceID), seed.relativePath, seed.relativePath, at}},
 		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at)
 		  VALUES($1,$2,$3,$4,$5,$6)`, []any{string(seed.artifactID), string(testWorkspaceID), contentHash, int64(len(content)), managedLocation, at}},
-		{`INSERT INTO core.source_version(id,source_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at,content_artifact_id)
-		  VALUES($1,$2,$3,$4,'text/markdown',$5,'passed',$6,$7)`, []any{string(seed.sourceVersionID), string(seed.sourceID), contentHash, int64(len(content)), seed.relativePath, at, string(seed.artifactID)}},
+		{`INSERT INTO core.source_version(id,source_id,workspace_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at,content_artifact_id)
+		  VALUES($1,$2,$3,$4,$5,'text/markdown',$6,'passed',$7,$8)`, []any{string(seed.sourceVersionID), string(seed.sourceID), string(testWorkspaceID), contentHash, int64(len(content)), seed.relativePath, at, string(seed.artifactID)}},
 		{`INSERT INTO ingestion.parse_projection(id,workspace_id,content_artifact_id,parser_id,parser_version,parser_config_hash,schema_version,normalized_content_hash,created_at)
 		  VALUES($1,$2,$3,'text','text-v1',$4,'schema-v1',$5,$6)`, []any{string(seed.projectionID), string(testWorkspaceID), string(seed.artifactID), testSHA256([]byte(seed.relativePath)), contentHash, at}},
 		{`INSERT INTO ingestion.source_version_projection(source_version_id,parse_projection_id,workspace_id,created_at)

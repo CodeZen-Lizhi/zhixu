@@ -11,7 +11,9 @@ import (
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changedispatch "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/dispatch"
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
+	changecontroleventcontract "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/eventcontract"
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
+	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/jackc/pgx/v5"
@@ -30,16 +32,24 @@ type ApprovalDispatchRepository struct {
 	runtime approvalRuntimeStarter
 	ids     foundation.IDGenerator
 	clock   foundation.Clock
+	events  eventsapplication.Appender
 }
 
 var _ changedispatch.Dispatcher = (*ApprovalDispatchRepository)(nil)
 
-// NewApprovalDispatchRepository 创建跨 Schema Approval Dispatch Repository。
-func NewApprovalDispatchRepository(db changecontrolpostgres.DB, runtime approvalRuntimeStarter, ids foundation.IDGenerator, clock foundation.Clock) (*ApprovalDispatchRepository, error) {
+// NewApprovalDispatchRepository 创建跨 Schema Approval Dispatch Repository；可选事件追加器与 Proposal 状态共用事务。
+func NewApprovalDispatchRepository(db changecontrolpostgres.DB, runtime approvalRuntimeStarter, ids foundation.IDGenerator, clock foundation.Clock, appenders ...eventsapplication.Appender) (*ApprovalDispatchRepository, error) {
 	if isNilDispatchDependency(db) || isNilDispatchDependency(runtime) || isNilDispatchDependency(ids) || isNilDispatchDependency(clock) {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "APPROVAL_DISPATCH_DEPENDENCY_MISSING", true, errors.New("approval dispatch dependency is nil"))
 	}
-	return &ApprovalDispatchRepository{db: db, runtime: runtime, ids: ids, clock: clock}, nil
+	if len(appenders) > 1 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "APPROVAL_DISPATCH_EVENT_APPENDER_INVALID", false, errors.New("only one approval dispatch event appender may be configured"))
+	}
+	var events eventsapplication.Appender
+	if len(appenders) == 1 && !isNilDispatchDependency(appenders[0]) {
+		events = appenders[0]
+	}
+	return &ApprovalDispatchRepository{db: db, runtime: runtime, ids: ids, clock: clock, events: events}, nil
 }
 
 // DecideAndDispatch 原子保存或重放 Approval、Proposal→Run binding、Workflow facts、Outbox 与 River Job。
@@ -62,13 +72,14 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var workspaceID, proposalType, status, revisionHash, baseHash string
+	var proposalVersion int64
 	var workflowRunID *string
 	err = tx.QueryRow(ctx, `
-		SELECT p.workspace_id::text,p.proposal_type,p.status,p.workflow_run_id::text,r.change_hash,r.base_hash
+		SELECT p.workspace_id::text,p.proposal_type,p.status,p.version,p.workflow_run_id::text,r.change_hash,r.base_hash
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.proposal_id=p.id AND r.id=$2
 		WHERE p.id=$1
-		FOR UPDATE OF p,r`, string(command.Approval.ProposalID), string(command.Approval.RevisionID)).Scan(&workspaceID, &proposalType, &status, &workflowRunID, &revisionHash, &baseHash)
+		FOR UPDATE OF p,r`, string(command.Approval.ProposalID), string(command.Approval.RevisionID)).Scan(&workspaceID, &proposalType, &status, &proposalVersion, &workflowRunID, &revisionHash, &baseHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return changedispatch.Result{}, foundation.NewError(foundation.ErrorNotFound, "PROPOSAL_REVISION_NOT_FOUND", false, err)
 	}
@@ -94,7 +105,7 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	}
 
 	if command.Approval.Decision == domain.DecisionRejected {
-		return r.persistRejected(ctx, tx, command, status, workflowRunID, existingErr == nil)
+		return r.persistRejected(ctx, tx, command, foundation.ID(workspaceID), proposalVersion, status, workflowRunID, existingErr == nil)
 	}
 	if workflowRunID != nil {
 		return r.replayApproved(ctx, tx, command, foundation.ID(*workflowRunID))
@@ -152,13 +163,16 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	return dispatchResult(command.Approval, runtimeResult, changedispatch.StatusQueued, false), nil
 }
 
-func (r *ApprovalDispatchRepository) persistRejected(ctx context.Context, tx pgx.Tx, command changedispatch.Command, status string, workflowRunID *string, replayed bool) (changedispatch.Result, error) {
+func (r *ApprovalDispatchRepository) persistRejected(ctx context.Context, tx pgx.Tx, command changedispatch.Command, workspaceID foundation.ID, proposalVersion int64, status string, workflowRunID *string, replayed bool) (changedispatch.Result, error) {
 	if workflowRunID != nil {
 		return changedispatch.Result{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_DISPATCH_BINDING_CONFLICT", false, errors.New("rejected proposal is bound to a workflow"))
 	}
 	if replayed {
 		if status != string(domain.StatusRejected) {
 			return changedispatch.Result{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_DISPATCH_BINDING_CONFLICT", false, errors.New("rejected approval status differs"))
+		}
+		if err := r.appendRejectedEvent(ctx, tx, command, workspaceID, proposalVersion); err != nil {
+			return changedispatch.Result{}, err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return changedispatch.Result{}, classifyDispatch(err, "APPROVAL_DISPATCH_COMMIT_FAILED")
@@ -182,10 +196,25 @@ func (r *ApprovalDispatchRepository) persistRejected(ctx context.Context, tx pgx
 	if tag.RowsAffected() != 1 {
 		return changedispatch.Result{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_NOT_READY_FOR_REVIEW", false, errors.New("proposal state changed"))
 	}
+	if err := r.appendRejectedEvent(ctx, tx, command, workspaceID, proposalVersion+1); err != nil {
+		return changedispatch.Result{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return changedispatch.Result{}, classifyDispatch(err, "APPROVAL_DISPATCH_COMMIT_FAILED")
 	}
 	return changedispatch.Result{Approval: command.Approval}, nil
+}
+
+func (r *ApprovalDispatchRepository) appendRejectedEvent(ctx context.Context, tx pgx.Tx, command changedispatch.Command, workspaceID foundation.ID, proposalVersion int64) error {
+	if isNilDispatchDependency(r.events) {
+		return nil
+	}
+	request := changecontroleventcontract.ProposalStatusRequest(
+		workspaceID, command.Approval.ProposalID, command.Approval.ID,
+		changecontroleventcontract.ProposalRejectedEventType, string(domain.StatusRejected), proposalVersion, command.Approval.DecidedAt,
+	)
+	_, _, err := r.events.AppendTx(ctx, tx, request)
+	return err
 }
 
 func (r *ApprovalDispatchRepository) replayApproved(ctx context.Context, tx pgx.Tx, command changedispatch.Command, boundRunID foundation.ID) (changedispatch.Result, error) {

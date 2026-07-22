@@ -2,6 +2,7 @@ package workspacehttp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -93,6 +94,60 @@ func TestHandlerWorkspaceScanContract(t *testing.T) {
 	if response.Files[1] != (scannedFile{RelativePath: "nested/b.txt", ByteSize: 8, ContentHash: "hash-b", MediaType: "text/plain", SourceID: string(handlerTestWorkspaceID), SourceVersionID: string(handlerTestWorkspaceID), ContentArtifactID: string(handlerTestWorkspaceID)}) {
 		t.Fatalf("second scanned file = %#v", response.Files[1])
 	}
+}
+
+func TestSourceVersionListBindsFiltersToCursor(t *testing.T) {
+	service := &fakeWorkspaceService{listItems: []domain.SourceVersionListItem{{ID: handlerTestWorkspaceID, SourceID: handlerTestWorkspaceID, WorkspaceID: handlerTestWorkspaceID, CapturedAt: handlerTestTime}}, listHasMore: true}
+	first := serveWorkspaceRequest(t, service, http.MethodGet, "/api/v1/workspaces/"+string(handlerTestWorkspaceID)+"/source-versions?security_status=passed&limit=1", "")
+	if first.Code != http.StatusOK || service.listQuery.SecurityStatus != "passed" || service.listQuery.Limit != 1 {
+		t.Fatalf("status=%d query=%+v body=%s", first.Code, service.listQuery, first.Body.String())
+	}
+	page := decodeBody[sourceVersionPageResponse](t, first)
+	legacyCursor := cursorWithoutSourceVersionKind(t, page.NextCursor)
+	legacy := serveWorkspaceRequest(t, service, http.MethodGet, "/api/v1/workspaces/"+string(handlerTestWorkspaceID)+"/source-versions?security_status=passed&limit=1&cursor="+legacyCursor, "")
+	if legacy.Code != http.StatusBadRequest || service.listCalls != 1 {
+		t.Fatalf("legacy status=%d calls=%d body=%s", legacy.Code, service.listCalls, legacy.Body.String())
+	}
+	second := serveWorkspaceRequest(t, service, http.MethodGet, "/api/v1/workspaces/"+string(handlerTestWorkspaceID)+"/source-versions?security_status=pending&limit=1&cursor="+page.NextCursor, "")
+	if second.Code != http.StatusBadRequest || service.listCalls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", second.Code, service.listCalls, second.Body.String())
+	}
+	unknown := serveWorkspaceRequest(t, service, http.MethodGet, "/api/v1/workspaces/"+string(handlerTestWorkspaceID)+"/source-versions?future=value", "")
+	if unknown.Code != http.StatusBadRequest {
+		t.Fatalf("unknown status=%d body=%s", unknown.Code, unknown.Body.String())
+	}
+	for _, query := range []string{
+		"security_status=future",
+		"ingestion_status=failed",
+		"workflow_status=future",
+		"index_status=active",
+		"limit=1&limit=2",
+		"cursor=" + strings.Repeat("a", 2049),
+	} {
+		recorder := serveWorkspaceRequest(t, service, http.MethodGet, "/api/v1/workspaces/"+string(handlerTestWorkspaceID)+"/source-versions?"+query, "")
+		if recorder.Code != http.StatusBadRequest || service.listCalls != 1 {
+			t.Fatalf("query=%q status=%d calls=%d body=%s", query, recorder.Code, service.listCalls, recorder.Body.String())
+		}
+	}
+}
+
+func cursorWithoutSourceVersionKind(t *testing.T, cursor string) string {
+	t.Helper()
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	delete(payload, "version")
+	delete(payload, "kind")
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
 func TestHandlerRejectsInvalidJSON(t *testing.T) {
@@ -251,6 +306,16 @@ type fakeWorkspaceService struct {
 	scanErr       error
 	scanID        foundation.ID
 	scanCalls     int
+	listItems     []domain.SourceVersionListItem
+	listHasMore   bool
+	listQuery     domain.SourceVersionListQuery
+	listCalls     int
+}
+
+func (f *fakeWorkspaceService) ListSourceVersions(_ context.Context, query domain.SourceVersionListQuery) ([]domain.SourceVersionListItem, bool, error) {
+	f.listCalls++
+	f.listQuery = query
+	return append([]domain.SourceVersionListItem(nil), f.listItems...), f.listHasMore, f.scanErr
 }
 
 func (f *fakeWorkspaceService) CreateWorkspace(_ context.Context, request application.CreateWorkspaceRequest) (application.WorkspaceResult, error) {

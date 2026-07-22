@@ -78,7 +78,7 @@ func TestSemanticLinkCandidateServiceRoutesDecisions(t *testing.T) {
 	if err != nil || receipt.ProposalID == nil || *receipt.ProposalID != proposalID || confirmer.calls != 1 || repository.decideCalls != 1 {
 		t.Fatalf("confirm receipt=%+v err=%v repo_calls=%d confirm_calls=%d", receipt, err, repository.decideCalls, confirmer.calls)
 	}
-	if confirmer.command.Risk != semanticLinkConfirmRisk || confirmer.command.RollbackPlan != semanticLinkConfirmRollbackPlan {
+	if confirmer.command.RiskLevel != candidateconfirm.ProposalRiskLevel || confirmer.command.Risk != semanticLinkConfirmRisk || confirmer.command.RollbackPlan != semanticLinkConfirmRollbackPlan {
 		t.Fatalf("confirm command=%+v", confirmer.command)
 	}
 }

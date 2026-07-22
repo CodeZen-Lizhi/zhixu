@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"time"
 
 	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
@@ -50,10 +51,25 @@ func (repository *CandidateConfirmRepository) Confirm(ctx context.Context, comma
 		return candidateconfirm.Result{}, candidateConfirmUnavailable(errors.New("candidate confirm repository is unavailable"))
 	}
 	canonical, err := candidateconfirm.Canonicalize(command)
+	allowCreate := true
 	if err != nil {
-		return candidateconfirm.Result{}, err
+		if command.RiskLevel != "" {
+			return candidateconfirm.Result{}, err
+		}
+		canonical, err = candidateconfirm.CanonicalizeLegacy(command)
+		if err != nil {
+			return candidateconfirm.Result{}, err
+		}
+		allowCreate = false
 	}
-	requestHash, err := candidateconfirm.RequestHash(canonical)
+	requestHash := ""
+	if allowCreate {
+		requestHash, err = candidateconfirm.RequestHash(canonical)
+		if err != nil {
+			return candidateconfirm.Result{}, candidateConfirmInvalid(err)
+		}
+	}
+	legacyRequestHash, err := candidateconfirm.LegacyRequestHash(canonical)
 	if err != nil {
 		return candidateconfirm.Result{}, candidateConfirmInvalid(err)
 	}
@@ -63,7 +79,7 @@ func (repository *CandidateConfirmRepository) Confirm(ctx context.Context, comma
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	result, err := repository.confirmTx(ctx, tx, canonical, requestHash)
+	result, err := repository.confirmTx(ctx, tx, canonical, requestHash, legacyRequestHash, allowCreate)
 	if err != nil {
 		return candidateconfirm.Result{}, err
 	}
@@ -73,13 +89,16 @@ func (repository *CandidateConfirmRepository) Confirm(ctx context.Context, comma
 	return result, nil
 }
 
-func (repository *CandidateConfirmRepository) confirmTx(ctx context.Context, tx pgx.Tx, command candidateconfirm.Command, requestHash string) (candidateconfirm.Result, error) {
+func (repository *CandidateConfirmRepository) confirmTx(ctx context.Context, tx pgx.Tx, command candidateconfirm.Command, requestHash, legacyRequestHash string, allowCreate bool) (candidateconfirm.Result, error) {
 	receipt, found, err := loadDecisionByIdempotency(ctx, tx, command.WorkspaceID, command.IdempotencyKey)
 	if err != nil {
 		return candidateconfirm.Result{}, candidateConfirmClassify(err, "RELATION_PROPOSAL_CONFIRM_RECEIPT_QUERY_FAILED")
 	}
 	if found {
-		return repository.replayConfirmTx(ctx, tx, command, requestHash, receipt)
+		return repository.replayConfirmTx(ctx, tx, command, requestHash, legacyRequestHash, receipt)
+	}
+	if !allowCreate {
+		return candidateconfirm.Result{}, candidateConfirmInvalid(errors.New("new candidate confirmation requires HIGH risk level"))
 	}
 
 	base, err := loadCandidate(ctx, tx, command.WorkspaceID, command.CandidateID, "id", true)
@@ -92,7 +111,7 @@ func (repository *CandidateConfirmRepository) confirmTx(ctx context.Context, tx 
 		if winner, winnerFound, receiptErr := loadDecisionByIdempotency(ctx, tx, command.WorkspaceID, command.IdempotencyKey); receiptErr != nil {
 			return candidateconfirm.Result{}, candidateConfirmClassify(receiptErr, "RELATION_PROPOSAL_CONFIRM_RECEIPT_QUERY_FAILED")
 		} else if winnerFound {
-			return repository.replayConfirmTx(ctx, tx, command, requestHash, winner)
+			return repository.replayConfirmTx(ctx, tx, command, requestHash, legacyRequestHash, winner)
 		}
 		return candidateconfirm.Result{}, candidateConfirmVersionConflict("candidate expected version does not match")
 	}
@@ -114,15 +133,18 @@ func (repository *CandidateConfirmRepository) confirmTx(ctx context.Context, tx 
 	if err != nil {
 		return candidateconfirm.Result{}, err
 	}
+	if parsedRiskLevel, parseErr := changecontroldomain.ValidateProposalRiskLevelForType(changecontroldomain.ProposalTypeKnowledgeChange, command.RiskLevel); parseErr != nil || parsedRiskLevel != candidateconfirm.ProposalRiskLevel {
+		return candidateconfirm.Result{}, candidateConfirmInvalid(errors.New("confirmation risk level must be HIGH"))
+	}
 	changeHash, err := changecontroldomain.ComputeKnowledgeChangeHash(change, command.Risk, command.RollbackPlan)
 	if err != nil {
 		return candidateconfirm.Result{}, candidateConfirmInvalid(err)
 	}
-	proposalRequestHash, err := changecontroldomain.ComputeKnowledgeChangeRequestHash(command.WorkspaceID, change, command.Risk, command.RollbackPlan)
+	proposalRequestHash, err := changecontroldomain.ComputeKnowledgeChangeRequestHashWithRiskLevel(command.WorkspaceID, change, command.RiskLevel, command.Risk, command.RollbackPlan)
 	if err != nil {
 		return candidateconfirm.Result{}, candidateConfirmInvalid(err)
 	}
-	proposalKey := "semantic-link-confirm/v1:" + requestHash
+	proposalKey := "semantic-link-confirm/v2:" + requestHash
 	now := repository.clock.Now().UTC()
 	if now.IsZero() {
 		return candidateconfirm.Result{}, candidateConfirmUnavailable(errors.New("candidate confirm clock returned zero time"))
@@ -144,7 +166,7 @@ func (repository *CandidateConfirmRepository) confirmTx(ctx context.Context, tx 
 	}
 	proposal := changecontroldomain.Proposal{
 		ID: proposalID, WorkspaceID: command.WorkspaceID, Type: changecontroldomain.ProposalTypeKnowledgeChange,
-		IdempotencyKey: proposalKey, RequestHash: proposalRequestHash, Status: changecontroldomain.StatusReady,
+		RiskLevel: command.RiskLevel, IdempotencyKey: proposalKey, RequestHash: proposalRequestHash, Status: changecontroldomain.StatusReady,
 		Version: 1, CreatedAt: now, UpdatedAt: now,
 		Revision: changecontroldomain.Revision{
 			ID: revisionID, ProposalID: proposalID, RevisionNo: 1, Risk: command.Risk,
@@ -179,7 +201,7 @@ func (repository *CandidateConfirmRepository) confirmTx(ctx context.Context, tx 
 		if !winnerFound {
 			return candidateconfirm.Result{}, candidateConfirmConsistency(errors.New("candidate confirmation receipt disappeared"))
 		}
-		return repository.replayConfirmTx(ctx, tx, command, requestHash, winner)
+		return repository.replayConfirmTx(ctx, tx, command, requestHash, legacyRequestHash, winner)
 	}
 
 	updated, err := tx.Exec(ctx, `
@@ -204,14 +226,15 @@ func (repository *CandidateConfirmRepository) confirmTx(ctx context.Context, tx 
 	if err := graphdomain.ValidateSemanticLinkCandidate(resultCandidate); err != nil {
 		return candidateconfirm.Result{}, err
 	}
-	if err := validateCandidateConfirmProposalBinding(base.candidate, command, requestHash, proposal); err != nil {
+	if err := validateCandidateConfirmProposalBinding(base.candidate, command, requestHash, proposal, false); err != nil {
 		return candidateconfirm.Result{}, err
 	}
 	return candidateconfirm.Result{Candidate: resultCandidate, Proposal: proposal, DecisionID: decisionID}, nil
 }
 
-func (repository *CandidateConfirmRepository) replayConfirmTx(ctx context.Context, tx pgx.Tx, command candidateconfirm.Command, requestHash string, receipt candidateDecisionRow) (candidateconfirm.Result, error) {
-	if receipt.requestHash != requestHash || receipt.candidateID != command.CandidateID || receipt.workspaceID != command.WorkspaceID || receipt.proposalID == nil || receipt.action != command.Action || !sameOptionalRelationType(receipt.relationType, command.RelationType) {
+func (repository *CandidateConfirmRepository) replayConfirmTx(ctx context.Context, tx pgx.Tx, command candidateconfirm.Command, requestHash, legacyRequestHash string, receipt candidateDecisionRow) (candidateconfirm.Result, error) {
+	legacy := receipt.requestHash == legacyRequestHash
+	if (receipt.requestHash != requestHash && !legacy) || receipt.candidateID != command.CandidateID || receipt.workspaceID != command.WorkspaceID || receipt.proposalID == nil || receipt.action != command.Action || !sameOptionalRelationType(receipt.relationType, command.RelationType) {
 		return candidateconfirm.Result{}, candidateConfirmVersionConflict("candidate confirmation idempotency binding differs")
 	}
 	current, err := loadCandidate(ctx, tx, command.WorkspaceID, command.CandidateID, "id", true)
@@ -226,7 +249,7 @@ func (repository *CandidateConfirmRepository) replayConfirmTx(ctx context.Contex
 	if err != nil {
 		return candidateconfirm.Result{}, err
 	}
-	if err := validateCandidateConfirmProposalBinding(current.candidate, command, requestHash, proposal); err != nil {
+	if err := validateCandidateConfirmProposalBinding(current.candidate, command, receipt.requestHash, proposal, legacy); err != nil {
 		return candidateconfirm.Result{}, err
 	}
 	resultCandidate.ProposalID = receipt.proposalID
@@ -265,11 +288,11 @@ func buildKnowledgeChange(candidate graphdomain.SemanticLinkCandidate, relationT
 func insertOrLoadKnowledgeProposal(ctx context.Context, tx pgx.Tx, proposal changecontroldomain.Proposal) (changecontroldomain.Proposal, bool, error) {
 	var insertedID string
 	err := tx.QueryRow(ctx, `
-		INSERT INTO change_control.proposal(id,workspace_id,proposal_type,idempotency_key,request_hash,status,version,created_at,updated_at)
-		VALUES($1,$2,'knowledge_change',$3,$4,$5,$6,$7,$8)
-		ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
-		RETURNING id::text`,
-		string(proposal.ID), string(proposal.WorkspaceID), proposal.IdempotencyKey, proposal.RequestHash,
+			INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,idempotency_key,request_hash,status,version,created_at,updated_at)
+			VALUES($1,$2,'knowledge_change',$3,$4,$5,$6,$7,$8,$9)
+			ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
+			RETURNING id::text`,
+		string(proposal.ID), string(proposal.WorkspaceID), string(proposal.RiskLevel), proposal.IdempotencyKey, proposal.RequestHash,
 		string(proposal.Status), proposal.Version, proposal.CreatedAt.UTC(), proposal.UpdatedAt.UTC()).Scan(&insertedID)
 	if err == nil {
 		change := proposal.Revision.KnowledgeChange
@@ -315,7 +338,7 @@ func insertOrLoadKnowledgeProposal(ctx context.Context, tx pgx.Tx, proposal chan
 	if loadErr != nil {
 		return changecontroldomain.Proposal{}, false, loadErr
 	}
-	if existing.RequestHash != proposal.RequestHash || existing.Type != changecontroldomain.ProposalTypeKnowledgeChange || existing.WorkspaceID != proposal.WorkspaceID || existing.Status != changecontroldomain.StatusReady {
+	if existing.RequestHash != proposal.RequestHash || existing.RiskLevel != proposal.RiskLevel || existing.Type != changecontroldomain.ProposalTypeKnowledgeChange || existing.WorkspaceID != proposal.WorkspaceID || existing.Status != changecontroldomain.StatusReady {
 		return changecontroldomain.Proposal{}, false, candidateConfirmVersionConflict("relation proposal idempotency binding differs")
 	}
 	if existing.Revision.ChangeHash != proposal.Revision.ChangeHash {
@@ -336,7 +359,7 @@ func loadKnowledgeProposalByKey(ctx context.Context, tx pgx.Tx, workspaceID foun
 }
 
 func loadKnowledgeProposalForConfirm(ctx context.Context, tx pgx.Tx, proposalID foundation.ID) (changecontroldomain.Proposal, error) {
-	var id, workspaceID, proposalType, idempotencyKey, requestHash, status string
+	var id, workspaceID, proposalType, riskLevel, idempotencyKey, requestHash, status string
 	var workflowRunID *string
 	var version int64
 	var createdAt, updatedAt, revisionCreatedAt time.Time
@@ -347,14 +370,14 @@ func loadKnowledgeProposalForConfirm(ctx context.Context, tx pgx.Tx, proposalID 
 	var approvalID, approvalHash, approvalDecision, approvedGitHead *string
 	var approvalDecidedAt *time.Time
 	err := tx.QueryRow(ctx, `
-		SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.idempotency_key,p.request_hash,p.workflow_run_id::text,p.status,p.version,p.created_at,p.updated_at,
+			SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.risk_level,p.idempotency_key,p.request_hash,p.workflow_run_id::text,p.status,p.version,p.created_at,p.updated_at,
 		       r.id::text,r.revision_no,r.risk,r.rollback_plan,r.change_hash,r.target_refs,r.base_versions,r.change_set,r.evidence_refs,r.schema_version,r.created_at,
 		       a.id::text,a.change_hash,a.decision,a.approved_git_head,a.decided_at
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.proposal_id=p.id AND r.revision_no=1
 		LEFT JOIN change_control.approval a ON a.revision_id=r.id
 		WHERE p.id=$1 FOR UPDATE OF p,r`, string(proposalID)).Scan(
-		&id, &workspaceID, &proposalType, &idempotencyKey, &requestHash, &workflowRunID, &status, &version, &createdAt, &updatedAt,
+		&id, &workspaceID, &proposalType, &riskLevel, &idempotencyKey, &requestHash, &workflowRunID, &status, &version, &createdAt, &updatedAt,
 		&revisionID, &revisionNo, &risk, &rollback, &changeHash, &targetRefsRaw, &baseVersionsRaw, &changeSetRaw, &evidenceRefsRaw, &schemaVersion, &revisionCreatedAt,
 		&approvalID, &approvalHash, &approvalDecision, &approvedGitHead, &approvalDecidedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -383,9 +406,13 @@ func loadKnowledgeProposalForConfirm(ctx context.Context, tx pgx.Tx, proposalID 
 	if err != nil {
 		return changecontroldomain.Proposal{}, candidateConfirmConsistency(err)
 	}
+	persistedRisk, riskErr := changecontroldomain.ValidateProposalRiskLevelForType(changecontroldomain.ProposalTypeKnowledgeChange, changecontroldomain.ProposalRiskLevel(riskLevel))
+	if riskErr != nil {
+		return changecontroldomain.Proposal{}, candidateConfirmConsistency(riskErr)
+	}
 	proposal := changecontroldomain.Proposal{
 		ID: foundation.ID(id), WorkspaceID: foundation.ID(workspaceID), Type: changecontroldomain.ProposalTypeKnowledgeChange,
-		IdempotencyKey: idempotencyKey, RequestHash: requestHash, Status: changecontroldomain.ProposalStatus(status), Version: version,
+		RiskLevel: persistedRisk, IdempotencyKey: idempotencyKey, RequestHash: requestHash, Status: changecontroldomain.ProposalStatus(status), Version: version,
 		CreatedAt: createdAt, UpdatedAt: updatedAt,
 		Revision: changecontroldomain.Revision{ID: foundation.ID(revisionID), ProposalID: foundation.ID(id), RevisionNo: revisionNo,
 			Risk: *risk, RollbackPlan: *rollback, ChangeHash: *changeHash, KnowledgeChange: &canonicalChange, CreatedAt: revisionCreatedAt},
@@ -410,9 +437,15 @@ func loadKnowledgeProposalForConfirm(ctx context.Context, tx pgx.Tx, proposalID 
 	return proposal, nil
 }
 
-func validateCandidateConfirmProposalBinding(candidate graphdomain.SemanticLinkCandidate, command candidateconfirm.Command, requestHash string, proposal changecontroldomain.Proposal) error {
+func validateCandidateConfirmProposalBinding(candidate graphdomain.SemanticLinkCandidate, command candidateconfirm.Command, requestHash string, proposal changecontroldomain.Proposal, legacy bool) error {
 	if proposal.WorkspaceID != candidate.WorkspaceID || proposal.WorkspaceID != command.WorkspaceID || proposal.Type != changecontroldomain.ProposalTypeKnowledgeChange || proposal.Revision.KnowledgeChange == nil {
 		return candidateConfirmConsistency(errors.New("relation proposal does not bind candidate workspace or type"))
+	}
+	if proposal.RiskLevel != candidateconfirm.ProposalRiskLevel {
+		return candidateConfirmConsistency(errors.New("relation proposal risk level must be HIGH"))
+	}
+	if strings.TrimSpace(string(command.RiskLevel)) != "" && command.RiskLevel != proposal.RiskLevel {
+		return candidateConfirmConsistency(errors.New("relation proposal command risk level binding differs"))
 	}
 	if candidate.ProposalID != nil && *candidate.ProposalID != proposal.ID {
 		return candidateConfirmConsistency(errors.New("candidate projection and relation proposal differ"))
@@ -429,11 +462,16 @@ func validateCandidateConfirmProposalBinding(candidate graphdomain.SemanticLinkC
 	if err != nil {
 		return candidateConfirmInvalid(err)
 	}
-	expectedRequestHash, err := changecontroldomain.ComputeKnowledgeChangeRequestHash(candidate.WorkspaceID, expectedChange, command.Risk, command.RollbackPlan)
+	proposalKeyPrefix := "semantic-link-confirm/v2:"
+	expectedRequestHash, err := changecontroldomain.ComputeKnowledgeChangeRequestHashWithRiskLevel(candidate.WorkspaceID, expectedChange, command.RiskLevel, command.Risk, command.RollbackPlan)
+	if legacy {
+		proposalKeyPrefix = "semantic-link-confirm/v1:"
+		expectedRequestHash, err = changecontroldomain.ComputeKnowledgeChangeRequestHash(candidate.WorkspaceID, expectedChange, command.Risk, command.RollbackPlan)
+	}
 	if err != nil {
 		return candidateConfirmInvalid(err)
 	}
-	if proposal.IdempotencyKey != "semantic-link-confirm/v1:"+requestHash || proposal.RequestHash != expectedRequestHash || proposal.Revision.ChangeHash != expectedHash || proposal.Revision.Risk != command.Risk || proposal.Revision.RollbackPlan != command.RollbackPlan {
+	if proposal.IdempotencyKey != proposalKeyPrefix+requestHash || proposal.RequestHash != expectedRequestHash || proposal.Revision.ChangeHash != expectedHash || proposal.Revision.Risk != command.Risk || proposal.Revision.RollbackPlan != command.RollbackPlan {
 		return candidateConfirmConsistency(errors.New("relation proposal command binding differs"))
 	}
 	return nil

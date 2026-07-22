@@ -145,7 +145,7 @@ func TestSafeWritebackWorkflowNodePostgreSQLGitFilesystemSmoke(t *testing.T) {
 	baseHash := domain.ComputeWritebackResultHash(baseContent)
 	created, err := changeService.CreateProposal(ctx, application.CreateCommand{
 		WorkspaceID: workspaceID, TargetPath: targetPath, IdempotencyKey: "proposal-smoke-" + string(nextID()),
-		BaseHash: baseHash, Content: approvedContent, EvidenceSummary: "integration evidence", Risk: "low", RollbackPlan: "strict reverse commit",
+		BaseHash: baseHash, Content: approvedContent, EvidenceSummary: "integration evidence", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "strict reverse commit",
 	})
 	if err != nil {
 		t.Fatal(err)

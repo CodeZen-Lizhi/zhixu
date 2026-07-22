@@ -27,6 +27,18 @@ type Dependencies struct {
 // Service coordinates Workspace creation, opening and read-only scanning.
 type Service struct{ dependencies Dependencies }
 
+// ListSourceVersions 返回 Inbox 需要的 Source Version 摘要页。
+func (s *Service) ListSourceVersions(ctx context.Context, query domain.SourceVersionListQuery) ([]domain.SourceVersionListItem, bool, error) {
+	if query.WorkspaceID == "" || query.Limit < 1 || query.Limit > 100 {
+		return nil, false, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_LIST_INVALID", false, errors.New("invalid source version list scope"))
+	}
+	repository, ok := s.dependencies.Repository.(domain.SourceVersionListRepository)
+	if !ok {
+		return nil, false, foundation.NewError(foundation.ErrorDependencyUnavailable, "SOURCE_VERSION_LIST_UNAVAILABLE", true, errors.New("source version list repository is unavailable"))
+	}
+	return repository.ListSourceVersions(ctx, query)
+}
+
 // NewService creates a Workspace application service.
 func NewService(dependencies Dependencies) *Service {
 	return &Service{dependencies: dependencies}

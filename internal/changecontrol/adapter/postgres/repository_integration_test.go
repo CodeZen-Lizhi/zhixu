@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
+	eventcontract "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/eventcontract"
+	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
@@ -53,8 +55,12 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	proposalID, revisionID := integrationID(2), integrationID(3)
 	baseHash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	changeHash := domain.ComputeChangeHash("a.md", baseHash, "new content")
+	requestHash, err := domain.ComputeRequestHashWithRiskLevel(workspaceID, "a.md", baseHash, "new content", "source evidence", domain.ProposalRiskLevelLow, "low", "revert commit")
+	if err != nil {
+		t.Fatal(err)
+	}
 	proposal := domain.Proposal{
-		ID: proposalID, WorkspaceID: workspaceID, TargetPath: "a.md", IdempotencyKey: "create-one", RequestHash: domain.ComputeRequestHash(workspaceID, "a.md", baseHash, "new content", "source evidence", "low", "revert commit"), Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
+		ID: proposalID, WorkspaceID: workspaceID, RiskLevel: domain.ProposalRiskLevelLow, TargetPath: "a.md", IdempotencyKey: "create-one", RequestHash: requestHash, Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
 		Revision: domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: "a.md", BaseHash: baseHash, Content: "new content", EvidenceSummary: "source evidence", Risk: "low", RollbackPlan: "revert commit", ChangeHash: changeHash, CreatedAt: now},
 	}
 	if _, err := repository.CreateProposal(ctx, proposal); err != nil {
@@ -63,6 +69,11 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	replayedRequest := proposal
 	replayedRequest.ID = integrationID(9)
 	replayedRequest.Revision.ID = integrationID(10)
+	replayedRequest.RiskLevel = domain.ProposalRiskLevelLow
+	replayedRequest.RequestHash, err = domain.ComputeRequestHashWithRiskLevel(workspaceID, "a.md", baseHash, "new content", "source evidence", domain.ProposalRiskLevelLow, "low", "revert commit")
+	if err != nil {
+		t.Fatal(err)
+	}
 	replayed, err := repository.CreateProposal(ctx, replayedRequest)
 	if err != nil || replayed.ID != proposalID {
 		t.Fatalf("replayed=%#v err=%v", replayed, err)
@@ -70,12 +81,12 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	conflictingRequest := replayedRequest
 	conflictingRequest.ID = integrationID(11)
 	conflictingRequest.Revision.ID = integrationID(12)
-	conflictingRequest.RequestHash = domain.ComputeRequestHash(workspaceID, "a.md", baseHash, "different", "source evidence", "low", "revert commit")
+	conflictingRequest.RequestHash = mustFileRequestHash(t, workspaceID, "a.md", baseHash, "different", "source evidence", domain.ProposalRiskLevelLow, "low", "revert commit")
 	if _, err := repository.CreateProposal(ctx, conflictingRequest); !hasCode(err, "IDEMPOTENCY_KEY_REUSED") {
 		t.Fatalf("idempotency conflict err=%v", err)
 	}
 	queried, err := repository.GetProposal(ctx, proposalID)
-	if err != nil || queried.TargetPath != "a.md" || queried.Approval != nil || queried.WorkflowRunID != nil || queried.Version != 1 {
+	if err != nil || queried.RiskLevel != domain.ProposalRiskLevelLow || queried.TargetPath != "a.md" || queried.Approval != nil || queried.WorkflowRunID != nil || queried.Version != 1 {
 		t.Fatalf("queried=%#v err=%v", queried, err)
 	}
 	definitionID, workflowRunID := integrationID(7), integrationID(8)
@@ -88,7 +99,7 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	duplicateProposal := proposal
 	duplicateProposal.ID, duplicateProposal.Revision.ID = integrationID(13), integrationID(14)
 	duplicateProposal.IdempotencyKey = "create-duplicate-binding"
-	duplicateProposal.RequestHash = domain.ComputeRequestHash(workspaceID, "b.md", baseHash, "other content", "source evidence", "low", "revert commit")
+	duplicateProposal.RequestHash = mustFileRequestHash(t, workspaceID, "b.md", baseHash, "other content", "source evidence", domain.ProposalRiskLevelLow, "low", "revert commit")
 	duplicateProposal.TargetPath = "b.md"
 	duplicateProposal.Revision.ProposalID = duplicateProposal.ID
 	duplicateProposal.Revision.TargetPath = "b.md"
@@ -110,7 +121,7 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	crossWorkspaceProposal := proposal
 	crossWorkspaceProposal.ID, crossWorkspaceProposal.Revision.ID = integrationID(18), integrationID(19)
 	crossWorkspaceProposal.IdempotencyKey = "create-cross-workspace-binding"
-	crossWorkspaceProposal.RequestHash = domain.ComputeRequestHash(workspaceID, "c.md", baseHash, "cross content", "source evidence", "low", "revert commit")
+	crossWorkspaceProposal.RequestHash = mustFileRequestHash(t, workspaceID, "c.md", baseHash, "cross content", "source evidence", domain.ProposalRiskLevelLow, "low", "revert commit")
 	crossWorkspaceProposal.TargetPath = "c.md"
 	crossWorkspaceProposal.Revision.ProposalID = crossWorkspaceProposal.ID
 	crossWorkspaceProposal.Revision.TargetPath = "c.md"
@@ -122,7 +133,7 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	invalidStatusProposal := proposal
 	invalidStatusProposal.ID, invalidStatusProposal.Revision.ID = integrationID(23), integrationID(24)
 	invalidStatusProposal.IdempotencyKey = "create-invalid-status-binding"
-	invalidStatusProposal.RequestHash = domain.ComputeRequestHash(workspaceID, "d.md", baseHash, "invalid status content", "source evidence", "low", "revert commit")
+	invalidStatusProposal.RequestHash = mustFileRequestHash(t, workspaceID, "d.md", baseHash, "invalid status content", "source evidence", domain.ProposalRiskLevelLow, "low", "revert commit")
 	invalidStatusProposal.TargetPath = "d.md"
 	invalidStatusProposal.Revision.ProposalID = invalidStatusProposal.ID
 	invalidStatusProposal.Revision.TargetPath = "d.md"
@@ -132,7 +143,7 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSQLState(t, ctx, tx, "23514", `UPDATE change_control.proposal SET status='rejected',workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1`, string(invalidStatusProposal.ID), string(workflowRunID), now.Add(time.Minute))
-	assertSQLState(t, ctx, tx, "55000", `INSERT INTO change_control.proposal(id,workspace_id,status,created_at,updated_at,idempotency_key,request_hash,workflow_run_id) VALUES($1,$2,'ready_for_review',$3,$3,$4,$5,$6)`, string(integrationID(20)), string(workspaceID), now, "insert-bound-proposal", strings.Repeat("0", 64), string(workflowRunID))
+	assertSQLState(t, ctx, tx, "55000", `INSERT INTO change_control.proposal(id,workspace_id,status,risk_level,created_at,updated_at,idempotency_key,request_hash,workflow_run_id) VALUES($1,$2,'ready_for_review','LOW',$3,$3,$4,$5,$6)`, string(integrationID(20)), string(workspaceID), now, "insert-bound-proposal", strings.Repeat("0", 64), string(workflowRunID))
 
 	approvedGitHead := "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 	approval := domain.Approval{ID: integrationID(4), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now.Add(time.Minute)}
@@ -180,8 +191,108 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	assertImmutable(t, ctx, tx, `UPDATE change_control.approval SET decision='rejected' WHERE id=$1`, string(approval.ID))
 }
 
-func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
+func TestRepositoryRejectedApprovalPublishesProposalEventAndExactReplays(t *testing.T) {
 	pool, ctx := newChangeControlMigrationTestPool(t)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	events, err := eventspostgres.NewStore(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRepository(tx, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Second)
+	workspaceID := integrationID(60)
+	proposalID, revisionID, approvalID := integrationID(61), integrationID(62), integrationID(63)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
+		VALUES($1,'Proposal Event Test',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/proposal-event-"+string(workspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+	baseHash := strings.Repeat("0", 64)
+	content := "rejected proposal content"
+	changeHash := domain.ComputeChangeHash("events/rejected.md", baseHash, content)
+	requestHash, err := domain.ComputeRequestHashWithRiskLevel(
+		workspaceID, "events/rejected.md", baseHash, content, "event evidence",
+		domain.ProposalRiskLevelLow, "low", "restore the source",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := domain.Proposal{
+		ID: proposalID, WorkspaceID: workspaceID, RiskLevel: domain.ProposalRiskLevelLow,
+		TargetPath: "events/rejected.md", IdempotencyKey: "proposal-event-rejected",
+		RequestHash: requestHash, Status: domain.StatusReady, Version: 1,
+		CreatedAt: now, UpdatedAt: now,
+		Revision: domain.Revision{
+			ID: revisionID, ProposalID: proposalID, RevisionNo: 1,
+			TargetPath: "events/rejected.md", BaseHash: baseHash, Content: content,
+			EvidenceSummary: "event evidence", Risk: "low", RollbackPlan: "restore the source",
+			ChangeHash: changeHash, CreatedAt: now,
+		},
+	}
+	if _, err := repository.CreateProposal(ctx, proposal); err != nil {
+		t.Fatal(err)
+	}
+	approval := domain.Approval{
+		ID: approvalID, ProposalID: proposalID, RevisionID: revisionID,
+		ChangeHash: changeHash, Decision: domain.DecisionRejected, DecidedAt: now.Add(time.Minute),
+	}
+	if _, err := repository.Approve(ctx, approval); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Approve(ctx, approval); err != nil {
+		t.Fatal(err)
+	}
+
+	var eventCount int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ops.server_event
+		WHERE workspace_id=$1 AND event_type=$2 AND resource_ref=$3`,
+		string(workspaceID), eventcontract.ProposalRejectedEventType, "proposal:"+string(proposalID)).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("proposal rejected event count=%d, want 1", eventCount)
+	}
+	var eventType, resourceRef, sourceRef, status string
+	var resourceVersion int64
+	if err := tx.QueryRow(ctx, `SELECT event_type,resource_ref,resource_version,source_event_ref,payload_summary->>'status'
+		FROM ops.server_event WHERE workspace_id=$1 ORDER BY seq`, string(workspaceID)).Scan(
+		&eventType, &resourceRef, &resourceVersion, &sourceRef, &status,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if eventType != eventcontract.ProposalRejectedEventType || resourceRef != "proposal:"+string(proposalID) ||
+		resourceVersion != 2 || sourceRef != eventcontract.ProposalRejectedEventType+":"+string(approvalID)+":v1" || status != string(domain.StatusRejected) {
+		t.Fatalf("proposal event=%s ref=%s version=%d source=%s status=%s", eventType, resourceRef, resourceVersion, sourceRef, status)
+	}
+}
+
+func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
+	pool, ctx := newChangeControlTestDatabase(t)
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
+	annotated, err := platformmigration.NewLegacyAnnotationFS(projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName("goose_db_version"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.UpTo(ctx, 13); err != nil {
+		t.Fatalf("migrate to 00013: %v", err)
+	}
+	defer func() {
+		if _, upErr := provider.Up(context.Background()); upErr != nil {
+			t.Errorf("restore latest migrations: %v", upErr)
+		}
+	}()
 	ids := foundation.NewUUIDGenerator(nil)
 	nextID := func() foundation.ID {
 		id, idErr := ids.New()
@@ -208,6 +319,7 @@ func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'pending','{}',1,$4,$4)`, string(runID), string(workspaceID), string(definitionID), now); err != nil {
 		t.Fatal(err)
 	}
+	// 该断言精确验证 00013，因此 fixture 保持 00013 时的旧 Proposal schema。
 	if _, err := pool.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,status,created_at,updated_at,idempotency_key,request_hash) VALUES($1,$2,'approved',$3,$3,$4,$5)`, string(proposalID), string(workspaceID), now, "down-guard-"+string(proposalID), strings.Repeat("0", 64)); err != nil {
 		t.Fatal(err)
 	}
@@ -215,36 +327,6 @@ func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
-	annotated, err := platformmigration.NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName("goose_db_version"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if _, upErr := provider.Up(context.Background()); upErr != nil {
-			t.Errorf("restore latest migrations: %v", upErr)
-		}
-	}()
-	for {
-		version, versionErr := provider.GetDBVersion(ctx)
-		if versionErr != nil {
-			t.Fatal(versionErr)
-		}
-		if version == 13 {
-			break
-		}
-		if version < 13 {
-			t.Fatalf("migration version=%d before 00013 guard", version)
-		}
-		if _, err := provider.Down(ctx); err != nil {
-			t.Fatalf("down migration %d before 00013 guard: %v", version, err)
-		}
-	}
 	if _, err := provider.Down(ctx); err == nil {
 		t.Fatal("00013 Down accepted a persisted Proposal to Workflow Run binding")
 	} else {
@@ -252,6 +334,9 @@ func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
 		if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
 			t.Fatalf("guarded Down error=%v", err)
 		}
+	}
+	if version, err := provider.GetDBVersion(ctx); err != nil || version != 13 {
+		t.Fatalf("guarded Down version=%d err=%v, want 13", version, err)
 	}
 }
 
@@ -281,7 +366,7 @@ func TestRepositoryKnowledgeChangeProposalCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	change := knowledgeChangeFixtureForIntegration()
-	requestHash, err := domain.ComputeKnowledgeChangeRequestHash(workspaceID, change, "medium", "restore relation")
+	requestHash, err := domain.ComputeKnowledgeChangeRequestHashWithRiskLevel(workspaceID, change, domain.ProposalRiskLevelHigh, "medium", "restore relation")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +377,7 @@ func TestRepositoryKnowledgeChangeProposalCompatibility(t *testing.T) {
 	proposalID, revisionID, approvalID := integrationID(32), integrationID(33), integrationID(34)
 	proposal := domain.Proposal{
 		ID: proposalID, WorkspaceID: workspaceID, Type: domain.ProposalTypeKnowledgeChange,
-		IdempotencyKey: "knowledge-create", RequestHash: requestHash,
+		RiskLevel: domain.ProposalRiskLevelHigh, IdempotencyKey: "knowledge-create", RequestHash: requestHash,
 		Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
 		Revision: domain.Revision{
 			ID: revisionID, ProposalID: proposalID, RevisionNo: 1,
@@ -331,6 +416,19 @@ func TestRepositoryKnowledgeChangeProposalCompatibility(t *testing.T) {
 
 func newChangeControlMigrationTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Helper()
+	pool, ctx := newChangeControlTestDatabase(t)
+	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
+	if err == nil {
+		err = runner.Up(ctx)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pool, ctx
+}
+
+func newChangeControlTestDatabase(t *testing.T) (*pgxpool.Pool, context.Context) {
+	t.Helper()
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
 	if baseURL == "" {
 		t.Skip("set ZHIXU_TEST_DATABASE_URL for Change Control migration integration tests")
@@ -352,13 +450,6 @@ func newChangeControlMigrationTestPool(t *testing.T) (*pgxpool.Pool, context.Con
 	}
 	parsed.Path = "/" + databaseName
 	pool, err := pgxpool.New(ctx, parsed.String())
-	if err == nil {
-		var runner *platformmigration.Runner
-		runner, err = platformmigration.NewRunner(pool, projectmigrations.FS)
-		if err == nil {
-			err = runner.Up(ctx)
-		}
-	}
 	if err != nil {
 		if pool != nil {
 			pool.Close()
@@ -428,7 +519,7 @@ func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
 		return hex.EncodeToString(digest[:])
 	}
 	changeHash := domain.ComputeChangeHash("a.md", baseHash, "new content")
-	proposal := domain.Proposal{ID: proposalID, WorkspaceID: workspaceID, TargetPath: "a.md", IdempotencyKey: "auth-proposal", RequestHash: domain.ComputeRequestHash(workspaceID, "a.md", baseHash, "new content", "evidence", "low", "rollback"), Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: "a.md", BaseHash: baseHash, Content: "new content", EvidenceSummary: "evidence", Risk: "low", RollbackPlan: "rollback", ChangeHash: changeHash, CreatedAt: now}}
+	proposal := domain.Proposal{ID: proposalID, WorkspaceID: workspaceID, RiskLevel: domain.ProposalRiskLevelLow, TargetPath: "a.md", IdempotencyKey: "auth-proposal", RequestHash: mustFileRequestHash(t, workspaceID, "a.md", baseHash, "new content", "evidence", domain.ProposalRiskLevelLow, "low", "rollback"), Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: "a.md", BaseHash: baseHash, Content: "new content", EvidenceSummary: "evidence", Risk: "low", RollbackPlan: "rollback", ChangeHash: changeHash, CreatedAt: now}}
 	if _, err := repository.CreateProposal(ctx, proposal); err != nil {
 		t.Fatal(err)
 	}
@@ -650,6 +741,15 @@ func hexDigit(n byte) byte {
 
 func ptrTime(value time.Time) *time.Time {
 	return &value
+}
+
+func mustFileRequestHash(t *testing.T, workspaceID foundation.ID, targetPath, baseHash, content, evidence string, riskLevel domain.ProposalRiskLevel, risk, rollback string) string {
+	t.Helper()
+	hash, err := domain.ComputeRequestHashWithRiskLevel(workspaceID, targetPath, baseHash, content, evidence, riskLevel, risk, rollback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash
 }
 
 func knowledgeChangeFixtureForIntegration() domain.KnowledgeChange {

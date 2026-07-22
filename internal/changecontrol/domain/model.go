@@ -34,6 +34,20 @@ const (
 	StatusCancelled     ProposalStatus = "cancelled"
 )
 
+// ProposalRiskLevel 是 Proposal 审批、API、列表筛选和幂等绑定使用的受控风险等级。
+type ProposalRiskLevel string
+
+const (
+	// ProposalRiskLevelCritical 表示可能导致正式知识错误或数据不一致的最高风险。
+	ProposalRiskLevelCritical ProposalRiskLevel = "CRITICAL"
+	// ProposalRiskLevelHigh 表示会影响 RAG、引用或知识判断的高风险。
+	ProposalRiskLevelHigh ProposalRiskLevel = "HIGH"
+	// ProposalRiskLevelMedium 表示影响组织和维护质量的中风险。
+	ProposalRiskLevelMedium ProposalRiskLevel = "MEDIUM"
+	// ProposalRiskLevelLow 表示不影响正确性的低风险优化。
+	ProposalRiskLevelLow ProposalRiskLevel = "LOW"
+)
+
 // Decision 是一次不可变的用户审批决定。
 type Decision string
 
@@ -46,9 +60,11 @@ const (
 type Proposal struct {
 	ID, WorkspaceID foundation.ID
 	Type            ProposalType
-	TargetPath      string
-	IdempotencyKey  string
-	RequestHash     string
+	// RiskLevel 是 Proposal 级持久事实；Revision.Risk 仅保存独立的自由文本说明。
+	RiskLevel      ProposalRiskLevel
+	TargetPath     string
+	IdempotencyKey string
+	RequestHash    string
 	// WorkflowRunID 是 Approved Proposal 原子派发后绑定的唯一 Workflow Run；未派发记录为 nil，绑定后不随后续状态变化清除。
 	WorkflowRunID *foundation.ID
 	Status        ProposalStatus
@@ -94,6 +110,39 @@ type Approval struct {
 // ErrProposalInvalidTransition 表示 Proposal 状态迁移不在领域允许的迁移表中。
 var ErrProposalInvalidTransition = errors.New("proposal status transition is not allowed")
 
+// ErrProposalRiskLevelInvalid 表示风险等级不属于冻结枚举。
+var ErrProposalRiskLevelInvalid = errors.New("proposal risk level is invalid")
+
+// ParseProposalRiskLevel 严格校验 Proposal 使用的风险等级，不执行大小写或空白规范化。
+func ParseProposalRiskLevel(level ProposalRiskLevel) (ProposalRiskLevel, error) {
+	switch level {
+	case ProposalRiskLevelCritical, ProposalRiskLevelHigh, ProposalRiskLevelMedium, ProposalRiskLevelLow:
+		return level, nil
+	default:
+		return "", ErrProposalRiskLevelInvalid
+	}
+}
+
+// ValidateProposalRiskLevelForType 校验 Proposal 类型的等级策略。
+// 当前 knowledge_change 仅承载 Semantic Candidate Relation Proposal，因此固定为 HIGH。
+func ValidateProposalRiskLevelForType(proposalType ProposalType, level ProposalRiskLevel) (ProposalRiskLevel, error) {
+	parsed, err := ParseProposalRiskLevel(level)
+	if err != nil {
+		return "", err
+	}
+	switch NormalizeProposalType(proposalType) {
+	case ProposalTypeFilePatch:
+		return parsed, nil
+	case ProposalTypeKnowledgeChange:
+		if parsed != ProposalRiskLevelHigh {
+			return "", fmt.Errorf("%w: knowledge_change proposals require HIGH", ErrProposalRiskLevelInvalid)
+		}
+		return parsed, nil
+	default:
+		return "", ErrProposalTypeInvalid
+	}
+}
+
 // ValidateProposalTransition 是 Proposal 状态迁移的唯一领域事实源。
 // 数据库触发器和 Application 必须复用同一张迁移表，禁止各层自行放宽状态转移。
 func ValidateProposalTransition(from, to ProposalStatus) error {
@@ -137,7 +186,8 @@ func ComputeChangeHash(targetPath, baseHash, content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ComputeRequestHash 对 Proposal 创建请求计算稳定哈希，用于幂等键防误用。
+// ComputeRequestHash 重现历史 Proposal 创建请求的 v1 哈希。
+// 该函数只用于已持久化历史记录的精确重放；新 Proposal 必须使用包含 RiskLevel 的 v2 哈希。
 func ComputeRequestHash(workspaceID foundation.ID, targetPath, baseHash, content, evidence, risk, rollback string) string {
 	payload := struct {
 		WorkspaceID string `json:"workspace_id"`
@@ -151,6 +201,28 @@ func ComputeRequestHash(workspaceID foundation.ID, targetPath, baseHash, content
 	encoded, _ := json.Marshal(payload)
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])
+}
+
+// ComputeRequestHashWithRiskLevel 将显式风险等级纳入 Proposal 创建请求的幂等绑定。
+func ComputeRequestHashWithRiskLevel(workspaceID foundation.ID, targetPath, baseHash, content, evidence string, riskLevel ProposalRiskLevel, risk, rollback string) (string, error) {
+	normalizedRiskLevel, err := ParseProposalRiskLevel(riskLevel)
+	if err != nil {
+		return "", err
+	}
+	payload := struct {
+		SchemaVersion string            `json:"schema_version"`
+		WorkspaceID   string            `json:"workspace_id"`
+		TargetPath    string            `json:"target_path"`
+		BaseHash      string            `json:"base_hash"`
+		Content       string            `json:"content"`
+		Evidence      string            `json:"evidence"`
+		RiskLevel     ProposalRiskLevel `json:"risk_level"`
+		Risk          string            `json:"risk"`
+		Rollback      string            `json:"rollback"`
+	}{"proposal-create-request/v2", string(workspaceID), targetPath, strings.ToLower(baseHash), strings.ReplaceAll(content, "\r\n", "\n"), evidence, normalizedRiskLevel, risk, rollback}
+	encoded, _ := json.Marshal(payload)
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // ValidateTargetPath 只允许 Workspace 内的相对 POSIX 路径。

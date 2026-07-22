@@ -127,7 +127,7 @@ func main() {
 			graphHandler = configuredGraphHandler
 		}
 		healthEvents, healthEventsErr := eventspostgres.NewStore(database.DB())
-		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB())
+		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB(), healthEvents)
 		var workflowRuntime *workflowpostgres.RuntimeRepository
 		if changeControlRepositoryErr != nil {
 			logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
@@ -213,11 +213,11 @@ func main() {
 			if changeControlRepositoryErr != nil || targetReaderErr != nil || approvalGitInspectorErr != nil || workflowRuntime == nil {
 				logger.Error("change control dependencies are unavailable", "error_code", "CHANGE_CONTROL_DEPENDENCY_UNAVAILABLE")
 			} else {
-				dispatchRepository, dispatchRepositoryErr := approvaldispatchpostgres.NewApprovalDispatchRepository(database.DB(), workflowRuntime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+				dispatchRepository, dispatchRepositoryErr := approvaldispatchpostgres.NewApprovalDispatchRepository(database.DB(), workflowRuntime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthEvents)
 				if dispatchRepositoryErr != nil {
 					logger.Error("approval dispatch repository is unavailable", "error_code", "APPROVAL_DISPATCH_DEPENDENCY_MISSING")
 				} else {
-					knowledgeRelationApplier, knowledgeRelationApplierErr := knowledgepostgres.NewApprovedRelationApplyRepository(database.DB(), foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+					knowledgeRelationApplier, knowledgeRelationApplierErr := knowledgepostgres.NewApprovedRelationApplyRepository(database.DB(), foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthEvents)
 					if knowledgeRelationApplierErr != nil {
 						logger.Error("knowledge relation apply service is unavailable", "error_code", "KNOWLEDGE_RELATION_APPLIER_UNAVAILABLE")
 					}

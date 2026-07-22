@@ -36,3 +36,25 @@ type Repository interface {
 	CreateHumanTask(context.Context, HumanTask, OutboxEvent, time.Time) (HumanTask, error)
 	SubmitHumanTask(context.Context, foundation.ID, int64, json.RawMessage, time.Time, OutboxEvent) (HumanTask, error)
 }
+
+// RunListItem 是 Workflow 列表的持久摘要。
+type RunListItem struct {
+	Run
+	DefinitionKey     string
+	DefinitionVersion int64
+	WaitingForHuman   bool
+}
+
+// RunListQuery 描述 Workflow Run 列表的 Workspace 作用域、状态筛选和稳定分页边界。
+type RunListQuery struct {
+	WorkspaceID foundation.ID
+	Status      RunStatus
+	CursorTime  *time.Time
+	CursorID    foundation.ID
+	Limit       int
+}
+
+// RunListRepository 提供 Workspace 绑定的稳定 Run 分页。
+type RunListRepository interface {
+	ListRuns(context.Context, RunListQuery) ([]RunListItem, bool, error)
+}

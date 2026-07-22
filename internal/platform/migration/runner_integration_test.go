@@ -40,7 +40,7 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 29 || applied != 29 {
+	if maxVersion != 33 || applied != 33 {
 		t.Fatalf("project history max=%d applied=%d", maxVersion, applied)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE tablename LIKE 'river_%' AND schemaname <> 'workflow'`).Scan(&wrongSchema); err != nil {
@@ -493,8 +493,12 @@ func TestReindexConsumerMigrationRejectsDirectProposalCompletion(t *testing.T) {
 	if _, err := tx.Exec(ctx, `
 INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at)
 VALUES('83000000-0000-4000-8000-000000000001','completion','/tmp/completion','/tmp/completion',now(),'active',now(),now());
-INSERT INTO change_control.proposal(id,workspace_id,status,idempotency_key,request_hash,version,created_at,updated_at)
-VALUES('84000000-0000-4000-8000-000000000001','83000000-0000-4000-8000-000000000001','completed','direct-completed',repeat('a',64),1,now(),now());`); err != nil {
+INSERT INTO change_control.proposal(
+    id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at
+) VALUES(
+    '84000000-0000-4000-8000-000000000001','83000000-0000-4000-8000-000000000001',
+    'file_patch','HIGH','completed','direct-completed',repeat('a',64),1,now(),now()
+);`); err != nil {
 		t.Fatal(err)
 	}
 	assertPostgresCode(t, tx.Commit(ctx), "55000")
@@ -641,7 +645,7 @@ func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 29 || applied != 29 {
+	if maxVersion != 33 || applied != 33 {
 		t.Fatalf("adopted history max=%d applied=%d", maxVersion, applied)
 	}
 }
@@ -662,6 +666,34 @@ func TestRunnerSerializesConcurrentUp(t *testing.T) {
 		if err := <-errorsCh; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestRunnerAdvisoryLockWaitRespectsContext(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+	blockingConnection, err := pgx.ConnectConfig(ctx, pool.Config().ConnConfig.Copy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockingConnection.Close(context.Background())
+	if _, err := blockingConnection.Exec(ctx, "SELECT pg_advisory_lock(hashtextextended($1, 0))", migrationLockName); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = blockingConnection.Exec(context.Background(), "SELECT pg_advisory_unlock(hashtextextended($1, 0))", migrationLockName)
+	}()
+
+	runner, err := NewRunner(pool, projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancel()
+	err = runner.Up(deadline)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("advisory lock wait error=%v", err)
 	}
 }
 

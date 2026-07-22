@@ -122,7 +122,7 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	created, err := changeService.CreateProposal(ctx, application.CreateCommand{
 		WorkspaceID: workspaceID, TargetPath: targetPath, IdempotencyKey: "approval-river-smoke",
 		BaseHash: domain.ComputeWritebackResultHash(baseContent), Content: approvedContent,
-		EvidenceSummary: "real River smoke", Risk: "low", RollbackPlan: "revert commit",
+		EvidenceSummary: "real River smoke", RiskLevel: domain.ProposalRiskLevelLow, Risk: "low", RollbackPlan: "revert commit",
 	})
 	if err != nil {
 		t.Fatal(err)

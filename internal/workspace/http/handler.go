@@ -3,10 +3,15 @@ package workspacehttp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
@@ -23,6 +28,10 @@ type Service interface {
 	ScanWorkspace(context.Context, foundation.ID) ([]domain.ScannedFile, error)
 }
 
+type listService interface {
+	ListSourceVersions(context.Context, domain.SourceVersionListQuery) ([]domain.SourceVersionListItem, bool, error)
+}
+
 // Handler 负责 Workspace 请求解析、响应编码和错误映射。
 type Handler struct{ service Service }
 
@@ -34,6 +43,181 @@ func (h *Handler) Routes(router chi.Router) {
 	router.Post("/workspaces", h.create)
 	router.Get("/workspaces/{workspaceID}", h.detail)
 	router.Post("/workspaces/{workspaceID}/scan", h.scan)
+	router.Get("/workspaces/{workspaceID}/source-versions", h.listSourceVersions)
+}
+
+type sourceVersionPageResponse struct {
+	Items      []sourceVersionListResponse `json:"items"`
+	NextCursor string                      `json:"next_cursor,omitempty"`
+}
+
+const (
+	sourceVersionCursorVersion = 1
+	sourceVersionCursorKind    = "source_version_list"
+)
+
+type sourceVersionListCursor struct {
+	Version     int    `json:"version"`
+	Kind        string `json:"kind"`
+	WorkspaceID string `json:"workspace_id"`
+	At          string `json:"at"`
+	ID          string `json:"id"`
+	Filter      string `json:"filter"`
+}
+
+type sourceVersionListResponse struct {
+	ID              string `json:"id"`
+	SourceID        string `json:"source_id"`
+	WorkspaceID     string `json:"workspace_id"`
+	Path            string `json:"path"`
+	MimeType        string `json:"mime_type"`
+	ByteSize        int64  `json:"byte_size"`
+	CapturedAt      string `json:"captured_at"`
+	ContentHash     string `json:"content_hash"`
+	SecurityStatus  string `json:"security_status"`
+	IngestionStatus string `json:"ingestion_status,omitempty"`
+	WorkflowStatus  string `json:"workflow_status,omitempty"`
+	IndexStatus     string `json:"index_status,omitempty"`
+}
+
+func (h *Handler) listSourceVersions(w http.ResponseWriter, r *http.Request) {
+	service, ok := h.service.(listService)
+	if !ok {
+		writeProblem(w, http.StatusServiceUnavailable, "SOURCE_VERSION_LIST_UNAVAILABLE", "Source Version 列表暂不可用", true, nil)
+		return
+	}
+	workspaceID, err := foundation.ParseID(chi.URLParam(r, "workspaceID"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	allowed := map[string]struct{}{"cursor": {}, "limit": {}, "security_status": {}, "ingestion_status": {}, "workflow_status": {}, "index_status": {}, "mime_type": {}}
+	for key, values := range r.URL.Query() {
+		if _, ok := allowed[key]; !ok {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_LIST_FILTER_INVALID", false, fmt.Errorf("unknown query parameter %q", key)))
+			return
+		}
+		if len(values) != 1 {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_LIST_FILTER_INVALID", false, fmt.Errorf("query parameter %q must appear once", key)))
+			return
+		}
+	}
+	filters := struct {
+		SecurityStatus  string `json:"security_status,omitempty"`
+		IngestionStatus string `json:"ingestion_status,omitempty"`
+		WorkflowStatus  string `json:"workflow_status,omitempty"`
+		IndexStatus     string `json:"index_status,omitempty"`
+		MimeType        string `json:"mime_type,omitempty"`
+	}{
+		SecurityStatus: strings.TrimSpace(r.URL.Query().Get("security_status")), IngestionStatus: strings.TrimSpace(r.URL.Query().Get("ingestion_status")),
+		WorkflowStatus: strings.TrimSpace(r.URL.Query().Get("workflow_status")), IndexStatus: strings.TrimSpace(r.URL.Query().Get("index_status")), MimeType: strings.TrimSpace(r.URL.Query().Get("mime_type")),
+	}
+	for _, value := range []string{filters.SecurityStatus, filters.IngestionStatus, filters.WorkflowStatus, filters.IndexStatus, filters.MimeType} {
+		if len(value) > 128 || strings.ContainsAny(value, "\r\n\t") {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_LIST_FILTER_INVALID", false, errors.New("filter value is invalid")))
+			return
+		}
+	}
+	if !validSourceSecurityStatus(filters.SecurityStatus) || !validSourceIngestionStatus(filters.IngestionStatus) || !validSourceWorkflowStatus(filters.WorkflowStatus) || !validSourceIndexStatus(filters.IndexStatus) {
+		writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_LIST_FILTER_INVALID", false, errors.New("source version list status filter is invalid")))
+		return
+	}
+	filterJSON, _ := json.Marshal(filters)
+	limit := 30
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, scanErr := strconv.Atoi(raw)
+		if scanErr != nil {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_LIST_LIMIT_INVALID", false, scanErr))
+			return
+		}
+		limit = parsed
+	}
+	if limit < 1 || limit > 100 {
+		writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_LIST_LIMIT_INVALID", false, errors.New("limit must be between 1 and 100")))
+		return
+	}
+	var cursorTime *time.Time
+	var cursorID foundation.ID
+	if raw := strings.TrimSpace(r.URL.Query().Get("cursor")); raw != "" {
+		if len(raw) > 2048 {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_CURSOR_INVALID", false, errors.New("cursor is too long")))
+			return
+		}
+		decoded, decodeErr := base64.RawURLEncoding.DecodeString(raw)
+		if decodeErr != nil {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_CURSOR_INVALID", false, decodeErr))
+			return
+		}
+		var cursor sourceVersionListCursor
+		decoder := json.NewDecoder(strings.NewReader(string(decoded)))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&cursor) != nil || decoder.Decode(&struct{}{}) != io.EOF || cursor.Version != sourceVersionCursorVersion || cursor.Kind != sourceVersionCursorKind || cursor.WorkspaceID != string(workspaceID) || cursor.Filter != string(filterJSON) {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_CURSOR_INVALID", false, errors.New("cursor payload is invalid")))
+			return
+		}
+		parsed, parseErr := time.Parse(time.RFC3339Nano, cursor.At)
+		if parseErr != nil {
+			writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_VERSION_CURSOR_INVALID", false, parseErr))
+			return
+		}
+		id, idErr := foundation.ParseID(cursor.ID)
+		if idErr != nil {
+			writeError(w, idErr)
+			return
+		}
+		cursorTime, cursorID = &parsed, id
+	}
+	items, hasMore, err := service.ListSourceVersions(r.Context(), domain.SourceVersionListQuery{WorkspaceID: workspaceID, SecurityStatus: filters.SecurityStatus, IngestionStatus: filters.IngestionStatus, WorkflowStatus: filters.WorkflowStatus, IndexStatus: filters.IndexStatus, MimeType: filters.MimeType, CursorTime: cursorTime, CursorID: cursorID, Limit: limit})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response := sourceVersionPageResponse{Items: make([]sourceVersionListResponse, len(items))}
+	for index, item := range items {
+		response.Items[index] = sourceVersionListResponse{ID: string(item.ID), SourceID: string(item.SourceID), WorkspaceID: string(item.WorkspaceID), Path: item.Path, MimeType: item.MimeType, ByteSize: item.ByteSize, CapturedAt: item.CapturedAt.UTC().Format(time.RFC3339Nano), ContentHash: item.ContentHash, SecurityStatus: item.SecurityStatus, IngestionStatus: item.IngestionStatus, WorkflowStatus: item.WorkflowStatus, IndexStatus: item.IndexStatus}
+	}
+	if hasMore && len(items) > 0 {
+		tail := items[len(items)-1]
+		payload, _ := json.Marshal(sourceVersionListCursor{Version: sourceVersionCursorVersion, Kind: sourceVersionCursorKind, WorkspaceID: string(workspaceID), At: tail.CapturedAt.UTC().Format(time.RFC3339Nano), ID: string(tail.ID), Filter: string(filterJSON)})
+		response.NextCursor = base64.RawURLEncoding.EncodeToString(payload)
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func validSourceSecurityStatus(status string) bool {
+	switch status {
+	case "", "pending", "passed", "quarantined":
+		return true
+	default:
+		return false
+	}
+}
+
+func validSourceIngestionStatus(status string) bool {
+	switch status {
+	case "", "validating", "parsing", "parsed", "chunking", "chunked", "parse_failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func validSourceWorkflowStatus(status string) bool {
+	switch status {
+	case "", "pending", "running", "waiting_for_human", "retry_wait", "paused", "succeeded", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func validSourceIndexStatus(status string) bool {
+	switch status {
+	case "", "included", "excluded":
+		return true
+	default:
+		return false
+	}
 }
 
 type createRequest struct {

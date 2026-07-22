@@ -20,7 +20,7 @@ import (
 
 const runtimeEventSchemaVersion = 1
 
-const runtimeRunColumns = runColumns + `,pause_requested_at,cancel_requested_at`
+const runtimeRunColumns = runColumns
 
 const runtimeNodeColumns = nodeColumns + `,retry_no,next_attempt_at,failure_class,error_kind,error_code,error_summary`
 
@@ -358,6 +358,21 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 		if err := json.Unmarshal(resultJSON, &persisted); err != nil {
 			return application.ControlPersistenceResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_CONTROL_RESULT_INVALID", false, err)
 		}
+		// 旧版幂等快照可能没有 pending 字段；只在字段缺失时用当前锁定的 Run 补齐，保留新版 exact replay。
+		var resultFields map[string]json.RawMessage
+		if err := json.Unmarshal(resultJSON, &resultFields); err != nil {
+			return application.ControlPersistenceResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_CONTROL_RESULT_INVALID", false, err)
+		}
+		_, pauseCamel := resultFields["PauseRequested"]
+		_, pauseSnake := resultFields["pause_requested"]
+		if !pauseCamel && !pauseSnake {
+			persisted.PauseRequested = run.PauseRequestedAt != nil
+		}
+		_, cancelCamel := resultFields["CancelRequested"]
+		_, cancelSnake := resultFields["cancel_requested"]
+		if !cancelCamel && !cancelSnake {
+			persisted.CancelRequested = run.CancelRequestedAt != nil
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_COMMIT_FAILED")
 		}
@@ -467,10 +482,11 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 		return application.ControlPersistenceResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_CONTROL_INVALID", false, errors.New("unknown workflow control action"))
 	}
 	var currentVersion int64
-	if err := tx.QueryRow(ctx, `SELECT version FROM workflow.run WHERE id=$1`, string(run.ID)).Scan(&currentVersion); err != nil {
+	var pauseRequestedAt, cancelRequestedAt *time.Time
+	if err := tx.QueryRow(ctx, `SELECT version,pause_requested_at,cancel_requested_at FROM workflow.run WHERE id=$1`, string(run.ID)).Scan(&currentVersion, &pauseRequestedAt, &cancelRequestedAt); err != nil {
 		return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_QUERY_FAILED")
 	}
-	result := application.ControlPersistenceResult{WorkflowRunID: run.ID, Status: status, Version: currentVersion}
+	result := application.ControlPersistenceResult{WorkflowRunID: run.ID, Status: status, Version: currentVersion, PauseRequested: pauseRequestedAt != nil, CancelRequested: cancelRequestedAt != nil}
 	resultJSON, err = json.Marshal(result)
 	if err != nil {
 		return application.ControlPersistenceResult{}, foundation.NewError(foundation.ErrorNonRetryableFailure, "WORKFLOW_CONTROL_RESULT_ENCODING_FAILED", false, err)

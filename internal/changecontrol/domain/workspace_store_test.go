@@ -69,7 +69,7 @@ func TestValidateWorkspaceTarget(t *testing.T) {
 			t.Fatalf("valid target %q rejected: %v", targetPath, err)
 		}
 	}
-	for _, targetPath := range []string{"", "/tmp/a.md", "../a.md", "notes\\a.md", "notes/./a.md", "a.txt", ".knowledge/a.md", ".knowledge/writeback/a.md"} {
+	for _, targetPath := range []string{"", "/tmp/a.md", "../a.md", "notes\\a.md", "notes/./a.md", "a.txt", ".git/README.md", ".knowledge/a.md", ".knowledge/writeback/a.md"} {
 		if !errors.Is(ValidateWorkspaceTarget("workspace", targetPath), ErrWritebackInvalidInput) {
 			t.Fatalf("invalid target %q accepted", targetPath)
 		}

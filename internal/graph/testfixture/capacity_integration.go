@@ -267,9 +267,9 @@ func insertCapacityProvenance(ctx context.Context, tx pgx.Tx, ids capacityIDs, s
 		},
 		{
 			query: `INSERT INTO core.source_version(
-				id,source_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
-			) VALUES($1,$2,$3,$4,$5,'text/plain',$6,'pending',$7)`,
-			args: []any{string(ids.sourceVersionID), string(ids.sourceID), string(ids.artifactID), contentHash, len(content), "graph-capacity-fixture.txt", now},
+				id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
+			) VALUES($1,$2,$3,$4,$5,$6,'text/plain',$7,'pending',$8)`,
+			args: []any{string(ids.sourceVersionID), string(ids.sourceID), string(ids.workspaceID), string(ids.artifactID), contentHash, len(content), "graph-capacity-fixture.txt", now},
 		},
 		{
 			query: `INSERT INTO ingestion.parse_projection(
