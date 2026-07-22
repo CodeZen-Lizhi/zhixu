@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 27
-- **Last Active**: 2026-07-21
+- **Total Sessions**: 28
+- **Last Active**: 2026-07-22
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1287 | Active |
+| `journal-1.md` | ~1320 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 28 | 2026-07-22 | M7-03 Smart Collection 与健康扫描交付 | `9ac2a9d` | `dev` |
 | 27 | 2026-07-21 | 完成语义关联候选复验与归档 | `13bf907`, `f452525` | `dev` |
 | 26 | 2026-07-21 | 交付 M7-02 Semantic Link Candidates | `fccd262`, `6075ea6`, `1a9a37d`, `0eefb99` | `dev` |
 | 25 | 2026-07-21 | 完成 Graph M7-01 收口 | `7a83de3` | `dev` |

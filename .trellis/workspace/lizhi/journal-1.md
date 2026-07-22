@@ -1285,3 +1285,36 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 28: M7-03 Smart Collection 与健康扫描交付
+
+**Date**: 2026-07-22
+**Task**: M7-03 Smart Collection 与健康扫描交付
+**Branch**: `dev`
+
+### Summary
+
+完成版本化 Smart Collection Query AST、统一动态结果三视图、持久 Health Scan/Issue 生命周期、SMART_COLLECTION Candidate scope、Schedule/affected-change outbox、严格 Collection/Health API 与 Web 页面。主 Agent 执行 go-review、code-review-and-quality、sql-code-review；独立 backend/frontend 复验关闭 Health hydration cursor P2。暂存边界保持 M7-only，工作提交 9ac2a9d、归档提交 b0078bb，未 push；并行 M9 改动继续留在工作树。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9ac2a9d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

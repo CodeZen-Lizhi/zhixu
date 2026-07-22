@@ -170,5 +170,5 @@ OpenAPI、生产 composition 与 Web 页面。未落地的 Document/Directory/Ta
 - Review：主 Agent 已执行 `go-review`、`code-review-and-quality`、`sql-code-review`；backend/SQL reviewer
   两轮复验与 frontend/cross-layer reviewer 最终复验均未发现未关闭 P0-P2。主审发现的跨 Workspace 反向 move
   锁顺序风险已通过 UUID 固定排序和真实 PostgreSQL 并发回归关闭。
-- AC-14 已由主 Agent `go-review`、`code-review-and-quality`、`sql-code-review` 与独立 backend/frontend 复验关闭；工作提交 `9ac2a9d` 已创建，Trellis 归档和 journal 正在本轮 Finish bookkeeping 完成；
+- AC-14 已由主 Agent `go-review`、`code-review-and-quality`、`sql-code-review` 与独立 backend/frontend 复验关闭；工作提交 `9ac2a9d`、Trellis 归档提交 `b0078bb` 已创建，journal 在本轮 Finish 中记录完成；
   不把 M7-04、Tag/Review/Directory owner、认证、Artifact/Review 批量动作或 M10 最终容量认证宣称为本任务完成。
