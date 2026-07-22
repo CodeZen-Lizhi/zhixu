@@ -228,12 +228,14 @@ describe("Semantic Link decoders", () => {
     expect(() => decodeSemanticLinkCandidatePage({ workspace_id: workspaceId, items: [candidate] }, request)).toThrow(SemanticLinkApiError);
   });
 
-  it("兼容 legacy file_patch Proposal 并解码 typed knowledge_change Proposal", () => {
-    const legacy = decodeSemanticLinkProposal({
+  it("严格解码 typed file_patch 与 knowledge_change Proposal", () => {
+    const filePatch = decodeSemanticLinkProposal({
+      proposal_type: "file_patch",
       id: proposalId,
       workspace_id: workspaceId,
       target_path: "notes/graph.md",
       status: "ready_for_review",
+      risk_level: "LOW",
       revision: {
         id: revisionId,
         revision_no: 1,
@@ -249,8 +251,9 @@ describe("Semantic Link decoders", () => {
       created_at: at,
       updated_at: later,
     }, { proposalId });
-    expect(legacy).toMatchObject({
+    expect(filePatch).toMatchObject({
       proposalType: "file_patch",
+      riskLevel: "LOW",
       targetPath: "notes/graph.md",
       revision: { baseHash, changeHash },
     });
@@ -260,6 +263,7 @@ describe("Semantic Link decoders", () => {
       id: proposalId,
       workspace_id: workspaceId,
       status: "approved",
+      risk_level: "HIGH",
       revision: {
         id: revisionId,
         revision_no: 2,
@@ -287,10 +291,6 @@ describe("Semantic Link decoders", () => {
         revision_id: revisionId,
         change_hash: changeHash,
         decision: "approved",
-        approved_git_head: gitHead,
-        workflow_run_id: workflowRunId,
-        workflow_status_url: `/api/v1/workflows/${workflowRunId}`,
-        dispatch_status: "queued",
         decided_at: later,
       },
       created_at: at,
@@ -298,15 +298,98 @@ describe("Semantic Link decoders", () => {
     }, { proposalId });
     expect(typed).toMatchObject({
       proposalType: "knowledge_change",
+      riskLevel: "HIGH",
       revision: {
         schemaVersion: "knowledge-relation-change/v1",
         changeSet: { relationType: "COMPLEMENTS" },
       },
-      approval: {
-        workflowRunId,
-        dispatchStatus: "queued",
-      },
+      approval: { workflowRunId: null, dispatchStatus: null },
     });
+  });
+
+  it.each([
+    ["file_patch", {
+      proposal_type: "file_patch",
+      id: proposalId,
+      workspace_id: workspaceId,
+      target_path: "notes/graph.md",
+      status: "ready_for_review",
+      risk_level: "LOW",
+      revision: {
+        id: revisionId,
+        revision_no: 1,
+        base_hash: baseHash,
+        content: "patched",
+        evidence_summary: "reason",
+        risk: "low",
+        rollback_plan: "git revert",
+        change_hash: changeHash,
+        created_at: at,
+      },
+      created_at: at,
+      updated_at: later,
+    }],
+    ["knowledge_change", {
+      proposal_type: "knowledge_change",
+      id: proposalId,
+      workspace_id: workspaceId,
+      status: "ready_for_review",
+      risk_level: "HIGH",
+      revision: {
+        id: revisionId,
+        revision_no: 1,
+        schema_version: "knowledge-relation-change/v1",
+        target_refs: [{ type: "RELATION_CANDIDATE", id: targetCandidateId, fingerprint }],
+        base_versions: [
+          { node_type: "CLAIM", node_id: claimId, version: 5 },
+          { node_type: "CLAIM", node_id: otherClaimId, version: 2 },
+        ],
+        change_set: {
+          operation: "CREATE_RELATION",
+          source: { type: "CLAIM", id: claimId, version: 5 },
+          target: { type: "CLAIM", id: otherClaimId, version: 2 },
+          relation_type: "COMPLEMENTS",
+        },
+        evidence_refs: [{ candidate_evidence_id: candidateEvidenceId, semantic_hash: semanticHash }],
+        risk: "low",
+        rollback_plan: "create compensating proposal",
+        change_hash: changeHash,
+        created_at: at,
+      },
+      created_at: at,
+      updated_at: later,
+    }],
+  ])("拒绝缺失 approval 的 %s Proposal detail", (_proposalType, payload) => {
+    expect(() => decodeSemanticLinkProposal(payload, { proposalId })).toThrow(SemanticLinkApiError);
+  });
+
+  it.each([
+    ["缺失 proposal_type", { proposal_type: undefined, risk_level: "LOW" }],
+    ["缺失 risk_level", { proposal_type: "file_patch", risk_level: undefined }],
+    ["未知 risk_level", { proposal_type: "file_patch", risk_level: "SEVERE" }],
+    ["knowledge_change 非 HIGH", { proposal_type: "knowledge_change", risk_level: "LOW" }],
+  ])("拒绝%s", (_name, overrides) => {
+    expect(() => decodeSemanticLinkProposal({
+      id: proposalId,
+      workspace_id: workspaceId,
+      target_path: "notes/graph.md",
+      status: "ready_for_review",
+      revision: {
+        id: revisionId,
+        revision_no: 1,
+        base_hash: baseHash,
+        content: "patched",
+        evidence_summary: "reason",
+        risk: "low",
+        rollback_plan: "git revert",
+        change_hash: changeHash,
+        created_at: at,
+      },
+      approval: null,
+      created_at: at,
+      updated_at: later,
+      ...overrides,
+    }, { proposalId })).toThrow(SemanticLinkApiError);
   });
 });
 
@@ -610,7 +693,7 @@ describe("Semantic Link clients", () => {
     expect(() => decodeSemanticLinkScan({ ...failedPayload, last_error: null }, { scanId, workspaceId })).toThrow(SemanticLinkApiError);
   });
 
-  it("批准 Proposal 复用现有审批契约并映射服务端 Problem", async () => {
+  it("批准 Knowledge Proposal 校验响应绑定并映射服务端 Problem", async () => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({
         id: approvalId,
@@ -618,10 +701,6 @@ describe("Semantic Link clients", () => {
         revision_id: revisionId,
         change_hash: changeHash,
         decision: "approved",
-        approved_git_head: gitHead,
-        workflow_run_id: workflowRunId,
-        workflow_status_url: `/api/v1/workflows/${workflowRunId}`,
-        dispatch_status: "replayed",
         decided_at: later,
       }, 200))
       .mockResolvedValueOnce(jsonResponse({
@@ -638,7 +717,7 @@ describe("Semantic Link clients", () => {
       changeHash,
       decision: "approved",
     });
-    expect(approval).toMatchObject({ workflowRunId, dispatchStatus: "replayed" });
+    expect(approval).toMatchObject({ proposalId, revisionId, changeHash, workflowRunId: null, dispatchStatus: null });
     const [, init] = fetchMock.mock.calls[0] ?? [];
     if (typeof init?.body !== "string") throw new Error("missing body");
     expect(JSON.parse(init.body)).toEqual({
@@ -658,5 +737,27 @@ describe("Semantic Link clients", () => {
       status: 409,
       details: { resolution_actions: ["create_new_proposal_revision"] },
     });
+  });
+
+  it.each([
+    ["错误 Proposal 绑定", { proposal_id: targetCandidateId }],
+    ["非法 Git 写回字段", { approved_git_head: gitHead }],
+  ])("拒绝 Knowledge Approval 的%s", async (_name, overrides) => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      id: approvalId,
+      proposal_id: proposalId,
+      revision_id: revisionId,
+      change_hash: changeHash,
+      decision: "approved",
+      decided_at: later,
+      ...overrides,
+    }, 200)));
+
+    await expect(approveSemanticLinkProposal({
+      proposalId,
+      revisionId,
+      changeHash,
+      decision: "approved",
+    })).rejects.toMatchObject({ errorCode: "INVALID_RESPONSE" });
   });
 });

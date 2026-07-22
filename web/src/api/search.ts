@@ -527,5 +527,8 @@ export const search = async (input: SearchInput, signal?: AbortSignal): Promise<
     throw new SearchApiError("INVALID_RESPONSE", "Search API 返回了无效 JSON。", false, response.status, undefined, { cause: error });
   }
   if (!response.ok) throw decodeProblem(payload, response.status);
-  return decodeSearchResponse(payload);
+  const result = decodeSearchResponse(payload);
+  if (result.workspaceId !== input.workspaceId) throw invalidResponse("workspace_id");
+  if (result.requestedMode !== (input.retrievalMode ?? "hybrid")) throw invalidResponse("requested_mode");
+  return result;
 };

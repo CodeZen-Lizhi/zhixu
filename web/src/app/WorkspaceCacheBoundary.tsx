@@ -5,6 +5,7 @@ import { clearCollectionWorkspaceQueries } from "../features/collections/queries
 import { clearGraphWorkspaceQueries } from "../features/graph/queries";
 import { clearSemanticLinkWorkspaceQueries } from "../features/graph/semantic-link-queries";
 import { clearHealthWorkspaceQueries } from "../features/health/queries";
+import { clearSearchWorkspaceQueries } from "../features/search/query-keys";
 import { useActiveWorkspaceId } from "./active-workspace";
 
 export const WorkspaceCacheBoundary = ({ children }: PropsWithChildren) => {
@@ -19,6 +20,7 @@ export const WorkspaceCacheBoundary = ({ children }: PropsWithChildren) => {
       clearSemanticLinkWorkspaceQueries(queryClient, previous);
       clearCollectionWorkspaceQueries(queryClient, previous);
       clearHealthWorkspaceQueries(queryClient, previous);
+      clearSearchWorkspaceQueries(queryClient, previous);
     }
     previousWorkspaceId.current = workspaceId;
   }, [queryClient, workspaceId]);

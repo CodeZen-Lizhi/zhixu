@@ -213,6 +213,21 @@ describe("search client", () => {
     });
   });
 
+  it.each([
+    ["Workspace", { ...keywordPayload, workspace_id: "92000000-0000-4000-8000-000000000099" }],
+    ["requested mode", { ...keywordPayload, requested_mode: "hybrid" }],
+  ])("拒绝与请求不绑定的%s响应", async (_name, payload) => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(search({ workspaceId, query: "q", retrievalMode: "keyword" })).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+      retryable: false,
+    });
+  });
+
   it("将服务端 Problem 映射为稳定 SearchApiError", async () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       error_code: "RETRIEVAL_SEMANTIC_UNAVAILABLE",

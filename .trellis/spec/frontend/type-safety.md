@@ -232,3 +232,68 @@ Correct: 重试 mutation.variables；scan ID 只恢复 Candidate server state，
 Wrong: Topic scan 产出 Claim pair 后把 node scope 校验全部关闭，或在浏览器复制 BELONGS_TO 查询规则。
 Correct: Claim scope 精确校验 `(type,id)`；Topic scope 只允许直接 Topic/Claim-pair 形态，membership 由后端保证。
 ```
+
+## Scenario: M9 Business API And Proposal Review Boundary
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/business.ts`、Inbox/Proposal/Workflow 详情、current-content、审批或 Workflow 控制时应用。
+- Network JSON、路由 ID 和 Active Workspace 在进入 Feature 前必须形成绑定后的 Domain UI Model。
+
+### 2. Signatures
+
+```ts
+getProposal(workspaceId, proposalId, signal?)
+getProposalCurrentContent(workspaceId, proposalId, signal?)
+getWorkflow(workspaceId, workflowId, signal?)
+decideProposal(proposalId, { revisionId, changeHash, decision, proposalType })
+controlWorkflow(workflowId, action, expectedVersion)
+```
+
+- `ProposalCurrentContent` 响应必须包含 `proposal_id + workspace_id + target_path + content + current_hash + base_hash + base_hash_match`。
+- Proposal 是 `file_patch | knowledge_change` 判别联合；组件只能消费 camelCase 联合分支，不能读取 snake_case 或自行猜类型。
+
+### 3. Contracts
+
+- UUID、64 位小写 SHA-256、RFC3339、正安全整数、Page Cursor 长度、状态枚举和数组上下限全部运行时校验。
+- `knowledge_change` 固定 `schema_version=knowledge-relation-change/v1`、`operation=CREATE_RELATION`、Target Ref 类型、Node/Relation 枚举和 Evidence/版本数量。
+- 详情响应的 `workspace_id` 和资源 ID 必须与 Active Workspace/路由 ID 精确一致；Query Key 包含 Workspace 不能替代响应绑定。
+- 首次批准直接调用 Approval 命令。现有 `apply-preflight` 是 approved Proposal 的写回前检查，不是 pre-decision endpoint；不得在 `/approvals` 前调用。
+- File Patch 批准仍由服务端 Approval 命令重新校验 Revision、Change Hash、当前文件 Hash 与 Git；UI 的 Diff/current-content 只提供审阅和提前禁用，不是安全授权。
+- Proposal 详情内的 Approval snapshot 必须绑定当前 `proposal_id + revision_id + change_hash`；历史 Revision 的决定不得进入当前审阅模型。
+- Proposal detail 的 `approval` 是必需 nullable 字段：必须显式存在且只能是 `null` 或合法 Approval object；字段缺失必须 fail closed。Proposal summary 的 `approval` 可省略，但一旦出现就不得为 `null`。
+- 新产生的 `file_patch` approved 响应必须完整包含 Git 与 Safe Writeback Workflow 绑定；历史持久快照允许 `workflow_run_id=NULL`。有 Git 基线但无 Workflow 的快照映射为可安全重派发状态；Git 基线也缺失的历史快照只能只读并进入人工恢复。任一半截 Workflow ID/URL、已有 Workflow 却缺 Git、`knowledge_change` approved 或 rejected 携带写回字段时仍必须拒绝整个响应。`proposalType` 只用于在严格网络边界选择对应响应契约，不进入请求 JSON。
+- fetch 或响应体读取阶段的 `AbortError` 必须保持原始 identity，供 TanStack Query 正确识别取消；不得包装成可重试 `NETWORK_ERROR` 或无效 JSON。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| 响应 UUID/hash/time/version/enum/const 非法 | `BusinessApiError(INVALID_RESPONSE)`，不渲染部分事实 |
+| Proposal/Workflow/current-content Workspace 或资源 ID 不匹配 | fail closed，详情与写按钮不可用 |
+| Knowledge Change 数组为空/超限、Base Version 不等于 2 | 拒绝整个 Proposal |
+| ready Proposal 首次批准 | 调用 `/approvals`；不得先调用 post-approval preflight |
+| Approval/Workflow 409 | 保留错误并重新查询，不显示 optimistic success |
+| File Patch current hash 漂移 | 禁用批准；服务端命令仍以 409/needs_revision 兜底 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：Active Workspace B 打开 A 的旧详情 URL 时 decoder 拒绝；合法 file patch/knowledge change 使用各自 UI，首次批准能到达服务端 Approval。
+- Base：正文读取不可用时仍可驳回，但批准保持禁用；未交付编辑后批准/暂缓/三方合并只显示能力说明。
+- Bad：只因 Query Key 含 Workspace 就信任全局详情；组件 `as Proposal`；把 Apply Preflight 放在首次 Approval 前；非法 knowledge payload 仍进入 Relation Diff。
+
+### 6. Tests Required
+
+- API：Workspace/ID 绑定、UUID/hash/RFC3339/整数、状态、cursor、未知字段、Knowledge const/数组边界、Problem/network/Abort。
+- Component：首次 file patch 与 knowledge change Approval、不调用 post-approval preflight、Hash 漂移、409 回查、高风险确认、驳回可用和焦点恢复。
+- Canonical：M9 ESLint、TypeScript、Vitest、Production Build；全量门禁被其他并行任务阻断时必须列出具体文件和错误，不得把定向通过写成全量通过。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: getProposal(id) 不校验 workspace_id；点击批准先 POST apply-preflight。
+Correct: getProposal(expectedWorkspace,id) fail-closed；首次批准直接调用服务端 Approval 原子安全门。
+
+Wrong: 只检查 JSON primitive，接受 schema_version="1"、operation="create"、fingerprint="fp"。
+Correct: 按 OpenAPI 校验 knowledge-relation-change/v1、CREATE_RELATION、UUID/hash/版本与数组界限。
+```

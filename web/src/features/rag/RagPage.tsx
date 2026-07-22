@@ -5,7 +5,7 @@ import { useActiveWorkspaceId } from "../../app/active-workspace";
 import type { Answer, AnswerCitation, FeedbackType, Turn } from "../../api/conversation";
 import { ConversationApiError } from "../../api/conversation";
 import { createCommandId, useCreateConversationCommand, useSubmitFeedbackCommand, useSubmitQuestionCommand } from "./commands";
-import { useRagEventRecovery } from "./event-recovery";
+import { useWorkspaceEventState } from "../../events/event-store";
 import { useAnswer, useConversation, useConversationList, useConversationTurns, useLatestTurn } from "./queries";
 
 const stageLabels: Record<string, string> = {
@@ -157,7 +157,7 @@ export const RagPage = () => {
   const conversationQuery = useConversation(workspaceId, conversationId);
   const turnsQuery = useConversationTurns(workspaceId, conversationId);
   const latestTurnQuery = useLatestTurn(workspaceId, conversationId);
-  const connectionState = useRagEventRecovery(workspaceId);
+  const connectionState = useWorkspaceEventState();
   const createMutation = useCreateConversationCommand();
   const questionMutation = useSubmitQuestionCommand();
   const [title, setTitle] = useState("");

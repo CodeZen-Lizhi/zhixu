@@ -166,6 +166,40 @@ describe("parseServerEventStream", () => {
     for await (const event of parseServerEventStream(body)) ids.push(event.id);
     expect(ids).toHaveLength(200);
   });
+
+  it("预先取消的 signal 只取消一次 reader 并无事件退出", async () => {
+    let cancelCalls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelCalls += 1;
+      },
+    });
+    const controller = new AbortController();
+    controller.abort(new DOMException("aborted", "AbortError"));
+
+    const events: ServerEventEnvelope[] = [];
+    for await (const event of parseServerEventStream(body, controller.signal)) events.push(event);
+
+    expect(events).toEqual([]);
+    expect(cancelCalls).toBe(1);
+  });
+
+  it("UTF-8 decoder 失败会取消并释放 reader", async () => {
+    let cancelCalls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Uint8Array.of(0xff));
+      },
+      cancel() {
+        cancelCalls += 1;
+      },
+    });
+
+    await expect(async () => {
+      for await (const event of parseServerEventStream(body)) void event;
+    }).rejects.toMatchObject({ code: "INVALID_EVENT" });
+    expect(cancelCalls).toBe(1);
+  });
 });
 
 describe("connectServerEvents", () => {
@@ -252,32 +286,99 @@ describe("connectServerEvents", () => {
   });
 
   it.each(["SSE_CURSOR_INVALID", "SSE_CURSOR_FUTURE"])(
-    "400 %s 报告不可恢复错误且不重连",
+    "400 %s 完成权威回查后无游标重连",
     async (errorCode) => {
-      const fetcher = vi.fn(() => Promise.resolve(problemResponse(400, errorCode)));
-      const errors: ServerEventClientError[] = [];
+      const headers: (string | null)[] = [];
+      const recoveries: string[] = [];
+      const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+        headers.push(new Headers(init?.headers).get("Last-Event-ID"));
+        if (headers.length === 1) return Promise.resolve(problemResponse(400, errorCode));
+        return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+      });
       const connection = connectServerEvents({
         workspaceId,
         lastEventId: "41",
         fetcher,
-        onError: (error) => errors.push(error),
-        onRecoveryRequired: ignoreRecovery,
+        onRecoveryRequired: (signal) => { recoveries.push(signal.reason); },
         sleep: resolvedSleep,
       });
 
+      await vi.waitFor(() => expect(headers).toHaveLength(2));
+      expect(headers).toEqual(["41", null]);
+      expect(recoveries).toEqual([errorCode === "SSE_CURSOR_INVALID" ? "cursor_invalid" : "cursor_future"]);
+      connection.close();
       await connection.done;
-      expect(fetcher).toHaveBeenCalledTimes(1);
-      expect(errors).toHaveLength(1);
-      expect(errors[0]).toMatchObject({ code: "CURSOR_REJECTED", retryable: false });
     },
   );
 
-  it("取消会中止 fetch 并释放 reader", async () => {
-    let cancelled = false;
+  it.each([
+    ["过期游标", 409, "SSE_CURSOR_EXPIRED", { action: "refetch" }],
+    ["非法游标", 400, "SSE_CURSOR_INVALID", undefined],
+    ["未来游标", 400, "SSE_CURSOR_FUTURE", undefined],
+  ] as const)("%s权威回查失败时保留游标、报告可重试错误并停止自动重连", async (_label, status, errorCode, details) => {
+    const headers: (string | null)[] = [];
+    const errors: ServerEventClientError[] = [];
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      headers.push(new Headers(init?.headers).get("Last-Event-ID"));
+      return Promise.resolve(problemResponse(status, errorCode, details));
+    });
+    const connection = connectServerEvents({
+      workspaceId, lastEventId: "41", fetcher, sleep: resolvedSleep, initialBackoffMs: 1, maxBackoffMs: 1,
+      onRecoveryRequired: () => Promise.reject(new Error("database unavailable")),
+      onError: (error) => errors.push(error),
+    });
+
+    await connection.done;
+    expect(headers).toEqual(["41"]);
+    expect(errors[0]).toMatchObject({ code: "RECOVERY_FAILED", retryable: true });
+  });
+
+  it("onEvent 失败后先取消旧流再建立下一次 fetch", async () => {
+    const order: string[] = [];
+    const encoder = new TextEncoder();
+    const firstResponse = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(frame(envelope("42"))));
+        },
+        cancel() {
+          order.push("cancel-first-stream");
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "text/event-stream" } },
+    );
+    const fetcher = vi
+      .fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
+      .mockImplementation((_input, init) => {
+        if (fetcher.mock.calls.length === 1) return Promise.resolve(firstResponse);
+        order.push("start-second-fetch");
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        });
+      });
+    const connection = connectServerEvents({
+      workspaceId,
+      fetcher,
+      onRecoveryRequired: ignoreRecovery,
+      onEvent: () => Promise.reject(new Error("consumer unavailable")),
+      sleep: resolvedSleep,
+      initialBackoffMs: 1,
+      maxBackoffMs: 1,
+    });
+
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    expect(order).toEqual(["cancel-first-stream", "start-second-fetch"]);
+
+    connection.close();
+    await connection.done;
+  });
+
+  it("重复取消只中止 fetch 并释放 reader 一次", async () => {
+    let cancelCalls = 0;
     const response = new Response(
       new ReadableStream<Uint8Array>({
         cancel() {
-          cancelled = true;
+          cancelCalls += 1;
         },
       }),
       { status: 200, headers: { "Content-Type": "text/event-stream" } },
@@ -291,8 +392,9 @@ describe("connectServerEvents", () => {
 
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
     connection.close();
+    connection.close();
     await connection.done;
-    expect(cancelled).toBe(true);
+    expect(cancelCalls).toBe(1);
   });
 
   it("onEvent 失败时不提交游标并在重连后重放同一事件", async () => {

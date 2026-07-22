@@ -1,21 +1,47 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import { lazy } from "react";
+import { AppShell } from "../app/AppShell";
 
-import { CollectionDetailPage, CollectionsPage } from "../features/collections/CollectionsPage";
-import { GraphPage } from "../features/graph/GraphPage";
-import { HealthPage } from "../features/health/HealthPage";
-import { RagPage } from "../features/rag/RagPage";
-import { WorkspacePage } from "../features/workspace/WorkspacePage";
+const GraphPage = lazy(() => import("../features/graph/GraphPage").then((module) => ({ default: module.GraphPage })));
+const RagPage = lazy(() => import("../features/rag/RagPage").then((module) => ({ default: module.RagPage })));
+const WorkspacePage = lazy(() => import("../features/workspace/WorkspacePage").then((module) => ({ default: module.WorkspacePage })));
+const DashboardPage = lazy(() => import("../features/business/DashboardPage").then((module) => ({ default: module.DashboardPage })));
+const BasicPages = lazy(() => import("../features/business/BasicPages").then((module) => ({ default: module.InboxPage })));
+const DocumentsPage = lazy(() => import("../features/business/BasicPages").then((module) => ({ default: module.DocumentsPage })));
+const SettingsPage = lazy(() => import("../features/business/BasicPages").then((module) => ({ default: module.SettingsPage })));
+const ProposalsPage = lazy(() => import("../features/business/ProposalsPage").then((module) => ({ default: module.ProposalsPage })));
+const ProposalDetailPage = lazy(() => import("../features/business/ProposalsPage").then((module) => ({ default: module.ProposalDetailPage })));
+const WorkflowsPage = lazy(() => import("../features/business/WorkflowsPage").then((module) => ({ default: module.WorkflowsPage })));
+const WorkflowDetailPage = lazy(() => import("../features/business/WorkflowsPage").then((module) => ({ default: module.WorkflowDetailPage })));
+const CollectionsPage = lazy(() => import("../features/collections/CollectionsPage").then((module) => ({ default: module.CollectionsPage })));
+const CollectionDetailPage = lazy(() => import("../features/collections/CollectionsPage").then((module) => ({ default: module.CollectionDetailPage })));
+const HealthPage = lazy(() => import("../features/health/HealthPage").then((module) => ({ default: module.HealthPage })));
+const SearchPage = lazy(() => import("../features/search/SearchPage").then((module) => ({ default: module.SearchPage })));
+
+const Shell = () => <AppShell />;
 
 export const AppRoutes = () => (
   <Routes>
-    <Route path="/" element={<WorkspacePage />} />
-    <Route path="/collections" element={<CollectionsPage />} />
-    <Route path="/collections/:collectionId" element={<CollectionDetailPage />} />
-    <Route path="/health" element={<HealthPage />} />
-    <Route path="/settings" element={<WorkspacePage />} />
-    <Route path="/graph" element={<GraphPage />} />
-    <Route path="/chat" element={<RagPage />} />
-    <Route path="/chat/:conversationId" element={<RagPage />} />
-    <Route path="*" element={<Navigate to="/" replace />} />
+    <Route element={<Shell />}>
+      <Route path="/" element={<WorkspacePage />} />
+      <Route path="/dashboard" element={<DashboardPage />} />
+      <Route path="/inbox" element={<BasicPages />} />
+      <Route path="/documents" element={<DocumentsPage />} />
+      <Route path="/documents/:sourceVersionId" element={<DocumentsPage />} />
+      <Route path="/search" element={<SearchPage />} />
+      <Route path="/proposals" element={<ProposalsPage />} />
+      <Route path="/proposals/:proposalId" element={<ProposalDetailPage />} />
+      <Route path="/workflows" element={<WorkflowsPage />} />
+      <Route path="/workflows/:workflowId" element={<WorkflowDetailPage />} />
+      <Route path="/collections" element={<CollectionsPage />} />
+      <Route path="/collections/:collectionId" element={<CollectionDetailPage />} />
+      <Route path="/health" element={<HealthPage />} />
+      <Route path="/workspace" element={<WorkspacePage />} />
+      <Route path="/settings" element={<SettingsPage />} />
+      <Route path="/graph" element={<GraphPage />} />
+      <Route path="/chat" element={<RagPage />} />
+      <Route path="/chat/:conversationId" element={<RagPage />} />
+    </Route>
+    <Route path="*" element={<Navigate to="/dashboard" replace />} />
   </Routes>
 );

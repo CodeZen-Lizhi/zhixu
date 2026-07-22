@@ -46,7 +46,7 @@ export interface ServerEventEnvelope {
 }
 
 export interface ServerEventRecoverySignal {
-  reason: "cursor_expired";
+  reason: "cursor_expired" | "cursor_invalid" | "cursor_future";
   workspaceId: string;
 }
 
@@ -54,6 +54,7 @@ export type ServerEventConnectionState =
   | "connecting"
   | "open"
   | "reconnecting"
+  | "recovery_failed"
   | "closed";
 
 export class ServerEventClientError extends Error {
@@ -62,6 +63,7 @@ export class ServerEventClientError extends Error {
     | "INVALID_RESPONSE"
     | "HTTP_ERROR"
     | "CURSOR_REJECTED"
+    | "RECOVERY_FAILED"
     | "NETWORK_ERROR";
   readonly retryable: boolean;
 
@@ -381,10 +383,16 @@ export async function* parseServerEventStream(
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "";
-  const abort = (): void => {
-    void reader.cancel(signal?.reason);
+  let cancelPromise: Promise<void> | undefined;
+  const cancelReader = (reason?: unknown): Promise<void> => {
+    cancelPromise ??= reader.cancel(reason).catch(() => undefined);
+    return cancelPromise;
   };
-  signal?.addEventListener("abort", abort, { once: true });
+  const abort = (): void => {
+    void cancelReader(signal?.reason);
+  };
+  if (signal?.aborted === true) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
   try {
     for (;;) {
       const result = await reader.read();
@@ -419,7 +427,7 @@ export async function* parseServerEventStream(
     if (buffer !== "") throw invalidEvent("SSE stream 以不完整事件帧结束");
   } finally {
     signal?.removeEventListener("abort", abort);
-    if (signal?.aborted === true) await reader.cancel(signal.reason).catch(() => undefined);
+    await cancelReader(signal?.reason);
     reader.releaseLock();
   }
 }
@@ -524,6 +532,14 @@ export const connectServerEvents = (
   const maxBackoffMs = Math.max(initialBackoffMs, options.maxBackoffMs ?? 15_000);
   let lastEventId = options.lastEventId;
   const connectionAborted = (): boolean => controller.signal.aborted;
+  const recoverCursor = async (reason: ServerEventRecoverySignal["reason"]): Promise<void> => {
+    try {
+      await options.onRecoveryRequired({ reason, workspaceId: options.workspaceId });
+    } catch (error: unknown) {
+      throw new ServerEventClientError("RECOVERY_FAILED", "SSE 游标恢复所需的权威资源回查失败", true, { cause: error });
+    }
+    lastEventId = undefined;
+  };
 
   const run = async (): Promise<void> => {
     let backoffMs = initialBackoffMs;
@@ -532,12 +548,18 @@ export const connectServerEvents = (
     while (!connectionAborted()) {
       if (!firstAttempt) options.onStateChange?.("reconnecting");
       firstAttempt = false;
+      const attemptController = new AbortController();
+      const abortAttempt = (): void => {
+        attemptController.abort(controller.signal.reason);
+      };
+      if (controller.signal.aborted) abortAttempt();
+      else controller.signal.addEventListener("abort", abortAttempt, { once: true });
       try {
         const headers = new Headers({ Accept: "text/event-stream" });
         if (lastEventId !== undefined) headers.set("Last-Event-ID", lastEventId);
         const response = await fetcher(
           `${baseUrl}/api/v1/events?workspace_id=${encodeURIComponent(options.workspaceId)}`,
-          { headers, signal: controller.signal },
+          { headers, signal: attemptController.signal },
         );
         if (!response.ok) {
           const problem = await decodeProblem(response);
@@ -546,11 +568,7 @@ export const connectServerEvents = (
             problem.errorCode === "SSE_CURSOR_EXPIRED" &&
             problem.action === "refetch"
           ) {
-            await options.onRecoveryRequired({
-              reason: "cursor_expired",
-              workspaceId: options.workspaceId,
-            });
-            lastEventId = undefined;
+            await recoverCursor("cursor_expired");
             backoffMs = initialBackoffMs;
             continue;
           }
@@ -558,7 +576,9 @@ export const connectServerEvents = (
             response.status === 400 &&
             (problem.errorCode === "SSE_CURSOR_INVALID" || problem.errorCode === "SSE_CURSOR_FUTURE")
           ) {
-            throw new ServerEventClientError("CURSOR_REJECTED", problem.errorCode, false);
+            await recoverCursor(problem.errorCode === "SSE_CURSOR_INVALID" ? "cursor_invalid" : "cursor_future");
+            backoffMs = initialBackoffMs;
+            continue;
           }
           throw new ServerEventClientError(
             "HTTP_ERROR",
@@ -573,7 +593,7 @@ export const connectServerEvents = (
           throw new ServerEventClientError("INVALID_RESPONSE", "SSE 响应缺少 body", false);
         }
         options.onStateChange?.("open");
-        for await (const event of parseServerEventStream(response.body, controller.signal)) {
+        for await (const event of parseServerEventStream(response.body, attemptController.signal)) {
           if (event.workspaceId !== options.workspaceId) throw invalidEvent("SSE Workspace binding 不一致");
           if (lastEventId !== undefined && BigInt(event.id) <= BigInt(lastEventId)) {
             throw invalidEvent("SSE event id 未单调递增");
@@ -588,7 +608,11 @@ export const connectServerEvents = (
           ? error
           : new ServerEventClientError("NETWORK_ERROR", "SSE 连接中断", true, { cause: error });
         options.onError?.(classified);
+        if (classified.code === "RECOVERY_FAILED") break;
         if (!classified.retryable) break;
+      } finally {
+        controller.signal.removeEventListener("abort", abortAttempt);
+        if (!attemptController.signal.aborted) attemptController.abort();
       }
 
       if (connectionAborted()) break;

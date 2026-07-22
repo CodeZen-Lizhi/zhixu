@@ -34,6 +34,7 @@ export type SemanticLinkDecisionAction =
   | "RESUME";
 export type SemanticLinkScanStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
 export type ProposalType = "file_patch" | "knowledge_change";
+export type ProposalRiskLevel = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
 export type ProposalStatus =
   | "draft"
   | "validating"
@@ -273,6 +274,7 @@ export interface FilePatchProposal {
   workspaceId: string;
   targetPath: string;
   status: ProposalStatus;
+  riskLevel: ProposalRiskLevel;
   revision: FilePatchRevision;
   approval: ProposalApproval | null;
   createdAt: string;
@@ -322,6 +324,7 @@ export interface KnowledgeChangeProposal {
   id: string;
   workspaceId: string;
   status: ProposalStatus;
+  riskLevel: "HIGH";
   revision: KnowledgeChangeRevision;
   approval: ProposalApproval | null;
   createdAt: string;
@@ -344,7 +347,7 @@ export interface ApproveProposalInput {
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
-const gitHeadPattern = /^[0-9a-f]{40}$/;
+const gitHeadPattern = /^([0-9a-f]{40}|[0-9a-f]{64})$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const controlPattern = /[\u0000-\u001f\u007f-\u009f]/;
 const textEncoder = new TextEncoder();
@@ -385,6 +388,7 @@ const discoveryMethods = [
   "RAG_CO_RETRIEVAL",
 ] as const;
 const reopenedReasons = ["CONTENT_CHANGED"] as const;
+const proposalRiskLevels = ["CRITICAL", "HIGH", "MEDIUM", "LOW"] as const;
 const decisionActions = [
   "CONFIRM",
   "CONFIRM_WITH_RELATION_TYPE",
@@ -1035,6 +1039,43 @@ const readApproval = (value: unknown, field: string): ProposalApproval => {
   };
 };
 
+const validateApprovalBinding = (
+  approval: ProposalApproval,
+  expected: { proposalId: string; revisionId: string; changeHash: string; decision?: ProposalDecision },
+  field: string,
+): ProposalApproval => {
+  if (approval.proposalId !== expected.proposalId) throw invalidResponse(`${field}.proposal_id`);
+  if (approval.revisionId !== expected.revisionId) throw invalidResponse(`${field}.revision_id`);
+  if (approval.changeHash !== expected.changeHash) throw invalidResponse(`${field}.change_hash`);
+  if (expected.decision !== undefined && approval.decision !== expected.decision) throw invalidResponse(`${field}.decision`);
+  return approval;
+};
+
+const readProposalSnapshotApproval = (
+  value: unknown,
+  proposalType: ProposalType,
+  expected: { proposalId: string; revisionId: string; changeHash: string },
+): ProposalApproval | null => {
+  if (value === undefined) throw invalidResponse("proposal.approval");
+  if (value === null) return null;
+  const approval = validateApprovalBinding(readApproval(value, "proposal.approval"), expected, "proposal.approval");
+  const hasWorkflowBinding = approval.workflowRunId !== null || approval.workflowStatusUrl !== null;
+  if (hasWorkflowBinding && (approval.workflowRunId === null || approval.workflowStatusUrl !== `/api/v1/workflows/${approval.workflowRunId}`)) {
+    throw invalidResponse("proposal.approval.workflow_status_url");
+  }
+  if (approval.dispatchStatus !== null) throw invalidResponse("proposal.approval.dispatch_status");
+  if (approval.decision === "rejected" && (approval.approvedGitHead !== null || hasWorkflowBinding)) {
+    throw invalidResponse("proposal.approval");
+  }
+  if (proposalType === "knowledge_change" && (approval.approvedGitHead !== null || hasWorkflowBinding)) {
+    throw invalidResponse("proposal.approval");
+  }
+  if (proposalType === "file_patch" && approval.decision === "approved" && hasWorkflowBinding && approval.approvedGitHead === null) {
+    throw invalidResponse("proposal.approval.approved_git_head");
+  }
+  return approval;
+};
+
 const readFilePatchRevision = (value: unknown, field: string): FilePatchRevision => {
   if (!isRecord(value)) throw invalidResponse(field);
   assertExactKeys(value, [
@@ -1136,36 +1177,39 @@ const readKnowledgeChangeRevision = (value: unknown, field: string): KnowledgeCh
 
 export const decodeSemanticLinkProposal = (value: unknown, request?: GetProposalInput): SemanticLinkProposal => {
   if (!isRecord(value)) throw invalidResponse("proposal");
-  const proposalTypeValue = value.proposal_type;
-  const proposalType = proposalTypeValue === undefined
-    ? "file_patch"
-    : readEnum(proposalTypeValue, "proposal.proposal_type", ["file_patch", "knowledge_change"] as const);
+  const proposalType = readEnum(value.proposal_type, "proposal.proposal_type", ["file_patch", "knowledge_change"] as const);
+  const riskLevel = readEnum(value.risk_level, "proposal.risk_level", proposalRiskLevels);
   if (proposalType === "file_patch") {
-    assertExactKeys(value, ["proposal_type", "id", "workspace_id", "target_path", "status", "revision", "approval", "created_at", "updated_at"], "proposal");
+    assertExactKeys(value, ["proposal_type", "id", "workspace_id", "target_path", "status", "risk_level", "revision", "approval", "created_at", "updated_at"], "proposal");
     const id = readUuid(value.id, "proposal.id");
     if (request?.proposalId !== undefined && id !== request.proposalId) throw invalidResponse("proposal.id");
+    const revision = readFilePatchRevision(value.revision, "proposal.revision");
     return {
       proposalType,
       id,
       workspaceId: readUuid(value.workspace_id, "proposal.workspace_id"),
       targetPath: readPath(value.target_path, "proposal.target_path"),
       status: readProposalStatus(value.status, "proposal.status"),
-      revision: readFilePatchRevision(value.revision, "proposal.revision"),
-      approval: value.approval === undefined || value.approval === null ? null : readApproval(value.approval, "proposal.approval"),
+      riskLevel,
+      revision,
+      approval: readProposalSnapshotApproval(value.approval, proposalType, { proposalId: id, revisionId: revision.id, changeHash: revision.changeHash }),
       createdAt: readTimestamp(value.created_at, "proposal.created_at"),
       updatedAt: readTimestamp(value.updated_at, "proposal.updated_at"),
     };
   }
-  assertExactKeys(value, ["proposal_type", "id", "workspace_id", "status", "revision", "approval", "created_at", "updated_at"], "proposal");
+  if (riskLevel !== "HIGH") throw invalidResponse("proposal.risk_level");
+  assertExactKeys(value, ["proposal_type", "id", "workspace_id", "status", "risk_level", "revision", "approval", "created_at", "updated_at"], "proposal");
   const id = readUuid(value.id, "proposal.id");
   if (request?.proposalId !== undefined && id !== request.proposalId) throw invalidResponse("proposal.id");
+  const revision = readKnowledgeChangeRevision(value.revision, "proposal.revision");
   return {
     proposalType,
     id,
     workspaceId: readUuid(value.workspace_id, "proposal.workspace_id"),
     status: readProposalStatus(value.status, "proposal.status"),
-    revision: readKnowledgeChangeRevision(value.revision, "proposal.revision"),
-    approval: value.approval === undefined || value.approval === null ? null : readApproval(value.approval, "proposal.approval"),
+    riskLevel,
+    revision,
+    approval: readProposalSnapshotApproval(value.approval, proposalType, { proposalId: id, revisionId: revision.id, changeHash: revision.changeHash }),
     createdAt: readTimestamp(value.created_at, "proposal.created_at"),
     updatedAt: readTimestamp(value.updated_at, "proposal.updated_at"),
   };
@@ -1390,6 +1434,9 @@ export const approveSemanticLinkProposal = async (
   input: ApproveProposalInput,
 ): Promise<ProposalApproval> => {
   const proposalId = readUuid(input.proposalId, "proposalId", invalidRequest);
+  const revisionId = readUuid(input.revisionId, "revisionId", invalidRequest);
+  const changeHash = readHash(input.changeHash, "changeHash", false, invalidRequest);
+  const decision = readProposalDecision(input.decision, "decision", invalidRequest);
   return request(`/api/v1/proposals/${encodeURIComponent(proposalId)}/approvals`, {
     method: "POST",
     headers: {
@@ -1397,10 +1444,16 @@ export const approveSemanticLinkProposal = async (
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      revision_id: readUuid(input.revisionId, "revisionId", invalidRequest),
-      change_hash: readHash(input.changeHash, "changeHash", false, invalidRequest),
-      decision: readProposalDecision(input.decision, "decision", invalidRequest),
+      revision_id: revisionId,
+      change_hash: changeHash,
+      decision,
     }),
-  }, decodeProposalApproval);
+  }, (payload) => {
+    const approval = validateApprovalBinding(readApproval(payload, "approval"), { proposalId, revisionId, changeHash, decision }, "approval");
+    if (approval.approvedGitHead !== null || approval.workflowRunId !== null || approval.workflowStatusUrl !== null || approval.dispatchStatus !== null) {
+      throw invalidResponse("approval");
+    }
+    return approval;
+  });
 };
 import { graphNodeRefIdentity, graphRelationTypeCompatible, isSymmetricGraphRelationType } from "./graph";

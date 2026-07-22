@@ -80,6 +80,9 @@ const numberField = (record: Record<string, unknown>, field: string): number => 
 const invalidResponse = (field: string) =>
   new WorkspaceApiError("INVALID_RESPONSE", `Workspace 响应字段无效：${field}`, false);
 
+const isAbortError = (value: unknown): boolean =>
+  (value instanceof DOMException || value instanceof Error) && value.name === "AbortError";
+
 export const decodeWorkspace = (value: unknown): Workspace => {
   if (!isRecord(value) || !isRecord(value.git)) throw invalidResponse("workspace");
   const rawWarnings: unknown = value.warnings ?? [];
@@ -136,13 +139,15 @@ const request = async (path: string, init?: RequestInit): Promise<unknown> => {
       headers: { Accept: "application/json", ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...init,
     });
-  } catch {
+  } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new WorkspaceApiError("NETWORK_ERROR", "无法连接 Workspace API。", true);
   }
   let payload: unknown;
   try {
     payload = await response.json();
-  } catch {
+  } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new WorkspaceApiError("INVALID_RESPONSE", "Workspace API 返回了无效 JSON。", false);
   }
   if (!response.ok) {
@@ -160,8 +165,14 @@ export const createWorkspace = async (input: CreateWorkspaceInput): Promise<Work
     body: JSON.stringify({ name: input.name, root_path: input.rootPath, initialize_git: input.initializeGit }),
   }));
 
-export const getWorkspace = async (id: string, signal?: AbortSignal): Promise<Workspace> =>
-  decodeWorkspace(await request(`/api/v1/workspaces/${encodeURIComponent(id)}`, signal === undefined ? undefined : { signal }));
+export const getWorkspace = async (id: string, signal?: AbortSignal): Promise<Workspace> => {
+  const workspace = decodeWorkspace(await request(
+    `/api/v1/workspaces/${encodeURIComponent(id)}`,
+    signal === undefined ? undefined : { signal },
+  ));
+  if (workspace.id !== id) throw invalidResponse("id");
+  return workspace;
+};
 
 export const scanWorkspace = async (id: string): Promise<WorkspaceScan> =>
   decodeWorkspaceScan(await request(`/api/v1/workspaces/${encodeURIComponent(id)}/scan`, { method: "POST" }));

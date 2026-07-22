@@ -1,94 +1,78 @@
-import { useEffect, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import type { QueryClient } from "@tanstack/react-query";
 
-import {
-  ServerEventClientError,
-  connectServerEvents,
-  type ServerEventConnection,
-  type ServerEventConnectionState,
-  type ServerEventEnvelope,
-} from "../../events";
+import { type ServerEventEnvelope } from "../../events";
 import { ragQueryKeys } from "./query-keys";
 
-const cursorKey = (workspaceId: string): string => `zhixu.rag-event-cursor.${workspaceId}`;
+const sameQueryKey = (left: readonly unknown[], right: readonly unknown[]): boolean =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
+export const recoverRagWorkspace = async (queryClient: QueryClient, workspaceId: string): Promise<void> => {
+  const conversationListKey = ragQueryKeys.conversations(workspaceId);
+  await queryClient.resetQueries(
+    { queryKey: conversationListKey, exact: true },
+    { throwOnError: true },
+  );
+  await queryClient.refetchQueries({
+    type: "all",
+    predicate: (query) => query.queryKey[0] === "rag"
+      && query.queryKey[1] === workspaceId
+      && !sameQueryKey(query.queryKey, conversationListKey),
+  }, { throwOnError: true });
+};
 
 export const invalidateRagEvent = async (
+  queryClient: QueryClient,
   workspaceId: string,
   event: ServerEventEnvelope,
-  invalidate: (queryKey: readonly unknown[]) => Promise<unknown>,
 ): Promise<void> => {
   if (event.workspaceId !== workspaceId) return;
+  let resetConversationList = false;
+  const conversations = new Set<string>();
+  const turns = new Set<string>();
+  const answers = new Set<string>();
   for (const target of event.invalidations) {
     switch (target.resource) {
       case "conversation":
-        await invalidate(ragQueryKeys.conversations(workspaceId));
-        await invalidate(ragQueryKeys.conversation(workspaceId, target.id));
-        await invalidate(ragQueryKeys.turns(workspaceId, target.id));
+        resetConversationList = true;
+        conversations.add(target.id);
+        turns.add(target.id);
         break;
       case "answer":
-        await invalidate(ragQueryKeys.answer(workspaceId, target.id));
+        answers.add(target.id);
         break;
       case "question":
       case "workflow":
       case "model_run": {
         const conversationId = event.payloadSummary.conversationId;
-        if (conversationId !== undefined) await invalidate(ragQueryKeys.turns(workspaceId, conversationId));
+        if (conversationId !== undefined) turns.add(conversationId);
         const answerId = event.payloadSummary.answerId;
-        if (answerId !== undefined) await invalidate(ragQueryKeys.answer(workspaceId, answerId));
+        if (answerId !== undefined) answers.add(answerId);
         break;
       }
     }
   }
-};
-
-export const useRagEventRecovery = (workspaceId: string) => {
-  const queryClient = useQueryClient();
-  const [state, setState] = useState<ServerEventConnectionState>("closed");
-
-  useEffect(() => {
-    if (workspaceId === "") {
-      setState("closed");
-      return;
-    }
-    const storageKey = cursorKey(workspaceId);
-    const lastEventId = window.sessionStorage.getItem(storageKey) ?? undefined;
-    let connection: ServerEventConnection | undefined;
-    let cancelled = false;
-    const recover = async (): Promise<void> => {
-      await queryClient.resetQueries({ queryKey: ragQueryKeys.conversations(workspaceId), exact: true });
-      await queryClient.invalidateQueries({ queryKey: ragQueryKeys.all(workspaceId) });
-      window.sessionStorage.removeItem(storageKey);
-    };
-    const connect = (cursor?: string): ServerEventConnection => connectServerEvents({
-      workspaceId,
-      ...(cursor === undefined ? {} : { lastEventId: cursor }),
-      onStateChange: setState,
-      onEvent: async (event) => {
-        if (event.invalidations.some((target) => target.resource === "conversation")) {
-          await queryClient.resetQueries({ queryKey: ragQueryKeys.conversations(workspaceId), exact: true });
-        }
-        await invalidateRagEvent(workspaceId, event, (queryKey) =>
-          queryClient.invalidateQueries({ queryKey }));
-        window.sessionStorage.setItem(storageKey, event.id);
-      },
-      onRecoveryRequired: recover,
-    });
-    try {
-      connection = connect(lastEventId);
-    } catch (error) {
-      if (!(error instanceof ServerEventClientError) || error.code !== "CURSOR_REJECTED") throw error;
-      void recover().then(() => {
-        if (!cancelled) connection = connect();
-      }).catch((recoveryError: unknown) => {
-        setState("closed");
-        console.error("RAG SSE cursor recovery failed", recoveryError);
-      });
-    }
-    return () => {
-      cancelled = true;
-      connection?.close();
-    };
-  }, [queryClient, workspaceId]);
-
-  return state;
+  if (resetConversationList) {
+    await queryClient.resetQueries(
+      { queryKey: ragQueryKeys.conversations(workspaceId), exact: true },
+      { throwOnError: true },
+    );
+  }
+  for (const conversationId of conversations) {
+    await queryClient.invalidateQueries(
+      { queryKey: ragQueryKeys.conversation(workspaceId, conversationId), exact: true },
+      { throwOnError: true },
+    );
+  }
+  for (const conversationId of turns) {
+    await queryClient.invalidateQueries(
+      { queryKey: ragQueryKeys.turns(workspaceId, conversationId) },
+      { throwOnError: true },
+    );
+  }
+  for (const answerId of answers) {
+    await queryClient.invalidateQueries(
+      { queryKey: ragQueryKeys.answer(workspaceId, answerId), exact: true },
+      { throwOnError: true },
+    );
+  }
 };

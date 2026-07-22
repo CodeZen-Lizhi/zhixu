@@ -94,7 +94,7 @@ M1 必须记录实际 Query Default、Cache Retention、URL Parsing、Local Draf
 ### 3. Contracts
 
 - Collection/Health REST response 是 Server State 唯一事实源；SSE 只触发对应 Query invalidation。
-- Workspace 切换先停止旧连接/请求，再清理旧 Collection/Health cache；旧回调不得写入新 Workspace。
+- Workspace 切换先停止旧连接/请求，再清理旧 Collection/Health/business cache；旧回调不得写入新 Workspace。
 - LIST/TABLE/COMPACT_CARD 不复制结果 membership；Evidence、Decision、Schedule pending 状态不写入全局 store。
 - Saved Collection list 必须消费服务端 `next_cursor`；Workspace、Collection、version、query hash 或 Issue filter
   变化时，下一次请求的 cursor 必须为 undefined。
@@ -124,4 +124,72 @@ M1 必须记录实际 Query Default、Cache Retention、URL Parsing、Local Draf
 ```text
 Wrong: 收到 SSE 后直接 setScan({status:'SUCCEEDED'})。
 Correct: 仅 invalidation，重新 GET Scan/Issue projection 后再渲染终态。
+```
+
+## Scenario: M9 Unified Workspace SSE Event Store
+
+### 1. Scope / Trigger
+
+- 修改 App Shell、SSE connection lifecycle、Last-Event-ID、Query invalidation/recovery 或 Workspace 切换时应用。
+- 全站每个 Active Workspace 只有一个连接 Owner；Feature 不得直接调用 `connectServerEvents` 或创建 EventSource/fetch stream。
+
+### 2. Signatures
+
+```ts
+<EventStoreProvider>
+useEventStore(): { state; lastEventId?; lastEvent? }
+useRegisterWorkspaceRecovery((workspaceId) => Promise<void> | void)
+connectServerEvents({ workspaceId, lastEventId?, onEvent, onRecoveryRequired, ... })
+```
+
+- `web/src/events/event-store.tsx` 拥有连接；`server-events.ts` 只拥有严格 frame/envelope decoder 和可取消 connector。
+- sessionStorage key 固定按 Workspace 保存 Last-Event-ID，不保存事件正文或业务对象。
+
+### 3. Contracts
+
+- Server State 仍由 TanStack Query/API 拥有；SSE 只发 typed invalidation hint，Event Store 不重放 Proposal/Workflow/RAG 状态机。
+- `onEvent` 的所有 Query 失效成功完成后才提交 cursor；任一失效失败必须让同一事件在重连后重放。
+- 409 expired、400 invalid/future cursor 都先完成 Workspace 权威 Query 回查；成功后清 cursor 并无游标重连，失败保留 cursor 并进入 `recovery_failed`。
+- Search 的 opaque cursor 绑定 Active Index 和结果 fingerprint，恢复时禁止用 `refetchQueries(type:"all")` 重放旧窗口。Event Store 先取消并移除 Workspace 下全部 Search Query；当前挂载的 Search Feature 通过 recovery callback 清除 URL cursor，并以原 query/mode/filter 回查无 cursor 首屏。首屏回查失败必须拒绝整个恢复并保留 SSE cursor。
+- Search reset 与当前页面 recovery callback 必须先于 Workspace/business 等其他网络回查；后续任一回查失败时旧 cursor 窗口仍保持移除，但 SSE cursor 必须保留。首屏恢复只有一个 Query 请求所有者，callback 必须等待该最终请求成功，不能在随后自动 refetch 失败前提前 resolve。
+- Workspace 切换先关闭旧连接，再移除旧 Workspace 的 Workspace/business/RAG 及已注册 Query family cache；旧连接回调不得覆盖新 Workspace 状态。
+- 同一个事件对同一 Query family 最多执行一次失效；事件 type、resource ref 与 typed invalidation 只是同一失效判定的不同证据，不能造成重复请求。
+- `connecting|open|reconnecting|recovery_failed|closed` 只描述连接，不代表 Workflow/Approval 业务终态。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| Event Workspace 不匹配、ID 非单调或 payload 非法 | connector fail closed，不提交 cursor |
+| Query invalidation 失败 | onEvent reject，session cursor 保持旧值 |
+| expired/invalid/future 回查成功 | 删除 Workspace cursor，无 cursor 重连 |
+| 权威回查失败 | 保留 cursor，显示 recovery_failed，不伪装已恢复 |
+| Search 存在失效的第二页 cursor | 不执行旧 cursor Query；移除旧窗口，挂载页面以无 cursor 首屏回查后才允许清 SSE cursor |
+| Search 首屏回查失败 | 保留 SSE cursor 与 recovery_failed；重试不得重新执行已移除的旧 cursor |
+| Workspace A→B | A connection close；A 回调无效；B 只建立一个连接 |
+| 本地 cursor 损坏 | 先权威回查，再以无 cursor 建立唯一连接 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：一个事件对每个匹配的 Query family 只失效一次后提交 ID；Search recovery 丢弃旧 cursor 窗口并回查规范首屏；切换 Workspace 时旧连接和旧 Workspace-scoped cache 立即失效。
+- Base：无 Active Workspace 时状态 closed 且不建立连接；网络断开按有界抖动重连。
+- Bad：RAG/Proposal 各建一条连接；收到 SSE 直接写业务 cache；对包含旧 cursor 的全部 Search Query 做 refetch；回查失败仍删除 cursor；旧 Workspace 回调覆盖新状态。
+
+### 6. Tests Required
+
+- 单连接、Workspace switch/cleanup、旧回调隔离、事件 Workspace/单调 ID、Query 失效失败不提交、expired/invalid/future、损坏本地 cursor、recovery_failed 和 Abort cleanup。
+- Search recovery 必须证明：旧 cursor query 不再执行且缓存被移除；挂载页面 URL cursor 清除并以同一 query/mode/filter 回查首屏；首屏失败时 SSE cursor 不清除且重试不复活旧窗口。
+- 浏览器用真实 API 检查同一 Workspace 网络中无重复 SSE；console 无 warning/error；切换后旧页面事实不可见。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Feature 收到 workflow.updated 后直接把本地 Run 标为 succeeded，并立即保存 Last-Event-ID。
+Correct: 先失效 Workspace-scoped Query 并完成权威读取链，再提交 Event ID；Run 终态只来自 API。
+
+Wrong: cursor invalid 时先删除 sessionStorage，再尝试回查。
+Correct: 回查成功后才删除；失败保留旧 cursor 并显式 recovery_failed。
+
+Wrong: SSE 超窗恢复时 refetch Workspace 下所有 Search page，包括绑定旧 Index fingerprint 的 cursor。
+Correct: 先取消并移除 Search 窗口；挂载页面通过 recovery callback 只回查无 cursor 的规范首屏，成功后才提交恢复。
 ```

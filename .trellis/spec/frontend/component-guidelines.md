@@ -100,3 +100,66 @@ M1 必须确定样式与组件库策略、测试渲染器、可访问性工具�
   状态。共同 Topic 只能标为无路径建议，不能画成或描述为正式 path。
 - Workspace selector、URL State 和 opaque cursor 只表达查询范围，不是身份或授权凭据；组件不得据此隐藏
   服务端授权失败或声称 Auth 已完成，正式 Session/CSRF/Capability 仍等待 M10。
+
+## Scenario: M9 Monaco DiffEditor 模型生命周期
+
+### 1. Scope / Trigger
+
+- 使用 `@monaco-editor/react` 的 `DiffEditor` 展示 Workspace/Proposal 等路由绑定正文时应用。
+- 目标是离页后释放显式 URI 模型，同时避免 Monaco 在 DiffEditor 仍绑定模型时收到提前 `dispose()`。
+
+### 2. Signatures
+
+```tsx
+<DiffEditor
+  key={`${workspaceId}:${proposalId}`}
+  originalModelPath={`inmemory://zhixu/workspaces/${workspaceId}/proposals/${proposalId}/original.md`}
+  modifiedModelPath={`inmemory://zhixu/workspaces/${workspaceId}/proposals/${proposalId}/modified.md`}
+  keepCurrentOriginalModel
+  keepCurrentModifiedModel
+  onMount={releaseDetachedDiffModels}
+/>
+```
+
+### 3. Contracts
+
+- Model URI 必须绑定 Workspace 与资源 ID；路由身份变化必须通过同一身份组成 `key`，使旧 DiffEditor 完整卸载。
+- `keepCurrentOriginalModel` 与 `keepCurrentModifiedModel` 必须同时开启，模型所有权由页面的卸载处理器接管。
+- 监听内部 `getModifiedEditor().onDidDispose`，等待 DiffEditor 已解除模型绑定后，再在微任务中检查并释放模型。
+- 只有 `!model.isDisposed() && !model.isAttachedToEditor()` 时才允许 `model.dispose()`；快速重挂载到同一 URI 的模型必须保留。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| DiffEditor 正常离页，模型未再绑定 | 微任务后 original/modified 各释放一次 |
+| 同 URI 在微任务前被新编辑器绑定 | 不释放任何仍 attached 的模型 |
+| 模型已由其他 owner 释放 | 不重复调用 `dispose()` |
+| Workspace 或 Proposal 路由身份变化 | 旧 editor 完整卸载，只保留新 URI 的两个模型 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：连续进入/离开详情，Monaco registry 稳定为 `2 → 0`，console 没有模型提前释放异常。
+- Base：页面尚未创建模型或 `editor.getModel()` 为空时直接返回。
+- Bad：在 React effect cleanup 或 wrapper 开始卸载时立即释放模型；这会触发 `TextModel got disposed before DiffEditorWidget model got reset`。
+
+### 6. Tests Required
+
+- Component：断言 Workspace/Proposal URI、两个 keep-current 选项和资源身份 `key`。
+- Lifecycle：触发内部 modified editor 的 `onDidDispose`，等待一个微任务后断言 detached 模型恰好释放一次。
+- Remount：让 `isAttachedToEditor()` 返回 `true`，断言快速重挂载时模型不被提前释放。
+- Browser：重复路由切换后检查 Monaco model registry 为 0，并确认 console error/warning 为 0。
+
+### 7. Wrong vs Correct
+
+```tsx
+// Wrong: wrapper 卸载期间模型仍可能绑定在 DiffEditorWidget 上。
+useEffect(() => () => model.dispose(), [model]);
+
+// Correct: 等内部 editor 完成 detach，再释放没有被重新绑定的模型。
+editor.getModifiedEditor().onDidDispose(() => {
+  queueMicrotask(() => {
+    if (!model.isDisposed() && !model.isAttachedToEditor()) model.dispose();
+  });
+});
+```

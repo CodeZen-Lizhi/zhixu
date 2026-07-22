@@ -40,7 +40,8 @@
     "07-19-rag-conversation-sse",
     "07-20-graph-projection-queries",
     "07-21-semantic-link-candidates",
-    "07-21-smart-collection-health"
+    "07-21-smart-collection-health",
+    "07-22-m9-business-frontend"
   ],
   "parent": null,
   "relatedFiles": [],

@@ -56,10 +56,10 @@
 | M8-01 | M8 | 实现 Artifact 大纲、分章生成、来源覆盖、Markdown 导出和入库 Proposal | `internal/artifact/**`, `web/src/features/artifacts/**` | M6-02,M7-03 | 先大纲后正文、缺口显式、导出可追踪 | 产物污染正式知识 | 子 Agent | 待开始 |
 | M8-02 | M8 | 实现 Review Deck/Card、Evidence 绑定、多维评分和 FSRS Adapter | `internal/review/**`, `internal/platform/scheduler/**` | M5-05,M6-02,M8-01 | 卡片失效、答题幂等、评分解释、schedule 同事务 | 复习错误知识 | 子 Agent | 待开始 |
 | M8-03 | M8 | 实现 Interview Session、知识缺口、Learning Path 和 Memory 生命周期 | `internal/review/**`, `internal/memory/**` | M8-02,M7-04 | 面试报告、只记录明确确认 Memory、可编辑删除 | 隐式长期记忆 | 子 Agent | 待开始 |
-| M9-01 | M9 | 实现 Dashboard/Inbox/Documents/Proposals/Workflows/Settings | `web/src/features/**`, `web/src/routes/**` | M1-02,M1-04,M5-02,M5-03 | route integration、空/错/恢复状态、a11y | 页面先于契约漂移 | 子 Agent | 待开始 |
-| M9-02 | M9 | 实现 Diff、证据、审批、冲突和版本合并 UI | `web/src/features/optimization/**`, `web/src/features/proposals/**` | M5-03,M5-04 | 逐项 accept/reject/edit、ETag 冲突合并 | 误导性 Diff | 子 Agent | 待开始 |
-| M9-03 | M9 | 实现 Collection 表格、导出任务、脱敏和结果追踪 | `web/src/features/collections/**`, `internal/export/**` | M7-03,M1-04 | 表格视图、分页/筛选/列、Markdown/JSON 导出、权限/过期 | 擅自引入 XLSX/CSV | 子 Agent | 待开始 |
-| M9-04 | M9 | 实现统一 SSE Event Store、重连、查询失效和异步 UX | `web/src/events/**`, `internal/presentation/sse/**` | M1-04,M4-02 | Last-Event-ID、超窗重查、页面刷新恢复 | SSE 被当事实源 | 子 Agent | 待开始 |
+| M9-01 | M9 | 实现 Dashboard/Inbox/Documents/Proposals/Workflows/Settings | `web/src/features/**`, `web/src/routes/**` | M1-02,M1-04,M5-02,M5-03 | route integration、空/错/恢复状态、a11y | 页面先于契约漂移 | 子 Agent | 已完成：真实 Workspace 列表/API、响应式 shadcn open-code 工作台、严格状态与桌面/移动 smoke 已交付 |
+| M9-02 | M9 | 实现 Diff、证据、审批、冲突和版本合并 UI | `web/src/features/optimization/**`, `web/src/features/proposals/**` | M5-03,M5-04 | 逐项 accept/reject/edit、ETag 冲突合并 | 误导性 Diff | 子 Agent | 已完成当前契约范围：File/Relation Diff、证据/回滚、Approval/Reject、Hash/409 冲突与 Apply Preflight 已交付；编辑后批准和三方合并按未交付能力显式展示 |
+| M9-03 | M9 | 实现异步导出任务、脱敏、权限/过期和结果追踪 | `internal/export/**`, `web/src/features/collections/**` | M7-03,M1-04 | Markdown/JSON 导出、权限/过期、任务恢复；复用已交付 Collection 三视图 | 擅自引入 XLSX/CSV | 子 Agent | 待开始：Collection LIST/TABLE/COMPACT_CARD 已由 M7-03 交付，剩余仅正式导出闭环 |
+| M9-04 | M9 | 实现统一 SSE Event Store、重连、查询失效和异步 UX | `web/src/events/**`, `internal/presentation/sse/**` | M1-04,M4-02 | Last-Event-ID、超窗重查、页面刷新恢复 | SSE 被当事实源 | 子 Agent | 已完成：Workspace 唯一连接、Last-Event-ID、权威回查、定向失效、切换清理和 RAG 迁移已交付 |
 | M10-01 | M10 | 实现 slog/OTel/Metrics/append-only Audit/Secret Redaction | `internal/audit/**`, `internal/observability/**` | M4-01,M5-03,M6-03 | correlation、重试不重复审计、敏感字段扫描 | 日志泄密 | 子 Agent | 待开始 |
 | M10-02 | M10 | 完成认证、Session/Token、CSRF/Origin、Capability 和安全负测 | `internal/auth/**`, `internal/tools/**`, `web/**` | M1-04,M6-03 | auth/security suite 全通过 | 自托管越权 | 主 Agent + 子 Agent | 待开始 |
 | M10-03 | M10 | 完成 50 万容量、EXPLAIN、图谱和前端性能基线 | `bench/**`, `testdata/capacity/**`, `web/**` | M6-01,M7-01,M9-03 | `make benchmark-capacity`; P95 或 ADR 记录 | 性能预算不达标 | 子 Agent | 待开始 |
