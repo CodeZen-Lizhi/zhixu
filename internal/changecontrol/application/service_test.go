@@ -37,10 +37,14 @@ type fakeApprovalDispatcher struct {
 }
 
 type fakeKnowledgeRelationApplier struct {
-	command knowledgeapplication.ApprovedRelationApplyCommand
-	result  knowledgeapplication.ApprovedRelationApplyResult
-	err     error
-	calls   int
+	workspaceID    foundation.ID
+	change         *domain.KnowledgeChange
+	command        knowledgeapplication.ApprovedRelationApplyCommand
+	approvalInput  domain.Approval
+	approvalResult domain.Approval
+	result         knowledgeapplication.ApprovedRelationApplyResult
+	err            error
+	calls          int
 }
 
 func (f *fakeKnowledgeRelationApplier) ApplyApprovedRelation(_ context.Context, command knowledgeapplication.ApprovedRelationApplyCommand) (knowledgeapplication.ApprovedRelationApplyResult, error) {
@@ -61,6 +65,52 @@ func (f *fakeKnowledgeRelationApplier) ApplyApprovedRelation(_ context.Context, 
 		}
 	}
 	return f.result, f.err
+}
+
+func (f *fakeKnowledgeRelationApplier) ApproveAndApplyRelation(_ context.Context, approval domain.Approval) (domain.Approval, knowledgeapplication.ApprovedRelationApplyResult, error) {
+	f.calls++
+	f.approvalInput = approval
+	persisted := approval
+	if f.approvalResult.ID != "" {
+		persisted = f.approvalResult
+	}
+	f.command = knowledgeapplication.ApprovedRelationApplyCommand{
+		WorkspaceID: f.workspaceID,
+		ProposalID:  persisted.ProposalID,
+		RevisionID:  persisted.RevisionID,
+		ApprovalID:  persisted.ID,
+	}
+	if f.result.Relation.WorkspaceID == "" {
+		f.result = validFakeKnowledgeApplyResult(f.workspaceID, f.change, persisted.ID, f.result.Replayed)
+	}
+	return persisted, f.result, f.err
+}
+
+func validFakeKnowledgeApplyResult(workspaceID foundation.ID, change *domain.KnowledgeChange, approvalID foundation.ID, replayed bool) knowledgeapplication.ApprovedRelationApplyResult {
+	relationID := foundation.ID("70000000-0000-4000-8000-000000000001")
+	confirmation := knowledge.Confirmation{Method: knowledge.ConfirmationUserApproval, Reference: string(approvalID)}
+	at := time.Unix(2, 0).UTC()
+	applicability, err := knowledge.ParseApplicability([]byte(`{}`))
+	if err != nil {
+		panic(err)
+	}
+	evidence := knowledge.RelationEvidence{
+		ID: "70000000-0000-4000-8000-000000000002", WorkspaceID: workspaceID, RelationID: relationID,
+		Provenance: knowledge.ProvenanceRef{WorkspaceID: workspaceID, SourceVersionID: "70000000-0000-4000-8000-000000000003", SourceSpanID: "70000000-0000-4000-8000-000000000004"},
+		Reason:     "validated approval evidence", Applicability: applicability, Confirmation: &confirmation, CreatedAt: at,
+	}
+	evidence.EvidenceHash = knowledge.ComputeRelationEvidenceHash(evidence)
+	relation := knowledge.Relation{
+		ID: relationID, WorkspaceID: workspaceID, Source: change.ChangeSet.Source, Target: change.ChangeSet.Target,
+		Type: change.ChangeSet.RelationType, Status: knowledge.RelationStatusConfirmed, Confirmation: &confirmation,
+		Fingerprint:         knowledge.ComputeRelationFingerprint(workspaceID, change.ChangeSet.RelationType, change.ChangeSet.Source, change.ChangeSet.Target),
+		EvidenceFingerprint: knowledge.ComputeRelationEvidenceFingerprint([]knowledge.RelationEvidence{evidence}), Version: 2,
+		CreatedAt: at, UpdatedAt: at,
+	}
+	return knowledgeapplication.ApprovedRelationApplyResult{
+		Relation: relation, Evidence: []knowledge.RelationEvidence{evidence}, ProposalStatus: domain.StatusApplied,
+		ProposalVersion: 4, Replayed: replayed,
+	}
 }
 
 func (f *fakeApprovalDispatcher) DecideAndDispatch(_ context.Context, command ApprovalDispatchCommand) (ApprovalDispatchResult, error) {
@@ -168,6 +218,10 @@ func newTestServiceWithGit(repository *fakeRepo, targets *fakeTargets, git Appro
 }
 
 func newTestServiceWithKnowledgeApply(repository *fakeRepo, targets *fakeTargets, git ApprovalGitInspector, applier knowledgeapplication.ApprovedRelationApplyPort) *Service {
+	if fake, ok := applier.(*fakeKnowledgeRelationApplier); ok {
+		fake.workspaceID = repository.proposal.WorkspaceID
+		fake.change = repository.proposal.Revision.KnowledgeChange
+	}
 	service, err := NewService(repository, &seqIDs{}, foundation.FixedClock{Value: time.Unix(1, 0)}, targets, git, applier)
 	if err != nil {
 		panic(err)
@@ -184,6 +238,10 @@ func newTestDispatchService(repository *fakeRepo, targets *fakeTargets, git Appr
 }
 
 func newTestDispatchServiceWithKnowledgeApply(repository *fakeRepo, targets *fakeTargets, git ApprovalGitInspector, dispatcher ApprovalDispatcher, applier knowledgeapplication.ApprovedRelationApplyPort) *Service {
+	if fake, ok := applier.(*fakeKnowledgeRelationApplier); ok {
+		fake.workspaceID = repository.proposal.WorkspaceID
+		fake.change = repository.proposal.Revision.KnowledgeChange
+	}
 	service, err := NewServiceWithDispatch(repository, &seqIDs{}, foundation.FixedClock{Value: time.Unix(1, 0)}, targets, git, dispatcher, applier)
 	if err != nil {
 		panic(err)
@@ -369,7 +427,7 @@ func TestDecideKnowledgeChangeProposalBypassesFileMutableFacts(t *testing.T) {
 	repository := &fakeRepo{proposal: proposal}
 	targets := &fakeTargets{err: errors.New("must not be called")}
 	git := &fakeApprovalGitInspector{err: errors.New("must not be called")}
-	applier := &fakeKnowledgeRelationApplier{}
+	applier := &fakeKnowledgeRelationApplier{workspaceID: proposal.WorkspaceID, approvalResult: *proposal.Approval}
 	service := newTestServiceWithKnowledgeApply(repository, targets, git, applier)
 	approval, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
 	if err != nil || approval.Decision != domain.DecisionApproved || approval.ApprovedGitHead != nil || targets.calls != 0 || git.calls != 0 || applier.calls != 1 ||
@@ -383,7 +441,7 @@ func TestDecideKnowledgeChangeProposalFailsClosedWithoutApplySeam(t *testing.T) 
 	_, err := newTestServiceWithGit(&fakeRepo{proposal: proposal}, &fakeTargets{}, &fakeApprovalGitInspector{}).
 		DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
 	var classified *foundation.Error
-	if !errors.As(err, &classified) || classified.Code != "KNOWLEDGE_RELATION_APPLIER_UNAVAILABLE" {
+	if !errors.As(err, &classified) || classified.Code != "KNOWLEDGE_RELATION_APPROVAL_UOW_UNAVAILABLE" {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -519,12 +577,113 @@ func TestDecideProposalWithDispatchRoutesKnowledgeChangeWithoutDispatcher(t *tes
 	targets := &fakeTargets{err: errors.New("must not be called")}
 	git := &fakeApprovalGitInspector{err: errors.New("must not be called")}
 	dispatcher := &fakeApprovalDispatcher{err: errors.New("must not be called")}
-	applier := &fakeKnowledgeRelationApplier{}
+	applier := &fakeKnowledgeRelationApplier{workspaceID: proposal.WorkspaceID, approvalResult: *proposal.Approval}
 	service := newTestDispatchServiceWithKnowledgeApply(repository, targets, git, dispatcher, applier)
 
 	result, err := service.DecideProposalWithDispatch(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
 	if err != nil || result.Workflow != nil || result.Approval.Decision != domain.DecisionApproved || targets.calls != 0 || git.calls != 0 || dispatcher.calls != 0 || applier.calls != 1 {
 		t.Fatalf("result=%#v target calls=%d git calls=%d dispatch calls=%d apply calls=%d err=%v", result, targets.calls, git.calls, dispatcher.calls, applier.calls, err)
+	}
+}
+
+func TestDecideProposalWithDispatchUsesAtomicReplayResult(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	proposal.Status = domain.StatusReady
+	proposal.Version = 1
+	proposal.Approval = nil
+	applier := &fakeKnowledgeRelationApplier{workspaceID: proposal.WorkspaceID, result: knowledgeapplication.ApprovedRelationApplyResult{Replayed: true}}
+	service := newTestDispatchServiceWithKnowledgeApply(&fakeRepo{proposal: proposal}, &fakeTargets{err: errors.New("must not be called")}, &fakeApprovalGitInspector{err: errors.New("must not be called")}, &fakeApprovalDispatcher{err: errors.New("must not be called")}, applier)
+
+	result, err := service.DecideProposalWithDispatch(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err != nil || !result.Replayed || result.Approval.ID == "" || applier.calls != 1 {
+		t.Fatalf("result=%#v calls=%d err=%v", result, applier.calls, err)
+	}
+}
+
+func TestDecideKnowledgeChangeProposalRejectsInvalidAtomicApplyResult(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	applier := &fakeKnowledgeRelationApplier{
+		workspaceID:    proposal.WorkspaceID,
+		approvalResult: *proposal.Approval,
+		result: knowledgeapplication.ApprovedRelationApplyResult{
+			Relation: knowledge.Relation{
+				WorkspaceID: "different-workspace", Status: knowledge.RelationStatusConfirmed,
+				Confirmation: &knowledge.Confirmation{Method: knowledge.ConfirmationUserApproval, Reference: string(proposal.Approval.ID)},
+			},
+			Evidence:        []knowledge.RelationEvidence{{}},
+			ProposalStatus:  domain.StatusApplied,
+			ProposalVersion: 4,
+		},
+	}
+	service := newTestServiceWithKnowledgeApply(&fakeRepo{proposal: proposal}, &fakeTargets{err: errors.New("must not be called")}, &fakeApprovalGitInspector{err: errors.New("must not be called")}, applier)
+
+	_, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "KNOWLEDGE_RELATION_APPLY_RESULT_INVALID" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateApprovedKnowledgeRelationResultAllowsHistoricalConfirmedEvidence(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	result := validFakeKnowledgeApplyResult(proposal.WorkspaceID, proposal.Revision.KnowledgeChange, proposal.Approval.ID, false)
+	historicalConfirmation := knowledge.Confirmation{Method: knowledge.ConfirmationUserApproval, Reference: "historical-approval"}
+	historicalEvidence := result.Evidence[0]
+	historicalEvidence.ID = "70000000-0000-4000-8000-000000000005"
+	historicalEvidence.Provenance.SourceSpanID = "70000000-0000-4000-8000-000000000006"
+	historicalEvidence.Reason = "historical confirmed evidence"
+	historicalEvidence.Confirmation = &historicalConfirmation
+	historicalEvidence.EvidenceHash = knowledge.ComputeRelationEvidenceHash(historicalEvidence)
+	result.Evidence = append([]knowledge.RelationEvidence{historicalEvidence}, result.Evidence...)
+	result.Relation.EvidenceFingerprint = knowledge.ComputeRelationEvidenceFingerprint(result.Evidence)
+
+	if err := validateApprovedKnowledgeRelationResult(proposal, *proposal.Approval, result); err != nil {
+		t.Fatalf("historical confirmed evidence should remain valid: %v", err)
+	}
+}
+
+func TestDecideKnowledgeChangeProposalRejectsSkippedApplyVersion(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	result := validFakeKnowledgeApplyResult(proposal.WorkspaceID, proposal.Revision.KnowledgeChange, proposal.Approval.ID, false)
+	result.ProposalVersion = 99
+	applier := &fakeKnowledgeRelationApplier{workspaceID: proposal.WorkspaceID, approvalResult: *proposal.Approval, result: result}
+	service := newTestServiceWithKnowledgeApply(&fakeRepo{proposal: proposal}, &fakeTargets{err: errors.New("must not be called")}, &fakeApprovalGitInspector{err: errors.New("must not be called")}, applier)
+
+	_, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "KNOWLEDGE_RELATION_APPLY_RESULT_INVALID" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDecideKnowledgeChangeProposalRequiresReplayForAppliedProposal(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	proposal.Status = domain.StatusApplied
+	proposal.Version = 4
+	result := validFakeKnowledgeApplyResult(proposal.WorkspaceID, proposal.Revision.KnowledgeChange, proposal.Approval.ID, false)
+	result.ProposalVersion = proposal.Version
+	applier := &fakeKnowledgeRelationApplier{workspaceID: proposal.WorkspaceID, approvalResult: *proposal.Approval, result: result}
+	service := newTestServiceWithKnowledgeApply(&fakeRepo{proposal: proposal}, &fakeTargets{err: errors.New("must not be called")}, &fakeApprovalGitInspector{err: errors.New("must not be called")}, applier)
+
+	_, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "KNOWLEDGE_RELATION_APPLY_RESULT_INVALID" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDecideKnowledgeChangeProposalRejectsDifferentPersistedApproval(t *testing.T) {
+	proposal := knowledgeChangeProposal()
+	result := validFakeKnowledgeApplyResult(proposal.WorkspaceID, proposal.Revision.KnowledgeChange, proposal.Approval.ID, false)
+	otherApproval := *proposal.Approval
+	otherApproval.ID = "60000000-0000-4000-8000-000000000005"
+	applier := &fakeKnowledgeRelationApplier{workspaceID: proposal.WorkspaceID, approvalResult: otherApproval, result: result}
+	service := newTestServiceWithKnowledgeApply(&fakeRepo{proposal: proposal}, &fakeTargets{err: errors.New("must not be called")}, &fakeApprovalGitInspector{err: errors.New("must not be called")}, applier)
+
+	_, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "KNOWLEDGE_RELATION_APPROVAL_BINDING_INVALID" {
+		t.Fatalf("err=%v", err)
 	}
 }
 

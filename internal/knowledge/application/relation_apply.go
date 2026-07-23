@@ -45,6 +45,12 @@ type ApprovedRelationApplyPort interface {
 	ApplyApprovedRelation(context.Context, ApprovedRelationApplyCommand) (ApprovedRelationApplyResult, error)
 }
 
+// ApprovedRelationApprovalPort 在一个数据库事务内持久化 Approval，并应用正式 Relation。
+// 普通 apply 错误必须回滚 Approval、Proposal 状态和 Relation；基线漂移可以提交 needs_revision。
+type ApprovedRelationApprovalPort interface {
+	ApproveAndApplyRelation(context.Context, changecontroldomain.Approval) (changecontroldomain.Approval, ApprovedRelationApplyResult, error)
+}
+
 // ValidateApprovedRelationApplyCommand 校验跨模块身份边界。
 func ValidateApprovedRelationApplyCommand(command ApprovedRelationApplyCommand) error {
 	if !validApplyID(command.WorkspaceID) || !validApplyID(command.ProposalID) ||

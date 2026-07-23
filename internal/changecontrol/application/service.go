@@ -53,9 +53,9 @@ type Service struct {
 	targets    TargetReader
 	git        ApprovalGitInspector
 	dispatcher ApprovalDispatcher
-	// knowledgeApplier 是 typed knowledge_change 的唯一正式 Relation apply seam。
+	// knowledgeApprovalApplier 是 typed knowledge_change 的原子 Approval→Relation seam。
 	// 为空时 file_patch 仍可用，但批准 knowledge_change 必须 fail closed。
-	knowledgeApplier knowledgeapplication.ApprovedRelationApplyPort
+	knowledgeApprovalApplier knowledgeapplication.ApprovedRelationApprovalPort
 }
 
 // NewServiceWithDispatch 创建启用 Approval→Workflow/River 原子投递的 Change Control 应用服务。
@@ -84,7 +84,9 @@ func NewService(repo domain.Repository, ids foundation.IDGenerator, clock founda
 	}
 	service := &Service{repo: repo, ids: ids, clock: clock, targets: targets, git: git}
 	if len(knowledgeAppliers) == 1 && !isNilKnowledgeRelationApplier(knowledgeAppliers[0]) {
-		service.knowledgeApplier = knowledgeAppliers[0]
+		if approvalApplier, ok := knowledgeAppliers[0].(knowledgeapplication.ApprovedRelationApprovalPort); ok && !isNilKnowledgeRelationApprovalApplier(approvalApplier) {
+			service.knowledgeApprovalApplier = approvalApplier
+		}
 	}
 	return service, nil
 }
@@ -299,16 +301,12 @@ func (s *Service) decideProposalLegacy(ctx context.Context, proposalID, revision
 	if err := validateProposalForApproval(proposal); err != nil {
 		return domain.Approval{}, err
 	}
-	if proposalType(proposal) == domain.ProposalTypeKnowledgeChange && decision == domain.DecisionApproved && isNilKnowledgeRelationApplier(s.knowledgeApplier) {
-		return domain.Approval{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "KNOWLEDGE_RELATION_APPLIER_UNAVAILABLE", false, errors.New("knowledge relation apply seam is not configured"))
+	if proposalType(proposal) == domain.ProposalTypeKnowledgeChange && decision == domain.DecisionApproved {
+		approval, _, approvalErr := s.approveKnowledgeChangeProposal(ctx, proposal, revisionID, changeHash)
+		return approval, approvalErr
 	}
 	if proposal.Approval != nil {
 		if proposal.Approval.RevisionID == revisionID && proposal.Approval.ChangeHash == strings.ToLower(changeHash) && proposal.Approval.Decision == decision {
-			if proposalType(proposal) == domain.ProposalTypeKnowledgeChange && decision == domain.DecisionApproved {
-				if _, err := s.applyApprovedKnowledgeRelation(ctx, *proposal.Approval); err != nil {
-					return domain.Approval{}, err
-				}
-			}
 			return *proposal.Approval, nil
 		}
 		return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_DECISION_CONFLICT", false, errors.New("proposal already has a different approval decision"))
@@ -346,11 +344,6 @@ func (s *Service) decideProposalLegacy(ctx context.Context, proposalID, revision
 	if err != nil {
 		return domain.Approval{}, err
 	}
-	if proposalType(proposal) == domain.ProposalTypeKnowledgeChange && approval.Decision == domain.DecisionApproved {
-		if _, err := s.applyApprovedKnowledgeRelation(ctx, approval); err != nil {
-			return domain.Approval{}, err
-		}
-	}
 	return approval, nil
 }
 
@@ -375,8 +368,12 @@ func (s *Service) DecideProposalWithDispatch(ctx context.Context, proposalID, re
 		return ApprovalDecisionResult{}, err
 	}
 	if proposalType(proposal) == domain.ProposalTypeKnowledgeChange {
-		if decision == domain.DecisionApproved && isNilKnowledgeRelationApplier(s.knowledgeApplier) {
-			return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "KNOWLEDGE_RELATION_APPLIER_UNAVAILABLE", false, errors.New("knowledge relation apply seam is not configured"))
+		if decision == domain.DecisionApproved {
+			approval, replayed, approvalErr := s.approveKnowledgeChangeProposal(ctx, proposal, revisionID, changeHash)
+			if approvalErr != nil {
+				return ApprovalDecisionResult{Approval: approval, Replayed: replayed}, approvalErr
+			}
+			return ApprovalDecisionResult{Approval: approval, Replayed: replayed}, nil
 		}
 		approval, approvalErr := s.decideProposalLegacy(ctx, proposalID, revisionID, changeHash, decision)
 		if approvalErr != nil {
@@ -437,6 +434,36 @@ func (s *Service) DecideProposalWithDispatch(ctx context.Context, proposalID, re
 		command.ObservedGitHead = head
 	}
 	return s.dispatchApproval(ctx, command)
+}
+
+func (s *Service) approveKnowledgeChangeProposal(ctx context.Context, proposal domain.Proposal, revisionID foundation.ID, changeHash string) (domain.Approval, bool, error) {
+	if isNilKnowledgeRelationApprovalApplier(s.knowledgeApprovalApplier) {
+		return domain.Approval{}, false, foundation.NewError(foundation.ErrorDependencyUnavailable, "KNOWLEDGE_RELATION_APPROVAL_UOW_UNAVAILABLE", false, errors.New("knowledge relation approval UoW is not configured"))
+	}
+	requested := domain.Approval{
+		ProposalID: proposal.ID, RevisionID: revisionID,
+		ChangeHash: strings.ToLower(changeHash), Decision: domain.DecisionApproved, DecidedAt: s.clock.Now(),
+	}
+	if proposal.Approval != nil && proposal.Approval.ID != "" {
+		// Exact replays must not depend on a fresh ID or clock value. The
+		// persisted Approval is the only authoritative identity after response
+		// loss or a previously committed atomic apply.
+		requested = *proposal.Approval
+	} else {
+		approvalID, err := s.ids.New()
+		if err != nil {
+			return domain.Approval{}, false, err
+		}
+		requested.ID = approvalID
+	}
+	approval, result, err := s.knowledgeApprovalApplier.ApproveAndApplyRelation(ctx, requested)
+	if err != nil {
+		return approval, proposal.Approval != nil, err
+	}
+	if err := validateApprovedKnowledgeRelationResult(proposal, approval, result); err != nil {
+		return domain.Approval{}, false, err
+	}
+	return approval, proposal.Approval != nil || result.Replayed, nil
 }
 
 func (s *Service) dispatchApproval(ctx context.Context, command ApprovalDispatchCommand) (ApprovalDecisionResult, error) {

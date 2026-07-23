@@ -16,6 +16,8 @@ const (
 	ProposalRejectedEventType = "proposal.rejected"
 	// ProposalAppliedEventType 表示 knowledge_change 已安全应用。
 	ProposalAppliedEventType = "proposal.applied"
+	// ProposalNeedsRevisionEventType 表示批准后的知识变更因基线漂移需要新 Revision。
+	ProposalNeedsRevisionEventType = "proposal.needs_revision"
 )
 
 // ProposalStatusRequest 构造只携带稳定标识和状态的 Proposal SSE 事件。

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
@@ -38,6 +39,7 @@ type ApprovedRelationApplyRepository struct {
 }
 
 var _ knowledgeapplication.ApprovedRelationApplyPort = (*ApprovedRelationApplyRepository)(nil)
+var _ knowledgeapplication.ApprovedRelationApprovalPort = (*ApprovedRelationApplyRepository)(nil)
 
 // NewApprovedRelationApplyRepository 创建 Approval 到 Knowledge 的正式写入 adapter；可选事件追加器与 Relation apply 共用事务。
 func NewApprovedRelationApplyRepository(db DB, ids foundation.IDGenerator, clock foundation.Clock, appenders ...eventsapplication.Appender) (*ApprovedRelationApplyRepository, error) {
@@ -52,6 +54,240 @@ func NewApprovedRelationApplyRepository(db DB, ids foundation.IDGenerator, clock
 		events = appenders[0]
 	}
 	return &ApprovedRelationApplyRepository{db: db, ids: ids, clock: clock, events: events}, nil
+}
+
+// ApproveAndApplyRelation 在一个 PostgreSQL 事务内创建 Approval、推进 Proposal，
+// 并应用正式 Relation。普通 apply 失败会回滚整笔事务；基线漂移只提交
+// Approval 与 needs_revision，供调用方创建新 Revision。相同审批的响应丢失会
+// 通过已有 Approval 和 Knowledge receipt 精确重放。
+func (repository *ApprovedRelationApplyRepository) ApproveAndApplyRelation(ctx context.Context, approval changecontroldomain.Approval) (changecontroldomain.Approval, knowledgeapplication.ApprovedRelationApplyResult, error) {
+	if repository == nil || isNilRelationApplyDependency(repository.db) || isNilRelationApplyDependency(repository.ids) || isNilRelationApplyDependency(repository.clock) {
+		return changecontroldomain.Approval{}, knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyUnavailable(errors.New("relation approval repository is unavailable"))
+	}
+	if err := validateRelationApprovalInput(approval); err != nil {
+		return changecontroldomain.Approval{}, knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyInvalid(err)
+	}
+	tx, err := repository.db.Begin(ctx)
+	if err != nil {
+		return changecontroldomain.Approval{}, knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPROVAL_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	lockTarget, err := lockRelationApplyCandidateBeforeProposal(ctx, tx, approval.ProposalID, approval.RevisionID)
+	if err != nil {
+		return changecontroldomain.Approval{}, knowledgeapplication.ApprovedRelationApplyResult{}, err
+	}
+	binding, err := loadRelationApprovalBinding(ctx, tx, approval)
+	if err != nil {
+		return changecontroldomain.Approval{}, knowledgeapplication.ApprovedRelationApplyResult{}, err
+	}
+	if binding.workspaceID != lockTarget.workspaceID {
+		return changecontroldomain.Approval{}, knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyConsistency(errors.New("relation approval workspace binding changed"))
+	}
+	persistedApproval, err := repository.persistRelationApproval(ctx, tx, approval, binding)
+	if err != nil {
+		return persistedApproval, knowledgeapplication.ApprovedRelationApplyResult{}, err
+	}
+	command := knowledgeapplication.ApprovedRelationApplyCommand{
+		WorkspaceID: binding.workspaceID,
+		ProposalID:  persistedApproval.ProposalID,
+		RevisionID:  persistedApproval.RevisionID,
+		ApprovalID:  persistedApproval.ID,
+	}
+	requestHash, err := knowledgeapplication.RelationApplyRequestHash(command)
+	if err != nil {
+		return changecontroldomain.Approval{}, knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyInvalid(err)
+	}
+	result, err := repository.applyApprovedRelationTx(
+		ctx, tx, command,
+		knowledgeapplication.RelationApplyIdempotencyKey(command.ApprovalID), requestHash,
+	)
+	var stale *relationApplyNeedsRevision
+	if errors.As(err, &stale) {
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return changecontroldomain.Approval{}, knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(commitErr, "RELATION_PROPOSAL_APPROVAL_STALE_COMMIT_FAILED")
+		}
+		return persistedApproval, knowledgeapplication.ApprovedRelationApplyResult{}, foundation.NewError(foundation.ErrorVersionConflict, "RELATION_PROPOSAL_BASE_STALE", false, stale)
+	}
+	if err != nil {
+		return changecontroldomain.Approval{}, knowledgeapplication.ApprovedRelationApplyResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return changecontroldomain.Approval{}, knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPROVAL_COMMIT_FAILED")
+	}
+	return persistedApproval, result, nil
+}
+
+type relationApprovalBinding struct {
+	workspaceID     foundation.ID
+	status          changecontroldomain.ProposalStatus
+	proposalVersion int64
+	revisionHash    string
+	existing        *changecontroldomain.Approval
+}
+
+// relationApplyLockTarget 是在锁 Proposal 前确定的 Candidate 锁目标。
+// Proposal Revision 为不可变事实，先锁 Candidate 可让 Candidate Confirm、旧 Apply
+// 与原子 Approval UoW 使用同一锁序，避免 Proposal↔Candidate 反向等待。
+type relationApplyLockTarget struct {
+	workspaceID foundation.ID
+	candidateID foundation.ID
+}
+
+func lockRelationApplyCandidateBeforeProposal(ctx context.Context, tx pgx.Tx, proposalID, revisionID foundation.ID) (relationApplyLockTarget, error) {
+	var target relationApplyLockTarget
+	var workspaceID string
+	var targetRefsRaw []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT p.workspace_id::text,r.target_refs
+		FROM change_control.proposal p
+		JOIN change_control.proposal_revision r ON r.proposal_id=p.id AND r.id=$2
+		WHERE p.id=$1`, string(proposalID), string(revisionID)).Scan(&workspaceID, &targetRefsRaw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return relationApplyLockTarget{}, relationApplyNotFound(err)
+		}
+		return relationApplyLockTarget{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPLY_LOCK_TARGET_QUERY_FAILED")
+	}
+	target.workspaceID = foundation.ID(workspaceID)
+	var refs []changecontroldomain.KnowledgeTargetRef
+	if json.Unmarshal(targetRefsRaw, &refs) != nil || len(refs) != 1 || refs[0].Type != changecontroldomain.KnowledgeTargetRefRelationCandidate {
+		return relationApplyLockTarget{}, relationApplyConsistency(errors.New("knowledge relation proposal candidate target is invalid"))
+	}
+	parsed, err := foundation.ParseID(string(refs[0].ID))
+	if err != nil || parsed != refs[0].ID {
+		return relationApplyLockTarget{}, relationApplyConsistency(errors.New("knowledge relation proposal candidate identity is invalid"))
+	}
+	target.candidateID = refs[0].ID
+	var lockedID string
+	if err := tx.QueryRow(ctx, `
+		SELECT id::text
+		FROM graph.semantic_link_candidate
+		WHERE workspace_id=$1 AND id=$2
+		FOR UPDATE`, string(target.workspaceID), string(target.candidateID)).Scan(&lockedID); errors.Is(err, pgx.ErrNoRows) {
+		// 缺失 Candidate 在后续基线校验中转为 needs_revision；此处没有可锁的行。
+		return target, nil
+	} else if err != nil {
+		return relationApplyLockTarget{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPLY_CANDIDATE_LOCK_FAILED")
+	}
+	return target, nil
+}
+
+func validateRelationApprovalInput(approval changecontroldomain.Approval) error {
+	for name, value := range map[string]foundation.ID{
+		"proposal_id": approval.ProposalID,
+		"revision_id": approval.RevisionID,
+		"approval_id": approval.ID,
+	} {
+		parsed, err := foundation.ParseID(string(value))
+		if err != nil || parsed != value {
+			return errors.New(name + " is not a canonical UUID")
+		}
+	}
+	if !changecontroldomain.ValidHash(approval.ChangeHash) {
+		return errors.New("approval change hash is invalid")
+	}
+	if approval.Decision != changecontroldomain.DecisionApproved {
+		return errors.New("knowledge relation approval must be approved")
+	}
+	if approval.ApprovedGitHead != nil {
+		return errors.New("knowledge relation approval cannot bind a git head")
+	}
+	if approval.DecidedAt.IsZero() {
+		return errors.New("approval decision time is required")
+	}
+	return nil
+}
+
+func loadRelationApprovalBinding(ctx context.Context, tx pgx.Tx, approval changecontroldomain.Approval) (relationApprovalBinding, error) {
+	var binding relationApprovalBinding
+	var workspaceID, status, revisionHash string
+	err := tx.QueryRow(ctx, `
+		SELECT p.workspace_id::text,p.status,p.version,r.change_hash
+		FROM change_control.proposal p
+		JOIN change_control.proposal_revision r ON r.proposal_id=p.id AND r.id=$2
+		WHERE p.id=$1
+		FOR UPDATE OF p,r`, string(approval.ProposalID), string(approval.RevisionID)).Scan(
+		&workspaceID, &status, &binding.proposalVersion, &revisionHash,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return relationApprovalBinding{}, relationApplyNotFound(err)
+	}
+	if err != nil {
+		return relationApprovalBinding{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPROVAL_BINDING_QUERY_FAILED")
+	}
+	binding.workspaceID = foundation.ID(workspaceID)
+	binding.status = changecontroldomain.ProposalStatus(status)
+	binding.revisionHash = strings.ToLower(revisionHash)
+	var existingID, existingProposalID, existingRevisionID, existingHash, existingDecision string
+	var approvedGitHead *string
+	var decidedAt time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT id::text,proposal_id::text,revision_id::text,change_hash,decision,approved_git_head,decided_at
+		FROM change_control.approval
+		WHERE revision_id=$1
+		FOR UPDATE`, string(approval.RevisionID)).Scan(
+		&existingID, &existingProposalID, &existingRevisionID, &existingHash, &existingDecision, &approvedGitHead, &decidedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return binding, nil
+	}
+	if err != nil {
+		return relationApprovalBinding{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPROVAL_QUERY_FAILED")
+	}
+	persisted := changecontroldomain.Approval{
+		ID: foundation.ID(existingID), ProposalID: foundation.ID(existingProposalID), RevisionID: foundation.ID(existingRevisionID),
+		ChangeHash: strings.ToLower(existingHash), Decision: changecontroldomain.Decision(existingDecision),
+		ApprovedGitHead: approvedGitHead, DecidedAt: decidedAt,
+	}
+	binding.existing = &persisted
+	return binding, nil
+}
+
+func (repository *ApprovedRelationApplyRepository) persistRelationApproval(ctx context.Context, tx pgx.Tx, requested changecontroldomain.Approval, binding relationApprovalBinding) (changecontroldomain.Approval, error) {
+	if binding.existing != nil {
+		existing := *binding.existing
+		if existing.ProposalID != requested.ProposalID || existing.RevisionID != requested.RevisionID ||
+			!strings.EqualFold(existing.ChangeHash, requested.ChangeHash) || existing.Decision != requested.Decision ||
+			(existing.ApprovedGitHead != nil) {
+			return changecontroldomain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_DECISION_CONFLICT", false, errors.New("proposal already has a different approval decision"))
+		}
+		if binding.status == changecontroldomain.StatusNeedsRevision {
+			return existing, foundation.NewError(foundation.ErrorVersionConflict, "RELATION_PROPOSAL_BASE_STALE", false, errors.New("relation proposal requires revision"))
+		}
+		if binding.status != changecontroldomain.StatusApproved && binding.status != changecontroldomain.StatusApplied {
+			return changecontroldomain.Approval{}, relationApplyConsistency(errors.New("persisted relation approval has an invalid proposal status"))
+		}
+		return existing, nil
+	}
+	if binding.status != changecontroldomain.StatusReady {
+		return changecontroldomain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_NOT_READY_FOR_REVIEW", false, errors.New("proposal is not ready for review"))
+	}
+	if !strings.EqualFold(binding.revisionHash, requested.ChangeHash) {
+		return changecontroldomain.Approval{}, foundation.NewError(foundation.ErrorConsistencyViolation, "CHANGE_HASH_MISMATCH", false, errors.New("change hash mismatch"))
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO change_control.approval(id,proposal_id,revision_id,change_hash,decision,approved_git_head,decided_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7)`, string(requested.ID), string(requested.ProposalID), string(requested.RevisionID),
+		strings.ToLower(requested.ChangeHash), string(requested.Decision), requested.ApprovedGitHead, requested.DecidedAt.UTC()); err != nil {
+		return changecontroldomain.Approval{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPROVAL_CREATE_FAILED")
+	}
+	newVersion, err := transitionRelationApplyProposal(ctx, tx, requested.ProposalID, binding.proposalVersion,
+		changecontroldomain.StatusReady, changecontroldomain.StatusApproved, requested.DecidedAt)
+	if err != nil {
+		return changecontroldomain.Approval{}, err
+	}
+	if !isNilRelationApplyDependency(repository.events) {
+		request := changecontroleventcontract.ProposalStatusRequest(
+			binding.workspaceID, requested.ProposalID, requested.ID,
+			changecontroleventcontract.ProposalApprovedEventType, string(changecontroldomain.StatusApproved), newVersion, requested.DecidedAt,
+		)
+		if _, _, err := repository.events.AppendTx(ctx, tx, request); err != nil {
+			return changecontroldomain.Approval{}, err
+		}
+	}
+	requested.ChangeHash = strings.ToLower(requested.ChangeHash)
+	requested.DecidedAt = requested.DecidedAt.UTC()
+	return requested, nil
 }
 
 // ApplyApprovedRelation 重新校验 Approval、typed Revision、Candidate、端点版本和
@@ -75,6 +311,13 @@ func (repository *ApprovedRelationApplyRepository) ApplyApprovedRelation(ctx con
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
+	lockTarget, err := lockRelationApplyCandidateBeforeProposal(ctx, tx, command.ProposalID, command.RevisionID)
+	if err != nil {
+		return knowledgeapplication.ApprovedRelationApplyResult{}, err
+	}
+	if lockTarget.workspaceID != command.WorkspaceID {
+		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyConsistency(errors.New("relation apply workspace binding changed"))
+	}
 	result, err := repository.applyApprovedRelationTx(ctx, tx, command, idempotencyKey, requestHash)
 	var stale *relationApplyNeedsRevision
 	if errors.As(err, &stale) {
@@ -99,16 +342,16 @@ func (repository *ApprovedRelationApplyRepository) applyApprovedRelationTx(
 	idempotencyKey string,
 	requestHash string,
 ) (knowledgeapplication.ApprovedRelationApplyResult, error) {
+	proposal, err := loadApprovedRelationProposal(ctx, tx, command)
+	if err != nil {
+		return knowledgeapplication.ApprovedRelationApplyResult{}, err
+	}
 	if err := lockRelationApplyReceipt(ctx, tx, command.WorkspaceID, idempotencyKey); err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, err
 	}
 	receipt, err := loadReceipt(ctx, tx, command.WorkspaceID, idempotencyKey)
 	if err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPLY_RECEIPT_QUERY_FAILED")
-	}
-	proposal, err := loadApprovedRelationProposal(ctx, tx, command)
-	if err != nil {
-		return knowledgeapplication.ApprovedRelationApplyResult{}, err
 	}
 	if receipt != nil {
 		return repository.replayApprovedRelationApply(ctx, tx, command, requestHash, proposal, receipt)
@@ -160,13 +403,23 @@ func (repository *ApprovedRelationApplyRepository) applyApprovedRelationTx(
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))`, string(command.WorkspaceID), relationFingerprint); err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPLY_RELATION_LOCK_FAILED")
 	}
-	if _, err := loadRelationByFingerprint(ctx, tx, command.WorkspaceID, relationFingerprint); err == nil {
-		return repository.markNeedsRevision(ctx, tx, proposal, "canonical relation was created after proposal review")
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPLY_RELATION_QUERY_FAILED")
+	existingResult, relationErr := loadRelationByFingerprint(ctx, tx, command.WorkspaceID, relationFingerprint)
+	if relationErr != nil && !errors.Is(relationErr, pgx.ErrNoRows) {
+		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(relationErr, "RELATION_PROPOSAL_APPLY_RELATION_QUERY_FAILED")
+	}
+	var existing *domain.RelationResult
+	if relationErr == nil {
+		if err := validateReusableSuggestedRelation(existingResult, command.WorkspaceID, proposal.change.ChangeSet, relationFingerprint); err != nil {
+			return repository.markNeedsRevision(ctx, tx, proposal, "canonical relation already exists in a non-reusable state")
+		}
+		existing = &existingResult
 	}
 
-	at := latestRelationApplyTime(repository.clock.Now().UTC(), proposal.UpdatedAt, proposal.Approval.DecidedAt, candidate.UpdatedAt)
+	atValues := []time.Time{repository.clock.Now().UTC(), proposal.UpdatedAt, proposal.Approval.DecidedAt, candidate.UpdatedAt}
+	if existing != nil {
+		atValues = append(atValues, existing.Relation.UpdatedAt)
+	}
+	at := latestRelationApplyTime(atValues...)
 	if at.IsZero() {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyUnavailable(errors.New("relation apply clock returned zero time"))
 	}
@@ -175,33 +428,63 @@ func (repository *ApprovedRelationApplyRepository) applyApprovedRelationTx(
 		return knowledgeapplication.ApprovedRelationApplyResult{}, err
 	}
 
-	relationID, err := repository.ids.New()
-	if err != nil {
-		return knowledgeapplication.ApprovedRelationApplyResult{}, err
-	}
 	confirmation := domain.Confirmation{Method: domain.ConfirmationUserApproval, Reference: string(command.ApprovalID)}
+	relationID := foundation.ID("")
+	if existing != nil {
+		relationID = existing.Relation.ID
+	} else {
+		relationID, err = repository.ids.New()
+		if err != nil {
+			return knowledgeapplication.ApprovedRelationApplyResult{}, err
+		}
+	}
 	evidence, err := repository.buildConfirmedRelationEvidence(candidate, relationID, confirmation, applicability, at)
 	if err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, err
 	}
-	confidence := candidate.Confidence
-	relation := domain.Relation{
-		ID: relationID, WorkspaceID: command.WorkspaceID,
-		Source: proposal.change.ChangeSet.Source, Target: proposal.change.ChangeSet.Target,
-		Type: proposal.change.ChangeSet.RelationType, Status: domain.RelationStatusSuggested,
-		ConfidenceScore: &confidence, Fingerprint: relationFingerprint,
-		EvidenceFingerprint: domain.ComputeRelationEvidenceFingerprint(evidence),
-		Version:             1, CreatedAt: at, UpdatedAt: at,
-	}
-	if err := domain.ValidateRelationAggregate(relation, evidence); err != nil {
-		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyConsistency(err)
-	}
-	inserted, err := insertRelation(ctx, tx, relation)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return repository.markNeedsRevisionAtVersion(ctx, tx, proposal, applyingVersion, changecontroldomain.StatusApplying, "canonical relation was created concurrently")
-	}
-	if err != nil {
-		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPLY_RELATION_CREATE_FAILED")
+	allEvidence := evidence
+	if existing != nil {
+		allEvidence = append(append([]domain.RelationEvidence(nil), existing.Evidence...), evidence...)
+	} else {
+		confidence := candidate.Confidence
+		relation := domain.Relation{
+			ID: relationID, WorkspaceID: command.WorkspaceID,
+			Source: proposal.change.ChangeSet.Source, Target: proposal.change.ChangeSet.Target,
+			Type: proposal.change.ChangeSet.RelationType, Status: domain.RelationStatusSuggested,
+			ConfidenceScore: &confidence, Fingerprint: relationFingerprint,
+			EvidenceFingerprint: domain.ComputeRelationEvidenceFingerprint(allEvidence),
+			Version:             1, CreatedAt: at, UpdatedAt: at,
+		}
+		if err := domain.ValidateRelationAggregate(relation, allEvidence); err != nil {
+			return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyConsistency(err)
+		}
+		inserted, insertErr := insertRelation(ctx, tx, relation)
+		if errors.Is(insertErr, pgx.ErrNoRows) {
+			// A regular SuggestRelation does not take the apply advisory lock. It can
+			// win the fingerprint unique constraint after the initial lookup above.
+			// Re-read that winner and follow the same Suggested-reuse path instead of
+			// incorrectly terminating an otherwise valid approval as stale.
+			winner, loadErr := loadRelationByFingerprint(ctx, tx, command.WorkspaceID, relationFingerprint)
+			if loadErr != nil {
+				return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(loadErr, "RELATION_PROPOSAL_APPLY_RELATION_QUERY_FAILED")
+			}
+			if reuseErr := validateReusableSuggestedRelation(winner, command.WorkspaceID, proposal.change.ChangeSet, relationFingerprint); reuseErr != nil {
+				return repository.markNeedsRevisionAtVersion(ctx, tx, proposal, applyingVersion, changecontroldomain.StatusApplying, "canonical relation was created concurrently in a non-reusable state")
+			}
+			existing = &winner
+			relationID = winner.Relation.ID
+			at = latestRelationApplyTime(at, winner.Relation.UpdatedAt)
+			evidence, err = repository.buildConfirmedRelationEvidence(candidate, relationID, confirmation, applicability, at)
+			if err != nil {
+				return knowledgeapplication.ApprovedRelationApplyResult{}, err
+			}
+			allEvidence = append(append([]domain.RelationEvidence(nil), winner.Evidence...), evidence...)
+		} else if insertErr != nil {
+			return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(insertErr, "RELATION_PROPOSAL_APPLY_RELATION_CREATE_FAILED")
+		}
+		if existing == nil {
+			relationID = inserted.ID
+		}
 	}
 	for _, item := range evidence {
 		if err := insertRelationEvidence(ctx, tx, item); err != nil {
@@ -210,13 +493,14 @@ func (repository *ApprovedRelationApplyRepository) applyApprovedRelationTx(
 	}
 	confirmed, err := scanRelation(tx.QueryRow(ctx, `
 		UPDATE core.relation
-		SET status=$1,confirmation_method=$2,confirmation_ref=$3,version=version+1,updated_at=$4
-		WHERE workspace_id=$5 AND id=$6 AND version=1 AND status=$7
+		SET status=$1,confirmation_method=$2,confirmation_ref=$3,evidence_fingerprint=$4,version=version+1,updated_at=$5
+		WHERE workspace_id=$6 AND id=$7 AND version=$8 AND status=$9
 		RETURNING id::text,workspace_id::text,source_node_type,source_node_id::text,target_node_type,target_node_id::text,
 			relation_type,status,confirmation_method,confirmation_ref,confidence_score,valid_from,valid_to,
 			fingerprint,evidence_fingerprint,version,created_at,updated_at`,
-		string(domain.RelationStatusConfirmed), string(confirmation.Method), confirmation.Reference, at,
-		string(command.WorkspaceID), string(inserted.ID), string(domain.RelationStatusSuggested),
+		string(domain.RelationStatusConfirmed), string(confirmation.Method), confirmation.Reference,
+		domain.ComputeRelationEvidenceFingerprint(allEvidence), at,
+		string(command.WorkspaceID), string(relationID), relationVersionBeforeConfirm(existing), string(domain.RelationStatusSuggested),
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyConsistency(errors.New("relation confirmation CAS was lost"))
@@ -224,7 +508,7 @@ func (repository *ApprovedRelationApplyRepository) applyApprovedRelationTx(
 	if err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyClassify(err, "RELATION_PROPOSAL_APPLY_RELATION_CONFIRM_FAILED")
 	}
-	if err := domain.ValidateRelationAggregate(confirmed, evidence); err != nil {
+	if err := domain.ValidateRelationAggregate(confirmed, allEvidence); err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, relationApplyConsistency(err)
 	}
 	if err := insertReceipt(ctx, tx, command.WorkspaceID, idempotencyKey, requestHash, commandConfirmRelation, aggregateRelation, confirmed.ID, confirmed.Version, at); err != nil {
@@ -244,7 +528,7 @@ func (repository *ApprovedRelationApplyRepository) applyApprovedRelationTx(
 		}
 	}
 	return knowledgeapplication.ApprovedRelationApplyResult{
-		Relation: confirmed, Evidence: evidence,
+		Relation: confirmed, Evidence: allEvidence,
 		ProposalStatus: changecontroldomain.StatusApplied, ProposalVersion: appliedVersion,
 	}, nil
 }
@@ -720,8 +1004,18 @@ func (repository *ApprovedRelationApplyRepository) markNeedsRevision(ctx context
 
 func (repository *ApprovedRelationApplyRepository) markNeedsRevisionAtVersion(ctx context.Context, tx pgx.Tx, proposal approvedRelationProposal, version int64, status changecontroldomain.ProposalStatus, reason string) (knowledgeapplication.ApprovedRelationApplyResult, error) {
 	at := latestRelationApplyTime(repository.clock.Now().UTC(), proposal.UpdatedAt, proposal.Approval.DecidedAt)
-	if _, err := transitionRelationApplyProposal(ctx, tx, proposal.ID, version, status, changecontroldomain.StatusNeedsRevision, at); err != nil {
+	newVersion, err := transitionRelationApplyProposal(ctx, tx, proposal.ID, version, status, changecontroldomain.StatusNeedsRevision, at)
+	if err != nil {
 		return knowledgeapplication.ApprovedRelationApplyResult{}, err
+	}
+	if !isNilRelationApplyDependency(repository.events) {
+		request := changecontroleventcontract.ProposalStatusRequest(
+			proposal.WorkspaceID, proposal.ID, proposal.Approval.ID,
+			changecontroleventcontract.ProposalNeedsRevisionEventType, string(changecontroldomain.StatusNeedsRevision), newVersion, at,
+		)
+		if _, _, err := repository.events.AppendTx(ctx, tx, request); err != nil {
+			return knowledgeapplication.ApprovedRelationApplyResult{}, err
+		}
 	}
 	return knowledgeapplication.ApprovedRelationApplyResult{}, &relationApplyNeedsRevision{reason: reason}
 }
@@ -765,6 +1059,25 @@ func latestRelationApplyTime(values ...time.Time) time.Time {
 		}
 	}
 	return latest
+}
+
+func relationVersionBeforeConfirm(existing *domain.RelationResult) int64 {
+	if existing == nil {
+		return 1
+	}
+	return existing.Relation.Version
+}
+
+func validateReusableSuggestedRelation(existing domain.RelationResult, workspaceID foundation.ID, changeSet changecontroldomain.KnowledgeChangeSet, fingerprint string) error {
+	if existing.Relation.Status != domain.RelationStatusSuggested ||
+		existing.Relation.WorkspaceID != workspaceID ||
+		existing.Relation.Source != changeSet.Source ||
+		existing.Relation.Target != changeSet.Target ||
+		existing.Relation.Type != changeSet.RelationType ||
+		existing.Relation.Fingerprint != fingerprint {
+		return errors.New("canonical relation is not a reusable suggested relation")
+	}
+	return nil
 }
 
 func isNilRelationApplyDependency(value any) bool {
