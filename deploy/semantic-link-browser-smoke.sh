@@ -244,7 +244,7 @@ run_playwright() {
     ZHIXU_SEMANTIC_LINK_SMOKE_DISCOVERY_CLAIM_ID="$(jq -er '.discovery_claim_id' "${seed_file}")" \
     ZHIXU_PLAYWRIGHT_EXECUTABLE_PATH="${BROWSER_EXECUTABLE}" \
     ZHIXU_PLAYWRIGHT_OUTPUT_DIR="${STATE_DIR}/playwright" \
-      npm run test:e2e --prefix web
+      npm run test:e2e --prefix web -- e2e/semantic-link-graph.smoke.spec.ts
   ) >"${STATE_DIR}/playwright.log" 2>&1; then
     fail "Playwright semantic-link graph smoke failed"
   fi
