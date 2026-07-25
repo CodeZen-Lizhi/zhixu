@@ -1,5 +1,7 @@
 /** Smart Collection 的唯一网络边界：所有 unknown 响应在这里解码为领域模型。 */
 
+import { authFetch } from "./auth";
+
 export type CollectionStatus = "ACTIVE" | "ARCHIVED";
 export type CollectionViewType = "LIST" | "TABLE" | "COMPACT_CARD";
 export type CollectionObjectType = "TOPIC" | "CLAIM";
@@ -195,7 +197,6 @@ export class CollectionApiError extends Error {
   }
 }
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -618,7 +619,7 @@ const request = async (path: string, init: RequestInit = {}): Promise<unknown> =
   headers.set("Accept", "application/json");
   if (init.body !== undefined) headers.set("Content-Type", "application/json");
   let response: Response;
-  try { response = await fetch(`${apiBaseUrl}${path}`, { ...init, headers }); }
+  try { response = await authFetch(path, { ...init, headers }); }
   catch (error: unknown) { if (isAbortError(error)) throw error; throw new CollectionApiError("NETWORK_ERROR", "无法连接 Collection API。", true, null, "NETWORK_ERROR", { cause: error }); }
   let payload: unknown;
   try { payload = parseStrictJson(await response.text()); } catch (error: unknown) { throw new CollectionApiError("INVALID_RESPONSE", "Collection API 返回了无效或包含重复字段的 JSON。", false, response.status, "INVALID_RESPONSE", { cause: error }); }

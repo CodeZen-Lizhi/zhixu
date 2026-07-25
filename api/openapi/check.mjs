@@ -9,6 +9,13 @@ const requiredOperations = [
   ["/livez", "get", "200"],
   ["/readyz", "get", "200"],
   ["/api/v1/system/status", "get", "200"],
+  ["/api/v1/auth/sessions", "post", "201"],
+  ["/api/v1/auth/session", "get", "200"],
+  ["/api/v1/auth/session", "delete", "204"],
+  ["/api/v1/auth/session/rotate", "post", "200"],
+  ["/api/v1/auth/api-tokens", "get", "200"],
+  ["/api/v1/auth/api-tokens", "post", "201"],
+  ["/api/v1/auth/api-tokens/{token_id}", "delete", "204"],
   ["/api/v1/workspaces", "post", "201"],
   ["/api/v1/workspaces/{workspace_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/scan", "post", "200"],
@@ -57,6 +64,109 @@ for (const [path, method, successResponse] of requiredOperations) {
 }
 if (!document.paths["/readyz"].get.responses["503"]) {
   throw new Error("missing 503 response for GET /readyz");
+}
+for (const path of ["/livez", "/readyz", "/api/v1/system/status"]) {
+  if (document.paths[path].get.security?.length !== 0) throw new Error(`${path} must remain public`);
+}
+const exactSecurity = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
+const businessSecurity = [{ sessionCookie: [] }, { apiBearer: [] }];
+if (!exactSecurity(document.security, businessSecurity)) {
+  throw new Error("root security must require exactly sessionCookie or apiBearer");
+}
+const publicOperations = new Set([
+  "GET /livez",
+  "GET /readyz",
+  "GET /api/v1/system/status",
+]);
+for (const [path, pathItem] of Object.entries(document.paths)) {
+  for (const method of ["get", "post", "put", "patch", "delete", "head", "options", "trace"]) {
+    const operation = pathItem[method];
+    if (!operation) continue;
+    const key = `${method.toUpperCase()} ${path}`;
+    if (publicOperations.has(key)) {
+      if (!exactSecurity(operation.security, [])) throw new Error(`${key} must explicitly remain public`);
+    } else if (exactSecurity(operation.security, [])) {
+      throw new Error(`${key} must not disable business authentication`);
+    }
+  }
+}
+for (const scheme of ["sessionCookie", "apiBearer", "bootstrapBearer"]) {
+  if (!document.components?.securitySchemes?.[scheme]) throw new Error(`missing auth security scheme ${scheme}`);
+}
+if (document.components.securitySchemes.sessionCookie.name !== "zhixu_session" ||
+    document.components.securitySchemes.sessionCookie.in !== "cookie" ||
+    document.components.securitySchemes.apiBearer.scheme !== "bearer") {
+  throw new Error("auth security schemes drifted from runtime credentials");
+}
+for (const [path, method, expected] of [
+  ["/api/v1/auth/sessions", "post", [{ bootstrapBearer: [] }]],
+  ["/api/v1/auth/session", "get", [{ sessionCookie: [] }]],
+  ["/api/v1/auth/session", "delete", [{ sessionCookie: [] }]],
+  ["/api/v1/auth/session/rotate", "post", [{ sessionCookie: [] }]],
+  ["/api/v1/auth/api-tokens", "get", [{ sessionCookie: [] }]],
+  ["/api/v1/auth/api-tokens", "post", [{ sessionCookie: [] }]],
+  ["/api/v1/auth/api-tokens/{token_id}", "delete", [{ sessionCookie: [] }]],
+]) {
+  if (!exactSecurity(document.paths[path][method].security, expected)) {
+    throw new Error(`${method.toUpperCase()} ${path} auth scheme is not exact`);
+  }
+}
+for (const [path, method] of [
+  ["/api/v1/auth/session", "delete"],
+  ["/api/v1/auth/session/rotate", "post"],
+  ["/api/v1/auth/api-tokens", "post"],
+  ["/api/v1/auth/api-tokens/{token_id}", "delete"],
+]) {
+  const parameters = document.paths[path][method].parameters ?? [];
+  for (const requiredParameter of ["#/components/parameters/Origin", "#/components/parameters/CSRFToken"]) {
+    if (!parameters.some((parameter) => parameter.$ref === requiredParameter)) {
+      throw new Error(`${method.toUpperCase()} ${path} must require ${requiredParameter}`);
+    }
+  }
+}
+const authOperations = [
+  ["/api/v1/auth/sessions", "post", "SessionCredential", ["400", "401", "403", "405", "503"]],
+  ["/api/v1/auth/session", "get", "SessionInfo", ["401", "405", "503"]],
+  ["/api/v1/auth/session/rotate", "post", "SessionCredential", ["400", "401", "403", "405", "503"]],
+  ["/api/v1/auth/api-tokens", "get", "APITokenPage", ["401", "403", "405", "503"]],
+  ["/api/v1/auth/api-tokens", "post", "APITokenCredential", ["400", "401", "403", "405", "503"]],
+];
+for (const [path, method, schema, errors] of authOperations) {
+  const operation = document.paths[path][method];
+  const success = method === "post" && path !== "/api/v1/auth/session/rotate" ? "201" : "200";
+  if (operation.responses[success]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${schema}`) {
+    throw new Error(`invalid auth success schema for ${method.toUpperCase()} ${path}`);
+  }
+  for (const status of errors) {
+    if (resolveRef(operation.responses[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid auth ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+for (const [path, method] of [
+  ["/api/v1/auth/sessions", "post"],
+  ["/api/v1/auth/session", "delete"],
+  ["/api/v1/auth/session/rotate", "post"],
+  ["/api/v1/auth/api-tokens/{token_id}", "delete"],
+]) {
+  const operation = document.paths[path][method];
+  if (operation.requestBody !== undefined) {
+    throw new Error(`${method.toUpperCase()} ${path} must not accept a request body`);
+  }
+  if (resolveRef(operation.responses["400"])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+    throw new Error(`${method.toUpperCase()} ${path} must declare its invalid-body Problem response`);
+  }
+}
+for (const [path, method] of [
+  ["/api/v1/auth/session", "delete"],
+  ["/api/v1/auth/api-tokens/{token_id}", "delete"],
+]) {
+  if (document.paths[path][method].responses["204"]?.content) throw new Error(`${method.toUpperCase()} ${path} 204 must not have a body`);
+}
+for (const status of ["400", "401", "403", "404", "405", "503"]) {
+  if (resolveRef(document.paths["/api/v1/auth/api-tokens/{token_id}"].delete.responses[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+    throw new Error(`invalid DELETE /api/v1/auth/api-tokens/{token_id} ${status} Problem schema`);
+  }
 }
 if (!document.paths["/api/v1/workspaces/{workspace_id}/proposals"].post.responses["200"]) {
   throw new Error("missing idempotent replay response for Proposal creation");
@@ -165,6 +275,14 @@ for (const schema of [
   "Liveness",
   "Readiness",
   "SystemStatus",
+  "AuthCapability",
+  "AuthCapabilityStatus",
+  "SessionCredential",
+  "SessionInfo",
+  "CreateAPITokenRequest",
+  "APITokenInfo",
+  "APITokenCredential",
+  "APITokenPage",
   "RAGCapabilityStatus",
   "CreateWorkspaceRequest",
   "Workspace",
@@ -486,6 +604,41 @@ if (!schemas.SystemStatus.required.includes("semantic_links") || schemas.SystemS
     schemas.SemanticLinkCapabilityStatus.additionalProperties !== false) {
   throw new Error("SystemStatus must expose the strict Semantic Link capability state");
 }
+if (!schemas.SystemStatus.required.includes("auth") || schemas.SystemStatus.properties.auth.$ref !== "#/components/schemas/AuthCapabilityStatus" ||
+    schemas.AuthCapabilityStatus.properties.status.enum.join(",") !== "disabled,ready,unavailable") {
+  throw new Error("SystemStatus must expose the strict authentication capability state");
+}
+if (schemas.SessionCredential.properties.session_token || schemas.SessionInfo.properties.token_hash || schemas.SessionInfo.properties.csrf_hash ||
+    schemas.APITokenInfo.properties.token || schemas.APITokenInfo.properties.token_hash ||
+    !schemas.APITokenCredential.required.includes("token") ||
+    schemas.SessionCredential.properties.csrf_token.readOnly !== true ||
+    schemas.SessionCredential.properties.csrf_token.writeOnly !== undefined ||
+    schemas.APITokenCredential.properties.token.readOnly !== true ||
+    schemas.APITokenCredential.properties.token.writeOnly !== undefined) {
+  throw new Error("authentication schemas exposed a persisted digest or lost the one-time token contract");
+}
+const apiTokenListParameters = document.paths["/api/v1/auth/api-tokens"].get.parameters;
+const apiTokenCursor = apiTokenListParameters.find((parameter) => parameter.name === "cursor")?.schema;
+const apiTokenLimit = apiTokenListParameters.find((parameter) => parameter.name === "limit")?.schema;
+if (apiTokenCursor?.type !== "string" || apiTokenCursor.maxLength !== 2048 ||
+    apiTokenLimit?.type !== "integer" || apiTokenLimit.minimum !== 1 || apiTokenLimit.maximum !== 100 || apiTokenLimit.default !== 30 ||
+    schemas.APITokenPage.type !== "object" || schemas.APITokenPage.additionalProperties !== false ||
+    schemas.APITokenPage.required?.join(",") !== "items" || schemas.APITokenPage.properties.items.maxItems !== 100 ||
+    schemas.APITokenPage.properties.items.items?.$ref !== "#/components/schemas/APITokenInfo" ||
+    schemas.APITokenPage.properties.next_cursor.minLength !== 1 || schemas.APITokenPage.properties.next_cursor.maxLength !== 2048) {
+  throw new Error("API Token pagination contract drifted");
+}
+if (document.components.parameters.CSRFToken.name !== "X-CSRF-Token" ||
+    document.components.parameters.CSRFToken.required !== true) {
+  throw new Error("CSRF header contract drifted");
+}
+if (document.components.parameters.Origin.name !== "Origin" ||
+    document.components.parameters.Origin.in !== "header" ||
+    document.components.parameters.Origin.required !== true ||
+    document.components.parameters.Origin.schema?.type !== "string" ||
+    document.components.parameters.Origin.schema?.minLength !== 1) {
+  throw new Error("Origin header contract drifted");
+}
 function resolveRef(value) {
   if (!value?.$ref) return value;
   const prefix = "#/components/responses/";
@@ -498,6 +651,7 @@ for (const schemaName of [
   "WorkflowProjection", "QuestionAcceptance", "AnswerCitation", "RAGResultCitation", "RAGAssertion", "RAGConflictPosition", "RelatedTopic", "RAGAnswerPayload", "RAGAnswerResult", "RefusalResult",
   "ClarificationResult", "RetrievalDegradation", "RetrievalScopeSummary", "RetrievalSummary", "Answer", "Turn", "TurnPage",
   "SubmitFeedbackRequest", "AnswerFeedback", "ServerEventPayloadSummary", "ServerEventEnvelope",
+  "AuthCapabilityStatus", "SessionCredential", "SessionInfo", "CreateAPITokenRequest", "APITokenInfo", "APITokenCredential", "APITokenPage",
   "GraphCanonicalJSONObject", "GraphNodeRef", "GraphApplicability", "GraphTopicNode", "GraphClaimNode",
   "GraphConfirmation", "GraphEdge", "GraphPageMeta", "GraphFilter", "GraphGlobalRequest", "GraphGlobalCluster",
   "GraphGlobalResponse", "GraphNodeSearchMatch", "GraphNodeSearchResponse", "GraphNeighborhoodRequest",
@@ -510,6 +664,7 @@ for (const schemaName of [
 ]) {
   if (schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must reject unknown properties`);
 }
+
 if (schemas.SemanticLinkCandidate.properties.discovery_methods.maxItems !== 6 ||
     schemas.SemanticLinkCandidate.properties.evidence.maxItems !== 100 ||
     schemas.SemanticLinkCandidatePage.properties.items.maxItems !== 100 ||

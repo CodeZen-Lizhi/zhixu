@@ -1,6 +1,7 @@
 SHELL := /bin/sh
+DOCKER_COMPOSE ?= docker compose
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check tool-integration rag-integration graph-integration graph-smoke graph-benchmark semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke compose-check docker-build compose-up compose-down compose-search-smoke compose-tool-smoke compose-rag-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke compose-auth-check compose-auth-smoke compose-check docker-build compose-up compose-down compose-search-smoke compose-tool-smoke compose-rag-smoke
 
 test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet agent-eval openapi-check compose-check
 
@@ -46,6 +47,12 @@ semantic-link-eval:
 
 openapi-check:
 	node api/openapi/check.mjs
+
+auth-integration:
+	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
+	ZHIXU_DATABASE_URL="$$ZHIXU_TEST_DATABASE_URL" ZHIXU_MIGRATION_INTEGRATION=1 go test -tags=integration -count=1 ./cmd/migrate
+	go test -race -tags=integration -count=1 -p 1 ./internal/auth/adapter/postgres
+	go test -race -tags=integration -count=1 -p 1 -run '^TestLearningOpsAuthMigration(UpRepeatDownPreservesSchemas|GuardsNonEmptyDown)$$' ./internal/platform/migration
 
 tool-integration:
 	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
@@ -103,17 +110,24 @@ collection-health-secret-scan:
 
 collection-health-smoke: collection-health-browser-smoke
 
-compose-check:
-	docker compose -f deploy/compose.yml --env-file .env.example config --quiet
+compose-auth-check:
+	@python3 deploy/compose_auth_check.py -- \
+		$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example config --format json
+
+compose-auth-smoke:
+	bash deploy/compose-auth-smoke.sh
+
+compose-check: compose-auth-check
+	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example config --quiet
 
 docker-build:
 	docker build -f deploy/Dockerfile -t zhixu:local .
 
-compose-up:
-	docker compose -f deploy/compose.yml --env-file .env.example up -d --build --wait
+compose-up: compose-auth-check
+	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example up -d --build --wait
 
 compose-down:
-	docker compose -f deploy/compose.yml --env-file .env.example down -v
+	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example down -v
 
 compose-search-smoke:
 	bash deploy/compose-search-smoke.sh

@@ -17,6 +17,9 @@ API_BASE_URL=""
 LAST_RESPONSE_FILE=""
 CANARY_COMPOSE_FILE=""
 CURRENT_ANSWER_ID=""
+AUTH_ORIGIN=""
+CSRF_TOKEN=""
+COOKIE_JAR=""
 
 log() { printf '[compose-rag-smoke] %s\n' "$1"; }
 
@@ -88,6 +91,12 @@ request_json() {
   response_file="$(mktemp "${STATE_DIR}/response.XXXXXX")" || fail "could not allocate a private response file"
   local -a args=(--silent --show-error --connect-timeout 5 --max-time "${REQUEST_TIMEOUT_SECONDS}"
     --output "${response_file}" --write-out '%{http_code}' --request "${method}")
+  if [[ -n "${COOKIE_JAR}" ]]; then
+    args+=(--cookie "${COOKIE_JAR}")
+    if [[ "${method}" != GET && "${method}" != HEAD && "${method}" != OPTIONS ]]; then
+      args+=(--header "Origin: ${AUTH_ORIGIN}" --header "X-CSRF-Token: ${CSRF_TOKEN}")
+    fi
+  fi
   [[ -z "${idempotency_key}" ]] || args+=(--header "Idempotency-Key: ${idempotency_key}")
   if [[ -n "${body}" ]]; then
     args+=(--header 'Content-Type: application/json' --data-binary "${body}")
@@ -100,6 +109,19 @@ request_json() {
     fail "${label} returned HTTP ${http_status} (${problem_code})"
   fi
   jq -e 'type == "object"' "${response_file}" >/dev/null || fail "${label} returned invalid JSON"
+}
+
+authenticate() {
+  local response_file http_status
+  response_file="$(mktemp "${STATE_DIR}/auth-response.XXXXXX")" || fail 'could not allocate an auth response file'
+  COOKIE_JAR="${STATE_DIR}/cookies.txt"
+  http_status="$(curl --silent --show-error --connect-timeout 5 --max-time "${REQUEST_TIMEOUT_SECONDS}" \
+    --output "${response_file}" --write-out '%{http_code}' --request POST \
+    --cookie-jar "${COOKIE_JAR}" --header "Origin: ${AUTH_ORIGIN}" \
+    --header "Authorization: Bearer ${ZHIXU_AUTH_BOOTSTRAP_TOKEN}" \
+    "${API_BASE_URL}/api/v1/auth/sessions")" || fail 'authentication request could not reach the API'
+  [[ "${http_status}" == 201 ]] || fail "authentication returned HTTP ${http_status}"
+  CSRF_TOKEN="$(jq -er '.csrf_token | select(type == "string" and length > 20)' "${response_file}")" || fail 'authentication response omitted csrf_token'
 }
 
 wait_for_proposal() {
@@ -167,7 +189,7 @@ main() {
   trap cleanup EXIT INT TERM
   local run_id http_port workspace_root target_path evidence_token chat_canary
   run_id="$(random_hex 6)"; PROJECT_NAME="zhixu-rag-smoke-${run_id}"; http_port="$(allocate_port)"; POSTGRES_PORT="$(allocate_port)"
-  API_BASE_URL="http://127.0.0.1:${http_port}"; workspace_root="${STATE_DIR}/workspace"; target_path='docs/rag-smoke.md'
+  API_BASE_URL="http://127.0.0.1:${http_port}"; AUTH_ORIGIN="${API_BASE_URL}"; workspace_root="${STATE_DIR}/workspace"; target_path='docs/rag-smoke.md'
   evidence_token="durable-rag-${run_id}"; chat_canary="chat_${run_id}_$(random_hex 12)"
   CANARY_COMPOSE_FILE="${STATE_DIR}/compose.canary.yml"
   cat >"${CANARY_COMPOSE_FILE}" <<YAML
@@ -191,6 +213,8 @@ YAML
 
   export ZHIXU_HTTP_PORT="${http_port}" ZHIXU_POSTGRES_DB='zhixu_rag_smoke' ZHIXU_POSTGRES_USER='zhixu_rag_smoke'
   export ZHIXU_POSTGRES_PASSWORD="pg_${run_id}_$(random_hex 12)" ZHIXU_WORKSPACE_ROOT="${workspace_root}"
+  export ZHIXU_AUTH_MODE='required' ZHIXU_AUTH_BOOTSTRAP_TOKEN="auth_${run_id}_$(random_hex 24)"
+  export ZHIXU_AUTH_ALLOWED_ORIGINS="${AUTH_ORIGIN}" ZHIXU_AUTH_SECURE_COOKIE='false'
   export ZHIXU_EMBEDDING_PROVIDER='disabled' ZHIXU_EMBEDDING_BASE_URL='' ZHIXU_EMBEDDING_API_KEY='' ZHIXU_EMBEDDING_MODEL='' ZHIXU_EMBEDDING_DIMENSIONS='0'
   export ZHIXU_REINDEX_DISPATCH_POLL_INTERVAL='250ms' ZHIXU_REINDEX_DISPATCH_ERROR_BACKOFF='500ms'
 
@@ -200,6 +224,7 @@ YAML
   compose run --rm --no-deps --user root --entrypoint sh app -c 'chown -R 10001:10001 /workspace/project && chmod -R u+rwX /workspace/project' >/dev/null
   compose run --rm --no-deps --entrypoint sh app -c 'git -C /workspace/project init --initial-branch=main >/dev/null && git -C /workspace/project config user.name "ZHIXU RAG Smoke" && git -C /workspace/project config user.email "rag-smoke@example.invalid" && git -C /workspace/project add -- docs/rag-smoke.md && git -C /workspace/project commit -m base >/dev/null' >/dev/null
   compose up --detach --wait >/dev/null
+  authenticate
 
   local payload base_hash proposal_id revision_id change_hash workflow_path search_payload citation_href
   payload="$(jq -cn --arg name 'Compose RAG Smoke' '{name:$name,root_path:"/workspace/project",initialize_git:false}')"
@@ -250,14 +275,14 @@ YAML
 
   sse_file="${STATE_DIR}/events.sse"
   set +e
-  curl --silent --connect-timeout 5 --max-time 2 --header "Last-Event-ID: ${watermark}" --output "${sse_file}" "${API_BASE_URL}/api/v1/events?workspace_id=${WORKSPACE_ID}"
+  curl --silent --connect-timeout 5 --max-time 2 --cookie "${COOKIE_JAR}" --header "Last-Event-ID: ${watermark}" --output "${sse_file}" "${API_BASE_URL}/api/v1/events?workspace_id=${WORKSPACE_ID}"
   curl_status=$?
   set -e
   [[ ${curl_status} -eq 0 || ${curl_status} -eq 28 ]] || fail 'SSE replay request failed'
   grep -Eq '^id: [1-9][0-9]*$' "${sse_file}" || fail 'SSE replay omitted monotonic event ids'
   grep -Fq -- "${answer_id}" "${sse_file}" || fail 'SSE replay omitted the completed Answer resource'
   grep -Eq '^event: answer\.completed$' "${sse_file}" || fail 'SSE replay omitted the completed Answer event'
-  if grep -Fq -- "${evidence_token}" "${sse_file}" || grep -Fq -- "${ZHIXU_POSTGRES_PASSWORD}" "${sse_file}" || grep -Fq -- "${chat_canary}" "${sse_file}"; then fail 'SSE replay leaked private content or credentials'; fi
+  if grep -Fq -- "${evidence_token}" "${sse_file}" || grep -Fq -- "${ZHIXU_POSTGRES_PASSWORD}" "${sse_file}" || grep -Fq -- "${ZHIXU_AUTH_BOOTSTRAP_TOKEN}" "${sse_file}" || grep -Fq -- "${chat_canary}" "${sse_file}"; then fail 'SSE replay leaked private content or credentials'; fi
 
   payload="$(jq -cn --arg workspace "${WORKSPACE_ID}" --arg citation "${citation_id}" '{workspace_id:$workspace,feedback_type:"irrelevant_citation",citation_id:$citation,comment:"compose evaluation signal"}')"
   request_json POST "/api/v1/answers/${answer_id}/feedback" 201 "${payload}" 'feedback creation' "feedback-${run_id}"

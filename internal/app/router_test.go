@@ -12,6 +12,11 @@ import (
 	"testing"
 	"time"
 
+	authapplication "github.com/CodeZen-Lizhi/zhixu/internal/auth/application"
+	authdomain "github.com/CodeZen-Lizhi/zhixu/internal/auth/domain"
+	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
+	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
 	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -20,6 +25,7 @@ import (
 	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
+	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 )
@@ -32,6 +38,87 @@ type routerGraphService struct{}
 
 type routerCandidateService struct{}
 type routerCandidateScanService struct{}
+
+type routerAuthService struct{}
+
+type routerScopedAuthService struct {
+	routerAuthService
+	principals map[string]authdomain.Principal
+}
+
+func (service routerScopedAuthService) AuthenticateAPIToken(_ context.Context, plain string) (authdomain.Principal, error) {
+	principal, ok := service.principals[plain]
+	if !ok {
+		return authdomain.Principal{}, foundation.NewError(
+			foundation.ErrorPermissionDenied,
+			authapplication.ErrorCodeUnauthorized,
+			false,
+			errors.New("api token does not exist"),
+		)
+	}
+	return principal, nil
+}
+
+func routerAuthScopes() []capability.Capability {
+	scopes, _ := authdomain.CanonicalScopes(capability.All())
+	return scopes
+}
+
+func (routerAuthService) ExchangeBootstrap(context.Context, string) (authapplication.SessionCredential, error) {
+	return authapplication.SessionCredential{}, nil
+}
+
+func (routerAuthService) AuthenticateSession(context.Context, string, string, bool) (authdomain.Principal, error) {
+	return authdomain.Principal{Kind: authdomain.PrincipalSession, ID: foundation.ID("92000000-0000-4000-8000-000000000001"), Scopes: routerAuthScopes()}, nil
+}
+
+func (routerAuthService) CurrentSession(context.Context, string, string, bool) (authdomain.SessionInfo, error) {
+	return authdomain.SessionInfo{ID: foundation.ID("92000000-0000-4000-8000-000000000001"), UserLabel: "owner", Scopes: routerAuthScopes(), CreatedAt: time.Now().UTC(), LastSeenAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}, nil
+}
+
+func (routerAuthService) RotateSession(context.Context, authdomain.Principal, string, string, bool) (authapplication.SessionCredential, error) {
+	return authapplication.SessionCredential{}, nil
+}
+
+func (routerAuthService) AuthenticateAPIToken(context.Context, string) (authdomain.Principal, error) {
+	return authdomain.Principal{Kind: authdomain.PrincipalAPIToken, ID: foundation.ID("92000000-0000-4000-8000-000000000002"), Scopes: routerAuthScopes()}, nil
+}
+
+func (routerAuthService) CreateAPIToken(context.Context, authdomain.Principal, string, []capability.Capability, time.Duration) (authapplication.APITokenCredential, error) {
+	return authapplication.APITokenCredential{}, nil
+}
+
+func (routerAuthService) ListAPITokens(context.Context, authdomain.Principal, authdomain.APITokenListQuery) (authdomain.APITokenListPage, error) {
+	return authdomain.APITokenListPage{Items: []authdomain.APITokenInfo{}}, nil
+}
+
+func (routerAuthService) RevokeSession(context.Context, authdomain.Principal, foundation.ID) error {
+	return nil
+}
+
+func (routerAuthService) RevokeAPIToken(context.Context, authdomain.Principal, foundation.ID) error {
+	return nil
+}
+
+func readyAuthHandler(t *testing.T) *authhttp.Handler {
+	t.Helper()
+	handler, err := authhttp.NewHandler(routerAuthService{}, authhttp.Options{SecureCookie: true, AllowedOrigins: []string{"https://app.example.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handler
+}
+
+func readyScopedAuthHandler(t *testing.T, principals map[string]authdomain.Principal) *authhttp.Handler {
+	t.Helper()
+	handler, err := authhttp.NewHandler(routerScopedAuthService{principals: principals}, authhttp.Options{
+		SecureCookie: true, AllowedOrigins: []string{"https://app.example.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handler
+}
 
 func (routerCandidateService) List(context.Context, graphapplication.CandidateListRequest) (graphdomain.SemanticLinkCandidatePage, error) {
 	return graphdomain.SemanticLinkCandidatePage{}, nil
@@ -316,6 +403,160 @@ func TestRouterSystemStatusReportsMissingSemanticLinkScanDependency(t *testing.T
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"graph":{"status":"ready"}`) ||
 		!strings.Contains(response.Body.String(), `"semantic_links":{"reason":"semantic_link_dependencies_unavailable","status":"unavailable"}`) {
 		t.Fatalf("system status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRouterAuthProtectsBusinessRoutesButKeepsPublicHealth(t *testing.T) {
+	router := NewRouter(Dependencies{
+		Version: "auth-test", Database: fakePinger{}, Auth: readyAuthHandler(t), AuthRequired: true,
+		AuthCheck: func(context.Context) error { return nil },
+		Graph:     readyGraphHandler(), Candidate: readyCandidateHandler(),
+	})
+	for _, path := range []string{"/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001"} {
+		unauthenticated := httptest.NewRequest(http.MethodGet, path, nil)
+		unauthenticatedResponse := httptest.NewRecorder()
+		router.ServeHTTP(unauthenticatedResponse, unauthenticated)
+		if unauthenticatedResponse.Code != http.StatusUnauthorized || !strings.Contains(unauthenticatedResponse.Body.String(), "AUTH_UNAUTHORIZED") {
+			t.Fatalf("business route %s status=%d body=%s", path, unauthenticatedResponse.Code, unauthenticatedResponse.Body.String())
+		}
+	}
+
+	for _, test := range []struct {
+		name string
+		path string
+		want int
+	}{
+		{name: "livez", path: "/livez", want: http.StatusOK},
+		{name: "readyz", path: "/readyz", want: http.StatusOK},
+		{name: "system status", path: "/api/v1/system/status", want: http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.want {
+				t.Fatalf("%s status=%d body=%s", test.path, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestRouterScopedBearerCapabilityMatrixAndBootstrapIsolation(t *testing.T) {
+	const (
+		readToken      = "router-read-token"
+		indexToken     = "router-index-token"
+		proposalToken  = "router-proposal-token"
+		bootstrapToken = "bootstrap-token-with-at-least-32-bytes"
+	)
+	principal := func(id foundation.ID, scopes ...capability.Capability) authdomain.Principal {
+		return authdomain.Principal{Kind: authdomain.PrincipalAPIToken, ID: id, Scopes: scopes}
+	}
+	router := NewRouter(Dependencies{
+		Version: "auth-scope-test", Database: fakePinger{}, AuthRequired: true,
+		Auth: readyScopedAuthHandler(t, map[string]authdomain.Principal{
+			readToken:     principal("93000000-0000-4000-8000-000000000001", capability.ReadLocal),
+			indexToken:    principal("93000000-0000-4000-8000-000000000002", capability.IndexMaintenance),
+			proposalToken: principal("93000000-0000-4000-8000-000000000003", capability.WriteProposal),
+		}),
+		Workspace:     workspacehttp.NewHandler(nil),
+		ChangeControl: changecontrolhttp.NewHandler(nil),
+		Graph:         readyGraphHandler(),
+		Candidate:     readyCandidateHandler(),
+	})
+
+	request := func(method, path, token string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response
+	}
+
+	readResponse := request(http.MethodGet, "/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001&query=topic", readToken)
+	if readResponse.Code != http.StatusOK {
+		t.Fatalf("READ_LOCAL read status=%d body=%s", readResponse.Code, readResponse.Body.String())
+	}
+
+	for _, test := range []struct {
+		name   string
+		token  string
+		method string
+		path   string
+	}{
+		{name: "read cannot index", token: readToken, method: http.MethodPost, path: "/api/v1/workspaces/92000000-0000-4000-8000-000000000001/scan"},
+		{name: "read cannot propose", token: readToken, method: http.MethodPost, path: "/api/v1/workspaces"},
+		{name: "read cannot approve", token: readToken, method: http.MethodPost, path: "/api/v1/proposals/92000000-0000-4000-8000-000000000001/approvals"},
+		{name: "index cannot read", token: indexToken, method: http.MethodGet, path: "/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001"},
+		{name: "index alone cannot run composite scan", token: indexToken, method: http.MethodPost, path: "/api/v1/workspaces/92000000-0000-4000-8000-000000000001/scan"},
+		{name: "proposal cannot read", token: proposalToken, method: http.MethodGet, path: "/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001"},
+		{name: "proposal cannot approve knowledge", token: proposalToken, method: http.MethodPost, path: "/api/v1/proposals/92000000-0000-4000-8000-000000000001/approvals"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := request(test.method, test.path, test.token)
+			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), authapplication.ErrorCodeForbidden) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	bootstrapResponse := request(http.MethodGet, "/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001", bootstrapToken)
+	if bootstrapResponse.Code != http.StatusUnauthorized || !strings.Contains(bootstrapResponse.Body.String(), authapplication.ErrorCodeUnauthorized) {
+		t.Fatalf("bootstrap business status=%d body=%s", bootstrapResponse.Code, bootstrapResponse.Body.String())
+	}
+}
+
+func TestRouterAuthInitializationFailureFailsClosed(t *testing.T) {
+	router := NewRouter(Dependencies{
+		Version: "auth-failure", Database: fakePinger{}, AuthRequired: true, AuthInitErr: errors.New("private auth composition detail"),
+		Graph: readyGraphHandler(), Candidate: readyCandidateHandler(),
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "AUTH_DEPENDENCY_UNAVAILABLE") || strings.Contains(response.Body.String(), "private auth composition detail") {
+		t.Fatalf("business fail-open status=%d body=%s", response.Code, response.Body.String())
+	}
+	readyRequest := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	readyResponse := httptest.NewRecorder()
+	router.ServeHTTP(readyResponse, readyRequest)
+	if readyResponse.Code != http.StatusServiceUnavailable || !strings.Contains(readyResponse.Body.String(), "auth_dependencies_unavailable") {
+		t.Fatalf("auth readiness status=%d body=%s", readyResponse.Code, readyResponse.Body.String())
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
+	statusResponse := httptest.NewRecorder()
+	router.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"auth":{"reason":"auth_dependencies_unavailable","status":"unavailable"}`) {
+		t.Fatalf("auth system status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
+	}
+	livezRequest := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	livezResponse := httptest.NewRecorder()
+	router.ServeHTTP(livezResponse, livezRequest)
+	if livezResponse.Code != http.StatusOK {
+		t.Fatalf("livez must remain public status=%d", livezResponse.Code)
+	}
+}
+
+func TestRouterAuthReadinessFailsClosedWhenCredentialTablesAreUnavailable(t *testing.T) {
+	privateErr := errors.New("auth.session relation is missing")
+	router := NewRouter(Dependencies{
+		Version: "auth-readiness", Database: fakePinger{}, AuthRequired: true, Auth: readyAuthHandler(t),
+		AuthCheck: func(context.Context) error { return privateErr },
+		Graph:     readyGraphHandler(), Candidate: readyCandidateHandler(),
+	})
+
+	readyRequest := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	readyResponse := httptest.NewRecorder()
+	router.ServeHTTP(readyResponse, readyRequest)
+	if readyResponse.Code != http.StatusServiceUnavailable || !strings.Contains(readyResponse.Body.String(), "AUTH_DEPENDENCY_UNAVAILABLE") || strings.Contains(readyResponse.Body.String(), privateErr.Error()) {
+		t.Fatalf("auth readiness status=%d body=%s", readyResponse.Code, readyResponse.Body.String())
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
+	statusResponse := httptest.NewRecorder()
+	router.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"auth":{"reason":"auth_dependencies_unavailable","status":"unavailable"}`) || strings.Contains(statusResponse.Body.String(), privateErr.Error()) {
+		t.Fatalf("auth system status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
 	}
 }
 

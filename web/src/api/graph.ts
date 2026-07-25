@@ -1,3 +1,5 @@
+import { authFetch } from "./auth";
+
 export type NodeType = "TOPIC" | "CLAIM";
 export type RelationType =
   | "CITES"
@@ -282,7 +284,6 @@ export class GraphApiError extends Error implements GraphProblem {
   }
 }
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
@@ -1224,7 +1225,7 @@ const requestGraph = async <T>(
 ): Promise<T> => {
   let response: Response;
   try {
-    response = await fetch(`${apiBaseUrl}${path}`, {
+    response = await authFetch(path, {
       method,
       headers: body === undefined
         ? { Accept: "application/json" }

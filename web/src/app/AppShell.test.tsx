@@ -9,6 +9,12 @@ vi.mock("../events/event-store", () => ({
 vi.mock("./active-workspace", () => ({
   useActiveWorkspaceId: () => "10000000-0000-4000-8000-000000000002",
 }));
+vi.mock("./auth-context", () => ({
+  useAuth: () => ({
+    state: { status: "authenticated", mode: "required", session: { userLabel: "owner" } },
+    signOut: vi.fn(),
+  }),
+}));
 
 import { AppShell } from "./AppShell";
 
@@ -32,6 +38,7 @@ describe("AppShell", () => {
     expect(screen.getByRole("navigation", { name: "主导航" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Search" })).toHaveAttribute("href", "/search");
     expect(screen.getByRole("status")).toHaveTextContent("实时同步");
+    expect(screen.getByText("已认证 · owner")).toBeInTheDocument();
     expect(screen.getByText("正在加载工作台…")).toBeInTheDocument();
 
     act(() => {

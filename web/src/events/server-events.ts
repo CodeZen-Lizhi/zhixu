@@ -1,3 +1,5 @@
+import { invalidateAuthSession } from "../api/auth";
+
 export type ServerEventResource =
   | "conversation"
   | "question"
@@ -559,9 +561,21 @@ export const connectServerEvents = (
         if (lastEventId !== undefined) headers.set("Last-Event-ID", lastEventId);
         const response = await fetcher(
           `${baseUrl}/api/v1/events?workspace_id=${encodeURIComponent(options.workspaceId)}`,
-          { headers, signal: attemptController.signal },
+          { headers, signal: attemptController.signal, credentials: "include" },
         );
         if (!response.ok) {
+          if (response.status === 401) {
+            try {
+              invalidateAuthSession();
+            } catch (error: unknown) {
+              throw new ServerEventClientError(
+                "HTTP_ERROR",
+                "SSE 401 后无法清理本地认证恢复状态",
+                false,
+                { cause: error },
+              );
+            }
+          }
           const problem = await decodeProblem(response);
           if (
             response.status === 409 &&

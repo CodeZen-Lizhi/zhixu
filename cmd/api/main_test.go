@@ -31,6 +31,16 @@ func TestNewWorkflowServiceRequiresDatabase(t *testing.T) {
 	}
 }
 
+func TestNewAPIServerBoundsRequestReads(t *testing.T) {
+	server := newAPIServer("127.0.0.1:0", http.NotFoundHandler())
+	if server.ReadTimeout != apiReadTimeout || server.ReadTimeout <= 0 {
+		t.Fatalf("read timeout=%s", server.ReadTimeout)
+	}
+	if server.ReadHeaderTimeout != apiReadHeaderTimeout || server.IdleTimeout != apiIdleTimeout {
+		t.Fatalf("server timeouts header=%s idle=%s", server.ReadHeaderTimeout, server.IdleTimeout)
+	}
+}
+
 func TestAPIHasAllToolContractsWithoutExecutors(t *testing.T) {
 	registry, err := newToolContractRegistry()
 	if err != nil {

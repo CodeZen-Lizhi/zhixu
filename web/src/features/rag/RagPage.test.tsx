@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Answer } from "../../api/conversation";
 import { renderWithAppProviders } from "../../test/render";
-import { AnswerPublication, mergeLatestTurn } from "./RagPage";
+import { AnswerPublication, CitationInspector, mergeLatestTurn } from "./RagPage";
 
 const workspaceId = "92000000-0000-4000-8000-000000000001";
 const conversationId = "92000000-0000-4000-8000-000000000002";
@@ -66,6 +66,23 @@ describe("AnswerPublication", () => {
     expect(screen.queryByRole("button", { name: "提交反馈" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "仅查询 v2" }));
     expect(onPrompt).toHaveBeenCalledWith("仅查询 v2");
+  });
+});
+
+describe("CitationInspector", () => {
+  it("使用应用内受控读取按钮，不渲染绕过 authFetch 的原始 Span 链接", () => {
+    renderWithAppProviders(<CitationInspector citation={{
+      id: citationId,
+      workspaceId,
+      indexVersionId: runId,
+      chunkId: questionId,
+      sourceVersionId: modelRunId,
+      sourceSpanId: conversationId,
+      href: `/api/v1/workspaces/${workspaceId}/source-versions/${modelRunId}/spans/${conversationId}`,
+    }} onClose={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "打开段落证据" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "打开段落证据" })).not.toBeInTheDocument();
   });
 });
 

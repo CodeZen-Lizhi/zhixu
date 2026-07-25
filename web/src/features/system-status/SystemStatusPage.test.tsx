@@ -25,6 +25,7 @@ describe("SystemStatusPage", () => {
         semantic_links: { status: "ready" },
         rag: { status: "disabled" },
         collections: { status: "ready" }, knowledge_health: { status: "ready" },
+        auth: { status: "disabled" },
         request_id: "request-ready",
       }),
     );
@@ -47,6 +48,7 @@ describe("SystemStatusPage", () => {
         semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
         rag: { status: "unavailable", reason: "rag_dependencies_unavailable" },
         collections: { status: "unavailable" }, knowledge_health: { status: "unavailable" },
+        auth: { status: "ready" },
         request_id: "request-degraded",
       }),
     );
@@ -68,6 +70,7 @@ describe("SystemStatusPage", () => {
         semantic_links: { status: "ready" },
         rag: { status: "disabled" },
         collections: { status: "ready" }, knowledge_health: { status: "ready" },
+        auth: { status: "ready" },
         request_id: "request-graph",
       }),
     );
@@ -89,6 +92,7 @@ describe("SystemStatusPage", () => {
         semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
         rag: { status: "disabled" },
         collections: { status: "ready" }, knowledge_health: { status: "ready" },
+        auth: { status: "ready" },
         request_id: "request-semantic-links",
       }),
     );
@@ -98,6 +102,29 @@ describe("SystemStatusPage", () => {
     expect(await screen.findByText("语义候选能力暂不可用")).toBeInTheDocument();
     expect(screen.getByText("正式 Graph 查询仍可用，但候选扫描与审阅暂不可用，请检查语义候选依赖。")).toBeInTheDocument();
     expect(screen.getByText("语义候选", { selector: "dt" })).toBeInTheDocument();
+  });
+
+  it("认证依赖不可用时显示 fail-closed 状态", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse({
+        status: "degraded",
+        version: "0.1.0",
+        database: { status: "ready" },
+        graph: { status: "ready" },
+        semantic_links: { status: "ready" },
+        rag: { status: "disabled" },
+        collections: { status: "ready" },
+        knowledge_health: { status: "ready" },
+        auth: { status: "unavailable", reason: "auth_dependencies_unavailable" },
+        request_id: "request-auth-degraded",
+      }),
+    );
+
+    renderWithAppProviders(<SystemStatusPage />);
+
+    expect(await screen.findByText("认证依赖暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("认证边界无法初始化，业务 API 已 fail closed；请检查认证数据库与运行配置。")).toBeInTheDocument();
+    expect(screen.getByText("不可用", { selector: "dd" })).toBeInTheDocument();
   });
 
   it("请求失败后允许用户重试并恢复", async () => {
@@ -112,6 +139,7 @@ describe("SystemStatusPage", () => {
           semantic_links: { status: "ready" },
           rag: { status: "ready" },
           collections: { status: "ready" }, knowledge_health: { status: "ready" },
+          auth: { status: "ready" },
           request_id: "request-retry",
         }),
       );

@@ -78,6 +78,7 @@ describe("DocumentsPage Source Version projections", () => {
       "href",
       `/search?source_version_id=${sourceVersionId}&scope_workspace=${workspaceId}`,
     );
+		expect(screen.queryByRole("link", { name: "打开来源事实" })).not.toBeInTheDocument();
     expect(api.getSourceVersion).toHaveBeenCalledWith(workspaceId, sourceVersionId, expect.any(AbortSignal));
   });
 

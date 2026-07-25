@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { setCsrfToken, subscribeAuthInvalidation } from "../api/auth";
 import {
   ServerEventClientError,
   connectServerEvents,
@@ -203,6 +204,29 @@ describe("parseServerEventStream", () => {
 });
 
 describe("connectServerEvents", () => {
+  it("SSE 401 通过共享入口失效认证，且请求不携带 CSRF", async () => {
+    window.localStorage.clear();
+    setCsrfToken("c".repeat(43));
+    const invalidated = vi.fn();
+    const unsubscribe = subscribeAuthInvalidation(invalidated);
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("X-CSRF-Token")).toBeNull();
+      return Promise.resolve(problemResponse(401, "AUTH_UNAUTHORIZED"));
+    });
+    const connection = connectServerEvents({
+      workspaceId,
+      fetcher,
+      onRecoveryRequired: ignoreRecovery,
+    });
+
+    await connection.done;
+
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(window.localStorage.getItem("zhixu.csrf-token")).toBeNull();
+    expect(invalidated).toHaveBeenCalledOnce();
+    unsubscribe();
+  });
+
   it("拒绝缺少超窗权威回查处理器的连接", () => {
     expect(() => connectServerEvents({
       workspaceId,
@@ -238,6 +262,7 @@ describe("connectServerEvents", () => {
 
     await vi.waitFor(() => expect(requests).toHaveLength(2));
     expect(received).toEqual(["42"]);
+    expect(requests[0]?.credentials).toBe("include");
     expect(new Headers(requests[0]?.headers).get("Last-Event-ID")).toBeNull();
     expect(new Headers(requests[1]?.headers).get("Last-Event-ID")).toBe("42");
 

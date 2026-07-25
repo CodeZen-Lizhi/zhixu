@@ -146,7 +146,7 @@ describe("Conversation request clients", () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(conversation), { status: 201, headers: { "Content-Type": "application/json", ETag: 'W/"1"' } }));
     vi.stubGlobal("fetch", fetchMock);
     await expect(createConversation({ workspaceId, idempotencyKey: "create-1", title: null })).resolves.toMatchObject({ resource: { id: conversationId }, etag: 'W/"1"', notModified: false });
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ "Idempotency-Key": "create-1" });
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("Idempotency-Key")).toBe("create-1");
   });
 
   it("提交问题显式发送 snake_case 默认值并解码 202", async () => {
@@ -155,7 +155,7 @@ describe("Conversation request clients", () => {
     await submitQuestion({ workspaceId, conversationId, idempotencyKey: "question-1", question: "如何恢复？" });
     const init = fetchMock.mock.calls[0]?.[1]; if (typeof init?.body !== "string") throw new Error("missing body");
     expect(JSON.parse(init.body)).toEqual({ workspace_id: workspaceId, question: "如何恢复？", scope: { retrieval_mode: "hybrid", source_ids: [], source_version_ids: [], path_prefixes: [], captured_at_from: null, captured_at_before: null, allow_original_sources: false, allow_web: false }, answer_depth: "standard", output_format: "markdown" });
-    expect(init.headers).toMatchObject({ "Idempotency-Key": "question-1" });
+    expect(new Headers(init.headers).get("Idempotency-Key")).toBe("question-1");
   });
 
   it("GET 编码 cursor/limit 并处理带 stage 的 Answer ETag 200/304", async () => {
@@ -168,7 +168,7 @@ describe("Conversation request clients", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toContain(`workspace_id=${workspaceId}&cursor=opaque%2Bcursor&limit=20`);
     await expect(getAnswer({ workspaceId, id: answerId })).resolves.toMatchObject({ resource: { publicationStatus: "completed" }, etag: 'W/"answer-2-workflow-3-stage-none"', notModified: false });
     await expect(getAnswer({ workspaceId, id: answerId, ifNoneMatch: 'W/"answer-2-workflow-3-stage-plan.started"' })).resolves.toEqual({ resource: null, etag: 'W/"answer-2-workflow-3-stage-plan.started"', notModified: true });
-    expect(fetchMock.mock.calls[2]?.[1]?.headers).toMatchObject({ "If-None-Match": 'W/"answer-2-workflow-3-stage-plan.started"' });
+    expect(new Headers(fetchMock.mock.calls[2]?.[1]?.headers).get("If-None-Match")).toBe('W/"answer-2-workflow-3-stage-plan.started"');
   });
 
   it("latest Turn 使用有界恢复查询", async () => {

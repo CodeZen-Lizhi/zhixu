@@ -9,6 +9,7 @@ import {
   useGraphRelationEvidence,
 } from "./queries";
 import { GraphErrorNotice, GraphLoading, GraphResultNotice } from "./feedback";
+import { SourceSpanViewer } from "../source-spans";
 
 export type GraphSelection =
   | { kind: "node"; ref: GraphNodeRef }
@@ -171,7 +172,7 @@ export const GraphDetailPanel = ({
             {evidenceQuery.isPending ? <GraphLoading label="正在加载关系证据" /> : null}
             {evidenceQuery.isError ? <GraphErrorNotice error={evidenceQuery.error} onRetry={() => { void evidenceQuery.refetch(); }} onResetToFirstPage={() => { void recoverEvidence(); }} /> : null}
             <GraphResultNotice meta={evidenceMeta} title="证据结果已截断" message="当前关系的证据达到显示上限，结果不完整。" ariaLabel="关系证据状态" />
-            {evidence.map((item) => <article key={item.id}><p>{item.reason}</p><dl><div><dt>确认</dt><dd>{item.confirmation?.method ?? "未确认"}</dd></div><div><dt>时间</dt><dd>{formatTimestamp(item.createdAt)}</dd></div></dl><a href={item.spanHref} target="_blank" rel="noreferrer">打开来源段落</a></article>)}
+            {evidence.map((item) => <article key={item.id}><p>{item.reason}</p><dl><div><dt>确认</dt><dd>{item.confirmation?.method ?? "未确认"}</dd></div><div><dt>时间</dt><dd>{formatTimestamp(item.createdAt)}</dd></div></dl><SourceSpanViewer className="graph-text-button" label="打开来源段落" reference={{ workspaceId: item.provenance.workspaceId, sourceVersionId: item.provenance.sourceVersionId, sourceSpanId: item.provenance.sourceSpanId }} /></article>)}
             {evidenceQuery.hasNextPage ? <button type="button" className="graph-text-button" disabled={evidenceQuery.isFetchingNextPage} onClick={() => { void evidenceQuery.fetchNextPage(); }}>{evidenceQuery.isFetchingNextPage ? "加载中" : "加载更多证据"}</button> : null}
           </div>}
         </div>}

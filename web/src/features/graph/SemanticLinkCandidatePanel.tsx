@@ -11,6 +11,7 @@ import {
   type SemanticLinkDecisionAction,
 } from "../../api/semantic-links";
 import type { GraphNodeRef } from "../../api/graph";
+import { SourceSpanViewer } from "../source-spans";
 import {
   createSemanticLinkIdempotencyKey,
   useDecideSemanticLinkCandidate,
@@ -142,7 +143,7 @@ const CandidateCard = ({
         {candidate.evidence.map((evidence) => <li key={evidence.id}>
           <blockquote>{evidence.excerpt}</blockquote>
           <p>{evidence.reason}</p>
-          <div><a href={evidence.sourceSpanHref} target="_blank" rel="noreferrer">打开来源片段</a><code>{evidence.semanticHash.slice(0, 12)}…</code></div>
+          <div><SourceSpanViewer className="semantic-link-evidence__open" label="打开来源片段" reference={{ workspaceId: candidate.workspaceId, sourceVersionId: evidence.sourceVersionId, sourceSpanId: evidence.sourceSpanId }} /><code>{evidence.semanticHash.slice(0, 12)}…</code></div>
         </li>)}
       </ol>}
     </details>

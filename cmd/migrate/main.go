@@ -32,7 +32,7 @@ func run(ctx context.Context, configPath string) error {
 	if ctx == nil {
 		return errors.New("migration context is nil")
 	}
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadMigration(configPath)
 	if err != nil {
 		return err
 	}

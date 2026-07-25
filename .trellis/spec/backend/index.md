@@ -13,14 +13,17 @@ M9 已补充 Workspace Source Version/Proposal/Workflow 列表、资源绑定 cu
 Proposal 等级由不可变 `proposal.risk_level` 唯一拥有，Source Version 使用受复合约束的 Workspace 镜像键支撑
 有界 keyset 查询；Proposal detail 的 Approval 为必需 nullable，Summary 保持 optional non-null。三条真实
 PostgreSQL 列表、迁移契约与严格执行计划已在最终迁移工作树复验；M10 继续负责最终容量门禁。
+M10-02 已交付单用户 Auth、Cookie Session、受限 API Token、CSRF/Origin、Capability Middleware 和 Compose
+启动预检；认证与 Write Authorization 保持两道独立边界，具体可执行契约见 `auth-security.md`。
 
 ## 规范索引
 
 | 规范 | 内容 | 当前状态 |
 |---|---|---|
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
+| [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
 | [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health 持久化、read-model revision、schedule/outbox，以及 M9 Workspace 列表、cursor kind/version、Active Index included/excluded 与 PG/EXPLAIN 门禁 |
-| [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool 稳定错误与 M9 Proposal detail/summary Approval 空值契约；正式 Auth/CSRF 仍归 M10 |
+| [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool 稳定错误、M9 Proposal detail/summary Approval 空值契约与 M10 Auth 的稳定 Problem Details 边界 |
 | [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M6-03 Tool/Observability 共享脱敏与受限 Tool Call 事实已记录；通用 append-only Audit/真实 exporter 归 M10 |
 | [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | M7-01 Graph、M7-02 Semantic Link 与 M7-03 Collection/Health 的跨层、fault、性能、浏览器和独立审查门禁均已记录 |
 
@@ -79,6 +82,6 @@ git diff --check
 
 ## 当前明确待验证项
 
-- License、认证实现和 50 万 Chunk ANN/P95 必须在对应后续任务中通过仓库文件和测试锁定；M2 已明确
+- License 和 50 万 Chunk ANN/P95 必须在对应后续任务中通过仓库文件和测试锁定；M2 已明确
   不采用 Eino 主模块依赖，M6-D 的 exact vector scan/EXPLAIN 只作为正确性基线。
 - 本规范不提供伪造的实现代码、版本号、数据库字段长度或不存在的测试结果；M1 完成后应将真实文件链接补入各专题规范。

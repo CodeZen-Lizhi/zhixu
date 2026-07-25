@@ -119,10 +119,8 @@ describe("SearchPage", () => {
     expect(screen.getByText("Vector #1 · distance 0.1250")).toBeInTheDocument();
     expect(screen.getByText("rerank：RETRIEVAL_RERANK_UNAVAILABLE（可重试）")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "资料版本" })).toHaveAttribute("href", `/documents/${sourceVersionId}`);
-    expect(screen.getByRole("link", { name: "打开证据片段" })).toHaveAttribute(
-      "href",
-      `/api/v1/workspaces/${workspaceId}/source-versions/${sourceVersionId}/spans/${spanId}`,
-    );
+    expect(screen.getByRole("button", { name: "打开证据片段" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "打开证据片段" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "下一页" }));
     await vi.waitFor(() => expect(api.search).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "page-3" }), expect.any(AbortSignal)));
@@ -231,7 +229,7 @@ describe("SearchPage", () => {
 
     expect(await screen.findByText("docs/semantic-links.md")).toBeInTheDocument();
     expect(screen.getByText("docs/approval-river.md")).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "打开证据片段" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "打开证据片段" })).toHaveLength(2);
     expect(screen.getByText("该 Evidence 还有更多来源，当前响应已按服务端上限截断。")).toBeInTheDocument();
   });
 

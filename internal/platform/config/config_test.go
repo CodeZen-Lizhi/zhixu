@@ -738,6 +738,193 @@ func TestValidateDatabaseRequiresExplicitURL(t *testing.T) {
 	}
 }
 
+func TestAuthDefaultsAreExplicitlyDisabledOnlyForDevelopmentLoopback(t *testing.T) {
+	cfg := Defaults()
+	if cfg.AuthMode != AuthModeDisabled || cfg.AuthSessionTTL <= 0 || cfg.AuthAPITokenTTL <= 0 {
+		t.Fatalf("auth defaults=%+v", cfg)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("development loopback defaults should validate: %v", err)
+	}
+	for _, mutate := range []func(*Config){
+		func(value *Config) { value.Environment = "production" },
+		func(value *Config) { value.HTTPAddr = "0.0.0.0:8080" },
+	} {
+		invalid := cfg
+		mutate(&invalid)
+		if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "auth_mode disabled") {
+			t.Fatalf("expected disabled auth rejection, cfg=%+v err=%v", invalid, err)
+		}
+	}
+}
+
+func TestRequiredAuthLoadsSecretsAndOriginsWithoutEchoingBootstrap(t *testing.T) {
+	bootstrap := "a-development-bootstrap-token-with-more-than-32-bytes"
+	values := map[string]string{
+		"ZHIXU_AUTH_MODE":            string(AuthModeRequired),
+		"ZHIXU_AUTH_BOOTSTRAP_TOKEN": bootstrap,
+		"ZHIXU_AUTH_ALLOWED_ORIGINS": "https://127.0.0.1:8080,https://example.test",
+		"ZHIXU_AUTH_SECURE_COOKIE":   "true",
+		"ZHIXU_AUTH_SESSION_TTL":     "6h",
+		"ZHIXU_AUTH_API_TOKEN_TTL":   "48h",
+		"ZHIXU_ENVIRONMENT":          "production",
+		"ZHIXU_HTTP_ADDR":            "0.0.0.0:8080",
+	}
+	cfg, err := LoadWithLookup("", func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuthMode != AuthModeRequired || cfg.AuthBootstrapToken != bootstrap || len(cfg.AuthAllowedOrigins) != 2 || !cfg.AuthSecureCookie || cfg.AuthSessionTTL != 6*time.Hour || cfg.AuthAPITokenTTL != 48*time.Hour {
+		t.Fatalf("loaded auth config=%+v", cfg)
+	}
+	if strings.Contains(cfg.String(), bootstrap) {
+		t.Fatalf("config String leaked bootstrap token: %s", cfg.String())
+	}
+}
+
+func TestDisabledAuthRejectsAnyExplicitBootstrapValue(t *testing.T) {
+	for _, bootstrap := range []string{
+		"a-disabled-bootstrap-token-with-more-than-32-bytes",
+		"   ",
+	} {
+		_, err := LoadWithLookup("", func(key string) (string, bool) {
+			switch key {
+			case "ZHIXU_AUTH_MODE":
+				return string(AuthModeDisabled), true
+			case "ZHIXU_AUTH_BOOTSTRAP_TOKEN":
+				return bootstrap, true
+			default:
+				return "", false
+			}
+		})
+		if err == nil || !strings.Contains(err.Error(), "auth_bootstrap_token must be empty") {
+			t.Fatalf("disabled auth accepted an explicit Bootstrap value: %v", err)
+		}
+	}
+}
+
+func TestNonAPIConfigDoesNotConsumeAPIBootstrapSecret(t *testing.T) {
+	bootstrapLookup := false
+	cfg, err := loadNonAPIWithLookup("", func(key string) (string, bool) {
+		switch key {
+		case "ZHIXU_ENVIRONMENT":
+			return "production", true
+		case "ZHIXU_AUTH_MODE":
+			return string(AuthModeRequired), true
+		case "ZHIXU_AUTH_BOOTSTRAP_TOKEN":
+			bootstrapLookup = true
+			return "worker-must-never-consume-this-bootstrap-secret", true
+		default:
+			return "", false
+		}
+	})
+	if err != nil {
+		t.Fatalf("non-API configuration should load without API-only auth validation: %v", err)
+	}
+	if bootstrapLookup || cfg.AuthBootstrapToken != "" {
+		t.Fatalf("non-API configuration consumed the API Bootstrap credential: looked_up=%t configured=%t", bootstrapLookup, cfg.AuthBootstrapToken != "")
+	}
+	if cfg.Environment != "production" || cfg.AuthMode != AuthModeRequired {
+		t.Fatalf("worker lost non-secret runtime configuration: %+v", cfg)
+	}
+}
+
+func TestRequiredAuthRejectsUnsafeProductionConfiguration(t *testing.T) {
+	base := Defaults()
+	base.AuthMode = AuthModeRequired
+	base.AuthBootstrapToken = "a-development-bootstrap-token-with-more-than-32-bytes"
+	base.AuthAllowedOrigins = []string{"http://example.test"}
+	for name, mutate := range map[string]func(*Config){
+		"insecure cookie": func(value *Config) { value.Environment = "production"; value.AuthSecureCookie = false },
+		"http origin":     func(value *Config) { value.Environment = "production"; value.AuthSecureCookie = true },
+		"short bootstrap": func(value *Config) { value.AuthBootstrapToken = "short" },
+		"bad origin":      func(value *Config) { value.AuthAllowedOrigins = []string{"https://example.test/path"} },
+		"default https port": func(value *Config) {
+			value.AuthAllowedOrigins = []string{"https://example.test:443"}
+		},
+		"default http port": func(value *Config) {
+			value.AuthAllowedOrigins = []string{"http://example.test:80"}
+		},
+		"uppercase origin host": func(value *Config) {
+			value.AuthAllowedOrigins = []string{"https://EXAMPLE.test"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := base
+			mutate(&invalid)
+			if err := invalid.Validate(); err == nil {
+				t.Fatal("unsafe auth configuration was accepted")
+			}
+		})
+	}
+}
+
+func TestRequiredAuthRejectsNonCanonicalOriginFromEnvironment(t *testing.T) {
+	for _, origin := range []string{
+		"http://example.test:80",
+		"https://example.test:443",
+		"http://127.000.000.001",
+		"http://[0:0:0:0:0:0:0:1]:8080",
+		"https://b\u00fccher.example",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			_, err := LoadWithLookup("", func(key string) (string, bool) {
+				switch key {
+				case "ZHIXU_AUTH_MODE":
+					return string(AuthModeRequired), true
+				case "ZHIXU_AUTH_BOOTSTRAP_TOKEN":
+					return "a-development-bootstrap-token-with-more-than-32-bytes", true
+				case "ZHIXU_AUTH_ALLOWED_ORIGINS":
+					return origin, true
+				case "ZHIXU_AUTH_SECURE_COOKIE":
+					return "true", true
+				case "ZHIXU_ENVIRONMENT":
+					return "development", true
+				default:
+					return "", false
+				}
+			})
+			if err == nil || !strings.Contains(err.Error(), "invalid exact origin") {
+				t.Fatalf("LoadWithLookup accepted non-canonical origin %q: %v", origin, err)
+			}
+		})
+	}
+}
+
+func TestRequiredAuthRestrictsInsecureDevelopmentConfigurationToLoopbackOrigins(t *testing.T) {
+	base := Defaults()
+	base.AuthMode = AuthModeRequired
+	base.AuthBootstrapToken = "a-development-bootstrap-token-with-more-than-32-bytes"
+	base.AuthSecureCookie = false
+	base.AuthAllowedOrigins = []string{"http://127.0.0.1:8080"}
+
+	tests := map[string]func(*Config){
+		"non-loopback origin":   func(value *Config) { value.AuthAllowedOrigins = []string{"http://example.test"} },
+		"non-loopback listener": func(value *Config) { value.HTTPAddr = "0.0.0.0:8080" },
+		"https loopback origin": func(value *Config) { value.AuthAllowedOrigins = []string{"https://127.0.0.1:8080"} },
+		"production label":      func(value *Config) { value.Environment = "production" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			invalid := base
+			mutate(&invalid)
+			if err := invalid.Validate(); err == nil {
+				t.Fatal("insecure non-loopback auth configuration was accepted")
+			}
+		})
+	}
+	for _, address := range []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080"} {
+		valid := base
+		valid.HTTPAddr = address
+		if err := valid.Validate(); err != nil {
+			t.Fatalf("development loopback-origin auth should support listener %s: %v", address, err)
+		}
+	}
+}
+
 func TestDatabaseConnectionStringEscapesPassword(t *testing.T) {
 	t.Parallel()
 	cfg := Defaults()

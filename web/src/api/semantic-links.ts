@@ -1,3 +1,5 @@
+import { authFetch } from "./auth";
+
 export type NodeType = "TOPIC" | "CLAIM";
 export type RelationType =
   | "CITES"
@@ -344,12 +346,15 @@ export interface ApproveProposalInput {
   decision: ProposalDecision;
 }
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const gitHeadPattern = /^([0-9a-f]{40}|[0-9a-f]{64})$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const controlPattern = /[\u0000-\u001f\u007f-\u009f]/;
+// Proposal revisions carry user-authored Markdown and explanations. Preserve
+// layout whitespace while still rejecting non-printing controls that could
+// corrupt logs, terminals, or downstream text renderers.
+const proposalFreeTextControlPattern = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/;
 const textEncoder = new TextEncoder();
 const maxCursorBytes = 2048;
 // Candidate reasons/risk text share the backend Knowledge domain's 4 KiB bound.
@@ -473,6 +478,20 @@ const readText = (
 ): string => {
   const result = readString(value, field, fail);
   if ((!allowEmpty && result === "") || (result !== "" && result.trim() !== result) || controlPattern.test(result) ||
+      textEncoder.encode(result).length > maxBytes) {
+    throw fail(field);
+  }
+  return result;
+};
+
+const readProposalFreeText = (
+  value: unknown,
+  field: string,
+  maxBytes: number,
+  fail: InvalidFactory = invalidResponse,
+): string => {
+  const result = readString(value, field, fail);
+  if (result.trim() === "" || proposalFreeTextControlPattern.test(result) ||
       textEncoder.encode(result).length > maxBytes) {
     throw fail(field);
   }
@@ -1093,10 +1112,10 @@ const readFilePatchRevision = (value: unknown, field: string): FilePatchRevision
     id: readUuid(value.id, `${field}.id`),
     revisionNo: readInteger(value.revision_no, `${field}.revision_no`, 1),
     baseHash: readHash(value.base_hash, `${field}.base_hash`),
-    content: readText(value.content, `${field}.content`, maxFreeTextBytes, true),
-    evidenceSummary: readText(value.evidence_summary, `${field}.evidence_summary`, maxReasonBytes),
-    risk: readText(value.risk, `${field}.risk`, maxReasonBytes),
-    rollbackPlan: readText(value.rollback_plan, `${field}.rollback_plan`, maxReasonBytes),
+    content: readProposalFreeText(value.content, `${field}.content`, maxFreeTextBytes),
+    evidenceSummary: readProposalFreeText(value.evidence_summary, `${field}.evidence_summary`, maxReasonBytes),
+    risk: readProposalFreeText(value.risk, `${field}.risk`, maxReasonBytes),
+    rollbackPlan: readProposalFreeText(value.rollback_plan, `${field}.rollback_plan`, maxReasonBytes),
     changeHash: readHash(value.change_hash, `${field}.change_hash`),
     createdAt: readTimestamp(value.created_at, `${field}.created_at`),
   };
@@ -1126,7 +1145,7 @@ const readKnowledgeChangeRevision = (value: unknown, field: string): KnowledgeCh
       fingerprint: readHash(item.fingerprint, `${itemField}.fingerprint`),
     };
   }, 1), `${field}.target_refs`, (item) => item.id);
-  const baseVersions = unique(readArray(value.base_versions, `${field}.base_versions`, 100, (item, itemField) => {
+  const baseVersions = unique(readArray(value.base_versions, `${field}.base_versions`, 2, (item, itemField) => {
     if (!isRecord(item)) throw invalidResponse(itemField);
     assertExactKeys(item, ["node_type", "node_id", "version"], itemField);
     return {
@@ -1134,7 +1153,7 @@ const readKnowledgeChangeRevision = (value: unknown, field: string): KnowledgeCh
       nodeId: readUuid(item.node_id, `${itemField}.node_id`),
       version: readInteger(item.version, `${itemField}.version`, 1),
     };
-  }, 1), `${field}.base_versions`, (item) => `${item.nodeType}:${item.nodeId}`);
+  }, 2), `${field}.base_versions`, (item) => `${item.nodeType}:${item.nodeId}`);
   const changeSetValue = value.change_set;
   if (!isRecord(changeSetValue)) throw invalidResponse(`${field}.change_set`);
   assertExactKeys(changeSetValue, ["operation", "source", "target", "relation_type"], `${field}.change_set`);
@@ -1147,6 +1166,21 @@ const readKnowledgeChangeRevision = (value: unknown, field: string): KnowledgeCh
       version: readInteger(item.version, `${endpointField}.version`, 1),
     };
   };
+  const source = readChangeEndpoint(changeSetValue.source, `${field}.change_set.source`);
+  const target = readChangeEndpoint(changeSetValue.target, `${field}.change_set.target`);
+  const relationType = readRelationType(changeSetValue.relation_type, `${field}.change_set.relation_type`);
+  const sourceKey = `${source.type}:${source.id}`;
+  const targetKey = `${target.type}:${target.id}`;
+  const baseVersionByKey = new Map(baseVersions.map((item) => [`${item.nodeType}:${item.nodeId}`, item.version]));
+  if (
+    sourceKey === targetKey ||
+    !graphRelationTypeCompatible(relationType, source.type, target.type) ||
+    isSymmetricGraphRelationType(relationType) && graphNodeRefIdentity(source) > graphNodeRefIdentity(target) ||
+    baseVersionByKey.get(sourceKey) !== source.version ||
+    baseVersionByKey.get(targetKey) !== target.version
+  ) {
+    throw invalidResponse(`${field}.change_set`);
+  }
   const evidenceRefs = unique(readArray(value.evidence_refs, `${field}.evidence_refs`, 100, (item, itemField) => {
     if (!isRecord(item)) throw invalidResponse(itemField);
     assertExactKeys(item, ["candidate_evidence_id", "semantic_hash"], itemField);
@@ -1163,13 +1197,13 @@ const readKnowledgeChangeRevision = (value: unknown, field: string): KnowledgeCh
     baseVersions,
     changeSet: {
       operation: readEnum(changeSetValue.operation, `${field}.change_set.operation`, ["CREATE_RELATION"] as const),
-      source: readChangeEndpoint(changeSetValue.source, `${field}.change_set.source`),
-      target: readChangeEndpoint(changeSetValue.target, `${field}.change_set.target`),
-      relationType: readRelationType(changeSetValue.relation_type, `${field}.change_set.relation_type`),
+      source,
+      target,
+      relationType,
     },
     evidenceRefs,
-    risk: readText(value.risk, `${field}.risk`, maxReasonBytes),
-    rollbackPlan: readText(value.rollback_plan, `${field}.rollback_plan`, maxReasonBytes),
+    risk: readProposalFreeText(value.risk, `${field}.risk`, maxReasonBytes),
+    rollbackPlan: readProposalFreeText(value.rollback_plan, `${field}.rollback_plan`, maxReasonBytes),
     changeHash: readHash(value.change_hash, `${field}.change_hash`),
     createdAt: readTimestamp(value.created_at, `${field}.created_at`),
   };
@@ -1256,7 +1290,7 @@ const readJson = async (response: Response): Promise<unknown> => {
 const request = async <T>(path: string, init: RequestInit, decode: (value: unknown) => T): Promise<T> => {
   let response: Response;
   try {
-    response = await fetch(`${apiBaseUrl}${path}`, init);
+    response = await authFetch(path, init);
   } catch {
     throw new SemanticLinkApiError({
       errorCode: "NETWORK_ERROR",

@@ -193,3 +193,53 @@ Correct: 回查成功后才删除；失败保留旧 cursor 并显式 recovery_fa
 Wrong: SSE 超窗恢复时 refetch Workspace 下所有 Search page，包括绑定旧 Index fingerprint 的 cursor。
 Correct: 先取消并移除 Search 窗口；挂载页面通过 recovery callback 只回查无 cursor 的规范首屏，成功后才提交恢复。
 ```
+
+## Scenario: M10 Browser Authentication State Ownership
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/auth.ts`、`auth-context.tsx`、认证页、应用根边界或受保护请求包装时应用。
+
+### 2. Signatures
+
+```ts
+authFetch(path, init?): Promise<Response>
+<AuthProvider><AuthBoundary>{children}</AuthBoundary></AuthProvider>
+useAuth(): { state, signIn, signOut, refresh }
+```
+
+### 3. Contracts
+
+- HTTP Cookie 由浏览器保存且始终使用 `credentials: "include"`；客户端不读取或持久化 Session Cookie 与 Bootstrap Token。
+- `authFetch` 只对 Cookie 身份的 unsafe 请求补 `X-CSRF-Token`；带 Bearer 的自动化请求不伪造 CSRF。`401` 必须触发 Auth 失效而不是保留受保护 Query cache。
+- `AuthProvider` 以 `/api/v1/system/status` 判定 `disabled|required|unavailable`，并在匿名、失效或存储不可用时清理 Query cache。前端状态不证明 Capability 或 Approval。
+- 所有认证 success/error body 在 `web/src/api/auth.ts` 从 `unknown` 严格解码；`Problem` 必须只有允许字段，且 `error_code`、`message` 非空、`retryable` 为 boolean，optional `workflow_run_id` 为 UUID、`details` 为 object。可选 Session/API Token 时间字段存在时仍须是有效 RFC3339 日历时间。Token 创建响应只在调用点使用一次明文，后续列表只能消费元数据。
+- 所有受保护 REST 请求必须经过 `authFetch`；组件不得用原始 `/api/v1/...` 新标签链接绕过 `401` 失效通知、`VITE_API_BASE_URL` 和 Query cache 清理。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 必须结果 |
+| --- | --- |
+| `401` 或注销成功 | 清理 CSRF/Query，进入 anonymous，不显示旧 Workspace 事实 |
+| 认证状态服务不可用或 CSRF Storage 不可用 | 显式 error/retry，不伪装已认证 |
+| success/Problem 字段缺失、未知、`retryable` 非 boolean、optional UUID/时间/details 不合法 | `AuthApiError(INVALID_RESPONSE)`，不渲染部分认证事实 |
+| development `disabled` | 渲染开发模式提示；不能由 UI 放宽服务端 Capability |
+
+### 5. Good / Base / Bad Cases
+
+- Good：Bootstrap 输入只在提交时进入认证 API，成功后由 HttpOnly Cookie 建立会话，UI 只保留 CSRF 派生值。
+- Base：刷新后先读取系统认证模式，再恢复当前 Session；未登录时不挂载业务工作台。
+- Bad：把 Bootstrap/API Token 放入 localStorage、仅因 localhost 绕过 AuthBoundary、401 后继续展示旧 Query、由组件自行拼接认证 Header，或直接打开受保护 `/api/v1` 链接而绕过 Auth 失效路径。
+
+### 6. Tests Required
+
+- API 单测覆盖严格 Session/API Token decoder、Problem（未知字段、非 boolean retryable、错误 UUID/时间/details）、401 失效、unsafe CSRF 注入与 Bearer 优先级；组件测试断言不保留原始受保护 API 跳转。
+- Context/App/Shell 测试覆盖 required 匿名、登录、登出、disabled、storage 失败和受保护内容隔离。
+- 真实浏览器在桌面与 `390x844` 下验证 disabled 模式工作台/Settings 可用、无 console error、无文本重叠；required 模式由 Compose smoke 验证 Cookie、CSRF、Token 生命周期。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 把 Bootstrap Token 或 API Token 放进 Browser Storage，并用它判断页面是否已登录。
+Correct: Bootstrap 只用于一次交换；浏览器身份由 HttpOnly Cookie 建立，前端只维护可清除的 CSRF 与可查询的 Session 元数据。
+```

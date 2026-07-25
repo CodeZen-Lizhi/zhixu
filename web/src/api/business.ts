@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/consistent-type-definitions, @typescript-eslint/no-non-null-assertion, @typescript-eslint/restrict-template-expressions */
+import { authFetch } from "./auth";
 import { graphNodeRefIdentity, graphRelationTypeCompatible, isSymmetricGraphRelationType } from "./graph";
 import { ApiBoundaryError } from "./system-status";
 
@@ -121,7 +122,6 @@ export class BusinessApiError extends ApiBoundaryError {
   }
 }
 
-const base = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
@@ -268,7 +268,7 @@ const isAbortError = (value: unknown): boolean =>
 const request = async (path: string, init?: RequestInit): Promise<unknown> => {
   let response: Response;
   const headers = new Headers(init?.headers); headers.set("Accept", "application/json"); if (init?.body !== undefined) headers.set("Content-Type", "application/json");
-  try { response = await fetch(`${base}${path}`, { ...init, headers }); }
+  try { response = await authFetch(path, { ...init, headers }); }
   catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new BusinessApiError("NETWORK_ERROR", "无法连接业务 API。", true, undefined, { cause: error });
@@ -543,8 +543,9 @@ export const preflightProposal = (id: string, input: { revisionId: string; chang
 export const getWorkflow = (workspaceId: string, id: string, signal?: AbortSignal): Promise<WorkflowDetail> => request(`/api/v1/workflows/${encodeURIComponent(id)}`, signal === undefined ? undefined : { signal }).then((v) => {
   const r = record(v, "workflow");
   exact(r, ["id", "workspace_id", "definition_id", "status", "input", "output", "version", "created_at", "updated_at", "completed_at", "pause_requested", "cancel_requested"], "workflow");
+  const input = requiredFieldValue(r, "input");
   const completedAt = r.completed_at === undefined ? undefined : dateTimeValue(r, "completed_at");
-  return { id: boundValue(uuidValue(r, "id"), id, "workflow.id"), workspaceId: boundValue(uuidValue(r, "workspace_id"), workspaceId, "workflow.workspace_id"), definitionId: uuidValue(r, "definition_id"), status: workflowStatus(r, "status"), input: r.input, ...(r.output === undefined ? {} : { output: r.output }), version: integerValue(r, "version", 1), createdAt: dateTimeValue(r, "created_at"), updatedAt: dateTimeValue(r, "updated_at"), ...(completedAt === undefined ? {} : { completedAt }), pauseRequested: boolValue(r, "pause_requested"), cancelRequested: boolValue(r, "cancel_requested") };
+  return { id: boundValue(uuidValue(r, "id"), id, "workflow.id"), workspaceId: boundValue(uuidValue(r, "workspace_id"), workspaceId, "workflow.workspace_id"), definitionId: uuidValue(r, "definition_id"), status: workflowStatus(r, "status"), input, ...(r.output === undefined ? {} : { output: r.output }), version: integerValue(r, "version", 1), createdAt: dateTimeValue(r, "created_at"), updatedAt: dateTimeValue(r, "updated_at"), ...(completedAt === undefined ? {} : { completedAt }), pauseRequested: boolValue(r, "pause_requested"), cancelRequested: boolValue(r, "cancel_requested") };
 });
 export const decideProposal = (id: string, input: { revisionId: string; changeHash: string; decision: "approved" | "rejected"; proposalType: ProposalType }): Promise<ApprovalDecisionResult> => request(`/api/v1/proposals/${encodeURIComponent(id)}/approvals`, { method: "POST", headers: { "Idempotency-Key": `m9-approval-${id}-${input.decision}-${input.changeHash}` }, body: JSON.stringify({ revision_id: input.revisionId, change_hash: input.changeHash, decision: input.decision }) }).then((value) => {
   const r = record(value, "approval_decision");

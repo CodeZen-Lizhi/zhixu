@@ -37,6 +37,17 @@ x-tool-environment: &tool-environment
   ZHIXU_WEB_FETCH_MAX_RESOLVED_IPS: ${ZHIXU_WEB_FETCH_MAX_RESOLVED_IPS:-16}
   ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES: ${ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
 
+x-runtime-environment: &runtime-environment
+  ZHIXU_ENVIRONMENT: ${ZHIXU_ENVIRONMENT:-development}
+
+x-api-auth-environment: &api-auth-environment
+  ZHIXU_AUTH_MODE: ${ZHIXU_AUTH_MODE:-required}
+  ZHIXU_AUTH_BOOTSTRAP_TOKEN: ${ZHIXU_AUTH_BOOTSTRAP_TOKEN:-}
+  ZHIXU_AUTH_SESSION_TTL: ${ZHIXU_AUTH_SESSION_TTL:-12h}
+  ZHIXU_AUTH_API_TOKEN_TTL: ${ZHIXU_AUTH_API_TOKEN_TTL:-720h}
+  ZHIXU_AUTH_SECURE_COOKIE: ${ZHIXU_AUTH_SECURE_COOKIE:-false}
+  ZHIXU_AUTH_ALLOWED_ORIGINS: ${ZHIXU_AUTH_ALLOWED_ORIGINS:-http://127.0.0.1:${ZHIXU_HTTP_PORT:-8080}}
+
 services:
   postgres:
     image: pgvector/pgvector:0.8.5-pg18-bookworm
@@ -73,9 +84,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     environment:
-      <<: [*embedding-environment, *chat-environment, *tool-environment]
+      <<: [*embedding-environment, *chat-environment, *tool-environment, *runtime-environment, *api-auth-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
-      ZHIXU_HTTP_ADDR: 0.0.0.0:8080
+      ZHIXU_HTTP_ADDR: 127.0.0.1:8081
       ZHIXU_DATABASE_HOST: postgres
       ZHIXU_DATABASE_PORT: 5432
       ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
@@ -92,6 +103,35 @@ services:
     volumes:
       - ${ZHIXU_WORKSPACE_ROOT:-../workspace}:/workspace
     healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  firewall:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/app/loopback-firewall.sh"]
+    user: "0:0"
+    cap_add:
+      - NET_ADMIN
+    network_mode: "service:app"
+    depends_on:
+      app:
+        condition: service_started
+
+  proxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["socat", "TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:8081"]
+    user: "10001:10001"
+    network_mode: "service:app"
+    depends_on:
+      firewall:
+        condition: service_completed_successfully
+    healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
       interval: 5s
       timeout: 3s
@@ -103,7 +143,7 @@ services:
       dockerfile: deploy/Dockerfile
     entrypoint: ["/app/zhixu-worker"]
     environment:
-      <<: [*embedding-environment, *chat-environment, *tool-environment]
+      <<: [*embedding-environment, *chat-environment, *tool-environment, *runtime-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
       ZHIXU_DATABASE_HOST: postgres
       ZHIXU_DATABASE_PORT: 5432

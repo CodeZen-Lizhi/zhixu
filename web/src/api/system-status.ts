@@ -1,3 +1,5 @@
+import { authFetch } from "./auth";
+
 export type SystemOverallStatus = "ready" | "degraded";
 export type DatabaseStatus = "ready" | "unavailable";
 export type GraphCapabilityStatus = "ready" | "unavailable";
@@ -5,6 +7,7 @@ export type SemanticLinkCapabilityStatus = "ready" | "unavailable";
 export type RAGCapabilityStatus = "ready" | "disabled" | "unavailable";
 export type CollectionCapabilityStatus = "ready" | "unavailable";
 export type KnowledgeHealthCapabilityStatus = "ready" | "unavailable";
+export type AuthCapabilityStatus = "ready" | "disabled" | "unavailable";
 
 export interface SystemStatus {
   status: SystemOverallStatus;
@@ -30,6 +33,10 @@ export interface SystemStatus {
   };
   knowledgeHealth: {
     status: KnowledgeHealthCapabilityStatus;
+  };
+  auth: {
+    status: AuthCapabilityStatus;
+    reason?: "auth_dependencies_unavailable";
   };
   requestId: string;
 }
@@ -113,21 +120,27 @@ const readBoundedCapabilityStatus = (value: unknown, field: string): "ready" | "
   throw new ApiBoundaryError("INVALID_RESPONSE", `系统状态响应包含未知 ${field}.status`, false);
 };
 
+const readAuthStatus = (value: unknown): AuthCapabilityStatus => {
+  if (value === "ready" || value === "disabled" || value === "unavailable") return value;
+  throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含未知 auth.status", false);
+};
+
 export const decodeSystemStatus = (value: unknown): SystemStatus => {
-  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.graph) || !isRecord(value.semantic_links) || !isRecord(value.rag) || !isRecord(value.collections) || !isRecord(value.knowledge_health)) {
+  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.graph) || !isRecord(value.semantic_links) || !isRecord(value.rag) || !isRecord(value.collections) || !isRecord(value.knowledge_health) || !isRecord(value.auth)) {
     throw new ApiBoundaryError(
       "INVALID_RESPONSE",
       "系统状态响应结构无效",
       false,
     );
   }
-  assertExactKeys(value, ["status", "version", "database", "graph", "semantic_links", "rag", "collections", "knowledge_health", "request_id"], "root");
+  assertExactKeys(value, ["status", "version", "database", "graph", "semantic_links", "rag", "collections", "knowledge_health", "auth", "request_id"], "root");
   assertExactKeys(value.database, ["status", "message"], "database");
   assertExactKeys(value.graph, ["status", "reason"], "graph");
   assertExactKeys(value.semantic_links, ["status", "reason"], "semantic_links");
   assertExactKeys(value.rag, ["status", "reason"], "rag");
   assertExactKeys(value.collections, ["status"], "collections");
   assertExactKeys(value.knowledge_health, ["status"], "knowledge_health");
+  assertExactKeys(value.auth, ["status", "reason"], "auth");
 
   const message = value.database.message;
   if (message !== undefined && typeof message !== "string") {
@@ -148,6 +161,10 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
   const reason = value.rag.reason;
   if (reason !== undefined && reason !== "rag_dependencies_unavailable") {
     throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含无效 rag.reason", false);
+  }
+  const authReason = value.auth.reason;
+  if (authReason !== undefined && authReason !== "auth_dependencies_unavailable") {
+    throw new ApiBoundaryError("INVALID_RESPONSE", "系统状态响应包含无效 auth.reason", false);
   }
 
   return {
@@ -171,18 +188,18 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
     },
     collections: { status: readBoundedCapabilityStatus(value.collections.status, "collections") },
     knowledgeHealth: { status: readBoundedCapabilityStatus(value.knowledge_health.status, "knowledge_health") },
+    auth: { status: readAuthStatus(value.auth.status), ...(authReason === undefined ? {} : { reason: authReason }) },
     requestId: readNonEmptyString(value.request_id, "request_id"),
   };
 };
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
 export const fetchSystemStatus = async (
   signal?: AbortSignal,
 ): Promise<SystemStatus> => {
   let response: Response;
   try {
-    response = await fetch(`${apiBaseUrl}/api/v1/system/status`, {
+    response = await authFetch("/api/v1/system/status", {
       headers: { Accept: "application/json" },
       ...(signal === undefined ? {} : { signal }),
     });

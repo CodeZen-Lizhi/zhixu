@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	collectionhttp "github.com/CodeZen-Lizhi/zhixu/internal/collection/http"
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
@@ -55,10 +56,15 @@ type Dependencies struct {
 	Candidate         *graphhttp.CandidateHandler
 	Conversation      *conversationhttp.Handler
 	Events            *eventshttp.Handler
-	RAGEnabled        bool
-	RAGInitErr        error
-	Logger            *slog.Logger
-	Tracer            observability.Tracer
+	Auth              *authhttp.Handler
+	AuthRequired      bool
+	AuthInitErr       error
+	// AuthCheck confirms that both authentication credential tables remain readable.
+	AuthCheck  func(context.Context) error
+	RAGEnabled bool
+	RAGInitErr error
+	Logger     *slog.Logger
+	Tracer     observability.Tracer
 }
 
 // NewRouter builds the API and static-resource boundary. Domain modules are
@@ -95,6 +101,13 @@ func NewRouter(deps Dependencies) http.Handler {
 			})
 			return
 		}
+		if err := checkAuth(r.Context(), deps); err != nil {
+			writeProblem(w, http.StatusServiceUnavailable, "AUTH_DEPENDENCY_UNAVAILABLE", "服务尚未就绪", true, map[string]any{
+				"dependency": "auth",
+				"reason":     "auth_dependencies_unavailable",
+			})
+			return
+		}
 		if deps.RAGEnabled && deps.RAGInitErr != nil {
 			writeProblem(w, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", "服务尚未就绪", true, map[string]any{
 				"dependency": "rag",
@@ -115,34 +128,21 @@ func NewRouter(deps Dependencies) http.Handler {
 		api.Get("/system/status", func(w http.ResponseWriter, r *http.Request) {
 			handleSystemStatus(w, r, deps)
 		})
-		if deps.Workspace != nil {
-			deps.Workspace.Routes(api)
-		}
-		if deps.Workflow != nil {
-			deps.Workflow.Routes(api)
-		}
-		if deps.ChangeControl != nil {
-			deps.ChangeControl.Routes(api)
-		}
-		if deps.Collection != nil {
-			deps.Collection.Routes(api)
-		}
-		if deps.Health != nil {
-			deps.Health.Routes(api)
-		}
-		if deps.Ingestion != nil {
-			deps.Ingestion.Routes(api)
-		}
-		if deps.Retrieval != nil {
-			deps.Retrieval.Routes(api)
-		}
-		deps.Graph.Routes(api)
-		deps.Candidate.Routes(api)
-		if deps.Conversation != nil {
-			deps.Conversation.Routes(api)
-		}
-		if deps.Events != nil {
-			deps.Events.Routes(api)
+		if deps.Auth != nil {
+			deps.Auth.OpenRoutes(api)
+			api.Group(func(protected chi.Router) {
+				protected.Use(deps.Auth.Middleware)
+				deps.Auth.ProtectedRoutes(protected)
+				registerDomainRoutes(protected, deps)
+			})
+		} else if deps.AuthRequired {
+			api.Post("/auth/sessions", authUnavailableHandler)
+			api.Group(func(protected chi.Router) {
+				protected.Use(authUnavailableMiddleware)
+				registerDomainRoutes(protected, deps)
+			})
+		} else {
+			registerDomainRoutes(api, deps)
 		}
 		api.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 			writeProblem(w, http.StatusNotFound, "NOT_FOUND", "请求的 API 资源不存在", false, nil)
@@ -163,6 +163,48 @@ func NewRouter(deps Dependencies) http.Handler {
 		writeProblem(w, http.StatusNotFound, "WEB_ASSETS_UNAVAILABLE", "Web 静态资源不可用", false, nil)
 	})
 	return router
+}
+
+func registerDomainRoutes(api chi.Router, deps Dependencies) {
+	if deps.Workspace != nil {
+		deps.Workspace.Routes(api)
+	}
+	if deps.Workflow != nil {
+		deps.Workflow.Routes(api)
+	}
+	if deps.ChangeControl != nil {
+		deps.ChangeControl.Routes(api)
+	}
+	if deps.Collection != nil {
+		deps.Collection.Routes(api)
+	}
+	if deps.Health != nil {
+		deps.Health.Routes(api)
+	}
+	if deps.Ingestion != nil {
+		deps.Ingestion.Routes(api)
+	}
+	if deps.Retrieval != nil {
+		deps.Retrieval.Routes(api)
+	}
+	deps.Graph.Routes(api)
+	deps.Candidate.Routes(api)
+	if deps.Conversation != nil {
+		deps.Conversation.Routes(api)
+	}
+	if deps.Events != nil {
+		deps.Events.Routes(api)
+	}
+}
+
+func authUnavailableHandler(w http.ResponseWriter, _ *http.Request) {
+	writeProblem(w, http.StatusServiceUnavailable, "AUTH_DEPENDENCY_UNAVAILABLE", "认证服务不可用", true, nil)
+}
+
+func authUnavailableMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		authUnavailableHandler(w, nil)
+	})
 }
 
 func requestTraceMiddleware(tracer observability.Tracer) func(http.Handler) http.Handler {
@@ -197,6 +239,7 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 	ragStatus := map[string]string{"status": "disabled"}
 	collectionsStatus := map[string]string{"status": "unavailable"}
 	knowledgeHealthStatus := map[string]string{"status": "unavailable"}
+	authStatus := map[string]string{"status": "disabled"}
 	status := "degraded"
 	if err := checkDatabase(r.Context(), deps); err == nil {
 		databaseStatus["status"] = "ready"
@@ -209,6 +252,14 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 		if deps.RAGInitErr != nil {
 			ragStatus["status"] = "unavailable"
 			ragStatus["reason"] = "rag_dependencies_unavailable"
+			status = "degraded"
+		}
+	}
+	if deps.AuthRequired {
+		authStatus["status"] = "ready"
+		if err := checkAuth(r.Context(), deps); err != nil {
+			authStatus["status"] = "unavailable"
+			authStatus["reason"] = "auth_dependencies_unavailable"
 			status = "degraded"
 		}
 	}
@@ -237,6 +288,7 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 		"rag":              ragStatus,
 		"collections":      collectionsStatus,
 		"knowledge_health": knowledgeHealthStatus,
+		"auth":             authStatus,
 		"request_id":       requestID(r.Context()),
 	})
 }
@@ -255,6 +307,24 @@ func checkDatabase(parent context.Context, deps Dependencies) error {
 	defer cancel()
 	if err := deps.Database.Ping(ctx); err != nil {
 		return &readinessError{kind: "ping", err: fmt.Errorf("database ping failed: %w", err)}
+	}
+	return nil
+}
+
+func checkAuth(parent context.Context, deps Dependencies) error {
+	if !deps.AuthRequired {
+		return nil
+	}
+	if deps.AuthInitErr != nil {
+		return errors.New("authentication initialization failed")
+	}
+	if deps.Auth == nil || deps.AuthCheck == nil {
+		return errors.New("authentication health check is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(parent, deps.PingTimeout)
+	defer cancel()
+	if err := deps.AuthCheck(ctx); err != nil {
+		return fmt.Errorf("authentication health check failed: %w", err)
 	}
 	return nil
 }

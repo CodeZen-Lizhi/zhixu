@@ -6,6 +6,7 @@ import type { Answer, AnswerCitation, FeedbackType, Turn } from "../../api/conve
 import { ConversationApiError } from "../../api/conversation";
 import { createCommandId, useCreateConversationCommand, useSubmitFeedbackCommand, useSubmitQuestionCommand } from "./commands";
 import { useWorkspaceEventState } from "../../events/event-store";
+import { SourceSpanViewer } from "../source-spans";
 import { useAnswer, useConversation, useConversationList, useConversationTurns, useLatestTurn } from "./queries";
 
 const stageLabels: Record<string, string> = {
@@ -148,6 +149,10 @@ const TurnCard = ({ turn, answer, onCitation, onPrompt }: { turn: Turn; answer: 
   </section>
 );
 
+export const CitationInspector = ({ citation, onClose }: { citation: AnswerCitation | undefined; onClose: () => void }) => (
+  citation === undefined ? <><h2>引用会在这里打开</h2><p>选择回答中的编号引用，查看服务端提供的真实段落链接。</p></> : <><h2>已选择引用</h2><dl><div><dt>Source Version</dt><dd>{citation.sourceVersionId}</dd></div><div><dt>Chunk</dt><dd>{citation.chunkId}</dd></div></dl><SourceSpanViewer className="secondary-button" label="打开段落证据" reference={{ workspaceId: citation.workspaceId, sourceVersionId: citation.sourceVersionId, sourceSpanId: citation.sourceSpanId }} /><button className="secondary-button" type="button" onClick={onClose}>关闭引用</button></>
+);
+
 export const RagPage = () => {
   const workspaceId = useActiveWorkspaceId();
   const { conversationId = "" } = useParams();
@@ -243,7 +248,7 @@ export const RagPage = () => {
           </div></details>
           <div className="rag-composer__options"><label><span>回答深度</span><select value={answerDepth} onChange={(event) => setAnswerDepth(event.target.value as typeof answerDepth)}><option value="concise">简洁</option><option value="standard">标准</option><option value="detailed">详细</option></select></label><label><span>输出格式</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as typeof outputFormat)}><option value="markdown">Markdown</option><option value="outline">大纲</option></select></label><button disabled={questionMutation.isPending || question.trim() === "" || conversationQuery.data?.status === "archived"}>{questionMutation.isPending ? "已接收，正在启动…" : "提交问题"}</button></div>{conversationQuery.data?.status === "archived" ? <p className="rag-muted">此会话已归档，不能继续提问。</p> : null}{questionMutation.isError ? <ErrorNotice error={questionMutation.error} /> : null}</form> : null}
       </main>
-      <aside ref={evidenceRef} tabIndex={selectedCitation === undefined ? undefined : -1} className={`rag-evidence${selectedCitation === undefined ? "" : " is-open"}`} aria-label="引用证据"><p className="eyebrow">Evidence</p>{selectedCitation === undefined ? <><h2>引用会在这里打开</h2><p>选择回答中的编号引用，查看服务端提供的真实段落链接。</p></> : <><h2>已选择引用</h2><dl><div><dt>Source Version</dt><dd>{selectedCitation.sourceVersionId}</dd></div><div><dt>Chunk</dt><dd>{selectedCitation.chunkId}</dd></div></dl><a href={selectedCitation.href} target="_blank" rel="noreferrer">打开段落证据 ↗</a><button className="secondary-button" type="button" onClick={closeCitation}>关闭引用</button></>}</aside>
+      <aside ref={evidenceRef} tabIndex={selectedCitation === undefined ? undefined : -1} className={`rag-evidence${selectedCitation === undefined ? "" : " is-open"}`} aria-label="引用证据"><p className="eyebrow">Evidence</p><CitationInspector citation={selectedCitation} onClose={closeCitation} /></aside>
     </div>
   </div>;
 };

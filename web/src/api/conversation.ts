@@ -1,3 +1,5 @@
+import { authFetch } from "./auth";
+
 export type ConversationStatus = "open" | "archived";
 export type SearchMode = "keyword" | "semantic" | "hybrid";
 export type AnswerDepth = "concise" | "standard" | "detailed";
@@ -195,7 +197,6 @@ export interface SubmitQuestionInput {
 }
 export interface SubmitFeedbackInput { workspaceId: string; answerId: string; idempotencyKey: string; feedbackType: FeedbackType; citationId?: string | null; comment?: string | null }
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const timestampPattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const etagPattern = /^W\/\"(?:[1-9][0-9]*|answer-[1-9][0-9]*-workflow-[1-9][0-9]*-stage-(?:none|plan\.started|plan\.completed|retrieval\.started|retrieval\.completed|validation\.started|validation\.completed))\"$/;
@@ -525,7 +526,7 @@ const query = (input: ListInput | GetInput): string => {
   return params.toString();
 };
 const request = async <T>(path: string, init: RequestInit, decoder: (value: unknown) => T): Promise<{ value: T; response: Response }> => {
-  let response: Response; try { response = await fetch(`${apiBaseUrl}${path}`, init) } catch (error: unknown) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new ConversationApiError({ errorCode: "NETWORK_ERROR", message: "无法连接 Conversation API。", retryable: true }, null, { cause: error }) }
+  let response: Response; try { response = await authFetch(path, init) } catch (error: unknown) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new ConversationApiError({ errorCode: "NETWORK_ERROR", message: "无法连接 Conversation API。", retryable: true }, null, { cause: error }) }
   let payload: unknown; try { payload = await response.json() } catch (error: unknown) { throw new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: "Conversation API 返回了无效 JSON。", retryable: false }, response.status, { cause: error }) }
   if (!response.ok) { try { throw new ConversationApiError(decodeProblem(payload), response.status) } catch (error: unknown) { if (error instanceof ConversationApiError && error.errorCode !== "INVALID_RESPONSE") throw error; throw new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: "Conversation API 返回了无效 Problem。", retryable: false }, response.status, { cause: error }) } }
   try { return { value: decoder(payload), response } } catch (error: unknown) { if (error instanceof ConversationApiError) throw new ConversationApiError({ errorCode: error.errorCode, message: error.message, retryable: false }, response.status, { cause: error }); throw error }
@@ -542,7 +543,7 @@ export const createConversation = async (input: CreateConversationInput, signal?
 export const listConversations = async (input: ListInput, signal?: AbortSignal): Promise<Page<Conversation>> => (await request(`/api/v1/conversations?${query(input)}`, { method: "GET", headers: { Accept: "application/json" }, ...withSignal(signal) }, decodeConversationPage)).value;
 const getVersioned = async <T>(path: string, input: GetInput, decoder: (value: unknown) => T, signal?: AbortSignal): Promise<VersionedResource<T>> => {
   validateUuid(input.id, "id"); if (input.ifNoneMatch !== undefined && !etagPattern.test(input.ifNoneMatch)) throw invalidRequest("ifNoneMatch");
-  let response: Response; try { response = await fetch(`${apiBaseUrl}${path}?${query(input)}`, { method: "GET", headers: { Accept: "application/json", ...(input.ifNoneMatch === undefined ? {} : { "If-None-Match": input.ifNoneMatch }) }, ...withSignal(signal) }) } catch (error: unknown) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new ConversationApiError({ errorCode: "NETWORK_ERROR", message: "无法连接 Conversation API。", retryable: true }, null, { cause: error }) }
+  let response: Response; try { response = await authFetch(`${path}?${query(input)}`, { method: "GET", headers: { Accept: "application/json", ...(input.ifNoneMatch === undefined ? {} : { "If-None-Match": input.ifNoneMatch }) }, ...withSignal(signal) }) } catch (error: unknown) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new ConversationApiError({ errorCode: "NETWORK_ERROR", message: "无法连接 Conversation API。", retryable: true }, null, { cause: error }) }
   if (response.status === 304) return { resource: null, etag: input.ifNoneMatch ?? null, notModified: true };
   let payload: unknown; try { payload = await response.json() } catch { throw new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: "Conversation API 返回了无效 JSON。", retryable: false }, response.status) }
   if (!response.ok) { try { throw new ConversationApiError(decodeProblem(payload), response.status) } catch (error: unknown) { if (error instanceof ConversationApiError && error.errorCode !== "INVALID_RESPONSE") throw error; throw new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: "Conversation API 返回了无效 Problem。", retryable: false }, response.status) } }

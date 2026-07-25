@@ -39,8 +39,9 @@ The project is under active development. The current skeleton provides a Go API 
 Workspace→摄取→索引→Search/Evidence、Conversation→RAG Answer→SSE→Feedback 闭环和 Graph v1。
 Graph v1 只读投影 Knowledge 中同一 Workspace 的 Topic、Claim 和 canonical Relation，不是第二事实源；
 M7-02 已交付独立 Semantic Link Candidate、Topic scan、typed Relation Proposal 与 Approval 后 Knowledge apply；
-Health/Timeline、Collection/表格、Artifact/Review/Interview、正式认证、安全/50 万容量/
-备份门禁和最终发布验收仍属于后续 M7–M11，不能把当前状态视为整个产品已经交付。
+Health/Timeline、Collection/表格、Artifact/Review/Interview、审计/可观测、50 万容量、备份门禁和
+最终发布验收仍属于后续 M7–M11，不能把当前状态视为整个产品已经交付。M10-02 认证边界已经接入：
+业务 API 默认要求 Session Cookie 或限 Scope API Token；认证关闭只允许 development loopback。
 
 ## Local development
 
@@ -73,11 +74,20 @@ Workspace form should use `/workspace` when running through Compose.
 make compose-up
 ```
 
-Then open <http://127.0.0.1:8080>. Health and dependency status are available at:
+The checked-in example explicitly uses development-only `disabled` auth, so it
+starts without a Bootstrap Token. To exercise `required` mode, set both
+`ZHIXU_AUTH_MODE=required` and a fresh canonical 32+ character
+`ZHIXU_AUTH_BOOTSTRAP_TOKEN`; `make compose-up` rejects a missing Token before
+building or starting services. Then open <http://127.0.0.1:8080>. Health and
+dependency status are available at:
 
 - `GET /livez`: API process liveness
 - `GET /readyz`: API readiness including PostgreSQL connectivity
 - `GET /api/v1/system/status`: API and database status used by the web page
+- `POST /api/v1/auth/sessions`: exchange the configured Bootstrap Bearer credential for an HttpOnly Session Cookie and one-time CSRF token
+- `GET/POST/DELETE /api/v1/auth/session`: inspect, rotate, or revoke the current browser Session
+- `GET/POST /api/v1/auth/api-tokens`: list metadata or create a scoped automation Token (plaintext returned once)
+- `DELETE /api/v1/auth/api-tokens/{token_id}`: revoke an automation Token
 - `POST /api/v1/workspaces`: create the single active Workspace and record its Git baseline
 - `GET /api/v1/workspaces/{workspace_id}`: reopen the persisted Workspace
 - `POST /api/v1/workspaces/{workspace_id}/scan`: scan supported files and register immutable Source Version metadata
@@ -115,8 +125,14 @@ both Claims have a formal `CONFIRMED BELONGS_TO` membership in that Topic; they 
 Open `/chat` to create/select a Conversation and `/chat/{conversationId}` to continue it. Chat is fail-closed by
 default because `.env.example` sets `ZHIXU_CHAT_PROVIDER=disabled`. To execute Questions, configure the same
 `ZHIXU_CHAT_*` OpenAI-compatible provider/model values for API and Worker through the Compose environment; never
-commit the API key. This local loopback mode provides Workspace isolation, not authentication. Session/API Token,
-CSRF/Origin and Capability middleware remain M10 work, so do not expose the current API as a secure public service.
+commit the API key. 认证配置由 `ZHIXU_AUTH_MODE=required|disabled` 控制：`required` 使用一次性 Bootstrap
+Token 换取 HttpOnly Session Cookie，浏览器修改请求同时校验精确 Origin 与 CSRF；自动化客户端使用限 Scope、
+可过期、可撤销的 Bearer API Token。Bootstrap Token 只用于首次换取 Session，API Token 明文只在创建响应返回
+一次，服务端只存摘要。`disabled` 仅允许 development 且 API 进程监听 loopback；官方 Compose 通过同网络命名空间
+的本地转发器暴露固定的 host-loopback 端口，而 API 本身继续监听 `127.0.0.1`。不要把该 Compose 端口改为 LAN 或
+公网入口；自托管或公网部署必须使用 `required`、HTTPS 与 Secure Cookie。
+未显式设置 `ZHIXU_AUTH_ALLOWED_ORIGINS` 时，Compose 会从 `ZHIXU_HTTP_PORT` 派生
+`http://127.0.0.1:<port>`；显式精确 Origin 始终优先。Bootstrap Token 只注入 API 容器，不进入 Worker 环境。
 
 The Worker has a separate health server on container port `8081`; it is not
 published to the host by Compose. Its liveness only proves that the process and

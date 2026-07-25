@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	authapplication "github.com/CodeZen-Lizhi/zhixu/internal/auth/application"
+	authorigin "github.com/CodeZen-Lizhi/zhixu/internal/auth/origin"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/operability"
 
@@ -36,6 +38,16 @@ const (
 	defaultWorkerSoftStopTimeout      = 30 * time.Second
 	defaultWorkerHardStopTimeout      = 60 * time.Second
 	defaultWorkerHealthAddr           = "0.0.0.0:8081"
+)
+
+// AuthMode 控制 API 是否要求单用户身份认证。
+type AuthMode string
+
+const (
+	// AuthModeDisabled 仅允许开发环境的 loopback 使用。
+	AuthModeDisabled AuthMode = "disabled"
+	// AuthModeRequired 要求配置 Bootstrap Token 和安全 Cookie 边界。
+	AuthModeRequired AuthMode = "required"
 )
 
 const (
@@ -226,6 +238,13 @@ type Config struct {
 	WorkerHealthAddr      string        `yaml:"worker_health_addr"`
 	TelemetryMode         TelemetryMode `yaml:"telemetry_mode"`
 	TelemetryEndpoint     string        `yaml:"telemetry_endpoint"`
+
+	AuthMode           AuthMode      `yaml:"auth_mode"`
+	AuthBootstrapToken string        `yaml:"auth_bootstrap_token"`
+	AuthSessionTTL     time.Duration `yaml:"auth_session_ttl"`
+	AuthAPITokenTTL    time.Duration `yaml:"auth_api_token_ttl"`
+	AuthSecureCookie   bool          `yaml:"auth_secure_cookie"`
+	AuthAllowedOrigins []string      `yaml:"auth_allowed_origins"`
 }
 
 // Defaults returns safe non-sensitive defaults. It intentionally leaves the
@@ -294,6 +313,10 @@ func Defaults() Config {
 		WorkerHardStopTimeout: defaultWorkerHardStopTimeout,
 		WorkerHealthAddr:      defaultWorkerHealthAddr,
 		TelemetryMode:         TelemetryModeDisabled,
+		AuthMode:              AuthModeDisabled,
+		AuthSessionTTL:        authapplication.DefaultSessionTTL,
+		AuthAPITokenTTL:       authapplication.DefaultAPITokenTTL,
+		AuthAllowedOrigins:    []string{"http://127.0.0.1:8080"},
 	}
 }
 
@@ -301,31 +324,68 @@ func Defaults() Config {
 // Environment values are intentionally explicit and validated rather than
 // silently falling back when malformed.
 func Load(path string) (Config, error) {
-	cfg := Defaults()
-	if path != "" {
-		if err := applyYAMLFile(path, &cfg); err != nil {
-			return cfg, err
-		}
-	}
-	if err := applyEnv(&cfg, os.LookupEnv); err != nil {
-		return cfg, err
-	}
-	return cfg, cfg.Validate()
+	return loadWithLookup(path, os.LookupEnv, loadOptions{
+		consumeAuthBootstrap: true,
+		validateAuth:         true,
+	})
+}
+
+// LoadWorker reads Worker configuration without consuming the API-only
+// Bootstrap credential. Authentication is enforced at the API boundary; the
+// Worker still validates every configuration group it actually consumes.
+func LoadWorker(path string) (Config, error) {
+	return loadNonAPIWithLookup(path, os.LookupEnv)
+}
+
+// LoadMigration reads migration configuration without consuming API-only
+// authentication credentials or validating API listener authentication rules.
+// Migrations only require database configuration and must be runnable before
+// the API process receives its Bootstrap credential.
+func LoadMigration(path string) (Config, error) {
+	return loadNonAPIWithLookup(path, os.LookupEnv)
 }
 
 // LoadWithLookup is exposed for deterministic unit tests without mutating the
 // process environment.
 func LoadWithLookup(path string, lookup func(string) (string, bool)) (Config, error) {
+	return loadWithLookup(path, lookup, loadOptions{
+		consumeAuthBootstrap: true,
+		validateAuth:         true,
+	})
+}
+
+type loadOptions struct {
+	consumeAuthBootstrap bool
+	validateAuth         bool
+}
+
+func loadNonAPIWithLookup(path string, lookup func(string) (string, bool)) (Config, error) {
+	return loadWithLookup(path, lookup, loadOptions{})
+}
+
+// loadWorkerWithLookup keeps the worker configuration test seam while
+// sharing the non-API process behavior with migrations.
+func loadWorkerWithLookup(path string, lookup func(string) (string, bool)) (Config, error) {
+	return loadNonAPIWithLookup(path, lookup)
+}
+
+func loadWithLookup(path string, lookup func(string) (string, bool), options loadOptions) (Config, error) {
 	cfg := Defaults()
 	if path != "" {
 		if err := applyYAMLFile(path, &cfg); err != nil {
 			return cfg, err
 		}
 	}
-	if err := applyEnv(&cfg, lookup); err != nil {
+	if !options.consumeAuthBootstrap {
+		cfg.AuthBootstrapToken = ""
+	}
+	if err := applyEnv(&cfg, lookup, options.consumeAuthBootstrap); err != nil {
 		return cfg, err
 	}
-	return cfg, cfg.Validate()
+	if !options.consumeAuthBootstrap {
+		cfg.AuthBootstrapToken = ""
+	}
+	return cfg, cfg.validate(options.validateAuth)
 }
 
 // fileConfig keeps YAML duration values as strings so their parsing is
@@ -410,6 +470,13 @@ type fileConfig struct {
 	WorkerHealthAddr      *string        `yaml:"worker_health_addr"`
 	TelemetryMode         *TelemetryMode `yaml:"telemetry_mode"`
 	TelemetryEndpoint     *string        `yaml:"telemetry_endpoint"`
+
+	AuthMode           *AuthMode `yaml:"auth_mode"`
+	AuthBootstrapToken *string   `yaml:"auth_bootstrap_token"`
+	AuthSessionTTL     *string   `yaml:"auth_session_ttl"`
+	AuthAPITokenTTL    *string   `yaml:"auth_api_token_ttl"`
+	AuthSecureCookie   *bool     `yaml:"auth_secure_cookie"`
+	AuthAllowedOrigins *[]string `yaml:"auth_allowed_origins"`
 }
 
 func applyYAMLFile(path string, cfg *Config) error {
@@ -579,6 +646,18 @@ func applyYAMLFile(path string, cfg *Config) error {
 	if raw.TelemetryEndpoint != nil {
 		cfg.TelemetryEndpoint = *raw.TelemetryEndpoint
 	}
+	if raw.AuthMode != nil {
+		cfg.AuthMode = *raw.AuthMode
+	}
+	if raw.AuthBootstrapToken != nil {
+		cfg.AuthBootstrapToken = *raw.AuthBootstrapToken
+	}
+	if raw.AuthSecureCookie != nil {
+		cfg.AuthSecureCookie = *raw.AuthSecureCookie
+	}
+	if raw.AuthAllowedOrigins != nil {
+		cfg.AuthAllowedOrigins = append([]string(nil), (*raw.AuthAllowedOrigins)...)
+	}
 	for name, value := range map[string]*string{
 		"database_ping_timeout":             raw.DatabasePingTimeout,
 		"graph_query_timeout":               raw.GraphQueryTimeout,
@@ -599,6 +678,8 @@ func applyYAMLFile(path string, cfg *Config) error {
 		"web_fetch_tls_handshake_timeout":   raw.WebFetchTLSHandshakeTimeout,
 		"worker_soft_stop_timeout":          raw.WorkerSoftStopTimeout,
 		"worker_hard_stop_timeout":          raw.WorkerHardStopTimeout,
+		"auth_session_ttl":                  raw.AuthSessionTTL,
+		"auth_api_token_ttl":                raw.AuthAPITokenTTL,
 	} {
 		if value == nil {
 			continue
@@ -649,6 +730,10 @@ func applyYAMLFile(path string, cfg *Config) error {
 			cfg.WorkerSoftStopTimeout = parsed
 		case "worker_hard_stop_timeout":
 			cfg.WorkerHardStopTimeout = parsed
+		case "auth_session_ttl":
+			cfg.AuthSessionTTL = parsed
+		case "auth_api_token_ttl":
+			cfg.AuthAPITokenTTL = parsed
 		}
 	}
 	return nil
@@ -658,6 +743,10 @@ func applyYAMLFile(path string, cfg *Config) error {
 // server. An empty DatabaseURL is allowed so API readiness can report a real
 // degraded state; Worker startup separately calls ValidateDatabase.
 func (c Config) Validate() error {
+	return c.validate(true)
+}
+
+func (c Config) validate(validateAuth bool) error {
 	if strings.TrimSpace(c.AppName) == "" {
 		return errors.New("app_name must not be empty")
 	}
@@ -727,6 +816,11 @@ func (c Config) Validate() error {
 	if err := c.validateTelemetry(); err != nil {
 		return err
 	}
+	if validateAuth {
+		if err := c.validateAuth(); err != nil {
+			return err
+		}
+	}
 	if err := c.validateEmbedding(); err != nil {
 		return err
 	}
@@ -740,6 +834,117 @@ func (c Config) Validate() error {
 		return errors.New("retrieval RRF configuration is invalid")
 	}
 	return nil
+}
+
+func (c Config) validateAuth() error {
+	development := isDevelopmentEnvironment(c.Environment)
+	switch c.AuthMode {
+	case AuthModeDisabled:
+		if c.AuthBootstrapToken != "" {
+			return errors.New("auth_bootstrap_token must be empty when auth_mode is disabled")
+		}
+		if !development || !isLoopbackAddress(c.HTTPAddr) {
+			return errors.New("auth_mode disabled is only allowed for development loopback HTTP")
+		}
+	case AuthModeRequired:
+		bootstrap := strings.TrimSpace(c.AuthBootstrapToken)
+		if len(bootstrap) < 32 || bootstrap != c.AuthBootstrapToken {
+			return errors.New("auth_bootstrap_token must contain at least 32 canonical characters")
+		}
+		if len(c.AuthAllowedOrigins) == 0 {
+			return errors.New("auth_allowed_origins must not be empty when auth_mode is required")
+		}
+		for _, origin := range c.AuthAllowedOrigins {
+			if !validAuthOrigin(origin) {
+				return errors.New("auth_allowed_origins contains an invalid exact origin")
+			}
+		}
+		if !c.AuthSecureCookie {
+			if !development {
+				return errors.New("auth_secure_cookie may be false only for development loopback origins")
+			}
+			if !isLoopbackAddress(c.HTTPAddr) {
+				return errors.New("insecure auth cookies require a loopback HTTP listener")
+			}
+			for _, origin := range c.AuthAllowedOrigins {
+				if !isLoopbackHTTPOrigin(origin) {
+					return errors.New("insecure auth origins must use loopback HTTP")
+				}
+			}
+		} else if !development {
+			for _, origin := range c.AuthAllowedOrigins {
+				if !strings.HasPrefix(origin, "https://") {
+					return errors.New("non-loopback auth origins must use https")
+				}
+			}
+		}
+	default:
+		return errors.New("auth_mode must be disabled or required")
+	}
+	if c.AuthSessionTTL <= 0 || c.AuthSessionTTL > authapplication.MaxSessionTTL {
+		return errors.New("auth_session_ttl is outside the supported range")
+	}
+	if c.AuthAPITokenTTL <= 0 || c.AuthAPITokenTTL > authapplication.MaxAPITokenTTL {
+		return errors.New("auth_api_token_ttl is outside the supported range")
+	}
+	return nil
+}
+
+func isDevelopmentEnvironment(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "development", "dev", "test", "testing":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLoopbackAddress(address string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func validAuthOrigin(value string) bool {
+	return authorigin.IsCanonical(value)
+}
+
+func isLoopbackHTTPOrigin(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "http" {
+		return false
+	}
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func parseAuthOrigins(raw string) ([]string, error) {
+	if raw == "" || raw != strings.TrimSpace(raw) {
+		return nil, errors.New("parse ZHIXU_AUTH_ALLOWED_ORIGINS: invalid origin list")
+	}
+	values := strings.Split(raw, ",")
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !validAuthOrigin(value) {
+			return nil, errors.New("parse ZHIXU_AUTH_ALLOWED_ORIGINS: invalid exact origin")
+		}
+		if _, exists := seen[value]; exists {
+			return nil, errors.New("parse ZHIXU_AUTH_ALLOWED_ORIGINS: duplicate origin")
+		}
+		seen[value] = struct{}{}
+	}
+	return values, nil
 }
 
 func (c Config) validateTools() error {
@@ -1061,7 +1266,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -1126,6 +1331,12 @@ func (c Config) String() string {
 		c.WorkerHealthAddr,
 		c.TelemetryMode,
 		strings.TrimSpace(c.TelemetryEndpoint) != "",
+		c.AuthMode,
+		strings.TrimSpace(c.AuthBootstrapToken) != "",
+		c.AuthSessionTTL,
+		c.AuthAPITokenTTL,
+		c.AuthSecureCookie,
+		len(c.AuthAllowedOrigins),
 	)
 }
 
@@ -1134,7 +1345,10 @@ func (c Config) GoString() string {
 	return c.String()
 }
 
-func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
+func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAuthBootstrap bool) error {
+	if value, ok := lookup("ZHIXU_AUTH_MODE"); ok {
+		cfg.AuthMode = AuthMode(value)
+	}
 	if value, ok := lookup("ZHIXU_TOOL_RUNTIME_MODE"); ok {
 		cfg.ToolRuntimeMode = ToolMode(value)
 	}
@@ -1202,6 +1416,25 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 				*target = value
 			}
 		}
+	}
+	if consumeAuthBootstrap {
+		if value, ok := lookup("ZHIXU_AUTH_BOOTSTRAP_TOKEN"); ok {
+			cfg.AuthBootstrapToken = value
+		}
+	}
+	if value, ok := lookup("ZHIXU_AUTH_ALLOWED_ORIGINS"); ok {
+		origins, err := parseAuthOrigins(value)
+		if err != nil {
+			return err
+		}
+		cfg.AuthAllowedOrigins = origins
+	}
+	if value, ok := lookup("ZHIXU_AUTH_SECURE_COOKIE"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("parse ZHIXU_AUTH_SECURE_COOKIE: invalid boolean")
+		}
+		cfg.AuthSecureCookie = parsed
 	}
 	if value, ok := lookup("ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES"); ok {
 		contentTypes, err := parseWebFetchContentTypes(value)
@@ -1335,6 +1568,8 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 
 		"ZHIXU_WORKER_SOFT_STOP_TIMEOUT": &cfg.WorkerSoftStopTimeout,
 		"ZHIXU_WORKER_HARD_STOP_TIMEOUT": &cfg.WorkerHardStopTimeout,
+		"ZHIXU_AUTH_SESSION_TTL":         &cfg.AuthSessionTTL,
+		"ZHIXU_AUTH_API_TOKEN_TTL":       &cfg.AuthAPITokenTTL,
 	} {
 		if value, ok := lookup(key); ok {
 			parsed, err := time.ParseDuration(value)

@@ -527,10 +527,8 @@ describe("GraphPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "加载关系证据" }));
 
     expect(await screen.findByText("该来源片段直接支持当前关系。")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "打开来源段落" })).toHaveAttribute(
-      "href",
-      `/api/v1/workspaces/${workspaceId}/source-versions/${sourceVersionId}/spans/${sourceSpanId}`,
-    );
+    expect(screen.getByRole("button", { name: "打开来源段落" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "打开来源段落" })).not.toBeInTheDocument();
   });
 
   it("收起后重开同一 Relation 时不回放旧 Evidence", async () => {

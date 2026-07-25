@@ -718,6 +718,24 @@ describe("business API boundary", () => {
     await expect(getWorkflow(workspaceB, workflowId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
+  it("rejects a Workflow response missing the required input field", async () => {
+    const workflowId = "10000000-0000-4000-8000-000000000008";
+    const workspaceId = "10000000-0000-4000-8000-000000000002";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: workflowId,
+      workspace_id: workspaceId,
+      definition_id: "10000000-0000-4000-8000-000000000003",
+      status: "running",
+      version: 1,
+      created_at: "2026-07-22T00:00:00Z",
+      updated_at: "2026-07-22T00:01:00Z",
+      pause_requested: false,
+      cancel_requested: false,
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await expect(getWorkflow(workspaceId, workflowId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
   it.each([
     ["zero year", "0000-01-01T00:00:00Z"],
     ["non-leap February 29", "2026-02-29T00:00:00Z"],

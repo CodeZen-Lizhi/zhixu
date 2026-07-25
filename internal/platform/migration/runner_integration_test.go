@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +41,8 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 33 || applied != 33 {
+	wantVersion, wantApplied := latestProjectMigration(t)
+	if maxVersion != wantVersion || applied != wantApplied {
 		t.Fatalf("project history max=%d applied=%d", maxVersion, applied)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE tablename LIKE 'river_%' AND schemaname <> 'workflow'`).Scan(&wrongSchema); err != nil {
@@ -645,9 +647,41 @@ func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if maxVersion != 33 || applied != 33 {
+	wantVersion, wantApplied := latestProjectMigration(t)
+	if maxVersion != wantVersion || applied != wantApplied {
 		t.Fatalf("adopted history max=%d applied=%d", maxVersion, applied)
 	}
+}
+
+func latestProjectMigration(t *testing.T) (int, int) {
+	t.Helper()
+	entries, err := fs.ReadDir(projectmigrations.FS, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxVersion := 0
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		versionText, _, ok := strings.Cut(entry.Name(), "_")
+		if !ok {
+			t.Fatalf("migration filename %q has no version separator", entry.Name())
+		}
+		version, err := strconv.Atoi(versionText)
+		if err != nil || version <= 0 {
+			t.Fatalf("migration filename %q has invalid version", entry.Name())
+		}
+		count++
+		if version > maxVersion {
+			maxVersion = version
+		}
+	}
+	if count == 0 {
+		t.Fatal("project migration filesystem is empty")
+	}
+	return maxVersion, count
 }
 
 func TestRunnerSerializesConcurrentUp(t *testing.T) {

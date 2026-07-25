@@ -1,0 +1,353 @@
+package config
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+const composeContractBootstrap = "compose-contract-bootstrap-token-32-characters"
+
+func TestLoopbackFirewallRuntimeImageIncludesRequiredNetworkTools(t *testing.T) {
+	repositoryRoot := composeContractRepositoryRoot(t)
+	dockerfile, err := os.ReadFile(filepath.Join(repositoryRoot, "deploy", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installStep, _, found := strings.Cut(string(dockerfile), "&& addgroup")
+	if !found {
+		t.Fatal("runtime image package installation step is missing")
+	}
+	for _, packageName := range []string{"iptables", "iproute2", "socat"} {
+		if !strings.Contains(installStep, " "+packageName) {
+			t.Fatalf("loopback firewall runtime dependency %q is missing", packageName)
+		}
+	}
+}
+
+func TestComposeAuthEnvironmentAndMakefileContract(t *testing.T) {
+	repositoryRoot := composeContractRepositoryRoot(t)
+	requireDockerCompose(t, repositoryRoot)
+
+	defaultModel := resolvedComposeModel(t, repositoryRoot, nil)
+	defaultApp := composeServiceEnvironment(t, defaultModel, "app")
+	if defaultApp["ZHIXU_AUTH_MODE"] != string(AuthModeDisabled) || defaultApp["ZHIXU_AUTH_BOOTSTRAP_TOKEN"] != "" {
+		t.Fatalf("default app auth environment=%v", defaultApp)
+	}
+	if defaultApp["ZHIXU_AUTH_ALLOWED_ORIGINS"] != "http://127.0.0.1:8080" {
+		t.Fatalf("default allowed origin=%v", defaultApp["ZHIXU_AUTH_ALLOWED_ORIGINS"])
+	}
+	assertNonAPIProcessesHaveNoBootstrapCredential(t, defaultModel)
+	if _, err := LoadWithLookup("", composeEnvironmentLookup(t, defaultApp)); err != nil {
+		t.Fatalf("resolved default API configuration is invalid: %v", err)
+	}
+	defaultWorker := composeServiceEnvironment(t, defaultModel, "worker")
+	if _, err := loadWorkerWithLookup("", composeEnvironmentLookup(t, defaultWorker)); err != nil {
+		t.Fatalf("resolved Worker configuration is invalid without the API Bootstrap credential: %v", err)
+	}
+
+	customPortModel := resolvedComposeModel(t, repositoryRoot, map[string]string{
+		"ZHIXU_HTTP_PORT": "18080",
+	})
+	customPortApp := composeServiceEnvironment(t, customPortModel, "app")
+	if customPortApp["ZHIXU_AUTH_ALLOWED_ORIGINS"] != "http://127.0.0.1:18080" {
+		t.Fatalf("custom-port default allowed origin=%v", customPortApp["ZHIXU_AUTH_ALLOWED_ORIGINS"])
+	}
+
+	explicitOriginModel := resolvedComposeModel(t, repositoryRoot, map[string]string{
+		"ZHIXU_HTTP_PORT":            "18080",
+		"ZHIXU_AUTH_ALLOWED_ORIGINS": "http://localhost:18080",
+	})
+	explicitOriginApp := composeServiceEnvironment(t, explicitOriginModel, "app")
+	if explicitOriginApp["ZHIXU_AUTH_ALLOWED_ORIGINS"] != "http://localhost:18080" {
+		t.Fatalf("explicit allowed origin lost precedence: %v", explicitOriginApp["ZHIXU_AUTH_ALLOWED_ORIGINS"])
+	}
+
+	requiredModel := resolvedComposeModel(t, repositoryRoot, map[string]string{
+		"ZHIXU_HTTP_PORT":            "18080",
+		"ZHIXU_AUTH_MODE":            string(AuthModeRequired),
+		"ZHIXU_AUTH_BOOTSTRAP_TOKEN": composeContractBootstrap,
+		"ZHIXU_AUTH_ALLOWED_ORIGINS": "http://127.0.0.1:18080",
+		"ZHIXU_AUTH_SECURE_COOKIE":   "false",
+	})
+	requiredApp := composeServiceEnvironment(t, requiredModel, "app")
+	if _, err := LoadWithLookup("", composeEnvironmentLookup(t, requiredApp)); err != nil {
+		t.Fatalf("resolved required API configuration is invalid: %v", err)
+	}
+	if requiredApp["ZHIXU_HTTP_ADDR"] != "127.0.0.1:8081" {
+		t.Fatalf("Compose must keep the API process on loopback: %v", requiredApp["ZHIXU_HTTP_ADDR"])
+	}
+	assertNonAPIProcessesHaveNoBootstrapCredential(t, requiredModel)
+
+	runComposeAuthMakeCheck(t, repositoryRoot, nil, true, "")
+	runComposeAuthMakeCheck(t, repositoryRoot, map[string]string{
+		"ZHIXU_AUTH_MODE": string(AuthModeRequired),
+	}, false, "required mode needs")
+	runComposeAuthMakeCheck(t, repositoryRoot, map[string]string{
+		"ZHIXU_AUTH_MODE":            string(AuthModeRequired),
+		"ZHIXU_AUTH_BOOTSTRAP_TOKEN": composeContractBootstrap,
+	}, true, "")
+	runComposeAuthMakeCheck(t, repositoryRoot, map[string]string{
+		"ZHIXU_AUTH_MODE":            string(AuthModeDisabled),
+		"ZHIXU_AUTH_BOOTSTRAP_TOKEN": composeContractBootstrap,
+	}, false, "must be empty")
+}
+
+func TestComposeUpMakefileRunsAuthGuardBeforeStartingServices(t *testing.T) {
+	repositoryRoot := composeContractRepositoryRoot(t)
+	fakeCompose := filepath.Join(t.TempDir(), "docker-compose-contract")
+	fakeSource := `#!/usr/bin/env python3
+import json
+import os
+import sys
+
+with open(os.environ["COMPOSE_CONTRACT_LOG"], "a", encoding="utf-8") as log:
+    log.write(" ".join(sys.argv[1:]) + "\n")
+
+if "config" in sys.argv and "--format" in sys.argv:
+    json.dump({
+		"services": {
+			"app": {"environment": {
+				"ZHIXU_AUTH_MODE": os.environ.get("ZHIXU_AUTH_MODE", "disabled"),
+				"ZHIXU_AUTH_BOOTSTRAP_TOKEN": os.environ.get("ZHIXU_AUTH_BOOTSTRAP_TOKEN", ""),
+				"ZHIXU_AUTH_SECURE_COOKIE": os.environ.get("ZHIXU_AUTH_SECURE_COOKIE", "false"),
+				"ZHIXU_HTTP_ADDR": os.environ.get("COMPOSE_CONTRACT_HTTP_ADDR", "127.0.0.1:8081"),
+			}, "ports": [{"host_ip": os.environ.get("COMPOSE_CONTRACT_HOST_IP", "127.0.0.1"), "protocol": "tcp"}], "network_mode": os.environ.get("COMPOSE_CONTRACT_NETWORK_MODE", "")},
+			"firewall": {
+				"network_mode": os.environ.get("COMPOSE_CONTRACT_FIREWALL_NETWORK_MODE", "service:app"),
+				"entrypoint": [os.environ.get("COMPOSE_CONTRACT_FIREWALL_ENTRYPOINT", "/app/loopback-firewall.sh")],
+				"user": os.environ.get("COMPOSE_CONTRACT_FIREWALL_USER", "0:0"),
+				"cap_add": [os.environ.get("COMPOSE_CONTRACT_FIREWALL_CAPABILITY", "NET_ADMIN")],
+				"depends_on": {} if os.environ.get("COMPOSE_CONTRACT_FIREWALL_DEPENDS_ON") == "none" else {"app": {"condition": os.environ.get("COMPOSE_CONTRACT_FIREWALL_DEPENDENCY_CONDITION", "service_started")}},
+			},
+			"proxy": {
+				"network_mode": os.environ.get("COMPOSE_CONTRACT_PROXY_NETWORK_MODE", "service:app"),
+				"user": os.environ.get("COMPOSE_CONTRACT_PROXY_USER", "10001:10001"),
+				"depends_on": {} if os.environ.get("COMPOSE_CONTRACT_PROXY_DEPENDS_ON") == "none" else {"firewall": {"condition": os.environ.get("COMPOSE_CONTRACT_PROXY_DEPENDENCY_CONDITION", "service_completed_successfully")}},
+			},
+		    "migrate": {"environment": {}},
+		    "worker": {"environment": {}},
+        }
+    }, sys.stdout)
+`
+	if err := os.WriteFile(fakeCompose, []byte(fakeSource), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, testCase := range map[string]struct {
+		overrides   map[string]string
+		wantSuccess bool
+		wantUp      bool
+	}{
+		"disabled empty": {wantSuccess: true, wantUp: true},
+		"required missing": {overrides: map[string]string{
+			"ZHIXU_AUTH_MODE": string(AuthModeRequired),
+		}},
+		"disabled explicit": {overrides: map[string]string{
+			"ZHIXU_AUTH_MODE":            string(AuthModeDisabled),
+			"ZHIXU_AUTH_BOOTSTRAP_TOKEN": composeContractBootstrap,
+		}},
+		"required valid": {overrides: map[string]string{
+			"ZHIXU_AUTH_MODE":            string(AuthModeRequired),
+			"ZHIXU_AUTH_BOOTSTRAP_TOKEN": composeContractBootstrap,
+		}, wantSuccess: true, wantUp: true},
+		"disabled public host binding": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_HOST_IP": "0.0.0.0",
+		}},
+		"insecure required public host binding": {overrides: map[string]string{
+			"ZHIXU_AUTH_MODE":            string(AuthModeRequired),
+			"ZHIXU_AUTH_BOOTSTRAP_TOKEN": composeContractBootstrap,
+			"COMPOSE_CONTRACT_HOST_IP":   "0.0.0.0",
+		}},
+		"secure required public host binding": {overrides: map[string]string{
+			"ZHIXU_AUTH_MODE":            string(AuthModeRequired),
+			"ZHIXU_AUTH_BOOTSTRAP_TOKEN": composeContractBootstrap,
+			"ZHIXU_AUTH_SECURE_COOKIE":   "true",
+			"COMPOSE_CONTRACT_HOST_IP":   "0.0.0.0",
+		}, wantSuccess: true, wantUp: true},
+		"disabled host networking": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_NETWORK_MODE": "host",
+		}},
+		"disabled detached proxy": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_PROXY_NETWORK_MODE": "bridge",
+		}},
+		"disabled privileged proxy": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_PROXY_USER": "0:0",
+		}},
+		"disabled firewall-free sidecar": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_FIREWALL_CAPABILITY": "",
+		}},
+		"disabled unexpected firewall entrypoint": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_FIREWALL_ENTRYPOINT": "/bin/true",
+		}},
+		"disabled firewall without app startup gate": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_FIREWALL_DEPENDS_ON": "none",
+		}},
+		"disabled firewall wrong app startup gate": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_FIREWALL_DEPENDENCY_CONDITION": "service_completed_successfully",
+		}},
+		"disabled proxy without firewall completion gate": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_PROXY_DEPENDS_ON": "none",
+		}},
+		"disabled proxy wrong firewall completion gate": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_PROXY_DEPENDENCY_CONDITION": "service_started",
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "compose.log")
+			overrides := make(map[string]string, len(testCase.overrides)+2)
+			for key, value := range testCase.overrides {
+				overrides[key] = value
+			}
+			overrides["DOCKER_COMPOSE"] = fakeCompose
+			overrides["COMPOSE_CONTRACT_LOG"] = logPath
+
+			command := exec.Command("make", "compose-up")
+			command.Dir = repositoryRoot
+			command.Env = composeContractEnvironment(overrides)
+			output, err := command.CombinedOutput()
+			if testCase.wantSuccess && err != nil {
+				t.Fatalf("compose-up unexpectedly failed: %v (%s)", err, strings.TrimSpace(string(output)))
+			}
+			if !testCase.wantSuccess && err == nil {
+				t.Fatal("compose-up unexpectedly accepted an unsafe auth configuration")
+			}
+			logOutput, readErr := os.ReadFile(logPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			started := strings.Contains(string(logOutput), " up -d --build --wait")
+			if started != testCase.wantUp {
+				t.Fatalf("compose-up start invocation=%t want=%t log=%q", started, testCase.wantUp, string(logOutput))
+			}
+			if strings.Contains(string(output), composeContractBootstrap) {
+				t.Fatal("compose-up echoed the Bootstrap credential")
+			}
+		})
+	}
+}
+
+func composeContractRepositoryRoot(t *testing.T) string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve compose contract test path")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(filename), "..", "..", ".."))
+}
+
+func requireDockerCompose(t *testing.T, repositoryRoot string) {
+	t.Helper()
+	command := exec.Command("docker", "compose", "version")
+	command.Dir = repositoryRoot
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Skipf("docker compose is unavailable: %v (%s)", err, strings.TrimSpace(string(output)))
+	}
+}
+
+func resolvedComposeModel(t *testing.T, repositoryRoot string, overrides map[string]string) map[string]any {
+	t.Helper()
+	command := exec.Command(
+		"docker", "compose",
+		"-f", "deploy/compose.yml",
+		"--env-file", ".env.example",
+		"config", "--format", "json",
+	)
+	command.Dir = repositoryRoot
+	command.Env = composeContractEnvironment(overrides)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		t.Fatalf("resolve Compose model: %v (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	var model map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &model); err != nil {
+		t.Fatalf("decode Compose model: %v", err)
+	}
+	return model
+}
+
+func composeServiceEnvironment(t *testing.T, model map[string]any, serviceName string) map[string]any {
+	t.Helper()
+	services, ok := model["services"].(map[string]any)
+	if !ok {
+		t.Fatal("Compose services are missing")
+	}
+	service, ok := services[serviceName].(map[string]any)
+	if !ok {
+		t.Fatalf("Compose service %q is missing", serviceName)
+	}
+	environment, ok := service["environment"].(map[string]any)
+	if !ok {
+		t.Fatalf("Compose service %q environment is missing", serviceName)
+	}
+	return environment
+}
+
+func composeEnvironmentLookup(t *testing.T, environment map[string]any) func(string) (string, bool) {
+	t.Helper()
+	values := make(map[string]string, len(environment))
+	for key, value := range environment {
+		text, ok := value.(string)
+		if !ok {
+			t.Fatalf("Compose environment %q is not a string", key)
+		}
+		values[key] = text
+	}
+	return func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	}
+}
+
+func assertNonAPIProcessesHaveNoBootstrapCredential(t *testing.T, model map[string]any) {
+	t.Helper()
+	for _, serviceName := range []string{"migrate", "worker"} {
+		environment := composeServiceEnvironment(t, model, serviceName)
+		if _, exists := environment["ZHIXU_AUTH_BOOTSTRAP_TOKEN"]; exists {
+			t.Fatalf("Compose injected the API Bootstrap credential into %s", serviceName)
+		}
+	}
+}
+
+func runComposeAuthMakeCheck(t *testing.T, repositoryRoot string, overrides map[string]string, wantSuccess bool, wantMessage string) {
+	t.Helper()
+	command := exec.Command("make", "compose-auth-check")
+	command.Dir = repositoryRoot
+	command.Env = composeContractEnvironment(overrides)
+	output, err := command.CombinedOutput()
+	if wantSuccess && err != nil {
+		t.Fatalf("compose-auth-check unexpectedly failed: %v (%s)", err, strings.TrimSpace(string(output)))
+	}
+	if !wantSuccess && err == nil {
+		t.Fatal("compose-auth-check unexpectedly accepted an unsafe configuration")
+	}
+	if wantMessage != "" && !strings.Contains(string(output), wantMessage) {
+		t.Fatalf("compose-auth-check output=%q want substring %q", string(output), wantMessage)
+	}
+	if strings.Contains(string(output), composeContractBootstrap) {
+		t.Fatal("compose-auth-check echoed the Bootstrap credential")
+	}
+}
+
+func composeContractEnvironment(overrides map[string]string) []string {
+	environment := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "ZHIXU_") || key == "DOCKER_COMPOSE" || key == "COMPOSE_CONTRACT_LOG" || key == "COMPOSE_CONTRACT_HOST_IP" || key == "COMPOSE_CONTRACT_HTTP_ADDR" || key == "COMPOSE_CONTRACT_NETWORK_MODE" || key == "COMPOSE_CONTRACT_PROXY_NETWORK_MODE" || key == "COMPOSE_CONTRACT_PROXY_USER" || key == "COMPOSE_CONTRACT_PROXY_DEPENDS_ON" || key == "COMPOSE_CONTRACT_PROXY_DEPENDENCY_CONDITION" || key == "COMPOSE_CONTRACT_FIREWALL_NETWORK_MODE" || key == "COMPOSE_CONTRACT_FIREWALL_ENTRYPOINT" || key == "COMPOSE_CONTRACT_FIREWALL_USER" || key == "COMPOSE_CONTRACT_FIREWALL_CAPABILITY" || key == "COMPOSE_CONTRACT_FIREWALL_DEPENDS_ON" || key == "COMPOSE_CONTRACT_FIREWALL_DEPENDENCY_CONDITION" {
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	for key, value := range overrides {
+		environment = append(environment, key+"="+value)
+	}
+	return environment
+}

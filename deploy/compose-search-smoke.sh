@@ -16,6 +16,9 @@ HTTP_PORT=""
 API_BASE_URL=""
 LAST_RESPONSE_FILE=""
 WORKSPACE_CONTAINER_ROOT=""
+AUTH_ORIGIN=""
+CSRF_TOKEN=""
+COOKIE_JAR=""
 
 log() {
   printf '[compose-search-smoke] %s\n' "$1"
@@ -85,14 +88,17 @@ request_json() {
   local curl_status
 
   response_file="$(mktemp "${STATE_DIR}/response.XXXXXX" 2>/dev/null)" || fail "could not allocate a private response file"
-  if [[ -n "${body}" ]]; then
-    curl_status="$(curl --silent --show-error --connect-timeout 5 --max-time "${REQUEST_TIMEOUT_SECONDS}" --output "${response_file}" --write-out '%{http_code}' \
-      --request "${method}" --header 'Content-Type: application/json' --data-binary "${body}" \
-      "${API_BASE_URL}${path}")" || fail "${label} request could not reach the API"
-  else
-    curl_status="$(curl --silent --show-error --connect-timeout 5 --max-time "${REQUEST_TIMEOUT_SECONDS}" --output "${response_file}" --write-out '%{http_code}' \
-      --request "${method}" "${API_BASE_URL}${path}")" || fail "${label} request could not reach the API"
+  local -a args=(--silent --show-error --connect-timeout 5 --max-time "${REQUEST_TIMEOUT_SECONDS}" --output "${response_file}" --write-out '%{http_code}' --request "${method}")
+  if [[ -n "${COOKIE_JAR}" ]]; then
+    args+=(--cookie "${COOKIE_JAR}")
+    if [[ "${method}" != GET && "${method}" != HEAD && "${method}" != OPTIONS ]]; then
+      args+=(--header "Origin: ${AUTH_ORIGIN}" --header "X-CSRF-Token: ${CSRF_TOKEN}")
+    fi
   fi
+  if [[ -n "${body}" ]]; then
+    args+=(--header 'Content-Type: application/json' --data-binary "${body}")
+  fi
+  curl_status="$(curl "${args[@]}" "${API_BASE_URL}${path}")" || fail "${label} request could not reach the API"
   LAST_RESPONSE_FILE="${response_file}"
   if [[ "${curl_status}" != "${expected_status}" ]]; then
     fail "${label} returned unexpected HTTP status ${curl_status}"
@@ -111,15 +117,30 @@ request_with_idempotency() {
   local curl_status
 
   response_file="$(mktemp "${STATE_DIR}/response.XXXXXX" 2>/dev/null)" || fail "could not allocate a private response file"
-  curl_status="$(curl --silent --show-error --connect-timeout 5 --max-time "${REQUEST_TIMEOUT_SECONDS}" --output "${response_file}" --write-out '%{http_code}' \
-    --request "${method}" --header 'Content-Type: application/json' \
-    --header "Idempotency-Key: ${idempotency_key}" --data-binary "${body}" \
-    "${API_BASE_URL}${path}")" || fail "${label} request could not reach the API"
+  local -a args=(--silent --show-error --connect-timeout 5 --max-time "${REQUEST_TIMEOUT_SECONDS}" --output "${response_file}" --write-out '%{http_code}'
+    --request "${method}" --header 'Content-Type: application/json' --header "Idempotency-Key: ${idempotency_key}" --data-binary "${body}")
+  if [[ -n "${COOKIE_JAR}" ]]; then
+    args+=(--cookie "${COOKIE_JAR}" --header "Origin: ${AUTH_ORIGIN}" --header "X-CSRF-Token: ${CSRF_TOKEN}")
+  fi
+  curl_status="$(curl "${args[@]}" "${API_BASE_URL}${path}")" || fail "${label} request could not reach the API"
   LAST_RESPONSE_FILE="${response_file}"
   if [[ "${curl_status}" != "${expected_status}" ]]; then
     fail "${label} returned unexpected HTTP status ${curl_status}"
   fi
   jq -e 'type == "object"' "${response_file}" >/dev/null || fail "${label} returned invalid JSON"
+}
+
+authenticate() {
+  local response_file http_status
+  response_file="$(mktemp "${STATE_DIR}/auth-response.XXXXXX" 2>/dev/null)" || fail "could not allocate an auth response file"
+  COOKIE_JAR="${STATE_DIR}/cookies.txt"
+  http_status="$(curl --silent --show-error --connect-timeout 5 --max-time "${REQUEST_TIMEOUT_SECONDS}" \
+    --output "${response_file}" --write-out '%{http_code}' --request POST \
+    --cookie-jar "${COOKIE_JAR}" --header "Origin: ${AUTH_ORIGIN}" \
+    --header "Authorization: Bearer ${ZHIXU_AUTH_BOOTSTRAP_TOKEN}" \
+    "${API_BASE_URL}/api/v1/auth/sessions")" || fail "authentication request could not reach the API"
+  [[ "${http_status}" == 201 ]] || fail "authentication returned HTTP ${http_status}"
+  CSRF_TOKEN="$(jq -er '.csrf_token | select(type == "string" and length > 20)' "${response_file}")" || fail "authentication response omitted csrf_token"
 }
 
 wait_for_completion() {
@@ -163,6 +184,9 @@ assert_clean_public_evidence() {
   if grep -Fq -- "${ZHIXU_POSTGRES_PASSWORD}" "${file}"; then
     fail "${label} exposed a database credential"
   fi
+  if grep -Fq -- "${ZHIXU_AUTH_BOOTSTRAP_TOKEN}" "${file}"; then
+    fail "${label} exposed the bootstrap credential"
+  fi
   if grep -Eqi 'postgres(ql)?://' "${file}"; then
     fail "${label} exposed a database connection string"
   fi
@@ -186,6 +210,7 @@ main() {
   PROJECT_NAME="zhixu-search-smoke-${run_id}"
   HTTP_PORT="$(allocate_port)"
   API_BASE_URL="http://127.0.0.1:${HTTP_PORT}"
+  AUTH_ORIGIN="${API_BASE_URL}"
   workspace_host_root="${STATE_DIR}/workspace"
   WORKSPACE_CONTAINER_ROOT="/workspace/project"
   target_path="docs/search-smoke.md"
@@ -200,6 +225,10 @@ main() {
   export ZHIXU_POSTGRES_USER="zhixu_smoke"
   export ZHIXU_POSTGRES_PASSWORD="smoke_${run_id}_$(random_hex 12)"
   export ZHIXU_WORKSPACE_ROOT="${workspace_host_root}"
+  export ZHIXU_AUTH_MODE="required"
+  export ZHIXU_AUTH_BOOTSTRAP_TOKEN="auth_${run_id}_$(random_hex 24)"
+  export ZHIXU_AUTH_ALLOWED_ORIGINS="${AUTH_ORIGIN}"
+  export ZHIXU_AUTH_SECURE_COOKIE="false"
   export ZHIXU_EMBEDDING_PROVIDER="disabled"
   export ZHIXU_EMBEDDING_BASE_URL=""
   export ZHIXU_EMBEDDING_API_KEY=""
@@ -218,6 +247,7 @@ main() {
 
   log "starting API, Worker and PostgreSQL"
   run_compose_step "Compose startup" up --detach --wait
+  authenticate
 
   local workspace_payload workspace_id source_version_id base_hash ingestion_payload
   workspace_payload="$(jq -cn --arg name 'Compose Search Smoke' --arg root "${WORKSPACE_CONTAINER_ROOT}" \

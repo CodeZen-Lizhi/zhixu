@@ -543,7 +543,8 @@ describe("Graph clients and request serialization", () => {
       `/api/v1/graph/relations/${relationId}/evidence?workspace_id=${workspaceId}&cursor=opaque%2Fevidence%2B1&limit=100`,
     ]);
     for (const call of fetchMock.mock.calls) {
-      expect(call[1]).toMatchObject({ method: "GET", headers: { Accept: "application/json" } });
+      expect(call[1]?.method).toBe("GET");
+      expect(new Headers(call[1]?.headers).get("Accept")).toBe("application/json");
       expect(call[1]?.body).toBeUndefined();
     }
   });

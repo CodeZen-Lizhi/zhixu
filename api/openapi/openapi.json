@@ -3,12 +3,21 @@
   "info": {
     "title": "ZHIXU API",
     "version": "0.1.0",
-    "description": "System health, Workspace, durable Workflow and M5 Change Control contracts. Apply preflight reads the real Workspace file hash but never writes files or creates Git commits."
+    "description": "System health, Workspace, durable Workflow, Change Control and single-user authentication contracts. Authentication is required by default for business APIs; health and system status remain public."
   },
+  "security": [
+    {
+      "sessionCookie": []
+    },
+    {
+      "apiBearer": []
+    }
+  ],
   "paths": {
     "/livez": {
       "get": {
         "operationId": "getLiveness",
+        "security": [],
         "responses": {
           "200": {
             "description": "The API process is responding.",
@@ -36,6 +45,7 @@
     "/readyz": {
       "get": {
         "operationId": "getReadiness",
+        "security": [],
         "responses": {
           "200": {
             "description": "Configuration and PostgreSQL are ready.",
@@ -73,6 +83,7 @@
     "/api/v1/system/status": {
       "get": {
         "operationId": "getSystemStatus",
+        "security": [],
         "responses": {
           "200": {
             "description": "Current API, database, Graph, and RAG status.",
@@ -4222,10 +4233,373 @@
           }
         }
       }
+    },
+    "/api/v1/auth/sessions": {
+      "post": {
+        "operationId": "exchangeBootstrapForSession",
+        "security": [
+          {
+            "bootstrapBearer": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Session created. The session credential is set only in an HttpOnly cookie; the CSRF token is returned once.",
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCredential"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "operationId": "getCurrentSession",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current Session metadata without credential digests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "revokeCurrentSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Session revoked and cookie expired."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/session/rotate": {
+      "post": {
+        "operationId": "rotateSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The previous Session is atomically revoked and a new cookie is issued.",
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCredential"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/api-tokens": {
+      "get": {
+        "operationId": "listApiTokens",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 30
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API Token metadata; no digest or plaintext is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APITokenPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createApiToken",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAPITokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "API Token plaintext is returned exactly once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APITokenCredential"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/api-tokens/{token_id}": {
+      "parameters": [
+        {
+          "name": "token_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "delete": {
+        "operationId": "revokeApiToken",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "API Token revoked."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "zhixu_session",
+        "description": "HttpOnly SameSite=Strict browser Session cookie. Unsafe requests also require the X-CSRF-Token header and an exact allowed Origin."
+      },
+      "apiBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "ZHIXU API Token",
+        "description": "A scoped, revocable API Token. It cannot bypass Proposal/Approval/Write Authorization."
+      },
+      "bootstrapBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "ZHIXU Bootstrap Token",
+        "description": "Runtime-only bootstrap credential accepted only by POST /api/v1/auth/sessions."
+      }
+    },
     "parameters": {
+      "CSRFToken": {
+        "name": "X-CSRF-Token",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 43
+        },
+        "description": "Required for unsafe requests authenticated by the Session cookie. Bearer API Token requests do not use CSRF."
+      },
+      "Origin": {
+        "name": "Origin",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": "The exact configured allowed Origin, without leading or trailing whitespace. Required for unsafe requests authenticated by the Session cookie."
+      },
       "IdempotencyKey": {
         "name": "Idempotency-Key",
         "in": "header",
@@ -4315,6 +4689,33 @@
       }
     },
     "responses": {
+      "Unauthorized": {
+        "description": "Missing, expired, revoked or invalid authentication credential.",
+        "headers": {
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The authenticated principal lacks the required Capability or failed Origin/CSRF validation.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
       "BadRequest": {
         "description": "Invalid strict JSON, identifier, cursor or option.",
         "content": {
@@ -4398,6 +4799,251 @@
           }
         }
       },
+      "AuthCapability": {
+        "type": "string",
+        "enum": [
+          "READ_LOCAL",
+          "READ_EXTERNAL",
+          "WRITE_PROPOSAL",
+          "WRITE_KNOWLEDGE",
+          "GIT_WRITE",
+          "INDEX_MAINTENANCE",
+          "EVALUATION_RUN"
+        ]
+      },
+      "AuthCapabilityStatus": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "ready",
+              "unavailable"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "auth_dependencies_unavailable"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionCredential": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "csrf_token",
+          "expires_at"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "csrf_token": {
+            "type": "string",
+            "minLength": 43,
+            "maxLength": 43,
+            "readOnly": true,
+            "description": "Returned on Session creation or rotation and required on unsafe cookie-authenticated requests."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "user_label",
+          "scopes",
+          "created_at",
+          "last_seen_at",
+          "expires_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scopes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/AuthCapability"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revoked_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateAPITokenRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "scopes"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "scopes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/AuthCapability"
+            }
+          },
+          "expires_in_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31536000,
+            "default": 0,
+            "description": "Zero uses the configured API Token TTL."
+          }
+        },
+        "additionalProperties": false
+      },
+      "APITokenInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "scopes",
+          "created_at",
+          "expires_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "scopes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/AuthCapability"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revoked_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "APITokenCredential": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "scopes",
+          "expires_at",
+          "token"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "scopes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/AuthCapability"
+            }
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "token": {
+            "type": "string",
+            "minLength": 43,
+            "maxLength": 43,
+            "readOnly": true,
+            "description": "Plaintext API Token returned exactly once."
+          }
+        },
+        "additionalProperties": false
+      },
+      "APITokenPage": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/APITokenInfo"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "additionalProperties": false
+      },
       "Readiness": {
         "type": "object",
         "required": [
@@ -4439,6 +5085,7 @@
           "rag",
           "collections",
           "knowledge_health",
+          "auth",
           "request_id"
         ],
         "properties": {
@@ -4470,6 +5117,9 @@
           },
           "knowledge_health": {
             "$ref": "#/components/schemas/OptionalCapabilityStatus"
+          },
+          "auth": {
+            "$ref": "#/components/schemas/AuthCapabilityStatus"
           },
           "request_id": {
             "type": "string",

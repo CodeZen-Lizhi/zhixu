@@ -100,6 +100,39 @@ const jsonResponse = (payload: unknown, status = 200): Response => new Response(
   headers: { "Content-Type": "application/json" },
 });
 
+const knowledgeProposalPayload = (revisionOverrides: Record<string, unknown> = {}) => ({
+  proposal_type: "knowledge_change",
+  id: proposalId,
+  workspace_id: workspaceId,
+  status: "ready_for_review",
+  risk_level: "HIGH",
+  revision: {
+    id: revisionId,
+    revision_no: 1,
+    schema_version: "knowledge-relation-change/v1",
+    target_refs: [{ type: "RELATION_CANDIDATE", id: targetCandidateId, fingerprint }],
+    base_versions: [
+      { node_type: "CLAIM", node_id: claimId, version: 5 },
+      { node_type: "CLAIM", node_id: otherClaimId, version: 2 },
+    ],
+    change_set: {
+      operation: "CREATE_RELATION",
+      source: { type: "CLAIM", id: claimId, version: 5 },
+      target: { type: "CLAIM", id: otherClaimId, version: 2 },
+      relation_type: "COMPLEMENTS",
+    },
+    evidence_refs: [{ candidate_evidence_id: candidateEvidenceId, semantic_hash: semanticHash }],
+    risk: "semantic relation",
+    rollback_plan: "create compensating proposal",
+    change_hash: changeHash,
+    created_at: at,
+    ...revisionOverrides,
+  },
+  approval: null,
+  created_at: at,
+  updated_at: later,
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -307,6 +340,134 @@ describe("Semantic Link decoders", () => {
     });
   });
 
+  it("保留 Proposal Revision 的多行正文和说明空白", () => {
+    const content = "\n# title\n\nbody\n";
+    const evidenceSummary = "evidence:\n  source span\n";
+    const risk = "risk:\n  review before apply\n";
+    const rollbackPlan = "rollback:\n  create compensating proposal\n";
+    const filePatch = decodeSemanticLinkProposal({
+      proposal_type: "file_patch",
+      id: proposalId,
+      workspace_id: workspaceId,
+      target_path: "notes/graph.md",
+      status: "ready_for_review",
+      risk_level: "LOW",
+      revision: {
+        id: revisionId,
+        revision_no: 1,
+        base_hash: baseHash,
+        content,
+        evidence_summary: evidenceSummary,
+        risk,
+        rollback_plan: rollbackPlan,
+        change_hash: changeHash,
+        created_at: at,
+      },
+      approval: null,
+      created_at: at,
+      updated_at: later,
+    }, { proposalId });
+
+    expect(filePatch.revision).toMatchObject({ content, evidenceSummary, risk, rollbackPlan });
+
+    const knowledgeChange = decodeSemanticLinkProposal(knowledgeProposalPayload({ risk, rollback_plan: rollbackPlan }), { proposalId });
+    expect(knowledgeChange.revision).toMatchObject({ risk, rollbackPlan });
+  });
+
+  it("拒绝 Relation Proposal 中不兼容、自环、非 canonical 或未绑定基线的端点", () => {
+    const invalidRevisions = [
+      {
+        change_set: {
+          operation: "CREATE_RELATION",
+          source: { type: "CLAIM", id: claimId, version: 5 },
+          target: { type: "TOPIC", id: topicId, version: 2 },
+          relation_type: "SUPPORTS",
+        },
+      },
+      {
+        change_set: {
+          operation: "CREATE_RELATION",
+          source: { type: "CLAIM", id: claimId, version: 5 },
+          target: { type: "CLAIM", id: claimId, version: 5 },
+          relation_type: "DUPLICATES",
+        },
+        base_versions: [{ node_type: "CLAIM", node_id: claimId, version: 5 }],
+      },
+      {
+        change_set: {
+          operation: "CREATE_RELATION",
+          source: { type: "CLAIM", id: otherClaimId, version: 2 },
+          target: { type: "CLAIM", id: claimId, version: 5 },
+          relation_type: "DUPLICATES",
+        },
+      },
+      {
+        base_versions: [
+          { node_type: "CLAIM", node_id: claimId, version: 9 },
+          { node_type: "CLAIM", node_id: otherClaimId, version: 2 },
+        ],
+      },
+    ] satisfies Record<string, unknown>[];
+
+    for (const revisionOverrides of invalidRevisions) {
+      expect(() => decodeSemanticLinkProposal(knowledgeProposalPayload(revisionOverrides), { proposalId }))
+        .toThrow(SemanticLinkApiError);
+    }
+  });
+
+  it("拒绝空 File Patch content", () => {
+    expect(() => decodeSemanticLinkProposal({
+      proposal_type: "file_patch",
+      id: proposalId,
+      workspace_id: workspaceId,
+      target_path: "notes/graph.md",
+      status: "ready_for_review",
+      risk_level: "LOW",
+      revision: {
+        id: revisionId,
+        revision_no: 1,
+        base_hash: baseHash,
+        content: "",
+        evidence_summary: "reason",
+        risk: "low",
+        rollback_plan: "git revert",
+        change_hash: changeHash,
+        created_at: at,
+      },
+      approval: null,
+      created_at: at,
+      updated_at: later,
+    }, { proposalId })).toThrow(SemanticLinkApiError);
+  });
+
+  it.each([
+    ["仅空白", "\n\t"],
+    ["危险控制字符", "patch\u0000content"],
+  ])("拒绝%s的 File Patch content", (_label, content) => {
+    expect(() => decodeSemanticLinkProposal({
+      proposal_type: "file_patch",
+      id: proposalId,
+      workspace_id: workspaceId,
+      target_path: "notes/graph.md",
+      status: "ready_for_review",
+      risk_level: "LOW",
+      revision: {
+        id: revisionId,
+        revision_no: 1,
+        base_hash: baseHash,
+        content,
+        evidence_summary: "reason",
+        risk: "low",
+        rollback_plan: "git revert",
+        change_hash: changeHash,
+        created_at: at,
+      },
+      approval: null,
+      created_at: at,
+      updated_at: later,
+    }, { proposalId })).toThrow(SemanticLinkApiError);
+  });
+
   it.each([
     ["file_patch", {
       proposal_type: "file_patch",
@@ -454,7 +615,7 @@ describe("Semantic Link clients", () => {
 
     expect(result.scanId).toBe(scanId);
     const [, init] = fetchMock.mock.calls[0] ?? [];
-    expect(init?.headers).toMatchObject({ "Idempotency-Key": "scan-1" });
+    expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("scan-1");
     if (typeof init?.body !== "string") throw new Error("missing body");
     expect(JSON.parse(init.body)).toEqual({
       workspace_id: workspaceId,
@@ -511,7 +672,7 @@ describe("Semantic Link clients", () => {
 
     expect(result.proposalId).toBe(proposalId);
     const [, init] = fetchMock.mock.calls[0] ?? [];
-    expect(init?.headers).toMatchObject({ "Idempotency-Key": "decision-1" });
+    expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("decision-1");
     if (typeof init?.body !== "string") throw new Error("missing body");
     expect(JSON.parse(init.body)).toEqual({
       workspace_id: workspaceId,

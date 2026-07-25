@@ -1,5 +1,7 @@
 /** Knowledge Health 的唯一网络边界：组件只消费这里导出的领域模型。 */
 
+import { authFetch } from "./auth";
+
 export type HealthIssueType = "ORPHAN" | "DUPLICATE" | "CONFLICT" | "STALE" | "MISSING_SOURCE" | "LOW_CONFIDENCE" | "BROKEN_REFERENCE" | "INDEX_ERROR" | "SUPERSEDED_USAGE" | "REVIEW_INVALIDATED";
 export type HealthSeverity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
 export type HealthIssueStatus = "OPEN" | "ACKNOWLEDGED" | "DEFERRED" | "PROPOSAL_CREATED" | "RESOLVED" | "IGNORED" | "FALSE_POSITIVE" | "REOPENED";
@@ -109,7 +111,6 @@ export class HealthApiError extends Error {
   }
 }
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
@@ -291,7 +292,7 @@ const decodeDecision = (value: unknown, field: string): HealthDecision => { if (
 export const decodeHealthIssueDetail = (value: unknown): HealthIssueDetail => { if (!isRecord(value)) throw invalidResponse("issue_detail"); exact(value, ["issue", "latest_observation", "observations", "decisions"], "issue_detail"); return { issue: decodeIssue(value.issue), latestObservation: value.latest_observation === undefined || value.latest_observation === null ? null : decodeObservation(value.latest_observation, "issue_detail.latest_observation"), observations: boundedArray(value.observations, "issue_detail.observations", 256).map((item, index) => decodeObservation(item, `issue_detail.observations[${String(index)}]`)), decisions: boundedArray(value.decisions, "issue_detail.decisions", 256).map((item, index) => decodeDecision(item, `issue_detail.decisions[${String(index)}]`)) }; };
 
 const readProblem = (value: unknown, status: number): HealthApiError => { if (isRecord(value) && typeof value.error_code === "string" && typeof value.message === "string" && typeof value.retryable === "boolean") return new HealthApiError("HTTP_ERROR", value.error_code, value.message, value.retryable, status); return new HealthApiError("HTTP_ERROR", "HTTP_ERROR", `Health 请求失败（HTTP ${String(status)}）`, status >= 500, status); };
-const request = async (path: string, init: RequestInit = {}): Promise<unknown> => { const headers = new Headers(init.headers); headers.set("Accept", "application/json"); if (init.body !== undefined) headers.set("Content-Type", "application/json"); let response: Response; try { response = await fetch(`${apiBaseUrl}${path}`, { ...init, headers }); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new HealthApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Knowledge Health API。", true, null, { cause: error }); } let payload: unknown; try { payload = await response.json(); } catch (error: unknown) { throw new HealthApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Knowledge Health API 返回了无效 JSON。", false, response.status, { cause: error }); } if (!response.ok) throw readProblem(payload, response.status); return payload; };
+const request = async (path: string, init: RequestInit = {}): Promise<unknown> => { const headers = new Headers(init.headers); headers.set("Accept", "application/json"); if (init.body !== undefined) headers.set("Content-Type", "application/json"); let response: Response; try { response = await authFetch(path, { ...init, headers }); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new HealthApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Knowledge Health API。", true, null, { cause: error }); } let payload: unknown; try { payload = await response.json(); } catch (error: unknown) { throw new HealthApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Knowledge Health API 返回了无效 JSON。", false, response.status, { cause: error }); } if (!response.ok) throw readProblem(payload, response.status); return payload; };
 const requireWorkspace = (workspaceId: string): string => { if (!uuidPattern.test(workspaceId)) throw invalidRequest("workspaceId"); return workspaceId; };
 const requireUuid = (value: string, field: string): string => { if (!uuidPattern.test(value)) throw invalidRequest(field); return value; };
 const requireIdempotencyKey = (value: string): string => { if (value.trim() === "" || value.length > 128) throw invalidRequest("idempotencyKey"); return value; };

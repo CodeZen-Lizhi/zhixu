@@ -13,6 +13,9 @@ import (
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
+	authpostgres "github.com/CodeZen-Lizhi/zhixu/internal/auth/adapter/postgres"
+	authapplication "github.com/CodeZen-Lizhi/zhixu/internal/auth/application"
+	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	approvaldispatchpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/approvaldispatchpostgres"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
@@ -70,6 +73,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	apiReadTimeout       = 30 * time.Second
+	apiReadHeaderTimeout = 5 * time.Second
+	apiIdleTimeout       = 60 * time.Second
+)
+
 func main() {
 	configPath := flag.String("config", "", "optional YAML configuration path")
 	flag.Parse()
@@ -100,6 +109,34 @@ func main() {
 	if staticErr != nil {
 		logger.Warn("web assets are unavailable", "error_code", "WEB_ASSETS_UNAVAILABLE")
 		static = nil
+	}
+	authRequired := cfg.AuthMode == config.AuthModeRequired
+	var authHandler *authhttp.Handler
+	var authInitErr error
+	var authCheck func(context.Context) error
+	if authRequired {
+		if database == nil {
+			authInitErr = errors.New("authentication database is unavailable")
+		} else {
+			authRepository, repositoryErr := authpostgres.NewRepository(database.DB())
+			if repositoryErr != nil {
+				authInitErr = repositoryErr
+			} else {
+				authCheck = authRepository.Check
+				authService, serviceErr := authapplication.NewService(authRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, authapplication.Options{
+					BootstrapToken: cfg.AuthBootstrapToken,
+					SessionTTL:     cfg.AuthSessionTTL,
+					APITokenTTL:    cfg.AuthAPITokenTTL,
+				})
+				if serviceErr != nil {
+					authInitErr = serviceErr
+				} else {
+					authHandler, authInitErr = authhttp.NewHandler(authService, authhttp.Options{
+						SecureCookie: cfg.AuthSecureCookie, AllowedOrigins: cfg.AuthAllowedOrigins,
+					})
+				}
+			}
+		}
 	}
 
 	workspaceHandler := workspacehttp.NewHandler(nil)
@@ -264,18 +301,17 @@ func main() {
 		Retrieval:         retrievalHandler,
 		Conversation:      conversationHandler,
 		Events:            eventsHandler,
+		Auth:              authHandler,
+		AuthRequired:      authRequired,
+		AuthInitErr:       authInitErr,
+		AuthCheck:         authCheck,
 		Graph:             graphHandler,
 		Candidate:         candidateHandler,
 		RAGEnabled:        ragEnabled,
 		RAGInitErr:        ragInitErr,
 		Logger:            logger,
 	}
-	server := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           app.NewRouter(deps),
-		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	server := newAPIServer(cfg.HTTPAddr, app.NewRouter(deps))
 
 	serverErr := make(chan error, 1)
 	go func() {
@@ -300,6 +336,16 @@ func main() {
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			logger.Error("api server shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
 		}
+	}
+}
+
+func newAPIServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              address,
+		Handler:           handler,
+		ReadTimeout:       apiReadTimeout,
+		ReadHeaderTimeout: apiReadHeaderTimeout,
+		IdleTimeout:       apiIdleTimeout,
 	}
 }
 

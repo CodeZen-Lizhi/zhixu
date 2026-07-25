@@ -1,3 +1,5 @@
+import { authFetch } from "./auth";
+
 export interface WorkspaceGitStatus {
   present: boolean;
   repositoryPath: string;
@@ -54,7 +56,6 @@ export class WorkspaceApiError extends Error {
   }
 }
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -135,7 +136,7 @@ export const decodeWorkspaceScan = (value: unknown): WorkspaceScan => {
 const request = async (path: string, init?: RequestInit): Promise<unknown> => {
   let response: Response;
   try {
-    response = await fetch(`${apiBaseUrl}${path}`, {
+    response = await authFetch(path, {
       headers: { Accept: "application/json", ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...init,
     });

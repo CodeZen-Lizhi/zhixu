@@ -139,7 +139,7 @@ describe("SemanticLinkCandidatePanel", () => {
     expect(scanReads).toBe(1);
 
     const startRequest = fetchMock.mock.calls.find(([input]) => requestUrl(input).pathname.endsWith("/candidate-scans"));
-    expect(startRequest?.[1]?.headers).toMatchObject({ "Idempotency-Key": "candidate-scan:test-key" });
+    expect(new Headers(startRequest?.[1]?.headers).get("Idempotency-Key")).toBe("candidate-scan:test-key");
     if (typeof startRequest?.[1]?.body !== "string") throw new Error("missing scan body");
     expect(JSON.parse(startRequest[1].body)).toEqual({ workspace_id: workspaceId, scope: { kind: "TOPIC", topic_id: topicId } });
   });
@@ -205,8 +205,8 @@ describe("SemanticLinkCandidatePanel", () => {
 
     const requests = fetchMock.mock.calls.filter(([input]) => requestUrl(input).pathname.endsWith("/candidate-scans"));
     expect(requests).toHaveLength(2);
-    expect(requests[0]?.[1]?.headers).toMatchObject({ "Idempotency-Key": "candidate-scan:key-1" });
-    expect(requests[1]?.[1]?.headers).toMatchObject({ "Idempotency-Key": "candidate-scan:key-1" });
+    expect(new Headers(requests[0]?.[1]?.headers).get("Idempotency-Key")).toBe("candidate-scan:key-1");
+    expect(new Headers(requests[1]?.[1]?.headers).get("Idempotency-Key")).toBe("candidate-scan:key-1");
     expect(keyFactory).toHaveBeenCalledTimes(1);
   });
 
@@ -285,8 +285,8 @@ describe("SemanticLinkCandidatePanel", () => {
     await waitFor(() => expect(starts).toBe(2));
 
     const startRequests = fetchMock.mock.calls.filter(([input]) => requestUrl(input).pathname.endsWith("/candidate-scans"));
-    expect(startRequests[0]?.[1]?.headers).toMatchObject({ "Idempotency-Key": "candidate-scan:replacement-1" });
-    expect(startRequests[1]?.[1]?.headers).toMatchObject({ "Idempotency-Key": "candidate-scan:replacement-1" });
+    expect(new Headers(startRequests[0]?.[1]?.headers).get("Idempotency-Key")).toBe("candidate-scan:replacement-1");
+    expect(new Headers(startRequests[1]?.[1]?.headers).get("Idempotency-Key")).toBe("candidate-scan:replacement-1");
     expect(keyFactory).toHaveBeenCalledTimes(1);
   });
 
@@ -463,7 +463,8 @@ describe("SemanticLinkCandidatePanel", () => {
     fireEvent.click(evidenceSummary);
     expect(evidenceDetails?.open).toBe(true);
     expect(screen.getByText("shared terminology")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "打开来源片段" })).toHaveAttribute("href", spanHref);
+    expect(screen.getByRole("button", { name: "打开来源片段" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "打开来源片段" })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("slider", { name: "最低置信度" }), { target: { value: "0.75" } });
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
@@ -513,8 +514,8 @@ describe("SemanticLinkCandidatePanel", () => {
 
     const decisionRequests = fetchMock.mock.calls.filter(([input]) => requestUrl(input).pathname.endsWith(`/candidates/${candidateId}/decisions`));
     expect(decisionRequests).toHaveLength(2);
-    expect(decisionRequests[0]?.[1]?.headers).toMatchObject({ "Idempotency-Key": "candidate-decision:test-key" });
-    expect(decisionRequests[1]?.[1]?.headers).toMatchObject({ "Idempotency-Key": "candidate-decision:test-key" });
+    expect(new Headers(decisionRequests[0]?.[1]?.headers).get("Idempotency-Key")).toBe("candidate-decision:test-key");
+    expect(new Headers(decisionRequests[1]?.[1]?.headers).get("Idempotency-Key")).toBe("candidate-decision:test-key");
     const firstDecisionBody = decisionRequests[0]?.[1]?.body;
     if (typeof firstDecisionBody !== "string") throw new Error("missing decision body");
     expect(JSON.parse(firstDecisionBody)).toMatchObject({

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, FileSearch, RotateCcw, Search as SearchIcon } from "lucide-react";
+import { FileSearch, RotateCcw, Search as SearchIcon } from "lucide-react";
 import { useCallback, useEffect, useState, type SyntheticEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -14,6 +14,7 @@ import { useActiveWorkspaceId } from "../../app/active-workspace";
 import { useRegisterWorkspaceRecovery } from "../../events/event-store";
 import { Badge, Button, Card, CardHeader, EmptyState } from "../../shared/ui";
 import { BusinessWorkspaceGate } from "../business/BusinessWorkspaceGate";
+import { SourceSpanViewer } from "../source-spans";
 import { searchQueryKeys } from "./query-keys";
 import {
   normalizeSearchQuery,
@@ -51,7 +52,7 @@ const scoreSummary = (item: SearchEvidence): string[] => {
   return values;
 };
 
-const SearchEvidenceCard = ({ item }: { item: SearchEvidence }) => {
+const SearchEvidenceCard = ({ item, workspaceId }: { item: SearchEvidence; workspaceId: string }) => {
   const primaryProvenance = item.provenances[0];
   const title = item.headingPath.length > 0
     ? item.headingPath.join(" / ")
@@ -72,7 +73,7 @@ const SearchEvidenceCard = ({ item }: { item: SearchEvidence }) => {
       {scoreSummary(item).map((score) => <li key={score}>{score}</li>)}
     </ul>
     <div className="search-provenance-list">
-      {item.provenances.map((provenance) => <section key={`${provenance.sourceVersionId}:${provenance.sourceSpanHref}`}>
+      {item.provenances.map((provenance) => <section key={`${provenance.sourceVersionId}:${item.span.spanId}`}>
         <div>
           <strong>{provenance.relativePath}</strong>
           <small>捕获于 {formatTimestamp(provenance.capturedAt)}</small>
@@ -81,9 +82,7 @@ const SearchEvidenceCard = ({ item }: { item: SearchEvidence }) => {
           <Link className="ui-button ui-button--ghost" to={`/documents/${provenance.sourceVersionId}`}>
             资料版本
           </Link>
-          <a className="ui-button ui-button--secondary" href={provenance.sourceSpanHref} target="_blank" rel="noreferrer">
-            <ExternalLink size={15} />打开证据片段
-          </a>
+          <SourceSpanViewer className="ui-button ui-button--secondary" label="打开证据片段" reference={{ workspaceId, sourceVersionId: provenance.sourceVersionId, sourceSpanId: item.span.spanId }} />
         </div>
       </section>)}
     </div>
@@ -305,7 +304,7 @@ export const SearchPage = () => {
     {searchQuery.data ? <>
       <SearchResultSummary response={searchQuery.data} fetching={searchQuery.isFetching} />
       {searchQuery.data.items.length === 0 ? <Card><EmptyState title="没有命中 Evidence" description="服务端完成了检索但当前条件没有结果；这不是依赖故障或假成功。" /></Card> : <div className="search-results" aria-label="Search Evidence 列表">
-        {searchQuery.data.items.map((item) => <SearchEvidenceCard key={item.chunkId} item={item} />)}
+        {searchQuery.data.items.map((item) => <SearchEvidenceCard key={item.chunkId} item={item} workspaceId={searchQuery.data.workspaceId} />)}
       </div>}
       <div className="pagination-row">
         {urlState.cursor !== "" ? <Button variant="ghost" onClick={restartFromFirstPage}>返回首屏</Button> : <span />}

@@ -7,7 +7,7 @@ const LoadingState = () => (
     <div>
       <p className="eyebrow">正在连接</p>
       <h2>读取系统真实状态</h2>
-      <p>正在检查 API、数据库、Graph 和当前应用版本。</p>
+      <p>正在检查 API、数据库、认证边界、Graph 和当前应用版本。</p>
     </div>
   </section>
 );
@@ -58,29 +58,56 @@ export const SystemStatusPage = () => {
     );
   }
 
-  const { collections, database, graph, knowledgeHealth, semanticLinks, rag, requestId, status, version } = statusQuery.data;
-  const isReady = status === "ready" && database.status === "ready" && graph.status === "ready" && semanticLinks.status === "ready";
+  const { auth, collections, database, graph, knowledgeHealth, semanticLinks, rag, requestId, status, version } = statusQuery.data;
+  const isReady = status === "ready"
+    && database.status === "ready"
+    && auth.status !== "unavailable"
+    && graph.status === "ready"
+    && semanticLinks.status === "ready"
+    && collections.status === "ready"
+    && knowledgeHealth.status === "ready"
+    && rag.status !== "unavailable";
   const databaseUnavailable = database.status === "unavailable";
+  const authUnavailable = auth.status === "unavailable";
   const graphUnavailable = graph.status === "unavailable";
   const semanticLinksUnavailable = semanticLinks.status === "unavailable";
+  const collectionsUnavailable = collections.status === "unavailable";
+  const knowledgeHealthUnavailable = knowledgeHealth.status === "unavailable";
+  const ragUnavailable = rag.status === "unavailable";
   const headline = isReady
     ? "所有基础依赖可用"
     : databaseUnavailable
       ? "API 可用，但数据库不可用"
-      : graphUnavailable
+      : authUnavailable
+        ? "认证依赖暂不可用"
+        : graphUnavailable
         ? "Graph 查询暂不可用"
         : semanticLinksUnavailable
           ? "语义候选能力暂不可用"
-          : "RAG 能力暂不可用";
+          : collectionsUnavailable
+            ? "Collection 能力暂不可用"
+            : knowledgeHealthUnavailable
+              ? "知识健康能力暂不可用"
+              : ragUnavailable
+                ? "RAG 能力暂不可用"
+                : "系统处于降级状态";
   const summary = isReady
-    ? "ZHIXU 已连接数据库，Graph 查询可用。"
+    ? `ZHIXU 已连接数据库，认证${auth.status === "disabled" ? "已按开发模式关闭" : "已启用"}，Graph 查询可用。`
     : databaseUnavailable
       ? database.message ?? "数据库依赖暂时不可用，请检查服务配置和运行状态。"
-      : graphUnavailable
+      : authUnavailable
+        ? "认证边界无法初始化，业务 API 已 fail closed；请检查认证数据库与运行配置。"
+        : graphUnavailable
         ? "知识图谱查询已暂停，请稍后重试；若持续失败，请检查服务日志。"
         : semanticLinksUnavailable
           ? "正式 Graph 查询仍可用，但候选扫描与审阅暂不可用，请检查语义候选依赖。"
-          : "会话读取仍可用，但新问题提交已暂停，请检查 RAG 运行依赖。";
+          : collectionsUnavailable
+            ? "Collection 查询暂不可用，请检查 Collection 依赖。"
+            : knowledgeHealthUnavailable
+              ? "知识健康查询暂不可用，请检查 Health 依赖。"
+              : ragUnavailable
+                ? "会话读取仍可用，但新问题提交已暂停，请检查 RAG 运行依赖。"
+                : "部分系统能力处于降级状态，请查看下方能力明细。";
 
   return (
     <section
@@ -118,6 +145,10 @@ export const SystemStatusPage = () => {
               <span aria-hidden="true">{semanticLinks.status === "ready" ? "●" : "▲"}</span>{" "}
               {semanticLinks.status === "ready" ? "可用" : "不可用"}
             </dd>
+          </div>
+          <div>
+            <dt>认证</dt>
+            <dd><span aria-hidden="true">{auth.status === "unavailable" ? "▲" : "●"}</span> {auth.status === "ready" ? "已启用" : auth.status === "disabled" ? "开发模式关闭" : "不可用"}</dd>
           </div>
           <div>
             <dt>RAG</dt>

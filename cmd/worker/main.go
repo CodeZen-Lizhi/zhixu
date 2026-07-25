@@ -135,7 +135,7 @@ func run(configPath string, logger *slog.Logger) error {
 	if logger == nil {
 		return errors.New("worker logger is nil")
 	}
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadWorker(configPath)
 	if err != nil {
 		logger.Error("configuration is invalid", "error_code", "INVALID_CONFIGURATION")
 		return err
