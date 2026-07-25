@@ -1396,3 +1396,45 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 31: M10 认证与安全闭环验证收口
+
+**Date**: 2026-07-25
+**Task**: M10 认证与安全闭环
+**Branch**: `dev`
+
+### Summary
+
+完成 M10-02 单用户认证的最终收口：Cookie Session、受限 API Token、CSRF/Origin、Capability Middleware、
+启动安全校验、Compose loopback 映射守卫、OpenAPI 与前端 Auth Boundary 均已验证。补充后端认证跨层契约、
+前端认证状态所有权和任务验收记录；已完成 scoped 工作提交、父任务状态同步与子任务归档，其他里程碑改动保持未提交。
+
+### Main Changes
+
+- Compose 守卫现在在信任 loopback 端口映射时解析最终 Compose 模型，拒绝缺失 host IP、`0.0.0.0` 和非 loopback 绑定；独立审查已复验 IPv4/IPv6/localhost 正例与负例。
+- 新增 `.trellis/spec/backend/auth-security.md`，锁定认证 API、配置、数据库摘要、失败矩阵、测试及 Write Authorization 独立边界。
+- 前端状态规范记录 `AuthProvider`/`AuthBoundary`、401 清理、CSRF 及严格 decoder 的唯一所有权。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1d2e341` | `feat: 完成单用户认证与安全边界` |
+| `76becd8` | `chore(task): 完成 M10-02 状态` |
+
+### Testing
+
+- `make compose-auth-smoke` 通过：真实 required-auth Compose 栈验证匿名拒绝、Bootstrap Session、Cookie、Origin/CSRF、API Token 创建/撤销与登出。
+- 使用一次性 loopback `pgvector/pgvector:0.8.5-pg18-bookworm` 数据库执行 `ZHIXU_TEST_DATABASE_URL=<temporary> make auth-integration` 通过：迁移、认证 PostgreSQL `-race`、重复 Up/非空 Down guard 均绿。
+- index 独立快照的 `go test -race -count=1 -timeout 60s ./...`、`go vet ./...`、前端 lint/typecheck/test（52 files / 610 tests）/build、`make openapi-check`、`make compose-check`、Python 编译和 `git diff --cached --check` 全部通过；混合工作树全量前端门禁另通过 52 files / 612 tests。
+- 桌面与 `390x844` 浏览器 smoke 已验证 development disabled 工作台/Settings 无 console error、空白或文本重叠；临时 Compose project、卷和数据库均已清理。
+
+### Review
+
+- 主审使用 `go-review`、`sql-code-review`、`code-review-and-quality` 进行五轴质量门禁：当前范围未发现 Critical/Required 问题。
+- 同一独立只读审查 Agent 最终复验暂存区，确认请求体阻塞与 API `ReadTimeout` 修复已进入提交，且未混入 Timeline/Review/Export 后续覆盖层；P0/P1/P2 均为 0。
+
+### Status
+
+[OK] **Completed and archived**
