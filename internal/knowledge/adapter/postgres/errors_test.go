@@ -48,3 +48,14 @@ func TestClassifyPreservesCallerCancellation(t *testing.T) {
 		t.Fatalf("classified=%#v err=%v", classified, err)
 	}
 }
+
+func TestTimelineProjectionTreatsUniqueEventBindingConflictAsPoison(t *testing.T) {
+	err := timelineStorage(&pgconn.PgError{Code: "23505"})
+	if !shouldPoisonTimelineProjection(err) {
+		t.Fatalf("unique event binding conflict must poison projection: %v", err)
+	}
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorVersionConflict || classified.Retryable {
+		t.Fatalf("classified=%#v err=%v", classified, err)
+	}
+}

@@ -9,6 +9,9 @@ M7-02 已补充 Semantic Link Candidate、typed Relation Proposal、Approval 后
 M7-03 已补充版本化 Smart Collection、统一 read model/cursor、持久 Health Scan/Issue/Schedule、SMART_COLLECTION
 Candidate scope、affected-change outbox、真实 PostgreSQL/River/API/浏览器门禁；Tag/Review/Directory owner、Artifact/
 Review 批量动作、认证和 M10 最终容量仍未实现。
+M7-04 已交付 append-only Knowledge Timeline、durable Outbox/Worker 恢复、Workspace-bound HMAC cursor、只读 Impact
+Report 与 `IMPACT_ANALYZED` Audit 原子事务；Timeline UI、正式 downstream Proposal、Artifact/Review/Eval impact、全局
+Audit/OTel/Metrics 和 POISONED 运维入口仍未实现。
 M9 已补充 Workspace Source Version/Proposal/Workflow 列表、资源绑定 cursor 与 Active Index 选择投影；
 Proposal 等级由不可变 `proposal.risk_level` 唯一拥有，Source Version 使用受复合约束的 Workspace 镜像键支撑
 有界 keyset 查询；Proposal detail 的 Approval 为必需 nullable，Summary 保持 optional non-null。三条真实
@@ -22,6 +25,7 @@ M10-02 已交付单用户 Auth、Cookie Session、受限 API Token、CSRF/Origin
 |---|---|---|
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
 | [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
+| [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker 门禁 | M7-04 后端闭环已验证；UI、正式 downstream Proposal 与全局 Audit 保持 deferred |
 | [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health 持久化、read-model revision、schedule/outbox，以及 M9 Workspace 列表、cursor kind/version、Active Index included/excluded 与 PG/EXPLAIN 门禁 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool 稳定错误、M9 Proposal detail/summary Approval 空值契约与 M10 Auth 的稳定 Problem Details 边界 |
 | [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M6-03 Tool/Observability 共享脱敏与受限 Tool Call 事实已记录；通用 append-only Audit/真实 exporter 归 M10 |

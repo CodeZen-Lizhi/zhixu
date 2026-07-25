@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行 Go race、vet、全量门禁和 review 要求"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"审查 SQL 参数化、约束、索引、并发、迁移和回滚"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"审查 Capability、跨 Workspace、防枚举、Origin/CSRF 与 Token 行为"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"审查 Audit 幂等、actor、脱敏和日志泄漏"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"审查 invalid/not found/conflict/unavailable/manual recovery 映射"}
+{"file":".trellis/tasks/07-25-m7-timeline-impact/prd.md","reason":"逐项验证 AC1-AC11 与 out-of-scope 声明"}

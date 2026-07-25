@@ -216,6 +216,7 @@ var capabilityRoutes = []capabilityRoute{
 	oneCapability(http.MethodPost, "/api/v1/health/issues/{issue_id}/decisions", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/health/issues/{issue_id}/repair-proposals", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/graph/candidates/{candidate_id}/decisions", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/timeline/{eventID}/impact-analysis", capability.WriteProposal),
 
 	oneCapability(http.MethodPost, "/api/v1/proposals/{proposalID}/approvals", capability.WriteKnowledge),
 	oneCapability(http.MethodPost, "/api/v1/proposals/{proposalID}/apply-preflight", capability.WriteKnowledge),

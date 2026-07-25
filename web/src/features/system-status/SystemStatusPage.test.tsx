@@ -24,7 +24,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "ready" },
         semantic_links: { status: "ready" },
         rag: { status: "disabled" },
-        collections: { status: "ready" }, knowledge_health: { status: "ready" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
         auth: { status: "disabled" },
         request_id: "request-ready",
       }),
@@ -47,7 +47,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
         semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
         rag: { status: "unavailable", reason: "rag_dependencies_unavailable" },
-        collections: { status: "unavailable" }, knowledge_health: { status: "unavailable" },
+        collections: { status: "unavailable" }, knowledge_health: { status: "unavailable" }, knowledge_timeline: { status: "unavailable" },
         auth: { status: "ready" },
         request_id: "request-degraded",
       }),
@@ -69,7 +69,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
         semantic_links: { status: "ready" },
         rag: { status: "disabled" },
-        collections: { status: "ready" }, knowledge_health: { status: "ready" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
         auth: { status: "ready" },
         request_id: "request-graph",
       }),
@@ -91,7 +91,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "ready" },
         semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
         rag: { status: "disabled" },
-        collections: { status: "ready" }, knowledge_health: { status: "ready" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
         auth: { status: "ready" },
         request_id: "request-semantic-links",
       }),
@@ -102,6 +102,30 @@ describe("SystemStatusPage", () => {
     expect(await screen.findByText("语义候选能力暂不可用")).toBeInTheDocument();
     expect(screen.getByText("正式 Graph 查询仍可用，但候选扫描与审阅暂不可用，请检查语义候选依赖。")).toBeInTheDocument();
     expect(screen.getByText("语义候选", { selector: "dt" })).toBeInTheDocument();
+  });
+
+  it("知识时间线依赖不可用时显示独立降级状态", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse({
+        status: "degraded",
+        version: "0.1.0",
+        database: { status: "ready" },
+        graph: { status: "ready" },
+        semantic_links: { status: "ready" },
+        rag: { status: "disabled" },
+        collections: { status: "ready" },
+        knowledge_health: { status: "ready" },
+        knowledge_timeline: { status: "unavailable" },
+        auth: { status: "ready" },
+        request_id: "request-timeline-degraded",
+      }),
+    );
+
+    renderWithAppProviders(<SystemStatusPage />);
+
+    expect(await screen.findByText("知识时间线能力暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("Knowledge Timeline 与 Impact Analysis 暂不可用，请检查其投影依赖。")).toBeInTheDocument();
+    expect(screen.getByText("知识时间线", { selector: "dt" })).toBeInTheDocument();
   });
 
   it("认证依赖不可用时显示 fail-closed 状态", async () => {
@@ -115,6 +139,7 @@ describe("SystemStatusPage", () => {
         rag: { status: "disabled" },
         collections: { status: "ready" },
         knowledge_health: { status: "ready" },
+        knowledge_timeline: { status: "ready" },
         auth: { status: "unavailable", reason: "auth_dependencies_unavailable" },
         request_id: "request-auth-degraded",
       }),
@@ -138,7 +163,7 @@ describe("SystemStatusPage", () => {
           graph: { status: "ready" },
           semantic_links: { status: "ready" },
           rag: { status: "ready" },
-          collections: { status: "ready" }, knowledge_health: { status: "ready" },
+          collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
           auth: { status: "ready" },
           request_id: "request-retry",
         }),

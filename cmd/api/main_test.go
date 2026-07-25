@@ -11,6 +11,8 @@ import (
 	"time"
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
+	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
+	authdomain "github.com/CodeZen-Lizhi/zhixu/internal/auth/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -38,6 +40,29 @@ func TestNewAPIServerBoundsRequestReads(t *testing.T) {
 	}
 	if server.ReadHeaderTimeout != apiReadHeaderTimeout || server.IdleTimeout != apiIdleTimeout {
 		t.Fatalf("server timeouts header=%s idle=%s", server.ReadHeaderTimeout, server.IdleTimeout)
+	}
+}
+
+func TestImpactAuditActorDistinguishesSessionAndAPIToken(t *testing.T) {
+	scopes := []capability.Capability{capability.ReadLocal}
+	for _, test := range []struct {
+		name      string
+		principal authdomain.Principal
+		found     bool
+		wantType  auditdomain.ActorType
+		wantRef   string
+	}{
+		{name: "anonymous", wantType: auditdomain.ActorAnonymous},
+		{name: "session", principal: authdomain.Principal{Kind: authdomain.PrincipalSession, ID: foundation.ID("91000000-0000-4000-8000-000000000001"), Scopes: scopes}, found: true, wantType: auditdomain.ActorUser, wantRef: "91000000-0000-4000-8000-000000000001"},
+		{name: "api token", principal: authdomain.Principal{Kind: authdomain.PrincipalAPIToken, ID: foundation.ID("91000000-0000-4000-8000-000000000002"), Scopes: scopes}, found: true, wantType: auditdomain.ActorAPIToken, wantRef: "91000000-0000-4000-8000-000000000002"},
+		{name: "invalid principal", principal: authdomain.Principal{Kind: authdomain.PrincipalAPIToken, ID: "not-a-uuid", Scopes: scopes}, found: true, wantType: auditdomain.ActorAnonymous},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			actorType, actorRef := impactAuditActorForPrincipal(test.principal, test.found)
+			if actorType != test.wantType || actorRef != test.wantRef {
+				t.Fatalf("actor=(%q,%q), want=(%q,%q)", actorType, actorRef, test.wantType, test.wantRef)
+			}
+		})
 	}
 }
 

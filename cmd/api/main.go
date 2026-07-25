@@ -13,8 +13,12 @@ import (
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
+	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
+	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	authpostgres "github.com/CodeZen-Lizhi/zhixu/internal/auth/adapter/postgres"
 	authapplication "github.com/CodeZen-Lizhi/zhixu/internal/auth/application"
+	authdomain "github.com/CodeZen-Lizhi/zhixu/internal/auth/domain"
 	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	approvaldispatchpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/approvaldispatchpostgres"
@@ -46,7 +50,10 @@ import (
 	ingestionapplication "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/application"
 	ingestiondomain "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/domain"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
+	knowledgeaudit "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/audit"
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
+	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
+	knowledgehttp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
@@ -150,10 +157,17 @@ func main() {
 	candidateHandler := graphhttp.NewCandidateHandler(nil, cfg.GraphQueryTimeout)
 	conversationHandler := conversationhttp.NewHandler(nil, conversationhttp.NewCursorCodec())
 	eventsHandler := eventshttp.NewHandler(nil)
+	knowledgeHandler := knowledgehttp.NewHandler(nil, nil, cfg.GraphQueryTimeout)
 	ragEnabled := cfg.ChatProvider != config.ChatProviderDisabled
 	var ragInitErr error
 	fileScanner := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
 	if database != nil {
+		configuredKnowledgeHandler, knowledgeHandlerErr := newKnowledgeHandler(database.DB(), cfg.GraphQueryTimeout)
+		if knowledgeHandlerErr != nil {
+			logger.Error("knowledge timeline and impact services are unavailable", "error_code", "KNOWLEDGE_TIMELINE_IMPACT_UNAVAILABLE")
+		} else {
+			knowledgeHandler = configuredKnowledgeHandler
+		}
 		if err := configureCollectionHealth(database, cfg, &collectionHandler, &healthHandler, nil); err != nil {
 			logger.Error("collection and health services are unavailable", "error_code", "COLLECTION_HEALTH_DEPENDENCY_UNAVAILABLE")
 		}
@@ -301,6 +315,7 @@ func main() {
 		Retrieval:         retrievalHandler,
 		Conversation:      conversationHandler,
 		Events:            eventsHandler,
+		Knowledge:         knowledgeHandler,
 		Auth:              authHandler,
 		AuthRequired:      authRequired,
 		AuthInitErr:       authInitErr,
@@ -346,6 +361,65 @@ func newAPIServer(address string, handler http.Handler) *http.Server {
 		ReadTimeout:       apiReadTimeout,
 		ReadHeaderTimeout: apiReadHeaderTimeout,
 		IdleTimeout:       apiIdleTimeout,
+	}
+}
+
+// newKnowledgeHandler 组装不可变 Timeline 投影查询与只读 Impact 报告服务。
+func newKnowledgeHandler(pool *pgxpool.Pool, timeout time.Duration) (*knowledgehttp.Handler, error) {
+	if pool == nil {
+		return nil, errors.New("knowledge timeline database is unavailable")
+	}
+	repository, err := knowledgepostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	cursor, err := knowledgeapplication.NewTimelineCursorCodec(key)
+	if err != nil {
+		return nil, err
+	}
+	timeline, err := knowledgeapplication.NewTimelineService(repository, cursor)
+	if err != nil {
+		return nil, err
+	}
+	auditRepository, err := auditpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	auditRecorder, err := auditapplication.NewRecorder(auditRepository)
+	if err != nil {
+		return nil, err
+	}
+	impactAudit, err := knowledgeaudit.NewImpactRecorder(auditRecorder, impactAuditActor)
+	if err != nil {
+		return nil, err
+	}
+	impact, err := knowledgeapplication.NewImpactServiceWithAudit(repository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, impactAudit)
+	if err != nil {
+		return nil, err
+	}
+	return knowledgehttp.NewHandler(timeline, impact, timeout), nil
+}
+
+func impactAuditActor(ctx context.Context) (auditdomain.ActorType, string) {
+	principal, found := authhttp.PrincipalFromContext(ctx)
+	return impactAuditActorForPrincipal(principal, found)
+}
+
+func impactAuditActorForPrincipal(principal authdomain.Principal, found bool) (auditdomain.ActorType, string) {
+	if !found || authdomain.ValidatePrincipal(principal) != nil {
+		return auditdomain.ActorAnonymous, ""
+	}
+	switch principal.Kind {
+	case authdomain.PrincipalSession:
+		return auditdomain.ActorUser, string(principal.ID)
+	case authdomain.PrincipalAPIToken:
+		return auditdomain.ActorAPIToken, string(principal.ID)
+	default:
+		return auditdomain.ActorAnonymous, ""
 	}
 }
 

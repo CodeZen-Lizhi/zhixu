@@ -9,17 +9,18 @@ import (
 )
 
 var (
-	sensitiveAssignmentPattern = regexp.MustCompile(`(?i)(authorization|bearer|api[_-]?key|credential|password|passwd|secret|token|cookie|dsn|database[_-]?url)\s*[:=]\s*\S+`)
+	sensitiveAssignmentPattern = regexp.MustCompile(`(?i)(authorization|bearer|api[_-]?key|credential|password|passwd|secret|token|cookie|session|csrf|access[_-]?token|refresh[_-]?token|set-cookie|dsn|database[_-]?url)["']?\s*[:=]\s*["']?\S+`)
 	bearerTokenPattern         = regexp.MustCompile(`(?i)\bbearer\s+\S+`)
+	jwtPattern                 = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
 	credentialURLPattern       = regexp.MustCompile(`(?i)\b(postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqp)://\S+`)
 	urlCandidatePattern        = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"']+`)
 	windowsAbsolutePathPattern = regexp.MustCompile(`(?:^|[\s\x22'\x60(=:;,])([A-Za-z]:[\\/][^\s\x22'\x60<>]*)`)
 	unixAbsolutePathPattern    = regexp.MustCompile(`(?:^|[\s\x22'\x60(=:;,])(/[^/\s\x22'\x60<>][^\s\x22'\x60<>]*)`)
 )
 
-// ContainsSecret 判断文本是否携带常见凭据赋值、Bearer Token 或带凭据连接 URL。
+// ContainsSecret 判断文本是否携带常见凭据赋值、Bearer/JWT Token 或带凭据连接 URL。
 func ContainsSecret(value string) bool {
-	if sensitiveAssignmentPattern.MatchString(value) || bearerTokenPattern.MatchString(value) || credentialURLPattern.MatchString(value) {
+	if sensitiveAssignmentPattern.MatchString(value) || bearerTokenPattern.MatchString(value) || jwtPattern.MatchString(value) || credentialURLPattern.MatchString(value) {
 		return true
 	}
 	for _, candidate := range urlCandidatePattern.FindAllString(value, -1) {

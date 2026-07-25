@@ -54,6 +54,10 @@ const requiredOperations = [
   ["/api/v1/answers/{answer_id}", "get", "200"],
   ["/api/v1/answers/{answer_id}/feedback", "post", "201"],
   ["/api/v1/events", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/timeline", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}", "get", "200"],
 ];
 for (const [path, method, successResponse] of requiredOperations) {
   const operation = document.paths?.[path]?.[method];
@@ -257,6 +261,48 @@ for (const [path, method, successStatus, successSchema, errorStatuses] of semant
   }
 }
 
+const timelineOperations = [
+  ["/api/v1/workspaces/{workspace_id}/timeline", "get", ["200"], "KnowledgeTimelinePage", ["400", "401", "403", "405", "500", "503"]],
+  ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}", "get", ["200"], "KnowledgeEvent", ["400", "401", "403", "404", "405", "500", "503"]],
+  ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis", "post", ["200", "201"], "ImpactAnalysisResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}", "get", ["200"], "ImpactReport", ["400", "401", "403", "404", "405", "500", "503"]],
+];
+for (const [path, method, successStatuses, successSchema, errorStatuses] of timelineOperations) {
+  const operation = document.paths[path][method];
+  if (operation.security?.length === 0) throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication`);
+  for (const status of successStatuses) {
+    const actual = operation.responses[status]?.content?.["application/json"]?.schema?.$ref;
+    if (actual !== `#/components/schemas/${successSchema}`) {
+      throw new Error(`invalid Timeline/Impact ${status} success schema for ${method.toUpperCase()} ${path}: ${String(actual)}`);
+    }
+  }
+  for (const status of errorStatuses) {
+    const response = resolveRef(operation.responses[status]);
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Timeline/Impact ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+const timelinePath = "/api/v1/workspaces/{workspace_id}/timeline";
+if (document.paths[timelinePath].post || document.paths[timelinePath].put || document.paths[timelinePath].patch || document.paths[timelinePath].delete) {
+  throw new Error("Knowledge Timeline must not expose a public event write operation");
+}
+const timelineParameters = document.paths[timelinePath].get.parameters;
+const timelineLimit = timelineParameters.find((parameter) => parameter.name === "limit")?.schema;
+const timelineCursor = timelineParameters.find((parameter) => parameter.name === "cursor")?.schema;
+const timelineEventTypes = timelineParameters.find((parameter) => parameter.name === "event_type")?.schema;
+if (timelineLimit?.minimum !== 1 || timelineLimit.maximum !== 100 || timelineLimit.default !== 25 ||
+    timelineCursor?.minLength !== 1 || timelineCursor.maxLength !== 4096 ||
+    timelineEventTypes?.type !== "array" || timelineEventTypes.maxItems !== 32 || timelineEventTypes.uniqueItems !== true) {
+  throw new Error("Knowledge Timeline pagination or event filter bounds drifted");
+}
+const impactOperation = document.paths["/api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis"].post;
+if (!impactOperation.parameters?.some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey") ||
+    impactOperation.requestBody?.required !== true || impactOperation.requestBody?.["x-max-body-bytes"] !== 4096 ||
+    impactOperation.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ImpactAnalysisRequest") {
+  throw new Error("Impact Analysis must require Idempotency-Key and a bounded empty JSON object");
+}
+
 for (const [path, method] of [
   ["/api/v1/search", "post"],
   ["/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}", "get"],
@@ -403,6 +449,14 @@ for (const schema of [
   "AnswerFeedback",
   "ServerEventPayloadSummary",
   "ServerEventEnvelope",
+  "KnowledgeEventCorrelation",
+  "KnowledgeEvent",
+  "KnowledgeTimelinePage",
+  "ImpactAnalysisRequest",
+  "ImpactObject",
+  "ImpactReport",
+  "ImpactProposalDraft",
+  "ImpactAnalysisResult",
   "Problem",
 ]) {
   if (!document.components?.schemas?.[schema]) throw new Error(`missing schema ${schema}`);
@@ -608,6 +662,10 @@ if (!schemas.SystemStatus.required.includes("auth") || schemas.SystemStatus.prop
     schemas.AuthCapabilityStatus.properties.status.enum.join(",") !== "disabled,ready,unavailable") {
   throw new Error("SystemStatus must expose the strict authentication capability state");
 }
+if (!schemas.SystemStatus.required.includes("knowledge_timeline") ||
+    schemas.SystemStatus.properties.knowledge_timeline.$ref !== "#/components/schemas/OptionalCapabilityStatus") {
+  throw new Error("SystemStatus must expose the Knowledge Timeline capability state");
+}
 if (schemas.SessionCredential.properties.session_token || schemas.SessionInfo.properties.token_hash || schemas.SessionInfo.properties.csrf_hash ||
     schemas.APITokenInfo.properties.token || schemas.APITokenInfo.properties.token_hash ||
     !schemas.APITokenCredential.required.includes("token") ||
@@ -652,6 +710,7 @@ for (const schemaName of [
   "ClarificationResult", "RetrievalDegradation", "RetrievalScopeSummary", "RetrievalSummary", "Answer", "Turn", "TurnPage",
   "SubmitFeedbackRequest", "AnswerFeedback", "ServerEventPayloadSummary", "ServerEventEnvelope",
   "AuthCapabilityStatus", "SessionCredential", "SessionInfo", "CreateAPITokenRequest", "APITokenInfo", "APITokenCredential", "APITokenPage",
+  "KnowledgeEventCorrelation", "KnowledgeEvent", "KnowledgeTimelinePage", "ImpactAnalysisRequest", "ImpactObject", "ImpactReport", "ImpactProposalDraft", "ImpactAnalysisResult",
   "GraphCanonicalJSONObject", "GraphNodeRef", "GraphApplicability", "GraphTopicNode", "GraphClaimNode",
   "GraphConfirmation", "GraphEdge", "GraphPageMeta", "GraphFilter", "GraphGlobalRequest", "GraphGlobalCluster",
   "GraphGlobalResponse", "GraphNodeSearchMatch", "GraphNodeSearchResponse", "GraphNeighborhoodRequest",
@@ -663,6 +722,26 @@ for (const schemaName of [
   "KnowledgeChangeSet", "KnowledgeChangeEvidenceRef", "KnowledgeChangeRevision", "KnowledgeChangeProposal",
 ]) {
   if (schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must reject unknown properties`);
+}
+
+if (schemas.ImpactAnalysisRequest.maxProperties !== 0 || schemas.ImpactAnalysisRequest.additionalProperties !== false ||
+    schemas.KnowledgeTimelinePage.properties.items.maxItems !== 100 ||
+    schemas.KnowledgeTimelinePage.properties.items.items.$ref !== "#/components/schemas/KnowledgeEvent" ||
+    schemas.KnowledgeTimelinePage.properties.next_cursor.maxLength !== 4096 ||
+    schemas.ImpactReport.properties.objects.maxItems !== 500 ||
+    schemas.ImpactReport.properties.objects.items.$ref !== "#/components/schemas/ImpactObject" ||
+    schemas.ImpactAnalysisResult.properties.proposal_drafts.maxItems !== 500 ||
+    schemas.ImpactAnalysisResult.properties.proposal_drafts.items.$ref !== "#/components/schemas/ImpactProposalDraft") {
+  throw new Error("Timeline/Impact page, empty request or bounded result schemas drifted");
+}
+if (schemas.KnowledgeEvent.properties.schema_version.const !== "knowledge-event/v1" ||
+    schemas.ImpactReport.properties.schema_version.const !== "impact-report/v1" ||
+    schemas.ImpactReport.properties.fingerprint.pattern !== "^[0-9a-f]{64}$" ||
+    schemas.ImpactObject.properties.type.enum.join(",") !== "RELATION,CONFLICT,HEALTH_ISSUE" ||
+    schemas.ImpactProposalDraft.properties.requires_approval.const !== true ||
+    schemas.ImpactProposalDraft.properties.requires_write_authorization.const !== true ||
+    schemas.ImpactProposalDraft.properties.operation.enum.includes("NO_ACTION")) {
+  throw new Error("Timeline/Impact immutable version or Proposal authorization boundary drifted");
 }
 
 if (schemas.SemanticLinkCandidate.properties.discovery_methods.maxItems !== 6 ||

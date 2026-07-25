@@ -14,6 +14,7 @@ describe("decodeSystemStatus", () => {
         rag: { status: "disabled" },
         collections: { status: "ready" },
         knowledge_health: { status: "ready" },
+        knowledge_timeline: { status: "ready" },
         auth: { status: "disabled" },
         request_id: "request-1",
       }),
@@ -26,6 +27,7 @@ describe("decodeSystemStatus", () => {
       rag: { status: "disabled" },
       collections: { status: "ready" },
       knowledgeHealth: { status: "ready" },
+      knowledgeTimeline: { status: "ready" },
       auth: { status: "disabled" },
       requestId: "request-1",
     });
@@ -40,7 +42,7 @@ describe("decodeSystemStatus", () => {
         graph: { status: "ready" },
         semantic_links: { status: "ready" },
       rag: { status: "ready" },
-        collections: { status: "ready" }, knowledge_health: { status: "ready" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
         auth: { status: "ready" },
         request_id: "request-1",
       }),
@@ -48,7 +50,7 @@ describe("decodeSystemStatus", () => {
     expect(() => decodeSystemStatus({
       status: "ready", version: "0.1.0", database: { status: "ready" }, graph: { status: "ready" },
       semantic_links: { status: "ready" }, rag: { status: "ready" }, request_id: "request-1", ignored_field: true,
-      collections: { status: "ready" }, knowledge_health: { status: "ready" },
+      collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
       auth: { status: "ready" },
     })).toThrow(ApiBoundaryError);
   });
@@ -61,7 +63,7 @@ describe("decodeSystemStatus", () => {
       graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
       semantic_links: { status: "ready" },
       rag: { status: "disabled" },
-      collections: { status: "ready" }, knowledge_health: { status: "ready" },
+      collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
       auth: { status: "ready" },
       request_id: "request-graph",
     }).graph).toEqual({ status: "unavailable", reason: "graph_dependencies_unavailable" });
@@ -78,7 +80,7 @@ describe("decodeSystemStatus", () => {
         graph,
         semantic_links: { status: "ready" },
         rag: { status: "disabled" },
-        collections: { status: "ready" }, knowledge_health: { status: "ready" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
         auth: { status: "ready" },
         request_id: "request-graph",
       })).toThrow(ApiBoundaryError);
@@ -93,7 +95,7 @@ describe("decodeSystemStatus", () => {
       graph: { status: "ready" },
       semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
       rag: { status: "disabled" },
-      collections: { status: "ready" }, knowledge_health: { status: "ready" },
+      collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
       auth: { status: "ready" },
       request_id: "request-semantic-links",
     }).semanticLinks).toEqual({ status: "unavailable", reason: "semantic_link_dependencies_unavailable" });
@@ -110,11 +112,29 @@ describe("decodeSystemStatus", () => {
         graph: { status: "ready" },
         semantic_links: semanticLinks,
         rag: { status: "disabled" },
-        collections: { status: "ready" }, knowledge_health: { status: "ready" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
         auth: { status: "ready" },
         request_id: "request-semantic-links",
       })).toThrow(ApiBoundaryError);
     }
   });
 
+  it("解码知识时间线能力并拒绝未知状态", () => {
+    const base = {
+      status: "degraded",
+      version: "0.1.0",
+      database: { status: "ready" },
+      graph: { status: "ready" },
+      semantic_links: { status: "ready" },
+      rag: { status: "disabled" },
+      collections: { status: "ready" },
+      knowledge_health: { status: "ready" },
+      auth: { status: "ready" },
+      request_id: "request-timeline",
+    };
+
+    expect(decodeSystemStatus({ ...base, knowledge_timeline: { status: "unavailable" } }).knowledgeTimeline).toEqual({ status: "unavailable" });
+    expect(() => decodeSystemStatus({ ...base, knowledge_timeline: { status: "disabled" } })).toThrow(ApiBoundaryError);
+    expect(() => decodeSystemStatus({ ...base, knowledge_timeline: { status: "ready", ignored: true } })).toThrow(ApiBoundaryError);
+  });
 });

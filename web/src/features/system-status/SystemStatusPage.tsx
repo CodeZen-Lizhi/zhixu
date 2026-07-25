@@ -58,7 +58,7 @@ export const SystemStatusPage = () => {
     );
   }
 
-  const { auth, collections, database, graph, knowledgeHealth, semanticLinks, rag, requestId, status, version } = statusQuery.data;
+  const { auth, collections, database, graph, knowledgeHealth, knowledgeTimeline, semanticLinks, rag, requestId, status, version } = statusQuery.data;
   const isReady = status === "ready"
     && database.status === "ready"
     && auth.status !== "unavailable"
@@ -66,6 +66,7 @@ export const SystemStatusPage = () => {
     && semanticLinks.status === "ready"
     && collections.status === "ready"
     && knowledgeHealth.status === "ready"
+    && knowledgeTimeline.status === "ready"
     && rag.status !== "unavailable";
   const databaseUnavailable = database.status === "unavailable";
   const authUnavailable = auth.status === "unavailable";
@@ -73,6 +74,7 @@ export const SystemStatusPage = () => {
   const semanticLinksUnavailable = semanticLinks.status === "unavailable";
   const collectionsUnavailable = collections.status === "unavailable";
   const knowledgeHealthUnavailable = knowledgeHealth.status === "unavailable";
+  const knowledgeTimelineUnavailable = knowledgeTimeline.status === "unavailable";
   const ragUnavailable = rag.status === "unavailable";
   const headline = isReady
     ? "所有基础依赖可用"
@@ -88,9 +90,11 @@ export const SystemStatusPage = () => {
             ? "Collection 能力暂不可用"
             : knowledgeHealthUnavailable
               ? "知识健康能力暂不可用"
-              : ragUnavailable
-                ? "RAG 能力暂不可用"
-                : "系统处于降级状态";
+              : knowledgeTimelineUnavailable
+                ? "知识时间线能力暂不可用"
+                : ragUnavailable
+                  ? "RAG 能力暂不可用"
+                  : "系统处于降级状态";
   const summary = isReady
     ? `ZHIXU 已连接数据库，认证${auth.status === "disabled" ? "已按开发模式关闭" : "已启用"}，Graph 查询可用。`
     : databaseUnavailable
@@ -105,9 +109,11 @@ export const SystemStatusPage = () => {
             ? "Collection 查询暂不可用，请检查 Collection 依赖。"
             : knowledgeHealthUnavailable
               ? "知识健康查询暂不可用，请检查 Health 依赖。"
-              : ragUnavailable
-                ? "会话读取仍可用，但新问题提交已暂停，请检查 RAG 运行依赖。"
-                : "部分系统能力处于降级状态，请查看下方能力明细。";
+              : knowledgeTimelineUnavailable
+                ? "Knowledge Timeline 与 Impact Analysis 暂不可用，请检查其投影依赖。"
+                : ragUnavailable
+                  ? "会话读取仍可用，但新问题提交已暂停，请检查 RAG 运行依赖。"
+                  : "部分系统能力处于降级状态，请查看下方能力明细。";
 
   return (
     <section
@@ -161,6 +167,10 @@ export const SystemStatusPage = () => {
           <div>
             <dt>知识健康</dt>
             <dd><span aria-hidden="true">{knowledgeHealth.status === "ready" ? "●" : "▲"}</span> {knowledgeHealth.status === "ready" ? "可用" : "不可用"}</dd>
+          </div>
+          <div>
+            <dt>知识时间线</dt>
+            <dd><span aria-hidden="true">{knowledgeTimeline.status === "ready" ? "●" : "▲"}</span> {knowledgeTimeline.status === "ready" ? "可用" : "不可用"}</dd>
           </div>
           <div>
             <dt>版本</dt>

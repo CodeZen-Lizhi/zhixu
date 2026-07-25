@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"加载后端分层、模块和当前 M7/M10 交付边界"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"约束 PostgreSQL、事务、迁移、幂等与 guarded Down"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"锁定跨层错误分类、Problem 与 fail-closed 行为"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"锁定 Timeline/Impact Capability、Session、Origin 与 CSRF 边界"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"锁定 Impact Audit、Secret redaction 和稳定日志字段"}
+{"file":".trellis/tasks/07-25-m7-timeline-impact/research/requirements.md","reason":"提供需求来源、当前实现事实、缺口和明确 deferral"}

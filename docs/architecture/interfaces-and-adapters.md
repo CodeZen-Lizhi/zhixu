@@ -392,3 +392,15 @@ loopback 部署；M10 完成前不得增加 allow-all Authorizer 或把 `workspa
 - 批量顺序。
 - 错误分类。
 - 资源释放。
+
+## 16. M7-04 Knowledge Timeline 与 Impact Adapter
+
+- `internal/knowledge/application` 只依赖 `TimelineReader`、`EventProjector`、`TimelineProjectionPort`、
+  `ImpactRepository` 和可选的 `ImpactAuditPort`；不依赖 HTTP、pgx、River、文件或 Git 类型。
+- `internal/knowledge/adapter/postgres` 是 Timeline/Impact SQL、事务和 Outbox projector 的唯一实现。它负责
+  Workspace predicate、稳定 cursor 查询、`SKIP LOCKED` 领取、source binding/CAS 和 append-only 错误映射；Worker
+  只负责有界调度，不拥有数据库事务。
+- Impact Adapter 只能读取 Knowledge/Health 下游并保存报告；Application 只为已有明确 owner 的对象生成不可执行
+  Proposal Draft，Draft 不创建 Change Control Proposal。当前生产 Reader 对尚无 owner 的对象保持
+  `requires_proposal=false`；未来必须通过带持久化与验收证据的新增契约接入。Projection Poison 必须持久化为
+  `POISONED`，供人工恢复/forward fix，不得静默重试或返回空事件。

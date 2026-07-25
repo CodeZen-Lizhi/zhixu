@@ -78,7 +78,10 @@ import (
 
 const (
 	// agentStructuredMaxOutputTokens 是 Agent 各结构化阶段单次响应的生产上限。
-	agentStructuredMaxOutputTokens = 8192
+	agentStructuredMaxOutputTokens      = 8192
+	timelineProjectionDispatchErrorCode = "KNOWLEDGE_TIMELINE_PROJECTION_FAILED"
+	timelineProjectionStartupPhase      = "startup"
+	timelineProjectionPeriodicPhase     = "periodic"
 )
 
 type workerComponents struct {
@@ -95,6 +98,7 @@ type workerComponents struct {
 	healthScanStart *healthapplication.ScanService
 	healthSchedule  *healthapplication.ScheduleService
 	healthAffected  *healthapplication.AffectedChangeDispatcher
+	timelineProject *knowledgeapplication.TimelineProjectionDispatcher
 	fatalInvariants <-chan error
 }
 
@@ -224,11 +228,15 @@ func run(configPath string, logger *slog.Logger) error {
 	}
 	readiness.SetRiverStarted(true)
 	readiness.SetReindexDispatcherStarted(components.dispatcher.Started())
+	timelineContext, cancelTimeline := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	_, _ = dispatchTimelineProjection(timelineContext, logger, components.timelineProject, timelineProjectionStartupPhase)
+	cancelTimeline()
 	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil,
 		"semantic_link_scan", components.semanticScan != nil,
 		"agent_available", components.agentCapability.available, "agent_capability_code", components.agentCapability.code,
 		"tool_runtime_enabled", components.tools.runtimeEnabled, "tool_executor_count", len(components.tools.enabledRefs),
-		"web_fetch_enabled", cfg.WebFetchMode == config.ToolModeEnabled, "reindex_dispatcher", components.dispatcher.Started())
+		"web_fetch_enabled", cfg.WebFetchMode == config.ToolModeEnabled, "reindex_dispatcher", components.dispatcher.Started(),
+		"timeline_projector", components.timelineProject != nil)
 
 	ticker := time.NewTicker(cfg.HealthInterval)
 	defer ticker.Stop()
@@ -296,6 +304,11 @@ func run(configPath string, logger *slog.Logger) error {
 						logger.Warn("health affected-change dispatch failed", "error_code", "HEALTH_AFFECTED_CHANGE_DISPATCH_FAILED")
 					}
 				}
+				if components.timelineProject != nil {
+					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+					_, _ = dispatchTimelineProjection(dispatchContext, logger, components.timelineProject, timelineProjectionPeriodicPhase)
+					cancelDispatch()
+				}
 			}
 		}
 	}
@@ -330,6 +343,32 @@ shutdown:
 		runErr = err
 	}
 	return runErr
+}
+
+func dispatchTimelineProjection(ctx context.Context, logger *slog.Logger, dispatcher *knowledgeapplication.TimelineProjectionDispatcher, phase string) (knowledgeapplication.TimelineProjectionBatchResult, error) {
+	batch, err := dispatcher.DispatchBatch(ctx, knowledgeapplication.MaxTimelineProjectionBatch)
+	if err != nil {
+		errorCode, retryable := timelineProjectionFailure(err)
+		logger.Warn("timeline projection dispatch failed",
+			"error_code", errorCode, "retryable", retryable, "phase", phase,
+			"processed_count", batch.Processed, "projected_count", batch.Projected,
+			"replayed_count", batch.Replayed, "poisoned_count", batch.Poisoned)
+		return batch, err
+	}
+	if phase == timelineProjectionStartupPhase || batch.Processed > 0 {
+		logger.Info("timeline projection dispatch completed",
+			"phase", phase, "processed_count", batch.Processed, "projected_count", batch.Projected,
+			"replayed_count", batch.Replayed, "poisoned_count", batch.Poisoned)
+	}
+	return batch, nil
+}
+
+func timelineProjectionFailure(err error) (string, bool) {
+	var classified *foundation.Error
+	if errors.As(err, &classified) && classified.Code != "" {
+		return classified.Code, classified.Retryable
+	}
+	return timelineProjectionDispatchErrorCode, false
 }
 
 func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logger, metrics observability.Metrics) (workerComponents, error) {
@@ -611,6 +650,14 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
+	timelineRepository, err := knowledgepostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	timelineProject, err := knowledgeapplication.NewTimelineProjectionDispatcher(timelineRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
 	runtimeCoordinator, err := workflowapplication.NewRuntimeCoordinator(runtimeRepository)
 	if err != nil {
 		return workerComponents{}, err
@@ -644,7 +691,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	return workerComponents{
 		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability,
 		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
-		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, fatalInvariants: fatalInvariants,
+		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject, fatalInvariants: fatalInvariants,
 	}, nil
 }
 

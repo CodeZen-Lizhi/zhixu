@@ -26,6 +26,16 @@ const (
 	ErrorCodeRequestInvalid             = "KNOWLEDGE_REQUEST_INVALID"
 	ErrorCodeVersionConflict            = "KNOWLEDGE_VERSION_CONFLICT"
 	ErrorCodeIdempotencyConflict        = "KNOWLEDGE_IDEMPOTENCY_CONFLICT"
+	ErrorCodeTimelineInvalid            = "KNOWLEDGE_TIMELINE_INVALID"
+	ErrorCodeTimelineCursorInvalid      = "KNOWLEDGE_TIMELINE_CURSOR_INVALID"
+	ErrorCodeTimelineNotFound           = "KNOWLEDGE_TIMELINE_NOT_FOUND"
+	ErrorCodeTimelineUnavailable        = "KNOWLEDGE_TIMELINE_UNAVAILABLE"
+	ErrorCodeTimelineInconsistent       = "KNOWLEDGE_TIMELINE_INCONSISTENT"
+	ErrorCodeTimelineProjectionPoisoned = "KNOWLEDGE_TIMELINE_PROJECTION_POISONED"
+	ErrorCodeImpactInvalid              = "KNOWLEDGE_IMPACT_INVALID"
+	ErrorCodeImpactNotFound             = "KNOWLEDGE_IMPACT_NOT_FOUND"
+	ErrorCodeImpactUnavailable          = "KNOWLEDGE_IMPACT_UNAVAILABLE"
+	ErrorCodeImpactConflict             = "KNOWLEDGE_IMPACT_CONFLICT"
 )
 
 func invalid(code, message string) error {

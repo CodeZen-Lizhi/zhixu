@@ -19,6 +19,7 @@ import (
 	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
 	healthhttp "github.com/CodeZen-Lizhi/zhixu/internal/health/http"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
+	knowledgehttp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
@@ -56,6 +57,7 @@ type Dependencies struct {
 	Candidate         *graphhttp.CandidateHandler
 	Conversation      *conversationhttp.Handler
 	Events            *eventshttp.Handler
+	Knowledge         *knowledgehttp.Handler
 	Auth              *authhttp.Handler
 	AuthRequired      bool
 	AuthInitErr       error
@@ -195,6 +197,9 @@ func registerDomainRoutes(api chi.Router, deps Dependencies) {
 	if deps.Events != nil {
 		deps.Events.Routes(api)
 	}
+	if deps.Knowledge != nil {
+		deps.Knowledge.Routes(api)
+	}
 }
 
 func authUnavailableHandler(w http.ResponseWriter, _ *http.Request) {
@@ -239,6 +244,7 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 	ragStatus := map[string]string{"status": "disabled"}
 	collectionsStatus := map[string]string{"status": "unavailable"}
 	knowledgeHealthStatus := map[string]string{"status": "unavailable"}
+	knowledgeTimelineStatus := map[string]string{"status": "unavailable"}
 	authStatus := map[string]string{"status": "disabled"}
 	status := "degraded"
 	if err := checkDatabase(r.Context(), deps); err == nil {
@@ -279,17 +285,21 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 	if deps.Health != nil && deps.Health.Available() {
 		knowledgeHealthStatus["status"] = "ready"
 	}
+	if deps.Knowledge != nil && deps.Knowledge.Available() {
+		knowledgeTimelineStatus["status"] = "ready"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":           status,
-		"version":          deps.Version,
-		"database":         databaseStatus,
-		"graph":            graphStatus,
-		"semantic_links":   semanticLinksStatus,
-		"rag":              ragStatus,
-		"collections":      collectionsStatus,
-		"knowledge_health": knowledgeHealthStatus,
-		"auth":             authStatus,
-		"request_id":       requestID(r.Context()),
+		"status":             status,
+		"version":            deps.Version,
+		"database":           databaseStatus,
+		"graph":              graphStatus,
+		"semantic_links":     semanticLinksStatus,
+		"rag":                ragStatus,
+		"collections":        collectionsStatus,
+		"knowledge_health":   knowledgeHealthStatus,
+		"knowledge_timeline": knowledgeTimelineStatus,
+		"auth":               authStatus,
+		"request_id":         requestID(r.Context()),
 	})
 }
 

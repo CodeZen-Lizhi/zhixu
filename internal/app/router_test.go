@@ -23,7 +23,9 @@ import (
 	graphapplication "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
+	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	knowledgehttp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/http"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 
@@ -38,6 +40,9 @@ type routerGraphService struct{}
 
 type routerCandidateService struct{}
 type routerCandidateScanService struct{}
+
+type routerTimelineService struct{}
+type routerImpactService struct{}
 
 type routerAuthService struct{}
 
@@ -176,6 +181,26 @@ func readyCandidateHandler() *graphhttp.CandidateHandler {
 	return graphhttp.NewCandidateHandler(routerCandidateService{}, time.Second, routerCandidateScanService{})
 }
 
+func (routerTimelineService) List(context.Context, knowledgeapplication.TimelineListRequest) (knowledgeapplication.TimelinePage, error) {
+	return knowledgeapplication.TimelinePage{}, nil
+}
+
+func (routerTimelineService) Get(context.Context, foundation.ID, foundation.ID) (knowledge.KnowledgeEvent, error) {
+	return knowledge.KnowledgeEvent{}, nil
+}
+
+func (routerImpactService) Analyze(context.Context, knowledgeapplication.ImpactAnalysisRequest) (knowledgeapplication.ImpactAnalysisResult, error) {
+	return knowledgeapplication.ImpactAnalysisResult{}, nil
+}
+
+func (routerImpactService) GetReport(context.Context, foundation.ID, foundation.ID) (knowledge.ImpactReport, error) {
+	return knowledge.ImpactReport{}, nil
+}
+
+func readyKnowledgeHandler() *knowledgehttp.Handler {
+	return knowledgehttp.NewHandler(routerTimelineService{}, routerImpactService{}, time.Second)
+}
+
 func TestRouterRegistersRetrievalRoutes(t *testing.T) {
 	router := NewRouter(Dependencies{Version: "test", Retrieval: retrievalhttp.NewHandler(nil, nil, nil)})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/search", strings.NewReader(`{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"q"}`))
@@ -204,6 +229,32 @@ func TestRouterRegistersEventsRoutes(t *testing.T) {
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "SSE_SERVICE_UNAVAILABLE") {
 		t.Fatalf("events route status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRouterRegistersKnowledgeTimelineAndImpactRoutes(t *testing.T) {
+	router := NewRouter(Dependencies{Version: "test", Knowledge: knowledgehttp.NewHandler(nil, nil, time.Second)})
+	workspaceID := "92000000-0000-4000-8000-000000000001"
+	eventID := "92000000-0000-4000-8000-000000000002"
+	reportID := "92000000-0000-4000-8000-000000000003"
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "timeline list", method: http.MethodGet, path: "/api/v1/workspaces/" + workspaceID + "/timeline"},
+		{name: "timeline detail", method: http.MethodGet, path: "/api/v1/workspaces/" + workspaceID + "/timeline/" + eventID},
+		{name: "impact analysis", method: http.MethodPost, path: "/api/v1/workspaces/" + workspaceID + "/timeline/" + eventID + "/impact-analysis"},
+		{name: "impact report", method: http.MethodGet, path: "/api/v1/workspaces/" + workspaceID + "/impact-reports/" + reportID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "KNOWLEDGE_HTTP_UNAVAILABLE") {
+				t.Fatalf("knowledge route status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 
@@ -379,7 +430,7 @@ func TestRouterSystemStatusReturnsDegradedButOK(t *testing.T) {
 }
 
 func TestRouterSystemStatusReady(t *testing.T) {
-	router := NewRouter(Dependencies{Version: "v-test", Database: fakePinger{}, Graph: readyGraphHandler(), Candidate: readyCandidateHandler()})
+	router := NewRouter(Dependencies{Version: "v-test", Database: fakePinger{}, Graph: readyGraphHandler(), Candidate: readyCandidateHandler(), Knowledge: readyKnowledgeHandler()})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
 	res := httptest.NewRecorder()
 	router.ServeHTTP(res, req)
@@ -387,7 +438,8 @@ func TestRouterSystemStatusReady(t *testing.T) {
 		t.Fatalf("status code = %d", res.Code)
 	}
 	if !strings.Contains(res.Body.String(), `"status":"ready"`) || !strings.Contains(res.Body.String(), `"graph":{"status":"ready"}`) ||
-		!strings.Contains(res.Body.String(), `"semantic_links":{"status":"ready"}`) {
+		!strings.Contains(res.Body.String(), `"semantic_links":{"status":"ready"}`) ||
+		!strings.Contains(res.Body.String(), `"knowledge_timeline":{"status":"ready"}`) {
 		t.Fatalf("body = %s", res.Body.String())
 	}
 }
@@ -410,9 +462,12 @@ func TestRouterAuthProtectsBusinessRoutesButKeepsPublicHealth(t *testing.T) {
 	router := NewRouter(Dependencies{
 		Version: "auth-test", Database: fakePinger{}, Auth: readyAuthHandler(t), AuthRequired: true,
 		AuthCheck: func(context.Context) error { return nil },
-		Graph:     readyGraphHandler(), Candidate: readyCandidateHandler(),
+		Graph:     readyGraphHandler(), Candidate: readyCandidateHandler(), Knowledge: readyKnowledgeHandler(),
 	})
-	for _, path := range []string{"/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001"} {
+	for _, path := range []string{
+		"/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001",
+		"/api/v1/workspaces/92000000-0000-4000-8000-000000000001/timeline",
+	} {
 		unauthenticated := httptest.NewRequest(http.MethodGet, path, nil)
 		unauthenticatedResponse := httptest.NewRecorder()
 		router.ServeHTTP(unauthenticatedResponse, unauthenticated)

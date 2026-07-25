@@ -691,6 +691,31 @@ Knowledge Event 是正式状态变化的时间线投影，不是独立可写的 
 - 事件摘要可查询，完整敏感正文不写入时间线；修正通过新事件表达而不是更新历史事件。
 - 投影失败进入可观测/恢复流程，不得阻塞已提交的领域事务，也不能把投影成功当作事实源。
 
+M7-04 将上述约束落到 `migrations/00037_timeline_impact_hardening.sql`：
+
+- `ops.timeline_projection_outbox` 是正式 Proposal、Approval、Proposal Commit、Knowledge Command Receipt
+  和 Impact Report 事务写入的最小投影源。`status` 只允许 `PENDING → PROJECTED` 或 `PENDING → POISONED`，
+  `(workspace_id, source_event_ref)` 与 `(workspace_id, event_id)` 防止重复投影；载荷不复制正文、凭据或绝对路径。
+- Worker 以 `FOR UPDATE SKIP LOCKED` 领取一条 Outbox，在短事务内校验绑定、追加 `ops.knowledge_event`，再以版本
+  CAS 标记完成。相同稳定来源重放返回既有事件；Schema、关联或内容漂移进入 `POISONED` 和
+  `KNOWLEDGE_TIMELINE_PROJECTION_POISONED`，不回滚已经提交的 Proposal/Knowledge 事实。完成时间取数据库时间与源
+  `created_at` 的较晚者，以容纳事务时钟略领先数据库的情况。
+- `ops.knowledge_event` 追加后由 append-only trigger 拒绝 UPDATE/DELETE；`source_event_ref`、schema、摘要、关联和
+  payload 大小均有数据库约束。`00037` 在空表可 Down→Up；存在 Timeline、Impact 或待投影 Outbox 时 Down 返回
+  SQLSTATE `55000`，保留数据并要求 forward fix。
+
+### impact_report
+
+Impact Report 是只读分析投影，不是 Knowledge 事实源，也不直接执行写回。
+
+- `ops.impact_report` 以 `(workspace_id, source_event_id)` 幂等；报告保存 source event/version、对象快照、稳定摘要、
+  fingerprint、状态（`READY|STALE|FAILED`）、schema/version 和错误/过期原因。
+- PostgreSQL Adapter 在 Workspace 条件下批量读取 Relation、Conflict、Health Issue 等下游对象；Application 负责
+  去重、排序、fingerprint 和 Proposal Draft 校验。Draft 只是无持久 ID 的不可执行建议，必须同时声明 Approval 与
+  一次性 Write Authorization；当前无正式 owner 的对象不生成 Draft，Impact 本身不写 Topic、Claim、Relation 或文件。
+- 报告 INSERT 只产生 `IMPACT_ANALYZED` Timeline 投影源；重复分析返回同一报告。Artifact、Review Card 和评测样本
+  的专属下游契约在对应 M8/M11 模块落地后 additive 扩展，不在 M7-04 引入第二事实表。
+
 ### audit
 
 Audit 是安全和业务决策的 append-only 记录，独立于普通日志和 Knowledge Event。

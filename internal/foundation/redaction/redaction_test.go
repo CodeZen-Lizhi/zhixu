@@ -6,6 +6,8 @@ func TestSensitiveTextDetectionCoversCredentialsAndPaths(t *testing.T) {
 	for _, value := range []string{
 		"Authorization: Bearer secret", "password=hunter2", "passwd: hunter2", "dsn=postgres://user:pass@host/db",
 		"database_url=postgres://user:pass@host/db", "postgres://user:pass@host/db", "https://user:pass@example.test/private",
+		"session=plain-session", "csrf=plain-csrf", `{"token":"plain-token"}`, `{"nested":{"password":"plain-password"}}`,
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature123",
 	} {
 		if !ContainsSecret(value) {
 			t.Fatalf("secret not detected: %q", value)
