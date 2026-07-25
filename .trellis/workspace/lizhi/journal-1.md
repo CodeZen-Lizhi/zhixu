@@ -1438,3 +1438,36 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed and archived**
+
+
+## Session 31: 收口 M7-04 Knowledge Timeline 与 Impact Analysis
+
+**Date**: 2026-07-26
+**Task**: 收口 M7-04 Knowledge Timeline 与 Impact Analysis
+**Branch**: `dev`
+
+### Summary
+
+完成 M7-only Knowledge Timeline、durable Outbox/Worker、只读 Impact Report 与原子 Audit 收口；隔离并提交 68 个 M7 文件，通过全量 Go/Web/OpenAPI/Compose、真实 PostgreSQL 门禁及独立复验，归档 M7-04，保留 M8/M9/M10 并行改动且未 push。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5cd940b` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
