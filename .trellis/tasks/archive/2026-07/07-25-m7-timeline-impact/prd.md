@@ -77,7 +77,7 @@
 - [x] AC8：Session 与 API Token 的 Impact Audit actor、同键 replay、不同键多事件、append-only、递归脱敏和明文 Secret fail-closed 测试通过。
 - [x] AC9：`make timeline-impact-integration`、`make timeline-impact-fault-smoke`、新增 Worker process smoke、`make openapi-check`、全量 Go race/vet、前端 lint/typecheck/test/build 和 `git diff --check` 通过。
 - [x] AC10：从最终 Git 索引导出的隔离快照完成全量门禁，且不包含 Review、Export、Capacity、完整 M10-01 Observability、Trellis 平台升级或其他后续开发文件。
-- [ ] AC11：权威文档、Trellis spec、父任务状态与实际交付一致；不宣称 Timeline UI、正式 downstream Proposal、Artifact/Review/Eval impact 或全局 Audit 已完成。
+- [x] AC11：权威文档、Trellis spec、父任务状态与实际交付一致；不宣称 Timeline UI、正式 downstream Proposal、Artifact/Review/Eval impact 或全局 Audit 已完成。
 
 ## Out Of Scope
 
@@ -100,4 +100,4 @@
 - AC1-AC9 已由全量 Go race/vet/tidy、`make test`、Web 52 files/612 tests、OpenAPI、Compose 及三组真实 PostgreSQL integration/fault/Worker process smoke 关闭。
 - 主 Agent 已执行 `go-review`、`sql-code-review` 与 `code-review-and-quality`；同一独立 reviewer 完成两轮修复复验，未发现未关闭 P0-P2。
 - 并发 smoke 暴露的 Worker 日志读取竞态已改为有界等待，并在真实 PostgreSQL 下 `-race -count=5` 连续通过；生产 Worker 行为未改。
-- AC10 已由最终 Git index/tree 白名单、`git diff --cached --check`、无 unstaged 代码差异及 `web/node_modules` 排除证据关闭；AC11 在 M7-only 工作提交、Trellis 归档和 journal 完成后关闭。Timeline UI、正式 downstream Proposal、Artifact/Review/Eval impact 与全局 Audit 继续保持 deferred。
+- AC10 已由最终 Git index/tree 白名单、`git diff --cached --check`、无 unstaged M7 独占代码差异及 `web/node_modules` 排除证据关闭；AC11 已由 M7-only 工作提交 `5cd940b`、Trellis spec 与父任务状态同步关闭。Timeline UI、正式 downstream Proposal、Artifact/Review/Eval impact 与全局 Audit 继续保持 deferred。

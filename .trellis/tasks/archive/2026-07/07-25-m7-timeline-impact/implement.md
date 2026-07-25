@@ -14,7 +14,7 @@
 | T08 | 同步权威 docs/spec/父任务状态，只记录已证明切片和明确 deferral | 文档不宣称 UI、正式 Proposal、Artifact/Review/Eval impact 或 M10-01 完成 | completed |
 | T09 | 从最终 index 导出隔离树执行全量 Go/Web/OpenAPI/Compose 适用门禁 | 所有 canonical commands 通过，`git diff --cached --check` 通过 | completed |
 | T10 | 主 Agent review + 独立 Go/SQL/跨层审查，修复后同一 reviewer 复验 | Critical/Required/P0-P2 为 0；盲区显式记录 | completed |
-| T11 | 仅提交 M7 snapshot，核对 commit tree，归档子任务并记录 journal | commit tree 与审核 tree 一致；后续工作区改动仍保留；不 push | pending |
+| T11 | 仅提交 M7 snapshot，核对 commit tree，归档子任务并记录 journal | commit tree 与审核 tree 一致；后续工作区改动仍保留；不 push | completed |
 
 ## Validation Commands
 
