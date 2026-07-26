@@ -1471,3 +1471,35 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 32: 完成 M8-01 Artifact 产物闭环
+
+**Date**: 2026-07-26
+**Task**: 完成 M8-01 Artifact 产物闭环
+
+### Summary
+
+交付 Workspace 隔离的 Artifact Revision、服务端 Citation 复核、受控分章生成、Markdown 导出和 PUBLISH_ARTIFACT Proposal；完成真实 PostgreSQL、全仓 race、OpenAPI、前端、API/Worker/Vite 浏览器 smoke 及独立复审。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0852a4f` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
