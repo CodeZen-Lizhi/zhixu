@@ -1,0 +1,11 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端模块、Composition Root、正式知识写入边界与质量检查入口。"}
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"M8 Artifact Revision、Citation、generation、receipt/reservation、export 与 Publish Proposal 可执行契约。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Artifact GET/mutation 的 READ_LOCAL、WRITE_PROPOSAL 与正式审批 WRITE_KNOWLEDGE 授权边界。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"PostgreSQL 参数化、Workspace 复合绑定、事务、迁移与 append-only 约束。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"稳定 Domain error、Problem Details、404 防枚举、409 冲突与 503 unavailable 规则。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go、PostgreSQL、API/Worker、恢复、浏览器与独立审查质量门禁。"}
+{"file":".trellis/spec/frontend/index.md","reason":"Artifact 前端模块、严格 API boundary、Query/URL/local state 所有权入口。"}
+{"file":".trellis/spec/frontend/artifact-workbench.md","reason":"M8 Artifact wire、修订、generation 恢复、GAP/export/publish UI 可执行契约。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"unknown JSON 到绑定后 UI model 的运行时校验和 fail-closed 规则。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"前端 lint/typecheck/test/build、交互状态、桌面与移动浏览器门禁。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Storage 到 Service、HTTP/OpenAPI、Query 与 UI 的双向数据流核对。"}

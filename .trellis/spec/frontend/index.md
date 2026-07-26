@@ -19,6 +19,8 @@ Timeline/Impact 页面、事件详情导航与版本比较 UI 仍未交付，不
 M9 已交付业务工作台、严格 Proposal 判别联合、Workspace-bound 详情和全站唯一 SSE Event Store；Apply Preflight 明确属于 Approval 后写回检查，Monaco DiffEditor 模型在内部 editor detach 后按 URI 安全释放。
 M10-02 已交付严格认证 API 边界、`AuthProvider`/`AuthBoundary`、Session 恢复、CSRF 注入和登录/登出状态；
 Bootstrap Token 只用于一次交换，浏览器持久化的唯一认证派生值是 CSRF Token，业务授权仍由后端裁决。
+M8-01 已交付 `/artifacts` 工作台、严格 Artifact decoder、Workspace-bound Query 与 generation 恢复；
+Citation 可信性、Artifact 状态和 export/publication 绑定只来自服务端响应。
 
 ## 已确认基线
 
@@ -40,6 +42,7 @@ Bootstrap Token 只用于一次交换，浏览器持久化的唯一认证派生�
 | [Hook 规范](./hook-guidelines.md) | Query、Command、URL 和 SSE Hook | Query Key Factory 和 Hook Test Harness |
 | [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | 已记录 M7-03 Workspace cache、M9 唯一 SSE Owner，以及 M10 Auth/CSRF 状态和匿名时的 Query 清理契约 |
 | [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 M7-03 Collection/Health、M7-04 `knowledge_timeline` capability、M9 Business 与 M10 Auth 响应/Problem 的严格解码 |
+| [Artifact 工作台契约](./artifact-workbench.md) | Artifact wire、Query、generation 恢复、GAP/export/publish UI 边界 | M8-01 decoder、组件、桌面/移动真实浏览器闭环已验证 |
 | [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 M7-01 Graph、M7-02 Candidate、M7-03 Collection/Health 与 M10 认证浏览器门禁 |
 
 ## 开发前检查清单

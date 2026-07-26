@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	artifacthttp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/http"
 	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	collectionhttp "github.com/CodeZen-Lizhi/zhixu/internal/collection/http"
@@ -58,6 +59,7 @@ type Dependencies struct {
 	Conversation      *conversationhttp.Handler
 	Events            *eventshttp.Handler
 	Knowledge         *knowledgehttp.Handler
+	Artifact          *artifacthttp.Handler
 	Auth              *authhttp.Handler
 	AuthRequired      bool
 	AuthInitErr       error
@@ -199,6 +201,9 @@ func registerDomainRoutes(api chi.Router, deps Dependencies) {
 	}
 	if deps.Knowledge != nil {
 		deps.Knowledge.Routes(api)
+	}
+	if deps.Artifact != nil {
+		deps.Artifact.Routes(api)
 	}
 }
 

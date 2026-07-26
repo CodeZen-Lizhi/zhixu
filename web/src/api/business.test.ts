@@ -92,6 +92,44 @@ const knowledgeProposalResponse = (
   updated_at: "2026-07-22T00:01:00Z",
   ...proposalOverrides,
 });
+const publishArtifactProposalResponse = (
+  revisionOverrides: Record<string, unknown> = {},
+  publicationOverrides: Record<string, unknown> = {},
+  proposalOverrides: Record<string, unknown> = {},
+) => ({
+  id: proposalId,
+  workspace_id: workspaceId,
+  proposal_type: "publish_artifact",
+  status: "ready_for_review",
+  risk_level: "HIGH",
+  revision: {
+    id: revisionId,
+    revision_no: 1,
+    publication: {
+      workspace_id: workspaceId,
+      artifact_id: "10000000-0000-4000-8000-000000000006",
+      revision_id: "10000000-0000-4000-8000-000000000007",
+      revision_no: 3,
+      artifact_version: 5,
+      content_hash: "c".repeat(64),
+      source_coverage: [
+        { section_key: "intro", status: "COVERED", gaps: [] },
+        { section_key: "limits", status: "GAP", gaps: [{ code: "NO_SOURCE", description: "没有可验证来源" }] },
+      ],
+      schema_version: "artifact-publication/v1",
+      ...publicationOverrides,
+    },
+    risk: "publish approved artifact",
+    rollback_plan: "keep artifact isolated",
+    change_hash: "f".repeat(64),
+    created_at: "2026-07-26T00:00:00Z",
+    ...revisionOverrides,
+  },
+  approval: null,
+  created_at: "2026-07-26T00:00:00Z",
+  updated_at: "2026-07-26T00:01:00Z",
+  ...proposalOverrides,
+});
 const proposalSummaryResponse = (overrides: Record<string, unknown> = {}) => ({
   id: proposalId,
   workspace_id: workspaceId,
@@ -196,6 +234,32 @@ describe("business API boundary", () => {
     await expect(listProposals(workspaceId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
+  it("decodes and filters publish_artifact Proposal summaries", async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      items: [proposalSummaryResponse({ proposal_type: "publish_artifact", target: "Artifact 发布", risk_level: "HIGH" })],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetcher);
+
+    await expect(listProposals(workspaceId, { type: "publish_artifact" })).resolves.toMatchObject({
+      items: [{ type: "publish_artifact", target: "Artifact 发布", riskLevel: "HIGH" }],
+    });
+    expect(fetcher.mock.calls[0]?.[0]).toContain("proposal_type=publish_artifact");
+  });
+
+  it("rejects a publish_artifact Proposal summary without HIGH risk", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      items: [proposalSummaryResponse({ proposal_type: "publish_artifact", risk_level: "MEDIUM" })],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(listProposals(workspaceId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
   it("preserves idempotency and JSON headers for decisions", async () => {
     const proposalId = "10000000-0000-4000-8000-000000000001";
     const revisionId = "10000000-0000-4000-8000-000000000003";
@@ -249,6 +313,45 @@ describe("business API boundary", () => {
       decision: "approved",
       decidedAt: response.decided_at,
     });
+  });
+
+  it("accepts a publish_artifact Approval without claiming a writeback Workflow", async () => {
+    const response = {
+      id: "10000000-0000-4000-8000-000000000005",
+      proposal_id: proposalId,
+      revision_id: revisionId,
+      change_hash: "a".repeat(64),
+      decision: "approved",
+      decided_at: "2026-07-26T00:00:00Z",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(response), { status: 201, headers: { "Content-Type": "application/json" } })));
+
+    await expect(decideProposal(proposalId, {
+      revisionId,
+      changeHash: response.change_hash,
+      decision: "approved",
+      proposalType: "publish_artifact",
+    })).resolves.toMatchObject({ proposalId, revisionId, decision: "approved" });
+  });
+
+  it("rejects a publish_artifact Approval decision that claims file writeback", async () => {
+    const response = {
+      id: "10000000-0000-4000-8000-000000000005",
+      proposal_id: proposalId,
+      revision_id: revisionId,
+      change_hash: "a".repeat(64),
+      decision: "approved",
+      approved_git_head: "b".repeat(40),
+      decided_at: "2026-07-26T00:00:00Z",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(response), { status: 201, headers: { "Content-Type": "application/json" } })));
+
+    await expect(decideProposal(proposalId, {
+      revisionId,
+      changeHash: response.change_hash,
+      decision: "approved",
+      proposalType: "publish_artifact",
+    })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("encodes list filters and rejects unknown response fields", async () => {
@@ -473,6 +576,80 @@ describe("business API boundary", () => {
 
     await expect(getProposal(common.workspace_id, common.id)).resolves.toMatchObject({ type: "file_patch", riskLevel: "LOW", targetPath: "docs/a.md", revision: { risk: "low", baseHash: "a".repeat(64), changeHash: "b".repeat(64) } });
     await expect(getProposal(common.workspace_id, common.id)).resolves.toMatchObject({ type: "knowledge_change", riskLevel: "HIGH", revision: { risk: "medium", changeSet: { relationType: "BELONGS_TO" }, evidenceRefs: [{ semanticHash: "c".repeat(64) }] } });
+  });
+
+  it("decodes a frozen publish_artifact detail without a formal-knowledge success projection", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(publishArtifactProposalResponse()), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getProposal(workspaceId, proposalId)).resolves.toMatchObject({
+      type: "publish_artifact",
+      riskLevel: "HIGH",
+      revision: {
+        id: revisionId,
+        publication: {
+          workspaceId,
+          artifactId: "10000000-0000-4000-8000-000000000006",
+          revisionId: "10000000-0000-4000-8000-000000000007",
+          revisionNo: 3,
+          artifactVersion: 5,
+          contentHash: "c".repeat(64),
+          sourceCoverage: [
+            { sectionKey: "intro", status: "COVERED", gaps: [] },
+            { sectionKey: "limits", status: "GAP", gaps: [{ code: "NO_SOURCE", description: "没有可验证来源" }] },
+          ],
+          schemaVersion: "artifact-publication/v1",
+        },
+      },
+    });
+  });
+
+  it.each([
+    ["非 HIGH 风险", {}, {}, { risk_level: "MEDIUM" }],
+    ["跨 Workspace publication", {}, { workspace_id: "10000000-0000-4000-8000-000000000009" }, {}],
+    ["空来源覆盖", {}, { source_coverage: [] }, {}],
+    ["COVERED 携带 Gap", {}, { source_coverage: [{ section_key: "intro", status: "COVERED", gaps: [{ code: "UNEXPECTED", description: "不应存在" }] }] }, {}],
+    ["GAP 缺少 Gap", {}, { source_coverage: [{ section_key: "intro", status: "GAP", gaps: [] }] }, {}],
+    ["重复章节覆盖", {}, { source_coverage: [{ section_key: "intro", status: "COVERED", gaps: [] }, { section_key: "intro", status: "COVERED", gaps: [] }] }, {}],
+    ["非法 schema", {}, { schema_version: "artifact-publication/v2" }, {}],
+    ["非法 Artifact version", {}, { artifact_version: 0 }, {}],
+    ["未知 publication 字段", {}, { future: true }, {}],
+  ])("rejects publish_artifact detail with %s", async (_label, revisionOverrides, publicationOverrides, proposalOverrides) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(publishArtifactProposalResponse(
+      revisionOverrides,
+      publicationOverrides,
+      proposalOverrides,
+    )), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getProposal(workspaceId, proposalId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("rejects publish_artifact Approval snapshots with file writeback fields", async () => {
+    const workflowRunId = "10000000-0000-4000-8000-000000000008";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(publishArtifactProposalResponse({}, {}, {
+      status: "approved",
+      approval: {
+        id: approvalId,
+        proposal_id: proposalId,
+        revision_id: revisionId,
+        change_hash: "f".repeat(64),
+        decision: "approved",
+        approved_git_head: "a".repeat(40),
+        workflow_run_id: workflowRunId,
+        workflow_status_url: `/api/v1/workflows/${workflowRunId}`,
+        decided_at: "2026-07-26T00:02:00Z",
+      },
+    })), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getProposal(workspaceId, proposalId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("rejects a Proposal detail without the discriminator", async () => {

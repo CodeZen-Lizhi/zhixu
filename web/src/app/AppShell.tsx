@@ -1,4 +1,4 @@
-import { Activity, Archive, FileCheck2, FolderOpen, GitBranch, HeartPulse, Inbox, Layers3, LayoutDashboard, LogOut, Menu, MessageSquare, MoreHorizontal, Search, Settings, ShieldAlert, ShieldCheck, Wifi, WifiOff } from "lucide-react";
+import { Activity, Archive, FileCheck2, FileText, FolderOpen, GitBranch, HeartPulse, Inbox, Layers3, LayoutDashboard, LogOut, Menu, MessageSquare, MoreHorizontal, Search, Settings, ShieldAlert, ShieldCheck, Wifi, WifiOff } from "lucide-react";
 import { Suspense, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 
@@ -11,6 +11,7 @@ const navigation = [
   ["/dashboard", "Dashboard", LayoutDashboard], ["/inbox", "Inbox", Inbox], ["/documents", "资料版本", Archive],
   ["/search", "Search", Search], ["/proposals", "Proposals", FileCheck2], ["/workflows", "Workflows", Activity], ["/graph", "Graph", GitBranch],
   ["/collections", "Collections", Layers3], ["/health", "知识健康", HeartPulse],
+  ["/artifacts", "Artifacts", FileText],
   ["/chat", "Chat", MessageSquare], ["/workspace", "Workspace", FolderOpen], ["/settings", "Settings", Settings],
 ] as const;
 

@@ -15,11 +15,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// RuntimeRepositoryHooks 汇总 Runtime 的可选事务内领域生命周期边界。
+type RuntimeRepositoryHooks struct {
+	CancellationSafety application.CancellationSafetyGuard
+	Terminal           application.WorkflowTerminalHook
+}
+
 // RuntimeRepository owns the PostgreSQL + River transactional Start unit of work.
 type RuntimeRepository struct {
 	db           DB
 	jobs         riveradapter.JobInserter
 	cancellation application.CancellationSafetyGuard
+	terminal     application.WorkflowTerminalHook
 }
 
 // NewRuntimeRepository constructs the reusable registered Workflow Start adapter.
@@ -30,11 +37,25 @@ func NewRuntimeRepository(db DB, jobs riveradapter.JobInserter, guards ...applic
 	if len(guards) > 1 || (len(guards) == 1 && isNilCancellationSafetyGuard(guards[0])) {
 		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_CANCELLATION_GUARD_INVALID", false, errors.New("runtime accepts at most one non-nil cancellation guard"))
 	}
-	repository := &RuntimeRepository{db: db, jobs: jobs}
+	hooks := RuntimeRepositoryHooks{}
 	if len(guards) == 1 {
-		repository.cancellation = guards[0]
+		hooks.CancellationSafety = guards[0]
 	}
-	return repository, nil
+	return NewRuntimeRepositoryWithHooks(db, jobs, hooks)
+}
+
+// NewRuntimeRepositoryWithHooks 构造带事务内取消与终态领域 Hook 的 Runtime Repository。
+func NewRuntimeRepositoryWithHooks(db DB, jobs riveradapter.JobInserter, hooks RuntimeRepositoryHooks) (*RuntimeRepository, error) {
+	if isNilDB(db) || isNilJobInserter(jobs) {
+		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUNTIME_DATABASE_UNAVAILABLE", true, errors.New("runtime database or job inserter is nil"))
+	}
+	if hooks.CancellationSafety != nil && isNilCancellationSafetyGuard(hooks.CancellationSafety) {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_CANCELLATION_GUARD_INVALID", false, errors.New("runtime cancellation guard is nil"))
+	}
+	if hooks.Terminal != nil && isNilWorkflowTerminalHook(hooks.Terminal) {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_TERMINAL_HOOK_INVALID", false, errors.New("runtime terminal hook is nil"))
+	}
+	return &RuntimeRepository{db: db, jobs: jobs, cancellation: hooks.CancellationSafety, terminal: hooks.Terminal}, nil
 }
 
 func isNilJobInserter(inserter riveradapter.JobInserter) bool {
@@ -50,6 +71,19 @@ func isNilCancellationSafetyGuard(guard application.CancellationSafetyGuard) boo
 		return true
 	}
 	value := reflect.ValueOf(guard)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func isNilWorkflowTerminalHook(hook application.WorkflowTerminalHook) bool {
+	if hook == nil {
+		return true
+	}
+	value := reflect.ValueOf(hook)
 	switch value.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return value.IsNil()

@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"逐项复核 Artifact 状态机、幂等、reservation、证据、generation、导出和 Proposal 验收。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"复核公共路由最小 Capability、Workspace/身份绑定与正式写入授权分离。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"复核 00039-00043 schema、约束、trigger、事务和 guarded Down。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"复核 HTTP/Repository/Workflow 错误分类及无静默 fallback。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行 Go race/vet、真实 PostgreSQL、API/Worker、恢复与 smoke 门禁。"}
+{"file":".trellis/spec/frontend/artifact-workbench.md","reason":"复核严格 decoder、修订/生成恢复、GAP/export/publish 状态和浏览器行为。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"复核字段精确性、Workspace/资源绑定、枚举与非法响应 fail closed。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"执行前端全量命令、桌面/移动 overflow、console 与交互检查。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"最终追踪 UI -> API -> Application -> Storage 及反向读模型一致性。"}

@@ -17,6 +17,8 @@ const CollectionsPage = lazy(() => import("../features/collections/CollectionsPa
 const CollectionDetailPage = lazy(() => import("../features/collections/CollectionsPage").then((module) => ({ default: module.CollectionDetailPage })));
 const HealthPage = lazy(() => import("../features/health/HealthPage").then((module) => ({ default: module.HealthPage })));
 const SearchPage = lazy(() => import("../features/search/SearchPage").then((module) => ({ default: module.SearchPage })));
+const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage").then((module) => ({ default: module.ArtifactsPage })));
+const ArtifactDetailPage = lazy(() => import("../features/artifacts/ArtifactsPage").then((module) => ({ default: module.ArtifactDetailPage })));
 
 const Shell = () => <AppShell />;
 
@@ -36,6 +38,8 @@ export const AppRoutes = () => (
       <Route path="/collections" element={<CollectionsPage />} />
       <Route path="/collections/:collectionId" element={<CollectionDetailPage />} />
       <Route path="/health" element={<HealthPage />} />
+      <Route path="/artifacts" element={<ArtifactsPage />} />
+      <Route path="/artifacts/:artifactId" element={<ArtifactDetailPage />} />
       <Route path="/workspace" element={<WorkspacePage />} />
       <Route path="/settings" element={<SettingsPage />} />
       <Route path="/graph" element={<GraphPage />} />

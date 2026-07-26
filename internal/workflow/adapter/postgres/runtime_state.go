@@ -452,7 +452,14 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 			return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_UPDATE_FAILED")
 		}
 		deferredCancellation := false
-		for id, node := range nodes {
+		cancelledNodeIDs := make([]foundation.ID, 0, len(nodes))
+		nodeIDs := make([]foundation.ID, 0, len(nodes))
+		for id := range nodes {
+			nodeIDs = append(nodeIDs, id)
+		}
+		sort.Slice(nodeIDs, func(i, j int) bool { return nodeIDs[i] < nodeIDs[j] })
+		for _, id := range nodeIDs {
+			node := nodes[id]
 			safe, safetyErr := r.safeToCancelWorkflowNode(ctx, tx, node.ID)
 			if safetyErr != nil {
 				return application.ControlPersistenceResult{}, safetyErr
@@ -470,12 +477,18 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 					return application.ControlPersistenceResult{}, classify(updateErr, "WORKFLOW_HUMAN_TASK_CANCEL_FAILED")
 				}
 				nodes[id] = updated
+				cancelledNodeIDs = append(cancelledNodeIDs, updated.ID)
 			}
 		}
 		if !hasRunningNode(nodes) && !deferredCancellation {
 			status = domain.RunStatusCancelled
 			if _, err := tx.Exec(ctx, `UPDATE workflow.run SET status='cancelled',completed_at=$2,version=version+1,updated_at=$2 WHERE id=$1`, string(run.ID), now); err != nil {
 				return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_UPDATE_FAILED")
+			}
+		}
+		for _, nodeID := range cancelledNodeIDs {
+			if notifyErr := r.notifyDirectlyCancelledWorkflowNode(ctx, tx, run.ID, nodeID, now); notifyErr != nil {
+				return application.ControlPersistenceResult{}, notifyErr
 			}
 		}
 	default:
@@ -502,6 +515,30 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 		return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_COMMIT_FAILED")
 	}
 	return result, nil
+}
+
+func (r *RuntimeRepository) notifyDirectlyCancelledWorkflowNode(ctx context.Context, tx pgx.Tx, runID, nodeID foundation.ID, terminalAt time.Time) error {
+	if r == nil || r.terminal == nil {
+		return nil
+	}
+	attempt, found, err := findLatestAttempt(ctx, tx, nodeID)
+	if err != nil {
+		return err
+	}
+	attemptID := foundation.ID("")
+	if found {
+		attemptID = attempt.ID
+	}
+	return r.notifyWorkflowNodeTerminal(ctx, tx, application.WorkflowNodeTerminalEvent{
+		WorkflowRunID:  runID,
+		NodeRunID:      nodeID,
+		NodeAttemptID:  attemptID,
+		Outcome:        application.WorkflowTerminalOutcomeCancelled,
+		FailureClass:   domain.FailureClassCancelled,
+		FailureCode:    "WORKFLOW_CANCELLED",
+		FailureSummary: "WORKFLOW_CANCELLED",
+		TerminalAt:     terminalAt,
+	})
 }
 
 func (r *RuntimeRepository) safeToCancelWorkflowNode(ctx context.Context, transaction any, nodeRunID foundation.ID) (bool, error) {
@@ -964,13 +1001,37 @@ func (r *RuntimeRepository) completeDelivery(ctx context.Context, tx pgx.Tx, run
 	if err := insertRuntimeEvent(ctx, tx, run, updatedNode, updatedAttempt, "workflow.node.succeeded"); err != nil {
 		return application.DeliveryTransitionResult{}, err
 	}
+	if err := r.notifyWorkflowNodeTerminal(ctx, tx, application.WorkflowNodeTerminalEvent{
+		WorkflowRunID: run.ID,
+		NodeRunID:     updatedNode.ID,
+		NodeAttemptID: updatedAttempt.ID,
+		Outcome:       application.WorkflowTerminalOutcomeSucceeded,
+		TerminalAt:    now,
+	}); err != nil {
+		return application.DeliveryTransitionResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return application.DeliveryTransitionResult{}, classify(err, "WORKFLOW_COMPLETE_COMMIT_FAILED")
 	}
 	return application.DeliveryTransitionResult{Run: run, Node: updatedNode, Attempt: updatedAttempt}, nil
 }
 
+func (r *RuntimeRepository) notifyWorkflowNodeTerminal(ctx context.Context, transaction any, event application.WorkflowNodeTerminalEvent) error {
+	if r == nil || r.terminal == nil {
+		return nil
+	}
+	if err := r.terminal.OnWorkflowNodeTerminal(ctx, transaction, event); err != nil {
+		var classified *foundation.Error
+		if errors.As(err, &classified) {
+			return err
+		}
+		return foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_TERMINAL_HOOK_FAILED", true, err)
+	}
+	return nil
+}
+
 func (r *RuntimeRepository) failDelivery(ctx context.Context, tx pgx.Tx, run domain.Run, nodes map[foundation.ID]domain.NodeRun, node domain.NodeRun, attempt domain.NodeAttempt, failure domain.FailureEnvelope, now time.Time) (application.DeliveryTransitionResult, error) {
+	attemptFailure := failure
 	if run.CancelRequestedAt != nil {
 		return r.controlCheckpoint(ctx, tx, run, nodes, node, attempt, domain.NodeStatusCancelled, "WORKFLOW_CANCELLED", now)
 	}
@@ -1035,7 +1096,7 @@ func (r *RuntimeRepository) failDelivery(ctx context.Context, tx pgx.Tx, run dom
 		attemptStatus = domain.AttemptStatusCancelled
 		nodeStatus = domain.NodeStatusCancelled
 	}
-	updatedAttempt, err := scanRuntimeAttempt(tx.QueryRow(ctx, `UPDATE workflow.node_attempt SET status=$2,failure_class=$3,error_kind=$4,error_code=$5,error_summary=$6,lease_owner=NULL,lease_until=NULL,ended_at=$7,heartbeat_at=$7 WHERE id=$1 RETURNING `+runtimeAttemptColumns, string(attempt.ID), string(attemptStatus), string(failure.Class), string(failure.ErrorKind), failure.Code, failure.Summary, now))
+	updatedAttempt, err := scanRuntimeAttempt(tx.QueryRow(ctx, `UPDATE workflow.node_attempt SET status=$2,failure_class=$3,error_kind=$4,error_code=$5,error_summary=$6,lease_owner=NULL,lease_until=NULL,ended_at=$7,heartbeat_at=$7 WHERE id=$1 RETURNING `+runtimeAttemptColumns, string(attempt.ID), string(attemptStatus), string(attemptFailure.Class), string(attemptFailure.ErrorKind), attemptFailure.Code, attemptFailure.Summary, now))
 	if err != nil {
 		return application.DeliveryTransitionResult{}, classify(err, "WORKFLOW_ATTEMPT_FAIL_FAILED")
 	}
@@ -1053,6 +1114,22 @@ func (r *RuntimeRepository) failDelivery(ctx context.Context, tx pgx.Tx, run dom
 		return application.DeliveryTransitionResult{}, err
 	}
 	if err := insertRuntimeEvent(ctx, tx, run, updatedNode, updatedAttempt, "workflow.node.failed"); err != nil {
+		return application.DeliveryTransitionResult{}, err
+	}
+	outcome := application.WorkflowTerminalOutcomeFailed
+	if nodeStatus == domain.NodeStatusCancelled {
+		outcome = application.WorkflowTerminalOutcomeCancelled
+	}
+	if err := r.notifyWorkflowNodeTerminal(ctx, tx, application.WorkflowNodeTerminalEvent{
+		WorkflowRunID:  run.ID,
+		NodeRunID:      updatedNode.ID,
+		NodeAttemptID:  updatedAttempt.ID,
+		Outcome:        outcome,
+		FailureClass:   failure.Class,
+		FailureCode:    failure.Code,
+		FailureSummary: failure.Summary,
+		TerminalAt:     now,
+	}); err != nil {
 		return application.DeliveryTransitionResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1262,6 +1339,20 @@ func (r *RuntimeRepository) controlCheckpoint(ctx context.Context, tx pgx.Tx, ru
 	if err := insertRuntimeEvent(ctx, tx, updatedRun, updatedNode, updatedAttempt, "workflow.node."+strings.ToLower(code)); err != nil {
 		return application.DeliveryTransitionResult{}, err
 	}
+	if nodeStatus == domain.NodeStatusCancelled {
+		if err := r.notifyWorkflowNodeTerminal(ctx, tx, application.WorkflowNodeTerminalEvent{
+			WorkflowRunID:  updatedRun.ID,
+			NodeRunID:      updatedNode.ID,
+			NodeAttemptID:  updatedAttempt.ID,
+			Outcome:        application.WorkflowTerminalOutcomeCancelled,
+			FailureClass:   domain.FailureClassCancelled,
+			FailureCode:    code,
+			FailureSummary: code,
+			TerminalAt:     now,
+		}); err != nil {
+			return application.DeliveryTransitionResult{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return application.DeliveryTransitionResult{}, classify(err, "WORKFLOW_CONTROL_CHECKPOINT_COMMIT_FAILED")
 	}
@@ -1294,7 +1385,7 @@ func pauseNode(ctx context.Context, tx pgx.Tx, node domain.NodeRun, now time.Tim
 }
 
 func cancelNode(ctx context.Context, tx pgx.Tx, node domain.NodeRun, now time.Time) (domain.NodeRun, error) {
-	return scanRuntimeNode(tx.QueryRow(ctx, `UPDATE workflow.node_run SET status='cancelled',completed_at=$2,updated_at=$2,version=version+1,lease_owner=NULL,lease_until=NULL WHERE id=$1 RETURNING `+runtimeNodeColumns, string(node.ID), now))
+	return scanRuntimeNode(tx.QueryRow(ctx, `UPDATE workflow.node_run SET status='cancelled',completed_at=$2,updated_at=$2,version=version+1,lease_owner=NULL,lease_until=NULL,next_attempt_at=NULL WHERE id=$1 RETURNING `+runtimeNodeColumns, string(node.ID), now))
 }
 
 func resumeNodes(ctx context.Context, tx pgx.Tx, jobs riveradapter.JobInserter, run domain.Run, nodes map[foundation.ID]domain.NodeRun, now time.Time) error {

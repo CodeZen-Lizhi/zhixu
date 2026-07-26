@@ -44,6 +44,23 @@ func (r *Repository) GetModelRunTx(ctx context.Context, transaction any, workspa
 	return run, nil
 }
 
+// GetModelRunRecordTx 在调用方事务内返回 Model Run 及按 call_no 排序的全部调用历史。
+func (r *Repository) GetModelRunRecordTx(ctx context.Context, transaction any, workspaceID, runID foundation.ID, forUpdate bool) (application.ModelRunRecord, error) {
+	tx, ok := transaction.(pgx.Tx)
+	if !ok || tx == nil {
+		return application.ModelRunRecord{}, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeModelRunInvalid, false, errors.New("agent model run transaction query is invalid"))
+	}
+	run, err := r.GetModelRunTx(ctx, tx, workspaceID, runID, forUpdate)
+	if err != nil {
+		return application.ModelRunRecord{}, err
+	}
+	calls, err := loadModelCalls(ctx, tx, workspaceID, runID)
+	if err != nil {
+		return application.ModelRunRecord{}, classify(err)
+	}
+	return application.ModelRunRecord{Run: run, Calls: calls}, nil
+}
+
 // GetModelRunByAttemptTx 在调用方事务内按唯一 Node Attempt 查找 Model Run。
 func (r *Repository) GetModelRunByAttemptTx(ctx context.Context, transaction any, workspaceID, attemptID foundation.ID, forUpdate bool) (domain.ModelRun, bool, error) {
 	tx, ok := transaction.(pgx.Tx)

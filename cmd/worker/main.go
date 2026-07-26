@@ -19,6 +19,9 @@ import (
 	agentretrieval "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/retrieval"
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	artifactpostgres "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/postgres"
+	artifactapplication "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
+	artifactworkflow "github.com/CodeZen-Lizhi/zhixu/internal/artifact/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
@@ -88,6 +91,7 @@ type workerComponents struct {
 	safeWriteback   *changecontrolworkflow.Node
 	tools           toolRuntimeComponents
 	agentCapability agentCapabilityStatus
+	artifact        artifactWorkflowComponents
 	reindexWorker   *reindexriver.Worker
 	dispatcher      *retrievalruntime.Runner
 	runtimeClient   *riveradapter.Client
@@ -199,7 +203,7 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetRiverSchemaOK(true)
 	readiness.SetDefinitionsOK(components.definitions != nil)
 	readiness.SetExecutorsOK(components.executors != nil)
-	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && agentWorkflowReadiness(components))
+	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
 	toolEnabled := cfg.ToolRuntimeMode == config.ToolModeEnabled
 	toolContractsOK, toolExecutorsOK, toolDependenciesOK := toolWorkflowReadiness(components)
 	readiness.SetToolRuntimeState(toolEnabled, toolContractsOK, toolExecutorsOK, toolDependenciesOK)
@@ -234,6 +238,7 @@ func run(configPath string, logger *slog.Logger) error {
 	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil,
 		"semantic_link_scan", components.semanticScan != nil,
 		"agent_available", components.agentCapability.available, "agent_capability_code", components.agentCapability.code,
+		"artifact_generation_available", components.artifact.capability.available, "artifact_generation_capability_code", components.artifact.capability.code,
 		"tool_runtime_enabled", components.tools.runtimeEnabled, "tool_executor_count", len(components.tools.enabledRefs),
 		"web_fetch_enabled", cfg.WebFetchMode == config.ToolModeEnabled, "reindex_dispatcher", components.dispatcher.Started(),
 		"timeline_projector", components.timelineProject != nil)
@@ -433,6 +438,19 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
+	riverOptions := riveradapter.Options{
+		Queue: cfg.WorkerQueue, MaxWorkers: cfg.WorkerMaxWorkers,
+		JobTimeout: cfg.WorkerJobTimeout, RescueStuckJobsAfter: cfg.WorkerRescueStuckJobsAfter,
+		SoftStopTimeout: cfg.WorkerSoftStopTimeout, Logger: logger,
+	}
+	insertClient, err := riveradapter.NewClientWithOptions(db, nil, riverOptions)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	inserter, err := riveradapter.NewJobInserter(insertClient)
+	if err != nil {
+		return workerComponents{}, err
+	}
 	if err := executors.Register(changecontrolworkflow.SafeWritebackNodeKind, changecontrolworkflow.SafeWritebackBootstrapInputSchemaVersion, bootstrap); err != nil {
 		return workerComponents{}, err
 	}
@@ -523,6 +541,29 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err := executors.Register(healthapplication.HealthScanNodeKind, healthapplication.HealthScanInputSchemaVersion, healthScan); err != nil {
 		return workerComponents{}, err
 	}
+	healthCancellationGuard, err := healthpostgres.NewScanCancellationGuard(healthEvents)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	cancellationGuard, err := workflowapplication.NewCompositeCancellationSafetyGuard(
+		writebackRepository,
+		graphpostgres.NewSemanticLinkScanCancellationGuard(),
+		healthCancellationGuard,
+	)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	artifactAgentRepository, artifactTerminal, err := newArtifactGenerationAgent(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	runtimeRepository, err := workflowpostgres.NewRuntimeRepositoryWithHooks(db, inserter, workflowpostgres.RuntimeRepositoryHooks{
+		CancellationSafety: cancellationGuard,
+		Terminal:           artifactTerminal,
+	})
+	if err != nil {
+		return workerComponents{}, err
+	}
 	agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository)
 	if err != nil {
 		return workerComponents{}, err
@@ -535,6 +576,20 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 			return workerComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_RAG_EXECUTOR_UNAVAILABLE", false, errors.New("chat is enabled but the RAG executor is unavailable"))
 		}
 		if err := executors.Register(agentworkflow.RAGWorkflowNodeKind, agentworkflow.RAGWorkflowInputSchemaVersion, agentComponents.rag); err != nil {
+			return workerComponents{}, err
+		}
+	}
+	artifactIDs := foundation.NewUUIDGenerator(nil)
+	artifactClock := foundation.SystemClock{}
+	artifactComponents, err := newArtifactWorkflowComponents(
+		db, cfg, workspaceRepository, runtimeRepository, artifactAgentRepository, artifactTerminal,
+		agentComponents.model, agentComponents.contract, artifactIDs, artifactClock,
+	)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if artifactComponents.executor != nil {
+		if err := executors.Register(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion, artifactComponents.executor); err != nil {
 			return workerComponents{}, err
 		}
 	}
@@ -585,41 +640,17 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 			return workerComponents{}, err
 		}
 	}
+	if artifactComponents.executor != nil {
+		if err := definitions.Register(artifactworkflow.RegisteredDefinition()); err != nil {
+			return workerComponents{}, err
+		}
+	}
 	if toolComponents.runtimeEnabled {
 		if err := definitions.Register(*toolComponents.definition); err != nil {
 			return workerComponents{}, err
 		}
 	}
 	if err := definitions.Freeze(); err != nil {
-		return workerComponents{}, err
-	}
-	riverOptions := riveradapter.Options{
-		Queue: cfg.WorkerQueue, MaxWorkers: cfg.WorkerMaxWorkers,
-		JobTimeout: cfg.WorkerJobTimeout, RescueStuckJobsAfter: cfg.WorkerRescueStuckJobsAfter,
-		SoftStopTimeout: cfg.WorkerSoftStopTimeout, Logger: logger,
-	}
-	insertClient, err := riveradapter.NewClientWithOptions(db, nil, riverOptions)
-	if err != nil {
-		return workerComponents{}, err
-	}
-	inserter, err := riveradapter.NewJobInserter(insertClient)
-	if err != nil {
-		return workerComponents{}, err
-	}
-	healthCancellationGuard, err := healthpostgres.NewScanCancellationGuard(healthEvents)
-	if err != nil {
-		return workerComponents{}, err
-	}
-	cancellationGuard, err := workflowapplication.NewCompositeCancellationSafetyGuard(
-		writebackRepository,
-		graphpostgres.NewSemanticLinkScanCancellationGuard(),
-		healthCancellationGuard,
-	)
-	if err != nil {
-		return workerComponents{}, err
-	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(db, inserter, cancellationGuard)
-	if err != nil {
 		return workerComponents{}, err
 	}
 	healthScanStartRepository, err := healthpostgres.NewScanRepository(db, runtimeRepository, healthEvents, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthcollection.DurableBindingVerifier{})
@@ -689,7 +720,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 		return workerComponents{}, err
 	}
 	return workerComponents{
-		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability,
+		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability, artifact: artifactComponents,
 		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
 		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject, fatalInvariants: fatalInvariants,
 	}, nil
@@ -872,9 +903,30 @@ func agentWorkflowReadiness(components workerComponents) bool {
 	return err == nil
 }
 
+// artifactWorkflowReadiness 保证 Generation 终态收敛始终存在，且 Chat 启用时 Executor 与 Definition 成对可达。
+func artifactWorkflowReadiness(components workerComponents) bool {
+	artifact := components.artifact
+	if artifact.generation == nil || artifact.terminal == nil {
+		return false
+	}
+	if !artifact.capability.available {
+		return artifact.capability.code == artifactworkflow.ErrorCodeCapabilityUnavailable && artifact.executor == nil && artifact.catalog == nil
+	}
+	if artifact.capability.code != "" || artifact.executor == nil || artifact.catalog == nil || components.executors == nil || components.definitions == nil {
+		return false
+	}
+	if _, err := components.executors.Resolve(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion); err != nil {
+		return false
+	}
+	_, err := components.definitions.Resolve(artifactworkflow.DefinitionKey, artifactworkflow.DefinitionVersion)
+	return err == nil
+}
+
 type agentWorkflowComponents struct {
 	relation   *agentworkflow.Executor
 	rag        *agentworkflow.RAGWorkflowExecutor
+	model      agentapplication.ChatModel
+	contract   platformmodels.ChatContract
 	capability agentCapabilityStatus
 }
 
@@ -987,7 +1039,145 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	return agentWorkflowComponents{relation: relation, rag: rag, capability: agentCapabilityStatus{available: true}}, nil
+	return agentWorkflowComponents{
+		relation: relation, rag: rag, model: model, contract: contract,
+		capability: agentCapabilityStatus{available: true},
+	}, nil
+}
+
+type artifactWorkflowComponents struct {
+	generation *artifactpostgres.SectionGenerationRepository
+	terminal   *artifactpostgres.SectionGenerationTerminalHook
+	executor   *artifactworkflow.Executor
+	catalog    *agentapplication.RuntimeCatalog
+	capability agentCapabilityStatus
+}
+
+// newArtifactGenerationAgent 先组装 Agent 事务端口与独立 terminal hook，解除 Runtime 构造依赖环。
+func newArtifactGenerationAgent(
+	db *pgxpool.Pool,
+) (*agentpostgres.Repository, *artifactpostgres.SectionGenerationTerminalHook, error) {
+	if db == nil {
+		return nil, nil, errors.New("artifact generation database is unavailable")
+	}
+	agentRepository, err := agentpostgres.NewRepository(db)
+	if err != nil {
+		return nil, nil, err
+	}
+	terminal, err := artifactpostgres.NewSectionGenerationTerminalHook(agentRepository, agentworkflow.DefaultProfileRef())
+	if err != nil {
+		return nil, nil, err
+	}
+	return agentRepository, terminal, nil
+}
+
+// newArtifactWorkflowComponents 组装始终存在的 Generation 终态事实，并仅在 Chat 启用时创建真实 Executor。
+func newArtifactWorkflowComponents(
+	db *pgxpool.Pool,
+	cfg config.Config,
+	workspaceRepository *workspacepostgres.Repository,
+	runtime artifactpostgres.RuntimeStarterTx,
+	agentRepository *agentpostgres.Repository,
+	terminal *artifactpostgres.SectionGenerationTerminalHook,
+	model agentapplication.ChatModel,
+	contract platformmodels.ChatContract,
+	ids foundation.IDGenerator,
+	clock foundation.Clock,
+) (artifactWorkflowComponents, error) {
+	if db == nil || workspaceRepository == nil || runtime == nil || agentRepository == nil || terminal == nil || ids == nil || clock == nil {
+		return artifactWorkflowComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, artifactworkflow.ErrorCodeCapabilityUnavailable, false, errors.New("artifact generation persistence dependencies are incomplete"))
+	}
+	knowledgeRepository, err := knowledgepostgres.NewRepository(db)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	eligibility, err := knowledgeapplication.NewEvidenceEligibilityService(knowledgeRepository)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	searchRepository, err := retrievalpostgres.NewSearchRepository(db)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	artifactReader, err := retrievalworkspace.NewReader(workspaceRepository, filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}})
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	evidenceReference, err := retrievalapplication.NewEvidenceReferenceService(searchRepository, artifactReader)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	citationVerifier, err := artifactapplication.NewServerCitationVerifier(evidenceReference, eligibility)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	generation, err := artifactpostgres.NewSectionGenerationRepository(
+		db, runtime, agentRepository, citationVerifier, ids, clock, agentworkflow.DefaultProfileRef(),
+	)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	components := artifactWorkflowComponents{
+		generation: generation, terminal: terminal,
+		capability: agentCapabilityStatus{code: artifactworkflow.ErrorCodeCapabilityUnavailable},
+	}
+	if cfg.ChatProvider == config.ChatProviderDisabled {
+		return components, nil
+	}
+	if model == nil || contract.Model.Validate() != nil || contract.Timeout <= 0 {
+		return artifactWorkflowComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, artifactworkflow.ErrorCodeCapabilityUnavailable, false, errors.New("configured artifact chat model contract is unavailable"))
+	}
+	catalog, err := newArtifactRuntimeCatalog(contract)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	embedder, err := platformmodels.NewConfiguredEmbedder(cfg)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	searchService, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	retrievalAdapter, err := agentretrieval.NewAdapter(searchService, evidenceReference)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	executor, err := artifactworkflow.NewExecutor(artifactworkflow.ExecutorDependencies{
+		Model: model, Catalog: catalog, Repository: agentRepository, Context: generation,
+		Retrieval: retrievalAdapter, Eligibility: eligibility, Finalizer: generation,
+		IDs: ids, Clock: clock, Budget: agentApplicationBudget(cfg),
+	})
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	components.executor = executor
+	components.catalog = catalog
+	components.capability = agentCapabilityStatus{available: true}
+	return components, nil
+}
+
+// newArtifactRuntimeCatalog 使用真实 Chat contract 冻结 Artifact 独立 Prompt、Schema 与共享 Profile 引用。
+func newArtifactRuntimeCatalog(contract platformmodels.ChatContract) (*agentapplication.RuntimeCatalog, error) {
+	if contract.Model.Validate() != nil || contract.Timeout <= 0 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, artifactworkflow.ErrorCodeCapabilityUnavailable, false, errors.New("artifact chat contract is invalid"))
+	}
+	catalog := agentapplication.NewRuntimeCatalog()
+	if err := artifactworkflow.RegisterRuntimeCatalog(catalog); err != nil {
+		return nil, err
+	}
+	if err := catalog.RegisterProfile(agentapplication.ModelProfile{
+		Ref:             agentworkflow.DefaultProfileRef(),
+		Model:           contract.Model,
+		Timeout:         contract.Timeout,
+		MaxOutputTokens: agentStructuredMaxOutputTokens,
+	}); err != nil {
+		return nil, err
+	}
+	if err := catalog.Freeze(); err != nil {
+		return nil, err
+	}
+	return catalog, nil
 }
 
 func agentApplicationBudget(cfg config.Config) agentapplication.RunBudget {

@@ -19,12 +19,54 @@ type ProposalType string
 const (
 	ProposalTypeFilePatch       ProposalType = "file_patch"
 	ProposalTypeKnowledgeChange ProposalType = "knowledge_change"
+	// ProposalTypePublishArtifact freezes an approved Artifact revision for a
+	// future formal-knowledge publication capability.
+	ProposalTypePublishArtifact ProposalType = "publish_artifact"
 )
 
 const (
 	// KnowledgeChangeSchemaVersion 是首版结构化知识关系变更契约版本。
 	KnowledgeChangeSchemaVersion = "knowledge-relation-change/v1"
+	// PublishArtifactSchemaVersion is the frozen Artifact publication contract.
+	PublishArtifactSchemaVersion = "artifact-publication/v1"
 )
+
+// ArtifactCoverageStatus is the verified coverage conclusion for one frozen
+// Artifact section. It deliberately mirrors the Artifact wire contract without
+// making Change Control depend on Artifact domain internals.
+type ArtifactCoverageStatus string
+
+const (
+	ArtifactCoverageCovered   ArtifactCoverageStatus = "COVERED"
+	ArtifactCoveragePartial   ArtifactCoverageStatus = "PARTIAL"
+	ArtifactCoverageStatusGap ArtifactCoverageStatus = "GAP"
+)
+
+// ArtifactCoverageGap records a concrete verified-knowledge gap.
+type ArtifactCoverageGap struct {
+	Code        string `json:"code"`
+	Description string `json:"description"`
+}
+
+// ArtifactSourceCoverage freezes verified source coverage by section.
+type ArtifactSourceCoverage struct {
+	SectionKey string                 `json:"section_key"`
+	Status     ArtifactCoverageStatus `json:"status"`
+	Gaps       []ArtifactCoverageGap  `json:"gaps"`
+}
+
+// PublishArtifact is the typed immutable payload for a publish_artifact
+// Proposal. It contains no target file or formal Document identity.
+type PublishArtifact struct {
+	WorkspaceID     foundation.ID            `json:"workspace_id"`
+	ArtifactID      foundation.ID            `json:"artifact_id"`
+	RevisionID      foundation.ID            `json:"revision_id"`
+	RevisionNo      int64                    `json:"revision_no"`
+	ArtifactVersion int64                    `json:"artifact_version"`
+	ContentHash     string                   `json:"content_hash"`
+	SourceCoverage  []ArtifactSourceCoverage `json:"source_coverage"`
+	SchemaVersion   string                   `json:"schema_version"`
+}
 
 // KnowledgeTargetRefType 是结构化知识变更的目标引用类型。
 type KnowledgeTargetRefType string
@@ -84,6 +126,8 @@ var (
 	ErrKnowledgeChangeInvalid = errors.New("knowledge change payload is invalid")
 	// ErrProposalTypeInvalid 表示 Proposal Type 与 Revision 内容不匹配。
 	ErrProposalTypeInvalid = errors.New("proposal type does not match revision payload")
+	// ErrPublishArtifactInvalid means the frozen Artifact publication payload is invalid.
+	ErrPublishArtifactInvalid = errors.New("publish artifact payload is invalid")
 )
 
 // NormalizeProposalType 返回去空白、默认 file_patch 的 ProposalType。
@@ -192,6 +236,126 @@ func ValidateKnowledgeChange(change KnowledgeChange) (KnowledgeChange, error) {
 	return normalized, nil
 }
 
+// ValidatePublishArtifact canonicalizes and validates a frozen Artifact publication payload.
+func ValidatePublishArtifact(publication PublishArtifact) (PublishArtifact, error) {
+	publication.SchemaVersion = strings.TrimSpace(publication.SchemaVersion)
+	if publication.SchemaVersion != PublishArtifactSchemaVersion || publication.RevisionNo < 1 || publication.ArtifactVersion < 1 || !ValidHash(publication.ContentHash) {
+		return PublishArtifact{}, ErrPublishArtifactInvalid
+	}
+	workspaceID, workspaceErr := foundation.ParseID(string(publication.WorkspaceID))
+	artifactID, artifactErr := foundation.ParseID(string(publication.ArtifactID))
+	revisionID, revisionErr := foundation.ParseID(string(publication.RevisionID))
+	if workspaceErr != nil || artifactErr != nil || revisionErr != nil || workspaceID == artifactID || workspaceID == revisionID || artifactID == revisionID {
+		return PublishArtifact{}, ErrPublishArtifactInvalid
+	}
+	publication.WorkspaceID, publication.ArtifactID, publication.RevisionID = workspaceID, artifactID, revisionID
+	publication.ContentHash = strings.ToLower(strings.TrimSpace(publication.ContentHash))
+	if len(publication.SourceCoverage) == 0 {
+		return PublishArtifact{}, ErrPublishArtifactInvalid
+	}
+	coverage := make([]ArtifactSourceCoverage, len(publication.SourceCoverage))
+	for index, item := range publication.SourceCoverage {
+		item.SectionKey = strings.TrimSpace(item.SectionKey)
+		if item.SectionKey == "" || len(item.SectionKey) > 128 {
+			return PublishArtifact{}, ErrPublishArtifactInvalid
+		}
+		item.Status = ArtifactCoverageStatus(strings.ToUpper(strings.TrimSpace(string(item.Status))))
+		switch item.Status {
+		case ArtifactCoverageCovered:
+			if len(item.Gaps) != 0 {
+				return PublishArtifact{}, ErrPublishArtifactInvalid
+			}
+		case ArtifactCoveragePartial:
+			if len(item.Gaps) == 0 {
+				return PublishArtifact{}, ErrPublishArtifactInvalid
+			}
+		case ArtifactCoverageStatusGap:
+			if len(item.Gaps) == 0 {
+				return PublishArtifact{}, ErrPublishArtifactInvalid
+			}
+		default:
+			return PublishArtifact{}, ErrPublishArtifactInvalid
+		}
+		gaps := make([]ArtifactCoverageGap, len(item.Gaps))
+		for gapIndex, gap := range item.Gaps {
+			gap.Code = strings.TrimSpace(gap.Code)
+			gap.Description = strings.TrimSpace(gap.Description)
+			if gap.Code == "" || len(gap.Code) > 128 || gap.Description == "" || len(gap.Description) > 4096 {
+				return PublishArtifact{}, ErrPublishArtifactInvalid
+			}
+			gaps[gapIndex] = gap
+		}
+		sort.Slice(gaps, func(i, j int) bool {
+			if gaps[i].Code == gaps[j].Code {
+				return gaps[i].Description < gaps[j].Description
+			}
+			return gaps[i].Code < gaps[j].Code
+		})
+		for gapIndex := 1; gapIndex < len(gaps); gapIndex++ {
+			if gaps[gapIndex-1] == gaps[gapIndex] {
+				return PublishArtifact{}, ErrPublishArtifactInvalid
+			}
+		}
+		item.Gaps = gaps
+		coverage[index] = item
+	}
+	sort.Slice(coverage, func(i, j int) bool { return coverage[i].SectionKey < coverage[j].SectionKey })
+	for index := 1; index < len(coverage); index++ {
+		if coverage[index-1].SectionKey == coverage[index].SectionKey {
+			return PublishArtifact{}, ErrPublishArtifactInvalid
+		}
+	}
+	publication.SourceCoverage = coverage
+	return publication, nil
+}
+
+// ComputePublishArtifactHash computes the canonical typed change hash.
+func ComputePublishArtifactHash(publication PublishArtifact, risk, rollbackPlan string) (string, error) {
+	canonical, err := ValidatePublishArtifact(publication)
+	if err != nil {
+		return "", err
+	}
+	payload := struct {
+		ProposalType ProposalType    `json:"proposal_type"`
+		Publication  PublishArtifact `json:"publication"`
+		Risk         string          `json:"risk"`
+		RollbackPlan string          `json:"rollback_plan"`
+	}{ProposalType: ProposalTypePublishArtifact, Publication: canonical, Risk: strings.TrimSpace(risk), RollbackPlan: strings.TrimSpace(rollbackPlan)}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// ComputePublishArtifactRequestHash binds workspace, frozen publication payload and risk to idempotency.
+func ComputePublishArtifactRequestHash(workspaceID foundation.ID, publication PublishArtifact, riskLevel ProposalRiskLevel, risk, rollbackPlan string) (string, error) {
+	canonical, err := ValidatePublishArtifact(publication)
+	if err != nil || canonical.WorkspaceID != workspaceID {
+		return "", ErrPublishArtifactInvalid
+	}
+	normalizedRiskLevel, err := ParseProposalRiskLevel(riskLevel)
+	if err != nil {
+		return "", err
+	}
+	payload := struct {
+		RequestSchema string            `json:"request_schema"`
+		WorkspaceID   foundation.ID     `json:"workspace_id"`
+		ProposalType  ProposalType      `json:"proposal_type"`
+		Publication   PublishArtifact   `json:"publication"`
+		RiskLevel     ProposalRiskLevel `json:"risk_level"`
+		Risk          string            `json:"risk"`
+		RollbackPlan  string            `json:"rollback_plan"`
+	}{RequestSchema: "publish-artifact-proposal-request/v1", WorkspaceID: workspaceID, ProposalType: ProposalTypePublishArtifact, Publication: canonical, RiskLevel: normalizedRiskLevel, Risk: strings.TrimSpace(risk), RollbackPlan: strings.TrimSpace(rollbackPlan)}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // ComputeKnowledgeChangeHash 计算 `knowledge_change` 的 canonical typed change hash。
 func ComputeKnowledgeChangeHash(change KnowledgeChange, risk, rollbackPlan string) (string, error) {
 	canonicalChange, err := ValidateKnowledgeChange(change)
@@ -286,7 +450,7 @@ func ComputeKnowledgeChangeRequestHashWithRiskLevel(workspaceID foundation.ID, c
 func ValidateProposalRevisionForType(proposalType ProposalType, revision Revision) error {
 	switch NormalizeProposalType(proposalType) {
 	case ProposalTypeFilePatch:
-		if revision.KnowledgeChange != nil {
+		if revision.KnowledgeChange != nil || revision.PublishArtifact != nil {
 			return ErrProposalTypeInvalid
 		}
 		targetPath, err := ValidateTargetPath(revision.TargetPath)
@@ -295,7 +459,7 @@ func ValidateProposalRevisionForType(proposalType ProposalType, revision Revisio
 		}
 		return nil
 	case ProposalTypeKnowledgeChange:
-		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange == nil {
+		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange == nil || revision.PublishArtifact != nil {
 			return ErrProposalTypeInvalid
 		}
 		canonicalChange, err := ValidateKnowledgeChange(*revision.KnowledgeChange)
@@ -303,6 +467,19 @@ func ValidateProposalRevisionForType(proposalType ProposalType, revision Revisio
 			return ErrProposalTypeInvalid
 		}
 		expectedHash, err := ComputeKnowledgeChangeHash(canonicalChange, revision.Risk, revision.RollbackPlan)
+		if err != nil || revision.ChangeHash != expectedHash {
+			return ErrProposalTypeInvalid
+		}
+		return nil
+	case ProposalTypePublishArtifact:
+		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange != nil || revision.PublishArtifact == nil {
+			return ErrProposalTypeInvalid
+		}
+		canonical, err := ValidatePublishArtifact(*revision.PublishArtifact)
+		if err != nil {
+			return ErrProposalTypeInvalid
+		}
+		expectedHash, err := ComputePublishArtifactHash(canonical, revision.Risk, revision.RollbackPlan)
 		if err != nil || revision.ChangeHash != expectedHash {
 			return ErrProposalTypeInvalid
 		}

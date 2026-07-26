@@ -13,6 +13,8 @@ import (
 type ModelRunTxFinalizer interface {
 	// GetModelRunTx 在调用方事务内读取并可选锁定 Model Run。
 	GetModelRunTx(context.Context, any, foundation.ID, foundation.ID, bool) (domain.ModelRun, error)
+	// GetModelRunRecordTx 在调用方事务内读取并可选锁定 Model Run 及其稳定排序的调用历史。
+	GetModelRunRecordTx(context.Context, any, foundation.ID, foundation.ID, bool) (ModelRunRecord, error)
 	// GetModelRunByAttemptTx 按唯一 Node Attempt 查找 Model Run；不存在时返回 found=false。
 	GetModelRunByAttemptTx(context.Context, any, foundation.ID, foundation.ID, bool) (domain.ModelRun, bool, error)
 	// FinalizeModelRunTx 以 CAS 终结 Model Run，并返回是否为精确重放。

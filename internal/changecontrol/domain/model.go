@@ -94,6 +94,7 @@ type Revision struct {
 	RollbackPlan    string
 	ChangeHash      string
 	KnowledgeChange *KnowledgeChange
+	PublishArtifact *PublishArtifact
 	CreatedAt       time.Time
 }
 
@@ -136,6 +137,11 @@ func ValidateProposalRiskLevelForType(proposalType ProposalType, level ProposalR
 	case ProposalTypeKnowledgeChange:
 		if parsed != ProposalRiskLevelHigh {
 			return "", fmt.Errorf("%w: knowledge_change proposals require HIGH", ErrProposalRiskLevelInvalid)
+		}
+		return parsed, nil
+	case ProposalTypePublishArtifact:
+		if parsed != ProposalRiskLevelHigh {
+			return "", fmt.Errorf("%w: publish_artifact proposals require HIGH", ErrProposalRiskLevelInvalid)
 		}
 		return parsed, nil
 	default:

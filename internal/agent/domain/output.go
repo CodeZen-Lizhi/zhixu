@@ -32,6 +32,8 @@ const (
 	ResultTypeRAGAnswer          = "rag_answer"
 	ResultTypeRefusal            = "refusal"
 	ResultTypeFaithfulnessReview = "faithfulness_review"
+	// ResultTypeArtifactSection 是受控 Artifact 章节生成的稳定终态类型。
+	ResultTypeArtifactSection = "artifact_section"
 	// ResultTypeToolRequest 是独立 Tool Request 的稳定 Agent 结果类型。
 	ResultTypeToolRequest = "tool_request"
 	// ResultTypeClarification 是会话澄清终态使用的稳定 Agent 结果类型。

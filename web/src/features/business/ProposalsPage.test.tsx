@@ -81,6 +81,38 @@ const fileProposal = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const publishArtifactProposal = (overrides: Record<string, unknown> = {}) => ({
+  id: proposalId,
+  workspaceId,
+  type: "publish_artifact" as const,
+  status: "ready_for_review" as const,
+  riskLevel: "HIGH" as const,
+  revision: {
+    id: revisionId,
+    revisionNo: 1,
+    publication: {
+      workspaceId,
+      artifactId: "10000000-0000-4000-8000-000000000006",
+      revisionId: "10000000-0000-4000-8000-000000000007",
+      revisionNo: 3,
+      artifactVersion: 5,
+      contentHash: "c".repeat(64),
+      sourceCoverage: [
+        { sectionKey: "intro", status: "COVERED" as const, gaps: [] },
+        { sectionKey: "limits", status: "GAP" as const, gaps: [{ code: "NO_SOURCE", description: "没有可验证来源" }] },
+      ],
+      schemaVersion: "artifact-publication/v1" as const,
+    },
+    risk: "发布将影响正式知识边界",
+    rollbackPlan: "保留隔离 Artifact",
+    changeHash,
+    createdAt: "2026-07-26T00:00:00Z",
+  },
+  createdAt: "2026-07-26T00:00:00Z",
+  updatedAt: "2026-07-26T00:01:00Z",
+  ...overrides,
+});
+
 const currentContent = (baseHashMatch = true, baseHash = "a".repeat(64)) => ({
   proposalId,
   workspaceId,
@@ -138,6 +170,31 @@ describe("ProposalsPage", () => {
 
     expect(await screen.findByRole("combobox", { name: "风险等级" })).toHaveValue("HIGH");
     await waitFor(() => expect(api.listProposals).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ risk: "HIGH" }), expect.any(AbortSignal)));
+  });
+
+  it("从 URL 恢复 publish_artifact 筛选并显示独立类型", async () => {
+    api.listProposals.mockResolvedValue({
+      items: [{
+        id: proposalId,
+        workspaceId,
+        type: "publish_artifact",
+        status: "ready_for_review",
+        target: "Artifact 发布",
+        riskLevel: "HIGH",
+        risk: "发布将影响正式知识边界",
+        revisionId,
+        changeHash,
+        createdAt: "2026-07-26T00:00:00Z",
+        updatedAt: "2026-07-26T00:01:00Z",
+      }],
+    });
+
+    renderList("/proposals?proposal_type=publish_artifact");
+
+    expect(await screen.findByRole("combobox", { name: "类型" })).toHaveValue("publish_artifact");
+    await waitFor(() => expect(api.listProposals).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ type: "publish_artifact" }), expect.any(AbortSignal)));
+    expect(screen.getAllByText("Artifact 发布").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("风险说明：发布将影响正式知识边界")).toBeInTheDocument();
   });
 
   it("展示列表中的持久 Approval 与 Workflow 绑定", async () => {
@@ -605,6 +662,36 @@ describe("ProposalDetailPage", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["semantic-links", workspaceId] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["collections", workspaceId] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["knowledge-health", workspaceId] });
+  });
+
+  it("publish_artifact 展示冻结来源覆盖，并把 Approval 与正式知识写入分开", async () => {
+    api.getProposal.mockReset().mockResolvedValue(publishArtifactProposal());
+    api.getProposalCurrentContent.mockClear();
+    renderDetail();
+
+    expect(await screen.findByText("Artifact Publication Snapshot")).toBeInTheDocument();
+    expect(screen.getByText("10000000-0000-4000-8000-000000000006")).toBeInTheDocument();
+    expect(screen.getByText(/#3 ·/)).toHaveTextContent("10000000-0000-4000-8000-000000000007");
+    expect(screen.getByText("v5")).toBeInTheDocument();
+    expect(screen.getAllByText("c".repeat(64))).toHaveLength(2);
+    expect(screen.getByText("COVERED · 无知识缺口")).toBeInTheDocument();
+    expect(screen.getByText("GAP · NO_SOURCE：没有可验证来源")).toBeInTheDocument();
+    expect(screen.getByText("尚未成为正式知识")).toBeInTheDocument();
+    expect(screen.getByText(/即使 Approval 为 approved，本页也不表示已创建 Document、Git 写入或索引/)).toBeInTheDocument();
+    expect(api.getProposalCurrentContent).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "执行 Apply Preflight" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "批准" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("批准只形成 Approval，不表示已经创建 Document、Git 写入或索引");
+    fireEvent.click(screen.getByRole("button", { name: "确认提交" }));
+
+    await waitFor(() => expect(api.decideProposal).toHaveBeenCalledWith(proposalId, {
+      revisionId,
+      changeHash,
+      decision: "approved",
+      proposalType: "publish_artifact",
+    }));
+    expect(api.preflightProposal).not.toHaveBeenCalled();
   });
 
   it("基线漂移时阻止批准并给出恢复说明", async () => {

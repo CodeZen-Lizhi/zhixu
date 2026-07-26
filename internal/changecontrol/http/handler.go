@@ -144,7 +144,7 @@ func (h *Handler) listProposals(w http.ResponseWriter, r *http.Request) {
 	status := domain.ProposalStatus(strings.TrimSpace(r.URL.Query().Get("status")))
 	proposalType := domain.ProposalType(strings.TrimSpace(r.URL.Query().Get("proposal_type")))
 	risk := r.URL.Query().Get("risk")
-	if status != "" && !validProposalListStatus(status) || proposalType != "" && proposalType != domain.ProposalTypeFilePatch && proposalType != domain.ProposalTypeKnowledgeChange || len(risk) > 64 || strings.ContainsAny(risk, "\r\n\t") {
+	if status != "" && !validProposalListStatus(status) || proposalType != "" && proposalType != domain.ProposalTypeFilePatch && proposalType != domain.ProposalTypeKnowledgeChange && proposalType != domain.ProposalTypePublishArtifact || len(risk) > 64 || strings.ContainsAny(risk, "\r\n\t") {
 		writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_LIST_FILTER_INVALID", false, errors.New("proposal list filter is invalid")))
 		return
 	}
@@ -338,6 +338,38 @@ type knowledgeRevisionResponse struct {
 	CreatedAt     string                         `json:"created_at"`
 }
 
+type publishArtifactGapResponse struct {
+	Code        string `json:"code"`
+	Description string `json:"description"`
+}
+
+type publishArtifactCoverageResponse struct {
+	SectionKey string                       `json:"section_key"`
+	Status     string                       `json:"status"`
+	Gaps       []publishArtifactGapResponse `json:"gaps"`
+}
+
+type publishArtifactBindingResponse struct {
+	WorkspaceID     string                            `json:"workspace_id"`
+	ArtifactID      string                            `json:"artifact_id"`
+	RevisionID      string                            `json:"revision_id"`
+	RevisionNo      int64                             `json:"revision_no"`
+	ArtifactVersion int64                             `json:"artifact_version"`
+	ContentHash     string                            `json:"content_hash"`
+	SourceCoverage  []publishArtifactCoverageResponse `json:"source_coverage"`
+	SchemaVersion   string                            `json:"schema_version"`
+}
+
+type publishArtifactRevisionResponse struct {
+	ID           string                         `json:"id"`
+	RevisionNo   int                            `json:"revision_no"`
+	Publication  publishArtifactBindingResponse `json:"publication"`
+	Risk         string                         `json:"risk"`
+	RollbackPlan string                         `json:"rollback_plan"`
+	ChangeHash   string                         `json:"change_hash"`
+	CreatedAt    string                         `json:"created_at"`
+}
+
 type approvalSnapshotResponse struct {
 	ID                string  `json:"id"`
 	ProposalID        string  `json:"proposal_id"`
@@ -514,10 +546,18 @@ func toProposalResponse(proposal domain.Proposal) (proposalResponse, error) {
 		Status: string(proposal.Status), RiskLevel: string(riskLevel), CreatedAt: proposal.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt: proposal.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
-	if proposalType == domain.ProposalTypeKnowledgeChange {
+	switch proposalType {
+	case domain.ProposalTypeKnowledgeChange:
 		response.TargetPath = ""
 		response.Revision = toKnowledgeRevisionResponse(proposal.Revision)
-	} else {
+	case domain.ProposalTypePublishArtifact:
+		response.TargetPath = ""
+		revision, mapErr := toPublishArtifactRevisionResponse(proposal.Revision)
+		if mapErr != nil {
+			return proposalResponse{}, mapErr
+		}
+		response.Revision = revision
+	default:
 		response.Revision = revisionResponse{
 			ID: string(proposal.Revision.ID), RevisionNo: proposal.Revision.RevisionNo, BaseHash: proposal.Revision.BaseHash,
 			Content: proposal.Revision.Content, EvidenceSummary: proposal.Revision.EvidenceSummary, Risk: proposal.Revision.Risk,
@@ -530,6 +570,34 @@ func toProposalResponse(proposal domain.Proposal) (proposalResponse, error) {
 		response.Approval = &approval
 	}
 	return response, nil
+}
+
+func toPublishArtifactRevisionResponse(revision domain.Revision) (publishArtifactRevisionResponse, error) {
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypePublishArtifact, revision); err != nil {
+		return publishArtifactRevisionResponse{}, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_REVISION_INVALID", false, err)
+	}
+	publication, err := domain.ValidatePublishArtifact(*revision.PublishArtifact)
+	if err != nil {
+		return publishArtifactRevisionResponse{}, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_REVISION_INVALID", false, err)
+	}
+	coverage := make([]publishArtifactCoverageResponse, len(publication.SourceCoverage))
+	for index, item := range publication.SourceCoverage {
+		gaps := make([]publishArtifactGapResponse, len(item.Gaps))
+		for gapIndex, gap := range item.Gaps {
+			gaps[gapIndex] = publishArtifactGapResponse{Code: gap.Code, Description: gap.Description}
+		}
+		coverage[index] = publishArtifactCoverageResponse{SectionKey: item.SectionKey, Status: string(item.Status), Gaps: gaps}
+	}
+	return publishArtifactRevisionResponse{
+		ID: string(revision.ID), RevisionNo: revision.RevisionNo,
+		Publication: publishArtifactBindingResponse{
+			WorkspaceID: string(publication.WorkspaceID), ArtifactID: string(publication.ArtifactID), RevisionID: string(publication.RevisionID),
+			RevisionNo: publication.RevisionNo, ArtifactVersion: publication.ArtifactVersion, ContentHash: publication.ContentHash,
+			SourceCoverage: coverage, SchemaVersion: publication.SchemaVersion,
+		},
+		Risk: revision.Risk, RollbackPlan: revision.RollbackPlan, ChangeHash: revision.ChangeHash,
+		CreatedAt: revision.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}, nil
 }
 
 func toKnowledgeRevisionResponse(revision domain.Revision) knowledgeRevisionResponse {
@@ -573,13 +641,18 @@ func toKnowledgeRevisionResponse(revision domain.Revision) knowledgeRevisionResp
 }
 
 func toProposalListResponse(item domain.ProposalListItem) (proposalListResponse, error) {
-	riskLevel, err := responseRiskLevel(item.Type, item.RiskLevel)
+	proposalType := domain.NormalizeProposalType(item.Type)
+	riskLevel, err := responseRiskLevel(proposalType, item.RiskLevel)
 	if err != nil {
 		return proposalListResponse{}, err
 	}
+	target := item.Target
+	if proposalType == domain.ProposalTypePublishArtifact {
+		target = "Artifact 发布"
+	}
 	response := proposalListResponse{
-		ID: string(item.ProposalID), WorkspaceID: string(item.WorkspaceID), ProposalType: string(item.Type),
-		Status: string(item.Status), Target: item.Target, RiskLevel: string(riskLevel), Risk: item.Risk, RevisionID: string(item.RevisionID),
+		ID: string(item.ProposalID), WorkspaceID: string(item.WorkspaceID), ProposalType: string(proposalType),
+		Status: string(item.Status), Target: target, RiskLevel: string(riskLevel), Risk: item.Risk, RevisionID: string(item.RevisionID),
 		ChangeHash: item.ChangeHash, CreatedAt: item.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt: item.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}

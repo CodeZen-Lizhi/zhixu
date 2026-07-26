@@ -58,6 +58,18 @@ const requiredOperations = [
   ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis", "post", "201"],
   ["/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}", "get", "200"],
+  ["/api/v1/artifacts", "get", "200"],
+  ["/api/v1/artifacts", "post", "201"],
+  ["/api/v1/artifacts/{artifact_id}", "get", "200"],
+  ["/api/v1/artifacts/{artifact_id}/outline", "post", "200"],
+  ["/api/v1/artifacts/{artifact_id}/outline/approve", "post", "200"],
+  ["/api/v1/artifacts/{artifact_id}/sections", "post", "200"],
+  ["/api/v1/artifacts/{artifact_id}/sections/generate", "post", "202"],
+  ["/api/v1/artifacts/{artifact_id}/section-generations", "get", "200"],
+  ["/api/v1/artifacts/{artifact_id}/draft/approve", "post", "200"],
+  ["/api/v1/artifacts/{artifact_id}/exports/markdown", "post", "200"],
+  ["/api/v1/artifacts/{artifact_id}/exports/{export_id}", "get", "200"],
+  ["/api/v1/artifacts/{artifact_id}/publish-proposals", "post", "200"],
 ];
 for (const [path, method, successResponse] of requiredOperations) {
   const operation = document.paths?.[path]?.[method];
@@ -346,6 +358,7 @@ for (const schema of [
   "ProposalRiskLevel",
   "ProposalRevision",
   "Approval",
+  "NonFileApproval",
   "ApprovalDecisionResponse",
   "Proposal",
   "ProposalPage",
@@ -359,6 +372,10 @@ for (const schema of [
   "KnowledgeChangeEvidenceRef",
   "KnowledgeChangeRevision",
   "KnowledgeChangeProposal",
+  "PublishArtifactCoverage",
+  "PublishArtifactBinding",
+  "PublishArtifactRevision",
+  "PublishArtifactProposal",
   "ProposalDecisionRequest",
   "ApplyPreflightRequest",
   "ApplyPreflightResult",
@@ -532,6 +549,7 @@ for (const [path, schema] of [
 const schemas = document.components.schemas;
 const workflowStatuses = ["pending", "running", "waiting_for_human", "retry_wait", "paused", "succeeded", "failed", "cancelled"];
 const proposalStatuses = ["draft", "validating", "ready_for_review", "approved", "applying", "applied", "verifying", "completed", "rejected", "needs_revision", "deferred", "apply_failed", "verify_failed", "rolled_back", "cancelled"];
+const proposalTypes = ["file_patch", "knowledge_change", "publish_artifact"];
 const proposalRiskLevels = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 const sourceSecurityStatuses = ["pending", "passed", "quarantined"];
 const sourceIngestionStatuses = ["validating", "parsing", "parsed", "chunking", "chunked", "parse_failed", "cancelled"];
@@ -560,6 +578,10 @@ if (queryParameter("/api/v1/workspaces/{workspace_id}/proposals", "status")?.enu
     schemas.ProposalSummary.properties.status.enum?.join(",") !== proposalStatuses.join(",")) {
   throw new Error("Proposal list status enum drifted from the domain contract");
 }
+if (queryParameter("/api/v1/workspaces/{workspace_id}/proposals", "proposal_type")?.enum?.join(",") !== proposalTypes.join(",") ||
+    schemas.ProposalSummary.properties.proposal_type.enum?.join(",") !== proposalTypes.join(",")) {
+  throw new Error("Proposal list type enum drifted from the typed Proposal contract");
+}
 if (schemas.ProposalRiskLevel.type !== "string" || schemas.ProposalRiskLevel.enum?.join(",") !== proposalRiskLevels.join(",") ||
     queryParameter("/api/v1/workspaces/{workspace_id}/proposals", "risk")?.$ref !== "#/components/schemas/ProposalRiskLevel") {
   throw new Error("Proposal risk query must use the frozen uppercase ProposalRiskLevel contract");
@@ -580,10 +602,14 @@ if (!schemas.KnowledgeChangeProposal.required.includes("risk_level") ||
     schemas.KnowledgeChangeRevision.properties.base_versions?.uniqueItems !== true) {
   throw new Error("KnowledgeChangeProposal must be HIGH and expose unique endpoint base versions");
 }
+if (!schemas.PublishArtifactProposal.required.includes("risk_level") ||
+    schemas.PublishArtifactProposal.properties.risk_level?.const !== "HIGH") {
+  throw new Error("PublishArtifactProposal must retain its HIGH risk boundary");
+}
 if (!schemas.ProposalSummary.required.includes("risk") || schemas.ProposalSummary.properties.risk?.type !== "string") {
   throw new Error("ProposalSummary must retain the human-readable risk description");
 }
-for (const schemaName of ["ProposalRevision", "KnowledgeChangeRevision"]) {
+for (const schemaName of ["ProposalRevision", "KnowledgeChangeRevision", "PublishArtifactRevision"]) {
   if (!schemas[schemaName].required.includes("risk") || schemas[schemaName].properties.risk?.type !== "string" ||
       schemas[schemaName].properties.risk_level !== undefined) {
     throw new Error(`${schemaName} must retain risk as description without owning risk_level`);
@@ -629,6 +655,16 @@ for (const schemaName of ["FilePatchProposal", "KnowledgeChangeProposal"]) {
       schemas[schemaName].properties.approval.oneOf?.[1]?.type !== "null") {
     throw new Error(`${schemaName} must require a nullable persistent Approval snapshot`);
   }
+}
+const nonFileApprovalForbiddenFields = ["approved_git_head", "workflow_run_id", "workflow_status_url"];
+if (schemas.NonFileApproval.allOf?.[0]?.$ref !== "#/components/schemas/Approval" ||
+    schemas.NonFileApproval.allOf?.[1]?.not?.anyOf?.map((item) => item.required?.join(",")).join(",") !== nonFileApprovalForbiddenFields.join(",") ||
+    !schemas.PublishArtifactProposal.required.includes("approval") ||
+    schemas.PublishArtifactProposal.properties.approval.oneOf?.[0]?.$ref !== "#/components/schemas/NonFileApproval" ||
+    schemas.PublishArtifactProposal.properties.approval.oneOf?.[1]?.type !== "null" ||
+    schemas.ProposalSummary.allOf?.[0]?.if?.properties?.proposal_type?.const !== "publish_artifact" ||
+    schemas.ProposalSummary.allOf?.[0]?.then?.properties?.approval?.$ref !== "#/components/schemas/NonFileApproval") {
+  throw new Error("publish_artifact Approval snapshots must forbid Git and Workflow fields");
 }
 const currentContent = schemas.ProposalCurrentContent;
 for (const field of ["proposal_id", "workspace_id", "target_path", "content", "current_hash", "base_hash", "base_hash_match"]) {
@@ -720,8 +756,197 @@ for (const schemaName of [
   "SemanticLinkCandidatePage", "SemanticLinkCandidateDecisionReceipt",
   "FilePatchProposal", "KnowledgeChangeTargetRef", "KnowledgeChangeBaseVersion", "KnowledgeChangeEndpoint",
   "KnowledgeChangeSet", "KnowledgeChangeEvidenceRef", "KnowledgeChangeRevision", "KnowledgeChangeProposal",
+  "PublishArtifactCoverage", "PublishArtifactBinding", "PublishArtifactRevision", "PublishArtifactProposal",
 ]) {
   if (schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must reject unknown properties`);
+}
+
+const artifactOperations = [
+  ["/api/v1/artifacts", "get", "ArtifactPage", undefined, ["400", "405", "500", "503"], false],
+  ["/api/v1/artifacts", "post", "ArtifactCommandResult", "ArtifactPlanRequest", ["200", "201", "400", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/artifacts/{artifact_id}", "get", "Artifact", undefined, ["400", "404", "405", "500", "503"], false],
+  ["/api/v1/artifacts/{artifact_id}/outline", "post", "ArtifactCommandResult", "ArtifactOutlineRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/artifacts/{artifact_id}/outline/approve", "post", "ArtifactCommandResult", "ArtifactRevisionRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/artifacts/{artifact_id}/revisions", "post", "ArtifactCommandResult", "ArtifactRevisionRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/artifacts/{artifact_id}/sections", "post", "ArtifactCommandResult", "ArtifactRecordSectionRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/artifacts/{artifact_id}/sections/generate", "post", "ArtifactSectionGenerationAcceptance", "ArtifactSectionGenerationRequest", ["202", "400", "404", "405", "409", "415", "500", "503"], true, "202"],
+  ["/api/v1/artifacts/{artifact_id}/section-generations", "get", "ArtifactSectionGenerationReadResponse", undefined, ["400", "404", "405", "500", "503"], false],
+  ["/api/v1/artifacts/{artifact_id}/draft/approve", "post", "ArtifactCommandResult", "ArtifactRevisionRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/artifacts/{artifact_id}/exports/markdown", "post", "ArtifactCommandResult", "ArtifactRevisionRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/artifacts/{artifact_id}/exports/{export_id}", "get", "ArtifactExport", undefined, ["400", "404", "405", "500", "503"], false],
+  ["/api/v1/artifacts/{artifact_id}/publish-proposals", "post", "ArtifactCommandResult", "ArtifactRevisionRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+];
+const artifactPaths = Object.keys(document.paths).filter((path) => path.startsWith("/api/v1/artifacts"));
+if (artifactOperations.length !== 13 || artifactPaths.length !== 12) {
+  throw new Error("Artifact HTTP contract must expose twelve URI templates and thirteen operations");
+}
+for (const [path, method, successSchema, requestSchema, statuses, mutation, successStatus = "200"] of artifactOperations) {
+  const pathItem = document.paths[path];
+  const operation = pathItem?.[method];
+  if (!operation) throw new Error(`missing Artifact operation ${method.toUpperCase()} ${path}`);
+  if (operation.security?.length === 0) throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication`);
+  if (operation.responses?.[successStatus]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}`) {
+    throw new Error(`invalid Artifact success schema for ${method.toUpperCase()} ${path}`);
+  }
+  for (const status of ["401", "403", ...statuses]) {
+    if (Number(status) < 400) continue;
+    const response = resolveRef(operation.responses?.[status]);
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Artifact ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+  const parameters = [...(pathItem.parameters ?? []), ...(operation.parameters ?? [])];
+  if (mutation) {
+    if (!parameters.some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey") ||
+        operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== 131072 ||
+        operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
+      throw new Error(`${method.toUpperCase()} ${path} must retain bounded idempotent Artifact command input`);
+    }
+  } else if (!parameters.some((parameter) => parameter.$ref === "#/components/parameters/WorkspaceIDQuery")) {
+    throw new Error(`${method.toUpperCase()} ${path} must remain Workspace-bound`);
+  }
+}
+const artifactList = document.paths["/api/v1/artifacts"].get;
+const artifactLimit = artifactList.parameters.find((parameter) => parameter.name === "limit")?.schema;
+const artifactCursor = artifactList.parameters.find((parameter) => parameter.name === "cursor")?.schema;
+if (artifactLimit?.minimum !== 1 || artifactLimit.maximum !== 100 || artifactLimit.default !== 50 ||
+    artifactCursor?.minLength !== 1 || artifactCursor.maxLength !== 1366 ||
+    schemas.ArtifactPage.properties.items.maxItems !== 100 || schemas.ArtifactPage.properties.next_cursor.maxLength !== 1366) {
+  throw new Error("Artifact cursor and page bounds drifted from the HTTP handler");
+}
+for (const schemaName of [
+  "ArtifactOutlineSection", "ArtifactGap", "ArtifactCoverage", "ArtifactGenerationMetadata", "ArtifactCitationInput", "ArtifactCitation",
+  "ArtifactSectionInput", "ArtifactSection", "ArtifactPlanRequest", "ArtifactOutlineRequest", "ArtifactRevisionRequest", "ArtifactRecordSectionRequest",
+  "ArtifactSectionGenerationRequest", "ArtifactSectionGenerationAcceptance", "ArtifactSectionGenerationReadItem", "ArtifactSectionGenerationReadResponse",
+  "ArtifactRevision", "Artifact", "ArtifactPage", "ArtifactExport", "ArtifactPublication", "ArtifactCommandResult",
+]) {
+  if (!schemas[schemaName] || schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must remain a strict Artifact schema`);
+}
+for (const requestName of ["ArtifactOutlineRequest", "ArtifactRevisionRequest", "ArtifactRecordSectionRequest", "ArtifactSectionGenerationRequest"]) {
+  if (!schemas[requestName].required.includes("workspace_id") || !schemas[requestName].required.includes("expected_version") ||
+      schemas[requestName].properties.expected_version.minimum !== 1) {
+    throw new Error(`${requestName} must bind Workspace and compare-and-swap version`);
+  }
+}
+if (schemas.ArtifactPlanRequest.required.join(",") !== "workspace_id,type,title,scope_definition" ||
+    schemas.ArtifactOutlineRequest.properties.outline.minItems !== 1 ||
+    schemas.ArtifactRecordSectionRequest.required.join(",") !== "workspace_id,expected_version,section" ||
+    Object.keys(schemas.ArtifactRecordSectionRequest.properties).sort().join(",") !== "expected_version,section,workspace_id" ||
+    schemas.ArtifactSectionGenerationRequest.required.join(",") !== "workspace_id,expected_version,section_key" ||
+    Object.keys(schemas.ArtifactSectionGenerationRequest.properties).sort().join(",") !== "expected_version,section_key,workspace_id" ||
+    schemas.ArtifactSectionGenerationRequest.properties.section_key.pattern !== "^[a-z0-9-]+$" ||
+    schemas.ArtifactSectionGenerationRequest.properties.section_key["x-max-utf8-bytes"] !== 128) {
+  throw new Error("Artifact plan, outline or section ingress contract drifted");
+}
+const artifactGenerationAcceptance = schemas.ArtifactSectionGenerationAcceptance;
+const artifactGenerationOperation = document.paths["/api/v1/artifacts/{artifact_id}/sections/generate"].post;
+if (artifactGenerationAcceptance.required.join(",") !== "generation_id,workspace_id,artifact_id,source_revision_id,source_revision_no,source_artifact_version,section_key,workflow_run_id,node_run_id,status,version,created_at,updated_at,replayed,status_url" ||
+    artifactGenerationAcceptance.properties.status.enum.join(",") !== "PENDING,COMPLETED,FAILED,CANCELLED,RECOVERY_REQUIRED" ||
+    artifactGenerationAcceptance.properties.status_url.pattern !== "^/api/v1/workflows/[0-9a-f-]{36}$" ||
+    artifactGenerationAcceptance.properties.status_url.format !== "uri-reference" ||
+    !["generation_id", "workspace_id", "artifact_id", "source_revision_id", "workflow_run_id", "node_run_id"].every((name) => artifactGenerationAcceptance.properties[name].format === "uuid") ||
+    artifactGenerationAcceptance.properties.source_revision_no.minimum !== 1 ||
+    artifactGenerationAcceptance.properties.source_artifact_version.minimum !== 1 ||
+    artifactGenerationAcceptance.properties.version.minimum !== 1) {
+  throw new Error("Artifact section generation acceptance must retain its frozen Workflow binding");
+}
+if (Object.keys(artifactGenerationOperation.responses).filter((status) => status.startsWith("2")).join(",") !== "202") {
+  throw new Error("Artifact section generation first acceptance and exact replay must both use only 202");
+}
+
+const artifactGenerationReadPath = document.paths["/api/v1/artifacts/{artifact_id}/section-generations"];
+const artifactGenerationReadOperation = artifactGenerationReadPath.get;
+const artifactGenerationReadItem = schemas.ArtifactSectionGenerationReadItem;
+const artifactGenerationReadResponse = schemas.ArtifactSectionGenerationReadResponse;
+const artifactGenerationReadStatuses = ["PENDING", "FAILED", "CANCELLED", "RECOVERY_REQUIRED"];
+const artifactGenerationReadRequired = artifactGenerationAcceptance.required.filter((name) => name !== "replayed");
+const artifactGenerationReadProperties = Object.keys(artifactGenerationAcceptance.properties).filter((name) => name !== "replayed");
+const artifactGenerationPathParameter = artifactGenerationReadPath.parameters?.[0];
+const artifactGenerationQueryParameter = document.components.parameters.WorkspaceIDQuery;
+if (artifactGenerationReadOperation["x-required-capability"] !== "READ_LOCAL" ||
+    artifactGenerationReadOperation.security !== undefined || artifactGenerationReadOperation.requestBody !== undefined ||
+    artifactGenerationReadPath.parameters?.length !== 1 || artifactGenerationPathParameter?.name !== "artifact_id" ||
+    artifactGenerationPathParameter.in !== "path" || artifactGenerationPathParameter.required !== true ||
+    artifactGenerationPathParameter.schema?.type !== "string" || artifactGenerationPathParameter.schema?.format !== "uuid" ||
+    artifactGenerationReadOperation.parameters?.length !== 1 || artifactGenerationReadOperation.parameters[0]?.$ref !== "#/components/parameters/WorkspaceIDQuery" ||
+    artifactGenerationQueryParameter?.name !== "workspace_id" || artifactGenerationQueryParameter?.in !== "query" ||
+    artifactGenerationQueryParameter?.required !== true || artifactGenerationQueryParameter?.schema?.type !== "string" ||
+    artifactGenerationQueryParameter?.schema?.format !== "uuid") {
+  throw new Error("Artifact section generation read must inherit business authentication and require exactly READ_LOCAL plus UUID path/query bindings");
+}
+const artifactGenerationReadResponseStatuses = Object.keys(artifactGenerationReadOperation.responses).sort();
+if (artifactGenerationReadResponseStatuses.join(",") !== ["200", "400", "401", "403", "404", "405", "500", "503"].join(",") ||
+    artifactGenerationReadOperation.responses["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ArtifactSectionGenerationReadResponse") {
+  throw new Error("Artifact section generation read response matrix drifted");
+}
+for (const [status, responseRef] of Object.entries({
+  "400": "BadRequest", "401": "Unauthorized", "403": "Forbidden", "404": "NotFound",
+  "405": "MethodNotAllowed", "500": "InternalError", "503": "Unavailable",
+})) {
+  if (artifactGenerationReadOperation.responses[status]?.$ref !== `#/components/responses/${responseRef}`) {
+    throw new Error(`Artifact section generation read ${status} response must use ${responseRef}`);
+  }
+}
+if (artifactGenerationReadItem.required.join(",") !== artifactGenerationReadRequired.join(",") ||
+    Object.keys(artifactGenerationReadItem.properties).join(",") !== artifactGenerationReadProperties.join(",") ||
+    artifactGenerationReadItem.properties.replayed !== undefined ||
+    artifactGenerationReadItem.properties.status.enum.join(",") !== artifactGenerationReadStatuses.join(",") ||
+    artifactGenerationReadItem.properties.status.enum.includes("COMPLETED")) {
+  throw new Error("Artifact section generation read item must reuse acceptance fields without replayed or COMPLETED");
+}
+for (const propertyName of artifactGenerationReadProperties) {
+  if (propertyName !== "status" && JSON.stringify(artifactGenerationReadItem.properties[propertyName]) !== JSON.stringify(artifactGenerationAcceptance.properties[propertyName])) {
+    throw new Error(`Artifact section generation read item ${propertyName} drifted from acceptance`);
+  }
+}
+if (artifactGenerationReadResponse.required.join(",") !== "workspace_id,artifact_id,items" ||
+    Object.keys(artifactGenerationReadResponse.properties).join(",") !== "workspace_id,artifact_id,items" ||
+    artifactGenerationReadResponse.properties.workspace_id.format !== "uuid" ||
+    artifactGenerationReadResponse.properties.artifact_id.format !== "uuid" ||
+    artifactGenerationReadResponse.properties.items.type !== "array" ||
+    artifactGenerationReadResponse.properties.items.maxItems !== undefined ||
+    artifactGenerationReadResponse.properties.items.items?.$ref !== "#/components/schemas/ArtifactSectionGenerationReadItem") {
+  throw new Error("Artifact section generation read response must remain an unpaginated Workspace-bound list");
+}
+const artifactGenerationUnavailable = resolveRef(artifactGenerationOperation.responses["503"]);
+const artifactGenerationUnavailableExample = artifactGenerationUnavailable?.content?.["application/json"]?.examples?.artifact_generation_capability_unavailable?.value;
+if (artifactGenerationUnavailableExample?.error_code !== "ARTIFACT_GENERATION_CAPABILITY_UNAVAILABLE" || artifactGenerationUnavailableExample.retryable !== false) {
+  throw new Error("Artifact section generation 503 must remain stable and non-retryable when Chat dependencies are disabled");
+}
+const artifactCitationInput = schemas.ArtifactCitationInput;
+if (Object.keys(artifactCitationInput.properties).sort().join(",") !== "chunk_id,index_version_id,source_span_id,source_version_id" ||
+    artifactCitationInput.required.join(",") !== "index_version_id,chunk_id,source_version_id,source_span_id" ||
+    schemas.ArtifactCitation.properties.verified.const !== true ||
+    !schemas.ArtifactCitation.required.includes("verified_content_hash") || !schemas.ArtifactCitation.required.includes("excerpt")) {
+  throw new Error("Artifact Citation ingress must remain server-verified and response-only");
+}
+const artifactCoverage = schemas.ArtifactCoverage;
+if (artifactCoverage.properties.status.enum.join(",") !== "COVERED,PARTIAL,GAP" ||
+    artifactCoverage.allOf?.[0]?.then?.properties?.gaps?.maxItems !== 0 ||
+    artifactCoverage.allOf?.[1]?.then?.properties?.gaps?.minItems !== 1 ||
+    schemas.ArtifactSectionInput.allOf?.[0]?.then?.properties?.content?.maxLength !== 0 ||
+    schemas.ArtifactSectionInput.allOf?.[0]?.then?.properties?.citations?.maxItems !== 0 ||
+    schemas.ArtifactSectionInput.allOf?.[1]?.then?.properties?.content?.minLength !== 1 ||
+    schemas.ArtifactSectionInput.allOf?.[1]?.then?.properties?.citations?.minItems !== 1 ||
+    schemas.ArtifactSection.allOf?.[0]?.then?.properties?.content?.maxLength !== 0 ||
+    schemas.ArtifactSection.allOf?.[0]?.then?.properties?.citations?.maxItems !== 0 ||
+    schemas.ArtifactSection.allOf?.[1]?.then?.properties?.content?.minLength !== 1 ||
+    schemas.ArtifactSection.allOf?.[1]?.then?.properties?.citations?.minItems !== 1) {
+  throw new Error("Artifact COVERED/PARTIAL/GAP evidence invariants drifted");
+}
+const artifactStatuses = schemas.Artifact.properties.status.enum;
+if (artifactStatuses.join(",") !== "PLANNING,OUTLINE_REVIEW,GENERATING,DRAFT,APPROVED,EXPORTED,PUBLISH_PROPOSED,PUBLISHED,ARCHIVED" ||
+    schemas.ArtifactRevision.properties.content_hash.pattern !== "^[0-9a-f]{64}$" ||
+    schemas.ArtifactExport.properties.revision_hash.pattern !== "^[0-9a-f]{64}$" ||
+    schemas.ArtifactExport.properties.output_hash.pattern !== "^[0-9a-f]{64}$") {
+  throw new Error("Artifact lifecycle or immutable hash contract drifted");
+}
+const artifactPublication = schemas.ArtifactPublication;
+if (artifactPublication.required.join(",") !== "workspace_id,artifact_id,revision_id,artifact_version,revision_no,content_hash,proposal_id,created_at" ||
+    artifactPublication.properties.content_hash.pattern !== "^[0-9a-f]{64}$" ||
+    !document.paths["/api/v1/artifacts/{artifact_id}/publish-proposals"].post.description.includes("PUBLISH_ARTIFACT") ||
+    !document.paths["/api/v1/artifacts/{artifact_id}/publish-proposals"].post.description.includes("never creates a Document")) {
+  throw new Error("Artifact publication must remain a frozen PUBLISH_ARTIFACT Proposal binding");
 }
 
 if (schemas.ImpactAnalysisRequest.maxProperties !== 0 || schemas.ImpactAnalysisRequest.additionalProperties !== false ||
@@ -751,18 +976,52 @@ if (schemas.SemanticLinkCandidate.properties.discovery_methods.maxItems !== 6 ||
   throw new Error("Semantic Link Candidate bounds or generation contract drifted");
 }
 if (schemas.Proposal.oneOf?.map((item) => item.$ref).join(",") !==
-      "#/components/schemas/FilePatchProposal,#/components/schemas/KnowledgeChangeProposal" ||
+      "#/components/schemas/FilePatchProposal,#/components/schemas/KnowledgeChangeProposal,#/components/schemas/PublishArtifactProposal" ||
     schemas.Proposal.discriminator?.propertyName !== "proposal_type" ||
     schemas.Proposal.discriminator?.mapping?.file_patch !== "#/components/schemas/FilePatchProposal" ||
     schemas.Proposal.discriminator?.mapping?.knowledge_change !== "#/components/schemas/KnowledgeChangeProposal" ||
+    schemas.Proposal.discriminator?.mapping?.publish_artifact !== "#/components/schemas/PublishArtifactProposal" ||
     !schemas.FilePatchProposal.required.includes("proposal_type") ||
     schemas.FilePatchProposal.properties.proposal_type?.const !== "file_patch" ||
     !schemas.KnowledgeChangeProposal.required.includes("proposal_type") ||
     schemas.KnowledgeChangeProposal.properties.proposal_type.const !== "knowledge_change" ||
+    !schemas.PublishArtifactProposal.required.includes("proposal_type") ||
+    schemas.PublishArtifactProposal.properties.proposal_type.const !== "publish_artifact" ||
     schemas.KnowledgeChangeRevision.properties.schema_version.const !== "knowledge-relation-change/v1" ||
     schemas.KnowledgeChangeRevision.properties.base_versions.minItems !== 2 ||
     schemas.KnowledgeChangeRevision.properties.base_versions.maxItems !== 2) {
   throw new Error("typed Proposal discriminated response contract drifted");
+}
+const publishArtifactCoverage = schemas.PublishArtifactCoverage;
+const publishArtifactBinding = schemas.PublishArtifactBinding;
+if (publishArtifactCoverage.required?.join(",") !== "section_key,status,gaps" ||
+    publishArtifactCoverage.properties.section_key?.minLength !== 1 ||
+    publishArtifactCoverage.properties.section_key?.["x-max-utf8-bytes"] !== 128 ||
+    publishArtifactCoverage.properties.section_key?.pattern !== undefined ||
+    publishArtifactCoverage.properties.status?.enum?.join(",") !== "COVERED,PARTIAL,GAP" ||
+    publishArtifactCoverage.properties.gaps?.uniqueItems !== true ||
+    publishArtifactCoverage.properties.gaps?.items?.$ref !== "#/components/schemas/ArtifactGap" ||
+    publishArtifactCoverage.allOf?.[0]?.then?.properties?.gaps?.maxItems !== 0 ||
+    publishArtifactCoverage.allOf?.[1]?.then?.properties?.gaps?.minItems !== 1 ||
+    schemas.ArtifactGap.properties.code?.["x-max-utf8-bytes"] !== 128 ||
+    schemas.ArtifactGap.properties.description?.["x-max-utf8-bytes"] !== 4096) {
+  throw new Error("PublishArtifactCoverage must preserve the frozen section and explicit gap rules");
+}
+if (publishArtifactBinding.required?.join(",") !== "workspace_id,artifact_id,revision_id,revision_no,artifact_version,content_hash,source_coverage,schema_version" ||
+    publishArtifactBinding.properties.workspace_id?.format !== "uuid" ||
+    publishArtifactBinding.properties.artifact_id?.format !== "uuid" ||
+    publishArtifactBinding.properties.revision_id?.format !== "uuid" ||
+    publishArtifactBinding.properties.revision_no?.minimum !== 1 ||
+    publishArtifactBinding.properties.artifact_version?.minimum !== 1 ||
+    publishArtifactBinding.properties.content_hash?.pattern !== "^[0-9a-f]{64}$" ||
+    publishArtifactBinding.properties.source_coverage?.minItems !== 1 ||
+    publishArtifactBinding.properties.source_coverage?.uniqueItems !== true ||
+    publishArtifactBinding.properties.source_coverage?.items?.$ref !== "#/components/schemas/PublishArtifactCoverage" ||
+    publishArtifactBinding.properties.schema_version?.const !== "artifact-publication/v1" ||
+    schemas.PublishArtifactRevision.properties.publication?.$ref !== "#/components/schemas/PublishArtifactBinding" ||
+    schemas.PublishArtifactRevision.properties.change_hash?.pattern !== "^[0-9a-f]{64}$" ||
+    schemas.PublishArtifactProposal.properties.revision?.$ref !== "#/components/schemas/PublishArtifactRevision") {
+  throw new Error("PublishArtifact Proposal must retain its immutable Artifact publication binding");
 }
 for (const operation of [
   document.paths["/api/v1/conversations"].post,

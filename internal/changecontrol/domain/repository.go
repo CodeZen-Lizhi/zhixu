@@ -57,6 +57,12 @@ type KnowledgeChangeProposalRepository interface {
 	CreateKnowledgeChangeProposal(context.Context, Proposal) (Proposal, error)
 }
 
+// PublishArtifactProposalRepository persists frozen Artifact publication proposals.
+// Missing implementations must fail closed because no execution capability exists yet.
+type PublishArtifactProposalRepository interface {
+	CreatePublishArtifactProposal(context.Context, Proposal) (Proposal, error)
+}
+
 // WritebackRepository 持有 Safe Writeback Durable Operation 的幂等、状态和发布事务边界。
 // Adapter 必须在数据库内再次执行领域校验，不能只依赖调用方传入的状态或版本。
 type WritebackRepository interface {

@@ -1169,7 +1169,8 @@
               "type": "string",
               "enum": [
                 "file_patch",
-                "knowledge_change"
+                "knowledge_change",
+                "publish_artifact"
               ]
             }
           },
@@ -4829,6 +4830,218 @@
         }
       }
     },
+    "/api/v1/artifacts": {
+      "get": {
+        "operationId": "listArtifacts",
+        "parameters": [
+          { "$ref": "#/components/parameters/WorkspaceIDQuery" },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 1366, "description": "Opaque, Workspace-bound Artifact cursor." } }
+        ],
+        "responses": {
+          "200": { "description": "Workspace-scoped Artifact page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactPage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "post": {
+        "operationId": "planArtifact",
+        "description": "Creates an isolated Artifact and its initial immutable Revision. It does not create a formal Document or default RAG input.",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 131072, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactPlanRequest" } } } },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactCommandResult" } } } },
+          "201": { "description": "Artifact planned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "get": {
+        "operationId": "getArtifact",
+        "parameters": [ { "$ref": "#/components/parameters/WorkspaceIDQuery" } ],
+        "responses": {
+          "200": { "description": "Current immutable Artifact Revision and state.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artifact" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/outline": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "post": {
+        "operationId": "submitArtifactOutline",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 131072, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactOutlineRequest" } } } },
+        "responses": {
+          "200": { "description": "Outline submitted or exact replay returned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/outline/approve": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "post": {
+        "operationId": "approveArtifactOutline",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 131072, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactRevisionRequest" } } } },
+        "responses": {
+          "200": { "description": "Outline approved or exact replay returned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/revisions": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "post": {
+        "operationId": "startArtifactRevision",
+        "description": "Returns a DRAFT, APPROVED or EXPORTED Artifact to GENERATING so its existing immutable Revision can be revised section by section. The current Revision remains unchanged until a section replacement creates the next Revision.",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 131072, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactRevisionRequest" } } } },
+        "responses": {
+          "200": { "description": "Artifact revision started or exact replay returned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/sections": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "post": {
+        "operationId": "recordArtifactSection",
+        "description": "Records one human-authored immutable section revision after server-side verification of every supplied retrieval Citation identity. The server fixes creator=HUMAN; clients cannot supply creator, generation metadata, verified hashes or excerpts.",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 131072, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactRecordSectionRequest" } } } },
+        "responses": {
+          "200": { "description": "Section recorded or exact replay returned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/sections/generate": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "post": {
+        "operationId": "generateArtifactSection",
+        "description": "Atomically freezes one approved Artifact section and starts its controlled Workflow. The request cannot supply content, Citations, creator, model, prompt, schema or generation metadata. First acceptance and exact Idempotency-Key replay both return 202 with the authoritative durable generation and Workflow binding.",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 131072, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactSectionGenerationRequest" } } } },
+        "responses": {
+          "202": {
+            "description": "Section generation accepted or exact durable binding replayed.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactSectionGenerationAcceptance" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": {
+            "description": "Artifact section generation is unavailable because Chat or another required controlled dependency is disabled.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Problem" },
+                "examples": {
+                  "artifact_generation_capability_unavailable": {
+                    "value": {
+                      "error_code": "ARTIFACT_GENERATION_CAPABILITY_UNAVAILABLE",
+                      "message": "Artifact section generation capability is unavailable.",
+                      "retryable": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/section-generations": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "get": {
+        "operationId": "listArtifactSectionGenerations",
+        "description": "Returns the authoritative latest non-completed Generation for each unfinished section in current outline order. This read remains available when Chat generation is disabled.",
+        "x-required-capability": "READ_LOCAL",
+        "parameters": [ { "$ref": "#/components/parameters/WorkspaceIDQuery" } ],
+        "responses": {
+          "200": { "description": "Current unfinished section Generation states without pagination.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactSectionGenerationReadResponse" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/draft/approve": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "post": {
+        "operationId": "approveArtifactDraft",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 131072, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactRevisionRequest" } } } },
+        "responses": {
+          "200": { "description": "Draft approved or exact replay returned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/exports/markdown": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "post": {
+        "operationId": "exportArtifactMarkdown",
+        "description": "Exports only the current approved immutable Revision to managed storage. Export does not publish formal knowledge.",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 131072, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactRevisionRequest" } } } },
+        "responses": {
+          "200": { "description": "Managed export recorded or exact replay returned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/exports/{export_id}": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }, { "name": "export_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "get": {
+        "operationId": "getArtifactExport",
+        "parameters": [ { "$ref": "#/components/parameters/WorkspaceIDQuery" } ],
+        "responses": {
+          "200": { "description": "Managed Artifact Markdown export record, including its immutable hashes.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactExport" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/publish-proposals": {
+      "parameters": [ { "name": "artifact_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+      "post": {
+        "operationId": "createArtifactPublishProposal",
+        "description": "Creates only a frozen PUBLISH_ARTIFACT Change Control Proposal bound to this current approved Revision. It never creates a Document, Git write or index entry directly.",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 131072, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactRevisionRequest" } } } },
+        "responses": {
+          "200": { "description": "PUBLISH_ARTIFACT Proposal binding created or exact replay returned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}": {
       "parameters": [
         {
@@ -6206,11 +6419,40 @@
           }
         },
         "additionalProperties": false,
-        "description": "Persistent Approval snapshot returned by Proposal detail and list reads. New approved file_patch snapshots include the durable Git and Workflow binding. Historical approved file_patch snapshots may omit workflow_run_id/workflow_status_url while awaiting an exact approval replay; snapshots that also omit approved_git_head are read-only manual-recovery records. Approved knowledge_change and rejected snapshots omit all Git and Workflow fields. The transient dispatch_status exists only on ApprovalDecisionResponse."
+        "description": "Persistent Approval snapshot returned by Proposal detail and list reads. New approved file_patch snapshots include the durable Git and Workflow binding. Historical approved file_patch snapshots may omit workflow_run_id/workflow_status_url while awaiting an exact approval replay; snapshots that also omit approved_git_head are read-only manual-recovery records. Approved knowledge_change or publish_artifact snapshots and rejected snapshots omit all Git and Workflow fields. The transient dispatch_status exists only on ApprovalDecisionResponse."
+      },
+      "NonFileApproval": {
+        "description": "Approval snapshot for a non-file typed Proposal. Git and Safe Writeback Workflow fields are forbidden.",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Approval"
+          },
+          {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "approved_git_head"
+                  ]
+                },
+                {
+                  "required": [
+                    "workflow_run_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "workflow_status_url"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
       },
       "ApprovalDecisionResponse": {
         "type": "object",
-        "description": "Approved file_patch decisions include approved_git_head, workflow_run_id, workflow_status_url and dispatch_status. Approved knowledge_change decisions and rejected decisions omit all Git and Workflow writeback fields.",
+        "description": "Approved file_patch decisions include approved_git_head, workflow_run_id, workflow_status_url and dispatch_status. Approved knowledge_change or publish_artifact decisions and rejected decisions omit all Git and Workflow writeback fields.",
         "required": [
           "id",
           "proposal_id",
@@ -6277,13 +6519,17 @@
           },
           {
             "$ref": "#/components/schemas/KnowledgeChangeProposal"
+          },
+          {
+            "$ref": "#/components/schemas/PublishArtifactProposal"
           }
         ],
         "discriminator": {
           "propertyName": "proposal_type",
           "mapping": {
             "file_patch": "#/components/schemas/FilePatchProposal",
-            "knowledge_change": "#/components/schemas/KnowledgeChangeProposal"
+            "knowledge_change": "#/components/schemas/KnowledgeChangeProposal",
+            "publish_artifact": "#/components/schemas/PublishArtifactProposal"
           }
         }
       },
@@ -6603,6 +6849,243 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/Approval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PublishArtifactCoverage": {
+        "type": "object",
+        "required": [
+          "section_key",
+          "status",
+          "gaps"
+        ],
+        "properties": {
+          "section_key": {
+            "type": "string",
+            "minLength": 1,
+            "x-max-utf8-bytes": 128
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "COVERED",
+              "PARTIAL",
+              "GAP"
+            ]
+          },
+          "gaps": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ArtifactGap"
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "COVERED"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "gaps": {
+                  "maxItems": 0
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "PARTIAL",
+                    "GAP"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "gaps": {
+                  "minItems": 1
+                }
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "PublishArtifactBinding": {
+        "type": "object",
+        "description": "Frozen Artifact publication binding. The three identifiers are pairwise distinct and source_coverage has unique section keys.",
+        "required": [
+          "workspace_id",
+          "artifact_id",
+          "revision_id",
+          "revision_no",
+          "artifact_version",
+          "content_hash",
+          "source_coverage",
+          "schema_version"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "artifact_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "artifact_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "source_coverage": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/PublishArtifactCoverage"
+            }
+          },
+          "schema_version": {
+            "const": "artifact-publication/v1"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PublishArtifactRevision": {
+        "type": "object",
+        "required": [
+          "id",
+          "revision_no",
+          "publication",
+          "risk",
+          "rollback_plan",
+          "change_hash",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "publication": {
+            "$ref": "#/components/schemas/PublishArtifactBinding"
+          },
+          "risk": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "rollback_plan": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "change_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PublishArtifactProposal": {
+        "type": "object",
+        "description": "A frozen Artifact publication request. Approval alone does not create a Document, write Git, or update the index.",
+        "required": [
+          "proposal_type",
+          "id",
+          "workspace_id",
+          "status",
+          "risk_level",
+          "revision",
+          "approval",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "proposal_type": {
+            "const": "publish_artifact"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "validating",
+              "ready_for_review",
+              "approved",
+              "applying",
+              "applied",
+              "verifying",
+              "completed",
+              "rejected",
+              "needs_revision",
+              "deferred",
+              "apply_failed",
+              "verify_failed",
+              "rolled_back",
+              "cancelled"
+            ]
+          },
+          "risk_level": {
+            "const": "HIGH"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/PublishArtifactRevision"
+          },
+          "approval": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NonFileApproval"
               },
               {
                 "type": "null"
@@ -12629,7 +13112,8 @@
             "type": "string",
             "enum": [
               "file_patch",
-              "knowledge_change"
+              "knowledge_change",
+              "publish_artifact"
             ]
           },
           "status": {
@@ -12681,6 +13165,27 @@
             "format": "date-time"
           }
         },
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "proposal_type"
+              ],
+              "properties": {
+                "proposal_type": {
+                  "const": "publish_artifact"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "approval": {
+                  "$ref": "#/components/schemas/NonFileApproval"
+                }
+              }
+            }
+          }
+        ],
         "additionalProperties": false
       },
       "SourceVersionPage": {
@@ -12701,6 +13206,285 @@
             "minLength": 1,
             "maxLength": 2048
           }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactOutlineSection": {
+        "type": "object",
+        "required": ["key", "title"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9-]+$", "x-max-utf8-bytes": 128 },
+          "title": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 512 }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactGap": {
+        "type": "object",
+        "required": ["code", "description"],
+        "properties": {
+          "code": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 128 },
+          "description": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 4096 }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactCoverage": {
+        "type": "object",
+        "required": ["section_key", "status", "gaps"],
+        "properties": {
+          "section_key": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9-]+$", "x-max-utf8-bytes": 128 },
+          "status": { "type": "string", "enum": ["COVERED", "PARTIAL", "GAP"] },
+          "gaps": { "type": "array", "items": { "$ref": "#/components/schemas/ArtifactGap" } }
+        },
+        "allOf": [
+          { "if": { "properties": { "status": { "const": "COVERED" } } }, "then": { "properties": { "gaps": { "maxItems": 0 } } } },
+          { "if": { "properties": { "status": { "enum": ["PARTIAL", "GAP"] } } }, "then": { "properties": { "gaps": { "minItems": 1 } } } }
+        ],
+        "additionalProperties": false
+      },
+      "ArtifactGenerationMetadata": {
+        "type": "object",
+        "required": ["prompt_version", "model_version", "workflow_definition_version", "schema_version"],
+        "properties": {
+          "prompt_version": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 256 },
+          "model_version": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 256 },
+          "workflow_definition_version": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 256 },
+          "schema_version": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 256 }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactCitationInput": {
+        "type": "object",
+        "required": ["index_version_id", "chunk_id", "source_version_id", "source_span_id"],
+        "properties": {
+          "index_version_id": { "type": "string", "format": "uuid" },
+          "chunk_id": { "type": "string", "format": "uuid" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "source_span_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactCitation": {
+        "type": "object",
+        "required": ["source_version_id", "source_span_id", "verified_content_hash", "excerpt", "verified"],
+        "properties": {
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "source_span_id": { "type": "string", "format": "uuid" },
+          "verified_content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "excerpt": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 16384 },
+          "verified": { "const": true }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactSectionInput": {
+        "type": "object",
+        "required": ["key", "title", "content", "citations", "coverage"],
+        "properties": {
+          "key": { "$ref": "#/components/schemas/ArtifactOutlineSection/properties/key" },
+          "title": { "$ref": "#/components/schemas/ArtifactOutlineSection/properties/title" },
+          "content": { "type": "string", "x-max-utf8-bytes": 262144 },
+          "citations": { "type": "array", "items": { "$ref": "#/components/schemas/ArtifactCitationInput" } },
+          "coverage": { "$ref": "#/components/schemas/ArtifactCoverage" }
+        },
+        "allOf": [
+          { "if": { "properties": { "coverage": { "properties": { "status": { "const": "GAP" } } } } }, "then": { "properties": { "content": { "maxLength": 0 }, "citations": { "maxItems": 0 } } } },
+          { "if": { "properties": { "coverage": { "properties": { "status": { "enum": ["COVERED", "PARTIAL"] } } } } }, "then": { "properties": { "content": { "minLength": 1 }, "citations": { "minItems": 1 } } } }
+        ],
+        "additionalProperties": false
+      },
+      "ArtifactSection": {
+        "type": "object",
+        "required": ["key", "title", "content", "citations", "coverage"],
+        "properties": {
+          "key": { "$ref": "#/components/schemas/ArtifactOutlineSection/properties/key" },
+          "title": { "$ref": "#/components/schemas/ArtifactOutlineSection/properties/title" },
+          "content": { "type": "string", "x-max-utf8-bytes": 262144 },
+          "citations": { "type": "array", "items": { "$ref": "#/components/schemas/ArtifactCitation" } },
+          "coverage": { "$ref": "#/components/schemas/ArtifactCoverage" }
+        },
+        "allOf": [
+          { "if": { "properties": { "coverage": { "properties": { "status": { "const": "GAP" } } } } }, "then": { "properties": { "content": { "maxLength": 0 }, "citations": { "maxItems": 0 } } } },
+          { "if": { "properties": { "coverage": { "properties": { "status": { "enum": ["COVERED", "PARTIAL"] } } } } }, "then": { "properties": { "content": { "minLength": 1 }, "citations": { "minItems": 1 } } } }
+        ],
+        "additionalProperties": false
+      },
+      "ArtifactPlanRequest": {
+        "type": "object",
+        "required": ["workspace_id", "type", "title", "scope_definition"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "type": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 128 },
+          "title": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 512 },
+          "scope_definition": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 16384 }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactOutlineRequest": {
+        "type": "object",
+        "required": ["workspace_id", "expected_version", "outline"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "outline": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/ArtifactOutlineSection" } }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactRevisionRequest": {
+        "type": "object",
+        "required": ["workspace_id", "expected_version"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "expected_version": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactRecordSectionRequest": {
+        "type": "object",
+        "required": ["workspace_id", "expected_version", "section"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "section": { "$ref": "#/components/schemas/ArtifactSectionInput" }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactSectionGenerationRequest": {
+        "type": "object",
+        "required": ["workspace_id", "expected_version", "section_key"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "section_key": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9-]+$", "x-max-utf8-bytes": 128 }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactSectionGenerationAcceptance": {
+        "type": "object",
+        "required": ["generation_id", "workspace_id", "artifact_id", "source_revision_id", "source_revision_no", "source_artifact_version", "section_key", "workflow_run_id", "node_run_id", "status", "version", "created_at", "updated_at", "replayed", "status_url"],
+        "properties": {
+          "generation_id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "artifact_id": { "type": "string", "format": "uuid" },
+          "source_revision_id": { "type": "string", "format": "uuid" },
+          "source_revision_no": { "type": "integer", "minimum": 1 },
+          "source_artifact_version": { "type": "integer", "minimum": 1 },
+          "section_key": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9-]+$", "x-max-utf8-bytes": 128 },
+          "workflow_run_id": { "type": "string", "format": "uuid" },
+          "node_run_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["PENDING", "COMPLETED", "FAILED", "CANCELLED", "RECOVERY_REQUIRED"] },
+          "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "replayed": { "type": "boolean" },
+          "status_url": { "type": "string", "format": "uri-reference", "pattern": "^/api/v1/workflows/[0-9a-f-]{36}$" }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactSectionGenerationReadItem": {
+        "type": "object",
+        "required": ["generation_id", "workspace_id", "artifact_id", "source_revision_id", "source_revision_no", "source_artifact_version", "section_key", "workflow_run_id", "node_run_id", "status", "version", "created_at", "updated_at", "status_url"],
+        "properties": {
+          "generation_id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "artifact_id": { "type": "string", "format": "uuid" },
+          "source_revision_id": { "type": "string", "format": "uuid" },
+          "source_revision_no": { "type": "integer", "minimum": 1 },
+          "source_artifact_version": { "type": "integer", "minimum": 1 },
+          "section_key": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9-]+$", "x-max-utf8-bytes": 128 },
+          "workflow_run_id": { "type": "string", "format": "uuid" },
+          "node_run_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["PENDING", "FAILED", "CANCELLED", "RECOVERY_REQUIRED"] },
+          "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "status_url": { "type": "string", "format": "uri-reference", "pattern": "^/api/v1/workflows/[0-9a-f-]{36}$" }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactSectionGenerationReadResponse": {
+        "type": "object",
+        "required": ["workspace_id", "artifact_id", "items"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "artifact_id": { "type": "string", "format": "uuid" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/ArtifactSectionGenerationReadItem" } }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactRevision": {
+        "type": "object",
+        "required": ["id", "artifact_id", "revision_no", "outline", "sections", "created_by", "content_hash", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "artifact_id": { "type": "string", "format": "uuid" },
+          "revision_no": { "type": "integer", "minimum": 1 },
+          "outline": { "type": "array", "items": { "$ref": "#/components/schemas/ArtifactOutlineSection" } },
+          "sections": { "type": "array", "items": { "$ref": "#/components/schemas/ArtifactSection" } },
+          "created_by": { "type": "string", "enum": ["HUMAN", "AGENT"] },
+          "metadata": { "$ref": "#/components/schemas/ArtifactGenerationMetadata" },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "allOf": [
+          { "if": { "properties": { "created_by": { "const": "HUMAN" } } }, "then": { "not": { "required": ["metadata"] } } },
+          { "if": { "properties": { "created_by": { "const": "AGENT" } } }, "then": { "required": ["metadata"] } }
+        ],
+        "additionalProperties": false
+      },
+      "Artifact": {
+        "type": "object",
+        "required": ["id", "workspace_id", "type", "title", "status", "scope_definition", "source_coverage", "current_revision_id", "version", "created_at", "updated_at", "revision"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "type": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 128 },
+          "title": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 512 },
+          "status": { "type": "string", "enum": ["PLANNING", "OUTLINE_REVIEW", "GENERATING", "DRAFT", "APPROVED", "EXPORTED", "PUBLISH_PROPOSED", "PUBLISHED", "ARCHIVED"] },
+          "scope_definition": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 16384 },
+          "source_coverage": { "type": "array", "items": { "$ref": "#/components/schemas/ArtifactCoverage" } },
+          "current_revision_id": { "type": "string", "format": "uuid" },
+          "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "revision": { "$ref": "#/components/schemas/ArtifactRevision" }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactPage": {
+        "type": "object",
+        "required": ["workspace_id", "items"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/Artifact" } },
+          "next_cursor": { "type": "string", "minLength": 1, "maxLength": 1366 }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactExport": {
+        "type": "object",
+        "required": ["id", "workspace_id", "artifact_id", "revision_id", "artifact_version", "revision_no", "revision_hash", "output_hash", "output_size", "exported_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" }, "workspace_id": { "type": "string", "format": "uuid" }, "artifact_id": { "type": "string", "format": "uuid" }, "revision_id": { "type": "string", "format": "uuid" },
+          "artifact_version": { "type": "integer", "minimum": 1 }, "revision_no": { "type": "integer", "minimum": 1 }, "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "output_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "output_size": { "type": "integer", "minimum": 0 }, "exported_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactPublication": {
+        "type": "object",
+        "description": "Frozen PUBLISH_ARTIFACT Proposal binding. Formal knowledge remains unchanged until Change Control approval and execution.",
+        "required": ["workspace_id", "artifact_id", "revision_id", "artifact_version", "revision_no", "content_hash", "proposal_id", "created_at"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" }, "artifact_id": { "type": "string", "format": "uuid" }, "revision_id": { "type": "string", "format": "uuid" }, "artifact_version": { "type": "integer", "minimum": 1 }, "revision_no": { "type": "integer", "minimum": 1 }, "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "proposal_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactCommandResult": {
+        "type": "object",
+        "required": ["artifact", "replayed"],
+        "properties": {
+          "artifact": { "$ref": "#/components/schemas/Artifact" },
+          "export": { "$ref": "#/components/schemas/ArtifactExport" },
+          "publication": { "$ref": "#/components/schemas/ArtifactPublication" },
+          "replayed": { "type": "boolean" }
         },
         "additionalProperties": false
       },

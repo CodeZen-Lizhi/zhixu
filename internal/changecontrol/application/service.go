@@ -114,6 +114,17 @@ type CreateKnowledgeChangeCommand struct {
 	RollbackPlan    string
 }
 
+// CreatePublishArtifactCommand creates a reviewable, frozen Artifact publication proposal.
+// It intentionally has no formal Document or execution capability fields.
+type CreatePublishArtifactCommand struct {
+	WorkspaceID    foundation.ID
+	IdempotencyKey string
+	Publication    domain.PublishArtifact
+	RiskLevel      domain.ProposalRiskLevel
+	Risk           string
+	RollbackPlan   string
+}
+
 // CreateResult 包含 Proposal 和是否命中已有幂等请求。
 type CreateResult struct {
 	Proposal domain.Proposal
@@ -221,6 +232,62 @@ func (s *Service) CreateKnowledgeChangeProposal(ctx context.Context, command Cre
 		IdempotencyKey: strings.TrimSpace(command.IdempotencyKey),
 		RequestHash:    requestHash,
 		Status:         domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: revision,
+	})
+	if err != nil {
+		return CreateResult{}, err
+	}
+	return CreateResult{Proposal: proposal, Replayed: !proposal.CreatedAt.Equal(now)}, nil
+}
+
+// CreatePublishArtifactProposal creates a typed publish_artifact Proposal without writing a Document.
+func (s *Service) CreatePublishArtifactProposal(ctx context.Context, command CreatePublishArtifactCommand) (CreateResult, error) {
+	repository, ok := s.repo.(domain.PublishArtifactProposalRepository)
+	if !ok {
+		return CreateResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "PUBLISH_ARTIFACT_PROPOSAL_REPOSITORY_UNAVAILABLE", false, errors.New("publish artifact proposal repository is unavailable"))
+	}
+	if command.WorkspaceID == "" || strings.TrimSpace(command.IdempotencyKey) == "" || len(strings.TrimSpace(command.IdempotencyKey)) > 128 || strings.TrimSpace(command.Risk) == "" || strings.TrimSpace(command.RollbackPlan) == "" {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PUBLISH_ARTIFACT_PROPOSAL_INVALID", false, errors.New("publish artifact proposal fields are invalid"))
+	}
+	publication, err := domain.ValidatePublishArtifact(command.Publication)
+	if err != nil || publication.WorkspaceID != command.WorkspaceID {
+		if err == nil {
+			err = errors.New("publication workspace differs from command workspace")
+		}
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PUBLISH_ARTIFACT_PROPOSAL_INVALID", false, err)
+	}
+	riskLevel, err := proposalRiskLevelForCreate(command.RiskLevel)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PUBLISH_ARTIFACT_PROPOSAL_INVALID", false, err)
+	}
+	if _, err := domain.ValidateProposalRiskLevelForType(domain.ProposalTypePublishArtifact, riskLevel); err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PUBLISH_ARTIFACT_PROPOSAL_INVALID", false, err)
+	}
+	proposalID, err := s.ids.New()
+	if err != nil {
+		return CreateResult{}, err
+	}
+	revisionID, err := s.ids.New()
+	if err != nil {
+		return CreateResult{}, err
+	}
+	now := s.clock.Now()
+	risk, rollbackPlan := strings.TrimSpace(command.Risk), strings.TrimSpace(command.RollbackPlan)
+	changeHash, err := domain.ComputePublishArtifactHash(publication, risk, rollbackPlan)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PUBLISH_ARTIFACT_PROPOSAL_INVALID", false, err)
+	}
+	requestHash, err := domain.ComputePublishArtifactRequestHash(command.WorkspaceID, publication, riskLevel, risk, rollbackPlan)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PUBLISH_ARTIFACT_PROPOSAL_INVALID", false, err)
+	}
+	revision := domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, Risk: risk, RollbackPlan: rollbackPlan, ChangeHash: changeHash, PublishArtifact: &publication, CreatedAt: now}
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypePublishArtifact, revision); err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PUBLISH_ARTIFACT_PROPOSAL_INVALID", false, err)
+	}
+	proposal, err := repository.CreatePublishArtifactProposal(ctx, domain.Proposal{
+		ID: proposalID, WorkspaceID: command.WorkspaceID, Type: domain.ProposalTypePublishArtifact, RiskLevel: riskLevel,
+		IdempotencyKey: strings.TrimSpace(command.IdempotencyKey), RequestHash: requestHash,
+		Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: revision,
 	})
 	if err != nil {
 		return CreateResult{}, err
@@ -375,6 +442,13 @@ func (s *Service) DecideProposalWithDispatch(ctx context.Context, proposalID, re
 			}
 			return ApprovalDecisionResult{Approval: approval, Replayed: replayed}, nil
 		}
+		approval, approvalErr := s.decideProposalLegacy(ctx, proposalID, revisionID, changeHash, decision)
+		if approvalErr != nil {
+			return ApprovalDecisionResult{}, approvalErr
+		}
+		return ApprovalDecisionResult{Approval: approval, Replayed: proposal.Approval != nil}, nil
+	}
+	if proposalType(proposal) == domain.ProposalTypePublishArtifact {
 		approval, approvalErr := s.decideProposalLegacy(ctx, proposalID, revisionID, changeHash, decision)
 		if approvalErr != nil {
 			return ApprovalDecisionResult{}, approvalErr
@@ -712,8 +786,8 @@ func validateProposalForApproval(proposal domain.Proposal) error {
 	if _, err := domain.ValidateProposalRiskLevelForType(proposalType(proposal), proposal.RiskLevel); err != nil {
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_RISK_LEVEL_INVALID", false, err)
 	}
-	if proposalType(proposal) == domain.ProposalTypeKnowledgeChange && strings.TrimSpace(proposal.TargetPath) != "" {
-		return foundation.NewError(foundation.ErrorConsistencyViolation, "KNOWLEDGE_CHANGE_PROPOSAL_INVALID", false, errors.New("knowledge change proposal must not carry file target fields"))
+	if proposalType(proposal) != domain.ProposalTypeFilePatch && strings.TrimSpace(proposal.TargetPath) != "" {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "TYPED_PROPOSAL_INVALID", false, errors.New("typed proposal must not carry file target fields"))
 	}
 	if err := domain.ValidateProposalRevisionForType(proposalType(proposal), proposal.Revision); err != nil {
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_REVISION_INVALID", false, err)
