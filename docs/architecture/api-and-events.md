@@ -25,6 +25,7 @@
 /api/v1/approvals
 /api/v1/graph
 /api/v1/collections
+/api/v1/exports
 /api/v1/health
 /api/v1/artifacts
 /api/v1/review
@@ -114,6 +115,7 @@ Command：
 - human_task.created。
 - proposal.ready。
 - index.activated。
+- export.*。
 - health.scan.completed。
 - review.scored。
 - conversation.created。
@@ -310,6 +312,27 @@ M7-03 的公共契约由 OpenAPI 3.1、`internal/collection/http`、`internal/he
 - 投影不一致返回 `409 GRAPH_PROJECTION_INCONSISTENT`；未知内部错误返回 500。空 Global、空 Evidence
   和 no-path 不伪装成依赖故障。
 
+### Smart Collection Export
+
+M9-03 已交付 Smart Collection 的可恢复异步 Export Job；公开范围只有 `MARKDOWN` 与 `METADATA_JSON`，
+输出 schema 为 `export/v1`：
+
+- `POST /api/v1/exports` 必须有唯一 `Idempotency-Key`，请求绑定 Workspace、Collection ID/version、query hash、
+  kind、安全字段、脱敏策略和 TTL。首次返回 `202 + Location`，完全相同的 replay 返回原 Job（200）；同 key
+  不同请求或当前 Collection binding 冲突返回 `409 EXPORT_IDEMPOTENCY_CONFLICT`。`dispatch_pending` 只说明
+  transport 尚待恢复，不是 Job 终态。
+- `GET /api/v1/exports/{export_id}?workspace_id=...` 返回严格 Job 投影；
+  `GET /api/v1/workspaces/{workspace_id}/exports?collection_id=...&limit=...&cursor=...` 按 Collection 使用
+  `created_at,id` 稳定 keyset cursor 恢复历史；两者均不暴露文件路径、staging locator、lease 或 request hash。
+- `GET /api/v1/exports/{export_id}/download?workspace_id=...` 只在 `SUCCEEDED` 后返回固定 Content-Type、
+  attachment 文件名、Content-Length、`Cache-Control: private, no-store` 与 `X-Content-Type-Options: nosniff`。
+  未完成返回 `409 EXPORT_RESULT_NOT_READY`，到期返回 `410 EXPORT_EXPIRED`，hash/size/path 不能证明一致时
+  返回 `500 EXPORT_RESULT_INCONSISTENT`，不返回部分文件。
+- `PENDING/RUNNING/SUCCEEDED/FAILED/EXPIRED` 是当前生命周期；`CANCELLED` 只读兼容历史。`export.*` Server Event
+  使用 `resource_ref=export_job:<id>`，只使前端失效并重新读取 Job/List，不能携带或替代结果事实。
+- 默认导出为 `MASKED`；`FULL + include_sensitive` 只允许有 `READ_LOCAL` 的认证 Session/API Token 主体。附件、
+  `EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 和字段映射没有 M9-03 公开端点或内容源，不能由客户端模拟。
+
 ### Timeline 与 Impact Analysis
 
 M7-04 的公开查询由 `internal/knowledge/http` 提供，Timeline 是 Workspace-scoped 只读投影，Impact 是显式分析命令：
@@ -341,6 +364,10 @@ M7-04 的公开查询由 `internal/knowledge/http` 提供，Timeline 是 Workspa
 - Session/API Token 撤销不追溯改变已完成审计；撤销后所有后续请求必须失败。
 - 不从 URL Query 传 Secret。
 - 文件下载通过 Object ID。
+
+Smart Collection Export 下载再次验证 Workspace 受控路径、symlink、SHA-256 与 size；通过后才在同一
+PostgreSQL 事务中增加下载统计并追加 actor-bound `export.download` Audit。该 Audit 仅说明服务端已准备开始
+返回结果，不证明浏览器完整接收。导出和 Problem/Event/日志均不得回显 Secret、绝对路径或 staging locator。
 
 M6-D 当前只完成 Search/Evidence 的 Workspace 数据隔离，并保持 API loopback 部署。正式 Auth、
 Session、API Token、CSRF/Origin 与 Capability Middleware 仍属于 M10；在这些门禁落地前不得把
@@ -374,6 +401,9 @@ Conversation/RAG API、SSE 与反馈已由 M6-04 落地；正式 Session/API Tok
   M6-04 的唯一严格 wire owner；Feature/Component 不得重复解析，SSE 只能定向失效 Query，最终状态必须回查。
 - `web/src/api/graph.ts` 是 Graph 7 个端点的唯一严格 decoder/client 边界；Global/Local/Path 使用
   TanStack Query 持有 Server State，Relation Evidence 只能在用户展开 Relation 详情后按需请求。
+- `web/src/api/exports.ts` 是 Collection Export 的唯一严格 decoder/client 边界；它只接受
+  `MARKDOWN|METADATA_JSON`，校验 Job 的 Workspace/Collection/version/query hash、生命周期字段、Problem 与下载
+  header/Blob，Feature 不得直接断言原始响应或用新标签页绕过认证和 `410` 处理。
 
 ## 15. 测试
 
@@ -387,6 +417,9 @@ Conversation/RAG API、SSE 与反馈已由 M6-04 落地；正式 Session/API Tok
 - CSRF/Origin。
 - API Token Scope/Expiry/Revocation。
 - 登录授权不能绕过 Approval Write Authorization。
+- Export：严格 JSON/Idempotency、同 key replay、Collection-filtered cursor、Job 状态、prepared/lease/TTL crash
+  recovery、下载 header/hash/size、actor Audit、过期/cleanup、`export.*` SSE invalidation 与真实 API/Worker/Vite
+  浏览器闭环。该门禁仅覆盖 Collection Markdown/Metadata JSON，附件与 AC-33 全量验收保持 deferred。
 - Search Handler：严格 JSON、默认值、三种模式、统一过滤、top-100 分页、Cursor 篡改/跨请求/
   stale/重启失效、零命中、显式降级和稳定 Problem 映射。
 - 真实 PostgreSQL HTTP：Workspace 隔离、三模式/过滤、Source Version/Span 可打开与 404 防枚举、

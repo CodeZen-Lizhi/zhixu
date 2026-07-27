@@ -17,6 +17,7 @@ import (
 	collectionhttp "github.com/CodeZen-Lizhi/zhixu/internal/collection/http"
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
 	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
+	exporthttp "github.com/CodeZen-Lizhi/zhixu/internal/export/http"
 	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
 	healthhttp "github.com/CodeZen-Lizhi/zhixu/internal/health/http"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
@@ -58,6 +59,7 @@ type Dependencies struct {
 	Candidate         *graphhttp.CandidateHandler
 	Conversation      *conversationhttp.Handler
 	Events            *eventshttp.Handler
+	Export            *exporthttp.Handler
 	Knowledge         *knowledgehttp.Handler
 	Artifact          *artifacthttp.Handler
 	Auth              *authhttp.Handler
@@ -198,6 +200,9 @@ func registerDomainRoutes(api chi.Router, deps Dependencies) {
 	}
 	if deps.Events != nil {
 		deps.Events.Routes(api)
+	}
+	if deps.Export != nil {
+		deps.Export.Routes(api)
 	}
 	if deps.Knowledge != nil {
 		deps.Knowledge.Routes(api)

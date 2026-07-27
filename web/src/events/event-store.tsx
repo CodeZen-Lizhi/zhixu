@@ -67,6 +67,7 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
       ["search", workspaceId],
       ["rag", workspaceId],
       ["collections", workspaceId],
+      ["collection-exports", workspaceId],
       ["knowledge-health", workspaceId],
       ["graph", workspaceId],
       ["semantic-links", workspaceId],
@@ -103,6 +104,8 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         await recoverRagWorkspace(queryClient, workspaceId);
         assertActive();
         await queryClient.refetchQueries({ queryKey: ["collections", workspaceId], type: "all" }, { throwOnError: true });
+        assertActive();
+        await queryClient.refetchQueries({ queryKey: ["collection-exports", workspaceId], type: "all" }, { throwOnError: true });
         assertActive();
         await queryClient.refetchQueries({ queryKey: ["knowledge-health", workspaceId], type: "all" }, { throwOnError: true });
         assertActive();
@@ -186,6 +189,10 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
       const invalidatesCollections = event.type.startsWith("collection.")
         || event.resourceRef.startsWith("collection:")
         || event.invalidations.some((item) => item.resource === "collection");
+      const invalidatesExports = event.type.startsWith("export.")
+        || event.resourceRef.startsWith("export_job:")
+        || event.invalidations.some((item) => item.resource === "export_job");
+      if (invalidatesExports) await invalidate(["collection-exports", workspaceId]);
       const invalidatesHealth = event.type.startsWith("health.")
         || event.resourceRef.startsWith("health_scan:")
         || event.resourceRef.startsWith("health_issue:")

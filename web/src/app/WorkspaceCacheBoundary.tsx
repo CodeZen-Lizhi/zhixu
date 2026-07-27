@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type PropsWithChildren, useEffect, useRef } from "react";
 
 import { clearCollectionWorkspaceQueries } from "../features/collections/queries";
+import { clearCollectionExportWorkspaceQueries } from "../features/collections/export-queries";
 import { clearGraphWorkspaceQueries } from "../features/graph/queries";
 import { clearSemanticLinkWorkspaceQueries } from "../features/graph/semantic-link-queries";
 import { clearHealthWorkspaceQueries } from "../features/health/queries";
@@ -19,6 +20,7 @@ export const WorkspaceCacheBoundary = ({ children }: PropsWithChildren) => {
       clearGraphWorkspaceQueries(queryClient, previous);
       clearSemanticLinkWorkspaceQueries(queryClient, previous);
       clearCollectionWorkspaceQueries(queryClient, previous);
+      clearCollectionExportWorkspaceQueries(queryClient, previous);
       clearHealthWorkspaceQueries(queryClient, previous);
       clearSearchWorkspaceQueries(queryClient, previous);
     }

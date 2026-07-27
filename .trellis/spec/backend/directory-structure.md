@@ -27,6 +27,7 @@ internal/
   changecontrol/               # Proposal、Approval、Safe Writeback、补偿
   graph/                       # 图谱查询、候选关联和路径
   collection/                  # Query AST、集合和视图配置
+  export/                      # Smart Collection 异步导出 Job、结果与恢复
   artifact/                    # Artifact 大纲、章节和导出
   review/                      # Deck、Card、Session、评分和调度
   health/                      # Health Issue 检测与修复 Proposal
@@ -64,6 +65,21 @@ web/                           # React 构建产物或嵌入边界；不放领�
 - Chat enabled 时，API 只有在 Workflow、Workspace/Retrieval 和 Conversation/Event 全部组装成功后才注入 Question Dispatcher；`/readyz` 对任何缺失依赖 fail closed，`system/status` 只暴露稳定、脱敏的 RAG 状态。
 - Worker 的 Relation 与 RAG Executor 共享冻结 Chat contract、Runtime Catalog、Agent Repository 和预算；RAG 另注入真实 Conversation Context/Finalizer、Retrieval、Knowledge Topic、Event Progress，禁止从 Tool runtime 借用 Search 或受 Tool disabled 状态影响。
 - Worker ExecutorRegistry 与 DefinitionRegistry 必须同时可解析 Relation 和 RAG；任一半注册状态都不能 ready，Safe Writeback、Tool 与 Reindex 的既有注册保持独立。
+
+### M9-03 Smart Collection Export Module Boundary
+
+- `internal/export/domain` 拥有 Export Kind、Job、生命周期、字段白名单、脱敏与 prepared-result 不变量；它不导入
+  HTTP、pgx、River、文件系统或 Audit Adapter。公开正式 kind 仅为 `MARKDOWN|METADATA_JSON`。
+- `internal/export/application` 编排授权、Collection durable scan、lease、staging/promote、恢复、过期、cleanup 与
+  下载统计/Audit binding。prepared 后不得重新读取 Collection 或生成第二个结果。
+- `internal/export/adapter/{collection,localfs,postgres,river,auth}` 分别实现 snapshot、受控 Workspace 文件、
+  PostgreSQL Job/Event/Audit、River transport 和能力检查；Adapter 不拥有业务状态机，River Args 只携带
+  Workspace ID 与 Export ID。
+- `internal/export/http` 只承担严格 HTTP wire、Problem、下载 header 与当前 principal 到 Audit actor 的映射；
+  `cmd/api`、`cmd/worker` 负责组装并运行 API、Worker、recovery 与 cleanup。Collection 页面通过 API/Query 恢复，
+  不直接读取文件或 PostgreSQL。
+- Artifact Export 与 Smart Collection Export 是不同领域事实。不得让 `ops.export_job` 充当 Artifact 状态源，
+  也不得把附件、`EVALUATION_JSON`、`AUDIT_JSON` 伪装成 M9-03 已实现的 Export kind。
 
 ## 命名约定
 

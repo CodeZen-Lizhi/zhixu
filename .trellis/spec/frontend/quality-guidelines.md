@@ -269,3 +269,38 @@ Correct: 三视图只投影同一 page；SSE 失效 Query 后以 REST Scan/Issue
 Wrong: Candidate 面板测试通过就宣称完整 Graph 交付，或 scan ID 变化时重建整个 workspace cache boundary。
 Correct: 前端全量门禁加真实 API 浏览器；scan ID 只影响 Candidate server state。
 ```
+
+## Scenario: M9-03 Smart Collection Export Frontend Quality Gate
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/exports.ts`、Collection Export Query/Panel、Workspace cache/SSE、下载行为、Export OpenAPI 或
+  浏览器 smoke 时应用。此门禁只覆盖 `MARKDOWN|METADATA_JSON`，附件、`EVALUATION_JSON`、`AUDIT_JSON` 与
+  AC-33 全量完成不在本切片验收内。
+
+### 2. Contracts
+
+- 网络 JSON 只经 Export strict decoder 进入 Query/Component；Collection 页面不重新解析 wire、伪造进度、
+  自行生成 download URL，或把 `dispatch_pending` 当作终态。
+- 任务必须从 Collection-filtered REST List/Detail 恢复；`PENDING|RUNNING` 使用 2 秒有界轮询，`export.*` SSE
+  只触发定向 invalidation，所有终态停止轮询。Create response-loss 复用同一 Idempotency-Key，`FAILED|EXPIRED`
+  显式新建才换 key。
+- 下载经 `authFetch` 和严格 Blob/header 校验；`SUCCEEDED` 之外没有下载控件，`FAILED|EXPIRED` 提供新建出口，
+  历史 `CANCELLED` 可读但不提供取消。默认 UI 只创建 `MASKED` 安全字段，不显示敏感或服务器路径。
+- 实际浏览器必须在桌面和 `390x844` 完成创建、刷新恢复、运行、下载、失败后新建、过期后新建、键盘与焦点检查；
+  不得有横向溢出或 console warning/error。
+
+### 3. Tests Required
+
+- API decoder：strict JSON、kind/status/field/时间/hash/binding、Problem、下载 header/size 和 Abort。
+- Query/Component：Workspace cache 清理、cursor、same-key retry、轮询停止、SSE invalidation、历史状态、下载错误、
+  归档 Collection 与可访问交互。
+- Canonical 命令：`npm run lint --prefix web`、`npm run typecheck --prefix web`、`npm run test --prefix web`、
+  `npm run build --prefix web`；随后由真实 API/Worker/Vite 的 `deploy/export-browser-smoke.sh` 验证闭环。
+
+### 4. Wrong vs Correct
+
+```text
+Wrong: 只展示 Markdown 创建按钮，就宣称附件和 AC-33 已完成；或把下载直链交给新标签页。
+Correct: 明确只支持 Collection Markdown/Metadata JSON，下载经 authFetch/Problem/Blob 校验；附件保持 deferred。
+```

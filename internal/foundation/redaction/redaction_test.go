@@ -30,3 +30,11 @@ func TestSensitiveTextDetectionCoversCredentialsAndPaths(t *testing.T) {
 		t.Fatal("safe text was classified as a secret")
 	}
 }
+
+func TestRedactSecretsPreservesLocalPathButStillMasksCredentials(t *testing.T) {
+	input := "read /Users/private/source.md with Bearer top-secret"
+	want := "read /Users/private/source.md with " + maskedValue
+	if got := RedactSecrets(input); got != want {
+		t.Fatalf("RedactSecrets() = %q, want %q", got, want)
+	}
+}

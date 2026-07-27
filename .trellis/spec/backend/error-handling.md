@@ -483,3 +483,40 @@ Proposal summary:       approval?: Approval        # optional, non-null
 Wrong: detail 与 summary 共用 `omitempty`，让字段缺失同时代表“未审批”和“未加载”。
 Correct: detail 必需 nullable；summary optional non-null；HTTP、OpenAPI 与 decoder 用回归测试共同锁定。
 ```
+
+## Scenario: M9-03 Export HTTP And Recovery Error Contract
+
+### 1. Scope / Trigger
+
+- 修改 Export Domain/Application/HTTP、Collection Export Router、下载、cleanup、OpenAPI 或前端 Problem 处理时应用。
+  本契约只覆盖 Smart Collection `MARKDOWN|METADATA_JSON`；附件、`EVALUATION_JSON`、`AUDIT_JSON` 的缺失必须明确为
+  未交付范围，不能映射成空成功。
+
+### 2. Error Matrix
+
+| 条件 | HTTP / 稳定 code | 语义 |
+|---|---|---|
+| 严格 JSON、请求/查询/header、kind、TTL、cursor 或 Idempotency-Key 非法 | `400 EXPORT_REQUEST_INVALID` / `INVALID_JSON` | 不创建或不查询 Job |
+| Job、Active Collection 或 Workspace binding 不存在 | `404 EXPORT_NOT_FOUND` | 跨 Workspace 与不存在统一，防止枚举 |
+| `FULL + include_sensitive`、主体或 `READ_LOCAL` 不满足 | `403 EXPORT_PERMISSION_DENIED` | 不泄漏字段、路径或权限细节 |
+| 同 key 绑定不同规范请求，或 Collection version/query hash 漂移 | `409 EXPORT_IDEMPOTENCY_CONFLICT` | 既有 exact replay 优先于当前态检查 |
+| 下载尚未 `SUCCEEDED` | `409 EXPORT_RESULT_NOT_READY` | 不返回空文件或假下载 URL |
+| Get/List/Download/Worker 检查到 TTL 到期 | `410 EXPORT_EXPIRED`（下载）或持久 `EXPIRED` 投影 | 保留 Job/cleanup 历史 |
+| hash、size、路径、snapshot 或 prepared binding 不一致 | `500 EXPORT_RESULT_INCONSISTENT` | fail closed，不增加下载统计或重 render |
+| PostgreSQL、River、文件或 Audit 依赖暂时不可用 | `503 EXPORT_DEPENDENCY_UNAVAILABLE` | 保留 PENDING/recoverable 事实 |
+
+### 3. Contracts
+
+- Handler、Worker、日志、Server Event 和 Audit 复用同一稳定 error code；HTTP 不返回 SQL、filesystem path、
+  staging locator、Secret、正文、hash 以外的受限内部绑定或底层错误原因。
+- 文件 promote/Complete、下载响应和 Audit 任一结果未知时，不得伪装为 `SUCCEEDED`。Download Audit 只说明服务端
+  已准备开始返回，不把 socket 写入完成当作客户端成功接收。
+- `FAILED/EXPIRED` 由用户显式使用新 Idempotency-Key 新建；响应丢失和可重试 transport 错误继续使用原 key。
+  `CANCELLED` 只为历史兼容展示，不新增取消或把它映射为失败。
+
+### 4. Tests Required
+
+- Handler 覆盖严格 JSON、重复 query/header、200 replay/202 create、404 anti-enumeration、409/410/500/503、
+  下载安全 header 与不回显私有数据。
+- Application/PG fault 覆盖 lease loss、prepared 后崩溃、到期竞态、hash/size 不一致、Audit 失败回滚和 cleanup retry；
+  前端覆盖 Problem 严格解码、下载 410 与新建出口。

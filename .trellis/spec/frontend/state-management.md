@@ -194,6 +194,38 @@ Wrong: SSE 超窗恢复时 refetch Workspace 下所有 Search page，包括绑�
 Correct: 先取消并移除 Search 窗口；挂载页面通过 recovery callback 只回查无 cursor 的规范首屏，成功后才提交恢复。
 ```
 
+## Scenario: M9-03 Smart Collection Export State Ownership
+
+### 1. Scope / Trigger
+
+- 修改 Collection Export Panel、`web/src/api/exports.ts`、Export Query/Mutation、Workspace cache boundary 或
+  `export.*` SSE invalidation 时应用。
+- 正式 UI Server State 只覆盖 Smart Collection `MARKDOWN|METADATA_JSON` Job；附件、`EVALUATION_JSON`、
+  `AUDIT_JSON` 没有前端状态、假按钮或本地 fallback。
+
+### 2. Contracts
+
+- Query key 固定绑定 `['collection-exports', workspaceId, collectionId, cursor]`；detail key 绑定
+  `workspaceId + exportId`。active Workspace 为空时不请求，切换 Workspace 时先取消再移除旧 Export cache，
+  旧回调不得写入新 Workspace。
+- Job/List REST projection 是状态、下载次数和过期事实的唯一 owner。`PENDING|RUNNING` 每 2 秒轮询，
+  `SUCCEEDED|FAILED|EXPIRED|CANCELLED` 停止轮询；刷新从 Collection-filtered List/Detail 恢复，不保存 Job 或
+  opaque cursor 到 URL/localStorage。
+- `export.*` 或 `resource_ref=export_job:<id>` 只失效当前 Workspace 的 `collection-exports` Query family；
+  Event Store 完成失效和权威回查后才推进 SSE cursor，不能直接把 event payload 写成完成、失败或下载次数。
+- Create mutation 把请求 variables 与 Idempotency-Key 作为同一重试单元。网络或响应丢失继续使用原 key；
+  只有用户显式“新建导出”或 `FAILED/EXPIRED` 后重新创建时才生成新 key。`dispatch_pending` 是 transport 提示，
+  仍以 Job 状态和恢复轮询为准。
+- 下载是一次命令结果，不写入乐观 `downloadCount`。`authFetch` 返回 Blob 并成功校验后再刷新 Job；`410`、`409`、
+  `401` 或严格 Problem 解码失败必须展示服务端错误或认证失效，而不是本地成功。
+
+### 3. Tests Required
+
+- Query key/cursor、Workspace switch cleanup、响应丢失同 key、active/terminal polling、SSE invalidation、
+  刷新恢复、下载后 Job 刷新和 `FAILED/EXPIRED` 新建。
+- 组件/浏览器覆盖全部状态、归档 Collection 禁用创建、键盘、焦点、390x844 overflow 与 console；不能用附件或
+  尚无内容源的 JSON kind fixture 冒充 AC-33 完成。
+
 ## Scenario: M10 Browser Authentication State Ownership
 
 ### 1. Scope / Trigger

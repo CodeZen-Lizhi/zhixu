@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	riverlib "github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 func TestClientAndMigratorAlwaysUseWorkflowSchema(t *testing.T) {
@@ -166,6 +168,39 @@ func TestClientUsesSafeDefaults(t *testing.T) {
 	}
 }
 
+func TestClientInsertDelegatesAndClassifiesDirectInsertFailures(t *testing.T) {
+	args := genericJobArgs{SchemaVersion: 1}
+	opts := &riverlib.InsertOpts{Queue: "export"}
+
+	t.Run("missing direct client", func(t *testing.T) {
+		_, err := (&Client{}).Insert(context.Background(), args, opts)
+		assertClientError(t, err, foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_MISSING", false)
+	})
+
+	t.Run("delegates result", func(t *testing.T) {
+		var gotArgs riverlib.JobArgs
+		var gotOpts *riverlib.InsertOpts
+		want := &rivertype.JobInsertResult{Job: &rivertype.JobRow{ID: 47}}
+		client := &Client{direct: directInsertClientFunc(func(_ context.Context, actual riverlib.JobArgs, actualOpts *riverlib.InsertOpts) (*rivertype.JobInsertResult, error) {
+			gotArgs = actual
+			gotOpts = actualOpts
+			return want, nil
+		})}
+		got, err := client.Insert(context.Background(), args, opts)
+		if err != nil || got != want || gotArgs != args || gotOpts != opts {
+			t.Fatalf("result=%#v err=%v args=%#v opts=%#v", got, err, gotArgs, gotOpts)
+		}
+	})
+
+	t.Run("classifies insert failure", func(t *testing.T) {
+		client := &Client{direct: directInsertClientFunc(func(context.Context, riverlib.JobArgs, *riverlib.InsertOpts) (*rivertype.JobInsertResult, error) {
+			return nil, errors.New("river unavailable")
+		})}
+		_, err := client.Insert(context.Background(), args, opts)
+		assertClientError(t, err, foundation.ErrorRetryableFailure, "WORKFLOW_RIVER_JOB_INSERT_FAILED", true)
+	})
+}
+
 func assertClientError(t *testing.T, err error, kind foundation.ErrorKind, code string, retryable bool) {
 	t.Helper()
 	var classified *foundation.Error
@@ -220,4 +255,10 @@ func (f *lifecycleFake) Stopped() <-chan struct{} {
 func withOptions(base Options, mutate func(*Options)) Options {
 	mutate(&base)
 	return base
+}
+
+type directInsertClientFunc func(context.Context, riverlib.JobArgs, *riverlib.InsertOpts) (*rivertype.JobInsertResult, error)
+
+func (f directInsertClientFunc) Insert(ctx context.Context, args riverlib.JobArgs, opts *riverlib.InsertOpts) (*rivertype.JobInsertResult, error) {
+	return f(ctx, args, opts)
 }

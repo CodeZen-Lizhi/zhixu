@@ -86,7 +86,7 @@ describe("decodeServerEventEnvelope", () => {
     });
   });
 
-  it("将 Collection 与 Health resource_ref 解码为失效提示", () => {
+  it("将 Collection、Export 与 Health resource_ref 解码为失效提示", () => {
     expect(decodeServerEventEnvelope({
       ...envelope("43"),
       type: "health.scan.completed",
@@ -99,6 +99,12 @@ describe("decodeServerEventEnvelope", () => {
       resource_ref: `collection:${answerId}`,
       payload_summary: {},
     }).invalidations).toEqual([{ resource: "collection", id: answerId }]);
+    expect(decodeServerEventEnvelope({
+      ...envelope("45"),
+      type: "export.completed",
+      resource_ref: `export_job:${answerId}`,
+      payload_summary: { status: "succeeded" },
+    }).invalidations).toEqual([{ resource: "export_job", id: answerId }]);
   });
 
   it.each([

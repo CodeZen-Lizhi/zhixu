@@ -7,6 +7,7 @@ export type ServerEventResource =
   | "workflow"
   | "model_run"
   | "collection"
+  | "export_job"
   | "health_issue"
   | "health_scan"
   | "knowledge_health";
@@ -277,6 +278,7 @@ const invalidationsFor = (
         resource === "workflow" ||
         resource === "model_run" ||
         resource === "collection" ||
+        resource === "export_job" ||
         resource === "health_issue" ||
         resource === "health_scan" ||
         resource === "knowledge_health")

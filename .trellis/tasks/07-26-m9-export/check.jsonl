@@ -1,0 +1,12 @@
+{"file":".trellis/tasks/07-26-m9-export/research/current-state.md","reason":"逐项复核所有已知阻断缺口均有实现、测试和验收证据。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"复核敏感导出 actor/capability、Workspace、path/symlink、Secret 与下载授权。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"复核 request hash、租约、prepared/cleanup、Server Event、Audit 事务和 guarded Down。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"复核创建/重放/下载/过期/不一致错误分类和无静默 fallback。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"复核 Audit 与普通日志边界以及所有错误/元数据脱敏。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行 race、真实 PostgreSQL/River、迁移、恢复故障注入和独立复验。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"复核 Collection-filtered keys、2 秒轮询、SSE cursor recovery 和 Workspace 清理。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"复核 Job/Page/SSE/Problem/download 的严格 decoder 与跨绑定拒绝。"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"复核全部 Job 状态、键盘、焦点、disabled reason 和错误恢复。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"执行 lint/typecheck/test/build、真实浏览器、390x844、overflow 和 console 门禁。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"最终追踪 Create/Execute/Recover/List/Download/Cleanup 的跨层事实一致性。"}
+{"review":"post-review","scope":"M9-03 candidate","findings_fixed":["LocalFS Promote/Write 改为 create-only 原子 link，防止 final 覆盖竞争","prepared cleanup 删除前复核持久化 hash/size，避免删除同路径替换文件","正式 Export kind 收敛为 MARKDOWN|METADATA_JSON，并同步 domain/migration/OpenAPI/frontend"],"frontend_review":"严格 decoder、轮询、SSE export_job 失效、workspace cache 清理和刷新恢复已核对，无新增契约漂移","verification_passed":["go test -race -count=1 -timeout 60s ./...","go vet ./...","go mod tidy -diff","make openapi-check","git diff --check","npm run lint --prefix web","npm run typecheck --prefix web","npm run test --prefix web (59 files / 684 tests)","npm run build --prefix web","真实 PostgreSQL export repository integration count=3","真实 PostgreSQL migration TestExport/TestM9 count=3","deploy/export-browser-smoke.sh"],"verification_pending":[]}

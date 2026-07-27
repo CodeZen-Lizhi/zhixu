@@ -16,6 +16,9 @@ M9 已补充 Workspace Source Version/Proposal/Workflow 列表、资源绑定 cu
 Proposal 等级由不可变 `proposal.risk_level` 唯一拥有，Source Version 使用受复合约束的 Workspace 镜像键支撑
 有界 keyset 查询；Proposal detail 的 Approval 为必需 nullable，Summary 保持 optional non-null。三条真实
 PostgreSQL 列表、迁移契约与严格执行计划已在最终迁移工作树复验；M10 继续负责最终容量门禁。
+M9-03 已交付 Smart Collection `MARKDOWN` 与 `METADATA_JSON` 的可恢复异步 Export Job：PostgreSQL 保存
+幂等、冻结范围、prepared result、TTL/cleanup 与下载 Audit，River 只负责投递，Collection 详情可恢复任务并下载。
+附件、`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 与通用字段映射仍为后续独立范围，AC-33 只能标为部分完成。
 M10-02 已交付单用户 Auth、Cookie Session、受限 API Token、CSRF/Origin、Capability Middleware 和 Compose
 启动预检；认证与 Write Authorization 保持两道独立边界，具体可执行契约见 `auth-security.md`。
 M8-01 已交付 Workspace 隔离的 Artifact/Revision、证据复核章节生成、受控 Markdown 导出和
@@ -29,6 +32,7 @@ M8-01 已交付 Workspace 隔离的 Artifact/Revision、证据复核章节生成
 | [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker 门禁 | M7-04 后端闭环已验证；UI、正式 downstream Proposal 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
+| [Smart Collection Export 契约](./export-contract.md) | Export Job、冻结 scan、prepared result、下载 Audit、过期清理与前端恢复 | M9-03 已交付 Collection Markdown/Metadata JSON；附件、Evaluation/Audit 内容导出与 AC-33 全量验收保持 deferred |
 | [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health 持久化、read-model revision、schedule/outbox，以及 M9 Workspace 列表、cursor kind/version、Active Index included/excluded 与 PG/EXPLAIN 门禁 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool 稳定错误、M9 Proposal detail/summary Approval 空值契约与 M10 Auth 的稳定 Problem Details 边界 |
 | [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M6-03 Tool/Observability 共享脱敏与受限 Tool Call 事实已记录；通用 append-only Audit/真实 exporter 归 M10 |
@@ -43,6 +47,8 @@ M8-01 已交付 Workspace 隔离的 Artifact/Revision、证据复核章节生成
 3. 先搜索现有领域术语、错误码、配置字段、查询和工具；共享规则只能有一个事实源。
 4. 对跨层变更阅读 `.trellis/spec/guides/cross-layer-thinking-guide.md`；发现重复实现时阅读 `code-reuse-thinking-guide.md`。
 5. 只有 Composition Root 读取配置并构造 Adapter；领域模块不自行创建数据库、模型或 Git 客户端。
+6. 修改 Export Job、结果文件、下载、清理或 Collection Export UI 时，先阅读 [`export-contract.md`](./export-contract.md)；
+   不把附件、`EVALUATION_JSON`、`AUDIT_JSON` 或 AC-33 全量完成推入 M9-03。
 
 ## 实现边界
 

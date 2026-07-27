@@ -82,6 +82,7 @@ const seedRecoveryQueries = (queryClient: QueryClient, workspaceId: string, orde
     { key: ["business", workspaceId, "sources"], label: "business" },
     { key: ["rag", workspaceId, "conversation", "c1"], label: "rag" },
     { key: ["collections", workspaceId, "list"], label: "collections" },
+    { key: ["collection-exports", workspaceId, "collection", ""], label: "collection-exports" },
     { key: ["knowledge-health", workspaceId, "summary"], label: "knowledge-health" },
     { key: ["graph", workspaceId, "global"], label: "graph" },
     { key: ["semantic-links", workspaceId, "candidates"], label: "semantic-links" },
@@ -380,6 +381,19 @@ describe("EventStoreProvider", () => {
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("44");
   });
 
+  it("Export 事件只定向失效当前 Workspace 的 Collection Export 查询", async () => {
+    setActiveWorkspaceId(workspaceA);
+    const queryClient = renderStore();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+    await act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1, id: "48", type: "export.completed", occurredAt: "2026-07-22T00:00:04Z",
+      workspaceId: workspaceA, resourceRef: "export_job:7a000000-0000-4000-8000-000000000012", resourceVersion: 2,
+      payloadSummary: { status: "SUCCEEDED" }, invalidations: [{ resource: "export_job", id: "7a000000-0000-4000-8000-000000000012" }],
+    }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["collection-exports", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["collections", workspaceA] }, { throwOnError: true });
+  });
+
   it("权威回查失败时保留游标并展示 recovery_failed", async () => {
     window.sessionStorage.setItem(`zhixu.event-cursor.${workspaceA}`, "41");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("database unavailable")));
@@ -535,7 +549,7 @@ describe("EventStoreProvider", () => {
     if (typeof requestUrl !== "string") throw new Error("Workspace recovery request URL is not a string");
     expect(requestUrl).toContain(`/api/v1/workspaces/${workspaceA}`);
     expect(request?.[1]?.signal).toBeInstanceOf(AbortSignal);
-    expect(order).toEqual(["workspace", "business", "rag", "collections", "knowledge-health", "graph", "semantic-links"]);
+    expect(order).toEqual(["workspace", "business", "rag", "collections", "collection-exports", "knowledge-health", "graph", "semantic-links"]);
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBeNull();
   });
 
@@ -566,7 +580,7 @@ describe("EventStoreProvider", () => {
     await vi.waitFor(() => expect(connectionMock.options).toHaveLength(2));
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(connectionMock.close).toHaveBeenCalledTimes(1);
-    expect(order).toEqual(["workspace", "business", "rag", "collections", "knowledge-health", "graph", "semantic-links"]);
+    expect(order).toEqual(["workspace", "business", "rag", "collections", "collection-exports", "knowledge-health", "graph", "semantic-links"]);
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBeNull();
     act(() => connectionMock.options[1]?.onStateChange?.("open"));
     act(() => oldConnection?.onStateChange?.("closed"));
@@ -621,7 +635,7 @@ describe("EventStoreProvider", () => {
     await vi.waitFor(() => expect(connectionMock.options).toHaveLength(1));
     expect(connectionMock.options[0]?.lastEventId).toBeUndefined();
     expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(order).toEqual(["business", "rag", "collections", "knowledge-health", "graph", "semantic-links"]);
+    expect(order).toEqual(["business", "rag", "collections", "collection-exports", "knowledge-health", "graph", "semantic-links"]);
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBeNull();
   });
 });

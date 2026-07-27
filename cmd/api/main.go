@@ -41,6 +41,13 @@ import (
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
+	exportauth "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/auth"
+	exportcollection "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/collection"
+	exportlocalfs "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/localfs"
+	exportpostgres "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/postgres"
+	exportriver "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/river"
+	exportapplication "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
+	exporthttp "github.com/CodeZen-Lizhi/zhixu/internal/export/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphpostgres "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/postgres"
 	graphapplication "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
@@ -163,6 +170,7 @@ func main() {
 	candidateHandler := graphhttp.NewCandidateHandler(nil, cfg.GraphQueryTimeout)
 	conversationHandler := conversationhttp.NewHandler(nil, conversationhttp.NewCursorCodec())
 	eventsHandler := eventshttp.NewHandler(nil)
+	exportHandler := exporthttp.NewHandler(nil)
 	knowledgeHandler := knowledgehttp.NewHandler(nil, nil, cfg.GraphQueryTimeout)
 	artifactHandler := artifacthttp.NewHandler(nil, nil, cfg.GraphQueryTimeout)
 	ragEnabled := cfg.ChatProvider != config.ChatProviderDisabled
@@ -249,6 +257,12 @@ func main() {
 				Clock:          foundation.SystemClock{},
 			})
 			workspaceHandler = workspacehttp.NewHandler(workspaceService)
+			configuredExportHandler, exportHandlerErr := newExportHandler(database.DB(), cfg, workspaceRepository)
+			if exportHandlerErr != nil {
+				logger.Error("export service is unavailable", "error_code", "EXPORT_DEPENDENCY_UNAVAILABLE")
+			} else {
+				exportHandler = configuredExportHandler
+			}
 			configuredRetrievalHandler, retrievalHandlerErr := newRetrievalHandler(database.DB(), cfg, workspaceRepository, fileScanner)
 			if retrievalHandlerErr != nil {
 				logger.Error("retrieval search service is unavailable", "error_code", "RETRIEVAL_SEARCH_SERVICE_UNAVAILABLE")
@@ -348,6 +362,7 @@ func main() {
 		Retrieval:         retrievalHandler,
 		Conversation:      conversationHandler,
 		Events:            eventsHandler,
+		Export:            exportHandler,
 		Knowledge:         knowledgeHandler,
 		Artifact:          artifactHandler,
 		Auth:              authHandler,
@@ -455,6 +470,67 @@ func impactAuditActorForPrincipal(principal authdomain.Principal, found bool) (a
 	default:
 		return auditdomain.ActorAnonymous, ""
 	}
+}
+
+// newExportHandler 组装 Collection durable snapshot、受限本地文件和 insert-only River 投递边界。
+func newExportHandler(pool *pgxpool.Pool, cfg config.Config, workspaces *workspacepostgres.Repository) (*exporthttp.Handler, error) {
+	if pool == nil || workspaces == nil {
+		return nil, errors.New("export dependencies are unavailable")
+	}
+	collectionRepository, err := collectionpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	collectionService, err := collectionapplication.NewService(collectionapplication.Dependencies{
+		Repository: collectionRepository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	snapshots, err := exportcollection.NewSnapshotReader(collectionService)
+	if err != nil {
+		return nil, err
+	}
+	files, err := exportlocalfs.NewStore(workspaces)
+	if err != nil {
+		return nil, err
+	}
+	eventStore, err := eventspostgres.NewStore(pool)
+	if err != nil {
+		return nil, err
+	}
+	auditStore, err := auditpostgres.NewStore(pool)
+	if err != nil {
+		return nil, err
+	}
+	repository, err := exportpostgres.NewRepository(
+		pool,
+		exportpostgres.WithEventAppender(eventStore),
+		exportpostgres.WithAuditAppender(auditStore),
+	)
+	if err != nil {
+		return nil, err
+	}
+	client, err := riveradapter.NewClientWithOptions(pool, nil, riveradapter.Options{
+		Queue: cfg.WorkerQueue, MaxWorkers: cfg.WorkerMaxWorkers,
+		JobTimeout: cfg.WorkerJobTimeout, RescueStuckJobsAfter: cfg.WorkerRescueStuckJobsAfter,
+		SoftStopTimeout: cfg.WorkerSoftStopTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	dispatcher, err := exportriver.NewDispatcher(client)
+	if err != nil {
+		return nil, err
+	}
+	service, err := exportapplication.NewService(exportapplication.Dependencies{
+		Repository: repository, Dispatcher: dispatcher, Snapshots: snapshots, Workspaces: workspaces, Files: files,
+		Authorizer: exportauth.Authorizer{}, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return exporthttp.NewHandler(service), nil
 }
 
 // newGraphHandler 以 canonical Knowledge facts 组装只读 Graph 查询链路。

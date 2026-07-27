@@ -66,7 +66,7 @@ workspace/
   .knowledge/
     sources/          # 按 SHA-256 create-only 保存的不可变 Source Content Artifact，普通扫描排除
     manifests/
-    exports/
+    exports/          # Smart Collection Export 的受控 final 与 .staging 结果，不纳入普通扫描或 Git
   .git/
 ```
 
@@ -75,7 +75,10 @@ workspace/
 - sources/ 保存原始或抓取版本。
 - knowledge/ 保存批准后的正式 Markdown。
 - artifacts/ 保存用户显式导出的产物。
-- .knowledge/ 保存应用托管的不可变 Content Artifact、清单和导出元数据，不保存密钥；其中 `.knowledge/sources/<sha256>` 必须按内容哈希 create-only 写入，并从普通扫描和 Git 默认跟踪中排除。
+- .knowledge/ 保存应用托管的不可变 Content Artifact、清单和受控导出结果，不保存密钥；其中 `.knowledge/sources/<sha256>` 必须按内容哈希 create-only 写入，并从普通扫描和 Git 默认跟踪中排除。
+- `.knowledge/exports/.staging` 只允许 M9-03 Export Job 的 create-only 临时文件；prepared binding 后的 staging/final
+  路径、SHA-256 和 size 由 PostgreSQL Job 事实约束。普通 Workspace 文件、附件和用户 `artifacts/` 不能被 Export
+  cleanup/orphan sweep 扫描或删除。
 - 数据库 Volume 不放在 Workspace 内。
 
 ## 4. 事实源矩阵
@@ -94,6 +97,8 @@ workspace/
 | Workflow/Audit | PostgreSQL | 必须备份 |
 | Review 进度 | PostgreSQL | 必须备份 |
 | Artifact 导出 | Workspace | 是 |
+| Smart Collection Export Job、下载统计、清理状态 | PostgreSQL `ops.export_job` + Audit | 必须备份 |
+| Smart Collection Export 结果文件 | `.knowledge/exports` + Job prepared binding | 不能脱离 Job 的 revision/count/hash/size 重新解释 |
 
 ## 5. 文件身份
 
@@ -188,6 +193,7 @@ sequenceDiagram
 - Approval。
 - 正式 Revision 映射。
 - 审计安全事件。
+- Smart Collection Export Job、冻结范围、下载 Audit 与 cleanup 历史。
 
 ### 可归档
 
@@ -202,6 +208,7 @@ sequenceDiagram
 - 可重建 Embedding。
 - 过期缓存。
 - 过期情景 Memory。
+- 到期 Smart Collection Export 的受控 staging/final 物理文件；删除失败保留 Job cleanup 事实并重试，不能删除 Job 或 Audit。
 
 清理策略必须保留重建所需版本信息。
 
@@ -247,15 +254,17 @@ sequenceDiagram
 
 ## 12. 数据导出
 
-支持：
+产品目标仍包括 Markdown、附件、领域元数据、评测和审计等可迁移数据；当前 M9-03 的已交付范围必须单独说明：
 
-- Markdown 与附件。
-- Topic/Claim/Relation JSONL。
-- Proposal/Approval 摘要。
-- Review Deck/Card。
-- Evaluation Report。
-
-导出包含 schema_version 和 Workspace ID。
+- Smart Collection `MARKDOWN` 与 `METADATA_JSON` 通过 `export/v1` 异步 Job 输出，绑定 Workspace、Collection
+  ID/version、query hash、首次 prepared 时冻结的 read-model revision、exact count、字段白名单、脱敏策略、
+  SHA-256、size、TTL 与下载 Audit。
+- 结果先写受控 staging，Prepare 持久化固定 binding 后原子 promote 到 `.knowledge/exports`。prepared 后恢复只验证
+  固定文件，不能重读可变 Collection 或重新 render；结果文件不成为 Artifact、Document、Git、默认索引或 RAG 事实。
+- TTL 到期只回收 staging/final 文件；Job、hash、下载统计和 append-only Audit 保留。每次下载前重验受控路径、
+  symlink、hash、size，并在同一数据库事务记录服务端准备返回的 actor-bound Audit。
+- 附件导出、`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX、通用字段映射与公式字段尚未交付；它们不能被
+  `MARKDOWN` 或 `METADATA_JSON` 结果替代，AC-33 因附件部分仍仅为部分完成。
 
 ## 13. 不变量
 

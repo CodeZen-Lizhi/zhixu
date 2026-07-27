@@ -851,6 +851,19 @@ h1 {
   text-decoration: none;
 }
 
+.collection-export-panel { display: grid; gap: 1rem; }
+.collection-export-create { display: grid; grid-template-columns: minmax(12rem, 18rem) auto; gap: .8rem 1rem; align-items: end; }
+.collection-export-create label { display: grid; gap: .35rem; font-weight: 750; }
+.collection-export-create .sidebar-note { grid-column: 1 / -1; margin: 0; }
+.collection-export-history { display: grid; gap: .75rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+.collection-export-history h3 { margin: 0; font-size: 1rem; }
+.collection-export-job-list { display: grid; gap: .65rem; }
+.collection-export-job { display: grid; gap: .55rem; border: 1px solid var(--line); border-radius: 6px; padding: .85rem; background: rgb(255 255 255 / 38%); }
+.collection-export-job p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.collection-export-job__summary { display: flex; align-items: center; justify-content: space-between; gap: .8rem; }
+.collection-export-job__summary > div, .collection-export-job__meta { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; }
+.collection-export-job__meta { color: var(--muted); font-size: .8rem; }
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -888,6 +901,9 @@ h1 {
   .rag-scope__grid { grid-template-columns: 1fr; }
   .rag-feedback__comment, .rag-feedback .rag-notice, .rag-feedback > [role="status"] { grid-column: auto; }
   .rag-metrics { grid-template-columns: 1fr 1fr; }
+  .collection-export-create { grid-template-columns: 1fr; align-items: stretch; }
+  .collection-export-create .sidebar-note { grid-column: auto; }
+  .collection-export-job__summary { align-items: flex-start; }
 }
 
 @media (prefers-reduced-motion: reduce) {

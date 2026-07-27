@@ -320,6 +320,7 @@ func TestRequiredCapabilityDoesNotTreatGraphCommandsAsReadQueries(t *testing.T) 
 		{path: "/api/v1/proposals/10000000-0000-4000-8000-000000000001/approvals", method: http.MethodPost, want: []capability.Capability{capability.WriteKnowledge}},
 		{path: "/api/v1/health/scans", method: http.MethodPost, want: []capability.Capability{capability.ReadLocal, capability.WriteProposal}},
 		{path: "/api/v1/conversations/10000000-0000-4000-8000-000000000001/questions", method: http.MethodPost, want: []capability.Capability{capability.ReadLocal}},
+		{path: "/api/v1/exports", method: http.MethodPost, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/workspaces/10000000-0000-4000-8000-000000000001/timeline", method: http.MethodGet, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/workspaces/10000000-0000-4000-8000-000000000001/timeline/10000000-0000-4000-8000-000000000002", method: http.MethodGet, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/workspaces/10000000-0000-4000-8000-000000000001/impact-reports/10000000-0000-4000-8000-000000000002", method: http.MethodGet, want: []capability.Capability{capability.ReadLocal}},
@@ -455,6 +456,7 @@ func TestMiddlewareRejectsDuplicateAuthorizationAndSupportsScopedBearer(t *testi
 	router.Use(handler.Middleware)
 	router.Get("/api/v1/read", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
 	router.Post("/api/v1/write", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
+	router.Post("/api/v1/exports", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
 
 	duplicate := httptest.NewRequest(http.MethodGet, "/api/v1/read", nil)
 	duplicate.Header.Add("Authorization", "Bearer "+token.Plain)
@@ -479,6 +481,13 @@ func TestMiddlewareRejectsDuplicateAuthorizationAndSupportsScopedBearer(t *testi
 	router.ServeHTTP(readResponse, read)
 	if readResponse.Code != http.StatusNoContent {
 		t.Fatalf("scoped read status=%d body=%s", readResponse.Code, readResponse.Body.String())
+	}
+	exportRequest := httptest.NewRequest(http.MethodPost, "/api/v1/exports", nil)
+	exportRequest.Header.Set("Authorization", "Bearer "+token.Plain)
+	exportResponse := httptest.NewRecorder()
+	router.ServeHTTP(exportResponse, exportRequest)
+	if exportResponse.Code != http.StatusNoContent {
+		t.Fatalf("scoped export status=%d body=%s", exportResponse.Code, exportResponse.Body.String())
 	}
 
 	write := httptest.NewRequest(http.MethodPost, "/api/v1/write", nil)

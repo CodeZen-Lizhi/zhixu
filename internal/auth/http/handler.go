@@ -202,6 +202,7 @@ var capabilityRoutes = []capabilityRoute{
 	oneCapability(http.MethodPost, "/api/v1/conversations", capability.ReadLocal),
 	oneCapability(http.MethodPost, "/api/v1/conversations/{conversation_id}/questions", capability.ReadLocal),
 	oneCapability(http.MethodPost, "/api/v1/answers/{answer_id}/feedback", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/exports", capability.ReadLocal),
 
 	oneCapability(http.MethodPost, "/api/v1/workspaces", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/artifacts", capability.WriteProposal),

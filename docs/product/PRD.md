@@ -2028,8 +2028,9 @@ Smart Collection 保存：
 - 发起健康扫描。
 - 创建 Review Deck。
 - 生成 Artifact。
+- 为当前 Smart Collection 创建可恢复异步导出。
 
-写入类批量操作必须进入 Proposal。
+写入正式知识的批量操作必须进入 Proposal；Collection Export 只创建可恢复的运行 Job，不写入正式知识。
 
 #### 10.14.8 验收标准
 
@@ -2037,6 +2038,20 @@ Smart Collection 保存：
 - 删除集合不删除知识。
 - 无效查询明确报错。
 - 三种视图使用同一查询结果。
+
+#### 10.14.9 M9-03 Collection Export 当前交付范围
+
+M9-03 已在 Smart Collection 详情交付可恢复异步导出：用户可创建当前 Collection 的 `MARKDOWN` 或
+`METADATA_JSON` 任务，任务绑定 Workspace、Collection ID/version、query hash、字段白名单、脱敏策略与 TTL；
+首次执行冻结 read-model revision 与精确 count，刷新或服务重启后仍可查询、恢复和下载经 hash/size 校验的结果。
+
+- 默认 `MASKED`，前端不提供敏感字段开关；未脱敏敏感导出仅限有 `READ_LOCAL` 的认证主体。
+- 创建使用 Idempotency-Key，首次返回 `202`，完全相同的响应丢失重试返回原 Job；`PENDING/RUNNING` 可恢复，
+  `FAILED/EXPIRED` 由用户以新 key 新建，历史 `CANCELLED` 只读兼容。
+- 结果到期后拒绝下载并回收受控物理文件；Job、hash、下载统计和 append-only Audit 保留。每次服务端准备返回成功
+  下载时记录 actor、Export ID、结果 hash 和 outcome，不声称客户端已完整接收。
+- 附件打包、`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX、通用字段映射与公式字段不在 M9-03。它们仍是产品后续
+  工作，不能用当前两个 Export kind 宣称 AC-33 全部关闭。
 
 ### 10.15 知识健康中心
 
@@ -2776,6 +2791,10 @@ Review Card 进入 INVALIDATED，并从调度移除，直到重新审核。
 - 导出任务必须记录字段、查询版本、权限、文件哈希、状态、过期时间和下载审计。
 - 正式 v1.0 不提供 Excel/CSV 模板导入、字段映射或公式字段；Smart Collection 的“表格”仅指 Web 表格视图。
 
+当前实现状态：M9-03 已完成 Smart Collection `MARKDOWN` 和领域 `METADATA_JSON` 的异步 Export Job、
+幂等恢复、脱敏、权限、过期清理、hash/size 校验与下载 Audit。附件、评测结果和审计摘要的内容导出仍未交付；
+`EVALUATION_JSON`、`AUDIT_JSON` 没有正式内容源，且 AC-33 因附件导出尚未完成而保持部分完成。
+
 #### 10.22.6 数据清理
 
 - 清理过期情景记忆。
@@ -3436,6 +3455,16 @@ Tool Call：
 - view_config。
 - cached_result_version。
 
+#### 13.8.1 Smart Collection Export Job
+
+- id、Workspace、Collection ID/version 和 query hash。
+- kind（当前仅 `MARKDOWN|METADATA_JSON`）、schema version、字段白名单、脱敏策略、请求 TTL 与幂等 binding。
+- lifecycle/version/lease、frozen read-model revision、exact count、prepared result hash/size 与受控文件 binding。
+- download count/time、到期/cleanup 状态和 append-only 下载 Audit binding。
+
+prepared result 之后不得重新读取 Collection 生成另一份结果；到期只删除受控物理文件，不删除 Job 或 Audit。
+附件、`EVALUATION_JSON`、`AUDIT_JSON` 不是该已交付模型的 kind。
+
 ### 13.9 Health Issue
 
 - id。
@@ -3650,6 +3679,8 @@ M7-01 已交付的接口是只读 Query：全局 Topic 聚类、Topic/Claim 服�
 - 保存 Collection。
 - 执行分页查询。
 - 创建基于 Collection 的工作流。
+- 创建、列表、查询和下载绑定当前 Collection 的异步 `MARKDOWN|METADATA_JSON` Export Job；Export 不新增独立导航，
+  且附件/评测/审计内容导出仍由后续接口负责。
 
 ### 14.9 Health 接口能力
 
@@ -4430,6 +4461,7 @@ M7-01 已交付的 `/graph` 首屏支持 Topic/Claim 的 Global、Local、Path �
 - 列表/表格/卡片切换。
 - 排序和分组。
 - 批量动作。
+- Collection Export Panel：创建、恢复、轮询和下载 `MARKDOWN|METADATA_JSON` Job。
 
 ### 21.11 知识健康页面
 
@@ -4446,6 +4478,10 @@ Source/Index 与 Health 事实动态计算；Health 支持 Workspace、Topic、S
 detector coverage、Issue Evidence、Decision、Schedule 和可用 repair option。扫描和页面不会直接修改正式知识，
 修复仍必须进入 Proposal/Approval。Tag、Review/Directory owner、Review Deck/Artifact 批量动作、Timeline/Impact、
 正式认证与最终 100k Claim/500k Relation 容量认证尚未交付，必须保持显式 unavailable 或归入后续里程碑。
+
+M9-03 已将 Export Panel 嵌入 Collection 详情：它只使用当前 Collection version/query hash，刷新后由服务端列表/详情
+恢复，`PENDING/RUNNING` 以有界轮询和 `export.*` SSE 失效跟踪，成功下载经认证请求处理。附件、评测与审计 JSON
+不会显示为可用入口，失败或过期后必须显式新建，不能生成第二个 response-loss 任务。
 
 ### 21.12 Artifact 编辑页面
 
@@ -4500,13 +4536,15 @@ detector coverage、Issue Evidence、Decision、Schedule 和可用 repair option
 - 数据导出。
 - 危险操作确认。
 
-M9-01、M9-02 与 M9-04 已交付当前真实契约切片：响应式 App Shell、Dashboard、Inbox、资料版本详情、Proposal、
+M9-01、M9-02、M9-03 与 M9-04 已交付当前真实契约切片：响应式 App Shell、Dashboard、Inbox、资料版本详情、Proposal、
 Workflow、Settings，以及每个 Active Workspace 唯一 SSE Owner。Inbox/详情展示的是 Source Version、摄取、解析、
 索引和 Workflow 事实，不能假称正式 Document 或伪造标准化正文。Proposal 支持 `file_patch|knowledge_change`、
 File/Relation Diff、证据、风险、回滚、批准/驳回、Hash/Version conflict 和 Approval 后 Apply Preflight；编辑后批准、
 三方合并、暂缓、批量审批和请求重分析仍未交付。Workflow 页面只展示公共 Run 字段和允许的 pause/resume/cancel；
 Node/Tool/Token 明细、Settings Secret 保存/导出/危险清理没有正式接口时必须显示 unavailable。M9-03 异步导出、
-脱敏、权限/过期与结果追踪仍是后续任务。
+脱敏、权限/过期与结果追踪已在 Collection Export Panel 闭环：当前只支持 Smart Collection `MARKDOWN` 与
+`METADATA_JSON`，并保留刷新恢复、下载 Audit 和到期清理。附件、`EVALUATION_JSON`、`AUDIT_JSON` 内容导出仍是
+后续任务，不能把该面板或 AC-33 标记为全量完成。
 
 ### 21.16 全局视觉与交互要求
 
@@ -4567,7 +4605,7 @@ Node/Tool/Token 明细、Settings Secret 保存/导出/危险清理没有正式�
 | AC-30 | Security | 路径穿越、Prompt Injection、SSRF 和 Secret 泄漏测试通过 |
 | AC-31 | Capacity | 在容量基线下检索和局部图谱达到性能目标 |
 | AC-32 | Deployment | Docker Compose 可启动 API、Worker、PostgreSQL 和依赖服务 |
-| AC-33 | Export | Markdown、附件和领域元数据可以导出 |
+| AC-33 | Export（部分完成） | Smart Collection Markdown、领域 Metadata JSON 已交付；附件导出仍未完成 |
 | AC-34 | Recovery | 数据库、Git 和文件状态不一致时进入只读恢复状态 |
 | AC-35 | Lifecycle | Document 和 Topic 的重命名、移动、拆分、合并、归档和删除均通过 Proposal |
 | AC-36 | Conflict | 冲突可调查、条件化解决、保留历史并触发下游影响分析 |

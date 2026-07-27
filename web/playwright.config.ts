@@ -7,6 +7,7 @@ const readOptionalEnvironment = (name: string): string | undefined => {
 
 const baseURL = readOptionalEnvironment("ZHIXU_PLAYWRIGHT_BASE_URL")
   ?? readOptionalEnvironment("ZHIXU_SEMANTIC_LINK_SMOKE_BASE_URL")
+  ?? readOptionalEnvironment("ZHIXU_EXPORT_SMOKE_BASE_URL")
   ?? readOptionalEnvironment("ZHIXU_COLLECTION_HEALTH_SMOKE_BASE_URL");
 if (baseURL === undefined) {
   throw new Error("ZHIXU_PLAYWRIGHT_BASE_URL is required");

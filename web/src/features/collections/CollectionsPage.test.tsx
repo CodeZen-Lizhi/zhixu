@@ -37,6 +37,7 @@ vi.mock("./queries", async (importOriginal) => ({
   useCollections: hooks.useCollections,
   useCreateCollection: hooks.useCreateCollection,
 }));
+vi.mock("./CollectionExportPanel", () => ({ CollectionExportPanel: () => <div data-testid="collection-export-panel" /> }));
 vi.mock("../graph/semantic-link-queries", () => ({ createSemanticLinkIdempotencyKey: () => "candidate-scan:test", useStartSemanticLinkScan: hooks.useStartSemanticLinkScan }));
 vi.mock("../health/queries", () => ({ useStartHealthScan: hooks.useStartHealthScan }));
 

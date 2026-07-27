@@ -18,6 +18,8 @@ var (
 	unixAbsolutePathPattern    = regexp.MustCompile(`(?:^|[\s\x22'\x60(=:;,])(/[^/\s\x22'\x60<>][^\s\x22'\x60<>]*)`)
 )
 
+const maskedValue = "<redacted>"
+
 // ContainsSecret 判断文本是否携带常见凭据赋值、Bearer/JWT Token 或带凭据连接 URL。
 func ContainsSecret(value string) bool {
 	if sensitiveAssignmentPattern.MatchString(value) || bearerTokenPattern.MatchString(value) || jwtPattern.MatchString(value) || credentialURLPattern.MatchString(value) {
@@ -52,4 +54,21 @@ func ContainsAbsolutePath(value string) bool {
 		return true
 	}
 	return windowsAbsolutePathPattern.MatchString(withoutNetworkURLs) || unixAbsolutePathPattern.MatchString(withoutNetworkURLs)
+}
+
+// RedactSecrets 只替换凭据、Bearer/JWT Token 和带凭据连接 URL。
+func RedactSecrets(value string) string {
+	redacted := jwtPattern.ReplaceAllString(value, maskedValue)
+	redacted = bearerTokenPattern.ReplaceAllString(redacted, maskedValue)
+	redacted = sensitiveAssignmentPattern.ReplaceAllString(redacted, maskedValue)
+	redacted = credentialURLPattern.ReplaceAllString(redacted, maskedValue)
+	redacted = urlCandidatePattern.ReplaceAllStringFunc(redacted, func(candidate string) string {
+		trimmed := strings.TrimRight(candidate, ").,;]}")
+		parsed, err := url.Parse(trimmed)
+		if err == nil && parsed.User != nil {
+			return maskedValue + strings.TrimPrefix(candidate, trimmed)
+		}
+		return candidate
+	})
+	return redacted
 }

@@ -427,3 +427,50 @@ Correct: 以真实 PostgreSQL/Workflow/HTTP/browser 分层证据证明动态结�
 Wrong: fault smoke 偶发出现 Scan=SUCCEEDED/Run=failed，重跑一次通过后忽略。
 Correct: 提高复现率、锁定持久时间精度根因、加入真实 PostgreSQL 回归，再连续运行原场景。
 ```
+
+## Scenario: M9-03 Smart Collection Export Quality Gate
+
+### 1. Scope / Trigger
+
+- 修改 Export Domain/Application/PostgreSQL/LocalFS/River/HTTP/Auth/Audit/OpenAPI、Collection Export 前端或
+  `deploy/export-browser-smoke.sh` 时，必须执行本门禁。
+- 门禁只证明 Smart Collection `MARKDOWN|METADATA_JSON`。附件、`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 和
+  AC-33 全量验收仍在后续任务；测试通过不得扩大该产品声明。
+
+### 2. Contracts
+
+- 真实 PostgreSQL 是 Job/lease/prepared result/cleanup/download Audit 的事实源；River 只投递，不能用 River
+  成功、readiness 或单元 Fake 代替 Create→Worker→Download 的闭环证据。
+- 故障注入必须覆盖 staging 写入、Prepare、promote、Complete、租约接管、TTL 到期、文件删除和 Audit 提交。
+  每个窗口都只能留下一个权威 result binding，或可解释的 `FAILED|EXPIRED|ManualRecovery`，不得重读可变
+  Collection 后给出第二个成功结果。
+- 安全测试必须验证 Workspace 隔离、Session/API Token/`READ_LOCAL`、默认 MASKED、Secret/绝对路径/危险公式前缀
+  canary、symlink/hash/size 检查与安全下载 header。Audit 必须记录 actor 和服务端准备返回的 outcome，而不声称
+  浏览器已收完字节。
+- 浏览器验证真实 API/Worker/Vite 的 Collection 面板：刷新恢复、同 key response-loss、`PENDING/RUNNING` 2 秒
+  有界轮询、SSE invalidation、成功下载、`FAILED/EXPIRED` 新建、桌面/390x844 键盘、无横向溢出和 console warning/error。
+
+### 3. Required Commands
+
+```bash
+go test -race -count=1 -timeout 60s ./internal/export/... ./internal/events/... ./internal/audit/... ./internal/auth/http ./internal/app ./cmd/api ./cmd/worker
+ZHIXU_TEST_DATABASE_URL="$ZHIXU_TEST_DATABASE_URL" go test -race -tags=integration -count=3 -p 1 -timeout 60s ./internal/export/adapter/postgres
+ZHIXU_TEST_DATABASE_URL="$ZHIXU_TEST_DATABASE_URL" go test -race -tags=integration -count=3 -p 1 -timeout 60s -run '^(TestExport|TestM9)' ./internal/platform/migration
+make openapi-check
+npm run lint --prefix web
+npm run typecheck --prefix web
+npm run test --prefix web
+npm run build --prefix web
+ZHIXU_TEST_DATABASE_URL="$ZHIXU_TEST_DATABASE_URL" bash deploy/export-browser-smoke.sh
+git diff --check
+```
+
+- Export 涉及公共 API、PostgreSQL、文件、认证、Audit、Worker 和前端，完成代码改动后必须执行 Go、SQL、通用
+  review，并由独立只读 reviewer 复验需求范围、崩溃恢复、安全边界和实际门禁结果。
+
+### 4. Wrong vs Correct
+
+```text
+Wrong: 只验证 Create 返回 202，或只用 mock fetch 截图就宣称 Export/AC-33 完成。
+Correct: 从真实 PostgreSQL/API/Worker/LocalFS/Audit/浏览器证明可恢复结果与受控下载；AC-33 仍明确为部分完成。
+```

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	riverlib "github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivertype"
 )
 
 const (
@@ -27,11 +28,16 @@ type clientLifecycle interface {
 	Stopped() <-chan struct{}
 }
 
+type directInsertClient interface {
+	Insert(context.Context, riverlib.JobArgs, *riverlib.InsertOpts) (*rivertype.JobInsertResult, error)
+}
+
 // Client owns the River client configured for the workflow schema. Production
 // process lifecycle wiring remains the responsibility of cmd/worker.
 type Client struct {
 	generation atomic.Uint64
 	insert     riverInsertClient
+	direct     directInsertClient
 	lifecycle  clientLifecycle
 	queue      string
 	schema     string
@@ -71,7 +77,19 @@ func NewClientWithOptions(pool *pgxpool.Pool, workers *Workers, options Options)
 	if err != nil {
 		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_INVALID", err)
 	}
-	return &Client{insert: inner, lifecycle: inner, queue: options.Queue, schema: WorkflowSchema}, nil
+	return &Client{insert: inner, direct: inner, lifecycle: inner, queue: options.Queue, schema: WorkflowSchema}, nil
+}
+
+// Insert 为已提交业务事实提供 insert-only River 投递边界；业务原子写入仍应优先使用 InsertTx。
+func (c *Client) Insert(ctx context.Context, args riverlib.JobArgs, options *riverlib.InsertOpts) (*rivertype.JobInsertResult, error) {
+	if c == nil || c.direct == nil {
+		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_MISSING", errors.New("River client is nil"))
+	}
+	result, err := c.direct.Insert(ctx, args, options)
+	if err != nil {
+		return nil, foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_RIVER_JOB_INSERT_FAILED", true, err)
+	}
+	return result, nil
 }
 
 // Queue returns the queue shared by this client's producers and consumers.

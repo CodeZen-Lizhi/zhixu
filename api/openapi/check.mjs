@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 const document = JSON.parse(readFileSync(new URL("./openapi.json", import.meta.url), "utf8"));
+const exportHandlerSource = readFileSync(new URL("../../internal/export/http/handler.go", import.meta.url), "utf8");
 if (document.openapi !== "3.1.0") {
   throw new Error(`expected OpenAPI 3.1.0, got ${document.openapi}`);
 }
@@ -58,6 +59,10 @@ const requiredOperations = [
   ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis", "post", "201"],
   ["/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}", "get", "200"],
+  ["/api/v1/exports", "post", "202"],
+  ["/api/v1/exports/{export_id}", "get", "200"],
+  ["/api/v1/exports/{export_id}/download", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/exports", "get", "200"],
   ["/api/v1/artifacts", "get", "200"],
   ["/api/v1/artifacts", "post", "201"],
   ["/api/v1/artifacts/{artifact_id}", "get", "200"],
@@ -740,6 +745,250 @@ function resolveRef(value) {
   return document.components.responses[value.$ref.slice(prefix.length)];
 }
 
+const expectedExportPaths = [
+  "/api/v1/exports",
+  "/api/v1/exports/{export_id}",
+  "/api/v1/exports/{export_id}/download",
+  "/api/v1/workspaces/{workspace_id}/exports",
+];
+const actualExportPaths = Object.keys(document.paths)
+  .filter((path) => path.startsWith("/api/v1/exports") || path === "/api/v1/workspaces/{workspace_id}/exports")
+  .sort();
+if (actualExportPaths.join(",") !== expectedExportPaths.slice().sort().join(",")) {
+  throw new Error("Export path inventory drifted from the four Router operations");
+}
+const expectedExportRouteRegistrations = [
+  "GET /exports/{export_id} handler.get",
+  "GET /exports/{export_id}/download handler.download",
+  "GET /workspaces/{workspace_id}/exports handler.list",
+  "POST /exports handler.create",
+];
+const actualExportRouteRegistrations = [...exportHandlerSource.matchAll(/router\.(Get|Post)\(\s*"([^"]+)"\s*,\s*handler\.([A-Za-z0-9_]+)\s*\)/g)]
+  .map((match) => `${match[1].toUpperCase()} ${match[2]} handler.${match[3]}`)
+  .sort();
+if (actualExportRouteRegistrations.join(",") !== expectedExportRouteRegistrations.join(",")) {
+  throw new Error("Export HTTP Router must register exactly create, detail, download and Collection list");
+}
+
+const exportOperations = [
+  [
+    "/api/v1/exports",
+    "post",
+    ["200", "202", "400", "401", "403", "404", "405", "409", "415", "500", "503"],
+    ["EXPORT_REQUEST_INVALID", "EXPORT_PERMISSION_DENIED", "EXPORT_NOT_FOUND", "EXPORT_IDEMPOTENCY_CONFLICT", "EXPORT_RESULT_INCONSISTENT", "EXPORT_DEPENDENCY_UNAVAILABLE"],
+  ],
+  [
+    "/api/v1/exports/{export_id}",
+    "get",
+    ["200", "400", "401", "403", "404", "405", "500", "503"],
+    ["EXPORT_REQUEST_INVALID", "EXPORT_NOT_FOUND", "EXPORT_RESULT_INCONSISTENT", "EXPORT_DEPENDENCY_UNAVAILABLE"],
+  ],
+  [
+    "/api/v1/exports/{export_id}/download",
+    "get",
+    ["200", "400", "401", "403", "404", "405", "409", "410", "500", "503"],
+    ["EXPORT_REQUEST_INVALID", "EXPORT_NOT_FOUND", "EXPORT_RESULT_NOT_READY", "EXPORT_EXPIRED", "EXPORT_RESULT_INCONSISTENT", "EXPORT_DEPENDENCY_UNAVAILABLE"],
+  ],
+  [
+    "/api/v1/workspaces/{workspace_id}/exports",
+    "get",
+    ["200", "400", "401", "403", "405", "500", "503"],
+    ["EXPORT_REQUEST_INVALID", "EXPORT_RESULT_INCONSISTENT", "EXPORT_DEPENDENCY_UNAVAILABLE"],
+  ],
+];
+for (const [path, method, statuses, errorCodes] of exportOperations) {
+  const operation = document.paths[path]?.[method];
+  if (!operation) throw new Error(`missing Export operation ${method.toUpperCase()} ${path}`);
+  if (operation.security !== undefined || operation["x-required-capability"] !== "READ_LOCAL") {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require READ_LOCAL`);
+  }
+  if (Object.keys(operation.responses).sort().join(",") !== statuses.slice().sort().join(",")) {
+    throw new Error(`${method.toUpperCase()} ${path} response status contract drifted`);
+  }
+  if (operation["x-error-codes"]?.join(",") !== errorCodes.join(",")) {
+    throw new Error(`${method.toUpperCase()} ${path} stable Export error codes drifted`);
+  }
+  for (const status of statuses.filter((status) => Number(status) >= 400)) {
+    if (resolveRef(operation.responses[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Export ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+
+const exportCreate = document.paths["/api/v1/exports"].post;
+if (exportCreate.parameters?.length !== 1 || exportCreate.parameters[0]?.$ref !== "#/components/parameters/IdempotencyKey" ||
+    exportCreate.requestBody?.required !== true || exportCreate.requestBody?.["x-max-body-bytes"] !== 65536 ||
+    exportCreate.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ExportCreateRequest") {
+  throw new Error("Export create must retain its strict 64 KiB idempotent JSON command contract");
+}
+for (const status of ["200", "202"]) {
+  const response = exportCreate.responses[status];
+  const schema = response.content?.["application/json"]?.schema;
+  if (schema?.allOf?.length !== 2 || schema.allOf[0]?.$ref !== "#/components/schemas/ExportCreateResponse" ||
+      schema.allOf[1]?.properties?.replayed?.const !== (status === "200") ||
+      response.headers?.Location?.schema?.format !== "uri-reference" ||
+      response.headers?.Location?.schema?.pattern !== "^/api/v1/exports/[0-9a-f-]{36}\\?workspace_id=[0-9a-f-]{36}$" ||
+      response.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+    throw new Error(`Export create ${status} response lost Location, no-store or its strict response schema`);
+  }
+}
+if (Object.keys(exportCreate.responses).filter((status) => status.startsWith("2")).join(",") !== "200,202") {
+  throw new Error("Export create must use only 202 for first acceptance and 200 for exact replay");
+}
+
+for (const path of ["/api/v1/exports/{export_id}", "/api/v1/exports/{export_id}/download"]) {
+  const parameter = document.paths[path].parameters?.[0];
+  const query = document.paths[path].get.parameters;
+  if (document.paths[path].parameters?.length !== 1 || parameter?.name !== "export_id" || parameter.in !== "path" ||
+      parameter.required !== true || parameter.schema?.type !== "string" || parameter.schema?.format !== "uuid" ||
+      query?.length !== 1 || query[0]?.$ref !== "#/components/parameters/WorkspaceIDQuery") {
+    throw new Error(`${path} must retain strict Export and Workspace identity parameters`);
+  }
+}
+const exportGet = document.paths["/api/v1/exports/{export_id}"].get;
+if (exportGet.responses["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ExportJob" ||
+    exportGet.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+  throw new Error("Export detail must return the strict no-store ExportJob projection");
+}
+
+const exportListPath = document.paths["/api/v1/workspaces/{workspace_id}/exports"];
+const exportList = exportListPath.get;
+const exportListWorkspace = exportListPath.parameters?.[0];
+const exportCollection = exportList.parameters?.find((parameter) => parameter.name === "collection_id");
+const exportLimit = exportList.parameters?.find((parameter) => parameter.name === "limit")?.schema;
+const exportCursor = exportList.parameters?.find((parameter) => parameter.name === "cursor")?.schema;
+if (exportListPath.parameters?.length !== 1 || exportListWorkspace?.name !== "workspace_id" || exportListWorkspace.in !== "path" ||
+    exportListWorkspace.required !== true || exportListWorkspace.schema?.type !== "string" || exportListWorkspace.schema?.format !== "uuid" ||
+    exportList.parameters?.length !== 3 || exportCollection?.in !== "query" || exportCollection.required !== true ||
+    exportCollection.schema?.type !== "string" || exportCollection.schema?.format !== "uuid" ||
+    exportLimit?.type !== "integer" || exportLimit.minimum !== 1 || exportLimit.maximum !== 100 || exportLimit.default !== 50 ||
+    exportCursor?.type !== "string" || exportCursor.minLength !== 1 || exportCursor.maxLength !== 4096 || exportCursor["x-max-utf8-bytes"] !== 4096 ||
+    exportList.responses["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ExportPage" ||
+    exportList.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+  throw new Error("Collection Export list identity, cursor, limit or response contract drifted");
+}
+
+const exportDownload = document.paths["/api/v1/exports/{export_id}/download"].get;
+const exportDownloadResponse = exportDownload.responses["200"];
+const exportDownloadHeaders = exportDownloadResponse.headers;
+const exportDownloadMediaTypes = Object.keys(exportDownloadResponse.content ?? {}).sort();
+if (exportDownloadMediaTypes.join(",") !== "application/json,text/markdown" ||
+    exportDownloadMediaTypes.some((mediaType) => exportDownloadResponse.content[mediaType]?.schema?.type !== "string" || exportDownloadResponse.content[mediaType]?.schema?.format !== "binary") ||
+    exportDownloadHeaders?.["Content-Disposition"]?.schema?.pattern !== "^attachment; filename=\\\"collection-[0-9a-f-]{36}-[0-9a-f-]{36}\\.(?:md|json)\\\"$" ||
+    exportDownloadHeaders?.["Content-Length"]?.schema?.type !== "integer" || exportDownloadHeaders?.["Content-Length"]?.schema?.minimum !== 0 ||
+    exportDownloadHeaders?.["Cache-Control"]?.schema?.const !== "private, no-store" ||
+    exportDownloadHeaders?.["X-Content-Type-Options"]?.schema?.const !== "nosniff" ||
+    exportDownload.responses["410"]?.$ref !== "#/components/responses/Gone") {
+  throw new Error("Export download media type, attachment, length, cache, nosniff or expiry contract drifted");
+}
+
+for (const schemaName of ["ExportCreateRequest", "ExportCreateResponse", "ExportJob", "ExportPage"]) {
+  if (schemas[schemaName]?.type !== "object" || schemas[schemaName].additionalProperties !== false) {
+    throw new Error(`${schemaName} must remain a strict object schema`);
+  }
+}
+const exportCreateRequest = schemas.ExportCreateRequest;
+const exportCreateRequestProperties = ["workspace_id", "kind", "collection_id", "collection_version", "query_hash", "fields", "redaction_policy", "include_sensitive", "expires_in_seconds"];
+const exportFields = ["object_type", "id", "title", "summary", "status", "topic", "source", "relations", "health", "confidence", "created_at", "updated_at", "applicability"];
+if (exportCreateRequest.required?.join(",") !== "workspace_id,kind,collection_id,collection_version,query_hash" ||
+    Object.keys(exportCreateRequest.properties).join(",") !== exportCreateRequestProperties.join(",") ||
+    exportCreateRequest.properties.workspace_id.format !== "uuid" || exportCreateRequest.properties.collection_id.format !== "uuid" ||
+    exportCreateRequest.properties.collection_version.minimum !== 1 || exportCreateRequest.properties.query_hash.pattern !== "^[0-9a-f]{64}$" ||
+    exportCreateRequest.properties.kind.enum?.join(",") !== "MARKDOWN,METADATA_JSON" ||
+    exportCreateRequest.properties.fields.minItems !== 1 || exportCreateRequest.properties.fields.maxItems !== 32 ||
+    exportCreateRequest.properties.fields.uniqueItems !== true || exportCreateRequest.properties.fields.items.enum?.join(",") !== exportFields.join(",") ||
+    exportCreateRequest.properties.redaction_policy.enum?.join(",") !== "MASKED,FULL" || exportCreateRequest.properties.redaction_policy.default !== "MASKED" ||
+    exportCreateRequest.properties.include_sensitive.default !== false || exportCreateRequest.properties.expires_in_seconds.minimum !== 1 ||
+    exportCreateRequest.properties.expires_in_seconds.maximum !== 604800 || exportCreateRequest.properties.expires_in_seconds.default !== 86400 ||
+    exportCreateRequest.properties.schema_version !== undefined) {
+  throw new Error("ExportCreateRequest public fields, defaults, bounds or fixed schema ownership drifted");
+}
+const exportRequestFullRule = exportCreateRequest.allOf?.find((rule) => rule.if?.properties?.redaction_policy?.const === "FULL");
+const exportRequestSensitiveRule = exportCreateRequest.allOf?.find((rule) => rule.if?.properties?.include_sensitive?.const === true);
+if (exportRequestFullRule?.then?.properties?.include_sensitive?.const !== true || !exportRequestFullRule.then.required?.includes("include_sensitive") ||
+    exportRequestSensitiveRule?.then?.properties?.redaction_policy?.const !== "FULL" || !exportRequestSensitiveRule.then.required?.includes("redaction_policy")) {
+  throw new Error("Export FULL and include_sensitive request invariants drifted");
+}
+
+const exportCreateResponse = schemas.ExportCreateResponse;
+if (exportCreateResponse.required?.join(",") !== "job,replayed,dispatch_pending" ||
+    Object.keys(exportCreateResponse.properties).join(",") !== "job,replayed,dispatch_pending" ||
+    exportCreateResponse.properties.job?.$ref !== "#/components/schemas/ExportJob" ||
+    exportCreateResponse.properties.replayed?.type !== "boolean" || exportCreateResponse.properties.dispatch_pending?.type !== "boolean") {
+  throw new Error("ExportCreateResponse replay or dispatch projection drifted");
+}
+
+const exportJob = schemas.ExportJob;
+const exportJobProperties = [
+  "id", "version", "workspace_id", "kind", "schema_version", "collection_id", "collection_version", "query_hash",
+  "read_model_revision", "exact_count", "fields", "redaction_policy", "include_sensitive", "status", "file_hash", "file_size",
+  "error_code", "error_message", "attempt_count", "expires_at", "created_at", "updated_at", "started_at", "completed_at",
+  "download_count", "last_downloaded_at", "download_url",
+];
+const exportJobRequired = [
+  "id", "version", "workspace_id", "kind", "schema_version", "collection_id", "collection_version", "query_hash", "fields",
+  "redaction_policy", "include_sensitive", "status", "file_size", "attempt_count", "expires_at", "created_at", "updated_at", "download_count",
+];
+if (Object.keys(exportJob.properties).join(",") !== exportJobProperties.join(",") ||
+    exportJob.required?.join(",") !== exportJobRequired.join(",") ||
+    exportJob.properties.id.format !== "uuid" || exportJob.properties.workspace_id.format !== "uuid" || exportJob.properties.collection_id.format !== "uuid" ||
+    exportJob.properties.version.minimum !== 1 || exportJob.properties.collection_version.minimum !== 1 ||
+    exportJob.properties.kind.enum?.join(",") !== "MARKDOWN,METADATA_JSON" || exportJob.properties.schema_version.const !== "export/v1" ||
+    exportJob.properties.query_hash.pattern !== "^[0-9a-f]{64}$" || exportJob.properties.read_model_revision.pattern !== "^[0-9a-f]{64}$" ||
+    exportJob.properties.file_hash.pattern !== "^[0-9a-f]{64}$" || exportJob.properties.exact_count.maximum !== 10000 ||
+    exportJob.properties.fields.minItems !== 1 || exportJob.properties.fields.maxItems !== 32 || exportJob.properties.fields.uniqueItems !== true ||
+    exportJob.properties.fields.items.enum?.join(",") !== exportFields.join(",") ||
+    exportJob.properties.redaction_policy.enum?.join(",") !== "MASKED,FULL" ||
+    exportJob.properties.status.enum?.join(",") !== "PENDING,RUNNING,SUCCEEDED,FAILED,EXPIRED,CANCELLED") {
+  throw new Error("ExportJob identity, snapshot, field or status projection drifted");
+}
+if (exportJob.dependentRequired?.read_model_revision?.join(",") !== "exact_count,file_hash" ||
+    exportJob.dependentRequired?.exact_count?.join(",") !== "read_model_revision,file_hash" ||
+    exportJob.dependentRequired?.file_hash?.join(",") !== "read_model_revision,exact_count") {
+  throw new Error("ExportJob prepared result fields must remain an indivisible public binding");
+}
+const exportJobMaskedRule = exportJob.allOf?.find((rule) => rule.if?.properties?.redaction_policy?.const === "MASKED");
+const exportJobFullRule = exportJob.allOf?.find((rule) => rule.if?.properties?.redaction_policy?.const === "FULL");
+const exportJobDownloadRule = exportJob.allOf?.find((rule) => rule.if?.properties?.download_count?.const === 0);
+if (exportJobMaskedRule?.then?.properties?.include_sensitive?.const !== false || exportJobFullRule?.then?.properties?.include_sensitive?.const !== true ||
+    exportJobDownloadRule?.then?.not?.required?.[0] !== "last_downloaded_at" ||
+    exportJobDownloadRule?.else?.required?.[0] !== "last_downloaded_at" ||
+    exportJobDownloadRule?.else?.properties?.status?.enum?.join(",") !== "SUCCEEDED,EXPIRED") {
+  throw new Error("ExportJob redaction or historical download-stat invariants drifted");
+}
+const exportStatusRules = new Map((exportJob.oneOf ?? []).map((rule) => [rule.properties?.status?.const, rule]));
+if ([...exportStatusRules.keys()].join(",") !== "PENDING,RUNNING,SUCCEEDED,FAILED,EXPIRED,CANCELLED") {
+  throw new Error("ExportJob must define exactly one strict schema branch for every public status");
+}
+const exportForbiddenFields = (rule) => new Set((rule?.not?.anyOf ?? []).flatMap((entry) => entry.required ?? []));
+const exportPendingRule = exportStatusRules.get("PENDING");
+const exportRunningRule = exportStatusRules.get("RUNNING");
+const exportSucceededRule = exportStatusRules.get("SUCCEEDED");
+const exportFailedRule = exportStatusRules.get("FAILED");
+const exportExpiredRule = exportStatusRules.get("EXPIRED");
+const exportCancelledRule = exportStatusRules.get("CANCELLED");
+if (exportPendingRule?.properties?.file_size?.const !== 0 || exportPendingRule?.properties?.download_count?.const !== 0 ||
+    !["read_model_revision", "exact_count", "file_hash", "started_at", "completed_at", "error_code", "error_message", "last_downloaded_at", "download_url"].every((field) => exportForbiddenFields(exportPendingRule).has(field)) ||
+    !exportRunningRule?.required?.includes("started_at") || exportRunningRule?.properties?.download_count?.const !== 0 ||
+    !["completed_at", "error_code", "error_message", "last_downloaded_at", "download_url"].every((field) => exportForbiddenFields(exportRunningRule).has(field)) ||
+    !["read_model_revision", "exact_count", "file_hash", "started_at", "completed_at", "download_url"].every((field) => exportSucceededRule?.required?.includes(field)) ||
+    !["error_code", "error_message"].every((field) => exportForbiddenFields(exportSucceededRule).has(field)) ||
+    !["started_at", "completed_at", "error_code", "error_message"].every((field) => exportFailedRule?.required?.includes(field)) ||
+    exportFailedRule?.properties?.download_count?.const !== 0 || !exportForbiddenFields(exportFailedRule).has("download_url") ||
+    !exportExpiredRule?.required?.includes("completed_at") || !["error_code", "error_message", "download_url"].every((field) => exportForbiddenFields(exportExpiredRule).has(field)) ||
+    ["read_model_revision", "exact_count", "file_hash", "last_downloaded_at"].some((field) => exportForbiddenFields(exportExpiredRule).has(field)) ||
+    exportCancelledRule?.properties?.download_count?.const !== 0 || !["error_code", "error_message", "last_downloaded_at", "download_url"].every((field) => exportForbiddenFields(exportCancelledRule).has(field))) {
+  throw new Error("ExportJob status/result/expiry field combinations drifted");
+}
+
+const exportPage = schemas.ExportPage;
+if (exportPage.required?.join(",") !== "workspace_id,items" || Object.keys(exportPage.properties).join(",") !== "workspace_id,items,next_cursor" ||
+    exportPage.properties.workspace_id.format !== "uuid" || exportPage.properties.items.maxItems !== 100 ||
+    exportPage.properties.items.items?.$ref !== "#/components/schemas/ExportJob" ||
+    exportPage.properties.next_cursor.minLength !== 1 || exportPage.properties.next_cursor.maxLength !== 4096 ||
+    exportPage.properties.next_cursor["x-max-utf8-bytes"] !== 4096) {
+  throw new Error("ExportPage Workspace, item or opaque cursor contract drifted");
+}
 for (const schemaName of [
   "CreateConversationRequest", "Conversation", "ConversationPage", "QuestionScopeRequest", "QuestionScope", "SubmitQuestionRequest", "Question",
   "WorkflowProjection", "QuestionAcceptance", "AnswerCitation", "RAGResultCitation", "RAGAssertion", "RAGConflictPosition", "RelatedTopic", "RAGAnswerPayload", "RAGAnswerResult", "RefusalResult",

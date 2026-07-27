@@ -297,3 +297,34 @@ Correct: getProposal(expectedWorkspace,id) fail-closed；首次批准直接调�
 Wrong: 只检查 JSON primitive，接受 schema_version="1"、operation="create"、fingerprint="fp"。
 Correct: 按 OpenAPI 校验 knowledge-relation-change/v1、CREATE_RELATION、UUID/hash/版本与数组界限。
 ```
+
+## Scenario: M9-03 Smart Collection Export Wire Boundary
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/exports.ts`、Collection Export Query/Panel、`export.*` SSE resource、Export OpenAPI 或下载
+  响应时应用。该文件是唯一 Export HTTP wire owner，Feature/Component 不得读取 snake_case、解析 cursor、
+  强转 Job 或自己解释下载 header。
+- 公共 `ExportKind` 只接受 `MARKDOWN|METADATA_JSON`，`schema_version` 固定 `export/v1`。附件、
+  `EVALUATION_JSON`、`AUDIT_JSON` 不属于该判别联合，不能用未知枚举、空 result 或可选字段兼容。
+
+### 2. Contracts
+
+- 从 `unknown` 严格解码 Create Result、Job、List、Problem 与下载响应；拒绝未知/重复字段、非法 UUID、
+  RFC3339、64 位小写 hash、正整数、cursor、field、redaction、kind/status，及 Workspace/Collection/version/
+  query hash/download URL 的跨绑定。
+- Job 必须穷尽 `PENDING|RUNNING|SUCCEEDED|FAILED|EXPIRED|CANCELLED`，并校验状态字段组合：成功结果才有
+  完整 revision/count/hash/size/download URL；失败才有受限错误；未 prepared 或过期任务不能把结果字段、下载 URL
+  或空字符串伪装为可下载。`CANCELLED` 只接受历史兼容投影。
+- Create Request 只允许当前 Workspace/Collection/version/query hash、两个 kind、安全字段和一个有效
+  Idempotency-Key；首版固定 `MASKED`、不发送敏感开关。客户端不重建成员集合、read-model revision 或文件路径。
+- 下载必须通过 `authFetch`，并验证 kind 对应的 Content-Type、受控 attachment 文件名、Content-Length、
+  `private, no-store`、`nosniff` 和 Blob size；非 2xx 先按严格 Problem 解码，不能把 `410 EXPORT_EXPIRED`
+  当作空 Blob 或浏览器已下载成功。
+
+### 3. Tests Required
+
+- normal/empty/unknown/duplicate、UUID/time/hash/enum/field、状态字段冲突、跨 Workspace/Collection binding、
+  `200` replay/`202` create、`dispatch_pending`、Problem、Abort 和下载 header/size。
+- Query/Component 测试覆盖同 key response-loss、终态停止轮询、SSE 失效、失败/过期新建和历史 `CANCELLED`。
+  测试 fixture 只能使用两个已交付 kind，且必须明确 AC-33 附件部分仍未完成。

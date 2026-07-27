@@ -5099,8 +5099,254 @@
           }
         }
       }
+    },
+    "/api/v1/exports": {
+      "post": {
+        "operationId": "createExport",
+        "description": "Creates a recoverable Smart Collection export. A new job returns 202; an exact Idempotency-Key replay returns the original job with 200.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": [
+          "EXPORT_REQUEST_INVALID",
+          "EXPORT_PERMISSION_DENIED",
+          "EXPORT_NOT_FOUND",
+          "EXPORT_IDEMPOTENCY_CONFLICT",
+          "EXPORT_RESULT_INCONSISTENT",
+          "EXPORT_DEPENDENCY_UNAVAILABLE"
+        ],
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 65536,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ExportCreateRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact idempotent replay of the persisted export job.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string",
+                  "format": "uri-reference",
+                  "pattern": "^/api/v1/exports/[0-9a-f-]{36}\\?workspace_id=[0-9a-f-]{36}$"
+                }
+              },
+              "Cache-Control": { "schema": { "const": "no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ExportCreateResponse" },
+                    { "properties": { "replayed": { "const": true } } }
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "A new durable export job was accepted for asynchronous execution.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string",
+                  "format": "uri-reference",
+                  "pattern": "^/api/v1/exports/[0-9a-f-]{36}\\?workspace_id=[0-9a-f-]{36}$"
+                }
+              },
+              "Cache-Control": { "schema": { "const": "no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ExportCreateResponse" },
+                    { "properties": { "replayed": { "const": false } } }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/exports/{export_id}": {
+      "parameters": [
+        {
+          "name": "export_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "getExport",
+        "description": "Returns the strict public projection of one Workspace-bound export job without exposing server file paths.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": [
+          "EXPORT_REQUEST_INVALID",
+          "EXPORT_NOT_FOUND",
+          "EXPORT_RESULT_INCONSISTENT",
+          "EXPORT_DEPENDENCY_UNAVAILABLE"
+        ],
+        "parameters": [
+          { "$ref": "#/components/parameters/WorkspaceIDQuery" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current export job projection. Expired jobs remain readable as EXPIRED history.",
+            "headers": {
+              "Cache-Control": { "schema": { "const": "no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ExportJob" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/exports/{export_id}/download": {
+      "parameters": [
+        {
+          "name": "export_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "downloadExport",
+        "description": "Revalidates the persisted result binding before preparing a Markdown or metadata JSON attachment. A successful response records server-side download preparation, not complete client receipt.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": [
+          "EXPORT_REQUEST_INVALID",
+          "EXPORT_NOT_FOUND",
+          "EXPORT_RESULT_NOT_READY",
+          "EXPORT_EXPIRED",
+          "EXPORT_RESULT_INCONSISTENT",
+          "EXPORT_DEPENDENCY_UNAVAILABLE"
+        ],
+        "parameters": [
+          { "$ref": "#/components/parameters/WorkspaceIDQuery" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified export bytes with a safe attachment filename.",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^attachment; filename=\\\"collection-[0-9a-f-]{36}-[0-9a-f-]{36}\\.(?:md|json)\\\"$"
+                }
+              },
+              "Content-Length": {
+                "schema": { "type": "integer", "minimum": 0 }
+              },
+              "Cache-Control": { "schema": { "const": "private, no-store" } },
+              "X-Content-Type-Options": { "schema": { "const": "nosniff" } }
+            },
+            "content": {
+              "text/markdown": {
+                "schema": { "type": "string", "format": "binary" }
+              },
+              "application/json": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "410": { "$ref": "#/components/responses/Gone" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/exports": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "listCollectionExports",
+        "description": "Lists export jobs for one required Smart Collection using a stable opaque cursor bound to Workspace, Collection and limit.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": [
+          "EXPORT_REQUEST_INVALID",
+          "EXPORT_RESULT_INCONSISTENT",
+          "EXPORT_DEPENDENCY_UNAVAILABLE"
+        ],
+        "parameters": [
+          {
+            "name": "collection_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace- and Collection-bound export job page.",
+            "headers": {
+              "Cache-Control": { "schema": { "const": "no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ExportPage" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
     }
-  },
+},
   "components": {
     "securitySchemes": {
       "sessionCookie": {
@@ -5329,8 +5575,18 @@
             }
           }
         }
+      },
+      "Gone": {
+        "description": "The requested result has expired and is no longer downloadable.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
       }
-    },
+},
     "schemas": {
       "Liveness": {
         "type": "object",
@@ -13958,7 +14214,297 @@
           }
         },
         "additionalProperties": false
+      },
+      "ExportCreateRequest": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "kind",
+          "collection_id",
+          "collection_version",
+          "query_hash"
+        ],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "kind": { "type": "string", "enum": ["MARKDOWN", "METADATA_JSON"] },
+          "collection_id": { "type": "string", "format": "uuid" },
+          "collection_version": { "type": "integer", "minimum": 1 },
+          "query_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "fields": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "object_type",
+                "id",
+                "title",
+                "summary",
+                "status",
+                "topic",
+                "source",
+                "relations",
+                "health",
+                "confidence",
+                "created_at",
+                "updated_at",
+                "applicability"
+              ]
+            }
+          },
+          "redaction_policy": { "type": "string", "enum": ["MASKED", "FULL"], "default": "MASKED" },
+          "include_sensitive": { "type": "boolean", "default": false },
+          "expires_in_seconds": { "type": "integer", "minimum": 1, "maximum": 604800, "default": 86400 }
+        },
+        "allOf": [
+          {
+            "if": {
+              "required": ["redaction_policy"],
+              "properties": { "redaction_policy": { "const": "FULL" } }
+            },
+            "then": {
+              "required": ["include_sensitive"],
+              "properties": { "include_sensitive": { "const": true } }
+            }
+          },
+          {
+            "if": {
+              "required": ["include_sensitive"],
+              "properties": { "include_sensitive": { "const": true } }
+            },
+            "then": {
+              "required": ["redaction_policy"],
+              "properties": { "redaction_policy": { "const": "FULL" } }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ExportCreateResponse": {
+        "type": "object",
+        "required": ["job", "replayed", "dispatch_pending"],
+        "properties": {
+          "job": { "$ref": "#/components/schemas/ExportJob" },
+          "replayed": { "type": "boolean" },
+          "dispatch_pending": {
+            "type": "boolean",
+            "description": "True only when the durable PENDING job exists but immediate River dispatch was not confirmed."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExportJob": {
+        "type": "object",
+        "required": [
+          "id",
+          "version",
+          "workspace_id",
+          "kind",
+          "schema_version",
+          "collection_id",
+          "collection_version",
+          "query_hash",
+          "fields",
+          "redaction_policy",
+          "include_sensitive",
+          "status",
+          "file_size",
+          "attempt_count",
+          "expires_at",
+          "created_at",
+          "updated_at",
+          "download_count"
+        ],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "version": { "type": "integer", "minimum": 1 },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "kind": { "type": "string", "enum": ["MARKDOWN", "METADATA_JSON"] },
+          "schema_version": { "const": "export/v1" },
+          "collection_id": { "type": "string", "format": "uuid" },
+          "collection_version": { "type": "integer", "minimum": 1 },
+          "query_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "read_model_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "exact_count": { "type": "integer", "minimum": 0, "maximum": 10000 },
+          "fields": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "object_type",
+                "id",
+                "title",
+                "summary",
+                "status",
+                "topic",
+                "source",
+                "relations",
+                "health",
+                "confidence",
+                "created_at",
+                "updated_at",
+                "applicability"
+              ]
+            }
+          },
+          "redaction_policy": { "type": "string", "enum": ["MASKED", "FULL"] },
+          "include_sensitive": { "type": "boolean" },
+          "status": { "type": "string", "enum": ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "EXPIRED", "CANCELLED"] },
+          "file_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "file_size": { "type": "integer", "minimum": 0 },
+          "error_code": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "error_message": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 },
+          "attempt_count": { "type": "integer", "minimum": 0 },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "started_at": { "type": "string", "format": "date-time" },
+          "completed_at": { "type": "string", "format": "date-time" },
+          "download_count": { "type": "integer", "minimum": 0 },
+          "last_downloaded_at": { "type": "string", "format": "date-time" },
+          "download_url": {
+            "type": "string",
+            "format": "uri-reference",
+            "pattern": "^/api/v1/exports/[0-9a-f-]{36}/download\\?workspace_id=[0-9a-f-]{36}$"
+          }
+        },
+        "dependentRequired": {
+          "read_model_revision": ["exact_count", "file_hash"],
+          "exact_count": ["read_model_revision", "file_hash"],
+          "file_hash": ["read_model_revision", "exact_count"]
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "redaction_policy": { "const": "MASKED" } } },
+            "then": { "properties": { "include_sensitive": { "const": false } } }
+          },
+          {
+            "if": { "properties": { "redaction_policy": { "const": "FULL" } } },
+            "then": { "properties": { "include_sensitive": { "const": true } } }
+          },
+          {
+            "if": { "not": { "required": ["file_hash"] } },
+            "then": { "properties": { "file_size": { "const": 0 } } }
+          },
+          {
+            "if": {
+              "required": ["download_count"],
+              "properties": { "download_count": { "const": 0 } }
+            },
+            "then": { "not": { "required": ["last_downloaded_at"] } },
+            "else": {
+              "required": ["last_downloaded_at"],
+              "properties": { "status": { "enum": ["SUCCEEDED", "EXPIRED"] } }
+            }
+          }
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "status": { "const": "PENDING" },
+              "file_size": { "const": 0 },
+              "download_count": { "const": 0 }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["read_model_revision"] },
+                { "required": ["exact_count"] },
+                { "required": ["file_hash"] },
+                { "required": ["started_at"] },
+                { "required": ["completed_at"] },
+                { "required": ["error_code"] },
+                { "required": ["error_message"] },
+                { "required": ["last_downloaded_at"] },
+                { "required": ["download_url"] }
+              ]
+            }
+          },
+          {
+            "required": ["started_at"],
+            "properties": {
+              "status": { "const": "RUNNING" },
+              "download_count": { "const": 0 }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["completed_at"] },
+                { "required": ["error_code"] },
+                { "required": ["error_message"] },
+                { "required": ["last_downloaded_at"] },
+                { "required": ["download_url"] }
+              ]
+            }
+          },
+          {
+            "required": ["read_model_revision", "exact_count", "file_hash", "started_at", "completed_at", "download_url"],
+            "properties": { "status": { "const": "SUCCEEDED" } },
+            "not": {
+              "anyOf": [
+                { "required": ["error_code"] },
+                { "required": ["error_message"] }
+              ]
+            }
+          },
+          {
+            "required": ["started_at", "completed_at", "error_code", "error_message"],
+            "properties": {
+              "status": { "const": "FAILED" },
+              "download_count": { "const": 0 }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["last_downloaded_at"] },
+                { "required": ["download_url"] }
+              ]
+            }
+          },
+          {
+            "required": ["completed_at"],
+            "properties": { "status": { "const": "EXPIRED" } },
+            "not": {
+              "anyOf": [
+                { "required": ["error_code"] },
+                { "required": ["error_message"] },
+                { "required": ["download_url"] }
+              ]
+            }
+          },
+          {
+            "properties": {
+              "status": { "const": "CANCELLED" },
+              "download_count": { "const": 0 }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["error_code"] },
+                { "required": ["error_message"] },
+                { "required": ["last_downloaded_at"] },
+                { "required": ["download_url"] }
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ExportPage": {
+        "type": "object",
+        "required": ["workspace_id", "items"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": { "$ref": "#/components/schemas/ExportJob" }
+          },
+          "next_cursor": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 }
+        },
+        "additionalProperties": false
       }
-    }
+}
   }
 }

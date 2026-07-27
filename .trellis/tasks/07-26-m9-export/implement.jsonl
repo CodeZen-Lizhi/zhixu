@@ -1,0 +1,13 @@
+{"file":".trellis/tasks/07-26-m9-export/research/current-state.md","reason":"M9-03 现有链路、阻断缺口、前端恢复边界与 prepared result 推荐协议。"}
+{"file":".trellis/spec/backend/index.md","reason":"后端模块边界、Composition Root、数据库与质量规范入口。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"READ_LOCAL、认证主体、Workspace 隔离、路径与 Secret 安全边界。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"PostgreSQL 事务、复合绑定、迁移、append-only 与恢复约束。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"稳定 Domain error、Problem Details、404/409/410/503 和 fail-closed 规则。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Export/Audit 日志脱敏、actor/correlation 与不可把日志替代审计的约束。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go race、真实 PostgreSQL、Worker 恢复、迁移与独立审查门禁。"}
+{"file":".trellis/spec/frontend/index.md","reason":"Collection 内嵌功能、API boundary 与前端分层入口。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Workspace-scoped server state、Query key、SSE/轮询恢复和 cache 清理。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"unknown wire JSON 严格 decoder、资源绑定与 fail-closed 规则。"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"异步状态、键盘、焦点、错误恢复和可访问性组件约束。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"前端全量命令、桌面/移动、overflow、console 与浏览器 smoke 门禁。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"核对 UI 到 API/Application/PostgreSQL/File/Audit 的双向数据流。"}

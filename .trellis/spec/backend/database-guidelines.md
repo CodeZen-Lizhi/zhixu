@@ -1416,3 +1416,54 @@ Correct: 每个 cursor 绑定 version/kind/workspace/filters；后端授权边�
 Wrong: index_manifest_source 按 source_version_id 连接 excluded 行，或选最新 created_at manifest。
 Correct: 先锁定 Workspace active index，再按 source_id 连接；included 额外匹配 source_version_id，excluded 保持 source 级语义。
 ```
+
+## Scenario: M9-03 Smart Collection Export Persistence And Recovery
+
+### 1. Scope / Trigger
+
+- 修改 `ops.export_job`、`00036_export_hardening.sql`、Export Repository、Job cursor、生命周期事件、下载 Audit、
+  Worker recovery 或 cleanup 时应用。
+- 该表保存 Smart Collection `MARKDOWN|METADATA_JSON` 的 Job 事实；附件、`EVALUATION_JSON`、`AUDIT_JSON`
+  没有 M9-03 的持久内容源，不能靠枚举、空 payload 或迁移列把它们标为已交付。
+
+### 2. Contracts
+
+- `ops.export_job` 是 request hash/TTL、Collection scope、状态/version、lease、冻结 revision/count、prepared
+  staging/final binding、hash/size、过期/cleanup 与下载统计的唯一事实源。River 表只表示 transport，文件系统只保存
+  受 Job binding 约束的结果。
+- Create 必须在同一事务中对 `(workspace_id,idempotency_key)` 取 advisory lock，先 exact replay，再锁定当前
+  Active Collection。request hash 覆盖规范化请求；`expires_at` 只在首次插入时按数据库时间计算，replay 不延长 TTL。
+- List 使用 `(created_at DESC,id DESC)` keyset，并把 Workspace、Collection ID 与 limit 编入 opaque cursor identity。
+  所有根查询参数化并带 Workspace predicate；Get/List 的数据库时间归约 `PENDING|RUNNING|SUCCEEDED|FAILED` 到
+  `EXPIRED`，不能仅依赖前端刷新。
+- Claim/Prepare/Complete/Fail 的更新必须同时比较 version、lease owner、数据库当前时间的 lease 与 `expires_at`。
+  Prepared binding 一次写入 `read_model_revision`、exact count、staging/final 相对路径、SHA-256 和 size；后续
+  状态转换只接受完全相同 binding。旧 owner、到期 Job 或漂移 snapshot 不能提交终态。
+- `EXPIRED` Job 的 cleanup 使用持久 status/attempt/error/file_deleted_at 重试；Job/hash/download/Audit 历史不删除。
+  orphan 查询只能确认受控 staging 命名空间中没有 prepared binding 的文件，不能扫描或删除普通 Workspace 文件。
+- 成功下载在一个 PostgreSQL transaction 中 CAS 增加 `download_count/last_downloaded_at`，并以当前 actor 追加
+  `ops.audit_event(action=export.download)`。Audit metadata 只含 Export ID、hash、size 与服务端已准备返回的 outcome；
+  不记录正文、Secret、绝对路径或“客户端已经收完”。
+- 每次 create/claim/prepare/complete/fail/expire/cleanup 的 `ops.server_event` 与 Job 转移同事务追加；
+  `source_event_ref=export.<stage>:<id>:v<version>` 保证事务重试不会形成第二事件。
+- 迁移仅前向扩展；存在 Export Job 时 Down 必须以 SQLSTATE `55000` 拒绝。发布回滚保留 Job、Audit 和文件，采用
+  forward fix，不能删除事实恢复旧 schema。
+
+### 3. Required Tests
+
+- 空库/重复 Up、空数据 Down→Up、有 Export Job 的 guarded Down；约束覆盖 scope、TTL、prepared binding、状态、
+  cleanup、下载计数和 append-only Audit。
+- 真实 PostgreSQL 覆盖同 key 并发/response-loss、Collection 变化后的 exact replay、跨 Workspace、Collection
+  cursor、数据库时间 lease/TTL、双 Worker fence、Prepare/Complete 崩溃窗口、过期/cleanup retry 与下载并发。
+- 生产 SQL 使用显式列、参数绑定和对应索引；解释计划必须验证 Collection list、expiry/recovery、cleanup 和
+  prepared staging lookup 不退化为无界扫描。
+
+### 4. Wrong vs Correct
+
+```text
+Wrong: 先检查当前 Collection，再读取同 key Job；响应丢失后 Collection 变化会制造冲突或第二个任务。
+Correct: advisory lock 下先 exact replay；只有不存在既有 Job 时才验证当前 Active Collection 并插入。
+
+Wrong: Complete 只校验进程 owner，下载统计与 Audit 分两次提交。
+Correct: 所有 lifecycle fence 使用 PostgreSQL 当前时间；统计 CAS 和 export.download Audit 在同一事务提交。
+```

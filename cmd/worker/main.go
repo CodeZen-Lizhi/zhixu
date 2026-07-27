@@ -31,6 +31,11 @@ import (
 	collectionapplication "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	conversationpostgres "github.com/CodeZen-Lizhi/zhixu/internal/conversation/adapter/postgres"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
+	exportcollection "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/collection"
+	exportlocalfs "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/localfs"
+	exportpostgres "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/postgres"
+	exportriver "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/river"
+	exportapplication "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphpostgres "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/postgres"
 	graphworkflow "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/workflow"
@@ -85,7 +90,16 @@ const (
 	timelineProjectionDispatchErrorCode = "KNOWLEDGE_TIMELINE_PROJECTION_FAILED"
 	timelineProjectionStartupPhase      = "startup"
 	timelineProjectionPeriodicPhase     = "periodic"
+	exportMaintenanceStartupPhase       = "startup"
+	exportMaintenancePeriodicPhase      = "periodic"
+	exportOrphanWorkspaceBatch          = 25
 )
+
+type exportMaintenanceService interface {
+	Recover(context.Context, foundation.ID, int) (int, error)
+	Sweep(context.Context, int) (exportapplication.SweepResult, error)
+	SweepOrphansAll(context.Context, foundation.ID, int, int, time.Duration) (exportapplication.OrphanSweepResult, error)
+}
 
 type workerComponents struct {
 	safeWriteback   *changecontrolworkflow.Node
@@ -103,6 +117,8 @@ type workerComponents struct {
 	healthSchedule  *healthapplication.ScheduleService
 	healthAffected  *healthapplication.AffectedChangeDispatcher
 	timelineProject *knowledgeapplication.TimelineProjectionDispatcher
+	exportWorker    *exportriver.Worker
+	exportService   *exportapplication.Service
 	fatalInvariants <-chan error
 }
 
@@ -203,7 +219,7 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetRiverSchemaOK(true)
 	readiness.SetDefinitionsOK(components.definitions != nil)
 	readiness.SetExecutorsOK(components.executors != nil)
-	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
+	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.exportWorker != nil && components.exportService != nil && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
 	toolEnabled := cfg.ToolRuntimeMode == config.ToolModeEnabled
 	toolContractsOK, toolExecutorsOK, toolDependenciesOK := toolWorkflowReadiness(components)
 	readiness.SetToolRuntimeState(toolEnabled, toolContractsOK, toolExecutorsOK, toolDependenciesOK)
@@ -235,13 +251,17 @@ func run(configPath string, logger *slog.Logger) error {
 	timelineContext, cancelTimeline := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	_, _ = dispatchTimelineProjection(timelineContext, logger, components.timelineProject, timelineProjectionStartupPhase)
 	cancelTimeline()
+	exportOrphanCursor := foundation.ID("")
+	maintenanceContext, cancelMaintenance := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	exportOrphanCursor = runExportMaintenance(maintenanceContext, logger, components.exportService, exportOrphanCursor, exportMaintenanceStartupPhase)
+	cancelMaintenance()
 	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil,
 		"semantic_link_scan", components.semanticScan != nil,
 		"agent_available", components.agentCapability.available, "agent_capability_code", components.agentCapability.code,
 		"artifact_generation_available", components.artifact.capability.available, "artifact_generation_capability_code", components.artifact.capability.code,
 		"tool_runtime_enabled", components.tools.runtimeEnabled, "tool_executor_count", len(components.tools.enabledRefs),
 		"web_fetch_enabled", cfg.WebFetchMode == config.ToolModeEnabled, "reindex_dispatcher", components.dispatcher.Started(),
-		"timeline_projector", components.timelineProject != nil)
+		"timeline_projector", components.timelineProject != nil, "export_worker", components.exportWorker != nil)
 
 	ticker := time.NewTicker(cfg.HealthInterval)
 	defer ticker.Stop()
@@ -314,6 +334,11 @@ func run(configPath string, logger *slog.Logger) error {
 					_, _ = dispatchTimelineProjection(dispatchContext, logger, components.timelineProject, timelineProjectionPeriodicPhase)
 					cancelDispatch()
 				}
+				if components.exportService != nil {
+					maintenanceContext, cancelMaintenance := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+					exportOrphanCursor = runExportMaintenance(maintenanceContext, logger, components.exportService, exportOrphanCursor, exportMaintenancePeriodicPhase)
+					cancelMaintenance()
+				}
 			}
 		}
 	}
@@ -374,6 +399,43 @@ func timelineProjectionFailure(err error) (string, bool) {
 		return classified.Code, classified.Retryable
 	}
 	return timelineProjectionDispatchErrorCode, false
+}
+
+func runExportMaintenance(ctx context.Context, logger *slog.Logger, service exportMaintenanceService, orphanCursor foundation.ID, phase string) foundation.ID {
+	if service == nil {
+		return orphanCursor
+	}
+	recovered, recoverErr := service.Recover(ctx, "", exportapplication.MaxListLimit)
+	if recoverErr != nil {
+		logger.Warn("export recovery dispatch failed", "error_code", "EXPORT_RECOVERY_DISPATCH_FAILED", "phase", phase, "recovered_count", recovered)
+	} else if phase == exportMaintenanceStartupPhase || recovered > 0 {
+		logger.Info("export recovery dispatched", "phase", phase, "recovered_count", recovered)
+	}
+	swept, sweepErr := service.Sweep(ctx, exportapplication.MaxListLimit)
+	if sweepErr != nil {
+		logger.Warn("export expiry cleanup failed", "error_code", "EXPORT_CLEANUP_FAILED", "phase", phase,
+			"expired_count", swept.Expired, "cleaned_count", swept.Cleaned, "failed_count", swept.Failed)
+	} else if phase == exportMaintenanceStartupPhase || swept.Expired > 0 || swept.Cleaned > 0 {
+		logger.Info("export expiry cleanup completed", "phase", phase,
+			"expired_count", swept.Expired, "cleaned_count", swept.Cleaned, "failed_count", swept.Failed)
+	}
+	orphans, orphanErr := service.SweepOrphansAll(
+		ctx,
+		orphanCursor,
+		exportOrphanWorkspaceBatch,
+		exportapplication.MaxListLimit,
+		exportapplication.DefaultOrphanGrace,
+	)
+	if orphanErr != nil {
+		logger.Warn("export orphan cleanup failed", "error_code", "EXPORT_ORPHAN_CLEANUP_FAILED", "phase", phase,
+			"workspace_count", orphans.ScannedWorkspaces, "deleted_count", orphans.Deleted)
+		return orphanCursor
+	}
+	if phase == exportMaintenanceStartupPhase || orphans.Deleted > 0 {
+		logger.Info("export orphan cleanup completed", "phase", phase,
+			"workspace_count", orphans.ScannedWorkspaces, "deleted_count", orphans.Deleted)
+	}
+	return orphans.NextWorkspaceID
 }
 
 func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logger, metrics observability.Metrics) (workerComponents, error) {
@@ -697,6 +759,33 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
+	exportSnapshots, err := exportcollection.NewSnapshotReader(collectionService)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	exportFiles, err := exportlocalfs.NewStore(workspaceRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	exportRepository, err := exportpostgres.NewRepository(db, exportpostgres.WithEventAppender(healthEvents))
+	if err != nil {
+		return workerComponents{}, err
+	}
+	exportDispatcher, err := exportriver.NewDispatcher(insertClient)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	exportService, err := exportapplication.NewService(exportapplication.Dependencies{
+		Repository: exportRepository, Dispatcher: exportDispatcher, Snapshots: exportSnapshots,
+		Workspaces: workspaceRepository, Files: exportFiles, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	exportWorker, err := exportriver.NewWorker(exportService, fmt.Sprintf("worker:%s", workerID))
+	if err != nil {
+		return workerComponents{}, err
+	}
 	fatalInvariants := make(chan error, 1)
 	runtimeWorker, err := riveradapter.NewRuntimeNodeWorkerWithObservability(executors, runtimeCoordinator, fmt.Sprintf("worker:%s", workerID), cfg.WorkflowLeaseDuration, cfg.WorkflowHeartbeatInterval, riveradapter.RuntimeWorkerObservability{
 		Metrics: metrics, Queue: cfg.WorkerQueue, Logger: logger, FatalInvariants: fatalInvariants,
@@ -715,6 +804,9 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err := reindexriver.AddWorkerSafely(workers, reindex.worker); err != nil {
 		return workerComponents{}, err
 	}
+	if err := riveradapter.AddWorkerSafely(workers, exportWorker); err != nil {
+		return workerComponents{}, err
+	}
 	runtimeClient, err := riveradapter.NewClientWithOptions(db, workers, riverOptions)
 	if err != nil {
 		return workerComponents{}, err
@@ -722,7 +814,8 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	return workerComponents{
 		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability, artifact: artifactComponents,
 		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
-		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject, fatalInvariants: fatalInvariants,
+		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject,
+		exportWorker: exportWorker, exportService: exportService, fatalInvariants: fatalInvariants,
 	}, nil
 }
 
