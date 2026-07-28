@@ -1,0 +1,8 @@
+{"file":".trellis/tasks/archive/2026-07/07-27-m8-interview-memory/prd.md","reason":"M8-03 requirements and acceptance criteria."}
+{"file":".trellis/tasks/archive/2026-07/07-27-m8-interview-memory/design.md","reason":"Interview, Artifact, and Memory ownership boundaries."}
+{"file":".trellis/tasks/archive/2026-07/07-27-m8-interview-memory/implement.md","reason":"M8-03 execution and verification checklist."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Go module boundary and composition-root conventions."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"PostgreSQL transaction, idempotency, migration, and SQL constraints."}
+{"file":".trellis/spec/frontend/index.md","reason":"React feature, query, strict decoder, and SSE ownership rules."}
+{"file":"docs/architecture/workflows/08-review-and-interview.md","reason":"Product workflow for evidence-bound interview, learning path, and memory."}
+{"file":"docs/architecture/agent-rag-architecture.md","reason":"Memory's non-citation and task-scope boundaries."}

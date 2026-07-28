@@ -1,0 +1,4 @@
+{"file":".trellis/tasks/07-27-m8-review-fsrs/prd.md","reason":"Acceptance criteria for review verification."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Backend test, migration, API, and review gates."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Frontend component, route, build, and browser quality gates."}
+{"file":"docs/architecture/testing-and-evaluation.md","reason":"Review scoring and browser verification expectations."}

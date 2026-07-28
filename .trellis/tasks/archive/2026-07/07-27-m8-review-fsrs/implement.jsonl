@@ -1,0 +1,7 @@
+{"file":".trellis/tasks/07-27-m8-review-fsrs/prd.md","reason":"M8-02 requirements and acceptance criteria."}
+{"file":".trellis/tasks/07-27-m8-review-fsrs/design.md","reason":"M8-02 boundaries, transactions, and compatibility decisions."}
+{"file":".trellis/tasks/07-27-m8-review-fsrs/implement.md","reason":"M8-02 execution and verification checklist."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Go module boundary and composition-root conventions."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"PostgreSQL transaction, idempotency, migration, and SQL constraints."}
+{"file":".trellis/spec/frontend/index.md","reason":"React feature, query, strict decoder, and SSE ownership rules."}
+{"file":"docs/architecture/workflows/08-review-and-interview.md","reason":"Product workflow for evidence-bound review, scoring, scheduling, invalidation, and interview."}
