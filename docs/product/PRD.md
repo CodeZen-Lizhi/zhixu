@@ -4499,8 +4499,10 @@ M7-03 已交付 `/collections`、`/collections/:id` 与 `/health` 的真实闭�
 `collection-query/v1` 查询和 LIST/TABLE/COMPACT_CARD 视图配置，结果始终从正式 Topic/Claim/Relation、
 Source/Index 与 Health 事实动态计算；Health 支持 Workspace、Topic、Smart Collection 范围的持久扫描、
 detector coverage、Issue Evidence、Decision、Schedule 和可用 repair option。扫描和页面不会直接修改正式知识，
-修复仍必须进入 Proposal/Approval。Tag、Review/Directory owner、Review Deck/Artifact 批量动作、Timeline/Impact、
-正式认证与最终 100k Claim/500k Relation 容量认证尚未交付，必须保持显式 unavailable 或归入后续里程碑。
+修复仍必须进入 Proposal/Approval。Tag、Review/Directory owner、Review Deck/Artifact 批量动作、正式认证与最终
+100k Claim/500k Relation 容量认证尚未交付，必须保持显式 unavailable 或归入后续里程碑。M7-04 与遗留收口
+已交付 Timeline UI、Artifact/Review Card owner-backed impact、一等事件和正式 `downstream_update` Proposal 意图；
+批准只记录 decision，下游 executor、Document/Eval impact 与全局 Audit 仍未交付。
 
 M9-03 已将 Export Panel 嵌入 Collection 详情：它只使用当前 Collection version/query hash，刷新后由服务端列表/详情
 恢复，`PENDING/RUNNING` 以有界轮询和 `export.*` SSE 失效跟踪，成功下载经认证请求处理。附件、评测与审计 JSON
