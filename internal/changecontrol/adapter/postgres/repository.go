@@ -2,10 +2,12 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"time"
@@ -14,6 +16,7 @@ import (
 	changecontroleventcontract "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/eventcontract"
 	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -33,6 +36,7 @@ type Repository struct {
 var _ domain.Repository = (*Repository)(nil)
 var _ domain.KnowledgeChangeProposalRepository = (*Repository)(nil)
 var _ domain.PublishArtifactProposalRepository = (*Repository)(nil)
+var _ domain.DownstreamUpdateProposalRepository = (*Repository)(nil)
 var _ domain.AuthorizationRepository = (*Repository)(nil)
 
 // NewRepository 创建 PostgreSQL Repository；可选事件追加器用于在同一事务发布 Proposal 状态通知。
@@ -52,13 +56,18 @@ func NewRepository(db DB, appenders ...eventsapplication.Appender) (*Repository,
 
 // CreateProposal 在同一事务中创建 Proposal 和不可变 Revision。
 func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposal) (domain.Proposal, error) {
-	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeKnowledgeChange {
+	switch domain.NormalizeProposalType(proposal.Type) {
+	case domain.ProposalTypeKnowledgeChange:
 		return r.CreateKnowledgeChangeProposal(ctx, proposal)
-	}
-	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypePublishArtifact {
+	case domain.ProposalTypePublishArtifact:
 		return r.CreatePublishArtifactProposal(ctx, proposal)
+	case domain.ProposalTypeDownstreamUpdate:
+		return r.CreateDownstreamUpdateProposal(ctx, proposal)
+	case domain.ProposalTypeFilePatch:
+		proposal.Type = domain.ProposalTypeFilePatch
+	default:
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, domain.ErrProposalTypeInvalid)
 	}
-	proposal.Type = domain.ProposalTypeFilePatch
 	riskLevel, riskErr := domain.ValidateProposalRiskLevelForType(proposal.Type, proposal.RiskLevel)
 	if riskErr != nil {
 		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, riskErr)
@@ -323,6 +332,275 @@ func (r *Repository) CreatePublishArtifactProposal(ctx context.Context, proposal
 	return proposal, nil
 }
 
+// CreateDownstreamUpdateProposal 持久化一个只可审批、不可执行的下游更新意图。
+func (r *Repository) CreateDownstreamUpdateProposal(ctx context.Context, proposal domain.Proposal) (domain.Proposal, error) {
+	proposal.Type = domain.ProposalTypeDownstreamUpdate
+	riskLevel, riskErr := domain.ValidateProposalRiskLevelForType(proposal.Type, proposal.RiskLevel)
+	if riskErr != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, riskErr)
+	}
+	proposal.RiskLevel = riskLevel
+	if err := domain.ValidateProposalRevisionForType(proposal.Type, proposal.Revision); err != nil || proposal.Revision.DownstreamUpdate == nil {
+		if err == nil {
+			err = errors.New("downstream update revision payload is required")
+		}
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	update, err := domain.ValidateDownstreamUpdate(*proposal.Revision.DownstreamUpdate)
+	if err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	proposal.Revision.DownstreamUpdate = &update
+	expectedRequestHash, err := domain.ComputeDownstreamUpdateRequestHash(
+		proposal.WorkspaceID, update, proposal.RiskLevel, proposal.Revision.Risk, proposal.Revision.RollbackPlan,
+	)
+	if err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	if proposal.RequestHash != expectedRequestHash {
+		return r.resolveInvalidRequestHash(ctx, proposal, "downstream update request hash mismatch")
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var insertedID string
+	err = tx.QueryRow(ctx, `
+			INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,idempotency_key,request_hash,status,version,created_at,updated_at)
+			VALUES($1,$2,'downstream_update',$3,$4,$5,$6,$7,$8,$9)
+			ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
+			RETURNING id::text`,
+		string(proposal.ID), string(proposal.WorkspaceID), string(proposal.RiskLevel), proposal.IdempotencyKey, proposal.RequestHash,
+		string(proposal.Status), proposal.Version, proposal.CreatedAt.UTC(), proposal.UpdatedAt.UTC()).Scan(&insertedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		existingID, storedType, requestHash, storedRiskLevel, queryErr := loadProposalCreateBinding(ctx, tx, proposal.WorkspaceID, proposal.IdempotencyKey)
+		if queryErr != nil {
+			return domain.Proposal{}, classify(queryErr, "PROPOSAL_IDEMPOTENCY_QUERY_FAILED")
+		}
+		if storedType != proposal.Type || storedRiskLevel != proposal.RiskLevel || requestHash != expectedRequestHash {
+			return domain.Proposal{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
+		}
+		_ = tx.Rollback(ctx)
+		return r.GetProposal(ctx, existingID)
+	}
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_CREATE_FAILED")
+	}
+	currentUpdate, err := r.buildDownstreamUpdate(
+		ctx, tx, update.WorkspaceID, update.ReportID, update.TargetType, update.TargetID, update.Action, true,
+	)
+	if err != nil {
+		return domain.Proposal{}, err
+	}
+	if !reflect.DeepEqual(currentUpdate, update) {
+		return domain.Proposal{}, downstreamImpactConflict("downstream update owner binding changed before create")
+	}
+	ownerBinding, err := json.Marshal(update.OwnerBinding)
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_REVISION_CREATE_FAILED")
+	}
+	revision := proposal.Revision
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO change_control.proposal_revision(
+			id,proposal_id,revision_no,target_path,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,
+			downstream_workspace_id,downstream_report_id,downstream_analysis_version,downstream_report_fingerprint,
+			downstream_source_event_id,downstream_source_event_version,downstream_target_type,downstream_target_id,
+			downstream_base_version,downstream_action,downstream_owner_binding,downstream_reason,schema_version,created_at
+		) VALUES($1,$2,$3,NULL,NULL,NULL,NULL,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+		string(revision.ID), string(proposal.ID), revision.RevisionNo, revision.Risk, revision.RollbackPlan, revision.ChangeHash,
+		string(update.WorkspaceID), string(update.ReportID), string(update.AnalysisVersion), update.ReportFingerprint,
+		string(update.SourceEventID), update.SourceEventVersion, string(update.TargetType), string(update.TargetID),
+		update.BaseVersion, string(update.Action), ownerBinding, update.Reason, update.SchemaVersion, revision.CreatedAt.UTC()); err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_REVISION_CREATE_FAILED")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_COMMIT_FAILED")
+	}
+	return proposal, nil
+}
+
+// FindProposalByIdempotencyKey 返回 Workspace 内已绑定创建键的完整 Proposal。
+func (r *Repository) FindProposalByIdempotencyKey(ctx context.Context, workspaceID foundation.ID, idempotencyKey string) (domain.Proposal, bool, error) {
+	var proposalID string
+	err := r.db.QueryRow(ctx, `
+		SELECT id::text
+		FROM change_control.proposal
+		WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), idempotencyKey).Scan(&proposalID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Proposal{}, false, nil
+	}
+	if err != nil {
+		return domain.Proposal{}, false, classify(err, "PROPOSAL_IDEMPOTENCY_QUERY_FAILED")
+	}
+	proposal, err := r.GetProposal(ctx, foundation.ID(proposalID))
+	if err != nil {
+		return domain.Proposal{}, false, err
+	}
+	return proposal, true, nil
+}
+
+// BuildDownstreamUpdate 从当前 Impact report 与 owner 事实重建下游更新载荷。
+func (r *Repository) BuildDownstreamUpdate(
+	ctx context.Context,
+	workspaceID, reportID foundation.ID,
+	targetType knowledge.ImpactObjectType,
+	targetID foundation.ID,
+	action knowledge.ImpactAction,
+) (domain.DownstreamUpdate, error) {
+	return r.buildDownstreamUpdate(ctx, r.db, workspaceID, reportID, targetType, targetID, action, false)
+}
+
+type downstreamUpdateQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (r *Repository) buildDownstreamUpdate(
+	ctx context.Context,
+	queryer downstreamUpdateQueryer,
+	workspaceID, reportID foundation.ID,
+	targetType knowledge.ImpactObjectType,
+	targetID foundation.ID,
+	action knowledge.ImpactAction,
+	lockOwner bool,
+) (domain.DownstreamUpdate, error) {
+	if targetType != knowledge.ImpactObjectArtifact && targetType != knowledge.ImpactObjectReviewCard {
+		return domain.DownstreamUpdate{}, foundation.NewError(foundation.ErrorInvalidInput, "DOWNSTREAM_UPDATE_TARGET_INVALID", false, errors.New("impact target type is unsupported"))
+	}
+	if targetType == knowledge.ImpactObjectArtifact && action != knowledge.ImpactActionRegenerateArtifact ||
+		targetType == knowledge.ImpactObjectReviewCard && action != knowledge.ImpactActionRevalidateReviewCard {
+		return domain.DownstreamUpdate{}, foundation.NewError(foundation.ErrorInvalidInput, "DOWNSTREAM_UPDATE_TARGET_INVALID", false, errors.New("impact target action is unsupported"))
+	}
+	reportQuery := `
+		SELECT source_event_id::text,source_event_version,analysis_version,fingerprint,status,schema_version,objects
+		FROM ops.impact_report
+		WHERE workspace_id=$1 AND id=$2`
+	if lockOwner {
+		reportQuery += ` FOR UPDATE`
+	}
+	var sourceEventID, analysisVersion, reportFingerprint, reportStatus, reportSchema string
+	var sourceEventVersion int64
+	var objectsRaw []byte
+	if err := queryer.QueryRow(ctx, reportQuery, string(workspaceID), string(reportID)).Scan(
+		&sourceEventID, &sourceEventVersion, &analysisVersion, &reportFingerprint, &reportStatus, &reportSchema, &objectsRaw,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.DownstreamUpdate{}, foundation.NewError(foundation.ErrorNotFound, "KNOWLEDGE_IMPACT_NOT_FOUND", false, err)
+		}
+		return domain.DownstreamUpdate{}, classify(err, "DOWNSTREAM_UPDATE_SOURCE_QUERY_FAILED")
+	}
+	var superseded bool
+	if err := queryer.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM ops.impact_report successor
+			WHERE successor.workspace_id=$1 AND successor.supersedes_report_id=$2
+		)`, string(workspaceID), string(reportID)).Scan(&superseded); err != nil {
+		return domain.DownstreamUpdate{}, classify(err, "DOWNSTREAM_UPDATE_SOURCE_QUERY_FAILED")
+	}
+	if reportStatus != string(knowledge.ImpactReportReady) || reportSchema != knowledge.ImpactReportSchemaVersionV2 ||
+		analysisVersion != string(knowledge.ImpactAnalysisVersionV2) || superseded {
+		return domain.DownstreamUpdate{}, downstreamImpactConflict("impact report is not current and ready")
+	}
+	var objects []knowledge.ImpactObject
+	if err := decodeStrictJSON(objectsRaw, &objects); err != nil {
+		return domain.DownstreamUpdate{}, downstreamImpactConflict("impact report objects are invalid")
+	}
+	parsedEventID, err := foundation.ParseID(sourceEventID)
+	if err != nil {
+		return domain.DownstreamUpdate{}, downstreamImpactConflict("impact report source event is invalid")
+	}
+	expectedFingerprint, err := knowledge.ComputeImpactFingerprintForVersion(knowledge.ImpactAnalysisVersionV2, parsedEventID, sourceEventVersion, objects)
+	if err != nil || expectedFingerprint != reportFingerprint {
+		return domain.DownstreamUpdate{}, downstreamImpactConflict("impact report fingerprint is invalid")
+	}
+	var selected *knowledge.ImpactObject
+	for index := range objects {
+		object := &objects[index]
+		if object.Type == targetType && object.ID == targetID {
+			if selected != nil {
+				return domain.DownstreamUpdate{}, downstreamImpactConflict("impact report contains duplicate target objects")
+			}
+			selected = object
+		}
+	}
+	if selected == nil || selected.WorkspaceID != workspaceID || selected.Action != action || !selected.RequiresProposal {
+		return domain.DownstreamUpdate{}, foundation.NewError(foundation.ErrorInvalidInput, "DOWNSTREAM_UPDATE_TARGET_INVALID", false, errors.New("target is not proposal-capable in the impact report"))
+	}
+
+	ownerLock := ""
+	if lockOwner {
+		ownerLock = " FOR SHARE"
+	}
+	ownerBinding := knowledge.EventOwnerBinding{}
+	switch targetType {
+	case knowledge.ImpactObjectArtifact:
+		var artifactID, revisionID, contentHash string
+		var artifactVersion, revisionNo int64
+		err := queryer.QueryRow(ctx, `
+			SELECT artifact.id::text,artifact.version,revision.id::text,revision.revision_no,revision.content_hash
+			FROM learning.artifact artifact
+			JOIN learning.artifact_revision revision
+			  ON revision.workspace_id=artifact.workspace_id
+			 AND revision.artifact_id=artifact.id
+			 AND revision.id=artifact.current_revision_id
+			WHERE artifact.workspace_id=$1 AND artifact.id=$2`+ownerLock,
+			string(workspaceID), string(targetID)).Scan(&artifactID, &artifactVersion, &revisionID, &revisionNo, &contentHash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.DownstreamUpdate{}, downstreamImpactConflict("artifact owner snapshot is unavailable")
+		}
+		if err != nil {
+			return domain.DownstreamUpdate{}, classify(err, "DOWNSTREAM_UPDATE_OWNER_QUERY_FAILED")
+		}
+		binding := knowledge.ArtifactImpactBinding{
+			ArtifactID: foundation.ID(artifactID), ArtifactVersion: artifactVersion,
+			RevisionID: foundation.ID(revisionID), RevisionNo: revisionNo, ContentHash: contentHash,
+		}
+		if selected.ArtifactBinding == nil || !reflect.DeepEqual(*selected.ArtifactBinding, binding) {
+			return domain.DownstreamUpdate{}, downstreamImpactConflict("artifact owner binding changed")
+		}
+		ownerBinding.Artifact = &binding
+	case knowledge.ImpactObjectReviewCard:
+		var cardID, status, fingerprint, claimID, evidenceFingerprint string
+		var cardVersion int64
+		err := queryer.QueryRow(ctx, `
+			SELECT card.id::text,card.version,card.status,card.fingerprint,card.claim_id::text,
+			       learning.review_card_evidence_binding_fingerprint(card.evidence)
+			FROM learning.review_card card
+			WHERE card.workspace_id=$1 AND card.id=$2`+ownerLock,
+			string(workspaceID), string(targetID)).Scan(&cardID, &cardVersion, &status, &fingerprint, &claimID, &evidenceFingerprint)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.DownstreamUpdate{}, downstreamImpactConflict("review card owner snapshot is unavailable")
+		}
+		if err != nil {
+			return domain.DownstreamUpdate{}, classify(err, "DOWNSTREAM_UPDATE_OWNER_QUERY_FAILED")
+		}
+		binding := knowledge.ReviewCardImpactBinding{
+			CardID: foundation.ID(cardID), CardVersion: cardVersion, Status: status, Fingerprint: fingerprint,
+			ClaimID: foundation.ID(claimID), EvidenceBindingFingerprint: evidenceFingerprint,
+		}
+		if selected.ReviewCardBinding == nil || !reflect.DeepEqual(*selected.ReviewCardBinding, binding) {
+			return domain.DownstreamUpdate{}, downstreamImpactConflict("review card owner binding changed")
+		}
+		ownerBinding.ReviewCard = &binding
+	}
+
+	update := domain.DownstreamUpdate{
+		WorkspaceID: workspaceID, ReportID: reportID, AnalysisVersion: knowledge.ImpactAnalysisVersionV2,
+		ReportFingerprint: reportFingerprint, SourceEventID: parsedEventID, SourceEventVersion: sourceEventVersion,
+		TargetType: targetType, TargetID: targetID, BaseVersion: selected.Version, Action: action,
+		OwnerBinding: ownerBinding, Reason: selected.Reason, SchemaVersion: domain.DownstreamUpdateSchemaVersion,
+	}
+	canonical, err := domain.ValidateDownstreamUpdate(update)
+	if err != nil {
+		return domain.DownstreamUpdate{}, downstreamImpactConflict("rebuilt downstream update is invalid")
+	}
+	return canonical, nil
+}
+
+func downstreamImpactConflict(message string) error {
+	return foundation.NewError(foundation.ErrorVersionConflict, "KNOWLEDGE_IMPACT_CONFLICT", false, errors.New(message))
+}
+
 func (r *Repository) resolveInvalidRequestHash(ctx context.Context, proposal domain.Proposal, mismatchMessage string) (domain.Proposal, error) {
 	var existingID string
 	err := r.db.QueryRow(ctx, `SELECT id::text FROM change_control.proposal WHERE workspace_id=$1 AND idempotency_key=$2`, string(proposal.WorkspaceID), proposal.IdempotencyKey).Scan(&existingID)
@@ -371,14 +649,20 @@ func (r *Repository) GetProposal(ctx context.Context, proposalID foundation.ID) 
 	row := r.db.QueryRow(ctx, `
 			SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.idempotency_key,p.request_hash,p.risk_level,p.workflow_run_id::text,p.status,p.version,p.created_at,p.updated_at,
 			r.id::text,r.revision_no,r.target_path,r.base_hash,r.content,r.evidence_summary,r.risk,r.rollback_plan,r.change_hash,
-			r.target_refs,r.base_versions,r.change_set,r.evidence_refs,
-			r.artifact_id::text,r.artifact_revision_id::text,r.artifact_revision_no,r.artifact_version,r.artifact_content_hash,r.artifact_source_coverage,r.schema_version,r.created_at,
+				r.target_refs,r.base_versions,r.change_set,r.evidence_refs,
+				r.artifact_id::text,r.artifact_revision_id::text,r.artifact_revision_no,r.artifact_version,r.artifact_content_hash,r.artifact_source_coverage,
+				r.downstream_workspace_id::text,r.downstream_report_id::text,r.downstream_analysis_version,r.downstream_report_fingerprint,
+				r.downstream_source_event_id::text,r.downstream_source_event_version,r.downstream_target_type,r.downstream_target_id::text,
+				r.downstream_base_version,r.downstream_action,r.downstream_owner_binding,r.downstream_reason,r.schema_version,r.created_at,
 			a.id::text,a.change_hash,a.decision,a.approved_git_head,a.decided_at
 		FROM change_control.proposal p
 		JOIN LATERAL (
 			SELECT id,revision_no,target_path,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,
 			       target_refs,base_versions,change_set,evidence_refs,
-			       artifact_id,artifact_revision_id,artifact_revision_no,artifact_version,artifact_content_hash,artifact_source_coverage,schema_version,created_at
+				       artifact_id,artifact_revision_id,artifact_revision_no,artifact_version,artifact_content_hash,artifact_source_coverage,
+				       downstream_workspace_id,downstream_report_id,downstream_analysis_version,downstream_report_fingerprint,
+				       downstream_source_event_id,downstream_source_event_version,downstream_target_type,downstream_target_id,
+				       downstream_base_version,downstream_action,downstream_owner_binding,downstream_reason,schema_version,created_at
 			FROM change_control.proposal_revision
 			WHERE proposal_id=p.id ORDER BY revision_no DESC LIMIT 1
 		) r ON true
@@ -479,11 +763,17 @@ func (r *Repository) ListProposals(ctx context.Context, request domain.ProposalL
 
 func buildProposalListQuery(request domain.ProposalListQuery) (string, []any) {
 	query := `SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.status,p.created_at,p.updated_at,
-			r.id::text,COALESCE(r.target_path,'知识关系'),p.risk_level,r.risk,r.change_hash,p.workflow_run_id::text,
+				r.id::text,CASE p.proposal_type
+					WHEN 'file_patch' THEN COALESCE(r.target_path,'')
+					WHEN 'knowledge_change' THEN '知识关系'
+					WHEN 'publish_artifact' THEN 'Artifact 发布'
+					WHEN 'downstream_update' THEN COALESCE(r.downstream_target_type || ':' || r.downstream_target_id::text,'下游更新')
+					ELSE '' END,
+				p.risk_level,r.risk,r.change_hash,p.workflow_run_id::text,
 		a.id::text,a.change_hash,a.decision,a.approved_git_head,a.decided_at
 		FROM change_control.proposal p
 		JOIN LATERAL (
-			SELECT id,target_path,risk,change_hash
+				SELECT id,target_path,risk,change_hash,downstream_target_type,downstream_target_id
 			FROM change_control.proposal_revision
 			WHERE proposal_id=p.id ORDER BY revision_no DESC LIMIT 1
 		) r ON true
@@ -896,8 +1186,10 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	var workflowRunID *string
 	var revisionID, risk, rollback, changeHash string
 	var targetPath, baseHash, content, evidence, artifactID, artifactRevisionID, artifactContentHash, schemaVersion *string
-	var artifactRevisionNo, artifactVersion *int64
-	var targetRefsRaw, baseVersionsRaw, changeSetRaw, evidenceRefsRaw, artifactSourceCoverageRaw []byte
+	var downstreamWorkspaceID, downstreamReportID, downstreamAnalysisVersion, downstreamReportFingerprint *string
+	var downstreamSourceEventID, downstreamTargetType, downstreamTargetID, downstreamAction, downstreamReason *string
+	var artifactRevisionNo, artifactVersion, downstreamSourceEventVersion, downstreamBaseVersion *int64
+	var targetRefsRaw, baseVersionsRaw, changeSetRaw, evidenceRefsRaw, artifactSourceCoverageRaw, downstreamOwnerBindingRaw []byte
 	var approvalID, approvalHash, decision, approvedGitHead *string
 	var createdAt, updatedAt, revisionCreatedAt time.Time
 	var decidedAt *time.Time
@@ -907,7 +1199,10 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 		&proposalID, &workspaceID, &proposalType, &idempotencyKey, &requestHash, &riskLevel, &workflowRunID, &status, &version, &createdAt, &updatedAt,
 		&revisionID, &revisionNo, &targetPath, &baseHash, &content, &evidence, &risk, &rollback, &changeHash,
 		&targetRefsRaw, &baseVersionsRaw, &changeSetRaw, &evidenceRefsRaw,
-		&artifactID, &artifactRevisionID, &artifactRevisionNo, &artifactVersion, &artifactContentHash, &artifactSourceCoverageRaw, &schemaVersion, &revisionCreatedAt,
+		&artifactID, &artifactRevisionID, &artifactRevisionNo, &artifactVersion, &artifactContentHash, &artifactSourceCoverageRaw,
+		&downstreamWorkspaceID, &downstreamReportID, &downstreamAnalysisVersion, &downstreamReportFingerprint,
+		&downstreamSourceEventID, &downstreamSourceEventVersion, &downstreamTargetType, &downstreamTargetID,
+		&downstreamBaseVersion, &downstreamAction, &downstreamOwnerBindingRaw, &downstreamReason, &schemaVersion, &revisionCreatedAt,
 		&approvalID, &approvalHash, &decision, &approvedGitHead, &decidedAt,
 	)
 	if err != nil {
@@ -928,10 +1223,13 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 		return domain.Proposal{}, riskErr
 	}
 	proposal.RiskLevel = parsedRiskLevel
+	downstreamFieldsPresent := downstreamWorkspaceID != nil || downstreamReportID != nil || downstreamAnalysisVersion != nil || downstreamReportFingerprint != nil ||
+		downstreamSourceEventID != nil || downstreamSourceEventVersion != nil || downstreamTargetType != nil || downstreamTargetID != nil ||
+		downstreamBaseVersion != nil || downstreamAction != nil || downstreamOwnerBindingRaw != nil || downstreamReason != nil
 	switch domain.NormalizeProposalType(proposal.Type) {
 	case domain.ProposalTypeFilePatch:
 		if targetPath == nil || baseHash == nil || content == nil || evidence == nil || schemaVersion != nil ||
-			targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil || artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil {
+			targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil || artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil || downstreamFieldsPresent {
 			return domain.Proposal{}, errors.New("file patch proposal revision payload is inconsistent")
 		}
 		proposal.Type = domain.ProposalTypeFilePatch
@@ -942,7 +1240,7 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 		proposal.Revision.EvidenceSummary = *evidence
 	case domain.ProposalTypeKnowledgeChange:
 		if targetPath != nil || baseHash != nil || content != nil || evidence != nil || schemaVersion == nil ||
-			targetRefsRaw == nil || baseVersionsRaw == nil || changeSetRaw == nil || evidenceRefsRaw == nil || artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil {
+			targetRefsRaw == nil || baseVersionsRaw == nil || changeSetRaw == nil || evidenceRefsRaw == nil || artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil || downstreamFieldsPresent {
 			return domain.Proposal{}, errors.New("knowledge change proposal revision payload is inconsistent")
 		}
 		change := domain.KnowledgeChange{SchemaVersion: *schemaVersion}
@@ -966,7 +1264,7 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 		proposal.Revision.KnowledgeChange = &canonical
 	case domain.ProposalTypePublishArtifact:
 		if targetPath != nil || baseHash != nil || content != nil || evidence != nil || targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil ||
-			artifactID == nil || artifactRevisionID == nil || artifactRevisionNo == nil || artifactVersion == nil || artifactContentHash == nil || artifactSourceCoverageRaw == nil || schemaVersion == nil {
+			artifactID == nil || artifactRevisionID == nil || artifactRevisionNo == nil || artifactVersion == nil || artifactContentHash == nil || artifactSourceCoverageRaw == nil || schemaVersion == nil || downstreamFieldsPresent {
 			return domain.Proposal{}, errors.New("publish artifact proposal revision payload is inconsistent")
 		}
 		publication := domain.PublishArtifact{
@@ -982,6 +1280,34 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 		}
 		proposal.Type = domain.ProposalTypePublishArtifact
 		proposal.Revision.PublishArtifact = &canonical
+	case domain.ProposalTypeDownstreamUpdate:
+		if targetPath != nil || baseHash != nil || content != nil || evidence != nil || targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil ||
+			artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil ||
+			downstreamWorkspaceID == nil || downstreamReportID == nil || downstreamAnalysisVersion == nil || downstreamReportFingerprint == nil ||
+			downstreamSourceEventID == nil || downstreamSourceEventVersion == nil || downstreamTargetType == nil || downstreamTargetID == nil ||
+			downstreamBaseVersion == nil || downstreamAction == nil || downstreamOwnerBindingRaw == nil || downstreamReason == nil || schemaVersion == nil {
+			return domain.Proposal{}, errors.New("downstream update proposal revision payload is inconsistent")
+		}
+		var ownerBinding knowledge.EventOwnerBinding
+		if err := decodeStrictJSON(downstreamOwnerBindingRaw, &ownerBinding); err != nil {
+			return domain.Proposal{}, err
+		}
+		update := domain.DownstreamUpdate{
+			WorkspaceID: foundation.ID(*downstreamWorkspaceID), ReportID: foundation.ID(*downstreamReportID),
+			AnalysisVersion: knowledge.ImpactAnalysisVersion(*downstreamAnalysisVersion), ReportFingerprint: *downstreamReportFingerprint,
+			SourceEventID: foundation.ID(*downstreamSourceEventID), SourceEventVersion: *downstreamSourceEventVersion,
+			TargetType: knowledge.ImpactObjectType(*downstreamTargetType), TargetID: foundation.ID(*downstreamTargetID), BaseVersion: *downstreamBaseVersion,
+			Action: knowledge.ImpactAction(*downstreamAction), OwnerBinding: ownerBinding, Reason: *downstreamReason, SchemaVersion: *schemaVersion,
+		}
+		canonical, err := domain.ValidateDownstreamUpdate(update)
+		if err != nil || canonical.WorkspaceID != proposal.WorkspaceID {
+			if err == nil {
+				err = errors.New("downstream update workspace binding is inconsistent")
+			}
+			return domain.Proposal{}, err
+		}
+		proposal.Type = domain.ProposalTypeDownstreamUpdate
+		proposal.Revision.DownstreamUpdate = &canonical
 	default:
 		return domain.Proposal{}, errors.New("proposal type is unsupported")
 	}
@@ -1005,6 +1331,21 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 		}
 	}
 	return proposal, nil
+}
+
+func decodeStrictJSON(raw []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("json payload contains multiple values")
+		}
+		return err
+	}
+	return nil
 }
 
 func getApproval(ctx context.Context, row interface {

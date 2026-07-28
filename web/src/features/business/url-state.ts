@@ -59,7 +59,7 @@ export const proposalStatusOptions = [
 ] as const satisfies readonly (readonly [ProposalStatus, string])[];
 
 const proposalStatuses = proposalStatusOptions.map(([value]) => value);
-const proposalTypes: readonly ProposalType[] = ["file_patch", "knowledge_change", "publish_artifact"];
+const proposalTypes: readonly ProposalType[] = ["file_patch", "knowledge_change", "publish_artifact", "downstream_update"];
 
 export interface InboxUrlState {
   securityStatus: SourceSecurityStatus | "";

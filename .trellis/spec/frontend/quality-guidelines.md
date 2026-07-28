@@ -425,3 +425,23 @@ Correct: 任何用户 Memory 命令都不含 provenance；INTERVIEW 来源由服
 Wrong: 浏览器把评分转换成 gap/Evidence 后创建 Review Path，或收到 503 后本地伪造成功 Path。
 Correct: 客户端只提交 Workspace/Answer/key；严格解码服务端 REVIEW origin Path，失败保持显式且用 REST 重试恢复。
 ```
+
+## Scenario: M7 Timeline / Impact Quality Gate
+
+### 1. Required Coverage
+
+- API tests 覆盖 Event/Report v1/v2、Artifact/Review binding、supersession、strict unknown/duplicate fields、
+  Workspace/resource mismatch、Problem、Abort 与 network unknown。
+- Query tests 覆盖 Workspace-bound keys、canonical filters/cursor、cache cleanup、Idempotency-Key response-loss retry、
+  Report/Event/Proposal 精确失效，并证明 Impact 成功不会竞速失效异步 projector 的 Timeline list。
+- Component/route tests 覆盖 `/timeline`、`/timeline/:eventId` 的 loading、empty、404、409、503、invalid response、
+  unknown result、重试、分页、筛选、只读引用、正式 Proposal 导航与 approved-unavailable 表达。
+- Canonical gate 为 `npm run lint --prefix web`、`npm run typecheck --prefix web`、Timeline 定向 Vitest、
+  `npm run build --prefix web` 与 `git diff --check`。发布前用真实 API/Worker/Vite 在桌面和 `390x844` 检查
+  无横向溢出、文字遮挡、console error 或失败请求。
+
+### 2. Prohibited Shortcuts
+
+- 不用 system status、空数组、disabled 控件或本地对象冒充 Timeline/Impact/Proposal 成功。
+- 不从任意 `source_ref` 猜路由，不把原始 SSE 到达当成 Timeline projector 已完成。
+- 不把 `downstream_update` 的 Approval 显示成 Apply；UI 隐藏命令不能替代服务端 fail-closed guard。

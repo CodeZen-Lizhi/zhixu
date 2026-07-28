@@ -24,6 +24,8 @@ const ReviewSessionPage = lazy(() => import("../features/review/ReviewSessionPag
 const MemoriesPage = lazy(() => import("../features/memory/MemoriesPage").then((module) => ({ default: module.MemoriesPage })));
 const InterviewsPage = lazy(() => import("../features/interview/InterviewPage").then((module) => ({ default: module.InterviewsPage })));
 const InterviewSessionPage = lazy(() => import("../features/interview/InterviewPage").then((module) => ({ default: module.InterviewSessionPage })));
+const TimelinePage = lazy(() => import("../features/timeline/TimelinePage").then((module) => ({ default: module.TimelinePage })));
+const TimelineEventPage = lazy(() => import("../features/timeline/TimelinePage").then((module) => ({ default: module.TimelineEventPage })));
 
 const Shell = () => <AppShell />;
 
@@ -43,6 +45,8 @@ export const AppRoutes = () => (
       <Route path="/collections" element={<CollectionsPage />} />
       <Route path="/collections/:collectionId" element={<CollectionDetailPage />} />
       <Route path="/health" element={<HealthPage />} />
+      <Route path="/timeline" element={<TimelinePage />} />
+      <Route path="/timeline/:eventId" element={<TimelineEventPage />} />
       <Route path="/artifacts" element={<ArtifactsPage />} />
       <Route path="/artifacts/:artifactId" element={<ArtifactDetailPage />} />
       <Route path="/review" element={<ReviewPage />} />

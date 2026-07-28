@@ -113,6 +113,74 @@ const publishArtifactProposal = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const downstreamArtifactProposal = (overrides: Record<string, unknown> = {}) => ({
+  id: proposalId,
+  workspaceId,
+  type: "downstream_update" as const,
+  status: "ready_for_review" as const,
+  riskLevel: "HIGH" as const,
+  revision: {
+    id: revisionId,
+    revisionNo: 1,
+    update: {
+      workspaceId,
+      sourceReport: {
+        id: "10000000-0000-4000-8000-000000000006",
+        analysisVersion: "impact-analysis/v2" as const,
+        fingerprint: "a".repeat(64),
+      },
+      sourceEvent: { id: "10000000-0000-4000-8000-000000000007", eventVersion: 2 },
+      targetType: "ARTIFACT" as const,
+      targetId: "10000000-0000-4000-8000-000000000008",
+      baseVersion: 5,
+      action: "REGENERATE_ARTIFACT" as const,
+      artifactBinding: {
+        artifactId: "10000000-0000-4000-8000-000000000008",
+        artifactVersion: 5,
+        revisionId: "10000000-0000-4000-8000-000000000009",
+        revisionNo: 3,
+        contentHash: "b".repeat(64),
+      },
+      reason: "引用来源发生变化",
+      schemaVersion: "impact-downstream-update/v1" as const,
+    },
+    risk: "Impact report identified an owner-backed downstream dependency",
+    rollbackPlan: "No target write has executed",
+    changeHash,
+    createdAt: "2026-07-28T00:00:00Z",
+  },
+  createdAt: "2026-07-28T00:00:00Z",
+  updatedAt: "2026-07-28T00:01:00Z",
+  ...overrides,
+});
+
+const downstreamReviewCardProposal = (overrides: Record<string, unknown> = {}) => {
+  const proposal = downstreamArtifactProposal();
+  return {
+    ...proposal,
+    revision: {
+      ...proposal.revision,
+      update: {
+        ...proposal.revision.update,
+        targetType: "REVIEW_CARD" as const,
+        targetId: "10000000-0000-4000-8000-000000000010",
+        baseVersion: 4,
+        action: "REVALIDATE_REVIEW_CARD" as const,
+        artifactBinding: undefined,
+        reviewCardBinding: {
+          cardId: "10000000-0000-4000-8000-000000000010",
+          cardVersion: 4,
+          status: "INVALIDATED" as const,
+          fingerprint: "d".repeat(64),
+          claimId: "10000000-0000-4000-8000-000000000011",
+          evidenceBindingFingerprint: "e".repeat(64),
+        },
+      },
+    },
+    ...overrides,
+  };
+};
+
 const currentContent = (baseHashMatch = true, baseHash = "a".repeat(64)) => ({
   proposalId,
   workspaceId,
@@ -195,6 +263,31 @@ describe("ProposalsPage", () => {
     await waitFor(() => expect(api.listProposals).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ type: "publish_artifact" }), expect.any(AbortSignal)));
     expect(screen.getAllByText("Artifact 发布").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("风险说明：发布将影响正式知识边界")).toBeInTheDocument();
+  });
+
+  it("从 URL 恢复 downstream_update 筛选并显示独立标签与图标", async () => {
+    api.listProposals.mockResolvedValue({
+      items: [{
+        id: proposalId,
+        workspaceId,
+        type: "downstream_update",
+        status: "ready_for_review",
+        target: "ARTIFACT:10000000-0000-4000-8000-000000000008",
+        riskLevel: "HIGH",
+        risk: "Impact report identified an owner-backed downstream dependency",
+        revisionId,
+        changeHash,
+        createdAt: "2026-07-28T00:00:00Z",
+        updatedAt: "2026-07-28T00:01:00Z",
+      }],
+    });
+
+    renderList("/proposals?proposal_type=downstream_update");
+
+    expect(await screen.findByRole("combobox", { name: "类型" })).toHaveValue("downstream_update");
+    await waitFor(() => expect(api.listProposals).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ type: "downstream_update" }), expect.any(AbortSignal)));
+    expect(screen.getAllByText("下游更新")).toHaveLength(2);
+    expect(document.querySelector(".kind-mark--downstream_update svg")).toBeInTheDocument();
   });
 
   it("展示列表中的持久 Approval 与 Workflow 绑定", async () => {
@@ -691,6 +784,65 @@ describe("ProposalDetailPage", () => {
       decision: "approved",
       proposalType: "publish_artifact",
     }));
+    expect(api.preflightProposal).not.toHaveBeenCalled();
+  });
+
+  it("downstream_update ready 状态展示冻结 Impact 与 Artifact owner 并允许审批", async () => {
+    api.getProposal.mockReset().mockResolvedValue(downstreamArtifactProposal());
+    api.getProposalCurrentContent.mockClear();
+    renderDetail();
+
+    expect(await screen.findByText("Downstream Update Snapshot")).toBeInTheDocument();
+    expect(screen.getByText("10000000-0000-4000-8000-000000000006")).toBeInTheDocument();
+    expect(screen.getByText("impact-analysis/v2")).toBeInTheDocument();
+    expect(screen.getByText("Source Event").parentElement).toHaveTextContent("10000000-0000-4000-8000-000000000007 · v2");
+    expect(screen.getByText("Target").parentElement).toHaveTextContent("ARTIFACT:10000000-0000-4000-8000-000000000008");
+    expect(screen.getByText("Artifact Owner").parentElement).toHaveTextContent("10000000-0000-4000-8000-000000000008 · v5");
+    expect(screen.getByText("Artifact Revision").parentElement).toHaveTextContent("#3 · 10000000-0000-4000-8000-000000000009");
+    expect(screen.getByText("b".repeat(64))).toBeInTheDocument();
+    expect(screen.getByText("引用来源发生变化")).toBeInTheDocument();
+    expect(api.getProposalCurrentContent).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "批准" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("批准只记录更新意图，不授予目标执行能力");
+    fireEvent.click(screen.getByRole("button", { name: "确认提交" }));
+
+    await waitFor(() => expect(api.decideProposal).toHaveBeenCalledWith(proposalId, {
+      revisionId,
+      changeHash,
+      decision: "approved",
+      proposalType: "downstream_update",
+    }));
+    expect(api.preflightProposal).not.toHaveBeenCalled();
+  });
+
+  it("approved downstream_update 展示 Review Card owner 与稳定的执行能力不可用状态", async () => {
+    api.getProposal.mockReset().mockResolvedValue(downstreamReviewCardProposal({
+      status: "approved",
+      approval: {
+        id: "10000000-0000-4000-8000-000000000012",
+        proposalId,
+        revisionId,
+        changeHash,
+        decision: "approved",
+        decidedAt: "2026-07-28T00:02:00Z",
+      },
+    }));
+    api.getProposalCurrentContent.mockClear();
+    renderDetail();
+
+    expect(await screen.findByText("执行能力不可用")).toBeInTheDocument();
+    expect(screen.getByText("Review Card Owner").parentElement).toHaveTextContent("10000000-0000-4000-8000-000000000010 · v4 · INVALIDATED");
+    expect(screen.getByText("10000000-0000-4000-8000-000000000011")).toBeInTheDocument();
+    expect(screen.getByText("d".repeat(64))).toBeInTheDocument();
+    expect(screen.getByText("e".repeat(64))).toBeInTheDocument();
+    expect(screen.getByText(/仅记录下游更新意图/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批准" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "驳回" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "执行 Apply Preflight" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "恢复写回 Workflow" })).not.toBeInTheDocument();
+    expect(screen.queryByText("写回前检查通过")).not.toBeInTheDocument();
+    expect(api.getProposalCurrentContent).not.toHaveBeenCalled();
     expect(api.preflightProposal).not.toHaveBeenCalled();
   });
 

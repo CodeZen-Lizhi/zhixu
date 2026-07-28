@@ -19,8 +19,12 @@ import (
 const (
 	// KnowledgeEventSchemaVersion 是 Timeline 投影事件的稳定结构版本。
 	KnowledgeEventSchemaVersion = "knowledge-event/v1"
+	// KnowledgeEventSchemaVersionV2 是携带操作者和 owner binding 的 Timeline 事件版本。
+	KnowledgeEventSchemaVersionV2 = "knowledge-event/v2"
 	// ImpactReportSchemaVersion 是 Impact 报告的稳定结构版本。
 	ImpactReportSchemaVersion = "impact-report/v1"
+	// ImpactReportSchemaVersionV2 是携带 owner binding 与 supersession 的 Impact 报告版本。
+	ImpactReportSchemaVersionV2 = "impact-report/v2"
 	// MaxKnowledgeEventSummaryBytes 限制用户可见事件摘要的大小。
 	MaxKnowledgeEventSummaryBytes = 4096
 	// MaxKnowledgeEventPayloadBytes 限制事件动态摘要载荷的大小。
@@ -39,21 +43,23 @@ const (
 type EventType string
 
 const (
-	EventProposalCreated      EventType = "PROPOSAL_CREATED"
-	EventApprovalGranted      EventType = "APPROVAL_GRANTED"
-	EventApprovalRejected     EventType = "APPROVAL_REJECTED"
-	EventGitCommitted         EventType = "GIT_COMMITTED"
-	EventRelationConfirmed    EventType = "RELATION_CONFIRMED"
-	EventRelationDeprecated   EventType = "RELATION_DEPRECATED"
-	EventConflictOpened       EventType = "CONFLICT_OPENED"
-	EventConflictTransitioned EventType = "CONFLICT_TRANSITIONED"
-	EventConflictResolved     EventType = "CONFLICT_RESOLVED"
-	EventVersionPublished     EventType = "VERSION_PUBLISHED"
-	EventVersionSuperseded    EventType = "VERSION_SUPERSEDED"
-	EventHealthIssueDetected  EventType = "HEALTH_ISSUE_DETECTED"
-	EventHealthIssueResolved  EventType = "HEALTH_ISSUE_RESOLVED"
-	EventImpactAnalyzed       EventType = "IMPACT_ANALYZED"
-	EventCorrectiveEvent      EventType = "CORRECTIVE_EVENT"
+	EventProposalCreated       EventType = "PROPOSAL_CREATED"
+	EventApprovalGranted       EventType = "APPROVAL_GRANTED"
+	EventApprovalRejected      EventType = "APPROVAL_REJECTED"
+	EventGitCommitted          EventType = "GIT_COMMITTED"
+	EventRelationConfirmed     EventType = "RELATION_CONFIRMED"
+	EventRelationDeprecated    EventType = "RELATION_DEPRECATED"
+	EventConflictOpened        EventType = "CONFLICT_OPENED"
+	EventConflictTransitioned  EventType = "CONFLICT_TRANSITIONED"
+	EventConflictResolved      EventType = "CONFLICT_RESOLVED"
+	EventVersionPublished      EventType = "VERSION_PUBLISHED"
+	EventVersionSuperseded     EventType = "VERSION_SUPERSEDED"
+	EventHealthIssueDetected   EventType = "HEALTH_ISSUE_DETECTED"
+	EventHealthIssueResolved   EventType = "HEALTH_ISSUE_RESOLVED"
+	EventImpactAnalyzed        EventType = "IMPACT_ANALYZED"
+	EventArtifactGenerated     EventType = "ARTIFACT_GENERATED"
+	EventReviewCardInvalidated EventType = "REVIEW_CARD_INVALIDATED"
+	EventCorrectiveEvent       EventType = "CORRECTIVE_EVENT"
 )
 
 // TimelineAggregateType 是事件所属的正式对象类型。
@@ -72,7 +78,25 @@ const (
 	TimelineAggregateRevision     TimelineAggregateType = "ARTICLE_REVISION"
 	TimelineAggregateHealthIssue  TimelineAggregateType = "HEALTH_ISSUE"
 	TimelineAggregateImpactReport TimelineAggregateType = "IMPACT_REPORT"
+	TimelineAggregateArtifact     TimelineAggregateType = "ARTIFACT"
+	TimelineAggregateReviewCard   TimelineAggregateType = "REVIEW_CARD"
 )
+
+// EventOperatorType 是 Timeline v2 事件记录的受控操作者类型。
+type EventOperatorType string
+
+const (
+	EventOperatorUser     EventOperatorType = "USER"
+	EventOperatorAPIToken EventOperatorType = "API_TOKEN"
+	EventOperatorSystem   EventOperatorType = "SYSTEM"
+	EventOperatorUnknown  EventOperatorType = "UNKNOWN"
+)
+
+// EventOperator 冻结事件产生者的受控类型和可选稳定身份。
+type EventOperator struct {
+	Type EventOperatorType `json:"type"`
+	ID   *foundation.ID    `json:"id,omitempty"`
+}
 
 // EventCorrelation 保存跨模块事实的稳定 ID，不保存正文或 Secret。
 type EventCorrelation struct {
@@ -98,8 +122,12 @@ type KnowledgeEvent struct {
 	Summary        string
 	Payload        json.RawMessage
 	Correlation    EventCorrelation
-	OccurredAt     time.Time
-	CreatedAt      time.Time
+	// Operator 只用于 knowledge-event/v2；历史 v1 不携带该字段。
+	Operator *EventOperator
+	// OwnerBinding 只用于 owner-backed v2 事件，冻结不可变 owner 快照。
+	OwnerBinding *EventOwnerBinding
+	OccurredAt   time.Time
+	CreatedAt    time.Time
 }
 
 // TimelineFilter 是 Workspace-scoped Timeline 查询过滤器。
@@ -145,18 +173,47 @@ const (
 	ImpactObjectProposal    ImpactObjectType = "PROPOSAL"
 	ImpactObjectRevision    ImpactObjectType = "ARTICLE_REVISION"
 	ImpactObjectAudit       ImpactObjectType = "AUDIT_EVENT"
+	ImpactObjectArtifact    ImpactObjectType = "ARTIFACT"
+	ImpactObjectReviewCard  ImpactObjectType = "REVIEW_CARD"
 )
 
 // ImpactAction 描述下游对象需要的下一步动作；它不是写命令。
 type ImpactAction string
 
 const (
-	ImpactActionReview          ImpactAction = "REVIEW"
-	ImpactActionReindex         ImpactAction = "REINDEX"
-	ImpactActionResolveConflict ImpactAction = "RESOLVE_CONFLICT"
-	ImpactActionRefreshHealth   ImpactAction = "REFRESH_HEALTH"
-	ImpactActionNoop            ImpactAction = "NO_ACTION"
+	ImpactActionReview               ImpactAction = "REVIEW"
+	ImpactActionReindex              ImpactAction = "REINDEX"
+	ImpactActionResolveConflict      ImpactAction = "RESOLVE_CONFLICT"
+	ImpactActionRefreshHealth        ImpactAction = "REFRESH_HEALTH"
+	ImpactActionRegenerateArtifact   ImpactAction = "REGENERATE_ARTIFACT"
+	ImpactActionRevalidateReviewCard ImpactAction = "REVALIDATE_REVIEW_CARD"
+	ImpactActionNoop                 ImpactAction = "NO_ACTION"
 )
+
+// ArtifactImpactBinding 冻结 Artifact 当前版本及其不可变 Revision 身份。
+type ArtifactImpactBinding struct {
+	ArtifactID      foundation.ID `json:"artifact_id"`
+	ArtifactVersion int64         `json:"artifact_version"`
+	RevisionID      foundation.ID `json:"revision_id"`
+	RevisionNo      int64         `json:"revision_no"`
+	ContentHash     string        `json:"content_hash"`
+}
+
+// ReviewCardImpactBinding 冻结 Review Card 版本、状态和证据 owner 绑定。
+type ReviewCardImpactBinding struct {
+	CardID                     foundation.ID `json:"card_id"`
+	CardVersion                int64         `json:"card_version"`
+	Status                     string        `json:"status"`
+	Fingerprint                string        `json:"fingerprint"`
+	ClaimID                    foundation.ID `json:"claim_id"`
+	EvidenceBindingFingerprint string        `json:"evidence_binding_fingerprint"`
+}
+
+// EventOwnerBinding 是 Timeline v2 owner 快照的判别联合。
+type EventOwnerBinding struct {
+	Artifact   *ArtifactImpactBinding   `json:"artifact,omitempty"`
+	ReviewCard *ReviewCardImpactBinding `json:"review_card,omitempty"`
+}
 
 // ImpactObject 是 Impact Analysis 的只读影响项。
 type ImpactObject struct {
@@ -167,7 +224,19 @@ type ImpactObject struct {
 	Action           ImpactAction     `json:"action"`
 	Reason           string           `json:"reason"`
 	RequiresProposal bool             `json:"requires_proposal"`
+	// ArtifactBinding 仅在 type=ARTIFACT 时存在。
+	ArtifactBinding *ArtifactImpactBinding `json:"artifact_binding,omitempty"`
+	// ReviewCardBinding 仅在 type=REVIEW_CARD 时存在。
+	ReviewCardBinding *ReviewCardImpactBinding `json:"review_card_binding,omitempty"`
 }
+
+// ImpactAnalysisVersion 标识生成不可变报告所使用的分析策略。
+type ImpactAnalysisVersion string
+
+const (
+	ImpactAnalysisVersionV1 ImpactAnalysisVersion = "impact-analysis/v1"
+	ImpactAnalysisVersionV2 ImpactAnalysisVersion = "impact-analysis/v2"
+)
 
 // ImpactReportStatus 是 Impact 报告的生命周期。
 type ImpactReportStatus string
@@ -185,15 +254,21 @@ type ImpactReport struct {
 	SourceEventID  foundation.ID
 	SourceEventRef string
 	SourceVersion  int64
-	Status         ImpactReportStatus
-	Objects        []ImpactObject
-	Summary        map[string]int
-	Fingerprint    string
-	ErrorCode      string
-	StaleReason    string
-	GeneratedAt    time.Time
-	CreatedAt      time.Time
-	Version        int64
+	// AnalysisVersion 为空时按历史 v1 解释，便于既有调用方兼容读取。
+	AnalysisVersion ImpactAnalysisVersion
+	// SupersedesReportID 指向同一 source event 的直接前序报告。
+	SupersedesReportID *foundation.ID
+	// SupersededByReportID 是读取时派生的直接后继报告，不修改历史报告。
+	SupersededByReportID *foundation.ID
+	Status               ImpactReportStatus
+	Objects              []ImpactObject
+	Summary              map[string]int
+	Fingerprint          string
+	ErrorCode            string
+	StaleReason          string
+	GeneratedAt          time.Time
+	CreatedAt            time.Time
+	Version              int64
 }
 
 // ProposalDraft 是 Impact Analysis 产生的待审批建议；它不执行写回。
@@ -227,8 +302,15 @@ func (event KnowledgeEvent) Validate() error {
 	if !validSafeText(event.SourceEventRef, 512) || !validSafeText(event.SourceRef, 512) {
 		return timelineInvalid("knowledge event source reference is invalid")
 	}
-	if event.EventVersion < 1 || event.SchemaVersion != KnowledgeEventSchemaVersion {
+	if event.EventVersion < 1 || (event.SchemaVersion != KnowledgeEventSchemaVersion && event.SchemaVersion != KnowledgeEventSchemaVersionV2) {
 		return timelineInvalid("knowledge event schema or version is invalid")
+	}
+	if event.SchemaVersion == KnowledgeEventSchemaVersion {
+		if event.Operator != nil || event.OwnerBinding != nil || event.EventType == EventArtifactGenerated || event.EventType == EventReviewCardInvalidated {
+			return timelineInvalid("knowledge event v1 contains v2 fields")
+		}
+	} else if err := validateKnowledgeEventV2(event); err != nil {
+		return timelineInvalid("knowledge event v2 binding is invalid")
 	}
 	if !validSummary(event.Summary, MaxKnowledgeEventSummaryBytes) {
 		return timelineInvalid("knowledge event summary is invalid")
@@ -293,8 +375,21 @@ func ValidateImpactReport(report ImpactReport) error {
 	if !validID(report.ID) || !validID(report.WorkspaceID) || !validID(report.SourceEventID) || report.ID == report.WorkspaceID || report.ID == report.SourceEventID {
 		return timelineInvalid("impact report identity is invalid")
 	}
-	if !validSafeText(report.SourceEventRef, 512) || report.SourceVersion < 1 || report.Version < 1 || report.SchemaVersion() != ImpactReportSchemaVersion {
+	analysisVersion := report.EffectiveAnalysisVersion()
+	if !validSafeText(report.SourceEventRef, 512) || report.SourceVersion < 1 || report.Version < 1 || !validImpactAnalysisVersion(analysisVersion) {
 		return timelineInvalid("impact report binding is invalid")
+	}
+	if report.SupersedesReportID != nil && (!validID(*report.SupersedesReportID) || *report.SupersedesReportID == report.ID) {
+		return timelineInvalid("impact report supersedes binding is invalid")
+	}
+	if report.SupersededByReportID != nil && (!validID(*report.SupersededByReportID) || *report.SupersededByReportID == report.ID) {
+		return timelineInvalid("impact report superseded-by binding is invalid")
+	}
+	if report.SupersedesReportID != nil && report.SupersededByReportID != nil && *report.SupersedesReportID == *report.SupersededByReportID {
+		return timelineInvalid("impact report supersession chain is invalid")
+	}
+	if analysisVersion == ImpactAnalysisVersionV1 && report.SupersedesReportID != nil {
+		return timelineInvalid("impact report v1 cannot supersede another report")
 	}
 	if report.Status != ImpactReportReady && report.Status != ImpactReportStale && report.Status != ImpactReportFailed {
 		return timelineInvalid("impact report status is invalid")
@@ -306,6 +401,9 @@ func ValidateImpactReport(report ImpactReport) error {
 	for _, object := range report.Objects {
 		if err := ValidateImpactObject(object); err != nil || object.WorkspaceID != report.WorkspaceID {
 			return timelineInvalid("impact object is invalid")
+		}
+		if analysisVersion == ImpactAnalysisVersionV1 && (object.Type == ImpactObjectArtifact || object.Type == ImpactObjectReviewCard) {
+			return timelineInvalid("impact report v1 contains v2-only objects")
 		}
 		key := string(object.Type) + ":" + string(object.ID)
 		if _, duplicate := seen[key]; duplicate {
@@ -356,6 +454,20 @@ func ValidateImpactObject(object ImpactObject) error {
 	if object.Action == ImpactActionNoop && object.RequiresProposal {
 		return timelineInvalid("no-op impact object cannot require a proposal")
 	}
+	switch object.Type {
+	case ImpactObjectArtifact:
+		if object.ReviewCardBinding != nil || object.ArtifactBinding == nil || !validArtifactImpactBinding(*object.ArtifactBinding) || object.ArtifactBinding.ArtifactID != object.ID || object.ArtifactBinding.ArtifactVersion != object.Version || object.Action != ImpactActionRegenerateArtifact || !object.RequiresProposal {
+			return timelineInvalid("artifact impact binding is invalid")
+		}
+	case ImpactObjectReviewCard:
+		if object.ArtifactBinding != nil || object.ReviewCardBinding == nil || !validReviewCardImpactBinding(*object.ReviewCardBinding) || object.ReviewCardBinding.CardID != object.ID || object.ReviewCardBinding.CardVersion != object.Version || object.Action != ImpactActionRevalidateReviewCard || !object.RequiresProposal {
+			return timelineInvalid("review card impact binding is invalid")
+		}
+	default:
+		if object.ArtifactBinding != nil || object.ReviewCardBinding != nil {
+			return timelineInvalid("legacy impact object contains owner binding")
+		}
+	}
 	return nil
 }
 
@@ -383,12 +495,30 @@ func SummarizeImpactObjects(objects []ImpactObject) map[string]int {
 	return result
 }
 
-// SchemaVersion 返回 ImpactReport 的固定结构版本，便于避免可变字段重复存储。
-func (report ImpactReport) SchemaVersion() string { return ImpactReportSchemaVersion }
+// EffectiveAnalysisVersion 将历史空值解释为 v1，避免改变既有报告身份。
+func (report ImpactReport) EffectiveAnalysisVersion() ImpactAnalysisVersion {
+	if report.AnalysisVersion == "" {
+		return ImpactAnalysisVersionV1
+	}
+	return report.AnalysisVersion
+}
+
+// SchemaVersion 根据不可变分析策略返回对应的报告 wire 版本。
+func (report ImpactReport) SchemaVersion() string {
+	if report.EffectiveAnalysisVersion() == ImpactAnalysisVersionV2 {
+		return ImpactReportSchemaVersionV2
+	}
+	return ImpactReportSchemaVersion
+}
 
 // ComputeImpactFingerprint 为相同源事件和影响对象生成稳定指纹。
 func ComputeImpactFingerprint(sourceEventID foundation.ID, sourceVersion int64, objects []ImpactObject) (string, error) {
-	if !validID(sourceEventID) || sourceVersion < 1 || len(objects) > MaxImpactObjects {
+	return ComputeImpactFingerprintForVersion(ImpactAnalysisVersionV1, sourceEventID, sourceVersion, objects)
+}
+
+// ComputeImpactFingerprintForVersion 为指定分析策略生成稳定、域隔离的报告指纹。
+func ComputeImpactFingerprintForVersion(analysisVersion ImpactAnalysisVersion, sourceEventID foundation.ID, sourceVersion int64, objects []ImpactObject) (string, error) {
+	if !validImpactAnalysisVersion(analysisVersion) || !validID(sourceEventID) || sourceVersion < 1 || len(objects) > MaxImpactObjects {
 		return "", timelineInvalid("impact fingerprint input is invalid")
 	}
 	canonical := append([]ImpactObject(nil), objects...)
@@ -410,13 +540,26 @@ func ComputeImpactFingerprint(sourceEventID foundation.ID, sourceVersion int64, 
 			return "", timelineInvalid("impact fingerprint contains duplicate objects")
 		}
 	}
-	payload := struct {
-		SchemaVersion string         `json:"schema_version"`
-		SourceEventID foundation.ID  `json:"source_event_id"`
-		SourceVersion int64          `json:"source_version"`
-		Objects       []ImpactObject `json:"objects"`
-	}{ImpactReportSchemaVersion, sourceEventID, sourceVersion, canonical}
-	raw, err := json.Marshal(payload)
+	var raw []byte
+	var err error
+	if analysisVersion == ImpactAnalysisVersionV1 {
+		payload := struct {
+			SchemaVersion string         `json:"schema_version"`
+			SourceEventID foundation.ID  `json:"source_event_id"`
+			SourceVersion int64          `json:"source_version"`
+			Objects       []ImpactObject `json:"objects"`
+		}{ImpactReportSchemaVersion, sourceEventID, sourceVersion, canonical}
+		raw, err = json.Marshal(payload)
+	} else {
+		payload := struct {
+			SchemaVersion   string                `json:"schema_version"`
+			AnalysisVersion ImpactAnalysisVersion `json:"analysis_version"`
+			SourceEventID   foundation.ID         `json:"source_event_id"`
+			SourceVersion   int64                 `json:"source_version"`
+			Objects         []ImpactObject        `json:"objects"`
+		}{ImpactReportSchemaVersionV2, analysisVersion, sourceEventID, sourceVersion, canonical}
+		raw, err = json.Marshal(payload)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -473,9 +616,63 @@ func validateEventCorrelation(correlation EventCorrelation) error {
 	return nil
 }
 
+func validateKnowledgeEventV2(event KnowledgeEvent) error {
+	if event.Operator == nil || !validEventOperator(*event.Operator) {
+		return errors.New("event operator is invalid")
+	}
+	switch event.EventType {
+	case EventArtifactGenerated:
+		if event.AggregateType != TimelineAggregateArtifact || event.AggregateID == nil || event.OwnerBinding == nil || event.OwnerBinding.Artifact == nil || event.OwnerBinding.ReviewCard != nil || !validArtifactImpactBinding(*event.OwnerBinding.Artifact) || event.OwnerBinding.Artifact.ArtifactID != *event.AggregateID {
+			return errors.New("artifact event owner binding is invalid")
+		}
+	case EventReviewCardInvalidated:
+		if event.AggregateType != TimelineAggregateReviewCard || event.AggregateID == nil || event.OwnerBinding == nil || event.OwnerBinding.Artifact != nil || event.OwnerBinding.ReviewCard == nil || !validReviewCardImpactBinding(*event.OwnerBinding.ReviewCard) || event.OwnerBinding.ReviewCard.CardID != *event.AggregateID || event.OwnerBinding.ReviewCard.Status != "INVALIDATED" {
+			return errors.New("review card event owner binding is invalid")
+		}
+	default:
+		if event.OwnerBinding != nil {
+			return errors.New("non-owner event contains owner binding")
+		}
+	}
+	return nil
+}
+
+func validEventOperator(operator EventOperator) bool {
+	switch operator.Type {
+	case EventOperatorUser, EventOperatorAPIToken, EventOperatorSystem, EventOperatorUnknown:
+	default:
+		return false
+	}
+	if operator.ID != nil && !validID(*operator.ID) {
+		return false
+	}
+	return (operator.Type != EventOperatorSystem && operator.Type != EventOperatorUnknown) || operator.ID == nil
+}
+
+func validArtifactImpactBinding(binding ArtifactImpactBinding) bool {
+	return validID(binding.ArtifactID) && validID(binding.RevisionID) && binding.ArtifactID != binding.RevisionID && binding.ArtifactVersion > 0 && binding.RevisionNo > 0 && validSHA256(binding.ContentHash)
+}
+
+func validReviewCardImpactBinding(binding ReviewCardImpactBinding) bool {
+	return validID(binding.CardID) && validID(binding.ClaimID) && binding.CardID != binding.ClaimID && binding.CardVersion > 0 && validReviewCardStatus(binding.Status) && validSHA256(binding.Fingerprint) && validSHA256(binding.EvidenceBindingFingerprint)
+}
+
+func validReviewCardStatus(status string) bool {
+	switch status {
+	case "DRAFT", "APPROVED", "INVALIDATED", "REJECTED":
+		return true
+	default:
+		return false
+	}
+}
+
+func validImpactAnalysisVersion(version ImpactAnalysisVersion) bool {
+	return version == ImpactAnalysisVersionV1 || version == ImpactAnalysisVersionV2
+}
+
 func validImpactObjectType(value ImpactObjectType) bool {
 	switch value {
-	case ImpactObjectTopic, ImpactObjectClaim, ImpactObjectRelation, ImpactObjectConflict, ImpactObjectHealthIssue, ImpactObjectProposal, ImpactObjectRevision, ImpactObjectAudit:
+	case ImpactObjectTopic, ImpactObjectClaim, ImpactObjectRelation, ImpactObjectConflict, ImpactObjectHealthIssue, ImpactObjectProposal, ImpactObjectRevision, ImpactObjectAudit, ImpactObjectArtifact, ImpactObjectReviewCard:
 		return true
 	default:
 		return false
@@ -484,7 +681,7 @@ func validImpactObjectType(value ImpactObjectType) bool {
 
 func validImpactAction(value ImpactAction) bool {
 	switch value {
-	case ImpactActionReview, ImpactActionReindex, ImpactActionResolveConflict, ImpactActionRefreshHealth, ImpactActionNoop:
+	case ImpactActionReview, ImpactActionReindex, ImpactActionResolveConflict, ImpactActionRefreshHealth, ImpactActionRegenerateArtifact, ImpactActionRevalidateReviewCard, ImpactActionNoop:
 		return true
 	default:
 		return false
@@ -496,7 +693,7 @@ func validEventType(value EventType) bool {
 	case EventProposalCreated, EventApprovalGranted, EventApprovalRejected, EventGitCommitted,
 		EventRelationConfirmed, EventRelationDeprecated, EventConflictOpened, EventConflictTransitioned,
 		EventConflictResolved, EventVersionPublished, EventVersionSuperseded, EventHealthIssueDetected,
-		EventHealthIssueResolved, EventImpactAnalyzed, EventCorrectiveEvent:
+		EventHealthIssueResolved, EventImpactAnalyzed, EventArtifactGenerated, EventReviewCardInvalidated, EventCorrectiveEvent:
 		return true
 	default:
 		return false
@@ -507,7 +704,8 @@ func validTimelineAggregateType(value TimelineAggregateType) bool {
 	switch value {
 	case TimelineAggregateProposal, TimelineAggregateApproval, TimelineAggregateCommit, TimelineAggregateTopic,
 		TimelineAggregateClaim, TimelineAggregateRelation, TimelineAggregateConflict, TimelineAggregateDocument,
-		TimelineAggregateRevision, TimelineAggregateHealthIssue, TimelineAggregateImpactReport:
+		TimelineAggregateRevision, TimelineAggregateHealthIssue, TimelineAggregateImpactReport, TimelineAggregateArtifact,
+		TimelineAggregateReviewCard:
 		return true
 	default:
 		return false

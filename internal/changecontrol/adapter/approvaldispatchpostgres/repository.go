@@ -86,7 +86,11 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	if err != nil {
 		return changedispatch.Result{}, classifyDispatch(err, "APPROVAL_DISPATCH_PROPOSAL_QUERY_FAILED")
 	}
-	if domain.NormalizeProposalType(domain.ProposalType(proposalType)) != domain.ProposalTypeFilePatch {
+	normalizedProposalType := domain.NormalizeProposalType(domain.ProposalType(proposalType))
+	if normalizedProposalType == domain.ProposalTypeDownstreamUpdate {
+		return changedispatch.Result{}, domain.NewDownstreamUpdateApplyUnavailableError()
+	}
+	if normalizedProposalType != domain.ProposalTypeFilePatch {
 		return changedispatch.Result{}, foundation.NewError(foundation.ErrorInvalidInput, "APPROVAL_DISPATCH_PROPOSAL_TYPE_UNSUPPORTED", false, errors.New("approval dispatch only supports file patch proposals"))
 	}
 	if workspaceID != string(command.WorkspaceID) || !strings.EqualFold(revisionHash, command.Approval.ChangeHash) {

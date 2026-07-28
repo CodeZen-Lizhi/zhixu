@@ -141,6 +141,30 @@ func TestBootstrapExecutorRejectsProposalBoundToDifferentRun(t *testing.T) {
 	}
 }
 
+func TestBootstrapExecutorRejectsDownstreamUpdateBeforeIssuingAuthorization(t *testing.T) {
+	proposal := bootstrapProposal()
+	proposal.Type = domain.ProposalTypeDownstreamUpdate
+	execution := bootstrapExecution(proposal)
+	lookup := &bootstrapLookupFake{execution: execution, found: true}
+	changeControl := &bootstrapChangeControlFake{proposal: proposal}
+	beginner := &bootstrapBeginFake{}
+	resumer := &bootstrapResumer{result: bootstrapResult(execution)}
+	node, err := NewNode(resumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := newBootstrapExecutorFixture(t, lookup, changeControl, beginner, node)
+
+	_, err = executor.Execute(context.Background(), bootstrapExecutionContext(t))
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != domain.DownstreamUpdateApplyUnavailableCode || classified.Kind != foundation.ErrorVersionConflict || classified.Retryable {
+		t.Fatalf("error=%v", err)
+	}
+	if len(changeControl.issues) != 0 || beginner.calls != 0 || resumer.executionID != "" {
+		t.Fatalf("downstream update reached bootstrap side effect: issues=%#v begin=%d resume=%s", changeControl.issues, beginner.calls, resumer.executionID)
+	}
+}
+
 func TestBootstrapExecutorRecoversAtomicBeginResponseLossByExactLookup(t *testing.T) {
 	proposal := bootstrapProposal()
 	execution := bootstrapExecution(proposal)

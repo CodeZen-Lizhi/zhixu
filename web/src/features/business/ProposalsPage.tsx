@@ -107,6 +107,7 @@ const proposalTypeLabel = (type: ProposalDetail["type"]): string => ({
   file_patch: "文件变更",
   knowledge_change: "知识关系变更",
   publish_artifact: "Artifact 发布",
+  downstream_update: "下游更新",
 })[type];
 
 export const ProposalsPage = () => {
@@ -148,7 +149,7 @@ export const ProposalsPage = () => {
     <Card>
       <div className="filter-bar" aria-label="Proposal 筛选">
         <label>状态<select value={status} onChange={(event) => updateFilter({ status: event.target.value as ProposalUrlState["status"] })}><option value="">全部</option>{proposalStatusOptions.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-        <label>类型<select value={type} onChange={(event) => updateFilter({ type: event.target.value as ProposalUrlState["type"] })}><option value="">全部</option><option value="file_patch">文件变更</option><option value="knowledge_change">知识关系</option><option value="publish_artifact">Artifact 发布</option></select></label>
+        <label>类型<select value={type} onChange={(event) => updateFilter({ type: event.target.value as ProposalUrlState["type"] })}><option value="">全部</option><option value="file_patch">文件变更</option><option value="knowledge_change">知识关系</option><option value="publish_artifact">Artifact 发布</option><option value="downstream_update">下游更新</option></select></label>
         <label>风险等级<select value={risk} onChange={(event) => updateFilter({ risk: event.target.value as ProposalUrlState["risk"] })}><option value="">全部</option>{proposalRiskLevels.map((riskLevel) => <option value={riskLevel} key={riskLevel}>{riskLevelLabel(riskLevel)}</option>)}</select></label>
         <label>创建日期起<input type="date" value={canonicalLocalDate(createdDate) ?? ""} onChange={(event) => updateFilter({ createdDate: canonicalLocalDate(event.target.value) ?? "" })} /></label>
       </div>
@@ -159,8 +160,8 @@ export const ProposalsPage = () => {
           ? <EmptyState title="没有可审变更" description="真实 Proposal 会按更新时间倒序出现在这里。" />
           : <div className="proposal-list">{query.data?.items.map((item) => <Link to={`/proposals/${item.id}`} className="proposal-row" key={item.id}>
             <div className="proposal-row__kind">
-              <span className={`kind-mark kind-mark--${item.type}`}>{item.type === "file_patch" ? <FileDiff size={16} /> : item.type === "knowledge_change" ? <GitMerge size={16} /> : <BookUp size={16} />}</span>
-              <div><strong>{item.type === "publish_artifact" ? "Artifact 发布" : item.target}</strong><small>{proposalTypeLabel(item.type)} · <CalendarDays size={12} /> {new Date(item.createdAt).toLocaleString("zh-CN")} · <Clock3 size={12} /> {item.status === "ready_for_review" ? `等待 ${formatElapsedDuration(item.createdAt)}` : `存在 ${formatElapsedDuration(item.createdAt)}`}</small></div>
+              <span className={`kind-mark kind-mark--${item.type}`}>{item.type === "file_patch" ? <FileDiff size={16} /> : item.type === "knowledge_change" ? <GitMerge size={16} /> : item.type === "publish_artifact" ? <BookUp size={16} /> : <RotateCcw size={16} />}</span>
+              <div><strong>{item.type === "publish_artifact" ? "Artifact 发布" : item.type === "downstream_update" ? "下游更新" : item.target}</strong><small>{proposalTypeLabel(item.type)} · <CalendarDays size={12} /> {new Date(item.createdAt).toLocaleString("zh-CN")} · <Clock3 size={12} /> {item.status === "ready_for_review" ? `等待 ${formatElapsedDuration(item.createdAt)}` : `存在 ${formatElapsedDuration(item.createdAt)}`}</small></div>
             </div>
             <div className="proposal-row__meta">
               <Badge tone={item.status === "ready_for_review" ? "warning" : item.status === "needs_revision" ? "danger" : "neutral"}>{item.status}</Badge>
@@ -305,8 +306,9 @@ export const ProposalDetailPage = () => {
   const fileRevision = proposal.type === "file_patch" ? proposal.revision : undefined;
   const knowledgeRevision = proposal.type === "knowledge_change" ? proposal.revision : undefined;
   const publishRevision = proposal.type === "publish_artifact" ? proposal.revision : undefined;
-  const versionBindingLabel = fileRevision ? "Base Hash" : publishRevision ? "Artifact Content Hash" : "版本来源";
-  const versionBindingValue = fileRevision?.baseHash ?? publishRevision?.publication.contentHash ?? "结构化节点版本";
+  const downstreamRevision = proposal.type === "downstream_update" ? proposal.revision : undefined;
+  const versionBindingLabel = fileRevision ? "Base Hash" : publishRevision ? "Artifact Content Hash" : downstreamRevision ? "Target Base Version" : "版本来源";
+  const versionBindingValue = fileRevision?.baseHash ?? publishRevision?.publication.contentHash ?? (downstreamRevision ? `v${String(downstreamRevision.update.baseVersion)}` : "结构化节点版本");
   const proposedContent = fileRevision?.content ?? "";
   const changeHash = revision.changeHash;
   const riskDescription = revision.risk;
@@ -352,7 +354,7 @@ export const ProposalDetailPage = () => {
     <div className="page-intro page-intro--split">
       <div>
         <p className="eyebrow">审阅台 / {type}</p>
-        <h2>{proposal.type === "file_patch" ? proposal.targetPath : proposal.type === "knowledge_change" ? "知识关系变更" : "Artifact 发布"}</h2>
+        <h2>{proposal.type === "file_patch" ? proposal.targetPath : proposal.type === "knowledge_change" ? "知识关系变更" : proposal.type === "publish_artifact" ? "Artifact 发布" : "下游更新意图"}</h2>
         <p>Proposal 状态：<Badge tone={proposal.status === "needs_revision" ? "danger" : ready ? "warning" : "neutral"}>{proposal.status}</Badge></p>
       </div>
       <div className="hash-card"><span>Change Hash</span><code>{changeHash.slice(0, 16)}…</code></div>
@@ -363,8 +365,8 @@ export const ProposalDetailPage = () => {
         <Card>
           <CardHeader
             eyebrow="变更主体"
-            title={type === "file_patch" ? "当前文件 → Proposal" : type === "knowledge_change" ? "Relation Diff" : "Artifact Publication Snapshot"}
-            description={type === "file_patch" ? "当前正文由服务端安全读取；只有 current hash 与 Proposal base hash 一致时才允许批准。" : type === "knowledge_change" ? "结构化关系端点、版本和 Evidence，不伪装成 Markdown Diff。" : "冻结 Artifact、Revision、版本、内容哈希与来源覆盖；这里只审阅发布请求，不写入正式知识。"}
+            title={type === "file_patch" ? "当前文件 → Proposal" : type === "knowledge_change" ? "Relation Diff" : type === "publish_artifact" ? "Artifact Publication Snapshot" : "Downstream Update Snapshot"}
+            description={type === "file_patch" ? "当前正文由服务端安全读取；只有 current hash 与 Proposal base hash 一致时才允许批准。" : type === "knowledge_change" ? "结构化关系端点、版本和 Evidence，不伪装成 Markdown Diff。" : type === "publish_artifact" ? "冻结 Artifact、Revision、版本、内容哈希与来源覆盖；这里只审阅发布请求，不写入正式知识。" : "冻结 Impact Report、来源 Event、目标版本和 owner 绑定；Approval 只记录更新意图，不授予执行能力。"}
             action={type === "file_patch" ? <Button variant="ghost" size="sm" onClick={() => void currentContentQuery.refetch()} disabled={currentContentQuery.isFetching}><RotateCcw size={14} />重新读取</Button> : undefined}
           />
           {fileRevision ? <>
@@ -412,12 +414,32 @@ export const ProposalDetailPage = () => {
               <span>章节覆盖 · {coverage.sectionKey}</span>
               <strong>{coverage.status} · {coverage.gaps.length === 0 ? "无知识缺口" : coverage.gaps.map((gap) => `${gap.code}：${gap.description}`).join("；")}</strong>
             </div>)}
+          </div> : downstreamRevision ? <div className="relation-diff">
+            <div><span>Impact Report</span><strong><code className="mono">{downstreamRevision.update.sourceReport.id}</code></strong></div>
+            <div><span>Analysis Version</span><strong>{downstreamRevision.update.sourceReport.analysisVersion}</strong></div>
+            <div><span>Report Fingerprint</span><strong><code className="mono">{downstreamRevision.update.sourceReport.fingerprint}</code></strong></div>
+            <div><span>Source Event</span><strong><code className="mono">{downstreamRevision.update.sourceEvent.id}</code> · v{downstreamRevision.update.sourceEvent.eventVersion}</strong></div>
+            <div><span>Target</span><strong>{downstreamRevision.update.targetType}:{downstreamRevision.update.targetId}</strong></div>
+            <div><span>Target Base Version</span><strong>v{downstreamRevision.update.baseVersion}</strong></div>
+            <div><span>Action</span><strong>{downstreamRevision.update.action}</strong></div>
+            <div><span>Schema</span><strong>{downstreamRevision.update.schemaVersion}</strong></div>
+            <div><span>Change Control Revision</span><strong>#{downstreamRevision.revisionNo} · <code className="mono">{downstreamRevision.id}</code></strong></div>
+            {downstreamRevision.update.targetType === "ARTIFACT" ? <>
+              <div><span>Artifact Owner</span><strong>{downstreamRevision.update.artifactBinding.artifactId} · v{downstreamRevision.update.artifactBinding.artifactVersion}</strong></div>
+              <div><span>Artifact Revision</span><strong>#{downstreamRevision.update.artifactBinding.revisionNo} · <code className="mono">{downstreamRevision.update.artifactBinding.revisionId}</code></strong></div>
+              <div><span>Artifact Content Hash</span><strong><code className="mono">{downstreamRevision.update.artifactBinding.contentHash}</code></strong></div>
+            </> : <>
+              <div><span>Review Card Owner</span><strong>{downstreamRevision.update.reviewCardBinding.cardId} · v{downstreamRevision.update.reviewCardBinding.cardVersion} · {downstreamRevision.update.reviewCardBinding.status}</strong></div>
+              <div><span>Claim</span><strong><code className="mono">{downstreamRevision.update.reviewCardBinding.claimId}</code></strong></div>
+              <div><span>Card Fingerprint</span><strong><code className="mono">{downstreamRevision.update.reviewCardBinding.fingerprint}</code></strong></div>
+              <div><span>Evidence Binding</span><strong><code className="mono">{downstreamRevision.update.reviewCardBinding.evidenceBindingFingerprint}</code></strong></div>
+            </>}
           </div> : null}
         </Card>
         <Card>
           <CardHeader eyebrow="证据与回滚" title="为什么要改" />
           <div className="prose-block">
-            <p>{fileRevision ? readText(fileRevision.evidenceSummary, "该 Proposal 没有提供摘要。") : knowledgeRevision ? `结构化变更绑定 ${String(knowledgeRevision.evidenceRefs.length)} 条 Evidence。` : `冻结 ${String(publishRevision?.publication.sourceCoverage.length ?? 0)} 个章节的来源覆盖；该快照仅供发布审批。`}</p>
+            <p>{fileRevision ? readText(fileRevision.evidenceSummary, "该 Proposal 没有提供摘要。") : knowledgeRevision ? `结构化变更绑定 ${String(knowledgeRevision.evidenceRefs.length)} 条 Evidence。` : publishRevision ? `冻结 ${String(publishRevision.publication.sourceCoverage.length)} 个章节的来源覆盖；该快照仅供发布审批。` : downstreamRevision?.update.reason}</p>
             <p><strong>风险等级：</strong><Badge tone={riskLevelTone(proposal.riskLevel)}>{proposal.riskLevel} · {riskLevelLabel(proposal.riskLevel)}</Badge></p>
             <p><strong>风险说明：</strong>{riskDescription}</p>
             <p><strong>回滚计划：</strong>{readText(revision.rollbackPlan)}</p>
@@ -435,7 +457,9 @@ export const ProposalDetailPage = () => {
               <Button className="full-button" variant="danger" disabled={!canReject || mutation.isPending} onClick={(event) => openConfirmation("rejected", event.currentTarget)}><X size={16} />驳回</Button>
               {type === "file_patch" && !baselineVerified && !currentContentQuery.isError ? <p className="sidebar-note">等待当前文件基线校验完成后才能批准。</p> : null}
               {type === "file_patch" && baselineVerified && !fileDiffReady && !currentContentQuery.isError ? <p className="sidebar-note">等待 Diff Viewer 成功挂载后才能批准；驳回仍可提交。</p> : null}
-            </> : writebackState === "pending_dispatch" ? <>
+            </> : proposal.type === "downstream_update" && proposal.status === "approved"
+              ? <UnavailableState title="执行能力不可用" description="该 Approval 仅记录下游更新意图；当前没有目标执行器，页面不会显示执行、派发或写入成功状态。" />
+              : writebackState === "pending_dispatch" ? <>
               <UnavailableState title="历史批准尚未派发" description="该 Approval 已有可信 Git 基线，但尚未绑定 Safe Writeback Workflow。恢复时服务端会重新检查当前文件与 Git。" />
               <Button className="full-button" variant="secondary" disabled={!canRedispatch || mutation.isPending} onClick={(event) => openConfirmation("redispatch", event.currentTarget)}><RotateCcw size={15} />恢复写回 Workflow</Button>
               {!baselineVerified && !currentContentQuery.isError ? <p className="sidebar-note">等待当前文件基线校验完成后才能恢复派发。</p> : null}
@@ -484,7 +508,7 @@ export const ProposalDetailPage = () => {
       open={activeConfirm !== undefined}
       onOpenChange={(open) => { if (!open) setConfirm(undefined); }}
       title={activeConfirm?.action === "redispatch" ? "确认恢复写回 Workflow？" : activeConfirm?.action === "approved" ? isHighRiskLevel(activeConfirm.riskLevel) ? "高风险变更：再次确认批准" : "确认批准这项变更？" : "确认驳回这项变更？"}
-      description={activeConfirm?.action === "redispatch" ? "服务端会重做 Target Hash 与 strict-clean Git 安全门，再原子补建唯一 Workflow；前端不会把请求受理显示成写回完成。" : activeConfirm?.proposalType === "publish_artifact" ? "提交后服务端会再次校验冻结的 Artifact、Revision、版本与 Change Hash。批准只形成 Approval，不表示已经创建 Document、Git 写入或索引。" : activeConfirm?.proposalType === "file_patch" ? "提交后服务端会再次校验 Proposal 状态、Revision、Change Hash 与当前文件基线；前端不会乐观显示成功。" : "提交后服务端会再次校验 Proposal 状态、Revision 与 Change Hash；前端不会乐观显示成功。"}
+      description={activeConfirm?.action === "redispatch" ? "服务端会重做 Target Hash 与 strict-clean Git 安全门，再原子补建唯一 Workflow；前端不会把请求受理显示成写回完成。" : activeConfirm?.proposalType === "downstream_update" ? "提交后服务端会再次校验冻结的 Impact Report、Event、目标版本、owner 绑定与 Change Hash。批准只记录更新意图，不授予目标执行能力。" : activeConfirm?.proposalType === "publish_artifact" ? "提交后服务端会再次校验冻结的 Artifact、Revision、版本与 Change Hash。批准只形成 Approval，不表示已经创建 Document、Git 写入或索引。" : activeConfirm?.proposalType === "file_patch" ? "提交后服务端会再次校验 Proposal 状态、Revision、Change Hash 与当前文件基线；前端不会乐观显示成功。" : "提交后服务端会再次校验 Proposal 状态、Revision 与 Change Hash；前端不会乐观显示成功。"}
       restoreFocusRef={decisionTriggerRef}
     >
       <div className="dialog-actions">

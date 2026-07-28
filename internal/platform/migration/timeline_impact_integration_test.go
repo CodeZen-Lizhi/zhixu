@@ -11,7 +11,6 @@ import (
 
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	knowledgeapp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -20,22 +19,19 @@ func TestTimelineImpactMigrationReplayAppendOnlyAndGuardedDown(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
+	provider := migrationProvider(t, pool)
+	if _, err := provider.UpTo(ctx, 37); err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatalf("repeated migration Up failed: %v", err)
+	if _, err := provider.UpTo(ctx, 37); err != nil {
+		t.Fatalf("repeated migration UpTo(37) failed: %v", err)
 	}
 	var version int64
 	if err := pool.QueryRow(ctx, `SELECT max(version_id) FROM public.goose_db_version WHERE is_applied`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version < 37 {
-		t.Fatalf("migration version=%d want at least 37", version)
+	if version != 37 {
+		t.Fatalf("migration version=%d want 37", version)
 	}
 
 	workspaceID := "37000000-0000-4000-8000-000000000001"
@@ -200,6 +196,9 @@ WHERE workspace_id=$1 AND aggregate_type='HEALTH_ISSUE' AND aggregate_id=$2`, wo
 	if backfillSources != 2 {
 		t.Fatalf("Health backfill source count=%d want 2", backfillSources)
 	}
+	if _, err := provider.UpTo(ctx, 62); err != nil {
+		t.Fatalf("upgrade Timeline projector schema to 00062: %v", err)
+	}
 
 	repository, err := knowledgepostgres.NewRepository(pool)
 	if err != nil {
@@ -342,6 +341,9 @@ func TestTimelineImpactMigrationBackfillsAndProjectsSourceDirectory(t *testing.T
 	assertTimelineSourceBinding(t, ctx, pool, workspaceID, "approval:"+approvalID+":v1", "APPROVAL_GRANTED", "APPROVAL", approvalID, "approval:"+approvalID, 1, map[string]string{"proposal_id": proposalID, "approval_id": approvalID})
 	assertTimelineSourceBinding(t, ctx, pool, workspaceID, "proposal-commit:"+commitID+":v1", "GIT_COMMITTED", "GIT_COMMIT", commitID, "git_commit:"+strings.Repeat("c", 40), 1, map[string]string{"proposal_id": proposalID, "approval_id": approvalID, "git_commit_ref": strings.Repeat("c", 40)})
 	assertTimelineSourceBinding(t, ctx, pool, workspaceID, "proposal-revision-published:"+commitID+":v1", "VERSION_PUBLISHED", "ARTICLE_REVISION", revisionID, "article_revision:"+revisionID, 1, map[string]string{"proposal_id": proposalID, "approval_id": approvalID, "git_commit_ref": strings.Repeat("c", 40)})
+	if _, err := provider.UpTo(ctx, 62); err != nil {
+		t.Fatalf("upgrade Timeline projector schema to 00062: %v", err)
+	}
 
 	repository, err := knowledgepostgres.NewRepository(pool)
 	if err != nil {

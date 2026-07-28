@@ -181,7 +181,7 @@ func main() {
 	collectionHandler := collectionhttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	healthHandler := healthhttp.NewHandler(nil, nil, nil, nil, nil)
 	workflowHandler := workflowhttp.NewHandler(nil)
-	changeControlHandler := changecontrolhttp.NewHandler(nil)
+	changeControlHandler := changecontrolhttp.NewHandlerWithTimeout(nil, cfg.GraphQueryTimeout)
 	ingestionHandler := ingestionhttp.NewHandler(nil)
 	retrievalHandler := retrievalhttp.NewHandler(nil, nil, nil)
 	graphHandler := graphhttp.NewHandler(nil, cfg.GraphQueryTimeout)
@@ -356,7 +356,7 @@ func main() {
 						logger.Error("change control service is unavailable", "error_code", "CHANGE_CONTROL_SERVICE_UNAVAILABLE")
 					} else {
 						changeControlService = configuredChangeControlService
-						changeControlHandler = changecontrolhttp.NewHandler(changeControlService)
+						changeControlHandler = changecontrolhttp.NewHandlerWithTimeout(changeControlService, cfg.GraphQueryTimeout)
 					}
 				}
 			}

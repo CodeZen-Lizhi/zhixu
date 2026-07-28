@@ -22,6 +22,8 @@ const (
 	// ProposalTypePublishArtifact freezes an approved Artifact revision for a
 	// future formal-knowledge publication capability.
 	ProposalTypePublishArtifact ProposalType = "publish_artifact"
+	// ProposalTypeDownstreamUpdate 记录 Impact 报告中的下游更新意图，不授予执行能力。
+	ProposalTypeDownstreamUpdate ProposalType = "downstream_update"
 )
 
 const (
@@ -29,6 +31,10 @@ const (
 	KnowledgeChangeSchemaVersion = "knowledge-relation-change/v1"
 	// PublishArtifactSchemaVersion is the frozen Artifact publication contract.
 	PublishArtifactSchemaVersion = "artifact-publication/v1"
+	// DownstreamUpdateSchemaVersion 是 Impact 下游更新 Proposal 的首版冻结契约。
+	DownstreamUpdateSchemaVersion = "impact-downstream-update/v1"
+	// DownstreamUpdateApplyUnavailableCode 表示尚未提供下游更新的执行能力。
+	DownstreamUpdateApplyUnavailableCode = "DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE"
 )
 
 // ArtifactCoverageStatus is the verified coverage conclusion for one frozen
@@ -66,6 +72,23 @@ type PublishArtifact struct {
 	ContentHash     string                   `json:"content_hash"`
 	SourceCoverage  []ArtifactSourceCoverage `json:"source_coverage"`
 	SchemaVersion   string                   `json:"schema_version"`
+}
+
+// DownstreamUpdate 是 `downstream_update` Proposal Revision 的不可变结构化正文。
+type DownstreamUpdate struct {
+	WorkspaceID        foundation.ID                   `json:"workspace_id"`
+	ReportID           foundation.ID                   `json:"report_id"`
+	AnalysisVersion    knowledge.ImpactAnalysisVersion `json:"analysis_version"`
+	ReportFingerprint  string                          `json:"report_fingerprint"`
+	SourceEventID      foundation.ID                   `json:"source_event_id"`
+	SourceEventVersion int64                           `json:"source_event_version"`
+	TargetType         knowledge.ImpactObjectType      `json:"target_type"`
+	TargetID           foundation.ID                   `json:"target_id"`
+	BaseVersion        int64                           `json:"base_version"`
+	Action             knowledge.ImpactAction          `json:"action"`
+	OwnerBinding       knowledge.EventOwnerBinding     `json:"owner_binding"`
+	Reason             string                          `json:"reason"`
+	SchemaVersion      string                          `json:"schema_version"`
 }
 
 // KnowledgeTargetRefType 是结构化知识变更的目标引用类型。
@@ -128,7 +151,19 @@ var (
 	ErrProposalTypeInvalid = errors.New("proposal type does not match revision payload")
 	// ErrPublishArtifactInvalid means the frozen Artifact publication payload is invalid.
 	ErrPublishArtifactInvalid = errors.New("publish artifact payload is invalid")
+	// ErrDownstreamUpdateInvalid 表示下游更新载荷未绑定当前 Impact 与 owner 快照。
+	ErrDownstreamUpdateInvalid = errors.New("downstream update payload is invalid")
 )
+
+// NewDownstreamUpdateApplyUnavailableError 返回下游更新禁止进入任何写回链路的稳定错误。
+func NewDownstreamUpdateApplyUnavailableError() error {
+	return foundation.NewError(
+		foundation.ErrorVersionConflict,
+		DownstreamUpdateApplyUnavailableCode,
+		false,
+		errors.New("downstream update execution capability is unavailable"),
+	)
+}
 
 // NormalizeProposalType 返回去空白、默认 file_patch 的 ProposalType。
 func NormalizeProposalType(value ProposalType) ProposalType {
@@ -197,7 +232,7 @@ func ValidateKnowledgeChange(change KnowledgeChange) (KnowledgeChange, error) {
 	sort.Slice(normalizedBaseVersions, func(i, j int) bool {
 		return knowledgeBaseVersionKey(normalizedBaseVersions[i]) < knowledgeBaseVersionKey(normalizedBaseVersions[j])
 	})
-	if knowledgeBaseVersionKey(normalizedBaseVersions[0]) == knowledgeBaseVersionKey(normalizedBaseVersions[1]) {
+	if knowledgeBaseVersionNodeKey(normalizedBaseVersions[0]) == knowledgeBaseVersionNodeKey(normalizedBaseVersions[1]) {
 		return KnowledgeChange{}, ErrKnowledgeChangeInvalid
 	}
 	expectedVersions := map[string]struct{}{
@@ -205,9 +240,14 @@ func ValidateKnowledgeChange(change KnowledgeChange) (KnowledgeChange, error) {
 		knowledgeNodeRefKey(normalized.ChangeSet.Target): {},
 	}
 	for _, item := range normalizedBaseVersions {
-		if _, ok := expectedVersions[knowledgeBaseVersionNodeKey(item)]; !ok {
+		key := knowledgeBaseVersionNodeKey(item)
+		if _, ok := expectedVersions[key]; !ok {
 			return KnowledgeChange{}, ErrKnowledgeChangeInvalid
 		}
+		delete(expectedVersions, key)
+	}
+	if len(expectedVersions) != 0 {
+		return KnowledgeChange{}, ErrKnowledgeChangeInvalid
 	}
 	normalized.BaseVersions = normalizedBaseVersions
 
@@ -356,6 +396,125 @@ func ComputePublishArtifactRequestHash(workspaceID foundation.ID, publication Pu
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// ValidateDownstreamUpdate 规范化并校验 Impact 下游更新的完整 owner 绑定。
+func ValidateDownstreamUpdate(update DownstreamUpdate) (DownstreamUpdate, error) {
+	update.SchemaVersion = strings.TrimSpace(update.SchemaVersion)
+	update.AnalysisVersion = knowledge.ImpactAnalysisVersion(strings.TrimSpace(string(update.AnalysisVersion)))
+	update.TargetType = knowledge.ImpactObjectType(strings.ToUpper(strings.TrimSpace(string(update.TargetType))))
+	update.Action = knowledge.ImpactAction(strings.ToUpper(strings.TrimSpace(string(update.Action))))
+	update.ReportFingerprint = strings.ToLower(strings.TrimSpace(update.ReportFingerprint))
+	update.Reason = strings.TrimSpace(update.Reason)
+	if update.SchemaVersion != DownstreamUpdateSchemaVersion || update.AnalysisVersion != knowledge.ImpactAnalysisVersionV2 ||
+		!ValidHash(update.ReportFingerprint) || update.SourceEventVersion < 1 || update.BaseVersion < 1 ||
+		update.Reason == "" || len(update.Reason) > 4096 || strings.ContainsAny(update.Reason, "\r\n") {
+		return DownstreamUpdate{}, ErrDownstreamUpdateInvalid
+	}
+
+	workspaceID, workspaceErr := foundation.ParseID(string(update.WorkspaceID))
+	reportID, reportErr := foundation.ParseID(string(update.ReportID))
+	eventID, eventErr := foundation.ParseID(string(update.SourceEventID))
+	targetID, targetErr := foundation.ParseID(string(update.TargetID))
+	if workspaceErr != nil || reportErr != nil || eventErr != nil || targetErr != nil ||
+		workspaceID == reportID || workspaceID == eventID || reportID == eventID {
+		return DownstreamUpdate{}, ErrDownstreamUpdateInvalid
+	}
+	update.WorkspaceID, update.ReportID, update.SourceEventID, update.TargetID = workspaceID, reportID, eventID, targetID
+
+	switch update.TargetType {
+	case knowledge.ImpactObjectArtifact:
+		if update.Action != knowledge.ImpactActionRegenerateArtifact || update.OwnerBinding.Artifact == nil || update.OwnerBinding.ReviewCard != nil {
+			return DownstreamUpdate{}, ErrDownstreamUpdateInvalid
+		}
+		binding := *update.OwnerBinding.Artifact
+		artifactID, artifactErr := foundation.ParseID(string(binding.ArtifactID))
+		revisionID, revisionErr := foundation.ParseID(string(binding.RevisionID))
+		if artifactErr != nil || revisionErr != nil {
+			return DownstreamUpdate{}, ErrDownstreamUpdateInvalid
+		}
+		binding.ArtifactID, binding.RevisionID = artifactID, revisionID
+		binding.ContentHash = strings.ToLower(strings.TrimSpace(binding.ContentHash))
+		update.OwnerBinding = knowledge.EventOwnerBinding{Artifact: &binding}
+	case knowledge.ImpactObjectReviewCard:
+		if update.Action != knowledge.ImpactActionRevalidateReviewCard || update.OwnerBinding.Artifact != nil || update.OwnerBinding.ReviewCard == nil {
+			return DownstreamUpdate{}, ErrDownstreamUpdateInvalid
+		}
+		binding := *update.OwnerBinding.ReviewCard
+		cardID, cardErr := foundation.ParseID(string(binding.CardID))
+		claimID, claimErr := foundation.ParseID(string(binding.ClaimID))
+		if cardErr != nil || claimErr != nil {
+			return DownstreamUpdate{}, ErrDownstreamUpdateInvalid
+		}
+		binding.CardID, binding.ClaimID = cardID, claimID
+		binding.Status = strings.ToUpper(strings.TrimSpace(binding.Status))
+		binding.Fingerprint = strings.ToLower(strings.TrimSpace(binding.Fingerprint))
+		binding.EvidenceBindingFingerprint = strings.ToLower(strings.TrimSpace(binding.EvidenceBindingFingerprint))
+		update.OwnerBinding = knowledge.EventOwnerBinding{ReviewCard: &binding}
+	default:
+		return DownstreamUpdate{}, ErrDownstreamUpdateInvalid
+	}
+
+	object := knowledge.ImpactObject{
+		Type: update.TargetType, ID: update.TargetID, WorkspaceID: update.WorkspaceID,
+		Version: update.BaseVersion, Action: update.Action, Reason: update.Reason, RequiresProposal: true,
+		ArtifactBinding: update.OwnerBinding.Artifact, ReviewCardBinding: update.OwnerBinding.ReviewCard,
+	}
+	if err := knowledge.ValidateImpactObject(object); err != nil {
+		return DownstreamUpdate{}, ErrDownstreamUpdateInvalid
+	}
+	return update, nil
+}
+
+// ComputeDownstreamUpdateHash 计算下游更新意图的 canonical change hash。
+func ComputeDownstreamUpdateHash(update DownstreamUpdate, risk, rollbackPlan string) (string, error) {
+	canonical, err := ValidateDownstreamUpdate(update)
+	if err != nil {
+		return "", err
+	}
+	payload := struct {
+		ProposalType ProposalType     `json:"proposal_type"`
+		Update       DownstreamUpdate `json:"update"`
+		Risk         string           `json:"risk"`
+		RollbackPlan string           `json:"rollback_plan"`
+	}{ProposalType: ProposalTypeDownstreamUpdate, Update: canonical, Risk: strings.TrimSpace(risk), RollbackPlan: strings.TrimSpace(rollbackPlan)}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// ComputeDownstreamUpdateRequestHash 将 Workspace、owner binding 与风险说明绑定到幂等键。
+func ComputeDownstreamUpdateRequestHash(workspaceID foundation.ID, update DownstreamUpdate, riskLevel ProposalRiskLevel, risk, rollbackPlan string) (string, error) {
+	canonical, err := ValidateDownstreamUpdate(update)
+	if err != nil || canonical.WorkspaceID != workspaceID {
+		return "", ErrDownstreamUpdateInvalid
+	}
+	normalizedRiskLevel, err := ValidateProposalRiskLevelForType(ProposalTypeDownstreamUpdate, riskLevel)
+	if err != nil {
+		return "", err
+	}
+	payload := struct {
+		RequestSchema string            `json:"request_schema"`
+		WorkspaceID   foundation.ID     `json:"workspace_id"`
+		ProposalType  ProposalType      `json:"proposal_type"`
+		Update        DownstreamUpdate  `json:"update"`
+		RiskLevel     ProposalRiskLevel `json:"risk_level"`
+		Risk          string            `json:"risk"`
+		RollbackPlan  string            `json:"rollback_plan"`
+	}{
+		RequestSchema: "downstream-update-proposal-request/v1", WorkspaceID: workspaceID,
+		ProposalType: ProposalTypeDownstreamUpdate, Update: canonical, RiskLevel: normalizedRiskLevel,
+		Risk: strings.TrimSpace(risk), RollbackPlan: strings.TrimSpace(rollbackPlan),
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // ComputeKnowledgeChangeHash 计算 `knowledge_change` 的 canonical typed change hash。
 func ComputeKnowledgeChangeHash(change KnowledgeChange, risk, rollbackPlan string) (string, error) {
 	canonicalChange, err := ValidateKnowledgeChange(change)
@@ -450,7 +609,7 @@ func ComputeKnowledgeChangeRequestHashWithRiskLevel(workspaceID foundation.ID, c
 func ValidateProposalRevisionForType(proposalType ProposalType, revision Revision) error {
 	switch NormalizeProposalType(proposalType) {
 	case ProposalTypeFilePatch:
-		if revision.KnowledgeChange != nil || revision.PublishArtifact != nil {
+		if revision.KnowledgeChange != nil || revision.PublishArtifact != nil || revision.DownstreamUpdate != nil {
 			return ErrProposalTypeInvalid
 		}
 		targetPath, err := ValidateTargetPath(revision.TargetPath)
@@ -459,7 +618,7 @@ func ValidateProposalRevisionForType(proposalType ProposalType, revision Revisio
 		}
 		return nil
 	case ProposalTypeKnowledgeChange:
-		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange == nil || revision.PublishArtifact != nil {
+		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange == nil || revision.PublishArtifact != nil || revision.DownstreamUpdate != nil {
 			return ErrProposalTypeInvalid
 		}
 		canonicalChange, err := ValidateKnowledgeChange(*revision.KnowledgeChange)
@@ -472,7 +631,7 @@ func ValidateProposalRevisionForType(proposalType ProposalType, revision Revisio
 		}
 		return nil
 	case ProposalTypePublishArtifact:
-		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange != nil || revision.PublishArtifact == nil {
+		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange != nil || revision.PublishArtifact == nil || revision.DownstreamUpdate != nil {
 			return ErrProposalTypeInvalid
 		}
 		canonical, err := ValidatePublishArtifact(*revision.PublishArtifact)
@@ -480,6 +639,19 @@ func ValidateProposalRevisionForType(proposalType ProposalType, revision Revisio
 			return ErrProposalTypeInvalid
 		}
 		expectedHash, err := ComputePublishArtifactHash(canonical, revision.Risk, revision.RollbackPlan)
+		if err != nil || revision.ChangeHash != expectedHash {
+			return ErrProposalTypeInvalid
+		}
+		return nil
+	case ProposalTypeDownstreamUpdate:
+		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange != nil || revision.PublishArtifact != nil || revision.DownstreamUpdate == nil {
+			return ErrProposalTypeInvalid
+		}
+		canonical, err := ValidateDownstreamUpdate(*revision.DownstreamUpdate)
+		if err != nil {
+			return ErrProposalTypeInvalid
+		}
+		expectedHash, err := ComputeDownstreamUpdateHash(canonical, revision.Risk, revision.RollbackPlan)
 		if err != nil || revision.ChangeHash != expectedHash {
 			return ErrProposalTypeInvalid
 		}

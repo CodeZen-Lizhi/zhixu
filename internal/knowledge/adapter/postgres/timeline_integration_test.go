@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -69,6 +71,523 @@ func TestTimelineRepositoryAppendPageAndImpactReplay(t *testing.T) {
 	}
 }
 
+func TestImpactReportV2SupersedesV1AndDerivesSuccessor(t *testing.T) {
+	repository, tx, ctx := integrationRepository(t)
+	fixture := seedProvenance(t, ctx, tx, "timeline-impact-v2-supersession")
+	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+	aggregateID := newID(t)
+	event := timelineIntegrationEvent(newID(t), fixture.workspaceID, aggregateID, "impact:v2-supersession", now)
+	if _, replayed, err := repository.AppendEvent(ctx, event); err != nil || replayed {
+		t.Fatalf("append source event replayed=%t err=%v", replayed, err)
+	}
+	ready, err := repository.ImpactAnalysisReady(ctx, fixture.workspaceID)
+	if err != nil || !ready {
+		t.Fatalf("impact readiness=%t err=%v", ready, err)
+	}
+
+	v1Fingerprint, err := domain.ComputeImpactFingerprint(event.ID, int64(event.EventVersion), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1 := domain.ImpactReport{
+		ID: newID(t), WorkspaceID: fixture.workspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef,
+		SourceVersion: int64(event.EventVersion), Status: domain.ImpactReportReady, Objects: []domain.ImpactObject{},
+		Summary: domain.SummarizeImpactObjects(nil), Fingerprint: v1Fingerprint,
+		GeneratedAt: now.Add(time.Second), CreatedAt: now.Add(time.Second), Version: 1,
+	}
+	if persisted, replayed, err := repository.SaveImpactReport(ctx, v1); err != nil || replayed || persisted.ID != v1.ID || persisted.EffectiveAnalysisVersion() != domain.ImpactAnalysisVersionV1 {
+		t.Fatalf("v1 persisted=%#v replayed=%t err=%v", persisted, replayed, err)
+	}
+	v2Fingerprint, err := domain.ComputeImpactFingerprintForVersion(domain.ImpactAnalysisVersionV2, event.ID, int64(event.EventVersion), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2 := domain.ImpactReport{
+		ID: newID(t), WorkspaceID: fixture.workspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef,
+		SourceVersion: int64(event.EventVersion), AnalysisVersion: domain.ImpactAnalysisVersionV2, SupersedesReportID: &v1.ID,
+		Status: domain.ImpactReportReady, Objects: []domain.ImpactObject{}, Summary: domain.SummarizeImpactObjects(nil), Fingerprint: v2Fingerprint,
+		GeneratedAt: now.Add(2 * time.Second), CreatedAt: now.Add(2 * time.Second), Version: 1,
+	}
+	persistedV2, replayed, err := repository.SaveImpactReport(ctx, v2)
+	if err != nil || replayed || persistedV2.ID != v2.ID || persistedV2.AnalysisVersion != domain.ImpactAnalysisVersionV2 || persistedV2.SupersedesReportID == nil || *persistedV2.SupersedesReportID != v1.ID {
+		t.Fatalf("v2 persisted=%#v replayed=%t err=%v", persistedV2, replayed, err)
+	}
+
+	competitor := v2
+	competitor.ID = newID(t)
+	competitor.GeneratedAt = now.Add(3 * time.Second)
+	competitor.CreatedAt = competitor.GeneratedAt
+	replayedV2, replayed, err := repository.SaveImpactReport(ctx, competitor)
+	if err != nil || !replayed || replayedV2.ID != v2.ID || replayedV2.GeneratedAt != v2.GeneratedAt {
+		t.Fatalf("v2 replay=%#v replayed=%t err=%v", replayedV2, replayed, err)
+	}
+
+	loadedV1, err := repository.GetImpactReportByID(ctx, fixture.workspaceID, v1.ID)
+	if err != nil || loadedV1.ID != v1.ID || loadedV1.Fingerprint != v1Fingerprint || loadedV1.SupersededByReportID == nil || *loadedV1.SupersededByReportID != v2.ID {
+		t.Fatalf("loaded v1=%#v err=%v", loadedV1, err)
+	}
+	loadedCurrent, found, err := repository.GetImpactReport(ctx, fixture.workspaceID, event.ID, domain.ImpactAnalysisVersionV2)
+	if err != nil || !found || loadedCurrent.ID != v2.ID || loadedCurrent.SupersededByReportID != nil {
+		t.Fatalf("loaded current=%#v found=%t err=%v", loadedCurrent, found, err)
+	}
+	var storedV1Schema, storedV1Analysis string
+	var storedV1Supersedes *string
+	if err := tx.QueryRow(ctx, `SELECT schema_version,analysis_version,supersedes_report_id::text
+FROM ops.impact_report WHERE workspace_id=$1 AND id=$2`, string(fixture.workspaceID), string(v1.ID)).Scan(&storedV1Schema, &storedV1Analysis, &storedV1Supersedes); err != nil {
+		t.Fatal(err)
+	}
+	if storedV1Schema != domain.ImpactReportSchemaVersion || storedV1Analysis != string(domain.ImpactAnalysisVersionV1) || storedV1Supersedes != nil {
+		t.Fatalf("stored v1 schema=%q analysis=%q supersedes=%v", storedV1Schema, storedV1Analysis, storedV1Supersedes)
+	}
+}
+
+func TestImpactReportV2RequiresMatchingV1Predecessor(t *testing.T) {
+	repository, tx, ctx := integrationRepository(t)
+	fixture := seedProvenance(t, ctx, tx, "timeline-impact-v2-predecessor")
+	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+	event := timelineIntegrationEvent(newID(t), fixture.workspaceID, newID(t), "impact:v2-predecessor", now)
+	if _, replayed, err := repository.AppendEvent(ctx, event); err != nil || replayed {
+		t.Fatalf("append source event replayed=%t err=%v", replayed, err)
+	}
+	v1Fingerprint, err := domain.ComputeImpactFingerprint(event.ID, int64(event.EventVersion), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1 := domain.ImpactReport{
+		ID: newID(t), WorkspaceID: fixture.workspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef,
+		SourceVersion: int64(event.EventVersion), Status: domain.ImpactReportReady, Objects: []domain.ImpactObject{},
+		Summary: domain.SummarizeImpactObjects(nil), Fingerprint: v1Fingerprint,
+		GeneratedAt: now.Add(time.Second), CreatedAt: now.Add(time.Second), Version: 1,
+	}
+	if _, replayed, err := repository.SaveImpactReport(ctx, v1); err != nil || replayed {
+		t.Fatalf("save v1 replayed=%t err=%v", replayed, err)
+	}
+	v2Fingerprint, err := domain.ComputeImpactFingerprintForVersion(domain.ImpactAnalysisVersionV2, event.ID, int64(event.EventVersion), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingPredecessor := domain.ImpactReport{
+		ID: newID(t), WorkspaceID: fixture.workspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef,
+		SourceVersion: int64(event.EventVersion), AnalysisVersion: domain.ImpactAnalysisVersionV2,
+		Status: domain.ImpactReportReady, Objects: []domain.ImpactObject{}, Summary: domain.SummarizeImpactObjects(nil), Fingerprint: v2Fingerprint,
+		GeneratedAt: now.Add(2 * time.Second), CreatedAt: now.Add(2 * time.Second), Version: 1,
+	}
+	if _, _, err := repository.SaveImpactReport(ctx, missingPredecessor); !hasCode(err, domain.ErrorCodeImpactConflict) {
+		t.Fatalf("missing predecessor error=%v", err)
+	}
+	var v2Count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ops.impact_report
+WHERE workspace_id=$1 AND source_event_id=$2 AND analysis_version='impact-analysis/v2'`, string(fixture.workspaceID), string(event.ID)).Scan(&v2Count); err != nil {
+		t.Fatal(err)
+	}
+	if v2Count != 0 {
+		t.Fatalf("v2 reports without predecessor=%d", v2Count)
+	}
+
+	freshEvent := timelineIntegrationEvent(newID(t), fixture.workspaceID, newID(t), "impact:v2-without-predecessor", now.Add(3*time.Second))
+	if _, replayed, err := repository.AppendEvent(ctx, freshEvent); err != nil || replayed {
+		t.Fatalf("append fresh source event replayed=%t err=%v", replayed, err)
+	}
+	freshFingerprint, err := domain.ComputeImpactFingerprintForVersion(domain.ImpactAnalysisVersionV2, freshEvent.ID, int64(freshEvent.EventVersion), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshV2 := domain.ImpactReport{
+		ID: newID(t), WorkspaceID: fixture.workspaceID, SourceEventID: freshEvent.ID, SourceEventRef: freshEvent.SourceEventRef,
+		SourceVersion: int64(freshEvent.EventVersion), AnalysisVersion: domain.ImpactAnalysisVersionV2,
+		Status: domain.ImpactReportReady, Objects: []domain.ImpactObject{}, Summary: domain.SummarizeImpactObjects(nil), Fingerprint: freshFingerprint,
+		GeneratedAt: now.Add(4 * time.Second), CreatedAt: now.Add(4 * time.Second), Version: 1,
+	}
+	if persisted, replayed, err := repository.SaveImpactReport(ctx, freshV2); err != nil || replayed || persisted.ID != freshV2.ID {
+		t.Fatalf("fresh v2 persisted=%#v replayed=%t err=%v", persisted, replayed, err)
+	}
+}
+
+func TestTimelineRepositoryListImpactObjectsRejectsMoreThan500Candidates(t *testing.T) {
+	repository, tx, ctx := integrationRepository(t)
+	fixture := seedProvenance(t, ctx, tx, "timeline-impact-object-limit")
+	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+	claimID := newID(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.claim(
+	id,workspace_id,statement,normalized_statement,applicability,applicability_schema_version,applicability_hash,
+	status,confidence_score,confidence_factors,fingerprint,version,created_at,updated_at
+) VALUES($1,$2,$3,$3,'{}','knowledge-applicability/v1',$4,'SUGGESTED',0.9,'{}',$5,1,$6,$6)`,
+		string(claimID), string(fixture.workspaceID), "Timeline impact object limit claim", testHash("timeline-impact-object-limit-applicability"), testHash("timeline-impact-object-limit-claim"), now); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index <= domain.MaxImpactObjects; index++ {
+		if _, err := tx.Exec(ctx, `INSERT INTO ops.health_issue(
+	id,workspace_id,type,target_type,target_id,detector_id,identity_hash,fingerprint_schema_version,fingerprint,
+	detector_version,severity,evidence_summary,status,version,first_detected_at,last_detected_at,last_verified_at,created_at,updated_at
+) VALUES($1,$2,'ORPHAN','CLAIM',$3,'timeline-impact-limit',$4,'health-issue-fingerprint/v1',$5,
+	'detector/v1','HIGH','timeline impact object limit','OPEN',1,$6,$6,$6,$6,$6)`,
+			string(newID(t)), string(fixture.workspaceID), string(claimID), testHash(fmt.Sprintf("timeline-impact-limit-identity-%d", index)), testHash(fmt.Sprintf("timeline-impact-limit-fingerprint-%d", index)), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	event := domain.KnowledgeEvent{
+		ID: newID(t), WorkspaceID: fixture.workspaceID, EventType: domain.EventVersionPublished,
+		AggregateType: domain.TimelineAggregateClaim, AggregateID: &claimID,
+		SourceEventRef: "timeline-impact-object-limit:" + string(claimID), SourceRef: "claim:" + string(claimID),
+		EventVersion: 1, SchemaVersion: domain.KnowledgeEventSchemaVersion, Summary: "timeline impact object limit", Payload: json.RawMessage(`{}`),
+		OccurredAt: now, CreatedAt: now,
+	}
+	if _, replayed, err := repository.AppendEvent(ctx, event); err != nil || replayed {
+		t.Fatalf("append limit source event replayed=%t err=%v", replayed, err)
+	}
+	if _, err := repository.ListImpactObjects(ctx, event); !hasCode(err, domain.ErrorCodeTimelineInconsistent) {
+		t.Fatalf("impact object limit error=%v", err)
+	}
+}
+
+func TestImpactReportV2ConcurrentCreateReplaysOneWinner(t *testing.T) {
+	repository, pool, ctx := integrationPoolRepository(t)
+	fixture := seedProvenance(t, ctx, pool, "timeline-impact-v2-concurrent")
+	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+	event := timelineIntegrationEvent(newID(t), fixture.workspaceID, newID(t), "impact:v2-concurrent", now)
+	if _, replayed, err := repository.AppendEvent(ctx, event); err != nil || replayed {
+		t.Fatalf("append source event replayed=%t err=%v", replayed, err)
+	}
+	v1Fingerprint, err := domain.ComputeImpactFingerprint(event.ID, int64(event.EventVersion), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1 := domain.ImpactReport{
+		ID: newID(t), WorkspaceID: fixture.workspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef,
+		SourceVersion: int64(event.EventVersion), Status: domain.ImpactReportReady, Objects: []domain.ImpactObject{},
+		Summary: domain.SummarizeImpactObjects(nil), Fingerprint: v1Fingerprint,
+		GeneratedAt: now.Add(time.Second), CreatedAt: now.Add(time.Second), Version: 1,
+	}
+	if _, replayed, err := repository.SaveImpactReport(ctx, v1); err != nil || replayed {
+		t.Fatalf("save v1 replayed=%t err=%v", replayed, err)
+	}
+	fingerprint, err := domain.ComputeImpactFingerprintForVersion(domain.ImpactAnalysisVersionV2, event.ID, int64(event.EventVersion), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeReport := func(id foundation.ID, at time.Time) domain.ImpactReport {
+		return domain.ImpactReport{
+			ID: id, WorkspaceID: fixture.workspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef,
+			SourceVersion: int64(event.EventVersion), AnalysisVersion: domain.ImpactAnalysisVersionV2, SupersedesReportID: &v1.ID,
+			Status: domain.ImpactReportReady, Objects: []domain.ImpactObject{}, Summary: domain.SummarizeImpactObjects(nil), Fingerprint: fingerprint,
+			GeneratedAt: at, CreatedAt: at, Version: 1,
+		}
+	}
+	secondRepository, err := NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		report   domain.ImpactReport
+		replayed bool
+		err      error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var workers sync.WaitGroup
+	for _, candidate := range []struct {
+		repository *Repository
+		report     domain.ImpactReport
+	}{
+		{repository: repository, report: makeReport(newID(t), now.Add(time.Second))},
+		{repository: secondRepository, report: makeReport(newID(t), now.Add(2*time.Second))},
+	} {
+		workers.Add(1)
+		go func(candidateRepository *Repository, candidateReport domain.ImpactReport) {
+			defer workers.Done()
+			<-start
+			persisted, replayed, saveErr := candidateRepository.SaveImpactReport(ctx, candidateReport)
+			results <- result{report: persisted, replayed: replayed, err: saveErr}
+		}(candidate.repository, candidate.report)
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+
+	var winner foundation.ID
+	created, replayed := 0, 0
+	for outcome := range results {
+		if outcome.err != nil {
+			t.Fatalf("concurrent v2 save error=%v", outcome.err)
+		}
+		if winner == "" {
+			winner = outcome.report.ID
+		}
+		if outcome.report.ID != winner {
+			t.Fatalf("concurrent v2 reports diverged: winner=%s report=%#v", winner, outcome.report)
+		}
+		if outcome.replayed {
+			replayed++
+		} else {
+			created++
+		}
+	}
+	if created != 1 || replayed != 1 {
+		t.Fatalf("concurrent v2 created=%d replayed=%d", created, replayed)
+	}
+	var reportCount, outboxCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.impact_report
+WHERE workspace_id=$1 AND source_event_id=$2 AND analysis_version='impact-analysis/v2'`, string(fixture.workspaceID), string(event.ID)).Scan(&reportCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.timeline_projection_outbox
+WHERE workspace_id=$1 AND source_event_ref LIKE $2`, string(fixture.workspaceID), "impact-report:"+string(winner)+":v%").Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if reportCount != 1 || outboxCount != 1 {
+		t.Fatalf("concurrent v2 reports=%d outbox=%d", reportCount, outboxCount)
+	}
+}
+
+func TestImpactReportV2RejectsIncompleteSelectorMarkerWithoutWrites(t *testing.T) {
+	repository, tx, ctx := integrationRepository(t)
+	fixture := seedProvenance(t, ctx, tx, "timeline-impact-v2-not-ready")
+	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+	aggregateID := newID(t)
+	event := timelineIntegrationEvent(newID(t), fixture.workspaceID, aggregateID, "impact:v2-not-ready", now)
+	if _, replayed, err := repository.AppendEvent(ctx, event); err != nil || replayed {
+		t.Fatalf("append source event replayed=%t err=%v", replayed, err)
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE learning.artifact_citation_selector_backfill
+SET status='PENDING',completed_at=NULL,version=version+1,updated_at=updated_at+interval '1 microsecond'
+WHERE workspace_id=$1`, string(fixture.workspaceID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = origin`); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := repository.ImpactAnalysisReady(ctx, fixture.workspaceID)
+	if err != nil || ready {
+		t.Fatalf("impact readiness=%t err=%v", ready, err)
+	}
+	fingerprint, err := domain.ComputeImpactFingerprintForVersion(domain.ImpactAnalysisVersionV2, event.ID, int64(event.EventVersion), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := domain.ImpactReport{
+		ID: newID(t), WorkspaceID: fixture.workspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef,
+		SourceVersion: int64(event.EventVersion), AnalysisVersion: domain.ImpactAnalysisVersionV2,
+		Status: domain.ImpactReportReady, Objects: []domain.ImpactObject{}, Summary: domain.SummarizeImpactObjects(nil), Fingerprint: fingerprint,
+		GeneratedAt: now.Add(time.Second), CreatedAt: now.Add(time.Second), Version: 1,
+	}
+	if _, _, err := repository.SaveImpactReport(ctx, report); !hasCode(err, domain.ErrorCodeImpactUnavailable) {
+		t.Fatalf("v2 save error=%v", err)
+	}
+	var reportCount, outboxCount int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ops.impact_report WHERE workspace_id=$1 AND source_event_id=$2`, string(fixture.workspaceID), string(event.ID)).Scan(&reportCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ops.timeline_projection_outbox WHERE workspace_id=$1 AND source_event_ref=$2`, string(fixture.workspaceID), "impact-report:"+string(report.ID)+":v1").Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if reportCount != 0 || outboxCount != 0 {
+		t.Fatalf("report rows=%d outbox rows=%d", reportCount, outboxCount)
+	}
+}
+
+func TestTimelineRepositoryListsOwnerBackedImpactFromExactProvenanceAndRejectsStaleSnapshot(t *testing.T) {
+	repository, tx, ctx := integrationRepository(t)
+	first := seedProvenance(t, ctx, tx, "timeline-owner-impact-first")
+	second := seedProvenanceForWorkspace(t, ctx, tx, first.workspaceID, "timeline-owner-impact-second", true)
+	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+
+	insertClaim := func(id foundation.ID, fixture provenanceFixture, label string) string {
+		t.Helper()
+		evidenceHash := testHash("timeline-owner-impact-claim-source-" + label)
+		if _, err := tx.Exec(ctx, `INSERT INTO core.claim(
+id,workspace_id,statement,normalized_statement,applicability,applicability_schema_version,applicability_hash,
+status,confidence_score,confidence_factors,fingerprint,version,created_at,updated_at
+) VALUES($1,$2,$3,$3,'{}','knowledge-applicability/v1',$4,'SUGGESTED',0.9,'{}',$5,1,$6,$6)`,
+			string(id), string(first.workspaceID), "Timeline owner impact claim "+label, testHash("timeline-owner-impact-applicability-"+label), testHash("timeline-owner-impact-claim-"+label), now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO core.claim_source(
+id,workspace_id,claim_id,source_version_id,source_span_id,support_type,reason,evidence_hash,created_at
+) VALUES($1,$2,$3,$4,$5,'SUPPORTS',$6,$7,$8)`,
+			string(newID(t)), string(first.workspaceID), string(id), string(fixture.sourceVersionID), string(fixture.sourceSpanID), "timeline owner impact provenance", evidenceHash, now); err != nil {
+			t.Fatal(err)
+		}
+		return evidenceHash
+	}
+
+	claimA, claimB, claimC := newID(t), newID(t), newID(t)
+	claimAEvidenceHash := insertClaim(claimA, first, "a")
+	insertClaim(claimB, first, "b")
+	claimCEvidenceHash := insertClaim(claimC, second, "c")
+	relationID := newID(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(
+id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,
+fingerprint,version,created_at,updated_at
+) VALUES($1,$2,'CLAIM',$3,'CLAIM',$4,'CITES','SUGGESTED',$5,1,$6,$6)`,
+		string(relationID), string(first.workspaceID), string(claimA), string(claimB), testHash("timeline-owner-impact-relation"), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(
+id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,
+applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at
+) VALUES($1,$2,$3,$4,$5,$6,$7,'{}','knowledge-applicability/v1',$8,'SOURCE_DERIVED',$9,$10)`,
+		string(newID(t)), string(first.workspaceID), string(relationID), string(second.sourceVersionID), string(second.sourceSpanID),
+		"timeline owner impact relation evidence", testHash("timeline-owner-impact-relation-evidence"), testHash("timeline-owner-impact-relation-applicability"), "timeline-owner-impact", now); err != nil {
+		t.Fatal(err)
+	}
+
+	insertArtifact := func(fixture provenanceFixture, label string) (foundation.ID, foundation.ID, string) {
+		t.Helper()
+		artifactID, revisionID := newID(t), newID(t)
+		contentHash := testHash("timeline-owner-impact-artifact-" + label)
+		if _, err := tx.Exec(ctx, `INSERT INTO learning.artifact(
+id,workspace_id,artifact_type,title,scope,status,version,created_at,updated_at,
+domain_schema_version,scope_definition,source_coverage,current_revision_id
+) VALUES($1,$2,'CUSTOM',$3,'{}','DRAFT',1,$4,$4,'artifact/v1','workspace','[]',$5)`,
+			string(artifactID), string(first.workspaceID), "Timeline owner impact artifact "+label, now, string(revisionID)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO learning.artifact_revision(
+id,artifact_id,workspace_id,revision_no,status,outline,sections,coverage,missing,conflicts,content_markdown,provenance,created_at,
+domain_schema_version,content_hash,created_by_type,generation_metadata
+) VALUES($1,$2,$3,1,'SNAPSHOT','[]','[]','[]','[]','[]','', '{}',$4,
+'artifact-revision/v1',$5,'HUMAN',NULL)`,
+			string(revisionID), string(artifactID), string(first.workspaceID), now, contentHash); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO learning.artifact_revision_citation_selector(
+workspace_id,artifact_id,revision_id,source_version_id,source_span_id
+) VALUES($1,$2,$3,$4,$5)`,
+			string(first.workspaceID), string(artifactID), string(revisionID), string(fixture.sourceVersionID), string(fixture.sourceSpanID)); err != nil {
+			t.Fatal(err)
+		}
+		return artifactID, revisionID, contentHash
+	}
+	artifactA, revisionA, artifactAHash := insertArtifact(first, "a")
+	artifactB, _, artifactBHash := insertArtifact(second, "b")
+
+	deckID := newID(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO learning.review_deck(
+id,workspace_id,name,scope,status,daily_limit,scheduler_version,version,created_at,updated_at
+) VALUES($1,$2,$3,'{}','ACTIVE',20,'fsrs/v1',1,$4,$4)`, string(deckID), string(first.workspaceID), "Timeline owner impact deck", now); err != nil {
+		t.Fatal(err)
+	}
+	insertCard := func(claimID foundation.ID, fixture provenanceFixture, evidenceHash, status, label string) foundation.ID {
+		t.Helper()
+		cardID := newID(t)
+		evidence, err := json.Marshal([]map[string]string{{
+			"schema_version": "review-evidence/v1", "claim_id": string(claimID), "source_version_id": string(fixture.sourceVersionID),
+			"source_span_id": string(fixture.sourceSpanID), "evidence_hash": evidenceHash,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO learning.review_card(
+id,workspace_id,deck_id,claim_id,question,answer_points,evidence,card_type,difficulty,status,
+fingerprint,model_version,version,created_at,updated_at
+) VALUES($1,$2,$3,$4,$5,'["answer"]',$6::jsonb,'SHORT_ANSWER',0.5,$7,$8,'manual',1,$9,$9)`,
+			string(cardID), string(first.workspaceID), string(deckID), string(claimID), "Timeline owner impact card "+label, string(evidence), status, testHash("timeline-owner-impact-card-"+label), now); err != nil {
+			t.Fatal(err)
+		}
+		return cardID
+	}
+	directCard := insertCard(claimA, first, claimAEvidenceHash, "DRAFT", "direct")
+	evidenceCard := insertCard(claimC, second, claimCEvidenceHash, "APPROVED", "evidence")
+	crossPairCard := newID(t)
+	crossPairEvidence, err := json.Marshal([]map[string]string{
+		{
+			"schema_version": "review-evidence/v1", "claim_id": string(claimC), "source_version_id": string(first.sourceVersionID),
+			"source_span_id": string(second.sourceSpanID), "evidence_hash": testHash("timeline-owner-impact-cross-pair-a"),
+		},
+		{
+			"schema_version": "review-evidence/v1", "claim_id": string(claimC), "source_version_id": string(second.sourceVersionID),
+			"source_span_id": string(first.sourceSpanID), "evidence_hash": testHash("timeline-owner-impact-cross-pair-b"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO learning.review_card(
+	id,workspace_id,deck_id,claim_id,question,answer_points,evidence,card_type,difficulty,status,
+	fingerprint,model_version,version,created_at,updated_at
+) VALUES($1,$2,$3,$4,$5,'["answer"]',$6::jsonb,'SHORT_ANSWER',0.5,'APPROVED',$7,'manual',1,$8,$8)`,
+		string(crossPairCard), string(first.workspaceID), string(deckID), string(claimC), "Timeline owner impact cross-pair card",
+		string(crossPairEvidence), testHash("timeline-owner-impact-card-cross-pair"), now); err != nil {
+		t.Fatal(err)
+	}
+
+	event := domain.KnowledgeEvent{
+		ID: newID(t), WorkspaceID: first.workspaceID, EventType: domain.EventVersionPublished,
+		AggregateType: domain.TimelineAggregateRelation, AggregateID: &relationID,
+		SourceEventRef: "timeline-owner-impact-relation:" + string(relationID), SourceRef: "relation:" + string(relationID),
+		EventVersion: 1, SchemaVersion: domain.KnowledgeEventSchemaVersion, Summary: "Timeline owner impact relation changed",
+		Payload: json.RawMessage(`{}`), OccurredAt: now, CreatedAt: now,
+	}
+	if _, replayed, err := repository.AppendEvent(ctx, event); err != nil || replayed {
+		t.Fatalf("append relation event replayed=%t err=%v", replayed, err)
+	}
+	objects, err := repository.ListImpactObjects(ctx, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKey := make(map[string]domain.ImpactObject, len(objects))
+	for _, object := range objects {
+		byKey[string(object.Type)+":"+string(object.ID)] = object
+	}
+	artifactAObject, artifactAFound := byKey[string(domain.ImpactObjectArtifact)+":"+string(artifactA)]
+	artifactBObject, artifactBFound := byKey[string(domain.ImpactObjectArtifact)+":"+string(artifactB)]
+	directCardObject, directCardFound := byKey[string(domain.ImpactObjectReviewCard)+":"+string(directCard)]
+	evidenceCardObject, evidenceCardFound := byKey[string(domain.ImpactObjectReviewCard)+":"+string(evidenceCard)]
+	if !artifactAFound || !artifactBFound || !directCardFound || !evidenceCardFound {
+		t.Fatalf("owner impact objects=%#v", objects)
+	}
+	if crossPairObject, found := byKey[string(domain.ImpactObjectReviewCard)+":"+string(crossPairCard)]; found {
+		t.Fatalf("cross-paired Review selector produced an impact object=%#v", crossPairObject)
+	}
+	if artifactAObject.ArtifactBinding == nil || artifactAObject.ArtifactBinding.RevisionID != revisionA || artifactAObject.ArtifactBinding.ContentHash != artifactAHash || artifactBObject.ArtifactBinding == nil || artifactBObject.ArtifactBinding.ContentHash != artifactBHash || artifactAObject.Action != domain.ImpactActionRegenerateArtifact || !artifactAObject.RequiresProposal {
+		t.Fatalf("artifact owner bindings=%#v / %#v", artifactAObject, artifactBObject)
+	}
+	if directCardObject.ReviewCardBinding == nil || directCardObject.ReviewCardBinding.ClaimID != claimA || evidenceCardObject.ReviewCardBinding == nil || evidenceCardObject.ReviewCardBinding.ClaimID != claimC || directCardObject.Action != domain.ImpactActionRevalidateReviewCard || !directCardObject.RequiresProposal {
+		t.Fatalf("review owner bindings=%#v / %#v", directCardObject, evidenceCardObject)
+	}
+	if relationObject, found := byKey[string(domain.ImpactObjectRelation)+":"+string(relationID)]; !found || relationObject.RequiresProposal || relationObject.Action != domain.ImpactActionReview {
+		t.Fatalf("relation impact=%#v", relationObject)
+	}
+
+	fingerprint, err := domain.ComputeImpactFingerprintForVersion(domain.ImpactAnalysisVersionV2, event.ID, int64(event.EventVersion), objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRevisionID := newID(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO learning.artifact_revision(
+id,artifact_id,workspace_id,revision_no,status,outline,sections,coverage,missing,conflicts,content_markdown,provenance,created_at,
+domain_schema_version,content_hash,created_by_type,generation_metadata
+) VALUES($1,$2,$3,2,'SNAPSHOT','[]','[]','[]','[]','[]','', '{}',$4,
+'artifact-revision/v1',$5,'HUMAN',NULL)`,
+		string(newRevisionID), string(artifactA), string(first.workspaceID), now.Add(time.Second), testHash("timeline-owner-impact-artifact-a-next")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE learning.artifact
+SET current_revision_id=$1,version=version+1,updated_at=$2
+WHERE workspace_id=$3 AND id=$4`, string(newRevisionID), now.Add(time.Second), string(first.workspaceID), string(artifactA)); err != nil {
+		t.Fatal(err)
+	}
+	report := domain.ImpactReport{
+		ID: newID(t), WorkspaceID: first.workspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef,
+		SourceVersion: int64(event.EventVersion), AnalysisVersion: domain.ImpactAnalysisVersionV2,
+		Status: domain.ImpactReportReady, Objects: objects, Summary: domain.SummarizeImpactObjects(objects), Fingerprint: fingerprint,
+		GeneratedAt: now.Add(2 * time.Second), CreatedAt: now.Add(2 * time.Second), Version: 1,
+	}
+	if _, _, err := repository.SaveImpactReport(ctx, report); !hasCode(err, domain.ErrorCodeImpactConflict) {
+		t.Fatalf("stale owner snapshot save err=%v", err)
+	}
+	var reportCount int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ops.impact_report WHERE workspace_id=$1 AND source_event_id=$2 AND analysis_version='impact-analysis/v2'`, string(first.workspaceID), string(event.ID)).Scan(&reportCount); err != nil {
+		t.Fatal(err)
+	}
+	if reportCount != 0 {
+		t.Fatalf("stale owner snapshot created v2 reports=%d", reportCount)
+	}
+}
+
 func TestImpactReportAndTimelineOutboxRollBackWhenTransactionalAuditFails(t *testing.T) {
 	repository, tx, ctx := integrationRepository(t)
 	fixture := seedProvenance(t, ctx, tx, "timeline-impact-audit-rollback")
@@ -91,7 +610,7 @@ func TestImpactReportAndTimelineOutboxRollBackWhenTransactionalAuditFails(t *tes
 	if _, _, err := repository.SaveImpactReportWithAudit(ctx, report, "audit-rollback", impactAuditFailureStub{err: auditFailure}); !errors.Is(err, auditFailure) {
 		t.Fatalf("atomic impact save error=%v", err)
 	}
-	if _, found, err := repository.GetImpactReport(ctx, fixture.workspaceID, event.ID); err != nil || found {
+	if _, found, err := repository.GetImpactReport(ctx, fixture.workspaceID, event.ID, domain.ImpactAnalysisVersionV1); err != nil || found {
 		t.Fatalf("rolled back impact report found=%t err=%v", found, err)
 	}
 	var outboxRows int
@@ -362,6 +881,169 @@ VALUES($1,$2,$3,'CONFLICT_OPENED','CONFLICT',$4,'poison:unknown-correlation','co
 	}
 	if _, err := repository.GetEvent(ctx, fixture.workspaceID, eventID); !hasCode(err, domain.ErrorCodeTimelineNotFound) {
 		t.Fatalf("poisoned event lookup err=%v", err)
+	}
+}
+
+func TestTimelineProjectionV2PersistsOwnerBindingAndReplays(t *testing.T) {
+	repository, pool, ctx := integrationPoolRepository(t)
+	drainTimelineProjectionQueue(t, ctx, mustTimelineDispatcher(t, repository))
+	fixture := seedProvenance(t, ctx, pool, "timeline-projector-v2")
+	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+
+	enqueue := func(event domain.KnowledgeEvent) (foundation.ID, foundation.ID) {
+		t.Helper()
+		var aggregateID, operatorID, ownerBinding any
+		if event.AggregateID != nil {
+			aggregateID = string(*event.AggregateID)
+		}
+		if event.Operator != nil && event.Operator.ID != nil {
+			operatorID = string(*event.Operator.ID)
+		}
+		if event.OwnerBinding != nil {
+			encoded, err := json.Marshal(event.OwnerBinding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ownerBinding = string(encoded)
+		}
+		correlation, err := json.Marshal(event.Correlation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `SELECT ops.enqueue_timeline_projection_v2(
+$1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12::jsonb,$13)`,
+			string(event.WorkspaceID), string(event.EventType), string(event.AggregateType), aggregateID,
+			event.SourceEventRef, event.SourceRef, event.EventVersion, event.Summary, string(correlation),
+			string(event.Operator.Type), operatorID, ownerBinding, event.OccurredAt); err != nil {
+			t.Fatal(err)
+		}
+		var sourceID, eventID string
+		if err := pool.QueryRow(ctx, `SELECT id::text,event_id::text FROM ops.timeline_projection_outbox
+WHERE workspace_id=$1 AND source_event_ref=$2`, string(event.WorkspaceID), event.SourceEventRef).Scan(&sourceID, &eventID); err != nil {
+			t.Fatal(err)
+		}
+		return foundation.ID(sourceID), foundation.ID(eventID)
+	}
+
+	artifactID, revisionID, operatorID := newID(t), newID(t), newID(t)
+	projected := domain.KnowledgeEvent{
+		WorkspaceID: fixture.workspaceID, EventType: domain.EventArtifactGenerated,
+		AggregateType: domain.TimelineAggregateArtifact, AggregateID: &artifactID,
+		SourceEventRef: "artifact-generated:" + string(artifactID) + ":" + string(revisionID) + ":v2",
+		SourceRef:      "artifact:" + string(artifactID), EventVersion: 2,
+		SchemaVersion: domain.KnowledgeEventSchemaVersionV2, Summary: "artifact revision generated",
+		Payload: json.RawMessage(`{}`), Operator: &domain.EventOperator{Type: domain.EventOperatorUser, ID: &operatorID},
+		OwnerBinding: &domain.EventOwnerBinding{Artifact: &domain.ArtifactImpactBinding{
+			ArtifactID: artifactID, ArtifactVersion: 2, RevisionID: revisionID, RevisionNo: 2,
+			ContentHash: testHash("timeline-v2-artifact"),
+		}},
+		OccurredAt: now, CreatedAt: now,
+	}
+	projectedSourceID, projectedEventID := enqueue(projected)
+	projected.ID = projectedEventID
+	result, found, err := repository.ProjectNext(ctx)
+	if err != nil || !found || result.Outcome != knowledgeapp.TimelineProjectionProjected || result.SourceID != projectedSourceID || result.EventID != projectedEventID {
+		t.Fatalf("v2 projection result=%#v found=%t err=%v", result, found, err)
+	}
+	loaded := mustTimelineEventBySource(t, ctx, repository, fixture.workspaceID, projected.SourceEventRef)
+	if !sameTimelineEvent(loaded, projected) || !reflect.DeepEqual(loaded.Operator, projected.Operator) || !reflect.DeepEqual(loaded.OwnerBinding, projected.OwnerBinding) {
+		t.Fatalf("v2 projected event=%#v want=%#v", loaded, projected)
+	}
+
+	cardID, claimID := newID(t), newID(t)
+	replayed := domain.KnowledgeEvent{
+		ID: newID(t), WorkspaceID: fixture.workspaceID, EventType: domain.EventReviewCardInvalidated,
+		AggregateType: domain.TimelineAggregateReviewCard, AggregateID: &cardID,
+		SourceEventRef: "review-card-invalidated:" + string(cardID) + ":v3",
+		SourceRef:      "review-card:" + string(cardID), EventVersion: 3,
+		SchemaVersion: domain.KnowledgeEventSchemaVersionV2, Summary: "review card invalidated",
+		Payload: json.RawMessage(`{}`), Operator: &domain.EventOperator{Type: domain.EventOperatorUnknown},
+		OwnerBinding: &domain.EventOwnerBinding{ReviewCard: &domain.ReviewCardImpactBinding{
+			CardID: cardID, CardVersion: 3, Status: "INVALIDATED", Fingerprint: testHash("timeline-v2-card"),
+			ClaimID: claimID, EvidenceBindingFingerprint: testHash("timeline-v2-card-evidence"),
+		}},
+		OccurredAt: now.Add(time.Second), CreatedAt: now.Add(time.Second),
+	}
+	if persisted, wasReplay, err := repository.AppendEvent(ctx, replayed); err != nil || wasReplay || !sameTimelineEvent(persisted, replayed) {
+		t.Fatalf("seed replay event=%#v replayed=%t err=%v", persisted, wasReplay, err)
+	}
+	replayedSourceID, replayedEventID := enqueue(replayed)
+	if replayedEventID != replayed.ID {
+		t.Fatalf("replayed outbox event id=%s want=%s", replayedEventID, replayed.ID)
+	}
+	result, found, err = repository.ProjectNext(ctx)
+	if err != nil || !found || result.Outcome != knowledgeapp.TimelineProjectionReplayed || result.SourceID != replayedSourceID || result.EventID != replayed.ID {
+		t.Fatalf("v2 replay result=%#v found=%t err=%v", result, found, err)
+	}
+	operatorDrift := replayed
+	operatorDrift.Operator = &domain.EventOperator{Type: domain.EventOperatorSystem}
+	if _, _, err := repository.AppendEvent(ctx, operatorDrift); !classifiedAs(err, foundation.ErrorVersionConflict) {
+		t.Fatalf("v2 operator drift error=%v", err)
+	}
+	ownerDrift := replayed
+	reviewBindingDrift := *replayed.OwnerBinding.ReviewCard
+	reviewBindingDrift.Fingerprint = testHash("timeline-v2-card-drift")
+	ownerDrift.OwnerBinding = &domain.EventOwnerBinding{ReviewCard: &reviewBindingDrift}
+	if _, _, err := repository.AppendEvent(ctx, ownerDrift); !classifiedAs(err, foundation.ErrorVersionConflict) {
+		t.Fatalf("v2 owner binding drift error=%v", err)
+	}
+}
+
+func TestTimelineProjectionV2PoisonsMalformedOwnerAndOperator(t *testing.T) {
+	repository, tx, ctx := integrationRepository(t)
+	drainTimelineProjectionQueue(t, ctx, mustTimelineDispatcher(t, repository))
+	fixture := seedProvenance(t, ctx, tx, "timeline-projector-v2-poison")
+	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+	operatorSourceID, operatorEventID, conflictID := newID(t), newID(t), newID(t)
+	ownerSourceID, ownerEventID, artifactID, revisionID := newID(t), newID(t), newID(t), newID(t)
+
+	if _, err := tx.Exec(ctx, `ALTER TABLE ops.timeline_projection_outbox
+DROP CONSTRAINT ops_timeline_projection_v2_wire`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := tx.Exec(ctx, `INSERT INTO ops.timeline_projection_outbox(
+id,event_id,workspace_id,event_type,aggregate_type,aggregate_id,source_event_ref,source_ref,event_version,
+schema_version,summary,correlation,operator_type,operator_id,owner_binding,occurred_at,status,created_at,updated_at)
+VALUES($1,$2,$3,'CONFLICT_OPENED','CONFLICT',$4,$5,$6,1,'knowledge-event/v2',
+'malformed operator projection','{}','SYSTEM',$7,NULL,$8,'PENDING',$8,$8)`,
+		string(operatorSourceID), string(operatorEventID), string(fixture.workspaceID), string(conflictID),
+		"malformed-operator:"+string(operatorSourceID), "conflict:"+string(conflictID), string(newID(t)), now); err != nil {
+		t.Fatal(err)
+	}
+	malformedOwner := `{"artifact":{"artifact_id":"` + string(artifactID) + `","artifact_version":1,"revision_id":"` + string(revisionID) + `","revision_no":1,"content_hash":"` + testHash("malformed-owner") + `","unexpected":true}}`
+	if _, err := tx.Exec(ctx, `INSERT INTO ops.timeline_projection_outbox(
+id,event_id,workspace_id,event_type,aggregate_type,aggregate_id,source_event_ref,source_ref,event_version,
+schema_version,summary,correlation,operator_type,operator_id,owner_binding,occurred_at,status,created_at,updated_at)
+VALUES($1,$2,$3,'ARTIFACT_GENERATED','ARTIFACT',$4,$5,$6,1,'knowledge-event/v2',
+'malformed owner projection','{}','SYSTEM',NULL,$7::jsonb,$8,'PENDING',$8,$8)`,
+		string(ownerSourceID), string(ownerEventID), string(fixture.workspaceID), string(artifactID),
+		"malformed-owner:"+string(ownerSourceID), "artifact:"+string(artifactID), malformedOwner, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, expected := range []struct {
+		sourceID foundation.ID
+		eventID  foundation.ID
+	}{
+		{sourceID: operatorSourceID, eventID: operatorEventID},
+		{sourceID: ownerSourceID, eventID: ownerEventID},
+	} {
+		result, found, err := repository.ProjectNext(ctx)
+		var classified *foundation.Error
+		if !found || result.SourceID != expected.sourceID || result.EventID != expected.eventID || result.Outcome != knowledgeapp.TimelineProjectionPoisoned || !errors.As(err, &classified) || classified.Kind != foundation.ErrorManualRecoveryRequired || classified.Code != domain.ErrorCodeTimelineProjectionPoisoned {
+			t.Fatalf("malformed v2 projection result=%#v found=%t classified=%#v err=%v", result, found, classified, err)
+		}
+		var status, errorCode string
+		if err := tx.QueryRow(ctx, `SELECT status,error_code FROM ops.timeline_projection_outbox WHERE id=$1`, string(expected.sourceID)).Scan(&status, &errorCode); err != nil {
+			t.Fatal(err)
+		}
+		if status != "POISONED" || errorCode != domain.ErrorCodeTimelineProjectionPoisoned {
+			t.Fatalf("malformed v2 status=%s error=%s", status, errorCode)
+		}
+		if _, err := repository.GetEvent(ctx, fixture.workspaceID, expected.eventID); !hasCode(err, domain.ErrorCodeTimelineNotFound) {
+			t.Fatalf("malformed v2 event lookup err=%v", err)
+		}
 	}
 }
 

@@ -378,6 +378,50 @@ func TestWritebackResumeCompletesStrictSagaAndCleanup(t *testing.T) {
 	}
 }
 
+func TestWritebackRejectsDownstreamUpdateWithoutSideEffects(t *testing.T) {
+	assertUnavailable := func(t *testing.T, err error) {
+		t.Helper()
+		var classified *foundation.Error
+		if !errors.As(err, &classified) || classified.Code != domain.DownstreamUpdateApplyUnavailableCode || classified.Kind != foundation.ErrorVersionConflict || classified.Retryable {
+			t.Fatalf("error=%v", err)
+		}
+	}
+
+	t.Run("begin", func(t *testing.T) {
+		proposal := downstreamUpdateProposal()
+		repository := &sagaRepository{proposal: proposal}
+		workspace := &sagaWorkspace{lock: targetLockFixture(t)}
+		git := &sagaGit{}
+		service := newSagaService(t, repository, workspace, git, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
+
+		_, err := service.Begin(context.Background(), BeginWritebackCommand{
+			WorkspaceID: proposal.WorkspaceID, WorkflowRunID: sagaRunID, NodeRunID: sagaNodeID, ProposalID: proposal.ID,
+			LeaseOwner: "worker-a", IdempotencyKey: "downstream-begin", WriteCredential: "write-secret", GitCredential: "git-secret",
+			WriteAuthorizationKey: "downstream-write", GitAuthorizationKey: "downstream-git",
+		})
+		assertUnavailable(t, err)
+		if len(repository.beginCommands) != 0 || workspace.acquireCalls != 0 || git.inspectCalls != 0 {
+			t.Fatalf("begin reached a writeback dependency: commands=%d acquire=%d inspect=%d", len(repository.beginCommands), workspace.acquireCalls, git.inspectCalls)
+		}
+	})
+
+	t.Run("resume historical execution", func(t *testing.T) {
+		proposal := downstreamUpdateProposal()
+		execution := executionFixture(domain.WritebackStatusPrepared)
+		execution.ProposalID = proposal.ID
+		repository := &sagaRepository{proposal: proposal, execution: execution}
+		workspace := &sagaWorkspace{lock: targetLockFixture(t)}
+		git := &sagaGit{}
+		service := newSagaService(t, repository, workspace, git, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
+
+		result, err := service.Resume(context.Background(), execution.ID, sagaResumeIdentity("worker-a"))
+		assertUnavailable(t, err)
+		if result.ExecutionID != execution.ID || len(repository.checkpointStatuses) != 0 || workspace.acquireCalls != 0 || workspace.resumeCalls != 0 || git.inspectCalls != 0 || git.commitCalls != 0 {
+			t.Fatalf("resume reached a writeback dependency: result=%#v checkpoints=%v acquire=%d resume=%d inspect=%d commit=%d", result, repository.checkpointStatuses, workspace.acquireCalls, workspace.resumeCalls, git.inspectCalls, git.commitCalls)
+		}
+	})
+}
+
 func TestWritebackResumeMapsResponseLossIntentByStatus(t *testing.T) {
 	for _, test := range []struct {
 		name        string

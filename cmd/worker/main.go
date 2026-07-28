@@ -98,6 +98,8 @@ const (
 	timelineProjectionDispatchErrorCode  = "KNOWLEDGE_TIMELINE_PROJECTION_FAILED"
 	timelineProjectionStartupPhase       = "startup"
 	timelineProjectionPeriodicPhase      = "periodic"
+	citationBackfillStartupPhase         = "startup"
+	citationBackfillPeriodicPhase        = "periodic"
 	exportMaintenanceStartupPhase        = "startup"
 	exportMaintenancePeriodicPhase       = "periodic"
 	exportOrphanWorkspaceBatch           = 25
@@ -132,24 +134,25 @@ type learningPathMaintenanceService interface {
 }
 
 type workerComponents struct {
-	safeWriteback   *changecontrolworkflow.Node
-	tools           toolRuntimeComponents
-	agentCapability agentCapabilityStatus
-	artifact        artifactWorkflowComponents
-	reindexWorker   *reindexriver.Worker
-	dispatcher      *retrievalruntime.Runner
-	runtimeClient   *riveradapter.Client
-	definitions     *workflowapplication.DefinitionRegistry
-	executors       *workflowapplication.ExecutorRegistry
-	semanticScan    *graphworkflow.SemanticLinkScanExecutor
-	healthScan      *healthworkflowadapter.HealthScanExecutor
-	healthScanStart *healthapplication.ScanService
-	healthSchedule  *healthapplication.ScheduleService
-	healthAffected  *healthapplication.AffectedChangeDispatcher
-	timelineProject *knowledgeapplication.TimelineProjectionDispatcher
-	exportWorker    *exportriver.Worker
-	exportService   *exportapplication.Service
-	memoryExpiry    memoryExpiryService
+	safeWriteback    *changecontrolworkflow.Node
+	tools            toolRuntimeComponents
+	agentCapability  agentCapabilityStatus
+	artifact         artifactWorkflowComponents
+	reindexWorker    *reindexriver.Worker
+	dispatcher       *retrievalruntime.Runner
+	runtimeClient    *riveradapter.Client
+	definitions      *workflowapplication.DefinitionRegistry
+	executors        *workflowapplication.ExecutorRegistry
+	semanticScan     *graphworkflow.SemanticLinkScanExecutor
+	healthScan       *healthworkflowadapter.HealthScanExecutor
+	healthScanStart  *healthapplication.ScanService
+	healthSchedule   *healthapplication.ScheduleService
+	healthAffected   *healthapplication.AffectedChangeDispatcher
+	timelineProject  *knowledgeapplication.TimelineProjectionDispatcher
+	citationBackfill *artifactapplication.CitationBackfillDispatcher
+	exportWorker     *exportriver.Worker
+	exportService    *exportapplication.Service
+	memoryExpiry     memoryExpiryService
 	// interviewCompletion 是 reservation/hidden hold 维护依赖。
 	interviewCompletion interviewCompletionMaintenanceService
 	// learningPathMaintenance 是 Review Path reservation/hidden hold 维护依赖。
@@ -254,7 +257,7 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetRiverSchemaOK(true)
 	readiness.SetDefinitionsOK(components.definitions != nil)
 	readiness.SetExecutorsOK(components.executors != nil)
-	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.exportWorker != nil && components.exportService != nil && components.memoryExpiry != nil && components.interviewCompletion != nil && components.learningPathMaintenance != nil && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
+	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.timelineProject != nil && components.citationBackfill != nil && components.exportWorker != nil && components.exportService != nil && components.memoryExpiry != nil && components.interviewCompletion != nil && components.learningPathMaintenance != nil && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
 	toolEnabled := cfg.ToolRuntimeMode == config.ToolModeEnabled
 	toolContractsOK, toolExecutorsOK, toolDependenciesOK := toolWorkflowReadiness(components)
 	readiness.SetToolRuntimeState(toolEnabled, toolContractsOK, toolExecutorsOK, toolDependenciesOK)
@@ -286,6 +289,9 @@ func run(configPath string, logger *slog.Logger) error {
 	timelineContext, cancelTimeline := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	_, _ = dispatchTimelineProjection(timelineContext, logger, components.timelineProject, timelineProjectionStartupPhase)
 	cancelTimeline()
+	citationBackfillContext, cancelCitationBackfill := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	_, _ = dispatchCitationBackfill(citationBackfillContext, logger, components.citationBackfill, citationBackfillStartupPhase)
+	cancelCitationBackfill()
 	exportOrphanCursor := foundation.ID("")
 	maintenanceContext, cancelMaintenance := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	exportOrphanCursor = runExportMaintenance(maintenanceContext, logger, components.exportService, exportOrphanCursor, exportMaintenanceStartupPhase)
@@ -306,6 +312,7 @@ func run(configPath string, logger *slog.Logger) error {
 		"tool_runtime_enabled", components.tools.runtimeEnabled, "tool_executor_count", len(components.tools.enabledRefs),
 		"web_fetch_enabled", cfg.WebFetchMode == config.ToolModeEnabled, "reindex_dispatcher", components.dispatcher.Started(),
 		"timeline_projector", components.timelineProject != nil, "export_worker", components.exportWorker != nil,
+		"artifact_citation_backfill", components.citationBackfill != nil,
 		"interview_completion_maintenance", components.interviewCompletion != nil,
 		"learning_path_maintenance", components.learningPathMaintenance != nil)
 
@@ -379,6 +386,11 @@ func run(configPath string, logger *slog.Logger) error {
 					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
 					_, _ = dispatchTimelineProjection(dispatchContext, logger, components.timelineProject, timelineProjectionPeriodicPhase)
 					cancelDispatch()
+				}
+				if components.citationBackfill != nil {
+					backfillContext, cancelBackfill := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+					_, _ = dispatchCitationBackfill(backfillContext, logger, components.citationBackfill, citationBackfillPeriodicPhase)
+					cancelBackfill()
 				}
 				if components.exportService != nil {
 					maintenanceContext, cancelMaintenance := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
@@ -460,6 +472,34 @@ func timelineProjectionFailure(err error) (string, bool) {
 		return classified.Code, classified.Retryable
 	}
 	return timelineProjectionDispatchErrorCode, false
+}
+
+func citationBackfillFailure(err error) (string, bool) {
+	var classified *foundation.Error
+	if errors.As(err, &classified) && classified.Code != "" {
+		return classified.Code, classified.Retryable
+	}
+	return artifactapplication.ErrorCodeCitationBackfillFailed, false
+}
+
+func dispatchCitationBackfill(ctx context.Context, logger *slog.Logger, dispatcher *artifactapplication.CitationBackfillDispatcher, phase string) (artifactapplication.CitationBackfillBatchResult, error) {
+	batch, err := dispatcher.DispatchBatch(ctx, artifactapplication.MaxCitationBackfillWorkspaceBatch, artifactapplication.MaxCitationBackfillRevisionBatch)
+	if err != nil {
+		errorCode, retryable := citationBackfillFailure(err)
+		logger.Warn("artifact citation selector backfill failed",
+			"error_code", errorCode, "retryable", retryable, "phase", phase,
+			"workspace_count", batch.Workspaces, "processed_revision_count", batch.ProcessedRevisions,
+			"processed_selector_count", batch.ProcessedSelectors, "validated_revision_count", batch.ValidatedRevisions,
+			"completed_workspace_count", batch.Completed)
+		return batch, err
+	}
+	if phase == citationBackfillStartupPhase || batch.Workspaces > 0 {
+		logger.Info("artifact citation selector backfill completed",
+			"phase", phase, "workspace_count", batch.Workspaces,
+			"processed_revision_count", batch.ProcessedRevisions, "processed_selector_count", batch.ProcessedSelectors,
+			"validated_revision_count", batch.ValidatedRevisions, "completed_workspace_count", batch.Completed)
+	}
+	return batch, nil
 }
 
 func runExportMaintenance(ctx context.Context, logger *slog.Logger, service exportMaintenanceService, orphanCursor foundation.ID, phase string) foundation.ID {
@@ -869,6 +909,14 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
+	artifactRepository, err := artifactpostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	citationBackfill, err := artifactapplication.NewCitationBackfillDispatcher(artifactRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
 	runtimeCoordinator, err := workflowapplication.NewRuntimeCoordinator(runtimeRepository)
 	if err != nil {
 		return workerComponents{}, err
@@ -944,7 +992,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	return workerComponents{
 		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability, artifact: artifactComponents,
 		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
-		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject,
+		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject, citationBackfill: citationBackfill,
 		exportWorker: exportWorker, exportService: exportService, memoryExpiry: memoryService,
 		interviewCompletion: interviewCompletion, learningPathMaintenance: learningPathMaintenance,
 		fatalInvariants: fatalInvariants,

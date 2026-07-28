@@ -1170,7 +1170,8 @@
               "enum": [
                 "file_patch",
                 "knowledge_change",
-                "publish_artifact"
+                "publish_artifact",
+                "downstream_update"
               ]
             }
           },
@@ -1317,7 +1318,7 @@
             }
           },
           "201": {
-            "description": "Decision created. Approved file_patch responses atomically include Git and Safe Writeback Workflow bindings; approved knowledge_change responses and all rejected responses omit those writeback fields.",
+            "description": "Decision created. Approved file_patch responses atomically include Git and Safe Writeback Workflow bindings; approved non-file typed Proposal responses and all rejected responses omit those writeback fields.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1393,7 +1394,10 @@
       ],
       "post": {
         "operationId": "checkProposalApplyPreflight",
-        "description": "Reads the real target file hash inside the persisted Workspace and verifies Approval, Revision, Change Hash and base hash. It performs no write and issues no write authorization.",
+        "description": "Reads the real target file hash inside the persisted Workspace and verifies Approval, Revision, Change Hash and base hash. It performs no write and issues no write authorization. downstream_update is approval-only and always fails closed with 409 DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE.",
+        "x-error-codes": [
+          "DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1456,7 +1460,7 @@
             }
           },
           "409": {
-            "description": "Revision, Change Hash or real target base hash conflict; baseline conflict moves Proposal to needs_revision.",
+            "description": "Revision, Change Hash or real target base hash conflict; baseline conflict moves Proposal to needs_revision. downstream_update returns non-retryable DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE without target or side-effect mutation.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4571,6 +4575,7 @@
       ],
       "get": {
         "operationId": "listKnowledgeTimeline",
+        "x-required-capability": "READ_LOCAL",
         "parameters": [
           {
             "name": "event_type",
@@ -4580,9 +4585,7 @@
               "maxItems": 32,
               "uniqueItems": true,
               "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/components/schemas/KnowledgeEventType"
               }
             },
             "style": "form",
@@ -4592,9 +4595,7 @@
             "name": "aggregate_type",
             "in": "query",
             "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
+              "$ref": "#/components/schemas/TimelineAggregateType"
             }
           },
           {
@@ -4705,6 +4706,7 @@
       ],
       "get": {
         "operationId": "getKnowledgeTimelineEvent",
+        "x-required-capability": "READ_LOCAL",
         "responses": {
           "200": {
             "description": "Immutable Knowledge Event projection.",
@@ -4763,6 +4765,7 @@
       ],
       "post": {
         "operationId": "analyzeKnowledgeImpact",
+        "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -5741,6 +5744,7 @@
       ],
       "get": {
         "operationId": "getKnowledgeImpactReport",
+        "x-required-capability": "READ_LOCAL",
         "responses": {
           "200": {
             "description": "Persisted Impact Report projection.",
@@ -8874,6 +8878,136 @@
           }
         }
       }
+    },
+    "/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}/proposals": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "report_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "createImpactDownstreamUpdateProposal",
+        "description": "Creates one approval-only downstream_update Proposal for an exact owner-backed target in the latest READY impact-report/v2. It never applies the update, creates a Workflow, grants write authorization, or mutates the target.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "x-error-codes": [
+          "DOWNSTREAM_UPDATE_PROPOSAL_INVALID",
+          "DOWNSTREAM_UPDATE_TARGET_INVALID",
+          "IDEMPOTENCY_KEY_REQUIRED",
+          "IDEMPOTENCY_KEY_REUSED",
+          "INVALID_JSON",
+          "UNSUPPORTED_MEDIA_TYPE",
+          "KNOWLEDGE_IMPACT_NOT_FOUND",
+          "KNOWLEDGE_IMPACT_CONFLICT",
+          "KNOWLEDGE_IMPACT_UNAVAILABLE",
+          "CHANGE_CONTROL_SERVICE_UNAVAILABLE",
+          "INTERNAL_ERROR"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDownstreamUpdateProposalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact Idempotency-Key replay of the same complete report, target, action and owner binding.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/DownstreamUpdateProposalCreateResponse"
+                    },
+                    {
+                      "properties": {
+                        "replayed": {
+                          "const": true
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "A new approval-only downstream_update Proposal was created; no target write or execution capability was granted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/DownstreamUpdateProposalCreateResponse"
+                    },
+                    {
+                      "properties": {
+                        "approval": {
+                          "type": "null"
+                        },
+                        "replayed": {
+                          "const": false
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -10216,7 +10350,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "Persistent Approval snapshot returned by Proposal detail and list reads. New approved file_patch snapshots include the durable Git and Workflow binding. Historical approved file_patch snapshots may omit workflow_run_id/workflow_status_url while awaiting an exact approval replay; snapshots that also omit approved_git_head are read-only manual-recovery records. Approved knowledge_change or publish_artifact snapshots and rejected snapshots omit all Git and Workflow fields. The transient dispatch_status exists only on ApprovalDecisionResponse."
+        "description": "Persistent Approval snapshot returned by Proposal detail and list reads. New approved file_patch snapshots include the durable Git and Workflow binding. Historical approved file_patch snapshots may omit workflow_run_id/workflow_status_url while awaiting an exact approval replay; snapshots that also omit approved_git_head are read-only manual-recovery records. Approved non-file typed Proposal snapshots and rejected snapshots omit all Git and Workflow fields. The transient dispatch_status exists only on ApprovalDecisionResponse."
       },
       "NonFileApproval": {
         "description": "Approval snapshot for a non-file typed Proposal. Git and Safe Writeback Workflow fields are forbidden.",
@@ -10249,7 +10383,7 @@
       },
       "ApprovalDecisionResponse": {
         "type": "object",
-        "description": "Approved file_patch decisions include approved_git_head, workflow_run_id, workflow_status_url and dispatch_status. Approved knowledge_change or publish_artifact decisions and rejected decisions omit all Git and Workflow writeback fields.",
+        "description": "Approved file_patch decisions include approved_git_head, workflow_run_id, workflow_status_url and dispatch_status. Approved non-file typed Proposal decisions and rejected decisions omit all Git and Workflow writeback fields.",
         "required": [
           "id",
           "proposal_id",
@@ -10319,6 +10453,9 @@
           },
           {
             "$ref": "#/components/schemas/PublishArtifactProposal"
+          },
+          {
+            "$ref": "#/components/schemas/DownstreamUpdateProposal"
           }
         ],
         "discriminator": {
@@ -10326,7 +10463,8 @@
           "mapping": {
             "file_patch": "#/components/schemas/FilePatchProposal",
             "knowledge_change": "#/components/schemas/KnowledgeChangeProposal",
-            "publish_artifact": "#/components/schemas/PublishArtifactProposal"
+            "publish_artifact": "#/components/schemas/PublishArtifactProposal",
+            "downstream_update": "#/components/schemas/DownstreamUpdateProposal"
           }
         }
       },
@@ -10645,7 +10783,7 @@
           "approval": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/Approval"
+                "$ref": "#/components/schemas/NonFileApproval"
               },
               {
                 "type": "null"
@@ -16910,7 +17048,8 @@
             "enum": [
               "file_patch",
               "knowledge_change",
-              "publish_artifact"
+              "publish_artifact",
+              "downstream_update"
             ]
           },
           "status": {
@@ -16970,7 +17109,11 @@
               ],
               "properties": {
                 "proposal_type": {
-                  "const": "publish_artifact"
+                  "enum": [
+                    "knowledge_change",
+                    "publish_artifact",
+                    "downstream_update"
+                  ]
                 }
               }
             },
@@ -18143,57 +18286,32 @@
         "additionalProperties": false
       },
       "ImpactObject": {
-        "type": "object",
-        "required": [
-          "type",
-          "id",
-          "workspace_id",
-          "version",
-          "action",
-          "reason",
-          "requires_proposal"
-        ],
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": [
-              "RELATION",
-              "CONFLICT",
-              "HEALTH_ISSUE"
-            ]
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ImpactObjectV2Legacy"
           },
-          "id": {
-            "type": "string",
-            "format": "uuid"
+          {
+            "$ref": "#/components/schemas/ArtifactImpactObject"
           },
-          "workspace_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "version": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "action": {
-            "type": "string",
-            "enum": [
-              "REVIEW",
-              "REINDEX",
-              "RESOLVE_CONFLICT",
-              "REFRESH_HEALTH",
-              "NO_ACTION"
-            ]
-          },
-          "reason": {
-            "type": "string",
-            "maxLength": 4096,
-            "x-max-utf8-bytes": 4096
-          },
-          "requires_proposal": {
-            "type": "boolean"
+          {
+            "$ref": "#/components/schemas/ReviewCardImpactObject"
           }
-        },
-        "additionalProperties": false
+        ],
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "TOPIC": "#/components/schemas/ImpactObjectV2Legacy",
+            "CLAIM": "#/components/schemas/ImpactObjectV2Legacy",
+            "RELATION": "#/components/schemas/ImpactObjectV2Legacy",
+            "CONFLICT": "#/components/schemas/ImpactObjectV2Legacy",
+            "HEALTH_ISSUE": "#/components/schemas/ImpactObjectV2Legacy",
+            "PROPOSAL": "#/components/schemas/ImpactObjectV2Legacy",
+            "ARTICLE_REVISION": "#/components/schemas/ImpactObjectV2Legacy",
+            "AUDIT_EVENT": "#/components/schemas/ImpactObjectV2Legacy",
+            "ARTIFACT": "#/components/schemas/ArtifactImpactObject",
+            "REVIEW_CARD": "#/components/schemas/ReviewCardImpactObject"
+          }
+        }
       },
       "ImpactProposalDraft": {
         "type": "object",
@@ -18228,7 +18346,9 @@
               "REVIEW",
               "REINDEX",
               "RESOLVE_CONFLICT",
-              "REFRESH_HEALTH"
+              "REFRESH_HEALTH",
+              "REGENERATE_ARTIFACT",
+              "REVALIDATE_REVIEW_CARD"
             ]
           },
           "target_type": {
@@ -18241,7 +18361,9 @@
               "HEALTH_ISSUE",
               "PROPOSAL",
               "ARTICLE_REVISION",
-              "AUDIT_EVENT"
+              "AUDIT_EVENT",
+              "ARTIFACT",
+              "REVIEW_CARD"
             ]
           },
           "target_id": {
@@ -18267,180 +18389,38 @@
         "additionalProperties": false
       },
       "ImpactReport": {
-        "type": "object",
-        "required": [
-          "id",
-          "workspace_id",
-          "source_event_id",
-          "source_event_ref",
-          "source_event_version",
-          "status",
-          "objects",
-          "summary",
-          "fingerprint",
-          "schema_version",
-          "generated_at",
-          "created_at",
-          "version"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid"
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ImpactReportV1"
           },
-          "workspace_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "source_event_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "source_event_ref": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 512
-          },
-          "source_event_version": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "READY",
-              "STALE",
-              "FAILED"
-            ]
-          },
-          "objects": {
-            "type": "array",
-            "maxItems": 500,
-            "items": {
-              "$ref": "#/components/schemas/ImpactObject"
-            }
-          },
-          "summary": {
-            "type": "object",
-            "maxProperties": 14,
-            "additionalProperties": {
-              "type": "integer",
-              "minimum": 1
-            }
-          },
-          "fingerprint": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{64}$"
-          },
-          "error_code": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 256
-          },
-          "stale_reason": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4096,
-            "x-max-utf8-bytes": 4096
-          },
-          "schema_version": {
-            "const": "impact-report/v1"
-          },
-          "generated_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "version": {
-            "type": "integer",
-            "minimum": 1
+          {
+            "$ref": "#/components/schemas/ImpactReportV2"
           }
-        },
-        "additionalProperties": false
+        ],
+        "discriminator": {
+          "propertyName": "schema_version",
+          "mapping": {
+            "impact-report/v1": "#/components/schemas/ImpactReportV1",
+            "impact-report/v2": "#/components/schemas/ImpactReportV2"
+          }
+        }
       },
       "KnowledgeEvent": {
-        "type": "object",
-        "required": [
-          "id",
-          "workspace_id",
-          "event_type",
-          "aggregate_type",
-          "source_event_ref",
-          "source_ref",
-          "event_version",
-          "schema_version",
-          "summary",
-          "payload",
-          "correlation",
-          "occurred_at",
-          "created_at"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid"
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/KnowledgeEventV1"
           },
-          "workspace_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "event_type": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "aggregate_type": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "aggregate_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "source_event_ref": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 512
-          },
-          "source_ref": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 512
-          },
-          "event_version": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "schema_version": {
-            "const": "knowledge-event/v1"
-          },
-          "summary": {
-            "type": "string",
-            "maxLength": 4096,
-            "x-max-utf8-bytes": 4096
-          },
-          "payload": {
-            "type": "object",
-            "x-max-json-bytes": 32768,
-            "additionalProperties": true
-          },
-          "correlation": {
-            "$ref": "#/components/schemas/KnowledgeEventCorrelation"
-          },
-          "occurred_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
+          {
+            "$ref": "#/components/schemas/KnowledgeEventV2"
           }
-        },
-        "additionalProperties": false
+        ],
+        "discriminator": {
+          "propertyName": "schema_version",
+          "mapping": {
+            "knowledge-event/v1": "#/components/schemas/KnowledgeEventV1",
+            "knowledge-event/v2": "#/components/schemas/KnowledgeEventV2"
+          }
+        }
       },
       "KnowledgeEventCorrelation": {
         "type": "object",
@@ -22064,6 +22044,1264 @@
           }
         },
         "additionalProperties": false
+      },
+      "ArtifactEventOwnerBinding": {
+        "type": "object",
+        "required": [
+          "artifact"
+        ],
+        "properties": {
+          "artifact": {
+            "$ref": "#/components/schemas/ArtifactImpactBinding"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactImpactBinding": {
+        "type": "object",
+        "required": [
+          "artifact_id",
+          "artifact_version",
+          "revision_id",
+          "revision_no",
+          "content_hash"
+        ],
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "artifact_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ArtifactImpactObject": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ImpactObjectV2Base"
+          },
+          {
+            "type": "object",
+            "required": [
+              "artifact_binding"
+            ],
+            "properties": {
+              "type": {
+                "const": "ARTIFACT"
+              },
+              "action": {
+                "const": "REGENERATE_ARTIFACT"
+              },
+              "requires_proposal": {
+                "const": true
+              },
+              "artifact_binding": {
+                "$ref": "#/components/schemas/ArtifactImpactBinding"
+              }
+            }
+          }
+        ],
+        "unevaluatedProperties": false
+      },
+      "CreateDownstreamUpdateProposalRequest": {
+        "type": "object",
+        "description": "Selects exactly one owner-backed target from the current impact-report/v2. Unknown or duplicate JSON fields are rejected by the HTTP boundary.",
+        "required": [
+          "target_type",
+          "target_id",
+          "action"
+        ],
+        "properties": {
+          "target_type": {
+            "type": "string",
+            "enum": [
+              "ARTIFACT",
+              "REVIEW_CARD"
+            ]
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "REGENERATE_ARTIFACT",
+              "REVALIDATE_REVIEW_CARD"
+            ]
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "target_type": {
+                "const": "ARTIFACT"
+              },
+              "action": {
+                "const": "REGENERATE_ARTIFACT"
+              }
+            }
+          },
+          {
+            "properties": {
+              "target_type": {
+                "const": "REVIEW_CARD"
+              },
+              "action": {
+                "const": "REVALIDATE_REVIEW_CARD"
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "DownstreamUpdate": {
+        "type": "object",
+        "description": "Frozen approval intent. The payload is not an apply command and never carries a write authorization or Workflow binding.",
+        "required": [
+          "workspace_id",
+          "source_report",
+          "source_event",
+          "target_type",
+          "target_id",
+          "base_version",
+          "action",
+          "reason",
+          "schema_version"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_report": {
+            "$ref": "#/components/schemas/DownstreamUpdateSourceReport"
+          },
+          "source_event": {
+            "$ref": "#/components/schemas/DownstreamUpdateSourceEvent"
+          },
+          "target_type": {
+            "type": "string",
+            "enum": [
+              "ARTIFACT",
+              "REVIEW_CARD"
+            ]
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "base_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "REGENERATE_ARTIFACT",
+              "REVALIDATE_REVIEW_CARD"
+            ]
+          },
+          "artifact_binding": {
+            "$ref": "#/components/schemas/ArtifactImpactBinding"
+          },
+          "review_card_binding": {
+            "$ref": "#/components/schemas/ReviewCardImpactBinding"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "schema_version": {
+            "const": "impact-downstream-update/v1"
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "artifact_binding"
+            ],
+            "properties": {
+              "target_type": {
+                "const": "ARTIFACT"
+              },
+              "action": {
+                "const": "REGENERATE_ARTIFACT"
+              }
+            },
+            "not": {
+              "required": [
+                "review_card_binding"
+              ]
+            }
+          },
+          {
+            "required": [
+              "review_card_binding"
+            ],
+            "properties": {
+              "target_type": {
+                "const": "REVIEW_CARD"
+              },
+              "action": {
+                "const": "REVALIDATE_REVIEW_CARD"
+              }
+            },
+            "not": {
+              "required": [
+                "artifact_binding"
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "DownstreamUpdateProposal": {
+        "type": "object",
+        "description": "An approval-only downstream owner update intent. Approved responses remain non-executable and omit every Git, Workflow, write-authorization and writeback field.",
+        "required": [
+          "proposal_type",
+          "id",
+          "workspace_id",
+          "status",
+          "risk_level",
+          "revision",
+          "approval",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "proposal_type": {
+            "const": "downstream_update"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready_for_review",
+              "approved",
+              "rejected"
+            ]
+          },
+          "risk_level": {
+            "const": "HIGH"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/DownstreamUpdateRevision"
+          },
+          "approval": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NonFileApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DownstreamUpdateProposalCreateResponse": {
+        "description": "Endpoint-only downstream Proposal response. replayed is intentionally absent from Proposal detail and list resources.",
+        "type": "object",
+        "required": [
+          "proposal_type",
+          "id",
+          "workspace_id",
+          "status",
+          "risk_level",
+          "revision",
+          "approval",
+          "replayed",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "proposal_type": {
+            "const": "downstream_update"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready_for_review",
+              "approved",
+              "rejected"
+            ]
+          },
+          "risk_level": {
+            "const": "HIGH"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/DownstreamUpdateRevision"
+          },
+          "approval": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NonFileApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DownstreamUpdateRevision": {
+        "type": "object",
+        "required": [
+          "id",
+          "revision_no",
+          "update",
+          "risk",
+          "rollback_plan",
+          "change_hash",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "update": {
+            "$ref": "#/components/schemas/DownstreamUpdate"
+          },
+          "risk": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "rollback_plan": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "change_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DownstreamUpdateSourceEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "event_version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "event_version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "DownstreamUpdateSourceReport": {
+        "type": "object",
+        "required": [
+          "id",
+          "analysis_version",
+          "fingerprint"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "analysis_version": {
+            "const": "impact-analysis/v2"
+          },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ImpactAction": {
+        "type": "string",
+        "enum": [
+          "REVIEW",
+          "REINDEX",
+          "RESOLVE_CONFLICT",
+          "REFRESH_HEALTH",
+          "REGENERATE_ARTIFACT",
+          "REVALIDATE_REVIEW_CARD",
+          "NO_ACTION"
+        ]
+      },
+      "ImpactObjectType": {
+        "type": "string",
+        "enum": [
+          "TOPIC",
+          "CLAIM",
+          "RELATION",
+          "CONFLICT",
+          "HEALTH_ISSUE",
+          "PROPOSAL",
+          "ARTICLE_REVISION",
+          "AUDIT_EVENT",
+          "ARTIFACT",
+          "REVIEW_CARD"
+        ]
+      },
+      "ImpactObjectV1": {
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "workspace_id",
+          "version",
+          "action",
+          "reason",
+          "requires_proposal"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "TOPIC",
+              "CLAIM",
+              "RELATION",
+              "CONFLICT",
+              "HEALTH_ISSUE",
+              "PROPOSAL",
+              "ARTICLE_REVISION",
+              "AUDIT_EVENT"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "REVIEW",
+              "REINDEX",
+              "RESOLVE_CONFLICT",
+              "REFRESH_HEALTH",
+              "NO_ACTION"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "requires_proposal": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ImpactObjectV2Base": {
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "workspace_id",
+          "version",
+          "action",
+          "reason",
+          "requires_proposal"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/ImpactObjectType"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "action": {
+            "$ref": "#/components/schemas/ImpactAction"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "requires_proposal": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ImpactObjectV2Legacy": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ImpactObjectV2Base"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "enum": [
+                  "TOPIC",
+                  "CLAIM",
+                  "RELATION",
+                  "CONFLICT",
+                  "HEALTH_ISSUE",
+                  "PROPOSAL",
+                  "ARTICLE_REVISION",
+                  "AUDIT_EVENT"
+                ]
+              }
+            }
+          }
+        ],
+        "unevaluatedProperties": false
+      },
+      "ImpactReportV1": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "source_event_id",
+          "source_event_ref",
+          "source_event_version",
+          "status",
+          "objects",
+          "summary",
+          "fingerprint",
+          "schema_version",
+          "generated_at",
+          "created_at",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_event_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_event_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "source_event_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "READY",
+              "STALE",
+              "FAILED"
+            ]
+          },
+          "objects": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/ImpactObjectV1"
+            }
+          },
+          "summary": {
+            "type": "object",
+            "maxProperties": 14,
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "error_code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "stale_reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "schema_version": {
+            "const": "impact-report/v1"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "ImpactReportV2": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "source_event_id",
+          "source_event_ref",
+          "source_event_version",
+          "analysis_version",
+          "supersedes_report_id",
+          "superseded_by_report_id",
+          "status",
+          "objects",
+          "summary",
+          "fingerprint",
+          "schema_version",
+          "generated_at",
+          "created_at",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_event_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_event_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "source_event_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "analysis_version": {
+            "const": "impact-analysis/v2"
+          },
+          "supersedes_report_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "superseded_by_report_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "READY",
+              "STALE",
+              "FAILED"
+            ]
+          },
+          "objects": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/ImpactObject"
+            }
+          },
+          "summary": {
+            "type": "object",
+            "maxProperties": 18,
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "error_code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "stale_reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "schema_version": {
+            "const": "impact-report/v2"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeEventOperator": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "USER",
+              "API_TOKEN",
+              "SYSTEM",
+              "UNKNOWN"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "type": {
+                  "enum": [
+                    "SYSTEM",
+                    "UNKNOWN"
+                  ]
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "KnowledgeEventOwnerBinding": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ArtifactEventOwnerBinding"
+          },
+          {
+            "$ref": "#/components/schemas/ReviewCardEventOwnerBinding"
+          }
+        ]
+      },
+      "KnowledgeEventType": {
+        "type": "string",
+        "enum": [
+          "PROPOSAL_CREATED",
+          "APPROVAL_GRANTED",
+          "APPROVAL_REJECTED",
+          "GIT_COMMITTED",
+          "RELATION_CONFIRMED",
+          "RELATION_DEPRECATED",
+          "CONFLICT_OPENED",
+          "CONFLICT_TRANSITIONED",
+          "CONFLICT_RESOLVED",
+          "VERSION_PUBLISHED",
+          "VERSION_SUPERSEDED",
+          "HEALTH_ISSUE_DETECTED",
+          "HEALTH_ISSUE_RESOLVED",
+          "IMPACT_ANALYZED",
+          "ARTIFACT_GENERATED",
+          "REVIEW_CARD_INVALIDATED",
+          "CORRECTIVE_EVENT"
+        ]
+      },
+      "KnowledgeEventV1": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "event_type",
+          "aggregate_type",
+          "source_event_ref",
+          "source_ref",
+          "event_version",
+          "schema_version",
+          "summary",
+          "payload",
+          "correlation",
+          "occurred_at",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "PROPOSAL_CREATED",
+              "APPROVAL_GRANTED",
+              "APPROVAL_REJECTED",
+              "GIT_COMMITTED",
+              "RELATION_CONFIRMED",
+              "RELATION_DEPRECATED",
+              "CONFLICT_OPENED",
+              "CONFLICT_TRANSITIONED",
+              "CONFLICT_RESOLVED",
+              "VERSION_PUBLISHED",
+              "VERSION_SUPERSEDED",
+              "HEALTH_ISSUE_DETECTED",
+              "HEALTH_ISSUE_RESOLVED",
+              "IMPACT_ANALYZED",
+              "CORRECTIVE_EVENT"
+            ]
+          },
+          "aggregate_type": {
+            "$ref": "#/components/schemas/TimelineAggregateType"
+          },
+          "aggregate_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_event_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "source_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "event_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "schema_version": {
+            "const": "knowledge-event/v1"
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "payload": {
+            "type": "object",
+            "x-max-json-bytes": 32768,
+            "additionalProperties": true
+          },
+          "correlation": {
+            "$ref": "#/components/schemas/KnowledgeEventCorrelation"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeEventV2": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "event_type",
+          "aggregate_type",
+          "source_event_ref",
+          "source_ref",
+          "event_version",
+          "schema_version",
+          "summary",
+          "payload",
+          "correlation",
+          "operator",
+          "owner_binding",
+          "occurred_at",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "event_type": {
+            "$ref": "#/components/schemas/KnowledgeEventType"
+          },
+          "aggregate_type": {
+            "$ref": "#/components/schemas/TimelineAggregateType"
+          },
+          "aggregate_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_event_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "source_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "event_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "schema_version": {
+            "const": "knowledge-event/v2"
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "payload": {
+            "type": "object",
+            "x-max-json-bytes": 32768,
+            "additionalProperties": true
+          },
+          "correlation": {
+            "$ref": "#/components/schemas/KnowledgeEventCorrelation"
+          },
+          "operator": {
+            "$ref": "#/components/schemas/KnowledgeEventOperator"
+          },
+          "owner_binding": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/KnowledgeEventOwnerBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "event_type": {
+                  "const": "ARTIFACT_GENERATED"
+                }
+              },
+              "required": [
+                "event_type"
+              ]
+            },
+            "then": {
+              "required": [
+                "aggregate_id"
+              ],
+              "properties": {
+                "aggregate_type": {
+                  "const": "ARTIFACT"
+                },
+                "owner_binding": {
+                  "$ref": "#/components/schemas/ArtifactEventOwnerBinding"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "event_type": {
+                  "const": "REVIEW_CARD_INVALIDATED"
+                }
+              },
+              "required": [
+                "event_type"
+              ]
+            },
+            "then": {
+              "required": [
+                "aggregate_id"
+              ],
+              "properties": {
+                "aggregate_type": {
+                  "const": "REVIEW_CARD"
+                },
+                "owner_binding": {
+                  "$ref": "#/components/schemas/ReviewCardEventOwnerBinding"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "event_type": {
+                  "not": {
+                    "enum": [
+                      "ARTIFACT_GENERATED",
+                      "REVIEW_CARD_INVALIDATED"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "event_type"
+              ]
+            },
+            "then": {
+              "properties": {
+                "owner_binding": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ReviewCardEventOwnerBinding": {
+        "type": "object",
+        "required": [
+          "review_card"
+        ],
+        "properties": {
+          "review_card": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReviewCardImpactBinding"
+              },
+              {
+                "properties": {
+                  "status": {
+                    "const": "INVALIDATED"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReviewCardImpactBinding": {
+        "type": "object",
+        "required": [
+          "card_id",
+          "card_version",
+          "status",
+          "fingerprint",
+          "claim_id",
+          "evidence_binding_fingerprint"
+        ],
+        "properties": {
+          "card_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "card_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "APPROVED",
+              "INVALIDATED",
+              "REJECTED"
+            ]
+          },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "claim_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "evidence_binding_fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReviewCardImpactObject": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ImpactObjectV2Base"
+          },
+          {
+            "type": "object",
+            "required": [
+              "review_card_binding"
+            ],
+            "properties": {
+              "type": {
+                "const": "REVIEW_CARD"
+              },
+              "action": {
+                "const": "REVALIDATE_REVIEW_CARD"
+              },
+              "requires_proposal": {
+                "const": true
+              },
+              "review_card_binding": {
+                "$ref": "#/components/schemas/ReviewCardImpactBinding"
+              }
+            }
+          }
+        ],
+        "unevaluatedProperties": false
+      },
+      "TimelineAggregateType": {
+        "type": "string",
+        "enum": [
+          "PROPOSAL",
+          "APPROVAL",
+          "GIT_COMMIT",
+          "TOPIC",
+          "CLAIM",
+          "RELATION",
+          "CONFLICT",
+          "DOCUMENT",
+          "ARTICLE_REVISION",
+          "HEALTH_ISSUE",
+          "IMPACT_REPORT",
+          "ARTIFACT",
+          "REVIEW_CARD"
+        ]
       }
     }
   }

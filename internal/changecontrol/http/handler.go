@@ -8,21 +8,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
+	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	"github.com/go-chi/chi/v5"
 )
 
 // Service 定义 Change Control HTTP 所需的最小应用层契约。
 type Service interface {
 	CreateProposal(context.Context, application.CreateCommand) (application.CreateResult, error)
+	CreateDownstreamUpdateProposal(context.Context, application.CreateDownstreamUpdateCommand) (application.CreateResult, error)
 	GetProposal(context.Context, foundation.ID) (domain.Proposal, error)
 	DecideProposalWithDispatch(context.Context, foundation.ID, foundation.ID, string, domain.Decision) (application.ApprovalDecisionResult, error)
 	CheckApplyPreflight(context.Context, foundation.ID, foundation.ID, string) (application.ApplyPreflightResult, error)
@@ -37,15 +43,31 @@ type currentContentService interface {
 }
 
 // Handler 只负责协议解析和响应映射，不执行文件或 Git 写回。
-type Handler struct{ service Service }
+type Handler struct {
+	service                 Service
+	downstreamUpdateTimeout time.Duration
+}
+
+const defaultDownstreamUpdateTimeout = 2 * time.Second
 
 // NewHandler 创建 Change Control HTTP Handler。
-func NewHandler(service Service) *Handler { return &Handler{service: service} }
+func NewHandler(service Service) *Handler {
+	return NewHandlerWithTimeout(service, defaultDownstreamUpdateTimeout)
+}
+
+// NewHandlerWithTimeout 创建带 downstream update 命令超时的 Change Control HTTP Handler。
+func NewHandlerWithTimeout(service Service, downstreamUpdateTimeout time.Duration) *Handler {
+	if downstreamUpdateTimeout <= 0 {
+		downstreamUpdateTimeout = defaultDownstreamUpdateTimeout
+	}
+	return &Handler{service: service, downstreamUpdateTimeout: downstreamUpdateTimeout}
+}
 
 // Routes 注册 Proposal、Approval 与 Apply preflight 路由。
 func (h *Handler) Routes(router chi.Router) {
 	router.Post("/workspaces/{workspaceID}/proposals", h.createProposal)
 	router.Get("/workspaces/{workspaceID}/proposals", h.listProposals)
+	router.Post("/workspaces/{workspaceID}/impact-reports/{reportID}/proposals", h.createDownstreamUpdateProposal)
 	router.Get("/proposals/{proposalID}", h.getProposal)
 	router.Get("/proposals/{proposalID}/current-content", h.getProposalCurrentContent)
 	router.Post("/proposals/{proposalID}/approvals", h.decideProposal)
@@ -144,7 +166,7 @@ func (h *Handler) listProposals(w http.ResponseWriter, r *http.Request) {
 	status := domain.ProposalStatus(strings.TrimSpace(r.URL.Query().Get("status")))
 	proposalType := domain.ProposalType(strings.TrimSpace(r.URL.Query().Get("proposal_type")))
 	risk := r.URL.Query().Get("risk")
-	if status != "" && !validProposalListStatus(status) || proposalType != "" && proposalType != domain.ProposalTypeFilePatch && proposalType != domain.ProposalTypeKnowledgeChange && proposalType != domain.ProposalTypePublishArtifact || len(risk) > 64 || strings.ContainsAny(risk, "\r\n\t") {
+	if status != "" && !validProposalListStatus(status) || proposalType != "" && proposalType != domain.ProposalTypeFilePatch && proposalType != domain.ProposalTypeKnowledgeChange && proposalType != domain.ProposalTypePublishArtifact && proposalType != domain.ProposalTypeDownstreamUpdate || len(risk) > 64 || strings.ContainsAny(risk, "\r\n\t") {
 		writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_LIST_FILTER_INVALID", false, errors.New("proposal list filter is invalid")))
 		return
 	}
@@ -258,6 +280,17 @@ type createProposalRequest struct {
 	RollbackPlan    string                   `json:"rollback_plan"`
 }
 
+const (
+	maxDownstreamUpdateProposalBodyBytes = 16 * 1024
+	maxDownstreamUpdateIdempotencyKey    = 128
+)
+
+type createDownstreamUpdateProposalRequest struct {
+	TargetType knowledge.ImpactObjectType `json:"target_type"`
+	TargetID   string                     `json:"target_id"`
+	Action     knowledge.ImpactAction     `json:"action"`
+}
+
 type decisionRequest struct {
 	RevisionID string          `json:"revision_id"`
 	ChangeHash string          `json:"change_hash"`
@@ -280,6 +313,11 @@ type proposalResponse struct {
 	Approval     *approvalSnapshotResponse `json:"approval"`
 	CreatedAt    string                    `json:"created_at"`
 	UpdatedAt    string                    `json:"updated_at"`
+}
+
+type downstreamUpdateProposalCreateResponse struct {
+	proposalResponse
+	Replayed bool `json:"replayed"`
 }
 
 type revisionResponse struct {
@@ -370,6 +408,58 @@ type publishArtifactRevisionResponse struct {
 	CreatedAt    string                         `json:"created_at"`
 }
 
+type downstreamUpdateSourceReportResponse struct {
+	ID              string `json:"id"`
+	AnalysisVersion string `json:"analysis_version"`
+	Fingerprint     string `json:"fingerprint"`
+}
+
+type downstreamUpdateSourceEventResponse struct {
+	ID           string `json:"id"`
+	EventVersion int64  `json:"event_version"`
+}
+
+type artifactImpactBindingResponse struct {
+	ArtifactID      string `json:"artifact_id"`
+	ArtifactVersion int64  `json:"artifact_version"`
+	RevisionID      string `json:"revision_id"`
+	RevisionNo      int64  `json:"revision_no"`
+	ContentHash     string `json:"content_hash"`
+}
+
+type reviewCardImpactBindingResponse struct {
+	CardID                     string `json:"card_id"`
+	CardVersion                int64  `json:"card_version"`
+	Status                     string `json:"status"`
+	Fingerprint                string `json:"fingerprint"`
+	ClaimID                    string `json:"claim_id"`
+	EvidenceBindingFingerprint string `json:"evidence_binding_fingerprint"`
+}
+
+type downstreamUpdateResponse struct {
+	WorkspaceID       string                               `json:"workspace_id"`
+	SourceReport      downstreamUpdateSourceReportResponse `json:"source_report"`
+	SourceEvent       downstreamUpdateSourceEventResponse  `json:"source_event"`
+	TargetType        string                               `json:"target_type"`
+	TargetID          string                               `json:"target_id"`
+	BaseVersion       int64                                `json:"base_version"`
+	Action            string                               `json:"action"`
+	ArtifactBinding   *artifactImpactBindingResponse       `json:"artifact_binding,omitempty"`
+	ReviewCardBinding *reviewCardImpactBindingResponse     `json:"review_card_binding,omitempty"`
+	Reason            string                               `json:"reason"`
+	SchemaVersion     string                               `json:"schema_version"`
+}
+
+type downstreamUpdateRevisionResponse struct {
+	ID           string                   `json:"id"`
+	RevisionNo   int                      `json:"revision_no"`
+	Update       downstreamUpdateResponse `json:"update"`
+	Risk         string                   `json:"risk"`
+	RollbackPlan string                   `json:"rollback_plan"`
+	ChangeHash   string                   `json:"change_hash"`
+	CreatedAt    string                   `json:"created_at"`
+}
+
 type approvalSnapshotResponse struct {
 	ID                string  `json:"id"`
 	ProposalID        string  `json:"proposal_id"`
@@ -441,6 +531,124 @@ func (h *Handler) createProposal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpapi.WriteJSON(w, status, response)
+}
+
+func (h *Handler) createDownstreamUpdateProposal(w http.ResponseWriter, r *http.Request) {
+	if r.URL.RawQuery != "" {
+		writeError(w, downstreamUpdateProposalInvalid("query parameters are not supported"))
+		return
+	}
+	workspaceID, err := parseDownstreamUpdateID(chi.URLParam(r, "workspaceID"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	reportID, err := parseDownstreamUpdateID(chi.URLParam(r, "reportID"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	request, err := decodeDownstreamUpdateProposalRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	targetID, err := parseDownstreamUpdateID(request.TargetID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !validDownstreamUpdateSelection(request.TargetType, request.Action) {
+		writeError(w, downstreamUpdateProposalInvalid("target type and action are not compatible"))
+		return
+	}
+	idempotencyKey, err := parseDownstreamUpdateIdempotencyKey(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if h == nil || h.service == nil {
+		writeUnavailable(w)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), h.downstreamUpdateTimeout)
+	defer cancel()
+	result, err := h.service.CreateDownstreamUpdateProposal(ctx, application.CreateDownstreamUpdateCommand{
+		WorkspaceID: workspaceID, ReportID: reportID, TargetType: request.TargetType,
+		TargetID: targetID, Action: request.Action, IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			httpapi.WriteProblem(w, http.StatusServiceUnavailable, knowledge.ErrorCodeImpactUnavailable,
+				"影响分析依赖暂不可用", errors.Is(err, context.DeadlineExceeded), nil)
+			return
+		}
+		writeError(w, err)
+		return
+	}
+	response, err := toProposalResponse(result.Proposal)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	httpapi.WriteJSON(w, status, downstreamUpdateProposalCreateResponse{proposalResponse: response, Replayed: result.Replayed})
+}
+
+func decodeDownstreamUpdateProposalRequest(r *http.Request) (createDownstreamUpdateProposalRequest, error) {
+	var zero createDownstreamUpdateProposalRequest
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
+		return zero, foundation.NewError(foundation.ErrorInvalidInput, "UNSUPPORTED_MEDIA_TYPE", false, errors.New("request requires application/json"))
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxDownstreamUpdateProposalBodyBytes+1))
+	if err != nil || len(body) == 0 || len(body) > maxDownstreamUpdateProposalBodyBytes {
+		return zero, foundation.NewError(foundation.ErrorInvalidInput, "INVALID_JSON", false, errors.New("request JSON is empty or oversized"))
+	}
+	limits := strictjson.DefaultLimits()
+	limits.MaxDocumentBytes = maxDownstreamUpdateProposalBodyBytes
+	request, err := strictjson.DecodeObject[createDownstreamUpdateProposalRequest](body, limits, nil)
+	if err != nil {
+		return zero, foundation.NewError(foundation.ErrorInvalidInput, "INVALID_JSON", false, err)
+	}
+	return request, nil
+}
+
+func parseDownstreamUpdateID(raw string) (foundation.ID, error) {
+	id, err := foundation.ParseID(raw)
+	if err != nil || raw != string(id) {
+		return "", downstreamUpdateProposalInvalid("proposal command ID is invalid")
+	}
+	return id, nil
+}
+
+func parseDownstreamUpdateIdempotencyKey(r *http.Request) (string, error) {
+	values := r.Header.Values("Idempotency-Key")
+	if len(values) != 1 || !utf8.ValidString(values[0]) || values[0] == "" {
+		return "", foundation.NewError(foundation.ErrorInvalidInput, "IDEMPOTENCY_KEY_REQUIRED", false, errors.New("exactly one Idempotency-Key header is required"))
+	}
+	key := values[0]
+	if len(key) > maxDownstreamUpdateIdempotencyKey || strings.TrimSpace(key) != key {
+		return "", downstreamUpdateProposalInvalid("Idempotency-Key is invalid")
+	}
+	for _, character := range key {
+		if unicode.IsControl(character) {
+			return "", downstreamUpdateProposalInvalid("Idempotency-Key is invalid")
+		}
+	}
+	return key, nil
+}
+
+func validDownstreamUpdateSelection(targetType knowledge.ImpactObjectType, action knowledge.ImpactAction) bool {
+	return targetType == knowledge.ImpactObjectArtifact && action == knowledge.ImpactActionRegenerateArtifact ||
+		targetType == knowledge.ImpactObjectReviewCard && action == knowledge.ImpactActionRevalidateReviewCard
+}
+
+func downstreamUpdateProposalInvalid(message string) error {
+	return foundation.NewError(foundation.ErrorInvalidInput, "DOWNSTREAM_UPDATE_PROPOSAL_INVALID", false, errors.New(message))
 }
 
 func (h *Handler) getProposal(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +765,13 @@ func toProposalResponse(proposal domain.Proposal) (proposalResponse, error) {
 			return proposalResponse{}, mapErr
 		}
 		response.Revision = revision
+	case domain.ProposalTypeDownstreamUpdate:
+		response.TargetPath = ""
+		revision, mapErr := toDownstreamUpdateRevisionResponse(proposal.WorkspaceID, proposal.Revision)
+		if mapErr != nil {
+			return proposalResponse{}, mapErr
+		}
+		response.Revision = revision
 	default:
 		response.Revision = revisionResponse{
 			ID: string(proposal.Revision.ID), RevisionNo: proposal.Revision.RevisionNo, BaseHash: proposal.Revision.BaseHash,
@@ -595,6 +810,48 @@ func toPublishArtifactRevisionResponse(revision domain.Revision) (publishArtifac
 			RevisionNo: publication.RevisionNo, ArtifactVersion: publication.ArtifactVersion, ContentHash: publication.ContentHash,
 			SourceCoverage: coverage, SchemaVersion: publication.SchemaVersion,
 		},
+		Risk: revision.Risk, RollbackPlan: revision.RollbackPlan, ChangeHash: revision.ChangeHash,
+		CreatedAt: revision.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}, nil
+}
+
+func toDownstreamUpdateRevisionResponse(workspaceID foundation.ID, revision domain.Revision) (downstreamUpdateRevisionResponse, error) {
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeDownstreamUpdate, revision); err != nil {
+		return downstreamUpdateRevisionResponse{}, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_REVISION_INVALID", false, err)
+	}
+	update, err := domain.ValidateDownstreamUpdate(*revision.DownstreamUpdate)
+	if err != nil || update.WorkspaceID != workspaceID {
+		if err == nil {
+			err = errors.New("downstream update workspace differs from proposal workspace")
+		}
+		return downstreamUpdateRevisionResponse{}, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_REVISION_INVALID", false, err)
+	}
+	response := downstreamUpdateResponse{
+		WorkspaceID: string(update.WorkspaceID),
+		SourceReport: downstreamUpdateSourceReportResponse{
+			ID: string(update.ReportID), AnalysisVersion: string(update.AnalysisVersion), Fingerprint: update.ReportFingerprint,
+		},
+		SourceEvent: downstreamUpdateSourceEventResponse{ID: string(update.SourceEventID), EventVersion: update.SourceEventVersion},
+		TargetType:  string(update.TargetType), TargetID: string(update.TargetID), BaseVersion: update.BaseVersion,
+		Action: string(update.Action), Reason: update.Reason, SchemaVersion: update.SchemaVersion,
+	}
+	if update.OwnerBinding.Artifact != nil {
+		binding := update.OwnerBinding.Artifact
+		response.ArtifactBinding = &artifactImpactBindingResponse{
+			ArtifactID: string(binding.ArtifactID), ArtifactVersion: binding.ArtifactVersion,
+			RevisionID: string(binding.RevisionID), RevisionNo: binding.RevisionNo, ContentHash: binding.ContentHash,
+		}
+	}
+	if update.OwnerBinding.ReviewCard != nil {
+		binding := update.OwnerBinding.ReviewCard
+		response.ReviewCardBinding = &reviewCardImpactBindingResponse{
+			CardID: string(binding.CardID), CardVersion: binding.CardVersion, Status: binding.Status,
+			Fingerprint: binding.Fingerprint, ClaimID: string(binding.ClaimID),
+			EvidenceBindingFingerprint: binding.EvidenceBindingFingerprint,
+		}
+	}
+	return downstreamUpdateRevisionResponse{
+		ID: string(revision.ID), RevisionNo: revision.RevisionNo, Update: response,
 		Risk: revision.Risk, RollbackPlan: revision.RollbackPlan, ChangeHash: revision.ChangeHash,
 		CreatedAt: revision.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}, nil
@@ -724,6 +981,9 @@ func writeError(w http.ResponseWriter, err error) {
 	case foundation.ErrorPermissionDenied:
 		status = http.StatusForbidden
 	}
+	if classified.Code == "UNSUPPORTED_MEDIA_TYPE" {
+		status = http.StatusUnsupportedMediaType
+	}
 	details := map[string]any(nil)
 	var conflict *application.HashConflict
 	if errors.As(err, &conflict) {
@@ -752,6 +1012,18 @@ func publicMessage(code string) string {
 		return "创建 Proposal 必须提供 Idempotency-Key"
 	case "IDEMPOTENCY_KEY_REUSED":
 		return "Idempotency-Key 已绑定到不同的 Proposal 请求"
+	case "DOWNSTREAM_UPDATE_PROPOSAL_INVALID":
+		return "下游更新 Proposal 请求无效"
+	case "DOWNSTREAM_UPDATE_TARGET_INVALID":
+		return "影响报告中的目标不支持该 Proposal 操作"
+	case "KNOWLEDGE_IMPACT_NOT_FOUND":
+		return "影响报告不存在"
+	case "KNOWLEDGE_IMPACT_CONFLICT":
+		return "影响报告或目标绑定已变化，请重新分析后再创建 Proposal"
+	case "KNOWLEDGE_IMPACT_UNAVAILABLE":
+		return "影响分析依赖暂不可用"
+	case "DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE":
+		return "下游更新意图已记录，但尚未提供执行能力"
 	case "PROPOSAL_REVISION_CONFLICT":
 		return "审批未绑定到请求的 Proposal Revision"
 	case "PROPOSAL_NOT_FOUND", "PROPOSAL_REVISION_NOT_FOUND":

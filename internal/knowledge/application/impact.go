@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -19,7 +20,9 @@ import (
 // 实现只能读取 Knowledge/Health/Proposal 事实并保存 report，不能直接修改 Knowledge。
 type ImpactRepository interface {
 	GetEvent(context.Context, foundation.ID, foundation.ID) (domain.KnowledgeEvent, error)
-	GetImpactReport(context.Context, foundation.ID, foundation.ID) (domain.ImpactReport, bool, error)
+	GetImpactReport(context.Context, foundation.ID, foundation.ID, domain.ImpactAnalysisVersion) (domain.ImpactReport, bool, error)
+	// ImpactAnalysisReady 仅在 Workspace 的 v2 selector 契约完成后返回 true。
+	ImpactAnalysisReady(context.Context, foundation.ID) (bool, error)
 	ListImpactObjects(context.Context, domain.KnowledgeEvent) ([]domain.ImpactObject, error)
 	SaveImpactReport(context.Context, domain.ImpactReport) (domain.ImpactReport, bool, error)
 	// SaveImpactReportWithAudit 在同一事务中保存首次报告并追加请求审计。
@@ -82,7 +85,7 @@ func NewImpactServiceWithAudit(repository ImpactRepository, ids foundation.IDGen
 	return &ImpactService{repository: repository, ids: ids, clock: clock, audit: audit}, nil
 }
 
-// Analyze 读取源事件和下游事实，幂等保存一份 Impact 报告。
+// Analyze 读取源事件和下游事实，幂等保存当前策略的 Impact 报告。
 func (service *ImpactService) Analyze(ctx context.Context, request ImpactAnalysisRequest) (ImpactAnalysisResult, error) {
 	if service == nil || isNil(service.repository) || service.ids == nil || service.clock == nil {
 		return ImpactAnalysisResult{}, impactUnavailable("impact analysis service is unavailable")
@@ -93,27 +96,19 @@ func (service *ImpactService) Analyze(ctx context.Context, request ImpactAnalysi
 	if !validImpactIdempotencyKey(request.IdempotencyKey) {
 		return ImpactAnalysisResult{}, impactInvalid("impact analysis idempotency key is invalid")
 	}
-	if existing, found, err := service.repository.GetImpactReport(ctx, request.WorkspaceID, request.SourceEventID); err != nil {
+	const currentAnalysisVersion = domain.ImpactAnalysisVersionV2
+	if existing, found, err := service.repository.GetImpactReport(ctx, request.WorkspaceID, request.SourceEventID, currentAnalysisVersion); err != nil {
 		return ImpactAnalysisResult{}, err
 	} else if found {
-		if existing.WorkspaceID != request.WorkspaceID || existing.SourceEventID != request.SourceEventID {
-			return ImpactAnalysisResult{}, impactInconsistent("impact report crossed workspace boundary")
-		}
-		if err := domain.ValidateImpactReport(existing); err != nil {
-			return ImpactAnalysisResult{}, impactInconsistent("impact report projection is invalid")
-		}
-		event, eventFound, eventErr := service.repositoryEvent(ctx, request.WorkspaceID, request.SourceEventID)
-		if eventErr != nil {
-			return ImpactAnalysisResult{}, eventErr
-		}
-		if !eventFound || validateImpactReportSourceBinding(existing, event) != nil {
-			return ImpactAnalysisResult{}, impactInconsistent("impact report source event binding is invalid")
-		}
-		result := ImpactAnalysisResult{Report: existing, ProposalDrafts: draftsForReport(existing), Replayed: true}
-		if err := service.recordAudit(ctx, result, request.IdempotencyKey); err != nil {
-			return ImpactAnalysisResult{}, err
-		}
-		return result, nil
+		return service.replayImpactReport(ctx, request, existing, currentAnalysisVersion)
+	}
+
+	ready, err := service.repository.ImpactAnalysisReady(ctx, request.WorkspaceID)
+	if err != nil {
+		return ImpactAnalysisResult{}, err
+	}
+	if !ready {
+		return ImpactAnalysisResult{}, impactUnavailable("impact analysis v2 selector projection is not ready")
 	}
 
 	// Event lookup is intentionally delegated to the repository. The repository
@@ -131,6 +126,22 @@ func (service *ImpactService) Analyze(ctx context.Context, request ImpactAnalysi
 	if err := event.Validate(); err != nil {
 		return ImpactAnalysisResult{}, impactInconsistent("source timeline event projection is invalid")
 	}
+	var supersedesReportID *foundation.ID
+	if predecessor, predecessorFound, predecessorErr := service.repository.GetImpactReport(
+		ctx, request.WorkspaceID, request.SourceEventID, domain.ImpactAnalysisVersionV1,
+	); predecessorErr != nil {
+		return ImpactAnalysisResult{}, predecessorErr
+	} else if predecessorFound {
+		if predecessor.WorkspaceID != request.WorkspaceID || predecessor.SourceEventID != request.SourceEventID || predecessor.EffectiveAnalysisVersion() != domain.ImpactAnalysisVersionV1 {
+			return ImpactAnalysisResult{}, impactInconsistent("impact predecessor crossed its version or workspace boundary")
+		}
+		if err := validateImpactReportIntegrity(predecessor); err != nil || validateImpactReportSourceBinding(predecessor, event) != nil {
+			return ImpactAnalysisResult{}, impactInconsistent("impact predecessor source event binding is invalid")
+		}
+		predecessorID := predecessor.ID
+		supersedesReportID = &predecessorID
+	}
+
 	objects, err := service.repository.ListImpactObjects(ctx, event)
 	if err != nil {
 		return ImpactAnalysisResult{}, err
@@ -142,7 +153,7 @@ func (service *ImpactService) Analyze(ctx context.Context, request ImpactAnalysi
 	if err != nil {
 		return ImpactAnalysisResult{}, err
 	}
-	fingerprint, err := domain.ComputeImpactFingerprint(event.ID, int64(event.EventVersion), objects)
+	fingerprint, err := domain.ComputeImpactFingerprintForVersion(currentAnalysisVersion, event.ID, int64(event.EventVersion), objects)
 	if err != nil {
 		return ImpactAnalysisResult{}, err
 	}
@@ -151,8 +162,13 @@ func (service *ImpactService) Analyze(ctx context.Context, request ImpactAnalysi
 	if err != nil {
 		return ImpactAnalysisResult{}, err
 	}
-	report := domain.ImpactReport{ID: id, WorkspaceID: request.WorkspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef, SourceVersion: int64(event.EventVersion), Status: domain.ImpactReportReady, Objects: objects, Summary: domain.SummarizeImpactObjects(objects), Fingerprint: fingerprint, GeneratedAt: now, CreatedAt: now, Version: 1}
-	if err := domain.ValidateImpactReport(report); err != nil {
+	report := domain.ImpactReport{
+		ID: id, WorkspaceID: request.WorkspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef,
+		SourceVersion: int64(event.EventVersion), AnalysisVersion: currentAnalysisVersion, SupersedesReportID: supersedesReportID,
+		Status: domain.ImpactReportReady, Objects: objects, Summary: domain.SummarizeImpactObjects(objects), Fingerprint: fingerprint,
+		GeneratedAt: now, CreatedAt: now, Version: 1,
+	}
+	if err := validateImpactReportIntegrity(report); err != nil {
 		return ImpactAnalysisResult{}, err
 	}
 	var persisted domain.ImpactReport
@@ -168,13 +184,57 @@ func (service *ImpactService) Analyze(ctx context.Context, request ImpactAnalysi
 	if persisted.WorkspaceID != request.WorkspaceID || persisted.SourceEventID != event.ID {
 		return ImpactAnalysisResult{}, impactInconsistent("persisted impact report crossed workspace boundary")
 	}
-	if err := domain.ValidateImpactReport(persisted); err != nil {
+	if err := validateImpactReportIntegrity(persisted); err != nil {
 		return ImpactAnalysisResult{}, impactInconsistent("persisted impact report is invalid")
 	}
-	if validateImpactReportSourceBinding(persisted, event) != nil || persisted.Status != domain.ImpactReportReady || persisted.Fingerprint != fingerprint {
+	if validateImpactReportSourceBinding(persisted, event) != nil || persisted.Status != domain.ImpactReportReady ||
+		persisted.EffectiveAnalysisVersion() != currentAnalysisVersion || persisted.Fingerprint != fingerprint ||
+		!sameImpactReportID(persisted.SupersedesReportID, supersedesReportID) || !reflect.DeepEqual(persisted.Objects, objects) {
 		return ImpactAnalysisResult{}, impactInconsistent("persisted impact report binding is invalid")
 	}
 	result := ImpactAnalysisResult{Report: persisted, ProposalDrafts: draftsForReport(persisted), Replayed: replayed}
+	return result, nil
+}
+
+func (service *ImpactService) replayImpactReport(ctx context.Context, request ImpactAnalysisRequest, existing domain.ImpactReport, analysisVersion domain.ImpactAnalysisVersion) (ImpactAnalysisResult, error) {
+	if existing.WorkspaceID != request.WorkspaceID || existing.SourceEventID != request.SourceEventID || existing.EffectiveAnalysisVersion() != analysisVersion {
+		return ImpactAnalysisResult{}, impactInconsistent("impact report crossed its version or workspace boundary")
+	}
+	if err := validateImpactReportIntegrity(existing); err != nil {
+		return ImpactAnalysisResult{}, impactInconsistent("impact report projection is invalid")
+	}
+	event, eventFound, eventErr := service.repositoryEvent(ctx, request.WorkspaceID, request.SourceEventID)
+	if eventErr != nil {
+		return ImpactAnalysisResult{}, eventErr
+	}
+	if !eventFound || validateImpactReportSourceBinding(existing, event) != nil {
+		return ImpactAnalysisResult{}, impactInconsistent("impact report source event binding is invalid")
+	}
+	if existing.Status != domain.ImpactReportReady {
+		return ImpactAnalysisResult{}, impactInconsistent("impact report is not ready for replay")
+	}
+	objects, err := service.repository.ListImpactObjects(ctx, event)
+	if err != nil {
+		return ImpactAnalysisResult{}, err
+	}
+	if len(objects) > domain.MaxImpactObjects {
+		return ImpactAnalysisResult{}, impactInconsistent("impact repository returned too many objects")
+	}
+	objects, err = canonicalizeImpactObjects(request.WorkspaceID, objects)
+	if err != nil {
+		return ImpactAnalysisResult{}, err
+	}
+	fingerprint, err := domain.ComputeImpactFingerprintForVersion(analysisVersion, event.ID, int64(event.EventVersion), objects)
+	if err != nil {
+		return ImpactAnalysisResult{}, err
+	}
+	if existing.Fingerprint != fingerprint || !reflect.DeepEqual(existing.Objects, objects) {
+		return ImpactAnalysisResult{}, impactInconsistent("impact report owner binding has drifted")
+	}
+	result := ImpactAnalysisResult{Report: existing, ProposalDrafts: draftsForReport(existing), Replayed: true}
+	if err := service.recordAudit(ctx, result, request.IdempotencyKey); err != nil {
+		return ImpactAnalysisResult{}, err
+	}
 	return result, nil
 }
 
@@ -193,7 +253,7 @@ func (service *ImpactService) GetReport(ctx context.Context, workspaceID, report
 	if report.WorkspaceID != workspaceID || report.ID != reportID {
 		return domain.ImpactReport{}, foundation.NewError(foundation.ErrorNotFound, domain.ErrorCodeImpactNotFound, false, errors.New("impact report is not visible in workspace"))
 	}
-	if err := domain.ValidateImpactReport(report); err != nil {
+	if err := validateImpactReportIntegrity(report); err != nil {
 		return domain.ImpactReport{}, impactInconsistent("impact report projection is invalid")
 	}
 	event, found, eventErr := service.repositoryEvent(ctx, workspaceID, report.SourceEventID)
@@ -247,6 +307,22 @@ func validateImpactReportSourceBinding(report domain.ImpactReport, event domain.
 	return nil
 }
 
+func validateImpactReportIntegrity(report domain.ImpactReport) error {
+	if err := domain.ValidateImpactReport(report); err != nil {
+		return err
+	}
+	fingerprint, err := domain.ComputeImpactFingerprintForVersion(
+		report.EffectiveAnalysisVersion(), report.SourceEventID, report.SourceVersion, report.Objects,
+	)
+	if err != nil {
+		return err
+	}
+	if fingerprint != report.Fingerprint {
+		return errors.New("impact report fingerprint does not match its source and objects")
+	}
+	return nil
+}
+
 func (service *ImpactService) recordAudit(ctx context.Context, result ImpactAnalysisResult, idempotencyKey string) error {
 	if isNil(service.audit) {
 		return nil
@@ -260,7 +336,7 @@ func (service *ImpactService) recordAudit(ctx context.Context, result ImpactAnal
 
 // BuildImpactAuditRecord 为持久报告和 HTTP 幂等键构造稳定、脱敏的 Audit 记录。
 func BuildImpactAuditRecord(report domain.ImpactReport, idempotencyKey string, replayed bool) (ImpactAuditRecord, error) {
-	if err := domain.ValidateImpactReport(report); err != nil {
+	if err := validateImpactReportIntegrity(report); err != nil {
 		return ImpactAuditRecord{}, impactInconsistent("impact audit report is invalid")
 	}
 	auditID, err := deriveImpactAuditID(report.ID, idempotencyKey)
@@ -317,11 +393,18 @@ func canonicalizeImpactObjects(workspaceID foundation.ID, objects []domain.Impac
 			result = append(result, object)
 			continue
 		}
-		if result[len(result)-1] != object {
+		if !reflect.DeepEqual(result[len(result)-1], object) {
 			return nil, impactInconsistent("impact repository returned conflicting duplicate objects")
 		}
 	}
 	return result, nil
+}
+
+func sameImpactReportID(left, right *foundation.ID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func validImpactIdempotencyKey(value string) bool {

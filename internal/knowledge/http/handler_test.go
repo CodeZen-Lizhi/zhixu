@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,8 +30,12 @@ func TestTimelineListAndDetailRoutesReturnWorkspaceBoundProjection(t *testing.T)
 	}
 	var page timelineListResponse
 	decodeKnowledgeHTTP(t, list, &page)
-	if page.WorkspaceID != string(event.WorkspaceID) || len(page.Items) != 1 || page.Items[0].ID != string(event.ID) {
+	if page.WorkspaceID != string(event.WorkspaceID) || len(page.Items) != 1 {
 		t.Fatalf("page=%#v", page)
+	}
+	listItem, ok := page.Items[0].(map[string]any)
+	if !ok || listItem["id"] != string(event.ID) {
+		t.Fatalf("page item=%#v", page.Items[0])
 	}
 
 	detail := serveKnowledgeHTTP(router, http.MethodGet, "/workspaces/"+string(event.WorkspaceID)+"/timeline/"+string(event.ID), "", nil)
@@ -41,6 +46,250 @@ func TestTimelineListAndDetailRoutesReturnWorkspaceBoundProjection(t *testing.T)
 	decodeKnowledgeHTTP(t, detail, &item)
 	if item.SourceEventRef != event.SourceEventRef || item.SchemaVersion != domain.KnowledgeEventSchemaVersion {
 		t.Fatalf("item=%#v", item)
+	}
+}
+
+func TestKnowledgeHTTPPreservesV1WireFieldSets(t *testing.T) {
+	event := knowledgeHTTPEvent()
+	report := knowledgeHTTPReport(t, event)
+	router := knowledgeHTTPRouter(&timelineServiceStub{event: event}, &impactServiceStub{report: report})
+
+	eventResponse := serveKnowledgeHTTP(router, http.MethodGet, "/workspaces/"+string(event.WorkspaceID)+"/timeline/"+string(event.ID), "", nil)
+	if eventResponse.Code != http.StatusOK {
+		t.Fatalf("v1 event status=%d body=%s", eventResponse.Code, eventResponse.Body.String())
+	}
+	eventBody := decodeKnowledgeJSONObject(t, eventResponse)
+	requireKnowledgeExactKeys(t, eventBody,
+		"id", "workspace_id", "event_type", "aggregate_type", "aggregate_id", "source_event_ref", "source_ref", "event_version",
+		"schema_version", "summary", "payload", "correlation", "occurred_at", "created_at",
+	)
+	if got := decodeKnowledgeJSONString(t, eventBody["schema_version"]); got != domain.KnowledgeEventSchemaVersion {
+		t.Fatalf("v1 event schema=%q", got)
+	}
+
+	reportResponse := serveKnowledgeHTTP(router, http.MethodGet, "/workspaces/"+string(event.WorkspaceID)+"/impact-reports/"+string(report.ID), "", nil)
+	if reportResponse.Code != http.StatusOK {
+		t.Fatalf("v1 report status=%d body=%s", reportResponse.Code, reportResponse.Body.String())
+	}
+	reportBody := decodeKnowledgeJSONObject(t, reportResponse)
+	requireKnowledgeExactKeys(t, reportBody,
+		"id", "workspace_id", "source_event_id", "source_event_ref", "source_event_version", "status", "objects", "summary",
+		"fingerprint", "schema_version", "generated_at", "created_at", "version",
+	)
+	if got := decodeKnowledgeJSONString(t, reportBody["schema_version"]); got != domain.ImpactReportSchemaVersion {
+		t.Fatalf("v1 report schema=%q", got)
+	}
+	objects := decodeKnowledgeJSONArray(t, reportBody["objects"])
+	if len(objects) != 1 {
+		t.Fatalf("v1 report objects=%d", len(objects))
+	}
+	requireKnowledgeExactKeys(t, decodeKnowledgeRawObject(t, objects[0]), "type", "id", "workspace_id", "version", "action", "reason", "requires_proposal")
+}
+
+func TestKnowledgeHTTPWritesVersionedV2EventAndImpactContracts(t *testing.T) {
+	event := knowledgeHTTPV2ArtifactEvent()
+	report := knowledgeHTTPV2Report(t, event)
+	router := knowledgeHTTPRouter(&timelineServiceStub{event: event}, &impactServiceStub{report: report})
+
+	eventResponse := serveKnowledgeHTTP(router, http.MethodGet, "/workspaces/"+string(event.WorkspaceID)+"/timeline/"+string(event.ID), "", nil)
+	if eventResponse.Code != http.StatusOK {
+		t.Fatalf("v2 event status=%d body=%s", eventResponse.Code, eventResponse.Body.String())
+	}
+	eventBody := decodeKnowledgeJSONObject(t, eventResponse)
+	requireKnowledgeExactKeys(t, eventBody,
+		"id", "workspace_id", "event_type", "aggregate_type", "aggregate_id", "source_event_ref", "source_ref", "event_version",
+		"schema_version", "summary", "payload", "correlation", "operator", "owner_binding", "occurred_at", "created_at",
+	)
+	if got := decodeKnowledgeJSONString(t, eventBody["schema_version"]); got != domain.KnowledgeEventSchemaVersionV2 {
+		t.Fatalf("v2 event schema=%q", got)
+	}
+	operator := decodeKnowledgeRawObject(t, eventBody["operator"])
+	requireKnowledgeExactKeys(t, operator, "type", "id")
+	if got := decodeKnowledgeJSONString(t, operator["type"]); got != string(domain.EventOperatorUser) {
+		t.Fatalf("operator type=%q", got)
+	}
+	correlation := decodeKnowledgeRawObject(t, eventBody["correlation"])
+	requireKnowledgeExactKeys(t, correlation, "workflow_run_id")
+	ownerBinding := decodeKnowledgeRawObject(t, eventBody["owner_binding"])
+	requireKnowledgeExactKeys(t, ownerBinding, "artifact")
+	requireKnowledgeExactKeys(t, decodeKnowledgeRawObject(t, ownerBinding["artifact"]), "artifact_id", "artifact_version", "revision_id", "revision_no", "content_hash")
+
+	reportResponse := serveKnowledgeHTTP(router, http.MethodGet, "/workspaces/"+string(event.WorkspaceID)+"/impact-reports/"+string(report.ID), "", nil)
+	if reportResponse.Code != http.StatusOK {
+		t.Fatalf("v2 report status=%d body=%s", reportResponse.Code, reportResponse.Body.String())
+	}
+	reportBody := decodeKnowledgeJSONObject(t, reportResponse)
+	requireKnowledgeExactKeys(t, reportBody,
+		"id", "workspace_id", "source_event_id", "source_event_ref", "source_event_version", "status", "objects", "summary",
+		"fingerprint", "schema_version", "analysis_version", "supersedes_report_id", "superseded_by_report_id", "generated_at", "created_at", "version",
+	)
+	if got := decodeKnowledgeJSONString(t, reportBody["schema_version"]); got != domain.ImpactReportSchemaVersionV2 {
+		t.Fatalf("v2 report schema=%q", got)
+	}
+	if got := decodeKnowledgeJSONString(t, reportBody["analysis_version"]); got != string(domain.ImpactAnalysisVersionV2) {
+		t.Fatalf("v2 analysis version=%q", got)
+	}
+	if got := decodeKnowledgeJSONString(t, reportBody["supersedes_report_id"]); got != string(*report.SupersedesReportID) {
+		t.Fatalf("supersedes report=%q", got)
+	}
+	if string(reportBody["superseded_by_report_id"]) != "null" {
+		t.Fatalf("superseded_by_report_id=%s want null", reportBody["superseded_by_report_id"])
+	}
+	objects := decodeKnowledgeJSONArray(t, reportBody["objects"])
+	if len(objects) != 2 {
+		t.Fatalf("v2 report objects=%d", len(objects))
+	}
+	byType := make(map[string]map[string]json.RawMessage, len(objects))
+	for _, raw := range objects {
+		object := decodeKnowledgeRawObject(t, raw)
+		byType[decodeKnowledgeJSONString(t, object["type"])] = object
+	}
+	artifact, artifactFound := byType[string(domain.ImpactObjectArtifact)]
+	if !artifactFound {
+		t.Fatalf("artifact object is missing: %#v", byType)
+	}
+	requireKnowledgeExactKeys(t, artifact, "type", "id", "workspace_id", "version", "action", "reason", "requires_proposal", "artifact_binding")
+	requireKnowledgeExactKeys(t, decodeKnowledgeRawObject(t, artifact["artifact_binding"]), "artifact_id", "artifact_version", "revision_id", "revision_no", "content_hash")
+	reviewCard, reviewCardFound := byType[string(domain.ImpactObjectReviewCard)]
+	if !reviewCardFound {
+		t.Fatalf("review-card object is missing: %#v", byType)
+	}
+	requireKnowledgeExactKeys(t, reviewCard, "type", "id", "workspace_id", "version", "action", "reason", "requires_proposal", "review_card_binding")
+	requireKnowledgeExactKeys(t, decodeKnowledgeRawObject(t, reviewCard["review_card_binding"]), "card_id", "card_version", "status", "fingerprint", "claim_id", "evidence_binding_fingerprint")
+}
+
+func TestTimelineListPreservesMixedEventWireVersions(t *testing.T) {
+	v1Event := knowledgeHTTPEvent()
+	v2OwnerEvent := knowledgeHTTPV2ArtifactEvent()
+	v2Event := knowledgeHTTPEvent()
+	v2Event.ID = knowledgeHTTPID(4)
+	v2Event.EventVersion = 2
+	v2Event.SchemaVersion = domain.KnowledgeEventSchemaVersionV2
+	v2Event.Operator = &domain.EventOperator{Type: domain.EventOperatorUnknown}
+	timeline := &timelineServiceStub{page: knowledgeapp.TimelinePage{
+		WorkspaceID: v1Event.WorkspaceID,
+		Items:       []domain.KnowledgeEvent{v1Event, v2OwnerEvent, v2Event},
+	}}
+
+	response := serveKnowledgeHTTP(knowledgeHTTPRouter(timeline, &impactServiceStub{}), http.MethodGet, "/workspaces/"+string(v1Event.WorkspaceID)+"/timeline", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("mixed timeline status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := decodeKnowledgeJSONObject(t, response)
+	requireKnowledgeExactKeys(t, body, "workspace_id", "items")
+	items := decodeKnowledgeJSONArray(t, body["items"])
+	if len(items) != 3 {
+		t.Fatalf("mixed timeline items=%d", len(items))
+	}
+
+	v1Body := decodeKnowledgeRawObject(t, items[0])
+	requireKnowledgeExactKeys(t, v1Body,
+		"id", "workspace_id", "event_type", "aggregate_type", "aggregate_id", "source_event_ref", "source_ref", "event_version",
+		"schema_version", "summary", "payload", "correlation", "occurred_at", "created_at",
+	)
+	v2OwnerBody := decodeKnowledgeRawObject(t, items[1])
+	requireKnowledgeExactKeys(t, v2OwnerBody,
+		"id", "workspace_id", "event_type", "aggregate_type", "aggregate_id", "source_event_ref", "source_ref", "event_version",
+		"schema_version", "summary", "payload", "correlation", "operator", "owner_binding", "occurred_at", "created_at",
+	)
+	ownerBinding := decodeKnowledgeRawObject(t, v2OwnerBody["owner_binding"])
+	requireKnowledgeExactKeys(t, ownerBinding, "artifact")
+	v2Body := decodeKnowledgeRawObject(t, items[2])
+	requireKnowledgeExactKeys(t, v2Body,
+		"id", "workspace_id", "event_type", "aggregate_type", "aggregate_id", "source_event_ref", "source_ref", "event_version",
+		"schema_version", "summary", "payload", "correlation", "operator", "owner_binding", "occurred_at", "created_at",
+	)
+	if string(v2Body["owner_binding"]) != "null" {
+		t.Fatalf("non-owner v2 owner_binding=%s want null", v2Body["owner_binding"])
+	}
+	operator := decodeKnowledgeRawObject(t, v2Body["operator"])
+	requireKnowledgeExactKeys(t, operator, "type")
+	if got := decodeKnowledgeJSONString(t, operator["type"]); got != string(domain.EventOperatorUnknown) {
+		t.Fatalf("non-owner v2 operator=%q", got)
+	}
+}
+
+func TestKnowledgeHTTPFailsClosedOnInvalidVersionedWire(t *testing.T) {
+	v2Event := knowledgeHTTPV2ArtifactEvent()
+	v2Report := knowledgeHTTPV2Report(t, v2Event)
+
+	invalidV1Event := v2Event
+	invalidV1Event.SchemaVersion = domain.KnowledgeEventSchemaVersion
+	invalidV2Event := v2Event
+	invalidV2Event.OwnerBinding = nil
+	invalidV1Report := v2Report
+	invalidV1Report.AnalysisVersion = domain.ImpactAnalysisVersionV1
+	invalidV1Report.SupersedesReportID = nil
+	invalidV2Report := v2Report
+	invalidV2Report.Objects = append([]domain.ImpactObject(nil), v2Report.Objects...)
+	invalidV2Report.Objects[0].ArtifactBinding = nil
+	invalidFingerprintReport := v2Report
+	invalidFingerprintReport.Fingerprint = strings.Repeat("d", 64)
+
+	for _, test := range []struct {
+		name     string
+		timeline *timelineServiceStub
+		impact   *impactServiceStub
+		path     string
+	}{
+		{
+			name: "v1 event carries v2 fields", timeline: &timelineServiceStub{event: invalidV1Event}, impact: &impactServiceStub{},
+			path: "/workspaces/" + string(v2Event.WorkspaceID) + "/timeline/" + string(v2Event.ID),
+		},
+		{
+			name: "v2 owner event loses owner binding", timeline: &timelineServiceStub{event: invalidV2Event}, impact: &impactServiceStub{},
+			path: "/workspaces/" + string(v2Event.WorkspaceID) + "/timeline/" + string(v2Event.ID),
+		},
+		{
+			name: "v1 report contains v2 owner object", timeline: &timelineServiceStub{}, impact: &impactServiceStub{report: invalidV1Report},
+			path: "/workspaces/" + string(v2Event.WorkspaceID) + "/impact-reports/" + string(v2Report.ID),
+		},
+		{
+			name: "v2 artifact report loses owner binding", timeline: &timelineServiceStub{}, impact: &impactServiceStub{report: invalidV2Report},
+			path: "/workspaces/" + string(v2Event.WorkspaceID) + "/impact-reports/" + string(v2Report.ID),
+		},
+		{
+			name: "v2 report fingerprint drifts", timeline: &timelineServiceStub{}, impact: &impactServiceStub{report: invalidFingerprintReport},
+			path: "/workspaces/" + string(v2Event.WorkspaceID) + "/impact-reports/" + string(v2Report.ID),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := serveKnowledgeHTTP(knowledgeHTTPRouter(test.timeline, test.impact), http.MethodGet, test.path, "", nil)
+			requireKnowledgeProblem(t, response, http.StatusInternalServerError, errorCodeHTTPResultInconsistent)
+		})
+	}
+}
+
+func TestKnowledgeHTTPMapsVersionedImpactAvailabilityAndKeepsHistoricalV1Readable(t *testing.T) {
+	event := knowledgeHTTPEvent()
+	report := knowledgeHTTPReport(t, event)
+	selectorUnavailable := foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeImpactUnavailable, true, errors.New("selector projection is incomplete"))
+	currentConflict := foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeImpactConflict, false, errors.New("current report binding drifted"))
+	analysisPath := "/workspaces/" + string(event.WorkspaceID) + "/timeline/" + string(event.ID) + "/impact-analysis"
+
+	for _, test := range []struct {
+		name string
+		err  error
+		want int
+		code string
+	}{
+		{name: "selector readiness unavailable", err: selectorUnavailable, want: http.StatusServiceUnavailable, code: domain.ErrorCodeImpactUnavailable},
+		{name: "current impact conflict", err: currentConflict, want: http.StatusConflict, code: domain.ErrorCodeImpactConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			impact := &impactServiceStub{analyzeErr: test.err}
+			response := serveKnowledgeHTTP(knowledgeHTTPRouter(&timelineServiceStub{}, impact), http.MethodPost, analysisPath, `{}`, map[string][]string{"Content-Type": {"application/json"}, "Idempotency-Key": {"impact-versioned"}})
+			requireKnowledgeProblem(t, response, test.want, test.code)
+		})
+	}
+
+	impact := &impactServiceStub{report: report, analyzeErr: selectorUnavailable}
+	historical := serveKnowledgeHTTP(knowledgeHTTPRouter(&timelineServiceStub{}, impact), http.MethodGet, "/workspaces/"+string(event.WorkspaceID)+"/impact-reports/"+string(report.ID), "", nil)
+	if historical.Code != http.StatusOK {
+		t.Fatalf("historical v1 report status=%d body=%s", historical.Code, historical.Body.String())
+	}
+	if impact.analyzeCalls != 0 || impact.getCalls != 1 {
+		t.Fatalf("historical v1 read calls: analyze=%d get=%d", impact.analyzeCalls, impact.getCalls)
 	}
 }
 
@@ -290,6 +539,7 @@ type impactServiceStub struct {
 	getErr       error
 	analyzeErr   error
 	analyzeCalls int
+	getCalls     int
 	lastRequest  knowledgeapp.ImpactAnalysisRequest
 }
 
@@ -300,6 +550,7 @@ func (service *impactServiceStub) Analyze(_ context.Context, request knowledgeap
 }
 
 func (service *impactServiceStub) GetReport(_ context.Context, _, _ foundation.ID) (domain.ImpactReport, error) {
+	service.getCalls++
 	return service.report, service.getErr
 }
 
@@ -353,6 +604,26 @@ func knowledgeHTTPEvent() domain.KnowledgeEvent {
 	}
 }
 
+func knowledgeHTTPV2ArtifactEvent() domain.KnowledgeEvent {
+	now := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
+	artifactID := knowledgeHTTPID(3)
+	revisionID := knowledgeHTTPID(4)
+	operatorID := knowledgeHTTPID(5)
+	workflowRunID := knowledgeHTTPID(6)
+	return domain.KnowledgeEvent{
+		ID: knowledgeHTTPID(2), WorkspaceID: knowledgeHTTPID(1), EventType: domain.EventArtifactGenerated,
+		AggregateType: domain.TimelineAggregateArtifact, AggregateID: &artifactID,
+		SourceEventRef: "artifact-generated:3:4:v2", SourceRef: "artifact:3", EventVersion: 2,
+		SchemaVersion: domain.KnowledgeEventSchemaVersionV2, Summary: "artifact revision generated", Payload: json.RawMessage(`{}`),
+		Correlation: domain.EventCorrelation{WorkflowRunID: &workflowRunID},
+		Operator:    &domain.EventOperator{Type: domain.EventOperatorUser, ID: &operatorID},
+		OwnerBinding: &domain.EventOwnerBinding{Artifact: &domain.ArtifactImpactBinding{
+			ArtifactID: artifactID, ArtifactVersion: 2, RevisionID: revisionID, RevisionNo: 2, ContentHash: strings.Repeat("a", 64),
+		}},
+		OccurredAt: now, CreatedAt: now,
+	}
+}
+
 func knowledgeHTTPReport(t *testing.T, event domain.KnowledgeEvent) domain.ImpactReport {
 	t.Helper()
 	objects := []domain.ImpactObject{{Type: domain.ImpactObjectConflict, ID: knowledgeHTTPID(4), WorkspaceID: event.WorkspaceID, Version: 2, Action: domain.ImpactActionResolveConflict, Reason: "conflict requires review", RequiresProposal: true}}
@@ -367,6 +638,38 @@ func knowledgeHTTPReport(t *testing.T, event domain.KnowledgeEvent) domain.Impac
 	}
 }
 
+func knowledgeHTTPV2Report(t *testing.T, event domain.KnowledgeEvent) domain.ImpactReport {
+	t.Helper()
+	artifactBinding := *event.OwnerBinding.Artifact
+	reviewBinding := domain.ReviewCardImpactBinding{
+		CardID: knowledgeHTTPID(9), CardVersion: 3, Status: "APPROVED", Fingerprint: strings.Repeat("b", 64),
+		ClaimID: event.ID, EvidenceBindingFingerprint: strings.Repeat("c", 64),
+	}
+	objects := []domain.ImpactObject{
+		{
+			Type: domain.ImpactObjectArtifact, ID: artifactBinding.ArtifactID, WorkspaceID: event.WorkspaceID,
+			Version: artifactBinding.ArtifactVersion, Action: domain.ImpactActionRegenerateArtifact,
+			Reason: "artifact depends on changed evidence", RequiresProposal: true, ArtifactBinding: &artifactBinding,
+		},
+		{
+			Type: domain.ImpactObjectReviewCard, ID: reviewBinding.CardID, WorkspaceID: event.WorkspaceID,
+			Version: reviewBinding.CardVersion, Action: domain.ImpactActionRevalidateReviewCard,
+			Reason: "review card evidence changed", RequiresProposal: true, ReviewCardBinding: &reviewBinding,
+		},
+	}
+	fingerprint, err := domain.ComputeImpactFingerprintForVersion(domain.ImpactAnalysisVersionV2, event.ID, int64(event.EventVersion), objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	supersedesReportID := knowledgeHTTPID(8)
+	return domain.ImpactReport{
+		ID: knowledgeHTTPID(7), WorkspaceID: event.WorkspaceID, SourceEventID: event.ID, SourceEventRef: event.SourceEventRef,
+		SourceVersion: int64(event.EventVersion), AnalysisVersion: domain.ImpactAnalysisVersionV2, SupersedesReportID: &supersedesReportID,
+		Status: domain.ImpactReportReady, Objects: objects, Summary: domain.SummarizeImpactObjects(objects), Fingerprint: fingerprint,
+		GeneratedAt: event.CreatedAt, CreatedAt: event.CreatedAt, Version: 1,
+	}
+}
+
 func knowledgeHTTPDraft(report domain.ImpactReport) domain.ProposalDraft {
 	object := report.Objects[0]
 	return domain.ProposalDraft{
@@ -377,4 +680,63 @@ func knowledgeHTTPDraft(report domain.ImpactReport) domain.ProposalDraft {
 
 func knowledgeHTTPID(seed int) foundation.ID {
 	return foundation.ID("37000000-0000-4000-8000-00000000000" + strconv.Itoa(seed))
+}
+
+func decodeKnowledgeJSONObject(t *testing.T, response *httptest.ResponseRecorder) map[string]json.RawMessage {
+	t.Helper()
+	return decodeKnowledgeRawObject(t, response.Body.Bytes())
+}
+
+func decodeKnowledgeRawObject(t *testing.T, raw json.RawMessage) map[string]json.RawMessage {
+	t.Helper()
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		t.Fatalf("decode JSON object %s: %v", raw, err)
+	}
+	if object == nil {
+		t.Fatalf("JSON object is null: %s", raw)
+	}
+	return object
+}
+
+func decodeKnowledgeJSONArray(t *testing.T, raw json.RawMessage) []json.RawMessage {
+	t.Helper()
+	var values []json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		t.Fatalf("decode JSON array %s: %v", raw, err)
+	}
+	if values == nil {
+		t.Fatalf("JSON array is null: %s", raw)
+	}
+	return values
+}
+
+func decodeKnowledgeJSONString(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode JSON string %s: %v", raw, err)
+	}
+	return value
+}
+
+func requireKnowledgeExactKeys(t *testing.T, object map[string]json.RawMessage, expected ...string) {
+	t.Helper()
+	if len(object) != len(expected) {
+		t.Fatalf("JSON keys=%v want=%v", knowledgeJSONKeys(object), expected)
+	}
+	for _, key := range expected {
+		if _, found := object[key]; !found {
+			t.Fatalf("JSON key %q is missing from %v", key, knowledgeJSONKeys(object))
+		}
+	}
+}
+
+func knowledgeJSONKeys(object map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }

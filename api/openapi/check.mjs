@@ -59,6 +59,7 @@ const requiredOperations = [
   ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis", "post", "201"],
   ["/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}/proposals", "post", "201"],
   ["/api/v1/exports", "post", "202"],
   ["/api/v1/exports/{export_id}", "get", "200"],
   ["/api/v1/exports/{export_id}/download", "get", "200"],
@@ -279,14 +280,16 @@ for (const [path, method, successStatus, successSchema, errorStatuses] of semant
 }
 
 const timelineOperations = [
-  ["/api/v1/workspaces/{workspace_id}/timeline", "get", ["200"], "KnowledgeTimelinePage", ["400", "401", "403", "405", "500", "503"]],
-  ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}", "get", ["200"], "KnowledgeEvent", ["400", "401", "403", "404", "405", "500", "503"]],
-  ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis", "post", ["200", "201"], "ImpactAnalysisResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
-  ["/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}", "get", ["200"], "ImpactReport", ["400", "401", "403", "404", "405", "500", "503"]],
+  ["/api/v1/workspaces/{workspace_id}/timeline", "get", ["200"], "KnowledgeTimelinePage", ["400", "401", "403", "405", "500", "503"], "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}", "get", ["200"], "KnowledgeEvent", ["400", "401", "403", "404", "405", "500", "503"], "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis", "post", ["200", "201"], "ImpactAnalysisResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"], "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}", "get", ["200"], "ImpactReport", ["400", "401", "403", "404", "405", "500", "503"], "READ_LOCAL"],
 ];
-for (const [path, method, successStatuses, successSchema, errorStatuses] of timelineOperations) {
+for (const [path, method, successStatuses, successSchema, errorStatuses, requiredCapability] of timelineOperations) {
   const operation = document.paths[path][method];
-  if (operation.security?.length === 0) throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication`);
+  if (operation.security?.length === 0 || operation["x-required-capability"] !== requiredCapability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${requiredCapability}`);
+  }
   for (const status of successStatuses) {
     const actual = operation.responses[status]?.content?.["application/json"]?.schema?.$ref;
     if (actual !== `#/components/schemas/${successSchema}`) {
@@ -310,7 +313,8 @@ const timelineCursor = timelineParameters.find((parameter) => parameter.name ===
 const timelineEventTypes = timelineParameters.find((parameter) => parameter.name === "event_type")?.schema;
 if (timelineLimit?.minimum !== 1 || timelineLimit.maximum !== 100 || timelineLimit.default !== 25 ||
     timelineCursor?.minLength !== 1 || timelineCursor.maxLength !== 4096 ||
-    timelineEventTypes?.type !== "array" || timelineEventTypes.maxItems !== 32 || timelineEventTypes.uniqueItems !== true) {
+    timelineEventTypes?.type !== "array" || timelineEventTypes.maxItems !== 32 || timelineEventTypes.uniqueItems !== true ||
+    timelineEventTypes.items?.$ref !== "#/components/schemas/KnowledgeEventType") {
   throw new Error("Knowledge Timeline pagination or event filter bounds drifted");
 }
 const impactOperation = document.paths["/api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis"].post;
@@ -318,6 +322,41 @@ if (!impactOperation.parameters?.some((parameter) => parameter.$ref === "#/compo
     impactOperation.requestBody?.required !== true || impactOperation.requestBody?.["x-max-body-bytes"] !== 4096 ||
     impactOperation.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ImpactAnalysisRequest") {
   throw new Error("Impact Analysis must require Idempotency-Key and a bounded empty JSON object");
+}
+
+const downstreamProposalPath = "/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}/proposals";
+const downstreamProposalOperation = document.paths[downstreamProposalPath]?.post;
+if (!downstreamProposalOperation || downstreamProposalOperation.security !== undefined ||
+    downstreamProposalOperation["x-required-capability"] !== "WRITE_PROPOSAL" ||
+    !downstreamProposalOperation.parameters?.some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey") ||
+    downstreamProposalOperation.requestBody?.required !== true ||
+    downstreamProposalOperation.requestBody?.["x-max-body-bytes"] !== 16384 ||
+    downstreamProposalOperation.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/CreateDownstreamUpdateProposalRequest") {
+  throw new Error("Downstream Proposal creation must inherit authentication and require WRITE_PROPOSAL, Idempotency-Key and a bounded strict body");
+}
+for (const [status, replayed] of [["200", true], ["201", false]]) {
+  const schema = downstreamProposalOperation.responses?.[status]?.content?.["application/json"]?.schema;
+  if (schema?.allOf?.[0]?.$ref !== "#/components/schemas/DownstreamUpdateProposalCreateResponse" ||
+      schema?.allOf?.[1]?.properties?.replayed?.const !== replayed ||
+      (status === "201" && schema?.allOf?.[1]?.properties?.approval?.type !== "null") ||
+      (status === "200" && schema?.allOf?.[1]?.properties?.approval !== undefined)) {
+    throw new Error(`Downstream Proposal ${status} must expose endpoint-only replayed=${String(replayed)}`);
+  }
+}
+for (const status of ["400", "401", "403", "404", "405", "409", "415", "500", "503"]) {
+  const response = resolveRef(downstreamProposalOperation.responses?.[status]);
+  if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+    throw new Error(`invalid Downstream Proposal ${status} Problem response`);
+  }
+}
+for (const errorCode of [
+  "DOWNSTREAM_UPDATE_PROPOSAL_INVALID", "DOWNSTREAM_UPDATE_TARGET_INVALID", "IDEMPOTENCY_KEY_REQUIRED", "IDEMPOTENCY_KEY_REUSED",
+  "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "KNOWLEDGE_IMPACT_NOT_FOUND", "KNOWLEDGE_IMPACT_CONFLICT",
+  "KNOWLEDGE_IMPACT_UNAVAILABLE", "CHANGE_CONTROL_SERVICE_UNAVAILABLE", "INTERNAL_ERROR",
+]) {
+  if (!downstreamProposalOperation["x-error-codes"]?.includes(errorCode)) {
+    throw new Error(`Downstream Proposal error matrix is missing ${errorCode}`);
+  }
 }
 
 for (const [path, method] of [
@@ -367,6 +406,13 @@ for (const schema of [
   "ApprovalDecisionResponse",
   "Proposal",
   "ProposalPage",
+  "CreateDownstreamUpdateProposalRequest",
+  "DownstreamUpdateSourceReport",
+  "DownstreamUpdateSourceEvent",
+  "DownstreamUpdate",
+  "DownstreamUpdateRevision",
+  "DownstreamUpdateProposal",
+  "DownstreamUpdateProposalCreateResponse",
   "ProposalSummary",
   "ProposalCurrentContent",
   "FilePatchProposal",
@@ -471,12 +517,31 @@ for (const schema of [
   "AnswerFeedback",
   "ServerEventPayloadSummary",
   "ServerEventEnvelope",
+  "KnowledgeEventType",
+  "TimelineAggregateType",
+  "ArtifactImpactBinding",
+  "ReviewCardImpactBinding",
+  "KnowledgeEventOperator",
+  "ArtifactEventOwnerBinding",
+  "ReviewCardEventOwnerBinding",
+  "KnowledgeEventOwnerBinding",
   "KnowledgeEventCorrelation",
   "KnowledgeEvent",
+  "KnowledgeEventV1",
+  "KnowledgeEventV2",
   "KnowledgeTimelinePage",
   "ImpactAnalysisRequest",
+  "ImpactObjectType",
+  "ImpactAction",
   "ImpactObject",
+  "ImpactObjectV1",
+  "ImpactObjectV2Base",
+  "ImpactObjectV2Legacy",
+  "ArtifactImpactObject",
+  "ReviewCardImpactObject",
   "ImpactReport",
+  "ImpactReportV1",
+  "ImpactReportV2",
   "ImpactProposalDraft",
   "ImpactAnalysisResult",
   "Problem",
@@ -554,7 +619,7 @@ for (const [path, schema] of [
 const schemas = document.components.schemas;
 const workflowStatuses = ["pending", "running", "waiting_for_human", "retry_wait", "paused", "succeeded", "failed", "cancelled"];
 const proposalStatuses = ["draft", "validating", "ready_for_review", "approved", "applying", "applied", "verifying", "completed", "rejected", "needs_revision", "deferred", "apply_failed", "verify_failed", "rolled_back", "cancelled"];
-const proposalTypes = ["file_patch", "knowledge_change", "publish_artifact"];
+const proposalTypes = ["file_patch", "knowledge_change", "publish_artifact", "downstream_update"];
 const proposalRiskLevels = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 const sourceSecurityStatuses = ["pending", "passed", "quarantined"];
 const sourceIngestionStatuses = ["validating", "parsing", "parsed", "chunking", "chunked", "parse_failed", "cancelled"];
@@ -611,10 +676,14 @@ if (!schemas.PublishArtifactProposal.required.includes("risk_level") ||
     schemas.PublishArtifactProposal.properties.risk_level?.const !== "HIGH") {
   throw new Error("PublishArtifactProposal must retain its HIGH risk boundary");
 }
+if (!schemas.DownstreamUpdateProposal.required.includes("risk_level") ||
+    schemas.DownstreamUpdateProposal.properties.risk_level?.const !== "HIGH") {
+  throw new Error("DownstreamUpdateProposal must retain its HIGH risk boundary");
+}
 if (!schemas.ProposalSummary.required.includes("risk") || schemas.ProposalSummary.properties.risk?.type !== "string") {
   throw new Error("ProposalSummary must retain the human-readable risk description");
 }
-for (const schemaName of ["ProposalRevision", "KnowledgeChangeRevision", "PublishArtifactRevision"]) {
+for (const schemaName of ["ProposalRevision", "KnowledgeChangeRevision", "PublishArtifactRevision", "DownstreamUpdateRevision"]) {
   if (!schemas[schemaName].required.includes("risk") || schemas[schemaName].properties.risk?.type !== "string" ||
       schemas[schemaName].properties.risk_level !== undefined) {
     throw new Error(`${schemaName} must retain risk as description without owning risk_level`);
@@ -654,22 +723,24 @@ if (schemas.ProposalSummary.properties.approval?.$ref !== "#/components/schemas/
     schemas.ApprovalDecisionResponse.properties.dispatch_status?.enum?.join(",") !== "queued,running,replayed") {
   throw new Error("Proposal Approval snapshot and decision response contracts are not separated");
 }
-for (const schemaName of ["FilePatchProposal", "KnowledgeChangeProposal"]) {
-  if (!schemas[schemaName].required.includes("approval") ||
-      schemas[schemaName].properties.approval.oneOf?.[0]?.$ref !== "#/components/schemas/Approval" ||
-      schemas[schemaName].properties.approval.oneOf?.[1]?.type !== "null") {
-    throw new Error(`${schemaName} must require a nullable persistent Approval snapshot`);
-  }
+if (!schemas.FilePatchProposal.required.includes("approval") ||
+    schemas.FilePatchProposal.properties.approval.oneOf?.[0]?.$ref !== "#/components/schemas/Approval" ||
+    schemas.FilePatchProposal.properties.approval.oneOf?.[1]?.type !== "null") {
+  throw new Error("FilePatchProposal must require a nullable persistent Approval snapshot");
 }
 const nonFileApprovalForbiddenFields = ["approved_git_head", "workflow_run_id", "workflow_status_url"];
 if (schemas.NonFileApproval.allOf?.[0]?.$ref !== "#/components/schemas/Approval" ||
     schemas.NonFileApproval.allOf?.[1]?.not?.anyOf?.map((item) => item.required?.join(",")).join(",") !== nonFileApprovalForbiddenFields.join(",") ||
-    !schemas.PublishArtifactProposal.required.includes("approval") ||
-    schemas.PublishArtifactProposal.properties.approval.oneOf?.[0]?.$ref !== "#/components/schemas/NonFileApproval" ||
-    schemas.PublishArtifactProposal.properties.approval.oneOf?.[1]?.type !== "null" ||
-    schemas.ProposalSummary.allOf?.[0]?.if?.properties?.proposal_type?.const !== "publish_artifact" ||
+    schemas.ProposalSummary.allOf?.[0]?.if?.properties?.proposal_type?.enum?.join(",") !== "knowledge_change,publish_artifact,downstream_update" ||
     schemas.ProposalSummary.allOf?.[0]?.then?.properties?.approval?.$ref !== "#/components/schemas/NonFileApproval") {
-  throw new Error("publish_artifact Approval snapshots must forbid Git and Workflow fields");
+  throw new Error("Non-file Proposal summaries must forbid Git and Workflow Approval fields");
+}
+for (const schemaName of ["KnowledgeChangeProposal", "PublishArtifactProposal", "DownstreamUpdateProposal"]) {
+  if (!schemas[schemaName].required.includes("approval") ||
+      schemas[schemaName].properties.approval.oneOf?.[0]?.$ref !== "#/components/schemas/NonFileApproval" ||
+      schemas[schemaName].properties.approval.oneOf?.[1]?.type !== "null") {
+    throw new Error(`${schemaName} must require a nullable non-file Approval snapshot`);
+  }
 }
 const currentContent = schemas.ProposalCurrentContent;
 for (const field of ["proposal_id", "workspace_id", "target_path", "content", "current_hash", "base_hash", "base_hash_match"]) {
@@ -995,7 +1066,9 @@ for (const schemaName of [
   "ClarificationResult", "RetrievalDegradation", "RetrievalScopeSummary", "RetrievalSummary", "Answer", "Turn", "TurnPage",
   "SubmitFeedbackRequest", "AnswerFeedback", "ServerEventPayloadSummary", "ServerEventEnvelope",
   "AuthCapabilityStatus", "SessionCredential", "SessionInfo", "CreateAPITokenRequest", "APITokenInfo", "APITokenCredential", "APITokenPage",
-  "KnowledgeEventCorrelation", "KnowledgeEvent", "KnowledgeTimelinePage", "ImpactAnalysisRequest", "ImpactObject", "ImpactReport", "ImpactProposalDraft", "ImpactAnalysisResult",
+  "ArtifactImpactBinding", "ReviewCardImpactBinding", "KnowledgeEventOperator", "ArtifactEventOwnerBinding", "ReviewCardEventOwnerBinding",
+  "KnowledgeEventCorrelation", "KnowledgeEventV1", "KnowledgeEventV2", "KnowledgeTimelinePage", "ImpactAnalysisRequest",
+  "ImpactObjectV1", "ImpactReportV1", "ImpactReportV2", "ImpactProposalDraft", "ImpactAnalysisResult",
   "GraphCanonicalJSONObject", "GraphNodeRef", "GraphApplicability", "GraphTopicNode", "GraphClaimNode",
   "GraphConfirmation", "GraphEdge", "GraphPageMeta", "GraphFilter", "GraphGlobalRequest", "GraphGlobalCluster",
   "GraphGlobalResponse", "GraphNodeSearchMatch", "GraphNodeSearchResponse", "GraphNeighborhoodRequest",
@@ -1006,6 +1079,7 @@ for (const schemaName of [
   "FilePatchProposal", "KnowledgeChangeTargetRef", "KnowledgeChangeBaseVersion", "KnowledgeChangeEndpoint",
   "KnowledgeChangeSet", "KnowledgeChangeEvidenceRef", "KnowledgeChangeRevision", "KnowledgeChangeProposal",
   "PublishArtifactCoverage", "PublishArtifactBinding", "PublishArtifactRevision", "PublishArtifactProposal",
+  "CreateDownstreamUpdateProposalRequest", "DownstreamUpdateSourceReport", "DownstreamUpdateSourceEvent", "DownstreamUpdate", "DownstreamUpdateRevision", "DownstreamUpdateProposal",
 ]) {
   if (schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must reject unknown properties`);
 }
@@ -1202,20 +1276,124 @@ if (schemas.ImpactAnalysisRequest.maxProperties !== 0 || schemas.ImpactAnalysisR
     schemas.KnowledgeTimelinePage.properties.items.maxItems !== 100 ||
     schemas.KnowledgeTimelinePage.properties.items.items.$ref !== "#/components/schemas/KnowledgeEvent" ||
     schemas.KnowledgeTimelinePage.properties.next_cursor.maxLength !== 4096 ||
-    schemas.ImpactReport.properties.objects.maxItems !== 500 ||
-    schemas.ImpactReport.properties.objects.items.$ref !== "#/components/schemas/ImpactObject" ||
+    schemas.ImpactReportV1.properties.objects.maxItems !== 500 ||
+    schemas.ImpactReportV1.properties.objects.items.$ref !== "#/components/schemas/ImpactObjectV1" ||
+    schemas.ImpactReportV2.properties.objects.maxItems !== 500 ||
+    schemas.ImpactReportV2.properties.objects.items.$ref !== "#/components/schemas/ImpactObject" ||
     schemas.ImpactAnalysisResult.properties.proposal_drafts.maxItems !== 500 ||
     schemas.ImpactAnalysisResult.properties.proposal_drafts.items.$ref !== "#/components/schemas/ImpactProposalDraft") {
   throw new Error("Timeline/Impact page, empty request or bounded result schemas drifted");
 }
-if (schemas.KnowledgeEvent.properties.schema_version.const !== "knowledge-event/v1" ||
-    schemas.ImpactReport.properties.schema_version.const !== "impact-report/v1" ||
-    schemas.ImpactReport.properties.fingerprint.pattern !== "^[0-9a-f]{64}$" ||
-    schemas.ImpactObject.properties.type.enum.join(",") !== "RELATION,CONFLICT,HEALTH_ISSUE" ||
+const knowledgeEventTypes = [
+  "PROPOSAL_CREATED", "APPROVAL_GRANTED", "APPROVAL_REJECTED", "GIT_COMMITTED", "RELATION_CONFIRMED", "RELATION_DEPRECATED",
+  "CONFLICT_OPENED", "CONFLICT_TRANSITIONED", "CONFLICT_RESOLVED", "VERSION_PUBLISHED", "VERSION_SUPERSEDED",
+  "HEALTH_ISSUE_DETECTED", "HEALTH_ISSUE_RESOLVED", "IMPACT_ANALYZED", "ARTIFACT_GENERATED", "REVIEW_CARD_INVALIDATED", "CORRECTIVE_EVENT",
+];
+const timelineAggregateTypes = [
+  "PROPOSAL", "APPROVAL", "GIT_COMMIT", "TOPIC", "CLAIM", "RELATION", "CONFLICT", "DOCUMENT", "ARTICLE_REVISION",
+  "HEALTH_ISSUE", "IMPACT_REPORT", "ARTIFACT", "REVIEW_CARD",
+];
+const eventV1Properties = [
+  "id", "workspace_id", "event_type", "aggregate_type", "aggregate_id", "source_event_ref", "source_ref", "event_version",
+  "schema_version", "summary", "payload", "correlation", "occurred_at", "created_at",
+];
+const eventV1Required = eventV1Properties.filter((field) => field !== "aggregate_id");
+if (schemas.KnowledgeEvent.oneOf?.map((item) => item.$ref).join(",") !==
+      "#/components/schemas/KnowledgeEventV1,#/components/schemas/KnowledgeEventV2" ||
+    schemas.KnowledgeEvent.discriminator?.propertyName !== "schema_version" ||
+    schemas.KnowledgeEvent.discriminator?.mapping?.["knowledge-event/v1"] !== "#/components/schemas/KnowledgeEventV1" ||
+    schemas.KnowledgeEvent.discriminator?.mapping?.["knowledge-event/v2"] !== "#/components/schemas/KnowledgeEventV2" ||
+    schemas.KnowledgeEventType.enum?.join(",") !== knowledgeEventTypes.join(",") ||
+    schemas.TimelineAggregateType.enum?.join(",") !== timelineAggregateTypes.join(",") ||
+    schemas.KnowledgeEventV1.required?.join(",") !== eventV1Required.join(",") ||
+    Object.keys(schemas.KnowledgeEventV1.properties ?? {}).join(",") !== eventV1Properties.join(",") ||
+    schemas.KnowledgeEventV1.properties.schema_version?.const !== "knowledge-event/v1" ||
+    schemas.KnowledgeEventV1.properties.event_type?.enum?.includes("ARTIFACT_GENERATED") ||
+    schemas.KnowledgeEventV1.properties.event_type?.enum?.includes("REVIEW_CARD_INVALIDATED") ||
+    schemas.KnowledgeEventV2.properties.schema_version?.const !== "knowledge-event/v2" ||
+    !schemas.KnowledgeEventV2.required?.includes("operator") || !schemas.KnowledgeEventV2.required?.includes("owner_binding") ||
+    schemas.KnowledgeEventV2.properties.operator?.$ref !== "#/components/schemas/KnowledgeEventOperator" ||
+    schemas.KnowledgeEventV2.properties.owner_binding?.oneOf?.[0]?.$ref !== "#/components/schemas/KnowledgeEventOwnerBinding" ||
+    schemas.KnowledgeEventV2.properties.owner_binding?.oneOf?.[1]?.type !== "null") {
+  throw new Error("Knowledge Event v1/v2 discriminator, exact legacy fields or required nullable v2 owner binding drifted");
+}
+if (schemas.KnowledgeEventOperator.properties.type?.enum?.join(",") !== "USER,API_TOKEN,SYSTEM,UNKNOWN" ||
+    schemas.KnowledgeEventOperator.allOf?.[0]?.then?.not?.required?.join(",") !== "id" ||
+    schemas.KnowledgeEventOwnerBinding.oneOf?.map((item) => item.$ref).join(",") !==
+      "#/components/schemas/ArtifactEventOwnerBinding,#/components/schemas/ReviewCardEventOwnerBinding" ||
+    schemas.ReviewCardEventOwnerBinding.properties.review_card?.allOf?.[0]?.$ref !== "#/components/schemas/ReviewCardImpactBinding" ||
+    schemas.ReviewCardEventOwnerBinding.properties.review_card?.allOf?.[1]?.properties?.status?.const !== "INVALIDATED" ||
+    schemas.KnowledgeEventV2.allOf?.[0]?.then?.properties?.aggregate_type?.const !== "ARTIFACT" ||
+    schemas.KnowledgeEventV2.allOf?.[0]?.then?.properties?.owner_binding?.$ref !== "#/components/schemas/ArtifactEventOwnerBinding" ||
+    schemas.KnowledgeEventV2.allOf?.[1]?.then?.properties?.aggregate_type?.const !== "REVIEW_CARD" ||
+    schemas.KnowledgeEventV2.allOf?.[1]?.then?.properties?.owner_binding?.$ref !== "#/components/schemas/ReviewCardEventOwnerBinding" ||
+    schemas.KnowledgeEventV2.allOf?.[2]?.then?.properties?.owner_binding?.type !== "null") {
+  throw new Error("Knowledge Event operator or owner-event conditional binding drifted");
+}
+const artifactBindingFields = ["artifact_id", "artifact_version", "revision_id", "revision_no", "content_hash"];
+const reviewBindingFields = ["card_id", "card_version", "status", "fingerprint", "claim_id", "evidence_binding_fingerprint"];
+if (schemas.ArtifactImpactBinding.required?.join(",") !== artifactBindingFields.join(",") ||
+    Object.keys(schemas.ArtifactImpactBinding.properties ?? {}).join(",") !== artifactBindingFields.join(",") ||
+    schemas.ArtifactImpactBinding.properties.content_hash?.pattern !== "^[0-9a-f]{64}$" ||
+    schemas.ReviewCardImpactBinding.required?.join(",") !== reviewBindingFields.join(",") ||
+    Object.keys(schemas.ReviewCardImpactBinding.properties ?? {}).join(",") !== reviewBindingFields.join(",") ||
+    schemas.ReviewCardImpactBinding.properties.status?.enum?.join(",") !== "DRAFT,APPROVED,INVALIDATED,REJECTED" ||
+    schemas.ReviewCardImpactBinding.properties.fingerprint?.pattern !== "^[0-9a-f]{64}$" ||
+    schemas.ReviewCardImpactBinding.properties.evidence_binding_fingerprint?.pattern !== "^[0-9a-f]{64}$") {
+  throw new Error("Artifact or Review Card immutable impact binding drifted");
+}
+const legacyImpactObjectTypes = ["TOPIC", "CLAIM", "RELATION", "CONFLICT", "HEALTH_ISSUE", "PROPOSAL", "ARTICLE_REVISION", "AUDIT_EVENT"];
+const impactObjectTypes = [...legacyImpactObjectTypes, "ARTIFACT", "REVIEW_CARD"];
+const impactActions = ["REVIEW", "REINDEX", "RESOLVE_CONFLICT", "REFRESH_HEALTH", "REGENERATE_ARTIFACT", "REVALIDATE_REVIEW_CARD", "NO_ACTION"];
+if (schemas.ImpactObjectType.enum?.join(",") !== impactObjectTypes.join(",") ||
+    schemas.ImpactAction.enum?.join(",") !== impactActions.join(",") ||
+    schemas.ImpactObjectV1.properties.type?.enum?.join(",") !== legacyImpactObjectTypes.join(",") ||
+    schemas.ImpactObjectV1.properties.action?.enum?.join(",") !== "REVIEW,REINDEX,RESOLVE_CONFLICT,REFRESH_HEALTH,NO_ACTION" ||
+    schemas.ImpactObject.oneOf?.map((item) => item.$ref).join(",") !==
+      "#/components/schemas/ImpactObjectV2Legacy,#/components/schemas/ArtifactImpactObject,#/components/schemas/ReviewCardImpactObject" ||
+    schemas.ImpactObject.discriminator?.propertyName !== "type" ||
+    schemas.ArtifactImpactObject.allOf?.[1]?.properties?.type?.const !== "ARTIFACT" ||
+    schemas.ArtifactImpactObject.allOf?.[1]?.properties?.action?.const !== "REGENERATE_ARTIFACT" ||
+    schemas.ArtifactImpactObject.allOf?.[1]?.properties?.requires_proposal?.const !== true ||
+    schemas.ArtifactImpactObject.allOf?.[1]?.properties?.artifact_binding?.$ref !== "#/components/schemas/ArtifactImpactBinding" ||
+    schemas.ReviewCardImpactObject.allOf?.[1]?.properties?.type?.const !== "REVIEW_CARD" ||
+    schemas.ReviewCardImpactObject.allOf?.[1]?.properties?.action?.const !== "REVALIDATE_REVIEW_CARD" ||
+    schemas.ReviewCardImpactObject.allOf?.[1]?.properties?.requires_proposal?.const !== true ||
+    schemas.ReviewCardImpactObject.allOf?.[1]?.properties?.review_card_binding?.$ref !== "#/components/schemas/ReviewCardImpactBinding" ||
+    schemas.ImpactObjectV2Legacy.unevaluatedProperties !== false || schemas.ArtifactImpactObject.unevaluatedProperties !== false ||
+    schemas.ReviewCardImpactObject.unevaluatedProperties !== false) {
+  throw new Error("Impact Object v1/v2 union or owner-specific action binding drifted");
+}
+const reportV1Properties = [
+  "id", "workspace_id", "source_event_id", "source_event_ref", "source_event_version", "status", "objects", "summary", "fingerprint",
+  "error_code", "stale_reason", "schema_version", "generated_at", "created_at", "version",
+];
+const reportV1Required = reportV1Properties.filter((field) => field !== "error_code" && field !== "stale_reason");
+if (schemas.ImpactReport.oneOf?.map((item) => item.$ref).join(",") !==
+      "#/components/schemas/ImpactReportV1,#/components/schemas/ImpactReportV2" ||
+    schemas.ImpactReport.discriminator?.propertyName !== "schema_version" ||
+    schemas.ImpactReport.discriminator?.mapping?.["impact-report/v1"] !== "#/components/schemas/ImpactReportV1" ||
+    schemas.ImpactReport.discriminator?.mapping?.["impact-report/v2"] !== "#/components/schemas/ImpactReportV2" ||
+    schemas.ImpactReportV1.required?.join(",") !== reportV1Required.join(",") ||
+    Object.keys(schemas.ImpactReportV1.properties ?? {}).join(",") !== reportV1Properties.join(",") ||
+    schemas.ImpactReportV1.properties.schema_version?.const !== "impact-report/v1" ||
+    schemas.ImpactReportV1.properties.analysis_version !== undefined ||
+    schemas.ImpactReportV2.properties.schema_version?.const !== "impact-report/v2" ||
+    schemas.ImpactReportV2.properties.analysis_version?.const !== "impact-analysis/v2" ||
+    !schemas.ImpactReportV2.required?.includes("analysis_version") || !schemas.ImpactReportV2.required?.includes("supersedes_report_id") ||
+    !schemas.ImpactReportV2.required?.includes("superseded_by_report_id") ||
+    schemas.ImpactReportV2.properties.supersedes_report_id?.oneOf?.[1]?.type !== "null" ||
+    schemas.ImpactReportV2.properties.superseded_by_report_id?.oneOf?.[1]?.type !== "null" ||
+    schemas.ImpactReportV1.properties.fingerprint?.pattern !== "^[0-9a-f]{64}$" ||
+    schemas.ImpactReportV2.properties.fingerprint?.pattern !== "^[0-9a-f]{64}$") {
+  throw new Error("Impact Report v1/v2 discriminator, exact legacy fields or supersession contract drifted");
+}
+if (schemas.ImpactProposalDraft.properties.target_type?.enum?.join(",") !== impactObjectTypes.join(",") ||
+    schemas.ImpactProposalDraft.properties.operation?.enum?.join(",") !== impactActions.filter((action) => action !== "NO_ACTION").join(",") ||
     schemas.ImpactProposalDraft.properties.requires_approval.const !== true ||
     schemas.ImpactProposalDraft.properties.requires_write_authorization.const !== true ||
     schemas.ImpactProposalDraft.properties.operation.enum.includes("NO_ACTION")) {
-  throw new Error("Timeline/Impact immutable version or Proposal authorization boundary drifted");
+  throw new Error("Impact Proposal draft authorization boundary drifted");
 }
 
 if (schemas.SemanticLinkCandidate.properties.discovery_methods.maxItems !== 6 ||
@@ -1225,21 +1403,92 @@ if (schemas.SemanticLinkCandidate.properties.discovery_methods.maxItems !== 6 ||
   throw new Error("Semantic Link Candidate bounds or generation contract drifted");
 }
 if (schemas.Proposal.oneOf?.map((item) => item.$ref).join(",") !==
-      "#/components/schemas/FilePatchProposal,#/components/schemas/KnowledgeChangeProposal,#/components/schemas/PublishArtifactProposal" ||
+      "#/components/schemas/FilePatchProposal,#/components/schemas/KnowledgeChangeProposal,#/components/schemas/PublishArtifactProposal,#/components/schemas/DownstreamUpdateProposal" ||
     schemas.Proposal.discriminator?.propertyName !== "proposal_type" ||
     schemas.Proposal.discriminator?.mapping?.file_patch !== "#/components/schemas/FilePatchProposal" ||
     schemas.Proposal.discriminator?.mapping?.knowledge_change !== "#/components/schemas/KnowledgeChangeProposal" ||
     schemas.Proposal.discriminator?.mapping?.publish_artifact !== "#/components/schemas/PublishArtifactProposal" ||
+    schemas.Proposal.discriminator?.mapping?.downstream_update !== "#/components/schemas/DownstreamUpdateProposal" ||
     !schemas.FilePatchProposal.required.includes("proposal_type") ||
     schemas.FilePatchProposal.properties.proposal_type?.const !== "file_patch" ||
     !schemas.KnowledgeChangeProposal.required.includes("proposal_type") ||
     schemas.KnowledgeChangeProposal.properties.proposal_type.const !== "knowledge_change" ||
     !schemas.PublishArtifactProposal.required.includes("proposal_type") ||
     schemas.PublishArtifactProposal.properties.proposal_type.const !== "publish_artifact" ||
+    !schemas.DownstreamUpdateProposal.required.includes("proposal_type") ||
+    schemas.DownstreamUpdateProposal.properties.proposal_type.const !== "downstream_update" ||
     schemas.KnowledgeChangeRevision.properties.schema_version.const !== "knowledge-relation-change/v1" ||
     schemas.KnowledgeChangeRevision.properties.base_versions.minItems !== 2 ||
     schemas.KnowledgeChangeRevision.properties.base_versions.maxItems !== 2) {
   throw new Error("typed Proposal discriminated response contract drifted");
+}
+const downstreamRequest = schemas.CreateDownstreamUpdateProposalRequest;
+const downstreamUpdate = schemas.DownstreamUpdate;
+const downstreamRevision = schemas.DownstreamUpdateRevision;
+const downstreamProposal = schemas.DownstreamUpdateProposal;
+if (downstreamRequest.required?.join(",") !== "target_type,target_id,action" ||
+    Object.keys(downstreamRequest.properties ?? {}).join(",") !== "target_type,target_id,action" ||
+    downstreamRequest.additionalProperties !== false || downstreamRequest.properties.target_id?.format !== "uuid" ||
+    downstreamRequest.oneOf?.[0]?.properties?.target_type?.const !== "ARTIFACT" ||
+    downstreamRequest.oneOf?.[0]?.properties?.action?.const !== "REGENERATE_ARTIFACT" ||
+    downstreamRequest.oneOf?.[1]?.properties?.target_type?.const !== "REVIEW_CARD" ||
+    downstreamRequest.oneOf?.[1]?.properties?.action?.const !== "REVALIDATE_REVIEW_CARD") {
+  throw new Error("Downstream Proposal request must accept only one compatible target_type, target_id and action tuple");
+}
+const downstreamUpdateRequired = [
+  "workspace_id", "source_report", "source_event", "target_type", "target_id", "base_version", "action", "reason", "schema_version",
+];
+if (downstreamUpdate.required?.join(",") !== downstreamUpdateRequired.join(",") ||
+    downstreamUpdate.properties.source_report?.$ref !== "#/components/schemas/DownstreamUpdateSourceReport" ||
+    downstreamUpdate.properties.source_event?.$ref !== "#/components/schemas/DownstreamUpdateSourceEvent" ||
+    downstreamUpdate.properties.schema_version?.const !== "impact-downstream-update/v1" ||
+    downstreamUpdate.properties.artifact_binding?.$ref !== "#/components/schemas/ArtifactImpactBinding" ||
+    downstreamUpdate.properties.review_card_binding?.$ref !== "#/components/schemas/ReviewCardImpactBinding" ||
+    downstreamUpdate.oneOf?.[0]?.required?.join(",") !== "artifact_binding" ||
+    downstreamUpdate.oneOf?.[0]?.not?.required?.join(",") !== "review_card_binding" ||
+    downstreamUpdate.oneOf?.[1]?.required?.join(",") !== "review_card_binding" ||
+    downstreamUpdate.oneOf?.[1]?.not?.required?.join(",") !== "artifact_binding" ||
+    schemas.DownstreamUpdateSourceReport.properties.analysis_version?.const !== "impact-analysis/v2" ||
+    schemas.DownstreamUpdateSourceReport.properties.fingerprint?.pattern !== "^[0-9a-f]{64}$" ||
+    schemas.DownstreamUpdateSourceEvent.properties.event_version?.minimum !== 1) {
+  throw new Error("Downstream Proposal must freeze the v2 report, event and exactly one owner binding");
+}
+if (downstreamRevision.required?.join(",") !== "id,revision_no,update,risk,rollback_plan,change_hash,created_at" ||
+    downstreamRevision.properties.update?.$ref !== "#/components/schemas/DownstreamUpdate" ||
+    downstreamRevision.properties.change_hash?.pattern !== "^[0-9a-f]{64}$" ||
+    downstreamRevision.properties.content !== undefined || downstreamRevision.properties.publication !== undefined ||
+    downstreamProposal.properties.proposal_type?.const !== "downstream_update" ||
+    downstreamProposal.properties.status?.enum?.join(",") !== "ready_for_review,approved,rejected" ||
+    downstreamProposal.properties.risk_level?.const !== "HIGH" ||
+    downstreamProposal.properties.revision?.$ref !== "#/components/schemas/DownstreamUpdateRevision" ||
+    downstreamProposal.properties.approval?.oneOf?.[0]?.$ref !== "#/components/schemas/NonFileApproval" ||
+    downstreamProposal.properties.approval?.oneOf?.[1]?.type !== "null") {
+  throw new Error("Downstream Proposal typed revision or approval-only lifecycle drifted");
+}
+const downstreamForbiddenFields = [
+  "replayed", "target_path", "approved_git_head", "workflow_run_id", "workflow_status_url", "write_authorization", "writeback", "apply",
+];
+const downstreamCreateResponse = schemas.DownstreamUpdateProposalCreateResponse;
+const downstreamCreateResponseRequired = [
+  "proposal_type", "id", "workspace_id", "status", "risk_level", "revision", "approval", "replayed", "created_at", "updated_at",
+];
+const applyPreflightOperation = document.paths["/api/v1/proposals/{proposal_id}/apply-preflight"]?.post;
+if (downstreamForbiddenFields.some((field) => downstreamProposal.properties[field] !== undefined) ||
+    schemas.ProposalSummary.properties.replayed !== undefined ||
+    downstreamCreateResponse.type !== "object" ||
+    downstreamCreateResponse.required?.join(",") !== downstreamCreateResponseRequired.join(",") ||
+    Object.keys(downstreamCreateResponse.properties ?? {}).join(",") !== downstreamCreateResponseRequired.join(",") ||
+    downstreamCreateResponse.properties?.proposal_type?.const !== "downstream_update" ||
+    downstreamCreateResponse.properties?.status?.enum?.join(",") !== "ready_for_review,approved,rejected" ||
+    downstreamCreateResponse.properties?.risk_level?.const !== "HIGH" ||
+    downstreamCreateResponse.properties?.revision?.$ref !== "#/components/schemas/DownstreamUpdateRevision" ||
+    downstreamCreateResponse.properties?.approval?.oneOf?.[0]?.$ref !== "#/components/schemas/NonFileApproval" ||
+    downstreamCreateResponse.properties?.approval?.oneOf?.[1]?.type !== "null" ||
+    downstreamCreateResponse.properties?.replayed?.type !== "boolean" ||
+    downstreamCreateResponse.additionalProperties !== false || downstreamCreateResponse.allOf !== undefined ||
+    !applyPreflightOperation?.["x-error-codes"]?.includes("DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE") ||
+    !applyPreflightOperation?.responses?.["409"]?.description?.includes("DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE")) {
+  throw new Error("replayed must remain endpoint-only and approved downstream Proposals must forbid apply/writeback fields");
 }
 const publishArtifactCoverage = schemas.PublishArtifactCoverage;
 const publishArtifactBinding = schemas.PublishArtifactBinding;

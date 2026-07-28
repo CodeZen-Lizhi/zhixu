@@ -28,6 +28,10 @@ vi.mock("../features/interview/InterviewPage", () => ({
   InterviewsPage: () => <div>Interviews route</div>,
   InterviewSessionPage: () => <div>Interview session route</div>,
 }));
+vi.mock("../features/timeline/TimelinePage", () => ({
+  TimelinePage: () => <div>Timeline route</div>,
+  TimelineEventPage: () => <div>Timeline event route</div>,
+}));
 
 import { AppRoutes } from "./AppRoutes";
 
@@ -78,6 +82,8 @@ describe("AppRoutes compatibility", () => {
     ["/memories", "Memories route"],
     ["/interviews", "Interviews route"],
     ["/interviews/10000000-0000-4000-8000-000000000003", "Interview session route"],
+    ["/timeline", "Timeline route"],
+    ["/timeline/10000000-0000-4000-8000-000000000003", "Timeline event route"],
   ])("保留 M9 业务深链 %s", async (path, expected) => {
     renderRoute(path);
 

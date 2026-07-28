@@ -629,8 +629,17 @@ func assertKnowledgeMigrationShape(t *testing.T, ctx context.Context, pool *pgxp
 		)`).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger
-		WHERE tgname LIKE 'knowledge_%' AND NOT tgisinternal`).Scan(&triggers); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*)
+		FROM pg_trigger trigger
+		JOIN pg_class relation ON relation.oid=trigger.tgrelid
+		JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+		WHERE namespace.nspname='core'
+		  AND relation.relname IN (
+			'topic','topic_alias','claim','claim_source','relation','relation_evidence',
+			'conflict','conflict_member','knowledge_command_receipt'
+		  )
+		  AND trigger.tgname LIKE 'knowledge_%'
+		  AND NOT trigger.tgisinternal`).Scan(&triggers); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes

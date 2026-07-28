@@ -25,12 +25,19 @@ import (
 	authapplication "github.com/CodeZen-Lizhi/zhixu/internal/auth/application"
 	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
+	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
+	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
+	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
+	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
+	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphtestfixture "github.com/CodeZen-Lizhi/zhixu/internal/graph/testfixture"
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -107,7 +114,8 @@ func TestTimelineImpactPublicHTTPIntegration(t *testing.T) {
 	created := postTimelineImpactResponse[timelineImpactAnalysisWire](t, client, analysisURL, "timeline-impact-http-1", http.StatusCreated)
 	if created.Replayed || created.Report.WorkspaceID != string(workspaceID) || created.Report.SourceEventID != string(eventID) ||
 		created.Report.SourceEventRef != event.SourceEventRef || created.Report.SourceEventVersion != 1 || created.Report.Status != domain.ImpactReportReady ||
-		created.Report.SchemaVersion != domain.ImpactReportSchemaVersion || created.Report.Version != 1 || len(created.Report.Fingerprint) != 64 ||
+		created.Report.SchemaVersion != domain.ImpactReportSchemaVersionV2 || created.Report.AnalysisVersion != domain.ImpactAnalysisVersionV2 ||
+		created.Report.SupersedesReportID != nil || created.Report.SupersededByReportID != nil || created.Report.Version != 1 || len(created.Report.Fingerprint) != 64 ||
 		len(created.Report.Objects) != 2 || len(created.ProposalDrafts) != 0 || created.Report.Summary[string(domain.ImpactObjectRelation)] != 2 ||
 		created.Report.Summary["action:"+string(domain.ImpactActionReview)] != 2 || created.Report.Summary["requires_proposal"] != 0 {
 		t.Fatalf("created impact response=%#v", created)
@@ -230,9 +238,32 @@ func newTimelineImpactAuthenticatedFixture(t *testing.T) timelineImpactAuthentic
 	if err != nil {
 		t.Fatal(err)
 	}
+	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changeControlRepository, err := changecontrolpostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetReader, err := changecontrollocalfs.NewReader(workspaceRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitInspector, err := gitcli.NewWritebackClient(gitcli.New(""), workspaceRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changeControlService, err := changecontrolapplication.NewService(
+		changeControlRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, targetReader, gitInspector,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(app.NewRouter(app.Dependencies{
 		Version: "timeline-impact-authenticated-integration", Database: pool, Knowledge: knowledgeHandler,
-		Auth: authHandler, AuthRequired: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ChangeControl: changecontrolhttp.NewHandler(changeControlService), Auth: authHandler, AuthRequired: true,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}))
 	t.Cleanup(server.Close)
 	return timelineImpactAuthenticatedFixture{
@@ -333,6 +364,124 @@ func TestTimelineImpactAuthenticatedAPITokenAuditIntegration(t *testing.T) {
 	reportProblem := doTimelineImpactResponse[timelineImpactProblemWire](t, authenticated.server.Client(), anonymousReport, http.StatusUnauthorized)
 	if reportProblem.ErrorCode != authapplication.ErrorCodeUnauthorized {
 		t.Fatalf("anonymous report problem=%#v", reportProblem)
+	}
+}
+
+func TestTimelineImpactDownstreamProposalAPICompositionIntegration(t *testing.T) {
+	authenticated := newTimelineImpactAuthenticatedFixture(t)
+	downstream := seedTimelineImpactDownstreamArtifact(t, authenticated)
+	otherWorkspaceID := seedTimelineImpactWorkspace(t, authenticated.ctx, authenticated.pool, "timeline-impact-downstream-isolation")
+
+	session, err := authenticated.authService.ExchangeBootstrap(authenticated.ctx, timelineImpactBootstrapToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := authenticated.authService.AuthenticateSession(authenticated.ctx, session.Token, session.CSRFToken, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readToken, err := authenticated.authService.CreateAPIToken(
+		authenticated.ctx, owner, "timeline-downstream-read-only", []capability.Capability{capability.ReadLocal}, time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeToken, err := authenticated.authService.CreateAPIToken(
+		authenticated.ctx, owner, "timeline-downstream-write-proposal", []capability.Capability{capability.WriteProposal}, time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := fmt.Sprintf(`{"target_type":"ARTIFACT","target_id":%q,"action":"REGENERATE_ARTIFACT"}`, downstream.artifactID)
+	proposalURL := fmt.Sprintf(
+		"%s/api/v1/workspaces/%s/impact-reports/%s/proposals",
+		authenticated.server.URL, authenticated.workspaceID, downstream.reportID,
+	)
+	requestProposal := func(t *testing.T, target, bearer, key string, wantStatus int) timelineImpactDownstreamProposalWire {
+		t.Helper()
+		request := newTimelineImpactHTTPRequest(t, authenticated.ctx, http.MethodPost, target, body, bearer)
+		request.Header.Set("Idempotency-Key", key)
+		return doTimelineImpactResponse[timelineImpactDownstreamProposalWire](t, authenticated.server.Client(), request, wantStatus)
+	}
+
+	for _, rejected := range []struct {
+		name       string
+		bearer     string
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "anonymous", wantStatus: http.StatusUnauthorized, wantCode: authapplication.ErrorCodeUnauthorized},
+		{name: "read only", bearer: readToken.Plain, wantStatus: http.StatusForbidden, wantCode: authapplication.ErrorCodeForbidden},
+	} {
+		t.Run(rejected.name, func(t *testing.T) {
+			request := newTimelineImpactHTTPRequest(t, authenticated.ctx, http.MethodPost, proposalURL, body, rejected.bearer)
+			request.Header.Set("Idempotency-Key", "timeline-downstream-rejected-"+strings.ReplaceAll(rejected.name, " ", "-"))
+			problem := doTimelineImpactResponse[timelineImpactProblemWire](t, authenticated.server.Client(), request, rejected.wantStatus)
+			if problem.ErrorCode != rejected.wantCode || problem.Retryable {
+				t.Fatalf("%s problem=%#v", rejected.name, problem)
+			}
+		})
+	}
+
+	crossWorkspaceURL := fmt.Sprintf(
+		"%s/api/v1/workspaces/%s/impact-reports/%s/proposals",
+		authenticated.server.URL, otherWorkspaceID, downstream.reportID,
+	)
+	crossWorkspaceRequest := newTimelineImpactHTTPRequest(t, authenticated.ctx, http.MethodPost, crossWorkspaceURL, body, writeToken.Plain)
+	crossWorkspaceRequest.Header.Set("Idempotency-Key", "timeline-downstream-cross-workspace")
+	crossWorkspace := doTimelineImpactResponse[timelineImpactProblemWire](t, authenticated.server.Client(), crossWorkspaceRequest, http.StatusNotFound)
+	if crossWorkspace.ErrorCode != domain.ErrorCodeImpactNotFound || crossWorkspace.Retryable {
+		t.Fatalf("cross-workspace downstream proposal problem=%#v", crossWorkspace)
+	}
+
+	created := requestProposal(t, proposalURL, writeToken.Plain, "timeline-downstream-create", http.StatusCreated)
+	if created.Replayed || created.ProposalType != string(changecontroldomain.ProposalTypeDownstreamUpdate) ||
+		created.WorkspaceID != string(authenticated.workspaceID) || created.Status != string(changecontroldomain.StatusReady) ||
+		created.RiskLevel != string(changecontroldomain.ProposalRiskLevelHigh) || created.Approval != nil ||
+		created.Revision.Update.WorkspaceID != string(authenticated.workspaceID) ||
+		created.Revision.Update.SourceReport.ID != string(downstream.reportID) ||
+		created.Revision.Update.SourceReport.AnalysisVersion != string(domain.ImpactAnalysisVersionV2) ||
+		created.Revision.Update.SourceReport.Fingerprint != downstream.reportFingerprint ||
+		created.Revision.Update.SourceEvent.ID != string(authenticated.eventID) ||
+		created.Revision.Update.SourceEvent.EventVersion != 1 ||
+		created.Revision.Update.TargetType != string(domain.ImpactObjectArtifact) ||
+		created.Revision.Update.TargetID != string(downstream.artifactID) ||
+		created.Revision.Update.BaseVersion != downstream.binding.ArtifactVersion ||
+		created.Revision.Update.Action != string(domain.ImpactActionRegenerateArtifact) ||
+		created.Revision.Update.ArtifactBinding == nil || *created.Revision.Update.ArtifactBinding != downstream.binding ||
+		created.Revision.Update.ReviewCardBinding != nil || created.Revision.Update.SchemaVersion != changecontroldomain.DownstreamUpdateSchemaVersion ||
+		created.Revision.Update.Reason == "" || created.Revision.RevisionNo != 1 || created.Revision.Risk == "" || created.Revision.RollbackPlan == "" ||
+		len(created.Revision.ChangeHash) != 64 || created.Revision.ID == "" || created.Revision.CreatedAt == "" ||
+		created.ID == "" || created.CreatedAt == "" || created.UpdatedAt == "" {
+		t.Fatalf("created downstream proposal=%#v", created)
+	}
+
+	replayed := requestProposal(t, proposalURL, writeToken.Plain, "timeline-downstream-create", http.StatusOK)
+	expectedReplay := created
+	expectedReplay.Replayed = true
+	if !reflect.DeepEqual(replayed, expectedReplay) {
+		t.Fatalf("downstream proposal replay drifted: created=%#v replayed=%#v", created, replayed)
+	}
+
+	detailURL := fmt.Sprintf("%s/api/v1/proposals/%s", authenticated.server.URL, created.ID)
+	detailRequest := newTimelineImpactHTTPRequest(t, authenticated.ctx, http.MethodGet, detailURL, "", readToken.Plain)
+	detail := doTimelineImpactResponse[timelineImpactDownstreamProposalDetailWire](t, authenticated.server.Client(), detailRequest, http.StatusOK)
+	if detail.ID != created.ID || !reflect.DeepEqual(detail.Revision, created.Revision) {
+		t.Fatalf("downstream proposal detail=%#v created=%#v", detail, created)
+	}
+
+	var proposals, revisions, otherWorkspaceProposals int
+	if err := authenticated.pool.QueryRow(authenticated.ctx, `SELECT
+		(SELECT count(*) FROM change_control.proposal WHERE workspace_id=$1),
+		(SELECT count(*) FROM change_control.proposal_revision WHERE proposal_id=$2),
+		(SELECT count(*) FROM change_control.proposal WHERE workspace_id=$3)`,
+		string(authenticated.workspaceID), created.ID, string(otherWorkspaceID),
+	).Scan(&proposals, &revisions, &otherWorkspaceProposals); err != nil {
+		t.Fatal(err)
+	}
+	if proposals != 1 || revisions != 1 || otherWorkspaceProposals != 0 {
+		t.Fatalf("downstream replay persistence proposals=%d revisions=%d other_workspace_proposals=%d", proposals, revisions, otherWorkspaceProposals)
 	}
 }
 
@@ -456,22 +605,79 @@ type timelineImpactSessionWire struct {
 	ExpiresAt string `json:"expires_at"`
 }
 
+type timelineImpactDownstreamProposalWire struct {
+	timelineImpactDownstreamProposalDetailWire
+	Replayed bool `json:"replayed"`
+}
+
+type timelineImpactDownstreamProposalDetailWire struct {
+	ProposalType string                                `json:"proposal_type"`
+	ID           string                                `json:"id"`
+	WorkspaceID  string                                `json:"workspace_id"`
+	Status       string                                `json:"status"`
+	RiskLevel    string                                `json:"risk_level"`
+	Revision     timelineImpactDownstreamRevisionWire  `json:"revision"`
+	Approval     *timelineImpactDownstreamApprovalWire `json:"approval"`
+	CreatedAt    string                                `json:"created_at"`
+	UpdatedAt    string                                `json:"updated_at"`
+}
+
+type timelineImpactDownstreamApprovalWire struct{}
+
+type timelineImpactDownstreamRevisionWire struct {
+	ID           string                             `json:"id"`
+	RevisionNo   int                                `json:"revision_no"`
+	Update       timelineImpactDownstreamUpdateWire `json:"update"`
+	Risk         string                             `json:"risk"`
+	RollbackPlan string                             `json:"rollback_plan"`
+	ChangeHash   string                             `json:"change_hash"`
+	CreatedAt    string                             `json:"created_at"`
+}
+
+type timelineImpactDownstreamUpdateWire struct {
+	WorkspaceID       string                          `json:"workspace_id"`
+	SourceReport      timelineImpactSourceReportWire  `json:"source_report"`
+	SourceEvent       timelineImpactSourceEventWire   `json:"source_event"`
+	TargetType        string                          `json:"target_type"`
+	TargetID          string                          `json:"target_id"`
+	BaseVersion       int64                           `json:"base_version"`
+	Action            string                          `json:"action"`
+	ArtifactBinding   *domain.ArtifactImpactBinding   `json:"artifact_binding,omitempty"`
+	ReviewCardBinding *domain.ReviewCardImpactBinding `json:"review_card_binding,omitempty"`
+	Reason            string                          `json:"reason"`
+	SchemaVersion     string                          `json:"schema_version"`
+}
+
+type timelineImpactSourceReportWire struct {
+	ID              string `json:"id"`
+	AnalysisVersion string `json:"analysis_version"`
+	Fingerprint     string `json:"fingerprint"`
+}
+
+type timelineImpactSourceEventWire struct {
+	ID           string `json:"id"`
+	EventVersion int64  `json:"event_version"`
+}
+
 type timelineImpactReportWire struct {
-	ID                 string                    `json:"id"`
-	WorkspaceID        string                    `json:"workspace_id"`
-	SourceEventID      string                    `json:"source_event_id"`
-	SourceEventRef     string                    `json:"source_event_ref"`
-	SourceEventVersion int64                     `json:"source_event_version"`
-	Status             domain.ImpactReportStatus `json:"status"`
-	Objects            []domain.ImpactObject     `json:"objects"`
-	Summary            map[string]int            `json:"summary"`
-	Fingerprint        string                    `json:"fingerprint"`
-	ErrorCode          *string                   `json:"error_code,omitempty"`
-	StaleReason        *string                   `json:"stale_reason,omitempty"`
-	SchemaVersion      string                    `json:"schema_version"`
-	GeneratedAt        string                    `json:"generated_at"`
-	CreatedAt          string                    `json:"created_at"`
-	Version            int64                     `json:"version"`
+	ID                   string                       `json:"id"`
+	WorkspaceID          string                       `json:"workspace_id"`
+	SourceEventID        string                       `json:"source_event_id"`
+	SourceEventRef       string                       `json:"source_event_ref"`
+	SourceEventVersion   int64                        `json:"source_event_version"`
+	Status               domain.ImpactReportStatus    `json:"status"`
+	Objects              []domain.ImpactObject        `json:"objects"`
+	Summary              map[string]int               `json:"summary"`
+	Fingerprint          string                       `json:"fingerprint"`
+	ErrorCode            *string                      `json:"error_code,omitempty"`
+	StaleReason          *string                      `json:"stale_reason,omitempty"`
+	SchemaVersion        string                       `json:"schema_version"`
+	GeneratedAt          string                       `json:"generated_at"`
+	CreatedAt            string                       `json:"created_at"`
+	Version              int64                        `json:"version"`
+	AnalysisVersion      domain.ImpactAnalysisVersion `json:"analysis_version,omitempty"`
+	SupersedesReportID   *string                      `json:"supersedes_report_id,omitempty"`
+	SupersededByReportID *string                      `json:"superseded_by_report_id,omitempty"`
 }
 
 type timelineImpactProblemWire struct {
@@ -553,6 +759,78 @@ func doTimelineImpactResponse[T any](t *testing.T, client *http.Client, request 
 		t.Fatalf("Timeline/Impact response has trailing JSON: %v; body=%s", err, body)
 	}
 	return result
+}
+
+type timelineImpactDownstreamArtifactFixture struct {
+	reportID          foundation.ID
+	artifactID        foundation.ID
+	reportFingerprint string
+	binding           domain.ArtifactImpactBinding
+}
+
+func seedTimelineImpactDownstreamArtifact(t *testing.T, authenticated timelineImpactAuthenticatedFixture) timelineImpactDownstreamArtifactFixture {
+	t.Helper()
+	reportID := mustTimelineImpactID(t)
+	artifactID := mustTimelineImpactID(t)
+	revisionID := mustTimelineImpactID(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	binding := domain.ArtifactImpactBinding{
+		ArtifactID: artifactID, ArtifactVersion: 6, RevisionID: revisionID,
+		RevisionNo: 2, ContentHash: strings.Repeat("b", 64),
+	}
+	if err := pgx.BeginFunc(authenticated.ctx, authenticated.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(authenticated.ctx, `
+			INSERT INTO learning.artifact(
+				id,workspace_id,artifact_type,title,scope,status,version,created_at,updated_at,
+				domain_schema_version,scope_definition,source_coverage,current_revision_id
+			) VALUES($1,$2,'CUSTOM','Timeline downstream proposal artifact','{}','PLANNING',6,$3,$3,
+				'artifact/v1','API composition fixture','[]',$4)`,
+			artifactID, authenticated.workspaceID, now, revisionID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(authenticated.ctx, `
+			INSERT INTO learning.artifact_revision(
+				id,artifact_id,workspace_id,revision_no,status,outline,sections,coverage,missing,
+				conflicts,content_markdown,provenance,created_at,domain_schema_version,content_hash,
+				created_by_type,generation_metadata
+			) VALUES($1,$2,$3,2,'SNAPSHOT','[]','[]','[]','[]','[]','','{}',$4,
+				'artifact-revision/v1',$5,'HUMAN',NULL)`,
+			revisionID, artifactID, authenticated.workspaceID, now, binding.ContentHash)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	object := domain.ImpactObject{
+		Type: domain.ImpactObjectArtifact, ID: artifactID, WorkspaceID: authenticated.workspaceID,
+		Version: binding.ArtifactVersion, Action: domain.ImpactActionRegenerateArtifact,
+		Reason: "cited source changed", RequiresProposal: true, ArtifactBinding: &binding,
+	}
+	objects, err := json.Marshal([]domain.ImpactObject{object})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := json.Marshal(domain.SummarizeImpactObjects([]domain.ImpactObject{object}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := domain.ComputeImpactFingerprintForVersion(
+		domain.ImpactAnalysisVersionV2, authenticated.eventID, 1, []domain.ImpactObject{object},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authenticated.pool.Exec(authenticated.ctx, `
+		INSERT INTO ops.impact_report(
+			id,workspace_id,source_event_id,status,objects,summary,generated_at,schema_version,
+			source_event_version,fingerprint,version,created_at,analysis_version,supersedes_report_id
+		) VALUES($1,$2,$3,'READY',$4,$5,$6,'impact-report/v2',1,$7,1,$6,'impact-analysis/v2',NULL)`,
+		reportID, authenticated.workspaceID, authenticated.eventID, objects, summary, now, fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	return timelineImpactDownstreamArtifactFixture{
+		reportID: reportID, artifactID: artifactID, reportFingerprint: fingerprint, binding: binding,
+	}
 }
 
 func seedTimelineImpactWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, label string) foundation.ID {

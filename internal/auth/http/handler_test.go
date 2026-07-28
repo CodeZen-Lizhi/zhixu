@@ -324,6 +324,7 @@ func TestRequiredCapabilityDoesNotTreatGraphCommandsAsReadQueries(t *testing.T) 
 		{path: "/api/v1/workspaces/10000000-0000-4000-8000-000000000001/timeline", method: http.MethodGet, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/workspaces/10000000-0000-4000-8000-000000000001/timeline/10000000-0000-4000-8000-000000000002", method: http.MethodGet, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/workspaces/10000000-0000-4000-8000-000000000001/impact-reports/10000000-0000-4000-8000-000000000002", method: http.MethodGet, want: []capability.Capability{capability.ReadLocal}},
+		{path: "/api/v1/workspaces/10000000-0000-4000-8000-000000000001/impact-reports/10000000-0000-4000-8000-000000000002/proposals", method: http.MethodPost, want: []capability.Capability{capability.WriteProposal}},
 		{path: "/api/v1/workspaces/10000000-0000-4000-8000-000000000001/timeline/10000000-0000-4000-8000-000000000002/impact-analysis", method: http.MethodPost, want: []capability.Capability{capability.WriteProposal}},
 		{path: "/api/v1/review/decks", method: http.MethodPost, want: []capability.Capability{capability.WriteProposal}},
 		{path: "/api/v1/review/decks/10000000-0000-4000-8000-000000000001/cards", method: http.MethodPost, want: []capability.Capability{capability.WriteProposal}},

@@ -220,6 +220,7 @@ var capabilityRoutes = []capabilityRoute{
 	oneCapability(http.MethodPost, "/api/v1/workflows/{runID}/resume", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/workflows/{runID}/cancel", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/proposals", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/impact-reports/{reportID}/proposals", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/collections", capability.WriteProposal),
 	oneCapability(http.MethodPut, "/api/v1/collections/{collection_id}", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/collections/{collection_id}/archive", capability.WriteProposal),

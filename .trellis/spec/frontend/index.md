@@ -14,8 +14,9 @@ M7-02 已在同一 `/graph` 页面增加独立 Semantic Link Candidate 面板、
 M7-03 已交付 Collection/Knowledge Health strict decoder、Workspace-bound Query keys、三视图、Evidence/Decision/Scan
 恢复、Vite 同源 proxy 和桌面/移动真实浏览器 smoke；cursor 仍是 opaque server state，SSE 只做 invalidation，Tag/
 Review/Directory/Artifact owner 和最终容量/认证不在本任务范围。
-M7-04 只把 `knowledge_timeline` 加入 system-status strict capability decoder，并锁定未知/缺失字段 fail closed；
-Timeline/Impact 页面、事件详情导航与版本比较 UI 仍未交付，不得用 system-status 展示冒充功能页面。
+M7 Timeline/Impact 已交付 `/timeline`、`/timeline/:eventId`、严格 `web/src/api/timeline.ts`、Workspace-bound Query、
+URL filter/cursor、v1/v2 Event/Report、Artifact/Review owner binding，以及从当前报告创建正式 `downstream_update`
+Proposal 的交互。批准仍只记录 decision；下游 Apply/executor 未交付，UI 不得显示可应用或已修改目标。
 M9 已交付业务工作台、严格 Proposal 判别联合、Workspace-bound 详情和全站唯一 SSE Event Store；Apply Preflight 明确属于 Approval 后写回检查，Monaco DiffEditor 模型在内部 editor detach 后按 URI 安全释放。
 M9-03 已在 Collection 详情交付异步 Export Panel、`web/src/api/exports.ts` 严格 decoder、Workspace/Collection-bound
 Query、刷新恢复、2 秒有界轮询、`export.*` SSE 定向失效和受控 Blob 下载；正式范围仅为 `MARKDOWN` 与
@@ -59,10 +60,10 @@ M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`�
 | [目录结构](./directory-structure.md) | Feature 边界和依赖方向 | 实际根目录、Alias、Public Export |
 | [组件规范](./component-guidelines.md) | 组合、Props、UI 状态和可访问性 | 已记录 M7-01 Graph 画布/列表、Evidence/移动 drawer，以及 M9 Monaco DiffEditor 安全卸载契约 |
 | [Hook 规范](./hook-guidelines.md) | Query、Command、URL 和 SSE Hook | Query Key Factory 和 Hook Test Harness |
-| [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | 已记录 M7-03 Workspace cache、M9 唯一 SSE Owner、M9-03 Export polling/recovery，以及 M10 Auth/CSRF 状态和匿名时的 Query 清理契约 |
-| [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 M7-03 Collection/Health、M7-04 `knowledge_timeline` capability、M9 Business/M9-03 Export 与 M10 Auth 响应/Problem 的严格解码 |
+| [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | 已记录 Timeline filter/cursor/idempotency 与 projector-safe refresh、M7-03 Workspace cache、M9 唯一 SSE Owner、M9-03 Export polling/recovery，以及 M10 Auth/CSRF 状态和匿名时的 Query 清理契约 |
+| [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 Timeline/Impact v1/v2 与 downstream Proposal、M7-03 Collection/Health、M9 Business/M9-03 Export 与 M10 Auth 响应/Problem 的严格解码 |
 | [Artifact 工作台契约](./artifact-workbench.md) | Artifact wire、Query、generation 恢复、GAP/export/publish UI 边界 | M8-01 decoder、组件、桌面/移动真实浏览器闭环已验证 |
-| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 M7-01 Graph、M7-02 Candidate、M7-03 Collection/Health、M8 Review/Shared Path/Interview/Memory、M9-03 Export 与 M10 认证浏览器门禁 |
+| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 Timeline/Impact strict decoder、状态/幂等/异步投影门禁，以及 Graph、Collection/Health、Review/Shared Path/Interview/Memory、Export 与认证浏览器门禁 |
 
 ## 开发前检查清单
 

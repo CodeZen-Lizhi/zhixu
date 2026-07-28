@@ -7,14 +7,15 @@ import (
 )
 
 const (
-	ErrorCodeRequestInvalid        = "ARTIFACT_REQUEST_INVALID"
-	ErrorCodeDependencyUnavailable = "ARTIFACT_DEPENDENCY_UNAVAILABLE"
-	ErrorCodeNotFound              = "ARTIFACT_NOT_FOUND"
-	ErrorCodeIdempotencyConflict   = "ARTIFACT_IDEMPOTENCY_CONFLICT"
-	ErrorCodeVersionConflict       = "ARTIFACT_VERSION_CONFLICT"
-	ErrorCodeResultInconsistent    = "ARTIFACT_RESULT_INCONSISTENT"
-	ErrorCodeEvidenceInvalid       = "ARTIFACT_EVIDENCE_INVALID"
-	ErrorCodeExportInvalid         = "ARTIFACT_EXPORT_INVALID"
+	ErrorCodeRequestInvalid         = "ARTIFACT_REQUEST_INVALID"
+	ErrorCodeDependencyUnavailable  = "ARTIFACT_DEPENDENCY_UNAVAILABLE"
+	ErrorCodeNotFound               = "ARTIFACT_NOT_FOUND"
+	ErrorCodeIdempotencyConflict    = "ARTIFACT_IDEMPOTENCY_CONFLICT"
+	ErrorCodeVersionConflict        = "ARTIFACT_VERSION_CONFLICT"
+	ErrorCodeResultInconsistent     = "ARTIFACT_RESULT_INCONSISTENT"
+	ErrorCodeEvidenceInvalid        = "ARTIFACT_EVIDENCE_INVALID"
+	ErrorCodeExportInvalid          = "ARTIFACT_EXPORT_INVALID"
+	ErrorCodeCitationBackfillFailed = "ARTIFACT_CITATION_BACKFILL_FAILED"
 )
 
 func requestInvalid(message string) error {

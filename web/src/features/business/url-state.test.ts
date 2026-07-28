@@ -69,6 +69,13 @@ describe("business URL state", () => {
     expect(parseProposalUrlState(written)).toMatchObject({ type: "publish_artifact", risk: "HIGH" });
   });
 
+  it("round-trips the downstream_update Proposal filter", () => {
+    const written = writeProposalUrlState({ status: "ready_for_review", type: "downstream_update", risk: "HIGH", createdDate: "" });
+
+    expect(written.toString()).toBe("status=ready_for_review&proposal_type=downstream_update&risk=HIGH");
+    expect(parseProposalUrlState(written)).toMatchObject({ status: "ready_for_review", type: "downstream_update", risk: "HIGH" });
+  });
+
   it("normalizes Workflow state and excludes pagination from the canonical URL", () => {
     const state = parseWorkflowUrlState(new URLSearchParams("status=paused&cursor=page-2&cursor_workspace=old-workspace"));
     expect(state).toEqual({ status: "paused" });

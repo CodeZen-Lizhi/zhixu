@@ -251,12 +251,13 @@ controlWorkflow(workflowId, action, expectedVersion)
 ```
 
 - `ProposalCurrentContent` 响应必须包含 `proposal_id + workspace_id + target_path + content + current_hash + base_hash + base_hash_match`。
-- Proposal 是 `file_patch | knowledge_change` 判别联合；组件只能消费 camelCase 联合分支，不能读取 snake_case 或自行猜类型。
+- Proposal 是 `file_patch | knowledge_change | publish_artifact | downstream_update` 判别联合；组件只能消费 camelCase 联合分支，不能读取 snake_case 或自行猜类型。
 
 ### 3. Contracts
 
 - UUID、64 位小写 SHA-256、RFC3339、正安全整数、Page Cursor 长度、状态枚举和数组上下限全部运行时校验。
 - `knowledge_change` 固定 `schema_version=knowledge-relation-change/v1`、`operation=CREATE_RELATION`、Target Ref 类型、Node/Relation 枚举和 Evidence/版本数量。
+- `downstream_update` 固定 `schema_version=impact-downstream-update/v1`、`risk_level=HIGH`，必须完整冻结 source report/event、target/action、owner binding；approved 分支不得携带 Workflow、Git 或写回字段。
 - 详情响应的 `workspace_id` 和资源 ID 必须与 Active Workspace/路由 ID 精确一致；Query Key 包含 Workspace 不能替代响应绑定。
 - 首次批准直接调用 Approval 命令。现有 `apply-preflight` 是 approved Proposal 的写回前检查，不是 pre-decision endpoint；不得在 `/approvals` 前调用。
 - File Patch 批准仍由服务端 Approval 命令重新校验 Revision、Change Hash、当前文件 Hash 与 Git；UI 的 Diff/current-content 只提供审阅和提前禁用，不是安全授权。
@@ -272,13 +273,14 @@ controlWorkflow(workflowId, action, expectedVersion)
 | 响应 UUID/hash/time/version/enum/const 非法 | `BusinessApiError(INVALID_RESPONSE)`，不渲染部分事实 |
 | Proposal/Workflow/current-content Workspace 或资源 ID 不匹配 | fail closed，详情与写按钮不可用 |
 | Knowledge Change 数组为空/超限、Base Version 不等于 2 | 拒绝整个 Proposal |
+| Downstream Update binding/schema/risk 不一致，或携带执行字段 | 拒绝整个 Proposal；不显示 Apply 命令 |
 | ready Proposal 首次批准 | 调用 `/approvals`；不得先调用 post-approval preflight |
 | Approval/Workflow 409 | 保留错误并重新查询，不显示 optimistic success |
 | File Patch current hash 漂移 | 禁用批准；服务端命令仍以 409/needs_revision 兜底 |
 
 ### 5. Good / Base / Bad Cases
 
-- Good：Active Workspace B 打开 A 的旧详情 URL 时 decoder 拒绝；合法 file patch/knowledge change 使用各自 UI，首次批准能到达服务端 Approval。
+- Good：Active Workspace B 打开 A 的旧详情 URL 时 decoder 拒绝；各 Proposal 分支使用自己的严格 UI，`downstream_update` 可审批但明确不可应用。
 - Base：正文读取不可用时仍可驳回，但批准保持禁用；未交付编辑后批准/暂缓/三方合并只显示能力说明。
 - Bad：只因 Query Key 含 Workspace 就信任全局详情；组件 `as Proposal`；把 Apply Preflight 放在首次 Approval 前；非法 knowledge payload 仍进入 Relation Diff。
 
@@ -328,3 +330,27 @@ Correct: 按 OpenAPI 校验 knowledge-relation-change/v1、CREATE_RELATION、UUI
   `200` replay/`202` create、`dispatch_pending`、Problem、Abort 和下载 header/size。
 - Query/Component 测试覆盖同 key response-loss、终态停止轮询、SSE 失效、失败/过期新建和历史 `CANCELLED`。
   测试 fixture 只能使用两个已交付 kind，且必须明确 AC-33 附件部分仍未完成。
+
+## Scenario: M7 Timeline / Impact Wire Boundary
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/timeline.ts`、Timeline/Impact Query、页面、路由或 downstream Proposal 创建时应用。
+- `web/src/api/timeline.ts` 是 Event、Impact Report/Object 与创建响应的唯一 wire owner；组件不得解析 raw JSON。
+
+### 2. Contracts
+
+- Event 以 `knowledge-event/v1|v2` 判别；只有 v2 接受 operator/owner binding，且 `ARTIFACT_GENERATED`、
+  `REVIEW_CARD_INVALIDATED` 必须是 v2 并携带对应 owner snapshot。
+- Report 以 `impact-report/v1|v2` 判别；v2 固定 `impact-analysis/v2` 并严格解码 supersession、Artifact/Review
+  binding。Workspace、路由 ID、source event/report/target binding 任一漂移都拒绝整个响应。
+- 创建响应只接受正式 `downstream_update`、`HIGH` risk、`impact-downstream-update/v1` 和合法 replay/status 组合；
+  UUID、RFC3339、正整数、64 位小写 hash、枚举、nullable/optional 与未知字段全部运行时校验。
+- 只有服务端结构化 correlation 或已知 owner 类型可产生导航；Commit、Evidence、Review Card 等无正式 detail owner
+  的引用只显示类型化文本，不从 `source_ref` 猜 URL。
+
+### 3. Tests Required
+
+- 覆盖 v1/v2 normal/empty、未知/重复字段、非法 binding/hash/time/version/enum、Workspace/route mismatch、
+  cursor/Problem/Abort/network unknown，以及 downstream create/replay/status/risk/schema 组合。
+- `INVALID_RESPONSE` 不渲染部分事实；网络未知重试必须复用原 mutation variables 与 Idempotency-Key。

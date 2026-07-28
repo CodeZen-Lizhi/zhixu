@@ -13,6 +13,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
+	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 )
 
 // TargetReader 从服务端受控的 Workspace 边界读取目标文件当前哈希。
@@ -124,6 +125,31 @@ type CreatePublishArtifactCommand struct {
 	Risk           string
 	RollbackPlan   string
 }
+
+// CreateDownstreamUpdateCommand 选择当前 Impact 报告中的一个 owner-backed target。
+type CreateDownstreamUpdateCommand struct {
+	WorkspaceID    foundation.ID
+	ReportID       foundation.ID
+	TargetType     knowledge.ImpactObjectType
+	TargetID       foundation.ID
+	Action         knowledge.ImpactAction
+	IdempotencyKey string
+}
+
+// DownstreamUpdateFactory 从当前报告和 owner 事实重建不可变 Proposal 载荷。
+type DownstreamUpdateFactory interface {
+	BuildDownstreamUpdate(context.Context, foundation.ID, foundation.ID, knowledge.ImpactObjectType, foundation.ID, knowledge.ImpactAction) (domain.DownstreamUpdate, error)
+}
+
+// ProposalCreateLookup 为 owner 事实变化后的精确幂等重放提供持久绑定查询。
+type ProposalCreateLookup interface {
+	FindProposalByIdempotencyKey(context.Context, foundation.ID, string) (domain.Proposal, bool, error)
+}
+
+const (
+	downstreamUpdateRiskNarrative = "Impact report identified an owner-backed downstream dependency"
+	downstreamUpdateRollbackPlan  = "No target write has executed; future execution requires a new Proposal revision and owner executor"
+)
 
 // CreateResult 包含 Proposal 和是否命中已有幂等请求。
 type CreateResult struct {
@@ -295,6 +321,82 @@ func (s *Service) CreatePublishArtifactProposal(ctx context.Context, command Cre
 	return CreateResult{Proposal: proposal, Replayed: !proposal.CreatedAt.Equal(now)}, nil
 }
 
+// CreateDownstreamUpdateProposal 创建 approval-only Proposal，不授予任何目标写回能力。
+func (s *Service) CreateDownstreamUpdateProposal(ctx context.Context, command CreateDownstreamUpdateCommand) (CreateResult, error) {
+	repository, repositoryOK := s.repo.(domain.DownstreamUpdateProposalRepository)
+	factory, factoryOK := s.repo.(DownstreamUpdateFactory)
+	lookup, lookupOK := s.repo.(ProposalCreateLookup)
+	if !repositoryOK || !factoryOK || !lookupOK {
+		return CreateResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "KNOWLEDGE_IMPACT_UNAVAILABLE", false, errors.New("downstream update proposal dependencies are unavailable"))
+	}
+	workspaceID, workspaceErr := foundation.ParseID(string(command.WorkspaceID))
+	reportID, reportErr := foundation.ParseID(string(command.ReportID))
+	targetID, targetErr := foundation.ParseID(string(command.TargetID))
+	idempotencyKey := strings.TrimSpace(command.IdempotencyKey)
+	if workspaceErr != nil || reportErr != nil || targetErr != nil || idempotencyKey == "" || len(idempotencyKey) > 128 ||
+		command.TargetType != knowledge.ImpactObjectArtifact && command.TargetType != knowledge.ImpactObjectReviewCard ||
+		command.TargetType == knowledge.ImpactObjectArtifact && command.Action != knowledge.ImpactActionRegenerateArtifact ||
+		command.TargetType == knowledge.ImpactObjectReviewCard && command.Action != knowledge.ImpactActionRevalidateReviewCard {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "DOWNSTREAM_UPDATE_PROPOSAL_INVALID", false, errors.New("downstream update selection is invalid"))
+	}
+	command.WorkspaceID, command.ReportID, command.TargetID = workspaceID, reportID, targetID
+	if existing, found, err := lookup.FindProposalByIdempotencyKey(ctx, workspaceID, idempotencyKey); err != nil {
+		return CreateResult{}, err
+	} else if found {
+		update := existing.Revision.DownstreamUpdate
+		if proposalType(existing) != domain.ProposalTypeDownstreamUpdate || update == nil ||
+			update.WorkspaceID != workspaceID || update.ReportID != reportID || update.TargetType != command.TargetType ||
+			update.TargetID != targetID || update.Action != command.Action {
+			return CreateResult{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
+		}
+		return CreateResult{Proposal: existing, Replayed: true}, nil
+	}
+	update, err := factory.BuildDownstreamUpdate(ctx, workspaceID, reportID, command.TargetType, targetID, command.Action)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	canonical, err := domain.ValidateDownstreamUpdate(update)
+	if err != nil || canonical.WorkspaceID != workspaceID || canonical.ReportID != reportID || canonical.TargetType != command.TargetType || canonical.TargetID != targetID || canonical.Action != command.Action {
+		if err == nil {
+			err = errors.New("downstream update factory returned a different selection")
+		}
+		return CreateResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "DOWNSTREAM_UPDATE_PROPOSAL_INVALID", false, err)
+	}
+	proposalID, err := s.ids.New()
+	if err != nil {
+		return CreateResult{}, err
+	}
+	revisionID, err := s.ids.New()
+	if err != nil {
+		return CreateResult{}, err
+	}
+	changeHash, err := domain.ComputeDownstreamUpdateHash(canonical, downstreamUpdateRiskNarrative, downstreamUpdateRollbackPlan)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "DOWNSTREAM_UPDATE_PROPOSAL_INVALID", false, err)
+	}
+	requestHash, err := domain.ComputeDownstreamUpdateRequestHash(
+		workspaceID, canonical, domain.ProposalRiskLevelHigh, downstreamUpdateRiskNarrative, downstreamUpdateRollbackPlan,
+	)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "DOWNSTREAM_UPDATE_PROPOSAL_INVALID", false, err)
+	}
+	now := s.clock.Now()
+	revision := domain.Revision{
+		ID: revisionID, ProposalID: proposalID, RevisionNo: 1,
+		Risk: downstreamUpdateRiskNarrative, RollbackPlan: downstreamUpdateRollbackPlan,
+		ChangeHash: changeHash, DownstreamUpdate: &canonical, CreatedAt: now,
+	}
+	proposal, err := repository.CreateDownstreamUpdateProposal(ctx, domain.Proposal{
+		ID: proposalID, WorkspaceID: workspaceID, Type: domain.ProposalTypeDownstreamUpdate,
+		RiskLevel: domain.ProposalRiskLevelHigh, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
+		Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: revision,
+	})
+	if err != nil {
+		return CreateResult{}, err
+	}
+	return CreateResult{Proposal: proposal, Replayed: proposal.ID != proposalID}, nil
+}
+
 // GetProposal 返回 Proposal 当前 Revision 与已有审批决定。
 func (s *Service) GetProposal(ctx context.Context, proposalID foundation.ID) (domain.Proposal, error) {
 	if proposalID == "" {
@@ -448,7 +550,7 @@ func (s *Service) DecideProposalWithDispatch(ctx context.Context, proposalID, re
 		}
 		return ApprovalDecisionResult{Approval: approval, Replayed: proposal.Approval != nil}, nil
 	}
-	if proposalType(proposal) == domain.ProposalTypePublishArtifact {
+	if proposalType(proposal) == domain.ProposalTypePublishArtifact || proposalType(proposal) == domain.ProposalTypeDownstreamUpdate {
 		approval, approvalErr := s.decideProposalLegacy(ctx, proposalID, revisionID, changeHash, decision)
 		if approvalErr != nil {
 			return ApprovalDecisionResult{}, approvalErr
@@ -716,6 +818,13 @@ func (s *Service) ConsumeWriteAuthorization(ctx context.Context, request domain.
 	request.ApprovedChangeHash = strings.ToLower(request.ApprovedChangeHash)
 	request.TargetVersion = strings.ToLower(request.TargetVersion)
 	request.Credential = hashCredential(request.Credential)
+	proposal, err := s.repo.GetProposal(ctx, request.ProposalID)
+	if err != nil {
+		return domain.AuthorizationConsumeResult{}, err
+	}
+	if err := requireFilePatchProposal(proposal, "WRITE_AUTHORIZATION_PROPOSAL_TYPE_UNSUPPORTED"); err != nil {
+		return domain.AuthorizationConsumeResult{}, err
+	}
 	existing, err := authorizations.GetAuthorization(ctx, request.WorkspaceID, request.IdempotencyKey, request.Credential)
 	if err != nil {
 		return domain.AuthorizationConsumeResult{}, err
@@ -727,13 +836,6 @@ func (s *Service) ConsumeWriteAuthorization(ctx context.Context, request domain.
 		result, consumeErr := authorizations.ConsumeAuthorization(ctx, request)
 		result.Authorization.TokenHash = ""
 		return result, consumeErr
-	}
-	proposal, err := s.repo.GetProposal(ctx, request.ProposalID)
-	if err != nil {
-		return domain.AuthorizationConsumeResult{}, err
-	}
-	if err := requireFilePatchProposal(proposal, "WRITE_AUTHORIZATION_PROPOSAL_TYPE_UNSUPPORTED"); err != nil {
-		return domain.AuthorizationConsumeResult{}, err
 	}
 	if proposal.WorkspaceID != request.WorkspaceID || proposal.Revision.ID != request.RevisionID || proposal.Approval == nil || proposal.Approval.ID != request.ApprovalID || proposal.Status != domain.StatusApproved || proposal.Approval.Decision != domain.DecisionApproved || proposal.Revision.ChangeHash != request.ApprovedChangeHash || proposal.Revision.BaseHash != request.TargetVersion || proposal.Approval.ChangeHash != request.ApprovedChangeHash || strings.TrimSpace(request.Scope) != domain.ExpectedAuthorizationScope(proposal.Revision.TargetPath) || proposal.Revision.ChangeHash != domain.ComputeChangeHash(proposal.Revision.TargetPath, proposal.Revision.BaseHash, proposal.Revision.Content) {
 		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, errors.New("authorization approval binding is no longer valid"))
@@ -801,8 +903,15 @@ func proposalRiskLevelForCreate(level domain.ProposalRiskLevel) (domain.Proposal
 }
 
 func requireFilePatchProposal(proposal domain.Proposal, code string) error {
+	if proposalType(proposal) == domain.ProposalTypeDownstreamUpdate {
+		return downstreamUpdateApplyUnavailable()
+	}
 	if proposalType(proposal) != domain.ProposalTypeFilePatch {
 		return foundation.NewError(foundation.ErrorPermissionDenied, code, false, errors.New("proposal type does not support file writeback"))
 	}
 	return nil
+}
+
+func downstreamUpdateApplyUnavailable() error {
+	return domain.NewDownstreamUpdateApplyUnavailableError()
 }

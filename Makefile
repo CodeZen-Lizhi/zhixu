@@ -124,13 +124,15 @@ export-browser-smoke:
 
 timeline-impact-integration:
 	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
-	go test -race -tags=integration -count=1 -p 1 -run '^(TestTimelineImpactPublicHTTPIntegration|TestTimelineImpactAuthenticatedAPITokenAuditIntegration|TestTimelineImpactAuthenticatedSessionAuditIntegration)$$' ./cmd/api
-	go test -race -tags=integration -count=1 -p 1 -run '^(TestTimelineRepositoryAppendPageAndImpactReplay|TestImpactReportAndTimelineOutboxRollBackWhenTransactionalAuditFails|TestTimelineRepositoryListImpactObjectsKeepsActionsReadOnly|TestTimelineProjectionOutboxConnectsProposalConflictAndImpact|TestTimelineProjectionTwoDispatchersSkipLockedAndPersistExactlyOneEvent)$$' ./internal/knowledge/adapter/postgres
-	go test -race -tags=integration -count=1 -p 1 -run '^TestTimelineImpactMigration' ./internal/platform/migration
+	go test -race -tags=integration -count=1 -p 1 -timeout 60s -run '^TestTimelineImpact' ./cmd/api
+	go test -race -tags=integration -count=1 -p 1 -timeout 60s -run '^(TestTimelineRepositoryAppendPageAndImpactReplay|TestImpactReportV2SupersedesV1AndDerivesSuccessor|TestImpactReportV2RequiresMatchingV1Predecessor|TestTimelineRepositoryListImpactObjectsRejectsMoreThan500Candidates|TestImpactReportV2ConcurrentCreateReplaysOneWinner|TestImpactReportV2RejectsIncompleteSelectorMarkerWithoutWrites|TestTimelineRepositoryListsOwnerBackedImpactFromExactProvenanceAndRejectsStaleSnapshot|TestImpactReportAndTimelineOutboxRollBackWhenTransactionalAuditFails|TestTimelineRepositoryListImpactObjectsKeepsActionsReadOnly|TestTimelineProjectionOutboxConnectsProposalConflictAndImpact|TestTimelineProjectionV2PersistsOwnerBindingAndReplays|TestTimelineProjectionTwoDispatchersSkipLockedAndPersistExactlyOneEvent)$$' ./internal/knowledge/adapter/postgres
+	go test -race -tags=integration -count=1 -p 1 -timeout 60s -run '^(TestRepositoryDownstreamUpdateProposalRoundTripReplayAndApprovalOnly|TestRepositoryBuildDownstreamReviewCardProposalGuardsBindings)$$' ./internal/changecontrol/adapter/postgres
+	go test -race -tags=integration -count=1 -p 1 -timeout 60s -run '^(TestArtifactRevisionWritesCitationSelectorsInOwnerTransaction|TestArtifactCitationBackfillPersistsFailureAndResumesExactValidation)$$' ./internal/artifact/adapter/postgres
+	go test -race -tags=integration -count=1 -p 1 -timeout 60s -run '^TestTimelineImpact(V2)?Migration' ./internal/platform/migration
 
 timeline-impact-fault-smoke:
 	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
-	go test -race -tags=integration -count=1 -p 1 -run '^TestTimelineProjectionPersistsPoisonWithoutWritingKnowledgeEvent$$' ./internal/knowledge/adapter/postgres
+	go test -race -tags=integration -count=1 -p 1 -timeout 60s -run '^TestTimelineProjection(V2PoisonsMalformedOwnerAndOperator|PersistsPoisonWithoutWritingKnowledgeEvent)$$' ./internal/knowledge/adapter/postgres
 
 timeline-impact-worker-smoke:
 	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)

@@ -95,7 +95,9 @@ type Revision struct {
 	ChangeHash      string
 	KnowledgeChange *KnowledgeChange
 	PublishArtifact *PublishArtifact
-	CreatedAt       time.Time
+	// DownstreamUpdate 仅在 downstream_update Revision 中存在，记录审批意图而非写回命令。
+	DownstreamUpdate *DownstreamUpdate
+	CreatedAt        time.Time
 }
 
 // Approval 将用户决定绑定到唯一 Revision 和 Change Hash。
@@ -144,6 +146,11 @@ func ValidateProposalRiskLevelForType(proposalType ProposalType, level ProposalR
 			return "", fmt.Errorf("%w: publish_artifact proposals require HIGH", ErrProposalRiskLevelInvalid)
 		}
 		return parsed, nil
+	case ProposalTypeDownstreamUpdate:
+		if parsed != ProposalRiskLevelHigh {
+			return "", fmt.Errorf("%w: downstream_update proposals require HIGH", ErrProposalRiskLevelInvalid)
+		}
+		return parsed, nil
 	default:
 		return "", ErrProposalTypeInvalid
 	}
@@ -182,6 +189,17 @@ func ValidateProposalTransition(from, to ProposalStatus) error {
 		return ErrProposalInvalidTransition
 	}
 	return nil
+}
+
+// ValidateProposalTransitionForType 按 Proposal 类型收紧状态迁移。
+func ValidateProposalTransitionForType(proposalType ProposalType, from, to ProposalStatus) error {
+	if NormalizeProposalType(proposalType) == ProposalTypeDownstreamUpdate {
+		if from == StatusReady && (to == StatusApproved || to == StatusRejected) {
+			return nil
+		}
+		return ErrProposalInvalidTransition
+	}
+	return ValidateProposalTransition(from, to)
 }
 
 // ComputeChangeHash 对版本化规范载荷计算哈希，保留内容中的语义空白。

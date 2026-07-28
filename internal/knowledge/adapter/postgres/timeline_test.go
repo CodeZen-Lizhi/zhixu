@@ -29,14 +29,65 @@ func TestScanImpactReportAcceptsMatchingSourceEventVersion(t *testing.T) {
 	}
 }
 
+func TestScanImpactReportRejectsFingerprintDrift(t *testing.T) {
+	_, err := scanImpactReport(impactReportRowStub{
+		reportSourceVersion: 2,
+		eventVersion:        2,
+		fingerprint:         strings.Repeat("f", 64),
+	})
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorConsistencyViolation || classified.Code != domain.ErrorCodeTimelineInconsistent {
+		t.Fatalf("classified=%#v err=%v", classified, err)
+	}
+}
+
+func TestScanImpactReportAcceptsV2SupersessionProjection(t *testing.T) {
+	predecessor := "10000000-0000-4000-8000-000000000004"
+	successor := "10000000-0000-4000-8000-000000000005"
+	report, err := scanImpactReport(impactReportRowStub{
+		reportSourceVersion:  2,
+		eventVersion:         2,
+		analysisVersion:      domain.ImpactAnalysisVersionV2,
+		schemaVersion:        domain.ImpactReportSchemaVersionV2,
+		supersedesReportID:   &predecessor,
+		supersededByReportID: &successor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AnalysisVersion != domain.ImpactAnalysisVersionV2 || report.SupersedesReportID == nil || *report.SupersedesReportID != foundation.ID(predecessor) || report.SupersededByReportID == nil || *report.SupersededByReportID != foundation.ID(successor) {
+		t.Fatalf("report=%#v", report)
+	}
+}
+
 type impactReportRowStub struct {
-	reportSourceVersion int64
-	eventVersion        int64
+	reportSourceVersion  int64
+	eventVersion         int64
+	analysisVersion      domain.ImpactAnalysisVersion
+	schemaVersion        string
+	supersedesReportID   *string
+	supersededByReportID *string
+	fingerprint          string
 }
 
 func (row impactReportRowStub) Scan(destinations ...any) error {
-	if len(destinations) != 16 {
-		return fmt.Errorf("destination count = %d, want 16", len(destinations))
+	if len(destinations) != 19 {
+		return fmt.Errorf("destination count = %d, want 19", len(destinations))
+	}
+	if row.analysisVersion == "" {
+		row.analysisVersion = domain.ImpactAnalysisVersionV1
+	}
+	if row.schemaVersion == "" {
+		row.schemaVersion = domain.ImpactReportSchemaVersion
+	}
+	if row.fingerprint == "" {
+		fingerprint, err := domain.ComputeImpactFingerprintForVersion(
+			row.analysisVersion, foundation.ID("10000000-0000-4000-8000-000000000003"), row.reportSourceVersion, nil,
+		)
+		if err != nil {
+			return err
+		}
+		row.fingerprint = fingerprint
 	}
 	now := time.Date(2026, 7, 25, 8, 9, 10, 123456000, time.UTC)
 	*destinations[0].(*string) = "10000000-0000-4000-8000-000000000001"
@@ -46,14 +97,17 @@ func (row impactReportRowStub) Scan(destinations ...any) error {
 	*destinations[4].(*string) = "[]"
 	*destinations[5].(*string) = "{}"
 	*destinations[6].(*time.Time) = now
-	*destinations[7].(*string) = domain.ImpactReportSchemaVersion
-	*destinations[8].(*int64) = row.reportSourceVersion
-	*destinations[9].(*string) = strings.Repeat("a", 64)
-	*destinations[10].(**string) = nil
-	*destinations[11].(**string) = nil
-	*destinations[12].(*int64) = 1
-	*destinations[13].(*time.Time) = now
-	*destinations[14].(*string) = "conflict:resolved:2"
-	*destinations[15].(*int64) = row.eventVersion
+	*destinations[7].(*string) = row.schemaVersion
+	*destinations[8].(*string) = string(row.analysisVersion)
+	*destinations[9].(**string) = row.supersedesReportID
+	*destinations[10].(**string) = row.supersededByReportID
+	*destinations[11].(*int64) = row.reportSourceVersion
+	*destinations[12].(*string) = row.fingerprint
+	*destinations[13].(**string) = nil
+	*destinations[14].(**string) = nil
+	*destinations[15].(*int64) = 1
+	*destinations[16].(*time.Time) = now
+	*destinations[17].(*string) = "conflict:resolved:2"
+	*destinations[18].(*int64) = row.eventVersion
 	return nil
 }

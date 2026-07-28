@@ -98,13 +98,18 @@ func (handler *Handler) listTimeline(w http.ResponseWriter, r *http.Request) {
 		writeError(w, resultInconsistent("timeline page crossed request binding"))
 		return
 	}
-	items := make([]knowledgeEventResponse, 0, len(page.Items))
+	items := make([]any, 0, len(page.Items))
 	for _, event := range page.Items {
 		if event.WorkspaceID != workspaceID || event.Validate() != nil {
 			writeError(w, resultInconsistent("timeline event projection is invalid"))
 			return
 		}
-		items = append(items, toKnowledgeEventResponse(event))
+		response, responseErr := toKnowledgeEventResponse(event)
+		if responseErr != nil {
+			writeError(w, resultInconsistent("timeline event wire is invalid"))
+			return
+		}
+		items = append(items, response)
 	}
 	response := timelineListResponse{WorkspaceID: string(workspaceID), Items: items}
 	if page.NextCursor != "" {
@@ -138,7 +143,12 @@ func (handler *Handler) getTimelineEvent(w http.ResponseWriter, r *http.Request)
 		writeError(w, resultInconsistent("timeline event crossed request binding"))
 		return
 	}
-	httpapi.WriteJSON(w, http.StatusOK, toKnowledgeEventResponse(event))
+	response, responseErr := toKnowledgeEventResponse(event)
+	if responseErr != nil {
+		writeError(w, resultInconsistent("timeline event wire is invalid"))
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, response)
 }
 
 func (handler *Handler) analyzeImpact(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +181,7 @@ func (handler *Handler) analyzeImpact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if result.Report.WorkspaceID != workspaceID || result.Report.SourceEventID != eventID || domain.ValidateImpactReport(result.Report) != nil {
+	if result.Report.WorkspaceID != workspaceID || result.Report.SourceEventID != eventID || validateImpactReportWire(result.Report) != nil {
 		writeError(w, resultInconsistent("impact report crossed request binding"))
 		return
 	}
@@ -185,7 +195,12 @@ func (handler *Handler) analyzeImpact(w http.ResponseWriter, r *http.Request) {
 	if result.Replayed {
 		status = http.StatusOK
 	}
-	httpapi.WriteJSON(w, status, impactAnalysisResponse{Report: toImpactReportResponse(result.Report), ProposalDrafts: result.ProposalDrafts, Replayed: result.Replayed})
+	reportResponse, responseErr := toImpactReportResponse(result.Report)
+	if responseErr != nil {
+		writeError(w, resultInconsistent("impact report wire is invalid"))
+		return
+	}
+	httpapi.WriteJSON(w, status, impactAnalysisResponse{Report: reportResponse, ProposalDrafts: result.ProposalDrafts, Replayed: result.Replayed})
 }
 
 func (handler *Handler) getImpactReport(w http.ResponseWriter, r *http.Request) {
@@ -209,11 +224,16 @@ func (handler *Handler) getImpactReport(w http.ResponseWriter, r *http.Request) 
 		writeError(w, err)
 		return
 	}
-	if report.WorkspaceID != workspaceID || report.ID != reportID || domain.ValidateImpactReport(report) != nil {
+	if report.WorkspaceID != workspaceID || report.ID != reportID || validateImpactReportWire(report) != nil {
 		writeError(w, resultInconsistent("impact report crossed request binding"))
 		return
 	}
-	httpapi.WriteJSON(w, http.StatusOK, toImpactReportResponse(report))
+	response, responseErr := toImpactReportResponse(report)
+	if responseErr != nil {
+		writeError(w, resultInconsistent("impact report wire is invalid"))
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, response)
 }
 
 func parseTimelineListRequest(r *http.Request, workspaceID foundation.ID) (knowledgeapp.TimelineListRequest, error) {
@@ -421,11 +441,12 @@ func writeError(w http.ResponseWriter, err error) {
 }
 
 type timelineListResponse struct {
-	WorkspaceID string                   `json:"workspace_id"`
-	Items       []knowledgeEventResponse `json:"items"`
-	NextCursor  *string                  `json:"next_cursor,omitempty"`
+	WorkspaceID string  `json:"workspace_id"`
+	Items       []any   `json:"items"`
+	NextCursor  *string `json:"next_cursor,omitempty"`
 }
 
+// knowledgeEventResponse 是 knowledge-event/v1 的精确 wire 字段集合。
 type knowledgeEventResponse struct {
 	ID             string                       `json:"id"`
 	WorkspaceID    string                       `json:"workspace_id"`
@@ -438,17 +459,61 @@ type knowledgeEventResponse struct {
 	SchemaVersion  string                       `json:"schema_version"`
 	Summary        string                       `json:"summary"`
 	Payload        json.RawMessage              `json:"payload"`
-	Correlation    domain.EventCorrelation      `json:"correlation"`
+	Correlation    eventCorrelationResponse     `json:"correlation"`
 	OccurredAt     string                       `json:"occurred_at"`
 	CreatedAt      string                       `json:"created_at"`
 }
 
+// knowledgeEventV2Response 只为 knowledge-event/v2 追加受控的操作者和 owner snapshot。
+type knowledgeEventV2Response struct {
+	knowledgeEventResponse
+	Operator     eventOperatorResponse      `json:"operator"`
+	OwnerBinding *eventOwnerBindingResponse `json:"owner_binding"`
+}
+
+type eventOperatorResponse struct {
+	Type domain.EventOperatorType `json:"type"`
+	ID   *string                  `json:"id,omitempty"`
+}
+
+type eventCorrelationResponse struct {
+	ProposalID    *string `json:"proposal_id,omitempty"`
+	ApprovalID    *string `json:"approval_id,omitempty"`
+	WorkflowRunID *string `json:"workflow_run_id,omitempty"`
+	AuditEventID  *string `json:"audit_event_id,omitempty"`
+	GitCommitRef  string  `json:"git_commit_ref,omitempty"`
+}
+
+type artifactImpactBindingResponse struct {
+	ArtifactID      string `json:"artifact_id"`
+	ArtifactVersion int64  `json:"artifact_version"`
+	RevisionID      string `json:"revision_id"`
+	RevisionNo      int64  `json:"revision_no"`
+	ContentHash     string `json:"content_hash"`
+}
+
+type reviewCardImpactBindingResponse struct {
+	CardID                     string `json:"card_id"`
+	CardVersion                int64  `json:"card_version"`
+	Status                     string `json:"status"`
+	Fingerprint                string `json:"fingerprint"`
+	ClaimID                    string `json:"claim_id"`
+	EvidenceBindingFingerprint string `json:"evidence_binding_fingerprint"`
+}
+
+// eventOwnerBindingResponse 是 Timeline v2 owner binding 的严格判别联合。
+type eventOwnerBindingResponse struct {
+	Artifact   *artifactImpactBindingResponse   `json:"artifact,omitempty"`
+	ReviewCard *reviewCardImpactBindingResponse `json:"review_card,omitempty"`
+}
+
 type impactAnalysisResponse struct {
-	Report         impactReportResponse   `json:"report"`
+	Report         any                    `json:"report"`
 	ProposalDrafts []domain.ProposalDraft `json:"proposal_drafts"`
 	Replayed       bool                   `json:"replayed"`
 }
 
+// impactReportResponse 是 impact-report/v1 的精确 wire 字段集合。
 type impactReportResponse struct {
 	ID             string                    `json:"id"`
 	WorkspaceID    string                    `json:"workspace_id"`
@@ -456,7 +521,7 @@ type impactReportResponse struct {
 	SourceEventRef string                    `json:"source_event_ref"`
 	SourceVersion  int64                     `json:"source_event_version"`
 	Status         domain.ImpactReportStatus `json:"status"`
-	Objects        []domain.ImpactObject     `json:"objects"`
+	Objects        []impactObjectResponse    `json:"objects"`
 	Summary        map[string]int            `json:"summary"`
 	Fingerprint    string                    `json:"fingerprint"`
 	ErrorCode      *string                   `json:"error_code,omitempty"`
@@ -467,24 +532,72 @@ type impactReportResponse struct {
 	Version        int64                     `json:"version"`
 }
 
-func toKnowledgeEventResponse(event domain.KnowledgeEvent) knowledgeEventResponse {
+// impactReportV2Response 只为 impact-report/v2 追加分析策略和 supersession 关系。
+type impactReportV2Response struct {
+	impactReportResponse
+	AnalysisVersion      domain.ImpactAnalysisVersion `json:"analysis_version"`
+	SupersedesReportID   *string                      `json:"supersedes_report_id"`
+	SupersededByReportID *string                      `json:"superseded_by_report_id"`
+}
+
+type impactObjectResponse struct {
+	Type              domain.ImpactObjectType          `json:"type"`
+	ID                string                           `json:"id"`
+	WorkspaceID       string                           `json:"workspace_id"`
+	Version           int64                            `json:"version"`
+	Action            domain.ImpactAction              `json:"action"`
+	Reason            string                           `json:"reason"`
+	RequiresProposal  bool                             `json:"requires_proposal"`
+	ArtifactBinding   *artifactImpactBindingResponse   `json:"artifact_binding,omitempty"`
+	ReviewCardBinding *reviewCardImpactBindingResponse `json:"review_card_binding,omitempty"`
+}
+
+func toKnowledgeEventResponse(event domain.KnowledgeEvent) (any, error) {
+	if err := event.Validate(); err != nil {
+		return nil, err
+	}
 	response := knowledgeEventResponse{
 		ID: string(event.ID), WorkspaceID: string(event.WorkspaceID), EventType: event.EventType, AggregateType: event.AggregateType,
 		SourceEventRef: event.SourceEventRef, SourceRef: event.SourceRef, EventVersion: event.EventVersion, SchemaVersion: event.SchemaVersion,
-		Summary: event.Summary, Payload: append(json.RawMessage(nil), event.Payload...), Correlation: event.Correlation,
+		Summary: event.Summary, Payload: append(json.RawMessage(nil), event.Payload...), Correlation: toEventCorrelationResponse(event.Correlation),
 		OccurredAt: event.OccurredAt.UTC().Format(time.RFC3339Nano), CreatedAt: event.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if event.AggregateID != nil {
 		value := string(*event.AggregateID)
 		response.AggregateID = &value
 	}
-	return response
+	switch event.SchemaVersion {
+	case domain.KnowledgeEventSchemaVersion:
+		return response, nil
+	case domain.KnowledgeEventSchemaVersionV2:
+		if event.Operator == nil {
+			return nil, errors.New("knowledge event v2 operator is missing")
+		}
+		binding, err := toEventOwnerBindingResponse(event.OwnerBinding)
+		if err != nil {
+			return nil, err
+		}
+		return knowledgeEventV2Response{
+			knowledgeEventResponse: response,
+			Operator:               toEventOperatorResponse(*event.Operator),
+			OwnerBinding:           binding,
+		}, nil
+	default:
+		return nil, errors.New("knowledge event schema is unsupported")
+	}
 }
 
-func toImpactReportResponse(report domain.ImpactReport) impactReportResponse {
+func toImpactReportResponse(report domain.ImpactReport) (any, error) {
+	if err := validateImpactReportWire(report); err != nil {
+		return nil, err
+	}
+	objects, err := toImpactObjectResponses(report.Objects)
+	if err != nil {
+		return nil, err
+	}
 	response := impactReportResponse{
 		ID: string(report.ID), WorkspaceID: string(report.WorkspaceID), SourceEventID: string(report.SourceEventID), SourceEventRef: report.SourceEventRef,
-		SourceVersion: report.SourceVersion, Status: report.Status, Objects: append([]domain.ImpactObject(nil), report.Objects...), Summary: report.Summary,
+		SourceVersion: report.SourceVersion, Status: report.Status, Objects: objects, Summary: copyImpactSummary(report.Summary),
 		Fingerprint: report.Fingerprint, SchemaVersion: report.SchemaVersion(), GeneratedAt: report.GeneratedAt.UTC().Format(time.RFC3339Nano),
 		CreatedAt: report.CreatedAt.UTC().Format(time.RFC3339Nano), Version: report.Version,
 	}
@@ -496,7 +609,111 @@ func toImpactReportResponse(report domain.ImpactReport) impactReportResponse {
 		value := report.StaleReason
 		response.StaleReason = &value
 	}
-	return response
+	if report.EffectiveAnalysisVersion() == domain.ImpactAnalysisVersionV1 {
+		return response, nil
+	}
+	return impactReportV2Response{
+		impactReportResponse: response,
+		AnalysisVersion:      report.EffectiveAnalysisVersion(),
+		SupersedesReportID:   responseID(report.SupersedesReportID),
+		SupersededByReportID: responseID(report.SupersededByReportID),
+	}, nil
+}
+
+func toEventOperatorResponse(operator domain.EventOperator) eventOperatorResponse {
+	return eventOperatorResponse{Type: operator.Type, ID: responseID(operator.ID)}
+}
+
+func toEventCorrelationResponse(correlation domain.EventCorrelation) eventCorrelationResponse {
+	return eventCorrelationResponse{
+		ProposalID: responseID(correlation.ProposalID), ApprovalID: responseID(correlation.ApprovalID),
+		WorkflowRunID: responseID(correlation.WorkflowRunID), AuditEventID: responseID(correlation.AuditEventID),
+		GitCommitRef: correlation.GitCommitRef,
+	}
+}
+
+func toEventOwnerBindingResponse(binding *domain.EventOwnerBinding) (*eventOwnerBindingResponse, error) {
+	if binding == nil {
+		return nil, nil
+	}
+	if (binding.Artifact == nil && binding.ReviewCard == nil) || (binding.Artifact != nil && binding.ReviewCard != nil) {
+		return nil, errors.New("timeline owner binding union is invalid")
+	}
+	response := &eventOwnerBindingResponse{}
+	if binding.Artifact != nil {
+		response.Artifact = toArtifactImpactBindingResponse(*binding.Artifact)
+	}
+	if binding.ReviewCard != nil {
+		response.ReviewCard = toReviewCardImpactBindingResponse(*binding.ReviewCard)
+	}
+	return response, nil
+}
+
+func toImpactObjectResponses(objects []domain.ImpactObject) ([]impactObjectResponse, error) {
+	responses := make([]impactObjectResponse, 0, len(objects))
+	for _, object := range objects {
+		if err := domain.ValidateImpactObject(object); err != nil {
+			return nil, err
+		}
+		response := impactObjectResponse{
+			Type: object.Type, ID: string(object.ID), WorkspaceID: string(object.WorkspaceID), Version: object.Version,
+			Action: object.Action, Reason: object.Reason, RequiresProposal: object.RequiresProposal,
+		}
+		if object.ArtifactBinding != nil {
+			response.ArtifactBinding = toArtifactImpactBindingResponse(*object.ArtifactBinding)
+		}
+		if object.ReviewCardBinding != nil {
+			response.ReviewCardBinding = toReviewCardImpactBindingResponse(*object.ReviewCardBinding)
+		}
+		responses = append(responses, response)
+	}
+	return responses, nil
+}
+
+func toArtifactImpactBindingResponse(binding domain.ArtifactImpactBinding) *artifactImpactBindingResponse {
+	return &artifactImpactBindingResponse{
+		ArtifactID: string(binding.ArtifactID), ArtifactVersion: binding.ArtifactVersion, RevisionID: string(binding.RevisionID),
+		RevisionNo: binding.RevisionNo, ContentHash: binding.ContentHash,
+	}
+}
+
+func toReviewCardImpactBindingResponse(binding domain.ReviewCardImpactBinding) *reviewCardImpactBindingResponse {
+	return &reviewCardImpactBindingResponse{
+		CardID: string(binding.CardID), CardVersion: binding.CardVersion, Status: binding.Status, Fingerprint: binding.Fingerprint,
+		ClaimID: string(binding.ClaimID), EvidenceBindingFingerprint: binding.EvidenceBindingFingerprint,
+	}
+}
+
+func responseID(value *foundation.ID) *string {
+	if value == nil {
+		return nil
+	}
+	result := string(*value)
+	return &result
+}
+
+func copyImpactSummary(summary map[string]int) map[string]int {
+	result := make(map[string]int, len(summary))
+	for key, value := range summary {
+		result[key] = value
+	}
+	return result
+}
+
+func validateImpactReportWire(report domain.ImpactReport) error {
+	if err := domain.ValidateImpactReport(report); err != nil {
+		return err
+	}
+	fingerprint, err := domain.ComputeImpactFingerprintForVersion(
+		report.EffectiveAnalysisVersion(), report.SourceEventID, report.SourceVersion, report.Objects,
+	)
+	if err != nil {
+		return err
+	}
+	if fingerprint != report.Fingerprint {
+		return errors.New("impact report fingerprint is inconsistent")
+	}
+	return nil
 }
 
 var (

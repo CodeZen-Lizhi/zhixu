@@ -80,7 +80,7 @@
 - [x] Semantic Links（M7-02 Candidate→typed Proposal→Approval→Relation，Topic scan）。
 - [ ] Smart Collection。
 - [ ] Knowledge Health。
-- [ ] Timeline/Impact。
+- [x] Timeline/Impact（M7-04 与遗留收口已交付 Timeline UI、v1/v2 报告、Artifact/Review Card impact、一等 owner event 与正式 `downstream_update` Proposal 意图；批准保持零执行副作用，下游 executor、Document/Eval impact 与全局 Audit 仍属后续范围）。
 - [x] Review/FSRS（M8-02 Review-only Session、Card/Schedule、可信评分、冻结 Scorer/FSRS version、API-only 共享/派生 HMAC `question_ref`、失效与 legacy quarantine）。
 - [x] Interview Simulation（M8-03 独立 Interview 会话、共享基表上的 INTERVIEW origin Path、难度/deadline/连续追问、Completion reservation/digest hidden hold、ABANDONED→ORPHANED 维护与服务端 INTERVIEW Candidate）。
 - [x] Review-derived Shared Learning Path 运行闭环（领域/Repository/HTTP/Web、`00060`、Artifact hidden hold、真实 Service composition 与 24 小时 reservation maintenance 已接线，并通过 fresh PostgreSQL/API/Worker/Vite/浏览器主链路验证）。
@@ -110,7 +110,7 @@
 - [x] Docker Smoke（基础、Workspace、Search、Tool 与 RAG Conversation 独立闭环）。
 
 > 边界：上述勾选只表示对应已实现切片已有代码和门禁，不表示项目整体完成。PDF/Web Parser、HNSW/容量、
-> M7-04 Timeline/Impact、M8、M9-03 异步导出/脱敏/结果追踪、正式 Document/Article Revision、M10 Auth/安全/
+> Timeline/Impact 下游 executor、Document/Eval impact 与 POISONED 运维入口、M8、M9-03 异步导出/脱敏/结果追踪、正式 Document/Article Revision、M10 Auth/安全/
 > 可观测/备份恢复，以及 M11 全量 E2E/发布交付仍未完成。
 
 > M8-02/M8-03 已补验 Review/Interview/Memory PostgreSQL、M8/Review migration race、前端 746 条测试，以及真实 API/Worker/Vite 的桌面与 390x844 浏览器主链路；业务数据 Down guard、Review Path reservation/hold 专门并发与 ABANDONED 重开仍未直接覆盖。

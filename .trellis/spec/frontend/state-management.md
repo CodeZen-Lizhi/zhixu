@@ -275,3 +275,23 @@ useAuth(): { state, signIn, signOut, refresh }
 Wrong: 把 Bootstrap Token 或 API Token 放进 Browser Storage，并用它判断页面是否已登录。
 Correct: Bootstrap 只用于一次交换；浏览器身份由 HttpOnly Cookie 建立，前端只维护可清除的 CSRF 与可查询的 Session 元数据。
 ```
+
+## Scenario: M7 Timeline / Impact State Ownership
+
+### 1. Contracts
+
+- Query key 统一以 `['timeline', workspaceId, ...]` 开头；列表 key 绑定 canonical filter、limit 与当前 opaque
+  cursor，Event/Report key 绑定资源 ID。无 Active Workspace 时不请求；Workspace 切换必须取消并移除旧 cache。
+- URL 只持有事件类型、aggregate、source ref 与 UTC 时间范围；cursor history、当前报告选择和一次 mutation 的
+  Idempotency-Key 属于组件局部状态。Workspace 或 canonical filter 变化立即清除 cursor、选择和未知结果状态。
+- Impact/Proposal mutation 把 variables 与 Idempotency-Key 作为同一重试单元。网络未知或可重试 503 复用原 key；
+  服务端确认成功或用户显式发起新意图后才生成新 key，不做 optimistic Report/Proposal。
+- Timeline projector 是异步的。Impact 成功只写入精确 Report cache 并失效 source Event；不得立即 invalidates 列表，
+  否则可能把投影前的旧列表重新缓存。新 Event 由用户显式刷新回查。
+- downstream Proposal 创建成功失效精确 Report 与当前 Workspace 的 Proposal list，并导航正式 Proposal ID；
+  approved 状态只来自服务端，不能在浏览器推导 Apply、Workflow 或目标已更新。
+
+### 2. Tests Required
+
+- canonical filter/query key、Workspace isolation/cleanup、filter cursor reset、显式刷新、Impact/Proposal same-key retry、
+  source Event/Report/Proposal 精确失效，以及分析成功不失效 Timeline list。

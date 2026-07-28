@@ -9,9 +9,10 @@ M7-02 已补充 Semantic Link Candidate、typed Relation Proposal、Approval 后
 M7-03 已补充版本化 Smart Collection、统一 read model/cursor、持久 Health Scan/Issue/Schedule、SMART_COLLECTION
 Candidate scope、affected-change outbox、真实 PostgreSQL/River/API/浏览器门禁；Tag/Review/Directory owner、Artifact/
 Review 批量动作、认证和 M10 最终容量仍未实现。
-M7-04 已交付 append-only Knowledge Timeline、durable Outbox/Worker 恢复、Workspace-bound HMAC cursor、只读 Impact
-Report 与 `IMPACT_ANALYZED` Audit 原子事务；Timeline UI、正式 downstream Proposal、Artifact/Review/Eval impact、全局
-Audit/OTel/Metrics 和 POISONED 运维入口仍未实现。
+M7-04 已交付 append-only Knowledge Timeline、durable Outbox/Worker 恢复、Workspace-bound HMAC cursor、Timeline UI、
+`impact-analysis/v2` Artifact/Review Card impact、一等 owner event、正式 `downstream_update` Proposal 意图与
+`IMPACT_ANALYZED` Audit 原子事务；下游 owner executor、Document/Eval impact、全局 Audit/OTel/Metrics 和
+POISONED 运维入口仍未实现。
 M9 已补充 Workspace Source Version/Proposal/Workflow 列表、资源绑定 cursor 与 Active Index 选择投影；
 Proposal 等级由不可变 `proposal.risk_level` 唯一拥有，Source Version 使用受复合约束的 Workspace 镜像键支撑
 有界 keyset 查询；Proposal detail 的 Approval 为必需 nullable，Summary 保持 optional non-null。三条真实
@@ -59,7 +60,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 |---|---|---|
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
 | [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
-| [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker 门禁 | M7-04 后端闭环已验证；UI、正式 downstream Proposal 与全局 Audit 保持 deferred |
+| [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker/Web 门禁 | M7-04 与遗留收口已验证；下游 owner executor、Document/Eval impact 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
 | [Smart Collection Export 契约](./export-contract.md) | Export Job、冻结 scan、prepared result、下载 Audit、过期清理与前端恢复 | M9-03 已交付 Collection Markdown/Metadata JSON；附件、Evaluation/Audit 内容导出与 AC-33 全量验收保持 deferred |
 | [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health、M8 Review/Interview/Shared Path/Memory、M9 Workspace 列表的持久化、receipt、可见性与 PG/EXPLAIN 门禁 |

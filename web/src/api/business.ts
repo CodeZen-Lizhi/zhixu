@@ -2,12 +2,13 @@
 import { authFetch } from "./auth";
 import { graphNodeRefIdentity, graphRelationTypeCompatible, isSymmetricGraphRelationType } from "./graph";
 import { ApiBoundaryError } from "./system-status";
+import type { ArtifactImpactBinding, ReviewCardImpactBinding } from "./timeline";
 
 export type Page<T> = { items: T[]; nextCursor?: string };
 export type SourceSecurityStatus = "pending" | "passed" | "quarantined";
 export type SourceIngestionStatus = "validating" | "parsing" | "parsed" | "chunking" | "chunked" | "parse_failed" | "cancelled";
 export type SourceIndexStatus = "included" | "excluded";
-export type ProposalType = "file_patch" | "knowledge_change" | "publish_artifact";
+export type ProposalType = "file_patch" | "knowledge_change" | "publish_artifact" | "downstream_update";
 export const proposalRiskLevels = ["CRITICAL", "HIGH", "MEDIUM", "LOW"] as const;
 export type ProposalRiskLevel = (typeof proposalRiskLevels)[number];
 export type SourceVersionItem = {
@@ -68,6 +69,31 @@ export interface PublishArtifactRevision extends ProposalRevisionBase {
     schemaVersion: "artifact-publication/v1";
   };
 }
+interface DownstreamUpdateBase {
+  workspaceId: string;
+  sourceReport: { id: string; analysisVersion: "impact-analysis/v2"; fingerprint: string };
+  sourceEvent: { id: string; eventVersion: number };
+  targetId: string;
+  baseVersion: number;
+  reason: string;
+  schemaVersion: "impact-downstream-update/v1";
+}
+export type DownstreamUpdate =
+  | (DownstreamUpdateBase & {
+    targetType: "ARTIFACT";
+    action: "REGENERATE_ARTIFACT";
+    artifactBinding: ArtifactImpactBinding;
+    reviewCardBinding?: never;
+  })
+  | (DownstreamUpdateBase & {
+    targetType: "REVIEW_CARD";
+    action: "REVALIDATE_REVIEW_CARD";
+    artifactBinding?: never;
+    reviewCardBinding: ReviewCardImpactBinding;
+  });
+export interface DownstreamUpdateRevision extends ProposalRevisionBase {
+  update: DownstreamUpdate;
+}
 interface ProposalDetailBase {
   id: string;
   workspaceId: string;
@@ -80,7 +106,8 @@ interface ProposalDetailBase {
 export type ProposalDetail =
   | (ProposalDetailBase & { type: "file_patch"; targetPath: string; revision: FilePatchRevision })
   | (ProposalDetailBase & { type: "knowledge_change"; revision: KnowledgeChangeRevision })
-  | (ProposalDetailBase & { type: "publish_artifact"; revision: PublishArtifactRevision });
+  | (ProposalDetailBase & { type: "publish_artifact"; revision: PublishArtifactRevision })
+  | (ProposalDetailBase & { type: "downstream_update"; revision: DownstreamUpdateRevision });
 export type WorkflowDetail = {
   id: string; workspaceId: string; definitionId: string; status: WorkflowStatus;
   input: unknown; output?: unknown; version: number; createdAt: string;
@@ -318,15 +345,12 @@ const decodeProposal = (value: unknown, expectedWorkspaceId: string): ProposalSu
   exact(r, ["id", "workspace_id", "proposal_type", "status", "target", "risk_level", "risk", "revision_id", "change_hash", "approval", "created_at", "updated_at"], "proposal");
   const workspaceId = boundValue(uuidValue(r, "workspace_id"), expectedWorkspaceId, "proposal.workspace_id");
   const id = uuidValue(r, "id");
-  const type = literalValue(r, "proposal_type", ["file_patch", "knowledge_change", "publish_artifact"]);
+  const type = literalValue(r, "proposal_type", ["file_patch", "knowledge_change", "publish_artifact", "downstream_update"]);
   const revisionId = uuidValue(r, "revision_id");
   const changeHash = hashValue(r, "change_hash");
   const riskLevel = proposalRiskLevel(r, "risk_level");
-  if (type === "knowledge_change" && riskLevel !== "HIGH") {
-    throw new BusinessApiError("INVALID_RESPONSE", "Knowledge Change 摘要必须使用 HIGH 风险等级", false);
-  }
-  if (type === "publish_artifact" && riskLevel !== "HIGH") {
-    throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布摘要必须使用 HIGH 风险等级", false);
+  if (type !== "file_patch" && riskLevel !== "HIGH") {
+    throw new BusinessApiError("INVALID_RESPONSE", "Typed Proposal 摘要必须使用 HIGH 风险等级", false);
   }
   const approval = decodeProposalApproval(r.approval, id, revisionId, changeHash, type);
   return { id, workspaceId, type, status: proposalStatus(r, "status"), target: stringValue(r, "target")!, riskLevel, risk: stringValue(r, "risk")!, revisionId, changeHash, ...(approval === undefined ? {} : { approval }), createdAt: dateTimeValue(r, "created_at"), updatedAt: dateTimeValue(r, "updated_at") };
@@ -359,11 +383,8 @@ function decodeProposalApproval(value: unknown, expectedProposalId: string, expe
   if (decision === "rejected" && (approvedGitHead !== undefined || hasWorkflowBinding)) {
     throw new BusinessApiError("INVALID_RESPONSE", "驳回 Approval 包含非法写回字段", false);
   }
-  if (proposalType === "knowledge_change" && (approvedGitHead !== undefined || hasWorkflowBinding)) {
-    throw new BusinessApiError("INVALID_RESPONSE", "Knowledge Approval 不应包含 Git/Workflow 写回字段", false);
-  }
-  if (proposalType === "publish_artifact" && (approvedGitHead !== undefined || hasWorkflowBinding)) {
-    throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布 Approval 不应包含 Git/Workflow 写回字段", false);
+  if (proposalType !== "file_patch" && (approvedGitHead !== undefined || hasWorkflowBinding)) {
+    throw new BusinessApiError("INVALID_RESPONSE", "Typed Proposal Approval 不应包含 Git/Workflow 写回字段", false);
   }
   let writebackState: ApprovalSnapshot["writebackState"];
   if (proposalType === "file_patch" && decision === "approved") {
@@ -389,6 +410,88 @@ function decodeProposalApproval(value: unknown, expectedProposalId: string, expe
     ...(writebackState === undefined ? {} : { writebackState }),
   };
 }
+
+const decodeArtifactImpactBinding = (value: unknown, field: string): ArtifactImpactBinding => {
+  const binding = record(value, field);
+  exact(binding, ["artifact_id", "artifact_version", "revision_id", "revision_no", "content_hash"], field);
+  const artifactId = uuidValue(binding, "artifact_id");
+  const revisionId = uuidValue(binding, "revision_id");
+  if (artifactId === revisionId) throw new BusinessApiError("INVALID_RESPONSE", `响应绑定不一致：${field}`, false);
+  return {
+    artifactId,
+    artifactVersion: integerValue(binding, "artifact_version", 1),
+    revisionId,
+    revisionNo: integerValue(binding, "revision_no", 1),
+    contentHash: hashValue(binding, "content_hash"),
+  };
+};
+
+const decodeReviewCardImpactBinding = (value: unknown, field: string): ReviewCardImpactBinding => {
+  const binding = record(value, field);
+  exact(binding, ["card_id", "card_version", "status", "fingerprint", "claim_id", "evidence_binding_fingerprint"], field);
+  const cardId = uuidValue(binding, "card_id");
+  const claimId = uuidValue(binding, "claim_id");
+  if (cardId === claimId) throw new BusinessApiError("INVALID_RESPONSE", `响应绑定不一致：${field}`, false);
+  return {
+    cardId,
+    cardVersion: integerValue(binding, "card_version", 1),
+    status: literalValue(binding, "status", ["DRAFT", "APPROVED", "INVALIDATED", "REJECTED"]),
+    fingerprint: hashValue(binding, "fingerprint"),
+    claimId,
+    evidenceBindingFingerprint: hashValue(binding, "evidence_binding_fingerprint"),
+  };
+};
+
+const decodeDownstreamUpdate = (value: unknown, expectedWorkspaceId: string): DownstreamUpdate => {
+  const update = record(value, "proposal.revision.update");
+  exact(update, ["workspace_id", "source_report", "source_event", "target_type", "target_id", "base_version", "action", "artifact_binding", "review_card_binding", "reason", "schema_version"], "proposal.revision.update");
+  const sourceReport = record(update.source_report, "proposal.revision.update.source_report");
+  const sourceEvent = record(update.source_event, "proposal.revision.update.source_event");
+  exact(sourceReport, ["id", "analysis_version", "fingerprint"], "proposal.revision.update.source_report");
+  exact(sourceEvent, ["id", "event_version"], "proposal.revision.update.source_event");
+
+  const workspaceId = boundValue(uuidValue(update, "workspace_id"), expectedWorkspaceId, "proposal.revision.update.workspace_id");
+  const sourceReportId = uuidValue(sourceReport, "id");
+  const sourceEventId = uuidValue(sourceEvent, "id");
+  if (new Set([workspaceId, sourceReportId, sourceEventId]).size !== 3) {
+    throw new BusinessApiError("INVALID_RESPONSE", "Downstream Update 来源身份绑定重复", false);
+  }
+  const common = {
+    workspaceId,
+    sourceReport: {
+      id: sourceReportId,
+      analysisVersion: literalValue(sourceReport, "analysis_version", ["impact-analysis/v2"]),
+      fingerprint: hashValue(sourceReport, "fingerprint"),
+    },
+    sourceEvent: { id: sourceEventId, eventVersion: integerValue(sourceEvent, "event_version", 1) },
+    targetId: uuidValue(update, "target_id"),
+    baseVersion: integerValue(update, "base_version", 1),
+    reason: boundedNonEmptyStringValue(update, "reason", maxKnowledgeRevisionTextBytes),
+    schemaVersion: literalValue(update, "schema_version", ["impact-downstream-update/v1"]),
+  };
+  const targetType = literalValue(update, "target_type", ["ARTIFACT", "REVIEW_CARD"]);
+  const action = literalValue(update, "action", ["REGENERATE_ARTIFACT", "REVALIDATE_REVIEW_CARD"]);
+  const artifactBinding = update.artifact_binding === undefined
+    ? undefined
+    : decodeArtifactImpactBinding(update.artifact_binding, "proposal.revision.update.artifact_binding");
+  const reviewCardBinding = update.review_card_binding === undefined
+    ? undefined
+    : decodeReviewCardImpactBinding(update.review_card_binding, "proposal.revision.update.review_card_binding");
+
+  if (targetType === "ARTIFACT") {
+    if (artifactBinding === undefined || action !== "REGENERATE_ARTIFACT" || reviewCardBinding !== undefined || artifactBinding.artifactId !== common.targetId || artifactBinding.artifactVersion !== common.baseVersion) {
+      throw new BusinessApiError("INVALID_RESPONSE", "Artifact Downstream Update 绑定不一致", false);
+    }
+    return { ...common, targetType, action, artifactBinding };
+  }
+  if (reviewCardBinding === undefined) {
+    throw new BusinessApiError("INVALID_RESPONSE", "Review Card Downstream Update 绑定不一致", false);
+  }
+  if (action !== "REVALIDATE_REVIEW_CARD" || artifactBinding !== undefined || reviewCardBinding.cardId !== common.targetId || reviewCardBinding.cardVersion !== common.baseVersion) {
+    throw new BusinessApiError("INVALID_RESPONSE", "Review Card Downstream Update 绑定不一致", false);
+  }
+  return { ...common, targetType, action, reviewCardBinding };
+};
 
 export const listSourceVersions = (workspaceId: string, params: SourceVersionListParams = {}, signal?: AbortSignal): Promise<Page<SourceVersionItem>> => {
   const query = new URLSearchParams({ ...(params.cursor ? { cursor: params.cursor } : {}), ...(params.limit ? { limit: String(params.limit) } : {}), ...(params.securityStatus ? { security_status: params.securityStatus } : {}), ...(params.ingestionStatus ? { ingestion_status: params.ingestionStatus } : {}), ...(params.workflowStatus ? { workflow_status: params.workflowStatus } : {}), ...(params.indexStatus ? { index_status: params.indexStatus } : {}), ...(params.mimeType ? { mime_type: params.mimeType } : {}) });
@@ -432,7 +535,7 @@ export const listWorkflows = (workspaceId: string, params: WorkflowListParams = 
 
 export const getProposal = (workspaceId: string, id: string, signal?: AbortSignal): Promise<ProposalDetail> => request(`/api/v1/proposals/${encodeURIComponent(id)}`, signal === undefined ? undefined : { signal }).then((v) => {
   const r = record(v, "proposal");
-  const type = literalValue(r, "proposal_type", ["file_patch", "knowledge_change", "publish_artifact"]);
+  const type = literalValue(r, "proposal_type", ["file_patch", "knowledge_change", "publish_artifact", "downstream_update"]);
   exact(r, type === "file_patch"
     ? ["proposal_type", "id", "workspace_id", "target_path", "status", "risk_level", "revision", "approval", "created_at", "updated_at"]
     : ["proposal_type", "id", "workspace_id", "status", "risk_level", "revision", "approval", "created_at", "updated_at"], "proposal");
@@ -468,51 +571,79 @@ export const getProposal = (workspaceId: string, id: string, signal?: AbortSigna
       ...(approval === undefined ? {} : { approval }),
     };
   }
-  if (type === "publish_artifact") {
-    exact(revision, ["id", "revision_no", "publication", "risk", "rollback_plan", "change_hash", "created_at"], "proposal.revision");
-    if (base.riskLevel !== "HIGH") throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布 Proposal 必须使用 HIGH 风险等级", false);
-    const publication = record(revision.publication, "proposal.revision.publication");
-    exact(publication, ["workspace_id", "artifact_id", "revision_id", "revision_no", "artifact_version", "content_hash", "source_coverage", "schema_version"], "proposal.revision.publication");
-    const publicationWorkspaceId = boundValue(uuidValue(publication, "workspace_id"), base.workspaceId, "proposal.revision.publication.workspace_id");
-    const artifactId = uuidValue(publication, "artifact_id");
-    const artifactRevisionId = uuidValue(publication, "revision_id");
-    if (new Set([publicationWorkspaceId, artifactId, artifactRevisionId]).size !== 3) {
-      throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布身份绑定重复", false);
-    }
-    const sourceCoverage = recordArray(publication.source_coverage, "proposal.revision.publication.source_coverage", 1, Number.MAX_SAFE_INTEGER).map((item) => {
-      exact(item, ["section_key", "status", "gaps"], "proposal.revision.publication.source_coverage[]");
-      const status = literalValue(item, "status", ["COVERED", "PARTIAL", "GAP"]);
-      const gaps = recordArray(item.gaps, "proposal.revision.publication.source_coverage[].gaps", 0, Number.MAX_SAFE_INTEGER).map((gap) => {
-        exact(gap, ["code", "description"], "proposal.revision.publication.source_coverage[].gap");
-        return {
-          code: boundedNonEmptyStringValue(gap, "code", 128),
-          description: boundedNonEmptyStringValue(gap, "description", maxKnowledgeRevisionTextBytes),
-        };
-      });
-      if (status === "COVERED" ? gaps.length !== 0 : gaps.length === 0) {
-        throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布来源覆盖与知识缺口不一致", false);
-      }
-      if (new Set(gaps.map((gap) => `${gap.code}\u0000${gap.description}`)).size !== gaps.length) {
-        throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布包含重复知识缺口", false);
-      }
-      return { sectionKey: boundedNonEmptyStringValue(item, "section_key", 128), status, gaps };
-    });
-    if (new Set(sourceCoverage.map((item) => item.sectionKey)).size !== sourceCoverage.length) {
-      throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布包含重复章节覆盖", false);
-    }
-    const decodedRevision: PublishArtifactRevision = {
+  if (type === "knowledge_change") {
+    exact(revision, ["id", "revision_no", "schema_version", "target_refs", "base_versions", "change_set", "evidence_refs", "risk", "rollback_plan", "change_hash", "created_at"], "proposal.revision");
+    if (base.riskLevel !== "HIGH") throw new BusinessApiError("INVALID_RESPONSE", "Knowledge Change 必须使用 HIGH 风险等级", false);
+    const changeSet = record(revision.change_set, "proposal.revision.change_set");
+    exact(changeSet, ["operation", "source", "target", "relation_type"], "proposal.revision.change_set");
+    const decodeEndpoint = (value: unknown, field: string) => {
+      const endpoint = record(value, field);
+      exact(endpoint, ["type", "id", "version"], field);
+      return { type: literalValue(endpoint, "type", ["TOPIC", "CLAIM"]), id: uuidValue(endpoint, "id"), version: integerValue(endpoint, "version", 1) };
+    };
+    const decodedRevision: KnowledgeChangeRevision = {
       id: uuidValue(revision, "id"),
       revisionNo: integerValue(revision, "revision_no", 1),
-      publication: {
-        workspaceId: publicationWorkspaceId,
-        artifactId,
-        revisionId: artifactRevisionId,
-        revisionNo: integerValue(publication, "revision_no", 1),
-        artifactVersion: integerValue(publication, "artifact_version", 1),
-        contentHash: hashValue(publication, "content_hash"),
-        sourceCoverage,
-        schemaVersion: literalValue(publication, "schema_version", ["artifact-publication/v1"]),
+      schemaVersion: literalValue(revision, "schema_version", ["knowledge-relation-change/v1"]),
+      targetRefs: recordArray(revision.target_refs, "proposal.revision.target_refs", 1, 100).map((item) => {
+        exact(item, ["type", "id", "fingerprint"], "proposal.revision.target_ref");
+        return { type: literalValue(item, "type", ["RELATION_CANDIDATE"]), id: uuidValue(item, "id"), fingerprint: hashValue(item, "fingerprint") };
+      }),
+      baseVersions: recordArray(revision.base_versions, "proposal.revision.base_versions", 2, 2).map((item) => {
+        exact(item, ["node_type", "node_id", "version"], "proposal.revision.base_version");
+        return { nodeType: literalValue(item, "node_type", ["TOPIC", "CLAIM"]), nodeId: uuidValue(item, "node_id"), version: integerValue(item, "version", 1) };
+      }),
+      changeSet: {
+        operation: literalValue(changeSet, "operation", ["CREATE_RELATION"]),
+        source: decodeEndpoint(changeSet.source, "proposal.revision.change_set.source"),
+        target: decodeEndpoint(changeSet.target, "proposal.revision.change_set.target"),
+        relationType: literalValue(changeSet, "relation_type", ["CITES", "DERIVED_FROM", "BELONGS_TO", "SUPPORTS", "COMPLEMENTS", "DUPLICATES", "CONFLICTS_WITH", "PREREQUISITE_OF", "VERSION_OF", "IMPACTS"]),
       },
+      evidenceRefs: recordArray(revision.evidence_refs, "proposal.revision.evidence_refs", 1, 100).map((item) => {
+        exact(item, ["candidate_evidence_id", "semantic_hash"], "proposal.revision.evidence_ref");
+        return { candidateEvidenceId: uuidValue(item, "candidate_evidence_id"), semanticHash: hashValue(item, "semantic_hash") };
+      }),
+      risk: boundedNonEmptyStringValue(revision, "risk", maxKnowledgeRevisionTextBytes),
+      rollbackPlan: boundedNonEmptyStringValue(revision, "rollback_plan", maxKnowledgeRevisionTextBytes),
+      changeHash: hashValue(revision, "change_hash"),
+      createdAt: dateTimeValue(revision, "created_at"),
+    };
+    const nodeKey = (type: "TOPIC" | "CLAIM", nodeId: string): string => `${type}:${nodeId}`;
+    const sourceKey = nodeKey(decodedRevision.changeSet.source.type, decodedRevision.changeSet.source.id);
+    const targetKey = nodeKey(decodedRevision.changeSet.target.type, decodedRevision.changeSet.target.id);
+    const baseVersions = new Map(decodedRevision.baseVersions.map((item) => [nodeKey(item.nodeType, item.nodeId), item.version]));
+    if (
+      sourceKey === targetKey ||
+      !graphRelationTypeCompatible(decodedRevision.changeSet.relationType, decodedRevision.changeSet.source.type, decodedRevision.changeSet.target.type) ||
+      isSymmetricGraphRelationType(decodedRevision.changeSet.relationType) &&
+        graphNodeRefIdentity(decodedRevision.changeSet.source) > graphNodeRefIdentity(decodedRevision.changeSet.target) ||
+      baseVersions.size !== 2 ||
+      baseVersions.get(sourceKey) !== decodedRevision.changeSet.source.version ||
+      baseVersions.get(targetKey) !== decodedRevision.changeSet.target.version
+    ) {
+      throw new BusinessApiError("INVALID_RESPONSE", "Knowledge Change 端点与基线版本不一致", false);
+    }
+    const targetRefKeys = new Set(decodedRevision.targetRefs.map((item) => `${item.type}:${item.id}:${item.fingerprint}`));
+    const evidenceRefKeys = new Set(decodedRevision.evidenceRefs.map((item) => `${item.candidateEvidenceId}:${item.semanticHash}`));
+    if (targetRefKeys.size !== decodedRevision.targetRefs.length || evidenceRefKeys.size !== decodedRevision.evidenceRefs.length) {
+      throw new BusinessApiError("INVALID_RESPONSE", "Knowledge Change 包含重复引用", false);
+    }
+    const approval = decodeProposalApproval(approvalValue, id, decodedRevision.id, decodedRevision.changeHash, type, true);
+    return {
+      ...base,
+      type,
+      revision: decodedRevision,
+      ...(approval === undefined ? {} : { approval }),
+    };
+  }
+
+  if (type === "downstream_update") {
+    exact(revision, ["id", "revision_no", "update", "risk", "rollback_plan", "change_hash", "created_at"], "proposal.revision");
+    if (base.riskLevel !== "HIGH") throw new BusinessApiError("INVALID_RESPONSE", "Downstream Update Proposal 必须使用 HIGH 风险等级", false);
+    const decodedRevision: DownstreamUpdateRevision = {
+      id: uuidValue(revision, "id"),
+      revisionNo: integerValue(revision, "revision_no", 1),
+      update: decodeDownstreamUpdate(revision.update, base.workspaceId),
       risk: boundedNonEmptyStringValue(revision, "risk", maxKnowledgeRevisionTextBytes),
       rollbackPlan: boundedNonEmptyStringValue(revision, "rollback_plan", maxKnowledgeRevisionTextBytes),
       changeHash: hashValue(revision, "change_hash"),
@@ -526,62 +657,56 @@ export const getProposal = (workspaceId: string, id: string, signal?: AbortSigna
       ...(approval === undefined ? {} : { approval }),
     };
   }
-  exact(revision, ["id", "revision_no", "schema_version", "target_refs", "base_versions", "change_set", "evidence_refs", "risk", "rollback_plan", "change_hash", "created_at"], "proposal.revision");
-  if (base.riskLevel !== "HIGH") throw new BusinessApiError("INVALID_RESPONSE", "Knowledge Change 必须使用 HIGH 风险等级", false);
-  const changeSet = record(revision.change_set, "proposal.revision.change_set");
-  exact(changeSet, ["operation", "source", "target", "relation_type"], "proposal.revision.change_set");
-  const decodeEndpoint = (value: unknown, field: string) => {
-    const endpoint = record(value, field);
-    exact(endpoint, ["type", "id", "version"], field);
-    return { type: literalValue(endpoint, "type", ["TOPIC", "CLAIM"]), id: uuidValue(endpoint, "id"), version: integerValue(endpoint, "version", 1) };
-  };
-  const decodedRevision: KnowledgeChangeRevision = {
+
+  exact(revision, ["id", "revision_no", "publication", "risk", "rollback_plan", "change_hash", "created_at"], "proposal.revision");
+  if (base.riskLevel !== "HIGH") throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布 Proposal 必须使用 HIGH 风险等级", false);
+  const publication = record(revision.publication, "proposal.revision.publication");
+  exact(publication, ["workspace_id", "artifact_id", "revision_id", "revision_no", "artifact_version", "content_hash", "source_coverage", "schema_version"], "proposal.revision.publication");
+  const publicationWorkspaceId = boundValue(uuidValue(publication, "workspace_id"), base.workspaceId, "proposal.revision.publication.workspace_id");
+  const artifactId = uuidValue(publication, "artifact_id");
+  const artifactRevisionId = uuidValue(publication, "revision_id");
+  if (new Set([publicationWorkspaceId, artifactId, artifactRevisionId]).size !== 3) {
+    throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布身份绑定重复", false);
+  }
+  const sourceCoverage = recordArray(publication.source_coverage, "proposal.revision.publication.source_coverage", 1, Number.MAX_SAFE_INTEGER).map((item) => {
+    exact(item, ["section_key", "status", "gaps"], "proposal.revision.publication.source_coverage[]");
+    const status = literalValue(item, "status", ["COVERED", "PARTIAL", "GAP"]);
+    const gaps = recordArray(item.gaps, "proposal.revision.publication.source_coverage[].gaps", 0, Number.MAX_SAFE_INTEGER).map((gap) => {
+      exact(gap, ["code", "description"], "proposal.revision.publication.source_coverage[].gap");
+      return {
+        code: boundedNonEmptyStringValue(gap, "code", 128),
+        description: boundedNonEmptyStringValue(gap, "description", maxKnowledgeRevisionTextBytes),
+      };
+    });
+    if (status === "COVERED" ? gaps.length !== 0 : gaps.length === 0) {
+      throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布来源覆盖与知识缺口不一致", false);
+    }
+    if (new Set(gaps.map((gap) => `${gap.code}\u0000${gap.description}`)).size !== gaps.length) {
+      throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布包含重复知识缺口", false);
+    }
+    return { sectionKey: boundedNonEmptyStringValue(item, "section_key", 128), status, gaps };
+  });
+  if (new Set(sourceCoverage.map((item) => item.sectionKey)).size !== sourceCoverage.length) {
+    throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布包含重复章节覆盖", false);
+  }
+  const decodedRevision: PublishArtifactRevision = {
     id: uuidValue(revision, "id"),
     revisionNo: integerValue(revision, "revision_no", 1),
-    schemaVersion: literalValue(revision, "schema_version", ["knowledge-relation-change/v1"]),
-    targetRefs: recordArray(revision.target_refs, "proposal.revision.target_refs", 1, 100).map((item) => {
-      exact(item, ["type", "id", "fingerprint"], "proposal.revision.target_ref");
-      return { type: literalValue(item, "type", ["RELATION_CANDIDATE"]), id: uuidValue(item, "id"), fingerprint: hashValue(item, "fingerprint") };
-    }),
-    baseVersions: recordArray(revision.base_versions, "proposal.revision.base_versions", 2, 2).map((item) => {
-      exact(item, ["node_type", "node_id", "version"], "proposal.revision.base_version");
-      return { nodeType: literalValue(item, "node_type", ["TOPIC", "CLAIM"]), nodeId: uuidValue(item, "node_id"), version: integerValue(item, "version", 1) };
-    }),
-    changeSet: {
-      operation: literalValue(changeSet, "operation", ["CREATE_RELATION"]),
-      source: decodeEndpoint(changeSet.source, "proposal.revision.change_set.source"),
-      target: decodeEndpoint(changeSet.target, "proposal.revision.change_set.target"),
-      relationType: literalValue(changeSet, "relation_type", ["CITES", "DERIVED_FROM", "BELONGS_TO", "SUPPORTS", "COMPLEMENTS", "DUPLICATES", "CONFLICTS_WITH", "PREREQUISITE_OF", "VERSION_OF", "IMPACTS"]),
+    publication: {
+      workspaceId: publicationWorkspaceId,
+      artifactId,
+      revisionId: artifactRevisionId,
+      revisionNo: integerValue(publication, "revision_no", 1),
+      artifactVersion: integerValue(publication, "artifact_version", 1),
+      contentHash: hashValue(publication, "content_hash"),
+      sourceCoverage,
+      schemaVersion: literalValue(publication, "schema_version", ["artifact-publication/v1"]),
     },
-    evidenceRefs: recordArray(revision.evidence_refs, "proposal.revision.evidence_refs", 1, 100).map((item) => {
-      exact(item, ["candidate_evidence_id", "semantic_hash"], "proposal.revision.evidence_ref");
-      return { candidateEvidenceId: uuidValue(item, "candidate_evidence_id"), semanticHash: hashValue(item, "semantic_hash") };
-    }),
     risk: boundedNonEmptyStringValue(revision, "risk", maxKnowledgeRevisionTextBytes),
     rollbackPlan: boundedNonEmptyStringValue(revision, "rollback_plan", maxKnowledgeRevisionTextBytes),
     changeHash: hashValue(revision, "change_hash"),
     createdAt: dateTimeValue(revision, "created_at"),
   };
-  const nodeKey = (type: "TOPIC" | "CLAIM", nodeId: string): string => `${type}:${nodeId}`;
-  const sourceKey = nodeKey(decodedRevision.changeSet.source.type, decodedRevision.changeSet.source.id);
-  const targetKey = nodeKey(decodedRevision.changeSet.target.type, decodedRevision.changeSet.target.id);
-  const baseVersions = new Map(decodedRevision.baseVersions.map((item) => [nodeKey(item.nodeType, item.nodeId), item.version]));
-  if (
-    sourceKey === targetKey ||
-    !graphRelationTypeCompatible(decodedRevision.changeSet.relationType, decodedRevision.changeSet.source.type, decodedRevision.changeSet.target.type) ||
-    isSymmetricGraphRelationType(decodedRevision.changeSet.relationType) &&
-      graphNodeRefIdentity(decodedRevision.changeSet.source) > graphNodeRefIdentity(decodedRevision.changeSet.target) ||
-    baseVersions.size !== 2 ||
-    baseVersions.get(sourceKey) !== decodedRevision.changeSet.source.version ||
-    baseVersions.get(targetKey) !== decodedRevision.changeSet.target.version
-  ) {
-    throw new BusinessApiError("INVALID_RESPONSE", "Knowledge Change 端点与基线版本不一致", false);
-  }
-  const targetRefKeys = new Set(decodedRevision.targetRefs.map((item) => `${item.type}:${item.id}:${item.fingerprint}`));
-  const evidenceRefKeys = new Set(decodedRevision.evidenceRefs.map((item) => `${item.candidateEvidenceId}:${item.semanticHash}`));
-  if (targetRefKeys.size !== decodedRevision.targetRefs.length || evidenceRefKeys.size !== decodedRevision.evidenceRefs.length) {
-    throw new BusinessApiError("INVALID_RESPONSE", "Knowledge Change 包含重复引用", false);
-  }
   const approval = decodeProposalApproval(approvalValue, id, decodedRevision.id, decodedRevision.changeHash, type, true);
   return {
     ...base,
@@ -641,13 +766,9 @@ export const decideProposal = (id: string, input: { revisionId: string; changeHa
     if (approvedGitHead === undefined || workflowRunId === undefined || workflowStatusUrl !== `/api/v1/workflows/${workflowRunId}` || dispatchStatus === undefined) {
       throw new BusinessApiError("INVALID_RESPONSE", "批准响应缺少写回 Workflow 绑定", false);
     }
-  } else if (decision === "approved" && input.proposalType === "knowledge_change") {
+  } else if (decision === "approved" && input.proposalType !== "file_patch") {
     if (approvedGitHead !== undefined || workflowRunId !== undefined || workflowStatusUrl !== undefined || dispatchStatus !== undefined) {
-      throw new BusinessApiError("INVALID_RESPONSE", "Knowledge Approval 响应包含非法 Git/Workflow 字段", false);
-    }
-  } else if (decision === "approved" && input.proposalType === "publish_artifact") {
-    if (approvedGitHead !== undefined || workflowRunId !== undefined || workflowStatusUrl !== undefined || dispatchStatus !== undefined) {
-      throw new BusinessApiError("INVALID_RESPONSE", "Artifact 发布 Approval 响应包含非法 Git/Workflow 字段", false);
+      throw new BusinessApiError("INVALID_RESPONSE", "Typed Proposal Approval 响应包含非法 Git/Workflow 字段", false);
     }
   } else if (approvedGitHead !== undefined || workflowRunId !== undefined || workflowStatusUrl !== undefined || dispatchStatus !== undefined) {
     throw new BusinessApiError("INVALID_RESPONSE", "驳回响应包含非法写回字段", false);

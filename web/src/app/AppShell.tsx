@@ -1,4 +1,4 @@
-import { Activity, Archive, BookOpenCheck, Brain, FileCheck2, FileText, FolderOpen, GitBranch, HeartPulse, Inbox, Layers3, LayoutDashboard, LogOut, Menu, MessageSquare, MoreHorizontal, Search, Settings, ShieldAlert, ShieldCheck, UserRoundCheck, Wifi, WifiOff } from "lucide-react";
+import { Activity, Archive, BookOpenCheck, Brain, FileCheck2, FileText, FolderOpen, GitBranch, HeartPulse, History, Inbox, Layers3, LayoutDashboard, LogOut, Menu, MessageSquare, MoreHorizontal, Search, Settings, ShieldAlert, ShieldCheck, UserRoundCheck, Wifi, WifiOff } from "lucide-react";
 import { Suspense, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 
@@ -10,7 +10,7 @@ import { useAuth } from "./auth-context";
 const navigation = [
   ["/dashboard", "Dashboard", LayoutDashboard], ["/inbox", "Inbox", Inbox], ["/documents", "资料版本", Archive],
   ["/search", "Search", Search], ["/proposals", "Proposals", FileCheck2], ["/workflows", "Workflows", Activity], ["/graph", "Graph", GitBranch],
-  ["/collections", "Collections", Layers3], ["/health", "知识健康", HeartPulse],
+  ["/collections", "Collections", Layers3], ["/health", "知识健康", HeartPulse], ["/timeline", "Timeline", History],
   ["/artifacts", "Artifacts", FileText],
   ["/review", "Review", BookOpenCheck],
   ["/memories", "Memory", Brain],

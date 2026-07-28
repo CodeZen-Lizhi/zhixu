@@ -130,6 +130,68 @@ const publishArtifactProposalResponse = (
   updated_at: "2026-07-26T00:01:00Z",
   ...proposalOverrides,
 });
+const downstreamArtifactProposalResponse = (
+  updateOverrides: Record<string, unknown> = {},
+  revisionOverrides: Record<string, unknown> = {},
+  proposalOverrides: Record<string, unknown> = {},
+) => ({
+  id: proposalId,
+  workspace_id: workspaceId,
+  proposal_type: "downstream_update",
+  status: "ready_for_review",
+  risk_level: "HIGH",
+  revision: {
+    id: revisionId,
+    revision_no: 1,
+    update: {
+      workspace_id: workspaceId,
+      source_report: {
+        id: "10000000-0000-4000-8000-000000000006",
+        analysis_version: "impact-analysis/v2",
+        fingerprint: "a".repeat(64),
+      },
+      source_event: { id: "10000000-0000-4000-8000-000000000007", event_version: 2 },
+      target_type: "ARTIFACT",
+      target_id: "10000000-0000-4000-8000-000000000008",
+      base_version: 5,
+      action: "REGENERATE_ARTIFACT",
+      artifact_binding: {
+        artifact_id: "10000000-0000-4000-8000-000000000008",
+        artifact_version: 5,
+        revision_id: "10000000-0000-4000-8000-000000000009",
+        revision_no: 3,
+        content_hash: "b".repeat(64),
+      },
+      reason: "引用来源发生变化",
+      schema_version: "impact-downstream-update/v1",
+      ...updateOverrides,
+    },
+    risk: "Impact report identified an owner-backed downstream dependency",
+    rollback_plan: "No target write has executed",
+    change_hash: "c".repeat(64),
+    created_at: "2026-07-28T00:00:00Z",
+    ...revisionOverrides,
+  },
+  approval: null,
+  created_at: "2026-07-28T00:00:00Z",
+  updated_at: "2026-07-28T00:01:00Z",
+  ...proposalOverrides,
+});
+const downstreamReviewCardProposalResponse = () => downstreamArtifactProposalResponse({
+  target_type: "REVIEW_CARD",
+  target_id: "10000000-0000-4000-8000-000000000010",
+  base_version: 4,
+  action: "REVALIDATE_REVIEW_CARD",
+  artifact_binding: undefined,
+  review_card_binding: {
+    card_id: "10000000-0000-4000-8000-000000000010",
+    card_version: 4,
+    status: "INVALIDATED",
+    fingerprint: "d".repeat(64),
+    claim_id: "10000000-0000-4000-8000-000000000011",
+    evidence_binding_fingerprint: "e".repeat(64),
+  },
+});
 const proposalSummaryResponse = (overrides: Record<string, unknown> = {}) => ({
   id: proposalId,
   workspace_id: workspaceId,
@@ -354,6 +416,25 @@ describe("business API boundary", () => {
     })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
+  it("accepts a downstream_update Approval decision only without Git or Workflow fields", async () => {
+    const response = {
+      id: "10000000-0000-4000-8000-000000000005",
+      proposal_id: proposalId,
+      revision_id: revisionId,
+      change_hash: "c".repeat(64),
+      decision: "approved",
+      decided_at: "2026-07-28T00:02:00Z",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(response), { status: 201, headers: { "Content-Type": "application/json" } })));
+
+    await expect(decideProposal(proposalId, {
+      revisionId,
+      changeHash: response.change_hash,
+      decision: "approved",
+      proposalType: "downstream_update",
+    })).resolves.toMatchObject({ proposalId, revisionId, decision: "approved" });
+  });
+
   it("encodes list filters and rejects unknown response fields", async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], next_cursor: "cursor" }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetcher);
@@ -362,6 +443,22 @@ describe("business API boundary", () => {
 
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], future: true }), { status: 200, headers: { "Content-Type": "application/json" } })));
     await expect(listProposals("10000000-0000-4000-8000-000000000002")).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("encodes and decodes the downstream_update Proposal list filter", async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      items: [proposalSummaryResponse({
+        proposal_type: "downstream_update",
+        target: "ARTIFACT:10000000-0000-4000-8000-000000000008",
+        risk_level: "HIGH",
+      })],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetcher);
+
+    await expect(listProposals(workspaceId, { type: "downstream_update" })).resolves.toMatchObject({
+      items: [{ type: "downstream_update", riskLevel: "HIGH" }],
+    });
+    expect(fetcher.mock.calls[0]?.[0]).toContain("proposal_type=downstream_update");
   });
 
   it("preserves AbortError identity during fetch and response body reads", async () => {
@@ -643,6 +740,96 @@ describe("business API boundary", () => {
         workflow_run_id: workflowRunId,
         workflow_status_url: `/api/v1/workflows/${workflowRunId}`,
         decided_at: "2026-07-26T00:02:00Z",
+      },
+    })), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getProposal(workspaceId, proposalId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("decodes Artifact and Review Card downstream_update details without a replay projection", async () => {
+    const responses = [downstreamArtifactProposalResponse(), downstreamReviewCardProposalResponse()];
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }))));
+
+    const artifact = await getProposal(workspaceId, proposalId);
+    expect(artifact).toMatchObject({
+      type: "downstream_update",
+      riskLevel: "HIGH",
+      revision: {
+        update: {
+          workspaceId,
+          sourceReport: { id: "10000000-0000-4000-8000-000000000006", analysisVersion: "impact-analysis/v2", fingerprint: "a".repeat(64) },
+          sourceEvent: { id: "10000000-0000-4000-8000-000000000007", eventVersion: 2 },
+          targetType: "ARTIFACT",
+          targetId: "10000000-0000-4000-8000-000000000008",
+          baseVersion: 5,
+          action: "REGENERATE_ARTIFACT",
+          artifactBinding: { artifactVersion: 5, revisionNo: 3, contentHash: "b".repeat(64) },
+          schemaVersion: "impact-downstream-update/v1",
+        },
+      },
+    });
+    expect(artifact).not.toHaveProperty("replayed");
+
+    await expect(getProposal(workspaceId, proposalId)).resolves.toMatchObject({
+      type: "downstream_update",
+      revision: {
+        update: {
+          targetType: "REVIEW_CARD",
+          action: "REVALIDATE_REVIEW_CARD",
+          reviewCardBinding: {
+            cardId: "10000000-0000-4000-8000-000000000010",
+            cardVersion: 4,
+            status: "INVALIDATED",
+            claimId: "10000000-0000-4000-8000-000000000011",
+            fingerprint: "d".repeat(64),
+            evidenceBindingFingerprint: "e".repeat(64),
+          },
+        },
+      },
+    });
+  });
+
+  it.each([
+    ["non-HIGH risk", {}, {}, { risk_level: "MEDIUM" }],
+    ["v1 analysis", { source_report: { id: "10000000-0000-4000-8000-000000000006", analysis_version: "impact-analysis/v1", fingerprint: "a".repeat(64) } }, {}, {}],
+    ["unknown schema", { schema_version: "impact-downstream-update/v2" }, {}, {}],
+    ["mismatched action", { action: "REVALIDATE_REVIEW_CARD" }, {}, {}],
+    ["missing owner", { artifact_binding: undefined }, {}, {}],
+    ["both owners", { review_card_binding: { card_id: "10000000-0000-4000-8000-000000000010", card_version: 4, status: "INVALIDATED", fingerprint: "d".repeat(64), claim_id: "10000000-0000-4000-8000-000000000011", evidence_binding_fingerprint: "e".repeat(64) } }, {}, {}],
+    ["target drift", { target_id: "10000000-0000-4000-8000-000000000012" }, {}, {}],
+    ["base version drift", { base_version: 6 }, {}, {}],
+    ["unknown update field", { future: true }, {}, {}],
+    ["create-only replay marker", {}, {}, { replayed: false }],
+  ])("rejects downstream_update detail with %s", async (_label, updateOverrides, revisionOverrides, proposalOverrides) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(downstreamArtifactProposalResponse(
+      updateOverrides,
+      revisionOverrides,
+      proposalOverrides,
+    )), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getProposal(workspaceId, proposalId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("rejects downstream_update Approval snapshots with file writeback fields", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(downstreamArtifactProposalResponse({}, {}, {
+      status: "approved",
+      approval: {
+        id: approvalId,
+        proposal_id: proposalId,
+        revision_id: revisionId,
+        change_hash: "c".repeat(64),
+        decision: "approved",
+        approved_git_head: "a".repeat(40),
+        decided_at: "2026-07-28T00:02:00Z",
       },
     })), {
       status: 200,

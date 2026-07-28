@@ -1,11 +1,9 @@
 package postgres
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledgeapp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
@@ -14,16 +12,20 @@ import (
 )
 
 const timelineProjectionColumns = `id::text,event_id::text,workspace_id::text,event_type,aggregate_type,
-aggregate_id::text,source_event_ref,source_ref,event_version,summary,correlation::text,occurred_at,created_at,version`
+aggregate_id::text,source_event_ref,source_ref,event_version,schema_version,summary,correlation::text,
+operator_type,operator_id::text,owner_binding::text,occurred_at,created_at,version`
 
 var _ knowledgeapp.TimelineProjectionPort = (*Repository)(nil)
 
 type timelineProjectionSource struct {
-	ID             foundation.ID
-	EventID        foundation.ID
-	Event          domain.KnowledgeEvent
-	CorrelationRaw string
-	Version        int64
+	ID              foundation.ID
+	EventID         foundation.ID
+	Event           domain.KnowledgeEvent
+	CorrelationRaw  string
+	OperatorTypeRaw *string
+	OperatorIDRaw   *string
+	OwnerBindingRaw *string
+	Version         int64
 }
 
 // ProjectNext 领取一条可信投影源并在同一短事务中追加 Knowledge Event。
@@ -43,6 +45,12 @@ func (repository *Repository) ProjectNext(ctx context.Context) (knowledgeapp.Tim
 		return knowledgeapp.TimelineProjectionResult{}, found, err
 	}
 	result := knowledgeapp.TimelineProjectionResult{SourceID: source.ID, EventID: source.EventID}
+	operator, ownerBinding, err := decodeTimelineEventExtensions(source.OperatorTypeRaw, source.OperatorIDRaw, source.OwnerBindingRaw)
+	if err != nil {
+		result.Outcome = knowledgeapp.TimelineProjectionPoisoned
+		return poisonTimelineProjection(ctx, tx, source, result, err)
+	}
+	source.Event.Operator, source.Event.OwnerBinding = operator, ownerBinding
 	if err := decodeTimelineCorrelation(source.CorrelationRaw, &source.Event.Correlation); err != nil {
 		result.Outcome = knowledgeapp.TimelineProjectionPoisoned
 		return poisonTimelineProjection(ctx, tx, source, result, err)
@@ -98,7 +106,9 @@ LIMIT 1`)
 	if err := row.Scan(
 		&sourceID, &eventID, &workspaceID, &eventType, &aggregateType, &aggregateID,
 		&source.Event.SourceEventRef, &source.Event.SourceRef, &source.Event.EventVersion,
-		&source.Event.Summary, &source.CorrelationRaw, &source.Event.OccurredAt, &source.Event.CreatedAt, &source.Version,
+		&source.Event.SchemaVersion, &source.Event.Summary, &source.CorrelationRaw,
+		&source.OperatorTypeRaw, &source.OperatorIDRaw, &source.OwnerBindingRaw,
+		&source.Event.OccurredAt, &source.Event.CreatedAt, &source.Version,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return timelineProjectionSource{}, false, nil
@@ -112,7 +122,6 @@ LIMIT 1`)
 		value := foundation.ID(*aggregateID)
 		source.Event.AggregateID = &value
 	}
-	source.Event.SchemaVersion = domain.KnowledgeEventSchemaVersion
 	source.Event.Payload = json.RawMessage(`{}`)
 	source.Event.OccurredAt = domain.CanonicalTimelineTime(source.Event.OccurredAt)
 	source.Event.CreatedAt = domain.CanonicalTimelineTime(source.Event.CreatedAt)
@@ -149,16 +158,5 @@ WHERE id=$2 AND status='PENDING' AND version=$3`, domain.ErrorCodeTimelineProjec
 }
 
 func decodeTimelineCorrelation(raw string, target *domain.EventCorrelation) error {
-	decoder := json.NewDecoder(bytes.NewBufferString(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("timeline correlation contains trailing JSON")
-		}
-		return err
-	}
-	return nil
+	return decodeTimelineJSON(raw, target, "timeline correlation")
 }

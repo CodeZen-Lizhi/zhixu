@@ -199,6 +199,9 @@ func validateBootstrapExecutionContext(ctx context.Context, execution workflowap
 }
 
 func validateBootstrapProposal(execution workflowapplication.ExecutionContext, input BootstrapInput, proposal domain.Proposal) error {
+	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeDownstreamUpdate {
+		return domain.NewDownstreamUpdateApplyUnavailableError()
+	}
 	if proposal.ID != input.ProposalID || proposal.WorkspaceID != execution.WorkspaceID || proposal.WorkflowRunID == nil || *proposal.WorkflowRunID != execution.RunID || proposal.TargetPath != proposal.Revision.TargetPath || proposal.Revision.ID != input.RevisionID || proposal.Revision.ProposalID != proposal.ID || !strings.EqualFold(proposal.Revision.ChangeHash, input.ApprovedChangeHash) || !strings.EqualFold(proposal.Revision.ChangeHash, domain.ComputeChangeHash(proposal.TargetPath, proposal.Revision.BaseHash, proposal.Revision.Content)) || proposal.Approval == nil || proposal.Approval.ID == "" || proposal.Approval.ProposalID != proposal.ID || proposal.Approval.RevisionID != proposal.Revision.ID || proposal.Approval.Decision != domain.DecisionApproved || !strings.EqualFold(proposal.Approval.ChangeHash, input.ApprovedChangeHash) || proposal.Approval.ApprovedGitHead == nil || !domain.ValidGitHead(*proposal.Approval.ApprovedGitHead) {
 		return bootstrapBindingConflict(domain.ErrWritebackIdentityConflict)
 	}

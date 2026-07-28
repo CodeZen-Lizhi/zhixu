@@ -335,18 +335,24 @@ M9-03 已交付 Smart Collection 的可恢复异步 Export Job；公开范围只
 
 ### Timeline 与 Impact Analysis
 
-M7-04 的公开查询由 `internal/knowledge/http` 提供，Timeline 是 Workspace-scoped 只读投影，Impact 是显式分析命令：
+M7-04 与遗留收口的公开查询由 `internal/knowledge/http` 提供，正式下游 Proposal 由
+`internal/changecontrol/http` 提供。Timeline 是 Workspace-scoped 只读投影，Impact 是显式分析命令：
 
 - `GET /api/v1/workspaces/{workspace_id}/timeline` 支持 `event_type`（可重复）、`aggregate_type`、`aggregate_id`、
   `source_event_ref`、UTC 时间范围、`limit` 和绑定查询条件的 opaque HMAC cursor；详情使用同一 Workspace predicate。
   Cursor 不能跨 Workspace、过滤器或页大小重放，稳定排序为 `(occurred_at DESC, id DESC)`。
 - `POST /api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis` 必须携带唯一
-  `Idempotency-Key` 和严格空 JSON 对象；首次返回报告与待审批 Proposal Draft，精确重放返回同一报告（200）。
-  `GET /api/v1/workspaces/{workspace_id}/impact-reports/{report_id}` 只读报告。报告或 Draft 的 Workspace、source event、
-  version 和状态不匹配时 fail closed。
-- Timeline Event 由 Proposal/Approval/Commit/Knowledge/Impact 事务的最小 Outbox 异步投影；没有客户端写 Event 的 API。
-  投影故障返回可重试 unavailable，绑定漂移返回一致性/人工恢复错误；不会把投影失败伪装成领域命令失败，也不会自动级联
-  修改下游对象。Impact 只创建报告和需要 Approval + Write Authorization 的 Draft。
+  `Idempotency-Key` 和严格空 JSON 对象；当前策略只在 Artifact selector backfill 完成后创建一份不可变
+  `impact-report/v2`，首次返回 `201`，精确重放返回同一报告（`200`）。既有 `impact-report/v1` 保持可读且不可变，
+  `GET /api/v1/workspaces/{workspace_id}/impact-reports/{report_id}` 按 ID 返回历史报告。
+- `POST /api/v1/workspaces/{workspace_id}/impact-reports/{report_id}/proposals` 接受严格的
+  `target_type + target_id + action` 和 `Idempotency-Key`，只允许从最新 READY v2 报告中的精确 Artifact/Review Card
+  owner binding 创建 `HIGH` 风险、`impact-downstream-update/v1` 的 `downstream_update` Proposal；首次返回 `201`，
+  精确重放返回 `200`。stale report/target、跨 Workspace、unsupported action 或 owner 漂移全部 fail closed。
+- Timeline Event 由 Proposal/Approval/Commit/Knowledge/Impact 与 Artifact/Review owner 事务的最小 Outbox 异步投影；
+  没有客户端写 Event 的 API。投影故障不会伪装成领域命令失败，也不会自动级联修改下游对象。
+- `downstream_update` 批准只记录 decision；所有 Apply/Preflight/Workflow/Write Authorization/Writeback 入口稳定返回
+  `409 DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE`，不得创建执行副作用或把 Approval 显示成目标已更新。
 
 ### Review Answer
 

@@ -19,14 +19,17 @@ const (
 )
 
 type fakeRepo struct {
-	proposal          domain.Proposal
-	approval          domain.Approval
-	err               error
-	markedNeedsReview bool
-	authorization     domain.ToolAuthorization
-	authReplayed      bool
-	consumed          domain.AuthorizationConsume
-	workflowErr       error
+	proposal           domain.Proposal
+	approval           domain.Approval
+	err                error
+	markedNeedsReview  bool
+	authorization      domain.ToolAuthorization
+	authorizationReads int
+	authReplayed       bool
+	consumed           domain.AuthorizationConsume
+	workflowErr        error
+	downstreamUpdate   domain.DownstreamUpdate
+	downstreamBuilds   int
 }
 
 type fakeApprovalDispatcher struct {
@@ -130,6 +133,27 @@ func (f *fakeRepo) CreateKnowledgeChangeProposal(_ context.Context, proposal dom
 	f.proposal = proposal
 	return proposal, f.err
 }
+func (f *fakeRepo) CreatePublishArtifactProposal(_ context.Context, proposal domain.Proposal) (domain.Proposal, error) {
+	f.proposal = proposal
+	return proposal, f.err
+}
+func (f *fakeRepo) CreateDownstreamUpdateProposal(_ context.Context, proposal domain.Proposal) (domain.Proposal, error) {
+	f.proposal = proposal
+	return proposal, f.err
+}
+func (f *fakeRepo) FindProposalByIdempotencyKey(_ context.Context, workspaceID foundation.ID, idempotencyKey string) (domain.Proposal, bool, error) {
+	if f.err != nil {
+		return domain.Proposal{}, false, f.err
+	}
+	if f.proposal.ID != "" && f.proposal.WorkspaceID == workspaceID && f.proposal.IdempotencyKey == idempotencyKey {
+		return f.proposal, true, nil
+	}
+	return domain.Proposal{}, false, nil
+}
+func (f *fakeRepo) BuildDownstreamUpdate(_ context.Context, _, _ foundation.ID, _ knowledge.ImpactObjectType, _ foundation.ID, _ knowledge.ImpactAction) (domain.DownstreamUpdate, error) {
+	f.downstreamBuilds++
+	return f.downstreamUpdate, f.err
+}
 func (f *fakeRepo) Approve(_ context.Context, approval domain.Approval) (domain.Approval, error) {
 	f.approval = approval
 	return approval, f.err
@@ -145,6 +169,7 @@ func (f *fakeRepo) ValidateWorkflowContext(context.Context, foundation.ID, found
 	return f.workflowErr
 }
 func (f *fakeRepo) GetAuthorization(context.Context, foundation.ID, string, string) (domain.ToolAuthorization, error) {
+	f.authorizationReads++
 	return f.authorization, f.err
 }
 func (f *fakeRepo) CreateAuthorization(_ context.Context, authorization domain.ToolAuthorization) (domain.AuthorizationIssueResult, error) {
@@ -363,6 +388,127 @@ func TestCreateKnowledgeChangeProposalRequiresExplicitHighRiskLevel(t *testing.T
 		if err == nil || repository.proposal.ID != "" {
 			t.Fatalf("risk level %q proposal=%#v err=%v", riskLevel, repository.proposal, err)
 		}
+	}
+}
+
+func TestCreatePublishArtifactProposalFreezesTypedPayload(t *testing.T) {
+	repository := &fakeRepo{}
+	service := newTestService(repository, &fakeTargets{})
+	publication := publishArtifactFixture()
+	result, err := service.CreatePublishArtifactProposal(context.Background(), CreatePublishArtifactCommand{
+		WorkspaceID: publication.WorkspaceID, IdempotencyKey: "publish-artifact-create", Publication: publication,
+		RiskLevel: domain.ProposalRiskLevelHigh, Risk: "formal knowledge publication", RollbackPlan: "retain the isolated artifact",
+	})
+	if err != nil {
+		t.Fatalf("CreatePublishArtifactProposal() error = %v", err)
+	}
+	proposal := result.Proposal
+	if proposal.Type != domain.ProposalTypePublishArtifact || proposal.Revision.PublishArtifact == nil || proposal.TargetPath != "" || proposal.Revision.KnowledgeChange != nil || proposal.Revision.ChangeHash == "" || proposal.RequestHash == "" {
+		t.Fatalf("proposal = %#v", proposal)
+	}
+	if proposal.Revision.PublishArtifact.ArtifactID != publication.ArtifactID || proposal.Revision.PublishArtifact.RevisionID != publication.RevisionID || len(proposal.Revision.PublishArtifact.SourceCoverage) != 2 {
+		t.Fatalf("frozen publication = %#v", proposal.Revision.PublishArtifact)
+	}
+}
+
+func TestDecideProposalWithDispatchLeavesPublishArtifactUnexecuted(t *testing.T) {
+	proposal := publishArtifactProposal()
+	repository := &fakeRepo{proposal: proposal}
+	targets := &fakeTargets{err: errors.New("must not read target")}
+	git := &fakeApprovalGitInspector{err: errors.New("must not inspect git")}
+	dispatcher := &fakeApprovalDispatcher{err: errors.New("must not dispatch")}
+	service := newTestDispatchService(repository, targets, git, dispatcher)
+
+	result, err := service.DecideProposalWithDispatch(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err != nil || result.Workflow != nil || result.Approval.Decision != domain.DecisionApproved || targets.calls != 0 || git.calls != 0 || dispatcher.calls != 0 {
+		t.Fatalf("result=%#v target=%d git=%d dispatch=%d err=%v", result, targets.calls, git.calls, dispatcher.calls, err)
+	}
+}
+
+func TestCreateDownstreamUpdateProposalFreezesFactoryBinding(t *testing.T) {
+	update := downstreamUpdateFixture()
+	repository := &fakeRepo{downstreamUpdate: update}
+	service := newTestService(repository, &fakeTargets{})
+	result, err := service.CreateDownstreamUpdateProposal(context.Background(), CreateDownstreamUpdateCommand{
+		WorkspaceID: update.WorkspaceID, ReportID: update.ReportID, TargetType: update.TargetType,
+		TargetID: update.TargetID, Action: update.Action, IdempotencyKey: "downstream-create",
+	})
+	if err != nil {
+		t.Fatalf("CreateDownstreamUpdateProposal() error=%v", err)
+	}
+	proposal := result.Proposal
+	if result.Replayed || repository.downstreamBuilds != 1 || proposal.Type != domain.ProposalTypeDownstreamUpdate || proposal.RiskLevel != domain.ProposalRiskLevelHigh || proposal.Revision.DownstreamUpdate == nil || proposal.Revision.DownstreamUpdate.ReportID != update.ReportID || proposal.Revision.KnowledgeChange != nil || proposal.Revision.PublishArtifact != nil || proposal.TargetPath != "" || proposal.WorkflowRunID != nil {
+		t.Fatalf("proposal=%#v builds=%d", proposal, repository.downstreamBuilds)
+	}
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeDownstreamUpdate, proposal.Revision); err != nil {
+		t.Fatalf("frozen revision error=%v", err)
+	}
+}
+
+func TestCreateDownstreamUpdateProposalReplaysPersistedBindingBeforeFactory(t *testing.T) {
+	proposal := downstreamUpdateProposal()
+	repository := &fakeRepo{proposal: proposal, downstreamUpdate: domain.DownstreamUpdate{}}
+	service := newTestService(repository, &fakeTargets{})
+	update := *proposal.Revision.DownstreamUpdate
+	result, err := service.CreateDownstreamUpdateProposal(context.Background(), CreateDownstreamUpdateCommand{
+		WorkspaceID: update.WorkspaceID, ReportID: update.ReportID, TargetType: update.TargetType,
+		TargetID: update.TargetID, Action: update.Action, IdempotencyKey: proposal.IdempotencyKey,
+	})
+	if err != nil || !result.Replayed || result.Proposal.ID != proposal.ID || repository.downstreamBuilds != 0 {
+		t.Fatalf("result=%#v builds=%d err=%v", result, repository.downstreamBuilds, err)
+	}
+}
+
+func TestDecideProposalWithDispatchLeavesDownstreamUpdateApprovalOnly(t *testing.T) {
+	proposal := downstreamUpdateProposal()
+	repository := &fakeRepo{proposal: proposal}
+	targets := &fakeTargets{err: errors.New("must not read target")}
+	git := &fakeApprovalGitInspector{err: errors.New("must not inspect git")}
+	dispatcher := &fakeApprovalDispatcher{err: errors.New("must not dispatch")}
+	service := newTestDispatchService(repository, targets, git, dispatcher)
+
+	result, err := service.DecideProposalWithDispatch(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
+	if err != nil || result.Workflow != nil || result.Approval.Decision != domain.DecisionApproved || result.Approval.ApprovedGitHead != nil || targets.calls != 0 || git.calls != 0 || dispatcher.calls != 0 {
+		t.Fatalf("result=%#v target=%d git=%d dispatch=%d err=%v", result, targets.calls, git.calls, dispatcher.calls, err)
+	}
+}
+
+func TestDownstreamUpdateApplyEntrypointsFailClosedWithoutTargetRead(t *testing.T) {
+	proposal := downstreamUpdateProposal()
+	approved := proposal
+	approved.Status = domain.StatusApproved
+	approved.Approval = &domain.Approval{
+		ID: "65000000-0000-4000-8000-000000000010", ProposalID: proposal.ID, RevisionID: proposal.Revision.ID,
+		ChangeHash: proposal.Revision.ChangeHash, Decision: domain.DecisionApproved,
+	}
+	repository := &fakeRepo{proposal: approved}
+	targets := &fakeTargets{err: errors.New("must not read target")}
+	service := newTestService(repository, targets)
+	assertUnavailable := func(err error) {
+		t.Helper()
+		var projectErr *foundation.Error
+		if !errors.As(err, &projectErr) || projectErr.Code != "DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE" || projectErr.Retryable || projectErr.Kind != foundation.ErrorVersionConflict {
+			t.Fatalf("apply guard error=%v", err)
+		}
+	}
+	_, err := service.CheckApplyPreflight(context.Background(), approved.ID, approved.Revision.ID, approved.Revision.ChangeHash)
+	assertUnavailable(err)
+	_, err = service.IssueWriteAuthorization(context.Background(), domain.AuthorizationIssue{
+		WorkspaceID: approved.WorkspaceID, WorkflowRunID: "65000000-0000-4000-8000-000000000011", NodeRunID: "65000000-0000-4000-8000-000000000012",
+		ProposalID: approved.ID, RevisionID: approved.Revision.ID, ApprovalID: approved.Approval.ID,
+		ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge, Scope: "target:any", IdempotencyKey: "downstream-auth", TTL: time.Minute,
+	})
+	assertUnavailable(err)
+	_, err = service.ConsumeWriteAuthorization(context.Background(), domain.AuthorizationConsume{
+		Credential: "historical-credential", IdempotencyKey: "downstream-auth", WorkspaceID: approved.WorkspaceID,
+		WorkflowRunID: "65000000-0000-4000-8000-000000000011", NodeRunID: "65000000-0000-4000-8000-000000000012",
+		ProposalID: approved.ID, RevisionID: approved.Revision.ID, ApprovalID: approved.Approval.ID,
+		ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge, Scope: "target:any",
+		ApprovedChangeHash: approved.Revision.ChangeHash, TargetVersion: testHash,
+	})
+	assertUnavailable(err)
+	if targets.calls != 0 || repository.markedNeedsReview || repository.authorizationReads != 0 || repository.consumed.Credential != "" {
+		t.Fatalf("downstream apply guard touched a writeback dependency: targets=%d marked=%v authorization_reads=%d consumed=%#v", targets.calls, repository.markedNeedsReview, repository.authorizationReads, repository.consumed)
 	}
 }
 
@@ -961,5 +1107,75 @@ func knowledgeChangeProposal() domain.Proposal {
 		ID: "60000000-0000-4000-8000-000000000002", WorkspaceID: "60000000-0000-4000-8000-000000000001", Type: domain.ProposalTypeKnowledgeChange, RiskLevel: domain.ProposalRiskLevelHigh, Status: domain.StatusApproved, Version: 2,
 		Revision: domain.Revision{ID: "60000000-0000-4000-8000-000000000003", ProposalID: "60000000-0000-4000-8000-000000000002", Risk: "medium", RollbackPlan: "restore relation", ChangeHash: hash, KnowledgeChange: &change},
 		Approval: &domain.Approval{ID: "60000000-0000-4000-8000-000000000004", ProposalID: "60000000-0000-4000-8000-000000000002", RevisionID: "60000000-0000-4000-8000-000000000003", ChangeHash: hash, Decision: domain.DecisionApproved},
+	}
+}
+
+func publishArtifactFixture() domain.PublishArtifact {
+	publication := domain.PublishArtifact{
+		WorkspaceID:     "61000000-0000-4000-8000-000000000001",
+		ArtifactID:      "61000000-0000-4000-8000-000000000002",
+		RevisionID:      "61000000-0000-4000-8000-000000000003",
+		RevisionNo:      4,
+		ArtifactVersion: 7,
+		ContentHash:     strings.ToUpper(strings.Repeat("c", 64)),
+		SourceCoverage: []domain.ArtifactSourceCoverage{
+			{SectionKey: "outcomes", Status: domain.ArtifactCoveragePartial, Gaps: []domain.ArtifactCoverageGap{{Code: "MISSING_SOURCE", Description: "requires an approved source"}}},
+			{SectionKey: "summary", Status: domain.ArtifactCoverageCovered},
+		},
+		SchemaVersion: domain.PublishArtifactSchemaVersion,
+	}
+	canonical, err := domain.ValidatePublishArtifact(publication)
+	if err != nil {
+		panic(err)
+	}
+	return canonical
+}
+
+func publishArtifactProposal() domain.Proposal {
+	publication := publishArtifactFixture()
+	hash, err := domain.ComputePublishArtifactHash(publication, "formal knowledge publication", "retain the isolated artifact")
+	if err != nil {
+		panic(err)
+	}
+	return domain.Proposal{
+		ID: "61000000-0000-4000-8000-000000000004", WorkspaceID: publication.WorkspaceID, Type: domain.ProposalTypePublishArtifact, RiskLevel: domain.ProposalRiskLevelHigh, Status: domain.StatusReady, Version: 1,
+		Revision: domain.Revision{ID: "61000000-0000-4000-8000-000000000005", ProposalID: "61000000-0000-4000-8000-000000000004", Risk: "formal knowledge publication", RollbackPlan: "retain the isolated artifact", ChangeHash: hash, PublishArtifact: &publication},
+	}
+}
+
+func downstreamUpdateFixture() domain.DownstreamUpdate {
+	return domain.DownstreamUpdate{
+		WorkspaceID: "65000000-0000-4000-8000-000000000001", ReportID: "65000000-0000-4000-8000-000000000002",
+		AnalysisVersion: knowledge.ImpactAnalysisVersionV2, ReportFingerprint: strings.Repeat("a", 64),
+		SourceEventID: "65000000-0000-4000-8000-000000000003", SourceEventVersion: 2,
+		TargetType: knowledge.ImpactObjectArtifact, TargetID: "65000000-0000-4000-8000-000000000004", BaseVersion: 5,
+		Action: knowledge.ImpactActionRegenerateArtifact,
+		OwnerBinding: knowledge.EventOwnerBinding{Artifact: &knowledge.ArtifactImpactBinding{
+			ArtifactID: "65000000-0000-4000-8000-000000000004", ArtifactVersion: 5,
+			RevisionID: "65000000-0000-4000-8000-000000000005", RevisionNo: 2, ContentHash: strings.Repeat("b", 64),
+		}},
+		Reason: "cited source changed", SchemaVersion: domain.DownstreamUpdateSchemaVersion,
+	}
+}
+
+func downstreamUpdateProposal() domain.Proposal {
+	update := downstreamUpdateFixture()
+	const risk = "Impact report identified an owner-backed downstream dependency"
+	const rollback = "No target write has executed; future execution requires a new Proposal revision and owner executor"
+	hash, err := domain.ComputeDownstreamUpdateHash(update, risk, rollback)
+	if err != nil {
+		panic(err)
+	}
+	requestHash, err := domain.ComputeDownstreamUpdateRequestHash(update.WorkspaceID, update, domain.ProposalRiskLevelHigh, risk, rollback)
+	if err != nil {
+		panic(err)
+	}
+	return domain.Proposal{
+		ID: "65000000-0000-4000-8000-000000000006", WorkspaceID: update.WorkspaceID, Type: domain.ProposalTypeDownstreamUpdate,
+		RiskLevel: domain.ProposalRiskLevelHigh, IdempotencyKey: "downstream-create", RequestHash: requestHash, Status: domain.StatusReady, Version: 1,
+		Revision: domain.Revision{
+			ID: "65000000-0000-4000-8000-000000000007", ProposalID: "65000000-0000-4000-8000-000000000006", RevisionNo: 1,
+			Risk: risk, RollbackPlan: rollback, ChangeHash: hash, DownstreamUpdate: &update,
+		},
 	}
 }

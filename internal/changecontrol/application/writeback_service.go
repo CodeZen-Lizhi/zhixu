@@ -146,6 +146,18 @@ func (s *WritebackService) Resume(ctx context.Context, executionID foundation.ID
 		return WritebackResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITEBACK_RESUME_INVALID", false, domain.ErrWritebackInvalidInput)
 	}
 	identity.LeaseOwner = strings.TrimSpace(identity.LeaseOwner)
+	// 历史 Execution 也必须先回读 Proposal 类型，才能接触任何文件、Git 或恢复检查点。
+	initial, err := s.repository.GetWritebackExecution(ctx, executionID)
+	if err != nil {
+		return WritebackResult{}, err
+	}
+	proposal, err := s.repository.GetProposal(ctx, initial.ProposalID)
+	if err != nil {
+		return resultFromExecution(initial), err
+	}
+	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeDownstreamUpdate {
+		return resultFromExecution(initial), domain.NewDownstreamUpdateApplyUnavailableError()
+	}
 	for range maxWritebackResumeSteps {
 		execution, err := s.repository.GetWritebackExecution(ctx, executionID)
 		if err != nil {
@@ -210,6 +222,9 @@ func (s *WritebackService) resumePrepared(ctx context.Context, execution domain.
 	proposal, err := s.repository.GetProposal(ctx, execution.ProposalID)
 	if err != nil {
 		return execution, err
+	}
+	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeDownstreamUpdate {
+		return execution, domain.NewDownstreamUpdateApplyUnavailableError()
 	}
 	if err := validateExecutionProposal(execution, proposal); err != nil {
 		return s.checkpointFailure(ctx, execution, domain.WritebackStatusApplyFailed, "WRITEBACK_PROPOSAL_BINDING_INVALID", err, false)
@@ -575,6 +590,9 @@ func (s *WritebackService) checkpointFailure(ctx context.Context, execution doma
 }
 
 func validateBeginProposal(workspaceID foundation.ID, proposal domain.Proposal) error {
+	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeDownstreamUpdate {
+		return domain.NewDownstreamUpdateApplyUnavailableError()
+	}
 	// Proposal 状态由 Atomic Begin 在同一事务内判定。Application 允许已进入
 	// applying/verifying 的同一请求抵达 Repository，以便返回既有 Execution。
 	if proposal.ID == "" || proposal.WorkspaceID != workspaceID || proposal.TargetPath != proposal.Revision.TargetPath || proposal.Approval == nil || proposal.Approval.Decision != domain.DecisionApproved || proposal.Approval.ApprovedGitHead == nil || !domain.ValidGitHead(*proposal.Approval.ApprovedGitHead) || proposal.Approval.RevisionID != proposal.Revision.ID || !strings.EqualFold(proposal.Approval.ChangeHash, proposal.Revision.ChangeHash) || !strings.EqualFold(proposal.Revision.ChangeHash, domain.ComputeChangeHash(proposal.TargetPath, proposal.Revision.BaseHash, proposal.Revision.Content)) {
@@ -584,6 +602,9 @@ func validateBeginProposal(workspaceID foundation.ID, proposal domain.Proposal) 
 }
 
 func validateExecutionProposal(execution domain.WritebackExecution, proposal domain.Proposal) error {
+	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeDownstreamUpdate {
+		return domain.NewDownstreamUpdateApplyUnavailableError()
+	}
 	if proposal.ID != execution.ProposalID || proposal.WorkspaceID != execution.WorkspaceID || proposal.Status != domain.StatusApplying || proposal.Revision.ID != execution.RevisionID || proposal.Revision.TargetPath != execution.TargetPath || !strings.EqualFold(proposal.Revision.BaseHash, execution.BaseHash) || !strings.EqualFold(proposal.Revision.ChangeHash, execution.ApprovedChangeHash) || !strings.EqualFold(domain.ComputeWritebackResultHash([]byte(proposal.Revision.Content)), execution.ResultHash) || proposal.Approval == nil || proposal.Approval.ID != execution.ApprovalID || proposal.Approval.Decision != domain.DecisionApproved || proposal.Approval.ApprovedGitHead == nil || !strings.EqualFold(*proposal.Approval.ApprovedGitHead, execution.ApprovedGitHead) {
 		return domain.ErrWritebackIdentityConflict
 	}

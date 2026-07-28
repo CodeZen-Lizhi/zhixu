@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
 	"strings"
 
 	artifactapp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
@@ -239,7 +240,126 @@ func insertRevision(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, r
 	if err != nil {
 		return classify(err)
 	}
+	return insertRevisionCitationSelectors(ctx, tx, workspaceID, revision)
+}
+
+type revisionCitationSelector struct {
+	sourceVersionID foundation.ID
+	sourceSpanID    foundation.ID
+}
+
+func insertRevisionCitationSelectors(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, revision domain.Revision) error {
+	var enabled bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM core.schema_meta WHERE key='timeline_impact' AND value='m7-v2'
+	)`).Scan(&enabled); err != nil {
+		return classify(err)
+	}
+	if !enabled {
+		return nil
+	}
+
+	selectors := revisionCitationSelectors(revision)
+	if len(selectors) > 0 {
+		sourceVersionIDs := make([]string, len(selectors))
+		sourceSpanIDs := make([]string, len(selectors))
+		for index, selector := range selectors {
+			sourceVersionIDs[index] = string(selector.sourceVersionID)
+			sourceSpanIDs[index] = string(selector.sourceSpanID)
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO learning.artifact_revision_citation_selector(
+			workspace_id,artifact_id,revision_id,source_version_id,source_span_id
+		)
+		SELECT $1,$2,$3,citation.source_version_id,citation.source_span_id
+		FROM unnest($4::uuid[],$5::uuid[]) AS citation(source_version_id,source_span_id)
+		ON CONFLICT (workspace_id,revision_id,source_version_id,source_span_id) DO NOTHING`,
+			string(workspaceID), string(revision.ArtifactID), string(revision.ID), sourceVersionIDs, sourceSpanIDs)
+		if err != nil {
+			return classify(err)
+		}
+	}
+	validated, err := validateRevisionCitationSelectors(ctx, tx, workspaceID, []domain.Revision{revision})
+	if err != nil {
+		return err
+	}
+	if validated != len(selectors) {
+		return inconsistent(errors.New("artifact citation selector insert count is inconsistent"))
+	}
 	return nil
+}
+
+func revisionCitationSelectors(revision domain.Revision) []revisionCitationSelector {
+	selectorsByKey := make(map[string]revisionCitationSelector)
+	for _, section := range revision.Sections {
+		for _, citation := range section.Citations {
+			key := string(citation.SourceVersionID) + "\x00" + string(citation.SourceSpanID)
+			selectorsByKey[key] = revisionCitationSelector{
+				sourceVersionID: citation.SourceVersionID,
+				sourceSpanID:    citation.SourceSpanID,
+			}
+		}
+	}
+	if len(selectorsByKey) == 0 {
+		return []revisionCitationSelector{}
+	}
+
+	keys := make([]string, 0, len(selectorsByKey))
+	for key := range selectorsByKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	selectors := make([]revisionCitationSelector, len(keys))
+	for index, key := range keys {
+		selectors[index] = selectorsByKey[key]
+	}
+	return selectors
+}
+
+func validateRevisionCitationSelectors(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, revisions []domain.Revision) (int, error) {
+	expected := make(map[string]struct{})
+	revisionIDs := make([]string, len(revisions))
+	for index, revision := range revisions {
+		revisionIDs[index] = string(revision.ID)
+		for _, selector := range revisionCitationSelectors(revision) {
+			expected[citationSelectorIdentity(revision.ArtifactID, revision.ID, selector.sourceVersionID, selector.sourceSpanID)] = struct{}{}
+		}
+	}
+	rows, err := tx.Query(ctx, `SELECT artifact_id::text,revision_id::text,source_version_id::text,source_span_id::text
+		FROM learning.artifact_revision_citation_selector
+		WHERE workspace_id=$1 AND revision_id=ANY($2::uuid[])
+		ORDER BY artifact_id,revision_id,source_version_id,source_span_id`, string(workspaceID), revisionIDs)
+	if err != nil {
+		return 0, classify(err)
+	}
+	defer rows.Close()
+	actual := make(map[string]struct{}, len(expected))
+	for rows.Next() {
+		var artifactID, revisionID, sourceVersionID, sourceSpanID string
+		if err := rows.Scan(&artifactID, &revisionID, &sourceVersionID, &sourceSpanID); err != nil {
+			return 0, classify(err)
+		}
+		key := citationSelectorIdentity(foundation.ID(artifactID), foundation.ID(revisionID), foundation.ID(sourceVersionID), foundation.ID(sourceSpanID))
+		if _, duplicate := actual[key]; duplicate {
+			return 0, inconsistent(errors.New("artifact citation selector validation found a duplicate"))
+		}
+		actual[key] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, classify(err)
+	}
+	if len(actual) != len(expected) {
+		return 0, inconsistent(fmt.Errorf("artifact citation selector validation count mismatch: expected %d, got %d", len(expected), len(actual)))
+	}
+	for key := range expected {
+		if _, found := actual[key]; !found {
+			return 0, inconsistent(errors.New("artifact citation selector validation found a binding mismatch"))
+		}
+	}
+	return len(expected), nil
+}
+
+func citationSelectorIdentity(artifactID, revisionID, sourceVersionID, sourceSpanID foundation.ID) string {
+	return string(artifactID) + "\x00" + string(revisionID) + "\x00" + string(sourceVersionID) + "\x00" + string(sourceSpanID)
 }
 
 func markdownFromSections(sections []domain.Section) string {
