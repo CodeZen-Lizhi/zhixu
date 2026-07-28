@@ -44,17 +44,17 @@
 
 ## Acceptance Criteria
 
-- [ ] 在 Collection 详情创建 Markdown 或 Metadata JSON 导出，首次请求返回 `202`；相同 key + 相同规范请求并发或响应丢失重试只得到同一 Job，Collection 后续变化不阻断重放，不同 payload/TTL 返回稳定 `409`。
-- [ ] 真实 PostgreSQL + River Worker 完成 `PENDING -> RUNNING -> SUCCEEDED`，结果包含 `export/v1`、Workspace/Collection binding、frozen read-model revision、exact count、字段/脱敏信息，下载内容与 Job 的 SHA-256/size 完全一致。
-- [ ] 在 staging 写入前后、prepared binding 前后、文件提升后和 DB Complete 前注入崩溃，重启后均只得到一个权威结果；租约超时双 Worker 中旧 owner 无法 Prepare/Complete/Fail；Prepare 后到期不能提交成功。
-- [ ] Collection version/query hash/read-model revision 漂移、跨 Workspace、超过 10,000 项、文件 hash/size 不一致均 fail closed，不返回部分成功或截断结果。
-- [ ] 无认证主体的敏感导出、缺少 `READ_LOCAL`、CSRF/Origin/API Token 能力不符均被拒绝；Secret、绝对路径和公式前缀 canary 不出现在 DB、文件、Problem 或日志中。
-- [ ] `Get`/按 Collection `List`/后台 sweep 可观察到过期归约；过期下载返回 `410`，prepared-but-unpromoted staging、已提升 final 和无引用 orphan 文件最终物理删除，删除失败可重试且保留事实。
-- [ ] 每次服务端准备并返回成功下载都原子增加统计并追加一条含 actor、Export ID、hash 和 outcome 的 Audit；并发下载不丢计数，审计记录不可更新或删除。
-- [ ] OpenAPI 与 Router 完整映射创建、列表、详情和下载；前端 decoder 拒绝未知/重复字段、非法枚举/UUID/hash/time、跨绑定和状态字段冲突。
-- [ ] Collection 导出面板可刷新恢复，SSE `export.*` 定向失效查询，轮询在终态停止；桌面和 390x844 移动端可键盘创建/刷新/下载，无横向溢出和 console error/warning。
-- [ ] 真实 API/Worker/Vite smoke 完成创建、运行、成功下载、失败后新建、过期后新建；Go race、PostgreSQL migration/integration、OpenAPI、前端 lint/typecheck/test/build 和独立复审通过。
-- [ ] 产品与架构文档准确标记 M9-03 已交付的 Collection Markdown/Metadata JSON 范围，并明确 AC-33 的附件部分仍未关闭。
+- [x] 在 Collection 详情创建 Markdown 或 Metadata JSON 导出，首次请求返回 `202`；相同 key + 相同规范请求并发或响应丢失重试只得到同一 Job，Collection 后续变化不阻断重放，不同 payload/TTL 返回稳定 `409`。
+- [x] 真实 PostgreSQL + River Worker 完成 `PENDING -> RUNNING -> SUCCEEDED`，结果包含 `export/v1`、Workspace/Collection binding、frozen read-model revision、exact count、字段/脱敏信息，下载内容与 Job 的 SHA-256/size 完全一致。
+- [x] 在 staging 写入前后、prepared binding 前后、文件提升后和 DB Complete 前注入崩溃，重启后均只得到一个权威结果；租约超时双 Worker 中旧 owner 无法 Prepare/Complete/Fail；Prepare 后到期不能提交成功。
+- [x] Collection version/query hash/read-model revision 漂移、跨 Workspace、超过 10,000 项、文件 hash/size 不一致均 fail closed，不返回部分成功或截断结果。
+- [x] 无认证主体的敏感导出、缺少 `READ_LOCAL`、CSRF/Origin/API Token 能力不符均被拒绝；Secret、绝对路径和公式前缀 canary 不出现在 DB、文件、Problem 或日志中。
+- [x] `Get`/按 Collection `List`/后台 sweep 可观察到过期归约；过期下载返回 `410`，prepared-but-unpromoted staging、已提升 final 和无引用 orphan 文件最终物理删除，删除失败可重试且保留事实。
+- [x] 每次服务端准备并返回成功下载都原子增加统计并追加一条含 actor、Export ID、hash 和 outcome 的 Audit；并发下载不丢计数，审计记录不可更新或删除。
+- [x] OpenAPI 与 Router 完整映射创建、列表、详情和下载；前端 decoder 拒绝未知/重复字段、非法枚举/UUID/hash/time、跨绑定和状态字段冲突。
+- [x] Collection 导出面板可刷新恢复，SSE `export.*` 定向失效查询，轮询在终态停止；桌面和 390x844 移动端可键盘创建/刷新/下载，无横向溢出和 console error/warning。
+- [x] 真实 API/Worker/Vite smoke 完成创建、运行、成功下载、失败后新建、过期后新建；Go race、PostgreSQL migration/integration、OpenAPI、前端 lint/typecheck/test/build 和独立复审通过。
+- [x] 产品与架构文档准确标记 M9-03 已交付的 Collection Markdown/Metadata JSON 范围，并明确 AC-33 的附件部分仍未关闭。
 
 ## Risks And Deferred Items
 

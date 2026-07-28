@@ -64,9 +64,6 @@ ZHIXU_TEST_DATABASE_URL="$ZHIXU_TEST_DATABASE_URL" bash deploy/export-browser-sm
 
 ## Completion Evidence
 
-> 下方前四项描述的是 storage、cleanup 和 supported-kind 复审修复前的候选基线；
-> 它们不能作为这些修复已通过真实 PostgreSQL 和浏览器门禁的证据。
-
 ### 2026-07-27 Candidate Verification
 
 - 创建与重放、冻结快照、prepared-result 恢复、DB-time lease/TTL CAS、Workspace/权限/脱敏、过期/cleanup、下载统计与
@@ -81,15 +78,4 @@ ZHIXU_TEST_DATABASE_URL="$ZHIXU_TEST_DATABASE_URL" bash deploy/export-browser-sm
   在桌面与 `390x844` 覆盖创建、刷新恢复、成功下载、失败/过期新建、SSE、键盘、overflow 与 console。
 - 主审、SQL/Go/通用检查及独立只读复审均未发现当前范围 P0-P3；独立 PostgreSQL 复验确认 orphan sweep cursor SQL 有效。
 - 交付范围仅为 Smart Collection `MARKDOWN|METADATA_JSON`。附件、`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX、通用字段
-  映射仍 deferred，AC-33 维持部分完成。提交 hash、push 分支与归档记录在最终提交后补充。
-
-### 2026-07-27 Post-review Regression Evidence
-
-- 已修复：LocalFS final 提升改为 create-only 原子 link；prepared cleanup 在 unlink
-  前复核 hash/size；领域、OpenAPI、前端和 migration 的正式 kind 收敛为
-  `MARKDOWN|METADATA_JSON`。相应 LocalFS、application、migration shape 回归测试已补充。
-- 当前候选副本通过：`go test -race -count=1 -timeout 60s ./...`、`go vet ./...`、
-  `go mod tidy -diff`、`make openapi-check`、`git diff --check`，以及
-  `npm run lint/typecheck/test/build --prefix web`（59 files / 684 tests）。
-- 修复后真实 PostgreSQL 三轮导出集成与 `TestExport|TestM9` 迁移集成都已通过；
-  `deploy/export-browser-smoke.sh` 也已通过真实 API、Worker、River、Vite 的桌面与 `390x844` 验收。
+  映射仍 deferred，AC-33 维持部分完成。工作提交为 `0165783`，已位于 `dev` 与 `origin/dev`。
