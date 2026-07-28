@@ -1543,3 +1543,37 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 34: 收口 M7 Timeline 与 Impact 遗留
+
+**Date**: 2026-07-29
+**Task**: 收口 M7 Timeline 与 Impact 遗留
+**Branch**: `dev`
+
+### Summary
+
+交付 Timeline Web、v2 Artifact/Review Card impact、一等 owner event 与 approval-only downstream_update Proposal；完成 PostgreSQL/API/Worker/Vite 动态验收及精确索引快照门禁。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c5126dc` | (see git log) |
+| `b341fc5` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
