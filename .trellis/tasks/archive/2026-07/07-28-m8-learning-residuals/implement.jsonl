@@ -1,0 +1,6 @@
+{"file":".trellis/tasks/07-28-m8-learning-residuals/research/m8-gap-analysis.md","reason":"M8 残余缺口、现有实现、影响文件和动态验证矩阵的仓库研究证据"}
+{"file":".trellis/spec/backend/index.md","reason":"M8-03 当前交付事实、未交付边界与后端开发前门禁"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"00059/00060、Review Path reservation/hold、Memory effective query 与 Model Run 持久化约束"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"M8 Review/Interview/Memory 的真实 PostgreSQL、并发、Composition 与跨层质量门禁"}
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"Artifact hidden visibility、reservation/receipt 原子闭合与外部副作用恢复边界"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Memory 从数据库到 Application、Agent、Workflow、Composition 的完整数据流与单一契约 owner 检查"}

@@ -1,0 +1,8 @@
+{"file":".trellis/tasks/07-28-m8-learning-residuals/research/m8-gap-analysis.md","reason":"复核实现是否只关闭已确认缺口且没有把已有能力或未验证行为误报为新交付"}
+{"file":".trellis/spec/backend/index.md","reason":"复核 M8 状态、Composition 边界和仍 deferred 的 last_used_at/UI/转换范围"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"复核 SQLSTATE、迁移版本、参数化 SQL、锁序、attempt fence、guarded Down 和审计约束"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行 M8 真实 PostgreSQL、并发、Worker、HTTP/OpenAPI 与独立 Review 门禁"}
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"检查 Review Path Artifact hold/release 不破坏可见性与 terminal receipt 闭包"}
+{"file":".trellis/spec/frontend/index.md","reason":"确认 Review Path 前端旧契约若已在 HEAD 修复则只验证、不重复实现"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"复核现有 M8 前端严格 decoder、Review Path mutation 与 canonical lint/typecheck/test/build 门禁"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核 Memory 不跨 RAG 边界扩散，所有失败路径和数据格式在唯一 owner 处校验"}
