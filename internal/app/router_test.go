@@ -27,6 +27,7 @@ import (
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	knowledgehttp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/http"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
+	reviewhttp "github.com/CodeZen-Lizhi/zhixu/internal/review/http"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
@@ -517,6 +518,7 @@ func TestRouterScopedBearerCapabilityMatrixAndBootstrapIsolation(t *testing.T) {
 		ChangeControl: changecontrolhttp.NewHandler(nil),
 		Graph:         readyGraphHandler(),
 		Candidate:     readyCandidateHandler(),
+		Review:        reviewhttp.NewHandler(nil, time.Second),
 	})
 
 	request := func(method, path, token string) *httptest.ResponseRecorder {
@@ -546,6 +548,7 @@ func TestRouterScopedBearerCapabilityMatrixAndBootstrapIsolation(t *testing.T) {
 		{name: "index alone cannot run composite scan", token: indexToken, method: http.MethodPost, path: "/api/v1/workspaces/92000000-0000-4000-8000-000000000001/scan"},
 		{name: "proposal cannot read", token: proposalToken, method: http.MethodGet, path: "/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001"},
 		{name: "proposal cannot approve knowledge", token: proposalToken, method: http.MethodPost, path: "/api/v1/proposals/92000000-0000-4000-8000-000000000001/approvals"},
+		{name: "read cannot mutate review", token: readToken, method: http.MethodPost, path: "/api/v1/review/decks"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			response := request(test.method, test.path, test.token)
@@ -553,6 +556,11 @@ func TestRouterScopedBearerCapabilityMatrixAndBootstrapIsolation(t *testing.T) {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
 		})
+	}
+
+	reviewResponse := request(http.MethodPost, "/api/v1/review/decks", proposalToken)
+	if reviewResponse.Code != http.StatusBadRequest || !strings.Contains(reviewResponse.Body.String(), "REVIEW_JSON_INVALID") {
+		t.Fatalf("WRITE_PROPOSAL review status=%d body=%s", reviewResponse.Code, reviewResponse.Body.String())
 	}
 
 	bootstrapResponse := request(http.MethodGet, "/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001", bootstrapToken)

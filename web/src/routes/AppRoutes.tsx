@@ -19,6 +19,11 @@ const HealthPage = lazy(() => import("../features/health/HealthPage").then((modu
 const SearchPage = lazy(() => import("../features/search/SearchPage").then((module) => ({ default: module.SearchPage })));
 const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage").then((module) => ({ default: module.ArtifactsPage })));
 const ArtifactDetailPage = lazy(() => import("../features/artifacts/ArtifactsPage").then((module) => ({ default: module.ArtifactDetailPage })));
+const ReviewPage = lazy(() => import("../features/review/ReviewPage").then((module) => ({ default: module.ReviewPage })));
+const ReviewSessionPage = lazy(() => import("../features/review/ReviewSessionPage").then((module) => ({ default: module.ReviewSessionPage })));
+const MemoriesPage = lazy(() => import("../features/memory/MemoriesPage").then((module) => ({ default: module.MemoriesPage })));
+const InterviewsPage = lazy(() => import("../features/interview/InterviewPage").then((module) => ({ default: module.InterviewsPage })));
+const InterviewSessionPage = lazy(() => import("../features/interview/InterviewPage").then((module) => ({ default: module.InterviewSessionPage })));
 
 const Shell = () => <AppShell />;
 
@@ -40,6 +45,11 @@ export const AppRoutes = () => (
       <Route path="/health" element={<HealthPage />} />
       <Route path="/artifacts" element={<ArtifactsPage />} />
       <Route path="/artifacts/:artifactId" element={<ArtifactDetailPage />} />
+      <Route path="/review" element={<ReviewPage />} />
+      <Route path="/review/session" element={<ReviewSessionPage />} />
+      <Route path="/memories" element={<MemoriesPage />} />
+      <Route path="/interviews" element={<InterviewsPage />} />
+      <Route path="/interviews/:sessionId" element={<InterviewSessionPage />} />
       <Route path="/workspace" element={<WorkspacePage />} />
       <Route path="/settings" element={<SettingsPage />} />
       <Route path="/graph" element={<GraphPage />} />

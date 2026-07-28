@@ -394,6 +394,38 @@ describe("EventStoreProvider", () => {
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["collections", workspaceA] }, { throwOnError: true });
   });
 
+  it("Review 事件只失效当前 Workspace 的 Review 查询", async () => {
+    setActiveWorkspaceId(workspaceA);
+    const queryClient = renderStore();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+
+    await act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1, id: "49", type: "review.answer.submitted", occurredAt: "2026-07-22T00:00:05Z",
+      workspaceId: workspaceA, resourceRef: "review_answer:7a000000-0000-4000-8000-000000000012", resourceVersion: 2,
+      payloadSummary: {}, invalidations: [],
+    }));
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["review", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["review", workspaceB] }, { throwOnError: true });
+    expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("49");
+  });
+
+  it("Memory 事件只失效当前 Workspace 的 Memory 查询", async () => {
+    setActiveWorkspaceId(workspaceA);
+    const queryClient = renderStore();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+
+    await act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1, id: "50", type: "memory.confirmed", occurredAt: "2026-07-22T00:00:06Z",
+      workspaceId: workspaceA, resourceRef: "memory:7a000000-0000-4000-8000-000000000012", resourceVersion: 2,
+      payloadSummary: {}, invalidations: [],
+    }));
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["memory", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["memory", workspaceB] }, { throwOnError: true });
+    expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("50");
+  });
+
   it("权威回查失败时保留游标并展示 recovery_failed", async () => {
     window.sessionStorage.setItem(`zhixu.event-cursor.${workspaceA}`, "41");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("database unavailable")));
@@ -637,5 +669,21 @@ describe("EventStoreProvider", () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(order).toEqual(["business", "rag", "collections", "collection-exports", "knowledge-health", "graph", "semantic-links"]);
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBeNull();
+  });
+
+  it("Interview 和 Learning Path 事件只失效当前 Workspace 的 Interview 查询", async () => {
+    setActiveWorkspaceId(workspaceA);
+    const queryClient = renderStore();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+
+    await act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1, id: "83", type: "learning_path.step.updated", occurredAt: "2026-07-27T00:00:00Z",
+      workspaceId: workspaceA, resourceRef: "learning_path_step:7a000000-0000-4000-8000-000000000010", resourceVersion: 2,
+      payloadSummary: {}, invalidations: [],
+    }));
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["interview", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["review", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["interview", workspaceB] }, { throwOnError: true });
   });
 });

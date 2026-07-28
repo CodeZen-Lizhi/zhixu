@@ -760,15 +760,17 @@ func TestAuthDefaultsAreExplicitlyDisabledOnlyForDevelopmentLoopback(t *testing.
 
 func TestRequiredAuthLoadsSecretsAndOriginsWithoutEchoingBootstrap(t *testing.T) {
 	bootstrap := "a-development-bootstrap-token-with-more-than-32-bytes"
+	questionRefKey := "a-shared-review-question-reference-key-with-more-than-32-bytes"
 	values := map[string]string{
-		"ZHIXU_AUTH_MODE":            string(AuthModeRequired),
-		"ZHIXU_AUTH_BOOTSTRAP_TOKEN": bootstrap,
-		"ZHIXU_AUTH_ALLOWED_ORIGINS": "https://127.0.0.1:8080,https://example.test",
-		"ZHIXU_AUTH_SECURE_COOKIE":   "true",
-		"ZHIXU_AUTH_SESSION_TTL":     "6h",
-		"ZHIXU_AUTH_API_TOKEN_TTL":   "48h",
-		"ZHIXU_ENVIRONMENT":          "production",
-		"ZHIXU_HTTP_ADDR":            "0.0.0.0:8080",
+		"ZHIXU_AUTH_MODE":               string(AuthModeRequired),
+		"ZHIXU_AUTH_BOOTSTRAP_TOKEN":    bootstrap,
+		"ZHIXU_REVIEW_QUESTION_REF_KEY": questionRefKey,
+		"ZHIXU_AUTH_ALLOWED_ORIGINS":    "https://127.0.0.1:8080,https://example.test",
+		"ZHIXU_AUTH_SECURE_COOKIE":      "true",
+		"ZHIXU_AUTH_SESSION_TTL":        "6h",
+		"ZHIXU_AUTH_API_TOKEN_TTL":      "48h",
+		"ZHIXU_ENVIRONMENT":             "production",
+		"ZHIXU_HTTP_ADDR":               "0.0.0.0:8080",
 	}
 	cfg, err := LoadWithLookup("", func(key string) (string, bool) {
 		value, ok := values[key]
@@ -777,11 +779,83 @@ func TestRequiredAuthLoadsSecretsAndOriginsWithoutEchoingBootstrap(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AuthMode != AuthModeRequired || cfg.AuthBootstrapToken != bootstrap || len(cfg.AuthAllowedOrigins) != 2 || !cfg.AuthSecureCookie || cfg.AuthSessionTTL != 6*time.Hour || cfg.AuthAPITokenTTL != 48*time.Hour {
+	if cfg.AuthMode != AuthModeRequired || cfg.AuthBootstrapToken != bootstrap || cfg.ReviewQuestionRefKey != questionRefKey || len(cfg.AuthAllowedOrigins) != 2 || !cfg.AuthSecureCookie || cfg.AuthSessionTTL != 6*time.Hour || cfg.AuthAPITokenTTL != 48*time.Hour {
 		t.Fatalf("loaded auth config=%+v", cfg)
 	}
-	if strings.Contains(cfg.String(), bootstrap) {
-		t.Fatalf("config String leaked bootstrap token: %s", cfg.String())
+	for _, secret := range []string{bootstrap, questionRefKey} {
+		if strings.Contains(cfg.String(), secret) {
+			t.Fatalf("config String leaked an API-only secret: %s", cfg.String())
+		}
+	}
+}
+
+func TestAPIConfigMaterializesStableReviewQuestionRefKey(t *testing.T) {
+	loadRequired := func(bootstrap string) Config {
+		t.Helper()
+		cfg, err := LoadWithLookup("", func(key string) (string, bool) {
+			switch key {
+			case "ZHIXU_AUTH_MODE":
+				return string(AuthModeRequired), true
+			case "ZHIXU_AUTH_BOOTSTRAP_TOKEN":
+				return bootstrap, true
+			default:
+				return "", false
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	bootstrap := "a-stable-bootstrap-token-with-more-than-32-bytes"
+	first := loadRequired(bootstrap)
+	second := loadRequired(bootstrap)
+	rotated := loadRequired(bootstrap + "-rotated")
+	if len(first.ReviewQuestionRefKey) < 32 || first.ReviewQuestionRefKey != second.ReviewQuestionRefKey {
+		t.Fatal("required API loads must derive one stable 32+ byte Review question-reference key")
+	}
+	if first.ReviewQuestionRefKey == bootstrap || first.ReviewQuestionRefKey == rotated.ReviewQuestionRefKey {
+		t.Fatal("Review question-reference key derivation must be domain-separated and Bootstrap-bound")
+	}
+	if strings.Contains(first.String(), first.ReviewQuestionRefKey) {
+		t.Fatal("Config.String leaked the derived Review question-reference key")
+	}
+}
+
+func TestReviewQuestionRefKeyValidationUsesCanonicalUTF8Bytes(t *testing.T) {
+	validUTF8 := "密密密密密密密密密密密"
+	cfg, err := LoadWithLookup("", func(key string) (string, bool) {
+		if key == "ZHIXU_REVIEW_QUESTION_REF_KEY" {
+			return validUTF8, true
+		}
+		return "", false
+	})
+	if err != nil {
+		t.Fatalf("32+ UTF-8 byte key was rejected: %v", err)
+	}
+	if cfg.ReviewQuestionRefKey != validUTF8 {
+		t.Fatal("explicit Review question-reference key was not preserved")
+	}
+
+	for name, key := range map[string]string{
+		"empty":               "",
+		"short":               strings.Repeat("k", 31),
+		"leading whitespace":  " " + strings.Repeat("k", 32),
+		"trailing whitespace": strings.Repeat("k", 32) + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadWithLookup("", func(candidate string) (string, bool) {
+				if candidate == "ZHIXU_REVIEW_QUESTION_REF_KEY" {
+					return key, true
+				}
+				return "", false
+			})
+			leaked := err != nil && key != "" && strings.Contains(err.Error(), key)
+			if err == nil || !strings.Contains(err.Error(), "review_question_ref_key") || leaked {
+				t.Fatalf("invalid Review question-reference key produced an unsafe error: %v", err)
+			}
+		})
 	}
 }
 
@@ -806,17 +880,20 @@ func TestDisabledAuthRejectsAnyExplicitBootstrapValue(t *testing.T) {
 	}
 }
 
-func TestNonAPIConfigDoesNotConsumeAPIBootstrapSecret(t *testing.T) {
-	bootstrapLookup := false
+func TestNonAPIConfigDoesNotConsumeAPISecrets(t *testing.T) {
+	secretLookups := map[string]bool{
+		"ZHIXU_AUTH_BOOTSTRAP_TOKEN":    false,
+		"ZHIXU_REVIEW_QUESTION_REF_KEY": false,
+	}
 	cfg, err := loadNonAPIWithLookup("", func(key string) (string, bool) {
 		switch key {
 		case "ZHIXU_ENVIRONMENT":
 			return "production", true
 		case "ZHIXU_AUTH_MODE":
 			return string(AuthModeRequired), true
-		case "ZHIXU_AUTH_BOOTSTRAP_TOKEN":
-			bootstrapLookup = true
-			return "worker-must-never-consume-this-bootstrap-secret", true
+		case "ZHIXU_AUTH_BOOTSTRAP_TOKEN", "ZHIXU_REVIEW_QUESTION_REF_KEY":
+			secretLookups[key] = true
+			return "worker-must-never-consume-this-api-secret", true
 		default:
 			return "", false
 		}
@@ -824,8 +901,8 @@ func TestNonAPIConfigDoesNotConsumeAPIBootstrapSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("non-API configuration should load without API-only auth validation: %v", err)
 	}
-	if bootstrapLookup || cfg.AuthBootstrapToken != "" {
-		t.Fatalf("non-API configuration consumed the API Bootstrap credential: looked_up=%t configured=%t", bootstrapLookup, cfg.AuthBootstrapToken != "")
+	if secretLookups["ZHIXU_AUTH_BOOTSTRAP_TOKEN"] || secretLookups["ZHIXU_REVIEW_QUESTION_REF_KEY"] || cfg.AuthBootstrapToken != "" || cfg.ReviewQuestionRefKey != "" {
+		t.Fatalf("non-API configuration consumed an API-only secret: lookups=%v bootstrap_configured=%t question_ref_configured=%t", secretLookups, cfg.AuthBootstrapToken != "", cfg.ReviewQuestionRefKey != "")
 	}
 	if cfg.Environment != "production" || cfg.AuthMode != AuthModeRequired {
 		t.Fatalf("worker lost non-secret runtime configuration: %+v", cfg)

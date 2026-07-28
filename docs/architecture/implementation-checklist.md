@@ -23,7 +23,7 @@
 - [x] Core Migration。
 - [x] Workflow/Outbox Migration。
 - [x] Retrieval Migration。
-- [ ] Review/Health Migration。
+- [x] Review/Health Migration（核心 schema 与后续硬化迁移均纳入项目迁移序列）。
 - [ ] sqlc Query。
 - [ ] Testcontainers。
 
@@ -70,7 +70,7 @@
 - [x] Citation Validation。
 - [x] RAG Refusal/Conflict、Clarification 与 v2 Answer。
 - [x] Conversation/Question/Answer/Feedback 与 retrieval-first Workflow。
-- [ ] Memory。
+- [ ] Memory（M8-03 Candidate/Confirm、编辑/暂停/恢复/删除/到期与 Interview scoped effective-context 已完成；通用 Agent 注入、`last_used_at`、最近使用展示和 `EPISODIC`→`PREFERENCE` 转换仍属后续产品范围）。
 
 ## Features
 
@@ -81,8 +81,9 @@
 - [ ] Smart Collection。
 - [ ] Knowledge Health。
 - [ ] Timeline/Impact。
-- [ ] Review/FSRS。
-- [ ] Interview Simulation。
+- [x] Review/FSRS（M8-02 Review-only Session、Card/Schedule、可信评分、冻结 Scorer/FSRS version、API-only 共享/派生 HMAC `question_ref`、失效与 legacy quarantine）。
+- [x] Interview Simulation（M8-03 独立 Interview 会话、共享基表上的 INTERVIEW origin Path、难度/deadline/连续追问、Completion reservation/digest hidden hold、ABANDONED→ORPHANED 维护与服务端 INTERVIEW Candidate）。
+- [x] Review-derived Shared Learning Path 运行闭环（领域/Repository/HTTP/Web、`00060`、Artifact hidden hold、真实 Service composition 与 24 小时 reservation maintenance 已接线，并通过 fresh PostgreSQL/API/Worker/Vite/浏览器主链路验证）。
 
 ## Application
 
@@ -92,7 +93,7 @@
 - [x] Inbox/资料版本（M9-01 Source Version 列表与详情；正式 Document 聚合仍未交付）。
 - [x] Diff/Approval（M9-02 File/Relation Diff、批准/驳回、Hash 冲突与 Apply Preflight）。
 - [x] Graph UI（Global/Local/Path、Evidence 与 Candidate panel）。
-- [ ] Review UI。
+- [x] Review/Interview/Memory UI（M8-02 `/review`、M8-03 `/interviews` 与 `/memories`，含两种 origin 的 Path 严格 decoder、Workspace cache/SSE 恢复和倒计时；真实后端主链路已完成桌面与 390x844 浏览器验证）。
 - [x] Workflow UI（M9-01 列表/详情与 pause/resume/cancel）。
 - [x] Settings UI（M9-01 只展示和操作已有服务端契约）。
 - [x] RAG Conversation UI（`/chat`、阶段恢复、Citation/Feedback、桌面/移动）。
@@ -111,3 +112,5 @@
 > 边界：上述勾选只表示对应已实现切片已有代码和门禁，不表示项目整体完成。PDF/Web Parser、HNSW/容量、
 > M7-04 Timeline/Impact、M8、M9-03 异步导出/脱敏/结果追踪、正式 Document/Article Revision、M10 Auth/安全/
 > 可观测/备份恢复，以及 M11 全量 E2E/发布交付仍未完成。
+
+> M8-02/M8-03 已补验 Review/Interview/Memory PostgreSQL、M8/Review migration race、前端 746 条测试，以及真实 API/Worker/Vite 的桌面与 390x844 浏览器主链路；业务数据 Down guard、Review Path reservation/hold 专门并发与 ABANDONED 重开仍未直接覆盖。

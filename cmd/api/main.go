@@ -15,6 +15,7 @@ import (
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
 	artifactchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/changecontrol"
+	artifactlearningpath "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/learningpath"
 	artifactlocalfs "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/localfs"
 	artifactpostgres "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/postgres"
 	artifactapplication "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
@@ -67,6 +68,10 @@ import (
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	knowledgehttp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/http"
+	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
+	memoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
+	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
+	memoryhttp "github.com/CodeZen-Lizhi/zhixu/internal/memory/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
@@ -74,10 +79,23 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	platformparser "github.com/CodeZen-Lizhi/zhixu/internal/platform/parser"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	platformscheduler "github.com/CodeZen-Lizhi/zhixu/internal/platform/scheduler"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
+	reviewpostgres "github.com/CodeZen-Lizhi/zhixu/internal/review/adapter/postgres"
+	reviewapplication "github.com/CodeZen-Lizhi/zhixu/internal/review/application"
+	reviewhttp "github.com/CodeZen-Lizhi/zhixu/internal/review/http"
+	interviewartifact "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/adapter/artifact"
+	interviewmemory "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/adapter/memory"
+	interviewpostgres "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/adapter/postgres"
+	interviewapplication "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/application"
+	interviewhttp "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/http"
+	learningpathartifact "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/adapter/artifact"
+	learningpathpostgres "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/adapter/postgres"
+	learningpathapplication "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/application"
+	learningpathhttp "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/http"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/webassets"
@@ -171,6 +189,10 @@ func main() {
 	conversationHandler := conversationhttp.NewHandler(nil, conversationhttp.NewCursorCodec())
 	eventsHandler := eventshttp.NewHandler(nil)
 	exportHandler := exporthttp.NewHandler(nil)
+	reviewHandler := reviewhttp.NewHandler(nil, cfg.GraphQueryTimeout)
+	memoryHandler := memoryhttp.NewHandler(nil, cfg.GraphQueryTimeout)
+	interviewHandler := interviewhttp.NewHandler(nil, cfg.GraphQueryTimeout)
+	learningPathHandler := learningpathhttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	knowledgeHandler := knowledgehttp.NewHandler(nil, nil, cfg.GraphQueryTimeout)
 	artifactHandler := artifacthttp.NewHandler(nil, nil, cfg.GraphQueryTimeout)
 	ragEnabled := cfg.ChatProvider != config.ChatProviderDisabled
@@ -186,6 +208,18 @@ func main() {
 			logger.Error("knowledge timeline and impact services are unavailable", "error_code", "KNOWLEDGE_TIMELINE_IMPACT_UNAVAILABLE")
 		} else {
 			knowledgeHandler = configuredKnowledgeHandler
+		}
+		configuredReviewHandler, reviewHandlerErr := newReviewHandler(database.DB(), cfg.GraphQueryTimeout, cfg.ReviewQuestionRefKey)
+		if reviewHandlerErr != nil {
+			logger.Error("review service is unavailable", "error_code", "REVIEW_DEPENDENCY_UNAVAILABLE")
+		} else {
+			reviewHandler = configuredReviewHandler
+		}
+		configuredMemoryHandler, memoryHandlerErr := newMemoryHandler(database.DB(), cfg.GraphQueryTimeout)
+		if memoryHandlerErr != nil {
+			logger.Error("memory service is unavailable", "error_code", "MEMORY_DEPENDENCY_UNAVAILABLE")
+		} else {
+			memoryHandler = configuredMemoryHandler
 		}
 		if err := configureCollectionHealth(database, cfg, &collectionHandler, &healthHandler, nil); err != nil {
 			logger.Error("collection and health services are unavailable", "error_code", "COLLECTION_HEALTH_DEPENDENCY_UNAVAILABLE")
@@ -257,6 +291,18 @@ func main() {
 				Clock:          foundation.SystemClock{},
 			})
 			workspaceHandler = workspacehttp.NewHandler(workspaceService)
+			configuredInterviewHandler, interviewHandlerErr := newInterviewHandler(database.DB(), workspaceRepository, fileScanner, cfg.GraphQueryTimeout)
+			if interviewHandlerErr != nil {
+				logger.Error("interview service is unavailable", "error_code", "INTERVIEW_DEPENDENCY_UNAVAILABLE")
+			} else {
+				interviewHandler = configuredInterviewHandler
+			}
+			configuredLearningPathHandler, learningPathHandlerErr := newLearningPathHandler(database.DB(), workspaceRepository, fileScanner, cfg.GraphQueryTimeout)
+			if learningPathHandlerErr != nil {
+				logger.Error("learning path service is unavailable", "error_code", "LEARNING_PATH_DEPENDENCY_UNAVAILABLE")
+			} else {
+				learningPathHandler = configuredLearningPathHandler
+			}
 			configuredExportHandler, exportHandlerErr := newExportHandler(database.DB(), cfg, workspaceRepository)
 			if exportHandlerErr != nil {
 				logger.Error("export service is unavailable", "error_code", "EXPORT_DEPENDENCY_UNAVAILABLE")
@@ -363,6 +409,10 @@ func main() {
 		Conversation:      conversationHandler,
 		Events:            eventsHandler,
 		Export:            exportHandler,
+		Review:            reviewHandler,
+		LearningPath:      learningPathHandler,
+		Memory:            memoryHandler,
+		Interview:         interviewHandler,
 		Knowledge:         knowledgeHandler,
 		Artifact:          artifactHandler,
 		Auth:              authHandler,
@@ -451,6 +501,173 @@ func newKnowledgeHandler(pool *pgxpool.Pool, timeout time.Duration) (*knowledgeh
 		return nil, err
 	}
 	return knowledgehttp.NewHandler(timeline, impact, timeout), nil
+}
+
+// newReviewHandler 组装 Review 的 PostgreSQL 事实、证据校验与冻结 FSRS 调度器。
+func newReviewHandler(pool *pgxpool.Pool, timeout time.Duration, questionRefKey string) (*reviewhttp.Handler, error) {
+	if pool == nil {
+		return nil, errors.New("review database is unavailable")
+	}
+	repository, err := reviewpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	fsrs, err := platformscheduler.NewFSRSAdapter()
+	if err != nil {
+		return nil, err
+	}
+	scorer := reviewapplication.NewDeterministicScorer()
+	service, err := reviewapplication.NewService(repository, repository, scorer, fsrs, questionRefKey, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	if err != nil {
+		return nil, err
+	}
+	return reviewhttp.NewHandler(service, timeout), nil
+}
+
+// newMemoryHandler 组装 Memory 的 PostgreSQL 生命周期事实与认证 HTTP 边界。
+func newMemoryHandler(pool *pgxpool.Pool, timeout time.Duration) (*memoryhttp.Handler, error) {
+	service, err := newMemoryService(pool)
+	if err != nil {
+		return nil, err
+	}
+	return memoryhttp.NewHandler(service, timeout), nil
+}
+
+// newMemoryService 统一组装 Memory 生命周期与 effective-context 读取依赖。
+func newMemoryService(pool *pgxpool.Pool) (*memoryapplication.Service, error) {
+	if pool == nil {
+		return nil, errors.New("memory database is unavailable")
+	}
+	repository, err := memorypostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	return memoryapplication.NewService(memoryapplication.Dependencies{
+		Repository: repository,
+		IDs:        foundation.NewUUIDGenerator(nil),
+		Clock:      foundation.SystemClock{},
+	})
+}
+
+// newInterviewHandler 组装 Interview 专属 PostgreSQL 事实、确定性评分和 Artifact DRAFT bridge。
+func newInterviewHandler(
+	pool *pgxpool.Pool,
+	workspaces *workspacepostgres.Repository,
+	files workspacedomain.FileScanner,
+	timeout time.Duration,
+) (*interviewhttp.Handler, error) {
+	service, err := newInterviewService(pool, workspaces, files)
+	if err != nil {
+		return nil, err
+	}
+	return interviewhttp.NewHandler(service, timeout), nil
+}
+
+// newInterviewService 统一组装 Interview、Memory 上下文和带服务端 Citation 校验的 Artifact 命令。
+func newInterviewService(
+	pool *pgxpool.Pool,
+	workspaces *workspacepostgres.Repository,
+	files workspacedomain.FileScanner,
+) (*interviewapplication.Service, error) {
+	if pool == nil || workspaces == nil || files == nil {
+		return nil, errors.New("interview dependencies are unavailable")
+	}
+	repository, err := interviewpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	artifactRepository, err := artifactpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	verifier, err := newArtifactCitationVerifier(pool, workspaces, files)
+	if err != nil {
+		return nil, err
+	}
+	artifactCommands, err := artifactapplication.NewCommandService(artifactapplication.Dependencies{
+		Repository: artifactRepository,
+		Evidence:   verifier,
+		IDs:        foundation.NewUUIDGenerator(nil),
+		Clock:      foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	bridge, err := interviewartifact.NewBridge(artifactCommands)
+	if err != nil {
+		return nil, err
+	}
+	memoryService, err := newMemoryService(pool)
+	if err != nil {
+		return nil, err
+	}
+	contextLoader, err := interviewmemory.NewLoader(memoryService, memorydomain.SingleUserOwner())
+	if err != nil {
+		return nil, err
+	}
+	candidateWriter, err := interviewmemory.NewWriter(memoryService)
+	if err != nil {
+		return nil, err
+	}
+	return interviewapplication.NewService(interviewapplication.Dependencies{
+		Store:           repository,
+		QuestionSource:  repository,
+		ContextLoader:   contextLoader,
+		CandidateWriter: candidateWriter,
+		Scorer:          interviewapplication.DeterministicScorer{},
+		ArtifactBridge:  bridge,
+		IDGenerator:     foundation.NewUUIDGenerator(nil),
+		Clock:           foundation.SystemClock{},
+	})
+}
+
+// newLearningPathHandler 组装 Review Answer 派生的共享 Path、Artifact hidden hold 与 HTTP 边界。
+func newLearningPathHandler(
+	pool *pgxpool.Pool,
+	workspaces *workspacepostgres.Repository,
+	files workspacedomain.FileScanner,
+	timeout time.Duration,
+) (*learningpathhttp.Handler, error) {
+	if pool == nil || workspaces == nil || files == nil {
+		return nil, errors.New("learning path dependencies are unavailable")
+	}
+	repository, err := learningpathpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	artifactRepository, err := artifactpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	verifier, err := newArtifactCitationVerifier(pool, workspaces, files)
+	if err != nil {
+		return nil, err
+	}
+	artifactCommands, err := artifactapplication.NewCommandService(artifactapplication.Dependencies{
+		Repository: artifactRepository,
+		Evidence:   verifier,
+		IDs:        foundation.NewUUIDGenerator(nil),
+		Clock:      foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	creator, err := artifactlearningpath.NewCreator(artifactCommands)
+	if err != nil {
+		return nil, err
+	}
+	bridge, err := learningpathartifact.NewBridge(creator)
+	if err != nil {
+		return nil, err
+	}
+	service, err := learningpathapplication.NewService(learningpathapplication.Dependencies{
+		Store: repository, ArtifactBridge: bridge,
+		Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return learningpathhttp.NewHandler(service, timeout), nil
 }
 
 func impactAuditActor(ctx context.Context) (auditdomain.ActorType, string) {

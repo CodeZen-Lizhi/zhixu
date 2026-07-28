@@ -23,6 +23,31 @@ M10-02 已交付单用户 Auth、Cookie Session、受限 API Token、CSRF/Origin
 启动预检；认证与 Write Authorization 保持两道独立边界，具体可执行契约见 `auth-security.md`。
 M8-01 已交付 Workspace 隔离的 Artifact/Revision、证据复核章节生成、受控 Markdown 导出和
 `PUBLISH_ARTIFACT` Proposal；外部副作用由持久 reservation 与 receipt/side-fact 原子闭合保护。
+M8-02 补充 Review Deck/Card、服务端评分、冻结 FSRS/Scorer version、Review-only Session 边界、严格 due 投影和
+Card/Schedule 失效收敛。due 查询必须携带活动 Review Session，`question_ref` 使用 API-only HMAC 绑定该 Session 与
+Card/Schedule 快照；显式 key 或 `required` 模式域隔离派生 key 可跨重启稳定，
+多实例必须显式共享同一 key。key 轮换、不同 key 实例或 local `disabled` 随机 key 重启后未提交题目必须刷新，已落库 Answer
+仍可 exact replay。`00052` 将 `DISPUTED` 等非 CONFIRMED Claim 与不可验证 legacy evidence 的 APPROVED Card quarantine；
+`00058` 以 Source-only/Source+Claim 双 selector 索引支撑有界失效，并让每条 Card 语句只调用一次集合化 Health helper；
+`00049` 只将失效结果投影到既有 Health/Timeline 兼容链路，`review_card` 仍是生命周期唯一事实源，不能将其宣称为
+完整 Review Health/Impact。
+M8-03 补充独立 Interview Question/Turn/Report、Review/Interview 共享 Learning Path、Memory Candidate/Confirm 生命周期与
+Interview-scoped effective-context 过滤。`00059` 用结构化 session/path/step provenance、复合 FK、每步唯一 Candidate、
+Audit aggregate/version 和 no-keepalive guard 强化 Memory/Completion；`00060` 将 `learning.learning_path(_step)` 设为
+唯一基表，保留 Interview 可更新兼容视图，并以 `INTERVIEW|REVIEW` origin/source shape、Review Answer 唯一绑定、command/
+reservation/hidden hold 与 retained-history trigger 保护共享 Path。
+Interview 已交付难度 policy、`started_at + duration` deadline、连续追问与 SKIPPED gap/path；用户 HTTP 固定 USER provenance，INTERVIEW
+Candidate 只能来自服务端已持久化 Path 步骤。Completion 采用 Begin/Prepare/Complete reservation：冻结 Session snapshot、
+pending reservation 阻止 Submit、在 Artifact hidden hold 创建事务内绑定 digest，final 事务核对并写 Report/Path/receipt 后
+release 精确 hold；Worker 在 24h 有界维护中将超时 reservation 转为 ABANDONED、hold 转为继续隐藏的 ORPHANED。本范围不
+物理删除恢复/审计资产。Interview Candidate 同时绑定客户端 key 的完整请求与服务端 provenance 的语义 identity。Memory
+effective context 的唯一生产消费者是 Interview loader；通用 Agent/Conversation/RAG 尚未接线。
+Review-derived Path 已统一 `00060`、Repository 与 Domain/Application 契约；ABANDONED 仅允许原 key 按新 `attempt_no`
+重开，Artifact digest 冻结 source snapshot、完整规范化 Draft、renderer 元数据与 attempt，Prepare/Complete 和精确 hold
+release 都受 attempt fence 保护。API 在数据库依赖可用时组装真实
+Repository/Artifact bridge/Service/Handler，System Status 仅在 Review 与 Learning Path Handler 均可用时标记 ready；Worker
+在启动和周期维护中调用 Application-owned 24 小时有界策略。本轮 production build/vet、OpenAPI 与 Web 静态门禁已通过；
+按限制未执行测试、真实 PostgreSQL/API/Worker/Vite，因此不能把动态事务、并发与端到端行为写成已验证。
 
 ## 规范索引
 
@@ -33,10 +58,10 @@ M8-01 已交付 Workspace 隔离的 Artifact/Revision、证据复核章节生成
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker 门禁 | M7-04 后端闭环已验证；UI、正式 downstream Proposal 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
 | [Smart Collection Export 契约](./export-contract.md) | Export Job、冻结 scan、prepared result、下载 Audit、过期清理与前端恢复 | M9-03 已交付 Collection Markdown/Metadata JSON；附件、Evaluation/Audit 内容导出与 AC-33 全量验收保持 deferred |
-| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health 持久化、read-model revision、schedule/outbox，以及 M9 Workspace 列表、cursor kind/version、Active Index included/excluded 与 PG/EXPLAIN 门禁 |
+| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health、M8 Review/Interview/Shared Path/Memory、M9 Workspace 列表的持久化、receipt、可见性与 PG/EXPLAIN 门禁 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool 稳定错误、M9 Proposal detail/summary Approval 空值契约与 M10 Auth 的稳定 Problem Details 边界 |
 | [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M6-03 Tool/Observability 共享脱敏与受限 Tool Call 事实已记录；通用 append-only Audit/真实 exporter 归 M10 |
-| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | M7-01 Graph、M7-02 Semantic Link 与 M7-03 Collection/Health 的跨层、fault、性能、浏览器和独立审查门禁均已记录 |
+| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已记录 M7 Graph/Collection/Health、M8 Review/Interview/Shared Path/Memory 和 M9 Export 的跨层、fault、浏览器与独立审查门禁 |
 
 ## 开发前检查清单
 

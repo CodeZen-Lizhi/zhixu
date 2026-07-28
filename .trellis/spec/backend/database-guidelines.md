@@ -1467,3 +1467,156 @@ Correct: advisory lock 下先 exact replay；只有不存在既有 Job 时才验
 Wrong: Complete 只校验进程 owner，下载统计与 Audit 分两次提交。
 Correct: 所有 lifecycle fence 使用 PostgreSQL 当前时间；统计 CAS 和 export.download Audit 在同一事务提交。
 ```
+
+## Scenario: M8 Review, Interview And Memory Persistence Contract
+
+### 1. Scope / Trigger
+
+- 修改 `learning.review_*`、`learning.interview_*`、`learning.learning_path*`、`learning.memory*`、Artifact visibility hold、迁移
+  `00035`、`00038`、`00044`–`00060`、Review/Interview/Memory PostgreSQL Repository 或相关 Worker maintenance 时应用。
+  `00056_m8_interview_provenance_shell_guard.sql` 保留 provenance shell guard，Completion reservation 只能由
+  `00057_m8_interview_completion_reservation.sql` 追加；`00059` 强化 Interview Memory 完整性，`00060` 将 Path 升格为共享基表并保留
+  `learning.interview_learning_path*` 可更新兼容视图。
+- 该场景锁定 Review/Interview 共享 Path、学习状态、Memory 生命周期和最小可见性边界；Health/Timeline 与兼容视图只能消费或转发
+  基表事实，不能成为 Review、Interview 或 Path 的第二事实源。
+
+### 2. Signatures
+
+- Review receipt identity：`(workspace_id,idempotency_key,request_hash,command_type)`；Answer 写入同时绑定 Session、Deck、
+  Card、question_ref、Score snapshot、冻结 Scheduler version 和产生评分的 Scorer version。
+- `question_ref` 由 API-only HMAC key 签发并绑定 Workspace/Session/Deck/Card fingerprint 与 Card/Schedule version。显式 key 至少 32
+  canonical bytes；`required` 缺省时从 Bootstrap Token 域隔离派生，local `disabled` 缺省时才生成进程 key。多实例必须共享
+  显式 key；key 轮换或 local 重启后刷新未提交题，已持久 Answer 的 receipt/response snapshot 仍是 exact replay 唯一依据。
+- Interview receipt identity：Start/Turn/Complete/Path status/step 独立保存 Workspace、session/path identity、request hash、
+  version 和完整 response snapshot；不得写入 `learning.review_answer` 或 `learning.review_schedule`。
+- Shared Path identity：`learning.learning_path.origin_type` 只能为 `INTERVIEW|REVIEW`。Interview 必须绑定 session+report 且
+  `review_answer_id IS NULL`；Review 必须唯一绑定同 Workspace 的不可变 Answer，且 Interview source fields 均为 NULL。
+- Review Path command identity：`learning_path_command` 以 `(workspace_id,idempotency_key)` 绑定 request hash、
+  `CREATE_REVIEW_PATH|PATH_STATUS|PATH_STEP`、expected/path version 与完整 response；创建 reservation 以
+  `(workspace_id,review_answer_id)` 唯一绑定 `source_snapshot/source_snapshot_digest/artifact_digest`、Path/Artifact tuple 与
+  `PENDING|COMPLETED|ABANDONED`。
+- Memory command identity：用户命令以 stable USER owner + Workspace + Idempotency-Key 绑定；`source_type/source_ref` 只由
+  服务端构造并可在响应中只读投影，任何用户命令都不能提交或修改；effective query 必须包含 Workspace、owner、可选
+  task scope 与数据库当前时间。
+- Interview Candidate identity：外层 `(workspace_id,idempotency_key)` 绑定完整 CREATE_CANDIDATE request hash；内层
+  `(workspace_id,stable owner,source_type='INTERVIEW',source_ref)` 由 `00054` partial unique index 绑定一条语义 Candidate。
+
+### 3. Contracts
+
+- Review Answer、Score、FSRS Schedule 与 receipt 用一个 PostgreSQL transaction/CAS 写入。Review Session 必须为 REVIEW
+  并绑定 Deck；Repository 读取和写入都验证 Card/Deck/Session/Workspace，不允许 HTTP 或 Application 只校验其中一层。
+- `00055` 将既有 Answer 的未知评分实现显式回填为 `legacy/unknown`；新 `scorer_version` 必须去除首尾空白后非空且不超过
+  128 bytes。Answer 是不可变审计事实，存在任何 Answer 时 Down 必须以 SQLSTATE `55000` 拒绝删除该字段。
+- `00052` 的 Claim lifecycle trigger 对任何从 CONFIRMED 离开的状态失效 APPROVED Card；legacy evidence quarantine 使用
+  `try_review_evidence_uuid`，所有 due SQL 都不得直接将可变 JSON 文本 cast 为 UUID。失效 Card 不得保留 ACTIVE Schedule。
+- `00049` 的 `REVIEW_INVALIDATED` Health Issue 与 Timeline outbox 是由 `learning.review_card` 派生的最小兼容投影；
+  不能据此 resolve/recreate Card，也不能把该表当成完整 downstream impact 数据源。
+- Claim/Source 生命周期失效命令每次最多处理 200 张 Card，使用单条 `UPDATE ... FROM ... RETURNING` 驱动既有触发器，
+  receipt 只保存 `invalidated_count/has_more` 有界摘要。`has_more=true` 时调用方必须用新 Idempotency-Key 继续，禁止
+  无界锁定全部匹配 Card、逐卡 load/update 或把完整 Card 列表写入 receipt。
+- `00058` 用 `review_card_evidence_selector` 保存由 APPROVED Card evidence 派生的只读 selector identity 与 Card Claim，
+  并分别以 `(workspace_id,selector_kind,selector_id,card_id)` 和
+  `(workspace_id,selector_kind,selector_id,claim_id,card_id)` 索引支持 Source-only 与 Source+Claim 批次；APPROVED Claim
+  路径使用 `(workspace_id,claim_id,id)` partial index，Health 指纹重算使用对应的 INVALIDATED partial covering index。投影由
+  evidence trigger 重建，Card JSON 仍是唯一证据事实源；多个 selector 按 Card 级 AND 组合，不要求同一 Evidence item
+  同时匹配；失效热查询不得重新对 Workspace 全量 Card 执行 `jsonb_array_elements`。
+- `00058` 将 Review invalidation Health 投影从逐 Card trigger 改为 transition-table statement trigger；每条 Card 语句
+  只能调用一次集合化 batch helper，由一组 SQL 同时聚合全部受影响 Workspace/Claim，不能按 Card 或 Claim 循环调用
+  scalar 聚合。Schedule/SSE 仍按 Card 逐行产生同事务事实，不能因投影优化而跳过。
+- `00059` 将 INTERVIEW Memory 的 opaque `source_ref` 投影为结构化 session/path/step columns，在迁移时先拒绝 malformed
+  历史引用，再以复合 FK 验证真实 Path chain；部分唯一索引保证 stable owner 对同一步骤最多一个 Candidate。来源列与 canonical
+  `source_ref` 不可变，初始 Candidate 必须固定 USER owner、GOAL、session scope、无 expiry，并等于 Path Step 的 title/rationale。
+- `00059` 还要求 `(workspace_id,memory_id,memory_version)` 只有一条 Audit；Audit owner、to_status、version 与当前 aggregate 一致，
+  action 必须匹配生命周期转换。Interview completion reservation 或 Review Path creation reservation 的 replay 不能只更新
+  `updated_at` 延长 24 小时维护窗口。
+- `00060` 的 `learning.learning_path(_step)` 是两个 origin 的唯一基表；旧 Interview relation 只是单表可更新视图。Path/Step 的
+  source、Evidence、Artifact binding 与 created_at 是 retained history，不可编辑或删除；只允许 version+1 的既定状态转换。
+  Review origin 由唯一 Review Answer 和 `review-gap/v1` 服务端快照驱动，客户端不得提交 gap、Score 或 Evidence。
+- `00056` 在数据库边界验证 `interview-evidence/v2` 的精确八字段 JSON、受限 UUID、Claim Source、active Index、Source/Chunk
+  Manifest 与 canonical Chunk；follow-up 只能复制 parent Claim/Evidence。Interview Session 与 Review Answer child 写入必须锁同一
+  `review_session` parent，parent 改型 trigger 反查 child，封闭两个提交方向；已有 Interview/Question 或 Review Answer 时 Down
+  以 SQLSTATE `55000` 拒绝移除 provenance/shell guard。
+- Interview Completion 使用 Begin/Prepare/Complete reservation，而不跨 Artifact/Interview 模块共享物理 transaction。
+  Begin 冻结 Session snapshot；PENDING reservation 阻止后续 Submit。Prepare 先持久化 digest；随后的 Artifact PLAN receipt 与
+  hidden hold 在一个 Artifact 事务写入，数据库 fence 锁 reservation，并只接受 PENDING、匹配 digest/type/role/stage key 的绑定。
+  Complete 的最终事务精确核对 reservation/digest/Artifact，
+  写入 Report/Path/receipt 并只 release 对应 hold。失败 Artifact 不可由普通 Get/List 读取，保留 stable identity 供 exact replay。
+  Worker 在 24h 有界维护中将超时 reservation 转为 ABANDONED、其 hold 转为 ORPHANED；ORPHANED 继续隐藏。本范围不物理删除
+  恢复或审计资产。
+- Review Path 创建同样使用 Answer-scoped reservation、digest、`LEARNING_PATH_CREATE/PATH` hidden hold 和精确 PLAN receipt fence；
+  Complete 必须在一个事务中写共享 Path/Step/receipt、完成 reservation 并只 release 自己的 hold。Repository SQL 必须使用
+  `00060` 的真实列名、command type 和非空 receipt 字段；在真实 PostgreSQL 契约验证前不得宣称该链路可运行。
+- Memory 表约束 Candidate insert、Confirm→ACTIVE、暂停/到期/删除与 append-only audit；读取 effective context 时在 SQL 根查询
+  同时过滤 `status='ACTIVE'`、confirmation、expiry、Workspace、stable owner 和 task scope，禁止先全量读取再进程过滤。
+- Interview Candidate Repository 固定先锁客户端 command key，再锁 provenance。相同 key 的不同 hash 在取得 provenance 锁前
+  冲突；不同 key 的等价 provenance 从原 CREATE_CANDIDATE receipt 恢复初始 Candidate snapshot，并为新 key 写绑定既有
+  Memory ID 的 receipt。并发只能产生一条 Candidate 和一条 `CANDIDATE_CREATED` Audit；USER provenance 不参与该唯一化。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 必须结果 |
+|---|---|
+| Review 同 key 不同 hash、CAS 过期或并发 Answer | stable conflict 或 exact replay；无第二 Answer/Schedule |
+| Review `question_ref` 的 key 轮换、不同 key 实例、local 随机 key 重启、签名无效或 Session/Card/Workspace 不匹配 | 刷新 Due Question 或 stable conflict；不写 Answer/Schedule，已落库 Answer 仍按 receipt exact replay |
+| Claim DISPUTED 或 legacy Card evidence 不是合法 `review-evidence/v1` | 同事务失效 Card/删除 Schedule；due 安全返回 |
+| Claim + Source Version/Span 组合失效 | 所有 selector 按 Card 级 AND；Source+Claim 直接走含 `claim_id` 的索引，Version+Span 不要求同一 Evidence item |
+| Health/Timeline projection 写入失败 | 包含 Card 生命周期变化的事务回滚；不得留下只有 Card 或只有投影的一半事实 |
+| Interview evidence malformed/tuple 漂移，或 parent/child 并发改型 | `23514` 或并发一方失败；不得留下非法 provenance 或跨类型 Session 历史 |
+| PENDING Completion reservation、snapshot/digest/Artifact 不匹配或 final receipt 已存在 | Submit 拒绝、stable conflict 或 exact replay；不 release 其他 hold、不公开 Draft |
+| 超过 24h 的 PENDING reservation | Worker 有界维护转 ABANDONED；关联 hold 转 ORPHANED 并继续被普通 Artifact 查询拒绝 |
+| Interview Candidate 相同 key 绑定不同 request hash | provenance 副作用前 idempotency conflict；不产生第二 Candidate/Audit |
+| Interview Candidate 不同 key 绑定相同 provenance/内容 | 复用初始 Candidate snapshot 和 Memory ID；每个 key 持久化独立 receipt |
+| Memory source/owner 试图变更、Candidate 未确认、PAUSED/EXPIRED/DELETED | 触发器/Repository 拒绝变更或 effective query 排除 |
+| Interview Memory 的结构化 session/path/step 与 source_ref 或真实 Path chain 不一致 | `23514`；不允许靠猜测回填或留下悬空 Candidate |
+| Memory Audit version/owner/status 与 aggregate 不一致，或 action 不符合状态转换 | `23514`；aggregate 写入与唯一 Audit 必须一起成功或一起回滚 |
+| Shared Path origin/source shape、Review Answer/Artifact tuple 或 version transition 不一致 | CHECK/FK/trigger 拒绝；不得跨 origin 改型、编辑历史证据或重新打开终态 Path |
+| Review Path command 名称、列名或必填 receipt 字段与 `00060` 不一致 | Repository 集成失败；在修正并用真实 PostgreSQL 证明前不得注册为 production capability |
+
+### 5. Good / Base / Bad Cases
+
+- Good：所有 learning root query 使用显式列、参数化 Workspace predicate、bounded keyset/limit；Card/Schedule、共享 Path、Interview
+  facts 和 Memory 各有单一 owner，兼容视图/投影只可转发、重建或观察；Complete 仅 release 精确 digest/Artifact 对应 hold。
+- Base：旧 Card 无法验证时被 quarantine；超时 Interview reservation 的 Artifact 留在 ORPHANED hidden hold；过期 Memory
+  保留审计历史但不进入上下文。
+- Bad：`(evidence->>'claim_id')::uuid` 直接 cast、先生成公开 Artifact 再写 Interview、为 Review 再建一套 Path 表、用 Health Issue
+  驱动 Schedule，或把 source_type/source_ref 暴露为浏览器命令字段。
+
+### 6. Tests Required
+
+- 迁移：空库/重复 Up、业务数据 guarded Down、`00035` legacy receipt/Answer hardening、`00038` COMPLETE_SESSION receipt
+  forward/guarded Down、legacy APPROVED Card quarantine、DISPUTED invalidation、`00049` projection 的 fingerprint/reopen/resolve、
+  `00053` hold、`00054` INTERVIEW partial uniqueness/Down、`00055` legacy Scorer version 回填/约束/空数据 Down→Up/有 Answer
+  guarded Down、`00056` malformed provenance/parent-copy/shell 双向竞态/业务数据 guarded Down、`00057` legacy ORPHANED 回填、
+  PLAN receipt + digest fence、NULL digest 安全归一化、role/artifact mutation、late Create 与 maintenance 竞态、24h
+  ABANDONED→ORPHANED/guarded Down；`00059` 覆盖 malformed legacy source_ref、结构化 FK/每步唯一 Candidate、Audit aggregate/version/
+  lifecycle、completion keepalive 与 Session immutable binding；`00060` 覆盖共享基表/兼容视图、origin shape、Review Answer 唯一绑定、
+  command/reservation/hold、Path/Step retained history、keepalive、Interview Memory provenance 重绑定与有数据 guarded Down。另验证
+  malformed JSON 不导致 due 查询失败。
+- Repository integration：Review Answer transaction/replay/CAS/Deck binding、question_ref key-change refresh/Answer exact replay，
+  Review invalidation projection 回填/清理、Claim/Version/Span 全组合 Card 级 AND、201/200 续批、新 key 继续与原 key replay、
+  200 张跨 Claim Card 的单次 set-based Health/Timeline/Schedule/SSE 原子投影，
+  Interview Begin/Prepare/Complete snapshot/digest/hold/release/failure replay 和 24h bounded maintenance，Memory owner/source
+  immutability、effective filter、expiry、双层幂等 exact/semantic replay、同 key 异请求冲突、并发每-key receipt/单 Candidate/Audit
+  和跨 Workspace 拒绝；Review Answer→Path 的 frozen gap/citation、唯一 reservation、exact replay/CAS、Artifact hold/release、
+  command type/expected version/response 字段及 24h maintenance。
+- SQL review：所有 JSON 访问安全、无字符串拼接；检查 due/expiry/path 查询索引、无 N+1/逐条写入，以及 visibility release
+  与 completion receipt 的失败顺序。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 直接把 legacy evidence JSON 文本 cast 为 UUID，或只把 due 查询加 WHERE 过滤。
+Correct: 使用受限安全转换并迁移 quarantine；Card、Schedule 和查询投影收敛到同一失效事实。
+
+Wrong: Source+Claim 先扫描高扇出 Source 再过滤 Claim，或让 Version+Span 只能匹配同一 Evidence item；statement trigger 再逐 Claim 调 scalar 聚合。
+Correct: selector 投影 Claim 并为 Source-only/Source+Claim 提供独立有序索引；Version 用同 Card EXISTS；每条 Card 语句只调用一次 set-based Health helper。
+
+Wrong: 用一个跨模块数据库事务假装 Artifact/Interview 原子性，或在最终提交时给未知来源 hold 补 digest。
+Correct: 用 reservation + PLAN/hold digest fence + exact release 表达可见性原子性；超时由 Worker 有界转 ABANDONED/ORPHANED。
+
+Wrong: 用 step-derived key 替换客户端 Idempotency-Key，或只靠 unique violation 事后收敛 Candidate。
+Correct: 先锁并校验客户端 key 的完整请求，再锁 INTERVIEW provenance；语义复用写新 receipt 并返回原 Candidate snapshot。
+
+Wrong: 为 Review 另建 Path 表，或让 Repository 自定义 `00060` 不接受的列名、command type 和 receipt 形状。
+Correct: 两个 origin 共用 `learning.learning_path(_step)`；Interview 通过兼容视图，Review Repository 严格服从基表和 command/reservation 契约。
+```

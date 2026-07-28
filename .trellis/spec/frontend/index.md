@@ -24,6 +24,22 @@ M10-02 已交付严格认证 API 边界、`AuthProvider`/`AuthBoundary`、Sessio
 Bootstrap Token 只用于一次交换，浏览器持久化的唯一认证派生值是 CSRF Token，业务授权仍由后端裁决。
 M8-01 已交付 `/artifacts` 工作台、严格 Artifact decoder、Workspace-bound Query 与 generation 恢复；
 Citation 可信性、Artifact 状态和 export/publication 绑定只来自服务端响应。
+M8-02 已交付 `/review` 与 `/review/session`：Deck 管理、绑定 Workspace/Session/Deck 的仅问题 due 投影、服务端评分与
+`scorer_version` 回执、同 key 重试、Workspace cache 与 `review.*` SSE 回查。due query key 必须包含 Session，避免同一
+Deck 的并行会话复用另一会话的 `question_ref`。答题前绝不渲染答案要点或证据正文；key 轮换、不同 key 实例或 local
+`disabled` 随机 key 的 API 重启使未提交 `question_ref` 失效时必须刷新 due，不能本地重签或复用旧题。显式/派生 key
+在同 key 重启后保持有效。
+Review-derived Learning Path 的客户端代码也已落在 `web/src/api/review.ts`、Review Query 与 `/review/session?answer=...`：
+它只提交 Workspace/Answer/key，严格解码 `origin_type=REVIEW`、`LEARNING_PATH` Artifact 与 Workspace/Answer/Path/Step
+binding，使用 `['review',workspaceId,'answers',answerId,'learning-path']` 精确缓存，并由 `learning_path.*` 事件定向失效。
+后端已在数据库依赖可用时组装真实 Learning Path Service/Handler，并将 Review readiness 与两者的可用性共同绑定；
+`00059/00060`、Repository 契约和 24 小时维护调用已用 fresh PostgreSQL、真实 API/Worker/Vite 及桌面/390x844
+浏览器主链路动态验证。该 UI 仍须把实际依赖不可用时的 503 显式展示为可恢复错误；有业务数据的 Down guard、
+Review Path reservation/hold 专门并发与 ABANDONED 重开仍需独立覆盖。
+M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`：Interview/Path 的严格 decoder、逐题恢复、报告/步骤状态、
+难度策略提示、从 `started_at + duration_minutes` 派生的倒计时、连续追问和 SKIPPED gap/path，以及 Memory Candidate/Confirm、
+编辑、暂停/恢复/删除、到期与 cursor 恢复。认证身份不进入浏览器；Memory provenance 只从服务端响应只读展示，任何用户
+命令都不能提交或修改 provenance。用户创建只能产生 USER candidate，INTERVIEW 来源仅由服务端受控命令产生。
 
 ## 已确认基线
 
@@ -46,7 +62,7 @@ Citation 可信性、Artifact 状态和 export/publication 绑定只来自服务
 | [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | 已记录 M7-03 Workspace cache、M9 唯一 SSE Owner、M9-03 Export polling/recovery，以及 M10 Auth/CSRF 状态和匿名时的 Query 清理契约 |
 | [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 M7-03 Collection/Health、M7-04 `knowledge_timeline` capability、M9 Business/M9-03 Export 与 M10 Auth 响应/Problem 的严格解码 |
 | [Artifact 工作台契约](./artifact-workbench.md) | Artifact wire、Query、generation 恢复、GAP/export/publish UI 边界 | M8-01 decoder、组件、桌面/移动真实浏览器闭环已验证 |
-| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 M7-01 Graph、M7-02 Candidate、M7-03 Collection/Health、M9-03 Export 与 M10 认证浏览器门禁 |
+| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 M7-01 Graph、M7-02 Candidate、M7-03 Collection/Health、M8 Review/Shared Path/Interview/Memory、M9-03 Export 与 M10 认证浏览器门禁 |
 
 ## 开发前检查清单
 

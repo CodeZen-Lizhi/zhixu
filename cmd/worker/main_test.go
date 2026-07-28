@@ -1,19 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
@@ -23,6 +27,55 @@ import (
 	workflowhealth "github.com/CodeZen-Lizhi/zhixu/internal/workflow/httphealth"
 	workflowruntime "github.com/CodeZen-Lizhi/zhixu/internal/workflow/runtime"
 )
+
+func TestRunMemoryExpiryMaintenanceUsesBoundedBatchAndReportsResult(t *testing.T) {
+	service := &memoryExpiryServiceFake{expired: 3}
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+
+	runMemoryExpiryMaintenance(context.Background(), logger, service, memoryExpiryStartupPhase)
+
+	if service.calls != 1 || service.limit != memorydomain.MaxListLimit {
+		t.Fatalf("calls=%d limit=%d", service.calls, service.limit)
+	}
+	logged := output.String()
+	if !strings.Contains(logged, `"msg":"memory expiry maintenance completed"`) ||
+		!strings.Contains(logged, `"phase":"startup"`) ||
+		!strings.Contains(logged, `"expired_count":3`) {
+		t.Fatalf("maintenance log=%s", logged)
+	}
+}
+
+func TestRunMemoryExpiryMaintenanceReportsFailureWithoutRetrying(t *testing.T) {
+	service := &memoryExpiryServiceFake{expired: 2, err: errors.New("database unavailable")}
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+
+	runMemoryExpiryMaintenance(context.Background(), logger, service, memoryExpiryPeriodicPhase)
+
+	if service.calls != 1 || service.limit != memorydomain.MaxListLimit {
+		t.Fatalf("calls=%d limit=%d", service.calls, service.limit)
+	}
+	logged := output.String()
+	if !strings.Contains(logged, `"msg":"memory expiry maintenance failed"`) ||
+		!strings.Contains(logged, `"error_code":"MEMORY_EXPIRY_MAINTENANCE_FAILED"`) ||
+		!strings.Contains(logged, `"phase":"periodic"`) {
+		t.Fatalf("maintenance log=%s", logged)
+	}
+}
+
+type memoryExpiryServiceFake struct {
+	calls   int
+	limit   int
+	expired int
+	err     error
+}
+
+func (fake *memoryExpiryServiceFake) ExpireDue(_ context.Context, limit int) (int, error) {
+	fake.calls++
+	fake.limit = limit
+	return fake.expired, fake.err
+}
 
 func TestNewWorkerComponentsRequiresDatabase(t *testing.T) {
 	components, err := newWorkerComponents(nil, config.Defaults(), nil, nil)

@@ -474,3 +474,145 @@ git diff --check
 Wrong: 只验证 Create 返回 202，或只用 mock fetch 截图就宣称 Export/AC-33 完成。
 Correct: 从真实 PostgreSQL/API/Worker/LocalFS/Audit/浏览器证明可恢复结果与受控下载；AC-33 仍明确为部分完成。
 ```
+
+## Scenario: M8 Review, Interview And Memory Quality Gate
+
+### 1. Scope / Trigger
+
+- 修改 `internal/review/**`、`internal/review/interview/**`、`internal/review/learningpath/**`、`internal/memory/**`、
+  `internal/platform/scheduler/**`、迁移 `00035`、`00038`、`00044`–`00060`、相关 HTTP/OpenAPI/Composition、Artifact
+  visibility hold、Worker expiry 或 M8 前端时应用。`00056` 保留 Interview provenance shell guard，`00057` 追加 Completion
+  reservation，`00059` 强化 Memory 完整性，`00060` 建立 Review/Interview 共享 Path。
+- 该门禁覆盖 Review FSRS、共享 Learning Path 与 Interview/Memory 三条事实链；它们可以读取受控的正式知识和评分结果，
+  但不得复用 Answer/Schedule、创建第二套 Path owner、把 Memory 变成 Evidence，或接受浏览器可伪造的 provenance。
+
+### 2. Signatures
+
+- Review：`StartSession(REVIEW, deck_id)`、`SubmitAnswer(session_id, card_id, question_ref, answer, rating, idempotency_key)`、
+  `CompleteSession(session_id, idempotency_key)`；Session、Deck、Card、question_ref 必须属于同一 Workspace。
+- Interview：`Start`、`SubmitTurn`、`Complete`、Learning Path status/step command；Question/Turn/Report/Path 使用独立
+  receipt 和 version，Interview Turn 不写 `learning.review_answer` 或 FSRS。
+- Review Path：`CreateForReview(workspace_id,review_answer_id,idempotency_key)`、`GetForReviewAnswer`、
+  `UpdateStatus(expected_version,status,key)`、`UpdateStep(step_id,expected_version,status,key)`；客户端不能提交 gap、Score、
+  Evidence 或 Artifact binding，所有输入从冻结 Answer 与正式 Citation 读取。Step 的 `PENDING` 只允许出现在读取投影；更新
+  target 只能是 `IN_PROGRESS|COMPLETED|SKIPPED`。
+- Memory：响应可只读返回服务端 provenance；用户 HTTP Create/Edit/Confirm/Pause/Resume/Delete 均不接受 source/owner/
+  confirmed_by，也不能修改既有 provenance。服务端 Interview Candidate 只接收已持久化的 session/path/step identity、
+  Workspace 与客户端 Idempotency-Key，并固定 `INTERVIEW` provenance。
+
+### 3. Contracts
+
+- Review Scorer 输入只来自已验证 Card、答案和受控上下文；评分、Evidence 子集校验、Answer、Schedule、receipt 在一个
+  PostgreSQL 事务中完成。`00052` 要求 Claim 离开 `CONFIRMED`（包括 `DISPUTED`）或 legacy evidence 不可验证时，Card
+  与 Schedule 一起收敛到失效状态；due 查询的 legacy UUID 转换必须 fail closed。每条 Answer 必须冻结非空、无首尾空白、
+  不超过 128 bytes 的 Scorer version；`00055` 将旧数据标记为 `legacy/unknown`，有 Answer 时禁止 Down 丢失该审计字段。
+- due 查询必须携带活动且 Deck-bound 的 Review Session；`question_ref` 使用 API-only HMAC key 绑定
+  Workspace/Session/Deck/Card fingerprint 与 Card/Schedule version。显式配置必须为至少
+  32 个 canonical bytes；`required` 模式缺省时从 Bootstrap Token 域隔离派生，local `disabled` 缺省时才使用进程随机 key。
+  多实例必须共享显式 key；key 轮换或 local 进程重启后未提交题目刷新 due，已持久 Answer 仍按 receipt exact replay。
+- `00049_review_invalidation_observability.sql` 只将已发生的 Card invalidation 投影到既有 `REVIEW_INVALIDATED` Health
+  Issue 和既有 Timeline outbox；它既不拥有 Card/Schedule 生命周期，也不实现完整 Review Health/Impact 或下游影响分析。
+- Review lifecycle invalidation 每次最多 200 张 Card，以单条批量 UPDATE 写入并只返回 count/has_more 摘要；
+  `has_more=true` 时用新 Idempotency-Key 继续，禁止无界锁、N+1 或完整 Card receipt。
+- `00058` 使用 transition table 将一条 Card 语句的 invalidation Health 更新收敛为一次集合化 batch helper 调用；
+  不得按 Card 或 Claim 循环扫描 INVALIDATED Card。
+- Source Version/Span 失效只能通过 `review_card_evidence_selector` 的 Workspace-bound btree seek 取得下一批；
+  多个 selector 必须按 Card 级 AND 组合，禁止误收紧为同一 Evidence item；Source+Claim 必须使用带 `claim_id` 的
+  索引与静态计划，不能先扫描高扇出 Source 再过滤稀疏 Claim；也禁止在持有 Workspace 写锁时展开所有 APPROVED Card
+  的 evidence JSON。
+- `00056` 要求 root Interview Question 的 `interview-evidence/v2` 恰有八个字段，并通过安全 UUID、Claim Source、active Index、
+  Source Manifest、canonical Chunk/Manifest Chunk 和 provenance 绑定校验；follow-up 必须原样冻结 parent Claim/Evidence。Interview
+  child 与 Review Answer 写入先 `FOR UPDATE` 锁同一 `review_session` parent，parent 改型再反查 child，保证双向竞态最多一方提交。
+  已有 Interview/Question 或 Review Answer 时，Down 必须以 SQLSTATE `55000` 拒绝移除这些 guard。
+- Interview Completion 使用 Begin/Prepare/Complete reservation，不建立跨模块长事务。Begin 在 Session 行锁下冻结 snapshot，
+  PENDING reservation 阻止 Submit；Prepare 冻结完整 Artifact digest。Artifact 创建事务写入 PLAN receipt 与带 digest 的 hidden
+  hold，数据库 fence 以 `FOR UPDATE` 核对 reservation=PENDING、digest、Artifact type/role 和精确 stage key。Complete 最终
+  事务再次核对并原子写 Report/Path/receipt，只 release 对应两个 hold。Worker 以 24 小时、有界批次将超时 reservation 转为
+  ABANDONED、ACTIVE hold 转为继续隐藏的 ORPHANED；本范围不物理删除恢复/审计资产。
+- `00059` 要求 INTERVIEW Candidate 以结构化 session/path/step FK 绑定真实 Interview-origin Path，stable owner 对同一步骤最多一条；
+  Memory Audit 与 aggregate owner/status/version 一致且每个 version 唯一，非法生命周期动作和无进展 keepalive 在数据库边界拒绝。
+- `00060` 将 Path/Step 升格为 `learning.learning_path(_step)`，Interview relation 只作为可更新兼容视图；Review origin 唯一绑定
+  不可变 Review Answer，Path/Step 历史字段不可改删，只能通过 version CAS 推进允许状态。Review 创建使用 Answer-scoped
+  reservation、`LEARNING_PATH_CREATE` hidden hold、digest 与 PLAN receipt fence。
+- Review Path 的生产 Composition 在数据库依赖可用时必须注入真实 Repository、Artifact bridge、Service 与 Handler；System Status
+  只有在 Review 和 Learning Path Handler 均可用时才能报告 `review: ready`。Worker 必须在启动和周期路径调用
+  Application-owned 的 24 小时有界维护策略，不能由入口复制 TTL/批次规则。当前实现已完成这些接线，并统一 `00060` 与
+  Repository 的 snapshot/digest、Path/Step、command/receipt、completed Artifact tuple；Artifact digest 必须冻结 source
+  snapshot、完整规范化 Draft（Scope、正文、Citation）与 renderer 元数据，并与 ABANDONED 重开、Prepare、Complete 一起绑定
+  `attempt_no`，确保代码版本变化、旧 attempt 的延迟请求和 ORPHANED hold 不能污染新尝试。静态门禁通过不等于
+  真实 PostgreSQL 事务、并发和 API/Worker 端到端已验证。
+  已持久化且非空的 legacy v1 digest 只有在由同一冻结 snapshot 精确重算匹配时才能恢复原 attempt；空 digest 和
+  ABANDONED 重开不得降级生成 v1。
+- Memory effective context 只返回 ACTIVE、confirmed、unexpired、Workspace/owner/task-scope 匹配项，显式标记为个人
+  上下文，绝不充当 Citation/Evidence。当前唯一生产消费者是 Interview memory loader；通用 Agent/Conversation/RAG 没有接线。
+  用户 HTTP 固定 `USER/user:manual`，不能伪造 AGENT/INTERVIEW source。
+- Interview Candidate 使用双层幂等：`learning.memory_command` 先将 Workspace + 客户端 key 绑定完整 Candidate 请求，
+  再以 stable owner + `INTERVIEW` source_ref 收敛同一步骤的语义 identity。相同 key 换步骤/内容必须在副作用前冲突；
+  不同 key 的等价步骤请求复用同一 Candidate，只新增各自 receipt，不新增 Candidate/Audit。公开 `replayed=true/200`
+  同时包含 exact key replay 与该语义复用，OpenAPI 和 UI 不得只解释为同 key 重放。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 必须结果 |
+|---|---|
+| Review Session 为 INTERVIEW、无 Deck，或 Card/question_ref 不绑定该 Session | stable invalid/conflict；不评分、不写 Answer/Schedule |
+| key 轮换、不同 key 实例或 local 随机 key 重启后提交旧 `question_ref` | fail closed 并要求刷新 due；已落库 Answer 的同 key 重试仍 exact replay |
+| Scorer/Evidence 不可用、同 key 不同请求或并发重试 | fail closed 或 exact replay；绝不第二次推进 FSRS |
+| Scorer version 为空、带首尾空白、超过 128 bytes，或有 Answer 时回滚 `00055` | CHECK 或 SQLSTATE `55000` 拒绝；不得写入或删除评分实现身份 |
+| Claim DISPUTED、legacy evidence 畸形或来源不可用 | Card INVALIDATED、Schedule 不存在；due 查询继续返回安全页 |
+| Interview evidence 为 scalar/多余字段/非法 UUID/漂移 tuple，或 shell/child 并发改型 | CHECK `23514` 或并发一方失败；不落 Question/Answer、不形成跨类型历史 |
+| Completion reservation PENDING、snapshot/digest/Artifact/stage key 漂移 | Submit 或 Complete stable conflict；不得给任意 hold 事后贴 digest、不得公开 Draft |
+| Completion 超过 24 小时 | Worker 有界转 ABANDONED/ORPHANED；晚到 Artifact Create 被数据库 fence 拒绝 |
+| Interview Candidate 同 key 换步骤/内容 | 写入前稳定 conflict；不得创建 Candidate、Audit 或第二 provenance |
+| Interview Candidate 不同 key 请求同一 provenance/内容 | 返回同一 Memory ID 且 `replayed=true`；每个 key 有 receipt，只有一条 Candidate/Audit |
+| 用户 Memory 命令传 source/owner/confirmed_by，或 Candidate 未确认/暂停/到期 | 请求拒绝，或 effective context 返回空；不泄漏为 Citation |
+| INTERVIEW Memory 的结构化 provenance、source_ref、Path origin 或 Audit aggregate/version 漂移 | CHECK/FK/trigger fail closed；不生成悬空 Candidate 或伪造 Audit |
+| Review Path Handler 的 service 未装配 | 返回依赖不可用，不把路由存在或前端页面存在解释为业务成功 |
+| Review Path Repository 与 `00060` 的列、command enum、expected_version、snapshot/digest 或 Artifact tuple 不一致 | 真实 PostgreSQL 门禁失败；不得通过 mock/静态 build 宣称持久化闭环 |
+| 通用 Agent/RAG 尝试读取 Memory，但没有显式 loader/composition | 该能力保持未交付；不得从 Interview 接线外推为全局上下文能力 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：Review 与 Interview 各自保存 receipt 和状态机；Memory 由受控 writer 生成 Candidate、用户 Confirm 后才进入
+  Interview context；共享 Path 的 origin/source binding 明确，且只有真实 Service/Repository/maintenance 全部接线后才暴露
+  Review Path capability；`00049` 只作为可观察兼容投影。
+- Base：Scorer、Artifact 或 Memory 依赖不可用时返回明确 Problem，原有事实不前进，页面通过 REST/SSE 重新读取。
+- Bad：把 Interview Turn 送入 Review Answer、因 due SQL 的旧 JSON cast 失败整页 500、浏览器指定 INTERVIEW provenance，
+  把 Interview-only Memory loader 宣称为通用 Agent 注入、以 nil-service 路由/前端代码冒充 Review Path 已交付，或把
+  Health/Timeline 投影宣称为完整 Impact。
+
+### 6. Tests Required
+
+- Domain/Application：Review-only Session binding、FSRS exact replay/CAS、`DISPUTED`/legacy quarantine、Interview turn
+  顺序/complete replay、共享 Path origin/source/actionable gap/transition、Memory provenance 和 Interview-scoped effective filter。
+- PostgreSQL：Answer/Score/Schedule 同事务、`00049` 投影与 `00052` guarded migration、安全 UUID due、Interview Artifact
+  hidden hold/release/failure replay、`00053` visibility migration、`00054` Interview provenance unique index、Memory
+  双层幂等的 exact-key/semantic replay、并发每-key receipt、单 Candidate/Audit、expiry/Workspace 隔离；`00055` 覆盖
+  Up/repeated Up、legacy `legacy/unknown` 回填、Scorer version 约束、空数据 Down→Up 与有 Answer guarded Down；同时覆盖
+  `00035` legacy receipt/Answer hardening、`00038` COMPLETE_SESSION receipt；`00056` 覆盖 malformed evidence、root/follow-up
+  provenance、Interview/Review shell 双向两连接竞态与有业务数据 guarded Down；`00057` 覆盖 legacy hold→ORPHANED、NULL digest
+  仅凭匹配 PLAN receipt 安全归一化、role/artifact mutation、reservation exact replay/异 key 并发、maintenance 与 late Artifact
+  Create 竞态、24h ABANDONED→ORPHANED 及 forward/guarded Down。
+- `00059/00060`：结构化 Interview Memory provenance/FK/每步唯一 Candidate、Audit aggregate/version/action matrix、completion/path
+  reservation no-keepalive、共享基表/兼容视图、origin shape、Review Answer/Artifact 唯一 binding、Path/Step retained history、
+  Review command/reservation/hold、真实 Repository SQL 列/枚举/必填字段与 guarded Down。
+- HTTP/OpenAPI/Browser：Capability/CSRF/Origin、严格 decoder、脱敏 due、Interview/Path 恢复、用户 source 字段拒绝、
+  Review Answer→Path 创建/恢复/状态与步骤命令、`review.*`/`learning_path.*`/`interview.*`/`memory.*` SSE invalidation；
+  Composition 测试必须证明 Handler 持有真实 Service，Worker/maintenance 调用可达。最终门禁前还需独立 Go、SQL、通用审查和
+  真实 PG/API/Worker/Vite 证据。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 先创建可见 Interview Artifact，或在 Complete 时给任意 NULL hold 事后贴当前 digest。
+Correct: Artifact PLAN/hold 创建事务绑定 reservation digest；数据库 fence 串行化 timeout maintenance，Complete 只 release 精确 hold。
+
+Wrong: 因 00049 已生成 Health/Timeline 行，就认为 Review Health/Impact 已完成。
+Correct: 把它记录为既有 owner 的最小兼容投影；完整 downstream impact 继续由专门能力拥有。
+
+Wrong: 丢弃浏览器 key，只用 step-derived key；或把 `replayed=true` 一律描述为同 key 精确重放。
+Correct: 客户端 key 绑定完整请求，INTERVIEW provenance 绑定语义 Candidate；两种复用都返回既有 ID 并被契约明确区分。
+
+Wrong: 看到 Review Path 的 Handler、Web 页面和 Store 文件存在，就把 API 与 24h maintenance 标成已交付。
+Correct: 先证明 `00060` 与 Repository SQL 一致、Composition 注入真实 Service/Artifact bridge、maintenance 有生产调用，再登记运行能力。
+```

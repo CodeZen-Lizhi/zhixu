@@ -158,8 +158,9 @@ def main() -> None:
     app_environment = service_environment(model, "app")
     mode = app_environment.get("ZHIXU_AUTH_MODE")
     token = app_environment.get("ZHIXU_AUTH_BOOTSTRAP_TOKEN")
-    if not isinstance(mode, str) or not isinstance(token, str):
-        fail("app auth mode and Bootstrap Token must resolve to strings")
+    question_ref_key = app_environment.get("ZHIXU_REVIEW_QUESTION_REF_KEY")
+    if not isinstance(mode, str) or not isinstance(token, str) or not isinstance(question_ref_key, str):
+        fail("app auth mode and API-only secrets must resolve to strings")
 
     if mode == "required":
         if len(token) < 32 or token != token.strip():
@@ -170,12 +171,20 @@ def main() -> None:
     else:
         fail("ZHIXU_AUTH_MODE must be required or disabled")
 
+    try:
+        question_ref_key_bytes = len(question_ref_key.encode("utf-8"))
+    except UnicodeEncodeError:
+        fail("ZHIXU_REVIEW_QUESTION_REF_KEY must be valid UTF-8")
+    if question_ref_key_bytes < 32 or question_ref_key != question_ref_key.strip():
+        fail("ZHIXU_REVIEW_QUESTION_REF_KEY must contain at least 32 canonical bytes")
+
     validate_local_auth_ingress(model, app_environment, mode)
 
     for service_name in ("migrate", "worker"):
         environment = service_environment(model, service_name)
-        if "ZHIXU_AUTH_BOOTSTRAP_TOKEN" in environment:
-            fail(f"{service_name} must not receive ZHIXU_AUTH_BOOTSTRAP_TOKEN")
+        for secret_name in ("ZHIXU_AUTH_BOOTSTRAP_TOKEN", "ZHIXU_REVIEW_QUESTION_REF_KEY"):
+            if secret_name in environment:
+                fail(f"{service_name} must not receive {secret_name}")
 
 
 if __name__ == "__main__":

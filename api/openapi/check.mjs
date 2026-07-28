@@ -1435,6 +1435,471 @@ if (!schemas.VectorDistance.required?.includes("distance") || "score" in (schema
 if (schemas.Problem.additionalProperties !== false || schemas.Problem.properties?.workflow_run_id?.format !== "uuid") {
   throw new Error("Problem strict schema or workflow_run_id format drifted");
 }
+for (const capabilityName of ["review", "memory", "interview"]) {
+  if (!schemas.SystemStatus.required.includes(capabilityName) ||
+      schemas.SystemStatus.properties[capabilityName]?.$ref !== "#/components/schemas/OptionalCapabilityStatus") {
+    throw new Error(`SystemStatus must expose the strict ${capabilityName} capability state`);
+  }
+}
+
+const reviewOperations = [
+  ["/api/v1/review/decks", "get", "ReviewDeckList", undefined, ["200", "400", "405", "500", "503"], false],
+  ["/api/v1/review/decks", "post", "ReviewDeck", "ReviewCreateDeckRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/decks/{deck_id}", "get", "ReviewDeck", undefined, ["200", "400", "404", "405", "500", "503"], false],
+  ["/api/v1/review/decks/{deck_id}/cards", "get", "ReviewCardList", undefined, ["200", "400", "404", "405", "500", "503"], false],
+  ["/api/v1/review/decks/{deck_id}/cards", "post", "ReviewCard", "ReviewCreateCardRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/cards/{card_id}", "put", "ReviewCard", "ReviewEditCardRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/decks/{deck_id}/schedule/pause", "post", "ReviewDeck", "ReviewDeckScheduleRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/decks/{deck_id}/schedule/resume", "post", "ReviewDeck", "ReviewDeckScheduleRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/decks/{deck_id}/schedule/reset", "post", "ReviewDeck", "ReviewDeckScheduleRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/due", "get", "ReviewDueCardList", undefined, ["200", "400", "404", "405", "409", "500", "503"], false],
+  ["/api/v1/review/cards/{card_id}/approve", "post", "ReviewCard", "ReviewCardDecisionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/cards/{card_id}/reject", "post", "ReviewCard", "ReviewCardDecisionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/cards/{card_id}/invalidate", "post", "ReviewCard", "ReviewCardDecisionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/invalidation", "post", "ReviewInvalidationResult", "ReviewInvalidationRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/sessions", "post", "ReviewSession", "ReviewStartSessionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/sessions/{session_id}/complete", "post", "ReviewSession", "ReviewCompleteSessionRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/sessions/{session_id}/answers", "post", "ReviewAnswerResult", "ReviewSubmitAnswerRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+];
+for (const [path, method, successSchema, requestSchema, statuses, requiresIdempotencyKey] of reviewOperations) {
+  const pathItem = document.paths[path];
+  const operation = pathItem?.[method];
+  if (!operation) throw new Error(`missing Review operation ${method.toUpperCase()} ${path}`);
+  const expectedCapability = method === "get" ? "READ_LOCAL" : "WRITE_PROPOSAL";
+  if (operation.security !== undefined || operation["x-required-capability"] !== expectedCapability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${expectedCapability}`);
+  }
+  for (const status of ["401", "403", ...statuses]) {
+    if (!operation.responses?.[status]) throw new Error(`missing Review ${status} response for ${method.toUpperCase()} ${path}`);
+    if (Number(status) >= 400 && resolveRef(operation.responses[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Review ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+  if (successSchema) {
+    for (const status of statuses.filter((status) => Number(status) < 300)) {
+      if (operation.responses[status]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}`) {
+        throw new Error(`invalid Review ${status} success schema for ${method.toUpperCase()} ${path}`);
+      }
+    }
+  }
+  if (requestSchema && operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
+    throw new Error(`invalid Review request schema for ${method.toUpperCase()} ${path}`);
+  }
+  if (requiresIdempotencyKey && ![...(pathItem.parameters ?? []), ...(operation.parameters ?? [])].some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey")) {
+    throw new Error(`${method.toUpperCase()} ${path} must require Idempotency-Key`);
+  }
+}
+for (const schemaName of [
+  "ReviewEvidenceBinding", "ReviewDeck", "ReviewDeckList", "ReviewCard", "ReviewCardList", "ReviewSchedule", "ReviewDueCardSummary", "ReviewDueCard", "ReviewDueCardList", "ReviewSession",
+  "ReviewCreateDeckRequest", "ReviewCreateCardRequest", "ReviewEditCardRequest", "ReviewCardDecisionRequest", "ReviewInvalidationRequest", "ReviewInvalidationResult", "ReviewStartSessionRequest", "ReviewCompleteSessionRequest", "ReviewDeckScheduleRequest", "ReviewSubmitAnswerRequest",
+  "ReviewScoreDimension", "ReviewScoreEvidence", "ReviewScore", "ReviewAnswer", "ReviewAnswerResult",
+]) {
+  if (!schemas[schemaName] || schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must remain a strict Review schema`);
+}
+for (const schemaName of ["ReviewDeck", "ReviewCreateDeckRequest"]) {
+  const dailyLimit = schemas[schemaName].properties.daily_limit;
+  if (dailyLimit?.type !== "integer" || dailyLimit.minimum !== 1 || dailyLimit.maximum !== 1000) {
+    throw new Error(`${schemaName}.daily_limit must match the 1..1000 domain bound`);
+  }
+}
+for (const schemaName of ["ReviewCard", "ReviewCreateCardRequest", "ReviewEditCardRequest"]) {
+  const properties = schemas[schemaName].properties;
+  if (properties.question?.["x-max-utf8-bytes"] !== 8192 || properties.answer_points?.maxItems !== 128 || properties.answer_points?.items?.["x-max-utf8-bytes"] !== 4096 || properties.evidence?.maxItems !== 128) {
+    throw new Error(`${schemaName} card bounds drifted from the Review domain`);
+  }
+}
+if (schemas.ReviewEvidenceBinding.properties.quote !== undefined || schemas.ReviewScoreEvidence.properties.quote !== undefined) {
+  throw new Error("Review evidence bindings must not expose a client-authored quote field");
+}
+const reviewDecisionReason = schemas.ReviewCardDecisionRequest.properties.reason;
+if (reviewDecisionReason?.maxLength !== 1024 || reviewDecisionReason?.["x-max-utf8-bytes"] !== 1024) {
+  throw new Error("Review card invalidation reason must match the 1024-byte domain bound");
+}
+const reviewDueCardSummary = schemas.ReviewDueCardSummary;
+const reviewDueCardFields = ["id", "workspace_id", "deck_id", "question", "card_type", "difficulty", "status", "version"];
+const reviewDueForbiddenFields = ["claim_id", "answer_points", "evidence", "fingerprint", "model_version", "invalidation_reason", "invalidated_at", "created_at", "updated_at"];
+if (reviewDueCardSummary.required?.join(",") !== reviewDueCardFields.join(",") ||
+    Object.keys(reviewDueCardSummary.properties ?? {}).join(",") !== reviewDueCardFields.join(",") ||
+    reviewDueForbiddenFields.some((field) => field in reviewDueCardSummary.properties) ||
+    reviewDueCardSummary.properties.status?.const !== "APPROVED" ||
+    schemas.ReviewDueCard.properties.card?.$ref !== "#/components/schemas/ReviewDueCardSummary" ||
+    schemas.ReviewDueCard.required?.join(",") !== "card,schedule,question_ref" ||
+    schemas.ReviewDueCard.properties.question_ref?.["x-max-utf8-bytes"] !== 512) {
+  throw new Error("Review due cards must use the redacted pre-answer summary wire shape");
+}
+const reviewDueOperation = document.paths["/api/v1/review/due"].get;
+const reviewCardListOperation = document.paths["/api/v1/review/decks/{deck_id}/cards"].get;
+const reviewDueSessionParameter = reviewDueOperation.parameters?.find((parameter) => parameter.name === "session_id" && parameter.in === "query");
+if (reviewDueSessionParameter?.required !== true || reviewDueSessionParameter.schema?.format !== "uuid" ||
+    schemas.ReviewDueCardList.required?.join(",") !== "workspace_id,items" ||
+    reviewDueOperation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+    reviewCardListOperation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+  throw new Error("Review due must bind an active Session and private reads must remain no-store");
+}
+const reviewSession = schemas.ReviewSession;
+const reviewStartSession = schemas.ReviewStartSessionRequest;
+if (reviewSession.required?.join(",") !== "id,workspace_id,deck_id,session_type,status,config,started_at" ||
+    reviewSession.properties.session_type?.const !== "REVIEW" ||
+    reviewStartSession.required?.join(",") !== "workspace_id,deck_id,session_type" ||
+    reviewStartSession.properties.session_type?.const !== "REVIEW") {
+  throw new Error("Review session API must require a Deck-bound REVIEW session");
+}
+const reviewAnswerRequest = schemas.ReviewSubmitAnswerRequest;
+if (reviewAnswerRequest.properties.score || reviewAnswerRequest.properties.feedback ||
+    reviewAnswerRequest.required.includes("score") || reviewAnswerRequest.required.includes("feedback") ||
+    reviewAnswerRequest.required.join(",") !== "workspace_id,card_id,question_ref,user_answer,rating" ||
+    !schemas.ReviewCard.required.includes("claim_id")) {
+  throw new Error("Review answer ingress must not accept client score or feedback");
+}
+const reviewAnswerOperation = document.paths["/api/v1/review/sessions/{session_id}/answers"].post;
+if (reviewAnswerOperation.requestBody?.required !== true || reviewAnswerOperation.requestBody?.["x-max-body-bytes"] !== 131072 ||
+    reviewAnswerOperation.responses["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ReviewAnswerResult" ||
+    reviewAnswerOperation.responses["201"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ReviewAnswerResult" ||
+    reviewAnswerOperation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+    reviewAnswerOperation.responses["201"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+    schemas.ReviewAnswer.required?.includes("scorer_version") !== true ||
+    schemas.ReviewAnswer.properties.scorer_version?.["x-max-utf8-bytes"] !== 128) {
+  throw new Error("Review answer command must be bounded and declare durable scoring success");
+}
+const reviewScoringUnavailable = resolveRef(reviewAnswerOperation.responses["503"]);
+const reviewScoringExample = reviewScoringUnavailable?.content?.["application/json"]?.examples?.review_scoring_unavailable?.value;
+if (reviewScoringExample?.error_code !== "REVIEW_SCORING_UNAVAILABLE" || reviewScoringExample.retryable !== true) {
+  throw new Error("Review answer 503 must declare retryable REVIEW_SCORING_UNAVAILABLE semantics");
+}
+const reviewScore = schemas.ReviewScore;
+if (reviewScore.required?.join(",") !== "schema_version,correctness,coverage,boundaries,clarity,confidence,evidence" ||
+    ["correctness", "coverage", "boundaries", "clarity", "confidence"].some((field) => reviewScore.properties[field]?.$ref !== "#/components/schemas/ReviewScoreDimension") ||
+    reviewScore.properties.evidence?.minItems !== 1 || reviewScore.properties.evidence?.maxItems !== 128 ||
+    reviewScore.properties.evidence?.items?.$ref !== "#/components/schemas/ReviewScoreEvidence") {
+  throw new Error("Review answer success must declare the server-generated evidence-bound score");
+}
+const reviewInvalidation = schemas.ReviewInvalidationRequest;
+if (reviewInvalidation.required?.join(",") !== "workspace_id,reason" ||
+    reviewInvalidation.properties.reason?.["x-max-utf8-bytes"] !== 1024 ||
+    reviewInvalidation.anyOf?.map((item) => item.required?.join(",")).join(",") !== "claim_id,source_version_id,source_span_id" ||
+    schemas.ReviewInvalidationResult.required?.join(",") !== "workspace_id,invalidated_count,has_more,replayed" ||
+    schemas.ReviewInvalidationResult.properties.invalidated_count?.maximum !== 200 ||
+    schemas.ReviewInvalidationResult.properties.cards !== undefined) {
+  throw new Error("Review invalidation selector and replay result contract drifted");
+}
+
+const reviewLearningPathOperations = [
+  ["/api/v1/review/answers/{answer_id}/learning-path", "get", "200", "ReviewLearningPathResult", ["400", "401", "403", "404", "405", "500", "503"]],
+  ["/api/v1/review/answers/{answer_id}/learning-path", "post", "201", "ReviewLearningPathResult", ["200", "400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/review/answers/{answer_id}/learning-path/status", "put", "200", "ReviewLearningPathStatusResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/review/answers/{answer_id}/learning-path/steps/{step_id}", "put", "200", "ReviewLearningPathStepResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+];
+for (const [path, method, successStatus, successSchema, statuses] of reviewLearningPathOperations) {
+  const pathItem = document.paths[path];
+  const operation = pathItem?.[method];
+  if (!operation) throw new Error(`missing Review Learning Path operation ${method.toUpperCase()} ${path}`);
+  const expectedCapability = method === "get" ? "READ_LOCAL" : "WRITE_PROPOSAL";
+  if (operation.security !== undefined || operation["x-required-capability"] !== expectedCapability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${expectedCapability}`);
+  }
+  if (operation.responses?.[successStatus]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}` ||
+      operation.responses?.[successStatus]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+    throw new Error(`invalid Review Learning Path ${successStatus} success contract for ${method.toUpperCase()} ${path}`);
+  }
+  for (const status of statuses) {
+    const response = resolveRef(operation.responses?.[status]);
+    if (status === "200" && successStatus === "201") {
+      if (response?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}` ||
+          response?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+        throw new Error(`Review Learning Path replay must return ${successSchema}`);
+      }
+      continue;
+    }
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Review Learning Path ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+for (const [path, method, requestSchema] of [
+  ["/api/v1/review/answers/{answer_id}/learning-path", "post", "CreateReviewLearningPathRequest"],
+  ["/api/v1/review/answers/{answer_id}/learning-path/status", "put", "UpdateReviewLearningPathStatusRequest"],
+  ["/api/v1/review/answers/{answer_id}/learning-path/steps/{step_id}", "put", "UpdateReviewLearningPathStepRequest"],
+]) {
+  const operation = document.paths[path]?.[method];
+  if (!operation?.parameters?.some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey") ||
+      operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== 131072 ||
+      operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
+    throw new Error(`Review Learning Path mutation contract drifted for ${method.toUpperCase()} ${path}`);
+  }
+}
+const reviewLearningPathGet = document.paths["/api/v1/review/answers/{answer_id}/learning-path"]?.get;
+if (!reviewLearningPathGet?.parameters?.some((parameter) => parameter.$ref === "#/components/parameters/WorkspaceIDQuery")) {
+  throw new Error("Review Learning Path recovery must remain Workspace-scoped");
+}
+for (const [path, ids] of [
+  ["/api/v1/review/answers/{answer_id}/learning-path", ["answer_id"]],
+  ["/api/v1/review/answers/{answer_id}/learning-path/status", ["answer_id"]],
+  ["/api/v1/review/answers/{answer_id}/learning-path/steps/{step_id}", ["answer_id", "step_id"]],
+]) {
+  const pathItem = document.paths[path];
+  const parameters = [...(pathItem?.parameters ?? []), ...(pathItem?.get?.parameters ?? []), ...(pathItem?.post?.parameters ?? []), ...(pathItem?.put?.parameters ?? [])];
+  for (const id of ids) {
+    if (!parameters.some((parameter) => parameter.name === id && parameter.in === "path" && parameter.required === true && parameter.schema?.format === "uuid")) {
+      throw new Error(`Review Learning Path ${id} path contract drifted for ${path}`);
+    }
+  }
+}
+for (const schemaName of [
+  "CreateReviewLearningPathRequest", "UpdateReviewLearningPathStatusRequest", "UpdateReviewLearningPathStepRequest",
+  "ReviewLearningPath", "ReviewLearningPathStep", "ReviewLearningPathResult", "ReviewLearningPathStatusResult", "ReviewLearningPathStepResult",
+]) {
+  if (!schemas[schemaName] || schemas[schemaName].additionalProperties !== false) {
+    throw new Error(`${schemaName} must remain a strict Review Learning Path schema`);
+  }
+}
+const reviewLearningPath = schemas.ReviewLearningPath;
+const reviewLearningPathStep = schemas.ReviewLearningPathStep;
+if (reviewLearningPath.required?.join(",") !== "id,workspace_id,origin_type,review_answer_id,artifact,source_policy_version,status,version,created_at,updated_at" ||
+    Object.keys(reviewLearningPath.properties ?? {}).join(",") !== "id,workspace_id,origin_type,review_answer_id,artifact,source_policy_version,status,version,created_at,updated_at" ||
+    reviewLearningPath.properties.origin_type?.const !== "REVIEW" ||
+    reviewLearningPath.properties.artifact?.$ref !== "#/components/schemas/LearningPathArtifactBinding" ||
+    reviewLearningPath.properties.source_policy_version?.["x-max-utf8-bytes"] !== 128 ||
+    reviewLearningPath.properties.status?.enum?.join(",") !== "ACTIVE,PAUSED,COMPLETED" ||
+    reviewLearningPath.properties.version?.minimum !== 1 ||
+    reviewLearningPathStep.required?.join(",") !== "id,workspace_id,path_id,step_no,claim_id,source_version_id,source_span_id,evidence_hash,title,rationale,status,version,created_at,updated_at" ||
+    Object.keys(reviewLearningPathStep.properties ?? {}).join(",") !== "id,workspace_id,path_id,step_no,claim_id,topic_id,source_version_id,source_span_id,evidence_hash,title,rationale,status,version,created_at,updated_at" ||
+    reviewLearningPathStep.properties.step_no?.minimum !== 1 ||
+    reviewLearningPathStep.properties.evidence_hash?.pattern !== "^[0-9a-f]{64}$" ||
+    reviewLearningPathStep.properties.title?.["x-max-utf8-bytes"] !== 512 ||
+    reviewLearningPathStep.properties.rationale?.["x-max-utf8-bytes"] !== 4096 ||
+    reviewLearningPathStep.properties.status?.enum?.join(",") !== "PENDING,IN_PROGRESS,COMPLETED,SKIPPED" ||
+    reviewLearningPathStep.properties.version?.minimum !== 1) {
+  throw new Error("Review Learning Path public DTO drifted from the strict frontend contract");
+}
+if (schemas.CreateReviewLearningPathRequest.required?.join(",") !== "workspace_id" ||
+    Object.keys(schemas.CreateReviewLearningPathRequest.properties ?? {}).join(",") !== "workspace_id" ||
+    schemas.UpdateReviewLearningPathStatusRequest.required?.join(",") !== "workspace_id,expected_version,status" ||
+    schemas.UpdateReviewLearningPathStepRequest.required?.join(",") !== "workspace_id,expected_version,status" ||
+    schemas.UpdateReviewLearningPathStatusRequest.properties.status?.enum?.join(",") !== "ACTIVE,PAUSED,COMPLETED" ||
+    schemas.UpdateReviewLearningPathStepRequest.properties.status?.enum?.join(",") !== "IN_PROGRESS,COMPLETED,SKIPPED" ||
+    schemas.UpdateReviewLearningPathStatusRequest.properties.expected_version?.minimum !== 1 ||
+    schemas.UpdateReviewLearningPathStepRequest.properties.expected_version?.minimum !== 1 ||
+    schemas.ReviewLearningPathResult.required?.join(",") !== "path,steps,replayed" ||
+    schemas.ReviewLearningPathResult.properties.path?.$ref !== "#/components/schemas/ReviewLearningPath" ||
+    schemas.ReviewLearningPathResult.properties.steps?.items?.$ref !== "#/components/schemas/ReviewLearningPathStep" ||
+    schemas.ReviewLearningPathResult.properties.steps?.maxItems !== 40 ||
+    schemas.ReviewLearningPathStatusResult.required?.join(",") !== "path,replayed" ||
+    schemas.ReviewLearningPathStepResult.required?.join(",") !== "path,step,replayed") {
+  throw new Error("Review Learning Path command, replay, or result shape drifted");
+}
+
+const memoryOperations = [
+  ["/api/v1/memories", "get", "200", "MemoryPage", ["400", "401", "403", "405", "500", "503"]],
+  ["/api/v1/memories", "post", "201", "MemoryCommandResult", ["200", "400", "401", "403", "405", "409", "415", "500", "503"]],
+  ["/api/v1/memories/{memory_id}", "get", "200", "Memory", ["400", "401", "403", "404", "405", "500", "503"]],
+  ["/api/v1/memories/{memory_id}", "put", "200", "MemoryCommandResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/memories/{memory_id}", "delete", "200", "MemoryCommandResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/memories/{memory_id}/confirm", "post", "200", "MemoryCommandResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/memories/{memory_id}/pause", "post", "200", "MemoryCommandResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/memories/{memory_id}/resume", "post", "200", "MemoryCommandResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+];
+for (const [path, method, successStatus, successSchema, statuses] of memoryOperations) {
+  const operation = document.paths[path]?.[method];
+  if (!operation) throw new Error(`missing Memory operation ${method.toUpperCase()} ${path}`);
+  const expectedCapability = method === "get" ? "READ_LOCAL" : "WRITE_PROPOSAL";
+  if (operation.security !== undefined || operation["x-required-capability"] !== expectedCapability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${expectedCapability}`);
+  }
+  if (operation.responses?.[successStatus]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}`) {
+    throw new Error(`invalid Memory ${successStatus} success schema for ${method.toUpperCase()} ${path}`);
+  }
+  for (const status of statuses) {
+    const response = resolveRef(operation.responses?.[status]);
+    if (status === "200" && method === "post" && path === "/api/v1/memories") {
+      if (response?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/MemoryCommandResult") {
+        throw new Error("Memory candidate replay must return MemoryCommandResult");
+      }
+      continue;
+    }
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Memory ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+for (const [path, method, requestSchema, bodyLimit] of [
+  ["/api/v1/memories", "post", "CreateMemoryCandidateRequest", 131072],
+  ["/api/v1/memories/{memory_id}", "put", "EditMemoryRequest", 131072],
+  ["/api/v1/memories/{memory_id}", "delete", "MemoryTransitionRequest", 4096],
+  ["/api/v1/memories/{memory_id}/confirm", "post", "MemoryTransitionRequest", 4096],
+  ["/api/v1/memories/{memory_id}/pause", "post", "MemoryTransitionRequest", 4096],
+  ["/api/v1/memories/{memory_id}/resume", "post", "MemoryTransitionRequest", 4096],
+]) {
+  const operation = document.paths[path][method];
+  if (!operation.parameters?.some((item) => item.$ref === "#/components/parameters/IdempotencyKey") ||
+      operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== bodyLimit ||
+      operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
+    throw new Error(`Memory mutation contract drifted for ${method.toUpperCase()} ${path}`);
+  }
+}
+const memoryList = document.paths["/api/v1/memories"].get;
+const memoryQuery = (name) => memoryList.parameters.find((item) => item.name === name)?.schema;
+if (!memoryList.parameters.some((item) => item.$ref === "#/components/parameters/WorkspaceIDQuery") ||
+    memoryQuery("limit")?.minimum !== 1 || memoryQuery("limit")?.maximum !== 100 || memoryQuery("limit")?.default !== 50 ||
+    memoryQuery("cursor")?.minLength !== 1 || memoryQuery("cursor")?.maxLength !== 4096 ||
+    memoryQuery("type")?.items?.enum?.join(",") !== "PREFERENCE,EPISODIC,GOAL,FEEDBACK" ||
+    memoryQuery("status")?.items?.enum?.join(",") !== "CANDIDATE,ACTIVE,PAUSED,EXPIRED,DELETED") {
+  throw new Error("Memory list Workspace, cursor, limit or lifecycle filters drifted");
+}
+for (const path of ["/api/v1/memories/{memory_id}", "/api/v1/memories/{memory_id}/confirm", "/api/v1/memories/{memory_id}/pause", "/api/v1/memories/{memory_id}/resume"]) {
+  const pathItem = document.paths[path];
+  const parameters = [...(pathItem.parameters ?? []), ...(pathItem.get?.parameters ?? []), ...(pathItem.post?.parameters ?? []), ...(pathItem.put?.parameters ?? []), ...(pathItem.delete?.parameters ?? [])];
+  if (!parameters.some((item) => item.name === "memory_id" && item.in === "path" && item.required === true && item.schema?.format === "uuid")) {
+    throw new Error(`Memory path identifier contract drifted for ${path}`);
+  }
+}
+for (const schemaName of ["MemorySource", "MemoryContent", "Memory", "CreateMemoryCandidateRequest", "EditMemoryRequest", "MemoryTransitionRequest", "MemoryCommandResult", "MemoryPage"]) {
+  if (!schemas[schemaName]) throw new Error(`missing ${schemaName} schema`);
+}
+if (schemas.Memory.additionalProperties !== false || schemas.Memory.required?.join(",") !== "id,workspace_id,type,content,source,status,version,created_at,updated_at" ||
+    schemas.Memory.properties.owner !== undefined || schemas.Memory.properties.confirmed_by !== undefined ||
+    schemas.Memory.properties.type.enum?.join(",") !== "PREFERENCE,EPISODIC,GOAL,FEEDBACK" ||
+    schemas.Memory.properties.status.enum?.join(",") !== "CANDIDATE,ACTIVE,PAUSED,EXPIRED,DELETED" ||
+    schemas.MemoryContent.minProperties !== 1 || schemas.MemoryContent.maxProperties !== 64 || schemas.MemoryContent["x-max-json-bytes"] !== 16384 ||
+    schemas.MemoryContent["x-max-string-bytes"] !== 4096 || schemas.MemoryContent["x-max-depth"] !== 8 || schemas.MemoryContent["x-max-array-items"] !== 128 ||
+    schemas.MemorySource.required?.join(",") !== "type,ref" || schemas.MemorySource.properties.type.enum?.join(",") !== "USER,AGENT,INTERVIEW" ||
+    schemas.MemorySource.properties.ref?.maxLength !== 512 || schemas.MemorySource.properties.ref?.["x-max-utf8-bytes"] !== 512 ||
+    schemas.MemorySource.properties.ref?.pattern !== "^\\S(?:[\\s\\S]*\\S)?$") {
+  throw new Error("Memory public model must preserve lifecycle and credential-identity privacy boundaries");
+}
+if (schemas.CreateMemoryCandidateRequest.additionalProperties !== false || schemas.CreateMemoryCandidateRequest.required?.join(",") !== "workspace_id,type,content" ||
+    schemas.CreateMemoryCandidateRequest.properties.source !== undefined ||
+    schemas.EditMemoryRequest.additionalProperties !== false || schemas.EditMemoryRequest.required?.join(",") !== "workspace_id,expected_version,content" ||
+    schemas.EditMemoryRequest.properties.source !== undefined || schemas.EditMemoryRequest.properties.type !== undefined ||
+    schemas.MemoryTransitionRequest.additionalProperties !== false || schemas.MemoryTransitionRequest.required?.join(",") !== "workspace_id,expected_version" ||
+    schemas.MemoryTransitionRequest.properties.expected_version.minimum !== 1 ||
+    schemas.MemoryCommandResult.required?.join(",") !== "memory,replayed" || schemas.MemoryPage.required?.join(",") !== "workspace_id,items" ||
+    schemas.MemoryPage.properties.items.maxItems !== 100 || schemas.MemoryPage.properties.next_cursor.maxLength !== 4096) {
+  throw new Error("Memory strict request, replay, version or pagination contract drifted");
+}
+for (const schemaName of ["CreateMemoryCandidateRequest", "EditMemoryRequest"]) {
+  const properties = schemas[schemaName].properties;
+  if (properties.task_scope_id?.type !== "string" || properties.task_scope_id?.format !== "uuid" || properties.task_scope_id?.nullable === true ||
+      properties.expires_at?.type !== "string" || properties.expires_at?.format !== "date-time" || properties.expires_at?.nullable === true) {
+    throw new Error(`${schemaName} optional scope and expiry fields must remain non-null strings`);
+  }
+}
+const interviewOperations = [
+  ["/api/v1/review/interviews", "get", "200", "InterviewSessionPage", ["400", "401", "403", "405", "500", "503"]],
+  ["/api/v1/review/interviews", "post", "201", "InterviewStartResult", ["200", "400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/review/interviews/{session_id}", "get", "200", "InterviewSnapshot", ["400", "401", "403", "404", "405", "500", "503"]],
+  ["/api/v1/review/interviews/{session_id}/turns", "post", "200", "InterviewTurnResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/review/interviews/{session_id}/complete", "post", "200", "InterviewCompletionResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/review/interviews/{session_id}/learning-paths/{path_id}/steps/{step_id}/memory-candidate", "post", "201", "InterviewMemoryCandidateResult", ["200", "400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/review/learning-paths/{path_id}/status", "put", "200", "LearningPathStatusResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/review/learning-paths/{path_id}/steps/{step_id}", "put", "200", "LearningPathStepResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+];
+for (const [path, method, successStatus, successSchema, statuses] of interviewOperations) {
+  const operation = document.paths[path]?.[method];
+  if (!operation) throw new Error(`missing Interview operation ${method.toUpperCase()} ${path}`);
+  const expectedCapability = method === "get" ? "READ_LOCAL" : "WRITE_PROPOSAL";
+  if (operation.security !== undefined || operation["x-required-capability"] !== expectedCapability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${expectedCapability}`);
+  }
+  if (operation.responses?.[successStatus]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}`) {
+    throw new Error(`invalid Interview ${successStatus} success schema for ${method.toUpperCase()} ${path}`);
+  }
+  for (const status of statuses) {
+    const response = resolveRef(operation.responses?.[status]);
+    if (status === "200" && successStatus === "201") {
+      if (response?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}`) throw new Error(`Interview replay must return ${successSchema}`);
+      continue;
+    }
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Interview ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+const interviewCandidateReplayDescription = document.paths["/api/v1/review/interviews/{session_id}/learning-paths/{path_id}/steps/{step_id}/memory-candidate"]?.post?.responses?.["200"]?.description ?? "";
+if (!interviewCandidateReplayDescription.includes("Idempotency-Key") || !interviewCandidateReplayDescription.includes("Interview provenance")) {
+  throw new Error("Interview Memory Candidate 200 must document exact-key replay and semantic provenance reuse");
+}
+for (const [path, method, requestSchema] of [
+  ["/api/v1/review/interviews", "post", "StartInterviewRequest"],
+  ["/api/v1/review/interviews/{session_id}/turns", "post", "SubmitInterviewTurnRequest"],
+  ["/api/v1/review/interviews/{session_id}/complete", "post", "CompleteInterviewRequest"],
+  ["/api/v1/review/interviews/{session_id}/learning-paths/{path_id}/steps/{step_id}/memory-candidate", "post", "InterviewMemoryCandidateRequest"],
+  ["/api/v1/review/learning-paths/{path_id}/status", "put", "UpdateLearningPathStatusRequest"],
+  ["/api/v1/review/learning-paths/{path_id}/steps/{step_id}", "put", "UpdateLearningPathStepRequest"],
+]) {
+  const operation = document.paths[path][method];
+  if (!operation.parameters?.some((item) => item.$ref === "#/components/parameters/IdempotencyKey") ||
+      operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== 131072 ||
+      operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
+    throw new Error(`Interview idempotent mutation contract drifted for ${method.toUpperCase()} ${path}`);
+  }
+}
+const interviewGet = document.paths["/api/v1/review/interviews/{session_id}"].get;
+if (!interviewGet.parameters?.some((item) => item.$ref === "#/components/parameters/WorkspaceIDQuery")) {
+  throw new Error("Interview recovery must remain Workspace-scoped");
+}
+const interviewList = document.paths["/api/v1/review/interviews"].get;
+const interviewListLimit = interviewList.parameters?.find((item) => item.name === "limit");
+const interviewListCursor = interviewList.parameters?.find((item) => item.name === "cursor");
+if (interviewList.parameters?.length !== 3 || interviewList.parameters[0]?.$ref !== "#/components/parameters/WorkspaceIDQuery" ||
+    interviewListLimit?.in !== "query" || interviewListLimit.required === true || interviewListLimit.schema?.type !== "integer" ||
+    interviewListLimit.schema.minimum !== 1 || interviewListLimit.schema.maximum !== 100 || interviewListLimit.schema.default !== 20 ||
+    interviewListCursor?.in !== "query" || interviewListCursor.required === true || interviewListCursor.schema?.type !== "string" ||
+    interviewListCursor.schema.minLength !== 1 || interviewListCursor.schema.maxLength !== 4096 || interviewListCursor.schema["x-max-utf8-bytes"] !== 4096 ||
+    !interviewListCursor.description?.includes("Opaque, Workspace-bound")) {
+  throw new Error("Interview list Workspace, cursor or limit contract drifted");
+}
+for (const [path, requiredIDs] of [
+  ["/api/v1/review/interviews/{session_id}", ["session_id"]],
+  ["/api/v1/review/interviews/{session_id}/turns", ["session_id"]],
+  ["/api/v1/review/interviews/{session_id}/complete", ["session_id"]],
+  ["/api/v1/review/interviews/{session_id}/learning-paths/{path_id}/steps/{step_id}/memory-candidate", ["session_id", "path_id", "step_id"]],
+  ["/api/v1/review/learning-paths/{path_id}/status", ["path_id"]],
+  ["/api/v1/review/learning-paths/{path_id}/steps/{step_id}", ["path_id", "step_id"]],
+]) {
+  const pathItem = document.paths[path];
+  const parameters = [...(pathItem.parameters ?? []), ...(pathItem.get?.parameters ?? []), ...(pathItem.post?.parameters ?? []), ...(pathItem.put?.parameters ?? []), ...(pathItem.delete?.parameters ?? [])];
+  for (const id of requiredIDs) {
+    if (!parameters.some((item) => item.name === id && item.in === "path" && item.required === true && item.schema?.format === "uuid")) throw new Error(`Interview ${id} path contract drifted for ${path}`);
+  }
+}
+for (const schemaName of ["InterviewScope", "InterviewConfig", "InterviewEvidence", "InterviewSession", "InterviewSessionPage", "InterviewQuestion", "InterviewScore", "InterviewTurn", "InterviewReport", "LearningPath", "LearningPathStep", "StartInterviewRequest", "SubmitInterviewTurnRequest", "CompleteInterviewRequest", "InterviewMemoryCandidateRequest", "InterviewMemoryCandidateResult", "UpdateLearningPathStatusRequest", "UpdateLearningPathStepRequest", "InterviewStartResult", "InterviewSnapshot", "InterviewTurnResult", "InterviewCompletionResult", "LearningPathStatusResult", "LearningPathStepResult"]) {
+  if (!schemas[schemaName]) throw new Error(`missing ${schemaName} schema`);
+}
+const interviewListForbiddenFields = ["questions", "turns", "answer_points", "evidence", "user_answer", "request_hash", "idempotency_key", "receipt"];
+if (schemas.InterviewSessionPage.additionalProperties !== false || schemas.InterviewSessionPage.required?.join(",") !== "workspace_id,items" ||
+    Object.keys(schemas.InterviewSessionPage.properties ?? {}).join(",") !== "workspace_id,items,next_cursor" ||
+    schemas.InterviewSessionPage.properties.workspace_id?.format !== "uuid" || schemas.InterviewSessionPage.properties.items?.maxItems !== 100 ||
+    schemas.InterviewSessionPage.properties.items?.items?.$ref !== "#/components/schemas/InterviewSession" ||
+    schemas.InterviewSessionPage.properties.next_cursor?.minLength !== 1 || schemas.InterviewSessionPage.properties.next_cursor?.maxLength !== 4096 ||
+    schemas.InterviewSessionPage.properties.next_cursor?.["x-max-utf8-bytes"] !== 4096 ||
+    interviewListForbiddenFields.some((field) => schemas.InterviewSessionPage.properties?.[field] !== undefined || schemas.InterviewSession.properties?.[field] !== undefined)) {
+  throw new Error("Interview Session list response contract drifted");
+}
+if (schemas.InterviewConfig.additionalProperties !== false || schemas.InterviewConfig.required?.join(",") !== "schema_version,role,scope,difficulty,duration_minutes,question_count,max_follow_ups" ||
+    schemas.InterviewConfig.properties.schema_version.const !== "interview/v1" || schemas.InterviewConfig.properties.difficulty.enum?.join(",") !== "FOUNDATION,INTERMEDIATE,ADVANCED" ||
+    schemas.InterviewConfig.properties.duration_minutes.maximum !== 240 || schemas.InterviewConfig.properties.question_count.maximum !== 20 || schemas.InterviewConfig.properties.max_follow_ups.maximum !== 20 ||
+    schemas.InterviewEvidence.properties.schema_version.const !== "interview-evidence/v1" || schemas.InterviewEvidence.properties.support_type.const !== "SUPPORTS" ||
+    schemas.InterviewEvidence.properties.evidence_hash.pattern !== "^[0-9a-f]{64}$") {
+  throw new Error("Interview config or formal SUPPORTS Evidence contract drifted");
+}
+const interviewQuestionFields = ["id", "workspace_id", "session_id", "question_no", "follow_up_no", "parent_question_id", "claim_id", "topic_id", "prompt", "status", "created_at", "answered_at"];
+const interviewQuestionRequired = ["id", "workspace_id", "session_id", "question_no", "follow_up_no", "claim_id", "prompt", "status", "created_at"];
+if (schemas.InterviewQuestion.additionalProperties !== false || schemas.InterviewQuestion.properties.answer_points !== undefined || schemas.InterviewQuestion.properties.evidence !== undefined ||
+    Object.keys(schemas.InterviewQuestion.properties ?? {}).join(",") !== interviewQuestionFields.join(",") || schemas.InterviewQuestion.required?.join(",") !== interviewQuestionRequired.join(",") ||
+    schemas.InterviewTurn.additionalProperties !== false || schemas.InterviewTurn.properties.user_answer !== undefined || schemas.InterviewTurn.properties.idempotency_key !== undefined || schemas.InterviewTurn.properties.request_hash !== undefined ||
+    schemas.InterviewScore.properties.schema_version.const !== "interview-score/v1" || schemas.InterviewReport.properties.schema_version.const !== "interview-report/v1" ||
+    schemas.InterviewReport.properties.artifact.$ref !== "#/components/schemas/InterviewReportArtifactBinding" || schemas.LearningPath.properties.artifact.$ref !== "#/components/schemas/LearningPathArtifactBinding" ||
+    schemas.InterviewReportArtifactBinding.allOf?.[1]?.properties?.kind?.const !== "INTERVIEW_DOC" || schemas.LearningPathArtifactBinding.allOf?.[1]?.properties?.kind?.const !== "LEARNING_PATH") {
+  throw new Error("Interview must hide scoring answers/raw submissions and retain immutable Artifact kind bindings");
+}
+if (schemas.StartInterviewRequest.required?.join(",") !== "workspace_id,config" || schemas.SubmitInterviewTurnRequest.required?.join(",") !== "workspace_id,question_id" ||
+    schemas.SubmitInterviewTurnRequest.properties.user_answer["x-max-utf8-bytes"] !== 65536 || schemas.SubmitInterviewTurnRequest.properties.user_answer.default !== "" || schemas.CompleteInterviewRequest.required?.join(",") !== "workspace_id" || schemas.CompleteInterviewRequest.properties.manual_end.default !== false ||
+    schemas.InterviewMemoryCandidateRequest.additionalProperties !== false || schemas.InterviewMemoryCandidateRequest.required?.join(",") !== "workspace_id" || Object.keys(schemas.InterviewMemoryCandidateRequest.properties ?? {}).join(",") !== "workspace_id" || schemas.InterviewMemoryCandidateRequest.properties.workspace_id.type !== "string" || schemas.InterviewMemoryCandidateRequest.properties.workspace_id.format !== "uuid" ||
+    schemas.InterviewMemoryCandidateResult.additionalProperties !== false || schemas.InterviewMemoryCandidateResult.required?.join(",") !== "memory_id,replayed" || Object.keys(schemas.InterviewMemoryCandidateResult.properties ?? {}).join(",") !== "memory_id,replayed" || schemas.InterviewMemoryCandidateResult.properties.memory_id.type !== "string" || schemas.InterviewMemoryCandidateResult.properties.memory_id.format !== "uuid" || schemas.InterviewMemoryCandidateResult.properties.replayed.type !== "boolean" ||
+    schemas.UpdateLearningPathStatusRequest.properties.status.enum?.join(",") !== "ACTIVE,PAUSED,COMPLETED" || schemas.UpdateLearningPathStepRequest.properties.status.enum?.join(",") !== "IN_PROGRESS,COMPLETED,SKIPPED" ||
+    schemas.UpdateLearningPathStatusRequest.properties.expected_version.minimum !== 1 || schemas.UpdateLearningPathStepRequest.properties.expected_version.minimum !== 1) {
+  throw new Error("Interview or Learning Path command shape drifted");
+}
 for (const field of ["source_ids", "source_version_ids", "path_prefixes"]) {
   if (schemas.SearchFilter.properties?.[field]?.uniqueItems === true) {
     throw new Error(`SearchFilter.${field} must allow canonicalizable duplicate input`);

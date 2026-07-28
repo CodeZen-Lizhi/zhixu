@@ -21,6 +21,13 @@ vi.mock("../features/business/WorkflowsPage", () => ({
   WorkflowsPage: () => <div>Workflows route</div>,
   WorkflowDetailPage: () => <div>Workflow detail route</div>,
 }));
+vi.mock("../features/review/ReviewPage", () => ({ ReviewPage: () => <div>Review route</div> }));
+vi.mock("../features/review/ReviewSessionPage", () => ({ ReviewSessionPage: () => <div>Review session route</div> }));
+vi.mock("../features/memory/MemoriesPage", () => ({ MemoriesPage: () => <div>Memories route</div> }));
+vi.mock("../features/interview/InterviewPage", () => ({
+  InterviewsPage: () => <div>Interviews route</div>,
+  InterviewSessionPage: () => <div>Interview session route</div>,
+}));
 
 import { AppRoutes } from "./AppRoutes";
 
@@ -66,6 +73,11 @@ describe("AppRoutes compatibility", () => {
     ["/workflows", "Workflows route"],
     ["/workflows/10000000-0000-4000-8000-000000000008", "Workflow detail route"],
     ["/settings", "Settings route"],
+    ["/review", "Review route"],
+    ["/review/session?deck=10000000-0000-4000-8000-000000000001&session=10000000-0000-4000-8000-000000000002", "Review session route"],
+    ["/memories", "Memories route"],
+    ["/interviews", "Interviews route"],
+    ["/interviews/10000000-0000-4000-8000-000000000003", "Interview session route"],
   ])("保留 M9 业务深链 %s", async (path, expected) => {
     renderRoute(path);
 

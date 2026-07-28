@@ -432,7 +432,7 @@ func seedArtifactHTTPEvidenceIndex(
 	return fixtures
 }
 
-func seedArtifactHTTPConfirmedClaim(t *testing.T, ctx context.Context, pool *pgxpool.Pool, evidence artifactHTTPEvidenceFixture) {
+func seedArtifactHTTPConfirmedClaim(t *testing.T, ctx context.Context, pool *pgxpool.Pool, evidence artifactHTTPEvidenceFixture) foundation.ID {
 	t.Helper()
 	repository, err := knowledgepostgres.NewRepository(pool)
 	if err != nil {
@@ -475,6 +475,7 @@ func seedArtifactHTTPConfirmedClaim(t *testing.T, ctx context.Context, pool *pgx
 	if err != nil || confirmed.Claim.Status != knowledgedomain.ClaimStatusConfirmed {
 		t.Fatalf("confirm evidence claim=%#v err=%v", confirmed, err)
 	}
+	return confirmed.Claim.ID
 }
 
 func newArtifactHTTPIntegrationServer(t *testing.T, pool *pgxpool.Pool) *httptest.Server {

@@ -37,6 +37,9 @@ describe("AppShell", () => {
 
     expect(screen.getByRole("navigation", { name: "主导航" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Search" })).toHaveAttribute("href", "/search");
+    expect(screen.getByRole("link", { name: "Review" })).toHaveAttribute("href", "/review");
+    expect(screen.getByRole("link", { name: "Memory" })).toHaveAttribute("href", "/memories");
+    expect(screen.getByRole("link", { name: "Interview" })).toHaveAttribute("href", "/interviews");
     expect(screen.getByRole("status")).toHaveTextContent("实时同步");
     expect(screen.getByText("已认证 · owner")).toBeInTheDocument();
     expect(screen.getByText("正在加载工作台…")).toBeInTheDocument();

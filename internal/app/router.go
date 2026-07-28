@@ -22,9 +22,13 @@ import (
 	healthhttp "github.com/CodeZen-Lizhi/zhixu/internal/health/http"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
 	knowledgehttp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/http"
+	memoryhttp "github.com/CodeZen-Lizhi/zhixu/internal/memory/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
+	reviewhttp "github.com/CodeZen-Lizhi/zhixu/internal/review/http"
+	interviewhttp "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/http"
+	learningpathhttp "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/http"
 	workflowhttp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/http"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 	"github.com/go-chi/chi/v5"
@@ -60,6 +64,10 @@ type Dependencies struct {
 	Conversation      *conversationhttp.Handler
 	Events            *eventshttp.Handler
 	Export            *exporthttp.Handler
+	Review            *reviewhttp.Handler
+	LearningPath      *learningpathhttp.Handler
+	Memory            *memoryhttp.Handler
+	Interview         *interviewhttp.Handler
 	Knowledge         *knowledgehttp.Handler
 	Artifact          *artifacthttp.Handler
 	Auth              *authhttp.Handler
@@ -204,6 +212,18 @@ func registerDomainRoutes(api chi.Router, deps Dependencies) {
 	if deps.Export != nil {
 		deps.Export.Routes(api)
 	}
+	if deps.Review != nil {
+		deps.Review.Routes(api)
+	}
+	if deps.LearningPath != nil {
+		deps.LearningPath.Routes(api)
+	}
+	if deps.Memory != nil {
+		deps.Memory.Routes(api)
+	}
+	if deps.Interview != nil {
+		deps.Interview.Routes(api)
+	}
 	if deps.Knowledge != nil {
 		deps.Knowledge.Routes(api)
 	}
@@ -255,6 +275,9 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 	collectionsStatus := map[string]string{"status": "unavailable"}
 	knowledgeHealthStatus := map[string]string{"status": "unavailable"}
 	knowledgeTimelineStatus := map[string]string{"status": "unavailable"}
+	reviewStatus := map[string]string{"status": "unavailable"}
+	memoryStatus := map[string]string{"status": "unavailable"}
+	interviewStatus := map[string]string{"status": "unavailable"}
 	authStatus := map[string]string{"status": "disabled"}
 	status := "degraded"
 	if err := checkDatabase(r.Context(), deps); err == nil {
@@ -298,6 +321,15 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 	if deps.Knowledge != nil && deps.Knowledge.Available() {
 		knowledgeTimelineStatus["status"] = "ready"
 	}
+	if deps.Review != nil && deps.Review.Available() && deps.LearningPath != nil && deps.LearningPath.Available() {
+		reviewStatus["status"] = "ready"
+	}
+	if deps.Memory != nil && deps.Memory.Available() {
+		memoryStatus["status"] = "ready"
+	}
+	if deps.Interview != nil && deps.Interview.Available() {
+		interviewStatus["status"] = "ready"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":             status,
 		"version":            deps.Version,
@@ -308,6 +340,9 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 		"collections":        collectionsStatus,
 		"knowledge_health":   knowledgeHealthStatus,
 		"knowledge_timeline": knowledgeTimelineStatus,
+		"review":             reviewStatus,
+		"memory":             memoryStatus,
+		"interview":          interviewStatus,
 		"auth":               authStatus,
 		"request_id":         requestID(r.Context()),
 	})

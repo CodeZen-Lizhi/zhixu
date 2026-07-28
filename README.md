@@ -78,7 +78,15 @@ The checked-in example explicitly uses development-only `disabled` auth, so it
 starts without a Bootstrap Token. To exercise `required` mode, set both
 `ZHIXU_AUTH_MODE=required` and a fresh canonical 32+ character
 `ZHIXU_AUTH_BOOTSTRAP_TOKEN`; `make compose-up` rejects a missing Token before
-building or starting services. Then open <http://127.0.0.1:8080>. Health and
+building or starting services. `ZHIXU_REVIEW_QUESTION_REF_KEY` is an optional
+API-only shared HMAC key for Review question references; when set it must contain
+at least 32 UTF-8 bytes with no surrounding whitespace, and an explicit empty
+value is rejected. If omitted, `required` derives a stable domain-separated key
+from the Bootstrap Token, while local `disabled` mode generates a process-local
+key whose outstanding references expire on API restart. The official Compose
+example supplies a development-only explicit key so its startup guard can verify
+the resolved model; replace that value before non-development use. Then open
+<http://127.0.0.1:8080>. Health and
 dependency status are available at:
 
 - `GET /livez`: API process liveness
@@ -133,6 +141,8 @@ Token 换取 HttpOnly Session Cookie，浏览器修改请求同时校验精确 O
 公网入口；自托管或公网部署必须使用 `required`、HTTPS 与 Secure Cookie。
 未显式设置 `ZHIXU_AUTH_ALLOWED_ORIGINS` 时，Compose 会从 `ZHIXU_HTTP_PORT` 派生
 `http://127.0.0.1:<port>`；显式精确 Origin 始终优先。Bootstrap Token 只注入 API 容器，不进入 Worker 环境。
+Review question-reference key 同样只进入 API；多 API 实例必须显式配置相同值，轮换该值会使尚未提交的
+`question_ref` 失效，但不会改变已持久化 Answer 或 Schedule。
 
 The Worker has a separate health server on container port `8081`; it is not
 published to the host by Compose. Its liveness only proves that the process and

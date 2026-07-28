@@ -52,6 +52,9 @@ import (
 	ingestiondomain "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/domain"
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
+	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
+	memoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
+	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
@@ -65,6 +68,10 @@ import (
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	retrievalruntime "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/runtime"
+	interviewpostgres "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/adapter/postgres"
+	interviewapplication "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/application"
+	learningpathpostgres "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/adapter/postgres"
+	learningpathapplication "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/application"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/changecontrol"
 	toolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
@@ -86,19 +93,41 @@ import (
 
 const (
 	// agentStructuredMaxOutputTokens 是 Agent 各结构化阶段单次响应的生产上限。
-	agentStructuredMaxOutputTokens      = 8192
-	timelineProjectionDispatchErrorCode = "KNOWLEDGE_TIMELINE_PROJECTION_FAILED"
-	timelineProjectionStartupPhase      = "startup"
-	timelineProjectionPeriodicPhase     = "periodic"
-	exportMaintenanceStartupPhase       = "startup"
-	exportMaintenancePeriodicPhase      = "periodic"
-	exportOrphanWorkspaceBatch          = 25
+	agentStructuredMaxOutputTokens       = 8192
+	timelineProjectionDispatchErrorCode  = "KNOWLEDGE_TIMELINE_PROJECTION_FAILED"
+	timelineProjectionStartupPhase       = "startup"
+	timelineProjectionPeriodicPhase      = "periodic"
+	exportMaintenanceStartupPhase        = "startup"
+	exportMaintenancePeriodicPhase       = "periodic"
+	exportOrphanWorkspaceBatch           = 25
+	memoryExpiryStartupPhase             = "startup"
+	memoryExpiryPeriodicPhase            = "periodic"
+	interviewCompletionStartupPhase      = "startup"
+	interviewCompletionPeriodicPhase     = "periodic"
+	learningPathMaintenanceStartupPhase  = "startup"
+	learningPathMaintenancePeriodicPhase = "periodic"
 )
 
 type exportMaintenanceService interface {
 	Recover(context.Context, foundation.ID, int) (int, error)
 	Sweep(context.Context, int) (exportapplication.SweepResult, error)
 	SweepOrphansAll(context.Context, foundation.ID, int, int, time.Duration) (exportapplication.OrphanSweepResult, error)
+}
+
+type memoryExpiryService interface {
+	ExpireDue(context.Context, int) (int, error)
+}
+
+// interviewCompletionMaintenanceService 提供有界 Completion reservation 过期维护。
+type interviewCompletionMaintenanceService interface {
+	// AbandonStaleCompletions 放弃超时 reservation，并将其 ACTIVE hold 转为 ORPHANED。
+	AbandonStaleCompletions(context.Context, int) (interviewapplication.CompletionMaintenanceResult, error)
+}
+
+// learningPathMaintenanceService 提供有界 Review Path reservation 过期维护。
+type learningPathMaintenanceService interface {
+	// MaintainExpiredReservations 按 Application-owned 策略放弃超时 reservation。
+	MaintainExpiredReservations(context.Context) (int, error)
 }
 
 type workerComponents struct {
@@ -119,7 +148,12 @@ type workerComponents struct {
 	timelineProject *knowledgeapplication.TimelineProjectionDispatcher
 	exportWorker    *exportriver.Worker
 	exportService   *exportapplication.Service
-	fatalInvariants <-chan error
+	memoryExpiry    memoryExpiryService
+	// interviewCompletion 是 reservation/hidden hold 维护依赖。
+	interviewCompletion interviewCompletionMaintenanceService
+	// learningPathMaintenance 是 Review Path reservation/hidden hold 维护依赖。
+	learningPathMaintenance learningPathMaintenanceService
+	fatalInvariants         <-chan error
 }
 
 type toolRuntimeComponents struct {
@@ -219,7 +253,7 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetRiverSchemaOK(true)
 	readiness.SetDefinitionsOK(components.definitions != nil)
 	readiness.SetExecutorsOK(components.executors != nil)
-	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.exportWorker != nil && components.exportService != nil && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
+	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.exportWorker != nil && components.exportService != nil && components.memoryExpiry != nil && components.interviewCompletion != nil && components.learningPathMaintenance != nil && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
 	toolEnabled := cfg.ToolRuntimeMode == config.ToolModeEnabled
 	toolContractsOK, toolExecutorsOK, toolDependenciesOK := toolWorkflowReadiness(components)
 	readiness.SetToolRuntimeState(toolEnabled, toolContractsOK, toolExecutorsOK, toolDependenciesOK)
@@ -255,13 +289,24 @@ func run(configPath string, logger *slog.Logger) error {
 	maintenanceContext, cancelMaintenance := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	exportOrphanCursor = runExportMaintenance(maintenanceContext, logger, components.exportService, exportOrphanCursor, exportMaintenanceStartupPhase)
 	cancelMaintenance()
+	memoryExpiryContext, cancelMemoryExpiry := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	runMemoryExpiryMaintenance(memoryExpiryContext, logger, components.memoryExpiry, memoryExpiryStartupPhase)
+	cancelMemoryExpiry()
+	interviewCompletionContext, cancelInterviewCompletion := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	runInterviewCompletionMaintenance(interviewCompletionContext, logger, components.interviewCompletion, interviewCompletionStartupPhase)
+	cancelInterviewCompletion()
+	learningPathContext, cancelLearningPath := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	runLearningPathMaintenance(learningPathContext, logger, components.learningPathMaintenance, learningPathMaintenanceStartupPhase)
+	cancelLearningPath()
 	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil,
 		"semantic_link_scan", components.semanticScan != nil,
 		"agent_available", components.agentCapability.available, "agent_capability_code", components.agentCapability.code,
 		"artifact_generation_available", components.artifact.capability.available, "artifact_generation_capability_code", components.artifact.capability.code,
 		"tool_runtime_enabled", components.tools.runtimeEnabled, "tool_executor_count", len(components.tools.enabledRefs),
 		"web_fetch_enabled", cfg.WebFetchMode == config.ToolModeEnabled, "reindex_dispatcher", components.dispatcher.Started(),
-		"timeline_projector", components.timelineProject != nil, "export_worker", components.exportWorker != nil)
+		"timeline_projector", components.timelineProject != nil, "export_worker", components.exportWorker != nil,
+		"interview_completion_maintenance", components.interviewCompletion != nil,
+		"learning_path_maintenance", components.learningPathMaintenance != nil)
 
 	ticker := time.NewTicker(cfg.HealthInterval)
 	defer ticker.Stop()
@@ -338,6 +383,21 @@ func run(configPath string, logger *slog.Logger) error {
 					maintenanceContext, cancelMaintenance := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 					exportOrphanCursor = runExportMaintenance(maintenanceContext, logger, components.exportService, exportOrphanCursor, exportMaintenancePeriodicPhase)
 					cancelMaintenance()
+				}
+				if components.memoryExpiry != nil {
+					memoryExpiryContext, cancelMemoryExpiry := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+					runMemoryExpiryMaintenance(memoryExpiryContext, logger, components.memoryExpiry, memoryExpiryPeriodicPhase)
+					cancelMemoryExpiry()
+				}
+				if components.interviewCompletion != nil {
+					interviewCompletionContext, cancelInterviewCompletion := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+					runInterviewCompletionMaintenance(interviewCompletionContext, logger, components.interviewCompletion, interviewCompletionPeriodicPhase)
+					cancelInterviewCompletion()
+				}
+				if components.learningPathMaintenance != nil {
+					learningPathContext, cancelLearningPath := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+					runLearningPathMaintenance(learningPathContext, logger, components.learningPathMaintenance, learningPathMaintenancePeriodicPhase)
+					cancelLearningPath()
 				}
 			}
 		}
@@ -436,6 +496,53 @@ func runExportMaintenance(ctx context.Context, logger *slog.Logger, service expo
 			"workspace_count", orphans.ScannedWorkspaces, "deleted_count", orphans.Deleted)
 	}
 	return orphans.NextWorkspaceID
+}
+
+func runMemoryExpiryMaintenance(ctx context.Context, logger *slog.Logger, service memoryExpiryService, phase string) {
+	if service == nil {
+		return
+	}
+	expired, err := service.ExpireDue(ctx, memorydomain.MaxListLimit)
+	if err != nil {
+		logger.Warn("memory expiry maintenance failed", "error_code", "MEMORY_EXPIRY_MAINTENANCE_FAILED", "phase", phase, "expired_count", expired)
+		return
+	}
+	if phase == memoryExpiryStartupPhase || expired > 0 {
+		logger.Info("memory expiry maintenance completed", "phase", phase, "expired_count", expired)
+	}
+}
+
+// runInterviewCompletionMaintenance 执行一次有界 reservation/hold 维护并记录稳定计数。
+func runInterviewCompletionMaintenance(ctx context.Context, logger *slog.Logger, service interviewCompletionMaintenanceService, phase string) {
+	if service == nil {
+		return
+	}
+	result, err := service.AbandonStaleCompletions(ctx, interviewapplication.MaxCompletionMaintenanceBatch)
+	if err != nil {
+		logger.Warn("interview completion maintenance failed", "error_code", "INTERVIEW_COMPLETION_MAINTENANCE_FAILED", "phase", phase,
+			"abandoned_reservation_count", result.AbandonedReservations, "orphaned_hold_count", result.OrphanedHolds)
+		return
+	}
+	if phase == interviewCompletionStartupPhase || result.AbandonedReservations > 0 || result.OrphanedHolds > 0 {
+		logger.Info("interview completion maintenance completed", "phase", phase,
+			"abandoned_reservation_count", result.AbandonedReservations, "orphaned_hold_count", result.OrphanedHolds)
+	}
+}
+
+// runLearningPathMaintenance 执行一次有界 Review Path reservation/hold 维护。
+func runLearningPathMaintenance(ctx context.Context, logger *slog.Logger, service learningPathMaintenanceService, phase string) {
+	if service == nil {
+		return
+	}
+	abandoned, err := service.MaintainExpiredReservations(ctx)
+	if err != nil {
+		logger.Warn("learning path maintenance failed", "error_code", "LEARNING_PATH_MAINTENANCE_FAILED", "phase", phase,
+			"abandoned_reservation_count", abandoned)
+		return
+	}
+	if phase == learningPathMaintenanceStartupPhase || abandoned > 0 {
+		logger.Info("learning path maintenance completed", "phase", phase, "abandoned_reservation_count", abandoned)
+	}
 }
 
 func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logger, metrics observability.Metrics) (workerComponents, error) {
@@ -786,6 +893,28 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
+	memoryRepository, err := memorypostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	memoryService, err := memoryapplication.NewService(memoryapplication.Dependencies{
+		Repository: memoryRepository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	interviewCompletion, err := interviewpostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	learningPathRepository, err := learningpathpostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	learningPathMaintenance, err := learningpathapplication.NewReservationMaintainer(learningPathRepository, foundation.SystemClock{})
+	if err != nil {
+		return workerComponents{}, err
+	}
 	fatalInvariants := make(chan error, 1)
 	runtimeWorker, err := riveradapter.NewRuntimeNodeWorkerWithObservability(executors, runtimeCoordinator, fmt.Sprintf("worker:%s", workerID), cfg.WorkflowLeaseDuration, cfg.WorkflowHeartbeatInterval, riveradapter.RuntimeWorkerObservability{
 		Metrics: metrics, Queue: cfg.WorkerQueue, Logger: logger, FatalInvariants: fatalInvariants,
@@ -815,7 +944,9 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability, artifact: artifactComponents,
 		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
 		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject,
-		exportWorker: exportWorker, exportService: exportService, fatalInvariants: fatalInvariants,
+		exportWorker: exportWorker, exportService: exportService, memoryExpiry: memoryService,
+		interviewCompletion: interviewCompletion, learningPathMaintenance: learningPathMaintenance,
+		fatalInvariants: fatalInvariants,
 	}, nil
 }
 

@@ -3,6 +3,10 @@ package config
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -245,6 +249,10 @@ type Config struct {
 	AuthAPITokenTTL    time.Duration `yaml:"auth_api_token_ttl"`
 	AuthSecureCookie   bool          `yaml:"auth_secure_cookie"`
 	AuthAllowedOrigins []string      `yaml:"auth_allowed_origins"`
+
+	ReviewQuestionRefKey string `yaml:"review_question_ref_key"`
+	// reviewQuestionRefKeyExplicit 区分缺省与显式空值，防止错误配置被静默随机化。
+	reviewQuestionRefKeyExplicit bool
 }
 
 // Defaults returns safe non-sensitive defaults. It intentionally leaves the
@@ -325,8 +333,8 @@ func Defaults() Config {
 // silently falling back when malformed.
 func Load(path string) (Config, error) {
 	return loadWithLookup(path, os.LookupEnv, loadOptions{
-		consumeAuthBootstrap: true,
-		validateAuth:         true,
+		consumeAPISecrets: true,
+		validateAuth:      true,
 	})
 }
 
@@ -349,14 +357,14 @@ func LoadMigration(path string) (Config, error) {
 // process environment.
 func LoadWithLookup(path string, lookup func(string) (string, bool)) (Config, error) {
 	return loadWithLookup(path, lookup, loadOptions{
-		consumeAuthBootstrap: true,
-		validateAuth:         true,
+		consumeAPISecrets: true,
+		validateAuth:      true,
 	})
 }
 
 type loadOptions struct {
-	consumeAuthBootstrap bool
-	validateAuth         bool
+	consumeAPISecrets bool
+	validateAuth      bool
 }
 
 func loadNonAPIWithLookup(path string, lookup func(string) (string, bool)) (Config, error) {
@@ -376,14 +384,23 @@ func loadWithLookup(path string, lookup func(string) (string, bool), options loa
 			return cfg, err
 		}
 	}
-	if !options.consumeAuthBootstrap {
+	if !options.consumeAPISecrets {
 		cfg.AuthBootstrapToken = ""
+		cfg.ReviewQuestionRefKey = ""
+		cfg.reviewQuestionRefKeyExplicit = false
 	}
-	if err := applyEnv(&cfg, lookup, options.consumeAuthBootstrap); err != nil {
+	if err := applyEnv(&cfg, lookup, options.consumeAPISecrets); err != nil {
 		return cfg, err
 	}
-	if !options.consumeAuthBootstrap {
+	if options.consumeAPISecrets {
+		if err := materializeReviewQuestionRefKey(&cfg); err != nil {
+			return cfg, err
+		}
+	}
+	if !options.consumeAPISecrets {
 		cfg.AuthBootstrapToken = ""
+		cfg.ReviewQuestionRefKey = ""
+		cfg.reviewQuestionRefKeyExplicit = false
 	}
 	return cfg, cfg.validate(options.validateAuth)
 }
@@ -477,6 +494,8 @@ type fileConfig struct {
 	AuthAPITokenTTL    *string   `yaml:"auth_api_token_ttl"`
 	AuthSecureCookie   *bool     `yaml:"auth_secure_cookie"`
 	AuthAllowedOrigins *[]string `yaml:"auth_allowed_origins"`
+
+	ReviewQuestionRefKey *string `yaml:"review_question_ref_key"`
 }
 
 func applyYAMLFile(path string, cfg *Config) error {
@@ -658,6 +677,10 @@ func applyYAMLFile(path string, cfg *Config) error {
 	if raw.AuthAllowedOrigins != nil {
 		cfg.AuthAllowedOrigins = append([]string(nil), (*raw.AuthAllowedOrigins)...)
 	}
+	if raw.ReviewQuestionRefKey != nil {
+		cfg.ReviewQuestionRefKey = *raw.ReviewQuestionRefKey
+		cfg.reviewQuestionRefKeyExplicit = true
+	}
 	for name, value := range map[string]*string{
 		"database_ping_timeout":             raw.DatabasePingTimeout,
 		"graph_query_timeout":               raw.GraphQueryTimeout,
@@ -820,6 +843,9 @@ func (c Config) validate(validateAuth bool) error {
 		if err := c.validateAuth(); err != nil {
 			return err
 		}
+		if err := c.validateReviewQuestionRefKey(); err != nil {
+			return err
+		}
 	}
 	if err := c.validateEmbedding(); err != nil {
 		return err
@@ -832,6 +858,44 @@ func (c Config) validate(validateAuth bool) error {
 	}
 	if err := domain.ValidateRRFConfig(c.RetrievalRRFConfig()); err != nil {
 		return errors.New("retrieval RRF configuration is invalid")
+	}
+	return nil
+}
+
+func (c Config) validateReviewQuestionRefKey() error {
+	key := strings.TrimSpace(c.ReviewQuestionRefKey)
+	if key == "" {
+		if c.AuthMode == AuthModeDisabled && isDevelopmentEnvironment(c.Environment) && isLoopbackAddress(c.HTTPAddr) {
+			return nil
+		}
+		bootstrap := strings.TrimSpace(c.AuthBootstrapToken)
+		if c.AuthMode == AuthModeRequired && len(bootstrap) >= 32 && bootstrap == c.AuthBootstrapToken {
+			return nil
+		}
+	}
+	return validateReviewQuestionRefKeyValue(c.ReviewQuestionRefKey)
+}
+
+func materializeReviewQuestionRefKey(cfg *Config) error {
+	if cfg.reviewQuestionRefKeyExplicit || cfg.ReviewQuestionRefKey != "" {
+		return validateReviewQuestionRefKeyValue(cfg.ReviewQuestionRefKey)
+	}
+	if cfg.AuthMode == AuthModeRequired && cfg.AuthBootstrapToken != "" {
+		digest := sha256.Sum256([]byte("zhixu/review-question-ref/v1\x00" + cfg.AuthBootstrapToken))
+		cfg.ReviewQuestionRefKey = hex.EncodeToString(digest[:])
+		return nil
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return errors.New("generate review_question_ref_key: secure randomness unavailable")
+	}
+	cfg.ReviewQuestionRefKey = base64.RawURLEncoding.EncodeToString(key)
+	return nil
+}
+
+func validateReviewQuestionRefKeyValue(key string) error {
+	if len(key) < 32 || key != strings.TrimSpace(key) {
+		return errors.New("review_question_ref_key must contain at least 32 canonical bytes")
 	}
 	return nil
 }
@@ -1266,7 +1330,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -1337,6 +1401,7 @@ func (c Config) String() string {
 		c.AuthAPITokenTTL,
 		c.AuthSecureCookie,
 		len(c.AuthAllowedOrigins),
+		strings.TrimSpace(c.ReviewQuestionRefKey) != "",
 	)
 }
 
@@ -1345,7 +1410,7 @@ func (c Config) GoString() string {
 	return c.String()
 }
 
-func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAuthBootstrap bool) error {
+func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAPISecrets bool) error {
 	if value, ok := lookup("ZHIXU_AUTH_MODE"); ok {
 		cfg.AuthMode = AuthMode(value)
 	}
@@ -1417,9 +1482,13 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAuthBootst
 			}
 		}
 	}
-	if consumeAuthBootstrap {
+	if consumeAPISecrets {
 		if value, ok := lookup("ZHIXU_AUTH_BOOTSTRAP_TOKEN"); ok {
 			cfg.AuthBootstrapToken = value
+		}
+		if value, ok := lookup("ZHIXU_REVIEW_QUESTION_REF_KEY"); ok {
+			cfg.ReviewQuestionRefKey = value
+			cfg.reviewQuestionRefKeyExplicit = true
 		}
 	}
 	if value, ok := lookup("ZHIXU_AUTH_ALLOWED_ORIGINS"); ok {

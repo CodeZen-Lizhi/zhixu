@@ -58,7 +58,7 @@ export const SystemStatusPage = () => {
     );
   }
 
-  const { auth, collections, database, graph, knowledgeHealth, knowledgeTimeline, semanticLinks, rag, requestId, status, version } = statusQuery.data;
+  const { auth, collections, database, graph, interview, knowledgeHealth, knowledgeTimeline, memory, review, semanticLinks, rag, requestId, status, version } = statusQuery.data;
   const isReady = status === "ready"
     && database.status === "ready"
     && auth.status !== "unavailable"
@@ -67,6 +67,9 @@ export const SystemStatusPage = () => {
     && collections.status === "ready"
     && knowledgeHealth.status === "ready"
     && knowledgeTimeline.status === "ready"
+    && review.status === "ready"
+    && memory.status === "ready"
+    && interview.status === "ready"
     && rag.status !== "unavailable";
   const databaseUnavailable = database.status === "unavailable";
   const authUnavailable = auth.status === "unavailable";
@@ -75,6 +78,9 @@ export const SystemStatusPage = () => {
   const collectionsUnavailable = collections.status === "unavailable";
   const knowledgeHealthUnavailable = knowledgeHealth.status === "unavailable";
   const knowledgeTimelineUnavailable = knowledgeTimeline.status === "unavailable";
+  const reviewUnavailable = review.status === "unavailable";
+  const memoryUnavailable = memory.status === "unavailable";
+  const interviewUnavailable = interview.status === "unavailable";
   const ragUnavailable = rag.status === "unavailable";
   const headline = isReady
     ? "所有基础依赖可用"
@@ -92,6 +98,12 @@ export const SystemStatusPage = () => {
               ? "知识健康能力暂不可用"
               : knowledgeTimelineUnavailable
                 ? "知识时间线能力暂不可用"
+                : reviewUnavailable
+                  ? "Review 能力暂不可用"
+                  : memoryUnavailable
+                    ? "Memory 能力暂不可用"
+                    : interviewUnavailable
+                      ? "Interview 能力暂不可用"
                 : ragUnavailable
                   ? "RAG 能力暂不可用"
                   : "系统处于降级状态";
@@ -111,6 +123,12 @@ export const SystemStatusPage = () => {
               ? "知识健康查询暂不可用，请检查 Health 依赖。"
               : knowledgeTimelineUnavailable
                 ? "Knowledge Timeline 与 Impact Analysis 暂不可用，请检查其投影依赖。"
+                : reviewUnavailable
+                  ? "Review 学习能力暂不可用，请检查其服务依赖。"
+                  : memoryUnavailable
+                    ? "Memory 生命周期能力暂不可用，请检查其服务依赖。"
+                    : interviewUnavailable
+                      ? "Interview 学习路径能力暂不可用，请检查其服务依赖。"
                 : ragUnavailable
                   ? "会话读取仍可用，但新问题提交已暂停，请检查 RAG 运行依赖。"
                   : "部分系统能力处于降级状态，请查看下方能力明细。";
@@ -171,6 +189,18 @@ export const SystemStatusPage = () => {
           <div>
             <dt>知识时间线</dt>
             <dd><span aria-hidden="true">{knowledgeTimeline.status === "ready" ? "●" : "▲"}</span> {knowledgeTimeline.status === "ready" ? "可用" : "不可用"}</dd>
+          </div>
+          <div>
+            <dt>Review</dt>
+            <dd><span aria-hidden="true">{review.status === "ready" ? "●" : "▲"}</span> {review.status === "ready" ? "可用" : "不可用"}</dd>
+          </div>
+          <div>
+            <dt>Memory</dt>
+            <dd><span aria-hidden="true">{memory.status === "ready" ? "●" : "▲"}</span> {memory.status === "ready" ? "可用" : "不可用"}</dd>
+          </div>
+          <div>
+            <dt>Interview</dt>
+            <dd><span aria-hidden="true">{interview.status === "ready" ? "●" : "▲"}</span> {interview.status === "ready" ? "可用" : "不可用"}</dd>
           </div>
           <div>
             <dt>版本</dt>

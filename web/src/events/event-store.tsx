@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { getWorkspace } from "../api/workspace";
 import { useActiveWorkspaceId } from "../app/active-workspace";
 import { invalidateRagEvent, recoverRagWorkspace } from "../features/rag/event-recovery";
+import { reviewQueryKeys } from "../features/review/query-keys";
 import { resetSearchWorkspaceQueriesForRecovery } from "../features/search/query-keys";
 import { ServerEventClientError, connectServerEvents, type ConnectServerEventsOptions, type ServerEventConnectionState, type ServerEventEnvelope } from "./server-events";
 
@@ -27,6 +28,11 @@ const resourceId = (event: ServerEventEnvelope, resource: string): string | unde
   const prefix = `${resource}:`;
   return event.resourceRef.startsWith(prefix) ? event.resourceRef.slice(prefix.length) : undefined;
 };
+
+const reviewLearningPathResource = (event: ServerEventEnvelope): boolean =>
+  event.type.startsWith("learning_path.") ||
+  event.resourceRef.startsWith("learning_path:") ||
+  event.resourceRef.startsWith("learning_path_step:");
 
 export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
   const workspaceId = useActiveWorkspaceId();
@@ -113,6 +119,12 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         assertActive();
         await queryClient.refetchQueries({ queryKey: ["semantic-links", workspaceId], type: "all" }, { throwOnError: true });
         assertActive();
+        await queryClient.refetchQueries({ queryKey: ["review", workspaceId], type: "all" }, { throwOnError: true });
+        assertActive();
+        await queryClient.refetchQueries({ queryKey: ["memory", workspaceId], type: "all" }, { throwOnError: true });
+        assertActive();
+        await queryClient.refetchQueries({ queryKey: ["interview", workspaceId], type: "all" }, { throwOnError: true });
+        assertActive();
         window.sessionStorage.removeItem(storageKey);
       } finally {
         if (!isActive() && (activeEffectRef.current === undefined || currentWorkspaceIdRef.current !== workspaceId)) {
@@ -153,6 +165,23 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         || event.type.startsWith("index.")
         || event.type.startsWith("source.")
         || event.type.startsWith("source_version.");
+      const learningPathEvent = reviewLearningPathResource(event);
+      const reviewAnswerID = learningPathEvent
+        ? event.payloadSummary.answerId
+        : undefined;
+      const reviewEvent = event.type.startsWith("review.")
+        || event.resourceRef.startsWith("review_deck:")
+        || event.resourceRef.startsWith("review_card:")
+        || event.resourceRef.startsWith("review_schedule:")
+        || event.resourceRef.startsWith("review_session:")
+        || event.resourceRef.startsWith("review_answer:");
+      const memoryEvent = event.type.startsWith("memory.") || event.resourceRef.startsWith("memory:");
+      const interviewEvent = event.type.startsWith("interview.")
+        || event.resourceRef.startsWith("interview_session:")
+        || event.resourceRef.startsWith("interview_question:")
+        || event.resourceRef.startsWith("interview_turn:")
+        || event.resourceRef.startsWith("interview_report:")
+        || (learningPathEvent && reviewAnswerID === undefined);
       if (proposalEvent) {
         await invalidate(["business", workspaceId, "proposals"]);
         const proposalId = resourceId(event, "proposal");
@@ -178,6 +207,11 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
       // 强制 refetch，否则 409 stale 会阻止 SSE 事件游标提交并形成重放循环。
       if (sourceEvent) await markStaleWithoutRefetch(["search", workspaceId]);
       await invalidateRagEvent(queryClient, workspaceId, event);
+      if (reviewEvent) await invalidate(["review", workspaceId]);
+      if (memoryEvent) await invalidate(["memory", workspaceId]);
+      if (interviewEvent) await invalidate(["interview", workspaceId]);
+      if (reviewAnswerID !== undefined)
+        await invalidate(reviewQueryKeys.learningPath(workspaceId, reviewAnswerID));
 
       if (event.type === "proposal.applied") {
         await invalidate(["graph", workspaceId]);

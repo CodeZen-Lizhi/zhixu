@@ -570,6 +570,17 @@ IGNORED 必须保存证据指纹；只有证据变化时才能自动 REOPENED。
 
 当绑定 Claim 被废弃或发生高严重度冲突时，卡片进入 INVALIDATED，不再参与调度。
 
+M8-02 的持久化状态使用 `DRAFT/APPROVED/INVALIDATED/REJECTED`，与上述产品视图的映射如下：
+
+- `GENERATED` 是生成过程中的瞬时结果；只有通过正式 Claim/Evidence 校验后才持久化为 `DRAFT`，因此数据库不保存未经校验的 GENERATED Card。
+- `READY_FOR_REVIEW` 对应 `DRAFT`；编辑任何历史 Card 都返回 `DRAFT` 并要求重新审批。
+- `ACTIVE` 对应 `APPROVED`，且要求 Deck 为 `ACTIVE`、Schedule 未暂停。
+- `SUSPENDED` 是 `APPROVED` Card 在 Deck 为 `PAUSED` 或 Schedule 为 paused 时的有效投影；Card 行保持 `APPROVED`，避免两个状态事实源。
+- `INVALIDATED` 与持久状态同名，并保存失效原因和时间、删除调度；恢复必须编辑为 `DRAFT` 后重新校验证据和审批。
+- `REJECTED` 表示用户在激活前驳回候选 Card，不等同于 `RETIRED`。正式 v1.0 不提供单 Card 退休命令；整组退休使用 Deck `ARCHIVED`。未来若增加单 Card `RETIRED`，必须追加前向迁移和公开契约，不能把历史 `REJECTED` 静默改名。
+
+既有 `DRAFT/APPROVED/INVALIDATED/REJECTED` 记录不做状态改写；`ACTIVE/SUSPENDED` 始终由 Card、Deck 和 Schedule 联合投影。
+
 ### 8.8 Document 状态
 
 - DRAFT：尚未成为正式知识。
@@ -2303,6 +2314,13 @@ Should：
 - 过期情景记忆不再使用。
 - 记忆不会被显示为知识来源。
 
+#### 10.17.8 M8-03 交付边界
+
+- M8-03 覆盖 Candidate/Confirm、编辑、暂停/恢复、删除、到期和面向 Interview 的 ACTIVE、已确认、未过期、scope 匹配的上下文读取；用户 HTTP 创建固定为 USER 来源，INTERVIEW Candidate 仅能由服务端受控流程派生。
+- Interview Candidate 以客户端 Idempotency-Key 绑定完整请求，并以服务端 stable owner + `INTERVIEW` provenance 绑定同一 Learning Path 步骤；同 key 异请求冲突，不同 key 等价请求复用同一 Candidate，只保留一条创建 Audit。
+- Interview Report/Path Artifact 在 Completion 绑定前通过 hidden hold 对普通查询不可见；失败可按稳定 identity 重放。Worker 对超过 24 小时的 Completion reservation/hold 做有界维护，将其转为 ABANDONED/ORPHANED；ORPHANED 产物继续隐藏并保留恢复与审计能力。
+- 本节的产品要求不因上述切片而降级：Memory `last_used_at`、管理页的最近使用展示，以及将 `EPISODIC` 转为 `PREFERENCE` 仍未交付，必须在后续任务中单独实现和验收。
+
 ### 10.18 智能复习、闪卡与面试模拟
 
 #### 10.18.1 功能目标
@@ -2471,6 +2489,11 @@ Review Card 进入 INVALIDATED，并从调度移除，直到重新审核。
 - 调度重复提交不会推进两次。
 - Claim 失效后卡片不再继续复习。
 - 面试报告能够生成后续学习动作。
+
+#### 10.18.14 M8 Review/Interview 边界
+
+- Review Session 只处理 Deck/Card Answer 与 FSRS；Interview 使用独立 Question、Turn、Report 和 Learning Path 事实，不能通过 Review Answer 推进调度。
+- `00049_review_invalidation_observability.sql` 仅将 Card 失效投影到既有 Health/Timeline 兼容链路；它不是完整 Review Health/Impact，也不满足本 PRD 对下游 Impact 覆盖的完整要求。
 
 ### 10.19 工作流编排与任务中心
 

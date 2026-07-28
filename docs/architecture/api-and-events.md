@@ -350,8 +350,12 @@ M7-04 的公开查询由 `internal/knowledge/http` 提供，Timeline 是 Workspa
 
 ### Review Answer
 
-- 输入：session、card、answer、idempotency key。
+- Due 查询：输入 Workspace、活动且 Deck-bound 的 Review Session 与可选 Deck；输出签发绑定
+  Session/Card/Schedule 快照的 opaque `question_ref`。
+- Answer 输入：session、card、`question_ref`、answer、rating、idempotency key。
 - 输出：score、feedback、schedule。
+- Review lifecycle invalidation 每次返回最多 200 张 Card 的 `invalidated_count` 与 `has_more`；调用方在
+  `has_more=true` 时使用新 Idempotency-Key 继续，单个 receipt 不保存完整 Card 列表。
 
 ## 12. 安全
 

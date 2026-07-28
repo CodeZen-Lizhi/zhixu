@@ -4,6 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithAppProviders } from "../../test/render";
 import { SystemStatusPage } from "./SystemStatusPage";
 
+const learningCapabilities = {
+  review: { status: "ready" },
+  memory: { status: "ready" },
+  interview: { status: "ready" },
+};
+
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -24,7 +30,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "ready" },
         semantic_links: { status: "ready" },
         rag: { status: "disabled" },
-        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" }, ...learningCapabilities,
         auth: { status: "disabled" },
         request_id: "request-ready",
       }),
@@ -47,7 +53,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
         semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
         rag: { status: "unavailable", reason: "rag_dependencies_unavailable" },
-        collections: { status: "unavailable" }, knowledge_health: { status: "unavailable" }, knowledge_timeline: { status: "unavailable" },
+        collections: { status: "unavailable" }, knowledge_health: { status: "unavailable" }, knowledge_timeline: { status: "unavailable" }, ...learningCapabilities,
         auth: { status: "ready" },
         request_id: "request-degraded",
       }),
@@ -69,7 +75,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "unavailable", reason: "graph_dependencies_unavailable" },
         semantic_links: { status: "ready" },
         rag: { status: "disabled" },
-        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" }, ...learningCapabilities,
         auth: { status: "ready" },
         request_id: "request-graph",
       }),
@@ -91,7 +97,7 @@ describe("SystemStatusPage", () => {
         graph: { status: "ready" },
         semantic_links: { status: "unavailable", reason: "semantic_link_dependencies_unavailable" },
         rag: { status: "disabled" },
-        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
+        collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" }, ...learningCapabilities,
         auth: { status: "ready" },
         request_id: "request-semantic-links",
       }),
@@ -116,6 +122,7 @@ describe("SystemStatusPage", () => {
         collections: { status: "ready" },
         knowledge_health: { status: "ready" },
         knowledge_timeline: { status: "unavailable" },
+        ...learningCapabilities,
         auth: { status: "ready" },
         request_id: "request-timeline-degraded",
       }),
@@ -140,6 +147,7 @@ describe("SystemStatusPage", () => {
         collections: { status: "ready" },
         knowledge_health: { status: "ready" },
         knowledge_timeline: { status: "ready" },
+        ...learningCapabilities,
         auth: { status: "unavailable", reason: "auth_dependencies_unavailable" },
         request_id: "request-auth-degraded",
       }),
@@ -150,6 +158,34 @@ describe("SystemStatusPage", () => {
     expect(await screen.findByText("认证依赖暂不可用")).toBeInTheDocument();
     expect(screen.getByText("认证边界无法初始化，业务 API 已 fail closed；请检查认证数据库与运行配置。")).toBeInTheDocument();
     expect(screen.getByText("不可用", { selector: "dd" })).toBeInTheDocument();
+  });
+
+  it("学习能力不可用时展示对应的状态明细", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse({
+        status: "degraded",
+        version: "0.1.0",
+        database: { status: "ready" },
+        graph: { status: "ready" },
+        semantic_links: { status: "ready" },
+        rag: { status: "disabled" },
+        collections: { status: "ready" },
+        knowledge_health: { status: "ready" },
+        knowledge_timeline: { status: "ready" },
+        review: { status: "unavailable" },
+        memory: { status: "ready" },
+        interview: { status: "ready" },
+        auth: { status: "ready" },
+        request_id: "request-review-unavailable",
+      }),
+    );
+
+    renderWithAppProviders(<SystemStatusPage />);
+
+    expect(await screen.findByText("Review 能力暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("Review", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.getByText("Memory", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.getByText("Interview", { selector: "dt" })).toBeInTheDocument();
   });
 
   it("请求失败后允许用户重试并恢复", async () => {
@@ -163,7 +199,7 @@ describe("SystemStatusPage", () => {
           graph: { status: "ready" },
           semantic_links: { status: "ready" },
           rag: { status: "ready" },
-          collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" },
+          collections: { status: "ready" }, knowledge_health: { status: "ready" }, knowledge_timeline: { status: "ready" }, ...learningCapabilities,
           auth: { status: "ready" },
           request_id: "request-retry",
         }),

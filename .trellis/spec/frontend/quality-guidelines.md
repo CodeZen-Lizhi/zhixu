@@ -304,3 +304,124 @@ Correct: 前端全量门禁加真实 API 浏览器；scan ID 只影响 Candidate
 Wrong: 只展示 Markdown 创建按钮，就宣称附件和 AC-33 已完成；或把下载直链交给新标签页。
 Correct: 明确只支持 Collection Markdown/Metadata JSON，下载经 authFetch/Problem/Blob 校验；附件保持 deferred。
 ```
+
+## Scenario: M8 Review, Interview And Memory Frontend Boundary
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/review.ts`、`web/src/features/review/**`、`web/src/api/interview.ts`、
+  `web/src/features/interview/**`、`web/src/api/memory.ts`、`web/src/features/memory/**`、相关路由、Workspace cache
+  或 SSE Event Store 时应用。
+- 当前范围为 Review Deck/Session、Review/Interview 共享 Learning Path 和 Memory 生命周期；各客户端均以 REST 读取为事实源，
+  `review.*`、`learning_path.*`、`interview.*`、`memory.*` SSE 只做当前 Workspace 的 Query invalidation。
+- Review Path 客户端、Query 和 `/review/session?answer=...` UI 已落地；后端在数据库依赖可用时组装真实 Service/Handler，
+  readiness 同时要求 Review 与 Learning Path 可用，持久化契约和 Worker maintenance 调用已静态收口。页面仍必须把实际
+  503/Problem 显示为可恢复错误；未取得真实 PostgreSQL/API/Vite/浏览器证据时，不能把静态接线描述为动态闭环已验证。
+
+### 2. Signatures
+
+```ts
+listReviewDecks(workspaceId, signal?)
+listReviewDue(workspaceId, sessionId, deckId?, signal?)
+submitReviewAnswer({ workspaceId, sessionId, cardId, questionRef, userAnswer, rating, idempotencyKey })
+getReviewLearningPath(workspaceId, answerId, signal?)
+createReviewLearningPath({ workspaceId, answerId, idempotencyKey })
+updateReviewLearningPathStatus({ workspaceId, answerId, expectedVersion, status, idempotencyKey })
+updateReviewLearningPathStep({ workspaceId, answerId, stepId, expectedVersion, status, idempotencyKey })
+listMemories({ workspaceId, types?, statuses?, cursor?, limit? }, signal?)
+createMemoryCandidate({ workspaceId, type, content, taskScopeId?, expiresAt?, idempotencyKey })
+confirmMemory({ workspaceId, memoryId, expectedVersion, idempotencyKey })
+startInterview({ workspaceId, config, idempotencyKey })
+submitInterviewTurn({ workspaceId, sessionId, questionId, userAnswer, idempotencyKey })
+completeInterview({ workspaceId, sessionId, manualEnd, idempotencyKey })
+suggestInterviewMemoryCandidate({ workspaceId, sessionId, pathId, stepId, idempotencyKey })
+updateLearningPathStep({ workspaceId, pathId, stepId, expectedVersion, status, idempotencyKey })
+```
+
+### 3. Contracts
+
+- `review.ts`、`interview.ts` 和 `memory.ts` 是唯一 HTTP/JSON decoder owner；组件只消费 camelCase domain model。
+- Due 请求必须携带活动 Review `session_id`；Query key 同时绑定 Workspace、Session 与 Deck。
+  Due Card 是脱敏投影，只允许问题、类型、难度、状态和版本。`answer_points`、完整 Card `evidence` 或任何未知字段出现时必须拒绝响应。
+- 浏览器提交 Review 只包含 answer、rating、Card/Session binding 与 Idempotency-Key；Score、答案要点、证据和 Schedule
+  只能从服务端 Answer result 读取，`scorer_version` 是必需的不可变审计字段。重试必须复用同一个 mutation variables 与 key；
+  未提交的 `question_ref` 因 key 轮换、不同 key 实例或 local `disabled` 随机 key 的 API 重启失效时必须重新读取 due，
+  不能在浏览器生成或持久化签名；显式/派生 key 的同 key 重启不要求主动丢弃 due。
+- Review Path 创建请求只能携带 Workspace、Answer ID 与 Idempotency-Key；gap、Score、Evidence、Citation 和 Artifact binding
+  全部由服务端从不可变 Answer 派生。Decoder 必须严格要求 `origin_type=REVIEW`、`artifact.kind=LEARNING_PATH`，并校验
+  Workspace/Answer/Path/Step、时间、版本、状态和唯一 step_no；Query key 固定为
+  `['review',workspaceId,'answers',answerId,'learning-path']`。
+- `/review/session?answer=...` 只能恢复该 Answer 的 Path；创建条件提示可以基于已返回 Score 决定是否显示按钮，但最终
+  actionable 判定和创建裁决属于服务端。Path/Step mutation 必须复用原 variables/key 处理 response loss，并在成功后更新、
+  失效同一精确 Query key。Step 响应可包含初始态 `PENDING`，但 mutation target 只能是
+  `IN_PROGRESS|COMPLETED|SKIPPED`；API 类型和 OpenAPI 不得公开必然失败的 `PENDING` 写入。
+- Memory 响应可以只读展示 source type/ref，但任何命令都不得提交 `owner`、`confirmed_by` 或 source type/ref，编辑和
+  状态转换也不能修改 provenance。用户 HTTP 创建固定为 USER candidate；只有 `confirm` 能将 Candidate 变为 ACTIVE，
+  INTERVIEW provenance 只能由服务端从 Path 步骤派生。EPISODIC 必须有到期时间，
+  表单 JSON 也必须用 API 边界的严格 parser，拒绝重复 key、数组根、空对象、超深或超限对象。content 以 UTF-8 bytes
+  限制为 4096，source ref 为 512 bytes；可选 `task_scope_id`/`expires_at` 省略合法，但显式 `null` 必须拒绝。
+- Interview 只能走独立 Session/Question/Turn/Report/Path wire；前端不得把它映射为 Review Answer、FSRS Schedule 或
+  Artifact 可见性状态。Artifact binding、Path step/status 与完成报告必须同时通过严格 decoder 与 Workspace/ID binding。
+- Interview 难度由服务端受证据约束的 prompt policy 决定；页面只展示配置。剩余时间必须从服务端 `started_at` 和
+  `duration_minutes` 恢复计算，归零后禁答但保留 `manual_end=true` 完成入口。连续追问按服务端 question chain 渲染；
+  SKIPPED 主问题链生成的 gap/path 不能被本地去掉或改写。
+- Interview Candidate 按原客户端 key 提交；`replayed=true` 既可能是同 key 重试，也可能是另一个 key 对同一 Path step 的
+  语义复用。UI 只表达“该步骤已有待确认候选”，不得误称为本次 key 的精确重放。
+- Query key 固定以 Workspace 开头，切换 Workspace 时取消并清除 Review/Interview/Memory 缓存，并由 REST 回查恢复事实。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+| --- | --- |
+| Due 响应携带答案要点、证据或未知字段 | `ReviewApiError(INVALID_RESPONSE)`，答题前不渲染内容 |
+| Scorer 不可用、响应丢失或 409 | 显示服务端错误；可重试时复用原 key，不能本地推进 Schedule |
+| key 轮换、不同 key 实例或 local 随机 key 重启后旧 `question_ref` 失效 | 丢弃旧 due 投影并刷新；不得本地构造替代签名 |
+| Memory 响应包含 owner/confirmed_by 或 Workspace/ID 漂移 | `MemoryApiError(INVALID_RESPONSE)`，不渲染部分事实 |
+| Memory 命令携带 source/owner/confirmed_by | `MemoryApiError(INVALID_REQUEST)`，浏览器不发起可伪造或修改 provenance 的命令 |
+| EPISODIC 无 expires_at、ACTIVE/PAUSED 无 confirmed_at | 严格 decoder 拒绝生命周期矛盾 |
+| content/source 超 UTF-8 byte 上限，或可选非 null 字段显式为 `null` | `MemoryApiError(INVALID_REQUEST/INVALID_RESPONSE)`，不发出或不渲染部分数据 |
+| Interview wire 与 Session/Question/Path binding 不一致，或包含 Review Schedule | `InterviewApiError(INVALID_RESPONSE)`，不渲染或本地推进学习状态 |
+| Interview deadline 归零 | 禁止新 Submit，允许使用稳定 key 的 manual completion；刷新后仍从服务端时间事实恢复 |
+| Interview Candidate 返回 `replayed=true` | 显示既有候选可前往确认；不推断一定是同 key 重放，不再创建本地 Candidate |
+| Review Path 响应 origin 不是 REVIEW、Answer/Path/Step binding 漂移、Artifact 不是 LEARNING_PATH 或含未知字段 | `ReviewApiError(INVALID_RESPONSE)`；不渲染部分 Path |
+| Review Path 创建表单尝试提交 gap/Score/Evidence/Artifact | API client 不提供这些字段；请求仅发送 `workspace_id`，不让浏览器成为来源事实 owner |
+| Review Path 后端 503、Problem 或持久化不可用 | 显示可恢复错误并保留原 mutation variables；不得本地生成 Path 或把路由存在解释为成功 |
+| 无 Active Workspace | 不发 Review/Interview/Memory 请求，显示可操作的 Workspace gate |
+| 390x844 横向溢出或 console warning/error | 浏览器门禁失败 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：Review 提交后才显示五维评分、遗漏、错误和可打开证据；服务端 Path 可用时按 Answer 恢复并推进共享 Path；Interview
+  逐题恢复且不触碰 FSRS；Memory Candidate 只在 Confirm 后成为 ACTIVE。
+- Base：没有 due Card 或匹配 Memory 时展示明确空态；认证/服务不可用显示可恢复错误而非成功。
+- Bad：组件直接 `JSON.parse` Memory 内容并断言为命令类型、在答题前预取完整 Card、从 SSE payload 拼 Score/Path、
+  浏览器自行构造 Review gap/Evidence，或将 owner 放进请求/列表投影。
+
+### 6. Tests Required
+
+- API：严格 JSON、未知/重复字段、Workspace/resource binding、脱敏 Due Card、Review Answer/Path/Step 与 REVIEW origin、
+  Interview Session/Question/Path、Problem/Abort、EPISODIC 生命周期、Memory 身份字段响应拒绝、source 响应只读解码与
+  命令 provenance 字段拒绝。
+- Query/Component：Workspace key/cache cleanup、same-key response-loss retry、SSE invalidation/recovery、Candidate Confirm、
+  pause/resume/delete、Review answer result、Answer URL Path 恢复/创建条件/状态与步骤、`learning_path.*` 精确失效、Interview
+  完成与 Path 状态、Loading/Empty/Error/Conflict。
+- Canonical：`npm run lint --prefix web`、`npm run typecheck --prefix web`、`npm run test --prefix web`、
+  `npm run build --prefix web`、`git diff --check`；真实 Vite 在桌面和 `390x844` 检查路由、Workspace gate、overflow
+  与 console。具有可用 Workspace 时，还必须完成真实 Candidate Confirm、一次 Review answer 路径和一次 Interview/Path
+  恢复路径。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Due endpoint 返回完整 Card，组件仅把答案区 CSS 隐藏。
+Correct: decoder 只接受最小 Due 投影；包含答案要点或证据即 fail closed。
+
+Wrong: Memory 表单用 JSON.parse 后 as MemoryJsonObject 直接发请求。
+Correct: 表单调用 memory API 导出的严格 parser；解析和请求使用同一大小、深度与重复字段约束。
+
+Wrong: 浏览器发送 `source.type=INTERVIEW`，或把 Interview Turn 提交给 Review Answer 端点。
+Correct: 任何用户 Memory 命令都不含 provenance；INTERVIEW 来源由服务端持久 Path 步骤派生，Interview 与 Review 只共享受控读取合同。
+
+Wrong: 浏览器把评分转换成 gap/Evidence 后创建 Review Path，或收到 503 后本地伪造成功 Path。
+Correct: 客户端只提交 Workspace/Answer/key；严格解码服务端 REVIEW origin Path，失败保持显式且用 REST 重试恢复。
+```
