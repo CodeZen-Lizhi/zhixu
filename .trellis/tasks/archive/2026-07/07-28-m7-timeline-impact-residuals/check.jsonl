@@ -1,0 +1,11 @@
+{"file":".trellis/tasks/07-28-m7-timeline-impact-residuals/research/m7-gap-analysis.md","reason":"复核实现是否覆盖已确认遗留且未越过 deferred 边界"}
+{"file":".trellis/spec/backend/timeline-impact.md","reason":"复核 Event/Report/Outbox/Audit、replay、POISONED 与错误矩阵"}
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"复核 Artifact selector、Revision binding 与 Change Control 边界"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"复核 Proposal capability、CSRF/Origin 和写权限未被审批绕过"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"复核迁移、参数化 SQL、seek 索引、批量与事务一致性"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go、PostgreSQL、故障注入、动态 smoke 与交付质量门禁"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"复核新 Event/Object/Report/Proposal wire 严格解码"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"复核 Workspace/filter/cursor/幂等键状态归属与恢复"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"复核 Timeline 列表、详情、操作状态与可访问性"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"复核前端测试、浏览器桌面/移动与错误状态门禁"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核跨层字段、版本、binding 与唯一事实源一致性"}

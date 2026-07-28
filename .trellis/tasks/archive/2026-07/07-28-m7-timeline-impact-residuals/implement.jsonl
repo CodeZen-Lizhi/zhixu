@@ -1,0 +1,11 @@
+{"file":".trellis/tasks/07-28-m7-timeline-impact-residuals/research/m7-gap-analysis.md","reason":"M7 遗留范围、代码事实、风险与验证建议"}
+{"file":".trellis/spec/backend/timeline-impact.md","reason":"Timeline/Impact append-only、cursor、Report/Audit 与错误契约"}
+{"file":".trellis/spec/backend/index.md","reason":"后端模块边界、开发前检查和里程碑归属"}
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"Artifact Revision、Citation、typed Proposal 与 owner 事务不变量"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Capability、Origin/CSRF、API Token 与 fail-closed 认证边界"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"PostgreSQL 事务、迁移、索引、批量与一致性规范"}
+{"file":".trellis/spec/frontend/index.md","reason":"Timeline 页面现状、前端架构与业务事实源边界"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"HTTP/SSE strict decoder 与判别联合规范"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Workspace cache、URL/local/server state 与 SSE ownership"}
+{"file":".trellis/spec/frontend/hook-guidelines.md","reason":"Query key、command、cursor 和 hook 边界"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"跨数据库、Domain、API、OpenAPI 与 Web 的契约检查"}
