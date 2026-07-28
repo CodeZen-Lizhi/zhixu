@@ -240,9 +240,11 @@ type commandRepositoryFake struct {
 	generationErr      error
 	receipts           map[string]CommandResult
 	getCalls           int
+	publicGetCalls     int
 	probeCalls         int
 	probeErr           error
 	reserveCalls       int
+	create             *CreateRecord
 	transition         *TransitionRecord
 }
 
@@ -262,6 +264,8 @@ func (fake *commandRepositoryFake) ProbeExternalTransition(_ context.Context, _ 
 }
 
 func (fake *commandRepositoryFake) Create(_ context.Context, record CreateRecord) (CommandResult, error) {
+	copyRecord := record
+	fake.create = &copyRecord
 	fake.state = record.State
 	return CommandResult{State: record.State, CommandVersion: record.State.Artifact.Version, RequestHash: record.Binding.RequestHash, CommandType: record.Binding.CommandType}, nil
 }
@@ -276,8 +280,13 @@ func (fake *commandRepositoryFake) Transition(_ context.Context, record Transiti
 	}, nil
 }
 
-func (fake *commandRepositoryFake) Get(_ context.Context, _, _ foundation.ID) (State, error) {
+func (fake *commandRepositoryFake) GetCommandState(_ context.Context, _, _ foundation.ID) (State, error) {
 	fake.getCalls++
+	return fake.state, nil
+}
+
+func (fake *commandRepositoryFake) Get(_ context.Context, _, _ foundation.ID) (State, error) {
+	fake.publicGetCalls++
 	return fake.state, nil
 }
 

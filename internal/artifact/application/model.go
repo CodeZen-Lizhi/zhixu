@@ -53,6 +53,40 @@ type PlanCommand struct {
 	Title           string
 	ScopeDefinition string
 	IdempotencyKey  string
+	VisibilityHold  *VisibilityHold
+}
+
+// VisibilityHoldOwnerType identifies the workflow that temporarily owns an
+// Artifact before it can become visible through public queries.
+type VisibilityHoldOwnerType string
+
+const (
+	// VisibilityHoldOwnerInterviewComplete binds an Artifact to one Interview
+	// completion transaction.
+	VisibilityHoldOwnerInterviewComplete VisibilityHoldOwnerType = "INTERVIEW_COMPLETE"
+	// VisibilityHoldOwnerLearningPathCreate binds the single Artifact produced
+	// from one persisted Review Answer to its path creation reservation.
+	VisibilityHoldOwnerLearningPathCreate VisibilityHoldOwnerType = "LEARNING_PATH_CREATE"
+)
+
+// VisibilityHoldOwnerRole identifies one Artifact produced by its owner.
+type VisibilityHoldOwnerRole string
+
+const (
+	// VisibilityHoldRoleReport identifies the Interview report Artifact.
+	VisibilityHoldRoleReport VisibilityHoldOwnerRole = "REPORT"
+	// VisibilityHoldRolePath identifies one learning-path Artifact.
+	VisibilityHoldRolePath VisibilityHoldOwnerRole = "PATH"
+)
+
+// VisibilityHold keeps an internally constructed Artifact out of public
+// reads until its owning transaction persists the corresponding binding.
+type VisibilityHold struct {
+	OwnerType VisibilityHoldOwnerType `json:"owner_type"`
+	OwnerID   foundation.ID           `json:"owner_id"`
+	OwnerRole VisibilityHoldOwnerRole `json:"owner_role"`
+	// AttemptDigest 绑定已 Prepare 的 Interview Completion 或 Review Path 内容摘要。
+	AttemptDigest string `json:"attempt_digest"`
 }
 
 // SubmitOutlinePersistentCommand is the durable form of outline submission.
@@ -195,8 +229,9 @@ type CommandBinding struct {
 
 // CreateRecord atomically persists the first Artifact revision and its receipt.
 type CreateRecord struct {
-	Binding CommandBinding
-	State   State
+	Binding        CommandBinding
+	State          State
+	VisibilityHold *VisibilityHold
 }
 
 // TransitionRecord atomically persists a CAS transition, optional new revision,
@@ -219,6 +254,9 @@ type Repository interface {
 	ReserveExternalTransition(context.Context, CommandBinding) (State, error)
 	Create(context.Context, CreateRecord) (CommandResult, error)
 	Transition(context.Context, TransitionRecord) (CommandResult, error)
+	// GetCommandState is an internal raw read used only to continue a command
+	// against an Artifact that may still have a visibility hold.
+	GetCommandState(context.Context, foundation.ID, foundation.ID) (State, error)
 	Get(context.Context, foundation.ID, foundation.ID) (State, error)
 	List(context.Context, ListQuery) (ArtifactPage, error)
 	ListSectionGenerations(context.Context, foundation.ID, foundation.ID) (SectionGenerationSnapshot, error)

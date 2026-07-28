@@ -42,8 +42,13 @@ func (service *CommandService) Plan(ctx context.Context, command PlanCommand) (C
 	if !validID(command.WorkspaceID) {
 		return CommandResult{}, requestInvalid("artifact workspace is invalid")
 	}
+	visibilityHold := cloneVisibilityHold(command.VisibilityHold)
+	if err := ValidateVisibilityHoldBinding(visibilityHold, command.Type, key); err != nil {
+		return CommandResult{}, err
+	}
 	hash, err := requestHash(CommandPlan, command.WorkspaceID, "", 0, planRequest{
 		Type: command.Type, Title: command.Title, ScopeDefinition: command.ScopeDefinition,
+		VisibilityHold: visibilityHold,
 	})
 	if err != nil {
 		return CommandResult{}, err
@@ -75,8 +80,9 @@ func (service *CommandService) Plan(ctx context.Context, command PlanCommand) (C
 	}
 	state := State{Artifact: artifact, Revision: revision}
 	result, err := service.dependencies.Repository.Create(ctx, CreateRecord{
-		Binding: CommandBinding{WorkspaceID: command.WorkspaceID, ArtifactID: artifact.ID, IdempotencyKey: key, RequestHash: hash, CommandType: CommandPlan},
-		State:   state,
+		Binding:        CommandBinding{WorkspaceID: command.WorkspaceID, ArtifactID: artifact.ID, IdempotencyKey: key, RequestHash: hash, CommandType: CommandPlan},
+		State:          state,
+		VisibilityHold: visibilityHold,
 	})
 	if err != nil {
 		return CommandResult{}, err
@@ -384,7 +390,7 @@ func (service *CommandService) replay(ctx context.Context, binding CommandBindin
 }
 
 func (service *CommandService) current(ctx context.Context, binding CommandBinding) (State, error) {
-	state, err := service.dependencies.Repository.Get(ctx, binding.WorkspaceID, binding.ArtifactID)
+	state, err := service.dependencies.Repository.GetCommandState(ctx, binding.WorkspaceID, binding.ArtifactID)
 	if err != nil {
 		return State{}, err
 	}
@@ -659,6 +665,50 @@ func validHash(value string) bool {
 	return err == nil
 }
 
+// ValidateVisibilityHold validates the bounded workflows allowed to hide an
+// Artifact before its owning transaction commits. A nil hold is ordinary.
+func ValidateVisibilityHold(hold *VisibilityHold) error {
+	if hold == nil {
+		return nil
+	}
+	validRole := hold.OwnerType == VisibilityHoldOwnerInterviewComplete &&
+		(hold.OwnerRole == VisibilityHoldRoleReport || hold.OwnerRole == VisibilityHoldRolePath)
+	validRole = validRole || hold.OwnerType == VisibilityHoldOwnerLearningPathCreate && hold.OwnerRole == VisibilityHoldRolePath
+	if !validID(hold.OwnerID) || !validRole || !validHash(hold.AttemptDigest) {
+		return requestInvalid("artifact visibility hold is invalid")
+	}
+	return nil
+}
+
+// ValidateVisibilityHoldBinding 把 hold 绑定到固定 Artifact 类型、attempt
+// digest 和 PLAN stage key；普通无 hold 的 Artifact 不受影响。
+func ValidateVisibilityHoldBinding(hold *VisibilityHold, artifactType, idempotencyKey string) error {
+	if err := ValidateVisibilityHold(hold); err != nil || hold == nil {
+		return err
+	}
+	wantType := "LEARNING_PATH"
+	wantKey := fmt.Sprintf("lp1:review:%s:%s:%s:p", hold.OwnerID, wantType, hold.AttemptDigest)
+	if hold.OwnerType == VisibilityHoldOwnerInterviewComplete {
+		wantType = "INTERVIEW_DOC"
+		if hold.OwnerRole == VisibilityHoldRolePath {
+			wantType = "LEARNING_PATH"
+		}
+		wantKey = fmt.Sprintf("iv1:%s:%s:%s:p", hold.OwnerID, wantType, hold.AttemptDigest)
+	}
+	if artifactType != wantType || idempotencyKey != wantKey {
+		return requestInvalid("artifact visibility hold binding is invalid")
+	}
+	return nil
+}
+
+func cloneVisibilityHold(hold *VisibilityHold) *VisibilityHold {
+	if hold == nil {
+		return nil
+	}
+	copyValue := *hold
+	return &copyValue
+}
+
 // exportIDForRevision derives one managed export identity for an immutable revision.
 // Replays and concurrent requests therefore write the same controlled path instead
 // of leaving a second untracked file before a losing CAS can return its conflict.
@@ -708,9 +758,41 @@ func artifactOrderBefore(left, right domain.Artifact) bool {
 }
 
 type planRequest struct {
-	Type            string `json:"type"`
-	Title           string `json:"title"`
-	ScopeDefinition string `json:"scope_definition"`
+	Type            string          `json:"type"`
+	Title           string          `json:"title"`
+	ScopeDefinition string          `json:"scope_definition"`
+	VisibilityHold  *VisibilityHold `json:"visibility_hold,omitempty"`
+}
+
+// planVisibilityHoldHashRequest 保留 00057 前的 PLAN request hash 形状。
+// AttemptDigest 已由精确 stage key 与数据库 hold fence 绑定，不能重复加入
+// hash 使迁移前的可恢复 PLAN receipt 失效。
+type planVisibilityHoldHashRequest struct {
+	OwnerType VisibilityHoldOwnerType `json:"owner_type"`
+	OwnerID   foundation.ID           `json:"owner_id"`
+	OwnerRole VisibilityHoldOwnerRole `json:"owner_role"`
+}
+
+func (request planRequest) MarshalJSON() ([]byte, error) {
+	var visibilityHold *planVisibilityHoldHashRequest
+	if request.VisibilityHold != nil {
+		visibilityHold = &planVisibilityHoldHashRequest{
+			OwnerType: request.VisibilityHold.OwnerType,
+			OwnerID:   request.VisibilityHold.OwnerID,
+			OwnerRole: request.VisibilityHold.OwnerRole,
+		}
+	}
+	return json.Marshal(struct {
+		Type            string                         `json:"type"`
+		Title           string                         `json:"title"`
+		ScopeDefinition string                         `json:"scope_definition"`
+		VisibilityHold  *planVisibilityHoldHashRequest `json:"visibility_hold,omitempty"`
+	}{
+		Type:            request.Type,
+		Title:           request.Title,
+		ScopeDefinition: request.ScopeDefinition,
+		VisibilityHold:  visibilityHold,
+	})
 }
 
 type submitOutlineRequest struct {

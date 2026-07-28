@@ -33,7 +33,21 @@ type queryer interface {
 type stateScanner interface{ Scan(...any) error }
 
 func loadState(ctx context.Context, db queryer, workspaceID, artifactID foundation.ID, lock bool) (artifactapp.State, error) {
+	return loadStateWithVisibility(ctx, db, workspaceID, artifactID, lock, false)
+}
+
+func loadVisibleState(ctx context.Context, db queryer, workspaceID, artifactID foundation.ID) (artifactapp.State, error) {
+	return loadStateWithVisibility(ctx, db, workspaceID, artifactID, false, true)
+}
+
+func loadStateWithVisibility(ctx context.Context, db queryer, workspaceID, artifactID foundation.ID, lock, hideHeld bool) (artifactapp.State, error) {
 	sql := stateSelect + ` WHERE a.workspace_id=$1 AND a.id=$2 AND a.domain_schema_version='artifact/v1' AND r.domain_schema_version='artifact-revision/v1'`
+	if hideHeld {
+		sql += ` AND NOT EXISTS (
+			SELECT 1 FROM learning.artifact_visibility_hold h
+			WHERE h.workspace_id=a.workspace_id AND h.artifact_id=a.id
+		)`
+	}
 	if lock {
 		sql += ` FOR UPDATE OF a`
 	}

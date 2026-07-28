@@ -179,7 +179,23 @@ func (r *Repository) Create(ctx context.Context, record artifactapp.CreateRecord
 		if err := insertRevision(ctx, tx, record.State.Artifact.WorkspaceID, record.State.Revision); err != nil {
 			return artifactapp.CommandResult{}, err
 		}
-		return insertReceipt(ctx, tx, record.Binding, commandResult(record.State, record.Binding, nil, nil))
+		result, err := insertReceipt(ctx, tx, record.Binding, commandResult(record.State, record.Binding, nil, nil))
+		if err != nil {
+			return artifactapp.CommandResult{}, err
+		}
+		if record.VisibilityHold != nil {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO learning.artifact_visibility_hold(
+					workspace_id,artifact_id,owner_type,owner_id,owner_role,attempt_digest,created_at
+				) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+				string(record.State.Artifact.WorkspaceID), string(record.State.Artifact.ID),
+				string(record.VisibilityHold.OwnerType), string(record.VisibilityHold.OwnerID),
+				string(record.VisibilityHold.OwnerRole), record.VisibilityHold.AttemptDigest,
+				record.State.Artifact.CreatedAt.UTC()); err != nil {
+				return artifactapp.CommandResult{}, classify(err)
+			}
+		}
+		return result, nil
 	})
 }
 
@@ -298,12 +314,25 @@ func externalReservationMatches(ctx context.Context, tx pgx.Tx, binding artifact
 	return true, nil
 }
 
-// Get returns the v1 current revision, always constrained by Workspace.
-func (r *Repository) Get(ctx context.Context, workspaceID, artifactID foundation.ID) (artifactapp.State, error) {
+// GetCommandState returns the raw v1 state for command continuation, including
+// an Artifact that is still protected by a visibility hold.
+func (r *Repository) GetCommandState(ctx context.Context, workspaceID, artifactID foundation.ID) (artifactapp.State, error) {
 	if r == nil || r.db == nil {
 		return artifactapp.State{}, unavailable(errors.New("artifact repository is unavailable"))
 	}
 	state, err := loadState(ctx, r.db, workspaceID, artifactID, false)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return artifactapp.State{}, notFound(err)
+	}
+	return state, err
+}
+
+// Get returns a visible v1 current revision, always constrained by Workspace.
+func (r *Repository) Get(ctx context.Context, workspaceID, artifactID foundation.ID) (artifactapp.State, error) {
+	if r == nil || r.db == nil {
+		return artifactapp.State{}, unavailable(errors.New("artifact repository is unavailable"))
+	}
+	state, err := loadVisibleState(ctx, r.db, workspaceID, artifactID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return artifactapp.State{}, notFound(err)
 	}
@@ -318,7 +347,11 @@ func (r *Repository) List(ctx context.Context, query artifactapp.ListQuery) (art
 	if !validID(query.WorkspaceID) || query.Limit < 1 || query.Limit > 100 {
 		return artifactapp.ArtifactPage{}, requestInvalid(errors.New("artifact list query is invalid"))
 	}
-	sql := stateSelect + ` WHERE a.workspace_id=$1 AND a.domain_schema_version='artifact/v1' AND r.domain_schema_version='artifact-revision/v1'`
+	sql := stateSelect + ` WHERE a.workspace_id=$1 AND a.domain_schema_version='artifact/v1' AND r.domain_schema_version='artifact-revision/v1'
+		AND NOT EXISTS (
+			SELECT 1 FROM learning.artifact_visibility_hold h
+			WHERE h.workspace_id=a.workspace_id AND h.artifact_id=a.id
+		)`
 	args := []any{string(query.WorkspaceID)}
 	if query.After != nil {
 		args = append(args, query.After.UpdatedAt.UTC(), string(query.After.ID))
@@ -408,6 +441,13 @@ func validateCreateRecord(record artifactapp.CreateRecord) error {
 	}
 	if err := artifactapp.ValidateState(record.State); err != nil {
 		return requestInvalid(fmt.Errorf("artifact create state is invalid: %w", err))
+	}
+	if err := artifactapp.ValidateVisibilityHoldBinding(
+		record.VisibilityHold,
+		record.State.Artifact.Type,
+		record.Binding.IdempotencyKey,
+	); err != nil {
+		return err
 	}
 	return nil
 }
