@@ -15,6 +15,7 @@ import (
 	"time"
 
 	agentknowledge "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/knowledge"
+	agentmemory "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/memory"
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
 	agentretrieval "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/retrieval"
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
@@ -733,7 +734,17 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
-	agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository)
+	memoryRepository, err := memorypostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	memoryService, err := memoryapplication.NewService(memoryapplication.Dependencies{
+		Repository: memoryRepository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository, memoryService)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -890,16 +901,6 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 		return workerComponents{}, err
 	}
 	exportWorker, err := exportriver.NewWorker(exportService, fmt.Sprintf("worker:%s", workerID))
-	if err != nil {
-		return workerComponents{}, err
-	}
-	memoryRepository, err := memorypostgres.NewRepository(db)
-	if err != nil {
-		return workerComponents{}, err
-	}
-	memoryService, err := memoryapplication.NewService(memoryapplication.Dependencies{
-		Repository: memoryRepository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
-	})
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1154,7 +1155,7 @@ type agentWorkflowComponents struct {
 	capability agentCapabilityStatus
 }
 
-func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository) (agentWorkflowComponents, error) {
+func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service) (agentWorkflowComponents, error) {
 	if cfg.ChatProvider == config.ChatProviderDisabled {
 		return agentWorkflowComponents{capability: agentCapabilityStatus{code: agentworkflow.ErrorCodeCapabilityUnavailable}}, nil
 	}
@@ -1254,8 +1255,15 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
+	memoryOwner := memorydomain.SingleUserOwner()
+	memoryLoader, err := agentmemory.NewLoader(memoryService, memoryOwner)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
 	rag, err := agentworkflow.NewRAGWorkflowExecutor(agentworkflow.RAGWorkflowExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: repository, Context: conversationRepository,
+		Model: model, Catalog: catalog, Repository: repository, Snapshots: repository,
+		Memory: memoryLoader, MemoryOwner: agentapplication.MemoryOwnerRef{Kind: string(memoryOwner.Kind), ID: memoryOwner.ID},
+		Context: conversationRepository,
 		Search: retrievalAdapter, Retrieval: retrievalAdapter, Eligibility: knowledgePort, Topics: topicAdapter,
 		Finalizer: finalizer, Progress: progress, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
 		Budget: agentApplicationBudget(cfg),

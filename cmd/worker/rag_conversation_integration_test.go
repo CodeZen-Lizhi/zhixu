@@ -20,6 +20,7 @@ import (
 	"time"
 
 	agentknowledge "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/knowledge"
+	agentmemory "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/memory"
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
 	agentretrieval "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/retrieval"
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
@@ -36,6 +37,9 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
+	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
+	memoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
+	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
 	platformfilesystem "github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
@@ -142,6 +146,23 @@ func newRAGConversationIntegrationRuntime(t *testing.T, pool *pgxpool.Pool, mode
 	if err != nil {
 		t.Fatal(err)
 	}
+	memoryRepository, err := memorypostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryService, err := memoryapplication.NewService(memoryapplication.Dependencies{
+		Repository: memoryRepository,
+		IDs:        foundation.NewUUIDGenerator(nil),
+		Clock:      foundation.SystemClock{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryOwner := memorydomain.SingleUserOwner()
+	memoryLoader, err := agentmemory.NewLoader(memoryService, memoryOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
 	knowledgeRepository, err := knowledgepostgres.NewRepository(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -204,8 +225,10 @@ func newRAGConversationIntegrationRuntime(t *testing.T, pool *pgxpool.Pool, mode
 		t.Fatal(err)
 	}
 	ragExecutor, err := agentworkflow.NewRAGWorkflowExecutor(agentworkflow.RAGWorkflowExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: agentRepository, Context: conversationRepository,
-		Search: retrievalAdapter, Retrieval: retrievalAdapter, Eligibility: knowledgeAdapter, Topics: topicAdapter,
+		Model: model, Catalog: catalog, Repository: agentRepository, Snapshots: agentRepository,
+		Memory: memoryLoader, MemoryOwner: agentapplication.MemoryOwnerRef{Kind: string(memoryOwner.Kind), ID: memoryOwner.ID},
+		Context: conversationRepository,
+		Search:  retrievalAdapter, Retrieval: retrievalAdapter, Eligibility: knowledgeAdapter, Topics: topicAdapter,
 		Finalizer: finalizer, Progress: progress, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}, Budget: agentapplication.DefaultRunBudget(),
 	})
 	if err != nil {

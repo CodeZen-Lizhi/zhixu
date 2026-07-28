@@ -20,6 +20,9 @@ type RAGWorkflowExecutorDependencies struct {
 	Model       agentapplication.ChatModel
 	Catalog     *agentapplication.RuntimeCatalog
 	Repository  agentapplication.ModelRunRepository
+	Snapshots   agentapplication.RAGMemorySnapshotRepository
+	Memory      agentapplication.EffectiveMemoryLoader
+	MemoryOwner agentapplication.MemoryOwnerRef
 	Context     conversationapplication.QuestionExecutionContextLoader
 	Search      agentapplication.ScopedRetrievalPort
 	Retrieval   agentapplication.RetrievalPort
@@ -40,6 +43,8 @@ type RAGWorkflowExecutor struct {
 // NewRAGWorkflowExecutor 创建 retrieval-first、无 Tool Loop 的 RAG Workflow Executor。
 func NewRAGWorkflowExecutor(dependencies RAGWorkflowExecutorDependencies) (*RAGWorkflowExecutor, error) {
 	if nilDependency(dependencies.Model) || dependencies.Catalog == nil || nilDependency(dependencies.Repository) ||
+		nilDependency(dependencies.Snapshots) || nilDependency(dependencies.Memory) ||
+		!validExecutionID(dependencies.MemoryOwner.ID) || dependencies.MemoryOwner.Kind == "" ||
 		nilDependency(dependencies.Context) || nilDependency(dependencies.Search) || nilDependency(dependencies.Retrieval) ||
 		nilDependency(dependencies.Eligibility) || nilDependency(dependencies.Topics) || nilDependency(dependencies.Finalizer) ||
 		nilDependency(dependencies.Progress) || nilDependency(dependencies.IDs) || nilDependency(dependencies.Clock) {
@@ -93,14 +98,56 @@ func (executor *RAGWorkflowExecutor) Execute(ctx context.Context, execution work
 	if err != nil {
 		return workflowapplication.ExecutionResult{}, err
 	}
-	planInput, answerInput, err := buildRAGModelInputs(executionContext)
+	snapshotID, err := executor.dependencies.IDs.New()
 	if err != nil {
 		return workflowapplication.ExecutionResult{}, err
 	}
-
-	run, err := executor.createRAGModelRun(ctx, execution)
+	claimantID, err := executor.dependencies.IDs.New()
 	if err != nil {
 		return workflowapplication.ExecutionResult{}, err
+	}
+	snapshotStartedAt := executor.dependencies.Clock.Now().UTC().Truncate(time.Microsecond)
+	snapshot, claimed, err := executor.dependencies.Snapshots.BeginRAGMemorySnapshot(ctx, agentdomain.RAGMemorySnapshot{
+		ID: snapshotID, WorkspaceID: execution.WorkspaceID, WorkflowRunID: execution.RunID,
+		NodeRunID: execution.NodeRunID, NodeAttemptID: execution.NodeAttemptID, ClaimantID: claimantID,
+		OwnerKind: executor.dependencies.MemoryOwner.Kind, OwnerID: executor.dependencies.MemoryOwner.ID,
+		TaskScopeID: input.ConversationID, Status: agentdomain.RAGMemorySnapshotPreparing,
+		CreatedAt: snapshotStartedAt, UpdatedAt: snapshotStartedAt,
+	})
+	if err != nil {
+		return workflowapplication.ExecutionResult{}, err
+	}
+	if !claimed {
+		return workflowapplication.ExecutionResult{}, workflowError(foundation.ErrorManualRecoveryRequired, agentapplication.ErrorCodeMemorySnapshotConflict, false, errors.New("rag memory snapshot already exists for this node attempt"))
+	}
+	memoryQuery := agentapplication.EffectiveMemoryQuery{
+		WorkspaceID: execution.WorkspaceID, Owner: executor.dependencies.MemoryOwner,
+		TaskScopeID: input.ConversationID, Limit: agentdomain.MaxRAGMemoryContextItems,
+	}
+	memoryItems, err := executor.dependencies.Memory.Load(ctx, memoryQuery)
+	if err != nil {
+		return workflowapplication.ExecutionResult{}, executor.failRAGMemorySnapshot(ctx, snapshot, err)
+	}
+	memoryContext, err := agentapplication.BuildMemoryContextSnapshot(memoryQuery, memoryItems)
+	if err != nil {
+		return workflowapplication.ExecutionResult{}, executor.failRAGMemorySnapshot(ctx, snapshot, err)
+	}
+	planInput, answerInput, err := buildRAGModelInputs(executionContext, memoryContext.Context)
+	if err != nil {
+		return workflowapplication.ExecutionResult{}, executor.failRAGMemorySnapshot(ctx, snapshot, err)
+	}
+	run, err := executor.prepareRAGModelRun(execution, agentdomain.RAGMemoryContextRef{
+		SnapshotID: snapshot.ID, SchemaVersion: memoryContext.SchemaVersion, Digest: memoryContext.Digest,
+		ItemCount: memoryContext.ItemCount, ByteCount: memoryContext.ByteCount,
+	})
+	if err != nil {
+		return workflowapplication.ExecutionResult{}, executor.failRAGMemorySnapshot(ctx, snapshot, err)
+	}
+	run, err = executor.dependencies.Snapshots.FinalizeRAGMemorySnapshotAndCreateModelRun(ctx, agentapplication.FinalizeRAGMemorySnapshotCommand{
+		SnapshotID: snapshot.ID, ClaimantID: snapshot.ClaimantID, Context: run.MemoryContext, Run: run,
+	})
+	if err != nil {
+		return workflowapplication.ExecutionResult{}, workflowError(foundation.ErrorManualRecoveryRequired, ErrorCodeRunFinalizationUnknown, false, err)
 	}
 	proposal, executeErr, unknown := executor.executeRun(ctx, run, executionContext, planInput, answerInput)
 	if executeErr != nil {
@@ -123,7 +170,7 @@ func (executor *RAGWorkflowExecutor) Execute(ctx context.Context, execution work
 	return encodeRAGExecutionResult(receipt)
 }
 
-func (executor *RAGWorkflowExecutor) createRAGModelRun(ctx context.Context, execution workflowapplication.ExecutionContext) (agentdomain.ModelRun, error) {
+func (executor *RAGWorkflowExecutor) prepareRAGModelRun(execution workflowapplication.ExecutionContext, memoryContext agentdomain.RAGMemoryContextRef) (agentdomain.ModelRun, error) {
 	profile := DefaultProfileRef()
 	answerSchema := agentdomain.SchemaRef{ID: agentdomain.RAGAnswerSchemaID, Version: agentdomain.OutputSchemaVersionV2}
 	refusalSchema := agentdomain.SchemaRef{ID: agentdomain.RefusalSchemaID, Version: agentdomain.OutputSchemaVersionV1}
@@ -135,22 +182,35 @@ func (executor *RAGWorkflowExecutor) createRAGModelRun(ctx context.Context, exec
 	if err != nil {
 		return agentdomain.ModelRun{}, err
 	}
-	now := executor.dependencies.Clock.Now()
+	now := executor.dependencies.Clock.Now().UTC().Truncate(time.Microsecond)
 	run := agentdomain.ModelRun{
 		ID: runID, WorkspaceID: execution.WorkspaceID, WorkflowRunID: execution.RunID,
 		NodeRunID: execution.NodeRunID, NodeAttemptID: execution.NodeAttemptID,
 		Model: snapshot.Profile.Model, Profile: snapshot.Profile.Ref, Prompt: snapshot.Prompt.Ref,
 		Schema: snapshot.Schema.Ref, ReducedSchema: snapshot.ReducedSchema.Ref,
-		Status: agentdomain.ModelRunRunning, Version: 1, CreatedAt: now, UpdatedAt: now,
+		MemoryContext: memoryContext,
+		Status:        agentdomain.ModelRunRunning, Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
-	created, replayed, err := executor.dependencies.Repository.CreateModelRun(ctx, run)
-	if err != nil {
+	if err := agentdomain.ValidateModelRun(run); err != nil {
 		return agentdomain.ModelRun{}, err
 	}
-	if replayed || created.Status != agentdomain.ModelRunRunning || created.Version != 1 {
-		return agentdomain.ModelRun{}, workflowError(foundation.ErrorManualRecoveryRequired, ErrorCodeRunReplayUnsafe, false, errors.New("rag model run cannot be safely replayed"))
+	return run, nil
+}
+
+func (executor *RAGWorkflowExecutor) failRAGMemorySnapshot(ctx context.Context, snapshot agentdomain.RAGMemorySnapshot, cause error) error {
+	code := errorCode(cause)
+	if code == "" {
+		code = agentapplication.ErrorCodeMemoryContextUnavailable
 	}
-	return created, nil
+	failureContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), ragFinalizeTimeout)
+	defer cancel()
+	_, err := executor.dependencies.Snapshots.FailRAGMemorySnapshot(failureContext, agentapplication.FailRAGMemorySnapshotCommand{
+		SnapshotID: snapshot.ID, WorkspaceID: snapshot.WorkspaceID, ClaimantID: snapshot.ClaimantID, ErrorCode: code,
+	})
+	if err != nil {
+		return workflowError(foundation.ErrorManualRecoveryRequired, ErrorCodeRunFinalizationUnknown, false, errors.Join(cause, err))
+	}
+	return cause
 }
 
 func (executor *RAGWorkflowExecutor) executeRun(

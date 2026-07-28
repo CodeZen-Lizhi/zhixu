@@ -43,7 +43,9 @@ List(context.Context, ListQuery) (ArtifactPage, error)
 - Artifact、current Revision、状态和版本只能由 Artifact domain 状态机推进；Revision append-only，读取时重新验证
   Workspace、current pointer、revision number 和 canonical content hash。
 - 所有命令要求 `Idempotency-Key`；版本化命令要求正整数 `expected_version`。receipt 完整绑定 Workspace、Artifact、
-  command type、request hash 和 expected version，相同 binding 返回原响应并标记 replay，不同 binding 返回冲突。
+  command type、request hash 和 expected version，相同 binding 返回原响应并标记 replay，不同 binding 返回冲突。`PLAN`
+  例外地把 Artifact ID 视为服务端生成输出：请求 hash 固定后并发 loser 产生的随机候选 ID 不参与 replay identity；receipt 返回
+  winner 的 Artifact ID。所有后续 transition 仍必须精确绑定客户端目标 Artifact ID。
 - Repository 在读取 receipt 前，以 `workspace_id + ':' + idempotency_key` 取得 transaction-scoped advisory lock；
   乐观锁不能代替同 key 并发序列化。
 - Citation 输入只包含 Index/Chunk/Source Version/Source Span identity。Retrieval 返回的 full tuple 必须与请求一一对应，
@@ -70,6 +72,7 @@ List(context.Context, ListQuery) (ArtifactPage, error)
 | 未知/重复 JSON、非法 UUID/enum、缺 Idempotency-Key、非法 expected version | 400，依赖和外部副作用调用次数为 0 |
 | Workspace/Artifact/Revision/Export 绑定不匹配 | 404 防枚举，不返回跨 Workspace 数据 |
 | stale version、不同 receipt binding、pending reservation owner 不同 | 409，状态与 side fact 不变 |
+| 同 key/hash 的并发 PLAN 生成不同候选 Artifact ID | 一个 original、其余 exact replay winner；只存在一个 Artifact/receipt |
 | Export/Publish 状态非法或命令时间早于 current state | 请求失败，不创建 reservation，不调用外部依赖 |
 | Citation 伪造、跨 Workspace、span/hash/excerpt 漂移或非正式知识 | 请求失败，不写 Revision/receipt |
 | GAP 带正文或 Citation，非 Export/Publish 携带 side fact | 请求失败，Artifact、receipt、side fact、reservation 全部不变 |
@@ -87,7 +90,7 @@ List(context.Context, ListQuery) (ArtifactPage, error)
 ### 6. Tests Required
 
 - Domain/Application：完整状态序列、非法转换、Revision/hash、Coverage/GAP、receipt replay 和错误映射。
-- PostgreSQL：Workspace 隔离、CAS、同 key replay、不同 key race、六类非法 side-fact 组合、reservation owner/recovery/
+- PostgreSQL：Workspace 隔离、CAS、同 key replay、同 key/hash PLAN 不同候选 ID、不同 key race、六类非法 side-fact 组合、reservation owner/recovery/
   terminal close，使用 `-race -tags=integration -count=3 -p 1`。
 - Migration：00039-00043 空库 Up、重复 Up、Down-Up、CHECK/FK/trigger、guarded Down；只运行 Artifact 专属测试，
   不以其他里程碑的迁移测试替代。
@@ -105,4 +108,7 @@ Correct: reservation-aware probe -> 完整无副作用 Domain preflight -> durab
 
 Wrong: Workflow 显示 succeeded 就直接接受模型正文和 Citation。
 Correct: terminal hook 在 PostgreSQL 事务内校验 Model Run 与 output receipt，Application 再执行服务器证据复核和领域状态机。
+
+Wrong: 把 PLAN 调用内随机生成的候选 Artifact ID 当作客户端请求身份，导致同 key/hash 并发 loser 与 winner 冲突。
+Correct: PLAN receipt 以 Workspace/key/hash/command/version 识别请求并返回 winner ID；只有后续 transition 把 Artifact ID 纳入 identity。
 ```

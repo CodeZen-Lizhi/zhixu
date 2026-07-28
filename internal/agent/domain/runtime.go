@@ -101,6 +101,7 @@ type ModelRun struct {
 	Schema          SchemaRef
 	ReducedSchema   SchemaRef
 	Retrieval       RetrievalRef
+	MemoryContext   RAGMemoryContextRef
 	Status          ModelRunStatus
 	FinalResultType string
 	FinalErrorCode  string
@@ -121,6 +122,9 @@ func ValidateModelRun(run ModelRun) error {
 	retrievalBound := run.Retrieval.IsBound()
 	if retrievalBound && run.Retrieval.Validate() != nil {
 		return invalid(ErrorCodeModelRunInvalid, "model run retrieval snapshot is invalid")
+	}
+	if run.MemoryContext.IsBound() && run.MemoryContext.Validate() != nil {
+		return invalid(ErrorCodeModelRunInvalid, "model run memory context snapshot is invalid")
 	}
 	if !retrievalBound && run.Schema.ID != RAGAnswerSchemaID {
 		return invalid(ErrorCodeModelRunInvalid, "model run retrieval snapshot is required")

@@ -13,6 +13,7 @@ import (
 
 // DB 是 Agent Repository 所需的最小 pgx 边界。
 type DB interface {
+	Begin(context.Context) (pgx.Tx, error)
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
@@ -85,9 +86,10 @@ const insertModelRunSQL = `
 		prompt_template_id,prompt_template_version,output_schema_id,output_schema_version,
 		reduced_schema_id,reduced_schema_version,
 		retrieval_index_version_id,embedding_version_id,rerank_model_version,
+		memory_snapshot_id,memory_context_schema_version,memory_context_digest,memory_context_item_count,memory_context_bytes,
 		status,final_result_type,error_code,version,started_at,updated_at,completed_at
 	) VALUES(
-		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27
+		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
 	) ON CONFLICT DO NOTHING`
 
 func modelRunArgs(run domain.ModelRun) []any {
@@ -97,6 +99,8 @@ func modelRunArgs(run domain.ModelRun) []any {
 		run.Profile.ID, run.Profile.Version, run.Prompt.ID, run.Prompt.Version, run.Schema.ID, run.Schema.Version,
 		run.ReducedSchema.ID, run.ReducedSchema.Version,
 		optionalFoundationID(run.Retrieval.IndexVersionID), optionalID(run.Retrieval.EmbeddingVersionID), optionalText(run.Retrieval.RerankModelVersion),
+		optionalFoundationID(run.MemoryContext.SnapshotID), optionalText(run.MemoryContext.SchemaVersion), optionalText(run.MemoryContext.Digest),
+		optionalInt(run.MemoryContext.IsBound(), run.MemoryContext.ItemCount), optionalInt64(run.MemoryContext.IsBound(), run.MemoryContext.ByteCount),
 		string(run.Status), optionalText(run.FinalResultType), optionalText(run.FinalErrorCode), run.Version,
 		run.CreatedAt.UTC(), run.UpdatedAt.UTC(), optionalTime(run.CompletedAt),
 	}

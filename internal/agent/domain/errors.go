@@ -48,6 +48,10 @@ const (
 	ErrorCodeModelRunTransitionInvalid = "AGENT_MODEL_RUN_TRANSITION_INVALID"
 	// ErrorCodeModelCallTransitionInvalid 表示 Model Call 状态迁移不合法。
 	ErrorCodeModelCallTransitionInvalid = "AGENT_MODEL_CALL_TRANSITION_INVALID"
+	// ErrorCodeMemoryContextInvalid 表示 RAG Memory 非证据上下文或快照绑定不合法。
+	ErrorCodeMemoryContextInvalid = "AGENT_MEMORY_CONTEXT_INVALID"
+	// ErrorCodeMemorySnapshotInvalid 表示 Node Attempt 的 Memory 快照生命周期不合法。
+	ErrorCodeMemorySnapshotInvalid = "AGENT_MEMORY_SNAPSHOT_INVALID"
 	// ErrorCodeValidationExhausted 表示 INITIAL、REPAIR、REDUCED 均未得到合法输出。
 	ErrorCodeValidationExhausted = "VALIDATION_EXHAUSTED"
 )

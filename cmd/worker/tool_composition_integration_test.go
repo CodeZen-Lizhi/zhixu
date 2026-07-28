@@ -14,6 +14,9 @@ import (
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
+	memoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
@@ -188,13 +191,25 @@ func TestWorkerChatCompositionRegistersRelationAndRAGTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	memoryRepository, err := memorypostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryService, err := memoryapplication.NewService(memoryapplication.Dependencies{
+		Repository: memoryRepository,
+		IDs:        foundation.NewUUIDGenerator(nil),
+		Clock:      foundation.SystemClock{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Defaults()
 	cfg.ChatProvider = config.ChatProviderOpenAICompatible
 	cfg.ChatBaseURL = "http://127.0.0.1:11434/v1"
 	cfg.ChatModel = "composition-test"
 	cfg.ChatModelVersion = "composition-test-v1"
 
-	agent, err := newAgentWorkflowComponents(pool, cfg, workspaceRepository)
+	agent, err := newAgentWorkflowComponents(pool, cfg, workspaceRepository, memoryService)
 	if err != nil {
 		t.Fatal(err)
 	}

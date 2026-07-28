@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -14,7 +15,12 @@ import (
 
 func TestBuildRAGModelInputsUsesOnlyValidatedConversationFacts(t *testing.T) {
 	execution := validRAGExecutionContext(t)
-	plan, answer, err := buildRAGModelInputs(execution)
+	nonEvidence := agentapplication.NonEvidenceContext{
+		UntrustedData:   true,
+		UserPreferences: []json.RawMessage{json.RawMessage(`{"tone":"concise"}`)},
+		TaskContext:     []json.RawMessage{json.RawMessage(`{"goal":"prepare rollout"}`)},
+	}
+	plan, answer, err := buildRAGModelInputs(execution, nonEvidence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,8 +31,12 @@ func TestBuildRAGModelInputsUsesOnlyValidatedConversationFacts(t *testing.T) {
 	if err := json.Unmarshal(plan, &document); err != nil {
 		t.Fatal(err)
 	}
-	if document["question"] != execution.Question.Request.QuestionText || document["untrusted_data"] != true || document["answer_depth"] != "standard" {
+	if document["schema_version"] != float64(2) || document["question"] != execution.Question.Request.QuestionText || document["untrusted_data"] != true || document["answer_depth"] != "standard" {
 		t.Fatalf("document=%#v", document)
+	}
+	contextDocument, ok := document["non_evidence_context"].(map[string]any)
+	if !ok || contextDocument["untrusted_data"] != true || len(contextDocument["user_preferences"].([]any)) != 1 || len(contextDocument["task_context"].([]any)) != 1 {
+		t.Fatalf("non_evidence_context=%#v", document["non_evidence_context"])
 	}
 	encoded := string(plan)
 	for _, forbidden := range []string{string(execution.Question.Request.WorkspaceID), string(execution.Question.ID), execution.Question.ContextHash} {
@@ -39,9 +49,13 @@ func TestBuildRAGModelInputsUsesOnlyValidatedConversationFacts(t *testing.T) {
 func TestBuildRAGModelInputsRejectsContextHashDrift(t *testing.T) {
 	execution := validRAGExecutionContext(t)
 	execution.Question.ContextHash = ragInputHash('f')
-	if _, _, err := buildRAGModelInputs(execution); err == nil {
+	if _, _, err := buildRAGModelInputs(execution, emptyNonEvidenceContext()); err == nil {
 		t.Fatal("context hash drift was accepted")
 	}
+}
+
+func emptyNonEvidenceContext() agentapplication.NonEvidenceContext {
+	return agentapplication.NonEvidenceContext{UntrustedData: true, UserPreferences: []json.RawMessage{}, TaskContext: []json.RawMessage{}}
 }
 
 func validRAGExecutionContext(t *testing.T) conversationapplication.QuestionExecutionContext {

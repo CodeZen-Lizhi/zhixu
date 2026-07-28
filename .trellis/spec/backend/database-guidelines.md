@@ -1472,8 +1472,9 @@ Correct: 所有 lifecycle fence 使用 PostgreSQL 当前时间；统计 CAS 和 
 
 ### 1. Scope / Trigger
 
-- 修改 `learning.review_*`、`learning.interview_*`、`learning.learning_path*`、`learning.memory*`、Artifact visibility hold、迁移
-  `00035`、`00038`、`00044`–`00060`、Review/Interview/Memory PostgreSQL Repository 或相关 Worker maintenance 时应用。
+- 修改 `learning.review_*`、`learning.interview_*`、`learning.learning_path*`、`learning.memory*`、`agent.rag_memory_snapshot`、
+  Agent Model Run Memory tuple、Artifact visibility hold、迁移 `00035`、`00038`、`00044`–`00061`、Review/Interview/Memory
+  PostgreSQL Repository 或相关 Worker maintenance 时应用。
   `00056_m8_interview_provenance_shell_guard.sql` 保留 provenance shell guard，Completion reservation 只能由
   `00057_m8_interview_completion_reservation.sql` 追加；`00059` 强化 Interview Memory 完整性，`00060` 将 Path 升格为共享基表并保留
   `learning.interview_learning_path*` 可更新兼容视图。
@@ -1500,6 +1501,9 @@ Correct: 所有 lifecycle fence 使用 PostgreSQL 当前时间；统计 CAS 和 
   task scope 与数据库当前时间。
 - Interview Candidate identity：外层 `(workspace_id,idempotency_key)` 绑定完整 CREATE_CANDIDATE request hash；内层
   `(workspace_id,stable owner,source_type='INTERVIEW',source_ref)` 由 `00054` partial unique index 绑定一条语义 Candidate。
+- Conversation RAG snapshot identity：`(workspace_id,node_attempt_id)` 唯一；`PREPARING` claimant 绑定 Workflow/Node/Attempt、
+  stable owner 与 `task_scope_id=conversation_id`，`READY` 双向绑定一个 Model Run 和完整
+  `(snapshot_id,schema_version,digest,item_count,byte_count)` 审计 tuple，正文不持久化。
 
 ### 3. Contracts
 
@@ -1548,6 +1552,12 @@ Correct: 所有 lifecycle fence 使用 PostgreSQL 当前时间；统计 CAS 和 
   `00060` 的真实列名、command type 和非空 receipt 字段；在真实 PostgreSQL 契约验证前不得宣称该链路可运行。
 - Memory 表约束 Candidate insert、Confirm→ACTIVE、暂停/到期/删除与 append-only audit；读取 effective context 时在 SQL 根查询
   同时过滤 `status='ACTIVE'`、confirmation、expiry、Workspace、stable owner 和 task scope，禁止先全量读取再进程过滤。
+- `00061` 只对 `workflow.node_run.node_type='agent.rag-answer'` 的 Conversation RAG 强制完整 Memory tuple；不能仅凭
+  `model_run.output_schema_id='agent.rag-answer'` 判定，因为其他 Agent 节点可以复用该输出 schema。唯一 claimant 才能调用
+  `LoadEffective` 一次；`READY` snapshot、Model Run insert 与双向 binding 必须同事务先于 Provider，`PREPARING|FAILED` 或
+  `READY` 缺失 Model Run 均 fail closed 且不得重新加载。
+- Model Run scanner 当前读取 32 列。新增持久列时必须同步 `modelRunSelect`、insert args、replay equality，以及 recovery 的
+  手写 `UPDATE ... RETURNING` 列表；只修改公共 scanner 而漏掉 recovery 会让真实 stale-run 扫描在运行时失败。
 - Interview Candidate Repository 固定先锁客户端 command key，再锁 provenance。相同 key 的不同 hash 在取得 provenance 锁前
   冲突；不同 key 的等价 provenance 从原 CREATE_CANDIDATE receipt 恢复初始 Candidate snapshot，并为新 key 写绑定既有
   Memory ID 的 receipt。并发只能产生一条 Candidate 和一条 `CANDIDATE_CREATED` Audit；USER provenance 不参与该唯一化。
@@ -1567,6 +1577,9 @@ Correct: 所有 lifecycle fence 使用 PostgreSQL 当前时间；统计 CAS 和 
 | Interview Candidate 相同 key 绑定不同 request hash | provenance 副作用前 idempotency conflict；不产生第二 Candidate/Audit |
 | Interview Candidate 不同 key 绑定相同 provenance/内容 | 复用初始 Candidate snapshot 和 Memory ID；每个 key 持久化独立 receipt |
 | Memory source/owner 试图变更、Candidate 未确认、PAUSED/EXPIRED/DELETED | 触发器/Repository 拒绝变更或 effective query 排除 |
+| 同一 Node Attempt 已有 `PREPARING|READY|FAILED` snapshot | 非 claimant 不加载 Memory、不调用 Provider；返回稳定 manual recovery/conflict |
+| Conversation RAG Model Run 缺 Memory tuple，或非 Conversation 节点绑定 snapshot | CHECK/trigger `23514` 或 consistency failure；不得落部分审计事实 |
+| `00061` 存在 snapshot/绑定 Model Run 时 Down | SQLSTATE `55000`，迁移版本与双向审计事实保持不变 |
 | Interview Memory 的结构化 session/path/step 与 source_ref 或真实 Path chain 不一致 | `23514`；不允许靠猜测回填或留下悬空 Candidate |
 | Memory Audit version/owner/status 与 aggregate 不一致，或 action 不符合状态转换 | `23514`；aggregate 写入与唯一 Audit 必须一起成功或一起回滚 |
 | Shared Path origin/source shape、Review Answer/Artifact tuple 或 version transition 不一致 | CHECK/FK/trigger 拒绝；不得跨 origin 改型、编辑历史证据或重新打开终态 Path |
@@ -1575,7 +1588,8 @@ Correct: 所有 lifecycle fence 使用 PostgreSQL 当前时间；统计 CAS 和 
 ### 5. Good / Base / Bad Cases
 
 - Good：所有 learning root query 使用显式列、参数化 Workspace predicate、bounded keyset/limit；Card/Schedule、共享 Path、Interview
-  facts 和 Memory 各有单一 owner，兼容视图/投影只可转发、重建或观察；Complete 仅 release 精确 digest/Artifact 对应 hold。
+  facts 和 Memory 各有单一 owner，兼容视图/投影只可转发、重建或观察；Complete 仅 release 精确 digest/Artifact 对应 hold；
+  Conversation RAG 在 Provider 前持久化无正文 snapshot digest 与 Model Run binding。
 - Base：旧 Card 无法验证时被 quarantine；超时 Interview reservation 的 Artifact 留在 ORPHANED hidden hold；过期 Memory
   保留审计历史但不进入上下文。
 - Bad：`(evidence->>'claim_id')::uuid` 直接 cast、先生成公开 Artifact 再写 Interview、为 Review 再建一套 Path 表、用 Health Issue
@@ -1599,6 +1613,8 @@ Correct: 所有 lifecycle fence 使用 PostgreSQL 当前时间；统计 CAS 和 
   immutability、effective filter、expiry、双层幂等 exact/semantic replay、同 key 异请求冲突、并发每-key receipt/单 Candidate/Audit
   和跨 Workspace 拒绝；Review Answer→Path 的 frozen gap/citation、唯一 reservation、exact replay/CAS、Artifact hold/release、
   command type/expected version/response 字段及 24h maintenance。
+- `00061` / Agent PostgreSQL：Up/repeated Up、all-null/all-present tuple、Conversation node-type fence、唯一并发 claimant、
+  `PREPARING -> READY|FAILED`、Model Run 双向原子 binding、stale recovery scanner、业务数据 guarded Down 和 clean Down -> Up。
 - SQL review：所有 JSON 访问安全、无字符串拼接；检查 due/expiry/path 查询索引、无 N+1/逐条写入，以及 visibility release
   与 completion receipt 的失败顺序。
 
@@ -1619,4 +1635,10 @@ Correct: 先锁并校验客户端 key 的完整请求，再锁 INTERVIEW provena
 
 Wrong: 为 Review 另建 Path 表，或让 Repository 自定义 `00060` 不接受的列名、command type 和 receipt 形状。
 Correct: 两个 origin 共用 `learning.learning_path(_step)`；Interview 通过兼容视图，Review Repository 严格服从基表和 command/reservation 契约。
+
+Wrong: 只按 `output_schema_id='agent.rag-answer'` 强制 Memory，或给所有 Agent Model Run 全局注入 loader。
+Correct: 用持久 NodeRun 的 `node_type='agent.rag-answer'` 界定 Conversation RAG；只有该 composition 持有 loader/snapshot 依赖。
+
+Wrong: 给 Model Run 增列后只更新公共 SELECT/scanner，遗漏 recovery 的手写 `RETURNING`。
+Correct: scanner 列序、所有 SELECT/RETURNING、insert args 和 replay equality 在同一改动中更新并用真实 PostgreSQL recovery 覆盖。
 ```

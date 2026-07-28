@@ -60,6 +60,31 @@ func TestCommandReceiptRejectsTamperedResponseBinding(t *testing.T) {
 	}
 }
 
+func TestCommandReceiptTreatsPlanArtifactIDAsGeneratedOutput(t *testing.T) {
+	state := postgresTestState(t)
+	receipt := commandReceipt{
+		WorkspaceID: state.Artifact.WorkspaceID, ArtifactID: state.Artifact.ID,
+		IdempotencyKey: "concurrent-plan", RequestHash: strings.Repeat("a", 64),
+		CommandType: artifactapp.CommandPlan, ExpectedVersion: 0,
+	}
+	binding := artifactapp.CommandBinding{
+		WorkspaceID: receipt.WorkspaceID, ArtifactID: postgresTestID(9),
+		IdempotencyKey: receipt.IdempotencyKey, RequestHash: receipt.RequestHash,
+		CommandType: receipt.CommandType, ExpectedVersion: receipt.ExpectedVersion,
+	}
+	if err := receipt.matches(binding); err != nil {
+		t.Fatalf("exact PLAN replay rejected because its candidate Artifact ID differed: %v", err)
+	}
+
+	receipt.CommandType = artifactapp.CommandSubmitOutline
+	receipt.ExpectedVersion = 1
+	binding.CommandType = receipt.CommandType
+	binding.ExpectedVersion = receipt.ExpectedVersion
+	if err := receipt.matches(binding); err == nil {
+		t.Fatal("transition replay accepted a different Artifact ID")
+	}
+}
+
 func TestCoverageFromSectionsPreservesExplicitEmptyGaps(t *testing.T) {
 	sections := []domain.Section{{
 		Coverage: domain.Coverage{

@@ -25,13 +25,18 @@ func scanModelRun(row rowScanner) (domain.ModelRun, error) {
 	var profileID, profileVersion, promptID, promptVersion, schemaID, schemaVersion string
 	var reducedSchemaID, reducedSchemaVersion string
 	var indexVersionID, embeddingVersionID, rerankVersion, finalResultType, errorCode *string
+	var memorySnapshotID, memorySchemaVersion, memoryDigest *string
+	var memoryItemCount *int
+	var memoryBytes *int64
 	var status string
 	if err := row.Scan(
 		&id, &workspaceID, &workflowRunID, &nodeRunID, &nodeAttemptID,
 		&adapterName, &adapterVersion, &modelID, &modelVersion,
 		&profileID, &profileVersion, &promptID, &promptVersion, &schemaID, &schemaVersion,
 		&reducedSchemaID, &reducedSchemaVersion,
-		&indexVersionID, &embeddingVersionID, &rerankVersion, &status, &finalResultType, &errorCode,
+		&indexVersionID, &embeddingVersionID, &rerankVersion,
+		&memorySnapshotID, &memorySchemaVersion, &memoryDigest, &memoryItemCount, &memoryBytes,
+		&status, &finalResultType, &errorCode,
 		&run.Version, &run.CreatedAt, &run.UpdatedAt, &run.CompletedAt,
 	); err != nil {
 		return domain.ModelRun{}, err
@@ -52,6 +57,21 @@ func scanModelRun(row rowScanner) (domain.ModelRun, error) {
 	}
 	if rerankVersion != nil {
 		run.Retrieval.RerankModelVersion = *rerankVersion
+	}
+	if memorySnapshotID != nil {
+		run.MemoryContext.SnapshotID = foundation.ID(*memorySnapshotID)
+	}
+	if memorySchemaVersion != nil {
+		run.MemoryContext.SchemaVersion = *memorySchemaVersion
+	}
+	if memoryDigest != nil {
+		run.MemoryContext.Digest = *memoryDigest
+	}
+	if memoryItemCount != nil {
+		run.MemoryContext.ItemCount = *memoryItemCount
+	}
+	if memoryBytes != nil {
+		run.MemoryContext.ByteCount = *memoryBytes
 	}
 	run.Status = domain.ModelRunStatus(status)
 	if finalResultType != nil {
@@ -140,6 +160,7 @@ const modelRunSelect = `
 		prompt_template_id,prompt_template_version,output_schema_id,output_schema_version,
 		reduced_schema_id,reduced_schema_version,
 		retrieval_index_version_id::text,embedding_version_id::text,rerank_model_version,
+		memory_snapshot_id::text,memory_context_schema_version,memory_context_digest,memory_context_item_count,memory_context_bytes,
 		status,final_result_type,error_code,version,started_at,updated_at,completed_at
 	FROM agent.model_run`
 
@@ -156,7 +177,7 @@ const modelCallSelect = `
 func sameModelRunBinding(left, right domain.ModelRun) bool {
 	return left.WorkspaceID == right.WorkspaceID && left.WorkflowRunID == right.WorkflowRunID && left.NodeRunID == right.NodeRunID &&
 		left.NodeAttemptID == right.NodeAttemptID && left.Model == right.Model && left.Profile == right.Profile && left.Prompt == right.Prompt &&
-		left.Schema == right.Schema && left.ReducedSchema == right.ReducedSchema &&
+		left.Schema == right.Schema && left.ReducedSchema == right.ReducedSchema && left.MemoryContext == right.MemoryContext &&
 		sameRetrieval(left.Retrieval, right.Retrieval) && left.CreatedAt.Equal(right.CreatedAt)
 }
 
@@ -171,7 +192,8 @@ func sameModelRunCreateBinding(existing, requested domain.ModelRun) bool {
 func sameModelRunBindingWithoutRetrieval(left, right domain.ModelRun) bool {
 	return left.WorkspaceID == right.WorkspaceID && left.WorkflowRunID == right.WorkflowRunID && left.NodeRunID == right.NodeRunID &&
 		left.NodeAttemptID == right.NodeAttemptID && left.Model == right.Model && left.Profile == right.Profile && left.Prompt == right.Prompt &&
-		left.Schema == right.Schema && left.ReducedSchema == right.ReducedSchema && left.CreatedAt.Equal(right.CreatedAt)
+		left.Schema == right.Schema && left.ReducedSchema == right.ReducedSchema && left.MemoryContext == right.MemoryContext &&
+		left.CreatedAt.Equal(right.CreatedAt)
 }
 
 func sameRetrieval(left, right domain.RetrievalRef) bool {
@@ -229,6 +251,20 @@ func optionalTime(value *time.Time) any {
 		return nil
 	}
 	return value.UTC()
+}
+
+func optionalInt(bound bool, value int) any {
+	if !bound {
+		return nil
+	}
+	return value
+}
+
+func optionalInt64(bound bool, value int64) any {
+	if !bound {
+		return nil
+	}
+	return value
 }
 
 func sameTime(left, right *time.Time) bool {

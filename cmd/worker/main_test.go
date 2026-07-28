@@ -85,7 +85,7 @@ func TestNewWorkerComponentsRequiresDatabase(t *testing.T) {
 }
 
 func TestDisabledChatLeavesWorkerAgentCapabilityExplicitlyUnavailable(t *testing.T) {
-	components, err := newAgentWorkflowComponents(nil, config.Defaults(), nil)
+	components, err := newAgentWorkflowComponents(nil, config.Defaults(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestEnabledChatFailsClosedWithoutProductionDependencies(t *testing.T) {
 	cfg.ChatBaseURL = "http://127.0.0.1:11434/v1"
 	cfg.ChatModel = "composition-test"
 	cfg.ChatModelVersion = "composition-test-v1"
-	components, err := newAgentWorkflowComponents(nil, cfg, nil)
+	components, err := newAgentWorkflowComponents(nil, cfg, nil, nil)
 	if err == nil || components.relation != nil || components.rag != nil || components.capability.available {
 		t.Fatalf("components=%+v err=%v", components, err)
 	}

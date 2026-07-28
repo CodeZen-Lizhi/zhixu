@@ -31,17 +31,18 @@ type ragModelScope struct {
 }
 
 type ragModelInput struct {
-	SchemaVersion int                   `json:"schema_version"`
-	UntrustedData bool                  `json:"untrusted_data"`
-	Question      string                `json:"question"`
-	History       []ragModelHistoryTurn `json:"history"`
-	Scope         ragModelScope         `json:"scope"`
-	AnswerDepth   string                `json:"answer_depth"`
-	OutputFormat  string                `json:"output_format"`
+	SchemaVersion      int                                 `json:"schema_version"`
+	UntrustedData      bool                                `json:"untrusted_data"`
+	Question           string                              `json:"question"`
+	History            []ragModelHistoryTurn               `json:"history"`
+	Scope              ragModelScope                       `json:"scope"`
+	NonEvidenceContext agentapplication.NonEvidenceContext `json:"non_evidence_context"`
+	AnswerDepth        string                              `json:"answer_depth"`
+	OutputFormat       string                              `json:"output_format"`
 }
 
 // buildRAGModelInputs 只从已校验的 Conversation 执行上下文构造有界、不持久化的模型输入。
-func buildRAGModelInputs(execution conversationapplication.QuestionExecutionContext) ([]byte, []byte, error) {
+func buildRAGModelInputs(execution conversationapplication.QuestionExecutionContext, nonEvidence agentapplication.NonEvidenceContext) ([]byte, []byte, error) {
 	if err := conversationdomain.ValidateQuestion(execution.Question); err != nil ||
 		conversationdomain.ValidateAnswer(execution.Answer) != nil ||
 		execution.Answer.PublicationStatus != conversationdomain.AnswerPublicationPending ||
@@ -54,6 +55,9 @@ func buildRAGModelInputs(execution conversationapplication.QuestionExecutionCont
 	if err != nil || contextHash != execution.Question.ContextHash || throughOrdinal != execution.Question.ContextThroughOrdinal {
 		return nil, nil, workflowError(foundation.ErrorConsistencyViolation, ErrorCodeInputInvalid, false, errors.New("rag execution context hash is inconsistent"))
 	}
+	if err := agentapplication.ValidateNonEvidenceContext(nonEvidence); err != nil {
+		return nil, nil, err
+	}
 
 	history := make([]ragModelHistoryTurn, len(execution.History))
 	for index, turn := range execution.History {
@@ -64,7 +68,7 @@ func buildRAGModelInputs(execution conversationapplication.QuestionExecutionCont
 	}
 	scope := execution.Question.Request.Scope
 	payload := ragModelInput{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		UntrustedData: true,
 		Question:      execution.Question.Request.QuestionText,
 		History:       history,
@@ -78,12 +82,28 @@ func buildRAGModelInputs(execution conversationapplication.QuestionExecutionCont
 			AllowOriginalSources: scope.AllowOriginalSources,
 			AllowWeb:             scope.AllowWeb,
 		},
-		AnswerDepth:  string(execution.Question.Request.AnswerDepth),
-		OutputFormat: string(execution.Question.Request.OutputFormat),
+		NonEvidenceContext: cloneNonEvidenceContext(nonEvidence),
+		AnswerDepth:        string(execution.Question.Request.AnswerDepth),
+		OutputFormat:       string(execution.Question.Request.OutputFormat),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil || len(encoded) == 0 || len(encoded) > agentapplication.MaxStructuredInputBytes || bytes.IndexByte(encoded, 0) >= 0 {
 		return nil, nil, workflowError(foundation.ErrorNonRetryableFailure, ErrorCodeInputInvalid, false, errors.New("rag model input could not be encoded within the budget"))
 	}
 	return append([]byte(nil), encoded...), append([]byte(nil), encoded...), nil
+}
+
+func cloneNonEvidenceContext(value agentapplication.NonEvidenceContext) agentapplication.NonEvidenceContext {
+	clone := agentapplication.NonEvidenceContext{
+		UntrustedData:   true,
+		UserPreferences: make([]json.RawMessage, len(value.UserPreferences)),
+		TaskContext:     make([]json.RawMessage, len(value.TaskContext)),
+	}
+	for index := range value.UserPreferences {
+		clone.UserPreferences[index] = append(json.RawMessage(nil), value.UserPreferences[index]...)
+	}
+	for index := range value.TaskContext {
+		clone.TaskContext[index] = append(json.RawMessage(nil), value.TaskContext[index]...)
+	}
+	return clone
 }

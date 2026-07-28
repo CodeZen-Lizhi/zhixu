@@ -32,7 +32,7 @@ Card/Schedule 快照；显式 key 或 `required` 模式域隔离派生 key 可�
 `00049` 只将失效结果投影到既有 Health/Timeline 兼容链路，`review_card` 仍是生命周期唯一事实源，不能将其宣称为
 完整 Review Health/Impact。
 M8-03 补充独立 Interview Question/Turn/Report、Review/Interview 共享 Learning Path、Memory Candidate/Confirm 生命周期与
-Interview-scoped effective-context 过滤。`00059` 用结构化 session/path/step provenance、复合 FK、每步唯一 Candidate、
+effective-context 过滤。`00059` 用结构化 session/path/step provenance、复合 FK、每步唯一 Candidate、
 Audit aggregate/version 和 no-keepalive guard 强化 Memory/Completion；`00060` 将 `learning.learning_path(_step)` 设为
 唯一基表，保留 Interview 可更新兼容视图，并以 `INTERVIEW|REVIEW` origin/source shape、Review Answer 唯一绑定、command/
 reservation/hidden hold 与 retained-history trigger 保护共享 Path。
@@ -40,14 +40,18 @@ Interview 已交付难度 policy、`started_at + duration` deadline、连续追�
 Candidate 只能来自服务端已持久化 Path 步骤。Completion 采用 Begin/Prepare/Complete reservation：冻结 Session snapshot、
 pending reservation 阻止 Submit、在 Artifact hidden hold 创建事务内绑定 digest，final 事务核对并写 Report/Path/receipt 后
 release 精确 hold；Worker 在 24h 有界维护中将超时 reservation 转为 ABANDONED、hold 转为继续隐藏的 ORPHANED。本范围不
-物理删除恢复/审计资产。Interview Candidate 同时绑定客户端 key 的完整请求与服务端 provenance 的语义 identity。Memory
-effective context 的唯一生产消费者是 Interview loader；通用 Agent/Conversation/RAG 尚未接线。
+物理删除恢复/审计资产。Interview Candidate 同时绑定客户端 key 的完整请求与服务端 provenance 的语义 identity。
+Conversation RAG 现通过 Agent-owned loader 显式读取 global/Conversation-scoped effective Memory；`00061` 先按
+`node_attempt_id` 创建唯一 `PREPARING` snapshot claimant，再把 canonical non-evidence digest 与 Model Run 在同一事务闭合，
+正文不进入 snapshot、Model Run、Workflow input、事件或日志。Memory 只注入 `agent.rag-answer` Conversation 节点，Relation
+Assessment、Artifact Generation 和共享模型 factory 保持不注入；`last_used_at`、最近使用 UI 与类型转换仍未交付。
 Review-derived Path 已统一 `00060`、Repository 与 Domain/Application 契约；ABANDONED 仅允许原 key 按新 `attempt_no`
 重开，Artifact digest 冻结 source snapshot、完整规范化 Draft、renderer 元数据与 attempt，Prepare/Complete 和精确 hold
 release 都受 attempt fence 保护。API 在数据库依赖可用时组装真实
 Repository/Artifact bridge/Service/Handler，System Status 仅在 Review 与 Learning Path Handler 均可用时标记 ready；Worker
-在启动和周期维护中调用 Application-owned 24 小时有界策略。本轮 production build/vet、OpenAPI 与 Web 静态门禁已通过；
-按限制未执行测试、真实 PostgreSQL/API/Worker/Vite，因此不能把动态事务、并发与端到端行为写成已验证。
+在启动和周期维护中调用 Application-owned 24 小时有界策略。`00059/00060/00061` guarded Down、Review Path 并发/
+response-loss/ABANDONED 重开、Agent snapshot 原子绑定和 API/Worker production composition 已用隔离 PostgreSQL 动态验证；
+Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 
 ## 规范索引
 

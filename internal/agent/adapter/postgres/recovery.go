@@ -87,9 +87,11 @@ func (r *Repository) MarkStaleModelRunsUnknown(ctx context.Context, query applic
 		RETURNING run.id::text,run.workspace_id::text,run.workflow_run_id::text,run.node_run_id::text,run.node_attempt_id::text,
 			run.adapter_name,run.adapter_version,run.model_id,run.model_version,run.profile_id,run.profile_version,
 			run.prompt_template_id,run.prompt_template_version,run.output_schema_id,run.output_schema_version,
-			run.reduced_schema_id,run.reduced_schema_version,
-			run.retrieval_index_version_id::text,run.embedding_version_id::text,run.rerank_model_version,
-			run.status,run.final_result_type,run.error_code,run.version,run.started_at,run.updated_at,run.completed_at`,
+				run.reduced_schema_id,run.reduced_schema_version,
+				run.retrieval_index_version_id::text,run.embedding_version_id::text,run.rerank_model_version,
+				run.memory_snapshot_id::text,run.memory_context_schema_version,run.memory_context_digest,
+				run.memory_context_item_count,run.memory_context_bytes,
+				run.status,run.final_result_type,run.error_code,run.version,run.started_at,run.updated_at,run.completed_at`,
 		query.Before.UTC(), query.Limit, ErrorCodeModelRunResultUnknown, query.At.UTC())
 	if err != nil {
 		return nil, classify(err)

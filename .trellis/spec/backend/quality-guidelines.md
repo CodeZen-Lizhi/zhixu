@@ -479,8 +479,8 @@ Correct: 从真实 PostgreSQL/API/Worker/LocalFS/Audit/浏览器证明可恢复�
 
 ### 1. Scope / Trigger
 
-- 修改 `internal/review/**`、`internal/review/interview/**`、`internal/review/learningpath/**`、`internal/memory/**`、
-  `internal/platform/scheduler/**`、迁移 `00035`、`00038`、`00044`–`00060`、相关 HTTP/OpenAPI/Composition、Artifact
+- 修改 `internal/review/**`、`internal/review/interview/**`、`internal/review/learningpath/**`、`internal/memory/**`、`internal/agent/**`、
+  `internal/platform/scheduler/**`、迁移 `00035`、`00038`、`00044`–`00061`、相关 HTTP/OpenAPI/Composition、Artifact
   visibility hold、Worker expiry 或 M8 前端时应用。`00056` 保留 Interview provenance shell guard，`00057` 追加 Completion
   reservation，`00059` 强化 Memory 完整性，`00060` 建立 Review/Interview 共享 Path。
 - 该门禁覆盖 Review FSRS、共享 Learning Path 与 Interview/Memory 三条事实链；它们可以读取受控的正式知识和评分结果，
@@ -544,8 +544,12 @@ Correct: 从真实 PostgreSQL/API/Worker/LocalFS/Audit/浏览器证明可恢复�
   已持久化且非空的 legacy v1 digest 只有在由同一冻结 snapshot 精确重算匹配时才能恢复原 attempt；空 digest 和
   ABANDONED 重开不得降级生成 v1。
 - Memory effective context 只返回 ACTIVE、confirmed、unexpired、Workspace/owner/task-scope 匹配项，显式标记为个人
-  上下文，绝不充当 Citation/Evidence。当前唯一生产消费者是 Interview memory loader；通用 Agent/Conversation/RAG 没有接线。
+  上下文，绝不充当 Citation/Evidence。Interview 与 Conversation RAG 各自持有窄 loader；RAG 用 Conversation ID 作为 task
+  scope，并在唯一 Node Attempt claimant 内加载一次。Relation Assessment、Artifact Generation 与共享 ChatModel/Runner 不注入。
   用户 HTTP 固定 `USER/user:manual`，不能伪造 AGENT/INTERVIEW source。
+- Conversation RAG 的 canonical `non_evidence_context` 使用 schema v2，空数组也产生稳定 digest；`00061` 在首个 Provider 调用前
+  原子闭合 READY snapshot 与 Model Run tuple。数据库强制边界来自 NodeRun type，不来自可复用的 output schema；所有 Model Run
+  scanner/硬编码 recovery `RETURNING` 必须同步新增列。
 - Interview Candidate 使用双层幂等：`learning.memory_command` 先将 Workspace + 客户端 key 绑定完整 Candidate 请求，
   再以 stable owner + `INTERVIEW` source_ref 收敛同一步骤的语义 identity。相同 key 换步骤/内容必须在副作用前冲突；
   不同 key 的等价步骤请求复用同一 Candidate，只新增各自 receipt，不新增 Candidate/Audit。公开 `replayed=true/200`
@@ -569,16 +573,18 @@ Correct: 从真实 PostgreSQL/API/Worker/LocalFS/Audit/浏览器证明可恢复�
 | INTERVIEW Memory 的结构化 provenance、source_ref、Path origin 或 Audit aggregate/version 漂移 | CHECK/FK/trigger fail closed；不生成悬空 Candidate 或伪造 Audit |
 | Review Path Handler 的 service 未装配 | 返回依赖不可用，不把路由存在或前端页面存在解释为业务成功 |
 | Review Path Repository 与 `00060` 的列、command enum、expected_version、snapshot/digest 或 Artifact tuple 不一致 | 真实 PostgreSQL 门禁失败；不得通过 mock/静态 build 宣称持久化闭环 |
-| 通用 Agent/RAG 尝试读取 Memory，但没有显式 loader/composition | 该能力保持未交付；不得从 Interview 接线外推为全局上下文能力 |
+| Conversation RAG 缺显式 loader/snapshot composition | capability unavailable；不允许静默空上下文或调用 Provider |
+| 同一 Node Attempt 的并发/恢复执行看到既有 snapshot | loader 与 Provider 调用均为 0；进入稳定 manual recovery/conflict |
+| Memory 含事实、工具指令或伪 Citation ID | 仍只在 `non_evidence_context`；不得进入 Evidence/Citation/Eligibility/Faithfulness approved facts |
 
 ### 5. Good / Base / Bad Cases
 
 - Good：Review 与 Interview 各自保存 receipt 和状态机；Memory 由受控 writer 生成 Candidate、用户 Confirm 后才进入
   Interview context；共享 Path 的 origin/source binding 明确，且只有真实 Service/Repository/maintenance 全部接线后才暴露
-  Review Path capability；`00049` 只作为可观察兼容投影。
+  Review Path capability；Conversation RAG 的唯一 claimant 在 Provider 前冻结无正文审计摘要；`00049` 只作为可观察兼容投影。
 - Base：Scorer、Artifact 或 Memory 依赖不可用时返回明确 Problem，原有事实不前进，页面通过 REST/SSE 重新读取。
 - Bad：把 Interview Turn 送入 Review Answer、因 due SQL 的旧 JSON cast 失败整页 500、浏览器指定 INTERVIEW provenance，
-  把 Interview-only Memory loader 宣称为通用 Agent 注入、以 nil-service 路由/前端代码冒充 Review Path 已交付，或把
+  把 Conversation RAG Memory loader 扩散为通用 Agent 注入、以 nil-service 路由/前端代码冒充 Review Path 已交付，或把
   Health/Timeline 投影宣称为完整 Impact。
 
 ### 6. Tests Required
@@ -596,6 +602,9 @@ Correct: 从真实 PostgreSQL/API/Worker/LocalFS/Audit/浏览器证明可恢复�
 - `00059/00060`：结构化 Interview Memory provenance/FK/每步唯一 Candidate、Audit aggregate/version/action matrix、completion/path
   reservation no-keepalive、共享基表/兼容视图、origin shape、Review Answer/Artifact 唯一 binding、Path/Step retained history、
   Review command/reservation/hold、真实 Repository SQL 列/枚举/必填字段与 guarded Down。
+- Conversation RAG / `00061`：effective Memory 正反例、canonical digest 绑定 scope/identity/version/type/content、loader failure 与
+  empty 区分、same-attempt 唯一 claimant、多阶段单次输入、READY+Model Run 原子 binding、Relation/Artifact 零注入、migration/
+  Repository/recovery 真实 PostgreSQL 与 guarded Down。
 - HTTP/OpenAPI/Browser：Capability/CSRF/Origin、严格 decoder、脱敏 due、Interview/Path 恢复、用户 source 字段拒绝、
   Review Answer→Path 创建/恢复/状态与步骤命令、`review.*`/`learning_path.*`/`interview.*`/`memory.*` SSE invalidation；
   Composition 测试必须证明 Handler 持有真实 Service，Worker/maintenance 调用可达。最终门禁前还需独立 Go、SQL、通用审查和
@@ -615,4 +624,7 @@ Correct: 客户端 key 绑定完整请求，INTERVIEW provenance 绑定语义 Ca
 
 Wrong: 看到 Review Path 的 Handler、Web 页面和 Store 文件存在，就把 API 与 24h maintenance 标成已交付。
 Correct: 先证明 `00060` 与 Repository SQL 一致、Composition 注入真实 Service/Artifact bridge、maintenance 有生产调用，再登记运行能力。
+
+Wrong: 在共享 ChatModel 外包一层 Memory，或 recovery 时对同一 attempt 重新执行 effective query。
+Correct: 只由 Conversation RAG executor 显式 claim snapshot；唯一 claimant 加载一次并让 PLAN/INITIAL/REPAIR/REDUCED/REVIEW 复用同一输入。
 ```

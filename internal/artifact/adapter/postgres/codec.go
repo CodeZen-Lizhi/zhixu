@@ -292,7 +292,13 @@ func loadReceipt(ctx context.Context, db receiptDB, workspaceID foundation.ID, k
 }
 
 func (receipt commandReceipt) matches(binding artifactapp.CommandBinding) error {
-	if receipt.WorkspaceID != binding.WorkspaceID || receipt.IdempotencyKey != binding.IdempotencyKey || receipt.RequestHash != binding.RequestHash || receipt.CommandType != binding.CommandType || receipt.ExpectedVersion != binding.ExpectedVersion || (binding.ArtifactID != "" && receipt.ArtifactID != binding.ArtifactID) {
+	artifactMismatch := binding.ArtifactID != "" && receipt.ArtifactID != binding.ArtifactID
+	if binding.CommandType == artifactapp.CommandPlan {
+		// PLAN generates ArtifactID after the request identity is fixed. A concurrent
+		// loser must replay the winner even if it generated a different candidate ID.
+		artifactMismatch = false
+	}
+	if receipt.WorkspaceID != binding.WorkspaceID || receipt.IdempotencyKey != binding.IdempotencyKey || receipt.RequestHash != binding.RequestHash || receipt.CommandType != binding.CommandType || receipt.ExpectedVersion != binding.ExpectedVersion || artifactMismatch {
 		return idempotencyConflict(errors.New("artifact idempotency key is bound to another request"))
 	}
 	return nil
