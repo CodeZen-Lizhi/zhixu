@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 32
-- **Last Active**: 2026-07-26
+- **Total Sessions**: 33
+- **Last Active**: 2026-07-28
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1505 | Active |
+| `journal-1.md` | ~1545 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 33 | 2026-07-28 | 完成 M8-02 Review/FSRS 与 M8-03 Interview/Memory | `002c2b5`, `c66cfbf`, `35439b3` | `dev` |
 | 32 | 2026-07-26 | 完成 M8-01 Artifact 产物闭环 | `0852a4f` | `-` |
 | 31 | 2026-07-26 | 收口 M7-04 Knowledge Timeline 与 Impact Analysis | `5cd940b` | `dev` |
 | 30 | 2026-07-23 | 完成 M9 业务前端与统一 SSE 交付 | `d84829e`, `f89acec` | `dev` |

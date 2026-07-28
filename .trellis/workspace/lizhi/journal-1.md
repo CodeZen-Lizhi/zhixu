@@ -1503,3 +1503,43 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 33: 完成 M8-02 Review/FSRS 与 M8-03 Interview/Memory
+
+**Date**: 2026-07-28
+**Task**: 完成 M8-02 Review/FSRS 与 M8-03 Interview/Memory
+**Branch**: `dev`
+
+### Summary
+
+完成 Review Deck/Card、可信评分与冻结 scorer/FSRS、HMAC question_ref、原子 Answer/Schedule、失效与 legacy quarantine；完成证据驱动 Interview、难度/deadline/连续追问、SKIPPED gap/path、Learning Path、Memory 生命周期，以及 Completion reservation/digest hidden hold 和 24h ABANDONED/ORPHANED Worker。本轮拆分为三笔 M8 工作提交，并补齐 PostgreSQL、race、前端测试及真实 API/Worker/Vite 浏览器动态验证；两个 M8 子任务已归档，M9/M10 与运行时并行改动保持未提交。
+
+### Main Changes
+
+- 交付 Review Deck/Card、服务端可信评分、冻结 scorer/FSRS version、HMAC `question_ref`、Answer/Schedule/receipt 原子推进、失效与 legacy quarantine。
+- 交付证据驱动 Interview、难度/deadline/连续追问、SKIPPED gap/path、Learning Path、Memory 生命周期和 effective context。
+- 以 Completion reservation、digest hidden hold 与 24 小时 ABANDONED/ORPHANED Worker 收口跨模块完成态，并同步 OpenAPI、Web、规范与任务文档。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `002c2b5` | `feat(m8): 完成 Review 与 FSRS 学习闭环` |
+| `c66cfbf` | `feat(m8): 完成 Interview、Memory 与共享学习路径` |
+| `35439b3` | `feat(m8): 接入学习 API、Worker 与 Web 路由` |
+
+### Testing
+
+- Review、Interview、Memory 的真实 PostgreSQL 集成验证通过；M8/Review 迁移 race 验证通过。
+- Web 69/69 个测试文件、746/746 个测试通过；OpenAPI、类型检查、构建与 staged whitespace 校验通过。
+- 真实 API、Worker、Vite 在桌面与 `390x844` 视口的浏览器主链路 smoke 通过。
+- `00059/00060` 业务数据 Down guard、Review Path reservation/hold 专门并发和 ABANDONED 重开仍是动态验证盲区。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
