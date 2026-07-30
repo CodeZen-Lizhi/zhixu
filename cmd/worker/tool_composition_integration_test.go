@@ -13,6 +13,8 @@ import (
 	"time"
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
+	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	artifactworkflow "github.com/CodeZen-Lizhi/zhixu/internal/artifact/workflow"
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
@@ -203,6 +205,27 @@ func TestWorkerChatCompositionRegistersRelationAndRAGTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	disabledWorker, err := newWorkerComponents(pool, config.Defaults(), slog.New(slog.NewTextHandler(io.Discard, nil)), observability.NewMemoryMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabledWorker.artifact.generation == nil || disabledWorker.artifact.terminal == nil || disabledWorker.artifact.executor != nil || disabledWorker.artifact.catalog != nil || disabledWorker.artifact.capability.available || disabledWorker.artifact.capability.code != artifactworkflow.ErrorCodeCapabilityUnavailable {
+		t.Fatalf("disabled artifact components=%+v", disabledWorker.artifact)
+	}
+	if !artifactWorkflowReadiness(disabledWorker) {
+		t.Fatal("disabled Artifact composition is not ready")
+	}
+	disabledCatalogLeak := disabledWorker
+	disabledCatalogLeak.artifact.catalog = agentapplication.NewRuntimeCatalog()
+	if artifactWorkflowReadiness(disabledCatalogLeak) {
+		t.Fatal("disabled Artifact readiness accepted a registered runtime catalog")
+	}
+	if _, err := disabledWorker.executors.Resolve(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion); err == nil {
+		t.Fatal("disabled Chat unexpectedly registered the Artifact executor")
+	}
+	if _, err := disabledWorker.definitions.Resolve(artifactworkflow.DefinitionKey, artifactworkflow.DefinitionVersion); err == nil {
+		t.Fatal("disabled Chat unexpectedly registered the Artifact definition")
+	}
 	cfg := config.Defaults()
 	cfg.ChatProvider = config.ChatProviderOpenAICompatible
 	cfg.ChatBaseURL = "http://127.0.0.1:11434/v1"
@@ -227,6 +250,20 @@ func TestWorkerChatCompositionRegistersRelationAndRAGTogether(t *testing.T) {
 	if _, err := worker.executors.Resolve(agentworkflow.RAGWorkflowNodeKind, agentworkflow.RAGWorkflowInputSchemaVersion); err != nil {
 		t.Fatalf("RAG executor is unreachable: %v", err)
 	}
+	if worker.artifact.generation == nil || worker.artifact.terminal == nil || worker.artifact.executor == nil || worker.artifact.catalog == nil || !worker.artifact.capability.available || worker.artifact.capability.code != "" {
+		t.Fatalf("enabled artifact components=%+v", worker.artifact)
+	}
+	if !artifactWorkflowReadiness(worker) {
+		t.Fatal("enabled Artifact composition is not ready")
+	}
+	enabledWithoutCatalog := worker
+	enabledWithoutCatalog.artifact.catalog = nil
+	if artifactWorkflowReadiness(enabledWithoutCatalog) {
+		t.Fatal("enabled Artifact readiness accepted a missing runtime catalog")
+	}
+	if _, err := worker.executors.Resolve(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion); err != nil {
+		t.Fatalf("Artifact executor is unreachable: %v", err)
+	}
 	if _, err := worker.executors.Resolve(changecontrolworkflow.SafeWritebackNodeKind, changecontrolworkflow.SafeWritebackBootstrapInputSchemaVersion); err != nil {
 		t.Fatalf("Safe Writeback executor regressed: %v", err)
 	}
@@ -235,6 +272,9 @@ func TestWorkerChatCompositionRegistersRelationAndRAGTogether(t *testing.T) {
 	}
 	if _, err := worker.definitions.Resolve(agentworkflow.RAGWorkflowDefinitionKey, agentworkflow.RAGWorkflowDefinitionVersion); err != nil {
 		t.Fatalf("RAG definition is unreachable: %v", err)
+	}
+	if _, err := worker.definitions.Resolve(artifactworkflow.DefinitionKey, artifactworkflow.DefinitionVersion); err != nil {
+		t.Fatalf("Artifact definition is unreachable: %v", err)
 	}
 	if _, err := worker.executors.Resolve(toolworkflow.NodeKind, toolworkflow.InputSchemaVersion); err == nil {
 		t.Fatal("disabled Tool runtime unexpectedly registered the Tool executor")

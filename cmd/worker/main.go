@@ -56,6 +56,8 @@ import (
 	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
 	memoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
+	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
+	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
@@ -246,7 +248,45 @@ func run(configPath string, logger *slog.Logger) error {
 		logger.Error("worker River schema validation failed", "error_code", "WORKFLOW_RIVER_MIGRATION_INVALID")
 		return validationErr
 	}
-	components, err := newWorkerComponents(database.DB(), cfg, logger, telemetry.Metrics())
+	var managedModels modelsettingsruntime.BootstrapResult
+	var modelEnqueueFences []riveradapter.EnqueueFence
+	var configuredModels *modelsettingsruntime.Models
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg)
+		managedModels = bootstrap
+		if bootstrap.Repository != nil {
+			modelEnqueueFences = append(modelEnqueueFences, bootstrap.Repository)
+		}
+		configuredModels = bootstrap.Loaded.Models
+		if bootstrap.KeyError != nil {
+			logger.Warn("model settings key is unavailable", "error_code", modelsettingsdomain.ErrorCodeSecretUnavailable)
+		}
+		if bootstrapErr != nil {
+			logger.Warn("managed model revision is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
+			if cfg.ModelSettingsRolloutID != "" || bootstrap.Service == nil || bootstrap.Loaded.Models == nil {
+				return bootstrapErr
+			}
+		}
+	} else {
+		loaded, modelsErr := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil)
+		if modelsErr != nil {
+			return modelsErr
+		}
+		configuredModels = loaded.Models
+	}
+	if configuredModels == nil {
+		fallback, fallbackErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()})
+		if fallbackErr != nil {
+			return fallbackErr
+		}
+		configuredModels = fallback
+	}
+	modelBinding, err := newWorkerModelRuntimeBinding(cfg.ModelSettingsMode, configuredModels, foundation.NewUUIDGenerator(nil))
+	if err != nil {
+		return err
+	}
+	cfg = modelsettingsruntime.WithoutModelCredentials(cfg)
+	components, err := newWorkerComponentsWithModels(database.DB(), cfg, configuredModels, modelBinding, logger, telemetry.Metrics(), modelEnqueueFences...)
 	if err != nil {
 		logger.Error("worker components are unavailable", "error_code", "WORKER_COMPONENTS_UNAVAILABLE")
 		return err
@@ -268,17 +308,65 @@ func run(configPath string, logger *slog.Logger) error {
 		return err
 	}
 
-	controller, err := newLifecycleController(components.runtimeClient, components.dispatcher)
+	lifecycle, err := newLifecycleController(components.runtimeClient, components.dispatcher)
 	if err != nil {
 		_ = health.server.Close()
 		return err
 	}
 	processContext, cancelProcess := context.WithCancel(context.Background())
 	defer cancelProcess()
+	modelDrain, err := newWorkerModelDrain(
+		components.dispatcher,
+		processContext,
+		func(ctx context.Context) (int64, error) {
+			return riveradapter.RunningJobCount(ctx, database.DB(), cfg.WorkerQueue)
+		},
+		readiness.SetReindexDispatcherStarted,
+	)
+	if err != nil {
+		_ = health.server.Close()
+		return err
+	}
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	if err := controller.Start(processContext); err != nil {
+	modelRuntimeErr := make(chan error, 1)
+	var modelController *modelsettingsruntime.Controller
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		if managedModels.Service == nil || modelBinding.instanceID == nil {
+			_ = health.server.Close()
+			return errors.New("managed model runtime registration is unavailable")
+		}
+		modelController, err = modelsettingsruntime.NewController(modelsettingsruntime.ControllerOptions{
+			Service: managedModels.Service, Role: modelsettingsdomain.RuntimeRoleWorker, InstanceID: *modelBinding.instanceID, Loaded: managedModels.Loaded,
+			Drain: modelDrain.Hooks(),
+		})
+		if err != nil {
+			_ = health.server.Close()
+			return err
+		}
+		go func() {
+			if runErr := modelController.Run(processContext); runErr != nil {
+				modelRuntimeErr <- runErr
+			}
+		}()
+		select {
+		case <-modelController.Active():
+		case runErr := <-modelRuntimeErr:
+			_ = health.server.Close()
+			return runErr
+		case received := <-signals:
+			logger.Info("worker stopping before model activation", "signal", received.String())
+			_ = health.server.Shutdown(context.Background())
+			return nil
+		case healthErr := <-health.errors:
+			if healthErr == nil {
+				healthErr = errors.New("worker health server stopped unexpectedly")
+			}
+			return healthErr
+		}
+	}
+	if err := lifecycle.Start(processContext); err != nil {
 		readiness.BeginShutdown()
 		_ = health.server.Close()
 		logger.Error("workflow runtime could not be started", "error_code", "WORKFLOW_RIVER_CLIENT_START_FAILED")
@@ -353,6 +441,11 @@ func run(configPath string, logger *slog.Logger) error {
 			runErr = fatalErr
 			logger.Error("worker runtime fatal invariant", "error_code", "WORKER_FATAL_INVARIANT")
 			goto shutdown
+		case runtimeErr := <-modelRuntimeErr:
+			shutdownMode = shutdownEmergency
+			runErr = runtimeErr
+			logger.Error("model runtime ownership was lost", "error_code", modelsettingsdomain.ErrorCodeRuntimeConflict)
+			goto shutdown
 		case <-ticker.C:
 			if err := ping(database, cfg.DatabasePingTimeout); err != nil {
 				readiness.SetDatabaseOK(false)
@@ -365,6 +458,9 @@ func run(configPath string, logger *slog.Logger) error {
 				cancelMetric()
 				if metricErr != nil {
 					logger.Warn("worker queue depth metric failed", "error_code", "WORKER_QUEUE_METRIC_FAILED")
+				}
+				if !modelDrain.ProducersEnabled() {
+					continue
 				}
 				if components.healthSchedule != nil {
 					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
@@ -421,7 +517,7 @@ shutdown:
 	readiness.SetReindexDispatcherStarted(false)
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), cfg.WorkerHardStopTimeout)
 	defer cancelShutdown()
-	if err := controller.Shutdown(shutdownContext, shutdownMode); err != nil && runErr == nil {
+	if err := lifecycle.Shutdown(shutdownContext, shutdownMode); err != nil && runErr == nil {
 		runErr = err
 	}
 	readiness.SetRiverStarted(false)
@@ -429,7 +525,7 @@ shutdown:
 		runErr = err
 	}
 	if errors.Is(shutdownContext.Err(), context.DeadlineExceeded) {
-		if err := recordShutdownMetric(telemetry.Metrics(), controller.Mode(), "failure"); err != nil {
+		if err := recordShutdownMetric(telemetry.Metrics(), lifecycle.Mode(), "failure"); err != nil {
 			logger.Warn("worker shutdown metric failed", "error_code", "WORKER_METRIC_RECORD_FAILED")
 		}
 		logger.Error("worker hard shutdown deadline exceeded", "error_code", "WORKER_HARD_SHUTDOWN_TIMEOUT")
@@ -439,7 +535,7 @@ shutdown:
 	if runErr != nil {
 		result = "failure"
 	}
-	if err := recordShutdownMetric(telemetry.Metrics(), controller.Mode(), result); err != nil {
+	if err := recordShutdownMetric(telemetry.Metrics(), lifecycle.Mode(), result); err != nil {
 		logger.Warn("worker shutdown metric failed", "error_code", "WORKER_METRIC_RECORD_FAILED")
 	}
 	if err := telemetry.Shutdown(shutdownContext); err != nil && runErr == nil {
@@ -586,9 +682,78 @@ func runLearningPathMaintenance(ctx context.Context, logger *slog.Logger, servic
 	}
 }
 
-func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logger, metrics observability.Metrics) (workerComponents, error) {
+func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logger, metrics observability.Metrics, enqueueFences ...riveradapter.EnqueueFence) (workerComponents, error) {
+	models, err := modelRuntimeForComposition(cfg)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	return newWorkerComponentsWithModels(db, cfg, models, workerModelRuntimeBinding{}, logger, metrics, enqueueFences...)
+}
+
+type workerModelRuntimeBinding struct {
+	revision   *int64
+	instanceID *foundation.ID
+}
+
+func newWorkerModelRuntimeBinding(mode config.ModelSettingsMode, models *modelsettingsruntime.Models, ids foundation.IDGenerator) (workerModelRuntimeBinding, error) {
+	if mode == config.ModelSettingsModeStatic {
+		return workerModelRuntimeBinding{}, nil
+	}
+	if mode != config.ModelSettingsModeManaged || models == nil || models.Revision() < 0 || ids == nil {
+		return workerModelRuntimeBinding{}, errors.New("managed worker model runtime binding is invalid")
+	}
+	instanceID, err := ids.New()
+	if err != nil {
+		return workerModelRuntimeBinding{}, err
+	}
+	parsed, err := foundation.ParseID(string(instanceID))
+	if err != nil || parsed != instanceID {
+		return workerModelRuntimeBinding{}, errors.New("managed worker model runtime instance is invalid")
+	}
+	revision := models.Revision()
+	return workerModelRuntimeBinding{revision: &revision, instanceID: &instanceID}, nil
+}
+
+func (binding workerModelRuntimeBinding) runtimeWorkerOptions() []riveradapter.RuntimeWorkerOptions {
+	if binding.revision == nil && binding.instanceID == nil {
+		return nil
+	}
+	return []riveradapter.RuntimeWorkerOptions{{ModelSettingsRevision: binding.revision, ModelRuntimeInstanceID: binding.instanceID}}
+}
+
+func modelRuntimeForComposition(cfg config.Config, supplied ...*modelsettingsruntime.Models) (*modelsettingsruntime.Models, error) {
+	if len(supplied) > 1 {
+		return nil, errors.New("composition accepts at most one frozen model runtime")
+	}
+	if len(supplied) == 1 {
+		if supplied[0] == nil {
+			return nil, errors.New("frozen model runtime is nil")
+		}
+		return supplied[0], nil
+	}
+	if cfg.ModelSettingsMode != config.ModelSettingsModeStatic {
+		return nil, errors.New("managed composition requires a prepared model runtime")
+	}
+	loaded, err := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil)
+	if err != nil {
+		return nil, err
+	}
+	return loaded.Models, nil
+}
+
+func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *modelsettingsruntime.Models, modelBinding workerModelRuntimeBinding, logger *slog.Logger, metrics observability.Metrics, enqueueFences ...riveradapter.EnqueueFence) (workerComponents, error) {
 	if db == nil {
 		return workerComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_DATABASE_UNAVAILABLE", true, errors.New("database pool is nil"))
+	}
+	if models == nil {
+		return workerComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, modelsettingsdomain.ErrorCodeUnavailable, false, errors.New("model runtime is nil"))
+	}
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		if modelBinding.revision == nil || modelBinding.instanceID == nil || *modelBinding.revision != models.Revision() {
+			return workerComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeRuntimeConflict, false, errors.New("managed worker model runtime binding does not match the frozen runtime"))
+		}
+	} else if modelBinding.revision != nil || modelBinding.instanceID != nil {
+		return workerComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeRuntimeConflict, false, errors.New("static worker must not bind a managed model runtime"))
 	}
 	workspaceRepository, err := workspacepostgres.NewRepository(db)
 	if err != nil {
@@ -614,7 +779,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
-	toolComponents, err := newToolRuntimeComponents(db, cfg, workspaceRepository, gitRepository)
+	toolComponents, err := newToolRuntimeComponents(db, cfg, workspaceRepository, gitRepository, models)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -652,6 +817,9 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 		Queue: cfg.WorkerQueue, MaxWorkers: cfg.WorkerMaxWorkers,
 		JobTimeout: cfg.WorkerJobTimeout, RescueStuckJobsAfter: cfg.WorkerRescueStuckJobsAfter,
 		SoftStopTimeout: cfg.WorkerSoftStopTimeout, Logger: logger,
+	}
+	if len(enqueueFences) > 0 {
+		riverOptions.EnqueueFence = enqueueFences[0]
 	}
 	insertClient, err := riveradapter.NewClientWithOptions(db, nil, riverOptions)
 	if err != nil {
@@ -784,7 +952,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
-	agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository, memoryService)
+	agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository, memoryService, models)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -802,8 +970,8 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	artifactIDs := foundation.NewUUIDGenerator(nil)
 	artifactClock := foundation.SystemClock{}
 	artifactComponents, err := newArtifactWorkflowComponents(
-		db, cfg, workspaceRepository, runtimeRepository, artifactAgentRepository, artifactTerminal,
-		agentComponents.model, agentComponents.contract, artifactIDs, artifactClock,
+		db, workspaceRepository, runtimeRepository, artifactAgentRepository, artifactTerminal,
+		agentComponents.model, agentComponents.contract, artifactIDs, artifactClock, models.Embedding().Embedder(),
 	)
 	if err != nil {
 		return workerComponents{}, err
@@ -937,7 +1105,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
-	exportDispatcher, err := exportriver.NewDispatcher(insertClient)
+	exportDispatcher, err := exportriver.NewTransactionalDispatcher(db, insertClient)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -968,11 +1136,14 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	fatalInvariants := make(chan error, 1)
 	runtimeWorker, err := riveradapter.NewRuntimeNodeWorkerWithObservability(executors, runtimeCoordinator, fmt.Sprintf("worker:%s", workerID), cfg.WorkflowLeaseDuration, cfg.WorkflowHeartbeatInterval, riveradapter.RuntimeWorkerObservability{
 		Metrics: metrics, Queue: cfg.WorkerQueue, Logger: logger, FatalInvariants: fatalInvariants,
-	})
+	}, modelBinding.runtimeWorkerOptions()...)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	reindex, err := newReindexComponents(db, cfg, workspaceRepository, gitRepository, insertClient, workerID, logger, metrics, fatalInvariants)
+	reindex, err := newReindexComponents(
+		db, cfg, workspaceRepository, gitRepository, insertClient, workerID, logger, metrics, fatalInvariants,
+		modelBinding.revision, models,
+	)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1000,7 +1171,11 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	}, nil
 }
 
-func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, gitInspector *gitcli.WritebackClient) (toolRuntimeComponents, error) {
+func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, gitInspector *gitcli.WritebackClient, modelRuntimes ...*modelsettingsruntime.Models) (toolRuntimeComponents, error) {
+	models, err := modelRuntimeForComposition(cfg, modelRuntimes...)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
 	if err := validateToolCompositionMode(cfg); err != nil {
 		return toolRuntimeComponents{}, err
 	}
@@ -1040,11 +1215,7 @@ func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepo
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
-	embedder, err := platformmodels.NewConfiguredEmbedder(cfg)
-	if err != nil {
-		return toolRuntimeComponents{}, err
-	}
-	searchService, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
+	searchService, err := retrievalapplication.NewSearchService(searchRepository, models.Embedding().Embedder(), nil)
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
@@ -1204,21 +1375,20 @@ type agentWorkflowComponents struct {
 	capability agentCapabilityStatus
 }
 
-func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service) (agentWorkflowComponents, error) {
-	if cfg.ChatProvider == config.ChatProviderDisabled {
-		return agentWorkflowComponents{capability: agentCapabilityStatus{code: agentworkflow.ErrorCodeCapabilityUnavailable}}, nil
-	}
-	model, err := platformmodels.NewConfiguredChatModel(cfg)
+func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
+	models, err := modelRuntimeForComposition(cfg, modelRuntimes...)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	contractProvider, ok := model.(interface {
-		Contract() platformmodels.ChatContract
-	})
+	chat := models.Chat()
+	if chat.State() != platformmodels.CapabilityConfigured {
+		return agentWorkflowComponents{capability: agentCapabilityStatus{code: agentworkflow.ErrorCodeCapabilityUnavailable}}, nil
+	}
+	model := chat.Model()
+	contract, ok := chat.Contract()
 	if !ok {
 		return agentWorkflowComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, "AGENT_CHAT_CONTRACT_UNAVAILABLE", false, errors.New("configured chat model does not expose its frozen contract"))
 	}
-	contract := contractProvider.Contract()
 	catalog, err := agentworkflow.NewRuntimeCatalog(agentworkflow.CatalogOptions{
 		Model: contract.Model, Timeout: contract.Timeout, MaxOutputTokens: agentStructuredMaxOutputTokens,
 	})
@@ -1263,7 +1433,7 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 	}
 	relation, err := agentworkflow.NewExecutor(agentworkflow.ExecutorDependencies{
 		Model: model, Catalog: catalog, Repository: repository, Knowledge: knowledgePort, Evidence: evidenceOpener,
-		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(cfg),
+		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(contract),
 	})
 	if err != nil {
 		return agentWorkflowComponents{}, err
@@ -1284,11 +1454,7 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	embedder, err := platformmodels.NewConfiguredEmbedder(cfg)
-	if err != nil {
-		return agentWorkflowComponents{}, err
-	}
-	searchService, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
+	searchService, err := retrievalapplication.NewSearchService(searchRepository, models.Embedding().Embedder(), nil)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
@@ -1313,9 +1479,9 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 		Model: model, Catalog: catalog, Repository: repository, Snapshots: repository,
 		Memory: memoryLoader, MemoryOwner: agentapplication.MemoryOwnerRef{Kind: string(memoryOwner.Kind), ID: memoryOwner.ID},
 		Context: conversationRepository,
-		Search: retrievalAdapter, Retrieval: retrievalAdapter, Eligibility: knowledgePort, Topics: topicAdapter,
+		Search:  retrievalAdapter, Retrieval: retrievalAdapter, Eligibility: knowledgePort, Topics: topicAdapter,
 		Finalizer: finalizer, Progress: progress, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
-		Budget: agentApplicationBudget(cfg),
+		Budget: agentApplicationBudget(contract),
 	})
 	if err != nil {
 		return agentWorkflowComponents{}, err
@@ -1355,7 +1521,6 @@ func newArtifactGenerationAgent(
 // newArtifactWorkflowComponents 组装始终存在的 Generation 终态事实，并仅在 Chat 启用时创建真实 Executor。
 func newArtifactWorkflowComponents(
 	db *pgxpool.Pool,
-	cfg config.Config,
 	workspaceRepository *workspacepostgres.Repository,
 	runtime artifactpostgres.RuntimeStarterTx,
 	agentRepository *agentpostgres.Repository,
@@ -1364,6 +1529,7 @@ func newArtifactWorkflowComponents(
 	contract platformmodels.ChatContract,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
+	embedders ...retrievalapplication.Embedder,
 ) (artifactWorkflowComponents, error) {
 	if db == nil || workspaceRepository == nil || runtime == nil || agentRepository == nil || terminal == nil || ids == nil || clock == nil {
 		return artifactWorkflowComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, artifactworkflow.ErrorCodeCapabilityUnavailable, false, errors.New("artifact generation persistence dependencies are incomplete"))
@@ -1402,7 +1568,7 @@ func newArtifactWorkflowComponents(
 		generation: generation, terminal: terminal,
 		capability: agentCapabilityStatus{code: artifactworkflow.ErrorCodeCapabilityUnavailable},
 	}
-	if cfg.ChatProvider == config.ChatProviderDisabled {
+	if model == nil {
 		return components, nil
 	}
 	if model == nil || contract.Model.Validate() != nil || contract.Timeout <= 0 {
@@ -1412,9 +1578,12 @@ func newArtifactWorkflowComponents(
 	if err != nil {
 		return artifactWorkflowComponents{}, err
 	}
-	embedder, err := platformmodels.NewConfiguredEmbedder(cfg)
-	if err != nil {
-		return artifactWorkflowComponents{}, err
+	if len(embedders) > 1 {
+		return artifactWorkflowComponents{}, errors.New("artifact composition accepts at most one shared embedder")
+	}
+	var embedder retrievalapplication.Embedder
+	if len(embedders) == 1 {
+		embedder = embedders[0]
 	}
 	searchService, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
 	if err != nil {
@@ -1427,7 +1596,7 @@ func newArtifactWorkflowComponents(
 	executor, err := artifactworkflow.NewExecutor(artifactworkflow.ExecutorDependencies{
 		Model: model, Catalog: catalog, Repository: agentRepository, Context: generation,
 		Retrieval: retrievalAdapter, Eligibility: eligibility, Finalizer: generation,
-		IDs: ids, Clock: clock, Budget: agentApplicationBudget(cfg),
+		IDs: ids, Clock: clock, Budget: agentApplicationBudget(contract),
 	})
 	if err != nil {
 		return artifactWorkflowComponents{}, err
@@ -1461,11 +1630,11 @@ func newArtifactRuntimeCatalog(contract platformmodels.ChatContract) (*agentappl
 	return catalog, nil
 }
 
-func agentApplicationBudget(cfg config.Config) agentapplication.RunBudget {
+func agentApplicationBudget(contract platformmodels.ChatContract) agentapplication.RunBudget {
 	budget := agentapplication.DefaultRunBudget()
-	budget.MaxRequestBytes = min(cfg.ChatMaxRequestBytes*agentapplication.StructuredCallLimit, agentapplication.MaxRunRequestBytes)
-	budget.MaxResponseBytes = min(cfg.ChatMaxResponseBytes*agentapplication.StructuredCallLimit, agentapplication.MaxRunResponseBytes)
-	budget.Timeout = min(cfg.ChatTimeout*time.Duration(agentapplication.StructuredCallLimit), agentapplication.MaxRunTimeout)
+	budget.MaxRequestBytes = min(contract.MaxRequestBytes*agentapplication.StructuredCallLimit, agentapplication.MaxRunRequestBytes)
+	budget.MaxResponseBytes = min(contract.MaxResponseBytes*agentapplication.StructuredCallLimit, agentapplication.MaxRunResponseBytes)
+	budget.Timeout = min(contract.Timeout*time.Duration(agentapplication.StructuredCallLimit), agentapplication.MaxRunTimeout)
 	return budget
 }
 
@@ -1474,7 +1643,11 @@ type reindexComponents struct {
 	dispatcher *retrievalruntime.Runner
 }
 
-func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, committedGit *gitcli.WritebackClient, insertClient *riveradapter.Client, workerID foundation.ID, logger *slog.Logger, metrics observability.Metrics, fatalInvariants chan<- error) (reindexComponents, error) {
+func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, committedGit *gitcli.WritebackClient, insertClient *riveradapter.Client, workerID foundation.ID, logger *slog.Logger, metrics observability.Metrics, fatalInvariants chan<- error, modelSettingsRevision *int64, modelRuntimes ...*modelsettingsruntime.Models) (reindexComponents, error) {
+	models, err := modelRuntimeForComposition(cfg, modelRuntimes...)
+	if err != nil {
+		return reindexComponents{}, err
+	}
 	ids := foundation.NewUUIDGenerator(nil)
 	clock := foundation.SystemClock{}
 	files := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
@@ -1519,10 +1692,7 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceReposito
 	if err != nil {
 		return reindexComponents{}, err
 	}
-	embedder, err := platformmodels.NewConfiguredEmbedder(cfg)
-	if err != nil {
-		return reindexComponents{}, err
-	}
+	embedder := models.Embedding().Embedder()
 	if embedder != nil {
 		contract := embedder.Contract()
 		registrationContext, cancelRegistration := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
@@ -1530,6 +1700,7 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceReposito
 			Provider: contract.Provider, AdapterName: contract.AdapterName, AdapterVersion: contract.AdapterVersion,
 			Model: contract.Model, Dimensions: contract.Dimensions, Normalization: contract.Normalization,
 			DistanceMetric: contract.DistanceMetric, ConfigHash: contract.ConfigHash,
+			ModelSettingsRevision: modelSettingsRevision,
 		})
 		cancelRegistration()
 		if registrationErr != nil {

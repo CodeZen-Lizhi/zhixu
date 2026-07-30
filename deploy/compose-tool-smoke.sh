@@ -5,8 +5,11 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly GO_IMAGE="${ZHIXU_COMPOSE_TOOL_SMOKE_GO_IMAGE:-golang:1.25.4-bookworm}"
+
+source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"
 
 STATE_DIR=""
 PROJECT_NAME=""
@@ -44,20 +47,27 @@ PY
 }
 
 compose() {
-  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
+  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
 }
 
 cleanup() {
   local exit_code=$?
-  trap - EXIT INT TERM
+  local cleanup_exit=0
+  trap - EXIT HUP INT TERM
   if [[ -n "${PROJECT_NAME}" ]]; then
-    compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+    cleanup_compose_smoke_project_images "${PROJECT_NAME}" || cleanup_exit=$?
   fi
   if [[ -n "${STATE_DIR}" ]]; then
     chmod -R u+rwX "${STATE_DIR}" >/dev/null 2>&1 || true
-    rm -rf -- "${STATE_DIR}" >/dev/null 2>&1 || true
+    if ! rm -rf -- "${STATE_DIR}" >/dev/null 2>&1; then
+      log "could not remove disposable state"
+      cleanup_exit=1
+    fi
   fi
-  exit "${exit_code}"
+  if [[ "${exit_code}" -ne 0 ]]; then
+    exit "${exit_code}"
+  fi
+  exit "${cleanup_exit}"
 }
 
 main() {
@@ -67,7 +77,10 @@ main() {
   docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
 
   STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zhixu-compose-tool-smoke.XXXXXX" 2>/dev/null)" || fail "could not allocate disposable state"
-  trap cleanup EXIT INT TERM
+  trap cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   local run_id database_url
   run_id="$(random_hex 6)"
@@ -99,8 +112,14 @@ main() {
     'chown -R 10001:10001 /workspace/project && chmod -R u+rwX /workspace/project'
   compose run --rm --no-deps --entrypoint sh app -c \
     'git -C /workspace/project init --initial-branch=main >/dev/null && git -C /workspace/project config user.name "ZHIXU Tool Smoke" && git -C /workspace/project config user.email "tool-smoke@example.invalid" && git -C /workspace/project add -- docs/tool-smoke.md && git -C /workspace/project commit -m "base" >/dev/null'
-  log "starting API, Worker and PostgreSQL with Tool Runtime enabled"
-  compose up --detach --wait
+  log "starting PostgreSQL, one-shot initialization, and API/Worker ingress with Tool Runtime enabled"
+  compose up --detach --wait postgres
+  compose run --rm --no-deps -T model-settings-key-init
+  compose run --rm --no-deps -T migrate
+  compose up --detach --no-deps --wait app worker
+  compose up --detach --no-deps --wait app-model-relay worker-model-relay
+  compose run --rm --no-deps -T firewall
+  compose up --detach --no-deps --wait proxy
   compose exec -T app wget -q -O /dev/null http://127.0.0.1:8080/readyz
   compose exec -T worker wget -q -O /dev/null http://127.0.0.1:8081/readyz
 

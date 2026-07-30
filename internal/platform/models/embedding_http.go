@@ -107,16 +107,12 @@ func newEmbeddingHTTPConfig(provider, requestPath string, allowLoopbackHTTP bool
 	if err != nil || domain.ValidateEmbeddingContract(contract) != nil {
 		return embeddingHTTPConfig{}, embeddingConfigError()
 	}
-	client := options.client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	clientCopy := *client
-	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
+	client, err := newModelHTTPClient(baseURL, options.client)
+	if err != nil {
+		return embeddingHTTPConfig{}, embeddingConfigError()
 	}
 	return embeddingHTTPConfig{
-		client:           &clientCopy,
+		client:           client,
 		endpointURL:      appendEmbeddingPath(baseURL, requestPath),
 		contract:         contract,
 		timeout:          timeout,

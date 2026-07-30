@@ -17,6 +17,9 @@ const requiredOperations = [
   ["/api/v1/auth/api-tokens", "get", "200"],
   ["/api/v1/auth/api-tokens", "post", "201"],
   ["/api/v1/auth/api-tokens/{token_id}", "delete", "204"],
+  ["/api/v1/settings/models", "get", "200"],
+  ["/api/v1/settings/models", "put", "200"],
+  ["/api/v1/settings/models/test", "post", "200"],
   ["/api/v1/workspaces", "post", "201"],
   ["/api/v1/workspaces/{workspace_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/scan", "post", "200"],
@@ -132,6 +135,9 @@ for (const [path, method, expected] of [
   ["/api/v1/auth/api-tokens", "get", [{ sessionCookie: [] }]],
   ["/api/v1/auth/api-tokens", "post", [{ sessionCookie: [] }]],
   ["/api/v1/auth/api-tokens/{token_id}", "delete", [{ sessionCookie: [] }]],
+  ["/api/v1/settings/models", "get", [{ sessionCookie: [] }]],
+  ["/api/v1/settings/models", "put", [{ sessionCookie: [] }]],
+  ["/api/v1/settings/models/test", "post", [{ sessionCookie: [] }]],
 ]) {
   if (!exactSecurity(document.paths[path][method].security, expected)) {
     throw new Error(`${method.toUpperCase()} ${path} auth scheme is not exact`);
@@ -142,6 +148,8 @@ for (const [path, method] of [
   ["/api/v1/auth/session/rotate", "post"],
   ["/api/v1/auth/api-tokens", "post"],
   ["/api/v1/auth/api-tokens/{token_id}", "delete"],
+  ["/api/v1/settings/models", "put"],
+  ["/api/v1/settings/models/test", "post"],
 ]) {
   const parameters = document.paths[path][method].parameters ?? [];
   for (const requiredParameter of ["#/components/parameters/Origin", "#/components/parameters/CSRFToken"]) {
@@ -778,6 +786,9 @@ if (!schemas.SystemStatus.required.includes("auth") || schemas.SystemStatus.prop
     schemas.AuthCapabilityStatus.properties.status.enum.join(",") !== "disabled,ready,unavailable") {
   throw new Error("SystemStatus must expose the strict authentication capability state");
 }
+if (schemas.AuthCapability.enum?.join(",") !== "READ_LOCAL,READ_EXTERNAL,WRITE_PROPOSAL,WRITE_KNOWLEDGE,GIT_WRITE,INDEX_MAINTENANCE,EVALUATION_RUN,MANAGE_SYSTEM_SETTINGS") {
+  throw new Error("AuthCapability must remain aligned with the canonical capability catalog");
+}
 if (!schemas.SystemStatus.required.includes("knowledge_timeline") ||
     schemas.SystemStatus.properties.knowledge_timeline.$ref !== "#/components/schemas/OptionalCapabilityStatus") {
   throw new Error("SystemStatus must expose the Knowledge Timeline capability state");
@@ -818,6 +829,250 @@ function resolveRef(value) {
   const prefix = "#/components/responses/";
   if (!value.$ref.startsWith(prefix)) throw new Error(`unsupported response ref ${value.$ref}`);
   return document.components.responses[value.$ref.slice(prefix.length)];
+}
+
+const modelSettingsOperations = [
+  ["/api/v1/settings/models", "get", "ModelSettingsResponse", undefined, ["200", "401", "403", "405", "500", "503"]],
+  ["/api/v1/settings/models", "put", "ModelSettingsResponse", "UpdateModelSettingsRequest", ["200", "400", "401", "403", "405", "409", "415", "500", "503"]],
+  ["/api/v1/settings/models/test", "post", "ModelSettingsTestResponse", "TestModelSettingsRequest", ["200", "400", "401", "403", "405", "409", "415", "500", "502", "503", "504"]],
+];
+for (const [path, method, successSchema, requestSchema, statuses] of modelSettingsOperations) {
+  const operation = document.paths[path]?.[method];
+  if (!operation) throw new Error(`missing Model Settings operation ${method.toUpperCase()} ${path}`);
+  if (Object.keys(operation.responses ?? {}).sort().join(",") !== statuses.slice().sort().join(",")) {
+    throw new Error(`${method.toUpperCase()} ${path} response status contract drifted`);
+  }
+  if (operation.responses["200"]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}` ||
+      operation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+    throw new Error(`${method.toUpperCase()} ${path} must return ${successSchema} with Cache-Control: no-store`);
+  }
+  for (const status of statuses.filter((status) => Number(status) >= 400)) {
+    const expectedSchema = status === "409" ? "#/components/schemas/ModelSettingsConflictProblem" : "#/components/schemas/Problem";
+    if (resolveRef(operation.responses[status])?.content?.["application/json"]?.schema?.$ref !== expectedSchema) {
+      throw new Error(`${method.toUpperCase()} ${path} ${status} must use ${expectedSchema}`);
+    }
+  }
+  if (requestSchema === undefined) {
+    if (operation.requestBody !== undefined) throw new Error(`${method.toUpperCase()} ${path} must not accept a request body`);
+  } else if (operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== 65536 ||
+      operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
+    throw new Error(`${method.toUpperCase()} ${path} must use the bounded strict ${requestSchema} body`);
+  }
+}
+for (const responseName of ["BadGateway", "GatewayTimeout"]) {
+  if (document.components.responses[responseName]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+    throw new Error(`${responseName} must remain a redacted Problem response`);
+  }
+}
+
+const strictModelSettingsSchemas = [
+  "ModelSettingsConflictProblem",
+  "ModelSettingsConflictDetails",
+  "ModelSettingsResponse",
+  "ModelSettingsSummary",
+  "ModelChatSettingsSummary",
+  "ModelEmbeddingSettingsSummary",
+  "ModelSettingsRuntime",
+  "ModelSettingsRuntimeRole",
+  "ModelSettingsRollout",
+  "ModelSettingsCapabilities",
+  "UpdateModelSettingsRequest",
+  "ModelChatSettingsDraft",
+  "ModelEmbeddingSettingsDraft",
+  "ModelAPIKeyKeep",
+  "ModelAPIKeyReplace",
+  "ModelAPIKeyClear",
+  "TestModelSettingsRequest",
+  "ModelSettingsTestResponse",
+];
+for (const schemaName of strictModelSettingsSchemas) {
+  if (schemas[schemaName]?.type !== "object" || schemas[schemaName]?.additionalProperties !== false) {
+    throw new Error(`${schemaName} must remain a strict object schema`);
+  }
+}
+if (schemas.ModelCapabilityState?.type !== "string" || schemas.ModelCapabilityState.enum?.join(",") !== "disabled,configured,unavailable") {
+  throw new Error("Model capability state must remain exhaustive");
+}
+
+const exactModelSettingsShape = (schemaName, required, properties = required) => {
+  const schema = schemas[schemaName];
+  if (schema.required?.join(",") !== required.join(",") || Object.keys(schema.properties ?? {}).join(",") !== properties.join(",")) {
+    throw new Error(`${schemaName} required/property shape drifted`);
+  }
+};
+exactModelSettingsShape("ModelSettingsResponse", ["desired_revision", "active_revision", "desired_settings", "active_settings", "runtime", "rollout", "restart_required", "capabilities"]);
+exactModelSettingsShape("ModelSettingsConflictProblem", ["error_code", "message", "retryable", "details"]);
+exactModelSettingsShape("ModelSettingsConflictDetails", ["current_revision"]);
+exactModelSettingsShape("ModelSettingsSummary", ["chat", "embedding"]);
+exactModelSettingsShape("ModelChatSettingsSummary", ["provider", "base_url", "model", "model_version", "adapter_version", "api_key_configured"]);
+exactModelSettingsShape("ModelEmbeddingSettingsSummary", ["provider", "base_url", "model", "dimensions", "normalization", "distance_metric", "api_key_configured"]);
+exactModelSettingsShape("ModelSettingsRuntime", ["api", "worker"]);
+exactModelSettingsShape("ModelSettingsRuntimeRole", ["applied_revision", "phase", "fresh"]);
+exactModelSettingsShape("ModelSettingsRollout", ["phase", "target_revision", "last_error_code", "retryable"]);
+exactModelSettingsShape("ModelSettingsCapabilities", ["chat", "embedding"]);
+exactModelSettingsShape("UpdateModelSettingsRequest", ["expected_revision", "chat", "embedding"]);
+exactModelSettingsShape("ModelChatSettingsDraft", ["provider", "base_url", "model", "model_version", "adapter_version", "api_key"]);
+exactModelSettingsShape("ModelEmbeddingSettingsDraft", ["provider", "base_url", "model", "dimensions", "normalization", "distance_metric", "api_key"]);
+exactModelSettingsShape("ModelAPIKeyKeep", ["action"]);
+exactModelSettingsShape("ModelAPIKeyReplace", ["action", "value"]);
+exactModelSettingsShape("ModelAPIKeyClear", ["action"]);
+exactModelSettingsShape("TestModelSettingsRequest", ["target"], ["target", "chat", "embedding"]);
+exactModelSettingsShape("ModelSettingsTestResponse", ["target", "status", "provider", "model"]);
+
+const modelResponse = schemas.ModelSettingsResponse;
+const modelConflict = schemas.ModelSettingsConflictProblem;
+if (modelConflict.properties.error_code.pattern !== "^[A-Z][A-Z0-9_]*$" ||
+    modelConflict.properties.error_code.maxLength !== 128 || modelConflict.properties.message.maxLength !== 4096 ||
+    modelConflict.properties.retryable.type !== "boolean" ||
+    modelConflict.properties.details.$ref !== "#/components/schemas/ModelSettingsConflictDetails" ||
+    schemas.ModelSettingsConflictDetails.properties.current_revision.minimum !== 0) {
+  throw new Error("Model Settings conflict must expose only a bounded stable code and current revision");
+}
+if (modelResponse.properties.desired_revision.minimum !== 0 || modelResponse.properties.active_revision.minimum !== 0 ||
+    modelResponse.properties.desired_settings.$ref !== "#/components/schemas/ModelSettingsSummary" ||
+    modelResponse.properties.active_settings.$ref !== "#/components/schemas/ModelSettingsSummary" ||
+    modelResponse.properties.runtime.$ref !== "#/components/schemas/ModelSettingsRuntime" ||
+    modelResponse.properties.rollout.$ref !== "#/components/schemas/ModelSettingsRollout" ||
+    modelResponse.properties.capabilities.$ref !== "#/components/schemas/ModelSettingsCapabilities" ||
+    modelResponse.properties.restart_required.type !== "boolean") {
+  throw new Error("Model Settings desired/active/runtime/rollout response contract drifted");
+}
+const responseSchemas = [modelResponse, modelConflict, schemas.ModelSettingsConflictDetails, schemas.ModelSettingsSummary, schemas.ModelChatSettingsSummary, schemas.ModelEmbeddingSettingsSummary,
+  schemas.ModelSettingsRuntime, schemas.ModelSettingsRuntimeRole, schemas.ModelSettingsRollout, schemas.ModelSettingsCapabilities];
+if (responseSchemas.some((schema) => JSON.stringify(schema).includes('"writeOnly"') || JSON.stringify(schema).includes('"api_key":') ||
+    JSON.stringify(schema).includes('"ciphertext"') || JSON.stringify(schema).includes('"nonce"') ||
+    JSON.stringify(schema).includes('"key_id"') || JSON.stringify(schema).includes('"instance_id"'))) {
+  throw new Error("Model Settings response schemas must not expose secrets, ciphertext, key metadata, or instance identity");
+}
+
+const chatSummary = schemas.ModelChatSettingsSummary;
+const embeddingSummary = schemas.ModelEmbeddingSettingsSummary;
+if (chatSummary.properties.provider.enum?.join(",") !== "disabled,openai-compatible" ||
+    chatSummary.oneOf?.map((branch) => branch.properties?.provider?.const).join(",") !== "disabled,openai-compatible" ||
+    chatSummary.oneOf[0].properties.base_url.const !== "" || chatSummary.oneOf[0].properties.model.const !== "" ||
+    chatSummary.oneOf[0].properties.model_version.const !== "" ||
+    chatSummary.oneOf[0].properties.api_key_configured.const !== false) {
+  throw new Error("Chat summary must remain a strict disabled/openai-compatible provider union");
+}
+if (embeddingSummary.properties.provider.enum?.join(",") !== "disabled,openai-compatible,ollama" ||
+    embeddingSummary.oneOf?.map((branch) => branch.properties?.provider?.const).join(",") !== "disabled,openai-compatible,ollama" ||
+    embeddingSummary.properties.dimensions.maximum !== 16000 || embeddingSummary.properties.model.maxLength !== 128 ||
+    embeddingSummary.properties.normalization.enum?.join(",") !== "none,l2" ||
+    embeddingSummary.properties.distance_metric.enum?.join(",") !== "cosine,inner_product,euclidean" ||
+    embeddingSummary.oneOf[0].properties.base_url.const !== "" || embeddingSummary.oneOf[0].properties.model.const !== "" ||
+    embeddingSummary.oneOf[0].properties.dimensions.const !== 0 || embeddingSummary.oneOf[0].properties.api_key_configured.const !== false ||
+    embeddingSummary.oneOf[1].properties.api_key_configured.const !== true ||
+    embeddingSummary.oneOf[2].properties.api_key_configured.const !== false) {
+  throw new Error("Embedding summary must remain a strict disabled/openai-compatible/ollama provider union");
+}
+
+if (schemas.ModelSettingsRuntime.properties.api.$ref !== "#/components/schemas/ModelSettingsRuntimeRole" ||
+    schemas.ModelSettingsRuntime.properties.worker.$ref !== "#/components/schemas/ModelSettingsRuntimeRole" ||
+    schemas.ModelSettingsRuntimeRole.properties.applied_revision.minimum !== 0 ||
+    schemas.ModelSettingsRuntimeRole.properties.phase.enum?.join(",") !== "active,quiescing,quiesced,prepared,verifying,unavailable" ||
+    schemas.ModelSettingsRuntimeRole.properties.fresh.type !== "boolean") {
+  throw new Error("Model Settings API/Worker applied runtime contract drifted");
+}
+if (schemas.ModelSettingsRollout.properties.phase.enum?.join(",") !== "idle,validating,draining,applying,verifying,failed" ||
+    schemas.ModelSettingsRollout.properties.target_revision.type?.join(",") !== "integer,null" ||
+    schemas.ModelSettingsRollout.properties.target_revision.minimum !== 0 ||
+    schemas.ModelSettingsRollout.properties.last_error_code.type?.join(",") !== "string,null" ||
+    schemas.ModelSettingsRollout.properties.retryable.type !== "boolean") {
+  throw new Error("Model Settings rollout/restart projection contract drifted");
+}
+const rolloutBranches = schemas.ModelSettingsRollout.oneOf ?? [];
+if (rolloutBranches.length !== 3 || rolloutBranches[0].properties?.phase?.const !== "idle" ||
+    rolloutBranches[0].properties?.target_revision?.type !== "null" ||
+    rolloutBranches[0].properties?.last_error_code?.type !== "null" || rolloutBranches[0].properties?.retryable?.const !== false ||
+    rolloutBranches[1].properties?.phase?.enum?.join(",") !== "validating,draining,applying,verifying" ||
+    rolloutBranches[1].properties?.target_revision?.type !== "integer" ||
+    rolloutBranches[1].properties?.last_error_code?.type !== "null" || rolloutBranches[1].properties?.retryable?.const !== false ||
+    rolloutBranches[2].properties?.phase?.const !== "failed" ||
+    rolloutBranches[2].properties?.target_revision?.type !== "integer" ||
+    rolloutBranches[2].properties?.last_error_code?.type !== "string" || rolloutBranches[2].properties?.retryable?.const !== true) {
+  throw new Error("Model Settings rollout must remain an exact idle/in-progress/failed union");
+}
+
+const modelSettingsProblem = document.components.responses.ModelSettingsProblemNoStore;
+if (modelSettingsProblem?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+    modelSettingsProblem?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+  throw new Error("Model Settings Problem responses must remain no-store");
+}
+const modelSettingsConflict = document.components.responses.ModelSettingsConflictNoStore;
+if (modelSettingsConflict?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+    modelSettingsConflict?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ModelSettingsConflictProblem") {
+  throw new Error("Model Settings conflict responses must include current_revision and remain no-store");
+}
+for (const [path, method, successStatus] of [
+  ["/api/v1/settings/models", "get", "200"],
+  ["/api/v1/settings/models", "put", "200"],
+  ["/api/v1/settings/models/test", "post", "200"],
+]) {
+  const responses = document.paths[path][method].responses;
+  if (responses[successStatus]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+      Object.entries(responses).some(([status, response]) => status !== successStatus && response.$ref !==
+        (status === "409" ? "#/components/responses/ModelSettingsConflictNoStore" : "#/components/responses/ModelSettingsProblemNoStore"))) {
+    throw new Error(`${method.toUpperCase()} ${path} responses must all remain no-store`);
+  }
+}
+
+const updateModelSettings = schemas.UpdateModelSettingsRequest;
+const chatDraft = schemas.ModelChatSettingsDraft;
+const embeddingDraft = schemas.ModelEmbeddingSettingsDraft;
+if (updateModelSettings.properties.expected_revision.minimum !== 0 ||
+    updateModelSettings.properties.chat.$ref !== "#/components/schemas/ModelChatSettingsDraft" ||
+    updateModelSettings.properties.embedding.$ref !== "#/components/schemas/ModelEmbeddingSettingsDraft") {
+  throw new Error("Model Settings update must remain an optimistic full replacement");
+}
+if (chatDraft.properties.provider.enum?.join(",") !== "disabled,openai-compatible" ||
+    chatDraft.oneOf?.map((branch) => branch.properties?.provider?.const).join(",") !== "disabled,openai-compatible" ||
+    chatDraft.properties.api_key.$ref !== "#/components/schemas/ModelAPIKeyAction" ||
+    chatDraft.properties.api_key.writeOnly !== true || chatDraft.properties.model.maxLength !== 128 ||
+    chatDraft.properties.model_version.maxLength !== 64 || chatDraft.properties.adapter_version.maxLength !== 64) {
+  throw new Error("Chat draft provider or write-only API-key contract drifted");
+}
+if (embeddingDraft.properties.provider.enum?.join(",") !== "disabled,openai-compatible,ollama" ||
+    embeddingDraft.oneOf?.map((branch) => branch.properties?.provider?.const).join(",") !== "disabled,openai-compatible,ollama" ||
+    embeddingDraft.properties.api_key.$ref !== "#/components/schemas/ModelAPIKeyAction" ||
+    embeddingDraft.properties.api_key.writeOnly !== true || embeddingDraft.properties.dimensions.maximum !== 16000 ||
+    embeddingDraft.properties.model.maxLength !== 128 ||
+    embeddingDraft.properties.normalization.enum?.join(",") !== "none,l2" ||
+    embeddingDraft.properties.distance_metric.enum?.join(",") !== "cosine,inner_product,euclidean") {
+  throw new Error("Embedding draft provider or write-only API-key contract drifted");
+}
+
+const apiKeyAction = schemas.ModelAPIKeyAction;
+if (!apiKeyAction.description?.includes("provider and normalized base_url") ||
+    apiKeyAction.oneOf?.map((branch) => branch.$ref).join(",") !==
+      "#/components/schemas/ModelAPIKeyKeep,#/components/schemas/ModelAPIKeyReplace,#/components/schemas/ModelAPIKeyClear" ||
+    apiKeyAction.discriminator?.propertyName !== "action" ||
+    apiKeyAction.discriminator.mapping?.keep !== "#/components/schemas/ModelAPIKeyKeep" ||
+    apiKeyAction.discriminator.mapping?.replace !== "#/components/schemas/ModelAPIKeyReplace" ||
+    apiKeyAction.discriminator.mapping?.clear !== "#/components/schemas/ModelAPIKeyClear" ||
+    schemas.ModelAPIKeyKeep.properties.action.const !== "keep" || schemas.ModelAPIKeyClear.properties.action.const !== "clear" ||
+    schemas.ModelAPIKeyReplace.properties.action.const !== "replace" || schemas.ModelAPIKeyReplace.properties.value.writeOnly !== true ||
+    schemas.ModelAPIKeyReplace.properties.value.minLength !== 1 || schemas.ModelAPIKeyReplace.properties.value.maxLength !== 16384) {
+  throw new Error("Model API key must remain an exact keep/replace/clear write-only tagged union");
+}
+
+const testModelSettings = schemas.TestModelSettingsRequest;
+if (testModelSettings.properties.target.enum?.join(",") !== "chat,embedding" ||
+    testModelSettings.properties.chat.$ref !== "#/components/schemas/ModelChatSettingsDraft" ||
+    testModelSettings.properties.embedding.$ref !== "#/components/schemas/ModelEmbeddingSettingsDraft" ||
+    testModelSettings.oneOf?.map((branch) => branch.properties?.target?.const).join(",") !== "chat,embedding" ||
+    testModelSettings.oneOf[0].required?.join(",") !== "chat" || testModelSettings.oneOf[0].not?.required?.join(",") !== "embedding" ||
+    testModelSettings.oneOf[0].properties.chat?.properties?.provider?.const !== "openai-compatible" ||
+    testModelSettings.oneOf[1].required?.join(",") !== "embedding" || testModelSettings.oneOf[1].not?.required?.join(",") !== "chat" ||
+    testModelSettings.oneOf[1].properties.embedding?.properties?.provider?.enum?.join(",") !== "openai-compatible,ollama") {
+  throw new Error("Model connection test must contain exactly one enabled target draft");
+}
+const modelTestResponse = schemas.ModelSettingsTestResponse;
+if (modelTestResponse.properties.status.const !== "ok" ||
+    modelTestResponse.properties.model.maxLength !== 128 ||
+    modelTestResponse.oneOf?.map((branch) => branch.properties?.target?.const).join(",") !== "chat,embedding" ||
+    modelTestResponse.oneOf[0].properties.provider.const !== "openai-compatible" ||
+    modelTestResponse.oneOf[1].properties.provider.enum?.join(",") !== "openai-compatible,ollama") {
+  throw new Error("Model connection test success response contract drifted");
 }
 
 const expectedExportPaths = [

@@ -118,7 +118,7 @@ func ValidateEmbeddingContractBinding(contract EmbeddingContract, version Embedd
 		DistanceMetric: contract.DistanceMetric,
 		ConfigHash:     contract.ConfigHash,
 	}
-	if !SameEmbeddingBinding(contractVersion, version) {
+	if !SameEmbeddingContractBinding(contractVersion, version) {
 		return inconsistent(ErrorCodeEmbeddingContractInvalid, "embedding contract does not match persisted version")
 	}
 	return nil

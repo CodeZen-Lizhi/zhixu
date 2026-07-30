@@ -29,3 +29,19 @@ func QueueDepth(ctx context.Context, database QueueDepthQuerier, queue string) (
 	}
 	return depth, nil
 }
+
+// RunningJobCount 返回目标 queue 中已经 claim 且仍在执行的 River Job 数量。
+func RunningJobCount(ctx context.Context, database QueueDepthQuerier, queue string) (int64, error) {
+	queue = strings.TrimSpace(queue)
+	if database == nil || queue == "" {
+		return 0, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_QUEUE_METRIC_INVALID", false, errors.New("queue metric dependencies are invalid"))
+	}
+	var count int64
+	if err := database.QueryRow(ctx, `SELECT count(*) FROM workflow.river_job WHERE queue=$1 AND state='running'`, queue).Scan(&count); err != nil {
+		return 0, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_QUEUE_METRIC_QUERY_FAILED", true, err)
+	}
+	if count < 0 {
+		return 0, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_QUEUE_METRIC_RESULT_INVALID", false, errors.New("running job count is negative"))
+	}
+	return count, nil
+}

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestAllReturnsSevenUniqueCanonicalCapabilitiesAndIndependentCopies(t *testing.T) {
+func TestAllReturnsUniqueCanonicalCapabilitiesAndIndependentCopies(t *testing.T) {
 	expected := []Capability{
 		"READ_LOCAL",
 		"READ_EXTERNAL",
@@ -14,6 +14,7 @@ func TestAllReturnsSevenUniqueCanonicalCapabilitiesAndIndependentCopies(t *testi
 		"GIT_WRITE",
 		"INDEX_MAINTENANCE",
 		"EVALUATION_RUN",
+		"MANAGE_SYSTEM_SETTINGS",
 	}
 	first := All()
 	if len(first) != len(expected) {

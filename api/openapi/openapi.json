@@ -9391,6 +9391,204 @@
           }
         }
       }
+    },
+    "/api/v1/settings/models": {
+      "get": {
+        "operationId": "getModelSettings",
+        "description": "Returns the non-sensitive desired and active model settings, per-process applied revisions, and rollout state. API keys, ciphertext, key identifiers, nonces, and instance identifiers are never returned. Bearer API Tokens cannot access this system-secret management endpoint.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current desired, active, runtime, rollout, and capability projections.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Model configuration projections must not be stored by browsers or intermediaries.",
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelSettingsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "403": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "405": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "500": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "503": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateModelSettings",
+        "description": "Creates a new immutable desired revision. Saving does not change the active revision; ./zhixu restart performs the controlled rollout. Bearer API Tokens cannot access this system-secret management endpoint.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 65536,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateModelSettingsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The desired revision was saved. Active and applied revisions remain authoritative and may still differ.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Model configuration projections must not be stored by browsers or intermediaries.",
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelSettingsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "401": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "403": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "405": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "409": {
+            "$ref": "#/components/responses/ModelSettingsConflictNoStore"
+          },
+          "415": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "500": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "503": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          }
+        }
+      }
+    },
+    "/api/v1/settings/models/test": {
+      "post": {
+        "operationId": "testModelSettings",
+        "description": "Tests exactly one Chat or Embedding draft from the API container without persisting it. Provider credentials and response details are never echoed. Bearer API Tokens cannot access this system-secret management endpoint.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 65536,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestModelSettingsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The selected provider accepted the bounded connection test and matched the requested model contract.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Connection-test results must not be stored by browsers or intermediaries.",
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelSettingsTestResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "401": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "403": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "405": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "409": {
+            "$ref": "#/components/responses/ModelSettingsConflictNoStore"
+          },
+          "415": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "500": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "502": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "503": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "504": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -9631,6 +9829,68 @@
             }
           }
         }
+      },
+      "BadGateway": {
+        "description": "The model provider rejected the bounded request or returned an invalid, redirected, oversized, or otherwise unusable response. Provider details and credentials are redacted.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "GatewayTimeout": {
+        "description": "The bounded model-provider connection test timed out.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "ModelSettingsProblemNoStore": {
+        "description": "A model settings request failed. The status code and Problem body carry the authoritative error classification.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Model settings errors must not be stored by browsers or intermediaries.",
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "WWW-Authenticate": {
+            "description": "Authentication challenge when the response status is 401.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "ModelSettingsConflictNoStore": {
+        "description": "The desired model settings revision changed or a rollout/secret binding conflict prevented the operation. The response includes only the latest desired revision.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Model settings conflicts must not be stored by browsers or intermediaries.",
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ModelSettingsConflictProblem"
+            }
+          }
+        }
       }
     },
     "schemas": {
@@ -9654,7 +9914,8 @@
           "WRITE_KNOWLEDGE",
           "GIT_WRITE",
           "INDEX_MAINTENANCE",
-          "EVALUATION_RUN"
+          "EVALUATION_RUN",
+          "MANAGE_SYSTEM_SETTINGS"
         ]
       },
       "AuthCapabilityStatus": {
@@ -24213,6 +24474,927 @@
             "x-max-utf8-bytes": 4096
           }
         },
+        "additionalProperties": false
+      },
+      "ModelSettingsConflictProblem": {
+        "type": "object",
+        "required": [
+          "error_code",
+          "message",
+          "retryable",
+          "details"
+        ],
+        "properties": {
+          "error_code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "details": {
+            "$ref": "#/components/schemas/ModelSettingsConflictDetails"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelSettingsConflictDetails": {
+        "type": "object",
+        "required": [
+          "current_revision"
+        ],
+        "properties": {
+          "current_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelSettingsResponse": {
+        "type": "object",
+        "required": [
+          "desired_revision",
+          "active_revision",
+          "desired_settings",
+          "active_settings",
+          "runtime",
+          "rollout",
+          "restart_required",
+          "capabilities"
+        ],
+        "properties": {
+          "desired_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Latest immutable revision saved by the user. Revision zero is the canonical disabled bootstrap."
+          },
+          "active_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Globally committed revision that ordinary API and Worker processes must load."
+          },
+          "desired_settings": {
+            "$ref": "#/components/schemas/ModelSettingsSummary"
+          },
+          "active_settings": {
+            "$ref": "#/components/schemas/ModelSettingsSummary"
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/ModelSettingsRuntime"
+          },
+          "rollout": {
+            "$ref": "#/components/schemas/ModelSettingsRollout"
+          },
+          "restart_required": {
+            "type": "boolean",
+            "description": "True unless desired and active revisions match and both fresh roles report that active revision."
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ModelSettingsCapabilities"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelSettingsSummary": {
+        "type": "object",
+        "required": [
+          "chat",
+          "embedding"
+        ],
+        "properties": {
+          "chat": {
+            "$ref": "#/components/schemas/ModelChatSettingsSummary"
+          },
+          "embedding": {
+            "$ref": "#/components/schemas/ModelEmbeddingSettingsSummary"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelChatSettingsSummary": {
+        "type": "object",
+        "required": [
+          "provider",
+          "base_url",
+          "model",
+          "model_version",
+          "adapter_version",
+          "api_key_configured"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "openai-compatible"
+            ]
+          },
+          "base_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "x-max-utf8-bytes": 2048
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128
+          },
+          "model_version": {
+            "type": "string",
+            "maxLength": 64,
+            "x-max-utf8-bytes": 64
+          },
+          "adapter_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "x-max-utf8-bytes": 64
+          },
+          "api_key_configured": {
+            "type": "boolean",
+            "description": "Only indicates whether encrypted key material is stored; no key-derived value is returned."
+          }
+        },
+        "oneOf": [
+          {
+            "title": "Disabled Chat settings",
+            "properties": {
+              "provider": {
+                "const": "disabled"
+              },
+              "base_url": {
+                "const": ""
+              },
+              "model": {
+                "const": ""
+              },
+              "model_version": {
+                "const": ""
+              },
+              "api_key_configured": {
+                "const": false
+              }
+            }
+          },
+          {
+            "title": "OpenAI-compatible Chat settings",
+            "properties": {
+              "provider": {
+                "const": "openai-compatible"
+              },
+              "base_url": {
+                "type": "string",
+                "format": "uri",
+                "minLength": 1
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model_version": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ModelEmbeddingSettingsSummary": {
+        "type": "object",
+        "required": [
+          "provider",
+          "base_url",
+          "model",
+          "dimensions",
+          "normalization",
+          "distance_metric",
+          "api_key_configured"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "openai-compatible",
+              "ollama"
+            ]
+          },
+          "base_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "x-max-utf8-bytes": 2048
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128
+          },
+          "dimensions": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16000
+          },
+          "normalization": {
+            "type": "string",
+            "enum": [
+              "none",
+              "l2"
+            ]
+          },
+          "distance_metric": {
+            "type": "string",
+            "enum": [
+              "cosine",
+              "inner_product",
+              "euclidean"
+            ]
+          },
+          "api_key_configured": {
+            "type": "boolean",
+            "description": "Only indicates whether encrypted key material is stored; no key-derived value is returned."
+          }
+        },
+        "oneOf": [
+          {
+            "title": "Disabled Embedding settings",
+            "properties": {
+              "provider": {
+                "const": "disabled"
+              },
+              "base_url": {
+                "const": ""
+              },
+              "model": {
+                "const": ""
+              },
+              "dimensions": {
+                "const": 0
+              },
+              "api_key_configured": {
+                "const": false
+              }
+            }
+          },
+          {
+            "title": "OpenAI-compatible Embedding settings",
+            "properties": {
+              "provider": {
+                "const": "openai-compatible"
+              },
+              "base_url": {
+                "type": "string",
+                "format": "uri",
+                "minLength": 1
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dimensions": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16000
+              },
+              "api_key_configured": {
+                "const": true
+              }
+            }
+          },
+          {
+            "title": "Ollama Embedding settings",
+            "properties": {
+              "provider": {
+                "const": "ollama"
+              },
+              "base_url": {
+                "type": "string",
+                "format": "uri",
+                "minLength": 1
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dimensions": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16000
+              },
+              "api_key_configured": {
+                "const": false
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ModelSettingsRuntime": {
+        "type": "object",
+        "required": [
+          "api",
+          "worker"
+        ],
+        "properties": {
+          "api": {
+            "$ref": "#/components/schemas/ModelSettingsRuntimeRole"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/ModelSettingsRuntimeRole"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelSettingsRuntimeRole": {
+        "type": "object",
+        "required": [
+          "applied_revision",
+          "phase",
+          "fresh"
+        ],
+        "properties": {
+          "applied_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "active",
+              "quiescing",
+              "quiesced",
+              "prepared",
+              "verifying",
+              "unavailable"
+            ]
+          },
+          "fresh": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelSettingsRollout": {
+        "type": "object",
+        "required": [
+          "phase",
+          "target_revision",
+          "last_error_code",
+          "retryable"
+        ],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "validating",
+              "draining",
+              "applying",
+              "verifying",
+              "failed"
+            ]
+          },
+          "target_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "last_error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Stable redacted rollout error code; null when no rollout error is retained."
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "phase": {
+                "const": "idle"
+              },
+              "target_revision": {
+                "type": "null"
+              },
+              "last_error_code": {
+                "type": "null"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "phase": {
+                "enum": [
+                  "validating",
+                  "draining",
+                  "applying",
+                  "verifying"
+                ]
+              },
+              "target_revision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "last_error_code": {
+                "type": "null"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "phase": {
+                "const": "failed"
+              },
+              "target_revision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "last_error_code": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "retryable": {
+                "const": true
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ModelSettingsCapabilities": {
+        "type": "object",
+        "required": [
+          "chat",
+          "embedding"
+        ],
+        "properties": {
+          "chat": {
+            "$ref": "#/components/schemas/ModelCapabilityState"
+          },
+          "embedding": {
+            "$ref": "#/components/schemas/ModelCapabilityState"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelCapabilityState": {
+        "type": "string",
+        "enum": [
+          "disabled",
+          "configured",
+          "unavailable"
+        ]
+      },
+      "UpdateModelSettingsRequest": {
+        "type": "object",
+        "required": [
+          "expected_revision",
+          "chat",
+          "embedding"
+        ],
+        "properties": {
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Latest desired revision observed by the caller. A mismatch or active rollout returns 409 without echoing settings or credentials."
+          },
+          "chat": {
+            "$ref": "#/components/schemas/ModelChatSettingsDraft"
+          },
+          "embedding": {
+            "$ref": "#/components/schemas/ModelEmbeddingSettingsDraft"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelChatSettingsDraft": {
+        "type": "object",
+        "required": [
+          "provider",
+          "base_url",
+          "model",
+          "model_version",
+          "adapter_version",
+          "api_key"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "openai-compatible"
+            ]
+          },
+          "base_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "x-max-utf8-bytes": 2048
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128
+          },
+          "model_version": {
+            "type": "string",
+            "maxLength": 64,
+            "x-max-utf8-bytes": 64
+          },
+          "adapter_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "x-max-utf8-bytes": 64
+          },
+          "api_key": {
+            "$ref": "#/components/schemas/ModelAPIKeyAction",
+            "writeOnly": true
+          }
+        },
+        "oneOf": [
+          {
+            "title": "Disabled Chat draft",
+            "properties": {
+              "provider": {
+                "const": "disabled"
+              },
+              "base_url": {
+                "const": ""
+              },
+              "model": {
+                "const": ""
+              },
+              "model_version": {
+                "const": ""
+              }
+            }
+          },
+          {
+            "title": "OpenAI-compatible Chat draft",
+            "properties": {
+              "provider": {
+                "const": "openai-compatible"
+              },
+              "base_url": {
+                "type": "string",
+                "format": "uri",
+                "minLength": 1
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model_version": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ModelEmbeddingSettingsDraft": {
+        "type": "object",
+        "required": [
+          "provider",
+          "base_url",
+          "model",
+          "dimensions",
+          "normalization",
+          "distance_metric",
+          "api_key"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "openai-compatible",
+              "ollama"
+            ]
+          },
+          "base_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "x-max-utf8-bytes": 2048
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128
+          },
+          "dimensions": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16000
+          },
+          "normalization": {
+            "type": "string",
+            "enum": [
+              "none",
+              "l2"
+            ]
+          },
+          "distance_metric": {
+            "type": "string",
+            "enum": [
+              "cosine",
+              "inner_product",
+              "euclidean"
+            ]
+          },
+          "api_key": {
+            "$ref": "#/components/schemas/ModelAPIKeyAction",
+            "writeOnly": true
+          }
+        },
+        "oneOf": [
+          {
+            "title": "Disabled Embedding draft",
+            "properties": {
+              "provider": {
+                "const": "disabled"
+              },
+              "base_url": {
+                "const": ""
+              },
+              "model": {
+                "const": ""
+              },
+              "dimensions": {
+                "const": 0
+              }
+            }
+          },
+          {
+            "title": "OpenAI-compatible Embedding draft",
+            "properties": {
+              "provider": {
+                "const": "openai-compatible"
+              },
+              "base_url": {
+                "type": "string",
+                "format": "uri",
+                "minLength": 1
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dimensions": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16000
+              }
+            }
+          },
+          {
+            "title": "Ollama Embedding draft",
+            "properties": {
+              "provider": {
+                "const": "ollama"
+              },
+              "base_url": {
+                "type": "string",
+                "format": "uri",
+                "minLength": 1
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dimensions": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16000
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ModelAPIKeyAction": {
+        "description": "Explicit API-key operation. keep is valid only when provider and normalized base_url still match the stored desired key binding; replace supplies a new transient value; clear removes stored key material.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ModelAPIKeyKeep"
+          },
+          {
+            "$ref": "#/components/schemas/ModelAPIKeyReplace"
+          },
+          {
+            "$ref": "#/components/schemas/ModelAPIKeyClear"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "action",
+          "mapping": {
+            "keep": "#/components/schemas/ModelAPIKeyKeep",
+            "replace": "#/components/schemas/ModelAPIKeyReplace",
+            "clear": "#/components/schemas/ModelAPIKeyClear"
+          }
+        }
+      },
+      "ModelAPIKeyKeep": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "keep"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelAPIKeyReplace": {
+        "type": "object",
+        "required": [
+          "action",
+          "value"
+        ],
+        "properties": {
+          "action": {
+            "const": "replace"
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "x-max-utf8-bytes": 16384,
+            "writeOnly": true,
+            "description": "Transient replacement value. It is never returned by any response."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelAPIKeyClear": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "clear"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TestModelSettingsRequest": {
+        "type": "object",
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": [
+              "chat",
+              "embedding"
+            ]
+          },
+          "chat": {
+            "$ref": "#/components/schemas/ModelChatSettingsDraft"
+          },
+          "embedding": {
+            "$ref": "#/components/schemas/ModelEmbeddingSettingsDraft"
+          }
+        },
+        "oneOf": [
+          {
+            "title": "Chat connection test",
+            "required": [
+              "chat"
+            ],
+            "properties": {
+              "target": {
+                "const": "chat"
+              },
+              "chat": {
+                "properties": {
+                  "provider": {
+                    "const": "openai-compatible"
+                  }
+                }
+              }
+            },
+            "not": {
+              "required": [
+                "embedding"
+              ]
+            }
+          },
+          {
+            "title": "Embedding connection test",
+            "required": [
+              "embedding"
+            ],
+            "properties": {
+              "target": {
+                "const": "embedding"
+              },
+              "embedding": {
+                "properties": {
+                  "provider": {
+                    "enum": [
+                      "openai-compatible",
+                      "ollama"
+                    ]
+                  }
+                }
+              }
+            },
+            "not": {
+              "required": [
+                "chat"
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ModelSettingsTestResponse": {
+        "type": "object",
+        "required": [
+          "target",
+          "status",
+          "provider",
+          "model"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": [
+              "chat",
+              "embedding"
+            ]
+          },
+          "status": {
+            "const": "ok"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "openai-compatible",
+              "ollama"
+            ]
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128
+          }
+        },
+        "oneOf": [
+          {
+            "title": "Successful Chat connection test",
+            "properties": {
+              "target": {
+                "const": "chat"
+              },
+              "provider": {
+                "const": "openai-compatible"
+              }
+            }
+          },
+          {
+            "title": "Successful Embedding connection test",
+            "properties": {
+              "target": {
+                "const": "embedding"
+              },
+              "provider": {
+                "enum": [
+                  "openai-compatible",
+                  "ollama"
+                ]
+              }
+            }
+          }
+        ],
         "additionalProperties": false
       }
     }

@@ -63,6 +63,7 @@ M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`�
 | [Hook 规范](./hook-guidelines.md) | Query、Command、URL 和 SSE Hook | Query Key Factory 和 Hook Test Harness |
 | [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | 已记录 Timeline filter/cursor/idempotency 与 projector-safe refresh、M7-03 Workspace cache、M9 唯一 SSE Owner、M9-03 Export polling/recovery，以及 M10 Auth/CSRF 状态和匿名时的 Query 清理契约 |
 | [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 Timeline/Impact v1/v2 与 downstream Proposal、M7-03 Collection/Health、M9 Business/M9-03 Export 与 M10 Auth 响应/Problem 的严格解码 |
+| [模型设置前端契约](./model-settings.md) | strict wire、desired/active/applied 状态、Session-only 与 Secret 生命周期 | Settings 模型面板和桌面/移动浏览器门禁 |
 | [Artifact 工作台契约](./artifact-workbench.md) | Artifact wire、Query、generation 恢复、GAP/export/publish UI 边界 | M8-01 decoder、组件、桌面/移动真实浏览器闭环已验证 |
 | [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 Timeline/Impact strict decoder、状态/幂等/异步投影门禁，以及 Graph、Collection/Health、Review/Shared Path/Interview/Memory、Export 与认证浏览器门禁 |
 

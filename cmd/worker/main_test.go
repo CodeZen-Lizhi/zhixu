@@ -18,7 +18,10 @@ import (
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
+	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
+	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
@@ -82,6 +85,45 @@ func TestNewWorkerComponentsRequiresDatabase(t *testing.T) {
 	if err == nil || components.safeWriteback != nil {
 		t.Fatalf("components=%#v err=%v", components, err)
 	}
+}
+
+func TestWorkerModelRuntimeBindingSharesOneManagedInstance(t *testing.T) {
+	staticModels, err := modelRuntimeForComposition(config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	staticBinding, err := newWorkerModelRuntimeBinding(config.ModelSettingsModeStatic, staticModels, nil)
+	if err != nil || staticBinding.revision != nil || staticBinding.instanceID != nil || len(staticBinding.runtimeWorkerOptions()) != 0 {
+		t.Fatalf("static binding=%+v err=%v", staticBinding, err)
+	}
+
+	managedConfig := config.Defaults()
+	managedConfig.ModelSettingsMode = config.ModelSettingsModeManaged
+	managedConfig.ModelSettingsKeyFile = "/run/secrets/model-settings.key"
+	managedModels, err := modelsettingsruntime.Build(managedConfig, modelsettingsdomain.ResolvedSettings{Revision: 0, Settings: modelsettingsdomain.CanonicalDisabledSettings()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := &workerIDGeneratorFake{id: foundation.ID("10000000-0000-4000-8000-000000000001")}
+	binding, err := newWorkerModelRuntimeBinding(config.ModelSettingsModeManaged, managedModels, ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := binding.runtimeWorkerOptions()
+	if ids.calls != 1 || binding.revision == nil || *binding.revision != 0 || binding.instanceID == nil || *binding.instanceID != ids.id ||
+		len(options) != 1 || options[0].ModelSettingsRevision != binding.revision || options[0].ModelRuntimeInstanceID != binding.instanceID {
+		t.Fatalf("binding=%+v options=%+v calls=%d", binding, options, ids.calls)
+	}
+}
+
+type workerIDGeneratorFake struct {
+	id    foundation.ID
+	calls int
+}
+
+func (generator *workerIDGeneratorFake) New() (foundation.ID, error) {
+	generator.calls++
+	return generator.id, nil
 }
 
 func TestDisabledChatLeavesWorkerAgentCapabilityExplicitlyUnavailable(t *testing.T) {
@@ -175,7 +217,12 @@ func TestToolWorkflowReadinessRequiresReachableNodeAndDefinition(t *testing.T) {
 
 func TestAgentApplicationBudgetAccountsForAllThreeStructuredCalls(t *testing.T) {
 	cfg := config.Defaults()
-	budget := agentApplicationBudget(cfg)
+	contract := platformmodels.ChatContract{
+		Timeout:          cfg.ChatTimeout,
+		MaxRequestBytes:  cfg.ChatMaxRequestBytes,
+		MaxResponseBytes: cfg.ChatMaxResponseBytes,
+	}
+	budget := agentApplicationBudget(contract)
 	if budget.MaxRequestBytes != cfg.ChatMaxRequestBytes*agentapplication.StructuredCallLimit ||
 		budget.MaxResponseBytes != cfg.ChatMaxResponseBytes*agentapplication.StructuredCallLimit ||
 		budget.Timeout != cfg.ChatTimeout*time.Duration(agentapplication.StructuredCallLimit) {
@@ -183,46 +230,60 @@ func TestAgentApplicationBudgetAccountsForAllThreeStructuredCalls(t *testing.T) 
 	}
 }
 
-func TestWorkerCompositionUsesSharedConfiguredEmbedderFactory(t *testing.T) {
+func TestWorkerCompositionConsumesOneFrozenModelRuntime(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var reindexFactoryCalls int
-	var foundReindexComposition bool
+	factoryCalls := 0
+	consumers := map[string]bool{
+		"newToolRuntimeComponents":      false,
+		"newAgentWorkflowComponents":    false,
+		"newArtifactWorkflowComponents": false,
+		"newReindexComponents":          false,
+	}
+	containsModels := func(node ast.Node) bool {
+		found := false
+		ast.Inspect(node, func(child ast.Node) bool {
+			identifier, ok := child.(*ast.Ident)
+			if ok && identifier.Name == "models" {
+				found = true
+				return false
+			}
+			return !found
+		})
+		return found
+	}
 	for _, declaration := range file.Decls {
 		function, ok := declaration.(*ast.FuncDecl)
 		if !ok {
 			continue
 		}
-		if function.Name.Name == "newConfiguredEmbedder" {
-			t.Fatal("worker must not own a private configured embedder factory")
-		}
-		if function.Name.Name != "newReindexComponents" {
-			continue
-		}
-		foundReindexComposition = true
 		ast.Inspect(function.Body, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			selector, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || selector.Sel.Name != "NewConfiguredEmbedder" {
-				return true
+			if selector, ok := call.Fun.(*ast.SelectorExpr); ok && (selector.Sel.Name == "NewConfiguredEmbedder" || selector.Sel.Name == "NewConfiguredChatModel") {
+				factoryCalls++
 			}
-			packageName, ok := selector.X.(*ast.Ident)
-			if ok && packageName.Name == "platformmodels" {
-				reindexFactoryCalls++
+			if function.Name.Name == "newWorkerComponentsWithModels" {
+				if identifier, ok := call.Fun.(*ast.Ident); ok {
+					if _, tracked := consumers[identifier.Name]; tracked && containsModels(call) {
+						consumers[identifier.Name] = true
+					}
+				}
 			}
 			return true
 		})
 	}
-	if !foundReindexComposition {
-		t.Fatal("worker reindex composition root was not found")
+	if factoryCalls != 0 {
+		t.Fatalf("worker composition directly called configured model factories %d times", factoryCalls)
 	}
-	if reindexFactoryCalls != 1 {
-		t.Fatalf("reindex shared configured embedder factory calls=%d want=1", reindexFactoryCalls)
+	for consumer, injected := range consumers {
+		if !injected {
+			t.Fatalf("%s did not receive the shared frozen model runtime", consumer)
+		}
 	}
 }
 

@@ -58,6 +58,7 @@ func (s *Service) BeginWorkspaceSnapshot(ctx context.Context, request BeginWorks
 	}
 	var err error
 	var fusion json.RawMessage
+	var modelSettingsRevision *int64
 	if request.EmbeddingVersionID == nil {
 		fusion, err = canonicalJSONObject(request.FusionConfig)
 		if err != nil {
@@ -67,9 +68,11 @@ func (s *Service) BeginWorkspaceSnapshot(ctx context.Context, request BeginWorks
 		if _, err := domain.ParseRRFConfig(request.FusionConfig); err != nil {
 			return domain.WorkspaceSnapshotResult{}, err
 		}
-		if err := s.validateEmbeddingVersionReference(ctx, *request.EmbeddingVersionID); err != nil {
+		embedding, err := s.validateEmbeddingVersionReference(ctx, *request.EmbeddingVersionID)
+		if err != nil {
 			return domain.WorkspaceSnapshotResult{}, err
 		}
+		modelSettingsRevision = cloneInt64(embedding.ModelSettingsRevision)
 		fusion = append(json.RawMessage(nil), request.FusionConfig...)
 	}
 	pageSize := request.PageSize
@@ -92,8 +95,8 @@ func (s *Service) BeginWorkspaceSnapshot(ctx context.Context, request BeginWorks
 	command := domain.WorkspaceSnapshotCommand{
 		IndexVersion: domain.IndexVersion{
 			ID: id, WorkspaceID: request.WorkspaceID,
-			EmbeddingVersionID: cloneID(request.EmbeddingVersionID),
-			TokenizerID:        clean(request.TokenizerID), TokenizerVersion: clean(request.TokenizerVersion),
+			EmbeddingVersionID: cloneID(request.EmbeddingVersionID), ModelSettingsRevision: modelSettingsRevision,
+			TokenizerID: clean(request.TokenizerID), TokenizerVersion: clean(request.TokenizerVersion),
 			TokenizerConfigHash: cleanHash(request.TokenizerConfigHash), FusionConfig: fusion,
 			SourceSnapshotRef: clean(request.SourceSnapshotRef), IdempotencyKey: clean(request.IdempotencyKey),
 			Status: domain.IndexStatusBuilding, DegradedCapabilities: snapshotInitialDegradations(request.EmbeddingVersionID),
@@ -141,14 +144,15 @@ func NewService(dependencies Dependencies) (*Service, error) {
 
 // RegisterEmbeddingRequest 描述一个不含凭据的不可变 Embedding 配置。
 type RegisterEmbeddingRequest struct {
-	Provider       string
-	AdapterName    string
-	AdapterVersion string
-	Model          string
-	Dimensions     int32
-	Normalization  domain.EmbeddingNormalization
-	DistanceMetric domain.DistanceMetric
-	ConfigHash     string
+	Provider              string
+	AdapterName           string
+	AdapterVersion        string
+	Model                 string
+	Dimensions            int32
+	Normalization         domain.EmbeddingNormalization
+	DistanceMetric        domain.DistanceMetric
+	ConfigHash            string
+	ModelSettingsRevision *int64
 }
 
 // RegisterEmbedding 注册或精确重放 Embedding Version。
@@ -161,16 +165,17 @@ func (s *Service) RegisterEmbedding(ctx context.Context, request RegisterEmbeddi
 		return domain.EmbeddingVersionResult{}, err
 	}
 	version := domain.EmbeddingVersion{
-		ID:             id,
-		Provider:       clean(request.Provider),
-		AdapterName:    clean(request.AdapterName),
-		AdapterVersion: clean(request.AdapterVersion),
-		Model:          clean(request.Model),
-		Dimensions:     request.Dimensions,
-		Normalization:  request.Normalization,
-		DistanceMetric: request.DistanceMetric,
-		ConfigHash:     cleanHash(request.ConfigHash),
-		CreatedAt:      s.dependencies.Clock.Now(),
+		ID:                    id,
+		Provider:              clean(request.Provider),
+		AdapterName:           clean(request.AdapterName),
+		AdapterVersion:        clean(request.AdapterVersion),
+		Model:                 clean(request.Model),
+		Dimensions:            request.Dimensions,
+		Normalization:         request.Normalization,
+		DistanceMetric:        request.DistanceMetric,
+		ConfigHash:            cleanHash(request.ConfigHash),
+		ModelSettingsRevision: cloneInt64(request.ModelSettingsRevision),
+		CreatedAt:             s.dependencies.Clock.Now(),
 	}
 	if err := domain.ValidateEmbeddingVersion(version); err != nil {
 		return domain.EmbeddingVersionResult{}, err
@@ -220,10 +225,13 @@ func (s *Service) BeginIndex(ctx context.Context, request BeginIndexRequest) (do
 	if err != nil {
 		return domain.IndexVersionResult{}, err
 	}
+	var modelSettingsRevision *int64
 	if request.EmbeddingVersionID != nil {
-		if err := s.validateEmbeddingVersionReference(ctx, *request.EmbeddingVersionID); err != nil {
+		embedding, err := s.validateEmbeddingVersionReference(ctx, *request.EmbeddingVersionID)
+		if err != nil {
 			return domain.IndexVersionResult{}, err
 		}
+		modelSettingsRevision = cloneInt64(embedding.ModelSettingsRevision)
 	}
 	if request.EmbeddingVersionID == nil && !domain.HasDegradedCapability(capabilities, domain.DegradedVector) {
 		capabilities = []domain.DegradedCapability{domain.DegradedVector}
@@ -247,22 +255,23 @@ func (s *Service) BeginIndex(ctx context.Context, request BeginIndexRequest) (do
 		return domain.IndexVersionResult{}, err
 	}
 	index := domain.IndexVersion{
-		ID:                   id,
-		WorkspaceID:          request.WorkspaceID,
-		EmbeddingVersionID:   cloneID(request.EmbeddingVersionID),
-		TokenizerID:          clean(request.TokenizerID),
-		TokenizerVersion:     clean(request.TokenizerVersion),
-		TokenizerConfigHash:  cleanHash(request.TokenizerConfigHash),
-		FusionConfig:         fusion,
-		SourceSnapshotRef:    clean(request.SourceSnapshotRef),
-		ManifestHash:         manifestHash,
-		ExpectedChunkCount:   int64(len(canonical)),
-		IdempotencyKey:       clean(request.IdempotencyKey),
-		Status:               domain.IndexStatusBuilding,
-		DegradedCapabilities: capabilities,
-		Version:              1,
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		ID:                    id,
+		WorkspaceID:           request.WorkspaceID,
+		EmbeddingVersionID:    cloneID(request.EmbeddingVersionID),
+		ModelSettingsRevision: modelSettingsRevision,
+		TokenizerID:           clean(request.TokenizerID),
+		TokenizerVersion:      clean(request.TokenizerVersion),
+		TokenizerConfigHash:   cleanHash(request.TokenizerConfigHash),
+		FusionConfig:          fusion,
+		SourceSnapshotRef:     clean(request.SourceSnapshotRef),
+		ManifestHash:          manifestHash,
+		ExpectedChunkCount:    int64(len(canonical)),
+		IdempotencyKey:        clean(request.IdempotencyKey),
+		Status:                domain.IndexStatusBuilding,
+		DegradedCapabilities:  capabilities,
+		Version:               1,
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 	build := domain.IndexBuild{IndexVersion: index, Manifest: canonical}
 	if err := domain.ValidateIndexBuild(build); err != nil {
@@ -271,20 +280,23 @@ func (s *Service) BeginIndex(ctx context.Context, request BeginIndexRequest) (do
 	return s.dependencies.Store.BeginIndex(ctx, build)
 }
 
-func (s *Service) validateEmbeddingVersionReference(ctx context.Context, embeddingVersionID foundation.ID) error {
+func (s *Service) validateEmbeddingVersionReference(ctx context.Context, embeddingVersionID foundation.ID) (domain.EmbeddingVersion, error) {
 	embedding, err := s.dependencies.Store.GetEmbeddingVersion(ctx, embeddingVersionID)
 	if err != nil {
-		return err
+		return domain.EmbeddingVersion{}, err
 	}
 	if embedding.ID != embeddingVersionID {
-		return foundation.NewError(
+		return domain.EmbeddingVersion{}, foundation.NewError(
 			foundation.ErrorConsistencyViolation,
 			"RETRIEVAL_EMBEDDING_VERSION_BINDING_INVALID",
 			false,
 			errors.New("embedding version lookup returned a different identity"),
 		)
 	}
-	return domain.ValidateEmbeddingVersion(embedding)
+	if err := domain.ValidateEmbeddingVersion(embedding); err != nil {
+		return domain.EmbeddingVersion{}, err
+	}
+	return embedding, nil
 }
 
 // BuildLexical 批量生成冻结 Manifest 对应的全文投影。

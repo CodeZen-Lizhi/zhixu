@@ -85,6 +85,7 @@ func (r *Repository) MarkStaleModelRunsUnknown(ctx context.Context, query applic
 		FROM candidates
 		WHERE run.id=candidates.id
 		RETURNING run.id::text,run.workspace_id::text,run.workflow_run_id::text,run.node_run_id::text,run.node_attempt_id::text,
+			run.model_settings_revision,
 			run.adapter_name,run.adapter_version,run.model_id,run.model_version,run.profile_id,run.profile_version,
 			run.prompt_template_id,run.prompt_template_version,run.output_schema_id,run.output_schema_version,
 				run.reduced_schema_id,run.reduced_schema_version,

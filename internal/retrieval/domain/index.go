@@ -19,26 +19,27 @@ const (
 
 // IndexVersion 是一个 Workspace 内不可变索引配置及其受控生命周期投影。
 type IndexVersion struct {
-	ID                   foundation.ID
-	WorkspaceID          foundation.ID
-	EmbeddingVersionID   *foundation.ID
-	TokenizerID          string
-	TokenizerVersion     string
-	TokenizerConfigHash  string
-	FusionConfig         json.RawMessage
-	SourceSnapshotRef    string
-	ManifestHash         string
-	ExpectedChunkCount   int64
-	SourceManifestHash   string
-	ExpectedSourceCount  *int64
-	ProcessingContract   *ProcessingContract
-	IdempotencyKey       string
-	Status               IndexStatus
-	DegradedCapabilities []DegradedCapability
-	FailureCode          string
-	Version              int64
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	ID                    foundation.ID
+	WorkspaceID           foundation.ID
+	EmbeddingVersionID    *foundation.ID
+	ModelSettingsRevision *int64
+	TokenizerID           string
+	TokenizerVersion      string
+	TokenizerConfigHash   string
+	FusionConfig          json.RawMessage
+	SourceSnapshotRef     string
+	ManifestHash          string
+	ExpectedChunkCount    int64
+	SourceManifestHash    string
+	ExpectedSourceCount   *int64
+	ProcessingContract    *ProcessingContract
+	IdempotencyKey        string
+	Status                IndexStatus
+	DegradedCapabilities  []DegradedCapability
+	FailureCode           string
+	Version               int64
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // IndexBuild 将 Index Version 与同一事务中冻结的 Manifest 绑定。
@@ -105,6 +106,12 @@ func ValidateIndexVersion(index IndexVersion) error {
 	}
 	if index.EmbeddingVersionID != nil && *index.EmbeddingVersionID == "" {
 		return invalid(ErrorCodeIndexVersionInvalid, "embedding version identity cannot be empty")
+	}
+	if index.ModelSettingsRevision != nil && *index.ModelSettingsRevision < 0 {
+		return invalid(ErrorCodeIndexVersionInvalid, "index model settings revision cannot be negative")
+	}
+	if index.EmbeddingVersionID == nil && index.ModelSettingsRevision != nil {
+		return invalid(ErrorCodeIndexVersionInvalid, "FTS-only index cannot carry an embedding model settings revision")
 	}
 	if len(index.FusionConfig) == 0 || !json.Valid(index.FusionConfig) {
 		return invalid(ErrorCodeIndexVersionInvalid, "fusion config must be valid json")
@@ -199,6 +206,7 @@ func ValidateIndexTransitionCommand(current IndexVersion, command IndexTransitio
 func SameIndexBuildBinding(left, right IndexBuild) bool {
 	if left.IndexVersion.WorkspaceID != right.IndexVersion.WorkspaceID ||
 		!optionalIDEqual(left.IndexVersion.EmbeddingVersionID, right.IndexVersion.EmbeddingVersionID) ||
+		!optionalInt64Equal(left.IndexVersion.ModelSettingsRevision, right.IndexVersion.ModelSettingsRevision) ||
 		left.IndexVersion.TokenizerID != right.IndexVersion.TokenizerID ||
 		left.IndexVersion.TokenizerVersion != right.IndexVersion.TokenizerVersion ||
 		left.IndexVersion.TokenizerConfigHash != right.IndexVersion.TokenizerConfigHash ||

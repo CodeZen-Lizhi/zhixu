@@ -106,12 +106,12 @@ func (r *Repository) BeginWorkspaceSnapshot(ctx context.Context, command domain.
 		return domain.WorkspaceSnapshotResult{}, consistency("REINDEX_INDEX_DEGRADATION_INVALID", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO retrieval.index_version(
-        id,workspace_id,embedding_version_id,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
+        id,workspace_id,embedding_version_id,model_settings_revision,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
         source_snapshot_ref,manifest_hash,expected_chunk_count,source_manifest_hash,expected_source_count,
 		source_parser_id,source_parser_version,source_parser_config_hash,source_chunk_strategy_version,source_schema_version,
         idempotency_key,status,degraded_capabilities,failure_code,version,created_at,updated_at
-    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'building',$19::jsonb,NULL,1,$20,$20)`,
-		string(index.ID), string(index.WorkspaceID), optionalID(index.EmbeddingVersionID), index.TokenizerID, index.TokenizerVersion,
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'building',$20::jsonb,NULL,1,$21,$21)`,
+		string(index.ID), string(index.WorkspaceID), optionalID(index.EmbeddingVersionID), nullableInt64(index.ModelSettingsRevision), index.TokenizerID, index.TokenizerVersion,
 		index.TokenizerConfigHash, index.FusionConfig, index.SourceSnapshotRef, index.ManifestHash,
 		index.ExpectedChunkCount, index.SourceManifestHash, sourceCount, index.ProcessingContract.ParserID,
 		index.ProcessingContract.ParserVersion, index.ProcessingContract.ParserConfigHash,
@@ -661,6 +661,7 @@ func replayWorkspaceSnapshot(ctx context.Context, tx pgx.Tx, command domain.Work
 
 func sameSnapshotIndexConfig(existing, requested domain.IndexVersion) bool {
 	return existing.WorkspaceID == requested.WorkspaceID && sameSnapshotEmbeddingID(existing.EmbeddingVersionID, requested.EmbeddingVersionID) &&
+		sameOptionalInt64(existing.ModelSettingsRevision, requested.ModelSettingsRevision) &&
 		existing.TokenizerID == requested.TokenizerID && existing.TokenizerVersion == requested.TokenizerVersion &&
 		existing.TokenizerConfigHash == requested.TokenizerConfigHash && domain.SameJSONValue(existing.FusionConfig, requested.FusionConfig) &&
 		existing.SourceSnapshotRef == requested.SourceSnapshotRef && existing.IdempotencyKey == requested.IdempotencyKey &&

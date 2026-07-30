@@ -25,6 +25,8 @@ type ExecutionContext struct {
 	NodeRunID         foundation.ID
 	NodeAttemptID     foundation.ID
 	NodeKind          string
+	// ModelSettingsRevision 来自已持久化 Attempt；nil 明确表示 static/unmanaged 执行。
+	ModelSettingsRevision *int64
 	// NodeVersion 是 Claim 提交后的持久乐观锁版本，可与 Attempt/LeaseOwner 共同构造执行 Fence。
 	NodeVersion        int64
 	InputSchemaVersion int

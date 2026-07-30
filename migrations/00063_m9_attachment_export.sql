@@ -1,5 +1,205 @@
 -- +goose Up
 
+-- Some installations recorded migration 00036 before its final export
+-- hardening shape was published. Mark only that historical shape so the
+-- compatibility backfill cannot rewrite already-hardened export facts.
+ALTER TABLE ops.export_job
+    ADD COLUMN IF NOT EXISTS migration_00063_needs_export_hardening boolean NOT NULL DEFAULT false;
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM information_schema.columns
+        WHERE table_schema = 'ops'
+          AND table_name = 'export_job'
+          AND column_name IN (
+              'request_hash','request_ttl_seconds','version','read_model_revision','exact_count',
+              'prepared_at','prepared_staging_path','cleanup_status','cleanup_attempt_count',
+              'cleanup_error','cleanup_updated_at','file_deleted_at'
+          )
+    ) < 12 THEN
+        UPDATE ops.export_job
+        SET migration_00063_needs_export_hardening = true;
+    END IF;
+END
+$$;
+-- +goose StatementEnd
+
+ALTER TABLE ops.export_job
+    ADD COLUMN IF NOT EXISTS request_hash text,
+    ADD COLUMN IF NOT EXISTS request_ttl_seconds bigint,
+    ADD COLUMN IF NOT EXISTS version bigint,
+    ADD COLUMN IF NOT EXISTS read_model_revision text,
+    ADD COLUMN IF NOT EXISTS exact_count bigint,
+    ADD COLUMN IF NOT EXISTS prepared_at timestamptz,
+    ADD COLUMN IF NOT EXISTS prepared_staging_path text,
+    ADD COLUMN IF NOT EXISTS cleanup_status text NOT NULL DEFAULT 'NOT_REQUIRED',
+    ADD COLUMN IF NOT EXISTS cleanup_attempt_count integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS cleanup_error text,
+    ADD COLUMN IF NOT EXISTS cleanup_updated_at timestamptz,
+    ADD COLUMN IF NOT EXISTS file_deleted_at timestamptz;
+
+UPDATE ops.export_job
+SET expires_at = created_at + interval '24 hours'
+WHERE migration_00063_needs_export_hardening
+  AND (expires_at IS NULL OR expires_at <= created_at);
+
+UPDATE ops.export_job
+SET collection_id = CASE
+        WHEN collection_id IS NOT NULL THEN collection_id
+        WHEN query_definition->>'collection_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            THEN (query_definition->>'collection_id')::uuid
+        ELSE NULL
+    END,
+    collection_version = CASE
+        WHEN collection_version IS NOT NULL THEN collection_version
+        WHEN query_definition->>'collection_version' ~ '^[1-9][0-9]*$'
+            THEN (query_definition->>'collection_version')::bigint
+        ELSE NULL
+    END,
+    query_hash = COALESCE(query_hash, NULLIF(query_definition->>'query_hash', ''))
+WHERE migration_00063_needs_export_hardening;
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM ops.export_job
+        WHERE migration_00063_needs_export_hardening
+          AND (
+              kind NOT IN ('MARKDOWN', 'METADATA_JSON')
+              OR collection_id IS NULL
+              OR collection_version IS NULL
+              OR collection_version < 1
+              OR query_hash IS NULL
+              OR query_hash !~ '^[0-9a-f]{64}$'
+          )
+    ) THEN
+        RAISE EXCEPTION 'legacy export rows require a delivered kind and complete Collection binding before M9-03 hardening'
+            USING ERRCODE = '55000';
+    END IF;
+END
+$$;
+-- +goose StatementEnd
+
+UPDATE ops.export_job
+SET fields = '["object_type","id","title","summary","status","topic","source","relations","health","confidence","created_at","updated_at"]'::jsonb
+WHERE migration_00063_needs_export_hardening
+  AND jsonb_array_length(fields) = 0;
+
+UPDATE ops.export_job
+SET request_ttl_seconds = COALESCE(
+        request_ttl_seconds,
+        LEAST(604800, GREATEST(1, CEIL(EXTRACT(EPOCH FROM (expires_at - created_at)))::bigint))
+    ),
+    request_hash = COALESCE(request_hash, md5('legacy-export:' || id::text) || md5(id::text || ':request')),
+    version = COALESCE(version, 1),
+    redaction_policy = CASE
+        WHEN redaction_policy = 'FULL' AND NOT include_sensitive THEN 'MASKED'
+        ELSE redaction_policy
+    END
+WHERE migration_00063_needs_export_hardening;
+
+UPDATE ops.export_job
+SET expires_at = created_at + make_interval(secs => request_ttl_seconds::double precision)
+WHERE migration_00063_needs_export_hardening;
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM ops.export_job
+        WHERE migration_00063_needs_export_hardening
+          AND (file_path IS NULL) <> (file_hash IS NULL)
+    ) THEN
+        RAISE EXCEPTION 'legacy export result has an incomplete path/hash binding'
+            USING ERRCODE = '55000';
+    END IF;
+END
+$$;
+-- +goose StatementEnd
+
+UPDATE ops.export_job
+SET read_model_revision = COALESCE(read_model_revision, request_hash),
+    exact_count = COALESCE(exact_count, 0),
+    prepared_at = COALESCE(prepared_at, completed_at, updated_at),
+    prepared_staging_path = COALESCE(
+        prepared_staging_path,
+        '.knowledge/exports/.staging/' || id::text || '-' || repeat('0', 32) ||
+            CASE WHEN kind = 'MARKDOWN' THEN '.md.stage' ELSE '.json.stage' END
+    ),
+    started_at = COALESCE(started_at, created_at),
+    completed_at = COALESCE(completed_at, updated_at),
+    status = CASE WHEN status = 'SUCCEEDED' THEN 'SUCCEEDED' ELSE 'EXPIRED' END,
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    error_code = NULL,
+    error_message = NULL,
+    cleanup_status = CASE WHEN status = 'SUCCEEDED' THEN 'NOT_REQUIRED' ELSE 'PENDING' END,
+    cleanup_attempt_count = 0,
+    cleanup_error = NULL,
+    cleanup_updated_at = NULL,
+    file_deleted_at = NULL
+WHERE migration_00063_needs_export_hardening
+  AND file_path IS NOT NULL
+  AND file_hash IS NOT NULL;
+
+UPDATE ops.export_job
+SET status = 'PENDING', lease_owner = NULL, lease_expires_at = NULL,
+    completed_at = NULL, error_code = NULL, error_message = NULL,
+    cleanup_status = 'NOT_REQUIRED', cleanup_attempt_count = 0,
+    cleanup_error = NULL, cleanup_updated_at = NULL, file_deleted_at = NULL
+WHERE migration_00063_needs_export_hardening
+  AND status = 'RUNNING'
+  AND prepared_at IS NULL;
+
+UPDATE ops.export_job
+SET started_at = COALESCE(started_at, created_at),
+    completed_at = COALESCE(completed_at, updated_at),
+    error_code = COALESCE(NULLIF(btrim(error_code), ''), 'EXPORT_LEGACY_FAILED'),
+    error_message = COALESCE(NULLIF(btrim(error_message), ''), 'legacy export failed'),
+    lease_owner = NULL, lease_expires_at = NULL,
+    cleanup_status = 'NOT_REQUIRED', cleanup_attempt_count = 0,
+    cleanup_error = NULL, cleanup_updated_at = NULL, file_deleted_at = NULL
+WHERE migration_00063_needs_export_hardening
+  AND status = 'FAILED';
+
+UPDATE ops.export_job
+SET completed_at = COALESCE(completed_at, updated_at),
+    error_code = NULL, error_message = NULL,
+    lease_owner = NULL, lease_expires_at = NULL,
+    cleanup_status = 'PENDING', cleanup_attempt_count = 0,
+    cleanup_error = NULL, cleanup_updated_at = NULL, file_deleted_at = NULL
+WHERE migration_00063_needs_export_hardening
+  AND status = 'EXPIRED';
+
+UPDATE ops.export_job
+SET error_code = NULL, error_message = NULL,
+    lease_owner = NULL, lease_expires_at = NULL,
+    cleanup_status = 'NOT_REQUIRED', cleanup_attempt_count = 0,
+    cleanup_error = NULL, cleanup_updated_at = NULL, file_deleted_at = NULL
+WHERE migration_00063_needs_export_hardening
+  AND status = 'CANCELLED';
+
+UPDATE ops.export_job
+SET completed_at = NULL, error_code = NULL, error_message = NULL,
+    lease_owner = NULL, lease_expires_at = NULL,
+    cleanup_status = 'NOT_REQUIRED', cleanup_attempt_count = 0,
+    cleanup_error = NULL, cleanup_updated_at = NULL, file_deleted_at = NULL
+WHERE migration_00063_needs_export_hardening
+  AND status = 'PENDING';
+
+ALTER TABLE ops.export_job
+    ALTER COLUMN expires_at SET NOT NULL,
+    ALTER COLUMN request_hash SET NOT NULL,
+    ALTER COLUMN request_ttl_seconds SET NOT NULL,
+    ALTER COLUMN version SET NOT NULL,
+    DROP COLUMN migration_00063_needs_export_hardening;
+
 -- M9 residual extends the durable Export union without rewriting 00036.
 ALTER TABLE ops.export_job
     ADD COLUMN IF NOT EXISTS scope_kind text NOT NULL DEFAULT 'COLLECTION',
@@ -22,7 +222,14 @@ VALUES('workspace-attachments','workspace-attachments/v1',false)
 ON CONFLICT (capability_key) DO NOTHING;
 
 ALTER TABLE ops.export_job
-	DROP CONSTRAINT IF EXISTS export_job_kind_check,
+    DROP CONSTRAINT IF EXISTS export_job_kind_check,
+    DROP CONSTRAINT IF EXISTS ops_export_job_success_binding,
+    DROP CONSTRAINT IF EXISTS ops_export_job_attempt_count,
+    DROP CONSTRAINT IF EXISTS ops_export_job_download_count,
+    DROP CONSTRAINT IF EXISTS ops_export_job_file_size,
+    DROP CONSTRAINT IF EXISTS ops_export_job_lease_binding,
+    DROP CONSTRAINT IF EXISTS ops_export_job_path_safe,
+    DROP CONSTRAINT IF EXISTS ops_export_job_query_hash,
     DROP CONSTRAINT IF EXISTS ops_export_job_supported_kind,
     ADD CONSTRAINT ops_export_job_supported_kind
         CHECK (kind IN ('MARKDOWN','METADATA_JSON','ATTACHMENTS_ZIP')),
@@ -34,6 +241,16 @@ ALTER TABLE ops.export_job
         (scope_kind='COLLECTION' AND (redaction_policy='FULL')=include_sensitive)
         OR (scope_kind='WORKSPACE_ATTACHMENTS' AND redaction_policy='RAW_USER_OWNED' AND NOT include_sensitive)
     ),
+    DROP CONSTRAINT IF EXISTS ops_export_job_request_hash,
+    ADD CONSTRAINT ops_export_job_request_hash
+        CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+    DROP CONSTRAINT IF EXISTS ops_export_job_request_ttl,
+    ADD CONSTRAINT ops_export_job_request_ttl CHECK (
+        request_ttl_seconds BETWEEN 1 AND 604800
+        AND expires_at=created_at+make_interval(secs => request_ttl_seconds::double precision)
+    ),
+    DROP CONSTRAINT IF EXISTS ops_export_job_version,
+    ADD CONSTRAINT ops_export_job_version CHECK (version>0),
     DROP CONSTRAINT IF EXISTS ops_export_job_scope_binding,
     ADD CONSTRAINT ops_export_job_scope_binding CHECK (
         ((
@@ -55,6 +272,11 @@ ALTER TABLE ops.export_job
             AND fields='[]'::jsonb
         )) IS TRUE
     ),
+    DROP CONSTRAINT IF EXISTS ops_export_job_collection_workspace,
+    ADD CONSTRAINT ops_export_job_collection_workspace
+        FOREIGN KEY (collection_id,workspace_id)
+        REFERENCES learning.smart_collection(id,workspace_id)
+        ON DELETE RESTRICT,
     DROP CONSTRAINT IF EXISTS ops_export_job_counters,
     ADD CONSTRAINT ops_export_job_counters CHECK (
         file_size>=0 AND attempt_count>=0 AND download_count>=0 AND cleanup_attempt_count>=0
@@ -99,6 +321,73 @@ ALTER TABLE ops.export_job
         OR (kind='ATTACHMENTS_ZIP' AND file_path='.knowledge/exports/'||id::text||'.zip'
             AND prepared_staging_path ~ ('^\.knowledge/exports/\.staging/'||id::text||'-[0-9a-f]{32}\.zip\.stage$'))
         ) IS TRUE
+    ),
+    DROP CONSTRAINT IF EXISTS ops_export_job_lifecycle_binding,
+    ADD CONSTRAINT ops_export_job_lifecycle_binding CHECK (
+        CASE status
+            WHEN 'PENDING' THEN
+                prepared_at IS NULL AND completed_at IS NULL
+                AND lease_owner IS NULL AND lease_expires_at IS NULL
+                AND error_code IS NULL AND error_message IS NULL
+            WHEN 'RUNNING' THEN
+                started_at IS NOT NULL AND completed_at IS NULL
+                AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL
+                AND error_code IS NULL AND error_message IS NULL
+            WHEN 'SUCCEEDED' THEN
+                prepared_at IS NOT NULL AND started_at IS NOT NULL AND completed_at IS NOT NULL
+                AND lease_owner IS NULL AND lease_expires_at IS NULL
+                AND error_code IS NULL AND error_message IS NULL
+            WHEN 'FAILED' THEN
+                started_at IS NOT NULL AND completed_at IS NOT NULL
+                AND lease_owner IS NULL AND lease_expires_at IS NULL
+                AND error_code IS NOT NULL AND error_message IS NOT NULL
+            WHEN 'EXPIRED' THEN
+                completed_at IS NOT NULL
+                AND lease_owner IS NULL AND lease_expires_at IS NULL
+                AND error_code IS NULL AND error_message IS NULL
+            WHEN 'CANCELLED' THEN
+                prepared_at IS NULL
+                AND lease_owner IS NULL AND lease_expires_at IS NULL
+                AND error_code IS NULL AND error_message IS NULL
+            ELSE false
+        END
+    ),
+    DROP CONSTRAINT IF EXISTS ops_export_job_cleanup_binding,
+    ADD CONSTRAINT ops_export_job_cleanup_binding CHECK (
+        (status='EXPIRED')=(cleanup_status<>'NOT_REQUIRED')
+        AND CASE cleanup_status
+            WHEN 'NOT_REQUIRED' THEN
+                cleanup_attempt_count=0 AND cleanup_error IS NULL
+                AND cleanup_updated_at IS NULL AND file_deleted_at IS NULL
+            WHEN 'PENDING' THEN
+                cleanup_attempt_count=0 AND cleanup_error IS NULL
+                AND cleanup_updated_at IS NULL AND file_deleted_at IS NULL
+            WHEN 'FAILED' THEN
+                cleanup_attempt_count>0 AND cleanup_error IS NOT NULL
+                AND cleanup_updated_at IS NOT NULL AND file_deleted_at IS NULL
+            WHEN 'SUCCEEDED' THEN
+                cleanup_attempt_count>0 AND cleanup_error IS NULL
+                AND cleanup_updated_at IS NOT NULL AND file_deleted_at IS NOT NULL
+                AND file_deleted_at=cleanup_updated_at
+            ELSE false
+        END
+    ),
+    DROP CONSTRAINT IF EXISTS ops_export_job_download_binding,
+    ADD CONSTRAINT ops_export_job_download_binding CHECK (
+        (download_count=0 AND last_downloaded_at IS NULL)
+        OR (download_count>0 AND last_downloaded_at IS NOT NULL AND status IN ('SUCCEEDED','EXPIRED'))
+    ),
+    DROP CONSTRAINT IF EXISTS ops_export_job_time_order,
+    ADD CONSTRAINT ops_export_job_time_order CHECK (
+        updated_at>=created_at
+        AND expires_at>created_at
+        AND (started_at IS NULL OR started_at BETWEEN created_at AND updated_at)
+        AND (prepared_at IS NULL OR prepared_at BETWEEN created_at AND updated_at)
+        AND (completed_at IS NULL OR completed_at BETWEEN created_at AND updated_at)
+        AND (last_downloaded_at IS NULL OR last_downloaded_at BETWEEN created_at AND updated_at)
+        AND (lease_expires_at IS NULL OR lease_expires_at>updated_at)
+        AND (cleanup_updated_at IS NULL OR cleanup_updated_at BETWEEN created_at AND updated_at)
+        AND (file_deleted_at IS NULL OR file_deleted_at BETWEEN created_at AND updated_at)
     ),
     DROP CONSTRAINT IF EXISTS ops_export_job_text_bounds,
     ADD CONSTRAINT ops_export_job_text_bounds CHECK (
@@ -165,17 +454,40 @@ END
 $$;
 -- +goose StatementEnd
 
+DROP TRIGGER IF EXISTS trg_ops_export_job_update ON ops.export_job;
+CREATE TRIGGER trg_ops_export_job_update
+BEFORE UPDATE ON ops.export_job
+FOR EACH ROW EXECUTE FUNCTION ops.enforce_export_job_update();
+
+CREATE INDEX IF NOT EXISTS idx_ops_export_pending_recovery
+    ON ops.export_job(status,lease_expires_at,created_at,id)
+    WHERE status IN ('PENDING','RUNNING');
+CREATE INDEX IF NOT EXISTS idx_ops_export_collection
+    ON ops.export_job(workspace_id,collection_id,created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_ops_export_expiry_candidate
+    ON ops.export_job(expires_at,id)
+    WHERE status IN ('PENDING','RUNNING','SUCCEEDED','FAILED');
+CREATE INDEX IF NOT EXISTS idx_ops_export_cleanup_candidate
+    ON ops.export_job(cleanup_status,cleanup_updated_at,updated_at,id)
+    WHERE status='EXPIRED' AND file_deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ops_export_prepared_staging
+    ON ops.export_job(workspace_id,prepared_staging_path)
+    WHERE prepared_staging_path IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_ops_export_attachment
     ON ops.export_job(workspace_id,created_at DESC,id DESC)
     WHERE scope_kind='WORKSPACE_ATTACHMENTS';
 
 -- +goose Down
 
+LOCK TABLE ops.export_job, ops.export_capability IN ACCESS EXCLUSIVE MODE;
+
 -- +goose StatementBegin
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM ops.export_job WHERE scope_kind='WORKSPACE_ATTACHMENTS' LIMIT 1) THEN
-        RAISE EXCEPTION 'attachment export history cannot be represented by the previous schema'
+    IF EXISTS (SELECT 1 FROM ops.export_job WHERE scope_kind='WORKSPACE_ATTACHMENTS' LIMIT 1)
+       OR EXISTS (SELECT 1 FROM ops.export_capability WHERE enabled LIMIT 1) THEN
+        RAISE EXCEPTION 'enabled attachment export capability or history cannot be represented by the previous schema'
             USING ERRCODE='55000';
     END IF;
 END

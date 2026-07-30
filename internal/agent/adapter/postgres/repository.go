@@ -81,7 +81,7 @@ var _ application.ModelRunRepository = (*Repository)(nil)
 
 const insertModelRunSQL = `
 	INSERT INTO agent.model_run(
-		id,workspace_id,workflow_run_id,node_run_id,node_attempt_id,
+		id,workspace_id,workflow_run_id,node_run_id,node_attempt_id,model_settings_revision,
 		adapter_name,adapter_version,model_id,model_version,profile_id,profile_version,
 		prompt_template_id,prompt_template_version,output_schema_id,output_schema_version,
 		reduced_schema_id,reduced_schema_version,
@@ -89,12 +89,13 @@ const insertModelRunSQL = `
 		memory_snapshot_id,memory_context_schema_version,memory_context_digest,memory_context_item_count,memory_context_bytes,
 		status,final_result_type,error_code,version,started_at,updated_at,completed_at
 	) VALUES(
-		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
+		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33
 	) ON CONFLICT DO NOTHING`
 
 func modelRunArgs(run domain.ModelRun) []any {
 	return []any{
 		string(run.ID), string(run.WorkspaceID), string(run.WorkflowRunID), string(run.NodeRunID), string(run.NodeAttemptID),
+		nullableInt64(run.ModelSettingsRevision),
 		run.Model.AdapterName, run.Model.AdapterVersion, run.Model.ModelID, run.Model.ModelVersion,
 		run.Profile.ID, run.Profile.Version, run.Prompt.ID, run.Prompt.Version, run.Schema.ID, run.Schema.Version,
 		run.ReducedSchema.ID, run.ReducedSchema.Version,

@@ -62,6 +62,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 |---|---|---|
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
 | [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
+| [模型设置与开发运行时契约](./model-settings-runtime.md) | desired/active/applied revision、AEAD、冻结 Model Runtime、受控 restart 与 Docker 生命周期 | managed Settings 与开发一键启动的实现和真实验收门禁 |
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker/Web 门禁 | M7-04 与遗留收口已验证；下游 owner executor、Document/Eval impact 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
 | [可恢复异步 Export 契约](./export-contract.md) | Tagged Job、Collection scan、附件 ZIP、prepared result、流式下载、Audit 与清理 | Collection Markdown/Metadata JSON 和 Workspace Attachments ZIP 已交付并关闭 AC-33；Evaluation/Audit 内容导出保持 deferred |

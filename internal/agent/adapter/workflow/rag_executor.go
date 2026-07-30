@@ -186,7 +186,8 @@ func (executor *RAGWorkflowExecutor) prepareRAGModelRun(execution workflowapplic
 	run := agentdomain.ModelRun{
 		ID: runID, WorkspaceID: execution.WorkspaceID, WorkflowRunID: execution.RunID,
 		NodeRunID: execution.NodeRunID, NodeAttemptID: execution.NodeAttemptID,
-		Model: snapshot.Profile.Model, Profile: snapshot.Profile.Ref, Prompt: snapshot.Prompt.Ref,
+		ModelSettingsRevision: cloneOptionalInt64(execution.ModelSettingsRevision),
+		Model:                 snapshot.Profile.Model, Profile: snapshot.Profile.Ref, Prompt: snapshot.Prompt.Ref,
 		Schema: snapshot.Schema.Ref, ReducedSchema: snapshot.ReducedSchema.Ref,
 		MemoryContext: memoryContext,
 		Status:        agentdomain.ModelRunRunning, Version: 1, CreatedAt: now, UpdatedAt: now,

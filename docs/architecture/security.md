@@ -101,6 +101,11 @@ Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 �
 ## 7. Secret
 
 - 环境变量或 Secret File。
+- managed 模型主密钥只存在 Compose named volume；Key init 只创建缺失文件，不覆盖既有 Key。API、Worker、
+  modelctl 只读挂载，Migrate、Proxy、前端和应用 Workspace 均不可访问。
+- 模型 API Key 只允许请求瞬时明文、短生命周期进程内 Secret buffer 和数据库 AES-256-GCM 密文；AAD 绑定
+  revision、用途、schema、Provider 与规范化 Endpoint。响应、Problem、Audit、日志、metric、trace、URL、
+  Browser Storage、镜像 history 和配置摘要均不得出现明文、密文、Key 长度或完整 Endpoint。
 - UI 只显示掩码。
 - 不进入 DB 导出。
 - 不发送给模型。
@@ -143,6 +148,9 @@ Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 �
 - 出站超时和大小。
 - 公开域名 Allowlist 只能收窄访问范围，不能允许 loopback、private、link-local、multicast、unspecified、metadata 或其他保留地址。
 - 每一跳固定使用本次校验后的 IP snapshot，保留 Host/TLS ServerName，禁止环境代理和校验后的二次 DNS。
+- 模型正式调用与 Settings Test 复用同一专用 Transport：`Proxy=nil`、禁止 redirect、每次建立新连接重新解析
+  全部 A/AAAA；任一地址不公开则整组拒绝，再按解析顺序尝试已验证地址。仅受控 Ollama preset 允许精确
+  `http://127.0.0.1:11434` relay，不扩展为任意 loopback 或私网 allowlist。
 
 ## 11. Web
 
@@ -193,6 +201,9 @@ Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 �
 M6-03 的 `workflow.tool_call` 是 Tool 执行事实和受限安全记录，不等同于 M10 的通用 append-only Audit：
 它只保存版本化身份、状态、Hash、字节数、受控摘要和稳定引用，不保存 raw Prompt/参数/输出、正文、
 Credential、Authorization、Cookie、绝对路径或 stderr。M10 仍需实现跨模块 Audit 查询、留存和 UI。
+
+模型设置保存必须与 append-only Audit 在同一数据库事务提交。Audit 只记录 action、revision、Provider 和
+`api_key_configured`，不记录 draft、Endpoint、Secret、密文或 runtime instance id；Audit 失败时 revision 保存回滚。
 
 ## 16. 安全失败模式
 

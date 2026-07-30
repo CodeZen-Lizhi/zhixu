@@ -5,8 +5,11 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly REQUEST_TIMEOUT_SECONDS="${ZHIXU_COMPOSE_SMOKE_REQUEST_TIMEOUT_SECONDS:-15}"
+
+source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"
 
 STATE_DIR=""
 PROJECT_NAME=""
@@ -41,7 +44,7 @@ PY
 }
 
 compose() {
-  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
+  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
 }
 
 run_compose_step() {
@@ -55,15 +58,22 @@ run_compose_step() {
 
 cleanup() {
   local exit_code=$?
-  trap - EXIT INT TERM
+  local cleanup_exit=0
+  trap - EXIT HUP INT TERM
   if [[ -n "${PROJECT_NAME}" ]]; then
-    compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+    cleanup_compose_smoke_project_images "${PROJECT_NAME}" || cleanup_exit=$?
   fi
   if [[ -n "${STATE_DIR}" ]]; then
     chmod -R u+rwX "${STATE_DIR}" >/dev/null 2>&1 || true
-    rm -rf -- "${STATE_DIR}" >/dev/null 2>&1 || true
+    if ! rm -rf -- "${STATE_DIR}" >/dev/null 2>&1; then
+      log "could not remove disposable state"
+      cleanup_exit=1
+    fi
   fi
-  exit "${exit_code}"
+  if [[ "${exit_code}" -ne 0 ]]; then
+    exit "${exit_code}"
+  fi
+  exit "${cleanup_exit}"
 }
 
 request() {
@@ -102,7 +112,10 @@ main() {
   [[ "${REQUEST_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]] || fail "ZHIXU_COMPOSE_SMOKE_REQUEST_TIMEOUT_SECONDS must be a positive integer"
 
   STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zhixu-compose-auth-smoke.XXXXXX" 2>/dev/null)" || fail "could not allocate disposable state"
-  trap cleanup EXIT INT TERM
+  trap cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   local run_id http_port bootstrap_response session_headers session_response csrf_token
   local rejected_response create_response list_response revoke_response logout_response token_payload token_id api_token
@@ -138,10 +151,17 @@ main() {
   mkdir -p "${STATE_DIR}/workspace"
   chmod a+rwX "${STATE_DIR}/workspace"
   python3 "${SCRIPT_DIR}/compose_auth_check.py" -- \
-    docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" config --format json
-  log "building and starting required-auth Compose stack"
+    docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" --env-file "${ENV_FILE}" config --format json
+  log "building required-auth Compose stack"
   run_compose_step "Compose image build" build
-  run_compose_step "Compose startup" up --detach --wait
+  log "starting PostgreSQL, one-shot initialization, and runtime ingress"
+  run_compose_step "PostgreSQL startup" up --detach --wait postgres
+  run_compose_step "Model settings key initialization" run --rm --no-deps -T model-settings-key-init
+  run_compose_step "Database migration" run --rm --no-deps -T migrate
+  run_compose_step "API and Worker startup" up --detach --no-deps --wait app worker
+  run_compose_step "Model relay startup" up --detach --no-deps --wait app-model-relay worker-model-relay
+  run_compose_step "Loopback firewall" run --rm --no-deps -T firewall
+  run_compose_step "Ingress proxy startup" up --detach --no-deps --wait proxy
   log "checking bridge-peer rejection"
   assert_bridge_peer_rejected
 

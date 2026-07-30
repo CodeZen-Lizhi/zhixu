@@ -5,10 +5,13 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly DEFAULT_ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly TIMEOUT_SECONDS="${ZHIXU_COMPOSE_SMOKE_TIMEOUT_SECONDS:-240}"
 readonly POLL_INTERVAL_SECONDS="${ZHIXU_COMPOSE_SMOKE_POLL_INTERVAL_SECONDS:-2}"
 readonly REQUEST_TIMEOUT_SECONDS="${ZHIXU_COMPOSE_SMOKE_REQUEST_TIMEOUT_SECONDS:-15}"
+
+source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"
 
 STATE_DIR=""
 PROJECT_NAME=""
@@ -35,15 +38,22 @@ require_command() {
 
 cleanup() {
   local exit_code=$?
-  trap - EXIT INT TERM
+  local cleanup_exit=0
+  trap - EXIT HUP INT TERM
   if [[ -n "${PROJECT_NAME}" ]]; then
-    docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${DEFAULT_ENV_FILE}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+    cleanup_compose_smoke_project_images "${PROJECT_NAME}" || cleanup_exit=$?
   fi
   if [[ -n "${STATE_DIR}" ]]; then
     chmod -R u+rwX "${STATE_DIR}" >/dev/null 2>&1 || true
-    rm -rf -- "${STATE_DIR}" >/dev/null 2>&1 || true
+    if ! rm -rf -- "${STATE_DIR}" >/dev/null 2>&1; then
+      log "could not remove disposable state"
+      cleanup_exit=1
+    fi
   fi
-  exit "${exit_code}"
+  if [[ "${exit_code}" -ne 0 ]]; then
+    exit "${exit_code}"
+  fi
+  exit "${cleanup_exit}"
 }
 
 allocate_port() {
@@ -66,7 +76,7 @@ PY
 }
 
 compose() {
-  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${DEFAULT_ENV_FILE}" "$@"
+  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" --env-file "${DEFAULT_ENV_FILE}" "$@"
 }
 
 run_compose_step() {
@@ -204,7 +214,10 @@ main() {
   [[ "${REQUEST_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]] || fail "ZHIXU_COMPOSE_SMOKE_REQUEST_TIMEOUT_SECONDS must be a positive integer"
 
   STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zhixu-compose-search-smoke.XXXXXX" 2>/dev/null)" || fail "could not allocate disposable state"
-  trap cleanup EXIT INT TERM
+  trap cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   local run_id search_token workspace_host_root target_path
   run_id="$(random_hex 6)"
   PROJECT_NAME="zhixu-search-smoke-${run_id}"
@@ -245,8 +258,14 @@ main() {
   run_compose_step "Git workspace initialization" run --rm --no-deps --entrypoint sh app -c \
     'git -C /workspace/project init --initial-branch=main >/dev/null && git -C /workspace/project config user.name "ZHIXU Compose Smoke" && git -C /workspace/project config user.email "compose-smoke@example.invalid" && git -C /workspace/project add -- docs/search-smoke.md && git -C /workspace/project commit -m "base" >/dev/null'
 
-  log "starting API, Worker and PostgreSQL"
-  run_compose_step "Compose startup" up --detach --wait
+  log "starting PostgreSQL, one-shot initialization, and API/Worker ingress"
+  run_compose_step "PostgreSQL startup" up --detach --wait postgres
+  run_compose_step "Model settings key initialization" run --rm --no-deps -T model-settings-key-init
+  run_compose_step "Database migration" run --rm --no-deps -T migrate
+  run_compose_step "API and Worker startup" up --detach --no-deps --wait app worker
+  run_compose_step "Model relay startup" up --detach --no-deps --wait app-model-relay worker-model-relay
+  run_compose_step "Loopback firewall" run --rm --no-deps -T firewall
+  run_compose_step "Ingress proxy startup" up --detach --no-deps --wait proxy
   authenticate
 
   local workspace_payload workspace_id source_version_id base_hash ingestion_payload

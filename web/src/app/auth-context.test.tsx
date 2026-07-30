@@ -17,8 +17,8 @@ const session = {
 };
 
 const Probe = () => {
-  const { state, signOut } = useAuth();
-  return <><output data-testid="auth-state">{state.status}:{state.mode}</output><button type="button" onClick={() => void signOut().catch(() => undefined)}>退出</button></>;
+  const { state, refresh, signOut } = useAuth();
+  return <><output data-testid="auth-state">{state.status}:{state.mode}</output><output data-testid="session-id">{state.session?.id ?? "none"}</output><button type="button" onClick={() => void refresh()}>刷新认证</button><button type="button" onClick={() => void signOut().catch(() => undefined)}>退出</button></>;
 };
 
 const renderAuth = (seedClient?: (client: QueryClient) => void) => {
@@ -129,6 +129,69 @@ describe("AuthProvider/AuthBoundary", () => {
       newValue: null,
     }));
     expect(await screen.findByRole("heading", { name: "输入 Bootstrap Token" })).toBeInTheDocument();
+  });
+
+  it("跨 Tab 替换 Session 时先清除旧 Model Settings query", async () => {
+    const originalCsrf = "a".repeat(43);
+    const replacementCsrf = "b".repeat(43);
+    const replacementSession = { ...session, id: "20000000-0000-4000-8000-000000000002" };
+    window.localStorage.setItem("zhixu.csrf-token", originalCsrf);
+    fetchSystemStatus.mockResolvedValue({ auth: { status: "ready" } });
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: session.id, user_label: session.userLabel, scopes: session.scopes, created_at: session.createdAt, last_seen_at: session.lastSeenAt, expires_at: session.expiresAt }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: replacementSession.id, user_label: replacementSession.userLabel, scopes: replacementSession.scopes, created_at: replacementSession.createdAt, last_seen_at: replacementSession.lastSeenAt, expires_at: replacementSession.expiresAt }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const { client } = renderAuth();
+    expect(await screen.findByTestId("session-id")).toHaveTextContent(session.id);
+    client.setQueryData(["settings", "models"], { desiredRevision: 7 });
+    let protectedSignal: AbortSignal | undefined;
+    const pendingProtectedQuery = client.fetchQuery({
+      queryKey: ["settings", "models"],
+      queryFn: ({ signal }) => {
+        protectedSignal = signal;
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        });
+      },
+    }).catch(() => undefined);
+    await waitFor(() => expect(protectedSignal).toBeDefined());
+
+    window.localStorage.setItem("zhixu.csrf-token", replacementCsrf);
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: "zhixu.csrf-token",
+      oldValue: originalCsrf,
+      newValue: replacementCsrf,
+    }));
+
+    await waitFor(() => expect(screen.getByTestId("session-id")).toHaveTextContent(replacementSession.id));
+    expect(protectedSignal?.aborted).toBe(true);
+    expect(client.getQueryData(["settings", "models"])).toBeUndefined();
+    await pendingProtectedQuery;
+  });
+
+  it("disabled 到 required 的显式 refresh 在接受新模式前清除旧 query", async () => {
+    const csrfToken = "c".repeat(43);
+    fetchSystemStatus
+      .mockResolvedValueOnce({ auth: { status: "disabled" } })
+      .mockResolvedValueOnce({ auth: { status: "ready" } });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      id: session.id,
+      user_label: session.userLabel,
+      scopes: session.scopes,
+      created_at: session.createdAt,
+      last_seen_at: session.lastSeenAt,
+      expires_at: session.expiresAt,
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const { client } = renderAuth();
+    expect(await screen.findByTestId("auth-state")).toHaveTextContent("authenticated:disabled");
+    client.setQueryData(["settings", "models"], { desiredRevision: 3 });
+    window.localStorage.setItem("zhixu.csrf-token", csrfToken);
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新认证" }));
+
+    expect(await screen.findByTestId("auth-state")).toHaveTextContent("authenticated:required");
+    expect(client.getQueryData(["settings", "models"])).toBeUndefined();
   });
 
   it("Local Storage 被阻断时 fail closed，不声称已认证", async () => {

@@ -163,19 +163,23 @@ type NodeRun struct {
 type NodeAttempt struct {
 	ID, NodeRunID                  foundation.ID
 	AttemptNo, DispatchNo, RetryNo int
-	RiverJobID                     int64
-	RiverJobAttempt                int
-	DeliveryID, LeaseOwner         string
-	LeaseUntil                     time.Time
-	Status                         AttemptStatus
-	OutputSchemaVersion            int
-	OutputHash                     string
-	FailureClass                   FailureClass
-	ErrorKind                      foundation.ErrorKind
-	ErrorCode, ErrorSummary        string
-	NextAttemptAt                  *time.Time
-	StartedAt, HeartbeatAt         time.Time
-	EndedAt                        *time.Time
+	// ModelSettingsRevision 固化本次 attempt 实际使用的 managed 模型设置版本；nil 表示 static/unmanaged。
+	ModelSettingsRevision *int64
+	// ModelRuntimeInstanceID 固化成功取得本次 attempt lease 的 managed Worker 运行实例；static 时为 nil。
+	ModelRuntimeInstanceID  *foundation.ID
+	RiverJobID              int64
+	RiverJobAttempt         int
+	DeliveryID, LeaseOwner  string
+	LeaseUntil              time.Time
+	Status                  AttemptStatus
+	OutputSchemaVersion     int
+	OutputHash              string
+	FailureClass            FailureClass
+	ErrorKind               foundation.ErrorKind
+	ErrorCode, ErrorSummary string
+	NextAttemptAt           *time.Time
+	StartedAt, HeartbeatAt  time.Time
+	EndedAt                 *time.Time
 }
 
 // DeliveryIdentity 将一次 River delivery 绑定到稳定节点 generation。

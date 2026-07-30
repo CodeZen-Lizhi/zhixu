@@ -14,11 +14,13 @@ import (
 	"github.com/riverqueue/river/rivertype"
 )
 
-// InsertOptions contains the only per-dispatch transport option exposed by the
-// project. Metadata, tags, and arbitrary payload fields are intentionally not
-// accepted at this boundary.
+// InsertOptions contains the bounded per-dispatch transport options exposed by
+// the project. Metadata, tags, and arbitrary payload fields are intentionally
+// not accepted at this boundary.
 type InsertOptions struct {
 	ScheduledAt time.Time
+	// UniqueStates 覆盖 River 默认唯一状态集合；nil 保留 River 默认语义。
+	UniqueStates []rivertype.JobState
 }
 
 // JobReceipt is the stable Application-owned result of transactional insertion.
@@ -28,6 +30,11 @@ type JobReceipt = application.JobReceipt
 // opaque outside this adapter so Domain and Application do not import pgx.
 type JobInserter interface {
 	InsertTx(context.Context, any, NodeJobArgs, InsertOptions) (JobReceipt, error)
+}
+
+// EnqueueFence 在 River insert 使用的同一 transaction 内校验是否允许新任务入队。
+type EnqueueFence interface {
+	CheckEnqueue(context.Context, pgx.Tx) error
 }
 
 type riverInsertClient interface {
@@ -40,6 +47,7 @@ type TypedJobInserter[T riverlib.JobArgs] struct {
 	client   riverInsertClient
 	queue    string
 	validate func(T) error
+	fence    EnqueueFence
 }
 
 // NewTypedJobInserter constructs a typed transactional inserter from the
@@ -51,7 +59,7 @@ func NewTypedJobInserter[T riverlib.JobArgs](client *Client, validate func(T) er
 	if validate == nil {
 		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_JOB_VALIDATOR_MISSING", errors.New("River job validator is nil"))
 	}
-	return &TypedJobInserter[T]{client: client.insert, queue: client.Queue(), validate: validate}, nil
+	return &TypedJobInserter[T]{client: client.insert, queue: client.Queue(), validate: validate, fence: client.fence}, nil
 }
 
 // RiverJobInserter is the backward-compatible NodeJobArgs wrapper around the
@@ -59,6 +67,7 @@ func NewTypedJobInserter[T riverlib.JobArgs](client *Client, validate func(T) er
 type RiverJobInserter struct {
 	client riverInsertClient
 	queue  string
+	fence  EnqueueFence
 	typed  *TypedJobInserter[NodeJobArgs]
 }
 
@@ -70,7 +79,7 @@ func NewJobInserter(client *Client) (JobInserter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &RiverJobInserter{client: typed.client, queue: typed.queue, typed: typed}, nil
+	return &RiverJobInserter{client: typed.client, queue: typed.queue, fence: typed.fence, typed: typed}, nil
 }
 
 // InsertTx inserts one uniquely identified node dispatch in the caller's
@@ -83,9 +92,9 @@ func (i *RiverJobInserter) InsertTx(ctx context.Context, transaction any, args N
 		return JobReceipt{}, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_INSERTER_MISSING", errors.New("River job inserter is nil"))
 	}
 	if i.typed != nil {
-		return insertValidatedJobTx(ctx, i.typed.client, i.typed.queue, transaction, args, options)
+		return insertValidatedJobTx(ctx, i.typed.client, i.typed.queue, i.typed.fence, transaction, args, options)
 	}
-	return insertValidatedJobTx(ctx, i.client, i.queue, transaction, args, options)
+	return insertValidatedJobTx(ctx, i.client, i.queue, i.fence, transaction, args, options)
 }
 
 // InsertTx validates and inserts one typed job in the caller's transaction. A
@@ -100,10 +109,10 @@ func (i *TypedJobInserter[T]) InsertTx(ctx context.Context, transaction any, arg
 	if err := i.validate(args); err != nil {
 		return JobReceipt{}, err
 	}
-	return insertValidatedJobTx(ctx, i.client, i.queue, transaction, args, options)
+	return insertValidatedJobTx(ctx, i.client, i.queue, i.fence, transaction, args, options)
 }
 
-func insertValidatedJobTx[T riverlib.JobArgs](ctx context.Context, client riverInsertClient, queue string, transaction any, args T, options InsertOptions) (JobReceipt, error) {
+func insertValidatedJobTx[T riverlib.JobArgs](ctx context.Context, client riverInsertClient, queue string, fence EnqueueFence, transaction any, args T, options InsertOptions) (JobReceipt, error) {
 	if client == nil {
 		return JobReceipt{}, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_INSERTER_MISSING", errors.New("River job inserter is nil"))
 	}
@@ -111,11 +120,20 @@ func insertValidatedJobTx[T riverlib.JobArgs](ctx context.Context, client riverI
 	if !ok || tx == nil {
 		return JobReceipt{}, jobError(foundation.ErrorInvalidInput, "WORKFLOW_RIVER_TRANSACTION_INVALID", errors.New("transaction is not a pgx transaction"))
 	}
+	if fence != nil {
+		if err := fence.CheckEnqueue(ctx, tx); err != nil {
+			return JobReceipt{}, err
+		}
+	}
 	metadata, err := encodeTraceMetadata(ctx)
 	if err != nil {
 		return JobReceipt{}, err
 	}
-	opts := &riverlib.InsertOpts{Metadata: metadata, Queue: queue, UniqueOpts: riverlib.UniqueOpts{ByArgs: true}}
+	uniqueOpts := riverlib.UniqueOpts{ByArgs: true}
+	if len(options.UniqueStates) > 0 {
+		uniqueOpts.ByState = append([]rivertype.JobState(nil), options.UniqueStates...)
+	}
+	opts := &riverlib.InsertOpts{Metadata: metadata, Queue: queue, UniqueOpts: uniqueOpts}
 	if !options.ScheduledAt.IsZero() {
 		opts.ScheduledAt = options.ScheduledAt.UTC()
 	}

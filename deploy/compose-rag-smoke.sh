@@ -5,11 +5,14 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly RAG_COMPOSE_FILE="${SCRIPT_DIR}/compose.rag-smoke.yml"
 readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly TIMEOUT_SECONDS="${ZHIXU_COMPOSE_RAG_SMOKE_TIMEOUT_SECONDS:-300}"
 readonly POLL_INTERVAL_SECONDS="${ZHIXU_COMPOSE_RAG_SMOKE_POLL_INTERVAL_SECONDS:-2}"
 readonly REQUEST_TIMEOUT_SECONDS="${ZHIXU_COMPOSE_RAG_SMOKE_REQUEST_TIMEOUT_SECONDS:-15}"
+
+source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"
 
 STATE_DIR=""
 PROJECT_NAME=""
@@ -24,8 +27,9 @@ COOKIE_JAR=""
 log() { printf '[compose-rag-smoke] %s\n' "$1"; }
 
 compose() {
-  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RAG_COMPOSE_FILE}" \
-    -f "${CANARY_COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
+  local -a compose_files=(-f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" -f "${RAG_COMPOSE_FILE}")
+  [[ -z "${CANARY_COMPOSE_FILE}" ]] || compose_files+=(-f "${CANARY_COMPOSE_FILE}")
+  docker compose --project-name "${PROJECT_NAME}" "${compose_files[@]}" --env-file "${ENV_FILE}" "$@"
 }
 
 diagnose() {
@@ -56,15 +60,22 @@ fail() {
 
 cleanup() {
   local exit_code=$?
-  trap - EXIT INT TERM
-  if [[ -n "${PROJECT_NAME}" && -n "${CANARY_COMPOSE_FILE}" ]]; then
-    compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  local cleanup_exit=0
+  trap - EXIT HUP INT TERM
+  if [[ -n "${PROJECT_NAME}" ]]; then
+    cleanup_compose_smoke_project_images "${PROJECT_NAME}" || cleanup_exit=$?
   fi
   if [[ -n "${STATE_DIR}" ]]; then
     chmod -R u+rwX "${STATE_DIR}" >/dev/null 2>&1 || true
-    rm -rf -- "${STATE_DIR}" >/dev/null 2>&1 || true
+    if ! rm -rf -- "${STATE_DIR}" >/dev/null 2>&1; then
+      log "could not remove disposable state"
+      cleanup_exit=1
+    fi
   fi
-  exit "${exit_code}"
+  if [[ "${exit_code}" -ne 0 ]]; then
+    exit "${exit_code}"
+  fi
+  exit "${cleanup_exit}"
 }
 
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"; }
@@ -186,13 +197,16 @@ main() {
   [[ "${REQUEST_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]] || fail 'request timeout must be a positive integer'
 
   STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zhixu-compose-rag-smoke.XXXXXX")" || fail 'could not allocate disposable state'
-  trap cleanup EXIT INT TERM
-  local run_id http_port workspace_root target_path evidence_token chat_canary
+  trap cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  local run_id http_port workspace_root target_path evidence_token chat_canary canary_compose_file
   run_id="$(random_hex 6)"; PROJECT_NAME="zhixu-rag-smoke-${run_id}"; http_port="$(allocate_port)"; POSTGRES_PORT="$(allocate_port)"
   API_BASE_URL="http://127.0.0.1:${http_port}"; AUTH_ORIGIN="${API_BASE_URL}"; workspace_root="${STATE_DIR}/workspace"; target_path='docs/rag-smoke.md'
   evidence_token="durable-rag-${run_id}"; chat_canary="chat_${run_id}_$(random_hex 12)"
-  CANARY_COMPOSE_FILE="${STATE_DIR}/compose.canary.yml"
-  cat >"${CANARY_COMPOSE_FILE}" <<YAML
+  canary_compose_file="${STATE_DIR}/compose.canary.yml"
+  cat >"${canary_compose_file}" <<YAML
 services:
   postgres:
     ports:
@@ -207,6 +221,7 @@ services:
     environment:
       ZHIXU_CHAT_API_KEY: ${chat_canary}
 YAML
+  CANARY_COMPOSE_FILE="${canary_compose_file}"
   mkdir -p "${workspace_root}/project/docs"
   printf '# RAG Compose Smoke\n\nBase content awaiting approved recovery guidance.\n' >"${workspace_root}/project/${target_path}"
   chmod -R a+rwX "${workspace_root}"
@@ -223,7 +238,13 @@ YAML
   compose build --quiet
   compose run --rm --no-deps --user root --entrypoint sh app -c 'chown -R 10001:10001 /workspace/project && chmod -R u+rwX /workspace/project' >/dev/null
   compose run --rm --no-deps --entrypoint sh app -c 'git -C /workspace/project init --initial-branch=main >/dev/null && git -C /workspace/project config user.name "ZHIXU RAG Smoke" && git -C /workspace/project config user.email "rag-smoke@example.invalid" && git -C /workspace/project add -- docs/rag-smoke.md && git -C /workspace/project commit -m base >/dev/null' >/dev/null
-  compose up --detach --wait >/dev/null
+  compose up --detach --wait postgres >/dev/null
+  compose run --rm --no-deps -T model-settings-key-init >/dev/null
+  compose run --rm --no-deps -T migrate >/dev/null
+  compose up --detach --no-deps --wait app worker >/dev/null
+  compose up --detach --no-deps --wait app-model-relay worker-model-relay >/dev/null
+  compose run --rm --no-deps -T firewall >/dev/null
+  compose up --detach --no-deps --wait proxy >/dev/null
   authenticate
 
   local payload base_hash proposal_id revision_id change_hash workflow_path search_payload citation_href

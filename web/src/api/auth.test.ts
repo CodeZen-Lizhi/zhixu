@@ -36,14 +36,14 @@ describe("auth API boundary", () => {
     expect(decodeSessionInfo({
       id: sessionId,
       user_label: "owner",
-      scopes: ["READ_LOCAL", "WRITE_PROPOSAL"],
+      scopes: ["READ_LOCAL", "WRITE_PROPOSAL", "MANAGE_SYSTEM_SETTINGS"],
       created_at: timestamp,
       last_seen_at: timestamp,
       expires_at: "2026-07-24T08:09:10Z",
     })).toEqual({
       id: sessionId,
       userLabel: "owner",
-      scopes: ["READ_LOCAL", "WRITE_PROPOSAL"],
+      scopes: ["READ_LOCAL", "WRITE_PROPOSAL", "MANAGE_SYSTEM_SETTINGS"],
       createdAt: timestamp,
       lastSeenAt: timestamp,
       expiresAt: "2026-07-24T08:09:10Z",

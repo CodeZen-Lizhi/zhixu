@@ -104,6 +104,9 @@ flowchart TB
 - 自托管仅 Proxy 暴露公网。
 - 模型和网页使用受控出站。
 
+本地模型 relay 通过 `network_mode: service:app|worker` 加入对应进程的网络命名空间，并只监听该 namespace 的
+`127.0.0.1:11434`。`host.docker.internal:host-gateway` 只配置在 app/worker owner；relay 不重复声明 `extra_hosts`。
+
 正式 Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 归 M10。M6-D 只提供
 Workspace 数据隔离，因此在 M10 门禁完成前必须保持宿主 loopback 发布；不得通过 `0.0.0.0`、反向代理
 或公网端口把当前 Search/Evidence API 描述为已具备自托管安全边界。
@@ -116,6 +119,10 @@ Workspace 数据隔离，因此在 M10 门禁完成前必须保持宿主 loopbac
 4. Worker 再次 Validate River Schema、冻结 Registry、启动 health server 和 River。
 5. API `/readyz` 与 Worker `/readyz` 分别就绪。
 6. 接收流量。
+
+开发 launcher 在 PostgreSQL healthy 后，使用 `compose run --rm --no-deps -T` 依次执行模型密钥初始化与迁移；
+完成即退出的 one-shot 不进入 `compose up --wait`。普通重复 `./zhixu up` 采用 Compose 差异驱动启动，镜像和配置未变时
+不强制替换 API/Worker；只有应用 desired model revision 的 `./zhixu restart` 强制重建候选与 steady runtime。
 
 ## 8. Readiness
 
@@ -241,6 +248,22 @@ API 与 Worker 必须通过同一 Configured Embedder Factory 解释上述配置
 Index Vector，API 用于 Semantic/Hybrid Query Embedding；两进程不得各自维护配置转换。`disabled`
 仍允许 Keyword 和明确退化的 Hybrid，Semantic 返回 503，不应阻断 API 启动或 FTS-only Active。
 
+### 9.1 Managed 模型设置
+
+官方开发 Compose 使用 `ZHIXU_MODEL_SETTINGS_MODE=managed`：Chat/Embedding 设置以 immutable revision
+保存在 PostgreSQL，AES-256-GCM 主密钥只存在专用 named volume，并以只读文件挂载给 API、Worker 和
+modelctl。Compose 不读取 `.env` 中的旧模型身份或 API Key；static Env/YAML 只供直接运行二进制和隔离 smoke。
+
+`desired_revision` 是最后保存版本，`active_revision` 是全局已提交版本，API/Worker 的 `applied_revision`
+是各进程实际冻结版本。Settings 保存只推进 desired，不热加载；`./zhixu restart` 固定 target，暂停 Queue，
+阻止新 Workflow 入队，排空已开始 attempt，启动 API/Worker prepared candidate，两个 role 都 fresh 且 revision
+一致后才提交 active 并恢复 Queue/入口。每个进程只构造一次 Model Runtime，全部 Chat/Embedding 消费者复用
+同一 Adapter 与 Contract；每个真正开始的 Workflow attempt 持久化其冻结 revision。
+
+无设置时 revision 0 是 canonical disabled，基础 API、Worker、Keyword Search 和 Settings 仍可 ready。
+Key 缺失、密文损坏或 Provider 预检失败时模型能力 fail closed，active 保持 previous，日志只报告稳定错误码。
+`./zhixu down` 保留 PostgreSQL、模型密钥和 Workspace；只有显式确认的 `./zhixu reset` 删除 Compose volumes。
+
 ## 10. 升级
 
 1. 创建备份 Marker。
@@ -251,6 +274,9 @@ Index Vector，API 用于 Semantic/Hybrid Query Embedding；两进程不得各�
 6. 启动新 API/Worker。
 7. 一致性与 Smoke Test。
 8. 恢复任务。
+
+仅应用新的模型设置使用 `./zhixu restart`，不执行 Schema rollback，也不删除 volume。launcher 中断、单 role
+prepared 失败或 drain timeout 时必须 abort/recover 到 previous active；未 claim River job 保留等待新 active。
 
 ## 11. 回滚
 
@@ -315,7 +341,7 @@ docker compose -f deploy/compose.yml --env-file .env.example up -d --build --wai
 curl -fsS http://127.0.0.1:8080/readyz
 docker compose -f deploy/compose.yml --env-file .env.example exec -T worker \
   wget -q -O - http://127.0.0.1:8081/readyz
-docker compose -f deploy/compose.yml --env-file .env.example down -v
+./zhixu down
 ```
 
 RAG Conversation 的可重复黑盒门禁为：

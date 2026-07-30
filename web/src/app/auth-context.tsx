@@ -34,15 +34,20 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const queryClient = useQueryClient();
   const [state, setState] = useState<AuthState>({ status: "loading", mode: "unknown" });
 
-  const becomeUnavailable = useCallback((error: Error) => {
+  const cancelAndClearQueries = useCallback(() => {
+    void queryClient.cancelQueries();
     queryClient.clear();
-    setState({ status: "error", mode: "required", error });
   }, [queryClient]);
 
+  const becomeUnavailable = useCallback((error: Error) => {
+    cancelAndClearQueries();
+    setState({ status: "error", mode: "required", error });
+  }, [cancelAndClearQueries]);
+
   const becomeAnonymous = useCallback((error?: AuthApiError) => {
-    queryClient.clear();
+    cancelAndClearQueries();
     setState({ status: "anonymous", mode: "required", ...(error === undefined ? {} : { error }) });
-  }, [queryClient]);
+  }, [cancelAndClearQueries]);
 
   const clearAndBecomeAnonymous = useCallback((error?: AuthApiError) => {
     try {
@@ -58,6 +63,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     try {
       const system = await fetchSystemStatus();
       if (system.auth.status === "disabled") {
+        cancelAndClearQueries();
         setState({ status: "authenticated", mode: "disabled" });
         return;
       }
@@ -65,6 +71,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         becomeUnavailable(new AuthApiError("AUTH_DEPENDENCY_UNAVAILABLE", "认证依赖暂不可用。", null, true));
         return;
       }
+      cancelAndClearQueries();
       setState({ status: "loading", mode: "required" });
       if (getCsrfToken() === undefined) {
         becomeAnonymous();
@@ -78,7 +85,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       }
       becomeUnavailable(error instanceof Error ? error : new Error("认证状态不可用"));
     }
-  }, [becomeAnonymous, becomeUnavailable]);
+  }, [becomeAnonymous, becomeUnavailable, cancelAndClearQueries]);
 
   useEffect(() => {
     void refresh();
@@ -86,15 +93,19 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       if (reason.kind === "storage_unavailable") becomeUnavailable(reason.error);
       else becomeAnonymous();
     });
-    const unsubscribeStorage = subscribeCsrfTokenChanges(() => void refresh());
+    const unsubscribeStorage = subscribeCsrfTokenChanges(() => {
+      cancelAndClearQueries();
+      setState({ status: "loading", mode: "required" });
+      void refresh();
+    });
     return () => {
       unsubscribeInvalidation();
       unsubscribeStorage();
     };
-  }, [becomeAnonymous, becomeUnavailable, refresh]);
+  }, [becomeAnonymous, becomeUnavailable, cancelAndClearQueries, refresh]);
 
   const signIn = useCallback(async (bootstrapToken: string) => {
-    queryClient.clear();
+    cancelAndClearQueries();
     setState({ status: "loading", mode: "required" });
     try {
       await bootstrapSession(bootstrapToken);
@@ -105,7 +116,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       else clearAndBecomeAnonymous(authError);
       throw error;
     }
-  }, [becomeUnavailable, clearAndBecomeAnonymous, queryClient]);
+  }, [becomeUnavailable, cancelAndClearQueries, clearAndBecomeAnonymous]);
 
   const signOut = useCallback(async () => {
     if (state.mode === "disabled") return;

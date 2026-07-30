@@ -1,0 +1,130 @@
+package postgres
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
+	"github.com/jackc/pgx/v5"
+)
+
+const defaultSnapshotStaleAfter = 20 * time.Second
+
+// Snapshot reads desired, active, rollout, and runtime projections from one repeatable snapshot.
+func (repository *Repository) Snapshot(ctx context.Context, staleAfter time.Duration) (domain.Snapshot, error) {
+	if ctx == nil {
+		return domain.Snapshot{}, invalid(errors.New("model settings snapshot context is nil"))
+	}
+	if staleAfter == 0 {
+		staleAfter = defaultSnapshotStaleAfter
+	}
+	if staleAfter < time.Second || staleAfter > 5*time.Minute {
+		return domain.Snapshot{}, invalid(errors.New("model settings snapshot stale interval is invalid"))
+	}
+	tx, err := repository.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return domain.Snapshot{}, classify(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	snapshot, err := snapshotTx(ctx, tx, staleAfter)
+	if err != nil {
+		return domain.Snapshot{}, err
+	}
+	if err := commit(tx, ctx); err != nil {
+		return domain.Snapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func snapshotTx(ctx context.Context, tx pgx.Tx, staleAfter time.Duration) (domain.Snapshot, error) {
+	state, err := loadState(ctx, tx, ``)
+	if err != nil {
+		return domain.Snapshot{}, err
+	}
+	desired, err := loadRevision(ctx, tx, state.desiredRevision)
+	if err != nil {
+		return domain.Snapshot{}, err
+	}
+	active, err := loadRevision(ctx, tx, state.activeRevision)
+	if err != nil {
+		return domain.Snapshot{}, err
+	}
+	now, err := databaseNow(ctx, tx)
+	if err != nil {
+		return domain.Snapshot{}, err
+	}
+	runtimes, err := loadRuntimeSummaries(ctx, tx, now, staleAfter)
+	if err != nil {
+		return domain.Snapshot{}, err
+	}
+	rollout, err := state.rollout()
+	if err != nil {
+		return domain.Snapshot{}, err
+	}
+	activeReady := runtimeReady(runtimes.API, state.activeRevision) && runtimeReady(runtimes.Worker, state.activeRevision)
+	snapshot := domain.Snapshot{
+		DesiredRevision: state.desiredRevision, ActiveRevision: state.activeRevision,
+		DesiredSettings: desired.summary(), ActiveSettings: active.summary(), Runtime: runtimes, Rollout: rollout,
+		RestartRequired: state.desiredRevision != state.activeRevision || !activeReady || rollout.Phase != domain.RolloutPhaseIdle,
+	}
+	snapshot.ChatCapability = chatCapability(snapshot.ActiveSettings, activeReady)
+	snapshot.EmbeddingCapability = embeddingCapability(snapshot.ActiveSettings, activeReady)
+	return snapshot, nil
+}
+
+func loadRuntimeSummaries(ctx context.Context, tx pgx.Tx, now time.Time, staleAfter time.Duration) (domain.RuntimeSummaries, error) {
+	missing := domain.RuntimeSummary{Phase: domain.RuntimePhaseUnavailable, Fresh: false}
+	result := domain.RuntimeSummaries{API: missing, Worker: missing}
+	rows, err := tx.Query(ctx, `SELECT `+runtimeColumns+` FROM ops.model_settings_runtime ORDER BY role`)
+	if err != nil {
+		return domain.RuntimeSummaries{}, classify(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		record, scanErr := scanRuntime(rows)
+		if scanErr != nil {
+			return domain.RuntimeSummaries{}, classify(scanErr)
+		}
+		summary := domain.RuntimeSummary{
+			AppliedRevision: record.AppliedRevision, Phase: record.Phase,
+			Fresh: !record.HeartbeatAt.Before(now.Add(-staleAfter)),
+		}
+		switch record.Role {
+		case domain.RuntimeRoleAPI:
+			result.API = summary
+		case domain.RuntimeRoleWorker:
+			result.Worker = summary
+		default:
+			return domain.RuntimeSummaries{}, corrupt(errors.New("model settings runtime role is invalid"))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return domain.RuntimeSummaries{}, classify(err)
+	}
+	return result, nil
+}
+
+func runtimeReady(runtime domain.RuntimeSummary, revision int64) bool {
+	return runtime.Fresh && runtime.Phase == domain.RuntimePhaseActive && runtime.AppliedRevision == revision
+}
+
+func chatCapability(active domain.SettingsSummary, runtimesReady bool) domain.Capability {
+	if active.Settings.Chat.Provider == domain.ChatProviderDisabled {
+		return domain.CapabilityDisabled
+	}
+	if !runtimesReady {
+		return domain.CapabilityUnavailable
+	}
+	return domain.CapabilityConfigured
+}
+
+func embeddingCapability(active domain.SettingsSummary, runtimesReady bool) domain.Capability {
+	if active.Settings.Embedding.Provider == domain.EmbeddingProviderDisabled {
+		return domain.CapabilityDisabled
+	}
+	if !runtimesReady || active.Settings.Embedding.Provider == domain.EmbeddingProviderOpenAICompatible && !active.Secrets.EmbeddingConfigured {
+		return domain.CapabilityUnavailable
+	}
+	return domain.CapabilityConfigured
+}

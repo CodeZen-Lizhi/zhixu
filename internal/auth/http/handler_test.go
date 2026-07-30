@@ -309,6 +309,9 @@ func TestRequiredCapabilityDoesNotTreatGraphCommandsAsReadQueries(t *testing.T) 
 		want   []capability.Capability
 	}{
 		{path: "/api/v1/graph/global", method: http.MethodPost, want: []capability.Capability{capability.ReadLocal}},
+		{path: "/api/v1/settings/models", method: http.MethodGet, want: []capability.Capability{capability.ManageSystemSettings}},
+		{path: "/api/v1/settings/models", method: http.MethodPut, want: []capability.Capability{capability.ManageSystemSettings}},
+		{path: "/api/v1/settings/models/test", method: http.MethodPost, want: []capability.Capability{capability.ManageSystemSettings}},
 		{path: "/api/v1/collections/preview", method: http.MethodPost, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/exports", method: http.MethodPost, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/graph/candidates/10000000-0000-4000-8000-000000000001/decisions", method: http.MethodPost, want: []capability.Capability{capability.WriteProposal}},

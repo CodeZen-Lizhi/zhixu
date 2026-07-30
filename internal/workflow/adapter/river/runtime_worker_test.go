@@ -57,6 +57,39 @@ func TestRuntimeNodeWorkerUsesDeliveryScopedLeaseOwner(t *testing.T) {
 	}
 }
 
+func TestRuntimeNodeWorkerBindsFrozenModelSettingsRevision(t *testing.T) {
+	runtime := &runtimeWorkerFake{claim: claimedRuntimeResult()}
+	executor := &capturingRuntimeExecutor{output: json.RawMessage(`{"ok":true}`)}
+	revision := int64(7)
+	instanceID := foundation.ID("a0000000-0000-4000-8000-000000000077")
+	worker, err := NewRuntimeNodeWorker(runtimeExecutorRegistry(t, executor), runtime, "worker-a", time.Minute, time.Second, RuntimeWorkerOptions{ModelSettingsRevision: &revision, ModelRuntimeInstanceID: &instanceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision = 8
+	instanceID = foundation.ID("a0000000-0000-4000-8000-000000000078")
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.claimCommand.ModelSettingsRevision == nil || *runtime.claimCommand.ModelSettingsRevision != 7 || runtime.claimCommand.ModelRuntimeInstanceID == nil || *runtime.claimCommand.ModelRuntimeInstanceID != foundation.ID("a0000000-0000-4000-8000-000000000077") {
+		t.Fatalf("claim binding revision=%v instance=%v", runtime.claimCommand.ModelSettingsRevision, runtime.claimCommand.ModelRuntimeInstanceID)
+	}
+	if executor.execution.ModelSettingsRevision == nil || *executor.execution.ModelSettingsRevision != 7 {
+		t.Fatalf("execution revision=%v", executor.execution.ModelSettingsRevision)
+	}
+}
+
+func TestRuntimeNodeWorkerUsesNullModelRuntimeBindingForStaticMode(t *testing.T) {
+	runtime := &runtimeWorkerFake{claim: claimedRuntimeResult()}
+	worker := newRuntimeWorkerFixture(t, runtime, runtimeExecutor{output: json.RawMessage(`{"ok":true}`)})
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.claimCommand.ModelSettingsRevision != nil || runtime.claimCommand.ModelRuntimeInstanceID != nil {
+		t.Fatalf("static claim binding revision=%v instance=%v", runtime.claimCommand.ModelSettingsRevision, runtime.claimCommand.ModelRuntimeInstanceID)
+	}
+}
+
 func TestRuntimeNodeWorkerRejectsPersistedArgsWithUnknownFields(t *testing.T) {
 	runtime := &runtimeWorkerFake{claim: claimedRuntimeResult()}
 	worker := newRuntimeWorkerFixture(t, runtime, runtimeExecutor{})
@@ -196,6 +229,15 @@ func TestNewRuntimeNodeWorkerRejectsInvalidCadenceAndTypedNil(t *testing.T) {
 	}
 	if _, err := NewRuntimeNodeWorker(registry, &runtimeWorkerFake{}, "worker", time.Minute, 20*time.Second); err == nil {
 		t.Fatal("heartbeat at lease/3 accepted")
+	}
+	negativeRevision := int64(-1)
+	instanceID := foundation.ID("a0000000-0000-4000-8000-000000000077")
+	if _, err := NewRuntimeNodeWorker(registry, &runtimeWorkerFake{}, "worker", time.Minute, time.Second, RuntimeWorkerOptions{ModelSettingsRevision: &negativeRevision, ModelRuntimeInstanceID: &instanceID}); err == nil {
+		t.Fatal("negative model settings revision accepted")
+	}
+	zeroRevision := int64(0)
+	if _, err := NewRuntimeNodeWorker(registry, &runtimeWorkerFake{}, "worker", time.Minute, time.Second, RuntimeWorkerOptions{ModelSettingsRevision: &zeroRevision}); err == nil {
+		t.Fatal("managed revision without runtime instance accepted")
 	}
 }
 
@@ -384,6 +426,8 @@ func (f *runtimeWorkerFake) Claim(ctx context.Context, command application.Claim
 	f.claimCommand = command
 	if f.claim.Disposition == application.ClaimDispositionClaimed {
 		f.claim.Attempt.LeaseOwner = command.LeaseOwner
+		f.claim.Attempt.ModelSettingsRevision = cloneOptionalInt64(command.ModelSettingsRevision)
+		f.claim.Attempt.ModelRuntimeInstanceID = cloneOptionalID(command.ModelRuntimeInstanceID)
 		f.claim.Node.LeaseOwner = command.LeaseOwner
 	}
 	return f.claim, f.claimErr

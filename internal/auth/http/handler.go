@@ -164,6 +164,9 @@ func RequiredCapabilities(request *http.Request) []capability.Capability {
 	if path == "/api/v1/system/status" || isAuthManagementPath(path) {
 		return nil
 	}
+	if path == "/api/v1/settings/models" || path == "/api/v1/settings/models/test" {
+		return []capability.Capability{capability.ManageSystemSettings}
+	}
 	if request.Method == http.MethodGet || request.Method == http.MethodHead || request.Method == http.MethodOptions {
 		return []capability.Capability{capability.ReadLocal}
 	}
@@ -193,6 +196,8 @@ func multipleCapabilities(method, pattern string, values ...capability.Capabilit
 
 // capabilityRoutes 是 API 公共状态修改端点的唯一 Capability 映射表。
 var capabilityRoutes = []capabilityRoute{
+	oneCapability(http.MethodPut, "/api/v1/settings/models", capability.ManageSystemSettings),
+	oneCapability(http.MethodPost, "/api/v1/settings/models/test", capability.ManageSystemSettings),
 	oneCapability(http.MethodPost, "/api/v1/search", capability.ReadLocal),
 	oneCapability(http.MethodPost, "/api/v1/graph/global", capability.ReadLocal),
 	oneCapability(http.MethodPost, "/api/v1/graph/neighborhood", capability.ReadLocal),

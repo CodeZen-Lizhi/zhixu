@@ -64,20 +64,42 @@ Apply embedded project migrations followed by River migrations. The command requ
 go run ./cmd/migrate
 ```
 
-Start the complete local stack. `.env.example` contains development-only values and must not be used as production secrets.
-
-Docker Compose mounts `ZHIXU_WORKSPACE_ROOT` into the containers at `/workspace`.
-Create that host directory first, or override the value in a local `.env`; the
-Workspace form should use `/workspace` when running through Compose.
+Start the complete local stack from the repository root. The launcher creates a
+Git-ignored `.env` with mode `0600`, creates `workspace/`, builds the image,
+runs migrations, waits for API and Worker readiness, and prints the local URL.
+`.env.example` contains development-only values and must not be used as
+production secrets.
 
 ```bash
-make compose-up
+./zhixu up
 ```
+
+Docker Compose mounts `ZHIXU_WORKSPACE_ROOT` into the containers at `/workspace`.
+Model settings are stored as immutable encrypted revisions in PostgreSQL; the
+master key is kept in the project-owned `deploy_zhixu-model-secrets` volume and
+is mounted read-only only by API, Worker, and modelctl. Saving Settings creates
+a desired revision. Apply it to both runtime roles with `./zhixu restart`. The
+launcher is fixed to the Compose project `deploy` and rejects
+`ZHIXU_COMPOSE_PROJECT_NAME` attempts to select another project, so `down` and
+`reset` cannot be redirected to an unrelated stack.
+
+The steady Worker uses `restart: on-failure`; prepared restart candidates do
+not auto-restart. Before commit, a failed rollout is aborted and the previous
+runtime is restored. After commit, the launcher replaces both candidates with
+steady API/Worker containers before restoring ingress. A failure in that final
+step cannot roll back the committed revision: the launcher retries the steady
+runtime and ingress recovery, keeps ingress closed if recovery still fails, and
+returns a non-zero status.
+
+Use `./zhixu status`, `./zhixu logs [service]`, and `./zhixu down` for normal
+operation. `down` preserves PostgreSQL, model settings, the master key, and the
+bind-mounted workspace. `./zhixu reset` is the explicit destructive command for
+the Compose volumes and requires typing `DELETE`.
 
 The checked-in example explicitly uses development-only `disabled` auth, so it
 starts without a Bootstrap Token. To exercise `required` mode, set both
 `ZHIXU_AUTH_MODE=required` and a fresh canonical 32+ character
-`ZHIXU_AUTH_BOOTSTRAP_TOKEN`; `make compose-up` rejects a missing Token before
+`ZHIXU_AUTH_BOOTSTRAP_TOKEN`; `./zhixu up` rejects a missing Token before
 building or starting services. `ZHIXU_REVIEW_QUESTION_REF_KEY` is an optional
 API-only shared HMAC key for Review question references; when set it must contain
 at least 32 UTF-8 bytes with no surrounding whitespace, and an explicit empty
@@ -131,9 +153,11 @@ canonical Graph query endpoints. Topic-scoped Candidate pages include direct Top
 both Claims have a formal `CONFIRMED BELONGS_TO` membership in that Topic; they never fall back to Workspace-wide results.
 
 Open `/chat` to create/select a Conversation and `/chat/{conversationId}` to continue it. Chat is fail-closed by
-default because `.env.example` sets `ZHIXU_CHAT_PROVIDER=disabled`. To execute Questions, configure the same
-`ZHIXU_CHAT_*` OpenAI-compatible provider/model values for API and Worker through the Compose environment; never
-commit the API key. 认证配置由 `ZHIXU_AUTH_MODE=required|disabled` 控制：`required` 使用一次性 Bootstrap
+default. For the normal Compose stack, configure Chat and Embedding in the Settings page, save the desired revision,
+then run `./zhixu restart`. Customized legacy `ZHIXU_CHAT_*` or `ZHIXU_EMBEDDING_*` values in `.env` are rejected
+before build/start; restore those fields to `.env.example` defaults. Static model environment variables remain for
+direct binaries and isolated smoke overlays only, and API keys must never be committed. 认证配置由
+`ZHIXU_AUTH_MODE=required|disabled` 控制：`required` 使用一次性 Bootstrap
 Token 换取 HttpOnly Session Cookie，浏览器修改请求同时校验精确 Origin 与 CSRF；自动化客户端使用限 Scope、
 可过期、可撤销的 Bearer API Token。Bootstrap Token 只用于首次换取 Session，API Token 明文只在创建响应返回
 一次，服务端只存摘要。`disabled` 仅允许 development 且 API 进程监听 loopback；官方 Compose 通过同网络命名空间
@@ -182,10 +206,16 @@ effects were rolled back. Recovery uses River delivery plus Workflow
 lease/checkpoint facts; see the
 [Workflow recovery runbook](docs/architecture/runbooks/workflow-recovery.md).
 
-Stop the stack and remove its local database volume:
+Stop the stack while preserving its local database and model-secret volumes:
 
 ```bash
-make compose-down
+./zhixu down
+```
+
+Delete those Compose volumes only after an explicit confirmation:
+
+```bash
+./zhixu reset
 ```
 
 Useful standalone checks:
@@ -229,8 +259,8 @@ Candidate routes/panel and scan worker while retaining Candidate, Proposal and a
 migrations are forward-only.
 
 `compose-check` validates the Compose model. A release candidate must also run
-`make compose-up`, query both API and Worker readiness, exercise the documented
-fault-recovery smoke, and then run `make compose-down`; the SIGKILL smoke creates
+`./zhixu up`, query both API and Worker readiness, exercise the documented
+fault-recovery smoke, and then run `./zhixu down`; the SIGKILL smoke creates
 an isolated temporary database so a running Compose Worker cannot own its River
 maintenance leader. Do not treat a successful
 image build or config render as evidence that crash recovery passed.

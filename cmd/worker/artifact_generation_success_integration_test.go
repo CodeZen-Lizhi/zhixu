@@ -209,8 +209,12 @@ func newArtifactGenerationSuccessRuntime(t *testing.T, pool *pgxpool.Pool, model
 	cfg.ChatAPIKey = "integration-only"
 	cfg.ChatModel = "artifact-generation-integration"
 	cfg.ChatModelVersion = "v1"
-	contract := platformmodels.ChatContract{Provider: "integration", Model: agentdomain.ModelRef{AdapterName: "integration", AdapterVersion: "v1", ModelID: cfg.ChatModel, ModelVersion: cfg.ChatModelVersion}, Timeout: 10 * time.Second}
-	components, err := newArtifactWorkflowComponents(pool, cfg, workspaces, runtime, agentRepository, terminal, model, contract, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	contract := platformmodels.ChatContract{
+		Provider: "integration",
+		Model:    agentdomain.ModelRef{AdapterName: "integration", AdapterVersion: "v1", ModelID: cfg.ChatModel, ModelVersion: cfg.ChatModelVersion},
+		Timeout:  10 * time.Second, MaxRequestBytes: cfg.ChatMaxRequestBytes, MaxResponseBytes: cfg.ChatMaxResponseBytes,
+	}
+	components, err := newArtifactWorkflowComponents(pool, workspaces, runtime, agentRepository, terminal, model, contract, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}

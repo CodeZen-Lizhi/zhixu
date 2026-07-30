@@ -12,12 +12,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const embeddingColumns = `id::text,provider,adapter_name,adapter_version,model,dimensions,normalization,distance_metric,config_hash,created_at`
-const indexColumns = `id::text,workspace_id::text,embedding_version_id::text,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,source_snapshot_ref,manifest_hash,expected_chunk_count,source_manifest_hash,expected_source_count,source_parser_id,source_parser_version,source_parser_config_hash,source_chunk_strategy_version,source_schema_version,idempotency_key,status,degraded_capabilities,failure_code,version,created_at,updated_at`
+const embeddingColumns = `id::text,provider,adapter_name,adapter_version,model,dimensions,normalization,distance_metric,config_hash,model_settings_revision,created_at`
+const indexColumns = `id::text,workspace_id::text,embedding_version_id::text,model_settings_revision,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,source_snapshot_ref,manifest_hash,expected_chunk_count,source_manifest_hash,expected_source_count,source_parser_id,source_parser_version,source_parser_config_hash,source_chunk_strategy_version,source_schema_version,idempotency_key,status,degraded_capabilities,failure_code,version,created_at,updated_at`
 
 func scanEmbedding(row pgx.Row) (domain.EmbeddingVersion, error) {
 	var v domain.EmbeddingVersion
-	err := row.Scan(&v.ID, &v.Provider, &v.AdapterName, &v.AdapterVersion, &v.Model, &v.Dimensions, &v.Normalization, &v.DistanceMetric, &v.ConfigHash, &v.CreatedAt)
+	err := row.Scan(&v.ID, &v.Provider, &v.AdapterName, &v.AdapterVersion, &v.Model, &v.Dimensions, &v.Normalization, &v.DistanceMetric, &v.ConfigHash, &v.ModelSettingsRevision, &v.CreatedAt)
 	return v, err
 }
 
@@ -28,7 +28,7 @@ func scanIndex(row pgx.Row) (domain.IndexVersion, error) {
 	var parserID, parserVersion, parserConfigHash, chunkStrategyVersion, schemaVersion *string
 	var degraded []byte
 	var failure *string
-	err := row.Scan(&v.ID, &v.WorkspaceID, &embedding, &v.TokenizerID, &v.TokenizerVersion, &v.TokenizerConfigHash, &v.FusionConfig, &v.SourceSnapshotRef, &v.ManifestHash, &v.ExpectedChunkCount, &sourceManifestHash, &v.ExpectedSourceCount, &parserID, &parserVersion, &parserConfigHash, &chunkStrategyVersion, &schemaVersion, &v.IdempotencyKey, &v.Status, &degraded, &failure, &v.Version, &v.CreatedAt, &v.UpdatedAt)
+	err := row.Scan(&v.ID, &v.WorkspaceID, &embedding, &v.ModelSettingsRevision, &v.TokenizerID, &v.TokenizerVersion, &v.TokenizerConfigHash, &v.FusionConfig, &v.SourceSnapshotRef, &v.ManifestHash, &v.ExpectedChunkCount, &sourceManifestHash, &v.ExpectedSourceCount, &parserID, &parserVersion, &parserConfigHash, &chunkStrategyVersion, &schemaVersion, &v.IdempotencyKey, &v.Status, &degraded, &failure, &v.Version, &v.CreatedAt, &v.UpdatedAt)
 	if err != nil {
 		return v, err
 	}
@@ -173,6 +173,12 @@ func sameOptionalInt64(left, right *int64) bool {
 		return left == nil && right == nil
 	}
 	return *left == *right
+}
+func nullableInt64(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 func nullableString(value string) any {
 	if value == "" {

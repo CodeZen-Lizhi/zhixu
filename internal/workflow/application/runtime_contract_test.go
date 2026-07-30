@@ -15,7 +15,8 @@ import (
 func TestRuntimeCoordinatorClaimUsesLeaseDurationAndStableDelivery(t *testing.T) {
 	t.Parallel()
 
-	command := ClaimCommand{NodeRunID: id(1), DispatchNo: 2, DeliveryID: "job-91-attempt-0", RiverJobID: 91, RiverJobAttempt: 0, LeaseOwner: " worker-a ", LeaseDuration: 30 * time.Second}
+	revision, instanceID := managedClaimBinding(7)
+	command := ClaimCommand{NodeRunID: id(1), DispatchNo: 2, DeliveryID: "job-91-attempt-0", RiverJobID: 91, RiverJobAttempt: 0, ModelSettingsRevision: revision, ModelRuntimeInstanceID: instanceID, LeaseOwner: " worker-a ", LeaseDuration: 30 * time.Second}
 	port := &fakeRuntimeStatePort{claimResult: validRuntimeClaimResult(command)}
 	coordinator, err := NewRuntimeCoordinator(port)
 	if err != nil {
@@ -25,7 +26,7 @@ func TestRuntimeCoordinatorClaimUsesLeaseDurationAndStableDelivery(t *testing.T)
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
 	}
-	if result.Disposition != ClaimDispositionClaimed || port.claim.LeaseOwner != "worker-a" || port.claim.LeaseDuration != 30*time.Second || port.claim.DispatchNo != 2 {
+	if result.Disposition != ClaimDispositionClaimed || port.claim.LeaseOwner != "worker-a" || port.claim.LeaseDuration != 30*time.Second || port.claim.DispatchNo != 2 || port.claim.ModelSettingsRevision == nil || *port.claim.ModelSettingsRevision != 7 || port.claim.ModelRuntimeInstanceID == nil || *port.claim.ModelRuntimeInstanceID != *instanceID {
 		t.Fatalf("Claim() result=%+v command=%+v", result, port.claim)
 	}
 }
@@ -62,6 +63,45 @@ func TestRuntimeCoordinatorValidatesClaimObservabilityFacts(t *testing.T) {
 	}
 }
 
+func TestRuntimeCoordinatorRejectsInvalidOrMismatchedModelRuntimeBinding(t *testing.T) {
+	t.Parallel()
+
+	invalid := validClaimCommand()
+	negativeRevision, instanceID := managedClaimBinding(-1)
+	invalid.ModelSettingsRevision = negativeRevision
+	invalid.ModelRuntimeInstanceID = instanceID
+	coordinator, _ := NewRuntimeCoordinator(&fakeRuntimeStatePort{})
+	if _, err := coordinator.Claim(context.Background(), invalid); workflowErrorCode(err) != "WORKFLOW_CLAIM_INVALID" {
+		t.Fatalf("negative revision error=%v", err)
+	}
+	revision, instanceID := managedClaimBinding(0)
+	invalid = validClaimCommand()
+	invalid.ModelSettingsRevision = revision
+	if _, err := coordinator.Claim(context.Background(), invalid); workflowErrorCode(err) != "WORKFLOW_CLAIM_INVALID" {
+		t.Fatalf("revision without instance error=%v", err)
+	}
+	invalid = validClaimCommand()
+	invalid.ModelRuntimeInstanceID = instanceID
+	if _, err := coordinator.Claim(context.Background(), invalid); workflowErrorCode(err) != "WORKFLOW_CLAIM_INVALID" {
+		t.Fatalf("instance without revision error=%v", err)
+	}
+
+	command := validClaimCommand()
+	command.ModelSettingsRevision, command.ModelRuntimeInstanceID = managedClaimBinding(3)
+	result := validRuntimeClaimResult(command)
+	result.Attempt.ModelSettingsRevision, result.Attempt.ModelRuntimeInstanceID = managedClaimBinding(2)
+	coordinator, _ = NewRuntimeCoordinator(&fakeRuntimeStatePort{claimResult: result})
+	if _, err := coordinator.Claim(context.Background(), command); workflowErrorCode(err) != "WORKFLOW_CLAIM_RESULT_INVALID" {
+		t.Fatalf("mismatched attempt revision error=%v", err)
+	}
+	result = validRuntimeClaimResult(command)
+	otherInstanceID := foundation.ID("a0000000-0000-4000-8000-000000000098")
+	result.Attempt.ModelRuntimeInstanceID = &otherInstanceID
+	if _, err := coordinator.Claim(context.Background(), command); workflowErrorCode(err) != "WORKFLOW_CLAIM_RESULT_INVALID" {
+		t.Fatalf("mismatched attempt instance error=%v", err)
+	}
+}
+
 func validRuntimeClaimResult(command ClaimCommand) ClaimResult {
 	graph := domain.CanonicalGraph{Nodes: []domain.NodeDefinition{{Key: "test-node", Kind: "test", InputSchemaVersion: 1, OutputSchemaVersion: 1}}}
 	graphJSON, _ := json.Marshal(graph)
@@ -72,7 +112,7 @@ func validRuntimeClaimResult(command ClaimCommand) ClaimResult {
 		Run:         domain.Run{ID: id(2), WorkspaceID: id(4), DefinitionID: id(3), Status: domain.RunStatusRunning},
 		Node: domain.NodeRun{ID: command.NodeRunID, RunID: id(2), NodeKey: "test-node", NodeType: "test", Status: domain.NodeStatusRunning,
 			InputSchemaVersion: 1, OutputSchemaVersion: 1},
-		Attempt: domain.NodeAttempt{ID: id(5), NodeRunID: command.NodeRunID, AttemptNo: 1, DispatchNo: command.DispatchNo, DeliveryID: strings.TrimSpace(command.DeliveryID), RiverJobID: command.RiverJobID,
+		Attempt: domain.NodeAttempt{ID: id(5), NodeRunID: command.NodeRunID, AttemptNo: 1, DispatchNo: command.DispatchNo, DeliveryID: strings.TrimSpace(command.DeliveryID), RiverJobID: command.RiverJobID, ModelSettingsRevision: command.ModelSettingsRevision, ModelRuntimeInstanceID: command.ModelRuntimeInstanceID,
 			RiverJobAttempt: command.RiverJobAttempt, LeaseOwner: strings.TrimSpace(command.LeaseOwner), Status: domain.AttemptStatusRunning},
 	}
 }
@@ -283,6 +323,11 @@ func TestNewRuntimeCoordinatorRejectsNilAndTypedNilPort(t *testing.T) {
 
 func validClaimCommand() ClaimCommand {
 	return ClaimCommand{NodeRunID: id(1), DispatchNo: 1, DeliveryID: "job-1-attempt-0", RiverJobID: 1, RiverJobAttempt: 0, LeaseOwner: "worker", LeaseDuration: time.Minute}
+}
+
+func managedClaimBinding(revision int64) (*int64, *foundation.ID) {
+	instanceID := foundation.ID("a0000000-0000-4000-8000-000000000099")
+	return &revision, &instanceID
 }
 
 func validDeliveryBinding() DeliveryBinding {

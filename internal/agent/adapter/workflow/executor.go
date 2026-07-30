@@ -93,7 +93,8 @@ func (executor *Executor) Execute(ctx context.Context, execution workflowapplica
 	run := agentdomain.ModelRun{
 		ID: runID, WorkspaceID: execution.WorkspaceID, WorkflowRunID: execution.RunID,
 		NodeRunID: execution.NodeRunID, NodeAttemptID: execution.NodeAttemptID,
-		Model: snapshot.Profile.Model, Profile: snapshot.Profile.Ref, Prompt: snapshot.Prompt.Ref,
+		ModelSettingsRevision: cloneOptionalInt64(execution.ModelSettingsRevision),
+		Model:                 snapshot.Profile.Model, Profile: snapshot.Profile.Ref, Prompt: snapshot.Prompt.Ref,
 		Schema: snapshot.Schema.Ref, ReducedSchema: snapshot.ReducedSchema.Ref, Retrieval: input.Retrieval,
 		Status: agentdomain.ModelRunRunning, Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
@@ -115,6 +116,14 @@ func (executor *Executor) Execute(ctx context.Context, execution workflowapplica
 		return workflowapplication.ExecutionResult{}, resultErr
 	}
 	return result, nil
+}
+
+func cloneOptionalInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func (executor *Executor) executeCreatedRun(ctx context.Context, run agentdomain.ModelRun, input RelationAssessmentWorkflowInput) (workflowapplication.ExecutionResult, error, bool) {

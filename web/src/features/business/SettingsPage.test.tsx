@@ -21,6 +21,7 @@ vi.mock("../../api/workspace", () => ({
 }));
 vi.mock("../../app/active-workspace", () => ({ useActiveWorkspaceId: () => "10000000-0000-4000-8000-000000000002" }));
 vi.mock("../../app/auth-context", () => ({ useAuth: () => ({ state: { status: "authenticated", mode: "required" } }) }));
+vi.mock("../settings/ModelSettingsPanel", () => ({ ModelSettingsPanel: () => <section aria-label="模型设置面板">真实模型设置面板</section> }));
 
 import { SettingsPage } from "./BasicPages";
 
@@ -46,6 +47,15 @@ afterEach(() => {
 });
 
 describe("SettingsPage API Token management", () => {
+  it("模型页签挂载真实设置面板，不再显示无契约占位", () => {
+    auth.listApiTokens.mockResolvedValue({ items: [] });
+    renderSettings();
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "模型 / 检索" }), { button: 0, ctrlKey: false });
+
+    expect(screen.getByRole("region", { name: "模型设置面板" })).toHaveTextContent("真实模型设置面板");
+    expect(screen.queryByText("无公开读取/写入契约")).not.toBeInTheDocument();
+  });
+
   it("一次性明文未确认复制前阻止连续创建和离页丢失", async () => {
     auth.listApiTokens
       .mockResolvedValueOnce({ items: [] })

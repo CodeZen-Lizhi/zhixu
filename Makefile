@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 DOCKER_COMPOSE ?= docker compose
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-auth-smoke compose-check docker-build compose-up compose-down compose-search-smoke compose-tool-smoke compose-rag-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-runtime-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke
 
 test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet agent-eval openapi-check compose-check
 
@@ -145,8 +145,31 @@ compose-auth-check:
 compose-auth-smoke:
 	bash deploy/compose-auth-smoke.sh
 
-compose-check: compose-auth-check
+compose-runtime-check:
+	@python3 deploy/compose_runtime_check.py -- \
+		$(DOCKER_COMPOSE) --profile modelctl -f deploy/compose.yml --env-file .env.example config --format json
+
+compose-static-models-check:
+	@python3 deploy/compose_runtime_check.py --static-models -- \
+		$(DOCKER_COMPOSE) -f deploy/compose.yml -f deploy/compose.static-models.yml --env-file .env.example config --format json
+
+compose-runtime-contract:
+	python3 deploy/compose_runtime_contract.py
+
+compose-check: compose-auth-check compose-runtime-check compose-static-models-check compose-runtime-contract compose-smoke-cleanup-contract smoke-image-cleanup-contract launcher-contract model-secrets-init-contract
 	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example config --quiet
+
+compose-smoke-cleanup-contract:
+	bash deploy/compose-smoke-cleanup-contract.sh
+
+smoke-image-cleanup-contract:
+	bash deploy/smoke-image-cleanup-contract.sh
+
+launcher-contract:
+	bash deploy/launcher-contract.sh
+
+model-secrets-init-contract:
+	bash deploy/model-secrets-init-contract.sh
 
 docker-build:
 	docker build -f deploy/Dockerfile -t zhixu:local .
@@ -155,7 +178,10 @@ compose-up: compose-auth-check
 	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example up -d --build --wait
 
 compose-down:
-	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example down -v
+	$(DOCKER_COMPOSE) --project-name deploy -f deploy/compose.yml --env-file .env.example down --remove-orphans
+
+compose-reset:
+	./zhixu reset
 
 compose-search-smoke:
 	bash deploy/compose-search-smoke.sh

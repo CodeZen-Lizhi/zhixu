@@ -120,20 +120,16 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 	if options.maxResponseBytes <= 0 || options.maxResponseBytes > 16<<20 {
 		return chatHTTPConfig{}, chatConfigErrorWithCause(errors.New("chat response byte limit is invalid"))
 	}
-	client := options.client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	clientCopy := *client
-	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
+	client, err := newModelHTTPClient(baseURL, options.client)
+	if err != nil {
+		return chatHTTPConfig{}, chatConfigErrorWithCause(err)
 	}
 	authorization := ""
 	if options.apiKey != "" {
 		authorization = "Bearer " + options.apiKey
 	}
 	return chatHTTPConfig{
-		client:           &clientCopy,
+		client:           client,
 		endpointURL:      appendChatPath(baseURL),
 		contract:         ChatContract{Provider: openAICompatibleProvider, Model: model, Timeout: options.timeout, MaxRequestBytes: options.maxRequestBytes, MaxResponseBytes: options.maxResponseBytes},
 		timeout:          options.timeout,

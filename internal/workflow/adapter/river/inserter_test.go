@@ -31,6 +31,7 @@ func TestTypedJobInserterValidatesAndInsertsArbitraryJobArgs(t *testing.T) {
 			return &rivertype.JobInsertResult{Job: &rivertype.JobRow{ID: 41}}, nil
 		}),
 		queue: "workflow_generic",
+		fence: enqueueFenceFunc(func(context.Context, pgx.Tx) error { return nil }),
 	}
 	validated := false
 	inserter, err := NewTypedJobInserter(client, func(args genericJobArgs) error {
@@ -63,6 +64,32 @@ func TestTypedJobInserterValidatesAndInsertsArbitraryJobArgs(t *testing.T) {
 	}
 	if !gotOpts.ScheduledAt.Equal(scheduledAt.UTC()) || gotOpts.ScheduledAt.Location() != time.UTC {
 		t.Fatalf("scheduled_at = %s", gotOpts.ScheduledAt)
+	}
+}
+
+func TestTypedJobInserterPreservesCustomUniqueStates(t *testing.T) {
+	t.Parallel()
+
+	var gotOpts *riverlib.InsertOpts
+	client := &Client{
+		insert: insertClientFunc(func(_ context.Context, _ pgx.Tx, _ riverlib.JobArgs, opts *riverlib.InsertOpts) (*rivertype.JobInsertResult, error) {
+			gotOpts = opts
+			return &rivertype.JobInsertResult{Job: &rivertype.JobRow{ID: 45}}, nil
+		}),
+		queue: "workflow_custom_unique",
+	}
+	inserter, err := NewTypedJobInserter(client, func(genericJobArgs) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := []rivertype.JobState{rivertype.JobStateAvailable, rivertype.JobStateRunning}
+	var tx pgx.Tx = fakeTx{}
+	if _, err := inserter.InsertTx(context.Background(), tx, genericJobArgs{SchemaVersion: 1}, InsertOptions{UniqueStates: states}); err != nil {
+		t.Fatal(err)
+	}
+	states[0] = rivertype.JobStateCancelled
+	if gotOpts == nil || len(gotOpts.UniqueOpts.ByState) != 2 || gotOpts.UniqueOpts.ByState[0] != rivertype.JobStateAvailable || gotOpts.UniqueOpts.ByState[1] != rivertype.JobStateRunning {
+		t.Fatalf("unique states = %#v", gotOpts)
 	}
 }
 
@@ -189,6 +216,37 @@ type insertClientFunc func(context.Context, pgx.Tx, riverlib.JobArgs, *riverlib.
 
 func (f insertClientFunc) InsertTx(ctx context.Context, tx pgx.Tx, args riverlib.JobArgs, opts *riverlib.InsertOpts) (*rivertype.JobInsertResult, error) {
 	return f(ctx, tx, args, opts)
+}
+
+type enqueueFenceFunc func(context.Context, pgx.Tx) error
+
+func (f enqueueFenceFunc) CheckEnqueue(ctx context.Context, tx pgx.Tx) error {
+	return f(ctx, tx)
+}
+
+func TestTypedJobInserterChecksFenceBeforeRiverInsert(t *testing.T) {
+	t.Parallel()
+	fenceErr := errors.New("rollout is draining")
+	inserted := false
+	client := &Client{
+		insert: insertClientFunc(func(context.Context, pgx.Tx, riverlib.JobArgs, *riverlib.InsertOpts) (*rivertype.JobInsertResult, error) {
+			inserted = true
+			return &rivertype.JobInsertResult{Job: &rivertype.JobRow{ID: 99}}, nil
+		}),
+		queue: "workflow",
+		fence: enqueueFenceFunc(func(context.Context, pgx.Tx) error { return fenceErr }),
+	}
+	inserter, err := NewTypedJobInserter(client, func(genericJobArgs) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tx pgx.Tx = fakeTx{}
+	if _, err := inserter.InsertTx(context.Background(), tx, genericJobArgs{SchemaVersion: 1}, InsertOptions{}); !errors.Is(err, fenceErr) {
+		t.Fatalf("InsertTx error = %v", err)
+	}
+	if inserted {
+		t.Fatal("River insert ran after enqueue fence rejection")
+	}
 }
 
 type fakeTx struct{ pgx.Tx }

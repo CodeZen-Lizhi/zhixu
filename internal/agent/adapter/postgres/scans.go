@@ -31,6 +31,7 @@ func scanModelRun(row rowScanner) (domain.ModelRun, error) {
 	var status string
 	if err := row.Scan(
 		&id, &workspaceID, &workflowRunID, &nodeRunID, &nodeAttemptID,
+		&run.ModelSettingsRevision,
 		&adapterName, &adapterVersion, &modelID, &modelVersion,
 		&profileID, &profileVersion, &promptID, &promptVersion, &schemaID, &schemaVersion,
 		&reducedSchemaID, &reducedSchemaVersion,
@@ -156,6 +157,7 @@ func loadModelCalls(ctx context.Context, queryer rowQueryer, workspaceID, runID 
 
 const modelRunSelect = `
 	SELECT id::text,workspace_id::text,workflow_run_id::text,node_run_id::text,node_attempt_id::text,
+		model_settings_revision,
 		adapter_name,adapter_version,model_id,model_version,profile_id,profile_version,
 		prompt_template_id,prompt_template_version,output_schema_id,output_schema_version,
 		reduced_schema_id,reduced_schema_version,
@@ -176,7 +178,8 @@ const modelCallSelect = `
 
 func sameModelRunBinding(left, right domain.ModelRun) bool {
 	return left.WorkspaceID == right.WorkspaceID && left.WorkflowRunID == right.WorkflowRunID && left.NodeRunID == right.NodeRunID &&
-		left.NodeAttemptID == right.NodeAttemptID && left.Model == right.Model && left.Profile == right.Profile && left.Prompt == right.Prompt &&
+		left.NodeAttemptID == right.NodeAttemptID && sameOptionalInt64(left.ModelSettingsRevision, right.ModelSettingsRevision) &&
+		left.Model == right.Model && left.Profile == right.Profile && left.Prompt == right.Prompt &&
 		left.Schema == right.Schema && left.ReducedSchema == right.ReducedSchema && left.MemoryContext == right.MemoryContext &&
 		sameRetrieval(left.Retrieval, right.Retrieval) && left.CreatedAt.Equal(right.CreatedAt)
 }
@@ -191,7 +194,8 @@ func sameModelRunCreateBinding(existing, requested domain.ModelRun) bool {
 
 func sameModelRunBindingWithoutRetrieval(left, right domain.ModelRun) bool {
 	return left.WorkspaceID == right.WorkspaceID && left.WorkflowRunID == right.WorkflowRunID && left.NodeRunID == right.NodeRunID &&
-		left.NodeAttemptID == right.NodeAttemptID && left.Model == right.Model && left.Profile == right.Profile && left.Prompt == right.Prompt &&
+		left.NodeAttemptID == right.NodeAttemptID && sameOptionalInt64(left.ModelSettingsRevision, right.ModelSettingsRevision) &&
+		left.Model == right.Model && left.Profile == right.Profile && left.Prompt == right.Prompt &&
 		left.Schema == right.Schema && left.ReducedSchema == right.ReducedSchema && left.MemoryContext == right.MemoryContext &&
 		left.CreatedAt.Equal(right.CreatedAt)
 }
@@ -265,6 +269,20 @@ func optionalInt64(bound bool, value int64) any {
 		return nil
 	}
 	return value
+}
+
+func nullableInt64(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func sameOptionalInt64(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func sameTime(left, right *time.Time) bool {

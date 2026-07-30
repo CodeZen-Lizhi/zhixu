@@ -24,6 +24,8 @@ const (
 	IndexMaintenance Capability = "INDEX_MAINTENANCE"
 	// EvaluationRun 允许运行受控的版本化评测。
 	EvaluationRun Capability = "EVALUATION_RUN"
+	// ManageSystemSettings 允许管理实例级模型与运行设置。
+	ManageSystemSettings Capability = "MANAGE_SYSTEM_SETTINGS"
 )
 
 var (
@@ -37,6 +39,7 @@ var (
 		GitWrite,
 		IndexMaintenance,
 		EvaluationRun,
+		ManageSystemSettings,
 	}
 )
 
@@ -59,7 +62,7 @@ func Parse(value string) (Capability, error) {
 // IsKnown 判断输入是否为未带额外空白的 canonical Capability。
 func IsKnown(value Capability) bool {
 	switch value {
-	case ReadLocal, ReadExternal, WriteProposal, WriteKnowledge, GitWrite, IndexMaintenance, EvaluationRun:
+	case ReadLocal, ReadExternal, WriteProposal, WriteKnowledge, GitWrite, IndexMaintenance, EvaluationRun, ManageSystemSettings:
 		return true
 	default:
 		return false

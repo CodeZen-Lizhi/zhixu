@@ -23,6 +23,7 @@ import (
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
 	knowledgehttp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/http"
 	memoryhttp "github.com/CodeZen-Lizhi/zhixu/internal/memory/http"
+	modelsettingshttp "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
@@ -70,6 +71,7 @@ type Dependencies struct {
 	Interview         *interviewhttp.Handler
 	Knowledge         *knowledgehttp.Handler
 	Artifact          *artifacthttp.Handler
+	ModelSettings     *modelsettingshttp.Handler
 	Auth              *authhttp.Handler
 	AuthRequired      bool
 	AuthInitErr       error
@@ -100,6 +102,7 @@ func NewRouter(deps Dependencies) http.Handler {
 		deps.Candidate = graphhttp.NewCandidateHandler(nil, 0)
 	}
 	router := chi.NewRouter()
+	router.Use(modelSettingsNoStoreMiddleware)
 	router.Use(requestIDMiddleware)
 	router.Use(requestTraceMiddleware(deps.Tracer))
 	router.Use(requestLogMiddleware(deps.Logger))
@@ -179,6 +182,15 @@ func NewRouter(deps Dependencies) http.Handler {
 	return router
 }
 
+func modelSettingsNoStoreMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request != nil && (request.URL.Path == "/api/v1/settings/models" || request.URL.Path == "/api/v1/settings/models/test") {
+			writer.Header().Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
 func registerDomainRoutes(api chi.Router, deps Dependencies) {
 	if deps.Workspace != nil {
 		deps.Workspace.Routes(api)
@@ -229,6 +241,9 @@ func registerDomainRoutes(api chi.Router, deps Dependencies) {
 	}
 	if deps.Artifact != nil {
 		deps.Artifact.Routes(api)
+	}
+	if deps.ModelSettings != nil {
+		deps.ModelSettings.Routes(api)
 	}
 }
 

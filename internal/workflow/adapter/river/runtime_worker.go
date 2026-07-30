@@ -33,27 +33,57 @@ type runtimeHumanWaiter interface {
 // stable River delivery. River remains transport; PostgreSQL remains truth.
 type RuntimeNodeWorker struct {
 	river.WorkerDefaults[NodeJobArgs]
-	registry          *application.ExecutorRegistry
-	runtime           RuntimeExecutionCoordinator
-	owner             string
-	leaseDuration     time.Duration
-	heartbeatInterval time.Duration
-	observer          runtimeWorkerObserver
+	registry               *application.ExecutorRegistry
+	runtime                RuntimeExecutionCoordinator
+	owner                  string
+	modelSettingsRevision  *int64
+	modelRuntimeInstanceID *foundation.ID
+	leaseDuration          time.Duration
+	heartbeatInterval      time.Duration
+	observer               runtimeWorkerObserver
+}
+
+// RuntimeWorkerOptions 配置 Worker 生命周期内保持不变的运行时事实。
+type RuntimeWorkerOptions struct {
+	// ModelSettingsRevision 是 Worker 启动时加载的 managed 模型设置版本；nil 表示 static/unmanaged。
+	ModelSettingsRevision *int64
+	// ModelRuntimeInstanceID 是与该 revision 同时登记的 Worker runtime owner。
+	ModelRuntimeInstanceID *foundation.ID
 }
 
 // NewRuntimeNodeWorker constructs the production state-machine worker.
-func NewRuntimeNodeWorker(registry *application.ExecutorRegistry, runtime RuntimeExecutionCoordinator, owner string, leaseDuration, heartbeatInterval time.Duration) (*RuntimeNodeWorker, error) {
-	return NewRuntimeNodeWorkerWithObservability(registry, runtime, owner, leaseDuration, heartbeatInterval, RuntimeWorkerObservability{})
+func NewRuntimeNodeWorker(registry *application.ExecutorRegistry, runtime RuntimeExecutionCoordinator, owner string, leaseDuration, heartbeatInterval time.Duration, options ...RuntimeWorkerOptions) (*RuntimeNodeWorker, error) {
+	return NewRuntimeNodeWorkerWithObservability(registry, runtime, owner, leaseDuration, heartbeatInterval, RuntimeWorkerObservability{}, options...)
 }
 
 // NewRuntimeNodeWorkerWithObservability 构造带有界指标和 fatal invariant 上报的生产 Runtime Worker。
-func NewRuntimeNodeWorkerWithObservability(registry *application.ExecutorRegistry, runtime RuntimeExecutionCoordinator, owner string, leaseDuration, heartbeatInterval time.Duration, observabilityOptions RuntimeWorkerObservability) (*RuntimeNodeWorker, error) {
+func NewRuntimeNodeWorkerWithObservability(registry *application.ExecutorRegistry, runtime RuntimeExecutionCoordinator, owner string, leaseDuration, heartbeatInterval time.Duration, observabilityOptions RuntimeWorkerObservability, options ...RuntimeWorkerOptions) (*RuntimeNodeWorker, error) {
 	owner = strings.TrimSpace(owner)
-	if registry == nil || isNilRuntimeCoordinator(runtime) || owner == "" || len(owner) > 80 || strings.ContainsAny(owner, "\r\n\t/") || leaseDuration <= 0 || heartbeatInterval <= 0 || heartbeatInterval >= leaseDuration/3 || (observabilityOptions.Metrics != nil && strings.TrimSpace(observabilityOptions.Queue) == "") {
+	modelSettingsRevision, modelRuntimeInstanceID, validRuntimeBinding := freezeRuntimeWorkerOptions(options)
+	if registry == nil || isNilRuntimeCoordinator(runtime) || owner == "" || len(owner) > 80 || strings.ContainsAny(owner, "\r\n\t/") || leaseDuration <= 0 || heartbeatInterval <= 0 || heartbeatInterval >= leaseDuration/3 || !validRuntimeBinding || (observabilityOptions.Metrics != nil && strings.TrimSpace(observabilityOptions.Queue) == "") {
 		return nil, jobError(foundation.ErrorInvalidInput, "WORKFLOW_RUNTIME_WORKER_INVALID", errors.New("runtime worker dependencies or lease cadence are invalid"))
 	}
 	observabilityOptions.Queue = strings.TrimSpace(observabilityOptions.Queue)
-	return &RuntimeNodeWorker{registry: registry, runtime: runtime, owner: owner, leaseDuration: leaseDuration, heartbeatInterval: heartbeatInterval, observer: newRuntimeWorkerObserver(observabilityOptions)}, nil
+	return &RuntimeNodeWorker{registry: registry, runtime: runtime, owner: owner, modelSettingsRevision: modelSettingsRevision, modelRuntimeInstanceID: modelRuntimeInstanceID, leaseDuration: leaseDuration, heartbeatInterval: heartbeatInterval, observer: newRuntimeWorkerObserver(observabilityOptions)}, nil
+}
+
+func freezeRuntimeWorkerOptions(options []RuntimeWorkerOptions) (*int64, *foundation.ID, bool) {
+	if len(options) > 1 {
+		return nil, nil, false
+	}
+	if len(options) == 0 || options[0].ModelSettingsRevision == nil && options[0].ModelRuntimeInstanceID == nil {
+		return nil, nil, true
+	}
+	if options[0].ModelSettingsRevision == nil || options[0].ModelRuntimeInstanceID == nil || *options[0].ModelSettingsRevision < 0 {
+		return nil, nil, false
+	}
+	parsed, err := foundation.ParseID(string(*options[0].ModelRuntimeInstanceID))
+	if err != nil || parsed != *options[0].ModelRuntimeInstanceID {
+		return nil, nil, false
+	}
+	revision := *options[0].ModelSettingsRevision
+	instanceID := *options[0].ModelRuntimeInstanceID
+	return &revision, &instanceID, true
 }
 
 func isNilRuntimeCoordinator(runtime RuntimeExecutionCoordinator) bool {
@@ -96,7 +126,7 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	}
 	deliveryID := fmt.Sprintf("job-%d-attempt-%d", job.ID, job.Attempt)
 	deliveryOwner := w.owner + ":" + deliveryID
-	claim, err := w.runtime.Claim(ctx, application.ClaimCommand{NodeRunID: job.Args.NodeRunID, DispatchNo: job.Args.DispatchNo, DeliveryID: deliveryID, RiverJobID: job.ID, RiverJobAttempt: job.Attempt, LeaseOwner: deliveryOwner, LeaseDuration: w.leaseDuration})
+	claim, err := w.runtime.Claim(ctx, application.ClaimCommand{NodeRunID: job.Args.NodeRunID, DispatchNo: job.Args.DispatchNo, DeliveryID: deliveryID, RiverJobID: job.ID, RiverJobAttempt: job.Attempt, ModelSettingsRevision: cloneOptionalInt64(w.modelSettingsRevision), ModelRuntimeInstanceID: cloneOptionalID(w.modelRuntimeInstanceID), LeaseOwner: deliveryOwner, LeaseDuration: w.leaseDuration})
 	if err != nil {
 		return err
 	}
@@ -134,7 +164,8 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 		WorkspaceID: claim.Run.WorkspaceID, DefinitionID: claim.Definition.ID, DefinitionVersion: claim.Definition.Version,
 		DefinitionHash: claim.Definition.GraphHash, RunID: claim.Run.ID, NodeKey: claim.Node.NodeKey,
 		NodeRunID: claim.Node.ID, NodeAttemptID: claim.Attempt.ID, NodeKind: claim.Node.NodeType,
-		NodeVersion: claim.Node.Version, InputSchemaVersion: claim.Node.InputSchemaVersion, AttemptNo: claim.Attempt.AttemptNo,
+		ModelSettingsRevision: cloneOptionalInt64(claim.Attempt.ModelSettingsRevision),
+		NodeVersion:           claim.Node.Version, InputSchemaVersion: claim.Node.InputSchemaVersion, AttemptNo: claim.Attempt.AttemptNo,
 		DispatchNo: claim.Node.DispatchNo, RetryNo: claim.Node.RetryNo, LeaseOwner: claim.Attempt.LeaseOwner,
 		Input: claim.Node.Input,
 	})
@@ -201,6 +232,22 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 		w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
 	}
 	return err
+}
+
+func cloneOptionalInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneOptionalID(value *foundation.ID) *foundation.ID {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func isLeaseLostError(err error) bool {

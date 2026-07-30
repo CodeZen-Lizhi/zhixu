@@ -35,19 +35,20 @@ const (
 	DistanceEuclidean DistanceMetric = "euclidean"
 )
 
-// EmbeddingVersion 是不可变的 Provider、Adapter、模型与向量形状绑定。
+// EmbeddingVersion 是不可变的 Provider、Adapter、模型、向量形状与设置来源绑定。
 // ConfigHash 必须由包含所有影响向量结果的非敏感配置计算，记录中不保存凭据。
 type EmbeddingVersion struct {
-	ID             foundation.ID
-	Provider       string
-	AdapterName    string
-	AdapterVersion string
-	Model          string
-	Dimensions     int32
-	Normalization  EmbeddingNormalization
-	DistanceMetric DistanceMetric
-	ConfigHash     string
-	CreatedAt      time.Time
+	ID                    foundation.ID
+	Provider              string
+	AdapterName           string
+	AdapterVersion        string
+	Model                 string
+	Dimensions            int32
+	Normalization         EmbeddingNormalization
+	DistanceMetric        DistanceMetric
+	ConfigHash            string
+	ModelSettingsRevision *int64
+	CreatedAt             time.Time
 }
 
 // EmbeddingVersionResult 返回幂等注册后的持久化版本。
@@ -74,12 +75,22 @@ func ValidateEmbeddingVersion(version EmbeddingVersion) error {
 	if version.CreatedAt.IsZero() {
 		return invalid(ErrorCodeEmbeddingVersionInvalid, "embedding created time is required")
 	}
+	if version.ModelSettingsRevision != nil && *version.ModelSettingsRevision < 0 {
+		return invalid(ErrorCodeEmbeddingVersionInvalid, "embedding model settings revision cannot be negative")
+	}
 	return nil
 }
 
-// SameEmbeddingBinding 判断两条记录是否绑定完全相同的向量结果身份。
+// SameEmbeddingBinding 判断两条记录是否绑定完全相同的向量结果与设置来源身份。
 // ID 与创建时间不参与比较，使 Repository 能识别首次创建和精确重放。
 func SameEmbeddingBinding(left, right EmbeddingVersion) bool {
+	return SameEmbeddingContractBinding(left, right) &&
+		optionalRevisionEqual(left.ModelSettingsRevision, right.ModelSettingsRevision)
+}
+
+// SameEmbeddingContractBinding 判断两条记录是否具有完全相同的向量结果合同。
+// 设置修订只描述来源，不改变已冻结向量合同的运行时兼容性。
+func SameEmbeddingContractBinding(left, right EmbeddingVersion) bool {
 	return left.Provider == right.Provider &&
 		left.AdapterName == right.AdapterName &&
 		left.AdapterVersion == right.AdapterVersion &&
@@ -88,6 +99,13 @@ func SameEmbeddingBinding(left, right EmbeddingVersion) bool {
 		left.Normalization == right.Normalization &&
 		left.DistanceMetric == right.DistanceMetric &&
 		left.ConfigHash == right.ConfigHash
+}
+
+func optionalRevisionEqual(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 // NormalizeEmbeddingVector 返回调用方不可变的向量副本，并按版本约定执行 L2 归一化。

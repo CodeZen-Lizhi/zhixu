@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"reflect"
 	"sync/atomic"
 	"time"
 
@@ -12,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	riverlib "github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
-	"github.com/riverqueue/river/rivertype"
 )
 
 const (
@@ -28,8 +28,9 @@ type clientLifecycle interface {
 	Stopped() <-chan struct{}
 }
 
-type directInsertClient interface {
-	Insert(context.Context, riverlib.JobArgs, *riverlib.InsertOpts) (*rivertype.JobInsertResult, error)
+type queueControlClient interface {
+	QueuePause(context.Context, string, *riverlib.QueuePauseOpts) error
+	QueueResume(context.Context, string, *riverlib.QueuePauseOpts) error
 }
 
 // Client owns the River client configured for the workflow schema. Production
@@ -37,8 +38,9 @@ type directInsertClient interface {
 type Client struct {
 	generation atomic.Uint64
 	insert     riverInsertClient
-	direct     directInsertClient
 	lifecycle  clientLifecycle
+	queueCtl   queueControlClient
+	fence      EnqueueFence
 	queue      string
 	schema     string
 	started    atomic.Bool
@@ -77,19 +79,7 @@ func NewClientWithOptions(pool *pgxpool.Pool, workers *Workers, options Options)
 	if err != nil {
 		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_INVALID", err)
 	}
-	return &Client{insert: inner, direct: inner, lifecycle: inner, queue: options.Queue, schema: WorkflowSchema}, nil
-}
-
-// Insert 为已提交业务事实提供 insert-only River 投递边界；业务原子写入仍应优先使用 InsertTx。
-func (c *Client) Insert(ctx context.Context, args riverlib.JobArgs, options *riverlib.InsertOpts) (*rivertype.JobInsertResult, error) {
-	if c == nil || c.direct == nil {
-		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_MISSING", errors.New("River client is nil"))
-	}
-	result, err := c.direct.Insert(ctx, args, options)
-	if err != nil {
-		return nil, foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_RIVER_JOB_INSERT_FAILED", true, err)
-	}
-	return result, nil
+	return &Client{insert: inner, lifecycle: inner, queueCtl: inner, fence: options.EnqueueFence, queue: options.Queue, schema: WorkflowSchema}, nil
 }
 
 // Queue returns the queue shared by this client's producers and consumers.
@@ -173,6 +163,28 @@ func (c *Client) Stopped() <-chan struct{} {
 	return c.lifecycle.Stopped()
 }
 
+// PauseQueue 持久暂停当前配置队列的新 Job claim；已运行 Job 不会被取消。
+func (c *Client) PauseQueue(ctx context.Context) error {
+	if c == nil || c.queueCtl == nil || c.queue == "" {
+		return jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_QUEUE_CONTROL_MISSING", errors.New("River queue control is unavailable"))
+	}
+	if err := c.queueCtl.QueuePause(ctx, c.queue, nil); err != nil {
+		return foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_RIVER_QUEUE_PAUSE_FAILED", true, err)
+	}
+	return nil
+}
+
+// ResumeQueue 恢复当前配置队列的新 Job claim。
+func (c *Client) ResumeQueue(ctx context.Context) error {
+	if c == nil || c.queueCtl == nil || c.queue == "" {
+		return jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_QUEUE_CONTROL_MISSING", errors.New("River queue control is unavailable"))
+	}
+	if err := c.queueCtl.QueueResume(ctx, c.queue, nil); err != nil {
+		return foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_RIVER_QUEUE_RESUME_FAILED", true, err)
+	}
+	return nil
+}
+
 // Options contains the project-owned River runtime tuning seam. It deliberately
 // excludes River-specific types from workflow domain and application packages.
 type Options struct {
@@ -182,6 +194,8 @@ type Options struct {
 	RescueStuckJobsAfter time.Duration
 	SoftStopTimeout      time.Duration
 	Logger               *slog.Logger
+	// EnqueueFence 在同一 PostgreSQL transaction 中阻止 rollout drain 后的新入队。
+	EnqueueFence EnqueueFence
 }
 
 func buildRiverConfig(workers *Workers, options Options) (*riverlib.Config, error) {
@@ -212,6 +226,12 @@ func buildRiverConfig(workers *Workers, options Options) (*riverlib.Config, erro
 func validateOptions(options Options) error {
 	if err := operability.ValidateRiverOptions(options.Queue, options.MaxWorkers, options.JobTimeout, options.RescueStuckJobsAfter, options.SoftStopTimeout); err != nil {
 		return optionsError(err)
+	}
+	if options.EnqueueFence != nil {
+		value := reflect.ValueOf(options.EnqueueFence)
+		if value.Kind() == reflect.Pointer && value.IsNil() {
+			return optionsError(errors.New("enqueue fence is nil"))
+		}
 	}
 	return nil
 }

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -151,6 +152,16 @@ const (
 	ChatProviderOpenAICompatible ChatProvider = "openai-compatible"
 )
 
+// ModelSettingsMode 控制模型身份来自静态配置还是受管数据库 revision。
+type ModelSettingsMode string
+
+const (
+	// ModelSettingsModeStatic 保持现有 Env/YAML 模型配置行为。
+	ModelSettingsModeStatic ModelSettingsMode = "static"
+	// ModelSettingsModeManaged 从数据库加载 active 或固定 rollout target。
+	ModelSettingsModeManaged ModelSettingsMode = "managed"
+)
+
 // ToolMode 控制 Tool runtime 或单项 Tool capability 是否进入生产组合。
 type ToolMode string
 
@@ -216,6 +227,15 @@ type Config struct {
 	ChatTimeout          time.Duration `yaml:"chat_timeout"`
 	ChatMaxRequestBytes  int64         `yaml:"chat_max_request_bytes"`
 	ChatMaxResponseBytes int64         `yaml:"chat_max_response_bytes"`
+
+	// ModelSettingsMode 显式选择静态或数据库受管的模型设置来源。
+	ModelSettingsMode ModelSettingsMode `yaml:"model_settings_mode"`
+	// ModelSettingsKeyFile 是只读 AES-256-GCM 主密钥文件路径。
+	ModelSettingsKeyFile string `yaml:"model_settings_key_file"`
+	// ModelSettingsRolloutID 固定候选进程只能加载指定 rollout target。
+	ModelSettingsRolloutID string `yaml:"model_settings_rollout_id"`
+	// ModelSettingsPrepared 让候选进程在 commit 前只登记 prepared，不接收工作。
+	ModelSettingsPrepared bool `yaml:"model_settings_prepared"`
 
 	ToolRuntimeMode ToolMode `yaml:"tool_runtime_mode"`
 	WebFetchMode    ToolMode `yaml:"web_fetch_mode"`
@@ -296,6 +316,7 @@ func Defaults() Config {
 		ChatTimeout:          defaultChatTimeout,
 		ChatMaxRequestBytes:  defaultChatMaxRequestBytes,
 		ChatMaxResponseBytes: defaultChatMaxResponseBytes,
+		ModelSettingsMode:    ModelSettingsModeStatic,
 
 		ToolRuntimeMode: ToolModeDisabled,
 		WebFetchMode:    ToolModeDisabled,
@@ -462,6 +483,11 @@ type fileConfig struct {
 	ChatMaxRequestBytes  *int64        `yaml:"chat_max_request_bytes"`
 	ChatMaxResponseBytes *int64        `yaml:"chat_max_response_bytes"`
 
+	ModelSettingsMode      *ModelSettingsMode `yaml:"model_settings_mode"`
+	ModelSettingsKeyFile   *string            `yaml:"model_settings_key_file"`
+	ModelSettingsRolloutID *string            `yaml:"model_settings_rollout_id"`
+	ModelSettingsPrepared  *bool              `yaml:"model_settings_prepared"`
+
 	ToolRuntimeMode *ToolMode `yaml:"tool_runtime_mode"`
 	WebFetchMode    *ToolMode `yaml:"web_fetch_mode"`
 
@@ -613,6 +639,18 @@ func applyYAMLFile(path string, cfg *Config) error {
 	}
 	if raw.ChatMaxResponseBytes != nil {
 		cfg.ChatMaxResponseBytes = *raw.ChatMaxResponseBytes
+	}
+	if raw.ModelSettingsMode != nil {
+		cfg.ModelSettingsMode = *raw.ModelSettingsMode
+	}
+	if raw.ModelSettingsKeyFile != nil {
+		cfg.ModelSettingsKeyFile = *raw.ModelSettingsKeyFile
+	}
+	if raw.ModelSettingsRolloutID != nil {
+		cfg.ModelSettingsRolloutID = *raw.ModelSettingsRolloutID
+	}
+	if raw.ModelSettingsPrepared != nil {
+		cfg.ModelSettingsPrepared = *raw.ModelSettingsPrepared
 	}
 	if raw.ToolRuntimeMode != nil {
 		cfg.ToolRuntimeMode = *raw.ToolRuntimeMode
@@ -769,6 +807,17 @@ func (c Config) Validate() error {
 	return c.validate(true)
 }
 
+// ValidateModels 只校验共享模型配置与受管设置来源，供非 API Composition Root 复用。
+func (c Config) ValidateModels() error {
+	if err := c.validateEmbedding(); err != nil {
+		return err
+	}
+	if err := c.validateChat(); err != nil {
+		return err
+	}
+	return c.validateModelSettings()
+}
+
 func (c Config) validate(validateAuth bool) error {
 	if strings.TrimSpace(c.AppName) == "" {
 		return errors.New("app_name must not be empty")
@@ -853,6 +902,9 @@ func (c Config) validate(validateAuth bool) error {
 	if err := c.validateChat(); err != nil {
 		return err
 	}
+	if err := c.validateModelSettings(); err != nil {
+		return err
+	}
 	if err := c.validateTools(); err != nil {
 		return err
 	}
@@ -860,6 +912,29 @@ func (c Config) validate(validateAuth bool) error {
 		return errors.New("retrieval RRF configuration is invalid")
 	}
 	return nil
+}
+
+func (c Config) validateModelSettings() error {
+	switch c.ModelSettingsMode {
+	case ModelSettingsModeStatic:
+		if c.ModelSettingsKeyFile != "" || c.ModelSettingsRolloutID != "" || c.ModelSettingsPrepared {
+			return errors.New("managed model settings fields must be empty in static mode")
+		}
+		return nil
+	case ModelSettingsModeManaged:
+		if c.ModelSettingsKeyFile == "" || c.ModelSettingsKeyFile != strings.TrimSpace(c.ModelSettingsKeyFile) || !filepath.IsAbs(c.ModelSettingsKeyFile) || filepath.Clean(c.ModelSettingsKeyFile) != c.ModelSettingsKeyFile {
+			return errors.New("model_settings_key_file must be a canonical absolute path in managed mode")
+		}
+		if c.ModelSettingsRolloutID != strings.TrimSpace(c.ModelSettingsRolloutID) || len(c.ModelSettingsRolloutID) > 128 || strings.ContainsAny(c.ModelSettingsRolloutID, "\r\n\t") {
+			return errors.New("model_settings_rollout_id is invalid")
+		}
+		if c.ModelSettingsPrepared && c.ModelSettingsRolloutID == "" {
+			return errors.New("model_settings_prepared requires model_settings_rollout_id")
+		}
+		return nil
+	default:
+		return errors.New("model_settings_mode must be static or managed")
+	}
 }
 
 func (c Config) validateReviewQuestionRefKey() error {
@@ -1330,7 +1405,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s ModelSettingsMode:%q ModelSettingsKeyConfigured:%t ModelSettingsRolloutConfigured:%t ModelSettingsPrepared:%t EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -1354,6 +1429,10 @@ func (c Config) String() string {
 		c.ReindexDispatchErrorBackoff,
 		c.ReindexLeaseDuration,
 		c.ReindexHeartbeatInterval,
+		c.ModelSettingsMode,
+		strings.TrimSpace(c.ModelSettingsKeyFile) != "",
+		strings.TrimSpace(c.ModelSettingsRolloutID) != "",
+		c.ModelSettingsPrepared,
 		c.EmbeddingProvider,
 		c.EmbeddingProvider != EmbeddingProviderDisabled,
 		c.EmbeddingModel,
@@ -1420,6 +1499,9 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAPISecrets
 	if value, ok := lookup("ZHIXU_WEB_FETCH_MODE"); ok {
 		cfg.WebFetchMode = ToolMode(value)
 	}
+	if value, ok := lookup("ZHIXU_MODEL_SETTINGS_MODE"); ok {
+		cfg.ModelSettingsMode = ModelSettingsMode(value)
+	}
 	if value, ok := lookup("ZHIXU_CHAT_PROVIDER"); ok {
 		cfg.ChatProvider = ChatProvider(value)
 		if cfg.ChatProvider == ChatProviderDisabled {
@@ -1439,19 +1521,21 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAPISecrets
 		}
 	}
 	values := map[string]*string{
-		"ZHIXU_APP_NAME":           &cfg.AppName,
-		"ZHIXU_VERSION":            &cfg.Version,
-		"ZHIXU_ENVIRONMENT":        &cfg.Environment,
-		"ZHIXU_HTTP_ADDR":          &cfg.HTTPAddr,
-		"ZHIXU_DATABASE_URL":       &cfg.DatabaseURL,
-		"ZHIXU_DATABASE_HOST":      &cfg.DatabaseHost,
-		"ZHIXU_DATABASE_PORT":      &cfg.DatabasePort,
-		"ZHIXU_DATABASE_NAME":      &cfg.DatabaseName,
-		"ZHIXU_DATABASE_USER":      &cfg.DatabaseUser,
-		"ZHIXU_DATABASE_PASSWORD":  &cfg.DatabasePassword,
-		"ZHIXU_WEB_ASSETS_DIR":     &cfg.WebAssetsDir,
-		"ZHIXU_WORKER_QUEUE":       &cfg.WorkerQueue,
-		"ZHIXU_WORKER_HEALTH_ADDR": &cfg.WorkerHealthAddr,
+		"ZHIXU_APP_NAME":                  &cfg.AppName,
+		"ZHIXU_VERSION":                   &cfg.Version,
+		"ZHIXU_ENVIRONMENT":               &cfg.Environment,
+		"ZHIXU_HTTP_ADDR":                 &cfg.HTTPAddr,
+		"ZHIXU_DATABASE_URL":              &cfg.DatabaseURL,
+		"ZHIXU_DATABASE_HOST":             &cfg.DatabaseHost,
+		"ZHIXU_DATABASE_PORT":             &cfg.DatabasePort,
+		"ZHIXU_DATABASE_NAME":             &cfg.DatabaseName,
+		"ZHIXU_DATABASE_USER":             &cfg.DatabaseUser,
+		"ZHIXU_DATABASE_PASSWORD":         &cfg.DatabasePassword,
+		"ZHIXU_WEB_ASSETS_DIR":            &cfg.WebAssetsDir,
+		"ZHIXU_WORKER_QUEUE":              &cfg.WorkerQueue,
+		"ZHIXU_WORKER_HEALTH_ADDR":        &cfg.WorkerHealthAddr,
+		"ZHIXU_MODEL_SETTINGS_KEY_FILE":   &cfg.ModelSettingsKeyFile,
+		"ZHIXU_MODEL_SETTINGS_ROLLOUT_ID": &cfg.ModelSettingsRolloutID,
 	}
 	for key, target := range values {
 		if value, ok := lookup(key); ok {
@@ -1504,6 +1588,13 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAPISecrets
 			return fmt.Errorf("parse ZHIXU_AUTH_SECURE_COOKIE: invalid boolean")
 		}
 		cfg.AuthSecureCookie = parsed
+	}
+	if value, ok := lookup("ZHIXU_MODEL_SETTINGS_PREPARED"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return errors.New("parse ZHIXU_MODEL_SETTINGS_PREPARED: invalid boolean")
+		}
+		cfg.ModelSettingsPrepared = parsed
 	}
 	if value, ok := lookup("ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES"); ok {
 		contentTypes, err := parseWebFetchContentTypes(value)

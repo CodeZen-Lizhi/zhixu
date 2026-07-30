@@ -5,7 +5,8 @@ export type AuthCapability =
   | "WRITE_KNOWLEDGE"
   | "GIT_WRITE"
   | "INDEX_MAINTENANCE"
-  | "EVALUATION_RUN";
+  | "EVALUATION_RUN"
+  | "MANAGE_SYSTEM_SETTINGS";
 
 export interface SessionCredential {
   sessionId: string;
@@ -71,7 +72,7 @@ const csrfStorageKey = "zhixu.csrf-token";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const capabilityValues: readonly AuthCapability[] = [
-  "READ_LOCAL", "READ_EXTERNAL", "WRITE_PROPOSAL", "WRITE_KNOWLEDGE", "GIT_WRITE", "INDEX_MAINTENANCE", "EVALUATION_RUN",
+  "READ_LOCAL", "READ_EXTERNAL", "WRITE_PROPOSAL", "WRITE_KNOWLEDGE", "GIT_WRITE", "INDEX_MAINTENANCE", "EVALUATION_RUN", "MANAGE_SYSTEM_SETTINGS",
 ];
 export type AuthInvalidationReason =
   | { kind: "unauthorized" }

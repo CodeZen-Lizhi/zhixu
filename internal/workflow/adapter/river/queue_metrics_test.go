@@ -29,6 +29,17 @@ func TestQueueDepthFailsClosed(t *testing.T) {
 	}
 }
 
+func TestRunningJobCountUsesRunningStateAndParameterizedQueue(t *testing.T) {
+	query := &queueDepthQueryFake{depth: 2}
+	count, err := RunningJobCount(context.Background(), query, " workflow ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 || !strings.Contains(query.sql, "state='running'") || strings.Contains(query.sql, "workflow ") || len(query.args) != 1 || query.args[0] != "workflow" {
+		t.Fatalf("count=%d sql=%q args=%v", count, query.sql, query.args)
+	}
+}
+
 type queueDepthQueryFake struct {
 	sql   string
 	args  []any

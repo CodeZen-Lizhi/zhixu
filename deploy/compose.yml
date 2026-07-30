@@ -1,28 +1,3 @@
-x-embedding-environment: &embedding-environment
-  ZHIXU_EMBEDDING_PROVIDER: ${ZHIXU_EMBEDDING_PROVIDER:-disabled}
-  ZHIXU_EMBEDDING_BASE_URL: ${ZHIXU_EMBEDDING_BASE_URL:-}
-  ZHIXU_EMBEDDING_API_KEY: ${ZHIXU_EMBEDDING_API_KEY:-}
-  ZHIXU_EMBEDDING_MODEL: ${ZHIXU_EMBEDDING_MODEL:-}
-  ZHIXU_EMBEDDING_DIMENSIONS: ${ZHIXU_EMBEDDING_DIMENSIONS:-0}
-  ZHIXU_EMBEDDING_NORMALIZATION: ${ZHIXU_EMBEDDING_NORMALIZATION:-l2}
-  ZHIXU_EMBEDDING_DISTANCE_METRIC: ${ZHIXU_EMBEDDING_DISTANCE_METRIC:-cosine}
-  ZHIXU_EMBEDDING_MAX_BATCH_SIZE: ${ZHIXU_EMBEDDING_MAX_BATCH_SIZE:-128}
-  ZHIXU_EMBEDDING_MAX_INPUT_BYTES: ${ZHIXU_EMBEDDING_MAX_INPUT_BYTES:-65536}
-  ZHIXU_EMBEDDING_MAX_BATCH_INPUT_BYTES: ${ZHIXU_EMBEDDING_MAX_BATCH_INPUT_BYTES:-8388608}
-  ZHIXU_EMBEDDING_TIMEOUT: ${ZHIXU_EMBEDDING_TIMEOUT:-30s}
-  ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES: ${ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES:-67108864}
-
-x-chat-environment: &chat-environment
-  ZHIXU_CHAT_PROVIDER: ${ZHIXU_CHAT_PROVIDER:-disabled}
-  ZHIXU_CHAT_BASE_URL: ${ZHIXU_CHAT_BASE_URL:-}
-  ZHIXU_CHAT_API_KEY: ${ZHIXU_CHAT_API_KEY:-}
-  ZHIXU_CHAT_MODEL: ${ZHIXU_CHAT_MODEL:-}
-  ZHIXU_CHAT_MODEL_VERSION: ${ZHIXU_CHAT_MODEL_VERSION:-}
-  ZHIXU_CHAT_ADAPTER_VERSION: ${ZHIXU_CHAT_ADAPTER_VERSION:-v1}
-  ZHIXU_CHAT_TIMEOUT: ${ZHIXU_CHAT_TIMEOUT:-30s}
-  ZHIXU_CHAT_MAX_REQUEST_BYTES: ${ZHIXU_CHAT_MAX_REQUEST_BYTES:-4194304}
-  ZHIXU_CHAT_MAX_RESPONSE_BYTES: ${ZHIXU_CHAT_MAX_RESPONSE_BYTES:-4194304}
-
 x-tool-environment: &tool-environment
   ZHIXU_TOOL_RUNTIME_MODE: ${ZHIXU_TOOL_RUNTIME_MODE:-disabled}
   ZHIXU_WEB_FETCH_MODE: ${ZHIXU_WEB_FETCH_MODE:-disabled}
@@ -39,6 +14,10 @@ x-tool-environment: &tool-environment
 
 x-runtime-environment: &runtime-environment
   ZHIXU_ENVIRONMENT: ${ZHIXU_ENVIRONMENT:-development}
+
+x-model-settings-environment: &model-settings-environment
+  ZHIXU_MODEL_SETTINGS_MODE: ${ZHIXU_MODEL_SETTINGS_MODE:-managed}
+  ZHIXU_MODEL_SETTINGS_KEY_FILE: /run/zhixu-model-secrets/model-settings.key
 
 x-api-auth-environment: &api-auth-environment
   ZHIXU_AUTH_MODE: ${ZHIXU_AUTH_MODE:-required}
@@ -65,6 +44,17 @@ services:
       timeout: 3s
       retries: 20
 
+  model-settings-key-init:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/app/model-secrets-init.sh"]
+    user: "0:0"
+    environment:
+      ZHIXU_MODEL_SETTINGS_KEY_DIR: /var/lib/zhixu/model-secrets
+    volumes:
+      - zhixu-model-secrets:/var/lib/zhixu/model-secrets
+
   migrate:
     build:
       context: ..
@@ -73,6 +63,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      model-settings-key-init:
+        condition: service_completed_successfully
     environment:
       ZHIXU_DATABASE_HOST: postgres
       ZHIXU_DATABASE_PORT: 5432
@@ -85,8 +77,10 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     environment:
-      <<: [*embedding-environment, *chat-environment, *tool-environment, *runtime-environment, *api-auth-environment]
+      <<: [*tool-environment, *runtime-environment, *model-settings-environment, *api-auth-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
+      ZHIXU_MODEL_SETTINGS_ROLLOUT_ID: ${ZHIXU_MODEL_SETTINGS_ROLLOUT_ID:-}
+      ZHIXU_MODEL_SETTINGS_PREPARED: ${ZHIXU_MODEL_SETTINGS_PREPARED:-false}
       ZHIXU_HTTP_ADDR: 127.0.0.1:8081
       ZHIXU_DATABASE_HOST: postgres
       ZHIXU_DATABASE_PORT: 5432
@@ -99,10 +93,18 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      model-settings-key-init:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:${ZHIXU_HTTP_PORT:-8080}:8080"
     volumes:
       - ${ZHIXU_WORKSPACE_ROOT:-../workspace}:/workspace
+      - type: volume
+        source: zhixu-model-secrets
+        target: /run/zhixu-model-secrets
+        read_only: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/readyz"]
       interval: 5s
@@ -138,14 +140,29 @@ services:
       timeout: 3s
       retries: 20
 
+  app-model-relay:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: on-failure
+    entrypoint: ["socat", "TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr", "TCP:host.docker.internal:11434"]
+    user: "10001:10001"
+    network_mode: "service:app"
+    depends_on:
+      app:
+        condition: service_started
+
   worker:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+    restart: ${ZHIXU_WORKER_RESTART_POLICY:-on-failure}
     entrypoint: ["/app/zhixu-worker"]
     environment:
-      <<: [*embedding-environment, *chat-environment, *tool-environment, *runtime-environment]
+      <<: [*tool-environment, *runtime-environment, *model-settings-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
+      ZHIXU_MODEL_SETTINGS_ROLLOUT_ID: ${ZHIXU_MODEL_SETTINGS_ROLLOUT_ID:-}
+      ZHIXU_MODEL_SETTINGS_PREPARED: ${ZHIXU_MODEL_SETTINGS_PREPARED:-false}
       ZHIXU_DATABASE_HOST: postgres
       ZHIXU_DATABASE_PORT: 5432
       ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
@@ -175,15 +192,62 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      model-settings-key-init:
+        condition: service_completed_successfully
     volumes:
       - ${ZHIXU_WORKSPACE_ROOT:-../workspace}:/workspace
+      - type: volume
+        source: zhixu-model-secrets
+        target: /run/zhixu-model-secrets
+        read_only: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/readyz"]
       interval: 5s
       timeout: 3s
       retries: 20
     stop_grace_period: ${ZHIXU_WORKER_STOP_GRACE_PERIOD:-70s}
+
+  worker-model-relay:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
     restart: on-failure
+    entrypoint: ["socat", "TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr", "TCP:host.docker.internal:11434"]
+    user: "10001:10001"
+    network_mode: "service:worker"
+    depends_on:
+      worker:
+        condition: service_started
+
+  modelctl:
+    profiles: ["modelctl"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/app/zhixu-modelctl"]
+    environment:
+      <<: [*runtime-environment, *model-settings-environment]
+      ZHIXU_DATABASE_HOST: postgres
+      ZHIXU_DATABASE_PORT: 5432
+      ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
+      ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
+      ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
+      ZHIXU_WORKER_QUEUE: ${ZHIXU_WORKER_QUEUE:-workflow}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      model-settings-key-init:
+        condition: service_completed_successfully
+    volumes:
+      - type: volume
+        source: zhixu-model-secrets
+        target: /run/zhixu-model-secrets
+        read_only: true
 
 volumes:
   zhixu-postgres:
+  zhixu-model-secrets:

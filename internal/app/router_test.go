@@ -673,6 +673,28 @@ func TestRouterMethodNotAllowedReturnsProblem(t *testing.T) {
 	}
 }
 
+func TestModelSettingsNoStoreMiddlewareCoversUpstreamFailures(t *testing.T) {
+	upstream := modelSettingsNoStoreMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+	}))
+
+	for _, path := range []string{"/api/v1/settings/models", "/api/v1/settings/models/test"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		upstream.ServeHTTP(response, request)
+		if got := response.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("path=%s Cache-Control=%q", path, got)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/workspaces", nil)
+	response := httptest.NewRecorder()
+	upstream.ServeHTTP(response, request)
+	if got := response.Header().Get("Cache-Control"); got != "" {
+		t.Fatalf("unrelated Cache-Control=%q", got)
+	}
+}
+
 func TestRouterInvalidDatabaseConfigurationIsNotRetryable(t *testing.T) {
 	router := NewRouter(Dependencies{Version: "test", DatabaseConfigErr: errors.New("database_url is invalid")})
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +19,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
@@ -40,6 +44,28 @@ func TestNewAPIServerBoundsRequestReads(t *testing.T) {
 	}
 	if server.ReadHeaderTimeout != apiReadHeaderTimeout || server.IdleTimeout != apiIdleTimeout {
 		t.Fatalf("server timeouts header=%s idle=%s", server.ReadHeaderTimeout, server.IdleTimeout)
+	}
+}
+
+func TestAPICompositionDoesNotCallConfiguredModelFactories(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factoryCalls := 0
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && (selector.Sel.Name == "NewConfiguredChatModel" || selector.Sel.Name == "NewConfiguredEmbedder") {
+			factoryCalls++
+		}
+		return true
+	})
+	if factoryCalls != 0 {
+		t.Fatalf("API composition directly called configured model factories %d times", factoryCalls)
 	}
 }
 
@@ -95,10 +121,6 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 		{name: "enabled", enabled: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cfg := config.Defaults()
-			if test.enabled {
-				cfg.ChatProvider = config.ChatProviderOpenAICompatible
-			}
 			catalog, err := workflowapplication.NewValidationCatalog([]int{1}, capability.All())
 			if err != nil {
 				t.Fatal(err)
@@ -107,7 +129,7 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := registerAPIWorkflowExecutors(cfg, executors); err != nil {
+			if err := registerAPIWorkflowExecutors(test.enabled, executors); err != nil {
 				t.Fatal(err)
 			}
 			if err := executors.Freeze(); err != nil {
@@ -117,7 +139,7 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := registerAPIWorkflowDefinitions(cfg, definitions); err != nil {
+			if err := registerAPIWorkflowDefinitions(test.enabled, definitions); err != nil {
 				t.Fatal(err)
 			}
 			if err := definitions.Freeze(); err != nil {
@@ -144,7 +166,7 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 }
 
 func TestNewRetrievalHandlerRequiresDependencies(t *testing.T) {
-	if handler, err := newRetrievalHandler(nil, config.Defaults(), nil, nil); err == nil || handler != nil {
+	if handler, err := newRetrievalHandler(nil, nil, nil, nil); err == nil || handler != nil {
 		t.Fatalf("handler=%#v err=%v", handler, err)
 	}
 }
@@ -209,7 +231,7 @@ func TestNewRetrievalHandlerComposesDisabledAndEnabledEmbedderWithoutSecretLeak(
 	repository := fakeSourceMaterialRepository{}
 	files := fakeFileScanner{}
 
-	handler, err := newRetrievalHandler(pool, config.Defaults(), repository, files)
+	handler, err := newRetrievalHandler(pool, nil, repository, files)
 	if err != nil || handler == nil {
 		t.Fatalf("disabled handler=%#v err=%v", handler, err)
 	}
@@ -222,15 +244,16 @@ func TestNewRetrievalHandlerComposesDisabledAndEnabledEmbedderWithoutSecretLeak(
 	cfg.EmbeddingDimensions = 3
 	cfg.EmbeddingNormalization = retrievaldomain.NormalizationL2
 	cfg.EmbeddingDistanceMetric = retrievaldomain.DistanceCosine
-	handler, err = newRetrievalHandler(pool, cfg, repository, files)
+	models := mustAPIModels(t, cfg)
+	handler, err = newRetrievalHandler(pool, models.Embedding().Embedder(), repository, files)
 	if err != nil || handler == nil {
 		t.Fatalf("enabled handler=%#v err=%v", handler, err)
 	}
 
 	cfg.EmbeddingProvider = "unsupported"
-	handler, err = newRetrievalHandler(pool, cfg, repository, files)
-	if err == nil || handler != nil {
-		t.Fatalf("invalid handler=%#v err=%v", handler, err)
+	_, err = modelsettingsruntime.LoadSettings(context.Background(), cfg, nil)
+	if err == nil {
+		t.Fatal("invalid model runtime unexpectedly succeeded")
 	}
 	if strings.Contains(fmt.Sprintf("%v", err), cfg.EmbeddingAPIKey) {
 		t.Fatal("retrieval composition error leaked embedding credential")
@@ -246,9 +269,7 @@ func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Defaults()
-	cfg.ChatProvider = config.ChatProviderOpenAICompatible
-	if err := registerAPIWorkflowExecutors(cfg, executors); err != nil {
+	if err := registerAPIWorkflowExecutors(true, executors); err != nil {
 		t.Fatal(err)
 	}
 	if err := executors.Freeze(); err != nil {
@@ -270,7 +291,7 @@ func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := registerAPIWorkflowDefinitions(cfg, definitions); err != nil {
+	if err := registerAPIWorkflowDefinitions(true, definitions); err != nil {
 		t.Fatal(err)
 	}
 	if err := definitions.Freeze(); err != nil {
@@ -305,7 +326,7 @@ func TestAPINeverExposesInternalToolWorkflowThroughGenericStartRegistry(t *testi
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := registerAPIWorkflowExecutors(cfg, executors); err != nil {
+		if err := registerAPIWorkflowExecutors(false, executors); err != nil {
 			t.Fatal(err)
 		}
 		if err := executors.Freeze(); err != nil {
@@ -319,7 +340,7 @@ func TestAPINeverExposesInternalToolWorkflowThroughGenericStartRegistry(t *testi
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := registerAPIWorkflowDefinitions(cfg, definitions); err != nil {
+		if err := registerAPIWorkflowDefinitions(false, definitions); err != nil {
 			t.Fatal(err)
 		}
 		if err := definitions.Freeze(); err != nil {
@@ -336,6 +357,15 @@ func TestAPINeverExposesInternalToolWorkflowThroughGenericStartRegistry(t *testi
 }
 
 type fakeSourceMaterialRepository struct{}
+
+func mustAPIModels(t *testing.T, cfg config.Config) *modelsettingsruntime.Models {
+	t.Helper()
+	loaded, err := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loaded.Models
+}
 
 func (fakeSourceMaterialRepository) GetSourceMaterial(context.Context, foundation.ID) (workspacedomain.SourceMaterial, error) {
 	return workspacedomain.SourceMaterial{}, nil

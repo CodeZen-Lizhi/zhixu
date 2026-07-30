@@ -90,25 +90,26 @@ func (usage TokenUsage) Validate() error {
 
 // ModelRun 是一次绑定 Workflow Node Attempt 与全部实际版本的 Agent pipeline 事实。
 type ModelRun struct {
-	ID              foundation.ID
-	WorkspaceID     foundation.ID
-	WorkflowRunID   foundation.ID
-	NodeRunID       foundation.ID
-	NodeAttemptID   foundation.ID
-	Model           ModelRef
-	Profile         ModelProfileRef
-	Prompt          PromptRef
-	Schema          SchemaRef
-	ReducedSchema   SchemaRef
-	Retrieval       RetrievalRef
-	MemoryContext   RAGMemoryContextRef
-	Status          ModelRunStatus
-	FinalResultType string
-	FinalErrorCode  string
-	Version         int64
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	CompletedAt     *time.Time
+	ID                    foundation.ID
+	WorkspaceID           foundation.ID
+	WorkflowRunID         foundation.ID
+	NodeRunID             foundation.ID
+	NodeAttemptID         foundation.ID
+	ModelSettingsRevision *int64
+	Model                 ModelRef
+	Profile               ModelProfileRef
+	Prompt                PromptRef
+	Schema                SchemaRef
+	ReducedSchema         SchemaRef
+	Retrieval             RetrievalRef
+	MemoryContext         RAGMemoryContextRef
+	Status                ModelRunStatus
+	FinalResultType       string
+	FinalErrorCode        string
+	Version               int64
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	CompletedAt           *time.Time
 }
 
 // ValidateModelRun 校验 Model Run 的绑定、版本快照和生命周期一致性。
@@ -118,6 +119,9 @@ func ValidateModelRun(run ModelRun) error {
 		run.Prompt.Validate() != nil || run.Schema.Validate() != nil || run.ReducedSchema.Validate() != nil ||
 		run.Version < 1 || run.CreatedAt.IsZero() || run.UpdatedAt.Before(run.CreatedAt) {
 		return invalid(ErrorCodeModelRunInvalid, "model run binding or version snapshot is invalid")
+	}
+	if run.ModelSettingsRevision != nil && *run.ModelSettingsRevision < 0 {
+		return invalid(ErrorCodeModelRunInvalid, "model settings revision cannot be negative")
 	}
 	retrievalBound := run.Retrieval.IsBound()
 	if retrievalBound && run.Retrieval.Validate() != nil {

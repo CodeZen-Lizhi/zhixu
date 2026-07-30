@@ -4,9 +4,14 @@
 .env
 .env.*
 !.env.example
+/.zhixu-launcher.lock*
 web/node_modules
 web/dist
+workspace
+/workspace
 poc
 coverage
+/output
+/.playwright-cli
 tmp
 *.log

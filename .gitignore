@@ -33,6 +33,7 @@ pnpm-debug.log*
 # Local runtime data
 /data/
 /workspace/
+/.zhixu-launcher.lock*
 /postgres-data/
 /tmp/
 *.db

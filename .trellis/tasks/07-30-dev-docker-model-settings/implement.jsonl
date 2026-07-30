@@ -1,0 +1,12 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端分层、Composition Root、数据库和 Workflow 总入口"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Settings Secret、Session/Token、CSRF 与 fail-closed 边界"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"新增 model settings migration、事务、参数化与一致性约束"}
+{"file":".trellis/spec/frontend/index.md","reason":"Settings 跨层数据流与前端模块边界"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"模型 Settings HTTP 响应必须由严格 decoder 唯一拥有"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"desired/active/applied revision、rollout mutation、auth cache 清理与恢复"}
+{"file":".trellis/tasks/07-30-dev-docker-model-settings/research/docker-dev.md","reason":"一键入口、现有 deploy 兼容和精确镜像清理证据"}
+{"file":".trellis/tasks/07-30-dev-docker-model-settings/research/model-settings.md","reason":"模型配置加载、Secret 持久化、restart 与 Ollama 网络研究"}
+{"file":".trellis/tasks/07-30-dev-docker-model-settings/research/worktree-overlap.md","reason":"Workflow、OpenAPI、脚本与文档现有用户改动的增量合并边界"}
+{"file": ".trellis/tasks/07-30-dev-docker-model-settings/research/implementation-baseline.md", "reason": "W0 Git、工具链、Docker保护快照与局部测试基线"}
+{"file": ".trellis/tasks/07-30-dev-docker-model-settings/research/runtime-fence-audit.md", "reason": "W3 producer事务围栏、Runtime生命周期与revision绑定缺口的完整审计"}
+{"file": ".trellis/tasks/07-30-dev-docker-model-settings/research/smoke-image-cleanup-result.md", "reason": "W6 real cleanup evidence and protected-resource snapshot"}

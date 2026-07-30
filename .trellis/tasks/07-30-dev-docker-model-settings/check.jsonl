@@ -1,0 +1,11 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go、迁移、集成与真实运行质量门禁"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Review Secret 泄漏、授权、SSRF 与配置失败模式"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"SQL、事务、migration、租户/权限与一致性审查"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Settings decoder/component/browser 桌面移动验收"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"未知字段、Secret 响应和 strict wire contract 审查"}
+{"file":".trellis/tasks/07-30-dev-docker-model-settings/research/docker-dev.md","reason":"清理前后 Docker 资源基线与不可触碰范围"}
+{"file":".trellis/tasks/07-30-dev-docker-model-settings/research/model-settings.md","reason":"API/Worker revision、Factory 复用与 Key 丢失风险审查"}
+{"file":".trellis/tasks/07-30-dev-docker-model-settings/research/worktree-overlap.md","reason":"确认 Review 没有覆盖或回滚用户现有 Capability、OpenAPI 与文档改动"}
+{"file": ".trellis/tasks/07-30-dev-docker-model-settings/research/implementation-baseline.md", "reason": "复核W0保护对象、目标镜像计数与验证盲区"}
+{"file": ".trellis/tasks/07-30-dev-docker-model-settings/research/runtime-fence-audit.md", "reason": "复核所有River producer、候选激活、drain与attempt/index/model-run revision事实"}
+{"file": ".trellis/tasks/07-30-dev-docker-model-settings/research/smoke-image-cleanup-result.md", "reason": "Verify W6 exact deletion and preservation evidence"}

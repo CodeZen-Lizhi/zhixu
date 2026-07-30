@@ -48,11 +48,11 @@ func (r *Repository) RegisterEmbeddingVersion(ctx context.Context, value domain.
 		return domain.EmbeddingVersionResult{}, classify(idErr, "RETRIEVAL_EMBEDDING_QUERY_FAILED")
 	}
 	row := r.db.QueryRow(ctx, `INSERT INTO retrieval.embedding_version
-		(id,provider,adapter_name,adapter_version,model,dimensions,normalization,distance_metric,config_hash,created_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		(id,provider,adapter_name,adapter_version,model,dimensions,normalization,distance_metric,config_hash,model_settings_revision,created_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		ON CONFLICT DO NOTHING RETURNING `+embeddingColumns,
 		string(value.ID), value.Provider, value.AdapterName, value.AdapterVersion, value.Model, value.Dimensions,
-		string(value.Normalization), string(value.DistanceMetric), value.ConfigHash, value.CreatedAt.UTC())
+		string(value.Normalization), string(value.DistanceMetric), value.ConfigHash, nullableInt64(value.ModelSettingsRevision), value.CreatedAt.UTC())
 	persisted, err := scanEmbedding(row)
 	if err == nil {
 		return domain.EmbeddingVersionResult{EmbeddingVersion: persisted, Created: true}, nil
@@ -61,7 +61,9 @@ func (r *Repository) RegisterEmbeddingVersion(ctx context.Context, value domain.
 		return domain.EmbeddingVersionResult{}, classify(err, "RETRIEVAL_EMBEDDING_CREATE_FAILED")
 	}
 	persisted, err = scanEmbedding(r.db.QueryRow(ctx, `SELECT `+embeddingColumns+` FROM retrieval.embedding_version
-		WHERE provider=$1 AND model=$2 AND dimensions=$3 AND config_hash=$4`, value.Provider, value.Model, value.Dimensions, value.ConfigHash))
+		WHERE provider=$1 AND model=$2 AND dimensions=$3 AND config_hash=$4
+		  AND model_settings_revision IS NOT DISTINCT FROM $5`,
+		value.Provider, value.Model, value.Dimensions, value.ConfigHash, nullableInt64(value.ModelSettingsRevision)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		byID, queryErr := scanEmbedding(r.db.QueryRow(ctx, `SELECT `+embeddingColumns+` FROM retrieval.embedding_version WHERE id=$1`, string(value.ID)))
 		if queryErr != nil {
@@ -126,11 +128,11 @@ func (r *Repository) BeginIndex(ctx context.Context, build domain.IndexBuild) (d
 	degraded := marshalDegradedCapabilities(build.IndexVersion.DegradedCapabilities)
 	var inserted string
 	err = tx.QueryRow(ctx, `INSERT INTO retrieval.index_version
-		(id,workspace_id,embedding_version_id,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
+		(id,workspace_id,embedding_version_id,model_settings_revision,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
 		source_snapshot_ref,manifest_hash,expected_chunk_count,idempotency_key,status,degraded_capabilities,failure_code,
-		version,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		version,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		ON CONFLICT(workspace_id,idempotency_key) DO NOTHING RETURNING id::text`, string(build.IndexVersion.ID),
-		string(build.IndexVersion.WorkspaceID), optionalID(build.IndexVersion.EmbeddingVersionID), build.IndexVersion.TokenizerID,
+		string(build.IndexVersion.WorkspaceID), optionalID(build.IndexVersion.EmbeddingVersionID), nullableInt64(build.IndexVersion.ModelSettingsRevision), build.IndexVersion.TokenizerID,
 		build.IndexVersion.TokenizerVersion, build.IndexVersion.TokenizerConfigHash, build.IndexVersion.FusionConfig,
 		build.IndexVersion.SourceSnapshotRef, build.IndexVersion.ManifestHash, build.IndexVersion.ExpectedChunkCount,
 		build.IndexVersion.IdempotencyKey, string(build.IndexVersion.Status), degraded, nullableString(build.IndexVersion.FailureCode),
