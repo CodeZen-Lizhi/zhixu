@@ -1577,3 +1577,24 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - None - task complete
+
+
+## Session 35: 收口 M9 附件导出与 AC-33
+
+**Date**: 2026-07-30
+**Task**: 收口 M9 附件导出与 AC-33
+**Branch**: `dev`
+
+### Summary
+
+完成 Workspace 附件 ZIP 导出、安全本地文件处理、OpenAPI 与数据库迁移、前端设置页收口及端到端验证，关闭 AC-33。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a7bf1c1` | (see git log) |
+
+### Status
+
+[OK] **Completed**
