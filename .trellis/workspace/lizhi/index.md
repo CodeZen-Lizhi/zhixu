@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 35
-- **Last Active**: 2026-07-30
+- **Total Sessions**: 36
+- **Last Active**: 2026-07-31
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1600 | Active |
+| `journal-1.md` | ~1631 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 36 | 2026-07-31 | 开发环境一键启动与模型配置 | `c14173e`, `5faeca9` | `dev` |
 | 35 | 2026-07-30 | 收口 M9 附件导出与 AC-33 | `a7bf1c1` | `dev` |
 | 34 | 2026-07-29 | 收口 M7 Timeline 与 Impact 遗留 | `c5126dc`, `b341fc5` | `dev` |
 | 33 | 2026-07-28 | 完成 M8-02 Review/FSRS 与 M8-03 Interview/Memory | `002c2b5`, `c66cfbf`, `35439b3` | `dev` |

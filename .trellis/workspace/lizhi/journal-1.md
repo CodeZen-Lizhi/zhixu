@@ -1598,3 +1598,34 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 36: 开发环境一键启动与模型配置
+
+**Date**: 2026-07-31
+**Task**: 开发环境一键启动与模型配置
+**Branch**: `dev`
+
+### Summary
+
+完成源码下载后一键 Docker 启动、受管模型配置与显式 restart 应用，并通过暂存快照全量验证。
+
+### Main Changes
+
+- 新增 ./zhixu up/status/logs/down/reset/restart 与 Compose 密钥卷、一次性迁移和运行时恢复契约。
+- 新增模型设置 API、加密 revision、API/Worker rollout fence、前端配置页及执行 provenance。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c14173e` | (see git log) |
+| `5faeca9` | (see git log) |
+
+### Testing
+
+- [OK] 暂存树通过 go test ./...、integration 编译、OpenAPI/Compose/launcher contracts、Web lint/typecheck、845 tests 和 build。
+
+### Status
+
+[OK] **Completed**
