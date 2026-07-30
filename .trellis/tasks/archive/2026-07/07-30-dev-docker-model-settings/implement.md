@@ -2,14 +2,16 @@
 
 ## 计划状态
 
-- 任务已经处于 `in_progress`，当前工作树存在 modelsettings domain/application/postgres/runtime/http、迁移、modelctl、前端面板和 launcher 草稿；草稿存在不等于阶段完成，所有 checkbox 只有在对应 Go/No-Go 门禁通过后才能勾选。
+- W0-W7 的实现与直接相关门禁已完成；用户已批准提交和归档，主实现提交为 `c14173e`。详细证据见
+  `research/w7-acceptance.md`。下方 checkbox 保留为原始开发清单，最终完成度以验收记录为准。
 - 2026-07-30 最终门禁已通过：受影响 Go tests/vet、modelsettings/transport/modelctl race、`go mod tidy -diff`、
-  Web lint/typecheck（80 files / 844 tests）/build、OpenAPI/Compose contracts、独立 PostgreSQL 18 migration integration、
+  Web lint/typecheck/test/build、OpenAPI/Compose contracts、独立 PostgreSQL 18 migration integration、
   `git diff --check` 与 Secret 元数据扫描。
 - 真实开发栈已完成 `./zhixu up`、`./zhixu restart`、重复 `up`、API/Worker readiness 和 volume 保留验证；
-  Settings 页面已在 1440x1000 与 390x844 验证 zero console error/warning、zero horizontal overflow、正常 Network。
-- 当前未使用用户提供的真实第三方 Provider 做连接测试；Provider 失败矩阵由本地 contract tests 覆盖。历史 smoke 精确清理
-  复核时没有匹配当前命名空间的目标镜像，因此删除数为 0；未执行全局 prune、全量长耗时 smoke 或删除其他 Docker 资源。
+  Settings 页面已在 1440x900 与 390x844 验证 zero console error/warning、zero horizontal overflow、正常 Network。
+- 受控 OpenAI-compatible fixture 已验证 Chat、Embedding、test/save/restart 链路；未使用真实第三方 Provider。四套长耗时
+  Compose smoke 未逐套动态执行，其启动/清理/信号路径由可执行 contract 覆盖。一次性精确清理实际移除 282 个目标
+  smoke image tag，清理后为 0；未执行全局 prune，也未删除其他 Docker 资源。
 - 工作树同时包含其他任务的大量未提交改动。所有重叠文件必须先读取当前 diff，再做增量 patch；不得整文件覆盖、格式化无关区块或把其他任务变更纳入本任务回滚。
 - 本计划的编号是交付工作包，不表示可以按文件顺序盲目施工；实际执行必须遵守下方波次和门禁。
 
