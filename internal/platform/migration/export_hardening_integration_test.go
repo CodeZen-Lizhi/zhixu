@@ -77,19 +77,6 @@ func TestExportHardeningMigrationConstraintsForeignKeyAndGuardedDown(t *testing.
 	assertPostgresCode(t, err, "23514")
 
 	err = insertExportHardeningFact(ctx, pool, exportHardeningFact{
-		ID:             "e9200000-0000-4000-8000-000000000008",
-		WorkspaceID:    workspaceID,
-		CollectionID:   collectionID,
-		QueryHash:      strings.Repeat("1", 64),
-		Kind:           "EVALUATION_JSON",
-		IdempotencyKey: "export-deferred-kind",
-		RequestHash:    strings.Repeat("8", 64),
-		TTLSeconds:     86400,
-		CreatedAt:      now,
-	})
-	assertPostgresCode(t, err, "23514")
-
-	err = insertExportHardeningFact(ctx, pool, exportHardeningFact{
 		ID:             "e9200000-0000-4000-8000-000000000003",
 		WorkspaceID:    workspaceID,
 		CollectionID:   collectionID,
@@ -379,7 +366,6 @@ func assertExportHardeningMigrationShape(t *testing.T, ctx context.Context, pool
 		kind      string
 		fragments []string
 	}{
-		{name: "ops_export_job_supported_kind", kind: "c", fragments: []string{"kind", "MARKDOWN", "METADATA_JSON"}},
 		{name: "ops_export_job_redaction_policy", kind: "c"},
 		{name: "ops_export_job_sensitive_policy", kind: "c", fragments: []string{"redaction_policy", "FULL", "include_sensitive"}},
 		{name: "ops_export_job_request_hash", kind: "c", fragments: []string{"request_hash", "[0-9a-f]{64}"}},
@@ -479,7 +465,7 @@ func assertExportHardeningMigrationAbsent(t *testing.T, ctx context.Context, poo
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_constraint
 		WHERE conrelid='ops.export_job'::regclass
 		  AND conname = ANY($1)`, []string{
-		"ops_export_job_supported_kind", "ops_export_job_redaction_policy", "ops_export_job_sensitive_policy", "ops_export_job_request_hash",
+		"ops_export_job_redaction_policy", "ops_export_job_sensitive_policy", "ops_export_job_request_hash",
 		"ops_export_job_request_ttl", "ops_export_job_version", "ops_export_job_scope_binding",
 		"ops_export_job_collection_workspace", "ops_export_job_counters", "ops_export_job_prepared_binding",
 		"ops_export_job_prepared_path_binding", "ops_export_job_lifecycle_binding", "ops_export_job_cleanup_binding",
@@ -573,7 +559,6 @@ type exportHardeningFact struct {
 	WorkspaceID      string
 	CollectionID     string
 	QueryHash        string
-	Kind             string
 	IdempotencyKey   string
 	RequestHash      string
 	TTLSeconds       int64
@@ -584,10 +569,6 @@ type exportHardeningFact struct {
 }
 
 func insertExportHardeningFact(ctx context.Context, pool *pgxpool.Pool, fact exportHardeningFact) error {
-	kind := fact.Kind
-	if kind == "" {
-		kind = "MARKDOWN"
-	}
 	redactionPolicy := fact.RedactionPolicy
 	if redactionPolicy == "" {
 		redactionPolicy = "MASKED"
@@ -602,11 +583,11 @@ func insertExportHardeningFact(ctx context.Context, pool *pgxpool.Pool, fact exp
 		collection_id,collection_version,query_hash,redaction_policy,include_sensitive,
 		permission_scope,requested_by
 	) VALUES(
-		$1,$2,$5,'export/v1',
+		$1,$2,'MARKDOWN','export/v1',
 		jsonb_build_object('collection_id',$3::uuid,'collection_version',1,'query_hash',$4::text),
-		'["id","title"]'::jsonb,'PENDING',$6,$7,$8,1,$9,$10,$10,
-		$3::uuid,1,$4::text,$11,$12,'READ_LOCAL','USER:migration-test'
-		)`, fact.ID, fact.WorkspaceID, fact.CollectionID, fact.QueryHash, kind, fact.IdempotencyKey,
+		'["id","title"]'::jsonb,'PENDING',$5,$6,$7,1,$8,$9,$9,
+		$3::uuid,1,$4::text,$10,$11,'READ_LOCAL','USER:migration-test'
+	)`, fact.ID, fact.WorkspaceID, fact.CollectionID, fact.QueryHash, fact.IdempotencyKey,
 		fact.RequestHash, fact.TTLSeconds, expiresAt, fact.CreatedAt,
 		redactionPolicy, fact.IncludeSensitive)
 	return err

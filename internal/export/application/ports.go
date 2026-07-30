@@ -4,6 +4,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"time"
 
 	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
@@ -45,10 +46,23 @@ type WorkspaceReader interface {
 type FileStore interface {
 	Stage(context.Context, foundation.ID, foundation.ID, string, []byte) (PreparedFile, error)
 	Promote(context.Context, foundation.ID, PreparedFile) error
-	Read(context.Context, foundation.ID, string, string, int64) ([]byte, error)
+	Open(context.Context, foundation.ID, string, string, int64) (io.ReadCloser, error)
 	DeletePrepared(context.Context, foundation.ID, string, string, int64) error
 	DeleteOrphan(context.Context, foundation.ID, string) error
 	ListStaging(context.Context, foundation.ID, time.Time, int) ([]StagingFile, error)
+}
+
+// AttachmentArchiver 从固定 Workspace 附件根生成受控、确定性的 staging ZIP。
+type AttachmentArchiver interface {
+	StageAttachments(context.Context, foundation.ID, foundation.ID) (AttachmentArchive, error)
+}
+
+// AttachmentArchive 是附件 manifest 与归档文件的不可变 prepared binding。
+type AttachmentArchive struct {
+	PreparedFile           PreparedFile
+	ManifestHash           string
+	EntryCount             int64
+	TotalUncompressedBytes int64
 }
 
 // PreparedFile 是 create-only staging 写入后用于数据库 Prepare 的不可变文件绑定。
@@ -134,6 +148,7 @@ type Health struct {
 // ListQuery 是导出任务列表的 Workspace-scoped cursor 查询。
 type ListQuery struct {
 	WorkspaceID  foundation.ID
+	ScopeKind    domain.ScopeKind
 	CollectionID *foundation.ID
 	Limit        int
 	Cursor       string
@@ -147,13 +162,16 @@ type ListPage struct {
 
 // PrepareRequest 是 worker 将冻结快照和 create-only staging 固定到 Job 的 CAS 请求。
 type PrepareRequest struct {
-	WorkspaceID       foundation.ID
-	JobID             foundation.ID
-	LeaseOwner        string
-	ExpectedVersion   int64
-	ReadModelRevision string
-	ExactCount        int64
-	PreparedFile      PreparedFile
+	WorkspaceID            foundation.ID
+	JobID                  foundation.ID
+	LeaseOwner             string
+	ExpectedVersion        int64
+	ReadModelRevision      string
+	ExactCount             int64
+	ManifestHash           string
+	EntryCount             int64
+	TotalUncompressedBytes int64
+	PreparedFile           PreparedFile
 }
 
 // CompleteRequest 是 worker 在已提升固定结果后成功归约的 CAS 请求。
@@ -188,6 +206,8 @@ type DownloadRecord struct {
 	JobID        foundation.ID
 	AuditEventID foundation.ID
 	Actor        DownloadActor
+	ScopeKind    domain.ScopeKind
+	EntryCount   *int64
 	FileHash     string
 	FileSize     int64
 }

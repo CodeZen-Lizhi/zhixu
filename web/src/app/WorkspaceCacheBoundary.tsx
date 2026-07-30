@@ -11,6 +11,7 @@ import { clearTimelineWorkspaceQueries } from "../features/timeline/query-keys";
 import { clearReviewWorkspaceQueries } from "../features/review/queries";
 import { clearMemoryWorkspaceQueries } from "../features/memory/queries";
 import { clearInterviewWorkspaceQueries } from "../features/interview/queries";
+import { clearAttachmentExportWorkspaceQueries } from "../features/settings/attachment-export-queries";
 import { useActiveWorkspaceId } from "./active-workspace";
 
 export const WorkspaceCacheBoundary = ({ children }: PropsWithChildren) => {
@@ -31,6 +32,7 @@ export const WorkspaceCacheBoundary = ({ children }: PropsWithChildren) => {
       clearReviewWorkspaceQueries(queryClient, previous);
       clearMemoryWorkspaceQueries(queryClient, previous);
       clearInterviewWorkspaceQueries(queryClient, previous);
+      clearAttachmentExportWorkspaceQueries(queryClient, previous);
     }
     previousWorkspaceId.current = workspaceId;
   }, [queryClient, workspaceId]);

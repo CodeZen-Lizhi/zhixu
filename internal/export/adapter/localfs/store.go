@@ -9,29 +9,30 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 	"time"
 
 	exportapp "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
+	"golang.org/x/sys/unix"
 )
 
 const (
 	exportDirectory      = ".knowledge/exports"
 	stagingDirectory     = exportDirectory + "/.staging"
-	maxExportFileBytes   = 32 * 1024 * 1024
+	maxExportFileBytes   = 1024 * 1024 * 1024
 	maxStagingCandidates = 100
 	filePathUnsafeCode   = "EXPORT_FILE_PATH_UNSAFE"
 	fileIOFailedCode     = "EXPORT_FILE_IO_FAILED"
 )
+
+var errStagingListComplete = errors.New("export staging list is complete")
 
 // WorkspaceReader 读取 Workspace 与其已规范化根路径。
 type WorkspaceReader interface {
@@ -39,7 +40,11 @@ type WorkspaceReader interface {
 }
 
 // Store 使用 0600 临时文件、fsync 和 create-only 原子链接写入固定导出目录。
-type Store struct{ workspaces WorkspaceReader }
+type Store struct {
+	workspaces     WorkspaceReader
+	attachmentHook attachmentArchiveHook
+	secureHook     secureFilesystemHook
+}
 
 var _ exportapp.FileStore = (*Store)(nil)
 
@@ -59,38 +64,40 @@ func (store *Store) Write(ctx context.Context, workspaceID foundation.ID, relati
 	if len(payload) > maxExportFileBytes {
 		return "", "", 0, invalid(errors.New("export file exceeds the size limit"))
 	}
-	root, err := store.openWorkspaceRoot(ctx, workspaceID)
+	root, managed, err := store.openManagedDirectories(ctx, workspaceID, true, false)
 	if err != nil {
 		return "", "", 0, err
 	}
 	defer root.Close()
-	if err := ensureExportDirectories(root, true); err != nil {
-		return "", "", 0, err
-	}
+	defer managed.Close()
+	directory, finalName := managedFileDirectory(managed, relativePath)
 	digest := sha256.Sum256(payload)
 	expectedHash := hex.EncodeToString(digest[:])
-	if _, statErr := root.Lstat(relativePath); statErr == nil {
-		if verifyErr := verifyExisting(root, relativePath, expectedHash, int64(len(payload))); verifyErr != nil {
+	if _, statErr := directory.Lstat(finalName); statErr == nil {
+		if verifyErr := verifyExistingInDirectory(ctx, directory, finalName, expectedHash, int64(len(payload))); verifyErr != nil {
 			return "", "", 0, verifyErr
+		}
+		if err := verifyManagedBindings(managed); err != nil {
+			return "", "", 0, err
 		}
 		return relativePath, expectedHash, int64(len(payload)), nil
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return "", "", 0, ioFailure(statErr)
+		return "", "", 0, managedBoundaryError(statErr)
 	}
 
-	temporaryPath, err := reserveTemporaryPath(root, relativePath)
+	temporaryName, err := reserveTemporaryName(directory, finalName)
 	if err != nil {
 		return "", "", 0, err
 	}
 	removeTemporary := true
 	defer func() {
 		if removeTemporary {
-			_ = root.Remove(temporaryPath)
+			_ = directory.Remove(temporaryName)
 		}
 	}()
-	file, err := root.OpenFile(temporaryPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	file, err := directory.OpenFile(temporaryName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return "", "", 0, ioFailure(err)
+		return "", "", 0, managedBoundaryError(err)
 	}
 	writeErr := writeAndSync(file, payload)
 	closeErr := file.Close()
@@ -100,23 +107,29 @@ func (store *Store) Write(ctx context.Context, workspaceID foundation.ID, relati
 	if closeErr != nil {
 		return "", "", 0, ioFailure(closeErr)
 	}
-	if err := root.Link(temporaryPath, relativePath); err != nil {
+	if err := directory.Link(temporaryName, directory, finalName); err != nil {
 		if !errors.Is(err, os.ErrExist) {
-			return "", "", 0, ioFailure(err)
+			return "", "", 0, managedBoundaryError(err)
 		}
-		if verifyErr := verifyExisting(root, relativePath, expectedHash, int64(len(payload))); verifyErr != nil {
+		if verifyErr := verifyExistingInDirectory(ctx, directory, finalName, expectedHash, int64(len(payload))); verifyErr != nil {
 			return "", "", 0, verifyErr
+		}
+		if err := verifyManagedBindings(managed); err != nil {
+			return "", "", 0, err
 		}
 		return relativePath, expectedHash, int64(len(payload)), nil
 	}
-	if err := root.Remove(temporaryPath); err != nil {
-		return "", "", 0, ioFailure(err)
+	if err := directory.Remove(temporaryName); err != nil {
+		return "", "", 0, managedBoundaryError(err)
 	}
 	removeTemporary = false
-	if err := syncDirectory(root, exportDirectory); err != nil {
+	if err := directory.Sync(); err != nil {
+		return "", "", 0, managedBoundaryError(err)
+	}
+	if err := verifyExistingInDirectory(ctx, directory, finalName, expectedHash, int64(len(payload))); err != nil {
 		return "", "", 0, err
 	}
-	if err := verifyExisting(root, relativePath, expectedHash, int64(len(payload))); err != nil {
+	if err := verifyManagedBindings(managed); err != nil {
 		return "", "", 0, err
 	}
 	return relativePath, expectedHash, int64(len(payload)), nil
@@ -130,14 +143,12 @@ func (store *Store) Stage(ctx context.Context, workspaceID, exportID foundation.
 	if len(payload) > maxExportFileBytes {
 		return exportapp.PreparedFile{}, invalid(errors.New("export file exceeds the size limit"))
 	}
-	root, err := store.openWorkspaceRoot(ctx, workspaceID)
+	root, managed, err := store.openManagedDirectories(ctx, workspaceID, true, true)
 	if err != nil {
 		return exportapp.PreparedFile{}, err
 	}
 	defer root.Close()
-	if err := ensureStagingDirectory(root, true); err != nil {
-		return exportapp.PreparedFile{}, err
-	}
+	defer managed.Close()
 
 	digest := sha256.Sum256(payload)
 	prepared := exportapp.PreparedFile{
@@ -150,27 +161,31 @@ func (store *Store) Stage(ctx context.Context, workspaceID, exportID foundation.
 		if err != nil {
 			return exportapp.PreparedFile{}, err
 		}
-		file, err := root.OpenFile(stagingPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+		stagingName := path.Base(stagingPath)
+		file, err := managed.staging.OpenFile(stagingName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if errors.Is(err, os.ErrExist) {
 			continue
 		}
 		if err != nil {
-			return exportapp.PreparedFile{}, ioFailure(err)
+			return exportapp.PreparedFile{}, managedBoundaryError(err)
 		}
 		writeErr := writeAndSync(file, payload)
 		closeErr := file.Close()
 		if writeErr != nil {
-			_ = root.Remove(stagingPath)
+			_ = managed.staging.Remove(stagingName)
 			return exportapp.PreparedFile{}, ioFailure(writeErr)
 		}
 		if closeErr != nil {
-			_ = root.Remove(stagingPath)
+			_ = managed.staging.Remove(stagingName)
 			return exportapp.PreparedFile{}, ioFailure(closeErr)
 		}
-		if err := syncDirectory(root, stagingDirectory); err != nil {
+		if err := managed.staging.Sync(); err != nil {
+			return exportapp.PreparedFile{}, managedBoundaryError(err)
+		}
+		if err := verifyExistingInDirectory(ctx, managed.staging, stagingName, prepared.FileHash, prepared.FileSize); err != nil {
 			return exportapp.PreparedFile{}, err
 		}
-		if err := verifyExisting(root, stagingPath, prepared.FileHash, prepared.FileSize); err != nil {
+		if err := verifyManagedBindings(managed); err != nil {
 			return exportapp.PreparedFile{}, err
 		}
 		prepared.StagingPath = stagingPath
@@ -184,46 +199,54 @@ func (store *Store) Promote(ctx context.Context, workspaceID foundation.ID, prep
 	if err := validatePreparedRequest(ctx, workspaceID, prepared); err != nil {
 		return err
 	}
-	root, err := store.openWorkspaceRoot(ctx, workspaceID)
+	root, managed, err := store.openManagedDirectories(ctx, workspaceID, false, true)
+	if errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	if err := ensureExportDirectories(root, false); err != nil {
-		return err
-	}
-	if err := ensureStagingDirectoryForPromote(root); err != nil {
-		return err
-	}
-
-	stagingExists, err := managedFileExists(root, prepared.StagingPath)
+	defer managed.Close()
+	stagingName := path.Base(prepared.StagingPath)
+	finalName := path.Base(prepared.FinalPath)
+	stagingExists, err := managedFileExistsInDirectory(managed.staging, stagingName)
 	if err != nil {
 		return err
 	}
 	if !stagingExists {
-		return verifyPromotedFinal(root, prepared)
+		if err := verifyExistingInDirectory(ctx, managed.exports, finalName, prepared.FileHash, prepared.FileSize); err != nil {
+			return err
+		}
+		return verifyManagedBindings(managed)
 	}
-	if err := verifyExisting(root, prepared.StagingPath, prepared.FileHash, prepared.FileSize); err != nil {
+	if err := verifyExistingInDirectory(ctx, managed.staging, stagingName, prepared.FileHash, prepared.FileSize); err != nil {
 		return err
 	}
-	if err := root.Link(prepared.StagingPath, prepared.FinalPath); err != nil {
+	if store.secureHook.afterManagedVerify != nil {
+		store.secureHook.afterManagedVerify()
+	}
+	if err := managed.staging.Link(stagingName, managed.exports, finalName); err != nil {
 		if !errors.Is(err, os.ErrExist) {
-			return ioFailure(err)
+			return managedBoundaryError(err)
 		}
-		if err := verifyExisting(root, prepared.FinalPath, prepared.FileHash, prepared.FileSize); err != nil {
+		if err := verifyExistingInDirectory(ctx, managed.exports, finalName, prepared.FileHash, prepared.FileSize); err != nil {
 			return err
 		}
 	}
-	if err := root.Remove(prepared.StagingPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return ioFailure(err)
+	if err := managed.staging.Remove(stagingName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return managedBoundaryError(err)
 	}
-	if err := syncDirectory(root, exportDirectory); err != nil {
+	if err := managed.exports.Sync(); err != nil {
+		return managedBoundaryError(err)
+	}
+	if err := managed.staging.Sync(); err != nil {
+		return managedBoundaryError(err)
+	}
+	if err := verifyExistingInDirectory(ctx, managed.exports, finalName, prepared.FileHash, prepared.FileSize); err != nil {
 		return err
 	}
-	if err := syncDirectory(root, stagingDirectory); err != nil {
-		return err
-	}
-	return verifyExisting(root, prepared.FinalPath, prepared.FileHash, prepared.FileSize)
+	return verifyManagedBindings(managed)
 }
 
 // ListStaging 返回早于 cutoff 的严格命名 staging 文件，供 orphan sweep 有界处理。
@@ -234,62 +257,74 @@ func (store *Store) ListStaging(ctx context.Context, workspaceID foundation.ID, 
 	if olderThan.IsZero() || limit < 1 || limit > maxStagingCandidates {
 		return nil, invalid(errors.New("export staging list request is invalid"))
 	}
-	root, err := store.openWorkspaceRoot(ctx, workspaceID)
+	root, managed, err := store.openManagedDirectories(ctx, workspaceID, false, true)
 	if err != nil {
-		return nil, err
-	}
-	defer root.Close()
-	if err := ensureStagingDirectory(root, false); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return []exportapp.StagingFile{}, nil
 		}
 		return nil, err
 	}
-	entries, err := fs.ReadDir(root.FS(), stagingDirectory)
-	if err != nil {
-		return nil, ioFailure(err)
-	}
-	staging := make([]exportapp.StagingFile, 0, min(limit, len(entries)))
-	for _, entry := range entries {
+	defer root.Close()
+	defer managed.Close()
+	staging := make([]exportapp.StagingFile, 0, limit)
+	err = managed.staging.ForEachDirEntry(maxStagingCandidates, func(entry os.DirEntry) error {
 		candidate := stagingDirectory + "/" + entry.Name()
 		if !validStagingPath(candidate) {
-			continue
+			return nil
 		}
-		info, err := root.Lstat(candidate)
+		info, err := managed.staging.Lstat(entry.Name())
 		if err != nil {
-			return nil, ioFailure(err)
+			return managedBoundaryError(err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-			return nil, unsafe(errors.New("export staging candidate is not a regular private file"))
+			return unsafe(errors.New("export staging candidate is not a regular private file"))
 		}
 		if !info.ModTime().Before(olderThan) {
-			continue
+			return nil
 		}
 		staging = append(staging, exportapp.StagingFile{Path: candidate, ModifiedAt: info.ModTime()})
 		if len(staging) == limit {
-			break
+			return errStagingListComplete
 		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errStagingListComplete) {
+		var classified *foundation.Error
+		if errors.As(err, &classified) {
+			return nil, err
+		}
+		return nil, ioFailure(err)
+	}
+	if err := verifyManagedBindings(managed); err != nil {
+		return nil, err
 	}
 	return staging, nil
 }
 
-// Read 只读取固定目录内的普通 0600 文件，并复核 size 与 SHA-256。
-func (store *Store) Read(ctx context.Context, workspaceID foundation.ID, relativePath, expectedHash string, expectedSize int64) ([]byte, error) {
+// Open 打开固定目录内的普通 0600 文件，完整复核 size 与 SHA-256 后返回同一文件描述符。
+func (store *Store) Open(ctx context.Context, workspaceID foundation.ID, relativePath, expectedHash string, expectedSize int64) (io.ReadCloser, error) {
 	if err := validateManagedRequest(ctx, workspaceID, relativePath); err != nil {
 		return nil, err
 	}
 	if !validHash(expectedHash) || expectedSize < 0 || expectedSize > maxExportFileBytes {
 		return nil, invalid(errors.New("export file binding is invalid"))
 	}
-	root, err := store.openWorkspaceRoot(ctx, workspaceID)
+	root, managed, err := store.openManagedDirectories(ctx, workspaceID, false, validStagingPath(relativePath))
 	if err != nil {
 		return nil, err
 	}
 	defer root.Close()
-	if err := ensureManagedDirectories(root, relativePath, false); err != nil {
+	defer managed.Close()
+	directory, name := managedFileDirectory(managed, relativePath)
+	file, err := openVerifiedInDirectory(ctx, directory, name, expectedHash, expectedSize)
+	if err != nil {
 		return nil, err
 	}
-	return readVerified(root, relativePath, expectedHash, expectedSize)
+	if err := verifyManagedBindings(managed); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
 }
 
 // DeletePrepared 仅删除仍与 durable prepared binding 完全匹配的受控文件。
@@ -300,31 +335,101 @@ func (store *Store) DeletePrepared(ctx context.Context, workspaceID foundation.I
 	if !validHash(expectedHash) || expectedSize < 0 || expectedSize > maxExportFileBytes {
 		return invalid(errors.New("export prepared file binding is invalid"))
 	}
-	root, err := store.openWorkspaceRoot(ctx, workspaceID)
+	root, managed, err := store.openManagedDirectories(ctx, workspaceID, false, validStagingPath(relativePath))
 	if err != nil {
-		return err
-	}
-	defer root.Close()
-	if err := ensureManagedDirectories(root, relativePath, false); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	_, err = root.Lstat(relativePath)
+	defer root.Close()
+	defer managed.Close()
+	directory, name := managedFileDirectory(managed, relativePath)
+	_, err = directory.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return ioFailure(err)
+		return managedBoundaryError(err)
 	}
-	if err := verifyExisting(root, relativePath, expectedHash, expectedSize); err != nil {
+	if err := verifyExistingInDirectory(ctx, directory, name, expectedHash, expectedSize); err != nil {
 		return err
 	}
-	if err := root.Remove(relativePath); err != nil {
-		return ioFailure(err)
+	if store.secureHook.afterManagedVerify != nil {
+		store.secureHook.afterManagedVerify()
 	}
-	return syncDirectory(root, directoryForManagedPath(relativePath))
+	if err := verifyManagedBindings(managed); err != nil {
+		return err
+	}
+	// Move the currently named object aside atomically, then verify that exact
+	// object again before unlinking it. A path swap can therefore never make
+	// cleanup delete an unverified replacement.
+	quarantine, err := quarantinePreparedFile(directory, name)
+	if errors.Is(err, os.ErrNotExist) {
+		return verifyManagedBindings(managed)
+	}
+	if err != nil {
+		return err
+	}
+	restore := func(cause error) error {
+		restoreErr := directory.RenameNoReplace(quarantine, name)
+		if restoreErr == nil {
+			restoreErr = directory.Sync()
+		}
+		if restoreErr != nil {
+			return errors.Join(cause, managedBoundaryError(restoreErr))
+		}
+		return cause
+	}
+	if err := verifyExistingInDirectory(ctx, directory, quarantine, expectedHash, expectedSize); err != nil {
+		return restore(err)
+	}
+	if err := verifyManagedBindings(managed); err != nil {
+		return restore(err)
+	}
+	if store.secureHook.afterPreparedVerify != nil {
+		store.secureHook.afterPreparedVerify()
+	}
+	if _, err := directory.Lstat(name); err == nil {
+		cause := inconsistent(errors.New("export prepared path was replaced during cleanup"))
+		if removeErr := directory.Remove(quarantine); removeErr != nil {
+			return errors.Join(cause, managedBoundaryError(removeErr))
+		}
+		if syncErr := directory.Sync(); syncErr != nil {
+			return errors.Join(cause, managedBoundaryError(syncErr))
+		}
+		return cause
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return restore(managedBoundaryError(err))
+	}
+	if err := directory.Remove(quarantine); err != nil {
+		return restore(managedBoundaryError(err))
+	}
+	if err := directory.Sync(); err != nil {
+		return managedBoundaryError(err)
+	}
+	return verifyManagedBindings(managed)
+}
+
+func quarantinePreparedFile(directory *secureDir, name string) (string, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		var random [16]byte
+		if _, err := io.ReadFull(rand.Reader, random[:]); err != nil {
+			return "", unavailable(err)
+		}
+		candidate := fmt.Sprintf(".%s.%s.delete", name, hex.EncodeToString(random[:]))
+		err := directory.RenameNoReplace(name, candidate)
+		if err == nil {
+			return candidate, nil
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return "", os.ErrNotExist
+		}
+		if !errors.Is(err, unix.EEXIST) {
+			return "", managedBoundaryError(err)
+		}
+	}
+	return "", unavailable(errors.New("could not isolate export prepared file"))
 }
 
 // DeleteOrphan 只删除已经由 repository 证明未绑定的严格 staging 文件。
@@ -335,34 +440,36 @@ func (store *Store) DeleteOrphan(ctx context.Context, workspaceID foundation.ID,
 	if !validStagingPath(relativePath) {
 		return invalid(errors.New("export orphan path is invalid"))
 	}
-	root, err := store.openWorkspaceRoot(ctx, workspaceID)
+	root, managed, err := store.openManagedDirectories(ctx, workspaceID, false, true)
 	if err != nil {
-		return err
-	}
-	defer root.Close()
-	if err := ensureStagingDirectory(root, false); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	info, err := root.Lstat(relativePath)
+	defer root.Close()
+	defer managed.Close()
+	name := path.Base(relativePath)
+	info, err := managed.staging.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return ioFailure(err)
+		return managedBoundaryError(err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 		return unsafe(errors.New("export orphan is not a regular private staging file"))
 	}
-	if err := root.Remove(relativePath); err != nil {
-		return ioFailure(err)
+	if err := managed.staging.Remove(name); err != nil {
+		return managedBoundaryError(err)
 	}
-	return syncDirectory(root, stagingDirectory)
+	if err := managed.staging.Sync(); err != nil {
+		return managedBoundaryError(err)
+	}
+	return verifyManagedBindings(managed)
 }
 
-func (store *Store) openWorkspaceRoot(ctx context.Context, workspaceID foundation.ID) (*os.Root, error) {
+func (store *Store) openWorkspaceRoot(ctx context.Context, workspaceID foundation.ID) (*secureRoot, error) {
 	if store == nil || nilDependency(store.workspaces) {
 		return nil, unavailable(errors.New("export file store is unavailable"))
 	}
@@ -388,11 +495,57 @@ func (store *Store) openWorkspaceRoot(ctx context.Context, workspaceID foundatio
 	if canonical != rootPath {
 		return nil, unsafe(errors.New("workspace root is not canonical"))
 	}
-	root, err := os.OpenRoot(rootPath)
+	if store.secureHook.afterWorkspaceLstat != nil {
+		store.secureHook.afterWorkspaceLstat()
+	}
+	root, err := openSecureRoot(rootPath, info, &store.secureHook)
 	if err != nil {
+		if errors.Is(err, errPathBindingChanged) || errors.Is(err, unix.ELOOP) {
+			return nil, unsafe(errors.New("workspace root binding changed while opening"))
+		}
 		return nil, ioFailure(err)
 	}
 	return root, nil
+}
+
+func (store *Store) openManagedDirectories(ctx context.Context, workspaceID foundation.ID, create, includeStaging bool) (*secureRoot, *managedDirectories, error) {
+	root, err := store.openWorkspaceRoot(ctx, workspaceID)
+	if err != nil {
+		return nil, nil, err
+	}
+	managed, err := openManagedDirectories(root, create, includeStaging)
+	if err != nil {
+		_ = root.Close()
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil, err
+		}
+		return nil, nil, managedBoundaryError(err)
+	}
+	return root, managed, nil
+}
+
+func managedBoundaryError(err error) error {
+	if errors.Is(err, errPathBindingChanged) || errors.Is(err, unix.ELOOP) {
+		return unsafe(errors.New("export managed directory binding changed"))
+	}
+	return ioFailure(err)
+}
+
+func managedFileDirectory(managed *managedDirectories, relativePath string) (*secureDir, string) {
+	if managed == nil {
+		return nil, ""
+	}
+	if validStagingPath(relativePath) {
+		return managed.staging, path.Base(relativePath)
+	}
+	return managed.exports, path.Base(relativePath)
+}
+
+func verifyManagedBindings(managed *managedDirectories) error {
+	if err := managed.VerifyBindings(); err != nil {
+		return managedBoundaryError(err)
+	}
+	return nil
 }
 
 func validateRequest(ctx context.Context, workspaceID foundation.ID, relativePath string) error {
@@ -525,7 +678,7 @@ func validRelativePath(value string) bool {
 }
 
 func validExtension(extension string) bool {
-	return extension == ".md" || extension == ".json"
+	return extension == ".md" || extension == ".json" || extension == ".zip"
 }
 
 func validRandomHex(value string) bool {
@@ -547,7 +700,7 @@ func directoryForManagedPath(relativePath string) string {
 	return exportDirectory
 }
 
-func ensureExportDirectories(root *os.Root, create bool) error {
+func ensureExportDirectories(root *secureRoot, create bool) error {
 	for _, directory := range []string{".knowledge", exportDirectory} {
 		info, err := root.Lstat(directory)
 		if errors.Is(err, os.ErrNotExist) && create {
@@ -572,7 +725,7 @@ func ensureExportDirectories(root *os.Root, create bool) error {
 	return nil
 }
 
-func ensureStagingDirectory(root *os.Root, create bool) error {
+func ensureStagingDirectory(root *secureRoot, create bool) error {
 	if err := ensureExportDirectories(root, create); err != nil {
 		return err
 	}
@@ -600,7 +753,7 @@ func ensureStagingDirectory(root *os.Root, create bool) error {
 	return nil
 }
 
-func ensureStagingDirectoryForPromote(root *os.Root) error {
+func ensureStagingDirectoryForPromote(root *secureRoot) error {
 	err := ensureStagingDirectory(root, false)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -608,14 +761,14 @@ func ensureStagingDirectoryForPromote(root *os.Root) error {
 	return err
 }
 
-func ensureManagedDirectories(root *os.Root, relativePath string, create bool) error {
+func ensureManagedDirectories(root *secureRoot, relativePath string, create bool) error {
 	if validStagingPath(relativePath) {
 		return ensureStagingDirectory(root, create)
 	}
 	return ensureExportDirectories(root, create)
 }
 
-func reserveTemporaryPath(root *os.Root, target string) (string, error) {
+func reserveTemporaryPath(root *secureRoot, target string) (string, error) {
 	for attempt := 0; attempt < 8; attempt++ {
 		var random [16]byte
 		if _, err := io.ReadFull(rand.Reader, random[:]); err != nil {
@@ -626,6 +779,22 @@ func reserveTemporaryPath(root *os.Root, target string) (string, error) {
 			return candidate, nil
 		} else if err != nil {
 			return "", ioFailure(err)
+		}
+	}
+	return "", unavailable(errors.New("could not reserve export temporary path"))
+}
+
+func reserveTemporaryName(directory *secureDir, target string) (string, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		var random [16]byte
+		if _, err := io.ReadFull(rand.Reader, random[:]); err != nil {
+			return "", unavailable(err)
+		}
+		candidate := fmt.Sprintf("%s.%s.tmp", target, hex.EncodeToString(random[:]))
+		if _, err := directory.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate, nil
+		} else if err != nil {
+			return "", managedBoundaryError(err)
 		}
 	}
 	return "", unavailable(errors.New("could not reserve export temporary path"))
@@ -653,18 +822,21 @@ func writeAndSync(file *os.File, payload []byte) error {
 	return file.Sync()
 }
 
-func verifyExisting(root *os.Root, relativePath, expectedHash string, expectedSize int64) error {
-	_, err := readVerified(root, relativePath, expectedHash, expectedSize)
-	return err
+func verifyExistingInDirectory(ctx context.Context, directory *secureDir, name, expectedHash string, expectedSize int64) error {
+	file, err := openVerifiedInDirectory(ctx, directory, name, expectedHash, expectedSize)
+	if err != nil {
+		return err
+	}
+	return ioFailureUnlessNil(file.Close())
 }
 
-func managedFileExists(root *os.Root, relativePath string) (bool, error) {
-	info, err := root.Lstat(relativePath)
+func managedFileExistsInDirectory(directory *secureDir, name string) (bool, error) {
+	info, err := directory.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		return false, ioFailure(err)
+		return false, managedBoundaryError(err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return false, unsafe(errors.New("export target is not a regular file"))
@@ -672,21 +844,13 @@ func managedFileExists(root *os.Root, relativePath string) (bool, error) {
 	return true, nil
 }
 
-func verifyPromotedFinal(root *os.Root, prepared exportapp.PreparedFile) error {
-	exists, err := managedFileExists(root, prepared.FinalPath)
-	if err != nil {
-		return err
+func openVerifiedInDirectory(ctx context.Context, directory *secureDir, name, expectedHash string, expectedSize int64) (*os.File, error) {
+	if ctx == nil {
+		return nil, invalid(errors.New("export file context is nil"))
 	}
-	if !exists {
-		return inconsistent(errors.New("export staging and final files are both absent"))
-	}
-	return verifyExisting(root, prepared.FinalPath, prepared.FileHash, prepared.FileSize)
-}
-
-func readVerified(root *os.Root, relativePath, expectedHash string, expectedSize int64) ([]byte, error) {
-	info, err := root.Lstat(relativePath)
+	info, err := directory.Lstat(name)
 	if err != nil {
-		return nil, ioFailure(err)
+		return nil, managedBoundaryError(err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return nil, unsafe(errors.New("export file is not a regular file"))
@@ -694,39 +858,44 @@ func readVerified(root *os.Root, relativePath, expectedHash string, expectedSize
 	if info.Mode().Perm() != 0o600 || info.Size() != expectedSize {
 		return nil, inconsistent(errors.New("export file metadata does not match its binding"))
 	}
-	file, err := root.OpenFile(relativePath, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	file, err := directory.OpenFile(name, os.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, ioFailure(err)
+		return nil, managedBoundaryError(err)
 	}
-	defer file.Close()
-	payload, err := io.ReadAll(io.LimitReader(file, expectedSize+1))
+	closeWith := func(cause error) (*os.File, error) {
+		return nil, errors.Join(cause, ioFailureUnlessNil(file.Close()))
+	}
+	opened, err := file.Stat()
+	if err != nil || !sameFileInfo(info, opened) || !opened.Mode().IsRegular() || linkCount(opened) != 1 || opened.Mode().Perm() != 0o600 || opened.Size() != expectedSize {
+		return closeWith(inconsistent(errors.New("export file changed while opening")))
+	}
+	digest := sha256.New()
+	written, err := io.Copy(digest, &contextReader{ctx: ctx, reader: io.LimitReader(file, expectedSize+1)})
 	if err != nil {
-		return nil, ioFailure(err)
+		return closeWith(ioFailure(err))
 	}
-	if int64(len(payload)) != expectedSize {
-		return nil, inconsistent(errors.New("export file size changed while reading"))
+	if written != expectedSize || hex.EncodeToString(digest.Sum(nil)) != expectedHash {
+		return closeWith(inconsistent(errors.New("export file content does not match its binding")))
 	}
-	digest := sha256.Sum256(payload)
-	if hex.EncodeToString(digest[:]) != expectedHash {
-		return nil, inconsistent(errors.New("export file hash does not match its binding"))
+	after, err := file.Stat()
+	if err != nil || !sameFileInfo(opened, after) || !after.Mode().IsRegular() || linkCount(after) != 1 || after.Size() != expectedSize || after.Mode().Perm() != 0o600 {
+		return closeWith(inconsistent(errors.New("export file changed while verifying")))
 	}
-	return payload, nil
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return closeWith(ioFailure(err))
+	}
+	return file, nil
 }
 
-func syncDirectory(root *os.Root, directory string) error {
-	info, err := root.Lstat(directory)
-	if err != nil {
-		return ioFailure(err)
+func ioFailureUnlessNil(err error) error {
+	if err == nil {
+		return nil
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return unsafe(errors.New("export directory is a symlink or non-directory"))
-	}
-	opened, err := root.Open(directory)
-	if err != nil {
-		return ioFailure(err)
-	}
-	defer opened.Close()
-	if err := opened.Sync(); err != nil {
+	return ioFailure(err)
+}
+
+func syncDirectory(root *secureRoot, directory string) error {
+	if err := root.SyncDirectory(directory); err != nil {
 		return ioFailure(err)
 	}
 	return nil

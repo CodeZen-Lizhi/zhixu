@@ -46,6 +46,15 @@ func (repository *Repository) Claim(ctx context.Context, workspaceID, jobID foun
 		}
 		return expiredJob, false, nil
 	}
+	if job.Scope.Kind == domain.ScopeWorkspaceAttachments {
+		enabled, gateErr := attachmentCapabilityEnabledTx(ctx, tx)
+		if gateErr != nil {
+			return domain.Job{}, false, gateErr
+		}
+		if !enabled {
+			return domain.Job{}, false, unavailable(errors.New("attachment export capability is disabled"))
+		}
+	}
 	claimable := job.Status == domain.StatusPending ||
 		job.Status == domain.StatusRunning && job.LeaseExpiresAt != nil && !job.LeaseExpiresAt.After(now)
 	if !claimable {
@@ -125,7 +134,7 @@ func (repository *Repository) Prepare(ctx context.Context, request exportapp.Pre
 	}
 	if job.IsPrepared() && job.Status == domain.StatusRunning && job.Version == request.ExpectedVersion+1 &&
 		job.LeaseOwner == request.LeaseOwner && job.LeaseExpiresAt != nil && job.LeaseExpiresAt.After(now) &&
-		job.ReadModelRevision == request.ReadModelRevision && job.ExactCount != nil && *job.ExactCount == request.ExactCount &&
+		samePreparedSummary(job, request) &&
 		samePreparedFile(job, request.PreparedFile) {
 		if err := tx.Commit(ctx); err != nil {
 			return domain.Job{}, classify(err, true)
@@ -139,19 +148,24 @@ func (repository *Repository) Prepare(ctx context.Context, request exportapp.Pre
 	if job.IsPrepared() {
 		return domain.Job{}, resultInvalid(errors.New("export job already has another prepared result"))
 	}
+	if !prepareSummaryMatchesScope(job, request) {
+		return domain.Job{}, resultInvalid(errors.New("export prepared summary does not match job scope"))
+	}
 	if request.PreparedFile.FinalPath != expectedFinalPath(job) || !validStagingPath(job.ID, request.PreparedFile) {
 		return domain.Job{}, resultInvalid(errors.New("export prepared paths do not match job identity"))
 	}
 	prepared, err := scanJob(tx.QueryRow(ctx, `WITH db_time AS MATERIALIZED (SELECT clock_timestamp() AS now)
 		UPDATE ops.export_job AS job SET
-		version=job.version+1,read_model_revision=$3,exact_count=$4,prepared_at=db_time.now,
-		prepared_staging_path=$5,file_path=$6,file_hash=$7,file_size=$8,updated_at=db_time.now
+		version=job.version+1,read_model_revision=$3,exact_count=$4,
+		manifest_sha256=$5,entry_count=$6,total_uncompressed_bytes=$7,prepared_at=db_time.now,
+		prepared_staging_path=$8,file_path=$9,file_hash=$10,file_size=$11,updated_at=db_time.now
 		FROM db_time
-		WHERE job.workspace_id=$1 AND job.id=$2 AND job.version=$9
-			AND job.status='RUNNING' AND job.lease_owner=$10
+		WHERE job.workspace_id=$1 AND job.id=$2 AND job.version=$12
+			AND job.status='RUNNING' AND job.lease_owner=$13
 			AND job.lease_expires_at > db_time.now AND job.expires_at > db_time.now
 		RETURNING `+selectColumns,
-		string(request.WorkspaceID), string(request.JobID), request.ReadModelRevision, request.ExactCount,
+		string(request.WorkspaceID), string(request.JobID), nullableText(request.ReadModelRevision), nullablePreparedCount(request.ReadModelRevision, request.ExactCount),
+		nullableText(request.ManifestHash), nullablePreparedCount(request.ManifestHash, request.EntryCount), nullablePreparedCount(request.ManifestHash, request.TotalUncompressedBytes),
 		request.PreparedFile.StagingPath, request.PreparedFile.FinalPath, request.PreparedFile.FileHash,
 		request.PreparedFile.FileSize, request.ExpectedVersion, request.LeaseOwner))
 	if err != nil {
@@ -401,6 +415,11 @@ func (repository *Repository) RecoveryCandidates(ctx context.Context, limit int)
 	}
 	rows, err := repository.db.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
 		WHERE expires_at>clock_timestamp()
+		  AND (scope_kind='COLLECTION' OR EXISTS (
+		      SELECT 1 FROM ops.export_capability capability
+		      WHERE capability.capability_key='workspace-attachments'
+		        AND capability.contract_version='workspace-attachments/v1' AND capability.enabled
+		  ))
 		  AND (status='PENDING' OR (status='RUNNING' AND lease_expires_at<=clock_timestamp()))
 		ORDER BY created_at,id LIMIT $1`, limit)
 	if err != nil {
@@ -424,9 +443,15 @@ func (repository *Repository) RecoveryCandidates(ctx context.Context, limit int)
 func validatePrepareRequest(ctx context.Context, request exportapp.PrepareRequest) error {
 	if ctx == nil || !validID(request.WorkspaceID) || !validID(request.JobID) || request.ExpectedVersion < 1 ||
 		strings.TrimSpace(request.LeaseOwner) == "" || len(request.LeaseOwner) > 128 ||
-		!validHash(request.ReadModelRevision) || request.ExactCount < 0 || request.ExactCount > exportapp.MaxSnapshotItems ||
 		!validHash(request.PreparedFile.FileHash) || request.PreparedFile.FileSize < 0 {
 		return invalid(errors.New("export prepare request is invalid"))
+	}
+	collection := validHash(request.ReadModelRevision) && request.ExactCount >= 0 && request.ExactCount <= exportapp.MaxSnapshotItems &&
+		request.ManifestHash == "" && request.EntryCount == 0 && request.TotalUncompressedBytes == 0
+	attachment := request.ReadModelRevision == "" && request.ExactCount == 0 && validHash(request.ManifestHash) &&
+		request.EntryCount >= 0 && request.EntryCount <= 10_000 && request.TotalUncompressedBytes >= 0 && request.TotalUncompressedBytes <= 1<<30
+	if !collection && !attachment {
+		return invalid(errors.New("export prepare summary is invalid"))
 	}
 	return nil
 }
@@ -445,6 +470,8 @@ func expectedFinalPath(job domain.Job) string {
 	extension := ".json"
 	if job.Kind == domain.KindMarkdown {
 		extension = ".md"
+	} else if job.Kind == domain.KindAttachmentsZIP {
+		extension = ".zip"
 	}
 	return ".knowledge/exports/" + string(job.ID) + extension
 }
@@ -453,6 +480,8 @@ func validStagingPath(jobID foundation.ID, file exportapp.PreparedFile) bool {
 	extension := ".json"
 	if strings.HasSuffix(file.FinalPath, ".md") {
 		extension = ".md"
+	} else if strings.HasSuffix(file.FinalPath, ".zip") {
+		extension = ".zip"
 	}
 	prefix := ".knowledge/exports/.staging/" + string(jobID) + "-"
 	suffix := extension + ".stage"
@@ -475,4 +504,26 @@ func validLowerHex(value string) bool {
 func samePreparedFile(job domain.Job, file exportapp.PreparedFile) bool {
 	return job.PreparedStagingPath == file.StagingPath && job.FilePath == file.FinalPath &&
 		job.FileHash == file.FileHash && job.FileSize == file.FileSize
+}
+
+func samePreparedSummary(job domain.Job, request exportapp.PrepareRequest) bool {
+	if job.Scope.Kind == domain.ScopeCollection {
+		return job.ReadModelRevision == request.ReadModelRevision && job.ExactCount != nil && *job.ExactCount == request.ExactCount
+	}
+	return job.ManifestHash == request.ManifestHash && job.EntryCount != nil && *job.EntryCount == request.EntryCount &&
+		job.TotalUncompressedBytes != nil && *job.TotalUncompressedBytes == request.TotalUncompressedBytes
+}
+
+func prepareSummaryMatchesScope(job domain.Job, request exportapp.PrepareRequest) bool {
+	if job.Scope.Kind == domain.ScopeCollection {
+		return validHash(request.ReadModelRevision) && request.ManifestHash == ""
+	}
+	return request.ReadModelRevision == "" && validHash(request.ManifestHash)
+}
+
+func nullablePreparedCount(binding string, value int64) any {
+	if binding == "" {
+		return nil
+	}
+	return value
 }

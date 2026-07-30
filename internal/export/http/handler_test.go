@@ -1,11 +1,14 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -83,7 +86,7 @@ func TestListRequiresOneValidCollectionIDAndBindsItems(t *testing.T) {
 		service := &exportHTTPFake{list: exportapp.ListPage{Items: []domain.Job{foreign}}}
 		response := httptest.NewRecorder()
 		exportHTTPRouter(service).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/workspaces/"+string(exportHTTPWorkspaceID)+"/exports?collection_id="+string(exportHTTPCollectionID), nil))
-		requireExportProblem(t, response, http.StatusConflict, domain.ErrorCodeResultInvalid)
+		requireExportProblem(t, response, http.StatusInternalServerError, domain.ErrorCodeResultInvalid)
 	})
 }
 
@@ -103,8 +106,8 @@ func TestGetProjectsVersionAndPreparedSnapshot(t *testing.T) {
 	service := &exportHTTPFake{get: job}
 	response := httptest.NewRecorder()
 	exportHTTPRouter(service).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/exports/"+string(exportHTTPJobID)+"?workspace_id="+string(exportHTTPWorkspaceID), nil))
-	if response.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK || service.getCalls != 1 || service.getScope != domain.ScopeCollection {
+		t.Fatalf("status=%d get calls=%d scope=%q body=%s", response.Code, service.getCalls, service.getScope, response.Body.String())
 	}
 	var payload struct {
 		Version           int64   `json:"version"`
@@ -126,7 +129,7 @@ func TestDownloadPassesAuditedActorAndSecurityHeaders(t *testing.T) {
 	service := &exportHTTPFake{downloadJob: job, downloadPayload: payload}
 	response := httptest.NewRecorder()
 	exportHTTPRouter(service).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/exports/"+string(exportHTTPJobID)+"/download?workspace_id="+string(exportHTTPWorkspaceID), nil))
-	if response.Code != http.StatusOK || service.downloadCalls != 1 {
+	if response.Code != http.StatusOK || service.downloadCalls != 1 || service.downloadScope != domain.ScopeCollection {
 		t.Fatalf("status=%d calls=%d body=%s", response.Code, service.downloadCalls, response.Body.String())
 	}
 	if service.downloadActor != (exportapp.DownloadActor{Type: auditdomain.ActorAnonymous, Ref: "local"}) {
@@ -168,6 +171,98 @@ func TestDownloadActorMapsKnownPrincipalsAndFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAttachmentExportRoutesUseWorkspaceTaggedContract(t *testing.T) {
+	job := validAttachmentHTTPJob()
+	service := &exportHTTPFake{
+		create: exportapp.CreateResult{Job: job},
+		list:   exportapp.ListPage{Items: []domain.Job{job}, NextCursor: "next-attachment-page"},
+		get:    job,
+	}
+	router := exportHTTPRouter(service)
+	routePath := "/workspaces/" + string(exportHTTPWorkspaceID) + "/attachment-exports"
+	body := `{"kind":"ATTACHMENTS_ZIP","schema_version":"attachment-export/v1","attachment_root_contract_version":"workspace-attachments/v1","content_policy":"RAW_USER_OWNED","expires_in_seconds":3600}`
+	request := httptest.NewRequest(http.MethodPost, routePath, strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "attachment-http-create")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || service.createCalls != 1 || service.createRequest.Scope.Kind != domain.ScopeWorkspaceAttachments ||
+		service.createRequest.Kind != domain.KindAttachmentsZIP || service.createRequest.Redaction != domain.RedactionRawUserOwned ||
+		service.createRequest.Scope.CollectionID != nil || service.createRequest.Scope.AttachmentRootContractVersion != attachmentRootVersion {
+		t.Fatalf("attachment create status=%d request=%#v body=%s", response.Code, service.createRequest, response.Body.String())
+	}
+	wantLocation := "/api/v1/workspaces/" + string(exportHTTPWorkspaceID) + "/attachment-exports/" + string(job.ID)
+	if response.Header().Get("Location") != wantLocation || !strings.Contains(response.Body.String(), `"scope_kind":"WORKSPACE_ATTACHMENTS"`) ||
+		!strings.Contains(response.Body.String(), `"content_policy":"RAW_USER_OWNED"`) || strings.Contains(response.Body.String(), "collection_id") {
+		t.Fatalf("attachment create location=%q body=%s", response.Header().Get("Location"), response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, routePath+"?limit=10", nil)
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || service.listCalls != 1 || service.listQuery.ScopeKind != domain.ScopeWorkspaceAttachments ||
+		service.listQuery.CollectionID != nil || service.listQuery.WorkspaceID != exportHTTPWorkspaceID || service.listQuery.Limit != 10 ||
+		!strings.Contains(response.Body.String(), `"next_cursor":"next-attachment-page"`) {
+		t.Fatalf("attachment list status=%d query=%#v body=%s", response.Code, service.listQuery, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, routePath+"/"+string(job.ID), nil)
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || service.getScope != domain.ScopeWorkspaceAttachments || !strings.Contains(response.Body.String(), `"kind":"ATTACHMENTS_ZIP"`) {
+		t.Fatalf("attachment detail status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAttachmentExportDownloadUsesStrictZIPHeaders(t *testing.T) {
+	job := validAttachmentHTTPSucceededJob()
+	payload := []byte("PK\x03\x04attachment archive")
+	job.FileSize = int64(len(payload))
+	service := &exportHTTPFake{downloadJob: job, downloadPayload: payload}
+	router := exportHTTPRouter(service)
+	path := "/workspaces/" + string(exportHTTPWorkspaceID) + "/attachment-exports/" + string(job.ID) + "/download"
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || service.downloadCalls != 1 || service.downloadScope != domain.ScopeWorkspaceAttachments || !bytes.Equal(response.Body.Bytes(), payload) {
+		t.Fatalf("attachment download status=%d calls=%d body=%q", response.Code, service.downloadCalls, response.Body.Bytes())
+	}
+	for header, want := range map[string]string{
+		"Content-Type":           "application/zip",
+		"Content-Length":         strconv.Itoa(len(payload)),
+		"Cache-Control":          "private, no-store",
+		"X-Content-Type-Options": "nosniff",
+	} {
+		if got := response.Header().Get(header); got != want {
+			t.Fatalf("attachment download header %s=%q want=%q", header, got, want)
+		}
+	}
+	if got := response.Header().Get("Content-Disposition"); got != `attachment; filename="workspace-attachments-`+string(job.ID)+`.zip"` {
+		t.Fatalf("attachment Content-Disposition=%q", got)
+	}
+}
+
+func TestAttachmentExportCreateRejectsUnknownAndCrossScopeFields(t *testing.T) {
+	service := &exportHTTPFake{}
+	router := exportHTTPRouter(service)
+	for name, body := range map[string]string{
+		"unknown":          `{"kind":"ATTACHMENTS_ZIP","schema_version":"attachment-export/v1","attachment_root_contract_version":"workspace-attachments/v1","content_policy":"RAW_USER_OWNED","unknown":true}`,
+		"collection field": `{"kind":"ATTACHMENTS_ZIP","schema_version":"attachment-export/v1","attachment_root_contract_version":"workspace-attachments/v1","content_policy":"RAW_USER_OWNED","collection_id":"` + string(exportHTTPCollectionID) + `"}`,
+		"fake kind":        `{"kind":"AUDIT_JSON","schema_version":"attachment-export/v1","attachment_root_contract_version":"workspace-attachments/v1","content_policy":"RAW_USER_OWNED"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/workspaces/"+string(exportHTTPWorkspaceID)+"/attachment-exports", strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Idempotency-Key", "attachment-http-invalid")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest || service.createCalls != 0 {
+				t.Fatalf("invalid attachment create status=%d calls=%d body=%s", response.Code, service.createCalls, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestWriteErrorMapsExportProblems(t *testing.T) {
 	tests := []struct {
 		name string
@@ -178,7 +273,9 @@ func TestWriteErrorMapsExportProblems(t *testing.T) {
 		{name: "invalid", err: foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeInvalid, false, errors.New("invalid")), want: http.StatusBadRequest, code: domain.ErrorCodeInvalid},
 		{name: "unsupported media", err: foundation.NewError(foundation.ErrorInvalidInput, "UNSUPPORTED_MEDIA_TYPE", false, errors.New("media")), want: http.StatusUnsupportedMediaType, code: "UNSUPPORTED_MEDIA_TYPE"},
 		{name: "not found", err: foundation.NewError(foundation.ErrorNotFound, domain.ErrorCodeNotFound, false, errors.New("missing")), want: http.StatusNotFound, code: domain.ErrorCodeNotFound},
-		{name: "conflict", err: foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeConflict, false, errors.New("conflict")), want: http.StatusConflict, code: domain.ErrorCodeConflict},
+		{name: "idempotency conflict", err: foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeConflict, false, errors.New("conflict")), want: http.StatusConflict, code: domain.ErrorCodeConflict},
+		{name: "result not ready", err: foundation.NewError(foundation.ErrorVersionConflict, "EXPORT_RESULT_NOT_READY", true, errors.New("not ready")), want: http.StatusConflict, code: "EXPORT_RESULT_NOT_READY"},
+		{name: "result inconsistent", err: foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeResultInvalid, false, errors.New("hash mismatch")), want: http.StatusInternalServerError, code: domain.ErrorCodeResultInvalid},
 		{name: "expired", err: foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeExpired, false, errors.New("expired")), want: http.StatusGone, code: domain.ErrorCodeExpired},
 		{name: "permission", err: foundation.NewError(foundation.ErrorPermissionDenied, domain.ErrorCodePermissionDenied, false, errors.New("denied")), want: http.StatusForbidden, code: domain.ErrorCodePermissionDenied},
 		{name: "unavailable", err: foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeUnavailable, true, errors.New("unavailable")), want: http.StatusServiceUnavailable, code: domain.ErrorCodeUnavailable},
@@ -196,8 +293,11 @@ type exportHTTPFake struct {
 	create          exportapp.CreateResult
 	createErr       error
 	createCalls     int
+	createRequest   domain.CreateRequest
 	get             domain.Job
 	getErr          error
+	getCalls        int
+	getScope        domain.ScopeKind
 	list            exportapp.ListPage
 	listErr         error
 	listCalls       int
@@ -207,14 +307,18 @@ type exportHTTPFake struct {
 	downloadErr     error
 	downloadCalls   int
 	downloadActor   exportapp.DownloadActor
+	downloadScope   domain.ScopeKind
 }
 
-func (fake *exportHTTPFake) Create(_ context.Context, _ domain.CreateRequest) (exportapp.CreateResult, error) {
+func (fake *exportHTTPFake) Create(_ context.Context, request domain.CreateRequest) (exportapp.CreateResult, error) {
 	fake.createCalls++
+	fake.createRequest = request
 	return fake.create, fake.createErr
 }
 
-func (fake *exportHTTPFake) Get(_ context.Context, _, _ foundation.ID) (domain.Job, error) {
+func (fake *exportHTTPFake) GetForScope(_ context.Context, _, _ foundation.ID, scopeKind domain.ScopeKind) (domain.Job, error) {
+	fake.getCalls++
+	fake.getScope = scopeKind
 	return fake.get, fake.getErr
 }
 
@@ -224,10 +328,14 @@ func (fake *exportHTTPFake) List(_ context.Context, query exportapp.ListQuery) (
 	return fake.list, fake.listErr
 }
 
-func (fake *exportHTTPFake) DownloadAs(_ context.Context, _, _ foundation.ID, actor exportapp.DownloadActor) (domain.Job, []byte, error) {
+func (fake *exportHTTPFake) DownloadAsForScope(_ context.Context, _, _ foundation.ID, scopeKind domain.ScopeKind, actor exportapp.DownloadActor) (domain.Job, io.ReadCloser, error) {
 	fake.downloadCalls++
+	fake.downloadScope = scopeKind
 	fake.downloadActor = actor
-	return fake.downloadJob, fake.downloadPayload, fake.downloadErr
+	if fake.downloadErr != nil {
+		return domain.Job{}, nil, fake.downloadErr
+	}
+	return fake.downloadJob, io.NopCloser(bytes.NewReader(fake.downloadPayload)), nil
 }
 
 func exportHTTPRouter(service Service) http.Handler {
@@ -254,7 +362,7 @@ func validExportHTTPJob() domain.Job {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	return domain.Job{
 		ID: exportHTTPJobID, WorkspaceID: exportHTTPWorkspaceID, Kind: domain.KindMarkdown, SchemaVersion: "export/v1",
-		Scope:  domain.Scope{CollectionID: &collectionID, CollectionVersion: &collectionVersion, QueryHash: strings.Repeat("a", 64)},
+		Scope:  domain.Scope{Kind: domain.ScopeCollection, CollectionID: &collectionID, CollectionVersion: &collectionVersion, QueryHash: strings.Repeat("a", 64)},
 		Fields: []domain.Field{domain.FieldID}, Redaction: domain.RedactionMasked, PermissionScope: "READ_LOCAL", RequestedBy: "local",
 		IdempotencyKey: "export-http-test", RequestHash: strings.Repeat("b", 64), RequestTTLSeconds: 3600, Status: domain.StatusPending, Version: 1,
 		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, CleanupStatus: domain.CleanupNotRequired,
@@ -279,5 +387,40 @@ func validExportHTTPSucceededJob() domain.Job {
 	job.FilePath = ".knowledge/exports/export-http-test.md"
 	job.FileHash = strings.Repeat("d", 64)
 	job.FileSize = 12
+	return job
+}
+
+func validAttachmentHTTPJob() domain.Job {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	return domain.Job{
+		ID: exportHTTPJobID, WorkspaceID: exportHTTPWorkspaceID, Kind: domain.KindAttachmentsZIP, SchemaVersion: attachmentSchemaVersion,
+		Scope:  domain.Scope{Kind: domain.ScopeWorkspaceAttachments, AttachmentRootContractVersion: attachmentRootVersion},
+		Fields: []domain.Field{}, Redaction: domain.RedactionRawUserOwned, PermissionScope: "READ_LOCAL", RequestedBy: "local",
+		IdempotencyKey: "attachment-export-http-test", RequestHash: strings.Repeat("b", 64), RequestTTLSeconds: 3600,
+		Status: domain.StatusPending, Version: 1, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+		CleanupStatus: domain.CleanupNotRequired,
+	}
+}
+
+func validAttachmentHTTPSucceededJob() domain.Job {
+	job := validAttachmentHTTPJob()
+	startedAt := job.CreatedAt.Add(time.Minute)
+	preparedAt := job.CreatedAt.Add(2 * time.Minute)
+	completedAt := job.CreatedAt.Add(3 * time.Minute)
+	entryCount := int64(2)
+	totalBytes := int64(42)
+	job.Status = domain.StatusSucceeded
+	job.Version = 4
+	job.StartedAt = &startedAt
+	job.PreparedAt = &preparedAt
+	job.CompletedAt = &completedAt
+	job.UpdatedAt = completedAt
+	job.ManifestHash = strings.Repeat("c", 64)
+	job.EntryCount = &entryCount
+	job.TotalUncompressedBytes = &totalBytes
+	job.PreparedStagingPath = ".knowledge/exports/.staging/" + string(job.ID) + "-" + strings.Repeat("e", 32) + ".zip.stage"
+	job.FilePath = ".knowledge/exports/" + string(job.ID) + ".zip"
+	job.FileHash = strings.Repeat("d", 64)
+	job.FileSize = 24
 	return job
 }

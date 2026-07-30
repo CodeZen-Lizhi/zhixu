@@ -18,6 +18,9 @@ func (repository *Repository) RecordDownload(ctx context.Context, request export
 		return domain.Job{}, unavailable(errors.New("export download audit repository is unavailable"))
 	}
 	if ctx == nil || !validID(request.WorkspaceID) || !validID(request.JobID) || !validID(request.AuditEventID) ||
+		(request.ScopeKind != domain.ScopeCollection && request.ScopeKind != domain.ScopeWorkspaceAttachments) ||
+		(request.ScopeKind == domain.ScopeCollection && request.EntryCount != nil) ||
+		(request.ScopeKind == domain.ScopeWorkspaceAttachments && (request.EntryCount == nil || *request.EntryCount < 0 || *request.EntryCount > 10_000)) ||
 		!validHash(request.FileHash) || request.FileSize < 0 {
 		return domain.Job{}, invalid(errors.New("export download binding is invalid"))
 	}
@@ -48,7 +51,8 @@ func (repository *Repository) RecordDownload(ctx context.Context, request export
 	if job.Status != domain.StatusSucceeded {
 		return domain.Job{}, versionConflict(errors.New("export result is not ready"))
 	}
-	if job.FileHash != request.FileHash || job.FileSize != request.FileSize {
+	if job.Scope.Kind != request.ScopeKind || !sameOptionalInt64(job.EntryCount, request.EntryCount) ||
+		job.FileHash != request.FileHash || job.FileSize != request.FileSize {
 		return domain.Job{}, resultInvalid(errors.New("export download differs from prepared result"))
 	}
 	updated, err := scanJob(tx.QueryRow(ctx, `WITH db_time AS MATERIALIZED (SELECT clock_timestamp() AS now)
@@ -102,10 +106,14 @@ func downloadAuditEvent(request exportapp.DownloadRecord, occurredAt time.Time) 
 	if err != nil {
 		return auditdomain.Event{}, err
 	}
-	metadata, err := json.Marshal(map[string]any{
+	metadataFields := map[string]any{
 		"export_id": string(request.JobID), "file_hash": request.FileHash,
-		"file_size": request.FileSize, "server_outcome": "prepared_for_return",
-	})
+		"file_size": request.FileSize, "scope_kind": string(request.ScopeKind), "server_outcome": "prepared_for_return",
+	}
+	if request.EntryCount != nil {
+		metadataFields["entry_count"] = *request.EntryCount
+	}
+	metadata, err := json.Marshal(metadataFields)
 	if err != nil {
 		return auditdomain.Event{}, err
 	}

@@ -300,36 +300,71 @@ Wrong: 只检查 JSON primitive，接受 schema_version="1"、operation="create"
 Correct: 按 OpenAPI 校验 knowledge-relation-change/v1、CREATE_RELATION、UUID/hash/版本与数组界限。
 ```
 
-## Scenario: M9-03 Smart Collection Export Wire Boundary
+## Scenario: M9 Export Wire Boundary
 
 ### 1. Scope / Trigger
 
-- 修改 `web/src/api/exports.ts`、Collection Export Query/Panel、`export.*` SSE resource、Export OpenAPI 或下载
-  响应时应用。该文件是唯一 Export HTTP wire owner，Feature/Component 不得读取 snake_case、解析 cursor、
-  强转 Job 或自己解释下载 header。
-- 公共 `ExportKind` 只接受 `MARKDOWN|METADATA_JSON`，`schema_version` 固定 `export/v1`。附件、
-  `EVALUATION_JSON`、`AUDIT_JSON` 不属于该判别联合，不能用未知枚举、空 result 或可选字段兼容。
+- 修改 Collection Export、Settings 附件导出、`export.*` SSE、OpenAPI 或下载响应时应用。
+- `web/src/api/exports.ts` 只拥有 `COLLECTION + MARKDOWN|METADATA_JSON`；
+  `web/src/api/attachment-exports.ts` 只拥有 `WORKSPACE_ATTACHMENTS + ATTACHMENTS_ZIP`。两个 wire owner
+  不共享可选字段堆叠，也不接受 `EVALUATION_JSON|AUDIT_JSON`。
 
-### 2. Contracts
+### 2. Signatures
 
-- 从 `unknown` 严格解码 Create Result、Job、List、Problem 与下载响应；拒绝未知/重复字段、非法 UUID、
-  RFC3339、64 位小写 hash、正整数、cursor、field、redaction、kind/status，及 Workspace/Collection/version/
-  query hash/download URL 的跨绑定。
-- Job 必须穷尽 `PENDING|RUNNING|SUCCEEDED|FAILED|EXPIRED|CANCELLED`，并校验状态字段组合：成功结果才有
-  完整 revision/count/hash/size/download URL；失败才有受限错误；未 prepared 或过期任务不能把结果字段、下载 URL
-  或空字符串伪装为可下载。`CANCELLED` 只接受历史兼容投影。
-- Create Request 只允许当前 Workspace/Collection/version/query hash、两个 kind、安全字段和一个有效
-  Idempotency-Key；首版固定 `MASKED`、不发送敏感开关。客户端不重建成员集合、read-model revision 或文件路径。
-- 下载必须通过 `authFetch`，并验证 kind 对应的 Content-Type、受控 attachment 文件名、Content-Length、
-  `private, no-store`、`nosniff` 和 Blob size；非 2xx 先按严格 Problem 解码，不能把 `410 EXPORT_EXPIRED`
-  当作空 Blob 或浏览器已下载成功。
+```ts
+createAttachmentExport({ workspaceId, idempotencyKey, expiresInSeconds? })
+listAttachmentExports(workspaceId, { cursor?, limit? }, signal?)
+getAttachmentExport(workspaceId, exportId, signal?)
+downloadAttachmentExport(job, signal?): Promise<Blob>
+```
 
-### 3. Tests Required
+- Attachment create body 固定 `ATTACHMENTS_ZIP`、`attachment-export/v1`、`workspace-attachments/v1`、
+  `RAW_USER_OWNED`；不得携带 Collection、fields、redaction 或 include-sensitive 字段。
 
-- normal/empty/unknown/duplicate、UUID/time/hash/enum/field、状态字段冲突、跨 Workspace/Collection binding、
-  `200` replay/`202` create、`dispatch_pending`、Problem、Abort 和下载 header/size。
-- Query/Component 测试覆盖同 key response-loss、终态停止轮询、SSE 失效、失败/过期新建和历史 `CANCELLED`。
-  测试 fixture 只能使用两个已交付 kind，且必须明确 AC-33 附件部分仍未完成。
+### 3. Contracts
+
+- 两个客户端都从 `unknown` 严格解码 Create Result、Job、List、Problem 与下载响应；拒绝未知/重复字段、
+  非法 UUID/RFC3339/hash/integer/cursor/enum，以及 Workspace/resource/download URL 跨绑定。
+- Collection Job 必须绑定 Collection ID/version/query hash、revision/count 和两种公开 kind；附件 Job 必须绑定
+  `scope_kind=WORKSPACE_ATTACHMENTS`、root contract、raw policy、manifest hash、entry count/bytes 和 ZIP hash/size。
+- Job 穷尽 `PENDING|RUNNING|SUCCEEDED|FAILED|EXPIRED|CANCELLED`，并按 scope 校验状态字段组合；只有成功附件
+  Job 能携带 manifest/archive binding 与 download URL。空字符串、缺字段或跨 scope 字段都必须拒绝整个响应。
+- 下载只经 `authFetch`，并校验 kind 对应 Content-Type、受控 ASCII filename、Content-Length、
+  `private, no-store`、`nosniff` 和 Blob size；非 2xx 先严格解码 Problem，`410` 不得变为空 Blob。
+- `AbortError` 保持原 identity。Workspace 切换时迟到的 create/list/get/download 响应不得写入新 Workspace cache。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 必须结果 |
+|---|---|
+| scope/kind/schema/root/policy 组合漂移 | `AttachmentExportApiError(INVALID_RESPONSE)` |
+| success 缺 manifest/archive binding，或非 success 携带下载事实 | 拒绝整个响应 |
+| Workspace/Export ID/download URL 不匹配 | fail closed，不显示下载按钮 |
+| `400/403/404/409/410/500/503` Problem 字段非法 | `INVALID_RESPONSE`，不构造近似错误 |
+| Workspace switch / route unmount | abort 请求和 mutation，迟到回调不能恢复旧 cache |
+
+### 5. Good / Base / Bad Cases
+
+- Good：Settings 只消费严格附件 Job，成功后用受控 Blob 下载并回查服务端统计。
+- Base：空列表保持 `[]`；gate 关闭显示 typed unavailable；`FAILED/EXPIRED` 保留历史并允许新建。
+- Bad：把附件塞进 Collection `ExportJob` 的 optional 字段、组件拼 download URL、把 `available:false` 当成功，
+  或 Workspace A 的迟到 mutation 写入 B 的 cache。
+
+### 6. Tests Required
+
+- Decoder/client：normal/empty/unknown/duplicate、UUID/time/hash/enum/status、scope binding、`200/202`、Problem、
+  Abort、headers/Blob size 和跨 Workspace URL。
+- Query/Component：Workspace key、cursor、same-key retry、active/terminal polling、SSE invalidation、切换 Abort、
+  迟到 mutation 隔离、失败/过期新建和下载后回查。
+- 真实浏览器覆盖 Collection 与附件两个入口、刷新/重启恢复、ZIP 下载解包、权限/跨 Workspace/tamper/expiry，
+  并验证桌面与 390x844。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 一个含大量 optional 字段的 ExportJob 同时表示 Collection 和附件，未知 kind 用默认值继续渲染。
+Correct: 两个 wire owner 各自解码穷尽 scope；任何跨 scope 字段、未知 kind 或 binding 漂移都拒绝整个响应。
+```
 
 ## Scenario: M7 Timeline / Impact Wire Boundary
 

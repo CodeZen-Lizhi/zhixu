@@ -414,6 +414,9 @@ Conversation/RAG API、SSE 与反馈已由 M6-04 落地；正式 Session/API Tok
 - `web/src/api/exports.ts` 是 Collection Export 的唯一严格 decoder/client 边界；它只接受
   `MARKDOWN|METADATA_JSON`，校验 Job 的 Workspace/Collection/version/query hash、生命周期字段、Problem 与下载
   header/Blob，Feature 不得直接断言原始响应或用新标签页绕过认证和 `410` 处理。
+- `web/src/api/attachment-exports.ts` 独立拥有 Workspace attachment Export wire；它只接受
+  `WORKSPACE_ATTACHMENTS + ATTACHMENTS_ZIP`，校验 root contract、raw policy、manifest/archive binding 和 ZIP
+  headers/Blob。Collection 与附件不能通过一组 optional 字段合并成含糊 Job。
 
 ## 15. 测试
 
@@ -427,9 +430,10 @@ Conversation/RAG API、SSE 与反馈已由 M6-04 落地；正式 Session/API Tok
 - CSRF/Origin。
 - API Token Scope/Expiry/Revocation。
 - 登录授权不能绕过 Approval Write Authorization。
-- Export：严格 JSON/Idempotency、同 key replay、Collection-filtered cursor、Job 状态、prepared/lease/TTL crash
-  recovery、下载 header/hash/size、actor Audit、过期/cleanup、`export.*` SSE invalidation 与真实 API/Worker/Vite
-  浏览器闭环。该门禁仅覆盖 Collection Markdown/Metadata JSON，附件与 AC-33 全量验收保持 deferred。
+- Export：严格 JSON/Idempotency、同 key replay、scope-bound cursor、Job 状态、capability gate、prepared/lease/TTL
+  crash recovery、下载 header/hash/size、actor Audit、过期/cleanup、`export.*` SSE invalidation 与真实 API/Worker/Vite
+  浏览器闭环。Collection Markdown/Metadata JSON 与 Workspace Attachments ZIP 共同关闭 AC-33；Evaluation/Audit
+  内容导出保持 deferred。
 - Search Handler：严格 JSON、默认值、三种模式、统一过滤、top-100 分页、Cursor 篡改/跨请求/
   stale/重启失效、零命中、显式降级和稳定 Problem 映射。
 - 真实 PostgreSQL HTTP：Workspace 隔离、三模式/过滤、Source Version/Span 可打开与 404 防枚举、

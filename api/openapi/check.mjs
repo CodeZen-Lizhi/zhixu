@@ -64,6 +64,10 @@ const requiredOperations = [
   ["/api/v1/exports/{export_id}", "get", "200"],
   ["/api/v1/exports/{export_id}/download", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/exports", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/attachment-exports", "post", "202"],
+  ["/api/v1/workspaces/{workspace_id}/attachment-exports", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/attachment-exports/{export_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/attachment-exports/{export_id}/download", "get", "200"],
   ["/api/v1/artifacts", "get", "200"],
   ["/api/v1/artifacts", "post", "201"],
   ["/api/v1/artifacts/{artifact_id}", "get", "200"],
@@ -820,25 +824,33 @@ const expectedExportPaths = [
   "/api/v1/exports",
   "/api/v1/exports/{export_id}",
   "/api/v1/exports/{export_id}/download",
+  "/api/v1/workspaces/{workspace_id}/attachment-exports",
+  "/api/v1/workspaces/{workspace_id}/attachment-exports/{export_id}",
+  "/api/v1/workspaces/{workspace_id}/attachment-exports/{export_id}/download",
   "/api/v1/workspaces/{workspace_id}/exports",
 ];
 const actualExportPaths = Object.keys(document.paths)
-  .filter((path) => path.startsWith("/api/v1/exports") || path === "/api/v1/workspaces/{workspace_id}/exports")
+  .filter((path) => path.startsWith("/api/v1/exports") || path === "/api/v1/workspaces/{workspace_id}/exports" ||
+    path.startsWith("/api/v1/workspaces/{workspace_id}/attachment-exports"))
   .sort();
 if (actualExportPaths.join(",") !== expectedExportPaths.slice().sort().join(",")) {
-  throw new Error("Export path inventory drifted from the four Router operations");
+  throw new Error("Export path inventory drifted from the Collection and attachment Router operations");
 }
 const expectedExportRouteRegistrations = [
   "GET /exports/{export_id} handler.get",
   "GET /exports/{export_id}/download handler.download",
+  "GET /workspaces/{workspace_id}/attachment-exports handler.listAttachments",
+  "GET /workspaces/{workspace_id}/attachment-exports/{export_id} handler.getAttachment",
+  "GET /workspaces/{workspace_id}/attachment-exports/{export_id}/download handler.downloadAttachment",
   "GET /workspaces/{workspace_id}/exports handler.list",
   "POST /exports handler.create",
+  "POST /workspaces/{workspace_id}/attachment-exports handler.createAttachment",
 ];
 const actualExportRouteRegistrations = [...exportHandlerSource.matchAll(/router\.(Get|Post)\(\s*"([^"]+)"\s*,\s*handler\.([A-Za-z0-9_]+)\s*\)/g)]
   .map((match) => `${match[1].toUpperCase()} ${match[2]} handler.${match[3]}`)
   .sort();
 if (actualExportRouteRegistrations.join(",") !== expectedExportRouteRegistrations.join(",")) {
-  throw new Error("Export HTTP Router must register exactly create, detail, download and Collection list");
+  throw new Error("Export HTTP Router must register exactly the Collection and attachment operations");
 }
 
 const exportOperations = [
@@ -865,6 +877,30 @@ const exportOperations = [
     "get",
     ["200", "400", "401", "403", "405", "500", "503"],
     ["EXPORT_REQUEST_INVALID", "EXPORT_RESULT_INCONSISTENT", "EXPORT_DEPENDENCY_UNAVAILABLE"],
+  ],
+  [
+    "/api/v1/workspaces/{workspace_id}/attachment-exports",
+    "post",
+    ["200", "202", "400", "401", "403", "404", "405", "409", "415", "500", "503"],
+    ["EXPORT_REQUEST_INVALID", "EXPORT_PERMISSION_DENIED", "EXPORT_NOT_FOUND", "EXPORT_IDEMPOTENCY_CONFLICT", "EXPORT_RESULT_INCONSISTENT", "EXPORT_DEPENDENCY_UNAVAILABLE"],
+  ],
+  [
+    "/api/v1/workspaces/{workspace_id}/attachment-exports",
+    "get",
+    ["200", "400", "401", "403", "405", "500", "503"],
+    ["EXPORT_REQUEST_INVALID", "EXPORT_RESULT_INCONSISTENT", "EXPORT_DEPENDENCY_UNAVAILABLE"],
+  ],
+  [
+    "/api/v1/workspaces/{workspace_id}/attachment-exports/{export_id}",
+    "get",
+    ["200", "400", "401", "403", "404", "405", "500", "503"],
+    ["EXPORT_REQUEST_INVALID", "EXPORT_NOT_FOUND", "EXPORT_RESULT_INCONSISTENT", "EXPORT_DEPENDENCY_UNAVAILABLE"],
+  ],
+  [
+    "/api/v1/workspaces/{workspace_id}/attachment-exports/{export_id}/download",
+    "get",
+    ["200", "400", "401", "403", "404", "405", "409", "410", "500", "503"],
+    ["EXPORT_REQUEST_INVALID", "EXPORT_NOT_FOUND", "EXPORT_RESULT_NOT_READY", "EXPORT_EXPIRED", "EXPORT_RESULT_INCONSISTENT", "EXPORT_DEPENDENCY_UNAVAILABLE"],
   ],
 ];
 for (const [path, method, statuses, errorCodes] of exportOperations) {
@@ -1060,6 +1096,171 @@ if (exportPage.required?.join(",") !== "workspace_id,items" || Object.keys(expor
     exportPage.properties.next_cursor["x-max-utf8-bytes"] !== 4096) {
   throw new Error("ExportPage Workspace, item or opaque cursor contract drifted");
 }
+
+const attachmentBasePath = "/api/v1/workspaces/{workspace_id}/attachment-exports";
+const attachmentDetailPath = `${attachmentBasePath}/{export_id}`;
+const attachmentDownloadPath = `${attachmentDetailPath}/download`;
+const attachmentPathItem = document.paths[attachmentBasePath];
+const attachmentWorkspaceParameter = attachmentPathItem.parameters?.[0];
+if (attachmentPathItem.parameters?.length !== 1 || attachmentWorkspaceParameter?.name !== "workspace_id" ||
+    attachmentWorkspaceParameter.in !== "path" || attachmentWorkspaceParameter.required !== true ||
+    attachmentWorkspaceParameter.schema?.type !== "string" || attachmentWorkspaceParameter.schema?.format !== "uuid") {
+  throw new Error("Attachment Export create/list must bind one UUID Workspace path parameter");
+}
+for (const path of [attachmentDetailPath, attachmentDownloadPath]) {
+  const parameters = document.paths[path]?.parameters;
+  if (parameters?.length !== 2 || parameters[0]?.name !== "workspace_id" || parameters[0]?.in !== "path" ||
+      parameters[0]?.required !== true || parameters[0]?.schema?.format !== "uuid" ||
+      parameters[1]?.name !== "export_id" || parameters[1]?.in !== "path" || parameters[1]?.required !== true ||
+      parameters[1]?.schema?.format !== "uuid") {
+    throw new Error(`${path} must bind strict Workspace and Export UUID path parameters`);
+  }
+}
+
+const attachmentCreate = attachmentPathItem.post;
+if (attachmentCreate.parameters?.length !== 1 || attachmentCreate.parameters[0]?.$ref !== "#/components/parameters/IdempotencyKey" ||
+    attachmentCreate.requestBody?.required !== true || attachmentCreate.requestBody?.["x-max-body-bytes"] !== 65536 ||
+    attachmentCreate.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/AttachmentExportCreateRequest") {
+  throw new Error("Attachment Export create must use the strict 64 KiB idempotent JSON command contract");
+}
+for (const status of ["200", "202"]) {
+  const response = attachmentCreate.responses[status];
+  const schema = response.content?.["application/json"]?.schema;
+  if (schema?.allOf?.length !== 2 || schema.allOf[0]?.$ref !== "#/components/schemas/AttachmentExportCreateResponse" ||
+      schema.allOf[1]?.properties?.replayed?.const !== (status === "200") ||
+      response.headers?.Location?.schema?.format !== "uri-reference" ||
+      response.headers?.Location?.schema?.pattern !== "^/api/v1/workspaces/[0-9a-f-]{36}/attachment-exports/[0-9a-f-]{36}$" ||
+      response.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+    throw new Error(`Attachment Export create ${status} response lost replay, Location or no-store binding`);
+  }
+}
+if (Object.keys(attachmentCreate.responses).filter((status) => status.startsWith("2")).join(",") !== "200,202") {
+  throw new Error("Attachment Export create must use only 202 for first acceptance and 200 for exact replay");
+}
+
+const attachmentList = attachmentPathItem.get;
+const attachmentListLimit = attachmentList.parameters?.find((parameter) => parameter.name === "limit")?.schema;
+const attachmentListCursor = attachmentList.parameters?.find((parameter) => parameter.name === "cursor")?.schema;
+if (attachmentList.parameters?.length !== 2 || attachmentList.parameters.some((parameter) => parameter.name === "collection_id") ||
+    attachmentListLimit?.type !== "integer" || attachmentListLimit.minimum !== 1 || attachmentListLimit.maximum !== 100 || attachmentListLimit.default !== 50 ||
+    attachmentListCursor?.type !== "string" || attachmentListCursor.minLength !== 1 || attachmentListCursor.maxLength !== 4096 ||
+    attachmentListCursor["x-max-utf8-bytes"] !== 4096 ||
+    attachmentList.responses["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/AttachmentExportPage" ||
+    attachmentList.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+  throw new Error("Attachment Export list scope, cursor, limit or response contract drifted");
+}
+const attachmentGet = document.paths[attachmentDetailPath].get;
+if (attachmentGet.responses["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/AttachmentExportJob" ||
+    attachmentGet.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+  throw new Error("Attachment Export detail must return the strict no-store tagged Job projection");
+}
+
+const attachmentDownload = document.paths[attachmentDownloadPath].get;
+const attachmentDownloadResponse = attachmentDownload.responses["200"];
+const attachmentDownloadHeaders = attachmentDownloadResponse.headers;
+if (Object.keys(attachmentDownloadResponse.content ?? {}).join(",") !== "application/zip" ||
+    attachmentDownloadResponse.content?.["application/zip"]?.schema?.type !== "string" ||
+    attachmentDownloadResponse.content?.["application/zip"]?.schema?.format !== "binary" ||
+    attachmentDownloadHeaders?.["Content-Disposition"]?.schema?.pattern !== "^attachment; filename=\\\"workspace-attachments-[0-9a-f-]{36}\\.zip\\\"$" ||
+    attachmentDownloadHeaders?.["Content-Length"]?.schema?.type !== "integer" ||
+    attachmentDownloadHeaders?.["Content-Length"]?.schema?.minimum !== 0 ||
+    attachmentDownloadHeaders?.["Content-Length"]?.schema?.maximum !== 1073741824 ||
+    attachmentDownloadHeaders?.["Cache-Control"]?.schema?.const !== "private, no-store" ||
+    attachmentDownloadHeaders?.["X-Content-Type-Options"]?.schema?.const !== "nosniff" ||
+    attachmentDownload.responses["410"]?.$ref !== "#/components/responses/Gone") {
+  throw new Error("Attachment Export download ZIP, filename, length, cache, nosniff or expiry contract drifted");
+}
+
+for (const schemaName of ["AttachmentExportCreateRequest", "AttachmentExportCreateResponse", "AttachmentExportJob", "AttachmentExportPage"]) {
+  if (schemas[schemaName]?.type !== "object" || schemas[schemaName].additionalProperties !== false) {
+    throw new Error(`${schemaName} must remain a strict object schema`);
+  }
+}
+const attachmentCreateRequest = schemas.AttachmentExportCreateRequest;
+const attachmentRequestProperties = ["kind", "schema_version", "attachment_root_contract_version", "content_policy", "expires_in_seconds"];
+if (attachmentCreateRequest.required?.join(",") !== "kind,schema_version,attachment_root_contract_version,content_policy" ||
+    Object.keys(attachmentCreateRequest.properties).join(",") !== attachmentRequestProperties.join(",") ||
+    attachmentCreateRequest.properties.kind.const !== "ATTACHMENTS_ZIP" ||
+    attachmentCreateRequest.properties.schema_version.const !== "attachment-export/v1" ||
+    attachmentCreateRequest.properties.attachment_root_contract_version.const !== "workspace-attachments/v1" ||
+    attachmentCreateRequest.properties.content_policy.const !== "RAW_USER_OWNED" ||
+    attachmentCreateRequest.properties.expires_in_seconds.minimum !== 1 ||
+    attachmentCreateRequest.properties.expires_in_seconds.maximum !== 604800 ||
+    attachmentCreateRequest.properties.expires_in_seconds.default !== 86400) {
+  throw new Error("AttachmentExportCreateRequest tagged scope, policy or TTL contract drifted");
+}
+const attachmentCreateResponse = schemas.AttachmentExportCreateResponse;
+if (attachmentCreateResponse.required?.join(",") !== "job,replayed,dispatch_pending" ||
+    Object.keys(attachmentCreateResponse.properties).join(",") !== "job,replayed,dispatch_pending" ||
+    attachmentCreateResponse.properties.job?.$ref !== "#/components/schemas/AttachmentExportJob" ||
+    attachmentCreateResponse.properties.replayed?.type !== "boolean" ||
+    attachmentCreateResponse.properties.dispatch_pending?.type !== "boolean") {
+  throw new Error("AttachmentExportCreateResponse replay or dispatch projection drifted");
+}
+
+const attachmentJob = schemas.AttachmentExportJob;
+const attachmentJobProperties = [
+  "id", "workspace_id", "scope_kind", "kind", "schema_version", "attachment_root_contract_version", "content_policy",
+  "status", "version", "manifest_sha256", "entry_count", "total_uncompressed_bytes", "archive_sha256", "archive_size",
+  "error_code", "error_message", "attempt_count", "expires_at", "created_at", "updated_at", "started_at", "completed_at",
+  "download_count", "last_downloaded_at", "download_url",
+];
+const attachmentJobRequired = [
+  "id", "workspace_id", "scope_kind", "kind", "schema_version", "attachment_root_contract_version", "content_policy",
+  "status", "version", "attempt_count", "expires_at", "created_at", "updated_at", "download_count",
+];
+if (Object.keys(attachmentJob.properties).join(",") !== attachmentJobProperties.join(",") ||
+    attachmentJob.required?.join(",") !== attachmentJobRequired.join(",") ||
+    attachmentJob.properties.id.format !== "uuid" || attachmentJob.properties.workspace_id.format !== "uuid" ||
+    attachmentJob.properties.scope_kind.const !== "WORKSPACE_ATTACHMENTS" || attachmentJob.properties.kind.const !== "ATTACHMENTS_ZIP" ||
+    attachmentJob.properties.schema_version.const !== "attachment-export/v1" ||
+    attachmentJob.properties.attachment_root_contract_version.const !== "workspace-attachments/v1" ||
+    attachmentJob.properties.content_policy.const !== "RAW_USER_OWNED" ||
+    attachmentJob.properties.status.enum?.join(",") !== "PENDING,RUNNING,SUCCEEDED,FAILED,EXPIRED,CANCELLED" ||
+    attachmentJob.properties.manifest_sha256.pattern !== "^[0-9a-f]{64}$" ||
+    attachmentJob.properties.archive_sha256.pattern !== "^[0-9a-f]{64}$" ||
+    attachmentJob.properties.entry_count.maximum !== 10000 ||
+    attachmentJob.properties.total_uncompressed_bytes.maximum !== 1073741824 ||
+    attachmentJob.properties.archive_size.maximum !== 1073741824 ||
+    attachmentJob.properties.download_url.pattern !== "^/api/v1/workspaces/[0-9a-f-]{36}/attachment-exports/[0-9a-f-]{36}/download$") {
+  throw new Error("AttachmentExportJob tagged identity, archive limits or public fields drifted");
+}
+const attachmentPreparedFields = ["manifest_sha256", "entry_count", "total_uncompressed_bytes", "archive_sha256", "archive_size"];
+for (const field of attachmentPreparedFields) {
+  const requiredPeers = attachmentPreparedFields.filter((peer) => peer !== field);
+  if (attachmentJob.dependentRequired?.[field]?.join(",") !== requiredPeers.join(",")) {
+    throw new Error("AttachmentExportJob prepared archive facts must remain an indivisible binding");
+  }
+}
+const attachmentStatusRules = new Map((attachmentJob.oneOf ?? []).map((rule) => [rule.properties?.status?.const, rule]));
+if ([...attachmentStatusRules.keys()].join(",") !== "PENDING,RUNNING,SUCCEEDED,FAILED,EXPIRED,CANCELLED") {
+  throw new Error("AttachmentExportJob must define exactly one strict branch for every public status");
+}
+const attachmentPendingRule = attachmentStatusRules.get("PENDING");
+const attachmentRunningRule = attachmentStatusRules.get("RUNNING");
+const attachmentSucceededRule = attachmentStatusRules.get("SUCCEEDED");
+const attachmentFailedRule = attachmentStatusRules.get("FAILED");
+const attachmentExpiredRule = attachmentStatusRules.get("EXPIRED");
+if (attachmentPendingRule?.properties?.download_count?.const !== 0 ||
+    !attachmentRunningRule?.required?.includes("started_at") || attachmentRunningRule?.properties?.download_count?.const !== 0 ||
+    ![...attachmentPreparedFields, "started_at", "completed_at", "download_url"].every((field) => attachmentSucceededRule?.required?.includes(field)) ||
+    !["started_at", "completed_at", "error_code", "error_message"].every((field) => attachmentFailedRule?.required?.includes(field)) ||
+    !attachmentExpiredRule?.required?.includes("completed_at")) {
+  throw new Error("AttachmentExportJob status, archive and failure field combinations drifted");
+}
+
+const attachmentPage = schemas.AttachmentExportPage;
+if (attachmentPage.required?.join(",") !== "workspace_id,scope_kind,items" ||
+    Object.keys(attachmentPage.properties).join(",") !== "workspace_id,scope_kind,items,next_cursor" ||
+    attachmentPage.properties.workspace_id.format !== "uuid" ||
+    attachmentPage.properties.scope_kind.const !== "WORKSPACE_ATTACHMENTS" ||
+    attachmentPage.properties.items.maxItems !== 100 ||
+    attachmentPage.properties.items.items?.$ref !== "#/components/schemas/AttachmentExportJob" ||
+    attachmentPage.properties.next_cursor.minLength !== 1 || attachmentPage.properties.next_cursor.maxLength !== 4096 ||
+    attachmentPage.properties.next_cursor["x-max-utf8-bytes"] !== 4096) {
+  throw new Error("AttachmentExportPage Workspace, scope, item or opaque cursor contract drifted");
+}
+
 for (const schemaName of [
   "CreateConversationRequest", "Conversation", "ConversationPage", "QuestionScopeRequest", "QuestionScope", "SubmitQuestionRequest", "Question",
   "WorkflowProjection", "QuestionAcceptance", "AnswerCitation", "RAGResultCitation", "RAGAssertion", "RAGConflictPosition", "RelatedTopic", "RAGAnswerPayload", "RAGAnswerResult", "RefusalResult",
@@ -1615,6 +1816,9 @@ if (sse.responses["200"].content?.["text/event-stream"]?.schema?.$ref !== "#/com
 }
 for (const field of ["id", "type", "occurred_at", "workspace_id", "resource_ref", "resource_version", "payload_summary", "schema_version"]) {
   if (!schemas.ServerEventEnvelope.required.includes(field)) throw new Error(`ServerEventEnvelope must require ${field}`);
+}
+if (schemas.ServerEventPayloadSummary.properties.scope_kind?.enum?.join(",") !== "collection,workspace_attachments") {
+  throw new Error("ServerEventPayloadSummary.scope_kind must retain the two delivered Export scopes");
 }
 for (const [schemaName, fields] of [
   ["Conversation", ["archived_at"]],

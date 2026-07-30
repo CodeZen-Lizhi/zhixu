@@ -21,6 +21,10 @@ const (
 	ErrorCodeUnavailable = "EXPORT_DEPENDENCY_UNAVAILABLE"
 	// ErrorCodeResultInvalid 表示生成文件与持久绑定不一致。
 	ErrorCodeResultInvalid = "EXPORT_RESULT_INCONSISTENT"
+	// ErrorCodeAttachmentRootNotFound 表示固定 attachments/ 源目录不存在。
+	ErrorCodeAttachmentRootNotFound = "EXPORT_ATTACHMENT_ROOT_NOT_FOUND"
+	// ErrorCodeAttachmentLimitExceeded 表示附件数量、源字节或归档字节超过版本化上限。
+	ErrorCodeAttachmentLimitExceeded = "EXPORT_ATTACHMENT_LIMIT_EXCEEDED"
 )
 
 func invalid(cause error) error {

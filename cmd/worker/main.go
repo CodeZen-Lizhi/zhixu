@@ -943,7 +943,8 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	}
 	exportService, err := exportapplication.NewService(exportapplication.Dependencies{
 		Repository: exportRepository, Dispatcher: exportDispatcher, Snapshots: exportSnapshots,
-		Workspaces: workspaceRepository, Files: exportFiles, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+		Workspaces: workspaceRepository, Files: exportFiles, Attachments: exportFiles,
+		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
 	})
 	if err != nil {
 		return workerComponents{}, err

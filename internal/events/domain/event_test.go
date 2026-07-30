@@ -12,13 +12,13 @@ import (
 
 func TestDecodePayloadSummaryAcceptsStableFactsAndRejectsBodyFields(t *testing.T) {
 	workflowID := "7a000000-0000-4000-8000-000000000002"
-	raw := []byte(`{"workflow_run_id":"` + workflowID + `","status":"running","candidate_count":0}`)
+	raw := []byte(`{"workflow_run_id":"` + workflowID + `","status":"running","scope_kind":"workspace_attachments","candidate_count":0}`)
 
 	summary, err := DecodePayloadSummary(raw)
 	if err != nil {
 		t.Fatalf("decode stable summary: %v", err)
 	}
-	if summary.WorkflowRunID == nil || string(*summary.WorkflowRunID) != workflowID || summary.Status != "running" || summary.CandidateCount == nil || *summary.CandidateCount != 0 {
+	if summary.WorkflowRunID == nil || string(*summary.WorkflowRunID) != workflowID || summary.Status != "running" || summary.ScopeKind != "workspace_attachments" || summary.CandidateCount == nil || *summary.CandidateCount != 0 {
 		t.Fatalf("unexpected summary: %#v", summary)
 	}
 
@@ -27,6 +27,8 @@ func TestDecodePayloadSummaryAcceptsStableFactsAndRejectsBodyFields(t *testing.T
 		`{"answer_text":"private answer"}`,
 		`{"evidence":"private evidence"}`,
 		`{"absolute_path":"/private/workspace/document.md"}`,
+		`{"scope_kind":"WORKSPACE_ATTACHMENTS"}`,
+		`{"scope_kind":"workspace"}`,
 		`{"status":"running","status":"completed"}`,
 	} {
 		if _, err := DecodePayloadSummary([]byte(unsafe)); errorCode(err) != ErrorCodePayloadSummaryInvalid {

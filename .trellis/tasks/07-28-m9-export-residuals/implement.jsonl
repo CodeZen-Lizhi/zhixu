@@ -1,0 +1,15 @@
+{"file":".trellis/tasks/07-28-m9-export-residuals/research/m9-gap-analysis.md","reason":"M9 当前补丁回归、AC-33 附件缺口、Workspace 附件语义、typed scope 与验证矩阵的直接研究证据。"}
+{"file":".trellis/spec/backend/export-contract.md","reason":"保持已交付 M9-03 幂等、prepared result、create-only、过期、下载审计与 cleanup 基线，并据此做附件 scope 前向扩展。"}
+{"file":".trellis/spec/backend/index.md","reason":"Export Domain/Application/Adapter/Composition 的后端分层和公共依赖边界。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"READ_LOCAL、Session/API Token、CSRF/Origin、Workspace 隔离、路径与 Secret 安全合同。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"ops.export_job、数据库时间租约、事务事件/Audit、前向 migration、互斥约束和 guarded Down 规则。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"附件创建、恢复、过期、权限、结果不一致和依赖失败的稳定 Problem/fail-closed 规则。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"限制 Export 日志、事件和 Audit 元数据，防止附件路径、正文、Secret 或伪客户端下载事实泄漏。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Export race、真实 PostgreSQL/River、故障注入、安全与浏览器闭环门禁。"}
+{"file":".trellis/spec/frontend/index.md","reason":"Settings feature、API wire owner、Query 与组件分层入口。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"从 unknown 严格解码 tagged Job/Problem/下载响应，拒绝跨 scope 和未交付 kind。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Workspace-scoped Query、2 秒轮询、SSE invalidation、response-loss 同 key 与 cache 清理合同。"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"Settings 异步状态、错误恢复、键盘、焦点和移动端交互规范。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"前端 lint/typecheck/test/build 与真实 API/Worker/Vite 桌面和移动浏览器验收。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"追踪 scope/kind 从 Domain、DB、Worker、HTTP/OpenAPI 到 Settings/Web/Test/Docs 的双向一致性。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有 Export 生命周期、Problem、Auth、SSE 与下载机制，避免附件建立第二套事实源。"}

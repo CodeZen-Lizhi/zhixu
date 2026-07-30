@@ -270,39 +270,59 @@ Wrong: Candidate 面板测试通过就宣称完整 Graph 交付，或 scan ID �
 Correct: 前端全量门禁加真实 API 浏览器；scan ID 只影响 Candidate server state。
 ```
 
-## Scenario: M9-03 Smart Collection Export Frontend Quality Gate
+## Scenario: M9 Export Frontend Quality Gate
 
 ### 1. Scope / Trigger
 
-- 修改 `web/src/api/exports.ts`、Collection Export Query/Panel、Workspace cache/SSE、下载行为、Export OpenAPI 或
-  浏览器 smoke 时应用。此门禁只覆盖 `MARKDOWN|METADATA_JSON`，附件、`EVALUATION_JSON`、`AUDIT_JSON` 与
-  AC-33 全量完成不在本切片验收内。
+- 修改 `web/src/api/{exports,attachment-exports}.ts`、Collection/Settings Export UI、Workspace cache/SSE、下载、
+  OpenAPI 或 `deploy/export-browser-smoke.sh` 时应用。
+- 当前门禁覆盖 Collection `MARKDOWN|METADATA_JSON` 和 Workspace `ATTACHMENTS_ZIP`；
+  `EVALUATION_JSON|AUDIT_JSON` 继续不得出现在公开 UI/API。
 
-### 2. Contracts
+### 2. Signatures
 
-- 网络 JSON 只经 Export strict decoder 进入 Query/Component；Collection 页面不重新解析 wire、伪造进度、
-  自行生成 download URL，或把 `dispatch_pending` 当作终态。
-- 任务必须从 Collection-filtered REST List/Detail 恢复；`PENDING|RUNNING` 使用 2 秒有界轮询，`export.*` SSE
-  只触发定向 invalidation，所有终态停止轮询。Create response-loss 复用同一 Idempotency-Key，`FAILED|EXPIRED`
-  显式新建才换 key。
-- 下载经 `authFetch` 和严格 Blob/header 校验；`SUCCEEDED` 之外没有下载控件，`FAILED|EXPIRED` 提供新建出口，
-  历史 `CANCELLED` 可读但不提供取消。默认 UI 只创建 `MASKED` 安全字段，不显示敏感或服务器路径。
-- 实际浏览器必须在桌面和 `390x844` 完成创建、刷新恢复、运行、下载、失败后新建、过期后新建、键盘与焦点检查；
-  不得有横向溢出或 console warning/error。
+- Collection wire/query/panel 与 Workspace attachment wire/query/panel 分开拥有；共同只复用 `authFetch`、Problem、
+  SSE invalidation 和通用 UI primitives。
+- 真实门禁：`deploy/export-browser-smoke.sh`，要求显式 `ZHIXU_TEST_DATABASE_URL` 并启动 API、Worker、Vite。
 
-### 3. Tests Required
+### 3. Contracts
 
-- API decoder：strict JSON、kind/status/field/时间/hash/binding、Problem、下载 header/size 和 Abort。
-- Query/Component：Workspace cache 清理、cursor、same-key retry、轮询停止、SSE invalidation、历史状态、下载错误、
-  归档 Collection 与可访问交互。
-- Canonical 命令：`npm run lint --prefix web`、`npm run typecheck --prefix web`、`npm run test --prefix web`、
-  `npm run build --prefix web`；随后由真实 API/Worker/Vite 的 `deploy/export-browser-smoke.sh` 验证闭环。
+- 网络 JSON 只经对应 strict decoder；组件不得重新解析 wire、生成 download URL 或把 `dispatch_pending` 当终态。
+- REST 恢复、2 秒 active polling、terminal stop、same-key response-loss、SSE invalidation 与 Workspace Abort 必须有测试。
+- 下载经 `authFetch` 严格校验 header/Blob/binding；只有 `SUCCEEDED` 显示下载，`FAILED|EXPIRED` 提供新建出口。
+- Settings 必须展示 `RAW_USER_OWNED`，不得声称二进制已脱敏；控制面不得显示服务器路径或附件完整文件名列表。
+- 浏览器 smoke 使用真实二进制/嵌套附件，完成刷新与服务重启恢复、ZIP 解包、manifest/hash/逐字节比对、
+  权限/跨 Workspace/unsafe/源变化/tamper/expiry/cleanup，并检查桌面和 390x844 的键盘、焦点、overflow、console/network。
 
-### 4. Wrong vs Correct
+### 4. Validation & Error Matrix
+
+| Failure | Required result |
+|---|---|
+| strict decoder/binding/header/Blob 失败 | 显式 error，不渲染 partial Job 或假下载 |
+| gate unavailable | Settings 显示可恢复 unavailable，Collection Export 不退化 |
+| Workspace 切换时请求仍在途 | abort/reset；迟到回调不能写 cache |
+| `FAILED|EXPIRED` | 保留历史并允许新 key；不得复用旧 key 创建第二个意图 |
+| 390x844 overflow、console warning/error 或异常请求 | browser gate 失败 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：真实 Worker 生成 ZIP，Settings 刷新/重启后恢复并下载，浏览器和 shell 解包验证同一 archive binding。
+- Base：空附件目录生成 zero-entry ZIP；无历史任务展示 Empty；gate 关闭展示 unavailable。
+- Bad：mock fetch 截图代替真实服务、直链下载、旧 Workspace mutation 写 cache、或 `available:false` 文件冒充未交付 kind。
+
+### 6. Tests Required
+
+- API：strict JSON、scope/kind/status/time/hash/binding、Problem、Abort、下载 header/Blob size。
+- Query/Component：Workspace cache/Abort/late callback、cursor、same-key retry、polling/SSE、历史状态、下载错误和 a11y。
+- Canonical：`npm run lint --prefix web`、`npm run typecheck --prefix web`、`npm run test --prefix web`、
+  `npm run build --prefix web`、`make openapi-check`、`git diff --check`。
+- Dynamic：`ZHIXU_TEST_DATABASE_URL="$ZHIXU_TEST_DATABASE_URL" bash deploy/export-browser-smoke.sh`。
+
+### 7. Wrong vs Correct
 
 ```text
-Wrong: 只展示 Markdown 创建按钮，就宣称附件和 AC-33 已完成；或把下载直链交给新标签页。
-Correct: 明确只支持 Collection Markdown/Metadata JSON，下载经 authFetch/Problem/Blob 校验；附件保持 deferred。
+Wrong: 只跑 API decoder 单测或只打开 Settings，就声明附件导出与 AC-33 完成。
+Correct: 真实 PostgreSQL/API/Worker/Vite 生成并恢复 ZIP，浏览器下载后解包/hash，cleanup 后源附件保持不变。
 ```
 
 ## Scenario: M8 Review, Interview And Memory Frontend Boundary

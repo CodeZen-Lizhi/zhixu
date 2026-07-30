@@ -742,7 +742,7 @@ func newExportHandler(pool *pgxpool.Pool, cfg config.Config, workspaces *workspa
 	}
 	service, err := exportapplication.NewService(exportapplication.Dependencies{
 		Repository: repository, Dispatcher: dispatcher, Snapshots: snapshots, Workspaces: workspaces, Files: files,
-		Authorizer: exportauth.Authorizer{}, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+		Attachments: files, Authorizer: exportauth.Authorizer{}, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
 	})
 	if err != nil {
 		return nil, err

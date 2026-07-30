@@ -20,7 +20,11 @@ func (repository *Repository) appendLifecycleEvent(ctx context.Context, tx pgx.T
 		WorkspaceID: job.WorkspaceID,
 		Type:        "export." + stage,
 		ResourceRef: "export_job:" + string(job.ID), ResourceVersion: job.Version,
-		PayloadSummary: eventsdomain.PayloadSummary{Status: strings.ToLower(string(job.Status)), Stage: stage},
+		PayloadSummary: eventsdomain.PayloadSummary{
+			Status:    strings.ToLower(string(job.Status)),
+			Stage:     stage,
+			ScopeKind: strings.ToLower(string(job.Scope.Kind)),
+		},
 		SchemaVersion:  1,
 		SourceEventRef: "export." + stage + ":" + string(job.ID) + ":v" + formatVersion(job.Version),
 		OccurredAt:     job.UpdatedAt,

@@ -18,9 +18,10 @@ M7 Timeline/Impact 已交付 `/timeline`、`/timeline/:eventId`、严格 `web/sr
 URL filter/cursor、v1/v2 Event/Report、Artifact/Review owner binding，以及从当前报告创建正式 `downstream_update`
 Proposal 的交互。批准仍只记录 decision；下游 Apply/executor 未交付，UI 不得显示可应用或已修改目标。
 M9 已交付业务工作台、严格 Proposal 判别联合、Workspace-bound 详情和全站唯一 SSE Event Store；Apply Preflight 明确属于 Approval 后写回检查，Monaco DiffEditor 模型在内部 editor detach 后按 URI 安全释放。
-M9-03 已在 Collection 详情交付异步 Export Panel、`web/src/api/exports.ts` 严格 decoder、Workspace/Collection-bound
-Query、刷新恢复、2 秒有界轮询、`export.*` SSE 定向失效和受控 Blob 下载；正式范围仅为 `MARKDOWN` 与
-`METADATA_JSON`。附件、`EVALUATION_JSON`、`AUDIT_JSON` 不在当前 UI/API 范围，不能将其或 AC-33 全量验收标为完成。
+M9 Export 已在 Collection 详情交付 `MARKDOWN|METADATA_JSON` Panel，并在 Settings 交付独立的 Workspace
+`ATTACHMENTS_ZIP` Panel。`web/src/api/{exports,attachment-exports}.ts` 分别拥有严格 wire，Query 绑定 Workspace/scope，
+刷新恢复、2 秒有界轮询、`export.*` SSE 定向失效、跨 Workspace Abort 和受控 Blob 下载均已验证。
+AC-33 已由 Markdown、领域 Metadata JSON 与真实附件 ZIP 闭环关闭；`EVALUATION_JSON|AUDIT_JSON` 继续不公开。
 M10-02 已交付严格认证 API 边界、`AuthProvider`/`AuthBoundary`、Session 恢复、CSRF 注入和登录/登出状态；
 Bootstrap Token 只用于一次交换，浏览器持久化的唯一认证派生值是 CSRF Token，业务授权仍由后端裁决。
 M8-01 已交付 `/artifacts` 工作台、严格 Artifact decoder、Workspace-bound Query 与 generation 恢复；

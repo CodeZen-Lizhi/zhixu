@@ -1,119 +1,152 @@
-# Smart Collection 异步导出契约
+# 可恢复异步导出契约
 
-## Scenario: M9-03 可恢复 Export Job
+## Scenario: Collection 与 Workspace 附件 Export
 
 ### 1. Scope / Trigger
 
-- 修改 `internal/export/**`、`migrations/00036_export_hardening.sql`、Export Router/Auth/Worker/LocalFS、
-  `ops.export_job`、下载 Audit、`export.*` Server Event 或 Collection Export UI/API 时，必须应用本契约。
-- 正式范围仅为 Smart Collection 的 `MARKDOWN` 与 `METADATA_JSON`，输出 schema 固定为 `export/v1`。
-  `EVALUATION_JSON`、`AUDIT_JSON` 没有正式内容源；附件打包、CSV/XLSX、通用字段映射和公式字段均不在
-  M9-03 范围。它们不得因领域枚举或历史代码存在而出现在公开请求、UI 或交付说明中。
-- PostgreSQL 是 Job、幂等、租约、冻结范围、prepared result、生命周期、清理、下载统计和 Audit 的唯一
-  事实源；River 只运输 `{workspace_id, export_id}`，LocalFS 只保存受控结果文件。
+- 修改 `internal/export/**`、Export Router/Auth/Worker/LocalFS、`ops.export_job`、下载 Audit、
+  `export.*` Server Event、Collection Export 或 Settings 附件导出时，必须应用本契约。
+- `COLLECTION` scope 只公开 `MARKDOWN|METADATA_JSON` 与 `export/v1`；
+  `WORKSPACE_ATTACHMENTS` 只公开 `ATTACHMENTS_ZIP`、`attachment-export/v1`、
+  `workspace-attachments/v1` 与 `RAW_USER_OWNED`。
+- `EVALUATION_JSON`、`AUDIT_JSON`、`evaluation|audit_summary` 没有正式内容源，继续 fail closed；
+  CSV/XLSX、通用字段映射、公式字段和 Collection 到附件的推导关系也不属于当前范围。
+- PostgreSQL 是 Job、幂等、scope、租约、prepared result、capability gate、TTL、清理、下载统计和 Audit
+  的唯一事实源；River 只运输 `{workspace_id,export_id}`，LocalFS 只读固定 `attachments/` 并管理
+  `.knowledge/exports` 下的生成物。
 
-### 2. Public Boundary
+### 2. Signatures
 
 ```text
+# Collection
 POST /api/v1/exports
 GET  /api/v1/exports/{export_id}?workspace_id=...
 GET  /api/v1/workspaces/{workspace_id}/exports?collection_id=...&limit=...&cursor=...
 GET  /api/v1/exports/{export_id}/download?workspace_id=...
+
+# Workspace attachments
+POST /api/v1/workspaces/{workspace_id}/attachment-exports
+GET  /api/v1/workspaces/{workspace_id}/attachment-exports?limit=...&cursor=...
+GET  /api/v1/workspaces/{workspace_id}/attachment-exports/{export_id}
+GET  /api/v1/workspaces/{workspace_id}/attachment-exports/{export_id}/download
 ```
 
-- 创建请求必须有唯一 `Idempotency-Key`，并绑定 Workspace、Collection ID/version、query hash、kind、
-  `export/v1`、规范化字段白名单、脱敏策略、敏感字段意图、调用主体/能力与 TTL。
-- 首次创建返回 `202` 和 `Location`；相同 key 的完全相同请求返回原 Job（`200`），不同规范请求返回
-  `409 EXPORT_IDEMPOTENCY_CONFLICT`。`dispatch_pending=true` 只表示本次 River 投递尚未确认，不能被客户端
-  渲染为业务失败或完成。
-- List 使用 `created_at DESC,id DESC` 的有界 opaque cursor；cursor 与 Workspace、Collection 和 limit 绑定。
-  Get/List/Download 均按当前 Workspace 授权，不返回服务器文件路径、staging locator、租约或 request hash。
+```go
+type FileStore interface {
+    Stage(context.Context, foundation.ID, foundation.ID, string, []byte) (PreparedFile, error)
+    Promote(context.Context, foundation.ID, PreparedFile) error
+    Open(context.Context, foundation.ID, string, string, int64) (io.ReadCloser, error)
+    DeletePrepared(context.Context, foundation.ID, string, string, int64) error
+    DeleteOrphan(context.Context, foundation.ID, string) error
+}
 
-### 3. Durable Contracts
+type AttachmentArchiver interface {
+    StageAttachments(context.Context, foundation.ID, foundation.ID) (AttachmentArchive, error)
+}
+```
 
-- Create 必须先读取同 `(workspace_id,idempotency_key)` 的既有 Job，再验证当前 Collection；因此首次响应丢失后，
-  即使 Collection 已变化、归档或 Job 已过期，完全相同的请求仍只返回原 Job。过期 Job 不复用 key 创建新任务。
-- 首次执行在同一 Collection version/query hash 的 durable scan 中冻结 `read_model_revision` 与 `exact_count`。
-  单次结果最多 10,000 项，超过上限、Workspace/Collection/version/query/revision/count 漂移都必须 fail closed，
-  禁止截断或退化为 Workspace 全量。
-- Worker 的可恢复顺序固定为 `Claim -> durable snapshot -> render -> create-only staging -> Prepare -> atomic promote -> Complete`。
-  `Prepare` 持久化 staging/final 相对路径、hash、size、revision 和 count；prepared 后任何恢复都只能验证该固定
-  binding，不能重新读取 Collection 或重新 render。
-- Claim、Prepare、Complete、Fail 都以 PostgreSQL 当前时间同时校验 Job version、lease owner、lease 未过期和
-  `expires_at`。旧 lease owner 无权提交；Prepare 后到期必须归约为 `EXPIRED`，不能写入成功或失败终态。
-- `PENDING -> RUNNING -> SUCCEEDED|FAILED|EXPIRED` 是当前写入生命周期；`CANCELLED` 仅为历史兼容读模型，
-  M9-03 不提供取消入口。Get、List 与后台 sweep 都归约到期 Job；任务和 Audit 历史保留，TTL 只回收物理文件。
-- 默认 `MASKED`，前端首版只发送安全字段且不暴露敏感开关。`FULL + include_sensitive` 只能由已认证
-  Session/API Token 主体以 `READ_LOCAL` 发起；Secret、绝对路径和危险公式前缀不得进入 render input、文件、
-  Problem、日志或事件摘要。
-- 下载前必须重新验证受控路径、symlink 边界、SHA-256 和 size；成功准备返回时，在同一 PostgreSQL 事务内增加
-  下载统计并追加 `export.download` append-only Audit，记录 actor、Export ID、hash、size 和
-  `server_outcome=prepared_for_return`。这不声称客户端已完整接收文件。
-- 过期清理幂等删除 prepared staging 与 final 路径；删除失败保留 cleanup 状态、次数和受限错误供后续 sweep 重试。
-  orphan sweep 只扫描 `.knowledge/exports/.staging` 的严格命名空间，且绝不删除已有 prepared binding 的文件。
+- `ops.export_job.scope_kind` 是 `COLLECTION|WORKSPACE_ATTACHMENTS` tagged union discriminator；附件结果额外冻结
+  `attachment_root_contract_version`、`manifest_sha256`、`entry_count` 和 `total_uncompressed_bytes`。
+- `ops.export_capability('workspace-attachments','workspace-attachments/v1')` 是持久启用门禁，migration 后默认关闭。
 
-### 4. HTTP / Event Error Matrix
+### 3. Contracts
+
+- Create 必须有唯一 `Idempotency-Key`。相同 `(workspace_id,key)` 的 exact replay 先于当前 Collection 或
+  `attachments/` 检查；首次返回 `202`，完全相同请求返回原 Job（`200`），不同 canonical request 返回
+  `409 EXPORT_IDEMPOTENCY_CONFLICT`。过期 Job 也不复用原 key 创建第二个任务。
+- `COLLECTION` 必须携带 Collection ID/version/query hash、非空 fields 和 `MASKED|FULL` 策略；
+  `WORKSPACE_ATTACHMENTS` 禁止这些 Collection 字段，fields 必须为 `[]`，只允许 `RAW_USER_OWNED`。
+  数据库 scope、prepared 和 path `CHECK` 必须以完整表达式 `IS TRUE` 并显式检查必填非 NULL，防止 PostgreSQL
+  `UNKNOWN` 绕过 tagged binding。
+- capability gate 关闭或 contract version 不匹配时，附件 Create 返回 unavailable，Claim/Recovery 不领取附件 Job；
+  Collection 查询始终显式过滤 `COLLECTION`。只有所有 API/Worker 都支持同一 contract 后才原子启用 gate。
+- Collection 执行固定为 `Claim -> durable snapshot -> render -> Stage -> Prepare -> Promote -> Complete`；
+  prepared 后恢复只验证固定 revision/count/path/hash/size，不重新读取 Collection。
+- 附件执行固定为 `Claim -> fd-relative scan/hash -> deterministic ZIP staging -> Prepare -> Promote -> Complete`。
+  从 canonical Workspace root handle 开始逐组件 no-follow；只接受 `attachments/` 中 link count=1 的 regular file，
+  拒绝 symlink/hardlink/device/FIFO/socket、无效 UTF-8、Zip Slip 及 NFC/case-fold/path collision。
+- v1 上限为 10,000 entries、单文件 256 MiB、总未压缩 1 GiB、ZIP 1 GiB；任一超限统一返回
+  `EXPORT_ATTACHMENT_LIMIT_EXCEEDED`，禁止截断。目录使用有界批次遍历，并在 Prepare 前复核文件、空目录、祖先
+  和 root identity 的最终快照。
+- manifest 位于 ZIP 根级，payload 位于 `attachments/<relative-path>`；entry 按 NFC 规范化相对路径的 UTF-8 byte
+  order 排序，使用 `zip.Store`、固定时间/权限、无 comment/extra。相同冻结输入必须产生相同 manifest/archive hash。
+- `Promote` 必须 create-only，冲突不得覆盖 winner。`DeletePrepared` 先把当前命名对象原子隔离、重新验证
+  hash/size 后再删；竞争产生的 replacement 必须保留。orphan 删除只接受严格 staging namespace。
+- 下载前 `FileStore.Open` 在同一 FD 上有界校验 path/inode/hash/size 并 rewind，Service 随后原子写下载统计与
+  `export.download` Audit，HTTP 使用 durable `Content-Length` 与 `io.CopyN` 流式返回。任何中间失败必须 Close，
+  Audit 只声明 `server_outcome=prepared_for_return`，不声称客户端收完。
+- List 使用 `created_at DESC,id DESC` 有界 opaque cursor；Collection cursor 绑定 Workspace/Collection/limit，附件
+  cursor 绑定 Workspace/scope/limit。Create/List/Get/Download 全部要求当前 Workspace `READ_LOCAL`，并防跨 Workspace
+  枚举。
+- TTL 只删除 hash/size 匹配的生成物；源 `attachments/`、Job、manifest/archive digest、统计和 Audit 永不由 cleanup
+  删除或改写。删除失败保留可重试事实。
+
+### 4. Validation & Error Matrix
 
 | 条件 | 必须结果 |
 |---|---|
-| 非法 JSON、重复/未知字段、UUID/hash/enum/TTL/cursor/Idempotency-Key 非法 | `400 EXPORT_REQUEST_INVALID` 或 `INVALID_JSON`，不创建 Job |
-| 跨 Workspace、Job 或当前 Active Collection 不存在 | `404 EXPORT_NOT_FOUND`，不帮助枚举资源 |
-| 同 key 不同 canonical request，或当前 Collection binding 漂移 | `409 EXPORT_IDEMPOTENCY_CONFLICT` |
+| 非法/重复/未知 JSON 字段、UUID/hash/enum/TTL/cursor/key 非法 | `400 EXPORT_REQUEST_INVALID` 或 `INVALID_JSON` |
+| scope/kind/schema/root/policy/Collection binding 不匹配 | `400 EXPORT_REQUEST_INVALID`，不创建 Job |
+| gate 关闭、contract mismatch 或依赖不可用 | `503 EXPORT_DEPENDENCY_UNAVAILABLE`，不创建/claim 新附件 Job |
+| 权限、Session/API Token、CSRF/Origin 或 `READ_LOCAL` 不满足 | `403 EXPORT_PERMISSION_DENIED` |
+| 跨 Workspace、Job 或 Collection 不存在 | `404 EXPORT_NOT_FOUND`，不帮助枚举 |
+| 同 key 不同 canonical request | `409 EXPORT_IDEMPOTENCY_CONFLICT` |
 | 下载未完成 | `409 EXPORT_RESULT_NOT_READY` |
-| 下载或读取时已到期 | `410 EXPORT_EXPIRED`，并保留 cleanup 事实 |
-| 授权、能力或敏感策略不满足 | `403 EXPORT_PERMISSION_DENIED` |
-| 文件/hash/size/持久绑定无法证明一致 | `500 EXPORT_RESULT_INCONSISTENT`，不返回部分结果或增加下载统计 |
-| PostgreSQL、River、文件或 Audit 依赖不可用 | `503 EXPORT_DEPENDENCY_UNAVAILABLE`，保留可恢复 Job |
+| 下载或读取时已过期 | `410 EXPORT_EXPIRED`，保留 cleanup 事实 |
+| missing root、unsafe entry、源变化或 path collision | 稳定失败，不产生可下载 partial ZIP |
+| 文件数、单文件、总字节或 ZIP 超限 | `EXPORT_ATTACHMENT_LIMIT_EXCEEDED`，不截断 |
+| path/inode/hash/size/prepared binding 无法证明一致 | `500 EXPORT_RESULT_INCONSISTENT`，不增加下载统计 |
+| cleanup mismatch | 保留 replacement/源文件和失败事实，后续可重试 |
 
-- `export.created|claimed|prepared|completed|failed|expired|cleanup_*` 是 Server Event 摘要；
-  `resource_ref=export_job:<id>`、`resource_version=job.version`。SSE 仅定向失效 Export Query，客户端必须回查
-  Job/List 事实，不能从事件 payload 推导终态。
-- 成功下载必须使用对应 kind 的固定 Content-Type、受控 attachment 文件名、Content-Length、
-  `Cache-Control: private, no-store` 和 `X-Content-Type-Options: nosniff`。
+成功下载按 kind 返回固定 Content-Type、受控 ASCII filename、`Content-Length`、
+`Cache-Control: private, no-store` 和 `X-Content-Type-Options: nosniff`。Server Event 只提供 typed invalidation hint；
+客户端必须回查 REST Job/List，不能从事件 payload 推导终态。
 
-### 5. Frontend Recovery Boundary
+### 5. Good / Base / Bad Cases
 
-- `web/src/api/exports.ts` 是唯一 wire owner。它从 `unknown` 严格解码 Job/Page/Problem/下载响应，校验
-  Workspace/Collection/version/query hash、UUID、RFC3339、hash、枚举、字段去重与状态字段组合；任一漂移
-  都拒绝整个响应。
-- Query key 至少绑定 `collection-exports + workspaceId + collectionId + cursor`；Workspace 切换取消并清除旧
-  Export cache。cursor 只在内存 Query state 中保存，不写 URL 或 Browser Storage。
-- `PENDING`、`RUNNING` 以 2 秒有界轮询恢复，`export.*` 事件立即失效同一 Workspace 的 Export Query；终态停止
-  轮询。创建响应丢失重试复用同一 variables 与 Idempotency-Key；只有用户显式新建，或 `FAILED/EXPIRED` 后重试，
-  才生成新 key。
-- 下载必须经 `authFetch` 获取 Blob 并校验响应头、长度和绑定；不得用直链/新标签页绕过 Problem、401 或 410 处理。
+- Good：兼容 release 读取 tagged union，gate 启用后 Settings 创建 Workspace 附件 Job；Worker 生成确定性 ZIP，
+  重启从 prepared binding 恢复，下载以验证后的 FD 流式返回，cleanup 后源附件字节和 metadata 不变。
+- Base：空 `attachments/` 生成 zero-entry manifest；任务失败/过期保留历史并允许用户用新 key 新建；gate 关闭时
+  Collection Export 继续正常，附件入口明确 unavailable。
+- Bad：用 dummy Collection 表示附件、用 `{"available":false}` 冒充 Evaluation/Audit、`Lstat -> Rename` 覆盖 final、
+  无 hash/size 删除 prepared 文件、把 1 GiB ZIP `ReadAll` 到 Go 堆，或在 cleanup 中扫描/删除源附件。
 
 ### 6. Tests Required
 
-- Domain/Application：canonical request/TTL、Job 状态字段、字段白名单、snapshot drift、10,000 上限、prepared replay、
-  lease/TTL loss、hash/size、cleanup 和下载 actor。
-- PostgreSQL：同 key 并发/response-loss、Collection 变化后的 replay、跨 Workspace、Collection-bound cursor、
-  DB-time Claim/Prepare/Complete/Fail、download+Audit 原子性、append-only、cleanup retry 和 guarded Down。
-- HTTP/OpenAPI：严格 body/header/query、`202/200/409/410/503`、下载安全 header、Router/OpenAPI 映射和
-  `MARKDOWN|METADATA_JSON` 公开枚举。
-- Frontend/Browser：strict decoder、同 key 重试、2 秒轮询停止、SSE recovery、Workspace cache 清理、全部状态、
-  Blob 下载、桌面/390x844 键盘、无横向溢出和无 console warning/error。
+- Domain/Application：tagged scope、canonical request、exact replay/conflict、lease/TTL fence、prepared replay、
+  gate disabled/enabled、流关闭和下载 Audit actor/binding。
+- LocalFS：create-only 并发 winner、prepared replacement/quarantine、orphan namespace、empty/binary/nested/determinism、
+  NFC order、symlink/hardlink/FIFO/socket、limits、源与祖先变化、最终目录 fingerprint、流式 hash/size 校验。
+- PostgreSQL/Migration：fresh/repeat/upgrade、NULL/UNKNOWN `23514`、scope/prepared/path 互斥、guarded Down、同 key
+  并发、DB-time Claim/Prepare/Complete/Fail、scope isolation、cleanup retry、download+Audit 原子性。
+- HTTP/OpenAPI/Auth：严格 body/header/query/cursor、`202/200/400/403/404/409/410/500/503`、ZIP headers、
+  Collection 兼容与 Evaluation/Audit rejection。
+- Frontend/Browser：两个 strict wire owner、Workspace query/cache/Abort 隔离、same-key retry、2 秒轮询、SSE invalidation、
+  Blob binding，以及真实 PostgreSQL/API/Worker/Vite 的刷新/重启、ZIP 解包/hash、权限/跨 Workspace/unsafe/源变化/
+  tamper/expiry/cleanup、桌面与 390x844。
 
 ```bash
-go test -race -count=1 -timeout 60s ./internal/export/... ./internal/events/... ./internal/audit/... ./internal/auth/http ./internal/app ./cmd/api ./cmd/worker
+go test -race -count=1 -timeout 60s ./internal/export/... ./internal/auth/http ./internal/app ./cmd/api ./cmd/worker
 ZHIXU_TEST_DATABASE_URL="$ZHIXU_TEST_DATABASE_URL" go test -race -tags=integration -count=3 -p 1 -timeout 60s ./internal/export/adapter/postgres
+ZHIXU_TEST_DATABASE_URL="$ZHIXU_TEST_DATABASE_URL" go test -race -tags=integration -count=3 -p 1 -timeout 60s -run '^(TestExport|TestM9|TestAttachment)' ./internal/platform/migration
 make openapi-check
 npm run lint --prefix web
 npm run typecheck --prefix web
 npm run test --prefix web
 npm run build --prefix web
 ZHIXU_TEST_DATABASE_URL="$ZHIXU_TEST_DATABASE_URL" bash deploy/export-browser-smoke.sh
+git diff --check
 ```
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: 文件写到最终路径后再次读取可变 Collection，或 River Job 被当作 Export 终态。
-Correct: PostgreSQL prepared binding 冻结 revision/count/path/hash/size；恢复只验证同一 binding，River 只负责投递。
+Wrong: PostgreSQL CHECK 只写 `query_hash ~ ...`，允许 NULL 产生 UNKNOWN 后通过。
+Correct: tagged scope/prepared/path 完整表达式 `IS TRUE`，分支必填列同时显式 `IS NOT NULL`，并用真实 23514 负测锁定。
 
-Wrong: 过期后删除 Job/Audit，或下载成功只增加计数而不记录 actor。
-Correct: TTL 只删除受控物理文件；历史 Job/Audit 保留，统计和 export.download 在同一事务追加。
+Wrong: 下载前 `io.ReadAll` 最大 1 GiB ZIP，或 RecordDownload 后丢失未关闭的文件流。
+Correct: 同一 FD 校验并 rewind；Audit 成功后用 Content-Length + CopyN 流式返回，所有失败路径 Close。
 
-Wrong: 宣称 AC-33 已关闭，因为能导出 Collection Markdown。
-Correct: M9-03 仅交付 Collection MARKDOWN/METADATA_JSON；附件、EVALUATION_JSON、AUDIT_JSON 继续 deferred，AC-33 仅部分完成。
+Wrong: Collection Markdown 能下载就声称 AC-33 完成，或把 Evaluation/Audit 占位文件算作交付。
+Correct: AC-33 由 Collection Markdown、Metadata JSON 和真实 Workspace 附件 ZIP 共同关闭；Evaluation/Audit 仍独立 deferred。
 ```

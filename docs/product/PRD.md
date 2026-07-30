@@ -2061,8 +2061,9 @@ M9-03 已在 Smart Collection 详情交付可恢复异步导出：用户可创�
   `FAILED/EXPIRED` 由用户以新 key 新建，历史 `CANCELLED` 只读兼容。
 - 结果到期后拒绝下载并回收受控物理文件；Job、hash、下载统计和 append-only Audit 保留。每次服务端准备返回成功
   下载时记录 actor、Export ID、结果 hash 和 outcome，不声称客户端已完整接收。
-- 附件打包、`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX、通用字段映射与公式字段不在 M9-03。它们仍是产品后续
-  工作，不能用当前两个 Export kind 宣称 AC-33 全部关闭。
+- 附件不属于 M9-03 的 Collection kind；后续 M9 residual 已在 Settings 以独立
+  `WORKSPACE_ATTACHMENTS + ATTACHMENTS_ZIP` 交付固定 `attachments/` 的真实字节与版本化 manifest，和当前两个
+  Collection kind 共同关闭 AC-33。`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX、通用字段映射与公式字段仍是后续。
 
 ### 10.15 知识健康中心
 
@@ -2814,9 +2815,10 @@ Review Card 进入 INVALIDATED，并从调度移除，直到重新审核。
 - 导出任务必须记录字段、查询版本、权限、文件哈希、状态、过期时间和下载审计。
 - 正式 v1.0 不提供 Excel/CSV 模板导入、字段映射或公式字段；Smart Collection 的“表格”仅指 Web 表格视图。
 
-当前实现状态：M9-03 已完成 Smart Collection `MARKDOWN` 和领域 `METADATA_JSON` 的异步 Export Job、
-幂等恢复、脱敏、权限、过期清理、hash/size 校验与下载 Audit。附件、评测结果和审计摘要的内容导出仍未交付；
-`EVALUATION_JSON`、`AUDIT_JSON` 没有正式内容源，且 AC-33 因附件导出尚未完成而保持部分完成。
+当前实现状态：M9-03 已完成 Smart Collection `MARKDOWN` 和领域 `METADATA_JSON`；M9 residual 已完成
+Workspace `ATTACHMENTS_ZIP`，从固定 `attachments/` 安全生成确定性 ZIP/manifest，并交付持久 gate、幂等恢复、
+权限、过期清理、hash/size、流式下载与 actor-bound Audit。三类真实数据共同关闭 AC-33。
+评测结果和审计摘要仍未交付；`EVALUATION_JSON`、`AUDIT_JSON` 没有正式内容源。
 
 #### 10.22.6 数据清理
 
@@ -3478,15 +3480,18 @@ Tool Call：
 - view_config。
 - cached_result_version。
 
-#### 13.8.1 Smart Collection Export Job
+#### 13.8.1 Export Job
 
-- id、Workspace、Collection ID/version 和 query hash。
-- kind（当前仅 `MARKDOWN|METADATA_JSON`）、schema version、字段白名单、脱敏策略、请求 TTL 与幂等 binding。
-- lifecycle/version/lease、frozen read-model revision、exact count、prepared result hash/size 与受控文件 binding。
-- download count/time、到期/cleanup 状态和 append-only 下载 Audit binding。
+- id、Workspace、`scope_kind=COLLECTION|WORKSPACE_ATTACHMENTS`。
+- Collection scope 绑定 Collection ID/version、query hash、`MARKDOWN|METADATA_JSON`、`export/v1`、fields 与脱敏策略。
+- Workspace attachment scope 禁止 Collection binding，只接受 `ATTACHMENTS_ZIP`、`attachment-export/v1`、
+  `workspace-attachments/v1` 与 `RAW_USER_OWNED`。
+- lifecycle/version/lease、请求 TTL/幂等、prepared path/hash/size；Collection 冻结 read-model revision/exact count，
+  附件冻结 manifest hash、entry count 和 total bytes。
+- download count/time、到期/cleanup 状态、持久 capability gate 和 append-only 下载 Audit binding。
 
-prepared result 之后不得重新读取 Collection 生成另一份结果；到期只删除受控物理文件，不删除 Job 或 Audit。
-附件、`EVALUATION_JSON`、`AUDIT_JSON` 不是该已交付模型的 kind。
+prepared result 之后不得重新读取 Collection 或附件源生成另一份结果；到期只删除受控生成物，不删除源附件、
+Job 或 Audit。`EVALUATION_JSON`、`AUDIT_JSON` 仍不是已交付 kind。
 
 ### 13.9 Health Issue
 
@@ -3703,7 +3708,7 @@ M7-01 已交付的接口是只读 Query：全局 Topic 聚类、Topic/Claim 服�
 - 执行分页查询。
 - 创建基于 Collection 的工作流。
 - 创建、列表、查询和下载绑定当前 Collection 的异步 `MARKDOWN|METADATA_JSON` Export Job；Export 不新增独立导航，
-  且附件/评测/审计内容导出仍由后续接口负责。
+  附件由 Settings 下独立 Workspace `ATTACHMENTS_ZIP` 接口负责；评测/审计内容导出仍由后续接口负责。
 
 ### 14.9 Health 接口能力
 
@@ -4566,10 +4571,9 @@ Workflow、Settings，以及每个 Active Workspace 唯一 SSE Owner。Inbox/详
 索引和 Workflow 事实，不能假称正式 Document 或伪造标准化正文。Proposal 支持 `file_patch|knowledge_change`、
 File/Relation Diff、证据、风险、回滚、批准/驳回、Hash/Version conflict 和 Approval 后 Apply Preflight；编辑后批准、
 三方合并、暂缓、批量审批和请求重分析仍未交付。Workflow 页面只展示公共 Run 字段和允许的 pause/resume/cancel；
-Node/Tool/Token 明细、Settings Secret 保存/导出/危险清理没有正式接口时必须显示 unavailable。M9-03 异步导出、
-脱敏、权限/过期与结果追踪已在 Collection Export Panel 闭环：当前只支持 Smart Collection `MARKDOWN` 与
-`METADATA_JSON`，并保留刷新恢复、下载 Audit 和到期清理。附件、`EVALUATION_JSON`、`AUDIT_JSON` 内容导出仍是
-后续任务，不能把该面板或 AC-33 标记为全量完成。
+Node/Tool/Token 明细、Settings Secret 保存/导出/危险清理没有正式接口时必须显示 unavailable。Collection Export Panel
+支持 `MARKDOWN|METADATA_JSON`；Settings 数据导出支持独立 Workspace `ATTACHMENTS_ZIP`，并保留刷新/重启恢复、
+下载 Audit、过期清理和源附件不变。三类能力关闭 AC-33；`EVALUATION_JSON|AUDIT_JSON` 内容导出仍是后续任务。
 
 ### 21.16 全局视觉与交互要求
 
@@ -4630,7 +4634,7 @@ Node/Tool/Token 明细、Settings Secret 保存/导出/危险清理没有正式�
 | AC-30 | Security | 路径穿越、Prompt Injection、SSRF 和 Secret 泄漏测试通过 |
 | AC-31 | Capacity | 在容量基线下检索和局部图谱达到性能目标 |
 | AC-32 | Deployment | Docker Compose 可启动 API、Worker、PostgreSQL 和依赖服务 |
-| AC-33 | Export（部分完成） | Smart Collection Markdown、领域 Metadata JSON 已交付；附件导出仍未完成 |
+| AC-33 | Export（完成） | Smart Collection Markdown、领域 Metadata JSON 与 Workspace 附件 ZIP 均已通过真实 API/Worker/PostgreSQL/Vite 验收 |
 | AC-34 | Recovery | 数据库、Git 和文件状态不一致时进入只读恢复状态 |
 | AC-35 | Lifecycle | Document 和 Topic 的重命名、移动、拆分、合并、归档和删除均通过 Proposal |
 | AC-36 | Conflict | 冲突可调查、条件化解决、保留历史并触发下游影响分析 |

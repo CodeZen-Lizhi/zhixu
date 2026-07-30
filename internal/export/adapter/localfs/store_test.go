@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,9 +42,9 @@ func TestStoreWritesReadsAndDeletesBoundExport(t *testing.T) {
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 		t.Fatalf("export mode=%v err=%v", info.Mode(), err)
 	}
-	read, err := store.Read(context.Background(), testWorkspaceID, relative, hash, size)
-	if err != nil || string(read) != string(payload) {
-		t.Fatalf("Read()=%q err=%v", read, err)
+	read := readStorePayload(t, store, relative, hash, size)
+	if string(read) != string(payload) {
+		t.Fatalf("Open()=%q", read)
 	}
 	if _, _, _, err := store.Write(context.Background(), testWorkspaceID, relative, payload); err != nil {
 		t.Fatalf("idempotent Write() error=%v", err)
@@ -73,8 +75,9 @@ func TestStoreRejectsTamperingUnsafePathsAndSymlinkDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(relative)), []byte("{\"no\":true}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Read(context.Background(), testWorkspaceID, relative, hash, size); err == nil {
-		t.Fatal("Read() accepted tampered export")
+	if reader, err := store.Open(context.Background(), testWorkspaceID, relative, hash, size); err == nil {
+		_ = reader.Close()
+		t.Fatal("Open() accepted tampered export")
 	}
 	for _, candidate := range []string{"/tmp/export.md", ".knowledge/exports/../escape.md", ".knowledge/exports/not-a-uuid.md", ".knowledge/exports/" + string(testExportID) + ".csv"} {
 		if _, _, _, err := store.Write(context.Background(), testWorkspaceID, candidate, payload); err == nil {
@@ -93,6 +96,132 @@ func TestStoreRejectsTamperingUnsafePathsAndSymlinkDirectory(t *testing.T) {
 	symlinkStore := newTestStore(t, symlinkRoot)
 	if _, _, _, err := symlinkStore.Write(context.Background(), testWorkspaceID, relative, payload); err == nil {
 		t.Fatal("Write() accepted a symlink export directory")
+	}
+}
+
+func TestStoreRejectsWorkspaceRootReplacementAfterLstat(t *testing.T) {
+	root := canonicalTempDir(t)
+	store := newTestStore(t, root)
+	outside := canonicalTempDir(t)
+	store.secureHook.afterWorkspaceLstat = func() {
+		store.secureHook.afterWorkspaceLstat = nil
+		if err := os.Rename(root, root+"-original"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relative := ".knowledge/exports/" + string(testExportID) + ".md"
+	if _, _, _, err := store.Write(context.Background(), testWorkspaceID, relative, []byte("never outside\n")); err == nil {
+		t.Fatal("Write accepted a workspace root replaced after Lstat")
+	}
+	if _, err := os.Lstat(filepath.Join(outside, ".knowledge")); !os.IsNotExist(err) {
+		t.Fatalf("workspace replacement wrote outside the pinned root: %v", err)
+	}
+}
+
+func TestStoreManagedAncestorSymlinkNeverTouchesOutsideSentinel(t *testing.T) {
+	root := canonicalTempDir(t)
+	store := newTestStore(t, root)
+	prepared, err := store.Stage(context.Background(), testWorkspaceID, testExportID, ".md", []byte("managed\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := canonicalTempDir(t)
+	if err := os.MkdirAll(filepath.Join(outside, "exports", ".staging"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(outside, "exports", ".staging", filepath.Base(prepared.StagingPath))
+	if err := os.WriteFile(sentinel, []byte("outside sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	knowledge := filepath.Join(root, ".knowledge")
+	if err := os.Rename(knowledge, knowledge+"-original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, knowledge); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeletePrepared(context.Background(), testWorkspaceID, prepared.StagingPath, prepared.FileHash, prepared.FileSize); err == nil {
+		t.Fatal("DeletePrepared accepted a redirected managed ancestor")
+	}
+	payload, err := os.ReadFile(sentinel)
+	if err != nil || string(payload) != "outside sentinel" {
+		t.Fatalf("redirected cleanup touched outside sentinel: payload=%q err=%v", payload, err)
+	}
+}
+
+func TestStoreDeletePreparedPinsManagedDirectoryAcrossOrdinaryReplacement(t *testing.T) {
+	root := canonicalTempDir(t)
+	store := newTestStore(t, root)
+	prepared, err := store.Stage(context.Background(), testWorkspaceID, testExportID, ".md", []byte("managed\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sentinel string
+	store.secureHook.afterManagedVerify = func() {
+		store.secureHook.afterManagedVerify = nil
+		sentinel = replaceExportsWithOrdinaryDirectory(t, root, filepath.Base(prepared.StagingPath))
+	}
+	err = store.DeletePrepared(context.Background(), testWorkspaceID, prepared.StagingPath, prepared.FileHash, prepared.FileSize)
+	assertUnsafeManagedError(t, err)
+	payload, readErr := os.ReadFile(sentinel)
+	if readErr != nil || string(payload) != "replacement sentinel" {
+		t.Fatalf("ordinary replacement cleanup touched sentinel: payload=%q err=%v", payload, readErr)
+	}
+}
+
+func TestStorePromotePinsBothDirectoriesAcrossOrdinaryReplacement(t *testing.T) {
+	root := canonicalTempDir(t)
+	store := newTestStore(t, root)
+	prepared, err := store.Stage(context.Background(), testWorkspaceID, testExportID, ".md", []byte("managed\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sentinel string
+	store.secureHook.afterManagedVerify = func() {
+		store.secureHook.afterManagedVerify = nil
+		sentinel = replaceExportsWithOrdinaryDirectory(t, root, filepath.Base(prepared.FinalPath))
+	}
+	err = store.Promote(context.Background(), testWorkspaceID, prepared)
+	assertUnsafeManagedError(t, err)
+	payload, readErr := os.ReadFile(sentinel)
+	if readErr != nil || string(payload) != "replacement sentinel" {
+		t.Fatalf("ordinary replacement publish touched sentinel: payload=%q err=%v", payload, readErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, ".knowledge", "exports", filepath.Base(prepared.FinalPath))); !os.IsNotExist(statErr) {
+		t.Fatalf("ordinary replacement received a promoted final: %v", statErr)
+	}
+}
+
+func TestStoreRejectsManagedComponentReplacementBetweenLstatAndOpen(t *testing.T) {
+	for _, component := range []string{".knowledge", "exports", ".staging"} {
+		t.Run(component, func(t *testing.T) {
+			root := canonicalTempDir(t)
+			store := newTestStore(t, root)
+			prepared, err := store.Stage(context.Background(), testWorkspaceID, testExportID, ".md", []byte("managed\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sentinel string
+			store.secureHook.afterChildLstat = func(name string) {
+				if name != component {
+					return
+				}
+				store.secureHook.afterChildLstat = nil
+				sentinel = replaceManagedComponentWithOrdinaryDirectory(t, root, component)
+			}
+			err = store.DeletePrepared(context.Background(), testWorkspaceID, prepared.StagingPath, prepared.FileHash, prepared.FileSize)
+			assertUnsafeManagedError(t, err)
+			if sentinel == "" {
+				t.Fatal("managed component replacement barrier was not reached")
+			}
+			payload, readErr := os.ReadFile(sentinel)
+			if readErr != nil || string(payload) != "replacement sentinel" {
+				t.Fatalf("replacement component was touched: payload=%q err=%v", payload, readErr)
+			}
+		})
 	}
 }
 
@@ -121,6 +250,70 @@ func TestStoreDeletePreparedPreservesMismatchedFile(t *testing.T) {
 	}
 }
 
+func TestStoreDeletePreparedPreservesReplacementIntroducedAfterVerification(t *testing.T) {
+	root := canonicalTempDir(t)
+	store := newTestStore(t, root)
+	prepared, err := store.Stage(context.Background(), testWorkspaceID, testExportID, ".md", []byte("expected"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedPath := filepath.Join(root, filepath.FromSlash(prepared.StagingPath))
+	originalEvidence := preparedPath + ".original"
+	store.secureHook.afterManagedVerify = func() {
+		store.secureHook.afterManagedVerify = nil
+		if err := os.Rename(preparedPath, originalEvidence); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(preparedPath, []byte("replaced"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := store.DeletePrepared(context.Background(), testWorkspaceID, prepared.StagingPath, prepared.FileHash, prepared.FileSize); err == nil {
+		t.Fatal("DeletePrepared accepted a replacement introduced after verification")
+	}
+	content, err := os.ReadFile(preparedPath)
+	if err != nil || string(content) != "replaced" {
+		t.Fatalf("replacement was not restored: content=%q err=%v", content, err)
+	}
+	content, err = os.ReadFile(originalEvidence)
+	if err != nil || string(content) != "expected" {
+		t.Fatalf("original evidence was changed: content=%q err=%v", content, err)
+	}
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(preparedPath), "."+filepath.Base(preparedPath)+".*.delete"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("cleanup left a quarantine file: matches=%v err=%v", matches, err)
+	}
+}
+
+func TestStoreDeletePreparedRemovesVerifiedQuarantineWhenPathIsRecreated(t *testing.T) {
+	root := canonicalTempDir(t)
+	store := newTestStore(t, root)
+	prepared, err := store.Stage(context.Background(), testWorkspaceID, testExportID, ".md", []byte("expected"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedPath := filepath.Join(root, filepath.FromSlash(prepared.StagingPath))
+	store.secureHook.afterPreparedVerify = func() {
+		store.secureHook.afterPreparedVerify = nil
+		if err := os.WriteFile(preparedPath, []byte("replacement"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := store.DeletePrepared(context.Background(), testWorkspaceID, prepared.StagingPath, prepared.FileHash, prepared.FileSize); err == nil {
+		t.Fatal("DeletePrepared accepted a path recreated after isolation")
+	}
+	content, err := os.ReadFile(preparedPath)
+	if err != nil || string(content) != "replacement" {
+		t.Fatalf("replacement was changed: content=%q err=%v", content, err)
+	}
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(preparedPath), "."+filepath.Base(preparedPath)+".*.delete"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("cleanup leaked verified quarantine: matches=%v err=%v", matches, err)
+	}
+}
+
 func TestStoreStagesAndPromotesRecoverably(t *testing.T) {
 	root := canonicalTempDir(t)
 	store := newTestStore(t, root)
@@ -140,9 +333,9 @@ func TestStoreStagesAndPromotesRecoverably(t *testing.T) {
 	if !stagedInfo.Mode().IsRegular() || stagedInfo.Mode().Perm() != 0o600 {
 		t.Fatalf("staging mode=%v", stagedInfo.Mode())
 	}
-	staged, err := store.Read(context.Background(), testWorkspaceID, prepared.StagingPath, prepared.FileHash, prepared.FileSize)
-	if err != nil || string(staged) != string(payload) {
-		t.Fatalf("Read(staging)=%q err=%v", staged, err)
+	staged := readStorePayload(t, store, prepared.StagingPath, prepared.FileHash, prepared.FileSize)
+	if string(staged) != string(payload) {
+		t.Fatalf("Open(staging)=%q", staged)
 	}
 
 	if err := store.Promote(context.Background(), testWorkspaceID, prepared); err != nil {
@@ -151,9 +344,9 @@ func TestStoreStagesAndPromotesRecoverably(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(prepared.StagingPath))); !os.IsNotExist(err) {
 		t.Fatalf("staging remains after Promote(): %v", err)
 	}
-	final, err := store.Read(context.Background(), testWorkspaceID, prepared.FinalPath, prepared.FileHash, prepared.FileSize)
-	if err != nil || string(final) != string(payload) {
-		t.Fatalf("Read(final)=%q err=%v", final, err)
+	final := readStorePayload(t, store, prepared.FinalPath, prepared.FileHash, prepared.FileSize)
+	if string(final) != string(payload) {
+		t.Fatalf("Open(final)=%q", final)
 	}
 	if err := store.Promote(context.Background(), testWorkspaceID, prepared); err != nil {
 		t.Fatalf("recovered Promote() error=%v", err)
@@ -271,8 +464,9 @@ func TestStoreReadsDeletesAndListsOnlySafeStagingFiles(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, filepath.FromSlash(second.StagingPath))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Read(context.Background(), testWorkspaceID, second.StagingPath, second.FileHash, second.FileSize); err == nil {
-		t.Fatal("Read() accepted a staging symlink")
+	if reader, err := store.Open(context.Background(), testWorkspaceID, second.StagingPath, second.FileHash, second.FileSize); err == nil {
+		_ = reader.Close()
+		t.Fatal("Open() accepted a staging symlink")
 	}
 	if err := store.DeleteOrphan(context.Background(), testWorkspaceID, second.StagingPath); err == nil {
 		t.Fatal("DeleteOrphan() accepted a staging symlink")
@@ -298,4 +492,68 @@ func newTestStore(t *testing.T, root string) *Store {
 		t.Fatal(err)
 	}
 	return store
+}
+
+func readStorePayload(t *testing.T, store *Store, relativePath, expectedHash string, expectedSize int64) []byte {
+	t.Helper()
+	reader, err := store.Open(context.Background(), testWorkspaceID, relativePath, expectedHash, expectedSize)
+	if err != nil {
+		t.Fatalf("Open(%q) error=%v", relativePath, err)
+	}
+	defer reader.Close()
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read Open(%q): %v", relativePath, err)
+	}
+	return payload
+}
+
+func replaceExportsWithOrdinaryDirectory(t *testing.T, root, sentinelName string) string {
+	t.Helper()
+	exports := filepath.Join(root, ".knowledge", "exports")
+	if err := os.Rename(exports, exports+"-original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(exports, ".staging"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(exports, ".staging", sentinelName)
+	if err := os.WriteFile(sentinel, []byte("replacement sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return sentinel
+}
+
+func replaceManagedComponentWithOrdinaryDirectory(t *testing.T, root, component string) string {
+	t.Helper()
+	var target string
+	switch component {
+	case ".knowledge":
+		target = filepath.Join(root, ".knowledge")
+	case "exports":
+		target = filepath.Join(root, ".knowledge", "exports")
+	case ".staging":
+		target = filepath.Join(root, ".knowledge", "exports", ".staging")
+	default:
+		t.Fatalf("unsupported managed component %q", component)
+	}
+	if err := os.Rename(target, target+"-lstat-original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(target, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("replacement sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return sentinel
+}
+
+func assertUnsafeManagedError(t *testing.T, err error) {
+	t.Helper()
+	var classified *foundation.Error
+	if err == nil || !errors.As(err, &classified) || classified.Code != filePathUnsafeCode || classified.Retryable {
+		t.Fatalf("managed replacement error=%v classified=%#v", err, classified)
+	}
 }

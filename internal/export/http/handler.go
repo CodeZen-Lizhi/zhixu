@@ -37,9 +37,9 @@ const (
 // Service 是 Export HTTP 边界所需的应用能力。
 type Service interface {
 	Create(context.Context, domain.CreateRequest) (exportapp.CreateResult, error)
-	Get(context.Context, foundation.ID, foundation.ID) (domain.Job, error)
+	GetForScope(context.Context, foundation.ID, foundation.ID, domain.ScopeKind) (domain.Job, error)
 	List(context.Context, exportapp.ListQuery) (exportapp.ListPage, error)
-	DownloadAs(context.Context, foundation.ID, foundation.ID, exportapp.DownloadActor) (domain.Job, []byte, error)
+	DownloadAsForScope(context.Context, foundation.ID, foundation.ID, domain.ScopeKind, exportapp.DownloadActor) (domain.Job, io.ReadCloser, error)
 }
 
 // Handler 将 Export application 映射为 Workspace-scoped REST 资源。
@@ -62,6 +62,10 @@ func (handler *Handler) Routes(router chi.Router) {
 	router.Get("/exports/{export_id}", handler.get)
 	router.Get("/exports/{export_id}/download", handler.download)
 	router.Get("/workspaces/{workspace_id}/exports", handler.list)
+	router.Post("/workspaces/{workspace_id}/attachment-exports", handler.createAttachment)
+	router.Get("/workspaces/{workspace_id}/attachment-exports", handler.listAttachments)
+	router.Get("/workspaces/{workspace_id}/attachment-exports/{export_id}", handler.getAttachment)
+	router.Get("/workspaces/{workspace_id}/attachment-exports/{export_id}/download", handler.downloadAttachment)
 }
 
 type createRequest struct {
@@ -163,7 +167,7 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 	ctx, cancel := context.WithTimeout(request.Context(), handler.timeout)
 	defer cancel()
 	result, err := handler.service.Create(ctx, domain.CreateRequest{
-		WorkspaceID: workspaceID, Kind: input.Kind, Scope: domain.Scope{CollectionID: &collectionID, CollectionVersion: &input.CollectionVersion, QueryHash: input.QueryHash},
+		WorkspaceID: workspaceID, Kind: input.Kind, Scope: domain.Scope{Kind: domain.ScopeCollection, CollectionID: &collectionID, CollectionVersion: &input.CollectionVersion, QueryHash: input.QueryHash},
 		Fields: input.Fields, Redaction: input.RedactionPolicy, IncludeSensitive: input.IncludeSensitive,
 		IdempotencyKey: key, RequestedBy: requestedBy, PermissionScope: permissionScope, ExpiresIn: expiresIn,
 	})
@@ -197,7 +201,7 @@ func (handler *Handler) get(writer http.ResponseWriter, request *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), handler.timeout)
 	defer cancel()
-	job, err := handler.service.Get(ctx, workspaceID, exportID)
+	job, err := handler.service.GetForScope(ctx, workspaceID, exportID, domain.ScopeCollection)
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -246,7 +250,7 @@ func (handler *Handler) list(writer http.ResponseWriter, request *http.Request) 
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), handler.timeout)
 	defer cancel()
-	page, err := handler.service.List(ctx, exportapp.ListQuery{WorkspaceID: workspaceID, CollectionID: &collectionID, Limit: limit, Cursor: cursor})
+	page, err := handler.service.List(ctx, exportapp.ListQuery{WorkspaceID: workspaceID, ScopeKind: domain.ScopeCollection, CollectionID: &collectionID, Limit: limit, Cursor: cursor})
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -284,19 +288,22 @@ func (handler *Handler) download(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), handler.timeout)
-	defer cancel()
 	actor, err := downloadActor(request.Context())
 	if err != nil {
 		writeError(writer, err)
 		return
 	}
-	job, payload, err := handler.service.DownloadAs(ctx, workspaceID, exportID, actor)
+	job, content, err := handler.service.DownloadAsForScope(request.Context(), workspaceID, exportID, domain.ScopeCollection, actor)
 	if err != nil {
 		writeError(writer, err)
 		return
 	}
-	if err := validateJobResult(job, workspaceID, exportID); err != nil || job.Status != domain.StatusSucceeded || int64(len(payload)) != job.FileSize {
+	if content == nil {
+		writeError(writer, invalidResult("export download returned a nil result stream"))
+		return
+	}
+	defer content.Close()
+	if err := validateJobResult(job, workspaceID, exportID); err != nil || job.Status != domain.StatusSucceeded {
 		if err == nil {
 			err = invalidResult("export download returned an inconsistent result")
 		}
@@ -310,11 +317,11 @@ func (handler *Handler) download(writer http.ResponseWriter, request *http.Reque
 	filename := fmt.Sprintf("collection-%s-%s.%s", dereferenceID(job.Scope.CollectionID), job.ID, extension)
 	writer.Header().Set("Content-Type", contentType)
 	writer.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-	writer.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+	writer.Header().Set("Content-Length", strconv.FormatInt(job.FileSize, 10))
 	writer.Header().Set("Cache-Control", "private, no-store")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	writer.WriteHeader(http.StatusOK)
-	_, _ = writer.Write(payload)
+	_, _ = io.CopyN(writer, content, job.FileSize)
 }
 
 func decodeCreateRequest(request *http.Request) (createRequest, error) {
@@ -506,6 +513,9 @@ func writeError(writer http.ResponseWriter, err error) {
 	}
 	if classified.Code == domain.ErrorCodeExpired {
 		status = http.StatusGone
+	}
+	if classified.Code == domain.ErrorCodeResultInvalid {
+		status = http.StatusInternalServerError
 	}
 	message := "导出请求处理失败"
 	switch status {

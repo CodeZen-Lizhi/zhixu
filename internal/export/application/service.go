@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -18,27 +19,29 @@ import (
 
 const (
 	// SchemaVersionV1 是导出 JSON/Markdown envelope 的稳定版本。
-	SchemaVersionV1    = "export/v1"
-	DefaultTTL         = 24 * time.Hour
-	MaxTTL             = 7 * 24 * time.Hour
-	DefaultListLimit   = 50
-	MaxListLimit       = 100
-	DefaultLease       = 2 * time.Minute
-	MaxSnapshotItems   = 10_000
-	DefaultOrphanGrace = 15 * time.Minute
+	SchemaVersionV1                = "export/v1"
+	DefaultTTL                     = 24 * time.Hour
+	MaxTTL                         = 7 * 24 * time.Hour
+	DefaultListLimit               = 50
+	MaxListLimit                   = 100
+	DefaultLease                   = 2 * time.Minute
+	MaxSnapshotItems               = 10_000
+	DefaultOrphanGrace             = 15 * time.Minute
+	attachmentLimitContractVersion = "attachment-limits/v1"
 )
 
 // Dependencies 是导出应用服务的显式依赖。
 type Dependencies struct {
-	Repository Repository
-	Dispatcher Dispatcher
-	Snapshots  SnapshotReader
-	Workspaces WorkspaceReader
-	Files      FileStore
-	Authorizer Authorizer
-	IDs        foundation.IDGenerator
-	Clock      foundation.Clock
-	Lease      time.Duration
+	Repository  Repository
+	Dispatcher  Dispatcher
+	Snapshots   SnapshotReader
+	Workspaces  WorkspaceReader
+	Files       FileStore
+	Attachments AttachmentArchiver
+	Authorizer  Authorizer
+	IDs         foundation.IDGenerator
+	Clock       foundation.Clock
+	Lease       time.Duration
 }
 
 // Service 编排导出任务创建、执行、下载和恢复。
@@ -108,6 +111,21 @@ func (s *Service) Get(ctx context.Context, workspaceID, jobID foundation.ID) (do
 	return job, nil
 }
 
+// GetForScope 返回绑定到指定公开 scope 的任务；错 scope 与不存在统一为 NotFound，避免跨入口枚举。
+func (s *Service) GetForScope(ctx context.Context, workspaceID, jobID foundation.ID, scopeKind domain.ScopeKind) (domain.Job, error) {
+	if scopeKind != domain.ScopeCollection && scopeKind != domain.ScopeWorkspaceAttachments {
+		return domain.Job{}, invalid(errors.New("export scope kind is invalid"))
+	}
+	job, err := s.Get(ctx, workspaceID, jobID)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	if job.Scope.Kind != scopeKind {
+		return domain.Job{}, notFound(errors.New("export job does not belong to the requested scope"))
+	}
+	return job, nil
+}
+
 // List 返回 Workspace 内稳定、有界的任务页面。
 func (s *Service) List(ctx context.Context, query ListQuery) (ListPage, error) {
 	if err := validContext(ctx); err != nil {
@@ -117,7 +135,9 @@ func (s *Service) List(ctx context.Context, query ListQuery) (ListPage, error) {
 		query.Limit = DefaultListLimit
 	}
 	if !validID(query.WorkspaceID) || query.Limit < 1 || query.Limit > MaxListLimit || len(query.Cursor) > 4096 ||
-		(query.CollectionID != nil && !validID(*query.CollectionID)) {
+		(query.ScopeKind != domain.ScopeCollection && query.ScopeKind != domain.ScopeWorkspaceAttachments) ||
+		(query.CollectionID != nil && !validID(*query.CollectionID)) ||
+		(query.ScopeKind == domain.ScopeCollection) != (query.CollectionID != nil) {
 		return ListPage{}, invalid(errors.New("export list query is invalid"))
 	}
 	page, err := s.dependencies.Repository.List(ctx, query)
@@ -128,7 +148,7 @@ func (s *Service) List(ctx context.Context, query ListQuery) (ListPage, error) {
 		return ListPage{}, resultInvalid(errors.New("export list exceeded requested limit"))
 	}
 	for _, job := range page.Items {
-		if job.WorkspaceID != query.WorkspaceID || job.Validate() != nil ||
+		if job.WorkspaceID != query.WorkspaceID || job.Scope.Kind != query.ScopeKind || job.Validate() != nil ||
 			(query.CollectionID != nil && (job.Scope.CollectionID == nil || *job.Scope.CollectionID != *query.CollectionID)) {
 			return ListPage{}, resultInvalid(errors.New("export list crossed workspace binding"))
 		}
@@ -170,6 +190,9 @@ func (s *Service) Execute(ctx context.Context, workspaceID, jobID foundation.ID,
 	if claimed.IsPrepared() {
 		return s.completePrepared(executionCtx, claimed, owner)
 	}
+	if claimed.Scope.Kind == domain.ScopeWorkspaceAttachments {
+		return s.executeAttachments(executionCtx, claimed, owner)
+	}
 	snapshot, err := s.dependencies.Snapshots.ReadCollection(executionCtx, claimed.WorkspaceID, claimed.Scope, MaxSnapshotItems)
 	if err != nil {
 		return s.failExecution(executionCtx, claimed, owner, err)
@@ -200,10 +223,39 @@ func (s *Service) Execute(ctx context.Context, workspaceID, jobID foundation.ID,
 	if prepared.Status == domain.StatusExpired {
 		return nil
 	}
-	if err := validatePreparedJob(prepared, preparedFile, snapshot.ReadModelRevision, snapshot.ExactCount, owner); err != nil {
+	if err := validatePreparedJob(prepared, PrepareRequest{ReadModelRevision: snapshot.ReadModelRevision, ExactCount: snapshot.ExactCount, PreparedFile: preparedFile}, owner); err != nil {
 		return resultInvalid(err)
 	}
 	return s.completePrepared(executionCtx, prepared, owner)
+}
+
+func (s *Service) executeAttachments(ctx context.Context, claimed domain.Job, owner string) error {
+	if s.dependencies.Attachments == nil {
+		return s.failExecution(ctx, claimed, owner, unavailable(errors.New("attachment archiver is unavailable")))
+	}
+	archive, err := s.dependencies.Attachments.StageAttachments(ctx, claimed.WorkspaceID, claimed.ID)
+	if err != nil {
+		return s.failExecution(ctx, claimed, owner, err)
+	}
+	if err := validateAttachmentArchive(archive, claimed.ID); err != nil {
+		return s.failExecution(ctx, claimed, owner, err)
+	}
+	request := PrepareRequest{
+		WorkspaceID: claimed.WorkspaceID, JobID: claimed.ID, LeaseOwner: owner, ExpectedVersion: claimed.Version,
+		ManifestHash: archive.ManifestHash, EntryCount: archive.EntryCount,
+		TotalUncompressedBytes: archive.TotalUncompressedBytes, PreparedFile: archive.PreparedFile,
+	}
+	prepared, err := s.dependencies.Repository.Prepare(ctx, request)
+	if err != nil {
+		return err
+	}
+	if prepared.Status == domain.StatusExpired {
+		return nil
+	}
+	if err := validatePreparedJob(prepared, request, owner); err != nil {
+		return resultInvalid(err)
+	}
+	return s.completePrepared(ctx, prepared, owner)
 }
 
 func (s *Service) completePrepared(ctx context.Context, job domain.Job, owner string) error {
@@ -233,45 +285,64 @@ func (s *Service) completePrepared(ctx context.Context, job domain.Job, owner st
 	return nil
 }
 
-// Download 校验生命周期和 hash 后读取结果；仅供兼容内部调用，生产 HTTP 必须使用 DownloadAs 传入当前主体。
-func (s *Service) Download(ctx context.Context, workspaceID, jobID foundation.ID) (domain.Job, []byte, error) {
+// Download 校验生命周期和 hash 后打开结果流；仅供兼容内部调用，生产 HTTP 必须使用 DownloadAs 传入当前主体。
+func (s *Service) Download(ctx context.Context, workspaceID, jobID foundation.ID) (domain.Job, io.ReadCloser, error) {
 	return s.DownloadAs(ctx, workspaceID, jobID, DownloadActor{Type: auditdomain.ActorSystem, Ref: "export-service-compat"})
 }
 
 // DownloadAs 校验固定结果，并在同一 PostgreSQL 事务中记录下载统计和当前主体 Audit。
-func (s *Service) DownloadAs(ctx context.Context, workspaceID, jobID foundation.ID, actor DownloadActor) (domain.Job, []byte, error) {
+func (s *Service) DownloadAs(ctx context.Context, workspaceID, jobID foundation.ID, actor DownloadActor) (domain.Job, io.ReadCloser, error) {
 	job, err := s.Get(ctx, workspaceID, jobID)
 	if err != nil {
 		return domain.Job{}, nil, err
 	}
+	return s.downloadJobAs(ctx, job, actor)
+}
+
+// DownloadAsForScope 仅下载指定公开 scope 的任务，并在文件读取与 Audit 副作用前拒绝错 scope ID。
+func (s *Service) DownloadAsForScope(ctx context.Context, workspaceID, jobID foundation.ID, scopeKind domain.ScopeKind, actor DownloadActor) (domain.Job, io.ReadCloser, error) {
+	job, err := s.GetForScope(ctx, workspaceID, jobID, scopeKind)
+	if err != nil {
+		return domain.Job{}, nil, err
+	}
+	return s.downloadJobAs(ctx, job, actor)
+}
+
+func (s *Service) downloadJobAs(ctx context.Context, job domain.Job, actor DownloadActor) (domain.Job, io.ReadCloser, error) {
 	if job.Status == domain.StatusExpired {
 		return domain.Job{}, nil, expired(errors.New("export result has expired"))
 	}
 	if job.Status != domain.StatusSucceeded {
 		return domain.Job{}, nil, foundation.NewError(foundation.ErrorVersionConflict, "EXPORT_RESULT_NOT_READY", true, errors.New("export result is not ready"))
 	}
-	content, err := s.dependencies.Files.Read(ctx, workspaceID, job.FilePath, job.FileHash, job.FileSize)
+	content, err := s.dependencies.Files.Open(ctx, job.WorkspaceID, job.FilePath, job.FileHash, job.FileSize)
 	if err != nil {
 		return domain.Job{}, nil, resultInvalid(err)
+	}
+	if content == nil {
+		return domain.Job{}, nil, resultInvalid(errors.New("export file store returned a nil result stream"))
+	}
+	closeWith := func(cause error) (domain.Job, io.ReadCloser, error) {
+		return domain.Job{}, nil, errors.Join(cause, content.Close())
 	}
 	auditEventID, err := s.dependencies.IDs.New()
 	if err != nil {
-		return domain.Job{}, nil, unavailable(err)
+		return closeWith(unavailable(err))
 	}
 	updated, err := s.dependencies.Repository.RecordDownload(ctx, DownloadRecord{
-		WorkspaceID: workspaceID, JobID: jobID, AuditEventID: auditEventID,
-		Actor: actor, FileHash: job.FileHash, FileSize: job.FileSize,
+		WorkspaceID: job.WorkspaceID, JobID: job.ID, AuditEventID: auditEventID,
+		Actor: actor, ScopeKind: job.Scope.Kind, EntryCount: cloneInt64(job.EntryCount), FileHash: job.FileHash, FileSize: job.FileSize,
 	})
 	if err != nil {
-		return domain.Job{}, nil, err
+		return closeWith(err)
 	}
 	if err := updated.Validate(); err != nil {
-		return domain.Job{}, nil, resultInvalid(err)
+		return closeWith(resultInvalid(err))
 	}
-	if updated.WorkspaceID != workspaceID || updated.ID != jobID || updated.Status != domain.StatusSucceeded ||
+	if updated.WorkspaceID != job.WorkspaceID || updated.ID != job.ID || updated.Status != domain.StatusSucceeded ||
 		updated.Version <= job.Version || updated.DownloadCount <= job.DownloadCount ||
 		updated.FileHash != job.FileHash || updated.FileSize != job.FileSize {
-		return domain.Job{}, nil, resultInvalid(errors.New("export download transaction returned an inconsistent projection"))
+		return closeWith(resultInvalid(errors.New("export download transaction returned an inconsistent projection")))
 	}
 	return updated, content, nil
 }
@@ -459,7 +530,7 @@ func (s *Service) buildJob(ctx context.Context, request domain.CreateRequest) (d
 	requestHash := canonicalRequestHash(request, ttlSeconds)
 	job := domain.Job{
 		ID: id, WorkspaceID: request.WorkspaceID, Kind: request.Kind, SchemaVersion: request.SchemaVersion,
-		Scope: request.Scope, Fields: append([]domain.Field(nil), request.Fields...), Redaction: request.Redaction,
+		Scope: request.Scope, Fields: append([]domain.Field{}, request.Fields...), Redaction: request.Redaction,
 		IncludeSensitive: request.IncludeSensitive, PermissionScope: request.PermissionScope, RequestedBy: request.RequestedBy,
 		IdempotencyKey: request.IdempotencyKey, RequestHash: requestHash, RequestTTLSeconds: ttlSeconds,
 		Status: domain.StatusPending, Version: 1, ExpiresAt: now.Add(request.ExpiresIn), CreatedAt: now, UpdatedAt: now,
@@ -560,25 +631,25 @@ func ComputeRequestHash(request domain.CreateRequest) (string, error) {
 }
 
 func normalizeCreateRequest(request domain.CreateRequest) (domain.CreateRequest, int64, error) {
-	if !validID(request.WorkspaceID) || (request.Kind != domain.KindMarkdown && request.Kind != domain.KindMetadataJSON) ||
+	if !validID(request.WorkspaceID) || !domain.ValidKind(request.Kind) ||
 		strings.TrimSpace(request.IdempotencyKey) == "" || request.IdempotencyKey != strings.TrimSpace(request.IdempotencyKey) ||
 		len(request.IdempotencyKey) > 128 || strings.ContainsAny(request.IdempotencyKey, "\r\n\x00") {
 		return domain.CreateRequest{}, 0, invalid(errors.New("export request identity or kind is invalid"))
 	}
-	if request.SchemaVersion == "" {
-		request.SchemaVersion = SchemaVersionV1
-	}
-	if request.SchemaVersion != SchemaVersionV1 {
-		return domain.CreateRequest{}, 0, invalid(errors.New("unsupported export schema version"))
-	}
-	if request.Redaction == "" {
-		request.Redaction = domain.RedactionMasked
-	}
-	if request.Redaction != domain.RedactionMasked && request.Redaction != domain.RedactionFull {
-		return domain.CreateRequest{}, 0, invalid(errors.New("redaction policy is invalid"))
-	}
-	if request.Redaction == domain.RedactionFull && !request.IncludeSensitive {
-		return domain.CreateRequest{}, 0, invalid(errors.New("FULL redaction policy requires include_sensitive"))
+	if request.Scope.Kind == domain.ScopeWorkspaceAttachments {
+		if request.SchemaVersion == "" {
+			request.SchemaVersion = "attachment-export/v1"
+		}
+		if request.Redaction == "" {
+			request.Redaction = domain.RedactionRawUserOwned
+		}
+	} else {
+		if request.SchemaVersion == "" {
+			request.SchemaVersion = SchemaVersionV1
+		}
+		if request.Redaction == "" {
+			request.Redaction = domain.RedactionMasked
+		}
 	}
 	if request.ExpiresIn == 0 {
 		request.ExpiresIn = DefaultTTL
@@ -598,36 +669,69 @@ func normalizeCreateRequest(request domain.CreateRequest) (domain.CreateRequest,
 		strings.ContainsAny(request.RequestedBy, "\r\n\x00") || strings.ContainsAny(request.PermissionScope, "\r\n\x00") {
 		return domain.CreateRequest{}, 0, invalid(errors.New("export actor or capability binding is invalid"))
 	}
-	fields, err := canonicalFields(request.Fields, request.Kind)
-	if err != nil {
-		return domain.CreateRequest{}, 0, err
-	}
-	request.Fields = fields
-	if request.Scope.CollectionID == nil || request.Scope.CollectionVersion == nil || !validID(*request.Scope.CollectionID) ||
-		*request.Scope.CollectionVersion < 1 || !isLowerHex(request.Scope.QueryHash) {
-		return domain.CreateRequest{}, 0, invalid(errors.New("export Collection binding is invalid"))
+	if request.Scope.Kind == domain.ScopeCollection {
+		fields, err := canonicalFields(request.Fields, request.Kind)
+		if err != nil {
+			return domain.CreateRequest{}, 0, err
+		}
+		request.Fields = fields
+		if (request.Kind != domain.KindMarkdown && request.Kind != domain.KindMetadataJSON) || request.SchemaVersion != SchemaVersionV1 ||
+			request.Scope.CollectionID == nil || request.Scope.CollectionVersion == nil || !validID(*request.Scope.CollectionID) ||
+			*request.Scope.CollectionVersion < 1 || !isLowerHex(request.Scope.QueryHash) || request.Scope.AttachmentRootContractVersion != "" ||
+			(request.Redaction != domain.RedactionMasked && request.Redaction != domain.RedactionFull) || (request.Redaction == domain.RedactionFull) != request.IncludeSensitive {
+			return domain.CreateRequest{}, 0, invalid(errors.New("export Collection binding is invalid"))
+		}
+	} else if request.Scope.Kind == domain.ScopeWorkspaceAttachments {
+		if request.Kind != domain.KindAttachmentsZIP || request.SchemaVersion != "attachment-export/v1" || request.Scope.CollectionID != nil ||
+			request.Scope.CollectionVersion != nil || request.Scope.QueryHash != "" || request.Scope.AttachmentRootContractVersion != "workspace-attachments/v1" ||
+			len(request.Fields) != 0 || request.Redaction != domain.RedactionRawUserOwned || request.IncludeSensitive {
+			return domain.CreateRequest{}, 0, invalid(errors.New("export attachment binding is invalid"))
+		}
+		request.Fields = []domain.Field{}
+	} else {
+		return domain.CreateRequest{}, 0, invalid(errors.New("export scope kind is invalid"))
 	}
 	return request, int64(request.ExpiresIn / time.Second), nil
 }
 
 func canonicalRequestHash(request domain.CreateRequest, ttlSeconds int64) string {
-	collectionID := string(*request.Scope.CollectionID)
-	collectionVersion := *request.Scope.CollectionVersion
+	if request.Scope.Kind == domain.ScopeCollection {
+		canonical, _ := json.Marshal(struct {
+			WorkspaceID       foundation.ID          `json:"workspace_id"`
+			CollectionID      string                 `json:"collection_id"`
+			CollectionVersion int64                  `json:"collection_version"`
+			QueryHash         string                 `json:"query_hash"`
+			Kind              domain.Kind            `json:"kind"`
+			SchemaVersion     string                 `json:"schema_version"`
+			Fields            []domain.Field         `json:"fields"`
+			Redaction         domain.RedactionPolicy `json:"redaction"`
+			IncludeSensitive  bool                   `json:"include_sensitive"`
+			RequestedBy       string                 `json:"requested_by"`
+			PermissionScope   string                 `json:"permission_scope"`
+			TTLSeconds        int64                  `json:"ttl_seconds"`
+		}{
+			request.WorkspaceID, string(*request.Scope.CollectionID), *request.Scope.CollectionVersion, request.Scope.QueryHash,
+			request.Kind, request.SchemaVersion, request.Fields, request.Redaction, request.IncludeSensitive,
+			request.RequestedBy, request.PermissionScope, ttlSeconds,
+		})
+		digest := sha256.Sum256(canonical)
+		return hex.EncodeToString(digest[:])
+	}
 	canonical, _ := json.Marshal(struct {
-		WorkspaceID       foundation.ID          `json:"workspace_id"`
-		CollectionID      string                 `json:"collection_id"`
-		CollectionVersion int64                  `json:"collection_version"`
-		QueryHash         string                 `json:"query_hash"`
-		Kind              domain.Kind            `json:"kind"`
-		SchemaVersion     string                 `json:"schema_version"`
-		Fields            []domain.Field         `json:"fields"`
-		Redaction         domain.RedactionPolicy `json:"redaction"`
-		IncludeSensitive  bool                   `json:"include_sensitive"`
-		RequestedBy       string                 `json:"requested_by"`
-		PermissionScope   string                 `json:"permission_scope"`
-		TTLSeconds        int64                  `json:"ttl_seconds"`
+		WorkspaceID                    foundation.ID          `json:"workspace_id"`
+		ScopeKind                      domain.ScopeKind       `json:"scope_kind"`
+		AttachmentRootContractVersion  string                 `json:"attachment_root_contract_version"`
+		AttachmentLimitContractVersion string                 `json:"attachment_limit_contract_version"`
+		Kind                           domain.Kind            `json:"kind"`
+		SchemaVersion                  string                 `json:"schema_version"`
+		Fields                         []domain.Field         `json:"fields"`
+		Redaction                      domain.RedactionPolicy `json:"redaction"`
+		IncludeSensitive               bool                   `json:"include_sensitive"`
+		RequestedBy                    string                 `json:"requested_by"`
+		PermissionScope                string                 `json:"permission_scope"`
+		TTLSeconds                     int64                  `json:"ttl_seconds"`
 	}{
-		request.WorkspaceID, collectionID, collectionVersion, request.Scope.QueryHash, request.Kind,
+		request.WorkspaceID, request.Scope.Kind, request.Scope.AttachmentRootContractVersion, attachmentLimitContractVersion, request.Kind,
 		request.SchemaVersion, request.Fields, request.Redaction, request.IncludeSensitive,
 		request.RequestedBy, request.PermissionScope, ttlSeconds,
 	})
@@ -653,13 +757,31 @@ func validatePreparedFile(file PreparedFile, finalPath string, payloadSize int64
 	return nil
 }
 
-func validatePreparedJob(job domain.Job, file PreparedFile, revision string, count int64, owner string) error {
+func validatePreparedJob(job domain.Job, request PrepareRequest, owner string) error {
 	if err := job.Validate(); err != nil {
 		return err
 	}
 	if job.Status != domain.StatusRunning || job.LeaseOwner != owner || !job.IsPrepared() ||
-		job.ReadModelRevision != revision || job.ExactCount == nil || *job.ExactCount != count || !samePreparedFile(job, file) {
+		!samePreparedSummary(job, request) || !samePreparedFile(job, request.PreparedFile) {
 		return errors.New("export repository returned an inconsistent prepared result")
+	}
+	return nil
+}
+
+func samePreparedSummary(job domain.Job, request PrepareRequest) bool {
+	if job.Scope.Kind == domain.ScopeCollection {
+		return job.ReadModelRevision == request.ReadModelRevision && job.ExactCount != nil && *job.ExactCount == request.ExactCount
+	}
+	return job.ManifestHash == request.ManifestHash && job.EntryCount != nil && *job.EntryCount == request.EntryCount &&
+		job.TotalUncompressedBytes != nil && *job.TotalUncompressedBytes == request.TotalUncompressedBytes
+}
+
+func validateAttachmentArchive(archive AttachmentArchive, exportID foundation.ID) error {
+	if !isLowerHex(archive.ManifestHash) || archive.EntryCount < 0 || archive.EntryCount > 10_000 ||
+		archive.TotalUncompressedBytes < 0 || archive.TotalUncompressedBytes > 1<<30 ||
+		archive.PreparedFile.FinalPath != exportRelativePath(exportID, "zip") || !isLowerHex(archive.PreparedFile.FileHash) ||
+		archive.PreparedFile.FileSize < 0 || archive.PreparedFile.FileSize > 1<<30 {
+		return resultInvalid(errors.New("attachment archiver returned an inconsistent binding"))
 	}
 	return nil
 }
@@ -681,6 +803,14 @@ func sameOptionalInt64(left, right *int64) bool {
 		return left == right
 	}
 	return *left == *right
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }
 
 func deletePreparedFiles(ctx context.Context, files FileStore, job domain.Job) error {

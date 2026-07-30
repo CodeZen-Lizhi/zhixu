@@ -92,7 +92,8 @@ expires_at,created_at,updated_at,completed_at,collection_id::text,collection_ver
 redaction_policy,include_sensitive,permission_scope,requested_by,read_model_revision,exact_count,
 prepared_at,prepared_staging_path,file_size,error_message,attempt_count,lease_owner,lease_expires_at,
 started_at,download_count,last_downloaded_at,cleanup_status,cleanup_attempt_count,cleanup_error,
-cleanup_updated_at,file_deleted_at`
+cleanup_updated_at,file_deleted_at,scope_kind,attachment_root_contract_version,
+manifest_sha256,entry_count,total_uncompressed_bytes`
 
 func scanJob(row interface{ Scan(...any) error }) (domain.Job, error) {
 	var (
@@ -100,10 +101,11 @@ func scanJob(row interface{ Scan(...any) error }) (domain.Job, error) {
 		queryDefinition, fields                                                    []byte
 		filePath, fileHash, errorCode, collectionID, queryHash                     sql.NullString
 		readModelRevision, preparedStagingPath, errorMessage, leaseOwner           sql.NullString
-		cleanupError                                                               sql.NullString
+		cleanupError, attachmentRootVersion, manifestHash                          sql.NullString
 		idempotencyKey, requestHash, redactionPolicy, permissionScope, requestedBy string
+		scopeKind                                                                  string
 		requestTTLSeconds, version, fileSize                                       int64
-		collectionVersion, exactCount                                              sql.NullInt64
+		collectionVersion, exactCount, entryCount, totalUncompressedBytes          sql.NullInt64
 		attemptCount, downloadCount, cleanupAttemptCount                           int
 		includeSensitive                                                           bool
 		expiresAt, createdAt, updatedAt                                            time.Time
@@ -118,7 +120,8 @@ func scanJob(row interface{ Scan(...any) error }) (domain.Job, error) {
 		&redactionPolicy, &includeSensitive, &permissionScope, &requestedBy, &readModelRevision, &exactCount,
 		&preparedAt, &preparedStagingPath, &fileSize, &errorMessage, &attemptCount, &leaseOwner, &leaseExpiresAt,
 		&startedAt, &downloadCount, &lastDownloadedAt, &cleanupStatus, &cleanupAttemptCount, &cleanupError,
-		&cleanupUpdatedAt, &fileDeletedAt,
+		&cleanupUpdatedAt, &fileDeletedAt, &scopeKind, &attachmentRootVersion,
+		&manifestHash, &entryCount, &totalUncompressedBytes,
 	); err != nil {
 		return domain.Job{}, err
 	}
@@ -138,6 +141,7 @@ func scanJob(row interface{ Scan(...any) error }) (domain.Job, error) {
 		FileSize: fileSize, AttemptCount: attemptCount, DownloadCount: downloadCount,
 		ExpiresAt: expiresAt.UTC(), CreatedAt: createdAt.UTC(), UpdatedAt: updatedAt.UTC(),
 		CleanupStatus: domain.CleanupStatus(cleanupStatus), CleanupAttemptCount: cleanupAttemptCount,
+		Scope: domain.Scope{Kind: domain.ScopeKind(scopeKind), AttachmentRootContractVersion: attachmentRootVersion.String},
 	}
 	if err := json.Unmarshal(fields, &job.Fields); err != nil {
 		return domain.Job{}, err
@@ -182,9 +186,18 @@ func scanJob(row interface{ Scan(...any) error }) (domain.Job, error) {
 	job.ErrorMessage = errorMessage.String
 	job.LeaseOwner = leaseOwner.String
 	job.CleanupError = cleanupError.String
+	job.ManifestHash = manifestHash.String
 	if exactCount.Valid {
 		value := exactCount.Int64
 		job.ExactCount = &value
+	}
+	if entryCount.Valid {
+		value := entryCount.Int64
+		job.EntryCount = &value
+	}
+	if totalUncompressedBytes.Valid {
+		value := totalUncompressedBytes.Int64
+		job.TotalUncompressedBytes = &value
 	}
 	assignTime := func(source sql.NullTime, target **time.Time) {
 		if source.Valid {
@@ -207,15 +220,21 @@ func scanJob(row interface{ Scan(...any) error }) (domain.Job, error) {
 
 func encodeJobDefinition(job domain.Job) ([]byte, []byte, error) {
 	definition := struct {
-		CollectionID      *foundation.ID `json:"collection_id"`
-		CollectionVersion *int64         `json:"collection_version"`
-		QueryHash         string         `json:"query_hash"`
-	}{job.Scope.CollectionID, job.Scope.CollectionVersion, job.Scope.QueryHash}
+		ScopeKind                     domain.ScopeKind `json:"scope_kind"`
+		CollectionID                  *foundation.ID   `json:"collection_id"`
+		CollectionVersion             *int64           `json:"collection_version"`
+		QueryHash                     string           `json:"query_hash"`
+		AttachmentRootContractVersion string           `json:"attachment_root_contract_version,omitempty"`
+	}{job.Scope.Kind, job.Scope.CollectionID, job.Scope.CollectionVersion, job.Scope.QueryHash, job.Scope.AttachmentRootContractVersion}
 	queryDefinition, err := json.Marshal(definition)
 	if err != nil {
 		return nil, nil, err
 	}
-	fields, err := json.Marshal(job.Fields)
+	fieldValues := job.Fields
+	if fieldValues == nil {
+		fieldValues = []domain.Field{}
+	}
+	fields, err := json.Marshal(fieldValues)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -224,6 +243,7 @@ func encodeJobDefinition(job domain.Job) ([]byte, []byte, error) {
 
 type cursorValue struct {
 	WorkspaceID  foundation.ID
+	ScopeKind    domain.ScopeKind
 	CollectionID *foundation.ID
 	Limit        int
 	CreatedAt    time.Time
@@ -231,25 +251,26 @@ type cursorValue struct {
 }
 
 type cursorEnvelope struct {
-	Version      int            `json:"version"`
-	Kind         string         `json:"kind"`
-	WorkspaceID  foundation.ID  `json:"workspace_id"`
-	CollectionID *foundation.ID `json:"collection_id,omitempty"`
-	Limit        int            `json:"limit"`
-	CreatedAt    time.Time      `json:"created_at"`
-	ID           foundation.ID  `json:"id"`
+	Version      int              `json:"version"`
+	Kind         string           `json:"kind"`
+	WorkspaceID  foundation.ID    `json:"workspace_id"`
+	ScopeKind    domain.ScopeKind `json:"scope_kind"`
+	CollectionID *foundation.ID   `json:"collection_id,omitempty"`
+	Limit        int              `json:"limit"`
+	CreatedAt    time.Time        `json:"created_at"`
+	ID           foundation.ID    `json:"id"`
 }
 
 func encodeCursor(value cursorValue) string {
 	raw, _ := json.Marshal(cursorEnvelope{
 		Version: 1, Kind: "export-list", WorkspaceID: value.WorkspaceID,
-		CollectionID: cloneID(value.CollectionID), Limit: value.Limit,
+		ScopeKind: value.ScopeKind, CollectionID: cloneID(value.CollectionID), Limit: value.Limit,
 		CreatedAt: value.CreatedAt.UTC(), ID: value.ID,
 	})
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
-func decodeCursor(value string, workspaceID foundation.ID, collectionID *foundation.ID, limit int) (cursorValue, error) {
+func decodeCursor(value string, workspaceID foundation.ID, scopeKind domain.ScopeKind, collectionID *foundation.ID, limit int) (cursorValue, error) {
 	if len(value) > 4096 {
 		return cursorValue{}, errors.New("export cursor is invalid")
 	}
@@ -261,14 +282,14 @@ func decodeCursor(value string, workspaceID foundation.ID, collectionID *foundat
 	limits.MaxDocumentBytes = 2048
 	parsed, err := strictjson.DecodeObject[cursorEnvelope](raw, limits, nil)
 	if err != nil || parsed.Version != 1 || parsed.Kind != "export-list" || parsed.WorkspaceID != workspaceID ||
-		!sameOptionalID(parsed.CollectionID, collectionID) || parsed.Limit != limit || parsed.CreatedAt.IsZero() {
+		parsed.ScopeKind != scopeKind || !sameOptionalID(parsed.CollectionID, collectionID) || parsed.Limit != limit || parsed.CreatedAt.IsZero() {
 		return cursorValue{}, errors.New("export cursor is invalid")
 	}
 	if !validID(parsed.WorkspaceID) || !validID(parsed.ID) || parsed.CollectionID != nil && !validID(*parsed.CollectionID) {
 		return cursorValue{}, errors.New("export cursor is invalid")
 	}
 	return cursorValue{
-		WorkspaceID: parsed.WorkspaceID, CollectionID: cloneID(parsed.CollectionID), Limit: parsed.Limit,
+		WorkspaceID: parsed.WorkspaceID, ScopeKind: parsed.ScopeKind, CollectionID: cloneID(parsed.CollectionID), Limit: parsed.Limit,
 		CreatedAt: parsed.CreatedAt.UTC(), ID: parsed.ID,
 	}, nil
 }
@@ -282,6 +303,13 @@ func cloneID(value *foundation.ID) *foundation.ID {
 }
 
 func sameOptionalID(left, right *foundation.ID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func sameOptionalInt64(left, right *int64) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}

@@ -17,9 +17,11 @@ M9 已补充 Workspace Source Version/Proposal/Workflow 列表、资源绑定 cu
 Proposal 等级由不可变 `proposal.risk_level` 唯一拥有，Source Version 使用受复合约束的 Workspace 镜像键支撑
 有界 keyset 查询；Proposal detail 的 Approval 为必需 nullable，Summary 保持 optional non-null。三条真实
 PostgreSQL 列表、迁移契约与严格执行计划已在最终迁移工作树复验；M10 继续负责最终容量门禁。
-M9-03 已交付 Smart Collection `MARKDOWN` 与 `METADATA_JSON` 的可恢复异步 Export Job：PostgreSQL 保存
-幂等、冻结范围、prepared result、TTL/cleanup 与下载 Audit，River 只负责投递，Collection 详情可恢复任务并下载。
-附件、`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 与通用字段映射仍为后续独立范围，AC-33 只能标为部分完成。
+M9 Export 已交付两个显式 scope：Smart Collection `MARKDOWN|METADATA_JSON` 与 Workspace
+`ATTACHMENTS_ZIP`。PostgreSQL 保存 tagged binding、幂等、租约、prepared result、持久 capability gate、
+TTL/cleanup 与下载 Audit；附件 ZIP 从固定 `attachments/` 生成，使用 fd-relative 安全遍历、确定性 manifest 和
+验证后的流式下载。`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 与通用字段映射仍为后续独立范围；
+AC-33 已由 Markdown、领域 Metadata JSON 和真实附件字节闭环关闭。
 M10-02 已交付单用户 Auth、Cookie Session、受限 API Token、CSRF/Origin、Capability Middleware 和 Compose
 启动预检；认证与 Write Authorization 保持两道独立边界，具体可执行契约见 `auth-security.md`。
 M8-01 已交付 Workspace 隔离的 Artifact/Revision、证据复核章节生成、受控 Markdown 导出和
@@ -62,7 +64,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker/Web 门禁 | M7-04 与遗留收口已验证；下游 owner executor、Document/Eval impact 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
-| [Smart Collection Export 契约](./export-contract.md) | Export Job、冻结 scan、prepared result、下载 Audit、过期清理与前端恢复 | M9-03 已交付 Collection Markdown/Metadata JSON；附件、Evaluation/Audit 内容导出与 AC-33 全量验收保持 deferred |
+| [可恢复异步 Export 契约](./export-contract.md) | Tagged Job、Collection scan、附件 ZIP、prepared result、流式下载、Audit 与清理 | Collection Markdown/Metadata JSON 和 Workspace Attachments ZIP 已交付并关闭 AC-33；Evaluation/Audit 内容导出保持 deferred |
 | [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health、M8 Review/Interview/Shared Path/Memory、M9 Workspace 列表的持久化、receipt、可见性与 PG/EXPLAIN 门禁 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool 稳定错误、M9 Proposal detail/summary Approval 空值契约与 M10 Auth 的稳定 Problem Details 边界 |
 | [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel correlation、脱敏和 Audit | M6-03 Tool/Observability 共享脱敏与受限 Tool Call 事实已记录；通用 append-only Audit/真实 exporter 归 M10 |

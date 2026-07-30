@@ -32,7 +32,7 @@
 | 10.22 | 设置/维护 | deployment、data、api | Runbooks |
 | 10.23 | 生命周期 | domain、data、module | workflow 10 |
 | 10.24 | Conflict | domain、agent-rag | workflow 09 |
-| 10.22/export | Markdown/附件/领域元数据导出 | data、api、security、database、backend/export-contract | M9-03 已交付 Smart Collection Markdown/Metadata JSON、恢复与安全测试；附件、Evaluation/Audit JSON 仍 deferred，AC-33 部分完成 |
+| 10.22/export | Markdown/附件/领域元数据导出 | data、api、security、database、backend/export-contract | Collection Markdown/Metadata JSON 与 Workspace Attachments ZIP 已通过恢复、安全、数据库和浏览器验收，AC-33 完成；Evaluation/Audit JSON 仍 deferred |
 | 附加-Eino | Eino PoC 与可替换 Adapter | ADR-0013、technology-stack、interfaces | Eino PoC、adapter contract、AI eval |
 | 附加-auth | Session、API Token、Approval Write Authorization | ADR-0014、security、api、tool-security | auth/CSRF/token/permission tests |
 

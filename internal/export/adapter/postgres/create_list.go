@@ -49,39 +49,42 @@ func (repository *Repository) Create(ctx context.Context, job domain.Job) (domai
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return domain.Job{}, false, classify(err, false)
 	}
-	if job.Scope.CollectionID == nil || job.Scope.CollectionVersion == nil {
-		return domain.Job{}, false, invalid(errors.New("export collection binding is required"))
-	}
-	var collectionVersion int64
-	var queryHash string
-	if err := tx.QueryRow(ctx, `SELECT version,query_hash FROM learning.smart_collection
-		WHERE id=$1 AND workspace_id=$2 AND status='ACTIVE' FOR SHARE`,
-		string(*job.Scope.CollectionID), string(job.WorkspaceID)).Scan(&collectionVersion, &queryHash); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.Job{}, false, notFound(errors.New("active collection does not exist"))
+	if job.Scope.Kind == domain.ScopeCollection {
+		var collectionVersion int64
+		var queryHash string
+		if err := tx.QueryRow(ctx, `SELECT version,query_hash FROM learning.smart_collection
+			WHERE id=$1 AND workspace_id=$2 AND status='ACTIVE' FOR SHARE`,
+			string(*job.Scope.CollectionID), string(job.WorkspaceID)).Scan(&collectionVersion, &queryHash); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.Job{}, false, notFound(errors.New("active collection does not exist"))
+			}
+			return domain.Job{}, false, classify(err, true)
 		}
-		return domain.Job{}, false, classify(err, true)
-	}
-	if collectionVersion != *job.Scope.CollectionVersion || queryHash != job.Scope.QueryHash {
-		return domain.Job{}, false, idempotencyConflict(errors.New("export collection definition changed"))
+		if collectionVersion != *job.Scope.CollectionVersion || queryHash != job.Scope.QueryHash {
+			return domain.Job{}, false, idempotencyConflict(errors.New("export collection definition changed"))
+		}
+	} else if enabled, gateErr := attachmentCapabilityEnabledTx(ctx, tx); gateErr != nil {
+		return domain.Job{}, false, gateErr
+	} else if !enabled {
+		return domain.Job{}, false, unavailable(errors.New("attachment export capability is disabled"))
 	}
 	persisted, err := scanJob(tx.QueryRow(ctx, `WITH db_time AS (SELECT clock_timestamp() AS now)
 		INSERT INTO ops.export_job(
 			id,workspace_id,kind,schema_version,query_definition,fields,status,idempotency_key,
 			request_hash,request_ttl_seconds,version,expires_at,created_at,updated_at,
-			collection_id,collection_version,query_hash,redaction_policy,include_sensitive,
+			scope_kind,collection_id,collection_version,query_hash,attachment_root_contract_version,redaction_policy,include_sensitive,
 			permission_scope,requested_by,file_size,attempt_count,download_count,
 			cleanup_status,cleanup_attempt_count
 		)
 		SELECT $1,$2,$3,$4,$5::jsonb,$6::jsonb,'PENDING',$7,$8,$9::bigint,1,
 			db_time.now + make_interval(secs => $9::bigint::double precision),db_time.now,db_time.now,
-			$10,$11,$12,$13,$14,$15,$16,0,0,0,'NOT_REQUIRED',0
+			$10,$11,$12,$13,$14,$15,$16,$17,$18,0,0,0,'NOT_REQUIRED',0
 		FROM db_time
 		RETURNING `+selectColumns,
 		string(job.ID), string(job.WorkspaceID), string(job.Kind), job.SchemaVersion, queryDefinition, fields,
 		job.IdempotencyKey, job.RequestHash, job.RequestTTLSeconds,
-		string(*job.Scope.CollectionID), *job.Scope.CollectionVersion, job.Scope.QueryHash,
-		string(job.Redaction), job.IncludeSensitive, job.PermissionScope, job.RequestedBy))
+		string(job.Scope.Kind), nullableIDPointer(job.Scope.CollectionID), nullableInt64(job.Scope.CollectionVersion), nullableText(job.Scope.QueryHash),
+		nullableText(job.Scope.AttachmentRootContractVersion), string(job.Redaction), job.IncludeSensitive, job.PermissionScope, job.RequestedBy))
 	if err != nil {
 		return domain.Job{}, false, classify(err, false)
 	}
@@ -137,12 +140,13 @@ func (repository *Repository) List(ctx context.Context, query exportapp.ListQuer
 		return exportapp.ListPage{}, unavailable(errors.New("export repository is unavailable"))
 	}
 	if ctx == nil || !validID(query.WorkspaceID) || query.Limit < 1 || query.Limit > exportapp.MaxListLimit ||
-		query.CollectionID != nil && !validID(*query.CollectionID) {
+		(query.ScopeKind != domain.ScopeCollection && query.ScopeKind != domain.ScopeWorkspaceAttachments) ||
+		query.CollectionID != nil && !validID(*query.CollectionID) || (query.ScopeKind == domain.ScopeCollection) != (query.CollectionID != nil) {
 		return exportapp.ListPage{}, invalid(errors.New("export list query is invalid"))
 	}
 	var cursor *cursorValue
 	if query.Cursor != "" {
-		decoded, err := decodeCursor(query.Cursor, query.WorkspaceID, query.CollectionID, query.Limit)
+		decoded, err := decodeCursor(query.Cursor, query.WorkspaceID, query.ScopeKind, query.CollectionID, query.Limit)
 		if err != nil {
 			return exportapp.ListPage{}, invalid(err)
 		}
@@ -190,7 +194,7 @@ func (repository *Repository) List(ctx context.Context, query exportapp.ListQuer
 	if hasMore && len(jobs) > 0 {
 		last := jobs[len(jobs)-1]
 		page.NextCursor = encodeCursor(cursorValue{
-			WorkspaceID: query.WorkspaceID, CollectionID: cloneID(query.CollectionID), Limit: query.Limit,
+			WorkspaceID: query.WorkspaceID, ScopeKind: query.ScopeKind, CollectionID: cloneID(query.CollectionID), Limit: query.Limit,
 			CreatedAt: last.CreatedAt, ID: last.ID,
 		})
 	}
@@ -203,24 +207,54 @@ func (repository *Repository) List(ctx context.Context, query exportapp.ListQuer
 func queryListRows(ctx context.Context, tx pgx.Tx, query exportapp.ListQuery, cursor *cursorValue) (pgx.Rows, error) {
 	limit := query.Limit + 1
 	switch {
-	case query.CollectionID == nil && cursor == nil:
+	case query.ScopeKind == domain.ScopeWorkspaceAttachments && cursor == nil:
 		return tx.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
-			WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 FOR UPDATE`, string(query.WorkspaceID), limit)
-	case query.CollectionID != nil && cursor == nil:
+			WHERE workspace_id=$1 AND scope_kind='WORKSPACE_ATTACHMENTS' ORDER BY created_at DESC,id DESC LIMIT $2 FOR UPDATE`, string(query.WorkspaceID), limit)
+	case query.ScopeKind == domain.ScopeCollection && cursor == nil:
 		return tx.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
-			WHERE workspace_id=$1 AND collection_id=$2 ORDER BY created_at DESC,id DESC LIMIT $3 FOR UPDATE`,
+			WHERE workspace_id=$1 AND scope_kind='COLLECTION' AND collection_id=$2 ORDER BY created_at DESC,id DESC LIMIT $3 FOR UPDATE`,
 			string(query.WorkspaceID), string(*query.CollectionID), limit)
-	case query.CollectionID == nil:
+	case query.ScopeKind == domain.ScopeWorkspaceAttachments:
 		return tx.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
-			WHERE workspace_id=$1 AND (created_at,id)<($2,$3)
+			WHERE workspace_id=$1 AND scope_kind='WORKSPACE_ATTACHMENTS' AND (created_at,id)<($2,$3)
 			ORDER BY created_at DESC,id DESC LIMIT $4 FOR UPDATE`,
 			string(query.WorkspaceID), cursor.CreatedAt, string(cursor.ID), limit)
 	default:
 		return tx.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
-			WHERE workspace_id=$1 AND collection_id=$2 AND (created_at,id)<($3,$4)
+			WHERE workspace_id=$1 AND scope_kind='COLLECTION' AND collection_id=$2 AND (created_at,id)<($3,$4)
 			ORDER BY created_at DESC,id DESC LIMIT $5 FOR UPDATE`,
 			string(query.WorkspaceID), string(*query.CollectionID), cursor.CreatedAt, string(cursor.ID), limit)
 	}
+}
+
+func attachmentCapabilityEnabledTx(ctx context.Context, tx pgx.Tx) (bool, error) {
+	var enabled bool
+	if err := tx.QueryRow(ctx, `SELECT enabled FROM ops.export_capability
+		WHERE capability_key='workspace-attachments' AND contract_version='workspace-attachments/v1' FOR SHARE`).Scan(&enabled); err != nil {
+		return false, classify(err, true)
+	}
+	return enabled, nil
+}
+
+func nullableIDPointer(value *foundation.ID) any {
+	if value == nil {
+		return nil
+	}
+	return string(*value)
+}
+
+func nullableInt64(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func expirable(status domain.Status) bool {

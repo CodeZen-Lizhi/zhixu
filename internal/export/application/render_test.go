@@ -31,7 +31,7 @@ func TestRenderNeverLeaksSecretsAbsolutePathsOrFormulaPrefixes(t *testing.T) {
 			Applicability: json.RawMessage(`{"nested":{"secret":"Bearer top-secret","path":"/Users/private/app.md","url":"https://example.test/usr/help"}}`),
 		}},
 	}
-	base := domain.Job{WorkspaceID: renderWorkspaceID, Kind: domain.KindMetadataJSON, SchemaVersion: SchemaVersionV1, Scope: domain.Scope{CollectionID: pointerFoundationID(renderCollectionID), CollectionVersion: &version, QueryHash: snapshot.QueryHash}, Fields: []domain.Field{domain.FieldTitle, domain.FieldSource, domain.FieldApplicability}}
+	base := domain.Job{WorkspaceID: renderWorkspaceID, Kind: domain.KindMetadataJSON, SchemaVersion: SchemaVersionV1, Scope: domain.Scope{Kind: domain.ScopeCollection, CollectionID: pointerFoundationID(renderCollectionID), CollectionVersion: &version, QueryHash: snapshot.QueryHash}, Fields: []domain.Field{domain.FieldTitle, domain.FieldSource, domain.FieldApplicability}}
 
 	masked := base
 	masked.Redaction = domain.RedactionMasked

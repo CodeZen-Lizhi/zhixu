@@ -13,8 +13,17 @@ import (
 type Kind string
 
 const (
-	KindMarkdown     Kind = "MARKDOWN"
-	KindMetadataJSON Kind = "METADATA_JSON"
+	KindMarkdown       Kind = "MARKDOWN"
+	KindMetadataJSON   Kind = "METADATA_JSON"
+	KindAttachmentsZIP Kind = "ATTACHMENTS_ZIP"
+)
+
+// ScopeKind 区分 Collection 投影与 Workspace 原始附件两种事实范围。
+type ScopeKind string
+
+const (
+	ScopeCollection           ScopeKind = "COLLECTION"
+	ScopeWorkspaceAttachments ScopeKind = "WORKSPACE_ATTACHMENTS"
 )
 
 // Status 是导出任务生命周期状态。
@@ -47,15 +56,18 @@ const (
 type RedactionPolicy string
 
 const (
-	RedactionMasked RedactionPolicy = "MASKED"
-	RedactionFull   RedactionPolicy = "FULL"
+	RedactionMasked       RedactionPolicy = "MASKED"
+	RedactionFull         RedactionPolicy = "FULL"
+	RedactionRawUserOwned RedactionPolicy = "RAW_USER_OWNED"
 )
 
 // Scope 描述导出绑定的事实范围。
 type Scope struct {
-	CollectionID      *foundation.ID
-	CollectionVersion *int64
-	QueryHash         string
+	Kind                          ScopeKind
+	CollectionID                  *foundation.ID
+	CollectionVersion             *int64
+	QueryHash                     string
+	AttachmentRootContractVersion string
 }
 
 // Field 是允许导出的领域字段白名单成员。
@@ -94,45 +106,48 @@ type CreateRequest struct {
 
 // Job 是导出任务的持久化事实和结果追踪投影。
 type Job struct {
-	ID                  foundation.ID
-	WorkspaceID         foundation.ID
-	Kind                Kind
-	SchemaVersion       string
-	Scope               Scope
-	Fields              []Field
-	Redaction           RedactionPolicy
-	IncludeSensitive    bool
-	PermissionScope     string
-	RequestedBy         string
-	IdempotencyKey      string
-	RequestHash         string
-	RequestTTLSeconds   int64
-	Status              Status
-	Version             int64
-	ReadModelRevision   string
-	ExactCount          *int64
-	PreparedAt          *time.Time
-	PreparedStagingPath string
-	FilePath            string
-	FileHash            string
-	FileSize            int64
-	ErrorCode           string
-	ErrorMessage        string
-	AttemptCount        int
-	LeaseOwner          string
-	LeaseExpiresAt      *time.Time
-	ExpiresAt           time.Time
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	StartedAt           *time.Time
-	CompletedAt         *time.Time
-	DownloadCount       int
-	LastDownloadedAt    *time.Time
-	CleanupStatus       CleanupStatus
-	CleanupAttemptCount int
-	CleanupError        string
-	CleanupUpdatedAt    *time.Time
-	FileDeletedAt       *time.Time
+	ID                     foundation.ID
+	WorkspaceID            foundation.ID
+	Kind                   Kind
+	SchemaVersion          string
+	Scope                  Scope
+	Fields                 []Field
+	Redaction              RedactionPolicy
+	IncludeSensitive       bool
+	PermissionScope        string
+	RequestedBy            string
+	IdempotencyKey         string
+	RequestHash            string
+	RequestTTLSeconds      int64
+	Status                 Status
+	Version                int64
+	ReadModelRevision      string
+	ExactCount             *int64
+	ManifestHash           string
+	EntryCount             *int64
+	TotalUncompressedBytes *int64
+	PreparedAt             *time.Time
+	PreparedStagingPath    string
+	FilePath               string
+	FileHash               string
+	FileSize               int64
+	ErrorCode              string
+	ErrorMessage           string
+	AttemptCount           int
+	LeaseOwner             string
+	LeaseExpiresAt         *time.Time
+	ExpiresAt              time.Time
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	StartedAt              *time.Time
+	CompletedAt            *time.Time
+	DownloadCount          int
+	LastDownloadedAt       *time.Time
+	CleanupStatus          CleanupStatus
+	CleanupAttemptCount    int
+	CleanupError           string
+	CleanupUpdatedAt       *time.Time
+	FileDeletedAt          *time.Time
 }
 
 // Validate 校验任务事实的跨层不变量。
@@ -145,20 +160,8 @@ func (j Job) Validate() error {
 		!validCleanupStatus(j.CleanupStatus) {
 		return errors.New("export job is invalid")
 	}
-	if j.Scope.CollectionID != nil && !validID(*j.Scope.CollectionID) {
-		return errors.New("export collection scope is invalid")
-	}
-	if j.Scope.CollectionVersion != nil && *j.Scope.CollectionVersion < 1 {
-		return errors.New("export collection version is invalid")
-	}
-	if j.Scope.CollectionID == nil && j.Scope.CollectionVersion != nil {
-		return errors.New("export collection version has no collection")
-	}
-	if j.Scope.CollectionID == nil || j.Scope.CollectionVersion == nil || !validHash(j.Scope.QueryHash) {
-		return errors.New("export job has no complete collection binding")
-	}
-	if len(j.Fields) == 0 || len(j.Fields) > 32 {
-		return errors.New("export fields are invalid")
+	if err := j.validateScopeAndPolicy(); err != nil {
+		return err
 	}
 	seenFields := make(map[Field]struct{}, len(j.Fields))
 	for _, field := range j.Fields {
@@ -170,19 +173,24 @@ func (j Job) Validate() error {
 		}
 		seenFields[field] = struct{}{}
 	}
-	if (j.Redaction != RedactionMasked && j.Redaction != RedactionFull) || (j.Redaction == RedactionFull) != j.IncludeSensitive ||
-		strings.TrimSpace(j.PermissionScope) == "" || strings.TrimSpace(j.RequestedBy) == "" {
-		return errors.New("export request policy is invalid")
-	}
 	prepared := j.PreparedAt != nil
-	if prepared != (j.ReadModelRevision != "" || j.ExactCount != nil || j.PreparedStagingPath != "" || j.FilePath != "" || j.FileHash != "") {
+	if prepared != (j.ReadModelRevision != "" || j.ExactCount != nil || j.ManifestHash != "" || j.EntryCount != nil ||
+		j.TotalUncompressedBytes != nil || j.PreparedStagingPath != "" || j.FilePath != "" || j.FileHash != "") {
 		return errors.New("export prepared result binding is incomplete")
 	}
 	if prepared {
-		if !validHash(j.ReadModelRevision) || j.ExactCount == nil || *j.ExactCount < 0 || *j.ExactCount > 10_000 ||
-			!validHash(j.FileHash) || j.FileSize < 0 || strings.TrimSpace(j.PreparedStagingPath) == "" || strings.TrimSpace(j.FilePath) == "" ||
+		if !validHash(j.FileHash) || j.FileSize < 0 || strings.TrimSpace(j.PreparedStagingPath) == "" || strings.TrimSpace(j.FilePath) == "" ||
 			j.PreparedAt.Before(j.CreatedAt) || j.PreparedAt.After(j.UpdatedAt) {
 			return errors.New("export prepared result binding is invalid")
+		}
+		if j.Scope.Kind == ScopeCollection && (!validHash(j.ReadModelRevision) || j.ExactCount == nil || *j.ExactCount < 0 || *j.ExactCount > 10_000 ||
+			j.ManifestHash != "" || j.EntryCount != nil || j.TotalUncompressedBytes != nil) {
+			return errors.New("collection export prepared result binding is invalid")
+		}
+		if j.Scope.Kind == ScopeWorkspaceAttachments && (j.ReadModelRevision != "" || j.ExactCount != nil || !validHash(j.ManifestHash) ||
+			j.EntryCount == nil || *j.EntryCount < 0 || *j.EntryCount > 10_000 || j.TotalUncompressedBytes == nil || *j.TotalUncompressedBytes < 0 ||
+			*j.TotalUncompressedBytes > 1<<30 || j.FileSize > 1<<30) {
+			return errors.New("attachment export prepared result binding is invalid")
 		}
 	} else if j.FileSize != 0 {
 		return errors.New("unprepared export cannot carry a file size")
@@ -267,6 +275,30 @@ func (j Job) Validate() error {
 	return nil
 }
 
+func (j Job) validateScopeAndPolicy() error {
+	if strings.TrimSpace(j.PermissionScope) == "" || strings.TrimSpace(j.RequestedBy) == "" {
+		return errors.New("export request policy is invalid")
+	}
+	switch j.Scope.Kind {
+	case ScopeCollection:
+		if j.Kind != KindMarkdown && j.Kind != KindMetadataJSON || j.SchemaVersion != "export/v1" ||
+			j.Scope.CollectionID == nil || !validID(*j.Scope.CollectionID) || j.Scope.CollectionVersion == nil || *j.Scope.CollectionVersion < 1 ||
+			!validHash(j.Scope.QueryHash) || j.Scope.AttachmentRootContractVersion != "" || len(j.Fields) == 0 || len(j.Fields) > 32 ||
+			(j.Redaction != RedactionMasked && j.Redaction != RedactionFull) || (j.Redaction == RedactionFull) != j.IncludeSensitive {
+			return errors.New("export collection scope or policy is invalid")
+		}
+	case ScopeWorkspaceAttachments:
+		if j.Kind != KindAttachmentsZIP || j.SchemaVersion != "attachment-export/v1" || j.Scope.CollectionID != nil ||
+			j.Scope.CollectionVersion != nil || j.Scope.QueryHash != "" || j.Scope.AttachmentRootContractVersion != "workspace-attachments/v1" ||
+			len(j.Fields) != 0 || j.Redaction != RedactionRawUserOwned || j.IncludeSensitive {
+			return errors.New("export attachment scope or policy is invalid")
+		}
+	default:
+		return errors.New("export scope kind is invalid")
+	}
+	return nil
+}
+
 // IsPrepared reports whether a fixed staging/final result binding has been persisted.
 func (j Job) IsPrepared() bool { return j.PreparedAt != nil }
 
@@ -281,11 +313,10 @@ func SameRequest(left, right Job) bool {
 		left.Redaction != right.Redaction || left.IncludeSensitive != right.IncludeSensitive ||
 		left.PermissionScope != right.PermissionScope || left.RequestedBy != right.RequestedBy ||
 		left.IdempotencyKey != right.IdempotencyKey || left.RequestHash != right.RequestHash ||
-		left.RequestTTLSeconds != right.RequestTTLSeconds || left.Scope.QueryHash != right.Scope.QueryHash ||
-		left.Scope.CollectionVersion == nil || right.Scope.CollectionVersion == nil ||
-		*left.Scope.CollectionVersion != *right.Scope.CollectionVersion ||
-		left.Scope.CollectionID == nil || right.Scope.CollectionID == nil ||
-		*left.Scope.CollectionID != *right.Scope.CollectionID || len(left.Fields) != len(right.Fields) {
+		left.RequestTTLSeconds != right.RequestTTLSeconds || left.Scope.Kind != right.Scope.Kind ||
+		left.Scope.QueryHash != right.Scope.QueryHash || left.Scope.AttachmentRootContractVersion != right.Scope.AttachmentRootContractVersion ||
+		!sameOptionalInt64(left.Scope.CollectionVersion, right.Scope.CollectionVersion) ||
+		!sameOptionalID(left.Scope.CollectionID, right.Scope.CollectionID) || len(left.Fields) != len(right.Fields) {
 		return false
 	}
 	for index := range left.Fields {
@@ -296,6 +327,14 @@ func SameRequest(left, right Job) bool {
 	return true
 }
 
+func sameOptionalID(left, right *foundation.ID) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func sameOptionalInt64(left, right *int64) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
 func validID(value foundation.ID) bool {
 	parsed, err := foundation.ParseID(string(value))
 	return err == nil && parsed == value
@@ -303,7 +342,7 @@ func validID(value foundation.ID) bool {
 
 func validKind(value Kind) bool {
 	switch value {
-	case KindMarkdown, KindMetadataJSON:
+	case KindMarkdown, KindMetadataJSON, KindAttachmentsZIP:
 		return true
 	default:
 		return false

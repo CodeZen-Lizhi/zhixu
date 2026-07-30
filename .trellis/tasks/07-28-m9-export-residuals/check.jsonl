@@ -1,0 +1,12 @@
+{"file":".trellis/tasks/07-28-m9-export-residuals/research/m9-gap-analysis.md","reason":"逐项复核当前回归已恢复、附件合同已真实交付、AC-33 与后续 Evaluation/Audit 分工没有漂移。"}
+{"file":".trellis/spec/backend/export-contract.md","reason":"复核 M9-03 Collection 行为无回归，以及 attachment Job 的幂等、prepared、下载和 cleanup 与既有协议一致。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"复核四个附件路由的 READ_LOCAL、Workspace、Session/Token、CSRF/Origin、path/symlink 和 Secret 负测。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"复核新前向 migration、scope CHECK/FK、DB-time lease/TTL、download+Audit 原子性、cleanup retry 与 guarded Down。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"复核 unsafe/source mutation/超限/未完成/过期/篡改/依赖错误稳定且无 partial success。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"扫描日志、Problem、Server Event 与 Audit，确认无绝对路径、附件正文、Secret 或文件名列表泄漏。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行 Export race、真实 PostgreSQL/River、崩溃恢复、安全 canary、浏览器 smoke 和独立复验。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"复核 attachment strict decoder、tagged scope/status/result、Problem 与 ZIP headers/blob binding。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"复核 Workspace Query identity、切换清理、same-key retry、轮询停止、SSE 回查和失败/过期新建。"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"复核 Settings 全状态、raw policy、错误恢复、键盘、焦点和 390x844 布局。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"执行前端全量门禁与真实浏览器下载解包、source preservation、overflow 和 console 检查。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"最终追踪 Create/Execute/Recover/List/Download/Expire/Cleanup 在所有层的 tagged binding 和事实一致性。"}

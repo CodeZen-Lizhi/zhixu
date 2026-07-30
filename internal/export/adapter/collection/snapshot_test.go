@@ -59,7 +59,7 @@ func TestSnapshotReaderUsesFrozenDurablePagesWithoutLocalFiltering(t *testing.T)
 		t.Fatal(err)
 	}
 	version := int64(7)
-	snapshot, err := reader.ReadCollection(context.Background(), snapshotWorkspaceID, domain.Scope{CollectionID: pointerID(snapshotCollectionID), CollectionVersion: &version, QueryHash: binding.QueryHash}, 10)
+	snapshot, err := reader.ReadCollection(context.Background(), snapshotWorkspaceID, domain.Scope{Kind: domain.ScopeCollection, CollectionID: pointerID(snapshotCollectionID), CollectionVersion: &version, QueryHash: binding.QueryHash}, 10)
 	if err != nil {
 		t.Fatalf("ReadCollection() error=%v", err)
 	}
@@ -82,12 +82,12 @@ func TestSnapshotReaderRejectsBindingDriftAndOversizedCollection(t *testing.T) {
 		t.Fatal(err)
 	}
 	version := int64(2)
-	if _, err := reader.ReadCollection(context.Background(), snapshotWorkspaceID, domain.Scope{CollectionID: pointerID(snapshotCollectionID), CollectionVersion: &version, QueryHash: binding.QueryHash}, 10); err == nil {
+	if _, err := reader.ReadCollection(context.Background(), snapshotWorkspaceID, domain.Scope{Kind: domain.ScopeCollection, CollectionID: pointerID(snapshotCollectionID), CollectionVersion: &version, QueryHash: binding.QueryHash}, 10); err == nil {
 		t.Fatal("ReadCollection() accepted a collection beyond maxItems")
 	}
 	service.binding.ExactCount = 0
 	service.binding.QueryHash = strings.Repeat("c", 64)
-	if _, err := reader.ReadCollection(context.Background(), snapshotWorkspaceID, domain.Scope{CollectionID: pointerID(snapshotCollectionID), CollectionVersion: &version, QueryHash: binding.QueryHash}, 10); err == nil {
+	if _, err := reader.ReadCollection(context.Background(), snapshotWorkspaceID, domain.Scope{Kind: domain.ScopeCollection, CollectionID: pointerID(snapshotCollectionID), CollectionVersion: &version, QueryHash: binding.QueryHash}, 10); err == nil {
 		t.Fatal("ReadCollection() accepted query hash drift")
 	}
 }

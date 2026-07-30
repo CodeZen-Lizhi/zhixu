@@ -381,17 +381,36 @@ describe("EventStoreProvider", () => {
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("44");
   });
 
-  it("Export 事件只定向失效当前 Workspace 的 Collection Export 查询", async () => {
+  it("Export 事件按 scope_kind 只失效对应 Export 查询，历史事件兼容性失效两类", async () => {
     setActiveWorkspaceId(workspaceA);
     const queryClient = renderStore();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
     await act(async () => connectionMock.options[0]?.onEvent?.({
       schemaVersion: 1, id: "48", type: "export.completed", occurredAt: "2026-07-22T00:00:04Z",
       workspaceId: workspaceA, resourceRef: "export_job:7a000000-0000-4000-8000-000000000012", resourceVersion: 2,
-      payloadSummary: { status: "SUCCEEDED" }, invalidations: [{ resource: "export_job", id: "7a000000-0000-4000-8000-000000000012" }],
+      payloadSummary: { status: "succeeded", scopeKind: "collection" }, invalidations: [{ resource: "export_job", id: "7a000000-0000-4000-8000-000000000012" }],
     }));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["collection-exports", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["workspace-attachment-exports", workspaceA] }, { throwOnError: true });
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["collections", workspaceA] }, { throwOnError: true });
+
+    invalidate.mockClear();
+    await act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1, id: "49", type: "export.completed", occurredAt: "2026-07-22T00:00:05Z",
+      workspaceId: workspaceA, resourceRef: "export_job:7a000000-0000-4000-8000-000000000013", resourceVersion: 2,
+      payloadSummary: { status: "succeeded", scopeKind: "workspace_attachments" }, invalidations: [{ resource: "export_job", id: "7a000000-0000-4000-8000-000000000013" }],
+    }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["workspace-attachment-exports", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["collection-exports", workspaceA] }, { throwOnError: true });
+
+    invalidate.mockClear();
+    await act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1, id: "50", type: "export.completed", occurredAt: "2026-07-22T00:00:06Z",
+      workspaceId: workspaceA, resourceRef: "export_job:7a000000-0000-4000-8000-000000000014", resourceVersion: 2,
+      payloadSummary: { status: "succeeded" }, invalidations: [{ resource: "export_job", id: "7a000000-0000-4000-8000-000000000014" }],
+    }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["collection-exports", workspaceA] }, { throwOnError: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["workspace-attachment-exports", workspaceA] }, { throwOnError: true });
   });
 
   it("Review 事件只失效当前 Workspace 的 Review 查询", async () => {

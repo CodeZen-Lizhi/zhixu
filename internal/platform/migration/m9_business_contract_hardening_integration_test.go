@@ -14,7 +14,6 @@ import (
 	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledgedomain "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,26 +21,22 @@ func TestM9BusinessContractHardeningMigrationSchemaAndEmptyDownUp(t *testing.T) 
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
+	provider := migrationProvider(t, pool)
+	if _, err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatal(err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)
 	assertM9BusinessContractHardeningShape(t, ctx, pool)
 
-	provider := migrationProvider(t, pool)
 	if _, err := provider.DownTo(ctx, 29); err != nil {
 		t.Fatalf("00030-00033 empty Down failed: %v", err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 29)
 	assertM9BusinessContractHardeningAbsent(t, ctx, pool)
-	if _, err := provider.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatalf("00030-00033 Up after Down failed: %v", err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)
@@ -59,7 +54,7 @@ func TestM9BusinessContractHardeningMigrationSchemaAndEmptyDownUp(t *testing.T) 
 	insertM9SourceVersionWithoutWorkspace(t, ctx, pool, sourceID, artifactID, versionID, "source-down-guard.txt", strings.Repeat("1", 64), now)
 	assertM9SourceVersionWorkspace(t, ctx, pool, versionID, workspaceID)
 
-	_, err = provider.DownTo(ctx, 29)
+	_, err := provider.DownTo(ctx, 29)
 	assertPostgresCode(t, err, "55000")
 	if !strings.Contains(err.Error(), "cannot downgrade M9 business contract hardening while Proposal or Source Version data exists") {
 		t.Fatalf("00033 Source Version guarded Down returned unexpected error: %v", err)
@@ -168,7 +163,7 @@ func TestM9BusinessContractHardeningMigrationBackfillConstraintsAndGuardedDown(t
 	insertM9WorkflowDefinition(t, ctx, pool, definitionID, workspaceID, "m9-definition", now)
 	insertM9WorkflowDefinition(t, ctx, pool, otherDefinitionID, otherWorkspaceID, "m9-other-definition", now)
 
-	if _, err := provider.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatal(err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)
@@ -195,37 +190,8 @@ func TestM9BusinessContractHardeningMigrationBackfillConstraintsAndGuardedDown(t
 			t.Fatalf("proposal %s risk_level=%s want=%s", proposalID, got, want)
 		}
 	}
-	repository, err := changecontrolpostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	orphan, err := repository.GetProposal(ctx, foundation.ID(orphanKnowledgeID))
-	if err != nil {
-		t.Fatalf("read upgraded orphan knowledge proposal: %v", err)
-	}
-	if orphan.Type != changecontroldomain.ProposalTypeKnowledgeChange || orphan.RiskLevel != changecontroldomain.ProposalRiskLevelHigh {
-		t.Fatalf("upgraded orphan knowledge proposal = %#v", orphan)
-	}
-	items, hasMore, err := repository.ListProposals(ctx, changecontroldomain.ProposalListQuery{
-		WorkspaceID: foundation.ID(workspaceID),
-		Type:        changecontroldomain.ProposalTypeKnowledgeChange,
-		RiskLevel:   changecontroldomain.ProposalRiskLevelHigh,
-		Limit:       100,
-	})
-	if err != nil {
-		t.Fatalf("list upgraded orphan knowledge proposal: %v", err)
-	}
-	foundOrphan := false
-	for _, item := range items {
-		if item.ProposalID == foundation.ID(orphanKnowledgeID) {
-			foundOrphan = item.RiskLevel == changecontroldomain.ProposalRiskLevelHigh
-		}
-	}
-	if hasMore || !foundOrphan {
-		t.Fatalf("upgraded knowledge proposal list hasMore=%v items=%#v", hasMore, items)
-	}
 
-	_, err = pool.Exec(ctx, `INSERT INTO change_control.proposal(
+	_, err := pool.Exec(ctx, `INSERT INTO change_control.proposal(
 		id,workspace_id,proposal_type,idempotency_key,request_hash,status,version,created_at,updated_at
 	) VALUES('b9100000-0000-4000-8000-000000000009',$1,'file_patch','m9-missing-risk',repeat('d',64),'ready_for_review',1,$2,$2)`,
 		workspaceID, now)
@@ -289,6 +255,40 @@ func TestM9BusinessContractHardeningMigrationBackfillConstraintsAndGuardedDown(t
 		t.Fatalf("00033 guarded Down returned unexpected error: %v", err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)
+
+	// The current repository reads fields added after the M9-only migration assertions above.
+	if _, err := provider.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := changecontrolpostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan, err := repository.GetProposal(ctx, foundation.ID(orphanKnowledgeID))
+	if err != nil {
+		t.Fatalf("read upgraded orphan knowledge proposal: %v", err)
+	}
+	if orphan.Type != changecontroldomain.ProposalTypeKnowledgeChange || orphan.RiskLevel != changecontroldomain.ProposalRiskLevelHigh {
+		t.Fatalf("upgraded orphan knowledge proposal = %#v", orphan)
+	}
+	items, hasMore, err := repository.ListProposals(ctx, changecontroldomain.ProposalListQuery{
+		WorkspaceID: foundation.ID(workspaceID),
+		Type:        changecontroldomain.ProposalTypeKnowledgeChange,
+		RiskLevel:   changecontroldomain.ProposalRiskLevelHigh,
+		Limit:       100,
+	})
+	if err != nil {
+		t.Fatalf("list upgraded orphan knowledge proposal: %v", err)
+	}
+	foundOrphan := false
+	for _, item := range items {
+		if item.ProposalID == foundation.ID(orphanKnowledgeID) {
+			foundOrphan = item.RiskLevel == changecontroldomain.ProposalRiskLevelHigh
+		}
+	}
+	if hasMore || !foundOrphan {
+		t.Fatalf("upgraded knowledge proposal list hasMore=%v items=%#v", hasMore, items)
+	}
 }
 
 func TestM9BusinessContractHardeningBackfillRejectsDirtySourceOwnershipAtomically(t *testing.T) {
@@ -355,7 +355,7 @@ func TestM9BusinessContractHardeningBackfillRejectsDirtySourceOwnershipAtomicall
 		t.Fatal(err)
 	}
 	setM9SourceVersionMutationTrigger(t, ctx, pool, true)
-	if _, err := provider.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatalf("00032-00033 Up after repairing dirty Source Version failed: %v", err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)
@@ -399,7 +399,7 @@ func TestM9BusinessContractHardeningContractRejectsDirtyWorkflowAtomically(t *te
 	if _, err := pool.Exec(ctx, `DELETE FROM workflow.run WHERE id=$1`, dirtyRunID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatalf("00033 Up after removing dirty Workflow Run failed: %v", err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)

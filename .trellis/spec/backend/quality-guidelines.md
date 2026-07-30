@@ -428,29 +428,51 @@ Wrong: fault smoke 偶发出现 Scan=SUCCEEDED/Run=failed，重跑一次通过�
 Correct: 提高复现率、锁定持久时间精度根因、加入真实 PostgreSQL 回归，再连续运行原场景。
 ```
 
-## Scenario: M9-03 Smart Collection Export Quality Gate
+## Scenario: M9 Export Quality Gate
 
 ### 1. Scope / Trigger
 
-- 修改 Export Domain/Application/PostgreSQL/LocalFS/River/HTTP/Auth/Audit/OpenAPI、Collection Export 前端或
+- 修改 Export Domain/Application/PostgreSQL/LocalFS/River/HTTP/Auth/Audit/OpenAPI、Collection/Settings Export 前端或
   `deploy/export-browser-smoke.sh` 时，必须执行本门禁。
-- 门禁只证明 Smart Collection `MARKDOWN|METADATA_JSON`。附件、`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 和
-  AC-33 全量验收仍在后续任务；测试通过不得扩大该产品声明。
+- 门禁覆盖 `COLLECTION + MARKDOWN|METADATA_JSON` 和
+  `WORKSPACE_ATTACHMENTS + ATTACHMENTS_ZIP`；`EVALUATION_JSON|AUDIT_JSON` 继续 fail closed。
 
-### 2. Contracts
+### 2. Signatures
 
-- 真实 PostgreSQL 是 Job/lease/prepared result/cleanup/download Audit 的事实源；River 只投递，不能用 River
-  成功、readiness 或单元 Fake 代替 Create→Worker→Download 的闭环证据。
-- 故障注入必须覆盖 staging 写入、Prepare、promote、Complete、租约接管、TTL 到期、文件删除和 Audit 提交。
-  每个窗口都只能留下一个权威 result binding，或可解释的 `FAILED|EXPIRED|ManualRecovery`，不得重读可变
-  Collection 后给出第二个成功结果。
-- 安全测试必须验证 Workspace 隔离、Session/API Token/`READ_LOCAL`、默认 MASKED、Secret/绝对路径/危险公式前缀
-  canary、symlink/hash/size 检查与安全下载 header。Audit 必须记录 actor 和服务端准备返回的 outcome，而不声称
-  浏览器已收完字节。
-- 浏览器验证真实 API/Worker/Vite 的 Collection 面板：刷新恢复、同 key response-loss、`PENDING/RUNNING` 2 秒
-  有界轮询、SSE invalidation、成功下载、`FAILED/EXPIRED` 新建、桌面/390x844 键盘、无横向溢出和 console warning/error。
+- 后端门禁覆盖 `internal/export/...`、Auth/Router/API/Worker、`migrations/00036` 基线和前向 `00063`。
+- 动态门禁使用真实 `ZHIXU_TEST_DATABASE_URL`，并通过 `deploy/export-browser-smoke.sh` 启动 API、Worker、Vite。
+- `FileStore.Open` 必须返回同一已验证 FD 的 `io.ReadCloser`；HTTP 按 durable size 流式返回。
 
-### 3. Required Commands
+### 3. Contracts
+
+- PostgreSQL 是 tagged Job/gate/lease/prepared/cleanup/download Audit 的事实源；River 只投递，readiness/Fake 不替代闭环。
+- 故障注入覆盖 Stage/Prepare/Promote/Complete、租约接管、TTL、删除和 Audit；prepared 后不得重读可变源生成第二结果。
+- Migration 必须覆盖 fresh/repeat/upgrade/guarded Down，以及 `CHECK` 的 NULL/UNKNOWN `23514`；禁止修改 `00036`。
+- LocalFS 安全测试覆盖 fd-relative no-follow、create-only、prepared replacement、orphan namespace、目录有界枚举、
+  NFC 排序、unsafe entry、limit、源/祖先/final snapshot 变化和流式 hash/size 校验。
+- Auth/HTTP 覆盖 Workspace、Session/API Token、CSRF/Origin、`READ_LOCAL`、安全下载头和 anti-enumeration；
+  `RAW_USER_OWNED` 不得伪装脱敏。Audit 只记录服务端 prepared-for-return。
+- 浏览器验证 Collection 与附件两个入口的刷新/重启恢复、同 key、轮询/SSE、ZIP 解包/hash、权限/跨 Workspace/
+  unsafe/源变化/tamper/expiry/cleanup、桌面/390x844 与 console/network。
+
+### 4. Validation & Error Matrix
+
+| Failure | Required result |
+|---|---|
+| gate 关闭/contract mismatch | 不创建或 claim 附件 Job；Collection 保持可用 |
+| NULL 绕过 scope/prepared/path | migration integration 必须得到 `23514` |
+| final/prepared/source path 竞态 | 保留 winner/replacement/source，不产生 partial success |
+| 合法大 ZIP 下载 | 验证后流式返回，不 `ReadAll` 到 Go 堆；失败路径关闭流 |
+| 聚合 DB 三轮超过 60 秒 | 按独立测试拆分，每项仍须 `-race -count=3 -timeout 60s` 且无断言失败 |
+| 浏览器未解包逐字节验证 | 不得关闭 AC-33 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：真实 PostgreSQL/River/API/Worker/LocalFS/Vite 贯穿创建、恢复、下载、Audit、过期和 cleanup，源附件保持不变。
+- Base：gate disabled 或空附件目录均有明确、可重复结果；失败/过期保留历史并可用新 key 重试。
+- Bad：只测 Create 202、只用 mock fetch、修改已提交 migration、用 `ReadAll` 返回 1 GiB ZIP，或把附件 cleanup 指向源目录。
+
+### 6. Tests Required
 
 ```bash
 go test -race -count=1 -timeout 60s ./internal/export/... ./internal/events/... ./internal/audit/... ./internal/auth/http ./internal/app ./cmd/api ./cmd/worker
@@ -468,11 +490,12 @@ git diff --check
 - Export 涉及公共 API、PostgreSQL、文件、认证、Audit、Worker 和前端，完成代码改动后必须执行 Go、SQL、通用
   review，并由独立只读 reviewer 复验需求范围、崩溃恢复、安全边界和实际门禁结果。
 
-### 4. Wrong vs Correct
+### 7. Wrong vs Correct
 
 ```text
 Wrong: 只验证 Create 返回 202，或只用 mock fetch 截图就宣称 Export/AC-33 完成。
-Correct: 从真实 PostgreSQL/API/Worker/LocalFS/Audit/浏览器证明可恢复结果与受控下载；AC-33 仍明确为部分完成。
+Correct: 从真实 PostgreSQL/API/Worker/LocalFS/Audit/浏览器证明 Collection 与附件可恢复结果、ZIP 字节和受控下载；
+AC-33 才能标记完成，Evaluation/Audit 内容导出仍保持后续。
 ```
 
 ## Scenario: M8 Review, Interview And Memory Quality Gate

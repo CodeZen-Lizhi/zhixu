@@ -39,7 +39,7 @@ func (reader *SnapshotReader) ReadCollection(ctx context.Context, workspaceID fo
 	if reader == nil || isNil(reader.service) {
 		return exportapp.CollectionSnapshot{}, unavailable(errors.New("collection export reader is unavailable"))
 	}
-	if ctx == nil || !validID(workspaceID) || scope.CollectionID == nil || scope.CollectionVersion == nil ||
+	if ctx == nil || !validID(workspaceID) || scope.Kind != domain.ScopeCollection || scope.CollectionID == nil || scope.CollectionVersion == nil ||
 		!validID(*scope.CollectionID) || *scope.CollectionVersion < 1 || !validHash(scope.QueryHash) || maxItems < 1 {
 		return exportapp.CollectionSnapshot{}, invalid(errors.New("collection export scope is invalid"))
 	}

@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,44 @@ func TestServiceCreateExactReplayDoesNotReadMutableDependencies(t *testing.T) {
 	}
 	if workspaceReads != 0 || snapshotReads != 0 {
 		t.Fatalf("exact replay read mutable dependencies: workspace=%d snapshot=%d", workspaceReads, snapshotReads)
+	}
+}
+
+func TestComputeRequestHashPreservesLegacyCollectionDigest(t *testing.T) {
+	digest, err := ComputeRequestHash(serviceCreateRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const legacyDigest = "5167189b47455e6e3a14e3b52fbd6988576dd7b99fbbb6e1f0656186f9f10d19"
+	if digest != legacyDigest {
+		t.Fatalf("Collection request digest=%q, want legacy digest %q", digest, legacyDigest)
+	}
+}
+
+func TestServiceCreateAttachmentUsesCanonicalTaggedBinding(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.UTC)
+	request := serviceAttachmentCreateRequest()
+	repository := &serviceRepositoryStub{
+		create: func(_ context.Context, candidate domain.Job) (domain.Job, bool, error) {
+			if candidate.Scope.Kind != domain.ScopeWorkspaceAttachments || candidate.Kind != domain.KindAttachmentsZIP ||
+				candidate.SchemaVersion != "attachment-export/v1" || candidate.Scope.AttachmentRootContractVersion != "workspace-attachments/v1" ||
+				candidate.Scope.CollectionID != nil || candidate.Scope.CollectionVersion != nil || candidate.Scope.QueryHash != "" ||
+				candidate.Fields == nil || len(candidate.Fields) != 0 || candidate.Redaction != domain.RedactionRawUserOwned || candidate.IncludeSensitive {
+				t.Fatalf("attachment candidate = %#v", candidate)
+			}
+			if err := candidate.Validate(); err != nil {
+				t.Fatalf("attachment candidate is invalid: %v", err)
+			}
+			return candidate, false, nil
+		},
+	}
+	service := newServiceForTest(t, repository, &serviceSnapshotStub{}, &serviceWorkspaceStub{}, &serviceFileStub{}, now)
+	result, err := service.Create(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Replayed || result.Job.RequestHash == "" || result.Job.RequestTTLSeconds != int64(DefaultTTL/time.Second) {
+		t.Fatalf("attachment create result = %#v", result)
 	}
 }
 
@@ -205,6 +244,137 @@ func TestServiceExecuteFirstRunStagesPreparesPromotesAndCompletes(t *testing.T) 
 	}
 	if got, want := strings.Join(steps, ","), "claim,snapshot,stage,prepare,promote,complete"; got != want {
 		t.Fatalf("first execution steps=%q, want %q", got, want)
+	}
+}
+
+func TestServiceExecuteAttachmentStagesPreparesPromotesAndCompletes(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.UTC)
+	claimed := serviceAttachmentRunningJob(now)
+	archive := AttachmentArchive{
+		PreparedFile: PreparedFile{
+			StagingPath: ".knowledge/exports/.staging/" + string(claimed.ID) + "-" + strings.Repeat("d", 32) + ".zip.stage",
+			FinalPath:   ".knowledge/exports/" + string(claimed.ID) + ".zip",
+			FileHash:    strings.Repeat("c", 64),
+			FileSize:    321,
+		},
+		ManifestHash: strings.Repeat("b", 64), EntryCount: 2, TotalUncompressedBytes: 42,
+	}
+	steps := make([]string, 0, 5)
+	snapshotReads := 0
+	repository := &serviceRepositoryStub{
+		claim: func(_ context.Context, workspaceID, jobID foundation.ID, owner string, lease time.Duration) (domain.Job, bool, error) {
+			steps = append(steps, "claim")
+			if workspaceID != claimed.WorkspaceID || jobID != claimed.ID || owner != claimed.LeaseOwner || lease != 4*time.Minute {
+				t.Fatalf("attachment claim binding workspace=%s job=%s owner=%q lease=%s", workspaceID, jobID, owner, lease)
+			}
+			return claimed, true, nil
+		},
+		prepare: func(_ context.Context, request PrepareRequest) (domain.Job, error) {
+			steps = append(steps, "prepare")
+			if request.WorkspaceID != claimed.WorkspaceID || request.JobID != claimed.ID || request.LeaseOwner != claimed.LeaseOwner ||
+				request.ExpectedVersion != claimed.Version || request.ReadModelRevision != "" || request.ExactCount != 0 ||
+				request.ManifestHash != archive.ManifestHash || request.EntryCount != archive.EntryCount ||
+				request.TotalUncompressedBytes != archive.TotalUncompressedBytes || request.PreparedFile != archive.PreparedFile {
+				t.Fatalf("attachment prepare request = %#v", request)
+			}
+			return prepareAttachmentJob(claimed, archive), nil
+		},
+		complete: func(_ context.Context, request CompleteRequest) (domain.Job, error) {
+			steps = append(steps, "complete")
+			prepared := prepareAttachmentJob(claimed, archive)
+			if request.ExpectedVersion != prepared.Version || request.PreparedFile != archive.PreparedFile {
+				t.Fatalf("attachment completion request = %#v", request)
+			}
+			completed := prepared
+			completed.Status = domain.StatusSucceeded
+			completed.Version++
+			completed.UpdatedAt = prepared.UpdatedAt.Add(time.Second)
+			completed.CompletedAt = cloneServiceTime(completed.UpdatedAt)
+			completed.LeaseOwner = ""
+			completed.LeaseExpiresAt = nil
+			return completed, nil
+		},
+	}
+	attachments := &serviceAttachmentStub{stage: func(_ context.Context, workspaceID, jobID foundation.ID) (AttachmentArchive, error) {
+		steps = append(steps, "archive")
+		if workspaceID != claimed.WorkspaceID || jobID != claimed.ID {
+			t.Fatalf("attachment archive binding workspace=%s job=%s", workspaceID, jobID)
+		}
+		return archive, nil
+	}}
+	files := &serviceFileStub{promote: func(_ context.Context, workspaceID foundation.ID, file PreparedFile) error {
+		steps = append(steps, "promote")
+		if workspaceID != claimed.WorkspaceID || file != archive.PreparedFile {
+			t.Fatalf("attachment promote binding workspace=%s file=%#v", workspaceID, file)
+		}
+		return nil
+	}}
+	service := newAttachmentServiceForTest(t, repository, &serviceSnapshotStub{reads: &snapshotReads}, files, attachments, now)
+	if err := service.Execute(context.Background(), claimed.WorkspaceID, claimed.ID, claimed.LeaseOwner); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(steps, ","), "claim,archive,prepare,promote,complete"; got != want || snapshotReads != 0 {
+		t.Fatalf("attachment execution steps=%q snapshot reads=%d, want %q/0", got, snapshotReads, want)
+	}
+}
+
+func TestValidateAttachmentArchiveRejectsOversizedResult(t *testing.T) {
+	exportID := serviceID(13)
+	archive := AttachmentArchive{
+		PreparedFile: PreparedFile{
+			StagingPath: ".knowledge/exports/.staging/" + string(exportID) + "-" + strings.Repeat("d", 32) + ".zip.stage",
+			FinalPath:   exportRelativePath(exportID, "zip"),
+			FileHash:    strings.Repeat("c", 64),
+			FileSize:    1<<30 + 1,
+		},
+		ManifestHash: strings.Repeat("b", 64),
+	}
+
+	if err := validateAttachmentArchive(archive, exportID); err == nil {
+		t.Fatal("attachment archive above the v1 result limit was accepted")
+	}
+}
+
+func TestServiceExecutePreparedAttachmentReplaySkipsSource(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.UTC)
+	claimed := serviceAttachmentRunningJob(now)
+	archive := AttachmentArchive{
+		PreparedFile: PreparedFile{
+			StagingPath: ".knowledge/exports/.staging/" + string(claimed.ID) + "-" + strings.Repeat("d", 32) + ".zip.stage",
+			FinalPath:   ".knowledge/exports/" + string(claimed.ID) + ".zip",
+			FileHash:    strings.Repeat("c", 64), FileSize: 321,
+		},
+		ManifestHash: strings.Repeat("b", 64), EntryCount: 2, TotalUncompressedBytes: 42,
+	}
+	prepared := prepareAttachmentJob(claimed, archive)
+	snapshotReads := 0
+	archiveReads := 0
+	repository := &serviceRepositoryStub{
+		claim: func(context.Context, foundation.ID, foundation.ID, string, time.Duration) (domain.Job, bool, error) {
+			return prepared, true, nil
+		},
+		complete: func(_ context.Context, request CompleteRequest) (domain.Job, error) {
+			completed := prepared
+			completed.Status = domain.StatusSucceeded
+			completed.Version++
+			completed.UpdatedAt = prepared.UpdatedAt.Add(time.Second)
+			completed.CompletedAt = cloneServiceTime(completed.UpdatedAt)
+			completed.LeaseOwner = ""
+			completed.LeaseExpiresAt = nil
+			return completed, nil
+		},
+	}
+	attachments := &serviceAttachmentStub{stage: func(context.Context, foundation.ID, foundation.ID) (AttachmentArchive, error) {
+		archiveReads++
+		return AttachmentArchive{}, errors.New("prepared replay opened the attachment source")
+	}}
+	files := &serviceFileStub{promote: func(context.Context, foundation.ID, PreparedFile) error { return nil }}
+	service := newAttachmentServiceForTest(t, repository, &serviceSnapshotStub{reads: &snapshotReads}, files, attachments, now)
+	if err := service.Execute(context.Background(), prepared.WorkspaceID, prepared.ID, prepared.LeaseOwner); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotReads != 0 || archiveReads != 0 {
+		t.Fatalf("prepared attachment replay read mutable sources: snapshot=%d archive=%d", snapshotReads, archiveReads)
 	}
 }
 
@@ -420,7 +590,8 @@ func TestServiceDownloadAsPassesCurrentActorToAtomicRecord(t *testing.T) {
 	repository := &serviceRepositoryStub{
 		get: func(context.Context, foundation.ID, foundation.ID) (domain.Job, error) { return job, nil },
 		recordDownload: func(_ context.Context, request DownloadRecord) (domain.Job, error) {
-			if request.Actor != actor || request.FileHash != job.FileHash || request.FileSize != job.FileSize {
+			if request.Actor != actor || request.ScopeKind != domain.ScopeCollection || request.EntryCount != nil ||
+				request.FileHash != job.FileHash || request.FileSize != job.FileSize {
 				t.Fatalf("download record = %#v", request)
 			}
 			updated := job
@@ -431,16 +602,87 @@ func TestServiceDownloadAsPassesCurrentActorToAtomicRecord(t *testing.T) {
 			return updated, nil
 		},
 	}
-	files := &serviceFileStub{read: func(context.Context, foundation.ID, string, string, int64) ([]byte, error) {
-		return payload, nil
+	files := &serviceFileStub{open: func(context.Context, foundation.ID, string, string, int64) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(string(payload))), nil
 	}}
 	service := newServiceForTest(t, repository, &serviceSnapshotStub{}, &serviceWorkspaceStub{}, files, now)
 	updated, content, err := service.DownloadAs(context.Background(), job.WorkspaceID, job.ID, actor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.DownloadCount != 1 || string(content) != string(payload) {
-		t.Fatalf("updated=%#v content=%q", updated, content)
+	defer content.Close()
+	body, err := io.ReadAll(content)
+	if err != nil || updated.DownloadCount != 1 || string(body) != string(payload) {
+		t.Fatalf("updated=%#v content=%q err=%v", updated, body, err)
+	}
+}
+
+func TestServiceDownloadAsClosesVerifiedStreamWhenAuditFails(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 30, 0, 0, time.UTC)
+	job := servicePreparedRunningJob(now)
+	job.Status = domain.StatusSucceeded
+	job.Version++
+	job.UpdatedAt = job.UpdatedAt.Add(time.Second)
+	job.CompletedAt = cloneServiceTime(job.UpdatedAt)
+	job.LeaseOwner = ""
+	job.LeaseExpiresAt = nil
+	stream := &serviceTrackedReadCloser{Reader: strings.NewReader("verified")}
+	repository := &serviceRepositoryStub{
+		get: func(context.Context, foundation.ID, foundation.ID) (domain.Job, error) { return job, nil },
+		recordDownload: func(context.Context, DownloadRecord) (domain.Job, error) {
+			return domain.Job{}, errors.New("injected Audit failure")
+		},
+	}
+	files := &serviceFileStub{open: func(context.Context, foundation.ID, string, string, int64) (io.ReadCloser, error) {
+		return stream, nil
+	}}
+	service := newServiceForTest(t, repository, &serviceSnapshotStub{}, &serviceWorkspaceStub{}, files, now)
+	_, content, err := service.DownloadAs(context.Background(), job.WorkspaceID, job.ID, DownloadActor{Type: auditdomain.ActorUser, Ref: string(serviceID(88))})
+	if err == nil || content != nil || !stream.closed {
+		t.Fatalf("Audit failure err=%v content=%v stream_closed=%t", err, content, stream.closed)
+	}
+}
+
+func TestServiceDownloadAsForScopeRejectsWrongScopeBeforeSideEffects(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.UTC)
+	job := serviceAttachmentRunningJob(now)
+	job = prepareAttachmentJob(job, AttachmentArchive{
+		PreparedFile: PreparedFile{
+			StagingPath: ".knowledge/exports/.staging/" + string(job.ID) + "-" + strings.Repeat("d", 32) + ".zip.stage",
+			FinalPath:   ".knowledge/exports/" + string(job.ID) + ".zip",
+			FileHash:    strings.Repeat("c", 64), FileSize: 16,
+		},
+		ManifestHash: strings.Repeat("b", 64), EntryCount: 1, TotalUncompressedBytes: 8,
+	})
+	completedAt := job.UpdatedAt.Add(time.Second)
+	job.Status = domain.StatusSucceeded
+	job.Version++
+	job.UpdatedAt = completedAt
+	job.CompletedAt = &completedAt
+	job.LeaseOwner = ""
+	job.LeaseExpiresAt = nil
+
+	fileReads := 0
+	downloadRecords := 0
+	repository := &serviceRepositoryStub{
+		get: func(context.Context, foundation.ID, foundation.ID) (domain.Job, error) { return job, nil },
+		recordDownload: func(context.Context, DownloadRecord) (domain.Job, error) {
+			downloadRecords++
+			return domain.Job{}, errors.New("unexpected download record")
+		},
+	}
+	files := &serviceFileStub{open: func(context.Context, foundation.ID, string, string, int64) (io.ReadCloser, error) {
+		fileReads++
+		return nil, errors.New("unexpected file read")
+	}}
+	service := newServiceForTest(t, repository, &serviceSnapshotStub{}, &serviceWorkspaceStub{}, files, now)
+	_, _, err := service.DownloadAsForScope(context.Background(), job.WorkspaceID, job.ID, domain.ScopeCollection, DownloadActor{Type: auditdomain.ActorUser, Ref: string(serviceID(88))})
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != domain.ErrorCodeNotFound || classified.Kind != foundation.ErrorNotFound {
+		t.Fatalf("wrong-scope download error=%v classified=%#v", err, classified)
+	}
+	if fileReads != 0 || downloadRecords != 0 {
+		t.Fatalf("wrong-scope download side effects: file reads=%d download records=%d", fileReads, downloadRecords)
 	}
 }
 
@@ -477,7 +719,8 @@ func TestServiceDownloadAsAllowsConcurrentMonotonicRecords(t *testing.T) {
 		recordDownload: func(_ context.Context, request DownloadRecord) (domain.Job, error) {
 			recordMu.Lock()
 			defer recordMu.Unlock()
-			if request.FileHash != job.FileHash || request.FileSize != job.FileSize {
+			if request.ScopeKind != domain.ScopeCollection || request.EntryCount != nil ||
+				request.FileHash != job.FileHash || request.FileSize != job.FileSize {
 				return domain.Job{}, errors.New("concurrent download result binding changed")
 			}
 			if _, exists := auditIDs[request.AuditEventID]; exists {
@@ -491,8 +734,8 @@ func TestServiceDownloadAsAllowsConcurrentMonotonicRecords(t *testing.T) {
 			return durable, nil
 		},
 	}
-	files := &serviceFileStub{read: func(context.Context, foundation.ID, string, string, int64) ([]byte, error) {
-		return append([]byte(nil), payload...), nil
+	files := &serviceFileStub{open: func(context.Context, foundation.ID, string, string, int64) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(string(payload))), nil
 	}}
 	service, err := NewService(Dependencies{
 		Repository: repository, Snapshots: &serviceSnapshotStub{}, Workspaces: &serviceWorkspaceStub{}, Files: files,
@@ -504,7 +747,7 @@ func TestServiceDownloadAsAllowsConcurrentMonotonicRecords(t *testing.T) {
 
 	type downloadResult struct {
 		job     domain.Job
-		content []byte
+		content io.ReadCloser
 		err     error
 	}
 	start := make(chan struct{})
@@ -524,8 +767,10 @@ func TestServiceDownloadAsAllowsConcurrentMonotonicRecords(t *testing.T) {
 		if result.err != nil {
 			t.Fatalf("concurrent DownloadAs error: %v", result.err)
 		}
-		if string(result.content) != string(payload) {
-			t.Fatalf("concurrent DownloadAs content=%q", result.content)
+		body, readErr := io.ReadAll(result.content)
+		closeErr := result.content.Close()
+		if readErr != nil || closeErr != nil || string(body) != string(payload) {
+			t.Fatalf("concurrent DownloadAs content=%q read=%v close=%v", body, readErr, closeErr)
 		}
 		seenCounts[result.job.DownloadCount] = struct{}{}
 	}
@@ -556,14 +801,37 @@ func newServiceForTest(t *testing.T, repository Repository, snapshots SnapshotRe
 	return service
 }
 
+func newAttachmentServiceForTest(t *testing.T, repository Repository, snapshots SnapshotReader, files FileStore, attachments AttachmentArchiver, now time.Time) *Service {
+	t.Helper()
+	service, err := NewService(Dependencies{
+		Repository: repository, Snapshots: snapshots, Workspaces: &serviceWorkspaceStub{}, Files: files, Attachments: attachments,
+		IDs: serviceIDGenerator{}, Clock: foundation.FixedClock{Value: now}, Lease: 4 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
 func serviceCreateRequest() domain.CreateRequest {
 	collectionID := serviceID(2)
 	version := int64(3)
 	return domain.CreateRequest{
 		WorkspaceID: serviceID(1), Kind: domain.KindMarkdown,
-		Scope:  domain.Scope{CollectionID: &collectionID, CollectionVersion: &version, QueryHash: strings.Repeat("a", 64)},
+		Scope:  domain.Scope{Kind: domain.ScopeCollection, CollectionID: &collectionID, CollectionVersion: &version, QueryHash: strings.Repeat("a", 64)},
 		Fields: []domain.Field{domain.FieldTitle, domain.FieldID}, Redaction: domain.RedactionMasked,
 		IdempotencyKey: "export-service-test", RequestedBy: "USER:test", PermissionScope: "READ_LOCAL",
+	}
+}
+
+func serviceAttachmentCreateRequest() domain.CreateRequest {
+	return domain.CreateRequest{
+		WorkspaceID: serviceID(1), Kind: domain.KindAttachmentsZIP,
+		Scope: domain.Scope{
+			Kind:                          domain.ScopeWorkspaceAttachments,
+			AttachmentRootContractVersion: "workspace-attachments/v1",
+		},
+		IdempotencyKey: "attachment-export-service-test", RequestedBy: "USER:test", PermissionScope: "READ_LOCAL",
 	}
 }
 
@@ -578,6 +846,49 @@ func servicePendingJob(now time.Time) domain.Job {
 		Status: domain.StatusPending, Version: 1, ExpiresAt: now.Add(DefaultTTL), CreatedAt: now, UpdatedAt: now,
 		CleanupStatus: domain.CleanupNotRequired,
 	}
+}
+
+func serviceAttachmentPendingJob(now time.Time) domain.Job {
+	request := serviceAttachmentCreateRequest()
+	return domain.Job{
+		ID: serviceID(13), WorkspaceID: request.WorkspaceID, Kind: request.Kind, SchemaVersion: "attachment-export/v1",
+		Scope: request.Scope, Redaction: domain.RedactionRawUserOwned,
+		PermissionScope: request.PermissionScope, RequestedBy: request.RequestedBy,
+		IdempotencyKey: request.IdempotencyKey, RequestHash: strings.Repeat("9", 64), RequestTTLSeconds: int64(DefaultTTL / time.Second),
+		Status: domain.StatusPending, Version: 1, ExpiresAt: now.Add(DefaultTTL), CreatedAt: now, UpdatedAt: now,
+		CleanupStatus: domain.CleanupNotRequired,
+	}
+}
+
+func serviceAttachmentRunningJob(now time.Time) domain.Job {
+	job := serviceAttachmentPendingJob(now)
+	startedAt := now.Add(time.Second)
+	leaseExpiresAt := now.Add(10 * time.Minute)
+	job.Status = domain.StatusRunning
+	job.Version = 2
+	job.AttemptCount = 1
+	job.UpdatedAt = startedAt
+	job.StartedAt = &startedAt
+	job.LeaseOwner = "worker:attachment"
+	job.LeaseExpiresAt = &leaseExpiresAt
+	return job
+}
+
+func prepareAttachmentJob(job domain.Job, archive AttachmentArchive) domain.Job {
+	preparedAt := job.UpdatedAt.Add(time.Second)
+	entryCount := archive.EntryCount
+	totalBytes := archive.TotalUncompressedBytes
+	job.Version++
+	job.UpdatedAt = preparedAt
+	job.PreparedAt = &preparedAt
+	job.ManifestHash = archive.ManifestHash
+	job.EntryCount = &entryCount
+	job.TotalUncompressedBytes = &totalBytes
+	job.PreparedStagingPath = archive.PreparedFile.StagingPath
+	job.FilePath = archive.PreparedFile.FinalPath
+	job.FileHash = archive.PreparedFile.FileHash
+	job.FileSize = archive.PreparedFile.FileSize
+	return job
 }
 
 func servicePreparedRunningJob(now time.Time) domain.Job {
@@ -642,6 +953,17 @@ type serviceSnapshotStub struct {
 	readCollection func(context.Context, foundation.ID, domain.Scope, int) (CollectionSnapshot, error)
 }
 
+type serviceAttachmentStub struct {
+	stage func(context.Context, foundation.ID, foundation.ID) (AttachmentArchive, error)
+}
+
+func (stub *serviceAttachmentStub) StageAttachments(ctx context.Context, workspaceID, jobID foundation.ID) (AttachmentArchive, error) {
+	if stub.stage == nil {
+		return AttachmentArchive{}, errors.New("unexpected attachment archive")
+	}
+	return stub.stage(ctx, workspaceID, jobID)
+}
+
 func (stub *serviceSnapshotStub) ReadCollection(ctx context.Context, workspaceID foundation.ID, scope domain.Scope, limit int) (CollectionSnapshot, error) {
 	if stub.reads != nil {
 		*stub.reads++
@@ -655,8 +977,18 @@ func (stub *serviceSnapshotStub) ReadCollection(ctx context.Context, workspaceID
 type serviceFileStub struct {
 	stage   func(context.Context, foundation.ID, foundation.ID, string, []byte) (PreparedFile, error)
 	promote func(context.Context, foundation.ID, PreparedFile) error
-	read    func(context.Context, foundation.ID, string, string, int64) ([]byte, error)
+	open    func(context.Context, foundation.ID, string, string, int64) (io.ReadCloser, error)
 	delete  func(context.Context, foundation.ID, string) error
+}
+
+type serviceTrackedReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (stream *serviceTrackedReadCloser) Close() error {
+	stream.closed = true
+	return nil
 }
 
 func (stub *serviceFileStub) Stage(ctx context.Context, workspaceID, jobID foundation.ID, extension string, payload []byte) (PreparedFile, error) {
@@ -671,11 +1003,11 @@ func (stub *serviceFileStub) Promote(ctx context.Context, workspaceID foundation
 	}
 	return stub.promote(ctx, workspaceID, file)
 }
-func (stub *serviceFileStub) Read(ctx context.Context, workspaceID foundation.ID, path, hash string, size int64) ([]byte, error) {
-	if stub.read == nil {
+func (stub *serviceFileStub) Open(ctx context.Context, workspaceID foundation.ID, path, hash string, size int64) (io.ReadCloser, error) {
+	if stub.open == nil {
 		return nil, errors.New("unexpected read")
 	}
-	return stub.read(ctx, workspaceID, path, hash, size)
+	return stub.open(ctx, workspaceID, path, hash, size)
 }
 func (stub *serviceFileStub) DeletePrepared(ctx context.Context, workspaceID foundation.ID, path, _ string, _ int64) error {
 	if stub.delete == nil {

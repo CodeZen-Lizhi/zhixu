@@ -484,39 +484,63 @@ Wrong: detail 与 summary 共用 `omitempty`，让字段缺失同时代表“未
 Correct: detail 必需 nullable；summary optional non-null；HTTP、OpenAPI 与 decoder 用回归测试共同锁定。
 ```
 
-## Scenario: M9-03 Export HTTP And Recovery Error Contract
+## Scenario: M9 Export HTTP And Recovery Error Contract
 
 ### 1. Scope / Trigger
 
-- 修改 Export Domain/Application/HTTP、Collection Export Router、下载、cleanup、OpenAPI 或前端 Problem 处理时应用。
-  本契约只覆盖 Smart Collection `MARKDOWN|METADATA_JSON`；附件、`EVALUATION_JSON`、`AUDIT_JSON` 的缺失必须明确为
-  未交付范围，不能映射成空成功。
+- 修改 Export Domain/Application/HTTP、Collection 或 Workspace attachment-export Router、下载、cleanup、OpenAPI
+  或前端 Problem 处理时应用。
+- 已交付 scope 为 Smart Collection `MARKDOWN|METADATA_JSON` 与 Workspace `ATTACHMENTS_ZIP`；
+  `EVALUATION_JSON|AUDIT_JSON` 仍未交付，必须 fail closed，不能映射成空成功。
 
-### 2. Error Matrix
+### 2. Signatures
 
-| 条件 | HTTP / 稳定 code | 语义 |
-|---|---|---|
-| 严格 JSON、请求/查询/header、kind、TTL、cursor 或 Idempotency-Key 非法 | `400 EXPORT_REQUEST_INVALID` / `INVALID_JSON` | 不创建或不查询 Job |
-| Job、Active Collection 或 Workspace binding 不存在 | `404 EXPORT_NOT_FOUND` | 跨 Workspace 与不存在统一，防止枚举 |
-| `FULL + include_sensitive`、主体或 `READ_LOCAL` 不满足 | `403 EXPORT_PERMISSION_DENIED` | 不泄漏字段、路径或权限细节 |
-| 同 key 绑定不同规范请求，或 Collection version/query hash 漂移 | `409 EXPORT_IDEMPOTENCY_CONFLICT` | 既有 exact replay 优先于当前态检查 |
-| 下载尚未 `SUCCEEDED` | `409 EXPORT_RESULT_NOT_READY` | 不返回空文件或假下载 URL |
-| Get/List/Download/Worker 检查到 TTL 到期 | `410 EXPORT_EXPIRED`（下载）或持久 `EXPIRED` 投影 | 保留 Job/cleanup 历史 |
-| hash、size、路径、snapshot 或 prepared binding 不一致 | `500 EXPORT_RESULT_INCONSISTENT` | fail closed，不增加下载统计或重 render |
-| PostgreSQL、River、文件或 Audit 依赖暂时不可用 | `503 EXPORT_DEPENDENCY_UNAVAILABLE` | 保留 PENDING/recoverable 事实 |
+- Collection 路由绑定 Workspace、Collection ID 与 Job ID；attachment 路由只绑定 Workspace 与 Job ID，不使用 dummy Collection。
+- Create 使用 Workspace-scoped `Idempotency-Key`；exact replay 返回 `200`，首次受理返回 `202`。
+- 下载只从持久 Job 的 scope、状态、expiry、hash、size 和生成文件 binding 得出结果；附件响应额外固定
+  `application/zip`、`Content-Length`、`private, no-store` 与 `nosniff`。
 
 ### 3. Contracts
 
 - Handler、Worker、日志、Server Event 和 Audit 复用同一稳定 error code；HTTP 不返回 SQL、filesystem path、
-  staging locator、Secret、正文、hash 以外的受限内部绑定或底层错误原因。
+  staging locator、Secret、正文、完整附件路径列表或底层错误原因。
 - 文件 promote/Complete、下载响应和 Audit 任一结果未知时，不得伪装为 `SUCCEEDED`。Download Audit 只说明服务端
   已准备开始返回，不把 socket 写入完成当作客户端成功接收。
 - `FAILED/EXPIRED` 由用户显式使用新 Idempotency-Key 新建；响应丢失和可重试 transport 错误继续使用原 key。
   `CANCELLED` 只为历史兼容展示，不新增取消或把它映射为失败。
+- 附件 root 缺失、unsafe entry、Unicode/path 冲突、上限和扫描中源变化均整体失败；不得跳过条目、截断或留下可下载 partial ZIP。
 
-### 4. Tests Required
+### 4. Validation & Error Matrix
+
+| 条件 | HTTP / 稳定 code | 语义 |
+|---|---|---|
+| 严格 JSON、请求/查询/header、kind、TTL、cursor 或 Idempotency-Key 非法 | `400 EXPORT_REQUEST_INVALID` / `INVALID_JSON` | 不创建或不查询 Job |
+| Job、Active Collection、附件 root 或 Workspace binding 不存在 | `404 EXPORT_NOT_FOUND` / `EXPORT_ATTACHMENT_ROOT_NOT_FOUND` | 跨 Workspace 与不存在统一防枚举；root 缺失显式失败 |
+| `FULL + include_sensitive`、主体或 `READ_LOCAL` 不满足 | `403 EXPORT_PERMISSION_DENIED` | 不泄漏字段、路径或权限细节 |
+| 同 key 绑定不同规范请求，或 scope/version/query hash 漂移 | `409 EXPORT_IDEMPOTENCY_CONFLICT` | 既有 exact replay 优先于当前态检查 |
+| 下载尚未 `SUCCEEDED` | `409 EXPORT_RESULT_NOT_READY` | 不返回空文件或假下载 URL |
+| Get/List/Download/Worker 检查到 TTL 到期 | `410 EXPORT_EXPIRED`（下载）或持久 `EXPIRED` 投影 | 保留 Job/cleanup 历史 |
+| unsafe entry、路径冲突、上限或源变化 | 稳定 `EXPORT_ATTACHMENT_*` code | 整体失败，不生成 partial success |
+| hash、size、路径、snapshot、manifest 或 prepared binding 不一致 | `500 EXPORT_RESULT_INCONSISTENT` | fail closed，不增加下载统计或重新扫描/render |
+| PostgreSQL、River、文件或 Audit 依赖暂时不可用 | `503 EXPORT_DEPENDENCY_UNAVAILABLE` | 保留 PENDING/recoverable 事实 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：附件 ZIP 在同一已验证 FD 上完成 hash/size 校验并流式返回，随后记录 `prepared_for_return` Audit。
+- Base：空 `attachments/` 返回含 zero-entry manifest 的成功 ZIP；缺失目录返回稳定失败。
+- Bad：把 `available:false`、空文件或部分 ZIP 标成成功，或在 prepared 恢复时重新读取已变化的源附件。
+
+### 6. Tests Required
 
 - Handler 覆盖严格 JSON、重复 query/header、200 replay/202 create、404 anti-enumeration、409/410/500/503、
-  下载安全 header 与不回显私有数据。
-- Application/PG fault 覆盖 lease loss、prepared 后崩溃、到期竞态、hash/size 不一致、Audit 失败回滚和 cleanup retry；
-  前端覆盖 Problem 严格解码、下载 410 与新建出口。
+  ZIP 下载安全 header、流长度与不回显私有数据。
+- Application/PG/LocalFS fault 覆盖 lease loss、prepared 后崩溃、到期竞态、unsafe/source mutation、hash/size/manifest
+  不一致、Audit 失败回滚和 cleanup retry；前端覆盖 Problem 严格解码、下载 410 与新建出口。
+- 真实 API/Worker/PostgreSQL/Vite smoke 必须覆盖权限、跨 Workspace、篡改、过期和 cleanup 后源附件不变。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: unsafe entry 或未交付 kind 仍生成成功文件，再让前端解释 unavailable。
+Correct: 在边界返回稳定错误且不 Prepare；只有完全验证的持久 binding 才能进入下载和 Audit。
+```

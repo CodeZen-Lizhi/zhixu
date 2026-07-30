@@ -35,6 +35,7 @@ type PayloadSummary struct {
 	PublicationStatus string         `json:"publication_status,omitempty"`
 	ResultType        string         `json:"result_type,omitempty"`
 	Stage             string         `json:"stage,omitempty"`
+	ScopeKind         string         `json:"scope_kind,omitempty"`
 	CandidateCount    *int64         `json:"candidate_count,omitempty"`
 	SelectedCount     *int64         `json:"selected_count,omitempty"`
 	ConflictCount     *int64         `json:"conflict_count,omitempty"`
@@ -62,6 +63,9 @@ func (summary PayloadSummary) Validate() error {
 			return invalid(ErrorCodePayloadSummaryInvalid, "SSE payload summary token is invalid", nil)
 		}
 	}
+	if summary.ScopeKind != "" && summary.ScopeKind != "collection" && summary.ScopeKind != "workspace_attachments" {
+		return invalid(ErrorCodePayloadSummaryInvalid, "SSE payload summary scope kind is invalid", nil)
+	}
 	for _, count := range []*int64{
 		summary.CandidateCount, summary.SelectedCount, summary.ConflictCount,
 		summary.DegradationCount, summary.RewriteCount, summary.CitationCount,
@@ -80,7 +84,7 @@ func DecodePayloadSummary(raw []byte) (PayloadSummary, error) {
 		MaxDepth:         2,
 		MaxStringBytes:   256,
 		MaxArrayItems:    0,
-		MaxObjectFields:  16,
+		MaxObjectFields:  17,
 	}
 	summary, err := foundationstrictjson.DecodeObject(raw, limits, PayloadSummary.Validate)
 	if err != nil {

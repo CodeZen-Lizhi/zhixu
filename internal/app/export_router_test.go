@@ -26,6 +26,10 @@ func TestRouterRegistersExportRoutesAndFailsClosedWithoutService(t *testing.T) {
 		{name: "detail", method: http.MethodGet, path: "/api/v1/exports/" + exportID + "?workspace_id=" + workspaceID},
 		{name: "list collection", method: http.MethodGet, path: "/api/v1/workspaces/" + workspaceID + "/exports?collection_id=" + collectionID},
 		{name: "download", method: http.MethodGet, path: "/api/v1/exports/" + exportID + "/download?workspace_id=" + workspaceID},
+		{name: "create attachment", method: http.MethodPost, path: "/api/v1/workspaces/" + workspaceID + "/attachment-exports"},
+		{name: "list attachments", method: http.MethodGet, path: "/api/v1/workspaces/" + workspaceID + "/attachment-exports"},
+		{name: "attachment detail", method: http.MethodGet, path: "/api/v1/workspaces/" + workspaceID + "/attachment-exports/" + exportID},
+		{name: "attachment download", method: http.MethodGet, path: "/api/v1/workspaces/" + workspaceID + "/attachment-exports/" + exportID + "/download"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequest(test.method, test.path, nil)

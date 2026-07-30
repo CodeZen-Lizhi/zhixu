@@ -74,6 +74,7 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
       ["rag", workspaceId],
       ["collections", workspaceId],
       ["collection-exports", workspaceId],
+      ["workspace-attachment-exports", workspaceId],
       ["knowledge-health", workspaceId],
       ["graph", workspaceId],
       ["semantic-links", workspaceId],
@@ -112,6 +113,8 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         await queryClient.refetchQueries({ queryKey: ["collections", workspaceId], type: "all" }, { throwOnError: true });
         assertActive();
         await queryClient.refetchQueries({ queryKey: ["collection-exports", workspaceId], type: "all" }, { throwOnError: true });
+        assertActive();
+        await queryClient.refetchQueries({ queryKey: ["workspace-attachment-exports", workspaceId], type: "all" }, { throwOnError: true });
         assertActive();
         await queryClient.refetchQueries({ queryKey: ["knowledge-health", workspaceId], type: "all" }, { throwOnError: true });
         assertActive();
@@ -226,7 +229,20 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
       const invalidatesExports = event.type.startsWith("export.")
         || event.resourceRef.startsWith("export_job:")
         || event.invalidations.some((item) => item.resource === "export_job");
-      if (invalidatesExports) await invalidate(["collection-exports", workspaceId]);
+      if (invalidatesExports) {
+        switch (event.payloadSummary.scopeKind) {
+          case "collection":
+            await invalidate(["collection-exports", workspaceId]);
+            break;
+          case "workspace_attachments":
+            await invalidate(["workspace-attachment-exports", workspaceId]);
+            break;
+          default:
+            // 历史事件没有 scope_kind，保守刷新两类查询以保持升级兼容。
+            await invalidate(["collection-exports", workspaceId]);
+            await invalidate(["workspace-attachment-exports", workspaceId]);
+        }
+      }
       const invalidatesHealth = event.type.startsWith("health.")
         || event.resourceRef.startsWith("health_scan:")
         || event.resourceRef.startsWith("health_issue:")

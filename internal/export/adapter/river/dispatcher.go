@@ -10,6 +10,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	workflowriver "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	riverlib "github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 // Dispatcher 在 Export 事实提交后以 Args 唯一键投递 River Job。
@@ -39,7 +40,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, workspaceID, exportI
 		return err
 	}
 	result, err := dispatcher.client.Insert(ctx, args, &riverlib.InsertOpts{
-		Queue: dispatcher.client.Queue(), Metadata: metadata, UniqueOpts: riverlib.UniqueOpts{ByArgs: true},
+		Queue: dispatcher.client.Queue(), Metadata: metadata, UniqueOpts: exportUniqueOpts(),
 	})
 	if err != nil {
 		return err
@@ -48,6 +49,16 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, workspaceID, exportI
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "EXPORT_RIVER_DISPATCH_RESULT_INVALID", false, errors.New("export River insert returned no persisted job"))
 	}
 	return nil
+}
+
+func exportUniqueOpts() riverlib.UniqueOpts {
+	return riverlib.UniqueOpts{ByArgs: true, ByState: []rivertype.JobState{
+		rivertype.JobStateAvailable,
+		rivertype.JobStatePending,
+		rivertype.JobStateRunning,
+		rivertype.JobStateScheduled,
+		rivertype.JobStateRetryable,
+	}}
 }
 
 func encodeTraceMetadata(ctx context.Context) ([]byte, error) {

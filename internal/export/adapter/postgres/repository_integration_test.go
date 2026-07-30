@@ -98,7 +98,7 @@ func TestExportRepositoryLifecycleIdempotencyAndDownloadAudit(t *testing.T) {
 	invalidAuditID := exportIntegrationID(t)
 	_, err = repository.RecordDownload(ctx, exportapp.DownloadRecord{
 		WorkspaceID: workspaceID, JobID: created.ID, AuditEventID: invalidAuditID,
-		Actor:    exportapp.DownloadActor{Type: auditdomain.ActorType("INVALID"), Ref: "invalid"},
+		Actor: exportapp.DownloadActor{Type: auditdomain.ActorType("INVALID"), Ref: "invalid"}, ScopeKind: domain.ScopeCollection,
 		FileHash: preparedFile.FileHash, FileSize: preparedFile.FileSize,
 	})
 	if err == nil {
@@ -110,7 +110,7 @@ func TestExportRepositoryLifecycleIdempotencyAndDownloadAudit(t *testing.T) {
 	actorRef := exportIntegrationID(t)
 	downloaded, err := repository.RecordDownload(ctx, exportapp.DownloadRecord{
 		WorkspaceID: workspaceID, JobID: created.ID, AuditEventID: auditEventID,
-		Actor:    exportapp.DownloadActor{Type: auditdomain.ActorUser, Ref: string(actorRef)},
+		Actor: exportapp.DownloadActor{Type: auditdomain.ActorUser, Ref: string(actorRef)}, ScopeKind: domain.ScopeCollection,
 		FileHash: preparedFile.FileHash, FileSize: preparedFile.FileSize,
 	})
 	if err != nil || downloaded.Version != 5 || downloaded.DownloadCount != 1 || downloaded.LastDownloadedAt == nil {
@@ -134,6 +134,164 @@ func TestExportRepositoryLifecycleIdempotencyAndDownloadAudit(t *testing.T) {
 	}
 	if lifecycleEvents != 4 {
 		t.Fatalf("main export lifecycle events=%d, want 4", lifecycleEvents)
+	}
+}
+
+func TestExportRepositoryAttachmentCapabilityLifecycleAndScopeIsolation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	repository, pool := newExportIntegrationRepository(t, ctx)
+
+	workspaceID := exportIntegrationID(t)
+	collectionID := exportIntegrationID(t)
+	queryHash := exportIntegrationHash("collection:" + string(collectionID))
+	seedExportIntegrationScope(t, ctx, pool, workspaceID, collectionID, queryHash)
+	otherWorkspaceID := exportIntegrationID(t)
+	otherCollectionID := exportIntegrationID(t)
+	seedExportIntegrationScope(t, ctx, pool, otherWorkspaceID, otherCollectionID, exportIntegrationHash("collection:"+string(otherCollectionID)))
+
+	disabledCandidate := exportIntegrationAttachmentJob(t, workspaceID, time.Hour, "disabled")
+	if _, _, err := repository.Create(ctx, disabledCandidate); exportIntegrationErrorCode(err) != domain.ErrorCodeUnavailable {
+		t.Fatalf("disabled attachment create code=%q err=%v detail=%s", exportIntegrationErrorCode(err), err, exportIntegrationErrorDetail(err))
+	}
+	var disabledRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.export_job WHERE id=$1`, string(disabledCandidate.ID)).Scan(&disabledRows); err != nil {
+		t.Fatal(err)
+	}
+	if disabledRows != 0 {
+		t.Fatalf("disabled attachment create persisted %d rows", disabledRows)
+	}
+
+	setExportAttachmentCapability(t, ctx, pool, true)
+	firstCandidate := exportIntegrationAttachmentJob(t, workspaceID, time.Hour, "first")
+	first, replayed, err := repository.Create(ctx, firstCandidate)
+	if err != nil || replayed || first.Scope.Kind != domain.ScopeWorkspaceAttachments {
+		t.Fatalf("create attachment job=%#v replayed=%t err=%v detail=%s", first, replayed, err, exportIntegrationErrorDetail(err))
+	}
+	replayCandidate := firstCandidate
+	replayCandidate.ID = exportIntegrationID(t)
+	replayedJob, replayed, err := repository.Create(ctx, replayCandidate)
+	if err != nil || !replayed || replayedJob.ID != first.ID {
+		t.Fatalf("replay attachment job=%#v replayed=%t err=%v", replayedJob, replayed, err)
+	}
+	secondCandidate := exportIntegrationAttachmentJob(t, workspaceID, time.Hour, "second")
+	second, replayed, err := repository.Create(ctx, secondCandidate)
+	if err != nil || replayed {
+		t.Fatalf("create second attachment job=%#v replayed=%t err=%v", second, replayed, err)
+	}
+	collectionCandidate := exportIntegrationJob(t, workspaceID, collectionID, queryHash, time.Hour, "scope-list")
+	collectionJob, replayed, err := repository.Create(ctx, collectionCandidate)
+	if err != nil || replayed {
+		t.Fatalf("create collection scope fixture job=%#v replayed=%t err=%v", collectionJob, replayed, err)
+	}
+
+	firstPage, err := repository.List(ctx, exportapp.ListQuery{
+		WorkspaceID: workspaceID, ScopeKind: domain.ScopeWorkspaceAttachments, Limit: 1,
+	})
+	if err != nil || len(firstPage.Items) != 1 || firstPage.NextCursor == "" || firstPage.Items[0].Scope.Kind != domain.ScopeWorkspaceAttachments {
+		t.Fatalf("first attachment page=%#v err=%v", firstPage, err)
+	}
+	secondPage, err := repository.List(ctx, exportapp.ListQuery{
+		WorkspaceID: workspaceID, ScopeKind: domain.ScopeWorkspaceAttachments, Limit: 1, Cursor: firstPage.NextCursor,
+	})
+	if err != nil || len(secondPage.Items) != 1 || secondPage.Items[0].Scope.Kind != domain.ScopeWorkspaceAttachments ||
+		secondPage.Items[0].ID == firstPage.Items[0].ID {
+		t.Fatalf("second attachment page=%#v err=%v", secondPage, err)
+	}
+	collectionPage, err := repository.List(ctx, exportapp.ListQuery{
+		WorkspaceID: workspaceID, ScopeKind: domain.ScopeCollection, CollectionID: &collectionID, Limit: 10,
+	})
+	if err != nil || len(collectionPage.Items) != 1 || collectionPage.Items[0].ID != collectionJob.ID {
+		t.Fatalf("collection-only page=%#v err=%v", collectionPage, err)
+	}
+
+	const owner = "attachment-integration-worker"
+	claimed, ok, err := repository.Claim(ctx, workspaceID, first.ID, owner, 2*time.Minute)
+	if err != nil || !ok || claimed.Status != domain.StatusRunning || claimed.Scope.Kind != domain.ScopeWorkspaceAttachments {
+		t.Fatalf("claim attachment job=%#v ok=%t err=%v", claimed, ok, err)
+	}
+	preparedFile := exportIntegrationAttachmentPreparedFile(first.ID)
+	manifestHash := exportIntegrationHash("manifest:" + string(first.ID))
+	prepared, err := repository.Prepare(ctx, exportapp.PrepareRequest{
+		WorkspaceID: workspaceID, JobID: first.ID, LeaseOwner: owner, ExpectedVersion: claimed.Version,
+		ManifestHash: manifestHash, EntryCount: 2, TotalUncompressedBytes: 42, PreparedFile: preparedFile,
+	})
+	if err != nil || prepared.ManifestHash != manifestHash || prepared.EntryCount == nil || *prepared.EntryCount != 2 ||
+		prepared.TotalUncompressedBytes == nil || *prepared.TotalUncompressedBytes != 42 || prepared.ReadModelRevision != "" || prepared.ExactCount != nil {
+		t.Fatalf("prepare attachment job=%#v err=%v detail=%s", prepared, err, exportIntegrationErrorDetail(err))
+	}
+	completed, err := repository.Complete(ctx, exportapp.CompleteRequest{
+		WorkspaceID: workspaceID, JobID: first.ID, LeaseOwner: owner, ExpectedVersion: prepared.Version, PreparedFile: preparedFile,
+	})
+	if err != nil || completed.Status != domain.StatusSucceeded {
+		t.Fatalf("complete attachment job=%#v err=%v", completed, err)
+	}
+	lifecycleRows, err := pool.Query(ctx, `SELECT event_type,payload_summary->>'scope_kind'
+		FROM ops.server_event WHERE workspace_id=$1 AND resource_ref=$2 ORDER BY seq`,
+		string(workspaceID), "export_job:"+string(first.ID))
+	if err != nil {
+		t.Fatalf("read attachment lifecycle event scopes: %v", err)
+	}
+	defer lifecycleRows.Close()
+	var lifecycleStages []string
+	for lifecycleRows.Next() {
+		var stage, scopeKind string
+		if err := lifecycleRows.Scan(&stage, &scopeKind); err != nil {
+			t.Fatalf("scan attachment lifecycle event scope: %v", err)
+		}
+		if scopeKind != "workspace_attachments" {
+			t.Fatalf("attachment lifecycle event %q scope_kind=%q", stage, scopeKind)
+		}
+		lifecycleStages = append(lifecycleStages, stage)
+	}
+	if err := lifecycleRows.Err(); err != nil {
+		t.Fatalf("iterate attachment lifecycle event scopes: %v", err)
+	}
+	const wantLifecycleStages = "export.created,export.claimed,export.prepared,export.completed"
+	if strings.Join(lifecycleStages, ",") != wantLifecycleStages {
+		t.Fatalf("attachment lifecycle stages=%v, want %s", lifecycleStages, wantLifecycleStages)
+	}
+	auditEventID := exportIntegrationID(t)
+	actorRef := exportIntegrationID(t)
+	downloaded, err := repository.RecordDownload(ctx, exportapp.DownloadRecord{
+		WorkspaceID: workspaceID, JobID: first.ID, AuditEventID: auditEventID,
+		Actor:     exportapp.DownloadActor{Type: auditdomain.ActorUser, Ref: string(actorRef)},
+		ScopeKind: domain.ScopeWorkspaceAttachments, EntryCount: completed.EntryCount,
+		FileHash: preparedFile.FileHash, FileSize: preparedFile.FileSize,
+	})
+	if err != nil || downloaded.DownloadCount != 1 {
+		t.Fatalf("record attachment download job=%#v err=%v", downloaded, err)
+	}
+	assertExportAttachmentDownloadAudit(t, ctx, pool, auditEventID, first.ID, preparedFile.FileHash, 2)
+	if _, err := repository.Get(ctx, otherWorkspaceID, first.ID); exportIntegrationErrorCode(err) != domain.ErrorCodeNotFound {
+		t.Fatalf("cross-workspace attachment get code=%q err=%v", exportIntegrationErrorCode(err), err)
+	}
+
+	setExportAttachmentCapability(t, ctx, pool, false)
+	blockedCandidate := exportIntegrationAttachmentJob(t, workspaceID, time.Hour, "blocked-again")
+	if _, _, err := repository.Create(ctx, blockedCandidate); exportIntegrationErrorCode(err) != domain.ErrorCodeUnavailable {
+		t.Fatalf("disabled-again create code=%q err=%v", exportIntegrationErrorCode(err), err)
+	}
+	notClaimed, ok, err := repository.Claim(ctx, workspaceID, second.ID, owner, 2*time.Minute)
+	if exportIntegrationErrorCode(err) != domain.ErrorCodeUnavailable || ok || notClaimed.ID != "" {
+		t.Fatalf("disabled claim job=%#v ok=%t code=%q err=%v", notClaimed, ok, exportIntegrationErrorCode(err), err)
+	}
+	pendingAfterDisabledClaim, err := repository.Get(ctx, workspaceID, second.ID)
+	if err != nil || pendingAfterDisabledClaim.Status != domain.StatusPending || pendingAfterDisabledClaim.Version != second.Version {
+		t.Fatalf("disabled claim changed job=%#v err=%v", pendingAfterDisabledClaim, err)
+	}
+	candidates, err := repository.RecoveryCandidates(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range candidates {
+		if candidate.Scope.Kind == domain.ScopeWorkspaceAttachments {
+			t.Fatalf("disabled recovery returned attachment job %#v", candidate)
+		}
+	}
+	preserved, err := repository.Get(ctx, workspaceID, completed.ID)
+	if err != nil || preserved.ManifestHash != manifestHash || preserved.Status != domain.StatusSucceeded {
+		t.Fatalf("disabled gate did not preserve completed attachment job=%#v err=%v", preserved, err)
 	}
 }
 
@@ -245,7 +403,7 @@ func TestExportRepositoryDatabaseTimeCAS(t *testing.T) {
 			case "download":
 				result, operationErr = repository.RecordDownload(ctx, exportapp.DownloadRecord{
 					WorkspaceID: workspaceID, JobID: created.ID, AuditEventID: exportIntegrationID(t),
-					Actor:    exportapp.DownloadActor{Type: auditdomain.ActorUser, Ref: string(exportIntegrationID(t))},
+					Actor: exportapp.DownloadActor{Type: auditdomain.ActorUser, Ref: string(exportIntegrationID(t))}, ScopeKind: domain.ScopeCollection,
 					FileHash: preparedFile.FileHash, FileSize: preparedFile.FileSize,
 				})
 			default:
@@ -382,7 +540,7 @@ func TestExportRepositoryConcurrentCreateAndDownload(t *testing.T) {
 	for index := range records {
 		records[index] = exportapp.DownloadRecord{
 			WorkspaceID: workspaceID, JobID: authoritative.ID, AuditEventID: exportIntegrationID(t),
-			Actor:    exportapp.DownloadActor{Type: auditdomain.ActorUser, Ref: string(exportIntegrationID(t))},
+			Actor: exportapp.DownloadActor{Type: auditdomain.ActorUser, Ref: string(exportIntegrationID(t))}, ScopeKind: domain.ScopeCollection,
 			FileHash: preparedFile.FileHash, FileSize: preparedFile.FileSize,
 		}
 	}
@@ -564,10 +722,28 @@ func exportIntegrationJob(t *testing.T, workspaceID, collectionID foundation.ID,
 	id := exportIntegrationID(t)
 	return domain.Job{
 		ID: id, WorkspaceID: workspaceID, Kind: domain.KindMarkdown, SchemaVersion: exportapp.SchemaVersionV1,
-		Scope:  domain.Scope{CollectionID: &collectionID, CollectionVersion: &collectionVersion, QueryHash: queryHash},
+		Scope:  domain.Scope{Kind: domain.ScopeCollection, CollectionID: &collectionID, CollectionVersion: &collectionVersion, QueryHash: queryHash},
 		Fields: []domain.Field{domain.FieldID, domain.FieldTitle}, Redaction: domain.RedactionMasked,
 		PermissionScope: "READ_LOCAL", RequestedBy: "USER:integration", IdempotencyKey: "export-integration-" + suffix + "-" + string(id),
 		RequestHash: exportIntegrationHash("request:" + suffix + ":" + string(id)), RequestTTLSeconds: int64(ttl / time.Second),
+		Status: domain.StatusPending, Version: 1, ExpiresAt: now.Add(ttl), CreatedAt: now, UpdatedAt: now,
+		CleanupStatus: domain.CleanupNotRequired,
+	}
+}
+
+func exportIntegrationAttachmentJob(t *testing.T, workspaceID foundation.ID, ttl time.Duration, suffix string) domain.Job {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	id := exportIntegrationID(t)
+	return domain.Job{
+		ID: id, WorkspaceID: workspaceID, Kind: domain.KindAttachmentsZIP, SchemaVersion: "attachment-export/v1",
+		Scope: domain.Scope{
+			Kind:                          domain.ScopeWorkspaceAttachments,
+			AttachmentRootContractVersion: "workspace-attachments/v1",
+		},
+		Redaction: domain.RedactionRawUserOwned, PermissionScope: "READ_LOCAL", RequestedBy: "USER:integration",
+		IdempotencyKey: "attachment-export-integration-" + suffix + "-" + string(id),
+		RequestHash:    exportIntegrationHash("attachment-request:" + suffix + ":" + string(id)), RequestTTLSeconds: int64(ttl / time.Second),
 		Status: domain.StatusPending, Version: 1, ExpiresAt: now.Add(ttl), CreatedAt: now, UpdatedAt: now,
 		CleanupStatus: domain.CleanupNotRequired,
 	}
@@ -599,6 +775,24 @@ func exportIntegrationPreparedFile(exportID foundation.ID) exportapp.PreparedFil
 		FinalPath:   ".knowledge/exports/" + string(exportID) + ".md",
 		FileHash:    exportIntegrationBytesHash(payload),
 		FileSize:    int64(len(payload)),
+	}
+}
+
+func exportIntegrationAttachmentPreparedFile(exportID foundation.ID) exportapp.PreparedFile {
+	payload := []byte("attachment export integration payload")
+	return exportapp.PreparedFile{
+		StagingPath: ".knowledge/exports/.staging/" + string(exportID) + "-" + strings.Repeat("f", 32) + ".zip.stage",
+		FinalPath:   ".knowledge/exports/" + string(exportID) + ".zip",
+		FileHash:    exportIntegrationBytesHash(payload),
+		FileSize:    int64(len(payload)),
+	}
+}
+
+func setExportAttachmentCapability(t *testing.T, ctx context.Context, pool *pgxpool.Pool, enabled bool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `UPDATE ops.export_capability SET enabled=$1,updated_at=clock_timestamp()
+		WHERE capability_key='workspace-attachments' AND contract_version='workspace-attachments/v1'`, enabled); err != nil {
+		t.Fatalf("set attachment export capability=%t: %v", enabled, err)
 	}
 }
 
@@ -728,6 +922,19 @@ func assertExportDownloadAudit(t *testing.T, ctx context.Context, pool *pgxpool.
 	var postgresError *pgconn.PgError
 	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
 		t.Fatalf("download Audit update error=%v", err)
+	}
+}
+
+func assertExportAttachmentDownloadAudit(t *testing.T, ctx context.Context, pool *pgxpool.Pool, auditID, exportID foundation.ID, archiveHash string, entryCount int64) {
+	t.Helper()
+	var scopeKind, persistedHash string
+	var persistedCount int64
+	if err := pool.QueryRow(ctx, `SELECT payload->>'scope_kind',payload->>'file_hash',(payload->>'entry_count')::bigint
+		FROM ops.audit_event WHERE id=$1`, string(auditID)).Scan(&scopeKind, &persistedHash, &persistedCount); err != nil {
+		t.Fatalf("read attachment download Audit: %v", err)
+	}
+	if scopeKind != string(domain.ScopeWorkspaceAttachments) || persistedHash != archiveHash || persistedCount != entryCount {
+		t.Fatalf("attachment download Audit scope=%q archive_hash=%q entry_count=%d", scopeKind, persistedHash, persistedCount)
 	}
 }
 

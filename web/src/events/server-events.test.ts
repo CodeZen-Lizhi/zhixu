@@ -99,12 +99,14 @@ describe("decodeServerEventEnvelope", () => {
       resource_ref: `collection:${answerId}`,
       payload_summary: {},
     }).invalidations).toEqual([{ resource: "collection", id: answerId }]);
-    expect(decodeServerEventEnvelope({
+    const attachmentExport = decodeServerEventEnvelope({
       ...envelope("45"),
       type: "export.completed",
       resource_ref: `export_job:${answerId}`,
-      payload_summary: { status: "succeeded" },
-    }).invalidations).toEqual([{ resource: "export_job", id: answerId }]);
+      payload_summary: { status: "succeeded", scope_kind: "workspace_attachments" },
+    });
+    expect(attachmentExport.payloadSummary.scopeKind).toBe("workspace_attachments");
+    expect(attachmentExport.invalidations).toEqual([{ resource: "export_job", id: answerId }]);
   });
 
   it.each([
@@ -116,6 +118,7 @@ describe("decodeServerEventEnvelope", () => {
     ["超出 int64 的 id", { ...envelope(), id: "9223372036854775808" }],
     ["非安全整数版本", { ...envelope(), resource_version: 1.5 }],
     ["非法摘要 token", { ...envelope(), payload_summary: { status: "RUNNING" } }],
+    ["非法导出范围", { ...envelope(), payload_summary: { scope_kind: "WORKSPACE_ATTACHMENTS" } }],
     ["摘要额外正文", { ...envelope(), payload_summary: { answer_text: "secret" } }],
   ])("拒绝%s", (_name, value) => {
     expect(() => decodeServerEventEnvelope(value)).toThrow(ServerEventClientError);

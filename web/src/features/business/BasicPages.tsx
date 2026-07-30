@@ -10,6 +10,7 @@ import { Button, Card, CardHeader, Badge, EmptyState, Tabs, TabsContent, TabsLis
 import { getWorkspace, scanWorkspace } from "../../api/workspace";
 import { createApiToken, listApiTokens, revokeApiToken, type AuthCapability, type ApiTokenCredential } from "../../api/auth";
 import { SystemStatusPage } from "../system-status/SystemStatusPage";
+import { AttachmentExportPanel } from "../settings/AttachmentExportPanel";
 import { BusinessWorkspaceGate } from "./BusinessWorkspaceGate";
 import { useScopedCursor } from "./pagination";
 import { parseInboxUrlState, writeInboxUrlState, type InboxUrlState } from "./url-state";
@@ -160,5 +161,29 @@ export const SettingsPage = () => {
           ? <dl className="detail-grid"><div><dt>名称</dt><dd>{query.data.name}</dd></div><div><dt>根目录</dt><dd className="mono">{query.data.rootPath}</dd></div><div><dt>状态</dt><dd><Badge tone="success">{query.data.status}</Badge></dd></div><div><dt>连接 ID</dt><dd className="mono">{query.data.id}</dd></div></dl>
           : <UnavailableState title="Workspace 状态缺失" description="API 没有返回可展示的 Workspace 事实。" />;
 
-  return <div className="page-stack"><div className="page-intro"><p className="eyebrow">运行边界 / Settings</p><h2>把能做什么写清楚。</h2><p>Settings 只展示已有契约；密钥、Bootstrap Token 和 Session Cookie 不进入 Browser Storage，也没有假保存按钮。</p></div><Tabs defaultValue="workspace"><TabsList aria-label="设置分组"><TabsTrigger value="workspace">Workspace</TabsTrigger><TabsTrigger value="runtime">运行依赖</TabsTrigger><TabsTrigger value="models">模型 / 检索</TabsTrigger><TabsTrigger value="git">Git</TabsTrigger><TabsTrigger value="auth">API Token</TabsTrigger><TabsTrigger value="maintenance">维护边界</TabsTrigger></TabsList><TabsContent value="workspace"><Card><CardHeader eyebrow="Workspace" title="当前连接" action={<Button asChild variant="secondary" size="sm"><Link to="/workspace">连接 / 切换</Link></Button>} />{workspaceState}</Card></TabsContent><TabsContent value="runtime"><Card><CardHeader eyebrow="Runtime" title="API 与依赖状态" description="状态来自 /api/v1/system/status，不根据浏览器连接状态推断业务健康。" /><SystemStatusPage /></Card></TabsContent><TabsContent value="models"><Card><CardHeader eyebrow="Model / Retrieval" title="模型与检索能力" /><div className="capability-list"><div><ShieldCheck size={17} /><span>RAG / Retrieval 可用性</span><Badge tone="info">见运行依赖实时状态</Badge></div><div><ShieldCheck size={17} /><span>模型名称、密钥与 Provider 配置</span><Badge tone="warning">无公开读取/写入契约</Badge></div><div><ShieldCheck size={17} /><span>索引维护与重建</span><Badge tone="neutral">未交付 Settings 命令</Badge></div></div></Card></TabsContent><TabsContent value="git"><Card><CardHeader eyebrow="Git" title="Workspace 仓库事实" />{query.data ? <dl className="detail-grid"><div><dt>Repository</dt><dd>{query.data.git.present ? "已检测" : "未检测到"}</dd></div><div><dt>Branch</dt><dd>{query.data.git.branch || "无分支"}</dd></div><div><dt>Working Tree</dt><dd><Badge tone={query.data.git.dirty ? "danger" : "success"}>{query.data.git.dirty ? "dirty" : "clean"}</Badge></dd></div><div><dt>Head</dt><dd className="mono">{query.data.git.head || "未提供"}</dd></div></dl> : workspaceState}</Card></TabsContent><TabsContent value="auth">{authState.mode === "required" ? <ApiTokenSettings /> : <UnavailableState title="开发模式未启用 API Token" description="认证显式关闭时服务端不会注册 Session/API Token 管理端点。切换到 required 后再创建自动化凭据。" />}</TabsContent><TabsContent value="maintenance"><Card><CardHeader eyebrow="Maintenance" title="允许与未交付操作" /><div className="capability-list"><div><ShieldCheck size={17} /><span>Workspace 安全扫描</span><Badge tone="info">已有契约</Badge></div><div><ShieldCheck size={17} /><span>Session / CSRF / Capability</span><Badge tone={authState.mode === "required" ? "success" : "warning"}>{authState.mode === "required" ? "已交付 M10-02" : "开发模式关闭"}</Badge></div><div><ShieldCheck size={17} /><span>Artifact / Review / Memory</span><Badge tone="warning">M8</Badge></div><div><ShieldCheck size={17} /><span>导出、危险清理与 Secret 保存</span><Badge tone="neutral">按权限与任务契约开放</Badge></div></div><div className="document-actions"><Button asChild variant="secondary"><Link to="/inbox"><RefreshCw size={15} />进入安全扫描</Link></Button></div></Card></TabsContent></Tabs></div>;
+  return <div className="page-stack">
+    <div className="page-intro">
+      <p className="eyebrow">运行边界 / Settings</p>
+      <h2>把能做什么写清楚。</h2>
+      <p>Settings 只展示已有契约；密钥、Bootstrap Token 和 Session Cookie 不进入 Browser Storage，也没有假保存按钮。</p>
+    </div>
+    <Tabs className="settings-tabs" defaultValue="workspace">
+      <TabsList aria-label="设置分组">
+        <TabsTrigger value="workspace">Workspace</TabsTrigger>
+        <TabsTrigger value="exports">数据导出</TabsTrigger>
+        <TabsTrigger value="runtime">运行依赖</TabsTrigger>
+        <TabsTrigger value="models">模型 / 检索</TabsTrigger>
+        <TabsTrigger value="git">Git</TabsTrigger>
+        <TabsTrigger value="auth">API Token</TabsTrigger>
+        <TabsTrigger value="maintenance">维护边界</TabsTrigger>
+      </TabsList>
+      <TabsContent value="workspace"><Card><CardHeader eyebrow="Workspace" title="当前连接" action={<Button asChild variant="secondary" size="sm"><Link to="/workspace">连接 / 切换</Link></Button>} />{workspaceState}</Card></TabsContent>
+      <TabsContent value="exports"><AttachmentExportPanel /></TabsContent>
+      <TabsContent value="runtime"><Card><CardHeader eyebrow="Runtime" title="API 与依赖状态" description="状态来自 /api/v1/system/status，不根据浏览器连接状态推断业务健康。" /><SystemStatusPage /></Card></TabsContent>
+      <TabsContent value="models"><Card><CardHeader eyebrow="Model / Retrieval" title="模型与检索能力" /><div className="capability-list"><div><ShieldCheck size={17} /><span>RAG / Retrieval 可用性</span><Badge tone="info">见运行依赖实时状态</Badge></div><div><ShieldCheck size={17} /><span>模型名称、密钥与 Provider 配置</span><Badge tone="warning">无公开读取/写入契约</Badge></div><div><ShieldCheck size={17} /><span>索引维护与重建</span><Badge tone="neutral">未交付 Settings 命令</Badge></div></div></Card></TabsContent>
+      <TabsContent value="git"><Card><CardHeader eyebrow="Git" title="Workspace 仓库事实" />{query.data ? <dl className="detail-grid"><div><dt>Repository</dt><dd>{query.data.git.present ? "已检测" : "未检测到"}</dd></div><div><dt>Branch</dt><dd>{query.data.git.branch || "无分支"}</dd></div><div><dt>Working Tree</dt><dd><Badge tone={query.data.git.dirty ? "danger" : "success"}>{query.data.git.dirty ? "dirty" : "clean"}</Badge></dd></div><div><dt>Head</dt><dd className="mono">{query.data.git.head || "未提供"}</dd></div></dl> : workspaceState}</Card></TabsContent>
+      <TabsContent value="auth">{authState.mode === "required" ? <ApiTokenSettings /> : <UnavailableState title="开发模式未启用 API Token" description="认证显式关闭时服务端不会注册 Session/API Token 管理端点。切换到 required 后再创建自动化凭据。" />}</TabsContent>
+      <TabsContent value="maintenance"><Card><CardHeader eyebrow="Maintenance" title="允许与未交付操作" /><div className="capability-list"><div><ShieldCheck size={17} /><span>Workspace 安全扫描</span><Badge tone="info">已有契约</Badge></div><div><ShieldCheck size={17} /><span>Session / CSRF / Capability</span><Badge tone={authState.mode === "required" ? "success" : "warning"}>{authState.mode === "required" ? "已交付 M10-02" : "开发模式关闭"}</Badge></div><div><ShieldCheck size={17} /><span>Artifact / Review / Memory</span><Badge tone="warning">M8</Badge></div><div><ShieldCheck size={17} /><span>导出、危险清理与 Secret 保存</span><Badge tone="neutral">按权限与任务契约开放</Badge></div></div><div className="document-actions"><Button asChild variant="secondary"><Link to="/inbox"><RefreshCw size={15} />进入安全扫描</Link></Button></div></Card></TabsContent>
+    </Tabs>
+  </div>;
 };

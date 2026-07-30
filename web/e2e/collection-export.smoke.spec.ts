@@ -167,7 +167,7 @@ test("真实 Collection Export 创建、刷新恢复、下载和桌面/移动状
   const sseRefresh = page.waitForResponse(async (response) => {
     if (!isCollectionExportListResponse(response) || Date.now() - sseRefreshStartedAt > 1_500) return false;
     const body: unknown = await response.json();
-    return isRecord(body) && Array.isArray(body.items) && body.items.some((item) => isRecord(item) && item.kind === "METADATA_JSON" && Array.isArray(item.fields) && item.fields.length === 2 && item.fields[0] === "object_type" && item.fields[1] === "id");
+    return isRecord(body) && Array.isArray(body.items) && body.items.some((item) => isRecord(item) && item.kind === "METADATA_JSON" && Array.isArray(item.fields) && item.fields.length === 2 && item.fields[0] === "id" && item.fields[1] === "object_type");
   });
   sseRefreshStartedAt = Date.now();
   const sseCreate = await page.request.post("/api/v1/exports", {
@@ -217,7 +217,7 @@ test("真实 Collection Export 创建、刷新恢复、下载和桌面/移动状
   captureRuntimeIssues(mobilePage, runtimeIssues);
   try {
     await mobilePage.goto(collectionPath);
-    await expect(mobilePage.getByRole("heading", { name: "Collection Export" })).toBeVisible();
+    await expect(mobilePage.getByRole("heading", { name: "Collection Export", exact: true })).toBeVisible();
     await expect(mobilePage.getByRole("button", { name: /创建 .* 导出/ })).toBeVisible();
     await assertNoHorizontalOverflow(mobilePage);
   } finally {

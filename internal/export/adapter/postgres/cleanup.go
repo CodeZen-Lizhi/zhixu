@@ -264,6 +264,8 @@ func validAnyStagingPath(value string) bool {
 		suffix = ".md.stage"
 	case strings.HasSuffix(remainder, ".json.stage"):
 		suffix = ".json.stage"
+	case strings.HasSuffix(remainder, ".zip.stage"):
+		suffix = ".zip.stage"
 	default:
 		return false
 	}

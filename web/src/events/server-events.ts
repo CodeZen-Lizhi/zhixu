@@ -28,6 +28,7 @@ export interface ServerEventPayloadSummary {
   publicationStatus?: string;
   resultType?: string;
   stage?: string;
+  scopeKind?: "collection" | "workspace_attachments";
   candidateCount?: number;
   selectedCount?: number;
   conflictCount?: number;
@@ -105,6 +106,7 @@ const summaryKeys = [
   "publication_status",
   "result_type",
   "stage",
+  "scope_kind",
   "candidate_count",
   "selected_count",
   "conflict_count",
@@ -160,6 +162,17 @@ const readOptionalToken = (
   value: unknown,
   field: string,
 ): string | undefined => value === undefined ? undefined : readToken(value, field);
+
+const readOptionalExportScopeKind = (
+  value: unknown,
+  field: string,
+): "collection" | "workspace_attachments" | undefined => {
+  if (value === undefined) return undefined;
+  if (value !== "collection" && value !== "workspace_attachments") {
+    throw invalidEvent(`${field} 不是有效导出范围`);
+  }
+  return value;
+};
 
 const readPositiveSafeInteger = (value: unknown, field: string): number => {
   if (!Number.isSafeInteger(value) || typeof value !== "number" || value <= 0) {
@@ -218,6 +231,7 @@ const decodePayloadSummary = (value: unknown): ServerEventPayloadSummary => {
   const publicationStatus = readOptionalToken(value.publication_status, "payload_summary.publication_status");
   const resultType = readOptionalToken(value.result_type, "payload_summary.result_type");
   const stage = readOptionalToken(value.stage, "payload_summary.stage");
+  const scopeKind = readOptionalExportScopeKind(value.scope_kind, "payload_summary.scope_kind");
   const candidateCount = readOptionalCount(value.candidate_count, "payload_summary.candidate_count");
   const selectedCount = readOptionalCount(value.selected_count, "payload_summary.selected_count");
   const conflictCount = readOptionalCount(value.conflict_count, "payload_summary.conflict_count");
@@ -236,6 +250,7 @@ const decodePayloadSummary = (value: unknown): ServerEventPayloadSummary => {
     ...(publicationStatus === undefined ? {} : { publicationStatus }),
     ...(resultType === undefined ? {} : { resultType }),
     ...(stage === undefined ? {} : { stage }),
+    ...(scopeKind === undefined ? {} : { scopeKind }),
     ...(candidateCount === undefined ? {} : { candidateCount }),
     ...(selectedCount === undefined ? {} : { selectedCount }),
     ...(conflictCount === undefined ? {} : { conflictCount }),

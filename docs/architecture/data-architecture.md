@@ -254,7 +254,7 @@ sequenceDiagram
 
 ## 12. 数据导出
 
-产品目标仍包括 Markdown、附件、领域元数据、评测和审计等可迁移数据；当前 M9-03 的已交付范围必须单独说明：
+产品目标仍包括 Markdown、附件、领域元数据、评测和审计等可迁移数据；当前已交付范围必须按 scope 说明：
 
 - Smart Collection `MARKDOWN` 与 `METADATA_JSON` 通过 `export/v1` 异步 Job 输出，绑定 Workspace、Collection
   ID/version、query hash、首次 prepared 时冻结的 read-model revision、exact count、字段白名单、脱敏策略、
@@ -263,8 +263,13 @@ sequenceDiagram
   固定文件，不能重读可变 Collection 或重新 render；结果文件不成为 Artifact、Document、Git、默认索引或 RAG 事实。
 - TTL 到期只回收 staging/final 文件；Job、hash、下载统计和 append-only Audit 保留。每次下载前重验受控路径、
   symlink、hash、size，并在同一数据库事务记录服务端准备返回的 actor-bound Audit。
-- 附件导出、`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX、通用字段映射与公式字段尚未交付；它们不能被
-  `MARKDOWN` 或 `METADATA_JSON` 结果替代，AC-33 因附件部分仍仅为部分完成。
+- Workspace attachment scope 从 canonical Workspace root handle 以 fd-relative no-follow 方式读取固定
+  `attachments/`，生成 `attachment-export/v1` 确定性 ZIP/manifest；prepared 后只验证固定 archive binding，下载使用
+  已校验 FD 流式返回。TTL/cleanup 只操作 `.knowledge/exports` 生成物，绝不修改或删除源附件。
+- `ops.export_capability` 的 `workspace-attachments/v1` gate 默认关闭；兼容 API/Worker 全部就绪后才启用，关闭时不创建
+  或 claim 新附件 Job。Collection 查询显式过滤 `COLLECTION`。
+- Markdown、领域 Metadata JSON 与真实附件字节共同关闭 AC-33；`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX、
+  通用字段映射与公式字段仍未交付，不能由占位成功文件替代。
 
 ## 13. 不变量
 

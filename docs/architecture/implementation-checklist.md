@@ -110,7 +110,7 @@
 - [x] Docker Smoke（基础、Workspace、Search、Tool 与 RAG Conversation 独立闭环）。
 
 > 边界：上述勾选只表示对应已实现切片已有代码和门禁，不表示项目整体完成。PDF/Web Parser、HNSW/容量、
-> Timeline/Impact 下游 executor、Document/Eval impact 与 POISONED 运维入口、M8、M9-03 异步导出/脱敏/结果追踪、正式 Document/Article Revision、M10 Auth/安全/
+> Timeline/Impact 下游 executor、Document/Eval impact 与 POISONED 运维入口、M8、Export 的 Evaluation/Audit/CSV/XLSX 等未覆盖格式、正式 Document/Article Revision、M10 Auth/安全/
 > 可观测/备份恢复，以及 M11 全量 E2E/发布交付仍未完成。
 
 > M8-02/M8-03 已补验 Review/Interview/Memory PostgreSQL、M8/Review migration race、前端 746 条测试，以及真实 API/Worker/Vite 的桌面与 390x844 浏览器主链路；业务数据 Down guard、Review Path reservation/hold 专门并发与 ABANDONED 重开仍未直接覆盖。
