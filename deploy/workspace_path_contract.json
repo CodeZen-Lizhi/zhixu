@@ -1,0 +1,16 @@
+[
+  {"path": "/tmp/zhixu-workspace", "valid": true},
+  {"path": "/private/tmp/zhixu-workspace", "valid": true},
+  {"path": "/Users/example/knowledge", "valid": true},
+  {"path": "/home/example/knowledge", "valid": true},
+  {"path": "/var/tmp/knowledge", "valid": true},
+  {"path": "/", "valid": false},
+  {"path": "/tmp", "valid": false},
+  {"path": "/private/tmp", "valid": false},
+  {"path": "/workspace", "valid": false},
+  {"path": "/workspace/project", "valid": false},
+  {"path": "/app/data", "valid": false},
+  {"path": "/var", "valid": false},
+  {"path": "/var/lib/zhixu", "valid": false},
+  {"path": "/run/user/1000", "valid": false}
+]

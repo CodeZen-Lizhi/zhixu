@@ -38,6 +38,10 @@ services:
       PGDATA: /var/lib/postgresql/data
     volumes:
       - zhixu-postgres:/var/lib/postgresql/data
+    ports:
+      - target: 5432
+        host_ip: 127.0.0.1
+        protocol: tcp
     healthcheck:
       test: ["CMD-SHELL", "PGPASSWORD=$$POSTGRES_PASSWORD psql -U $$POSTGRES_USER -d $$POSTGRES_DB -c 'SELECT 1' >/dev/null"]
       interval: 5s
@@ -73,9 +77,11 @@ services:
       ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
 
   app:
+    profiles: ["workspace-runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+    user: "10001:10001"
     environment:
       <<: [*tool-environment, *runtime-environment, *model-settings-environment, *api-auth-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
@@ -96,9 +102,10 @@ services:
       model-settings-key-init:
         condition: service_completed_successfully
     ports:
-      - "127.0.0.1:${ZHIXU_HTTP_PORT:-8080}:8080"
+      - target: 8080
+        host_ip: 127.0.0.1
+        protocol: tcp
     volumes:
-      - ${ZHIXU_WORKSPACE_ROOT:-../workspace}:/workspace
       - type: volume
         source: zhixu-model-secrets
         target: /run/zhixu-model-secrets
@@ -112,6 +119,7 @@ services:
       retries: 20
 
   firewall:
+    profiles: ["workspace-runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -125,6 +133,7 @@ services:
         condition: service_started
 
   proxy:
+    profiles: ["workspace-runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -141,6 +150,7 @@ services:
       retries: 20
 
   app-model-relay:
+    profiles: ["workspace-runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -153,9 +163,11 @@ services:
         condition: service_started
 
   worker:
+    profiles: ["workspace-runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+    user: "10001:10001"
     restart: ${ZHIXU_WORKER_RESTART_POLICY:-on-failure}
     entrypoint: ["/app/zhixu-worker"]
     environment:
@@ -195,7 +207,6 @@ services:
       model-settings-key-init:
         condition: service_completed_successfully
     volumes:
-      - ${ZHIXU_WORKSPACE_ROOT:-../workspace}:/workspace
       - type: volume
         source: zhixu-model-secrets
         target: /run/zhixu-model-secrets
@@ -210,6 +221,7 @@ services:
     stop_grace_period: ${ZHIXU_WORKER_STOP_GRACE_PERIOD:-70s}
 
   worker-model-relay:
+    profiles: ["workspace-runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile

@@ -74,6 +74,32 @@ func TestServiceCreateWorkspace(t *testing.T) {
 	}
 }
 
+func TestServiceManagedRootSelectionFailsBeforeFilesystemOrGitAccess(t *testing.T) {
+	repository := &deniedRootSelectionRepository{fakeRepository: &fakeRepository{}}
+	files := &fakeFileScanner{canonicalRoot: "/container/private"}
+	git := &fakeGitStatusReader{status: domain.GitStatus{Present: true}}
+	service := newTestService(repository, files, git)
+
+	for _, invoke := range []func() error{
+		func() error {
+			_, err := service.CreateWorkspace(context.Background(), CreateWorkspaceRequest{
+				Name: "Forbidden", RootPath: "/container/private", InitializeGit: true,
+			})
+			return err
+		},
+		func() error {
+			_, err := service.OpenWorkspace(context.Background(), "/container/private")
+			return err
+		},
+	} {
+		requireClassifiedError(t, invoke(), foundation.ErrorPermissionDenied, "WORKSPACE_ROOT_NOT_GRANTED")
+	}
+	if len(files.canonicalPaths) != 0 || git.calls != 0 || repository.createCalls != 0 || repository.requestedRoot != "" {
+		t.Fatalf("managed root selection reached side effects: paths=%v git=%d create=%d root=%q",
+			files.canonicalPaths, git.calls, repository.createCalls, repository.requestedRoot)
+	}
+}
+
 func TestCaptureCommittedSourceVersionRegistersExactCommitBytes(t *testing.T) {
 	now := time.Date(2026, time.July, 18, 3, 0, 0, 0, time.UTC)
 	content := []byte("# committed\n")
@@ -146,7 +172,7 @@ func TestServiceCreateWorkspaceRejectsDuplicateRoot(t *testing.T) {
 	}
 }
 
-func TestServiceCreateWorkspaceRejectsNestedRoot(t *testing.T) {
+func TestServiceCreateWorkspaceAllowsNestedRegistryRoot(t *testing.T) {
 	tests := []struct {
 		name      string
 		candidate string
@@ -162,10 +188,12 @@ func TestServiceCreateWorkspaceRejectsNestedRoot(t *testing.T) {
 			git := &fakeGitStatusReader{status: domain.GitStatus{Present: true}}
 			service := newTestService(repository, &fakeFileScanner{canonicalRoot: test.candidate}, git)
 
-			_, err := service.CreateWorkspace(context.Background(), CreateWorkspaceRequest{Name: "Workspace", RootPath: test.candidate})
-			requireClassifiedError(t, err, foundation.ErrorInvalidInput, "WORKSPACE_ROOT_NESTED")
-			if git.calls != 0 || repository.createCalls != 0 {
-				t.Fatalf("rejected nested root reached side effects: git calls=%d create calls=%d", git.calls, repository.createCalls)
+			result, err := service.CreateWorkspace(context.Background(), CreateWorkspaceRequest{Name: "Workspace", RootPath: test.candidate})
+			if err != nil {
+				t.Fatalf("CreateWorkspace() error = %v", err)
+			}
+			if result.Workspace.RootPath != test.candidate || git.calls != 1 || repository.createCalls != 1 {
+				t.Fatalf("nested registry result=%#v git calls=%d create calls=%d", result, git.calls, repository.createCalls)
 			}
 		})
 	}
@@ -283,6 +311,14 @@ type fakeRepository struct {
 	registration   domain.SourceRegistration
 	registerCalls  int
 	registerResult domain.SourceRegistrationResult
+}
+
+type deniedRootSelectionRepository struct {
+	*fakeRepository
+}
+
+func (*deniedRootSelectionRepository) AuthorizeRootSelection(context.Context) error {
+	return foundation.NewError(foundation.ErrorPermissionDenied, "WORKSPACE_ROOT_NOT_GRANTED", false, errors.New("managed root selection denied"))
 }
 
 func (f *fakeRepository) CreateWorkspace(_ context.Context, workspace domain.Workspace) (domain.Workspace, error) {

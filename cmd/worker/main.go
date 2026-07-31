@@ -91,6 +91,8 @@ import (
 	workflowruntime "github.com/CodeZen-Lizhi/zhixu/internal/workflow/runtime"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
+	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
+	workspaceruntimegrant "github.com/CodeZen-Lizhi/zhixu/internal/workspace/runtimegrant"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -248,6 +250,18 @@ func run(configPath string, logger *slog.Logger) error {
 		logger.Error("worker River schema validation failed", "error_code", "WORKFLOW_RIVER_MIGRATION_INVALID")
 		return validationErr
 	}
+	workspaceRuntime, err := workspaceruntimegrant.NewProcessComposition(
+		context.Background(), database.DB(), os.LookupEnv, workspacedomain.RuntimeRoleWorker,
+	)
+	if err != nil {
+		logger.Error("workspace root grant is unavailable", "error_code", "WORKSPACE_ROOT_GRANT_UNAVAILABLE")
+		return err
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		_ = workspaceRuntime.Close(shutdownContext)
+	}()
 	var managedModels modelsettingsruntime.BootstrapResult
 	var modelEnqueueFences []riveradapter.EnqueueFence
 	var configuredModels *modelsettingsruntime.Models
@@ -286,7 +300,7 @@ func run(configPath string, logger *slog.Logger) error {
 		return err
 	}
 	cfg = modelsettingsruntime.WithoutModelCredentials(cfg)
-	components, err := newWorkerComponentsWithModels(database.DB(), cfg, configuredModels, modelBinding, logger, telemetry.Metrics(), modelEnqueueFences...)
+	components, err := newWorkerComponentsWithModels(database.DB(), cfg, configuredModels, modelBinding, workspaceRuntime.Repository, logger, telemetry.Metrics(), modelEnqueueFences...)
 	if err != nil {
 		logger.Error("worker components are unavailable", "error_code", "WORKER_COMPONENTS_UNAVAILABLE")
 		return err
@@ -317,6 +331,7 @@ func run(configPath string, logger *slog.Logger) error {
 	defer cancelProcess()
 	modelDrain, err := newWorkerModelDrain(
 		components.dispatcher,
+		components.runtimeClient,
 		processContext,
 		func(ctx context.Context) (int64, error) {
 			return riveradapter.RunningJobCount(ctx, database.DB(), cfg.WorkerQueue)
@@ -327,10 +342,17 @@ func run(configPath string, logger *slog.Logger) error {
 		_ = health.server.Close()
 		return err
 	}
+	if err := workspaceRuntime.SetQuiescenceHooks(workspaceruntimegrant.QuiescenceHooks{
+		Begin: modelDrain.Begin, IsQuiesced: modelDrain.IsQuiesced, Resume: modelDrain.Resume,
+	}); err != nil {
+		_ = health.server.Close()
+		return err
+	}
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	modelRuntimeErr := make(chan error, 1)
+	workspaceRuntimeErr := workspaceRuntime.Errors()
 	var modelController *modelsettingsruntime.Controller
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
 		if managedModels.Service == nil || modelBinding.instanceID == nil {
@@ -355,6 +377,9 @@ func run(configPath string, logger *slog.Logger) error {
 		case runErr := <-modelRuntimeErr:
 			_ = health.server.Close()
 			return runErr
+		case runErr := <-workspaceRuntimeErr:
+			_ = health.server.Close()
+			return runErr
 		case received := <-signals:
 			logger.Info("worker stopping before model activation", "signal", received.String())
 			_ = health.server.Shutdown(context.Background())
@@ -366,6 +391,26 @@ func run(configPath string, logger *slog.Logger) error {
 			return healthErr
 		}
 	}
+	queueResumeContext, cancelQueueResume := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	resumeQueue := true
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		modelSnapshot, snapshotErr := managedModels.Service.Snapshot(queueResumeContext)
+		if snapshotErr != nil {
+			cancelQueueResume()
+			_ = health.server.Close()
+			return snapshotErr
+		}
+		resumeQueue = modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseIdle ||
+			modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseFailed
+	}
+	if resumeQueue {
+		if err := components.runtimeClient.ResumeQueue(queueResumeContext); err != nil {
+			cancelQueueResume()
+			_ = health.server.Close()
+			return err
+		}
+	}
+	cancelQueueResume()
 	if err := lifecycle.Start(processContext); err != nil {
 		readiness.BeginShutdown()
 		_ = health.server.Close()
@@ -445,6 +490,11 @@ func run(configPath string, logger *slog.Logger) error {
 			shutdownMode = shutdownEmergency
 			runErr = runtimeErr
 			logger.Error("model runtime ownership was lost", "error_code", modelsettingsdomain.ErrorCodeRuntimeConflict)
+			goto shutdown
+		case runtimeErr := <-workspaceRuntimeErr:
+			shutdownMode = shutdownEmergency
+			runErr = runtimeErr
+			logger.Error("workspace root grant ownership was lost", "error_code", "WORKSPACE_GRANT_STALE")
 			goto shutdown
 		case <-ticker.C:
 			if err := ping(database, cfg.DatabasePingTimeout); err != nil {
@@ -687,7 +737,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
-	return newWorkerComponentsWithModels(db, cfg, models, workerModelRuntimeBinding{}, logger, metrics, enqueueFences...)
+	return newWorkerComponentsWithModels(db, cfg, models, workerModelRuntimeBinding{}, nil, logger, metrics, enqueueFences...)
 }
 
 type workerModelRuntimeBinding struct {
@@ -741,7 +791,7 @@ func modelRuntimeForComposition(cfg config.Config, supplied ...*modelsettingsrun
 	return loaded.Models, nil
 }
 
-func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *modelsettingsruntime.Models, modelBinding workerModelRuntimeBinding, logger *slog.Logger, metrics observability.Metrics, enqueueFences ...riveradapter.EnqueueFence) (workerComponents, error) {
+func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *modelsettingsruntime.Models, modelBinding workerModelRuntimeBinding, workspaceRepository *workspacepostgres.Repository, logger *slog.Logger, metrics observability.Metrics, enqueueFences ...riveradapter.EnqueueFence) (workerComponents, error) {
 	if db == nil {
 		return workerComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_DATABASE_UNAVAILABLE", true, errors.New("database pool is nil"))
 	}
@@ -755,9 +805,12 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	} else if modelBinding.revision != nil || modelBinding.instanceID != nil {
 		return workerComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeRuntimeConflict, false, errors.New("static worker must not bind a managed model runtime"))
 	}
-	workspaceRepository, err := workspacepostgres.NewRepository(db)
-	if err != nil {
-		return workerComponents{}, err
+	if workspaceRepository == nil {
+		var err error
+		workspaceRepository, err = workspacepostgres.NewRepository(db)
+		if err != nil {
+			return workerComponents{}, err
+		}
 	}
 	writebackRepository, err := changecontrolpostgres.NewRepository(db)
 	if err != nil {

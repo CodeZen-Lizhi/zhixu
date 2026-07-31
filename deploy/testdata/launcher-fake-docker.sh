@@ -11,6 +11,34 @@ case "${arguments}" in
   *" compose version "*)
     printf 'Docker Compose version v5.1.2\n'
     ;;
+  *" buildx version "*)
+    printf 'github.com/docker/buildx v0.27.0\n'
+    ;;
+  *" buildx build "*)
+    destination=""
+    previous=""
+    for argument in "$@"; do
+      if [[ "${previous}" == "--output" ]]; then
+        destination="${argument#type=local,dest=}"
+        break
+      fi
+      previous="${argument}"
+    done
+    [[ -n "${destination}" ]] || exit 61
+    mkdir -p "${destination}/web"
+    cat >"${destination}/zhixu-host-controller" <<'EOF'
+#!/usr/bin/env bash
+trap 'exit 0' INT TERM
+while :; do
+  sleep 1
+done
+EOF
+    printf '<!doctype html><title>ZHIXU</title>\n' >"${destination}/web/index.html"
+    chmod 0755 "${destination}/zhixu-host-controller"
+    ;;
+  *" port postgres 5432 "*)
+    printf '127.0.0.1:55432\n'
+    ;;
   *"compose.static-models.yml"*" config --format json "*)
     cat "${ZHIXU_FAKE_STATIC_COMPOSE_MODEL}"
     ;;
@@ -19,52 +47,10 @@ case "${arguments}" in
     ;;
   *" config --quiet "*)
     ;;
-  *" port app 8080 "*)
-    printf '127.0.0.1:8080\n'
-    ;;
   *" run --rm --no-deps -T model-settings-key-init "*)
-    if [[ "${ZHIXU_FAKE_KEY_INIT_EXIT:-0}" != "0" ]]; then
-      exit "${ZHIXU_FAKE_KEY_INIT_EXIT}"
-    fi
+    [[ "${ZHIXU_FAKE_KEY_INIT_EXIT:-0}" == "0" ]] || exit "${ZHIXU_FAKE_KEY_INIT_EXIT}"
     ;;
   *" run --rm --no-deps -T migrate "*)
-    if [[ "${ZHIXU_FAKE_MIGRATE_EXIT:-0}" != "0" ]]; then
-      exit "${ZHIXU_FAKE_MIGRATE_EXIT}"
-    fi
-    ;;
-  *" run --rm --no-deps -T modelctl begin "*)
-    printf 'rollout-contract-1\n'
-    ;;
-  *" run --rm --no-deps -T modelctl wait-prepared "*)
-    if [[ "${ZHIXU_FAKE_BLOCK_MODELCTL:-}" == "wait-prepared" ]]; then
-      : >"${ZHIXU_FAKE_BLOCK_READY_FILE:?missing fake block ready file}"
-      while :; do
-        sleep 1
-      done
-    fi
-    if [[ "${ZHIXU_FAKE_FAIL_MODELCTL:-}" == "wait-prepared" ]]; then
-      exit 17
-    fi
-    ;;
-  *" run --rm --no-deps -T modelctl commit "*)
-    if [[ "${ZHIXU_FAKE_FAIL_MODELCTL:-}" == "commit-after-persist" ]]; then
-      exit 20
-    fi
-    if [[ "${ZHIXU_FAKE_FAIL_MODELCTL:-}" == "commit-before-persist" ]]; then
-      exit 17
-    fi
-    ;;
-  *" run --rm --no-deps -T modelctl status "*)
-    printf 'active\n'
-    ;;
-  *" up --detach --no-deps --force-recreate --wait app worker "*)
-    if [[ -n "${ZHIXU_FAKE_FAIL_STEADY_ONCE_FILE:-}" && ! -e "${ZHIXU_FAKE_FAIL_STEADY_ONCE_FILE}" ]]; then
-      : >"${ZHIXU_FAKE_FAIL_STEADY_ONCE_FILE}"
-      exit 18
-    fi
-    ;;
-  *" ps --status running --services app-model-relay worker-model-relay "*)
-    [[ "${ZHIXU_FAKE_MISSING_RELAY:-}" == "app-model-relay" ]] || printf 'app-model-relay\n'
-    [[ "${ZHIXU_FAKE_MISSING_RELAY:-}" == "worker-model-relay" ]] || printf 'worker-model-relay\n'
+    [[ "${ZHIXU_FAKE_MIGRATE_EXIT:-0}" == "0" ]] || exit "${ZHIXU_FAKE_MIGRATE_EXIT}"
     ;;
 esac

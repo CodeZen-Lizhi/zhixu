@@ -1,0 +1,12 @@
+{"file":".trellis/spec/backend/index.md","reason":"检查后端质量清单及所有被引用的核心规范。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查 Go composition、并发、测试、迁移与部署变更质量。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"审查 Controller/业务 credential 隔离、Origin、CSRF、loopback 与日志泄漏。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"审查单 Active、事务、锁、CAS、约束、索引、迁移与回滚。"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"审查 Workspace switch 与既有 rollout/drain/queue owner 的兼容和互斥。"}
+{"file":".trellis/spec/frontend/index.md","reason":"检查前端质量清单及状态、类型、组件规范。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"检查前端 lint、typecheck、测试、构建、浏览器与可访问性证据。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"审查 active identity、cache、mutation、route 与 SSE 不泄漏旧 Workspace。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"端到端核对浏览器 host path 到 Docker exact bind 和 Root capability 的事实流。"}
+{"file":".trellis/tasks/07-31-docker-host-workspace-path/research/host-path-contract.md","reason":"按当前代码与部署事实检查 mount、路径校验、调用方和兼容覆盖。"}
+{"file":".trellis/tasks/07-31-docker-host-workspace-path/research/workspace-identity-switch.md","reason":"检查 identity 不重绑、历史归属、后台任务和回滚隔离。"}
+{"file":".trellis/tasks/07-31-docker-host-workspace-path/research/frontend-controller-ux.md","reason":"检查稳定页面、控制认证、严格状态、cache/SSE/route 与浏览器测试矩阵。"}

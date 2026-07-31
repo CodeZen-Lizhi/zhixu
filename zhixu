@@ -4,22 +4,23 @@ set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/deploy/compose.yml"
+readonly DOCKERFILE="${SCRIPT_DIR}/deploy/Dockerfile"
 readonly ENV_TEMPLATE="${SCRIPT_DIR}/.env.example"
 readonly LOCAL_ENV_FILE="${SCRIPT_DIR}/.env"
-readonly WORKSPACE_DIR="${SCRIPT_DIR}/workspace"
 readonly PROJECT_NAME="deploy"
-readonly STEADY_WORKER_RESTART_POLICY="on-failure"
-readonly COMMITTED_QUEUE_PAUSED_EXIT_CODE=20
-readonly MUTATION_LOCK_DIR="${SCRIPT_DIR}/.zhixu-launcher.lock"
-readonly MUTATION_LOCK_METADATA="${MUTATION_LOCK_DIR}/owner"
+readonly STATE_DIR="${SCRIPT_DIR}/.zhixu"
+readonly LOCK_DIR="${STATE_DIR}/launcher.lock"
+readonly LOCK_METADATA="${LOCK_DIR}/owner"
+readonly BUNDLE_DIR="${STATE_DIR}/bundle"
+readonly CONTROLLER_BINARY="${BUNDLE_DIR}/zhixu-host-controller"
+readonly CONTROLLER_ASSETS="${BUNDLE_DIR}/web"
+readonly CONTROLLER_PID_FILE="${STATE_DIR}/controller.pid"
+readonly CONTROLLER_LOG_FILE="${STATE_DIR}/controller.log"
+readonly GRANT_OVERRIDE="${STATE_DIR}/workspace-grant.yml"
 
 ENV_FILE="${LOCAL_ENV_FILE}"
-RESTART_ROLLOUT_ID=""
-RESTART_STACK_STOPPED=0
-RESTART_COMMITTED=0
 MUTATION_LOCK_HELD=0
 MUTATION_COMMAND_PID=""
-READINESS_ERROR=""
 
 log() {
   printf '[zhixu] %s\n' "$1"
@@ -30,131 +31,17 @@ fail() {
   exit 1
 }
 
-release_mutation_lock() {
-  if [[ "${MUTATION_LOCK_HELD}" -eq 1 ]]; then
-    if ! rm -f -- "${MUTATION_LOCK_METADATA}" || ! rmdir -- "${MUTATION_LOCK_DIR}"; then
-      printf '[zhixu] warning: could not release mutation lock %s\n' "${MUTATION_LOCK_DIR}" >&2
-    fi
-    MUTATION_LOCK_HELD=0
-  fi
-  return 0
-}
-
-write_mutation_lock_metadata() {
-  local command=$1
-  local started_at
-  started_at="$(date +%s)" || fail "could not read the launcher start time"
-  (
-    umask 077
-    printf 'pid=%s\nstarted_at_epoch=%s\ncommand=%s\n' "$$" "${started_at}" "${command}" >"${MUTATION_LOCK_METADATA}"
-  ) || fail "could not write mutation lock metadata"
-}
-
-read_mutation_lock_metadata() {
-  awk -F= '
-    BEGIN { valid = 1 }
-    NR == 1 && NF == 2 && $1 == "pid" && $2 ~ /^[1-9][0-9]*$/ { pid = $2; next }
-    NR == 2 && NF == 2 && $1 == "started_at_epoch" && $2 ~ /^[1-9][0-9]*$/ { started = $2; next }
-    NR == 3 && NF == 2 && $1 == "command" && $2 ~ /^(up|restart|down|reset)$/ { command = $2; next }
-    { valid = 0 }
-    END {
-      if (valid && NR == 3 && pid != "" && started != "" && command != "") {
-        printf "%s %s %s\n", pid, started, command
-      } else {
-        exit 1
-      }
-    }
-  ' "${MUTATION_LOCK_METADATA}"
-}
-
-acquire_mutation_lock() {
-  local command=$1
-  local existing_metadata lock_pid lock_started lock_command lock_entries ps_output stale_lock
-  if mkdir -- "${MUTATION_LOCK_DIR}" 2>/dev/null; then
-    MUTATION_LOCK_HELD=1
-    write_mutation_lock_metadata "${command}"
-    return
-  fi
-
-  [[ -d "${MUTATION_LOCK_DIR}" && ! -L "${MUTATION_LOCK_DIR}" ]] || fail "mutation lock path is not a trusted directory"
-  [[ -f "${MUTATION_LOCK_METADATA}" && ! -L "${MUTATION_LOCK_METADATA}" ]] || fail "mutation lock metadata is missing or unsafe"
-  lock_entries="$(find "${MUTATION_LOCK_DIR}" -mindepth 1 -maxdepth 1 -print 2>/dev/null)" \
-    || fail "could not inspect mutation lock contents"
-  [[ "${lock_entries}" == "${MUTATION_LOCK_METADATA}" ]] || fail "mutation lock contains unexpected entries"
-  existing_metadata="$(read_mutation_lock_metadata)" || fail "mutation lock metadata is invalid"
-  read -r lock_pid lock_started lock_command <<<"${existing_metadata}"
-
-  if kill -0 "${lock_pid}" 2>/dev/null; then
-    fail "another mutating command is running (pid=${lock_pid}, started_at_epoch=${lock_started}, command=${lock_command})"
-  fi
-  if ps_output="$(ps -p "${lock_pid}" -o pid= 2>&1)"; then
-    fail "mutation lock owner is still present (pid=${lock_pid}, command=${lock_command})"
-  elif [[ -n "${ps_output}" ]]; then
-    fail "could not prove mutation lock owner is absent"
-  fi
-
-  stale_lock="${MUTATION_LOCK_DIR}.stale.$$"
-  [[ ! -e "${stale_lock}" && ! -L "${stale_lock}" ]] || fail "stale mutation lock recovery path already exists"
-  mv -- "${MUTATION_LOCK_DIR}" "${stale_lock}" || fail "mutation lock changed during stale recovery"
-  if ! mkdir -- "${MUTATION_LOCK_DIR}" 2>/dev/null; then
-    rm -f -- "${stale_lock}/owner"
-    rmdir -- "${stale_lock}" || true
-    fail "another mutating command acquired the launcher lock"
-  fi
-  MUTATION_LOCK_HELD=1
-  write_mutation_lock_metadata "${command}"
-  rm -f -- "${stale_lock}/owner"
-  rmdir -- "${stale_lock}" || fail "could not remove the recovered stale mutation lock"
-  log "recovered stale ${lock_command} lock from pid ${lock_pid}"
-}
-
-forward_mutation_signal() {
-  local signal=$1
-  local exit_code=$2
-  trap - INT TERM
-  if [[ -n "${MUTATION_COMMAND_PID}" ]]; then
-    kill -"${signal}" -- "-${MUTATION_COMMAND_PID}" 2>/dev/null \
-      || kill -"${signal}" "${MUTATION_COMMAND_PID}" 2>/dev/null \
-      || true
-    wait "${MUTATION_COMMAND_PID}" 2>/dev/null || true
-  fi
-  exit "${exit_code}"
-}
-
-run_mutation_command() {
-  local command_exit=0
-  python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" &
-  MUTATION_COMMAND_PID=$!
-  wait "${MUTATION_COMMAND_PID}" || command_exit=$?
-  MUTATION_COMMAND_PID=""
-  return "${command_exit}"
-}
-
-run_with_mutation_lock() {
-  local command=$1
-  local operation=$2
-  shift 2
-  require_command python3
-  trap release_mutation_lock EXIT
-  trap 'forward_mutation_signal INT 130' INT
-  trap 'forward_mutation_signal TERM 143' TERM
-  acquire_mutation_lock "${command}"
-  "${operation}" "$@"
-  release_mutation_lock
-  trap - EXIT INT TERM
-}
-
 usage() {
   cat <<'EOF'
 Usage: ./zhixu <command> [arguments]
 
 Commands:
-  up                       Build and start the complete local stack
-  restart                  Apply desired model settings with a controlled restart
-  status                   Show services, readiness, and the local URL
-  logs [service]           Follow logs for all or one known service
-  down                     Stop the stack and preserve all data volumes
-  reset [--confirm DELETE] Delete PostgreSQL and model-secret volumes
+  up                       Start base services and the native Host Controller
+  restart                  Restart services and restore the saved exact Workspace
+  status                   Show Controller and Compose process status
+  logs [controller|service] Follow Controller or one known Compose service
+  down                     Stop Controller and Compose while preserving volumes
+  reset [--confirm DELETE] Delete PostgreSQL/model-secret volumes and the active grant
   help                     Show this help
 EOF
 }
@@ -169,9 +56,55 @@ validate_project_scope() {
   fi
 }
 
+path_owner() {
+  local value
+  if value="$(stat -f '%u' -- "$1" 2>/dev/null)" && [[ "${value}" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "${value}"
+    return
+  fi
+  stat -c '%u' -- "$1" 2>/dev/null || return 1
+}
+
+path_mode() {
+  local value
+  if value="$(stat -f '%Lp' -- "$1" 2>/dev/null)" && [[ "${value}" =~ ^[0-7]+$ ]]; then
+    printf '%s\n' "${value}"
+    return
+  fi
+  stat -c '%a' -- "$1" 2>/dev/null || return 1
+}
+
+validate_state_directory() {
+  [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || fail ".zhixu must be a regular directory, not a symlink"
+  [[ "$(path_owner "${STATE_DIR}")" == "$(id -u)" ]] || fail ".zhixu has an unexpected owner"
+  local mode="$(path_mode "${STATE_DIR}")"
+  [[ "${mode}" == "700" ]] || fail ".zhixu permissions must be 0700"
+}
+
+ensure_state_directory() {
+  if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
+    (umask 077; mkdir -- "${STATE_DIR}") || fail "could not create protected Controller state"
+  fi
+  validate_state_directory
+}
+
+validate_optional_state_directory() {
+  if [[ -e "${STATE_DIR}" || -L "${STATE_DIR}" ]]; then
+    validate_state_directory
+  fi
+}
+
+validate_protected_file() {
+  local path=$1 label=$2 mode
+  [[ -f "${path}" && ! -L "${path}" ]] || fail "${label} must be a regular file, not a symlink"
+  [[ "$(path_owner "${path}")" == "$(id -u)" ]] || fail "${label} has an unexpected owner"
+  mode="$(path_mode "${path}")" || fail "could not inspect ${label} permissions"
+  [[ "${mode}" == "600" ]] || fail "${label} permissions must be 0600"
+}
+
 select_existing_env() {
   if [[ -e "${LOCAL_ENV_FILE}" || -L "${LOCAL_ENV_FILE}" ]]; then
-    [[ -f "${LOCAL_ENV_FILE}" && ! -L "${LOCAL_ENV_FILE}" ]] || fail ".env must be a regular file, not a symlink"
+    validate_protected_file "${LOCAL_ENV_FILE}" ".env"
     ENV_FILE="${LOCAL_ENV_FILE}"
   else
     ENV_FILE="${ENV_TEMPLATE}"
@@ -179,306 +112,378 @@ select_existing_env() {
 }
 
 initialize_local_state() {
+  ensure_state_directory
   if [[ ! -e "${LOCAL_ENV_FILE}" && ! -L "${LOCAL_ENV_FILE}" ]]; then
-    (
-      umask 077
-      cp -- "${ENV_TEMPLATE}" "${LOCAL_ENV_FILE}"
-    )
+    (umask 077; cp -- "${ENV_TEMPLATE}" "${LOCAL_ENV_FILE}") || fail "could not create local .env"
     log "created local .env from .env.example"
   else
-    [[ -f "${LOCAL_ENV_FILE}" && ! -L "${LOCAL_ENV_FILE}" ]] || fail ".env must be a regular file, not a symlink"
+    validate_protected_file "${LOCAL_ENV_FILE}" ".env"
   fi
   chmod 0600 "${LOCAL_ENV_FILE}"
+  validate_protected_file "${LOCAL_ENV_FILE}" ".env"
   ENV_FILE="${LOCAL_ENV_FILE}"
-  mkdir -p -- "${WORKSPACE_DIR}"
-  chmod u+rwx "${WORKSPACE_DIR}"
+  if awk -F= '$1 == "ZHIXU_WORKSPACE_ROOT" && $2 != "" { found = 1 } END { exit found ? 0 : 1 }' "${ENV_FILE}"; then
+    log "warning: ZHIXU_WORKSPACE_ROOT is obsolete and will not be mounted; select the directory in the browser"
+  fi
+}
+
+release_mutation_lock() {
+  if [[ "${MUTATION_LOCK_HELD}" -eq 1 ]]; then
+    if ! rm -f -- "${LOCK_METADATA}" || ! rmdir -- "${LOCK_DIR}"; then
+      printf '[zhixu] warning: could not release launcher lock %s\n' "${LOCK_DIR}" >&2
+    fi
+    MUTATION_LOCK_HELD=0
+  fi
+  return 0
+}
+
+read_lock_metadata() {
+  awk -F= '
+    NR == 1 && NF == 2 && $1 == "pid" && $2 ~ /^[1-9][0-9]*$/ { pid = $2; next }
+    NR == 2 && NF == 2 && $1 == "command" && $2 ~ /^(up|restart|down|reset)$/ { command = $2; next }
+    { invalid = 1 }
+    END { if (!invalid && NR == 2 && pid != "" && command != "") print pid, command; else exit 1 }
+  ' "${LOCK_METADATA}"
+}
+
+acquire_mutation_lock() {
+  local command=$1 metadata owner_pid owner_command stale
+  if mkdir -m 0700 -- "${LOCK_DIR}" 2>/dev/null; then
+    MUTATION_LOCK_HELD=1
+    (umask 077; printf 'pid=%s\ncommand=%s\n' "$$" "${command}" >"${LOCK_METADATA}") || fail "could not write launcher lock"
+    return
+  fi
+  [[ -d "${LOCK_DIR}" && ! -L "${LOCK_DIR}" ]] || fail "launcher lock is unsafe"
+  validate_protected_file "${LOCK_METADATA}" "launcher lock metadata"
+  metadata="$(read_lock_metadata)" || fail "launcher lock metadata is invalid"
+  read -r owner_pid owner_command <<<"${metadata}"
+  if kill -0 "${owner_pid}" 2>/dev/null; then
+    fail "another mutating command is running (pid=${owner_pid}, command=${owner_command})"
+  fi
+  local ps_output
+  if ps_output="$(ps -p "${owner_pid}" -o pid= 2>&1)"; then
+    fail "launcher lock owner is still present (pid=${owner_pid}, command=${owner_command})"
+  elif [[ -n "${ps_output}" ]]; then
+    fail "could not prove launcher lock owner is absent"
+  fi
+  stale="${STATE_DIR}/launcher.lock.stale.$$"
+  [[ ! -e "${stale}" && ! -L "${stale}" ]] || fail "stale lock recovery path already exists"
+  mv -- "${LOCK_DIR}" "${stale}" || fail "launcher lock changed during recovery"
+  rm -f -- "${stale}/owner"
+  rmdir -- "${stale}" || fail "could not remove stale launcher lock"
+  mkdir -m 0700 -- "${LOCK_DIR}" || fail "could not acquire launcher lock"
+  MUTATION_LOCK_HELD=1
+  (umask 077; printf 'pid=%s\ncommand=%s\n' "$$" "${command}" >"${LOCK_METADATA}") || fail "could not write launcher lock"
+  log "recovered stale ${owner_command} lock from pid ${owner_pid}"
+}
+
+forward_mutation_signal() {
+  local signal=$1 exit_code=$2
+  trap - INT TERM
+  if [[ -n "${MUTATION_COMMAND_PID}" ]]; then
+    kill -"${signal}" -- "-${MUTATION_COMMAND_PID}" 2>/dev/null || kill -"${signal}" "${MUTATION_COMMAND_PID}" 2>/dev/null || true
+    wait "${MUTATION_COMMAND_PID}" 2>/dev/null || true
+  fi
+  exit "${exit_code}"
+}
+
+run_mutation_command() {
+  local exit_code=0
+  python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" &
+  MUTATION_COMMAND_PID=$!
+  wait "${MUTATION_COMMAND_PID}" || exit_code=$?
+  MUTATION_COMMAND_PID=""
+  return "${exit_code}"
+}
+
+run_with_mutation_lock() {
+  local command=$1 operation=$2
+  shift 2
+  require_command python3
+  ensure_state_directory
+  trap release_mutation_lock EXIT
+  trap 'forward_mutation_signal INT 130' INT
+  trap 'forward_mutation_signal TERM 143' TERM
+  acquire_mutation_lock "${command}"
+  "${operation}" "$@"
+  release_mutation_lock
+  trap - EXIT INT TERM
 }
 
 compose() {
+  local prefix=(docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}")
   if [[ "${MUTATION_LOCK_HELD}" -eq 1 ]]; then
-    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
-      ZHIXU_WORKER_RESTART_POLICY="${STEADY_WORKER_RESTART_POLICY}" \
-      run_mutation_command docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
-    return
+    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false ZHIXU_WORKER_RESTART_POLICY=on-failure \
+      run_mutation_command "${prefix[@]}" "$@"
+  else
+    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false ZHIXU_WORKER_RESTART_POLICY=on-failure \
+      "${prefix[@]}" "$@"
   fi
-  ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
-    ZHIXU_WORKER_RESTART_POLICY="${STEADY_WORKER_RESTART_POLICY}" \
-    docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
-}
-
-compose_candidate() {
-  local rollout_id=$1
-  shift
-  ZHIXU_MODEL_SETTINGS_ROLLOUT_ID="${rollout_id}" ZHIXU_MODEL_SETTINGS_PREPARED=true \
-    ZHIXU_WORKER_RESTART_POLICY=no \
-    run_mutation_command docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
-}
-
-modelctl() {
-  compose run --rm --no-deps -T modelctl "$@"
-}
-
-modelctl_preflight() {
-  local role=$1
-  local service=$2
-  local rollout_id=$3
-  compose exec -T "${service}" /app/zhixu-modelctl preflight --role "${role}" --rollout-id "${rollout_id}"
 }
 
 validate_compose() {
   compose config --quiet
-  ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
-    ZHIXU_WORKER_RESTART_POLICY="${STEADY_WORKER_RESTART_POLICY}" \
-    python3 "${SCRIPT_DIR}/deploy/compose_runtime_check.py" --legacy-model-env -- \
-    docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" \
-      -f "${SCRIPT_DIR}/deploy/compose.static-models.yml" --env-file "${ENV_FILE}" config --format json
-  ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
-    ZHIXU_WORKER_RESTART_POLICY="${STEADY_WORKER_RESTART_POLICY}" \
-    python3 "${SCRIPT_DIR}/deploy/compose_auth_check.py" -- \
-    docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" config --format json
-  ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
-    ZHIXU_WORKER_RESTART_POLICY="${STEADY_WORKER_RESTART_POLICY}" \
-    python3 "${SCRIPT_DIR}/deploy/compose_runtime_check.py" -- \
-    docker compose --profile modelctl --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" config --format json
-}
-
-resolved_url() {
-  local binding port
-  binding="$(compose port app 8080 2>/dev/null | head -n 1 || true)"
-  if [[ "${binding}" =~ ^127\.0\.0\.1:([0-9]+)$ ]]; then
-    printf 'http://%s\n' "${binding}"
-    return
-  fi
-  port="${ZHIXU_HTTP_PORT:-$(awk -F= '$1 == "ZHIXU_HTTP_PORT" {sub(/\r$/, "", $2); print $2; exit}' "${ENV_FILE}")}"
-  [[ "${port}" =~ ^[1-9][0-9]{0,4}$ && "${port}" -le 65535 ]] || fail "ZHIXU_HTTP_PORT is invalid"
-  printf 'http://127.0.0.1:%s\n' "${port}"
-}
-
-check_readiness() {
-  local url relay running_relays
-  READINESS_ERROR=""
-  if ! url="$(resolved_url)"; then
-    READINESS_ERROR="local URL resolution failed"
-    return 1
-  fi
-  if ! curl --fail --silent --show-error --connect-timeout 3 --max-time 10 --output /dev/null "${url}/livez"; then
-    READINESS_ERROR="API liveness check failed"
-    return 1
-  fi
-  if ! curl --fail --silent --show-error --connect-timeout 3 --max-time 10 --output /dev/null "${url}/readyz"; then
-    READINESS_ERROR="API readiness check failed"
-    return 1
-  fi
-  if ! compose exec -T worker wget -q -T 10 -O /dev/null http://127.0.0.1:8081/readyz; then
-    READINESS_ERROR="Worker readiness check failed"
-    return 1
-  fi
-  running_relays="$(compose ps --status running --services app-model-relay worker-model-relay 2>/dev/null || true)"
-  for relay in app-model-relay worker-model-relay; do
-    if ! grep -Fx -- "${relay}" <<<"${running_relays}" >/dev/null; then
-      READINESS_ERROR="${relay} is not running"
-      return 1
-    fi
-  done
-}
-
-verify_readiness() {
-  check_readiness || fail "${READINESS_ERROR:-runtime readiness check failed}"
+  local model=(docker compose --profile workspace-runtime --profile modelctl --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" config --format json)
+  python3 "${SCRIPT_DIR}/deploy/compose_auth_check.py" -- "${model[@]}"
+  python3 "${SCRIPT_DIR}/deploy/compose_runtime_check.py" -- "${model[@]}"
+  python3 "${SCRIPT_DIR}/deploy/compose_workspace_check.py" --base -- "${model[@]}"
+  local static_model=(docker compose --profile workspace-runtime --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${SCRIPT_DIR}/deploy/compose.static-models.yml" --env-file "${ENV_FILE}" config --format json)
+  python3 "${SCRIPT_DIR}/deploy/compose_runtime_check.py" --legacy-model-env -- "${static_model[@]}"
 }
 
 start_base_stack() {
-  log "building application images"
-  compose --profile modelctl build
+  log "building base and Workspace runtime images"
+  compose --profile workspace-runtime --profile modelctl build \
+    model-settings-key-init migrate modelctl app worker app-model-relay worker-model-relay firewall proxy
   log "starting PostgreSQL, secret initialization, and migrations"
   compose up --detach --wait postgres
   compose run --rm --no-deps -T model-settings-key-init
   compose run --rm --no-deps -T migrate
-  modelctl recover --stale
+  compose --profile modelctl run --rm --no-deps -T modelctl recover --stale
 }
 
-start_ingress() {
-  compose up --detach --no-deps --wait app-model-relay worker-model-relay || return 1
-  compose run --rm --no-deps -T firewall || return 1
-  compose up --detach --no-deps --wait proxy
+host_platform() {
+  local os_name architecture
+  case "$(uname -s)" in
+    Darwin) os_name=darwin ;;
+    Linux) os_name=linux ;;
+    *) fail "Host Controller supports only macOS and Linux" ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) architecture=amd64 ;;
+    arm64|aarch64) architecture=arm64 ;;
+    *) fail "Host Controller supports only amd64 and arm64" ;;
+  esac
+  printf '%s %s\n' "${os_name}" "${architecture}"
 }
 
-close_ingress() {
-  compose stop proxy app-model-relay worker-model-relay >/dev/null 2>&1 || true
-  compose rm --force --stop proxy firewall app-model-relay worker-model-relay >/dev/null 2>&1 || true
+remove_bundle_directory() {
+  [[ -d "${BUNDLE_DIR}" && ! -L "${BUNDLE_DIR}" ]] || fail "Controller bundle path is unsafe"
+  find "${BUNDLE_DIR}" -depth -mindepth 1 -delete || fail "could not replace Controller bundle"
+  rmdir -- "${BUNDLE_DIR}" || fail "could not replace Controller bundle"
 }
 
-stop_runtime_containers() {
-  compose stop proxy app-model-relay worker-model-relay app worker
-  compose rm --force proxy firewall app-model-relay worker-model-relay app worker
-}
-
-start_steady_runtime() {
-  compose up --detach --no-deps --force-recreate --wait app worker
-}
-
-ensure_steady_runtime() {
-  compose up --detach --no-deps --wait app worker
-}
-
-restore_previous_runtime() {
-  log "restoring the previous active API and Worker"
-  compose stop proxy app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
-  compose rm --force --stop proxy firewall app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
-  start_steady_runtime || return 1
-  if ! start_ingress; then
-    close_ingress
-    return 1
+build_controller_bundle() {
+  local host_os host_arch temporary
+  read -r host_os host_arch <<<"$(host_platform)"
+  temporary="${STATE_DIR}/bundle.new.$$"
+  [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || fail "Controller bundle staging path already exists"
+  mkdir -m 0700 -- "${temporary}" || fail "could not stage Controller bundle"
+  log "building native Host Controller and web bundle"
+  if ! run_mutation_command docker buildx build --target host-controller-bundle \
+    --build-arg "ZHIXU_HOST_GOOS=${host_os}" --build-arg "ZHIXU_HOST_GOARCH=${host_arch}" \
+    --output "type=local,dest=${temporary}" -f "${DOCKERFILE}" "${SCRIPT_DIR}"; then
+    find "${temporary}" -depth -mindepth 1 -delete 2>/dev/null || true
+    rmdir -- "${temporary}" 2>/dev/null || true
+    fail "Host Controller bundle build failed"
   fi
-  if ! check_readiness; then
-    close_ingress
-    return 1
-  fi
+  [[ -f "${temporary}/zhixu-host-controller" && ! -L "${temporary}/zhixu-host-controller" ]] || fail "Controller bundle binary is missing"
+  [[ -d "${temporary}/web" && ! -L "${temporary}/web" ]] || fail "Controller web bundle is missing"
+  chmod 0700 "${temporary}/zhixu-host-controller"
+  [[ ! -e "${BUNDLE_DIR}" && ! -L "${BUNDLE_DIR}" ]] || remove_bundle_directory
+  mv -- "${temporary}" "${BUNDLE_DIR}" || fail "could not publish Controller bundle"
 }
 
-restore_committed_runtime() {
-  log "restoring the committed revision with steady API and Worker configuration"
-  compose stop proxy app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
-  compose rm --force --stop proxy firewall app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
-  start_steady_runtime || return 1
-  if ! start_ingress; then
-    close_ingress
-    return 1
-  fi
-  if ! check_readiness; then
-    close_ingress
-    return 1
-  fi
+controller_pid() {
+  [[ -e "${CONTROLLER_PID_FILE}" || -L "${CONTROLLER_PID_FILE}" ]] || return 1
+  validate_protected_file "${CONTROLLER_PID_FILE}" "Controller PID file"
+  local pid
+  pid="$(tr -d '\r\n' <"${CONTROLLER_PID_FILE}")"
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "${pid}"
 }
 
-restart_failed() {
-  local exit_code=$1
-  trap - EXIT INT TERM
-  set +e
-  if [[ -n "${RESTART_ROLLOUT_ID}" && "${RESTART_COMMITTED}" -eq 0 ]]; then
-    log "restart failed before commit; aborting rollout ${RESTART_ROLLOUT_ID}"
-    if modelctl abort --rollout-id "${RESTART_ROLLOUT_ID}"; then
-      if [[ "${RESTART_STACK_STOPPED}" -eq 1 ]]; then
-        restore_previous_runtime || log "automatic runtime restoration failed; inspect ./zhixu status"
-      fi
-    else
-      log "rollout abort failed; ingress remains fail closed for manual recovery"
+stop_controller() {
+  if [[ ! -e "${CONTROLLER_PID_FILE}" && ! -L "${CONTROLLER_PID_FILE}" ]]; then
+    return
+  fi
+  local pid command process_uid attempt
+  pid="$(controller_pid)" || fail "Controller PID file is unsafe"
+  if kill -0 "${pid}" 2>/dev/null; then
+    command="$(ps -p "${pid}" -o command= 2>/dev/null)" || fail "could not verify Controller process"
+    process_uid="$(ps -p "${pid}" -o uid= 2>/dev/null | tr -d '[:space:]')" || fail "could not verify Controller process owner"
+    [[ "${process_uid}" == "$(id -u)" && "${command}" == *"${CONTROLLER_BINARY}"* ]] || fail "Controller PID belongs to another process"
+    kill -TERM "${pid}" || fail "could not stop Host Controller"
+    for ((attempt = 0; attempt < 100; attempt++)); do
+      kill -0 "${pid}" 2>/dev/null || break
+      sleep 0.05
+    done
+    kill -0 "${pid}" 2>/dev/null && fail "Host Controller did not stop cleanly"
+  fi
+  rm -f -- "${CONTROLLER_PID_FILE}"
+}
+
+revoke_workspace_runtime() {
+  log "revoking any previous Workspace runtime"
+  compose --profile workspace-runtime stop proxy app-model-relay worker-model-relay app worker \
+    || fail "could not stop the previous Workspace runtime"
+  compose --profile workspace-runtime rm --force --stop proxy firewall app-model-relay worker-model-relay app worker \
+    || fail "could not remove the previous Workspace runtime"
+  remove_active_grant
+}
+
+controller_port() {
+  local configured
+  configured="${ZHIXU_HTTP_PORT:-$(awk -F= '$1 == "ZHIXU_HTTP_PORT" {sub(/\r$/, "", $2); print $2; exit}' "${ENV_FILE}")}" || fail "could not read Controller port"
+  [[ "${configured}" =~ ^[1-9][0-9]{0,4}$ && "${configured}" -le 65535 ]] || fail "ZHIXU_HTTP_PORT is invalid"
+  printf '%s\n' "${configured}"
+}
+
+generate_token() {
+  local value
+  value="$(LC_ALL=C od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" || fail "could not generate Controller credential"
+  [[ "${#value}" -eq 64 ]] || fail "could not generate Controller credential"
+  printf '%s\n' "${value}"
+}
+
+controller_database_url() {
+  local endpoint
+  endpoint="$(compose port postgres 5432)" || fail "could not discover the PostgreSQL host port"
+  [[ "${endpoint}" =~ ^127\.0\.0\.1:([1-9][0-9]{0,4})$ && "${BASH_REMATCH[1]}" -le 65535 ]] \
+    || fail "PostgreSQL is not published on an IPv4 loopback port"
+  compose config --format json | python3 -c '
+import json
+import sys
+from urllib.parse import quote
+
+endpoint = sys.argv[1]
+model = json.load(sys.stdin)
+environment = model.get("services", {}).get("postgres", {}).get("environment", {})
+if not isinstance(environment, dict):
+    raise SystemExit("PostgreSQL environment is unavailable")
+database = environment.get("POSTGRES_DB")
+username = environment.get("POSTGRES_USER")
+password = environment.get("POSTGRES_PASSWORD")
+if not all(isinstance(value, str) and value for value in (database, username, password)):
+    raise SystemExit("PostgreSQL credentials are unavailable")
+print(
+    "postgres://{}:{}@{}/{}?sslmode=disable".format(
+        quote(username, safe=""),
+        quote(password, safe=""),
+        endpoint,
+        quote(database, safe=""),
+    )
+)
+' "${endpoint}" || fail "could not derive the Controller database connection"
+}
+
+start_controller() {
+  local port token database_url pid attempt ready=0
+  port="$(controller_port)"
+  token="$(generate_token)"
+  database_url="$(controller_database_url)"
+  (umask 077; : >"${CONTROLLER_LOG_FILE}") || fail "could not create Controller log"
+  chmod 0600 "${CONTROLLER_LOG_FILE}"
+  # macOS still ships Bash 3.2, so use a fixed inherited descriptor instead of
+  # the Bash 4 dynamic-FD syntax.
+  exec 8<<<"${database_url}"
+  exec 9<<<"${token}"
+  nohup "${CONTROLLER_BINARY}" \
+    --addr "127.0.0.1:${port}" \
+    --assets "${CONTROLLER_ASSETS}" \
+    --state-dir "${STATE_DIR}" \
+    --compose-file "${COMPOSE_FILE}" \
+    --env-file "${ENV_FILE}" \
+    --grant-override "${GRANT_OVERRIDE}" \
+    --database-url-fd 8 \
+    --bootstrap-token-fd 9 \
+    >"${CONTROLLER_LOG_FILE}" 2>&1 </dev/null &
+  pid=$!
+  exec 8<&-
+  exec 9<&-
+  (umask 077; printf '%s\n' "${pid}" >"${CONTROLLER_PID_FILE}") || fail "could not write Controller PID"
+  chmod 0600 "${CONTROLLER_PID_FILE}"
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      break
     fi
-  elif [[ "${RESTART_COMMITTED}" -eq 1 ]]; then
-    log "model revision committed, but steady runtime or ingress recovery failed"
-    restore_committed_runtime || log "automatic committed-runtime recovery failed; ingress remains fail closed"
+    if curl --fail --silent --show-error --connect-timeout 1 --max-time 2 --output /dev/null \
+      -H "Host: 127.0.0.1:${port}" "http://127.0.0.1:${port}/control/v1/livez"; then
+      ready=1
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${ready}" -ne 1 ]]; then
+    stop_controller
+    fail "Host Controller liveness check failed"
   fi
-  release_mutation_lock
-  exit "${exit_code}"
+  log "ready: http://127.0.0.1:${port}/#control=${token}"
 }
 
 run_up() {
   require_command curl
   require_command docker
+  require_command id
+  require_command od
   require_command python3
   validate_project_scope
   docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
+  docker buildx version >/dev/null 2>&1 || fail "Docker Buildx is unavailable"
   initialize_local_state
   validate_compose
+  stop_controller
+  revoke_workspace_runtime
   start_base_stack
-  log "starting API, Worker, relays, and loopback ingress"
-  ensure_steady_runtime
-  start_ingress
-  if ! check_readiness; then
-    close_ingress
-    fail "${READINESS_ERROR:-runtime readiness check failed}"
-  fi
-  log "ready: $(resolved_url)"
+  build_controller_bundle
+  start_controller
 }
 
 run_restart() {
-  require_command curl
-  require_command docker
-  require_command python3
-  validate_project_scope
-  docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
-  initialize_local_state
-  validate_compose
-  start_base_stack
-
-  log "ensuring the current active runtime is healthy"
-  ensure_steady_runtime
-  start_ingress
-  verify_readiness
-
-  local begin_output
-  trap 'restart_failed $?' EXIT
-  trap 'forward_mutation_signal INT 130' INT
-  trap 'forward_mutation_signal TERM 143' TERM
-
-  begin_output="$(modelctl begin)"
-  RESTART_ROLLOUT_ID="$(printf '%s\n' "${begin_output}" | awk 'NF {value=$0} END {print value}')"
-  [[ "${RESTART_ROLLOUT_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || fail "modelctl returned an invalid rollout id"
-
-  log "preflighting target model revision"
-  modelctl_preflight api app "${RESTART_ROLLOUT_ID}"
-  modelctl_preflight worker worker "${RESTART_ROLLOUT_ID}"
-  modelctl drain --rollout-id "${RESTART_ROLLOUT_ID}"
-  modelctl wait-quiesced --rollout-id "${RESTART_ROLLOUT_ID}"
-
-  RESTART_STACK_STOPPED=1
-  stop_runtime_containers
-  log "starting prepared API and Worker candidates"
-  compose_candidate "${RESTART_ROLLOUT_ID}" up --detach --no-deps --force-recreate app worker
-  modelctl wait-prepared --rollout-id "${RESTART_ROLLOUT_ID}"
-  local commit_exit=0
-  if modelctl commit --rollout-id "${RESTART_ROLLOUT_ID}"; then
-    RESTART_COMMITTED=1
-  else
-    commit_exit=$?
-    if [[ "${commit_exit}" -ne "${COMMITTED_QUEUE_PAUSED_EXIT_CODE}" ]]; then
-      return "${commit_exit}"
-    fi
-    RESTART_COMMITTED=1
-    log "model revision committed; retrying queue recovery"
-    modelctl recover --stale
-  fi
-
-  log "replacing prepared candidates with steady API and Worker containers"
-  start_steady_runtime
-  start_ingress
-  verify_readiness
-
-  trap - EXIT INT TERM
-  RESTART_ROLLOUT_ID=""
-  log "restart complete: $(resolved_url)"
+  run_up
 }
 
 run_status() {
   require_command curl
   require_command docker
   validate_project_scope
+  validate_optional_state_directory
   select_existing_env
-  compose ps
-  local url api_status worker_status
-  url="$(resolved_url)"
-  api_status="unavailable"
-  worker_status="unavailable"
-  curl --fail --silent --connect-timeout 2 --max-time 5 --output /dev/null "${url}/readyz" && api_status="ready"
-  compose exec -T worker wget -q -T 5 -O /dev/null http://127.0.0.1:8081/readyz >/dev/null 2>&1 && worker_status="ready"
-  printf 'API: %s\nWorker: %s\nURL: %s\n' "${api_status}" "${worker_status}" "${url}"
+  compose --profile workspace-runtime --profile modelctl ps
+  local port pid status="stopped"
+  port="$(controller_port)"
+  if [[ -e "${CONTROLLER_PID_FILE}" || -L "${CONTROLLER_PID_FILE}" ]]; then
+    pid="$(controller_pid)" || fail "Controller PID file is invalid"
+  fi
+  if [[ -n "${pid:-}" ]] && kill -0 "${pid}" 2>/dev/null; then
+    status="unavailable"
+    if curl --fail --silent --connect-timeout 1 --max-time 2 --output /dev/null \
+      -H "Host: 127.0.0.1:${port}" "http://127.0.0.1:${port}/control/v1/livez"; then
+      status="ready"
+    fi
+  fi
+  printf 'Controller: %s\nURL: http://127.0.0.1:%s/\n' "${status}" "${port}"
+  if [[ -e "${GRANT_OVERRIDE}" || -L "${GRANT_OVERRIDE}" ]]; then
+    validate_protected_file "${GRANT_OVERRIDE}" "Workspace grant file"
+    printf 'Grant: configured (details require a Controller session)\n'
+  else
+    printf 'Grant: waiting for Workspace selection\n'
+  fi
 }
 
 run_logs() {
   require_command docker
   validate_project_scope
+  validate_optional_state_directory
   select_existing_env
-  local service="${1:-}"
-  if [[ $# -gt 1 ]]; then
-    fail "logs accepts at most one service"
+  local service="${1:-controller}"
+  [[ $# -le 1 ]] || fail "logs accepts at most one service"
+  if [[ "${service}" == "controller" ]]; then
+    validate_protected_file "${CONTROLLER_LOG_FILE}" "Controller log"
+    tail -n 200 -f -- "${CONTROLLER_LOG_FILE}"
+    return
   fi
-  if [[ -n "${service}" ]]; then
-    case "${service}" in
-      postgres|model-settings-key-init|migrate|app|worker|app-model-relay|worker-model-relay|firewall|proxy|modelctl) ;;
-      *) fail "unknown service: ${service}" ;;
-    esac
-    compose logs --follow --tail 200 "${service}"
-  else
-    compose logs --follow --tail 200
+  case "${service}" in
+    postgres|model-settings-key-init|migrate|app|worker|app-model-relay|worker-model-relay|firewall|proxy|modelctl) ;;
+    *) fail "unknown service: ${service}" ;;
+  esac
+  compose --profile workspace-runtime --profile modelctl logs --follow --tail 200 "${service}"
+}
+
+remove_active_grant() {
+  if [[ -e "${GRANT_OVERRIDE}" || -L "${GRANT_OVERRIDE}" ]]; then
+    validate_protected_file "${GRANT_OVERRIDE}" "Workspace grant file"
+    rm -f -- "${GRANT_OVERRIDE}"
   fi
 }
 
@@ -486,8 +491,10 @@ run_down() {
   require_command docker
   validate_project_scope
   select_existing_env
+  stop_controller
   compose down --remove-orphans
-  log "stopped; PostgreSQL, model settings, secret key, and workspace were preserved"
+  remove_active_grant
+  log "stopped; PostgreSQL and model-secret volumes were preserved; no Workspace remains granted"
 }
 
 run_reset() {
@@ -504,8 +511,10 @@ run_reset() {
     fail "reset requires an interactive confirmation or --confirm DELETE"
   fi
   [[ "${confirmation}" == "DELETE" ]] || fail "reset confirmation did not match DELETE"
+  stop_controller
   compose down --volumes --remove-orphans
-  log "deleted Compose volumes; the bind-mounted workspace was preserved"
+  remove_active_grant
+  log "deleted Compose volumes and cleared the active grant; host Workspace files were not touched"
 }
 
 main() {

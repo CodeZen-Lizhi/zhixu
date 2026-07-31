@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/rootgrant"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,29 +22,90 @@ type DB interface {
 	Begin(context.Context) (pgx.Tx, error)
 }
 
+// RootGrantResolver is the capability boundary required before a persisted
+// Workspace root can leave this adapter.
+type RootGrantResolver interface {
+	Resolve(context.Context, foundation.ID) (*rootgrant.Capability, error)
+}
+
 // Repository is the PostgreSQL implementation of domain.Repository.
-type Repository struct{ db DB }
+type Repository struct {
+	db      DB
+	grants  RootGrantResolver
+	managed bool
+}
+
+// RepositoryOption configures process-local root authority.
+type RepositoryOption func(*Repository) error
+
+// WithRootGrantResolver gates every root-bearing read through resolver.
+func WithRootGrantResolver(resolver RootGrantResolver, managed bool) RepositoryOption {
+	return func(repository *Repository) error {
+		if resolver == nil {
+			return errors.New("workspace root grant resolver is nil")
+		}
+		repository.grants = resolver
+		repository.managed = managed
+		return nil
+	}
+}
+
+const workspaceColumns = `id::text,name,root_path,root_fingerprint,binding_version,
+	git_repository_path,git_branch,git_head,git_dirty,git_checked_at,
+	status,availability,availability_reason,availability_checked_at,last_opened_at,removed_at,
+	version,created_at,updated_at`
 
 // NewRepository constructs a Workspace repository over a pgx-compatible pool.
-func NewRepository(db DB) (*Repository, error) {
+func NewRepository(db DB, options ...RepositoryOption) (*Repository, error) {
 	if db == nil {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKSPACE_DATABASE_UNAVAILABLE", true, errors.New("database is nil"))
 	}
-	return &Repository{db: db}, nil
+	repository := &Repository{db: db}
+	for _, option := range options {
+		if option == nil {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKSPACE_REPOSITORY_OPTION_INVALID", false, errors.New("workspace repository option is nil"))
+		}
+		if err := option(repository); err != nil {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKSPACE_REPOSITORY_OPTION_INVALID", false, err)
+		}
+	}
+	return repository, nil
+}
+
+// AuthorizeRootSelection reserves root creation and root-based opening to the
+// Host Controller when this repository belongs to a managed runtime.
+func (r *Repository) AuthorizeRootSelection(context.Context) error {
+	if r != nil && r.managed {
+		return foundation.NewError(foundation.ErrorPermissionDenied, rootgrant.ErrorCodeRootNotGranted, false, errors.New("managed Workspace roots are selected by the Host Controller"))
+	}
+	return nil
 }
 
 // CreateWorkspace inserts one Workspace mapping and returns database timestamps.
 func (r *Repository) CreateWorkspace(ctx context.Context, workspace domain.Workspace) (domain.Workspace, error) {
+	if r.managed {
+		return domain.Workspace{}, foundation.NewError(foundation.ErrorPermissionDenied, rootgrant.ErrorCodeRootNotGranted, false, errors.New("managed Workspace identities are created by the Host Controller"))
+	}
+	availability := workspace.Availability
+	availabilityReason := nullableText(workspace.AvailabilityReason)
+	availabilityCheckedAt := nullableTime(workspace.AvailabilityCheckedAt)
+	if availability == "" {
+		availability = domain.WorkspaceAvailabilityMigrationRequired
+		availabilityReason = "WORKSPACE_BINDING_LEGACY_DIRECT"
+		availabilityCheckedAt = workspace.UpdatedAt.UTC()
+	}
 	row := r.db.QueryRow(ctx, `
 		INSERT INTO core.workspace (
-			id, name, root_path, git_repository_path, git_branch, git_head,
-			git_dirty, git_checked_at, status, version, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		RETURNING id::text, name, root_path, git_repository_path, git_branch, git_head,
-			git_dirty, git_checked_at, status, version, created_at, updated_at`,
-		string(workspace.ID), workspace.Name, workspace.RootPath,
+			id,name,root_path,root_fingerprint,binding_version,
+			git_repository_path,git_branch,git_head,git_dirty,git_checked_at,
+			status,availability,availability_reason,availability_checked_at,last_opened_at,removed_at,
+			version,created_at,updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		RETURNING `+workspaceColumns,
+		string(workspace.ID), workspace.Name, workspace.RootPath, nullableText(workspace.RootFingerprint), workspace.BindingVersion,
 		workspace.Git.RepositoryPath, workspace.Git.Branch, workspace.Git.Head,
-		workspace.Git.Dirty, workspace.Git.CheckedAt.UTC(), string(workspace.Status),
+		workspace.Git.Dirty, workspace.Git.CheckedAt.UTC(), string(workspace.Status), string(availability),
+		availabilityReason, availabilityCheckedAt, nullableTime(workspace.LastOpenedAt), nullableTime(workspace.RemovedAt),
 		workspace.Version, workspace.CreatedAt.UTC(), workspace.UpdatedAt.UTC(),
 	)
 	persisted, err := scanWorkspace(row)
@@ -55,12 +117,20 @@ func (r *Repository) CreateWorkspace(ctx context.Context, workspace domain.Works
 
 // GetWorkspaceByID returns one Workspace by stable ID.
 func (r *Repository) GetWorkspaceByID(ctx context.Context, id foundation.ID) (domain.Workspace, error) {
-	return r.getWorkspace(ctx, "id = $1", string(id))
+	workspace, err := r.getWorkspace(ctx, "id = $1", string(id))
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+	return r.authorizeWorkspace(ctx, workspace)
 }
 
 // GetWorkspaceByRootPath returns one Workspace by canonical root path.
 func (r *Repository) GetWorkspaceByRootPath(ctx context.Context, rootPath string) (domain.Workspace, error) {
-	return r.getWorkspace(ctx, "root_path = $1", rootPath)
+	workspace, err := r.getWorkspace(ctx, "root_path = $1", rootPath)
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+	return r.authorizeWorkspace(ctx, workspace)
 }
 
 // ListSourceVersions 返回按捕获时间和 ID 倒序排列的 Source Version 摘要。
@@ -120,9 +190,7 @@ func buildSourceVersionListQuery(request domain.SourceVersionListQuery) (string,
 }
 
 func (r *Repository) getWorkspace(ctx context.Context, predicate string, argument any) (domain.Workspace, error) {
-	query := `SELECT id::text, name, root_path, git_repository_path, git_branch, git_head,
-		git_dirty, git_checked_at, status, version, created_at, updated_at
-		FROM core.workspace WHERE ` + predicate
+	query := `SELECT ` + workspaceColumns + ` FROM core.workspace WHERE ` + predicate
 	workspace, err := scanWorkspace(r.db.QueryRow(ctx, query, argument))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -135,6 +203,9 @@ func (r *Repository) getWorkspace(ctx context.Context, predicate string, argumen
 
 // ListWorkspaceRoots returns canonical roots in stable lexical order.
 func (r *Repository) ListWorkspaceRoots(ctx context.Context) ([]string, error) {
+	if err := r.AuthorizeRootSelection(ctx); err != nil {
+		return nil, err
+	}
 	rows, err := r.db.Query(ctx, `SELECT root_path FROM core.workspace ORDER BY root_path, id`)
 	if err != nil {
 		return nil, classify(err, "WORKSPACE_ROOTS_QUERY_FAILED")
@@ -259,10 +330,33 @@ func (r *Repository) GetSourceMaterial(ctx context.Context, sourceVersionID foun
 	if version.ContentHash != artifact.ContentHash || version.ByteSize != artifact.ByteSize {
 		return domain.SourceMaterial{}, foundation.NewError(foundation.ErrorConsistencyViolation, "SOURCE_MATERIAL_METADATA_CONFLICT", false, errors.New("source version and content artifact metadata differ"))
 	}
+	authorizedWorkspace, err := r.authorizeWorkspace(ctx, domain.Workspace{ID: parsedWorkspaceID, RootPath: workspaceRootPath})
+	if err != nil {
+		return domain.SourceMaterial{}, err
+	}
 	return domain.SourceMaterial{
-		WorkspaceID: parsedWorkspaceID, WorkspaceRootPath: workspaceRootPath, SourceID: parsedSourceID,
+		WorkspaceID: parsedWorkspaceID, WorkspaceRootPath: authorizedWorkspace.RootPath, SourceID: parsedSourceID,
 		SourceVersion: version, ContentArtifact: artifact,
 	}, nil
+}
+
+func (r *Repository) authorizeWorkspace(ctx context.Context, workspace domain.Workspace) (domain.Workspace, error) {
+	if r.grants == nil {
+		return workspace, nil
+	}
+	capability, err := r.grants.Resolve(ctx, workspace.ID)
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+	defer func() { _ = capability.Close() }()
+	if capability.WorkspaceID() != workspace.ID || capability.CanonicalRoot() != workspace.RootPath {
+		return domain.Workspace{}, foundation.NewError(foundation.ErrorConsistencyViolation, rootgrant.ErrorCodeGrantStale, false, errors.New("workspace row differs from root grant"))
+	}
+	if err := capability.Revalidate(ctx); err != nil {
+		return domain.Workspace{}, err
+	}
+	workspace.RootPath = capability.CanonicalRoot()
+	return workspace, nil
 }
 
 func parseMaterialID(value, field string) (foundation.ID, error) {
@@ -451,10 +545,13 @@ type rowScanner interface{ Scan(...any) error }
 
 func scanWorkspace(row rowScanner) (domain.Workspace, error) {
 	var workspace domain.Workspace
-	var id, status string
-	err := row.Scan(&id, &workspace.Name, &workspace.RootPath,
+	var id, status, availability string
+	var fingerprint, availabilityReason sql.NullString
+	var availabilityCheckedAt, lastOpenedAt, removedAt sql.NullTime
+	err := row.Scan(&id, &workspace.Name, &workspace.RootPath, &fingerprint, &workspace.BindingVersion,
 		&workspace.Git.RepositoryPath, &workspace.Git.Branch, &workspace.Git.Head,
-		&workspace.Git.Dirty, &workspace.Git.CheckedAt, &status, &workspace.Version,
+		&workspace.Git.Dirty, &workspace.Git.CheckedAt, &status, &availability,
+		&availabilityReason, &availabilityCheckedAt, &lastOpenedAt, &removedAt, &workspace.Version,
 		&workspace.CreatedAt, &workspace.UpdatedAt)
 	if err != nil {
 		return domain.Workspace{}, err
@@ -465,7 +562,33 @@ func scanWorkspace(row rowScanner) (domain.Workspace, error) {
 	}
 	workspace.ID = parsed
 	workspace.Status = domain.WorkspaceStatus(status)
+	workspace.Availability = domain.WorkspaceAvailability(availability)
+	workspace.RootFingerprint = fingerprint.String
+	workspace.AvailabilityReason = availabilityReason.String
+	if availabilityCheckedAt.Valid {
+		workspace.AvailabilityCheckedAt = availabilityCheckedAt.Time
+	}
+	if lastOpenedAt.Valid {
+		workspace.LastOpenedAt = lastOpenedAt.Time
+	}
+	if removedAt.Valid {
+		workspace.RemovedAt = removedAt.Time
+	}
 	return workspace, nil
+}
+
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC()
 }
 
 func scanSource(row rowScanner) (domain.Source, error) {

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -156,7 +156,7 @@ describe("EventStoreProvider", () => {
     expect(connectionMock.close).toHaveBeenCalledTimes(1);
     expect(connectionMock.options).toHaveLength(2);
     expect(connectionMock.options[1]?.workspaceId).toBe(workspaceB);
-    expect(queryClient.getQueryData(["workspace", workspaceA])).toBeUndefined();
+    await waitFor(() => expect(queryClient.getQueryData(["workspace", workspaceA])).toBeUndefined());
     expect(queryClient.getQueryData(["business", workspaceA, "proposal", "p1"])).toBeUndefined();
     expect(queryClient.getQueryData(["search", workspaceA, "page", "query"])).toBeUndefined();
     expect(queryClient.getQueryData(["rag", workspaceA, "conversation", "c1"])).toBeUndefined();

@@ -1,0 +1,13 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端开发前置清单与目录、错误、数据库、质量规范入口。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Controller 独立会话、Origin、CSRF、Cookie 与业务认证隔离必须遵守现有安全边界。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Workspace Registry、单 Active、操作状态机、lease 与回滚涉及高风险事务和迁移。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"路径、切换、回滚和控制认证需要稳定分类错误与 HTTP 映射。"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"复用现有 rollout heartbeat、prepared runtime、drain、commit/recover 模式并建立互斥。"}
+{"file":".trellis/spec/frontend/index.md","reason":"前端开发前置清单与状态、类型、组件规范入口。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Controller state、active Workspace、query cache、mutation 与 SSE 生命周期的核心约束。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Controller 严格协议、状态枚举、Problem 与 switch payload 需要边界解码。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"宿主机控制器、数据库、运行时、API 与浏览器必须按一条可验证数据流实现。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Root Grant、cache cleanup、queue gate 和 runtime rollout 需要单一 owner，避免重复规则。"}
+{"file":".trellis/tasks/07-31-docker-host-workspace-path/research/host-path-contract.md","reason":"提供当前 launcher、Compose、持久路径和全部 Root 消费者事实；顶部 superseding decision 排除旧父目录建议。"}
+{"file":".trellis/tasks/07-31-docker-host-workspace-path/research/workspace-identity-switch.md","reason":"说明不同 Root 必须使用不同 Workspace ID及历史、任务、Git 与前端隔离影响。"}
+{"file":".trellis/tasks/07-31-docker-host-workspace-path/research/frontend-controller-ux.md","reason":"提供稳定控制页面、独立认证、控制 API、cache/SSE/route 切换与测试边界。"}

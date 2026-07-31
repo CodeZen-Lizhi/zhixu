@@ -112,6 +112,7 @@ import (
 	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
+	workspaceruntimegrant "github.com/CodeZen-Lizhi/zhixu/internal/workspace/runtimegrant"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -166,6 +167,7 @@ func runAPI() int {
 	}()
 
 	producerGate := newAPIProducerGate()
+	workspaceGate := newAPIWorkspaceRuntimeGate()
 	var modelRuntimeController *modelsettingsruntime.Controller
 	var modelSettingsManager modelsettingsapplication.SettingsManager
 	var modelEnqueueFences []riveradapter.EnqueueFence
@@ -297,6 +299,25 @@ func runAPI() int {
 	artifactIDs := foundation.NewUUIDGenerator(nil)
 	artifactClock := foundation.SystemClock{}
 	fileScanner := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
+	var workspaceRuntime *workspaceruntimegrant.ProcessComposition
+	if database != nil {
+		workspaceRuntime, databaseErr = workspaceruntimegrant.NewProcessComposition(
+			context.Background(), database.DB(), os.LookupEnv, workspacedomain.RuntimeRoleAPI,
+		)
+		if databaseErr != nil {
+			logger.Error("workspace root grant is unavailable", "error_code", "WORKSPACE_ROOT_GRANT_UNAVAILABLE")
+			return 1
+		}
+		if err := workspaceRuntime.SetQuiescenceHooks(workspaceGate.Hooks()); err != nil {
+			logger.Error("workspace runtime quiescence is unavailable", "error_code", "WORKSPACE_QUIESCENCE_UNAVAILABLE")
+			return 1
+		}
+		defer func() {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+			defer cancel()
+			_ = workspaceRuntime.Close(shutdownContext)
+		}()
+	}
 	if database != nil {
 		configuredKnowledgeHandler, knowledgeHandlerErr := newKnowledgeHandler(database.DB(), cfg.GraphQueryTimeout)
 		if knowledgeHandlerErr != nil {
@@ -325,7 +346,8 @@ func runAPI() int {
 		} else {
 			graphHandler = configuredGraphHandler
 		}
-		workspaceRepository, repositoryErr := workspacepostgres.NewRepository(database.DB())
+		workspaceRepository := workspaceRuntime.Repository
+		var repositoryErr error
 		healthEvents, healthEventsErr := eventspostgres.NewStore(database.DB())
 		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB(), healthEvents)
 		var workflowRuntime *workflowpostgres.RuntimeRepository
@@ -523,10 +545,14 @@ func runAPI() int {
 		Logger:            logger,
 		Tracer:            telemetry.Tracer(),
 	}
-	server := newAPIServer(cfg.HTTPAddr, producerGate.Wrap(app.NewRouter(deps)))
+	server := newAPIServer(cfg.HTTPAddr, workspaceGate.Wrap(producerGate.Wrap(app.NewRouter(deps))))
 	stop, stopCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopCancel()
 	var modelRuntimeErr <-chan error
+	var workspaceRuntimeErr <-chan error
+	if workspaceRuntime != nil {
+		workspaceRuntimeErr = workspaceRuntime.Errors()
+	}
 	if modelRuntimeController != nil {
 		modelRuntimeErr = startAPIModelRuntime(stop, modelRuntimeController)
 		select {
@@ -547,21 +573,28 @@ func runAPI() int {
 		}
 	}()
 
+	exitCode := 0
 	select {
 	case err := <-serverErr:
 		logger.Error("api server stopped unexpectedly", "error_code", "SERVER_FAILED", "error", err)
-		return 1
+		exitCode = 1
 	case err := <-modelRuntimeErr:
 		logger.Error("model runtime ownership was lost", "error_code", modelsettingsdomain.ErrorCodeRuntimeConflict, "error", err)
-		return 1
+		exitCode = 1
+	case err := <-workspaceRuntimeErr:
+		logger.Error("workspace root grant ownership was lost", "error_code", "WORKSPACE_GRANT_STALE", "error", err)
+		exitCode = 1
 	case <-stop.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Error("api server shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("api server shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
+		if exitCode == 0 {
+			exitCode = 1
 		}
 	}
-	return 0
+	return exitCode
 }
 
 // initializeAPITelemetry 按 API 配置构造 telemetry，并保留 disabled、optional、required 的统一语义。

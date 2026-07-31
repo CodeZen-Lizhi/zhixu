@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 
 import { getWorkspace } from "../api/workspace";
 import { useActiveWorkspaceId } from "../app/active-workspace";
+import { clearWorkspaceRuntimeState } from "../app/workspace-runtime-state";
 import { invalidateRagEvent, recoverRagWorkspace } from "../features/rag/event-recovery";
 import { reviewQueryKeys } from "../features/review/query-keys";
 import { resetSearchWorkspaceQueriesForRecovery } from "../features/search/query-keys";
@@ -67,20 +68,8 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
       && activeEffectRef.current === effectIdentity
       && currentWorkspaceIdRef.current === workspaceId;
     const storageKey = cursorKey(workspaceId);
-    const queryFamilies = [
-      ["workspace", workspaceId],
-      ["business", workspaceId],
-      ["search", workspaceId],
-      ["rag", workspaceId],
-      ["collections", workspaceId],
-      ["collection-exports", workspaceId],
-      ["workspace-attachment-exports", workspaceId],
-      ["knowledge-health", workspaceId],
-      ["graph", workspaceId],
-      ["semantic-links", workspaceId],
-    ] as const;
     const removeWorkspaceQueries = (): void => {
-      for (const queryKey of queryFamilies) queryClient.removeQueries({ queryKey });
+      void clearWorkspaceRuntimeState(queryClient, workspaceId);
     };
     const assertActive = (): void => {
       if (isActive()) return;

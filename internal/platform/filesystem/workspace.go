@@ -41,17 +41,16 @@ type ScanOptions struct {
 // and ingestion composition roots unless an explicit policy overrides it.
 const DefaultMaxBytes int64 = 10 * 1024 * 1024
 
-// NewRoot canonicalizes an existing directory and rejects non-directories.
+// NewRoot canonicalizes an existing absolute directory and rejects non-directories.
 func NewRoot(path string) (Root, error) {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
 		return Root{}, errors.New("workspace root is required")
 	}
-	abs, err := filepath.Abs(trimmed)
-	if err != nil {
-		return Root{}, fmt.Errorf("resolve workspace root: %w", err)
+	if !filepath.IsAbs(trimmed) {
+		return Root{}, errors.New("workspace root must be absolute")
 	}
-	canonical, err := filepath.EvalSymlinks(abs)
+	canonical, err := filepath.EvalSymlinks(filepath.Clean(trimmed))
 	if err != nil {
 		return Root{}, fmt.Errorf("resolve workspace root symlinks: %w", err)
 	}

@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 DOCKER_COMPOSE ?= docker compose
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-runtime-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-runtime-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke
 
 test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet agent-eval openapi-check compose-check
 
@@ -143,23 +143,30 @@ timeline-impact-worker-smoke:
 
 compose-auth-check:
 	@python3 deploy/compose_auth_check.py -- \
-		$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example config --format json
+		$(DOCKER_COMPOSE) --profile workspace-runtime -f deploy/compose.yml --env-file .env.example config --format json
 
 compose-auth-smoke:
 	bash deploy/compose-auth-smoke.sh
 
 compose-runtime-check:
 	@python3 deploy/compose_runtime_check.py -- \
-		$(DOCKER_COMPOSE) --profile modelctl -f deploy/compose.yml --env-file .env.example config --format json
+		$(DOCKER_COMPOSE) --profile workspace-runtime --profile modelctl -f deploy/compose.yml --env-file .env.example config --format json
 
 compose-static-models-check:
 	@python3 deploy/compose_runtime_check.py --static-models -- \
-		$(DOCKER_COMPOSE) -f deploy/compose.yml -f deploy/compose.static-models.yml --env-file .env.example config --format json
+		$(DOCKER_COMPOSE) --profile workspace-runtime -f deploy/compose.yml -f deploy/compose.static-models.yml --env-file .env.example config --format json
 
 compose-runtime-contract:
 	python3 deploy/compose_runtime_contract.py
 
-compose-check: compose-auth-check compose-runtime-check compose-static-models-check compose-runtime-contract compose-smoke-cleanup-contract smoke-image-cleanup-contract launcher-contract model-secrets-init-contract
+compose-workspace-check:
+	@python3 deploy/compose_workspace_check.py --base -- \
+		$(DOCKER_COMPOSE) --profile workspace-runtime -f deploy/compose.yml --env-file .env.example config --format json
+
+compose-workspace-contract:
+	python3 deploy/compose_workspace_contract.py
+
+compose-check: compose-auth-check compose-runtime-check compose-static-models-check compose-runtime-contract compose-workspace-check compose-workspace-contract compose-smoke-cleanup-contract smoke-image-cleanup-contract launcher-contract model-secrets-init-contract
 	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example config --quiet
 
 compose-smoke-cleanup-contract:

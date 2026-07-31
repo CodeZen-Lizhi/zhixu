@@ -312,6 +312,7 @@ func resolvedComposeModel(t *testing.T, repositoryRoot string, overrides map[str
 	t.Helper()
 	command := exec.Command(
 		"docker", "compose",
+		"--profile", "workspace-runtime",
 		"-f", "deploy/compose.yml",
 		"--env-file", ".env.example",
 		"config", "--format", "json",

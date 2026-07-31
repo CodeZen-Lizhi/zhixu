@@ -1,11 +1,11 @@
-FROM node:24.18.0-bookworm-slim AS web-build
+FROM --platform=$BUILDPLATFORM node:24.18.0-bookworm-slim AS web-build
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM golang:1.25.4-bookworm AS go-build
+FROM --platform=$BUILDPLATFORM golang:1.25.4-bookworm AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY vendor/ vendor/
@@ -14,6 +14,19 @@ RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-worker ./cmd/worker
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-migrate ./cmd/migrate
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-modelctl ./cmd/modelctl
+RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-workspace-probe ./cmd/workspaceprobe
+
+FROM go-build AS host-controller-build
+ARG ZHIXU_HOST_GOOS
+ARG ZHIXU_HOST_GOARCH
+RUN test "${ZHIXU_HOST_GOOS}" = darwin -o "${ZHIXU_HOST_GOOS}" = linux
+RUN test "${ZHIXU_HOST_GOARCH}" = amd64 -o "${ZHIXU_HOST_GOARCH}" = arm64
+RUN CGO_ENABLED=0 GOOS="${ZHIXU_HOST_GOOS}" GOARCH="${ZHIXU_HOST_GOARCH}" \
+  go build -mod=vendor -trimpath -ldflags='-s -w' -o /host/zhixu-host-controller ./cmd/hostcontroller
+
+FROM scratch AS host-controller-bundle
+COPY --from=host-controller-build /host/zhixu-host-controller /zhixu-host-controller
+COPY --from=web-build /src/web/dist /web
 
 FROM alpine:3.22 AS runtime
 RUN apk add --no-cache ca-certificates git iproute2 iptables socat \
@@ -24,6 +37,7 @@ COPY --from=go-build /out/zhixu-api /app/zhixu-api
 COPY --from=go-build /out/zhixu-worker /app/zhixu-worker
 COPY --from=go-build /out/zhixu-migrate /app/zhixu-migrate
 COPY --from=go-build /out/zhixu-modelctl /app/zhixu-modelctl
+COPY --from=go-build /out/zhixu-workspace-probe /app/zhixu-workspace-probe
 COPY --from=web-build /src/web/dist /app/web
 COPY --chmod=0755 deploy/loopback-firewall.sh /app/loopback-firewall.sh
 COPY --chmod=0755 deploy/model-secrets-init.sh /app/model-secrets-init.sh

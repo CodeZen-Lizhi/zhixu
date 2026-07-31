@@ -58,10 +58,17 @@ type WorkspaceResult struct {
 	Warnings  []string
 }
 
+type rootSelectionAuthorizer interface {
+	AuthorizeRootSelection(context.Context) error
+}
+
 // CreateWorkspace validates boundaries and persists one active Workspace.
 func (s *Service) CreateWorkspace(ctx context.Context, request CreateWorkspaceRequest) (WorkspaceResult, error) {
 	if s == nil || s.dependencies.Repository == nil || s.dependencies.Files == nil || s.dependencies.Git == nil || s.dependencies.IDs == nil || s.dependencies.Clock == nil {
 		return WorkspaceResult{}, dependencyError("WORKSPACE_SERVICE_UNAVAILABLE")
+	}
+	if err := authorizeRootSelection(ctx, s.dependencies.Repository); err != nil {
+		return WorkspaceResult{}, err
 	}
 	name := strings.TrimSpace(request.Name)
 	if name == "" {
@@ -131,6 +138,9 @@ func (s *Service) OpenWorkspace(ctx context.Context, root string) (WorkspaceResu
 	if s == nil || s.dependencies.Repository == nil || s.dependencies.Files == nil || s.dependencies.Git == nil {
 		return WorkspaceResult{}, dependencyError("WORKSPACE_SERVICE_UNAVAILABLE")
 	}
+	if err := authorizeRootSelection(ctx, s.dependencies.Repository); err != nil {
+		return WorkspaceResult{}, err
+	}
 	rootPath, err := s.dependencies.Files.CanonicalRoot(root)
 	if err != nil {
 		return WorkspaceResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WORKSPACE_ROOT_INVALID", false, err)
@@ -147,6 +157,14 @@ func (s *Service) OpenWorkspace(ctx context.Context, root string) (WorkspaceResu
 		return WorkspaceResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "GIT_REPOSITORY_MISSING", false, errors.New("persisted workspace repository is missing"))
 	}
 	return result(workspace, gitStatus), nil
+}
+
+func authorizeRootSelection(ctx context.Context, repository domain.Repository) error {
+	authorizer, ok := repository.(rootSelectionAuthorizer)
+	if !ok {
+		return nil
+	}
+	return authorizer.AuthorizeRootSelection(ctx)
 }
 
 // GetWorkspace returns a persisted Workspace and refreshes its read-only Git
@@ -254,24 +272,8 @@ func validateAvailableRoot(candidate string, configured []string) error {
 		if candidate == existing {
 			return foundation.NewError(foundation.ErrorVersionConflict, "WORKSPACE_ALREADY_EXISTS", false, errors.New("workspace root is already configured"))
 		}
-		if pathsNested(candidate, existing) {
-			return foundation.NewError(foundation.ErrorInvalidInput, "WORKSPACE_ROOT_NESTED", false, errors.New("workspace roots must not be nested"))
-		}
-	}
-	if len(configured) > 0 {
-		return foundation.NewError(foundation.ErrorVersionConflict, "ACTIVE_WORKSPACE_LIMIT_REACHED", false, errors.New("v1 permits one active workspace"))
 	}
 	return nil
-}
-
-func pathsNested(left, right string) bool {
-	for _, pair := range [][2]string{{left, right}, {right, left}} {
-		relative, err := filepath.Rel(pair[0], pair[1])
-		if err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
-			return true
-		}
-	}
-	return false
 }
 
 func result(workspace domain.Workspace, gitStatus domain.GitStatus) WorkspaceResult {

@@ -64,37 +64,44 @@ Apply embedded project migrations followed by River migrations. The command requ
 go run ./cmd/migrate
 ```
 
-Start the complete local stack from the repository root. The launcher creates a
-Git-ignored `.env` with mode `0600`, creates `workspace/`, builds the image,
-runs migrations, waits for API and Worker readiness, and prints the local URL.
-`.env.example` contains development-only values and must not be used as
-production secrets.
+Start the local control plane from the repository root. The launcher creates a
+Git-ignored `.env` with mode `0600`, runs migrations, exports a native Host
+Controller plus the built SPA from Docker, and prints a one-time fragment link.
+The Controller stays on the stable loopback URL while the API and Worker are
+stopped or rebuilt. `.env.example` contains development-only values and must
+not be used as production secrets.
 
 ```bash
 ./zhixu up
 ```
 
-Docker Compose mounts `ZHIXU_WORKSPACE_ROOT` into the containers at `/workspace`.
-Model settings are stored as immutable encrypted revisions in PostgreSQL; the
-master key is kept in the project-owned `deploy_zhixu-model-secrets` volume and
-is mounted read-only only by API, Worker, and modelctl. Saving Settings creates
-a desired revision. Apply it to both runtime roles with `./zhixu restart`. The
-launcher is fixed to the Compose project `deploy` and rejects
-`ZHIXU_COMPOSE_PROJECT_NAME` attempts to select another project, so `down` and
-`reset` cannot be redirected to an unrelated stack.
+The first start grants no host directory and starts no API or Worker. Open the
+printed link, establish the process-local control session, and select one
+existing absolute directory. The Controller resolves it to a physical canonical
+path and grants that exact path to API and Worker as both bind source and target.
+It never mounts a parent, Home, `/`, or the legacy `/workspace` target, and it
+never creates the directory or changes its permissions. `ZHIXU_WORKSPACE_ROOT`
+is obsolete and only produces a migration warning when left in an old `.env`.
 
-The steady Worker uses `restart: on-failure`; prepared restart candidates do
-not auto-restart. Before commit, a failed rollout is aborted and the previous
-runtime is restored. After commit, the launcher replaces both candidates with
-steady API/Worker containers before restoring ingress. A failure in that final
-step cannot roll back the committed revision: the launcher retries the steady
-runtime and ingress recovery, keeps ingress closed if recovery still fails, and
-returns a non-zero status.
+On Docker Desktop, make sure the selected directory is shared with Docker. The
+directory must also be accessible to container UID/GID `10001:10001`; sharing or
+permission failures are reported without falling back to a broader mount. A
+switch stops and removes the old runtime before applying the new exact grant.
+While no verified runtime is ready, `/api/v1/*` fails closed with `503`, but the
+Controller page and protected operation state remain available.
 
-Use `./zhixu status`, `./zhixu logs [service]`, and `./zhixu down` for normal
-operation. `down` preserves PostgreSQL, model settings, the master key, and the
-bind-mounted workspace. `./zhixu reset` is the explicit destructive command for
-the Compose volumes and requires typing `DELETE`.
+Model settings remain immutable encrypted revisions in PostgreSQL, with the
+master key in the project-owned `deploy_zhixu-model-secrets` volume. Runtime
+restart and Workspace switching are Controller-owned mutations; the legacy
+`./zhixu restart` command deliberately refuses to bypass that gate. The launcher
+is fixed to Compose project `deploy` and rejects `ZHIXU_COMPOSE_PROJECT_NAME`,
+so `down` and `reset` cannot target an unrelated stack.
+
+Use `./zhixu status`, `./zhixu logs [controller|service]`, and `./zhixu down` for
+normal operation. `down` preserves PostgreSQL, model settings, the master key,
+and every host Workspace file while clearing the active grant override.
+`./zhixu reset` is the explicit destructive command for Compose volumes and
+requires typing `DELETE`; it still never deletes a selected host directory.
 
 The checked-in example explicitly uses development-only `disabled` auth, so it
 starts without a Bootstrap Token. To exercise `required` mode, set both
@@ -107,9 +114,11 @@ value is rejected. If omitted, `required` derives a stable domain-separated key
 from the Bootstrap Token, while local `disabled` mode generates a process-local
 key whose outstanding references expire on API restart. The official Compose
 example supplies a development-only explicit key so its startup guard can verify
-the resolved model; replace that value before non-development use. Then open
-<http://127.0.0.1:8080>. Health and
-dependency status are available at:
+the resolved model; replace that value before non-development use. Use the
+one-time link printed by `./zhixu up`; a bare <http://127.0.0.1:8080> does not
+carry the bootstrap credential. Controller liveness is
+`GET /control/v1/livez`. After a Workspace runtime is ready, business health and
+dependency status are proxied at:
 
 - `GET /livez`: API process liveness
 - `GET /readyz`: API readiness including PostgreSQL connectivity
@@ -154,7 +163,7 @@ both Claims have a formal `CONFIRMED BELONGS_TO` membership in that Topic; they 
 
 Open `/chat` to create/select a Conversation and `/chat/{conversationId}` to continue it. Chat is fail-closed by
 default. For the normal Compose stack, configure Chat and Embedding in the Settings page, save the desired revision,
-then run `./zhixu restart`. Customized legacy `ZHIXU_CHAT_*` or `ZHIXU_EMBEDDING_*` values in `.env` are rejected
+then apply the saved revision through the Host Controller workflow. Customized legacy `ZHIXU_CHAT_*` or `ZHIXU_EMBEDDING_*` values in `.env` are rejected
 before build/start; restore those fields to `.env.example` defaults. Static model environment variables remain for
 direct binaries and isolated smoke overlays only, and API keys must never be committed. 认证配置由
 `ZHIXU_AUTH_MODE=required|disabled` 控制：`required` 使用一次性 Bootstrap

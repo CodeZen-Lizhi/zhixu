@@ -8,12 +8,14 @@
     "node": ">=24.18.0"
   },
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "dev": "VITE_RUNTIME_MODE=direct vite",
+    "dev:controller": "VITE_RUNTIME_MODE=controller vite",
+    "build": "tsc --noEmit && VITE_RUNTIME_MODE=controller vite build",
+    "build:direct": "tsc --noEmit && VITE_RUNTIME_MODE=direct vite build",
     "lint": "eslint src e2e vite.config.ts playwright.config.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test": "VITE_RUNTIME_MODE=direct vitest run",
+    "test:e2e": "VITE_RUNTIME_MODE=direct playwright test"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

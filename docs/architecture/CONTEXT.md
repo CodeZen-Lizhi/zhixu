@@ -8,6 +8,52 @@
 用户控制的一个知识空间，包含原始资料、正式知识、附件和版本历史。
 _Avoid_: Vault、知识库实例、租户
 
+**Workspace Root**:
+用户明确选定、作为一个 Workspace 文件边界的单一本地目录；选择该目录不代表授权访问它的父目录或兄弟目录。
+_Avoid_: 允许父目录、容器路径、挂载父目录
+
+**Workspace Root Grant**:
+用户授予运行时访问当前 Workspace Root 的权限边界；替换 Grant 必须先撤销旧 Root，再激活新 Root。
+_Avoid_: 父目录授权、目录白名单、隐式磁盘权限
+
+**Workspace Switch**:
+把当前活动 Workspace 从一个既有身份切换为另一个既有或新建身份；它替换 Workspace Root Grant，但不改变任一 Workspace 的 Root 身份。
+_Avoid_: 修改路径、重绑 Workspace、迁移目录
+
+**Workspace Root Migration**:
+在证明目录与 Git、内容身份连续的前提下，显式改变同一个 Workspace 的 Root；它不是普通 Workspace Switch。
+_Avoid_: 切换 Workspace、直接更新 root_path、选择新目录
+
+**Workspace Registry**:
+保存已知 Workspace 身份及其 Root 的持久目录，用于展示最近 Workspace 和发起切换；Registry 记录本身不授予目录访问权限。
+_Avoid_: Workspace Root Grant、已挂载目录、文件索引
+
+**Active Workspace**:
+当前唯一获得 Workspace Root Grant、可由业务运行时访问的 Workspace 身份。
+_Avoid_: 最近 Workspace、列表选中项、所有已登记 Workspace
+
+**Unavailable Workspace**:
+Workspace Registry 中仍保留身份，但其 Root 当前不存在、不可访问或需要迁移，因而不能获得 Workspace Root Grant 的 Workspace。
+_Avoid_: 已删除 Workspace、空目录、自动迁移候选
+
+**Workspace Quiescence**:
+Workspace 已停止接收新的 Root 相关工作，且正在执行的文件操作已到达可安全暂停或切换的检查点。
+_Avoid_: 所有 Workflow 已结束、强制停机、普通空闲状态
+
+**Host Controller**:
+受用户本机信任、负责应用 Workspace Root Grant 并协调运行时切换的本地控制组件；它不处理知识业务，也不读取 Workspace 内容。
+_Avoid_: 业务 API、Docker Socket、文件扫描器
+
+## 工作台体验
+
+**Workbench Entry State**:
+没有 Active Workspace 时的工作台状态，用于理解产品并连接一个知识空间；它不是系统就绪页，也不是每次启动都出现的欢迎封面。
+_Avoid_: 系统状态页、启动页、工作态
+
+**Workbench Working State**:
+存在 Active Workspace 时的工作台状态，直接恢复该知识空间的真实上下文与待处理工作，不经过独立欢迎封面。
+_Avoid_: 欢迎页、系统诊断页、入口态
+
 **Inbox**:
 等待系统接收和处理资料的入口，不是正式知识目录。
 _Avoid_: 知识库、草稿箱

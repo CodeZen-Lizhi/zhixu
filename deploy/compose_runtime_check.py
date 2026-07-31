@@ -185,6 +185,27 @@ def validate_secret_boundary(model: dict[str, Any], prepared_candidate: bool = F
         fail("modelctl must be profile-scoped and have no published ports")
 
 
+def validate_zero_base_grant(model: dict[str, Any]) -> None:
+    for service_name, raw_definition in model.get("services", {}).items():
+        if not isinstance(raw_definition, dict):
+            fail(f"{service_name} service definition must be an object")
+        definition = raw_definition
+        for mount in volume_mounts(definition, service_name):
+            if mount.get("type") == "bind":
+                fail(f"base Compose must not grant a bind mount to {service_name}")
+        service_environment = definition.get("environment", {})
+        if not isinstance(service_environment, dict):
+            fail(f"{service_name} environment must be an object")
+        for key in (
+            "ZHIXU_WORKSPACE_ROOT",
+            "ZHIXU_WORKSPACE_GRANTED_ID",
+            "ZHIXU_WORKSPACE_GRANTED_ROOT",
+            "ZHIXU_WORKSPACE_GRANT_GENERATION",
+        ):
+            if key in service_environment:
+                fail(f"base Compose must not contain {key}")
+
+
 def validate_relay(model: dict[str, Any], relay_name: str, owner_name: str) -> None:
     relay = service(model, relay_name)
     expected_entrypoint = [
@@ -227,6 +248,21 @@ def validate_ingress(model: dict[str, Any]) -> None:
     port = ports[0]
     if not isinstance(port, dict) or port.get("host_ip") != "127.0.0.1" or port.get("target") != 8080 or port.get("protocol") != "tcp":
         fail("app must map host loopback to namespace port 8080")
+    if port.get("published") not in (None, 0, "0"):
+        fail("app ingress host port must be allocated automatically")
+
+    postgres_ports = service(model, "postgres").get("ports")
+    if not isinstance(postgres_ports, list) or len(postgres_ports) != 1:
+        fail("PostgreSQL must publish exactly one controller-only loopback port")
+    postgres_port = postgres_ports[0]
+    if (
+        not isinstance(postgres_port, dict)
+        or postgres_port.get("host_ip") != "127.0.0.1"
+        or postgres_port.get("target") != 5432
+        or postgres_port.get("protocol") != "tcp"
+        or postgres_port.get("published") not in (None, 0, "0")
+    ):
+        fail("PostgreSQL host port must be allocated automatically on loopback")
 
     proxy = service(model, "proxy")
     expected_entrypoint = ["socat", "TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:8081"]
@@ -307,6 +343,7 @@ def main() -> None:
         validate_secret_boundary(model)
     validate_relays(model)
     validate_ingress(model)
+    validate_zero_base_grant(model)
 
 
 if __name__ == "__main__":

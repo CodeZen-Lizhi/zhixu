@@ -26,11 +26,11 @@ def fail(message: str) -> None:
 
 def render(
     *files: Path,
-    profile: str | None = None,
+    profiles: tuple[str, ...] = (),
     environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     command = ["docker", "compose"]
-    if profile is not None:
+    for profile in profiles:
         command.extend(["--profile", profile])
     command.extend(["--project-name", "deploy"])
     for path in files:
@@ -99,11 +99,11 @@ def secret_mount(model: dict[str, Any], service_name: str) -> dict[str, Any]:
 
 
 def main() -> None:
-    managed = render(COMPOSE, profile="modelctl")
-    static = render(COMPOSE, STATIC_MODELS)
+    managed = render(COMPOSE, profiles=("workspace-runtime", "modelctl"))
+    static = render(COMPOSE, STATIC_MODELS, profiles=("workspace-runtime",))
     prepared = render(
         COMPOSE,
-        profile="modelctl",
+        profiles=("workspace-runtime", "modelctl"),
         environment={
             "ZHIXU_MODEL_SETTINGS_ROLLOUT_ID": "compose-contract-rollout",
             "ZHIXU_MODEL_SETTINGS_PREPARED": "true",

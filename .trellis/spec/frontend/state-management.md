@@ -321,3 +321,64 @@ Correct: Bootstrap 只用于一次交换；浏览器身份由 HttpOnly Cookie �
 
 - canonical filter/query key、Workspace isolation/cleanup、filter cursor reset、显式刷新、Impact/Proposal same-key retry、
   source Event/Report/Proposal 精确失效，以及分析成功不失效 Timeline list。
+
+## Scenario: Docker Host Controller State Ownership
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/controller.ts`、`host-control-context.tsx`、`App.tsx`、Controller Workspace 页面或
+  Workspace cache/SSE/Auth 根边界时应用。
+
+### 2. Signatures
+
+```ts
+getControllerSession(signal?): Promise<ControllerSession>
+getControllerState(signal?): Promise<ControllerState>
+startControllerWorkspaceSwitch(request, { stateVersion, idempotencyKey, signal? })
+<HostControlProvider><HostControlledRuntime /></HostControlProvider>
+```
+
+### 3. Contracts
+
+- Controller REST state 是 Active Workspace、operation phase、API/Worker readiness 与 poll interval 的唯一事实源；
+  React timer、URL、localStorage 和 business API 都不能成为第二状态机。
+- Fragment bootstrap 只在首屏读取一次并立即从 URL 清除；不得写入 Browser Storage。Cookie 不可由 JavaScript 读取，
+  CSRF 只保存在可清除的进程内状态。
+- `waiting_for_workspace|switching|recovery_failed` 以及 Active/API/Worker 未同时 ready 时，不得挂载
+  `AuthProvider`、TanStack Query 业务树或 SSE Event Store。
+- Workspace 切换先 abort 旧 Controller/business 请求，再清除旧 Workspace cache、runtime hint 和 SSE；旧 session epoch
+  的迟到响应不得覆盖新 session/state。localStorage 最多保存非权威 active Workspace ID hint。
+- command 必须绑定当前 `stateVersion` 与单次 intent 的 idempotency key；未知结果回查 Controller state，不能 optimistic
+  显示成功。poll interval 只消费服务端 `poll_after_ms`，Provider 卸载必须清理 timer 和 AbortController。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 必须结果 |
+| --- | --- |
+| fragment 缺失/失效或 session 401 | 清 CSRF/state/cache，显示一次性控制链接失效，不挂载业务树 |
+| Controller response 缺字段、未知字段或 enum/time/version 非法 | `INVALID_RESPONSE`，不渲染部分权威事实 |
+| switching/rollback/recovery_failed | 只显示控制进度；业务 Auth/Query/SSE 保持 unmounted |
+| state version 409 | 回查 state 后等待用户重试；不改本地 Active |
+| Root unavailable | 保留最近记录，提供重查与仅移除记录；不得自动创建目录 |
+| session epoch 变化或 Provider 卸载 | abort 请求并忽略迟到 success/error |
+
+### 5. Good / Base / Bad Cases
+
+- Good：切换中刷新页面后从 `/control/v1/state` 恢复同一 operation；只有新 API/Worker ready 后才挂载业务树并 refetch。
+- Base：zero Active 时只展示本机目录授权表单，浏览器不探测文件系统。
+- Bad：把路径映射规则放在前端；点击后立即写 Active；切换中继续保留旧 Query/SSE；把 bootstrap/CSRF 写入 localStorage。
+
+### 6. Tests Required
+
+- Strict decoder、fragment 清除、Cookie credentials、CSRF/If-Match/idempotency headers、401 清理和 Abort。
+- App 根边界分别断言 waiting/switching/recovery_failed/ready 的 Provider 挂载；旧 session/state 响应不能回写。
+- Controller 页面覆盖新建、显式 Git、registered 切换、operation、Unavailable 重查/移除和长 Unicode 路径。
+- Playwright 覆盖刷新恢复、expected 409、桌面/390x844 overflow、console/network，以及 ready 后真实业务入口。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 点击“授权并打开”后 setActiveWorkspaceId(rootPath)，同时让旧 Auth/Query/SSE 继续运行。
+Correct: 提交带 version/key 的 Controller command；持续读取权威 state，只有 exact grant 与两类 runtime ready 后
+         才设置 effective Workspace 并挂载全新的业务 Provider 子树。
+```

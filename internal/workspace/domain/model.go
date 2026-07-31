@@ -12,6 +12,17 @@ type WorkspaceStatus string
 const (
 	// WorkspaceStatusActive marks the single Workspace currently available to users.
 	WorkspaceStatusActive WorkspaceStatus = "active"
+	// WorkspaceStatusInactive keeps identity and history without granting root access.
+	WorkspaceStatusInactive WorkspaceStatus = "inactive"
+)
+
+// WorkspaceAvailability records whether the persisted root binding can be granted.
+type WorkspaceAvailability string
+
+const (
+	WorkspaceAvailabilityAvailable         WorkspaceAvailability = "available"
+	WorkspaceAvailabilityUnavailable       WorkspaceAvailability = "unavailable"
+	WorkspaceAvailabilityMigrationRequired WorkspaceAvailability = "migration_required"
 )
 
 // GitBaseline records the repository state observed when a Workspace is opened.
@@ -25,14 +36,21 @@ type GitBaseline struct {
 
 // Workspace is the stable database mapping for a user-controlled file root.
 type Workspace struct {
-	ID        foundation.ID
-	Name      string
-	RootPath  string
-	Git       GitBaseline
-	Status    WorkspaceStatus
-	Version   int64
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID                    foundation.ID
+	Name                  string
+	RootPath              string
+	RootFingerprint       string
+	BindingVersion        int64
+	Git                   GitBaseline
+	Status                WorkspaceStatus
+	Availability          WorkspaceAvailability
+	AvailabilityReason    string
+	AvailabilityCheckedAt time.Time
+	LastOpenedAt          time.Time
+	RemovedAt             time.Time
+	Version               int64
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // Source is one logical imported resource. Its path is metadata, not identity.

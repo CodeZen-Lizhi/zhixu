@@ -85,6 +85,9 @@ func TestScanRejectsOversizedFile(t *testing.T) {
 }
 
 func TestNewRootRejectsMissingOrFilePath(t *testing.T) {
+	if _, err := NewRoot("relative/workspace"); err == nil {
+		t.Fatal("relative root succeeded")
+	}
 	if _, err := NewRoot(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("missing root succeeded")
 	}

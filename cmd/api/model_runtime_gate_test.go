@@ -136,6 +136,7 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 	var startPosition token.Pos
 	var activeWaitPosition token.Pos
 	var listenAndServePosition token.Pos
+	var shutdownPosition token.Pos
 	var runtimeErrorClauses []*ast.CommClause
 	var managedGuard *ast.IfStmt
 	ast.Inspect(runBody, func(node ast.Node) bool {
@@ -147,6 +148,9 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 			if selector, ok := typed.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "ListenAndServe" {
 				listenAndServePosition = typed.Pos()
 			}
+			if selector, ok := typed.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "Shutdown" {
+				shutdownPosition = typed.Pos()
+			}
 		case *ast.UnaryExpr:
 			if typed.Op == token.ARROW && receivesControllerActive(typed) {
 				activeWaitPosition = typed.Pos()
@@ -154,7 +158,7 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 		case *ast.SelectStmt:
 			for _, statement := range typed.Body.List {
 				clause, ok := statement.(*ast.CommClause)
-				if ok && receivesIdentifier(clause.Comm, "modelRuntimeErr") {
+				if ok && (receivesIdentifier(clause.Comm, "modelRuntimeErr") || receivesIdentifier(clause.Comm, "workspaceRuntimeErr")) {
 					runtimeErrorClauses = append(runtimeErrorClauses, clause)
 				}
 			}
@@ -166,8 +170,8 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 		return true
 	})
 
-	if startPosition == token.NoPos || activeWaitPosition == token.NoPos || listenAndServePosition == token.NoPos {
-		t.Fatalf("startup positions start=%d active=%d serve=%d", startPosition, activeWaitPosition, listenAndServePosition)
+	if startPosition == token.NoPos || activeWaitPosition == token.NoPos || listenAndServePosition == token.NoPos || shutdownPosition == token.NoPos {
+		t.Fatalf("startup positions start=%d active=%d serve=%d shutdown=%d", startPosition, activeWaitPosition, listenAndServePosition, shutdownPosition)
 	}
 	if !(startPosition < activeWaitPosition && activeWaitPosition < listenAndServePosition) {
 		t.Fatalf("managed runtime gate order start=%d active=%d serve=%d", startPosition, activeWaitPosition, listenAndServePosition)
@@ -180,18 +184,42 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 	var beforeServeExit bool
 	var afterServeExit bool
 	for _, clause := range runtimeErrorClauses {
-		if !containsReturnOne(clause) {
-			t.Fatalf("runtime error branch at %d does not return a failing API exit code", clause.Pos())
-		}
 		if clause.Pos() < listenAndServePosition {
+			if !containsReturnOne(clause) {
+				t.Fatalf("pre-serve runtime error branch at %d does not return a failing API exit code", clause.Pos())
+			}
 			beforeServeExit = true
 		} else {
+			if !containsAssignmentOne(clause, "exitCode") {
+				t.Fatalf("served runtime error branch at %d does not preserve a failing API exit code", clause.Pos())
+			}
+			if clause.Pos() >= shutdownPosition {
+				t.Fatalf("served runtime error branch at %d bypasses shutdown at %d", clause.Pos(), shutdownPosition)
+			}
 			afterServeExit = true
 		}
 	}
 	if !beforeServeExit || !afterServeExit {
 		t.Fatalf("runtime error exits before_serve=%t after_serve=%t clauses=%d", beforeServeExit, afterServeExit, len(runtimeErrorClauses))
 	}
+}
+
+func containsAssignmentOne(node ast.Node, name string) bool {
+	found := false
+	ast.Inspect(node, func(current ast.Node) bool {
+		assignment, ok := current.(*ast.AssignStmt)
+		if !ok || len(assignment.Lhs) != 1 || len(assignment.Rhs) != 1 {
+			return true
+		}
+		identifier, identifierOK := assignment.Lhs[0].(*ast.Ident)
+		value, valueOK := assignment.Rhs[0].(*ast.BasicLit)
+		if identifierOK && identifier.Name == name && valueOK && value.Kind == token.INT && value.Value == "1" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 type fakeAPIModelRuntimeController struct {
