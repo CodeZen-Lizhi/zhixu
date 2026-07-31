@@ -65,3 +65,6 @@ test-results/
 # Local AI tooling and generated design outputs
 /.serena/
 /outputs/
+/output/
+/.playwright-cli/
+/.trellis/workspace/*/uncommitted-scope-plan.md
