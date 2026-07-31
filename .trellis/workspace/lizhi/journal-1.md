@@ -1629,3 +1629,24 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 37: 优化工作台首屏与导航流程
+
+**Date**: 2026-07-31
+**Task**: 优化工作台首屏与导航流程
+**Branch**: `dev`
+
+### Summary
+
+完成 Workspace 首屏、分组导航、状态摘要与移动端 Playwright 验证。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6598cfd81955f141878e9c0548d83c986ce6891f` | (see git log) |
+
+### Status
+
+[OK] **Completed**
