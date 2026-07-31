@@ -241,6 +241,9 @@ Correct: 三视图只投影同一 page；SSE 失效 Query 后以 REST Scan/Issue
 - 当前 Candidate scope 为 Topic 时，恢复的 Scan `scope.topic_id` 必须与当前 Topic 相同；跨 Topic 的旧 scan
   立即隐藏并清除 URL 绑定，不能用 Topic A 的进度驱动 Topic B 的候选刷新。
 - status 同时保留 `graph` 与 `semantic_links`，任一未知/缺失字段都由严格 decoder 拒绝。
+- `/graph` 位于 `.workbench__main` 内时，桌面画布只能扩展到该主栏左右边界：以父内容宽度和
+  `--workbench-content-gutter` 计算补偿，禁止在嵌套页面使用 `100vw` 或其他完整视口宽度，避免 rail
+  与主栏 padding 共同造成 document 横向溢出。
 
 ### 4. Validation & Error Matrix
 
@@ -261,13 +264,15 @@ Correct: 三视图只投影同一 page；SSE 失效 Query 后以 REST Scan/Issue
 
 - Decoder、Claim 精确 scope、Topic Claim-pair scope、query key/cursor、response-loss、mutation invalidation、
   Graph cache identity、跨 Topic scan 恢复拒绝、全部决策、focus loop。
-- 浏览器验证真实 API、scan URL 恢复、system status、桌面/移动 overflow 与 console；后端 integration/fault/eval 仍必需。
+- 浏览器验证真实 API、scan URL 恢复、system status、桌面/移动 overflow 与 console；断言 document、
+  `.graph-page`、`.semantic-link-panel` 的 `scrollWidth` 和实际左右边界，且桌面 `.graph-page` 与
+  `.workbench__main` 左右对齐；后端 integration/fault/eval 仍必需。
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: Candidate 面板测试通过就宣称完整 Graph 交付，或 scan ID 变化时重建整个 workspace cache boundary。
-Correct: 前端全量门禁加真实 API 浏览器；scan ID 只影响 Candidate server state。
+Wrong: Candidate 面板测试通过就宣称完整 Graph 交付，或在 `.workbench__main` 内用 `100vw` 让 Graph 越过 rail。
+Correct: 前端全量门禁加真实 API 浏览器；scan ID 只影响 Candidate server state，Graph 宽度相对主栏计算。
 ```
 
 ## Scenario: M9 Export Frontend Quality Gate

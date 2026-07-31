@@ -13,7 +13,7 @@
 }
 
 .graph-page {
-  width: min(1600px, calc(100vw - 1rem));
+  width: min(1600px, calc(100% + var(--workbench-content-gutter) + var(--workbench-content-gutter)));
   min-height: 46rem;
   margin-top: -4.5rem;
   margin-left: 50%;

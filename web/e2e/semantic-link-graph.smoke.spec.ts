@@ -61,19 +61,36 @@ const graphCountText = async (page: Page): Promise<string> => {
 
 const assertNoHorizontalOverflow = async (page: Page): Promise<void> => {
   const widths = await page.evaluate(() => {
+    const measure = (element: HTMLElement | null) => {
+      const bounds = element?.getBoundingClientRect();
+      return {
+        present: element !== null,
+        scrollWidth: element?.scrollWidth ?? 0,
+        left: bounds?.left ?? 0,
+        right: bounds?.right ?? 0,
+      };
+    };
     const documentWidth = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth);
-    const graphPage = document.querySelector<HTMLElement>(".graph-page");
-    const candidatePanel = document.querySelector<HTMLElement>(".semantic-link-panel");
     return {
       viewport: window.innerWidth,
       document: documentWidth,
-      graphPage: graphPage?.scrollWidth ?? 0,
-      candidatePanel: candidatePanel?.scrollWidth ?? 0,
+      workbenchMain: measure(document.querySelector<HTMLElement>(".workbench__main")),
+      graphPage: measure(document.querySelector<HTMLElement>(".graph-page")),
+      candidatePanel: measure(document.querySelector<HTMLElement>(".semantic-link-panel")),
     };
   });
   expect(widths.document).toBeLessThanOrEqual(widths.viewport + 1);
-  expect(widths.graphPage).toBeLessThanOrEqual(widths.viewport + 1);
-  expect(widths.candidatePanel).toBeLessThanOrEqual(widths.viewport + 1);
+  for (const element of [widths.graphPage, widths.candidatePanel]) {
+    expect(element.present).toBe(true);
+    expect(element.scrollWidth).toBeLessThanOrEqual(widths.viewport + 1);
+    expect(element.left).toBeGreaterThanOrEqual(-1);
+    expect(element.right).toBeLessThanOrEqual(widths.viewport + 1);
+  }
+  if (widths.viewport > 920) {
+    expect(widths.workbenchMain.present).toBe(true);
+    expect(Math.abs(widths.graphPage.left - widths.workbenchMain.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(widths.graphPage.right - widths.workbenchMain.right)).toBeLessThanOrEqual(1);
+  }
 };
 
 const assertCandidateIsNotAFormalEdge = async (page: Page): Promise<void> => {
