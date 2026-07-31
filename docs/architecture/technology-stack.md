@@ -22,7 +22,7 @@
 | Telemetry | 项目自有接口 + OpenTelemetry Adapter seam | Trace/Metrics；真实 exporter 尚未接入 Composition |
 | Config | 环境变量 + YAML | 本地与自托管配置 |
 
-M4-A 已在主模块精确锁定 River/riverpgxv5 `v0.40.0` 与 Goose `v3.27.0`。River 使用 MPL-2.0，Goose 使用 MIT；当前 Go/Docker 基线为 `1.25.4`，因此不采用要求 Go `1.25.7` 的 Goose `v3.27.2`。迁移、License、升级与退出门禁见 [ADR-0015](adr/0015-river-goose-runtime.md)。项目自身 License 仍未确定，属于发布前风险。
+M4-A 已在主模块精确锁定 River/riverpgxv5 `v0.40.0` 与 Goose `v3.27.0`。River 使用 MPL-2.0，Goose 使用 MIT；当前 Go/Docker 基线为 `1.25.4`，因此不采用要求 Go `1.25.7` 的 Goose `v3.27.2`。迁移、依赖 License、升级与退出门禁见 [ADR-0015](adr/0015-river-goose-runtime.md)。项目自身采用仓库根目录 `LICENSE` 中的 MIT License。
 
 M4-D 已提供项目自有 Logger/Metrics/Tracer/Provider 接口、bounded label 与
 `traceparent` 异步传播，并定义 `disabled/optional/required`。当前生产 Composition
@@ -91,6 +91,8 @@ M2 已在独立 `poc/eino` module 中验证 Eino `v0.9.12` 的 Chat Graph、Tool
 | Diff | Monaco Diff Editor |
 | Realtime | EventSource/SSE |
 | Test | Vitest + Testing Library + Playwright |
+
+前端运行时和工具链由 `web/package.json`、`web/package-lock.json` 与 `deploy/Dockerfile` 共同锁定：Node.js `24.18.0`、npm `11.7.0`、React `19.2.7`、TypeScript `5.9.3`、Vite `8.1.5`、Vitest `4.1.10`、Playwright `1.61.1`。依赖升级必须同步 lockfile、镜像基线和回归门禁。
 
 Graph 展示实现不进入领域模型。当前 `web/package.json` 未引入 Cytoscape.js；只有 M10 的 500,000 Relation
 容量与前端 FPS/交互证据证明有必要时，才单独评估 Cytoscape.js/Web Worker 并锁定依赖。

@@ -34,7 +34,7 @@ status: accepted
 
 - River `v0.40.0`：MPL-2.0。保留 vendor 中上游 License 和未修改的上游源文件；项目自有领域代码不因此转为 MPL。
 - Goose `v3.27.0`：MIT。
-- 项目自身 License 尚未确定，这是源码包、镜像和第三方分发前必须关闭的发布风险。
+- 项目自身 License 已锁定为仓库根目录 `LICENSE` 中的 MIT License；源码包、镜像和第三方分发必须保留该声明及依赖 License 清单。
 
 ## Upgrade Gate
 

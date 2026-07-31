@@ -275,4 +275,4 @@ The isolated Eino adoption gate is available under `poc/eino` and is included in
 
 ## License
 
-To be determined.
+[MIT License](LICENSE)

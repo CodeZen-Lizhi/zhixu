@@ -24,19 +24,19 @@
 | 任务ID | 阶段 | 任务 | 影响文件或模块 | 前置任务 | 验收方式 | 风险 | 执行者 | 状态 |
 |---|---|---|---|---|---|---|---|---|
 | M0-01 | M0 | 收敛 PRD、分页、SSE、表格边界和 Eino 决策记录 | `docs/product/PRD.md`, `docs/architecture/*`, ADR | 无 | 文档链接检查；需求追踪无孤儿；冲突表归零 | 文档与实现分叉 | 主 Agent | 已完成 |
-| M0-02 | M0 | 完成 Trellis 后端规范 | `.trellis/spec/backend/**` | M0-01 | 无 `TBD/To be filled`；含事实引用和质量门禁，真实代码示例待 M1 回填 | 规范过度理想化 | 子 Agent，主 Agent 审核 | 已完成（待 M1 代码链接回填） |
-| M0-03 | M0 | 完成 Trellis 前端规范 | `.trellis/spec/frontend/**` | M0-01 | 无 `TBD/To be filled`；含事实引用和可访问性门禁，真实代码示例待 M1 回填 | 与未来代码不一致 | 子 Agent，主 Agent 审核 | 已完成（待 M1 代码链接回填） |
-| M0-04 | M0 | 确定 Go/Node/数据库/依赖版本与 License | `go.mod`, `web/package.json`, `docs/architecture/technology-stack.md` | M0-01 | manifest/lockfile 可复现；License 明确 | 版本选择过早 | 主 Agent | 待开始 |
+| M0-02 | M0 | 完成 Trellis 后端规范 | `.trellis/spec/backend/**` | M0-01 | 无 `TBD/To be filled`；含事实引用和质量门禁，真实代码示例已随实现回填 | 规范过度理想化 | 子 Agent，主 Agent 审核 | 已完成 |
+| M0-03 | M0 | 完成 Trellis 前端规范 | `.trellis/spec/frontend/**` | M0-01 | 无 `TBD/To be filled`；含事实引用和可访问性门禁，真实代码示例已随实现回填 | 与未来代码不一致 | 子 Agent，主 Agent 审核 | 已完成 |
+| M0-04 | M0 | 确定 Go/Node/数据库/依赖版本与 License | `go.mod`, `web/package.json`, `docs/architecture/technology-stack.md`, `LICENSE` | M0-01 | manifest/lockfile 可复现；MIT License 明确 | 版本选择过早 | 主 Agent | 已完成：Go/Node/数据库依赖版本已锁定，项目采用 MIT License |
 | M1-01 | M1 | 初始化 Go module、API/Worker composition root、统一 ID/Clock/Error/Config | `go.mod`, `cmd/**`, `internal/platform/**` | M0-02,M0-04 | `go test ./...`, `go vet ./...`, readiness 单测 | 骨架形成错误依赖 | 子 Agent | 已完成 |
-| M1-02 | M1 | 初始化 React/Vite/TS/Query/Router/Vitest；Playwright 由 M11 E2E 正式接入 | `web/**` | M0-03,M0-04 | `npm ci`, lint/typecheck/test/build；首页非空 | 工具链版本漂移 | 子 Agent | React/Vite/TS/Query/Router/Vitest 已完成；Playwright 尚未安装 |
+| M1-02 | M1 | 初始化 React/Vite/TS/Query/Router/Vitest；Playwright 由 M11 E2E 正式接入 | `web/**` | M0-03,M0-04 | `npm ci`, lint/typecheck/test/build；首页非空 | 工具链版本漂移 | 子 Agent | 已完成：React/Vite/TS/Query/Router/Vitest 与 Playwright 基础设施、浏览器 smoke 已交付；M11 负责最终全量 E2E 验收 |
 | M1-03 | M1 | 建立显式 Compose、PostgreSQL+pgvector、配置样例和 CI | `deploy/compose.yml`, `Dockerfile*`, `.env.example`, `.github/workflows/**` | M1-01 | `docker compose -f deploy/compose.yml config`; Docker smoke | 误读父目录 Compose | 子 Agent | 已完成 |
 | M1-04 | M1 | 建立 OpenAPI-first、Problem Details、cursor、ETag、Idempotency、SSE envelope | `api/openapi/**`, `internal/presentation/**`, `web/src/api/**` | M1-01,M1-02 | contract test、生成客户端无漂移 | 概念契约字段遗漏 | 主 Agent + 子 Agent | 已完成当前已发布 API 基线：OpenAPI/Problem、稳定 cursor、ETag、幂等与持久 SSE envelope/replay；后续领域接口继续 additive 演进 |
-| M2-01 | M2 | Eino 16 项最小 PoC（模型、Embedding、Retriever、Streaming、Schema、Tool、Callback、River） | 独立 `internal/platform/eino/**`, `research/eino-poc/**` | M1-01,M1-03 | `make test-eino-poc` 逐项报告；race/资源关闭 | 框架类型侵入领域 | 子 Agent，主 Agent 复核 | 已完成采用门禁，部分验证未通过 |
+| M2-01 | M2 | Eino 16 项最小 PoC（模型、Embedding、Retriever、Streaming、Schema、Tool、Callback、River） | 独立 `internal/platform/eino/**`, `research/eino-poc/**` | M1-01,M1-03 | `make test-eino-poc` 逐项报告；race/资源关闭 | 框架类型侵入领域 | 子 Agent，主 Agent 复核 | 已完成：采用门禁已执行；未通过项构成不正式采用 Eino 的证据，而非未完成工作 |
 | M2-02 | M2 | 根据 PoC 锁定或拒绝 Eino，建立 Adapter/Fake/ADR | `docs/architecture/adr/0013*`, `internal/agentadapter/**` | M2-01 | Adapter Contract；替换路径测试 | 锁定不可替换 | 主 Agent | 已完成：主模块不正式采用 Eino |
-| M3-01 | M3 | 设计并实现 Core/Change/Workflow/Retrieval/Learning/Ops 迁移 | `migrations/**`, `sqlc.yaml`, `queries/**` | M0-01,M1-01 | 空库/升级/重复迁移/回滚前向策略测试 | 漏实体或版本字段 | 子 Agent | 待开始 |
-| M3-02 | M3 | 落实部分唯一索引、FK/多态引用策略、CHECK、乐观锁和幂等作用域 | `migrations/**`, `internal/platform/postgres/**` | M3-01 | 并发约束测试、重复消息测试 | DB 约束弱于领域规则 | 主 Agent + 子 Agent | 待开始 |
-| M3-03 | M3 | 建立领域 ID、状态机、聚合命令、事件和错误契约 | `internal/shared/**`, `internal/{workspace,knowledge,changecontrol,workflow,review}/**` | M0-01,M1-01 | 纯函数/状态机/非法转移测试 | 第三方类型渗透 | 主 Agent | 待开始 |
-| M3-04 | M3 | 建立固定 Workspace、Fake Model/Parser/Git/FS/Retrieval、AI Gold Set 和容量生成器 | `testdata/**`, `internal/testkit/**`, `eval/**` | M3-03 | fixture 校验、确定性复现、无 Secret | 测试数据与生产数据混淆 | 子 Agent | 待开始 |
+| M3-01 | M3 | 设计并实现 Core/Change/Workflow/Retrieval/Learning/Ops 迁移 | `migrations/**`, `internal/platform/migration/**`, `internal/**/adapter/postgres/**` | M0-01,M1-01 | 空库/升级/重复迁移/前向迁移策略测试 | 漏实体或版本字段 | 子 Agent | 已完成：迁移与 PostgreSQL Repository 已采用项目内手写 pgx 实现，未采用 sqlc |
+| M3-02 | M3 | 落实部分唯一索引、FK/多态引用策略、CHECK、乐观锁和幂等作用域 | `migrations/**`, `internal/**/adapter/postgres/**` | M3-01 | 并发约束测试、重复消息测试 | DB 约束弱于领域规则 | 主 Agent + 子 Agent | 已完成：数据库约束、CAS、幂等作用域与 PostgreSQL 集成回归已覆盖 |
+| M3-03 | M3 | 建立领域 ID、状态机、聚合命令、事件和错误契约 | `internal/foundation/**`, `internal/{workspace,knowledge,changecontrol,workflow,retrieval}/**` | M0-01,M1-01 | 纯函数/状态机/非法转移测试 | 第三方类型渗透 | 主 Agent | 已完成：领域 ID、状态机、聚合命令和稳定错误契约已落地并由领域测试覆盖 |
+| M3-04 | M3 | 建立固定 Workspace、Fake Model/Parser/Git/FS/Retrieval、AI Gold Set 和容量生成器 | `internal/**/{fake,testfixture}/**`, `eval/**`, `internal/capacity/**` | M3-03 | fixture 校验、确定性复现、无 Secret | 测试数据与生产数据混淆 | 子 Agent | 已完成：固定 Workspace、领域 Fixture/Fake、确定性评测集与容量生成入口已建立；最终容量门禁仍归 M10 |
 | M4-01 | M4 | 实现 Workflow Definition/Run/Node、River job 映射和租约 | `internal/workflow/**`, `cmd/worker/**` | M3-01,M3-03 | Worker claim/heartbeat/complete 集成测试 | 双状态机 | 子 Agent | 已完成：M4-A/B/C/D 子任务与真实 River/PostgreSQL smoke 已归档 |
 | M4-02 | M4 | 实现 Outbox、重试/退避、暂停/恢复/取消、Human Task | `internal/workflow/**`, `migrations/**` | M4-01 | crash、lease expire、duplicate event、double submit | 重复副作用 | 子 Agent | 已完成：重试/后继/Human/控制面、duplicate/lease reclaim 与故障恢复已验证 |
 | M4-03 | M4 | 实现 Side Effect 执行判定、补偿和 `MANUAL_RECOVERY_REQUIRED` | `internal/workflow/**`, `internal/audit/**` | M4-02 | 未知结果不自动重试；恢复演练 | 状态误判 | 主 Agent + 子 Agent | 已完成 Workflow/Writeback 安全判定；通用 append-only Audit 仍归 M10-01 |

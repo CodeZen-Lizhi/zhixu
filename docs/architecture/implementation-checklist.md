@@ -24,8 +24,8 @@
 - [x] Workflow/Outbox Migration。
 - [x] Retrieval Migration。
 - [x] Review/Health Migration（核心 schema 与后续硬化迁移均纳入项目迁移序列）。
-- [ ] sqlc Query。
-- [ ] Testcontainers。
+- [x] PostgreSQL Repository Query（采用手写 pgx Repository；不采用 sqlc）。
+- [x] 可丢弃 PostgreSQL 集成测试环境（通过 `ZHIXU_TEST_DATABASE_URL` 注入；不采用 Testcontainers）。
 
 ## Workflow
 
@@ -75,11 +75,11 @@
 ## Features
 
 - [ ] Article Optimization。
-- [ ] Artifact。
+- [x] Artifact（M8-01 Outline→Section generation、Revision/Citation、Markdown export、Publish Proposal 与可恢复 reservation/receipt 已交付；正式知识写回仍由 Change Control 拥有）。
 - [x] Graph（M7-01 Topic/Claim canonical read projection）。
 - [x] Semantic Links（M7-02 Candidate→typed Proposal→Approval→Relation，Topic scan）。
-- [ ] Smart Collection。
-- [ ] Knowledge Health。
+- [x] Smart Collection（M7-03 Query AST、统一 read model、列表/表格/卡片）。
+- [x] Knowledge Health（M7-03 Issue、持久扫描、决策、修复与调度）。
 - [x] Timeline/Impact（M7-04 与遗留收口已交付 Timeline UI、v1/v2 报告、Artifact/Review Card impact、一等 owner event 与正式 `downstream_update` Proposal 意图；批准保持零执行副作用，下游 executor、Document/Eval impact 与全局 Audit 仍属后续范围）。
 - [x] Review/FSRS（M8-02 Review-only Session、Card/Schedule、可信评分、冻结 Scorer/FSRS version、API-only 共享/派生 HMAC `question_ref`、失效与 legacy quarantine）。
 - [x] Interview Simulation（M8-03 独立 Interview 会话、共享基表上的 INTERVIEW origin Path、难度/deadline/连续追问、Completion reservation/digest hidden hold、ABANDONED→ORPHANED 维护与服务端 INTERVIEW Candidate）。
@@ -110,7 +110,7 @@
 - [x] Docker Smoke（基础、Workspace、Search、Tool 与 RAG Conversation 独立闭环）。
 
 > 边界：上述勾选只表示对应已实现切片已有代码和门禁，不表示项目整体完成。PDF/Web Parser、HNSW/容量、
-> Timeline/Impact 下游 executor、Document/Eval impact 与 POISONED 运维入口、M8、Export 的 Evaluation/Audit/CSV/XLSX 等未覆盖格式、正式 Document/Article Revision、M10 Auth/安全/
+> Timeline/Impact 下游 executor、Document/Eval impact 与 POISONED 运维入口、上述 Memory 后续产品缺口、Review Path reservation/hold 专门并发与 ABANDONED 重开、Export 的 Evaluation/Audit/CSV/XLSX 等未覆盖格式、正式 Document/Article Revision、M10 后续安全/
 > 可观测/备份恢复，以及 M11 全量 E2E/发布交付仍未完成。
 
 > M8-02/M8-03 已补验 Review/Interview/Memory PostgreSQL、M8/Review migration race、前端 746 条测试，以及真实 API/Worker/Vite 的桌面与 390x844 浏览器主链路；业务数据 Down guard、Review Path reservation/hold 专门并发与 ABANDONED 重开仍未直接覆盖。
