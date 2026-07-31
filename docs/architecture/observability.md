@@ -37,6 +37,10 @@ Context 已有的关联字段。高基数 ID 不得进入 Metrics labels。
 使用项目封装的 slog JSON Handler。Handler 在写出前 fail closed 脱敏，而不是
 依赖每个调用方都记得清洗。
 
+业务包优先依赖 `internal/observability` 稳定 facade；具体 slog、Metrics、Trace 与
+Telemetry 实现仍由 `internal/platform/observability` 单一事实源持有。facade 不复制
+Provider 或脱敏实现，只转发项目自有合同。
+
 级别：
 
 - DEBUG：开发诊断。
@@ -57,6 +61,13 @@ Context 已有的关联字段。高基数 ID 不得进入 Metrics labels。
 敏感 key、内嵌凭据 URL、`key=value` Secret 以及常见绝对路径均替换为
 `<redacted>`；`[]byte` 只输出长度。配置日志使用安全摘要，不输出数据库密码或
 Telemetry endpoint。
+
+Credential marker 优先于 `_id`、`_hash`、`_status` 等摘要后缀；例如
+`token_hash`、`credential_id`、`session_status` 仍按敏感字段处理。只有不携带凭据
+marker 的 `content_hash`、`prompt_version`、`source_count` 等受控摘要可保留。
+未知 `error`/`fmt.Stringer` 默认整体替换为 `<redacted>`，调用方应另记稳定
+`error_code`。文本检测覆盖 Session、CSRF、Set-Cookie、access/refresh token、JWT、
+URL userinfo 和绝对路径。
 
 ## 5. Trace
 
@@ -161,6 +172,29 @@ M4-D 的生产发射语义固定如下：
 
 审计不可由普通清理任务删除。
 
+### 7.1 Append-only Audit 合同
+
+`internal/audit/domain` 定义 `audit-event/v1` 事件、Actor/Outcome 枚举、稳定错误码、
+严格 JSON/canonical 编码和递归脱敏；`internal/audit/application.Recorder` 在调用
+Repository 前再次执行统一清洗，并拒绝 Repository 返回的 Workspace 或完整事件
+binding 漂移。
+
+PostgreSQL Adapter 追加到 `ops.audit_event`，不提供 UPDATE/DELETE 路径。迁移中的
+append-only trigger 使用 SQLSTATE `55000` 拒绝修改和删除。每个事件必须携带由业务
+调用方稳定生成的 ID、`occurred_at` 和 `idempotency_key`；重试时相同完整 binding
+返回既有事件，不制造第二条记录。同 key 不同 binding 返回稳定
+`AUDIT_IDEMPOTENCY_CONFLICT`。
+
+由于 PostgreSQL unique constraint 不会把 `NULL workspace_id` 视为冲突，Adapter 在
+追加前按 Workspace+幂等键取得事务级 advisory lock，并使用
+`IS NOT DISTINCT FROM` 查询，保证全局 Audit 的并发重放也只有一行。数据库读回若
+发现未脱敏 Secret、非法 JSON 或保留字段损坏，按 `AUDIT_EVENT_CORRUPT` fail closed，
+不把已污染载荷继续暴露给调用方。
+
+查询默认只返回一个显式 Workspace；`workspace_id=nil` 仅表示全局事件，不代表跨
+Workspace 管理查询。列表按 `occurred_at,id` 倒序并使用二元游标，避免同微秒事件在
+翻页时丢失。跨 Workspace 运维读取需要未来单独的授权入口，不能复用默认 List。
+
 ## 8. 用户时间线
 
 面向用户：
@@ -230,6 +264,10 @@ Composition，不能进入 Workflow Domain/Application。
 - Secret Redaction。
 - Error Code 可查询。
 - Duplicate Retry 不重复审计副作用。
+- 相同 Audit 幂等键精确重放只保留一行；相同 key 不同完整 binding 稳定冲突。
+- `NULL workspace_id` 并发追加仍只有一行，Audit UPDATE/DELETE 由 SQLSTATE `55000`
+  拒绝。
+- Audit correlation/payload 入库前递归脱敏，数据库读回明文 Secret 时 fail closed。
 - Trace 在异步边界连续。
 - API 在 exporter disabled 时仍生成可传播 trace，合法入站 `traceparent` 保持同一 trace。
 - 项目写入的 River metadata 只含 `traceparent`；River 自身保留的 `river:*` recovery
@@ -240,6 +278,9 @@ Composition，不能进入 Workflow Domain/Application。
 - Health payload 只含稳定 `status/code/version`。
 - `disabled/optional/required` 不伪造 exporter 成功，Provider 资源只关闭一次。
 
-发布门禁还应对日志、Metric snapshot、Trace snapshot、River metadata 和 Worker
-health response 做 Secret canary 扫描。单元测试通过不等同于生产 exporter 或
-Compose 网络已验证；真实 exporter 与容器烟测必须单独记录结果。
+发布门禁还应对日志、Audit row、Metric snapshot、Trace snapshot、River metadata 和
+Worker health response 做 Secret canary 扫描。Audit 单元门禁为
+`go test ./internal/audit/...`；真实 PostgreSQL 门禁使用
+`go test -tags integration ./internal/audit/adapter/postgres`，并要求指向已迁移的可丢弃
+数据库。单元测试通过不等同于生产 exporter 或 Compose 网络已验证；真实 exporter、
+数据库与容器烟测必须单独记录结果。

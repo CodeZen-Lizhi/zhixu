@@ -379,13 +379,15 @@ Smart Collection Export 下载再次验证 Workspace 受控路径、symlink、SH
 PostgreSQL 事务中增加下载统计并追加 actor-bound `export.download` Audit。该 Audit 仅说明服务端已准备开始
 返回结果，不证明浏览器完整接收。导出和 Problem/Event/日志均不得回显 Secret、绝对路径或 staging locator。
 
-M6-D 当前只完成 Search/Evidence 的 Workspace 数据隔离，并保持 API loopback 部署。正式 Auth、
-Session、API Token、CSRF/Origin 与 Capability Middleware 仍属于 M10；在这些门禁落地前不得把
-`workspace_id`、回环来源或 Search Cursor 当作已认证身份，也不得将自托管公网入口描述为安全可交付。
+M6-D 当前只完成 Search/Evidence 的 Workspace 数据隔离，并保持 API loopback 部署。M10-02 已落地
+Session、API Token、CSRF/Origin 与 Capability Middleware：除健康和系统状态外，业务路由默认要求有效身份
+与最小 Capability。`workspace_id`、回环来源或 Search Cursor 仍不能当作身份凭据；`disabled` 认证模式只
+允许 development loopback，不得将其作为自托管公网入口的安全证明。
 
 M6-03 不暴露通用 `/tools/{name}:execute` HTTP API。Tool 只能由服务端持久 Workflow Node 间接执行；
 Agent Tool Request 不能携带 Workspace、Capability、Approval、Credential、path、command 或 Git args。
-Conversation/RAG API、SSE 与反馈已由 M6-04 落地；正式 Session/API Token/CSRF/Capability Middleware 仍由 M10 提供。
+Conversation/RAG API、SSE 与反馈已由 M6-04 落地；认证 API 由 M10-02 提供，并与 Proposal/Approval/Write
+Authorization 保持独立。
 
 认证 API 至少提供登录、登出、当前 Session、Session 轮换，以及 API Token 创建、列出元数据和撤销能力。创建 Token 时明文只返回一次；响应和日志不得再次暴露完整 Token。
 

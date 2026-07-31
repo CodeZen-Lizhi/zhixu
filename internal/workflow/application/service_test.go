@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
@@ -276,6 +277,42 @@ func TestStartReturnsRegistryResolutionError(t *testing.T) {
 	}
 }
 
+func TestStartEnforcesAllDefinitionCapabilitiesBeforeRuntime(t *testing.T) {
+	service, runtime, _ := newRuntimeStartService(t, definitionFixture("safe-writeback", []domain.NodeDefinition{{
+		Key: "write", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1,
+		RetryPolicy: testRetryPolicy(), RequiredPermissions: []domain.Permission{capability.GitWrite, capability.WriteKnowledge},
+	}}))
+	command := StartCommand{
+		WorkspaceID: id(5), DefinitionKey: "safe-writeback", DefinitionVersion: 1,
+		Input: json.RawMessage(`{}`), IdempotencyKey: "request-1",
+		CallerCapabilities: []capability.Capability{capability.WriteProposal},
+	}
+	if _, err := service.Start(context.Background(), command); workflowErrorCode(err) != "WORKFLOW_CALLER_CAPABILITY_DENIED" {
+		t.Fatalf("low-scope start error=%v", err)
+	}
+	if runtime.calls != 0 {
+		t.Fatalf("runtime called before authorization: %d", runtime.calls)
+	}
+	command.CallerCapabilities = []capability.Capability{capability.GitWrite, capability.WriteKnowledge, capability.WriteProposal}
+	if _, err := service.Start(context.Background(), command); err != nil {
+		t.Fatalf("authorized start: %v", err)
+	}
+	if runtime.calls != 1 {
+		t.Fatalf("runtime calls=%d", runtime.calls)
+	}
+}
+
+func TestAuthorizeWorkflowDefinitionFailsClosedForCorruptPermission(t *testing.T) {
+	graph := domain.CanonicalGraph{Nodes: []domain.NodeDefinition{{
+		Key: "legacy", Kind: "deterministic.test", InputSchemaVersion: 1, OutputSchemaVersion: 1,
+		RequiredPermissions: []domain.Permission{"ADMIN_MAINTENANCE"},
+	}}}
+	err := AuthorizeWorkflowDefinition(graph, capability.All())
+	if workflowErrorCode(err) != "WORKFLOW_DEFINITION_PERMISSION_INVALID" {
+		t.Fatalf("corrupt permission error=%v", err)
+	}
+}
+
 func TestClaimUsesClockAndPositiveLease(t *testing.T) {
 	repo := &fakeRepository{}
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
@@ -298,7 +335,10 @@ func TestSubmitRejectsInvalidVersion(t *testing.T) {
 
 func newRuntimeStartService(t *testing.T, definition domain.RegisteredDefinition) (*Service, *fakeRuntimeStarter, domain.RegisteredDefinition) {
 	t.Helper()
-	catalog := testValidationCatalog(t)
+	catalog, err := NewValidationCatalog([]int{1}, capability.All())
+	if err != nil {
+		t.Fatal(err)
+	}
 	executors := testFrozenExecutors(t, catalog, "deterministic.test")
 	definitions, err := NewDefinitionRegistry(catalog, executors)
 	if err != nil {

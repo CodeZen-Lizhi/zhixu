@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -416,6 +417,9 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 	if err != nil {
 		return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_RUN_QUERY_FAILED")
 	}
+	if err := authorizeRuntimeRun(ctx, tx, run, command.CallerCapabilities); err != nil {
+		return application.ControlPersistenceResult{}, err
+	}
 	var storedHash string
 	var resultJSON []byte
 	var storedExpected int64
@@ -695,6 +699,25 @@ func (r *RuntimeRepository) WaitForHuman(ctx context.Context, command applicatio
 	return application.HumanTransitionResult{Task: task, Run: run, Node: updatedNode, Attempt: updatedAttempt}, nil
 }
 
+func authorizeRuntimeRun(ctx context.Context, tx pgx.Tx, run domain.Run, caller []capability.Capability) error {
+	if caller == nil {
+		return nil
+	}
+	var graphJSON []byte
+	err := tx.QueryRow(ctx, `SELECT graph FROM workflow.definition WHERE id=$1 AND workspace_id=$2`, string(run.DefinitionID), string(run.WorkspaceID)).Scan(&graphJSON)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_DEFINITION_BINDING_INVALID", false, errors.New("workflow run definition binding is missing"))
+	}
+	if err != nil {
+		return classify(err, "WORKFLOW_DEFINITION_QUERY_FAILED")
+	}
+	graph, err := application.DecodeCanonicalGraph(graphJSON)
+	if err != nil {
+		return err
+	}
+	return application.AuthorizeWorkflowDefinition(graph, caller)
+}
+
 // SubmitHuman completes a pending Human Task and activates canonical
 // successors unless the Run is paused, in which case Resume owns dispatch.
 func (r *RuntimeRepository) SubmitHuman(ctx context.Context, command application.HumanDecisionTransition) (application.HumanTransitionResult, error) {
@@ -710,6 +733,9 @@ func (r *RuntimeRepository) SubmitHuman(ctx context.Context, command application
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, `SELECT `+runtimeRunColumns+` FROM workflow.run WHERE id=$1 FOR UPDATE`, string(command.RunID)))
 	if err != nil {
 		return application.HumanTransitionResult{}, classify(err, "WORKFLOW_RUN_QUERY_FAILED")
+	}
+	if err := authorizeRuntimeRun(ctx, tx, run, command.CallerCapabilities); err != nil {
+		return application.HumanTransitionResult{}, err
 	}
 	nodes, err := lockRuntimeNodes(ctx, tx, run.ID)
 	if err != nil {

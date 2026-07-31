@@ -2674,7 +2674,7 @@ Review Card 进入 INVALIDATED，并从调度移除，直到重新审核。
 - `FetchWebPage` 默认关闭；持久 Workspace/Workflow Web Policy 尚未接线时即使配置启用也必须 readiness fail closed。
 - `RebuildIndex` 与 `RunRegressionEvaluation` v1 仅保留 Contract；缺少版本化 Application seam、持久 receipt 或 Workflow 时不注册 Executor，不返回 Fake 或空成功。
 - M6-03 先把 strict Agent Tool Request 转换为不含模型自由文本 `reason` 的持久 invocation，并只开放空参数或稳定 ID tuple 的 `ReadSource`、`ValidateCitation`、`ReadGitStatus`。`SearchKnowledge` 和 `CalculateDiff` typed Adapter 已建立，但 query/before/after 属于内容型参数；M6-04 在提供不复制 raw 内容的 request receipt 或同一 Agent Attempt 内执行 seam 前，不得把它们加入持久模型目录。
-- 不提供公共 `/tools/{name}:execute` API；M6-04 才负责 Conversation、RAG HTTP API、SSE、反馈与前端，M10 才负责 Session/API Token、CSRF/Origin、公共 Capability Middleware 和通用 Audit UI。
+- 不提供公共 `/tools/{name}:execute` API；M6-04 负责 Conversation、RAG HTTP API、SSE、反馈与前端。M10-02 已接入 Session/API Token、CSRF/Origin 和公共 Capability Middleware；通用 Audit/UI 仍由 M10-01 收口。
 
 #### 10.20.9 验收标准
 
@@ -4504,10 +4504,11 @@ M7-03 已交付 `/collections`、`/collections/:id` 与 `/health` 的真实闭�
 `collection-query/v1` 查询和 LIST/TABLE/COMPACT_CARD 视图配置，结果始终从正式 Topic/Claim/Relation、
 Source/Index 与 Health 事实动态计算；Health 支持 Workspace、Topic、Smart Collection 范围的持久扫描、
 detector coverage、Issue Evidence、Decision、Schedule 和可用 repair option。扫描和页面不会直接修改正式知识，
-修复仍必须进入 Proposal/Approval。Tag、Review/Directory owner、Review Deck/Artifact 批量动作、正式认证与最终
+修复仍必须进入 Proposal/Approval。Tag、Review/Directory owner、Review Deck/Artifact 批量动作与最终
 100k Claim/500k Relation 容量认证尚未交付，必须保持显式 unavailable 或归入后续里程碑。M7-04 与遗留收口
 已交付 Timeline UI、Artifact/Review Card owner-backed impact、一等事件和正式 `downstream_update` Proposal 意图；
-批准只记录 decision，下游 executor、Document/Eval impact 与全局 Audit 仍未交付。
+批准只记录 decision，下游 executor、Document/Eval impact 与全局 Audit 仍未交付。M10-02 认证边界已接入，
+但不能替代上述领域能力或一次性 Write Authorization。
 
 M9-03 已将 Export Panel 嵌入 Collection 详情：它只使用当前 Collection version/query hash，刷新后由服务端列表/详情
 恢复，`PENDING/RUNNING` 以有界轮询和 `export.*` SSE 失效跟踪，成功下载经认证请求处理。附件、评测与审计 JSON

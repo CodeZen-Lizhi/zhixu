@@ -122,6 +122,11 @@ const (
 )
 
 func main() {
+	os.Exit(runAPI())
+}
+
+// runAPI 组装并运行 API，返回退出码以保证资源清理 defer 在进程退出前执行。
+func runAPI() int {
 	configPath := flag.String("config", "", "optional YAML configuration path")
 	flag.Parse()
 
@@ -129,7 +134,20 @@ func main() {
 	cfg, loadErr := config.Load(*configPath)
 	if loadErr != nil {
 		logger.Error("configuration is invalid", "error_code", "INVALID_CONFIGURATION")
-		os.Exit(1)
+		return 1
+	}
+	telemetry, telemetryErr := initializeAPITelemetry(context.Background(), cfg)
+	if telemetryErr != nil {
+		logger.Error("telemetry initialization failed", "error_code", "TELEMETRY_EXPORTER_UNAVAILABLE")
+		return 1
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		_ = telemetry.Shutdown(shutdownContext)
+	}()
+	if telemetryStatus := telemetry.Status(); telemetryStatus.Degraded {
+		logger.Warn("telemetry exporter is unavailable", "error_code", telemetryStatus.Code)
 	}
 
 	var database *postgres.Pool
@@ -156,7 +174,7 @@ func main() {
 		if database == nil {
 			logger.Error("managed model settings database is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 			if cfg.ModelSettingsRolloutID != "" {
-				os.Exit(1)
+				return 1
 			}
 		} else {
 			bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg)
@@ -171,14 +189,14 @@ func main() {
 			if bootstrapErr != nil {
 				logger.Warn("managed model revision is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 				if cfg.ModelSettingsRolloutID != "" || bootstrap.Service == nil || bootstrap.Loaded.Models == nil {
-					os.Exit(1)
+					return 1
 				}
 			}
 			if bootstrap.Service != nil && bootstrap.Loaded.Models != nil {
 				instanceID, instanceErr := foundation.NewUUIDGenerator(nil).New()
 				if instanceErr != nil {
 					logger.Error("model runtime identity is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
-					os.Exit(1)
+					return 1
 				}
 				modelRuntimeController, bootstrapErr = modelsettingsruntime.NewController(modelsettingsruntime.ControllerOptions{
 					Service: bootstrap.Service, Role: modelsettingsdomain.RuntimeRoleAPI, InstanceID: instanceID, Loaded: bootstrap.Loaded,
@@ -186,7 +204,7 @@ func main() {
 				})
 				if bootstrapErr != nil {
 					logger.Error("model runtime controller is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
-					os.Exit(1)
+					return 1
 				}
 			}
 		}
@@ -194,7 +212,7 @@ func main() {
 		loaded, modelsErr := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil)
 		if modelsErr != nil {
 			logger.Error("static model runtime is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
-			os.Exit(1)
+			return 1
 		}
 		configuredModels = loaded.Models
 	}
@@ -202,7 +220,7 @@ func main() {
 		fallback, fallbackErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()})
 		if fallbackErr != nil {
 			logger.Error("disabled model runtime is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
-			os.Exit(1)
+			return 1
 		}
 		configuredModels = fallback
 	}
@@ -503,6 +521,7 @@ func main() {
 		RAGEnabled:        ragEnabled,
 		RAGInitErr:        ragInitErr,
 		Logger:            logger,
+		Tracer:            telemetry.Tracer(),
 	}
 	server := newAPIServer(cfg.HTTPAddr, producerGate.Wrap(app.NewRouter(deps)))
 	stop, stopCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -514,12 +533,9 @@ func main() {
 		case <-modelRuntimeController.Active():
 		case err := <-modelRuntimeErr:
 			logger.Error("model runtime registration failed", "error_code", modelsettingsdomain.ErrorCodeRuntimeConflict, "error", err)
-			if database != nil {
-				database.Close()
-			}
-			os.Exit(1)
+			return 1
 		case <-stop.Done():
-			return
+			return 0
 		}
 	}
 
@@ -534,16 +550,10 @@ func main() {
 	select {
 	case err := <-serverErr:
 		logger.Error("api server stopped unexpectedly", "error_code", "SERVER_FAILED", "error", err)
-		if database != nil {
-			database.Close()
-		}
-		os.Exit(1)
+		return 1
 	case err := <-modelRuntimeErr:
 		logger.Error("model runtime ownership was lost", "error_code", modelsettingsdomain.ErrorCodeRuntimeConflict, "error", err)
-		if database != nil {
-			database.Close()
-		}
-		os.Exit(1)
+		return 1
 	case <-stop.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 		defer cancel()
@@ -551,6 +561,15 @@ func main() {
 			logger.Error("api server shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
 		}
 	}
+	return 0
+}
+
+// initializeAPITelemetry 按 API 配置构造 telemetry，并保留 disabled、optional、required 的统一语义。
+func initializeAPITelemetry(ctx context.Context, cfg config.Config) (*observability.Telemetry, error) {
+	return observability.InitializeTelemetry(ctx, observability.TelemetryOptions{
+		Mode:     observability.TelemetryMode(cfg.TelemetryMode),
+		Endpoint: cfg.TelemetryEndpoint,
+	})
 }
 
 func newAPIServer(address string, handler http.Handler) *http.Server {

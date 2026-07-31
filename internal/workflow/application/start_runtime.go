@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
@@ -91,6 +92,9 @@ type StartCommand struct {
 	Input json.RawMessage
 	// IdempotencyKey 在 Workspace 内绑定一次 Start 请求。
 	IdempotencyKey string
+	// CallerCapabilities 是公共 API 调用者的 Capability 快照；nil 表示内部/开发模式调用，
+	// 不在此层重复执行 HTTP 认证。
+	CallerCapabilities []capability.Capability
 
 	// Deprecated: Graph 仅用于校验旧客户端看到的图与 Registry canonical graph 完全一致。
 	Graph json.RawMessage
@@ -143,6 +147,9 @@ func (s *Service) Start(ctx context.Context, command StartCommand) (domain.Run, 
 	if err != nil {
 		return domain.Run{}, err
 	}
+	if err := authorizeDefinitionStart(definition, command.CallerCapabilities); err != nil {
+		return domain.Run{}, err
+	}
 	root, err := uniqueDefinitionRoot(definition)
 	if err != nil {
 		return domain.Run{}, err
@@ -165,6 +172,46 @@ func (s *Service) Start(ctx context.Context, command StartCommand) (domain.Run, 
 		return domain.Run{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_START_RESULT_INVALID", false, errors.New("workflow runtime returned an incomplete or conflicting start result"))
 	}
 	return result.Run, nil
+}
+
+// authorizeDefinitionStart 防止低 Scope API Token 通过通用 Workflow Start
+// 间接启动包含更高权限节点的服务端 Definition。一次性 Approval/Write
+// Authorization 仍由后续写回 seam 独立校验。
+func authorizeDefinitionStart(definition domain.RegisteredDefinition, caller []capability.Capability) error {
+	return AuthorizeWorkflowDefinition(definition.Graph, caller)
+}
+
+// AuthorizeWorkflowDefinition 按不可变 Definition 的全部节点权限复核调用者。
+// caller 为 nil 仅用于认证显式关闭的开发模式或内部可信调用；非 nil 调用者
+// 必须提供 canonical Capability，且不得缺少 Definition 声明的任一权限。
+func AuthorizeWorkflowDefinition(graph domain.CanonicalGraph, caller []capability.Capability) error {
+	if caller == nil {
+		return nil
+	}
+	if len(caller) == 0 || len(graph.Nodes) == 0 {
+		return foundation.NewError(foundation.ErrorPermissionDenied, "WORKFLOW_CALLER_CAPABILITY_DENIED", false, errors.New("caller capability set is invalid"))
+	}
+	allowed := make(map[capability.Capability]struct{}, len(caller))
+	for _, value := range caller {
+		if err := capability.Validate(value); err != nil {
+			return foundation.NewError(foundation.ErrorPermissionDenied, "WORKFLOW_CALLER_CAPABILITY_DENIED", false, errors.New("caller capability is not canonical"))
+		}
+		if _, duplicated := allowed[value]; duplicated {
+			return foundation.NewError(foundation.ErrorPermissionDenied, "WORKFLOW_CALLER_CAPABILITY_DENIED", false, errors.New("caller capability is duplicated"))
+		}
+		allowed[value] = struct{}{}
+	}
+	for _, node := range graph.Nodes {
+		for _, required := range node.RequiredPermissions {
+			if err := capability.Validate(required); err != nil {
+				return foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_DEFINITION_PERMISSION_INVALID", false, errors.New("workflow definition contains a non-canonical capability"))
+			}
+			if _, ok := allowed[required]; !ok {
+				return foundation.NewError(foundation.ErrorPermissionDenied, "WORKFLOW_CALLER_CAPABILITY_DENIED", false, errors.New("caller does not have a capability required by the workflow definition"))
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Service) buildRuntimeStartRequest(workspaceID foundation.ID, idempotencyKey string, input json.RawMessage, definition domain.RegisteredDefinition) (RuntimeStartRequest, error) {

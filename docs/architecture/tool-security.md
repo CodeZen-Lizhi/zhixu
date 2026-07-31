@@ -57,9 +57,10 @@ M10 对公共 API 的目标是先验证调用者身份和普通 Capability：
 
 身份认证与普通 Capability 只允许调用者请求工具，不能代替一次性 Approval Write Authorization。
 
-M6-03 当前没有公共 Tool Execute API，也未实现 Cookie Session、API Token、CSRF/Origin 或公共 Capability
-Middleware；当前可执行 Tool 只接受服务端持久 Workflow/Node/Attempt 身份。M10 完成前不得把 loopback 或
-`workspace_id` 当作已认证调用者。
+M6-03 当前没有公共 Tool Execute API；M10-02 已为现有业务 API 接入 Cookie Session、API Token、
+CSRF/Origin 和公共 Capability Middleware。当前可执行 Tool 仍只接受服务端持久 Workflow/Node/Attempt
+身份，HTTP 身份或高 Scope Token 不能直接构造 Tool 执行上下文，也不能把 loopback 或 `workspace_id`
+当作已认证调用者。
 
 写权限要求：
 

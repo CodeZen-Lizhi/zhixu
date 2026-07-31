@@ -474,9 +474,21 @@ func requestLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			if status == 0 {
 				status = http.StatusOK
 			}
-			logger.InfoContext(r.Context(), "http request completed", "request_id", requestID(r.Context()), "method", r.Method, "path", r.URL.Path, "status", status)
+			logger.InfoContext(r.Context(), "http request completed", "request_id", requestID(r.Context()), "method", r.Method, "http_route", requestRoutePattern(r), "status", status)
 		})
 	}
+}
+
+// requestRoutePattern 只返回 chi 已匹配的路由模板，避免将客户端请求路径写入日志。
+func requestRoutePattern(request *http.Request) string {
+	if request == nil {
+		return ""
+	}
+	routeContext := chi.RouteContext(request.Context())
+	if routeContext == nil {
+		return ""
+	}
+	return routeContext.RoutePattern()
 }
 
 func requestID(ctx context.Context) string {

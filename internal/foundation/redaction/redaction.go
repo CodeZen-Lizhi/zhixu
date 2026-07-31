@@ -12,6 +12,7 @@ var (
 	sensitiveAssignmentPattern = regexp.MustCompile(`(?i)(authorization|bearer|api[_-]?key|credential|password|passwd|secret|token|cookie|session|csrf|access[_-]?token|refresh[_-]?token|set-cookie|dsn|database[_-]?url)["']?\s*[:=]\s*["']?\S+`)
 	bearerTokenPattern         = regexp.MustCompile(`(?i)\bbearer\s+\S+`)
 	jwtPattern                 = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
+	emailPattern               = regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
 	credentialURLPattern       = regexp.MustCompile(`(?i)\b(postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqp)://\S+`)
 	urlCandidatePattern        = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"']+`)
 	windowsAbsolutePathPattern = regexp.MustCompile(`(?:^|[\s\x22'\x60(=:;,])([A-Za-z]:[\\/][^\s\x22'\x60<>]*)`)
@@ -20,7 +21,7 @@ var (
 
 const maskedValue = "<redacted>"
 
-// ContainsSecret 判断文本是否携带常见凭据赋值、Bearer/JWT Token 或带凭据连接 URL。
+// ContainsSecret 判断文本是否携带常见凭据、Bearer/JWT Token 或带凭据连接 URL。
 func ContainsSecret(value string) bool {
 	if sensitiveAssignmentPattern.MatchString(value) || bearerTokenPattern.MatchString(value) || jwtPattern.MatchString(value) || credentialURLPattern.MatchString(value) {
 		return true
@@ -33,6 +34,9 @@ func ContainsSecret(value string) bool {
 	}
 	return false
 }
+
+// ContainsPII 判断文本是否携带不应进入日志或 Trace 的个人信息。
+func ContainsPII(value string) bool { return emailPattern.MatchString(value) }
 
 // ContainsAbsolutePath 判断文本是否暴露 Unix、Windows 或 file URL 形式的绝对路径。
 func ContainsAbsolutePath(value string) bool {
@@ -56,7 +60,17 @@ func ContainsAbsolutePath(value string) bool {
 	return windowsAbsolutePathPattern.MatchString(withoutNetworkURLs) || unixAbsolutePathPattern.MatchString(withoutNetworkURLs)
 }
 
-// RedactSecrets 只替换凭据、Bearer/JWT Token 和带凭据连接 URL。
+// RedactText 将凭据赋值、邮箱、Bearer/JWT Token、带凭据连接 URL 和绝对本地路径替换为稳定遮罩。
+// HTTP(S) URL 的普通 path 会保留，避免把可公开引用误判为本地文件路径。
+func RedactText(value string) string {
+	redacted := RedactSecrets(value)
+	redacted = emailPattern.ReplaceAllString(redacted, maskedValue)
+	redacted = windowsAbsolutePathPattern.ReplaceAllStringFunc(redacted, redactPathMatch)
+	redacted = unixAbsolutePathPattern.ReplaceAllStringFunc(redacted, redactPathMatch)
+	return redacted
+}
+
+// RedactSecrets 只替换凭据、Bearer/JWT Token 和带凭据连接 URL，保留普通内容与本地路径供已授权边界处理。
 func RedactSecrets(value string) string {
 	redacted := jwtPattern.ReplaceAllString(value, maskedValue)
 	redacted = bearerTokenPattern.ReplaceAllString(redacted, maskedValue)
@@ -71,4 +85,15 @@ func RedactSecrets(value string) string {
 		return candidate
 	})
 	return redacted
+}
+
+func redactPathMatch(match string) string {
+	if match == "" {
+		return maskedValue
+	}
+	first := match[0]
+	if first == '/' || (len(match) >= 3 && ((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')) && match[1] == ':') {
+		return maskedValue
+	}
+	return match[:1] + maskedValue
 }

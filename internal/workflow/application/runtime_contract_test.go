@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
@@ -260,12 +261,15 @@ func TestRuntimeCoordinatorPauseResumeCancelBuildStableControlCommand(t *testing
 
 	port := &fakeRuntimeStatePort{controlResult: ControlPersistenceResult{WorkflowRunID: id(2), Status: domain.RunStatusPaused, Version: 4, PauseRequested: true, CancelRequested: false}}
 	coordinator, _ := NewRuntimeCoordinator(port)
-	command := RunControlCommand{WorkflowRunID: id(2), ExpectedVersion: 3, IdempotencyKey: " control-1 "}
+	command := RunControlCommand{
+		WorkflowRunID: id(2), ExpectedVersion: 3, IdempotencyKey: " control-1 ",
+		CallerCapabilities: []capability.Capability{capability.WriteProposal},
+	}
 	result, err := coordinator.Pause(context.Background(), command)
 	if err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
-	if port.control.Action != ControlActionPause || port.control.IdempotencyKey != "control-1" || port.control.RequestHash == "" || result.StatusURL != "/api/v1/workflows/"+string(id(2)) || result.Version != 4 || !result.PauseRequested || result.CancelRequested {
+	if port.control.Action != ControlActionPause || port.control.IdempotencyKey != "control-1" || port.control.RequestHash == "" || len(port.control.CallerCapabilities) != 1 || port.control.CallerCapabilities[0] != capability.WriteProposal || result.StatusURL != "/api/v1/workflows/"+string(id(2)) || result.Version != 4 || !result.PauseRequested || result.CancelRequested {
 		t.Fatalf("Pause() result=%+v command=%+v", result, port.control)
 	}
 	firstHash := port.control.RequestHash

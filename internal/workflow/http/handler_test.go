@@ -11,6 +11,10 @@ import (
 	"testing"
 	"time"
 
+	authapplication "github.com/CodeZen-Lizhi/zhixu/internal/auth/application"
+	authdomain "github.com/CodeZen-Lizhi/zhixu/internal/auth/domain"
+	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
@@ -142,6 +146,56 @@ func TestWorkflowControlRequiresIdempotencyAndPositiveVersion(t *testing.T) {
 	}
 }
 
+func TestWorkflowCommandsCarryBearerPrincipalCapabilities(t *testing.T) {
+	principal := authdomain.Principal{
+		Kind:   authdomain.PrincipalAPIToken,
+		ID:     foundation.ID("40000000-0000-4000-8000-000000000001"),
+		Scopes: []capability.Capability{capability.WriteProposal},
+	}
+	authHandler, err := authhttp.NewHandler(workflowAuthService{principal: principal}, authhttp.Options{
+		SecureCookie: true, AllowedOrigins: []string{"https://app.example.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
+	service := &fakeService{
+		controlResult: application.RunControlResult{WorkflowRunID: testRunID, Status: domain.RunStatusPaused, Version: 2, StatusURL: "/api/v1/workflows/" + string(testRunID), PauseRequested: true},
+		task:          domain.HumanTask{ID: testTaskID, RunID: testRunID, NodeRunID: testWorkspaceID, Status: domain.HumanTaskSubmitted, TargetVersion: 1, Decision: json.RawMessage(`{"approved":true}`), SubmittedAt: &now},
+	}
+	router := chi.NewRouter()
+	router.Route("/api/v1", func(api chi.Router) {
+		api.Group(func(protected chi.Router) {
+			protected.Use(authHandler.Middleware)
+			NewHandler(service).Routes(protected)
+		})
+	})
+
+	for _, test := range []struct {
+		path string
+		body string
+	}{
+		{path: "/api/v1/workflows/" + string(testRunID) + "/pause", body: `{"expected_version":1}`},
+		{path: "/api/v1/workflows/" + string(testRunID) + "/human-tasks/" + string(testTaskID) + "/decision", body: `{"target_version":1,"decision":{"approved":true}}`},
+	} {
+		request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+		request.Header.Set("Authorization", "Bearer low-scope-token")
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", "bearer-command")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("path=%s status=%d body=%s", test.path, response.Code, response.Body.String())
+		}
+	}
+	if len(service.control.CallerCapabilities) != 1 || service.control.CallerCapabilities[0] != capability.WriteProposal {
+		t.Fatalf("control caller capabilities=%v", service.control.CallerCapabilities)
+	}
+	if len(service.human.CallerCapabilities) != 1 || service.human.CallerCapabilities[0] != capability.WriteProposal {
+		t.Fatalf("human caller capabilities=%v", service.human.CallerCapabilities)
+	}
+}
+
 func TestWorkflowHandlerMapsInvalidAndConflictErrors(t *testing.T) {
 	tests := []struct {
 		name, path, body, code string
@@ -182,6 +236,7 @@ type fakeService struct {
 	submitTaskID, submitRunID foundation.ID
 	submitWorkspaceID         foundation.ID
 	control                   application.RunControlCommand
+	human                     application.HumanDecisionCommand
 	controlResult             application.RunControlResult
 	controlAction             string
 	listItems                 []domain.RunListItem
@@ -230,8 +285,47 @@ func (f *fakeService) SubmitHumanDecision(_ context.Context, taskID foundation.I
 }
 
 func (f *fakeService) SubmitRuntimeHumanDecision(_ context.Context, command application.HumanDecisionCommand) (application.HumanTransitionResult, error) {
+	f.human = command
 	f.submitTaskID, f.submitRunID = command.TaskID, command.RunID
 	return application.HumanTransitionResult{Task: f.task, Run: f.run, Node: domain.NodeRun{ID: f.task.NodeRunID, RunID: f.task.RunID, Status: domain.NodeStatusSucceeded}}, f.err
+}
+
+type workflowAuthService struct{ principal authdomain.Principal }
+
+func (service workflowAuthService) ExchangeBootstrap(context.Context, string) (authapplication.SessionCredential, error) {
+	return authapplication.SessionCredential{}, nil
+}
+
+func (service workflowAuthService) AuthenticateSession(context.Context, string, string, bool) (authdomain.Principal, error) {
+	return service.principal, nil
+}
+
+func (service workflowAuthService) CurrentSession(context.Context, string, string, bool) (authdomain.SessionInfo, error) {
+	return authdomain.SessionInfo{}, nil
+}
+
+func (service workflowAuthService) RotateSession(context.Context, authdomain.Principal, string, string, bool) (authapplication.SessionCredential, error) {
+	return authapplication.SessionCredential{}, nil
+}
+
+func (service workflowAuthService) AuthenticateAPIToken(context.Context, string) (authdomain.Principal, error) {
+	return service.principal, nil
+}
+
+func (service workflowAuthService) CreateAPIToken(context.Context, authdomain.Principal, string, []capability.Capability, time.Duration) (authapplication.APITokenCredential, error) {
+	return authapplication.APITokenCredential{}, nil
+}
+
+func (service workflowAuthService) ListAPITokens(context.Context, authdomain.Principal, authdomain.APITokenListQuery) (authdomain.APITokenListPage, error) {
+	return authdomain.APITokenListPage{}, nil
+}
+
+func (service workflowAuthService) RevokeSession(context.Context, authdomain.Principal, foundation.ID) error {
+	return nil
+}
+
+func (service workflowAuthService) RevokeAPIToken(context.Context, authdomain.Principal, foundation.ID) error {
+	return nil
 }
 
 func serve(t *testing.T, service Service, method, path, body string) *httptest.ResponseRecorder {

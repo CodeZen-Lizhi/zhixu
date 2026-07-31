@@ -56,6 +56,7 @@ flowchart TB
 ### app
 
 - Go API。
+- 运行时服务中唯一接收 `ZHIXU_AUTH_BOOTSTRAP_TOKEN` 和可选 `ZHIXU_REVIEW_QUESTION_REF_KEY` 的进程；Compose 启动前按已解析配置校验 Secret 契约。
 - Readiness 检查 DB 和 API 依赖。
 - Liveness 只检查进程。
 - 宿主默认只发布 `127.0.0.1:8080`。
@@ -67,6 +68,7 @@ flowchart TB
 ### worker
 
 - 同一镜像不同命令。
+- 不接收也不读取 API Bootstrap Token 或 Review question-reference key；使用 Worker 专属配置加载，只校验自身消费的配置组。
 - 可扩为多个实例。
 - 使用 DB 租约。
 - 独立监听容器内 `0.0.0.0:8081`，不发布宿主端口。
@@ -107,9 +109,11 @@ flowchart TB
 本地模型 relay 通过 `network_mode: service:app|worker` 加入对应进程的网络命名空间，并只监听该 namespace 的
 `127.0.0.1:11434`。`host.docker.internal:host-gateway` 只配置在 app/worker owner；relay 不重复声明 `extra_hosts`。
 
-正式 Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 归 M10。M6-D 只提供
-Workspace 数据隔离，因此在 M10 门禁完成前必须保持宿主 loopback 发布；不得通过 `0.0.0.0`、反向代理
-或公网端口把当前 Search/Evidence API 描述为已具备自托管安全边界。
+M10-02 已接入 Auth、Session、API Token、CSRF/Origin 和 Capability Middleware。业务 API 默认要求
+认证身份；`/livez`、`/readyz`、`/api/v1/system/status` 和 Bootstrap 交换端点保持公共。M6-D 的
+Workspace 隔离仍不是身份凭据。官方 Compose 让 API 进程监听容器 loopback，并由共享网络命名空间的代理发布宿主
+loopback 端口；代理只接受 Docker bridge gateway 转发的流量，拒绝其他 bridge peer。`ZHIXU_AUTH_MODE=disabled`
+不能通过 LAN、公网端口、普通反向代理或同 Docker 网络的容器变成自托管安全边界。
 
 ## 7. 启动顺序
 
@@ -176,6 +180,13 @@ Worker 运行参数：
 | `ZHIXU_REINDEX_DISPATCH_ERROR_BACKOFF` | `5s` | Dispatcher/业务重试退避，最大 `1m` |
 | `ZHIXU_REINDEX_LEASE_DURATION` | `2m` | Reindex Delivery DB-time lease |
 | `ZHIXU_REINDEX_HEARTBEAT_INTERVAL` | `30s` | 必须小于 Reindex lease |
+| `ZHIXU_AUTH_MODE` | `required` | `required/disabled`；`disabled` 仅允许 development loopback |
+| `ZHIXU_AUTH_BOOTSTRAP_TOKEN` | 无 | API-only：首次换取 Session 的运行时凭据；不得注入 Worker、写日志或提交仓库 |
+| `ZHIXU_REVIEW_QUESTION_REF_KEY` | 无；Compose 示例提供 development-only 值 | API-only：可选共享 HMAC key；显式值至少 32 UTF-8 bytes、无首尾空白且不得为空。直接运行 API 且缺失时，`required` 从 Bootstrap Token 域隔离派生，local `disabled` 生成进程随机值；多实例必须显式共享同一值 |
+| `ZHIXU_AUTH_SESSION_TTL` | `12h` | Session 有效期；登出、轮换或撤销后立即失效 |
+| `ZHIXU_AUTH_API_TOKEN_TTL` | `720h` | API Token 最大有效期；明文只在创建响应返回一次 |
+| `ZHIXU_AUTH_SECURE_COOKIE` | `false` | HTTPS 部署必须为 `true`；Cookie 仍为 HttpOnly/SameSite |
+| `ZHIXU_AUTH_ALLOWED_ORIGINS` | 普通进程 `http://127.0.0.1:8080`；Compose 从 `ZHIXU_HTTP_PORT` 派生 | 精确 Origin 白名单；显式值优先于 Compose 派生值，浏览器 unsafe 请求同时校验 CSRF |
 | `ZHIXU_TOOL_RUNTIME_MODE` | `disabled` | Compose 模板默认关闭；仓库 `.env.example` 为本地 Tool smoke 显式启用。启用时 API/Worker 必须共享冻结 Contract 且 Worker真实 Executor/Workflow 全部可达 |
 | `ZHIXU_WEB_FETCH_MODE` | `disabled` | 默认关闭；持久 Workspace/Workflow Web Policy 未接线时显式 `enabled` 也必须 fail closed |
 | `ZHIXU_WEB_FETCH_TIMEOUT` | `30s` | 每次 Fetch 总 deadline，包含逐跳解析、TLS、Header 与 Body |
@@ -344,6 +355,13 @@ docker compose -f deploy/compose.yml --env-file .env.example exec -T worker \
 ./zhixu down
 ```
 
+`.env.example` 显式选择 development `disabled`，因此空 Bootstrap Token 是合法基线；同时提供只供本地
+开发的 Review question-reference key，非开发部署必须替换。`make compose-up` 会先解析 Compose 最终模型：
+`required` 缺少 canonical 32+ 字符 Token、`disabled` 却提供任意非空 Token、Review key 缺失/为空/不足
+32 UTF-8 bytes/带首尾空白，或 Worker/Migrate 环境出现任一 API-only Secret 时，都会在 build/up 之前失败。
+只修改 `ZHIXU_HTTP_PORT` 时，默认允许 Origin 同步为宿主 loopback 端口；显式
+`ZHIXU_AUTH_ALLOWED_ORIGINS` 覆盖该派生值。
+
 RAG Conversation 的可重复黑盒门禁为：
 
 ```bash
@@ -357,8 +375,8 @@ fixture 只接受匹配 Bearer、已知 strict Schema 和有界 JSON。脚本经
 Reindex 与 Conversation/Question/Answer/SSE/Feedback API 运行真实 Worker，只用测试 harness 补目前没有公开命令的
 Knowledge Eligibility 事实；不会直接 seed Conversation、Answer 或 Workflow。退出时必须删除容器、volume 和临时目录。
 
-该门禁证明 M6-04 容器闭环，不证明正式 Provider 质量、Auth/CSRF/Capability、50 万容量、备份恢复或最终发布包；
-这些仍由 M10/M11 验收。
+该门禁证明 M6-04 容器闭环，不单独证明正式 Provider 质量、M10-02 认证安全负测、50 万容量、备份恢复或
+最终发布包；这些必须由各自 M10/M11 门禁给出独立证据。
 
 本轮已确认镜像以 UID `10001` 运行、Migrate 在 API/Worker 前成功完成、Worker
 health 端口未发布宿主、API/Worker 同时 ready、SIGTERM 退出码为 0，并验证 PostgreSQL

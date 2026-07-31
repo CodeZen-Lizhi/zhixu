@@ -11,12 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -38,7 +40,21 @@ func TestRuntimeStateClaimHeartbeatCompleteAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRuntimeRepository(pool, inserter)
+	hook := &terminalHookRecorder{inspect: func(ctx context.Context, tx pgx.Tx, event application.WorkflowNodeTerminalEvent) error {
+		var runStatus domain.RunStatus
+		var nodeStatus domain.NodeStatus
+		if err := tx.QueryRow(ctx, `SELECT status FROM workflow.run WHERE id=$1`, string(event.WorkflowRunID)).Scan(&runStatus); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT status FROM workflow.node_run WHERE id=$1`, string(event.NodeRunID)).Scan(&nodeStatus); err != nil {
+			return err
+		}
+		if runStatus != domain.RunStatusSucceeded || nodeStatus != domain.NodeStatusSucceeded {
+			return fmt.Errorf("hook observed run=%s node=%s", runStatus, nodeStatus)
+		}
+		return nil
+	}}
+	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,12 +92,25 @@ func TestRuntimeStateClaimHeartbeatCompleteAndReplay(t *testing.T) {
 	if completed.Run.Status != domain.RunStatusSucceeded || completed.Node.Status != domain.NodeStatusSucceeded || completed.Attempt.Status != domain.AttemptStatusSucceeded {
 		t.Fatalf("completed=%+v", completed)
 	}
+	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkflowRunID: started.Run.ID,
+		NodeRunID:     started.FirstNode.ID,
+		NodeAttemptID: claimed.Attempt.ID,
+		Outcome:       application.WorkflowTerminalOutcomeSucceeded,
+		TerminalAt:    *completed.Attempt.EndedAt,
+	}
+	if len(hook.events) != 1 || hook.events[0] != wantEvent {
+		t.Fatalf("terminal events=%+v want=%+v", hook.events, wantEvent)
+	}
 	replayed, err := repository.TransitionDelivery(ctx, transition)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if replayed.Attempt.ID != completed.Attempt.ID || replayed.Node.Status != domain.NodeStatusSucceeded || replayed.Run.Status != domain.RunStatusSucceeded {
 		t.Fatalf("replayed=%+v completed=%+v", replayed, completed)
+	}
+	if len(hook.events) != 1 {
+		t.Fatalf("terminal replay calls=%d events=%+v", len(hook.events), hook.events)
 	}
 }
 
@@ -290,7 +319,8 @@ func TestRuntimeStateRetrySchedulesOneBusinessGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRuntimeRepository(pool, inserter)
+	hook := &terminalHookRecorder{}
+	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +349,45 @@ func TestRuntimeStateRetrySchedulesOneBusinessGeneration(t *testing.T) {
 	if jobs != 1 {
 		t.Fatalf("scheduled jobs=%d", jobs)
 	}
+	if len(hook.events) != 0 {
+		t.Fatalf("retry_scheduled invoked terminal hook: %+v", hook.events)
+	}
+	coordinator, err := application.NewRuntimeCoordinator(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelCommand := application.RunControlCommand{WorkflowRunID: started.Run.ID, ExpectedVersion: result.Run.Version, IdempotencyKey: "cancel-retry-wait"}
+	cancelled, err := coordinator.Cancel(ctx, cancelCommand)
+	if err != nil || cancelled.Status != domain.RunStatusCancelled {
+		t.Fatalf("cancel retry_wait=%+v err=%v", cancelled, err)
+	}
+	var terminalAt time.Time
+	var attempts int
+	if err := pool.QueryRow(ctx, `SELECT completed_at FROM workflow.node_run WHERE id=$1`, string(started.FirstNode.ID)).Scan(&terminalAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.node_attempt WHERE node_run_id=$1`, string(started.FirstNode.ID)).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 {
+		t.Fatalf("retry_wait cancel attempts=%d", attempts)
+	}
+	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkflowRunID:  started.Run.ID,
+		NodeRunID:      started.FirstNode.ID,
+		NodeAttemptID:  result.Attempt.ID,
+		Outcome:        application.WorkflowTerminalOutcomeCancelled,
+		FailureClass:   domain.FailureClassCancelled,
+		FailureCode:    "WORKFLOW_CANCELLED",
+		FailureSummary: "WORKFLOW_CANCELLED",
+		TerminalAt:     terminalAt,
+	}
+	if len(hook.events) != 1 || hook.events[0] != wantEvent {
+		t.Fatalf("retry_wait cancel events=%+v want=%+v", hook.events, wantEvent)
+	}
+	if replayed, err := coordinator.Cancel(ctx, cancelCommand); err != nil || replayed.Version != cancelled.Version || len(hook.events) != 1 {
+		t.Fatalf("retry_wait cancel replay=%+v events=%d err=%v", replayed, len(hook.events), err)
+	}
 }
 
 func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
@@ -337,7 +406,8 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRuntimeRepository(pool, inserter)
+	hook := &terminalHookRecorder{}
+	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,12 +452,121 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := coordinator.Cancel(ctx, application.RunControlCommand{WorkflowRunID: cancelled.Run.ID, ExpectedVersion: 1, IdempotencyKey: "cancel-1"})
+	hook.inspect = func(ctx context.Context, tx pgx.Tx, event application.WorkflowNodeTerminalEvent) error {
+		var runStatus domain.RunStatus
+		var nodeStatus domain.NodeStatus
+		if err := tx.QueryRow(ctx, `SELECT status FROM workflow.run WHERE id=$1`, string(event.WorkflowRunID)).Scan(&runStatus); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT status FROM workflow.node_run WHERE id=$1`, string(event.NodeRunID)).Scan(&nodeStatus); err != nil {
+			return err
+		}
+		if runStatus != domain.RunStatusCancelled || nodeStatus != domain.NodeStatusCancelled {
+			return fmt.Errorf("direct cancel hook observed run=%s node=%s", runStatus, nodeStatus)
+		}
+		return nil
+	}
+	cancelCommand := application.RunControlCommand{WorkflowRunID: cancelled.Run.ID, ExpectedVersion: 1, IdempotencyKey: "cancel-1"}
+	result, err := coordinator.Cancel(ctx, cancelCommand)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Status != domain.RunStatusCancelled || result.PauseRequested || !result.CancelRequested {
 		t.Fatalf("cancelled=%+v", result)
+	}
+	var terminalAt time.Time
+	var attempts int
+	if err := pool.QueryRow(ctx, `SELECT completed_at FROM workflow.node_run WHERE id=$1`, string(cancelled.FirstNode.ID)).Scan(&terminalAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.node_attempt WHERE node_run_id=$1`, string(cancelled.FirstNode.ID)).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 {
+		t.Fatalf("pending cancel created attempts=%d", attempts)
+	}
+	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkflowRunID:  cancelled.Run.ID,
+		NodeRunID:      cancelled.FirstNode.ID,
+		Outcome:        application.WorkflowTerminalOutcomeCancelled,
+		FailureClass:   domain.FailureClassCancelled,
+		FailureCode:    "WORKFLOW_CANCELLED",
+		FailureSummary: "WORKFLOW_CANCELLED",
+		TerminalAt:     terminalAt,
+	}
+	if len(hook.events) != 1 || hook.events[0] != wantEvent {
+		t.Fatalf("direct cancel events=%+v want=%+v", hook.events, wantEvent)
+	}
+	replayedCancel, err := coordinator.Cancel(ctx, cancelCommand)
+	if err != nil || replayedCancel.Version != result.Version {
+		t.Fatalf("direct cancel replay=%+v err=%v", replayedCancel, err)
+	}
+	if len(hook.events) != 1 {
+		t.Fatalf("direct cancel replay terminal calls=%d", len(hook.events))
+	}
+}
+
+func TestRuntimeStateControlAuthorizesBeforeMutationAndReplay(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	defer cleanup()
+	workspaceID := foundation.ID("a3500000-0000-4000-8000-000000000001")
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-control-auth',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-control-auth"); err != nil {
+		t.Fatal(err)
+	}
+	client, err := riveradapter.NewClient(pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserter, err := riveradapter.NewJobInserter(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRuntimeRepository(pool, inserter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := runtimeStateStartFixtureWithPermissions(t, workspaceID, "state-control-auth", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}, capability.GitWrite, capability.WriteKnowledge)
+	started, err := repository.Start(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := application.NewRuntimeCoordinator(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := application.RunControlCommand{
+		WorkflowRunID: started.Run.ID, ExpectedVersion: 1, IdempotencyKey: "pause-auth",
+		CallerCapabilities: []capability.Capability{capability.WriteProposal},
+	}
+	if _, err := coordinator.Pause(ctx, command); !hasCode(err, "WORKFLOW_CALLER_CAPABILITY_DENIED") {
+		t.Fatalf("low-scope pause error=%v", err)
+	}
+	var status domain.RunStatus
+	var version int64
+	var controls int
+	if err := pool.QueryRow(ctx, `SELECT status,version FROM workflow.run WHERE id=$1`, string(started.Run.ID)).Scan(&status, &version); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.control_command WHERE run_id=$1`, string(started.Run.ID)).Scan(&controls); err != nil {
+		t.Fatal(err)
+	}
+	if status != domain.RunStatusPending || version != 1 || controls != 0 {
+		t.Fatalf("unauthorized mutation status=%s version=%d controls=%d", status, version, controls)
+	}
+	command.CallerCapabilities = []capability.Capability{capability.GitWrite, capability.WriteKnowledge, capability.WriteProposal}
+	paused, err := coordinator.Pause(ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.CallerCapabilities = []capability.Capability{capability.WriteProposal}
+	if _, err := coordinator.Pause(ctx, command); !hasCode(err, "WORKFLOW_CALLER_CAPABILITY_DENIED") {
+		t.Fatalf("low-scope replay error=%v", err)
+	}
+	command.CallerCapabilities = []capability.Capability{capability.GitWrite, capability.WriteKnowledge, capability.WriteProposal}
+	replayed, err := coordinator.Pause(ctx, command)
+	if err != nil || replayed.Version != paused.Version || replayed.Status != paused.Status {
+		t.Fatalf("authorized replay=%+v err=%v", replayed, err)
 	}
 }
 
@@ -407,7 +586,8 @@ func TestRuntimeStateRunningPauseAndCancelConvergeAtDeliveryCheckpoint(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRuntimeRepository(pool, inserter)
+	hook := &terminalHookRecorder{}
+	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,6 +615,9 @@ func TestRuntimeStateRunningPauseAndCancelConvergeAtDeliveryCheckpoint(t *testin
 	if paused.Run.Status != domain.RunStatusPaused || paused.Run.PauseRequestedAt == nil || paused.Run.CancelRequestedAt != nil || paused.Node.Status != domain.NodeStatusPaused || paused.Attempt.Status != domain.AttemptStatusCancelled {
 		t.Fatalf("paused checkpoint=%+v", paused)
 	}
+	if len(hook.events) != 0 {
+		t.Fatalf("pause checkpoint invoked terminal hook: %+v", hook.events)
+	}
 	resumed, err := coordinator.Resume(ctx, application.RunControlCommand{WorkflowRunID: started.Run.ID, ExpectedVersion: paused.Run.Version, IdempotencyKey: "resume-running"})
 	if err != nil || resumed.Status != domain.RunStatusRunning || resumed.PauseRequested || resumed.CancelRequested {
 		t.Fatalf("resume=%+v err=%v", resumed, err)
@@ -461,12 +644,33 @@ func TestRuntimeStateRunningPauseAndCancelConvergeAtDeliveryCheckpoint(t *testin
 	if !cancelControl.CancelRequested || cancelControl.PauseRequested {
 		t.Fatalf("cancel request=%+v", cancelControl)
 	}
-	cancelled, err := coordinator.Complete(ctx, application.CompleteDeliveryCommand{Binding: application.DeliveryBinding{NodeRunID: cancelledStart.FirstNode.ID, DispatchNo: 1, DeliveryID: "cancel-delivery", Fence: domain.LeaseFence{Owner: "worker-c", AttemptNo: cancelClaim.Attempt.AttemptNo, NodeVersion: cancelClaim.Node.Version}}, Output: json.RawMessage(`{"ignored":true}`), OutputSchemaVersion: 1})
+	cancelCommand := application.CompleteDeliveryCommand{Binding: application.DeliveryBinding{NodeRunID: cancelledStart.FirstNode.ID, DispatchNo: 1, DeliveryID: "cancel-delivery", Fence: domain.LeaseFence{Owner: "worker-c", AttemptNo: cancelClaim.Attempt.AttemptNo, NodeVersion: cancelClaim.Node.Version}}, Output: json.RawMessage(`{"ignored":true}`), OutputSchemaVersion: 1}
+	cancelled, err := coordinator.Complete(ctx, cancelCommand)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cancelled.Run.Status != domain.RunStatusCancelled || cancelled.Node.Status != domain.NodeStatusCancelled || cancelled.Attempt.Status != domain.AttemptStatusCancelled {
 		t.Fatalf("cancelled checkpoint=%+v", cancelled)
+	}
+	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkflowRunID:  cancelledStart.Run.ID,
+		NodeRunID:      cancelledStart.FirstNode.ID,
+		NodeAttemptID:  cancelClaim.Attempt.ID,
+		Outcome:        application.WorkflowTerminalOutcomeCancelled,
+		FailureClass:   domain.FailureClassCancelled,
+		FailureCode:    "WORKFLOW_CANCELLED",
+		FailureSummary: "WORKFLOW_CANCELLED",
+		TerminalAt:     *cancelled.Attempt.EndedAt,
+	}
+	if len(hook.events) != 1 || hook.events[0] != wantEvent {
+		t.Fatalf("cancel checkpoint events=%+v want=%+v", hook.events, wantEvent)
+	}
+	replayed, err := coordinator.Complete(ctx, cancelCommand)
+	if err != nil || !replayed.Replayed {
+		t.Fatalf("cancel checkpoint replay=%+v err=%v", replayed, err)
+	}
+	if len(hook.events) != 1 {
+		t.Fatalf("cancel checkpoint replay terminal calls=%d", len(hook.events))
 	}
 }
 
@@ -490,7 +694,8 @@ func TestRuntimeStateHumanWaitSubmitCompletesNodeAndReplaysDecision(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "state-human", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}))
+	request := runtimeStateStartFixtureWithPermissions(t, workspaceID, "state-human", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}, capability.GitWrite, capability.WriteKnowledge)
+	started, err := repository.Start(ctx, request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,19 +715,214 @@ func TestRuntimeStateHumanWaitSubmitCompletesNodeAndReplaysDecision(t *testing.T
 		t.Fatalf("waited=%+v", waited)
 	}
 	decision := json.RawMessage(`{"approved":true}`)
-	submitted, err := human.SubmitHuman(ctx, application.HumanDecisionCommand{RunID: started.Run.ID, TaskID: waited.Task.ID, TargetVersion: 1, Decision: decision})
+	lowScope := application.HumanDecisionCommand{
+		RunID: started.Run.ID, TaskID: waited.Task.ID, TargetVersion: 1, Decision: decision,
+		CallerCapabilities: []capability.Capability{capability.WriteProposal},
+	}
+	if _, err := human.SubmitHuman(ctx, lowScope); !hasCode(err, "WORKFLOW_CALLER_CAPABILITY_DENIED") {
+		t.Fatalf("low-scope human decision error=%v", err)
+	}
+	var taskStatus domain.HumanTaskStatus
+	var nodeStatus domain.NodeStatus
+	if err := pool.QueryRow(ctx, `SELECT status FROM workflow.human_task WHERE id=$1`, string(waited.Task.ID)).Scan(&taskStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM workflow.node_run WHERE id=$1`, string(waited.Node.ID)).Scan(&nodeStatus); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != domain.HumanTaskPending || nodeStatus != domain.NodeStatusWaitingForHuman {
+		t.Fatalf("unauthorized human mutation task=%s node=%s", taskStatus, nodeStatus)
+	}
+	authorized := lowScope
+	authorized.CallerCapabilities = []capability.Capability{capability.GitWrite, capability.WriteKnowledge, capability.WriteProposal}
+	submitted, err := human.SubmitHuman(ctx, authorized)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if submitted.Task.Status != domain.HumanTaskSubmitted || submitted.Node.Status != domain.NodeStatusSucceeded || submitted.Run.Status != domain.RunStatusSucceeded {
 		t.Fatalf("submitted=%+v", submitted)
 	}
-	replayed, err := human.SubmitHuman(ctx, application.HumanDecisionCommand{RunID: started.Run.ID, TaskID: waited.Task.ID, TargetVersion: 1, Decision: decision})
+	if _, err := human.SubmitHuman(ctx, lowScope); !hasCode(err, "WORKFLOW_CALLER_CAPABILITY_DENIED") {
+		t.Fatalf("low-scope human replay error=%v", err)
+	}
+	replayed, err := human.SubmitHuman(ctx, authorized)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if replayed.Task.ID != submitted.Task.ID || !jsonEqual(replayed.Task.Decision, decision) {
 		t.Fatalf("replayed=%+v submitted=%+v", replayed, submitted)
+	}
+}
+
+func TestRuntimeStateControlDirectCancelWaitingHumanUsesExistingAttempt(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	defer cleanup()
+	workspaceID := foundation.ID("a6500000-0000-4000-8000-000000000001")
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-human-cancel',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-human-cancel"); err != nil {
+		t.Fatal(err)
+	}
+	client, err := riveradapter.NewClient(pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserter, err := riveradapter.NewJobInserter(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook := &terminalHookRecorder{}
+	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "state-human-cancel", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := repository.Claim(ctx, application.ClaimCommand{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "human-cancel-delivery", RiverJobID: started.Job.JobID, LeaseOwner: "worker-human-cancel", LeaseDuration: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	human, err := application.NewRuntimeHumanCoordinator(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waited, err := human.WaitForHuman(ctx, application.HumanWaitCommand{TaskID: foundation.ID("a6500000-0000-4000-8000-000000000015"), RunID: started.Run.ID, NodeRunID: started.FirstNode.ID, Fence: domain.LeaseFence{Owner: "worker-human-cancel", AttemptNo: claimed.Attempt.AttemptNo, NodeVersion: claimed.Node.Version}, ExpectedInputSchema: json.RawMessage(`{}`), TargetVersion: 1, ExpiresIn: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := application.NewRuntimeCoordinator(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelCommand := application.RunControlCommand{WorkflowRunID: started.Run.ID, ExpectedVersion: waited.Run.Version, IdempotencyKey: "cancel-waiting-human"}
+	cancelled, err := coordinator.Cancel(ctx, cancelCommand)
+	if err != nil || cancelled.Status != domain.RunStatusCancelled {
+		t.Fatalf("cancel waiting human=%+v err=%v", cancelled, err)
+	}
+	var taskStatus domain.HumanTaskStatus
+	var terminalAt time.Time
+	var attempts int
+	if err := pool.QueryRow(ctx, `SELECT status FROM workflow.human_task WHERE id=$1`, string(waited.Task.ID)).Scan(&taskStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT completed_at FROM workflow.node_run WHERE id=$1`, string(started.FirstNode.ID)).Scan(&terminalAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.node_attempt WHERE node_run_id=$1`, string(started.FirstNode.ID)).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkflowRunID:  started.Run.ID,
+		NodeRunID:      started.FirstNode.ID,
+		NodeAttemptID:  waited.Attempt.ID,
+		Outcome:        application.WorkflowTerminalOutcomeCancelled,
+		FailureClass:   domain.FailureClassCancelled,
+		FailureCode:    "WORKFLOW_CANCELLED",
+		FailureSummary: "WORKFLOW_CANCELLED",
+		TerminalAt:     terminalAt,
+	}
+	if taskStatus != domain.HumanTaskCancelled || attempts != 1 || len(hook.events) != 1 || hook.events[0] != wantEvent {
+		t.Fatalf("task=%s attempts=%d events=%+v want=%+v", taskStatus, attempts, hook.events, wantEvent)
+	}
+	if replayed, err := coordinator.Cancel(ctx, cancelCommand); err != nil || replayed.Version != cancelled.Version || len(hook.events) != 1 {
+		t.Fatalf("waiting human cancel replay=%+v events=%d err=%v", replayed, len(hook.events), err)
+	}
+}
+
+func TestRuntimeTerminalHookFailureRollsBackDeliveryAndControl(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	defer cleanup()
+	workspaceID := foundation.ID("a6800000-0000-4000-8000-000000000001")
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-terminal-rollback',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-terminal-rollback"); err != nil {
+		t.Fatal(err)
+	}
+	client, err := riveradapter.NewClient(pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserter, err := riveradapter.NewJobInserter(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook := &terminalHookRecorder{}
+	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "terminal-hook-delivery", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := repository.Claim(ctx, application.ClaimCommand{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "terminal-hook-delivery", RiverJobID: started.Job.JobID, LeaseOwner: "worker-terminal", LeaseDuration: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := application.DeliveryTransition{Binding: application.DeliveryBinding{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "terminal-hook-delivery", Fence: domain.LeaseFence{Owner: "worker-terminal", AttemptNo: claimed.Attempt.AttemptNo, NodeVersion: claimed.Node.Version}}, Result: domain.AttemptResult{Output: json.RawMessage(`{"ok":true}`), OutputSchemaVersion: 1}}
+	hook.err = foundation.NewError(foundation.ErrorManualRecoveryRequired, "ARTIFACT_GENERATION_RECOVERY_REQUIRED", false, errors.New("injected terminal recovery"))
+	if _, err := repository.TransitionDelivery(ctx, delivery); !hasCode(err, "ARTIFACT_GENERATION_RECOVERY_REQUIRED") {
+		t.Fatalf("classified terminal hook error=%v", err)
+	}
+	var runStatus domain.RunStatus
+	var nodeStatus domain.NodeStatus
+	var attemptStatus domain.AttemptStatus
+	if err := pool.QueryRow(ctx, `SELECT status FROM workflow.run WHERE id=$1`, string(started.Run.ID)).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM workflow.node_run WHERE id=$1`, string(started.FirstNode.ID)).Scan(&nodeStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM workflow.node_attempt WHERE id=$1`, string(claimed.Attempt.ID)).Scan(&attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != domain.RunStatusRunning || nodeStatus != domain.NodeStatusRunning || attemptStatus != domain.AttemptStatusRunning {
+		t.Fatalf("delivery rollback run=%s node=%s attempt=%s", runStatus, nodeStatus, attemptStatus)
+	}
+	hook.err = nil
+	if completed, err := repository.TransitionDelivery(ctx, delivery); err != nil || completed.Run.Status != domain.RunStatusSucceeded {
+		t.Fatalf("delivery retry=%+v err=%v", completed, err)
+	}
+
+	controlRequest := runtimeStateStartFixture(workspaceID, "terminal-hook-control", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second})
+	remapRuntimeStartIDs(&controlRequest, "d")
+	controlRequest.Definition.Key = "terminal-hook-control-definition"
+	controlRequest.Run.IdempotencyKey = "terminal-hook-control-run"
+	controlRequest.FirstNode.IdempotencyKey = "terminal-hook-control-node"
+	controlRequest.Event.IdempotencyKey = "terminal-hook-control-event"
+	controlRequest.Event.EventKey = "terminal-hook-control-event"
+	controlStarted, err := repository.Start(ctx, controlRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := application.NewRuntimeCoordinator(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := application.RunControlCommand{WorkflowRunID: controlStarted.Run.ID, ExpectedVersion: 1, IdempotencyKey: "terminal-hook-cancel"}
+	hook.err = errors.New("injected terminal hook dependency failure")
+	_, err = coordinator.Cancel(ctx, control)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_TERMINAL_HOOK_FAILED" || !classified.Retryable {
+		t.Fatalf("raw terminal hook error=%v", err)
+	}
+	var cancelRequestedAt *time.Time
+	var controls int
+	if err := pool.QueryRow(ctx, `SELECT status,cancel_requested_at FROM workflow.run WHERE id=$1`, string(controlStarted.Run.ID)).Scan(&runStatus, &cancelRequestedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM workflow.node_run WHERE id=$1`, string(controlStarted.FirstNode.ID)).Scan(&nodeStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.control_command WHERE run_id=$1`, string(controlStarted.Run.ID)).Scan(&controls); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != domain.RunStatusPending || cancelRequestedAt != nil || nodeStatus != domain.NodeStatusPending || controls != 0 {
+		t.Fatalf("control rollback run=%s cancel_at=%v node=%s controls=%d", runStatus, cancelRequestedAt, nodeStatus, controls)
+	}
+	hook.err = nil
+	if cancelled, err := coordinator.Cancel(ctx, control); err != nil || cancelled.Status != domain.RunStatusCancelled {
+		t.Fatalf("control retry=%+v err=%v", cancelled, err)
 	}
 }
 
@@ -657,7 +1057,8 @@ func TestRuntimeStateRetryExhaustionFailsWithoutNewJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRuntimeRepository(pool, inserter)
+	hook := &terminalHookRecorder{}
+	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,8 +1074,35 @@ func TestRuntimeStateRetryExhaustionFailsWithoutNewJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Node.Status != domain.NodeStatusFailed || result.Attempt.Status != domain.AttemptStatusFailed || result.Node.DispatchNo != 1 {
+	if result.Node.Status != domain.NodeStatusFailed || result.Node.FailureClass != domain.FailureClassNonRetryable || result.Node.ErrorCode != "WORKFLOW_RETRY_EXHAUSTED" || result.Attempt.Status != domain.AttemptStatusFailed || result.Attempt.FailureClass != domain.FailureClassRetryable || result.Attempt.ErrorCode != "BUSY" || result.Node.DispatchNo != 1 {
 		t.Fatalf("exhausted=%+v", result)
+	}
+	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkflowRunID:  started.Run.ID,
+		NodeRunID:      started.FirstNode.ID,
+		NodeAttemptID:  claimed.Attempt.ID,
+		Outcome:        application.WorkflowTerminalOutcomeFailed,
+		FailureClass:   domain.FailureClassNonRetryable,
+		FailureCode:    "WORKFLOW_RETRY_EXHAUSTED",
+		FailureSummary: "retry limit exhausted",
+		TerminalAt:     *result.Attempt.EndedAt,
+	}
+	if len(hook.events) != 1 || hook.events[0] != wantEvent {
+		t.Fatalf("terminal events=%+v want=%+v", hook.events, wantEvent)
+	}
+	replayed, err := repository.TransitionDelivery(ctx, application.DeliveryTransition{Binding: application.DeliveryBinding{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "exhaust-delivery", Fence: domain.LeaseFence{Owner: "worker-e", AttemptNo: claimed.Attempt.AttemptNo, NodeVersion: claimed.Node.Version}}, Result: domain.AttemptResult{Failure: &domain.FailureEnvelope{Class: domain.FailureClassRetryable, ErrorKind: foundation.ErrorRetryableFailure, Code: "BUSY", Summary: "busy"}}})
+	if err != nil || !replayed.Replayed {
+		t.Fatalf("exhausted replay=%+v err=%v", replayed, err)
+	}
+	if len(hook.events) != 1 {
+		t.Fatalf("exhausted replay terminal calls=%d", len(hook.events))
+	}
+	conflicting := application.DeliveryTransition{Binding: application.DeliveryBinding{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "exhaust-delivery", Fence: domain.LeaseFence{Owner: "worker-e", AttemptNo: claimed.Attempt.AttemptNo, NodeVersion: claimed.Node.Version}}, Result: domain.AttemptResult{Failure: &domain.FailureEnvelope{Class: domain.FailureClassRetryable, ErrorKind: foundation.ErrorRetryableFailure, Code: "DIFFERENT_FAILURE", Summary: "different"}}}
+	if _, err := repository.TransitionDelivery(ctx, conflicting); !hasCode(err, "WORKFLOW_COMPLETION_CONFLICT") {
+		t.Fatalf("different exhausted result replay error=%v", err)
+	}
+	if len(hook.events) != 1 {
+		t.Fatalf("different exhausted result invoked terminal hook: %d", len(hook.events))
 	}
 	var jobs int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.river_job WHERE kind=$1 AND args->>'node_run_id'=$2`, riveradapter.NodeJobKind, string(started.FirstNode.ID)).Scan(&jobs); err != nil {
@@ -768,4 +1196,40 @@ func runtimeStateStartFixture(workspaceID foundation.ID, key string, retry domai
 	graph, _ := json.Marshal(domain.CanonicalGraph{Nodes: []domain.NodeDefinition{{Key: "hash", Kind: application.CanonicalJSONHashNodeKind, InputSchemaVersion: 1, OutputSchemaVersion: 1, RetryPolicy: retry}}})
 	runCopy := runID
 	return application.RuntimeStartRequest{Definition: domain.Definition{ID: definitionID, WorkspaceID: workspaceID, Key: key, Version: 1, Graph: graph, CreatedAt: time.Now().UTC()}, DefinitionGraphHash: "1111111111111111111111111111111111111111111111111111111111111111", DefinitionInputSchemaVersion: 1, Run: domain.Run{ID: runID, WorkspaceID: workspaceID, DefinitionID: definitionID, Status: domain.RunStatusPending, Input: json.RawMessage(`{"value":1}`), IdempotencyKey: key, RequestHash: "2222222222222222222222222222222222222222222222222222222222222222", Version: 1, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}, FirstNode: domain.NodeRun{ID: nodeID, RunID: runID, NodeKey: "hash", NodeType: application.CanonicalJSONHashNodeKind, Status: domain.NodeStatusPending, Input: json.RawMessage(`{"value":1}`), IdempotencyKey: "node-start-" + key, InputSchemaVersion: 1, OutputSchemaVersion: 1, DispatchNo: 1, Version: 1, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}, Event: domain.OutboxEvent{ID: eventID, WorkspaceID: workspaceID, RunID: &runCopy, Type: "workflow.run.started", IdempotencyKey: "workflow-start:" + key, EventKey: "workflow.run.started:" + key, SchemaVersion: 1, EventVersion: 1, Payload: json.RawMessage(`{}`), OccurredAt: time.Now().UTC()}, RequestHash: "2222222222222222222222222222222222222222222222222222222222222222"}
+}
+
+func runtimeStateStartFixtureWithPermissions(t *testing.T, workspaceID foundation.ID, key string, retry domain.RetryPolicy, permissions ...capability.Capability) application.RuntimeStartRequest {
+	t.Helper()
+	request := runtimeStateStartFixture(workspaceID, key, retry)
+	var graph domain.CanonicalGraph
+	if err := json.Unmarshal(request.Definition.Graph, &graph); err != nil {
+		t.Fatal(err)
+	}
+	graph.Nodes[0].RequiredPermissions = append([]domain.Permission(nil), permissions...)
+	encoded, err := json.Marshal(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Definition.Graph = encoded
+	return request
+}
+
+type terminalHookRecorder struct {
+	events  []application.WorkflowNodeTerminalEvent
+	inspect func(context.Context, pgx.Tx, application.WorkflowNodeTerminalEvent) error
+	err     error
+}
+
+func (hook *terminalHookRecorder) OnWorkflowNodeTerminal(ctx context.Context, transaction any, event application.WorkflowNodeTerminalEvent) error {
+	tx, ok := transaction.(pgx.Tx)
+	if !ok {
+		return errors.New("terminal hook transaction is not pgx.Tx")
+	}
+	hook.events = append(hook.events, event)
+	if hook.inspect != nil {
+		if err := hook.inspect(ctx, tx, event); err != nil {
+			return err
+		}
+	}
+	return hook.err
 }

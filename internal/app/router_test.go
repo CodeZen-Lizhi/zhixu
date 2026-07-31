@@ -31,6 +31,7 @@ import (
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
+	"github.com/go-chi/chi/v5"
 )
 
 type fakePinger struct {
@@ -735,5 +736,32 @@ func TestRouterPropagatesIncomingTraceToHandlers(t *testing.T) {
 	}
 	if entry["trace_id"] != "0123456789abcdef0123456789abcdef" || entry["request_id"] != "request-trace-test" {
 		t.Fatalf("request log correlation=%+v", entry)
+	}
+}
+
+func TestRequestLogUsesChiRouteTemplateWithoutRequestPath(t *testing.T) {
+	var output bytes.Buffer
+	router := chi.NewRouter()
+	router.Use(requestIDMiddleware)
+	router.Use(requestLogMiddleware(observability.NewLogger("info", &output)))
+	router.Get("/api/v1/workspaces/{workspace_id}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/workspaces/92000000-0000-4000-8000-000000000001", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d", response.Code)
+	}
+	entry := make(map[string]any)
+	if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+		t.Fatalf("decode request log: %v\\n%s", err, output.String())
+	}
+	if entry["http_route"] != "/api/v1/workspaces/{workspace_id}" || entry["path"] != nil {
+		t.Fatalf("request log=%+v", entry)
+	}
+	if strings.Contains(output.String(), "92000000-0000-4000-8000-000000000001") {
+		t.Fatalf("request path leaked: %s", output.String())
 	}
 }

@@ -199,8 +199,19 @@ func TestSemanticLinkCandidatesMigrationTypedProposalCompatibilityAndGuardedDown
 		WHERE id=$1`, knowledgeProposalID)
 	assertPostgresCode(t, err, "23514")
 
-	_, err = migrationProvider(t, pool).DownTo(ctx, 23)
+	provider := migrationProvider(t, pool)
+	_, err = provider.DownTo(ctx, 23)
 	assertPostgresCode(t, err, "55000")
+	if !strings.Contains(err.Error(), "cannot remove semantic link candidates with knowledge change proposals") {
+		t.Fatalf("00024 guarded Down returned unexpected error: %v", err)
+	}
+	version, versionErr := provider.GetDBVersion(ctx)
+	if versionErr != nil {
+		t.Fatal(versionErr)
+	}
+	if version != 24 {
+		t.Fatalf("00024 guarded Down left migration version=%d want=24", version)
+	}
 }
 
 func TestSemanticLinkCandidatesMigrationCandidateDecisionScanAndConcurrency(t *testing.T) {
@@ -367,8 +378,19 @@ func TestSemanticLinkCandidatesMigrationCandidateDecisionScanAndConcurrency(t *t
 		t.Fatalf("concurrent fingerprint rows=%d", duplicateCount)
 	}
 
-	_, err = migrationProvider(t, pool).DownTo(ctx, 23)
+	provider := migrationProvider(t, pool)
+	_, err = provider.DownTo(ctx, 23)
 	assertPostgresCode(t, err, "55000")
+	if !strings.Contains(err.Error(), "cannot remove semantic link candidates with candidate data") {
+		t.Fatalf("00024 guarded Down returned unexpected error: %v", err)
+	}
+	version, versionErr := provider.GetDBVersion(ctx)
+	if versionErr != nil {
+		t.Fatal(versionErr)
+	}
+	if version != 24 {
+		t.Fatalf("00024 guarded Down left migration version=%d want=24", version)
+	}
 }
 
 func assertSemanticLinkCandidatesMigrationShape(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {

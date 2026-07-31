@@ -335,7 +335,6 @@ if (!impactOperation.parameters?.some((parameter) => parameter.$ref === "#/compo
     impactOperation.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ImpactAnalysisRequest") {
   throw new Error("Impact Analysis must require Idempotency-Key and a bounded empty JSON object");
 }
-
 const downstreamProposalPath = "/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}/proposals";
 const downstreamProposalOperation = document.paths[downstreamProposalPath]?.post;
 if (!downstreamProposalOperation || downstreamProposalOperation.security !== undefined ||
@@ -418,13 +417,6 @@ for (const schema of [
   "ApprovalDecisionResponse",
   "Proposal",
   "ProposalPage",
-  "CreateDownstreamUpdateProposalRequest",
-  "DownstreamUpdateSourceReport",
-  "DownstreamUpdateSourceEvent",
-  "DownstreamUpdate",
-  "DownstreamUpdateRevision",
-  "DownstreamUpdateProposal",
-  "DownstreamUpdateProposalCreateResponse",
   "ProposalSummary",
   "ProposalCurrentContent",
   "FilePatchProposal",
@@ -439,6 +431,13 @@ for (const schema of [
   "PublishArtifactBinding",
   "PublishArtifactRevision",
   "PublishArtifactProposal",
+  "CreateDownstreamUpdateProposalRequest",
+  "DownstreamUpdateSourceReport",
+  "DownstreamUpdateSourceEvent",
+  "DownstreamUpdate",
+  "DownstreamUpdateRevision",
+  "DownstreamUpdateProposal",
+  "DownstreamUpdateProposalCreateResponse",
   "ProposalDecisionRequest",
   "ApplyPreflightRequest",
   "ApplyPreflightResult",
@@ -538,22 +537,22 @@ for (const schema of [
   "ReviewCardEventOwnerBinding",
   "KnowledgeEventOwnerBinding",
   "KnowledgeEventCorrelation",
-  "KnowledgeEvent",
   "KnowledgeEventV1",
   "KnowledgeEventV2",
+  "KnowledgeEvent",
   "KnowledgeTimelinePage",
   "ImpactAnalysisRequest",
   "ImpactObjectType",
   "ImpactAction",
-  "ImpactObject",
   "ImpactObjectV1",
   "ImpactObjectV2Base",
   "ImpactObjectV2Legacy",
   "ArtifactImpactObject",
   "ReviewCardImpactObject",
-  "ImpactReport",
+  "ImpactObject",
   "ImpactReportV1",
   "ImpactReportV2",
+  "ImpactReport",
   "ImpactProposalDraft",
   "ImpactAnalysisResult",
   "Problem",
@@ -792,6 +791,12 @@ if (schemas.AuthCapability.enum?.join(",") !== "READ_LOCAL,READ_EXTERNAL,WRITE_P
 if (!schemas.SystemStatus.required.includes("knowledge_timeline") ||
     schemas.SystemStatus.properties.knowledge_timeline.$ref !== "#/components/schemas/OptionalCapabilityStatus") {
   throw new Error("SystemStatus must expose the Knowledge Timeline capability state");
+}
+for (const capabilityName of ["review", "memory", "interview"]) {
+  if (!schemas.SystemStatus.required.includes(capabilityName) ||
+      schemas.SystemStatus.properties[capabilityName]?.$ref !== "#/components/schemas/OptionalCapabilityStatus") {
+    throw new Error(`SystemStatus must expose the strict ${capabilityName} capability state`);
+  }
 }
 if (schemas.SessionCredential.properties.session_token || schemas.SessionInfo.properties.token_hash || schemas.SessionInfo.properties.csrf_hash ||
     schemas.APITokenInfo.properties.token || schemas.APITokenInfo.properties.token_hash ||
@@ -1540,6 +1545,252 @@ for (const schemaName of [
   if (schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must reject unknown properties`);
 }
 
+const reviewOperations = [
+  ["/api/v1/review/decks", "get", "ReviewDeckList", undefined, ["200", "400", "405", "500", "503"], false],
+  ["/api/v1/review/decks", "post", "ReviewDeck", "ReviewCreateDeckRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/decks/{deck_id}", "get", "ReviewDeck", undefined, ["200", "400", "404", "405", "500", "503"], false],
+  ["/api/v1/review/decks/{deck_id}/cards", "get", "ReviewCardList", undefined, ["200", "400", "404", "405", "500", "503"], false],
+  ["/api/v1/review/decks/{deck_id}/cards", "post", "ReviewCard", "ReviewCreateCardRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/cards/{card_id}", "put", "ReviewCard", "ReviewEditCardRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/decks/{deck_id}/schedule/pause", "post", "ReviewDeck", "ReviewDeckScheduleRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/decks/{deck_id}/schedule/resume", "post", "ReviewDeck", "ReviewDeckScheduleRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/decks/{deck_id}/schedule/reset", "post", "ReviewDeck", "ReviewDeckScheduleRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/due", "get", "ReviewDueCardList", undefined, ["200", "400", "404", "405", "409", "500", "503"], false],
+  ["/api/v1/review/cards/{card_id}/approve", "post", "ReviewCard", "ReviewCardDecisionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/cards/{card_id}/reject", "post", "ReviewCard", "ReviewCardDecisionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/cards/{card_id}/invalidate", "post", "ReviewCard", "ReviewCardDecisionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/invalidation", "post", "ReviewInvalidationResult", "ReviewInvalidationRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/sessions", "post", "ReviewSession", "ReviewStartSessionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/sessions/{session_id}/complete", "post", "ReviewSession", "ReviewCompleteSessionRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
+  ["/api/v1/review/sessions/{session_id}/answers", "post", "ReviewAnswerResult", "ReviewSubmitAnswerRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
+];
+for (const [path, method, successSchema, requestSchema, statuses, requiresIdempotencyKey] of reviewOperations) {
+  const pathItem = document.paths[path];
+  const operation = pathItem?.[method];
+  if (!operation) throw new Error(`missing Review operation ${method.toUpperCase()} ${path}`);
+  const expectedCapability = method === "get" ? "READ_LOCAL" : "WRITE_PROPOSAL";
+  if (operation.security !== undefined || operation["x-required-capability"] !== expectedCapability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${expectedCapability}`);
+  }
+  for (const status of ["401", "403", ...statuses]) {
+    if (!operation.responses?.[status]) throw new Error(`missing Review ${status} response for ${method.toUpperCase()} ${path}`);
+    if (Number(status) >= 400 && resolveRef(operation.responses[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Review ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+  if (successSchema) {
+    for (const status of statuses.filter((status) => Number(status) < 300)) {
+      if (operation.responses[status]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}`) {
+        throw new Error(`invalid Review ${status} success schema for ${method.toUpperCase()} ${path}`);
+      }
+    }
+  }
+  if (requestSchema && operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
+    throw new Error(`invalid Review request schema for ${method.toUpperCase()} ${path}`);
+  }
+  if (requiresIdempotencyKey && ![...(pathItem.parameters ?? []), ...(operation.parameters ?? [])].some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey")) {
+    throw new Error(`${method.toUpperCase()} ${path} must require Idempotency-Key`);
+  }
+}
+for (const schemaName of [
+  "ReviewEvidenceBinding", "ReviewDeck", "ReviewDeckList", "ReviewCard", "ReviewCardList", "ReviewSchedule", "ReviewDueCardSummary", "ReviewDueCard", "ReviewDueCardList", "ReviewSession",
+  "ReviewCreateDeckRequest", "ReviewCreateCardRequest", "ReviewEditCardRequest", "ReviewCardDecisionRequest", "ReviewInvalidationRequest", "ReviewInvalidationResult", "ReviewStartSessionRequest", "ReviewCompleteSessionRequest", "ReviewDeckScheduleRequest", "ReviewSubmitAnswerRequest",
+  "ReviewScoreDimension", "ReviewScoreEvidence", "ReviewScore", "ReviewAnswer", "ReviewAnswerResult",
+]) {
+  if (!schemas[schemaName] || schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must remain a strict Review schema`);
+}
+for (const schemaName of ["ReviewDeck", "ReviewCreateDeckRequest"]) {
+  const dailyLimit = schemas[schemaName].properties.daily_limit;
+  if (dailyLimit?.type !== "integer" || dailyLimit.minimum !== 1 || dailyLimit.maximum !== 1000) {
+    throw new Error(`${schemaName}.daily_limit must match the 1..1000 domain bound`);
+  }
+}
+for (const schemaName of ["ReviewCard", "ReviewCreateCardRequest", "ReviewEditCardRequest"]) {
+  const properties = schemas[schemaName].properties;
+  if (properties.question?.["x-max-utf8-bytes"] !== 8192 || properties.answer_points?.maxItems !== 128 || properties.answer_points?.items?.["x-max-utf8-bytes"] !== 4096 || properties.evidence?.maxItems !== 128) {
+    throw new Error(`${schemaName} card bounds drifted from the Review domain`);
+  }
+}
+if (schemas.ReviewEvidenceBinding.properties.quote !== undefined || schemas.ReviewScoreEvidence.properties.quote !== undefined) {
+  throw new Error("Review evidence bindings must not expose a client-authored quote field");
+}
+const reviewDecisionReason = schemas.ReviewCardDecisionRequest.properties.reason;
+if (reviewDecisionReason?.maxLength !== 1024 || reviewDecisionReason?.["x-max-utf8-bytes"] !== 1024) {
+  throw new Error("Review card invalidation reason must match the 1024-byte domain bound");
+}
+const reviewDueCardSummary = schemas.ReviewDueCardSummary;
+const reviewDueCardFields = ["id", "workspace_id", "deck_id", "question", "card_type", "difficulty", "status", "version"];
+const reviewDueForbiddenFields = ["claim_id", "answer_points", "evidence", "fingerprint", "model_version", "invalidation_reason", "invalidated_at", "created_at", "updated_at"];
+if (reviewDueCardSummary.required?.join(",") !== reviewDueCardFields.join(",") ||
+    Object.keys(reviewDueCardSummary.properties ?? {}).join(",") !== reviewDueCardFields.join(",") ||
+    reviewDueForbiddenFields.some((field) => field in reviewDueCardSummary.properties) ||
+    reviewDueCardSummary.properties.status?.const !== "APPROVED" ||
+    schemas.ReviewDueCard.properties.card?.$ref !== "#/components/schemas/ReviewDueCardSummary" ||
+    schemas.ReviewDueCard.required?.join(",") !== "card,schedule,question_ref" ||
+    schemas.ReviewDueCard.properties.question_ref?.["x-max-utf8-bytes"] !== 512) {
+  throw new Error("Review due cards must use the redacted pre-answer summary wire shape");
+}
+const reviewDueOperation = document.paths["/api/v1/review/due"].get;
+const reviewCardListOperation = document.paths["/api/v1/review/decks/{deck_id}/cards"].get;
+const reviewDueSessionParameter = reviewDueOperation.parameters?.find((parameter) => parameter.name === "session_id" && parameter.in === "query");
+if (reviewDueSessionParameter?.required !== true || reviewDueSessionParameter.schema?.format !== "uuid" ||
+    schemas.ReviewDueCardList.required?.join(",") !== "workspace_id,items" ||
+    reviewDueOperation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+    reviewCardListOperation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+  throw new Error("Review due must bind an active Session and private reads must remain no-store");
+}
+const reviewSession = schemas.ReviewSession;
+const reviewStartSession = schemas.ReviewStartSessionRequest;
+if (reviewSession.required?.join(",") !== "id,workspace_id,deck_id,session_type,status,config,started_at" ||
+    reviewSession.properties.session_type?.const !== "REVIEW" ||
+    reviewStartSession.required?.join(",") !== "workspace_id,deck_id,session_type" ||
+    reviewStartSession.properties.session_type?.const !== "REVIEW") {
+  throw new Error("Review session API must require a Deck-bound REVIEW session");
+}
+const reviewAnswerRequest = schemas.ReviewSubmitAnswerRequest;
+if (reviewAnswerRequest.properties.score || reviewAnswerRequest.properties.feedback ||
+    reviewAnswerRequest.required.includes("score") || reviewAnswerRequest.required.includes("feedback") ||
+    reviewAnswerRequest.required.join(",") !== "workspace_id,card_id,question_ref,user_answer,rating" ||
+    !schemas.ReviewCard.required.includes("claim_id")) {
+  throw new Error("Review answer ingress must not accept client score or feedback");
+}
+const reviewAnswerOperation = document.paths["/api/v1/review/sessions/{session_id}/answers"].post;
+if (reviewAnswerOperation.requestBody?.required !== true || reviewAnswerOperation.requestBody?.["x-max-body-bytes"] !== 131072 ||
+    reviewAnswerOperation.responses["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ReviewAnswerResult" ||
+    reviewAnswerOperation.responses["201"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ReviewAnswerResult" ||
+    reviewAnswerOperation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+    reviewAnswerOperation.responses["201"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+    schemas.ReviewAnswer.required?.includes("scorer_version") !== true ||
+    schemas.ReviewAnswer.properties.scorer_version?.["x-max-utf8-bytes"] !== 128) {
+  throw new Error("Review answer command must be bounded and declare durable scoring success");
+}
+const reviewScoringUnavailable = resolveRef(reviewAnswerOperation.responses["503"]);
+const reviewScoringExample = reviewScoringUnavailable?.content?.["application/json"]?.examples?.review_scoring_unavailable?.value;
+if (reviewScoringExample?.error_code !== "REVIEW_SCORING_UNAVAILABLE" || reviewScoringExample.retryable !== true) {
+  throw new Error("Review answer 503 must declare retryable REVIEW_SCORING_UNAVAILABLE semantics");
+}
+const reviewScore = schemas.ReviewScore;
+if (reviewScore.required?.join(",") !== "schema_version,correctness,coverage,boundaries,clarity,confidence,evidence" ||
+    ["correctness", "coverage", "boundaries", "clarity", "confidence"].some((field) => reviewScore.properties[field]?.$ref !== "#/components/schemas/ReviewScoreDimension") ||
+    reviewScore.properties.evidence?.minItems !== 1 || reviewScore.properties.evidence?.maxItems !== 128 ||
+    reviewScore.properties.evidence?.items?.$ref !== "#/components/schemas/ReviewScoreEvidence") {
+  throw new Error("Review answer success must declare the server-generated evidence-bound score");
+}
+const reviewInvalidation = schemas.ReviewInvalidationRequest;
+if (reviewInvalidation.required?.join(",") !== "workspace_id,reason" ||
+    reviewInvalidation.properties.reason?.["x-max-utf8-bytes"] !== 1024 ||
+    reviewInvalidation.anyOf?.map((item) => item.required?.join(",")).join(",") !== "claim_id,source_version_id,source_span_id" ||
+    schemas.ReviewInvalidationResult.required?.join(",") !== "workspace_id,invalidated_count,has_more,replayed" ||
+    schemas.ReviewInvalidationResult.properties.invalidated_count?.maximum !== 200 ||
+    schemas.ReviewInvalidationResult.properties.cards !== undefined) {
+  throw new Error("Review invalidation selector and replay result contract drifted");
+}
+
+const reviewLearningPathOperations = [
+  ["/api/v1/review/answers/{answer_id}/learning-path", "get", "200", "ReviewLearningPathResult", ["400", "401", "403", "404", "405", "500", "503"]],
+  ["/api/v1/review/answers/{answer_id}/learning-path", "post", "201", "ReviewLearningPathResult", ["200", "400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/review/answers/{answer_id}/learning-path/status", "put", "200", "ReviewLearningPathStatusResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+  ["/api/v1/review/answers/{answer_id}/learning-path/steps/{step_id}", "put", "200", "ReviewLearningPathStepResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
+];
+for (const [path, method, successStatus, successSchema, statuses] of reviewLearningPathOperations) {
+  const pathItem = document.paths[path];
+  const operation = pathItem?.[method];
+  if (!operation) throw new Error(`missing Review Learning Path operation ${method.toUpperCase()} ${path}`);
+  const expectedCapability = method === "get" ? "READ_LOCAL" : "WRITE_PROPOSAL";
+  if (operation.security !== undefined || operation["x-required-capability"] !== expectedCapability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${expectedCapability}`);
+  }
+  if (operation.responses?.[successStatus]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}` ||
+      operation.responses?.[successStatus]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+    throw new Error(`invalid Review Learning Path ${successStatus} success contract for ${method.toUpperCase()} ${path}`);
+  }
+  for (const status of statuses) {
+    const response = resolveRef(operation.responses?.[status]);
+    if (status === "200" && successStatus === "201") {
+      if (response?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}` ||
+          response?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+        throw new Error(`Review Learning Path replay must return ${successSchema}`);
+      }
+      continue;
+    }
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Review Learning Path ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+for (const [path, method, requestSchema] of [
+  ["/api/v1/review/answers/{answer_id}/learning-path", "post", "CreateReviewLearningPathRequest"],
+  ["/api/v1/review/answers/{answer_id}/learning-path/status", "put", "UpdateReviewLearningPathStatusRequest"],
+  ["/api/v1/review/answers/{answer_id}/learning-path/steps/{step_id}", "put", "UpdateReviewLearningPathStepRequest"],
+]) {
+  const operation = document.paths[path]?.[method];
+  if (!operation?.parameters?.some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey") ||
+      operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== 131072 ||
+      operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
+    throw new Error(`Review Learning Path mutation contract drifted for ${method.toUpperCase()} ${path}`);
+  }
+}
+const reviewLearningPathGet = document.paths["/api/v1/review/answers/{answer_id}/learning-path"]?.get;
+if (!reviewLearningPathGet?.parameters?.some((parameter) => parameter.$ref === "#/components/parameters/WorkspaceIDQuery")) {
+  throw new Error("Review Learning Path recovery must remain Workspace-scoped");
+}
+for (const [path, ids] of [
+  ["/api/v1/review/answers/{answer_id}/learning-path", ["answer_id"]],
+  ["/api/v1/review/answers/{answer_id}/learning-path/status", ["answer_id"]],
+  ["/api/v1/review/answers/{answer_id}/learning-path/steps/{step_id}", ["answer_id", "step_id"]],
+]) {
+  const pathItem = document.paths[path];
+  const parameters = [...(pathItem?.parameters ?? []), ...(pathItem?.get?.parameters ?? []), ...(pathItem?.post?.parameters ?? []), ...(pathItem?.put?.parameters ?? [])];
+  for (const id of ids) {
+    if (!parameters.some((parameter) => parameter.name === id && parameter.in === "path" && parameter.required === true && parameter.schema?.format === "uuid")) {
+      throw new Error(`Review Learning Path ${id} path contract drifted for ${path}`);
+    }
+  }
+}
+for (const schemaName of [
+  "CreateReviewLearningPathRequest", "UpdateReviewLearningPathStatusRequest", "UpdateReviewLearningPathStepRequest",
+  "ReviewLearningPath", "ReviewLearningPathStep", "ReviewLearningPathResult", "ReviewLearningPathStatusResult", "ReviewLearningPathStepResult",
+]) {
+  if (!schemas[schemaName] || schemas[schemaName].additionalProperties !== false) {
+    throw new Error(`${schemaName} must remain a strict Review Learning Path schema`);
+  }
+}
+const reviewLearningPath = schemas.ReviewLearningPath;
+const reviewLearningPathStep = schemas.ReviewLearningPathStep;
+if (reviewLearningPath.required?.join(",") !== "id,workspace_id,origin_type,review_answer_id,artifact,source_policy_version,status,version,created_at,updated_at" ||
+    Object.keys(reviewLearningPath.properties ?? {}).join(",") !== "id,workspace_id,origin_type,review_answer_id,artifact,source_policy_version,status,version,created_at,updated_at" ||
+    reviewLearningPath.properties.origin_type?.const !== "REVIEW" ||
+    reviewLearningPath.properties.artifact?.$ref !== "#/components/schemas/LearningPathArtifactBinding" ||
+    reviewLearningPath.properties.source_policy_version?.["x-max-utf8-bytes"] !== 128 ||
+    reviewLearningPath.properties.status?.enum?.join(",") !== "ACTIVE,PAUSED,COMPLETED" ||
+    reviewLearningPath.properties.version?.minimum !== 1 ||
+    reviewLearningPathStep.required?.join(",") !== "id,workspace_id,path_id,step_no,claim_id,source_version_id,source_span_id,evidence_hash,title,rationale,status,version,created_at,updated_at" ||
+    Object.keys(reviewLearningPathStep.properties ?? {}).join(",") !== "id,workspace_id,path_id,step_no,claim_id,topic_id,source_version_id,source_span_id,evidence_hash,title,rationale,status,version,created_at,updated_at" ||
+    reviewLearningPathStep.properties.step_no?.minimum !== 1 ||
+    reviewLearningPathStep.properties.evidence_hash?.pattern !== "^[0-9a-f]{64}$" ||
+    reviewLearningPathStep.properties.title?.["x-max-utf8-bytes"] !== 512 ||
+    reviewLearningPathStep.properties.rationale?.["x-max-utf8-bytes"] !== 4096 ||
+    reviewLearningPathStep.properties.status?.enum?.join(",") !== "PENDING,IN_PROGRESS,COMPLETED,SKIPPED" ||
+    reviewLearningPathStep.properties.version?.minimum !== 1) {
+  throw new Error("Review Learning Path public DTO drifted from the strict frontend contract");
+}
+if (schemas.CreateReviewLearningPathRequest.required?.join(",") !== "workspace_id" ||
+    Object.keys(schemas.CreateReviewLearningPathRequest.properties ?? {}).join(",") !== "workspace_id" ||
+    schemas.UpdateReviewLearningPathStatusRequest.required?.join(",") !== "workspace_id,expected_version,status" ||
+    schemas.UpdateReviewLearningPathStepRequest.required?.join(",") !== "workspace_id,expected_version,status" ||
+    schemas.UpdateReviewLearningPathStatusRequest.properties.status?.enum?.join(",") !== "ACTIVE,PAUSED,COMPLETED" ||
+    schemas.UpdateReviewLearningPathStepRequest.properties.status?.enum?.join(",") !== "IN_PROGRESS,COMPLETED,SKIPPED" ||
+    schemas.UpdateReviewLearningPathStatusRequest.properties.expected_version?.minimum !== 1 ||
+    schemas.UpdateReviewLearningPathStepRequest.properties.expected_version?.minimum !== 1 ||
+    schemas.ReviewLearningPathResult.required?.join(",") !== "path,steps,replayed" ||
+    schemas.ReviewLearningPathResult.properties.path?.$ref !== "#/components/schemas/ReviewLearningPath" ||
+    schemas.ReviewLearningPathResult.properties.steps?.items?.$ref !== "#/components/schemas/ReviewLearningPathStep" ||
+    schemas.ReviewLearningPathResult.properties.steps?.maxItems !== 40 ||
+    schemas.ReviewLearningPathStatusResult.required?.join(",") !== "path,replayed" ||
+    schemas.ReviewLearningPathStepResult.required?.join(",") !== "path,step,replayed") {
+  throw new Error("Review Learning Path command, replay, or result shape drifted");
+}
+
 const artifactOperations = [
   ["/api/v1/artifacts", "get", "ArtifactPage", undefined, ["400", "405", "500", "503"], false],
   ["/api/v1/artifacts", "post", "ArtifactCommandResult", "ArtifactPlanRequest", ["200", "201", "400", "405", "409", "415", "500", "503"], true],
@@ -1632,7 +1883,6 @@ if (artifactGenerationAcceptance.required.join(",") !== "generation_id,workspace
 if (Object.keys(artifactGenerationOperation.responses).filter((status) => status.startsWith("2")).join(",") !== "202") {
   throw new Error("Artifact section generation first acceptance and exact replay must both use only 202");
 }
-
 const artifactGenerationReadPath = document.paths["/api/v1/artifacts/{artifact_id}/section-generations"];
 const artifactGenerationReadOperation = artifactGenerationReadPath.get;
 const artifactGenerationReadItem = schemas.ArtifactSectionGenerationReadItem;
@@ -1727,7 +1977,12 @@ if (artifactPublication.required.join(",") !== "workspace_id,artifact_id,revisio
     !document.paths["/api/v1/artifacts/{artifact_id}/publish-proposals"].post.description.includes("never creates a Document")) {
   throw new Error("Artifact publication must remain a frozen PUBLISH_ARTIFACT Proposal binding");
 }
-
+if (schemas.SemanticLinkCandidate.properties.discovery_methods.maxItems !== 6 ||
+    schemas.SemanticLinkCandidate.properties.evidence.maxItems !== 100 ||
+    schemas.SemanticLinkCandidatePage.properties.items.maxItems !== 100 ||
+    schemas.SemanticLinkGeneration.required.join(",") !== "index_version_id,embedding_version_id,rerank_version_id") {
+  throw new Error("Semantic Link Candidate bounds or generation contract drifted");
+}
 if (schemas.ImpactAnalysisRequest.maxProperties !== 0 || schemas.ImpactAnalysisRequest.additionalProperties !== false ||
     schemas.KnowledgeTimelinePage.properties.items.maxItems !== 100 ||
     schemas.KnowledgeTimelinePage.properties.items.items.$ref !== "#/components/schemas/KnowledgeEvent" ||
@@ -1850,13 +2105,6 @@ if (schemas.ImpactProposalDraft.properties.target_type?.enum?.join(",") !== impa
     schemas.ImpactProposalDraft.properties.requires_write_authorization.const !== true ||
     schemas.ImpactProposalDraft.properties.operation.enum.includes("NO_ACTION")) {
   throw new Error("Impact Proposal draft authorization boundary drifted");
-}
-
-if (schemas.SemanticLinkCandidate.properties.discovery_methods.maxItems !== 6 ||
-    schemas.SemanticLinkCandidate.properties.evidence.maxItems !== 100 ||
-    schemas.SemanticLinkCandidatePage.properties.items.maxItems !== 100 ||
-    schemas.SemanticLinkGeneration.required.join(",") !== "index_version_id,embedding_version_id,rerank_version_id") {
-  throw new Error("Semantic Link Candidate bounds or generation contract drifted");
 }
 if (schemas.Proposal.oneOf?.map((item) => item.$ref).join(",") !==
       "#/components/schemas/FilePatchProposal,#/components/schemas/KnowledgeChangeProposal,#/components/schemas/PublishArtifactProposal,#/components/schemas/DownstreamUpdateProposal" ||
@@ -2143,259 +2391,6 @@ if (!schemas.VectorDistance.required?.includes("distance") || "score" in (schema
 if (schemas.Problem.additionalProperties !== false || schemas.Problem.properties?.workflow_run_id?.format !== "uuid") {
   throw new Error("Problem strict schema or workflow_run_id format drifted");
 }
-for (const capabilityName of ["review", "memory", "interview"]) {
-  if (!schemas.SystemStatus.required.includes(capabilityName) ||
-      schemas.SystemStatus.properties[capabilityName]?.$ref !== "#/components/schemas/OptionalCapabilityStatus") {
-    throw new Error(`SystemStatus must expose the strict ${capabilityName} capability state`);
-  }
-}
-
-const reviewOperations = [
-  ["/api/v1/review/decks", "get", "ReviewDeckList", undefined, ["200", "400", "405", "500", "503"], false],
-  ["/api/v1/review/decks", "post", "ReviewDeck", "ReviewCreateDeckRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/decks/{deck_id}", "get", "ReviewDeck", undefined, ["200", "400", "404", "405", "500", "503"], false],
-  ["/api/v1/review/decks/{deck_id}/cards", "get", "ReviewCardList", undefined, ["200", "400", "404", "405", "500", "503"], false],
-  ["/api/v1/review/decks/{deck_id}/cards", "post", "ReviewCard", "ReviewCreateCardRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/cards/{card_id}", "put", "ReviewCard", "ReviewEditCardRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/decks/{deck_id}/schedule/pause", "post", "ReviewDeck", "ReviewDeckScheduleRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/decks/{deck_id}/schedule/resume", "post", "ReviewDeck", "ReviewDeckScheduleRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/decks/{deck_id}/schedule/reset", "post", "ReviewDeck", "ReviewDeckScheduleRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/due", "get", "ReviewDueCardList", undefined, ["200", "400", "404", "405", "409", "500", "503"], false],
-  ["/api/v1/review/cards/{card_id}/approve", "post", "ReviewCard", "ReviewCardDecisionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/cards/{card_id}/reject", "post", "ReviewCard", "ReviewCardDecisionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/cards/{card_id}/invalidate", "post", "ReviewCard", "ReviewCardDecisionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/invalidation", "post", "ReviewInvalidationResult", "ReviewInvalidationRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/sessions", "post", "ReviewSession", "ReviewStartSessionRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/sessions/{session_id}/complete", "post", "ReviewSession", "ReviewCompleteSessionRequest", ["200", "400", "404", "405", "409", "415", "500", "503"], true],
-  ["/api/v1/review/sessions/{session_id}/answers", "post", "ReviewAnswerResult", "ReviewSubmitAnswerRequest", ["200", "201", "400", "404", "405", "409", "415", "500", "503"], true],
-];
-for (const [path, method, successSchema, requestSchema, statuses, requiresIdempotencyKey] of reviewOperations) {
-  const pathItem = document.paths[path];
-  const operation = pathItem?.[method];
-  if (!operation) throw new Error(`missing Review operation ${method.toUpperCase()} ${path}`);
-  const expectedCapability = method === "get" ? "READ_LOCAL" : "WRITE_PROPOSAL";
-  if (operation.security !== undefined || operation["x-required-capability"] !== expectedCapability) {
-    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${expectedCapability}`);
-  }
-  for (const status of ["401", "403", ...statuses]) {
-    if (!operation.responses?.[status]) throw new Error(`missing Review ${status} response for ${method.toUpperCase()} ${path}`);
-    if (Number(status) >= 400 && resolveRef(operation.responses[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
-      throw new Error(`invalid Review ${status} Problem schema for ${method.toUpperCase()} ${path}`);
-    }
-  }
-  if (successSchema) {
-    for (const status of statuses.filter((status) => Number(status) < 300)) {
-      if (operation.responses[status]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}`) {
-        throw new Error(`invalid Review ${status} success schema for ${method.toUpperCase()} ${path}`);
-      }
-    }
-  }
-  if (requestSchema && operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
-    throw new Error(`invalid Review request schema for ${method.toUpperCase()} ${path}`);
-  }
-  if (requiresIdempotencyKey && ![...(pathItem.parameters ?? []), ...(operation.parameters ?? [])].some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey")) {
-    throw new Error(`${method.toUpperCase()} ${path} must require Idempotency-Key`);
-  }
-}
-for (const schemaName of [
-  "ReviewEvidenceBinding", "ReviewDeck", "ReviewDeckList", "ReviewCard", "ReviewCardList", "ReviewSchedule", "ReviewDueCardSummary", "ReviewDueCard", "ReviewDueCardList", "ReviewSession",
-  "ReviewCreateDeckRequest", "ReviewCreateCardRequest", "ReviewEditCardRequest", "ReviewCardDecisionRequest", "ReviewInvalidationRequest", "ReviewInvalidationResult", "ReviewStartSessionRequest", "ReviewCompleteSessionRequest", "ReviewDeckScheduleRequest", "ReviewSubmitAnswerRequest",
-  "ReviewScoreDimension", "ReviewScoreEvidence", "ReviewScore", "ReviewAnswer", "ReviewAnswerResult",
-]) {
-  if (!schemas[schemaName] || schemas[schemaName].additionalProperties !== false) throw new Error(`${schemaName} must remain a strict Review schema`);
-}
-for (const schemaName of ["ReviewDeck", "ReviewCreateDeckRequest"]) {
-  const dailyLimit = schemas[schemaName].properties.daily_limit;
-  if (dailyLimit?.type !== "integer" || dailyLimit.minimum !== 1 || dailyLimit.maximum !== 1000) {
-    throw new Error(`${schemaName}.daily_limit must match the 1..1000 domain bound`);
-  }
-}
-for (const schemaName of ["ReviewCard", "ReviewCreateCardRequest", "ReviewEditCardRequest"]) {
-  const properties = schemas[schemaName].properties;
-  if (properties.question?.["x-max-utf8-bytes"] !== 8192 || properties.answer_points?.maxItems !== 128 || properties.answer_points?.items?.["x-max-utf8-bytes"] !== 4096 || properties.evidence?.maxItems !== 128) {
-    throw new Error(`${schemaName} card bounds drifted from the Review domain`);
-  }
-}
-if (schemas.ReviewEvidenceBinding.properties.quote !== undefined || schemas.ReviewScoreEvidence.properties.quote !== undefined) {
-  throw new Error("Review evidence bindings must not expose a client-authored quote field");
-}
-const reviewDecisionReason = schemas.ReviewCardDecisionRequest.properties.reason;
-if (reviewDecisionReason?.maxLength !== 1024 || reviewDecisionReason?.["x-max-utf8-bytes"] !== 1024) {
-  throw new Error("Review card invalidation reason must match the 1024-byte domain bound");
-}
-const reviewDueCardSummary = schemas.ReviewDueCardSummary;
-const reviewDueCardFields = ["id", "workspace_id", "deck_id", "question", "card_type", "difficulty", "status", "version"];
-const reviewDueForbiddenFields = ["claim_id", "answer_points", "evidence", "fingerprint", "model_version", "invalidation_reason", "invalidated_at", "created_at", "updated_at"];
-if (reviewDueCardSummary.required?.join(",") !== reviewDueCardFields.join(",") ||
-    Object.keys(reviewDueCardSummary.properties ?? {}).join(",") !== reviewDueCardFields.join(",") ||
-    reviewDueForbiddenFields.some((field) => field in reviewDueCardSummary.properties) ||
-    reviewDueCardSummary.properties.status?.const !== "APPROVED" ||
-    schemas.ReviewDueCard.properties.card?.$ref !== "#/components/schemas/ReviewDueCardSummary" ||
-    schemas.ReviewDueCard.required?.join(",") !== "card,schedule,question_ref" ||
-    schemas.ReviewDueCard.properties.question_ref?.["x-max-utf8-bytes"] !== 512) {
-  throw new Error("Review due cards must use the redacted pre-answer summary wire shape");
-}
-const reviewDueOperation = document.paths["/api/v1/review/due"].get;
-const reviewCardListOperation = document.paths["/api/v1/review/decks/{deck_id}/cards"].get;
-const reviewDueSessionParameter = reviewDueOperation.parameters?.find((parameter) => parameter.name === "session_id" && parameter.in === "query");
-if (reviewDueSessionParameter?.required !== true || reviewDueSessionParameter.schema?.format !== "uuid" ||
-    schemas.ReviewDueCardList.required?.join(",") !== "workspace_id,items" ||
-    reviewDueOperation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
-    reviewCardListOperation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
-  throw new Error("Review due must bind an active Session and private reads must remain no-store");
-}
-const reviewSession = schemas.ReviewSession;
-const reviewStartSession = schemas.ReviewStartSessionRequest;
-if (reviewSession.required?.join(",") !== "id,workspace_id,deck_id,session_type,status,config,started_at" ||
-    reviewSession.properties.session_type?.const !== "REVIEW" ||
-    reviewStartSession.required?.join(",") !== "workspace_id,deck_id,session_type" ||
-    reviewStartSession.properties.session_type?.const !== "REVIEW") {
-  throw new Error("Review session API must require a Deck-bound REVIEW session");
-}
-const reviewAnswerRequest = schemas.ReviewSubmitAnswerRequest;
-if (reviewAnswerRequest.properties.score || reviewAnswerRequest.properties.feedback ||
-    reviewAnswerRequest.required.includes("score") || reviewAnswerRequest.required.includes("feedback") ||
-    reviewAnswerRequest.required.join(",") !== "workspace_id,card_id,question_ref,user_answer,rating" ||
-    !schemas.ReviewCard.required.includes("claim_id")) {
-  throw new Error("Review answer ingress must not accept client score or feedback");
-}
-const reviewAnswerOperation = document.paths["/api/v1/review/sessions/{session_id}/answers"].post;
-if (reviewAnswerOperation.requestBody?.required !== true || reviewAnswerOperation.requestBody?.["x-max-body-bytes"] !== 131072 ||
-    reviewAnswerOperation.responses["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ReviewAnswerResult" ||
-    reviewAnswerOperation.responses["201"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ReviewAnswerResult" ||
-    reviewAnswerOperation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
-    reviewAnswerOperation.responses["201"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
-    schemas.ReviewAnswer.required?.includes("scorer_version") !== true ||
-    schemas.ReviewAnswer.properties.scorer_version?.["x-max-utf8-bytes"] !== 128) {
-  throw new Error("Review answer command must be bounded and declare durable scoring success");
-}
-const reviewScoringUnavailable = resolveRef(reviewAnswerOperation.responses["503"]);
-const reviewScoringExample = reviewScoringUnavailable?.content?.["application/json"]?.examples?.review_scoring_unavailable?.value;
-if (reviewScoringExample?.error_code !== "REVIEW_SCORING_UNAVAILABLE" || reviewScoringExample.retryable !== true) {
-  throw new Error("Review answer 503 must declare retryable REVIEW_SCORING_UNAVAILABLE semantics");
-}
-const reviewScore = schemas.ReviewScore;
-if (reviewScore.required?.join(",") !== "schema_version,correctness,coverage,boundaries,clarity,confidence,evidence" ||
-    ["correctness", "coverage", "boundaries", "clarity", "confidence"].some((field) => reviewScore.properties[field]?.$ref !== "#/components/schemas/ReviewScoreDimension") ||
-    reviewScore.properties.evidence?.minItems !== 1 || reviewScore.properties.evidence?.maxItems !== 128 ||
-    reviewScore.properties.evidence?.items?.$ref !== "#/components/schemas/ReviewScoreEvidence") {
-  throw new Error("Review answer success must declare the server-generated evidence-bound score");
-}
-const reviewInvalidation = schemas.ReviewInvalidationRequest;
-if (reviewInvalidation.required?.join(",") !== "workspace_id,reason" ||
-    reviewInvalidation.properties.reason?.["x-max-utf8-bytes"] !== 1024 ||
-    reviewInvalidation.anyOf?.map((item) => item.required?.join(",")).join(",") !== "claim_id,source_version_id,source_span_id" ||
-    schemas.ReviewInvalidationResult.required?.join(",") !== "workspace_id,invalidated_count,has_more,replayed" ||
-    schemas.ReviewInvalidationResult.properties.invalidated_count?.maximum !== 200 ||
-    schemas.ReviewInvalidationResult.properties.cards !== undefined) {
-  throw new Error("Review invalidation selector and replay result contract drifted");
-}
-
-const reviewLearningPathOperations = [
-  ["/api/v1/review/answers/{answer_id}/learning-path", "get", "200", "ReviewLearningPathResult", ["400", "401", "403", "404", "405", "500", "503"]],
-  ["/api/v1/review/answers/{answer_id}/learning-path", "post", "201", "ReviewLearningPathResult", ["200", "400", "401", "403", "404", "405", "409", "415", "500", "503"]],
-  ["/api/v1/review/answers/{answer_id}/learning-path/status", "put", "200", "ReviewLearningPathStatusResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
-  ["/api/v1/review/answers/{answer_id}/learning-path/steps/{step_id}", "put", "200", "ReviewLearningPathStepResult", ["400", "401", "403", "404", "405", "409", "415", "500", "503"]],
-];
-for (const [path, method, successStatus, successSchema, statuses] of reviewLearningPathOperations) {
-  const pathItem = document.paths[path];
-  const operation = pathItem?.[method];
-  if (!operation) throw new Error(`missing Review Learning Path operation ${method.toUpperCase()} ${path}`);
-  const expectedCapability = method === "get" ? "READ_LOCAL" : "WRITE_PROPOSAL";
-  if (operation.security !== undefined || operation["x-required-capability"] !== expectedCapability) {
-    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${expectedCapability}`);
-  }
-  if (operation.responses?.[successStatus]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}` ||
-      operation.responses?.[successStatus]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
-    throw new Error(`invalid Review Learning Path ${successStatus} success contract for ${method.toUpperCase()} ${path}`);
-  }
-  for (const status of statuses) {
-    const response = resolveRef(operation.responses?.[status]);
-    if (status === "200" && successStatus === "201") {
-      if (response?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}` ||
-          response?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
-        throw new Error(`Review Learning Path replay must return ${successSchema}`);
-      }
-      continue;
-    }
-    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
-      throw new Error(`invalid Review Learning Path ${status} Problem schema for ${method.toUpperCase()} ${path}`);
-    }
-  }
-}
-for (const [path, method, requestSchema] of [
-  ["/api/v1/review/answers/{answer_id}/learning-path", "post", "CreateReviewLearningPathRequest"],
-  ["/api/v1/review/answers/{answer_id}/learning-path/status", "put", "UpdateReviewLearningPathStatusRequest"],
-  ["/api/v1/review/answers/{answer_id}/learning-path/steps/{step_id}", "put", "UpdateReviewLearningPathStepRequest"],
-]) {
-  const operation = document.paths[path]?.[method];
-  if (!operation?.parameters?.some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey") ||
-      operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== 131072 ||
-      operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
-    throw new Error(`Review Learning Path mutation contract drifted for ${method.toUpperCase()} ${path}`);
-  }
-}
-const reviewLearningPathGet = document.paths["/api/v1/review/answers/{answer_id}/learning-path"]?.get;
-if (!reviewLearningPathGet?.parameters?.some((parameter) => parameter.$ref === "#/components/parameters/WorkspaceIDQuery")) {
-  throw new Error("Review Learning Path recovery must remain Workspace-scoped");
-}
-for (const [path, ids] of [
-  ["/api/v1/review/answers/{answer_id}/learning-path", ["answer_id"]],
-  ["/api/v1/review/answers/{answer_id}/learning-path/status", ["answer_id"]],
-  ["/api/v1/review/answers/{answer_id}/learning-path/steps/{step_id}", ["answer_id", "step_id"]],
-]) {
-  const pathItem = document.paths[path];
-  const parameters = [...(pathItem?.parameters ?? []), ...(pathItem?.get?.parameters ?? []), ...(pathItem?.post?.parameters ?? []), ...(pathItem?.put?.parameters ?? [])];
-  for (const id of ids) {
-    if (!parameters.some((parameter) => parameter.name === id && parameter.in === "path" && parameter.required === true && parameter.schema?.format === "uuid")) {
-      throw new Error(`Review Learning Path ${id} path contract drifted for ${path}`);
-    }
-  }
-}
-for (const schemaName of [
-  "CreateReviewLearningPathRequest", "UpdateReviewLearningPathStatusRequest", "UpdateReviewLearningPathStepRequest",
-  "ReviewLearningPath", "ReviewLearningPathStep", "ReviewLearningPathResult", "ReviewLearningPathStatusResult", "ReviewLearningPathStepResult",
-]) {
-  if (!schemas[schemaName] || schemas[schemaName].additionalProperties !== false) {
-    throw new Error(`${schemaName} must remain a strict Review Learning Path schema`);
-  }
-}
-const reviewLearningPath = schemas.ReviewLearningPath;
-const reviewLearningPathStep = schemas.ReviewLearningPathStep;
-if (reviewLearningPath.required?.join(",") !== "id,workspace_id,origin_type,review_answer_id,artifact,source_policy_version,status,version,created_at,updated_at" ||
-    Object.keys(reviewLearningPath.properties ?? {}).join(",") !== "id,workspace_id,origin_type,review_answer_id,artifact,source_policy_version,status,version,created_at,updated_at" ||
-    reviewLearningPath.properties.origin_type?.const !== "REVIEW" ||
-    reviewLearningPath.properties.artifact?.$ref !== "#/components/schemas/LearningPathArtifactBinding" ||
-    reviewLearningPath.properties.source_policy_version?.["x-max-utf8-bytes"] !== 128 ||
-    reviewLearningPath.properties.status?.enum?.join(",") !== "ACTIVE,PAUSED,COMPLETED" ||
-    reviewLearningPath.properties.version?.minimum !== 1 ||
-    reviewLearningPathStep.required?.join(",") !== "id,workspace_id,path_id,step_no,claim_id,source_version_id,source_span_id,evidence_hash,title,rationale,status,version,created_at,updated_at" ||
-    Object.keys(reviewLearningPathStep.properties ?? {}).join(",") !== "id,workspace_id,path_id,step_no,claim_id,topic_id,source_version_id,source_span_id,evidence_hash,title,rationale,status,version,created_at,updated_at" ||
-    reviewLearningPathStep.properties.step_no?.minimum !== 1 ||
-    reviewLearningPathStep.properties.evidence_hash?.pattern !== "^[0-9a-f]{64}$" ||
-    reviewLearningPathStep.properties.title?.["x-max-utf8-bytes"] !== 512 ||
-    reviewLearningPathStep.properties.rationale?.["x-max-utf8-bytes"] !== 4096 ||
-    reviewLearningPathStep.properties.status?.enum?.join(",") !== "PENDING,IN_PROGRESS,COMPLETED,SKIPPED" ||
-    reviewLearningPathStep.properties.version?.minimum !== 1) {
-  throw new Error("Review Learning Path public DTO drifted from the strict frontend contract");
-}
-if (schemas.CreateReviewLearningPathRequest.required?.join(",") !== "workspace_id" ||
-    Object.keys(schemas.CreateReviewLearningPathRequest.properties ?? {}).join(",") !== "workspace_id" ||
-    schemas.UpdateReviewLearningPathStatusRequest.required?.join(",") !== "workspace_id,expected_version,status" ||
-    schemas.UpdateReviewLearningPathStepRequest.required?.join(",") !== "workspace_id,expected_version,status" ||
-    schemas.UpdateReviewLearningPathStatusRequest.properties.status?.enum?.join(",") !== "ACTIVE,PAUSED,COMPLETED" ||
-    schemas.UpdateReviewLearningPathStepRequest.properties.status?.enum?.join(",") !== "IN_PROGRESS,COMPLETED,SKIPPED" ||
-    schemas.UpdateReviewLearningPathStatusRequest.properties.expected_version?.minimum !== 1 ||
-    schemas.UpdateReviewLearningPathStepRequest.properties.expected_version?.minimum !== 1 ||
-    schemas.ReviewLearningPathResult.required?.join(",") !== "path,steps,replayed" ||
-    schemas.ReviewLearningPathResult.properties.path?.$ref !== "#/components/schemas/ReviewLearningPath" ||
-    schemas.ReviewLearningPathResult.properties.steps?.items?.$ref !== "#/components/schemas/ReviewLearningPathStep" ||
-    schemas.ReviewLearningPathResult.properties.steps?.maxItems !== 40 ||
-    schemas.ReviewLearningPathStatusResult.required?.join(",") !== "path,replayed" ||
-    schemas.ReviewLearningPathStepResult.required?.join(",") !== "path,step,replayed") {
-  throw new Error("Review Learning Path command, replay, or result shape drifted");
-}
-
 const memoryOperations = [
   ["/api/v1/memories", "get", "200", "MemoryPage", ["400", "401", "403", "405", "500", "503"]],
   ["/api/v1/memories", "post", "201", "MemoryCommandResult", ["200", "400", "401", "403", "405", "409", "415", "500", "503"]],

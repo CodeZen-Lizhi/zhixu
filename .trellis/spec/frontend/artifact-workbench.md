@@ -40,6 +40,7 @@ createArtifactPublishProposal(input)
 - generation acceptance 可以是 `PENDING|COMPLETED|FAILED|CANCELLED|RECOVERY_REQUIRED`；持久 generation 列表不得包含
   `COMPLETED`，因为完成结果已由 Artifact Revision/receipt 拥有。Workflow 终态后仍轮询 receipt，缺失时显示恢复状态。
 - GAP 章节显示显式 gap，正文和 Citation 必须为空；COVERED/PARTIAL Citation 只展示服务器返回的 version/span/excerpt。
+- DRAFT/APPROVED/EXPORTED 可启动修订；进入 GENERATING 后，已有章节和未完成章节都可重新生成或由人工 GAP 替换，成功后只展示服务端返回的新 Revision。
 - 浏览器不显示 managed export 文件路径，只展示可公开的 revision/hash/size 和可回读记录；Publish 成功只展示
   `publish_artifact` Proposal，不宣称正式知识已经写入。
 - Idempotency key 在一次用户动作及 response-loss retry 中保持稳定；Workspace、Artifact、expected version 或 payload

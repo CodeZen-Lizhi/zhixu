@@ -111,6 +111,19 @@ func TestSuccessfulModelRunAcceptsIndependentToolRequestResultType(t *testing.T)
 	}
 }
 
+func TestSuccessfulModelRunAcceptsArtifactSectionResultType(t *testing.T) {
+	run := validModelRun()
+	now := run.UpdatedAt.Add(time.Second)
+	run.Status = ModelRunSucceeded
+	run.FinalResultType = ResultTypeArtifactSection
+	run.Version++
+	run.UpdatedAt = now
+	run.CompletedAt = &now
+	if err := ValidateModelRun(run); err != nil {
+		t.Fatalf("ValidateModelRun(artifact section) error = %v", err)
+	}
+}
+
 func TestPlanCallAndClarificationResultRemainAdditive(t *testing.T) {
 	call := validStartedCall()
 	call.Phase = ModelCallPlan

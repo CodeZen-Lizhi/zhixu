@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -267,10 +269,12 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 		writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "IDEMPOTENCY_KEY_REQUIRED", false, errors.New("workflow start requires an Idempotency-Key header")))
 		return
 	}
-	run, err := h.service.Start(r.Context(), application.StartCommand{
+	startCommand := application.StartCommand{
 		WorkspaceID: workspaceID, DefinitionKey: request.DefinitionKey, DefinitionVersion: request.DefinitionVersion,
 		Graph: request.Graph, Input: request.Input, FirstNodeKey: request.FirstNodeKey, FirstNodeType: request.FirstNodeType, IdempotencyKey: idempotencyKey,
-	})
+	}
+	startCommand.CallerCapabilities = callerCapabilities(r.Context())
+	run, err := h.service.Start(r.Context(), startCommand)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -316,7 +320,10 @@ func (h *Handler) submitHumanDecision(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusServiceUnavailable, "WORKFLOW_SERVICE_UNAVAILABLE", "Workflow 服务暂不可用", true, nil)
 		return
 	}
-	result, err := h.service.SubmitRuntimeHumanDecision(r.Context(), application.HumanDecisionCommand{RunID: runID, TaskID: taskID, TargetVersion: request.TargetVersion, Decision: request.Decision})
+	result, err := h.service.SubmitRuntimeHumanDecision(r.Context(), application.HumanDecisionCommand{
+		RunID: runID, TaskID: taskID, TargetVersion: request.TargetVersion, Decision: request.Decision,
+		CallerCapabilities: callerCapabilities(r.Context()),
+	})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -357,12 +364,23 @@ func (h *Handler) control(w http.ResponseWriter, r *http.Request, execute func(c
 		writeError(w, err)
 		return
 	}
-	result, err := execute(r.Context(), application.RunControlCommand{WorkflowRunID: runID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key"))})
+	result, err := execute(r.Context(), application.RunControlCommand{
+		WorkflowRunID: runID, ExpectedVersion: request.ExpectedVersion,
+		IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")), CallerCapabilities: callerCapabilities(r.Context()),
+	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, controlResponse{WorkflowRunID: string(result.WorkflowRunID), Status: string(result.Status), Version: result.Version, StatusURL: result.StatusURL, PauseRequested: result.PauseRequested, CancelRequested: result.CancelRequested})
+}
+
+func callerCapabilities(ctx context.Context) []capability.Capability {
+	principal, authenticated := authhttp.PrincipalFromContext(ctx)
+	if !authenticated {
+		return nil
+	}
+	return append([]capability.Capability{}, principal.Scopes...)
 }
 
 func decodeJSON(r *http.Request, target any) error {

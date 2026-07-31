@@ -21,6 +21,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
@@ -44,6 +45,42 @@ func TestNewAPIServerBoundsRequestReads(t *testing.T) {
 	}
 	if server.ReadHeaderTimeout != apiReadHeaderTimeout || server.IdleTimeout != apiIdleTimeout {
 		t.Fatalf("server timeouts header=%s idle=%s", server.ReadHeaderTimeout, server.IdleTimeout)
+	}
+}
+
+func TestInitializeAPITelemetryHonorsConfiguredMode(t *testing.T) {
+	tests := []struct {
+		name         string
+		mode         config.TelemetryMode
+		endpoint     string
+		wantErr      error
+		wantDegraded bool
+	}{
+		{name: "disabled", mode: config.TelemetryModeDisabled},
+		{name: "optional exporter unavailable", mode: config.TelemetryModeOptional, endpoint: "https://collector.example.test:4318", wantDegraded: true},
+		{name: "required exporter unavailable", mode: config.TelemetryModeRequired, endpoint: "https://collector.example.test:4318", wantErr: observability.ErrTelemetryExporterRequired},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.TelemetryMode = test.mode
+			cfg.TelemetryEndpoint = test.endpoint
+			telemetry, err := initializeAPITelemetry(context.Background(), cfg)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("initializeAPITelemetry error=%v, want %v", err, test.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			defer func() {
+				if shutdownErr := telemetry.Shutdown(context.Background()); shutdownErr != nil {
+					t.Fatalf("telemetry shutdown: %v", shutdownErr)
+				}
+			}()
+			if telemetry.Tracer() == nil || telemetry.Status().Degraded != test.wantDegraded {
+				t.Fatalf("telemetry=%#v tracer=%#v", telemetry.Status(), telemetry.Tracer())
+			}
+		})
 	}
 }
 

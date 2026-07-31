@@ -69,9 +69,18 @@ Session 要求：
 
 完整决策见 [ADR-0014](adr/0014-single-user-authentication.md)。
 
-M6-D 的现实边界是：Search/Evidence 只实现持久数据的 Workspace 隔离，部署继续绑定 loopback；正式
-Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 实现。回环来源、请求中的
-`workspace_id` 和 HMAC Search Cursor 均不能证明身份，也不能作为授权通过依据。
+M6-D 的现实边界是：Search/Evidence 只实现持久数据的 Workspace 隔离，部署继续绑定 loopback。M10-02
+已经接入 Auth、Session、API Token、CSRF/Origin 和 Capability Middleware：业务 API 默认要求有效
+Session 或限 Scope API Token；回环来源、请求中的 `workspace_id` 和 HMAC Search Cursor 仍不能证明身份，
+也不能作为授权通过依据。`ZHIXU_AUTH_MODE=disabled` 只允许 development 的 loopback HTTP；官方 Compose 让 API
+进程监听 loopback，并使用受限 proxy 只接受 Docker bridge gateway 转发、拒绝其他 bridge peer。该部署边界不能用于
+production、LAN 或公网暴露，其他环境必须使用 `required` 与 HTTPS Secure Cookie。
+Compose 只把 Bootstrap Token 与可选 `ZHIXU_REVIEW_QUESTION_REF_KEY` 注入 API；Worker/Migrate 使用不消费
+这些 Secret 的配置入口。Review `question_ref` 由 API 使用 HMAC 绑定 Review Session 与题目快照，不是身份或授权凭据；显式 key
+必须至少 32 UTF-8 bytes、无首尾空白且不得为空。缺失时 `required` 从 Bootstrap Token 做域隔离派生，local
+`disabled` 生成进程随机 key。多 API 实例必须共享显式 key；轮换只会使在途 `question_ref` fail closed，不能
+重写已经持久化的 Answer/Schedule。官方 Compose 示例提供 development-only 显式 key，启动预检要求最终模型
+中的 key 非空且满足上述边界；非开发部署必须替换。预检同时拒绝非法 Auth/Review Secret，避免静默忽略错误配置。
 
 ## 6. 授权
 
@@ -101,6 +110,8 @@ Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 �
 ## 7. Secret
 
 - 环境变量或 Secret File。
+- Bootstrap Token 只进入 API 进程，不进入 Worker、Migrate 或 Compose 共享环境块。
+- Review question-reference key 只进入 API 进程；不进入响应、日志、配置摘要、Worker 或 Migrate。
 - managed 模型主密钥只存在 Compose named volume；Key init 只创建缺失文件，不覆盖既有 Key。API、Worker、
   modelctl 只读挂载，Migrate、Proxy、前端和应用 Workspace 均不可访问。
 - 模型 API Key 只允许请求瞬时明文、短生命周期进程内 Secret buffer 和数据库 AES-256-GCM 密文；AAD 绑定
@@ -200,7 +211,8 @@ Auth、Session、API Token、CSRF/Origin 和 Capability Middleware 仍由 M10 �
 
 M6-03 的 `workflow.tool_call` 是 Tool 执行事实和受限安全记录，不等同于 M10 的通用 append-only Audit：
 它只保存版本化身份、状态、Hash、字节数、受控摘要和稳定引用，不保存 raw Prompt/参数/输出、正文、
-Credential、Authorization、Cookie、绝对路径或 stderr。M10 仍需实现跨模块 Audit 查询、留存和 UI。
+Credential、Authorization、Cookie、绝对路径或 stderr。通用 Audit、留存和 UI 仍属于 M10-01，不能用
+该受限记录冒充跨模块审计。
 
 模型设置保存必须与 append-only Audit 在同一数据库事务提交。Audit 只记录 action、revision、Provider 和
 `api_key_configured`，不记录 draft、Endpoint、Secret、密文或 runtime instance id；Audit 失败时 revision 保存回滚。
@@ -230,8 +242,9 @@ Credential、Authorization、Cookie、绝对路径或 stderr。M10 仍需实现�
 - Search Cursor 篡改、跨请求复用、进程重启失效和结果 stale；错误不得回显 Query、Key、DSN 或路径。
 - Evidence 跨 Workspace、Source Version/Span 错绑、managed locator 越界、Hash/大小/byte range/excerpt
   不一致；均不得回退到工作树或泄漏其他 Workspace 元数据。
-- 在 M10 完成前验证 Compose/API 只发布 loopback；不得把 Workspace 隔离测试冒充身份、CSRF 或
-  Capability 测试已完成。
+- Compose/API 仍只发布 loopback；认证负测必须覆盖 Bootstrap 泛化、Session 固定/撤销、CSRF/Origin、
+  API Token Scope/Expiry/Revocation 和未获 Approval Write Authorization 的写入拒绝。Workspace 隔离测试
+  不得冒充身份或 Capability 证据。
 
 ## 18. 依赖与镜像
 

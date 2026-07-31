@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
@@ -142,6 +143,8 @@ type RunControlCommand struct {
 	WorkflowRunID   foundation.ID
 	ExpectedVersion int64
 	IdempotencyKey  string
+	// CallerCapabilities 是认证 Middleware 提供的权限快照；nil 仅表示内部可信调用或显式 disabled 开发模式。
+	CallerCapabilities []capability.Capability
 }
 
 // ControlTransition 是交给事务端口的动作与稳定 request hash。
@@ -151,6 +154,8 @@ type ControlTransition struct {
 	ExpectedVersion int64
 	IdempotencyKey  string
 	RequestHash     string
+	// CallerCapabilities 必须在持久状态改变或幂等结果重放前按 Run Definition 复核。
+	CallerCapabilities []capability.Capability
 }
 
 // ControlPersistenceResult 是控制事务返回的持久 Run 投影。
@@ -332,7 +337,10 @@ func (c *RuntimeCoordinator) control(ctx context.Context, action ControlAction, 
 	if command.WorkflowRunID == "" || command.ExpectedVersion < 1 || len(command.IdempotencyKey) > MaxIdempotencyKeyLength {
 		return RunControlResult{}, runtimeContractError(foundation.ErrorInvalidInput, "WORKFLOW_CONTROL_INVALID")
 	}
-	transition := ControlTransition{WorkflowRunID: command.WorkflowRunID, Action: action, ExpectedVersion: command.ExpectedVersion, IdempotencyKey: command.IdempotencyKey}
+	transition := ControlTransition{
+		WorkflowRunID: command.WorkflowRunID, Action: action, ExpectedVersion: command.ExpectedVersion,
+		IdempotencyKey: command.IdempotencyKey, CallerCapabilities: cloneCapabilities(command.CallerCapabilities),
+	}
 	transition.RequestHash = controlRequestHash(transition)
 	persisted, err := c.state.Control(ctx, transition)
 	if err != nil {
@@ -342,6 +350,13 @@ func (c *RuntimeCoordinator) control(ctx context.Context, action ControlAction, 
 		return RunControlResult{}, runtimeContractError(foundation.ErrorConsistencyViolation, "WORKFLOW_CONTROL_RESULT_INVALID")
 	}
 	return RunControlResult{WorkflowRunID: persisted.WorkflowRunID, Status: persisted.Status, Version: persisted.Version, StatusURL: "/api/v1/workflows/" + string(persisted.WorkflowRunID), PauseRequested: persisted.PauseRequested, CancelRequested: persisted.CancelRequested}, nil
+}
+
+func cloneCapabilities(values []capability.Capability) []capability.Capability {
+	if values == nil {
+		return nil
+	}
+	return append([]capability.Capability{}, values...)
 }
 
 func isValidClaimCommand(command ClaimCommand) bool {

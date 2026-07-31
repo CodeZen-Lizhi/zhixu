@@ -26,6 +26,14 @@ func (g *cancellationSafetyGuardStub) SafeToCancelWorkflowNode(context.Context, 
 	return g.safe, g.err
 }
 
+type workflowTerminalHookStub struct {
+	err error
+}
+
+func (h *workflowTerminalHookStub) OnWorkflowNodeTerminal(context.Context, any, application.WorkflowNodeTerminalEvent) error {
+	return h.err
+}
+
 func TestNewRuntimeRepositoryRejectsTypedNilJobInserter(t *testing.T) {
 	var inserter *typedNilJobInserter
 	if _, err := NewRuntimeRepository(fakeDB{}, inserter); err == nil {
@@ -35,6 +43,10 @@ func TestNewRuntimeRepositoryRejectsTypedNilJobInserter(t *testing.T) {
 
 func TestNewRuntimeRepositoryValidatesCancellationSafetyGuard(t *testing.T) {
 	var guard *cancellationSafetyGuardStub
+	var inserter *typedNilJobInserter
+	if _, err := NewRuntimeRepository(fakeDB{}, inserter, guard); !hasFoundationCode(err, "WORKFLOW_RUNTIME_DATABASE_UNAVAILABLE") {
+		t.Fatalf("database dependency error precedence changed: %v", err)
+	}
 	if _, err := NewRuntimeRepository(fakeDB{}, &typedNilJobInserter{}, guard); err == nil {
 		t.Fatal("typed nil cancellation guard was accepted")
 	}
@@ -56,6 +68,30 @@ func TestNewRuntimeRepositoryValidatesCancellationSafetyGuard(t *testing.T) {
 		if !errors.As(err, &classified) || classified.Code != "WORKFLOW_CANCELLATION_SAFETY_UNAVAILABLE" || !classified.Retryable {
 			t.Fatalf("guard error=%v", err)
 		}
+	}
+}
+
+func hasFoundationCode(err error, code string) bool {
+	var classified *foundation.Error
+	return errors.As(err, &classified) && classified.Code == code
+}
+
+func TestNewRuntimeRepositoryWithHooksValidatesAndInjectsLifecycleHooks(t *testing.T) {
+	var terminal *workflowTerminalHookStub
+	if _, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{Terminal: terminal}); err == nil {
+		t.Fatal("typed nil terminal hook was accepted")
+	}
+	cancellation := &cancellationSafetyGuardStub{safe: true}
+	terminal = &workflowTerminalHookStub{}
+	repository, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{
+		CancellationSafety: cancellation,
+		Terminal:           terminal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository.cancellation != cancellation || repository.terminal != terminal {
+		t.Fatalf("hooks were not injected: cancellation=%T terminal=%T", repository.cancellation, repository.terminal)
 	}
 }
 

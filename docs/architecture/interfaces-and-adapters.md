@@ -379,8 +379,9 @@ Adapter 必须映射原始 SDK/命令/数据库错误，不能把外部错误类
 
 认证 Session、API Token 和一次性 Write Authorization 同样由 Composition Root 注入的安全组件实现；领域调用方只接收已验证 Identity/Capability Context，不依赖 Cookie、Header 或 Token 存储细节。
 
-M6-D 尚未注入正式 Auth/Session/Token/CSRF/Capability Middleware，只实现 Workspace 查询隔离并要求
-loopback 部署；M10 完成前不得增加 allow-all Authorizer 或把 `workspace_id` 当作 Identity。
+M10-02 已在 Composition Root 注入 Auth/Session/API Token/CSRF/Capability Middleware；业务 Handler 只接收
+已验证 Principal，不读取 Cookie、Authorization 或 Bootstrap Token。`workspace_id` 仍只是数据范围，不是
+Identity；认证 disabled 只允许 development loopback，也不得增加 allow-all Authorizer。
 
 ## 15. Contract Test
 

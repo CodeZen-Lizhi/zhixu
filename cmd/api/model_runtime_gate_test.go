@@ -123,14 +123,14 @@ func TestStartAPIModelRuntimeReportsOwnershipLossAfterActivation(t *testing.T) {
 	}
 }
 
-func TestAPIMainWaitsForManagedRuntimeBeforeListenAndServeAndExitsOnRuntimeErrors(t *testing.T) {
+func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErrors(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mainBody := findFunctionBody(file, "main")
-	if mainBody == nil {
-		t.Fatal("main function was not found")
+	runBody := findFunctionBody(file, "runAPI")
+	if runBody == nil {
+		t.Fatal("runAPI function was not found")
 	}
 
 	var startPosition token.Pos
@@ -138,7 +138,7 @@ func TestAPIMainWaitsForManagedRuntimeBeforeListenAndServeAndExitsOnRuntimeError
 	var listenAndServePosition token.Pos
 	var runtimeErrorClauses []*ast.CommClause
 	var managedGuard *ast.IfStmt
-	ast.Inspect(mainBody, func(node ast.Node) bool {
+	ast.Inspect(runBody, func(node ast.Node) bool {
 		switch typed := node.(type) {
 		case *ast.CallExpr:
 			if identifier, ok := typed.Fun.(*ast.Ident); ok && identifier.Name == "startAPIModelRuntime" {
@@ -180,8 +180,8 @@ func TestAPIMainWaitsForManagedRuntimeBeforeListenAndServeAndExitsOnRuntimeError
 	var beforeServeExit bool
 	var afterServeExit bool
 	for _, clause := range runtimeErrorClauses {
-		if !containsExitOne(clause) {
-			t.Fatalf("runtime error branch at %d does not terminate the API process", clause.Pos())
+		if !containsReturnOne(clause) {
+			t.Fatalf("runtime error branch at %d does not return a failing API exit code", clause.Pos())
 		}
 		if clause.Pos() < listenAndServePosition {
 			beforeServeExit = true
@@ -284,20 +284,15 @@ func mentionsIdentifier(node ast.Node, name string) bool {
 	return found
 }
 
-func containsExitOne(node ast.Node) bool {
+func containsReturnOne(node ast.Node) bool {
 	found := false
 	ast.Inspect(node, func(current ast.Node) bool {
-		call, ok := current.(*ast.CallExpr)
-		if !ok || len(call.Args) != 1 {
+		statement, ok := current.(*ast.ReturnStmt)
+		if !ok || len(statement.Results) != 1 {
 			return true
 		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != "Exit" {
-			return true
-		}
-		packageName, ok := selector.X.(*ast.Ident)
-		status, statusOK := call.Args[0].(*ast.BasicLit)
-		if ok && packageName.Name == "os" && statusOK && status.Kind == token.INT && status.Value == "1" {
+		status, statusOK := statement.Results[0].(*ast.BasicLit)
+		if statusOK && status.Kind == token.INT && status.Value == "1" {
 			found = true
 			return false
 		}

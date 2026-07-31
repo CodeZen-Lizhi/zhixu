@@ -15,7 +15,8 @@
 ## 目标代码落点（M1 起）
 
 - `cmd/api`、`cmd/worker`：创建带统一字段和级别策略的 slog Handler，并注入应用与 Worker。
-- `internal/platform/observability/`：slog JSON、OpenTelemetry Trace/Metrics、字段规范和 Secret Redaction；实际目录需在 M1 骨架确认。
+- `internal/observability/`：业务包使用的稳定 facade；不复制实现。
+- `internal/platform/observability/`：slog JSON、OpenTelemetry Trace/Metrics、字段规范和 Secret Redaction 的单一事实源。
 - `internal/audit/`：append-only Audit Interface、持久化 Adapter、查询投影和脱敏边界。
 - `internal/workflow/`、`internal/tools/`、`internal/changecontrol/`：写入运行摘要和业务审计事件，不自行拼接无结构日志。
 - `internal/platform/models/`、`internal/platform/gitcli/`、`internal/platform/filesystem/`：记录调用摘要、耗时、错误码和版本，不记录完整敏感载荷。
@@ -36,6 +37,10 @@
 3. Tool Audit 记录调用者、Workflow/Node、Tool、权限、参数摘要、目标、幂等键、耗时和结果/错误；不记录完整敏感参数。
 4. Audit 与普通日志分别有生命周期和访问权限；审计事件必须支持按 Proposal、Commit、Tool Call、Security Block 和 Workflow 反查。
 5. 日志和 Trace 不能记录模型私有思维链；只记录结构化输出摘要、Schema/Prompt/Model 版本和引用统计。
+6. Credential marker 优先于 `_id`、`_hash`、`_status` 等摘要后缀；未知 `error` 与
+   `fmt.Stringer` 默认整体脱敏，调用方另记稳定 `error_code`。
+7. Audit correlation/payload 使用严格 JSON、递归脱敏和 canonical 编码；读取持久记录
+   发现明文 Secret 时必须 fail closed，不能在返回阶段静默遮住已发生的落库泄漏。
 
 ## 禁止模式
 
@@ -74,11 +79,74 @@ git diff --check
 - `disabled/optional/required` 不伪造 exporter 成功；当前生产 Composition 未提供真实 exporter factory，optional 明确 degraded，required fail-fast。
 - Worker `/livez|readyz` 只返回稳定 `status/code/version`；真实容器日志和 health response 已执行 Secret canary 扫描。
 
+## M10-01 Audit 与安全脱敏边界
+
+- `internal/audit` 已实现 append-only Event、Recorder 和 PostgreSQL Adapter；业务事件
+  调用方负责稳定提供 ID、发生时间和幂等键。
+- 相同 Workspace+幂等键只允许精确完整 binding 重放；不同 binding 稳定冲突。
+  `NULL workspace_id` 使用 advisory lock 与 `IS NOT DISTINCT FROM` 收敛并发事实。
+- `ops.audit_event` UPDATE/DELETE 由迁移 trigger 以 SQLSTATE `55000` 拒绝；Adapter
+  不提供改写接口。
+- 单元测试覆盖递归 Secret/JWT/路径脱敏、重复 JSON key、canonical/fingerprint、
+  Recorder binding 校验、Adapter 错误分类与数据库读回 fail-closed。真实 PostgreSQL
+  测试通过 `-tags integration` 和 `ZHIXU_TEST_DATABASE_URL` 显式启用。
+- Impact Analysis 以 Report ID 为 UUID v5 namespace、以 HTTP `Idempotency-Key` 为 name 派生
+  Audit Event ID；相同请求键精确重放同一 Audit 事实，不同请求键重用同一 Report 时必须追加不同
+  Audit 事件，不能复用 `ReportID` 作为 Audit 主键。
+- 审计主体必须保留认证来源：Cookie Session 记为 `USER`，Bearer API Token 记为 `API_TOKEN`；
+  不能把自动化 Token 操作伪装成人工用户操作。
+
+### Scenario: Workspace Audit Advisory Lock Key
+
+#### 1. Scope / Trigger
+
+- `internal/audit/adapter/postgres.AppendTx` 追加带 `workspace_id` 的幂等 Audit 事件时，
+  PostgreSQL 的唯一约束与 `NULL` scope 需要同一条 transaction-scoped advisory lock 路径。
+
+#### 2. Signatures
+
+- 锁调用固定为 `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`。
+- Workspace scope 锁键固定为 `string(workspaceID) + ":" + idempotencyKey`；无 Workspace
+  时锁键仅为 `idempotencyKey`。
+
+#### 3. Contracts
+
+- `workspaceID` 必须是 canonical fixed-width UUID；`idempotencyKey` 必须先通过
+  `domain.Event.Validate` 的可打印文本校验。
+- 锁键作为 PostgreSQL `text` 参数传递，分隔符必须是可打印、无歧义字符；不得使用 `NUL`。
+
+#### 4. Validation & Error Matrix
+
+- 锁键含 `NUL` -> PostgreSQL 拒绝 text 参数，表现为 `AUDIT_EVENT_UNAVAILABLE`；这是实现错误，
+  不能靠重试掩盖。
+- 同一 Workspace+幂等键且完整 binding 相同 -> 返回既有事件并标记 replay。
+- 同一 Workspace+幂等键但 binding 不同 -> `AUDIT_IDEMPOTENCY_CONFLICT`。
+
+#### 5. Good/Base/Bad Cases
+
+- Good: `workspaceUUID + ":" + "impact:request-1"` 能正常取得锁并精确重放。
+- Base: 全局事件只用 `idempotencyKey`，再用 `IS NOT DISTINCT FROM` 查询统一 `NULL` scope。
+- Bad: `workspaceUUID + "\\x00" + idempotencyKey`；pgx/PostgreSQL 不接受 NUL text 参数。
+
+#### 6. Tests Required
+
+- 真实 PostgreSQL 集成测试必须覆盖 Workspace-scoped 首次追加、同键 replay 与单行计数，
+  断言不会得到 `AUDIT_EVENT_UNAVAILABLE`。
+- 同时保留全局 scope 的并发 replay、不同 binding 冲突和 append-only trigger 断言。
+
+#### 7. Wrong vs Correct
+
+```text
+Wrong: 用 NUL 拼接 workspace 与幂等键，再把失败分类为可重试 Audit 依赖故障。
+Correct: 用 canonical UUID + ':' + 已验证幂等键构造可打印锁键，并用真实 PG replay 回归测试锁定。
+```
+
 ## 后续待验证
 
-- 真实 OpenTelemetry exporter Adapter、采样/保留策略和 Audit Repository。
+- 真实 OpenTelemetry exporter Adapter、采样/保留策略，以及全部安全/业务决策调用点
+  对 Audit Recorder 的接入覆盖。
 - 采样策略、日志保留和外部 OTel/Prometheus 接入方式。
-- Audit 表字段、不可变约束、访问权限和归档策略；当前仅有架构约束，没有迁移。
+- Audit 访问权限、长期归档策略与真实自托管数据库演练。
 
 ## M6-03 Tool Redaction Boundary
 

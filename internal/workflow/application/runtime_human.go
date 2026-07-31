@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
@@ -37,6 +38,8 @@ type HumanDecisionCommand struct {
 	TaskID        foundation.ID
 	TargetVersion int64
 	Decision      json.RawMessage
+	// CallerCapabilities 是认证 Middleware 提供的权限快照；nil 仅表示内部可信调用或显式 disabled 开发模式。
+	CallerCapabilities []capability.Capability
 }
 
 // HumanDecisionTransition carries canonical decision JSON to persistence.
@@ -79,6 +82,7 @@ func (c *RuntimeHumanCoordinator) SubmitHuman(ctx context.Context, command Human
 		return HumanTransitionResult{}, invalid("HUMAN_DECISION_INVALID")
 	}
 	command.Decision = canonical
+	command.CallerCapabilities = cloneCapabilities(command.CallerCapabilities)
 	result, err := c.state.SubmitHuman(ctx, command)
 	if err != nil {
 		return HumanTransitionResult{}, err

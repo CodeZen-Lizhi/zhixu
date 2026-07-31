@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,6 +15,12 @@ import (
 // RedactedValue is the only replacement emitted when a sensitive value is
 // detected. The original value is never included in errors or telemetry.
 const RedactedValue = "<redacted>"
+
+var (
+	// 常见会话/CSRF/JWT 文本即使没有显式 key 也必须 fail closed。
+	jwtPattern                 = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
+	sensitiveAssignmentPattern = regexp.MustCompile(`(?i)\b(session|csrf|access[_-]?token|refresh[_-]?token|set-cookie)\s*[:=]\s*\S+`)
+)
 
 type safeHandler struct {
 	next      slog.Handler
@@ -116,11 +123,14 @@ func redactAny(key string, value any) any {
 	case []byte:
 		return fmt.Sprintf("<bytes:%d>", len(typed))
 	case error:
-		return redactString(key, typed.Error())
+		// error 文本可能携带 SQL 参数、凭据、正文或本地路径；调用方
+		// 应额外记录稳定 error_code，而不是把未知错误对象交给日志。
+		return RedactedValue
 	case time.Time, time.Duration:
 		return typed
 	case fmt.Stringer:
-		return redactString(key, typed.String())
+		// Stringer 的实现不受本包控制，默认不信任其返回内容。
+		return RedactedValue
 	case map[string]string:
 		clean := make(map[string]string, len(typed))
 		for childKey, childValue := range typed {
@@ -157,28 +167,40 @@ func redactAny(key string, value any) any {
 }
 
 func redactString(key, value string) string {
-	if value == "" {
-		return value
-	}
 	if isSensitiveKey(key) || containsSecret(value) || isAbsoluteFilesystemPath(key, value) {
 		return RedactedValue
+	}
+	if value == "" {
+		return value
 	}
 	return value
 }
 
 func containsSecret(value string) bool {
-	return foundationredaction.ContainsSecret(value)
+	return foundationredaction.ContainsSecret(value) || foundationredaction.ContainsPII(value) || jwtPattern.MatchString(value) || sensitiveAssignmentPattern.MatchString(value)
 }
 
 func isSensitiveKey(key string) bool {
 	normalized := normalizeKey(key)
-	if normalized == "" || isSummaryKey(normalized) {
+	if normalized == "" {
+		return false
+	}
+	// 凭据 marker 必须优先于 `_id`/`_hash` 等摘要后缀，避免
+	// `token_hash`、`credential_id` 这类字段把原始凭据带出日志。
+	for _, marker := range []string{
+		"authorization", "cookie", "credential", "password", "passwd", "secret", "token",
+		"apikey", "dsn", "databaseurl", "connectionstring", "session", "csrf", "setcookie",
+		"locktoken", "email", "phone", "mobile", "telephone", "address", "postalcode", "zipcode",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	if isSummaryKey(normalized) {
 		return false
 	}
 	for _, marker := range []string{
-		"authorization", "cookie", "credential", "password", "passwd", "secret", "token",
-		"apikey", "dsn", "databaseurl", "connectionstring", "requestbody", "responsebody",
-		"body", "content", "prompt", "source", "rawresponse", "stderr", "locktoken",
+		"requestbody", "responsebody", "body", "content", "prompt", "source", "rawresponse", "stderr",
 	} {
 		if strings.Contains(normalized, marker) {
 			return true
@@ -208,6 +230,9 @@ func isAbsoluteFilesystemPath(key, value string) bool {
 		return false
 	}
 	normalizedKey := normalizeKey(key)
+	if normalizedKey == "httproute" && strings.HasPrefix(trimmed, "/") && !strings.ContainsAny(trimmed, "?#\r\n") {
+		return false
+	}
 	pathKey := strings.Contains(normalizedKey, "file") || strings.Contains(normalizedKey, "directory") ||
 		strings.Contains(normalizedKey, "workspace") || strings.Contains(normalizedKey, "root") ||
 		strings.Contains(normalizedKey, "targetpath") || strings.Contains(normalizedKey, "absolutepath")
@@ -216,3 +241,12 @@ func isAbsoluteFilesystemPath(key, value string) bool {
 	}
 	return foundationredaction.ContainsAbsolutePath(trimmed)
 }
+
+// RedactString 对日志、Trace 和导出边界的文本执行统一 fail-closed 脱敏。
+func RedactString(key, value string) string { return redactString(key, value) }
+
+// RedactValue 对任意日志值执行递归脱敏；未知复合类型会被替换为摘要占位符。
+func RedactValue(key string, value any) any { return redactAny(key, value) }
+
+// IsSensitiveKey 判断字段名是否属于凭据或受限正文边界。
+func IsSensitiveKey(key string) bool { return isSensitiveKey(key) }

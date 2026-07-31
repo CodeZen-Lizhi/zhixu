@@ -22,6 +22,78 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func TestRepositoryGetModelRunRecordTxUsesCallerTransaction(t *testing.T) {
+	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	seedAgentRuntime(t, ctx, pool)
+	repository, err := NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+	run := testModelRun(testAgentID(87), testAgentID(5), started)
+	if _, replayed, err := repository.CreateModelRun(ctx, run); err != nil || replayed {
+		t.Fatalf("CreateModelRun replayed=%t err=%v", replayed, err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	txRepository, err := NewRepository(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := domain.ModelCall{
+		ID: testAgentID(88), ModelRunID: run.ID, CallNo: 1, Phase: domain.ModelCallInitial,
+		Model: run.Model, Profile: run.Profile, Prompt: run.Prompt, Schema: run.Schema, MaxOutputTokens: 128,
+		Status: domain.ModelCallStarted, RequestHash: hash64('a'), RequestBytes: 64,
+		Version: 1, StartedAt: started.Add(time.Second),
+	}
+	if _, replayed, err := txRepository.StartModelCall(ctx, run.WorkspaceID, first); err != nil || replayed {
+		t.Fatalf("StartModelCall first replayed=%t err=%v", replayed, err)
+	}
+	firstCompletedAt := started.Add(2 * time.Second)
+	firstCompleted := first
+	firstCompleted.Status = domain.ModelCallSucceeded
+	firstCompleted.ResponseHash = hash64('b')
+	firstCompleted.ResponseBytes = 32
+	firstCompleted.Usage = domain.TokenUsage{InputTokens: 5, OutputTokens: 3, TotalTokens: 8}
+	firstCompleted.LatencyMillis = 10
+	firstCompleted.Version = 2
+	firstCompleted.CompletedAt = &firstCompletedAt
+	if _, replayed, err := txRepository.CompleteModelCall(ctx, application.CompleteModelCallCommand{
+		WorkspaceID: run.WorkspaceID, ExpectedVersion: 1, Call: firstCompleted,
+	}); err != nil || replayed {
+		t.Fatalf("CompleteModelCall first replayed=%t err=%v", replayed, err)
+	}
+	second := domain.ModelCall{
+		ID: testAgentID(89), ModelRunID: run.ID, CallNo: 2, Phase: domain.ModelCallReview,
+		Model: run.Model, Profile: run.Profile, Prompt: run.Prompt, Schema: run.Schema, MaxOutputTokens: 64,
+		Status: domain.ModelCallStarted, RequestHash: hash64('c'), RequestBytes: 48,
+		Version: 1, StartedAt: started.Add(3 * time.Second),
+	}
+	if _, replayed, err := txRepository.StartModelCall(ctx, run.WorkspaceID, second); err != nil || replayed {
+		t.Fatalf("StartModelCall second replayed=%t err=%v", replayed, err)
+	}
+
+	record, err := repository.GetModelRunRecordTx(ctx, tx, run.WorkspaceID, run.ID, true)
+	if err != nil || record.Run.ID != run.ID || len(record.Calls) != 2 ||
+		record.Calls[0].CallNo != 1 || record.Calls[1].CallNo != 2 {
+		t.Fatalf("GetModelRunRecordTx=%#v err=%v", record, err)
+	}
+	outside, err := repository.GetModelRun(ctx, run.WorkspaceID, run.ID)
+	if err != nil || len(outside.Calls) != 0 {
+		t.Fatalf("outside transaction record=%#v err=%v", outside, err)
+	}
+	if _, err := repository.GetModelRunRecordTx(ctx, tx, testAgentID(2), run.ID, false); agentErrorCode(err) != ErrorCodeRuntimeNotFound {
+		t.Fatalf("cross-workspace code=%s err=%v", agentErrorCode(err), err)
+	}
+	if _, err := repository.GetModelRunRecordTx(ctx, nil, run.WorkspaceID, run.ID, false); agentErrorCode(err) != domain.ErrorCodeModelRunInvalid {
+		t.Fatalf("invalid transaction code=%s err=%v", agentErrorCode(err), err)
+	}
+}
+
 func TestRepositoryModelRunCallReplayCASAndUnknownRecovery(t *testing.T) {
 	pool, ctx := newAgentRepositoryIntegrationPool(t)
 	seedAgentRuntime(t, ctx, pool)
