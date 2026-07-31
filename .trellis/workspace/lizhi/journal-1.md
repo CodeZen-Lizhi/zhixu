@@ -1650,3 +1650,24 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 38: 宿主机 Workspace 精确授权
+
+**Date**: 2026-08-01
+**Task**: 宿主机 Workspace 精确授权
+**Branch**: `dev`
+
+### Summary
+
+实现 Docker 宿主机绝对路径的精确单目录授权、可恢复切换、控制页面与全链路验证。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a6b5988` | (see git log) |
+
+### Status
+
+[OK] **Completed**
