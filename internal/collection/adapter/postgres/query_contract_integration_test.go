@@ -328,22 +328,92 @@ func TestCollectionQueryPlanUsesCanonicalIndexes(t *testing.T) {
 		}
 	}
 
-	found := make(map[string]bool)
-	queries := []domain.Query{
-		collectionQuery(collectionIn("status", "ACTIVE", "CONFIRMED")),
-		collectionQuery(collectionSingle("relation_type", domain.OperatorEQ, "SUPPORTS")),
-		collectionQuery(collectionSingle("health_issue_type", domain.OperatorEQ, "ORPHAN")),
+	boundedRelationIndexes := []string{
+		"idx_knowledge_relation_workspace_source_status_type",
+		"idx_knowledge_relation_workspace_target_status_type",
+		"idx_knowledge_relation_source",
+		"idx_knowledge_relation_target",
+		"idx_knowledge_relation_workspace_status",
+		"idx_knowledge_relation_semantic_scan_topic_claim",
 	}
-	for _, query := range queries {
-		for index := range explainCollectionPage(t, ctx, tx, fixture.WorkspaceID, query) {
-			found[index] = true
-		}
+	relationPredicateIndexes := []string{
+		"idx_knowledge_relation_workspace_source_status_type",
+		"idx_knowledge_relation_workspace_target_status_type",
+		"idx_knowledge_relation_source",
+		"idx_knowledge_relation_target",
+		"idx_knowledge_relation_workspace_status",
 	}
-	assertCollectionPlanUsesAny(t, found, "Topic root", "idx_knowledge_topic_workspace_status", "uq_knowledge_topic_id_workspace", "uq_knowledge_topic_workspace_name")
-	assertCollectionPlanUsesAny(t, found, "Claim root", "idx_knowledge_claim_workspace_status", "uq_knowledge_claim_id_workspace", "uq_knowledge_claim_workspace_fingerprint")
-	assertCollectionPlanUsesAny(t, found, "Relation source", "idx_knowledge_relation_workspace_source_status_type", "idx_knowledge_relation_source")
-	assertCollectionPlanUsesAny(t, found, "Relation target", "idx_knowledge_relation_workspace_target_status_type", "idx_knowledge_relation_target")
-	assertCollectionPlanUsesAny(t, found, "Health target", "idx_ops_health_issue_workspace_target_status_type")
+	tests := []struct {
+		name         string
+		query        domain.Query
+		targets      []collectionPlanTargetRequirement
+		requirements []collectionPlanIndexRequirement
+	}{
+		{
+			name:  "topic status root",
+			query: collectionQueryAll(collectionSingle("object_type", domain.OperatorEQ, "TOPIC"), collectionSingle("status", domain.OperatorEQ, "ACTIVE")),
+			targets: []collectionPlanTargetRequirement{{
+				purpose: "Topic root", relation: "topic",
+				indexes: []string{"idx_knowledge_topic_workspace_status_id", "idx_knowledge_topic_workspace_status", "uq_knowledge_topic_workspace_name"},
+			}},
+		},
+		{
+			name:  "claim status root",
+			query: collectionQueryAll(collectionSingle("object_type", domain.OperatorEQ, "CLAIM"), collectionSingle("status", domain.OperatorEQ, "CONFIRMED")),
+			targets: []collectionPlanTargetRequirement{{
+				purpose: "Claim root", relation: "claim",
+				indexes: []string{"idx_knowledge_claim_workspace_status_id", "idx_knowledge_claim_workspace_status", "uq_knowledge_claim_workspace_fingerprint"},
+			}},
+		},
+		{
+			name:    "topic membership predicate",
+			query:   collectionQuery(collectionSingle("topic_id", domain.OperatorEQ, string(fixture.SecondaryTopicID))),
+			targets: []collectionPlanTargetRequirement{{purpose: "Relation access", relation: "relation", indexes: boundedRelationIndexes}},
+			requirements: []collectionPlanIndexRequirement{{
+				purpose: "Claim Topic membership",
+				indexes: []string{"idx_knowledge_relation_semantic_scan_topic_claim"},
+			}},
+		},
+		{
+			name:    "relation predicate",
+			query:   collectionQuery(collectionSingle("relation_type", domain.OperatorEQ, "SUPPORTS")),
+			targets: []collectionPlanTargetRequirement{{purpose: "Relation access", relation: "relation", indexes: boundedRelationIndexes}},
+			requirements: []collectionPlanIndexRequirement{{
+				purpose: "Relation predicate",
+				indexes: relationPredicateIndexes,
+			}},
+		},
+		{
+			name:  "health predicate",
+			query: collectionQuery(collectionSingle("health_issue_type", domain.OperatorEQ, "ORPHAN")),
+			targets: []collectionPlanTargetRequirement{{
+				purpose: "Health target", relation: "health_issue",
+				indexes: []string{"idx_ops_health_issue_workspace_target_status_type"},
+			}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			explain := explainCollectionPage(t, ctx, tx, fixture.WorkspaceID, test.query)
+			for _, target := range test.targets {
+				assertCollectionTargetAccess(t, explain, target)
+			}
+			for _, requirement := range test.requirements {
+				assertCollectionPlanUsesAny(t, explain.indexes, requirement.purpose, requirement.indexes...)
+			}
+		})
+	}
+}
+
+type collectionPlanTargetRequirement struct {
+	purpose  string
+	relation string
+	indexes  []string
+}
+
+type collectionPlanIndexRequirement struct {
+	purpose string
+	indexes []string
 }
 
 type collectionQueryTracer struct {
@@ -499,7 +569,10 @@ func insertCollectionSourceVersion(t *testing.T, ctx context.Context, pool *pgxp
 
 func seedCollectionPlanCardinality(t *testing.T, ctx context.Context, tx pgx.Tx, fixture graphfixture.Fixture) {
 	t.Helper()
-	const topicCount = 384
+	const (
+		topicCount           = 384
+		deprecatedTopicCount = 2048
+	)
 	now := collectionFixtureTime().Add(2 * time.Hour)
 	topics := make([]foundation.ID, topicCount)
 	topicBatch := &pgx.Batch{}
@@ -510,6 +583,24 @@ func seedCollectionPlanCardinality(t *testing.T, ctx context.Context, tx pgx.Tx,
 	}
 	if err := tx.SendBatch(ctx, topicBatch).Close(); err != nil {
 		t.Fatal(err)
+	}
+	deprecatedBatch := &pgx.Batch{}
+	for index := 0; index < deprecatedTopicCount; index++ {
+		name := fmt.Sprintf("Collection Plan Deprecated Topic %04d", index)
+		deprecatedBatch.Queue(`INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,$3,$4,'plan fixture','ACTIVE',1,$5,$5)`, string(collectionQueryID(t)), string(fixture.WorkspaceID), name, strings.ToLower(name), now)
+	}
+	if err := tx.SendBatch(ctx, deprecatedBatch).Close(); err != nil {
+		t.Fatal(err)
+	}
+	retiredAt := now.Add(time.Microsecond)
+	commandTag, err := tx.Exec(ctx, `UPDATE core.topic
+		SET status='DEPRECATED',version=2,updated_at=$2
+		WHERE workspace_id=$1 AND normalized_name LIKE 'collection plan deprecated topic %'`, string(fixture.WorkspaceID), retiredAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commandTag.RowsAffected() != deprecatedTopicCount {
+		t.Fatalf("deprecated plan topics=%d want=%d", commandTag.RowsAffected(), deprecatedTopicCount)
 	}
 	relationBatch := &pgx.Batch{}
 	targets := []foundation.ID{fixture.PrimaryTopicID, fixture.SecondaryTopicID}
@@ -554,9 +645,13 @@ func seedCollectionReferenceTopics(t *testing.T, ctx context.Context, pool *pgxp
 }
 
 func collectionQuery(clause domain.Clause) domain.Query {
+	return collectionQueryAll(clause)
+}
+
+func collectionQueryAll(clauses ...domain.Clause) domain.Query {
 	return domain.Query{
 		SchemaVersion: domain.QuerySchemaVersionV1,
-		Root:          domain.Clause{Kind: domain.ClauseKindGroup, Operator: string(domain.GroupOperatorAND), Clauses: []domain.Clause{clause}},
+		Root:          domain.Clause{Kind: domain.ClauseKindGroup, Operator: string(domain.GroupOperatorAND), Clauses: clauses},
 	}
 }
 
@@ -667,52 +762,98 @@ func assertCollectionTrace(t *testing.T, statements []string, saved bool) {
 	}
 }
 
-func explainCollectionPage(t *testing.T, ctx context.Context, db DB, workspaceID foundation.ID, query domain.Query) map[string]bool {
+func explainCollectionPage(t *testing.T, ctx context.Context, db DB, workspaceID foundation.ID, query domain.Query) collectionExplainResult {
 	t.Helper()
 	plan, err := collectionapp.CompileQuery(query)
 	if err != nil {
 		t.Fatal(err)
 	}
 	where, args := shiftWhere(plan.Where, append([]any{string(workspaceID)}, plan.Args...))
-	order := make([]string, 0, len(plan.Sort))
-	for _, term := range plan.Sort {
-		order = append(order, term.Column+" "+term.Direction+" NULLS LAST")
-	}
-	pageSQL := unifiedItemCTE + "SELECT * FROM item WHERE " + where + " ORDER BY " + strings.Join(order, ", ") + fmt.Sprintf(" LIMIT $%d", len(args)+1)
-	args = append(args, 26)
+	pageSQL, args := buildCollectionPageQuery(plan, where, args, 26)
 	var raw []byte
 	if err := db.QueryRow(ctx, "EXPLAIN (FORMAT JSON, COSTS OFF) "+pageSQL, args...).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
-	var documents []map[string]any
+	var documents []struct {
+		Plan collectionExplainPlan `json:"Plan"`
+	}
 	if err := json.Unmarshal(raw, &documents); err != nil || len(documents) != 1 {
 		t.Fatalf("invalid collection explain: %v %s", err, raw)
 	}
-	found := make(map[string]bool)
-	visitCollectionPlan(documents[0]["Plan"], func(node map[string]any) {
-		if index, ok := node["Index Name"].(string); ok {
-			found[index] = true
-		}
-		if node["Node Type"] == "Seq Scan" {
-			switch node["Relation Name"] {
-			case "topic", "claim", "relation", "health_issue":
-				t.Fatalf("production collection page contains %s Seq Scan: %s", node["Relation Name"], raw)
-			}
+	indexes := make(map[string]bool)
+	visitCollectionPlan(documents[0].Plan, func(node collectionExplainPlan) {
+		if node.IndexName != "" {
+			indexes[node.IndexName] = true
 		}
 	})
-	return found
+	return collectionExplainResult{plan: documents[0].Plan, indexes: indexes, raw: raw}
 }
 
-func visitCollectionPlan(value any, visit func(map[string]any)) {
-	node, ok := value.(map[string]any)
-	if !ok {
-		return
-	}
-	visit(node)
-	children, _ := node["Plans"].([]any)
-	for _, child := range children {
+type collectionExplainResult struct {
+	plan    collectionExplainPlan
+	indexes map[string]bool
+	raw     []byte
+}
+
+type collectionExplainPlan struct {
+	NodeType     string                  `json:"Node Type"`
+	RelationName string                  `json:"Relation Name"`
+	IndexName    string                  `json:"Index Name"`
+	Plans        []collectionExplainPlan `json:"Plans"`
+}
+
+func visitCollectionPlan(plan collectionExplainPlan, visit func(collectionExplainPlan)) {
+	visit(plan)
+	for _, child := range plan.Plans {
 		visitCollectionPlan(child, visit)
 	}
+}
+
+func assertCollectionTargetAccess(t *testing.T, explain collectionExplainResult, target collectionPlanTargetRequirement) {
+	t.Helper()
+	accesses := 0
+	visitCollectionPlan(explain.plan, func(node collectionExplainPlan) {
+		if node.RelationName != target.relation {
+			return
+		}
+		accesses++
+		switch node.NodeType {
+		case "Index Scan", "Index Only Scan":
+			if !collectionIndexAllowed(node.IndexName, target.indexes) {
+				t.Fatalf("production page %s uses non-bounded index %q; allowed=%v plan=%s", target.purpose, node.IndexName, target.indexes, explain.raw)
+			}
+		case "Bitmap Heap Scan":
+			if !collectionPlanUsesAnyIndex(node, target.indexes) {
+				t.Fatalf("production page %s bitmap access misses bounded indexes %v: %s", target.purpose, target.indexes, explain.raw)
+			}
+		default:
+			t.Fatalf("production page %s uses unsupported %s on %s: %s", target.purpose, node.NodeType, target.relation, explain.raw)
+		}
+	})
+	if accesses == 0 {
+		t.Fatalf("production page has no %s access for %s: %s", target.relation, target.purpose, explain.raw)
+	}
+}
+
+func collectionPlanUsesAnyIndex(plan collectionExplainPlan, indexes []string) bool {
+	if collectionIndexAllowed(plan.IndexName, indexes) {
+		return true
+	}
+	for _, child := range plan.Plans {
+		if collectionPlanUsesAnyIndex(child, indexes) {
+			return true
+		}
+	}
+	return false
+}
+
+func collectionIndexAllowed(index string, allowed []string) bool {
+	for _, candidate := range allowed {
+		if index == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func assertCollectionPlanUsesAny(t *testing.T, found map[string]bool, purpose string, indexes ...string) {

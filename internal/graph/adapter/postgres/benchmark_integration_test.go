@@ -7,14 +7,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/capacity"
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/graph/testfixture"
@@ -24,12 +26,14 @@ import (
 )
 
 const (
-	graphBenchmarkWarmups       = 5
-	graphBenchmarkSamples       = 30
-	graphBenchmarkP95Limit      = 1500 * time.Millisecond
-	graphBenchmarkQueryTimeout  = 2 * time.Second
-	graphNeighborhoodStatements = 6
-	defaultGraphBenchmarkSeed   = "m7-01-reference-v1"
+	graphBenchmarkWarmups             = 5
+	graphBenchmarkSamples             = 30
+	graphBenchmarkP95Limit            = capacity.DefaultGraphP95Limit
+	graphBenchmarkQueryTimeout        = 5 * time.Second
+	graphNeighborhoodStatements       = 6
+	defaultGraphBenchmarkSeed         = "m7-01-reference-v1"
+	defaultM10GraphBenchmarkSeed      = "m10-03-graph-capacity-v1"
+	defaultM10MixedGraphBenchmarkSeed = "m10-03-graph-capacity-mixed-v1"
 )
 
 type graphBenchmarkSample struct {
@@ -75,12 +79,19 @@ type graphExplainMetadata struct {
 }
 
 type graphBenchmarkSummary struct {
-	SchemaVersion string    `json:"schema_version"`
-	GeneratedAt   time.Time `json:"generated_at"`
+	SchemaVersion string                 `json:"schema_version"`
+	GeneratedAt   time.Time              `json:"generated_at"`
+	Outcome       string                 `json:"outcome"`
+	Formal        bool                   `json:"formal"`
+	Failure       *graphBenchmarkFailure `json:"failure,omitempty"`
 	Fixture       struct {
 		Version            string  `json:"version"`
 		Seed               string  `json:"seed"`
 		WorkspaceID        string  `json:"workspace_id"`
+		CenterNodeType     string  `json:"center_node_type"`
+		CenterNodeID       string  `json:"center_node_id"`
+		PathTargetNodeType string  `json:"path_target_node_type"`
+		PathTargetNodeID   string  `json:"path_target_node_id"`
 		CenterTopicID      string  `json:"center_topic_id"`
 		PathTargetTopicID  string  `json:"path_target_topic_id"`
 		EvidenceRelationID string  `json:"evidence_relation_id"`
@@ -88,7 +99,11 @@ type graphBenchmarkSummary struct {
 	} `json:"fixture"`
 	Counts struct {
 		Nodes           int `json:"nodes"`
+		Topics          int `json:"topics"`
+		Claims          int `json:"claims"`
 		Relations       int `json:"relations"`
+		BelongsTo       int `json:"belongs_to"`
+		Impacts         int `json:"impacts"`
 		Evidence        int `json:"evidence"`
 		HotCenterDegree int `json:"hot_center_degree"`
 	} `json:"counts"`
@@ -149,20 +164,56 @@ type graphBenchmarkSummary struct {
 	Explain map[string]graphExplainMetadata `json:"explain"`
 }
 
-// TestGraphCapacityBenchmark 验证 20k/100k Graph 一跳 p95 与生产 SQL 索引计划。
+type graphBenchmarkFailure struct {
+	Stage   string `json:"stage"`
+	Message string `json:"message"`
+}
+
+// TestGraphCapacityBenchmark 验证参考或 M10 500k Graph 一跳 p95 与生产 SQL 索引计划。
 func TestGraphCapacityBenchmark(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
 	artifactDirectory := os.Getenv("ZHIXU_GRAPH_BENCHMARK_ARTIFACT_DIR")
 	if databaseURL == "" || artifactDirectory == "" {
 		t.Skip("set ZHIXU_TEST_DATABASE_URL and ZHIXU_GRAPH_BENCHMARK_ARTIFACT_DIR to run the Graph capacity benchmark")
 	}
-	seed := os.Getenv("ZHIXU_GRAPH_BENCHMARK_SEED")
-	if seed == "" {
-		seed = defaultGraphBenchmarkSeed
+	profile := strings.TrimSpace(os.Getenv("ZHIXU_GRAPH_BENCHMARK_PROFILE"))
+	if profile == "" {
+		profile = "reference"
 	}
-	if err := os.MkdirAll(artifactDirectory, 0o755); err != nil {
+	seed := strings.TrimSpace(os.Getenv("ZHIXU_GRAPH_BENCHMARK_SEED"))
+	if seed == "" {
+		if profile == "m10" {
+			seed = defaultM10GraphBenchmarkSeed
+		} else if profile == "m10-mixed" {
+			seed = defaultM10MixedGraphBenchmarkSeed
+		} else {
+			seed = defaultGraphBenchmarkSeed
+		}
+	}
+	if err := capacity.PrepareArtifactDirectory(artifactDirectory); err != nil {
 		t.Fatalf("create Graph benchmark artifact directory: %v", err)
 	}
+	started := time.Now()
+	summary := graphBenchmarkSummary{
+		SchemaVersion: "zhixu-graph-benchmark/v2", Outcome: "failed",
+		Formal: profile == "m10-mixed",
+	}
+	summary.Fixture.Version, summary.Fixture.Seed = profile, seed
+	var samples []graphBenchmarkSample
+	plans := capacityPlans{raw: make(map[string]json.RawMessage), metadata: make(map[string]graphExplainMetadata)}
+	defer func() {
+		if summary.Failure == nil {
+			summary.Failure = &graphBenchmarkFailure{Stage: "benchmark", Message: "benchmark did not reach a passing completion"}
+		}
+		summary.GeneratedAt = time.Now().UTC()
+		if summary.Outcome == "passed" {
+			summary.Failure = nil
+		}
+		if err := writeGraphBenchmarkArtifacts(artifactDirectory, samples, plans, summary); err != nil {
+			t.Errorf("write Graph benchmark evidence: %v", err)
+		}
+		_ = started
+	}()
 
 	poolConfig, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -179,15 +230,30 @@ func TestGraphCapacityBenchmark(t *testing.T) {
 	t.Cleanup(pool.Close)
 
 	seedStarted := time.Now()
-	fixture, err := testfixture.SeedCapacity(ctx, pool, seed)
+	var fixture testfixture.CapacityFixture
+	switch profile {
+	case "reference":
+		fixture, err = testfixture.SeedCapacity(ctx, pool, seed)
+	case "m10":
+		fixture, err = testfixture.SeedM10Capacity(ctx, pool, seed)
+	case "m10-mixed":
+		fixture, err = testfixture.SeedM10MixedCapacity(ctx, pool, seed)
+	default:
+		t.Fatalf("unsupported Graph benchmark profile %q", profile)
+	}
 	if err != nil {
 		t.Fatalf("seed Graph capacity fixture: %v", err)
 	}
+	summary.Fixture.WorkspaceID = string(fixture.WorkspaceID)
+	summary.Fixture.CenterNodeType, summary.Fixture.CenterNodeID = string(fixture.CenterNodeType), string(fixture.CenterNodeID)
+	summary.Fixture.PathTargetNodeType, summary.Fixture.PathTargetNodeID = string(fixture.PathTargetNodeType), string(fixture.PathTargetNodeID)
+	summary.Fixture.CenterTopicID, summary.Fixture.PathTargetTopicID = string(fixture.CenterTopicID), string(fixture.PathTargetTopicID)
+	summary.Fixture.EvidenceRelationID = string(fixture.EvidenceRelationID)
 	seedDuration := time.Since(seedStarted)
 	t.Cleanup(func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cleanupCancel()
-		if cleanupErr := testfixture.CleanupCapacity(cleanupContext, pool, fixture.WorkspaceID); cleanupErr != nil {
+		if cleanupErr := testfixture.CleanupCapacityFixture(cleanupContext, pool, fixture); cleanupErr != nil {
 			t.Errorf("cleanup Graph capacity fixture: %v", cleanupErr)
 		}
 	})
@@ -204,16 +270,25 @@ func TestGraphCapacityBenchmark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct Graph benchmark service: %v", err)
 	}
+	nodeTypes := []knowledge.NodeType{knowledge.NodeTypeTopic}
+	relationTypes := []knowledge.RelationType{knowledge.RelationImpacts}
+	claimStatuses := []knowledge.ClaimStatus(nil)
+	if fixture.ClaimCount > 0 {
+		nodeTypes = []knowledge.NodeType{knowledge.NodeTypeTopic, knowledge.NodeTypeClaim}
+		relationTypes = []knowledge.RelationType{knowledge.RelationBelongsTo, knowledge.RelationImpacts}
+		claimStatuses = []knowledge.ClaimStatus{knowledge.ClaimStatusConfirmed}
+	}
 	request := graphdomain.NeighborhoodRequest{
 		WorkspaceID: fixture.WorkspaceID,
-		Center:      knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.CenterTopicID},
+		Center:      knowledge.NodeRef{Type: fixture.CenterNodeType, ID: fixture.CenterNodeID},
 		Depth:       1,
 		Limit:       graphdomain.MaxLimit,
 		Direction:   graphdomain.TraversalBoth,
 		Filter: graphdomain.GraphFilter{
-			NodeTypes:        []knowledge.NodeType{knowledge.NodeTypeTopic},
-			RelationTypes:    []knowledge.RelationType{knowledge.RelationImpacts},
+			NodeTypes:        nodeTypes,
+			RelationTypes:    relationTypes,
 			RelationStatuses: []knowledge.RelationStatus{knowledge.RelationStatusConfirmed},
+			ClaimStatuses:    claimStatuses,
 		},
 		MaxNodes:    graphdomain.MaxNodes,
 		MaxEdges:    fixture.HotCenterDegree,
@@ -233,7 +308,7 @@ func TestGraphCapacityBenchmark(t *testing.T) {
 		}
 	}
 
-	samples := make([]graphBenchmarkSample, 0, graphBenchmarkSamples)
+	samples = make([]graphBenchmarkSample, 0, graphBenchmarkSamples)
 	durations := make([]time.Duration, 0, graphBenchmarkSamples)
 	for sampleIndex := 0; sampleIndex < graphBenchmarkSamples; sampleIndex++ {
 		result, duration, statementCount, queryErr := runCapacityNeighborhood(ctx, service, queryCounter, request)
@@ -253,16 +328,24 @@ func TestGraphCapacityBenchmark(t *testing.T) {
 	}
 	var memoryAfter runtime.MemStats
 	runtime.ReadMemStats(&memoryAfter)
-	p50, p95, maximum := percentileNearestRank(durations, 50), percentileNearestRank(durations, 95), maximumDuration(durations)
+	p50, err := capacity.PercentileNearestRank(durations, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p95, err := capacity.PercentileNearestRank(durations, 95)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maximum := maximumDuration(durations)
 
 	pathStarted := time.Now()
 	pathContext, pathCancel := context.WithTimeout(ctx, graphBenchmarkQueryTimeout)
 	path, err := service.FindPath(pathContext, graphdomain.PathRequest{
 		WorkspaceID:   fixture.WorkspaceID,
-		From:          knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.CenterTopicID},
-		To:            knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.PathTargetTopicID},
+		From:          knowledge.NodeRef{Type: fixture.CenterNodeType, ID: fixture.CenterNodeID},
+		To:            knowledge.NodeRef{Type: fixture.PathTargetNodeType, ID: fixture.PathTargetNodeID},
 		Direction:     graphdomain.TraversalBoth,
-		RelationTypes: []knowledge.RelationType{knowledge.RelationImpacts},
+		RelationTypes: relationTypes,
 		MaxDepth:      2,
 		MaxVisited:    graphdomain.MaxNodes,
 	})
@@ -280,26 +363,20 @@ func TestGraphCapacityBenchmark(t *testing.T) {
 		t.Fatalf("Graph capacity evidence=%#v err=%v", evidence, err)
 	}
 
-	plans := captureCapacityPlans(t, ctx, pool, fixture)
-	if err := writeBenchmarkSamples(filepath.Join(artifactDirectory, "samples.jsonl"), samples); err != nil {
-		t.Fatalf("write Graph benchmark samples: %v", err)
-	}
-	for name, plan := range plans.raw {
-		if err := writeArtifact(filepath.Join(artifactDirectory, name+".explain.json"), plan); err != nil {
-			t.Fatalf("write Graph benchmark %s plan: %v", name, err)
-		}
-	}
+	plans = captureCapacityPlans(t, ctx, pool, fixture)
 
-	summary, err := newGraphBenchmarkSummary(ctx, fixture, seedDuration, pool, memoryBefore, memoryAfter, p50, p95, maximum, pathDuration, path.HopCount, evidenceDuration, len(evidence.Items), plans.metadata)
+	formal, outcome, failure := summary.Formal, summary.Outcome, summary.Failure
+	summary, err = newGraphBenchmarkSummary(ctx, fixture, seedDuration, pool, memoryBefore, memoryAfter, p50, p95, maximum, pathDuration, path.HopCount, evidenceDuration, len(evidence.Items), plans.metadata)
 	if err != nil {
 		t.Fatalf("read Graph benchmark environment metadata: %v", err)
 	}
-	if err := writeJSONArtifact(filepath.Join(artifactDirectory, "summary.json"), summary); err != nil {
-		t.Fatalf("write Graph benchmark summary: %v", err)
-	}
+	summary.Formal, summary.Outcome, summary.Failure = formal, outcome, failure
 	if p95 > graphBenchmarkP95Limit {
+		summary.Outcome = "failed"
+		summary.Failure = &graphBenchmarkFailure{Stage: "latency_gate", Message: fmt.Sprintf("p95 %s exceeds %s", p95, graphBenchmarkP95Limit)}
 		t.Fatalf("Graph capacity p95 %s exceeds %s", p95, graphBenchmarkP95Limit)
 	}
+	summary.Outcome = "passed"
 }
 
 func assertCapacityNeighborhood(t *testing.T, result graphdomain.Neighborhood) {
@@ -333,6 +410,14 @@ type capacityPlans struct {
 
 func captureCapacityPlans(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture testfixture.CapacityFixture) capacityPlans {
 	t.Helper()
+	nodeTypes := []string{"TOPIC"}
+	relationTypes := []string{"IMPACTS"}
+	claimStatuses := []string{"CONFIRMED", "DISPUTED"}
+	if fixture.ClaimCount > 0 {
+		nodeTypes = []string{"TOPIC", "CLAIM"}
+		relationTypes = []string{"BELONGS_TO", "IMPACTS"}
+		claimStatuses = []string{"CONFIRMED"}
+	}
 	queries := []struct {
 		name            string
 		query           string
@@ -341,12 +426,12 @@ func captureCapacityPlans(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	}{
 		{
 			name: "neighborhood", query: `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, SETTINGS) ` + neighborhoodDepthOneSQL,
-			args:            []any{string(fixture.WorkspaceID), "TOPIC", string(fixture.CenterTopicID), "BOTH", []string{"CONFIRMED"}, []string{"IMPACTS"}, (*float64)(nil), (*time.Time)(nil), []string{"TOPIC"}, []string{}, []string{"CONFIRMED", "DISPUTED"}, (*float64)(nil), 500},
+			args:            []any{string(fixture.WorkspaceID), string(fixture.CenterNodeType), string(fixture.CenterNodeID), "BOTH", []string{"CONFIRMED"}, relationTypes, (*float64)(nil), (*time.Time)(nil), nodeTypes, []string{}, claimStatuses, (*float64)(nil), 500},
 			requiredIndexes: []string{"idx_knowledge_relation_source", "idx_knowledge_relation_target", "idx_knowledge_relation_evidence_owner"},
 		},
 		{
 			name: "path", query: `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, SETTINGS) ` + pathFrontierSQL,
-			args:            []any{string(fixture.WorkspaceID), []string{"TOPIC"}, []string{string(fixture.CenterTopicID)}, "BOTH", []string{"IMPACTS"}, 1001},
+			args:            []any{string(fixture.WorkspaceID), []string{string(fixture.CenterNodeType)}, []string{string(fixture.CenterNodeID)}, "BOTH", relationTypes, 1001},
 			requiredIndexes: []string{"idx_knowledge_relation_source", "idx_knowledge_relation_target"},
 		},
 		{
@@ -436,12 +521,16 @@ func newGraphBenchmarkSummary(
 	evidenceItems int,
 	plans map[string]graphExplainMetadata,
 ) (graphBenchmarkSummary, error) {
-	summary := graphBenchmarkSummary{SchemaVersion: "zhixu-graph-benchmark/v1", GeneratedAt: time.Now().UTC(), Explain: plans}
+	summary := graphBenchmarkSummary{SchemaVersion: "zhixu-graph-benchmark/v2", GeneratedAt: time.Now().UTC(), Explain: plans}
 	summary.Fixture.Version, summary.Fixture.Seed = fixture.Version, fixture.Seed
+	summary.Fixture.CenterNodeType, summary.Fixture.CenterNodeID = string(fixture.CenterNodeType), string(fixture.CenterNodeID)
+	summary.Fixture.PathTargetNodeType, summary.Fixture.PathTargetNodeID = string(fixture.PathTargetNodeType), string(fixture.PathTargetNodeID)
 	summary.Fixture.WorkspaceID, summary.Fixture.CenterTopicID = string(fixture.WorkspaceID), string(fixture.CenterTopicID)
 	summary.Fixture.PathTargetTopicID, summary.Fixture.EvidenceRelationID = string(fixture.PathTargetTopicID), string(fixture.EvidenceRelationID)
 	summary.Fixture.SeedMilliseconds = durationMilliseconds(seedDuration)
-	summary.Counts.Nodes, summary.Counts.Relations = fixture.NodeCount, fixture.RelationCount
+	summary.Counts.Nodes, summary.Counts.Topics, summary.Counts.Claims = fixture.NodeCount, fixture.TopicCount, fixture.ClaimCount
+	summary.Counts.Relations = fixture.RelationCount
+	summary.Counts.BelongsTo, summary.Counts.Impacts = fixture.BelongsToCount, fixture.ImpactsCount
 	summary.Counts.Evidence, summary.Counts.HotCenterDegree = fixture.EvidenceCount, fixture.HotCenterDegree
 	summary.PostgreSQL.PoolMaxConnections = pool.Stat().MaxConns()
 	if err := pool.QueryRow(ctx, `SELECT
@@ -483,13 +572,6 @@ func benchmarkMemory(value runtime.MemStats) graphBenchmarkMemory {
 	}
 }
 
-func percentileNearestRank(values []time.Duration, percentile int) time.Duration {
-	ordered := append([]time.Duration(nil), values...)
-	sort.Slice(ordered, func(left, right int) bool { return ordered[left] < ordered[right] })
-	rank := (percentile*len(ordered) + 99) / 100
-	return ordered[rank-1]
-}
-
 func maximumDuration(values []time.Duration) time.Duration {
 	maximum := time.Duration(0)
 	for _, value := range values {
@@ -505,46 +587,28 @@ func durationMilliseconds(value time.Duration) float64 {
 }
 
 func writeBenchmarkSamples(path string, samples []graphBenchmarkSample) error {
-	var payload bytes.Buffer
-	encoder := json.NewEncoder(&payload)
-	for _, sample := range samples {
-		if err := encoder.Encode(sample); err != nil {
+	return capacity.WriteAtomicArtifact(path, func(writer io.Writer) error {
+		encoder := json.NewEncoder(writer)
+		for _, sample := range samples {
+			if err := encoder.Encode(sample); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func writeGraphBenchmarkArtifacts(directory string, samples []graphBenchmarkSample, plans capacityPlans, summary graphBenchmarkSummary) error {
+	if err := writeBenchmarkSamples(filepath.Join(directory, "samples.jsonl"), samples); err != nil {
+		return err
+	}
+	for name, plan := range plans.raw {
+		if err := capacity.WriteAtomicArtifact(filepath.Join(directory, name+".explain.json"), func(writer io.Writer) error {
+			_, err := writer.Write(plan)
+			return err
+		}); err != nil {
 			return err
 		}
 	}
-	return writeArtifact(path, payload.Bytes())
-}
-
-func writeJSONArtifact(path string, value any) error {
-	payload, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	payload = append(payload, '\n')
-	return writeArtifact(path, payload)
-}
-
-func writeArtifact(path string, payload []byte) error {
-	directory := filepath.Dir(path)
-	temporary, err := os.CreateTemp(directory, ".graph-benchmark-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
-	if _, err := temporary.Write(payload); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	return nil
+	return capacity.WriteJSONArtifact(filepath.Join(directory, "summary.json"), summary)
 }

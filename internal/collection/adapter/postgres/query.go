@@ -286,19 +286,12 @@ func (r *Repository) executePlanSnapshot(ctx context.Context, db DB, execution q
 		where += " AND " + keyset
 		args = append(args, keysetArgs...)
 	}
-	base := unifiedItemCTE + "SELECT * FROM item WHERE " + where
 	countSQL := "SELECT count(*) FROM (" + unifiedItemCTE + "SELECT * FROM item WHERE " + countWhere + ") counted"
 	var count int64
 	if err := db.QueryRow(ctx, countSQL, countArgs...).Scan(&count); err != nil {
 		return collectionapp.ResultPage{}, classify(err)
 	}
-	sortSQL := make([]string, 0, len(plan.Sort))
-	for _, sortTerm := range plan.Sort {
-		sortSQL = append(sortSQL, sortTerm.Column+" "+sortTerm.Direction+" NULLS LAST")
-	}
-	limitArg := len(args) + 1
-	pageSQL := base + " ORDER BY " + strings.Join(sortSQL, ", ") + fmt.Sprintf(" LIMIT $%d", limitArg)
-	pageArgs := append(append([]any(nil), args...), execution.limit+1)
+	pageSQL, pageArgs := buildCollectionPageQuery(plan, where, args, execution.limit+1)
 	rows, err := db.Query(ctx, pageSQL, pageArgs...)
 	if err != nil {
 		return collectionapp.ResultPage{}, classify(err)
@@ -335,6 +328,15 @@ func (r *Repository) executePlanSnapshot(ctx context.Context, db DB, execution q
 		return collectionapp.ResultPage{}, err
 	}
 	return page, nil
+}
+
+func buildCollectionPageQuery(plan collectionapp.QueryPlan, where string, args []any, limit int) (string, []any) {
+	sortSQL := make([]string, 0, len(plan.Sort))
+	for _, sortTerm := range plan.Sort {
+		sortSQL = append(sortSQL, sortTerm.Column+" "+sortTerm.Direction+" NULLS LAST")
+	}
+	pageSQL := unifiedItemCTE + "SELECT * FROM item WHERE " + where + " ORDER BY " + strings.Join(sortSQL, ", ") + fmt.Sprintf(" LIMIT $%d", len(args)+1)
+	return pageSQL, append(append([]any(nil), args...), limit)
 }
 
 type revisionOptions struct {

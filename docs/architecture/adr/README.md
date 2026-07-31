@@ -17,3 +17,4 @@
 | [0013](0013-eino-adoption-gate.md) | Eino 采用门禁与 M2 不采用结论 | accepted |
 | [0014](0014-single-user-authentication.md) | 单用户 Session、API Token 与写授权分离 | accepted |
 | [0015](0015-river-goose-runtime.md) | River/Goose Runtime 版本、迁移和兼容边界 | accepted |
+| [0016](0016-capacity-performance-baseline.md) | 确定性容量数据集与可审计性能门禁 | accepted |

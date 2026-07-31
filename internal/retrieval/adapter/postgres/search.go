@@ -135,7 +135,7 @@ func (r *SearchRepository) SearchVector(ctx context.Context, query application.V
 	if persistedEmbedding.ID != query.EmbeddingVersion.ID || !domain.SameEmbeddingBinding(persistedEmbedding, query.EmbeddingVersion) {
 		return nil, consistency("RETRIEVAL_VECTOR_EMBEDDING_BINDING_INVALID", errors.New("query embedding version differs from persisted binding"))
 	}
-	distanceExpression, ok := vectorDistanceExpression(persistedEmbedding.DistanceMetric)
+	distanceExpression, ok := vectorDistanceExpression(persistedEmbedding.DistanceMetric, persistedEmbedding.Dimensions)
 	if !ok {
 		return nil, searchInvalid("RETRIEVAL_VECTOR_DISTANCE_INVALID", errors.New("unsupported vector distance metric"))
 	}
@@ -144,8 +144,18 @@ func (r *SearchRepository) SearchVector(ctx context.Context, query application.V
 		pgvector.NewVector(query.QueryEmbedding), query.Limit, domain.MaxEvidenceProvenance,
 	}
 	filterSQL := appendSearchFilter(&arguments, canonicalFilter)
+	nearestEligibilitySQL := ""
+	if filterSQL != "" {
+		nearestEligibilitySQL = ` AND projection.chunk_id IN (
+			SELECT matched_chunks.chunk_id
+			FROM matched_chunks
+			WHERE matched_chunks.index_version_id=active_index.id
+			OFFSET 0
+		)`
+	}
 	rows, err := r.db.Query(ctx, fmt.Sprintf(
-		vectorCandidateSQL, filterSQL, searchSnippetCharacterLimit, searchRerankCharacterLimit, distanceExpression,
+		vectorCandidateSQL, filterSQL, distanceExpression, persistedEmbedding.Dimensions, nearestEligibilitySQL, distanceExpression,
+		searchSnippetCharacterLimit, searchRerankCharacterLimit,
 	), arguments...)
 	if err != nil {
 		return nil, classify(err, "RETRIEVAL_VECTOR_SEARCH_QUERY_FAILED")
@@ -222,17 +232,22 @@ func idsAsStrings(values []foundation.ID) []string {
 	return result
 }
 
-func vectorDistanceExpression(metric domain.DistanceMetric) (string, bool) {
+func vectorDistanceExpression(metric domain.DistanceMetric, dimensions int32) (string, bool) {
+	if dimensions <= 0 {
+		return "", false
+	}
+	operator := ""
 	switch metric {
 	case domain.DistanceCosine:
-		return "projection.embedding <=> $4::vector", true
+		operator = "<=>"
 	case domain.DistanceInnerProduct:
-		return "projection.embedding <#> $4::vector", true
+		operator = "<#>"
 	case domain.DistanceEuclidean:
-		return "projection.embedding <-> $4::vector", true
+		operator = "<->"
 	default:
 		return "", false
 	}
+	return fmt.Sprintf("projection.embedding::vector(%d) %s $4::vector(%d)", dimensions, operator, dimensions), true
 }
 
 type searchCandidateScan struct {
@@ -530,6 +545,25 @@ matched_chunks AS MATERIALIZED (
 	FROM filtered_provenance
 	GROUP BY index_version_id,chunk_id
 ),
+nearest AS MATERIALIZED (
+	SELECT active_index.id AS index_version_id,nearest_projection.chunk_id,active_index.workspace_id,
+		active_index.embedding_version_id,nearest_projection.distance
+	FROM active_index
+	CROSS JOIN LATERAL (
+		SELECT projection.chunk_id,(%s)::double precision AS distance
+		FROM retrieval.chunk_projection projection
+		WHERE projection.index_version_id=active_index.id
+		  AND projection.workspace_id=active_index.workspace_id
+		  AND projection.embedding_version_id=$3
+		  AND projection.lexical_status='ready'
+		  AND projection.vector_status='ready'
+		  AND projection.embedding IS NOT NULL
+		  AND vector_dims(projection.embedding)=%d
+		  %s
+		ORDER BY %s,projection.chunk_id
+		LIMIT $5
+	) nearest_projection
+),
 scored AS MATERIALIZED (
 	SELECT active_index.workspace_id::text AS workspace_id,
 		active_index.id::text AS index_version_id,
@@ -538,24 +572,19 @@ scored AS MATERIALIZED (
 		chunk.sequence,chunk.content_hash,chunk.heading_path,
 		span.id::text AS span_id,span.start_line,span.end_line,span.start_byte,span.end_byte,
 		left(chunk.content,%d) AS snippet,left(chunk.content,%d) AS rerank_text,
-		(%s)::double precision AS distance
+		nearest.distance
 	FROM active_index
-	JOIN retrieval.chunk_projection projection
-	  ON projection.index_version_id=active_index.id
-	 AND projection.workspace_id=active_index.workspace_id
-	 AND projection.embedding_version_id=$3
-	 AND projection.lexical_status='ready'
-	 AND projection.vector_status='ready'
+	JOIN nearest
+	  ON nearest.index_version_id=active_index.id
+	 AND nearest.workspace_id=active_index.workspace_id
+	 AND nearest.embedding_version_id=active_index.embedding_version_id
 	JOIN ingestion.canonical_chunk chunk
-	  ON chunk.id=projection.chunk_id
+	  ON chunk.id=nearest.chunk_id
 	 AND chunk.workspace_id=active_index.workspace_id
 	 AND chunk.status='active'
 	JOIN ingestion.source_span span
 	  ON span.id=chunk.source_span_id
 	 AND span.workspace_id=active_index.workspace_id
-	JOIN matched_chunks
-	  ON matched_chunks.index_version_id=active_index.id
-	 AND matched_chunks.chunk_id=chunk.id
 ),
 ranked AS (
 	SELECT scored.*,

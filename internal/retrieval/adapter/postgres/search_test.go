@@ -61,11 +61,11 @@ func TestVectorDistanceExpressionUsesOnlyFixedOperators(t *testing.T) {
 		{metric: domain.DistanceMetric("cosine; DROP TABLE retrieval.index_version"), ok: false},
 	}
 	for _, test := range tests {
-		expression, ok := vectorDistanceExpression(test.metric)
+		expression, ok := vectorDistanceExpression(test.metric, 384)
 		if ok != test.ok {
 			t.Fatalf("metric %q ok=%v", test.metric, ok)
 		}
-		if test.ok && expression != "projection.embedding "+test.operator+" $4::vector" {
+		if test.ok && expression != "projection.embedding::vector(384) "+test.operator+" $4::vector(384)" {
 			t.Fatalf("metric %q expression=%q", test.metric, expression)
 		}
 		if !test.ok && expression != "" {
@@ -76,7 +76,9 @@ func TestVectorDistanceExpressionUsesOnlyFixedOperators(t *testing.T) {
 
 func TestCandidateSQLSharesActiveIncludedAndChunkPredicates(t *testing.T) {
 	lexicalSQL := fmt.Sprintf(lexicalCandidateSQL, "", searchSnippetCharacterLimit, searchRerankCharacterLimit)
-	vectorSQL := fmt.Sprintf(vectorCandidateSQL, "", searchSnippetCharacterLimit, searchRerankCharacterLimit, "projection.embedding <=> $4::vector")
+	vectorSQL := fmt.Sprintf(vectorCandidateSQL, "", "projection.embedding::vector(3) <=> $4::vector(3)", 3,
+		"", "projection.embedding::vector(3) <=> $4::vector(3)",
+		searchSnippetCharacterLimit, searchRerankCharacterLimit)
 	shared := []string{
 		"WHERE workspace_id=$1 AND id=$2",
 		"status='active'",
@@ -96,6 +98,8 @@ func TestCandidateSQLSharesActiveIncludedAndChunkPredicates(t *testing.T) {
 	}
 	for _, predicate := range []string{
 		"embedding_version_id=$3", "projection.vector_status='ready'", "projection.embedding_version_id=$3",
+		"projection.embedding IS NOT NULL", "vector_dims(projection.embedding)=3", "CROSS JOIN LATERAL",
+		"ORDER BY projection.embedding::vector(3) <=> $4::vector(3),projection.chunk_id", "LIMIT $5",
 	} {
 		if !strings.Contains(vectorSQL, predicate) {
 			t.Fatalf("vector SQL missing %q", predicate)

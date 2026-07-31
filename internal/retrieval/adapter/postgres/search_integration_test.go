@@ -344,7 +344,7 @@ func TestSearchRepositoryDistanceOperatorsAndExactExplain(t *testing.T) {
 				t.Fatalf("persisted distance mismatch error=%#v", mismatchErr)
 			}
 
-			expression, ok := vectorDistanceExpression(test.metric)
+			expression, ok := vectorDistanceExpression(test.metric, embedding.Dimensions)
 			if !ok {
 				t.Fatal("distance expression missing")
 			}
@@ -353,7 +353,8 @@ func TestSearchRepositoryDistanceOperatorsAndExactExplain(t *testing.T) {
 				pgvector.NewVector([]float32{0, 1, 0}), int32(10), domain.MaxEvidenceProvenance,
 			}
 			plan := explainSearchQuery(t, ctx, database.DB(), fmt.Sprintf(
-				vectorCandidateSQL, "", searchSnippetCharacterLimit, searchRerankCharacterLimit, expression,
+				vectorCandidateSQL, "", expression, embedding.Dimensions, "", expression,
+				searchSnippetCharacterLimit, searchRerankCharacterLimit,
 			), arguments...)
 			if !strings.Contains(plan, test.operator) {
 				t.Fatalf("EXPLAIN missing distance operator %s:\n%s", test.operator, plan)

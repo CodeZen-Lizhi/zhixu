@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 DOCKER_COMPOSE ?= docker compose
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-runtime-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-runtime-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke
 
 test: go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet agent-eval openapi-check compose-check
 
@@ -75,6 +75,9 @@ graph-benchmark:
 	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
 	ZHIXU_GRAPH_BENCHMARK_ARTIFACT_DIR="$${ZHIXU_GRAPH_BENCHMARK_ARTIFACT_DIR:-$(CURDIR)/tmp/graph-benchmark}" \
 		go test -tags=integration -count=1 -p 1 -run '^TestGraphCapacityBenchmark$$' ./internal/graph/adapter/postgres
+
+benchmark-capacity:
+	bash deploy/capacity-benchmark.sh
 
 semantic-link-integration:
 	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)

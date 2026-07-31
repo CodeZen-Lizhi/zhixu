@@ -139,6 +139,45 @@ make graph-benchmark
 - 上述仅证明 M7-03 参考 fixture 的有界查询、无逐对象 N+1 和索引计划，不是最终 100,000 Claim/
   500,000 Relation 容量认证；正式容量、并发与资源预算仍归 M10。
 
+## 8.2 M10-03 容量门禁入口与证据边界
+
+仓库提供统一入口：
+
+```bash
+make benchmark-capacity
+```
+
+默认快速模式只执行 `internal/capacity` 与 `cmd/capacity-benchmark` 的单测，并在
+`tmp/capacity-benchmark/` 写出确定性的 `manifest.json` 和本次 `run.json`；不会默认生成 500,000 条
+Chunk JSONL、500,000 条 Relation JSONL，也不会写入 PostgreSQL。需要检查流式数据文件时显式设置
+`ZHIXU_CAPACITY_GENERATE_JSONL=1`。
+
+完整 PostgreSQL 门禁必须使用 disposable 数据库的 superuser 连接并显式开启。脚本会在写入任何 500,000 规模 fixture 前用 `psql` 检查 superuser 权限；这是 cleanup 中 `SET LOCAL session_replication_role=replica` 的必要条件：
+
+```bash
+test -n "$ZHIXU_TEST_DATABASE_URL"
+ZHIXU_CAPACITY_FULL=1 make benchmark-capacity
+```
+
+完整模式当前包含：
+
+- Graph `m10-mixed` profile：20,000 Topic、100,000 Confirmed Claim、500,000 混合 Relation 与 500,000 Evidence，5 次预热、
+  30 次一跳采样，P95 门槛 1.5 秒；同时检查固定 6 statements 和 Neighborhood/Path/Evidence 生产 SQL 的
+  既有索引计划。M7 `reference` profile 仍保持 20,000/100,000 默认行为。
+- Retrieval Hybrid/ANN profile：500,000 canonical Chunk、完整 source/chunk manifest、FTS projection、Active Index，
+  通过生产 Hybrid 路径分别运行 HNSW 与 IVFFlat，检查 ANN recall、5 次预热、30 次采样和 2 秒 P95 门槛，并保留 EXPLAIN。
+- 可选浏览器诊断：只有同时提供 `ZHIXU_PLAYWRIGHT_BASE_URL`、`ZHIXU_GRAPH_FPS_WORKSPACE_ID` 和
+  `ZHIXU_GRAPH_FPS_CENTER_TOPIC_ID` 才执行 `graph-capacity.fps.spec.ts`。它写出 `formal:false` 的合成
+  `requestAnimationFrame` 调度数据，不设置通过阈值，也不能替代真实 Graph 渲染、布局与交互 FPS 门禁。
+
+产物根目录可用 `ZHIXU_CAPACITY_ARTIFACT_DIR` 覆盖；目录权限为 `0700`、文件权限为 `0600`。Graph 与
+Retrieval summary 记录 seed、数据量、Go/OS/Arch、运行时内存、数据库或查询环境、P50/P95/Max、阈值和
+EXPLAIN 产物。设置 `ZHIXU_CAPACITY_SEED` 时，脚本会将同一 seed 传给 manifest、Graph 与 Retrieval 基准。测试结束只按严格 Workspace marker 清理 fixture；marker 不匹配时 fail closed。
+
+本节定义可执行门禁，不记录未运行的通过结论。`m10-mixed` Graph 和 500,000 Chunk Hybrid/ANN Retrieval 的 HNSW/IVFFlat
+参数、P95，以及正式容量页面的真实 Graph 渲染 FPS，仍需对应产物后才能关闭 AC-31。详细决策见
+[ADR-0016](adr/0016-capacity-performance-baseline.md)。
+
 ## 9. Vector
 
 - HNSW。

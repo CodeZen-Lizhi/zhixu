@@ -27,17 +27,21 @@ const semanticLinkTopicClaimPairsSQL = `
 	SELECT source_ids.source_id::text,target.target_id::text
 	FROM source_ids
 	CROSS JOIN LATERAL (
-		SELECT claim.id AS target_id
+		SELECT scoped.source_node_id AS target_id
 		FROM core.relation scoped
-		JOIN core.claim claim
-		  ON claim.workspace_id=scoped.workspace_id AND claim.id=scoped.source_node_id
-		 AND claim.status IN ('CONFIRMED','DISPUTED')
 		WHERE scoped.workspace_id=$1
 		  AND scoped.source_node_type='CLAIM'
 		  AND scoped.target_node_type='TOPIC' AND scoped.target_node_id=$2
 		  AND scoped.relation_type='BELONGS_TO' AND scoped.status='CONFIRMED'
-		  AND claim.id>source_ids.source_id
-		ORDER BY claim.id
+		  AND scoped.source_node_id>source_ids.source_id
+		  AND EXISTS (
+			SELECT 1
+			FROM core.claim claim
+			WHERE claim.workspace_id=scoped.workspace_id
+			  AND claim.id=scoped.source_node_id
+			  AND claim.status IN ('CONFIRMED','DISPUTED')
+		  )
+		ORDER BY scoped.source_node_id
 		LIMIT $4
 	) target
 	ORDER BY source_ids.source_id,target.target_id`
