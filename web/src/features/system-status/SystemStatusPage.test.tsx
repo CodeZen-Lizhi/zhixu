@@ -39,9 +39,40 @@ describe("SystemStatusPage", () => {
     renderWithAppProviders(<SystemStatusPage />);
 
     expect(screen.getByText("读取系统真实状态")).toBeInTheDocument();
-    expect(await screen.findByText("所有基础依赖可用")).toBeInTheDocument();
+    expect(await screen.findByText("基础服务已就绪")).toBeInTheDocument();
+    expect(screen.getByText("可选能力已关闭")).toBeInTheDocument();
     expect(screen.getByText("0.1.0")).toBeInTheDocument();
     expect(screen.getByText("request-ready")).toBeInTheDocument();
+  });
+
+  it("紧凑模式只展示关键运行事实并明确 RAG 是可选能力", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse({
+        status: "ready",
+        version: "0.1.0",
+        database: { status: "ready" },
+        graph: { status: "ready" },
+        semantic_links: { status: "ready" },
+        rag: { status: "disabled" },
+        collections: { status: "ready" },
+        knowledge_health: { status: "ready" },
+        knowledge_timeline: { status: "ready" },
+        ...learningCapabilities,
+        auth: { status: "disabled" },
+        request_id: "request-compact",
+      }),
+    );
+
+    renderWithAppProviders(<SystemStatusPage display="compact" />);
+
+    expect(screen.getByText("读取运行摘要")).toBeInTheDocument();
+    expect(await screen.findByText("基础服务已就绪")).toBeInTheDocument();
+    expect(screen.getByText("运行摘要")).toBeInTheDocument();
+    expect(screen.getByText("可选能力已关闭")).toBeInTheDocument();
+    expect(screen.getByText("RAG", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.getByText("Graph", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.queryByText("request-compact")).not.toBeInTheDocument();
+    expect(screen.queryByText("认证", { selector: "dt" })).not.toBeInTheDocument();
   });
 
   it("数据库不可用时显示 degraded 和重试入口", async () => {

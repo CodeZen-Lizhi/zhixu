@@ -1,4 +1,4 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithAppProviders } from "../../test/render";
@@ -32,6 +32,23 @@ const workspace = {
   updated_at: "2026-07-16T10:00:00Z",
 };
 
+const systemStatus = {
+  status: "ready",
+  version: "dev",
+  database: { status: "ready" },
+  graph: { status: "ready" },
+  semantic_links: { status: "ready" },
+  rag: { status: "disabled" },
+  collections: { status: "ready" },
+  knowledge_health: { status: "ready" },
+  knowledge_timeline: { status: "ready" },
+  review: { status: "ready" },
+  memory: { status: "ready" },
+  interview: { status: "ready" },
+  auth: { status: "disabled" },
+  request_id: "req",
+};
+
 describe("WorkspacePage", () => {
   beforeEach(() => {
     const values = new Map<string, string>();
@@ -48,7 +65,7 @@ describe("WorkspacePage", () => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = requestURL(input);
       if (url.endsWith("/api/v1/system/status")) {
-        return Promise.resolve(jsonResponse({ status: "ready", version: "dev", database: { status: "ready" }, graph: { status: "ready" }, rag: { status: "disabled" }, request_id: "req" }));
+        return Promise.resolve(jsonResponse(systemStatus));
       }
       return Promise.reject(new Error(`unexpected request: ${url}`));
     }));
@@ -58,21 +75,44 @@ describe("WorkspacePage", () => {
     vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
       const url = requestURL(input);
       if (url.endsWith("/api/v1/system/status")) {
-        return Promise.resolve(jsonResponse({ status: "ready", version: "dev", database: { status: "ready" }, graph: { status: "ready" }, rag: { status: "disabled" }, request_id: "req" }));
+        return Promise.resolve(jsonResponse(systemStatus));
       }
       if (url.endsWith("/api/v1/workspaces")) return Promise.resolve(jsonResponse(workspace, 201));
       return Promise.reject(new Error(`unexpected request: ${url}`));
     });
 
     renderWithAppProviders(<WorkspacePage />);
-    expect(screen.getByRole("link", { name: "知识图谱" })).toHaveAttribute("href", "/graph");
-    expect(screen.getByRole("link", { name: "证据研究台" })).toHaveAttribute("href", "/chat");
+    expect(screen.getByRole("button", { name: "创建 Workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开已有 Workspace" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Workspace 名称"), { target: { value: "知识库" } });
     fireEvent.change(screen.getByLabelText("根目录绝对路径"), { target: { value: "/tmp/knowledge" } });
     fireEvent.click(screen.getByRole("button", { name: "创建 Workspace" }));
 
     expect(await screen.findByText("Git Dirty 警告")).toBeInTheDocument();
     expect(screen.getByText("/tmp/knowledge")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "扫描受支持文件" })).toBeEnabled();
+    expect(screen.getByRole("link", { name: "进入工作台" })).toHaveAttribute("href", "/dashboard");
+  });
+
+  it("打开已有 Workspace 后展示由服务端事实驱动的下一步入口", async () => {
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = requestURL(input);
+      if (url.endsWith("/api/v1/system/status")) {
+        return Promise.resolve(jsonResponse(systemStatus));
+      }
+      if (url.endsWith(`/api/v1/workspaces/${workspace.id}`)) {
+        return Promise.resolve(jsonResponse(workspace));
+      }
+      return Promise.reject(new Error(`unexpected request: ${url}`));
+    });
+
+    renderWithAppProviders(<WorkspacePage />);
+    fireEvent.change(screen.getByLabelText("已有 Workspace ID"), { target: { value: workspace.id } });
+    fireEvent.click(screen.getByRole("button", { name: "打开已有 Workspace" }));
+
+    const nextStep = await screen.findByRole("region", { name: "扫描资料，或进入工作台" });
+    expect(within(nextStep).getByRole("button", { name: "扫描受支持文件" })).toBeEnabled();
+    expect(within(nextStep).getByRole("link", { name: "进入工作台" })).toHaveAttribute("href", "/dashboard");
   });
 
   it("扫描后以表格展示文件哈希并明确不是导入完成", async () => {
@@ -80,7 +120,7 @@ describe("WorkspacePage", () => {
     vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
       const url = requestURL(input);
       if (url.endsWith("/api/v1/system/status")) {
-        return Promise.resolve(jsonResponse({ status: "ready", version: "dev", database: { status: "ready" }, graph: { status: "ready" }, rag: { status: "disabled" }, request_id: "req" }));
+        return Promise.resolve(jsonResponse(systemStatus));
       }
       if (url.endsWith(`/api/v1/workspaces/${workspace.id}/scan`)) {
         return Promise.resolve(jsonResponse({
@@ -98,5 +138,8 @@ describe("WorkspacePage", () => {
 
     expect(await screen.findByRole("cell", { name: "notes/a.md" })).toBeInTheDocument();
     expect(screen.getByText("扫描会把原始字节捕获到受管不可变存储，不修改源文件，也不代表已完成解析或索引。")).toBeInTheDocument();
+    const scanNextStep = screen.getByRole("region", { name: "继续检查资料事实" });
+    expect(within(scanNextStep).getByRole("link", { name: "查看资料版本" })).toHaveAttribute("href", "/documents");
+    expect(within(scanNextStep).getByRole("link", { name: "进入工作台" })).toHaveAttribute("href", "/dashboard");
   });
 });

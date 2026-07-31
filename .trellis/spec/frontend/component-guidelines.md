@@ -163,3 +163,53 @@ editor.getModifiedEditor().onDidDispose(() => {
   });
 });
 ```
+
+## Scenario: Workspace 首次连接与 App Shell 导航
+
+### 1. Scope / Trigger
+
+- 修改 `AppShell` 导航、Workspace 首次连接页、系统状态摘要或根路由 `/` 的页面语义时应用。
+
+### 2. Signatures
+
+```tsx
+<Navigation workspaceConnected={workspaceId !== ""} currentPath={location.pathname} />
+<SystemStatusPage display="full" />
+<SystemStatusPage display="compact" />
+```
+
+### 3. Contracts
+
+- 未连接 Workspace 时，主导航只显示工作台和系统入口；已有业务 deep link 仍由目标页面的 Workspace gate 处理，不能删路由或重定向为假成功。
+- 根路由 `/` 语义等同 Workspace 页面：工作区链接必须具有 active 样式与 `aria-current="page"`，面包屑不得追加“详情”。
+- 未连接时显示“等待连接 Workspace”；只有 Active Workspace 存在时，侧栏才把 SSE `open|connecting|reconnecting|recovery_failed|closed` 投影为同步状态。
+- `compact` 与 `full` 必须复用同一个严格系统状态 Query。紧凑模式只投影 API、数据库、Graph、RAG；RAG `disabled` 表达为“可选能力已关闭”，不能与核心服务降级混为一谈。
+- 创建或打开 Workspace 后提供扫描与进入工作台入口；扫描完成后提供资料版本与工作台入口。不得自动扫描、伪造索引完成或改变 Workspace/storage owner。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| 无 Active Workspace | 只显示必要导航和连接表单，不建立 SSE |
+| `/` 打开 Workspace 页 | 工作区 active 且无“详情”面包屑 |
+| RAG disabled、核心依赖 ready | “基础服务已就绪”并明确可选能力已关闭 |
+| 状态请求失败或能力 unavailable | 显示可重试错误/降级，不隐藏连接表单 |
+| 创建、打开或扫描失败 | 保留服务端错误，不显示后续成功事实 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：首次打开页面即可连接 Workspace，运行摘要不阻挡主操作；连接后完整分组导航可用。
+- Base：没有 Workspace 时仍可访问 Dashboard、工作区和设置，并可通过 direct URL 查看其他页面的 gate。
+- Bad：平铺全部路由、把 `closed` 描述为服务离线、在表单前渲染完整状态矩阵，或创建后自动扫描。
+
+### 6. Tests Required
+
+- Component：未连接/已连接导航、根路由 active 与面包屑、compact ready/degraded、创建/打开/扫描后的下一步。
+- Browser：真实本地 API 下检查 `1440x900` 和 `390x844` 的主操作可见、移动 Sheet、Escape 焦点恢复、零横向溢出及零 console warning/error。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 未选择 Workspace 时把 SSE closed 显示为“离线”，并让用户先滚过全部能力明细。
+Correct: 显示“等待连接 Workspace”，表单优先，compact 状态只说明真实运行事实。
+```

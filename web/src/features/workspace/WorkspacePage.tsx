@@ -3,14 +3,13 @@ import { type SyntheticEvent, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { setActiveWorkspaceId, useActiveWorkspaceId } from "../../app/active-workspace";
-
 import {
   createWorkspace,
   getWorkspace,
   scanWorkspace,
   type Workspace,
-  type WorkspaceScan,
   WorkspaceApiError,
+  type WorkspaceScan,
 } from "../../api/workspace";
 import { SystemStatusPage } from "../system-status/SystemStatusPage";
 
@@ -75,6 +74,17 @@ const ScanTable = ({ scan }: { scan: WorkspaceScan }) => (
         </tbody>
       </table>
     </div>
+    <section className="workspace-next-step workspace-next-step--scan" aria-labelledby="scan-next-step-title">
+      <div>
+        <p className="eyebrow">扫描后的下一步</p>
+        <h3 id="scan-next-step-title">继续检查资料事实</h3>
+        <p>本次扫描已返回 {scan.count} 个文件事实；资料的解析与索引状态仍以对应页面的服务端投影为准。</p>
+      </div>
+      <div className="workspace-action-row">
+        <Link className="workspace-action-link workspace-action-link--primary" to="/documents">查看资料版本</Link>
+        <Link className="workspace-action-link" to="/dashboard">进入工作台</Link>
+      </div>
+    </section>
   </section>
 );
 
@@ -118,72 +128,92 @@ export const WorkspacePage = () => {
 
   return (
     <div className="workspace-page">
-      <header className="hero">
+      <header className="workspace-intro">
         <p className="brand-mark">知序 · ZHIXU</p>
-        <h1>把本地知识，接入一条可信链路。</h1>
-        <p className="hero-copy">创建 Workspace、检查 Git 基线，并安全扫描真实文件；所有状态均来自后端与本地事实源。</p>
-        <nav className="workspace-product-nav" aria-label="产品工作区">
-          <Link to="/graph">知识图谱</Link>
-          <Link to="/chat">证据研究台</Link>
-        </nav>
+        <h2>连接你的本地知识。</h2>
+        <p>创建或打开 Workspace 后，再从真实目录扫描资料；运行状态与文件事实始终分别呈现。</p>
       </header>
-      <SystemStatusPage />
 
-      <section className="workspace-section" aria-labelledby="workspace-setup-title">
-        <div className="section-heading">
+      <section className="workspace-connection" aria-labelledby="workspace-setup-title">
+        <div className="section-heading workspace-connection__heading">
           <div>
             <p className="eyebrow">Workspace 配置</p>
-            <h2 id="workspace-setup-title">连接本地知识目录</h2>
+            <h2 id="workspace-setup-title">{workspaceID === "" ? "连接本地知识目录" : "当前工作区"}</h2>
           </div>
-          <p>目录必须存在且位于 API 服务可访问的本机或服务器文件系统中。</p>
+          <p>{workspaceID === "" ? "目录必须存在，并且可由 API 服务访问。" : "Workspace 已连接；同步通道与业务状态仍由各自的事实源负责。"}</p>
         </div>
 
-        {workspaceID === "" ? (
-          <><form className="workspace-form" onSubmit={submit}>
-            <label>
-              <span>Workspace 名称</span>
-              <input value={name} onChange={(event) => setName(event.target.value)} required />
-            </label>
-            <label>
-              <span>根目录绝对路径</span>
-              <input value={rootPath} onChange={(event) => setRootPath(event.target.value)} required placeholder="/Users/me/knowledge" />
-            </label>
-            <label className="checkbox-field">
-              <input type="checkbox" checked={initializeGit} onChange={(event) => setInitializeGit(event.target.checked)} />
-              <span>目录不是 Git 仓库时允许初始化</span>
-            </label>
-            <button type="submit" disabled={createMutation.isPending}>
-              {createMutation.isPending ? "正在校验并创建…" : "创建 Workspace"}
-            </button>
-          </form>
-          <form className="workspace-open-form" onSubmit={(event) => { event.preventDefault(); try { setActiveWorkspaceId(existingWorkspaceID.trim()); setExistingWorkspaceError(undefined); } catch (error: unknown) { setExistingWorkspaceError(error instanceof Error ? error : new Error("Workspace ID 无效")); } }}>
-            <label><span>已有 Workspace ID</span><input value={existingWorkspaceID} onChange={(event) => setExistingWorkspaceID(event.target.value)} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" title="请输入规范 UUID" required /></label>
-            <button type="submit" className="secondary-button">打开已有 Workspace</button>
-          </form></>
-        ) : null}
+        <div className="workspace-connection__body">
+          <div className="workspace-connection__primary">
+            {workspaceID === "" ? (
+              <>
+                <form className="workspace-form" onSubmit={submit}>
+                  <label>
+                    <span>Workspace 名称</span>
+                    <input value={name} onChange={(event) => setName(event.target.value)} required />
+                  </label>
+                  <label>
+                    <span>根目录绝对路径</span>
+                    <input value={rootPath} onChange={(event) => setRootPath(event.target.value)} required placeholder="/Users/me/knowledge" />
+                  </label>
+                  <label className="checkbox-field">
+                    <input type="checkbox" checked={initializeGit} onChange={(event) => setInitializeGit(event.target.checked)} />
+                    <span>目录不是 Git 仓库时允许初始化</span>
+                  </label>
+                  <button type="submit" disabled={createMutation.isPending}>
+                    {createMutation.isPending ? "正在校验并创建…" : "创建 Workspace"}
+                  </button>
+                </form>
+                <form className="workspace-open-form" onSubmit={(event) => {
+                  event.preventDefault();
+                  try {
+                    setActiveWorkspaceId(existingWorkspaceID.trim());
+                    setExistingWorkspaceError(undefined);
+                  } catch (error: unknown) {
+                    setExistingWorkspaceError(error instanceof Error ? error : new Error("Workspace ID 无效"));
+                  }
+                }}>
+                  <label><span>已有 Workspace ID</span><input value={existingWorkspaceID} onChange={(event) => setExistingWorkspaceID(event.target.value)} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" title="请输入规范 UUID" required /></label>
+                  <button type="submit" className="secondary-button">打开已有 Workspace</button>
+                </form>
+              </>
+            ) : null}
 
-        {existingWorkspaceError === undefined ? null : <ErrorNotice error={existingWorkspaceError} />}
+            {existingWorkspaceError === undefined ? null : <ErrorNotice error={existingWorkspaceError} />}
+            {createMutation.isError ? <ErrorNotice error={createMutation.error} /> : null}
+            {workspaceQuery.isPending && workspaceID !== "" ? <p role="status">正在打开上次 Workspace…</p> : null}
+            {workspaceQuery.isError ? (
+              <>
+                <ErrorNotice error={workspaceQuery.error} />
+                <button type="button" className="secondary-button" onClick={() => {
+                  setActiveWorkspaceId("");
+                }}>清除本地引用并重新创建</button>
+              </>
+            ) : null}
 
-        {createMutation.isError ? <ErrorNotice error={createMutation.error} /> : null}
-        {workspaceQuery.isPending && workspaceID !== "" ? <p>正在打开上次 Workspace…</p> : null}
-        {workspaceQuery.isError ? (
-          <>
-            <ErrorNotice error={workspaceQuery.error} />
-            <button type="button" className="secondary-button" onClick={() => {
-              setActiveWorkspaceId("");
-            }}>清除本地引用并重新创建</button>
-          </>
-        ) : null}
-        {workspace === undefined ? null : <WorkspaceSummary workspace={workspace} />}
-
-        {workspace === undefined ? null : (
-          <div className="workspace-actions">
-            <button type="button" onClick={() => scanMutation.mutate(workspace.id)} disabled={scanMutation.isPending}>
-              {scanMutation.isPending ? "正在安全扫描…" : "扫描受支持文件"}
-            </button>
+            {workspace === undefined ? null : (
+              <>
+                <WorkspaceSummary workspace={workspace} />
+                <section className="workspace-next-step" aria-labelledby="workspace-next-step-title">
+                  <div>
+                    <p className="eyebrow">下一步</p>
+                    <h3 id="workspace-next-step-title">扫描资料，或进入工作台</h3>
+                    <p>扫描只捕获受支持文件的真实版本；不需要扫描时，可以直接查看已有工作状态。</p>
+                  </div>
+                  <div className="workspace-action-row">
+                    <button type="button" onClick={() => scanMutation.mutate(workspace.id)} disabled={scanMutation.isPending}>
+                      {scanMutation.isPending ? "正在安全扫描…" : "扫描受支持文件"}
+                    </button>
+                    <Link className="workspace-action-link" to="/dashboard">进入工作台</Link>
+                  </div>
+                </section>
+              </>
+            )}
+            {scanMutation.isError ? <ErrorNotice error={scanMutation.error} /> : null}
           </div>
-        )}
-        {scanMutation.isError ? <ErrorNotice error={scanMutation.error} /> : null}
+
+          <SystemStatusPage display="compact" />
+        </div>
       </section>
 
       {scan === undefined ? null : <ScanTable scan={scan} />}
