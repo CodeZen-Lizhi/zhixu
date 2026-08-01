@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { Link } from "react-router-dom";
 
 import { getRuntimeAccess, type RuntimeAccess, type RuntimeAccessStatus } from "../api/runtime-access";
@@ -48,13 +49,18 @@ export const RuntimeAccessProvider = ({ children }: { children: ReactNode }) => 
     const nextWorkspace = next.status === "ready" ? next.activeWorkspaceId : "";
     const previousWorkspace = publishedWorkspaceRef.current;
     if (previousWorkspace !== nextWorkspace) {
-      publishedWorkspaceRef.current = "";
-      setActiveWorkspaceId("");
       if (previousWorkspace !== "") {
         // 先卸载旧业务树；A -> B 清理期间保持 loading，绝不提前渲染 B。
         const suspended: RuntimeAccessState = next.status === "ready" ? { status: "loading" } : next;
-        stateRef.current = suspended;
-        setState(suspended);
+        flushSync(() => {
+          publishedWorkspaceRef.current = "";
+          setActiveWorkspaceId("");
+          stateRef.current = suspended;
+          setState(suspended);
+        });
+      } else {
+        publishedWorkspaceRef.current = "";
+        setActiveWorkspaceId("");
       }
       await queueWorkspaceCleanup(previousWorkspace);
       if (epoch !== epochRef.current) return;

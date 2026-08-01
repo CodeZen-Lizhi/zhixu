@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const runtimeMocks = vi.hoisted(() => ({ getRuntimeAccess: vi.fn() }));
@@ -11,22 +12,49 @@ import { RuntimeAccessBoundary, RuntimeAccessProvider } from "./runtime-access-c
 
 const workspaceA = "91000000-0000-4000-8000-000000000001";
 const workspaceB = "91000000-0000-4000-8000-000000000002";
+const businessLifecycle: string[] = [];
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 };
 const Probe = () => <output data-testid="workspace">{useActiveWorkspaceId() || "none"}</output>;
-const RuntimeProbe = () => <RuntimeAccessBoundary><output data-testid="business">business</output></RuntimeAccessBoundary>;
+const BusinessProbe = () => {
+  const workspaceId = useActiveWorkspaceId();
+  useEffect(() => {
+    businessLifecycle.push(`mount:${workspaceId}`);
+    return () => { businessLifecycle.push(`unmount:${workspaceId}`); };
+  }, [workspaceId]);
+  return <output data-testid="business">business</output>;
+};
+const RuntimeProbe = () => <RuntimeAccessBoundary><BusinessProbe /></RuntimeAccessBoundary>;
 
 beforeEach(() => {
   window.localStorage.clear();
   setActiveWorkspaceId("");
+  businessLifecycle.length = 0;
   vi.clearAllMocks();
 });
 afterEach(() => window.localStorage.clear());
 
 describe("RuntimeAccessProvider", () => {
+  it("A 到 B 即使连续响应也先提交旧业务树卸载，再挂载新作用域", async () => {
+    runtimeMocks.getRuntimeAccess
+      .mockResolvedValueOnce({ status: "ready", activeWorkspaceId: workspaceA, pollAfterMs: 5000 })
+      .mockResolvedValueOnce({ status: "ready", activeWorkspaceId: workspaceB, pollAfterMs: 5000 });
+    render(<QueryClientProvider client={new QueryClient()}><RuntimeAccessProvider><Probe /><RuntimeProbe /></RuntimeAccessProvider></QueryClientProvider>);
+    await waitFor(() => expect(businessLifecycle).toEqual([`mount:${workspaceA}`]));
+
+    notifyRuntimeAccessInvalidation();
+
+    await waitFor(() => expect(screen.getByTestId("workspace")).toHaveTextContent(workspaceB));
+    expect(businessLifecycle).toEqual([
+      `mount:${workspaceA}`,
+      `unmount:${workspaceA}`,
+      `mount:${workspaceB}`,
+    ]);
+  });
+
   it("控制命令可等待旧 Workspace 缓存清理完成，并保持暂停直到显式重查", async () => {
     runtimeMocks.getRuntimeAccess.mockResolvedValue({ status: "ready", activeWorkspaceId: workspaceA, pollAfterMs: 5000 });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
