@@ -6,6 +6,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { getWorkspace } from "../../api/workspace";
 import { setActiveWorkspaceId, useActiveWorkspaceId } from "../../app/active-workspace";
 import { useAuth } from "../../app/auth-context";
+import { runtimeMode } from "../../app/runtime-mode";
 import { Badge, Button, DropdownMenu, DropdownMenuItem, EmptyState, PageHeader, UnavailableState } from "../../shared/ui";
 import { SystemStatusPage } from "../system-status/SystemStatusPage";
 import { ApiTokenSettings } from "./ApiTokenSettings";
@@ -35,7 +36,7 @@ const WorkspaceSettingsPanel = () => {
     retry: false,
   });
   const reconnect = (): void => {
-    setActiveWorkspaceId("");
+    if (runtimeMode === "direct") setActiveWorkspaceId("");
     void navigate("/workspace");
   };
 

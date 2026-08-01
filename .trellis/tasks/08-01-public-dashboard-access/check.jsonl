@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查 Go 测试、并发/错误路径、HTTP 契约和回归门禁。"}
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"审查公开投影没有削弱 Root Grant、控制认证和 ready-only 代理。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"审查业务认证与控制认证没有混用或扩大凭证能力。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"检查 lint/typecheck/test/build、Provider 生命周期与浏览器质量门禁。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"审查 stale Workspace、Query/SSE 清理、乱序响应和认证状态。"}
+{"file":".trellis/tasks/08-01-public-dashboard-access/research/backend-control-boundary.md","reason":"对照已验证敏感字段和后端风险进行安全审查。"}
+{"file":".trellis/tasks/08-01-public-dashboard-access/research/frontend-public-dashboard.md","reason":"对照多浏览器、深链、重启和缓存风险进行前端审查。"}

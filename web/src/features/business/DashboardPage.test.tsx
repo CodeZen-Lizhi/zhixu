@@ -157,8 +157,13 @@ describe("DashboardPage", () => {
 
     renderPage();
 
-    expect(screen.getByRole("heading", { name: "今天的知识桌面" })).toBeInTheDocument();
-    expect(await screen.findByTitle("/tmp/workspace")).toHaveTextContent("知序产品知识库 · main · 工作树干净");
+    const dashboardHeading = screen.getByRole("heading", { name: "今天的知识桌面" });
+    expect(dashboardHeading).toBeInTheDocument();
+    const workspaceSummary = dashboardHeading.parentElement?.querySelector("p");
+    await waitFor(() => expect(workspaceSummary).toHaveTextContent("知序产品知识库 · main · 工作树干净"));
+    expect(workspaceSummary).not.toHaveAttribute("title");
+    expect(screen.queryByText("/tmp/workspace")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("/tmp/workspace")).not.toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "manual_review" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /继续流程/ })).toHaveAttribute("href", "/workflows/20000000-0000-4000-8000-000000000001");
     expect(screen.queryByText("failed_index")).not.toBeInTheDocument();

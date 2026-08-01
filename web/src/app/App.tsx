@@ -7,6 +7,7 @@ import { ControllerWorkspacePage } from "../features/workspace/ControllerWorkspa
 import { AuthBoundary, AuthProvider } from "./auth-context";
 import { HostControlProvider, useHostControl } from "./host-control-context";
 import { runtimeMode } from "./runtime-mode";
+import { RuntimeAccessBoundary, RuntimeAccessProvider } from "./runtime-access-context";
 import { WorkspaceCacheBoundary } from "./WorkspaceCacheBoundary";
 
 const BusinessRuntime = () => (
@@ -54,9 +55,8 @@ const ControllerWorkspaceRoutes = () => (
   </main>
 );
 
-export const HostControlledRuntime = () => {
-  const { state, effectiveWorkspaceId, refresh } = useHostControl();
-  const location = useLocation();
+const ControllerControlRoute = () => {
+  const { state, refresh } = useHostControl();
 
   if (state.status === "loading") {
     return <ControllerGate eyebrow="ZHIXU / CONTROL" title="正在确认本机运行边界" message="正在恢复控制会话并读取 Workspace 运行状态。" />;
@@ -67,10 +67,13 @@ export const HostControlledRuntime = () => {
   if (state.status === "error") {
     return <ControllerGate eyebrow="ZHIXU / CONTROL" title="无法确认本机运行状态" message={state.error.message} action={<button type="button" onClick={() => void refresh()}>重新检查</button>} />;
   }
-  if (location.pathname === "/" || location.pathname === "/workspace") return <ControllerWorkspaceRoutes />;
-  if (effectiveWorkspaceId === "") return <ControllerWorkspaceRoutes />;
+  return <ControllerWorkspaceRoutes />;
+};
 
-  return <BusinessRuntime key={effectiveWorkspaceId} />;
+export const HostControlledRuntime = () => {
+  const location = useLocation();
+  if (location.pathname === "/" || location.pathname === "/workspace") return <ControllerControlRoute />;
+  return <RuntimeAccessBoundary><BusinessRuntime /></RuntimeAccessBoundary>;
 };
 
 export const DirectApp = () => (
@@ -90,7 +93,9 @@ export const DirectApp = () => (
 export const ControllerApp = ({ initialControllerToken }: { initialControllerToken?: string | undefined }) => (
   <BrowserRouter>
     <HostControlProvider initialControllerToken={initialControllerToken}>
-      <HostControlledRuntime />
+      <RuntimeAccessProvider>
+        <HostControlledRuntime />
+      </RuntimeAccessProvider>
     </HostControlProvider>
   </BrowserRouter>
 );

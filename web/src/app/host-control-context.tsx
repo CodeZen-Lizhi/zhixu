@@ -1,4 +1,3 @@
-import { useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   useCallback,
@@ -9,12 +8,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useLocation } from "react-router-dom";
 
 import {
   checkControllerWorkspaceAvailability,
   clearControllerCsrfToken,
   ControllerApiError,
-  type ControllerOperation,
   type ControllerSession,
   type ControllerState,
   type ControllerWorkspaceSwitchRequest,
@@ -24,8 +23,7 @@ import {
   removeControllerWorkspace,
   startControllerWorkspaceSwitch,
 } from "../api/controller";
-import { setActiveWorkspaceId } from "./active-workspace";
-import { clearWorkspaceRuntimeState } from "./workspace-runtime-state";
+import { notifyRuntimeAccessInvalidation, suspendRuntimeAccess } from "../shared/runtime-access-invalidation";
 
 export type HostControlState =
   | { status: "loading" }
@@ -35,7 +33,6 @@ export type HostControlState =
 
 interface HostControlContextValue {
   state: HostControlState;
-  effectiveWorkspaceId: string;
   actionPending: boolean;
   actionError?: Error;
   refresh: () => Promise<void>;
@@ -46,25 +43,6 @@ interface HostControlContextValue {
 }
 
 const HostControlContext = createContext<HostControlContextValue | undefined>(undefined);
-
-const isTerminalOperation = (operation: ControllerOperation): boolean => operation.result !== undefined;
-
-export const effectiveWorkspaceFromState = (
-  state: ControllerState,
-  suspendedOperationId?: string,
-): string => {
-  if (suspendedOperationId !== undefined) return "";
-  if (state.runtime.status !== "ready" || state.runtime.api.status !== "ready" || state.runtime.worker.status !== "ready") return "";
-  const active = state.activeWorkspace;
-  if (active?.availability !== "available") return "";
-  const operation = state.operation;
-  if (operation === null) return active.workspaceId;
-  if (!isTerminalOperation(operation) || operation.result === "failed") return "";
-  if (operation.result === "succeeded") {
-    return operation.targetWorkspaceId === active.workspaceId ? active.workspaceId : "";
-  }
-  return active.workspaceId;
-};
 
 const newIdempotencyKey = (): string => {
   if (typeof globalThis.crypto.randomUUID !== "function") {
@@ -83,19 +61,15 @@ export const HostControlProvider = ({
   children: ReactNode;
   initialControllerToken?: string | undefined;
 }) => {
-  const queryClient = useQueryClient();
+  const location = useLocation();
+  const controlRoute = location.pathname === "/" || location.pathname === "/workspace";
   const [state, setState] = useState<HostControlState>({ status: "loading" });
-  const [effectiveWorkspaceId, setEffectiveWorkspaceId] = useState("");
   const [actionPending, setActionPending] = useState(false);
   const [actionError, setActionError] = useState<Error>();
   const sessionRef = useRef<ControllerSession | undefined>(undefined);
   const controllerStateRef = useRef<ControllerState | undefined>(undefined);
-  const effectiveWorkspaceIdRef = useRef("");
   const initialTokenRef = useRef(initialControllerToken);
   const sessionPromiseRef = useRef<Promise<ControllerSession> | undefined>(undefined);
-  const cleanupPromiseRef = useRef<Promise<void>>(Promise.resolve());
-  const applySequenceRef = useRef(0);
-  const suspendedOperationIdRef = useRef<string | undefined>(undefined);
   const actionPendingRef = useRef(false);
   const commandAttemptRef = useRef<{ signature: string; key: string } | undefined>(undefined);
   const bootstrapEffectRef = useRef<object | undefined>(undefined);
@@ -104,6 +78,8 @@ export const HostControlProvider = ({
   const stateRequestControllersRef = useRef(new Set<AbortController>());
   const stateRequestSequenceRef = useRef(0);
   const appliedStateRequestSequenceRef = useRef(0);
+  const controlRouteRef = useRef(controlRoute);
+  controlRouteRef.current = controlRoute;
 
   const invalidateStateRequests = useCallback((): void => {
     sessionEpochRef.current += 1;
@@ -111,30 +87,10 @@ export const HostControlProvider = ({
     stateRequestControllersRef.current.clear();
   }, []);
 
-  const queueWorkspaceCleanup = useCallback((workspaceId: string): Promise<void> => {
-    if (workspaceId === "") return cleanupPromiseRef.current;
-    const cleanup = cleanupPromiseRef.current.then(async () => {
-      await clearWorkspaceRuntimeState(queryClient, workspaceId);
-    });
-    cleanupPromiseRef.current = cleanup.catch(() => undefined);
-    return cleanup;
-  }, [queryClient]);
-
-  const suspendBusinessRuntime = useCallback(async (): Promise<void> => {
-    const previous = effectiveWorkspaceIdRef.current;
-    effectiveWorkspaceIdRef.current = "";
-    setEffectiveWorkspaceId("");
-    setActiveWorkspaceId("");
-    await Promise.all([
-      queueWorkspaceCleanup(previous),
-      new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
-    ]);
-  }, [queueWorkspaceCleanup]);
-
-  const applyControllerState = useCallback(async (
+  const applyControllerState = useCallback((
     session: ControllerSession,
     next: ControllerState,
-  ): Promise<void> => {
+  ): void => {
     if (next.controllerInstanceId !== session.controllerInstanceId) {
       throw new ControllerApiError(
         "INVALID_RESPONSE",
@@ -146,37 +102,9 @@ export const HostControlProvider = ({
     const currentVersion = controllerStateRef.current?.stateVersion ?? 0;
     if (next.stateVersion < currentVersion) return;
 
-    const sequence = applySequenceRef.current + 1;
-    applySequenceRef.current = sequence;
     controllerStateRef.current = next;
-    if (suspendedOperationIdRef.current !== undefined
-      && next.operation?.operationId === suspendedOperationIdRef.current
-      && isTerminalOperation(next.operation)) {
-      suspendedOperationIdRef.current = undefined;
-    }
-    const nextEffective = effectiveWorkspaceFromState(next, suspendedOperationIdRef.current);
-    const previousEffective = effectiveWorkspaceIdRef.current;
     setState({ status: "ready", session, controlState: next });
-
-    if (previousEffective !== "" && previousEffective !== nextEffective) {
-      effectiveWorkspaceIdRef.current = "";
-      setEffectiveWorkspaceId("");
-      setActiveWorkspaceId("");
-      void queueWorkspaceCleanup(previousEffective);
-    }
-    await cleanupPromiseRef.current;
-    if (applySequenceRef.current !== sequence) return;
-
-    if (nextEffective === "") {
-      effectiveWorkspaceIdRef.current = "";
-      setEffectiveWorkspaceId("");
-      setActiveWorkspaceId("");
-      return;
-    }
-    setActiveWorkspaceId(nextEffective);
-    effectiveWorkspaceIdRef.current = nextEffective;
-    setEffectiveWorkspaceId(nextEffective);
-  }, [queueWorkspaceCleanup]);
+  }, []);
 
   const establishSession = useCallback((): Promise<ControllerSession> => {
     if (sessionRef.current !== undefined) return Promise.resolve(sessionRef.current);
@@ -196,9 +124,8 @@ export const HostControlProvider = ({
     return trackedPromise;
   }, []);
 
-  const becomeUnavailable = useCallback(async (error: Error): Promise<void> => {
+  const becomeUnavailable = useCallback((error: Error): void => {
     invalidateStateRequests();
-    applySequenceRef.current += 1;
     if (error instanceof ControllerApiError
       && (error.status === 401 || error.errorCode === "CONTROLLER_INSTANCE_CHANGED")) {
       clearControllerCsrfToken();
@@ -209,13 +136,13 @@ export const HostControlProvider = ({
     } else {
       setState({ status: "error", error });
     }
-    await suspendBusinessRuntime();
-  }, [invalidateStateRequests, suspendBusinessRuntime]);
+  }, [invalidateStateRequests]);
 
   const loadControllerState = useCallback(async (
     session: ControllerSession,
     parentSignal?: AbortSignal,
   ): Promise<void> => {
+    if (!controlRouteRef.current) return;
     const epoch = sessionEpochRef.current;
     const requestSequence = stateRequestSequenceRef.current + 1;
     stateRequestSequenceRef.current = requestSequence;
@@ -224,7 +151,8 @@ export const HostControlProvider = ({
     if (parentSignal?.aborted === true) return;
     parentSignal?.addEventListener("abort", abortRequest, { once: true });
     stateRequestControllersRef.current.add(controller);
-    const isCurrentSession = (): boolean => sessionEpochRef.current === epoch
+    const isCurrentSession = (): boolean => controlRouteRef.current
+      && sessionEpochRef.current === epoch
       && sessionRef.current?.sessionId === session.sessionId
       && sessionRef.current.controllerInstanceId === session.controllerInstanceId;
     try {
@@ -232,11 +160,11 @@ export const HostControlProvider = ({
       if (!controller.signal.aborted && isCurrentSession()
         && requestSequence >= appliedStateRequestSequenceRef.current) {
         appliedStateRequestSequenceRef.current = requestSequence;
-        await applyControllerState(session, next);
+        applyControllerState(session, next);
       }
     } catch (error: unknown) {
       if (isAbortError(error) || controller.signal.aborted || !isCurrentSession()) return;
-      await becomeUnavailable(asError(error));
+      becomeUnavailable(asError(error));
       throw error;
     } finally {
       stateRequestControllersRef.current.delete(controller);
@@ -250,16 +178,23 @@ export const HostControlProvider = ({
     try {
       session = await establishSession();
     } catch (error: unknown) {
-      await becomeUnavailable(asError(error));
+      becomeUnavailable(asError(error));
       return;
     }
     try { await loadControllerState(session); } catch { /* fail-closed state is already visible */ }
   }, [becomeUnavailable, establishSession, loadControllerState]);
 
-  const pollingSession = state.status === "ready" ? state.session : undefined;
+  const pollingSession = controlRoute && state.status === "ready" ? state.session : undefined;
 
   useEffect(() => {
-    if (state.status !== "loading") return undefined;
+    if (controlRoute) return;
+    invalidateStateRequests();
+    controllerStateRef.current = undefined;
+    setState({ status: "loading" });
+  }, [controlRoute, invalidateStateRequests]);
+
+  useEffect(() => {
+    if (state.status !== "loading" || (!controlRoute && initialTokenRef.current === undefined)) return undefined;
     const identity = {};
     bootstrapEffectRef.current = identity;
     void (async () => {
@@ -267,16 +202,16 @@ export const HostControlProvider = ({
       try {
         session = await establishSession();
       } catch (error: unknown) {
-        if (bootstrapEffectRef.current === identity) await becomeUnavailable(asError(error));
+        if (bootstrapEffectRef.current === identity) becomeUnavailable(asError(error));
         return;
       }
-      if (bootstrapEffectRef.current !== identity) return;
+      if (bootstrapEffectRef.current !== identity || !controlRoute) return;
       try { await loadControllerState(session); } catch { /* fail-closed state is already visible */ }
     })();
     return () => {
       if (bootstrapEffectRef.current === identity) bootstrapEffectRef.current = undefined;
     };
-  }, [becomeUnavailable, establishSession, loadControllerState, state.status]);
+  }, [becomeUnavailable, controlRoute, establishSession, loadControllerState, state.status]);
 
   useEffect(() => {
     if (pollingSession === undefined) return undefined;
@@ -303,7 +238,6 @@ export const HostControlProvider = ({
   }, [loadControllerState, pollingSession]);
 
   useEffect(() => () => {
-    applySequenceRef.current += 1;
     invalidateStateRequests();
   }, [invalidateStateRequests]);
 
@@ -335,23 +269,28 @@ export const HostControlProvider = ({
   const runWorkspaceSwitch = useCallback(async (input: ControllerWorkspaceSwitchRequest): Promise<void> => {
     if (!beginCommand()) return;
     const signature = JSON.stringify(input);
+    let runtimeSuspended = false;
     try {
       const options = commandOptions(signature);
-      suspendedOperationIdRef.current = `pending:${options.idempotencyKey}`;
-      await suspendBusinessRuntime();
-      const operation = await startControllerWorkspaceSwitch(input, options);
-      suspendedOperationIdRef.current = operation.operationId;
+      runtimeSuspended = true;
+      await suspendRuntimeAccess();
+      await startControllerWorkspaceSwitch(input, options);
+      notifyRuntimeAccessInvalidation();
+      runtimeSuspended = false;
       commandAttemptRef.current = undefined;
       const session = sessionRef.current;
       if (session !== undefined) await loadControllerState(session);
       finishCommand();
     } catch (error: unknown) {
+      if (runtimeSuspended) {
+        notifyRuntimeAccessInvalidation();
+        runtimeSuspended = false;
+      }
       const failure = asError(error);
       setActionError(failure);
-      suspendedOperationIdRef.current = undefined;
       finishCommand(error);
       if (error instanceof ControllerApiError && error.status === 401) {
-        await becomeUnavailable(error);
+        becomeUnavailable(error);
         return;
       }
       const session = sessionRef.current;
@@ -359,7 +298,7 @@ export const HostControlProvider = ({
         try { await loadControllerState(session); } catch { /* fail-closed state is already visible */ }
       }
     }
-  }, [becomeUnavailable, beginCommand, commandOptions, finishCommand, loadControllerState, suspendBusinessRuntime]);
+  }, [becomeUnavailable, beginCommand, commandOptions, finishCommand, loadControllerState]);
 
   const runRegistryCommand = useCallback(async (
     signature: string,
@@ -377,7 +316,7 @@ export const HostControlProvider = ({
       setActionError(failure);
       finishCommand(error);
       if (error instanceof ControllerApiError && error.status === 401) {
-        await becomeUnavailable(error);
+        becomeUnavailable(error);
         return;
       }
       const session = sessionRef.current;
@@ -405,7 +344,6 @@ export const HostControlProvider = ({
 
   const value = useMemo<HostControlContextValue>(() => ({
     state,
-    effectiveWorkspaceId,
     actionPending,
     ...(actionError === undefined ? {} : { actionError }),
     refresh,
@@ -418,7 +356,6 @@ export const HostControlProvider = ({
     actionPending,
     checkWorkspaceAvailability,
     createAndSwitchWorkspace,
-    effectiveWorkspaceId,
     refresh,
     removeWorkspace,
     state,

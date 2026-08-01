@@ -242,7 +242,7 @@ export const DashboardPage = () => {
       </div>
       <div className="dashboard-day-title">
         <h1>今天的知识桌面</h1>
-        <p title={workspace.data?.rootPath}>
+        <p>
           {workspace.isPending ? "正在读取工作区…" : workspace.data
             ? <>{workspace.data.name}<span aria-hidden="true"> · </span>{workspace.data.git.present ? `${workspace.data.git.branch || "未命名分支"} · ${workspace.data.git.dirty ? "有未提交改动" : "工作树干净"}` : "未检测到 Git"}</>
             : "当前工作区信息暂不可用"}

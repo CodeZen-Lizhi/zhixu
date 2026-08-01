@@ -1,11 +1,15 @@
 import { useSyncExternalStore } from "react";
 
+import { runtimeMode } from "./runtime-mode";
+
 export const activeWorkspaceStorageKey = "zhixu.active-workspace-id";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const listeners = new Set<() => void>();
+let snapshot = "";
 
 const readStorage = (): string => {
+  if (runtimeMode === "controller") return snapshot;
   if (typeof window === "undefined") return "";
   try {
     const value = window.localStorage.getItem(activeWorkspaceStorageKey) ?? "";
@@ -15,7 +19,7 @@ const readStorage = (): string => {
   }
 };
 
-let snapshot = readStorage();
+snapshot = readStorage();
 
 const emit = (): void => {
   snapshot = readStorage();
@@ -36,6 +40,11 @@ export const getActiveWorkspaceId = (): string => {
 export const setActiveWorkspaceId = (workspaceId: string): void => {
   if (workspaceId !== "" && !uuidPattern.test(workspaceId)) {
     throw new Error("活动 Workspace ID 必须是规范 UUID");
+  }
+  if (runtimeMode === "controller") {
+    snapshot = workspaceId;
+    listeners.forEach((listener) => listener());
+    return;
   }
   if (workspaceId === "") window.localStorage.removeItem(activeWorkspaceStorageKey);
   else window.localStorage.setItem(activeWorkspaceStorageKey, workspaceId);

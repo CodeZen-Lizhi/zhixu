@@ -7,6 +7,7 @@ import {
   setActiveWorkspaceId,
   useActiveWorkspaceId,
 } from "./active-workspace";
+import { runtimeMode } from "./runtime-mode";
 
 const workspaceId = "92000000-0000-4000-8000-000000000001";
 
@@ -22,21 +23,26 @@ describe("active workspace owner", () => {
         setItem: (key: string, value: string) => values.set(key, value),
       },
     });
+    setActiveWorkspaceId("");
   });
 
-  it("在单一 storage key 中读写并通知当前页面", () => {
+  it("Direct 模式持久化，Controller 模式只发布进程内权威值", () => {
     const { result } = renderHook(() => useActiveWorkspaceId());
     expect(result.current).toBe("");
     act(() => setActiveWorkspaceId(workspaceId));
     expect(result.current).toBe(workspaceId);
-    expect(window.localStorage.getItem(activeWorkspaceStorageKey)).toBe(workspaceId);
+    expect(window.localStorage.getItem(activeWorkspaceStorageKey)).toBe(runtimeMode === "direct" ? workspaceId : null);
     act(() => setActiveWorkspaceId(""));
     expect(result.current).toBe("");
   });
 
-  it("拒绝写入并忽略读取非法 Workspace ID", () => {
+  it("拒绝非法 ID，Controller 模式忽略 storage 恢复和跨标签页事件", () => {
     expect(() => setActiveWorkspaceId("bad")).toThrow("规范 UUID");
-    window.localStorage.setItem(activeWorkspaceStorageKey, "bad");
+    window.localStorage.setItem(activeWorkspaceStorageKey, runtimeMode === "direct" ? "bad" : workspaceId);
     expect(getActiveWorkspaceId()).toBe("");
+    if (runtimeMode === "controller") {
+      window.dispatchEvent(new StorageEvent("storage", { key: activeWorkspaceStorageKey, newValue: workspaceId }));
+      expect(getActiveWorkspaceId()).toBe("");
+    }
   });
 });

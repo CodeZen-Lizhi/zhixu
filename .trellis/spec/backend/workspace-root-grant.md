@@ -13,6 +13,8 @@
 
 - 控制会话：`POST /control/v1/sessions`、`GET /control/v1/session`。
 - 权威状态：`GET /control/v1/state`。
+- 匿名运行时发现：`GET|HEAD /host/v1/runtime`，响应只允许
+  `{status,active_workspace_id,poll_after_ms}`；`active_workspace_id` 仅在 `ready` 时为规范 UUID。
 - 切换命令：`POST /control/v1/workspace-switches`，请求二选一：
   `{target_kind:"registered",workspace_id}` 或
   `{target_kind:"new",name,root_path,initialize_git}`。
@@ -46,8 +48,17 @@
   Controller 重启只能在旧 lease 过期后 CAS 接管同一未完成 operation。
 - Controller 只监听明确的 IPv4 loopback host/origin。一次性 fragment token 只交换 HttpOnly、SameSite=Strict
   Cookie；unsafe 请求同时校验精确 Origin 与 CSRF。Bootstrap、Cookie、CSRF 和宿主路径不得进入日志或业务代理。
-- `GET /control/v1/state` 是 effective Active 与 runtime readiness 的唯一事实源。只有 Active、API、Worker 与
-  generation 同时匹配且 fresh 时才开放业务代理；waiting/switching/rollback/recovery_failed 都保持业务入口关闭。
+- Controller State Store 的单次快照是 effective Active 与 runtime readiness 的唯一事实源。`/control/v1/state`
+  向有控制会话的浏览器返回完整控制投影；`/host/v1/runtime` 从同一快照生成无路径的最小发现投影，不读取或返回
+  Controller Session、CSRF、operation、root path、backend URL 或进程细节。
+- 公开发现与业务代理共用同一个 RuntimeAccess locator。只有 Active available、API/Worker ready、无非终态 operation、
+  Workspace ID 合法且实际 loopback backend discovery 成功时才发布 `ready`；业务代理仍逐请求重查。waiting、
+  switching、rollback、recovery_failed 和矛盾状态都保持业务入口关闭。
+- `/host` 全命名空间使用独立 JSON router，不得回落 SPA；精确 Host 校验必须先于 State/backend 读取，所有响应
+  `Cache-Control: no-store` 且不开放 CORS。内部错误统一脱敏为 `RUNTIME_ACCESS_UNAVAILABLE`。
+- Controller Session 只授权 `/control/v1/*` 的完整状态与宿主机控制。普通业务路由不依赖 Controller Session，
+  仍由业务认证模式和 Capability 独立保护；Workspace root、Registry 和 Docker mutation 继续要求 Cookie、Origin、
+  CSRF、If-Match 与 Idempotency-Key。
 
 ### 4. Validation & Error Matrix
 
@@ -64,6 +75,7 @@
 | candidate 身份、mount、generation、API 或 Worker readiness 不匹配 | 拒绝 commit，撤销 candidate 后恢复 previous |
 | 恢复也失败但已证明 zero bind | failed + zero Active + `recovery_failed`；业务代理保持 503 |
 | Cookie、Host、Origin、CSRF、If-Match 或 Idempotency-Key 无效 | 稳定 4xx；不得触发状态机或 Docker 操作 |
+| 公开发现 Host 无效、locator 失败或投影矛盾 | 固定 403/503 Problem；零依赖读取或零内部信息泄漏 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -83,8 +95,9 @@
   revoke 持续失败不终态化、瞬时恢复失败无需重启即可完成、Controller restart takeover。
 - Compose contract：base zero bind；grant 模型只有 API/Worker 各一个 exact bind；source=target、非 root、
   `create_host_path=false`、无 Docker socket、无 legacy `/workspace`。
-- HTTP/前端：一次性 fragment 清除、Cookie/Origin/CSRF/Host、严格 decoder、401 epoch/Abort、非 ready 不挂载
-  Auth/Query/SSE、刷新恢复 operation、Unavailable 重查/移除。
+- HTTP/前端：一次性 fragment 清除、Cookie/Origin/CSRF/Host、`/host` 404/405/HEAD、公开投影严格字段与错误 canary、
+  proxy runtime-invalid header、严格 decoder、401 epoch/Abort、非 ready 不挂载 Auth/Query/SSE、刷新恢复 operation、
+  Unavailable 重查/移除。
 - 真实 Docker + Playwright：A -> B -> A，Unicode/空格路径，原 Root/兄弟目录不可访问，缺失 Root 返回 409 且
   当前 Active/grant/generation 不变；1440x900 与 390x844 无溢出、console/network 无意外错误。
 

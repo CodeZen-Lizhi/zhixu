@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
+import { MemoryRouter, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => ({
@@ -12,17 +13,21 @@ const apiMocks = vi.hoisted(() => ({
   removeControllerWorkspace: vi.fn(),
   clearControllerCsrfToken: vi.fn(),
 }));
+const runtimeBoundaryMocks = vi.hoisted(() => ({
+  notifyRuntimeAccessInvalidation: vi.fn(),
+  suspendRuntimeAccess: vi.fn(),
+}));
 
 vi.mock("../api/controller", async (importOriginal) => {
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   const actual = await importOriginal<typeof import("../api/controller")>();
   return { ...actual, ...apiMocks };
 });
+vi.mock("../shared/runtime-access-invalidation", () => runtimeBoundaryMocks);
 
 import { ControllerApiError, type ControllerOperation, type ControllerSession, type ControllerState } from "../api/controller";
 import { getCsrfToken, setCsrfToken } from "../api/auth";
-import { HostControlProvider, effectiveWorkspaceFromState, useHostControl } from "./host-control-context";
-import { workspaceQueryRoots } from "./workspace-runtime-state";
+import { HostControlProvider, useHostControl } from "./host-control-context";
 
 const workspaceA = "72000000-0000-4000-8000-000000000001";
 const workspaceB = "72000000-0000-4000-8000-000000000002";
@@ -68,13 +73,16 @@ const switchingOperation: ControllerOperation = {
 
 const Probe = () => {
   const control = useHostControl();
+  const navigate = useNavigate();
   return <>
     <output data-testid="status">{control.state.status}</output>
-    <output data-testid="effective">{control.effectiveWorkspaceId || "none"}</output>
+    <output data-testid="runtime-status">{control.state.status === "ready" ? control.state.controlState.runtime.status : "none"}</output>
     <output data-testid="pending">{control.actionPending ? "pending" : "idle"}</output>
     <output data-testid="action-error">{control.actionError?.message ?? "none"}</output>
     <button type="button" onClick={() => void control.switchToRegisteredWorkspace(workspaceB)}>switch</button>
     <button type="button" onClick={() => void control.refresh()}>refresh</button>
+    <button type="button" onClick={() => void navigate("/dashboard")}>leave</button>
+    <button type="button" onClick={() => void navigate("/workspace")}>enter</button>
   </>;
 };
 
@@ -86,7 +94,7 @@ const deferred = <T,>() => {
 
 const Providers = ({ children, token, client = new QueryClient() }: { children: ReactNode; token?: string; client?: QueryClient }) => (
   <QueryClientProvider client={client}>
-    <HostControlProvider initialControllerToken={token}>{children}</HostControlProvider>
+    <MemoryRouter><HostControlProvider initialControllerToken={token}>{children}</HostControlProvider></MemoryRouter>
   </QueryClientProvider>
 );
 
@@ -96,27 +104,11 @@ beforeEach(() => {
   apiMocks.getControllerSession.mockResolvedValue(session);
   apiMocks.exchangeControllerSession.mockResolvedValue(session);
   apiMocks.getControllerState.mockResolvedValue(waitingState());
+  runtimeBoundaryMocks.suspendRuntimeAccess.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
   window.localStorage.clear();
-});
-
-describe("effectiveWorkspaceFromState", () => {
-  it("仅在 Controller 确认完整 ready 契约时返回活动 ID", () => {
-    expect(effectiveWorkspaceFromState(readyState())).toBe(workspaceA);
-    expect(effectiveWorkspaceFromState({ ...readyState(), runtime: { ...readyState().runtime, status: "switching" } })).toBe("");
-    expect(effectiveWorkspaceFromState({ ...readyState(), runtime: { ...readyState().runtime, worker: { status: "starting" } } })).toBe("");
-    expect(effectiveWorkspaceFromState(readyState(), "pending-operation")).toBe("");
-  });
-
-  it("成功时校验 target，回滚时只恢复 Controller 已确认就绪的旧 Workspace", () => {
-    const succeeded = { ...switchingOperation, result: "succeeded" as const };
-    expect(effectiveWorkspaceFromState({ ...readyState(workspaceB), operation: succeeded })).toBe(workspaceB);
-    expect(effectiveWorkspaceFromState({ ...readyState(workspaceA), operation: succeeded })).toBe("");
-    expect(effectiveWorkspaceFromState({ ...readyState(workspaceA), operation: { ...switchingOperation, result: "rolled_back" } })).toBe(workspaceA);
-    expect(effectiveWorkspaceFromState({ ...readyState(), operation: { ...switchingOperation, result: "failed" } })).toBe("");
-  });
 });
 
 describe("HostControlProvider", () => {
@@ -126,12 +118,13 @@ describe("HostControlProvider", () => {
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
     expect(apiMocks.exchangeControllerSession).toHaveBeenCalledTimes(1);
     expect(apiMocks.getControllerSession).not.toHaveBeenCalled();
-    expect(screen.getByTestId("effective")).toHaveTextContent("none");
+    expect(screen.getByTestId("status")).toHaveTextContent("ready");
   });
 
-  it("用户发起切换时先卸载旧作用域并清理全部缓存，再提交结构化命令", async () => {
+  it("用户发起切换时等待独立 runtime Owner 清理完旧作用域再提交命令", async () => {
     const client = new QueryClient();
-    for (const root of workspaceQueryRoots) client.setQueryData([root, workspaceA, "detail"], root);
+    const suspended = deferred<undefined>();
+    runtimeBoundaryMocks.suspendRuntimeAccess.mockReturnValueOnce(suspended.promise);
     apiMocks.getControllerState
       .mockResolvedValueOnce(readyState())
       .mockResolvedValueOnce({
@@ -142,12 +135,15 @@ describe("HostControlProvider", () => {
       });
     apiMocks.startControllerWorkspaceSwitch.mockResolvedValue(switchingOperation);
     render(<Providers client={client}><Probe /></Providers>);
-    await waitFor(() => expect(screen.getByTestId("effective")).toHaveTextContent(workspaceA));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
 
     fireEvent.click(screen.getByRole("button", { name: "switch" }));
 
-    await waitFor(() => expect(screen.getByTestId("effective")).toHaveTextContent("none"));
-    await waitFor(() => expect(client.getQueryData(["artifacts", workspaceA, "detail"])).toBeUndefined());
+    await waitFor(() => expect(runtimeBoundaryMocks.suspendRuntimeAccess).toHaveBeenCalledOnce());
+    expect(apiMocks.startControllerWorkspaceSwitch).not.toHaveBeenCalled();
+    suspended.resolve(undefined);
+    await waitFor(() => expect(apiMocks.startControllerWorkspaceSwitch).toHaveBeenCalledOnce());
+
     const switchCall = apiMocks.startControllerWorkspaceSwitch.mock.calls[0] as unknown as [
       { targetKind: "registered"; workspaceId: string },
       { stateVersion: number; idempotencyKey: string },
@@ -155,10 +151,30 @@ describe("HostControlProvider", () => {
     expect(switchCall[0]).toEqual({ targetKind: "registered", workspaceId: workspaceB });
     expect(switchCall[1].stateVersion).toBe(7);
     expect(switchCall[1].idempotencyKey).not.toBe("");
-    for (const root of workspaceQueryRoots) expect(client.getQueryData([root, workspaceA, "detail"])).toBeUndefined();
+    expect(runtimeBoundaryMocks.notifyRuntimeAccessInvalidation).toHaveBeenCalledOnce();
   });
 
-  it("Controller 401 关闭业务树但不清理业务 CSRF", async () => {
+  it("控制命令在离页后返回时不重新缓存完整控制投影", async () => {
+    const command = deferred<ControllerOperation>();
+    apiMocks.getControllerState.mockResolvedValueOnce(readyState());
+    apiMocks.startControllerWorkspaceSwitch.mockReturnValueOnce(command.promise);
+    render(<Providers><Probe /></Providers>);
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
+
+    fireEvent.click(screen.getByRole("button", { name: "switch" }));
+    await waitFor(() => expect(apiMocks.startControllerWorkspaceSwitch).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "leave" }));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("loading"));
+    command.resolve(switchingOperation);
+
+    await waitFor(() => expect(screen.getByTestId("pending")).toHaveTextContent("idle"));
+    expect(apiMocks.getControllerState).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "enter" }));
+    await waitFor(() => expect(apiMocks.getControllerState).toHaveBeenCalledTimes(2));
+  });
+
+  it("Controller 401 只关闭控制会话且不清理业务 CSRF", async () => {
     setCsrfToken("business-csrf");
     apiMocks.getControllerState.mockRejectedValue(new ControllerApiError(
       "HTTP_ERROR",
@@ -189,11 +205,11 @@ describe("HostControlProvider", () => {
       .mockRejectedValueOnce(new ControllerApiError("NETWORK_ERROR", "NETWORK_ERROR", "响应丢失", true))
       .mockResolvedValueOnce(switchingOperation);
     render(<Providers><Probe /></Providers>);
-    await waitFor(() => expect(screen.getByTestId("effective")).toHaveTextContent(workspaceA));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
 
     fireEvent.click(screen.getByRole("button", { name: "switch" }));
     await waitFor(() => expect(screen.getByTestId("action-error")).toHaveTextContent("响应丢失"));
-    await waitFor(() => expect(screen.getByTestId("effective")).toHaveTextContent(workspaceA));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
     expect(screen.getByTestId("pending")).toHaveTextContent("idle");
     fireEvent.click(screen.getByRole("button", { name: "switch" }));
     await waitFor(() => expect(apiMocks.startControllerWorkspaceSwitch).toHaveBeenCalledTimes(2));
@@ -216,7 +232,7 @@ describe("HostControlProvider", () => {
         401,
       ));
     render(<Providers><Probe /></Providers>);
-    await waitFor(() => expect(screen.getByTestId("effective")).toHaveTextContent(workspaceA));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
     await waitFor(() => expect(apiMocks.getControllerState).toHaveBeenCalledTimes(2));
     const staleSignal = apiMocks.getControllerState.mock.calls[1]?.[0] as AbortSignal | undefined;
     expect(staleSignal).toBeDefined();
@@ -229,7 +245,6 @@ describe("HostControlProvider", () => {
 
     await new Promise((resolve) => window.setTimeout(resolve, 0));
     expect(screen.getByTestId("status")).toHaveTextContent("session_required");
-    expect(screen.getByTestId("effective")).toHaveTextContent("none");
   });
 
   it("同一版本的较早 state 响应晚到时不恢复旧运行时", async () => {
@@ -243,15 +258,15 @@ describe("HostControlProvider", () => {
         operation: switchingOperation,
       });
     render(<Providers><Probe /></Providers>);
-    await waitFor(() => expect(screen.getByTestId("effective")).toHaveTextContent(workspaceA));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
     await waitFor(() => expect(apiMocks.getControllerState).toHaveBeenCalledTimes(2));
 
     fireEvent.click(screen.getByRole("button", { name: "refresh" }));
-    await waitFor(() => expect(screen.getByTestId("effective")).toHaveTextContent("none"));
+    await waitFor(() => expect(screen.getByTestId("runtime-status")).toHaveTextContent("switching"));
     staleReadyState.resolve(readyState());
 
     await new Promise((resolve) => window.setTimeout(resolve, 0));
-    expect(screen.getByTestId("effective")).toHaveTextContent("none");
+    expect(screen.getByTestId("runtime-status")).toHaveTextContent("switching");
   });
 
   it("卸载 Provider 时中止仍在等待的 state 请求", async () => {
