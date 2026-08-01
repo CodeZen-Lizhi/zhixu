@@ -32,7 +32,7 @@ def render(
     command = ["docker", "compose"]
     for profile in profiles:
         command.extend(["--profile", profile])
-    command.extend(["--project-name", "deploy"])
+    command.extend(["--project-name", "zhixu"])
     for path in files:
         command.extend(["-f", str(path)])
     command.extend(["--env-file", str(ENV_FILE), "config", "--format", "json"])

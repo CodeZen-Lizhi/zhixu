@@ -185,10 +185,10 @@ docker-build:
 	docker build -f deploy/Dockerfile -t zhixu:local .
 
 compose-up: compose-auth-check
-	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example up -d --build --wait
+	$(DOCKER_COMPOSE) --project-name zhixu -f deploy/compose.yml --env-file .env.example up -d --build --wait
 
 compose-down:
-	$(DOCKER_COMPOSE) --project-name deploy -f deploy/compose.yml --env-file .env.example down --remove-orphans
+	$(DOCKER_COMPOSE) --project-name zhixu -f deploy/compose.yml --env-file .env.example down --remove-orphans
 
 compose-reset:
 	./zhixu reset

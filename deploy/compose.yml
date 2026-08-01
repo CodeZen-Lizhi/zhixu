@@ -12,6 +12,8 @@ x-tool-environment: &tool-environment
   ZHIXU_WEB_FETCH_MAX_RESOLVED_IPS: ${ZHIXU_WEB_FETCH_MAX_RESOLVED_IPS:-16}
   ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES: ${ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
 
+name: zhixu
+
 x-runtime-environment: &runtime-environment
   ZHIXU_ENVIRONMENT: ${ZHIXU_ENVIRONMENT:-development}
 

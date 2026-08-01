@@ -69,7 +69,7 @@ func TestComposeDriverAppliesOnlyFixedArgvWithoutHostPath(t *testing.T) {
 	stateDirectory := t.TempDir()
 	runner := &fakeCommandRunner{grant: grant, model: composeFixture(grant, true)}
 	driver, err := NewComposeDriver(ComposeDriverOptions{
-		Executable: "docker-fixture", Project: "deploy", BaseFile: "/repo/deploy/compose.yml",
+		Executable: "docker-fixture", Project: "zhixu", BaseFile: "/repo/deploy/compose.yml",
 		OverrideFile: filepath.Join(stateDirectory, "grant.yml"), EnvFile: "/repo/.env", Runner: runner,
 	})
 	if err != nil {
@@ -108,7 +108,7 @@ func TestComposeDriverAppliesOnlyFixedArgvWithoutHostPath(t *testing.T) {
 	}
 	all := strings.Join(joined, "\n")
 	for _, required := range []string{
-		"--profile workspace-runtime --project-name deploy",
+		"--profile workspace-runtime --project-name zhixu",
 		"up --detach --no-deps --force-recreate --wait app worker",
 		"run --rm --no-deps -T firewall",
 		"inspect --format {{json .Mounts}} aaaaaaaaaaaa",
@@ -125,7 +125,7 @@ func TestComposeDriverRevokesAfterPostStartFailure(t *testing.T) {
 	grant := validatedTestGrant(t, "workspace-driver-2", root, 4)
 	runner := &fakeCommandRunner{grant: grant, model: composeFixture(grant, true), failOn: "run --rm --no-deps -T firewall"}
 	driver, err := NewComposeDriver(ComposeDriverOptions{
-		Executable: "docker", Project: "deploy", BaseFile: "/repo/compose.yml",
+		Executable: "docker", Project: "zhixu", BaseFile: "/repo/compose.yml",
 		OverrideFile: filepath.Join(t.TempDir(), "grant.yml"), EnvFile: "/repo/.env", Runner: runner,
 	})
 	if err != nil {
@@ -160,7 +160,7 @@ func TestComposeDriverRevokesPartialInitialStart(t *testing.T) {
 		failOn: "up --detach --no-deps --force-recreate --wait app worker",
 	}
 	driver, err := NewComposeDriver(ComposeDriverOptions{
-		Executable: "docker", Project: "deploy", BaseFile: "/repo/compose.yml",
+		Executable: "docker", Project: "zhixu", BaseFile: "/repo/compose.yml",
 		OverrideFile: filepath.Join(t.TempDir(), "grant.yml"), EnvFile: "/repo/.env", Runner: runner,
 	})
 	if err != nil {
@@ -188,7 +188,7 @@ func TestComposeDriverPreparesBothRealCandidateRolesWithFixedArgv(t *testing.T) 
 	stateDirectory := t.TempDir()
 	runner := &fakeCommandRunner{grant: grant, model: composeFixture(grant, true)}
 	driver, err := NewComposeDriver(ComposeDriverOptions{
-		Executable: "docker", Project: "deploy", BaseFile: "/repo/compose.yml",
+		Executable: "docker", Project: "zhixu", BaseFile: "/repo/compose.yml",
 		OverrideFile: filepath.Join(stateDirectory, "grant.yml"), EnvFile: "/repo/.env", Runner: runner,
 	})
 	if err != nil {
@@ -238,7 +238,7 @@ func TestComposeDriverRejectsWhenWorkerCandidateFailsAndRemovesGrant(t *testing.
 		failOn: "worker --role=worker",
 	}
 	driver, err := NewComposeDriver(ComposeDriverOptions{
-		Executable: "docker", Project: "deploy", BaseFile: "/repo/compose.yml",
+		Executable: "docker", Project: "zhixu", BaseFile: "/repo/compose.yml",
 		OverrideFile: filepath.Join(stateDirectory, "grant.yml"), EnvFile: "/repo/.env", Runner: runner,
 	})
 	if err != nil {
@@ -276,7 +276,7 @@ func TestComposeDriverMapsCandidateExitCodes(t *testing.T) {
 				failOn: "app --role=api", failCode: test.exitCode,
 			}
 			driver, err := NewComposeDriver(ComposeDriverOptions{
-				Executable: "docker", Project: "deploy", BaseFile: "/repo/compose.yml",
+				Executable: "docker", Project: "zhixu", BaseFile: "/repo/compose.yml",
 				OverrideFile: filepath.Join(t.TempDir(), "grant.yml"), EnvFile: "/repo/.env", Runner: runner,
 			})
 			if err != nil {
@@ -295,7 +295,7 @@ func TestComposeDriverRejectsPublicBackend(t *testing.T) {
 	t.Parallel()
 	runner := &fakeCommandRunner{}
 	driver, err := NewComposeDriver(ComposeDriverOptions{
-		Executable: "docker", Project: "deploy", BaseFile: "/repo/compose.yml",
+		Executable: "docker", Project: "zhixu", BaseFile: "/repo/compose.yml",
 		OverrideFile: "/state/grant.yml", EnvFile: "/repo/.env", Runner: runner,
 	})
 	if err != nil {

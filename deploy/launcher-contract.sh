@@ -61,10 +61,10 @@ main() {
   cp "${REPOSITORY_ROOT}/deploy/compose_runtime_check.py" "${STATE_DIR}/fixture/deploy/compose_runtime_check.py"
   cp "${REPOSITORY_ROOT}/deploy/compose_workspace_check.py" "${STATE_DIR}/fixture/deploy/compose_workspace_check.py"
 
-  docker compose --profile workspace-runtime --profile modelctl --project-name deploy \
+  docker compose --profile workspace-runtime --profile modelctl --project-name zhixu \
     -f "${REPOSITORY_ROOT}/deploy/compose.yml" --env-file "${REPOSITORY_ROOT}/.env.example" \
     config --format json >"${STATE_DIR}/compose-managed.json"
-  docker compose --profile workspace-runtime --project-name deploy \
+  docker compose --profile workspace-runtime --project-name zhixu \
     -f "${REPOSITORY_ROOT}/deploy/compose.yml" -f "${REPOSITORY_ROOT}/deploy/compose.static-models.yml" \
     --env-file "${REPOSITORY_ROOT}/.env.example" config --format json >"${STATE_DIR}/compose-static.json"
 
@@ -85,9 +85,11 @@ main() {
   [[ -n "${token}" ]] || fail "could not extract one-time token"
   [[ ! -e "${STATE_DIR}/fixture/workspace" ]] || fail "up created a fallback workspace directory"
   [[ -d "${STATE_DIR}/fixture/.zhixu" ]] || fail "up did not create Controller state"
+  [[ -f "${STATE_DIR}/fixture/.zhixu/workspace-grant.yml" ]] || fail "up did not create the stable Workspace grant file"
   [[ -x "${STATE_DIR}/fixture/.zhixu/bundle/zhixu-host-controller" ]] || fail "native Controller was not exported"
   [[ -f "${STATE_DIR}/fixture/.zhixu/bundle/web/index.html" ]] || fail "web bundle was not exported"
   assert_mode "${STATE_DIR}/fixture/.zhixu" 0700
+  assert_mode "${STATE_DIR}/fixture/.zhixu/workspace-grant.yml" 0600
   assert_mode "${STATE_DIR}/fixture/.env" 0600
   assert_mode "${STATE_DIR}/fixture/.zhixu/controller.pid" 0600
   assert_mode "${STATE_DIR}/fixture/.zhixu/controller.log" 0600
@@ -95,6 +97,7 @@ main() {
   kill -0 "${first_pid}" 2>/dev/null || fail "Controller process is not running"
 	assert_log_contains "buildx build --target host-controller-bundle"
 	assert_log_contains "build model-settings-key-init migrate modelctl app worker app-model-relay worker-model-relay firewall proxy"
+	assert_log_contains "-f ${STATE_DIR}/fixture/.zhixu/workspace-grant.yml"
 	assert_log_contains "up --detach --wait postgres"
   assert_log_contains "run --rm --no-deps -T model-settings-key-init"
   assert_log_contains "run --rm --no-deps -T migrate"
@@ -161,6 +164,7 @@ main() {
   [[ ! -e "${STATE_DIR}/fixture/.zhixu/controller.pid" ]] || fail "down left the Controller PID file"
   [[ ! -e "${STATE_DIR}/fixture/.zhixu/workspace-grant.yml" ]] || fail "down retained a stale active grant"
   assert_log_contains "down --remove-orphans"
+  assert_log_contains "--profile workspace-runtime --profile modelctl down --remove-orphans"
   if grep -F -- "--volumes" "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null; then
     fail "normal down requested volume deletion"
   fi

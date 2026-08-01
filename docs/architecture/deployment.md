@@ -346,11 +346,11 @@ prepared 失败或 drain timeout 时必须 abort/recover 到 previous active；�
 环境完成一轮验证，后续发布仍需重新执行：
 
 ```bash
-docker compose -f deploy/compose.yml --env-file .env.example config --quiet
+docker compose --project-name zhixu -f deploy/compose.yml --env-file .env.example config --quiet
 docker build -f deploy/Dockerfile -t zhixu:local .
-docker compose -f deploy/compose.yml --env-file .env.example up -d --build --wait
+docker compose --project-name zhixu -f deploy/compose.yml --env-file .env.example up -d --build --wait
 curl -fsS http://127.0.0.1:8080/readyz
-docker compose -f deploy/compose.yml --env-file .env.example exec -T worker \
+docker compose --project-name zhixu -f deploy/compose.yml --env-file .env.example exec -T worker \
   wget -q -O - http://127.0.0.1:8081/readyz
 ./zhixu down
 ```

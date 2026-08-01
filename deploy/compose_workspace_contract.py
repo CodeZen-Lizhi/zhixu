@@ -33,7 +33,7 @@ def fail(message: str) -> None:
 def render(*files: Path) -> dict[str, Any]:
     command = [
         "docker", "compose", "--profile", "workspace-runtime", "--profile", "modelctl",
-        "--project-name", "deploy",
+        "--project-name", "zhixu",
     ]
     for path in files:
         command.extend(["-f", str(path)])

@@ -91,10 +91,10 @@ While no verified runtime is ready, `/api/v1/*` fails closed with `503`, but the
 Controller page and protected operation state remain available.
 
 Model settings remain immutable encrypted revisions in PostgreSQL, with the
-master key in the project-owned `deploy_zhixu-model-secrets` volume. Runtime
+master key in the project-owned `zhixu_zhixu-model-secrets` volume. Runtime
 restart and Workspace switching are Controller-owned mutations; the legacy
 `./zhixu restart` command deliberately refuses to bypass that gate. The launcher
-is fixed to Compose project `deploy` and rejects `ZHIXU_COMPOSE_PROJECT_NAME`,
+is fixed to Compose project `zhixu` and rejects `ZHIXU_COMPOSE_PROJECT_NAME`,
 so `down` and `reset` cannot target an unrelated stack.
 
 Use `./zhixu status`, `./zhixu logs [controller|service]`, and `./zhixu down` for
@@ -184,9 +184,9 @@ migration validation, a started River client, frozen Definition/Executor
 registries, and all enabled Workflow dependencies:
 
 ```bash
-docker compose -f deploy/compose.yml --env-file .env.example exec -T worker \
+docker compose --project-name zhixu -f deploy/compose.yml --env-file .env.example exec -T worker \
   wget -q -O - http://127.0.0.1:8081/livez
-docker compose -f deploy/compose.yml --env-file .env.example exec -T worker \
+docker compose --project-name zhixu -f deploy/compose.yml --env-file .env.example exec -T worker \
   wget -q -O - http://127.0.0.1:8081/readyz
 ```
 

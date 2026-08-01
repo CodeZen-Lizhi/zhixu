@@ -115,7 +115,7 @@ func run(arguments []string) int {
 		return 1
 	}
 	driver, err := hostcontroller.NewComposeDriver(hostcontroller.ComposeDriverOptions{
-		Executable: "docker", Project: "deploy", BaseFile: config.composeFile,
+		Executable: "docker", Project: "zhixu", BaseFile: config.composeFile,
 		OverrideFile: config.grantOverride, EnvFile: config.environmentFile,
 	})
 	if err != nil {
