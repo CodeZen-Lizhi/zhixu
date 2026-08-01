@@ -84,7 +84,7 @@ Active Workspace ID
 
 ## 验证顺序
 
-1. `npm run test --prefix web -- web/src/features/business/dashboard-view-model.test.ts web/src/features/business/DashboardPage.test.tsx web/src/app/AppShell.test.tsx`
+1. `npm run test --prefix web -- src/features/business/dashboard-view-model.test.ts src/features/business/DashboardPage.test.tsx src/app/AppShell.test.tsx`
 2. `npm run typecheck --prefix web`
 3. `npm run lint --prefix web`
 4. `npm run build --prefix web`
