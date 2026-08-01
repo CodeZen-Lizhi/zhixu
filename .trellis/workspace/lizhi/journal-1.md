@@ -1693,3 +1693,26 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 40: 首页公开访问与控制授权拆分
+
+**Date**: 2026-08-02
+**Task**: 首页公开访问与控制授权拆分
+**Branch**: `dev`
+
+### Summary
+
+拆分普通业务访问与 Host 控制授权，完成多浏览器、认证模式、重启恢复和桌面移动端验收，并更新 8 月 1 日优化清单。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e812c32` | (see git log) |
+| `1a7add8` | (see git log) |
+| `430f0f9` | (see git log) |
+
+### Status
+
+[OK] **Completed**
