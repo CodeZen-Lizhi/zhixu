@@ -32,17 +32,19 @@
 
 ## Acceptance Criteria
 
-- [ ] AC1：全新浏览器配置直接访问 `http://127.0.0.1:8080/dashboard`；业务认证 disabled 时看到当前已连接首页，required 时看到业务登录，两种情况都不需要 Controller 凭证。
-- [ ] AC2：两个互不共享 Cookie/localStorage 的浏览器上下文可同时打开 `/dashboard` 及任一普通业务深链；每个上下文独立执行业务认证，不消费 Controller Bootstrap Token。
-- [ ] AC3：分别验证三种场景：仅 Controller Session 失效时仍 ready 的业务树不卸载；Host Controller 进程短暂不可达时先进入不可用、恢复后复用业务身份；`zhixu restart` 撤销并重建 runtime 后恢复 durable Active Workspace。三种场景下 `/workspace` 都只接受当前有效控制会话。
-- [ ] AC4：没有 Active Workspace 时显示可连接目录的等待状态；切换、回滚、恢复失败或业务运行时不可用时显示脱敏不可用状态，不渲染旧 Workspace 事实。
-- [ ] AC5：匿名请求所有 Host Controller 写接口仍稳定返回 4xx，且不会创建操作、改变 Root Grant、切换 Workspace 或触发 Docker 重建。
-- [ ] AC6：匿名运行时投影仅返回约定字段，响应 `Cache-Control: no-store`、限制精确 Host、不允许跨源读取；错误响应不包含宿主路径、内部错误文本或操作详情。
-- [ ] AC7：伪造或陈旧的 `zhixu.active-workspace-id` 不能让业务 Provider、Query 或 SSE 在权威 ready 响应前挂载。
-- [ ] AC8：Workspace A 切换到 B 时，A 的请求被取消、Query 缓存移除、SSE 关闭；B 只在权威 ready 后挂载，同一页面不得短暂显示 A 的业务数据。
-- [ ] AC9：`/`、`/workspace` 和所有控制命令保持现有 Session/Origin/CSRF/ETag/幂等兼容；Controller Token 不进入业务请求、日志或存储。
-- [ ] AC10：相关 Go 测试、前端 lint/typecheck/test/build 通过；Playwright 覆盖桌面与移动、两个隔离浏览器、required/disabled 业务认证、Session 失效、Controller 进程重启、launcher restart 及 Workspace 切换。
-- [ ] AC11：`docs/product/2026-08-01-requirement-optimization-list.md` 的 TODO 1 被勾选，并与最终实现及安全边界一致。
+- [x] AC1：全新浏览器配置直接访问 `http://127.0.0.1:8080/dashboard`；业务认证 disabled 时看到当前已连接首页，required 时看到业务登录，两种情况都不需要 Controller 凭证。
+- [x] AC2：两个互不共享 Cookie/localStorage 的浏览器上下文可同时打开 `/dashboard` 及任一普通业务深链；每个上下文独立执行业务认证，不消费 Controller Bootstrap Token。
+- [x] AC3：分别验证三种场景：仅 Controller Session 失效时仍 ready 的业务树不卸载；Host Controller 进程短暂不可达时先进入不可用、恢复后复用业务身份；`zhixu restart` 撤销并重建 runtime 后恢复 durable Active Workspace。三种场景下 `/workspace` 都只接受当前有效控制会话。
+- [x] AC4：没有 Active Workspace 时显示可连接目录的等待状态；切换、回滚、恢复失败或业务运行时不可用时显示脱敏不可用状态，不渲染旧 Workspace 事实。
+- [x] AC5：匿名请求所有 Host Controller 写接口仍稳定返回 4xx，且不会创建操作、改变 Root Grant、切换 Workspace 或触发 Docker 重建。
+- [x] AC6：匿名运行时投影仅返回约定字段，响应 `Cache-Control: no-store`、限制精确 Host、不允许跨源读取；错误响应不包含宿主路径、内部错误文本或操作详情。
+- [x] AC7：伪造或陈旧的 `zhixu.active-workspace-id` 不能让业务 Provider、Query 或 SSE 在权威 ready 响应前挂载。
+- [x] AC8：Workspace A 切换到 B 时，A 的请求被取消、Query 缓存移除、SSE 关闭；B 只在权威 ready 后挂载，同一页面不得短暂显示 A 的业务数据。
+- [x] AC9：`/`、`/workspace` 和所有控制命令保持现有 Session/Origin/CSRF/ETag/幂等兼容；Controller Token 不进入业务请求、日志或存储。
+- [x] AC10：相关 Go 测试、前端 lint/typecheck/test/build 通过；Playwright 覆盖桌面与移动、两个隔离浏览器、required/disabled 业务认证、Session 失效、Controller 进程重启及 launcher restart；确定性 focused tests 覆盖 Workspace 切换顺序。
+- [x] AC11：`docs/product/2026-08-01-requirement-optimization-list.md` 的 TODO 1 被勾选，并与最终实现及安全边界一致。
+
+验收采用真实 Docker 与受控 fixture 组合：多浏览器、disabled、控制 Session 缺失、Controller/launcher 重启使用真实运行服务；required 使用 Playwright 响应 fixture；Workspace A -> B 使用确定性生命周期测试验证清理与挂载顺序，避免改变用户当前工作区。
 
 ## In Scope
 

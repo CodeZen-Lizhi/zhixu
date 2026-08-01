@@ -14,8 +14,8 @@
 | T06 | 重组 Controller 路由：`/`、`/workspace` 走控制面，其余路由走 runtime + business auth | `web/src/app/App.tsx`, `web/src/app/App.controller.test.tsx`, route tests | 普通深链不显示控制门禁；`/#control -> /dashboard -> /workspace` 交换一次且 Cookie 恢复成功 | [x] |
 | T07 | 清理 Dashboard 无必要宿主路径 tooltip，保持设置/导航到控制页的授权语义；Controller 模式设置页不直接改写 Active Workspace | `web/src/features/business/DashboardPage.tsx`, `web/src/features/settings/SettingsPage.tsx` 相关测试 | 公共投影和普通首页 DOM 无隐藏宿主路径；切换动作只进入 `/workspace`；Direct 模式清除行为兼容 | [x] |
 | T08 | 更新安全、Workspace 与前端状态规范 | `.trellis/spec/backend/workspace-root-grant.md`, `.trellis/spec/frontend/state-management.md`, `.trellis/spec/frontend/component-guidelines.md`, 必要架构文档 | 文档权限矩阵和可执行测试与代码一致 | [x] |
-| T09 | 完成多浏览器、认证模式、重启与切换浏览器验收 | Controller Playwright/fixture 或新增 focused E2E | AC1-AC10 有可复核证据，桌面/移动无异常 console/network | [ ] |
-| T10 | 勾选 8 月 1 日需求优化清单 TODO 1 | `docs/product/2026-08-01-requirement-optimization-list.md` | 仅在全部验证通过后标记完成并记录最终边界 | [ ] |
+| T09 | 完成多浏览器、认证模式、重启与切换浏览器验收 | Controller Playwright/fixture 或新增 focused E2E | AC1-AC10 有可复核证据，桌面/移动无异常 console/network | [x] |
+| T10 | 勾选 8 月 1 日需求优化清单 TODO 1 | `docs/product/2026-08-01-requirement-optimization-list.md` | 仅在全部验证通过后标记完成并记录最终边界 | [x] |
 
 ## 2. Implementation Order and Checkpoints
 
@@ -85,7 +85,18 @@ git diff --check
 
 本任务无数据库迁移、无持久格式变化；代码回滚不需要数据回滚。
 
-## 6. Planning Exit Gate
+## 6. Final Validation Evidence
+
+- Go：`go test ./...`、`go vet ./...`、`go test -race ./internal/hostcontroller` 通过。
+- 前端：Direct 88 files / 911 tests、Controller 10 files / 91 tests 通过；lint、typecheck、Controller/Direct build 均通过。
+- HTTP：匿名 `GET/HEAD /host/v1/runtime` 返回最小投影与 `Cache-Control: no-store`；非法 Host 返回 403，未知 `/host` 返回 JSON 404，无控制 Cookie 的 `/control/v1/state` 返回 401。
+- 真实 Docker：`./zhixu restart` 完成镜像重建、迁移和 durable Workspace 恢复；Controller、app、worker、proxy 与 PostgreSQL 最终就绪。
+- Playwright：两个隔离且无 Cookie/localStorage 的浏览器可直接打开 `/dashboard`，第二个浏览器可继续打开 `/inbox`；业务页未请求 `/control/v1/session` 或 `/control/v1/state`。
+- Playwright：`1440x900` 与 `390x844` 均无横向溢出、重叠或业务页 console 错误；required 认证 fixture 显示业务登录页，未回落控制凭证门禁。
+- Playwright：无控制会话访问 `/workspace` 保持 401 和“控制链接已失效”；Controller 短暂停止时已打开的业务树先卸载，恢复后原 `/dashboard` 自动重新挂载。
+- Workspace A -> B 的取消、卸载、缓存清理、再挂载顺序，以及控制命令等待 runtime suspend 的顺序，使用确定性 React focused tests 验证，未改动用户当前真实 Workspace。
+
+## 7. Planning Exit Gate
 
 - [x] 用户选择业务工作台范围方案 B。
 - [x] PRD 无阻塞产品问题。
