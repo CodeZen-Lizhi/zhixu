@@ -164,52 +164,55 @@ editor.getModifiedEditor().onDidDispose(() => {
 });
 ```
 
-## Scenario: Workspace 首次连接与 App Shell 导航
+## Scenario: Workspace 连接、入口工作台与 App Shell 导航
 
 ### 1. Scope / Trigger
 
-- 修改 `AppShell` 导航、Workspace 首次连接页、系统状态摘要或根路由 `/` 的页面语义时应用。
+- 修改 `AppShell`、入口 Dashboard、Workspace 首次连接页、设置分组或根路由 `/` 的页面语义时应用。
 
 ### 2. Signatures
 
 ```tsx
 <Navigation workspaceConnected={workspaceId !== ""} currentPath={location.pathname} />
-<SystemStatusPage display="full" />
-<SystemStatusPage display="compact" />
+<SettingsPage /> // `?section=workspace|models|exports|access|system`
+selectDashboardFocus({ waitingWorkflows, failedWorkflows, proposals })
 ```
 
 ### 3. Contracts
 
-- 未连接 Workspace 时，主导航只显示工作台和系统入口；已有业务 deep link 仍由目标页面的 Workspace gate 处理，不能删路由或重定向为假成功。
-- 根路由 `/` 语义等同 Workspace 页面：工作区链接必须具有 active 样式与 `aria-current="page"`，面包屑不得追加“详情”。
-- 未连接时显示“等待连接 Workspace”；只有 Active Workspace 存在时，侧栏才把 SSE `open|connecting|reconnecting|recovery_failed|closed` 投影为同步状态。
-- `compact` 与 `full` 必须复用同一个严格系统状态 Query。紧凑模式只投影 API、数据库、Graph、RAG；RAG `disabled` 表达为“可选能力已关闭”，不能与核心服务降级混为一谈。
-- 创建或打开 Workspace 后提供扫描与进入工作台入口；扫描完成后提供资料版本与工作台入口。不得自动扫描、伪造索引完成或改变 Workspace/storage owner。
+- `routeDisplayRegistry` 是导航分组、面包屑和路由归属的唯一来源；`AppShell` 不得复制一份手写菜单或按 URL 子串猜测所属分组。
+- 未连接 Workspace 且位于 `/dashboard` 时，Shell 使用入口模式：仅保留工作台与设置两个图标入口、`知序` 品牌和“本地模式”提示。入口 Dashboard 只展示知识脉络、连接目录和可展开的数据边界，不请求 Workspace、Proposal、Workflow、Source Version 或 System Status。
+- 已连接时一级导航固定为“工作台 / 知识 / 产出 / 设置”。知识与产出使用由 registry 派生的分组菜单；设置只保留一个入口，并通过 `section=workspace|models|exports|access|system` 选择内容。
+- 根路由 `/` 语义等同 Workspace 页面，归属设置：设置链接必须具有 active 样式与 `aria-current="page"`，面包屑不得追加“详情”。已有业务 deep link 仍由目标页面的 Workspace gate 处理，不能删路由或重定向为假成功。
+- System Status 只在设置的 `section=system` 使用 `SystemStatusPage display="full"` 展示。不得在入口 Dashboard 拼接能力矩阵、请求 ID 或运行摘要，也不得把 SSE 连接状态描述为业务成功/失败。
+- 已连接 Dashboard 的“先处理这一件”只从有界真实列表派生：`waiting_for_human` Workflow（1 条）优先于 `failed` Workflow（1 条），再优先于当前 `ready_for_review` Proposal（最多 5 条，风险等级后按更新时间）；最近资料只使用最多 4 条 Source Version 的服务端捕获时间。无数据时展示下一步入口，不得伪造总数、最近访问或跨资源关联。
+- 创建或打开 Workspace 后提供资料收件箱与工作台入口。不得自动扫描、伪造索引完成或改变 Workspace/storage owner。
 
 ### 4. Validation & Error Matrix
 
 | Condition | Required result |
 |---|---|
-| 无 Active Workspace | 只显示必要导航和连接表单，不建立 SSE |
+| 无 Active Workspace 的 `/dashboard` | 只显示入口脉络与连接动作，不建立业务 Query/SSE，也不显示系统状态 |
 | `/` 打开 Workspace 页 | 工作区 active 且无“详情”面包屑 |
-| RAG disabled、核心依赖 ready | “基础服务已就绪”并明确可选能力已关闭 |
-| 状态请求失败或能力 unavailable | 显示可重试错误/降级，不隐藏连接表单 |
+| 单个 Dashboard 待办列表失败 | 保留成功列表派生的焦点，提示结果可能不完整并提供独立重试 |
+| 所有 Dashboard 待办列表失败 | 显示读取受阻和重试，不把失败伪装成“今日已收束” |
+| `section` 非法 | 保留其他 URL 参数并 replace 为 `section=workspace` |
 | 创建、打开或扫描失败 | 保留服务端错误，不显示后续成功事实 |
 
 ### 5. Good / Base / Bad Cases
 
-- Good：首次打开页面即可连接 Workspace，运行摘要不阻挡主操作；连接后完整分组导航可用。
+- Good：首次打开 `/dashboard` 即可连接 Workspace，知识脉络不被运行摘要阻挡；连接后完整分组导航与五类设置可用。
 - Base：没有 Workspace 时仍可访问 Dashboard、工作区和设置，并可通过 direct URL 查看其他页面的 gate。
-- Bad：平铺全部路由、把 `closed` 描述为服务离线、在表单前渲染完整状态矩阵，或创建后自动扫描。
+- Bad：平铺全部路由、把 `closed` 描述为服务离线、在入口页渲染完整状态矩阵、以首屏列表长度冒充总数，或创建后自动扫描。
 
 ### 6. Tests Required
 
-- Component：未连接/已连接导航、根路由 active 与面包屑、compact ready/degraded、创建/打开/扫描后的下一步。
-- Browser：真实本地 API 下检查 `1440x900` 和 `390x844` 的主操作可见、移动 Sheet、Escape 焦点恢复、零横向溢出及零 console warning/error。
+- Component：未连接入口不发业务请求、已连接的待办优先级和独立重试、Source Version 真实投影、导航 registry/根路由 active、非法设置分类归一化、一次性 Token 离页保护。
+- Browser：真实或确定性本地 API 下检查 `1440x900` 和 `390x844` 的入口与已连接状态、移动 Sheet、Escape 焦点恢复、主操作可见、零横向溢出及零 console warning/error。
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: 未选择 Workspace 时把 SSE closed 显示为“离线”，并让用户先滚过全部能力明细。
-Correct: 显示“等待连接 Workspace”，表单优先，compact 状态只说明真实运行事实。
+Wrong: 未选择 Workspace 时把 SSE closed 显示为“离线”，并让用户先滚过完整系统状态、能力矩阵和虚构统计。
+Correct: `/dashboard` 只显示可追溯知识脉络与连接动作；系统事实留在设置，连接后首页只投影有界且可解释的真实待办与资料。
 ```

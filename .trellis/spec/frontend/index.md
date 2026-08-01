@@ -24,6 +24,7 @@ M9 Export 已在 Collection 详情交付 `MARKDOWN|METADATA_JSON` Panel，并在
 AC-33 已由 Markdown、领域 Metadata JSON 与真实附件 ZIP 闭环关闭；`EVALUATION_JSON|AUDIT_JSON` 继续不公开。
 M10-02 已交付严格认证 API 边界、`AuthProvider`/`AuthBoundary`、Session 恢复、CSRF 注入和登录/登出状态；
 Bootstrap Token 只用于一次交换，浏览器持久化的唯一认证派生值是 CSRF Token，业务授权仍由后端裁决。
+工作台导航与首页已重构为白蓝低噪声信息架构：未连接 `/dashboard` 是不发业务请求的知识脉络入口，已连接首页仅投影有界真实待办与最近捕获资料；导航归属由路由展示表统一派生，系统状态收敛至五类 Settings 的 `section=system`。
 M8-01 已交付 `/artifacts` 工作台、严格 Artifact decoder、Workspace-bound Query 与 generation 恢复；
 Citation 可信性、Artifact 状态和 export/publication 绑定只来自服务端响应。
 M8-02 已交付 `/review` 与 `/review/session`：Deck 管理、绑定 Workspace/Session/Deck 的仅问题 due 投影、服务端评分与
