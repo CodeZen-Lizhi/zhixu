@@ -11,8 +11,8 @@ vi.mock("../features/business/DashboardPage", () => ({ DashboardPage: () => <div
 vi.mock("../features/business/BasicPages", () => ({
   InboxPage: () => <div>Inbox route</div>,
   DocumentsPage: () => <div>Documents route</div>,
-  SettingsPage: () => <div>Settings route</div>,
 }));
+vi.mock("../features/settings/SettingsPage", () => ({ SettingsPage: () => <div>Settings route</div> }));
 vi.mock("../features/business/ProposalsPage", () => ({
   ProposalsPage: () => <div>Proposals route</div>,
   ProposalDetailPage: () => <div>Proposal detail route</div>,
@@ -31,6 +31,15 @@ vi.mock("../features/interview/InterviewPage", () => ({
 vi.mock("../features/timeline/TimelinePage", () => ({
   TimelinePage: () => <div>Timeline route</div>,
   TimelineEventPage: () => <div>Timeline event route</div>,
+}));
+vi.mock("../features/collections/CollectionsPage", () => ({
+  CollectionsPage: () => <div>Collections route</div>,
+  CollectionDetailPage: () => <div>Collection detail route</div>,
+}));
+vi.mock("../features/health/HealthPage", () => ({ HealthPage: () => <div>Health route</div> }));
+vi.mock("../features/artifacts/ArtifactsPage", () => ({
+  ArtifactsPage: () => <div>Artifacts route</div>,
+  ArtifactDetailPage: () => <div>Artifact detail route</div>,
 }));
 
 import { AppRoutes } from "./AppRoutes";
@@ -77,6 +86,12 @@ describe("AppRoutes compatibility", () => {
     ["/workflows", "Workflows route"],
     ["/workflows/10000000-0000-4000-8000-000000000008", "Workflow detail route"],
     ["/settings", "Settings route"],
+    ["/settings?section=system", "Settings route"],
+    ["/collections", "Collections route"],
+    ["/collections/10000000-0000-4000-8000-000000000006", "Collection detail route"],
+    ["/health", "Health route"],
+    ["/artifacts", "Artifacts route"],
+    ["/artifacts/10000000-0000-4000-8000-000000000007", "Artifact detail route"],
     ["/review", "Review route"],
     ["/review/session?deck=10000000-0000-4000-8000-000000000001&session=10000000-0000-4000-8000-000000000002", "Review session route"],
     ["/memories", "Memories route"],

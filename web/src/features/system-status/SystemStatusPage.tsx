@@ -10,13 +10,18 @@ interface SystemStatusPageProps {
 const panelClassName = (display: SystemStatusDisplay, state: string): string =>
   `state-panel state-panel--${state}${display === "compact" ? " state-panel--compact" : ""}`;
 
-const LoadingState = ({ display }: { display: SystemStatusDisplay }) => (
+const LoadingState = ({ display }: { display: SystemStatusDisplay }) => display === "compact" ? (
+  <section className={panelClassName(display, "loading")} aria-live="polite">
+    <span className="status-mark" aria-hidden="true" />
+    <strong className="state-compact-headline">正在读取系统状态…</strong>
+  </section>
+) : (
   <section className={panelClassName(display, "loading")} aria-live="polite">
     <span className="status-mark" aria-hidden="true" />
     <div>
       <p className="eyebrow">正在连接</p>
-      <h2>{display === "compact" ? "读取运行摘要" : "读取系统真实状态"}</h2>
-      <p>{display === "compact" ? "正在确认 API、数据库与可选能力状态。" : "正在检查 API、数据库、认证边界、Graph 和当前应用版本。"}</p>
+      <h2>读取系统真实状态</h2>
+      <p>正在检查 API、数据库、认证边界、Graph 和当前应用版本。</p>
     </div>
   </section>
 );
@@ -35,7 +40,7 @@ const ErrorState = ({ display, error, onRetry, retrying }: ErrorStateProps) => {
     <section className={panelClassName(display, "error")} role="alert">
       <span className="status-mark" aria-hidden="true" />
       <div>
-        <p className="eyebrow">连接失败</p>
+        {display === "compact" ? null : <p className="eyebrow">连接失败</p>}
         <h2>无法确认系统状态</h2>
         <p>{error.message}</p>
         {boundaryError === undefined ? null : (
@@ -146,18 +151,12 @@ export const SystemStatusPage = ({ display = "full" }: SystemStatusPageProps) =>
     { label: "RAG", value: rag.status === "ready" ? "可用" : rag.status === "disabled" ? "可选能力已关闭" : "不可用" },
   ] as const;
 
-  return (
-    <section
-      className={panelClassName(display, presentation.isReady ? "ready" : "degraded")}
-      aria-live="polite"
-    >
-      <span className="status-mark" aria-hidden="true" />
-      <div className="state-content">
-        <p className="eyebrow">{display === "compact" ? "运行摘要" : presentation.isReady ? "系统就绪" : "服务降级"}</p>
-        <h2>{presentation.headline}</h2>
-        <p>{presentation.summary}</p>
-
-        {display === "compact" ? (
+  if (display === "compact") {
+    return (
+      <section className={panelClassName(display, presentation.isReady ? "ready" : "degraded")} aria-live="polite">
+        <span className="status-mark" aria-hidden="true" />
+        <div className="state-content">
+          <strong className="state-compact-headline">{presentation.headline}</strong>
           <dl className="status-compact-grid">
             {compactFacts.map((fact) => (
               <div key={fact.label}>
@@ -166,8 +165,28 @@ export const SystemStatusPage = ({ display = "full" }: SystemStatusPageProps) =>
               </div>
             ))}
           </dl>
-        ) : (
-          <dl className="status-grid">
+          {presentation.isReady ? null : (
+            <button type="button" onClick={() => { void statusQuery.refetch(); }} disabled={statusQuery.isFetching}>
+              {statusQuery.isFetching ? "正在重试…" : "重新检查"}
+            </button>
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section
+      className={panelClassName(display, presentation.isReady ? "ready" : "degraded")}
+      aria-live="polite"
+    >
+      <span className="status-mark" aria-hidden="true" />
+      <div className="state-content">
+        <p className="eyebrow">{presentation.isReady ? "系统就绪" : "服务降级"}</p>
+        <h2>{presentation.headline}</h2>
+        <p>{presentation.summary}</p>
+
+        <dl className="status-grid">
             <div>
               <dt>API</dt>
               <dd><span aria-hidden="true">●</span> 可用</dd>
@@ -224,8 +243,7 @@ export const SystemStatusPage = ({ display = "full" }: SystemStatusPageProps) =>
               <dt>请求 ID</dt>
               <dd className="request-id">{requestId}</dd>
             </div>
-          </dl>
-        )}
+        </dl>
 
         {presentation.isReady ? null : (
           <button

@@ -711,8 +711,7 @@ export const ReviewSessionPage = () => {
             <ArrowLeft size={15} />
             返回 Deck
           </Link>
-          <p className="eyebrow">Review session</p>
-          <h2>今日复习</h2>
+          <h1>今日复习</h1>
           <p>会话 {sessionId.slice(0, 8)}…</p>
         </div>
         <div className="folio-mark">

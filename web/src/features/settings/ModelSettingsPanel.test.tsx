@@ -98,6 +98,10 @@ const renderPanel = () => {
   };
 };
 
+const expandModelSection = async (name: "对话模型" | "向量模型"): Promise<void> => {
+  fireEvent.click(await screen.findByRole("button", { name: `配置${name}` }));
+};
+
 afterEach(() => {
   api.getModelSettings.mockReset();
   api.testModelSettings.mockReset();
@@ -115,7 +119,9 @@ describe("ModelSettingsPanel", () => {
     expect(screen.getByRole("status")).toHaveTextContent("正在读取模型设置");
     resolveSettings?.(disabledSettings());
 
-    expect(await screen.findByRole("heading", { name: "Chat 与 Embedding" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "模型与检索" })).toBeInTheDocument();
+    await expandModelSection("对话模型");
+    await expandModelSection("向量模型");
     expect(screen.getByText("Chat 模型已关闭。")).toBeInTheDocument();
     expect(screen.getByText("Embedding 模型已关闭；Keyword 检索保持可用。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "测试 Chat 连接" })).toBeDisabled();
@@ -129,6 +135,8 @@ describe("ModelSettingsPanel", () => {
     renderPanel();
 
     expect(await screen.findByText("已保存的配置尚未生效")).toBeInTheDocument();
+    await expandModelSection("对话模型");
+    await expandModelSection("向量模型");
     expect(screen.getAllByText("与待应用配置不同")).toHaveLength(2);
     expect(screen.getByText("Revision 2")).toBeInTheDocument();
     expect(screen.getAllByText("Revision 1").length).toBeGreaterThanOrEqual(3);
@@ -148,7 +156,8 @@ describe("ModelSettingsPanel", () => {
     api.testModelSettings.mockRejectedValue(new ModelSettingsApiError("HTTP_ERROR", "MODEL_PROVIDER_TIMEOUT", "模型提供方连接超时", true, 504));
 
     renderPanel();
-    await screen.findByRole("heading", { name: "Chat 与 Embedding" });
+    await screen.findByRole("heading", { name: "模型与检索" });
+    await expandModelSection("对话模型");
     fireEvent.click(screen.getByRole("button", { name: "测试 Chat 连接" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("模型提供方连接超时");
@@ -159,6 +168,7 @@ describe("ModelSettingsPanel", () => {
     api.getModelSettings.mockResolvedValue(configuredSettings());
 
     renderPanel();
+    await expandModelSection("对话模型");
     const baseUrl = await screen.findByLabelText("Chat Base URL");
     fireEvent.change(baseUrl, { target: { value: "https://user@example.test/v1?key=value" } });
     fireEvent.click(screen.getByRole("button", { name: "测试 Chat 连接" }));
@@ -174,6 +184,7 @@ describe("ModelSettingsPanel", () => {
     api.getModelSettings.mockResolvedValue(initial);
 
     renderPanel();
+    await expandModelSection("向量模型");
     fireEvent.change(await screen.findByLabelText("Embedding Provider"), { target: { value: "ollama" } });
 
     expect(screen.getByLabelText("Embedding Base URL")).toHaveValue("http://127.0.0.1:11434");
@@ -193,6 +204,7 @@ describe("ModelSettingsPanel", () => {
     }));
 
     const { client } = renderPanel();
+    await expandModelSection("对话模型");
     const baseUrl = await screen.findByLabelText("Chat Base URL");
     fireEvent.change(baseUrl, { target: { value: "https://new-models.example.test/v1" } });
     fireEvent.click(screen.getByRole("button", { name: "保存模型设置" }));
@@ -236,6 +248,7 @@ describe("ModelSettingsPanel", () => {
     });
 
     renderPanel();
+    await expandModelSection("对话模型");
     const secretActions = await screen.findByRole("radiogroup", { name: "Chat API Key操作" });
     fireEvent.click(within(secretActions).getByRole("radio", { name: "清除" }));
     expect(screen.getByText("保存后会清除已保存的 API Key。")).toBeInTheDocument();
@@ -251,7 +264,7 @@ describe("ModelSettingsPanel", () => {
     api.updateModelSettings.mockRejectedValue(new ModelSettingsApiError("HTTP_ERROR", "MODEL_SETTINGS_UNAVAILABLE", "模型设置暂时不可用", true, 503));
 
     renderPanel();
-    await screen.findByRole("heading", { name: "Chat 与 Embedding" });
+    await screen.findByRole("heading", { name: "模型与检索" });
     fireEvent.click(screen.getByRole("button", { name: "保存模型设置" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("模型设置暂时不可用");
@@ -282,6 +295,7 @@ describe("ModelSettingsPanel", () => {
       });
 
     renderPanel();
+    await expandModelSection("对话模型");
     fireEvent.change(await screen.findByLabelText("Chat Model"), { target: { value: "local-chat-draft" } });
     const actions = screen.getByRole("radiogroup", { name: "Chat API Key操作" });
     fireEvent.click(within(actions).getByRole("radio", { name: "替换" }));
@@ -326,6 +340,7 @@ describe("ModelSettingsPanel", () => {
     ));
 
     renderPanel();
+    await expandModelSection("对话模型");
     fireEvent.change(await screen.findByLabelText("Chat Model"), { target: { value: "local-chat-draft" } });
     const actions = screen.getByRole("radiogroup", { name: "Chat API Key操作" });
     fireEvent.click(within(actions).getByRole("radio", { name: "替换" }));
@@ -344,6 +359,7 @@ describe("ModelSettingsPanel", () => {
     api.getModelSettings.mockResolvedValueOnce(initial).mockResolvedValueOnce(latest);
 
     renderPanel();
+    await expandModelSection("对话模型");
     fireEvent.change(await screen.findByLabelText("Chat Model"), { target: { value: "local-chat-draft" } });
     const actions = screen.getByRole("radiogroup", { name: "Chat API Key操作" });
     fireEvent.click(within(actions).getByRole("radio", { name: "替换" }));
@@ -369,6 +385,7 @@ describe("ModelSettingsPanel", () => {
     ));
 
     renderPanel();
+    await expandModelSection("对话模型");
     const actions = await screen.findByRole("radiogroup", { name: "Chat API Key操作" });
     fireEvent.click(within(actions).getByRole("radio", { name: "替换" }));
     fireEvent.change(screen.getByLabelText("Chat API Key"), { target: { value: "conflicted-secret" } });
@@ -391,6 +408,7 @@ describe("ModelSettingsPanel", () => {
     renderPanel();
 
     expect(await screen.findByText("配置切换：applying")).toBeInTheDocument();
+    await expandModelSection("对话模型");
     expect(screen.getByText("部分模型能力不可用")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存模型设置" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "测试 Chat 连接" })).toBeDisabled();
@@ -407,6 +425,7 @@ describe("ModelSettingsPanel", () => {
     renderPanel();
 
     expect(await screen.findByText("上次配置应用失败")).toBeInTheDocument();
+    await expandModelSection("对话模型");
     expect(screen.getByText(/MODEL_SETTINGS_ROLLOUT_PREPARE_FAILED/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存模型设置" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "测试 Chat 连接" })).toBeEnabled();
@@ -423,6 +442,7 @@ describe("ModelSettingsPanel", () => {
     });
 
     const { unmount } = renderPanel();
+    await expandModelSection("对话模型");
     const actions = await screen.findByRole("radiogroup", { name: "Chat API Key操作" });
     fireEvent.click(within(actions).getByRole("radio", { name: "替换" }));
     fireEvent.change(screen.getByLabelText("Chat API Key"), { target: { value: "transient-secret" } });

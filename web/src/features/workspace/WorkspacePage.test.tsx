@@ -1,6 +1,7 @@
-import { fireEvent, screen, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { activeWorkspaceStorageKey } from "../../app/active-workspace";
 import { renderWithAppProviders } from "../../test/render";
 import { WorkspacePage } from "./WorkspacePage";
 
@@ -32,114 +33,58 @@ const workspace = {
   updated_at: "2026-07-16T10:00:00Z",
 };
 
-const systemStatus = {
-  status: "ready",
-  version: "dev",
-  database: { status: "ready" },
-  graph: { status: "ready" },
-  semantic_links: { status: "ready" },
-  rag: { status: "disabled" },
-  collections: { status: "ready" },
-  knowledge_health: { status: "ready" },
-  knowledge_timeline: { status: "ready" },
-  review: { status: "ready" },
-  memory: { status: "ready" },
-  interview: { status: "ready" },
-  auth: { status: "disabled" },
-  request_id: "req",
-};
-
 describe("WorkspacePage", () => {
   beforeEach(() => {
-    const values = new Map<string, string>();
-    Object.defineProperty(window, "localStorage", {
-      configurable: true,
-      value: {
-        clear: () => values.clear(),
-        getItem: (key: string) => values.get(key) ?? null,
-        removeItem: (key: string) => values.delete(key),
-        setItem: (key: string, value: string) => values.set(key, value),
-      },
-    });
     window.localStorage.clear();
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
-      const url = requestURL(input);
-      if (url.endsWith("/api/v1/system/status")) {
-        return Promise.resolve(jsonResponse(systemStatus));
-      }
-      return Promise.reject(new Error(`unexpected request: ${url}`));
-    }));
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.reject(new Error(`unexpected request: ${requestURL(input)}`))));
   });
 
-  it("创建 Workspace 后显示真实 Git Dirty 警告", async () => {
+  it("每次只展示一种连接方式", () => {
+    renderWithAppProviders(<WorkspacePage />);
+
+    expect(screen.getByRole("heading", { name: "连接工作区", level: 1 })).toBeInTheDocument();
+    expect(screen.getByLabelText("名称")).toBeInTheDocument();
+    expect(screen.getByLabelText("宿主机目录")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Workspace ID")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "使用 Workspace ID" }));
+
+    expect(screen.getByLabelText("Workspace ID")).toBeInTheDocument();
+    expect(screen.queryByLabelText("名称")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("宿主机目录")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /扫描/ })).not.toBeInTheDocument();
+  });
+
+  it("创建工作区后保存活动 ID", async () => {
     vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
       const url = requestURL(input);
-      if (url.endsWith("/api/v1/system/status")) {
-        return Promise.resolve(jsonResponse(systemStatus));
-      }
       if (url.endsWith("/api/v1/workspaces")) return Promise.resolve(jsonResponse(workspace, 201));
       return Promise.reject(new Error(`unexpected request: ${url}`));
     });
 
     renderWithAppProviders(<WorkspacePage />);
-    expect(screen.getByRole("button", { name: "创建 Workspace" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "打开已有 Workspace" })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Workspace 名称"), { target: { value: "知识库" } });
-    fireEvent.change(screen.getByLabelText("根目录绝对路径"), { target: { value: "/tmp/knowledge" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建 Workspace" }));
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "知识库" } });
+    fireEvent.change(screen.getByLabelText("宿主机目录"), { target: { value: "/tmp/knowledge" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建工作区" }));
 
-    expect(await screen.findByText("Git Dirty 警告")).toBeInTheDocument();
-    expect(screen.getByText("/tmp/knowledge")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "扫描受支持文件" })).toBeEnabled();
-    expect(screen.getByRole("link", { name: "进入工作台" })).toHaveAttribute("href", "/dashboard");
+    await waitFor(() => expect(window.localStorage.getItem(activeWorkspaceStorageKey)).toBe(workspace.id));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: /扫描/ })).not.toBeInTheDocument();
   });
 
-  it("打开已有 Workspace 后展示由服务端事实驱动的下一步入口", async () => {
+  it("使用 Workspace ID 连接后保存活动 ID", async () => {
     vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
       const url = requestURL(input);
-      if (url.endsWith("/api/v1/system/status")) {
-        return Promise.resolve(jsonResponse(systemStatus));
-      }
-      if (url.endsWith(`/api/v1/workspaces/${workspace.id}`)) {
-        return Promise.resolve(jsonResponse(workspace));
-      }
-      return Promise.reject(new Error(`unexpected request: ${url}`));
-    });
-
-    renderWithAppProviders(<WorkspacePage />);
-    fireEvent.change(screen.getByLabelText("已有 Workspace ID"), { target: { value: workspace.id } });
-    fireEvent.click(screen.getByRole("button", { name: "打开已有 Workspace" }));
-
-    const nextStep = await screen.findByRole("region", { name: "扫描资料，或进入工作台" });
-    expect(within(nextStep).getByRole("button", { name: "扫描受支持文件" })).toBeEnabled();
-    expect(within(nextStep).getByRole("link", { name: "进入工作台" })).toHaveAttribute("href", "/dashboard");
-  });
-
-  it("扫描后以表格展示文件哈希并明确不是导入完成", async () => {
-    window.localStorage.setItem("zhixu.active-workspace-id", workspace.id);
-    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
-      const url = requestURL(input);
-      if (url.endsWith("/api/v1/system/status")) {
-        return Promise.resolve(jsonResponse(systemStatus));
-      }
-      if (url.endsWith(`/api/v1/workspaces/${workspace.id}/scan`)) {
-        return Promise.resolve(jsonResponse({
-          workspace_id: workspace.id,
-          count: 1,
-          files: [{ relative_path: "notes/a.md", byte_size: 12, content_hash: "a".repeat(64), media_type: "text/markdown", source_id: workspace.id, source_version_id: workspace.id, content_artifact_id: workspace.id, content_artifact_created: true }],
-        }));
-      }
       if (url.endsWith(`/api/v1/workspaces/${workspace.id}`)) return Promise.resolve(jsonResponse(workspace));
       return Promise.reject(new Error(`unexpected request: ${url}`));
     });
 
     renderWithAppProviders(<WorkspacePage />);
-    fireEvent.click(await screen.findByRole("button", { name: "扫描受支持文件" }));
+    fireEvent.click(screen.getByRole("button", { name: "使用 Workspace ID" }));
+    fireEvent.change(screen.getByLabelText("Workspace ID"), { target: { value: workspace.id } });
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区" }));
 
-    expect(await screen.findByRole("cell", { name: "notes/a.md" })).toBeInTheDocument();
-    expect(screen.getByText("扫描会把原始字节捕获到受管不可变存储，不修改源文件，也不代表已完成解析或索引。")).toBeInTheDocument();
-    const scanNextStep = screen.getByRole("region", { name: "继续检查资料事实" });
-    expect(within(scanNextStep).getByRole("link", { name: "查看资料版本" })).toHaveAttribute("href", "/documents");
-    expect(within(scanNextStep).getByRole("link", { name: "进入工作台" })).toHaveAttribute("href", "/dashboard");
+    await waitFor(() => expect(window.localStorage.getItem(activeWorkspaceStorageKey)).toBe(workspace.id));
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

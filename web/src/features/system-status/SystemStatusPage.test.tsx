@@ -65,9 +65,10 @@ describe("SystemStatusPage", () => {
 
     renderWithAppProviders(<SystemStatusPage display="compact" />);
 
-    expect(screen.getByText("读取运行摘要")).toBeInTheDocument();
+    expect(screen.getByText("正在读取系统状态…")).toBeInTheDocument();
     expect(await screen.findByText("基础服务已就绪")).toBeInTheDocument();
-    expect(screen.getByText("运行摘要")).toBeInTheDocument();
+    expect(screen.queryByText("运行摘要")).not.toBeInTheDocument();
+    expect(screen.queryByText(/ZHIXU 已连接数据库/)).not.toBeInTheDocument();
     expect(screen.getByText("可选能力已关闭")).toBeInTheDocument();
     expect(screen.getByText("RAG", { selector: "dt" })).toBeInTheDocument();
     expect(screen.getByText("Graph", { selector: "dt" })).toBeInTheDocument();

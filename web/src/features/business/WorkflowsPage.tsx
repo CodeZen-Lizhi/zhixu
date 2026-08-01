@@ -73,12 +73,8 @@ export const WorkflowsPage = () => {
   return (
     <div className="page-stack">
       <div className="page-intro">
-        <p className="eyebrow">Durable Runtime / Workflow</p>
-        <h2>让长任务有自己的时间线。</h2>
-        <p>
-          这里只显示持久 Run 的真实状态；节点、Tool Call 与 Token
-          细节没有公共契约时会明确标注缺口。
-        </p>
+        <h1>流程</h1>
+        <p>查看任务运行状态与执行记录。</p>
       </div>
       <Card>
         <div className="filter-bar" aria-label="Workflow 筛选">
@@ -211,7 +207,7 @@ export const WorkflowDetailPage = () => {
       <div className="page-intro page-intro--split">
         <div>
           <p className="eyebrow">Workflow Run / durable state</p>
-          <h2>{run.definitionId}</h2>
+          <h1>{run.definitionId}</h1>
           <p>
             <Badge
               tone={

@@ -1,6 +1,6 @@
 .timeline-workbench {
   --timeline-surface: rgb(255 255 255 / 58%);
-  --timeline-line: #c8c3b8;
+  --timeline-line: var(--line);
   display: grid;
   gap: 1.25rem;
   min-width: 0;
@@ -32,11 +32,10 @@
   padding: .8rem 0 1.5rem;
 }
 
-.timeline-hero h2 {
+.timeline-hero h1 {
   margin: .25rem 0 .55rem;
-  font-family: Georgia, serif;
-  font-size: 3.4rem;
-  font-weight: 500;
+  font-size: 1.75rem;
+  font-weight: 650;
   letter-spacing: 0;
   line-height: 1;
 }
@@ -124,7 +123,7 @@
   display: grid;
   gap: .35rem;
   min-width: 0;
-  color: #4f504a;
+  color: var(--muted);
   font-size: .73rem;
   font-weight: 750;
 }
@@ -143,7 +142,7 @@
   gap: 1rem;
   align-items: center;
   min-width: 0;
-  border-bottom: 1px solid rgb(200 195 184 / 70%);
+  border-bottom: 1px solid var(--line);
   padding: 1rem .15rem;
 }
 
@@ -248,11 +247,10 @@
   padding-bottom: 1rem;
 }
 
-.timeline-event-detail__title h2 {
+.timeline-event-detail__title h1 {
   margin: .5rem 0 0;
-  font-family: Georgia, serif;
-  font-size: 1.8rem;
-  font-weight: 500;
+  font-size: 1.35rem;
+  font-weight: 650;
   letter-spacing: 0;
 }
 
@@ -276,7 +274,7 @@
   gap: .3rem;
   min-width: 0;
   padding: .75rem;
-  background: #f8f6f0;
+  background: var(--surface-subtle);
 }
 
 .timeline-report-meta dt,
@@ -301,9 +299,9 @@
 
 .timeline-owner-snapshot {
   margin-top: 1rem;
-  border-left: 3px solid var(--brass);
+  border-left: 3px solid var(--amber);
   padding: .75rem;
-  background: rgb(169 120 44 / 7%);
+  background: #fff7e6;
   font-size: .75rem;
 }
 
@@ -404,7 +402,7 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .timeline-hero h2 {
+  .timeline-hero h1 {
     font-size: 2.1rem;
   }
 

@@ -8,7 +8,7 @@ const WorkspacePage = lazy(() => import("../features/workspace/WorkspacePage").t
 const DashboardPage = lazy(() => import("../features/business/DashboardPage").then((module) => ({ default: module.DashboardPage })));
 const BasicPages = lazy(() => import("../features/business/BasicPages").then((module) => ({ default: module.InboxPage })));
 const DocumentsPage = lazy(() => import("../features/business/BasicPages").then((module) => ({ default: module.DocumentsPage })));
-const SettingsPage = lazy(() => import("../features/business/BasicPages").then((module) => ({ default: module.SettingsPage })));
+const SettingsPage = lazy(() => import("../features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const ProposalsPage = lazy(() => import("../features/business/ProposalsPage").then((module) => ({ default: module.ProposalsPage })));
 const ProposalDetailPage = lazy(() => import("../features/business/ProposalsPage").then((module) => ({ default: module.ProposalDetailPage })));
 const WorkflowsPage = lazy(() => import("../features/business/WorkflowsPage").then((module) => ({ default: module.WorkflowsPage })));

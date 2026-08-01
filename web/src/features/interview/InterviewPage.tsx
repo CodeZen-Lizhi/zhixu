@@ -322,7 +322,7 @@ export const InterviewsPage = () => {
 
   return <div className="page-stack">
     <div className="page-intro page-intro--split">
-      <div><p className="eyebrow">Learning / Interview</p><h2>模拟面试</h2><p>题目、评分与报告均绑定正式 Claim；评分依据只在提交后出现。</p></div>
+      <div><h1>访谈</h1><p>基于知识内容进行模拟问答。</p></div>
       <div className="folio-mark"><Target size={20} /><strong>Interview</strong><span>evidence bound</span></div>
     </div>
     <div className="interview-start-grid">
@@ -544,7 +544,7 @@ export const InterviewSessionPage = () => {
 
   return <div className="page-stack">
     <div className="page-intro page-intro--split">
-      <div><Link className="back-link" to="/interviews">返回 Interview</Link><p className="eyebrow">Interview session</p><h2>模拟面试</h2></div>
+      <div><Link className="back-link" to="/interviews">返回访谈</Link><h1>模拟面试</h1></div>
       <Button variant="ghost" aria-label="刷新面试会话" onClick={() => void snapshot.refetch()} disabled={snapshot.isFetching}><RefreshCw size={16} /></Button>
     </div>
     {snapshot.isPending ? <div className="ui-state" role="status">正在恢复面试会话…</div> : null}

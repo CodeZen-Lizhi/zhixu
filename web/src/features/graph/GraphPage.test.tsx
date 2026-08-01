@@ -236,8 +236,9 @@ describe("GraphPage", () => {
 
     renderPage();
 
-    expect(screen.getByRole("heading", { name: "先连接一个 Workspace" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "返回 Workspace 配置" })).toHaveAttribute("href", "/");
+    expect(screen.getByRole("heading", { name: "知识图谱" })).toBeInTheDocument();
+    expect(screen.getByText("请先连接工作区。")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "连接工作区" })).toHaveAttribute("href", "/");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -492,13 +493,12 @@ describe("GraphPage", () => {
 
     act(() => setActiveWorkspaceId(otherWorkspaceId));
 
-    await waitFor(() => expect(screen.getByText(otherWorkspaceId)).toBeInTheDocument());
-    expect(screen.getByText("选择图中的节点或关系，查看服务端事实与证据。")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "释放固定布局" })).not.toBeInTheDocument();
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => {
       if (typeof init?.body !== "string") return false;
       return (JSON.parse(init.body) as { workspace_id?: string }).workspace_id === otherWorkspaceId;
     })).toBe(true));
+    expect(screen.getByText("选择图中的节点或关系，查看服务端事实与证据。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "释放固定布局" })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([input]) => {
       const url = requestUrl(input);
       return url.pathname === `/api/v1/graph/nodes/CLAIM/${claimId}`

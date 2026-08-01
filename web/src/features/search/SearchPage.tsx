@@ -239,9 +239,8 @@ export const SearchPage = () => {
 
   return <div className="page-stack">
     <div className="page-intro">
-      <p className="eyebrow">证据检索 / Search</p>
-      <h2>从当前索引找到可打开的证据。</h2>
-      <p>支持 Keyword、Semantic 与 Hybrid；请求模式、实际模式、降级原因和 vector distance 都会原样保留。</p>
+      <h1>检索</h1>
+      <p>从当前索引查找可打开的证据。</p>
     </div>
 
     <Card>

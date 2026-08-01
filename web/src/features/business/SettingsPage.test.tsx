@@ -1,12 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 const tokenId = "10000000-0000-4000-8000-000000000003";
-const workspaceApi = vi.hoisted(() => ({ getWorkspace: vi.fn(), scanWorkspace: vi.fn() }));
+const workspaceApi = vi.hoisted(() => ({ getWorkspace: vi.fn() }));
 const auth = vi.hoisted(() => ({ createApiToken: vi.fn(), listApiTokens: vi.fn(), revokeApiToken: vi.fn() }));
+const systemStatus = vi.hoisted(() => ({ render: vi.fn() }));
 
 vi.mock("../../api/auth", async (importOriginal) => ({
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
@@ -17,26 +18,32 @@ vi.mock("../../api/auth", async (importOriginal) => ({
 }));
 vi.mock("../../api/workspace", () => ({
   getWorkspace: workspaceApi.getWorkspace,
-  scanWorkspace: workspaceApi.scanWorkspace,
 }));
 vi.mock("../../app/active-workspace", () => ({ useActiveWorkspaceId: () => "10000000-0000-4000-8000-000000000002" }));
 vi.mock("../../app/auth-context", () => ({ useAuth: () => ({ state: { status: "authenticated", mode: "required" } }) }));
 vi.mock("../settings/ModelSettingsPanel", () => ({ ModelSettingsPanel: () => <section aria-label="模型设置面板">真实模型设置面板</section> }));
+vi.mock("../system-status/SystemStatusPage", () => ({ SystemStatusPage: (props: { display?: string }) => { systemStatus.render(props); return <section aria-label="系统状态面板">{props.display}</section>; } }));
 
-import { SettingsPage } from "./BasicPages";
+import { SettingsPage } from "../settings/SettingsPage";
 
-const renderSettings = () => render(
-  <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <MemoryRouter><SettingsPage /></MemoryRouter>
+const LocationProbe = () => {
+  const location = useLocation();
+  return <output data-testid="settings-location">{location.pathname}{location.search}</output>;
+};
+
+const renderSettings = (path = "/settings") => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const result = render(
+  <QueryClientProvider client={queryClient}>
+    <MemoryRouter initialEntries={[path]}><SettingsPage /><LocationProbe /></MemoryRouter>
   </QueryClientProvider>,
-);
-
-const openApiTokenTab = () => {
-  fireEvent.mouseDown(screen.getByRole("tab", { name: "API Token" }), { button: 0, ctrlKey: false });
+  );
+  return { ...result, queryClient };
 };
 
 beforeEach(() => {
   window.localStorage.clear();
+  systemStatus.render.mockClear();
   workspaceApi.getWorkspace.mockResolvedValue({ id: workspaceId, name: "Docs", rootPath: "/workspace", status: "active", git: { present: true, dirty: false, branch: "dev", head: "abc" } });
 });
 
@@ -47,13 +54,40 @@ afterEach(() => {
 });
 
 describe("SettingsPage API Token management", () => {
-  it("模型页签挂载真实设置面板，不再显示无契约占位", () => {
+  it("模型分类挂载真实设置面板，不再显示无契约占位", () => {
     auth.listApiTokens.mockResolvedValue({ items: [] });
-    renderSettings();
-    fireEvent.mouseDown(screen.getByRole("tab", { name: "模型 / 检索" }), { button: 0, ctrlKey: false });
+    renderSettings("/settings?section=models");
 
     expect(screen.getByRole("region", { name: "模型设置面板" })).toHaveTextContent("真实模型设置面板");
     expect(screen.queryByText("无公开读取/写入契约")).not.toBeInTheDocument();
+  });
+
+  it("用 URL 分类状态组织五类设置", () => {
+    auth.listApiTokens.mockResolvedValue({ items: [] });
+    renderSettings();
+
+    const navigation = screen.getByRole("navigation", { name: "设置分类" });
+    expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
+    expect(navigation).toHaveTextContent("工作区模型与检索数据导出访问权限系统状态");
+    expect(screen.getByRole("link", { name: "工作区" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("未知分类回退到工作区，并在切换分类时保留其他查询参数", async () => {
+    auth.listApiTokens.mockResolvedValue({ items: [] });
+    renderSettings("/settings?section=unknown&from=shortcut");
+
+    expect(screen.getByRole("link", { name: "工作区" })).toHaveAttribute("aria-current", "page");
+    await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent("/settings?section=workspace&from=shortcut"));
+
+    fireEvent.click(screen.getByRole("link", { name: "模型与检索" }));
+    await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent("/settings?section=models&from=shortcut"));
+  });
+
+  it("系统状态分类展示完整依赖事实", () => {
+    renderSettings("/settings?section=system");
+
+    expect(screen.getByRole("region", { name: "系统状态面板" })).toHaveTextContent("full");
+    expect(systemStatus.render).toHaveBeenCalledWith({ display: "full" });
   });
 
   it("一次性明文未确认复制前阻止连续创建和离页丢失", async () => {
@@ -62,8 +96,7 @@ describe("SettingsPage API Token management", () => {
       .mockResolvedValueOnce({ items: [{ id: tokenId, name: "CI read", scopes: ["READ_LOCAL"], createdAt: "2026-07-23T00:00:00Z", expiresAt: "2026-08-22T00:00:00Z" }] });
     auth.createApiToken.mockResolvedValue({ id: tokenId, name: "CI read", scopes: ["READ_LOCAL"], expiresAt: "2026-08-22T00:00:00Z", token: "t".repeat(43) });
 
-    renderSettings();
-    openApiTokenTab();
+    const { queryClient } = renderSettings("/settings?section=access");
     expect(await screen.findByText("尚无 API Token")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("名称"), { target: { value: "CI read" } });
     fireEvent.click(screen.getByRole("button", { name: "创建 API Token" }));
@@ -74,6 +107,15 @@ describe("SettingsPage API Token management", () => {
     expect(screen.getByRole("button", { name: "创建 API Token" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "关闭一次性 Token" })).toBeDisabled();
     expect(JSON.stringify(window.localStorage)).not.toContain("t".repeat(43));
+    const queryCache = queryClient.getQueryCache().getAll().map((query) => query.state.data);
+    const mutationCache = queryClient.getMutationCache().getAll().map((mutation) => mutation.state);
+    expect(JSON.stringify({ queryCache, mutationCache })).not.toContain("t".repeat(43));
+
+    const confirmNavigation = vi.spyOn(window, "confirm").mockReturnValue(false);
+    fireEvent.click(screen.getByRole("link", { name: "模型与检索" }));
+    expect(confirmNavigation).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("settings-location")).toHaveTextContent("/settings?section=access");
+    confirmNavigation.mockRestore();
 
     const beforeUnload = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(beforeUnload);
@@ -94,8 +136,7 @@ describe("SettingsPage API Token management", () => {
       .mockRejectedValueOnce(new Error("撤销服务不可用"))
       .mockResolvedValueOnce(undefined);
 
-    renderSettings();
-    openApiTokenTab();
+    renderSettings("/settings?section=access");
     expect(await screen.findByText("CI read")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "撤销" }));
 
@@ -114,8 +155,7 @@ describe("SettingsPage API Token management", () => {
       .mockRejectedValueOnce(new Error("第二页暂时不可用"))
       .mockResolvedValueOnce({ items: [{ id: secondTokenId, name: "second", scopes: ["READ_LOCAL"], createdAt: "2026-07-22T00:00:00Z", expiresAt: "2026-08-21T00:00:00Z" }] });
 
-    renderSettings();
-    openApiTokenTab();
+    renderSettings("/settings?section=access");
     expect(await screen.findByText("first")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "加载更多 Token" }));
 

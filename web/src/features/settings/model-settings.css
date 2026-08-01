@@ -104,18 +104,37 @@
   gap: .75rem;
 }
 
-.model-settings-section > header > div,
 .model-settings-active__heading > div {
   display: grid;
   min-width: 0;
   gap: .2rem;
 }
 
+.model-settings-section__actions {
+  display: flex;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: .45rem;
+}
+
+.model-settings-toggle {
+  min-height: 36px;
+  padding: .35rem .5rem;
+  color: var(--blue);
+}
+
+.model-settings-toggle svg {
+  transition: transform var(--motion-fast) ease;
+}
+
+.model-settings-toggle svg.is-expanded {
+  transform: rotate(180deg);
+}
+
 .model-settings-section h3 {
   margin: 0;
-  font-family: Georgia, serif;
-  font-size: 1.18rem;
-  font-weight: 500;
+  font-size: 1rem;
+  font-weight: 650;
 }
 
 .model-settings-section__body {
@@ -309,7 +328,7 @@
 }
 
 .model-settings-warning {
-  color: var(--brass);
+  color: var(--amber);
 }
 
 .model-settings-error {
@@ -346,26 +365,14 @@
 }
 
 @media (max-width: 520px) {
-  .model-settings-status,
   .model-settings-fields {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .model-settings-status > div,
-  .model-settings-status > div:nth-child(2) {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .model-settings-status > div:last-child {
-    border-bottom: 0;
   }
 
   .model-settings-field--wide {
     grid-column: auto;
   }
 
-  .model-settings-section > header,
   .model-settings-active__heading,
   .model-secret-control__heading {
     align-items: flex-start;
@@ -373,10 +380,6 @@
   }
 
   .model-settings-save {
-    justify-content: stretch;
-  }
-
-  .model-settings-save .ui-button {
-    width: 100%;
+    justify-content: flex-start;
   }
 }

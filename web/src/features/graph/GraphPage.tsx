@@ -285,7 +285,7 @@ export const GraphPage = () => {
   };
 
   if (workspaceId === "") {
-    return <section className="graph-gate"><span className="graph-kicker">知序 · Graph</span><h1>先连接一个 Workspace</h1><p>图谱查询只读取当前 Workspace 中的正式 Topic、Claim 与 Relation。</p><Link to="/">返回 Workspace 配置</Link></section>;
+    return <section className="graph-gate"><h1>知识图谱</h1><p>请先连接工作区。</p><Link to="/">连接工作区</Link></section>;
   }
 
   const pathNotFound = pathQuery.data?.status === "not_found" ? pathQuery.data : undefined;
@@ -293,9 +293,7 @@ export const GraphPage = () => {
 
   return <div className="graph-page">
     <header className="graph-header" {...(detailModalOpen ? { inert: true } : {})}>
-      <div><Link to="/" className="graph-brand">知序 · ZHIXU</Link><h1>知识图谱</h1></div>
-      <nav aria-label="产品导航"><Link to="/">Workspace</Link><Link to="/chat">证据研究台</Link></nav>
-      <div className="graph-workspace-id"><span>Workspace</span><code>{workspaceId}</code></div>
+      <h1>知识图谱</h1>
     </header>
     <div className="graph-mode-switch" aria-label="图谱模式" {...(detailModalOpen ? { inert: true } : {})}>
       {graphModes.map((mode) => <button type="button" key={mode} aria-pressed={urlState.mode === mode} onClick={() => changeMode(mode)}>{modeLabels[mode]}</button>)}

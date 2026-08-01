@@ -142,9 +142,8 @@ export const ProposalsPage = () => {
 
   return <div className="page-stack">
     <div className="page-intro">
-      <p className="eyebrow">Change Control / Proposal</p>
-      <h2>在变更落地前，先读证据。</h2>
-      <p>每类 Proposal 使用自己的冻结快照；批准和驳回都绑定服务端 Revision 与 Change Hash。</p>
+      <h1>提案</h1>
+      <p>审阅并决定待处理变更。</p>
     </div>
     <Card>
       <div className="filter-bar" aria-label="Proposal 筛选">
@@ -354,7 +353,7 @@ export const ProposalDetailPage = () => {
     <div className="page-intro page-intro--split">
       <div>
         <p className="eyebrow">审阅台 / {type}</p>
-        <h2>{proposal.type === "file_patch" ? proposal.targetPath : proposal.type === "knowledge_change" ? "知识关系变更" : proposal.type === "publish_artifact" ? "Artifact 发布" : "下游更新意图"}</h2>
+        <h1>{proposal.type === "file_patch" ? proposal.targetPath : proposal.type === "knowledge_change" ? "知识关系变更" : proposal.type === "publish_artifact" ? "Artifact 发布" : "下游更新意图"}</h1>
         <p>Proposal 状态：<Badge tone={proposal.status === "needs_revision" ? "danger" : ready ? "warning" : "neutral"}>{proposal.status}</Badge></p>
       </div>
       <div className="hash-card"><span>Change Hash</span><code>{changeHash.slice(0, 16)}…</code></div>

@@ -112,9 +112,8 @@ export const ReviewPage = () => {
   return <div className="page-stack">
     <div className="page-intro page-intro--split">
       <div>
-        <p className="eyebrow">Learning / Review</p>
-        <h2>从正式知识开始，完成今天的主动回忆。</h2>
-        <p>待复习题只在答题前展示问题；评分、遗漏与可打开的来源证据由可信服务端提交后返回。</p>
+        <h1>复习</h1>
+        <p>管理复习 Deck 并开始主动回忆。</p>
       </div>
       <div className="folio-mark"><BookOpenCheck size={20} /><strong>{decks.data?.items.length ?? "—"}</strong><span>个 Deck</span></div>
     </div>

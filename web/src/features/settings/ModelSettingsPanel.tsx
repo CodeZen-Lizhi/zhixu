@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient, type UseMutationResult } from "@tanstack/react-query";
-import { AlertTriangle, Check, KeyRound, LoaderCircle, RefreshCw, Save, TestTube2 } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, KeyRound, LoaderCircle, RefreshCw, Save, TestTube2 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 
 import {
@@ -276,6 +276,7 @@ export const ModelSettingsPanel = () => {
   const feedbackRef = useRef<HTMLDivElement>(null);
   const [validationError, setValidationError] = useState<string | undefined>();
   const [conflict, setConflict] = useState<string | undefined>();
+  const [expandedSections, setExpandedSections] = useState<Record<ModelTestTarget, boolean>>({ chat: false, embedding: false });
 
   const replaceDraft = (nextDraft: ModelSettingsDraft): void => {
     draftRef.current = nextDraft;
@@ -430,7 +431,7 @@ export const ModelSettingsPanel = () => {
   };
 
   return <Card className="model-settings-panel">
-    <CardHeader eyebrow="Model runtime" title="Chat 与 Embedding" description="待应用配置与当前生效配置分开显示。" action={<Button type="button" variant="ghost" size="sm" aria-label="刷新模型设置" onClick={() => void query.refetch()} disabled={query.isFetching || actionPending}><RefreshCw className={query.isFetching ? "is-spinning" : undefined} size={16} /></Button>} />
+    <CardHeader title="模型与检索" description="待应用配置与当前生效配置分开显示。" action={<Button type="button" variant="ghost" size="sm" aria-label="刷新模型设置" onClick={() => void query.refetch()} disabled={query.isFetching || actionPending}><RefreshCw className={query.isFetching ? "is-spinning" : undefined} size={16} /></Button>} />
 
     <div className="model-settings-status" aria-label="模型配置版本状态">
       <div><span>Desired</span><strong>Revision {String(settings.desiredRevision)}</strong></div>
@@ -446,8 +447,8 @@ export const ModelSettingsPanel = () => {
 
     <form className="model-settings-form" onSubmit={submit} noValidate>
       <section className="model-settings-section" aria-labelledby="chat-settings-title">
-        <header><div><span>Chat</span><h3 id="chat-settings-title">对话模型</h3></div><Badge tone={capabilityTone(settings.capabilities.chat)}>{capabilityLabel[settings.capabilities.chat]}</Badge></header>
-        <div className="model-settings-section__body">
+        <header><h3 id="chat-settings-title">对话模型</h3><div className="model-settings-section__actions"><Badge tone={capabilityTone(settings.capabilities.chat)}>{capabilityLabel[settings.capabilities.chat]}</Badge><Button type="button" variant="ghost" size="sm" className="model-settings-toggle" aria-label={`${expandedSections.chat ? "收起" : "配置"}对话模型`} aria-expanded={expandedSections.chat} aria-controls="chat-settings-content" onClick={() => setExpandedSections((current) => ({ ...current, chat: !current.chat }))}>{expandedSections.chat ? "收起" : "配置"}<ChevronDown className={expandedSections.chat ? "is-expanded" : undefined} size={16} /></Button></div></header>
+        {expandedSections.chat ? <div className="model-settings-section__body" id="chat-settings-content">
           <fieldset className="model-settings-fields" disabled={controlsDisabled}>
             <legend><span>Desired</span>待应用配置</legend>
             <label>Provider<select aria-label="Chat Provider" value={draft.chat.provider} onChange={(event) => changeDraft((current) => { const provider = chatProviderValue(event.target.value); return { ...current, chat: { ...current.chat, provider, ...(provider === "disabled" ? { baseUrl: "", model: "", modelVersion: "", secret: { action: "clear", value: "" } } : {}) } }; })}><option value="disabled">Disabled</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
@@ -458,12 +459,12 @@ export const ModelSettingsPanel = () => {
             <div className="model-settings-actions model-settings-field--wide"><Button type="button" variant="secondary" size="sm" disabled={controlsDisabled || draft.chat.provider === "disabled"} onClick={() => runTest("chat")}><TestTube2 size={15} />{testMutation.isPending && testMutation.variables === "chat" ? "测试中…" : "测试 Chat 连接"}</Button><TestFeedback target="chat" mutation={testMutation} /></div>
           </fieldset>
           <ActiveSummary kind="chat" summary={settings.activeSettings.chat} differs={!settingsEqual(settings.desiredSettings.chat, settings.activeSettings.chat)} />
-        </div>
+        </div> : null}
       </section>
 
       <section className="model-settings-section" aria-labelledby="embedding-settings-title">
-        <header><div><span>Embedding</span><h3 id="embedding-settings-title">向量模型</h3></div><Badge tone={capabilityTone(settings.capabilities.embedding)}>{capabilityLabel[settings.capabilities.embedding]}</Badge></header>
-        <div className="model-settings-section__body">
+        <header><h3 id="embedding-settings-title">向量模型</h3><div className="model-settings-section__actions"><Badge tone={capabilityTone(settings.capabilities.embedding)}>{capabilityLabel[settings.capabilities.embedding]}</Badge><Button type="button" variant="ghost" size="sm" className="model-settings-toggle" aria-label={`${expandedSections.embedding ? "收起" : "配置"}向量模型`} aria-expanded={expandedSections.embedding} aria-controls="embedding-settings-content" onClick={() => setExpandedSections((current) => ({ ...current, embedding: !current.embedding }))}>{expandedSections.embedding ? "收起" : "配置"}<ChevronDown className={expandedSections.embedding ? "is-expanded" : undefined} size={16} /></Button></div></header>
+        {expandedSections.embedding ? <div className="model-settings-section__body" id="embedding-settings-content">
           <fieldset className="model-settings-fields" disabled={controlsDisabled}>
             <legend><span>Desired</span>待应用配置</legend>
             <label>Provider<select aria-label="Embedding Provider" value={draft.embedding.provider} onChange={(event) => changeDraft((current) => { const provider = embeddingProviderValue(event.target.value); return { ...current, embedding: { ...current.embedding, provider, ...(provider === "disabled" ? { baseUrl: "", model: "", dimensions: "0", secret: { action: "clear", value: "" } } : provider === "ollama" ? { baseUrl: modelSettingsOllamaRelayUrl, secret: { action: "clear", value: "" } } : {}) } }; })}><option value="disabled">Disabled</option><option value="openai-compatible">OpenAI-compatible</option><option value="ollama">Ollama</option></select></label>
@@ -476,7 +477,7 @@ export const ModelSettingsPanel = () => {
             <div className="model-settings-actions model-settings-field--wide"><Button type="button" variant="secondary" size="sm" disabled={controlsDisabled || draft.embedding.provider === "disabled"} onClick={() => runTest("embedding")}><TestTube2 size={15} />{testMutation.isPending && testMutation.variables === "embedding" ? "测试中…" : "测试 Embedding 连接"}</Button><TestFeedback target="embedding" mutation={testMutation} /></div>
           </fieldset>
           <ActiveSummary kind="embedding" summary={settings.activeSettings.embedding} differs={!settingsEqual(settings.desiredSettings.embedding, settings.activeSettings.embedding)} />
-        </div>
+        </div> : null}
       </section>
 
       <div className="model-settings-feedback" ref={feedbackRef} tabIndex={-1} aria-label="模型设置反馈" aria-live="polite">

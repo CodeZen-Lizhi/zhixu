@@ -609,11 +609,7 @@
   min-height: 26rem;
   overflow: hidden;
   border: 1px solid #bac5c1;
-  background-color: #fbfdfc;
-  background-image:
-    linear-gradient(#e4eae7 1px, transparent 1px),
-    linear-gradient(90deg, #e4eae7 1px, transparent 1px);
-  background-size: 2rem 2rem;
+  background-color: #f7f9fc;
 }
 
 .graph-canvas__edges,
@@ -683,7 +679,7 @@
 .graph-node[data-selected="true"],
 .graph-list__button[data-selected="true"],
 .graph-edge-label[data-selected="true"] {
-  outline: 3px solid #d16932;
+  outline: 3px solid var(--blue-focus);
   outline-offset: 3px;
 }
 
@@ -1031,7 +1027,7 @@
   }
 
   .graph-header h1 {
-    font-size: 1.8rem;
+    font-size: 1.5rem;
   }
 
   .graph-header nav {
@@ -1101,7 +1097,7 @@
   }
 
   .graph-gate h1 {
-    font-size: 2.25rem;
+    font-size: 1.5rem;
   }
 }
 

@@ -216,9 +216,9 @@ export const RagPage = () => {
   };
   const closeCitation = () => { setSearchParams({}); citationTriggerRef.current?.focus(); };
 
-  if (workspaceId === "") return <section className="rag-gate"><p className="brand-mark">知序 · RAG</p><h1>先连接一个 Workspace。</h1><p>会话必须绑定真实 Workspace，不能用临时示例数据代替。</p><Link className="rag-text-link" to="/">返回 Workspace 配置</Link></section>;
+  if (workspaceId === "") return <section className="rag-gate"><h1>证据研究台</h1><p>请先连接工作区。</p><Link className="rag-text-link" to="/">连接工作区</Link></section>;
   return <div className="rag-page">
-    <header className="rag-header"><div><Link to="/" className="brand-mark">知序 · ZHIXU</Link><h1>证据研究台</h1></div><div className={`rag-connection rag-connection--${connectionState}`} role="status"><span aria-hidden="true" />{connectionState === "open" ? "事件已连接" : connectionState === "reconnecting" ? "正在恢复连接" : "事件连接已关闭"}</div></header>
+    <header className="rag-header"><h1>证据研究台</h1></header>
     <div className="rag-layout">
       <aside className="rag-rail" aria-label="会话列表"><form onSubmit={create}><label><span>新会话标题</span><input maxLength={512} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：发布流程核查" /></label><button disabled={createMutation.isPending}>{createMutation.isPending ? "创建中…" : "新建会话"}</button></form>
         {createMutation.isError ? <ErrorNotice error={createMutation.error} /> : null}
