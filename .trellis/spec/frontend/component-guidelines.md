@@ -168,7 +168,7 @@ editor.getModifiedEditor().onDidDispose(() => {
 
 ### 1. Scope / Trigger
 
-- 修改 `AppShell`、入口 Dashboard、Workspace 首次连接页、设置分组或根路由 `/` 的页面语义时应用。
+- 修改 `AppShell`、入口 Dashboard、Workspace 首次连接页、设置分组、根路由 `/` 或 Controller 运行时门禁时应用。
 
 ### 2. Signatures
 
@@ -181,9 +181,10 @@ selectDashboardFocus({ waitingWorkflows, failedWorkflows, proposals })
 ### 3. Contracts
 
 - `routeDisplayRegistry` 是导航分组、面包屑和路由归属的唯一来源；`AppShell` 不得复制一份手写菜单或按 URL 子串猜测所属分组。
-- 未连接 Workspace 且位于 `/dashboard` 时，Shell 使用入口模式：仅保留工作台与设置两个图标入口、`知序` 品牌和“本地模式”提示。入口 Dashboard 只展示知识脉络、连接目录和可展开的数据边界，不请求 Workspace、Proposal、Workflow、Source Version 或 System Status。
+- Direct 模式未连接 Workspace 且位于 `/dashboard` 时，Shell 使用入口模式：仅保留工作台与设置两个图标入口、`知序` 品牌和“本地模式”提示。入口 Dashboard 只展示知识脉络、连接目录和可展开的数据边界，不请求 Workspace、Proposal、Workflow、Source Version 或 System Status。
+- Controller 模式下，`/dashboard` 及其他普通业务 deep link 不要求控制凭证；它们先显示简短的公开 runtime waiting/unavailable 状态，ready 后进入独立业务认证和既有工作台。状态页只保留一个标题、一句必要说明和一个明确动作，不展示控制 Session、Root Path、operation 详情或大段能力介绍。
 - 已连接时一级导航固定为“工作台 / 知识 / 产出 / 设置”。知识与产出使用由 registry 派生的分组菜单；设置只保留一个入口，并通过 `section=workspace|models|exports|access|system` 选择内容。
-- 根路由 `/` 语义等同 Workspace 页面，归属设置：设置链接必须具有 active 样式与 `aria-current="page"`，面包屑不得追加“详情”。已有业务 deep link 仍由目标页面的 Workspace gate 处理，不能删路由或重定向为假成功。
+- Controller 模式的 `/`、`/workspace` 是受保护的 Host Control 页面；Direct 模式根路由 `/` 仍语义等同 Workspace 页面并归属设置。已有业务 deep link 保持原 URL，不能因控制 Session 缺失重定向到 `/workspace` 或假成功页。
 - System Status 只在设置的 `section=system` 使用 `SystemStatusPage display="full"` 展示。不得在入口 Dashboard 拼接能力矩阵、请求 ID 或运行摘要，也不得把 SSE 连接状态描述为业务成功/失败。
 - 已连接 Dashboard 的“先处理这一件”只从有界真实列表派生：`waiting_for_human` Workflow（1 条）优先于 `failed` Workflow（1 条），再优先于当前 `ready_for_review` Proposal（最多 5 条，风险等级后按更新时间）；最近资料只使用最多 4 条 Source Version 的服务端捕获时间。无数据时展示下一步入口，不得伪造总数、最近访问或跨资源关联。
 - 创建或打开 Workspace 后提供资料收件箱与工作台入口。不得自动扫描、伪造索引完成或改变 Workspace/storage owner。
@@ -192,8 +193,10 @@ selectDashboardFocus({ waitingWorkflows, failedWorkflows, proposals })
 
 | Condition | Required result |
 |---|---|
-| 无 Active Workspace 的 `/dashboard` | 只显示入口脉络与连接动作，不建立业务 Query/SSE，也不显示系统状态 |
-| `/` 打开 Workspace 页 | 工作区 active 且无“详情”面包屑 |
+| Direct 模式无 Active Workspace 的 `/dashboard` | 只显示入口脉络与连接动作，不建立业务 Query/SSE，也不显示系统状态 |
+| Controller 模式 runtime waiting/unavailable | 原业务 URL 显示简短状态和进入 `/workspace`/重试动作，不显示控制凭证错误或旧业务事实 |
+| Controller 模式 runtime ready 且无控制 Session | 普通业务路由进入业务 Auth；`/workspace` 显示控制授权门禁 |
+| `/` 打开 Workspace 页 | 工作区 active 且无“详情”面包屑；Controller 模式仍要求控制 Session |
 | 单个 Dashboard 待办列表失败 | 保留成功列表派生的焦点，提示结果可能不完整并提供独立重试 |
 | 所有 Dashboard 待办列表失败 | 显示读取受阻和重试，不把失败伪装成“今日已收束” |
 | `section` 非法 | 保留其他 URL 参数并 replace 为 `section=workspace` |
@@ -201,18 +204,18 @@ selectDashboardFocus({ waitingWorkflows, failedWorkflows, proposals })
 
 ### 5. Good / Base / Bad Cases
 
-- Good：首次打开 `/dashboard` 即可连接 Workspace，知识脉络不被运行摘要阻挡；连接后完整分组导航与五类设置可用。
-- Base：没有 Workspace 时仍可访问 Dashboard、工作区和设置，并可通过 direct URL 查看其他页面的 gate。
-- Bad：平铺全部路由、把 `closed` 描述为服务离线、在入口页渲染完整状态矩阵、以首屏列表长度冒充总数，或创建后自动扫描。
+- Good：全新浏览器可直接打开 ready 的 `/dashboard`；进入 `/workspace` 才要求控制链接。连接后完整分组导航与五类设置可用。
+- Base：没有 Workspace 时业务 deep link 保持原 URL 并显示简短 runtime gate；有效控制会话可从 `/workspace` 连接目录。
+- Bad：平铺全部路由、把控制链接失效当作首页错误、把 `closed` 描述为服务离线、在入口页渲染完整状态矩阵、以首屏列表长度冒充总数，或创建后自动扫描。
 
 ### 6. Tests Required
 
-- Component：未连接入口不发业务请求、已连接的待办优先级和独立重试、Source Version 真实投影、导航 registry/根路由 active、非法设置分类归一化、一次性 Token 离页保护。
-- Browser：真实或确定性本地 API 下检查 `1440x900` 和 `390x844` 的入口与已连接状态、移动 Sheet、Escape 焦点恢复、主操作可见、零横向溢出及零 console warning/error。
+- Component：Direct 未连接入口不发业务请求；Controller 业务 deep link 不探测控制 Session；runtime gate、已连接待办优先级、Source Version 真实投影、导航 registry/根路由、非法设置分类归一化和一次性 Token 离页保护。
+- Browser：真实 API 下使用两个隔离上下文检查无 Cookie `/dashboard` 与受保护 `/workspace`，并覆盖 `1440x900`、`390x844`、移动 Sheet、Escape 焦点恢复、主操作可见、零横向溢出及零 console warning/error。
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: 未选择 Workspace 时把 SSE closed 显示为“离线”，并让用户先滚过完整系统状态、能力矩阵和虚构统计。
-Correct: `/dashboard` 只显示可追溯知识脉络与连接动作；系统事实留在设置，连接后首页只投影有界且可解释的真实待办与资料。
+Wrong: 没有 Controller Cookie 就把 `/dashboard` 替换成“控制链接已失效”，并展示完整状态矩阵或大段解释。
+Correct: `/dashboard` 只依赖公开 runtime 与业务认证；控制授权留在 `/workspace`，过渡状态保持短、清楚、可操作。
 ```

@@ -322,63 +322,73 @@ Correct: Bootstrap 只用于一次交换；浏览器身份由 HttpOnly Cookie �
 - canonical filter/query key、Workspace isolation/cleanup、filter cursor reset、显式刷新、Impact/Proposal same-key retry、
   source Event/Report/Proposal 精确失效，以及分析成功不失效 Timeline list。
 
-## Scenario: Docker Host Controller State Ownership
+## Scenario: Host Control 与 Business Runtime State Ownership
 
 ### 1. Scope / Trigger
 
-- 修改 `web/src/api/controller.ts`、`host-control-context.tsx`、`App.tsx`、Controller Workspace 页面或
-  Workspace cache/SSE/Auth 根边界时应用。
+- 修改 `web/src/api/controller.ts`、`runtime-access.ts`、`host-control-context.tsx`、
+  `runtime-access-context.tsx`、`App.tsx`、Controller Workspace 页面或 Workspace cache/SSE/Auth 根边界时应用。
 
 ### 2. Signatures
 
 ```ts
 getControllerSession(signal?): Promise<ControllerSession>
 getControllerState(signal?): Promise<ControllerState>
+getRuntimeAccess(signal?): Promise<RuntimeAccess>
 startControllerWorkspaceSwitch(request, { stateVersion, idempotencyKey, signal? })
-<HostControlProvider><HostControlledRuntime /></HostControlProvider>
+<HostControlProvider><RuntimeAccessProvider>...</RuntimeAccessProvider></HostControlProvider>
 ```
 
 ### 3. Contracts
 
-- Controller REST state 是 Active Workspace、operation phase、API/Worker readiness 与 poll interval 的唯一事实源；
-  React timer、URL、localStorage 和 business API 都不能成为第二状态机。
+- `/control/v1/state` 是 Root、operation 与控制命令前置状态的唯一事实源；只允许控制页面消费。
+- `/host/v1/runtime` 是 Controller 模式业务 Active Workspace 的唯一前端事实源，只公开
+  `waiting|ready|unavailable`、ready Workspace UUID 与有界轮询间隔。它是发现信息，不替代代理逐请求 readiness
+  检查或业务 Auth/Capability。
 - Fragment bootstrap 只在首屏读取一次并立即从 URL 清除；不得写入 Browser Storage。Cookie 不可由 JavaScript 读取，
   CSRF 只保存在可清除的进程内状态。
-- `waiting_for_workspace|switching|recovery_failed` 以及 Active/API/Worker 未同时 ready 时，不得挂载
-  `AuthProvider`、TanStack Query 业务树或 SSE Event Store。
-- Workspace 切换先 abort 旧 Controller/business 请求，再清除旧 Workspace cache、runtime hint 和 SSE；旧 session epoch
-  的迟到响应不得覆盖新 session/state。localStorage 最多保存非权威 active Workspace ID hint。
+- `HostControlProvider` 只拥有控制 Session、完整控制状态和命令；普通业务路由不得为恢复控制 Session 主动请求
+  `/control/v1/*`。Controller 401 只清控制 CSRF/state，不清仍有效的业务身份或 runtime。
+- `RuntimeAccessProvider` 在非 ready、请求失败或代理返回
+  `X-Zhixu-Runtime-Status: unavailable` 时立即撤销当前 Workspace 并卸载业务树。Workspace A -> B 必须先取消请求、
+  清除 A Query 并关闭 SSE，再发布 B；Abort/epoch 之前的迟到响应不得覆盖新状态。
+- Controller 模式不从 `localStorage` 恢复 Active Workspace，也不响应 storage event；Direct 模式保留既有本地存储行为。
+- `/`、`/workspace` 进入控制边界；其他业务路由先经过 runtime boundary，再由独立 `AuthProvider` 决定访问。
 - command 必须绑定当前 `stateVersion` 与单次 intent 的 idempotency key；未知结果回查 Controller state，不能 optimistic
-  显示成功。poll interval 只消费服务端 `poll_after_ms`，Provider 卸载必须清理 timer 和 AbortController。
+  显示成功。两个 Provider 的 poll interval 只消费各自响应的 `poll_after_ms`，卸载必须清理 timer 和 AbortController。
 
 ### 4. Validation & Error Matrix
 
 | 条件 | 必须结果 |
 | --- | --- |
-| fragment 缺失/失效或 session 401 | 清 CSRF/state/cache，显示一次性控制链接失效，不挂载业务树 |
+| 普通业务路由没有 Controller Session | 不请求控制状态；runtime ready 后继续进入业务认证 |
+| `/`、`/workspace` 的 fragment 缺失/失效或 session 401 | 只清控制 CSRF/state，显示控制链接失效；不撤销业务 runtime |
 | Controller response 缺字段、未知字段或 enum/time/version 非法 | `INVALID_RESPONSE`，不渲染部分权威事实 |
-| switching/rollback/recovery_failed | 只显示控制进度；业务 Auth/Query/SSE 保持 unmounted |
+| runtime waiting/unavailable、请求失败或代理 runtime-invalid header | 立即卸载业务 Auth/Query/SSE，显示脱敏状态并重试 |
+| runtime ready A -> B | A cache/SSE 清理完成后才发布 B，不短暂显示 A |
 | state version 409 | 回查 state 后等待用户重试；不改本地 Active |
 | Root unavailable | 保留最近记录，提供重查与仅移除记录；不得自动创建目录 |
-| session epoch 变化或 Provider 卸载 | abort 请求并忽略迟到 success/error |
+| control/runtime epoch 变化或 Provider 卸载 | abort 对应请求并忽略迟到 success/error |
 
 ### 5. Good / Base / Bad Cases
 
-- Good：切换中刷新页面后从 `/control/v1/state` 恢复同一 operation；只有新 API/Worker ready 后才挂载业务树并 refetch。
-- Base：zero Active 时只展示本机目录授权表单，浏览器不探测文件系统。
-- Bad：把路径映射规则放在前端；点击后立即写 Active；切换中继续保留旧 Query/SSE；把 bootstrap/CSRF 写入 localStorage。
+- Good：全新浏览器直接打开 `/dashboard`，只读取公开 runtime；业务认证独立恢复。进入 `/workspace` 时才恢复控制 Session。
+- Base：zero Active 时业务路由显示简短等待入口；控制页在有效会话下提供本机目录授权，浏览器不探测文件系统。
+- Bad：普通路由请求 `/control/v1/state`；用 Controller 401 注销业务用户；用 localStorage 挂载 Workspace；切换中保留旧 Query/SSE；把 bootstrap/CSRF 写入 storage。
 
 ### 6. Tests Required
 
-- Strict decoder、fragment 清除、Cookie credentials、CSRF/If-Match/idempotency headers、401 清理和 Abort。
-- App 根边界分别断言 waiting/switching/recovery_failed/ready 的 Provider 挂载；旧 session/state 响应不能回写。
+- Controller/runtime strict decoder、fragment 清除、Cookie credentials、CSRF/If-Match/idempotency headers、401 隔离和 Abort。
+- App 根边界分别断言公开 runtime waiting/unavailable/ready、业务 deep link 不探测控制 Session、业务 Auth 独立挂载；
+  旧 control/runtime 响应不能回写。
 - Controller 页面覆盖新建、显式 Git、registered 切换、operation、Unavailable 重查/移除和长 Unicode 路径。
-- Playwright 覆盖刷新恢复、expected 409、桌面/390x844 overflow、console/network，以及 ready 后真实业务入口。
+- Playwright 覆盖无 Cookie 多浏览器 `/dashboard`、受保护 `/workspace`、Controller/restart 恢复、Workspace 切换、
+  expected 409、桌面/390x844 overflow 与 console/network。
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: 点击“授权并打开”后 setActiveWorkspaceId(rootPath)，同时让旧 Auth/Query/SSE 继续运行。
-Correct: 提交带 version/key 的 Controller command；持续读取权威 state，只有 exact grant 与两类 runtime ready 后
-         才设置 effective Workspace 并挂载全新的业务 Provider 子树。
+Wrong: 用控制 Session 是否存在决定 `/dashboard` 能否挂载，或从 localStorage 直接恢复 Active Workspace。
+Correct: 控制 Session 只保护 `/workspace` 和命令；公开 runtime 先撤销旧作用域并清理，再发布权威 Workspace，
+         业务访问始终由独立 Auth/Capability 决定。
 ```

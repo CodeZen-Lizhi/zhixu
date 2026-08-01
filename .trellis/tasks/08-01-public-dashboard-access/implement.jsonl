@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"约束 Host Controller 精确 Root Grant、ready-only 业务代理与控制写操作认证边界。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"保持业务认证与 Controller 认证独立，并验证 Cookie、CSRF、Capability 契约。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"约束 Active Workspace 唯一 Owner、Query/SSE 清理和认证状态生命周期。"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"约束入口 Dashboard、App Shell、Workspace 控制入口和多状态展示。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"实现跨 Host Controller、业务代理、React Provider 与浏览器状态的完整数据流。"}
+{"file":".trellis/tasks/08-01-public-dashboard-access/research/verified-current-boundary.md","reason":"提供已验证现状、拒绝方案与最小公开投影依据。"}
+{"file":".trellis/tasks/08-01-public-dashboard-access/research/backend-control-boundary.md","reason":"提供 Go 路由、敏感字段、readiness 与控制命令安全分析。"}
+{"file":".trellis/tasks/08-01-public-dashboard-access/research/frontend-public-dashboard.md","reason":"提供 React 启动组合、路由、业务认证、Query/SSE 与多浏览器约束。"}

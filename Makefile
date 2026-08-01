@@ -25,6 +25,7 @@ web-typecheck:
 
 web-test:
 	npm run test --prefix web
+	npm run test:controller --prefix web
 
 web-build:
 	npm run build --prefix web

@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type PropsWithChildren, useEffect, useRef } from "react";
 
 import { useActiveWorkspaceId } from "./active-workspace";
+import { runtimeMode } from "./runtime-mode";
 import { clearWorkspaceRuntimeState } from "./workspace-runtime-state";
 
 export const WorkspaceCacheBoundary = ({ children }: PropsWithChildren) => {
@@ -11,7 +12,7 @@ export const WorkspaceCacheBoundary = ({ children }: PropsWithChildren) => {
 
   useEffect(() => {
     const previous = previousWorkspaceId.current;
-    if (previous !== workspaceId) {
+    if (runtimeMode === "direct" && previous !== workspaceId) {
       void clearWorkspaceRuntimeState(queryClient, previous);
     }
     previousWorkspaceId.current = workspaceId;

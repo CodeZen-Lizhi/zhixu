@@ -7,19 +7,19 @@
 }
 
 .control-gate__content {
-  width: min(100%, 46rem);
-  border-top: 4px solid var(--brass);
+  width: min(100%, 34rem);
+  border-top: 3px solid var(--blue);
   border-bottom: 1px solid var(--line);
-  padding: clamp(1.5rem, 5vw, 3rem) 0;
+  padding: clamp(1.5rem, 4vw, 2.25rem) 0;
 }
 
 .control-gate__content h1 {
-  max-width: 14ch;
+  max-width: 18ch;
   margin: 0 0 1rem;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: 3.4rem;
-  font-weight: 500;
-  line-height: 1;
+  font-size: 2.35rem;
+  font-weight: 600;
+  line-height: 1.12;
 }
 
 .control-gate__content > p:not(.eyebrow) {
@@ -28,7 +28,7 @@
   line-height: 1.7;
 }
 
-.control-gate__content > button { margin-top: 1rem; }
+.control-gate__action { margin-top: 1rem; }
 
 .controller-entry {
   min-height: 100vh;
@@ -75,7 +75,7 @@
 }
 
 .control-operation--warning {
-  border-color: var(--brass);
+  border-color: var(--amber);
   background: rgb(169 120 44 / 8%);
 }
 
@@ -332,7 +332,7 @@
 
 @media (max-width: 720px) {
   .controller-entry__inner { width: min(100% - 1.5rem, 1180px); }
-  .control-gate__content h1 { font-size: 2.5rem; }
+  .control-gate__content h1 { font-size: 2rem; }
   .control-runtime-band { grid-template-columns: 1fr 1fr; }
   .control-runtime-band > div:first-child { grid-column: 1 / -1; }
   .control-workspace-form,

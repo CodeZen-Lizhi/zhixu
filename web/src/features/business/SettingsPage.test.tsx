@@ -8,6 +8,7 @@ const tokenId = "10000000-0000-4000-8000-000000000003";
 const workspaceApi = vi.hoisted(() => ({ getWorkspace: vi.fn() }));
 const auth = vi.hoisted(() => ({ createApiToken: vi.fn(), listApiTokens: vi.fn(), revokeApiToken: vi.fn() }));
 const systemStatus = vi.hoisted(() => ({ render: vi.fn() }));
+const activeWorkspace = vi.hoisted(() => ({ setActiveWorkspaceId: vi.fn() }));
 
 vi.mock("../../api/auth", async (importOriginal) => ({
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
@@ -19,12 +20,16 @@ vi.mock("../../api/auth", async (importOriginal) => ({
 vi.mock("../../api/workspace", () => ({
   getWorkspace: workspaceApi.getWorkspace,
 }));
-vi.mock("../../app/active-workspace", () => ({ useActiveWorkspaceId: () => "10000000-0000-4000-8000-000000000002" }));
+vi.mock("../../app/active-workspace", () => ({
+  setActiveWorkspaceId: activeWorkspace.setActiveWorkspaceId,
+  useActiveWorkspaceId: () => "10000000-0000-4000-8000-000000000002",
+}));
 vi.mock("../../app/auth-context", () => ({ useAuth: () => ({ state: { status: "authenticated", mode: "required" } }) }));
 vi.mock("../settings/ModelSettingsPanel", () => ({ ModelSettingsPanel: () => <section aria-label="模型设置面板">真实模型设置面板</section> }));
 vi.mock("../system-status/SystemStatusPage", () => ({ SystemStatusPage: (props: { display?: string }) => { systemStatus.render(props); return <section aria-label="系统状态面板">{props.display}</section>; } }));
 
 import { SettingsPage } from "../settings/SettingsPage";
+import { runtimeMode } from "../../app/runtime-mode";
 
 const LocationProbe = () => {
   const location = useLocation();
@@ -44,6 +49,7 @@ const renderSettings = (path = "/settings") => {
 beforeEach(() => {
   window.localStorage.clear();
   systemStatus.render.mockClear();
+  activeWorkspace.setActiveWorkspaceId.mockClear();
   workspaceApi.getWorkspace.mockResolvedValue({ id: workspaceId, name: "Docs", rootPath: "/workspace", status: "active", git: { present: true, dirty: false, branch: "dev", head: "abc" } });
 });
 
@@ -54,6 +60,20 @@ afterEach(() => {
 });
 
 describe("SettingsPage API Token management", () => {
+  it("切换工作区始终进入控制页，且 Controller 模式不自行清空权威 Workspace", async () => {
+    auth.listApiTokens.mockResolvedValue({ items: [] });
+    renderSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "切换工作区" }));
+
+    await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent("/workspace"));
+    if (runtimeMode === "direct") {
+      expect(activeWorkspace.setActiveWorkspaceId).toHaveBeenCalledWith("");
+    } else {
+      expect(activeWorkspace.setActiveWorkspaceId).not.toHaveBeenCalled();
+    }
+  });
+
   it("模型分类挂载真实设置面板，不再显示无契约占位", () => {
     auth.listApiTokens.mockResolvedValue({ items: [] });
     renderSettings("/settings?section=models");

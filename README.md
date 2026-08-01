@@ -114,11 +114,15 @@ value is rejected. If omitted, `required` derives a stable domain-separated key
 from the Bootstrap Token, while local `disabled` mode generates a process-local
 key whose outstanding references expire on API restart. The official Compose
 example supplies a development-only explicit key so its startup guard can verify
-the resolved model; replace that value before non-development use. Use the
-one-time link printed by `./zhixu up`; a bare <http://127.0.0.1:8080> does not
-carry the bootstrap credential. Controller liveness is
-`GET /control/v1/livez`. After a Workspace runtime is ready, business health and
-dependency status are proxied at:
+the resolved model; replace that value before non-development use. Any local
+browser can open <http://127.0.0.1:8080/dashboard> without a Controller
+credential; business authentication still follows `required|disabled`. The
+one-time link printed by `./zhixu up` is only required for `/`, `/workspace`,
+Workspace Root changes, runtime switching, and other Host Controller operations.
+Public runtime discovery is `GET /host/v1/runtime`; it exposes only readiness and
+the active opaque Workspace ID. Controller liveness is `GET /control/v1/livez`.
+After a Workspace runtime is ready, business health and dependency status are
+proxied at:
 
 - `GET /livez`: API process liveness
 - `GET /readyz`: API readiness including PostgreSQL connectivity

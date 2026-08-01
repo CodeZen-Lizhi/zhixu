@@ -26,6 +26,11 @@ import (
 
 const maxControlBodyBytes = 64 << 10
 
+const (
+	runtimeStatusHeader      = "X-Zhixu-Runtime-Status"
+	runtimeStatusUnavailable = "unavailable"
+)
+
 // HandlerOptions fixes the browser origin, host, credential authority, and runtime seams.
 type HandlerOptions struct {
 	Authority     *SessionAuthority
@@ -49,6 +54,7 @@ type Handler struct {
 	secureCookie  bool
 	pathValidator PathValidator
 	control       http.Handler
+	host          http.Handler
 	idempotency   *idempotencyRegistry
 }
 
@@ -70,6 +76,7 @@ func NewHandler(options HandlerOptions) (*Handler, error) {
 		pathValidator: options.PathValidator, idempotency: newIdempotencyRegistry(512),
 	}
 	handler.control = handler.controlRouter()
+	handler.host = handler.hostRouter()
 	return handler, nil
 }
 
@@ -78,6 +85,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	switch {
 	case path == "/control" || strings.HasPrefix(path, "/control/"):
 		handler.control.ServeHTTP(writer, request)
+	case path == "/host" || strings.HasPrefix(path, "/host/"):
+		handler.host.ServeHTTP(writer, request)
 	case path == "/api/v1" || strings.HasPrefix(path, "/api/v1/") || path == "/livez" || path == "/readyz":
 		handler.proxyBusiness(writer, request)
 	case path == "/api" || strings.HasPrefix(path, "/api/"):
@@ -85,6 +94,51 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	default:
 		handler.static.ServeHTTP(writer, request)
 	}
+}
+
+func (handler *Handler) hostRouter() http.Handler {
+	router := chi.NewRouter()
+	router.Get("/host/v1/runtime", handler.currentRuntimeAccess)
+	router.Head("/host/v1/runtime", handler.currentRuntimeAccess)
+	router.NotFound(func(writer http.ResponseWriter, request *http.Request) {
+		writeHostResponse(writer, request, responseProblem(http.StatusNotFound, "HOST_ROUTE_NOT_FOUND", "请求的本机接口不存在", false, nil, ""))
+	})
+	router.MethodNotAllowed(func(writer http.ResponseWriter, request *http.Request) {
+		writeHostResponse(writer, request, responseProblem(http.StatusMethodNotAllowed, "HOST_METHOD_NOT_ALLOWED", "本机接口不支持该方法", false, nil, ""))
+	})
+	return router
+}
+
+type runtimeAccessResponse struct {
+	Status            RuntimeAccessStatus `json:"status"`
+	ActiveWorkspaceID *string             `json:"active_workspace_id"`
+	PollAfterMS       int                 `json:"poll_after_ms"`
+}
+
+func (handler *Handler) currentRuntimeAccess(writer http.ResponseWriter, request *http.Request) {
+	if request.Host != handler.expectedHost {
+		writeHostResponse(writer, request, responseProblem(http.StatusForbidden, "HOST_REQUEST_INVALID", "本机请求来源无效", false, nil, ""))
+		return
+	}
+	access, err := handler.backend.LocateRuntime(request.Context())
+	if err != nil || !validRuntimeAccess(access) {
+		writeHostResponse(writer, request, responseProblem(http.StatusServiceUnavailable, "RUNTIME_ACCESS_UNAVAILABLE", "业务运行时状态暂不可用", true, nil, ""))
+		return
+	}
+	var workspaceID *string
+	if access.Status == RuntimeAccessReady {
+		value := access.WorkspaceID
+		workspaceID = &value
+	}
+	response := runtimeAccessResponse{Status: access.Status, ActiveWorkspaceID: workspaceID, PollAfterMS: access.PollAfterMS}
+	writeHostResponse(writer, request, jsonResponse(http.StatusOK, response))
+}
+
+func writeHostResponse(writer http.ResponseWriter, request *http.Request, response cachedResponse) {
+	if request.Method == http.MethodHead {
+		response.Body = nil
+	}
+	writeCachedResponse(writer, response)
 }
 
 func (handler *Handler) controlRouter() http.Handler {
@@ -382,15 +436,18 @@ func (handler *Handler) executeIdempotent(
 }
 
 func (handler *Handler) proxyBusiness(writer http.ResponseWriter, request *http.Request) {
-	backend, err := handler.backend.ReadyBackend(request.Context())
-	if err != nil {
+	access, err := handler.backend.LocateRuntime(request.Context())
+	if err != nil || access.Status != RuntimeAccessReady {
+		writer.Header().Set(runtimeStatusHeader, runtimeStatusUnavailable)
 		writeProblem(writer, responseProblem(http.StatusServiceUnavailable, "RUNTIME_NOT_READY", "业务运行时尚未就绪", true, nil, ""))
 		return
 	}
-	if !validBackendURL(backend) {
+	if !validRuntimeAccess(access) {
+		writer.Header().Set(runtimeStatusHeader, runtimeStatusUnavailable)
 		writeProblem(writer, responseProblem(http.StatusServiceUnavailable, "RUNTIME_BACKEND_INVALID", "业务运行时尚未就绪", true, nil, ""))
 		return
 	}
+	backend := access.Backend
 	originalHost := request.Host
 	proxy := httputil.NewSingleHostReverseProxy(backend)
 	originalDirector := proxy.Director
@@ -401,10 +458,12 @@ func (handler *Handler) proxyBusiness(writer http.ResponseWriter, request *http.
 	}
 	proxy.FlushInterval = -1
 	proxy.ModifyResponse = func(response *http.Response) error {
+		response.Header.Del(runtimeStatusHeader)
 		filterControlSetCookie(response.Header)
 		return nil
 	}
 	proxy.ErrorHandler = func(responseWriter http.ResponseWriter, _ *http.Request, _ error) {
+		responseWriter.Header().Set(runtimeStatusHeader, runtimeStatusUnavailable)
 		writeProblem(responseWriter, responseProblem(http.StatusBadGateway, "RUNTIME_PROXY_FAILED", "业务运行时连接失败", true, nil, ""))
 	}
 	proxy.ServeHTTP(writer, request)
@@ -627,6 +686,6 @@ func cloneResponse(response cachedResponse) cachedResponse {
 // UnavailableBackend is the explicit zero-grant proxy state.
 type UnavailableBackend struct{}
 
-func (UnavailableBackend) ReadyBackend(context.Context) (*url.URL, error) {
-	return nil, runtimeFault("RUNTIME_NOT_READY")
+func (UnavailableBackend) LocateRuntime(context.Context) (RuntimeAccess, error) {
+	return RuntimeAccess{Status: RuntimeAccessUnavailable, PollAfterMS: 2000}, nil
 }

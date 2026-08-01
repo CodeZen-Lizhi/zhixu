@@ -8,6 +8,7 @@ const workspaceState = vi.hoisted(() => ({ id: "77000000-0000-4000-8000-00000000
 vi.mock("./active-workspace", () => ({ useActiveWorkspaceId: () => workspaceState.id }));
 
 import { timelineQueryKeys } from "../features/timeline/query-keys";
+import { runtimeMode } from "./runtime-mode";
 import { WorkspaceCacheBoundary } from "./WorkspaceCacheBoundary";
 
 const workspaceId = "77000000-0000-4000-8000-000000000001";
@@ -20,7 +21,7 @@ afterEach(() => {
 });
 
 describe("WorkspaceCacheBoundary", () => {
-  it("removes only the previous Workspace Timeline cache after a switch", async () => {
+  it("Direct 模式清理旧缓存，Controller 模式交给 RuntimeAccessProvider", async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
     const previousKey = timelineQueryKeys.list(workspaceId, "{}", 25);
     const currentKey = timelineQueryKeys.list(nextWorkspaceId, "{}", 25);
@@ -39,7 +40,11 @@ describe("WorkspaceCacheBoundary", () => {
       </QueryClientProvider>,
     );
 
-    await waitFor(() => expect(queryClient.getQueryData(previousKey)).toBeUndefined());
+    if (runtimeMode === "direct") {
+      await waitFor(() => expect(queryClient.getQueryData(previousKey)).toBeUndefined());
+    } else {
+      expect(queryClient.getQueryData(previousKey)).toEqual({ workspaceId, items: [] });
+    }
     expect(queryClient.getQueryData(currentKey)).toEqual({ workspaceId: nextWorkspaceId, items: [] });
   });
 });

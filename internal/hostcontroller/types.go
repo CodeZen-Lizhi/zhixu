@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/url"
 	"time"
+
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
 // RuntimeStatus describes the effective business runtime exposed by the controller.
@@ -73,7 +75,7 @@ type Operation struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
-// State is the only browser bootstrap source for controller and runtime state.
+// State is the authenticated browser bootstrap source for full control state.
 type State struct {
 	ControllerInstanceID string       `json:"controller_instance_id"`
 	StateVersion         int64        `json:"state_version"`
@@ -114,6 +116,27 @@ type StateReader interface {
 	State(context.Context) (State, error)
 }
 
+// RuntimeAccessStatus is the path-free browser discovery state.
+type RuntimeAccessStatus string
+
+const (
+	RuntimeAccessWaiting     RuntimeAccessStatus = "waiting"
+	RuntimeAccessReady       RuntimeAccessStatus = "ready"
+	RuntimeAccessUnavailable RuntimeAccessStatus = "unavailable"
+
+	runtimeAccessPollMinMS = 500
+	runtimeAccessPollMaxMS = 5000
+)
+
+// RuntimeAccess combines one authoritative state projection with backend discovery.
+// Backend is internal to the host proxy and must never be serialized to browsers.
+type RuntimeAccess struct {
+	Status      RuntimeAccessStatus
+	WorkspaceID string
+	PollAfterMS int
+	Backend     *url.URL `json:"-"`
+}
+
 // RuntimeDriver accepts only typed grant lifecycle operations.
 type RuntimeDriver interface {
 	ApplyGrant(context.Context, Grant) (*url.URL, error)
@@ -121,9 +144,9 @@ type RuntimeDriver interface {
 	CurrentBackend(context.Context) (*url.URL, error)
 }
 
-// BackendLocator resolves the business backend only when its grant is authoritative and ready.
+// BackendLocator resolves the public discovery state and ready-only business backend in one read.
 type BackendLocator interface {
-	ReadyBackend(context.Context) (*url.URL, error)
+	LocateRuntime(context.Context) (RuntimeAccess, error)
 }
 
 // Fault is a stable controller problem without sensitive implementation detail.
@@ -194,16 +217,71 @@ type StateBackend struct {
 	}
 }
 
-func (backend StateBackend) ReadyBackend(ctx context.Context) (*url.URL, error) {
+// LocateRuntime reads one state snapshot and discovers a backend only for a ready projection.
+func (backend StateBackend) LocateRuntime(ctx context.Context) (RuntimeAccess, error) {
 	if backend.State == nil || backend.Runtime == nil {
-		return nil, &Fault{Code: "RUNTIME_NOT_READY", Message: "业务运行时尚未就绪", Retryable: true, Status: 503}
+		return RuntimeAccess{}, &Fault{Code: "RUNTIME_NOT_READY", Message: "业务运行时尚未就绪", Retryable: true, Status: 503}
 	}
 	state, err := backend.State.State(ctx)
 	if err != nil {
-		return nil, err
+		return RuntimeAccess{}, err
 	}
-	if state.Runtime.Status != RuntimeReady || state.Runtime.API.Status != ProcessReady || state.Runtime.Worker.Status != ProcessReady {
-		return nil, &Fault{Code: "RUNTIME_NOT_READY", Message: "业务运行时尚未就绪", Retryable: true, Status: 503}
+	access := projectRuntimeAccess(state)
+	if access.Status != RuntimeAccessReady {
+		return access, nil
 	}
-	return backend.Runtime.CurrentBackend(ctx)
+	access.Backend, err = backend.Runtime.CurrentBackend(ctx)
+	if err != nil {
+		return RuntimeAccess{}, err
+	}
+	if !validBackendURL(access.Backend) {
+		return RuntimeAccess{}, runtimeFault("RUNTIME_BACKEND_INVALID")
+	}
+	return access, nil
+}
+
+func projectRuntimeAccess(state State) RuntimeAccess {
+	access := RuntimeAccess{Status: RuntimeAccessUnavailable, PollAfterMS: clampRuntimeAccessPoll(state.PollAfterMS)}
+	operationRunning := state.Operation != nil && state.Operation.Result == ""
+	if state.Runtime.Status == RuntimeWaitingForWorkspace && state.ActiveWorkspace == nil && !operationRunning &&
+		state.Runtime.API.Status == ProcessStopped && state.Runtime.Worker.Status == ProcessStopped {
+		access.Status = RuntimeAccessWaiting
+		return access
+	}
+	if state.Runtime.Status != RuntimeReady || state.Runtime.API.Status != ProcessReady || state.Runtime.Worker.Status != ProcessReady ||
+		state.ActiveWorkspace == nil || state.ActiveWorkspace.Availability != AvailabilityAvailable || operationRunning {
+		return access
+	}
+	workspaceID, err := foundation.ParseID(state.ActiveWorkspace.WorkspaceID)
+	if err != nil {
+		return access
+	}
+	access.Status = RuntimeAccessReady
+	access.WorkspaceID = string(workspaceID)
+	return access
+}
+
+func clampRuntimeAccessPoll(value int) int {
+	if value < runtimeAccessPollMinMS {
+		return runtimeAccessPollMinMS
+	}
+	if value > runtimeAccessPollMaxMS {
+		return runtimeAccessPollMaxMS
+	}
+	return value
+}
+
+func validRuntimeAccess(access RuntimeAccess) bool {
+	if access.PollAfterMS < runtimeAccessPollMinMS || access.PollAfterMS > runtimeAccessPollMaxMS {
+		return false
+	}
+	switch access.Status {
+	case RuntimeAccessWaiting, RuntimeAccessUnavailable:
+		return access.WorkspaceID == "" && access.Backend == nil
+	case RuntimeAccessReady:
+		workspaceID, err := foundation.ParseID(access.WorkspaceID)
+		return err == nil && string(workspaceID) == access.WorkspaceID && validBackendURL(access.Backend)
+	default:
+		return false
+	}
 }

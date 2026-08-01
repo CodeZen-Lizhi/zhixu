@@ -3,6 +3,7 @@ package hostcontroller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,8 +56,24 @@ func (store *fakeStore) RemoveWorkspace(context.Context, string, int64) error {
 
 type fixedBackend struct{ value *url.URL }
 
-func (backend fixedBackend) ReadyBackend(context.Context) (*url.URL, error) {
-	return backend.value, nil
+func (backend fixedBackend) LocateRuntime(context.Context) (RuntimeAccess, error) {
+	return RuntimeAccess{
+		Status:      RuntimeAccessReady,
+		WorkspaceID: "10000000-0000-4000-8000-000000000001",
+		PollAfterMS: 1000,
+		Backend:     backend.value,
+	}, nil
+}
+
+type recordingBackend struct {
+	access RuntimeAccess
+	err    error
+	calls  int
+}
+
+func (backend *recordingBackend) LocateRuntime(context.Context) (RuntimeAccess, error) {
+	backend.calls++
+	return backend.access, backend.err
 }
 
 func newHTTPFixture(t *testing.T, store Store, backend BackendLocator, static http.Handler) (*Handler, string) {
@@ -114,6 +131,290 @@ func authorizedRequest(method, path string, body io.Reader, cookie *http.Cookie,
 		request.Header.Set("Content-Type", "application/json")
 	}
 	return request
+}
+
+func assertNoStoreWithoutCORS(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	if recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control=%q, want no-store", recorder.Header().Get("Cache-Control"))
+	}
+	for key := range recorder.Header() {
+		if strings.HasPrefix(strings.ToLower(key), "access-control-allow-") {
+			t.Fatalf("unexpected CORS response header %q", key)
+		}
+	}
+}
+
+func TestAnonymousDashboardUsesOnlyStaticAssets(t *testing.T) {
+	t.Parallel()
+	locator := &recordingBackend{err: errors.New("must not be called")}
+	store := &fakeStore{}
+	handler, _ := newHTTPFixture(t, store, locator, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/html")
+		_, _ = writer.Write([]byte("dashboard-spa"))
+	}))
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/dashboard", nil)
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "dashboard-spa" || locator.calls != 0 {
+		t.Fatalf("status=%d locator calls=%d body=%q", recorder.Code, locator.calls, recorder.Body.String())
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.beginCalls != 0 || store.availability != 0 || store.removeCalls != 0 {
+		t.Fatalf("anonymous dashboard reached mutations: begin=%d availability=%d remove=%d", store.beginCalls, store.availability, store.removeCalls)
+	}
+}
+
+func TestPublicRuntimeAccessProjection(t *testing.T) {
+	t.Parallel()
+	backendURL, err := url.Parse("http://127.0.0.1:32100")
+	if err != nil {
+		t.Fatalf("parse backend URL: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		access     RuntimeAccess
+		wantStatus string
+		wantID     string
+	}{
+		{
+			name:       "waiting",
+			access:     RuntimeAccess{Status: RuntimeAccessWaiting, PollAfterMS: 1500},
+			wantStatus: `"waiting"`,
+			wantID:     "null",
+		},
+		{
+			name:       "ready",
+			access:     RuntimeAccess{Status: RuntimeAccessReady, WorkspaceID: runtimeWorkspaceID, PollAfterMS: 1000, Backend: backendURL},
+			wantStatus: `"ready"`,
+			wantID:     `"` + runtimeWorkspaceID + `"`,
+		},
+		{
+			name:       "unavailable",
+			access:     RuntimeAccess{Status: RuntimeAccessUnavailable, PollAfterMS: 5000},
+			wantStatus: `"unavailable"`,
+			wantID:     "null",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			locator := &recordingBackend{access: test.access}
+			handler, _ := newHTTPFixture(t, &fakeStore{}, locator, http.NotFoundHandler())
+			request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/host/v1/runtime", nil)
+			request.Host = "127.0.0.1:8080"
+			recorder := httptest.NewRecorder()
+
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "application/json" || locator.calls != 1 {
+				t.Fatalf("status=%d content-type=%q calls=%d body=%s", recorder.Code, recorder.Header().Get("Content-Type"), locator.calls, recorder.Body.String())
+			}
+			assertNoStoreWithoutCORS(t, recorder)
+			var body map[string]json.RawMessage
+			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode runtime response: %v", err)
+			}
+			if len(body) != 3 || string(body["status"]) != test.wantStatus || string(body["active_workspace_id"]) != test.wantID || string(body["poll_after_ms"]) != fmt.Sprint(test.access.PollAfterMS) {
+				t.Fatalf("unexpected runtime response: %s", recorder.Body.String())
+			}
+			for _, forbidden := range []string{"root_path", "operation", "backend", "controller", "csrf", "token"} {
+				if strings.Contains(strings.ToLower(recorder.Body.String()), forbidden) {
+					t.Fatalf("runtime response leaked %q: %s", forbidden, recorder.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestPublicRuntimeAccessChecksHostBeforeDependencies(t *testing.T) {
+	t.Parallel()
+	locator := &recordingBackend{err: errors.New("must not be called")}
+	handler, _ := newHTTPFixture(t, &fakeStore{}, locator, http.NotFoundHandler())
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/host/v1/runtime", nil)
+	request.Host = "localhost:8080"
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden || locator.calls != 0 || !strings.Contains(recorder.Body.String(), `"code":"HOST_REQUEST_INVALID"`) {
+		t.Fatalf("status=%d calls=%d body=%s", recorder.Code, locator.calls, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), request.Host) || strings.Contains(recorder.Body.String(), "127.0.0.1:8080") {
+		t.Fatalf("host response reflected host details: %s", recorder.Body.String())
+	}
+	assertNoStoreWithoutCORS(t, recorder)
+}
+
+func TestPublicRuntimeAccessHidesDependencyErrors(t *testing.T) {
+	t.Parallel()
+	locator := &recordingBackend{err: &Fault{
+		Code:        "PRIVATE_FAILURE",
+		Message:     "failed under /Users/private/knowledge",
+		OperationID: "private-operation-id",
+		FieldErrors: map[string]string{"root_path": "/Users/private/knowledge"},
+		Status:      http.StatusTeapot,
+	}}
+	handler, _ := newHTTPFixture(t, &fakeStore{}, locator, http.NotFoundHandler())
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/host/v1/runtime", nil)
+	request.Host = "127.0.0.1:8080"
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable || locator.calls != 1 || !strings.Contains(recorder.Body.String(), `"code":"RUNTIME_ACCESS_UNAVAILABLE"`) {
+		t.Fatalf("status=%d calls=%d body=%s", recorder.Code, locator.calls, recorder.Body.String())
+	}
+	for _, secret := range []string{"PRIVATE_FAILURE", "/Users/private", "private-operation-id", "root_path"} {
+		if strings.Contains(recorder.Body.String(), secret) {
+			t.Fatalf("runtime problem leaked %q: %s", secret, recorder.Body.String())
+		}
+	}
+	assertNoStoreWithoutCORS(t, recorder)
+}
+
+func TestPublicRuntimeAccessRejectsInvalidLocatorProjection(t *testing.T) {
+	t.Parallel()
+	backendURL, err := url.Parse("http://127.0.0.1:32100")
+	if err != nil {
+		t.Fatalf("parse backend URL: %v", err)
+	}
+	tests := []RuntimeAccess{
+		{Status: RuntimeAccessStatus("private"), PollAfterMS: 1000},
+		{Status: RuntimeAccessReady, WorkspaceID: runtimeWorkspaceID, PollAfterMS: 1000},
+		{Status: RuntimeAccessReady, WorkspaceID: "private-workspace", PollAfterMS: 1000, Backend: backendURL},
+		{Status: RuntimeAccessWaiting, WorkspaceID: runtimeWorkspaceID, PollAfterMS: 1000},
+		{Status: RuntimeAccessUnavailable, PollAfterMS: runtimeAccessPollMinMS - 1},
+		{Status: RuntimeAccessUnavailable, PollAfterMS: runtimeAccessPollMaxMS + 1},
+	}
+
+	for index, access := range tests {
+		locator := &recordingBackend{access: access}
+		handler, _ := newHTTPFixture(t, &fakeStore{}, locator, http.NotFoundHandler())
+		request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/host/v1/runtime", nil)
+		request.Host = "127.0.0.1:8080"
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"code":"RUNTIME_ACCESS_UNAVAILABLE"`) {
+			t.Fatalf("case %d status=%d body=%s", index, recorder.Code, recorder.Body.String())
+		}
+		assertNoStoreWithoutCORS(t, recorder)
+	}
+}
+
+func TestHostNamespaceNeverFallsBackToSPA(t *testing.T) {
+	t.Parallel()
+	locator := &recordingBackend{access: RuntimeAccess{Status: RuntimeAccessWaiting, PollAfterMS: 1000}}
+	handler, _ := newHTTPFixture(t, &fakeStore{}, locator, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/html")
+		_, _ = writer.Write([]byte("SPA"))
+	}))
+
+	for _, path := range []string{"/host", "/host/", "/host/v1", "/host/v1/unknown"} {
+		request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080"+path, nil)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound || recorder.Header().Get("Content-Type") != "application/problem+json" || strings.Contains(recorder.Body.String(), "SPA") || !strings.Contains(recorder.Body.String(), `"code":"HOST_ROUTE_NOT_FOUND"`) {
+			t.Fatalf("%s status=%d content-type=%q body=%s", path, recorder.Code, recorder.Header().Get("Content-Type"), recorder.Body.String())
+		}
+		assertNoStoreWithoutCORS(t, recorder)
+	}
+	if locator.calls != 0 {
+		t.Fatalf("unknown host routes called locator %d times", locator.calls)
+	}
+	request := httptest.NewRequest(http.MethodHead, "http://127.0.0.1:8080/host/v1/unknown", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound || recorder.Body.Len() != 0 {
+		t.Fatalf("HEAD unknown status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	assertNoStoreWithoutCORS(t, recorder)
+}
+
+func TestPublicRuntimeAccessMethodAndHeadSemantics(t *testing.T) {
+	t.Parallel()
+	locator := &recordingBackend{access: RuntimeAccess{Status: RuntimeAccessWaiting, PollAfterMS: 1000}}
+	handler, _ := newHTTPFixture(t, &fakeStore{}, locator, http.NotFoundHandler())
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
+		request := httptest.NewRequest(method, "http://127.0.0.1:8080/host/v1/runtime", nil)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusMethodNotAllowed || !strings.Contains(recorder.Body.String(), `"code":"HOST_METHOD_NOT_ALLOWED"`) {
+			t.Fatalf("%s status=%d body=%s", method, recorder.Code, recorder.Body.String())
+		}
+		assertNoStoreWithoutCORS(t, recorder)
+	}
+	if locator.calls != 0 {
+		t.Fatalf("invalid methods called locator %d times", locator.calls)
+	}
+
+	request := httptest.NewRequest(http.MethodHead, "http://127.0.0.1:8080/host/v1/runtime", nil)
+	request.Host = "127.0.0.1:8080"
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Body.Len() != 0 || locator.calls != 1 {
+		t.Fatalf("HEAD status=%d calls=%d body=%q", recorder.Code, locator.calls, recorder.Body.String())
+	}
+	assertNoStoreWithoutCORS(t, recorder)
+
+	locator.err = errors.New("runtime unavailable")
+	request = httptest.NewRequest(http.MethodHead, "http://127.0.0.1:8080/host/v1/runtime", nil)
+	request.Host = "127.0.0.1:8080"
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Body.Len() != 0 || locator.calls != 2 {
+		t.Fatalf("failed HEAD status=%d calls=%d body=%q", recorder.Code, locator.calls, recorder.Body.String())
+	}
+	assertNoStoreWithoutCORS(t, recorder)
+}
+
+func TestAnonymousControlMutationsNeverReachStore(t *testing.T) {
+	t.Parallel()
+	store := &fakeStore{state: State{StateVersion: 7}}
+	handler, _ := newHTTPFixture(t, store, UnavailableBackend{}, http.NotFoundHandler())
+	tests := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{method: http.MethodPost, path: "/control/v1/workspace-switches", body: `{"target_kind":"registered","workspace_id":"workspace-1"}`},
+		{method: http.MethodPost, path: "/control/v1/workspaces/workspace-1/availability-checks", body: `{}`},
+		{method: http.MethodDelete, path: "/control/v1/workspaces/workspace-1"},
+	}
+
+	for _, test := range tests {
+		var body io.Reader
+		if test.body != "" {
+			body = strings.NewReader(test.body)
+		}
+		request := httptest.NewRequest(test.method, "http://127.0.0.1:8080"+test.path, body)
+		request.Host = "127.0.0.1:8080"
+		request.Header.Set("Origin", "http://127.0.0.1:8080")
+		request.Header.Set(ControlCSRFHeader, "anonymous-csrf")
+		request.Header.Set("If-Match", `"7"`)
+		request.Header.Set("Idempotency-Key", "anonymous-request")
+		if body != nil {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s status=%d body=%s", test.method, test.path, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.beginCalls != 0 || store.availability != 0 || store.removeCalls != 0 {
+		t.Fatalf("anonymous mutations reached store: begin=%d availability=%d remove=%d", store.beginCalls, store.availability, store.removeCalls)
+	}
 }
 
 func TestControlStateRequiresSessionWithoutPathLeak(t *testing.T) {
@@ -295,7 +596,7 @@ func TestBusinessProxyIsReadyOnlyAndNeverFallsBackToSPA(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080"+path, nil)
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Content-Type") != "application/problem+json" || strings.Contains(recorder.Body.String(), "SPA") {
+		if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Content-Type") != "application/problem+json" || recorder.Header().Get(runtimeStatusHeader) != runtimeStatusUnavailable || strings.Contains(recorder.Body.String(), "SPA") {
 			t.Fatalf("%s status=%d content-type=%q body=%s", path, recorder.Code, recorder.Header().Get("Content-Type"), recorder.Body.String())
 		}
 	}
@@ -310,6 +611,54 @@ func TestBusinessProxyIsReadyOnlyAndNeverFallsBackToSPA(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK || recorder.Body.String() != "SPA" {
 		t.Fatalf("SPA status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestBusinessProxyRejectsInvalidReadyProjection(t *testing.T) {
+	t.Parallel()
+	backendURL, err := url.Parse("http://127.0.0.1:32100")
+	if err != nil {
+		t.Fatalf("parse backend URL: %v", err)
+	}
+	locator := &recordingBackend{access: RuntimeAccess{Status: RuntimeAccessReady, PollAfterMS: 1000, Backend: backendURL}}
+	handler, _ := newHTTPFixture(t, &fakeStore{}, locator, http.NotFoundHandler())
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/system/status", nil)
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get(runtimeStatusHeader) != runtimeStatusUnavailable || locator.calls != 1 {
+		t.Fatalf("status=%d runtime-status=%q calls=%d body=%s", recorder.Code, recorder.Header().Get(runtimeStatusHeader), locator.calls, recorder.Body.String())
+	}
+}
+
+func TestBusinessProxyMarksOnlyControllerRuntimeFailures(t *testing.T) {
+	t.Parallel()
+	backendServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set(runtimeStatusHeader, runtimeStatusUnavailable)
+		writeProblem(writer, responseProblem(http.StatusServiceUnavailable, "BUSINESS_DEPENDENCY_UNAVAILABLE", "业务依赖暂不可用", true, nil, ""))
+	}))
+	backendURL, err := url.Parse(backendServer.URL)
+	if err != nil {
+		backendServer.Close()
+		t.Fatalf("parse backend URL: %v", err)
+	}
+	handler, _ := newHTTPFixture(t, &fakeStore{}, fixedBackend{value: backendURL}, http.NotFoundHandler())
+
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/system/status", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get(runtimeStatusHeader) != "" || !strings.Contains(recorder.Body.String(), "BUSINESS_DEPENDENCY_UNAVAILABLE") {
+		backendServer.Close()
+		t.Fatalf("business 503 status=%d runtime-status=%q body=%s", recorder.Code, recorder.Header().Get(runtimeStatusHeader), recorder.Body.String())
+	}
+
+	backendServer.Close()
+	request = httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/system/status", nil)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadGateway || recorder.Header().Get(runtimeStatusHeader) != runtimeStatusUnavailable || !strings.Contains(recorder.Body.String(), `"code":"RUNTIME_PROXY_FAILED"`) {
+		t.Fatalf("proxy failure status=%d runtime-status=%q body=%s", recorder.Code, recorder.Header().Get(runtimeStatusHeader), recorder.Body.String())
 	}
 }
 
