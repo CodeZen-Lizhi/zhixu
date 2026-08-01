@@ -1671,3 +1671,25 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 39: 重设计工作台导航与首页
+
+**Date**: 2026-08-01
+**Task**: 重设计工作台导航与首页
+**Branch**: `dev`
+
+### Summary
+
+将首页收敛为白蓝知识脉络入口，重组导航与五类设置，并以真实有界数据投影已连接工作台。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c1a7ca3` | (see git log) |
+| `145deee` | (see git log) |
+
+### Status
+
+[OK] **Completed**
