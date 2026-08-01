@@ -44,6 +44,17 @@ interface HostControlContextValue {
 
 const HostControlContext = createContext<HostControlContextValue | undefined>(undefined);
 
+/** 与 React Router 的非大小写敏感匹配保持一致，防止控制路径变体落入业务路由。 */
+export const isHostControlRoute = (pathname: string): boolean => {
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(pathname);
+  } catch {
+    return false;
+  }
+  return decodedPath === "/" || /^\/workspace\/?$/i.test(decodedPath);
+};
+
 const newIdempotencyKey = (): string => {
   if (typeof globalThis.crypto.randomUUID !== "function") {
     throw new Error("当前浏览器无法生成安全的幂等请求标识");
@@ -62,7 +73,7 @@ export const HostControlProvider = ({
   initialControllerToken?: string | undefined;
 }) => {
   const location = useLocation();
-  const controlRoute = location.pathname === "/" || location.pathname === "/workspace";
+  const controlRoute = isHostControlRoute(location.pathname);
   const [state, setState] = useState<HostControlState>({ status: "loading" });
   const [actionPending, setActionPending] = useState(false);
   const [actionError, setActionError] = useState<Error>();

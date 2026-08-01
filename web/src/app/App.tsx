@@ -5,7 +5,7 @@ import { AppRoutes } from "../routes/AppRoutes";
 import { EventStoreProvider } from "../events/event-store";
 import { ControllerWorkspacePage } from "../features/workspace/ControllerWorkspacePage";
 import { AuthBoundary, AuthProvider } from "./auth-context";
-import { HostControlProvider, useHostControl } from "./host-control-context";
+import { HostControlProvider, isHostControlRoute, useHostControl } from "./host-control-context";
 import { runtimeMode } from "./runtime-mode";
 import { RuntimeAccessBoundary, RuntimeAccessProvider } from "./runtime-access-context";
 import { WorkspaceCacheBoundary } from "./WorkspaceCacheBoundary";
@@ -72,7 +72,7 @@ const ControllerControlRoute = () => {
 
 export const HostControlledRuntime = () => {
   const location = useLocation();
-  if (location.pathname === "/" || location.pathname === "/workspace") return <ControllerControlRoute />;
+  if (isHostControlRoute(location.pathname)) return <ControllerControlRoute />;
   return <RuntimeAccessBoundary><BusinessRuntime /></RuntimeAccessBoundary>;
 };
 

@@ -96,9 +96,9 @@ describe("ControllerApp runtime boundary", () => {
     expect(screen.queryByTestId("business-sse")).not.toBeInTheDocument();
   });
 
-  it("active ready 时控制路径仍位于业务 Auth 与 SSE 子树之外", async () => {
+  it.each(["/workspace", "/workspace/", "/WORKSPACE", "/work%73pace"])("控制路径变体 %s 均位于业务 Auth 与 SSE 子树之外", async (path) => {
     apiMocks.getControllerState.mockResolvedValue({ ...readyState(), pollAfterMs: 60_000 });
-    window.history.replaceState(null, "", "/workspace");
+    window.history.replaceState(null, "", path);
     renderControllerApp();
 
     expect(await screen.findByText("controller-workspace")).toBeInTheDocument();
