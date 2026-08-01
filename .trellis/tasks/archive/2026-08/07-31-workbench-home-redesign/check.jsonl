@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"核对前端分层、Workspace 绑定和事实源边界"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"检查语义结构、键盘、焦点、非纯颜色状态和图谱替代文本"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"执行相关测试、类型、Lint、Build 与真实浏览器门禁"}
+{"file":".trellis/tasks/07-31-workbench-home-redesign/research/visual-analysis.md","reason":"逐项核对确认稿构图、响应式与明确禁止的视觉漂移"}

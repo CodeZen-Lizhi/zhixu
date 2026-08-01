@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知序 · 沉浸式知识地图入口精修</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./workbench-b.css" />
+  </head>
+  <body>
+    <div class="shell map-shell">
+      <aside class="rail map-rail">
+        <a class="map-mark" href="#" aria-label="知序">序</a>
+        <nav aria-label="主导航">
+          <button class="icon-button active" aria-label="首页" title="首页">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 10h16M9 10v9" /></svg>
+          </button>
+          <button class="icon-button" aria-label="知识图谱" title="知识图谱">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="18" cy="18" r="2" /><path d="m8 11 8-4M8 13l8 4" /></svg>
+          </button>
+          <button class="icon-button" aria-label="资料" title="资料">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z" /></svg>
+          </button>
+        </nav>
+        <div class="rail-spacer"></div>
+        <button class="icon-button" aria-label="设置" title="设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19 13.5v-3l-2-.7-.7-1.7.9-1.9-2.1-2.1-1.9.9-1.7-.7-.7-2h-3l-.7 2-1.7.7-1.9-.9-2.1 2.1.9 1.9-.7 1.7-2 .7v3l2 .7.7 1.7-.9 1.9 2.1 2.1 1.9-.9 1.7.7.7 2h3l.7-2 1.7-.7 1.9.9 2.1-2.1-.9-1.9.7-1.7z" /></svg>
+        </button>
+      </aside>
+
+      <main class="map-main refined">
+        <header class="map-topbar">
+          <span class="map-caption">KNOWLEDGE LINEAGE / ENTRY</span>
+          <div class="map-topbar-right"><span class="local-mode">本地模式</span><span>数据边界</span><span>帮助</span></div>
+        </header>
+
+        <section class="map-stage refined-stage">
+          <div class="map-copy refined-copy">
+            <p class="micro">LOCAL KNOWLEDGE, IN ORDER</p>
+            <h1>知序</h1>
+            <h2>让每一条知识，<br />都看得见来路。</h2>
+            <p>连接本地 Markdown，把资料、版本、关系与 AI 建议放回同一条可追溯的脉络。</p>
+            <div class="map-actions">
+              <button class="primary-button">
+                连接知识目录
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+              </button>
+              <button class="quiet-button">查看数据边界</button>
+            </div>
+          </div>
+
+          <svg class="knowledge-atlas" viewBox="0 0 1362 834" preserveAspectRatio="xMidYMid meet" aria-label="资料、主题、证据与提案之间的知识关系模型">
+            <g aria-hidden="true">
+              <path class="cluster-boundary" d="M456 602 C454 472 525 376 650 354 C741 338 802 393 820 481 C838 574 777 686 673 718 C566 752 459 699 456 602Z" />
+              <path class="cluster-boundary" d="M747 349 C743 214 832 125 965 128 C1093 131 1163 230 1137 347 C1113 457 1018 502 909 476 C817 454 749 415 747 349Z" />
+              <path class="cluster-boundary" d="M999 514 C1015 399 1113 338 1220 367 C1329 396 1360 514 1300 616 C1244 710 1119 734 1042 656 C1004 618 992 563 999 514Z" />
+              <path class="cluster-axis" d="M486 695 C696 676 827 584 930 458 C1041 323 1133 284 1325 299" />
+              <path class="cluster-axis" d="M620 754 C783 653 886 591 1010 597 C1124 603 1205 651 1320 650" />
+            </g>
+
+            <g aria-label="背景关系">
+              <path class="relation" d="M493 621 C531 591 560 561 597 529" />
+              <path class="relation" d="M493 621 C543 651 587 674 637 687" />
+              <path class="relation" d="M597 529 C618 462 638 424 684 393" />
+              <path class="relation near" d="M637 687 C694 650 731 609 752 557" />
+              <path class="relation" d="M752 557 C797 530 822 502 845 467" />
+              <path class="relation" d="M684 393 C735 396 778 417 845 467" />
+              <path class="relation" d="M845 467 C868 416 886 386 914 350" />
+              <path class="relation" d="M914 350 C862 302 850 250 877 197" />
+              <path class="relation" d="M914 350 C950 289 990 248 1048 218" />
+              <path class="relation" d="M914 350 C1004 347 1056 368 1097 413" />
+              <path class="relation" d="M1048 218 C1110 232 1159 257 1202 296" />
+              <path class="relation" d="M1097 413 C1157 384 1199 352 1202 296" />
+              <path class="relation" d="M1097 413 C1090 470 1077 514 1066 558" />
+              <path class="relation near" d="M1066 558 C1123 599 1169 621 1220 626" />
+              <path class="relation" d="M1066 558 C1042 620 1012 659 965 686" />
+              <path class="relation" d="M1220 626 C1265 590 1293 543 1292 490" />
+              <path class="relation" d="M1202 296 C1246 286 1280 273 1311 247" />
+              <path class="relation pending" d="M965 686 C900 716 837 724 781 704" />
+            </g>
+
+            <g aria-label="主要知识脉络">
+              <path class="relation primary primary-path" d="M493 621 C575 590 629 534 684 475 C746 408 823 375 914 350 C1005 325 1053 363 1097 413 C1146 469 1191 437 1230 389" />
+            </g>
+
+            <g aria-label="关系说明">
+              <text class="relation-label" x="555" y="560">保留来源</text>
+              <text class="relation-label" x="738" y="413">形成上下文</text>
+              <text class="relation-label" x="984" y="358">关联证据</text>
+              <text class="relation-label" x="1151" y="441">生成建议</text>
+            </g>
+
+            <g aria-label="资料关系簇">
+              <text class="cluster-label" x="470" y="385">SOURCE MATERIAL</text>
+              <circle class="node-small" cx="493" cy="621" r="6" />
+              <circle class="node-small" cx="597" cy="529" r="5" />
+              <circle class="node-small solid" cx="637" cy="687" r="5" />
+              <circle class="node-small" cx="752" cy="557" r="4" />
+              <circle class="node-small" cx="684" cy="393" r="4" />
+              <circle class="node-small" cx="781" cy="704" r="4" />
+              <g class="focus-node">
+                <circle class="node-neutral-ring" cx="684" cy="475" r="19" />
+                <circle class="node-neutral-core" cx="684" cy="475" r="5" />
+              </g>
+              <g class="focus-label">
+                <text class="label-type" x="706" y="468">SOURCE VERSION</text>
+                <text class="label-name" x="706" y="488">版本与来源</text>
+              </g>
+              <text class="label-type" x="463" y="646">LOCAL FILE</text>
+              <text class="label-name" x="463" y="665">Markdown 资料</text>
+            </g>
+
+            <g aria-label="知识理解簇">
+              <text class="cluster-label" x="760" y="158">KNOWLEDGE CONTEXT</text>
+              <circle class="node-small" cx="845" cy="467" r="5" />
+              <circle class="node-small" cx="877" cy="197" r="4" />
+              <circle class="node-small solid" cx="1048" cy="218" r="5" />
+              <circle class="node-small" cx="1097" cy="413" r="5" />
+              <g class="focus-node">
+                <circle class="core-orbit" cx="914" cy="350" r="49" />
+                <circle class="core-orbit blue" cx="914" cy="350" r="37" />
+                <circle class="node-focus-ring" cx="914" cy="350" r="24" />
+                <circle class="node-focus-core" cx="914" cy="350" r="7" />
+              </g>
+              <g class="focus-label">
+                <text class="label-type" x="914" y="425" text-anchor="middle">KNOWLEDGE TOPIC</text>
+                <text class="label-name large" x="914" y="448" text-anchor="middle">知识主题</text>
+              </g>
+              <text class="label-type" x="1067" y="190">CONTEXT</text>
+              <text class="label-name" x="1067" y="209">关系与语义</text>
+            </g>
+
+            <g aria-label="审阅关系簇">
+              <text class="cluster-label" x="1060" y="695">REVIEW AND DECISION</text>
+              <circle class="node-small" cx="1066" cy="558" r="5" />
+              <circle class="node-small" cx="965" cy="686" r="4" />
+              <circle class="node-small solid" cx="1220" cy="626" r="5" />
+              <circle class="node-small" cx="1292" cy="490" r="4" />
+              <circle class="node-small" cx="1311" cy="247" r="4" />
+              <g class="focus-node">
+                <circle class="node-focus-ring" cx="1097" cy="413" r="17" />
+                <circle class="node-focus-core" cx="1097" cy="413" r="5" />
+              </g>
+              <g class="focus-label">
+                <text class="label-type" x="1119" y="407">EVIDENCE</text>
+                <text class="label-name" x="1119" y="428">证据关系</text>
+              </g>
+              <g class="focus-node">
+                <circle class="node-focus-ring" cx="1230" cy="389" r="25" />
+                <circle class="node-focus-core" cx="1230" cy="389" r="7" />
+              </g>
+              <g class="focus-label">
+                <text class="label-type" x="1261" y="382">PROPOSAL</text>
+                <text class="label-name large" x="1261" y="405">待审建议</text>
+              </g>
+            </g>
+          </svg>
+
+          <svg class="knowledge-atlas knowledge-atlas-mobile" viewBox="0 0 338 370" preserveAspectRatio="xMidYMid meet" aria-label="从本地资料到待审建议的知识脉络">
+            <g aria-hidden="true">
+              <path class="cluster-boundary" d="M8 286 C30 225 83 196 135 213 C181 228 196 281 170 328 C143 377 61 381 21 338 C8 324 2 305 8 286Z" />
+              <path class="cluster-boundary" d="M105 151 C111 83 167 38 231 52 C291 65 318 126 292 180 C266 235 199 249 150 215 C119 194 103 176 105 151Z" />
+              <path class="cluster-axis" d="M8 337 C90 329 147 289 184 232 C224 172 271 133 333 112" />
+              <path class="relation" d="M24 298 C62 308 91 322 121 344" />
+              <path class="relation" d="M86 252 C113 275 131 294 143 317" />
+              <path class="relation" d="M164 151 C140 122 129 96 133 67" />
+              <path class="relation" d="M164 151 C200 120 222 91 231 57" />
+              <path class="relation" d="M222 204 C254 216 279 226 306 242" />
+              <path class="relation" d="M222 204 C259 171 283 140 303 103" />
+              <path class="relation pending" d="M143 317 C181 338 219 344 258 334" />
+              <path class="relation primary primary-path" d="M24 298 C63 284 82 267 98 242 C119 209 136 178 164 151 C184 132 202 161 222 204 C244 185 270 144 303 103" />
+            </g>
+
+            <g aria-label="本地资料">
+              <circle class="node-small" cx="24" cy="298" r="5" />
+              <text class="label-type" x="16" y="320">LOCAL FILE</text>
+              <text class="label-name" x="16" y="338">Markdown 资料</text>
+            </g>
+
+            <g aria-label="资料版本">
+              <circle class="node-neutral-ring" cx="98" cy="242" r="12" />
+              <circle class="node-neutral-core" cx="98" cy="242" r="4" />
+              <text class="label-type" x="114" y="235">SOURCE VERSION</text>
+              <text class="label-name" x="114" y="252">版本与来源</text>
+            </g>
+
+            <g aria-label="知识主题">
+              <circle class="core-orbit" cx="164" cy="151" r="31" />
+              <circle class="core-orbit blue" cx="164" cy="151" r="24" />
+              <circle class="node-focus-ring" cx="164" cy="151" r="15" />
+              <circle class="node-focus-core" cx="164" cy="151" r="5" />
+              <text class="label-type" x="164" y="193" text-anchor="middle">KNOWLEDGE TOPIC</text>
+              <text class="label-name" x="164" y="211" text-anchor="middle">知识主题</text>
+            </g>
+
+            <g aria-label="证据关系">
+              <circle class="node-focus-ring" cx="222" cy="204" r="10" />
+              <circle class="node-focus-core" cx="222" cy="204" r="4" />
+              <text class="label-type" x="237" y="202">EVIDENCE</text>
+              <text class="label-name" x="237" y="219">证据关系</text>
+            </g>
+
+            <g aria-label="待审建议">
+              <circle class="node-focus-ring" cx="303" cy="103" r="15" />
+              <circle class="node-focus-core" cx="303" cy="103" r="5" />
+              <text class="label-type" x="286" y="74" text-anchor="middle">PROPOSAL</text>
+              <text class="label-name" x="286" y="91" text-anchor="middle">待审建议</text>
+            </g>
+          </svg>
+
+          <div class="atlas-legend" aria-label="图例">
+            <span><i></i>关联对象</span>
+            <span><i class="legend-focus"></i>当前脉络</span>
+            <span><i class="legend-line"></i>可追溯路径</span>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

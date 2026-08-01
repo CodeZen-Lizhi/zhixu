@@ -1,0 +1,7 @@
+{"file":".trellis/spec/frontend/index.md","reason":"前端架构入口、数据流边界与开发前检查清单"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"路由组件职责、状态表达、SVG 与可访问性交互约束"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"TanStack Query、Workspace Server State 与错误状态所有权"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"前端测试、浏览器门禁与禁止伪造状态"}
+{"file":".trellis/tasks/07-31-workbench-home-redesign/research/reference-products.md","reason":"首页产品定位与不照搬的参考边界"}
+{"file":".trellis/tasks/07-31-workbench-home-redesign/research/visual-analysis.md","reason":"确认稿的桌面/移动几何、信息层级与真实性修正"}
+{"file":".trellis/tasks/07-31-workbench-navigation-visual-redesign/research/frontend-information-architecture.md","reason":"复用 Clearline 导航与信息归属，避免复制第二套壳"}

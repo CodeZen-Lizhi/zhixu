@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知序 · 知识星座入口</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./workbench-b.css" />
+  </head>
+  <body>
+    <div class="shell map-shell">
+      <aside class="rail map-rail">
+        <a class="map-mark" href="#" aria-label="知序">序</a>
+        <nav aria-label="主导航">
+          <button class="icon-button active" aria-label="首页" title="首页">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 10h16M9 10v9" /></svg>
+          </button>
+          <button class="icon-button" aria-label="知识图谱" title="知识图谱">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="18" cy="18" r="2" /><path d="m8 11 8-4M8 13l8 4" /></svg>
+          </button>
+          <button class="icon-button" aria-label="资料" title="资料">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z" /></svg>
+          </button>
+        </nav>
+        <div class="rail-spacer"></div>
+        <button class="icon-button" aria-label="设置" title="设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19 13.5v-3l-2-.7-.7-1.7.9-1.9-2.1-2.1-1.9.9-1.7-.7-.7-2h-3l-.7 2-1.7.7-1.9-.9-2.1 2.1.9 1.9-.7 1.7-2 .7v3l2 .7.7 1.7-.9 1.9 2.1 2.1 1.9-.9 1.7.7.7 2h3l.7-2 1.7-.7 1.9.9 2.1-2.1-.9-1.9.7-1.7z" /></svg>
+        </button>
+      </aside>
+
+      <main class="map-main constellation">
+        <header class="map-topbar">
+          <span class="map-caption">KNOWLEDGE CONSTELLATION / ENTRY</span>
+          <div class="map-topbar-right"><span class="local-mode">本地模式</span><span>数据边界</span><span>帮助</span></div>
+        </header>
+
+        <section class="map-stage constellation-stage">
+          <div class="map-copy constellation-copy">
+            <p class="micro">LOCAL KNOWLEDGE, IN ORDER</p>
+            <h1>知序</h1>
+            <h2>让知识，连成<br />自己的星图。</h2>
+            <p>连接本地 Markdown，让资料、主题、证据与建议形成可追溯的知识星图。</p>
+            <div class="map-actions">
+              <button class="primary-button">
+                连接知识目录
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+              </button>
+              <button class="quiet-button">查看数据边界</button>
+            </div>
+          </div>
+
+          <svg class="constellation-map" viewBox="0 0 1362 834" preserveAspectRatio="xMidYMid meet" aria-label="由本地资料、知识主题、证据关系和待审提案组成的知识星座">
+            <g aria-hidden="true">
+              <circle class="distant-star" cx="563" cy="323" r="2" />
+              <circle class="distant-star" cx="741" cy="226" r="1.7" />
+              <circle class="distant-star" cx="1084" cy="676" r="2" />
+              <circle class="distant-star" cx="1304" cy="490" r="1.7" />
+            </g>
+
+            <g aria-label="展开书页轮廓">
+              <path class="figure-line draw-line" d="M620 590 L700 390 L860 445 L955 570 L620 590 M955 570 L1015 360 L1200 410 L955 570 M1015 360 L1190 190 L1200 410" />
+              <path class="knowledge-route draw-line" d="M620 590 L860 445 L1015 360 L1190 190" />
+            </g>
+
+            <g aria-hidden="true">
+              <circle class="quiet-star" cx="700" cy="390" r="4" />
+              <circle class="quiet-star" cx="955" cy="570" r="4" />
+              <circle class="quiet-star" cx="1200" cy="410" r="4" />
+            </g>
+
+            <g class="twinkle" aria-label="本地资料">
+              <circle class="star-halo" cx="620" cy="590" r="15" />
+              <line class="star-ray" x1="620" y1="568" x2="620" y2="578" />
+              <line class="star-ray" x1="620" y1="602" x2="620" y2="612" />
+              <line class="star-ray" x1="598" y1="590" x2="608" y2="590" />
+              <line class="star-ray" x1="632" y1="590" x2="642" y2="590" />
+              <circle class="star-core" cx="620" cy="590" r="6" />
+            </g>
+            <text class="star-name" x="586" y="628">本地资料</text>
+
+            <g class="twinkle twinkle-b" aria-label="知识主题">
+              <circle class="star-halo" cx="860" cy="445" r="20" />
+              <line class="star-ray" x1="860" y1="416" x2="860" y2="428" />
+              <line class="star-ray" x1="860" y1="462" x2="860" y2="474" />
+              <line class="star-ray" x1="831" y1="445" x2="843" y2="445" />
+              <line class="star-ray" x1="877" y1="445" x2="889" y2="445" />
+              <circle class="star-core" cx="860" cy="445" r="8" />
+            </g>
+            <text class="star-name" x="824" y="492">知识主题</text>
+
+            <g class="twinkle twinkle-c" aria-label="证据关系">
+              <circle class="star-halo" cx="1015" cy="360" r="17" />
+              <line class="star-ray" x1="1015" y1="335" x2="1015" y2="345" />
+              <line class="star-ray" x1="1015" y1="375" x2="1015" y2="385" />
+              <line class="star-ray" x1="990" y1="360" x2="1000" y2="360" />
+              <line class="star-ray" x1="1030" y1="360" x2="1040" y2="360" />
+              <circle class="star-core" cx="1015" cy="360" r="7" />
+            </g>
+            <text class="star-name" x="1039" y="365">证据关系</text>
+
+            <g class="north-star twinkle" aria-label="待审提案">
+              <circle class="star-halo" cx="1190" cy="190" r="24" />
+              <line class="star-ray" x1="1190" y1="150" x2="1190" y2="169" />
+              <line class="star-ray" x1="1190" y1="211" x2="1190" y2="230" />
+              <line class="star-ray" x1="1150" y1="190" x2="1169" y2="190" />
+              <line class="star-ray" x1="1211" y1="190" x2="1230" y2="190" />
+              <circle class="star-core" cx="1190" cy="190" r="9" />
+            </g>
+            <text class="star-name" x="1150" y="242">待审提案</text>
+          </svg>
+
+          <svg class="constellation-map constellation-map-mobile" viewBox="0 0 338 350" preserveAspectRatio="xMidYMid meet" aria-label="由本地资料、知识主题、证据关系和待审提案组成的知识星座">
+            <path class="figure-line draw-line" d="M25 265 L70 150 L135 185 L170 250 L25 265 M170 250 L205 140 L285 170 L170 250 M205 140 L270 55 L285 170" />
+            <path class="knowledge-route draw-line" d="M25 265 L135 185 L205 140 L270 55" />
+
+            <circle class="quiet-star" cx="70" cy="150" r="3" />
+            <circle class="quiet-star" cx="170" cy="250" r="3" />
+            <circle class="quiet-star" cx="285" cy="170" r="3" />
+
+            <g class="twinkle">
+              <circle class="star-halo" cx="25" cy="265" r="11" />
+              <circle class="star-core" cx="25" cy="265" r="5" />
+            </g>
+            <text class="star-name" x="15" y="294">本地资料</text>
+
+            <g class="twinkle twinkle-b">
+              <circle class="star-halo" cx="135" cy="185" r="15" />
+              <circle class="star-core" cx="135" cy="185" r="7" />
+            </g>
+            <text class="star-name" x="104" y="222">知识主题</text>
+
+            <g class="twinkle twinkle-c">
+              <circle class="star-halo" cx="205" cy="140" r="13" />
+              <circle class="star-core" cx="205" cy="140" r="6" />
+            </g>
+            <text class="star-name" x="181" y="124">证据关系</text>
+
+            <g class="north-star twinkle">
+              <circle class="star-halo" cx="270" cy="55" r="18" />
+              <line class="star-ray" x1="270" y1="25" x2="270" y2="38" />
+              <line class="star-ray" x1="270" y1="72" x2="270" y2="85" />
+              <line class="star-ray" x1="240" y1="55" x2="253" y2="55" />
+              <line class="star-ray" x1="287" y1="55" x2="300" y2="55" />
+              <circle class="star-core" cx="270" cy="55" r="8" />
+            </g>
+            <text class="star-name" x="233" y="96">待审提案</text>
+          </svg>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

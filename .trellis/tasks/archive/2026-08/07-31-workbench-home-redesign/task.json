@@ -1,0 +1,28 @@
+{
+  "id": "workbench-home-redesign",
+  "name": "workbench-home-redesign",
+  "title": "工作台首页重设计",
+  "description": "",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "lizhi",
+  "assignee": "lizhi",
+  "createdAt": "2026-07-31",
+  "completedAt": "2026-08-01",
+  "branch": "codex/workbench-navigation-visual-redesign",
+  "base_branch": "dev",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "implementation_worktree": "/Users/zhenglizhi/GolandProjects/zhixu-workbench-navigation-visual-redesign"
+  }
+}

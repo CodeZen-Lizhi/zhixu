@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知序 · 沉浸式知识地图入口</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./workbench-b.css" />
+  </head>
+  <body>
+    <div class="shell map-shell">
+      <aside class="rail map-rail">
+        <a class="map-mark" href="#" aria-label="知序">序</a>
+        <nav aria-label="主导航">
+          <button class="icon-button active" aria-label="首页" title="首页">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 10h16M9 10v9" /></svg>
+          </button>
+          <button class="icon-button" aria-label="知识图谱" title="知识图谱">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="18" cy="18" r="2" /><path d="m8 11 8-4M8 13l8 4" /></svg>
+          </button>
+          <button class="icon-button" aria-label="资料" title="资料">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z" /></svg>
+          </button>
+        </nav>
+        <div class="rail-spacer"></div>
+        <button class="icon-button" aria-label="设置" title="设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19 13.5v-3l-2-.7-.7-1.7.9-1.9-2.1-2.1-1.9.9-1.7-.7-.7-2h-3l-.7 2-1.7.7-1.9-.9-2.1 2.1.9 1.9-.7 1.7-2 .7v3l2 .7.7 1.7-.9 1.9 2.1 2.1 1.9-.9 1.7.7.7 2h3l.7-2 1.7-.7 1.9.9 2.1-2.1-.9-1.9.7-1.7z" /></svg>
+        </button>
+      </aside>
+
+      <main class="map-main">
+        <header class="map-topbar">
+          <span class="map-caption">KNOWLEDGE LINEAGE / ENTRY</span>
+          <div class="map-topbar-right"><span class="local-mode">本地模式</span><span>数据边界</span><span>帮助</span></div>
+        </header>
+
+        <section class="map-stage">
+          <svg class="map-graph" viewBox="0 0 1362 834" preserveAspectRatio="none" aria-label="知识流转关系模型">
+            <path class="edge secondary" d="M38 702 C185 650 248 745 420 678 S722 566 841 621" />
+            <path class="edge" d="M396 534 C505 486 588 418 704 391" />
+            <path class="edge primary" d="M432 518 C550 469 610 414 712 375 S852 281 934 255" />
+            <path class="edge primary" d="M936 255 C1031 274 1086 326 1142 364" />
+            <path class="edge primary" d="M936 255 C965 372 1018 469 1060 528" />
+            <path class="edge primary" d="M1060 528 C1162 479 1211 418 1245 363" />
+            <path class="edge" d="M702 389 C778 455 866 503 1058 528" />
+            <path class="edge secondary" d="M829 120 C882 168 897 210 936 255" />
+            <path class="edge" d="M1188 188 C1100 203 1008 213 936 255" />
+            <path class="edge" d="M1140 364 C1205 508 1214 606 1174 725" />
+            <path class="edge secondary" d="M1060 528 C977 653 856 708 707 746" />
+            <path class="edge" d="M704 391 C638 572 539 679 406 755" />
+            <circle cx="38" cy="702" r="4" /><circle cx="168" cy="650" r="3" /><circle cx="265" cy="734" r="4" />
+            <circle cx="396" cy="534" r="5" /><circle class="focus" cx="432" cy="518" r="6" />
+            <circle cx="704" cy="391" r="5" /><circle class="focus" cx="712" cy="375" r="6" />
+            <circle cx="829" cy="120" r="4" /><circle class="focus" cx="936" cy="255" r="6" />
+            <circle cx="1188" cy="188" r="4" /><circle cx="1140" cy="364" r="5" />
+            <circle class="focus" cx="1060" cy="528" r="6" /><circle class="focus" cx="1245" cy="363" r="6" />
+            <circle cx="1174" cy="725" r="4" /><circle cx="707" cy="746" r="4" /><circle cx="406" cy="755" r="4" />
+          </svg>
+
+          <div class="map-copy">
+            <p class="micro">LOCAL KNOWLEDGE, IN ORDER</p>
+            <h1>知序</h1>
+            <h2>让每一条知识，<br />都看得见来路。</h2>
+            <p>连接本地 Markdown，把资料、版本、关系与 AI 建议放回同一条可追溯的脉络。</p>
+            <div class="map-actions">
+              <button class="primary-button">
+                连接知识目录
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+              </button>
+              <button class="quiet-button">查看数据边界</button>
+            </div>
+          </div>
+
+          <article class="map-node node-file"><small>LOCAL FILE</small><strong>Markdown 资料</strong></article>
+          <article class="map-node node-version"><small>SOURCE VERSION</small><strong>版本与来源</strong></article>
+          <article class="map-node node-topic"><small>KNOWLEDGE TOPIC</small><strong>知识主题</strong></article>
+          <article class="map-node node-evidence"><small>EVIDENCE</small><strong>证据关系</strong></article>
+          <article class="map-node node-proposal"><small>PROPOSAL</small><strong>待审建议</strong></article>
+
+          <div class="map-tools" aria-label="画布工具"><button aria-label="放大" title="放大">+</button><button aria-label="缩小" title="缩小">−</button><button aria-label="适应画布" title="适应画布">⌗</button></div>
+          <div class="map-trust"><span>本地文件所有权</span><i></i><span>Git 版本历史</span><i></i><span>AI 修改先审后写</span></div>
+          <div class="map-model-label">知识流转模型 / 尚未连接目录</div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

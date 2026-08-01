@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知序 · 极简知识脉络入口</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./workbench-b.css" />
+  </head>
+  <body>
+    <div class="shell map-shell">
+      <aside class="rail map-rail">
+        <a class="map-mark" href="#" aria-label="知序">序</a>
+        <nav aria-label="主导航">
+          <button class="icon-button active" aria-label="首页" title="首页">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 10h16M9 10v9" /></svg>
+          </button>
+          <button class="icon-button" aria-label="知识图谱" title="知识图谱">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="18" cy="18" r="2" /><path d="m8 11 8-4M8 13l8 4" /></svg>
+          </button>
+          <button class="icon-button" aria-label="资料" title="资料">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z" /></svg>
+          </button>
+        </nav>
+        <div class="rail-spacer"></div>
+        <button class="icon-button" aria-label="设置" title="设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19 13.5v-3l-2-.7-.7-1.7.9-1.9-2.1-2.1-1.9.9-1.7-.7-.7-2h-3l-.7 2-1.7.7-1.9-.9-2.1 2.1.9 1.9-.7 1.7-2 .7v3l2 .7.7 1.7-.9 1.9 2.1 2.1 1.9-.9 1.7.7.7 2h3l.7-2 1.7-.7 1.9.9 2.1-2.1-.9-1.9.7-1.7z" /></svg>
+        </button>
+      </aside>
+
+      <main class="map-main minimal">
+        <header class="map-topbar">
+          <span class="map-caption">KNOWLEDGE LINEAGE / ENTRY</span>
+          <div class="map-topbar-right"><span class="local-mode">本地模式</span><span>数据边界</span><span>帮助</span></div>
+        </header>
+
+        <section class="map-stage minimal-stage">
+          <div class="map-copy minimal-copy">
+            <p class="micro">LOCAL KNOWLEDGE, IN ORDER</p>
+            <h1>知序</h1>
+            <h2>让每一条知识，<br />都看得见来路。</h2>
+            <p>连接本地 Markdown，把资料、关系与 AI 建议放回一条可追溯的脉络。</p>
+            <div class="map-actions">
+              <button class="primary-button">
+                连接知识目录
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+              </button>
+              <button class="quiet-button">查看数据边界</button>
+            </div>
+          </div>
+
+          <svg class="minimal-lineage" viewBox="0 0 1362 834" preserveAspectRatio="xMidYMid meet" aria-label="从本地资料到待审建议的知识脉络">
+            <path class="thread-hint" d="M800 365 C928 248 1116 237 1240 305" />
+            <path class="main-thread" d="M560 610 C659 589 708 431 800 365 C876 310 930 465 1035 500 C1136 534 1142 347 1240 305" />
+
+            <g class="primary-node" aria-label="本地资料">
+              <circle class="node-ring" cx="560" cy="610" r="8" />
+              <circle class="node-core" cx="560" cy="610" r="3" />
+            </g>
+            <g class="primary-label">
+              <text class="node-name" x="530" y="648">本地资料</text>
+            </g>
+
+            <g class="primary-node" aria-label="知识主题">
+              <circle class="node-ring" cx="800" cy="365" r="25" />
+              <circle class="node-core" cx="800" cy="365" r="6" />
+            </g>
+            <g class="primary-label">
+              <text class="node-name" x="768" y="417">知识主题</text>
+            </g>
+
+            <g class="primary-node" aria-label="证据关系">
+              <circle class="node-ring" cx="1035" cy="500" r="15" />
+              <circle class="node-core" cx="1035" cy="500" r="5" />
+            </g>
+            <g class="primary-label">
+              <text class="node-name" x="1002" y="543">证据关系</text>
+            </g>
+
+            <g class="primary-node" aria-label="待审建议">
+              <circle class="node-terminal" cx="1240" cy="305" r="21" />
+              <circle class="node-terminal-core" cx="1240" cy="305" r="5" />
+            </g>
+            <g class="primary-label">
+              <text class="node-name" x="1195" y="356">待审建议</text>
+            </g>
+          </svg>
+
+          <svg class="minimal-lineage minimal-lineage-mobile" viewBox="0 0 338 335" preserveAspectRatio="xMidYMid meet" aria-label="从本地资料到待审建议的知识脉络">
+            <path class="thread-hint" d="M120 160 C185 91 259 79 307 105" />
+            <path class="main-thread" d="M24 275 C74 260 82 181 120 160 C160 137 180 215 226 230 C266 243 273 121 307 105" />
+
+            <circle class="node-ring" cx="24" cy="275" r="6" />
+            <circle class="node-core" cx="24" cy="275" r="2.5" />
+            <text class="node-name" x="16" y="304">本地资料</text>
+
+            <circle class="node-ring" cx="120" cy="160" r="19" />
+            <circle class="node-core" cx="120" cy="160" r="5" />
+            <text class="node-name" x="92" y="200">知识主题</text>
+
+            <circle class="node-ring" cx="226" cy="230" r="12" />
+            <circle class="node-core" cx="226" cy="230" r="4" />
+            <text class="node-name" x="198" y="265">证据关系</text>
+
+            <circle class="node-terminal" cx="308" cy="91" r="17" />
+            <circle class="node-terminal-core" cx="308" cy="91" r="4" />
+            <text class="node-name" x="257" y="132">待审建议</text>
+          </svg>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
