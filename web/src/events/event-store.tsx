@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { getWorkspace } from "../api/workspace";
 import { useActiveWorkspaceId } from "../app/active-workspace";
 import { clearWorkspaceRuntimeState } from "../app/workspace-runtime-state";
+import { resetDocumentHistoryWorkspaceQueriesForRecovery } from "../features/document-history/query-keys";
 import { invalidateRagEvent, recoverRagWorkspace } from "../features/rag/event-recovery";
 import { reviewQueryKeys } from "../features/review/query-keys";
 import { resetSearchWorkspaceQueriesForRecovery } from "../features/search/query-keys";
@@ -80,6 +81,7 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
       assertActive();
       try {
         await resetSearchWorkspaceQueriesForRecovery(queryClient, workspaceId);
+        await resetDocumentHistoryWorkspaceQueriesForRecovery(queryClient, workspaceId);
         for (const recoverWorkspace of [...recoveryCallbacksRef.current]) {
           assertActive();
           await recoverWorkspace(workspaceId);
@@ -96,6 +98,14 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         });
         assertActive();
         await queryClient.refetchQueries({ queryKey: ["business", workspaceId], type: "all" }, { throwOnError: true });
+        assertActive();
+        await queryClient.refetchQueries({ queryKey: ["captures", workspaceId], type: "all" }, { throwOnError: true });
+        assertActive();
+        await queryClient.refetchQueries({ queryKey: ["authoring", workspaceId], type: "all" }, { throwOnError: true });
+        assertActive();
+        await queryClient.refetchQueries({ queryKey: ["organizing", workspaceId], type: "all" }, { throwOnError: true });
+        assertActive();
+        await queryClient.refetchQueries({ queryKey: ["settings", "git-sync", workspaceId], type: "all" }, { throwOnError: true });
         assertActive();
         await recoverRagWorkspace(queryClient, workspaceId);
         assertActive();
@@ -150,6 +160,14 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         invalidated.add(identity);
         await queryClient.invalidateQueries({ queryKey, refetchType: "none" }, { throwOnError: true });
       };
+      const invalidateBestEffort = async (queryKey: readonly unknown[]): Promise<void> => {
+        const identity = JSON.stringify(queryKey);
+        if (invalidated.has(identity)) return;
+        invalidated.add(identity);
+        // Active history pages may legitimately return cursor-stale after HEAD moves.
+        // The page owns baseline reset; that expected conflict must not reject SSE delivery.
+        await queryClient.invalidateQueries({ queryKey });
+      };
       const proposalEvent = event.type.startsWith("proposal.") || event.type.startsWith("approval.") || event.resourceRef.startsWith("proposal:");
       const workflowEvent = event.type.startsWith("workflow.") || event.invalidations.some((item) => item.resource === "workflow");
       const sourceEvent = event.type.startsWith("ingestion.")
@@ -157,6 +175,34 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         || event.type.startsWith("index.")
         || event.type.startsWith("source.")
         || event.type.startsWith("source_version.");
+      const captureEvent = event.type.startsWith("capture.")
+        || event.type.startsWith("profile.")
+        || event.resourceRef.startsWith("capture:")
+        || event.resourceRef.startsWith("knowledge_profile:")
+        || event.invalidations.some((item) => item.resource === "capture" || item.resource === "knowledge_profile");
+      const authoringEvent = event.type.startsWith("authoring.")
+        || event.resourceRef.startsWith("working_draft:")
+        || event.resourceRef.startsWith("document_publication:")
+        || event.resourceRef.startsWith("article_revision:")
+        || event.invalidations.some((item) => item.resource === "working_draft"
+          || item.resource === "document"
+          || item.resource === "article_revision"
+          || item.resource === "document_publication");
+      const documentHistoryEvent = event.type === "proposal.applied"
+        || event.resourceRef.startsWith("document:")
+        || event.resourceRef.startsWith("article_revision:")
+        || event.invalidations.some((item) => item.resource === "document" || item.resource === "article_revision");
+      const organizingEvent = event.type.startsWith("organizing.")
+        || event.resourceRef.startsWith("organizing_draft:")
+        || event.resourceRef.startsWith("organizing_snapshot:")
+        || event.resourceRef.startsWith("organizing_run:")
+        || event.invalidations.some((item) => item.resource === "organizing_draft"
+          || item.resource === "organizing_snapshot"
+          || item.resource === "organizing_run");
+      const gitSyncEvent = event.type.startsWith("git.")
+        || event.resourceRef.startsWith("git_remote:")
+        || event.resourceRef.startsWith("git_sync_run:")
+        || event.invalidations.some((item) => item.resource === "git_remote" || item.resource === "git_sync_run");
       const learningPathEvent = reviewLearningPathResource(event);
       const reviewAnswerID = learningPathEvent
         ? event.payloadSummary.answerId
@@ -195,6 +241,11 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         await invalidate(["business", workspaceId, "proposal-current-content"]);
       }
       if (workflowEvent || sourceEvent) await invalidate(["business", workspaceId, "sources"]);
+			if (captureEvent || sourceEvent || workflowEvent) await invalidate(["captures", workspaceId]);
+      if (authoringEvent || event.type === "proposal.applied") await invalidate(["authoring", workspaceId]);
+      if (documentHistoryEvent) await invalidateBestEffort(["document-history", workspaceId]);
+      if (organizingEvent || workflowEvent) await invalidate(["organizing", workspaceId]);
+      if (gitSyncEvent) await invalidate(["settings", "git-sync", workspaceId]);
       // Search cursor 绑定 Active Index/result fingerprint。Index 事件只把快照标 stale，不能用旧 cursor
       // 强制 refetch，否则 409 stale 会阻止 SSE 事件游标提交并形成重放循环。
       if (sourceEvent) await markStaleWithoutRefetch(["search", workspaceId]);

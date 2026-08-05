@@ -1,12 +1,15 @@
 import { Navigate, Route, Routes } from "react-router-dom";
-import { lazy } from "react";
+import { lazy, type ReactNode } from "react";
 import { AppShell } from "../app/AppShell";
+import { useAuth } from "../app/auth-context";
+import { PageHeader, UnavailableState } from "../shared/ui";
 
 const GraphPage = lazy(() => import("../features/graph/GraphPage").then((module) => ({ default: module.GraphPage })));
 const RagPage = lazy(() => import("../features/rag/RagPage").then((module) => ({ default: module.RagPage })));
 const WorkspacePage = lazy(() => import("../features/workspace/WorkspacePage").then((module) => ({ default: module.WorkspacePage })));
 const DashboardPage = lazy(() => import("../features/business/DashboardPage").then((module) => ({ default: module.DashboardPage })));
 const BasicPages = lazy(() => import("../features/business/BasicPages").then((module) => ({ default: module.InboxPage })));
+const CaptureDetailPage = lazy(() => import("../features/capture/CaptureDetailPage").then((module) => ({ default: module.CaptureDetailPage })));
 const DocumentsPage = lazy(() => import("../features/business/BasicPages").then((module) => ({ default: module.DocumentsPage })));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const ProposalsPage = lazy(() => import("../features/business/ProposalsPage").then((module) => ({ default: module.ProposalsPage })));
@@ -26,8 +29,22 @@ const InterviewsPage = lazy(() => import("../features/interview/InterviewPage").
 const InterviewSessionPage = lazy(() => import("../features/interview/InterviewPage").then((module) => ({ default: module.InterviewSessionPage })));
 const TimelinePage = lazy(() => import("../features/timeline/TimelinePage").then((module) => ({ default: module.TimelinePage })));
 const TimelineEventPage = lazy(() => import("../features/timeline/TimelinePage").then((module) => ({ default: module.TimelineEventPage })));
+const AuthoringPage = lazy(() => import("../features/authoring/AuthoringPage").then((module) => ({ default: module.AuthoringPage })));
+const NewDocumentPage = lazy(() => import("../features/authoring/NewDocumentPage").then((module) => ({ default: module.NewDocumentPage })));
+const DocumentHistoryPage = lazy(() => import("../features/document-history").then((module) => ({ default: module.DocumentHistoryPage })));
+const OrganizingPage = lazy(() => import("../features/organizing").then((module) => ({ default: module.OrganizingPage })));
 
 const Shell = () => <AppShell />;
+
+const AuthenticatedPrincipalRoute = ({ children, title, description }: { children: ReactNode; title: string; description: string }) => {
+  const { state } = useAuth();
+  if (state.status === "authenticated" && state.mode === "required") return <>{children}</>;
+
+  return <div className="page-stack">
+    <PageHeader title={title} description={description} />
+    <UnavailableState title="需要登录后使用" description="此功能会绑定当前用户。请启用身份认证并登录；当前开发模式不会发起相关请求。" />
+  </div>;
+};
 
 export const AppRoutes = () => (
   <Routes>
@@ -35,9 +52,14 @@ export const AppRoutes = () => (
       <Route path="/" element={<WorkspacePage />} />
       <Route path="/dashboard" element={<DashboardPage />} />
       <Route path="/inbox" element={<BasicPages />} />
+      <Route path="/captures/:captureId" element={<CaptureDetailPage />} />
       <Route path="/documents" element={<DocumentsPage />} />
       <Route path="/documents/:sourceVersionId" element={<DocumentsPage />} />
       <Route path="/search" element={<SearchPage />} />
+      <Route path="/authoring" element={<AuthoringPage />} />
+      <Route path="/authoring/new" element={<NewDocumentPage />} />
+      <Route path="/authoring/documents/:documentId/history" element={<DocumentHistoryPage />} />
+      <Route path="/authoring/organize" element={<OrganizingPage />} />
       <Route path="/proposals" element={<ProposalsPage />} />
       <Route path="/proposals/:proposalId" element={<ProposalDetailPage />} />
       <Route path="/workflows" element={<WorkflowsPage />} />
@@ -51,9 +73,9 @@ export const AppRoutes = () => (
       <Route path="/artifacts/:artifactId" element={<ArtifactDetailPage />} />
       <Route path="/review" element={<ReviewPage />} />
       <Route path="/review/session" element={<ReviewSessionPage />} />
-      <Route path="/memories" element={<MemoriesPage />} />
-      <Route path="/interviews" element={<InterviewsPage />} />
-      <Route path="/interviews/:sessionId" element={<InterviewSessionPage />} />
+      <Route path="/memories" element={<AuthenticatedPrincipalRoute title="记忆" description="管理需要明确确认的长期上下文。"><MemoriesPage /></AuthenticatedPrincipalRoute>} />
+      <Route path="/interviews" element={<AuthenticatedPrincipalRoute title="访谈" description="基于知识内容进行模拟问答。"><InterviewsPage /></AuthenticatedPrincipalRoute>} />
+      <Route path="/interviews/:sessionId" element={<AuthenticatedPrincipalRoute title="模拟面试" description="恢复服务端保存的题目、回答与学习路径。"><InterviewSessionPage /></AuthenticatedPrincipalRoute>} />
       <Route path="/workspace" element={<WorkspacePage />} />
       <Route path="/settings" element={<SettingsPage />} />
       <Route path="/graph" element={<GraphPage />} />

@@ -114,6 +114,10 @@ func TestRepositoryListSourceVersionsWithPostgres(t *testing.T) {
 	assertSourceVersionListIDs(t, repository, ctx, domain.SourceVersionListQuery{WorkspaceID: workspaceID, IndexStatus: "excluded", Limit: 10}, thirdID)
 	assertSourceVersionListIDs(t, repository, ctx, domain.SourceVersionListQuery{WorkspaceID: workspaceID, MimeType: "text/plain", Limit: 10}, fourthID)
 	assertSourceVersionListIDs(t, repository, ctx, domain.SourceVersionListQuery{WorkspaceID: workspaceID, IngestionStatus: "parsed", Limit: 10})
+	if _, err := tx.Exec(ctx, `UPDATE core.source SET removed_at=$1 WHERE id=$2`, now.Add(12*time.Hour), string(sourceThreeID)); err != nil {
+		t.Fatal(err)
+	}
+	assertSourceVersionListIDs(t, repository, ctx, domain.SourceVersionListQuery{WorkspaceID: workspaceID, Limit: 10}, firstID, secondID, thirdID)
 }
 
 type sourceVersionFixture struct {

@@ -8,7 +8,7 @@ const tokenId = "10000000-0000-4000-8000-000000000003";
 const workspaceApi = vi.hoisted(() => ({ getWorkspace: vi.fn() }));
 const auth = vi.hoisted(() => ({ createApiToken: vi.fn(), listApiTokens: vi.fn(), revokeApiToken: vi.fn() }));
 const systemStatus = vi.hoisted(() => ({ render: vi.fn() }));
-const activeWorkspace = vi.hoisted(() => ({ setActiveWorkspaceId: vi.fn() }));
+const activeWorkspace = vi.hoisted(() => ({ id: "10000000-0000-4000-8000-000000000002", setActiveWorkspaceId: vi.fn() }));
 
 vi.mock("../../api/auth", async (importOriginal) => ({
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
@@ -22,10 +22,11 @@ vi.mock("../../api/workspace", () => ({
 }));
 vi.mock("../../app/active-workspace", () => ({
   setActiveWorkspaceId: activeWorkspace.setActiveWorkspaceId,
-  useActiveWorkspaceId: () => "10000000-0000-4000-8000-000000000002",
+  useActiveWorkspaceId: () => activeWorkspace.id,
 }));
 vi.mock("../../app/auth-context", () => ({ useAuth: () => ({ state: { status: "authenticated", mode: "required" } }) }));
 vi.mock("../settings/ModelSettingsPanel", () => ({ ModelSettingsPanel: () => <section aria-label="模型设置面板">真实模型设置面板</section> }));
+vi.mock("../settings/GitRemoteSettingsPanel", () => ({ GitRemoteSettingsPanel: () => <section aria-label="Git 同步设置面板">Git 同步设置</section> }));
 vi.mock("../system-status/SystemStatusPage", () => ({ SystemStatusPage: (props: { display?: string }) => { systemStatus.render(props); return <section aria-label="系统状态面板">{props.display}</section>; } }));
 
 import { SettingsPage } from "../settings/SettingsPage";
@@ -49,6 +50,7 @@ const renderSettings = (path = "/settings") => {
 beforeEach(() => {
   window.localStorage.clear();
   systemStatus.render.mockClear();
+  activeWorkspace.id = workspaceId;
   activeWorkspace.setActiveWorkspaceId.mockClear();
   workspaceApi.getWorkspace.mockResolvedValue({ id: workspaceId, name: "Docs", rootPath: "/workspace", status: "active", git: { present: true, dirty: false, branch: "dev", head: "abc" } });
 });
@@ -89,7 +91,26 @@ describe("SettingsPage API Token management", () => {
     const navigation = screen.getByRole("navigation", { name: "设置分类" });
     expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
     expect(navigation).toHaveTextContent("工作区模型与检索数据导出访问权限系统状态");
+    expect(navigation).not.toHaveTextContent("Git 同步");
     expect(screen.getByRole("link", { name: "工作区" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("region", { name: "Git 同步设置面板" })).toBeInTheDocument();
+  });
+
+  it("旧 Git 同步分类规范化到合并后的工作区分类", async () => {
+    auth.listApiTokens.mockResolvedValue({ items: [] });
+    renderSettings("/settings?section=sync&from=legacy");
+
+    expect(screen.getByRole("link", { name: "工作区" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("region", { name: "Git 同步设置面板" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent("/settings?section=workspace&from=legacy"));
+  });
+
+  it("未连接工作区时不重复展示 Git 空态", () => {
+    activeWorkspace.id = "";
+    renderSettings();
+
+    expect(screen.getByRole("heading", { name: "尚未连接工作区" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Git 同步设置面板" })).not.toBeInTheDocument();
   });
 
   it("未知分类回退到工作区，并在切换分类时保留其他查询参数", async () => {

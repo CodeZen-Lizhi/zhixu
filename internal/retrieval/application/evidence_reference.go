@@ -15,6 +15,7 @@ import (
 const (
 	evidenceReferenceServiceUnavailableCode = "RETRIEVAL_EVIDENCE_REFERENCE_SERVICE_UNAVAILABLE"
 	evidenceArtifactInvalidCode             = "RETRIEVAL_EVIDENCE_ARTIFACT_INVALID"
+	MaxSourceVersionBatchSize               = 100
 )
 
 // EvidenceReferenceStore 读取 Source Version 与 Source Span 的不可变数据库绑定。
@@ -25,10 +26,21 @@ type EvidenceReferenceStore interface {
 	LoadSourceSpanReference(context.Context, foundation.ID, foundation.ID, foundation.ID) (domain.SourceSpanReference, error)
 }
 
+// SourceVersionReferenceBatchStore 按一次有界请求批量读取 Source Version 引用。
+// 它独立于单条端口，避免给已有 HTTP fake 和其他调用方强加新方法。
+type SourceVersionReferenceBatchStore interface {
+	LoadSourceVersionReferences(context.Context, foundation.ID, []foundation.ID) ([]domain.SourceVersionReference, error)
+}
+
 // CitationEvidenceStore 按完整 frozen Index Citation tuple 加载 Source Span 绑定。
 type CitationEvidenceStore interface {
 	// LoadCitationSourceSpanReferences 必须单批证明 Index、Chunk、Source Version、Projection 与 Span。
 	LoadCitationSourceSpanReferences(context.Context, []domain.CitationReferenceQuery) ([]CitationSourceSpanBinding, error)
+}
+
+// ProvenanceCitationStore 将正式知识来源批量解析为可重新打开的完整 Citation tuple。
+type ProvenanceCitationStore interface {
+	ResolveProvenanceCitationReferences(context.Context, []domain.ProvenanceReferenceQuery) ([]domain.CitationReferenceQuery, error)
 }
 
 // CitationSourceSpanBinding 保留完整 Citation 查询与不可变 Source Span 的精确对应。
@@ -102,6 +114,40 @@ func (service *EvidenceReferenceService) GetSourceVersion(
 	}
 	reference.CapturedAt = reference.CapturedAt.UTC()
 	return reference, nil
+}
+
+// GetSourceVersions 批量返回指定 Workspace 的不可变 Source Version 引用，并保持请求顺序。
+// 确认阶段必须使用该端口重新校验所有材料，不能以逐条调用替代。
+func (service *EvidenceReferenceService) GetSourceVersions(
+	ctx context.Context,
+	workspaceID foundation.ID,
+	sourceVersionIDs []foundation.ID,
+) ([]domain.SourceVersionReference, error) {
+	if service == nil || nilDispatcherDependency(service.store) {
+		return nil, evidenceReferenceDependencyError("evidence reference service is unavailable")
+	}
+	if err := validateSourceVersionBatchRequest(workspaceID, sourceVersionIDs); err != nil {
+		return nil, err
+	}
+	store, ok := service.store.(SourceVersionReferenceBatchStore)
+	if !ok || nilDispatcherDependency(store) {
+		return nil, evidenceReferenceDependencyError("source version batch store is unavailable")
+	}
+	references, err := store.LoadSourceVersionReferences(ctx, workspaceID, sourceVersionIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(references) != len(sourceVersionIDs) {
+		return nil, evidenceArtifactConsistency("source version batch store returned an incomplete batch")
+	}
+	for index, reference := range references {
+		if err := domain.ValidateSourceVersionReference(reference); err != nil ||
+			reference.WorkspaceID != workspaceID || reference.SourceVersionID != sourceVersionIDs[index] {
+			return nil, evidenceArtifactConsistency("source version batch store returned an invalid binding")
+		}
+		references[index].CapturedAt = reference.CapturedAt.UTC()
+	}
+	return references, nil
 }
 
 // GetSourceSpan 返回经不可变 Artifact 复核的 Source Span 与有界 UTF-8 excerpt。
@@ -183,6 +229,36 @@ func (service *EvidenceReferenceService) OpenCitationEvidenceBatch(ctx context.C
 	return result, nil
 }
 
+// ResolveProvenanceCitations 将正式 Claim 的 Source Version/Span 来源映射到当前 Active Index 的完整 Citation。
+func (service *EvidenceReferenceService) ResolveProvenanceCitations(ctx context.Context, queries []domain.ProvenanceReferenceQuery) ([]domain.CitationReferenceQuery, error) {
+	if service == nil || nilDispatcherDependency(service.store) {
+		return nil, evidenceReferenceDependencyError("provenance citation service is unavailable")
+	}
+	canonical, err := canonicalProvenanceQueries(queries)
+	if err != nil {
+		return nil, err
+	}
+	store, ok := service.store.(ProvenanceCitationStore)
+	if !ok || nilDispatcherDependency(store) {
+		return nil, evidenceReferenceDependencyError("provenance citation store is unavailable")
+	}
+	result, err := store.ResolveProvenanceCitationReferences(ctx, canonical)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) != len(canonical) {
+		return nil, evidenceArtifactConsistency("provenance citation store returned an incomplete batch")
+	}
+	for index, citation := range result {
+		provenance := canonical[index]
+		if domain.ValidateCitationReferenceQuery(citation) != nil || citation.WorkspaceID != provenance.WorkspaceID ||
+			citation.SourceVersionID != provenance.SourceVersionID || citation.SourceSpanID != provenance.SourceSpanID {
+			return nil, evidenceArtifactConsistency("provenance citation store returned an invalid binding")
+		}
+	}
+	return result, nil
+}
+
 func (service *EvidenceReferenceService) openSourceSpan(
 	ctx context.Context,
 	reference domain.SourceSpanReference,
@@ -255,12 +331,53 @@ func canonicalCitationQueries(queries []domain.CitationReferenceQuery) ([]domain
 	return canonical, nil
 }
 
+func canonicalProvenanceQueries(queries []domain.ProvenanceReferenceQuery) ([]domain.ProvenanceReferenceQuery, error) {
+	if len(queries) == 0 || len(queries) > 500 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("provenance reference batch count is invalid"))
+	}
+	canonical := append([]domain.ProvenanceReferenceQuery(nil), queries...)
+	seen := make(map[domain.ProvenanceReferenceQuery]struct{}, len(canonical))
+	for _, query := range canonical {
+		if err := domain.ValidateProvenanceReferenceQuery(query); err != nil {
+			return nil, err
+		}
+		if query.WorkspaceID != canonical[0].WorkspaceID {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("provenance reference batch crosses workspace"))
+		}
+		if _, duplicate := seen[query]; duplicate {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("provenance reference batch contains duplicates"))
+		}
+		seen[query] = struct{}{}
+	}
+	return canonical, nil
+}
+
 func validateEvidenceReferenceRequest(values ...foundation.ID) error {
 	for _, value := range values {
 		parsed, err := foundation.ParseID(string(value))
 		if err != nil || parsed != value {
 			return foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("evidence reference identity is invalid"))
 		}
+	}
+	return nil
+}
+
+func validateSourceVersionBatchRequest(workspaceID foundation.ID, sourceVersionIDs []foundation.ID) error {
+	if err := validateEvidenceReferenceRequest(workspaceID); err != nil {
+		return err
+	}
+	if len(sourceVersionIDs) == 0 || len(sourceVersionIDs) > MaxSourceVersionBatchSize {
+		return foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("source version batch count is invalid"))
+	}
+	seen := make(map[foundation.ID]struct{}, len(sourceVersionIDs))
+	for _, sourceVersionID := range sourceVersionIDs {
+		if err := validateEvidenceReferenceRequest(sourceVersionID); err != nil {
+			return err
+		}
+		if _, duplicate := seen[sourceVersionID]; duplicate {
+			return foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("source version batch contains duplicates"))
+		}
+		seen[sourceVersionID] = struct{}{}
 	}
 	return nil
 }
@@ -276,11 +393,23 @@ func validateEvidenceArtifact(reference domain.SourceVersionReference, artifact 
 }
 
 func evidenceExcerpt(reference domain.SourceSpanReference, content []byte) (string, bool, error) {
-	start, end := reference.Span.StartByte, reference.Span.EndByte
-	if start < 0 || end < start || end > int64(len(content)) {
-		return "", false, evidenceArtifactConsistency("source span byte range exceeds content artifact")
+	evidenceKind := reference.EvidenceKind
+	if evidenceKind == "" {
+		evidenceKind = domain.EvidenceRawBytes
 	}
-	full := content[int(start):int(end)]
+	var full []byte
+	switch evidenceKind {
+	case domain.EvidenceRawBytes:
+		start, end := reference.Span.StartByte, reference.Span.EndByte
+		if start < 0 || end < start || end > int64(len(content)) {
+			return "", false, evidenceArtifactConsistency("source span byte range exceeds content artifact")
+		}
+		full = content[int(start):int(end)]
+	case domain.EvidenceDerivedText:
+		full = []byte(reference.DerivedExcerpt)
+	default:
+		return "", false, evidenceArtifactConsistency("source span evidence kind is invalid")
+	}
 	if !utf8.Valid(full) || !validEvidenceArtifactHash(reference.ExcerptHash, full) {
 		return "", false, evidenceArtifactConsistency("source span excerpt does not match immutable artifact")
 	}

@@ -13,28 +13,24 @@ import {
   LogOut,
   Menu,
   MessageSquare,
-  MoreHorizontal,
+  Plus,
   Search,
   Settings,
   ShieldAlert,
   ShieldCheck,
+  SquarePen,
   UserRoundCheck,
   Wifi,
   WifiOff,
   type LucideIcon,
 } from "lucide-react";
-import { forwardRef, Suspense, useId, useRef, useState } from "react";
+import { forwardRef, Suspense, useEffect, useRef, useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 
 import { useEventStore } from "../events/event-store";
-import {
-  DropdownMenu,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  Sheet,
-  Tooltip,
-} from "../shared/ui";
+import { QuickCaptureDialog } from "../features/capture/QuickCaptureDialog";
+import { quickCaptureIntentEvent } from "../features/capture/quick-capture-intent";
+import { DropdownMenu, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, Sheet, Tooltip } from "../shared/ui";
 import { getRouteDisplay, routeBelongsToSection, routeDisplayRegistry, type RouteNavigationIcon, type RouteSection } from "../routes/route-display";
 import { useActiveWorkspaceId } from "./active-workspace";
 import { useAuth } from "./auth-context";
@@ -45,20 +41,8 @@ interface NavigationDestination {
   path: string;
 }
 
-interface NavigationMenuGroup {
-  label: string;
-  items: readonly NavigationDestination[];
-}
-
 interface PrimaryNavigationItem extends NavigationDestination {
   section: RouteSection;
-  groups?: readonly NavigationMenuGroup[];
-}
-
-interface OrderedNavigationMenuGroup {
-  label: string;
-  order: number;
-  items: (NavigationDestination & { order: number })[];
 }
 
 interface OrderedPrimaryNavigationItem extends PrimaryNavigationItem {
@@ -68,6 +52,18 @@ interface OrderedPrimaryNavigationItem extends PrimaryNavigationItem {
 interface FooterNavigationItem extends NavigationDestination {
   section: RouteSection;
   order: number;
+}
+
+interface KnowledgeNavigationItem extends NavigationDestination {
+  groupLabel: string;
+  groupOrder: number;
+  order: number;
+}
+
+interface KnowledgeNavigationGroup {
+  label: string;
+  order: number;
+  items: KnowledgeNavigationItem[];
 }
 
 const navigationIcons: Record<RouteNavigationIcon, LucideIcon> = {
@@ -84,33 +80,14 @@ const navigationIcons: Record<RouteNavigationIcon, LucideIcon> = {
   "message-square": MessageSquare,
   search: Search,
   settings: Settings,
+  "square-pen": SquarePen,
   "user-round-check": UserRoundCheck,
-};
-
-const navigationGroupsFor = (section: RouteSection): readonly NavigationMenuGroup[] => {
-  const groups = new Map<string, OrderedNavigationMenuGroup>();
-
-  for (const route of routeDisplayRegistry) {
-    const navigation = route.navigation;
-    if (navigation === undefined || navigation.placement === "footer") continue;
-    const group = navigation.group;
-    if (route.section !== section || group === undefined) continue;
-    const current = groups.get(group.label) ?? { label: group.label, order: group.order, items: [] };
-    current.items.push({ path: route.basePath, label: route.label, icon: navigationIcons[navigation.icon], order: group.itemOrder });
-    groups.set(group.label, current);
-  }
-
-  return [...groups.values()]
-    .sort((left, right) => left.order - right.order)
-    .map((group) => ({ label: group.label, items: group.items.sort((left, right) => left.order - right.order) }));
 };
 
 const primaryNavigation = routeDisplayRegistry.flatMap<OrderedPrimaryNavigationItem>((route) => {
   const navigation = route.navigation;
   if (navigation?.placement !== "primary") return [];
-  const groups = navigationGroupsFor(route.section);
   const item: OrderedPrimaryNavigationItem = { path: route.basePath, label: navigation.label, icon: navigationIcons[navigation.icon], section: route.section, order: navigation.order };
-  if (groups.length > 0) item.groups = groups;
   return [item];
 }).sort((left, right) => left.order - right.order);
 
@@ -120,7 +97,25 @@ const footerNavigation = routeDisplayRegistry.flatMap<FooterNavigationItem>((rou
   return [{ path: route.basePath, label: navigation.label, icon: navigationIcons[navigation.icon], section: route.section, order: navigation.order }];
 }).sort((left, right) => left.order - right.order);
 
-const knowledgeHome = routeDisplayRegistry.find((route) => route.section === "knowledge" && route.navigation?.placement === "primary");
+const knowledgeNavigationItems = routeDisplayRegistry.flatMap<KnowledgeNavigationItem>((route) => {
+  const navigation = route.navigation;
+  if (route.section !== "knowledge" || navigation === undefined || !("group" in navigation)) return [];
+  return [{
+    path: route.basePath,
+    label: route.label,
+    icon: navigationIcons[navigation.icon],
+    groupLabel: navigation.group.label,
+    groupOrder: navigation.group.order,
+    order: navigation.group.itemOrder,
+  }];
+});
+
+const knowledgeNavigationGroups = Array.from(knowledgeNavigationItems.reduce((groups, item) => {
+  const group = groups.get(item.groupLabel) ?? { label: item.groupLabel, order: item.groupOrder, items: [] };
+  group.items.push(item);
+  groups.set(item.groupLabel, group);
+  return groups;
+}, new Map<string, KnowledgeNavigationGroup>()).values()).sort((left, right) => left.order - right.order).map((group) => ({ ...group, items: group.items.sort((left, right) => left.order - right.order) }));
 
 interface NavigationProps {
   currentPath: string;
@@ -130,31 +125,31 @@ interface NavigationProps {
   workspaceConnected: boolean;
 }
 
-const DestinationLink = ({ destination, currentPath, onNavigate }: { destination: NavigationDestination; currentPath: string; onNavigate: (() => void) | undefined }) => {
-  const Icon = destination.icon;
-  const active = currentPath === destination.path || currentPath.startsWith(`${destination.path}/`);
-  return <Link className={active ? "rail-submenu-link rail-submenu-link--active" : "rail-submenu-link"} aria-current={active ? "page" : undefined} to={destination.path} onClick={onNavigate}><Icon size={16} strokeWidth={1.8} /><span>{destination.label}</span></Link>;
-};
-
 const PrimaryItem = ({ item, currentPath, compact, mobile, onNavigate }: { item: PrimaryNavigationItem; currentPath: string; compact: boolean; mobile: boolean; onNavigate: (() => void) | undefined }) => {
   const Icon = item.icon;
   const active = routeBelongsToSection(currentPath, item.section);
   const currentDestination = currentPath === item.path;
-  const [expanded, setExpanded] = useState(active);
-  const panelId = useId();
   const linkClassName = active ? "rail-link rail-link--active" : "rail-link";
+  const link = <Link className={linkClassName} aria-current={currentDestination ? "page" : undefined} aria-label={compact ? item.label : undefined} to={item.path} onClick={onNavigate}><Icon size={18} strokeWidth={1.8} /><span>{item.label}</span></Link>;
+  if (item.section !== "knowledge") return compact ? <Tooltip content={item.label}>{link}</Tooltip> : link;
 
-  if (item.groups === undefined) {
-    const link = <Link className={linkClassName} aria-current={active ? "page" : undefined} aria-label={compact ? item.label : undefined} to={item.path} onClick={onNavigate}><Icon size={18} strokeWidth={1.8} /><span>{item.label}</span></Link>;
-    return compact ? <Tooltip content={item.label}>{link}</Tooltip> : link;
-  }
-
-  return <div className={active ? "rail-split-link rail-split-link--active" : "rail-split-link"}>
-    <Link className={linkClassName} aria-current={currentDestination ? "page" : undefined} to={item.path} onClick={onNavigate}><Icon size={18} strokeWidth={1.8} /><span>{item.label}</span></Link>
-    {mobile ? <button type="button" className="rail-menu-trigger" aria-label={`${expanded ? "收起" : "展开"}${item.label}菜单`} aria-expanded={expanded} aria-controls={panelId} onClick={() => setExpanded((value) => !value)}><ChevronDown size={17} className={expanded ? "is-expanded" : undefined} /></button> : <DropdownMenu label={`${item.label}菜单`} side="right" align="start" trigger={<button type="button" className="rail-menu-trigger" aria-label={`打开${item.label}菜单`}><ChevronDown size={17} /></button>}>
-      {item.groups.map((group, index) => <div key={group.label}>{index > 0 ? <DropdownMenuSeparator /> : null}<DropdownMenuLabel>{group.label}</DropdownMenuLabel>{group.items.map((destination) => <DropdownMenuItem key={destination.path} asChild><Link to={destination.path} onClick={onNavigate}><destination.icon size={16} strokeWidth={1.8} /><span>{destination.label}</span></Link></DropdownMenuItem>)}</div>)}
-    </DropdownMenu>}
-    {mobile && expanded ? <div className="rail-mobile-submenu" id={panelId}>{item.groups.map((group) => <section key={group.label}><p>{group.label}</p>{group.items.map((destination) => <DestinationLink key={destination.path} destination={destination} currentPath={currentPath} onNavigate={onNavigate} />)}</section>)}</div> : null}
+  return <div className="rail-primary-item rail-primary-item--with-menu">
+    {compact ? <Tooltip content={item.label}>{link}</Tooltip> : link}
+    <DropdownMenu
+      align="start"
+      label="知识菜单"
+      side={mobile ? "bottom" : "right"}
+      trigger={<button className="rail-menu-trigger" type="button" aria-label="打开知识菜单"><ChevronDown size={16} strokeWidth={1.8} /></button>}
+    >
+      {knowledgeNavigationGroups.map((group, index) => <div key={group.label}>
+        {index === 0 ? null : <DropdownMenuSeparator />}
+        <DropdownMenuLabel>{group.label}</DropdownMenuLabel>
+        {group.items.map((destination) => {
+          const DestinationIcon = destination.icon;
+          return <DropdownMenuItem key={destination.path} asChild><Link to={destination.path} aria-current={currentPath === destination.path ? "page" : undefined} onClick={onNavigate}><DestinationIcon size={17} strokeWidth={1.8} /><span>{destination.label}</span></Link></DropdownMenuItem>;
+        })}
+      </div>)}
+    </DropdownMenu>
   </div>;
 };
 
@@ -195,9 +190,15 @@ export const AppShell = () => {
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<Error>();
+  const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
+  const [captureNotice, setCaptureNotice] = useState("");
   const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const quickCaptureButtonRef = useRef<HTMLButtonElement>(null);
+  const quickCaptureRestoreRef = useRef<HTMLElement | null>(null);
   const workspaceConnected = workspaceId !== "";
   const dashboardEntry = location.pathname === "/dashboard" && !workspaceConnected;
+  const connectedDashboard = location.pathname === "/dashboard" && workspaceConnected;
+  const workbenchVariant = dashboardEntry ? "workbench--dashboard-entry" : connectedDashboard ? "workbench--dashboard" : "";
   const current = getRouteDisplay(location.pathname);
   const eventConnectionLabel = event.state === "open" ? "实时同步" : event.state === "recovery_failed" ? "恢复失败" : event.state === "reconnecting" ? "正在重连" : event.state === "connecting" ? "正在连接" : "同步未连接";
   const eventConnectionDescription = event.state === "open" ? "同步通道已连接，业务结果仍以 API 查询为准。" : event.state === "recovery_failed" ? "事件游标恢复失败，旧游标已保留。" : "事件通道正在恢复，不代表业务操作失败。";
@@ -207,6 +208,44 @@ export const AppShell = () => {
   const authRequired = authState.status === "authenticated" && authState.mode === "required";
   const authLabel = authRequired ? `已认证 · ${authState.session?.userLabel ?? "Owner"}` : "开发模式";
   const authDescription = authRequired ? "浏览器使用 HttpOnly Cookie Session，并校验 Origin 与 CSRF。" : "认证已关闭，仅允许本机开发模式。";
+
+  const openQuickCapture = (restoreTarget?: HTMLElement | null): void => {
+    quickCaptureRestoreRef.current = restoreTarget ?? quickCaptureButtonRef.current;
+    setCaptureNotice("");
+    setQuickCaptureOpen(true);
+  };
+
+  useEffect(() => {
+    if (!workspaceConnected) return undefined;
+    const handleShortcut = (event: KeyboardEvent): void => {
+      if (quickCaptureOpen || event.defaultPrevented || event.repeat || event.altKey || !event.shiftKey || (!event.metaKey && !event.ctrlKey) || event.key.toLowerCase() !== "k") return;
+      event.preventDefault();
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : quickCaptureButtonRef.current;
+      quickCaptureRestoreRef.current = active;
+      setCaptureNotice("");
+      setQuickCaptureOpen(true);
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [quickCaptureOpen, workspaceConnected]);
+
+  useEffect(() => {
+    if (!workspaceConnected) return undefined;
+    const handleIntent = (): void => {
+      if (quickCaptureOpen) return;
+      quickCaptureRestoreRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : quickCaptureButtonRef.current;
+      setCaptureNotice("");
+      setQuickCaptureOpen(true);
+    };
+    window.addEventListener(quickCaptureIntentEvent, handleIntent);
+    return () => window.removeEventListener(quickCaptureIntentEvent, handleIntent);
+  }, [quickCaptureOpen, workspaceConnected]);
+
+  useEffect(() => {
+    if (captureNotice === "") return undefined;
+    const timer = window.setTimeout(() => setCaptureNotice(""), 5000);
+    return () => window.clearTimeout(timer);
+  }, [captureNotice]);
 
   const handleSignOut = async (): Promise<void> => {
     setSignOutError(undefined);
@@ -220,7 +259,7 @@ export const AppShell = () => {
     }
   };
 
-  return <div className={dashboardEntry ? "workbench workbench--dashboard-entry" : "workbench"}>
+  return <div className={`workbench${workbenchVariant === "" ? "" : ` ${workbenchVariant}`}`}>
     <aside className="workbench__rail">
       <div className="mobile-brand-row">{dashboardEntry
         ? <Link to="/dashboard" className="entry-mark" aria-label="知序首页">序</Link>
@@ -242,19 +281,29 @@ export const AppShell = () => {
         </> : <>
           <nav className="topbar-breadcrumb" aria-label="面包屑"><Link to="/dashboard">工作台</Link>{current?.parentLabel ? <><span aria-hidden="true">/</span><span>{current.parentLabel}</span></> : null}{current?.label && current.basePath !== "/dashboard" ? <><span aria-hidden="true">/</span><span aria-current="page">{current.label}</span></> : null}</nav>
           <div className="topbar-actions">
+          {workspaceConnected ? <button
+            ref={quickCaptureButtonRef}
+            className="ui-button ui-button--primary ui-button--sm quick-capture-trigger"
+            type="button"
+            onClick={(event) => openQuickCapture(event.currentTarget)}
+          ><Plus size={16} /><span>快速记录</span></button> : null}
+          {captureNotice === "" ? null : <span className="quick-capture-notice" role="status">{captureNotice}</span>}
           <Tooltip content={connectionDescription}><ConnectionPill state={connectionState} label={connectionLabel} waitingForWorkspace={!workspaceConnected} /></Tooltip>
           <Tooltip content={authDescription}><span className={`local-mode-badge ${authRequired ? "local-mode-badge--authenticated" : ""}`}>{authRequired ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}{authLabel}</span></Tooltip>
-          <DropdownMenu label="工作台快捷入口" trigger={<button type="button" className="topbar-menu-button" aria-label="打开工作台快捷入口"><MoreHorizontal size={19} /></button>}>
-            <DropdownMenuItem asChild><Link to="/settings?section=workspace">工作区设置</Link></DropdownMenuItem>
-            <DropdownMenuItem asChild><Link to="/settings?section=system">系统状态</Link></DropdownMenuItem>
-            {workspaceConnected && knowledgeHome ? <DropdownMenuItem asChild><Link to={knowledgeHome.basePath}>{knowledgeHome.label}</Link></DropdownMenuItem> : null}
-            {authRequired ? <><DropdownMenuSeparator /><DropdownMenuItem disabled={signingOut} onSelect={() => { void handleSignOut(); }}><LogOut size={15} />{signingOut ? "正在退出…" : "退出登录"}</DropdownMenuItem></> : null}
-          </DropdownMenu>
+          {authRequired ? <Tooltip content="退出登录"><button type="button" className="topbar-signout-button" aria-label="退出登录" disabled={signingOut} onClick={() => { void handleSignOut(); }}><LogOut size={17} /></button></Tooltip> : null}
           </div>
         </>}
       </header>
       {signOutError ? <p className="topbar-auth-error" role="alert">退出登录失败：{signOutError.message}。请重试。</p> : null}
       <div className="workbench__content"><Suspense fallback={<div className="page-loading">正在加载…</div>}><Outlet /></Suspense></div>
     </main>
+    {workspaceConnected ? <QuickCaptureDialog
+      key={workspaceId}
+      open={quickCaptureOpen}
+      onOpenChange={setQuickCaptureOpen}
+      onCaptured={(capture) => setCaptureNotice(`已存入收件箱：${capture.displayName}`)}
+      restoreFocusRef={quickCaptureRestoreRef}
+      workspaceId={workspaceId}
+    /> : null}
   </div>;
 };

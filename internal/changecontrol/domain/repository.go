@@ -68,6 +68,11 @@ type DownstreamUpdateProposalRepository interface {
 	CreateDownstreamUpdateProposal(context.Context, Proposal) (Proposal, error)
 }
 
+// RestoreDocumentProposalRepository persists typed restore proposals with Document binding checks.
+type RestoreDocumentProposalRepository interface {
+	CreateRestoreDocumentProposal(context.Context, Proposal) (Proposal, error)
+}
+
 // WritebackRepository 持有 Safe Writeback Durable Operation 的幂等、状态和发布事务边界。
 // Adapter 必须在数据库内再次执行领域校验，不能只依赖调用方传入的状态或版本。
 type WritebackRepository interface {

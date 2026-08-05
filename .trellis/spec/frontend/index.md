@@ -25,6 +25,19 @@ AC-33 已由 Markdown、领域 Metadata JSON 与真实附件 ZIP 闭环关闭；
 M10-02 已交付严格认证 API 边界、`AuthProvider`/`AuthBoundary`、Session 恢复、CSRF 注入和登录/登出状态；
 Bootstrap Token 只用于一次交换，浏览器持久化的唯一认证派生值是 CSRF Token，业务授权仍由后端裁决。
 工作台导航与首页已重构为白蓝低噪声信息架构：未连接 `/dashboard` 是不发业务请求的知识脉络入口，已连接首页仅投影有界真实待办与最近捕获资料；导航归属由路由展示表统一派生，系统状态收敛至五类 Settings 的 `section=system`。
+Quick Capture 已由 AppShell 单例提供文字、链接、文件和图片入口，`/inbox` 同时展示 Capture 与 Workspace Scan，
+`/captures/:captureId` 分层恢复原始来源、处理状态与候选画像；严格 wire、焦点恢复和降级语义见 `capture-workbench.md`。
+Authoring 已交付 `/authoring` 与 `/authoring/new`、服务端 Working Draft autosave、每次 Freeze 新 Revision、
+安全 Markdown preview 和 Proposal publication 恢复；严格 wire 与 stale Revision 防护见 `authoring-workbench.md`。
+Organizing 已交付 `/organizing` 的服务端 Draft 恢复、可解释材料增删/选择、四模板与受约束自定义模板、
+Snapshot/Run/Artifact/Proposal 状态，以及 Topic/Merge Human Task Evidence/GAP/Diff 审阅；严格 wire 与盲批防护见
+`organizing-workbench.md`。
+Document History 已交付 `/authoring/documents/:documentId/history` 的 current-path 时间线、版本比较和受控恢复入口；
+strict wire 保留 managed partial relations，Query/SSE 恢复绑定 Workspace/head/path/version/cursor，Proposal 创建不冒充已写回，
+具体契约见 `document-history-workbench.md`。
+Git Remote Sync 已交付 `/settings?section=workspace`（旧 `/settings?section=sync` 兼容归一化）、唯一 strict wire、Workspace-bound Query、write-only Secret action、
+配置/测试/手动同步/重试和 Git/索引分列状态。未配置 `current_run: null`、网络重试 key、Secret 销毁、终态轮询停止及
+桌面/390x844 无横向溢出门禁见 `git-sync-settings.md`。
 Controller 模式现以公开 `/host/v1/runtime` 独立发布业务 Workspace：普通业务 deep link 不再依赖控制会话，
 `/`、`/workspace` 与宿主机命令继续进入 Host Control 边界；Controller 模式禁止从 localStorage 恢复业务作用域。
 M8-01 已交付 `/artifacts` 工作台、严格 Artifact decoder、Workspace-bound Query 与 generation 恢复；
@@ -68,6 +81,11 @@ M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`�
 | [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 Timeline/Impact v1/v2 与 downstream Proposal、M7-03 Collection/Health、M9 Business/M9-03 Export 与 M10 Auth 响应/Problem 的严格解码 |
 | [模型设置前端契约](./model-settings.md) | strict wire、desired/active/applied 状态、Session-only 与 Secret 生命周期 | Settings 模型面板和桌面/移动浏览器门禁 |
 | [Artifact 工作台契约](./artifact-workbench.md) | Artifact wire、Query、generation 恢复、GAP/export/publish UI 边界 | M8-01 decoder、组件、桌面/移动真实浏览器闭环已验证 |
+| [快速记录工作台契约](./capture-workbench.md) | Capture/Profile strict wire、Dialog、Inbox、详情、焦点与恢复 | 真实 API/Worker 下 TEXT Capture、降级画像及桌面/移动交互已验证 |
+| [主动创作工作台契约](./authoring-workbench.md) | Authoring wire、autosave、Freeze、preview 与发布恢复 | Decoder、Query、组件、lint/typecheck/build 与真实桌面/移动浏览器门禁已验证 |
+| [材料整理工作台契约](./organizing-workbench.md) | Material/Template/Snapshot/Run strict wire、服务端 Draft、Human Task Evidence/GAP/Diff 与结果恢复 | Decoder、Query、组件、lint/typecheck/test/build 及父任务桌面/移动真实浏览器门禁已验证 |
+| [文档文件历史工作台契约](./document-history-workbench.md) | History strict wire、Workspace/head/path/version/cursor Query、compare、restore preview/Proposal 与 SSE recovery | Decoder、Query/SSE、组件、Monaco、lint/typecheck/test/build 及父任务桌面/移动真实浏览器门禁已验证 |
+| [Git 同步设置前端契约](./git-sync-settings.md) | strict wire、Workspace binding、Secret 生命周期、配置/状态/重试、轮询恢复与响应式边界 | Decoder、Query/Mutation、组件、lint/typecheck/test/build及真实 API/Worker 桌面/390x844 分叉冲突、有界预览与重试门禁已验证 |
 | [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 Timeline/Impact strict decoder、状态/幂等/异步投影门禁，以及 Graph、Collection/Health、Review/Shared Path/Interview/Memory、Export 与认证浏览器门禁 |
 
 ## 开发前检查清单

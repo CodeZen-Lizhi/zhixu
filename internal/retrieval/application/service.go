@@ -39,6 +39,8 @@ type BeginWorkspaceSnapshotRequest struct {
 	TargetSourceID          foundation.ID
 	TargetSourceVersionID   foundation.ID
 	TargetParseProjectionID foundation.ID
+	Targets                 []domain.SnapshotTarget
+	RemovedSourceIDs        []foundation.ID
 	TokenizerID             string
 	TokenizerVersion        string
 	TokenizerConfigHash     string
@@ -109,6 +111,8 @@ func (s *Service) BeginWorkspaceSnapshot(ctx context.Context, request BeginWorks
 		},
 		TargetSourceID: request.TargetSourceID, TargetSourceVersionID: request.TargetSourceVersionID,
 		TargetParseProjectionID: request.TargetParseProjectionID,
+		Targets:                 append([]domain.SnapshotTarget(nil), request.Targets...),
+		RemovedSourceIDs:        append([]foundation.ID(nil), request.RemovedSourceIDs...),
 		PageSize:                pageSize, MaxSources: maxSources, MaxChunks: maxChunks,
 	}
 	if err := domain.ValidateWorkspaceSnapshotCommand(command); err != nil {

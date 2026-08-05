@@ -265,7 +265,7 @@ func TestApprovalAndPreflightContracts(t *testing.T) {
 			Approval: domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead},
 			Workflow: &application.ApprovalWorkflowDispatch{RunID: testWorkflowRunID, NodeID: testNodeRunID, JobID: 42, Status: application.DispatchStatusQueued},
 		},
-		preflight: application.ApplyPreflightResult{ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, BaseHash: testChangeHash},
+		preflight: application.ApplyPreflightResult{ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, TargetMode: domain.TargetModeReplace, BaseHash: testChangeHash},
 	}
 	approval := serve(t, service, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/approvals", `{"revision_id":"`+string(testRevisionID)+`","change_hash":"`+testChangeHash+`","decision":"approved"}`)
 	if approval.Code != http.StatusCreated || service.decision != domain.DecisionApproved {
@@ -282,7 +282,7 @@ func TestApprovalAndPreflightContracts(t *testing.T) {
 	}
 	var response map[string]any
 	decode(t, preflight, &response)
-	if response["preflight_passed"] != true || response["write_performed"] != false || response["mode"] != "preflight_only" {
+	if response["preflight_passed"] != true || response["write_performed"] != false || response["mode"] != "preflight_only" || response["target_mode"] != string(domain.TargetModeReplace) || response["base_hash"] != testChangeHash {
 		t.Fatalf("preflight response=%#v", response)
 	}
 	if _, exists := response["eligible"]; exists {
@@ -293,7 +293,7 @@ func TestApprovalAndPreflightContracts(t *testing.T) {
 func TestProposalCurrentContentContract(t *testing.T) {
 	service := &fakeService{currentContent: application.ProposalCurrentContent{
 		ProposalID: testProposalID, WorkspaceID: testWorkspaceID, TargetPath: "notes/a.md", Content: "current",
-		CurrentHash: testChangeHash, BaseHash: testChangeHash, BaseHashMatch: true,
+		TargetMode: domain.TargetModeReplace, CurrentHash: testChangeHash, BaseHash: testChangeHash, BaseHashMatch: true,
 	}}
 	recorder := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID)+"/current-content", "")
 	if recorder.Code != http.StatusOK {
@@ -304,7 +304,7 @@ func TestProposalCurrentContentContract(t *testing.T) {
 	}
 	var response proposalCurrentContentResponse
 	decode(t, recorder, &response)
-	if response.ProposalID != string(testProposalID) || response.WorkspaceID != string(testWorkspaceID) || response.Content != "current" || !response.BaseHashMatch {
+	if response.ProposalID != string(testProposalID) || response.WorkspaceID != string(testWorkspaceID) || response.TargetMode != string(domain.TargetModeReplace) || response.Content != "current" || !response.BaseHashMatch {
 		t.Fatalf("response=%#v", response)
 	}
 }

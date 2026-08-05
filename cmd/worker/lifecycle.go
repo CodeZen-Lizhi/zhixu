@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"time"
 )
 
 type shutdownMode string
@@ -23,6 +24,25 @@ type riverLifecycle interface {
 type dispatcherLifecycle interface {
 	Start(context.Context) error
 	Stop(context.Context) error
+}
+
+type workerStartupLifecycle interface {
+	Start(context.Context) error
+	Shutdown(context.Context, shutdownMode) error
+}
+
+type workerQueueController interface {
+	PauseQueue(context.Context) error
+	ResumeQueue(context.Context) error
+}
+
+type workerStartupReadiness interface {
+	SetRiverStarted(bool)
+	BeginShutdown()
+}
+
+type workerStartupHealth interface {
+	Close() error
 }
 
 type lifecycleState uint8
@@ -53,6 +73,46 @@ func newLifecycleController(client riverLifecycle, dispatcher dispatcherLifecycl
 		return nil, errors.New("worker lifecycle dependencies are nil")
 	}
 	return &lifecycleController{client: client, dispatcher: dispatcher, state: lifecycleIdle, stopDone: make(chan struct{})}, nil
+}
+
+func startWorkerRuntime(
+	processContext context.Context,
+	resumeQueue bool,
+	queueResumeTimeout time.Duration,
+	hardStopTimeout time.Duration,
+	lifecycle workerStartupLifecycle,
+	queue workerQueueController,
+	readiness workerStartupReadiness,
+	health workerStartupHealth,
+) error {
+	if !resumeQueue {
+		pauseContext, cancelPause := context.WithTimeout(processContext, queueResumeTimeout)
+		pauseErr := queue.PauseQueue(pauseContext)
+		cancelPause()
+		if pauseErr != nil {
+			readiness.BeginShutdown()
+			return errors.Join(pauseErr, health.Close())
+		}
+	}
+	if err := lifecycle.Start(processContext); err != nil {
+		readiness.BeginShutdown()
+		return errors.Join(err, health.Close())
+	}
+	if resumeQueue {
+		resumeContext, cancelResume := context.WithTimeout(processContext, queueResumeTimeout)
+		resumeErr := queue.ResumeQueue(resumeContext)
+		cancelResume()
+		if resumeErr != nil {
+			readiness.BeginShutdown()
+			shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), hardStopTimeout)
+			defer cancelShutdown()
+			lifecycleErr := lifecycle.Shutdown(shutdownContext, shutdownGraceful)
+			healthErr := health.Close()
+			return errors.Join(resumeErr, lifecycleErr, healthErr)
+		}
+	}
+	readiness.SetRiverStarted(true)
+	return nil
 }
 
 func nilLifecycleDependency(value any) bool {

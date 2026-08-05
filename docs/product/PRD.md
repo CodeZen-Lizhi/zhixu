@@ -330,7 +330,7 @@ Proposal → Evidence Validation → User Approval（服务端捕获 strict clea
 - 今日待复习卡片数量。
 - 知识健康问题概览。
 - 最近新增知识和最近 Git Commit。
-- 快捷入口：导入资料、优化文章、开始问答、生成面试文档、开始复习。
+- 快捷入口：快速记录、新建文章、整理成文、优化文章、开始问答、生成面试文档、开始复习。
 
 页面效果：
 
@@ -351,6 +351,10 @@ Inbox 页面分为：
 
 列表显示文件名、类型、大小、导入时间、内容哈希状态、解析状态、工作流状态和风险标记。
 
+已交付的 Quick Capture 入口在任意已连接业务页接收文字、URL、文件和图片，并立即创建不可变 Capture/Source 事实。
+Inbox 同时保留 Quick Capture 与既有 Workspace Scan 两类来源；Fetch、解析、索引和候选画像分别显示状态，某一可选能力
+不可用时不得覆盖其他已完成阶段。URL 抓取失败和仅保存原图的记录仍留在 Inbox，可查看稳定错误并按同一 Capture 身份重试。
+
 ### 6.4 知识库
 
 知识库提供：
@@ -360,6 +364,9 @@ Inbox 页面分为：
 - 文章详情。
 - Claim、Topic、来源、版本、关系和时间线侧栏。
 - 原文、正式版、历史 Revision 切换。
+
+主动创作使用独立的 Authoring 工作台：用户可从空白 Markdown 开始，恢复尚未发布的 Working Draft，并查看每次显式冻结形成的
+Article Revision。自动保存草稿不等于发布，也不把手写文章伪装为 Inbox Source。
 
 ### 6.5 搜索与问答
 
@@ -696,6 +703,7 @@ M8-02 的持久化状态使用 `DRAFT/APPROVED/INVALIDATED/REJECTED`，与上述
 
 - 首次启动引导。
 - 设置 → Workspace。
+- 设置 → Git 同步。
 - 首页“创建 Workspace”。
 
 #### 10.1.3 输入项
@@ -706,6 +714,8 @@ M8-02 的持久化状态使用 `DRAFT/APPROVED/INVALIDATED/REJECTED`，与上述
 - 正式知识目录。
 - 附件目录。
 - 是否初始化 Git。
+- 可选的标准 HTTPS Git Remote、分支和访问令牌；令牌只写不可回读。
+- “批准写回后自动同步”开关，默认关闭。
 - 模型配置。
 - Embedding 配置。
 - 默认语言和时区。
@@ -829,6 +839,14 @@ M8-02 的持久化状态使用 `DRAFT/APPROVED/INVALIDATED/REJECTED`，与上述
 - 隔离资料不进入默认检索。
 - 所有 Source Version 可反查导入时间、路径和哈希。
 
+#### 10.2.10 Quick Capture 已交付契约
+
+- AppShell 在所有已连接业务页面提供 Quick Capture 按钮和 `Ctrl|Meta + Shift + K` 快捷键；保存、取消或关闭后回到原页面并恢复焦点。
+- TEXT/FILE/IMAGE 先可靠创建 Capture、Source、Content Artifact 和 Source Version，再由 durable outbox 启动处理；URL 在抓取前先创建 Capture 与 Source，成功后才追加 HTML Source Version。
+- 原始输入类型、URL 或内容哈希、Source 与捕获时间不可变；临时名称可编辑但不改变 Provenance。
+- URL 抓取对协议、credential、DNS/私网、重定向、响应大小、媒体类型和超时 fail closed。抓取失败不丢 Source，可按版本化命令重试。
+- 相同 Workspace、幂等键和规范请求只创建一个 Capture/Source/Source Version；不同请求复用同 key 返回冲突。
+
 ### 10.3 内容解析、标准化与分块
 
 #### 10.3.1 功能目标
@@ -887,6 +905,12 @@ M8-02 的持久化状态使用 `DRAFT/APPROVED/INVALIDATED/REJECTED`，与上述
 - 分块不能破坏代码块。
 - 相同 Parser 版本和输入产生稳定结果。
 - 解析版本可追溯。
+
+#### 10.3.8 Quick Capture 解析边界
+
+- 文字、Markdown/TXT、HTML 和 PDF 复用同一 Ingestion/Parser 事实源，不在 Capture 模块复制解析规则。
+- HTML/PDF 派生文本必须保存可验证的 Source Span evidence kind/excerpt；Profile 与引用只能读取属于当前 Source Version 的已验证 Span。
+- 图片在 OCR/视觉能力不可用时只保存原图并明确降级，不生成伪造正文、Chunk 或画像。
 
 ### 10.4 索引与混合检索
 
@@ -973,6 +997,20 @@ Embedding Version 的距离度量做受控解释，不能直接把 `distance` �
   Semantic 返回 503 capability unavailable；真实零命中返回 200 与空 items。
 - 当前只完成 Workspace 数据隔离。正式 Auth、Session、API Token、CSRF/Origin 与 Capability
   Authorization 属于 M10；这些门禁完成前，API 交付范围保持 loopback，不得把 Cursor 当作授权凭据。
+
+#### 10.4.10 Capture 自动索引与画像降级
+
+- Capture 处理在解析后自动建立基础全文索引；Embedding disabled 时 Keyword 仍可用，vector 单独标记 capability unavailable。
+- Document Knowledge Profile 是绑定 Source Version、Parse Projection、Index Version、Prompt、Model Run、Model Settings 和 Schema 的可重建候选投影。
+- Profile v1 包含摘要、候选 Topic、术语/别名、知识点、示例和 Source Span 引用；它不进入正式 Topic/Claim/Relation 查询，也不自动创建 Proposal。
+- Profile 失败、能力不可用或 stale 不阻断基础检索；旧的不可变 Profile Revision/Evidence 在重试和失败后仍可读取。
+
+#### 10.4.11 整理材料发现已交付契约
+
+- 用户可以自然语言主题发起材料建议；系统组合 Search、Profile、正式 Claim 和 Smart Collection owner 结果，并展示命中原因、版本、状态与可打开 Evidence。
+- 建议只进入可恢复的 Suggested Material Set。默认选择、重新建议或手动补充都不等于授权，显式确认前不得创建 Workflow。
+- Embedding/模型不可用时保留 Keyword、正式 owner 查询和手动补充；空结果或降级原因必须明确展示，不能伪造候选。
+- 确认时重新校验实际 Source/Index/Profile、Document Revision、Claim provenance、Collection revision 和 Evidence hash；任一漂移都拒绝旧材料集。
 
 ### 10.5 文章优化与版本管理
 
@@ -1146,6 +1184,24 @@ Embedding Version 的距离度量做受控解释，不能直接把 `distance` �
 - 无来源补充不得进入正式正文。
 - 用户可以逐项审批而不是只能整篇接受。
 
+#### 10.5.12 主动创作已交付契约
+
+- `/authoring/new` 立即创建服务端持久的空白 Working Draft；标题、目标路径和 Markdown 正文以 500-1000ms debounce 自动保存，刷新后从服务端恢复。
+- 自动保存只更新带版本 CAS 的 Working Draft。只有用户显式保存版本或发布前 Freeze，才校验非空标题、Workspace 内 `.md` 路径和正文，并追加不可变 Article Revision。
+- 同一 Working Draft 首次 Freeze 创建 Document Draft；后续 Freeze 追加父子 Revision，不改写历史。多标签陈旧保存返回 409，并保留未确认的本地输入供用户处理。
+- 首次发布固定创建 `CREATE_ONLY` file-patch Proposal，以版本化“不存在证明”审阅空基线 Diff；批准与写回时同时复核文件系统和批准 Git tree 中目标仍不存在，竞争文件不得被覆盖。
+- Proposal 创建只代表“待审批”。只有 Safe Writeback Git Commit 与冻结 Revision 完全一致后，幂等 finalizer 才把 Article Revision 和 Document 推进为 PUBLISHED。
+- 发布预留在确定性、可证明尚未创建 Proposal 的父目录缺失时进入 `ABANDONED`，同一幂等键稳定重放原错误；响应未知或暂时故障保持 PENDING，以便恢复而不重复创建 Proposal。
+
+#### 10.5.13 文档文件历史已交付契约
+
+- Document 可查看当前分支、当前 canonical path 的有界版本时间线；分页绑定 Workspace、Document、path、branch 和 HEAD，基线变化后旧游标失效并回到首屏。
+- 知序 Safe Writeback Commit 显示真实存在的 Article Revision、Proposal、Approval、Workflow 和 Writeback 关系；关系允许部分缺失。没有映射的 Commit 标记为外部变更，不补造审批。
+- 当前 Document 的未提交修改只作为顶部 `CURRENT_CHANGE` 展示，不算历史 Commit；仓库其他路径 dirty 时不伪造当前 Document 修改，但仍禁止恢复。
+- 用户可比较两个当前分支可读 Commit，或 Commit 与当前工作树；左右版本身份、来源和完整 Diff 必须明确，超限输出整体拒绝而不是截断。
+- 恢复从历史 Commit 的 exact blob 生成服务端预览，并创建 `restore_document` Proposal。批准后追加新的 Safe Writeback Commit 和 Article Revision，原 Commit 不删除、不移动。
+- 首版不支持跨分支/远端历史、rename follow、通用 Git 图谱，以及 reset、checkout、rebase、cherry-pick 或 force 操作。
+
 ### 10.6 知识抽取与关系分析 Agent
 
 #### 10.6.1 功能目标
@@ -1275,6 +1331,12 @@ Embedding Version 的距离度量做受控解释，不能直接把 `distance` �
 - 每个判断都有双方证据。
 - 冲突不会被误处理为覆盖或合并。
 - 低置信度不会自动进入正式知识。
+
+#### 10.6.10 整理分类与正式知识边界
+
+- 多文档整理对每条来源内容显式分类为重复、互补、冲突或独特；冲突不得在合并草稿中静默消失。
+- 整理中的 Profile、建议 Topic 和材料 reason 仍是候选解释，不会创建或修改正式 Topic、Claim、Relation 或 Conflict。
+- 合并确认只创建受控 Merge Proposal；专题文章发布只创建 Artifact Publish Proposal，后续仍经过 Approval 与 Safe Writeback。
 
 ### 10.7 Proposal 生成与管理
 
@@ -1518,6 +1580,25 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 - 失败补偿路径有自动化测试。
 - 回滚不使用破坏性 Git 历史重写。
 
+#### 10.9.7 受控恢复已交付契约
+
+- Restore preview 绑定 Workspace、Document、当前 canonical path、expected HEAD、Document version、目标 Commit、当前/目标内容 hash 和 Diff hash；创建 Proposal 前全部重新验证。
+- 相同 Idempotency-Key 的 exact replay 在重新读取可变 Git 状态前返回原 Proposal；同 key 不同请求稳定冲突，避免响应丢失导致重复 Proposal。
+- `restore_document` 只能通过 Approval 和 Safe Writeback 写入。`FILE_PREPARED` 崩溃恢复在 Commit 前重新校验 Proposal/Execution、Authoring owner 和 lease；Document 已推进时进入 `NEEDS_REVISION`，不得提交陈旧内容。
+- Git Commit 成功后，Authoring finalizer 在同一数据库事务精确校验 Proposal Commit 与 Document/current Revision，并追加一条 restore Article Revision。并发或响应丢失重放只能有一个 writer。
+- 外部 Commit 可以提供恢复目标正文，但不能反向获得 Revision、Proposal、Approval、Workflow 或 Writeback 关系。
+
+#### 10.9.8 Git 远端同步已交付契约
+
+- 每个 Workspace 首版配置一个标准 HTTPS Remote 与一个分支；Token 以服务端专用 AES-256-GCM Secret Store 保存，只返回是否已配置。
+- 每次同步先持久化 Run/Attempt/Outbox，再 Fetch 并重新读取 attached branch、HEAD、工作树、远端 OID 和 ancestry。
+- 冲突详情按 Git 顺序展示前 500 个文件变化并明确提示可能还有更多；这是解释性预览，不替代同步成功后基于实际 Git tree 的完整外部变化捕获。
+- 两端相同时直接完成；远端单向领先且工作树严格干净时只做 Fast-forward；本地单向领先时只做 non-force Push，并在操作后重新读取本地/远端 OID 证明结果。
+- dirty、detached、diverged、ref drift、non-fast-forward 或结果未知时停止；不自动 Merge、Rebase、Force Push、Reset、Checkout 或解决冲突。
+- Git Remote Sync 与 Safe Writeback 使用同一个 Workspace Git 操作互斥边界。配置 Revision、Remote 或 branch 漂移会让旧运行 stale，旧运行不得使用新 Token。
+- Fast-forward 后通过外部变化捕获链刷新 Source/Revision 与索引；Git 成功和索引结果分列，索引失败不回滚 Git。
+- 自动同步只消费已完成写回，并以 Commit + 配置 Revision 唯一绑定。自动失败不回滚 Proposal、Commit 或已经激活的索引。
+
 ### 10.10 RAG 问答
 
 #### 10.10.1 功能目标
@@ -1714,6 +1795,14 @@ M5-04D 的真实 Writeback 模型目前只具备 Proposal/Revision/Approval/Work
 - 每章有来源覆盖信息。
 - Artifact 不会自动污染正式知识。
 - 入库必须经过 Proposal。
+
+#### 10.11.11 四类整理模板已交付契约
+
+- 专题知识文章先生成带 Evidence/GAP 的大纲并等待 Human Task 确认，再生成 Document Draft Artifact。
+- 多文档合并先生成重复、互补、冲突、独特分类与受控 Markdown Diff；确认目标后创建 Merge Proposal，不覆盖原文。
+- 知识总结报告与面试复习文档默认保持 Artifact，不自动进入正式知识。
+- 用户可以克隆内置模板或创建 Workspace 自定义模板；每次保存追加不可变 Template Revision，历史 Run 始终展示冻结 Revision。
+- 自定义模板只能配置受约束的材料条件、章节、读者、语言、语气、篇幅和输出偏好；不能关闭 Evidence、GAP、冲突、审批或 Safe Writeback，也不能声明任意工具、权限、脚本或 Workflow 节点。
 
 ### 10.12 可操作知识图谱
 
@@ -2804,6 +2893,10 @@ Review Card 进入 INVALIDATED，并从调度移除，直到重新审核。
 - 查看未提交文件。
 - 验证仓库状态。
 - 重新关联仓库。
+- 配置一个标准 HTTPS Remote 与分支，访问令牌只写不可回读。
+- 手动测试连接、立即同步、查看当前与历史运行，并对允许重试的终态重新同步。
+- “批准写回后自动同步”默认关闭；失败只记录远端同步状态，不回滚本地写回。
+- 分开展示 Git 与拉取内容的知识索引状态。
 - 不提供 reset --hard 等破坏性操作。
 
 #### 10.22.5 数据导出
@@ -3029,6 +3122,19 @@ flowchart TD
     W -->|"通过"| Y["更新时间线、图谱和健康状态"]
 ```
 
+已交付的摄取前半段从任意业务页 Quick Capture 开始：命令先原子保存不可变 Capture/Source（已有字节时同时保存
+Content Artifact/Source Version）和 outbox，再由 Worker 完成安全检查、解析、分块和基础索引。随后可生成
+`document-knowledge-profile/v1` 候选画像；画像只为后续整理提供带 Source Span 的材料线索，不能替代图中正式
+Topic/Claim 抽取、关系分析、Proposal 与 Approval 阶段。
+
+主动创作不经过 Source 摄取链：空白 Working Draft 自动保存后，由用户显式 Freeze 为 Document Draft 与不可变
+Article Revision；发布仍进入统一 Proposal、Approval、CREATE_ONLY Safe Writeback 和 Git Commit。它与资料摄取最终共享
+正式 Document/Revision、Proposal 和 Git 事实，但不共享 Inbox Source 身份。
+
+材料整理使用独立的可恢复 Draft：Search/Profile/Knowledge/Collection 只提供带理由和 Evidence 的候选，用户在同页增删并
+显式确认后，系统才在一个事务中冻结 Workflow Input Snapshot、Draft terminal、command receipt 和 start outbox。
+Snapshot 绑定实际材料、Evidence 与 Template Revision；后续 owner 变化不能改写旧 Snapshot，漂移只能要求重新确认。
+
 ### 11.2 文章优化与入库
 
 ```mermaid
@@ -3095,6 +3201,10 @@ flowchart TD
     I -->|"导出"| J["导出 Markdown"]
     I -->|"入库"| K["创建 PUBLISH_ARTIFACT Proposal"]
 ```
+
+Organizing 复用这一 Artifact 主链路但不复制其状态机：专题文章在 `Planning -> Human Task -> 分章生成` 后形成
+Document Draft Artifact；合并在 Human Task 展示分类、冲突和 Diff 后只创建 Merge Proposal；总结报告和面试复习文档
+默认停留 Artifact。所有章节引用必须来自冻结 Snapshot，证据不足的章节显示 GAP。
 
 ### 11.5 图谱与语义关联
 
@@ -3172,6 +3282,10 @@ flowchart TD
     J -->|"失败"| N["保留旧 Active 与 VERIFYING，重试或人工恢复"]
     J -->|"通过"| O["Proposal 完成"]
 ```
+
+`restore_document` 复用同一写回状态机，不存在单独的 Git 快捷路径。即使恢复已经持久化 `file_prepared`，进程重启后也必须重新获取目标锁、重验 Proposal/Execution、Authoring Document version/current Revision 和 Node lease，再决定是否继续文件 CAS。任何 owner、HEAD、path、blob 或工作树漂移都在 Commit 前 fail closed；恢复通过追加反向内容 Commit 完成，不执行历史重写。
+
+Git 远端同步在本地写回完成之后独立运行，不进入 Proposal 完成事务：手动或自动触发先创建持久 Run，再按 `Fetch → Compare → Fast-forward 或 non-force Push → Post-check` 执行。与 Safe Writeback 的并发通过同一 Workspace Git 操作锁串行化；远端拉取成功后再创建独立 Capture/Index follow-up。若 Git 外部结果无法证明，Run 进入人工恢复而不是盲目重试；若仅索引失败，Git 保持成功并单独重试索引。
 
 ---
 
@@ -3294,6 +3408,17 @@ Source Version：
 
 说明：`original_content_location` 是 Provenance，不是历史版本的唯一内容存储。Source Version 必须关联按内容哈希 create-only 保存的不可变 Content Artifact。`security_status` 和 `parser_version` 仅兼容早期字段，不作为后置处理状态事实源；安全、解析和分块状态记录在 Ingestion Attempt。
 
+Capture：
+
+- id、workspace_id、kind、display_name。
+- original_location、original_url 或 original_input_hash。
+- source_id、latest_source_version_id。
+- 聚合 status 与独立 fetch、ingestion、index、profile status。
+- failure_stage、error_code、retryable、version、captured_at、updated_at。
+
+Capture 是一次不可变用户输入的编排事实，不替代 Source/Source Version。URL Capture 可以在抓取前没有
+latest_source_version_id；其他类型必须绑定已保存的不可变 Source Version。状态更新使用 CAS，原始 provenance 不可修改。
+
 ### 13.3 Document、Revision 与 Chunk
 
 Document：
@@ -3316,6 +3441,26 @@ Article Revision：
 - optimization_mode。
 - created_by。
 - git_commit。
+
+Working Draft：
+
+- id、workspace_id、可空 document_id。
+- title、target_path、Markdown body。
+- status、version、created_at、updated_at。
+- 允许编辑期间暂时为空或无效；Freeze 才执行可发布校验，更新使用 expected version CAS。
+
+Publication Reservation / Binding：
+
+- Reservation 先绑定 Workspace、Document、Article Revision、幂等键和规范请求哈希，状态为 PENDING、CLOSED 或 ABANDONED。
+- Binding append-only 关联 Article Revision、Proposal/Proposal Revision、目标模式、路径、内容哈希和最终化状态。
+- `CREATE_ONLY` 保存 absence token 而非空文件哈希；`REPLACE` 保存当前正式 Revision 的内容哈希。
+- 只有完全匹配的 Proposal Commit 可以推进 Document 与 Revision；确定性发布前失败可 ABANDON，结果未知时保留 PENDING。
+
+Restore Publication：
+
+- `restore_document` Proposal 冻结 Workspace、Document、target path/Commit、expected HEAD/Document version、current/target content hash 和 preview hash。
+- 批准写回后以 Proposal Commit 为唯一闭合事实，append 新 Article Revision，并把 parent_revision_id 指向恢复前 current Revision；历史 Revision 与目标外部 Commit 的旧业务关系保持不变。
+- finalization 锁定 Proposal、Document 与 current Revision，精确验证 Commit/path/content/version；并发调用只有一次状态推进，其余 exact replay 不产生重复 Revision。
 
 Chunk：
 
@@ -3340,6 +3485,13 @@ Source Span：
 - Span 不可变；Claim Source 和 Relation Evidence 额外保存 source_version_id 选择具体导入 Provenance。
 
 Source Span 是稳定实体，Chunk 通过 `source_span_id` 引用；行号采用 1-based 闭区间，byte offset 采用不可变 Content Artifact 原始字节中的 0-based 半开区间。Canonical Chunk 属于 Ingestion 投影，不伪造与具体模型相关的 Token 数；Embedding、Token Count、FTS 和 Index Version 属于 Retrieval 投影。
+
+Document Knowledge Profile：
+
+- Profile 以 workspace_id、capture_id、source_version_id 唯一绑定当前候选画像状态和 current_revision_id。
+- Profile Revision append-only，冻结 parse_projection_id、index_version_id、model_run_id、model_settings_revision、prompt/schema version、content digest 和创建时间。
+- Profile Evidence 将每个 Revision 绑定到同一 Workspace/Source Version 的不可变 Source Span。
+- READY 与 STALE 必须保留可读 current Revision；重试、失败或能力不可用不得删除历史 Revision/Evidence。
 
 ### 13.4 Topic、Claim 与 Relation
 
@@ -3469,6 +3621,13 @@ Tool Call：
 - idempotency_key。
 - status。
 
+#### 13.7.1 Workflow Input Snapshot
+
+- `workflow_input_snapshot` 绑定 Workspace、整理 Draft/version、Template/Revision/hash、intent、canonical snapshot hash 与创建时间。
+- `workflow_input_material` 使用 `SOURCE|DOCUMENT|CLAIM|SMART_COLLECTION` 判别联合；Source 固定 Source Version、Profile/index 与 Evidence，Document 固定 Revision，Claim 固定 Evidence，Smart Collection 在确认时展开实际成员并保留 origin collection/revision。
+- Snapshot、材料顺序、Evidence、Template Revision 和运行绑定均为不可变事实；后续资料、画像、正式知识、Collection 或模板变化不得改写历史运行输入。
+- 确认以 expected Draft version、Workspace owner fence 和一次事务内的版本复核冻结输入；stale、不可访问或跨 Workspace 材料必须拒绝。
+
 ### 13.8 Smart Collection
 
 - id。
@@ -3479,6 +3638,8 @@ Tool Call：
 - view_type。
 - view_config。
 - cached_result_version。
+
+Smart Collection 被整理流程选中时只是候选范围，不把动态查询本身当作生成输入。用户确认后必须冻结当次 Workspace read-model revision、Collection revision 与实际展开成员；运行和结果展示使用 Snapshot 中的成员，不随 Collection 后续查询结果漂移。
 
 #### 13.8.1 Export Job
 
@@ -3506,6 +3667,8 @@ Job 或 Audit。`EVALUATION_JSON`、`AUDIT_JSON` 仍不是已交付 kind。
 - last_verified_at。
 - ignored_reason。
 
+整理生成中的 `GAP` 是某个 Snapshot/章节缺少可验证 Evidence 的结果语义，不是 Health Issue，也不得自动写成正式知识。只有独立 Health 扫描形成稳定 fingerprint、证据与目标绑定后，才可创建 Health Issue。
+
 ### 13.10 Artifact
 
 - id。
@@ -3515,6 +3678,8 @@ Job 或 Audit。`EVALUATION_JSON`、`AUDIT_JSON` 仍不是已交付 kind。
 - scope_definition。
 - current_revision_id。
 - source_coverage。
+
+整理结果额外通过不可变 Run Result 绑定 Workspace、Run Binding、Snapshot、Workflow Run/Node Run、`ARTIFACT|MERGE_PROPOSAL` result kind、owner result ref 与 result hash。Artifact 仍由 Artifact 模块拥有；发布或合并继续进入 Proposal/Approval/Safe Writeback，Organizing 不复制 owner 状态，也不直接写文件。
 
 Artifact Revision：
 
@@ -3635,6 +3800,14 @@ Knowledge Event：
 - 查看 Source Version。
 - 重试失败节点。
 - 隔离、解除隔离或删除未处理资料。
+- `POST /api/v1/workspaces/{workspace_id}/captures` 创建 TEXT/URL Capture。
+- `POST /api/v1/workspaces/{workspace_id}/capture-files` 创建 FILE/IMAGE Capture。
+- `GET /api/v1/workspaces/{workspace_id}/captures[/{capture_id}]` 查询 Workspace-bound Capture 状态。
+- `POST /api/v1/workspaces/{workspace_id}/captures/{capture_id}/retry` 按 expected version 幂等重试。
+- `GET|POST /api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/knowledge-profile[/retry]` 读取或重试候选画像。
+
+规则：GET 使用 `READ_LOCAL`，Capture/Profile mutation 使用 `WRITE_PROPOSAL`；响应严格绑定 Workspace、Capture 和
+Source Version。`GET /api/v1/system/status` 必须返回 `capture.status=ready|unavailable`，前端不得忽略或宽松解码该字段。
 
 ### 14.4 Search 接口能力
 
@@ -3659,6 +3832,11 @@ Knowledge Event：
 当前公开 Search API 为 `POST /api/v1/search`。Cursor 是当前 API 进程内签名的结果一致性凭据，
 不是 Session 或权限凭据；重启后失效。Source Version/Span GET 必须同时校验 Workspace 归属，
 跨 Workspace 与绑定不存在统一返回 Not Found，避免对象身份枚举。
+
+Quick Capture 产生的 Source Version 在完成安全检查、解析并进入当前 Active Index 后可被 Keyword/Hybrid Search 召回。
+Profile 自身不作为第二套 Search 事实源；它提供的 Source Span 只用于候选材料发现，正式知识过滤规则保持不变。
+
+整理建议以用户 intent 为查询入口，在 Workspace 内聚合 Search、Profile、正式 Claim/Document 与 Smart Collection 候选；候选携带稳定 reason code、owner-resolved 版本、可用性和 Evidence，只用于建议，不能代替用户显式选择与确认。重复 owner identity 必须稳定去重，响应与 Draft 版本受界限控制。
 
 ### 14.5 RAG 接口能力
 
@@ -3710,6 +3888,8 @@ M7-01 已交付的接口是只读 Query：全局 Topic 聚类、Topic/Claim 服�
 - 创建、列表、查询和下载绑定当前 Collection 的异步 `MARKDOWN|METADATA_JSON` Export Job；Export 不新增独立导航，
   附件由 Settings 下独立 Workspace `ATTACHMENTS_ZIP` 接口负责；评测/审计内容导出仍由后续接口负责。
 
+整理流程可以将 Smart Collection 作为候选加入 Draft，但确认时由 Collection owner 在同一 Workspace 下复核 revision/read-model 并展开有界成员；Snapshot 保存实际成员及 origin binding，不能在生成阶段重新执行动态查询。
+
 ### 14.9 Health 接口能力
 
 - 触发扫描。
@@ -3726,6 +3906,8 @@ M7-01 已交付的接口是只读 Query：全局 Topic 聚类、Topic/Claim 服�
 - 编辑 Artifact Revision。
 - 导出。
 - 创建入库 Proposal。
+
+四类整理模板复用 Artifact owner 生成证据绑定的 Draft Artifact。专题文章在正文前等待大纲审阅；多文档合并先展示比较、Artifact 与 Markdown Diff，再由人工决定是否创建 Merge Proposal；知识总结和面试复习默认只保留 Artifact。所有 Citation 必须重新打开 frozen Evidence，证据不足保留显式 GAP。
 
 ### 14.11 Review 接口能力
 
@@ -3745,6 +3927,8 @@ M7-01 已交付的接口是只读 Query：全局 Topic 聚类、Topic/Claim 服�
 - 暂停、恢复、取消。
 - 从失败节点重试。
 - 提交 Human Node 输入。
+
+整理 Run 由不可变 Snapshot 和 Template Revision 启动，公共 Workflow 详情返回严格的 `TOPIC_OUTLINE|MERGE_COMPARISON` review 联合或 `null`。Human Task 决策必须重复校验 Workspace、Definition/Run/Task/Node、Snapshot/hash、Artifact/revision/diff 与 Evidence；没有合法 review 时前后端都不得提交盲审决定。SSE 只触发权威回查，不拥有 Run 状态。
 
 ### 14.13 事件通知
 
@@ -3810,6 +3994,9 @@ claim-heavy/mixed 拓扑、500,000 Relation、正式资源预算和前端交互 
 - 数据库保存 Commit 与 Revision 映射。
 - 启动时检查数据库已发布 Revision 与 Git HEAD 的一致性。
 - 不一致时系统进入 READ_ONLY_RECOVERY，禁止新写入。
+- Safe Writeback、Document History 恢复和 Git Remote Sync 共享 Workspace 级 Git 操作互斥，不能并发改写同一仓库状态。
+- Git 自动同步同时绑定完成的本地 Commit 与扫描时配置 Revision；应用层和数据库事务都必须拒绝配置漂移。
+- SyncRun 永久绑定创建时的 Remote、branch 和 config revision，执行时只打开该 Revision 的 Token。
 
 ### 15.5 可恢复性
 
@@ -3817,6 +4004,14 @@ claim-heavy/mixed 拓扑、500,000 Relation、正式资源预算和前端交互 
 - 临时文件带 Run ID 并可识别清理。
 - Side Effect 有补偿记录。
 - MANUAL_RECOVERY_REQUIRED 状态阻止后续相关写入。
+- History cursor 的 HEAD/path/position 漂移使旧分页失效，客户端清理旧页并从首屏恢复，不拼接不同基线的数据。
+- Restore 的 preview、Proposal、Writeback Execution 和 Authoring publication 都有不可变绑定与幂等回执；响应丢失可回查原结果。
+- `FILE_PREPARED` 恢复不能把已持久化 intent 当作继续 Commit 的充分条件，必须重新执行 owner preflight 和 lease fence。
+- Restore Commit 已创建但 Authoring 尚未闭合时保留可重试状态；finalizer 重放只追加一次 Revision，不用删除 Commit 补偿。
+- Git SyncRun、Attempt、lease、阶段检查点、expected OID 和 Outbox 全部持久化；Worker restart 从这些事实恢复。
+- Fetch/Fast-forward/Push 后必须 post-check；响应丢失时根据本地/远端 OID 证明结果，无法证明则进入 `MANUAL_RECOVERY_REQUIRED`。
+- 相同幂等键只重放同一 Run；自动同步使用 Commit + config revision 的稳定键，不能因配置竞态创建重复运行。
+- Git 成功后的 Capture/Index 使用独立 follow-up 状态，索引失败可重试且不反向补偿 Git。
 
 ### 15.6 可扩展性
 
@@ -3858,6 +4053,9 @@ Should：
 - 前端不返回完整密钥。
 - 日志只显示掩码。
 - 导出配置不包含 Secret。
+- Git Remote Token 使用独立 AES-256-GCM purpose 和 AAD，绑定 Workspace、配置 Revision、normalized URL、branch 与 schema；任一绑定变化都不能解密旧密文。
+- Git Sync 主密钥只从 canonical absolute path 的私有普通文件加载；拒绝 symlink，权限仅允许 `0400` 或 `0600`，内容为单行 Base64 编码的 32 字节密钥。
+- Git Token 明文只允许短暂存在于请求、可清零内存和受控 AskPass 子进程环境；不得进入 URL、argv、Git Config、Workspace、日志、审计或错误响应。
 
 ### 16.2 文件安全
 
@@ -4353,6 +4551,13 @@ Should：
 
 ### 21.2 Inbox 页面
 
+#### Quick Capture 区
+
+- 展示 TEXT、URL、FILE、IMAGE Capture，并按类型和聚合状态筛选。
+- 显示临时名称、Source Version 短标识、捕获时间、聚合状态和稳定错误码。
+- URL 尚未抓取或抓取失败时仍显示记录；合法失败提供同一 Capture identity 的重试入口。
+- 与 Workspace Scan 分区展示，不能把同一 Source Version 伪装成两个独立来源事实。
+
 #### 列表字段
 
 - 文件名。
@@ -4373,7 +4578,26 @@ Should：
 - 标准化预览。
 - 后续操作。
 
+Quick Capture 详情使用独立 `/captures/{capture_id}` 页面，分开展示 Immutable Source、Fetch/Ingestion/Index/Profile
+阶段和 Document Knowledge Profile。候选 Topic、术语、知识点和示例必须明确标注为 derived candidate，并可打开其
+Source Span；能力不可用时保留基础资料，不显示伪造摘要。
+
 ### 21.3 Document 详情
+
+#### 主动创作工作台
+
+- `/authoring` 展示真实的最近 Working Draft、Document Draft 和待审批发布状态，并提供“新建文章”入口；“整理成文”仅在对应能力真实可用后启用。
+- `/authoring/new` 提供标题、目标路径、Monaco Markdown 编辑器、安全实时预览、自动保存状态、冲突恢复、显式保存版本和发布 Proposal。
+- Markdown 是唯一编辑事实；预览不执行原始 HTML、脚本、事件属性或危险 URL。页面刷新从服务端恢复，不使用 Browser Storage 保存第二套草稿状态。
+- 发布后跳转真实 Proposal 详情；Proposal 创建、批准、Git 写回和最终 Published 状态必须分别展示，不能显示假成功。
+
+#### 文档文件历史工作台
+
+- `/authoring/documents/{document_id}/history` 展示当前 canonical path 的基线、当前未提交改动、知序写回和外部 Commit；已知 Revision、Proposal、Approval、Workflow、Writeback 关系分别展示，缺失保持为空。
+- 分页游标失效或 History SSE recovery 时清理旧页面和版本选择，重新读取首屏；SSE 只触发失效，REST 是唯一事实源。
+- 比较区支持 Commit 对 Commit、Commit 对当前工作树，明确左右身份与来源；长 path、Commit 和 Diff 在桌面与移动布局中可换行或受控滚动。
+- 恢复 Dialog 展示当前 HEAD 到目标 Commit 的服务端反向 Diff、preview hash 和 dirty 阻断。成功文案只能是“恢复 Proposal 已创建”，并跳转 Proposal 审批，不能冒充文件已经恢复。
+- Workspace 切换取消旧请求并清理 History/Compare cache；Monaco Diff model 在切换、错误和卸载时按 detach-before-dispose 顺序释放。
 
 #### 主区域
 
@@ -4398,6 +4622,10 @@ Should：
 - 询问本文。
 - 创建 Artifact。
 - 创建 Review Deck。
+
+从 Capture 或 Inbox 打开 Document/Source Version 时必须保留返回原 Capture 的上下文；原始来源、不可变版本和候选画像
+不能与正式 Article Revision、Topic、Claim 或 Relation 混为同一状态。Profile stale 或重试失败时仍展示上一版 Revision，
+并明确说明它是候选投影。
 
 ### 21.4 文章优化页面
 
@@ -4524,6 +4752,8 @@ M9-03 已将 Export Panel 嵌入 Collection 详情：它只使用当前 Collecti
 - 版本历史。
 - 导出和入库。
 
+整理结果页必须同时展示冻结 Snapshot identity、完整 Template hash/Revision、逐项材料与 Evidence，以及 Run Result 的 Artifact/Proposal owner binding。专题文章结果从已确认大纲进入分章 Artifact；合并结果在人工节点展示重复、互补、冲突、独特分类和 Markdown Diff；知识总结与面试复习不得伪装成已发布正式知识。
+
 ### 21.13 Review 页面
 
 #### 今日复习
@@ -4558,6 +4788,8 @@ M9-03 已将 Export Panel 嵌入 Collection 详情：它只使用当前 Collecti
 - Token。
 - 重试和取消。
 
+当 Organizing Run 正在等待人工时，页面按服务端 review 联合渲染大纲或合并比较，Evidence 可打开 Source Span。Decision 操作只在 review、允许动作和全部绑定均有效时启用；刷新、Workspace 切换或旧请求返回后必须重新读取权威状态，不能沿用上一 Workspace 的 review。
+
 ### 21.15 设置页面
 
 - 分组导航。
@@ -4575,6 +4807,8 @@ File/Relation Diff、证据、风险、回滚、批准/驳回、Hash/Version con
 Node/Tool/Token 明细、Settings Secret 保存/导出/危险清理没有正式接口时必须显示 unavailable。Collection Export Panel
 支持 `MARKDOWN|METADATA_JSON`；Settings 数据导出支持独立 Workspace `ATTACHMENTS_ZIP`，并保留刷新/重启恢复、
 下载 Audit、过期清理和源附件不变。三类能力关闭 AC-33；`EVALUATION_JSON|AUDIT_JSON` 内容导出仍是后续任务。
+
+Git 同步已在 Settings 交付独立分类：配置一个标准 HTTPS Remote、branch、默认关闭的自动同步和只写访问令牌，支持保存、连接测试、手动同步、历史运行与显式重试。页面分列 Git 与知识索引状态，公开稳定错误码但不回显 Token、原始 stderr 或密钥路径；桌面与 `390x844` 使用同一严格 API Decoder，长 URL、Run ID 和状态文本不得制造页面横向滚动。
 
 ### 21.16 全局视觉与交互要求
 
@@ -4639,6 +4873,11 @@ Node/Tool/Token 明细、Settings Secret 保存/导出/危险清理没有正式�
 | AC-34 | Recovery | 数据库、Git 和文件状态不一致时进入只读恢复状态 |
 | AC-35 | Lifecycle | Document 和 Topic 的重命名、移动、拆分、合并、归档和删除均通过 Proposal |
 | AC-36 | Conflict | 冲突可调查、条件化解决、保留历史并触发下游影响分析 |
+| AC-37 | Quick Capture/Profile | 文字、URL、文件和图片可形成不可变 Capture/Source；自动解析与基础索引、独立降级状态、Profile v1 Evidence、幂等重试和桌面/移动恢复均可验证 |
+| AC-38 | Document Draft/Authoring | 空白 Working Draft 自动保存与冲突恢复、显式 Freeze 不可变 Revision、CREATE_ONLY Proposal、Git 最终化和桌面/移动安全预览均可验证 |
+| AC-39 | Organizing Material/Templates | 自然语言建议、同页材料增删与显式确认、不可变 Snapshot、四类受约束模板、Evidence/GAP、Human Task、Artifact/Proposal owner binding 和跨 Workspace 恢复均可验证 |
+| AC-40 | Document File History/Restore | 当前 path 的 managed/external/current-change 时间线、稳定分页、任意版本比较、strict dirty/stale 阻断、restore Proposal、Safe Writeback 新 Commit 与 append-only Revision 均可验证 |
+| AC-41 | Git Remote Sync | 单 HTTPS Remote、加密只写 Token、受控 Fetch/Fast-forward/non-force Push、post-check、配置漂移与并发栅栏、自动调度、Worker 恢复及 Git/索引分列状态均可验证 |
 
 ### 22.1 最终演示场景
 
@@ -4655,6 +4894,9 @@ Node/Tool/Token 明细、Settings Secret 保存/导出/危险清理没有正式�
 9. 从相关 Topic 生成 Review Card。
 10. 回答错误后获得知识缺口和复习计划。
 11. 模拟一次索引失败并证明任务可恢复。
+12. 输入一个知识点，在同页补充并确认材料，冻结 Snapshot；分别演示专题文章大纲审批和多文档合并冲突审阅，并从结果反查 Evidence、Template Revision、Artifact 或 Proposal。
+13. 在一个 Document 的文件历史中比较知序写回与外部 Commit，制造当前未提交改动证明恢复被阻止；清理后创建并批准 restore Proposal，验证生成新 Commit/Article Revision 且原历史保留。
+14. 为 Workspace 保存一个标准 HTTPS Remote 和只写 Token，分别演示 same、远端 Fast-forward、本地 non-force Push、dirty/diverged 停止、Worker restart 与结果未知恢复；证明响应、日志、argv、Git Config 和 Workspace 不含明文 Token，并验证 Git 成功而索引失败时两个状态分列。
 
 ---
 

@@ -37,6 +37,7 @@ var _ domain.Repository = (*Repository)(nil)
 var _ domain.KnowledgeChangeProposalRepository = (*Repository)(nil)
 var _ domain.PublishArtifactProposalRepository = (*Repository)(nil)
 var _ domain.DownstreamUpdateProposalRepository = (*Repository)(nil)
+var _ domain.RestoreDocumentProposalRepository = (*Repository)(nil)
 var _ domain.AuthorizationRepository = (*Repository)(nil)
 
 // NewRepository 创建 PostgreSQL Repository；可选事件追加器用于在同一事务发布 Proposal 状态通知。
@@ -76,9 +77,11 @@ func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposa
 	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeFilePatch, proposal.Revision); err != nil {
 		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
 	}
-	expectedRequestHash, err := domain.ComputeRequestHashWithRiskLevel(
+	targetMode := domain.NormalizeTargetMode(proposal.Revision.TargetMode)
+	expectedRequestHash, err := domain.ComputeRequestHashWithTargetMode(
 		proposal.WorkspaceID,
 		proposal.Revision.TargetPath,
+		targetMode,
 		proposal.Revision.BaseHash,
 		proposal.Revision.Content,
 		proposal.Revision.EvidenceSummary,
@@ -89,16 +92,19 @@ func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposa
 	if err != nil {
 		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
 	}
-	legacyRequestHash := domain.ComputeRequestHash(
-		proposal.WorkspaceID,
-		proposal.Revision.TargetPath,
-		proposal.Revision.BaseHash,
-		proposal.Revision.Content,
-		proposal.Revision.EvidenceSummary,
-		proposal.Revision.Risk,
-		proposal.Revision.RollbackPlan,
-	)
-	legacyRequest := proposal.RequestHash == legacyRequestHash
+	legacyRequestHash := ""
+	if targetMode == domain.TargetModeReplace {
+		legacyRequestHash = domain.ComputeRequestHash(
+			proposal.WorkspaceID,
+			proposal.Revision.TargetPath,
+			proposal.Revision.BaseHash,
+			proposal.Revision.Content,
+			proposal.Revision.EvidenceSummary,
+			proposal.Revision.Risk,
+			proposal.Revision.RollbackPlan,
+		)
+	}
+	legacyRequest := targetMode == domain.TargetModeReplace && proposal.RequestHash == legacyRequestHash
 	if proposal.RequestHash != expectedRequestHash && !legacyRequest {
 		return r.resolveInvalidRequestHash(ctx, proposal, "file patch request hash mismatch")
 	}
@@ -146,10 +152,10 @@ func (r *Repository) CreateProposal(ctx context.Context, proposal domain.Proposa
 	revision := proposal.Revision
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO change_control.proposal_revision(
-			id,proposal_id,revision_no,target_path,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,created_at
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			id,proposal_id,revision_no,target_path,target_mode,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,created_at
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		string(revision.ID), string(proposal.ID), revision.RevisionNo, revision.TargetPath,
-		revision.BaseHash, revision.Content, revision.EvidenceSummary, revision.Risk,
+		string(domain.NormalizeTargetMode(revision.TargetMode)), revision.BaseHash, revision.Content, revision.EvidenceSummary, revision.Risk,
 		revision.RollbackPlan, revision.ChangeHash, revision.CreatedAt.UTC()); err != nil {
 		return domain.Proposal{}, classify(err, "PROPOSAL_REVISION_CREATE_FAILED")
 	}
@@ -420,6 +426,96 @@ func (r *Repository) CreateDownstreamUpdateProposal(ctx context.Context, proposa
 	return proposal, nil
 }
 
+// CreateRestoreDocumentProposal persists a typed restore after locking its exact published Document binding.
+func (r *Repository) CreateRestoreDocumentProposal(ctx context.Context, proposal domain.Proposal) (domain.Proposal, error) {
+	proposal.Type = domain.ProposalTypeRestoreDocument
+	if proposal.Revision.RestoreDocument == nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, domain.ErrRestoreDocumentInvalid)
+	}
+	restore, err := domain.ValidateRestoreDocument(*proposal.Revision.RestoreDocument)
+	if err != nil || restore.WorkspaceID != proposal.WorkspaceID || proposal.TargetPath != proposal.Revision.TargetPath {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, domain.ErrRestoreDocumentInvalid)
+	}
+	proposal.Revision.RestoreDocument = &restore
+	riskLevel, err := domain.ValidateProposalRiskLevelForType(proposal.Type, proposal.RiskLevel)
+	if err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	proposal.RiskLevel = riskLevel
+	if err := domain.ValidateProposalRevisionForType(proposal.Type, proposal.Revision); err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	expectedRequestHash, err := domain.ComputeRestoreDocumentRequestHash(
+		proposal.WorkspaceID, restore, proposal.Revision.TargetPath, proposal.Revision.Content,
+		proposal.Revision.EvidenceSummary, proposal.RiskLevel, proposal.Revision.Risk, proposal.Revision.RollbackPlan,
+	)
+	if err != nil {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	if proposal.RequestHash != expectedRequestHash {
+		return r.resolveInvalidRequestHash(ctx, proposal, "restore document request hash mismatch")
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_TRANSACTION_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var insertedID string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,idempotency_key,request_hash,status,version,created_at,updated_at)
+		VALUES($1,$2,'restore_document',$3,$4,$5,$6,$7,$8,$9)
+		ON CONFLICT(workspace_id,idempotency_key) DO NOTHING
+		RETURNING id::text`,
+		string(proposal.ID), string(proposal.WorkspaceID), string(proposal.RiskLevel), proposal.IdempotencyKey, proposal.RequestHash,
+		string(proposal.Status), proposal.Version, proposal.CreatedAt.UTC(), proposal.UpdatedAt.UTC()).Scan(&insertedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		existingID, storedType, requestHash, storedRiskLevel, queryErr := loadProposalCreateBinding(ctx, tx, proposal.WorkspaceID, proposal.IdempotencyKey)
+		if queryErr != nil {
+			return domain.Proposal{}, classify(queryErr, "PROPOSAL_IDEMPOTENCY_QUERY_FAILED")
+		}
+		if storedType != proposal.Type || storedRiskLevel != proposal.RiskLevel || requestHash != expectedRequestHash {
+			return domain.Proposal{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
+		}
+		_ = tx.Rollback(ctx)
+		return r.GetProposal(ctx, existingID)
+	}
+	if err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_CREATE_FAILED")
+	}
+	var canonicalPath, lifecycle, currentRevisionID string
+	var documentVersion int64
+	err = tx.QueryRow(ctx, `SELECT canonical_path,lifecycle_status,COALESCE(current_published_revision_id::text,''),version
+		FROM core.document WHERE workspace_id=$1 AND id=$2 FOR SHARE`, string(proposal.WorkspaceID), string(restore.DocumentID)).Scan(
+		&canonicalPath, &lifecycle, &currentRevisionID, &documentVersion,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorNotFound, "DOCUMENT_HISTORY_NOT_FOUND", false, err)
+	}
+	if err != nil {
+		return domain.Proposal{}, classify(err, "DOCUMENT_RESTORE_BINDING_QUERY_FAILED")
+	}
+	if lifecycle != "PUBLISHED" || currentRevisionID == "" || canonicalPath != proposal.Revision.TargetPath || documentVersion != restore.ExpectedDocumentVersion {
+		return domain.Proposal{}, foundation.NewError(foundation.ErrorVersionConflict, "DOCUMENT_RESTORE_STALE", false, errors.New("published document binding changed before proposal creation"))
+	}
+	revision := proposal.Revision
+	if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal_revision(
+		id,proposal_id,revision_no,target_path,target_mode,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,
+		restore_workspace_id,restore_document_id,restore_target_commit,restore_expected_head,restore_expected_document_version,
+		restore_preview_hash,restore_current_content_hash,restore_target_content_hash,schema_version,created_at
+	) VALUES($1,$2,$3,$4,'REPLACE',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+		string(revision.ID), string(proposal.ID), revision.RevisionNo, revision.TargetPath, revision.BaseHash,
+		revision.Content, revision.EvidenceSummary, revision.Risk, revision.RollbackPlan, revision.ChangeHash,
+		string(restore.WorkspaceID), string(restore.DocumentID), restore.TargetCommit, restore.ExpectedHead,
+		restore.ExpectedDocumentVersion, restore.PreviewHash, restore.CurrentContentHash, restore.TargetContentHash,
+		restore.SchemaVersion, revision.CreatedAt.UTC()); err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_REVISION_CREATE_FAILED")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Proposal{}, classify(err, "PROPOSAL_COMMIT_FAILED")
+	}
+	return proposal, nil
+}
+
 // FindProposalByIdempotencyKey 返回 Workspace 内已绑定创建键的完整 Proposal。
 func (r *Repository) FindProposalByIdempotencyKey(ctx context.Context, workspaceID foundation.ID, idempotencyKey string) (domain.Proposal, bool, error) {
 	var proposalID string
@@ -648,21 +744,25 @@ func proposalRequestHashReplayMatches(storedHash, requestedHash, requestHashV2, 
 func (r *Repository) GetProposal(ctx context.Context, proposalID foundation.ID) (domain.Proposal, error) {
 	row := r.db.QueryRow(ctx, `
 			SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.idempotency_key,p.request_hash,p.risk_level,p.workflow_run_id::text,p.status,p.version,p.created_at,p.updated_at,
-			r.id::text,r.revision_no,r.target_path,r.base_hash,r.content,r.evidence_summary,r.risk,r.rollback_plan,r.change_hash,
+			r.id::text,r.revision_no,r.target_path,r.target_mode,r.base_hash,r.content,r.evidence_summary,r.risk,r.rollback_plan,r.change_hash,
 				r.target_refs,r.base_versions,r.change_set,r.evidence_refs,
 				r.artifact_id::text,r.artifact_revision_id::text,r.artifact_revision_no,r.artifact_version,r.artifact_content_hash,r.artifact_source_coverage,
 				r.downstream_workspace_id::text,r.downstream_report_id::text,r.downstream_analysis_version,r.downstream_report_fingerprint,
 				r.downstream_source_event_id::text,r.downstream_source_event_version,r.downstream_target_type,r.downstream_target_id::text,
 				r.downstream_base_version,r.downstream_action,r.downstream_owner_binding,r.downstream_reason,r.schema_version,r.created_at,
+				r.restore_workspace_id::text,r.restore_document_id::text,r.restore_target_commit,r.restore_expected_head,
+				r.restore_expected_document_version,r.restore_preview_hash,r.restore_current_content_hash,r.restore_target_content_hash,
 			a.id::text,a.change_hash,a.decision,a.approved_git_head,a.decided_at
 		FROM change_control.proposal p
 		JOIN LATERAL (
-			SELECT id,revision_no,target_path,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,
+			SELECT id,revision_no,target_path,target_mode,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,
 			       target_refs,base_versions,change_set,evidence_refs,
 				       artifact_id,artifact_revision_id,artifact_revision_no,artifact_version,artifact_content_hash,artifact_source_coverage,
 				       downstream_workspace_id,downstream_report_id,downstream_analysis_version,downstream_report_fingerprint,
 				       downstream_source_event_id,downstream_source_event_version,downstream_target_type,downstream_target_id,
-				       downstream_base_version,downstream_action,downstream_owner_binding,downstream_reason,schema_version,created_at
+			       downstream_base_version,downstream_action,downstream_owner_binding,downstream_reason,schema_version,created_at,
+			       restore_workspace_id,restore_document_id,restore_target_commit,restore_expected_head,
+			       restore_expected_document_version,restore_preview_hash,restore_current_content_hash,restore_target_content_hash
 			FROM change_control.proposal_revision
 			WHERE proposal_id=p.id ORDER BY revision_no DESC LIMIT 1
 		) r ON true
@@ -737,7 +837,7 @@ func (r *Repository) ListProposals(ctx context.Context, request domain.ProposalL
 				DecidedAt: *approvalDecidedAt,
 			}
 			if item.Approval.Decision == domain.DecisionRejected && (item.Approval.ApprovedGitHead != nil || workflowRunID != nil) ||
-				domain.NormalizeProposalType(item.Type) != domain.ProposalTypeFilePatch && (item.Approval.ApprovedGitHead != nil || workflowRunID != nil) ||
+				!domain.ProposalSupportsFileWriteback(item.Type) && (item.Approval.ApprovedGitHead != nil || workflowRunID != nil) ||
 				workflowRunID != nil && (item.Approval.Decision != domain.DecisionApproved || item.Approval.ApprovedGitHead == nil) {
 				return nil, false, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_LIST_BINDING_INVALID", false, errors.New("proposal approval contains an invalid durable writeback binding"))
 			}
@@ -765,6 +865,7 @@ func buildProposalListQuery(request domain.ProposalListQuery) (string, []any) {
 	query := `SELECT p.id::text,p.workspace_id::text,p.proposal_type,p.status,p.created_at,p.updated_at,
 				r.id::text,CASE p.proposal_type
 					WHEN 'file_patch' THEN COALESCE(r.target_path,'')
+					WHEN 'restore_document' THEN COALESCE(r.target_path,'')
 					WHEN 'knowledge_change' THEN '知识关系'
 					WHEN 'publish_artifact' THEN 'Artifact 发布'
 					WHEN 'downstream_update' THEN COALESCE(r.downstream_target_type || ':' || r.downstream_target_id::text,'下游更新')
@@ -967,6 +1068,11 @@ func (r *Repository) GetAuthorization(ctx context.Context, workspaceID foundatio
 
 // CreateAuthorization 保存授权绑定；同一 Workspace/幂等键只返回原记录，不重新生成凭据。
 func (r *Repository) CreateAuthorization(ctx context.Context, authorization domain.ToolAuthorization) (domain.AuthorizationIssueResult, error) {
+	targetMode, modeErr := domain.ValidateTargetMode(authorization.TargetMode)
+	if modeErr != nil {
+		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITE_AUTHORIZATION_TARGET_MODE_INVALID", false, modeErr)
+	}
+	authorization.TargetMode = targetMode
 	requested := authorization
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -983,7 +1089,7 @@ func (r *Repository) CreateAuthorization(ctx context.Context, authorization doma
 	authorization, err = scanAuthorization(tx.QueryRow(ctx, authorizationInsert+` RETURNING `+authorizationColumns,
 		string(authorization.ID), string(authorization.WorkspaceID), string(authorization.WorkflowRunID), string(authorization.NodeRunID),
 		string(authorization.ProposalID), string(authorization.RevisionID), string(authorization.ApprovalID), authorization.ToolName,
-		string(authorization.Capability), authorization.Scope, authorization.ApprovedChangeHash, authorization.TargetVersion,
+		string(authorization.Capability), authorization.Scope, authorization.ApprovedChangeHash, string(authorization.TargetMode), authorization.TargetVersion,
 		authorization.TokenHash, authorization.IdempotencyKey, string(authorization.Status), authorization.IssuedAt.UTC(), authorization.ExpiresAt.UTC(),
 		authorizationTimePointer(authorization.RevokedAt), authorizationTimePointer(authorization.ConsumedAt), authorization.Version))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1095,27 +1201,28 @@ func (r *Repository) RevokeAuthorization(ctx context.Context, id foundation.ID, 
 	return classifyAuthorization(tx.Commit(ctx), "WRITE_AUTHORIZATION_COMMIT_FAILED")
 }
 
-const authorizationColumns = `id::text,workspace_id::text,workflow_run_id::text,node_run_id::text,proposal_id::text,revision_id::text,approval_id::text,tool_name,capability,scope,approved_change_hash,target_version,token_hash,idempotency_key,status,issued_at,expires_at,revoked_at,consumed_at,version`
+const authorizationColumns = `id::text,workspace_id::text,workflow_run_id::text,node_run_id::text,proposal_id::text,revision_id::text,approval_id::text,tool_name,capability,scope,approved_change_hash,target_mode,target_version,token_hash,idempotency_key,status,issued_at,expires_at,revoked_at,consumed_at,version`
 
 const authorizationInsert = `INSERT INTO change_control.tool_authorization(
-	id,workspace_id,workflow_run_id,node_run_id,proposal_id,revision_id,approval_id,tool_name,capability,scope,approved_change_hash,target_version,token_hash,idempotency_key,status,issued_at,expires_at,revoked_at,consumed_at,version
-) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
-ON CONFLICT(workspace_id,idempotency_key) DO NOTHING`
+		id,workspace_id,workflow_run_id,node_run_id,proposal_id,revision_id,approval_id,tool_name,capability,scope,approved_change_hash,target_mode,target_version,token_hash,idempotency_key,status,issued_at,expires_at,revoked_at,consumed_at,version
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+	ON CONFLICT(workspace_id,idempotency_key) DO NOTHING`
 
 func scanAuthorization(row pgx.Row) (domain.ToolAuthorization, error) {
 	var authorization domain.ToolAuthorization
 	var id, workspaceID, runID, nodeID, proposalID, revisionID, approvalID, capability, status string
-	if err := row.Scan(&id, &workspaceID, &runID, &nodeID, &proposalID, &revisionID, &approvalID, &authorization.ToolName, &capability, &authorization.Scope, &authorization.ApprovedChangeHash, &authorization.TargetVersion, &authorization.TokenHash, &authorization.IdempotencyKey, &status, &authorization.IssuedAt, &authorization.ExpiresAt, &authorization.RevokedAt, &authorization.ConsumedAt, &authorization.Version); err != nil {
+	if err := row.Scan(&id, &workspaceID, &runID, &nodeID, &proposalID, &revisionID, &approvalID, &authorization.ToolName, &capability, &authorization.Scope, &authorization.ApprovedChangeHash, &authorization.TargetMode, &authorization.TargetVersion, &authorization.TokenHash, &authorization.IdempotencyKey, &status, &authorization.IssuedAt, &authorization.ExpiresAt, &authorization.RevokedAt, &authorization.ConsumedAt, &authorization.Version); err != nil {
 		return domain.ToolAuthorization{}, err
 	}
 	authorization.ID, authorization.WorkspaceID, authorization.WorkflowRunID, authorization.NodeRunID = foundation.ID(id), foundation.ID(workspaceID), foundation.ID(runID), foundation.ID(nodeID)
 	authorization.ProposalID, authorization.RevisionID, authorization.ApprovalID = foundation.ID(proposalID), foundation.ID(revisionID), foundation.ID(approvalID)
 	authorization.Capability, authorization.Status = domain.Capability(capability), domain.AuthorizationStatus(status)
+	authorization.TargetMode = domain.NormalizeTargetMode(authorization.TargetMode)
 	return authorization, nil
 }
 
 func sameAuthorizationIdentity(existing, requested domain.ToolAuthorization) bool {
-	return existing.WorkspaceID == requested.WorkspaceID && existing.WorkflowRunID == requested.WorkflowRunID && existing.NodeRunID == requested.NodeRunID && existing.ProposalID == requested.ProposalID && existing.RevisionID == requested.RevisionID && existing.ApprovalID == requested.ApprovalID && existing.ToolName == requested.ToolName && existing.Capability == requested.Capability && existing.Scope == requested.Scope && existing.ApprovedChangeHash == requested.ApprovedChangeHash && existing.TargetVersion == requested.TargetVersion && existing.IdempotencyKey == requested.IdempotencyKey && existing.ExpiresAt.Sub(existing.IssuedAt) == requested.ExpiresAt.Sub(requested.IssuedAt)
+	return existing.WorkspaceID == requested.WorkspaceID && existing.WorkflowRunID == requested.WorkflowRunID && existing.NodeRunID == requested.NodeRunID && existing.ProposalID == requested.ProposalID && existing.RevisionID == requested.RevisionID && existing.ApprovalID == requested.ApprovalID && existing.ToolName == requested.ToolName && existing.Capability == requested.Capability && existing.Scope == requested.Scope && existing.ApprovedChangeHash == requested.ApprovedChangeHash && domain.NormalizeTargetMode(existing.TargetMode) == domain.NormalizeTargetMode(requested.TargetMode) && existing.TargetVersion == requested.TargetVersion && existing.IdempotencyKey == requested.IdempotencyKey && existing.ExpiresAt.Sub(existing.IssuedAt) == requested.ExpiresAt.Sub(requested.IssuedAt)
 }
 
 func sameAuthorizationBinding(authorization domain.ToolAuthorization, request domain.AuthorizationConsume) bool {
@@ -1123,21 +1230,22 @@ func sameAuthorizationBinding(authorization domain.ToolAuthorization, request do
 }
 
 func verifyCurrentAuthorizationState(ctx context.Context, tx pgx.Tx, authorization domain.ToolAuthorization) error {
-	var workspaceID, status, targetPath, baseHash, revisionHash, approvalProposal, approvalRevision, approvalHash, decision string
+	var workspaceID, status, targetPath, targetMode, baseHash, revisionHash, approvalProposal, approvalRevision, approvalHash, decision string
 	err := tx.QueryRow(ctx, `
-		SELECT p.workspace_id,p.status,r.target_path,r.base_hash,r.change_hash,a.proposal_id,a.revision_id,a.change_hash,a.decision
+		SELECT p.workspace_id,p.status,r.target_path,r.target_mode,r.base_hash,r.change_hash,a.proposal_id,a.revision_id,a.change_hash,a.decision
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.id=$2 AND r.proposal_id=p.id
 		JOIN change_control.approval a ON a.id=$3 AND a.proposal_id=p.id AND a.revision_id=r.id
 		WHERE p.id=$1
-		FOR UPDATE OF p`, string(authorization.ProposalID), string(authorization.RevisionID), string(authorization.ApprovalID)).Scan(&workspaceID, &status, &targetPath, &baseHash, &revisionHash, &approvalProposal, &approvalRevision, &approvalHash, &decision)
+		FOR UPDATE OF p`, string(authorization.ProposalID), string(authorization.RevisionID), string(authorization.ApprovalID)).Scan(&workspaceID, &status, &targetPath, &targetMode, &baseHash, &revisionHash, &approvalProposal, &approvalRevision, &approvalHash, &decision)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, err)
 		}
 		return classifyAuthorization(err, "WRITE_AUTHORIZATION_APPROVAL_QUERY_FAILED")
 	}
-	if workspaceID != string(authorization.WorkspaceID) || (status != string(domain.StatusApproved) && status != string(domain.StatusApplying)) || approvalProposal != string(authorization.ProposalID) || approvalRevision != string(authorization.RevisionID) || decision != string(domain.DecisionApproved) || revisionHash != authorization.ApprovedChangeHash || approvalHash != authorization.ApprovedChangeHash || baseHash != authorization.TargetVersion || authorization.Scope != domain.ExpectedAuthorizationScope(targetPath) {
+	mode, modeErr := domain.ValidateTargetMode(domain.TargetMode(targetMode))
+	if modeErr != nil || workspaceID != string(authorization.WorkspaceID) || (status != string(domain.StatusApproved) && status != string(domain.StatusApplying)) || approvalProposal != string(authorization.ProposalID) || approvalRevision != string(authorization.RevisionID) || decision != string(domain.DecisionApproved) || revisionHash != authorization.ApprovedChangeHash || approvalHash != authorization.ApprovedChangeHash || baseHash != authorization.TargetVersion || domain.NormalizeTargetMode(authorization.TargetMode) != mode || authorization.Scope != domain.ExpectedAuthorizationScopeForTarget(targetPath, mode) {
 		return foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, errors.New("authorization approval state is no longer valid"))
 	}
 	var one int
@@ -1185,10 +1293,13 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	var proposalID, workspaceID, proposalType, idempotencyKey, requestHash, riskLevel, status string
 	var workflowRunID *string
 	var revisionID, risk, rollback, changeHash string
-	var targetPath, baseHash, content, evidence, artifactID, artifactRevisionID, artifactContentHash, schemaVersion *string
+	var targetPath, targetMode, baseHash, content, evidence, artifactID, artifactRevisionID, artifactContentHash, schemaVersion *string
 	var downstreamWorkspaceID, downstreamReportID, downstreamAnalysisVersion, downstreamReportFingerprint *string
 	var downstreamSourceEventID, downstreamTargetType, downstreamTargetID, downstreamAction, downstreamReason *string
+	var restoreWorkspaceID, restoreDocumentID, restoreTargetCommit, restoreExpectedHead *string
+	var restorePreviewHash, restoreCurrentContentHash, restoreTargetContentHash *string
 	var artifactRevisionNo, artifactVersion, downstreamSourceEventVersion, downstreamBaseVersion *int64
+	var restoreExpectedDocumentVersion *int64
 	var targetRefsRaw, baseVersionsRaw, changeSetRaw, evidenceRefsRaw, artifactSourceCoverageRaw, downstreamOwnerBindingRaw []byte
 	var approvalID, approvalHash, decision, approvedGitHead *string
 	var createdAt, updatedAt, revisionCreatedAt time.Time
@@ -1197,12 +1308,14 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	var version int64
 	err := row.Scan(
 		&proposalID, &workspaceID, &proposalType, &idempotencyKey, &requestHash, &riskLevel, &workflowRunID, &status, &version, &createdAt, &updatedAt,
-		&revisionID, &revisionNo, &targetPath, &baseHash, &content, &evidence, &risk, &rollback, &changeHash,
+		&revisionID, &revisionNo, &targetPath, &targetMode, &baseHash, &content, &evidence, &risk, &rollback, &changeHash,
 		&targetRefsRaw, &baseVersionsRaw, &changeSetRaw, &evidenceRefsRaw,
 		&artifactID, &artifactRevisionID, &artifactRevisionNo, &artifactVersion, &artifactContentHash, &artifactSourceCoverageRaw,
 		&downstreamWorkspaceID, &downstreamReportID, &downstreamAnalysisVersion, &downstreamReportFingerprint,
 		&downstreamSourceEventID, &downstreamSourceEventVersion, &downstreamTargetType, &downstreamTargetID,
 		&downstreamBaseVersion, &downstreamAction, &downstreamOwnerBindingRaw, &downstreamReason, &schemaVersion, &revisionCreatedAt,
+		&restoreWorkspaceID, &restoreDocumentID, &restoreTargetCommit, &restoreExpectedHead, &restoreExpectedDocumentVersion,
+		&restorePreviewHash, &restoreCurrentContentHash, &restoreTargetContentHash,
 		&approvalID, &approvalHash, &decision, &approvedGitHead, &decidedAt,
 	)
 	if err != nil {
@@ -1226,21 +1339,51 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 	downstreamFieldsPresent := downstreamWorkspaceID != nil || downstreamReportID != nil || downstreamAnalysisVersion != nil || downstreamReportFingerprint != nil ||
 		downstreamSourceEventID != nil || downstreamSourceEventVersion != nil || downstreamTargetType != nil || downstreamTargetID != nil ||
 		downstreamBaseVersion != nil || downstreamAction != nil || downstreamOwnerBindingRaw != nil || downstreamReason != nil
+	restoreFieldsPresent := restoreWorkspaceID != nil || restoreDocumentID != nil || restoreTargetCommit != nil || restoreExpectedHead != nil ||
+		restoreExpectedDocumentVersion != nil || restorePreviewHash != nil || restoreCurrentContentHash != nil || restoreTargetContentHash != nil
 	switch domain.NormalizeProposalType(proposal.Type) {
 	case domain.ProposalTypeFilePatch:
-		if targetPath == nil || baseHash == nil || content == nil || evidence == nil || schemaVersion != nil ||
-			targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil || artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil || downstreamFieldsPresent {
+		if targetPath == nil || targetMode == nil || baseHash == nil || content == nil || evidence == nil || schemaVersion != nil ||
+			targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil || artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil || downstreamFieldsPresent || restoreFieldsPresent {
 			return domain.Proposal{}, errors.New("file patch proposal revision payload is inconsistent")
 		}
 		proposal.Type = domain.ProposalTypeFilePatch
 		proposal.TargetPath = *targetPath
 		proposal.Revision.TargetPath = *targetPath
+		mode, modeErr := domain.ValidateTargetMode(domain.TargetMode(*targetMode))
+		if modeErr != nil || domain.ValidateTargetBaseVersion(proposal.WorkspaceID, *targetPath, mode, *baseHash) != nil {
+			return domain.Proposal{}, errors.New("file patch target mode is inconsistent")
+		}
+		proposal.Revision.TargetMode = mode
 		proposal.Revision.BaseHash = *baseHash
 		proposal.Revision.Content = *content
 		proposal.Revision.EvidenceSummary = *evidence
+	case domain.ProposalTypeRestoreDocument:
+		if targetPath == nil || targetMode == nil || *targetMode != string(domain.TargetModeReplace) || baseHash == nil || content == nil || evidence == nil || schemaVersion == nil ||
+			targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil || artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil || downstreamFieldsPresent ||
+			restoreWorkspaceID == nil || restoreDocumentID == nil || restoreTargetCommit == nil || restoreExpectedHead == nil || restoreExpectedDocumentVersion == nil || restorePreviewHash == nil || restoreCurrentContentHash == nil || restoreTargetContentHash == nil {
+			return domain.Proposal{}, errors.New("restore document proposal revision payload is inconsistent")
+		}
+		restore, err := domain.ValidateRestoreDocument(domain.RestoreDocument{
+			WorkspaceID: foundation.ID(*restoreWorkspaceID), DocumentID: foundation.ID(*restoreDocumentID),
+			TargetCommit: *restoreTargetCommit, ExpectedHead: *restoreExpectedHead,
+			ExpectedDocumentVersion: *restoreExpectedDocumentVersion, PreviewHash: *restorePreviewHash,
+			CurrentContentHash: *restoreCurrentContentHash, TargetContentHash: *restoreTargetContentHash,
+			SchemaVersion: *schemaVersion,
+		})
+		if err != nil || restore.WorkspaceID != proposal.WorkspaceID {
+			return domain.Proposal{}, errors.New("restore document workspace binding is inconsistent")
+		}
+		proposal.TargetPath = *targetPath
+		proposal.Revision.TargetPath = *targetPath
+		proposal.Revision.TargetMode = domain.TargetModeReplace
+		proposal.Revision.BaseHash = *baseHash
+		proposal.Revision.Content = *content
+		proposal.Revision.EvidenceSummary = *evidence
+		proposal.Revision.RestoreDocument = &restore
 	case domain.ProposalTypeKnowledgeChange:
-		if targetPath != nil || baseHash != nil || content != nil || evidence != nil || schemaVersion == nil ||
-			targetRefsRaw == nil || baseVersionsRaw == nil || changeSetRaw == nil || evidenceRefsRaw == nil || artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil || downstreamFieldsPresent {
+		if targetPath != nil || targetMode == nil || *targetMode != string(domain.TargetModeReplace) || baseHash != nil || content != nil || evidence != nil || schemaVersion == nil ||
+			targetRefsRaw == nil || baseVersionsRaw == nil || changeSetRaw == nil || evidenceRefsRaw == nil || artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil || downstreamFieldsPresent || restoreFieldsPresent {
 			return domain.Proposal{}, errors.New("knowledge change proposal revision payload is inconsistent")
 		}
 		change := domain.KnowledgeChange{SchemaVersion: *schemaVersion}
@@ -1263,8 +1406,8 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 		proposal.Type = domain.ProposalTypeKnowledgeChange
 		proposal.Revision.KnowledgeChange = &canonical
 	case domain.ProposalTypePublishArtifact:
-		if targetPath != nil || baseHash != nil || content != nil || evidence != nil || targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil ||
-			artifactID == nil || artifactRevisionID == nil || artifactRevisionNo == nil || artifactVersion == nil || artifactContentHash == nil || artifactSourceCoverageRaw == nil || schemaVersion == nil || downstreamFieldsPresent {
+		if targetPath != nil || targetMode == nil || *targetMode != string(domain.TargetModeReplace) || baseHash != nil || content != nil || evidence != nil || targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil ||
+			artifactID == nil || artifactRevisionID == nil || artifactRevisionNo == nil || artifactVersion == nil || artifactContentHash == nil || artifactSourceCoverageRaw == nil || schemaVersion == nil || downstreamFieldsPresent || restoreFieldsPresent {
 			return domain.Proposal{}, errors.New("publish artifact proposal revision payload is inconsistent")
 		}
 		publication := domain.PublishArtifact{
@@ -1281,11 +1424,11 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 		proposal.Type = domain.ProposalTypePublishArtifact
 		proposal.Revision.PublishArtifact = &canonical
 	case domain.ProposalTypeDownstreamUpdate:
-		if targetPath != nil || baseHash != nil || content != nil || evidence != nil || targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil ||
+		if targetPath != nil || targetMode == nil || *targetMode != string(domain.TargetModeReplace) || baseHash != nil || content != nil || evidence != nil || targetRefsRaw != nil || baseVersionsRaw != nil || changeSetRaw != nil || evidenceRefsRaw != nil ||
 			artifactID != nil || artifactRevisionID != nil || artifactRevisionNo != nil || artifactVersion != nil || artifactContentHash != nil || artifactSourceCoverageRaw != nil ||
 			downstreamWorkspaceID == nil || downstreamReportID == nil || downstreamAnalysisVersion == nil || downstreamReportFingerprint == nil ||
 			downstreamSourceEventID == nil || downstreamSourceEventVersion == nil || downstreamTargetType == nil || downstreamTargetID == nil ||
-			downstreamBaseVersion == nil || downstreamAction == nil || downstreamOwnerBindingRaw == nil || downstreamReason == nil || schemaVersion == nil {
+			downstreamBaseVersion == nil || downstreamAction == nil || downstreamOwnerBindingRaw == nil || downstreamReason == nil || schemaVersion == nil || restoreFieldsPresent {
 			return domain.Proposal{}, errors.New("downstream update proposal revision payload is inconsistent")
 		}
 		var ownerBinding knowledge.EventOwnerBinding
@@ -1315,14 +1458,14 @@ func scanProposal(row pgx.Row) (domain.Proposal, error) {
 		return domain.Proposal{}, err
 	}
 	if workflowRunID != nil {
-		if proposal.Type != domain.ProposalTypeFilePatch {
+		if !domain.ProposalSupportsFileWriteback(proposal.Type) {
 			return domain.Proposal{}, errors.New("typed proposal has an invalid writeback workflow binding")
 		}
 		value := foundation.ID(*workflowRunID)
 		proposal.WorkflowRunID = &value
 	}
 	if approvalID != nil && approvalHash != nil && decision != nil && decidedAt != nil {
-		if proposal.Type != domain.ProposalTypeFilePatch && approvedGitHead != nil {
+		if !domain.ProposalSupportsFileWriteback(proposal.Type) && approvedGitHead != nil {
 			return domain.Proposal{}, errors.New("typed proposal has an invalid git approval binding")
 		}
 		proposal.Approval = &domain.Approval{

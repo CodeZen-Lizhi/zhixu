@@ -26,7 +26,7 @@ func executionFromCreate(command CreateWriteback, status WritebackStatus) Writeb
 		ID: command.ID, WorkspaceID: command.WorkspaceID, WorkflowRunID: command.WorkflowRunID, NodeRunID: command.NodeRunID,
 		ProposalID: command.ProposalID, RevisionID: command.RevisionID, ApprovalID: command.ApprovalID,
 		WriteAuthorizationID: command.WriteAuthorizationID, GitAuthorizationID: command.GitAuthorizationID,
-		TargetPath: command.TargetPath, BaseHash: command.BaseHash, ResultHash: command.ResultHash, ApprovedChangeHash: command.ApprovedChangeHash,
+		TargetPath: command.TargetPath, TargetMode: command.TargetMode, BaseHash: command.BaseHash, ResultHash: command.ResultHash, ApprovedChangeHash: command.ApprovedChangeHash,
 		ApprovedGitHead: command.ApprovedGitHead, Status: status, IdempotencyKey: command.IdempotencyKey,
 		GitCommit: strings.Repeat("d", 40), ParentGitCommit: strings.Repeat("e", 40), DiffHash: strings.Repeat("f", 64),
 		TemporaryRef: command.TemporaryRef, BackupRef: command.BackupRef, Version: 1,
@@ -76,6 +76,41 @@ func TestValidateWritebackCreate(t *testing.T) {
 	invalid.TemporaryRef = "../outside"
 	if !errors.Is(ValidateWritebackCreate(invalid), ErrWritebackInvalidInput) {
 		t.Fatal("unsafe temporary ref accepted")
+	}
+}
+
+func TestCreateOnlyWritebackUsesBoundAbsenceAndNoGitBaseBlob(t *testing.T) {
+	command := validCreateWriteback()
+	command.TargetMode = TargetModeCreateOnly
+	command.BackupRef = ""
+	token, err := ComputeAbsenceToken(command.WorkspaceID, command.TargetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.BaseHash = token
+	if err := ValidateWritebackCreate(command); err != nil {
+		t.Fatal(err)
+	}
+	command.BaseHash = ComputeWritebackResultHash(nil)
+	if !errors.Is(ValidateWritebackCreate(command), ErrWritebackInvalidInput) {
+		t.Fatal("CREATE_ONLY accepted an empty-file hash as its base version")
+	}
+
+	command.BaseHash = token
+	current := executionFromCreate(command, WritebackStatusFileApplied)
+	current.TargetMode = TargetModeCreateOnly
+	current.BackupRef = ""
+	checkpoint := CheckpointWriteback{
+		ExecutionID: current.ID, ExpectedVersion: current.Version, Status: WritebackStatusGitPrepared,
+		ResultHash: current.ResultHash, DiffHash: strings.Repeat("f", 64), BaseBlobID: "",
+		ResultBlobID: strings.Repeat("a", 40), BaseMode: GitFileModeRegular,
+	}
+	if err := ValidateWritebackCheckpoint(current, checkpoint); err != nil {
+		t.Fatalf("CREATE_ONLY git intent with no base blob = %v", err)
+	}
+	checkpoint.BaseBlobID = token
+	if !errors.Is(ValidateWritebackCheckpoint(current, checkpoint), ErrWritebackInvalidInput) {
+		t.Fatal("CREATE_ONLY accepted absence token as a Git blob")
 	}
 }
 

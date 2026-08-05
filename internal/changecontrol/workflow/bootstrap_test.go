@@ -94,6 +94,48 @@ func TestBootstrapExecutorCreatesExecutionWithEphemeralDoubleAuthorization(t *te
 	}
 }
 
+func TestBootstrapExecutorCreateOnlyBindsAuthorizationScopeAndExecutionMode(t *testing.T) {
+	proposal := bootstrapProposal()
+	absence, err := domain.ComputeAbsenceToken(proposal.WorkspaceID, proposal.TargetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal.Revision.TargetMode = domain.TargetModeCreateOnly
+	proposal.Revision.BaseHash = absence
+	proposal.Revision.ChangeHash, err = domain.ComputeChangeHashForTarget(proposal.WorkspaceID, proposal.TargetPath, proposal.Revision.TargetMode, absence, proposal.Revision.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal.Approval.ChangeHash = proposal.Revision.ChangeHash
+	execution := bootstrapExecution(proposal)
+	lookup := &bootstrapLookupFake{}
+	changeControl := &bootstrapChangeControlFake{proposal: proposal}
+	beginner := &bootstrapBeginFake{lookup: lookup, execution: execution}
+	resumer := &bootstrapResumer{result: bootstrapResult(execution)}
+	node, err := NewNode(resumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := newBootstrapExecutorFixture(t, lookup, changeControl, beginner, node)
+	executionContext := bootstrapExecutionContext(t)
+	executionContext.Input, err = EncodeBootstrapInput(proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.Execute(context.Background(), executionContext); err != nil {
+		t.Fatal(err)
+	}
+	if execution.TargetMode != domain.TargetModeCreateOnly || len(changeControl.issues) != 2 {
+		t.Fatalf("execution=%+v issues=%+v", execution, changeControl.issues)
+	}
+	wantScope := domain.ExpectedAuthorizationScopeForTarget(proposal.TargetPath, domain.TargetModeCreateOnly)
+	for _, issue := range changeControl.issues {
+		if issue.Scope != wantScope {
+			t.Fatalf("scope=%q want=%q", issue.Scope, wantScope)
+		}
+	}
+}
+
 func TestBootstrapExecutorBindingConflictIsManualAndHasNoSideEffect(t *testing.T) {
 	proposal := bootstrapProposal()
 	execution := bootstrapExecution(proposal)
@@ -256,7 +298,7 @@ func bootstrapExecution(proposal domain.Proposal) domain.WritebackExecution {
 		ID: bootstrapExecutionID, WorkspaceID: bootstrapWorkspaceID, WorkflowRunID: bootstrapRunID, NodeRunID: bootstrapNodeID,
 		ProposalID: proposal.ID, RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID,
 		WriteAuthorizationID: bootstrapWriteAuthID, GitAuthorizationID: bootstrapGitAuthID,
-		TargetPath: proposal.TargetPath, BaseHash: proposal.Revision.BaseHash,
+		TargetPath: proposal.TargetPath, TargetMode: proposal.Revision.TargetMode, BaseHash: proposal.Revision.BaseHash,
 		ResultHash: domain.ComputeWritebackResultHash([]byte(proposal.Revision.Content)), ApprovedChangeHash: proposal.Revision.ChangeHash,
 		ApprovedGitHead: *proposal.Approval.ApprovedGitHead, Status: domain.WritebackStatusPrepared, IdempotencyKey: key, Version: 1,
 	}
@@ -310,6 +352,7 @@ func (f *bootstrapChangeControlFake) IssueWriteAuthorization(_ context.Context, 
 	result.Authorization.ToolName = issue.ToolName
 	result.Authorization.Capability = issue.Capability
 	result.Authorization.Scope = issue.Scope
+	result.Authorization.TargetMode = f.proposal.Revision.TargetMode
 	result.Authorization.ApprovedChangeHash = f.proposal.Revision.ChangeHash
 	result.Authorization.TargetVersion = f.proposal.Revision.BaseHash
 	result.Authorization.Status = domain.AuthorizationIssued

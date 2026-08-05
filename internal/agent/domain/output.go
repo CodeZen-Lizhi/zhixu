@@ -38,6 +38,12 @@ const (
 	ResultTypeToolRequest = "tool_request"
 	// ResultTypeClarification 是会话澄清终态使用的稳定 Agent 结果类型。
 	ResultTypeClarification = "clarification"
+	// ResultTypeDocumentKnowledgeProfile 是证据绑定文档知识画像的稳定结果类型。
+	ResultTypeDocumentKnowledgeProfile = "document_knowledge_profile"
+	// ResultTypeOrganizingOutline 是基于冻结整理材料生成的大纲结果类型。
+	ResultTypeOrganizingOutline = "organizing_outline"
+	// ResultTypeOrganizingDocument 是基于冻结整理材料生成的文档结果类型。
+	ResultTypeOrganizingDocument = "organizing_document"
 
 	maxOutputTextBytes = 16 * 1024
 	maxSummaryBytes    = 4 * 1024

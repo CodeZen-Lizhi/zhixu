@@ -1,5 +1,6 @@
-// Package parser adapts Markdown and plain-text content to the project-owned
-// ingestion contract. Third-party AST values never cross this package boundary.
+// Package parser adapts Markdown, plain-text, HTML, and PDF content to the
+// project-owned ingestion contract. Third-party AST values never cross this
+// package boundary.
 package parser
 
 import (
@@ -126,10 +127,12 @@ func NewTextParserWithOptions(options Options) *TextParser {
 	}
 }
 
-// Registry selects the parser for the two supported MIME types.
+// Registry 为支持的文本 MIME 选择对应 Parser。
 type Registry struct {
 	markdown *MarkdownParser
 	text     *TextParser
+	html     *HTMLParser
+	pdf      *PDFParser
 }
 
 // NewRegistry creates a registry sharing the same parser limits.
@@ -137,6 +140,8 @@ func NewRegistry(options Options) *Registry {
 	return &Registry{
 		markdown: NewMarkdownParserWithOptions(options),
 		text:     NewTextParserWithOptions(options),
+		html:     NewHTMLParserWithOptions(options),
+		pdf:      NewPDFParserWithOptions(options),
 	}
 }
 
@@ -156,6 +161,16 @@ func (r *Registry) ParserFor(mediaType string) (domain.Parser, error) {
 			return nil, &domain.ParserError{Code: "PARSER_UNAVAILABLE", Cause: domain.ErrParserUnavailable}
 		}
 		return r.text, nil
+	case "text/html":
+		if r.html == nil {
+			return nil, &domain.ParserError{Code: "PARSER_UNAVAILABLE", Cause: domain.ErrParserUnavailable}
+		}
+		return r.html, nil
+	case "application/pdf":
+		if r.pdf == nil {
+			return nil, &domain.ParserError{Code: "PARSER_UNAVAILABLE", Cause: domain.ErrParserUnavailable}
+		}
+		return r.pdf, nil
 	default:
 		return nil, &domain.ParserError{Code: "PARSER_MEDIA_TYPE_UNSUPPORTED", Cause: domain.ErrUnsupportedMediaType}
 	}

@@ -330,12 +330,34 @@ func (s *Service) buildSpans(content SourceContent, parsed domain.ParsedDocument
 		if idErr != nil {
 			return "", nil, idErr
 		}
-		excerpt := sha256.Sum256(content.Bytes[block.StartByte:block.EndByte])
+		evidenceKind := block.EvidenceKind
+		if evidenceKind == "" {
+			evidenceKind = domain.EvidenceRawBytes
+		}
+		var evidence []byte
+		derivedExcerpt := ""
+		switch evidenceKind {
+		case domain.EvidenceRawBytes:
+			evidence = content.Bytes[block.StartByte:block.EndByte]
+			if string(evidence) != block.Content {
+				return "", nil, foundation.NewError(foundation.ErrorConsistencyViolation, "PARSER_SOURCE_CONTENT_MISMATCH", false, errors.New("parser content differs from its raw evidence range"))
+			}
+		case domain.EvidenceDerivedText:
+			if block.Content == "" || block.StartByte != 0 || block.EndByte != int64(len(content.Bytes)) {
+				return "", nil, foundation.NewError(foundation.ErrorConsistencyViolation, "PARSER_DERIVED_EVIDENCE_INVALID", false, errors.New("derived evidence must bind the complete immutable artifact and contain text"))
+			}
+			evidence = []byte(block.Content)
+			derivedExcerpt = block.Content
+		default:
+			return "", nil, foundation.NewError(foundation.ErrorConsistencyViolation, "PARSER_EVIDENCE_KIND_INVALID", false, errors.New("parser returned an unknown evidence kind"))
+		}
+		excerpt := sha256.Sum256(evidence)
 		spans = append(spans, domain.SourceSpan{
 			ID: id, WorkspaceID: content.WorkspaceID, ContentArtifactID: content.ContentArtifactID,
 			ParseProjectionID: projectionID, SpanType: block.SpanType, StartLine: block.StartLine, EndLine: block.EndLine,
 			StartByte: block.StartByte, EndByte: block.EndByte, Selector: cloneSelector(block.Selector),
-			ExcerptHash: hex.EncodeToString(excerpt[:]), ParserVersion: parsed.ParserVersion, SchemaVersion: parsed.SchemaVersion,
+			ExcerptHash: hex.EncodeToString(excerpt[:]), EvidenceKind: evidenceKind, DerivedExcerpt: derivedExcerpt,
+			ParserVersion: parsed.ParserVersion, SchemaVersion: parsed.SchemaVersion,
 		})
 	}
 	return projectionID, spans, nil

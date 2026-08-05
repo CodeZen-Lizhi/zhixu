@@ -51,6 +51,7 @@ const riskRank: Record<ProposalRiskLevel, number> = {
 
 const proposalTypeLabels: Record<ProposalSummary["type"], string> = {
   file_patch: "文件修改",
+  restore_document: "文档恢复",
   knowledge_change: "知识变更",
   publish_artifact: "发布产物",
   downstream_update: "下游更新",
@@ -134,9 +135,9 @@ export const selectDashboardFocus = ({
     kind: "empty",
     label: "今日已收束",
     title: "今天没有等待处理的事项",
-    description: "可以从资料收件箱继续整理新的知识线索。",
-    href: "/inbox",
-    actionLabel: "查看资料收件箱",
+    description: "现在适合从一篇新文章或一次材料整理开始。",
+    href: "/authoring/new",
+    actionLabel: "新建文章",
   };
 };
 

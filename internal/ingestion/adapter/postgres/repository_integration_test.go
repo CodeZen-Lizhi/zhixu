@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"strings"
@@ -13,6 +15,48 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestRepositoryPersistsDerivedEvidence(t *testing.T) {
+	repository, tx, ctx := integrationRepository(t)
+	workspaceID, artifactID, versionID := seedSourceVersion(t, ctx, tx, "7d000000", "d")
+	now := time.Date(2026, 8, 2, 7, 0, 0, 0, time.UTC)
+	derived := "Java AI PDF evidence"
+	digest := sha256.Sum256([]byte(derived))
+	spanID := mustID(t, "7d000000-0000-4000-8000-000000000011")
+	write := domain.ProjectionWrite{
+		SourceVersionID: versionID,
+		Projection: domain.ParseProjection{
+			ID: mustID(t, "7d000000-0000-4000-8000-000000000012"), WorkspaceID: workspaceID,
+			ContentArtifactID: artifactID, ParserID: "pdf", ParserVersion: "pdf-v1",
+			ParserConfigHash: strings.Repeat("a", 64), SchemaVersion: "parse-v1",
+			NormalizedContentHash: strings.Repeat("b", 64), CreatedAt: now,
+		},
+		Spans: []domain.SourceSpan{{
+			ID: spanID, SpanType: "document", StartLine: 1, EndLine: 1, StartByte: 0, EndByte: 4,
+			Selector:    map[string]string{"format": "pdf", "page_start": "1", "page_end": "1"},
+			ExcerptHash: hex.EncodeToString(digest[:]), EvidenceKind: domain.EvidenceDerivedText,
+			DerivedExcerpt: derived, ParserVersion: "pdf-v1", SchemaVersion: "parse-v1",
+		}},
+		Chunks: []domain.CanonicalChunk{{
+			ID: mustID(t, "7d000000-0000-4000-8000-000000000013"), Sequence: 0, Content: derived,
+			ContentHash: hex.EncodeToString(digest[:]), SourceSpanID: spanID, ByteCount: int64(len(derived)), RuneCount: int64(len(derived)),
+			ParserVersion: "pdf-v1", ChunkStrategyVersion: "structure-v1", SchemaVersion: "parse-v1", Status: "active",
+		}},
+		CreatedAt: now,
+	}
+	result, err := repository.SaveProjection(ctx, write)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Spans) != 1 || result.Spans[0].EvidenceKind != domain.EvidenceDerivedText || result.Spans[0].DerivedExcerpt != derived {
+		t.Fatalf("derived span = %#v", result.Spans)
+	}
+	write.Projection.ID = mustID(t, "7d000000-0000-4000-8000-000000000014")
+	replayed, err := repository.SaveProjection(ctx, write)
+	if err != nil || replayed.Created || len(replayed.Spans) != 1 || replayed.Spans[0].DerivedExcerpt != derived {
+		t.Fatalf("replayed projection = %#v, %v", replayed, err)
+	}
+}
 
 func TestRepositoryAttemptProjectionLifecycle(t *testing.T) {
 	repository, tx, ctx := integrationRepository(t)
@@ -224,7 +268,12 @@ func seedSourceVersion(t *testing.T, ctx context.Context, tx pgx.Tx, prefix, has
 		query string
 		args  []any
 	}{
-		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'test', $4,$4)`, []any{string(workspaceID), prefix, root, now}},
+		{`INSERT INTO core.workspace(
+			id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
+			status,availability,availability_reason,availability_checked_at,version,created_at,updated_at
+		) VALUES($1,$2,$3,$4,1,$3,$5,'inactive','available',NULL,$5,1,$5,$5)`, []any{
+			string(workspaceID), prefix, root, strings.Repeat(hashCharacter, 64), now,
+		}},
 		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at) VALUES($1,$2,$3,4,$4,$5)`, []any{string(artifactID), string(workspaceID), hash, ".knowledge/sources/" + hash, now}},
 		{`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at) VALUES($1,$2,'text',$3,$3,$4)`, []any{string(sourceID), string(workspaceID), prefix + ".txt", now}},
 		{`INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) VALUES($1,$2,$3,$4,$5,4,'text/plain',$6,'pending',$7)`, []any{string(versionID), string(sourceID), string(workspaceID), string(artifactID), hash, prefix + ".txt", now}},

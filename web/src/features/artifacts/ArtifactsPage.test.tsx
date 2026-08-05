@@ -6,10 +6,10 @@ import { ArtifactApiError, type Artifact, type ArtifactSectionGeneration, type A
 import type { WorkflowDetail, WorkflowStatus } from "../../api/business";
 import { ArtifactDetailPage, ArtifactsPage } from "./ArtifactsPage";
 
-const artifact: Artifact = { id: "12000000-0000-4000-8000-000000000002", workspaceId: "12000000-0000-4000-8000-000000000001", type: "knowledge-note", title: "Gap artifact", status: "PUBLISH_PROPOSED", scopeDefinition: "scope", sourceCoverage: [{ sectionKey: "gap", status: "GAP", gaps: [{ code: "KNOWLEDGE_GAP", description: "missing" }] }], currentRevisionId: "12000000-0000-4000-8000-000000000003", version: 4, createdAt: "2026-07-26T00:00:00Z", updatedAt: "2026-07-26T00:00:00Z", revision: { id: "12000000-0000-4000-8000-000000000003", artifactId: "12000000-0000-4000-8000-000000000002", revisionNo: 4, outline: [{ key: "gap", title: "Gap" }], sections: [{ key: "gap", title: "Gap", content: "", citations: [], coverage: { sectionKey: "gap", status: "GAP", gaps: [{ code: "KNOWLEDGE_GAP", description: "missing" }] } }], createdBy: "HUMAN", contentHash: "a".repeat(64), createdAt: "2026-07-26T00:00:00Z" } };
+const artifact: Artifact = { id: "12000000-0000-4000-8000-000000000002", workspaceId: "12000000-0000-4000-8000-000000000001", type: "knowledge-note", title: "Gap artifact", status: "PUBLISH_PROPOSED", scopeDefinition: "scope", sourceCoverage: [{ sectionKey: "gap", status: "GAP", gaps: [{ code: "KNOWLEDGE_GAP", description: "missing" }] }], currentRevisionId: "12000000-0000-4000-8000-000000000003", version: 4, createdAt: "2026-07-26T00:00:00Z", updatedAt: "2026-07-26T00:00:00Z", revision: { id: "12000000-0000-4000-8000-000000000003", artifactId: "12000000-0000-4000-8000-000000000002", revisionNo: 4, outline: [{ key: "gap", title: "Gap" }], sections: [{ key: "gap", title: "Gap", content: "", citations: [], documentSources: [], coverage: { sectionKey: "gap", status: "GAP", gaps: [{ code: "KNOWLEDGE_GAP", description: "missing" }] } }], createdBy: "HUMAN", contentHash: "a".repeat(64), createdAt: "2026-07-26T00:00:00Z" } };
 const evidenceArtifact: Artifact = { ...artifact, status: "DRAFT", sourceCoverage: [{ sectionKey: "covered", status: "COVERED", gaps: [] }, { sectionKey: "partial", status: "PARTIAL", gaps: [{ code: "MISSING_DETAIL", description: "citation is bounded" }] }], revision: { ...artifact.revision, outline: [{ key: "covered", title: "Covered" }, { key: "partial", title: "Partial" }], sections: [
-  { key: "covered", title: "Covered", content: "covered body", citations: [{ sourceVersionId: "12000000-0000-4000-8000-000000000004", sourceSpanId: "12000000-0000-4000-8000-000000000005", verifiedContentHash: "a".repeat(64), excerpt: "covered citation", verified: true }], coverage: { sectionKey: "covered", status: "COVERED", gaps: [] } },
-  { key: "partial", title: "Partial", content: "partial body", citations: [{ sourceVersionId: "12000000-0000-4000-8000-000000000006", sourceSpanId: "12000000-0000-4000-8000-000000000007", verifiedContentHash: "a".repeat(64), excerpt: "partial citation", verified: true }], coverage: { sectionKey: "partial", status: "PARTIAL", gaps: [{ code: "MISSING_DETAIL", description: "citation is bounded" }] } },
+  { key: "covered", title: "Covered", content: "covered body", citations: [{ sourceVersionId: "12000000-0000-4000-8000-000000000004", sourceSpanId: "12000000-0000-4000-8000-000000000005", verifiedContentHash: "a".repeat(64), excerpt: "covered citation", verified: true }], documentSources: [], coverage: { sectionKey: "covered", status: "COVERED", gaps: [] } },
+  { key: "partial", title: "Partial", content: "partial body", citations: [], documentSources: [{ documentId: "12000000-0000-4000-8000-000000000006", articleRevisionId: "12000000-0000-4000-8000-000000000007", revisionNo: 2, verifiedContentHash: "a".repeat(64), verified: true }], coverage: { sectionKey: "partial", status: "PARTIAL", gaps: [{ code: "MISSING_DETAIL", description: "citation is bounded" }] } },
 ] } };
 const generatingArtifact: Artifact = { ...artifact, status: "GENERATING", sourceCoverage: [], revision: { ...artifact.revision, sections: [] } };
 const revisingArtifact: Artifact = { ...evidenceArtifact, status: "GENERATING", version: 5 };
@@ -85,14 +85,15 @@ describe("Artifact pages", () => {
     expect(screen.getByText("此章节没有正文，缺口已显式记录。")).toBeInTheDocument();
   });
 
-  it("renders server-verified COVERED and PARTIAL Citations with their distinct Coverage", () => {
+  it("renders formal Citations and document sources separately with their distinct Coverage", () => {
     mocks.detail = { isPending: false, isError: false, data: evidenceArtifact, refetch: detailRefetch };
     renderDetail();
 
     expect(screen.getAllByText("COVERED").length).toBeGreaterThan(0);
     expect(screen.getAllByText("PARTIAL").length).toBeGreaterThan(0);
     expect(screen.getByText("covered citation")).toBeInTheDocument();
-    expect(screen.getByText("partial citation")).toBeInTheDocument();
+    expect(screen.getByText("来源文档")).toBeInTheDocument();
+    expect(screen.getByText(/Revision 2/)).toBeInTheDocument();
     expect(screen.getByText("citation is bounded")).toBeInTheDocument();
   });
 

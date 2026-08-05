@@ -1,0 +1,54 @@
+.git-remote-settings { min-width: 0; }
+.git-remote-settings .settings-section__header > .ui-badge { flex: 0 0 auto; white-space: nowrap; }
+.git-sync-loading, .git-remote-feedback, .git-remote-validation, .git-remote-error { display: flex; align-items: center; gap: .45rem; margin: 0; overflow-wrap: anywhere; }
+.git-sync-loading { min-height: 8rem; justify-content: center; color: var(--muted); }
+.git-remote-form { display: grid; min-width: 0; gap: 1rem; }
+.git-remote-fields { display: grid; grid-template-columns: minmax(10rem, .55fr) minmax(16rem, 1fr); gap: .8rem; }
+.git-remote-fields > label, .git-secret-control { display: grid; min-width: 0; gap: .4rem; color: var(--muted); font-size: .74rem; font-weight: 750; }
+.git-remote-field--wide { grid-column: 1 / -1; }
+.git-remote-fields input[type="url"], .git-remote-fields input:not([type]), .git-secret-control > input { width: 100%; min-width: 0; min-height: 44px; border: 1px solid var(--line); border-radius: 4px; padding: .65rem; background: rgb(255 255 255 / 64%); color: var(--ink); font: inherit; }
+.git-remote-toggle { grid-template-columns: auto minmax(0, 1fr); align-items: center; border-left: 2px solid var(--line); padding: .45rem .7rem; }
+.git-remote-toggle input { width: 1rem; height: 1rem; }
+.git-remote-toggle span { display: grid; gap: .18rem; }
+.git-remote-toggle strong { color: var(--ink); font-size: .78rem; }
+.git-remote-toggle small { font-weight: 500; line-height: 1.35; }
+.git-secret-control { margin: 0; border: 0; border-top: 1px solid var(--line); padding: 1rem 0 0; }
+.git-secret-control legend { display: inline-flex; align-items: center; gap: .4rem; padding: 0; color: var(--ink); font-size: .8rem; font-weight: 750; }
+.git-secret-control > div { display: flex; flex-wrap: wrap; gap: .5rem 1rem; }
+.git-secret-control > div label { display: inline-flex; align-items: center; gap: .35rem; }
+.git-secret-control > div input { width: 1rem; height: 1rem; }
+.git-remote-validation { color: var(--muted); font-size: .78rem; }
+.git-remote-error { border-left: 3px solid var(--red); padding: .7rem .8rem; background: rgb(161 54 45 / 7%); color: var(--red); font-size: .8rem; }
+.git-remote-feedback { border-left: 3px solid var(--green); padding: .7rem .8rem; background: rgb(41 101 70 / 6%); color: var(--green); font-size: .8rem; }
+.git-remote-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.git-sync-divider { height: 1px; margin: 1.6rem 0; background: var(--line); }
+.git-sync-status > header, .git-sync-history > header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; margin-bottom: .8rem; }
+.git-sync-status h3, .git-sync-history h3 { margin: 0; font-size: .95rem; }
+.git-sync-status header p { margin: .2rem 0 0; color: var(--muted); font-size: .76rem; }
+.git-sync-run { display: grid; min-width: 0; gap: .75rem; border-block: 1px solid var(--line); padding: .9rem 0; }
+.git-sync-run > header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; color: var(--muted); font-size: .72rem; }
+.git-sync-run > header > div { display: flex; align-items: center; gap: .55rem; }
+.git-sync-run__facts { display: grid; grid-template-columns: .55fr 1.25fr .75fr; }
+.git-sync-run__facts > div { display: grid; min-width: 0; gap: .25rem; padding: .25rem .75rem; border-left: 1px solid var(--line); }
+.git-sync-run__facts > div:first-child { border-left: 0; padding-left: 0; }
+.git-sync-run__facts span { color: var(--muted); font-size: .68rem; font-weight: 700; }
+.git-sync-run__facts strong { display: flex; min-width: 0; align-items: center; gap: .35rem; overflow-wrap: anywhere; font-size: .78rem; }
+.git-sync-run__notice { display: flex; align-items: center; gap: .4rem; margin: 0; color: var(--red); font-size: .78rem; }
+.git-sync-run__changes summary { cursor: pointer; color: var(--blue); font-size: .76rem; font-weight: 650; }
+.git-sync-run__changes ul { display: grid; gap: .35rem; max-height: 14rem; margin: .65rem 0 0; padding: 0; overflow: auto; list-style: none; }
+.git-sync-run__changes li { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: .5rem; font-size: .72rem; }
+.git-sync-run__changes li span { color: var(--muted); }
+.git-sync-run__changes code { overflow-wrap: anywhere; }
+.git-sync-run > .ui-button { justify-self: start; }
+.git-sync-history { margin-top: 1.5rem; }
+.git-sync-history__list { display: grid; }
+.git-remote-settings .is-spinning { animation: model-settings-spin 1.2s linear infinite; }
+
+@media (max-width: 720px) {
+  .git-remote-fields, .git-sync-run__facts { grid-template-columns: 1fr; }
+  .git-remote-field--wide { grid-column: auto; }
+  .git-sync-run__facts > div { border-left: 0; border-top: 1px solid var(--line); padding: .6rem 0 0; }
+  .git-sync-run__facts > div:first-child { border-top: 0; padding-top: 0; }
+  .git-sync-status > header { align-items: stretch; flex-direction: column; }
+  .git-sync-status > header .ui-button { width: 100%; }
+}

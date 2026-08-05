@@ -615,17 +615,25 @@ type revisionResponse struct {
 	CreatedAt   string                  `json:"created_at"`
 }
 type sectionResponse struct {
-	Key       string             `json:"key"`
-	Title     string             `json:"title"`
-	Content   string             `json:"content"`
-	Citations []citationResponse `json:"citations"`
-	Coverage  coverageResponse   `json:"coverage"`
+	Key             string                   `json:"key"`
+	Title           string                   `json:"title"`
+	Content         string                   `json:"content"`
+	Citations       []citationResponse       `json:"citations"`
+	DocumentSources []documentSourceResponse `json:"document_sources"`
+	Coverage        coverageResponse         `json:"coverage"`
 }
 type citationResponse struct {
 	SourceVersionID     string `json:"source_version_id"`
 	SourceSpanID        string `json:"source_span_id"`
 	VerifiedContentHash string `json:"verified_content_hash"`
 	Excerpt             string `json:"excerpt"`
+	Verified            bool   `json:"verified"`
+}
+type documentSourceResponse struct {
+	DocumentID          string `json:"document_id"`
+	ArticleRevisionID   string `json:"article_revision_id"`
+	RevisionNo          int64  `json:"revision_no"`
+	VerifiedContentHash string `json:"verified_content_hash"`
 	Verified            bool   `json:"verified"`
 }
 type coverageResponse struct {
@@ -697,7 +705,12 @@ func toArtifactResponse(state artifactapp.State) artifactResponse {
 			citation := section.Citations[j]
 			citations[j] = citationResponse{SourceVersionID: string(citation.SourceVersionID), SourceSpanID: string(citation.SourceSpanID), VerifiedContentHash: citation.VerifiedContentHash, Excerpt: citation.Excerpt, Verified: citation.Verified}
 		}
-		sections[i] = sectionResponse{Key: section.Key, Title: section.Title, Content: section.Content, Citations: citations, Coverage: toCoverageResponse(section.Coverage)}
+		documentSources := make([]documentSourceResponse, len(section.DocumentSources))
+		for j := range section.DocumentSources {
+			source := section.DocumentSources[j]
+			documentSources[j] = documentSourceResponse{DocumentID: string(source.DocumentID), ArticleRevisionID: string(source.ArticleRevisionID), RevisionNo: source.RevisionNo, VerifiedContentHash: source.VerifiedContentHash, Verified: source.Verified}
+		}
+		sections[i] = sectionResponse{Key: section.Key, Title: section.Title, Content: section.Content, Citations: citations, DocumentSources: documentSources, Coverage: toCoverageResponse(section.Coverage)}
 	}
 	return artifactResponse{ID: string(artifact.ID), WorkspaceID: string(artifact.WorkspaceID), Type: artifact.Type, Title: artifact.Title, Status: string(artifact.Status), ScopeDefinition: artifact.ScopeDefinition, SourceCoverage: coverageResponses(artifact.SourceCoverage), CurrentRevisionID: string(artifact.CurrentRevisionID), Version: artifact.Version, CreatedAt: formatTime(artifact.CreatedAt), UpdatedAt: formatTime(artifact.UpdatedAt), Revision: revisionResponse{ID: string(revision.ID), ArtifactID: string(revision.ArtifactID), RevisionNo: revision.RevisionNo, Outline: outline, Sections: sections, CreatedBy: string(revision.CreatedBy), Metadata: metadataResponse(revision.Metadata), ContentHash: revision.ContentHash, CreatedAt: formatTime(revision.CreatedAt)}}
 }

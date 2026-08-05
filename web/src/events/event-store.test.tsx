@@ -80,6 +80,7 @@ const renderStore = (
 const seedRecoveryQueries = (queryClient: QueryClient, workspaceId: string, order: string[]): void => {
   const queries = [
     { key: ["business", workspaceId, "sources"], label: "business" },
+    { key: ["document-history", workspaceId, "documents"], label: "document-history" },
     { key: ["rag", workspaceId, "conversation", "c1"], label: "rag" },
     { key: ["collections", workspaceId, "list"], label: "collections" },
     { key: ["collection-exports", workspaceId, "collection", ""], label: "collection-exports" },
@@ -256,6 +257,38 @@ describe("EventStoreProvider", () => {
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("45");
   });
 
+  it("Capture 事件只把当前 Workspace 的 Capture Query 标为失效", async () => {
+    setActiveWorkspaceId(workspaceA);
+    const queryClient = renderStore();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+    const captureId = "7a000000-0000-4000-8000-000000000015";
+
+    await act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1, id: "46", type: "capture.updated", occurredAt: "2026-07-22T00:00:03Z",
+      workspaceId: workspaceA, resourceRef: `capture:${captureId}`, resourceVersion: 2,
+      payloadSummary: {}, invalidations: [{ resource: "capture", id: captureId }],
+    }));
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["captures", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["captures", workspaceB] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "sources"] }, { throwOnError: true });
+    expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("46");
+  });
+
+  it("Git Sync 事件只失效所属 Workspace 的 Git 设置查询", async () => {
+    setActiveWorkspaceId(workspaceA);
+    const queryClient = renderStore();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+    await act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1, id: "461", type: "git.sync.run.updated", occurredAt: "2026-07-22T00:00:03Z",
+      workspaceId: workspaceA, resourceRef: "git_sync_run:7a000000-0000-4000-8000-000000000015", resourceVersion: 2,
+      payloadSummary: {}, invalidations: [{ resource: "git_sync_run", id: "7a000000-0000-4000-8000-000000000015" }],
+    }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["settings", "git-sync", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["settings", "git-sync", workspaceB] }, { throwOnError: true });
+    expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("461");
+  });
+
   it("Workflow 事件定向失效 Business Query", async () => {
     setActiveWorkspaceId(workspaceA);
     const queryClient = renderStore();
@@ -274,6 +307,8 @@ describe("EventStoreProvider", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposals"] }, { throwOnError: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposal"] }, { throwOnError: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposal-current-content"] }, { throwOnError: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["captures", workspaceA] }, { throwOnError: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["organizing", workspaceA] }, { throwOnError: true });
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["rag", workspaceA] });
   });
 
@@ -353,7 +388,83 @@ describe("EventStoreProvider", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["semantic-links", workspaceA] }, { throwOnError: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["collections", workspaceA] }, { throwOnError: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["knowledge-health", workspaceA] }, { throwOnError: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["authoring", workspaceA] }, { throwOnError: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["document-history", workspaceA] });
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("47");
+  });
+
+  it("Document History 旧 cursor 变 stale 时仍提交实时事件游标", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const staleHistoryKey = [
+      "document-history", workspaceA, "documents", "7a000000-0000-4000-8000-000000000020",
+      "history", "a".repeat(40), "stale-cursor", 30,
+    ] as const;
+    const staleRequest = vi.fn().mockRejectedValue(new Error("DOCUMENT_HISTORY_CURSOR_STALE"));
+    queryClient.setQueryData(staleHistoryKey, { items: [{ kind: "EXTERNAL" }] });
+    const observer = new QueryObserver(queryClient, { queryKey: staleHistoryKey, queryFn: staleRequest, staleTime: Infinity });
+    const unsubscribe = observer.subscribe(() => undefined);
+    setActiveWorkspaceId(workspaceA);
+    renderStore(queryClient);
+
+    await expect(act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1,
+      id: "4710",
+      type: "proposal.applied",
+      occurredAt: "2026-07-22T00:00:05Z",
+      workspaceId: workspaceA,
+      resourceRef: "proposal:7a000000-0000-4000-8000-000000000015",
+      resourceVersion: 4,
+      payloadSummary: { status: "applied" },
+      invalidations: [],
+    }))).resolves.toBeUndefined();
+
+    expect(staleRequest).toHaveBeenCalledOnce();
+    expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("4710");
+    unsubscribe();
+  });
+
+  it("Authoring 事件只失效当前 Workspace 的创作查询族", async () => {
+    setActiveWorkspaceId(workspaceA);
+    const queryClient = renderStore();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+
+    await act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1,
+      id: "470",
+      type: "authoring.working_draft.updated",
+      occurredAt: "2026-07-22T00:00:04Z",
+      workspaceId: workspaceA,
+      resourceRef: "working_draft:7a000000-0000-4000-8000-000000000017",
+      resourceVersion: 2,
+      payloadSummary: { status: "editing" },
+      invalidations: [{ resource: "working_draft", id: "7a000000-0000-4000-8000-000000000017" }],
+    }));
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["authoring", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["authoring", workspaceB] }, { throwOnError: true });
+    expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("470");
+  });
+
+  it("Organizing 事件只失效当前 Workspace 的整理查询族", async () => {
+    setActiveWorkspaceId(workspaceA);
+    const queryClient = renderStore();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+
+    await act(async () => connectionMock.options[0]?.onEvent?.({
+      schemaVersion: 1,
+      id: "471",
+      type: "organizing.snapshot.confirmed",
+      occurredAt: "2026-07-22T00:00:05Z",
+      workspaceId: workspaceA,
+      resourceRef: "organizing_snapshot:7a000000-0000-4000-8000-000000000018",
+      resourceVersion: 1,
+      payloadSummary: {},
+      invalidations: [{ resource: "organizing_snapshot", id: "7a000000-0000-4000-8000-000000000018" }],
+    }));
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["organizing", workspaceA] }, { throwOnError: true });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["organizing", workspaceB] }, { throwOnError: true });
+    expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("471");
   });
 
   it("Collection 事件刷新自身，Health 事件同时刷新 Issue 与 Collection result 摘要", async () => {
@@ -476,6 +587,32 @@ describe("EventStoreProvider", () => {
 
     expect(queryClient.getQueryData(searchKey)).toBeUndefined();
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("41");
+  });
+
+  it("SSE recovery 移除旧 Document History cursor 窗口且不重放 stale 请求", async () => {
+    window.sessionStorage.setItem(`zhixu.event-cursor.${workspaceA}`, "41");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(workspaceResponse(workspaceA)));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const staleHistoryKey = [
+      "document-history", workspaceA, "documents", "7a000000-0000-4000-8000-000000000020",
+      "history", "a".repeat(40), "stale-cursor", 30,
+    ] as const;
+    const staleRequest = vi.fn().mockRejectedValue(new Error("DOCUMENT_HISTORY_CURSOR_STALE"));
+    queryClient.setQueryData(staleHistoryKey, { items: [{ kind: "EXTERNAL" }] });
+    const observer = new QueryObserver(queryClient, { queryKey: staleHistoryKey, queryFn: staleRequest, staleTime: Infinity });
+    const unsubscribe = observer.subscribe(() => undefined);
+    setActiveWorkspaceId(workspaceA);
+    renderStore(queryClient);
+
+    await expect(connectionMock.options[0]?.onRecoveryRequired({
+      reason: "cursor_expired",
+      workspaceId: workspaceA,
+    })).resolves.toBeUndefined();
+
+    expect(staleRequest).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(staleHistoryKey)).toBeUndefined();
+    expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBeNull();
+    unsubscribe();
   });
 
   it("Search 恢复丢弃旧 cursor 窗口并执行当前页面的首屏回调", async () => {
@@ -601,6 +738,7 @@ describe("EventStoreProvider", () => {
     expect(requestUrl).toContain(`/api/v1/workspaces/${workspaceA}`);
     expect(request?.[1]?.signal).toBeInstanceOf(AbortSignal);
     expect(order).toEqual(["workspace", "business", "rag", "collections", "collection-exports", "knowledge-health", "graph", "semantic-links"]);
+    expect(queryClient.getQueryData(["document-history", workspaceA, "documents"])).toBeUndefined();
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBeNull();
   });
 

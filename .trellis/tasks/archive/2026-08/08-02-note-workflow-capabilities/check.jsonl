@@ -1,0 +1,5 @@
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"检查数据库、错误、安全、并发、恢复、严格 Decoder 与浏览器门禁"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查跨层字段、版本、状态和错误是否完整贯通"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"检查是否产生重复事实源、重复工具或重复解码"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/repository-evidence.md","reason":"对照仓库证据检查设计与实际边界一致"}
+{"file":"docs/architecture/CONTEXT.md","reason":"检查创作、草稿、Artifact 与采集语义没有重新混用"}

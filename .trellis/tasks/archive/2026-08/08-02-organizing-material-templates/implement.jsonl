@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/index.md","reason":"Organizing 组合 Retrieval、Knowledge、Artifact、Workflow 与 Change Control 的模块边界"}
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"四类整理结果、Citation、Coverage/GAP、Artifact Revision 和 Publish 约束"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"模板指令、材料 Evidence、Workspace Capability 与 Prompt Injection 边界"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"Draft/Snapshot/Template persistence、错误、幂等、迁移和跨层质量契约"}
+{"file":".trellis/spec/frontend/artifact-workbench.md","reason":"整理结果与现有 Artifact 工作台/发布路径兼容"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"服务端 Draft/Snapshot/Run、Workspace cache 和 SSE invalidation"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Material union、Template declaration 和 Workflow 状态严格解码"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"材料、模板、Snapshot、Workflow、Artifact/Proposal 全链路"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/repository-evidence.md","reason":"复用 Search、Artifact Human Task 与 Change Control 的仓库证据"}

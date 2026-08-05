@@ -40,13 +40,17 @@ func (s *Service) GetClaims(ctx context.Context, query GetClaimsQuery) ([]domain
 	if err := validateCommandContext(s, ctx); err != nil {
 		return nil, err
 	}
+	return getClaims(ctx, s.dependencies.Repository, query)
+}
+
+func getClaims(ctx context.Context, repository ClaimQueryRepository, query GetClaimsQuery) ([]domain.ClaimWithSources, error) {
 	if err := validateBatchQuery(query.WorkspaceID, query.IDs, query.Limit); err != nil {
 		return nil, err
 	}
 	if !validClaimStatuses(query.Statuses) {
 		return nil, requestError("claim query statuses are invalid")
 	}
-	result, err := s.dependencies.Repository.BatchGetClaims(ctx, query)
+	result, err := repository.BatchGetClaims(ctx, query)
 	if err != nil {
 		return nil, err
 	}

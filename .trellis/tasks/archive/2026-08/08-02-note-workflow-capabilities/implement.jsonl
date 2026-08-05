@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"父任务跨 Workspace、Ingestion、Retrieval、Workflow、Change Control 与 Git，需遵守后端模块边界"}
+{"file":".trellis/spec/frontend/index.md","reason":"父任务包含 Quick Capture、整理页、History 与 Settings 的跨 Feature UI"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"各子任务均跨 API、Application、Database、Worker 与 Web"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用 Source、Artifact、Workflow、Git Runner 与 Secret 能力，防止第二套实现"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/repository-evidence.md","reason":"共享已验证代码入口、现状缺口和模块归属"}
+{"file":"docs/architecture/CONTEXT.md","reason":"统一 Authoring、Document Draft、Artifact、Quick Capture 与整理输入术语"}

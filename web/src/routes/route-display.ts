@@ -1,4 +1,4 @@
-export type RouteSection = "dashboard" | "knowledge" | "output" | "settings";
+export type RouteSection = "dashboard" | "knowledge" | "authoring" | "settings";
 
 export type RouteNavigationIcon =
   | "activity"
@@ -14,6 +14,7 @@ export type RouteNavigationIcon =
   | "message-square"
   | "search"
   | "settings"
+  | "square-pen"
   | "user-round-check";
 
 interface RouteNavigationGroup {
@@ -40,6 +41,7 @@ export const routeDisplayRegistry: readonly RouteDisplay[] = [
   { basePath: "/", label: "连接工作区", section: "settings", exact: true },
   { basePath: "/dashboard", label: "工作台", section: "dashboard", navigation: { placement: "primary", label: "工作台", order: 0, icon: "dashboard" } },
   { basePath: "/inbox", label: "资料收件箱", section: "knowledge", navigation: { placement: "primary", label: "知识", order: 1, icon: "inbox", group: { label: "资料", order: 0, itemOrder: 0 } } },
+  { basePath: "/captures", label: "快速记录", parentLabel: "资料收件箱", section: "knowledge" },
   { basePath: "/documents", label: "资料版本", parentLabel: "资料收件箱", section: "knowledge" },
   { basePath: "/search", label: "检索", section: "knowledge", navigation: { placement: "submenu", icon: "search", group: { label: "探索", order: 1, itemOrder: 0 } } },
   { basePath: "/chat", label: "对话", section: "knowledge", navigation: { placement: "submenu", icon: "message-square", group: { label: "探索", order: 1, itemOrder: 1 } } },
@@ -50,9 +52,13 @@ export const routeDisplayRegistry: readonly RouteDisplay[] = [
   { basePath: "/review", label: "复习", section: "knowledge", navigation: { placement: "submenu", icon: "book-open-check", group: { label: "学习", order: 3, itemOrder: 0 } } },
   { basePath: "/memories", label: "记忆", section: "knowledge", navigation: { placement: "submenu", icon: "brain", group: { label: "学习", order: 3, itemOrder: 1 } } },
   { basePath: "/interviews", label: "访谈", section: "knowledge", navigation: { placement: "submenu", icon: "user-round-check", group: { label: "学习", order: 3, itemOrder: 2 } } },
-  { basePath: "/proposals", label: "提案", section: "output", navigation: { placement: "primary", label: "产出", order: 2, icon: "file-check", group: { label: "产出", order: 0, itemOrder: 0 } } },
-  { basePath: "/workflows", label: "流程", section: "output", navigation: { placement: "submenu", icon: "activity", group: { label: "产出", order: 0, itemOrder: 1 } } },
-  { basePath: "/artifacts", label: "产物", section: "output", navigation: { placement: "submenu", icon: "file-text", group: { label: "产出", order: 0, itemOrder: 2 } } },
+  { basePath: "/authoring", label: "创作", section: "authoring", navigation: { placement: "primary", label: "创作", order: 2, icon: "square-pen" } },
+  { basePath: "/authoring/new", label: "新建文章", parentLabel: "创作", section: "authoring" },
+  { basePath: "/authoring/documents", label: "文档历史", parentLabel: "创作", section: "authoring" },
+  { basePath: "/authoring/organize", label: "整理成文", parentLabel: "创作", section: "authoring" },
+  { basePath: "/proposals", label: "提案", section: "authoring" },
+  { basePath: "/workflows", label: "流程", section: "authoring" },
+  { basePath: "/artifacts", label: "产物", section: "authoring" },
   { basePath: "/workspace", label: "连接工作区", section: "settings" },
   { basePath: "/settings", label: "设置", section: "settings", navigation: { placement: "footer", label: "设置", order: 0, icon: "settings" } },
 ] as const;

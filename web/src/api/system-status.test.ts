@@ -6,6 +6,9 @@ const learningCapabilities = {
   review: { status: "ready" },
   memory: { status: "ready" },
   interview: { status: "ready" },
+  authoring: { status: "ready" },
+  capture: { status: "ready" },
+  organizing: { status: "ready" },
 } as const;
 
 describe("decodeSystemStatus", () => {
@@ -38,6 +41,9 @@ describe("decodeSystemStatus", () => {
       review: { status: "ready" },
       memory: { status: "ready" },
       interview: { status: "ready" },
+      authoring: { status: "ready" },
+      capture: { status: "ready" },
+      organizing: { status: "ready" },
       auth: { status: "disabled" },
       requestId: "request-1",
     });

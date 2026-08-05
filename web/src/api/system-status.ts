@@ -48,6 +48,15 @@ export interface SystemStatus {
   interview: {
     status: LearningCapabilityStatus;
   };
+  authoring: {
+    status: LearningCapabilityStatus;
+  };
+  capture: {
+    status: LearningCapabilityStatus;
+  };
+  organizing: {
+    status: LearningCapabilityStatus;
+  };
   auth: {
     status: AuthCapabilityStatus;
     reason?: "auth_dependencies_unavailable";
@@ -140,14 +149,14 @@ const readAuthStatus = (value: unknown): AuthCapabilityStatus => {
 };
 
 export const decodeSystemStatus = (value: unknown): SystemStatus => {
-  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.graph) || !isRecord(value.semantic_links) || !isRecord(value.rag) || !isRecord(value.collections) || !isRecord(value.knowledge_health) || !isRecord(value.knowledge_timeline) || !isRecord(value.review) || !isRecord(value.memory) || !isRecord(value.interview) || !isRecord(value.auth)) {
+  if (!isRecord(value) || !isRecord(value.database) || !isRecord(value.graph) || !isRecord(value.semantic_links) || !isRecord(value.rag) || !isRecord(value.collections) || !isRecord(value.knowledge_health) || !isRecord(value.knowledge_timeline) || !isRecord(value.review) || !isRecord(value.memory) || !isRecord(value.interview) || !isRecord(value.authoring) || !isRecord(value.capture) || !isRecord(value.organizing) || !isRecord(value.auth)) {
     throw new ApiBoundaryError(
       "INVALID_RESPONSE",
       "系统状态响应结构无效",
       false,
     );
   }
-  assertExactKeys(value, ["status", "version", "database", "graph", "semantic_links", "rag", "collections", "knowledge_health", "knowledge_timeline", "review", "memory", "interview", "auth", "request_id"], "root");
+  assertExactKeys(value, ["status", "version", "database", "graph", "semantic_links", "rag", "collections", "knowledge_health", "knowledge_timeline", "review", "memory", "interview", "authoring", "capture", "organizing", "auth", "request_id"], "root");
   assertExactKeys(value.database, ["status", "message"], "database");
   assertExactKeys(value.graph, ["status", "reason"], "graph");
   assertExactKeys(value.semantic_links, ["status", "reason"], "semantic_links");
@@ -158,6 +167,9 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
   assertExactKeys(value.review, ["status"], "review");
   assertExactKeys(value.memory, ["status"], "memory");
   assertExactKeys(value.interview, ["status"], "interview");
+  assertExactKeys(value.authoring, ["status"], "authoring");
+  assertExactKeys(value.capture, ["status"], "capture");
+  assertExactKeys(value.organizing, ["status"], "organizing");
   assertExactKeys(value.auth, ["status", "reason"], "auth");
 
   const message = value.database.message;
@@ -210,6 +222,9 @@ export const decodeSystemStatus = (value: unknown): SystemStatus => {
     review: { status: readBoundedCapabilityStatus(value.review.status, "review") },
     memory: { status: readBoundedCapabilityStatus(value.memory.status, "memory") },
     interview: { status: readBoundedCapabilityStatus(value.interview.status, "interview") },
+    authoring: { status: readBoundedCapabilityStatus(value.authoring.status, "authoring") },
+    capture: { status: readBoundedCapabilityStatus(value.capture.status, "capture") },
+    organizing: { status: readBoundedCapabilityStatus(value.organizing.status, "organizing") },
     auth: { status: readAuthStatus(value.auth.status), ...(authReason === undefined ? {} : { reason: authReason }) },
     requestId: readNonEmptyString(value.request_id, "request_id"),
   };

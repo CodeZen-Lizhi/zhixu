@@ -364,6 +364,20 @@ func renderMarkdown(snapshot artifactapp.ExportSnapshot) []byte {
 				writeQuotedBlock(&builder, citation.Excerpt)
 			}
 		}
+		if len(section.DocumentSources) > 0 {
+			builder.WriteString("\n### Source Documents\n\n")
+			for _, source := range section.DocumentSources {
+				builder.WriteString("- Document: `")
+				builder.WriteString(string(source.DocumentID))
+				builder.WriteString("`; Article Revision: `")
+				builder.WriteString(string(source.ArticleRevisionID))
+				builder.WriteString("`; Revision Number: `")
+				builder.WriteString(fmt.Sprintf("%d", source.RevisionNo))
+				builder.WriteString("`; SHA-256: `")
+				builder.WriteString(source.VerifiedContentHash)
+				builder.WriteString("`\n")
+			}
+		}
 		builder.WriteByte('\n')
 	}
 	return []byte(builder.String())

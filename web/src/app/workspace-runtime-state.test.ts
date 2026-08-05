@@ -15,6 +15,10 @@ describe("clearWorkspaceRuntimeState", () => {
     const cancel = vi.spyOn(queryClient, "cancelQueries");
     const remove = vi.spyOn(queryClient, "removeQueries");
 
+    expect(workspaceQueryRoots).toContain("authoring");
+    expect(workspaceQueryRoots).toContain("document-history");
+    expect(workspaceQueryRoots).toContain("organizing");
+
     await clearWorkspaceRuntimeState(queryClient, workspaceId);
 
     expect(cancel.mock.calls.map(([filters]) => filters?.queryKey)).toEqual(

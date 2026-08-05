@@ -393,6 +393,8 @@ updateLearningPathStep({ workspaceId, pathId, stepId, expectedVersion, status, i
 - Interview Candidate 按原客户端 key 提交；`replayed=true` 既可能是同 key 重试，也可能是另一个 key 对同一 Path step 的
   语义复用。UI 只表达“该步骤已有待确认候选”，不得误称为本次 key 的精确重放。
 - Query key 固定以 Workspace 开头，切换 Workspace 时取消并清除 Review/Interview/Memory 缓存，并由 REST 回查恢复事实。
+- `AuthProvider` 返回 `authenticated + disabled` 时没有可绑定的用户主体；Memory 与 Interview 路由必须在功能组件挂载前
+  显示明确不可用状态，不能先执行 Query/Mutation 再把服务端 `403` 当成普通页面错误。`required + authenticated` 行为保持不变。
 
 ### 4. Validation & Error Matrix
 
@@ -412,6 +414,7 @@ updateLearningPathStep({ workspaceId, pathId, stepId, expectedVersion, status, i
 | Review Path 创建表单尝试提交 gap/Score/Evidence/Artifact | API client 不提供这些字段；请求仅发送 `workspace_id`，不让浏览器成为来源事实 owner |
 | Review Path 后端 503、Problem 或持久化不可用 | 显示可恢复错误并保留原 mutation variables；不得本地生成 Path 或把路由存在解释为成功 |
 | 无 Active Workspace | 不发 Review/Interview/Memory 请求，显示可操作的 Workspace gate |
+| development `disabled` 打开 Memory、Interview 或 Interview Session 深链 | 保留原 URL 和单一页面标题；功能组件不挂载，受保护 Query/Mutation 请求数为 0 |
 | 390x844 横向溢出或 console warning/error | 浏览器门禁失败 |
 
 ### 5. Good / Base / Bad Cases
@@ -429,7 +432,7 @@ updateLearningPathStep({ workspaceId, pathId, stepId, expectedVersion, status, i
   命令 provenance 字段拒绝。
 - Query/Component：Workspace key/cache cleanup、same-key response-loss retry、SSE invalidation/recovery、Candidate Confirm、
   pause/resume/delete、Review answer result、Answer URL Path 恢复/创建条件/状态与步骤、`learning_path.*` 精确失效、Interview
-  完成与 Path 状态、Loading/Empty/Error/Conflict。
+  完成与 Path 状态、Loading/Empty/Error/Conflict；路由测试还必须证明 development `disabled` 下三条身份型深链不挂载功能组件。
 - Canonical：`npm run lint --prefix web`、`npm run typecheck --prefix web`、`npm run test --prefix web`、
   `npm run build --prefix web`、`git diff --check`；真实 Vite 在桌面和 `390x844` 检查路由、Workspace gate、overflow
   与 console。具有可用 Workspace 时，还必须完成真实 Candidate Confirm、一次 Review answer 路径和一次 Interview/Path
@@ -449,6 +452,9 @@ Correct: 任何用户 Memory 命令都不含 provenance；INTERVIEW 来源由服
 
 Wrong: 浏览器把评分转换成 gap/Evidence 后创建 Review Path，或收到 503 后本地伪造成功 Path。
 Correct: 客户端只提交 Workspace/Answer/key；严格解码服务端 REVIEW origin Path，失败保持显式且用 REST 重试恢复。
+
+Wrong: development `disabled` 仍挂载 Memory/Interview 页面，等待受保护接口返回 403 后再显示错误。
+Correct: 路由壳先检查认证模式；没有用户主体时直接显示不可用状态，只有 `required + authenticated` 才挂载数据 Hook。
 ```
 
 ## Scenario: M7 Timeline / Impact Quality Gate

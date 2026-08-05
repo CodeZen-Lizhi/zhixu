@@ -16,6 +16,8 @@ type fakeRepository struct {
 	start                domain.StartRequest
 	claimNow, claimUntil time.Time
 	submittedVersion     int64
+	pendingTask          domain.HumanTask
+	pendingTaskFound     bool
 	err                  error
 }
 
@@ -43,6 +45,27 @@ func (f *fakeRepository) CreateHumanTask(_ context.Context, t domain.HumanTask, 
 func (f *fakeRepository) SubmitHumanTask(_ context.Context, _ foundation.ID, v int64, _ json.RawMessage, _ time.Time, _ domain.OutboxEvent) (domain.HumanTask, error) {
 	f.submittedVersion = v
 	return domain.HumanTask{}, f.err
+}
+func (f *fakeRepository) GetPendingHumanTask(context.Context, foundation.ID) (domain.HumanTask, bool, error) {
+	return f.pendingTask, f.pendingTaskFound, f.err
+}
+
+func TestGetPendingHumanTaskReturnsOwnerValidatedTask(t *testing.T) {
+	now := time.Date(2026, 8, 3, 8, 0, 0, 0, time.UTC)
+	repository := &fakeRepository{pendingTaskFound: true, pendingTask: domain.HumanTask{
+		ID: id(1), RunID: id(2), NodeRunID: id(3), Status: domain.HumanTaskPending,
+		ExpectedInputSchema: json.RawMessage(`{"type":"object"}`), TargetVersion: 1, CreatedAt: now,
+	}}
+	service := &Service{repository: repository}
+	task, found, err := service.GetPendingHumanTask(context.Background(), id(2))
+	if err != nil || !found || task.ID != id(1) {
+		t.Fatalf("task=%+v found=%v err=%v", task, found, err)
+	}
+
+	repository.pendingTask.RunID = id(4)
+	if _, _, err := service.GetPendingHumanTask(context.Background(), id(2)); err == nil {
+		t.Fatal("cross-run pending Human Task was accepted")
+	}
 }
 
 type fakeRuntimeStarter struct {

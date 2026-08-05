@@ -69,6 +69,13 @@ describe("business URL state", () => {
     expect(parseProposalUrlState(written)).toMatchObject({ type: "publish_artifact", risk: "HIGH" });
   });
 
+  it("round-trips the restore_document Proposal filter", () => {
+    const written = writeProposalUrlState({ status: "ready_for_review", type: "restore_document", risk: "HIGH", createdDate: "" });
+
+    expect(written.toString()).toBe("status=ready_for_review&proposal_type=restore_document&risk=HIGH");
+    expect(parseProposalUrlState(written)).toMatchObject({ status: "ready_for_review", type: "restore_document", risk: "HIGH" });
+  });
+
   it("round-trips the downstream_update Proposal filter", () => {
     const written = writeProposalUrlState({ status: "ready_for_review", type: "downstream_update", risk: "HIGH", createdDate: "" });
 

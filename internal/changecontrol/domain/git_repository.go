@@ -48,6 +48,8 @@ const (
 	GitTrailerWorkflowNodeID = "Zhixu-Workflow-Node-ID"
 	// GitTrailerTargetPath 标识 Workspace 相对目标路径 Trailer。
 	GitTrailerTargetPath = "Zhixu-Target-Path"
+	// GitTrailerTargetMode 标识不可变目标存在性契约。
+	GitTrailerTargetMode = "Zhixu-Target-Mode"
 	// GitTrailerResultSHA256 标识写回结果原始字节的 SHA-256 Trailer。
 	GitTrailerResultSHA256 = "Zhixu-Result-SHA256"
 	// GitTrailerDiffSHA256 标识稳定 Git Diff 字节的 SHA-256 Trailer。
@@ -103,6 +105,7 @@ type GitSnapshot struct {
 type GitDiffRequest struct {
 	WorkspaceID     foundation.ID
 	TargetPath      string
+	TargetMode      TargetMode
 	ApprovedGitHead string
 	ResultHash      string
 }
@@ -111,6 +114,7 @@ type GitDiffRequest struct {
 type GitDiff struct {
 	WorkspaceID     foundation.ID
 	TargetPath      string
+	TargetMode      TargetMode
 	ApprovedGitHead string
 	ResultHash      string
 	DiffHash        string
@@ -126,6 +130,7 @@ type GitCommitRequest struct {
 	ProposalID, RevisionID, ApprovalID    foundation.ID
 	Operation                             GitOperation
 	TargetPath                            string
+	TargetMode                            TargetMode
 	ApprovedGitHead, ResultHash, DiffHash string
 	BaseBlobID, ResultBlobID, BaseMode    string
 }
@@ -138,6 +143,7 @@ type GitCommit struct {
 	ProposalID, RevisionID, ApprovalID    foundation.ID
 	Operation                             GitOperation
 	TargetPath                            string
+	TargetMode                            TargetMode
 	ApprovedGitHead                       string
 	GitCommit, ParentGitCommit            string
 	ResultHash, DiffHash                  string
@@ -153,6 +159,7 @@ type GitCommitLookup struct {
 	ProposalID, RevisionID, ApprovalID    foundation.ID
 	Operation                             GitOperation
 	TargetPath                            string
+	TargetMode                            TargetMode
 	ApprovedGitHead, ResultHash, DiffHash string
 	BaseBlobID, ResultBlobID, BaseMode    string
 	RevertsCommit                         string
@@ -183,7 +190,7 @@ func ValidateGitSnapshotBinding(workspaceID foundation.ID, approvedGitHead strin
 
 // ValidateGitDiffRequest 校验 Diff 请求的 Workspace、Markdown 目标、批准 HEAD 和结果哈希。
 func ValidateGitDiffRequest(request GitDiffRequest) error {
-	if !validGitID(request.WorkspaceID) || validateGitTargetPath(request.TargetPath) != nil || !ValidGitHead(request.ApprovedGitHead) || !ValidHash(request.ResultHash) {
+	if _, err := ValidateTargetMode(request.TargetMode); err != nil || !validGitID(request.WorkspaceID) || validateGitTargetPath(request.TargetPath) != nil || !ValidGitHead(request.ApprovedGitHead) || !ValidHash(request.ResultHash) {
 		return ErrGitInvalidInput
 	}
 	return nil
@@ -197,10 +204,10 @@ func ValidateGitDiffBinding(request GitDiffRequest, diff GitDiff) error {
 	if !validGitDiff(diff) {
 		return ErrGitConsistencyViolation
 	}
-	if diff.WorkspaceID != request.WorkspaceID || diff.TargetPath != request.TargetPath || !strings.EqualFold(diff.ApprovedGitHead, request.ApprovedGitHead) || !strings.EqualFold(diff.ResultHash, request.ResultHash) {
+	if diff.WorkspaceID != request.WorkspaceID || diff.TargetPath != request.TargetPath || NormalizeTargetMode(diff.TargetMode) != NormalizeTargetMode(request.TargetMode) || !strings.EqualFold(diff.ApprovedGitHead, request.ApprovedGitHead) || !strings.EqualFold(diff.ResultHash, request.ResultHash) {
 		return ErrGitConsistencyViolation
 	}
-	if !sameGitObjectWidth(diff.ApprovedGitHead, diff.BaseBlobID) || !sameGitObjectWidth(diff.ApprovedGitHead, diff.ResultBlobID) {
+	if !validApplyGitFacts(diff) {
 		return ErrGitConsistencyViolation
 	}
 	return nil
@@ -212,11 +219,11 @@ func ValidateGitCommitRequest(request GitCommitRequest) error {
 		return ErrGitInvalidInput
 	}
 	diff := GitDiff{
-		WorkspaceID: request.WorkspaceID, TargetPath: request.TargetPath, ApprovedGitHead: request.ApprovedGitHead,
+		WorkspaceID: request.WorkspaceID, TargetPath: request.TargetPath, TargetMode: request.TargetMode, ApprovedGitHead: request.ApprovedGitHead,
 		ResultHash: request.ResultHash, DiffHash: request.DiffHash, BaseBlobID: request.BaseBlobID,
 		ResultBlobID: request.ResultBlobID, BaseMode: request.BaseMode,
 	}
-	if !validGitDiff(diff) || !sameGitObjectWidth(diff.ApprovedGitHead, diff.BaseBlobID) || !sameGitObjectWidth(diff.ApprovedGitHead, diff.ResultBlobID) {
+	if !validGitDiff(diff) || !validApplyGitFacts(diff) {
 		return ErrGitInvalidInput
 	}
 	return nil
@@ -242,20 +249,17 @@ func ValidateGitCommitLookup(lookup GitCommitLookup) error {
 		return ErrGitInvalidInput
 	}
 	diff := GitDiff{
-		WorkspaceID: lookup.WorkspaceID, TargetPath: lookup.TargetPath, ApprovedGitHead: lookup.ApprovedGitHead,
+		WorkspaceID: lookup.WorkspaceID, TargetPath: lookup.TargetPath, TargetMode: lookup.TargetMode, ApprovedGitHead: lookup.ApprovedGitHead,
 		ResultHash: lookup.ResultHash, DiffHash: lookup.DiffHash, BaseBlobID: lookup.BaseBlobID,
 		ResultBlobID: lookup.ResultBlobID, BaseMode: lookup.BaseMode,
 	}
-	if !validGitDiff(diff) || !sameGitObjectWidth(diff.ApprovedGitHead, diff.BaseBlobID) || !sameGitObjectWidth(diff.ApprovedGitHead, diff.ResultBlobID) {
-		return ErrGitInvalidInput
-	}
 	switch lookup.Operation {
 	case GitOperationApply:
-		if lookup.RevertsCommit != "" {
+		if lookup.RevertsCommit != "" || !validGitDiff(diff) || !validApplyGitFacts(diff) {
 			return ErrGitInvalidInput
 		}
 	case GitOperationRevert:
-		if !ValidGitHead(lookup.RevertsCommit) || !sameGitObjectWidth(lookup.RevertsCommit, lookup.ApprovedGitHead) {
+		if !validRevertGitFacts(lookup) || !ValidGitHead(lookup.RevertsCommit) || !sameGitObjectWidth(lookup.RevertsCommit, lookup.ApprovedGitHead) {
 			return ErrGitInvalidInput
 		}
 	default:
@@ -283,10 +287,10 @@ func ValidateGitCommitLookupBinding(lookup GitCommitLookup, commit GitCommit) er
 
 // ValidateReverseCommitRequest 校验反向操作只接受完整有效的系统前向 Commit 和 Base Hash。
 func ValidateReverseCommitRequest(request ReverseCommitRequest) error {
-	if !ValidHash(request.ExpectedBaseHash) {
+	if ValidateTargetBaseVersion(request.Commit.WorkspaceID, request.Commit.TargetPath, request.Commit.TargetMode, request.ExpectedBaseHash) != nil {
 		return ErrGitInvalidInput
 	}
-	if !validGitCommit(request.Commit, false) || request.Commit.Operation != GitOperationApply || request.Commit.RevertsCommit != "" || request.Commit.Recovered && request.Commit.Replayed || !strings.EqualFold(request.Commit.ParentGitCommit, request.Commit.ApprovedGitHead) || !sameGitObjectWidth(request.Commit.GitCommit, request.Commit.ApprovedGitHead) || !sameGitObjectWidth(request.Commit.BaseBlobID, request.Commit.ApprovedGitHead) || !sameGitObjectWidth(request.Commit.ResultBlobID, request.Commit.ApprovedGitHead) {
+	if !validGitCommit(request.Commit, false) || request.Commit.Operation != GitOperationApply || request.Commit.RevertsCommit != "" || request.Commit.Recovered && request.Commit.Replayed || !strings.EqualFold(request.Commit.ParentGitCommit, request.Commit.ApprovedGitHead) || !sameGitObjectWidth(request.Commit.GitCommit, request.Commit.ApprovedGitHead) {
 		return ErrGitInvalidInput
 	}
 	return nil
@@ -301,7 +305,7 @@ func ValidateReverseCommitBinding(request ReverseCommitRequest, reverse GitCommi
 	if !validGitCommit(reverse, true) || reverse.Recovered && reverse.Replayed {
 		return ErrGitConsistencyViolation
 	}
-	if reverse.Operation != GitOperationRevert || !sameGitCommitIdentity(original, reverse) || reverse.TargetPath != original.TargetPath || !strings.EqualFold(reverse.ApprovedGitHead, original.ApprovedGitHead) || !strings.EqualFold(reverse.ParentGitCommit, original.GitCommit) || !strings.EqualFold(reverse.RevertsCommit, original.GitCommit) || !strings.EqualFold(reverse.ResultHash, request.ExpectedBaseHash) || !strings.EqualFold(reverse.BaseBlobID, original.ResultBlobID) || !strings.EqualFold(reverse.ResultBlobID, original.BaseBlobID) || reverse.BaseMode != original.BaseMode || !sameGitObjectWidth(reverse.GitCommit, original.GitCommit) {
+	if reverse.Operation != GitOperationRevert || !sameGitCommitIdentity(original, reverse) || NormalizeTargetMode(reverse.TargetMode) != NormalizeTargetMode(original.TargetMode) || reverse.TargetPath != original.TargetPath || !strings.EqualFold(reverse.ApprovedGitHead, original.ApprovedGitHead) || !strings.EqualFold(reverse.ParentGitCommit, original.GitCommit) || !strings.EqualFold(reverse.RevertsCommit, original.GitCommit) || !strings.EqualFold(reverse.ResultHash, request.ExpectedBaseHash) || !strings.EqualFold(reverse.BaseBlobID, original.ResultBlobID) || !strings.EqualFold(reverse.ResultBlobID, original.BaseBlobID) || reverse.BaseMode != original.BaseMode || !sameGitObjectWidth(reverse.GitCommit, original.GitCommit) {
 		return ErrGitConsistencyViolation
 	}
 	return nil
@@ -329,17 +333,58 @@ func validGitObjectIDForFormat(value string, format GitObjectFormat) bool {
 }
 
 func validGitDiff(diff GitDiff) bool {
-	return validGitID(diff.WorkspaceID) && validateGitTargetPath(diff.TargetPath) == nil && ValidGitHead(diff.ApprovedGitHead) && ValidHash(diff.ResultHash) && ValidHash(diff.DiffHash) && ValidGitObjectID(diff.BaseBlobID) && ValidGitObjectID(diff.ResultBlobID) && ValidGitFileMode(diff.BaseMode)
+	mode, err := ValidateTargetMode(diff.TargetMode)
+	if err != nil || !validGitID(diff.WorkspaceID) || validateGitTargetPath(diff.TargetPath) != nil || !ValidGitHead(diff.ApprovedGitHead) || !ValidHash(diff.ResultHash) || !ValidHash(diff.DiffHash) || !ValidGitObjectID(diff.ResultBlobID) || !ValidGitFileMode(diff.BaseMode) {
+		return false
+	}
+	return (mode == TargetModeReplace && ValidGitObjectID(diff.BaseBlobID)) || (mode == TargetModeCreateOnly && diff.BaseBlobID == "")
 }
 
 func validGitCommit(commit GitCommit, reverse bool) bool {
-	if !validGitCommitIdentity(commit.WorkspaceID, commit.WorkflowRunID, commit.NodeRunID, commit.WritebackExecutionID, commit.ProposalID, commit.RevisionID, commit.ApprovalID) || validateGitTargetPath(commit.TargetPath) != nil || !ValidGitHead(commit.ApprovedGitHead) || !ValidGitHead(commit.GitCommit) || !ValidGitHead(commit.ParentGitCommit) || !ValidHash(commit.ResultHash) || !ValidHash(commit.DiffHash) || !ValidGitObjectID(commit.BaseBlobID) || !ValidGitObjectID(commit.ResultBlobID) || !ValidGitFileMode(commit.BaseMode) {
+	mode, err := ValidateTargetMode(commit.TargetMode)
+	if err != nil || !validGitCommitIdentity(commit.WorkspaceID, commit.WorkflowRunID, commit.NodeRunID, commit.WritebackExecutionID, commit.ProposalID, commit.RevisionID, commit.ApprovalID) || validateGitTargetPath(commit.TargetPath) != nil || !ValidGitHead(commit.ApprovedGitHead) || !ValidGitHead(commit.GitCommit) || !ValidGitHead(commit.ParentGitCommit) || !ValidHash(commit.DiffHash) || !ValidGitFileMode(commit.BaseMode) {
 		return false
 	}
 	if reverse {
-		return commit.Operation == GitOperationRevert && ValidGitHead(commit.RevertsCommit)
+		lookup := GitCommitLookup{
+			WorkspaceID: commit.WorkspaceID, WorkflowRunID: commit.WorkflowRunID, NodeRunID: commit.NodeRunID,
+			WritebackExecutionID: commit.WritebackExecutionID, ProposalID: commit.ProposalID, RevisionID: commit.RevisionID, ApprovalID: commit.ApprovalID,
+			Operation: commit.Operation, TargetPath: commit.TargetPath, TargetMode: mode, ApprovedGitHead: commit.ApprovedGitHead,
+			ResultHash: commit.ResultHash, DiffHash: commit.DiffHash, BaseBlobID: commit.BaseBlobID, ResultBlobID: commit.ResultBlobID,
+			BaseMode: commit.BaseMode, RevertsCommit: commit.RevertsCommit,
+		}
+		return commit.Operation == GitOperationRevert && ValidGitHead(commit.RevertsCommit) && validRevertGitFacts(lookup)
 	}
-	return commit.Operation == GitOperationApply && commit.RevertsCommit == ""
+	diff := GitDiff{
+		WorkspaceID: commit.WorkspaceID, TargetPath: commit.TargetPath, TargetMode: mode, ApprovedGitHead: commit.ApprovedGitHead,
+		ResultHash: commit.ResultHash, DiffHash: commit.DiffHash, BaseBlobID: commit.BaseBlobID, ResultBlobID: commit.ResultBlobID, BaseMode: commit.BaseMode,
+	}
+	return commit.Operation == GitOperationApply && commit.RevertsCommit == "" && validGitDiff(diff) && validApplyGitFacts(diff)
+}
+
+func validApplyGitFacts(diff GitDiff) bool {
+	if !sameGitObjectWidth(diff.ApprovedGitHead, diff.ResultBlobID) {
+		return false
+	}
+	if NormalizeTargetMode(diff.TargetMode) == TargetModeCreateOnly {
+		return diff.BaseBlobID == ""
+	}
+	return sameGitObjectWidth(diff.ApprovedGitHead, diff.BaseBlobID)
+}
+
+func validRevertGitFacts(lookup GitCommitLookup) bool {
+	if !validGitID(lookup.WorkspaceID) || validateGitTargetPath(lookup.TargetPath) != nil || !ValidGitHead(lookup.ApprovedGitHead) || !ValidHash(lookup.DiffHash) || !ValidGitFileMode(lookup.BaseMode) || !sameGitObjectWidth(lookup.ApprovedGitHead, lookup.BaseBlobID) {
+		return false
+	}
+	if NormalizeTargetMode(lookup.TargetMode) == TargetModeCreateOnly {
+		return validGitAbsenceFact(lookup.WorkspaceID, lookup.TargetPath, lookup.ResultHash) && lookup.ResultBlobID == ""
+	}
+	return ValidHash(lookup.ResultHash) && sameGitObjectWidth(lookup.ApprovedGitHead, lookup.ResultBlobID)
+}
+
+func validGitAbsenceFact(workspaceID foundation.ID, targetPath, value string) bool {
+	expected, err := ComputeAbsenceToken(workspaceID, targetPath)
+	return err == nil && value == expected && ValidAbsenceToken(value)
 }
 
 func validGitCommitIdentity(ids ...foundation.ID) bool {
@@ -380,6 +425,7 @@ func sameCommitRequest(request GitCommitRequest, commit GitCommit) bool {
 		request.ApprovalID == commit.ApprovalID &&
 		request.Operation == commit.Operation &&
 		request.TargetPath == commit.TargetPath &&
+		NormalizeTargetMode(request.TargetMode) == NormalizeTargetMode(commit.TargetMode) &&
 		strings.EqualFold(request.ApprovedGitHead, commit.ApprovedGitHead) &&
 		strings.EqualFold(request.ResultHash, commit.ResultHash) &&
 		strings.EqualFold(request.DiffHash, commit.DiffHash) &&
@@ -408,6 +454,7 @@ func sameLookupBinding(lookup GitCommitLookup, commit GitCommit) bool {
 		lookup.ApprovalID == commit.ApprovalID &&
 		lookup.Operation == commit.Operation &&
 		lookup.TargetPath == commit.TargetPath &&
+		NormalizeTargetMode(lookup.TargetMode) == NormalizeTargetMode(commit.TargetMode) &&
 		strings.EqualFold(lookup.ApprovedGitHead, commit.ApprovedGitHead) &&
 		strings.EqualFold(lookup.ResultHash, commit.ResultHash) &&
 		strings.EqualFold(lookup.DiffHash, commit.DiffHash) &&

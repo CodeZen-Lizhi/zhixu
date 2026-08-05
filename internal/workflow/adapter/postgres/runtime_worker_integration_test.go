@@ -18,7 +18,7 @@ func TestRuntimeNodeWorkerExecutesDeterministicDeliveryEndToEnd(t *testing.T) {
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a5000000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-worker',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-worker"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-worker',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-worker"); err != nil {
 		t.Fatal(err)
 	}
 	insertClient, err := riveradapter.NewClient(pool, nil)

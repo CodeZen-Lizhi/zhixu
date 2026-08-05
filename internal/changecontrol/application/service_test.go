@@ -22,6 +22,7 @@ type fakeRepo struct {
 	proposal           domain.Proposal
 	approval           domain.Approval
 	err                error
+	createCalls        int
 	markedNeedsReview  bool
 	authorization      domain.ToolAuthorization
 	authorizationReads int
@@ -126,6 +127,7 @@ func (f *fakeApprovalDispatcher) DecideAndDispatch(_ context.Context, command Ap
 }
 
 func (f *fakeRepo) CreateProposal(_ context.Context, proposal domain.Proposal) (domain.Proposal, error) {
+	f.createCalls++
 	f.proposal = proposal
 	return proposal, f.err
 }
@@ -138,6 +140,11 @@ func (f *fakeRepo) CreatePublishArtifactProposal(_ context.Context, proposal dom
 	return proposal, f.err
 }
 func (f *fakeRepo) CreateDownstreamUpdateProposal(_ context.Context, proposal domain.Proposal) (domain.Proposal, error) {
+	f.proposal = proposal
+	return proposal, f.err
+}
+func (f *fakeRepo) CreateRestoreDocumentProposal(_ context.Context, proposal domain.Proposal) (domain.Proposal, error) {
+	f.createCalls++
 	f.proposal = proposal
 	return proposal, f.err
 }
@@ -194,10 +201,15 @@ func (f *fakeRepo) RevokeAuthorization(_ context.Context, _ foundation.ID, _ tim
 }
 
 type fakeTargets struct {
-	hash    string
-	content []byte
-	err     error
-	calls   int
+	hash             string
+	content          []byte
+	err              error
+	calls            int
+	absenceErr       error
+	absenceCalls     int
+	absenceWorkspace foundation.ID
+	absencePath      string
+	absenceToken     string
 }
 
 func (f *fakeTargets) CurrentHash(context.Context, foundation.ID, string) (string, error) {
@@ -210,15 +222,36 @@ func (f *fakeTargets) CurrentContent(context.Context, foundation.ID, string, int
 	return append([]byte(nil), f.content...), f.hash, f.err
 }
 
+func (f *fakeTargets) EnsureTargetAbsent(_ context.Context, workspaceID foundation.ID, targetPath, absenceToken string) error {
+	f.absenceCalls++
+	f.absenceWorkspace = workspaceID
+	f.absencePath = targetPath
+	f.absenceToken = absenceToken
+	return f.absenceErr
+}
+
 type fakeApprovalGitInspector struct {
-	snapshot domain.GitSnapshot
-	err      error
-	calls    int
+	snapshot         domain.GitSnapshot
+	err              error
+	calls            int
+	absenceErr       error
+	absenceCalls     int
+	absenceWorkspace foundation.ID
+	absenceHead      string
+	absencePath      string
 }
 
 func (f *fakeApprovalGitInspector) CaptureApprovalSnapshot(context.Context, foundation.ID) (domain.GitSnapshot, error) {
 	f.calls++
 	return f.snapshot, f.err
+}
+
+func (f *fakeApprovalGitInspector) EnsureTargetAbsentAt(_ context.Context, workspaceID foundation.ID, approvedHead, targetPath string) error {
+	f.absenceCalls++
+	f.absenceWorkspace = workspaceID
+	f.absenceHead = approvedHead
+	f.absencePath = targetPath
+	return f.absenceErr
 }
 
 type seqIDs struct{ n int }
@@ -302,6 +335,96 @@ func TestCreateProposalBindsTargetBaseAndContent(t *testing.T) {
 	}
 }
 
+func TestCreateCreateOnlyFileProposalProvesAbsenceBeforePersistence(t *testing.T) {
+	repository := &fakeRepo{}
+	targets := &fakeTargets{}
+	service := newTestService(repository, targets)
+	command := CreateCreateOnlyFileProposalCommand{
+		WorkspaceID: "workspace", TargetPath: "notes/new.md", IdempotencyKey: "create-only-1",
+		Content: "# new\n", EvidenceSummary: "authoring revision", RiskLevel: domain.ProposalRiskLevelLow,
+		Risk: "creates a new document", RollbackPlan: "delete the created file through compensation",
+	}
+	result, err := service.CreateCreateOnlyFileProposal(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absenceToken, err := domain.ComputeAbsenceToken(command.WorkspaceID, command.TargetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targets.absenceCalls != 1 || targets.calls != 0 || targets.absenceWorkspace != command.WorkspaceID || targets.absencePath != command.TargetPath || targets.absenceToken != absenceToken {
+		t.Fatalf("absence proof = %#v", targets)
+	}
+	if repository.createCalls != 1 || result.Proposal.Revision.TargetMode != domain.TargetModeCreateOnly || result.Proposal.Revision.BaseHash != absenceToken {
+		t.Fatalf("proposal = %#v, create calls = %d", result.Proposal, repository.createCalls)
+	}
+	expectedRequestHash, err := domain.ComputeRequestHashWithTargetMode(
+		command.WorkspaceID, command.TargetPath, domain.TargetModeCreateOnly, absenceToken, command.Content,
+		command.EvidenceSummary, command.RiskLevel, command.Risk, command.RollbackPlan,
+	)
+	if err != nil || result.Proposal.RequestHash != expectedRequestHash {
+		t.Fatalf("request hash = %s, want %s, err=%v", result.Proposal.RequestHash, expectedRequestHash, err)
+	}
+}
+
+func TestCreateCreateOnlyFileProposalReplaysBeforeCheckingAnAppliedTarget(t *testing.T) {
+	repository := &fakeRepo{}
+	targets := &fakeTargets{}
+	service := newTestService(repository, targets)
+	command := CreateCreateOnlyFileProposalCommand{
+		WorkspaceID: "workspace", TargetPath: "notes/new.md", IdempotencyKey: "create-only-replay",
+		Content: "# new\n", EvidenceSummary: "authoring revision", RiskLevel: domain.ProposalRiskLevelLow,
+		Risk: "creates a new document", RollbackPlan: "delete the created file through compensation",
+	}
+	created, err := service.CreateCreateOnlyFileProposal(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Replayed {
+		t.Fatal("first CREATE_ONLY request was reported as a replay")
+	}
+
+	// The approved request may already have created the target when a client
+	// retries after losing the original response. The immutable request binding
+	// must win before observing the now-present file.
+	targets.absenceErr = errors.New("target already exists")
+	replayed, err := service.CreateCreateOnlyFileProposal(context.Background(), command)
+	if err != nil {
+		t.Fatalf("exact replay after target creation failed: %v", err)
+	}
+	if !replayed.Replayed || replayed.Proposal.ID != created.Proposal.ID || repository.createCalls != 1 || targets.absenceCalls != 1 {
+		t.Fatalf("replay=%#v create calls=%d absence calls=%d", replayed, repository.createCalls, targets.absenceCalls)
+	}
+
+	command.Content = "# different\n"
+	_, err = service.CreateCreateOnlyFileProposal(context.Background(), command)
+	var projectErr *foundation.Error
+	if !errors.As(err, &projectErr) || projectErr.Code != "IDEMPOTENCY_KEY_REUSED" || projectErr.Kind != foundation.ErrorVersionConflict {
+		t.Fatalf("mismatched replay error = %v", err)
+	}
+	if repository.createCalls != 1 || targets.absenceCalls != 1 {
+		t.Fatalf("mismatched replay reached external state: create calls=%d absence calls=%d", repository.createCalls, targets.absenceCalls)
+	}
+}
+
+func TestCreateCreateOnlyFileProposalDoesNotPersistWhenTargetExists(t *testing.T) {
+	occupied := errors.New("target already exists")
+	repository := &fakeRepo{}
+	targets := &fakeTargets{absenceErr: occupied}
+	service := newTestService(repository, targets)
+	_, err := service.CreateCreateOnlyFileProposal(context.Background(), CreateCreateOnlyFileProposalCommand{
+		WorkspaceID: "workspace", TargetPath: "notes/new.md", IdempotencyKey: "create-only-occupied",
+		Content: "# new\n", EvidenceSummary: "authoring revision", RiskLevel: domain.ProposalRiskLevelLow,
+		Risk: "creates a new document", RollbackPlan: "delete the created file through compensation",
+	})
+	if !errors.Is(err, occupied) {
+		t.Fatalf("error = %v", err)
+	}
+	if repository.createCalls != 0 || repository.proposal.ID != "" || targets.absenceCalls != 1 {
+		t.Fatalf("proposal persisted before absence proof: calls=%d proposal=%#v absence calls=%d", repository.createCalls, repository.proposal, targets.absenceCalls)
+	}
+}
+
 func TestCreateProposalRequiresExplicitRiskLevel(t *testing.T) {
 	repository := &fakeRepo{}
 	service := newTestService(repository, &fakeTargets{})
@@ -326,8 +449,31 @@ func TestGetProposalCurrentContentReportsBaselineDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProposalCurrentContent() error = %v", err)
 	}
-	if result.WorkspaceID != "workspace" || result.Content != "current" || result.CurrentHash != currentHash || result.BaseHash != baseHash || result.BaseHashMatch {
+	if result.WorkspaceID != "workspace" || result.TargetMode != domain.TargetModeReplace || result.Content != "current" || result.CurrentHash != currentHash || result.BaseHash != baseHash || result.BaseHashMatch {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestGetProposalCurrentContentUsesEmptyBaselineForCreateOnly(t *testing.T) {
+	absenceToken, err := domain.ComputeAbsenceToken("workspace", "notes/new.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &fakeRepo{proposal: domain.Proposal{
+		ID: "proposal", WorkspaceID: "workspace", Type: domain.ProposalTypeFilePatch, TargetPath: "notes/new.md",
+		Revision: domain.Revision{TargetPath: "notes/new.md", TargetMode: domain.TargetModeCreateOnly, BaseHash: absenceToken},
+	}}
+	targets := &fakeTargets{hash: testHash, content: []byte("must not read")}
+	service := newTestService(repository, targets)
+	result, err := service.GetProposalCurrentContent(context.Background(), "proposal")
+	if err != nil {
+		t.Fatalf("GetProposalCurrentContent() error = %v", err)
+	}
+	if result.TargetMode != domain.TargetModeCreateOnly || result.Content != "" || result.CurrentHash != absenceToken || result.BaseHash != absenceToken || !result.BaseHashMatch {
+		t.Fatalf("result = %#v", result)
+	}
+	if targets.calls != 0 || targets.absenceCalls != 1 || targets.absenceWorkspace != "workspace" || targets.absencePath != "notes/new.md" || targets.absenceToken != absenceToken {
+		t.Fatalf("reader calls=%d absence calls=%d binding=%s/%s/%s", targets.calls, targets.absenceCalls, targets.absenceWorkspace, targets.absencePath, targets.absenceToken)
 	}
 }
 
@@ -850,8 +996,46 @@ func TestApplyPreflightReadsServerTargetAndPassesWithoutWrite(t *testing.T) {
 	repository := &fakeRepo{proposal: proposal}
 	service := newTestService(repository, &fakeTargets{hash: testHash})
 	result, err := service.CheckApplyPreflight(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash)
-	if err != nil || result.BaseHash != testHash || repository.markedNeedsReview {
+	if err != nil || result.TargetMode != domain.TargetModeReplace || result.BaseHash != testHash || repository.markedNeedsReview {
 		t.Fatalf("result = %#v, marked = %v, err = %v", result, repository.markedNeedsReview, err)
+	}
+}
+
+func TestApplyPreflightRechecksCreateOnlyFilesystemAndApprovedGitTree(t *testing.T) {
+	absenceToken, err := domain.ComputeAbsenceToken("workspace", "a.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := approvedProposal(absenceToken)
+	proposal.Revision.TargetMode = domain.TargetModeCreateOnly
+	proposal.Revision.ChangeHash, err = domain.ComputeChangeHashForTarget(
+		proposal.WorkspaceID,
+		proposal.Revision.TargetPath,
+		domain.TargetModeCreateOnly,
+		absenceToken,
+		proposal.Revision.Content,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal.Approval.ChangeHash = proposal.Revision.ChangeHash
+	targets := &fakeTargets{}
+	git := &fakeApprovalGitInspector{snapshot: domain.GitSnapshot{
+		WorkspaceID: "workspace", Branch: "main", Head: testGitHead, ObjectFormat: domain.GitObjectFormatSHA1, Clean: true,
+	}}
+	service := newTestServiceWithGit(&fakeRepo{proposal: proposal}, targets, git)
+	result, err := service.CheckApplyPreflight(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash)
+	if err != nil {
+		t.Fatalf("CheckApplyPreflight() error = %v", err)
+	}
+	if result.TargetMode != domain.TargetModeCreateOnly || result.BaseHash != absenceToken {
+		t.Fatalf("result = %#v", result)
+	}
+	if targets.calls != 0 || targets.absenceCalls != 1 || targets.absenceToken != absenceToken {
+		t.Fatalf("target reader calls=%d absence calls=%d token=%q", targets.calls, targets.absenceCalls, targets.absenceToken)
+	}
+	if git.calls != 0 || git.absenceCalls != 1 || git.absenceWorkspace != proposal.WorkspaceID || git.absenceHead != testGitHead || git.absencePath != proposal.TargetPath {
+		t.Fatalf("git calls=%d absence calls=%d binding=%s/%s/%s", git.calls, git.absenceCalls, git.absenceWorkspace, git.absenceHead, git.absencePath)
 	}
 }
 

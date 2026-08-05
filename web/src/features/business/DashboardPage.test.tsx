@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 const workspaceState = vi.hoisted(() => ({ id: "10000000-0000-4000-8000-000000000002" }));
 const api = vi.hoisted(() => ({
+  getAuthoringOverview: vi.fn(),
   getWorkspace: vi.fn(),
   listProposals: vi.fn(),
   listSourceVersions: vi.fn(),
@@ -30,6 +31,11 @@ vi.mock("../../api/workspace", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/workspace")>()),
   getWorkspace: api.getWorkspace,
 }));
+vi.mock("../../api/authoring", async (importOriginal) => ({
+  // eslint-disable-next-line @typescript-eslint/consistent-type-imports
+  ...(await importOriginal<typeof import("../../api/authoring")>()),
+  getAuthoringOverview: api.getAuthoringOverview,
+}));
 vi.mock("../system-status/use-system-status", () => ({ useSystemStatus: systemStatus.useSystemStatus }));
 
 import { DashboardPage } from "./DashboardPage";
@@ -40,13 +46,13 @@ const renderPage = () => render(
   </QueryClientProvider>,
 );
 
-const source = (id: string, path: string) => ({
+const source = (id: string, path: string, capturedAt = new Date().toISOString()) => ({
   id,
   sourceId: "50000000-0000-4000-8000-000000000001",
   path,
   mimeType: "text/markdown",
   byteSize: 2048,
-  capturedAt: "2026-07-31T09:36:00Z",
+  capturedAt,
   contentHash: "a".repeat(64),
   securityStatus: "passed" as const,
   ingestionStatus: "parsed" as const,
@@ -69,6 +75,13 @@ beforeEach(() => {
   api.listProposals.mockResolvedValue({ items: [] });
   api.listSourceVersions.mockResolvedValue({ items: [] });
   api.listWorkflows.mockResolvedValue({ items: [] });
+  api.getAuthoringOverview.mockResolvedValue({
+    workspaceId,
+    organizing: { available: false, reason: "整理模板尚未接入", href: null },
+    recentDrafts: [],
+    pendingPublications: [],
+    completedDocuments: [],
+  });
 });
 
 afterEach(() => {
@@ -77,6 +90,7 @@ afterEach(() => {
   api.listProposals.mockReset();
   api.listSourceVersions.mockReset();
   api.listWorkflows.mockReset();
+  api.getAuthoringOverview.mockReset();
   systemStatus.useSystemStatus.mockReset();
 });
 
@@ -165,6 +179,11 @@ describe("DashboardPage", () => {
     expect(screen.queryByText("/tmp/workspace")).not.toBeInTheDocument();
     expect(screen.queryByTitle("/tmp/workspace")).not.toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "manual_review" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /快速记录/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /新建文章/ })).toHaveAttribute("href", "/authoring/new");
+    expect(screen.getByRole("button", { name: /整理成文/ })).toBeDisabled();
+    expect(screen.getByRole("link", { name: /搜索知识/ })).toHaveAttribute("href", "/search");
+    expect(screen.getByRole("link", { name: "工作区设置" })).toHaveAttribute("href", "/settings?section=workspace");
     expect(screen.getByRole("link", { name: /继续流程/ })).toHaveAttribute("href", "/workflows/20000000-0000-4000-8000-000000000001");
     expect(screen.queryByText("failed_index")).not.toBeInTheDocument();
     expect(screen.queryByText("docs/high-risk.md")).not.toBeInTheDocument();
@@ -214,9 +233,50 @@ describe("DashboardPage", () => {
     renderPage();
 
     expect(await screen.findByRole("heading", { name: "今天没有等待处理的事项" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /查看资料收件箱/ })).toHaveAttribute("href", "/inbox");
-    expect(await screen.findByRole("heading", { name: "还没有捕获资料" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "前往资料收件箱" })).toHaveAttribute("href", "/inbox");
+    expect(screen.getAllByRole("link", { name: /新建文章/ }).some((link) => link.getAttribute("href") === "/authoring/new")).toBe(true);
+    expect(await screen.findByRole("heading", { name: "从一篇文章开始" })).toBeInTheDocument();
+    expect(screen.getByText("今天还没有新的业务记录。")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /资料收件箱/ })).not.toBeInTheDocument();
     expect(screen.queryByText(/总计|最近进入|示例/)).not.toBeInTheDocument();
+  });
+
+  it("有创作草稿时优先作为继续事项，并把当天资料放入动态而非重复收件箱", async () => {
+    api.getAuthoringOverview.mockResolvedValue({
+      workspaceId,
+      organizing: { available: true, reason: null, href: "/authoring/organize" },
+      recentDrafts: [{
+        id: "d0000000-0000-4000-8000-000000000001",
+        workspaceId,
+        documentId: null,
+        title: "系统设计草稿",
+        targetPath: "notes/system-design.md",
+        status: "EDITING",
+        version: 3,
+        updatedAt: new Date().toISOString(),
+      }],
+      pendingPublications: [],
+      completedDocuments: [],
+    });
+    api.listSourceVersions.mockResolvedValue({ items: [source("60000000-0000-4000-8000-000000000001", "research/homepage.md")] });
+
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "系统设计草稿" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /打开草稿/ })).toHaveAttribute("href", "/authoring/new?draft=d0000000-0000-4000-8000-000000000001");
+    expect(screen.getByRole("link", { name: /homepage\.md/ })).toHaveAttribute("href", "/documents/60000000-0000-4000-8000-000000000001");
+    expect(screen.queryByRole("link", { name: /资料收件箱/ })).not.toBeInTheDocument();
+  });
+
+  it("overview 提供真实入口后才启用整理成文", async () => {
+    api.getAuthoringOverview.mockResolvedValue({
+      workspaceId,
+      organizing: { available: true, reason: null, href: "/authoring/organize" },
+      recentDrafts: [],
+      pendingPublications: [],
+      completedDocuments: [],
+    });
+    renderPage();
+
+    expect(await screen.findByRole("link", { name: /整理成文/ })).toHaveAttribute("href", "/authoring/organize");
   });
 });

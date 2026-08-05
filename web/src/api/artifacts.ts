@@ -11,8 +11,9 @@ export type ArtifactSectionGenerationPersistedStatus = Exclude<ArtifactSectionGe
 export interface ArtifactGap { code: string; description: string; }
 export interface ArtifactCoverage { sectionKey: string; status: CoverageStatus; gaps: ArtifactGap[]; }
 export interface ArtifactCitation { sourceVersionId: string; sourceSpanId: string; verifiedContentHash: string; excerpt: string; verified: true; }
+export interface ArtifactDocumentSource { documentId: string; articleRevisionId: string; revisionNo: number; verifiedContentHash: string; verified: true; }
 export interface ArtifactOutlineSection { key: string; title: string; }
-export interface ArtifactSection { key: string; title: string; content: string; citations: ArtifactCitation[]; coverage: ArtifactCoverage; }
+export interface ArtifactSection { key: string; title: string; content: string; citations: ArtifactCitation[]; documentSources: ArtifactDocumentSource[]; coverage: ArtifactCoverage; }
 export interface ArtifactRevision {
   id: string; artifactId: string; revisionNo: number; outline: ArtifactOutlineSection[]; sections: ArtifactSection[];
   createdBy: ArtifactCreator; metadata?: { promptVersion: string; modelVersion: string; workflowDefinitionVersion: string; schemaVersion: string; };
@@ -114,19 +115,36 @@ const decodeCitation = (value: unknown, field: string): ArtifactCitation => {
   if (!bool(value.verified, `${field}.verified`)) throw invalidResponse(`${field}.verified`);
   return { sourceVersionId: uuid(value.source_version_id, `${field}.source_version_id`), sourceSpanId: uuid(value.source_span_id, `${field}.source_span_id`), verifiedContentHash: hash(value.verified_content_hash, `${field}.verified_content_hash`), excerpt: stringValue(value.excerpt, `${field}.excerpt`), verified: true };
 };
+const decodeDocumentSource = (value: unknown, field: string): ArtifactDocumentSource => {
+  if (!isRecord(value)) throw invalidResponse(field); exact(value, ["document_id", "article_revision_id", "revision_no", "verified_content_hash", "verified"], field);
+  if (!bool(value.verified, `${field}.verified`)) throw invalidResponse(`${field}.verified`);
+  return {
+    documentId: uuid(value.document_id, `${field}.document_id`),
+    articleRevisionId: uuid(value.article_revision_id, `${field}.article_revision_id`),
+    revisionNo: integer(value.revision_no, `${field}.revision_no`, 1),
+    verifiedContentHash: hash(value.verified_content_hash, `${field}.verified_content_hash`),
+    verified: true,
+  };
+};
 const decodeOutline = (value: unknown, field: string): ArtifactOutlineSection[] => {
   if (!Array.isArray(value)) throw invalidResponse(field);
   const keys = new Set<string>();
   return value.map((item, index) => { const itemField = `${field}[${String(index)}]`; if (!isRecord(item)) throw invalidResponse(itemField); exact(item, ["key", "title"], itemField); const key = stringValue(item.key, `${itemField}.key`); if (keys.has(key)) throw invalidResponse(`${itemField}.key`); keys.add(key); return { key, title: stringValue(item.title, `${itemField}.title`) }; });
 };
 const decodeSection = (value: unknown, field: string): ArtifactSection => {
-  if (!isRecord(value)) throw invalidResponse(field); exact(value, ["key", "title", "content", "citations", "coverage"], field);
-  if (!Array.isArray(value.citations)) throw invalidResponse(`${field}.citations`);
+  if (!isRecord(value)) throw invalidResponse(field); exact(value, ["key", "title", "content", "citations", "document_sources", "coverage"], field);
+  if (!Array.isArray(value.citations) || !Array.isArray(value.document_sources)) throw invalidResponse(field);
   const coverage = decodeCoverage(value.coverage, `${field}.coverage`);
   const citations = value.citations.map((item, index) => decodeCitation(item, `${field}.citations[${String(index)}]`));
+  const documentSources = value.document_sources.map((item, index) => decodeDocumentSource(item, `${field}.document_sources[${String(index)}]`));
+  const documentSourceIdentities = documentSources.map((source) => `${source.documentId}\u0000${source.articleRevisionId}`);
   const content = stringValue(value.content, `${field}.content`, true);
-  if (coverage.sectionKey !== stringValue(value.key, `${field}.key`) || (coverage.status === "GAP" && (content !== "" || citations.length !== 0))) throw invalidResponse(field);
-  return { key: coverage.sectionKey, title: stringValue(value.title, `${field}.title`), content, citations, coverage };
+  const supportCount = citations.length + documentSources.length;
+  if (coverage.sectionKey !== stringValue(value.key, `${field}.key`)
+    || new Set(documentSourceIdentities).size !== documentSourceIdentities.length
+    || (coverage.status === "GAP" && (content !== "" || supportCount !== 0))
+    || (coverage.status !== "GAP" && supportCount === 0)) throw invalidResponse(field);
+  return { key: coverage.sectionKey, title: stringValue(value.title, `${field}.title`), content, citations, documentSources, coverage };
 };
 const decodeRevision = (value: unknown, field: string): ArtifactRevision => {
   if (!isRecord(value)) throw invalidResponse(field); exact(value, ["id", "artifact_id", "revision_no", "outline", "sections", "created_by", "metadata", "content_hash", "created_at"], field);

@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"检查 Citation、Coverage/GAP、Revision 和发布边界"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"检查 Snapshot 原子性、N+1、迁移、并发和前端浏览器质量"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"检查 Material/Template/Run 判别联合和未知值拒绝"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/repository-evidence.md","reason":"核对未建立第二套 Artifact、Workflow 或写回路径"}

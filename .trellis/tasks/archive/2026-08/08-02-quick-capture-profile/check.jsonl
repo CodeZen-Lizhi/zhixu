@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/auth-security.md","reason":"检查 URL SSRF、上传、Workspace 隔离和敏感输入"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"检查迁移、幂等、并发、资源上限、恢复与前端浏览器质量"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"检查所有网络/上传边界 fail closed"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/repository-evidence.md","reason":"核对没有复制 Workspace/Ingestion/Retrieval 事实源"}

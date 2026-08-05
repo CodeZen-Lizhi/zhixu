@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "检查前端层边界和共享模块归属"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "检查组件语义、交互和复用"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "检查 URL 状态、刷新和前进后退行为"}
+{"file": ".trellis/spec/frontend/model-settings.md", "reason": "检查模型设置契约未被视觉改版破坏"}
+{"file": ".trellis/tasks/07-31-workbench-navigation-visual-redesign/research/frontend-information-architecture.md", "reason": "核对能力可达性、路由兼容和单一标题"}
+{"file": ".trellis/tasks/07-31-workbench-navigation-visual-redesign/research/frontend-visual-system.md", "reason": "核对配色、断点、Graph 几何和 CSS 迁移风险"}
+{"file": ".trellis/tasks/archive/2026-08/07-31-workbench-home-redesign/prd.md", "reason": "检查首页真实数据边界、重复入口和历史验收假设"}
+{"file": ".trellis/tasks/archive/2026-08/08-02-note-workflow-capabilities/prd.md", "reason": "检查四个固定动作只在依赖能力真实可用后启用"}

@@ -103,6 +103,18 @@ describe("auth API boundary", () => {
     expect(new Headers(secondCall?.[1]?.headers).get("X-CSRF-Token")).toBeNull();
   });
 
+  it("保留 FormData 请求体，并让浏览器生成 multipart boundary", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ ok: true }));
+    const body = new FormData();
+    body.set("kind", "FILE");
+
+    await authFetch("/api/v1/workspaces/example/capture-files", { method: "POST", body });
+
+    const call = vi.mocked(fetch).mock.calls.at(-1);
+    expect(call?.[1]?.body).toBe(body);
+    expect(new Headers(call?.[1]?.headers).get("Content-Type")).toBeNull();
+  });
+
   it("Bootstrap 把 CSRF 放入与持久 Session 同生命周期的 Local Storage", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
       session_id: sessionId,

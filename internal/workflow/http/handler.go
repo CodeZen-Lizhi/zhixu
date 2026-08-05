@@ -26,6 +26,7 @@ import (
 type Service interface {
 	Start(context.Context, application.StartCommand) (domain.Run, error)
 	Get(context.Context, foundation.ID) (domain.Run, error)
+	GetPendingHumanTask(context.Context, foundation.ID) (domain.HumanTask, bool, error)
 	SubmitRuntimeHumanDecision(context.Context, application.HumanDecisionCommand) (application.HumanTransitionResult, error)
 	Pause(context.Context, application.RunControlCommand) (application.RunControlResult, error)
 	Resume(context.Context, application.RunControlCommand) (application.RunControlResult, error)
@@ -36,11 +37,26 @@ type listService interface {
 	ListRuns(context.Context, domain.RunListQuery) ([]domain.RunListItem, bool, error)
 }
 
+// HumanTaskReviewProjector optionally adds a bounded owner review projection to
+// a pending Human Task. required=false leaves non-owned tasks unchanged.
+type HumanTaskReviewProjector interface {
+	ProjectHumanTaskReview(context.Context, domain.Run, domain.HumanTask) (review json.RawMessage, required bool, err error)
+}
+
 // Handler 负责 Workflow 协议解析、响应编码和错误映射。
-type Handler struct{ service Service }
+type Handler struct {
+	service         Service
+	reviewProjector HumanTaskReviewProjector
+}
 
 // NewHandler 创建 Workflow HTTP Handler。
-func NewHandler(service Service) *Handler { return &Handler{service: service} }
+func NewHandler(service Service, reviewProjectors ...HumanTaskReviewProjector) *Handler {
+	handler := &Handler{service: service}
+	if len(reviewProjectors) > 0 {
+		handler.reviewProjector = reviewProjectors[0]
+	}
+	return handler
+}
 
 // Routes 注册 Workflow 资源路由。
 func (h *Handler) Routes(router chi.Router) {
@@ -207,18 +223,31 @@ type startResponse struct {
 }
 
 type runResponse struct {
-	ID              string          `json:"id"`
-	WorkspaceID     string          `json:"workspace_id"`
-	DefinitionID    string          `json:"definition_id"`
-	Status          string          `json:"status"`
-	Input           json.RawMessage `json:"input"`
-	Output          json.RawMessage `json:"output,omitempty"`
-	Version         int64           `json:"version"`
-	CreatedAt       string          `json:"created_at"`
-	UpdatedAt       string          `json:"updated_at"`
-	CompletedAt     *string         `json:"completed_at,omitempty"`
-	PauseRequested  bool            `json:"pause_requested"`
-	CancelRequested bool            `json:"cancel_requested"`
+	ID              string                    `json:"id"`
+	WorkspaceID     string                    `json:"workspace_id"`
+	DefinitionID    string                    `json:"definition_id"`
+	Status          string                    `json:"status"`
+	Input           json.RawMessage           `json:"input"`
+	Output          json.RawMessage           `json:"output,omitempty"`
+	Version         int64                     `json:"version"`
+	CreatedAt       string                    `json:"created_at"`
+	UpdatedAt       string                    `json:"updated_at"`
+	CompletedAt     *string                   `json:"completed_at,omitempty"`
+	PauseRequested  bool                      `json:"pause_requested"`
+	CancelRequested bool                      `json:"cancel_requested"`
+	HumanTask       *pendingHumanTaskResponse `json:"human_task"`
+}
+
+type pendingHumanTaskResponse struct {
+	ID                  string          `json:"id"`
+	RunID               string          `json:"run_id"`
+	NodeRunID           string          `json:"node_run_id"`
+	Status              string          `json:"status"`
+	ExpectedInputSchema json.RawMessage `json:"expected_input_schema"`
+	TargetVersion       int64           `json:"target_version"`
+	ExpiresAt           *string         `json:"expires_at"`
+	CreatedAt           string          `json:"created_at"`
+	Review              json.RawMessage `json:"review"`
 }
 
 type humanDecisionRequest struct {
@@ -288,16 +317,47 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if h == nil || h.service == nil {
-		writeProblem(w, http.StatusServiceUnavailable, "WORKFLOW_SERVICE_UNAVAILABLE", "Workflow 服务暂不可用", true, nil)
-		return
-	}
-	run, err := h.service.Get(r.Context(), runID)
+	workspaceID, err := workflowWorkspaceID(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toRunResponse(run))
+	if h == nil || h.service == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "WORKFLOW_SERVICE_UNAVAILABLE", "Workflow 服务暂不可用", true, nil)
+		return
+	}
+	run, err := h.ownedRun(r.Context(), runID, workspaceID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	task, found, err := h.service.GetPendingHumanTask(r.Context(), runID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response := toRunResponse(run)
+	if found {
+		mapped, mapErr := toPendingHumanTaskResponse(task, run)
+		if mapErr != nil {
+			writeError(w, mapErr)
+			return
+		}
+		if h.reviewProjector != nil {
+			review, required, reviewErr := h.reviewProjector.ProjectHumanTaskReview(r.Context(), run, task)
+			if reviewErr != nil {
+				writeError(w, reviewErr)
+				return
+			}
+			if (required && len(review) == 0) || (!required && len(review) != 0) || (len(review) != 0 && !json.Valid(review)) {
+				writeError(w, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_HUMAN_TASK_REVIEW_INVALID", false, errors.New("workflow human task review projection is invalid")))
+				return
+			}
+			mapped.Review = append(json.RawMessage(nil), review...)
+		}
+		response.HumanTask = &mapped
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *Handler) submitHumanDecision(w http.ResponseWriter, r *http.Request) {
@@ -311,13 +371,43 @@ func (h *Handler) submitHumanDecision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	var request humanDecisionRequest
-	if err := decodeJSON(r, &request); err != nil {
+	workspaceID, err := workflowWorkspaceID(r)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
 	if h == nil || h.service == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "WORKFLOW_SERVICE_UNAVAILABLE", "Workflow 服务暂不可用", true, nil)
+		return
+	}
+	run, err := h.ownedRun(r.Context(), runID, workspaceID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if h.reviewProjector != nil {
+		task, found, taskErr := h.service.GetPendingHumanTask(r.Context(), runID)
+		if taskErr != nil {
+			writeError(w, taskErr)
+			return
+		}
+		if !found || task.ID != taskID {
+			writeError(w, foundation.NewError(foundation.ErrorNotFound, "HUMAN_TASK_NOT_FOUND", false, errors.New("human task was not found")))
+			return
+		}
+		review, required, reviewErr := h.reviewProjector.ProjectHumanTaskReview(r.Context(), run, task)
+		if reviewErr != nil {
+			writeError(w, reviewErr)
+			return
+		}
+		if (required && len(review) == 0) || (!required && len(review) != 0) || (len(review) != 0 && !json.Valid(review)) {
+			writeError(w, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_HUMAN_TASK_REVIEW_INVALID", false, errors.New("workflow human task review projection is invalid")))
+			return
+		}
+	}
+	var request humanDecisionRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, err)
 		return
 	}
 	result, err := h.service.SubmitRuntimeHumanDecision(r.Context(), application.HumanDecisionCommand{
@@ -355,8 +445,17 @@ func (h *Handler) control(w http.ResponseWriter, r *http.Request, execute func(c
 		writeError(w, err)
 		return
 	}
+	workspaceID, err := workflowWorkspaceID(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	if h == nil || h.service == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "WORKFLOW_SERVICE_UNAVAILABLE", "Workflow 服务暂不可用", true, nil)
+		return
+	}
+	if _, err := h.ownedRun(r.Context(), runID, workspaceID); err != nil {
+		writeError(w, err)
 		return
 	}
 	var request controlRequest
@@ -373,6 +472,29 @@ func (h *Handler) control(w http.ResponseWriter, r *http.Request, execute func(c
 		return
 	}
 	writeJSON(w, http.StatusOK, controlResponse{WorkflowRunID: string(result.WorkflowRunID), Status: string(result.Status), Version: result.Version, StatusURL: result.StatusURL, PauseRequested: result.PauseRequested, CancelRequested: result.CancelRequested})
+}
+
+func workflowWorkspaceID(r *http.Request) (foundation.ID, error) {
+	raw := strings.TrimSpace(r.Header.Get("X-Workspace-ID"))
+	if raw == "" {
+		return "", foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_WORKSPACE_REQUIRED", false, errors.New("X-Workspace-ID header is required"))
+	}
+	workspaceID, err := foundation.ParseID(raw)
+	if err != nil {
+		return "", foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_WORKSPACE_INVALID", false, err)
+	}
+	return workspaceID, nil
+}
+
+func (h *Handler) ownedRun(ctx context.Context, runID, workspaceID foundation.ID) (domain.Run, error) {
+	run, err := h.service.Get(ctx, runID)
+	if err != nil {
+		return domain.Run{}, err
+	}
+	if run.WorkspaceID != workspaceID {
+		return domain.Run{}, foundation.NewError(foundation.ErrorNotFound, "WORKFLOW_NOT_FOUND", false, errors.New("workflow run was not found"))
+	}
+	return run, nil
 }
 
 func callerCapabilities(ctx context.Context) []capability.Capability {
@@ -397,6 +519,23 @@ func toRunResponse(run domain.Run) runResponse {
 		response.CompletedAt = &value
 	}
 	return response
+}
+
+func toPendingHumanTaskResponse(task domain.HumanTask, run domain.Run) (pendingHumanTaskResponse, error) {
+	var schema map[string]json.RawMessage
+	if task.ID == "" || task.RunID != run.ID || task.NodeRunID == "" || task.Status != domain.HumanTaskPending ||
+		task.TargetVersion < 1 || task.CreatedAt.IsZero() || json.Unmarshal(task.ExpectedInputSchema, &schema) != nil ||
+		(task.ExpiresAt != nil && task.ExpiresAt.Before(task.CreatedAt)) {
+		return pendingHumanTaskResponse{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_HUMAN_TASK_RESULT_INVALID", false, errors.New("workflow pending human task is invalid"))
+	}
+	response := pendingHumanTaskResponse{ID: string(task.ID), RunID: string(task.RunID), NodeRunID: string(task.NodeRunID),
+		Status: string(task.Status), ExpectedInputSchema: task.ExpectedInputSchema, TargetVersion: task.TargetVersion,
+		CreatedAt: task.CreatedAt.UTC().Format(time.RFC3339Nano)}
+	if task.ExpiresAt != nil {
+		value := task.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		response.ExpiresAt = &value
+	}
+	return response, nil
 }
 
 func toHumanResponse(task domain.HumanTask) humanTaskResponse {

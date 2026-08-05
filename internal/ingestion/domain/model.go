@@ -123,6 +123,8 @@ type ParsedBlock struct {
 	Selector    map[string]string
 	Content     string
 	Atomic      bool
+	// EvidenceKind 指明 Evidence 应从原始字节还是解析器的确定性派生文本读取。
+	EvidenceKind EvidenceKind
 }
 
 // ParsedDocument 是不含第三方 AST 类型的解析结果。
@@ -152,6 +154,16 @@ type ParserDescriptor struct {
 	SchemaVersion string
 }
 
+// EvidenceKind 是 Source Span excerpt 的不可变取证方式。
+type EvidenceKind string
+
+const (
+	// EvidenceRawBytes 表示 excerpt 必须与原始 Content Artifact 的字节区间完全一致。
+	EvidenceRawBytes EvidenceKind = "raw_bytes"
+	// EvidenceDerivedText 表示 excerpt 是从原始 Artifact 确定性解析出的文本投影。
+	EvidenceDerivedText EvidenceKind = "derived_text"
+)
+
 // SourceSpan 是 Content Artifact 中不可变的原文位置。
 type SourceSpan struct {
 	ID                foundation.ID
@@ -165,6 +177,8 @@ type SourceSpan struct {
 	EndByte           int64
 	Selector          map[string]string
 	ExcerptHash       string
+	EvidenceKind      EvidenceKind
+	DerivedExcerpt    string
 	ParserVersion     string
 	SchemaVersion     string
 }

@@ -53,4 +53,13 @@ func TestValidateAuthorizationConsumeBindingChecksEveryImmutableField(t *testing
 	if err := ValidateAuthorizationConsumeBinding(authorization, request); err == nil {
 		t.Fatal("proposal binding mismatch accepted")
 	}
+	request.ProposalID = authorization.ProposalID
+	authorization.TargetMode = TargetModeCreateOnly
+	if err := ValidateAuthorizationConsumeBinding(authorization, request); err == nil {
+		t.Fatal("CREATE_ONLY authorization accepted a legacy REPLACE consume request")
+	}
+	request.TargetMode = TargetModeCreateOnly
+	if err := ValidateAuthorizationConsumeBinding(authorization, request); err != nil {
+		t.Fatalf("CREATE_ONLY authorization binding = %v", err)
+	}
 }

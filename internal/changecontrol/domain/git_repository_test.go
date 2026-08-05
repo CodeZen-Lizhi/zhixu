@@ -50,7 +50,7 @@ func commitFromRequest(request GitCommitRequest) GitCommit {
 		WorkspaceID: request.WorkspaceID, WorkflowRunID: request.WorkflowRunID, NodeRunID: request.NodeRunID,
 		WritebackExecutionID: request.WritebackExecutionID, ProposalID: request.ProposalID,
 		RevisionID: request.RevisionID, ApprovalID: request.ApprovalID, Operation: request.Operation,
-		TargetPath: request.TargetPath, ApprovedGitHead: request.ApprovedGitHead,
+		TargetPath: request.TargetPath, TargetMode: request.TargetMode, ApprovedGitHead: request.ApprovedGitHead,
 		GitCommit: testGitCommit, ParentGitCommit: request.ApprovedGitHead,
 		ResultHash: request.ResultHash, DiffHash: request.DiffHash, BaseBlobID: request.BaseBlobID,
 		ResultBlobID: request.ResultBlobID, BaseMode: request.BaseMode,
@@ -151,6 +151,22 @@ func TestValidateGitDiffBinding(t *testing.T) {
 	changed.BaseMode = "120000"
 	if !errors.Is(ValidateGitDiffBinding(request, changed), ErrGitConsistencyViolation) {
 		t.Fatal("symlink git mode accepted")
+	}
+}
+
+func TestCreateOnlyGitDiffRejectsSyntheticBaseBlob(t *testing.T) {
+	request := validGitDiffRequest()
+	request.TargetMode = TargetModeCreateOnly
+	diff := validGitDiffValue()
+	diff.TargetMode = TargetModeCreateOnly
+	diff.BaseBlobID = ""
+	if err := ValidateGitDiffBinding(request, diff); err != nil {
+		t.Fatalf("valid create-only diff rejected: %v", err)
+	}
+
+	diff.BaseBlobID = strings.Repeat("0", 40)
+	if !errors.Is(ValidateGitDiffBinding(request, diff), ErrGitConsistencyViolation) {
+		t.Fatal("create-only diff accepted a synthetic base blob")
 	}
 }
 

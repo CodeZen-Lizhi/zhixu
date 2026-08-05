@@ -288,8 +288,13 @@ func TestRegistrySelectsOnlySupportedParsers(t *testing.T) {
 	if err != nil || textParser.Version() != TextParserVersion {
 		t.Fatalf("text parser = %v, %v", textParser, err)
 	}
-	if _, err := registry.ParserFor("application/pdf"); err == nil {
-		t.Fatal("expected unsupported parser error")
+	htmlParser, err := registry.ParserFor("text/html")
+	if err != nil || htmlParser.Version() != HTMLParserVersion {
+		t.Fatalf("html parser = %v, %v", htmlParser, err)
+	}
+	pdfParser, err := registry.ParserFor("application/pdf")
+	if err != nil || pdfParser.Version() != PDFParserVersion {
+		t.Fatalf("pdf parser = %v, %v", pdfParser, err)
 	}
 	if _, err := (&Registry{}).ParserFor("text/markdown"); err == nil {
 		t.Fatal("zero-value registry must report an unavailable parser")
@@ -319,6 +324,16 @@ func TestParserDescriptorMatchesSuccessfulProjection(t *testing.T) {
 	textDescriptor := textParser.Descriptor()
 	if textDescriptor.ID != TextParserID || textDescriptor.Version != TextParserVersion || textDescriptor.ConfigHash == "" || textDescriptor.SchemaVersion != ParseSchemaVersion {
 		t.Fatalf("text descriptor = %#v", textDescriptor)
+	}
+
+	htmlParser := NewHTMLParser()
+	htmlDescriptor := htmlParser.Descriptor()
+	htmlDocument, err := htmlParser.Parse(context.Background(), domain.SourceInput{MediaType: "text/html", ImmutableBytes: []byte("<p>body</p>")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if htmlDescriptor.ID != htmlDocument.ParserID || htmlDescriptor.Version != htmlDocument.ParserVersion || htmlDescriptor.ConfigHash != htmlDocument.ParserConfigHash || htmlDescriptor.SchemaVersion != htmlDocument.SchemaVersion {
+		t.Fatalf("html descriptor = %#v, document = %#v", htmlDescriptor, htmlDocument)
 	}
 }
 

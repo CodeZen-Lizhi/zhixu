@@ -50,6 +50,22 @@ Conversation RAG 现通过 Agent-owned loader 显式读取 global/Conversation-s
 `node_attempt_id` 创建唯一 `PREPARING` snapshot claimant，再把 canonical non-evidence digest 与 Model Run 在同一事务闭合，
 正文不进入 snapshot、Model Run、Workflow input、事件或日志。Memory 只注入 `agent.rag-answer` Conversation 节点，Relation
 Assessment、Artifact Generation 和共享模型 factory 保持不注入；`last_used_at`、最近使用 UI 与类型转换仍未交付。
+Quick Capture 已交付 TEXT/URL/FILE/IMAGE 的不可变 Capture、Workspace-owned Source/Artifact/Version、durable outbox/
+Worker、独立 Ingestion/Index/Profile 状态和 `document-knowledge-profile/v1`。Profile Revision/Evidence append-only，
+候选不进入正式知识；模型/Embedding disabled 时保留 Keyword 与基础资料，具体契约见 `capture-profile-contract.md`。
+Authoring 已交付可恢复 Working Draft、每次 Freeze 追加不可变 Article Revision、Document Draft 列表，以及
+`CREATE_ONLY|REPLACE` Proposal Reservation/Binding/Commit 最终化。数据库拒绝绕过 Proposal Commit 伪造 Published，
+确定性发布前失败使用独立 ABANDONED 事实；具体契约见 `authoring-contract.md`。
+Organizing 已交付可恢复 Suggested Material Set、显式确认、不可变 Workflow Input Snapshot、四个固定 Workflow 和
+受约束自定义 Template Revision。确认在同一 Serializable 事务重验 owner facts；Human Task 读取与提交均 fail closed
+复投影 Evidence/GAP/Diff，结果只经 Artifact/Proposal 与 Safe Writeback；具体契约见 `organizing-contract.md`。
+Document History 已交付当前分支、当前 canonical path 的有界 Git 时间线、managed/external/current-change 区分、
+严格版本比较和 `restore_document` Proposal。恢复只追加 Safe Writeback Commit 与 Article Revision，崩溃恢复重新校验
+Authoring owner，禁止 reset/checkout/history rewrite；具体契约见 `document-history-contract.md`。
+Git Remote Sync 已交付单 Workspace 单 HTTPS Remote、write-only AES-GCM Token、SSRF/DNS pinning、受控
+AskPass、持久 Run/Attempt/Outbox、same/Fast-forward/non-force Push/post-check、result unknown 恢复、外部变化捕获和
+独立索引状态。自动候选同时绑定 writeback Commit 与配置 Revision，并在应用层和 PostgreSQL 事务内双重栅栏；
+与 Safe Writeback 复用 Workspace Git operation lock，具体契约见 `git-sync-contract.md`。
 Review-derived Path 已统一 `00060`、Repository 与 Domain/Application 契约；ABANDONED 仅允许原 key 按新 `attempt_no`
 重开，Artifact digest 冻结 source snapshot、完整规范化 Draft、renderer 元数据与 attempt，Prepare/Complete 和精确 hold
 release 都受 attempt fence 保护。API 在数据库依赖可用时组装真实
@@ -68,6 +84,11 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [模型设置与开发运行时契约](./model-settings-runtime.md) | desired/active/applied revision、AEAD、冻结 Model Runtime、受控 restart 与 Docker 生命周期 | managed Settings 与开发一键启动的实现和真实验收门禁 |
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker/Web 门禁 | M7-04 与遗留收口已验证；下游 owner executor、Document/Eval impact 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
+| [快速记录与画像契约](./capture-profile-contract.md) | Capture、Source/Version、Outbox、独立阶段、Profile Revision/Evidence 与降级恢复 | TEXT/URL/FILE/IMAGE、Profile v1、真实 PostgreSQL 与桌面/移动 Capture 链已验证 |
+| [主动创作与 Document Draft 契约](./authoring-contract.md) | Working Draft、Freeze、Revision、发布预留、CREATE_ONLY 与 Commit 最终化 | Domain/Application、真实 PostgreSQL、Change Control/Git、HTTP/OpenAPI、前端构建与桌面/移动浏览器门禁已验证 |
+| [材料确认与整理模板契约](./organizing-contract.md) | Suggested Material、Serializable Snapshot、Template Revision、四 Workflow、Human Task review 与结果治理 | Domain/Application、真实 PostgreSQL、Workflow/Artifact/Proposal、HTTP/OpenAPI、前端构建及父任务桌面/移动浏览器门禁已验证 |
+| [文档文件历史与受控恢复契约](./document-history-contract.md) | 当前 path Git 时间线、映射、cursor、compare、restore Proposal、Safe Writeback 与 Authoring closure | Domain/Application/Git/PostgreSQL/Change Control/Authoring、HTTP/OpenAPI、Web 构建、并发恢复及父任务桌面/移动浏览器门禁已验证 |
+| [Git 远端同步契约](./git-sync-contract.md) | HTTPS Remote、AEAD Token、SSRF/AskPass、Run/Attempt/Outbox、受控 Fetch/Fast-forward/Push、post-check、自动调度与索引分离 | Domain/Application/Git/PostgreSQL/API/Worker、安全与 migration 门禁已验证；真实浏览器已覆盖桌面/390x844 配置、持久运行恢复、分叉冲突、有界预览和重试 |
 | [可恢复异步 Export 契约](./export-contract.md) | Tagged Job、Collection scan、附件 ZIP、prepared result、流式下载、Audit 与清理 | Collection Markdown/Metadata JSON 和 Workspace Attachments ZIP 已交付并关闭 AC-33；Evaluation/Audit 内容导出保持 deferred |
 | [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health、M8 Review/Interview/Shared Path/Memory、M9 Workspace 列表的持久化、receipt、可见性与 PG/EXPLAIN 门禁 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool 稳定错误、M9 Proposal detail/summary Approval 空值契约与 M10 Auth 的稳定 Problem Details 边界 |

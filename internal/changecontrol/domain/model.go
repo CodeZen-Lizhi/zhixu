@@ -48,6 +48,18 @@ const (
 	ProposalRiskLevelLow ProposalRiskLevel = "LOW"
 )
 
+// TargetMode 描述文件补丁替换既有目标，或只创建始终缺失的新目标。
+type TargetMode string
+
+const (
+	// TargetModeReplace 保留既有文件替换契约。
+	TargetModeReplace TargetMode = "REPLACE"
+	// TargetModeCreateOnly 要求 absence token，并禁止替换任何已存在目标。
+	TargetModeCreateOnly TargetMode = "CREATE_ONLY"
+
+	absenceTokenPrefix = "workspace-target-absent/v1:"
+)
+
 // Decision 是一次不可变的用户审批决定。
 type Decision string
 
@@ -76,6 +88,11 @@ type Proposal struct {
 	Approval  *Approval
 }
 
+// RestoreBindingMatches compares the complete typed restore intent without dereferencing nil.
+func (proposal Proposal) RestoreBindingMatches(expected RestoreDocument) bool {
+	return proposal.Revision.RestoreDocument != nil && *proposal.Revision.RestoreDocument == expected
+}
+
 // TargetUnavailableError 表示 Proposal 目标不再是 Workspace 内可安全读取的普通文件。
 type TargetUnavailableError struct{ Cause error }
 
@@ -84,9 +101,11 @@ func (e *TargetUnavailableError) Unwrap() error { return e.Cause }
 
 // Revision 是带目标、基线和证据的不可变变更快照。
 type Revision struct {
-	ID, ProposalID  foundation.ID
-	RevisionNo      int
-	TargetPath      string
+	ID, ProposalID foundation.ID
+	RevisionNo     int
+	TargetPath     string
+	// TargetMode 只允许旧内存值为空；空值按 REPLACE 处理。
+	TargetMode      TargetMode
 	BaseHash        string
 	Content         string
 	EvidenceSummary string
@@ -95,6 +114,8 @@ type Revision struct {
 	ChangeHash      string
 	KnowledgeChange *KnowledgeChange
 	PublishArtifact *PublishArtifact
+	// RestoreDocument is present only for append-only Document restore proposals.
+	RestoreDocument *RestoreDocument
 	// DownstreamUpdate 仅在 downstream_update Revision 中存在，记录审批意图而非写回命令。
 	DownstreamUpdate *DownstreamUpdate
 	CreatedAt        time.Time
@@ -135,6 +156,11 @@ func ValidateProposalRiskLevelForType(proposalType ProposalType, level ProposalR
 	}
 	switch NormalizeProposalType(proposalType) {
 	case ProposalTypeFilePatch:
+		return parsed, nil
+	case ProposalTypeRestoreDocument:
+		if parsed != ProposalRiskLevelHigh {
+			return "", fmt.Errorf("%w: restore_document proposals require HIGH", ErrProposalRiskLevelInvalid)
+		}
 		return parsed, nil
 	case ProposalTypeKnowledgeChange:
 		if parsed != ProposalRiskLevelHigh {
@@ -210,6 +236,101 @@ func ComputeChangeHash(targetPath, baseHash, content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// NormalizeTargetMode 将旧空值表示规范为 REPLACE。
+func NormalizeTargetMode(mode TargetMode) TargetMode {
+	if mode == "" {
+		return TargetModeReplace
+	}
+	return mode
+}
+
+// ValidateTargetMode 只接受两种不可变目标存在性契约。
+func ValidateTargetMode(mode TargetMode) (TargetMode, error) {
+	mode = NormalizeTargetMode(mode)
+	if mode != TargetModeReplace && mode != TargetModeCreateOnly {
+		return "", errors.New("target mode is invalid")
+	}
+	return mode, nil
+}
+
+// ComputeAbsenceToken 生成 Authoring 与 Change Control 共享的版本化缺失证明；它不是文件内容哈希。
+func ComputeAbsenceToken(workspaceID foundation.ID, targetPath string) (string, error) {
+	canonicalPath, err := ValidateTargetPath(targetPath)
+	if workspaceID == "" || err != nil || canonicalPath != targetPath {
+		return "", errors.New("absence token target is invalid")
+	}
+	payload := struct {
+		Schema  string `json:"schema"`
+		Payload struct {
+			WorkspaceID foundation.ID `json:"workspace_id"`
+			TargetPath  string        `json:"target_path"`
+		} `json:"payload"`
+	}{Schema: "workspace-target-absent/v1"}
+	payload.Payload.WorkspaceID = workspaceID
+	payload.Payload.TargetPath = targetPath
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return absenceTokenPrefix + hex.EncodeToString(sum[:]), nil
+}
+
+// ValidAbsenceToken 校验版本化 absence token 的格式。
+func ValidAbsenceToken(value string) bool {
+	return strings.HasPrefix(value, absenceTokenPrefix) && ValidHash(strings.TrimPrefix(value, absenceTokenPrefix))
+}
+
+// ValidateTargetBaseVersion 将基线版本绑定到 Workspace、路径和目标模式。
+func ValidateTargetBaseVersion(workspaceID foundation.ID, targetPath string, mode TargetMode, baseVersion string) error {
+	canonicalPath, err := ValidateTargetPath(targetPath)
+	mode, modeErr := ValidateTargetMode(mode)
+	if workspaceID == "" || err != nil || modeErr != nil || canonicalPath != targetPath {
+		return ErrWritebackInvalidInput
+	}
+	if mode == TargetModeReplace {
+		if !ValidHash(baseVersion) {
+			return ErrWritebackInvalidInput
+		}
+		return nil
+	}
+	expected, err := ComputeAbsenceToken(workspaceID, targetPath)
+	if err != nil || baseVersion != expected || !ValidAbsenceToken(baseVersion) {
+		return ErrWritebackInvalidInput
+	}
+	return nil
+}
+
+// ComputeChangeHashForTarget 生成模式绑定的 Change Hash；REPLACE 保持旧 v1 字节不变。
+func ComputeChangeHashForTarget(workspaceID foundation.ID, targetPath string, mode TargetMode, baseVersion, content string) (string, error) {
+	mode, err := ValidateTargetMode(mode)
+	if err != nil || ValidateTargetBaseVersion(workspaceID, targetPath, mode, baseVersion) != nil {
+		return "", ErrWritebackInvalidInput
+	}
+	return computeChangeHashForMode(targetPath, mode, baseVersion, content)
+}
+
+func computeChangeHashForMode(targetPath string, mode TargetMode, baseVersion, content string) (string, error) {
+	mode, err := ValidateTargetMode(mode)
+	canonicalPath, pathErr := ValidateTargetPath(targetPath)
+	if err != nil || pathErr != nil || canonicalPath != targetPath {
+		return "", ErrWritebackInvalidInput
+	}
+	if mode == TargetModeReplace {
+		if !ValidHash(baseVersion) {
+			return "", ErrWritebackInvalidInput
+		}
+		return ComputeChangeHash(targetPath, baseVersion, content), nil
+	}
+	if !ValidAbsenceToken(baseVersion) {
+		return "", ErrWritebackInvalidInput
+	}
+	normalizedContent := strings.ReplaceAll(content, "\r\n", "\n")
+	canonical := fmt.Sprintf("zhixu-change-v2\ntarget-mode:%s\ntarget-path-length:%d\ntarget-path:%s\nbase-version:%s\ncontent-length:%d\ncontent:\n%s", mode, len(targetPath), targetPath, baseVersion, len(normalizedContent), normalizedContent)
+	sum := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // ComputeRequestHash 重现历史 Proposal 创建请求的 v1 哈希。
 // 该函数只用于已持久化历史记录的精确重放；新 Proposal 必须使用包含 RiskLevel 的 v2 哈希。
 func ComputeRequestHash(workspaceID foundation.ID, targetPath, baseHash, content, evidence, risk, rollback string) string {
@@ -244,6 +365,36 @@ func ComputeRequestHashWithRiskLevel(workspaceID foundation.ID, targetPath, base
 		Risk          string            `json:"risk"`
 		Rollback      string            `json:"rollback"`
 	}{"proposal-create-request/v2", string(workspaceID), targetPath, strings.ToLower(baseHash), strings.ReplaceAll(content, "\r\n", "\n"), evidence, normalizedRiskLevel, risk, rollback}
+	encoded, _ := json.Marshal(payload)
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// ComputeRequestHashWithTargetMode 将 CREATE_ONLY 请求绑定到 absence token；REPLACE 保持 v2 字节兼容。
+func ComputeRequestHashWithTargetMode(workspaceID foundation.ID, targetPath string, mode TargetMode, baseVersion, content, evidence string, riskLevel ProposalRiskLevel, risk, rollback string) (string, error) {
+	mode, err := ValidateTargetMode(mode)
+	if err != nil || ValidateTargetBaseVersion(workspaceID, targetPath, mode, baseVersion) != nil {
+		return "", ErrWritebackInvalidInput
+	}
+	if mode == TargetModeReplace {
+		return ComputeRequestHashWithRiskLevel(workspaceID, targetPath, baseVersion, content, evidence, riskLevel, risk, rollback)
+	}
+	normalizedRiskLevel, err := ParseProposalRiskLevel(riskLevel)
+	if err != nil {
+		return "", err
+	}
+	payload := struct {
+		SchemaVersion string            `json:"schema_version"`
+		WorkspaceID   string            `json:"workspace_id"`
+		TargetPath    string            `json:"target_path"`
+		TargetMode    TargetMode        `json:"target_mode"`
+		BaseVersion   string            `json:"base_version"`
+		Content       string            `json:"content"`
+		Evidence      string            `json:"evidence"`
+		RiskLevel     ProposalRiskLevel `json:"risk_level"`
+		Risk          string            `json:"risk"`
+		Rollback      string            `json:"rollback"`
+	}{"proposal-create-request/v3", string(workspaceID), targetPath, mode, baseVersion, strings.ReplaceAll(content, "\r\n", "\n"), evidence, normalizedRiskLevel, risk, rollback}
 	encoded, _ := json.Marshal(payload)
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:]), nil

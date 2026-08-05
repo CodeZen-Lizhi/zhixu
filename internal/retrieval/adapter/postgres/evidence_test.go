@@ -137,6 +137,36 @@ func TestLoadCitationSourceSpanReferenceUsesFullFrozenTupleInOneQuery(t *testing
 	}
 }
 
+func TestResolveProvenanceCitationReferencesUsesActiveIndexInOneQuery(t *testing.T) {
+	encoded, err := json.Marshal([]map[string]string{{
+		"WorkspaceID": string(evidenceTestWorkspaceID), "IndexVersionID": string(evidenceTestIndexID),
+		"ChunkID": string(evidenceTestChunkID), "SourceVersionID": string(evidenceTestSourceVersionID),
+		"SourceSpanID": string(evidenceTestSpanID),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := &evidenceTestDB{row: evidenceTestRow{values: []any{encoded}}}
+	repository, err := NewSearchRepository(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := domain.ProvenanceReferenceQuery{WorkspaceID: evidenceTestWorkspaceID, SourceVersionID: evidenceTestSourceVersionID, SourceSpanID: evidenceTestSpanID}
+	result, err := repository.ResolveProvenanceCitationReferences(context.Background(), []domain.ProvenanceReferenceQuery{query})
+	if err != nil || len(result) != 1 || result[0].IndexVersionID != evidenceTestIndexID || result[0].ChunkID != evidenceTestChunkID {
+		t.Fatalf("provenance result=%#v err=%v", result, err)
+	}
+	for _, predicate := range []string{"idx.status='active'", "source_manifest.selection_status='included'", "chunk.source_span_id=requested.source_span_id", "manifest.chunk_id=chunk.id", "row_number() OVER"} {
+		if !strings.Contains(database.query, predicate) {
+			t.Fatalf("provenance query missing %q:\n%s", predicate, database.query)
+		}
+	}
+	wantArgs := []any{[]string{string(evidenceTestWorkspaceID)}, []string{string(evidenceTestSourceVersionID)}, []string{string(evidenceTestSpanID)}}
+	if !reflect.DeepEqual(database.args, wantArgs) {
+		t.Fatalf("provenance args=%#v", database.args)
+	}
+}
+
 func citationReferenceJSON(t *testing.T, relativePath string) []byte {
 	t.Helper()
 	encoded, err := json.Marshal([]map[string]any{{
@@ -274,6 +304,8 @@ func evidenceSpanRowValuesWithVersionPath(relativePath, versionRelativePath stri
 		"paragraph",
 		[]byte(`{"kind":"paragraph"}`),
 		strings.Repeat("b", 64),
+		domain.EvidenceKind("raw_bytes"),
+		"",
 		"parser-v1",
 		"schema-v1",
 	)

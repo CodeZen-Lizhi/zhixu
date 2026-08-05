@@ -16,7 +16,6 @@
 .control-gate__content h1 {
   max-width: 18ch;
   margin: 0 0 1rem;
-  font-family: Georgia, "Times New Roman", serif;
   font-size: 2.35rem;
   font-weight: 600;
   line-height: 1.12;
@@ -76,7 +75,7 @@
 
 .control-operation--warning {
   border-color: var(--amber);
-  background: rgb(169 120 44 / 8%);
+  background: rgb(138 75 15 / 8%);
 }
 
 .control-operation--error {
@@ -86,7 +85,6 @@
 
 .control-operation h2 {
   margin: 0 0 .45rem;
-  font-family: Georgia, "Times New Roman", serif;
   font-size: 1.8rem;
   font-weight: 500;
 }
@@ -124,7 +122,6 @@
 
 .control-active-workspace h2 {
   margin: 0;
-  font-family: Georgia, "Times New Roman", serif;
   font-size: 2rem;
   font-weight: 500;
 }
@@ -243,7 +240,6 @@
 .control-registry-row__title h3 {
   margin: 0;
   overflow-wrap: anywhere;
-  font-family: Georgia, "Times New Roman", serif;
   font-size: 1.25rem;
   font-weight: 500;
 }
@@ -266,7 +262,7 @@
 
 .control-status--available { border-color: rgb(40 100 67 / 35%); color: var(--green); background: rgb(40 100 67 / 7%); }
 .control-status--unavailable { border-color: rgb(161 54 45 / 35%); color: var(--red); background: rgb(161 54 45 / 7%); }
-.control-status--migration_required { border-color: rgb(169 120 44 / 35%); color: #855b1c; background: rgb(169 120 44 / 8%); }
+.control-status--migration_required { border-color: rgb(138 75 15 / 35%); color: var(--amber); background: rgb(138 75 15 / 8%); }
 
 .control-registry-row__reason {
   margin: .5rem 0 0;

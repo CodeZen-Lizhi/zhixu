@@ -21,6 +21,12 @@ type TargetReader interface {
 	CurrentHash(context.Context, foundation.ID, string) (string, error)
 }
 
+// CreateOnlyTargetReader 证明受控 Workspace 中的规范目标路径仍不存在。
+// 单独的窄接口避免改变既有 REPLACE Reader 的兼容契约。
+type CreateOnlyTargetReader interface {
+	EnsureTargetAbsent(context.Context, foundation.ID, string, string) error
+}
+
 // CurrentContentReader 在同一次受限读取中返回目标正文与哈希，供审阅 UI 展示真实 Diff。
 type CurrentContentReader interface {
 	CurrentContent(context.Context, foundation.ID, string, int64) ([]byte, string, error)
@@ -31,9 +37,11 @@ const MaxProposalCurrentContentBytes int64 = 1024 * 1024
 
 // ProposalCurrentContent 是当前 Workspace 文件与 Proposal 基线的只读比较结果。
 type ProposalCurrentContent struct {
-	ProposalID    foundation.ID
-	WorkspaceID   foundation.ID
-	TargetPath    string
+	ProposalID  foundation.ID
+	WorkspaceID foundation.ID
+	TargetPath  string
+	// TargetMode 区分替换既有文件与只创建缺失目标的审阅基线。
+	TargetMode    domain.TargetMode
 	Content       string
 	CurrentHash   string
 	BaseHash      string
@@ -44,6 +52,11 @@ type ProposalCurrentContent struct {
 // 调用方不能提供 HEAD；实现返回的快照是 Approval Git HEAD 的唯一来源。
 type ApprovalGitInspector interface {
 	CaptureApprovalSnapshot(context.Context, foundation.ID) (domain.GitSnapshot, error)
+}
+
+// CreateOnlyApprovalGitInspector 证明批准的 Git 树中没有 CREATE_ONLY 目标条目。
+type CreateOnlyApprovalGitInspector interface {
+	EnsureTargetAbsentAt(context.Context, foundation.ID, string, string) error
 }
 
 // Service 协调 Proposal、Approval 与无副作用 Apply 前置校验。
@@ -105,6 +118,18 @@ type CreateCommand struct {
 	RollbackPlan    string
 }
 
+// CreateCreateOnlyFileProposalCommand 是 Authoring 首次发布文件的受限 Proposal 命令。
+type CreateCreateOnlyFileProposalCommand struct {
+	WorkspaceID     foundation.ID
+	TargetPath      string
+	IdempotencyKey  string
+	Content         string
+	EvidenceSummary string
+	RiskLevel       domain.ProposalRiskLevel
+	Risk            string
+	RollbackPlan    string
+}
+
 // CreateKnowledgeChangeCommand 是创建 `knowledge_change` Proposal 的结构化命令。
 type CreateKnowledgeChangeCommand struct {
 	WorkspaceID     foundation.ID
@@ -136,6 +161,18 @@ type CreateDownstreamUpdateCommand struct {
 	IdempotencyKey string
 }
 
+// CreateRestoreDocumentCommand creates one typed, append-only Document restore proposal.
+type CreateRestoreDocumentCommand struct {
+	WorkspaceID     foundation.ID
+	TargetPath      string
+	IdempotencyKey  string
+	Content         string
+	EvidenceSummary string
+	Risk            string
+	RollbackPlan    string
+	Restore         domain.RestoreDocument
+}
+
 // DownstreamUpdateFactory 从当前报告和 owner 事实重建不可变 Proposal 载荷。
 type DownstreamUpdateFactory interface {
 	BuildDownstreamUpdate(context.Context, foundation.ID, foundation.ID, knowledge.ImpactObjectType, foundation.ID, knowledge.ImpactAction) (domain.DownstreamUpdate, error)
@@ -159,15 +196,181 @@ type CreateResult struct {
 
 // CreateProposal 校验并原子创建 ready_for_review Proposal 和 Revision。
 func (s *Service) CreateProposal(ctx context.Context, command CreateCommand) (CreateResult, error) {
+	return s.createFileProposal(ctx, createFileProposalCommand{
+		WorkspaceID: command.WorkspaceID, TargetPath: command.TargetPath, TargetMode: domain.TargetModeReplace,
+		IdempotencyKey: command.IdempotencyKey, BaseVersion: command.BaseHash, Content: command.Content,
+		EvidenceSummary: command.EvidenceSummary, RiskLevel: command.RiskLevel, Risk: command.Risk, RollbackPlan: command.RollbackPlan,
+	})
+}
+
+// CreateCreateOnlyFileProposal 为 Authoring 创建目标必须缺失的 file_patch Proposal。
+func (s *Service) CreateCreateOnlyFileProposal(ctx context.Context, command CreateCreateOnlyFileProposalCommand) (CreateResult, error) {
+	targetPath, err := domain.ValidateTargetPath(command.TargetPath)
+	if err != nil || targetPath != command.TargetPath {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("proposal target path is invalid"))
+	}
+	absenceToken, err := domain.ComputeAbsenceToken(command.WorkspaceID, targetPath)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	return s.createFileProposal(ctx, createFileProposalCommand{
+		WorkspaceID: command.WorkspaceID, TargetPath: targetPath, TargetMode: domain.TargetModeCreateOnly,
+		IdempotencyKey: command.IdempotencyKey, BaseVersion: absenceToken, Content: command.Content,
+		EvidenceSummary: command.EvidenceSummary, RiskLevel: command.RiskLevel, Risk: command.Risk, RollbackPlan: command.RollbackPlan,
+	})
+}
+
+// CreateRestoreDocumentProposal rebinds current file/Git facts before persisting a typed restore revision.
+func (s *Service) CreateRestoreDocumentProposal(ctx context.Context, command CreateRestoreDocumentCommand) (CreateResult, error) {
+	repository, ok := s.repo.(domain.RestoreDocumentProposalRepository)
+	lookup, lookupOK := s.repo.(ProposalCreateLookup)
+	if !ok || !lookupOK {
+		return CreateResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "DOCUMENT_RESTORE_PROPOSAL_REPOSITORY_UNAVAILABLE", false, errors.New("restore proposal repository is unavailable"))
+	}
+	targetPath, pathErr := domain.ValidateTargetPath(command.TargetPath)
+	workspaceTargetErr := domain.ValidateWorkspaceTarget(command.WorkspaceID, command.TargetPath)
+	restore, restoreErr := domain.ValidateRestoreDocument(command.Restore)
+	idempotencyKey := strings.TrimSpace(command.IdempotencyKey)
+	evidence, risk, rollback := strings.TrimSpace(command.EvidenceSummary), strings.TrimSpace(command.Risk), strings.TrimSpace(command.RollbackPlan)
+	if pathErr != nil || workspaceTargetErr != nil || targetPath != command.TargetPath || restoreErr != nil || restore.WorkspaceID != command.WorkspaceID ||
+		idempotencyKey == "" || idempotencyKey != command.IdempotencyKey || len(idempotencyKey) > 128 ||
+		strings.TrimSpace(command.Content) == "" || evidence == "" || risk == "" || rollback == "" ||
+		domain.ComputeContentHash([]byte(command.Content)) != restore.TargetContentHash {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "DOCUMENT_RESTORE_PROPOSAL_INVALID", false, domain.ErrRestoreDocumentInvalid)
+	}
+	requestHash, err := domain.ComputeRestoreDocumentRequestHash(
+		command.WorkspaceID, restore, targetPath, command.Content, evidence,
+		domain.ProposalRiskLevelHigh, risk, rollback,
+	)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "DOCUMENT_RESTORE_PROPOSAL_INVALID", false, err)
+	}
+	if existing, found, lookupErr := lookup.FindProposalByIdempotencyKey(ctx, command.WorkspaceID, idempotencyKey); lookupErr != nil {
+		return CreateResult{}, lookupErr
+	} else if found {
+		if !restoreProposalCreateRequestMatches(existing, restore, targetPath, command.Content, evidence, risk, rollback, requestHash, idempotencyKey) {
+			return CreateResult{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
+		}
+		return CreateResult{Proposal: existing, Replayed: true}, nil
+	}
+	currentHash, err := s.targets.CurrentHash(ctx, command.WorkspaceID, targetPath)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	if !strings.EqualFold(currentHash, restore.CurrentContentHash) {
+		return CreateResult{}, foundation.NewError(foundation.ErrorVersionConflict, "DOCUMENT_RESTORE_STALE", false, &HashConflict{Expected: restore.CurrentContentHash, Current: strings.ToLower(currentHash)})
+	}
+	snapshot, err := s.git.CaptureApprovalSnapshot(ctx, command.WorkspaceID)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	if !strings.EqualFold(snapshot.Head, restore.ExpectedHead) || snapshot.Branch == "" || !snapshot.Clean {
+		return CreateResult{}, foundation.NewError(foundation.ErrorVersionConflict, "DOCUMENT_RESTORE_STALE", false, errors.New("restore git baseline changed"))
+	}
+	proposalID, err := s.ids.New()
+	if err != nil {
+		return CreateResult{}, err
+	}
+	revisionID, err := s.ids.New()
+	if err != nil {
+		return CreateResult{}, err
+	}
+	changeHash, err := domain.ComputeChangeHashForTarget(command.WorkspaceID, targetPath, domain.TargetModeReplace, restore.CurrentContentHash, command.Content)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "DOCUMENT_RESTORE_PROPOSAL_INVALID", false, err)
+	}
+	now := s.clock.Now()
+	revision := domain.Revision{
+		ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: targetPath,
+		TargetMode: domain.TargetModeReplace, BaseHash: restore.CurrentContentHash, Content: command.Content,
+		EvidenceSummary: evidence, Risk: risk, RollbackPlan: rollback, ChangeHash: changeHash,
+		RestoreDocument: &restore, CreatedAt: now,
+	}
+	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeRestoreDocument, revision); err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "DOCUMENT_RESTORE_PROPOSAL_INVALID", false, err)
+	}
+	proposal, err := repository.CreateRestoreDocumentProposal(ctx, domain.Proposal{
+		ID: proposalID, WorkspaceID: command.WorkspaceID, Type: domain.ProposalTypeRestoreDocument,
+		RiskLevel: domain.ProposalRiskLevelHigh, TargetPath: targetPath, IdempotencyKey: idempotencyKey,
+		RequestHash: requestHash, Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
+		Revision: revision,
+	})
+	if err != nil {
+		return CreateResult{}, err
+	}
+	return CreateResult{Proposal: proposal, Replayed: proposal.ID != proposalID}, nil
+}
+
+func restoreProposalCreateRequestMatches(proposal domain.Proposal, restore domain.RestoreDocument, targetPath, content, evidence, risk, rollback, requestHash, idempotencyKey string) bool {
+	return proposalType(proposal) == domain.ProposalTypeRestoreDocument && proposal.RestoreBindingMatches(restore) &&
+		proposal.WorkspaceID == restore.WorkspaceID && proposal.TargetPath == targetPath && proposal.IdempotencyKey == idempotencyKey && proposal.RequestHash == requestHash &&
+		proposal.RiskLevel == domain.ProposalRiskLevelHigh && proposal.Revision.TargetPath == targetPath &&
+		proposal.Revision.BaseHash == restore.CurrentContentHash && proposal.Revision.Content == content &&
+		proposal.Revision.EvidenceSummary == evidence && proposal.Revision.Risk == risk && proposal.Revision.RollbackPlan == rollback
+}
+
+type createFileProposalCommand struct {
+	WorkspaceID     foundation.ID
+	TargetPath      string
+	TargetMode      domain.TargetMode
+	IdempotencyKey  string
+	BaseVersion     string
+	Content         string
+	EvidenceSummary string
+	RiskLevel       domain.ProposalRiskLevel
+	Risk            string
+	RollbackPlan    string
+}
+
+func (s *Service) createFileProposal(ctx context.Context, command createFileProposalCommand) (CreateResult, error) {
 	targetPath, pathErr := domain.ValidateTargetPath(command.TargetPath)
 	workspaceTargetErr := domain.ValidateWorkspaceTarget(command.WorkspaceID, targetPath)
-	if command.WorkspaceID == "" || pathErr != nil || workspaceTargetErr != nil || strings.TrimSpace(command.IdempotencyKey) == "" || len(strings.TrimSpace(command.IdempotencyKey)) > 128 || !domain.ValidHash(command.BaseHash) || strings.TrimSpace(command.Content) == "" || strings.TrimSpace(command.EvidenceSummary) == "" || strings.TrimSpace(command.Risk) == "" || strings.TrimSpace(command.RollbackPlan) == "" {
+	targetMode, modeErr := domain.ValidateTargetMode(command.TargetMode)
+	idempotencyKey := strings.TrimSpace(command.IdempotencyKey)
+	evidenceSummary := strings.TrimSpace(command.EvidenceSummary)
+	rollbackPlan := strings.TrimSpace(command.RollbackPlan)
+	if command.WorkspaceID == "" || pathErr != nil || workspaceTargetErr != nil || modeErr != nil || domain.ValidateTargetBaseVersion(command.WorkspaceID, targetPath, targetMode, command.BaseVersion) != nil || idempotencyKey == "" || len(idempotencyKey) > 128 || strings.TrimSpace(command.Content) == "" || evidenceSummary == "" || strings.TrimSpace(command.Risk) == "" || rollbackPlan == "" {
 		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, errors.New("proposal fields are invalid"))
 	}
 	risk := strings.TrimSpace(command.Risk)
 	riskLevel, riskErr := proposalRiskLevelForCreate(command.RiskLevel)
 	if riskErr != nil {
 		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, riskErr)
+	}
+	baseHash := command.BaseVersion
+	if targetMode == domain.TargetModeReplace {
+		baseHash = strings.ToLower(baseHash)
+	}
+	changeHash, changeErr := domain.ComputeChangeHashForTarget(command.WorkspaceID, targetPath, targetMode, baseHash, command.Content)
+	if changeErr != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, changeErr)
+	}
+	requestHash, err := domain.ComputeRequestHashWithTargetMode(command.WorkspaceID, targetPath, targetMode, baseHash, command.Content, evidenceSummary, riskLevel, risk, rollbackPlan)
+	if err != nil {
+		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
+	}
+	if targetMode == domain.TargetModeCreateOnly {
+		lookup, ok := s.repo.(ProposalCreateLookup)
+		if !ok {
+			return CreateResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_IDEMPOTENCY_LOOKUP_UNAVAILABLE", false, errors.New("create-only proposal lookup is unavailable"))
+		}
+		existing, found, lookupErr := lookup.FindProposalByIdempotencyKey(ctx, command.WorkspaceID, idempotencyKey)
+		if lookupErr != nil {
+			return CreateResult{}, lookupErr
+		}
+		if found {
+			if !fileProposalCreateRequestMatches(existing, command.WorkspaceID, targetPath, targetMode, baseHash, command.Content, evidenceSummary, riskLevel, risk, rollbackPlan, changeHash, requestHash, idempotencyKey) {
+				return CreateResult{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
+			}
+			return CreateResult{Proposal: existing, Replayed: true}, nil
+		}
+		reader, ok := s.targets.(CreateOnlyTargetReader)
+		if !ok {
+			return CreateResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_TARGET_READER_UNAVAILABLE", false, errors.New("create-only target reader is unavailable"))
+		}
+		if err := reader.EnsureTargetAbsent(ctx, command.WorkspaceID, targetPath, baseHash); err != nil {
+			return CreateResult{}, err
+		}
 	}
 	proposalID, err := s.ids.New()
 	if err != nil {
@@ -178,31 +381,45 @@ func (s *Service) CreateProposal(ctx context.Context, command CreateCommand) (Cr
 		return CreateResult{}, err
 	}
 	now := s.clock.Now()
-	baseHash := strings.ToLower(command.BaseHash)
 	revision := domain.Revision{
 		ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: targetPath,
-		BaseHash: baseHash, Content: command.Content, EvidenceSummary: strings.TrimSpace(command.EvidenceSummary),
-		Risk: risk, RollbackPlan: strings.TrimSpace(command.RollbackPlan),
-		ChangeHash: domain.ComputeChangeHash(targetPath, baseHash, command.Content), CreatedAt: now,
+		TargetMode: targetMode,
+		BaseHash:   baseHash, Content: command.Content, EvidenceSummary: evidenceSummary,
+		Risk: risk, RollbackPlan: rollbackPlan,
+		ChangeHash: changeHash, CreatedAt: now,
 	}
 	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeFilePatch, revision); err != nil {
-		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
-	}
-	requestHash, err := domain.ComputeRequestHashWithRiskLevel(command.WorkspaceID, targetPath, baseHash, command.Content, strings.TrimSpace(command.EvidenceSummary), riskLevel, risk, strings.TrimSpace(command.RollbackPlan))
-	if err != nil {
 		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
 	}
 	proposal, err := s.repo.CreateProposal(ctx, domain.Proposal{
 		ID: proposalID, WorkspaceID: command.WorkspaceID, Type: domain.ProposalTypeFilePatch, TargetPath: targetPath,
 		RiskLevel:      riskLevel,
-		IdempotencyKey: strings.TrimSpace(command.IdempotencyKey),
+		IdempotencyKey: idempotencyKey,
 		RequestHash:    requestHash,
 		Status:         domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now, Revision: revision,
 	})
 	if err != nil {
 		return CreateResult{}, err
 	}
-	return CreateResult{Proposal: proposal, Replayed: !proposal.CreatedAt.Equal(now)}, nil
+	return CreateResult{Proposal: proposal, Replayed: proposal.ID != proposalID}, nil
+}
+
+func fileProposalCreateRequestMatches(
+	proposal domain.Proposal,
+	workspaceID foundation.ID,
+	targetPath string,
+	targetMode domain.TargetMode,
+	baseHash, content, evidenceSummary string,
+	riskLevel domain.ProposalRiskLevel,
+	risk, rollbackPlan, changeHash, requestHash, idempotencyKey string,
+) bool {
+	return proposalType(proposal) == domain.ProposalTypeFilePatch &&
+		proposal.WorkspaceID == workspaceID && proposal.RiskLevel == riskLevel &&
+		proposal.TargetPath == targetPath && proposal.IdempotencyKey == idempotencyKey && proposal.RequestHash == requestHash &&
+		proposal.Revision.TargetPath == targetPath && domain.NormalizeTargetMode(proposal.Revision.TargetMode) == targetMode &&
+		proposal.Revision.BaseHash == baseHash && proposal.Revision.Content == content &&
+		proposal.Revision.EvidenceSummary == evidenceSummary && proposal.Revision.Risk == risk &&
+		proposal.Revision.RollbackPlan == rollbackPlan && proposal.Revision.ChangeHash == changeHash
 }
 
 // CreateKnowledgeChangeProposal 校验并创建结构化 `knowledge_change` Proposal。
@@ -414,11 +631,23 @@ func (s *Service) GetProposalCurrentContent(ctx context.Context, proposalID foun
 	if err != nil {
 		return ProposalCurrentContent{}, err
 	}
-	if domain.NormalizeProposalType(proposal.Type) != domain.ProposalTypeFilePatch {
+	if !domain.ProposalSupportsFileWriteback(proposal.Type) {
 		return ProposalCurrentContent{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_CURRENT_CONTENT_UNSUPPORTED", false, errors.New("current content is only available for file patch proposals"))
 	}
 	if err := domain.ValidateWorkspaceTarget(proposal.WorkspaceID, proposal.TargetPath); err != nil {
 		return ProposalCurrentContent{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_TARGET_INVALID", false, err)
+	}
+	targetMode := domain.NormalizeTargetMode(proposal.Revision.TargetMode)
+	if targetMode == domain.TargetModeCreateOnly {
+		currentHash, verifyErr := s.verifyProposalTarget(ctx, proposal)
+		if verifyErr != nil {
+			return ProposalCurrentContent{}, verifyErr
+		}
+		return ProposalCurrentContent{
+			ProposalID: proposal.ID, WorkspaceID: proposal.WorkspaceID, TargetPath: proposal.TargetPath,
+			TargetMode: targetMode, Content: "", CurrentHash: currentHash, BaseHash: proposal.Revision.BaseHash,
+			BaseHashMatch: currentHash == proposal.Revision.BaseHash,
+		}, nil
 	}
 	reader, ok := s.targets.(CurrentContentReader)
 	if !ok {
@@ -430,7 +659,7 @@ func (s *Service) GetProposalCurrentContent(ctx context.Context, proposalID foun
 	}
 	return ProposalCurrentContent{
 		ProposalID: proposal.ID, WorkspaceID: proposal.WorkspaceID, TargetPath: proposal.TargetPath, Content: string(content),
-		CurrentHash: currentHash, BaseHash: proposal.Revision.BaseHash,
+		TargetMode: targetMode, CurrentHash: currentHash, BaseHash: proposal.Revision.BaseHash,
 		BaseHashMatch: currentHash == proposal.Revision.BaseHash,
 	}, nil
 }
@@ -481,12 +710,12 @@ func (s *Service) decideProposalLegacy(ctx context.Context, proposalID, revision
 		return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_DECISION_CONFLICT", false, errors.New("proposal already has a different approval decision"))
 	}
 	var approvedGitHead *string
-	if proposal.Status == domain.StatusReady && decision == domain.DecisionApproved && proposalType(proposal) == domain.ProposalTypeFilePatch {
-		currentHash, readErr := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
+	if proposal.Status == domain.StatusReady && decision == domain.DecisionApproved && domain.ProposalSupportsFileWriteback(proposal.Type) {
+		currentHash, readErr := s.verifyProposalTarget(ctx, proposal)
 		if readErr != nil {
 			return s.rejectUnavailableTarget(ctx, proposal.ID, readErr)
 		}
-		if strings.ToLower(currentHash) != proposal.Revision.BaseHash {
+		if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeReplace && strings.ToLower(currentHash) != proposal.Revision.BaseHash {
 			if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
 				return domain.Approval{}, markErr
 			}
@@ -498,6 +727,12 @@ func (s *Service) decideProposalLegacy(ctx context.Context, proposalID, revision
 		}
 		if bindingErr := domain.ValidateGitSnapshotBinding(proposal.WorkspaceID, snapshot.Head, snapshot); bindingErr != nil {
 			return domain.Approval{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_GIT_SNAPSHOT_INVALID", false, bindingErr)
+		}
+		if proposalType(proposal) == domain.ProposalTypeRestoreDocument && (proposal.Revision.RestoreDocument == nil || !strings.EqualFold(snapshot.Head, proposal.Revision.RestoreDocument.ExpectedHead)) {
+			return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "DOCUMENT_RESTORE_STALE", false, errors.New("restore git baseline changed before approval"))
+		}
+		if gitErr := s.verifyCreateOnlyGitTarget(ctx, proposal, snapshot.Head); gitErr != nil {
+			return domain.Approval{}, gitErr
 		}
 		head := strings.ToLower(snapshot.Head)
 		approvedGitHead = &head
@@ -581,13 +816,13 @@ func (s *Service) DecideProposalWithDispatch(ctx context.Context, proposalID, re
 
 	command := ApprovalDispatchCommand{WorkspaceID: proposal.WorkspaceID, Approval: approval}
 	if decision == domain.DecisionApproved {
-		currentHash, readErr := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
+		currentHash, readErr := s.verifyProposalTarget(ctx, proposal)
 		if readErr != nil {
 			_, rejectionErr := s.rejectUnavailableTarget(ctx, proposal.ID, readErr)
 			return ApprovalDecisionResult{}, rejectionErr
 		}
 		currentHash = strings.ToLower(currentHash)
-		if currentHash != proposal.Revision.BaseHash {
+		if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeReplace && currentHash != proposal.Revision.BaseHash {
 			if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
 				return ApprovalDecisionResult{}, markErr
 			}
@@ -599,6 +834,12 @@ func (s *Service) DecideProposalWithDispatch(ctx context.Context, proposalID, re
 		}
 		if bindingErr := domain.ValidateGitSnapshotBinding(proposal.WorkspaceID, snapshot.Head, snapshot); bindingErr != nil {
 			return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_GIT_SNAPSHOT_INVALID", false, bindingErr)
+		}
+		if proposalType(proposal) == domain.ProposalTypeRestoreDocument && (proposal.Revision.RestoreDocument == nil || !strings.EqualFold(snapshot.Head, proposal.Revision.RestoreDocument.ExpectedHead)) {
+			return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "DOCUMENT_RESTORE_STALE", false, errors.New("restore git baseline changed before approval"))
+		}
+		if gitErr := s.verifyCreateOnlyGitTarget(ctx, proposal, snapshot.Head); gitErr != nil {
+			return ApprovalDecisionResult{}, gitErr
 		}
 		head := strings.ToLower(snapshot.Head)
 		if approval.ApprovedGitHead != nil && !strings.EqualFold(*approval.ApprovedGitHead, head) {
@@ -669,6 +910,8 @@ type ApplyPreflightResult struct {
 	ProposalID foundation.ID
 	RevisionID foundation.ID
 	ChangeHash string
+	// TargetMode 绑定本次检查使用的目标存在性契约。
+	TargetMode domain.TargetMode
 	BaseHash   string
 }
 
@@ -703,10 +946,10 @@ func (s *Service) CheckApplyPreflight(ctx context.Context, proposalID, revisionI
 	if proposal.Revision.ChangeHash != approvedChangeHash || proposal.Approval.ChangeHash != approvedChangeHash {
 		return ApplyPreflightResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "CHANGE_HASH_MISMATCH", false, errors.New("approved hash does not match revision"))
 	}
-	if expectedChangeHash := domain.ComputeChangeHash(proposal.Revision.TargetPath, proposal.Revision.BaseHash, proposal.Revision.Content); proposal.Revision.ChangeHash != expectedChangeHash {
+	if !proposalChangeHashValid(proposal) {
 		return ApplyPreflightResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "CHANGE_HASH_INVALID", false, errors.New("revision change hash is not reproducible"))
 	}
-	currentBaseHash, err := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
+	currentBaseHash, err := s.verifyProposalSafety(ctx, proposal)
 	if err != nil {
 		var unavailable *domain.TargetUnavailableError
 		if errors.As(err, &unavailable) {
@@ -718,7 +961,7 @@ func (s *Service) CheckApplyPreflight(ctx context.Context, proposalID, revisionI
 		return ApplyPreflightResult{}, err
 	}
 	currentBaseHash = strings.ToLower(currentBaseHash)
-	if proposal.Revision.BaseHash != currentBaseHash {
+	if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeReplace && proposal.Revision.BaseHash != currentBaseHash {
 		if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
 			return ApplyPreflightResult{}, markErr
 		}
@@ -726,7 +969,8 @@ func (s *Service) CheckApplyPreflight(ctx context.Context, proposalID, revisionI
 	}
 	return ApplyPreflightResult{
 		ProposalID: proposal.ID, RevisionID: proposal.Revision.ID,
-		ChangeHash: proposal.Revision.ChangeHash, BaseHash: proposal.Revision.BaseHash,
+		ChangeHash: proposal.Revision.ChangeHash, TargetMode: domain.NormalizeTargetMode(proposal.Revision.TargetMode),
+		BaseHash: proposal.Revision.BaseHash,
 	}, nil
 }
 
@@ -750,20 +994,20 @@ func (s *Service) IssueWriteAuthorization(ctx context.Context, command domain.Au
 	if proposal.WorkspaceID != command.WorkspaceID || proposal.Revision.ID != command.RevisionID || proposal.Approval == nil || proposal.Approval.ID != command.ApprovalID || proposal.Status != domain.StatusApproved || proposal.Approval.Decision != domain.DecisionApproved {
 		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, errors.New("proposal approval binding is not valid"))
 	}
-	if strings.TrimSpace(command.Scope) != domain.ExpectedAuthorizationScope(proposal.Revision.TargetPath) {
+	if strings.TrimSpace(command.Scope) != domain.ExpectedAuthorizationScopeForTarget(proposal.Revision.TargetPath, proposal.Revision.TargetMode) {
 		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_SCOPE_INVALID", false, errors.New("authorization scope is broader than the approved target"))
 	}
 	if err := domain.ValidateToolBinding(command.ToolName, command.Capability); err != nil {
 		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITE_AUTHORIZATION_INVALID", false, err)
 	}
-	if proposal.Approval.ChangeHash != proposal.Revision.ChangeHash || proposal.Revision.ChangeHash != domain.ComputeChangeHash(proposal.Revision.TargetPath, proposal.Revision.BaseHash, proposal.Revision.Content) {
+	if proposal.Approval.ChangeHash != proposal.Revision.ChangeHash || !proposalChangeHashValid(proposal) {
 		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WRITE_AUTHORIZATION_CHANGE_HASH_INVALID", false, errors.New("approved change hash is not reproducible"))
 	}
-	currentHash, err := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
+	currentHash, err := s.verifyProposalSafety(ctx, proposal)
 	if err != nil {
 		return domain.AuthorizationIssueResult{}, err
 	}
-	if strings.ToLower(currentHash) != proposal.Revision.BaseHash {
+	if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeReplace && strings.ToLower(currentHash) != proposal.Revision.BaseHash {
 		if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
 			return domain.AuthorizationIssueResult{}, markErr
 		}
@@ -786,7 +1030,7 @@ func (s *Service) IssueWriteAuthorization(ctx context.Context, command domain.Au
 		WorkspaceID: command.WorkspaceID, WorkflowRunID: command.WorkflowRunID, NodeRunID: command.NodeRunID,
 		ProposalID: command.ProposalID, RevisionID: command.RevisionID, ApprovalID: command.ApprovalID,
 		ToolName: strings.TrimSpace(command.ToolName), Capability: command.Capability, Scope: strings.TrimSpace(command.Scope),
-		ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: proposal.Revision.BaseHash,
+		ApprovedChangeHash: proposal.Revision.ChangeHash, TargetMode: domain.NormalizeTargetMode(proposal.Revision.TargetMode), TargetVersion: proposal.Revision.BaseHash,
 		TokenHash: hashCredential(credential), IdempotencyKey: strings.TrimSpace(command.IdempotencyKey),
 		Status: domain.AuthorizationIssued, IssuedAt: now, ExpiresAt: now.Add(command.TTL), Version: 1,
 	})
@@ -807,7 +1051,7 @@ func (s *Service) ConsumeWriteAuthorization(ctx context.Context, request domain.
 	if !ok {
 		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WRITE_AUTHORIZATION_REPOSITORY_UNAVAILABLE", false, errors.New("authorization repository is unavailable"))
 	}
-	if strings.TrimSpace(request.Credential) == "" || len(request.Credential) > domain.MaxAuthorizationCredentialBytes || strings.TrimSpace(request.IdempotencyKey) == "" || len(strings.TrimSpace(request.IdempotencyKey)) > 128 || request.WorkspaceID == "" || request.WorkflowRunID == "" || request.NodeRunID == "" || request.ProposalID == "" || request.RevisionID == "" || request.ApprovalID == "" || strings.TrimSpace(request.ToolName) == "" || len(strings.TrimSpace(request.ToolName)) > 64 || strings.TrimSpace(request.Scope) == "" || len(strings.TrimSpace(request.Scope)) > 512 || !domain.ValidHash(request.ApprovedChangeHash) || !domain.ValidHash(request.TargetVersion) {
+	if strings.TrimSpace(request.Credential) == "" || len(request.Credential) > domain.MaxAuthorizationCredentialBytes || strings.TrimSpace(request.IdempotencyKey) == "" || len(strings.TrimSpace(request.IdempotencyKey)) > 128 || request.WorkspaceID == "" || request.WorkflowRunID == "" || request.NodeRunID == "" || request.ProposalID == "" || request.RevisionID == "" || request.ApprovalID == "" || strings.TrimSpace(request.ToolName) == "" || len(strings.TrimSpace(request.ToolName)) > 64 || strings.TrimSpace(request.Scope) == "" || len(strings.TrimSpace(request.Scope)) > 512 || !domain.ValidHash(request.ApprovedChangeHash) {
 		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITE_AUTHORIZATION_CONSUME_INVALID", false, errors.New("authorization consume binding is incomplete"))
 	}
 	if err := domain.ValidateToolBinding(request.ToolName, request.Capability); err != nil {
@@ -816,7 +1060,6 @@ func (s *Service) ConsumeWriteAuthorization(ctx context.Context, request domain.
 	request.ToolName = strings.TrimSpace(request.ToolName)
 	request.Scope = strings.TrimSpace(request.Scope)
 	request.ApprovedChangeHash = strings.ToLower(request.ApprovedChangeHash)
-	request.TargetVersion = strings.ToLower(request.TargetVersion)
 	request.Credential = hashCredential(request.Credential)
 	proposal, err := s.repo.GetProposal(ctx, request.ProposalID)
 	if err != nil {
@@ -824,6 +1067,9 @@ func (s *Service) ConsumeWriteAuthorization(ctx context.Context, request domain.
 	}
 	if err := requireFilePatchProposal(proposal, "WRITE_AUTHORIZATION_PROPOSAL_TYPE_UNSUPPORTED"); err != nil {
 		return domain.AuthorizationConsumeResult{}, err
+	}
+	if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeReplace {
+		request.TargetVersion = strings.ToLower(request.TargetVersion)
 	}
 	existing, err := authorizations.GetAuthorization(ctx, request.WorkspaceID, request.IdempotencyKey, request.Credential)
 	if err != nil {
@@ -837,14 +1083,17 @@ func (s *Service) ConsumeWriteAuthorization(ctx context.Context, request domain.
 		result.Authorization.TokenHash = ""
 		return result, consumeErr
 	}
-	if proposal.WorkspaceID != request.WorkspaceID || proposal.Revision.ID != request.RevisionID || proposal.Approval == nil || proposal.Approval.ID != request.ApprovalID || proposal.Status != domain.StatusApproved || proposal.Approval.Decision != domain.DecisionApproved || proposal.Revision.ChangeHash != request.ApprovedChangeHash || proposal.Revision.BaseHash != request.TargetVersion || proposal.Approval.ChangeHash != request.ApprovedChangeHash || strings.TrimSpace(request.Scope) != domain.ExpectedAuthorizationScope(proposal.Revision.TargetPath) || proposal.Revision.ChangeHash != domain.ComputeChangeHash(proposal.Revision.TargetPath, proposal.Revision.BaseHash, proposal.Revision.Content) {
+	if proposal.WorkspaceID != request.WorkspaceID || proposal.Revision.ID != request.RevisionID || proposal.Approval == nil || proposal.Approval.ID != request.ApprovalID || proposal.Status != domain.StatusApproved || proposal.Approval.Decision != domain.DecisionApproved || proposal.Revision.ChangeHash != request.ApprovedChangeHash || proposal.Revision.BaseHash != request.TargetVersion || proposal.Approval.ChangeHash != request.ApprovedChangeHash || strings.TrimSpace(request.Scope) != domain.ExpectedAuthorizationScopeForTarget(proposal.Revision.TargetPath, proposal.Revision.TargetMode) || !proposalChangeHashValid(proposal) {
 		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorPermissionDenied, "WRITE_AUTHORIZATION_APPROVAL_REQUIRED", false, errors.New("authorization approval binding is no longer valid"))
 	}
-	currentHash, err := s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.TargetPath)
+	if domain.NormalizeTargetMode(request.TargetMode) != domain.NormalizeTargetMode(proposal.Revision.TargetMode) {
+		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WRITE_AUTHORIZATION_BINDING_CONFLICT", false, errors.New("authorization target mode differs"))
+	}
+	currentHash, err := s.verifyProposalSafety(ctx, proposal)
 	if err != nil {
 		return domain.AuthorizationConsumeResult{}, err
 	}
-	if strings.ToLower(currentHash) != proposal.Revision.BaseHash {
+	if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeReplace && strings.ToLower(currentHash) != proposal.Revision.BaseHash {
 		return domain.AuthorizationConsumeResult{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: proposal.Revision.BaseHash, Current: strings.ToLower(currentHash)})
 	}
 	if err := authorizations.ValidateWorkflowContext(ctx, request.WorkspaceID, request.WorkflowRunID, request.NodeRunID); err != nil {
@@ -884,11 +1133,64 @@ func proposalType(proposal domain.Proposal) domain.ProposalType {
 	return domain.NormalizeProposalType(proposal.Type)
 }
 
+func proposalChangeHashValid(proposal domain.Proposal) bool {
+	expected, err := domain.ComputeChangeHashForTarget(
+		proposal.WorkspaceID,
+		proposal.Revision.TargetPath,
+		proposal.Revision.TargetMode,
+		proposal.Revision.BaseHash,
+		proposal.Revision.Content,
+	)
+	return err == nil && strings.EqualFold(expected, proposal.Revision.ChangeHash) &&
+		(proposalType(proposal) != domain.ProposalTypeRestoreDocument || domain.ValidateProposalRevisionForType(domain.ProposalTypeRestoreDocument, proposal.Revision) == nil)
+}
+
+func (s *Service) verifyProposalTarget(ctx context.Context, proposal domain.Proposal) (string, error) {
+	if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeCreateOnly {
+		reader, ok := s.targets.(CreateOnlyTargetReader)
+		if !ok {
+			return "", foundation.NewError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_TARGET_READER_UNAVAILABLE", false, errors.New("create-only target reader is unavailable"))
+		}
+		if err := reader.EnsureTargetAbsent(ctx, proposal.WorkspaceID, proposal.Revision.TargetPath, proposal.Revision.BaseHash); err != nil {
+			return "", err
+		}
+		return proposal.Revision.BaseHash, nil
+	}
+	return s.targets.CurrentHash(ctx, proposal.WorkspaceID, proposal.Revision.TargetPath)
+}
+
+func (s *Service) verifyCreateOnlyGitTarget(ctx context.Context, proposal domain.Proposal, approvedHead string) error {
+	if domain.NormalizeTargetMode(proposal.Revision.TargetMode) != domain.TargetModeCreateOnly {
+		return nil
+	}
+	inspector, ok := s.git.(CreateOnlyApprovalGitInspector)
+	if !ok {
+		return foundation.NewError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_GIT_INSPECTOR_UNAVAILABLE", false, errors.New("create-only git inspector is unavailable"))
+	}
+	return inspector.EnsureTargetAbsentAt(ctx, proposal.WorkspaceID, approvedHead, proposal.Revision.TargetPath)
+}
+
+func (s *Service) verifyProposalSafety(ctx context.Context, proposal domain.Proposal) (string, error) {
+	version, err := s.verifyProposalTarget(ctx, proposal)
+	if err != nil {
+		return "", err
+	}
+	if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeCreateOnly {
+		if proposal.Approval == nil || proposal.Approval.ApprovedGitHead == nil {
+			return "", foundation.NewError(foundation.ErrorConsistencyViolation, "CREATE_ONLY_GIT_HEAD_MISSING", false, errors.New("create-only approval git head is missing"))
+		}
+		if err := s.verifyCreateOnlyGitTarget(ctx, proposal, *proposal.Approval.ApprovedGitHead); err != nil {
+			return "", err
+		}
+	}
+	return version, nil
+}
+
 func validateProposalForApproval(proposal domain.Proposal) error {
 	if _, err := domain.ValidateProposalRiskLevelForType(proposalType(proposal), proposal.RiskLevel); err != nil {
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_RISK_LEVEL_INVALID", false, err)
 	}
-	if proposalType(proposal) != domain.ProposalTypeFilePatch && strings.TrimSpace(proposal.TargetPath) != "" {
+	if !domain.ProposalSupportsFileWriteback(proposal.Type) && strings.TrimSpace(proposal.TargetPath) != "" {
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "TYPED_PROPOSAL_INVALID", false, errors.New("typed proposal must not carry file target fields"))
 	}
 	if err := domain.ValidateProposalRevisionForType(proposalType(proposal), proposal.Revision); err != nil {
@@ -906,7 +1208,7 @@ func requireFilePatchProposal(proposal domain.Proposal, code string) error {
 	if proposalType(proposal) == domain.ProposalTypeDownstreamUpdate {
 		return downstreamUpdateApplyUnavailable()
 	}
-	if proposalType(proposal) != domain.ProposalTypeFilePatch {
+	if !domain.ProposalSupportsFileWriteback(proposal.Type) {
 		return foundation.NewError(foundation.ErrorPermissionDenied, code, false, errors.New("proposal type does not support file writeback"))
 	}
 	return nil

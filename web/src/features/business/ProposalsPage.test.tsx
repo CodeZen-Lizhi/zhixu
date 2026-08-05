@@ -68,6 +68,7 @@ const fileProposal = (overrides: Record<string, unknown> = {}) => ({
   revision: {
     id: revisionId,
     revisionNo: 1,
+    targetMode: "REPLACE" as const,
     baseHash: "a".repeat(64),
     content: "next",
     evidenceSummary: "evidence",
@@ -78,6 +79,46 @@ const fileProposal = (overrides: Record<string, unknown> = {}) => ({
   },
   createdAt: "2026-07-22T00:00:00Z",
   updatedAt: "2026-07-22T00:01:00Z",
+  ...overrides,
+});
+
+const restoreDocumentId = "10000000-0000-4000-8000-000000000006";
+const restoreTargetCommit = "c".repeat(40);
+const restoreExpectedHead = "d".repeat(40);
+const restorePreviewHash = "e".repeat(64);
+const restoreTargetContentHash = "f".repeat(64);
+const restoreProposal = (overrides: Record<string, unknown> = {}) => ({
+  id: proposalId,
+  workspaceId,
+  type: "restore_document" as const,
+  targetPath: "docs/a.md",
+  status: "ready_for_review" as const,
+  riskLevel: "HIGH" as const,
+  revision: {
+    id: revisionId,
+    revisionNo: 1,
+    targetMode: "REPLACE" as const,
+    baseHash: "a".repeat(64),
+    content: "historic\n",
+    evidenceSummary: "恢复到经过审阅的历史版本",
+    risk: "恢复会覆盖当前工作区正文",
+    rollbackPlan: "通过新的恢复 Proposal 回到当前 Commit",
+    changeHash,
+    createdAt: "2026-08-02T00:00:00Z",
+    restore: {
+      workspaceId,
+      documentId: restoreDocumentId,
+      targetCommit: restoreTargetCommit,
+      expectedHead: restoreExpectedHead,
+      expectedDocumentVersion: 7,
+      previewHash: restorePreviewHash,
+      currentContentHash: "a".repeat(64),
+      targetContentHash: restoreTargetContentHash,
+      schemaVersion: "document-restore/v1" as const,
+    },
+  },
+  createdAt: "2026-08-02T00:00:00Z",
+  updatedAt: "2026-08-02T00:01:00Z",
   ...overrides,
 });
 
@@ -185,6 +226,7 @@ const currentContent = (baseHashMatch = true, baseHash = "a".repeat(64)) => ({
   proposalId,
   workspaceId,
   targetPath: "docs/a.md",
+  targetMode: "REPLACE" as const,
   content: "current",
   currentHash: baseHashMatch ? baseHash : "c".repeat(64),
   baseHash,
@@ -219,7 +261,7 @@ beforeEach(() => {
   api.getProposal.mockResolvedValue(fileProposal());
   api.getProposalCurrentContent.mockResolvedValue(currentContent());
   api.listProposals.mockResolvedValue({ items: [] });
-  api.preflightProposal.mockResolvedValue({ proposalId, revisionId, changeHash, baseHash: "a".repeat(64), preflightPassed: true, mode: "preflight_only", writePerformed: false });
+  api.preflightProposal.mockResolvedValue({ proposalId, revisionId, changeHash, targetMode: "REPLACE", baseHash: "a".repeat(64), preflightPassed: true, mode: "preflight_only", writePerformed: false });
 });
 
 afterEach(() => {
@@ -263,6 +305,32 @@ describe("ProposalsPage", () => {
     await waitFor(() => expect(api.listProposals).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ type: "publish_artifact" }), expect.any(AbortSignal)));
     expect(screen.getAllByText("Artifact 发布").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("风险说明：发布将影响正式知识边界")).toBeInTheDocument();
+  });
+
+  it("从 URL 恢复 restore_document 筛选并明确显示文档恢复", async () => {
+    api.listProposals.mockResolvedValue({
+      items: [{
+        id: proposalId,
+        workspaceId,
+        type: "restore_document",
+        status: "ready_for_review",
+        target: "docs/a.md",
+        riskLevel: "HIGH",
+        risk: "恢复会覆盖当前工作区正文",
+        revisionId,
+        changeHash,
+        createdAt: "2026-08-02T00:00:00Z",
+        updatedAt: "2026-08-02T00:01:00Z",
+      }],
+    });
+
+    renderList("/proposals?proposal_type=restore_document");
+
+    expect(await screen.findByRole("combobox", { name: "类型" })).toHaveValue("restore_document");
+    await waitFor(() => expect(api.listProposals).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ type: "restore_document" }), expect.any(AbortSignal)));
+    expect(screen.getByText("docs/a.md")).toBeInTheDocument();
+    expect(document.querySelector(".proposal-row small")).toHaveTextContent("文档恢复");
+    expect(document.querySelector(".kind-mark--restore_document svg")).toBeInTheDocument();
   });
 
   it("从 URL 恢复 downstream_update 筛选并显示独立标签与图标", async () => {
@@ -445,8 +513,118 @@ describe("ProposalDetailPage", () => {
     }));
     expect(api.getProposalCurrentContent).toHaveBeenCalledWith(workspaceId, proposalId, {
       targetPath: "docs/a.md",
+      targetMode: "REPLACE",
       baseHash: "a".repeat(64),
     }, expect.any(AbortSignal));
+  });
+
+  it("把 CREATE_ONLY Proposal 显示为空文件到新正文的 Diff", async () => {
+    const absenceToken = `workspace-target-absent/v1:${"d".repeat(64)}`;
+    const proposal = fileProposal({
+      targetPath: "java-ai-guide.md",
+      revision: {
+        ...fileProposal().revision,
+        targetMode: "CREATE_ONLY" as const,
+        baseHash: absenceToken,
+      },
+    });
+    api.getProposal.mockResolvedValue(proposal);
+    api.getProposalCurrentContent.mockResolvedValue({
+      proposalId,
+      workspaceId,
+      targetPath: "java-ai-guide.md",
+      targetMode: "CREATE_ONLY",
+      content: "",
+      currentHash: absenceToken,
+      baseHash: absenceToken,
+      baseHashMatch: true,
+    });
+    renderDetail();
+
+    expect(await screen.findByText("新文件 → Proposal")).toBeInTheDocument();
+    expect(screen.getByText("目标路径当前不存在；Diff 基线为空文件。")).toBeInTheDocument();
+    expect(screen.getByText("缺失证明")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "批准" })).toBeEnabled());
+    expect(monaco.diffViewer).toHaveBeenCalledWith(expect.objectContaining({ original: "", modified: "next" }));
+    expect(api.getProposalCurrentContent).toHaveBeenCalledWith(workspaceId, proposalId, {
+      targetPath: "java-ai-guide.md",
+      targetMode: "CREATE_ONLY",
+      baseHash: absenceToken,
+    }, expect.any(AbortSignal));
+  });
+
+  it("展示文档恢复来源并通过文件 Diff 审批 restore_document", async () => {
+    api.getProposal.mockResolvedValue(restoreProposal());
+    renderDetail();
+
+    expect(await screen.findByText("当前文档 → 恢复目标")).toBeInTheDocument();
+    expect(screen.getByText(/审阅台 \/ 文档恢复/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: restoreDocumentId })).toHaveAttribute("href", `/authoring/documents/${restoreDocumentId}/history`);
+    expect(screen.getByText("来源 Commit").parentElement).toHaveTextContent(restoreTargetCommit);
+    expect(screen.getByText("预览 HEAD").parentElement).toHaveTextContent(restoreExpectedHead);
+    expect(screen.getByText("Document Version").parentElement).toHaveTextContent("v7");
+    expect(screen.getByText("Preview Hash").parentElement).toHaveTextContent(restorePreviewHash);
+    expect(screen.getByText("目标内容 Hash").parentElement).toHaveTextContent(restoreTargetContentHash);
+    expect(screen.getByText("document-restore/v1")).toBeInTheDocument();
+    expect(await screen.findByText("Diff Viewer")).toBeInTheDocument();
+    expect(api.getProposalCurrentContent).toHaveBeenCalledWith(workspaceId, proposalId, {
+      targetPath: "docs/a.md",
+      targetMode: "REPLACE",
+      baseHash: "a".repeat(64),
+    }, expect.any(AbortSignal));
+    expect(monaco.diffViewer).toHaveBeenCalledWith(expect.objectContaining({
+      original: "current",
+      modified: "historic\n",
+    }));
+
+    const approve = screen.getByRole("button", { name: "批准" });
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(approve);
+    expect(screen.getByRole("dialog")).toHaveTextContent("恢复来源 Document");
+    expect(screen.getByRole("dialog")).toHaveTextContent("不会改写既有历史");
+    fireEvent.click(screen.getByRole("button", { name: "确认提交" }));
+
+    await waitFor(() => expect(api.decideProposal).toHaveBeenCalledWith(proposalId, {
+      revisionId,
+      changeHash,
+      decision: "approved",
+      proposalType: "restore_document",
+    }));
+    expect(api.preflightProposal).not.toHaveBeenCalled();
+  });
+
+  it("为已批准的 restore_document 提供独立 Apply Preflight", async () => {
+    const writebackWorkflowRunId = "10000000-0000-4000-8000-000000000008";
+    api.getProposal.mockResolvedValue(restoreProposal({
+      status: "approved",
+      approval: {
+        id: "10000000-0000-4000-8000-000000000004",
+        proposalId,
+        revisionId,
+        changeHash,
+        decision: "approved",
+        approvedGitHead: restoreExpectedHead,
+        workflowRunId: writebackWorkflowRunId,
+        workflowStatusUrl: `/api/v1/workflows/${writebackWorkflowRunId}`,
+        writebackState: "bound",
+        decidedAt: "2026-08-02T00:02:00Z",
+      },
+    }));
+    renderDetail();
+
+    const preflightButton = await screen.findByRole("button", { name: "执行 Apply Preflight" });
+    expect(screen.getByText(/冻结的文档恢复绑定/)).toBeInTheDocument();
+    await waitFor(() => expect(preflightButton).toBeEnabled());
+    fireEvent.click(preflightButton);
+
+    await waitFor(() => expect(api.preflightProposal).toHaveBeenCalledWith(proposalId, {
+      revisionId,
+      changeHash,
+      targetMode: "REPLACE",
+      baseHash: "a".repeat(64),
+    }));
+    expect(await screen.findByText("写回前检查通过")).toBeInTheDocument();
+    expect(api.decideProposal).not.toHaveBeenCalled();
   });
 
   it("离开详情后立即清除 Proposal 正文与当前正文缓存", async () => {
@@ -598,7 +776,12 @@ describe("ProposalDetailPage", () => {
     const preflightButton = await screen.findByRole("button", { name: "执行 Apply Preflight" });
     await waitFor(() => expect(preflightButton).toBeEnabled());
     fireEvent.click(preflightButton);
-    await waitFor(() => expect(api.preflightProposal).toHaveBeenCalledWith(proposalId, { revisionId, changeHash }));
+    await waitFor(() => expect(api.preflightProposal).toHaveBeenCalledWith(proposalId, {
+      revisionId,
+      changeHash,
+      targetMode: "REPLACE",
+      baseHash: "a".repeat(64),
+    }));
     expect(await screen.findByText("写回前检查通过")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: workflowRunId })).toHaveAttribute("href", `/workflows/${workflowRunId}`);
     expect(screen.queryByText("queued")).not.toBeInTheDocument();
@@ -901,6 +1084,7 @@ describe("ProposalDetailPage", () => {
 
     await waitFor(() => expect(api.getProposalCurrentContent).toHaveBeenCalledWith(workspaceId, proposalId, {
       targetPath: "docs/a.md",
+      targetMode: "REPLACE",
       baseHash: nextBaseHash,
     }, expect.any(AbortSignal)));
     expect(screen.getByRole("button", { name: "批准" })).toBeDisabled();

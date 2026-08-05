@@ -11,7 +11,18 @@ export type ServerEventResource =
   | "export_job"
   | "health_issue"
   | "health_scan"
-  | "knowledge_health";
+  | "knowledge_health"
+  | "capture"
+  | "knowledge_profile"
+  | "working_draft"
+  | "document"
+  | "article_revision"
+  | "document_publication"
+  | "organizing_draft"
+  | "organizing_snapshot"
+  | "organizing_run"
+  | "git_remote"
+  | "git_sync_run";
 
 export interface ServerEventInvalidation {
   resource: ServerEventResource;
@@ -297,7 +308,18 @@ const invalidationsFor = (
         resource === "export_job" ||
         resource === "health_issue" ||
         resource === "health_scan" ||
-        resource === "knowledge_health")
+        resource === "knowledge_health" ||
+        resource === "capture" ||
+        resource === "knowledge_profile" ||
+        resource === "working_draft" ||
+        resource === "document" ||
+        resource === "article_revision" ||
+        resource === "document_publication" ||
+        resource === "organizing_draft" ||
+        resource === "organizing_snapshot" ||
+        resource === "organizing_run" ||
+        resource === "git_remote" ||
+        resource === "git_sync_run")
     ) {
       append(resource, id);
     }

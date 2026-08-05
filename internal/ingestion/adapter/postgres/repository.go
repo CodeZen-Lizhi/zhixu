@@ -277,13 +277,17 @@ func insertSpan(ctx context.Context, tx pgx.Tx, span domain.SourceSpan, createdA
 	if err != nil {
 		return domain.SourceSpan{}, err
 	}
+	if span.EvidenceKind == "" {
+		span.EvidenceKind = domain.EvidenceRawBytes
+	}
 	return scanSpan(tx.QueryRow(ctx, `
 		INSERT INTO ingestion.source_span
-			(id,workspace_id,content_artifact_id,parse_projection_id,span_type,start_line,end_line,start_byte,end_byte,selector,excerpt_hash,parser_version,schema_version,created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-		RETURNING id::text,workspace_id::text,content_artifact_id::text,parse_projection_id::text,span_type,start_line,end_line,start_byte,end_byte,selector,excerpt_hash,parser_version,schema_version`,
+			(id,workspace_id,content_artifact_id,parse_projection_id,span_type,start_line,end_line,start_byte,end_byte,selector,excerpt_hash,evidence_kind,derived_excerpt,parser_version,schema_version,created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+		RETURNING id::text,workspace_id::text,content_artifact_id::text,parse_projection_id::text,span_type,start_line,end_line,start_byte,end_byte,selector,excerpt_hash,evidence_kind,derived_excerpt,parser_version,schema_version`,
 		string(span.ID), string(span.WorkspaceID), string(span.ContentArtifactID), string(span.ParseProjectionID), span.SpanType,
-		span.StartLine, span.EndLine, span.StartByte, span.EndByte, selector, span.ExcerptHash, span.ParserVersion, span.SchemaVersion, createdAt.UTC(),
+		span.StartLine, span.EndLine, span.StartByte, span.EndByte, selector, span.ExcerptHash, span.EvidenceKind, span.DerivedExcerpt,
+		span.ParserVersion, span.SchemaVersion, createdAt.UTC(),
 	))
 }
 
@@ -317,7 +321,7 @@ func insertOrGetChunk(ctx context.Context, tx pgx.Tx, chunk domain.CanonicalChun
 }
 
 func listSpans(ctx context.Context, tx pgx.Tx, projectionID foundation.ID) ([]domain.SourceSpan, error) {
-	rows, err := tx.Query(ctx, `SELECT id::text,workspace_id::text,content_artifact_id::text,parse_projection_id::text,span_type,start_line,end_line,start_byte,end_byte,selector,excerpt_hash,parser_version,schema_version FROM ingestion.source_span WHERE parse_projection_id=$1 ORDER BY start_byte,id`, string(projectionID))
+	rows, err := tx.Query(ctx, `SELECT id::text,workspace_id::text,content_artifact_id::text,parse_projection_id::text,span_type,start_line,end_line,start_byte,end_byte,selector,excerpt_hash,evidence_kind,derived_excerpt,parser_version,schema_version FROM ingestion.source_span WHERE parse_projection_id=$1 ORDER BY start_byte,id`, string(projectionID))
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +384,7 @@ func ensureChunks(ctx context.Context, tx pgx.Tx, projection domain.ParseProject
 	}
 	spanByKey := make(map[string]foundation.ID, len(persistedSpans))
 	for _, span := range persistedSpans {
-		spanByKey[spanKey(span.SpanType, span.StartLine, span.EndLine, span.StartByte, span.EndByte, span.SchemaVersion)] = span.ID
+		spanByKey[spanKey(span)] = span.ID
 	}
 	inputSpans := make(map[foundation.ID]domain.SourceSpan, len(write.Spans))
 	for _, span := range write.Spans {
@@ -392,7 +396,7 @@ func ensureChunks(ctx context.Context, tx pgx.Tx, projection domain.ParseProject
 		if !ok {
 			return nil, errors.New("chunk references a span outside the write")
 		}
-		mapped, ok := spanByKey[spanKey(inputSpan.SpanType, inputSpan.StartLine, inputSpan.EndLine, inputSpan.StartByte, inputSpan.EndByte, inputSpan.SchemaVersion)]
+		mapped, ok := spanByKey[spanKey(inputSpan)]
 		if !ok {
 			return nil, errors.New("chunk span does not belong to the projection")
 		}
@@ -415,8 +419,14 @@ func chunkVersions(w domain.ProjectionWrite) (string, string) {
 	return w.Chunks[0].ChunkStrategyVersion, w.Chunks[0].SchemaVersion
 }
 
-func spanKey(spanType string, startLine, endLine int32, startByte, endByte int64, schemaVersion string) string {
-	return fmt.Sprintf("%s|%d|%d|%d|%d|%s", spanType, startLine, endLine, startByte, endByte, schemaVersion)
+func spanKey(span domain.SourceSpan) string {
+	selector, _ := marshalObject(span.Selector)
+	evidenceKind := span.EvidenceKind
+	if evidenceKind == "" {
+		evidenceKind = domain.EvidenceRawBytes
+	}
+	return fmt.Sprintf("%s|%d|%d|%d|%d|%s|%s|%s|%s", span.SpanType, span.StartLine, span.EndLine,
+		span.StartByte, span.EndByte, selector, span.ExcerptHash, evidenceKind, span.SchemaVersion)
 }
 
 type rowScanner interface{ Scan(...any) error }
@@ -492,9 +502,11 @@ func scanProjection(row rowScanner) (domain.ParseProjection, error) {
 func scanSpan(row rowScanner) (domain.SourceSpan, error) {
 	var span domain.SourceSpan
 	var id, workspaceID, artifactID, projectionID string
+	var evidenceKind string
 	var selector []byte
 	if err := row.Scan(&id, &workspaceID, &artifactID, &projectionID, &span.SpanType, &span.StartLine,
-		&span.EndLine, &span.StartByte, &span.EndByte, &selector, &span.ExcerptHash, &span.ParserVersion, &span.SchemaVersion); err != nil {
+		&span.EndLine, &span.StartByte, &span.EndByte, &selector, &span.ExcerptHash, &evidenceKind, &span.DerivedExcerpt,
+		&span.ParserVersion, &span.SchemaVersion); err != nil {
 		return domain.SourceSpan{}, err
 	}
 	var err error
@@ -513,6 +525,7 @@ func scanSpan(row rowScanner) (domain.SourceSpan, error) {
 	if err := json.Unmarshal(selector, &span.Selector); err != nil {
 		return domain.SourceSpan{}, err
 	}
+	span.EvidenceKind = domain.EvidenceKind(evidenceKind)
 	return span, nil
 }
 

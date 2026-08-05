@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/git-sync-contract.md", "reason": "复核 Git 同步安全、不变量、恢复和 Git parser 边界"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "后端测试、安全与交付 Review 标准"}
+{"file": ".trellis/spec/frontend/git-sync-settings.md", "reason": "复核 strict decoder、Workspace 隔离及 UI 状态"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "复核测试、响应式和浏览器验收证据"}

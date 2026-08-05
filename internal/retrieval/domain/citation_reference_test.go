@@ -24,3 +24,18 @@ func TestValidateCitationReferenceQueryRequiresCompleteUniqueTuple(t *testing.T)
 		t.Fatal("citation tuple accepted an invalid id")
 	}
 }
+
+func TestValidateProvenanceReferenceQueryRequiresWorkspaceSourceAndSpan(t *testing.T) {
+	query := ProvenanceReferenceQuery{
+		WorkspaceID:     "91000000-0000-4000-8000-000000000001",
+		SourceVersionID: "91000000-0000-4000-8000-000000000002",
+		SourceSpanID:    "91000000-0000-4000-8000-000000000003",
+	}
+	if err := ValidateProvenanceReferenceQuery(query); err != nil {
+		t.Fatal(err)
+	}
+	query.SourceSpanID = query.SourceVersionID
+	if err := ValidateProvenanceReferenceQuery(query); err == nil {
+		t.Fatal("reused provenance identity was accepted")
+	}
+}

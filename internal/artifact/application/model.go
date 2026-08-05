@@ -34,6 +34,7 @@ const (
 type Dependencies struct {
 	Repository Repository
 	Evidence   CitationVerifier
+	Documents  DocumentSourceVerifier
 	Exporter   MarkdownExporter
 	Publisher  PublicationCreator
 	IDs        foundation.IDGenerator
@@ -116,13 +117,22 @@ type CitationInput struct {
 	SourceSpanID    foundation.ID
 }
 
+// DocumentSourceInput 是调用方提供的不可变文章 Revision 身份；可信字段由服务端重建。
+type DocumentSourceInput struct {
+	DocumentID        foundation.ID
+	ArticleRevisionID foundation.ID
+	RevisionNo        int64
+	ContentHash       string
+}
+
 // SectionInput carries a section body and untrusted citation identities.
 type SectionInput struct {
-	Key       string
-	Title     string
-	Content   string
-	Citations []CitationInput
-	Coverage  domain.Coverage
+	Key             string
+	Title           string
+	Content         string
+	Citations       []CitationInput
+	DocumentSources []DocumentSourceInput
+	Coverage        domain.Coverage
 }
 
 // RecordSectionPersistentCommand creates an immutable section revision.
@@ -267,4 +277,9 @@ type Repository interface {
 // evidence. It must reject missing, cross-workspace, stale or ineligible input.
 type CitationVerifier interface {
 	VerifyCitations(context.Context, foundation.ID, []CitationInput) ([]domain.Citation, error)
+}
+
+// DocumentSourceVerifier 从 Authoring owner 重建可信的不可变文章 Revision 来源。
+type DocumentSourceVerifier interface {
+	VerifyDocumentSources(context.Context, foundation.ID, []DocumentSourceInput) ([]domain.DocumentSource, error)
 }

@@ -41,13 +41,15 @@ type ToolAuthorization struct {
 	Capability                                Capability
 	Scope                                     string
 	ApprovedChangeHash                        string
-	TargetVersion                             string
-	TokenHash                                 string
-	IdempotencyKey                            string
-	Status                                    AuthorizationStatus
-	IssuedAt, ExpiresAt                       time.Time
-	RevokedAt, ConsumedAt                     *time.Time
-	Version                                   int64
+	// TargetMode 绑定授权签发时的目标存在性契约。
+	TargetMode            TargetMode
+	TargetVersion         string
+	TokenHash             string
+	IdempotencyKey        string
+	Status                AuthorizationStatus
+	IssuedAt, ExpiresAt   time.Time
+	RevokedAt, ConsumedAt *time.Time
+	Version               int64
 }
 
 // AuthorizationIssue 是签发授权的请求；Workflow Run/Node 必须已持久化。
@@ -77,7 +79,9 @@ type AuthorizationConsume struct {
 	Capability                            Capability
 	Scope                                 string
 	ApprovedChangeHash                    string
-	TargetVersion                         string
+	// TargetMode 必须与授权及 Proposal Revision 完全一致。
+	TargetMode    TargetMode
+	TargetVersion string
 	// At is retained for deterministic fakes; production adapters use trusted
 	// database/service time instead of caller-provided timestamps.
 	At time.Time
@@ -112,6 +116,7 @@ func ValidateAuthorizationConsumeBinding(authorization ToolAuthorization, reques
 		authorization.ToolName != request.ToolName ||
 		authorization.Capability != request.Capability ||
 		authorization.Scope != request.Scope ||
+		NormalizeTargetMode(authorization.TargetMode) != NormalizeTargetMode(request.TargetMode) ||
 		!strings.EqualFold(authorization.ApprovedChangeHash, request.ApprovedChangeHash) ||
 		!strings.EqualFold(authorization.TargetVersion, request.TargetVersion) {
 		return errors.New("authorization binding does not match request")
@@ -150,6 +155,15 @@ func ValidateToolBinding(toolName string, capability Capability) error {
 // ExpectedAuthorizationScope binds a capability to the approved target path.
 func ExpectedAuthorizationScope(targetPath string) string {
 	return "target:" + targetPath
+}
+
+// ExpectedAuthorizationScopeForTarget binds CREATE_ONLY credentials to the
+// no-replace contract without changing the legacy REPLACE scope bytes.
+func ExpectedAuthorizationScopeForTarget(targetPath string, mode TargetMode) string {
+	if NormalizeTargetMode(mode) == TargetModeCreateOnly {
+		return "target:create-only:" + targetPath
+	}
+	return ExpectedAuthorizationScope(targetPath)
 }
 
 // ValidateAuthorizationIssue 校验签发请求的局部格式和 TTL 上限。

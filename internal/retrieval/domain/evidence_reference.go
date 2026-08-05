@@ -18,6 +18,17 @@ const (
 	maxEvidenceParserVersionBytes  = 256
 	maxEvidenceSchemaVersionBytes  = 256
 	maxEvidenceSelectorBytes       = 16 * 1024
+	maxDerivedEvidenceBytes        = 2 * 1024 * 1024
+)
+
+// EvidenceKind 描述 Source Span excerpt 的不可变取证方式。
+type EvidenceKind string
+
+const (
+	// EvidenceRawBytes 从原始 Content Artifact 的字节区间读取。
+	EvidenceRawBytes EvidenceKind = "raw_bytes"
+	// EvidenceDerivedText 从解析投影持久化的确定性文本读取。
+	EvidenceDerivedText EvidenceKind = "derived_text"
 )
 
 // SourceVersionReference 是可打开 Evidence 所依赖的不可变 Source Version 元数据。
@@ -50,6 +61,8 @@ type SourceSpanReference struct {
 	SpanType          string
 	Selector          json.RawMessage
 	ExcerptHash       string
+	EvidenceKind      EvidenceKind
+	DerivedExcerpt    string
 	ParserVersion     string
 	SchemaVersion     string
 }
@@ -115,6 +128,23 @@ func ValidateSourceSpanReference(value SourceSpanReference) error {
 		!isCanonicalHash(value.ExcerptHash) || !canonicalEvidenceText(value.ParserVersion, maxEvidenceParserVersionBytes) ||
 		!canonicalEvidenceText(value.SchemaVersion, maxEvidenceSchemaVersionBytes) {
 		return inconsistent(ErrorCodeEvidenceReferenceInvalid, "source span metadata is invalid")
+	}
+	evidenceKind := value.EvidenceKind
+	if evidenceKind == "" {
+		evidenceKind = EvidenceRawBytes
+	}
+	switch evidenceKind {
+	case EvidenceRawBytes:
+		if value.DerivedExcerpt != "" {
+			return inconsistent(ErrorCodeEvidenceReferenceInvalid, "raw source span contains derived evidence")
+		}
+	case EvidenceDerivedText:
+		if value.Span.StartByte != 0 || value.Span.EndByte != value.SourceVersion.ByteSize || value.DerivedExcerpt == "" ||
+			len(value.DerivedExcerpt) > maxDerivedEvidenceBytes || !utf8.ValidString(value.DerivedExcerpt) {
+			return inconsistent(ErrorCodeEvidenceReferenceInvalid, "derived source span evidence is invalid")
+		}
+	default:
+		return inconsistent(ErrorCodeEvidenceReferenceInvalid, "source span evidence kind is invalid")
 	}
 	return nil
 }

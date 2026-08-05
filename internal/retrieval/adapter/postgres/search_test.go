@@ -83,6 +83,7 @@ func TestCandidateSQLSharesActiveIncludedAndChunkPredicates(t *testing.T) {
 		"WHERE workspace_id=$1 AND id=$2",
 		"status='active'",
 		"source_manifest.selection_status='included'",
+		"source_record.removed_at IS NULL",
 		"chunk.status='active'",
 		"projection.lexical_status='ready'",
 		"ORDER BY filtered_provenance.source_id,filtered_provenance.source_version_id,filtered_provenance.relative_path",

@@ -7,19 +7,24 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
 
 const defaultCommandOutputLimit = 4 << 20
 
-var errCommandOutputLimit = errors.New("git command output exceeds limit")
+var (
+	errCommandOutputLimit     = errors.New("git command output exceeds limit")
+	errCommandIndexFileUnsafe = errors.New("git command index file is unsafe")
+)
 
 // commandOptions 描述受限 Git 命令执行策略；调用方只能选择读写模式、标准输入和输出上限。
 type commandOptions struct {
 	ReadOnly       bool
 	Stdin          io.Reader
 	MaxOutputBytes int
+	IndexFile      string
 }
 
 // commandResult 保留命令的有界输出和退出码，供同包 Git Adapter 做稳定语义解析。
@@ -33,6 +38,9 @@ type commandResult struct {
 func (c Client) runCommand(ctx context.Context, rootPath string, options commandOptions, args ...string) (commandResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if options.IndexFile != "" && (!filepath.IsAbs(options.IndexFile) || filepath.Clean(options.IndexFile) != options.IndexFile || strings.ContainsAny(options.IndexFile, "\x00\r\n")) {
+		return commandResult{ExitCode: -1}, errCommandIndexFileUnsafe
 	}
 	limit := options.MaxOutputBytes
 	if limit <= 0 {
@@ -58,7 +66,7 @@ func (c Client) runCommand(ctx context.Context, rootPath string, options command
 	}
 	commandArgs = append(commandArgs, args...)
 	command := exec.CommandContext(runContext, c.executable, commandArgs...)
-	command.Env = commandEnvironment(options.ReadOnly)
+	command.Env = commandEnvironment(options.ReadOnly, options.IndexFile)
 	command.Stdin = options.Stdin
 	command.Stdout = stdout
 	command.Stderr = stderr
@@ -88,7 +96,7 @@ func (c Client) runCommand(ctx context.Context, rootPath string, options command
 	return result, commandErr
 }
 
-func commandEnvironment(readOnly bool) []string {
+func commandEnvironment(readOnly bool, indexFile string) []string {
 	environment := make([]string, 0, len(os.Environ())+6)
 	for _, entry := range os.Environ() {
 		name, _, found := strings.Cut(entry, "=")
@@ -110,6 +118,9 @@ func commandEnvironment(readOnly bool) []string {
 	)
 	if readOnly {
 		environment = append(environment, "GIT_OPTIONAL_LOCKS=0")
+	}
+	if indexFile != "" {
+		environment = append(environment, "GIT_INDEX_FILE="+indexFile)
 	}
 	return environment
 }

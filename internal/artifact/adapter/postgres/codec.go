@@ -42,7 +42,7 @@ func loadVisibleState(ctx context.Context, db queryer, workspaceID, artifactID f
 }
 
 func loadStateWithVisibility(ctx context.Context, db queryer, workspaceID, artifactID foundation.ID, lock, hideHeld bool) (artifactapp.State, error) {
-	sql := stateSelect + ` WHERE a.workspace_id=$1 AND a.id=$2 AND a.domain_schema_version='artifact/v1' AND r.domain_schema_version='artifact-revision/v1'`
+	sql := stateSelect + ` WHERE a.workspace_id=$1 AND a.id=$2 AND a.domain_schema_version='artifact/v1' AND r.domain_schema_version IN ('artifact-revision/v1','artifact-revision/v2')`
 	if hideHeld {
 		sql += ` AND NOT EXISTS (
 			SELECT 1 FROM learning.artifact_visibility_hold h
@@ -64,7 +64,7 @@ func loadStateWithVisibility(ctx context.Context, db queryer, workspaceID, artif
 
 func loadRevision(ctx context.Context, db queryer, workspaceID, artifactID, revisionID foundation.ID) (domain.Revision, error) {
 	revision, err := scanRevision(db.QueryRow(ctx, revisionSelect+`
-		WHERE r.workspace_id=$1 AND r.artifact_id=$2 AND r.id=$3 AND r.domain_schema_version='artifact-revision/v1'`,
+		WHERE r.workspace_id=$1 AND r.artifact_id=$2 AND r.id=$3 AND r.domain_schema_version IN ('artifact-revision/v1','artifact-revision/v2')`,
 		string(workspaceID), string(artifactID), string(revisionID)))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -231,12 +231,16 @@ func insertRevision(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, r
 	if revision.Metadata != nil {
 		metadata = marshalJSON(revision.Metadata)
 	}
-	_, err := tx.Exec(ctx, `
+	schemaVersion, err := domain.RevisionSchemaVersion(revision)
+	if err != nil {
+		return inconsistent(fmt.Errorf("select artifact revision schema: %w", err))
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO learning.artifact_revision(
 			id,artifact_id,workspace_id,revision_no,status,outline,sections,coverage,missing,conflicts,content_markdown,provenance,
 			domain_schema_version,content_hash,created_by_type,generation_metadata,created_at
 		) VALUES($1,$2,$3,$4,'SNAPSHOT',$5,$6,$7,'[]'::jsonb,'[]'::jsonb,$8,$9,$10,$11,$12,$13,$14)`,
-		string(revision.ID), string(revision.ArtifactID), string(workspaceID), revision.RevisionNo, marshalJSON(revision.Outline), marshalJSON(revision.Sections), marshalJSON(coverage), markdownFromSections(revision.Sections), marshalJSON(map[string]string{"schema_version": artifactRevisionSchemaVersion}), artifactRevisionSchemaVersion, revision.ContentHash, string(revision.CreatedBy), metadata, revision.CreatedAt.UTC())
+		string(revision.ID), string(revision.ArtifactID), string(workspaceID), revision.RevisionNo, marshalJSON(revision.Outline), marshalJSON(revision.Sections), marshalJSON(coverage), markdownFromSections(revision.Sections), marshalJSON(map[string]string{"schema_version": schemaVersion}), schemaVersion, revision.ContentHash, string(revision.CreatedBy), metadata, revision.CreatedAt.UTC())
 	if err != nil {
 		return classify(err)
 	}

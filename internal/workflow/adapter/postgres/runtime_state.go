@@ -561,7 +561,7 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 			}
 		}
 		for _, nodeID := range cancelledNodeIDs {
-			if notifyErr := r.notifyDirectlyCancelledWorkflowNode(ctx, tx, run.ID, nodeID, now); notifyErr != nil {
+			if notifyErr := r.notifyDirectlyCancelledWorkflowNode(ctx, tx, run, nodes[nodeID], now); notifyErr != nil {
 				return application.ControlPersistenceResult{}, notifyErr
 			}
 		}
@@ -591,11 +591,11 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 	return result, nil
 }
 
-func (r *RuntimeRepository) notifyDirectlyCancelledWorkflowNode(ctx context.Context, tx pgx.Tx, runID, nodeID foundation.ID, terminalAt time.Time) error {
+func (r *RuntimeRepository) notifyDirectlyCancelledWorkflowNode(ctx context.Context, tx pgx.Tx, run domain.Run, node domain.NodeRun, terminalAt time.Time) error {
 	if r == nil || r.terminal == nil {
 		return nil
 	}
-	attempt, found, err := findLatestAttempt(ctx, tx, nodeID)
+	attempt, found, err := findLatestAttempt(ctx, tx, node.ID)
 	if err != nil {
 		return err
 	}
@@ -604,8 +604,10 @@ func (r *RuntimeRepository) notifyDirectlyCancelledWorkflowNode(ctx context.Cont
 		attemptID = attempt.ID
 	}
 	return r.notifyWorkflowNodeTerminal(ctx, tx, application.WorkflowNodeTerminalEvent{
-		WorkflowRunID:  runID,
-		NodeRunID:      nodeID,
+		WorkspaceID:    run.WorkspaceID,
+		WorkflowRunID:  run.ID,
+		NodeRunID:      node.ID,
+		NodeKind:       node.NodeType,
 		NodeAttemptID:  attemptID,
 		Outcome:        application.WorkflowTerminalOutcomeCancelled,
 		FailureClass:   domain.FailureClassCancelled,
@@ -1105,11 +1107,14 @@ func (r *RuntimeRepository) completeDelivery(ctx context.Context, tx pgx.Tx, run
 		return application.DeliveryTransitionResult{}, err
 	}
 	if err := r.notifyWorkflowNodeTerminal(ctx, tx, application.WorkflowNodeTerminalEvent{
-		WorkflowRunID: run.ID,
-		NodeRunID:     updatedNode.ID,
-		NodeAttemptID: updatedAttempt.ID,
-		Outcome:       application.WorkflowTerminalOutcomeSucceeded,
-		TerminalAt:    now,
+		WorkspaceID:    run.WorkspaceID,
+		WorkflowRunID:  run.ID,
+		NodeRunID:      updatedNode.ID,
+		NodeKind:       updatedNode.NodeType,
+		NodeAttemptID:  updatedAttempt.ID,
+		Outcome:        application.WorkflowTerminalOutcomeSucceeded,
+		TerminalOutput: string(updatedNode.Output),
+		TerminalAt:     now,
 	}); err != nil {
 		return application.DeliveryTransitionResult{}, err
 	}
@@ -1224,8 +1229,10 @@ func (r *RuntimeRepository) failDelivery(ctx context.Context, tx pgx.Tx, run dom
 		outcome = application.WorkflowTerminalOutcomeCancelled
 	}
 	if err := r.notifyWorkflowNodeTerminal(ctx, tx, application.WorkflowNodeTerminalEvent{
+		WorkspaceID:    run.WorkspaceID,
 		WorkflowRunID:  run.ID,
 		NodeRunID:      updatedNode.ID,
+		NodeKind:       updatedNode.NodeType,
 		NodeAttemptID:  updatedAttempt.ID,
 		Outcome:        outcome,
 		FailureClass:   failure.Class,
@@ -1444,8 +1451,10 @@ func (r *RuntimeRepository) controlCheckpoint(ctx context.Context, tx pgx.Tx, ru
 	}
 	if nodeStatus == domain.NodeStatusCancelled {
 		if err := r.notifyWorkflowNodeTerminal(ctx, tx, application.WorkflowNodeTerminalEvent{
+			WorkspaceID:    updatedRun.WorkspaceID,
 			WorkflowRunID:  updatedRun.ID,
 			NodeRunID:      updatedNode.ID,
+			NodeKind:       updatedNode.NodeType,
 			NodeAttemptID:  updatedAttempt.ID,
 			Outcome:        application.WorkflowTerminalOutcomeCancelled,
 			FailureClass:   domain.FailureClassCancelled,

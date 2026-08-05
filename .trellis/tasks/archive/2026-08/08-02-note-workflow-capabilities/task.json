@@ -1,0 +1,32 @@
+{
+  "id": "note-workflow-capabilities",
+  "name": "note-workflow-capabilities",
+  "title": "笔记工作流基础能力增强",
+  "description": "父任务：统筹快速记录、主动创作、材料整理模板、文件历史和 Git 远端同步五个可独立验收的能力切片。",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "lizhi",
+  "assignee": "lizhi",
+  "createdAt": "2026-08-02",
+  "completedAt": "2026-08-05",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "08-02-quick-capture-profile",
+    "08-02-organizing-material-templates",
+    "08-02-document-file-history",
+    "08-02-git-remote-sync",
+    "08-02-document-draft-authoring"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

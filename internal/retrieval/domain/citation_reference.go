@@ -11,6 +11,13 @@ type CitationReferenceQuery struct {
 	SourceSpanID    foundation.ID
 }
 
+// ProvenanceReferenceQuery 是正式知识来源在 Retrieval 中解析 Citation 的最小身份。
+type ProvenanceReferenceQuery struct {
+	WorkspaceID     foundation.ID
+	SourceVersionID foundation.ID
+	SourceSpanID    foundation.ID
+}
+
 // ValidateCitationReferenceQuery 校验 Citation tuple 完整且不复用身份。
 func ValidateCitationReferenceQuery(query CitationReferenceQuery) error {
 	values := []foundation.ID{query.WorkspaceID, query.IndexVersionID, query.ChunkID, query.SourceVersionID, query.SourceSpanID}
@@ -27,6 +34,23 @@ func ValidateCitationReferenceQuery(query CitationReferenceQuery) error {
 	}
 	if len(seen) != len(values) {
 		return invalid(ErrorCodeEvidenceReferenceInvalid, "citation reference identity is incomplete")
+	}
+	return nil
+}
+
+// ValidateProvenanceReferenceQuery 校验正式知识来源身份完整且 Workspace-scoped。
+func ValidateProvenanceReferenceQuery(query ProvenanceReferenceQuery) error {
+	values := []foundation.ID{query.WorkspaceID, query.SourceVersionID, query.SourceSpanID}
+	seen := make(map[foundation.ID]struct{}, len(values))
+	for _, value := range values {
+		parsed, err := foundation.ParseID(string(value))
+		if err != nil || parsed != value {
+			return invalid(ErrorCodeEvidenceReferenceInvalid, "provenance reference identity is invalid")
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return invalid(ErrorCodeEvidenceReferenceInvalid, "provenance reference identity is reused")
+		}
+		seen[value] = struct{}{}
 	}
 	return nil
 }

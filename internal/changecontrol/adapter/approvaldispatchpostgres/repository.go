@@ -71,15 +71,21 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var workspaceID, proposalType, status, revisionHash, baseHash string
+	var workspaceID, proposalType, status, revisionHash, targetPath, targetMode, baseHash string
 	var proposalVersion int64
 	var workflowRunID *string
+	var restoreDocumentID, restoreExpectedHead, restoreCurrentContentHash *string
+	var restoreExpectedDocumentVersion *int64
 	err = tx.QueryRow(ctx, `
-		SELECT p.workspace_id::text,p.proposal_type,p.status,p.version,p.workflow_run_id::text,r.change_hash,r.base_hash
+			SELECT p.workspace_id::text,p.proposal_type,p.status,p.version,p.workflow_run_id::text,r.change_hash,r.target_path,r.target_mode,r.base_hash,
+			       r.restore_document_id::text,r.restore_expected_head,r.restore_expected_document_version,r.restore_current_content_hash
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.proposal_id=p.id AND r.id=$2
 		WHERE p.id=$1
-		FOR UPDATE OF p,r`, string(command.Approval.ProposalID), string(command.Approval.RevisionID)).Scan(&workspaceID, &proposalType, &status, &proposalVersion, &workflowRunID, &revisionHash, &baseHash)
+		FOR UPDATE OF p,r`, string(command.Approval.ProposalID), string(command.Approval.RevisionID)).Scan(
+		&workspaceID, &proposalType, &status, &proposalVersion, &workflowRunID, &revisionHash, &targetPath, &targetMode, &baseHash,
+		&restoreDocumentID, &restoreExpectedHead, &restoreExpectedDocumentVersion, &restoreCurrentContentHash,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return changedispatch.Result{}, foundation.NewError(foundation.ErrorNotFound, "PROPOSAL_REVISION_NOT_FOUND", false, err)
 	}
@@ -90,8 +96,16 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	if normalizedProposalType == domain.ProposalTypeDownstreamUpdate {
 		return changedispatch.Result{}, domain.NewDownstreamUpdateApplyUnavailableError()
 	}
-	if normalizedProposalType != domain.ProposalTypeFilePatch {
-		return changedispatch.Result{}, foundation.NewError(foundation.ErrorInvalidInput, "APPROVAL_DISPATCH_PROPOSAL_TYPE_UNSUPPORTED", false, errors.New("approval dispatch only supports file patch proposals"))
+	if !domain.ProposalSupportsFileWriteback(normalizedProposalType) {
+		return changedispatch.Result{}, foundation.NewError(foundation.ErrorInvalidInput, "APPROVAL_DISPATCH_PROPOSAL_TYPE_UNSUPPORTED", false, errors.New("approval dispatch only supports governed file writeback proposals"))
+	}
+	if normalizedProposalType == domain.ProposalTypeRestoreDocument {
+		if restoreDocumentID == nil || restoreExpectedHead == nil || restoreExpectedDocumentVersion == nil || restoreCurrentContentHash == nil ||
+			!domain.ValidGitObjectID(*restoreExpectedHead) || !domain.ValidHash(*restoreCurrentContentHash) || !strings.EqualFold(*restoreCurrentContentHash, baseHash) {
+			return changedispatch.Result{}, foundation.NewError(foundation.ErrorConsistencyViolation, "DOCUMENT_RESTORE_BINDING_INVALID", false, errors.New("restore revision binding is incomplete"))
+		}
+	} else if restoreDocumentID != nil || restoreExpectedHead != nil || restoreExpectedDocumentVersion != nil || restoreCurrentContentHash != nil {
+		return changedispatch.Result{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_DISPATCH_BINDING_CONFLICT", false, errors.New("file patch carries restore fields"))
 	}
 	if workspaceID != string(command.WorkspaceID) || !strings.EqualFold(revisionHash, command.Approval.ChangeHash) {
 		return changedispatch.Result{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_DISPATCH_BINDING_CONFLICT", false, errors.New("proposal revision binding differs"))
@@ -114,7 +128,25 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	if workflowRunID != nil {
 		return r.replayApproved(ctx, tx, command, foundation.ID(*workflowRunID))
 	}
-	if err := validateApprovedDispatchSafety(command, baseHash); err != nil {
+	if normalizedProposalType == domain.ProposalTypeRestoreDocument {
+		var documentPath, lifecycle, currentRevisionID string
+		var documentVersion int64
+		err := tx.QueryRow(ctx, `SELECT canonical_path,lifecycle_status,COALESCE(current_published_revision_id::text,''),version
+			FROM core.document WHERE workspace_id=$1 AND id=$2 FOR SHARE`, workspaceID, *restoreDocumentID).Scan(
+			&documentPath, &lifecycle, &currentRevisionID, &documentVersion,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return changedispatch.Result{}, foundation.NewError(foundation.ErrorNotFound, "DOCUMENT_HISTORY_NOT_FOUND", false, err)
+		}
+		if err != nil {
+			return changedispatch.Result{}, classifyDispatch(err, "DOCUMENT_RESTORE_BINDING_QUERY_FAILED")
+		}
+		if documentPath != targetPath || lifecycle != "PUBLISHED" || currentRevisionID == "" || documentVersion != *restoreExpectedDocumentVersion ||
+			!strings.EqualFold(command.ObservedGitHead, *restoreExpectedHead) || !strings.EqualFold(command.ObservedBaseHash, *restoreCurrentContentHash) {
+			return changedispatch.Result{}, foundation.NewError(foundation.ErrorVersionConflict, "DOCUMENT_RESTORE_STALE", false, errors.New("restore baseline changed before approval"))
+		}
+	}
+	if err := validateApprovedDispatchSafety(command, targetPath, domain.TargetMode(targetMode), baseHash); err != nil {
 		return changedispatch.Result{}, err
 	}
 	if existingErr == nil {
@@ -262,8 +294,9 @@ func validateApprovalDispatchCommand(command changedispatch.Command) error {
 	return nil
 }
 
-func validateApprovedDispatchSafety(command changedispatch.Command, persistedBaseHash string) error {
-	if command.Approval.ApprovedGitHead == nil || !domain.ValidGitHead(*command.Approval.ApprovedGitHead) || !domain.ValidHash(command.ObservedBaseHash) || !domain.ValidGitHead(command.ObservedGitHead) || !strings.EqualFold(command.ObservedBaseHash, persistedBaseHash) || !strings.EqualFold(command.ObservedGitHead, *command.Approval.ApprovedGitHead) {
+func validateApprovedDispatchSafety(command changedispatch.Command, targetPath string, targetMode domain.TargetMode, persistedBaseHash string) error {
+	mode, modeErr := domain.ValidateTargetMode(targetMode)
+	if command.Approval.ApprovedGitHead == nil || modeErr != nil || domain.ValidateTargetBaseVersion(command.WorkspaceID, targetPath, mode, command.ObservedBaseHash) != nil || !domain.ValidGitHead(*command.Approval.ApprovedGitHead) || !domain.ValidGitHead(command.ObservedGitHead) || !strings.EqualFold(command.ObservedBaseHash, persistedBaseHash) || !strings.EqualFold(command.ObservedGitHead, *command.Approval.ApprovedGitHead) {
 		return foundation.NewError(foundation.ErrorVersionConflict, "APPROVAL_DISPATCH_SAFETY_CONFLICT", false, errors.New("approval safety observations do not match persisted facts"))
 	}
 	return nil

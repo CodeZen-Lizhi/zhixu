@@ -454,7 +454,23 @@ func (service *CommandService) verifySection(ctx context.Context, workspaceID fo
 	} else {
 		citations = []domain.Citation{}
 	}
-	return domain.Section{Key: input.Key, Title: input.Title, Content: input.Content, Citations: citations, Coverage: input.Coverage}, nil
+	var documentSources []domain.DocumentSource
+	if len(input.DocumentSources) > 0 {
+		if service.dependencies.Documents == nil {
+			return domain.Section{}, unavailable("artifact document source verifier is unavailable")
+		}
+		verified, err := service.dependencies.Documents.VerifyDocumentSources(ctx, workspaceID, input.DocumentSources)
+		if err != nil {
+			return domain.Section{}, err
+		}
+		if len(verified) != len(input.DocumentSources) {
+			return domain.Section{}, resultInconsistent("document source verifier returned an incomplete result")
+		}
+		documentSources = verified
+	} else {
+		documentSources = []domain.DocumentSource{}
+	}
+	return domain.Section{Key: input.Key, Title: input.Title, Content: input.Content, Citations: citations, DocumentSources: documentSources, Coverage: input.Coverage}, nil
 }
 
 func (service *CommandService) available(ctx context.Context) error {

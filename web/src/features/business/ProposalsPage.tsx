@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, BookUp, CalendarDays, Check, Clock3, FileDiff, GitMerge, RotateCcw, X } from "lucide-react";
+import { AlertTriangle, BookUp, CalendarDays, Check, Clock3, FileDiff, GitMerge, History, RotateCcw, X } from "lucide-react";
 import { Component, lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
@@ -40,7 +40,7 @@ interface ProposalDecisionSnapshot {
   changeHash: string;
   riskLevel: ProposalRiskLevel;
 }
-type FilePatchProposal = Extract<ProposalDetail, { type: "file_patch" }>;
+type FileWritebackProposal = Extract<ProposalDetail, { type: "file_patch" | "restore_document" }>;
 interface DiffLoadState {
   identity: string;
   status: DiffLoadStatus;
@@ -59,12 +59,16 @@ interface DiffViewerErrorBoundaryState {
 const currentContentPrefix = (workspaceId: string, proposalId: string) =>
   ["business", workspaceId, "proposal-current-content", proposalId] as const;
 
-const currentContentKey = (workspaceId: string, proposalId: string, proposal: FilePatchProposal) =>
-  [...currentContentPrefix(workspaceId, proposalId), proposal.revision.id, proposal.targetPath, proposal.revision.baseHash] as const;
+const isFileWritebackProposal = (proposal: ProposalDetail | undefined): proposal is FileWritebackProposal =>
+  proposal?.type === "file_patch" || proposal?.type === "restore_document";
 
-const readCurrentContent = (workspaceId: string, proposalId: string, proposal: FilePatchProposal, signal?: AbortSignal) =>
+const currentContentKey = (workspaceId: string, proposalId: string, proposal: FileWritebackProposal) =>
+  [...currentContentPrefix(workspaceId, proposalId), proposal.revision.id, proposal.targetPath, proposal.revision.targetMode, proposal.revision.baseHash] as const;
+
+const readCurrentContent = (workspaceId: string, proposalId: string, proposal: FileWritebackProposal, signal?: AbortSignal) =>
   getProposalCurrentContent(workspaceId, proposalId, {
     targetPath: proposal.targetPath,
+    targetMode: proposal.revision.targetMode,
     baseHash: proposal.revision.baseHash,
   }, signal);
 
@@ -105,6 +109,7 @@ const isHighRiskLevel = (riskLevel: ProposalRiskLevel): boolean => riskLevel ===
 
 const proposalTypeLabel = (type: ProposalDetail["type"]): string => ({
   file_patch: "文件变更",
+  restore_document: "文档恢复",
   knowledge_change: "知识关系变更",
   publish_artifact: "Artifact 发布",
   downstream_update: "下游更新",
@@ -148,7 +153,7 @@ export const ProposalsPage = () => {
     <Card>
       <div className="filter-bar" aria-label="Proposal 筛选">
         <label>状态<select value={status} onChange={(event) => updateFilter({ status: event.target.value as ProposalUrlState["status"] })}><option value="">全部</option>{proposalStatusOptions.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-        <label>类型<select value={type} onChange={(event) => updateFilter({ type: event.target.value as ProposalUrlState["type"] })}><option value="">全部</option><option value="file_patch">文件变更</option><option value="knowledge_change">知识关系</option><option value="publish_artifact">Artifact 发布</option><option value="downstream_update">下游更新</option></select></label>
+        <label>类型<select value={type} onChange={(event) => updateFilter({ type: event.target.value as ProposalUrlState["type"] })}><option value="">全部</option><option value="file_patch">文件变更</option><option value="restore_document">文档恢复</option><option value="knowledge_change">知识关系</option><option value="publish_artifact">Artifact 发布</option><option value="downstream_update">下游更新</option></select></label>
         <label>风险等级<select value={risk} onChange={(event) => updateFilter({ risk: event.target.value as ProposalUrlState["risk"] })}><option value="">全部</option>{proposalRiskLevels.map((riskLevel) => <option value={riskLevel} key={riskLevel}>{riskLevelLabel(riskLevel)}</option>)}</select></label>
         <label>创建日期起<input type="date" value={canonicalLocalDate(createdDate) ?? ""} onChange={(event) => updateFilter({ createdDate: canonicalLocalDate(event.target.value) ?? "" })} /></label>
       </div>
@@ -159,7 +164,7 @@ export const ProposalsPage = () => {
           ? <EmptyState title="没有可审变更" description="真实 Proposal 会按更新时间倒序出现在这里。" />
           : <div className="proposal-list">{query.data?.items.map((item) => <Link to={`/proposals/${item.id}`} className="proposal-row" key={item.id}>
             <div className="proposal-row__kind">
-              <span className={`kind-mark kind-mark--${item.type}`}>{item.type === "file_patch" ? <FileDiff size={16} /> : item.type === "knowledge_change" ? <GitMerge size={16} /> : item.type === "publish_artifact" ? <BookUp size={16} /> : <RotateCcw size={16} />}</span>
+              <span className={`kind-mark kind-mark--${item.type}`}>{item.type === "file_patch" ? <FileDiff size={16} /> : item.type === "restore_document" ? <History size={16} /> : item.type === "knowledge_change" ? <GitMerge size={16} /> : item.type === "publish_artifact" ? <BookUp size={16} /> : <RotateCcw size={16} />}</span>
               <div><strong>{item.type === "publish_artifact" ? "Artifact 发布" : item.type === "downstream_update" ? "下游更新" : item.target}</strong><small>{proposalTypeLabel(item.type)} · <CalendarDays size={12} /> {new Date(item.createdAt).toLocaleString("zh-CN")} · <Clock3 size={12} /> {item.status === "ready_for_review" ? `等待 ${formatElapsedDuration(item.createdAt)}` : `存在 ${formatElapsedDuration(item.createdAt)}`}</small></div>
             </div>
             <div className="proposal-row__meta">
@@ -203,22 +208,22 @@ export const ProposalDetailPage = () => {
     if (confirm !== undefined && !confirmMatchesProposal) setConfirm(undefined);
   }, [confirm, confirmMatchesProposal]);
   const type = proposal?.type ?? "file_patch";
-  const fileProposal: FilePatchProposal | undefined = proposal?.type === "file_patch" ? proposal : undefined;
-  const proposalCurrentContentKey = fileProposal === undefined
+  const fileWritebackProposal = isFileWritebackProposal(proposal) ? proposal : undefined;
+  const proposalCurrentContentKey = fileWritebackProposal === undefined
     ? [...currentContentPrefix(workspaceId, proposalId), "unbound"] as const
-    : currentContentKey(workspaceId, proposalId, fileProposal);
+    : currentContentKey(workspaceId, proposalId, fileWritebackProposal);
   const currentContentQuery = useQuery({
     queryKey: proposalCurrentContentKey,
     queryFn: ({ signal }) => {
-      if (fileProposal === undefined) throw new Error("File Patch Proposal 绑定不完整");
-      return readCurrentContent(workspaceId, proposalId, fileProposal, signal);
+      if (fileWritebackProposal === undefined) throw new Error("文件型 Proposal 绑定不完整");
+      return readCurrentContent(workspaceId, proposalId, fileWritebackProposal, signal);
     },
-    enabled: Boolean(workspaceId && proposalId && fileProposal),
+    enabled: Boolean(workspaceId && proposalId && fileWritebackProposal),
     retry: false,
     gcTime: 0,
   });
-  const diffIdentity = fileProposal !== undefined && currentContentQuery.data !== undefined
-    ? `${workspaceId}:${proposalId}:${fileProposal.revision.id}:${fileProposal.revision.baseHash}:${fileProposal.revision.changeHash}:${currentContentQuery.data.currentHash}`
+  const diffIdentity = fileWritebackProposal !== undefined && currentContentQuery.data !== undefined
+    ? `${workspaceId}:${proposalId}:${fileWritebackProposal.revision.id}:${fileWritebackProposal.revision.baseHash}:${fileWritebackProposal.revision.changeHash}:${currentContentQuery.data.currentHash}`
     : "";
   useEffect(() => {
     setDiffLoadState((current) => {
@@ -231,7 +236,7 @@ export const ProposalDetailPage = () => {
     const previousCurrentContentKey = proposalCurrentContentKey;
     const result = await proposalQuery.refetch();
     const freshProposal = result.data;
-    if (result.isError || freshProposal?.type !== "file_patch") return;
+    if (result.isError || !isFileWritebackProposal(freshProposal)) return;
     const freshCurrentContentKey = currentContentKey(workspaceId, proposalId, freshProposal);
     if (JSON.stringify(previousCurrentContentKey) !== JSON.stringify(freshCurrentContentKey)) {
       await queryClient.cancelQueries({ queryKey: previousCurrentContentKey, exact: true });
@@ -281,10 +286,15 @@ export const ProposalDetailPage = () => {
   const preflight = useMutation({
     mutationFn: async () => {
       const current = proposalQuery.data;
-      if (!current || current.type !== "file_patch" || current.status !== "approved") {
+      if (!isFileWritebackProposal(current) || current.status !== "approved") {
         throw new Error("只有已批准的文件 Proposal 可以执行写回前检查");
       }
-      return preflightProposal(proposalId, { revisionId: current.revision.id, changeHash: current.revision.changeHash });
+      return preflightProposal(proposalId, {
+        revisionId: current.revision.id,
+        changeHash: current.revision.changeHash,
+        targetMode: current.revision.targetMode,
+        baseHash: current.revision.baseHash,
+      });
     },
     onError: async (error) => {
       if (error instanceof BusinessApiError && error.status === 409) {
@@ -302,24 +312,26 @@ export const ProposalDetailPage = () => {
   }
 
   const revision = proposal.revision;
-  const fileRevision = proposal.type === "file_patch" ? proposal.revision : undefined;
+  const fileRevision = isFileWritebackProposal(proposal) ? proposal.revision : undefined;
+  const restoreRevision = proposal.type === "restore_document" ? proposal.revision : undefined;
   const knowledgeRevision = proposal.type === "knowledge_change" ? proposal.revision : undefined;
   const publishRevision = proposal.type === "publish_artifact" ? proposal.revision : undefined;
   const downstreamRevision = proposal.type === "downstream_update" ? proposal.revision : undefined;
-  const versionBindingLabel = fileRevision ? "Base Hash" : publishRevision ? "Artifact Content Hash" : downstreamRevision ? "Target Base Version" : "版本来源";
-  const versionBindingValue = fileRevision?.baseHash ?? publishRevision?.publication.contentHash ?? (downstreamRevision ? `v${String(downstreamRevision.update.baseVersion)}` : "结构化节点版本");
+  const versionBindingLabel = restoreRevision ? "Restore Preview Hash" : fileRevision?.targetMode === "CREATE_ONLY" ? "缺失证明" : fileRevision ? "Base Hash" : publishRevision ? "Artifact Content Hash" : downstreamRevision ? "Target Base Version" : "版本来源";
+  const versionBindingValue = restoreRevision?.restore.previewHash ?? fileRevision?.baseHash ?? publishRevision?.publication.contentHash ?? (downstreamRevision ? `v${String(downstreamRevision.update.baseVersion)}` : "结构化节点版本");
   const proposedContent = fileRevision?.content ?? "";
   const changeHash = revision.changeHash;
   const riskDescription = revision.risk;
   const ready = proposal.status === "ready_for_review";
-  const baselineVerified = type !== "file_patch" || currentContentQuery.data?.baseHashMatch === true;
-  const fileDiffReady = type !== "file_patch" || (diffIdentity !== "" && diffLoadState.identity === diffIdentity && diffLoadState.status === "ready");
-  const fileDiffFailed = type === "file_patch" && diffIdentity !== "" && diffLoadState.identity === diffIdentity && diffLoadState.status === "error";
-  const fileDiffPending = type === "file_patch" && currentContentQuery.data !== undefined && !fileDiffReady && !fileDiffFailed;
+  const fileWriteback = isFileWritebackProposal(proposal);
+  const baselineVerified = !fileWriteback || currentContentQuery.data?.baseHashMatch === true;
+  const fileDiffReady = !fileWriteback || (diffIdentity !== "" && diffLoadState.identity === diffIdentity && diffLoadState.status === "ready");
+  const fileDiffFailed = fileWriteback && diffIdentity !== "" && diffLoadState.identity === diffIdentity && diffLoadState.status === "error";
+  const fileDiffPending = fileWriteback && currentContentQuery.data !== undefined && !fileDiffReady && !fileDiffFailed;
   const canApprove = ready && baselineVerified && !currentContentQuery.isError && fileDiffReady;
   const canReject = ready;
-  const canPreflight = proposal.type === "file_patch" && proposal.status === "approved" && baselineVerified && !currentContentQuery.isError;
-  const writebackState = proposal.type === "file_patch" && proposal.approval?.decision === "approved"
+  const canPreflight = fileWriteback && proposal.status === "approved" && baselineVerified && !currentContentQuery.isError;
+  const writebackState = fileWriteback && proposal.approval?.decision === "approved"
     ? proposal.approval.writebackState
     : undefined;
   const canRedispatch = writebackState === "pending_dispatch" && baselineVerified && !currentContentQuery.isError && fileDiffReady;
@@ -334,13 +346,14 @@ export const ProposalDetailPage = () => {
       riskLevel: proposal.riskLevel,
     });
   };
-  const preflightStillCurrent = proposal.type === "file_patch"
+  const preflightStillCurrent = fileWriteback
     && preflight.data !== undefined
     && !proposalQuery.isFetching
     && !currentContentQuery.isFetching
     && currentContentQuery.data?.baseHashMatch === true
     && preflight.data.revisionId === proposal.revision.id
     && preflight.data.changeHash === proposal.revision.changeHash
+    && preflight.data.targetMode === proposal.revision.targetMode
     && preflight.data.baseHash === proposal.revision.baseHash
     && currentContentQuery.data.baseHash === proposal.revision.baseHash;
   const retryDiffViewer = (): void => {
@@ -348,12 +361,50 @@ export const ProposalDetailPage = () => {
     setDiffLoadState({ identity: diffIdentity, status: "loading", message: "" });
     setDiffRetryNonce((value) => value + 1);
   };
+  const proposalTitle = fileWriteback
+    ? proposal.targetPath
+    : proposal.type === "knowledge_change"
+      ? "知识关系变更"
+      : proposal.type === "publish_artifact"
+        ? "Artifact 发布"
+        : "下游更新意图";
+  const changeBodyTitle = restoreRevision
+    ? "当前文档 → 恢复目标"
+    : fileRevision
+      ? fileRevision.targetMode === "CREATE_ONLY" ? "新文件 → Proposal" : "当前文件 → Proposal"
+      : knowledgeRevision
+        ? "Relation Diff"
+        : publishRevision
+          ? "Artifact Publication Snapshot"
+          : "Downstream Update Snapshot";
+  const changeBodyDescription = restoreRevision
+    ? "对比服务端当前正文与冻结的历史版本正文；Document、来源 Commit、Document Version 与 Preview Hash 作为不可变审批证据，批准前实时检查当前内容 Hash 和 Git HEAD。"
+    : fileRevision
+      ? fileRevision.targetMode === "CREATE_ONLY" ? "目标路径当前不存在；Diff 基线为空文件。" : "当前正文由服务端安全读取；只有 current hash 与 Proposal base hash 一致时才允许批准。"
+      : knowledgeRevision
+        ? "结构化关系端点、版本和 Evidence，不伪装成 Markdown Diff。"
+        : publishRevision
+          ? "冻结 Artifact、Revision、版本、内容哈希与来源覆盖；这里只审阅发布请求，不写入正式知识。"
+          : "冻结 Impact Report、来源 Event、目标版本和 owner 绑定；Approval 只记录更新意图，不授予执行能力。";
+  const confirmationDescription = activeConfirm?.action === "redispatch"
+    ? activeConfirm.proposalType === "restore_document"
+      ? "恢复写回继续绑定页面展示的恢复来源 Document、目标 Commit、Document Version、Preview Hash 与 Change Hash；服务端会实时重查当前内容 Hash 和 Git HEAD，再原子补建唯一 Safe Writeback Workflow，不会改写既有历史。"
+      : "服务端会重做 Target Hash 与 strict-clean Git 安全门，再原子补建唯一 Workflow；前端不会把请求受理显示成写回完成。"
+    : activeConfirm?.proposalType === "restore_document"
+      ? "本次审批绑定页面展示的恢复来源 Document、目标 Commit、Document Version、Preview Hash 与 Change Hash；服务端会实时检查当前内容 Hash 和 Git HEAD 是否仍等于预览基线。恢复通过追加 Safe Writeback 完成，不会改写既有历史。"
+      : activeConfirm?.proposalType === "downstream_update"
+        ? "提交后服务端会再次校验冻结的 Impact Report、Event、目标版本、owner 绑定与 Change Hash。批准只记录更新意图，不授予目标执行能力。"
+        : activeConfirm?.proposalType === "publish_artifact"
+          ? "提交后服务端会再次校验冻结的 Artifact、Revision、版本与 Change Hash。批准只形成 Approval，不表示已经创建 Document、Git 写入或索引。"
+          : activeConfirm?.proposalType === "file_patch"
+            ? "提交后服务端会再次校验 Proposal 状态、Revision、Change Hash 与当前文件基线；前端不会乐观显示成功。"
+            : "提交后服务端会再次校验 Proposal 状态、Revision 与 Change Hash；前端不会乐观显示成功。";
 
   return <div className="page-stack">
     <div className="page-intro page-intro--split">
       <div>
-        <p className="eyebrow">审阅台 / {type}</p>
-        <h1>{proposal.type === "file_patch" ? proposal.targetPath : proposal.type === "knowledge_change" ? "知识关系变更" : proposal.type === "publish_artifact" ? "Artifact 发布" : "下游更新意图"}</h1>
+        <p className="eyebrow">审阅台 / {proposalTypeLabel(type)}</p>
+        <h1>{proposalTitle}</h1>
         <p>Proposal 状态：<Badge tone={proposal.status === "needs_revision" ? "danger" : ready ? "warning" : "neutral"}>{proposal.status}</Badge></p>
       </div>
       <div className="hash-card"><span>Change Hash</span><code>{changeHash.slice(0, 16)}…</code></div>
@@ -364,18 +415,28 @@ export const ProposalDetailPage = () => {
         <Card>
           <CardHeader
             eyebrow="变更主体"
-            title={type === "file_patch" ? "当前文件 → Proposal" : type === "knowledge_change" ? "Relation Diff" : type === "publish_artifact" ? "Artifact Publication Snapshot" : "Downstream Update Snapshot"}
-            description={type === "file_patch" ? "当前正文由服务端安全读取；只有 current hash 与 Proposal base hash 一致时才允许批准。" : type === "knowledge_change" ? "结构化关系端点、版本和 Evidence，不伪装成 Markdown Diff。" : type === "publish_artifact" ? "冻结 Artifact、Revision、版本、内容哈希与来源覆盖；这里只审阅发布请求，不写入正式知识。" : "冻结 Impact Report、来源 Event、目标版本和 owner 绑定；Approval 只记录更新意图，不授予执行能力。"}
-            action={type === "file_patch" ? <Button variant="ghost" size="sm" onClick={() => void currentContentQuery.refetch()} disabled={currentContentQuery.isFetching}><RotateCcw size={14} />重新读取</Button> : undefined}
+            title={changeBodyTitle}
+            description={changeBodyDescription}
+            action={fileWriteback ? <Button variant="ghost" size="sm" onClick={() => void currentContentQuery.refetch()} disabled={currentContentQuery.isFetching}><RotateCcw size={14} />重新读取</Button> : undefined}
           />
           {fileRevision ? <>
+            {restoreRevision ? <div className="relation-diff" aria-label="文档恢复来源">
+              <div><span>恢复来源 Document</span><strong><Link className="table-link" to={`/authoring/documents/${restoreRevision.restore.documentId}/history`}>{restoreRevision.restore.documentId}</Link></strong></div>
+              <div><span>来源 Commit</span><strong><code className="mono">{restoreRevision.restore.targetCommit}</code></strong></div>
+              <div><span>预览 HEAD</span><strong><code className="mono">{restoreRevision.restore.expectedHead}</code></strong></div>
+              <div><span>Document Version</span><strong>v{restoreRevision.restore.expectedDocumentVersion}</strong></div>
+              <div><span>Preview Hash</span><strong><code className="mono">{restoreRevision.restore.previewHash}</code></strong></div>
+              <div><span>当前内容 Hash</span><strong><code className="mono">{restoreRevision.restore.currentContentHash}</code></strong></div>
+              <div><span>目标内容 Hash</span><strong><code className="mono">{restoreRevision.restore.targetContentHash}</code></strong></div>
+              <div><span>Schema</span><strong>{restoreRevision.restore.schemaVersion}</strong></div>
+            </div> : null}
             {currentContentQuery.isPending ? <p className="skeleton-line">正在读取当前 Workspace 文件…</p> : null}
             {currentContentQuery.isError ? <ErrorState title="当前文件读取失败" description={currentContentQuery.error.message} onRetry={() => void currentContentQuery.refetch()} /> : null}
             {currentContentQuery.data && !currentContentQuery.data.baseHashMatch ? <div className="ui-state ui-state--error" role="alert"><strong>版本冲突：基线已经漂移</strong><p>当前 hash 为 <code>{currentContentQuery.data.currentHash}</code>，Proposal base hash 为 <code>{currentContentQuery.data.baseHash}</code>。批准已被禁用，请重新生成 Revision。</p></div> : null}
             {fileDiffPending ? <p className="sidebar-note" role="status">Diff Viewer 正在挂载；完成前文件批准和恢复派发保持禁用。</p> : null}
             {fileDiffFailed ? <ErrorState title="Diff Viewer 加载失败" description={diffLoadState.message || "无法加载本地 Monaco Diff Viewer；请重试或驳回该 Proposal。"} onRetry={retryDiffViewer} /> : null}
             {currentContentQuery.data && !fileDiffFailed ? <Suspense fallback={<p>正在加载 Diff Viewer…</p>}>
-              <div className="monaco-diff-shell" aria-label="当前文件与 Proposal 内容差异">
+              <div className="monaco-diff-shell" aria-label={restoreRevision ? "当前文档与恢复目标内容差异" : "当前文件与 Proposal 内容差异"}>
                 <DiffViewerErrorBoundary
                   identity={`${diffIdentity}:${String(diffRetryNonce)}`}
                   onError={(error) => setDiffLoadState({ identity: diffIdentity, status: "error", message: error.message })}
@@ -449,13 +510,13 @@ export const ProposalDetailPage = () => {
       <aside className="review-sidebar">
         <Card>
           <CardHeader eyebrow="Change Control" title="决策" />
-          {proposal.status === "needs_revision" || (type === "file_patch" && currentContentQuery.data?.baseHashMatch === false)
+          {proposal.status === "needs_revision" || (fileWriteback && currentContentQuery.data?.baseHashMatch === false)
             ? <UnavailableState title="基线已漂移" description="批准已被阻止；请重新生成 Proposal Revision。" />
             : ready ? <>
               <Button className="full-button" disabled={!canApprove || mutation.isPending} onClick={(event) => openConfirmation("approved", event.currentTarget)}><Check size={16} />批准</Button>
               <Button className="full-button" variant="danger" disabled={!canReject || mutation.isPending} onClick={(event) => openConfirmation("rejected", event.currentTarget)}><X size={16} />驳回</Button>
-              {type === "file_patch" && !baselineVerified && !currentContentQuery.isError ? <p className="sidebar-note">等待当前文件基线校验完成后才能批准。</p> : null}
-              {type === "file_patch" && baselineVerified && !fileDiffReady && !currentContentQuery.isError ? <p className="sidebar-note">等待 Diff Viewer 成功挂载后才能批准；驳回仍可提交。</p> : null}
+              {fileWriteback && !baselineVerified && !currentContentQuery.isError ? <p className="sidebar-note">等待当前文件基线校验完成后才能批准。</p> : null}
+              {fileWriteback && baselineVerified && !fileDiffReady && !currentContentQuery.isError ? <p className="sidebar-note">等待 Diff Viewer 成功挂载后才能批准；驳回仍可提交。</p> : null}
             </> : proposal.type === "downstream_update" && proposal.status === "approved"
               ? <UnavailableState title="执行能力不可用" description="该 Approval 仅记录下游更新意图；当前没有目标执行器，页面不会显示执行、派发或写入成功状态。" />
               : writebackState === "pending_dispatch" ? <>
@@ -468,9 +529,9 @@ export const ProposalDetailPage = () => {
           {mutation.isError ? <p className="form-error" role="alert">{mutation.error.message}</p> : null}
           <p className="sidebar-note">暂缓、编辑后批准、批量审批与完整三方合并尚未交付。</p>
         </Card>
-        {proposal.type === "file_patch" && proposal.status === "approved" ? <Card>
+        {fileWriteback && proposal.status === "approved" ? <Card>
           <CardHeader eyebrow="Safe Writeback" title="写回前检查" />
-          <p className="sidebar-note">Apply Preflight 只检查已批准 Revision 的当前基线，不写文件，也不代替首次审批。</p>
+          <p className="sidebar-note">Apply Preflight 只检查已批准 Revision 的当前基线{restoreRevision ? "与冻结的文档恢复绑定" : ""}，不写文件，也不代替首次审批。</p>
           <Button className="full-button" variant="secondary" disabled={!canPreflight || preflight.isPending} onClick={() => preflight.mutate()}>
             <RotateCcw size={15} />{preflight.isPending ? "检查中…" : "执行 Apply Preflight"}
           </Button>
@@ -507,7 +568,7 @@ export const ProposalDetailPage = () => {
       open={activeConfirm !== undefined}
       onOpenChange={(open) => { if (!open) setConfirm(undefined); }}
       title={activeConfirm?.action === "redispatch" ? "确认恢复写回 Workflow？" : activeConfirm?.action === "approved" ? isHighRiskLevel(activeConfirm.riskLevel) ? "高风险变更：再次确认批准" : "确认批准这项变更？" : "确认驳回这项变更？"}
-      description={activeConfirm?.action === "redispatch" ? "服务端会重做 Target Hash 与 strict-clean Git 安全门，再原子补建唯一 Workflow；前端不会把请求受理显示成写回完成。" : activeConfirm?.proposalType === "downstream_update" ? "提交后服务端会再次校验冻结的 Impact Report、Event、目标版本、owner 绑定与 Change Hash。批准只记录更新意图，不授予目标执行能力。" : activeConfirm?.proposalType === "publish_artifact" ? "提交后服务端会再次校验冻结的 Artifact、Revision、版本与 Change Hash。批准只形成 Approval，不表示已经创建 Document、Git 写入或索引。" : activeConfirm?.proposalType === "file_patch" ? "提交后服务端会再次校验 Proposal 状态、Revision、Change Hash 与当前文件基线；前端不会乐观显示成功。" : "提交后服务端会再次校验 Proposal 状态、Revision 与 Change Hash；前端不会乐观显示成功。"}
+      description={confirmationDescription}
       restoreFocusRef={decisionTriggerRef}
     >
       <div className="dialog-actions">

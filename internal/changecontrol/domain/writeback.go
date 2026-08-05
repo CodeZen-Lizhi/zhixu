@@ -57,6 +57,7 @@ type WritebackExecution struct {
 	ProposalID, RevisionID, ApprovalID        foundation.ID
 	WriteAuthorizationID, GitAuthorizationID  foundation.ID
 	TargetPath                                string
+	TargetMode                                TargetMode
 	BaseHash, ResultHash, ApprovedChangeHash  string
 	ApprovedGitHead                           string
 	GitCommit, ParentGitCommit, DiffHash      string
@@ -83,6 +84,7 @@ type ProposalCommit struct {
 	ProposalID, RevisionID, ApprovalID    foundation.ID
 	GitCommit, ParentGitCommit            string
 	TargetPath, DiffHash, ResultHash      string
+	TargetMode                            TargetMode
 	CreatedAt                             time.Time
 }
 
@@ -92,6 +94,7 @@ type CreateWriteback struct {
 	ProposalID, RevisionID, ApprovalID        foundation.ID
 	WriteAuthorizationID, GitAuthorizationID  foundation.ID
 	TargetPath                                string
+	TargetMode                                TargetMode
 	BaseHash, ResultHash, ApprovedChangeHash  string
 	ApprovedGitHead                           string
 	IdempotencyKey                            string
@@ -225,7 +228,8 @@ func ValidateWritebackCreate(command CreateWriteback) error {
 	if err != nil || target != command.TargetPath {
 		return ErrWritebackInvalidInput
 	}
-	if !ValidHash(command.BaseHash) || !ValidHash(command.ResultHash) || !ValidHash(command.ApprovedChangeHash) || !ValidGitHead(command.ApprovedGitHead) {
+	mode, modeErr := ValidateTargetMode(command.TargetMode)
+	if modeErr != nil || ValidateTargetBaseVersion(command.WorkspaceID, command.TargetPath, mode, command.BaseHash) != nil || !ValidHash(command.ResultHash) || !ValidHash(command.ApprovedChangeHash) || !ValidGitHead(command.ApprovedGitHead) {
 		return ErrWritebackInvalidInput
 	}
 	if strings.TrimSpace(command.IdempotencyKey) == "" || len(strings.TrimSpace(command.IdempotencyKey)) > 128 {
@@ -234,7 +238,10 @@ func ValidateWritebackCreate(command CreateWriteback) error {
 	if err := validateWritebackRef(command.TemporaryRef); err != nil {
 		return ErrWritebackInvalidInput
 	}
-	if err := validateWritebackRef(command.BackupRef); err != nil {
+	if mode == TargetModeReplace && validateWritebackRef(command.BackupRef) != nil {
+		return ErrWritebackInvalidInput
+	}
+	if mode == TargetModeCreateOnly && command.BackupRef != "" {
 		return ErrWritebackInvalidInput
 	}
 	return nil
@@ -249,14 +256,20 @@ func ValidateWritebackCheckpoint(current WritebackExecution, command CheckpointW
 		return err
 	}
 	// 旧 CreateWritebackExecution 记录可保留直达迁移；Atomic Begin 创建的 Saga 必须经过 durable intent。
-	if current.Status == WritebackStatusPrepared && command.Status == WritebackStatusFileApplied && (current.TemporaryRef == "" || current.BackupRef == "") {
+	if current.Status == WritebackStatusPrepared && command.Status == WritebackStatusFileApplied && (current.TemporaryRef == "" || (NormalizeTargetMode(current.TargetMode) == TargetModeReplace && current.BackupRef == "")) {
 		return ErrWritebackInvalidTransition
 	}
 	if current.Status == WritebackStatusFileApplied && command.Status == WritebackStatusGitCommitted && current.FileLockToken != "" {
 		return ErrWritebackInvalidTransition
 	}
-	if current.BaseBlobID != "" && (!strings.EqualFold(command.DiffHash, current.DiffHash) || !strings.EqualFold(command.BaseBlobID, current.BaseBlobID) || !strings.EqualFold(command.ResultBlobID, current.ResultBlobID) || command.BaseMode != current.BaseMode) {
-		return ErrWritebackIdentityConflict
+	// Git intent 持久化完整 tuple 后才不可变；历史 prepared 记录可能只有预期 diff，
+	// 此时不能把尚未落库的字段当作重放身份。
+	createOnly := NormalizeTargetMode(current.TargetMode) == TargetModeCreateOnly
+	hasGitIntent := current.DiffHash != "" && current.ResultBlobID != "" && (createOnly || current.BaseBlobID != "")
+	if hasGitIntent {
+		if !strings.EqualFold(command.DiffHash, current.DiffHash) || !strings.EqualFold(command.ResultBlobID, current.ResultBlobID) || command.BaseMode != current.BaseMode || (!createOnly && !strings.EqualFold(command.BaseBlobID, current.BaseBlobID)) || (createOnly && command.BaseBlobID != "") {
+			return ErrWritebackIdentityConflict
+		}
 	}
 	if current.FileLockToken != "" && (command.TemporaryRef != current.TemporaryRef || command.BackupRef != current.BackupRef || command.FileByteSize != current.FileByteSize || command.FileMode != current.FileMode || !strings.EqualFold(command.FileLockToken, current.FileLockToken) || !strings.EqualFold(command.FileResultLockToken, current.FileResultLockToken) || !strings.EqualFold(command.FileBackupLockToken, current.FileBackupLockToken)) {
 		return ErrWritebackIdentityConflict
@@ -273,15 +286,20 @@ func ValidateWritebackCheckpoint(current WritebackExecution, command CheckpointW
 		}
 	}
 	if command.Status == WritebackStatusFilePrepared {
-		if command.TemporaryRef == "" || command.BackupRef == "" || command.FileByteSize <= 0 || command.FileByteSize > MaxWritebackContentBytes || command.FileMode&^uint32(0o7777) != 0 || !ValidHash(command.FileLockToken) || !ValidHash(command.FileResultLockToken) || !ValidHash(command.FileBackupLockToken) {
+		createOnly := NormalizeTargetMode(current.TargetMode) == TargetModeCreateOnly
+		if command.TemporaryRef == "" || (!createOnly && command.BackupRef == "") || (createOnly && command.BackupRef != "") || command.FileByteSize <= 0 || command.FileByteSize > MaxWritebackContentBytes || command.FileMode&^uint32(0o7777) != 0 || !ValidHash(command.FileLockToken) || !ValidHash(command.FileResultLockToken) || (!createOnly && !ValidHash(command.FileBackupLockToken)) || (createOnly && command.FileBackupLockToken != "") {
 			return ErrWritebackInvalidInput
 		}
-		if strings.EqualFold(command.FileLockToken, command.FileResultLockToken) || strings.EqualFold(command.FileLockToken, command.FileBackupLockToken) || strings.EqualFold(command.FileResultLockToken, command.FileBackupLockToken) {
+		if strings.EqualFold(command.FileLockToken, command.FileResultLockToken) || (!createOnly && (strings.EqualFold(command.FileLockToken, command.FileBackupLockToken) || strings.EqualFold(command.FileResultLockToken, command.FileBackupLockToken))) {
 			return ErrWritebackInvalidInput
 		}
 	}
 	if command.Status == WritebackStatusGitPrepared {
-		if !ValidHash(command.DiffHash) || !ValidGitObjectID(command.BaseBlobID) || !ValidGitObjectID(command.ResultBlobID) || len(command.BaseBlobID) != len(current.ApprovedGitHead) || len(command.ResultBlobID) != len(current.ApprovedGitHead) || !ValidGitFileMode(command.BaseMode) {
+		baseFactValid := ValidGitObjectID(command.BaseBlobID) && len(command.BaseBlobID) == len(current.ApprovedGitHead)
+		if NormalizeTargetMode(current.TargetMode) == TargetModeCreateOnly {
+			baseFactValid = command.BaseBlobID == "" && ValidateTargetBaseVersion(current.WorkspaceID, current.TargetPath, current.TargetMode, current.BaseHash) == nil
+		}
+		if !ValidHash(command.DiffHash) || !baseFactValid || !ValidGitObjectID(command.ResultBlobID) || len(command.ResultBlobID) != len(current.ApprovedGitHead) || !ValidGitFileMode(command.BaseMode) {
 			return ErrWritebackInvalidInput
 		}
 	}
@@ -349,6 +367,7 @@ func sameWritebackIdentity(existing, requested WritebackExecution) bool {
 		existing.WriteAuthorizationID == requested.WriteAuthorizationID &&
 		existing.GitAuthorizationID == requested.GitAuthorizationID &&
 		existing.TargetPath == requested.TargetPath &&
+		NormalizeTargetMode(existing.TargetMode) == NormalizeTargetMode(requested.TargetMode) &&
 		strings.EqualFold(existing.BaseHash, requested.BaseHash) &&
 		strings.EqualFold(existing.ResultHash, requested.ResultHash) &&
 		strings.EqualFold(existing.ApprovedChangeHash, requested.ApprovedChangeHash) &&
@@ -358,7 +377,7 @@ func sameWritebackIdentity(existing, requested WritebackExecution) bool {
 
 // ValidateProposalCommitBinding 确认 Commit Mapping 只能指向当前执行及其审批版本。
 func ValidateProposalCommitBinding(execution WritebackExecution, commit ProposalCommit) error {
-	if execution.ID == "" || commit.ID == "" || commit.WritebackExecutionID != execution.ID || commit.WorkspaceID != execution.WorkspaceID || commit.ProposalID != execution.ProposalID || commit.RevisionID != execution.RevisionID || commit.ApprovalID != execution.ApprovalID || commit.TargetPath != execution.TargetPath || !strings.EqualFold(commit.ResultHash, execution.ResultHash) || !strings.EqualFold(commit.GitCommit, execution.GitCommit) || !strings.EqualFold(commit.ParentGitCommit, execution.ParentGitCommit) || !strings.EqualFold(commit.DiffHash, execution.DiffHash) || !ValidGitHead(commit.GitCommit) || !ValidGitHead(commit.ParentGitCommit) || !ValidHash(commit.DiffHash) {
+	if execution.ID == "" || commit.ID == "" || commit.WritebackExecutionID != execution.ID || commit.WorkspaceID != execution.WorkspaceID || commit.ProposalID != execution.ProposalID || commit.RevisionID != execution.RevisionID || commit.ApprovalID != execution.ApprovalID || commit.TargetPath != execution.TargetPath || NormalizeTargetMode(commit.TargetMode) != NormalizeTargetMode(execution.TargetMode) || !strings.EqualFold(commit.ResultHash, execution.ResultHash) || !strings.EqualFold(commit.GitCommit, execution.GitCommit) || !strings.EqualFold(commit.ParentGitCommit, execution.ParentGitCommit) || !strings.EqualFold(commit.DiffHash, execution.DiffHash) || !ValidGitHead(commit.GitCommit) || !ValidGitHead(commit.ParentGitCommit) || !ValidHash(commit.DiffHash) {
 		return ErrWritebackPublishBindingConflict
 	}
 	return nil

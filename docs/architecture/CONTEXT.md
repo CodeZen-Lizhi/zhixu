@@ -58,6 +58,10 @@ _Avoid_: 欢迎页、系统诊断页、入口态
 等待系统接收和处理资料的入口，不是正式知识目录。
 _Avoid_: 知识库、草稿箱
 
+**Quick Capture**:
+不要求用户先确定正式标题、目录、Topic 或处理方式，便可把原始文字、URL、文件或图片创建为 Inbox Source 的低摩擦输入动作。
+_Avoid_: 新建 Document、编辑器草稿、自动入库
+
 ## 资料与文档
 
 **Source**:
@@ -76,9 +80,21 @@ _Avoid_: Source Version、用户可变路径
 可以被组织并发布到正式知识目录的文章对象。
 _Avoid_: Source、文件记录
 
+**Document Draft**:
+尚未发布的 Document；它可以从空白创作或确认材料整理形成，成为正式知识前仍受变更控制。
+_Avoid_: Artifact、Quick Capture、Source
+
+**Working Draft**:
+Document 编辑过程中可更新、可恢复的当前工作状态；它不是版本历史，也不是不可变 Article Revision。
+_Avoid_: Article Revision、自动保存版本、浏览器临时缓存
+
+**Authoring**:
+以形成可发布 Document 为目标的内容创作活动，包括从空白开始和基于确认材料整理两种方式。
+_Avoid_: 产出、Artifact 生成、Quick Capture
+
 **Article Revision**:
 Document 的一个内容版本，可以是草稿、已批准或已发布状态。
-_Avoid_: Source Version、Document
+_Avoid_: Source Version、Document、Working Draft
 
 **Chunk**:
 由 Ingestion 从 Parse Projection 中确定性切分出的 canonical 内容片段，不是独立知识事实；Retrieval 只建立引用它的索引投影。
@@ -87,6 +103,24 @@ _Avoid_: Claim、知识点
 **Source Span**:
 Content Artifact 原始字节中可以精确定位的不可变内容范围；具体导入路径通过 Source Version Provenance 选择。
 _Avoid_: Chunk、引用文本
+
+**Document Knowledge Profile**:
+从一个明确资料版本派生、用于材料发现的文档摘要、候选 Topic、术语别名、关键知识点和来源定位集合；它可重建且不是正式知识。
+_Avoid_: 自动标签、正式 Topic、Claim、Document 摘要字段
+
+## 整理输入
+
+**Suggested Material Set**:
+系统围绕一次明确整理意图检索并解释的候选材料集合，等待用户删除、补充和确认；它不是 Smart Collection，也不是已经授权使用的 Workflow 输入。
+_Avoid_: 材料篮、自动选定材料、Smart Collection
+
+**Workflow Input Snapshot**:
+用户确认后为一次 Workflow Run 冻结的材料及其版本集合，用于生成结果的来源追溯和重放；后续材料变化不能改写该快照。
+_Avoid_: Suggested Material Set、Smart Collection、当前搜索结果
+
+**Organizing Template**:
+定义整理任务的材料要求、输出结构、证据与冲突规则以及结果去向的版本化声明；它不能替代 Workflow Definition、Approval 或 Safe Writeback。
+_Avoid_: Prompt、工作流脚本、Document 样板文件
 
 ## 知识模型
 
@@ -179,6 +213,30 @@ _Avoid_: Candidate、Relation、文件补丁 Proposal
 **Safe Writeback**:
 将已批准 Proposal 应用为正式文件和版本变更并完成验证的过程。
 _Avoid_: 保存文件、自动修改
+
+**Git Remote Config**:
+一个 Workspace 当前启用的、按 Revision 管理的标准 HTTPS Remote、目标分支、自动同步偏好与凭据存在状态；访问令牌是只写 Secret，不属于公开配置内容。
+_Avoid_: 仓库 `.git/config`、明文 Token、完整 Workspace 备份配置
+
+**Git Sync Run**:
+一次先持久化再执行的 Workspace Git 远端同步逻辑运行，永久绑定创建时的 Remote Config Revision、触发来源和目标分支，并分别记录 Git 结果与后续索引结果。
+_Avoid_: Workflow Run、单条 Git 命令、数据库备份、索引任务
+
+**Git Sync Attempt**:
+Git Sync Run 的一次带 lease、checkpoint 和外部结果证明的实际执行尝试；Worker 重投仍恢复同一 Run，用户对终态显式重新同步才创建关联的新 Run。
+_Avoid_: Git Sync Run、HTTP 请求、无状态重试
+
+**Git Change Preview**:
+Git Sync Run 为冲突解释保存的有界文件变化投影，首版最多按 Git 顺序展示前 500 条；它不是完整 Diff，也不能代替 Fast-forward 后对实际 tree 的 Source capture。
+_Avoid_: 完整变更清单、Source capture 输入、文件历史
+
+**Workspace Git Operation Lock**:
+Safe Writeback、Git Remote Sync 和其他会改变 Workspace Git 状态的流程共享的 Workspace 级互斥边界；它只负责串行化操作，不代表 Run 成功或数据库事务已经包含 Git 副作用。
+_Avoid_: 数据库事务、Workflow lease、文件历史读锁
+
+**Manual Git Recovery**:
+Git 突变阶段发生响应丢失且 post-check 无法证明外部结果时的终态，要求先核对精确本地/远端 OID；只读 Fetch、Compare 或元数据解析失败不属于该状态。
+_Avoid_: 普通离线失败、状态损坏、自动重试
 
 ## 派生与学习
 

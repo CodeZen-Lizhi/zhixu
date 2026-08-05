@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/index.md","reason":"History 查询与 Change Control 恢复的模块边界"}
+{"file":".trellis/spec/backend/timeline-impact.md","reason":"明确 Document File History 不污染 Knowledge Timeline 语义"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Workspace、Document、path、Commit 与 Capability 边界"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"History mapping、恢复 Proposal、错误、幂等、迁移和跨层质量契约"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"History、Diff、Restore Dialog 与键盘交互"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Workspace/Document/head/cursor Query 与刷新恢复"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"managed/external/current union、Commit 和 Diff 严格解码"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Git/DB mapping 到 UI 和恢复 Proposal 的跨层链路"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/repository-evidence.md","reason":"现有 Article Revision、Proposal Commit 与 Safe Writeback 证据"}

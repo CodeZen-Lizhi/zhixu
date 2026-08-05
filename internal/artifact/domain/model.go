@@ -20,6 +20,7 @@ const (
 	maxSectionTitleBytes  = 512
 	maxSectionContent     = 256 * 1024
 	maxCitationExcerpt    = 16 * 1024
+	maxDocumentSources    = 64
 	maxGapCodeBytes       = 128
 	maxGapDescription     = 4 * 1024
 )
@@ -85,6 +86,16 @@ type Citation struct {
 	Verified            bool
 }
 
+// DocumentSource 引用 Workspace 内一份经过服务端复核的不可变文章 Revision。
+// 它与正式知识 Citation 分开表达，不能伪装成 Source Span。
+type DocumentSource struct {
+	DocumentID          foundation.ID
+	ArticleRevisionID   foundation.ID
+	RevisionNo          int64
+	VerifiedContentHash string
+	Verified            bool
+}
+
 // Gap 明确记录无法由已验证知识支持的部分。
 type Gap struct {
 	Code        string
@@ -100,11 +111,12 @@ type Coverage struct {
 
 // Section 是 Revision 中不可变的单章正文及其验证引用。
 type Section struct {
-	Key       string
-	Title     string
-	Content   string
-	Citations []Citation
-	Coverage  Coverage
+	Key             string
+	Title           string
+	Content         string
+	Citations       []Citation
+	DocumentSources []DocumentSource `json:"DocumentSources,omitempty"`
+	Coverage        Coverage
 }
 
 // GenerationMetadata 保存 Agent 生成的可追踪版本信息；人工 Revision 必须为空。
@@ -209,8 +221,29 @@ func ComputeRevisionContentHash(revision Revision) (string, error) {
 		return "", err
 	}
 	sections := make([]canonicalSection, len(canonical.Sections))
+	hasDocumentSources := false
 	for index, section := range canonical.Sections {
-		sections[index] = canonicalSection{Key: section.Key, Title: section.Title, Content: section.Content, Citations: section.Citations, Coverage: section.Coverage}
+		sections[index] = canonicalSection{Key: section.Key, Title: section.Title, Content: section.Content, Citations: section.Citations, DocumentSources: section.DocumentSources, Coverage: section.Coverage}
+		hasDocumentSources = hasDocumentSources || len(section.DocumentSources) > 0
+	}
+	if !hasDocumentSources {
+		legacySections := make([]canonicalSectionV1, len(sections))
+		for index, section := range sections {
+			legacySections[index] = canonicalSectionV1{Key: section.Key, Title: section.Title, Content: section.Content, Citations: section.Citations, Coverage: section.Coverage}
+		}
+		payload := struct {
+			Schema   string               `json:"schema"`
+			Outline  []OutlineSection     `json:"outline"`
+			Sections []canonicalSectionV1 `json:"sections"`
+			Creator  CreatorType          `json:"creator"`
+			Metadata *GenerationMetadata  `json:"metadata"`
+		}{Schema: RevisionSchemaV1, Outline: canonical.Outline, Sections: legacySections, Creator: canonical.CreatedBy, Metadata: canonical.Metadata}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return "", inconsistent(ErrorCodeArtifactInvalid, "revision hash payload cannot be encoded")
+		}
+		digest := sha256.Sum256(encoded)
+		return hex.EncodeToString(digest[:]), nil
 	}
 	payload := struct {
 		Schema   string              `json:"schema"`
@@ -218,13 +251,34 @@ func ComputeRevisionContentHash(revision Revision) (string, error) {
 		Sections []canonicalSection  `json:"sections"`
 		Creator  CreatorType         `json:"creator"`
 		Metadata *GenerationMetadata `json:"metadata"`
-	}{Schema: "artifact-revision/v1", Outline: canonical.Outline, Sections: sections, Creator: canonical.CreatedBy, Metadata: canonical.Metadata}
+	}{Schema: RevisionSchemaV2, Outline: canonical.Outline, Sections: sections, Creator: canonical.CreatedBy, Metadata: canonical.Metadata}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return "", inconsistent(ErrorCodeArtifactInvalid, "revision hash payload cannot be encoded")
 	}
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+const (
+	// RevisionSchemaV1 是只包含正式 Citation 的既有 Revision 哈希契约。
+	RevisionSchemaV1 = "artifact-revision/v1"
+	// RevisionSchemaV2 增加独立的不可变来源文档绑定。
+	RevisionSchemaV2 = "artifact-revision/v2"
+)
+
+// RevisionSchemaVersion 返回持久化当前 Revision 所需的最小 Schema 版本。
+func RevisionSchemaVersion(revision Revision) (string, error) {
+	canonical, err := canonicalRevision(revision)
+	if err != nil {
+		return "", err
+	}
+	for _, section := range canonical.Sections {
+		if len(section.DocumentSources) > 0 {
+			return RevisionSchemaV2, nil
+		}
+	}
+	return RevisionSchemaV1, nil
 }
 
 // ValidateRevision 验证 Revision 仍保持 canonical 内容和哈希绑定。
@@ -271,6 +325,8 @@ func CloneRevision(revision Revision) Revision {
 		copyValue.Sections[index] = section
 		copyValue.Sections[index].Citations = make([]Citation, len(section.Citations))
 		copy(copyValue.Sections[index].Citations, section.Citations)
+		copyValue.Sections[index].DocumentSources = make([]DocumentSource, len(section.DocumentSources))
+		copy(copyValue.Sections[index].DocumentSources, section.DocumentSources)
 		copyValue.Sections[index].Coverage.Gaps = make([]Gap, len(section.Coverage.Gaps))
 		copy(copyValue.Sections[index].Coverage.Gaps, section.Coverage.Gaps)
 	}
@@ -289,6 +345,15 @@ func CloneArtifact(artifact Artifact) Artifact {
 }
 
 type canonicalSection struct {
+	Key             string           `json:"key"`
+	Title           string           `json:"title"`
+	Content         string           `json:"content"`
+	Citations       []Citation       `json:"citations"`
+	DocumentSources []DocumentSource `json:"document_sources"`
+	Coverage        Coverage         `json:"coverage"`
+}
+
+type canonicalSectionV1 struct {
 	Key       string     `json:"key"`
 	Title     string     `json:"title"`
 	Content   string     `json:"content"`
@@ -328,21 +393,25 @@ func canonicalRevision(revision Revision) (Revision, error) {
 		if err != nil {
 			return Revision{}, err
 		}
+		documentSources, err := canonicalDocumentSources(section.DocumentSources)
+		if err != nil {
+			return Revision{}, err
+		}
 		coverage, err := canonicalCoverage([]Coverage{section.Coverage}, map[string]struct{}{section.Key: {}}, true)
 		if err != nil {
 			return Revision{}, err
 		}
-		if err := validateSectionEvidence(section.Content, citations, coverage[0]); err != nil {
+		if err := validateSectionEvidence(section.Content, citations, documentSources, coverage[0]); err != nil {
 			return Revision{}, err
 		}
-		sections[index] = canonicalSection{Key: section.Key, Title: section.Title, Content: section.Content, Citations: citations, Coverage: coverage[0]}
+		sections[index] = canonicalSection{Key: section.Key, Title: section.Title, Content: section.Content, Citations: citations, DocumentSources: documentSources, Coverage: coverage[0]}
 	}
 	sort.Slice(sections, func(i, j int) bool { return sections[i].Key < sections[j].Key })
 	copyValue := CloneRevision(revision)
 	copyValue.Outline = outline
 	copyValue.Sections = make([]Section, len(sections))
 	for index, section := range sections {
-		copyValue.Sections[index] = Section{Key: section.Key, Title: section.Title, Content: section.Content, Citations: cloneCitations(section.Citations), Coverage: section.Coverage}
+		copyValue.Sections[index] = Section{Key: section.Key, Title: section.Title, Content: section.Content, Citations: cloneCitations(section.Citations), DocumentSources: cloneDocumentSources(section.DocumentSources), Coverage: section.Coverage}
 	}
 	return copyValue, nil
 }
@@ -388,6 +457,34 @@ func canonicalCitations(citations []Citation) ([]Citation, error) {
 	sort.Slice(canonical, func(i, j int) bool {
 		left := string(canonical[i].SourceVersionID) + "\x00" + string(canonical[i].SourceSpanID) + "\x00" + canonical[i].VerifiedContentHash
 		right := string(canonical[j].SourceVersionID) + "\x00" + string(canonical[j].SourceSpanID) + "\x00" + canonical[j].VerifiedContentHash
+		return left < right
+	})
+	return canonical, nil
+}
+
+func canonicalDocumentSources(values []DocumentSource) ([]DocumentSource, error) {
+	if values == nil {
+		values = []DocumentSource{}
+	}
+	if len(values) > maxDocumentSources {
+		return nil, invalid(ErrorCodeArtifactCoverageInvalid, "section document sources exceed the bounded limit")
+	}
+	canonical := cloneDocumentSources(values)
+	seen := make(map[string]struct{}, len(canonical))
+	for _, source := range canonical {
+		if !validID(source.DocumentID) || !validID(source.ArticleRevisionID) || source.DocumentID == source.ArticleRevisionID ||
+			source.RevisionNo < 1 || !source.Verified || !canonicalSHA256(source.VerifiedContentHash) {
+			return nil, invalid(ErrorCodeArtifactCoverageInvalid, "document source must bind a verified article revision")
+		}
+		key := string(source.DocumentID) + "\x00" + string(source.ArticleRevisionID) + "\x00" + source.VerifiedContentHash
+		if _, duplicate := seen[key]; duplicate {
+			return nil, invalid(ErrorCodeArtifactCoverageInvalid, "document source identity is duplicated")
+		}
+		seen[key] = struct{}{}
+	}
+	sort.Slice(canonical, func(i, j int) bool {
+		left := string(canonical[i].DocumentID) + "\x00" + string(canonical[i].ArticleRevisionID) + "\x00" + canonical[i].VerifiedContentHash
+		right := string(canonical[j].DocumentID) + "\x00" + string(canonical[j].ArticleRevisionID) + "\x00" + canonical[j].VerifiedContentHash
 		return left < right
 	})
 	return canonical, nil
@@ -445,18 +542,19 @@ func canonicalCoverage(coverage []Coverage, expected map[string]struct{}, requir
 	return canonical, nil
 }
 
-func validateSectionEvidence(content string, citations []Citation, coverage Coverage) error {
+func validateSectionEvidence(content string, citations []Citation, documentSources []DocumentSource, coverage Coverage) error {
+	supportCount := len(citations) + len(documentSources)
 	switch coverage.Status {
 	case CoverageCovered:
-		if content == "" || len(citations) == 0 {
-			return invalid(ErrorCodeArtifactCoverageInvalid, "covered section requires body and verified citations")
+		if content == "" || supportCount == 0 {
+			return invalid(ErrorCodeArtifactCoverageInvalid, "covered section requires body and verified sources")
 		}
 	case CoveragePartial:
-		if content == "" || len(citations) == 0 {
-			return invalid(ErrorCodeArtifactCoverageInvalid, "partial section requires body and verified citations")
+		if content == "" || supportCount == 0 {
+			return invalid(ErrorCodeArtifactCoverageInvalid, "partial section requires body and verified sources")
 		}
 	case CoverageGap:
-		if content != "" || len(citations) != 0 {
+		if content != "" || supportCount != 0 {
 			return invalid(ErrorCodeArtifactCoverageInvalid, "missing knowledge cannot be replaced with generated content")
 		}
 	}
@@ -527,5 +625,11 @@ func cloneCoverage(coverage []Coverage) []Coverage {
 func cloneCitations(citations []Citation) []Citation {
 	result := make([]Citation, len(citations))
 	copy(result, citations)
+	return result
+}
+
+func cloneDocumentSources(values []DocumentSource) []DocumentSource {
+	result := make([]DocumentSource, len(values))
+	copy(result, values)
 	return result
 }

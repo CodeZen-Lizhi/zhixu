@@ -110,6 +110,39 @@ describe("decodeServerEventEnvelope", () => {
     expect(attachmentExport.invalidations).toEqual([{ resource: "export_job", id: answerId }]);
   });
 
+  it("将 Capture 与 Knowledge Profile resource_ref 解码为定向失效提示", () => {
+    expect(decodeServerEventEnvelope({
+      ...envelope("46"),
+      type: "capture.updated",
+      resource_ref: `capture:${answerId}`,
+      payload_summary: {},
+    }).invalidations).toEqual([{ resource: "capture", id: answerId }]);
+    expect(decodeServerEventEnvelope({
+      ...envelope("47"),
+      type: "profile.ready",
+      resource_ref: `knowledge_profile:${workflowRunId}`,
+      payload_summary: {},
+    }).invalidations).toEqual([{ resource: "knowledge_profile", id: workflowRunId }]);
+  });
+
+  it("将 Authoring resource_ref 解码为定向失效提示", () => {
+    expect(decodeServerEventEnvelope({
+      ...envelope("48"),
+      type: "authoring.draft.updated",
+      resource_ref: `working_draft:${workflowRunId}`,
+      payload_summary: {},
+    }).invalidations).toEqual([{ resource: "working_draft", id: workflowRunId }]);
+  });
+
+  it("严格解码 Git Remote 与 Git Sync Run 资源", () => {
+    expect(decodeServerEventEnvelope({
+      ...envelope("49"), type: "git.sync.run.updated", resource_ref: `git_sync_run:${workflowRunId}`, payload_summary: {},
+    }).invalidations).toEqual([{ resource: "git_sync_run", id: workflowRunId }]);
+    expect(decodeServerEventEnvelope({
+      ...envelope("50"), type: "git.remote.updated", resource_ref: `git_remote:${answerId}`, payload_summary: {},
+    }).invalidations).toEqual([{ resource: "git_remote", id: answerId }]);
+  });
+
   it.each([
     ["未来 schema", { ...envelope(), schema_version: 2 }],
     ["额外 Envelope 字段", { ...envelope(), answer_text: "secret" }],

@@ -243,11 +243,14 @@ const readError = (payload: unknown, response: Response): AuthApiError => {
 
 const unsafeMethod = (method: string): boolean => !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
 
-/** 为所有业务 API 统一附加同源 Cookie、CSRF 和 JSON 边界。 */
+/** 为所有业务 API 统一附加同源 Cookie、CSRF 和请求媒体类型边界。 */
 export const authFetch = async (path: string, init: RequestInit = {}): Promise<Response> => {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
-  if (init.body !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const multipartBody = typeof FormData !== "undefined" && init.body instanceof FormData;
+  if (init.body !== undefined && !multipartBody && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   const method = (init.method ?? "GET").toUpperCase();
   if (unsafeMethod(method) && !headers.has("Authorization") && !path.endsWith("/auth/sessions")) {
     const csrf = getCsrfToken();

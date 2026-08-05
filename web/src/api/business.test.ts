@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { controlWorkflow, decideProposal, getProposal, getProposalCurrentContent, getSourceVersion, getWorkflow, listProposals, listWorkflows, preflightProposal } from "./business";
+import { controlWorkflow, decideProposal, getProposal, getProposalCurrentContent, getSourceVersion, getWorkflow, listProposals, listWorkflows, preflightProposal, submitWorkflowHumanDecision } from "./business";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -23,6 +23,102 @@ const proposalId = "10000000-0000-4000-8000-000000000001";
 const revisionId = "10000000-0000-4000-8000-000000000003";
 const approvalId = "10000000-0000-4000-8000-000000000004";
 const workflowRunId = "10000000-0000-4000-8000-000000000005";
+const restoreDocumentId = "10000000-0000-4000-8000-000000000006";
+const restoreTargetCommit = "c".repeat(40);
+const restoreExpectedHead = "d".repeat(40);
+const restoreCurrentContentHash = "a".repeat(64);
+const restoreTargetContentHash = "ae7ce8d5ba997e154949caeda929cef4f828e90ccc294255fe151bc87fe7243d";
+const reviewTaskId = "10000000-0000-4000-8000-000000000009";
+const reviewNodeRunId = "10000000-0000-4000-8000-000000000010";
+const reviewSnapshotId = "10000000-0000-4000-8000-000000000011";
+const reviewEvidenceResponse = {
+  kind: "SOURCE_VERSION",
+  source_version_id: "10000000-0000-4000-8000-000000000012",
+  source_span_id: "10000000-0000-4000-8000-000000000013",
+  content_hash: "c".repeat(64),
+  excerpt_hash: "d".repeat(64),
+};
+const reviewDocumentResponse = {
+  kind: "DOCUMENT_REVISION",
+  document_id: "10000000-0000-4000-8000-000000000016",
+  article_revision_id: "10000000-0000-4000-8000-000000000017",
+  revision_no: 3,
+  content_hash: "e".repeat(64),
+};
+const mergeDiffPreview = "--- /dev/null\n+++ b/organized-result.md\n@@ -0,0 +1,1 @@\n+# merged\n";
+const mergeReviewResponse = (runId: string, overrides: Record<string, unknown> = {}) => ({
+  kind: "MERGE_COMPARISON",
+  schema_version: 1,
+  workspace_id: workspaceId,
+  run_id: runId,
+  task_id: reviewTaskId,
+  node_run_id: reviewNodeRunId,
+  snapshot_id: reviewSnapshotId,
+  snapshot_hash: "a".repeat(64),
+  artifact_id: "10000000-0000-4000-8000-000000000014",
+  revision_hash: "e".repeat(64),
+  default_target_path: "organized/merged.md",
+  diff_hash: "f".repeat(64),
+  diff_preview: mergeDiffPreview,
+  diff_truncated: false,
+  conflict_count: 0,
+  evidence_count: 1,
+  document_count: 0,
+  categories: [
+    { category: "DUPLICATE", count: 1 },
+    { category: "COMPLEMENTARY", count: 0 },
+    { category: "CONFLICT", count: 0 },
+    { category: "UNIQUE", count: 0 },
+  ],
+  comparison: [{ category: "DUPLICATE", ...reviewEvidenceResponse }],
+  ...overrides,
+});
+const topicReviewResponse = (runId: string, overrides: Record<string, unknown> = {}) => ({
+  kind: "TOPIC_OUTLINE",
+  schema_version: 1,
+  workspace_id: workspaceId,
+  run_id: runId,
+  task_id: reviewTaskId,
+  node_run_id: reviewNodeRunId,
+  snapshot_id: reviewSnapshotId,
+  snapshot_hash: "a".repeat(64),
+  template_revision_id: "10000000-0000-4000-8000-000000000015",
+  template_hash: "b".repeat(64),
+  outline: [
+    { key: "context", title: "背景", supports: [reviewEvidenceResponse], gap_code: null },
+    { key: "limits", title: "限制", supports: [], gap_code: "EVIDENCE_UNAVAILABLE" },
+  ],
+  ...overrides,
+});
+const waitingWorkflowResponse = (
+  runId: string,
+  review: Record<string, unknown> | null | undefined,
+  decisionKind: "approval" | "approval_with_target_path" = "approval_with_target_path",
+) => ({
+  id: runId,
+  workspace_id: workspaceId,
+  definition_id: "10000000-0000-4000-8000-000000000003",
+  status: "waiting_for_human",
+  input: {},
+  version: 2,
+  created_at: "2026-07-22T00:00:00Z",
+  updated_at: "2026-07-22T00:01:00Z",
+  pause_requested: false,
+  cancel_requested: false,
+  human_task: {
+    id: reviewTaskId,
+    run_id: runId,
+    node_run_id: reviewNodeRunId,
+    status: "pending",
+    target_version: 3,
+    expected_input_schema: decisionKind === "approval"
+      ? { type: "object", required: ["approved"], properties: { approved: { type: "boolean" } }, additionalProperties: false }
+      : { type: "object", required: ["approved"], properties: { approved: { type: "boolean" }, target_path: { type: "string" } }, additionalProperties: false },
+    expires_at: null,
+    created_at: "2026-07-22T00:01:00Z",
+    review,
+  },
+});
 const fileProposalResponse = (
   approval: Record<string, unknown>,
   proposalOverrides: Record<string, unknown> = {},
@@ -36,6 +132,7 @@ const fileProposalResponse = (
   revision: {
     id: revisionId,
     revision_no: 1,
+    target_mode: "REPLACE",
     base_hash: "a".repeat(64),
     content: "next",
     evidence_summary: "evidence",
@@ -55,6 +152,47 @@ const fileProposalResponse = (
   },
   created_at: "2026-07-22T00:00:00Z",
   updated_at: "2026-07-22T00:02:00Z",
+  ...proposalOverrides,
+});
+const restoreProposalResponse = (
+  restoreOverrides: Record<string, unknown> = {},
+  revisionOverrides: Record<string, unknown> = {},
+  proposalOverrides: Record<string, unknown> = {},
+) => ({
+  id: proposalId,
+  workspace_id: workspaceId,
+  proposal_type: "restore_document",
+  target_path: "docs/a.md",
+  status: "ready_for_review",
+  risk_level: "HIGH",
+  revision: {
+    id: revisionId,
+    revision_no: 1,
+    target_mode: "REPLACE",
+    base_hash: restoreCurrentContentHash,
+    content: "historic\n",
+    evidence_summary: "恢复到经过审阅的历史版本",
+    risk: "恢复会覆盖当前工作区正文",
+    rollback_plan: "通过新的恢复 Proposal 回到当前 Commit",
+    change_hash: "b".repeat(64),
+    created_at: "2026-08-02T00:00:00Z",
+    restore: {
+      workspace_id: workspaceId,
+      document_id: restoreDocumentId,
+      target_commit: restoreTargetCommit,
+      expected_head: restoreExpectedHead,
+      expected_document_version: 7,
+      preview_hash: "e".repeat(64),
+      current_content_hash: restoreCurrentContentHash,
+      target_content_hash: restoreTargetContentHash,
+      schema_version: "document-restore/v1",
+      ...restoreOverrides,
+    },
+    ...revisionOverrides,
+  },
+  approval: null,
+  created_at: "2026-08-02T00:00:00Z",
+  updated_at: "2026-08-02T00:01:00Z",
   ...proposalOverrides,
 });
 const knowledgeProposalResponse = (
@@ -311,6 +449,59 @@ describe("business API boundary", () => {
     expect(fetcher.mock.calls[0]?.[0]).toContain("proposal_type=publish_artifact");
   });
 
+  it("decodes and filters restore_document Proposal summaries as HIGH-risk file writebacks", async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      items: [proposalSummaryResponse({ proposal_type: "restore_document", target: "docs/a.md", risk_level: "HIGH" })],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetcher);
+
+    await expect(listProposals(workspaceId, { type: "restore_document" })).resolves.toMatchObject({
+      items: [{ type: "restore_document", target: "docs/a.md", riskLevel: "HIGH" }],
+    });
+    expect(fetcher.mock.calls[0]?.[0]).toContain("proposal_type=restore_document");
+  });
+
+  it.each([
+    ["非 HIGH 风险", { risk_level: "MEDIUM" }],
+    ["非规范目标路径", { target: "../docs/a.md" }],
+  ])("rejects a restore_document Proposal summary with %s", async (_label, overrides) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      items: [proposalSummaryResponse({ proposal_type: "restore_document", target: "docs/a.md", risk_level: "HIGH", ...overrides })],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(listProposals(workspaceId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("rejects an approved restore_document summary without its preview Git baseline", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      items: [proposalSummaryResponse({
+        proposal_type: "restore_document",
+        target: "docs/a.md",
+        status: "approved",
+        risk_level: "HIGH",
+        approval: {
+          id: approvalId,
+          proposal_id: proposalId,
+          revision_id: revisionId,
+          change_hash: "b".repeat(64),
+          decision: "approved",
+          decided_at: "2026-08-02T00:02:00Z",
+        },
+      })],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(listProposals(workspaceId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
   it("rejects a publish_artifact Proposal summary without HIGH risk", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       items: [proposalSummaryResponse({ proposal_type: "publish_artifact", risk_level: "MEDIUM" })],
@@ -347,6 +538,60 @@ describe("business API boundary", () => {
     expect(headers.get("Content-Type")).toBe("application/json");
     expect(headers.get("Idempotency-Key")).toContain("m9-approval-");
     expect(new Headers((fetcher.mock.calls[1]?.[1] as RequestInit).headers).get("Idempotency-Key")).toBe(headers.get("Idempotency-Key"));
+  });
+
+  it("requires the Safe Writeback binding when approving restore_document", async () => {
+    const response = {
+      id: approvalId,
+      proposal_id: proposalId,
+      revision_id: revisionId,
+      change_hash: "b".repeat(64),
+      decision: "approved",
+      approved_git_head: restoreExpectedHead,
+      workflow_run_id: workflowRunId,
+      workflow_status_url: `/api/v1/workflows/${workflowRunId}`,
+      dispatch_status: "queued",
+      decided_at: "2026-08-02T00:02:00Z",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(response), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(decideProposal(proposalId, {
+      revisionId,
+      changeHash: response.change_hash,
+      decision: "approved",
+      proposalType: "restore_document",
+    })).resolves.toMatchObject({
+      proposalId,
+      revisionId,
+      approvedGitHead: restoreExpectedHead,
+      workflowRunId,
+      dispatchStatus: "queued",
+    });
+  });
+
+  it("rejects a restore_document approval response without a Safe Writeback Workflow", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: approvalId,
+      proposal_id: proposalId,
+      revision_id: revisionId,
+      change_hash: "b".repeat(64),
+      decision: "approved",
+      approved_git_head: restoreExpectedHead,
+      decided_at: "2026-08-02T00:02:00Z",
+    }), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(decideProposal(proposalId, {
+      revisionId,
+      changeHash: "b".repeat(64),
+      decision: "approved",
+      proposalType: "restore_document",
+    })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("accepts an approved Knowledge decision without Git or Workflow writeback fields", async () => {
@@ -475,18 +720,102 @@ describe("business API boundary", () => {
 
   it("strictly decodes current content and apply preflight", async () => {
     const responses = [
-      { proposal_id: "10000000-0000-4000-8000-000000000001", workspace_id: "10000000-0000-4000-8000-000000000002", target_path: "docs/a.md", content: "current", current_hash: "a".repeat(64), base_hash: "a".repeat(64), base_hash_match: true },
-      { proposal_id: "10000000-0000-4000-8000-000000000001", revision_id: "10000000-0000-4000-8000-000000000003", change_hash: "a".repeat(64), base_hash: "a".repeat(64), preflight_passed: true, mode: "preflight_only", write_performed: false },
+      { proposal_id: "10000000-0000-4000-8000-000000000001", workspace_id: "10000000-0000-4000-8000-000000000002", target_path: "docs/a.md", target_mode: "REPLACE", content: "current", current_hash: "a".repeat(64), base_hash: "a".repeat(64), base_hash_match: true },
+      { proposal_id: "10000000-0000-4000-8000-000000000001", revision_id: "10000000-0000-4000-8000-000000000003", change_hash: "a".repeat(64), target_mode: "REPLACE", base_hash: "a".repeat(64), preflight_passed: true, mode: "preflight_only", write_performed: false },
     ];
     const fetcher = vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(responses.shift()), { status: 200, headers: { "Content-Type": "application/json" } })));
     vi.stubGlobal("fetch", fetcher);
     await expect(getProposalCurrentContent(
       "10000000-0000-4000-8000-000000000002",
       "10000000-0000-4000-8000-000000000001",
-      { targetPath: "docs/a.md", baseHash: "a".repeat(64) },
+      { targetPath: "docs/a.md", targetMode: "REPLACE", baseHash: "a".repeat(64) },
     )).resolves.toMatchObject({ baseHashMatch: true, content: "current" });
-    await expect(preflightProposal("10000000-0000-4000-8000-000000000001", { revisionId: "10000000-0000-4000-8000-000000000003", changeHash: "a".repeat(64) })).resolves.toMatchObject({ preflightPassed: true, writePerformed: false });
+    await expect(preflightProposal("10000000-0000-4000-8000-000000000001", { revisionId: "10000000-0000-4000-8000-000000000003", changeHash: "a".repeat(64), targetMode: "REPLACE", baseHash: "a".repeat(64) })).resolves.toMatchObject({ preflightPassed: true, writePerformed: false });
     expect((fetcher.mock.calls[1]?.[1] as RequestInit).body).toContain("approved_change_hash");
+  });
+
+  it("binds CREATE_ONLY proposal review to an empty absence-token baseline", async () => {
+    const absenceToken = `workspace-target-absent/v1:${"d".repeat(64)}`;
+    const replaceProposal = fileProposalResponse({});
+    const responses = [
+      {
+        ...replaceProposal,
+        status: "ready_for_review",
+        approval: null,
+        target_path: "java-ai-guide.md",
+        revision: {
+          ...replaceProposal.revision,
+          target_mode: "CREATE_ONLY",
+          base_hash: absenceToken,
+        },
+      },
+      {
+        proposal_id: proposalId,
+        workspace_id: workspaceId,
+        target_path: "java-ai-guide.md",
+        target_mode: "CREATE_ONLY",
+        content: "",
+        current_hash: absenceToken,
+        base_hash: absenceToken,
+        base_hash_match: true,
+      },
+      {
+        proposal_id: proposalId,
+        revision_id: revisionId,
+        change_hash: "b".repeat(64),
+        target_mode: "CREATE_ONLY",
+        base_hash: absenceToken,
+        preflight_passed: true,
+        mode: "preflight_only",
+        write_performed: false,
+      },
+    ];
+    const fetcher = vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(responses.shift()), { status: 200, headers: { "Content-Type": "application/json" } })));
+    vi.stubGlobal("fetch", fetcher);
+
+    await expect(getProposal(workspaceId, proposalId)).resolves.toMatchObject({
+      targetPath: "java-ai-guide.md",
+      revision: { targetMode: "CREATE_ONLY", baseHash: absenceToken },
+    });
+    await expect(getProposalCurrentContent(workspaceId, proposalId, {
+      targetPath: "java-ai-guide.md",
+      targetMode: "CREATE_ONLY",
+      baseHash: absenceToken,
+    })).resolves.toMatchObject({ targetMode: "CREATE_ONLY", content: "", baseHashMatch: true });
+    await expect(preflightProposal(proposalId, {
+      revisionId,
+      changeHash: "b".repeat(64),
+      targetMode: "CREATE_ONLY",
+      baseHash: absenceToken,
+    })).resolves.toMatchObject({ targetMode: "CREATE_ONLY", baseHash: absenceToken });
+  });
+
+  it("rejects CREATE_ONLY responses that claim a file hash or non-empty baseline", async () => {
+    const replaceProposal = fileProposalResponse({});
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      ...replaceProposal,
+      status: "ready_for_review",
+      approval: null,
+      revision: { ...replaceProposal.revision, target_mode: "CREATE_ONLY" },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    await expect(getProposal(workspaceId, proposalId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+
+    const absenceToken = `workspace-target-absent/v1:${"d".repeat(64)}`;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      proposal_id: proposalId,
+      workspace_id: workspaceId,
+      target_path: "java-ai-guide.md",
+      target_mode: "CREATE_ONLY",
+      content: "unexpected existing content",
+      current_hash: absenceToken,
+      base_hash: absenceToken,
+      base_hash_match: true,
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    await expect(getProposalCurrentContent(workspaceId, proposalId, {
+      targetPath: "java-ai-guide.md",
+      targetMode: "CREATE_ONLY",
+      baseHash: absenceToken,
+    })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it.each([
@@ -498,6 +827,7 @@ describe("business API boundary", () => {
       proposal_id: "10000000-0000-4000-8000-000000000001",
       workspace_id: "10000000-0000-4000-8000-000000000002",
       target_path: "docs/a.md",
+      target_mode: "REPLACE",
       content: "current",
       current_hash: "a".repeat(64),
       base_hash: "a".repeat(64),
@@ -508,7 +838,7 @@ describe("business API boundary", () => {
     await expect(getProposalCurrentContent(
       "10000000-0000-4000-8000-000000000002",
       "10000000-0000-4000-8000-000000000001",
-      { targetPath: "docs/a.md", baseHash: "a".repeat(64) },
+      { targetPath: "docs/a.md", targetMode: "REPLACE", baseHash: "a".repeat(64) },
     )).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
@@ -517,6 +847,7 @@ describe("business API boundary", () => {
       proposal_id: proposalId,
       workspace_id: workspaceId,
       target_path: "docs/a.md",
+      target_mode: "REPLACE",
       content: "\u{1F600}".repeat(262145),
       current_hash: "a".repeat(64),
       base_hash: "a".repeat(64),
@@ -525,6 +856,7 @@ describe("business API boundary", () => {
 
     await expect(getProposalCurrentContent(workspaceId, proposalId, {
       targetPath: "docs/a.md",
+      targetMode: "REPLACE",
       baseHash: "a".repeat(64),
     })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
@@ -534,6 +866,7 @@ describe("business API boundary", () => {
       proposal_id: "10000000-0000-4000-8000-000000000009",
       revision_id: "10000000-0000-4000-8000-000000000003",
       change_hash: "a".repeat(64),
+      target_mode: "REPLACE",
       base_hash: "a".repeat(64),
       preflight_passed: true,
       mode: "preflight_only",
@@ -543,10 +876,13 @@ describe("business API boundary", () => {
     await expect(preflightProposal("10000000-0000-4000-8000-000000000001", {
       revisionId: "10000000-0000-4000-8000-000000000003",
       changeHash: "a".repeat(64),
+      targetMode: "REPLACE",
+      baseHash: "a".repeat(64),
     })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("strictly binds Workflow control responses to the requested Run", async () => {
+    const workspaceId = "10000000-0000-4000-8000-000000000002";
     const workflowId = "10000000-0000-4000-8000-000000000008";
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       workflow_run_id: workflowId,
@@ -558,11 +894,14 @@ describe("business API boundary", () => {
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetcher);
 
-    await expect(controlWorkflow(workflowId, "pause", 2)).resolves.toMatchObject({ workflowRunId: workflowId, status: "paused", version: 3 });
-    expect(new Headers((fetcher.mock.calls[0]?.[1] as RequestInit).headers).get("Idempotency-Key")).toBe(`m9-workflow-${workflowId}-pause-2`);
+    await expect(controlWorkflow(workspaceId, workflowId, "pause", 2)).resolves.toMatchObject({ workflowRunId: workflowId, status: "paused", version: 3 });
+    const headers = new Headers((fetcher.mock.calls[0]?.[1] as RequestInit).headers);
+    expect(headers.get("Idempotency-Key")).toBe(`m9-workflow-${workflowId}-pause-2`);
+    expect(headers.get("X-Workspace-ID")).toBe(workspaceId);
   });
 
   it("rejects a Workflow control response that does not advance the expected version", async () => {
+    const workspaceId = "10000000-0000-4000-8000-000000000002";
     const workflowId = "10000000-0000-4000-8000-000000000008";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       workflow_run_id: workflowId,
@@ -573,7 +912,7 @@ describe("business API boundary", () => {
       cancel_requested: false,
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
 
-    await expect(controlWorkflow(workflowId, "pause", 2)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    await expect(controlWorkflow(workspaceId, workflowId, "pause", 2)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("strictly decodes workflow status and preserves waiting-for-human projection", async () => {
@@ -666,13 +1005,88 @@ describe("business API boundary", () => {
       updated_at: "2026-07-22T00:01:00Z",
     };
     const responses = [
-      { ...common, proposal_type: "file_patch", target_path: "docs/a.md", revision: { id: "10000000-0000-4000-8000-000000000003", revision_no: 1, base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z" }, approval: null },
+      { ...common, proposal_type: "file_patch", target_path: "docs/a.md", revision: { id: "10000000-0000-4000-8000-000000000003", revision_no: 1, target_mode: "REPLACE", base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z" }, approval: null },
       { ...common, proposal_type: "knowledge_change", risk_level: "HIGH", revision: { id: "10000000-0000-4000-8000-000000000004", revision_no: 2, schema_version: "knowledge-relation-change/v1", target_refs: [{ type: "RELATION_CANDIDATE", id: "10000000-0000-4000-8000-000000000005", fingerprint: "e".repeat(64) }], base_versions: [{ node_type: "CLAIM", node_id: "10000000-0000-4000-8000-000000000005", version: 3 }, { node_type: "TOPIC", node_id: "10000000-0000-4000-8000-000000000006", version: 2 }], change_set: { operation: "CREATE_RELATION", source: { type: "CLAIM", id: "10000000-0000-4000-8000-000000000005", version: 3 }, target: { type: "TOPIC", id: "10000000-0000-4000-8000-000000000006", version: 2 }, relation_type: "BELONGS_TO" }, evidence_refs: [{ candidate_evidence_id: "10000000-0000-4000-8000-000000000007", semantic_hash: "c".repeat(64) }], risk: "medium", rollback_plan: "remove relation", change_hash: "d".repeat(64), created_at: "2026-07-22T00:00:00Z" }, approval: null },
     ];
     vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(responses.shift()), { status: 200, headers: { "Content-Type": "application/json" } }))));
 
     await expect(getProposal(common.workspace_id, common.id)).resolves.toMatchObject({ type: "file_patch", riskLevel: "LOW", targetPath: "docs/a.md", revision: { risk: "low", baseHash: "a".repeat(64), changeHash: "b".repeat(64) } });
     await expect(getProposal(common.workspace_id, common.id)).resolves.toMatchObject({ type: "knowledge_change", riskLevel: "HIGH", revision: { risk: "medium", changeSet: { relationType: "BELONGS_TO" }, evidenceRefs: [{ semanticHash: "c".repeat(64) }] } });
+  });
+
+  it("decodes a restore_document detail with its frozen Document and preview bindings", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(restoreProposalResponse()), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getProposal(workspaceId, proposalId)).resolves.toMatchObject({
+      id: proposalId,
+      workspaceId,
+      type: "restore_document",
+      targetPath: "docs/a.md",
+      status: "ready_for_review",
+      riskLevel: "HIGH",
+      revision: {
+        id: revisionId,
+        targetMode: "REPLACE",
+        baseHash: restoreCurrentContentHash,
+        content: "historic\n",
+        restore: {
+          workspaceId,
+          documentId: restoreDocumentId,
+          targetCommit: restoreTargetCommit,
+          expectedHead: restoreExpectedHead,
+          expectedDocumentVersion: 7,
+          previewHash: "e".repeat(64),
+          currentContentHash: restoreCurrentContentHash,
+          targetContentHash: restoreTargetContentHash,
+          schemaVersion: "document-restore/v1",
+        },
+      },
+    });
+  });
+
+  it.each([
+    ["非 HIGH 风险", restoreProposalResponse({}, {}, { risk_level: "MEDIUM" })],
+    ["非 REPLACE 模式", restoreProposalResponse({}, { target_mode: "CREATE_ONLY" })],
+    ["跨 Workspace 绑定", restoreProposalResponse({ workspace_id: "10000000-0000-4000-8000-000000000009" })],
+    ["跨 Revision 当前 Hash", restoreProposalResponse({ current_content_hash: "f".repeat(64) })],
+    ["相同目标 Commit 与预览 HEAD", restoreProposalResponse({ expected_head: restoreTargetCommit })],
+    ["不同长度目标 Commit 与预览 HEAD", restoreProposalResponse({ expected_head: "d".repeat(64) })],
+    ["目标正文 Hash 不一致", restoreProposalResponse({ target_content_hash: "f".repeat(64) })],
+    ["非法 Schema", restoreProposalResponse({ schema_version: "document-restore/v2" })],
+    ["未知恢复字段", restoreProposalResponse({ future: true })],
+    ["非规范目标路径", restoreProposalResponse({}, {}, { target_path: "docs/../a.md" })],
+  ])("rejects a restore_document detail with %s", async (_label, response) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getProposal(workspaceId, proposalId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("rejects an approved restore_document detail whose Approval HEAD differs from the frozen preview HEAD", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(restoreProposalResponse({}, {}, {
+      status: "approved",
+      approval: {
+        id: approvalId,
+        proposal_id: proposalId,
+        revision_id: revisionId,
+        change_hash: "b".repeat(64),
+        decision: "approved",
+        approved_git_head: "f".repeat(40),
+        workflow_run_id: workflowRunId,
+        workflow_status_url: `/api/v1/workflows/${workflowRunId}`,
+        decided_at: "2026-08-02T00:02:00Z",
+      },
+    })), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getProposal(workspaceId, proposalId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("decodes a frozen publish_artifact detail without a formal-knowledge success projection", async () => {
@@ -900,7 +1314,7 @@ describe("business API boundary", () => {
       target_path: "docs/a.md",
       status: "ready_for_review",
       risk_level: "LOW",
-      revision: { id: "10000000-0000-4000-8000-000000000003", revision_no: 1, base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z", future: true },
+      revision: { id: "10000000-0000-4000-8000-000000000003", revision_no: 1, target_mode: "REPLACE", base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z", future: true },
       created_at: "2026-07-22T00:00:00Z",
       updated_at: "2026-07-22T00:01:00Z",
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
@@ -943,6 +1357,7 @@ describe("business API boundary", () => {
       revision: {
         id: revisionId,
         revision_no: 1,
+        target_mode: "REPLACE",
         base_hash: "a".repeat(64),
         content: "next",
         evidence_summary: "evidence",
@@ -980,7 +1395,7 @@ describe("business API boundary", () => {
       target_path: "docs/a.md",
       status: "approved",
       risk_level: "LOW",
-      revision: { id: revisionId, revision_no: 1, base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z" },
+      revision: { id: revisionId, revision_no: 1, target_mode: "REPLACE", base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z" },
       approval: { id: "10000000-0000-4000-8000-000000000004", proposal_id: proposalId, revision_id: revisionId, change_hash: "b".repeat(64), decision: "approved", approved_git_head: "c".repeat(40), workflow_run_id: workflowRunId, workflow_status_url: `/api/v1/workflows/${workflowRunId}`, decided_at: "2026-07-22T00:02:00Z" },
       created_at: "2026-07-22T00:00:00Z",
       updated_at: "2026-07-22T00:02:00Z",
@@ -1068,15 +1483,16 @@ describe("business API boundary", () => {
     const proposalId = "10000000-0000-4000-8000-000000000001";
     const workflowId = "10000000-0000-4000-8000-000000000008";
     const responses = [
-      { id: proposalId, workspace_id: workspaceA, target_path: "docs/a.md", status: "ready_for_review", risk_level: "LOW", revision: { id: "10000000-0000-4000-8000-000000000003", revision_no: 1, base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z" }, created_at: "2026-07-22T00:00:00Z", updated_at: "2026-07-22T00:01:00Z" },
-      { proposal_id: proposalId, workspace_id: workspaceA, target_path: "docs/a.md", content: "current", current_hash: "a".repeat(64), base_hash: "a".repeat(64), base_hash_match: true },
-      { id: workflowId, workspace_id: workspaceA, definition_id: "10000000-0000-4000-8000-000000000003", status: "running", input: {}, version: 1, created_at: "2026-07-22T00:00:00Z", updated_at: "2026-07-22T00:01:00Z", pause_requested: false, cancel_requested: false },
+      { id: proposalId, workspace_id: workspaceA, target_path: "docs/a.md", status: "ready_for_review", risk_level: "LOW", revision: { id: "10000000-0000-4000-8000-000000000003", revision_no: 1, target_mode: "REPLACE", base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z" }, created_at: "2026-07-22T00:00:00Z", updated_at: "2026-07-22T00:01:00Z" },
+      { proposal_id: proposalId, workspace_id: workspaceA, target_path: "docs/a.md", target_mode: "REPLACE", content: "current", current_hash: "a".repeat(64), base_hash: "a".repeat(64), base_hash_match: true },
+      { id: workflowId, workspace_id: workspaceA, definition_id: "10000000-0000-4000-8000-000000000003", status: "running", input: {}, version: 1, created_at: "2026-07-22T00:00:00Z", updated_at: "2026-07-22T00:01:00Z", pause_requested: false, cancel_requested: false, human_task: null },
     ];
     vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(responses.shift()), { status: 200, headers: { "Content-Type": "application/json" } }))));
 
     await expect(getProposal(workspaceB, proposalId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
     await expect(getProposalCurrentContent(workspaceB, proposalId, {
       targetPath: "docs/a.md",
+      targetMode: "REPLACE",
       baseHash: "a".repeat(64),
     })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
     await expect(getWorkflow(workspaceB, workflowId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
@@ -1095,7 +1511,186 @@ describe("business API boundary", () => {
       updated_at: "2026-07-22T00:01:00Z",
       pause_requested: false,
       cancel_requested: false,
+      human_task: null,
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await expect(getWorkflow(workspaceId, workflowId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("decodes and submits a bounded Workflow Human Task", async () => {
+    const workspaceId = "10000000-0000-4000-8000-000000000002";
+    const workflowId = "10000000-0000-4000-8000-000000000008";
+    const responses = [
+      waitingWorkflowResponse(workflowId, mergeReviewResponse(workflowId)),
+      { id: reviewTaskId, run_id: workflowId, node_run_id: reviewNodeRunId, status: "submitted", target_version: 3, decision: { approved: true, target_path: "notes/merged.md" }, submitted_at: "2026-07-22T00:02:00Z" },
+    ];
+    const fetcher = vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(responses.shift()), { status: 200, headers: { "Content-Type": "application/json" } })));
+    vi.stubGlobal("fetch", fetcher);
+
+    const workflow = await getWorkflow(workspaceId, workflowId);
+    expect(workflow.humanTask?.decisionKind).toBe("approval_with_target_path");
+    expect(workflow.humanTask?.review).toMatchObject({
+      kind: "MERGE_COMPARISON",
+      workspaceId,
+      runId: workflowId,
+      taskId: reviewTaskId,
+      nodeRunId: reviewNodeRunId,
+      evidenceCount: 1,
+      documentCount: 0,
+      conflictCount: 0,
+      diffPreview: mergeDiffPreview,
+      diffTruncated: false,
+      defaultTargetPath: "organized/merged.md",
+    });
+    const getRequest = fetcher.mock.calls.at(0);
+    if (!getRequest) throw new Error("expected workflow detail request");
+    expect(new Headers((getRequest[1] as RequestInit).headers).get("X-Workspace-ID")).toBe(workspaceId);
+    if (!workflow.humanTask) throw new Error("expected a pending human task");
+    await expect(submitWorkflowHumanDecision(workspaceId, workflowId, workflow.humanTask, { approved: true, targetPath: "notes/merged.md" })).resolves.toBeUndefined();
+    const decisionRequest = fetcher.mock.calls.at(1);
+    if (!decisionRequest) throw new Error("expected workflow decision request");
+    expect(new Headers((decisionRequest[1] as RequestInit).headers).get("X-Workspace-ID")).toBe(workspaceId);
+  });
+
+  it("strictly decodes a bound Topic Outline review with Evidence and GAP", async () => {
+    const workflowId = "10000000-0000-4000-8000-000000000008";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(
+      waitingWorkflowResponse(workflowId, topicReviewResponse(workflowId), "approval"),
+    ), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await expect(getWorkflow(workspaceId, workflowId)).resolves.toMatchObject({
+      humanTask: {
+        review: {
+          kind: "TOPIC_OUTLINE",
+          outline: [
+            { key: "context", gapCode: null, supports: [{ sourceVersionId: reviewEvidenceResponse.source_version_id }] },
+            { key: "limits", gapCode: "EVIDENCE_UNAVAILABLE", supports: [] },
+          ],
+        },
+      },
+    });
+  });
+
+  it("strictly decodes a historical document revision as a separate review source", async () => {
+    const workflowId = "10000000-0000-4000-8000-000000000008";
+    const review = mergeReviewResponse(workflowId, {
+      evidence_count: 0,
+      document_count: 1,
+      categories: [
+        { category: "DUPLICATE", count: 0 },
+        { category: "COMPLEMENTARY", count: 0 },
+        { category: "CONFLICT", count: 0 },
+        { category: "UNIQUE", count: 1 },
+      ],
+      comparison: [{ category: "UNIQUE", ...reviewDocumentResponse }],
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(
+      waitingWorkflowResponse(workflowId, review),
+    ), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await expect(getWorkflow(workspaceId, workflowId)).resolves.toMatchObject({
+      humanTask: {
+        review: {
+          evidenceCount: 0,
+          documentCount: 1,
+          comparison: [{
+            kind: "DOCUMENT_REVISION",
+            documentId: reviewDocumentResponse.document_id,
+            articleRevisionId: reviewDocumentResponse.article_revision_id,
+            revisionNo: 3,
+          }],
+        },
+      },
+    });
+  });
+
+  it("keeps a pending Human Task visible when its required review value is null", async () => {
+    const workflowId = "10000000-0000-4000-8000-000000000008";
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(
+      waitingWorkflowResponse(workflowId, null, "approval"),
+    ), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetcher);
+
+    const workflow = await getWorkflow(workspaceId, workflowId);
+    expect(workflow.humanTask).toBeDefined();
+    expect(workflow.humanTask?.review).toBeNull();
+    const task = workflow.humanTask;
+    if (!task) throw new Error("expected a pending human task");
+    expect(() => submitWorkflowHumanDecision(workspaceId, workflowId, task, { approved: true }))
+      .toThrow(expect.objectContaining({ code: "INVALID_RESPONSE" }));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a pending Human Task that omits the required review field", async () => {
+    const workflowId = "10000000-0000-4000-8000-000000000008";
+    const response = waitingWorkflowResponse(workflowId, undefined, "approval");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getWorkflow(workspaceId, workflowId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it.each([
+    ["workspace", "workspace_id"],
+    ["run", "run_id"],
+    ["task", "task_id"],
+    ["node", "node_run_id"],
+  ] as const)("rejects %s binding drift in a Workflow review", async (_label, field) => {
+    const workflowId = "10000000-0000-4000-8000-000000000008";
+    const review = mergeReviewResponse(workflowId, { [field]: "10000000-0000-4000-8000-000000000099" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(waitingWorkflowResponse(workflowId, review)), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getWorkflow(workspaceId, workflowId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it.each([
+    ["review root", { unknown_field: true }],
+    ["comparison evidence", { comparison: [{ category: "DUPLICATE", ...reviewEvidenceResponse, unknown_field: true }] }],
+  ])("rejects an unknown field in the Workflow %s", async (_label, overrides) => {
+    const workflowId = "10000000-0000-4000-8000-000000000008";
+    const review = mergeReviewResponse(workflowId, overrides);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(waitingWorkflowResponse(workflowId, review)), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(getWorkflow(workspaceId, workflowId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it.each([
+    ["category order", { categories: [{ category: "COMPLEMENTARY", count: 1 }, { category: "DUPLICATE", count: 0 }, { category: "CONFLICT", count: 0 }, { category: "UNIQUE", count: 0 }] }],
+    ["category total", { evidence_count: 2 }],
+    ["conflict count", { conflict_count: 1 }],
+    ["unsafe count", { evidence_count: Number.MAX_SAFE_INTEGER + 1 }],
+    ["invalid hash", { diff_hash: "ABC" }],
+    ["empty diff preview", { diff_preview: "" }],
+    ["oversized diff preview", { diff_preview: "x".repeat(32 * 1024 + 1) }],
+    ["invalid diff header", { diff_preview: "--- source.md\n+++ merged.md\n@@ -1 +1 @@\n-old\n+new" }],
+    ["short truncated diff", { diff_truncated: true }],
+    ["invalid truncation flag", { diff_truncated: "false" }],
+  ])("rejects invalid Workflow merge review semantics: %s", async (_label, overrides) => {
+    const workflowId = "10000000-0000-4000-8000-000000000008";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(
+      waitingWorkflowResponse(workflowId, mergeReviewResponse(workflowId, overrides)),
+    ), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await expect(getWorkflow(workspaceId, workflowId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it.each([
+    ["support with GAP", { outline: [{ key: "context", title: "背景", supports: [reviewEvidenceResponse], gap_code: "SHOULD_NOT_EXIST" }] }],
+    ["empty support without GAP", { outline: [{ key: "context", title: "背景", supports: [], gap_code: null }] }],
+    ["unknown GAP code", { outline: [{ key: "context", title: "背景", supports: [], gap_code: "UNKNOWN_GAP" }] }],
+  ])("rejects invalid Workflow outline XOR semantics: %s", async (_label, overrides) => {
+    const workflowId = "10000000-0000-4000-8000-000000000008";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(
+      waitingWorkflowResponse(workflowId, topicReviewResponse(workflowId, overrides), "approval"),
+    ), { status: 200, headers: { "Content-Type": "application/json" } })));
 
     await expect(getWorkflow(workspaceId, workflowId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });

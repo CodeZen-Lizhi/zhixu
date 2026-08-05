@@ -3,32 +3,26 @@ package modelcrypto
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"reflect"
 	"strings"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/secretstore"
 )
 
-const masterKeySize = 32
+const masterKeySize = secretstore.KeySize
 
 // Sealer encrypts model credentials with revision- and target-bound AES-256-GCM.
 type Sealer struct {
-	key    [masterKeySize]byte
-	keyID  string
-	random io.Reader
+	primitive *secretstore.Sealer
 }
 
 // NewSealer copies one 32-byte master key into a process-owned sealer.
@@ -38,13 +32,11 @@ func NewSealer(key []byte) (*Sealer, error) {
 
 // NewSealerWithReader exposes entropy injection for deterministic failure tests.
 func NewSealerWithReader(key []byte, random io.Reader) (*Sealer, error) {
-	if len(key) != masterKeySize || nilInterface(random) {
+	primitive, err := secretstore.NewWithReader(key, random)
+	if err != nil {
 		return nil, secretUnavailable(errors.New("model settings master key is invalid"))
 	}
-	digest := sha256.Sum256(key)
-	sealer := &Sealer{keyID: hex.EncodeToString(digest[:]), random: random}
-	copy(sealer.key[:], key)
-	return sealer, nil
+	return &Sealer{primitive: primitive}, nil
 }
 
 // NewSealerFromFile loads a base64-encoded master key and creates a sealer.
@@ -103,14 +95,14 @@ func LoadKeyFile(path string) ([]byte, error) {
 
 // KeyID returns the non-secret SHA-256 identifier persisted with ciphertext.
 func (sealer *Sealer) KeyID() string {
-	if sealer == nil {
+	if sealer == nil || sealer.primitive == nil {
 		return ""
 	}
-	return sealer.keyID
+	return sealer.primitive.KeyID()
 }
 
 func (sealer Sealer) String() string {
-	return fmt.Sprintf("modelcrypto.Sealer{configured:%t}", sealer.keyID != "")
+	return fmt.Sprintf("modelcrypto.Sealer{configured:%t}", sealer.primitive != nil)
 }
 
 func (sealer Sealer) GoString() string { return sealer.String() }
@@ -127,20 +119,16 @@ func (sealer *Sealer) Seal(secret domain.Secret, context domain.SecretContext) (
 	if err != nil {
 		return domain.EncryptedSecret{}, err
 	}
-	gcm, err := sealer.gcm()
-	if err != nil {
-		return domain.EncryptedSecret{}, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(sealer.random, nonce); err != nil {
-		return domain.EncryptedSecret{}, secretUnavailable(fmt.Errorf("read model settings nonce: %w", err))
-	}
 	plaintext := secret.Bytes()
 	defer clear(plaintext)
+	encrypted, err := sealer.primitive.Seal(plaintext, aad)
+	if err != nil {
+		return domain.EncryptedSecret{}, secretUnavailable(err)
+	}
 	envelope := domain.EncryptedSecret{
-		KeyID:      sealer.keyID,
-		Nonce:      nonce,
-		Ciphertext: gcm.Seal(nil, nonce, plaintext, aad),
+		KeyID:      encrypted.KeyID,
+		Nonce:      encrypted.Nonce,
+		Ciphertext: encrypted.Ciphertext,
 	}
 	if err := envelope.Validate(); err != nil {
 		return domain.EncryptedSecret{}, err
@@ -156,20 +144,15 @@ func (sealer *Sealer) Open(envelope domain.EncryptedSecret, context domain.Secre
 	if err := envelope.Validate(); err != nil || !envelope.Configured() {
 		return domain.Secret{}, secretUnavailable(errors.New("model settings secret envelope is invalid"))
 	}
-	if len(envelope.KeyID) != len(sealer.keyID) || subtle.ConstantTimeCompare([]byte(envelope.KeyID), []byte(sealer.keyID)) != 1 {
-		return domain.Secret{}, secretUnavailable(errors.New("model settings secret key identifier does not match"))
-	}
 	aad, err := additionalData(context)
 	if err != nil {
 		return domain.Secret{}, err
 	}
-	gcm, err := sealer.gcm()
+	plaintext, err := sealer.primitive.Open(secretstore.Envelope{
+		KeyID: envelope.KeyID, Nonce: envelope.Nonce, Ciphertext: envelope.Ciphertext,
+	}, aad)
 	if err != nil {
-		return domain.Secret{}, err
-	}
-	plaintext, err := gcm.Open(nil, envelope.Nonce, envelope.Ciphertext, aad)
-	if err != nil {
-		return domain.Secret{}, secretUnavailable(errors.New("model settings secret authentication failed"))
+		return domain.Secret{}, secretUnavailable(err)
 	}
 	defer clear(plaintext)
 	secret, err := domain.SecretFromBytes(plaintext)
@@ -179,20 +162,8 @@ func (sealer *Sealer) Open(envelope domain.EncryptedSecret, context domain.Secre
 	return secret, nil
 }
 
-func (sealer *Sealer) gcm() (cipher.AEAD, error) {
-	block, err := aes.NewCipher(sealer.key[:])
-	if err != nil {
-		return nil, secretUnavailable(errors.New("create model settings cipher"))
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, secretUnavailable(errors.New("create model settings gcm"))
-	}
-	return gcm, nil
-}
-
 func (sealer *Sealer) ready() error {
-	if sealer == nil || len(sealer.keyID) != sha256.Size*2 || nilInterface(sealer.random) {
+	if sealer == nil || sealer.primitive == nil || len(sealer.KeyID()) != sha256.Size*2 {
 		return secretUnavailable(errors.New("model settings sealer is unavailable"))
 	}
 	return nil
@@ -222,17 +193,4 @@ func additionalData(context domain.SecretContext) ([]byte, error) {
 
 func secretUnavailable(cause error) error {
 	return foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeSecretUnavailable, false, cause)
-}
-
-func nilInterface(value any) bool {
-	if value == nil {
-		return true
-	}
-	reflected := reflect.ValueOf(value)
-	switch reflected.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return reflected.IsNil()
-	default:
-		return false
-	}
 }

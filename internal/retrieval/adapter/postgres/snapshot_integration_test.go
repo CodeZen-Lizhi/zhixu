@@ -182,6 +182,78 @@ func TestRepositoryBeginWorkspaceSnapshotIncrementallyReplacesTargetsWithoutLosi
 	assertSnapshotSource(t, ctx, database.DB(), third.ID, secondB.SourceID, secondB.VersionID, secondB.ProjectionID, "included")
 }
 
+func TestRepositoryBeginWorkspaceSnapshotBatchTargetsRemoveSources(t *testing.T) {
+	repository, database, ctx := newRetrievalTestRepository(t)
+	now := time.Date(2026, 8, 4, 9, 0, 0, 0, time.UTC)
+	workspaceID := seedSnapshotWorkspace(t, ctx, database.DB(), 701, now)
+	firstA := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 702, 1, true, now, now, 1)
+	firstB := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 703, 1, true, now, now, 1)
+	firstC := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 704, 1, true, now, now, 1)
+	first := mustCreateAndActivateSnapshot(t, ctx, repository,
+		snapshotCommand(workspaceID, 705, firstA, "batch-targets-first", now.Add(time.Minute)), 706, now.Add(2*time.Minute))
+	assertSnapshotSource(t, ctx, database.DB(), first.ID, firstA.SourceID, firstA.VersionID, firstA.ProjectionID, "included")
+	assertSnapshotSource(t, ctx, database.DB(), first.ID, firstB.SourceID, firstB.VersionID, firstB.ProjectionID, "included")
+	assertSnapshotSource(t, ctx, database.DB(), first.ID, firstC.SourceID, firstC.VersionID, firstC.ProjectionID, "included")
+
+	secondA := seedSnapshotSourceVersionForSource(t, ctx, database.DB(), workspaceID, firstA.SourceID, 707, true, now.Add(3*time.Minute), now.Add(3*time.Minute), 1)
+	secondC := seedSnapshotSourceVersionForSource(t, ctx, database.DB(), workspaceID, firstC.SourceID, 708, true, now.Add(3*time.Minute), now.Add(3*time.Minute), 1)
+	command := snapshotCommand(workspaceID, 709, secondA, "batch-targets-second", now.Add(4*time.Minute))
+	command.TargetSourceID = ""
+	command.TargetSourceVersionID = ""
+	command.TargetParseProjectionID = ""
+	command.Targets = []domain.SnapshotTarget{
+		{SourceID: secondA.SourceID, SourceVersionID: secondA.VersionID, ParseProjectionID: secondA.ProjectionID},
+		{SourceID: secondC.SourceID, SourceVersionID: secondC.VersionID, ParseProjectionID: secondC.ProjectionID},
+	}
+	command.RemovedSourceIDs = []foundation.ID{firstB.SourceID}
+	second := mustCreateAndActivateSnapshot(t, ctx, repository, command, 710, now.Add(5*time.Minute))
+	assertSnapshotSource(t, ctx, database.DB(), second.ID, secondA.SourceID, secondA.VersionID, secondA.ProjectionID, "included")
+	assertSnapshotSource(t, ctx, database.DB(), second.ID, secondC.SourceID, secondC.VersionID, secondC.ProjectionID, "included")
+	var removedCount int
+	if err := database.QueryRow(ctx, `SELECT count(*) FROM retrieval.index_manifest_source
+		WHERE index_version_id=$1 AND source_id=$2`, string(second.ID), string(firstB.SourceID)).Scan(&removedCount); err != nil {
+		t.Fatal(err)
+	}
+	if removedCount != 0 {
+		t.Fatalf("removed source persisted in batch snapshot: %d", removedCount)
+	}
+}
+
+func TestRepositoryBeginWorkspaceSnapshotExcludesTombstonedSourcesFromIncrementalBase(t *testing.T) {
+	repository, database, ctx := newRetrievalTestRepository(t)
+	now := time.Date(2026, 8, 4, 10, 0, 0, 0, time.UTC)
+	workspaceID := seedSnapshotWorkspace(t, ctx, database.DB(), 720, now)
+	firstA := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 721, 1, true, now, now, 1)
+	firstB := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 722, 1, true, now, now, 1)
+	_ = mustCreateAndActivateSnapshot(t, ctx, repository,
+		snapshotCommand(workspaceID, 723, firstA, "tombstone-incremental-first", now.Add(time.Minute)), 724, now.Add(2*time.Minute))
+	if _, err := database.DB().Exec(ctx, `UPDATE core.source SET removed_at=$1 WHERE id=$2`, now.Add(3*time.Minute), string(firstB.SourceID)); err != nil {
+		t.Fatal(err)
+	}
+	secondA := seedSnapshotSourceVersionForSource(t, ctx, database.DB(), workspaceID, firstA.SourceID, 725, true,
+		now.Add(4*time.Minute), now.Add(4*time.Minute), 1)
+	created, err := repository.BeginWorkspaceSnapshot(ctx,
+		snapshotCommand(workspaceID, 726, secondA, "tombstone-incremental-second", now.Add(5*time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSnapshotSource(t, ctx, database.DB(), created.IndexVersion.ID, secondA.SourceID, secondA.VersionID, secondA.ProjectionID, "included")
+	var tombstonedCount int
+	if err := database.DB().QueryRow(ctx, `SELECT count(*) FROM retrieval.index_manifest_source WHERE index_version_id=$1 AND source_id=$2`,
+		string(created.IndexVersion.ID), string(firstB.SourceID)).Scan(&tombstonedCount); err != nil {
+		t.Fatal(err)
+	}
+	if tombstonedCount != 0 || created.SourceCount != 1 {
+		t.Fatalf("tombstoned source leaked into incremental snapshot: count=%d result=%#v", tombstonedCount, created)
+	}
+
+	_, err = repository.BeginWorkspaceSnapshot(ctx,
+		snapshotCommand(workspaceID, 727, firstB, "tombstone-target", now.Add(6*time.Minute)))
+	if !retrievalErrorCode(err, "REINDEX_TARGET_PROJECTION_INVALID") {
+		t.Fatalf("tombstoned target error=%v", err)
+	}
+}
+
 func TestRepositoryBeginWorkspaceSnapshotRebuildsAllSourcesFromLegacyActive(t *testing.T) {
 	repository, database, ctx := newRetrievalTestRepository(t)
 	now := time.Date(2026, 7, 18, 1, 45, 0, 0, time.UTC)
@@ -330,7 +402,7 @@ func seedSnapshotWorkspace(t *testing.T, ctx context.Context, database *pgxpool.
 	root := fmt.Sprintf("/tmp/reindex-snapshot-%d", ordinal)
 	if _, err := database.Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-	) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), fmt.Sprintf("snapshot-%d", ordinal), root, now); err != nil {
+	) VALUES($1,$2,$3,$3,$4,'active',1,$4,$4)`, string(workspaceID), fmt.Sprintf("snapshot-%d", ordinal), root, now); err != nil {
 		t.Fatal(err)
 	}
 	return workspaceID

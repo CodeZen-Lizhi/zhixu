@@ -16,6 +16,10 @@ import (
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
+	captureapplication "github.com/CodeZen-Lizhi/zhixu/internal/capture/application"
+	captureprofile "github.com/CodeZen-Lizhi/zhixu/internal/capture/profile"
+	captureworkflow "github.com/CodeZen-Lizhi/zhixu/internal/capture/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
@@ -27,6 +31,7 @@ import (
 	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
+	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowhealth "github.com/CodeZen-Lizhi/zhixu/internal/workflow/httphealth"
 	workflowruntime "github.com/CodeZen-Lizhi/zhixu/internal/workflow/runtime"
 )
@@ -78,6 +83,55 @@ func (fake *memoryExpiryServiceFake) ExpireDue(_ context.Context, limit int) (in
 	fake.calls++
 	fake.limit = limit
 	return fake.expired, fake.err
+}
+
+func TestDispatchGitSyncOutboxDrainsBoundedWork(t *testing.T) {
+	results := make([]gitSyncWorkerResult, gitSyncDispatchBatchSize+1)
+	for index := range results {
+		results[index].worked = true
+	}
+	worker := &gitSyncWorkerFake{results: results}
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+
+	processed, err := dispatchGitSyncOutbox(context.Background(), logger, worker, gitSyncDispatchStartupPhase)
+	if err != nil || processed != gitSyncDispatchBatchSize || worker.calls != gitSyncDispatchBatchSize {
+		t.Fatalf("processed=%d calls=%d err=%v", processed, worker.calls, err)
+	}
+	if !strings.Contains(output.String(), `"msg":"Git sync outbox dispatch completed"`) ||
+		!strings.Contains(output.String(), `"processed_count":10`) {
+		t.Fatalf("dispatch log=%s", output.String())
+	}
+}
+
+func TestDispatchGitSyncOutboxDoesNothingWhenCapabilityIsDisabled(t *testing.T) {
+	processed, err := dispatchGitSyncOutbox(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), nil, gitSyncDispatchPeriodicPhase)
+	if err != nil || processed != 0 {
+		t.Fatalf("processed=%d err=%v", processed, err)
+	}
+	worker, scheduler, err := newGitSyncWorker(nil, config.Defaults(), nil, nil, sourceProcessingComponents{}, nil, "")
+	if err != nil || worker != nil || scheduler != nil {
+		t.Fatalf("worker=%v scheduler=%v err=%v", worker, scheduler, err)
+	}
+}
+
+type gitSyncWorkerResult struct {
+	worked bool
+	err    error
+}
+
+type gitSyncWorkerFake struct {
+	results []gitSyncWorkerResult
+	calls   int
+}
+
+func (fake *gitSyncWorkerFake) RunOnce(context.Context) (bool, error) {
+	if fake.calls >= len(fake.results) {
+		return false, nil
+	}
+	result := fake.results[fake.calls]
+	fake.calls++
+	return result.worked, result.err
 }
 
 func TestNewWorkerComponentsRequiresDatabase(t *testing.T) {
@@ -230,6 +284,119 @@ func TestAgentApplicationBudgetAccountsForAllThreeStructuredCalls(t *testing.T) 
 	}
 }
 
+func TestDispatchCaptureOutboxUsesBoundedBatchAndRedactedLogs(t *testing.T) {
+	dispatcher := &captureOutboxDispatcherFake{result: captureapplication.DispatchBatchResult{
+		Claimed: 3, Started: 2, Retried: 1,
+	}}
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+
+	result, err := dispatchCaptureOutbox(context.Background(), logger, dispatcher, captureDispatchStartupPhase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatcher.calls != 1 || dispatcher.limit != captureDispatchBatchSize || result != dispatcher.result {
+		t.Fatalf("calls=%d limit=%d result=%+v", dispatcher.calls, dispatcher.limit, result)
+	}
+	logged := output.String()
+	if !strings.Contains(logged, `"msg":"capture outbox dispatch completed"`) ||
+		!strings.Contains(logged, `"phase":"startup"`) || !strings.Contains(logged, `"started_count":2`) {
+		t.Fatalf("dispatch log=%s", logged)
+	}
+
+	output.Reset()
+	dispatcher.err = errors.New("postgres password=must-not-leak")
+	_, err = dispatchCaptureOutbox(context.Background(), logger, dispatcher, captureDispatchPeriodicPhase)
+	if err == nil {
+		t.Fatal("capture dispatch failure was hidden")
+	}
+	logged = output.String()
+	if !strings.Contains(logged, `"error_code":"CAPTURE_OUTBOX_DISPATCH_FAILED"`) || strings.Contains(logged, "must-not-leak") {
+		t.Fatalf("failure log=%s", logged)
+	}
+}
+
+func TestCaptureDispatchUsesDedicatedBoundedCadence(t *testing.T) {
+	if captureDispatchInterval != time.Second {
+		t.Fatalf("capture dispatch interval=%s", captureDispatchInterval)
+	}
+	if captureDispatchBatchSize < 1 || captureDispatchBatchSize > 100 {
+		t.Fatalf("capture dispatch batch=%d", captureDispatchBatchSize)
+	}
+}
+
+func TestCaptureWorkflowReadinessRequiresFrozenExecutorDefinitionAndOutbox(t *testing.T) {
+	catalog, err := workflowapplication.NewValidationCatalog([]int{1, 2}, capability.All())
+	if err != nil {
+		t.Fatal(err)
+	}
+	executors, err := workflowapplication.NewExecutorRegistry(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := new(captureworkflow.Executor)
+	if err := executors.Register(captureapplication.ProcessingNodeKind, captureapplication.ProcessingInputSchemaVersion, executor); err != nil {
+		t.Fatal(err)
+	}
+	if err := executors.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := captureworkflow.RegisteredDefinition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := definitions.Register(definition); err != nil {
+		t.Fatal(err)
+	}
+	if err := definitions.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	components := workerComponents{
+		captureExecutor: executor, captureOutbox: &captureOutboxDispatcherFake{},
+		captureProfile: agentCapabilityStatus{code: captureprofile.ErrorCodeCapabilityUnavailable},
+		executors:      executors, definitions: definitions,
+	}
+	if !captureWorkflowReadiness(components) {
+		t.Fatal("complete Capture composition reported unavailable")
+	}
+	components.captureOutbox = nil
+	if captureWorkflowReadiness(components) {
+		t.Fatal("Capture composition without outbox reported ready")
+	}
+	components.captureOutbox = &captureOutboxDispatcherFake{}
+	components.captureProfile = agentCapabilityStatus{}
+	if captureWorkflowReadiness(components) {
+		t.Fatal("Capture composition hid an invalid Profile capability state")
+	}
+}
+
+func TestNewCaptureProfileGeneratorRequiresPersistenceWhenCapabilityIsDisabled(t *testing.T) {
+	generator, capabilityStatus, err := newCaptureProfileGenerator(
+		nil, nil, platformmodels.ChatContract{}, nil,
+		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+	)
+	if err == nil || generator != nil || capabilityStatus.available || capabilityStatus.code != captureprofile.ErrorCodeCapabilityUnavailable {
+		t.Fatalf("generator=%T capability=%+v", generator, capabilityStatus)
+	}
+}
+
+type captureOutboxDispatcherFake struct {
+	calls  int
+	limit  int
+	result captureapplication.DispatchBatchResult
+	err    error
+}
+
+func (dispatcher *captureOutboxDispatcherFake) DispatchBatch(_ context.Context, limit int) (captureapplication.DispatchBatchResult, error) {
+	dispatcher.calls++
+	dispatcher.limit = limit
+	return dispatcher.result, dispatcher.err
+}
+
 func TestWorkerCompositionConsumesOneFrozenModelRuntime(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
 	if err != nil {
@@ -240,6 +407,7 @@ func TestWorkerCompositionConsumesOneFrozenModelRuntime(t *testing.T) {
 		"newToolRuntimeComponents":      false,
 		"newAgentWorkflowComponents":    false,
 		"newArtifactWorkflowComponents": false,
+		"newSourceProcessingComponents": false,
 		"newReindexComponents":          false,
 	}
 	containsModels := func(node ast.Node) bool {

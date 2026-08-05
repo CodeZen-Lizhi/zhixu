@@ -11,6 +11,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitoperation"
 	reindexcontract "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/contract"
 )
 
@@ -20,6 +21,7 @@ const (
 	// WritebackIndexStatusPending 表示发布事务已创建重索引 Outbox，但 Retrieval 尚未消费。
 	WritebackIndexStatusPending = "pending"
 	maxWritebackResumeSteps     = 16
+	writebackGitLockReleaseTimeout = 5 * time.Second
 )
 
 // writebackRepository 是 Application Saga 使用的最小持久化端口。
@@ -34,38 +36,75 @@ type writebackRepository interface {
 	FinalizeWritebackCleanup(context.Context, foundation.ID, int64, time.Time) (domain.WritebackExecution, error)
 }
 
+// WritebackPublication 是写回 Commit 成功后交给业务 owner 的不可变发布事实。
+type WritebackPublication struct {
+	WorkspaceID        foundation.ID
+	ProposalID         foundation.ID
+	ProposalRevisionID foundation.ID
+	WritebackID        foundation.ID
+	GitCommit          string
+	ResultHash         string
+}
+
+// WritebackPublicationFinalizer 在通用写回成功后推进业务 owner 的发布状态。
+// 实现必须幂等；失败会让 Execution 保持 Verifying 并在恢复时重试。
+type WritebackPublicationFinalizer interface {
+	FinalizePublication(context.Context, WritebackPublication) error
+}
+
+// WritebackPreparationValidator lets a business owner re-check mutable owner
+// state immediately before Safe Writeback first touches a file. Restore
+// proposals require this capability and fail closed when it is unavailable.
+type WritebackPreparationValidator interface {
+	ValidateWritebackPreparation(context.Context, domain.Proposal) error
+}
+
+// WritebackPublicationFinalizerFunc 将函数适配为发布终态端口。
+type WritebackPublicationFinalizerFunc func(context.Context, WritebackPublication) error
+
+// FinalizePublication 调用适配后的发布终态函数。
+func (finalizer WritebackPublicationFinalizerFunc) FinalizePublication(ctx context.Context, publication WritebackPublication) error {
+	return finalizer(ctx, publication)
+}
+
 // WritebackServiceDependencies 是 Safe Writeback Saga 的完整依赖。
 type WritebackServiceDependencies struct {
-	Repository writebackRepository
-	Workspace  domain.WorkspaceStore
-	Git        domain.GitRepository
-	Audit      WritebackAuditRecorder
-	IDs        foundation.IDGenerator
-	Clock      foundation.Clock
+	Repository    writebackRepository
+	Workspace     domain.WorkspaceStore
+	Git           domain.GitRepository
+	GitOperations gitoperation.WorkspaceLocker
+	Audit         WritebackAuditRecorder
+	Publication   WritebackPublicationFinalizer
+	IDs           foundation.IDGenerator
+	Clock         foundation.Clock
 }
 
 // WritebackService 协调数据库、文件和 Git 的可恢复有序 Saga。
 type WritebackService struct {
-	repository writebackRepository
-	workspace  domain.WorkspaceStore
-	git        domain.GitRepository
-	audit      WritebackAuditRecorder
-	ids        foundation.IDGenerator
-	clock      foundation.Clock
+	repository    writebackRepository
+	workspace     domain.WorkspaceStore
+	git           domain.GitRepository
+	gitOperations gitoperation.WorkspaceLocker
+	audit         WritebackAuditRecorder
+	publication   WritebackPublicationFinalizer
+	ids           foundation.IDGenerator
+	clock         foundation.Clock
 }
 
 // NewWritebackService 创建 Safe Writeback Application Saga。
 func NewWritebackService(dependencies WritebackServiceDependencies) (*WritebackService, error) {
-	if dependencies.Repository == nil || dependencies.Workspace == nil || dependencies.Git == nil || dependencies.Audit == nil || dependencies.IDs == nil || dependencies.Clock == nil {
+	if dependencies.Repository == nil || dependencies.Workspace == nil || dependencies.Git == nil || dependencies.GitOperations == nil || dependencies.Audit == nil || dependencies.Publication == nil || dependencies.IDs == nil || dependencies.Clock == nil {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WRITEBACK_DEPENDENCY_MISSING", false, errors.New("writeback dependency missing"))
 	}
 	return &WritebackService{
-		repository: dependencies.Repository,
-		workspace:  dependencies.Workspace,
-		git:        dependencies.Git,
-		audit:      dependencies.Audit,
-		ids:        dependencies.IDs,
-		clock:      dependencies.Clock,
+		repository:    dependencies.Repository,
+		workspace:     dependencies.Workspace,
+		git:           dependencies.Git,
+		gitOperations: dependencies.GitOperations,
+		audit:         dependencies.Audit,
+		publication:   dependencies.Publication,
+		ids:           dependencies.IDs,
+		clock:         dependencies.Clock,
 	}, nil
 }
 
@@ -124,8 +163,8 @@ func (s *WritebackService) Begin(ctx context.Context, command BeginWritebackComm
 			Credential: credential, IdempotencyKey: strings.TrimSpace(key),
 			WorkspaceID: command.WorkspaceID, WorkflowRunID: command.WorkflowRunID, NodeRunID: command.NodeRunID,
 			ProposalID: proposal.ID, RevisionID: proposal.Revision.ID, ApprovalID: proposal.Approval.ID,
-			ToolName: tool, Capability: capability, Scope: domain.ExpectedAuthorizationScope(proposal.TargetPath),
-			ApprovedChangeHash: proposal.Revision.ChangeHash, TargetVersion: proposal.Revision.BaseHash,
+			ToolName: tool, Capability: capability, Scope: domain.ExpectedAuthorizationScopeForTarget(proposal.TargetPath, proposal.Revision.TargetMode),
+			ApprovedChangeHash: proposal.Revision.ChangeHash, TargetMode: proposal.Revision.TargetMode, TargetVersion: proposal.Revision.BaseHash,
 		}
 	}
 	execution, err := s.repository.BeginWriteback(ctx, domain.BeginWriteback{
@@ -141,7 +180,7 @@ func (s *WritebackService) Begin(ctx context.Context, command BeginWritebackComm
 }
 
 // Resume 从持久化 Execution 检查点继续，直到 verifying/index_pending、终态或需要稍后重试。
-func (s *WritebackService) Resume(ctx context.Context, executionID foundation.ID, identity WritebackResumeIdentity) (WritebackResult, error) {
+func (s *WritebackService) Resume(ctx context.Context, executionID foundation.ID, identity WritebackResumeIdentity) (result WritebackResult, returnErr error) {
 	if ctx == nil || executionID == "" || identity.Validate() != nil {
 		return WritebackResult{}, foundation.NewError(foundation.ErrorInvalidInput, "WRITEBACK_RESUME_INVALID", false, domain.ErrWritebackInvalidInput)
 	}
@@ -151,6 +190,9 @@ func (s *WritebackService) Resume(ctx context.Context, executionID foundation.ID
 	if err != nil {
 		return WritebackResult{}, err
 	}
+	if initial.ID != executionID || initial.WorkspaceID != identity.WorkspaceID || initial.WorkflowRunID != identity.WorkflowRunID || initial.NodeRunID != identity.NodeRunID {
+		return resultFromExecution(initial), foundation.NewError(foundation.ErrorConsistencyViolation, "WRITEBACK_RESUME_BINDING_INVALID", false, domain.ErrWritebackIdentityConflict)
+	}
 	proposal, err := s.repository.GetProposal(ctx, initial.ProposalID)
 	if err != nil {
 		return resultFromExecution(initial), err
@@ -158,6 +200,18 @@ func (s *WritebackService) Resume(ctx context.Context, executionID foundation.ID
 	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeDownstreamUpdate {
 		return resultFromExecution(initial), domain.NewDownstreamUpdateApplyUnavailableError()
 	}
+	operationLease, err := s.gitOperations.Acquire(ctx, initial.WorkspaceID)
+	if err != nil {
+		return resultFromExecution(initial), err
+	}
+	if operationLease == nil {
+		return resultFromExecution(initial), foundation.NewError(foundation.ErrorDependencyUnavailable, gitoperation.ErrorCodeUnavailable, true, errors.New("Git operation locker returned a nil lease"))
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), writebackGitLockReleaseTimeout)
+		defer cancel()
+		returnErr = errors.Join(returnErr, operationLease.Release(releaseCtx))
+	}()
 	for range maxWritebackResumeSteps {
 		execution, err := s.repository.GetWritebackExecution(ctx, executionID)
 		if err != nil {
@@ -235,19 +289,33 @@ func (s *WritebackService) resumePrepared(ctx context.Context, execution domain.
 	if _, err := s.git.Inspect(ctx, execution.WorkspaceID, execution.ApprovedGitHead); err != nil {
 		return s.checkpointPreparedError(ctx, execution, err)
 	}
+	if domain.NormalizeTargetMode(execution.TargetMode) == domain.TargetModeCreateOnly {
+		inspector, ok := s.git.(interface {
+			EnsureTargetAbsentAt(context.Context, foundation.ID, string, string) error
+		})
+		if !ok {
+			return s.checkpointPreparedError(ctx, execution, foundation.NewError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_GIT_INSPECTOR_UNAVAILABLE", false, errors.New("git repository does not support create-only inspection")))
+		}
+		if err := inspector.EnsureTargetAbsentAt(ctx, execution.WorkspaceID, execution.ApprovedGitHead, execution.TargetPath); err != nil {
+			return s.checkpointPreparedError(ctx, execution, err)
+		}
+	}
 	if err := s.validateLease(ctx, execution, leaseOwner); err != nil {
 		return execution, err
 	}
-	lock, err := s.workspace.AcquireTarget(ctx, execution.WorkspaceID, execution.TargetPath)
+	lock, err := acquireWritebackTarget(ctx, s.workspace, execution)
 	if err != nil {
 		return s.checkpointPreparedError(ctx, execution, err)
 	}
 	defer joinTargetCloseError(lock, &retErr)
+	if err := s.validateOwnerPreparation(ctx, proposal); err != nil {
+		return s.checkpointPreparedError(ctx, execution, err)
+	}
 	if err := s.validateLease(ctx, execution, leaseOwner); err != nil {
 		return execution, err
 	}
 	prepared, err := lock.Prepare(ctx, domain.PrepareWrite{
-		ExecutionID: execution.ID, ExpectedBaseHash: execution.BaseHash,
+		ExecutionID: execution.ID, WorkspaceID: execution.WorkspaceID, TargetMode: execution.TargetMode, ExpectedBaseHash: execution.BaseHash,
 		ApprovedChangeHash: execution.ApprovedChangeHash, Content: []byte(proposal.Revision.Content),
 	})
 	if err != nil {
@@ -283,12 +351,25 @@ func (s *WritebackService) resumeFilePrepared(ctx context.Context, execution dom
 	if err := s.validateLease(ctx, execution, leaseOwner); err != nil {
 		return execution, err
 	}
-	lock, prepared, applied, err := s.workspace.ResumeTarget(ctx, execution.WorkspaceID, execution.TargetPath, domain.ResumeWrite{Prepared: preparedFromExecution(execution)})
+	lock, prepared, applied, err := resumeWritebackTarget(ctx, s.workspace, execution, domain.ResumeWrite{Prepared: preparedFromExecution(execution)})
 	if err != nil {
 		return s.checkpointFileError(ctx, execution, err)
 	}
 	defer joinTargetCloseError(lock, &retErr)
 	if applied == nil {
+		proposal, proposalErr := s.repository.GetProposal(ctx, execution.ProposalID)
+		if proposalErr != nil {
+			return execution, proposalErr
+		}
+		if proposalErr = validateExecutionProposal(execution, proposal); proposalErr != nil {
+			return s.checkpointFailure(ctx, execution, domain.WritebackStatusApplyFailed, "WRITEBACK_PROPOSAL_BINDING_INVALID", proposalErr, false)
+		}
+		if proposalErr = s.validateOwnerPreparation(ctx, proposal); proposalErr != nil {
+			return s.checkpointPreparedError(ctx, execution, proposalErr)
+		}
+		if err := s.validateLease(ctx, execution, leaseOwner); err != nil {
+			return execution, err
+		}
 		if err := s.audit.EnsureStarted(ctx, identity, execution, WritebackAuditApply); err != nil {
 			return execution, err
 		}
@@ -328,6 +409,7 @@ func (s *WritebackService) resumeFileApplied(ctx context.Context, execution doma
 	diff, err := s.git.DiffApproved(ctx, domain.GitDiffRequest{
 		WorkspaceID: execution.WorkspaceID, TargetPath: execution.TargetPath,
 		ApprovedGitHead: execution.ApprovedGitHead, ResultHash: execution.ResultHash,
+		TargetMode: execution.TargetMode,
 	})
 	if err != nil {
 		if retryWithoutCheckpoint(err) {
@@ -489,6 +571,16 @@ func (s *WritebackService) resumeCleanup(ctx context.Context, execution domain.W
 	if err := lock.Cleanup(ctx, *applied); err != nil {
 		return resultFromExecution(execution), err
 	}
+	if err := s.validateLease(ctx, execution, leaseOwner); err != nil {
+		return resultFromExecution(execution), err
+	}
+	if err := s.publication.FinalizePublication(ctx, WritebackPublication{
+		WorkspaceID: execution.WorkspaceID, ProposalID: execution.ProposalID,
+		ProposalRevisionID: execution.RevisionID, WritebackID: execution.ID,
+		GitCommit: execution.GitCommit, ResultHash: execution.ResultHash,
+	}); err != nil {
+		return resultFromExecution(execution), err
+	}
 	updated, err := s.repository.FinalizeWritebackCleanup(ctx, execution.ID, execution.Version, s.clock.Now())
 	if err != nil {
 		return resultFromExecution(execution), err
@@ -502,7 +594,7 @@ func (s *WritebackService) resumeAppliedTarget(ctx context.Context, execution do
 	}
 	prepared := preparedFromExecution(execution)
 	applied := appliedFromExecution(execution)
-	return s.workspace.ResumeTarget(ctx, execution.WorkspaceID, execution.TargetPath, domain.ResumeWrite{
+	return resumeWritebackTarget(ctx, s.workspace, execution, domain.ResumeWrite{
 		Prepared:                prepared,
 		Applied:                 &applied,
 		CleanupMayHaveCompleted: execution.Status == domain.WritebackStatusVerifying,
@@ -510,8 +602,46 @@ func (s *WritebackService) resumeAppliedTarget(ctx context.Context, execution do
 	})
 }
 
+func resumeWritebackTarget(ctx context.Context, workspace domain.WorkspaceStore, execution domain.WritebackExecution, resume domain.ResumeWrite) (domain.TargetLock, domain.PreparedWrite, *domain.AppliedWrite, error) {
+	if domain.NormalizeTargetMode(execution.TargetMode) != domain.TargetModeCreateOnly {
+		return workspace.ResumeTarget(ctx, execution.WorkspaceID, execution.TargetPath, resume)
+	}
+	createOnly, ok := workspace.(domain.CreateOnlyWorkspaceStore)
+	if !ok {
+		return nil, domain.PreparedWrite{}, nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_WORKSPACE_STORE_UNAVAILABLE", false, errors.New("workspace store does not support create-only recovery"))
+	}
+	return createOnly.ResumeCreateOnlyTarget(ctx, execution.WorkspaceID, execution.TargetPath, resume)
+}
+
+func acquireWritebackTarget(ctx context.Context, workspace domain.WorkspaceStore, execution domain.WritebackExecution) (domain.TargetLock, error) {
+	if domain.NormalizeTargetMode(execution.TargetMode) != domain.TargetModeCreateOnly {
+		return workspace.AcquireTarget(ctx, execution.WorkspaceID, execution.TargetPath)
+	}
+	createOnly, ok := workspace.(domain.CreateOnlyWorkspaceStore)
+	if !ok {
+		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_WORKSPACE_STORE_UNAVAILABLE", false, errors.New("workspace store does not support create-only targets"))
+	}
+	return createOnly.AcquireCreateOnlyTarget(ctx, execution.WorkspaceID, execution.TargetPath)
+}
+
 func (s *WritebackService) validateLease(ctx context.Context, execution domain.WritebackExecution, leaseOwner string) error {
 	return s.repository.ValidateWritebackLease(ctx, execution.ID, leaseOwner)
+}
+
+func (s *WritebackService) validateOwnerPreparation(ctx context.Context, proposal domain.Proposal) error {
+	validator, available := s.publication.(WritebackPreparationValidator)
+	if !available {
+		if domain.NormalizeProposalType(proposal.Type) != domain.ProposalTypeRestoreDocument {
+			return nil
+		}
+		return foundation.NewError(
+			foundation.ErrorDependencyUnavailable,
+			"RESTORE_DOCUMENT_OWNER_VALIDATOR_UNAVAILABLE",
+			false,
+			errors.New("restore document owner validator is unavailable"),
+		)
+	}
+	return validator.ValidateWritebackPreparation(ctx, proposal)
 }
 
 func joinTargetCloseError(lock domain.TargetLock, target *error) {
@@ -524,7 +654,7 @@ func (s *WritebackService) checkpointPreparedError(ctx context.Context, executio
 	switch {
 	case retryWithoutCheckpoint(err):
 		return execution, err
-	case errors.Is(err, domain.ErrTargetBaseHashConflict), errors.Is(err, domain.ErrTargetIdentityConflict), errorKind(err) == foundation.ErrorVersionConflict:
+	case errors.Is(err, domain.ErrTargetBaseHashConflict), errors.Is(err, domain.ErrTargetIdentityConflict), errors.Is(err, domain.ErrTargetExistenceConflict), errorKind(err) == foundation.ErrorVersionConflict:
 		return s.checkpointFailure(ctx, execution, domain.WritebackStatusNeedsRevision, errorCode(err, "WRITEBACK_BASE_CONFLICT"), err, false)
 	default:
 		return s.checkpointFailure(ctx, execution, domain.WritebackStatusApplyFailed, errorCode(err, "WRITEBACK_PREPARE_FAILED"), err, false)
@@ -535,7 +665,7 @@ func (s *WritebackService) checkpointFileError(ctx context.Context, execution do
 	switch {
 	case retryWithoutCheckpoint(err):
 		return execution, err
-	case errors.Is(err, domain.ErrTargetBaseHashConflict), errors.Is(err, domain.ErrTargetIdentityConflict):
+	case errors.Is(err, domain.ErrTargetBaseHashConflict), errors.Is(err, domain.ErrTargetIdentityConflict), errors.Is(err, domain.ErrTargetExistenceConflict):
 		return s.checkpointFailure(ctx, execution, domain.WritebackStatusNeedsRevision, errorCode(err, "WRITEBACK_BASE_CONFLICT"), err, false)
 	case requiresManualRecovery(err), errorKind(err) == foundation.ErrorConsistencyViolation:
 		return s.checkpointManual(ctx, execution, errorCode(err, "WRITEBACK_FILE_RESULT_UNKNOWN"), err)
@@ -595,7 +725,8 @@ func validateBeginProposal(workspaceID foundation.ID, proposal domain.Proposal) 
 	}
 	// Proposal 状态由 Atomic Begin 在同一事务内判定。Application 允许已进入
 	// applying/verifying 的同一请求抵达 Repository，以便返回既有 Execution。
-	if proposal.ID == "" || proposal.WorkspaceID != workspaceID || proposal.TargetPath != proposal.Revision.TargetPath || proposal.Approval == nil || proposal.Approval.Decision != domain.DecisionApproved || proposal.Approval.ApprovedGitHead == nil || !domain.ValidGitHead(*proposal.Approval.ApprovedGitHead) || proposal.Approval.RevisionID != proposal.Revision.ID || !strings.EqualFold(proposal.Approval.ChangeHash, proposal.Revision.ChangeHash) || !strings.EqualFold(proposal.Revision.ChangeHash, domain.ComputeChangeHash(proposal.TargetPath, proposal.Revision.BaseHash, proposal.Revision.Content)) {
+	expectedChangeHash, hashErr := domain.ComputeChangeHashForTarget(proposal.WorkspaceID, proposal.Revision.TargetPath, proposal.Revision.TargetMode, proposal.Revision.BaseHash, proposal.Revision.Content)
+	if proposal.ID == "" || proposal.WorkspaceID != workspaceID || proposal.TargetPath != proposal.Revision.TargetPath || domain.ValidateTargetBaseVersion(proposal.WorkspaceID, proposal.Revision.TargetPath, proposal.Revision.TargetMode, proposal.Revision.BaseHash) != nil || hashErr != nil || proposal.Approval == nil || proposal.Approval.Decision != domain.DecisionApproved || proposal.Approval.ApprovedGitHead == nil || !domain.ValidGitHead(*proposal.Approval.ApprovedGitHead) || proposal.Approval.RevisionID != proposal.Revision.ID || !strings.EqualFold(proposal.Approval.ChangeHash, proposal.Revision.ChangeHash) || !strings.EqualFold(proposal.Revision.ChangeHash, expectedChangeHash) {
 		return foundation.NewError(foundation.ErrorPermissionDenied, "WRITEBACK_APPROVAL_REQUIRED", false, domain.ErrWritebackIdentityConflict)
 	}
 	return nil
@@ -605,7 +736,7 @@ func validateExecutionProposal(execution domain.WritebackExecution, proposal dom
 	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeDownstreamUpdate {
 		return domain.NewDownstreamUpdateApplyUnavailableError()
 	}
-	if proposal.ID != execution.ProposalID || proposal.WorkspaceID != execution.WorkspaceID || proposal.Status != domain.StatusApplying || proposal.Revision.ID != execution.RevisionID || proposal.Revision.TargetPath != execution.TargetPath || !strings.EqualFold(proposal.Revision.BaseHash, execution.BaseHash) || !strings.EqualFold(proposal.Revision.ChangeHash, execution.ApprovedChangeHash) || !strings.EqualFold(domain.ComputeWritebackResultHash([]byte(proposal.Revision.Content)), execution.ResultHash) || proposal.Approval == nil || proposal.Approval.ID != execution.ApprovalID || proposal.Approval.Decision != domain.DecisionApproved || proposal.Approval.ApprovedGitHead == nil || !strings.EqualFold(*proposal.Approval.ApprovedGitHead, execution.ApprovedGitHead) {
+	if proposal.ID != execution.ProposalID || proposal.WorkspaceID != execution.WorkspaceID || proposal.Status != domain.StatusApplying || proposal.Revision.ID != execution.RevisionID || proposal.Revision.TargetPath != execution.TargetPath || domain.NormalizeTargetMode(proposal.Revision.TargetMode) != domain.NormalizeTargetMode(execution.TargetMode) || !strings.EqualFold(proposal.Revision.BaseHash, execution.BaseHash) || !strings.EqualFold(proposal.Revision.ChangeHash, execution.ApprovedChangeHash) || !strings.EqualFold(domain.ComputeWritebackResultHash([]byte(proposal.Revision.Content)), execution.ResultHash) || proposal.Approval == nil || proposal.Approval.ID != execution.ApprovalID || proposal.Approval.Decision != domain.DecisionApproved || proposal.Approval.ApprovedGitHead == nil || !strings.EqualFold(*proposal.Approval.ApprovedGitHead, execution.ApprovedGitHead) {
 		return domain.ErrWritebackIdentityConflict
 	}
 	return nil
@@ -614,6 +745,7 @@ func validateExecutionProposal(execution domain.WritebackExecution, proposal dom
 func preparedFromExecution(execution domain.WritebackExecution) domain.PreparedWrite {
 	return domain.PreparedWrite{
 		ExecutionID: execution.ID, TemporaryRef: execution.TemporaryRef, BackupRef: execution.BackupRef,
+		TargetMode:       execution.TargetMode,
 		ExpectedBaseHash: execution.BaseHash, ApprovedChangeHash: execution.ApprovedChangeHash,
 		ResultHash: execution.ResultHash, ByteSize: execution.FileByteSize, Mode: execution.FileMode, LockToken: execution.FileLockToken,
 		ResultLockToken: execution.FileResultLockToken, BackupLockToken: execution.FileBackupLockToken,
@@ -623,7 +755,8 @@ func preparedFromExecution(execution domain.WritebackExecution) domain.PreparedW
 func appliedFromExecution(execution domain.WritebackExecution) domain.AppliedWrite {
 	return domain.AppliedWrite{
 		ExecutionID: execution.ID, TemporaryRef: execution.TemporaryRef, BackupRef: execution.BackupRef,
-		BaseHash: execution.BaseHash, ApprovedChangeHash: execution.ApprovedChangeHash,
+		TargetMode: execution.TargetMode,
+		BaseHash:   execution.BaseHash, ApprovedChangeHash: execution.ApprovedChangeHash,
 		ResultHash: execution.ResultHash, ByteSize: execution.FileByteSize, Mode: execution.FileMode, LockToken: execution.FileLockToken,
 		ResultLockToken: execution.FileResultLockToken, BackupLockToken: execution.FileBackupLockToken,
 	}
@@ -633,7 +766,7 @@ func gitLookupFromExecution(execution domain.WritebackExecution) domain.GitCommi
 	return domain.GitCommitLookup{
 		WorkspaceID: execution.WorkspaceID, WorkflowRunID: execution.WorkflowRunID, NodeRunID: execution.NodeRunID,
 		WritebackExecutionID: execution.ID, ProposalID: execution.ProposalID, RevisionID: execution.RevisionID, ApprovalID: execution.ApprovalID,
-		Operation: domain.GitOperationApply, TargetPath: execution.TargetPath, ApprovedGitHead: execution.ApprovedGitHead,
+		Operation: domain.GitOperationApply, TargetPath: execution.TargetPath, ApprovedGitHead: execution.ApprovedGitHead, TargetMode: execution.TargetMode,
 		ResultHash: execution.ResultHash, DiffHash: execution.DiffHash, BaseBlobID: execution.BaseBlobID,
 		ResultBlobID: execution.ResultBlobID, BaseMode: execution.BaseMode,
 	}
@@ -644,7 +777,7 @@ func gitCommitRequestFromExecution(execution domain.WritebackExecution) domain.G
 	return domain.GitCommitRequest{
 		WorkspaceID: lookup.WorkspaceID, WorkflowRunID: lookup.WorkflowRunID, NodeRunID: lookup.NodeRunID,
 		WritebackExecutionID: lookup.WritebackExecutionID, ProposalID: lookup.ProposalID, RevisionID: lookup.RevisionID, ApprovalID: lookup.ApprovalID,
-		Operation: lookup.Operation, TargetPath: lookup.TargetPath, ApprovedGitHead: lookup.ApprovedGitHead,
+		Operation: lookup.Operation, TargetPath: lookup.TargetPath, ApprovedGitHead: lookup.ApprovedGitHead, TargetMode: lookup.TargetMode,
 		ResultHash: lookup.ResultHash, DiffHash: lookup.DiffHash, BaseBlobID: lookup.BaseBlobID,
 		ResultBlobID: lookup.ResultBlobID, BaseMode: lookup.BaseMode,
 	}
@@ -674,7 +807,7 @@ func buildPublishWriteback(execution domain.WritebackExecution, at time.Time) (d
 			ID: commitID, WorkspaceID: execution.WorkspaceID, WritebackExecutionID: execution.ID,
 			ProposalID: execution.ProposalID, RevisionID: execution.RevisionID, ApprovalID: execution.ApprovalID,
 			GitCommit: execution.GitCommit, ParentGitCommit: execution.ParentGitCommit, TargetPath: execution.TargetPath,
-			DiffHash: execution.DiffHash, ResultHash: execution.ResultHash, CreatedAt: at,
+			DiffHash: execution.DiffHash, ResultHash: execution.ResultHash, TargetMode: execution.TargetMode, CreatedAt: at,
 		},
 		Event: domain.WritebackOutboxEvent{
 			ID: eventID, WorkspaceID: execution.WorkspaceID, RunID: execution.WorkflowRunID,

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	artifactapp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
+	"github.com/CodeZen-Lizhi/zhixu/internal/artifact/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -16,7 +17,7 @@ import (
 
 const (
 	artifactSchemaVersion         = "artifact/v1"
-	artifactRevisionSchemaVersion = "artifact-revision/v1"
+	artifactRevisionSchemaVersion = domain.RevisionSchemaV1
 	artifactReceiptSchemaVersion  = "artifact-command-receipt/v1"
 )
 
@@ -347,7 +348,7 @@ func (r *Repository) List(ctx context.Context, query artifactapp.ListQuery) (art
 	if !validID(query.WorkspaceID) || query.Limit < 1 || query.Limit > 100 {
 		return artifactapp.ArtifactPage{}, requestInvalid(errors.New("artifact list query is invalid"))
 	}
-	sql := stateSelect + ` WHERE a.workspace_id=$1 AND a.domain_schema_version='artifact/v1' AND r.domain_schema_version='artifact-revision/v1'
+	sql := stateSelect + ` WHERE a.workspace_id=$1 AND a.domain_schema_version='artifact/v1' AND r.domain_schema_version IN ('artifact-revision/v1','artifact-revision/v2')
 		AND NOT EXISTS (
 			SELECT 1 FROM learning.artifact_visibility_hold h
 			WHERE h.workspace_id=a.workspace_id AND h.artifact_id=a.id

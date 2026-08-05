@@ -11,6 +11,10 @@ const (
 	maxStableErrorCodeBytes = 128
 	// MaxModelCallOutputTokens 是单次模型调用可持久化的最大输出 Token 上限。
 	MaxModelCallOutputTokens = 128 * 1024
+	// OrganizingOutlineSchemaID 允许由冻结 Snapshot 文档直接驱动、无需伪造 Retrieval Index 的大纲运行。
+	OrganizingOutlineSchemaID = "organizing.outline-generation"
+	// OrganizingDocumentSchemaID 允许由冻结 Snapshot 文档直接驱动、无需伪造 Retrieval Index 的文档运行。
+	OrganizingDocumentSchemaID = "organizing.document-generation"
 )
 
 // ModelRunStatus 是一次 Agent pipeline 的持久状态。
@@ -130,7 +134,7 @@ func ValidateModelRun(run ModelRun) error {
 	if run.MemoryContext.IsBound() && run.MemoryContext.Validate() != nil {
 		return invalid(ErrorCodeModelRunInvalid, "model run memory context snapshot is invalid")
 	}
-	if !retrievalBound && run.Schema.ID != RAGAnswerSchemaID {
+	if !retrievalBound && run.Schema.ID != RAGAnswerSchemaID && run.Schema.ID != OrganizingOutlineSchemaID && run.Schema.ID != OrganizingDocumentSchemaID {
 		return invalid(ErrorCodeModelRunInvalid, "model run retrieval snapshot is required")
 	}
 	switch run.Status {
@@ -255,7 +259,9 @@ func validModelRunCompletionTime(completedAt *time.Time, updatedAt time.Time) bo
 
 func validSuccessfulResultType(value string) bool {
 	return value == ResultTypeRelationAssessment || value == ResultTypeRAGAnswer || value == ResultTypeFaithfulnessReview ||
-		value == ResultTypeArtifactSection || value == ResultTypeToolRequest || value == ResultTypeClarification
+		value == ResultTypeArtifactSection || value == ResultTypeToolRequest || value == ResultTypeClarification ||
+		value == ResultTypeDocumentKnowledgeProfile || value == ResultTypeOrganizingOutline ||
+		value == ResultTypeOrganizingDocument
 }
 
 func canonicalErrorCode(value string) bool {

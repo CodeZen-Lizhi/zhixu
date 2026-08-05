@@ -84,7 +84,7 @@ func TestRepositoryListRunsWithPostgres(t *testing.T) {
 func insertWorkflowListWorkspace(t *testing.T, ctx context.Context, tx pgx.Tx, id foundation.ID, suffix string, now time.Time) {
 	t.Helper()
 	root := "/tmp/zhixu-m9-" + suffix
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(id), suffix, root, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(id), suffix, root, now); err != nil {
 		t.Fatal(err)
 	}
 }

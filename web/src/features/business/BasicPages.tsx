@@ -8,6 +8,7 @@ import { getSourceVersion, listSourceVersions, type SourceIndexStatus, type Sour
 import { scanWorkspace } from "../../api/workspace";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
 import { Badge, Button, Card, CardHeader, EmptyState, PageHeader, UnavailableState } from "../../shared/ui";
+import { CaptureInboxSection } from "../capture/CaptureInboxSection";
 import { BusinessWorkspaceGate } from "./BusinessWorkspaceGate";
 import { useScopedCursor } from "./pagination";
 import { parseInboxUrlState, writeInboxUrlState, type InboxUrlState } from "./url-state";
@@ -43,8 +44,9 @@ export const InboxPage = () => {
   if (workspaceId === "") return <BusinessWorkspaceGate description="连接工作区后才能读取资料版本。" />;
 
   return <div className="page-stack">
-    <PageHeader title="资料收件箱" description="扫描本地目录并检查资料处理状态。" action={<Button onClick={() => scan.mutate()} disabled={scan.isPending} variant="secondary"><RefreshCw size={16} />{scan.isPending ? "扫描中…" : "重新扫描"}</Button>} />
+    <PageHeader title="资料收件箱" description="快速记录与工作区文件都在这里恢复真实处理状态。" action={<Button onClick={() => scan.mutate()} disabled={scan.isPending} variant="secondary"><RefreshCw size={16} />{scan.isPending ? "扫描中…" : "重新扫描"}</Button>} />
     {scan.isError ? <div className="ui-state ui-state--error" role="alert"><strong>工作区扫描失败</strong><p>{scan.error.message}</p></div> : null}
+    <CaptureInboxSection workspaceId={workspaceId} />
     <Card>
       <div className="filter-bar" aria-label="资料筛选">
         <label>安全状态<select value={securityStatus} onChange={(event) => updateFilter({ securityStatus: event.target.value as InboxUrlState["securityStatus"] })}><option value="">全部</option><option value="pending">待检查</option><option value="passed">通过</option><option value="quarantined">隔离</option></select></label>
@@ -53,7 +55,7 @@ export const InboxPage = () => {
         <label>索引选择<select value={indexStatus} onChange={(event) => updateFilter({ indexStatus: event.target.value as InboxUrlState["indexStatus"] })}><option value="">全部</option><option value="included">已纳入</option><option value="excluded">已排除</option></select></label>
         <label>资料类型<select value={mimeType} onChange={(event) => updateFilter({ mimeType: event.target.value as InboxUrlState["mimeType"] })}><option value="">全部</option><option value="text/markdown">Markdown</option><option value="text/plain">纯文本</option><option value="text/html">HTML</option><option value="application/pdf">PDF</option></select></label>
       </div>
-      <CardHeader title={query.isPending ? "读取中…" : `${query.data?.items.length ?? 0} 个版本`} />
+      <CardHeader eyebrow="Workspace Scan" title={query.isPending ? "读取中…" : `${query.data?.items.length ?? 0} 个工作区版本`} description="兼容既有目录扫描来源；这里仍按不可变 Source Version 展示。" />
       {query.isError ? <UnavailableState title="资料版本列表不可用" description={query.error.message} /> : query.data?.items.length === 0 ? <EmptyState title="暂无资料版本" description="扫描工作区后，资料版本会按捕获时间倒序出现。" /> : <div className="table-scroll"><table className="data-table"><thead><tr><th>文件</th><th>类型 / 大小</th><th>捕获时间</th><th>安全</th><th>解析 / 索引</th><th>Workflow</th></tr></thead><tbody>{query.data?.items.map((item) => <tr key={item.id}><td><Link className="table-link" to={`/documents/${item.id}`}><FileText size={15} />{item.path}</Link><small className="mono">{item.contentHash.slice(0, 12)}…</small></td><td>{item.mimeType}<br /><span className="muted">{formatBytes(item.byteSize)}</span></td><td>{new Date(item.capturedAt).toLocaleString("zh-CN")}</td><td><Badge tone={item.securityStatus === "passed" ? "success" : item.securityStatus === "quarantined" ? "danger" : "warning"}>{item.securityStatus}</Badge></td><td>{item.ingestionStatus ?? "未开始"} / {item.indexStatus === "excluded" ? "来源已排除" : item.indexStatus === "included" ? "该版本已纳入" : "未选择"}</td><td>{item.workflowStatus ? <Badge tone={workflowTone(item.workflowStatus)}>{item.workflowStatus}</Badge> : <span className="muted">未绑定</span>}</td></tr>)}</tbody></table></div>}
       <div className="pagination-row">{cursor ? <Button variant="ghost" onClick={() => setCursor("")}>返回首屏</Button> : <span />}{query.data?.nextCursor ? <Button variant="secondary" onClick={() => setCursor(query.data.nextCursor ?? "")}>下一页</Button> : null}</div>
     </Card>

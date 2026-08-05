@@ -24,6 +24,8 @@ type fakeRepository struct {
 	previewResult ResultPage
 	list          ListQuery
 	listResult    CollectionListPage
+	search        CollectionSearchQuery
+	searchResult  []Collection
 	durablePlan   DurableScanBinding
 	durableRead   DurableScanPageRequest
 	durablePage   DurableScanPage
@@ -50,6 +52,10 @@ func (f *fakeRepository) GetCollection(context.Context, foundation.ID, foundatio
 func (f *fakeRepository) ListCollections(_ context.Context, query ListQuery) (CollectionListPage, error) {
 	f.list = query
 	return f.listResult, nil
+}
+func (f *fakeRepository) SearchCollections(_ context.Context, query CollectionSearchQuery) ([]Collection, error) {
+	f.search = query
+	return append([]Collection(nil), f.searchResult...), nil
 }
 func (f *fakeRepository) ExecutePreview(_ context.Context, query PreviewQuery) (ResultPage, error) {
 	f.preview = query
@@ -106,6 +112,27 @@ func TestServiceCreateCanonicalizesDefinitionAndHash(t *testing.T) {
 	if repository.create.Collection.QueryHash != canonical.Hash {
 		t.Fatalf("query hash=%s want=%s", repository.create.Collection.QueryHash, canonical.Hash)
 	}
+}
+
+func TestServiceSearchCollectionsNormalizesAndRejectsWorkspaceDrift(t *testing.T) {
+	t.Parallel()
+	workspaceID, collectionID := collectionTestIDs()
+	now := time.Date(2026, 8, 3, 7, 30, 0, 0, time.UTC)
+	repository := &fakeRepository{searchResult: []Collection{{
+		ID: collectionID, WorkspaceID: workspaceID, Name: "Formal Claims", NormalizedName: "formal claims",
+		Status: CollectionStatusActive, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}}}
+	service, err := NewService(Dependencies{Repository: repository, IDs: fixedIDs{value: collectionID}, Clock: foundation.FixedClock{Value: now}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := service.SearchCollections(context.Background(), CollectionSearchQuery{WorkspaceID: workspaceID, Query: "  Formal Claims  ", Limit: 5})
+	if err != nil || len(items) != 1 || repository.search.Query != "formal claims" || repository.search.WorkspaceID != workspaceID {
+		t.Fatalf("items=%#v query=%#v err=%v", items, repository.search, err)
+	}
+	repository.searchResult[0].WorkspaceID = foundation.ID("30000000-0000-4000-8000-000000000001")
+	_, err = service.SearchCollections(context.Background(), CollectionSearchQuery{WorkspaceID: workspaceID, Query: "Formal", Limit: 5})
+	assertCode(t, err, ErrorCodeResultInconsistent)
 }
 
 func TestServiceRejectsUnavailableRegistryField(t *testing.T) {

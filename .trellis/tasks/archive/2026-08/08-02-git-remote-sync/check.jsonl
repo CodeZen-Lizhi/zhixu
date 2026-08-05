@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/auth-security.md","reason":"检查 Token、URL、AskPass、Capability 与凭据泄露"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"检查 Secret Sealer 抽取没有破坏模型设置"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"检查 Secret、Run/Attempt/Outbox、并发、恢复、迁移与前端浏览器质量"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"检查日志、错误、argv、env 和 Git Config 脱敏"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"检查 Remote/Sync/Index follow-up 状态严格解码"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/repository-evidence.md","reason":"核对未扩宽 Safe Writeback GitRepository 且 post-check 完整"}

@@ -308,6 +308,41 @@ func (r *Repository) ListCollections(ctx context.Context, query collectionapp.Li
 	return page, nil
 }
 
+// SearchCollections searches active Smart Collections within one Workspace and a strict result bound.
+func (r *Repository) SearchCollections(ctx context.Context, query collectionapp.CollectionSearchQuery) ([]collectionapp.Collection, error) {
+	if r == nil || r.db == nil {
+		return nil, unavailable(errors.New("collection repository is unavailable"))
+	}
+	if !validID(query.WorkspaceID) || query.Query == "" || query.Limit < 1 || query.Limit > collectionapp.MaxCollectionSearchLimit {
+		return nil, requestInvalid(errors.New("collection search request is invalid"))
+	}
+	rows, err := r.db.Query(ctx, collectionSelect+`
+		WHERE workspace_id=$1 AND status='ACTIVE'
+		  AND (position($2 in normalized_name)>0 OR position($2 in lower(description))>0)
+		ORDER BY CASE
+			WHEN normalized_name=$2 THEN 0
+			WHEN position($2 in normalized_name)=1 THEN 1
+			ELSE 2 END,
+			updated_at DESC,id DESC
+		LIMIT $3`, string(query.WorkspaceID), query.Query, query.Limit)
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer rows.Close()
+	items := make([]collectionapp.Collection, 0, query.Limit)
+	for rows.Next() {
+		item, scanErr := scanCollection(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, classify(err)
+	}
+	return items, nil
+}
+
 func canonicalCollectionStatuses(statuses []collectionapp.CollectionStatus) []string {
 	if len(statuses) == 0 {
 		return []string{string(collectionapp.CollectionStatusActive)}

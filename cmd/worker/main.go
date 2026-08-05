@@ -20,10 +20,18 @@ import (
 	agentretrieval "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/retrieval"
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	artifactauthoring "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/authoring"
 	artifactpostgres "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/postgres"
 	artifactapplication "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	artifactworkflow "github.com/CodeZen-Lizhi/zhixu/internal/artifact/workflow"
+	authoringchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/authoring/adapter/changecontrol"
+	authoringpostgres "github.com/CodeZen-Lizhi/zhixu/internal/authoring/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
+	capturehttpfetch "github.com/CodeZen-Lizhi/zhixu/internal/capture/adapter/httpfetch"
+	capturepostgres "github.com/CodeZen-Lizhi/zhixu/internal/capture/adapter/postgres"
+	captureapplication "github.com/CodeZen-Lizhi/zhixu/internal/capture/application"
+	captureprofile "github.com/CodeZen-Lizhi/zhixu/internal/capture/profile"
+	captureworkflow "github.com/CodeZen-Lizhi/zhixu/internal/capture/workflow"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
@@ -38,6 +46,11 @@ import (
 	exportriver "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/river"
 	exportapplication "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	gitsyncpostgres "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/adapter/postgres"
+	gitsyncsecurity "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/adapter/security"
+	gitsourcecapture "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/adapter/sourcecapture"
+	gitsyncapplication "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/application"
+	gitsyncdomain "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/domain"
 	graphpostgres "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/postgres"
 	graphworkflow "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/workflow"
 	graphapplication "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
@@ -58,9 +71,13 @@ import (
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
+	organizingowner "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/owner"
+	organizingpostgres "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/postgres"
+	organizingworkflow "github.com/CodeZen-Lizhi/zhixu/internal/organizing/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitoperation"
 	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	platformparser "github.com/CodeZen-Lizhi/zhixu/internal/platform/parser"
@@ -113,6 +130,26 @@ const (
 	interviewCompletionPeriodicPhase     = "periodic"
 	learningPathMaintenanceStartupPhase  = "startup"
 	learningPathMaintenancePeriodicPhase = "periodic"
+	captureDispatchStartupPhase          = "startup"
+	captureDispatchPeriodicPhase         = "periodic"
+	captureDispatchInterval              = time.Second
+	captureDispatchBatchSize             = 25
+	captureDispatchLeaseDuration         = 30 * time.Second
+	captureDispatchRetryBase             = time.Second
+	captureDispatchMaxAttempts           = 10
+	organizingDispatchStartupPhase       = "startup"
+	organizingDispatchPeriodicPhase      = "periodic"
+	organizingDispatchBatchSize          = 25
+	organizingDispatchLeaseDuration      = 30 * time.Second
+	organizingDispatchRetryBase          = time.Second
+	organizingDispatchMaxAttempts        = 10
+	gitSyncDispatchStartupPhase          = "startup"
+	gitSyncDispatchPeriodicPhase         = "periodic"
+	gitSyncDispatchInterval              = time.Second
+	gitSyncScheduleBatchSize             = 25
+	gitSyncDispatchBatchSize             = 10
+	gitSyncScheduleTimeout               = 5 * time.Second
+	gitSyncDispatchTimeout               = 30 * time.Second
 )
 
 type exportMaintenanceService interface {
@@ -137,26 +174,50 @@ type learningPathMaintenanceService interface {
 	MaintainExpiredReservations(context.Context) (int, error)
 }
 
+type captureOutboxDispatchService interface {
+	DispatchBatch(context.Context, int) (captureapplication.DispatchBatchResult, error)
+}
+
+type organizingOutboxDispatchService interface {
+	DispatchBatch(context.Context, int) (organizingworkflow.DispatchBatchResult, error)
+}
+
+type gitSyncOutboxWorker interface {
+	RunOnce(context.Context) (bool, error)
+}
+
+type gitSyncAutoScheduler interface {
+	ScheduleBatch(context.Context, int) (gitsyncapplication.AutoSyncBatchResult, error)
+}
+
 type workerComponents struct {
-	safeWriteback    *changecontrolworkflow.Node
-	tools            toolRuntimeComponents
-	agentCapability  agentCapabilityStatus
-	artifact         artifactWorkflowComponents
-	reindexWorker    *reindexriver.Worker
-	dispatcher       *retrievalruntime.Runner
-	runtimeClient    *riveradapter.Client
-	definitions      *workflowapplication.DefinitionRegistry
-	executors        *workflowapplication.ExecutorRegistry
-	semanticScan     *graphworkflow.SemanticLinkScanExecutor
-	healthScan       *healthworkflowadapter.HealthScanExecutor
-	healthScanStart  *healthapplication.ScanService
-	healthSchedule   *healthapplication.ScheduleService
-	healthAffected   *healthapplication.AffectedChangeDispatcher
-	timelineProject  *knowledgeapplication.TimelineProjectionDispatcher
-	citationBackfill *artifactapplication.CitationBackfillDispatcher
-	exportWorker     *exportriver.Worker
-	exportService    *exportapplication.Service
-	memoryExpiry     memoryExpiryService
+	safeWriteback      *changecontrolworkflow.Node
+	tools              toolRuntimeComponents
+	agentCapability    agentCapabilityStatus
+	artifact           artifactWorkflowComponents
+	captureExecutor    *captureworkflow.Executor
+	captureOutbox      captureOutboxDispatchService
+	captureProfile     agentCapabilityStatus
+	organizingExecutor *organizingworkflow.Executor
+	organizingOutbox   organizingOutboxDispatchService
+	gitSyncWorker      *gitsyncapplication.Worker
+	gitSyncScheduler   *gitsyncapplication.AutoSyncScheduler
+	gitSyncCapability  agentCapabilityStatus
+	reindexWorker      *reindexriver.Worker
+	dispatcher         *retrievalruntime.Runner
+	runtimeClient      *riveradapter.Client
+	definitions        *workflowapplication.DefinitionRegistry
+	executors          *workflowapplication.ExecutorRegistry
+	semanticScan       *graphworkflow.SemanticLinkScanExecutor
+	healthScan         *healthworkflowadapter.HealthScanExecutor
+	healthScanStart    *healthapplication.ScanService
+	healthSchedule     *healthapplication.ScheduleService
+	healthAffected     *healthapplication.AffectedChangeDispatcher
+	timelineProject    *knowledgeapplication.TimelineProjectionDispatcher
+	citationBackfill   *artifactapplication.CitationBackfillDispatcher
+	exportWorker       *exportriver.Worker
+	exportService      *exportapplication.Service
+	memoryExpiry       memoryExpiryService
 	// interviewCompletion 是 reservation/hidden hold 维护依赖。
 	interviewCompletion interviewCompletionMaintenanceService
 	// learningPathMaintenance 是 Review Path reservation/hidden hold 维护依赖。
@@ -311,7 +372,7 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetRiverSchemaOK(true)
 	readiness.SetDefinitionsOK(components.definitions != nil)
 	readiness.SetExecutorsOK(components.executors != nil)
-	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.timelineProject != nil && components.citationBackfill != nil && components.exportWorker != nil && components.exportService != nil && components.memoryExpiry != nil && components.interviewCompletion != nil && components.learningPathMaintenance != nil && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
+	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.timelineProject != nil && components.citationBackfill != nil && components.exportWorker != nil && components.exportService != nil && components.memoryExpiry != nil && components.interviewCompletion != nil && components.learningPathMaintenance != nil && captureWorkflowReadiness(components) && organizingWorkflowReadiness(components) && gitSyncWorkerReadiness(components) && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
 	toolEnabled := cfg.ToolRuntimeMode == config.ToolModeEnabled
 	toolContractsOK, toolExecutorsOK, toolDependenciesOK := toolWorkflowReadiness(components)
 	readiness.SetToolRuntimeState(toolEnabled, toolContractsOK, toolExecutorsOK, toolDependenciesOK)
@@ -391,34 +452,44 @@ func run(configPath string, logger *slog.Logger) error {
 			return healthErr
 		}
 	}
-	queueResumeContext, cancelQueueResume := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	resumeQueue := true
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		queueResumeContext, cancelQueueResume := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 		modelSnapshot, snapshotErr := managedModels.Service.Snapshot(queueResumeContext)
+		cancelQueueResume()
 		if snapshotErr != nil {
-			cancelQueueResume()
 			_ = health.server.Close()
 			return snapshotErr
 		}
 		resumeQueue = modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseIdle ||
 			modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseFailed
 	}
-	if resumeQueue {
-		if err := components.runtimeClient.ResumeQueue(queueResumeContext); err != nil {
-			cancelQueueResume()
-			_ = health.server.Close()
-			return err
-		}
-	}
-	cancelQueueResume()
-	if err := lifecycle.Start(processContext); err != nil {
-		readiness.BeginShutdown()
-		_ = health.server.Close()
+	if err := startWorkerRuntime(
+		processContext,
+		resumeQueue,
+		cfg.DatabasePingTimeout,
+		cfg.WorkerHardStopTimeout,
+		lifecycle,
+		components.runtimeClient,
+		readiness,
+		health.server,
+	); err != nil {
 		logger.Error("workflow runtime could not be started", "error_code", "WORKFLOW_RIVER_CLIENT_START_FAILED")
 		return err
 	}
-	readiness.SetRiverStarted(true)
 	readiness.SetReindexDispatcherStarted(components.dispatcher.Started())
+	gitSyncProcessContext, cancelGitSyncProcess := context.WithCancel(processContext)
+	gitSyncStopped := startGitSyncDispatchLoop(
+		gitSyncProcessContext, logger, components.gitSyncScheduler, components.gitSyncWorker,
+		gitSyncDispatchInterval, gitSyncDispatchTimeout, modelDrain.ProducersEnabled,
+	)
+	defer cancelGitSyncProcess()
+	captureContext, cancelCapture := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	_, _ = dispatchCaptureOutbox(captureContext, logger, components.captureOutbox, captureDispatchStartupPhase)
+	cancelCapture()
+	organizingContext, cancelOrganizing := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	_, _ = dispatchOrganizingOutbox(organizingContext, logger, components.organizingOutbox, organizingDispatchStartupPhase)
+	cancelOrganizing()
 	timelineContext, cancelTimeline := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	_, _ = dispatchTimelineProjection(timelineContext, logger, components.timelineProject, timelineProjectionStartupPhase)
 	cancelTimeline()
@@ -442,6 +513,11 @@ func run(configPath string, logger *slog.Logger) error {
 		"semantic_link_scan", components.semanticScan != nil,
 		"agent_available", components.agentCapability.available, "agent_capability_code", components.agentCapability.code,
 		"artifact_generation_available", components.artifact.capability.available, "artifact_generation_capability_code", components.artifact.capability.code,
+		"capture_workflow", components.captureExecutor != nil, "capture_outbox", components.captureOutbox != nil,
+		"capture_profile_available", components.captureProfile.available, "capture_profile_capability_code", components.captureProfile.code,
+		"organizing_workflow", components.organizingExecutor != nil, "organizing_outbox", components.organizingOutbox != nil,
+		"git_sync_available", components.gitSyncCapability.available,
+		"git_sync_capability_code", components.gitSyncCapability.code,
 		"tool_runtime_enabled", components.tools.runtimeEnabled, "tool_executor_count", len(components.tools.enabledRefs),
 		"web_fetch_enabled", cfg.WebFetchMode == config.ToolModeEnabled, "reindex_dispatcher", components.dispatcher.Started(),
 		"timeline_projector", components.timelineProject != nil, "export_worker", components.exportWorker != nil,
@@ -451,6 +527,8 @@ func run(configPath string, logger *slog.Logger) error {
 
 	ticker := time.NewTicker(cfg.HealthInterval)
 	defer ticker.Stop()
+	captureTicker := time.NewTicker(captureDispatchInterval)
+	defer captureTicker.Stop()
 	shutdownMode := shutdownGraceful
 	var runErr error
 	for {
@@ -496,6 +574,16 @@ func run(configPath string, logger *slog.Logger) error {
 			runErr = runtimeErr
 			logger.Error("workspace root grant ownership was lost", "error_code", "WORKSPACE_GRANT_STALE")
 			goto shutdown
+		case <-captureTicker.C:
+			if !modelDrain.ProducersEnabled() {
+				continue
+			}
+			dispatchContext, cancelDispatch := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+			_, _ = dispatchCaptureOutbox(dispatchContext, logger, components.captureOutbox, captureDispatchPeriodicPhase)
+			cancelDispatch()
+			organizingContext, cancelOrganizing := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+			_, _ = dispatchOrganizingOutbox(organizingContext, logger, components.organizingOutbox, organizingDispatchPeriodicPhase)
+			cancelOrganizing()
 		case <-ticker.C:
 			if err := ping(database, cfg.DatabasePingTimeout); err != nil {
 				readiness.SetDatabaseOK(false)
@@ -567,6 +655,11 @@ shutdown:
 	readiness.SetReindexDispatcherStarted(false)
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), cfg.WorkerHardStopTimeout)
 	defer cancelShutdown()
+	cancelGitSyncProcess()
+	select {
+	case <-gitSyncStopped:
+	case <-shutdownContext.Done():
+	}
 	if err := lifecycle.Shutdown(shutdownContext, shutdownMode); err != nil && runErr == nil {
 		runErr = err
 	}
@@ -592,6 +685,171 @@ shutdown:
 		runErr = err
 	}
 	return runErr
+}
+
+func dispatchCaptureOutbox(ctx context.Context, logger *slog.Logger, dispatcher captureOutboxDispatchService, phase string) (captureapplication.DispatchBatchResult, error) {
+	if dispatcher == nil {
+		return captureapplication.DispatchBatchResult{}, errors.New("capture outbox dispatcher is unavailable")
+	}
+	batch, err := dispatcher.DispatchBatch(ctx, captureDispatchBatchSize)
+	if err != nil {
+		errorCode, retryable := captureDispatchFailure(err)
+		logger.Warn("capture outbox dispatch failed",
+			"error_code", errorCode, "retryable", retryable, "phase", phase,
+			"claimed_count", batch.Claimed, "started_count", batch.Started,
+			"retried_count", batch.Retried, "poisoned_count", batch.Poisoned)
+		return batch, err
+	}
+	if phase == captureDispatchStartupPhase || batch.Claimed > 0 {
+		logger.Info("capture outbox dispatch completed",
+			"phase", phase, "claimed_count", batch.Claimed, "started_count", batch.Started,
+			"retried_count", batch.Retried, "poisoned_count", batch.Poisoned)
+	}
+	return batch, nil
+}
+
+func captureDispatchFailure(err error) (string, bool) {
+	var classified *foundation.Error
+	if errors.As(err, &classified) && classified.Code != "" {
+		return classified.Code, classified.Retryable
+	}
+	return "CAPTURE_OUTBOX_DISPATCH_FAILED", false
+}
+
+func dispatchOrganizingOutbox(ctx context.Context, logger *slog.Logger, dispatcher organizingOutboxDispatchService, phase string) (organizingworkflow.DispatchBatchResult, error) {
+	if dispatcher == nil {
+		return organizingworkflow.DispatchBatchResult{}, errors.New("organizing outbox dispatcher is unavailable")
+	}
+	batch, err := dispatcher.DispatchBatch(ctx, organizingDispatchBatchSize)
+	if err != nil {
+		errorCode, retryable := organizingDispatchFailure(err)
+		logger.Warn("organizing outbox dispatch failed",
+			"error_code", errorCode, "retryable", retryable, "phase", phase,
+			"claimed_count", batch.Claimed, "started_count", batch.Started,
+			"replayed_count", batch.Replayed, "retried_count", batch.Retried, "poisoned_count", batch.Poisoned)
+		return batch, err
+	}
+	if phase == organizingDispatchStartupPhase || batch.Claimed > 0 {
+		logger.Info("organizing outbox dispatch completed",
+			"phase", phase, "claimed_count", batch.Claimed, "started_count", batch.Started,
+			"replayed_count", batch.Replayed, "retried_count", batch.Retried, "poisoned_count", batch.Poisoned)
+	}
+	return batch, nil
+}
+
+func organizingDispatchFailure(err error) (string, bool) {
+	var classified *foundation.Error
+	if errors.As(err, &classified) && classified.Code != "" {
+		return classified.Code, classified.Retryable
+	}
+	return "ORGANIZING_OUTBOX_DISPATCH_FAILED", false
+}
+
+func startGitSyncDispatchLoop(
+	ctx context.Context,
+	logger *slog.Logger,
+	scheduler gitSyncAutoScheduler,
+	worker gitSyncOutboxWorker,
+	interval time.Duration,
+	timeout time.Duration,
+	enabled func() bool,
+) <-chan struct{} {
+	stopped := make(chan struct{})
+	if ctx == nil || logger == nil || scheduler == nil || worker == nil || interval <= 0 || timeout <= 0 {
+		close(stopped)
+		return stopped
+	}
+	if enabled == nil {
+		enabled = func() bool { return true }
+	}
+	go func() {
+		defer close(stopped)
+		dispatch := func(phase string) {
+			if !enabled() {
+				return
+			}
+			dispatchContext, cancelDispatch := context.WithTimeout(ctx, timeout)
+			defer cancelDispatch()
+			_, _, _ = dispatchGitSync(dispatchContext, logger, scheduler, worker, phase)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		dispatch(gitSyncDispatchStartupPhase)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				dispatch(gitSyncDispatchPeriodicPhase)
+			}
+		}
+	}()
+	return stopped
+}
+
+// dispatchGitSync first turns eligible approved writebacks into standard Runs,
+// then drains already durable outbox work even when scheduling reports a fault.
+func dispatchGitSync(ctx context.Context, logger *slog.Logger, scheduler gitSyncAutoScheduler, worker gitSyncOutboxWorker, phase string) (gitsyncapplication.AutoSyncBatchResult, int, error) {
+	if scheduler == nil && worker == nil {
+		return gitsyncapplication.AutoSyncBatchResult{}, 0, nil
+	}
+	if scheduler == nil || worker == nil {
+		return gitsyncapplication.AutoSyncBatchResult{}, 0, errors.New("Git sync scheduler and worker must be configured together")
+	}
+	scheduleContext, cancelSchedule := context.WithTimeout(ctx, gitSyncScheduleTimeout)
+	batch, scheduleErr := scheduler.ScheduleBatch(scheduleContext, gitSyncScheduleBatchSize)
+	cancelSchedule()
+	if scheduleErr != nil {
+		errorCode, retryable := gitSyncDispatchFailure(scheduleErr)
+		logger.Warn("Git automatic sync scheduling failed",
+			"error_code", errorCode, "retryable", retryable, "phase", phase,
+			"scanned_count", batch.Scanned, "scheduled_count", batch.Scheduled,
+			"replayed_count", batch.Replayed, "deferred_count", batch.Deferred)
+	} else if phase == gitSyncDispatchStartupPhase || batch.Scanned > 0 {
+		logger.Info("Git automatic sync scheduling completed",
+			"phase", phase, "scanned_count", batch.Scanned, "scheduled_count", batch.Scheduled,
+			"replayed_count", batch.Replayed, "deferred_count", batch.Deferred)
+	}
+	processed, dispatchErr := dispatchGitSyncOutbox(ctx, logger, worker, phase)
+	return batch, processed, errors.Join(scheduleErr, dispatchErr)
+}
+
+// dispatchGitSyncOutbox drains a bounded number of durable Git sync events.
+// The worker itself persists retry and terminal state, so a transient dispatch
+// error is observed and retried on the next periodic tick.
+func dispatchGitSyncOutbox(ctx context.Context, logger *slog.Logger, worker gitSyncOutboxWorker, phase string) (int, error) {
+	if worker == nil {
+		return 0, nil
+	}
+	processed := 0
+	for processed < gitSyncDispatchBatchSize {
+		worked, err := worker.RunOnce(ctx)
+		if err != nil {
+			errorCode, retryable := gitSyncDispatchFailure(err)
+			logger.Warn("Git sync outbox dispatch failed",
+				"error_code", errorCode, "retryable", retryable, "phase", phase, "processed_count", processed)
+			return processed, err
+		}
+		if !worked {
+			break
+		}
+		processed++
+	}
+	if phase == gitSyncDispatchStartupPhase || processed > 0 {
+		logger.Info("Git sync outbox dispatch completed", "phase", phase, "processed_count", processed)
+	}
+	return processed, nil
+}
+
+func gitSyncDispatchFailure(err error) (string, bool) {
+	var classified *foundation.Error
+	if errors.As(err, &classified) && classified.Code != "" {
+		return classified.Code, classified.Retryable
+	}
+	return "GIT_SYNC_OUTBOX_DISPATCH_FAILED", false
 }
 
 func dispatchTimelineProjection(ctx context.Context, logger *slog.Logger, dispatcher *knowledgeapplication.TimelineProjectionDispatcher, phase string) (knowledgeapplication.TimelineProjectionBatchResult, error) {
@@ -812,6 +1070,10 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 			return workerComponents{}, err
 		}
 	}
+	gitOperationLocker, err := gitoperation.NewPostgresLocker(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
 	writebackRepository, err := changecontrolpostgres.NewRepository(db)
 	if err != nil {
 		return workerComponents{}, err
@@ -836,9 +1098,17 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
+	authoringRepository, err := authoringpostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	publicationFinalizer, err := authoringchangecontrol.NewPublicationFinalizer(authoringRepository, foundation.SystemClock{})
+	if err != nil {
+		return workerComponents{}, err
+	}
 	service, err := changecontrolapplication.NewWritebackService(changecontrolapplication.WritebackServiceDependencies{
-		Repository: writebackRepository, Workspace: workspaceStore, Git: gitRepository, Audit: toolComponents.writebackAudit,
-		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+		Repository: writebackRepository, Workspace: workspaceStore, Git: gitRepository, GitOperations: gitOperationLocker, Audit: toolComponents.writebackAudit,
+		Publication: publicationFinalizer, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
 	})
 	if err != nil {
 		return workerComponents{}, err
@@ -879,6 +1149,10 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		return workerComponents{}, err
 	}
 	inserter, err := riveradapter.NewJobInserter(insertClient)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	workerID, err := foundation.NewUUIDGenerator(nil).New()
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -988,10 +1262,45 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
+	terminalHooks, err := workflowapplication.NewCompositeWorkflowTerminalHook(
+		artifactTerminal,
+		organizingworkflow.NewTerminalHook(),
+	)
+	if err != nil {
+		return workerComponents{}, err
+	}
 	runtimeRepository, err := workflowpostgres.NewRuntimeRepositoryWithHooks(db, inserter, workflowpostgres.RuntimeRepositoryHooks{
 		CancellationSafety: cancellationGuard,
-		Terminal:           artifactTerminal,
+		Terminal:           terminalHooks,
 	})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	workflowRepository, err := workflowpostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	sourceProcessing, err := newSourceProcessingComponents(
+		db, cfg, workspaceRepository, gitRepository, modelBinding.revision, models,
+	)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	gitSyncWorker, gitSyncScheduler, err := newGitSyncWorker(
+		db, cfg, workspaceRepository, gitRepository, sourceProcessing, gitOperationLocker, workerID,
+	)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	gitSyncCapability := agentCapabilityStatus{code: gitsyncdomain.ErrorCodeUnavailable}
+	if gitSyncWorker != nil && gitSyncScheduler != nil {
+		gitSyncCapability = agentCapabilityStatus{available: true}
+	}
+	captureRepository, err := capturepostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	captureFetcher, err := capturehttpfetch.New(capturehttpfetch.Options{})
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1007,6 +1316,23 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	}
 	agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository, memoryService, models)
 	if err != nil {
+		return workerComponents{}, err
+	}
+	captureProfileGenerator, captureProfileCapability, err := newCaptureProfileGenerator(
+		db, agentComponents.model, agentComponents.contract, artifactAgentRepository,
+		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+	)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	captureExecutor, err := newCaptureWorkflowExecutor(
+		captureRepository, captureRepository, sourceProcessing.workspace, captureFetcher,
+		sourceProcessing.refresher, captureProfileGenerator, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+	)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := executors.Register(captureapplication.ProcessingNodeKind, captureapplication.ProcessingInputSchemaVersion, captureExecutor); err != nil {
 		return workerComponents{}, err
 	}
 	if agentComponents.relation != nil {
@@ -1031,6 +1357,86 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	}
 	if artifactComponents.executor != nil {
 		if err := executors.Register(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion, artifactComponents.executor); err != nil {
+			return workerComponents{}, err
+		}
+	}
+	artifactRepository, err := artifactpostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	documentSourceVerifier, err := artifactauthoring.NewVerifier(authoringRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	documentContentReader, err := organizingowner.NewDocumentContentReader(authoringRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	artifactCommands, err := artifactapplication.NewCommandService(artifactapplication.Dependencies{
+		Repository: artifactRepository, Evidence: artifactComponents.citationVerifier,
+		Documents: documentSourceVerifier,
+		IDs:       artifactIDs, Clock: artifactClock,
+	})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	artifactQueries, err := artifactapplication.NewQueryService(artifactRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	organizingRepository, err := organizingpostgres.NewRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	builtInContext, cancelBuiltIns := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+	builtInErr := organizingRepository.EnsureBuiltIns(builtInContext, foundation.SystemClock{}.Now())
+	cancelBuiltIns()
+	if builtInErr != nil {
+		return workerComponents{}, builtInErr
+	}
+	organizingRenderer, err := organizingworkflow.NewEvidenceRenderer(artifactComponents.citationVerifier)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	var organizingGenerator organizingworkflow.ContentGenerator = organizingworkflow.NewUnavailableGenerator()
+	if agentComponents.model != nil {
+		organizingGenerationRepository, repositoryErr := organizingpostgres.NewGenerationRepository(db, artifactAgentRepository)
+		if repositoryErr != nil {
+			return workerComponents{}, repositoryErr
+		}
+		organizingCatalog, catalogErr := newOrganizingRuntimeCatalog(agentComponents.contract)
+		if catalogErr != nil {
+			return workerComponents{}, catalogErr
+		}
+		organizingGenerator, err = organizingworkflow.NewGenerator(organizingworkflow.GeneratorDependencies{
+			Model: agentComponents.model, Catalog: organizingCatalog, ModelRuns: artifactAgentRepository,
+			Store: organizingGenerationRepository, Evidence: organizingRenderer, Documents: documentContentReader,
+			ProfileRef: agentworkflow.DefaultProfileRef(), IDs: foundation.NewUUIDGenerator(nil),
+			Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(agentComponents.contract),
+		})
+		if err != nil {
+			return workerComponents{}, err
+		}
+	}
+	organizingArtifacts, err := organizingworkflow.NewArtifactOwner(artifactCommands, artifactQueries)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	organizingProposals, err := organizingworkflow.NewProposalOwner(changeControlService)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	organizingExecutor, err := organizingworkflow.NewExecutor(organizingworkflow.ExecutorDependencies{
+		Runs: workflowRepository, Snapshots: organizingRepository, Templates: organizingRepository,
+		Bindings: organizingRepository, Stages: runtimeRepository, Artifacts: organizingArtifacts,
+		Proposals: organizingProposals, Generator: organizingGenerator,
+		IDs: foundation.NewUUIDGenerator(nil),
+	})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	for _, kind := range organizingworkflow.ExecutorNodeKinds() {
+		if err := executors.Register(kind, organizingworkflow.InputSchemaVersion, organizingExecutor); err != nil {
 			return workerComponents{}, err
 		}
 	}
@@ -1073,6 +1479,13 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err := definitions.Register(healthScanDefinition); err != nil {
 		return workerComponents{}, err
 	}
+	captureDefinition, err := captureworkflow.RegisteredDefinition()
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := definitions.Register(captureDefinition); err != nil {
+		return workerComponents{}, err
+	}
 	if agentComponents.relation != nil {
 		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
 			return workerComponents{}, err
@@ -1091,7 +1504,38 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 			return workerComponents{}, err
 		}
 	}
+	for _, definition := range organizingworkflow.RegisteredDefinitions() {
+		if err := definitions.Register(definition); err != nil {
+			return workerComponents{}, err
+		}
+	}
 	if err := definitions.Freeze(); err != nil {
+		return workerComponents{}, err
+	}
+	workflowService, err := workflowapplication.NewRuntimeService(
+		workflowRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+		workflowapplication.RuntimeDependencies{
+			Definitions: definitions, Starter: runtimeRepository, State: runtimeRepository, Human: runtimeRepository,
+		},
+	)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	captureOutbox, err := captureapplication.NewOutboxDispatcher(captureapplication.DispatcherDependencies{
+		Outbox: captureRepository, Workflows: captureworkflow.Starter{Runtime: workflowService},
+		Owner: fmt.Sprintf("capture-worker:%s", workerID), LeaseDuration: captureDispatchLeaseDuration,
+		RetryBase: captureDispatchRetryBase, MaxAttempts: captureDispatchMaxAttempts,
+	})
+	if err != nil {
+		return workerComponents{}, err
+	}
+	organizingOutbox, err := organizingworkflow.NewDispatcher(organizingworkflow.DispatcherDependencies{
+		Repository: organizingRepository, Workflows: workflowService,
+		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+		Owner: fmt.Sprintf("organizing-worker:%s", workerID), LeaseDuration: organizingDispatchLeaseDuration,
+		RetryBase: organizingDispatchRetryBase, MaxAttempts: organizingDispatchMaxAttempts,
+	})
+	if err != nil {
 		return workerComponents{}, err
 	}
 	healthScanStartRepository, err := healthpostgres.NewScanRepository(db, runtimeRepository, healthEvents, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthcollection.DurableBindingVerifier{})
@@ -1130,19 +1574,11 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	artifactRepository, err := artifactpostgres.NewRepository(db)
-	if err != nil {
-		return workerComponents{}, err
-	}
 	citationBackfill, err := artifactapplication.NewCitationBackfillDispatcher(artifactRepository)
 	if err != nil {
 		return workerComponents{}, err
 	}
 	runtimeCoordinator, err := workflowapplication.NewRuntimeCoordinator(runtimeRepository)
-	if err != nil {
-		return workerComponents{}, err
-	}
-	workerID, err := foundation.NewUUIDGenerator(nil).New()
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1194,8 +1630,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		return workerComponents{}, err
 	}
 	reindex, err := newReindexComponents(
-		db, cfg, workspaceRepository, gitRepository, insertClient, workerID, logger, metrics, fatalInvariants,
-		modelBinding.revision, models,
+		db, cfg, sourceProcessing, insertClient, workerID, logger, metrics, fatalInvariants, models,
 	)
 	if err != nil {
 		return workerComponents{}, err
@@ -1216,6 +1651,9 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	}
 	return workerComponents{
 		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability, artifact: artifactComponents,
+		captureExecutor: captureExecutor, captureOutbox: captureOutbox, captureProfile: captureProfileCapability,
+		organizingExecutor: organizingExecutor, organizingOutbox: organizingOutbox,
+		gitSyncWorker: gitSyncWorker, gitSyncScheduler: gitSyncScheduler, gitSyncCapability: gitSyncCapability,
 		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
 		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject, citationBackfill: citationBackfill,
 		exportWorker: exportWorker, exportService: exportService, memoryExpiry: memoryService,
@@ -1380,6 +1818,87 @@ func toolWorkflowReadiness(components workerComponents) (bool, bool, bool) {
 	return contractsOK, executorsOK, dependenciesOK
 }
 
+func captureWorkflowReadiness(components workerComponents) bool {
+	if components.captureExecutor == nil || components.captureOutbox == nil || components.executors == nil || components.definitions == nil {
+		return false
+	}
+	if components.captureProfile.available {
+		if components.captureProfile.code != "" {
+			return false
+		}
+	} else if components.captureProfile.code != captureprofile.ErrorCodeCapabilityUnavailable {
+		return false
+	}
+	executor, err := components.executors.Resolve(captureapplication.ProcessingNodeKind, captureapplication.ProcessingInputSchemaVersion)
+	if err != nil || executor != components.captureExecutor {
+		return false
+	}
+	definition, err := components.definitions.Resolve(captureapplication.ProcessingDefinitionKey, captureapplication.ProcessingDefinitionVersion)
+	return err == nil && len(definition.Graph.Nodes) == 1 && definition.Graph.Nodes[0].Kind == captureapplication.ProcessingNodeKind
+}
+
+func organizingWorkflowReadiness(components workerComponents) bool {
+	if components.organizingExecutor == nil || components.organizingOutbox == nil || components.executors == nil || components.definitions == nil {
+		return false
+	}
+	for _, kind := range organizingworkflow.ExecutorNodeKinds() {
+		executor, err := components.executors.Resolve(kind, organizingworkflow.InputSchemaVersion)
+		if err != nil || executor != components.organizingExecutor {
+			return false
+		}
+	}
+	for _, registered := range organizingworkflow.RegisteredDefinitions() {
+		definition, err := components.definitions.Resolve(registered.Key, registered.Version)
+		if err != nil || len(definition.Graph.Nodes) != len(registered.Graph.Nodes) {
+			return false
+		}
+	}
+	return true
+}
+
+func gitSyncWorkerReadiness(components workerComponents) bool {
+	if !components.gitSyncCapability.available {
+		return components.gitSyncWorker == nil && components.gitSyncScheduler == nil && components.gitSyncCapability.code == gitsyncdomain.ErrorCodeUnavailable
+	}
+	return components.gitSyncWorker != nil && components.gitSyncScheduler != nil && components.gitSyncCapability.code == ""
+}
+
+func newCaptureWorkflowExecutor(
+	captures captureapplication.Repository,
+	runtime captureapplication.ProcessingRepository,
+	content captureapplication.ManagedContentWriter,
+	fetcher captureapplication.URLFetcher,
+	refresher captureworkflow.SourceRefresher,
+	profiles captureworkflow.ProfileGenerator,
+	ids foundation.IDGenerator,
+	clock foundation.Clock,
+) (*captureworkflow.Executor, error) {
+	return captureworkflow.NewExecutor(captureworkflow.ExecutorDependencies{
+		Captures: captures, Runtime: runtime, Content: content, Fetcher: fetcher,
+		Refresher: refresher, Profiles: profiles, IDs: ids, Clock: clock,
+	})
+}
+
+func newCaptureProfileRuntimeCatalog(contract platformmodels.ChatContract) (*agentapplication.RuntimeCatalog, error) {
+	if contract.Model.Validate() != nil || contract.Timeout <= 0 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, captureprofile.ErrorCodeCapabilityUnavailable, false, errors.New("capture profile chat contract is invalid"))
+	}
+	catalog := agentapplication.NewRuntimeCatalog()
+	if err := captureprofile.RegisterRuntimeCatalog(catalog); err != nil {
+		return nil, err
+	}
+	if err := catalog.RegisterProfile(agentapplication.ModelProfile{
+		Ref: agentworkflow.DefaultProfileRef(), Model: contract.Model,
+		Timeout: contract.Timeout, MaxOutputTokens: agentStructuredMaxOutputTokens,
+	}); err != nil {
+		return nil, err
+	}
+	if err := catalog.Freeze(); err != nil {
+		return nil, err
+	}
+	return catalog, nil
+}
+
 // agentWorkflowReadiness 保证 Chat capability 要么显式关闭，要么 Relation 与 RAG 都在冻结 Registry 可达。
 func agentWorkflowReadiness(components workerComponents) bool {
 	if !components.agentCapability.available {
@@ -1404,7 +1923,7 @@ func agentWorkflowReadiness(components workerComponents) bool {
 // artifactWorkflowReadiness 保证 Generation 终态收敛始终存在，且 Chat 启用时 Executor 与 Definition 成对可达。
 func artifactWorkflowReadiness(components workerComponents) bool {
 	artifact := components.artifact
-	if artifact.generation == nil || artifact.terminal == nil {
+	if artifact.generation == nil || artifact.terminal == nil || artifact.citationVerifier == nil {
 		return false
 	}
 	if !artifact.capability.available {
@@ -1546,11 +2065,53 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 }
 
 type artifactWorkflowComponents struct {
-	generation *artifactpostgres.SectionGenerationRepository
-	terminal   *artifactpostgres.SectionGenerationTerminalHook
-	executor   *artifactworkflow.Executor
-	catalog    *agentapplication.RuntimeCatalog
-	capability agentCapabilityStatus
+	generation       *artifactpostgres.SectionGenerationRepository
+	terminal         *artifactpostgres.SectionGenerationTerminalHook
+	citationVerifier *artifactapplication.ServerCitationVerifier
+	executor         *artifactworkflow.Executor
+	catalog          *agentapplication.RuntimeCatalog
+	capability       agentCapabilityStatus
+}
+
+func newCaptureProfileGenerator(
+	db *pgxpool.Pool,
+	model agentapplication.ChatModel,
+	contract platformmodels.ChatContract,
+	modelRuns *agentpostgres.Repository,
+	ids foundation.IDGenerator,
+	clock foundation.Clock,
+) (captureworkflow.ProfileGenerator, agentCapabilityStatus, error) {
+	unavailable := agentCapabilityStatus{code: captureprofile.ErrorCodeCapabilityUnavailable}
+	if db == nil || modelRuns == nil || ids == nil || clock == nil {
+		return nil, unavailable, foundation.NewError(foundation.ErrorDependencyUnavailable, captureprofile.ErrorCodeCapabilityUnavailable, false, errors.New("configured capture profile dependencies are unavailable"))
+	}
+	profileRepository, err := capturepostgres.NewProfileRepository(db, modelRuns)
+	if err != nil {
+		return nil, unavailable, err
+	}
+	if model == nil {
+		generator, generatorErr := captureprofile.NewUnavailableGenerator(profileRepository, ids, clock)
+		if generatorErr != nil {
+			return nil, unavailable, generatorErr
+		}
+		return generator, unavailable, nil
+	}
+	if contract.Model.Validate() != nil || contract.Timeout <= 0 {
+		return nil, unavailable, foundation.NewError(foundation.ErrorDependencyUnavailable, captureprofile.ErrorCodeCapabilityUnavailable, false, errors.New("configured capture profile model contract is unavailable"))
+	}
+	catalog, err := newCaptureProfileRuntimeCatalog(contract)
+	if err != nil {
+		return nil, unavailable, err
+	}
+	profileRef := agentworkflow.DefaultProfileRef()
+	generator, err := captureprofile.NewGenerator(captureprofile.GeneratorDependencies{
+		Repository: profileRepository, ModelRuns: modelRuns, Model: model, Catalog: catalog,
+		ModelProfileRef: profileRef, Budget: agentApplicationBudget(contract), IDs: ids, Clock: clock,
+	})
+	if err != nil {
+		return nil, unavailable, err
+	}
+	return generator, agentCapabilityStatus{available: true}, nil
 }
 
 // newArtifactGenerationAgent 先组装 Agent 事务端口与独立 terminal hook，解除 Runtime 构造依赖环。
@@ -1618,7 +2179,7 @@ func newArtifactWorkflowComponents(
 		return artifactWorkflowComponents{}, err
 	}
 	components := artifactWorkflowComponents{
-		generation: generation, terminal: terminal,
+		generation: generation, terminal: terminal, citationVerifier: citationVerifier,
 		capability: agentCapabilityStatus{code: artifactworkflow.ErrorCodeCapabilityUnavailable},
 	}
 	if model == nil {
@@ -1683,6 +2244,27 @@ func newArtifactRuntimeCatalog(contract platformmodels.ChatContract) (*agentappl
 	return catalog, nil
 }
 
+// newOrganizingRuntimeCatalog 使用共享 Chat contract 冻结 Organizing 独立 Prompt、Schema 与 Profile。
+func newOrganizingRuntimeCatalog(contract platformmodels.ChatContract) (*agentapplication.RuntimeCatalog, error) {
+	if contract.Model.Validate() != nil || contract.Timeout <= 0 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "ORGANIZING_GENERATION_CAPABILITY_UNAVAILABLE", false, errors.New("organizing chat contract is invalid"))
+	}
+	catalog := agentapplication.NewRuntimeCatalog()
+	if err := organizingworkflow.RegisterGenerationRuntimeCatalog(catalog); err != nil {
+		return nil, err
+	}
+	if err := catalog.RegisterProfile(agentapplication.ModelProfile{
+		Ref: agentworkflow.DefaultProfileRef(), Model: contract.Model,
+		Timeout: contract.Timeout, MaxOutputTokens: agentStructuredMaxOutputTokens,
+	}); err != nil {
+		return nil, err
+	}
+	if err := catalog.Freeze(); err != nil {
+		return nil, err
+	}
+	return catalog, nil
+}
+
 func agentApplicationBudget(contract platformmodels.ChatContract) agentapplication.RunBudget {
 	budget := agentapplication.DefaultRunBudget()
 	budget.MaxRequestBytes = min(contract.MaxRequestBytes*agentapplication.StructuredCallLimit, agentapplication.MaxRunRequestBytes)
@@ -1696,24 +2278,36 @@ type reindexComponents struct {
 	dispatcher *retrievalruntime.Runner
 }
 
-func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, committedGit *gitcli.WritebackClient, insertClient *riveradapter.Client, workerID foundation.ID, logger *slog.Logger, metrics observability.Metrics, fatalInvariants chan<- error, modelSettingsRevision *int64, modelRuntimes ...*modelsettingsruntime.Models) (reindexComponents, error) {
+type sourceProcessingComponents struct {
+	workspace        *workspaceapplication.Service
+	ingestion        *ingestionapplication.Service
+	retrieval        *retrievalapplication.Service
+	store            *retrievalpostgres.Repository
+	vectors          retrievalapplication.ProcessorVectorPort
+	regression       *retrievalapplication.RegressionService
+	processorOptions retrievalapplication.ProcessorOptions
+	refresher        *retrievalapplication.SourceRefresher
+}
+
+func newSourceProcessingComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, committedGit *gitcli.WritebackClient, modelSettingsRevision *int64, modelRuntimes ...*modelsettingsruntime.Models) (sourceProcessingComponents, error) {
 	models, err := modelRuntimeForComposition(cfg, modelRuntimes...)
 	if err != nil {
-		return reindexComponents{}, err
+		return sourceProcessingComponents{}, err
 	}
 	ids := foundation.NewUUIDGenerator(nil)
 	clock := foundation.SystemClock{}
 	files := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
 	workspaceService := workspaceapplication.NewService(workspaceapplication.Dependencies{
-		Repository: workspaceRepository, CommittedFiles: files, CommittedGit: committedGit, IDs: ids, Clock: clock,
+		Repository: workspaceRepository, ManagedFiles: files, CommittedFiles: files, CommittedGit: committedGit,
+		IDs: ids, Clock: clock,
 	})
 	ingestionRepository, err := ingestionpostgres.NewRepository(db)
 	if err != nil {
-		return reindexComponents{}, err
+		return sourceProcessingComponents{}, err
 	}
 	sourceReader, err := ingestionworkspace.NewReader(workspaceRepository, files)
 	if err != nil {
-		return reindexComponents{}, err
+		return sourceProcessingComponents{}, err
 	}
 	ingestionService, err := ingestionapplication.NewService(ingestionapplication.Dependencies{
 		Repository: ingestionRepository, Sources: sourceReader,
@@ -1726,24 +2320,24 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceReposito
 		},
 	})
 	if err != nil {
-		return reindexComponents{}, err
+		return sourceProcessingComponents{}, err
 	}
 	retrievalRepository, err := retrievalpostgres.NewRepository(db)
 	if err != nil {
-		return reindexComponents{}, err
+		return sourceProcessingComponents{}, err
 	}
 	retrievalService, err := retrievalapplication.NewService(retrievalapplication.Dependencies{Store: retrievalRepository, IDs: ids, Clock: clock})
 	if err != nil {
-		return reindexComponents{}, err
+		return sourceProcessingComponents{}, err
 	}
 	regressionService, err := retrievalapplication.NewRegressionService(retrievalRepository)
 	if err != nil {
-		return reindexComponents{}, err
+		return sourceProcessingComponents{}, err
 	}
 	processorOptions := retrievalapplication.DefaultFTSOnlyProcessorOptions(cfg.ReindexDispatchErrorBackoff)
 	vectorBuilder, err := retrievalapplication.NewVectorRecoveryBuilder(retrievalRepository, clock)
 	if err != nil {
-		return reindexComponents{}, err
+		return sourceProcessingComponents{}, err
 	}
 	embedder := models.Embedding().Embedder()
 	if embedder != nil {
@@ -1757,23 +2351,122 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceReposito
 		})
 		cancelRegistration()
 		if registrationErr != nil {
-			return reindexComponents{}, registrationErr
+			return sourceProcessingComponents{}, registrationErr
 		}
 		builder, builderErr := retrievalapplication.NewVectorBuilder(retrievalapplication.VectorBuilderDependencies{
 			Store: retrievalRepository, Embedder: embedder, Clock: clock,
 		})
 		if builderErr != nil {
-			return reindexComponents{}, builderErr
+			return sourceProcessingComponents{}, builderErr
 		}
 		fusion, fusionErr := configuredRRF(cfg)
 		if fusionErr != nil {
-			return reindexComponents{}, fusionErr
+			return sourceProcessingComponents{}, fusionErr
 		}
 		embeddingVersionID := registered.EmbeddingVersion.ID
 		processorOptions.EmbeddingVersionID = &embeddingVersionID
 		processorOptions.FusionConfig = fusion
 		vectorBuilder = builder
 	}
+	refresher, err := retrievalapplication.NewSourceRefresher(retrievalapplication.SourceRefresherDependencies{
+		Ingestion: ingestionService, Retrieval: retrievalService, Locker: retrievalRepository, Vectors: vectorBuilder,
+	}, retrievalapplication.SourceRefresherOptions{
+		EmbeddingVersionID: processorOptions.EmbeddingVersionID,
+		TokenizerID:        processorOptions.TokenizerID, TokenizerVersion: processorOptions.TokenizerVersion,
+		TokenizerConfigHash: processorOptions.TokenizerConfigHash, FusionConfig: processorOptions.FusionConfig,
+		PageSize: processorOptions.PageSize, MaxSources: processorOptions.MaxSources, MaxChunks: processorOptions.MaxChunks,
+	})
+	if err != nil {
+		return sourceProcessingComponents{}, err
+	}
+	return sourceProcessingComponents{
+		workspace: workspaceService, ingestion: ingestionService, retrieval: retrievalService,
+		store: retrievalRepository, vectors: vectorBuilder, regression: regressionService,
+		processorOptions: processorOptions, refresher: refresher,
+	}, nil
+}
+
+// newGitSyncWorker composes the optional remote-sync capability. A missing key
+// intentionally leaves it unavailable: no credential store or remote client is
+// created, while unrelated Worker capabilities remain runnable.
+func newGitSyncWorker(
+	db *pgxpool.Pool,
+	cfg config.Config,
+	workspaceRepository *workspacepostgres.Repository,
+	committedGit *gitcli.WritebackClient,
+	sources sourceProcessingComponents,
+	locker gitoperation.WorkspaceLocker,
+	workerID foundation.ID,
+) (*gitsyncapplication.Worker, *gitsyncapplication.AutoSyncScheduler, error) {
+	if cfg.GitSyncKeyFile == "" {
+		return nil, nil, nil
+	}
+	sealer, err := gitsyncsecurity.NewCredentialSealerFromFile(cfg.GitSyncKeyFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	if db == nil || workspaceRepository == nil || committedGit == nil || sources.workspace == nil ||
+		sources.refresher == nil || locker == nil || workerID == "" {
+		return nil, nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_GIT_SYNC_DEPENDENCIES_UNAVAILABLE", false, errors.New("Git sync worker dependencies are unavailable"))
+	}
+	repository, err := gitsyncpostgres.NewRepository(db, sealer)
+	if err != nil {
+		return nil, nil, err
+	}
+	policy := gitsyncsecurity.NewURLPolicy(net.DefaultResolver)
+	remote, err := gitcli.NewRemoteClient(gitcli.New(""), workspaceRepository, policy)
+	if err != nil {
+		return nil, nil, err
+	}
+	ids := foundation.NewUUIDGenerator(nil)
+	clock := foundation.SystemClock{}
+	cursors, err := gitsyncapplication.NewRandomCursorCodec()
+	if err != nil {
+		return nil, nil, err
+	}
+	service, err := gitsyncapplication.NewService(repository, repository, policy, remote, ids, clock, cursors)
+	if err != nil {
+		return nil, nil, err
+	}
+	scheduler, err := gitsyncapplication.NewAutoSyncScheduler(repository, service)
+	if err != nil {
+		return nil, nil, err
+	}
+	runs, err := gitsyncapplication.NewRunExecutor(
+		repository, repository, remote, locker, ids, 0,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	capture, err := gitsourcecapture.New(gitsourcecapture.Dependencies{
+		Trees: committedGit, Blobs: committedGit, Sources: sources.workspace,
+		Repository: workspaceRepository, Refresher: sources.refresher, Clock: clock,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	followup, err := gitsyncapplication.NewFollowupExecutor(repository, capture)
+	if err != nil {
+		return nil, nil, err
+	}
+	worker, err := gitsyncapplication.NewWorker(repository, runs, followup, fmt.Sprintf("git-sync-worker:%s", workerID), 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	return worker, scheduler, nil
+}
+
+func newReindexComponents(db *pgxpool.Pool, cfg config.Config, processing sourceProcessingComponents, insertClient *riveradapter.Client, workerID foundation.ID, logger *slog.Logger, metrics observability.Metrics, fatalInvariants chan<- error, modelRuntimes ...*modelsettingsruntime.Models) (reindexComponents, error) {
+	models, err := modelRuntimeForComposition(cfg, modelRuntimes...)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	if processing.workspace == nil || processing.ingestion == nil || processing.retrieval == nil || processing.store == nil ||
+		processing.vectors == nil || processing.regression == nil || processing.refresher == nil ||
+		(processing.processorOptions.EmbeddingVersionID != nil) != (models.Embedding().Embedder() != nil) {
+		return reindexComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKER_SOURCE_PROCESSING_UNAVAILABLE", false, errors.New("shared source processing components do not match the frozen model runtime"))
+	}
+	ids := foundation.NewUUIDGenerator(nil)
 	deliveryRepository, err := retrievalpostgres.NewDeliveryRepository(db, ids)
 	if err != nil {
 		return reindexComponents{}, err
@@ -1783,13 +2476,13 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, workspaceReposito
 		return reindexComponents{}, err
 	}
 	processor, err := retrievalapplication.NewProcessor(retrievalapplication.ProcessorDependencies{
-		Contexts: deliveryRepository, Capture: workspaceService, Ingestion: ingestionService,
-		Retrieval: retrievalService, Vectors: vectorBuilder, Regression: regressionService,
-	}, processorOptions)
+		Contexts: deliveryRepository, Capture: processing.workspace, Ingestion: processing.ingestion,
+		Retrieval: processing.retrieval, Vectors: processing.vectors, Regression: processing.regression,
+	}, processing.processorOptions)
 	if err != nil {
 		return reindexComponents{}, err
 	}
-	completion, err := retrievalapplication.NewCompletionService(retrievalRepository, ids, cfg.ReindexDispatchErrorBackoff)
+	completion, err := retrievalapplication.NewCompletionService(processing.store, ids, cfg.ReindexDispatchErrorBackoff)
 	if err != nil {
 		return reindexComponents{}, err
 	}

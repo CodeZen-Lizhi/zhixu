@@ -64,6 +64,9 @@ func TestExporterWritesCanonicalMarkdownWithVerifiedBinding(t *testing.T) {
 		"## Channels",
 		"Channels synchronize work.",
 		"Source Version: `50000000-0000-4000-8000-000000000005`",
+		"### Source Documents",
+		"Document: `b0000000-0000-4000-8000-000000000011`",
+		"Article Revision: `c0000000-0000-4000-8000-000000000012`",
 		"## Limits",
 		"- `NO_SOURCE`: No approved source covers limits",
 		"- Formal Knowledge: `false`",
@@ -229,6 +232,9 @@ func testSnapshot(t *testing.T, workspaceID, artifactID, revisionID, exportID fo
 	covered := domain.Section{Key: "channels", Title: "Channels", Content: "Channels synchronize work.", Citations: []domain.Citation{{
 		SourceVersionID: "50000000-0000-4000-8000-000000000005", SourceSpanID: "60000000-0000-4000-8000-000000000006",
 		VerifiedContentHash: strings.Repeat("a", 64), Excerpt: "Verified source span.", Verified: true,
+	}}, DocumentSources: []domain.DocumentSource{{
+		DocumentID: "b0000000-0000-4000-8000-000000000011", ArticleRevisionID: "c0000000-0000-4000-8000-000000000012",
+		RevisionNo: 3, VerifiedContentHash: strings.Repeat("b", 64), Verified: true,
 	}}, Coverage: domain.Coverage{SectionKey: "channels", Status: domain.CoverageCovered, Gaps: []domain.Gap{}}}
 	artifact, revision, err = domain.RecordSection(artifact, revision, "90000000-0000-4000-8000-000000000009", covered, domain.CreatorHuman, nil, now.Add(3*time.Minute))
 	if err != nil {

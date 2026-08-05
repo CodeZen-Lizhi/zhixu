@@ -2,6 +2,8 @@ package application
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"reflect"
 	"strings"
@@ -157,6 +159,38 @@ func TestCaptureCommittedSourceVersionRejectsHashMismatchBeforePublishing(t *tes
 	})
 	if err == nil || store.calls != 0 || repository.registerCalls != 0 {
 		t.Fatalf("err=%v store_calls=%d register_calls=%d", err, store.calls, repository.registerCalls)
+	}
+}
+
+func TestPrepareCommittedSourceVersionDefersDatabaseRegistration(t *testing.T) {
+	content := []byte("<p>committed</p>")
+	digest := sha256.Sum256(content)
+	hash := hex.EncodeToString(digest[:])
+	repository := &fakeRepository{workspace: domain.Workspace{ID: testWorkspaceID, RootPath: "/workspace"}}
+	git := &fakeCommittedBlobReader{blob: domain.CommittedBlob{
+		WorkspaceID: testWorkspaceID, Commit: strings.Repeat("a", 40), RelativePath: "notes/a.html", Bytes: content,
+	}}
+	store := &fakeCommittedContentStore{capture: domain.ContentCapture{
+		ContentHash: hash, ByteSize: int64(len(content)), ManagedLocation: ".knowledge/sources/" + hash,
+	}}
+	service := NewService(Dependencies{
+		Repository: repository, CommittedGit: git, CommittedFiles: store,
+		IDs: &sequenceIDGenerator{ids: []foundation.ID{
+			"91000000-0000-4000-8000-000000000001",
+			"92000000-0000-4000-8000-000000000001",
+			"93000000-0000-4000-8000-000000000001",
+		}},
+		Clock: foundation.FixedClock{Value: time.Date(2026, time.August, 3, 1, 0, 0, 0, time.UTC)},
+	})
+
+	registration, err := service.PrepareCommittedSourceVersion(context.Background(), CaptureCommittedSourceRequest{
+		WorkspaceID: testWorkspaceID, GitCommit: strings.Repeat("a", 40), RelativePath: "notes/a.html", ExpectedHash: hash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository.registerCalls != 0 || registration.Version.MediaType != "text/html" || registration.Version.ContentHash != hash {
+		t.Fatalf("registration=%#v register_calls=%d", registration, repository.registerCalls)
 	}
 }
 

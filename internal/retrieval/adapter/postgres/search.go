@@ -416,6 +416,7 @@ filtered_provenance AS MATERIALIZED (
 	JOIN core.source source_record
 	  ON source_record.id=source_manifest.source_id
 	 AND source_record.workspace_id=active_index.workspace_id
+	 AND source_record.removed_at IS NULL
 	JOIN core.source_version source_version
 	  ON source_version.id=source_manifest.source_version_id
 	 AND source_version.source_id=source_manifest.source_id
@@ -527,6 +528,7 @@ filtered_provenance AS MATERIALIZED (
 	JOIN core.source source_record
 	  ON source_record.id=source_manifest.source_id
 	 AND source_record.workspace_id=active_index.workspace_id
+	 AND source_record.removed_at IS NULL
 	JOIN core.source_version source_version
 	  ON source_version.id=source_manifest.source_version_id
 	 AND source_version.source_id=source_manifest.source_id

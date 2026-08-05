@@ -22,9 +22,10 @@ import (
 )
 
 const (
-	testWorkspaceID foundation.ID = "10000000-0000-4000-8000-000000000001"
-	testRunID       foundation.ID = "20000000-0000-4000-8000-000000000001"
-	testTaskID      foundation.ID = "30000000-0000-4000-8000-000000000001"
+	testWorkspaceID  foundation.ID = "10000000-0000-4000-8000-000000000001"
+	otherWorkspaceID foundation.ID = "10000000-0000-4000-8000-000000000002"
+	testRunID        foundation.ID = "20000000-0000-4000-8000-000000000001"
+	testTaskID       foundation.ID = "30000000-0000-4000-8000-000000000001"
 )
 
 func TestStartWorkflowReturnsAcceptedRun(t *testing.T) {
@@ -42,15 +43,77 @@ func TestStartWorkflowReturnsAcceptedRun(t *testing.T) {
 
 func TestGetWorkflowRunContract(t *testing.T) {
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
-	service := &fakeService{run: domain.Run{ID: testRunID, WorkspaceID: testWorkspaceID, DefinitionID: testTaskID, Status: domain.StatusRunning, Input: json.RawMessage(`{}`), Version: 2, CreatedAt: now, UpdatedAt: now, PauseRequestedAt: &now}}
+	expiresAt := now.Add(time.Hour)
+	service := &fakeService{
+		run: domain.Run{ID: testRunID, WorkspaceID: testWorkspaceID, DefinitionID: testTaskID, Status: domain.StatusWaitingForHuman, Input: json.RawMessage(`{}`), Version: 2, CreatedAt: now, UpdatedAt: now, PauseRequestedAt: &now},
+		pendingTask: domain.HumanTask{ID: testTaskID, RunID: testRunID, NodeRunID: testWorkspaceID, Status: domain.HumanTaskPending,
+			ExpectedInputSchema: json.RawMessage(`{"type":"object","required":["approved"]}`), TargetVersion: 3, ExpiresAt: &expiresAt, CreatedAt: now},
+		pendingTaskFound: true,
+	}
 	recorder := serve(t, service, http.MethodGet, "/api/v1/workflows/"+string(testRunID), "")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	var response runResponse
 	decode(t, recorder, &response)
-	if response.ID != string(testRunID) || response.Status != string(domain.StatusRunning) || !response.PauseRequested || response.CancelRequested || service.getID != testRunID {
+	if response.ID != string(testRunID) || response.Status != string(domain.StatusWaitingForHuman) || !response.PauseRequested || response.CancelRequested || service.getID != testRunID ||
+		response.HumanTask == nil || response.HumanTask.ID != string(testTaskID) || response.HumanTask.TargetVersion != 3 || string(response.HumanTask.Review) != "null" {
 		t.Fatalf("response=%#v getID=%q", response, service.getID)
+	}
+}
+
+func TestGetWorkflowRunIncludesBoundHumanTaskReview(t *testing.T) {
+	now := time.Date(2026, 8, 4, 8, 0, 0, 0, time.UTC)
+	run := domain.Run{ID: testRunID, WorkspaceID: testWorkspaceID, DefinitionID: testTaskID, Status: domain.StatusWaitingForHuman,
+		Input: json.RawMessage(`{"snapshot_id":"10000000-0000-4000-8000-000000000003"}`), Version: 2, CreatedAt: now, UpdatedAt: now}
+	task := domain.HumanTask{ID: testTaskID, RunID: testRunID, NodeRunID: testWorkspaceID, Status: domain.HumanTaskPending,
+		ExpectedInputSchema: json.RawMessage(`{"type":"object"}`), TargetVersion: 1, CreatedAt: now}
+	service := &fakeService{run: run, pendingTask: task, pendingTaskFound: true}
+	projector := &fakeHumanTaskReviewProjector{review: json.RawMessage(`{"kind":"TOPIC_OUTLINE","schema_version":1}`), required: true}
+	recorder := serveWithReviewProjector(t, service, projector, http.MethodGet, "/api/v1/workflows/"+string(testRunID), "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response runResponse
+	decode(t, recorder, &response)
+	if response.HumanTask == nil || string(response.HumanTask.Review) != string(projector.review) ||
+		projector.run.ID != run.ID || projector.task.ID != task.ID {
+		t.Fatalf("response=%#v projector=%+v", response, projector)
+	}
+}
+
+func TestGetWorkflowRunFailsClosedForInvalidRequiredReview(t *testing.T) {
+	now := time.Date(2026, 8, 4, 8, 0, 0, 0, time.UTC)
+	service := &fakeService{
+		run: domain.Run{ID: testRunID, WorkspaceID: testWorkspaceID, DefinitionID: testTaskID, Status: domain.StatusWaitingForHuman,
+			Input: json.RawMessage(`{}`), Version: 2, CreatedAt: now, UpdatedAt: now},
+		pendingTask: domain.HumanTask{ID: testTaskID, RunID: testRunID, NodeRunID: testWorkspaceID, Status: domain.HumanTaskPending,
+			ExpectedInputSchema: json.RawMessage(`{"type":"object"}`), TargetVersion: 1, CreatedAt: now},
+		pendingTaskFound: true,
+	}
+	for _, test := range []struct {
+		name      string
+		projector *fakeHumanTaskReviewProjector
+		status    int
+		code      string
+	}{
+		{name: "missing required review", projector: &fakeHumanTaskReviewProjector{required: true}, status: http.StatusConflict, code: "WORKFLOW_HUMAN_TASK_REVIEW_INVALID"},
+		{name: "dependency unavailable", projector: &fakeHumanTaskReviewProjector{required: true, err: foundation.NewError(foundation.ErrorDependencyUnavailable, "ORGANIZING_HUMAN_REVIEW_UNAVAILABLE", true, errors.New("offline"))}, status: http.StatusServiceUnavailable, code: "ORGANIZING_HUMAN_REVIEW_UNAVAILABLE"},
+		{name: "non owner invented review", projector: &fakeHumanTaskReviewProjector{review: json.RawMessage(`{"kind":"FAKE"}`)}, status: http.StatusConflict, code: "WORKFLOW_HUMAN_TASK_REVIEW_INVALID"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := serveWithReviewProjector(t, service, test.projector, http.MethodGet, "/api/v1/workflows/"+string(testRunID), "")
+			if recorder.Code != test.status {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var problem struct {
+				ErrorCode string `json:"error_code"`
+			}
+			decode(t, recorder, &problem)
+			if problem.ErrorCode != test.code {
+				t.Fatalf("problem=%+v", problem)
+			}
+		})
 	}
 }
 
@@ -110,6 +173,42 @@ func TestSubmitHumanDecisionContract(t *testing.T) {
 	}
 }
 
+func TestSubmitHumanDecisionFailsClosedWhenRequiredReviewIsUnavailable(t *testing.T) {
+	now := time.Date(2026, 8, 4, 8, 0, 0, 0, time.UTC)
+	pending := domain.HumanTask{ID: testTaskID, RunID: testRunID, NodeRunID: testWorkspaceID, Status: domain.HumanTaskPending,
+		ExpectedInputSchema: json.RawMessage(`{"type":"object"}`), TargetVersion: 3, CreatedAt: now}
+	service := &fakeService{
+		run:              domain.Run{ID: testRunID, WorkspaceID: testWorkspaceID, Status: domain.StatusWaitingForHuman},
+		pendingTask:      pending,
+		pendingTaskFound: true,
+		task:             domain.HumanTask{ID: testTaskID, RunID: testRunID, NodeRunID: testWorkspaceID, Status: domain.HumanTaskSubmitted, TargetVersion: 3},
+	}
+	recorder := serveWithReviewProjector(t, service, &fakeHumanTaskReviewProjector{required: true}, http.MethodPost,
+		"/api/v1/workflows/"+string(testRunID)+"/human-tasks/"+string(testTaskID)+"/decision", `{"target_version":3,"decision":{"approved":true}}`)
+	if recorder.Code != http.StatusConflict || service.submitTaskID != "" {
+		t.Fatalf("status=%d submitted=%q body=%s", recorder.Code, service.submitTaskID, recorder.Body.String())
+	}
+	var problem struct {
+		ErrorCode string `json:"error_code"`
+	}
+	decode(t, recorder, &problem)
+	if problem.ErrorCode != "WORKFLOW_HUMAN_TASK_REVIEW_INVALID" {
+		t.Fatalf("problem=%+v", problem)
+	}
+}
+
+func TestSubmitHumanDecisionDoesNotBypassMissingPendingTask(t *testing.T) {
+	service := &fakeService{
+		run:  domain.Run{ID: testRunID, WorkspaceID: testWorkspaceID, Status: domain.StatusWaitingForHuman},
+		task: domain.HumanTask{ID: testTaskID, RunID: testRunID, Status: domain.HumanTaskSubmitted, TargetVersion: 3},
+	}
+	recorder := serveWithReviewProjector(t, service, &fakeHumanTaskReviewProjector{}, http.MethodPost,
+		"/api/v1/workflows/"+string(testRunID)+"/human-tasks/"+string(testTaskID)+"/decision", `{"target_version":3,"decision":{"approved":true}}`)
+	if recorder.Code != http.StatusNotFound || service.submitTaskID != "" {
+		t.Fatalf("status=%d submitted=%q body=%s", recorder.Code, service.submitTaskID, recorder.Body.String())
+	}
+}
+
 func TestWorkflowControlContract(t *testing.T) {
 	for _, action := range []string{"pause", "resume", "cancel"} {
 		t.Run(action, func(t *testing.T) {
@@ -132,6 +231,7 @@ func TestWorkflowControlRequiresIdempotencyAndPositiveVersion(t *testing.T) {
 	router := chi.NewRouter()
 	router.Route("/api/v1", func(api chi.Router) { NewHandler(service).Routes(api) })
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/pause", strings.NewReader(`{"expected_version":1}`))
+	request.Header.Set("X-Workspace-ID", string(testWorkspaceID))
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
@@ -139,6 +239,7 @@ func TestWorkflowControlRequiresIdempotencyAndPositiveVersion(t *testing.T) {
 	}
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/pause", strings.NewReader(`{"expected_version":0}`))
 	request.Header.Set("Idempotency-Key", "key")
+	request.Header.Set("X-Workspace-ID", string(testWorkspaceID))
 	recorder = httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
@@ -182,6 +283,7 @@ func TestWorkflowCommandsCarryBearerPrincipalCapabilities(t *testing.T) {
 		request.Header.Set("Authorization", "Bearer low-scope-token")
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Idempotency-Key", "bearer-command")
+		request.Header.Set("X-Workspace-ID", string(testWorkspaceID))
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, request)
 		if response.Code != http.StatusOK {
@@ -194,6 +296,51 @@ func TestWorkflowCommandsCarryBearerPrincipalCapabilities(t *testing.T) {
 	if len(service.human.CallerCapabilities) != 1 || service.human.CallerCapabilities[0] != capability.WriteProposal {
 		t.Fatalf("human caller capabilities=%v", service.human.CallerCapabilities)
 	}
+}
+
+func TestWorkflowGlobalOperationsRequireWorkspaceHeaderAndOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		header   string
+		status   int
+		getCalls int
+	}{
+		{name: "missing header", status: http.StatusBadRequest},
+		{name: "invalid header", header: "not-a-workspace-id", status: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeService{run: domain.Run{ID: testRunID, WorkspaceID: testWorkspaceID}}
+			recorder := serveWithWorkspaceHeader(t, service, http.MethodGet, "/api/v1/workflows/"+string(testRunID), "", test.header)
+			if recorder.Code != test.status || service.getCalls != test.getCalls {
+				t.Fatalf("status=%d getCalls=%d body=%s", recorder.Code, service.getCalls, recorder.Body.String())
+			}
+		})
+	}
+
+	foreignRun := domain.Run{ID: testRunID, WorkspaceID: otherWorkspaceID}
+	t.Run("detail cross workspace returns not found", func(t *testing.T) {
+		service := &fakeService{run: foreignRun}
+		recorder := serveWithWorkspaceHeader(t, service, http.MethodGet, "/api/v1/workflows/"+string(testRunID), "", string(testWorkspaceID))
+		if recorder.Code != http.StatusNotFound || service.getCalls != 1 {
+			t.Fatalf("status=%d getCalls=%d body=%s", recorder.Code, service.getCalls, recorder.Body.String())
+		}
+	})
+	for _, action := range []string{"pause", "resume", "cancel"} {
+		t.Run(action+" cross workspace returns not found", func(t *testing.T) {
+			service := &fakeService{run: foreignRun}
+			recorder := serveWithWorkspaceHeader(t, service, http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/"+action, `{"expected_version":1}`, string(testWorkspaceID))
+			if recorder.Code != http.StatusNotFound || service.getCalls != 1 || service.controlAction != "" {
+				t.Fatalf("status=%d getCalls=%d control=%q body=%s", recorder.Code, service.getCalls, service.controlAction, recorder.Body.String())
+			}
+		})
+	}
+	t.Run("human decision cross workspace returns not found", func(t *testing.T) {
+		service := &fakeService{run: foreignRun}
+		recorder := serveWithWorkspaceHeader(t, service, http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/human-tasks/"+string(testTaskID)+"/decision", `{"target_version":1,"decision":{"approved":true}}`, string(testWorkspaceID))
+		if recorder.Code != http.StatusNotFound || service.getCalls != 1 || service.human.RunID != "" {
+			t.Fatalf("status=%d getCalls=%d human=%+v body=%s", recorder.Code, service.getCalls, service.human, recorder.Body.String())
+		}
+	})
 }
 
 func TestWorkflowHandlerMapsInvalidAndConflictErrors(t *testing.T) {
@@ -233,6 +380,7 @@ type fakeService struct {
 	err                       error
 	start                     application.StartCommand
 	getID                     foundation.ID
+	getCalls                  int
 	submitTaskID, submitRunID foundation.ID
 	submitWorkspaceID         foundation.ID
 	control                   application.RunControlCommand
@@ -243,6 +391,21 @@ type fakeService struct {
 	listHasMore               bool
 	listQuery                 domain.RunListQuery
 	listCalls                 int
+	pendingTask               domain.HumanTask
+	pendingTaskFound          bool
+}
+
+type fakeHumanTaskReviewProjector struct {
+	review   json.RawMessage
+	required bool
+	err      error
+	run      domain.Run
+	task     domain.HumanTask
+}
+
+func (projector *fakeHumanTaskReviewProjector) ProjectHumanTaskReview(_ context.Context, run domain.Run, task domain.HumanTask) (json.RawMessage, bool, error) {
+	projector.run, projector.task = run, task
+	return append(json.RawMessage(nil), projector.review...), projector.required, projector.err
 }
 
 func (f *fakeService) ListRuns(_ context.Context, query domain.RunListQuery) ([]domain.RunListItem, bool, error) {
@@ -276,8 +439,17 @@ func (f *fakeService) Start(_ context.Context, command application.StartCommand)
 	return f.run, f.err
 }
 func (f *fakeService) Get(_ context.Context, id foundation.ID) (domain.Run, error) {
-	f.getID = id
+	f.getID, f.getCalls = id, f.getCalls+1
+	if f.run.ID == "" {
+		return domain.Run{ID: id, WorkspaceID: testWorkspaceID}, f.err
+	}
 	return f.run, f.err
+}
+func (f *fakeService) GetPendingHumanTask(_ context.Context, runID foundation.ID) (domain.HumanTask, bool, error) {
+	if runID != f.run.ID {
+		return domain.HumanTask{}, false, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_HUMAN_TASK_RUN_INVALID", false, errors.New("run binding mismatch"))
+	}
+	return f.pendingTask, f.pendingTaskFound, f.err
 }
 func (f *fakeService) SubmitHumanDecision(_ context.Context, taskID foundation.ID, _ int64, _ json.RawMessage, workspaceID, runID foundation.ID) (domain.HumanTask, error) {
 	f.submitTaskID, f.submitWorkspaceID, f.submitRunID = taskID, workspaceID, runID
@@ -329,11 +501,30 @@ func (service workflowAuthService) RevokeAPIToken(context.Context, authdomain.Pr
 }
 
 func serve(t *testing.T, service Service, method, path, body string) *httptest.ResponseRecorder {
+	return serveWithWorkspaceHeader(t, service, method, path, body, string(testWorkspaceID))
+}
+
+func serveWithWorkspaceHeader(t *testing.T, service Service, method, path, body, workspaceHeader string) *httptest.ResponseRecorder {
 	t.Helper()
 	router := chi.NewRouter()
 	router.Route("/api/v1", func(api chi.Router) { NewHandler(service).Routes(api) })
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Idempotency-Key", "test-request")
+	if workspaceHeader != "" {
+		request.Header.Set("X-Workspace-ID", workspaceHeader)
+	}
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func serveWithReviewProjector(t *testing.T, service Service, projector HumanTaskReviewProjector, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	router := chi.NewRouter()
+	router.Route("/api/v1", func(api chi.Router) { NewHandler(service, projector).Routes(api) })
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	request.Header.Set("Idempotency-Key", "test-request")
+	request.Header.Set("X-Workspace-ID", string(testWorkspaceID))
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	return recorder

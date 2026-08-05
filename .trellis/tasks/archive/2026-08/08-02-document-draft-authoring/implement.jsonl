@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/index.md","reason":"Authoring 模块、Composition Root 与 Change Control owner 边界"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Workspace Capability、写命令与安全边界"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Working Draft CAS、不可变 Revision、发布绑定和迁移约束"}
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"确认 Document Draft 与 Artifact 身份和发布契约不混淆"}
+{"file":".trellis/spec/frontend/index.md","reason":"Authoring Feature、路由、Server State 与严格边界"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"Markdown Editor、焦点、冲突与状态组件"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Workspace Query、Working Draft、autosave 和 SSE invalidation"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Authoring JSON 与判别状态严格解码"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Working Draft 到 Proposal/Writeback 的跨层一致性"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"幂等、迁移、恢复和证据优先契约"}

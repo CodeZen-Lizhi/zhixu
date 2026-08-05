@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"检查 CAS、复合 FK、append-only、Down guard 和并发"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"检查 Workspace 隔离、Capability、路径和敏感输入"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"检查网络边界、恢复状态和 fail closed decoder"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"检查编辑器、预览、焦点、移动端和冲突 UX"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 Revision、Proposal、Commit 与 Document 发布事实一致性"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"检查 response-loss、幂等和恢复门禁"}

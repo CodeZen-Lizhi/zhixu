@@ -54,6 +54,52 @@ func (r *Reader) CurrentHash(ctx context.Context, workspaceID foundation.ID, tar
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
+// EnsureTargetAbsent 在同一受控 Workspace 边界内证明目标不存在。
+// absence token 由调用方冻结，不能以空文件的内容哈希替代。
+func (r *Reader) EnsureTargetAbsent(ctx context.Context, workspaceID foundation.ID, targetPath, absenceToken string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := domain.ValidateWorkspaceTarget(workspaceID, targetPath); err != nil {
+		return foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_TARGET_INVALID", false, err)
+	}
+	if err := domain.ValidateTargetBaseVersion(workspaceID, targetPath, domain.TargetModeCreateOnly, absenceToken); err != nil {
+		return foundation.NewError(foundation.ErrorInvalidInput, "CREATE_ONLY_ABSENCE_TOKEN_INVALID", false, err)
+	}
+	workspace, err := r.workspaces.GetWorkspaceByID(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if workspace.ID != workspaceID {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_WORKSPACE_BINDING_INVALID", false, errors.New("workspace repository returned a different workspace"))
+	}
+	canonicalRoot, err := filesystem.NewRoot(workspace.RootPath)
+	if err != nil {
+		return foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
+	}
+	root, err := os.OpenRoot(canonicalRoot.Path())
+	if err != nil {
+		return &domain.TargetUnavailableError{Cause: err}
+	}
+	defer func() { _ = root.Close() }()
+	rootIdentity, err := directoryIdentity(root, ".")
+	if err != nil {
+		return &domain.TargetUnavailableError{Cause: err}
+	}
+	if err := validateTargetParents(root, targetPath, rootIdentity.Device); err != nil {
+		return &domain.TargetUnavailableError{Cause: err}
+	}
+	if _, err := root.Lstat(targetPath); err == nil {
+		return foundation.NewError(foundation.ErrorVersionConflict, "CREATE_ONLY_TARGET_EXISTS", false, domain.ErrTargetExistenceConflict)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return &domain.TargetUnavailableError{Cause: err}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // CurrentContent 在 Workspace 边界内读取有界 UTF-8 普通文件，并从同一字节快照计算 SHA-256。
 func (r *Reader) CurrentContent(ctx context.Context, workspaceID foundation.ID, targetPath string, maxBytes int64) ([]byte, string, error) {
 	if err := ctx.Err(); err != nil {

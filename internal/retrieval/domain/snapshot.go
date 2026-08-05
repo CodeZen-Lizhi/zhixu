@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -27,12 +28,24 @@ type ProcessingContract struct {
 	SchemaVersion        string
 }
 
+// SnapshotTarget binds one Source to the exact successful projection selected
+// by a Workspace snapshot.
+type SnapshotTarget struct {
+	SourceID          foundation.ID
+	SourceVersionID   foundation.ID
+	ParseProjectionID foundation.ID
+}
+
 // WorkspaceSnapshotCommand 描述一次在 Store 内分页选择并物化完整 Workspace Snapshot 的命令。
 type WorkspaceSnapshotCommand struct {
-	IndexVersion            IndexVersion
+	IndexVersion IndexVersion
+	// TargetSource* keeps the single-source API backward compatible. New batch
+	// callers use Targets and leave these legacy fields empty.
 	TargetSourceID          foundation.ID
 	TargetSourceVersionID   foundation.ID
 	TargetParseProjectionID foundation.ID
+	Targets                 []SnapshotTarget
+	RemovedSourceIDs        []foundation.ID
 	PageSize                int32
 	MaxSources              int64
 	MaxChunks               int64
@@ -56,7 +69,7 @@ func ValidateWorkspaceSnapshotCommand(command WorkspaceSnapshotCommand) error {
 	if index.ID == "" || index.WorkspaceID == "" ||
 		!isCanonicalText(index.TokenizerID) || !isCanonicalText(index.TokenizerVersion) ||
 		!isCanonicalHash(index.TokenizerConfigHash) ||
-		!isCanonicalText(index.SourceSnapshotRef) || !strings.HasPrefix(index.SourceSnapshotRef, "reindex-v1:") ||
+		!isCanonicalText(index.SourceSnapshotRef) || !validSourceSnapshotRef(index.SourceSnapshotRef) ||
 		!isCanonicalText(index.IdempotencyKey) || len(index.IdempotencyKey) > 128 ||
 		index.ManifestHash != "" || index.ExpectedChunkCount != 0 || index.SourceManifestHash != "" || index.ExpectedSourceCount != nil ||
 		index.Status != IndexStatusBuilding ||
@@ -79,14 +92,74 @@ func ValidateWorkspaceSnapshotCommand(command WorkspaceSnapshotCommand) error {
 		return invalid(ErrorCodeManifestInvalid, "workspace snapshot processing contract is required")
 	}
 	contract := *index.ProcessingContract
-	if command.TargetSourceID == "" || command.TargetSourceVersionID == "" || command.TargetParseProjectionID == "" ||
-		!isCanonicalText(contract.ParserID) || !isCanonicalText(contract.ParserVersion) ||
+	targets, err := WorkspaceSnapshotTargets(command)
+	if err != nil {
+		return err
+	}
+	if !isCanonicalText(contract.ParserID) || !isCanonicalText(contract.ParserVersion) ||
 		!isCanonicalHash(contract.ParserConfigHash) || !isCanonicalText(contract.ChunkStrategyVersion) ||
 		!isCanonicalText(contract.SchemaVersion) || command.PageSize <= 0 || command.PageSize > MaxSnapshotPageSize ||
 		command.MaxSources <= 0 || command.MaxChunks <= 0 {
 		return invalid(ErrorCodeManifestInvalid, "workspace snapshot selection contract is invalid")
 	}
+	if len(targets) == 0 && len(command.RemovedSourceIDs) == 0 {
+		return invalid(ErrorCodeManifestInvalid, "workspace snapshot has no source changes")
+	}
+	if err := validateSnapshotSourceSets(targets, command.RemovedSourceIDs); err != nil {
+		return err
+	}
 	return nil
+}
+
+// WorkspaceSnapshotTargets returns the canonical target set for legacy and
+// batch snapshot commands.
+func WorkspaceSnapshotTargets(command WorkspaceSnapshotCommand) ([]SnapshotTarget, error) {
+	legacyConfigured := command.TargetSourceID != "" || command.TargetSourceVersionID != "" || command.TargetParseProjectionID != ""
+	if len(command.Targets) > 0 {
+		if legacyConfigured {
+			return nil, invalid(ErrorCodeManifestInvalid, "workspace snapshot target forms cannot be mixed")
+		}
+		return append([]SnapshotTarget(nil), command.Targets...), nil
+	}
+	if !legacyConfigured {
+		return nil, nil
+	}
+	if command.TargetSourceID == "" || command.TargetSourceVersionID == "" || command.TargetParseProjectionID == "" {
+		return nil, invalid(ErrorCodeManifestInvalid, "workspace snapshot legacy target is incomplete")
+	}
+	return []SnapshotTarget{{
+		SourceID: command.TargetSourceID, SourceVersionID: command.TargetSourceVersionID,
+		ParseProjectionID: command.TargetParseProjectionID,
+	}}, nil
+}
+
+func validateSnapshotSourceSets(targets []SnapshotTarget, removed []foundation.ID) error {
+	seen := make(map[foundation.ID]struct{}, len(targets)+len(removed))
+	for index, target := range targets {
+		if target.SourceID == "" || target.SourceVersionID == "" || target.ParseProjectionID == "" ||
+			(index > 0 && targets[index-1].SourceID >= target.SourceID) {
+			return invalid(ErrorCodeManifestInvalid, "workspace snapshot targets must be complete, unique, and sorted")
+		}
+		seen[target.SourceID] = struct{}{}
+	}
+	if !sort.SliceIsSorted(removed, func(left, right int) bool { return removed[left] < removed[right] }) {
+		return invalid(ErrorCodeManifestInvalid, "workspace snapshot removals must be sorted")
+	}
+	for index, sourceID := range removed {
+		if sourceID == "" || (index > 0 && removed[index-1] == sourceID) {
+			return invalid(ErrorCodeManifestInvalid, "workspace snapshot removals must be unique")
+		}
+		if _, exists := seen[sourceID]; exists {
+			return invalid(ErrorCodeManifestInvalid, "workspace snapshot source cannot be targeted and removed")
+		}
+		seen[sourceID] = struct{}{}
+	}
+	return nil
+}
+
+func validSourceSnapshotRef(value string) bool {
+	return strings.HasPrefix(value, "reindex-v1:") || strings.HasPrefix(value, "source-refresh-v1:") ||
+		strings.HasPrefix(value, "git-fast-forward-v1:")
 }
 
 func validProcessingContract(contract ProcessingContract) bool {

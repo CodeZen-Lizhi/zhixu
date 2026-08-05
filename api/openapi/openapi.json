@@ -520,6 +520,990 @@
         }
       }
     },
+    "/api/v1/workspaces/{workspace_id}/captures": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "createCapture",
+        "description": "Durably records immutable text or URL provenance in the Workspace Inbox. A new command returns 201; an exact Idempotency-Key replay returns the original Capture with 200. URL content is fetched asynchronously after the Source exists.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 2097152,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCaptureRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact idempotent replay of the persisted Capture result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureCommandResult"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Capture, Source, optional immutable Source Version, outbox event and command receipt were committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureCommandResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listCaptures",
+        "description": "Returns a stable Workspace-bound Inbox page, including URL Captures that do not yet have a Source Version.",
+        "x-required-capability": "READ_LOCAL",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/CaptureKind"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/CaptureStatus"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 30
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "description": "Opaque cursor bound to the Workspace, canonical filters and page limit."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stable Capture page ordered by captured_at and ID descending.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapturePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/capture-files": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "uploadCapture",
+        "description": "Durably stores one server-sniffed document or image as immutable managed content before asynchronous processing. The filename is display metadata and never a filesystem path.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 11534336,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadCaptureRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact idempotent replay of the persisted Capture result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureCommandResult"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Original bytes, Capture, Source, Source Version, outbox event and command receipt were committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureCommandResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/captures/{capture_id}": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "capture_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getCapture",
+        "description": "Returns the authoritative Capture orchestration state. Original content bytes and managed storage locations are not returned.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": {
+            "description": "Workspace-bound Capture detail.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capture"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/captures/{capture_id}/retry": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "capture_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "retryCapture",
+        "description": "Schedules a new durable processing run for a retryable terminal Capture without changing its immutable input. A new retry returns 202; an exact replay returns 200.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 1024,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetryCaptureRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact idempotent replay of the persisted retry result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureCommandResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "A new processing outbox event was durably scheduled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureCommandResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/authoring/working-drafts": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "createWorkingDraft",
+        "description": "Creates an empty, Workspace-scoped Working Draft. A new command returns 201; an exact Idempotency-Key replay returns the original durable draft with 200.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "x-error-codes": [
+          "INVALID_ID",
+          "AUTHORING_REQUEST_INVALID",
+          "INVALID_JSON",
+          "UNSUPPORTED_MEDIA_TYPE",
+          "AUTHORING_IDEMPOTENCY_KEY_INVALID",
+          "AUTHORING_IDEMPOTENCY_CONFLICT",
+          "AUTHORING_DRAFT_INVALID",
+          "AUTHORING_DRAFT_NOT_FOUND",
+          "AUTHORING_REPOSITORY_UNAVAILABLE",
+          "AUTHORING_HTTP_UNAVAILABLE",
+          "AUTHORING_REQUEST_TIMEOUT",
+          "AUTHORING_REQUEST_CANCELLED",
+          "AUTHORING_HTTP_RESULT_INCONSISTENT",
+          "AUTHORING_RESULT_INVALID"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 4096,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthoringEmptyCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact Idempotency-Key replay of the persisted Working Draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkingDraftCommandResult"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The empty Working Draft and its command receipt were committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkingDraftCommandResult"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "get": {
+        "operationId": "listWorkingDrafts",
+        "description": "Returns a Workspace-bound, stable keyset page of server-persisted Working Draft summaries. Draft bodies are retrieved only through the detail endpoint. The opaque cursor is bound to the Workspace, status filter, and limit.",
+        "x-required-capability": "READ_LOCAL",
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["EDITING", "ARCHIVED"] } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 30 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 4096 } }
+        ],
+        "responses": {
+          "200": { "description": "Workspace-bound Working Draft summary page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkingDraftPage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        },
+        {
+          "name": "draft_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "getWorkingDraft",
+        "description": "Returns one Workspace-bound Working Draft for server-backed editing recovery.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": { "description": "Workspace-bound Working Draft.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkingDraft" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "put": {
+        "operationId": "updateWorkingDraft",
+        "description": "CAS-updates the mutable Working Draft. expected_version is mandatory; stale updates and Idempotency-Key reuse with different content return 409 without silently overwriting the server version.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "x-error-codes": [
+          "INVALID_ID",
+          "AUTHORING_REQUEST_INVALID",
+          "INVALID_JSON",
+          "UNSUPPORTED_MEDIA_TYPE",
+          "AUTHORING_IDEMPOTENCY_KEY_INVALID",
+          "AUTHORING_IDEMPOTENCY_CONFLICT",
+          "AUTHORING_DRAFT_INVALID",
+          "AUTHORING_DRAFT_VERSION_CONFLICT",
+          "AUTHORING_DRAFT_NOT_FOUND",
+          "AUTHORING_REPOSITORY_UNAVAILABLE",
+          "AUTHORING_HTTP_UNAVAILABLE",
+          "AUTHORING_REQUEST_TIMEOUT",
+          "AUTHORING_REQUEST_CANCELLED",
+          "AUTHORING_HTTP_RESULT_INCONSISTENT",
+          "AUTHORING_RESULT_INVALID"
+        ],
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 62947328,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UpdateWorkingDraftRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "CAS-updated Working Draft or an exact Idempotency-Key replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkingDraftCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}/freeze": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        },
+        {
+          "name": "draft_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "post": {
+        "operationId": "freezeWorkingDraft",
+        "description": "Validates and atomically freezes a Working Draft into a Document Draft and immutable Article Revision. A new freeze returns 201; an exact Idempotency-Key replay returns the same identities with 200.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "x-error-codes": [
+          "INVALID_ID",
+          "AUTHORING_REQUEST_INVALID",
+          "INVALID_JSON",
+          "UNSUPPORTED_MEDIA_TYPE",
+          "AUTHORING_IDEMPOTENCY_KEY_INVALID",
+          "AUTHORING_IDEMPOTENCY_CONFLICT",
+          "AUTHORING_DRAFT_INVALID",
+          "AUTHORING_TARGET_PATH_INVALID",
+          "AUTHORING_TARGET_PATH_CONFLICT",
+          "AUTHORING_FREEZE_INVALID",
+          "AUTHORING_DRAFT_VERSION_CONFLICT",
+          "AUTHORING_DRAFT_NOT_FOUND",
+          "AUTHORING_REPOSITORY_UNAVAILABLE",
+          "AUTHORING_HTTP_UNAVAILABLE",
+          "AUTHORING_REQUEST_TIMEOUT",
+          "AUTHORING_REQUEST_CANCELLED",
+          "AUTHORING_HTTP_RESULT_INCONSISTENT",
+          "AUTHORING_RESULT_INVALID"
+        ],
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 4096,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/FreezeWorkingDraftRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay of the frozen Document and Article Revision.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FreezeWorkingDraftResult" } } } },
+          "201": { "description": "The Working Draft update, Document Draft, Article Revision, and freeze receipt were committed atomically.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FreezeWorkingDraftResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/publish-proposals": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        },
+        {
+          "name": "document_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        },
+        {
+          "name": "revision_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "post": {
+        "operationId": "publishArticleRevision",
+        "description": "Creates the controlled file_patch Proposal from the frozen server-owned Article Revision. It never accepts client content, path, base hash, or Proposal fields. A new binding returns 201; an exact successful Idempotency-Key replay returns it with 200. A deterministic missing-parent failure abandons the reservation; the same key stably replays WRITEBACK_TARGET_PARENT_NOT_FOUND with 404, and recovery requires correcting the path, freezing a new Revision, and using a new key.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "x-error-codes": [
+          "INVALID_ID",
+          "AUTHORING_REQUEST_INVALID",
+          "INVALID_JSON",
+          "UNSUPPORTED_MEDIA_TYPE",
+          "AUTHORING_IDEMPOTENCY_KEY_INVALID",
+          "AUTHORING_IDEMPOTENCY_CONFLICT",
+          "AUTHORING_PUBLICATION_INVALID",
+          "AUTHORING_PUBLICATION_CONFLICT",
+          "AUTHORING_TARGET_BASE_CONFLICT",
+          "AUTHORING_PROPOSAL_BINDING_CONFLICT",
+          "AUTHORING_REVISION_NOT_LATEST",
+          "WRITEBACK_TARGET_PARENT_NOT_FOUND",
+          "AUTHORING_DRAFT_NOT_FOUND",
+          "AUTHORING_REPOSITORY_UNAVAILABLE",
+          "AUTHORING_HTTP_UNAVAILABLE",
+          "AUTHORING_REQUEST_TIMEOUT",
+          "AUTHORING_REQUEST_CANCELLED",
+          "AUTHORING_HTTP_RESULT_INCONSISTENT",
+          "AUTHORING_RESULT_INVALID"
+        ],
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 4096,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AuthoringEmptyCommand" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay of the immutable publication binding.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishArticleRevisionResult" } } } },
+          "201": { "description": "A file_patch Proposal and immutable publication binding were committed from the frozen Revision.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishArticleRevisionResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        },
+        {
+          "name": "document_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "getDocumentDraft",
+        "description": "Returns one Workspace-bound Document Draft, its latest frozen Article Revision when present, and its publication recovery state when present.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": { "description": "Workspace-bound Document Draft detail.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DocumentDraftDetail" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/history": {
+      "parameters": [
+        { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "document_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "get": {
+        "operationId": "listDocumentHistory",
+        "description": "Returns a bounded path history bound to the current Document version, branch and HEAD. The opaque cursor is process-local and becomes stale when any bound fact changes.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": ["DOCUMENT_HISTORY_INVALID", "DOCUMENT_HISTORY_CURSOR_INVALID", "DOCUMENT_HISTORY_CURSOR_STALE", "DOCUMENT_HISTORY_NOT_FOUND", "DOCUMENT_HISTORY_OUTPUT_TOO_LARGE", "DOCUMENT_HISTORY_DETACHED_HEAD", "DOCUMENT_HISTORY_GIT_UNSAFE", "DOCUMENT_HISTORY_GIT_TIMEOUT", "DOCUMENT_HISTORY_GIT_CANCELLED", "DOCUMENT_HISTORY_GIT_UNAVAILABLE", "DOCUMENT_HISTORY_RESULT_INVALID", "DOCUMENT_HISTORY_HTTP_UNAVAILABLE"],
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 30 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" } }
+        ],
+        "responses": {
+          "200": { "description": "Stable Document history page.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DocumentHistoryPage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/history/compare": {
+      "parameters": [
+        { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "document_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "get": {
+        "operationId": "compareDocumentHistory",
+        "description": "Returns complete bounded contents and a unified patch for two verified versions of the current canonical Document path.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": ["DOCUMENT_HISTORY_INVALID", "DOCUMENT_HISTORY_CURSOR_STALE", "DOCUMENT_HISTORY_NOT_FOUND", "DOCUMENT_HISTORY_OUTPUT_TOO_LARGE", "DOCUMENT_HISTORY_DETACHED_HEAD", "DOCUMENT_HISTORY_GIT_UNSAFE", "DOCUMENT_HISTORY_GIT_TIMEOUT", "DOCUMENT_HISTORY_GIT_CANCELLED", "DOCUMENT_HISTORY_GIT_UNAVAILABLE", "DOCUMENT_HISTORY_RESULT_INVALID", "DOCUMENT_HISTORY_HTTP_UNAVAILABLE"],
+        "parameters": [
+          { "name": "left", "in": "query", "required": true, "schema": { "$ref": "#/components/schemas/DocumentHistoryVersionRef" } },
+          { "name": "right", "in": "query", "required": true, "schema": { "$ref": "#/components/schemas/DocumentHistoryVersionRef" } }
+        ],
+        "responses": {
+          "200": { "description": "Complete bounded comparison.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DocumentHistoryCompare" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-previews": {
+      "parameters": [
+        { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "document_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "post": {
+        "operationId": "createDocumentRestorePreview",
+        "description": "Re-reads the current Git and Document baseline and returns a server-derived restore preview. It never writes the worktree or creates a Proposal.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": ["DOCUMENT_HISTORY_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "DOCUMENT_HISTORY_NOT_FOUND", "DOCUMENT_RESTORE_STALE", "DOCUMENT_HISTORY_OUTPUT_TOO_LARGE", "DOCUMENT_HISTORY_DETACHED_HEAD", "DOCUMENT_HISTORY_GIT_UNSAFE", "DOCUMENT_HISTORY_GIT_TIMEOUT", "DOCUMENT_HISTORY_GIT_CANCELLED", "DOCUMENT_HISTORY_GIT_UNAVAILABLE", "DOCUMENT_HISTORY_RESULT_INVALID", "DOCUMENT_HISTORY_HTTP_UNAVAILABLE"],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DocumentRestorePreviewRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Server-derived restore preview.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DocumentRestorePreview" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-proposals": {
+      "parameters": [
+        { "name": "workspace_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+        { "name": "document_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "post": {
+        "operationId": "createDocumentRestoreProposal",
+        "description": "Re-verifies the preview against the current Document and Git facts, then creates a governed restore_document Proposal containing only server-read target bytes. An exact Idempotency-Key replay returns 200.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "x-error-codes": ["DOCUMENT_HISTORY_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "IDEMPOTENCY_KEY_REUSED", "DOCUMENT_HISTORY_NOT_FOUND", "DOCUMENT_RESTORE_DIRTY_WORKTREE", "DOCUMENT_RESTORE_STALE", "DOCUMENT_HISTORY_OUTPUT_TOO_LARGE", "DOCUMENT_HISTORY_DETACHED_HEAD", "DOCUMENT_HISTORY_GIT_UNSAFE", "DOCUMENT_HISTORY_GIT_TIMEOUT", "DOCUMENT_HISTORY_GIT_CANCELLED", "DOCUMENT_HISTORY_GIT_UNAVAILABLE", "DOCUMENT_HISTORY_RESULT_INVALID", "DOCUMENT_HISTORY_HTTP_UNAVAILABLE"],
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DocumentRestoreProposalRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay of the restore Proposal.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DocumentRestoreProposalResult" } } } },
+          "201": { "description": "New governed restore_document Proposal.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DocumentRestoreProposalResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/authoring/overview": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "getAuthoringOverview",
+        "description": "Returns bounded, server-owned Authoring overview projections. Working Draft bodies and browser-local draft state are never included.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": { "description": "Workspace-bound Authoring overview.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthoringOverview" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/authoring/documents": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "listDocumentDrafts",
+        "description": "Returns a Workspace-bound, stable keyset page of formal Documents whose lifecycle_status is DRAFT. The opaque cursor is bound to the Workspace and limit.",
+        "x-required-capability": "READ_LOCAL",
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 30 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 4096 } }
+        ],
+        "responses": {
+          "200": { "description": "Workspace-bound formal Document Draft page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DocumentDraftPage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/knowledge-profile": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        },
+        {
+          "name": "source_version_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "getDocumentKnowledgeProfile",
+        "description": "Returns the authoritative document knowledge profile and its current immutable revision. Evidence is carried by source span IDs in the revision content.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": { "description": "Workspace-bound profile detail.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DocumentKnowledgeProfileResponse" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/knowledge-profile/retry": {
+      "parameters": [
+        {
+          "name": "workspace_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        },
+        {
+          "name": "source_version_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "post": {
+        "operationId": "retryDocumentKnowledgeProfile",
+        "description": "CAS-rebuilds a retryable failed, capability-unavailable, or stale profile while preserving the immutable Source Version, completed ingestion/index facts, and any previously readable Profile Revision. A new rebuild returns 202; an exact replay returns 200.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 1024,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RetryKnowledgeProfileRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Exact idempotent replay of the persisted profile retry result.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeProfileCommandResult" } } } },
+          "202": { "description": "Profile processing was durably scheduled.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeProfileCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
     "/api/v1/source-versions/{source_version_id}/ingestion-attempts": {
       "parameters": [
         {
@@ -796,6 +1780,9 @@
             "type": "string",
             "format": "uuid"
           }
+        },
+        {
+          "$ref": "#/components/parameters/WorkflowWorkspaceID"
         }
       ],
       "get": {
@@ -874,6 +1861,9 @@
             "minLength": 1,
             "maxLength": 128
           }
+        },
+        {
+          "$ref": "#/components/parameters/WorkflowWorkspaceID"
         }
       ],
       "post": {
@@ -962,6 +1952,9 @@
             "minLength": 1,
             "maxLength": 128
           }
+        },
+        {
+          "$ref": "#/components/parameters/WorkflowWorkspaceID"
         }
       ],
       "post": {
@@ -1050,6 +2043,9 @@
             "minLength": 1,
             "maxLength": 128
           }
+        },
+        {
+          "$ref": "#/components/parameters/WorkflowWorkspaceID"
         }
       ],
       "post": {
@@ -1137,6 +2133,9 @@
             "type": "string",
             "format": "uuid"
           }
+        },
+        {
+          "$ref": "#/components/parameters/WorkflowWorkspaceID"
         }
       ],
       "post": {
@@ -1367,6 +2366,7 @@
               "type": "string",
               "enum": [
                 "file_patch",
+                "restore_document",
                 "knowledge_change",
                 "publish_artifact",
                 "downstream_update"
@@ -9589,6 +10589,592 @@
           }
         }
       }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/drafts": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" }
+      ],
+      "post": {
+        "operationId": "createOrganizingDraft",
+        "description": "Creates a recoverable Suggested Material Set. Creation does not select a Template Revision or authorize generation.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingCreateDraftRequest" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingDraftCommandResult" } } } },
+          "201": { "description": "Draft created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingDraftCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" },
+        { "$ref": "#/components/parameters/OrganizingDraftID" }
+      ],
+      "get": {
+        "operationId": "getOrganizingDraft",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": { "description": "Workspace-owned mutable Draft.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingDraftEnvelope" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "put": {
+        "operationId": "updateOrganizingDraft",
+        "description": "CAS-updates intent and the exact selected Template Revision.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingUpdateDraftRequest" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "CAS-updated Draft or exact replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingDraftCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/suggestions": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" },
+        { "$ref": "#/components/parameters/OrganizingDraftID" }
+      ],
+      "post": {
+        "operationId": "suggestOrganizingMaterials",
+        "description": "CAS-replaces server-hydrated suggestions while retaining explicit user selections.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingSuggestRequest" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "CAS-updated Draft or exact replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingDraftCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" },
+        { "$ref": "#/components/parameters/OrganizingDraftID" }
+      ],
+      "post": {
+        "operationId": "addOrganizingMaterial",
+        "description": "Adds one identity-only reference. The server resolves ownership, title, availability, hashes, and Evidence.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingAddMaterialRequest" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingDraftCommandResult" } } } },
+          "201": { "description": "Material resolved and added by CAS.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingDraftCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials/{material_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" },
+        { "$ref": "#/components/parameters/OrganizingDraftID" },
+        { "$ref": "#/components/parameters/OrganizingMaterialID" }
+      ],
+      "patch": {
+        "operationId": "setOrganizingMaterialSelection",
+        "description": "CAS-updates the user's explicit authorization for one suggested material.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingMaterialSelectionRequest" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "Material selection updated by CAS or exact replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingDraftCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "delete": {
+        "operationId": "removeOrganizingMaterial",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingExpectedVersionRequest" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "Material removed by CAS or exact replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingDraftCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/confirm": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" },
+        { "$ref": "#/components/parameters/OrganizingDraftID" }
+      ],
+      "post": {
+        "operationId": "confirmOrganizingDraft",
+        "description": "Atomically freezes the selected inputs and exact Template Revision into an immutable Snapshot and durable Workflow-start outbox. No Workflow Run is invented before dispatch starts.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingConfirmRequest" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "Exact confirmation replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingConfirmResult" } } } },
+          "202": { "description": "Snapshot frozen and Workflow dispatch pending.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingConfirmResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/materials/search": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" }
+      ],
+      "get": {
+        "operationId": "searchOrganizingMaterials",
+        "description": "Searches one Workspace-owned material kind and returns identity-only selectors. Adding a result re-resolves owner facts.",
+        "x-required-capability": "READ_LOCAL",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 256, "x-min-utf8-bytes": 2, "x-max-utf8-bytes": 256 }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": true,
+            "schema": { "$ref": "#/components/schemas/OrganizingMaterialKind" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 25, "default": 12 }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Bounded Workspace material identities.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingMaterialSearchPage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/snapshots/{snapshot_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" },
+        { "$ref": "#/components/parameters/OrganizingSnapshotID" }
+      ],
+      "get": {
+        "operationId": "getOrganizingSnapshot",
+        "description": "Returns an immutable Workflow input Snapshot.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": { "description": "Immutable Snapshot.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingSnapshotEnvelope" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/templates": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" }
+      ],
+      "get": {
+        "operationId": "listOrganizingTemplates",
+        "description": "Lists built-in templates and Workspace-owned custom templates.",
+        "x-required-capability": "READ_LOCAL",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/OrganizingTemplateKind" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 100 }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Bounded template list.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplatePage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "post": {
+        "operationId": "createOrganizingTemplate",
+        "description": "Creates a constrained Workspace-owned Template and immutable Revision 1.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 65536,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateCreateRequest" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateCommandResult" } } } },
+          "201": { "description": "Custom Template created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" },
+        { "$ref": "#/components/parameters/OrganizingTemplateID" }
+      ],
+      "get": {
+        "operationId": "getOrganizingTemplate",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": { "description": "Template and exact current Revision.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateEnvelope" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/clone": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" },
+        { "$ref": "#/components/parameters/OrganizingTemplateID" }
+      ],
+      "post": {
+        "operationId": "cloneOrganizingTemplate",
+        "description": "Clones a built-in Template into an independent Workspace-owned Template.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateCloneRequest" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateCommandResult" } } } },
+          "201": { "description": "Built-in Template cloned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/revisions": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" },
+        { "$ref": "#/components/parameters/OrganizingTemplateID" }
+      ],
+      "post": {
+        "operationId": "reviseOrganizingTemplate",
+        "description": "Appends an immutable custom Template Revision and advances its current pointer by CAS.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 65536,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateReviseRequest" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateCommandResult" } } } },
+          "201": { "description": "Template Revision appended.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateCommandResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/organizing/runs/{snapshot_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OrganizingWorkspaceID" },
+        { "$ref": "#/components/parameters/OrganizingSnapshotID" }
+      ],
+      "get": {
+        "operationId": "getOrganizingRun",
+        "description": "Returns the true Snapshot-scoped Outbox state plus any immutable Workflow binding and terminal result. Missing rows remain Not Found and are never inferred as PENDING.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": { "description": "Durable dispatch and Run projection.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingRunEnvelope" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/git-remote": {
+      "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" } ],
+      "get": {
+        "operationId": "getGitRemoteConfig",
+        "description": "Returns the Workspace-scoped remote projection. Credentials are represented only by token_configured and are never readable.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": ["GIT_SYNC_INVALID", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+        "responses": {
+          "200": { "description": "Workspace Git remote configuration without credential material.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitRemoteConfig" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "put": {
+        "operationId": "saveGitRemoteConfig",
+        "description": "CAS updates the Workspace HTTPS remote. Token values are accepted only for this request and are never returned.",
+        "x-required-capability": "GIT_WRITE",
+        "x-error-codes": ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_REMOTE_SECRET_ACTION_INVALID", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_REMOTE_URL_INVALID", "GIT_REMOTE_BRANCH_INVALID", "GIT_SYNC_OFFLINE", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_REMOTE_REVISION_CONFLICT", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_RUN_NOT_FOUND", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 32768, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SaveGitRemoteConfigRequest" } } } },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitRemoteConfig" } } } },
+          "201": { "description": "New remote configuration revision.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitRemoteConfig" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "delete": {
+        "operationId": "removeGitRemoteConfig",
+        "description": "CAS appends an unconfigured revision and removes the encrypted credential. Exact Idempotency-Key replays return the original projection.",
+        "x-required-capability": "GIT_WRITE",
+        "x-error-codes": ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_REMOTE_REVISION_CONFLICT", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 32768, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RemoveGitRemoteConfigRequest" } } } },
+        "responses": {
+          "200": { "description": "Remote configuration cleared without returning credentials.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitRemoteConfig" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/git-remote/tests": {
+      "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" } ],
+      "post": {
+        "operationId": "testGitRemoteConfig",
+        "description": "Tests an HTTPS remote draft with a kept or replacement token, without persisting or returning credential material.",
+        "x-required-capability": "GIT_WRITE",
+        "x-error-codes": ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_REMOTE_SECRET_ACTION_INVALID", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_REMOTE_URL_INVALID", "GIT_REMOTE_BRANCH_INVALID", "GIT_REMOTE_REVISION_CONFLICT", "GIT_SYNC_CONFIG_STALE", "GIT_SYNC_REF_DRIFT", "GIT_SYNC_AUTHENTICATION_FAILED", "GIT_SYNC_OFFLINE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+        "requestBody": { "required": true, "x-max-body-bytes": 32768, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TestGitRemoteConfigRequest" } } } },
+        "responses": {
+          "200": { "description": "The canonical remote and branch responded.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitRemoteTestResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/git-sync": {
+      "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" } ],
+      "get": {
+        "operationId": "getGitSyncStatus",
+        "description": "Returns credential-free configuration and the latest persisted SyncRun, keeping Git and index follow-up state separate.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": ["GIT_SYNC_INVALID", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+        "responses": {
+          "200": { "description": "Credential-free remote configuration and current SyncRun.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitSyncStatus" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/git-sync/runs": {
+      "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" } ],
+      "get": {
+        "operationId": "listGitSyncRuns",
+        "description": "Lists Workspace-bound runs with an opaque cursor bound to the requested Workspace and limit.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": ["GIT_SYNC_INVALID", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+        "parameters": [ { "$ref": "#/components/parameters/GitSyncCursor" }, { "$ref": "#/components/parameters/GitSyncLimit" } ],
+        "responses": {
+          "200": { "description": "Bounded, Workspace-owned SyncRun history.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitSyncRunPage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "post": {
+        "operationId": "createGitSyncRun",
+        "description": "Queues one manual Git synchronization. The request body must be empty; an exact Idempotency-Key replay returns the original run.",
+        "x-required-capability": "GIT_WRITE",
+        "x-error-codes": ["GIT_SYNC_INVALID", "GIT_REMOTE_NOT_CONFIGURED", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_SYNC_CONFIG_STALE", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitSyncRun" } } } },
+          "202": { "description": "Manual Git synchronization queued.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitSyncRun" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}": {
+      "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" }, { "$ref": "#/components/parameters/GitSyncRunID" } ],
+      "get": {
+        "operationId": "getGitSyncRun",
+        "description": "Returns one credential-free SyncRun only when both the Workspace and run identity match.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": ["GIT_SYNC_INVALID", "GIT_SYNC_RUN_NOT_FOUND", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+        "responses": {
+          "200": { "description": "Workspace-bound credential-free SyncRun.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitSyncRun" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}/retries": {
+      "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" }, { "$ref": "#/components/parameters/GitSyncRunID" } ],
+      "post": {
+        "operationId": "retryGitSyncRun",
+        "description": "CAS retries a failed index follow-up in place or creates a new RETRY SyncRun for another terminal Git result.",
+        "x-required-capability": "GIT_WRITE",
+        "x-error-codes": ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_SYNC_RUN_NOT_FOUND", "GIT_SYNC_RUN_TRANSITION_CONFLICT", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_REMOTE_NOT_CONFIGURED", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_SYNC_CONFIG_STALE", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": { "required": true, "x-max-body-bytes": 32768, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RetryGitSyncRunRequest" } } } },
+        "responses": {
+          "200": { "description": "Exact Idempotency-Key replay.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitSyncRun" } } } },
+          "202": { "description": "Retry SyncRun queued or index follow-up retried.", "headers": { "Cache-Control": { "schema": { "const": "private, no-store" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitSyncRun" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
     }
   },
   "components": {
@@ -9643,6 +11229,70 @@
           "minLength": 1,
           "maxLength": 128
         }
+      },
+      "GitSyncWorkspaceID": {
+        "name": "workspace_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "GitSyncRunID": {
+        "name": "run_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "GitSyncCursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      },
+      "GitSyncLimit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 30 }
+      },
+      "WorkflowWorkspaceID": {
+        "name": "X-Workspace-ID",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "description": "Binds a global Workflow Run URL to its owning Workspace."
+      },
+      "OrganizingWorkspaceID": {
+        "name": "workspace_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "OrganizingDraftID": {
+        "name": "draft_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "OrganizingMaterialID": {
+        "name": "material_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "OrganizingSnapshotID": {
+        "name": "snapshot_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "OrganizingTemplateID": {
+        "name": "template_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
       },
       "WorkspaceIDQuery": {
         "name": "workspace_id",
@@ -9790,6 +11440,16 @@
           }
         }
       },
+      "PayloadTooLarge": {
+        "description": "The complete bounded history, blob or diff exceeds the public response limit.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
       "Gone": {
         "description": "The requested result has expired and is no longer downloadable.",
         "content": {
@@ -9812,6 +11472,16 @@
       },
       "Unavailable": {
         "description": "Required dependency unavailable.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "UnprocessableEntity": {
+        "description": "The command is structurally valid but cannot be retried or processed in its current lifecycle state.",
         "content": {
           "application/json": {
             "schema": {
@@ -11117,7 +12787,10 @@
           "review",
           "memory",
           "interview",
-          "auth",
+    "authoring",
+    "capture",
+    "organizing",
+    "auth",
           "request_id"
         ],
         "properties": {
@@ -11162,7 +12835,16 @@
           "interview": {
             "$ref": "#/components/schemas/OptionalCapabilityStatus"
           },
-          "auth": {
+          "authoring": {
+            "$ref": "#/components/schemas/OptionalCapabilityStatus"
+          },
+    "capture": {
+      "$ref": "#/components/schemas/OptionalCapabilityStatus"
+    },
+    "organizing": {
+      "$ref": "#/components/schemas/OptionalCapabilityStatus"
+    },
+    "auth": {
             "$ref": "#/components/schemas/AuthCapabilityStatus"
           },
           "request_id": {
@@ -11421,6 +13103,994 @@
         },
         "additionalProperties": false
       },
+      "CaptureKind": {
+        "type": "string",
+        "enum": [
+          "TEXT",
+          "URL",
+          "FILE",
+          "IMAGE"
+        ]
+      },
+      "CaptureStatus": {
+        "type": "string",
+        "enum": [
+          "RECEIVED",
+          "SOURCE_SAVED",
+          "FETCHING",
+          "PROCESSING",
+          "READY",
+          "READY_DEGRADED",
+          "FETCH_FAILED",
+          "PROCESSING_FAILED"
+        ]
+      },
+      "CaptureStageStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "RUNNING",
+          "READY",
+          "FAILED",
+          "CAPABILITY_UNAVAILABLE",
+          "STALE",
+          "NOT_APPLICABLE"
+        ]
+      },
+      "CreateCaptureRequest": {
+        "oneOf": [
+          {
+            "title": "Text Capture",
+            "type": "object",
+            "required": [
+              "kind",
+              "text"
+            ],
+            "properties": {
+              "kind": {
+                "const": "TEXT"
+              },
+              "display_name": {
+                "type": "string",
+                "maxLength": 512,
+                "x-max-utf8-bytes": 512
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2097152,
+                "description": "UTF-8 plain text. The bounded JSON request must contain no NUL byte."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "title": "URL Capture",
+            "type": "object",
+            "required": [
+              "kind",
+              "url"
+            ],
+            "properties": {
+              "kind": {
+                "const": "URL"
+              },
+              "display_name": {
+                "type": "string",
+                "maxLength": 512,
+                "x-max-utf8-bytes": 512
+              },
+              "url": {
+                "type": "string",
+                "format": "uri",
+                "minLength": 1,
+                "maxLength": 8192,
+                "description": "Canonical public HTTP or HTTPS URL retained as immutable provenance; fetching remains asynchronous and fail-closed."
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "UploadCaptureRequest": {
+        "type": "object",
+        "required": [
+          "kind",
+          "file"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "FILE",
+              "IMAGE"
+            ]
+          },
+          "display_name": {
+            "type": "string",
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512
+          },
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "maxLength": 10485760,
+            "description": "One non-empty document or image. The server, not the filename or client Content-Type, determines the accepted media type."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RetryCaptureRequest": {
+        "type": "object",
+        "required": [
+          "expected_version"
+        ],
+        "properties": {
+          "expected_version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "RetryKnowledgeProfileRequest": {
+        "type": "object",
+        "required": [ "expected_version" ],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeProfileStatus": {
+        "type": "string",
+        "enum": [ "PENDING", "RUNNING", "READY", "FAILED", "CAPABILITY_UNAVAILABLE", "STALE" ]
+      },
+      "KnowledgeProfileCandidate": {
+        "type": "object",
+        "required": [ "label", "source_span_ids" ],
+        "properties": {
+          "label": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "aliases": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 512 } },
+          "source_span_ids": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "format": "uuid" } }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeProfilePoint": {
+        "type": "object",
+        "required": [ "text", "source_span_ids" ],
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "source_span_ids": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "format": "uuid" } }
+        },
+        "additionalProperties": false
+      },
+      "DocumentKnowledgeProfileContent": {
+        "type": "object",
+        "required": [ "summary", "topics", "terms", "knowledge_points", "examples" ],
+        "properties": {
+          "summary": { "type": "string", "minLength": 1, "maxLength": 16384 },
+          "topics": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/components/schemas/KnowledgeProfileCandidate" } },
+          "terms": { "type": "array", "maxItems": 128, "items": { "$ref": "#/components/schemas/KnowledgeProfileCandidate" } },
+          "knowledge_points": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/components/schemas/KnowledgeProfilePoint" } },
+          "examples": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/KnowledgeProfilePoint" } }
+        },
+        "additionalProperties": false
+      },
+      "DocumentKnowledgeProfile": {
+        "type": "object",
+        "required": [ "id", "workspace_id", "capture_id", "source_version_id", "status", "retryable", "version", "created_at", "updated_at" ],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "capture_id": { "type": "string", "format": "uuid" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "current_revision_id": { "type": "string", "format": "uuid" },
+          "status": { "$ref": "#/components/schemas/KnowledgeProfileStatus" },
+          "error_code": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "retryable": { "type": "boolean" },
+          "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeProfileRevision": {
+        "type": "object",
+        "required": [ "id", "profile_id", "workspace_id", "source_version_id", "parse_projection_id", "index_version_id", "model_run_id", "model_settings_revision", "prompt_version", "schema_version", "content", "content_digest", "created_at" ],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "profile_id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "parse_projection_id": { "type": "string", "format": "uuid" },
+          "index_version_id": { "type": "string", "format": "uuid" },
+          "model_run_id": { "type": "string", "format": "uuid" },
+          "model_settings_revision": { "type": [ "integer", "null" ], "minimum": 1 },
+          "prompt_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "schema_version": { "const": "document-knowledge-profile/v1" },
+          "content": { "$ref": "#/components/schemas/DocumentKnowledgeProfileContent" },
+          "content_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "DocumentKnowledgeProfileResponse": {
+        "type": "object",
+        "required": [ "profile", "revision" ],
+        "properties": {
+          "profile": { "$ref": "#/components/schemas/DocumentKnowledgeProfile" },
+          "revision": { "oneOf": [ { "$ref": "#/components/schemas/KnowledgeProfileRevision" }, { "type": "null" } ] }
+        },
+        "additionalProperties": false
+      },
+      "KnowledgeProfileCommandResult": {
+        "type": "object",
+        "required": [ "profile", "revision", "replayed" ],
+        "properties": {
+          "profile": { "$ref": "#/components/schemas/DocumentKnowledgeProfile" },
+          "revision": { "oneOf": [ { "$ref": "#/components/schemas/KnowledgeProfileRevision" }, { "type": "null" } ] },
+          "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "Capture": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "kind",
+          "display_name",
+          "source_id",
+          "status",
+          "fetch_status",
+          "ingestion_status",
+          "index_status",
+          "profile_status",
+          "retryable",
+          "version",
+          "captured_at",
+          "updated_at",
+          "detail_href"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CaptureKind"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512
+          },
+          "original_url": {
+            "type": "string",
+            "format": "uri",
+            "minLength": 1,
+            "maxLength": 8192
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "latest_source_version_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CaptureStatus"
+          },
+          "fetch_status": {
+            "$ref": "#/components/schemas/CaptureStageStatus"
+          },
+          "ingestion_status": {
+            "$ref": "#/components/schemas/CaptureStageStatus"
+          },
+          "index_status": {
+            "$ref": "#/components/schemas/CaptureStageStatus"
+          },
+          "profile_status": {
+            "$ref": "#/components/schemas/CaptureStageStatus"
+          },
+          "failure_stage": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "error_code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "captured_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "detail_href": {
+            "type": "string",
+            "pattern": "^/api/v1/workspaces/[0-9a-f-]+/captures/[0-9a-f-]+$"
+          },
+          "profile_href": {
+            "type": "string",
+            "pattern": "^/api/v1/workspaces/[0-9a-f-]+/source-versions/[0-9a-f-]+/knowledge-profile$"
+          }
+        },
+        "dependentRequired": {
+          "failure_stage": [
+            "error_code"
+          ],
+          "error_code": [
+            "failure_stage"
+          ]
+        },
+        "oneOf": [
+          {
+            "required": [
+              "original_url"
+            ],
+            "properties": {
+              "kind": {
+                "const": "URL"
+              }
+            }
+          },
+          {
+            "required": [
+              "latest_source_version_id"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "TEXT",
+                  "FILE",
+                  "IMAGE"
+                ]
+              }
+            },
+            "not": {
+              "required": [
+                "original_url"
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "CaptureCommandResult": {
+        "type": "object",
+        "required": [
+          "capture",
+          "replayed"
+        ],
+        "properties": {
+          "capture": {
+            "$ref": "#/components/schemas/Capture"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CapturePage": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "items"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Capture"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "additionalProperties": false
+      },
+      "AuthoringEmptyCommand": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "UpdateWorkingDraftRequest": {
+        "type": "object",
+        "required": [
+          "expected_version",
+          "title",
+          "target_path",
+          "body"
+        ],
+        "properties": {
+          "expected_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "target_path": {
+            "type": "string",
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 10485760,
+            "x-max-utf8-bytes": 10485760,
+            "pattern": "^[^\\u0000]*$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "FreezeWorkingDraftRequest": {
+        "type": "object",
+        "required": [
+          "expected_version"
+        ],
+        "properties": {
+          "expected_version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkingDraft": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "document_id",
+          "title",
+          "target_path",
+          "body",
+          "status",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "document_id": {
+            "oneOf": [
+              { "type": "string", "format": "uuid" },
+              { "type": "null" }
+            ]
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "target_path": {
+            "type": "string",
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 10485760,
+            "x-max-utf8-bytes": 10485760,
+            "pattern": "^[^\\u0000]*$"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["EDITING", "ARCHIVED"]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkingDraftSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "document_id",
+          "title",
+          "target_path",
+          "status",
+          "version",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "document_id": {
+            "oneOf": [
+              { "type": "string", "format": "uuid" },
+              { "type": "null" }
+            ]
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "target_path": {
+            "type": "string",
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["EDITING", "ARCHIVED"]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkingDraftPage": {
+        "type": "object",
+        "required": ["workspace_id", "items"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/WorkingDraftSummary" } },
+          "next_cursor": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "additionalProperties": false
+      },
+      "DocumentDraft": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "canonical_path",
+          "title",
+          "lifecycle_status",
+          "current_published_revision_id",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "canonical_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096,
+            "pattern": "^[^\\r\\n\\u0000]+$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512,
+            "pattern": "^[^\\r\\n\\u0000]+$"
+          },
+          "lifecycle_status": {
+            "type": "string",
+            "enum": ["DRAFT", "PUBLISHED", "ARCHIVED", "DELETED"]
+          },
+          "current_published_revision_id": {
+            "oneOf": [
+              { "type": "string", "format": "uuid" },
+              { "type": "null" }
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "lifecycle_status": { "const": "DRAFT" } } },
+            "then": { "properties": { "current_published_revision_id": { "type": "null" } } }
+          },
+          {
+            "if": { "properties": { "lifecycle_status": { "const": "PUBLISHED" } } },
+            "then": { "properties": { "current_published_revision_id": { "type": "string", "format": "uuid" } } }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "DocumentDraftPage": {
+        "type": "object",
+        "required": ["workspace_id", "items"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/DocumentDraftSummary" } },
+          "next_cursor": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "additionalProperties": false
+      },
+      "DocumentDraftSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "canonical_path",
+          "title",
+          "lifecycle_status",
+          "current_published_revision_id",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "canonical_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096,
+            "pattern": "^[^\\r\\n\\u0000]+$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512,
+            "pattern": "^[^\\r\\n\\u0000]+$"
+          },
+          "lifecycle_status": { "type": "string", "const": "DRAFT" },
+          "current_published_revision_id": { "type": "null" },
+          "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "ArticleRevision": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "document_id",
+          "source_version_id",
+          "parent_revision_id",
+          "revision_no",
+          "content",
+          "content_hash",
+          "status",
+          "optimization_mode",
+          "git_commit",
+          "created_by_type",
+          "created_at"
+        ],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "source_version_id": {
+            "oneOf": [
+              { "type": "string", "format": "uuid" },
+              { "type": "null" }
+            ]
+          },
+          "parent_revision_id": {
+            "oneOf": [
+              { "type": "string", "format": "uuid" },
+              { "type": "null" }
+            ]
+          },
+          "revision_no": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 10485760,
+            "x-max-utf8-bytes": 10485760,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "status": {
+            "type": "string",
+            "enum": ["DRAFT", "REVIEW", "APPROVED", "PUBLISHED", "SUPERSEDED", "ARCHIVED"]
+          },
+          "optimization_mode": {
+            "type": "string",
+            "enum": ["NONE", "CLARITY", "STRUCTURE", "COMPLETENESS"]
+          },
+          "git_commit": {
+            "oneOf": [
+              { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+              { "type": "null" }
+            ]
+          },
+          "created_by_type": {
+            "type": "string",
+            "enum": ["USER", "AGENT", "SYSTEM"]
+          },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "PUBLISHED" } } },
+            "then": { "properties": { "git_commit": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" } } }
+          },
+          {
+            "if": { "properties": { "status": { "enum": ["DRAFT", "REVIEW", "APPROVED"] } } },
+            "then": { "properties": { "git_commit": { "type": "null" } } }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "PublicationBinding": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "document_id",
+          "article_revision_id",
+          "proposal_id",
+          "proposal_revision_id",
+          "target_path",
+          "content_hash",
+          "status",
+          "git_commit",
+          "error_code",
+          "version",
+          "created_at",
+          "updated_at",
+          "published_at",
+          "proposal_href"
+        ],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "article_revision_id": { "type": "string", "format": "uuid" },
+          "proposal_id": { "type": "string", "format": "uuid" },
+          "proposal_revision_id": { "type": "string", "format": "uuid" },
+          "target_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096,
+            "pattern": "^[^\\r\\n\\u0000]+$"
+          },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "status": {
+            "type": "string",
+            "enum": ["PENDING", "PUBLISHED", "RECOVERY_REQUIRED", "CLOSED"]
+          },
+          "git_commit": {
+            "oneOf": [
+              { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+              { "type": "null" }
+            ]
+          },
+          "error_code": {
+            "oneOf": [
+              { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z][A-Z0-9_]{0,127}$" },
+              { "type": "null" }
+            ]
+          },
+          "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "published_at": {
+            "oneOf": [
+              { "type": "string", "format": "date-time" },
+              { "type": "null" }
+            ]
+          },
+          "proposal_href": { "type": "string", "pattern": "^/proposals/[0-9a-f-]+$" }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "status": { "const": "PENDING" },
+              "git_commit": { "type": "null" },
+              "error_code": { "type": "null" },
+              "published_at": { "type": "null" }
+            }
+          },
+          {
+            "properties": {
+              "status": { "const": "PUBLISHED" },
+              "git_commit": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+              "error_code": { "type": "null" },
+              "published_at": { "type": "string", "format": "date-time" }
+            }
+          },
+          {
+            "properties": {
+              "status": { "enum": ["RECOVERY_REQUIRED", "CLOSED"] },
+              "git_commit": { "type": "null" },
+              "error_code": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z][A-Z0-9_]{0,127}$" },
+              "published_at": { "type": "null" }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "WorkingDraftCommandResult": {
+        "type": "object",
+        "required": ["working_draft", "replayed"],
+        "properties": {
+          "working_draft": { "$ref": "#/components/schemas/WorkingDraft" },
+          "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "FreezeWorkingDraftResult": {
+        "type": "object",
+        "required": ["working_draft", "document", "article_revision", "replayed"],
+        "properties": {
+          "working_draft": { "$ref": "#/components/schemas/WorkingDraft" },
+          "document": { "$ref": "#/components/schemas/DocumentDraft" },
+          "article_revision": { "$ref": "#/components/schemas/ArticleRevision" },
+          "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "PublishArticleRevisionResult": {
+        "type": "object",
+        "required": ["publication", "replayed"],
+        "properties": {
+          "publication": { "$ref": "#/components/schemas/PublicationBinding" },
+          "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "DocumentDraftDetail": {
+        "type": "object",
+        "required": ["document", "current_revision", "publication"],
+        "properties": {
+          "document": { "$ref": "#/components/schemas/DocumentDraft" },
+          "current_revision": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/ArticleRevision" },
+              { "type": "null" }
+            ]
+          },
+          "publication": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/PublicationBinding" },
+              { "type": "null" }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingAvailability": {
+        "type": "object",
+        "required": ["available", "reason", "href"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "reason": {
+            "oneOf": [
+              { "type": "string", "minLength": 1, "maxLength": 1024 },
+              { "type": "null" }
+            ]
+          },
+          "href": {
+            "oneOf": [
+              { "const": "/authoring/organize" },
+              { "type": "null" }
+            ]
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "available": { "const": true },
+              "reason": { "type": "null" },
+              "href": { "const": "/authoring/organize" }
+            }
+          },
+          {
+            "properties": {
+              "available": { "const": false },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 1024 },
+              "href": { "type": "null" }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "AuthoringOverview": {
+        "type": "object",
+        "required": ["workspace_id", "organizing", "recent_drafts", "pending_publications", "completed_documents"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "organizing": { "$ref": "#/components/schemas/OrganizingAvailability" },
+          "recent_drafts": {
+            "type": "array",
+            "maxItems": 100,
+            "items": { "$ref": "#/components/schemas/WorkingDraftSummary" }
+          },
+          "pending_publications": {
+            "type": "array",
+            "maxItems": 100,
+            "items": { "$ref": "#/components/schemas/PublicationBinding" }
+          },
+          "completed_documents": {
+            "type": "array",
+            "maxItems": 100,
+            "items": { "$ref": "#/components/schemas/DocumentDraft" }
+          }
+        },
+        "additionalProperties": false
+      },
       "IngestionRequest": {
         "type": "object",
         "required": [
@@ -11580,7 +14250,8 @@
           "created_at",
           "updated_at",
           "pause_requested",
-          "cancel_requested"
+          "cancel_requested",
+          "human_task"
         ],
         "properties": {
           "id": {
@@ -11631,6 +14302,490 @@
           },
           "cancel_requested": {
             "type": "boolean"
+          },
+          "human_task": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PendingWorkflowHumanTask"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "PendingWorkflowHumanTask": {
+        "type": "object",
+        "required": [
+          "id",
+          "run_id",
+          "node_run_id",
+          "status",
+          "expected_input_schema",
+          "target_version",
+          "expires_at",
+          "created_at",
+          "review"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "const": "pending"
+          },
+          "expected_input_schema": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "target_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expires_at": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "review": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowHumanTaskReview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowHumanTaskReview": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WorkflowTopicOutlineReview"
+          },
+          {
+            "$ref": "#/components/schemas/WorkflowMergeComparisonReview"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "TOPIC_OUTLINE": "#/components/schemas/WorkflowTopicOutlineReview",
+            "MERGE_COMPARISON": "#/components/schemas/WorkflowMergeComparisonReview"
+          }
+        }
+      },
+      "WorkflowReviewEvidence": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/WorkflowReviewSourceEvidence" },
+          { "$ref": "#/components/schemas/WorkflowReviewDocumentEvidence" }
+        ],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "SOURCE_VERSION": "#/components/schemas/WorkflowReviewSourceEvidence",
+            "DOCUMENT_REVISION": "#/components/schemas/WorkflowReviewDocumentEvidence"
+          }
+        }
+      },
+      "WorkflowReviewSourceEvidence": {
+        "type": "object",
+        "required": [ "kind", "source_version_id", "source_span_id", "content_hash", "excerpt_hash" ],
+        "properties": {
+          "kind": { "const": "SOURCE_VERSION" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "source_span_id": { "type": "string", "format": "uuid" },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "excerpt_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowReviewDocumentEvidence": {
+        "type": "object",
+        "required": [ "kind", "document_id", "article_revision_id", "revision_no", "content_hash" ],
+        "properties": {
+          "kind": { "const": "DOCUMENT_REVISION" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "article_revision_id": { "type": "string", "format": "uuid" },
+          "revision_no": { "type": "integer", "minimum": 1 },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowTopicOutlineSection": {
+        "type": "object",
+        "required": [
+          "key",
+          "title",
+          "supports",
+          "gap_code"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "supports": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/WorkflowReviewEvidence"
+            }
+          },
+          "gap_code": {
+            "oneOf": [
+              {
+                "const": "EVIDENCE_UNAVAILABLE"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "supports": {
+                "minItems": 1
+              },
+              "gap_code": {
+                "type": "null"
+              }
+            }
+          },
+          {
+            "properties": {
+              "supports": {
+                "maxItems": 0
+              },
+              "gap_code": {
+                "const": "EVIDENCE_UNAVAILABLE"
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "WorkflowTopicOutlineReview": {
+        "type": "object",
+        "required": [
+          "kind",
+          "schema_version",
+          "workspace_id",
+          "run_id",
+          "task_id",
+          "node_run_id",
+          "snapshot_id",
+          "snapshot_hash",
+          "template_revision_id",
+          "template_hash",
+          "outline"
+        ],
+        "properties": {
+          "kind": {
+            "const": "TOPIC_OUTLINE"
+          },
+          "schema_version": {
+            "const": 1
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "task_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snapshot_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "template_revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "template_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "outline": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 24,
+            "items": {
+              "$ref": "#/components/schemas/WorkflowTopicOutlineSection"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowMergeCategory": {
+        "type": "object",
+        "required": [
+          "category",
+          "count"
+        ],
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "DUPLICATE",
+              "COMPLEMENTARY",
+              "CONFLICT",
+              "UNIQUE"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowMergeEvidence": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/WorkflowMergeSourceEvidence" },
+          { "$ref": "#/components/schemas/WorkflowMergeDocumentEvidence" }
+        ],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "SOURCE_VERSION": "#/components/schemas/WorkflowMergeSourceEvidence",
+            "DOCUMENT_REVISION": "#/components/schemas/WorkflowMergeDocumentEvidence"
+          }
+        }
+      },
+      "WorkflowMergeSourceEvidence": {
+        "type": "object",
+        "required": [ "category", "kind", "source_version_id", "source_span_id", "content_hash", "excerpt_hash" ],
+        "properties": {
+          "category": { "type": "string", "enum": [ "DUPLICATE", "COMPLEMENTARY", "CONFLICT", "UNIQUE" ] },
+          "kind": { "const": "SOURCE_VERSION" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "source_span_id": { "type": "string", "format": "uuid" },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "excerpt_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowMergeDocumentEvidence": {
+        "type": "object",
+        "required": [ "category", "kind", "document_id", "article_revision_id", "revision_no", "content_hash" ],
+        "properties": {
+          "category": { "type": "string", "enum": [ "DUPLICATE", "COMPLEMENTARY", "CONFLICT", "UNIQUE" ] },
+          "kind": { "const": "DOCUMENT_REVISION" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "article_revision_id": { "type": "string", "format": "uuid" },
+          "revision_no": { "type": "integer", "minimum": 1 },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "WorkflowMergeComparisonReview": {
+        "type": "object",
+        "required": [
+          "kind",
+          "schema_version",
+          "workspace_id",
+          "run_id",
+          "task_id",
+          "node_run_id",
+          "snapshot_id",
+          "snapshot_hash",
+          "artifact_id",
+          "revision_hash",
+          "default_target_path",
+          "diff_hash",
+          "diff_preview",
+          "diff_truncated",
+          "conflict_count",
+          "evidence_count",
+          "document_count",
+          "categories",
+          "comparison"
+        ],
+        "properties": {
+          "kind": {
+            "const": "MERGE_COMPARISON"
+          },
+          "schema_version": {
+            "const": 1
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "task_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snapshot_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "artifact_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "default_target_path": {
+            "type": "string",
+            "description": "Frozen template-derived default. Clients may replace it only with another canonical Workspace-relative Markdown path at approval time.",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096,
+            "pattern": "^(?!/)(?!\\.git(?:/|$))(?!\\.knowledge(?:/|$))(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$)).+\\.(?:md|markdown)$"
+          },
+          "diff_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "diff_preview": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768,
+            "x-max-utf8-bytes": 32768
+          },
+          "diff_truncated": {
+            "type": "boolean"
+          },
+          "conflict_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evidence_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "document_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "categories": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "prefixItems": [
+              {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/WorkflowMergeCategory"
+                  },
+                  {
+                    "properties": {
+                      "category": {
+                        "const": "DUPLICATE"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/WorkflowMergeCategory"
+                  },
+                  {
+                    "properties": {
+                      "category": {
+                        "const": "COMPLEMENTARY"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/WorkflowMergeCategory"
+                  },
+                  {
+                    "properties": {
+                      "category": {
+                        "const": "CONFLICT"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/WorkflowMergeCategory"
+                  },
+                  {
+                    "properties": {
+                      "category": {
+                        "const": "UNIQUE"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "items": false
+          },
+          "comparison": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/WorkflowMergeEvidence"
+            }
           }
         },
         "additionalProperties": false
@@ -11812,9 +14967,11 @@
       },
       "ProposalRevision": {
         "type": "object",
+        "x-invariant": "target_mode REPLACE requires a sha256 base_hash; target_mode CREATE_ONLY requires a non-zero workspace-target-absent/v1 token.",
         "required": [
           "id",
           "revision_no",
+          "target_mode",
           "base_hash",
           "content",
           "evidence_summary",
@@ -11832,9 +14989,19 @@
             "type": "integer",
             "minimum": 1
           },
+          "target_mode": {
+            "type": "string",
+            "enum": [
+              "REPLACE",
+              "CREATE_ONLY"
+            ]
+          },
           "base_hash": {
             "type": "string",
-            "pattern": "^[0-9a-f]{64}$"
+            "pattern": "^(?:[0-9a-f]{64}|workspace-target-absent/v1:[0-9a-f]{64})$",
+            "not": {
+              "const": "workspace-target-absent/v1:0000000000000000000000000000000000000000000000000000000000000000"
+            }
           },
           "content": {
             "type": "string",
@@ -11915,7 +15082,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "Persistent Approval snapshot returned by Proposal detail and list reads. New approved file_patch snapshots include the durable Git and Workflow binding. Historical approved file_patch snapshots may omit workflow_run_id/workflow_status_url while awaiting an exact approval replay; snapshots that also omit approved_git_head are read-only manual-recovery records. Approved non-file typed Proposal snapshots and rejected snapshots omit all Git and Workflow fields. The transient dispatch_status exists only on ApprovalDecisionResponse."
+        "description": "Persistent Approval snapshot returned by Proposal detail and list reads. New approved file_patch and restore_document snapshots include the durable Git and Workflow binding. Historical approved file_patch snapshots may omit workflow_run_id/workflow_status_url while awaiting an exact approval replay; snapshots that also omit approved_git_head are read-only manual-recovery records. Approved restore_document snapshots always bind approved_git_head to the verified restore HEAD. Approved non-file typed Proposal snapshots and rejected snapshots omit all Git and Workflow fields. The transient dispatch_status exists only on ApprovalDecisionResponse."
       },
       "NonFileApproval": {
         "description": "Approval snapshot for a non-file typed Proposal. Git and Safe Writeback Workflow fields are forbidden.",
@@ -11948,7 +15115,7 @@
       },
       "ApprovalDecisionResponse": {
         "type": "object",
-        "description": "Approved file_patch decisions include approved_git_head, workflow_run_id, workflow_status_url and dispatch_status. Approved non-file typed Proposal decisions and rejected decisions omit all Git and Workflow writeback fields.",
+        "description": "Approved file_patch and restore_document decisions include approved_git_head, workflow_run_id, workflow_status_url and dispatch_status. Approved non-file typed Proposal decisions and rejected decisions omit all Git and Workflow writeback fields.",
         "required": [
           "id",
           "proposal_id",
@@ -12014,6 +15181,9 @@
             "$ref": "#/components/schemas/FilePatchProposal"
           },
           {
+            "$ref": "#/components/schemas/RestoreDocumentProposal"
+          },
+          {
             "$ref": "#/components/schemas/KnowledgeChangeProposal"
           },
           {
@@ -12027,6 +15197,7 @@
           "propertyName": "proposal_type",
           "mapping": {
             "file_patch": "#/components/schemas/FilePatchProposal",
+            "restore_document": "#/components/schemas/RestoreDocumentProposal",
             "knowledge_change": "#/components/schemas/KnowledgeChangeProposal",
             "publish_artifact": "#/components/schemas/PublishArtifactProposal",
             "downstream_update": "#/components/schemas/DownstreamUpdateProposal"
@@ -12107,6 +15278,100 @@
             "type": "string",
             "format": "date-time"
           }
+        },
+        "additionalProperties": false
+      },
+      "RestoreDocumentBinding": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "document_id",
+          "target_commit",
+          "expected_head",
+          "expected_document_version",
+          "preview_hash",
+          "current_content_hash",
+          "target_content_hash",
+          "schema_version"
+        ],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "target_commit": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "expected_head": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "expected_document_version": { "type": "integer", "minimum": 1 },
+          "preview_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "current_content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "target_content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "schema_version": { "const": "document-restore/v1" }
+        },
+        "additionalProperties": false,
+        "description": "Immutable server-derived restore provenance. target_commit and expected_head use the same Git object format and must differ; current and target content hashes must differ."
+      },
+      "RestoreDocumentRevision": {
+        "type": "object",
+        "required": [
+          "id",
+          "revision_no",
+          "target_mode",
+          "base_hash",
+          "content",
+          "evidence_summary",
+          "risk",
+          "rollback_plan",
+          "change_hash",
+          "created_at",
+          "restore"
+        ],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "revision_no": { "type": "integer", "minimum": 1 },
+          "target_mode": { "const": "REPLACE" },
+          "base_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "content": { "type": "string", "minLength": 1, "maxLength": 10485760, "x-max-utf8-bytes": 10485760 },
+          "evidence_summary": { "type": "string", "minLength": 1 },
+          "risk": { "type": "string", "minLength": 1 },
+          "rollback_plan": { "type": "string", "minLength": 1 },
+          "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "restore": { "$ref": "#/components/schemas/RestoreDocumentBinding" }
+        },
+        "additionalProperties": false,
+        "description": "Safe Writeback revision whose content is the exact target blob read by the server and whose base_hash equals restore.current_content_hash."
+      },
+      "RestoreDocumentProposal": {
+        "type": "object",
+        "required": [
+          "proposal_type",
+          "id",
+          "workspace_id",
+          "target_path",
+          "status",
+          "risk_level",
+          "revision",
+          "approval",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "proposal_type": { "const": "restore_document" },
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "target_path": { "$ref": "#/components/schemas/DocumentHistoryPath" },
+          "status": {
+            "type": "string",
+            "enum": ["draft", "validating", "ready_for_review", "approved", "applying", "applied", "verifying", "completed", "rejected", "needs_revision", "deferred", "apply_failed", "verify_failed", "rolled_back", "cancelled"]
+          },
+          "risk_level": { "const": "HIGH" },
+          "revision": { "$ref": "#/components/schemas/RestoreDocumentRevision" },
+          "approval": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/Approval" },
+              { "type": "null" }
+            ]
+          },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
         },
         "additionalProperties": false
       },
@@ -13014,10 +16279,12 @@
       },
       "ApplyPreflightResult": {
         "type": "object",
+        "x-invariant": "target_mode and base_hash retain the exact Proposal Revision target binding.",
         "required": [
           "proposal_id",
           "revision_id",
           "change_hash",
+          "target_mode",
           "base_hash",
           "preflight_passed",
           "mode",
@@ -13036,9 +16303,19 @@
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
           },
+          "target_mode": {
+            "type": "string",
+            "enum": [
+              "REPLACE",
+              "CREATE_ONLY"
+            ]
+          },
           "base_hash": {
             "type": "string",
-            "pattern": "^[0-9a-f]{64}$"
+            "pattern": "^(?:[0-9a-f]{64}|workspace-target-absent/v1:[0-9a-f]{64})$",
+            "not": {
+              "const": "workspace-target-absent/v1:0000000000000000000000000000000000000000000000000000000000000000"
+            }
           },
           "preflight_passed": {
             "const": true
@@ -20027,11 +23304,12 @@
       },
       "ProposalCurrentContent": {
         "type": "object",
-        "x-invariant": "base_hash_match == (current_hash == base_hash)",
+        "x-invariant": "base_hash_match == (current_hash == base_hash); CREATE_ONLY requires empty content and matching non-zero workspace-target-absent/v1 tokens.",
         "required": [
           "proposal_id",
           "workspace_id",
           "target_path",
+          "target_mode",
           "content",
           "current_hash",
           "base_hash",
@@ -20050,17 +23328,30 @@
             "type": "string",
             "minLength": 1
           },
+          "target_mode": {
+            "type": "string",
+            "enum": [
+              "REPLACE",
+              "CREATE_ONLY"
+            ]
+          },
           "content": {
             "type": "string",
             "maxLength": 1048576
           },
           "current_hash": {
             "type": "string",
-            "pattern": "^[0-9a-f]{64}$"
+            "pattern": "^(?:[0-9a-f]{64}|workspace-target-absent/v1:[0-9a-f]{64})$",
+            "not": {
+              "const": "workspace-target-absent/v1:0000000000000000000000000000000000000000000000000000000000000000"
+            }
           },
           "base_hash": {
             "type": "string",
-            "pattern": "^[0-9a-f]{64}$"
+            "pattern": "^(?:[0-9a-f]{64}|workspace-target-absent/v1:[0-9a-f]{64})$",
+            "not": {
+              "const": "workspace-target-absent/v1:0000000000000000000000000000000000000000000000000000000000000000"
+            }
           },
           "base_hash_match": {
             "type": "boolean",
@@ -20097,6 +23388,7 @@
             "type": "string",
             "enum": [
               "file_patch",
+              "restore_document",
               "knowledge_change",
               "publish_artifact",
               "downstream_update"
@@ -24492,6 +27784,24 @@
         },
         "additionalProperties": false
       },
+      "ArtifactDocumentSource": {
+        "type": "object",
+        "required": [
+          "document_id",
+          "article_revision_id",
+          "revision_no",
+          "verified_content_hash",
+          "verified"
+        ],
+        "properties": {
+          "document_id": { "type": "string", "format": "uuid" },
+          "article_revision_id": { "type": "string", "format": "uuid" },
+          "revision_no": { "type": "integer", "minimum": 1 },
+          "verified_content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "verified": { "const": true }
+        },
+        "additionalProperties": false
+      },
       "ArtifactSectionInput": {
         "type": "object",
         "required": [
@@ -24582,6 +27892,7 @@
           "title",
           "content",
           "citations",
+          "document_sources",
           "coverage"
         ],
         "properties": {
@@ -24600,6 +27911,10 @@
             "items": {
               "$ref": "#/components/schemas/ArtifactCitation"
             }
+          },
+          "document_sources": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ArtifactDocumentSource" }
           },
           "coverage": {
             "$ref": "#/components/schemas/ArtifactCoverage"
@@ -25309,6 +28624,796 @@
         },
         "additionalProperties": false
       },
+      "OrganizingMaterialKind": {
+        "type": "string",
+        "enum": ["SOURCE_VERSION", "DOCUMENT_REVISION", "CLAIM", "SMART_COLLECTION"]
+      },
+      "OrganizingTemplateKind": {
+        "type": "string",
+        "enum": ["TOPIC_ARTICLE", "MERGE_DOCUMENTS", "KNOWLEDGE_REPORT", "INTERVIEW_REVIEW"]
+      },
+      "OrganizingCreateDraftRequest": {
+        "type": "object",
+        "required": ["intent"],
+        "properties": {
+          "intent": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingUpdateDraftRequest": {
+        "type": "object",
+        "required": ["expected_version", "intent", "template_revision_id"],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "intent": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "template_revision_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingSuggestRequest": {
+        "type": "object",
+        "required": ["expected_version"],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "limit": { "type": "integer", "minimum": 0, "maximum": 100 }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingExpectedVersionRequest": {
+        "type": "object",
+        "required": ["expected_version"],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingMaterialSelectionRequest": {
+        "type": "object",
+        "required": ["expected_version", "selected"],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "selected": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingConfirmRequest": {
+        "type": "object",
+        "required": ["expected_version", "template_revision_id"],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "template_revision_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingAddSourceVersionRequest": {
+        "type": "object",
+        "required": ["expected_version", "kind", "source_version_id"],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "kind": { "const": "SOURCE_VERSION" },
+          "source_version_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingAddDocumentRevisionRequest": {
+        "type": "object",
+        "required": ["expected_version", "kind", "document_id", "article_revision_id"],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "kind": { "const": "DOCUMENT_REVISION" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "article_revision_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingAddClaimRequest": {
+        "type": "object",
+        "required": ["expected_version", "kind", "claim_id"],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "kind": { "const": "CLAIM" },
+          "claim_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingAddSmartCollectionRequest": {
+        "type": "object",
+        "required": ["expected_version", "kind", "collection_id"],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "kind": { "const": "SMART_COLLECTION" },
+          "collection_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingAddMaterialRequest": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/OrganizingAddSourceVersionRequest" },
+          { "$ref": "#/components/schemas/OrganizingAddDocumentRevisionRequest" },
+          { "$ref": "#/components/schemas/OrganizingAddClaimRequest" },
+          { "$ref": "#/components/schemas/OrganizingAddSmartCollectionRequest" }
+        ],
+        "discriminator": { "propertyName": "kind" }
+      },
+      "OrganizingMaterialPolicy": {
+        "type": "object",
+        "required": ["allowed_kinds", "min_materials", "max_materials"],
+        "properties": {
+          "allowed_kinds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/OrganizingMaterialKind" }
+          },
+          "min_materials": { "type": "integer", "minimum": 1, "maximum": 500 },
+          "max_materials": { "type": "integer", "minimum": 1, "maximum": 500 }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingTemplateSection": {
+        "type": "object",
+        "required": ["key", "title", "required"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "required": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingPresentationPolicy": {
+        "type": "object",
+        "required": ["audience", "language", "tone", "length", "include_code", "include_examples", "include_faq"],
+        "properties": {
+          "audience": { "type": "string", "maxLength": 512 },
+          "language": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "tone": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "length": { "type": "string", "enum": ["SHORT", "MEDIUM", "LONG"] },
+          "include_code": { "type": "boolean" },
+          "include_examples": { "type": "boolean" },
+          "include_faq": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingOutputDefaults": {
+        "type": "object",
+        "required": ["directory", "filename_pattern"],
+        "properties": {
+          "directory": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "filename_pattern": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingTemplateDeclaration": {
+        "type": "object",
+        "description": "Constrained declaration only. Prompt text, tool lists, permissions, Workflow nodes, and model credentials are not accepted.",
+        "required": ["schema_version", "kind", "name", "description", "materials", "sections", "presentation", "output", "additional_instructions"],
+        "properties": {
+          "schema_version": { "const": "organizing-template/v1" },
+          "kind": { "$ref": "#/components/schemas/OrganizingTemplateKind" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 2048 },
+          "materials": { "$ref": "#/components/schemas/OrganizingMaterialPolicy" },
+          "sections": {
+            "type": "array",
+            "description": "Must contain exactly one required section for each governance key: conflicts, gaps, and sources.",
+            "minItems": 1,
+            "maxItems": 24,
+            "items": { "$ref": "#/components/schemas/OrganizingTemplateSection" },
+            "allOf": [
+              {
+                "contains": {
+                  "type": "object",
+                  "required": ["key", "required"],
+                  "properties": {
+                    "key": { "const": "conflicts" },
+                    "required": { "const": true }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": ["key", "required"],
+                  "properties": {
+                    "key": { "const": "gaps" },
+                    "required": { "const": true }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": ["key", "required"],
+                  "properties": {
+                    "key": { "const": "sources" },
+                    "required": { "const": true }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          },
+          "presentation": { "$ref": "#/components/schemas/OrganizingPresentationPolicy" },
+          "output": { "$ref": "#/components/schemas/OrganizingOutputDefaults" },
+          "additional_instructions": { "type": "string", "maxLength": 8192 }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingTemplateCreateRequest": {
+        "type": "object",
+        "required": ["declaration"],
+        "properties": {
+          "declaration": { "$ref": "#/components/schemas/OrganizingTemplateDeclaration" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingTemplateCloneRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingTemplateReviseRequest": {
+        "type": "object",
+        "required": ["expected_version", "declaration"],
+        "properties": {
+          "expected_version": { "type": "integer", "minimum": 1 },
+          "declaration": { "$ref": "#/components/schemas/OrganizingTemplateDeclaration" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingEvidence": {
+        "type": "object",
+        "required": ["index_version_id", "chunk_id", "source_version_id", "source_span_id", "content_hash", "excerpt_hash"],
+        "properties": {
+          "index_version_id": { "type": "string", "format": "uuid" },
+          "chunk_id": { "type": "string", "format": "uuid" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "source_span_id": { "type": "string", "format": "uuid" },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "excerpt_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingSourceVersionSearchReference": {
+        "type": "object",
+        "required": ["kind", "source_version_id"],
+        "properties": {
+          "kind": { "const": "SOURCE_VERSION" },
+          "source_version_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingDocumentRevisionSearchReference": {
+        "type": "object",
+        "required": ["kind", "document_id", "article_revision_id"],
+        "properties": {
+          "kind": { "const": "DOCUMENT_REVISION" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "article_revision_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingClaimSearchReference": {
+        "type": "object",
+        "required": ["kind", "claim_id"],
+        "properties": {
+          "kind": { "const": "CLAIM" },
+          "claim_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingSmartCollectionSearchReference": {
+        "type": "object",
+        "required": ["kind", "collection_id"],
+        "properties": {
+          "kind": { "const": "SMART_COLLECTION" },
+          "collection_id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingMaterialSearchReference": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/OrganizingSourceVersionSearchReference" },
+          { "$ref": "#/components/schemas/OrganizingDocumentRevisionSearchReference" },
+          { "$ref": "#/components/schemas/OrganizingClaimSearchReference" },
+          { "$ref": "#/components/schemas/OrganizingSmartCollectionSearchReference" }
+        ],
+        "discriminator": { "propertyName": "kind" }
+      },
+      "OrganizingMaterialSearchItem": {
+        "type": "object",
+        "required": ["workspace_id", "kind", "title", "availability", "reference"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "kind": { "$ref": "#/components/schemas/OrganizingMaterialKind" },
+          "title": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "availability": { "type": "string", "enum": ["AVAILABLE", "STALE", "UNAVAILABLE"] },
+          "reference": { "$ref": "#/components/schemas/OrganizingMaterialSearchReference" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingMaterialSearchPage": {
+        "type": "object",
+        "required": ["workspace_id", "items"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "items": { "type": "array", "maxItems": 25, "items": { "$ref": "#/components/schemas/OrganizingMaterialSearchItem" } }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingMaterialReference": {
+        "type": "object",
+        "required": ["kind", "version"],
+        "properties": {
+          "kind": { "$ref": "#/components/schemas/OrganizingMaterialKind" },
+          "source_version_id": { "type": "string", "format": "uuid" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "article_revision_id": { "type": "string", "format": "uuid" },
+          "claim_id": { "type": "string", "format": "uuid" },
+          "collection_id": { "type": "string", "format": "uuid" },
+          "origin_collection_id": { "type": "string", "format": "uuid" },
+          "profile_revision_id": { "type": "string", "format": "uuid" },
+          "version": { "type": "integer", "minimum": 0 },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "query_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "read_model_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingMaterial": {
+        "type": "object",
+        "required": ["id", "draft_id", "workspace_id", "kind", "title", "reasons", "origin", "availability", "score", "selected", "position", "reference", "evidence", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "draft_id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "kind": { "$ref": "#/components/schemas/OrganizingMaterialKind" },
+          "title": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "reasons": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": { "type": "string", "enum": ["HYBRID_MATCH", "PROFILE_MATCH", "ALIAS_MATCH", "FORMAL_KNOWLEDGE", "COLLECTION_MEMBER", "USER_ADDED"] }
+          },
+          "origin": { "type": "string", "enum": ["SUGGESTED", "USER"] },
+          "availability": { "type": "string", "enum": ["AVAILABLE", "STALE", "UNAVAILABLE"] },
+          "score": { "type": "number", "minimum": 0, "maximum": 1 },
+          "selected": { "type": "boolean" },
+          "position": { "type": "integer", "minimum": 0 },
+          "reference": { "$ref": "#/components/schemas/OrganizingMaterialReference" },
+          "evidence": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/OrganizingEvidence" } },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingDraft": {
+        "type": "object",
+        "required": ["id", "workspace_id", "intent", "status", "template_revision_id", "confirmed_snapshot_id", "version", "materials", "created_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "intent": { "type": "string", "maxLength": 4096 },
+          "status": { "type": "string", "enum": ["EDITING", "CONFIRMED"] },
+          "template_revision_id": { "type": ["string", "null"], "format": "uuid" },
+          "confirmed_snapshot_id": { "type": ["string", "null"], "format": "uuid" },
+          "version": { "type": "integer", "minimum": 1 },
+          "materials": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/OrganizingMaterial" } },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingDraftEnvelope": {
+        "type": "object",
+        "required": ["draft"],
+        "properties": { "draft": { "$ref": "#/components/schemas/OrganizingDraft" } },
+        "additionalProperties": false
+      },
+      "OrganizingDraftCommandResult": {
+        "type": "object",
+        "required": ["draft", "replayed"],
+        "properties": {
+          "draft": { "$ref": "#/components/schemas/OrganizingDraft" },
+          "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingSnapshotMaterial": {
+        "type": "object",
+        "required": ["position", "reference", "evidence"],
+        "properties": {
+          "position": { "type": "integer", "minimum": 0 },
+          "reference": { "$ref": "#/components/schemas/OrganizingMaterialReference" },
+          "evidence": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/OrganizingEvidence" } }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingSnapshot": {
+        "type": "object",
+        "required": ["id", "workspace_id", "draft_id", "draft_version", "template_id", "template_revision_id", "template_hash", "intent", "materials", "canonical_hash", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "draft_id": { "type": "string", "format": "uuid" },
+          "draft_version": { "type": "integer", "minimum": 1 },
+          "template_id": { "type": "string", "format": "uuid" },
+          "template_revision_id": { "type": "string", "format": "uuid" },
+          "template_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "intent": { "type": "string", "maxLength": 4096 },
+          "materials": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "$ref": "#/components/schemas/OrganizingSnapshotMaterial" } },
+          "canonical_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingSnapshotEnvelope": {
+        "type": "object",
+        "required": ["snapshot"],
+        "properties": { "snapshot": { "$ref": "#/components/schemas/OrganizingSnapshot" } },
+        "additionalProperties": false
+      },
+      "OrganizingConfirmResult": {
+        "type": "object",
+        "required": ["draft", "snapshot", "dispatch_status", "replayed"],
+        "properties": {
+          "draft": { "$ref": "#/components/schemas/OrganizingDraft" },
+          "snapshot": { "$ref": "#/components/schemas/OrganizingSnapshot" },
+          "dispatch_status": { "const": "PENDING" },
+          "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingTemplateRevision": {
+        "type": "object",
+        "required": ["id", "template_id", "workspace_id", "revision_no", "kind", "schema_version", "canonical_hash", "declaration", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "template_id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": ["string", "null"], "format": "uuid" },
+          "revision_no": { "type": "integer", "minimum": 1 },
+          "kind": { "$ref": "#/components/schemas/OrganizingTemplateKind" },
+          "schema_version": { "const": "organizing-template/v1" },
+          "canonical_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "declaration": { "$ref": "#/components/schemas/OrganizingTemplateDeclaration" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingTemplate": {
+        "type": "object",
+        "required": ["id", "workspace_id", "key", "name", "description", "built_in", "kind", "current_revision_id", "version", "current_revision", "created_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": ["string", "null"], "format": "uuid" },
+          "key": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "description": { "type": "string", "maxLength": 2048 },
+          "built_in": { "type": "boolean" },
+          "kind": { "$ref": "#/components/schemas/OrganizingTemplateKind" },
+          "current_revision_id": { "type": "string", "format": "uuid" },
+          "version": { "type": "integer", "minimum": 1 },
+          "current_revision": { "$ref": "#/components/schemas/OrganizingTemplateRevision" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingTemplateEnvelope": {
+        "type": "object",
+        "required": ["template"],
+        "properties": { "template": { "$ref": "#/components/schemas/OrganizingTemplate" } },
+        "additionalProperties": false
+      },
+      "OrganizingTemplateCommandResult": {
+        "type": "object",
+        "required": ["template", "replayed"],
+        "properties": {
+          "template": { "$ref": "#/components/schemas/OrganizingTemplate" },
+          "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingTemplatePage": {
+        "type": "object",
+        "required": ["workspace_id", "items"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/OrganizingTemplate" } }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingRunBinding": {
+        "type": "object",
+        "required": ["id", "workspace_id", "snapshot_id", "workflow_run_id", "definition_key", "definition_version", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "snapshot_id": { "type": "string", "format": "uuid" },
+          "workflow_run_id": { "type": "string", "format": "uuid" },
+          "definition_key": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "definition_version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingRunResult": {
+        "type": "object",
+        "required": ["id", "workspace_id", "run_binding_id", "snapshot_id", "workflow_run_id", "node_run_id", "kind", "result_ref", "result_hash", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "run_binding_id": { "type": "string", "format": "uuid" },
+          "snapshot_id": { "type": "string", "format": "uuid" },
+          "workflow_run_id": { "type": "string", "format": "uuid" },
+          "node_run_id": { "type": "string", "format": "uuid" },
+          "kind": { "type": "string", "enum": ["ARTIFACT", "MERGE_PROPOSAL"] },
+          "result_ref": { "type": "string", "format": "uuid" },
+          "result_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "OrganizingRun": {
+        "type": "object",
+        "required": ["snapshot_id", "dispatch_status", "workflow_status", "retryable", "attempt_count", "last_error_code", "binding", "result", "updated_at"],
+        "properties": {
+          "snapshot_id": { "type": "string", "format": "uuid" },
+          "dispatch_status": { "type": "string", "enum": ["PENDING", "STARTED", "POISONED"] },
+          "workflow_status": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": ["pending", "running", "waiting_for_human", "retry_wait", "paused", "succeeded", "failed", "cancelled"]
+              },
+              { "type": "null" }
+            ]
+          },
+          "retryable": { "type": "boolean" },
+          "attempt_count": { "type": "integer", "minimum": 0, "maximum": 1000 },
+          "last_error_code": { "type": ["string", "null"], "maxLength": 128, "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "binding": { "oneOf": [{ "$ref": "#/components/schemas/OrganizingRunBinding" }, { "type": "null" }] },
+          "result": { "oneOf": [{ "$ref": "#/components/schemas/OrganizingRunResult" }, { "type": "null" }] },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "dispatch_status": { "const": "PENDING" },
+              "workflow_status": { "type": "null" },
+              "retryable": { "const": true },
+              "binding": { "type": "null" },
+              "result": { "type": "null" }
+            }
+          },
+          {
+            "properties": {
+              "dispatch_status": { "const": "POISONED" },
+              "workflow_status": { "type": "null" },
+              "retryable": { "const": false },
+              "last_error_code": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z][A-Z0-9_]*$" },
+              "binding": { "type": "null" },
+              "result": { "type": "null" }
+            }
+          },
+          {
+            "properties": {
+              "dispatch_status": { "const": "STARTED" },
+              "workflow_status": {
+                "type": "string",
+                "enum": ["pending", "running", "waiting_for_human", "retry_wait", "paused", "succeeded", "failed", "cancelled"]
+              },
+              "retryable": { "const": false },
+              "binding": { "$ref": "#/components/schemas/OrganizingRunBinding" }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "workflow_status": { "const": "succeeded" },
+                  "result": { "$ref": "#/components/schemas/OrganizingRunResult" }
+                }
+              },
+              {
+                "properties": {
+                  "workflow_status": {
+                    "type": "string",
+                    "enum": ["pending", "running", "waiting_for_human", "retry_wait", "paused", "failed", "cancelled"]
+                  },
+                  "result": { "type": "null" }
+                }
+              }
+            ]
+          }
+        ],
+        "additionalProperties": false
+      },
+      "OrganizingRunEnvelope": {
+        "type": "object",
+        "required": ["run"],
+        "properties": { "run": { "$ref": "#/components/schemas/OrganizingRun" } },
+        "additionalProperties": false
+      },
+      "DocumentHistoryObjectID": {
+        "type": "string",
+        "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+      },
+      "DocumentHistoryVersionRef": {
+        "type": "string",
+        "pattern": "^(?:WORKTREE|[0-9a-f]{40}|[0-9a-f]{64})$"
+      },
+      "DocumentHistoryPath": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "x-max-utf8-bytes": 4096,
+        "pattern": "^(?!/)(?!\\.git(?:/|$))(?!\\.knowledge(?:/|$))(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\r\\n\\u0000]+\\.[mM][dD]$"
+      },
+      "DocumentHistoryExternalEntry": {
+        "type": "object",
+        "required": ["kind", "commit", "parent_commits", "author_name", "author_email", "committed_at", "summary"],
+        "properties": {
+          "kind": { "const": "EXTERNAL" },
+          "commit": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "parent_commits": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/components/schemas/DocumentHistoryObjectID" } },
+          "author_name": { "type": "string", "maxLength": 512, "x-max-utf8-bytes": 512 },
+          "author_email": { "type": "string", "maxLength": 512, "x-max-utf8-bytes": 512 },
+          "committed_at": { "type": "string", "format": "date-time" },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 }
+        },
+        "additionalProperties": false
+      },
+      "DocumentHistoryManagedEntry": {
+        "type": "object",
+        "required": ["kind", "commit", "parent_commits", "author_name", "author_email", "committed_at", "summary", "article_revision_id", "article_revision_no", "proposal_id", "proposal_revision_id", "approval_id", "workflow_run_id", "writeback_id", "proposal_type", "approval_decided_at"],
+        "properties": {
+          "kind": { "const": "MANAGED" },
+          "commit": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "parent_commits": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/components/schemas/DocumentHistoryObjectID" } },
+          "author_name": { "type": "string", "maxLength": 512, "x-max-utf8-bytes": 512 },
+          "author_email": { "type": "string", "maxLength": 512, "x-max-utf8-bytes": 512 },
+          "committed_at": { "type": "string", "format": "date-time" },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 },
+          "article_revision_id": { "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }] },
+          "article_revision_no": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+          "proposal_id": { "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }] },
+          "proposal_revision_id": { "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }] },
+          "approval_id": { "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }] },
+          "workflow_run_id": { "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }] },
+          "writeback_id": { "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }] },
+          "proposal_type": { "oneOf": [{ "type": "string", "enum": ["file_patch", "restore_document"] }, { "type": "null" }] },
+          "approval_decided_at": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] }
+        },
+        "additionalProperties": false,
+        "description": "At least one Article Revision or complete Proposal writeback binding is present; missing historical relations remain explicit nulls."
+      },
+      "DocumentHistoryCurrentEntry": {
+        "type": "object",
+        "required": ["kind", "commit", "parent_commits", "author_name", "author_email", "committed_at", "summary"],
+        "properties": {
+          "kind": { "const": "CURRENT_CHANGE" },
+          "commit": { "type": "null" },
+          "parent_commits": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "$ref": "#/components/schemas/DocumentHistoryObjectID" } },
+          "author_name": { "type": "string", "maxLength": 512, "x-max-utf8-bytes": 512 },
+          "author_email": { "type": "string", "maxLength": 512, "x-max-utf8-bytes": 512 },
+          "committed_at": { "type": "null" },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 }
+        },
+        "additionalProperties": false
+      },
+      "DocumentHistoryEntry": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/DocumentHistoryManagedEntry" },
+          { "$ref": "#/components/schemas/DocumentHistoryExternalEntry" },
+          { "$ref": "#/components/schemas/DocumentHistoryCurrentEntry" }
+        ],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "MANAGED": "#/components/schemas/DocumentHistoryManagedEntry",
+            "EXTERNAL": "#/components/schemas/DocumentHistoryExternalEntry",
+            "CURRENT_CHANGE": "#/components/schemas/DocumentHistoryCurrentEntry"
+          }
+        }
+      },
+      "DocumentHistoryPage": {
+        "type": "object",
+        "required": ["workspace_id", "document_id", "document_version", "path", "branch", "head", "dirty", "items"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "document_version": { "type": "integer", "minimum": 1 },
+          "path": { "$ref": "#/components/schemas/DocumentHistoryPath" },
+          "branch": { "type": "string", "minLength": 1, "maxLength": 512, "x-max-utf8-bytes": 512 },
+          "head": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "dirty": { "type": "boolean" },
+          "items": { "type": "array", "maxItems": 51, "items": { "$ref": "#/components/schemas/DocumentHistoryEntry" } },
+          "next_cursor": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" }
+        },
+        "additionalProperties": false
+      },
+      "DocumentHistoryCompare": {
+        "type": "object",
+        "required": ["workspace_id", "document_id", "path", "head", "left", "right", "left_content", "right_content", "patch", "diff_hash"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "path": { "$ref": "#/components/schemas/DocumentHistoryPath" },
+          "head": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "left": { "$ref": "#/components/schemas/DocumentHistoryVersionRef" },
+          "right": { "$ref": "#/components/schemas/DocumentHistoryVersionRef" },
+          "left_content": { "type": "string", "maxLength": 10485760, "x-max-utf8-bytes": 10485760 },
+          "right_content": { "type": "string", "maxLength": 10485760, "x-max-utf8-bytes": 10485760 },
+          "patch": { "type": "string", "maxLength": 2097152, "x-max-utf8-bytes": 2097152 },
+          "diff_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "DocumentRestorePreviewRequest": {
+        "type": "object",
+        "required": ["target_commit", "expected_document_version"],
+        "properties": {
+          "target_commit": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "expected_document_version": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "DocumentRestorePreview": {
+        "type": "object",
+        "required": ["workspace_id", "document_id", "path", "target_commit", "expected_head", "expected_document_version", "current_content_hash", "target_content_hash", "current_content", "target_content", "patch", "diff_hash", "preview_hash", "blocked_by_dirty_worktree"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "path": { "$ref": "#/components/schemas/DocumentHistoryPath" },
+          "target_commit": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "expected_head": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "expected_document_version": { "type": "integer", "minimum": 1 },
+          "current_content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "target_content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "current_content": { "type": "string", "maxLength": 10485760, "x-max-utf8-bytes": 10485760 },
+          "target_content": { "type": "string", "maxLength": 10485760, "x-max-utf8-bytes": 10485760 },
+          "patch": { "type": "string", "maxLength": 2097152, "x-max-utf8-bytes": 2097152 },
+          "diff_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "preview_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "blocked_by_dirty_worktree": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "DocumentRestoreProposalRequest": {
+        "type": "object",
+        "required": ["target_commit", "expected_head", "expected_document_version", "preview_hash"],
+        "properties": {
+          "target_commit": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "expected_head": { "$ref": "#/components/schemas/DocumentHistoryObjectID" },
+          "expected_document_version": { "type": "integer", "minimum": 1 },
+          "preview_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "DocumentRestoreProposalResult": {
+        "type": "object",
+        "required": ["proposal_id", "proposal_revision_id", "proposal_type", "status", "change_hash", "replayed"],
+        "properties": {
+          "proposal_id": { "type": "string", "format": "uuid" },
+          "proposal_revision_id": { "type": "string", "format": "uuid" },
+          "proposal_type": { "const": "restore_document" },
+          "status": {
+            "type": "string",
+            "enum": ["draft", "validating", "ready_for_review", "approved", "applying", "applied", "verifying", "completed", "rejected", "needs_revision", "deferred", "apply_failed", "verify_failed", "rolled_back", "cancelled"]
+          },
+          "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
       "SourceVersionSummary": {
         "type": "object",
         "required": [
@@ -25395,6 +29500,157 @@
             "description": "Active Index selection. included binds this Source Version; excluded is Source-scoped and therefore applies to every historical version of the excluded Source."
           }
         },
+        "additionalProperties": false
+      },
+      "GitSyncHTTPSRemoteInput": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048,
+        "x-max-utf8-bytes": 2048,
+        "description": "Remote input normalized by the server; after trimming it must be a public HTTPS repository URL without userinfo, query, or fragment."
+      },
+      "GitSyncHTTPSRemoteURL": {
+        "type": "string",
+        "format": "uri",
+        "minLength": 11,
+        "maxLength": 2048,
+        "x-max-utf8-bytes": 2048,
+        "pattern": "^https://[^/?#@]+/[^/?#][^?#]*$",
+        "description": "Canonical public HTTPS repository URL without userinfo, query, or fragment."
+      },
+      "GitSyncBranch": { "type": "string", "minLength": 1, "maxLength": 255, "x-max-utf8-bytes": 255 },
+      "GitSyncOID": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+      "GitSyncKeepTokenAction": {
+        "type": "object",
+        "required": ["action"],
+        "properties": { "action": { "type": "string", "const": "keep" } },
+        "additionalProperties": false
+      },
+      "GitSyncReplaceTokenAction": {
+        "type": "object",
+        "required": ["action", "value"],
+        "properties": {
+          "action": { "type": "string", "const": "replace" },
+          "value": { "type": "string", "minLength": 1, "maxLength": 16384, "x-max-utf8-bytes": 16384, "pattern": "^[^\\u0000-\\u0020\\u007f]+$", "writeOnly": true }
+        },
+        "additionalProperties": false
+      },
+      "GitSyncClearTokenAction": {
+        "type": "object",
+        "required": ["action"],
+        "properties": { "action": { "type": "string", "const": "clear" } },
+        "additionalProperties": false
+      },
+      "GitSyncTokenAction": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/GitSyncKeepTokenAction" },
+          { "$ref": "#/components/schemas/GitSyncReplaceTokenAction" },
+          { "$ref": "#/components/schemas/GitSyncClearTokenAction" }
+        ]
+      },
+      "GitSyncTestTokenAction": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/GitSyncKeepTokenAction" },
+          { "$ref": "#/components/schemas/GitSyncReplaceTokenAction" }
+        ]
+      },
+      "SaveGitRemoteConfigRequest": {
+        "type": "object",
+        "required": ["expected_revision", "remote_url", "branch", "auto_sync", "token"],
+        "properties": {
+          "expected_revision": { "type": "integer", "minimum": 0 },
+          "remote_url": { "$ref": "#/components/schemas/GitSyncHTTPSRemoteInput" },
+          "branch": { "$ref": "#/components/schemas/GitSyncBranch" },
+          "auto_sync": { "type": "boolean" },
+          "token": { "$ref": "#/components/schemas/GitSyncTokenAction" }
+        },
+        "additionalProperties": false
+      },
+      "RemoveGitRemoteConfigRequest": {
+        "type": "object",
+        "required": ["expected_revision"],
+        "properties": { "expected_revision": { "type": "integer", "minimum": 1 } },
+        "additionalProperties": false
+      },
+      "TestGitRemoteConfigRequest": {
+        "type": "object",
+        "required": ["expected_revision", "remote_url", "branch", "token"],
+        "properties": {
+          "expected_revision": { "type": "integer", "minimum": 0 },
+          "remote_url": { "$ref": "#/components/schemas/GitSyncHTTPSRemoteInput" },
+          "branch": { "$ref": "#/components/schemas/GitSyncBranch" },
+          "token": { "$ref": "#/components/schemas/GitSyncTestTokenAction" }
+        },
+        "additionalProperties": false
+      },
+      "RetryGitSyncRunRequest": {
+        "type": "object",
+        "required": ["expected_version"],
+        "properties": { "expected_version": { "type": "integer", "minimum": 1 } },
+        "additionalProperties": false
+      },
+      "GitRemoteConfig": {
+        "type": "object",
+        "required": ["workspace_id", "configured", "remote_url", "branch", "auto_sync", "token_configured", "revision", "created_at", "updated_at"],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "configured": { "type": "boolean" },
+          "remote_url": { "oneOf": [{ "$ref": "#/components/schemas/GitSyncHTTPSRemoteURL" }, { "type": "null" }] },
+          "branch": { "oneOf": [{ "$ref": "#/components/schemas/GitSyncBranch" }, { "type": "null" }] },
+          "auto_sync": { "type": "boolean" },
+          "token_configured": { "type": "boolean", "description": "Whether a credential is present; the credential itself is never returned." },
+          "revision": { "type": "integer", "minimum": 0 },
+          "created_at": { "type": ["string", "null"], "format": "date-time" },
+          "updated_at": { "type": ["string", "null"], "format": "date-time" },
+          "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "GitRemoteTestResult": {
+        "type": "object",
+        "required": ["status", "remote_url", "branch"],
+        "properties": { "status": { "type": "string", "const": "ok" }, "remote_url": { "$ref": "#/components/schemas/GitSyncHTTPSRemoteURL" }, "branch": { "$ref": "#/components/schemas/GitSyncBranch" } },
+        "additionalProperties": false
+      },
+      "GitSyncFileChange": {
+        "type": "object",
+        "required": ["path", "old_path", "kind"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 },
+          "old_path": { "type": ["string", "null"], "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096 },
+          "kind": { "type": "string", "enum": ["ADDED", "MODIFIED", "DELETED", "RENAMED"] }
+        },
+        "additionalProperties": false
+      },
+      "GitSyncRun": {
+        "type": "object",
+        "required": ["id", "workspace_id", "config_revision", "remote_url", "branch", "trigger", "retry_of_run_id", "status", "direction", "failure_class", "error_code", "retryable", "expected_head_oid", "expected_remote_oid", "verified_head_oid", "verified_remote_oid", "changed_files", "index_status", "index_error_code", "index_retryable", "index_version_id", "attempt_count", "version", "created_at", "updated_at", "completed_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" }, "workspace_id": { "type": "string", "format": "uuid" },
+          "config_revision": { "type": "integer", "minimum": 1 }, "remote_url": { "$ref": "#/components/schemas/GitSyncHTTPSRemoteURL" }, "branch": { "$ref": "#/components/schemas/GitSyncBranch" },
+          "trigger": { "type": "string", "enum": ["MANUAL", "AUTOMATIC", "RETRY"] }, "retry_of_run_id": { "type": ["string", "null"], "format": "uuid" },
+          "status": { "type": "string", "enum": ["PENDING", "FETCHING", "COMPARING", "FAST_FORWARDING", "PUSHING", "VERIFYING", "SUCCEEDED", "CONFLICT", "FAILED", "STALE", "MANUAL_RECOVERY_REQUIRED"] },
+          "direction": { "type": "string", "enum": ["UNKNOWN", "NONE", "PULL", "PUSH"] },
+          "failure_class": { "type": "string", "enum": ["NONE", "DIRTY", "DETACHED", "DIVERGED", "AUTHENTICATION", "OFFLINE", "REF_DRIFT", "NON_FAST_FORWARD", "STALE_CONFIG", "RESULT_UNKNOWN", "DEPENDENCY", "INTERNAL"] },
+          "error_code": { "type": "string", "maxLength": 128 }, "retryable": { "type": "boolean" },
+          "expected_head_oid": { "oneOf": [{ "$ref": "#/components/schemas/GitSyncOID" }, { "type": "null" }] }, "expected_remote_oid": { "oneOf": [{ "$ref": "#/components/schemas/GitSyncOID" }, { "type": "null" }] },
+          "verified_head_oid": { "oneOf": [{ "$ref": "#/components/schemas/GitSyncOID" }, { "type": "null" }] }, "verified_remote_oid": { "oneOf": [{ "$ref": "#/components/schemas/GitSyncOID" }, { "type": "null" }] },
+          "changed_files": { "type": "array", "maxItems": 500, "items": { "$ref": "#/components/schemas/GitSyncFileChange" } },
+          "index_status": { "type": "string", "enum": ["NOT_REQUIRED", "PENDING", "RUNNING", "SUCCEEDED", "FAILED"] }, "index_error_code": { "type": "string", "maxLength": 128 }, "index_retryable": { "type": "boolean" }, "index_version_id": { "type": ["string", "null"], "format": "uuid" },
+          "attempt_count": { "type": "integer", "minimum": 0 }, "version": { "type": "integer", "minimum": 1 }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "completed_at": { "type": ["string", "null"], "format": "date-time" }, "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "GitSyncStatus": {
+        "type": "object",
+        "required": ["config", "current_run"],
+        "properties": { "config": { "$ref": "#/components/schemas/GitRemoteConfig" }, "current_run": { "oneOf": [ { "$ref": "#/components/schemas/GitSyncRun" }, { "type": "null" } ] } },
+        "additionalProperties": false
+      },
+      "GitSyncRunPage": {
+        "type": "object",
+        "required": ["items"],
+        "properties": { "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/GitSyncRun" } }, "next_cursor": { "type": "string", "minLength": 1, "maxLength": 2048 } },
         "additionalProperties": false
       }
     }

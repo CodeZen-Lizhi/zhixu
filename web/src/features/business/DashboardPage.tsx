@@ -5,8 +5,12 @@ import {
   ChevronDown,
   FileText,
   FolderOpen,
+  Layers3,
+  Plus,
   RotateCw,
+  Search,
   ShieldCheck,
+  SquarePen,
 } from "lucide-react";
 import { useId, useState } from "react";
 import { Link } from "react-router-dom";
@@ -15,6 +19,8 @@ import type { SourceVersionItem } from "../../api/business";
 import { listProposals, listSourceVersions, listWorkflows } from "../../api/business";
 import { getWorkspace } from "../../api/workspace";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
+import { requestQuickCapture } from "../capture/quick-capture-intent";
+import { useAuthoringOverview } from "../authoring";
 import { Badge } from "../../shared/ui";
 import {
   formatDashboardTimestamp,
@@ -166,21 +172,27 @@ const LeadSource = ({ source }: { source: SourceVersionItem }) => {
   </>;
 };
 
-const RecentSourceLink = ({ source }: { source: SourceVersionItem }) => {
-  const security = securityStatusDisplay(source.securityStatus);
-  const ingestion = ingestionStatusDisplay(source.ingestionStatus);
-  const index = indexStatusDisplay(source.indexStatus);
+interface DashboardActivity {
+  id: string;
+  label: string;
+  title: string;
+  href: string;
+  updatedAt: string;
+}
 
-  return <Link className="dashboard-recent-row" to={`/documents/${source.id}`}>
-    <time dateTime={source.capturedAt}>{formatDashboardTimestamp(source.capturedAt)}</time>
-    <div>
-      <strong>{sourceFileName(source.path)}</strong>
-      <span title={source.path}>{source.path}</span>
-      <small>{source.mimeType} · 安全{security.label} · 解析{ingestion.label} · 索引{index.label}</small>
-    </div>
-    <ArrowUpRight size={15} aria-hidden="true" />
-  </Link>;
+const isSameLocalDay = (value: string, day: Date): boolean => {
+  const timestamp = new Date(value);
+  return Number.isFinite(timestamp.getTime())
+    && timestamp.getFullYear() === day.getFullYear()
+    && timestamp.getMonth() === day.getMonth()
+    && timestamp.getDate() === day.getDate();
 };
+
+const ActivityLink = ({ activity }: { activity: DashboardActivity }) => <Link className="dashboard-activity-row" to={activity.href}>
+  <div><span>{activity.label}</span><strong>{activity.title}</strong></div>
+  <time dateTime={activity.updatedAt}>{formatDashboardTimestamp(activity.updatedAt)}</time>
+  <ArrowUpRight size={15} aria-hidden="true" />
+</Link>;
 
 export const DashboardPage = () => {
   const workspaceId = useActiveWorkspaceId();
@@ -215,6 +227,7 @@ export const DashboardPage = () => {
     enabled,
     retry: false,
   });
+  const authoring = useAuthoringOverview();
 
   if (!enabled) return <EntryDashboard />;
 
@@ -229,7 +242,58 @@ export const DashboardPage = () => {
   });
   const focusUnavailable = !focusPending && focus.kind === "empty" && focusErrors.length > 0;
   const leadSource = sources.data?.items[0];
-  const recentSources = sources.data?.items.slice(1) ?? [];
+  const recentDraft = authoring.data?.recentDrafts[0];
+  const continuationPending = authoring.isPending || (recentDraft === undefined && sources.isPending);
+  const activityPending = [...workflowAndProposalQueries, sources, authoring].some((query) => query.isPending);
+  const activityUnavailable = [...workflowAndProposalQueries, sources, authoring].some((query) => query.isError);
+  const activities: DashboardActivity[] = [
+    ...(authoring.data?.pendingPublications ?? []).map((publication) => ({
+      id: `publication:${publication.id}`,
+      label: "发布待处理",
+      title: publication.targetPath,
+      href: publication.proposalHref,
+      updatedAt: publication.updatedAt,
+    })),
+    ...(authoring.data?.completedDocuments ?? []).map((document) => ({
+      id: `document:${document.id}`,
+      label: "文章已完成",
+      title: document.title,
+      href: "/authoring",
+      updatedAt: document.updatedAt,
+    })),
+    ...(waitingWorkflows.data?.items ?? []).map((workflow) => ({
+      id: `workflow:${workflow.id}`,
+      label: "流程待处理",
+      title: workflow.definitionKey,
+      href: `/workflows/${workflow.id}`,
+      updatedAt: workflow.updatedAt,
+    })),
+    ...(failedWorkflows.data?.items ?? []).map((workflow) => ({
+      id: `workflow:${workflow.id}`,
+      label: "流程失败",
+      title: workflow.definitionKey,
+      href: `/workflows/${workflow.id}`,
+      updatedAt: workflow.updatedAt,
+    })),
+    ...(proposals.data?.items ?? []).map((proposal) => ({
+      id: `proposal:${proposal.id}`,
+      label: "提案待审",
+      title: proposal.target,
+      href: `/proposals/${proposal.id}`,
+      updatedAt: proposal.updatedAt,
+    })),
+    ...(sources.data?.items ?? [])
+      .filter((source) => recentDraft !== undefined || source.id !== leadSource?.id)
+      .map((source) => ({
+        id: `source:${source.id}`,
+        label: "资料已捕获",
+        title: sourceFileName(source.path),
+        href: `/documents/${source.id}`,
+        updatedAt: source.capturedAt,
+      })),
+  ].filter((activity) => isSameLocalDay(activity.updatedAt, today))
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+    .slice(0, 5);
   const retryFocus = (): void => {
     for (const query of focusErrors) void query.refetch();
   };
@@ -248,10 +312,17 @@ export const DashboardPage = () => {
             : "当前工作区信息暂不可用"}
         </p>
       </div>
-      <Link className="dashboard-context-link" to="/workspace">工作区设置<ArrowUpRight size={14} /></Link>
+      <Link className="dashboard-context-link" to="/settings?section=workspace">工作区设置<ArrowUpRight size={14} /></Link>
     </header>
 
     {workspace.isError ? <InlineError title="工作区信息暂不可用" description={errorMessage(workspace.error)} onRetry={() => { void workspace.refetch(); }} /> : null}
+
+    <section className="dashboard-action-strip" aria-label="常用操作">
+      <button type="button" onClick={requestQuickCapture}><Plus size={17} /><span><strong>快速记录</strong><small>存入收件箱</small></span></button>
+      <Link to="/authoring/new"><SquarePen size={17} /><span><strong>新建文章</strong><small>空白 Markdown</small></span></Link>
+      {authoring.data?.organizing.available && authoring.data.organizing.href !== null ? <Link to={authoring.data.organizing.href}><Layers3 size={17} /><span><strong>整理成文</strong><small>从材料开始</small></span></Link> : <button type="button" disabled title={authoring.data?.organizing.reason ?? "整理能力暂不可用"}><Layers3 size={17} /><span><strong>整理成文</strong><small>{authoring.isPending ? "正在确认" : "暂不可用"}</small></span></button>}
+      <Link to="/search"><Search size={17} /><span><strong>搜索知识</strong><small>检索工作区</small></span></Link>
+    </section>
 
     <section className="dashboard-focus" aria-labelledby="dashboard-focus-title">
       <div className="dashboard-focus__label">
@@ -273,27 +344,34 @@ export const DashboardPage = () => {
 
     {focusErrors.length > 0 && !focusUnavailable ? <InlineError title="部分待办读取失败" description="当前焦点来自已成功返回的有界列表，结果可能不完整。" onRetry={retryFocus} /> : null}
 
-    <div className="dashboard-source-grid">
-      <section className="dashboard-source-panel" aria-labelledby="dashboard-lead-source-title">
+    <div className="dashboard-source-grid dashboard-continuation-grid">
+      <section className="dashboard-source-panel dashboard-continuation-panel" aria-labelledby="dashboard-lead-source-title">
         <div className="dashboard-panel-heading">
-          <h2 id="dashboard-lead-source-title">继续最近的资料线索</h2>
-          {leadSource ? <Link to={`/documents/${leadSource.id}`}>打开资料<ArrowRight size={14} /></Link> : null}
+          <h2 id="dashboard-lead-source-title">继续进行</h2>
+          {recentDraft ? <Link to={`/authoring/new?draft=${recentDraft.id}`}>打开草稿<ArrowRight size={14} /></Link>
+            : leadSource ? <Link to={`/documents/${leadSource.id}`}>打开资料<ArrowRight size={14} /></Link>
+            : <Link to="/authoring/new">新建文章<ArrowRight size={14} /></Link>}
         </div>
-        {sources.isPending ? <div className="dashboard-source-skeleton" aria-label="正在读取最近资料"><i /><i /><i /></div>
-          : sources.isError ? <InlineError title="资料列表暂不可用" description={errorMessage(sources.error)} onRetry={() => { void sources.refetch(); }} />
+        {recentDraft ? <>
+          <p className="dashboard-object-label">创作草稿</p>
+          <h2>{recentDraft.title || "未命名文章"}</h2>
+          <p className="dashboard-source-path" title={recentDraft.targetPath}>{recentDraft.targetPath}</p>
+          <p className="dashboard-source-meta">第 {recentDraft.version} 版 · 更新于 {formatDashboardTimestamp(recentDraft.updatedAt)}</p>
+        </>
+          : continuationPending ? <div className="dashboard-source-skeleton" aria-label="正在读取继续事项"><i /><i /><i /></div>
           : leadSource ? <LeadSource source={leadSource} />
-          : <div className="dashboard-source-empty"><FileText size={19} /><h3>还没有捕获资料</h3><p>连接目录后，从资料收件箱启动第一次扫描。</p><Link className="ui-button ui-button--secondary" to="/inbox">前往资料收件箱</Link></div>}
+          : authoring.isError && sources.isError ? <InlineError title="继续事项暂不可用" description="草稿和资料列表均读取失败。" onRetry={() => { void authoring.refetch(); void sources.refetch(); }} />
+          : <div className="dashboard-source-empty"><FileText size={19} /><h3>从一篇文章开始</h3><p>创建空白 Markdown 草稿，内容会自动保存到服务端。</p><Link className="ui-button ui-button--secondary" to="/authoring/new">新建文章</Link></div>}
       </section>
 
       <section className="dashboard-source-panel dashboard-source-panel--recent" aria-labelledby="dashboard-recent-title">
         <div className="dashboard-panel-heading">
-          <div><h2 id="dashboard-recent-title">最近捕获</h2><p>按服务端捕获时间排序</p></div>
-          <Link to="/inbox">查看全部<ArrowRight size={14} /></Link>
+          <div><h2 id="dashboard-recent-title">今日动态</h2><p>按业务更新时间排序</p></div>
         </div>
-        {sources.isPending ? <div className="dashboard-recent-skeleton" aria-label="正在读取捕获记录"><i /><i /><i /></div>
-          : sources.isError ? <p className="dashboard-recent-note">资料列表恢复后会在这里显示。</p>
-          : recentSources.length > 0 ? <div className="dashboard-recent-list">{recentSources.map((source) => <RecentSourceLink key={source.id} source={source} />)}</div>
-          : <p className="dashboard-recent-note">暂无更多捕获记录。</p>}
+        {activities.length > 0 ? <div className="dashboard-recent-list">{activities.map((activity) => <ActivityLink key={activity.id} activity={activity} />)}</div>
+          : activityPending ? <div className="dashboard-recent-skeleton" aria-label="正在读取今日动态"><i /><i /><i /></div>
+          : activityUnavailable ? <p className="dashboard-recent-note">部分业务动态暂不可用，请稍后重试。</p>
+          : <p className="dashboard-recent-note">今天还没有新的业务记录。</p>}
       </section>
     </div>
 

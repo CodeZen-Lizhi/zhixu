@@ -6,7 +6,8 @@
 
 ### 1. Scope / Trigger
 
-- 修改 `internal/modelsettings`、模型 Factory/Transport、API/Worker Composition Root、Workflow enqueue/attempt、
+- 修改 `internal/modelsettings`、`internal/platform/secretstore`、模型 Factory/Transport、API/Worker Composition Root、
+  Workflow enqueue/attempt、
   `cmd/modelctl`、`deploy/compose.yml` 或根目录 `zhixu` 时，必须应用本规范。
 - 本规范只覆盖开发 Compose 的 managed 模式；普通二进制 static Env/YAML 模式继续兼容，revision 固定为 `0`。
 
@@ -27,6 +28,10 @@
 - revision `0` 是无持久行的 canonical disabled。非零 revision append-only；高级 timeout/batch/byte limit 也冻结。
 - Secret 只允许请求瞬时明文、短生命周期进程内明文和 AES-256-GCM 密文。AAD 绑定 revision、用途、schema、
   Provider 和规范化 Endpoint；`keep` 必须解密后以新 revision AAD 重加密。
+- AES-256-GCM key/nonce/envelope mechanics 只由 `internal/platform/secretstore` 实现；Model Settings wrapper 继续拥有
+  自己的 envelope、脱敏错误和 AAD。Model schema 固定为 `model-settings-secret/v1`，purpose 固定为 `chat|embedding`；
+  Git Sync 即使复用同一 primitive，也必须独立加载业务主密钥并使用 `git-remote-token` / `git-remote-token/v1` AAD，
+  不能合并业务上下文或跨用途打开密文。
 - Settings Audit 与 revision 保存同事务，只包含 action、revision、Provider 与 key-configured；禁止 Endpoint、draft、
   密文、Secret、Key 长度或 instance id。
 - 远程模型只允许 HTTPS，使用 `Proxy=nil`、禁止 redirect、逐新连接重解析的专用 Transport。A/AAAA 任一地址为
@@ -75,8 +80,9 @@
 
 - Domain/Application：canonical Provider value、Secret action、expected revision、Settings Manager Test 生命周期、
   Rollout Coordinator 合法顺序、lease/stale/recover、runtime ownership 与 attempt revision contract tests。
-- Crypto/Transport：round trip、wrong key、nonce/AAD tamper、replace/keep、safe String/GoString、redirect、mixed DNS、
-  rebind、IPv4/IPv6 fallback、TLS hostname/SNI、精确 loopback relay。
+- Crypto/Transport：通过 Model Settings 与 Git Sync 业务 wrapper 回归共享 `secretstore` primitive，覆盖 round trip、wrong key、
+  nonce/AAD tamper、purpose/schema 隔离、replace/keep、safe String/GoString、redirect、mixed DNS、rebind、IPv4/IPv6 fallback、
+  TLS hostname/SNI、精确 loopback relay。
 - PostgreSQL：fresh migration Up/guarded Down、append-only revision、同事务 Audit、并发 PUT/begin、runtime CAS、
   enqueue/drain 竞态、attempt revision insert/read/replay、历史同版本 schema repair 与失败全回滚；SQL 必须参数化并用真实 PostgreSQL 验证。
 - Composition/CLI/Compose：API/Worker disabled/configured/fixed target、单一 Runtime 注入、queue pause/resume、
@@ -99,4 +105,7 @@ Correct: down 保留数据；reset 单独确认；历史 smoke 只按精确 name
 
 Wrong: 用 compose up --wait 启动 migrate，或在共享 app 网络命名空间的 relay 上重复 extra_hosts。
 Correct: postgres healthy 后 compose run --rm 顺序执行 one-shot；网络映射由 app/worker namespace owner 持有。
+
+Wrong: Model Settings 与 Git Sync 各自复制 AES-GCM 实现，或共用一份没有业务 purpose/schema 的 AAD。
+Correct: `secretstore` 只拥有加密原语；两个业务 wrapper 分别拥有 envelope、purpose/schema、完整上下文和错误语义。
 ```

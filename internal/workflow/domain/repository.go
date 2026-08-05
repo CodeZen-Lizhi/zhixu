@@ -58,3 +58,10 @@ type RunListQuery struct {
 type RunListRepository interface {
 	ListRuns(context.Context, RunListQuery) ([]RunListItem, bool, error)
 }
+
+// PendingHumanTaskRepository reads the only actionable Human Task for a Run.
+// Registered Workflow graphs are linear at each human checkpoint, so more than
+// one pending task is a persistence consistency violation.
+type PendingHumanTaskRepository interface {
+	GetPendingHumanTask(context.Context, foundation.ID) (HumanTask, bool, error)
+}

@@ -16,6 +16,8 @@ const evidenceReferenceNotFoundCode = "RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND"
 
 var _ application.EvidenceReferenceStore = (*SearchRepository)(nil)
 var _ application.CitationEvidenceStore = (*SearchRepository)(nil)
+var _ application.SourceVersionReferenceBatchStore = (*SearchRepository)(nil)
+var _ application.ProvenanceCitationStore = (*SearchRepository)(nil)
 
 // LoadSourceVersionReference 读取指定 Workspace 内完整绑定的 Source Version 引用。
 func (r *SearchRepository) LoadSourceVersionReference(
@@ -84,6 +86,101 @@ func (r *SearchRepository) LoadSourceVersionReference(
 	return reference, nil
 }
 
+// LoadSourceVersionReferences 以一次参数化查询批量读取 Source Version 引用，并按请求顺序返回。
+func (r *SearchRepository) LoadSourceVersionReferences(
+	ctx context.Context,
+	workspaceID foundation.ID,
+	sourceVersionIDs []foundation.ID,
+) ([]domain.SourceVersionReference, error) {
+	if err := validateEvidenceReferenceIDs(workspaceID); err != nil || len(sourceVersionIDs) == 0 || len(sourceVersionIDs) > application.MaxSourceVersionBatchSize {
+		if err != nil {
+			return nil, err
+		}
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("source version batch count is invalid"))
+	}
+	ids := make([]string, len(sourceVersionIDs))
+	seen := make(map[foundation.ID]struct{}, len(sourceVersionIDs))
+	for index, sourceVersionID := range sourceVersionIDs {
+		if err := validateEvidenceReferenceIDs(sourceVersionID); err != nil {
+			return nil, err
+		}
+		if _, duplicate := seen[sourceVersionID]; duplicate {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("source version batch contains duplicates"))
+		}
+		seen[sourceVersionID] = struct{}{}
+		ids[index] = string(sourceVersionID)
+	}
+	rows, err := r.db.Query(ctx, `
+		WITH requested(source_version_id, ordinality) AS (
+			SELECT id, ordinality FROM unnest($2::uuid[]) WITH ORDINALITY AS input(id, ordinality)
+		)
+		SELECT requested.ordinality,
+			s.workspace_id::text,
+			s.id::text,
+			sv.id::text,
+			ca.id::text,
+			s.type,
+			s.logical_name,
+			s.original_location,
+			sv.original_content_location,
+			sv.content_hash,
+			sv.byte_size,
+			sv.mime_type,
+			COALESCE(attempt.security_status,sv.security_status),
+			COALESCE(attempt.status,''),
+			COALESCE(run.status,''),
+			COALESCE(manifest.selection_status,''),
+			sv.captured_at
+		FROM requested
+		JOIN core.source_version AS sv ON sv.id=requested.source_version_id
+		JOIN core.source AS s ON s.id=sv.source_id AND s.workspace_id=$1
+		JOIN core.content_artifact AS ca ON ca.id=sv.content_artifact_id AND ca.workspace_id=s.workspace_id AND ca.content_hash=sv.content_hash AND ca.byte_size=sv.byte_size
+		LEFT JOIN LATERAL (
+			SELECT status,security_status,workflow_run_id
+			FROM ingestion.attempt
+			WHERE source_version_id=sv.id
+			ORDER BY started_at DESC,id DESC
+			LIMIT 1
+		) AS attempt ON true
+		LEFT JOIN workflow.run AS run ON run.id=attempt.workflow_run_id
+		LEFT JOIN retrieval.index_version AS active_index ON active_index.workspace_id=s.workspace_id AND active_index.status='active'
+		LEFT JOIN retrieval.index_manifest_source AS manifest ON manifest.index_version_id=active_index.id AND manifest.source_id=s.id AND (manifest.selection_status='excluded' OR manifest.source_version_id=sv.id)
+		WHERE sv.id=requested.source_version_id
+		ORDER BY requested.ordinality`, string(workspaceID), ids)
+	if err != nil {
+		return nil, classify(err, "RETRIEVAL_EVIDENCE_REFERENCE_BATCH_QUERY_FAILED")
+	}
+	defer rows.Close()
+	result := make([]domain.SourceVersionReference, len(sourceVersionIDs))
+	seenOrdinals := make(map[int64]struct{}, len(sourceVersionIDs))
+	for rows.Next() {
+		var ordinal int64
+		reference, versionRelativePath, scanErr := scanSourceVersionReferenceWithOrdinal(rows, &ordinal)
+		if scanErr != nil {
+			return nil, classify(scanErr, "RETRIEVAL_EVIDENCE_REFERENCE_BATCH_SCAN_FAILED")
+		}
+		if ordinal < 1 || ordinal > int64(len(result)) {
+			return nil, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("source version batch ordinal is invalid"))
+		}
+		index := int(ordinal - 1)
+		if _, duplicate := seenOrdinals[ordinal]; duplicate || reference.WorkspaceID != workspaceID || reference.SourceVersionID != sourceVersionIDs[index] || reference.RelativePath != versionRelativePath {
+			return nil, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("source version batch binding is inconsistent"))
+		}
+		if err := domain.ValidateSourceVersionReference(reference); err != nil {
+			return nil, err
+		}
+		seenOrdinals[ordinal] = struct{}{}
+		result[index] = reference
+	}
+	if err := rows.Err(); err != nil {
+		return nil, classify(err, "RETRIEVAL_EVIDENCE_REFERENCE_BATCH_QUERY_FAILED")
+	}
+	if len(seenOrdinals) != len(result) {
+		return nil, notFound(evidenceReferenceNotFoundCode, errors.New("one or more source version references were not found"))
+	}
+	return result, nil
+}
+
 // LoadSourceSpanReference 读取 Source Version、Artifact、Projection 与 Span 全绑定的引用。
 func (r *SearchRepository) LoadSourceSpanReference(
 	ctx context.Context,
@@ -126,6 +223,8 @@ func (r *SearchRepository) LoadSourceSpanReference(
 			sp.span_type,
 			sp.selector,
 			sp.excerpt_hash,
+			sp.evidence_kind,
+			sp.derived_excerpt,
 			sp.parser_version,
 			sp.schema_version
 		FROM core.source_version AS sv
@@ -174,6 +273,8 @@ func (r *SearchRepository) LoadSourceSpanReference(
 		&reference.SpanType,
 		&selector,
 		&reference.ExcerptHash,
+		&reference.EvidenceKind,
+		&reference.DerivedExcerpt,
 		&reference.ParserVersion,
 		&reference.SchemaVersion,
 	)
@@ -266,6 +367,68 @@ func (r *SearchRepository) LoadCitationSourceSpanReferences(
 	return result, nil
 }
 
+// ResolveProvenanceCitationReferences 将正式知识来源批量解析到当前 Active Index 的确定性 Citation tuple。
+func (r *SearchRepository) ResolveProvenanceCitationReferences(
+	ctx context.Context,
+	queries []domain.ProvenanceReferenceQuery,
+) ([]domain.CitationReferenceQuery, error) {
+	if len(queries) == 0 || len(queries) > 500 {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("provenance reference batch count is invalid"))
+	}
+	workspaceIDs := make([]string, len(queries))
+	sourceVersionIDs := make([]string, len(queries))
+	spanIDs := make([]string, len(queries))
+	seen := make(map[domain.ProvenanceReferenceQuery]struct{}, len(queries))
+	for index, query := range queries {
+		if err := domain.ValidateProvenanceReferenceQuery(query); err != nil {
+			return nil, err
+		}
+		if index > 0 && query.WorkspaceID != queries[0].WorkspaceID {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("provenance reference batch crosses workspace"))
+		}
+		if _, duplicate := seen[query]; duplicate {
+			return nil, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeEvidenceReferenceInvalid, false, errors.New("provenance reference batch contains duplicates"))
+		}
+		seen[query] = struct{}{}
+		workspaceIDs[index] = string(query.WorkspaceID)
+		sourceVersionIDs[index] = string(query.SourceVersionID)
+		spanIDs[index] = string(query.SourceSpanID)
+	}
+	var encoded []byte
+	if err := r.db.QueryRow(ctx, provenanceCitationBatchSQL, workspaceIDs, sourceVersionIDs, spanIDs).Scan(&encoded); err != nil {
+		return nil, classify(err, "RETRIEVAL_PROVENANCE_CITATION_QUERY_FAILED")
+	}
+	var stored []struct {
+		WorkspaceID, IndexVersionID, ChunkID, SourceVersionID, SourceSpanID string
+	}
+	if err := json.Unmarshal(encoded, &stored); err != nil {
+		return nil, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("provenance citation batch payload is invalid"))
+	}
+	if len(stored) != len(queries) {
+		return nil, notFound(evidenceReferenceNotFoundCode, pgx.ErrNoRows)
+	}
+	result := make([]domain.CitationReferenceQuery, len(stored))
+	for index, value := range stored {
+		ids := []string{value.WorkspaceID, value.IndexVersionID, value.ChunkID, value.SourceVersionID, value.SourceSpanID}
+		parsed := make([]foundation.ID, len(ids))
+		for idIndex, raw := range ids {
+			id, err := foundation.ParseID(raw)
+			if err != nil {
+				return nil, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("provenance citation identity is invalid"))
+			}
+			parsed[idIndex] = id
+		}
+		citation := domain.CitationReferenceQuery{WorkspaceID: parsed[0], IndexVersionID: parsed[1], ChunkID: parsed[2], SourceVersionID: parsed[3], SourceSpanID: parsed[4]}
+		requested := queries[index]
+		if domain.ValidateCitationReferenceQuery(citation) != nil || citation.WorkspaceID != requested.WorkspaceID ||
+			citation.SourceVersionID != requested.SourceVersionID || citation.SourceSpanID != requested.SourceSpanID {
+			return nil, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("provenance citation batch is out of order"))
+		}
+		result[index] = citation
+	}
+	return result, nil
+}
+
 type storedCitationReference struct {
 	WorkspaceID, IndexVersionID, ChunkID  string
 	SourceID, SourceVersionID, ArtifactID string
@@ -281,7 +444,8 @@ type storedCitationReference struct {
 	SpanType                              string
 	Selector                              json.RawMessage
 	ExcerptHash, ParserVersion            string
-	SchemaVersion                         string
+	EvidenceKind                          domain.EvidenceKind
+	DerivedExcerpt, SchemaVersion         string
 }
 
 func (value storedCitationReference) binding() (application.CitationSourceSpanBinding, error) {
@@ -311,6 +475,7 @@ func (value storedCitationReference) binding() (application.CitationSourceSpanBi
 			StartLine: value.StartLine, EndLine: value.EndLine, StartByte: value.StartByte, EndByte: value.EndByte,
 		},
 		SpanType: value.SpanType, Selector: append(json.RawMessage(nil), value.Selector...), ExcerptHash: value.ExcerptHash,
+		EvidenceKind: value.EvidenceKind, DerivedExcerpt: value.DerivedExcerpt,
 		ParserVersion: value.ParserVersion, SchemaVersion: value.SchemaVersion,
 	}
 	if err := parseEvidenceReferenceIDs(&reference, value.WorkspaceID, value.SourceID, value.SourceVersionID, value.ArtifactID, value.ProjectionID, value.SpanID); err != nil {
@@ -364,6 +529,8 @@ WITH requested AS MATERIALIZED (
 			'SpanType',sp.span_type,
 			'Selector',sp.selector,
 			'ExcerptHash',sp.excerpt_hash,
+			'EvidenceKind',sp.evidence_kind,
+			'DerivedExcerpt',sp.derived_excerpt,
 			'ParserVersion',sp.parser_version,
 			'SchemaVersion',sp.schema_version
 		) AS reference
@@ -411,11 +578,80 @@ WITH requested AS MATERIALIZED (
 )
 SELECT COALESCE(jsonb_agg(reference ORDER BY ordinality),'[]'::jsonb) FROM bound`
 
+const provenanceCitationBatchSQL = `
+WITH requested AS MATERIALIZED (
+	SELECT workspace_id,source_version_id,source_span_id,ordinality
+	FROM unnest($1::uuid[],$2::uuid[],$3::uuid[])
+		WITH ORDINALITY AS value(workspace_id,source_version_id,source_span_id,ordinality)
+), ranked AS (
+	SELECT requested.ordinality,requested.workspace_id,idx.id AS index_version_id,
+		chunk.id AS chunk_id,requested.source_version_id,requested.source_span_id,
+		row_number() OVER (PARTITION BY requested.ordinality ORDER BY chunk.sequence,chunk.id) AS rank
+	FROM requested
+	JOIN retrieval.index_version AS idx
+	  ON idx.workspace_id=requested.workspace_id AND idx.status='active'
+	JOIN retrieval.index_manifest_source AS source_manifest
+	  ON source_manifest.index_version_id=idx.id
+	 AND source_manifest.workspace_id=idx.workspace_id
+	 AND source_manifest.source_version_id=requested.source_version_id
+	 AND source_manifest.selection_status='included'
+	JOIN ingestion.canonical_chunk AS chunk
+	  ON chunk.workspace_id=idx.workspace_id
+	 AND chunk.parse_projection_id=source_manifest.parse_projection_id
+	 AND chunk.source_span_id=requested.source_span_id
+	JOIN retrieval.index_manifest_chunk AS manifest
+	  ON manifest.index_version_id=idx.id
+	 AND manifest.workspace_id=idx.workspace_id
+	 AND manifest.chunk_id=chunk.id
+	 AND manifest.content_hash=chunk.content_hash
+), bound AS (
+	SELECT ordinality,jsonb_build_object(
+		'WorkspaceID',workspace_id::text,
+		'IndexVersionID',index_version_id::text,
+		'ChunkID',chunk_id::text,
+		'SourceVersionID',source_version_id::text,
+		'SourceSpanID',source_span_id::text
+	) AS reference
+	FROM ranked WHERE rank=1
+)
+SELECT COALESCE(jsonb_agg(reference ORDER BY ordinality),'[]'::jsonb) FROM bound`
+
 func scanSourceVersionReference(row pgx.Row) (domain.SourceVersionReference, string, error) {
 	var reference domain.SourceVersionReference
 	var workspaceText, sourceText, versionText, artifactText string
 	var versionRelativePath string
 	if err := row.Scan(
+		&workspaceText,
+		&sourceText,
+		&versionText,
+		&artifactText,
+		&reference.SourceType,
+		&reference.LogicalName,
+		&reference.RelativePath,
+		&versionRelativePath,
+		&reference.ContentHash,
+		&reference.ByteSize,
+		&reference.MediaType,
+		&reference.SecurityStatus,
+		&reference.IngestionStatus,
+		&reference.WorkflowStatus,
+		&reference.IndexStatus,
+		&reference.CapturedAt,
+	); err != nil {
+		return domain.SourceVersionReference{}, "", err
+	}
+	if err := parseSourceVersionReferenceIDs(&reference, workspaceText, sourceText, versionText, artifactText); err != nil {
+		return domain.SourceVersionReference{}, "", err
+	}
+	return reference, versionRelativePath, nil
+}
+
+func scanSourceVersionReferenceWithOrdinal(row interface{ Scan(...any) error }, ordinal *int64) (domain.SourceVersionReference, string, error) {
+	var reference domain.SourceVersionReference
+	var workspaceText, sourceText, versionText, artifactText string
+	var versionRelativePath string
+	if err := row.Scan(
+		ordinal,
 		&workspaceText,
 		&sourceText,
 		&versionText,

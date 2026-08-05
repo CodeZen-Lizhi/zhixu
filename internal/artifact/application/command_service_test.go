@@ -111,6 +111,56 @@ func TestCommandServicePublishFreezesSourceCoverage(t *testing.T) {
 	}
 }
 
+func TestCommandServiceVerifiesDocumentSourcesBeforePersistingSection(t *testing.T) {
+	now := time.Date(2026, 8, 4, 3, 0, 0, 0, time.UTC)
+	artifact, revision, err := domain.PlanArtifact(domain.PlanInput{
+		ArtifactID: appID(600), InitialRevisionID: appID(601), WorkspaceID: appID(602),
+		Type: "knowledge-note", Title: "Document source", ScopeDefinition: "historical material", CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, revision, err = domain.SubmitOutline(artifact, revision, appID(603), []domain.OutlineSection{{Key: "summary", Title: "Summary"}}, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, revision, err = domain.ApproveOutline(artifact, revision, appID(604), now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := domain.DocumentSource{
+		DocumentID: appID(605), ArticleRevisionID: appID(606), RevisionNo: 2,
+		VerifiedContentHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", Verified: true,
+	}
+	documents := &documentSourceVerifierFake{verified: []domain.DocumentSource{verified}}
+	repository := &commandRepositoryFake{state: State{Artifact: artifact, Revision: revision}, receipts: map[string]CommandResult{}}
+	service, err := NewCommandService(Dependencies{Repository: repository, Documents: documents, IDs: &sequenceIDs{next: 607}, Clock: foundation.FixedClock{Value: now.Add(3 * time.Minute)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.RecordSection(context.Background(), RecordSectionPersistentCommand{
+		RevisionPersistentCommand: RevisionPersistentCommand{
+			WorkspaceID: artifact.WorkspaceID, ArtifactID: artifact.ID, ExpectedVersion: artifact.Version, IdempotencyKey: "artifact-document-source",
+		},
+		Section: SectionInput{
+			Key: "summary", Title: "Summary", Content: "Historical document summary.", Citations: []CitationInput{},
+			DocumentSources: []DocumentSourceInput{{DocumentID: verified.DocumentID, ArticleRevisionID: verified.ArticleRevisionID, RevisionNo: verified.RevisionNo, ContentHash: verified.VerifiedContentHash}},
+			Coverage:        domain.Coverage{SectionKey: "summary", Status: domain.CoverageCovered, Gaps: []domain.Gap{}},
+		},
+		Creator: domain.CreatorAgent,
+		Metadata: &domain.GenerationMetadata{
+			PromptVersion: "organizing/v1", ModelVersion: "model/v1", WorkflowDefinitionVersion: "1", SchemaVersion: "organizing.document-generation/v1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if documents.calls != 1 || documents.workspaceID != artifact.WorkspaceID || len(result.State.Revision.Sections) != 1 ||
+		!reflect.DeepEqual(result.State.Revision.Sections[0].DocumentSources, []domain.DocumentSource{verified}) {
+		t.Fatalf("calls=%d workspace=%s revision=%+v", documents.calls, documents.workspaceID, result.State.Revision)
+	}
+}
+
 func TestCommandServiceExternalPreflightDoesNotReserveWhenClockPredatesState(t *testing.T) {
 	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
 	state := approvedCommandState(t, now)
@@ -306,6 +356,18 @@ type publicationCreatorFake struct {
 	calls   int
 	request domain.PublicationRequest
 	id      foundation.ID
+}
+
+type documentSourceVerifierFake struct {
+	verified    []domain.DocumentSource
+	workspaceID foundation.ID
+	calls       int
+}
+
+func (fake *documentSourceVerifierFake) VerifyDocumentSources(_ context.Context, workspaceID foundation.ID, _ []DocumentSourceInput) ([]domain.DocumentSource, error) {
+	fake.calls++
+	fake.workspaceID = workspaceID
+	return append([]domain.DocumentSource(nil), fake.verified...), nil
 }
 
 func (fake *publicationCreatorFake) CreateArtifactPublication(_ context.Context, request domain.PublicationRequest, _ string) (foundation.ID, error) {

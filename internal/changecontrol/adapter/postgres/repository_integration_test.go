@@ -340,6 +340,209 @@ func TestApprovalWritebackBindingMigrationDownGuard(t *testing.T) {
 	}
 }
 
+func TestCreateOnlyMigrationEmptyDownUpAndGuard(t *testing.T) {
+	pool, ctx := newChangeControlTestDatabase(t)
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
+	annotated, err := platformmigration.NewLegacyAnnotationFS(projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName("goose_db_version"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.UpTo(ctx, 70); err != nil {
+		t.Fatalf("migrate through 00070: %v", err)
+	}
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("empty 00070 down: %v", err)
+	}
+	if version, err := provider.GetDBVersion(ctx); err != nil || version != 69 {
+		t.Fatalf("version after empty down=%d err=%v, want 69", version, err)
+	}
+	if _, err := provider.UpTo(ctx, 70); err != nil {
+		t.Fatalf("repeat 00070 up: %v", err)
+	}
+
+	workspaceID := integrationID(0x70)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
+		VALUES($1,'Create Only Migration Test',$2,$2,$3,'inactive',1,$3,$3)`,
+		string(workspaceID), "/tmp/create-only-"+string(workspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalID, revisionID := integrationID(0x71), integrationID(0x72)
+	targetPath := "notes/create-only.md"
+	absenceToken, err := domain.ComputeAbsenceToken(workspaceID, targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "# Create only\n"
+	changeHash, err := domain.ComputeChangeHashForTarget(workspaceID, targetPath, domain.TargetModeCreateOnly, absenceToken, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestHash, err := domain.ComputeRequestHashWithTargetMode(
+		workspaceID, targetPath, domain.TargetModeCreateOnly, absenceToken, content, "manual document revision",
+		domain.ProposalRiskLevelLow, "low", "remove the created document",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := domain.Proposal{
+		ID: proposalID, WorkspaceID: workspaceID, Type: domain.ProposalTypeFilePatch,
+		RiskLevel: domain.ProposalRiskLevelLow, IdempotencyKey: "create-only-migration", RequestHash: requestHash,
+		Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
+		Revision: domain.Revision{
+			ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: targetPath,
+			TargetMode: domain.TargetModeCreateOnly, BaseHash: absenceToken, Content: content,
+			EvidenceSummary: "manual document revision", Risk: "low", RollbackPlan: "remove the created document",
+			ChangeHash: changeHash, CreatedAt: now,
+		},
+	}
+	created, err := repository.CreateProposal(ctx, proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Revision.TargetMode != domain.TargetModeCreateOnly || created.Revision.BaseHash != absenceToken {
+		t.Fatalf("create-only revision=%#v", created.Revision)
+	}
+	if _, err := provider.Down(ctx); err == nil {
+		t.Fatal("00070 Down accepted persisted CREATE_ONLY revision")
+	} else {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
+			t.Fatalf("guarded Down error=%v", err)
+		}
+	}
+	if version, err := provider.GetDBVersion(ctx); err != nil || version != 70 {
+		t.Fatalf("guarded Down version=%d err=%v, want 70", version, err)
+	}
+}
+
+func TestCreateOnlyMigrationDownWaitsForWriterAndRejectsCommittedFact(t *testing.T) {
+	pool, ctx := newChangeControlTestDatabase(t)
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
+	annotated, err := platformmigration.NewLegacyAnnotationFS(projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName("goose_db_version"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.UpTo(ctx, 70); err != nil {
+		t.Fatalf("migrate through 00070: %v", err)
+	}
+
+	workspaceID := integrationID(0x73)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
+		VALUES($1,'Create Only Concurrent Down',$2,$2,$3,'inactive',1,$3,$3)`,
+		string(workspaceID), "/tmp/create-only-concurrent-"+string(workspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+
+	writer, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Rollback(ctx) }()
+	if _, err := writer.Exec(ctx, `LOCK TABLE change_control.proposal_revision IN ROW EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	downResult := make(chan error, 1)
+	go func() {
+		_, downErr := provider.Down(ctx)
+		downResult <- downErr
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1
+				FROM pg_locks lock
+				JOIN pg_class relation ON relation.oid=lock.relation
+				JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+				WHERE namespace.nspname='change_control'
+				  AND relation.relname='proposal_revision'
+				  AND lock.mode='AccessExclusiveLock'
+				  AND NOT lock.granted
+			)`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("00070 Down did not wait for the active CREATE_ONLY writer")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	targetPath := "notes/concurrent-create-only.md"
+	absenceToken, err := domain.ComputeAbsenceToken(workspaceID, targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "# Concurrent create only\n"
+	changeHash, err := domain.ComputeChangeHashForTarget(workspaceID, targetPath, domain.TargetModeCreateOnly, absenceToken, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestHash, err := domain.ComputeRequestHashWithTargetMode(
+		workspaceID, targetPath, domain.TargetModeCreateOnly, absenceToken, content, "concurrent down guard",
+		domain.ProposalRiskLevelLow, "low", "remove the created document",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRepository(writer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalID, revisionID := integrationID(0x74), integrationID(0x75)
+	if _, err := repository.CreateProposal(ctx, domain.Proposal{
+		ID: proposalID, WorkspaceID: workspaceID, Type: domain.ProposalTypeFilePatch,
+		RiskLevel: domain.ProposalRiskLevelLow, IdempotencyKey: "create-only-concurrent-down", RequestHash: requestHash,
+		Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
+		Revision: domain.Revision{
+			ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: targetPath,
+			TargetMode: domain.TargetModeCreateOnly, BaseHash: absenceToken, Content: content,
+			EvidenceSummary: "concurrent down guard", Risk: "low", RollbackPlan: "remove the created document",
+			ChangeHash: changeHash, CreatedAt: now,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-downResult:
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
+			t.Fatalf("guarded concurrent Down error=%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("00070 Down remained blocked after the writer committed")
+	}
+	if version, err := provider.GetDBVersion(ctx); err != nil || version != 70 {
+		t.Fatalf("guarded concurrent Down version=%d err=%v, want 70", version, err)
+	}
+}
+
 func TestRepositoryKnowledgeChangeProposalCompatibility(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
 	if databaseURL == "" {

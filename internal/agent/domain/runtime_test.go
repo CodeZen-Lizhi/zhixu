@@ -175,6 +175,37 @@ func TestOnlyRunningRAGModelRunMayOmitRetrieval(t *testing.T) {
 	}
 }
 
+func TestOrganizingModelRunMayOmitRetrievalWithoutWeakeningOtherSchemas(t *testing.T) {
+	for _, schemaID := range []string{OrganizingOutlineSchemaID, OrganizingDocumentSchemaID} {
+		run := validModelRun()
+		run.Schema = SchemaRef{ID: schemaID, Version: "v1"}
+		run.ReducedSchema = run.Schema
+		run.Retrieval = RetrievalRef{}
+		if err := ValidateModelRun(run); err != nil {
+			t.Fatalf("running organizing run %s rejected: %v", schemaID, err)
+		}
+		completed := run.UpdatedAt.Add(time.Second)
+		run.Status = ModelRunSucceeded
+		run.FinalResultType = ResultTypeOrganizingDocument
+		if schemaID == OrganizingOutlineSchemaID {
+			run.FinalResultType = ResultTypeOrganizingOutline
+		}
+		run.CompletedAt = &completed
+		run.UpdatedAt = completed
+		if err := ValidateModelRun(run); err != nil {
+			t.Fatalf("terminal organizing run %s rejected: %v", schemaID, err)
+		}
+	}
+
+	run := validModelRun()
+	run.Schema = SchemaRef{ID: RelationAssessmentSchemaID, Version: OutputSchemaVersionV1}
+	run.ReducedSchema = run.Schema
+	run.Retrieval = RetrievalRef{}
+	if err := ValidateModelRun(run); errorCode(err) != ErrorCodeModelRunInvalid {
+		t.Fatalf("unrelated schema without retrieval err=%v", err)
+	}
+}
+
 func TestModelCallValidationPreservesUnknownOutcome(t *testing.T) {
 	call := validStartedCall()
 	if err := ValidateModelCall(call); err != nil {

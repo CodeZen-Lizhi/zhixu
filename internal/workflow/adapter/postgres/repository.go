@@ -92,6 +92,44 @@ func (r *Repository) GetRun(ctx context.Context, id foundation.ID) (domain.Run, 
 	return run, nil
 }
 
+// GetPendingHumanTask returns the unique actionable Human Task for a Run.
+func (r *Repository) GetPendingHumanTask(ctx context.Context, runID foundation.ID) (domain.HumanTask, bool, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.HumanTask{}, false, classify(err, "WORKFLOW_HUMAN_TASK_QUERY_FAILED")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `SELECT `+humanColumns+`
+		FROM workflow.human_task
+		WHERE run_id=$1 AND status='pending'
+		ORDER BY created_at,id
+		LIMIT 2`, string(runID))
+	if err != nil {
+		return domain.HumanTask{}, false, classify(err, "WORKFLOW_HUMAN_TASK_QUERY_FAILED")
+	}
+	defer rows.Close()
+	var task domain.HumanTask
+	count := 0
+	for rows.Next() {
+		current, scanErr := scanHuman(rows)
+		if scanErr != nil {
+			return domain.HumanTask{}, false, classify(scanErr, "WORKFLOW_HUMAN_TASK_QUERY_FAILED")
+		}
+		task = current
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return domain.HumanTask{}, false, classify(err, "WORKFLOW_HUMAN_TASK_QUERY_FAILED")
+	}
+	if count > 1 {
+		return domain.HumanTask{}, false, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_HUMAN_TASK_MULTIPLE_PENDING", false, errors.New("workflow run has multiple pending human tasks"))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.HumanTask{}, false, classify(err, "WORKFLOW_HUMAN_TASK_QUERY_FAILED")
+	}
+	return task, count == 1, nil
+}
+
 // ListRuns 返回 Workspace 绑定的 Workflow Run 摘要页。
 func (r *Repository) ListRuns(ctx context.Context, request domain.RunListQuery) ([]domain.RunListItem, bool, error) {
 	if request.WorkspaceID == "" || request.Limit < 1 || request.Limit > 100 {

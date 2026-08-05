@@ -78,6 +78,7 @@ type proposalCurrentContentResponse struct {
 	ProposalID    string `json:"proposal_id"`
 	WorkspaceID   string `json:"workspace_id"`
 	TargetPath    string `json:"target_path"`
+	TargetMode    string `json:"target_mode"`
 	Content       string `json:"content"`
 	CurrentHash   string `json:"current_hash"`
 	BaseHash      string `json:"base_hash"`
@@ -103,7 +104,7 @@ func (h *Handler) getProposalCurrentContent(w http.ResponseWriter, r *http.Reque
 	}
 	httpapi.WriteJSON(w, http.StatusOK, proposalCurrentContentResponse{
 		ProposalID: string(result.ProposalID), WorkspaceID: string(result.WorkspaceID), TargetPath: result.TargetPath, Content: result.Content,
-		CurrentHash: result.CurrentHash, BaseHash: result.BaseHash, BaseHashMatch: result.BaseHashMatch,
+		TargetMode: string(result.TargetMode), CurrentHash: result.CurrentHash, BaseHash: result.BaseHash, BaseHashMatch: result.BaseHashMatch,
 	})
 }
 
@@ -166,7 +167,7 @@ func (h *Handler) listProposals(w http.ResponseWriter, r *http.Request) {
 	status := domain.ProposalStatus(strings.TrimSpace(r.URL.Query().Get("status")))
 	proposalType := domain.ProposalType(strings.TrimSpace(r.URL.Query().Get("proposal_type")))
 	risk := r.URL.Query().Get("risk")
-	if status != "" && !validProposalListStatus(status) || proposalType != "" && proposalType != domain.ProposalTypeFilePatch && proposalType != domain.ProposalTypeKnowledgeChange && proposalType != domain.ProposalTypePublishArtifact && proposalType != domain.ProposalTypeDownstreamUpdate || len(risk) > 64 || strings.ContainsAny(risk, "\r\n\t") {
+	if status != "" && !validProposalListStatus(status) || proposalType != "" && proposalType != domain.ProposalTypeFilePatch && proposalType != domain.ProposalTypeRestoreDocument && proposalType != domain.ProposalTypeKnowledgeChange && proposalType != domain.ProposalTypePublishArtifact && proposalType != domain.ProposalTypeDownstreamUpdate || len(risk) > 64 || strings.ContainsAny(risk, "\r\n\t") {
 		writeError(w, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_LIST_FILTER_INVALID", false, errors.New("proposal list filter is invalid")))
 		return
 	}
@@ -323,6 +324,7 @@ type downstreamUpdateProposalCreateResponse struct {
 type revisionResponse struct {
 	ID              string `json:"id"`
 	RevisionNo      int    `json:"revision_no"`
+	TargetMode      string `json:"target_mode"`
 	BaseHash        string `json:"base_hash"`
 	Content         string `json:"content"`
 	EvidenceSummary string `json:"evidence_summary"`
@@ -330,6 +332,19 @@ type revisionResponse struct {
 	RollbackPlan    string `json:"rollback_plan"`
 	ChangeHash      string `json:"change_hash"`
 	CreatedAt       string `json:"created_at"`
+	Restore         *restoreDocumentResponse `json:"restore,omitempty"`
+}
+
+type restoreDocumentResponse struct {
+	WorkspaceID             string `json:"workspace_id"`
+	DocumentID              string `json:"document_id"`
+	TargetCommit            string `json:"target_commit"`
+	ExpectedHead            string `json:"expected_head"`
+	ExpectedDocumentVersion int64  `json:"expected_document_version"`
+	PreviewHash             string `json:"preview_hash"`
+	CurrentContentHash      string `json:"current_content_hash"`
+	TargetContentHash       string `json:"target_content_hash"`
+	SchemaVersion           string `json:"schema_version"`
 }
 
 type knowledgeTargetRefResponse struct {
@@ -481,6 +496,7 @@ type applyPreflightResponse struct {
 	ProposalID      string `json:"proposal_id"`
 	RevisionID      string `json:"revision_id"`
 	ChangeHash      string `json:"change_hash"`
+	TargetMode      string `json:"target_mode"`
 	BaseHash        string `json:"base_hash"`
 	PreflightPassed bool   `json:"preflight_passed"`
 	Mode            string `json:"mode"`
@@ -739,7 +755,8 @@ func (h *Handler) applyPreflight(w http.ResponseWriter, r *http.Request) {
 	}
 	httpapi.WriteJSON(w, http.StatusOK, applyPreflightResponse{
 		ProposalID: string(result.ProposalID), RevisionID: string(result.RevisionID), ChangeHash: result.ChangeHash,
-		BaseHash: result.BaseHash, PreflightPassed: true, Mode: "preflight_only", WritePerformed: false,
+		TargetMode: string(result.TargetMode), BaseHash: result.BaseHash,
+		PreflightPassed: true, Mode: "preflight_only", WritePerformed: false,
 	})
 }
 
@@ -773,12 +790,27 @@ func toProposalResponse(proposal domain.Proposal) (proposalResponse, error) {
 		}
 		response.Revision = revision
 	default:
-		response.Revision = revisionResponse{
-			ID: string(proposal.Revision.ID), RevisionNo: proposal.Revision.RevisionNo, BaseHash: proposal.Revision.BaseHash,
+		revision := revisionResponse{
+			ID: string(proposal.Revision.ID), RevisionNo: proposal.Revision.RevisionNo,
+			TargetMode: string(domain.NormalizeTargetMode(proposal.Revision.TargetMode)), BaseHash: proposal.Revision.BaseHash,
 			Content: proposal.Revision.Content, EvidenceSummary: proposal.Revision.EvidenceSummary, Risk: proposal.Revision.Risk,
 			RollbackPlan: proposal.Revision.RollbackPlan, ChangeHash: proposal.Revision.ChangeHash,
 			CreatedAt: proposal.Revision.CreatedAt.UTC().Format(time.RFC3339Nano),
 		}
+		if proposalType == domain.ProposalTypeRestoreDocument {
+			if err := domain.ValidateProposalRevisionForType(proposalType, proposal.Revision); err != nil || proposal.Revision.RestoreDocument == nil {
+				return proposalResponse{}, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_REVISION_INVALID", false, err)
+			}
+			restore := proposal.Revision.RestoreDocument
+			revision.Restore = &restoreDocumentResponse{
+				WorkspaceID: string(restore.WorkspaceID), DocumentID: string(restore.DocumentID),
+				TargetCommit: restore.TargetCommit, ExpectedHead: restore.ExpectedHead,
+				ExpectedDocumentVersion: restore.ExpectedDocumentVersion, PreviewHash: restore.PreviewHash,
+				CurrentContentHash: restore.CurrentContentHash, TargetContentHash: restore.TargetContentHash,
+				SchemaVersion: restore.SchemaVersion,
+			}
+		}
+		response.Revision = revision
 	}
 	if proposal.Approval != nil {
 		approval := toApprovalSnapshotResponse(*proposal.Approval, proposal.Type, proposal.WorkflowRunID)
@@ -940,7 +972,7 @@ func toApprovalDecisionSnapshotResponse(approval domain.Approval) approvalSnapsh
 
 func toApprovalSnapshotResponse(approval domain.Approval, proposalType domain.ProposalType, workflowRunID *foundation.ID) approvalSnapshotResponse {
 	response := toApprovalDecisionSnapshotResponse(approval)
-	if approval.Decision != domain.DecisionApproved || domain.NormalizeProposalType(proposalType) != domain.ProposalTypeFilePatch {
+	if approval.Decision != domain.DecisionApproved || !domain.ProposalSupportsFileWriteback(proposalType) {
 		response.ApprovedGitHead = nil
 		return response
 	}

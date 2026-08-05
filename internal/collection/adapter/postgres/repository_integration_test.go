@@ -72,6 +72,14 @@ func TestCollectionRepositoryLifecycleIdempotencyCASAndWorkspaceIsolation(t *tes
 	if !replayed.Replayed || replayed.Collection.ID != created.Collection.ID || replayed.CommandVersion != created.CommandVersion || replayed.Collection.Version != created.Collection.Version || replayed.Collection.Name != created.Collection.Name || replayed.Collection.Description != created.Collection.Description {
 		t.Fatalf("replayed=%+v", replayed)
 	}
+	searchItems, err := service.SearchCollections(ctx, collectionapp.CollectionSearchQuery{WorkspaceID: workspaceID, Query: "Integration", Limit: 5})
+	if err != nil || len(searchItems) != 1 || searchItems[0].ID != collectionID {
+		t.Fatalf("collection search=%+v err=%v", searchItems, err)
+	}
+	otherWorkspaceItems, err := service.SearchCollections(ctx, collectionapp.CollectionSearchQuery{WorkspaceID: otherWorkspaceID, Query: "Integration", Limit: 5})
+	if err != nil || len(otherWorkspaceItems) != 0 {
+		t.Fatalf("cross-workspace collection search=%+v err=%v", otherWorkspaceItems, err)
+	}
 	conflict := command
 	conflict.Description = "different payload"
 	if _, err := service.Create(ctx, conflict); !hasCollectionCode(err, collectionapp.ErrorCodeIdempotencyConflict) {

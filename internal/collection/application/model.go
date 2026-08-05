@@ -86,6 +86,21 @@ type CollectionListPage struct {
 	NextCursor string
 }
 
+// MaxCollectionSearchLimit bounds same-page Smart Collection search.
+const MaxCollectionSearchLimit = 25
+
+// CollectionSearchQuery searches active Smart Collections in one Workspace.
+type CollectionSearchQuery struct {
+	WorkspaceID foundation.ID
+	Query       string
+	Limit       int
+}
+
+// CollectionSearchRepository is the optional bounded Smart Collection search capability.
+type CollectionSearchRepository interface {
+	SearchCollections(context.Context, CollectionSearchQuery) ([]Collection, error)
+}
+
 // CollectionSourceSummary 是 Claim 来源的有界摘要；不携带正文或 Evidence。
 type CollectionSourceSummary struct {
 	SourceType  string    `json:"source_type"`

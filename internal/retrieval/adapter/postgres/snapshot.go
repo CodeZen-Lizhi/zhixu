@@ -171,8 +171,13 @@ func createSnapshotStages(ctx context.Context, tx pgx.Tx) error {
 
 func validateTargetProjection(ctx context.Context, tx pgx.Tx, command domain.WorkspaceSnapshotCommand) error {
 	contract := *command.IndexVersion.ProcessingContract
-	var valid bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS(
+	targets, err := domain.WorkspaceSnapshotTargets(command)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		var valid bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS(
         SELECT 1
           FROM core.source source
           JOIN core.source_version version ON version.source_id=source.id
@@ -180,18 +185,19 @@ func validateTargetProjection(ctx context.Context, tx pgx.Tx, command domain.Wor
             ON mapping.source_version_id=version.id AND mapping.workspace_id=source.workspace_id
           JOIN ingestion.attempt attempt
             ON attempt.source_version_id=version.id AND attempt.parse_projection_id=mapping.parse_projection_id
-         WHERE source.id=$1 AND source.workspace_id=$2 AND version.id=$3 AND mapping.parse_projection_id=$4
+	         WHERE source.id=$1 AND source.workspace_id=$2 AND source.removed_at IS NULL AND version.id=$3 AND mapping.parse_projection_id=$4
            AND attempt.status='chunked' AND attempt.security_status='passed'
            AND attempt.parser_id=$5 AND attempt.parser_version=$6 AND attempt.parser_config_hash=$7
            AND attempt.chunk_strategy_version=$8 AND attempt.schema_version=$9
-    )`, string(command.TargetSourceID), string(command.IndexVersion.WorkspaceID), string(command.TargetSourceVersionID),
-		string(command.TargetParseProjectionID), contract.ParserID, contract.ParserVersion, contract.ParserConfigHash,
-		contract.ChunkStrategyVersion, contract.SchemaVersion).Scan(&valid)
-	if err != nil {
-		return classify(err, "REINDEX_TARGET_PROJECTION_QUERY_FAILED")
-	}
-	if !valid {
-		return conflict("REINDEX_TARGET_PROJECTION_INVALID", errors.New("target source version has no successful current projection"))
+	)`, string(target.SourceID), string(command.IndexVersion.WorkspaceID), string(target.SourceVersionID),
+			string(target.ParseProjectionID), contract.ParserID, contract.ParserVersion, contract.ParserConfigHash,
+			contract.ChunkStrategyVersion, contract.SchemaVersion).Scan(&valid)
+		if err != nil {
+			return classify(err, "REINDEX_TARGET_PROJECTION_QUERY_FAILED")
+		}
+		if !valid {
+			return conflict("REINDEX_TARGET_PROJECTION_INVALID", errors.New("target source version has no successful current projection"))
+		}
 	}
 	return nil
 }
@@ -238,12 +244,18 @@ func snapshotActiveBase(ctx context.Context, tx pgx.Tx, workspaceID foundation.I
 func stageIncrementalSources(ctx context.Context, tx pgx.Tx, command domain.WorkspaceSnapshotCommand, activeID foundation.ID) error {
 	cursor := snapshotCursorID
 	var staged int64
+	excluded := snapshotChangedSourceIDs(command)
+	targetCount := snapshotTargetCount(command)
 	for {
 		rows, err := tx.Query(ctx, `SELECT source_id::text,workspace_id::text,source_version_id::text,parse_projection_id::text,
             selection_status,exclusion_code,created_at
-            FROM retrieval.index_manifest_source
-            WHERE index_version_id=$1 AND source_id>$2 AND source_id<>$3
-            ORDER BY source_id LIMIT $4`, string(activeID), string(cursor), string(command.TargetSourceID), command.PageSize)
+			FROM retrieval.index_manifest_source AS source_manifest
+				JOIN core.source AS source
+				  ON source.id=source_manifest.source_id
+				 AND source.workspace_id=source_manifest.workspace_id
+				 AND source.removed_at IS NULL
+				WHERE source_manifest.index_version_id=$1 AND source_manifest.source_id>$2 AND NOT (source_manifest.source_id=ANY($3::uuid[]))
+				ORDER BY source_manifest.source_id LIMIT $4`, string(activeID), string(cursor), excluded, command.PageSize)
 		if err != nil {
 			return classify(err, "REINDEX_ACTIVE_SOURCE_PAGE_FAILED")
 		}
@@ -256,7 +268,7 @@ func stageIncrementalSources(ctx context.Context, tx pgx.Tx, command domain.Work
 			return nil
 		}
 		staged += int64(len(page))
-		if staged+1 > command.MaxSources {
+		if staged+targetCount > command.MaxSources {
 			return snapshotCapacityError("source count exceeds configured maximum")
 		}
 		if err := copySourceStage(ctx, tx, page, command.IndexVersion.CreatedAt); err != nil {
@@ -273,6 +285,8 @@ func stageFirstBuildSources(ctx context.Context, tx pgx.Tx, command domain.Works
 	cursor := snapshotCursorID
 	var staged int64
 	contract := *command.IndexVersion.ProcessingContract
+	excluded := snapshotChangedSourceIDs(command)
+	targetCount := snapshotTargetCount(command)
 	for {
 		rows, err := tx.Query(ctx, `SELECT source.id::text,source.workspace_id::text,
             choice.source_version_id::text,choice.parse_projection_id::text
@@ -296,8 +310,9 @@ func stageFirstBuildSources(ctx context.Context, tx pgx.Tx, command domain.Works
                  WHERE version.source_id=source.id
                  ORDER BY version.captured_at DESC,version.id DESC LIMIT 1
             ) choice ON true
-            WHERE source.workspace_id=$1 AND source.id>$2 AND source.id<>$3
-            ORDER BY source.id LIMIT $9`, string(command.IndexVersion.WorkspaceID), string(cursor), string(command.TargetSourceID),
+			WHERE source.workspace_id=$1 AND source.id>$2 AND source.removed_at IS NULL
+			  AND NOT (source.id=ANY($3::uuid[]))
+			ORDER BY source.id LIMIT $9`, string(command.IndexVersion.WorkspaceID), string(cursor), excluded,
 			contract.ParserID, contract.ParserVersion, contract.ParserConfigHash, contract.ChunkStrategyVersion,
 			contract.SchemaVersion, command.PageSize)
 		if err != nil {
@@ -331,7 +346,7 @@ func stageFirstBuildSources(ctx context.Context, tx pgx.Tx, command domain.Works
 			return nil
 		}
 		staged += int64(len(page))
-		if staged+1 > command.MaxSources {
+		if staged+targetCount > command.MaxSources {
 			return snapshotCapacityError("source count exceeds configured maximum")
 		}
 		if err := copySourceStage(ctx, tx, page, command.IndexVersion.CreatedAt); err != nil {
@@ -345,14 +360,37 @@ func stageFirstBuildSources(ctx context.Context, tx pgx.Tx, command domain.Works
 }
 
 func stageTargetSource(ctx context.Context, tx pgx.Tx, command domain.WorkspaceSnapshotCommand) error {
-	_, err := tx.Exec(ctx, `INSERT INTO reindex_source_stage(
-        source_id,workspace_id,source_version_id,parse_projection_id,selection_status,exclusion_code,created_at
-    ) VALUES($1,$2,$3,$4,'included',NULL,$5)`, string(command.TargetSourceID), string(command.IndexVersion.WorkspaceID),
-		string(command.TargetSourceVersionID), string(command.TargetParseProjectionID), command.IndexVersion.CreatedAt.UTC())
+	targets, err := domain.WorkspaceSnapshotTargets(command)
 	if err != nil {
-		return classify(err, "REINDEX_TARGET_SOURCE_STAGE_FAILED")
+		return err
+	}
+	for _, target := range targets {
+		_, err := tx.Exec(ctx, `INSERT INTO reindex_source_stage(
+        source_id,workspace_id,source_version_id,parse_projection_id,selection_status,exclusion_code,created_at
+	) VALUES($1,$2,$3,$4,'included',NULL,$5)`, string(target.SourceID), string(command.IndexVersion.WorkspaceID),
+			string(target.SourceVersionID), string(target.ParseProjectionID), command.IndexVersion.CreatedAt.UTC())
+		if err != nil {
+			return classify(err, "REINDEX_TARGET_SOURCE_STAGE_FAILED")
+		}
 	}
 	return nil
+}
+
+func snapshotChangedSourceIDs(command domain.WorkspaceSnapshotCommand) []string {
+	targets, _ := domain.WorkspaceSnapshotTargets(command)
+	ids := make([]string, 0, len(targets)+len(command.RemovedSourceIDs))
+	for _, target := range targets {
+		ids = append(ids, string(target.SourceID))
+	}
+	for _, sourceID := range command.RemovedSourceIDs {
+		ids = append(ids, string(sourceID))
+	}
+	return ids
+}
+
+func snapshotTargetCount(command domain.WorkspaceSnapshotCommand) int64 {
+	targets, _ := domain.WorkspaceSnapshotTargets(command)
+	return int64(len(targets))
 }
 
 type sourceStageRow struct {
@@ -645,15 +683,30 @@ func replayWorkspaceSnapshot(ctx context.Context, tx pgx.Tx, command domain.Work
 	if err := validateTargetProjection(ctx, tx, command); err != nil {
 		return domain.WorkspaceSnapshotResult{}, false, err
 	}
-	var sourceCount, chunkCount, excluded, targetCount int64
+	var sourceCount, chunkCount, excluded int64
 	if err := tx.QueryRow(ctx, `SELECT
         (SELECT count(*) FROM retrieval.index_manifest_source WHERE index_version_id=$1),
         (SELECT count(*) FROM retrieval.index_manifest_chunk WHERE index_version_id=$1),
-        (SELECT count(*) FROM retrieval.index_manifest_source WHERE index_version_id=$1 AND selection_status='excluded'),
-        (SELECT count(*) FROM retrieval.index_manifest_source WHERE index_version_id=$1 AND source_id=$2 AND source_version_id=$3 AND parse_projection_id=$4 AND selection_status='included')`, string(index.ID), string(command.TargetSourceID), string(command.TargetSourceVersionID), string(command.TargetParseProjectionID)).Scan(&sourceCount, &chunkCount, &excluded, &targetCount); err != nil {
+		(SELECT count(*) FROM retrieval.index_manifest_source WHERE index_version_id=$1 AND selection_status='excluded')`, string(index.ID)).Scan(&sourceCount, &chunkCount, &excluded); err != nil {
 		return domain.WorkspaceSnapshotResult{}, false, classify(err, "REINDEX_SNAPSHOT_REPLAY_MANIFEST_QUERY_FAILED")
 	}
-	if sourceCount != *index.ExpectedSourceCount || chunkCount != index.ExpectedChunkCount || targetCount != 1 {
+	targets, targetErr := domain.WorkspaceSnapshotTargets(command)
+	if targetErr != nil {
+		return domain.WorkspaceSnapshotResult{}, false, targetErr
+	}
+	for _, target := range targets {
+		var targetCount int64
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM retrieval.index_manifest_source
+			WHERE index_version_id=$1 AND source_id=$2 AND source_version_id=$3
+			  AND parse_projection_id=$4 AND selection_status='included'`, string(index.ID), string(target.SourceID),
+			string(target.SourceVersionID), string(target.ParseProjectionID)).Scan(&targetCount); err != nil {
+			return domain.WorkspaceSnapshotResult{}, false, classify(err, "REINDEX_SNAPSHOT_REPLAY_MANIFEST_QUERY_FAILED")
+		}
+		if targetCount != 1 {
+			return domain.WorkspaceSnapshotResult{}, false, consistency("REINDEX_SNAPSHOT_REPLAY_INVALID", errors.New("persisted snapshot target is incomplete"))
+		}
+	}
+	if sourceCount != *index.ExpectedSourceCount || chunkCount != index.ExpectedChunkCount {
 		return domain.WorkspaceSnapshotResult{}, false, consistency("REINDEX_SNAPSHOT_REPLAY_INVALID", errors.New("persisted snapshot is incomplete"))
 	}
 	return domain.WorkspaceSnapshotResult{IndexVersion: index, SourceCount: sourceCount, ChunkCount: chunkCount, ExcludedSourceCount: excluded, Replayed: true}, true, nil

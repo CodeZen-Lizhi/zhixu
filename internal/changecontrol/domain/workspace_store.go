@@ -24,6 +24,8 @@ var (
 	ErrTargetBaseHashConflict = errors.New("writeback target base hash does not match")
 	// ErrTargetIdentityConflict 表示目标路径当前指向的文件身份已发生变化。
 	ErrTargetIdentityConflict = errors.New("writeback target identity does not match")
+	// ErrTargetExistenceConflict 表示 CREATE_ONLY 目标的缺失事实已失效。
+	ErrTargetExistenceConflict = errors.New("writeback target existence does not match")
 	// ErrWritebackManualRecoveryRequired 表示文件副作用结果无法证明，必须停止自动重试并人工恢复。
 	ErrWritebackManualRecoveryRequired = errors.New("writeback requires manual recovery")
 	// ErrWritebackRestoreConflict 表示目标在系统写入后又被修改，恢复操作不得覆盖当前内容。
@@ -35,6 +37,13 @@ var (
 type WorkspaceStore interface {
 	AcquireTarget(context.Context, foundation.ID, string) (TargetLock, error)
 	ResumeTarget(context.Context, foundation.ID, string, ResumeWrite) (TargetLock, PreparedWrite, *AppliedWrite, error)
+}
+
+// CreateOnlyWorkspaceStore 为 CREATE_ONLY 提供在准备 no-replace 发布期间证明目标不存在的锁。
+type CreateOnlyWorkspaceStore interface {
+	WorkspaceStore
+	AcquireCreateOnlyTarget(context.Context, foundation.ID, string) (TargetLock, error)
+	ResumeCreateOnlyTarget(context.Context, foundation.ID, string, ResumeWrite) (TargetLock, PreparedWrite, *AppliedWrite, error)
 }
 
 // TargetLock 封装单个 Workspace 目标的 Prepare、CAS、恢复和清理生命周期。
@@ -57,6 +66,8 @@ type ContentValidator interface {
 // Content 由调用方持有，Adapter 不得修改该切片。
 type PrepareWrite struct {
 	ExecutionID        foundation.ID
+	WorkspaceID        foundation.ID
+	TargetMode         TargetMode
 	ExpectedBaseHash   string
 	ApprovedChangeHash string
 	Content            []byte
@@ -67,6 +78,7 @@ type PrepareWrite struct {
 // ResultLockToken 绑定即将 rename 为正式目标的受控 temp inode。
 type PreparedWrite struct {
 	ExecutionID        foundation.ID
+	TargetMode         TargetMode
 	TemporaryRef       string
 	BackupRef          string
 	ExpectedBaseHash   string
@@ -93,6 +105,7 @@ type ResumeWrite struct {
 // BackupRef 必须指向当前锁和 Execution 生成的受控独立备份。
 type AppliedWrite struct {
 	ExecutionID        foundation.ID
+	TargetMode         TargetMode
 	TemporaryRef       string
 	BackupRef          string
 	BaseHash           string
@@ -145,7 +158,8 @@ func ComputeWritebackResultHash(content []byte) string {
 // ValidatePrepareWrite 校验正文与 Execution、Base Hash、批准 Change Hash 和目标路径的完整绑定。
 // 返回值是由原始正文重新计算的 Result Hash，调用方不得信任外部传入的结果哈希。
 func ValidatePrepareWrite(targetPath string, command PrepareWrite) (string, error) {
-	if command.ExecutionID == "" || !ValidHash(command.ExpectedBaseHash) || !ValidHash(command.ApprovedChangeHash) {
+	mode, modeErr := ValidateTargetMode(command.TargetMode)
+	if command.ExecutionID == "" || modeErr != nil || !ValidHash(command.ApprovedChangeHash) {
 		return "", ErrWritebackInvalidInput
 	}
 	if err := validateWritebackTargetPath(targetPath); err != nil {
@@ -154,7 +168,23 @@ func ValidatePrepareWrite(targetPath string, command PrepareWrite) (string, erro
 	if len(command.Content) == 0 || len(command.Content) > MaxWritebackContentBytes {
 		return "", ErrWritebackInvalidInput
 	}
-	expectedChangeHash := ComputeChangeHash(targetPath, command.ExpectedBaseHash, string(command.Content))
+	if mode == TargetModeReplace {
+		if !ValidHash(command.ExpectedBaseHash) {
+			return "", ErrWritebackInvalidInput
+		}
+	} else if command.WorkspaceID == "" || ValidateTargetBaseVersion(command.WorkspaceID, targetPath, mode, command.ExpectedBaseHash) != nil {
+		return "", ErrWritebackInvalidInput
+	}
+	var expectedChangeHash string
+	if mode == TargetModeReplace {
+		expectedChangeHash = ComputeChangeHash(targetPath, command.ExpectedBaseHash, string(command.Content))
+	} else {
+		var hashErr error
+		expectedChangeHash, hashErr = ComputeChangeHashForTarget(command.WorkspaceID, targetPath, mode, command.ExpectedBaseHash, string(command.Content))
+		if hashErr != nil {
+			return "", ErrWritebackInvalidInput
+		}
+	}
 	if !strings.EqualFold(expectedChangeHash, command.ApprovedChangeHash) {
 		return "", ErrWritebackIdentityConflict
 	}
@@ -168,6 +198,7 @@ func ValidatePreparedWriteBinding(targetPath string, command PrepareWrite, prepa
 		return err
 	}
 	if prepared.ExecutionID != command.ExecutionID ||
+		NormalizeTargetMode(prepared.TargetMode) != NormalizeTargetMode(command.TargetMode) ||
 		!strings.EqualFold(prepared.ExpectedBaseHash, command.ExpectedBaseHash) ||
 		!strings.EqualFold(prepared.ApprovedChangeHash, command.ApprovedChangeHash) ||
 		!strings.EqualFold(prepared.ResultHash, resultHash) ||
@@ -189,7 +220,16 @@ func ValidatePreparedWriteSummary(targetPath string, prepared PreparedWrite) err
 		return err
 	}
 	targetParent := path.Dir(targetPath)
-	if path.Dir(prepared.TemporaryRef) != targetParent || path.Dir(prepared.BackupRef) != targetParent || prepared.TemporaryRef == prepared.BackupRef {
+	if path.Dir(prepared.TemporaryRef) != targetParent {
+		return ErrWritebackIdentityConflict
+	}
+	if NormalizeTargetMode(prepared.TargetMode) == TargetModeCreateOnly {
+		if prepared.BackupRef != "" || prepared.BackupLockToken != "" {
+			return ErrWritebackIdentityConflict
+		}
+		return nil
+	}
+	if path.Dir(prepared.BackupRef) != targetParent || prepared.TemporaryRef == prepared.BackupRef {
 		return ErrWritebackIdentityConflict
 	}
 	return nil
@@ -201,6 +241,7 @@ func ValidateAppliedWriteBinding(prepared PreparedWrite, applied AppliedWrite) e
 		return ErrWritebackIdentityConflict
 	}
 	if applied.ExecutionID != prepared.ExecutionID ||
+		NormalizeTargetMode(applied.TargetMode) != NormalizeTargetMode(prepared.TargetMode) ||
 		applied.TemporaryRef != prepared.TemporaryRef ||
 		applied.BackupRef != prepared.BackupRef ||
 		!strings.EqualFold(applied.BaseHash, prepared.ExpectedBaseHash) ||
@@ -212,6 +253,12 @@ func ValidateAppliedWriteBinding(prepared PreparedWrite, applied AppliedWrite) e
 		applied.ResultLockToken != prepared.ResultLockToken ||
 		applied.BackupLockToken != prepared.BackupLockToken {
 		return ErrWritebackIdentityConflict
+	}
+	if NormalizeTargetMode(prepared.TargetMode) == TargetModeCreateOnly {
+		if applied.BackupRef != "" || applied.BackupLockToken != "" {
+			return ErrWritebackIdentityConflict
+		}
+		return nil
 	}
 	if err := validateWritebackLocator(applied.BackupRef, ".bak", applied.ExecutionID, applied.LockToken); err != nil {
 		return ErrWritebackIdentityConflict
@@ -248,14 +295,24 @@ func ValidateRestoreResult(result RestoreResult) error {
 }
 
 func validatePreparedWrite(prepared PreparedWrite) error {
-	if prepared.ExecutionID == "" || !ValidHash(prepared.ExpectedBaseHash) || !ValidHash(prepared.ApprovedChangeHash) || !ValidHash(prepared.ResultHash) || prepared.ByteSize <= 0 || prepared.ByteSize > MaxWritebackContentBytes || prepared.Mode&^uint32(0o7777) != 0 || !ValidHash(prepared.LockToken) || !ValidHash(prepared.ResultLockToken) || !ValidHash(prepared.BackupLockToken) {
+	mode, err := ValidateTargetMode(prepared.TargetMode)
+	if prepared.ExecutionID == "" || err != nil || !ValidHash(prepared.ApprovedChangeHash) || !ValidHash(prepared.ResultHash) || prepared.ByteSize <= 0 || prepared.ByteSize > MaxWritebackContentBytes || prepared.Mode&^uint32(0o7777) != 0 || !ValidHash(prepared.LockToken) || !ValidHash(prepared.ResultLockToken) {
 		return ErrWritebackInvalidInput
 	}
-	if strings.EqualFold(prepared.LockToken, prepared.ResultLockToken) || strings.EqualFold(prepared.LockToken, prepared.BackupLockToken) || strings.EqualFold(prepared.ResultLockToken, prepared.BackupLockToken) {
+	if mode == TargetModeReplace && (!ValidHash(prepared.ExpectedBaseHash) || !ValidHash(prepared.BackupLockToken)) {
+		return ErrWritebackInvalidInput
+	}
+	if mode == TargetModeCreateOnly && (!ValidAbsenceToken(prepared.ExpectedBaseHash) || prepared.BackupLockToken != "") {
+		return ErrWritebackInvalidInput
+	}
+	if strings.EqualFold(prepared.LockToken, prepared.ResultLockToken) || (mode == TargetModeReplace && (strings.EqualFold(prepared.LockToken, prepared.BackupLockToken) || strings.EqualFold(prepared.ResultLockToken, prepared.BackupLockToken))) {
 		return ErrWritebackInvalidInput
 	}
 	if err := validateWritebackLocator(prepared.TemporaryRef, ".tmp", prepared.ExecutionID, prepared.LockToken); err != nil {
 		return err
+	}
+	if mode == TargetModeCreateOnly {
+		return nil
 	}
 	return validateWritebackLocator(prepared.BackupRef, ".bak", prepared.ExecutionID, prepared.LockToken)
 }

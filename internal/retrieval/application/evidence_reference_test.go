@@ -42,6 +42,34 @@ func TestEvidenceReferenceServiceReturnsImmutableSpanExcerpt(t *testing.T) {
 	}
 }
 
+func TestEvidenceReferenceServiceReturnsDerivedPDFExcerptAndStillVerifiesOriginal(t *testing.T) {
+	original := []byte("%PDF-1.7\nimmutable-binary-placeholder")
+	derived := "Java AI extracted evidence"
+	reference := applicationSourceSpanReference(original, original)
+	reference.SourceVersion.MediaType = "application/pdf"
+	reference.Span.EndByte = int64(len(original))
+	reference.EvidenceKind = domain.EvidenceDerivedText
+	reference.DerivedExcerpt = derived
+	reference.ExcerptHash = sha256Hex([]byte(derived))
+	reader := &fakeEvidenceArtifactReader{artifact: EvidenceArtifact{
+		WorkspaceID: reference.SourceVersion.WorkspaceID, SourceVersionID: reference.SourceVersion.SourceVersionID,
+		ContentArtifactID: reference.SourceVersion.ContentArtifactID, ContentHash: sha256Hex(original),
+		ByteSize: int64(len(original)), Bytes: append([]byte(nil), original...),
+	}}
+	service, err := NewEvidenceReferenceService(&fakeEvidenceReferenceStore{sourceSpan: reference}, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := service.GetSourceSpan(context.Background(), reference.SourceVersion.WorkspaceID, reference.SourceVersion.SourceVersionID, reference.Span.ID)
+	if err != nil || view.Excerpt != derived || view.ExcerptTruncated {
+		t.Fatalf("view=%+v err=%v", view, err)
+	}
+	reader.artifact.Bytes[0] = '!'
+	if _, err := service.GetSourceSpan(context.Background(), reference.SourceVersion.WorkspaceID, reference.SourceVersion.SourceVersionID, reference.Span.ID); err == nil {
+		t.Fatal("expected original artifact verification failure")
+	}
+}
+
 func TestEvidenceReferenceServiceReturnsSourceVersionWithoutReadingArtifact(t *testing.T) {
 	reference := applicationSourceSpanReference([]byte("body"), []byte("body"))
 	store := &fakeEvidenceReferenceStore{sourceVersion: reference.SourceVersion, sourceSpan: reference}
@@ -54,6 +82,55 @@ func TestEvidenceReferenceServiceReturnsSourceVersionWithoutReadingArtifact(t *t
 	result, err := service.GetSourceVersion(context.Background(), reference.SourceVersion.WorkspaceID, reference.SourceVersion.SourceVersionID)
 	if err != nil || result != reference.SourceVersion || reader.calls != 0 {
 		t.Fatalf("unexpected source version result=%+v calls=%d err=%v", result, reader.calls, err)
+	}
+}
+
+func TestEvidenceReferenceServiceBatchesSourceVersionsInRequestOrder(t *testing.T) {
+	first := applicationSourceSpanReference([]byte("first"), []byte("first")).SourceVersion
+	second := first
+	second.SourceID = "91000000-0000-4000-8000-000000000021"
+	second.SourceVersionID = "91000000-0000-4000-8000-000000000022"
+	second.ContentArtifactID = "91000000-0000-4000-8000-000000000023"
+	second.LogicalName = "second.md"
+	store := &fakeEvidenceReferenceStore{sourceVersions: []domain.SourceVersionReference{first, second}}
+	service, err := NewEvidenceReferenceService(store, &fakeEvidenceArtifactReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []foundation.ID{first.SourceVersionID, second.SourceVersionID}
+	result, err := service.GetSourceVersions(context.Background(), first.WorkspaceID, ids)
+	if err != nil || len(result) != 2 || result[0].SourceVersionID != ids[0] || result[1].SourceVersionID != ids[1] || store.sourceVersionBatchCalls != 1 {
+		t.Fatalf("source version batch = %#v, calls=%d, err=%v", result, store.sourceVersionBatchCalls, err)
+	}
+	if _, err := service.GetSourceVersions(context.Background(), first.WorkspaceID, []foundation.ID{ids[0], ids[0]}); err == nil || store.sourceVersionBatchCalls != 1 {
+		t.Fatalf("duplicate batch was not rejected before store: calls=%d err=%v", store.sourceVersionBatchCalls, err)
+	}
+	store.sourceVersions = []domain.SourceVersionReference{second, first}
+	if _, err := service.GetSourceVersions(context.Background(), first.WorkspaceID, ids); err == nil {
+		t.Fatal("out-of-order source version batch was accepted")
+	}
+}
+
+func TestEvidenceReferenceServiceResolvesProvenanceToExactCitation(t *testing.T) {
+	provenance := domain.ProvenanceReferenceQuery{
+		WorkspaceID: "91000000-0000-4000-8000-000000000011", SourceVersionID: "91000000-0000-4000-8000-000000000013",
+		SourceSpanID: "91000000-0000-4000-8000-000000000016",
+	}
+	citation := domain.CitationReferenceQuery{WorkspaceID: provenance.WorkspaceID,
+		IndexVersionID: "91000000-0000-4000-8000-000000000017", ChunkID: "91000000-0000-4000-8000-000000000018",
+		SourceVersionID: provenance.SourceVersionID, SourceSpanID: provenance.SourceSpanID}
+	store := &fakeEvidenceReferenceStore{provenanceCitations: []domain.CitationReferenceQuery{citation}}
+	service, err := NewEvidenceReferenceService(store, &fakeEvidenceArtifactReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ResolveProvenanceCitations(context.Background(), []domain.ProvenanceReferenceQuery{provenance})
+	if err != nil || len(result) != 1 || result[0] != citation || len(store.provenanceQueries) != 1 || store.provenanceQueries[0] != provenance {
+		t.Fatalf("provenance citations=%#v queries=%#v err=%v", result, store.provenanceQueries, err)
+	}
+	store.provenanceCitations[0].SourceSpanID = "91000000-0000-4000-8000-000000000019"
+	if _, err := service.ResolveProvenanceCitations(context.Background(), []domain.ProvenanceReferenceQuery{provenance}); err == nil {
+		t.Fatal("mismatched provenance citation was accepted")
 	}
 }
 
@@ -187,15 +264,29 @@ func sha256Hex(value []byte) string {
 }
 
 type fakeEvidenceReferenceStore struct {
-	sourceVersion domain.SourceVersionReference
-	sourceSpan    domain.SourceSpanReference
-	citationQuery domain.CitationReferenceQuery
-	citationCalls int
-	err           error
+	sourceVersion           domain.SourceVersionReference
+	sourceVersions          []domain.SourceVersionReference
+	sourceSpan              domain.SourceSpanReference
+	citationQuery           domain.CitationReferenceQuery
+	citationCalls           int
+	sourceVersionBatchCalls int
+	provenanceQueries       []domain.ProvenanceReferenceQuery
+	provenanceCitations     []domain.CitationReferenceQuery
+	err                     error
 }
 
 func (f *fakeEvidenceReferenceStore) LoadSourceVersionReference(context.Context, foundation.ID, foundation.ID) (domain.SourceVersionReference, error) {
 	return f.sourceVersion, f.err
+}
+
+func (f *fakeEvidenceReferenceStore) LoadSourceVersionReferences(context.Context, foundation.ID, []foundation.ID) ([]domain.SourceVersionReference, error) {
+	f.sourceVersionBatchCalls++
+	return append([]domain.SourceVersionReference(nil), f.sourceVersions...), f.err
+}
+
+func (f *fakeEvidenceReferenceStore) ResolveProvenanceCitationReferences(_ context.Context, queries []domain.ProvenanceReferenceQuery) ([]domain.CitationReferenceQuery, error) {
+	f.provenanceQueries = append([]domain.ProvenanceReferenceQuery(nil), queries...)
+	return append([]domain.CitationReferenceQuery(nil), f.provenanceCitations...), f.err
 }
 
 func (f *fakeEvidenceReferenceStore) LoadSourceSpanReference(context.Context, foundation.ID, foundation.ID, foundation.ID) (domain.SourceSpanReference, error) {

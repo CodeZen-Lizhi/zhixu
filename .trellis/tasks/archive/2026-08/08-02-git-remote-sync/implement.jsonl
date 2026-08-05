@@ -1,0 +1,11 @@
+{"file":".trellis/spec/backend/index.md","reason":"Git Sync 独立端口、Workspace/Change Control/Worker 模块边界"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"HTTPS Remote、Token、Capability、AskPass 与 Secret 生命周期"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"抽取通用 Secret Sealer 时保持 Model Settings AAD/rollout 兼容"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"Remote/Secret/SyncRun persistence、错误、幂等、迁移和跨层质量契约"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Token、URL userinfo、Git stderr 和环境变量脱敏"}
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"Git Remote 操作必须绑定活动 Workspace canonical root"}
+{"file":".trellis/spec/frontend/model-settings.md","reason":"Secret replace/keep/clear UI 与不回显模式可复用"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Config/Run/Index follow-up、Workspace 切换与 SSE invalidation"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Remote/Sync/conflict 判别状态严格解码"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Secret、Git refs、SyncRun、外部捕获与 UI 的跨层链路"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/repository-evidence.md","reason":"Git Runner、Safe Writeback 禁止边界和 Secret 现状证据"}

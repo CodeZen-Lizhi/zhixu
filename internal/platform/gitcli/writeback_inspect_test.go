@@ -56,6 +56,20 @@ func TestWritebackCaptureApprovalSnapshotReadsCurrentStrictBaseline(t *testing.T
 	}
 }
 
+func TestWritebackEnsureTargetAbsentAtBindsApprovedTree(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		repository := newCreateOnlyWritebackTestRepository(t, "notes/new.md")
+		if err := repository.client.EnsureTargetAbsentAt(context.Background(), writebackTestWorkspaceID, repository.head, repository.target); err != nil {
+			t.Fatalf("EnsureTargetAbsentAt() error = %v", err)
+		}
+	})
+	t.Run("tracked", func(t *testing.T) {
+		repository := newWritebackTestRepository(t, "", "notes/existing.md")
+		err := repository.client.EnsureTargetAbsentAt(context.Background(), writebackTestWorkspaceID, repository.head, repository.target)
+		requireGitErrorCode(t, err, "CREATE_ONLY_GIT_TARGET_EXISTS", foundation.ErrorVersionConflict)
+	})
+}
+
 func TestWritebackCaptureApprovalSnapshotRejectsUnsafeCurrentRepository(t *testing.T) {
 	t.Run("root mismatch", func(t *testing.T) {
 		repository := newWritebackTestRepository(t, "", "")

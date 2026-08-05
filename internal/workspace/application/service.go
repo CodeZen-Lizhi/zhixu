@@ -16,6 +16,7 @@ const WarningGitDirty = "GIT_WORKTREE_DIRTY"
 type Dependencies struct {
 	Repository     domain.Repository
 	Files          domain.FileScanner
+	ManagedFiles   domain.ManagedContentStore
 	CommittedFiles domain.CommittedContentStore
 	CommittedGit   domain.CommittedBlobReader
 	Git            domain.GitStatusReader
@@ -26,6 +27,63 @@ type Dependencies struct {
 
 // Service coordinates Workspace creation, opening and read-only scanning.
 type Service struct{ dependencies Dependencies }
+
+// StageManagedBytes verifies immutable bytes under an authorized Workspace root
+// while keeping the stable artifact location unpublished.
+func (s *Service) StageManagedBytes(ctx context.Context, workspaceID foundation.ID, sourceRef string, content []byte, expectedHash string) (domain.ManagedContentStage, error) {
+	workspace, err := s.managedContentWorkspace(ctx, workspaceID)
+	if err != nil {
+		return domain.ManagedContentStage{}, err
+	}
+	staged, err := s.dependencies.ManagedFiles.StageManaged(ctx, workspace.RootPath, sourceRef, content, expectedHash)
+	if err != nil {
+		return domain.ManagedContentStage{}, err
+	}
+	if staged.ContentHash != expectedHash || staged.ByteSize != int64(len(content)) || staged.ManagedLocation == "" {
+		return domain.ManagedContentStage{}, foundation.NewError(foundation.ErrorConsistencyViolation, "MANAGED_CONTENT_STAGE_RESULT_INVALID", false, errors.New("managed content store returned an invalid stage binding"))
+	}
+	return staged, nil
+}
+
+// PublishManagedBytes promotes a verified stage after the database binding is confirmed.
+func (s *Service) PublishManagedBytes(ctx context.Context, workspaceID foundation.ID, stage domain.ManagedContentStage) (domain.ContentCapture, error) {
+	workspace, err := s.managedContentWorkspace(ctx, workspaceID)
+	if err != nil {
+		return domain.ContentCapture{}, err
+	}
+	captured, err := s.dependencies.ManagedFiles.PublishManaged(ctx, workspace.RootPath, stage)
+	if err != nil {
+		return domain.ContentCapture{}, err
+	}
+	if captured.ContentHash != stage.ContentHash || captured.ByteSize != stage.ByteSize || captured.ManagedLocation != stage.ManagedLocation {
+		return domain.ContentCapture{}, foundation.NewError(foundation.ErrorConsistencyViolation, "MANAGED_CONTENT_RESULT_INVALID", false, errors.New("managed content store returned an invalid publish binding"))
+	}
+	return captured, nil
+}
+
+// DiscardManagedBytes removes an exact stage only after its caller proves the
+// database binding is absent. The final content-addressed file is never targeted.
+func (s *Service) DiscardManagedBytes(ctx context.Context, workspaceID foundation.ID, stage domain.ManagedContentStage) error {
+	workspace, err := s.managedContentWorkspace(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	return s.dependencies.ManagedFiles.DiscardManaged(ctx, workspace.RootPath, stage)
+}
+
+func (s *Service) managedContentWorkspace(ctx context.Context, workspaceID foundation.ID) (domain.Workspace, error) {
+	if s == nil || s.dependencies.Repository == nil || s.dependencies.ManagedFiles == nil {
+		return domain.Workspace{}, dependencyError("MANAGED_CONTENT_STORE_UNAVAILABLE")
+	}
+	workspace, err := s.dependencies.Repository.GetWorkspaceByID(ctx, workspaceID)
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+	if workspace.ID != workspaceID || workspace.RootPath == "" {
+		return domain.Workspace{}, foundation.NewError(foundation.ErrorConsistencyViolation, "MANAGED_CONTENT_WORKSPACE_BINDING_INVALID", false, errors.New("workspace lookup returned an invalid binding"))
+	}
+	return workspace, nil
+}
 
 // ListSourceVersions 返回 Inbox 需要的 Source Version 摘要页。
 func (s *Service) ListSourceVersions(ctx context.Context, query domain.SourceVersionListQuery) ([]domain.SourceVersionListItem, bool, error) {

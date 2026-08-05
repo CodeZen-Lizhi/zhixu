@@ -5,6 +5,7 @@ go 1.25.4
 require (
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/pgvector/pgvector-go v0.4.0
 	github.com/pgvector/pgvector-go/pgx v0.4.0
 	github.com/pressly/goose/v3 v3.27.0

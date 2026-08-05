@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/index.md","reason":"Capture 编排必须保持 Workspace、Ingestion、Retrieval 与 Agent 模块边界"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"上传、URL Fetch、Workspace Capability 与敏感输入安全"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"Profile 模型设置版本、disabled/degraded 和 Secret 生命周期"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"Capture/Profile persistence、错误、幂等、迁移和跨层质量契约"}
+{"file":".trellis/spec/frontend/index.md","reason":"Quick Capture、Inbox 与 Profile 前端边界"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"全局 Dialog、焦点恢复、文件粘贴拖入与状态组件"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Workspace Query、Capture draft、SSE invalidation 与刷新恢复"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Capture/Profile JSON、multipart metadata 和判别状态严格解码"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Source 到 Profile 的跨层版本与状态链路"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/repository-evidence.md","reason":"复用现有 Source、Ingestion、Search 与 AppShell 的仓库证据"}

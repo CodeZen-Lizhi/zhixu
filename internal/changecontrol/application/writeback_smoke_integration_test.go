@@ -20,6 +20,7 @@ import (
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitoperation"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/changecontrol"
 	toolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
@@ -205,6 +206,10 @@ func TestSafeWritebackWorkflowNodePostgreSQLGitFilesystemSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	gitOperationLocker, err := gitoperation.NewPostgresLocker(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writebackService, err := application.NewWritebackService(application.WritebackServiceDependencies{
 		Repository: &smokeFaultRepository{
 			WritebackSagaRepository: changeRepository,
@@ -213,7 +218,9 @@ func TestSafeWritebackWorkflowNodePostgreSQLGitFilesystemSmoke(t *testing.T) {
 			losePublishResponse:     true,
 			loseCleanupResponse:     true,
 		},
-		Workspace: workspaceStore, Git: gitRepository, Audit: auditRecorder, IDs: ids, Clock: foundation.FixedClock{Value: databaseNow.Add(time.Minute)},
+		Workspace: workspaceStore, Git: gitRepository, GitOperations: gitOperationLocker, Audit: auditRecorder,
+		Publication: application.WritebackPublicationFinalizerFunc(func(context.Context, application.WritebackPublication) error { return nil }),
+		IDs:         ids, Clock: foundation.FixedClock{Value: databaseNow.Add(time.Minute)},
 	})
 	if err != nil {
 		t.Fatal(err)

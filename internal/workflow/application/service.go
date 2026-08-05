@@ -71,6 +71,30 @@ func (s *Service) Get(ctx context.Context, id foundation.ID) (domain.Run, error)
 	return s.repository.GetRun(ctx, id)
 }
 
+// GetPendingHumanTask returns the single actionable Human Task for one Run.
+func (s *Service) GetPendingHumanTask(ctx context.Context, runID foundation.ID) (domain.HumanTask, bool, error) {
+	if s == nil || s.repository == nil {
+		return domain.HumanTask{}, false, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_HUMAN_TASK_QUERY_UNAVAILABLE", true, errors.New("workflow human task repository is unavailable"))
+	}
+	if ctx == nil || runID == "" {
+		return domain.HumanTask{}, false, invalid("WORKFLOW_RUN_ID_INVALID")
+	}
+	repository, ok := s.repository.(domain.PendingHumanTaskRepository)
+	if !ok {
+		return domain.HumanTask{}, false, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_HUMAN_TASK_QUERY_UNAVAILABLE", true, errors.New("workflow human task query is unavailable"))
+	}
+	task, found, err := repository.GetPendingHumanTask(ctx, runID)
+	if err != nil || !found {
+		return domain.HumanTask{}, found, err
+	}
+	if task.RunID != runID || task.Status != domain.HumanTaskPending || task.ID == "" || task.NodeRunID == "" ||
+		task.TargetVersion < 1 || task.CreatedAt.IsZero() || !objectJSON(task.ExpectedInputSchema) ||
+		(task.ExpiresAt != nil && task.ExpiresAt.Before(task.CreatedAt)) {
+		return domain.HumanTask{}, false, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_HUMAN_TASK_RESULT_INVALID", false, errors.New("workflow human task query returned an invalid pending task"))
+	}
+	return task, true, nil
+}
+
 // ListRuns 返回按更新时间和 ID 倒序排列的 Workflow 摘要页。
 func (s *Service) ListRuns(ctx context.Context, query domain.RunListQuery) ([]domain.RunListItem, bool, error) {
 	if query.WorkspaceID == "" || query.Limit < 1 || query.Limit > 100 {

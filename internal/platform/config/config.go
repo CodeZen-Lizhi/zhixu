@@ -232,6 +232,8 @@ type Config struct {
 	ModelSettingsMode ModelSettingsMode `yaml:"model_settings_mode"`
 	// ModelSettingsKeyFile 是只读 AES-256-GCM 主密钥文件路径。
 	ModelSettingsKeyFile string `yaml:"model_settings_key_file"`
+	// GitSyncKeyFile 是 Git Remote Token 的只读 AES-256-GCM 主密钥文件路径。
+	GitSyncKeyFile string `yaml:"git_sync_key_file"`
 	// ModelSettingsRolloutID 固定候选进程只能加载指定 rollout target。
 	ModelSettingsRolloutID string `yaml:"model_settings_rollout_id"`
 	// ModelSettingsPrepared 让候选进程在 commit 前只登记 prepared，不接收工作。
@@ -485,6 +487,7 @@ type fileConfig struct {
 
 	ModelSettingsMode      *ModelSettingsMode `yaml:"model_settings_mode"`
 	ModelSettingsKeyFile   *string            `yaml:"model_settings_key_file"`
+	GitSyncKeyFile         *string            `yaml:"git_sync_key_file"`
 	ModelSettingsRolloutID *string            `yaml:"model_settings_rollout_id"`
 	ModelSettingsPrepared  *bool              `yaml:"model_settings_prepared"`
 
@@ -645,6 +648,9 @@ func applyYAMLFile(path string, cfg *Config) error {
 	}
 	if raw.ModelSettingsKeyFile != nil {
 		cfg.ModelSettingsKeyFile = *raw.ModelSettingsKeyFile
+	}
+	if raw.GitSyncKeyFile != nil {
+		cfg.GitSyncKeyFile = *raw.GitSyncKeyFile
 	}
 	if raw.ModelSettingsRolloutID != nil {
 		cfg.ModelSettingsRolloutID = *raw.ModelSettingsRolloutID
@@ -905,6 +911,9 @@ func (c Config) validate(validateAuth bool) error {
 	if err := c.validateModelSettings(); err != nil {
 		return err
 	}
+	if err := c.validateGitSyncKeyFile(); err != nil {
+		return err
+	}
 	if err := c.validateTools(); err != nil {
 		return err
 	}
@@ -935,6 +944,17 @@ func (c Config) validateModelSettings() error {
 	default:
 		return errors.New("model_settings_mode must be static or managed")
 	}
+}
+
+func (c Config) validateGitSyncKeyFile() error {
+	if c.GitSyncKeyFile == "" {
+		return nil
+	}
+	if c.GitSyncKeyFile != strings.TrimSpace(c.GitSyncKeyFile) || strings.ContainsAny(c.GitSyncKeyFile, "\x00\r\n\t") ||
+		!filepath.IsAbs(c.GitSyncKeyFile) || filepath.Clean(c.GitSyncKeyFile) != c.GitSyncKeyFile {
+		return errors.New("git_sync_key_file must be a canonical absolute path when configured")
+	}
+	return nil
 }
 
 func (c Config) validateReviewQuestionRefKey() error {
@@ -1405,7 +1425,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s ModelSettingsMode:%q ModelSettingsKeyConfigured:%t ModelSettingsRolloutConfigured:%t ModelSettingsPrepared:%t EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s ModelSettingsMode:%q ModelSettingsKeyConfigured:%t GitSyncKeyConfigured:%t ModelSettingsRolloutConfigured:%t ModelSettingsPrepared:%t EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -1431,6 +1451,7 @@ func (c Config) String() string {
 		c.ReindexHeartbeatInterval,
 		c.ModelSettingsMode,
 		strings.TrimSpace(c.ModelSettingsKeyFile) != "",
+		strings.TrimSpace(c.GitSyncKeyFile) != "",
 		strings.TrimSpace(c.ModelSettingsRolloutID) != "",
 		c.ModelSettingsPrepared,
 		c.EmbeddingProvider,
@@ -1535,6 +1556,7 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAPISecrets
 		"ZHIXU_WORKER_QUEUE":              &cfg.WorkerQueue,
 		"ZHIXU_WORKER_HEALTH_ADDR":        &cfg.WorkerHealthAddr,
 		"ZHIXU_MODEL_SETTINGS_KEY_FILE":   &cfg.ModelSettingsKeyFile,
+		"ZHIXU_GIT_SYNC_KEY_FILE":         &cfg.GitSyncKeyFile,
 		"ZHIXU_MODEL_SETTINGS_ROLLOUT_ID": &cfg.ModelSettingsRolloutID,
 	}
 	for key, target := range values {

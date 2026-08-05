@@ -71,7 +71,7 @@ func (Scanner) Capture(ctx context.Context, rootPath string, file domain.Scanned
 // CaptureCommitted 发布指定 Git Commit 的确切 bytes，不读取可能漂移的工作树文件。
 func (s Scanner) CaptureCommitted(ctx context.Context, rootPath, relativePath string, content []byte, expectedHash string) (domain.ContentCapture, error) {
 	extension := strings.ToLower(filepath.Ext(relativePath))
-	if extension != ".md" && extension != ".markdown" && extension != ".txt" {
+	if extension != ".md" && extension != ".markdown" && extension != ".txt" && extension != ".html" && extension != ".htm" && extension != ".pdf" {
 		return domain.ContentCapture{}, fileError(foundation.ErrorInvalidInput, "SOURCE_EXTENSION_UNSUPPORTED", false, errors.New("source extension is not supported by ingestion"))
 	}
 	maxBytes := s.Options.MaxBytes
@@ -95,6 +95,43 @@ func (s Scanner) CaptureCommitted(ctx context.Context, rootPath, relativePath st
 	return domain.ContentCapture{ContentHash: expectedHash, ByteSize: int64(len(content)), ManagedLocation: location, Created: created}, nil
 }
 
+// StageManaged verifies Quick Capture or fetched bytes without publishing the final artifact.
+func (s Scanner) StageManaged(ctx context.Context, rootPath, sourceRef string, content []byte, expectedHash string) (domain.ManagedContentStage, error) {
+	maxBytes := s.Options.MaxBytes
+	if maxBytes < 0 {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorInvalidInput, "SOURCE_CAPTURE_LIMIT_INVALID", false, errors.New("capture limit must not be negative"))
+	}
+	if maxBytes == 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	if int64(len(content)) > maxBytes {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorInvalidInput, "SOURCE_FILE_TOO_LARGE", false, errors.New("managed source exceeds capture limit"))
+	}
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorInvalidInput, "WORKSPACE_ROOT_INVALID", false, err)
+	}
+	return root.StageManagedBytes(ctx, sourceRef, content, expectedHash)
+}
+
+// PublishManaged promotes one verified stage after its database binding commits.
+func (Scanner) PublishManaged(ctx context.Context, rootPath string, stage domain.ManagedContentStage) (domain.ContentCapture, error) {
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		return domain.ContentCapture{}, fileError(foundation.ErrorInvalidInput, "WORKSPACE_ROOT_INVALID", false, err)
+	}
+	return root.PublishManagedStage(ctx, stage)
+}
+
+// DiscardManaged removes only a verified unreferenced stage, never the final artifact.
+func (Scanner) DiscardManaged(ctx context.Context, rootPath string, stage domain.ManagedContentStage) error {
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		return fileError(foundation.ErrorInvalidInput, "WORKSPACE_ROOT_INVALID", false, err)
+	}
+	return root.DiscardManagedStage(ctx, stage)
+}
+
 // ReadArtifact safely re-reads immutable bytes and verifies their metadata.
 func (s Scanner) ReadArtifact(ctx context.Context, rootPath string, artifact domain.ContentArtifact) ([]byte, error) {
 	root, err := NewRoot(rootPath)
@@ -106,3 +143,4 @@ func (s Scanner) ReadArtifact(ctx context.Context, rootPath string, artifact dom
 
 var _ domain.FileScanner = Scanner{}
 var _ domain.CommittedContentStore = Scanner{}
+var _ domain.ManagedContentStore = Scanner{}

@@ -34,6 +34,7 @@ type Writer struct {
 }
 
 var _ domain.WorkspaceStore = (*Writer)(nil)
+var _ domain.CreateOnlyWorkspaceStore = (*Writer)(nil)
 
 type writerOperations struct {
 	random           io.Reader
@@ -41,6 +42,7 @@ type writerOperations struct {
 	syncFile         func(*os.File) error
 	syncDirectory    func(*os.Root, string) error
 	rename           func(*os.Root, string, string) error
+	link             func(*os.Root, string, string) error
 	verifyResult     func(context.Context, *targetLock, domain.AppliedWrite) error
 }
 
@@ -51,6 +53,7 @@ func defaultWriterOperations() writerOperations {
 		syncFile:         func(file *os.File) error { return file.Sync() },
 		syncDirectory:    syncDirectoryRoot,
 		rename:           func(root *os.Root, oldPath, newPath string) error { return root.Rename(oldPath, newPath) },
+		link:             func(root *os.Root, oldPath, newPath string) error { return root.Link(oldPath, newPath) },
 		verifyResult:     verifyAppliedTarget,
 	}
 }
@@ -83,10 +86,90 @@ func newWriterWithOperations(workspaces WorkspaceRepository, validator domain.Co
 	if operations.rename == nil {
 		operations.rename = defaults.rename
 	}
+	if operations.link == nil {
+		operations.link = defaults.link
+	}
 	if operations.verifyResult == nil {
 		operations.verifyResult = defaults.verifyResult
 	}
 	return &Writer{workspaces: workspaces, validator: validator, ops: operations}, nil
+}
+
+// AcquireCreateOnlyTarget 锁定规范路径并在锁内确认目标不存在。
+// 发布阶段使用 link(temp,target) 的 no-replace 原语，绝不退化为 rename 覆盖。
+func (w *Writer) AcquireCreateOnlyTarget(ctx context.Context, workspaceID foundation.ID, targetPath string) (domain.TargetLock, error) {
+	if ctx == nil {
+		return nil, writebackError(foundation.ErrorInvalidInput, "WRITEBACK_CONTEXT_INVALID", false, errors.New("context is nil"))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, writebackContextError("WRITEBACK_TARGET_LOCK_CANCELLED", err)
+	}
+	if err := domain.ValidateWorkspaceTarget(workspaceID, targetPath); err != nil {
+		return nil, writebackError(foundation.ErrorInvalidInput, "WRITEBACK_TARGET_INVALID", false, err)
+	}
+	canonicalRoot, root, rootIdentity, err := w.openWorkspaceRoot(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	closeRoot := true
+	defer func() {
+		if closeRoot {
+			_ = root.Close()
+		}
+	}()
+	if err := validateTargetParents(root, targetPath, rootIdentity.Device); err != nil {
+		return nil, err
+	}
+	if err := ensureLockDirectory(root, rootIdentity.Device); err != nil {
+		return nil, err
+	}
+	pathLockToken := lockTokenForPath(rootIdentity, targetPath)
+	pathLockFile, err := openAndAcquireTargetLock(ctx, root, rootIdentity.Device, pathLockToken, true, w.ops.lockPollInterval)
+	if err != nil {
+		return nil, err
+	}
+	closePathLock := true
+	defer func() {
+		if closePathLock {
+			_ = syscall.Flock(int(pathLockFile.Fd()), syscall.LOCK_UN)
+			_ = pathLockFile.Close()
+		}
+	}()
+	lockToken := lockTokenForCreateOnly(rootIdentity, targetPath)
+	lockFile, err := openAndAcquireTargetLock(ctx, root, rootIdentity.Device, lockToken, true, w.ops.lockPollInterval)
+	if err != nil {
+		return nil, err
+	}
+	closeLock := true
+	defer func() {
+		if closeLock {
+			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+			_ = lockFile.Close()
+		}
+	}()
+	if err := validateTargetParents(root, targetPath, rootIdentity.Device); err != nil {
+		return nil, err
+	}
+	if err := ensureTargetAbsent(root, targetPath); err != nil {
+		return nil, err
+	}
+	if err := canonicalRoot.EnsureGitExcludePatterns("/.knowledge/", writebackExcludePattern); err != nil {
+		return nil, err
+	}
+	closeRoot, closePathLock, closeLock = false, false, false
+	return &targetLock{
+		root: root, rootDevice: rootIdentity.Device, targetPath: targetPath, parentPath: path.Dir(targetPath),
+		targetMode: domain.TargetModeCreateOnly, mode: 0o644, pathLockFile: pathLockFile, lockFile: lockFile,
+		lockToken: lockToken, validator: w.validator, ops: w.ops, managedFiles: make(map[string]fileIdentity),
+	}, nil
+}
+
+// ResumeCreateOnlyTarget 恢复 CREATE_ONLY 的受控 temp 与 no-replace 发布检查点。
+func (w *Writer) ResumeCreateOnlyTarget(ctx context.Context, workspaceID foundation.ID, targetPath string, resume domain.ResumeWrite) (domain.TargetLock, domain.PreparedWrite, *domain.AppliedWrite, error) {
+	if domain.NormalizeTargetMode(resume.Prepared.TargetMode) != domain.TargetModeCreateOnly {
+		return nil, domain.PreparedWrite{}, nil, writebackError(foundation.ErrorInvalidInput, "CREATE_ONLY_RESUME_MODE_INVALID", false, domain.ErrWritebackInvalidInput)
+	}
+	return w.ResumeTarget(ctx, workspaceID, targetPath, resume)
 }
 
 // AcquireTarget 校验 Workspace 目标并获取基于 device/inode 的跨进程 advisory lock。
@@ -261,14 +344,18 @@ func (w *Writer) ResumeTarget(ctx context.Context, workspaceID foundation.ID, ta
 			_ = lockFile.Close()
 		}
 	}()
-	current, err := openSafeRegular(root, targetPath, rootIdentity.Device)
-	if err != nil {
-		return nil, domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_TARGET_INVALID", err)
-	}
-	currentIdentity := current.identity
-	currentMode := current.mode
-	if err := current.file.Close(); err != nil {
-		return nil, domain.PreparedWrite{}, nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_CLOSE_FAILED", true, err)
+	var currentIdentity fileIdentity
+	currentMode := resume.Prepared.Mode
+	if domain.NormalizeTargetMode(resume.Prepared.TargetMode) != domain.TargetModeCreateOnly {
+		current, openErr := openSafeRegular(root, targetPath, rootIdentity.Device)
+		if openErr != nil {
+			return nil, domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_TARGET_INVALID", openErr)
+		}
+		currentIdentity = current.identity
+		currentMode = current.mode
+		if err := current.file.Close(); err != nil {
+			return nil, domain.PreparedWrite{}, nil, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TARGET_CLOSE_FAILED", true, err)
+		}
 	}
 	if err := canonicalRoot.EnsureGitExcludePatterns("/.knowledge/", writebackExcludePattern); err != nil {
 		return nil, domain.PreparedWrite{}, nil, err
@@ -280,6 +367,7 @@ func (w *Writer) ResumeTarget(ctx context.Context, workspaceID foundation.ID, ta
 		parentPath:   path.Dir(targetPath),
 		identity:     currentIdentity,
 		mode:         currentMode,
+		targetMode:   resume.Prepared.TargetMode,
 		pathLockFile: pathLockFile,
 		lockFile:     lockFile,
 		lockToken:    resume.Prepared.LockToken,
@@ -331,6 +419,7 @@ type targetLock struct {
 	rootDevice    uint64
 	targetPath    string
 	parentPath    string
+	targetMode    domain.TargetMode
 	identity      fileIdentity
 	mode          uint32
 	pathLockFile  *os.File
@@ -359,6 +448,9 @@ func (l *targetLock) Prepare(ctx context.Context, command domain.PrepareWrite) (
 	resultHash, err := domain.ValidatePrepareWrite(l.targetPath, command)
 	if err != nil {
 		return domain.PreparedWrite{}, classifyDomainWritebackError("WRITEBACK_PREPARE_INVALID", err)
+	}
+	if domain.NormalizeTargetMode(command.TargetMode) != domain.NormalizeTargetMode(l.targetMode) {
+		return domain.PreparedWrite{}, writebackError(foundation.ErrorVersionConflict, "WRITEBACK_TARGET_MODE_CONFLICT", false, domain.ErrWritebackIdentityConflict)
 	}
 	content := append([]byte(nil), command.Content...)
 	command.Content = content
@@ -401,6 +493,35 @@ func (l *targetLock) Prepare(ctx context.Context, command domain.PrepareWrite) (
 	}
 	if err := file.Close(); err != nil {
 		return domain.PreparedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_TEMP_CLOSE_FAILED", true, err)
+	}
+	if domain.NormalizeTargetMode(l.targetMode) == domain.TargetModeCreateOnly {
+		if err := ensureTargetAbsent(l.root, l.targetPath); err != nil {
+			return domain.PreparedWrite{}, err
+		}
+		if err := l.ops.syncDirectory(l.root, l.parentPath); err != nil {
+			return domain.PreparedWrite{}, writebackError(foundation.ErrorDependencyUnavailable, "WRITEBACK_PREPARE_DIRECTORY_SYNC_FAILED", true, err)
+		}
+		resultIdentity, ok := l.managedFiles[temporaryRef]
+		if !ok {
+			return domain.PreparedWrite{}, writebackError(foundation.ErrorConsistencyViolation, "WRITEBACK_TEMP_IDENTITY_MISSING", false, errors.New("prepared temp identity is unavailable"))
+		}
+		prepared := domain.PreparedWrite{
+			ExecutionID: command.ExecutionID, TargetMode: domain.TargetModeCreateOnly,
+			TemporaryRef: temporaryRef, ExpectedBaseHash: command.ExpectedBaseHash,
+			ApprovedChangeHash: strings.ToLower(command.ApprovedChangeHash), ResultHash: resultHash,
+			ByteSize: int64(len(content)), Mode: l.mode, LockToken: l.lockToken,
+			ResultLockToken: lockTokenForIdentity(resultIdentity),
+		}
+		if err := domain.ValidatePreparedWriteBinding(l.targetPath, command, prepared); err != nil {
+			return domain.PreparedWrite{}, classifyDomainWritebackError("WRITEBACK_PREPARED_BINDING_CONFLICT", err)
+		}
+		if err := l.verifyManagedFile(ctx, prepared.TemporaryRef, prepared.ResultHash, prepared.ByteSize, prepared.Mode); err != nil {
+			return domain.PreparedWrite{}, err
+		}
+		l.prepare = &command
+		l.prepared = &prepared
+		removeTemporary = false
+		return prepared, nil
 	}
 	backupRef, backup, err := l.createManagedFile(command.ExecutionID, ".bak")
 	if err != nil {
@@ -457,6 +578,7 @@ func (l *targetLock) Prepare(ctx context.Context, command domain.PrepareWrite) (
 	}
 	prepared := domain.PreparedWrite{
 		ExecutionID:        command.ExecutionID,
+		TargetMode:         l.targetMode,
 		TemporaryRef:       temporaryRef,
 		BackupRef:          backupRef,
 		ExpectedBaseHash:   strings.ToLower(command.ExpectedBaseHash),
@@ -503,6 +625,9 @@ func (l *targetLock) CommitCAS(ctx context.Context, prepared domain.PreparedWrit
 		}
 		return *l.applied, nil
 	}
+	if domain.NormalizeTargetMode(l.targetMode) == domain.TargetModeCreateOnly {
+		return l.commitCreateOnly(ctx, prepared)
+	}
 	if err := validateTargetParents(l.root, l.targetPath, l.rootDevice); err != nil {
 		return domain.AppliedWrite{}, err
 	}
@@ -532,6 +657,7 @@ func (l *targetLock) CommitCAS(ctx context.Context, prepared domain.PreparedWrit
 	}
 	applied := domain.AppliedWrite{
 		ExecutionID:        prepared.ExecutionID,
+		TargetMode:         prepared.TargetMode,
 		TemporaryRef:       prepared.TemporaryRef,
 		BackupRef:          prepared.BackupRef,
 		BaseHash:           prepared.ExpectedBaseHash,
@@ -562,6 +688,40 @@ func (l *targetLock) CommitCAS(ctx context.Context, prepared domain.PreparedWrit
 	return applied, nil
 }
 
+func (l *targetLock) commitCreateOnly(ctx context.Context, prepared domain.PreparedWrite) (domain.AppliedWrite, error) {
+	if err := validateTargetParents(l.root, l.targetPath, l.rootDevice); err != nil {
+		return domain.AppliedWrite{}, err
+	}
+	if err := ensureTargetAbsent(l.root, l.targetPath); err != nil {
+		return domain.AppliedWrite{}, err
+	}
+	if err := l.verifyManagedFile(ctx, prepared.TemporaryRef, prepared.ResultHash, prepared.ByteSize, prepared.Mode); err != nil {
+		return domain.AppliedWrite{}, err
+	}
+	applied := appliedFromPrepared(prepared)
+	if err := domain.ValidateAppliedWriteBinding(prepared, applied); err != nil {
+		return domain.AppliedWrite{}, classifyDomainWritebackError("WRITEBACK_APPLIED_BINDING_INVALID", err)
+	}
+	l.applied = &applied
+	if err := l.ops.link(l.root, prepared.TemporaryRef, l.targetPath); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			l.applied = nil
+			return domain.AppliedWrite{}, writebackError(foundation.ErrorVersionConflict, "CREATE_ONLY_TARGET_EXISTS", false, domain.ErrTargetExistenceConflict)
+		}
+		l.resultUnknown = true
+		return applied, manualRecoveryError("CREATE_ONLY_LINK_RESULT_UNKNOWN", err)
+	}
+	if err := l.ops.syncDirectory(l.root, l.parentPath); err != nil {
+		l.resultUnknown = true
+		return applied, manualRecoveryError("CREATE_ONLY_PARENT_SYNC_RESULT_UNKNOWN", err)
+	}
+	if err := l.ops.verifyResult(ctx, l, applied); err != nil {
+		l.resultUnknown = true
+		return applied, manualRecoveryError("CREATE_ONLY_RESULT_VERIFY_UNKNOWN", err)
+	}
+	return applied, nil
+}
+
 // RestoreCAS 只在目标仍为系统 Result Hash 时恢复已验证的 Base backup。
 func (l *targetLock) RestoreCAS(ctx context.Context, applied domain.AppliedWrite) (domain.RestoreResult, error) {
 	l.mu.Lock()
@@ -571,6 +731,9 @@ func (l *targetLock) RestoreCAS(ctx context.Context, applied domain.AppliedWrite
 	}
 	if l.prepared == nil || l.applied == nil || domain.ValidateAppliedWriteBinding(*l.prepared, applied) != nil || applied != *l.applied {
 		return domain.RestoreResult{}, writebackError(foundation.ErrorVersionConflict, "WRITEBACK_APPLIED_BINDING_CONFLICT", false, domain.ErrWritebackIdentityConflict)
+	}
+	if domain.NormalizeTargetMode(applied.TargetMode) == domain.TargetModeCreateOnly {
+		return l.restoreCreateOnly(ctx, applied)
 	}
 	currentHash, currentMode, _, currentIdentity, err := inspectSafeRegular(ctx, l.root, l.targetPath, l.rootDevice)
 	if err != nil {
@@ -615,6 +778,39 @@ func (l *targetLock) RestoreCAS(ctx context.Context, applied domain.AppliedWrite
 	return domain.RestoreResult{Restored: true}, nil
 }
 
+func (l *targetLock) restoreCreateOnly(ctx context.Context, applied domain.AppliedWrite) (domain.RestoreResult, error) {
+	if err := validateTargetParents(l.root, l.targetPath, l.rootDevice); err != nil {
+		return domain.RestoreResult{}, err
+	}
+	if _, err := l.root.Lstat(l.targetPath); errors.Is(err, os.ErrNotExist) {
+		l.resultUnknown = false
+		return domain.RestoreResult{Replayed: true}, nil
+	} else if err != nil {
+		return domain.RestoreResult{}, writebackError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_RESTORE_READ_FAILED", true, err)
+	}
+	currentHash, currentMode, _, currentIdentity, err := inspectSafeRegular(ctx, l.root, l.targetPath, l.rootDevice)
+	if err != nil {
+		return domain.RestoreResult{}, err
+	}
+	if !strings.EqualFold(currentHash, applied.ResultHash) || currentMode != applied.Mode || lockTokenForIdentity(currentIdentity) != strings.ToLower(applied.ResultLockToken) {
+		return domain.RestoreResult{}, writebackError(foundation.ErrorVersionConflict, "CREATE_ONLY_RESTORE_CONFLICT", false, domain.ErrWritebackRestoreConflict)
+	}
+	if err := l.root.Remove(l.targetPath); err != nil {
+		l.resultUnknown = true
+		return domain.RestoreResult{}, manualRecoveryError("CREATE_ONLY_REMOVE_RESULT_UNKNOWN", err)
+	}
+	if err := l.ops.syncDirectory(l.root, l.parentPath); err != nil {
+		l.resultUnknown = true
+		return domain.RestoreResult{}, manualRecoveryError("CREATE_ONLY_REMOVE_SYNC_RESULT_UNKNOWN", err)
+	}
+	if err := ensureTargetAbsent(l.root, l.targetPath); err != nil {
+		l.resultUnknown = true
+		return domain.RestoreResult{}, manualRecoveryError("CREATE_ONLY_REMOVE_VERIFY_UNKNOWN", err)
+	}
+	l.resultUnknown = false
+	return domain.RestoreResult{Restored: true}, nil
+}
+
 // Cleanup 幂等删除当前锁生成的受控 temp/backup，并同步目标父目录。
 func (l *targetLock) Cleanup(ctx context.Context, applied domain.AppliedWrite) error {
 	l.mu.Lock()
@@ -629,7 +825,11 @@ func (l *targetLock) Cleanup(ctx context.Context, applied domain.AppliedWrite) e
 		return manualRecoveryError("WRITEBACK_RESULT_STILL_UNKNOWN", domain.ErrWritebackManualRecoveryRequired)
 	}
 	removed := false
-	for _, locator := range []string{applied.TemporaryRef, applied.BackupRef} {
+	locators := []string{applied.TemporaryRef, applied.BackupRef}
+	if domain.NormalizeTargetMode(applied.TargetMode) == domain.TargetModeCreateOnly {
+		locators = []string{applied.TemporaryRef}
+	}
+	for _, locator := range locators {
 		expectedHash := applied.ResultHash
 		if locator == applied.BackupRef {
 			expectedHash = applied.BaseHash
@@ -696,6 +896,9 @@ func (l *targetLock) usable(ctx context.Context) error {
 func (l *targetLock) rehydrate(ctx context.Context, resume domain.ResumeWrite) (domain.PreparedWrite, *domain.AppliedWrite, error) {
 	if err := l.usable(ctx); err != nil {
 		return domain.PreparedWrite{}, nil, err
+	}
+	if domain.NormalizeTargetMode(resume.Prepared.TargetMode) == domain.TargetModeCreateOnly {
+		return l.rehydrateCreateOnly(ctx, resume)
 	}
 	prepared := resume.Prepared
 	targetHash, targetMode, targetSize, targetIdentity, err := inspectSafeRegular(ctx, l.root, l.targetPath, l.rootDevice)
@@ -776,6 +979,65 @@ func (l *targetLock) rehydrate(ctx context.Context, resume domain.ResumeWrite) (
 	return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_RESULT_UNKNOWN", errors.New("target, temp, and backup do not match a recoverable checkpoint"))
 }
 
+func (l *targetLock) rehydrateCreateOnly(ctx context.Context, resume domain.ResumeWrite) (domain.PreparedWrite, *domain.AppliedWrite, error) {
+	prepared := resume.Prepared
+	tempState, tempErr := l.registerManagedFileState(ctx, prepared.TemporaryRef)
+	tempExists := tempErr == nil
+	if tempErr != nil && !errors.Is(tempErr, os.ErrNotExist) {
+		return domain.PreparedWrite{}, nil, manualRecoveryError("CREATE_ONLY_RESUME_TEMP_INVALID", tempErr)
+	}
+	tempIsResult := tempExists && strings.EqualFold(tempState.hash, prepared.ResultHash) && tempState.size == prepared.ByteSize && tempState.mode == prepared.Mode && lockTokenForIdentity(tempState.identity) == strings.ToLower(prepared.ResultLockToken)
+	if tempExists && !tempIsResult {
+		return domain.PreparedWrite{}, nil, manualRecoveryError("CREATE_ONLY_RESUME_TEMP_CONFLICT", domain.ErrWritebackIdentityConflict)
+	}
+	targetExists := false
+	var targetIdentity fileIdentity
+	if _, err := l.root.Lstat(l.targetPath); err == nil {
+		targetExists = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return domain.PreparedWrite{}, nil, manualRecoveryError("CREATE_ONLY_RESUME_TARGET_INVALID", err)
+	}
+	targetIsResult := false
+	if targetExists {
+		hash, mode, size, identity, err := inspectSafeRegular(ctx, l.root, l.targetPath, l.rootDevice)
+		if err != nil {
+			return domain.PreparedWrite{}, nil, manualRecoveryError("CREATE_ONLY_RESUME_TARGET_INVALID", err)
+		}
+		targetIdentity = identity
+		targetIsResult = strings.EqualFold(hash, prepared.ResultHash) && mode == prepared.Mode && size == prepared.ByteSize && lockTokenForIdentity(identity) == strings.ToLower(prepared.ResultLockToken)
+		if !targetIsResult {
+			return domain.PreparedWrite{}, nil, manualRecoveryError("CREATE_ONLY_RESUME_TARGET_CONFLICT", domain.ErrWritebackIdentityConflict)
+		}
+	}
+	derivedApplied := appliedFromPrepared(prepared)
+	if !targetExists && tempIsResult && resume.Applied == nil {
+		l.prepared = &prepared
+		return prepared, nil, nil
+	}
+	if targetIsResult && tempIsResult {
+		if resume.Applied != nil && *resume.Applied != derivedApplied {
+			return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_APPLIED_BINDING_CONFLICT", domain.ErrWritebackIdentityConflict)
+		}
+		l.identity, l.mode, l.prepared, l.applied = targetIdentity, prepared.Mode, &prepared, &derivedApplied
+		return prepared, &derivedApplied, nil
+	}
+	if targetIsResult && !tempExists && resume.CleanupMayHaveCompleted && resume.Applied != nil {
+		if *resume.Applied != derivedApplied {
+			return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_APPLIED_BINDING_CONFLICT", domain.ErrWritebackIdentityConflict)
+		}
+		l.identity, l.mode, l.prepared, l.applied, l.cleanupReplay = targetIdentity, prepared.Mode, &prepared, &derivedApplied, true
+		return prepared, &derivedApplied, nil
+	}
+	if !targetExists && resume.RestoreMayHaveCompleted && resume.Applied != nil {
+		if *resume.Applied != derivedApplied {
+			return domain.PreparedWrite{}, nil, manualRecoveryError("WRITEBACK_RESUME_APPLIED_BINDING_CONFLICT", domain.ErrWritebackIdentityConflict)
+		}
+		l.mode, l.prepared, l.applied = prepared.Mode, &prepared, &derivedApplied
+		return prepared, &derivedApplied, nil
+	}
+	return domain.PreparedWrite{}, nil, manualRecoveryError("CREATE_ONLY_RESUME_RESULT_UNKNOWN", errors.New("target and controlled temp do not match a create-only checkpoint"))
+}
+
 type managedFileState struct {
 	hash     string
 	size     int64
@@ -832,6 +1094,7 @@ func (l *targetLock) createManagedFileAt(locator string) (*os.File, error) {
 func appliedFromPrepared(prepared domain.PreparedWrite) domain.AppliedWrite {
 	return domain.AppliedWrite{
 		ExecutionID:        prepared.ExecutionID,
+		TargetMode:         prepared.TargetMode,
 		TemporaryRef:       prepared.TemporaryRef,
 		BackupRef:          prepared.BackupRef,
 		BaseHash:           prepared.ExpectedBaseHash,
@@ -1027,6 +1290,20 @@ func lockTokenForIdentity(identity fileIdentity) string {
 func lockTokenForPath(rootIdentity fileIdentity, targetPath string) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("path\x00%d:%d\x00%s", rootIdentity.Device, rootIdentity.Inode, targetPath)))
 	return hex.EncodeToString(sum[:])
+}
+
+func lockTokenForCreateOnly(rootIdentity fileIdentity, targetPath string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("create-only\x00%d:%d\x00%s", rootIdentity.Device, rootIdentity.Inode, targetPath)))
+	return hex.EncodeToString(sum[:])
+}
+
+func ensureTargetAbsent(root *os.Root, targetPath string) error {
+	if _, err := root.Lstat(targetPath); err == nil {
+		return writebackError(foundation.ErrorVersionConflict, "CREATE_ONLY_TARGET_EXISTS", false, domain.ErrTargetExistenceConflict)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return writebackError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_TARGET_READ_FAILED", true, err)
+	}
+	return nil
 }
 
 func openAndAcquireTargetLock(ctx context.Context, root *os.Root, rootDevice uint64, lockToken string, create bool, pollInterval time.Duration) (*os.File, error) {
@@ -1351,6 +1628,8 @@ func randomHex(reader io.Reader, byteCount int) (string, error) {
 
 func equalPrepareWrite(left, right domain.PrepareWrite) bool {
 	return left.ExecutionID == right.ExecutionID &&
+		left.WorkspaceID == right.WorkspaceID &&
+		domain.NormalizeTargetMode(left.TargetMode) == domain.NormalizeTargetMode(right.TargetMode) &&
 		strings.EqualFold(left.ExpectedBaseHash, right.ExpectedBaseHash) &&
 		strings.EqualFold(left.ApprovedChangeHash, right.ApprovedChangeHash) &&
 		string(left.Content) == string(right.Content)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,11 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 )
 
-const managedSourceDirectory = ".knowledge/sources"
+const (
+	managedSourceDirectory        = ".knowledge/sources"
+	managedSourceStagingDirectory = ".knowledge/sources/.staging"
+	maxManagedStageCandidates     = 256
+)
 
 // Capture copies an observed Workspace file into the immutable managed source store.
 func (r Root) Capture(ctx context.Context, relative, expectedHash string, expectedSize int64) (string, bool, error) {
@@ -147,6 +152,173 @@ func (r Root) CaptureBytes(ctx context.Context, relative string, content []byte,
 	return finalizeManagedCapture(ctx, workspaceRoot, temporaryRelative, expectedHash, int64(len(content)), &removeTemporary)
 }
 
+// StageManagedBytes durably verifies Capture bytes without making the final
+// content-addressed location visible. The staging locator is deterministic for
+// one source reference and content hash, so exact replay can recover it.
+func (r Root) StageManagedBytes(ctx context.Context, sourceRef string, content []byte, expectedHash string) (domain.ManagedContentStage, error) {
+	if err := contextError(ctx); err != nil {
+		return domain.ManagedContentStage{}, err
+	}
+	if len(content) == 0 || int64(len(content)) > domain.MaxCommittedSourceBytes || len(sourceRef) > 4096 ||
+		!validSHA256(expectedHash) || !canonicalBytesPath(sourceRef) {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorInvalidInput, "MANAGED_CONTENT_STAGE_INVALID", false, errors.New("invalid managed content metadata"))
+	}
+	digest := sha256.Sum256(content)
+	if hex.EncodeToString(digest[:]) != expectedHash {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorVersionConflict, "SOURCE_RESULT_HASH_CONFLICT", false, errors.New("managed content hash does not match"))
+	}
+	workspaceRoot, err := os.OpenRoot(r.path)
+	if err != nil {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
+	}
+	defer workspaceRoot.Close()
+	if err := ensureManagedSourceDirectoryRoot(workspaceRoot); err != nil {
+		return domain.ManagedContentStage{}, err
+	}
+	if err := r.ensureManagedSourceIgnored(); err != nil {
+		return domain.ManagedContentStage{}, err
+	}
+	stage := domain.ManagedContentStage{
+		ContentHash: expectedHash, ByteSize: int64(len(content)),
+		ManagedLocation: filepath.ToSlash(filepath.Join(managedSourceDirectory, expectedHash)),
+		StagingLocation: managedStageLocation(sourceRef, expectedHash),
+	}
+	if info, statErr := workspaceRoot.Lstat(stage.ManagedLocation); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return domain.ManagedContentStage{}, fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_INVALID", false, errors.New("published artifact is not a regular file"))
+		}
+		if err := verifyRootFile(ctx, workspaceRoot, stage.ManagedLocation, stage.ContentHash, stage.ByteSize); err != nil {
+			return domain.ManagedContentStage{}, err
+		}
+		if err := syncRootDirectory(workspaceRoot, managedSourceDirectory); err != nil {
+			return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_FAILED", true, err)
+		}
+		stage.StagingLocation = ""
+		return stage, nil
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_FAILED", true, statErr)
+	}
+	if err := ensureManagedStagingHashDirectoryRoot(workspaceRoot, expectedHash); err != nil {
+		return domain.ManagedContentStage{}, err
+	}
+	if _, statErr := workspaceRoot.Lstat(stage.StagingLocation); statErr == nil {
+		if err := verifyManagedStageFile(ctx, workspaceRoot, stage); err != nil {
+			return domain.ManagedContentStage{}, err
+		}
+		if err := syncRootDirectory(workspaceRoot, filepath.ToSlash(filepath.Dir(stage.StagingLocation))); err != nil {
+			return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_FAILED", true, err)
+		}
+		return stage, nil
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_FAILED", true, statErr)
+	}
+
+	temporary, temporaryRelative, err := createManagedTemp(workspaceRoot)
+	if err != nil {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_TEMP_CREATE_FAILED", true, err)
+	}
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = workspaceRoot.Remove(temporaryRelative)
+		}
+	}()
+	writeErr := copyWithContext(ctx, temporary, bytes.NewReader(content))
+	if writeErr == nil {
+		writeErr = temporary.Sync()
+	}
+	closeErr := temporary.Close()
+	if writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		if errors.Is(writeErr, context.Canceled) || errors.Is(writeErr, context.DeadlineExceeded) {
+			return domain.ManagedContentStage{}, contextError(ctx)
+		}
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_WRITE_FAILED", true, writeErr)
+	}
+	if err := verifyRootFile(ctx, workspaceRoot, temporaryRelative, stage.ContentHash, stage.ByteSize); err != nil {
+		return domain.ManagedContentStage{}, err
+	}
+	if err := workspaceRoot.Link(temporaryRelative, stage.StagingLocation); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_FAILED", true, err)
+		}
+		if err := verifyManagedStageFile(ctx, workspaceRoot, stage); err != nil {
+			return domain.ManagedContentStage{}, err
+		}
+	}
+	// Also sync an existing deterministic stage. A prior caller may have linked
+	// it successfully but observed an fsync failure before returning.
+	if err := syncRootDirectory(workspaceRoot, filepath.ToSlash(filepath.Dir(stage.StagingLocation))); err != nil {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_FAILED", true, err)
+	}
+	if err := workspaceRoot.Remove(temporaryRelative); err != nil {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_TEMP_CLEANUP_FAILED", true, err)
+	}
+	removeTemporary = false
+	if err := syncRootDirectory(workspaceRoot, managedSourceDirectory); err != nil {
+		return domain.ManagedContentStage{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_FAILED", true, err)
+	}
+	return stage, nil
+}
+
+// PublishManagedStage create-only promotes verified staging bytes after the
+// corresponding database transaction has been confirmed.
+func (r Root) PublishManagedStage(ctx context.Context, stage domain.ManagedContentStage) (domain.ContentCapture, error) {
+	if err := contextError(ctx); err != nil {
+		return domain.ContentCapture{}, err
+	}
+	if err := validateManagedStage(stage); err != nil {
+		return domain.ContentCapture{}, err
+	}
+	workspaceRoot, err := os.OpenRoot(r.path)
+	if err != nil {
+		return domain.ContentCapture{}, fileError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
+	}
+	defer workspaceRoot.Close()
+	if stage.StagingLocation == "" {
+		if err := validateManagedSourceDirectoryRoot(workspaceRoot); err != nil {
+			return domain.ContentCapture{}, err
+		}
+	} else if err := ensureManagedStagingHashDirectoryRoot(workspaceRoot, stage.ContentHash); err != nil {
+		return domain.ContentCapture{}, err
+	}
+	return publishManagedStageRoot(ctx, workspaceRoot, stage)
+}
+
+// DiscardManagedStage removes only the exact verified staging locator. It never
+// removes the stable content-addressed file.
+func (r Root) DiscardManagedStage(ctx context.Context, stage domain.ManagedContentStage) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	if err := validateManagedStage(stage); err != nil {
+		return err
+	}
+	if stage.StagingLocation == "" {
+		return nil
+	}
+	workspaceRoot, err := os.OpenRoot(r.path)
+	if err != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
+	}
+	defer workspaceRoot.Close()
+	if err := validateManagedStagingHashDirectoryRoot(workspaceRoot, stage.ContentHash); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if err := verifyManagedStageFile(ctx, workspaceRoot, stage); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return removeManagedStageFile(workspaceRoot, stage.StagingLocation, stage.ContentHash)
+}
+
 func finalizeManagedCapture(ctx context.Context, workspaceRoot *os.Root, temporaryRelative, expectedHash string, expectedSize int64, removeTemporary *bool) (string, bool, error) {
 	actualHash, actualSize, err := hashRootFileWithSize(ctx, workspaceRoot, temporaryRelative)
 	if err != nil {
@@ -167,7 +339,7 @@ func finalizeManagedCapture(ctx context.Context, workspaceRoot *os.Root, tempora
 		if !errors.Is(err, os.ErrExist) {
 			return "", false, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_PUBLISH_FAILED", true, err)
 		}
-		if err := verifyRootFile(workspaceRoot, finalRelative, expectedHash, expectedSize); err != nil {
+		if err := verifyRootFile(ctx, workspaceRoot, finalRelative, expectedHash, expectedSize); err != nil {
 			return "", false, err
 		}
 	} else {
@@ -184,6 +356,230 @@ func finalizeManagedCapture(ctx context.Context, workspaceRoot *os.Root, tempora
 	}
 	*removeTemporary = false
 	return filepath.ToSlash(filepath.Join(managedSourceDirectory, expectedHash)), created, nil
+}
+
+func publishManagedStageRoot(ctx context.Context, workspaceRoot *os.Root, stage domain.ManagedContentStage) (domain.ContentCapture, error) {
+	created := false
+	finalReady := false
+	for attempt := 0; attempt < 2 && !finalReady; attempt++ {
+		info, err := workspaceRoot.Lstat(stage.ManagedLocation)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return domain.ContentCapture{}, fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_INVALID", false, errors.New("published artifact is not a regular file"))
+			}
+			if err := verifyRootFile(ctx, workspaceRoot, stage.ManagedLocation, stage.ContentHash, stage.ByteSize); err != nil {
+				return domain.ContentCapture{}, err
+			}
+			finalReady = true
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return domain.ContentCapture{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_PUBLISH_FAILED", true, err)
+		}
+		if stage.StagingLocation == "" {
+			return domain.ContentCapture{}, fileError(foundation.ErrorNotFound, "CONTENT_ARTIFACT_STAGE_NOT_FOUND", true, err)
+		}
+		if err := verifyManagedStageFile(ctx, workspaceRoot, stage); err != nil {
+			if errors.Is(err, os.ErrNotExist) && attempt == 0 {
+				continue
+			}
+			return domain.ContentCapture{}, err
+		}
+		if err := contextError(ctx); err != nil {
+			return domain.ContentCapture{}, err
+		}
+		if err := workspaceRoot.Link(stage.StagingLocation, stage.ManagedLocation); err != nil {
+			if (errors.Is(err, os.ErrExist) || errors.Is(err, os.ErrNotExist)) && attempt == 0 {
+				continue
+			}
+			return domain.ContentCapture{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_PUBLISH_FAILED", true, err)
+		}
+		created = true
+		if err := verifyRootFile(ctx, workspaceRoot, stage.ManagedLocation, stage.ContentHash, stage.ByteSize); err != nil {
+			return domain.ContentCapture{}, err
+		}
+		finalReady = true
+	}
+	if !finalReady {
+		return domain.ContentCapture{}, fileError(foundation.ErrorNotFound, "CONTENT_ARTIFACT_STAGE_NOT_FOUND", true, os.ErrNotExist)
+	}
+	// Retry directory durability even when the final hard link already exists;
+	// the previous publisher may have failed after Link but before fsync.
+	if err := syncRootDirectory(workspaceRoot, managedSourceDirectory); err != nil {
+		return domain.ContentCapture{}, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_PUBLISH_FAILED", true, err)
+	}
+	if err := cleanupPublishedHashStages(ctx, workspaceRoot, stage.ContentHash, stage.ByteSize); err != nil {
+		return domain.ContentCapture{}, err
+	}
+	return domain.ContentCapture{
+		ContentHash: stage.ContentHash, ByteSize: stage.ByteSize,
+		ManagedLocation: stage.ManagedLocation, Created: created,
+	}, nil
+}
+
+func cleanupPublishedHashStages(ctx context.Context, workspaceRoot *os.Root, contentHash string, byteSize int64) error {
+	hashDirectory := filepath.ToSlash(filepath.Join(managedSourceStagingDirectory, contentHash))
+	info, err := workspaceRoot.Lstat(hashDirectory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_READ_FAILED", true, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_STAGE_INVALID", false, errors.New("managed staging hash path is unsafe"))
+	}
+	directory, err := workspaceRoot.Open(hashDirectory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_READ_FAILED", true, err)
+	}
+	entries, readErr := directory.ReadDir(maxManagedStageCandidates)
+	closeErr := directory.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_READ_FAILED", true, readErr)
+	}
+	if closeErr != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_READ_FAILED", true, closeErr)
+	}
+	stages := make([]domain.ManagedContentStage, 0, len(entries))
+	for _, entry := range entries {
+		stage := domain.ManagedContentStage{
+			ContentHash: contentHash, ByteSize: byteSize,
+			ManagedLocation: filepath.ToSlash(filepath.Join(managedSourceDirectory, contentHash)),
+			StagingLocation: filepath.ToSlash(filepath.Join(hashDirectory, entry.Name())),
+		}
+		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() || validateManagedStage(stage) != nil {
+			return fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_STAGE_INVALID", false, errors.New("managed staging directory contains an unsafe entry"))
+		}
+		if err := verifyManagedStageFile(ctx, workspaceRoot, stage); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		stages = append(stages, stage)
+	}
+	for _, stage := range stages {
+		if err := workspaceRoot.Remove(stage.StagingLocation); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_CLEANUP_FAILED", true, err)
+		}
+	}
+	if err := syncRootDirectory(workspaceRoot, hashDirectory); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_CLEANUP_FAILED", true, err)
+	}
+	if err := workspaceRoot.Remove(hashDirectory); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_CLEANUP_FAILED", true, err)
+	}
+	if err := syncRootDirectory(workspaceRoot, managedSourceStagingDirectory); err != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_CLEANUP_FAILED", true, err)
+	}
+	return nil
+}
+
+func promoteManagedStageForRead(ctx context.Context, workspaceRoot *os.Root, expectedHash string, expectedSize int64) error {
+	if err := validateManagedStagingHashDirectoryRoot(workspaceRoot, expectedHash); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fileError(foundation.ErrorNotFound, "CONTENT_ARTIFACT_NOT_FOUND", false, err)
+		}
+		return err
+	}
+	hashDirectory := filepath.ToSlash(filepath.Join(managedSourceStagingDirectory, expectedHash))
+	directory, err := workspaceRoot.Open(hashDirectory)
+	if err != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_READ_FAILED", true, err)
+	}
+	entries, readErr := directory.ReadDir(maxManagedStageCandidates + 1)
+	closeErr := directory.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_READ_FAILED", true, readErr)
+	}
+	if closeErr != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_READ_FAILED", true, closeErr)
+	}
+	if len(entries) > maxManagedStageCandidates {
+		return fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_STAGE_LIMIT_EXCEEDED", false, errors.New("too many staging candidates for one content hash"))
+	}
+	for _, entry := range entries {
+		stage := domain.ManagedContentStage{
+			ContentHash: expectedHash, ByteSize: expectedSize,
+			ManagedLocation: filepath.ToSlash(filepath.Join(managedSourceDirectory, expectedHash)),
+			StagingLocation: filepath.ToSlash(filepath.Join(hashDirectory, entry.Name())),
+		}
+		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() || validateManagedStage(stage) != nil {
+			return fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_STAGE_INVALID", false, errors.New("managed staging directory contains an unsafe entry"))
+		}
+		if err := verifyManagedStageFile(ctx, workspaceRoot, stage); err != nil {
+			return err
+		}
+		_, err := publishManagedStageRoot(ctx, workspaceRoot, stage)
+		return err
+	}
+	return fileError(foundation.ErrorNotFound, "CONTENT_ARTIFACT_NOT_FOUND", false, os.ErrNotExist)
+}
+
+func validateManagedStage(stage domain.ManagedContentStage) error {
+	expectedLocation := filepath.ToSlash(filepath.Join(managedSourceDirectory, stage.ContentHash))
+	if !validSHA256(stage.ContentHash) || stage.ByteSize < 1 || stage.ByteSize > domain.MaxCommittedSourceBytes ||
+		stage.ManagedLocation != expectedLocation || (stage.StagingLocation != "" && !validManagedStageLocation(stage.StagingLocation, stage.ContentHash)) {
+		return fileError(foundation.ErrorInvalidInput, "MANAGED_CONTENT_STAGE_INVALID", false, errors.New("managed content stage binding is invalid"))
+	}
+	return nil
+}
+
+func verifyManagedStageFile(ctx context.Context, workspaceRoot *os.Root, stage domain.ManagedContentStage) error {
+	if stage.StagingLocation == "" {
+		return fileError(foundation.ErrorNotFound, "CONTENT_ARTIFACT_STAGE_NOT_FOUND", true, os.ErrNotExist)
+	}
+	info, err := workspaceRoot.Lstat(stage.StagingLocation)
+	if errors.Is(err, os.ErrNotExist) {
+		return fileError(foundation.ErrorNotFound, "CONTENT_ARTIFACT_STAGE_NOT_FOUND", true, err)
+	}
+	if err != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_READ_FAILED", true, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_STAGE_INVALID", false, errors.New("managed staging artifact is not a private regular file"))
+	}
+	if info.Size() != stage.ByteSize {
+		return fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_CONTENT_CONFLICT", false, errors.New("managed staging artifact size differs from expected content"))
+	}
+	return verifyRootFile(ctx, workspaceRoot, stage.StagingLocation, stage.ContentHash, stage.ByteSize)
+}
+
+func removeManagedStageFile(workspaceRoot *os.Root, stagingLocation, contentHash string) error {
+	if err := workspaceRoot.Remove(stagingLocation); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_CLEANUP_FAILED", true, err)
+	}
+	hashDirectory := filepath.ToSlash(filepath.Join(managedSourceStagingDirectory, contentHash))
+	if err := syncRootDirectory(workspaceRoot, hashDirectory); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_CLEANUP_FAILED", true, err)
+	}
+	if err := workspaceRoot.Remove(hashDirectory); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_CLEANUP_FAILED", true, err)
+	}
+	if err := syncRootDirectory(workspaceRoot, managedSourceStagingDirectory); err != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_CLEANUP_FAILED", true, err)
+	}
+	return nil
+}
+
+func managedStageLocation(sourceRef, contentHash string) string {
+	digest := sha256.Sum256([]byte(sourceRef))
+	return filepath.ToSlash(filepath.Join(managedSourceStagingDirectory, contentHash, hex.EncodeToString(digest[:])+".stage"))
+}
+
+func validManagedStageLocation(value, contentHash string) bool {
+	if filepath.ToSlash(filepath.Clean(value)) != value || filepath.Dir(value) != filepath.Join(managedSourceStagingDirectory, contentHash) {
+		return false
+	}
+	name := filepath.Base(value)
+	if !strings.HasSuffix(name, ".stage") {
+		return false
+	}
+	return validSHA256(strings.TrimSuffix(name, ".stage"))
 }
 
 // ReadArtifact safely re-reads and verifies an immutable managed content artifact.
@@ -214,6 +610,19 @@ func (r Root) ReadArtifactLimited(ctx context.Context, managedLocation, expected
 		return nil, err
 	}
 	info, err := workspaceRoot.Lstat(expectedLocation)
+	if errors.Is(err, os.ErrNotExist) {
+		if repairErr := promoteManagedStageForRead(ctx, workspaceRoot, expectedHash, expectedSize); repairErr != nil {
+			info, err = workspaceRoot.Lstat(expectedLocation)
+			if err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					return nil, fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_READ_FAILED", true, err)
+				}
+				return nil, repairErr
+			}
+		} else {
+			info, err = workspaceRoot.Lstat(expectedLocation)
+		}
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fileError(foundation.ErrorNotFound, "CONTENT_ARTIFACT_NOT_FOUND", false, err)
@@ -267,12 +676,18 @@ func (r Root) ReadArtifactLimited(ctx context.Context, managedLocation, expected
 }
 
 func ensureManagedSourceDirectoryRoot(root *os.Root) error {
+	return ensureManagedSourceDirectoryRootWithSync(root, syncRootDirectory)
+}
+
+func ensureManagedSourceDirectoryRootWithSync(root *os.Root, syncDirectory func(*os.Root, string) error) error {
 	for _, path := range []string{".knowledge", managedSourceDirectory} {
 		info, err := root.Lstat(path)
+		created := false
 		if errors.Is(err, os.ErrNotExist) {
 			if err := root.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 				return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STORE_CREATE_FAILED", true, err)
 			}
+			created = true
 			info, err = root.Lstat(path)
 		}
 		if err != nil {
@@ -280,6 +695,76 @@ func ensureManagedSourceDirectoryRoot(root *os.Root) error {
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fileError(foundation.ErrorPermissionDenied, "CONTENT_ARTIFACT_STORE_UNSAFE", false, errors.New("managed store is not a local directory"))
+		}
+		if created {
+			parent := filepath.ToSlash(filepath.Dir(path))
+			if err := syncDirectory(root, parent); err != nil {
+				return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STORE_CREATE_FAILED", true, err)
+			}
+		}
+	}
+	return nil
+}
+
+func ensureManagedStagingHashDirectoryRoot(root *os.Root, contentHash string) error {
+	return ensureManagedStagingHashDirectoryRootWithSync(root, contentHash, syncRootDirectory)
+}
+
+func ensureManagedStagingHashDirectoryRootWithSync(root *os.Root, contentHash string, syncDirectory func(*os.Root, string) error) error {
+	if !validSHA256(contentHash) {
+		return fileError(foundation.ErrorInvalidInput, "MANAGED_CONTENT_STAGE_INVALID", false, errors.New("managed content hash is invalid"))
+	}
+	if err := ensureManagedSourceDirectoryRootWithSync(root, syncDirectory); err != nil {
+		return err
+	}
+	for _, directory := range []string{
+		managedSourceStagingDirectory,
+		filepath.ToSlash(filepath.Join(managedSourceStagingDirectory, contentHash)),
+	} {
+		info, err := root.Lstat(directory)
+		created := false
+		if errors.Is(err, os.ErrNotExist) {
+			if err := root.Mkdir(directory, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+				return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_CREATE_FAILED", true, err)
+			}
+			created = true
+			info, err = root.Lstat(directory)
+		}
+		if err != nil {
+			return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_OPEN_FAILED", true, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+			return fileError(foundation.ErrorPermissionDenied, "CONTENT_ARTIFACT_STAGE_UNSAFE", false, errors.New("managed staging path is not a private local directory"))
+		}
+		if created {
+			if err := syncDirectory(root, filepath.ToSlash(filepath.Dir(directory))); err != nil {
+				return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_CREATE_FAILED", true, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateManagedStagingHashDirectoryRoot(root *os.Root, contentHash string) error {
+	if !validSHA256(contentHash) {
+		return fileError(foundation.ErrorInvalidInput, "MANAGED_CONTENT_STAGE_INVALID", false, errors.New("managed content hash is invalid"))
+	}
+	if err := validateManagedSourceDirectoryRoot(root); err != nil {
+		return err
+	}
+	for _, directory := range []string{
+		managedSourceStagingDirectory,
+		filepath.ToSlash(filepath.Join(managedSourceStagingDirectory, contentHash)),
+	} {
+		info, err := root.Lstat(directory)
+		if errors.Is(err, os.ErrNotExist) {
+			return fileError(foundation.ErrorNotFound, "CONTENT_ARTIFACT_STAGE_NOT_FOUND", true, err)
+		}
+		if err != nil {
+			return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_STAGE_READ_FAILED", true, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+			return fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_STAGE_INVALID", false, errors.New("managed staging path is not a private local directory"))
 		}
 	}
 	return nil
@@ -370,9 +855,27 @@ func hashReaderWithContext(ctx context.Context, reader io.Reader) (string, int64
 	return hex.EncodeToString(hash.Sum(nil)), size, nil
 }
 
-func verifyRootFile(root *os.Root, relative, expectedHash string, expectedSize int64) error {
-	actualHash, actualSize, err := hashRootFileWithSize(context.Background(), root, relative)
+func verifyRootFile(ctx context.Context, root *os.Root, relative, expectedHash string, expectedSize int64) error {
+	if expectedSize < 0 || expectedSize == math.MaxInt64 {
+		return fileError(foundation.ErrorInvalidInput, "CONTENT_ARTIFACT_REFERENCE_INVALID", false, errors.New("invalid expected artifact size"))
+	}
+	file, err := root.Open(relative)
 	if err != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_VERIFY_FAILED", true, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_VERIFY_FAILED", true, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() != expectedSize {
+		return fileError(foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_CONTENT_CONFLICT", false, errors.New("published artifact size differs from expected content"))
+	}
+	actualHash, actualSize, err := hashReaderWithContext(ctx, io.LimitReader(file, expectedSize+1))
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return contextError(ctx)
+		}
 		return fileError(foundation.ErrorDependencyUnavailable, "CONTENT_ARTIFACT_VERIFY_FAILED", true, err)
 	}
 	if actualHash != expectedHash || actualSize != expectedSize {

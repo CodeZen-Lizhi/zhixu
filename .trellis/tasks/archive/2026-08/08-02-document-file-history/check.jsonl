@@ -1,0 +1,4 @@
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/implementation-contracts.md","reason":"检查输出上限、批量映射、N+1、迁移、恢复和前端浏览器质量"}
+{"file":".trellis/spec/backend/timeline-impact.md","reason":"检查 History 与 Knowledge Timeline 保持独立"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"检查 History/Compare/Restore 网络边界"}
+{"file":".trellis/tasks/08-02-note-workflow-capabilities/research/repository-evidence.md","reason":"核对外部 Commit、dirty 与恢复不重写历史"}

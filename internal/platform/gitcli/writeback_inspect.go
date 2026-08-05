@@ -92,6 +92,24 @@ func (c *WritebackClient) Inspect(ctx context.Context, workspaceID foundation.ID
 	return snapshot, nil
 }
 
+// EnsureTargetAbsentAt 证明批准 Git tree 中没有 CREATE_ONLY 目标条目。
+func (c *WritebackClient) EnsureTargetAbsentAt(ctx context.Context, workspaceID foundation.ID, approvedHead, targetPath string) error {
+	if !validWritebackWorkspaceID(workspaceID) || !changecontrol.ValidGitHead(approvedHead) || unsafeGitPath(targetPath) {
+		return gitWritebackError(foundation.ErrorInvalidInput, "CREATE_ONLY_GIT_ABSENCE_INPUT_INVALID", false, changecontrol.ErrGitInvalidInput)
+	}
+	root, err := c.resolveWritebackRoot(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if err := c.ensureRepositoryTopLevel(ctx, root); err != nil {
+		return err
+	}
+	if err := c.ensureTreeTargetAbsent(ctx, root, approvedHead, targetPath); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c *WritebackClient) inspectCurrentSnapshot(ctx context.Context, workspaceID foundation.ID) (changecontrol.GitSnapshot, error) {
 	root, err := c.resolveWritebackRoot(ctx, workspaceID)
 	if err != nil {
@@ -189,12 +207,23 @@ func (c *WritebackClient) DiffApproved(ctx context.Context, request changecontro
 	if err != nil {
 		return changecontrol.GitDiff{}, err
 	}
-	baseMode, baseBlobID, err := c.readTrackedBlob(ctx, root, request.ApprovedGitHead, request.TargetPath)
-	if err != nil {
-		return changecontrol.GitDiff{}, err
-	}
-	if err := validateOnlyTargetModification(status, request.TargetPath, baseMode); err != nil {
-		return changecontrol.GitDiff{}, err
+	targetMode := changecontrol.NormalizeTargetMode(request.TargetMode)
+	baseMode, baseBlobID := changecontrol.GitFileModeRegular, ""
+	if targetMode == changecontrol.TargetModeCreateOnly {
+		if err := c.ensureTreeTargetAbsent(ctx, root, request.ApprovedGitHead, request.TargetPath); err != nil {
+			return changecontrol.GitDiff{}, err
+		}
+		if err := validateOnlyTargetCreation(status, request.TargetPath); err != nil {
+			return changecontrol.GitDiff{}, err
+		}
+	} else {
+		baseMode, baseBlobID, err = c.readTrackedBlob(ctx, root, request.ApprovedGitHead, request.TargetPath)
+		if err != nil {
+			return changecontrol.GitDiff{}, err
+		}
+		if err := validateOnlyTargetModification(status, request.TargetPath, baseMode); err != nil {
+			return changecontrol.GitDiff{}, err
+		}
 	}
 	content, err := readSafeWorkspaceFile(root, request.TargetPath)
 	if err != nil {
@@ -211,20 +240,25 @@ func (c *WritebackClient) DiffApproved(ctx context.Context, request changecontro
 	if err != nil {
 		return changecontrol.GitDiff{}, err
 	}
-	if _, err := c.git.runCommand(ctx, root, commandOptions{ReadOnly: true}, "diff", "--check", "--no-ext-diff", "--no-textconv", request.ApprovedGitHead, "--", request.TargetPath); err != nil {
-		if isExitCode(err, 2) {
-			return changecontrol.GitDiff{}, gitWritebackError(foundation.ErrorInvalidInput, "GIT_DIFF_WHITESPACE_INVALID", false, errors.Join(changecontrol.ErrGitInvalidInput, err))
+	var stableDiff []byte
+	if targetMode == changecontrol.TargetModeCreateOnly {
+		stableDiff, err = c.readCreateOnlyPrivateDiff(ctx, root, request, resultBlobID, baseMode, content)
+	} else {
+		if _, err := c.git.runCommand(ctx, root, commandOptions{ReadOnly: true}, "diff", "--check", "--no-ext-diff", "--no-textconv", request.ApprovedGitHead, "--", request.TargetPath); err != nil {
+			if isExitCode(err, 2) {
+				return changecontrol.GitDiff{}, gitWritebackError(foundation.ErrorInvalidInput, "GIT_DIFF_WHITESPACE_INVALID", false, errors.Join(changecontrol.ErrGitInvalidInput, err))
+			}
+			return changecontrol.GitDiff{}, classifyGitReadError("GIT_DIFF_CHECK_FAILED", err)
 		}
-		return changecontrol.GitDiff{}, classifyGitReadError("GIT_DIFF_CHECK_FAILED", err)
+		stableDiff, err = c.readStableDiff(ctx, root, request.ApprovedGitHead, "", request.TargetPath)
 	}
-	stableDiff, err := c.readStableDiff(ctx, root, request.ApprovedGitHead, "", request.TargetPath)
 	if err != nil {
 		return changecontrol.GitDiff{}, err
 	}
 	if len(stableDiff) == 0 {
 		return changecontrol.GitDiff{}, gitWritebackError(foundation.ErrorVersionConflict, "GIT_TARGET_DIFF_MISSING", false, changecontrol.ErrGitVersionConflict)
 	}
-	if err := validateStableDiffBlobBinding(stableDiff, baseBlobID, resultBlobID, baseMode); err != nil {
+	if err := validateStableDiffForTargetMode(stableDiff, targetMode, baseBlobID, resultBlobID, baseMode); err != nil {
 		return changecontrol.GitDiff{}, err
 	}
 	if err := c.ensureFilterUnspecified(ctx, root, request.TargetPath); err != nil {
@@ -247,6 +281,7 @@ func (c *WritebackClient) DiffApproved(ctx context.Context, request changecontro
 	diff := changecontrol.GitDiff{
 		WorkspaceID:     request.WorkspaceID,
 		TargetPath:      request.TargetPath,
+		TargetMode:      targetMode,
 		ApprovedGitHead: request.ApprovedGitHead,
 		ResultHash:      resultHash,
 		DiffHash:        sha256Hex(stableDiff),
@@ -425,6 +460,18 @@ func (c *WritebackClient) readTrackedBlob(ctx context.Context, root, commit, tar
 		return "", "", gitWritebackError(foundation.ErrorPermissionDenied, "GIT_TARGET_OBJECT_UNSAFE", false, changecontrol.ErrGitPermissionDenied)
 	}
 	return fields[0], strings.ToLower(fields[2]), nil
+}
+
+func (c *WritebackClient) ensureTreeTargetAbsent(ctx context.Context, root, commit, target string) error {
+	result, err := c.git.runCommand(ctx, root, commandOptions{ReadOnly: true}, "ls-tree", "-z", commit, "--", target)
+	if err != nil {
+		return classifyGitReadError("CREATE_ONLY_GIT_TREE_INSPECT_FAILED", err)
+	}
+	entries := splitNUL(result.Stdout)
+	if len(entries) == 0 {
+		return nil
+	}
+	return gitWritebackError(foundation.ErrorVersionConflict, "CREATE_ONLY_GIT_TARGET_EXISTS", false, changecontrol.ErrGitVersionConflict)
 }
 
 func (c *WritebackClient) ensureFilterUnspecified(ctx context.Context, root, target string) error {
@@ -649,6 +696,42 @@ func validateOnlyTargetModification(status []byte, target, baseMode string) erro
 	}
 	if fields[3] != baseMode || fields[4] != baseMode || fields[5] != baseMode {
 		return gitWritebackError(foundation.ErrorVersionConflict, "GIT_TARGET_MODE_CONFLICT", false, changecontrol.ErrGitVersionConflict)
+	}
+	return nil
+}
+
+func validateOnlyTargetCreation(status []byte, target string) error {
+	records := splitNUL(status)
+	if len(records) != 1 || string(records[0]) != "? "+target {
+		return classifyDirtyStatus(status)
+	}
+	return nil
+}
+
+func validateStableDiffForTargetMode(diff []byte, targetMode changecontrol.TargetMode, baseBlobID, resultBlobID, baseMode string) error {
+	if changecontrol.NormalizeTargetMode(targetMode) != changecontrol.TargetModeCreateOnly {
+		return validateStableDiffBlobBinding(diff, baseBlobID, resultBlobID, baseMode)
+	}
+	var indexLine string
+	var newFileMode string
+	for _, line := range bytes.Split(diff, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("index ")) {
+			if indexLine != "" {
+				return gitWritebackError(foundation.ErrorConsistencyViolation, "GIT_STABLE_DIFF_INDEX_INVALID", false, changecontrol.ErrGitConsistencyViolation)
+			}
+			indexLine = string(line)
+		}
+		if bytes.HasPrefix(line, []byte("new file mode ")) {
+			newFileMode = strings.TrimPrefix(string(line), "new file mode ")
+		}
+	}
+	fields := strings.Fields(indexLine)
+	if len(fields) != 2 || fields[0] != "index" || newFileMode != baseMode {
+		return gitWritebackError(foundation.ErrorConsistencyViolation, "CREATE_ONLY_STABLE_DIFF_INVALID", false, changecontrol.ErrGitConsistencyViolation)
+	}
+	base, result, found := strings.Cut(fields[1], "..")
+	if !found || len(base) != len(resultBlobID) || strings.Trim(base, "0") != "" || !strings.EqualFold(result, resultBlobID) {
+		return gitWritebackError(foundation.ErrorVersionConflict, "CREATE_ONLY_STABLE_DIFF_BLOB_CONFLICT", false, changecontrol.ErrGitVersionConflict)
 	}
 	return nil
 }

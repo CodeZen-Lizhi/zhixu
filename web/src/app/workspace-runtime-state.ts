@@ -3,6 +3,10 @@ import type { QueryClient } from "@tanstack/react-query";
 export const workspaceQueryRoots = [
   "workspace",
   "business",
+  "captures",
+  "authoring",
+  "document-history",
+  "organizing",
   "search",
   "rag",
   "collections",

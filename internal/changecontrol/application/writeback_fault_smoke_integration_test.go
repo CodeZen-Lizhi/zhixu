@@ -176,8 +176,9 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 			t.Fatal(gitErr)
 		}
 		service, serviceErr := NewWritebackService(WritebackServiceDependencies{
-			Repository: repository, Workspace: workspaceStore, Git: gitClient, Audit: &sagaAuditRecorder{},
-			IDs: ids, Clock: foundation.FixedClock{Value: databaseNow.Add(time.Minute)},
+			Repository: repository, Workspace: workspaceStore, Git: gitClient, GitOperations: sagaGitOperationLocker{}, Audit: &sagaAuditRecorder{},
+			Publication: WritebackPublicationFinalizerFunc(func(context.Context, WritebackPublication) error { return nil }),
+			IDs:         ids, Clock: foundation.FixedClock{Value: databaseNow.Add(time.Minute)},
 		})
 		if serviceErr != nil {
 			t.Fatal(serviceErr)

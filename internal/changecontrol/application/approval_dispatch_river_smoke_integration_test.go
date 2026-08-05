@@ -27,6 +27,7 @@ import (
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitoperation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/changecontrol"
@@ -160,7 +161,15 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writebackService, err := application.NewWritebackService(application.WritebackServiceDependencies{Repository: changeRepository, Workspace: workspaceStore, Git: gitRepository, Audit: auditRecorder, IDs: ids, Clock: foundation.SystemClock{}})
+	gitOperationLocker, err := gitoperation.NewPostgresLocker(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writebackService, err := application.NewWritebackService(application.WritebackServiceDependencies{
+		Repository: changeRepository, Workspace: workspaceStore, Git: gitRepository, GitOperations: gitOperationLocker, Audit: auditRecorder,
+		Publication: application.WritebackPublicationFinalizerFunc(func(context.Context, application.WritebackPublication) error { return nil }),
+		IDs:         ids, Clock: foundation.SystemClock{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

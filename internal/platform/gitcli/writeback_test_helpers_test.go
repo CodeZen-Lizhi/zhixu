@@ -88,6 +88,31 @@ func newWritebackTestRepository(t *testing.T, objectFormat, target string) write
 	}
 }
 
+func newCreateOnlyWritebackTestRepository(t *testing.T, target string) writebackTestRepository {
+	t.Helper()
+	root := t.TempDir()
+	runWritebackGit(t, root, "init", "--initial-branch=main")
+	runWritebackGit(t, root, "config", "user.name", "Zhixu Test")
+	runWritebackGit(t, root, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("base\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runWritebackGit(t, root, "add", "--", "README.md")
+	runWritebackGit(t, root, "commit", "-m", "initial")
+	if err := os.MkdirAll(filepath.Join(root, filepath.Dir(filepath.FromSlash(target))), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewWritebackClient(New(""), writebackWorkspaceRepository{workspace: workspaceForWritebackTest(canonical)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return writebackTestRepository{root: canonical, target: target, head: strings.TrimSpace(runWritebackGit(t, canonical, "rev-parse", "HEAD")), client: client}
+}
+
 func (r writebackTestRepository) writeTarget(t *testing.T, content []byte) string {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(r.root, filepath.FromSlash(r.target)), content, 0o640); err != nil {

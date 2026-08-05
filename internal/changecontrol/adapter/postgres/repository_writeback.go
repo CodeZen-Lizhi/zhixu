@@ -95,21 +95,21 @@ func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWri
 	}
 
 	// Proposal、Revision、Approval 以固定顺序锁定，正文/目标/Hash 全部从此处派生。
-	var proposalWorkspace, proposalStatus, targetPath, baseHash, content, revisionChangeHash string
+	var proposalWorkspace, proposalStatus, targetPath, targetMode, baseHash, content, revisionChangeHash string
 	var proposalWorkflowRunID *string
 	var revisionProposal, approvalProposal, approvalRevision string
 	var approvalChangeHash, approvalDecision string
 	var approvalGitHead *string
 	var revisionID, approvalID string
 	err = tx.QueryRow(ctx, `
-			SELECT p.workspace_id::text,p.status,p.workflow_run_id::text,r.id::text,r.proposal_id::text,r.target_path,r.base_hash,r.content,r.change_hash,
+			SELECT p.workspace_id::text,p.status,p.workflow_run_id::text,r.id::text,r.proposal_id::text,r.target_path,r.target_mode,r.base_hash,r.content,r.change_hash,
 			       a.id::text,a.proposal_id::text,a.revision_id::text,a.change_hash,a.decision,a.approved_git_head
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.id=$2 AND r.proposal_id=p.id
 		JOIN change_control.approval a ON a.id=$3 AND a.proposal_id=p.id AND a.revision_id=r.id
 		WHERE p.id=$1
 		FOR UPDATE OF p,r,a`, string(command.ProposalID), string(writeAuth.RevisionID), string(writeAuth.ApprovalID)).Scan(
-		&proposalWorkspace, &proposalStatus, &proposalWorkflowRunID, &revisionID, &revisionProposal, &targetPath, &baseHash, &content, &revisionChangeHash,
+		&proposalWorkspace, &proposalStatus, &proposalWorkflowRunID, &revisionID, &revisionProposal, &targetPath, &targetMode, &baseHash, &content, &revisionChangeHash,
 		&approvalID, &approvalProposal, &approvalRevision, &approvalChangeHash, &approvalDecision, &approvalGitHead)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.WritebackExecution{}, foundation.NewError(foundation.ErrorNotFound, "WRITEBACK_APPROVAL_NOT_FOUND", false, err)
@@ -117,7 +117,8 @@ func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWri
 	if err != nil {
 		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_APPROVAL_QUERY_FAILED")
 	}
-	if proposalWorkspace != string(command.WorkspaceID) || proposalWorkflowRunID == nil || *proposalWorkflowRunID != string(command.WorkflowRunID) || revisionProposal != string(command.ProposalID) || approvalProposal != string(command.ProposalID) || approvalRevision != revisionID || foundation.ID(revisionID) != writeAuth.RevisionID || foundation.ID(approvalID) != writeAuth.ApprovalID || approvalDecision != string(domain.DecisionApproved) || approvalGitHead == nil || !strings.EqualFold(revisionChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(approvalChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(baseHash, writeAuth.TargetVersion) {
+	normalizedTargetMode, modeErr := domain.ValidateTargetMode(domain.TargetMode(targetMode))
+	if modeErr != nil || proposalWorkspace != string(command.WorkspaceID) || proposalWorkflowRunID == nil || *proposalWorkflowRunID != string(command.WorkflowRunID) || revisionProposal != string(command.ProposalID) || approvalProposal != string(command.ProposalID) || approvalRevision != revisionID || foundation.ID(revisionID) != writeAuth.RevisionID || foundation.ID(approvalID) != writeAuth.ApprovalID || approvalDecision != string(domain.DecisionApproved) || approvalGitHead == nil || !strings.EqualFold(revisionChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(approvalChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(baseHash, writeAuth.TargetVersion) || domain.NormalizeTargetMode(writeAuth.TargetMode) != normalizedTargetMode || domain.NormalizeTargetMode(gitAuth.TargetMode) != normalizedTargetMode || writeAuth.Scope != domain.ExpectedAuthorizationScopeForTarget(targetPath, normalizedTargetMode) || gitAuth.Scope != domain.ExpectedAuthorizationScopeForTarget(targetPath, normalizedTargetMode) {
 		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackIdentityConflict)
 	}
 
@@ -126,7 +127,8 @@ func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWri
 	}
 
 	resultHash := domain.ComputeWritebackResultHash([]byte(content))
-	if !strings.EqualFold(domain.ComputeChangeHash(targetPath, baseHash, content), writeAuth.ApprovedChangeHash) {
+	computedChangeHash, hashErr := domain.ComputeChangeHashForTarget(command.WorkspaceID, targetPath, normalizedTargetMode, baseHash, content)
+	if hashErr != nil || !strings.EqualFold(computedChangeHash, writeAuth.ApprovedChangeHash) {
 		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackIdentityConflict)
 	}
 	// 幂等重放必须在授权消费前返回同一个 Durable Execution。
@@ -138,6 +140,7 @@ func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWri
 		requested.WorkflowRunID, requested.NodeRunID = command.WorkflowRunID, command.NodeRunID
 		requested.ProposalID, requested.RevisionID, requested.ApprovalID = command.ProposalID, writeAuth.RevisionID, writeAuth.ApprovalID
 		requested.WriteAuthorizationID, requested.GitAuthorizationID = writeAuth.ID, gitAuth.ID
+		requested.TargetMode = normalizedTargetMode
 		requested.TargetPath, requested.BaseHash, requested.ResultHash, requested.ApprovedChangeHash, requested.ApprovedGitHead = targetPath, baseHash, resultHash, writeAuth.ApprovedChangeHash, *approvalGitHead
 		if err := domain.ValidateWritebackIdentity(existing, requested); err != nil {
 			return domain.WritebackExecution{}, writebackDomainError(err)
@@ -173,12 +176,12 @@ func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWri
 			return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_ID_GENERATION_FAILED")
 		}
 	}
-	requested := domain.CreateWriteback{ID: executionID, WorkspaceID: command.WorkspaceID, WorkflowRunID: command.WorkflowRunID, NodeRunID: command.NodeRunID, ProposalID: command.ProposalID, RevisionID: writeAuth.RevisionID, ApprovalID: writeAuth.ApprovalID, WriteAuthorizationID: writeAuth.ID, GitAuthorizationID: gitAuth.ID, TargetPath: targetPath, BaseHash: baseHash, ResultHash: resultHash, ApprovedChangeHash: strings.ToLower(writeAuth.ApprovedChangeHash), ApprovedGitHead: strings.ToLower(*approvalGitHead), IdempotencyKey: command.IdempotencyKey, CreatedAt: now}
+	requested := domain.CreateWriteback{ID: executionID, WorkspaceID: command.WorkspaceID, WorkflowRunID: command.WorkflowRunID, NodeRunID: command.NodeRunID, ProposalID: command.ProposalID, RevisionID: writeAuth.RevisionID, ApprovalID: writeAuth.ApprovalID, WriteAuthorizationID: writeAuth.ID, GitAuthorizationID: gitAuth.ID, TargetPath: targetPath, TargetMode: normalizedTargetMode, BaseHash: baseHash, ResultHash: resultHash, ApprovedChangeHash: strings.ToLower(writeAuth.ApprovedChangeHash), ApprovedGitHead: strings.ToLower(*approvalGitHead), IdempotencyKey: command.IdempotencyKey, CreatedAt: now}
 	if err := domain.ValidateWritebackCreate(requested); err != nil {
 		return domain.WritebackExecution{}, writebackDomainError(err)
 	}
 	persisted, err := scanWritebackExecution(tx.QueryRow(ctx, writebackInsert+` RETURNING `+writebackColumns,
-		string(requested.ID), string(requested.WorkspaceID), string(requested.WorkflowRunID), string(requested.NodeRunID), string(requested.ProposalID), string(requested.RevisionID), string(requested.ApprovalID), string(requested.WriteAuthorizationID), string(requested.GitAuthorizationID), requested.TargetPath, requested.BaseHash, requested.ResultHash, requested.ApprovedChangeHash, requested.ApprovedGitHead, string(domain.WritebackStatusPrepared), requested.IdempotencyKey, nil, nil, int64(1), now, now))
+		string(requested.ID), string(requested.WorkspaceID), string(requested.WorkflowRunID), string(requested.NodeRunID), string(requested.ProposalID), string(requested.RevisionID), string(requested.ApprovalID), string(requested.WriteAuthorizationID), string(requested.GitAuthorizationID), requested.TargetPath, string(domain.NormalizeTargetMode(requested.TargetMode)), requested.BaseHash, requested.ResultHash, requested.ApprovedChangeHash, requested.ApprovedGitHead, string(domain.WritebackStatusPrepared), requested.IdempotencyKey, nil, nil, int64(1), now, now))
 	if err != nil {
 		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_CREATE_FAILED")
 	}
@@ -393,7 +396,7 @@ func (r *Repository) CreateWritebackExecution(ctx context.Context, command domai
 		string(requested.ID), string(requested.WorkspaceID), string(requested.WorkflowRunID), string(requested.NodeRunID),
 		string(requested.ProposalID), string(requested.RevisionID), string(requested.ApprovalID),
 		string(requested.WriteAuthorizationID), string(requested.GitAuthorizationID), requested.TargetPath,
-		requested.BaseHash, requested.ResultHash, requested.ApprovedChangeHash, requested.ApprovedGitHead,
+		string(domain.NormalizeTargetMode(requested.TargetMode)), requested.BaseHash, requested.ResultHash, requested.ApprovedChangeHash, requested.ApprovedGitHead,
 		string(requested.Status), requested.IdempotencyKey, nullableString(requested.TemporaryRef), nullableString(requested.BackupRef),
 		requested.Version, requested.CreatedAt, requested.UpdatedAt))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -597,14 +600,14 @@ func (r *Repository) PublishWriteback(ctx context.Context, command domain.Publis
 	return domain.PublishWritebackResult{Execution: updated, Commit: commit}, nil
 }
 
-const writebackColumns = `id::text,workspace_id::text,workflow_run_id::text,node_run_id::text,proposal_id::text,revision_id::text,approval_id::text,write_authorization_id::text,git_authorization_id::text,target_path,base_hash,result_hash,approved_change_hash,approved_git_head,git_commit,parent_git_commit,diff_hash,status,idempotency_key,failure_code,manual_recovery_required,temporary_ref,backup_ref,file_byte_size,file_mode,file_lock_token,file_result_lock_token,file_backup_lock_token,base_blob_id,result_blob_id,base_mode,version,created_at,updated_at,completed_at,cleanup_completed_at`
+const writebackColumns = `id::text,workspace_id::text,workflow_run_id::text,node_run_id::text,proposal_id::text,revision_id::text,approval_id::text,write_authorization_id::text,git_authorization_id::text,target_path,target_mode,base_hash,result_hash,approved_change_hash,approved_git_head,git_commit,parent_git_commit,diff_hash,status,idempotency_key,failure_code,manual_recovery_required,temporary_ref,backup_ref,file_byte_size,file_mode,file_lock_token,file_result_lock_token,file_backup_lock_token,base_blob_id,result_blob_id,base_mode,version,created_at,updated_at,completed_at,cleanup_completed_at`
 
 const writebackInsert = `INSERT INTO change_control.writeback_execution(
 	id,workspace_id,workflow_run_id,node_run_id,proposal_id,revision_id,approval_id,write_authorization_id,git_authorization_id,
-	target_path,base_hash,result_hash,approved_change_hash,approved_git_head,status,idempotency_key,temporary_ref,backup_ref,version,created_at,updated_at
-) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`
+	target_path,target_mode,base_hash,result_hash,approved_change_hash,approved_git_head,status,idempotency_key,temporary_ref,backup_ref,version,created_at,updated_at
+) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`
 
-const proposalCommitColumns = `id::text,workspace_id::text,writeback_execution_id::text,proposal_id::text,revision_id::text,approval_id::text,git_commit,parent_git_commit,target_path,diff_hash,result_hash,created_at`
+const proposalCommitColumns = `id::text,workspace_id::text,writeback_execution_id::text,proposal_id::text,revision_id::text,approval_id::text,git_commit,parent_git_commit,target_path,target_mode,diff_hash,result_hash,created_at`
 
 func scanWritebackExecution(row pgx.Row) (domain.WritebackExecution, error) {
 	var execution domain.WritebackExecution
@@ -615,7 +618,7 @@ func scanWritebackExecution(row pgx.Row) (domain.WritebackExecution, error) {
 	var fileMode *int32
 	err := row.Scan(
 		&id, &workspaceID, &runID, &nodeID, &proposalID, &revisionID, &approvalID, &writeAuthorizationID, &gitAuthorizationID,
-		&execution.TargetPath, &execution.BaseHash, &execution.ResultHash, &execution.ApprovedChangeHash, &execution.ApprovedGitHead,
+		&execution.TargetPath, &execution.TargetMode, &execution.BaseHash, &execution.ResultHash, &execution.ApprovedChangeHash, &execution.ApprovedGitHead,
 		&gitCommit, &parentGitCommit, &diffHash, &status, &execution.IdempotencyKey, &failureCode, &execution.ManualRecoveryRequired,
 		&temporaryRef, &backupRef, &fileByteSize, &fileMode, &fileLockToken, &fileResultLockToken, &fileBackupLockToken, &baseBlobID, &resultBlobID, &baseMode,
 		&execution.Version, &execution.CreatedAt, &execution.UpdatedAt, &execution.CompletedAt, &execution.CleanupCompletedAt,
@@ -627,6 +630,7 @@ func scanWritebackExecution(row pgx.Row) (domain.WritebackExecution, error) {
 	execution.ProposalID, execution.RevisionID, execution.ApprovalID = foundation.ID(proposalID), foundation.ID(revisionID), foundation.ID(approvalID)
 	execution.WriteAuthorizationID, execution.GitAuthorizationID = foundation.ID(writeAuthorizationID), foundation.ID(gitAuthorizationID)
 	execution.Status = domain.WritebackStatus(status)
+	execution.TargetMode = domain.NormalizeTargetMode(execution.TargetMode)
 	execution.GitCommit, execution.ParentGitCommit, execution.DiffHash = stringValue(gitCommit), stringValue(parentGitCommit), stringValue(diffHash)
 	execution.FailureCode, execution.TemporaryRef, execution.BackupRef = stringValue(failureCode), stringValue(temporaryRef), stringValue(backupRef)
 	execution.FileLockToken = stringValue(fileLockToken)
@@ -644,11 +648,12 @@ func scanWritebackExecution(row pgx.Row) (domain.WritebackExecution, error) {
 func scanProposalCommit(row pgx.Row) (domain.ProposalCommit, error) {
 	var commit domain.ProposalCommit
 	var id, workspaceID, executionID, proposalID, revisionID, approvalID string
-	if err := row.Scan(&id, &workspaceID, &executionID, &proposalID, &revisionID, &approvalID, &commit.GitCommit, &commit.ParentGitCommit, &commit.TargetPath, &commit.DiffHash, &commit.ResultHash, &commit.CreatedAt); err != nil {
+	if err := row.Scan(&id, &workspaceID, &executionID, &proposalID, &revisionID, &approvalID, &commit.GitCommit, &commit.ParentGitCommit, &commit.TargetPath, &commit.TargetMode, &commit.DiffHash, &commit.ResultHash, &commit.CreatedAt); err != nil {
 		return domain.ProposalCommit{}, err
 	}
 	commit.ID, commit.WorkspaceID, commit.WritebackExecutionID = foundation.ID(id), foundation.ID(workspaceID), foundation.ID(executionID)
 	commit.ProposalID, commit.RevisionID, commit.ApprovalID = foundation.ID(proposalID), foundation.ID(revisionID), foundation.ID(approvalID)
+	commit.TargetMode = domain.NormalizeTargetMode(commit.TargetMode)
 	return commit, nil
 }
 
@@ -688,12 +693,12 @@ func lookupWritebackExecution(ctx context.Context, tx pgx.Tx, command domain.Cre
 
 func insertOrReplayProposalCommit(ctx context.Context, tx pgx.Tx, execution domain.WritebackExecution, requested domain.ProposalCommit) (domain.ProposalCommit, error) {
 	commit, err := scanProposalCommit(tx.QueryRow(ctx, `
-		INSERT INTO change_control.proposal_commit(id,workspace_id,writeback_execution_id,proposal_id,revision_id,approval_id,git_commit,parent_git_commit,target_path,diff_hash,result_hash,created_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		INSERT INTO change_control.proposal_commit(id,workspace_id,writeback_execution_id,proposal_id,revision_id,approval_id,git_commit,parent_git_commit,target_path,target_mode,diff_hash,result_hash,created_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT DO NOTHING RETURNING `+proposalCommitColumns,
 		string(requested.ID), string(requested.WorkspaceID), string(requested.WritebackExecutionID), string(requested.ProposalID),
 		string(requested.RevisionID), string(requested.ApprovalID), requested.GitCommit, requested.ParentGitCommit,
-		requested.TargetPath, requested.DiffHash, requested.ResultHash, requested.CreatedAt.UTC()))
+		requested.TargetPath, string(domain.NormalizeTargetMode(requested.TargetMode)), requested.DiffHash, requested.ResultHash, requested.CreatedAt.UTC()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		commit, err = scanProposalCommit(tx.QueryRow(ctx, `SELECT `+proposalCommitColumns+` FROM change_control.proposal_commit WHERE writeback_execution_id=$1 OR (proposal_id=$2 AND revision_id=$3) OR (workspace_id=$4 AND git_commit=$5) FOR UPDATE`,
 			string(execution.ID), string(execution.ProposalID), string(execution.RevisionID), string(execution.WorkspaceID), execution.GitCommit))
@@ -820,7 +825,7 @@ func executionFromCreate(command domain.CreateWriteback, databaseNow time.Time) 
 		ID: command.ID, WorkspaceID: command.WorkspaceID, WorkflowRunID: command.WorkflowRunID, NodeRunID: command.NodeRunID,
 		ProposalID: command.ProposalID, RevisionID: command.RevisionID, ApprovalID: command.ApprovalID,
 		WriteAuthorizationID: command.WriteAuthorizationID, GitAuthorizationID: command.GitAuthorizationID,
-		TargetPath: command.TargetPath, BaseHash: command.BaseHash, ResultHash: command.ResultHash,
+		TargetPath: command.TargetPath, TargetMode: domain.NormalizeTargetMode(command.TargetMode), BaseHash: command.BaseHash, ResultHash: command.ResultHash,
 		ApprovedChangeHash: command.ApprovedChangeHash, ApprovedGitHead: command.ApprovedGitHead,
 		Status: domain.WritebackStatusPrepared, IdempotencyKey: command.IdempotencyKey,
 		TemporaryRef: command.TemporaryRef, BackupRef: command.BackupRef, Version: 1,
@@ -912,7 +917,7 @@ func sameProposalCommitIdentity(left, right domain.ProposalCommit) bool {
 	return left.ID == right.ID && left.WorkspaceID == right.WorkspaceID && left.WritebackExecutionID == right.WritebackExecutionID &&
 		left.ProposalID == right.ProposalID && left.RevisionID == right.RevisionID && left.ApprovalID == right.ApprovalID &&
 		strings.EqualFold(left.GitCommit, right.GitCommit) && strings.EqualFold(left.ParentGitCommit, right.ParentGitCommit) &&
-		left.TargetPath == right.TargetPath && strings.EqualFold(left.DiffHash, right.DiffHash) && strings.EqualFold(left.ResultHash, right.ResultHash)
+		left.TargetPath == right.TargetPath && domain.NormalizeTargetMode(left.TargetMode) == domain.NormalizeTargetMode(right.TargetMode) && strings.EqualFold(left.DiffHash, right.DiffHash) && strings.EqualFold(left.ResultHash, right.ResultHash)
 }
 
 func sameJSON(left, right []byte) bool {

@@ -1,9 +1,126 @@
 import { readFileSync } from "node:fs";
 
-const document = JSON.parse(readFileSync(new URL("./openapi.json", import.meta.url), "utf8"));
+const openAPISource = readFileSync(new URL("./openapi.json", import.meta.url), "utf8");
+const document = JSON.parse(openAPISource);
 const exportHandlerSource = readFileSync(new URL("../../internal/export/http/handler.go", import.meta.url), "utf8");
+const gitSyncHandlerSource = readFileSync(new URL("../../internal/gitsync/http/handler.go", import.meta.url), "utf8");
+const authHandlerSource = readFileSync(new URL("../../internal/auth/http/handler.go", import.meta.url), "utf8");
 if (document.openapi !== "3.1.0") {
   throw new Error(`expected OpenAPI 3.1.0, got ${document.openapi}`);
+}
+for (const marker of [
+  '    "/api/v1/workspaces/{workspace_id}/captures": {',
+  '    "/api/v1/workspaces/{workspace_id}/capture-files": {',
+  '    "/api/v1/workspaces/{workspace_id}/captures/{capture_id}": {',
+  '    "/api/v1/workspaces/{workspace_id}/captures/{capture_id}/retry": {',
+  '      "CaptureKind": {',
+  '      "CaptureStatus": {',
+  '      "CaptureStageStatus": {',
+  '      "Capture": {',
+  '      "CapturePage": {',
+]) {
+  if (openAPISource.split(marker).length !== 2) {
+    throw new Error(`Capture OpenAPI key must occur exactly once: ${marker.trim()}`);
+  }
+}
+for (const marker of [
+  '    "/api/v1/workspaces/{workspace_id}/authoring/working-drafts": {',
+  '    "/api/v1/workspaces/{workspace_id}/authoring/documents": {',
+  '    "/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}": {',
+  '    "/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}/freeze": {',
+  '    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/publish-proposals": {',
+  '    "/api/v1/workspaces/{workspace_id}/documents/{document_id}": {',
+  '    "/api/v1/workspaces/{workspace_id}/authoring/overview": {',
+  '      "AuthoringEmptyCommand": {',
+  '      "UpdateWorkingDraftRequest": {',
+  '      "FreezeWorkingDraftRequest": {',
+  '      "WorkingDraft": {',
+  '      "WorkingDraftSummary": {',
+  '      "WorkingDraftPage": {',
+  '      "DocumentDraft": {',
+  '      "DocumentDraftSummary": {',
+  '      "DocumentDraftPage": {',
+  '      "ArticleRevision": {',
+  '      "PublicationBinding": {',
+  '      "AuthoringOverview": {',
+]) {
+  if (openAPISource.split(marker).length !== 2) {
+    throw new Error(`Authoring OpenAPI key must occur exactly once: ${marker.trim()}`);
+  }
+}
+for (const marker of [
+  '    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/history": {',
+  '    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/history/compare": {',
+  '    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-previews": {',
+  '    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-proposals": {',
+  '      "DocumentHistoryEntry": {',
+  '      "DocumentHistoryPage": {',
+  '      "DocumentHistoryCompare": {',
+  '      "DocumentRestorePreview": {',
+  '      "DocumentRestoreProposalResult": {',
+  '      "RestoreDocumentProposal": {',
+]) {
+  if (openAPISource.split(marker).length !== 2) {
+    throw new Error(`Document History OpenAPI key must occur exactly once: ${marker.trim()}`);
+  }
+}
+for (const marker of [
+  '    "/api/v1/workspaces/{workspace_id}/git-remote": {',
+  '    "/api/v1/workspaces/{workspace_id}/git-remote/tests": {',
+  '    "/api/v1/workspaces/{workspace_id}/git-sync": {',
+  '    "/api/v1/workspaces/{workspace_id}/git-sync/runs": {',
+  '    "/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}": {',
+  '    "/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}/retries": {',
+  '      "GitSyncWorkspaceID": {',
+  '      "GitSyncRunID": {',
+  '      "GitSyncCursor": {',
+  '      "GitSyncLimit": {',
+  '      "GitSyncHTTPSRemoteInput": {',
+  '      "GitSyncHTTPSRemoteURL": {',
+  '      "GitSyncBranch": {',
+  '      "GitSyncOID": {',
+  '      "GitSyncKeepTokenAction": {',
+  '      "GitSyncReplaceTokenAction": {',
+  '      "GitSyncClearTokenAction": {',
+  '      "GitSyncTokenAction": {',
+  '      "GitSyncTestTokenAction": {',
+  '      "SaveGitRemoteConfigRequest": {',
+  '      "RemoveGitRemoteConfigRequest": {',
+  '      "TestGitRemoteConfigRequest": {',
+  '      "RetryGitSyncRunRequest": {',
+  '      "GitRemoteConfig": {',
+  '      "GitRemoteTestResult": {',
+  '      "GitSyncFileChange": {',
+  '      "GitSyncRun": {',
+  '      "GitSyncStatus": {',
+  '      "GitSyncRunPage": {',
+]) {
+  if (openAPISource.split(marker).length !== 2) {
+    throw new Error(`Git Sync OpenAPI key must occur exactly once: ${marker.trim()}`);
+  }
+}
+for (const marker of [
+  '    "/api/v1/workspaces/{workspace_id}/organizing/drafts": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/suggestions": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials/{material_id}": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/confirm": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/snapshots/{snapshot_id}": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/templates": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/clone": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/revisions": {',
+  '    "/api/v1/workspaces/{workspace_id}/organizing/runs/{snapshot_id}": {',
+  '      "OrganizingAddMaterialRequest": {',
+  '      "OrganizingDraft": {',
+  '      "OrganizingSnapshot": {',
+  '      "OrganizingTemplate": {',
+  '      "OrganizingRun": {',
+]) {
+  if (openAPISource.split(marker).length !== 2) {
+    throw new Error(`Organizing OpenAPI key must occur exactly once: ${marker.trim()}`);
+  }
 }
 
 const requiredOperations = [
@@ -23,6 +140,48 @@ const requiredOperations = [
   ["/api/v1/workspaces", "post", "201"],
   ["/api/v1/workspaces/{workspace_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/scan", "post", "200"],
+  ["/api/v1/workspaces/{workspace_id}/captures", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/captures", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/capture-files", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/captures/{capture_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/captures/{capture_id}/retry", "post", "202"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}", "put", "200"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}/freeze", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/publish-proposals", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}/history", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}/history/compare", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-previews", "post", "200"],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-proposals", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/overview", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/documents", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}", "put", "200"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/suggestions", "post", "200"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials/{material_id}", "patch", "200"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials/{material_id}", "delete", "200"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/confirm", "post", "202"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/snapshots/{snapshot_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/clone", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/revisions", "post", "201"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/runs/{snapshot_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/git-remote", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/git-remote", "put", "201"],
+  ["/api/v1/workspaces/{workspace_id}/git-remote", "delete", "200"],
+  ["/api/v1/workspaces/{workspace_id}/git-remote/tests", "post", "200"],
+  ["/api/v1/workspaces/{workspace_id}/git-sync", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/git-sync/runs", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/git-sync/runs", "post", "202"],
+  ["/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}", "get", "200"],
+  ["/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}/retries", "post", "202"],
   ["/api/v1/source-versions/{source_version_id}/ingestion-attempts", "post", "201"],
   ["/api/v1/workspaces/{workspace_id}/source-versions", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/workflows", "post", "202"],
@@ -90,6 +249,24 @@ for (const [path, method, successResponse] of requiredOperations) {
   for (const response of [successResponse, "405"]) {
     if (!operation.responses?.[response]) throw new Error(`missing ${response} response for ${method.toUpperCase()} ${path}`);
   }
+}
+for (const [path, method] of [
+  ["/api/v1/workflows/{run_id}", "get"],
+  ["/api/v1/workflows/{run_id}/pause", "post"],
+  ["/api/v1/workflows/{run_id}/resume", "post"],
+  ["/api/v1/workflows/{run_id}/cancel", "post"],
+  ["/api/v1/workflows/{run_id}/human-tasks/{task_id}/decision", "post"],
+]) {
+  const parameters = document.paths[path]?.parameters ?? [];
+  if (!parameters.some((parameter) => parameter.$ref === "#/components/parameters/WorkflowWorkspaceID")) {
+    throw new Error(`${method.toUpperCase()} ${path} must require X-Workspace-ID`);
+  }
+}
+const workflowWorkspaceHeader = document.components?.parameters?.WorkflowWorkspaceID;
+if (workflowWorkspaceHeader?.name !== "X-Workspace-ID" || workflowWorkspaceHeader.in !== "header" ||
+    workflowWorkspaceHeader.required !== true || workflowWorkspaceHeader.schema?.type !== "string" ||
+    workflowWorkspaceHeader.schema?.format !== "uuid") {
+  throw new Error("WorkflowWorkspaceID must be a required UUID X-Workspace-ID header");
 }
 if (!document.paths["/readyz"].get.responses["503"]) {
   throw new Error("missing 503 response for GET /readyz");
@@ -405,6 +582,18 @@ for (const schema of [
   "StartWorkflowRequest",
   "WorkflowStart",
   "WorkflowRun",
+  "PendingWorkflowHumanTask",
+  "WorkflowHumanTaskReview",
+  "WorkflowReviewEvidence",
+  "WorkflowReviewSourceEvidence",
+  "WorkflowReviewDocumentEvidence",
+  "WorkflowTopicOutlineSection",
+  "WorkflowTopicOutlineReview",
+  "WorkflowMergeCategory",
+  "WorkflowMergeEvidence",
+  "WorkflowMergeSourceEvidence",
+  "WorkflowMergeDocumentEvidence",
+  "WorkflowMergeComparisonReview",
   "WorkflowRunPage",
   "WorkflowRunSummary",
   "HumanDecisionRequest",
@@ -628,9 +817,254 @@ for (const [path, schema] of [
 }
 
 const schemas = document.components.schemas;
+const workflowRunHumanTask = schemas.WorkflowRun?.properties?.human_task?.oneOf ?? [];
+if (!schemas.WorkflowRun?.required?.includes("human_task") ||
+    workflowRunHumanTask[0]?.$ref !== "#/components/schemas/PendingWorkflowHumanTask" ||
+    workflowRunHumanTask[1]?.type !== "null") {
+  throw new Error("WorkflowRun must expose an explicit pending Human Task or null");
+}
+const pendingWorkflowHumanTask = schemas.PendingWorkflowHumanTask;
+if (pendingWorkflowHumanTask?.type !== "object" || pendingWorkflowHumanTask.additionalProperties !== false ||
+    pendingWorkflowHumanTask.required?.join(",") !== "id,run_id,node_run_id,status,expected_input_schema,target_version,expires_at,created_at,review" ||
+    pendingWorkflowHumanTask.properties?.status?.const !== "pending" ||
+    pendingWorkflowHumanTask.properties?.review?.oneOf?.[0]?.$ref !== "#/components/schemas/WorkflowHumanTaskReview" ||
+    pendingWorkflowHumanTask.properties?.review?.oneOf?.[1]?.type !== "null") {
+  throw new Error("PendingWorkflowHumanTask must retain its exact nullable review contract");
+}
+const humanTaskReviewRefs = schemas.WorkflowHumanTaskReview?.oneOf?.map((entry) => entry.$ref) ?? [];
+if (humanTaskReviewRefs.join(",") !== "#/components/schemas/WorkflowTopicOutlineReview,#/components/schemas/WorkflowMergeComparisonReview" ||
+    schemas.WorkflowHumanTaskReview?.discriminator?.propertyName !== "kind") {
+  throw new Error("WorkflowHumanTaskReview must remain a kind-discriminated closed union");
+}
+for (const [schemaName, required, kind] of [
+  ["WorkflowTopicOutlineReview", "kind,schema_version,workspace_id,run_id,task_id,node_run_id,snapshot_id,snapshot_hash,template_revision_id,template_hash,outline", "TOPIC_OUTLINE"],
+  ["WorkflowMergeComparisonReview", "kind,schema_version,workspace_id,run_id,task_id,node_run_id,snapshot_id,snapshot_hash,artifact_id,revision_hash,default_target_path,diff_hash,diff_preview,diff_truncated,conflict_count,evidence_count,document_count,categories,comparison", "MERGE_COMPARISON"],
+]) {
+  const schema = schemas[schemaName];
+  if (schema?.type !== "object" || schema.additionalProperties !== false || schema.required?.join(",") !== required ||
+      schema.properties?.kind?.const !== kind || schema.properties?.schema_version?.const !== 1) {
+    throw new Error(`${schemaName} must retain its exact versioned review identity`);
+  }
+}
+const workflowEvidenceVariants = [
+  ["WorkflowReviewSourceEvidence", "kind,source_version_id,source_span_id,content_hash,excerpt_hash", "SOURCE_VERSION", false],
+  ["WorkflowReviewDocumentEvidence", "kind,document_id,article_revision_id,revision_no,content_hash", "DOCUMENT_REVISION", true],
+  ["WorkflowMergeSourceEvidence", "category,kind,source_version_id,source_span_id,content_hash,excerpt_hash", "SOURCE_VERSION", false],
+  ["WorkflowMergeDocumentEvidence", "category,kind,document_id,article_revision_id,revision_no,content_hash", "DOCUMENT_REVISION", true],
+];
+for (const [schemaName, required, kind, documentVariant] of workflowEvidenceVariants) {
+  const schema = schemas[schemaName];
+  if (schema?.type !== "object" || schema.additionalProperties !== false || schema.required?.join(",") !== required ||
+      schema.properties?.kind?.const !== kind || schema.properties?.content_hash?.pattern !== "^[0-9a-f]{64}$" ||
+      (documentVariant ? schema.properties?.revision_no?.minimum !== 1 : schema.properties?.excerpt_hash?.pattern !== "^[0-9a-f]{64}$")) {
+    throw new Error(`${schemaName} must retain its exact immutable source shape`);
+  }
+}
+for (const [unionName, sourceName, documentName] of [
+  ["WorkflowReviewEvidence", "WorkflowReviewSourceEvidence", "WorkflowReviewDocumentEvidence"],
+  ["WorkflowMergeEvidence", "WorkflowMergeSourceEvidence", "WorkflowMergeDocumentEvidence"],
+]) {
+  const schema = schemas[unionName];
+  const refs = schema?.oneOf?.map((entry) => entry.$ref) ?? [];
+  if (refs.join(",") !== `#/components/schemas/${sourceName},#/components/schemas/${documentName}` ||
+      schema?.discriminator?.propertyName !== "kind") {
+    throw new Error(`${unionName} must remain a kind-discriminated Source/Document union`);
+  }
+}
+if (schemas.WorkflowTopicOutlineReview.properties.outline.minItems !== 1 ||
+    schemas.WorkflowTopicOutlineReview.properties.outline.maxItems !== 24 ||
+    schemas.WorkflowTopicOutlineSection.properties.supports.maxItems !== 32 ||
+    schemas.WorkflowTopicOutlineSection.oneOf?.length !== 2) {
+  throw new Error("Topic outline review bounds or Evidence/GAP exclusivity drifted");
+}
+const mergeReview = schemas.WorkflowMergeComparisonReview.properties;
+const mergeCategoryOrder = mergeReview.categories.prefixItems?.map((entry) => entry.allOf?.[1]?.properties?.category?.const) ?? [];
+if (mergeReview.categories.minItems !== 4 || mergeReview.categories.maxItems !== 4 || mergeReview.categories.items !== false ||
+    mergeCategoryOrder.join(",") !== "DUPLICATE,COMPLEMENTARY,CONFLICT,UNIQUE" ||
+    mergeReview.comparison.maxItems !== 64 || mergeReview.document_count?.minimum !== 0 || mergeReview.diff_preview.minLength !== 1 ||
+    mergeReview.diff_preview.maxLength !== 32768 || mergeReview.diff_preview["x-max-utf8-bytes"] !== 32768 ||
+    mergeReview.default_target_path?.minLength !== 1 || mergeReview.default_target_path?.maxLength !== 4096 ||
+    mergeReview.default_target_path?.["x-max-utf8-bytes"] !== 4096 ||
+    mergeReview.default_target_path?.pattern !== "^(?!/)(?!\\.git(?:/|$))(?!\\.knowledge(?:/|$))(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$)).+\\.(?:md|markdown)$") {
+  throw new Error("Merge review category order, Evidence preview, or bounded diff contract drifted");
+}
+const captureOperations = [
+  ["/api/v1/workspaces/{workspace_id}/captures", "post", ["200", "201"], "CaptureCommandResult", ["400", "401", "403", "404", "405", "409", "422", "500", "503"], "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/captures", "get", ["200"], "CapturePage", ["400", "401", "403", "405", "500", "503"], "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/capture-files", "post", ["200", "201"], "CaptureCommandResult", ["400", "401", "403", "404", "405", "409", "422", "500", "503"], "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/captures/{capture_id}", "get", ["200"], "Capture", ["400", "401", "403", "404", "405", "500", "503"], "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/captures/{capture_id}/retry", "post", ["200", "202"], "CaptureCommandResult", ["400", "401", "403", "404", "405", "409", "422", "500", "503"], "WRITE_PROPOSAL"],
+];
+for (const [path, method, successStatuses, successSchema, errorStatuses, capability] of captureOperations) {
+  const operation = document.paths[path]?.[method];
+  if (!operation || operation.security !== undefined || operation["x-required-capability"] !== capability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${capability}`);
+  }
+  for (const status of successStatuses) {
+    if (operation.responses?.[status]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}`) {
+      throw new Error(`invalid Capture ${status} success schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+  for (const status of errorStatuses) {
+    if (resolveRef(operation.responses?.[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Capture ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+const captureList = document.paths["/api/v1/workspaces/{workspace_id}/captures"].get;
+const captureQuery = (name) => captureList.parameters.find((parameter) => parameter.name === name)?.schema;
+if (captureQuery("kind")?.$ref !== "#/components/schemas/CaptureKind" ||
+    captureQuery("status")?.$ref !== "#/components/schemas/CaptureStatus" ||
+    captureQuery("limit")?.minimum !== 1 || captureQuery("limit")?.maximum !== 100 || captureQuery("limit")?.default !== 30 ||
+    captureQuery("cursor")?.maxLength !== 4096 || schemas.CapturePage.properties.items.maxItems !== 100) {
+  throw new Error("Capture list filter, cursor or page limit contract drifted");
+}
+if (document.paths["/api/v1/workspaces/{workspace_id}/captures"].post.requestBody?.["x-max-body-bytes"] !== 2097152 ||
+    document.paths["/api/v1/workspaces/{workspace_id}/capture-files"].post.requestBody?.["x-max-body-bytes"] !== 11534336 ||
+    document.paths["/api/v1/workspaces/{workspace_id}/captures/{capture_id}/retry"].post.requestBody?.["x-max-body-bytes"] !== 1024) {
+  throw new Error("Capture request body limits drifted from the HTTP boundary");
+}
+for (const schemaName of ["CreateCaptureRequest", "UploadCaptureRequest", "RetryCaptureRequest", "Capture", "CaptureCommandResult", "CapturePage"]) {
+  if (schemas[schemaName].additionalProperties !== false && schemaName !== "CreateCaptureRequest") {
+    throw new Error(`${schemaName} must reject unknown fields`);
+  }
+}
+const profilePath = "/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/knowledge-profile";
+const profileRetryPath = `${profilePath}/retry`;
+for (const [path, method, successStatuses, schema, capability] of [
+  [profilePath, "get", ["200"], "DocumentKnowledgeProfileResponse", "READ_LOCAL"],
+  [profileRetryPath, "post", ["200", "202"], "KnowledgeProfileCommandResult", "WRITE_PROPOSAL"],
+]) {
+  const operation = document.paths[path]?.[method];
+  if (!operation || operation.security !== undefined || operation["x-required-capability"] !== capability) {
+    throw new Error(`invalid Profile capability contract for ${method.toUpperCase()} ${path}`);
+  }
+  for (const status of successStatuses) {
+    if (operation.responses?.[status]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${schema}`) {
+      throw new Error(`invalid Profile ${status} success schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+if (document.paths[profileRetryPath].post.requestBody?.["x-max-body-bytes"] !== 1024 ||
+    document.paths[profileRetryPath].post.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/RetryKnowledgeProfileRequest" ||
+    schemas.CaptureStageStatus?.enum?.join(",") !== "PENDING,RUNNING,READY,FAILED,CAPABILITY_UNAVAILABLE,STALE,NOT_APPLICABLE" ||
+    schemas.KnowledgeProfileStatus?.enum?.join(",") !== "PENDING,RUNNING,READY,FAILED,CAPABILITY_UNAVAILABLE,STALE" ||
+    schemas.RetryKnowledgeProfileRequest?.additionalProperties !== false ||
+    schemas.DocumentKnowledgeProfileResponse?.additionalProperties !== false ||
+    schemas.KnowledgeProfileCommandResult?.additionalProperties !== false ||
+    schemas.DocumentKnowledgeProfile?.additionalProperties !== false ||
+    schemas.DocumentKnowledgeProfileContent?.properties?.topics?.minItems !== 1 ||
+    schemas.DocumentKnowledgeProfileContent?.properties?.knowledge_points?.minItems !== 1 ||
+    schemas.KnowledgeProfileRevision?.properties?.content?.$ref !== "#/components/schemas/DocumentKnowledgeProfileContent" ||
+    schemas.KnowledgeProfileRevision?.properties?.schema_version?.const !== "document-knowledge-profile/v1") {
+  throw new Error("Document Knowledge Profile contract drifted");
+}
+if (schemas.CreateCaptureRequest.oneOf?.length !== 2 || !schemas.CreateCaptureRequest.oneOf.every((variant) => variant.additionalProperties === false) ||
+    document.paths["/api/v1/workspaces/{workspace_id}/capture-files"].post.requestBody?.content?.["multipart/form-data"]?.schema?.$ref !== "#/components/schemas/UploadCaptureRequest" ||
+    schemas.Capture.properties.original_location !== undefined ||
+    schemas.Capture.properties.original_input_hash !== undefined ||
+    !schemas.SystemStatus.required?.includes("capture") ||
+    schemas.SystemStatus.properties?.capture?.$ref !== "#/components/schemas/OptionalCapabilityStatus") {
+  throw new Error("Capture strict request, redacted response, or capability status contract drifted");
+}
+const authoringOperations = [
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts", "post", ["200", "201"], "WorkingDraftCommandResult", "AuthoringEmptyCommand", 4096, "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts", "get", ["200"], "WorkingDraftPage", undefined, undefined, "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}", "get", ["200"], "WorkingDraft", undefined, undefined, "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}", "put", ["200"], "WorkingDraftCommandResult", "UpdateWorkingDraftRequest", 62947328, "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}/freeze", "post", ["200", "201"], "FreezeWorkingDraftResult", "FreezeWorkingDraftRequest", 4096, "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/publish-proposals", "post", ["200", "201"], "PublishArticleRevisionResult", "AuthoringEmptyCommand", 4096, "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}", "get", ["200"], "DocumentDraftDetail", undefined, undefined, "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/overview", "get", ["200"], "AuthoringOverview", undefined, undefined, "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/documents", "get", ["200"], "DocumentDraftPage", undefined, undefined, "READ_LOCAL"],
+];
+for (const [path, method, successStatuses, successSchema, requestSchema, bodyLimit, capability] of authoringOperations) {
+  const pathItem = document.paths[path];
+  const operation = pathItem?.[method];
+  if (!operation || operation.security !== undefined || operation["x-required-capability"] !== capability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${capability}`);
+  }
+  for (const status of successStatuses) {
+    if (operation.responses?.[status]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}`) {
+      throw new Error(`invalid Authoring ${status} success schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+  const errorStatuses = method === "get"
+    ? ["400", "401", "403", "404", "405", "500", "503"]
+    : ["400", "401", "403", "404", "405", "409", "415", "422", "500", "503"];
+  for (const status of errorStatuses) {
+    if (resolveRef(operation.responses?.[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Authoring ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+  if (requestSchema === undefined) continue;
+  const parameters = [...(pathItem.parameters ?? []), ...(operation.parameters ?? [])];
+  if (!parameters.some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey") ||
+      operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== bodyLimit ||
+      operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}` ||
+      !operation.responses?.["200"]) {
+    throw new Error(`${method.toUpperCase()} ${path} must retain its bounded idempotent Authoring command contract`);
+  }
+}
+for (const schemaName of [
+  "AuthoringEmptyCommand", "UpdateWorkingDraftRequest", "FreezeWorkingDraftRequest",
+  "WorkingDraft", "WorkingDraftSummary", "WorkingDraftPage", "DocumentDraft", "DocumentDraftSummary", "DocumentDraftPage", "ArticleRevision", "PublicationBinding",
+  "WorkingDraftCommandResult", "FreezeWorkingDraftResult", "PublishArticleRevisionResult",
+  "DocumentDraftDetail", "OrganizingAvailability", "AuthoringOverview",
+]) {
+  if (schemas[schemaName]?.type !== "object" || schemas[schemaName]?.additionalProperties !== false) {
+    throw new Error(`${schemaName} must retain an exact Authoring object shape`);
+  }
+}
+if (schemas.AuthoringEmptyCommand.properties && Object.keys(schemas.AuthoringEmptyCommand.properties).length !== 0 ||
+    schemas.UpdateWorkingDraftRequest.required?.join(",") !== "expected_version,title,target_path,body" ||
+    schemas.UpdateWorkingDraftRequest.properties.expected_version.minimum !== 1 ||
+    schemas.UpdateWorkingDraftRequest.properties.title["x-max-utf8-bytes"] !== 512 ||
+    schemas.UpdateWorkingDraftRequest.properties.target_path["x-max-utf8-bytes"] !== 4096 ||
+    schemas.UpdateWorkingDraftRequest.properties.body["x-max-utf8-bytes"] !== 10485760 ||
+    schemas.FreezeWorkingDraftRequest.required?.join(",") !== "expected_version" ||
+    schemas.WorkingDraft.required?.join(",") !== "id,workspace_id,document_id,title,target_path,body,status,version,created_at,updated_at" ||
+    schemas.WorkingDraftSummary.properties.body !== undefined ||
+    schemas.WorkingDraftPage.properties.items.items.$ref !== "#/components/schemas/WorkingDraftSummary" ||
+    schemas.DocumentDraft.properties.lifecycle_status.enum?.join(",") !== "DRAFT,PUBLISHED,ARCHIVED,DELETED" ||
+    schemas.DocumentDraftSummary.properties.lifecycle_status.const !== "DRAFT" ||
+    schemas.DocumentDraftSummary.properties.current_published_revision_id.type !== "null" ||
+    schemas.DocumentDraftPage.properties.items.items.$ref !== "#/components/schemas/DocumentDraftSummary" ||
+    schemas.ArticleRevision.properties.content_hash.pattern !== "^[0-9a-f]{64}$" ||
+    schemas.ArticleRevision.properties.status.enum?.join(",") !== "DRAFT,REVIEW,APPROVED,PUBLISHED,SUPERSEDED,ARCHIVED" ||
+    schemas.PublicationBinding.properties.status.enum?.join(",") !== "PENDING,PUBLISHED,RECOVERY_REQUIRED,CLOSED" ||
+    schemas.PublicationBinding.properties.proposal_href.pattern !== "^/proposals/[0-9a-f-]+$" ||
+    schemas.AuthoringOverview.properties.recent_drafts.maxItems !== 100 ||
+    schemas.AuthoringOverview.properties.pending_publications.maxItems !== 100 ||
+    schemas.AuthoringOverview.properties.completed_documents.maxItems !== 100) {
+  throw new Error("Authoring strict request, response, status, or bounded overview contract drifted");
+}
+for (const [path, pageSchema] of [
+  ["/api/v1/workspaces/{workspace_id}/authoring/working-drafts", "WorkingDraftPage"],
+  ["/api/v1/workspaces/{workspace_id}/authoring/documents", "DocumentDraftPage"],
+]) {
+  const parameters = document.paths[path].get.parameters;
+  const cursor = parameters.find((parameter) => parameter.name === "cursor")?.schema;
+  const limit = parameters.find((parameter) => parameter.name === "limit")?.schema;
+  if (cursor?.maxLength !== 4096 || limit?.minimum !== 1 || limit?.maximum !== 100 || limit?.default !== 30 ||
+      schemas[pageSchema].properties.items.maxItems !== 100 ||
+      schemas[pageSchema].properties.next_cursor.minLength !== 1 || schemas[pageSchema].properties.next_cursor.maxLength !== 4096 ||
+      schemas[pageSchema].required?.join(",") !== "workspace_id,items") {
+    throw new Error(`${pageSchema} Authoring keyset pagination contract drifted`);
+  }
+}
+const authoringPublishOperation = document.paths["/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/publish-proposals"].post;
+for (const code of ["AUTHORING_TARGET_BASE_CONFLICT", "AUTHORING_PROPOSAL_BINDING_CONFLICT", "AUTHORING_REVISION_NOT_LATEST", "WRITEBACK_TARGET_PARENT_NOT_FOUND"]) {
+  if (!authoringPublishOperation["x-error-codes"]?.includes(code)) {
+    throw new Error(`missing Authoring publish error code: ${code}`);
+  }
+}
+if (!authoringPublishOperation.description.includes("same key stably replays WRITEBACK_TARGET_PARENT_NOT_FOUND with 404")) {
+  throw new Error("Authoring publish must document abandoned deterministic-failure replay semantics");
+}
 const workflowStatuses = ["pending", "running", "waiting_for_human", "retry_wait", "paused", "succeeded", "failed", "cancelled"];
 const proposalStatuses = ["draft", "validating", "ready_for_review", "approved", "applying", "applied", "verifying", "completed", "rejected", "needs_revision", "deferred", "apply_failed", "verify_failed", "rolled_back", "cancelled"];
-const proposalTypes = ["file_patch", "knowledge_change", "publish_artifact", "downstream_update"];
+const proposalTypes = ["file_patch", "restore_document", "knowledge_change", "publish_artifact", "downstream_update"];
 const proposalRiskLevels = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 const sourceSecurityStatuses = ["pending", "passed", "quarantined"];
 const sourceIngestionStatuses = ["validating", "parsing", "parsed", "chunking", "chunked", "parse_failed", "cancelled"];
@@ -662,6 +1096,336 @@ if (queryParameter("/api/v1/workspaces/{workspace_id}/proposals", "status")?.enu
 if (queryParameter("/api/v1/workspaces/{workspace_id}/proposals", "proposal_type")?.enum?.join(",") !== proposalTypes.join(",") ||
     schemas.ProposalSummary.properties.proposal_type.enum?.join(",") !== proposalTypes.join(",")) {
   throw new Error("Proposal list type enum drifted from the typed Proposal contract");
+}
+const documentHistoryOperations = [
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}/history", "get", ["200"], "DocumentHistoryPage", "READ_LOCAL", false],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}/history/compare", "get", ["200"], "DocumentHistoryCompare", "READ_LOCAL", false],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-previews", "post", ["200"], "DocumentRestorePreview", "READ_LOCAL", true],
+  ["/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-proposals", "post", ["200", "201"], "DocumentRestoreProposalResult", "WRITE_PROPOSAL", true],
+];
+for (const [path, method, successStatuses, successSchema, capability, acceptsJSON] of documentHistoryOperations) {
+  const pathItem = document.paths[path];
+  const operation = pathItem?.[method];
+  if (!operation || operation.security !== undefined || operation["x-required-capability"] !== capability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${capability}`);
+  }
+  const pathParameters = pathItem.parameters ?? [];
+  for (const name of ["workspace_id", "document_id"]) {
+    const parameter = pathParameters.find((candidate) => candidate.name === name);
+    if (parameter?.in !== "path" || parameter.required !== true || parameter.schema?.type !== "string" || parameter.schema?.format !== "uuid") {
+      throw new Error(`${method.toUpperCase()} ${path} must require UUID ${name}`);
+    }
+  }
+  for (const status of successStatuses) {
+    const response = operation.responses?.[status];
+    if (response?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}` ||
+        response.headers?.["Cache-Control"]?.schema?.const !== "private, no-store") {
+      throw new Error(`invalid Document History ${status} response for ${method.toUpperCase()} ${path}`);
+    }
+  }
+  const errorStatuses = acceptsJSON
+    ? ["400", "401", "403", "404", "405", "409", "413", "415", "500", "503"]
+    : ["400", "401", "403", "404", "405", "409", "413", "500", "503"];
+  for (const status of errorStatuses) {
+    if (resolveRef(operation.responses?.[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Document History ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+}
+const historyPath = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/history";
+const comparePath = `${historyPath}/compare`;
+const previewPath = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-previews";
+const restoreProposalPath = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-proposals";
+const historyQuery = (name) => document.paths[historyPath].get.parameters.find((parameter) => parameter.name === name)?.schema;
+const compareQuery = (name) => document.paths[comparePath].get.parameters.find((parameter) => parameter.name === name)?.schema;
+if (historyQuery("limit")?.minimum !== 1 || historyQuery("limit")?.maximum !== 50 || historyQuery("limit")?.default !== 30 ||
+    historyQuery("cursor")?.maxLength !== 4096 ||
+    compareQuery("left")?.$ref !== "#/components/schemas/DocumentHistoryVersionRef" ||
+    compareQuery("right")?.$ref !== "#/components/schemas/DocumentHistoryVersionRef") {
+  throw new Error("Document History query bounds or version reference contract drifted");
+}
+for (const [path, requestSchema, idempotent] of [
+  [previewPath, "DocumentRestorePreviewRequest", false],
+  [restoreProposalPath, "DocumentRestoreProposalRequest", true],
+]) {
+  const operation = document.paths[path].post;
+  const parameters = operation.parameters ?? [];
+  if (operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== 16384 ||
+      operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}` ||
+      parameters.some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey") !== idempotent) {
+    throw new Error(`POST ${path} must retain its strict bounded${idempotent ? " idempotent" : ""} command contract`);
+  }
+}
+for (const schemaName of [
+  "DocumentHistoryExternalEntry", "DocumentHistoryManagedEntry", "DocumentHistoryCurrentEntry", "DocumentHistoryPage",
+  "DocumentHistoryCompare", "DocumentRestorePreviewRequest", "DocumentRestorePreview", "DocumentRestoreProposalRequest",
+  "DocumentRestoreProposalResult", "RestoreDocumentBinding", "RestoreDocumentRevision", "RestoreDocumentProposal",
+]) {
+  if (schemas[schemaName]?.type !== "object" || schemas[schemaName]?.additionalProperties !== false) {
+    throw new Error(`${schemaName} must retain an exact Document History object shape`);
+  }
+}
+const historyEntryRefs = schemas.DocumentHistoryEntry?.oneOf?.map((entry) => entry.$ref) ?? [];
+const proposalRefs = schemas.Proposal?.oneOf?.map((entry) => entry.$ref) ?? [];
+if (historyEntryRefs.join(",") !== "#/components/schemas/DocumentHistoryManagedEntry,#/components/schemas/DocumentHistoryExternalEntry,#/components/schemas/DocumentHistoryCurrentEntry" ||
+    schemas.DocumentHistoryEntry?.discriminator?.propertyName !== "kind" ||
+    schemas.DocumentHistoryPage.properties.items.maxItems !== 51 ||
+    schemas.DocumentHistoryPage.properties.items.items.$ref !== "#/components/schemas/DocumentHistoryEntry" ||
+    schemas.DocumentHistoryPage.properties.next_cursor.maxLength !== 4096 ||
+    schemas.DocumentHistoryCompare.properties.left_content["x-max-utf8-bytes"] !== 10485760 ||
+    schemas.DocumentHistoryCompare.properties.patch["x-max-utf8-bytes"] !== 2097152 ||
+    schemas.DocumentRestorePreview.properties.target_content["x-max-utf8-bytes"] !== 10485760 ||
+    schemas.DocumentRestorePreview.properties.patch["x-max-utf8-bytes"] !== 2097152 ||
+    schemas.DocumentHistoryObjectID.pattern !== "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" ||
+    schemas.DocumentHistoryVersionRef.pattern !== "^(?:WORKTREE|[0-9a-f]{40}|[0-9a-f]{64})$") {
+  throw new Error("Document History discriminated timeline or bounded content contract drifted");
+}
+if (!proposalRefs.includes("#/components/schemas/RestoreDocumentProposal") ||
+    schemas.Proposal.discriminator.mapping.restore_document !== "#/components/schemas/RestoreDocumentProposal" ||
+    schemas.RestoreDocumentProposal.properties.proposal_type.const !== "restore_document" ||
+    schemas.RestoreDocumentProposal.properties.risk_level.const !== "HIGH" ||
+    schemas.RestoreDocumentProposal.properties.revision.$ref !== "#/components/schemas/RestoreDocumentRevision" ||
+    schemas.RestoreDocumentRevision.properties.target_mode.const !== "REPLACE" ||
+    schemas.RestoreDocumentRevision.properties.restore.$ref !== "#/components/schemas/RestoreDocumentBinding" ||
+    schemas.RestoreDocumentBinding.properties.schema_version.const !== "document-restore/v1" ||
+    schemas.DocumentRestoreProposalResult.properties.status.enum?.join(",") !== proposalStatuses.join(",")) {
+  throw new Error("restore_document Proposal provenance or replay status contract drifted");
+}
+
+const expectedGitSyncPaths = [
+  "/api/v1/workspaces/{workspace_id}/git-remote",
+  "/api/v1/workspaces/{workspace_id}/git-remote/tests",
+  "/api/v1/workspaces/{workspace_id}/git-sync",
+  "/api/v1/workspaces/{workspace_id}/git-sync/runs",
+  "/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}",
+  "/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}/retries",
+];
+const actualGitSyncPaths = Object.keys(document.paths)
+  .filter((path) => path.includes("/git-remote") || path.includes("/git-sync"))
+  .sort();
+if (actualGitSyncPaths.join(",") !== expectedGitSyncPaths.slice().sort().join(",")) {
+  throw new Error("Git Sync path inventory drifted from the HTTP Router");
+}
+const expectedGitSyncRouteRegistrations = [
+  "DELETE /workspaces/{workspaceID}/git-remote handler.removeConfig",
+  "GET /workspaces/{workspaceID}/git-remote handler.getConfig",
+  "GET /workspaces/{workspaceID}/git-sync handler.getStatus",
+  "GET /workspaces/{workspaceID}/git-sync/runs handler.listRuns",
+  "GET /workspaces/{workspaceID}/git-sync/runs/{runID} handler.getRun",
+  "POST /workspaces/{workspaceID}/git-remote/tests handler.testConfig",
+  "POST /workspaces/{workspaceID}/git-sync/runs handler.createRun",
+  "POST /workspaces/{workspaceID}/git-sync/runs/{runID}/retries handler.retryRun",
+  "PUT /workspaces/{workspaceID}/git-remote handler.saveConfig",
+].sort();
+const actualGitSyncRouteRegistrations = [...gitSyncHandlerSource.matchAll(/router\.(Get|Put|Post|Delete)\(\s*"([^"]+)"\s*,\s*handler\.([A-Za-z0-9_]+)\s*\)/g)]
+  .map((match) => `${match[1].toUpperCase()} ${match[2]} handler.${match[3]}`)
+  .sort();
+if (actualGitSyncRouteRegistrations.join(",") !== expectedGitSyncRouteRegistrations.join(",")) {
+  throw new Error("Git Sync HTTP Router must register exactly the documented operations");
+}
+const gitSyncCapabilityNames = new Map([
+  ["ReadLocal", "READ_LOCAL"],
+  ["GitWrite", "GIT_WRITE"],
+]);
+const actualGitSyncCapabilities = new Map(
+  [...authHandlerSource.matchAll(/oneCapability\(http\.Method(Get|Put|Post|Delete),\s*"([^"]+)",\s*capability\.([A-Za-z0-9]+)\)/g)]
+    .filter((match) => match[2].includes("/git-remote") || match[2].includes("/git-sync"))
+    .map((match) => {
+      const path = match[2].replaceAll("{workspaceID}", "{workspace_id}").replaceAll("{runID}", "{run_id}");
+      return [`${match[1].toUpperCase()} ${path}`, gitSyncCapabilityNames.get(match[3])];
+    }),
+);
+if (actualGitSyncCapabilities.size !== 9 || [...actualGitSyncCapabilities.values()].some((capability) => capability === undefined)) {
+  throw new Error("Git Sync Auth capability route inventory is incomplete or unsupported");
+}
+
+const gitSyncOperations = [
+  {
+    path: "/api/v1/workspaces/{workspace_id}/git-remote", method: "get", operationId: "getGitRemoteConfig",
+    statuses: ["200", "400", "401", "403", "405", "409", "500", "503"], successStatuses: ["200"],
+    schemaName: "GitRemoteConfig", capability: "READ_LOCAL", requestSchema: null, idempotent: false,
+    errorCodes: ["GIT_SYNC_INVALID", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+  },
+  {
+    path: "/api/v1/workspaces/{workspace_id}/git-remote", method: "put", operationId: "saveGitRemoteConfig",
+    statuses: ["200", "201", "400", "401", "403", "404", "405", "409", "415", "500", "503"], successStatuses: ["200", "201"],
+    schemaName: "GitRemoteConfig", capability: "GIT_WRITE", requestSchema: "SaveGitRemoteConfigRequest", idempotent: true,
+    errorCodes: ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_REMOTE_SECRET_ACTION_INVALID", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_REMOTE_URL_INVALID", "GIT_REMOTE_BRANCH_INVALID", "GIT_SYNC_OFFLINE", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_REMOTE_REVISION_CONFLICT", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_RUN_NOT_FOUND", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+  },
+  {
+    path: "/api/v1/workspaces/{workspace_id}/git-remote", method: "delete", operationId: "removeGitRemoteConfig",
+    statuses: ["200", "400", "401", "403", "405", "409", "415", "500", "503"], successStatuses: ["200"],
+    schemaName: "GitRemoteConfig", capability: "GIT_WRITE", requestSchema: "RemoveGitRemoteConfigRequest", idempotent: true,
+    errorCodes: ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_REMOTE_REVISION_CONFLICT", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+  },
+  {
+    path: "/api/v1/workspaces/{workspace_id}/git-remote/tests", method: "post", operationId: "testGitRemoteConfig",
+    statuses: ["200", "400", "401", "403", "405", "409", "415", "500", "503"], successStatuses: ["200"],
+    schemaName: "GitRemoteTestResult", capability: "GIT_WRITE", requestSchema: "TestGitRemoteConfigRequest", idempotent: false,
+    errorCodes: ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_REMOTE_SECRET_ACTION_INVALID", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_REMOTE_URL_INVALID", "GIT_REMOTE_BRANCH_INVALID", "GIT_REMOTE_REVISION_CONFLICT", "GIT_SYNC_CONFIG_STALE", "GIT_SYNC_REF_DRIFT", "GIT_SYNC_AUTHENTICATION_FAILED", "GIT_SYNC_OFFLINE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+  },
+  {
+    path: "/api/v1/workspaces/{workspace_id}/git-sync", method: "get", operationId: "getGitSyncStatus",
+    statuses: ["200", "400", "401", "403", "405", "409", "500", "503"], successStatuses: ["200"],
+    schemaName: "GitSyncStatus", capability: "READ_LOCAL", requestSchema: null, idempotent: false,
+    errorCodes: ["GIT_SYNC_INVALID", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+  },
+  {
+    path: "/api/v1/workspaces/{workspace_id}/git-sync/runs", method: "get", operationId: "listGitSyncRuns",
+    statuses: ["200", "400", "401", "403", "405", "409", "500", "503"], successStatuses: ["200"],
+    schemaName: "GitSyncRunPage", capability: "READ_LOCAL", requestSchema: null, idempotent: false,
+    errorCodes: ["GIT_SYNC_INVALID", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+  },
+  {
+    path: "/api/v1/workspaces/{workspace_id}/git-sync/runs", method: "post", operationId: "createGitSyncRun",
+    statuses: ["200", "202", "400", "401", "403", "404", "405", "409", "500", "503"], successStatuses: ["200", "202"],
+    schemaName: "GitSyncRun", capability: "GIT_WRITE", requestSchema: null, idempotent: true,
+    errorCodes: ["GIT_SYNC_INVALID", "GIT_REMOTE_NOT_CONFIGURED", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_SYNC_CONFIG_STALE", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+  },
+  {
+    path: "/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}", method: "get", operationId: "getGitSyncRun",
+    statuses: ["200", "400", "401", "403", "404", "405", "409", "500", "503"], successStatuses: ["200"],
+    schemaName: "GitSyncRun", capability: "READ_LOCAL", requestSchema: null, idempotent: false,
+    errorCodes: ["GIT_SYNC_INVALID", "GIT_SYNC_RUN_NOT_FOUND", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+  },
+  {
+    path: "/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}/retries", method: "post", operationId: "retryGitSyncRun",
+    statuses: ["200", "202", "400", "401", "403", "404", "405", "409", "415", "500", "503"], successStatuses: ["200", "202"],
+    schemaName: "GitSyncRun", capability: "GIT_WRITE", requestSchema: "RetryGitSyncRunRequest", idempotent: true,
+    errorCodes: ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_SYNC_RUN_NOT_FOUND", "GIT_SYNC_RUN_TRANSITION_CONFLICT", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_REMOTE_NOT_CONFIGURED", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_SYNC_CONFIG_STALE", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
+  },
+];
+const resolveParameter = (parameter) => {
+  if (!parameter?.$ref) return parameter;
+  const name = parameter.$ref.split("/").at(-1);
+  return document.components?.parameters?.[name];
+};
+for (const { path, method, operationId, statuses, successStatuses, schemaName, capability, requestSchema, idempotent, errorCodes } of gitSyncOperations) {
+  const pathItem = document.paths[path];
+  const operation = pathItem?.[method];
+  if (!operation || operation.operationId !== operationId || operation.security !== undefined || operation["x-required-capability"] !== capability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${capability}`);
+  }
+  if (actualGitSyncCapabilities.get(`${method.toUpperCase()} ${path}`) !== capability) {
+    throw new Error(`${method.toUpperCase()} ${path} OpenAPI capability drifted from Auth middleware`);
+  }
+  if (Object.keys(operation.responses ?? {}).sort().join(",") !== statuses.slice().sort().join(",") ||
+      operation["x-error-codes"]?.join(",") !== errorCodes.join(",")) {
+    throw new Error(`${method.toUpperCase()} ${path} response status or stable error-code contract drifted`);
+  }
+  for (const parameter of pathItem.parameters ?? []) {
+    const resolved = resolveParameter(parameter);
+    if (resolved?.name === "workspace_id" && (resolved.in !== "path" || resolved.required !== true || resolved.schema?.format !== "uuid")) {
+      throw new Error(`${method.toUpperCase()} ${path} must bind a UUID workspace_id`);
+    }
+    if (resolved?.name === "run_id" && (resolved.in !== "path" || resolved.required !== true || resolved.schema?.format !== "uuid")) {
+      throw new Error(`${method.toUpperCase()} ${path} must bind a UUID run_id`);
+    }
+  }
+  if (!(pathItem.parameters ?? []).some((parameter) => resolveParameter(parameter)?.name === "workspace_id")) {
+    throw new Error(`${method.toUpperCase()} ${path} must bind workspace_id`);
+  }
+  const hasRunID = (pathItem.parameters ?? []).some((parameter) => resolveParameter(parameter)?.name === "run_id");
+  if (hasRunID !== path.includes("{run_id}")) {
+    throw new Error(`${method.toUpperCase()} ${path} run_id binding drifted`);
+  }
+  for (const status of successStatuses) {
+    const response = operation.responses?.[status];
+    if (response?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${schemaName}` ||
+        response.headers?.["Cache-Control"]?.schema?.const !== "private, no-store") {
+      throw new Error(`invalid Git Sync ${status} response for ${method.toUpperCase()} ${path}`);
+    }
+  }
+  for (const status of statuses.filter((status) => Number(status) >= 400)) {
+    if (resolveRef(operation.responses?.[status])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`invalid Git Sync ${status} Problem schema for ${method.toUpperCase()} ${path}`);
+    }
+  }
+  if (requestSchema === null) {
+    if (operation.requestBody !== undefined) {
+      throw new Error(`${method.toUpperCase()} ${path} must not define a request body`);
+    }
+  } else if (operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== 32768 ||
+      operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}` ||
+      Object.keys(operation.requestBody?.content ?? {}).join(",") !== "application/json") {
+    throw new Error(`${method.toUpperCase()} ${path} must require its strict bounded JSON command body`);
+  }
+  const hasIdempotencyKey = (operation.parameters ?? []).some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey");
+  if (hasIdempotencyKey !== idempotent) {
+    throw new Error(`${method.toUpperCase()} ${path} Idempotency-Key contract drifted`);
+  }
+}
+if (schemas.SaveGitRemoteConfigRequest.required?.join(",") !== "expected_revision,remote_url,branch,auto_sync,token" ||
+    schemas.TestGitRemoteConfigRequest.required?.join(",") !== "expected_revision,remote_url,branch,token" ||
+    schemas.RemoveGitRemoteConfigRequest.required?.join(",") !== "expected_revision" ||
+    schemas.RemoveGitRemoteConfigRequest.properties?.expected_revision?.minimum !== 1 ||
+    schemas.RetryGitSyncRunRequest.required?.join(",") !== "expected_version" ||
+    schemas.RetryGitSyncRunRequest.properties?.expected_version?.minimum !== 1 ||
+    schemas.TestGitRemoteConfigRequest.properties?.token?.$ref !== "#/components/schemas/GitSyncTestTokenAction") {
+  throw new Error("Git Sync CAS request contracts drifted");
+}
+for (const schemaName of [
+  "GitSyncKeepTokenAction", "GitSyncReplaceTokenAction", "GitSyncClearTokenAction", "SaveGitRemoteConfigRequest",
+  "RemoveGitRemoteConfigRequest", "TestGitRemoteConfigRequest", "RetryGitSyncRunRequest", "GitRemoteConfig",
+  "GitRemoteTestResult", "GitSyncFileChange", "GitSyncRun", "GitSyncStatus", "GitSyncRunPage",
+]) {
+  if (schemas[schemaName]?.type !== "object" || schemas[schemaName]?.additionalProperties !== false) {
+    throw new Error(`${schemaName} must remain a strict Git Sync object shape`);
+  }
+}
+for (const schemaName of ["GitRemoteConfig", "GitRemoteTestResult", "GitSyncFileChange", "GitSyncRun", "GitSyncStatus", "GitSyncRunPage"]) {
+  if (schemas[schemaName].properties?.token !== undefined) {
+    throw new Error(`${schemaName} must remain credential-free`);
+  }
+}
+const gitSyncResponseShapes = [
+  [
+    "GitRemoteConfig",
+    ["workspace_id", "configured", "remote_url", "branch", "auto_sync", "token_configured", "revision", "created_at", "updated_at", "replayed"],
+    ["workspace_id", "configured", "remote_url", "branch", "auto_sync", "token_configured", "revision", "created_at", "updated_at"],
+  ],
+  ["GitRemoteTestResult", ["status", "remote_url", "branch"], ["status", "remote_url", "branch"]],
+  ["GitSyncFileChange", ["path", "old_path", "kind"], ["path", "old_path", "kind"]],
+  [
+    "GitSyncRun",
+    ["id", "workspace_id", "config_revision", "remote_url", "branch", "trigger", "retry_of_run_id", "status", "direction", "failure_class", "error_code", "retryable", "expected_head_oid", "expected_remote_oid", "verified_head_oid", "verified_remote_oid", "changed_files", "index_status", "index_error_code", "index_retryable", "index_version_id", "attempt_count", "version", "created_at", "updated_at", "completed_at", "replayed"],
+    ["id", "workspace_id", "config_revision", "remote_url", "branch", "trigger", "retry_of_run_id", "status", "direction", "failure_class", "error_code", "retryable", "expected_head_oid", "expected_remote_oid", "verified_head_oid", "verified_remote_oid", "changed_files", "index_status", "index_error_code", "index_retryable", "index_version_id", "attempt_count", "version", "created_at", "updated_at", "completed_at"],
+  ],
+  ["GitSyncStatus", ["config", "current_run"], ["config", "current_run"]],
+  ["GitSyncRunPage", ["items", "next_cursor"], ["items"]],
+];
+for (const [schemaName, properties, required] of gitSyncResponseShapes) {
+  if (Object.keys(schemas[schemaName].properties ?? {}).join(",") !== properties.join(",") ||
+      schemas[schemaName].required?.join(",") !== required.join(",")) {
+    throw new Error(`${schemaName} response fields drifted from the credential-free HTTP DTO`);
+  }
+}
+const nullableOIDRef = (property) => property?.oneOf?.[0]?.$ref === "#/components/schemas/GitSyncOID" &&
+  property.oneOf?.[1]?.type === "null";
+if (schemas.GitRemoteConfig.properties?.token_configured?.type !== "boolean" ||
+    schemas.GitRemoteConfig.properties?.remote_url?.oneOf?.[0]?.$ref !== "#/components/schemas/GitSyncHTTPSRemoteURL" ||
+    schemas.GitRemoteConfig.properties?.remote_url?.oneOf?.[1]?.type !== "null" ||
+    schemas.GitSyncRunPage.properties?.items?.maxItems !== 100 ||
+    schemas.GitSyncRunPage.properties?.next_cursor?.maxLength !== 2048 ||
+    schemas.GitSyncRun.properties?.changed_files?.maxItems !== 500 ||
+    !["expected_head_oid", "expected_remote_oid", "verified_head_oid", "verified_remote_oid"].every((name) => nullableOIDRef(schemas.GitSyncRun.properties?.[name])) ||
+    schemas.GitSyncTokenAction?.oneOf?.length !== 3 || schemas.GitSyncTestTokenAction?.oneOf?.length !== 2 ||
+    schemas.GitSyncTokenAction.oneOf.map((entry) => entry.$ref).join(",") !== "#/components/schemas/GitSyncKeepTokenAction,#/components/schemas/GitSyncReplaceTokenAction,#/components/schemas/GitSyncClearTokenAction" ||
+    schemas.GitSyncTestTokenAction.oneOf.map((entry) => entry.$ref).join(",") !== "#/components/schemas/GitSyncKeepTokenAction,#/components/schemas/GitSyncReplaceTokenAction" ||
+    schemas.GitSyncReplaceTokenAction.properties?.value?.writeOnly !== true ||
+    schemas.GitSyncReplaceTokenAction.properties?.value?.["x-max-utf8-bytes"] !== 16384 ||
+    schemas.GitSyncHTTPSRemoteInput?.["x-max-utf8-bytes"] !== 2048 ||
+    document.components.parameters.GitSyncCursor.schema?.maxLength !== 2048 ||
+    document.components.parameters.GitSyncLimit.schema?.minimum !== 1 ||
+    document.components.parameters.GitSyncLimit.schema?.maximum !== 100 ||
+    document.components.parameters.GitSyncLimit.schema?.default !== 30 ||
+    schemas.GitSyncOID?.pattern !== "^(?:[0-9a-f]{40}|[0-9a-f]{64})$") {
+  throw new Error("Git Sync credential masking or bounded response contract drifted");
+}
+for (const code of ["DOCUMENT_RESTORE_STALE", "DOCUMENT_RESTORE_DIRTY_WORKTREE", "IDEMPOTENCY_KEY_REUSED"]) {
+  if (!document.paths[restoreProposalPath].post["x-error-codes"]?.includes(code)) {
+    throw new Error(`missing Document restore Proposal error code: ${code}`);
+  }
 }
 if (schemas.ProposalRiskLevel.type !== "string" || schemas.ProposalRiskLevel.enum?.join(",") !== proposalRiskLevels.join(",") ||
     queryParameter("/api/v1/workspaces/{workspace_id}/proposals", "risk")?.$ref !== "#/components/schemas/ProposalRiskLevel") {
@@ -754,17 +1518,29 @@ for (const schemaName of ["KnowledgeChangeProposal", "PublishArtifactProposal", 
   }
 }
 const currentContent = schemas.ProposalCurrentContent;
-for (const field of ["proposal_id", "workspace_id", "target_path", "content", "current_hash", "base_hash", "base_hash_match"]) {
+const targetBasePattern = "^(?:[0-9a-f]{64}|workspace-target-absent/v1:[0-9a-f]{64})$";
+const zeroAbsenceToken = `workspace-target-absent/v1:${"0".repeat(64)}`;
+const targetModes = "REPLACE,CREATE_ONLY";
+for (const field of ["proposal_id", "workspace_id", "target_path", "target_mode", "content", "current_hash", "base_hash", "base_hash_match"]) {
   if (!currentContent.required.includes(field)) throw new Error(`ProposalCurrentContent must require ${field}`);
 }
 if (currentContent.additionalProperties !== false || currentContent.properties.content.maxLength !== 1048576 ||
     currentContent.properties.proposal_id.format !== "uuid" || currentContent.properties.workspace_id.format !== "uuid" ||
     currentContent.properties.target_path.minLength !== 1 ||
-    currentContent.properties.current_hash.pattern !== "^[0-9a-f]{64}$" || currentContent.properties.base_hash.pattern !== "^[0-9a-f]{64}$" ||
+    currentContent.properties.target_mode.enum?.join(",") !== targetModes ||
+    currentContent.properties.current_hash.pattern !== targetBasePattern || currentContent.properties.base_hash.pattern !== targetBasePattern ||
+    currentContent.properties.current_hash.not?.const !== zeroAbsenceToken || currentContent.properties.base_hash.not?.const !== zeroAbsenceToken ||
     currentContent.properties.base_hash_match.type !== "boolean" ||
-    currentContent["x-invariant"] !== "base_hash_match == (current_hash == base_hash)" ||
+    currentContent["x-invariant"] !== "base_hash_match == (current_hash == base_hash); CREATE_ONLY requires empty content and matching non-zero workspace-target-absent/v1 tokens." ||
     document.paths["/api/v1/proposals/{proposal_id}/current-content"].get.responses["200"].headers?.["Cache-Control"]?.schema?.const !== "no-store") {
   throw new Error("Proposal current-content body or no-store contract drifted");
+}
+for (const schemaName of ["ProposalRevision", "ApplyPreflightResult"]) {
+  const schema = schemas[schemaName];
+  if (!schema.required.includes("target_mode") || schema.properties.target_mode.enum?.join(",") !== targetModes ||
+      schema.properties.base_hash.pattern !== targetBasePattern || schema.properties.base_hash.not?.const !== zeroAbsenceToken) {
+    throw new Error(`${schemaName} must bind REPLACE and CREATE_ONLY target baselines`);
+  }
 }
 if (!schemas.SystemStatus.required.includes("rag") || schemas.SystemStatus.properties.rag.$ref !== "#/components/schemas/RAGCapabilityStatus" ||
     schemas.RAGCapabilityStatus.additionalProperties !== false) {
@@ -792,7 +1568,7 @@ if (!schemas.SystemStatus.required.includes("knowledge_timeline") ||
     schemas.SystemStatus.properties.knowledge_timeline.$ref !== "#/components/schemas/OptionalCapabilityStatus") {
   throw new Error("SystemStatus must expose the Knowledge Timeline capability state");
 }
-for (const capabilityName of ["review", "memory", "interview"]) {
+for (const capabilityName of ["review", "memory", "interview", "authoring", "capture", "organizing"]) {
   if (!schemas.SystemStatus.required.includes(capabilityName) ||
       schemas.SystemStatus.properties[capabilityName]?.$ref !== "#/components/schemas/OptionalCapabilityStatus") {
     throw new Error(`SystemStatus must expose the strict ${capabilityName} capability state`);
@@ -1845,7 +2621,7 @@ if (artifactLimit?.minimum !== 1 || artifactLimit.maximum !== 100 || artifactLim
   throw new Error("Artifact cursor and page bounds drifted from the HTTP handler");
 }
 for (const schemaName of [
-  "ArtifactOutlineSection", "ArtifactGap", "ArtifactCoverage", "ArtifactGenerationMetadata", "ArtifactCitationInput", "ArtifactCitation",
+  "ArtifactOutlineSection", "ArtifactGap", "ArtifactCoverage", "ArtifactGenerationMetadata", "ArtifactCitationInput", "ArtifactCitation", "ArtifactDocumentSource",
   "ArtifactSectionInput", "ArtifactSection", "ArtifactPlanRequest", "ArtifactOutlineRequest", "ArtifactRevisionRequest", "ArtifactRecordSectionRequest",
   "ArtifactSectionGenerationRequest", "ArtifactSectionGenerationAcceptance", "ArtifactSectionGenerationReadItem", "ArtifactSectionGenerationReadResponse",
   "ArtifactRevision", "Artifact", "ArtifactPage", "ArtifactExport", "ArtifactPublication", "ArtifactCommandResult",
@@ -1948,6 +2724,17 @@ if (Object.keys(artifactCitationInput.properties).sort().join(",") !== "chunk_id
     schemas.ArtifactCitation.properties.verified.const !== true ||
     !schemas.ArtifactCitation.required.includes("verified_content_hash") || !schemas.ArtifactCitation.required.includes("excerpt")) {
   throw new Error("Artifact Citation ingress must remain server-verified and response-only");
+}
+const artifactDocumentSource = schemas.ArtifactDocumentSource;
+if (artifactDocumentSource?.type !== "object" || artifactDocumentSource.additionalProperties !== false ||
+    artifactDocumentSource.required?.join(",") !== "document_id,article_revision_id,revision_no,verified_content_hash,verified" ||
+    artifactDocumentSource.properties?.document_id?.format !== "uuid" || artifactDocumentSource.properties?.article_revision_id?.format !== "uuid" ||
+    artifactDocumentSource.properties?.revision_no?.minimum !== 1 || artifactDocumentSource.properties?.verified_content_hash?.pattern !== "^[0-9a-f]{64}$" ||
+    artifactDocumentSource.properties?.verified?.const !== true ||
+    !schemas.ArtifactSection.required?.includes("document_sources") ||
+    schemas.ArtifactSection.properties?.document_sources?.type !== "array" ||
+    schemas.ArtifactSection.properties?.document_sources?.items?.$ref !== "#/components/schemas/ArtifactDocumentSource") {
+  throw new Error("Artifact Section must expose exact verified Document Sources alongside Citations");
 }
 const artifactCoverage = schemas.ArtifactCoverage;
 if (artifactCoverage.properties.status.enum.join(",") !== "COVERED,PARTIAL,GAP" ||
@@ -2107,14 +2894,17 @@ if (schemas.ImpactProposalDraft.properties.target_type?.enum?.join(",") !== impa
   throw new Error("Impact Proposal draft authorization boundary drifted");
 }
 if (schemas.Proposal.oneOf?.map((item) => item.$ref).join(",") !==
-      "#/components/schemas/FilePatchProposal,#/components/schemas/KnowledgeChangeProposal,#/components/schemas/PublishArtifactProposal,#/components/schemas/DownstreamUpdateProposal" ||
+      "#/components/schemas/FilePatchProposal,#/components/schemas/RestoreDocumentProposal,#/components/schemas/KnowledgeChangeProposal,#/components/schemas/PublishArtifactProposal,#/components/schemas/DownstreamUpdateProposal" ||
     schemas.Proposal.discriminator?.propertyName !== "proposal_type" ||
     schemas.Proposal.discriminator?.mapping?.file_patch !== "#/components/schemas/FilePatchProposal" ||
+    schemas.Proposal.discriminator?.mapping?.restore_document !== "#/components/schemas/RestoreDocumentProposal" ||
     schemas.Proposal.discriminator?.mapping?.knowledge_change !== "#/components/schemas/KnowledgeChangeProposal" ||
     schemas.Proposal.discriminator?.mapping?.publish_artifact !== "#/components/schemas/PublishArtifactProposal" ||
     schemas.Proposal.discriminator?.mapping?.downstream_update !== "#/components/schemas/DownstreamUpdateProposal" ||
     !schemas.FilePatchProposal.required.includes("proposal_type") ||
     schemas.FilePatchProposal.properties.proposal_type?.const !== "file_patch" ||
+    !schemas.RestoreDocumentProposal.required.includes("proposal_type") ||
+    schemas.RestoreDocumentProposal.properties.proposal_type?.const !== "restore_document" ||
     !schemas.KnowledgeChangeProposal.required.includes("proposal_type") ||
     schemas.KnowledgeChangeProposal.properties.proposal_type.const !== "knowledge_change" ||
     !schemas.PublishArtifactProposal.required.includes("proposal_type") ||
@@ -2602,6 +3392,135 @@ if (schemas.StartInterviewRequest.required?.join(",") !== "workspace_id,config" 
     schemas.UpdateLearningPathStatusRequest.properties.status.enum?.join(",") !== "ACTIVE,PAUSED,COMPLETED" || schemas.UpdateLearningPathStepRequest.properties.status.enum?.join(",") !== "IN_PROGRESS,COMPLETED,SKIPPED" ||
     schemas.UpdateLearningPathStatusRequest.properties.expected_version.minimum !== 1 || schemas.UpdateLearningPathStepRequest.properties.expected_version.minimum !== 1) {
   throw new Error("Interview or Learning Path command shape drifted");
+}
+const organizingOperations = [
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts", "post", "201", "OrganizingDraftCommandResult", "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}", "get", "200", "OrganizingDraftEnvelope", "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}", "put", "200", "OrganizingDraftCommandResult", "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/suggestions", "post", "200", "OrganizingDraftCommandResult", "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials", "post", "201", "OrganizingDraftCommandResult", "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials/{material_id}", "patch", "200", "OrganizingDraftCommandResult", "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials/{material_id}", "delete", "200", "OrganizingDraftCommandResult", "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/confirm", "post", "202", "OrganizingConfirmResult", "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/materials/search", "get", "200", "OrganizingMaterialSearchPage", "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/snapshots/{snapshot_id}", "get", "200", "OrganizingSnapshotEnvelope", "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates", "get", "200", "OrganizingTemplatePage", "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates", "post", "201", "OrganizingTemplateCommandResult", "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}", "get", "200", "OrganizingTemplateEnvelope", "READ_LOCAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/clone", "post", "201", "OrganizingTemplateCommandResult", "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/revisions", "post", "201", "OrganizingTemplateCommandResult", "WRITE_PROPOSAL"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/runs/{snapshot_id}", "get", "200", "OrganizingRunEnvelope", "READ_LOCAL"],
+];
+for (const [path, method, status, schema, capability] of organizingOperations) {
+  const operation = document.paths[path]?.[method];
+  if (!operation || operation.security !== undefined || operation["x-required-capability"] !== capability) {
+    throw new Error(`${method.toUpperCase()} ${path} must inherit business authentication and require ${capability}`);
+  }
+  if (operation.responses?.[status]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${schema}`) {
+    throw new Error(`invalid Organizing ${status} success schema for ${method.toUpperCase()} ${path}`);
+  }
+  if (resolveRef(operation.responses?.["405"])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+    throw new Error(`invalid Organizing 405 response for ${method.toUpperCase()} ${path}`);
+  }
+}
+for (const [path, method, requestSchema, bodyLimit] of [
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts", "post", "OrganizingCreateDraftRequest", 16384],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}", "put", "OrganizingUpdateDraftRequest", 16384],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/suggestions", "post", "OrganizingSuggestRequest", 16384],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials", "post", "OrganizingAddMaterialRequest", 16384],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials/{material_id}", "patch", "OrganizingMaterialSelectionRequest", 16384],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials/{material_id}", "delete", "OrganizingExpectedVersionRequest", 16384],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/confirm", "post", "OrganizingConfirmRequest", 16384],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates", "post", "OrganizingTemplateCreateRequest", 65536],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/clone", "post", "OrganizingTemplateCloneRequest", 16384],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/revisions", "post", "OrganizingTemplateReviseRequest", 65536],
+]) {
+  const operation = document.paths[path][method];
+  if (!operation.parameters?.some((item) => item.$ref === "#/components/parameters/IdempotencyKey") ||
+      operation.requestBody?.required !== true || operation.requestBody?.["x-max-body-bytes"] !== bodyLimit ||
+      operation.requestBody?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${requestSchema}`) {
+    throw new Error(`Organizing strict idempotent mutation contract drifted for ${method.toUpperCase()} ${path}`);
+  }
+}
+for (const [path, method] of [
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts", "post"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials", "post"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates", "post"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/clone", "post"],
+  ["/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/revisions", "post"],
+]) {
+  const operation = document.paths[path][method];
+  const createdSchema = operation.responses?.["201"]?.content?.["application/json"]?.schema?.$ref;
+  if (!createdSchema || operation.responses?.["200"]?.content?.["application/json"]?.schema?.$ref !== createdSchema) {
+    throw new Error(`Organizing create/replay response schemas drifted for ${method.toUpperCase()} ${path}`);
+  }
+}
+const organizingAddBranches = schemas.OrganizingAddMaterialRequest?.oneOf?.map((item) => schemas[item.$ref?.replace("#/components/schemas/", "")]);
+if (organizingAddBranches?.length !== 4 || organizingAddBranches.some((branch) => branch?.additionalProperties !== false) ||
+    organizingAddBranches.some((branch) => ["availability", "evidence", "content_hash", "query_hash", "read_model_revision", "title", "score"].some((field) => branch.properties?.[field] !== undefined))) {
+  throw new Error("Organizing Add Material must remain an identity-only four-kind discriminated union");
+}
+const organizingSearchOperation = document.paths["/api/v1/workspaces/{workspace_id}/organizing/materials/search"]?.get;
+const organizingSearchParameters = Object.fromEntries((organizingSearchOperation?.parameters ?? []).map((item) => [item.name, item]));
+const organizingSearchBranches = schemas.OrganizingMaterialSearchReference?.oneOf?.map((item) => schemas[item.$ref?.replace("#/components/schemas/", "")]);
+if (organizingSearchParameters.q?.required !== true || organizingSearchParameters.q?.schema?.["x-min-utf8-bytes"] !== 2 || organizingSearchParameters.q?.schema?.["x-max-utf8-bytes"] !== 256 ||
+    organizingSearchParameters.kind?.required !== true || organizingSearchParameters.kind?.schema?.$ref !== "#/components/schemas/OrganizingMaterialKind" ||
+    organizingSearchParameters.limit?.schema?.minimum !== 1 || organizingSearchParameters.limit?.schema?.maximum !== 25 || organizingSearchParameters.limit?.schema?.default !== 12 ||
+    schemas.OrganizingMaterialSearchPage?.additionalProperties !== false || schemas.OrganizingMaterialSearchPage?.properties?.items?.maxItems !== 25 ||
+    schemas.OrganizingMaterialSearchItem?.additionalProperties !== false || schemas.OrganizingMaterialSearchItem?.required?.join(",") !== "workspace_id,kind,title,availability,reference" ||
+    schemas.OrganizingMaterialSearchItem?.properties?.evidence !== undefined || organizingSearchBranches?.length !== 4 ||
+    organizingSearchBranches.some((branch) => branch?.additionalProperties !== false || ["version", "content_hash", "query_hash", "read_model_revision", "evidence"].some((field) => branch.properties?.[field] !== undefined))) {
+  throw new Error("Organizing material search must remain bounded, Workspace-scoped, and identity-only");
+}
+if (schemas.OrganizingUpdateDraftRequest?.additionalProperties !== false ||
+    schemas.OrganizingUpdateDraftRequest.required?.join(",") !== "expected_version,intent,template_revision_id" ||
+    schemas.OrganizingUpdateDraftRequest.properties?.template_revision_id?.format !== "uuid" ||
+    schemas.OrganizingMaterialSelectionRequest?.additionalProperties !== false ||
+    schemas.OrganizingMaterialSelectionRequest.required?.join(",") !== "expected_version,selected" ||
+    schemas.OrganizingMaterialSelectionRequest.properties?.selected?.type !== "boolean" ||
+    schemas.OrganizingDraft.required?.join(",") !== "id,workspace_id,intent,status,template_revision_id,confirmed_snapshot_id,version,materials,created_at,updated_at") {
+  throw new Error("Organizing Draft must preserve CAS and exact Template Revision selection");
+}
+if (schemas.OrganizingCreateDraftRequest?.properties?.intent?.minLength !== 1 ||
+    schemas.OrganizingTemplateSection?.properties?.key?.maxLength !== 64 ||
+    schemas.OrganizingPresentationPolicy?.properties?.tone?.maxLength !== 128 ||
+    schemas.OrganizingOutputDefaults?.properties?.filename_pattern?.maxLength !== 256 ||
+    schemas.OrganizingTemplateDeclaration?.properties?.description?.minLength !== 1) {
+  throw new Error("Organizing OpenAPI input bounds must match the domain declaration validator");
+}
+const organizingGovernanceSections = schemas.OrganizingTemplateDeclaration?.properties?.sections?.allOf ?? [];
+const organizingGovernanceKeys = organizingGovernanceSections.map((entry) => entry.contains?.properties?.key?.const);
+if (organizingGovernanceSections.length !== 3 || organizingGovernanceKeys.join(",") !== "conflicts,gaps,sources" ||
+    organizingGovernanceSections.some((entry) => entry.minContains !== 1 || entry.maxContains !== 1 ||
+      entry.contains?.properties?.required?.const !== true || entry.contains?.required?.join(",") !== "key,required")) {
+  throw new Error("Organizing templates must preserve the required conflicts, gaps, and sources governance sections");
+}
+if (schemas.OrganizingEvidence?.required?.join(",") !== "index_version_id,chunk_id,source_version_id,source_span_id,content_hash,excerpt_hash" ||
+    schemas.OrganizingEvidence.additionalProperties !== false || schemas.OrganizingMaterialReference?.properties?.evidence !== undefined) {
+  throw new Error("Organizing Evidence must remain a complete separate Citation tuple");
+}
+if (schemas.OrganizingConfirmResult?.properties?.dispatch_status?.const !== "PENDING" ||
+    schemas.OrganizingConfirmResult.properties?.workflow_run_id !== undefined || schemas.OrganizingConfirmResult.properties?.outbox_id !== undefined ||
+    document.paths["/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/confirm"].post.responses?.["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/OrganizingConfirmResult") {
+  throw new Error("Organizing confirmation must expose immutable Snapshot plus true pending dispatch without inventing a Run");
+}
+const organizingRunBranches = schemas.OrganizingRun?.oneOf ?? [];
+const organizingStartedBranch = organizingRunBranches.find((branch) => branch.properties?.dispatch_status?.const === "STARTED");
+const organizingPendingBranch = organizingRunBranches.find((branch) => branch.properties?.dispatch_status?.const === "PENDING");
+const organizingPoisonedBranch = organizingRunBranches.find((branch) => branch.properties?.dispatch_status?.const === "POISONED");
+const organizingStartedStates = organizingStartedBranch?.oneOf ?? [];
+const organizingSucceededState = organizingStartedStates.find((branch) => branch.properties?.workflow_status?.const === "succeeded");
+const organizingActiveState = organizingStartedStates.find((branch) => branch.properties?.result?.type === "null");
+if (schemas.OrganizingRun?.properties?.dispatch_status?.enum?.join(",") !== "PENDING,STARTED,POISONED" ||
+    !schemas.OrganizingRun.required?.includes("workflow_status") || schemas.OrganizingRun.properties?.attempt_count?.maximum !== 1000 ||
+    organizingRunBranches.length !== 3 || organizingStartedBranch?.properties?.workflow_status?.type !== "string" ||
+    organizingStartedBranch?.properties?.binding?.$ref !== "#/components/schemas/OrganizingRunBinding" ||
+    organizingStartedStates.length !== 2 || organizingSucceededState?.properties?.result?.$ref !== "#/components/schemas/OrganizingRunResult" ||
+    organizingActiveState?.properties?.workflow_status?.enum?.includes("succeeded") !== false ||
+    organizingPendingBranch?.properties?.workflow_status?.type !== "null" || organizingPendingBranch?.properties?.retryable?.const !== true ||
+    organizingPoisonedBranch?.properties?.workflow_status?.type !== "null" || organizingPoisonedBranch?.properties?.retryable?.const !== false ||
+    resolveRef(document.paths["/api/v1/workspaces/{workspace_id}/organizing/runs/{snapshot_id}"].get.responses?.["404"])?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+  throw new Error("Organizing Run must expose true Outbox and Workflow states without inferring either projection");
 }
 for (const field of ["source_ids", "source_version_ids", "path_prefixes"]) {
   if (schemas.SearchFilter.properties?.[field]?.uniqueItems === true) {

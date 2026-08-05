@@ -17,7 +17,9 @@ import (
 type ProposalType string
 
 const (
-	ProposalTypeFilePatch       ProposalType = "file_patch"
+	ProposalTypeFilePatch ProposalType = "file_patch"
+	// ProposalTypeRestoreDocument restores a published Document through append-only Safe Writeback.
+	ProposalTypeRestoreDocument ProposalType = "restore_document"
 	ProposalTypeKnowledgeChange ProposalType = "knowledge_change"
 	// ProposalTypePublishArtifact freezes an approved Artifact revision for a
 	// future formal-knowledge publication capability.
@@ -33,6 +35,8 @@ const (
 	PublishArtifactSchemaVersion = "artifact-publication/v1"
 	// DownstreamUpdateSchemaVersion 是 Impact 下游更新 Proposal 的首版冻结契约。
 	DownstreamUpdateSchemaVersion = "impact-downstream-update/v1"
+	// RestoreDocumentSchemaVersion is the immutable Document restore intent contract.
+	RestoreDocumentSchemaVersion = "document-restore/v1"
 	// DownstreamUpdateApplyUnavailableCode 表示尚未提供下游更新的执行能力。
 	DownstreamUpdateApplyUnavailableCode = "DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE"
 )
@@ -144,6 +148,19 @@ type KnowledgeChange struct {
 	SchemaVersion string                 `json:"schema_version"`
 }
 
+// RestoreDocument freezes the server-derived restore target and optimistic baselines.
+type RestoreDocument struct {
+	WorkspaceID             foundation.ID `json:"workspace_id"`
+	DocumentID              foundation.ID `json:"document_id"`
+	TargetCommit            string        `json:"target_commit"`
+	ExpectedHead            string        `json:"expected_head"`
+	ExpectedDocumentVersion int64         `json:"expected_document_version"`
+	PreviewHash             string        `json:"preview_hash"`
+	CurrentContentHash      string        `json:"current_content_hash"`
+	TargetContentHash       string        `json:"target_content_hash"`
+	SchemaVersion           string        `json:"schema_version"`
+}
+
 var (
 	// ErrKnowledgeChangeInvalid 表示知识变更结构化载荷不满足冻结契约。
 	ErrKnowledgeChangeInvalid = errors.New("knowledge change payload is invalid")
@@ -153,6 +170,8 @@ var (
 	ErrPublishArtifactInvalid = errors.New("publish artifact payload is invalid")
 	// ErrDownstreamUpdateInvalid 表示下游更新载荷未绑定当前 Impact 与 owner 快照。
 	ErrDownstreamUpdateInvalid = errors.New("downstream update payload is invalid")
+	// ErrRestoreDocumentInvalid means the frozen restore payload is incomplete or inconsistent.
+	ErrRestoreDocumentInvalid = errors.New("restore document payload is invalid")
 )
 
 // NewDownstreamUpdateApplyUnavailableError 返回下游更新禁止进入任何写回链路的稳定错误。
@@ -172,6 +191,76 @@ func NormalizeProposalType(value ProposalType) ProposalType {
 		return ProposalTypeFilePatch
 	}
 	return trimmed
+}
+
+// ProposalSupportsFileWriteback reports whether a Proposal uses the governed file writeback path.
+func ProposalSupportsFileWriteback(value ProposalType) bool {
+	normalized := NormalizeProposalType(value)
+	return normalized == ProposalTypeFilePatch || normalized == ProposalTypeRestoreDocument
+}
+
+// ValidateRestoreDocument canonicalizes and validates one immutable restore intent.
+func ValidateRestoreDocument(restore RestoreDocument) (RestoreDocument, error) {
+	workspaceID, workspaceErr := foundation.ParseID(string(restore.WorkspaceID))
+	documentID, documentErr := foundation.ParseID(string(restore.DocumentID))
+	restore.SchemaVersion = strings.TrimSpace(restore.SchemaVersion)
+	restore.TargetCommit = strings.ToLower(strings.TrimSpace(restore.TargetCommit))
+	restore.ExpectedHead = strings.ToLower(strings.TrimSpace(restore.ExpectedHead))
+	restore.PreviewHash = strings.ToLower(strings.TrimSpace(restore.PreviewHash))
+	restore.CurrentContentHash = strings.ToLower(strings.TrimSpace(restore.CurrentContentHash))
+	restore.TargetContentHash = strings.ToLower(strings.TrimSpace(restore.TargetContentHash))
+	if workspaceErr != nil || documentErr != nil || workspaceID == documentID ||
+		restore.SchemaVersion != RestoreDocumentSchemaVersion || restore.ExpectedDocumentVersion < 1 ||
+		!ValidGitObjectID(restore.TargetCommit) || !ValidGitObjectID(restore.ExpectedHead) ||
+		len(restore.TargetCommit) != len(restore.ExpectedHead) || restore.TargetCommit == restore.ExpectedHead ||
+		!ValidHash(restore.PreviewHash) || !ValidHash(restore.CurrentContentHash) || !ValidHash(restore.TargetContentHash) ||
+		restore.CurrentContentHash == restore.TargetContentHash {
+		return RestoreDocument{}, ErrRestoreDocumentInvalid
+	}
+	restore.WorkspaceID, restore.DocumentID = workspaceID, documentID
+	return restore, nil
+}
+
+// ComputeContentHash returns the exact-byte SHA-256 used by restore payloads.
+func ComputeContentHash(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
+// ComputeRestoreDocumentRequestHash binds idempotency to all restore facts and exact target bytes.
+func ComputeRestoreDocumentRequestHash(workspaceID foundation.ID, restore RestoreDocument, targetPath, content, evidence string, riskLevel ProposalRiskLevel, risk, rollback string) (string, error) {
+	canonical, err := ValidateRestoreDocument(restore)
+	if err != nil || canonical.WorkspaceID != workspaceID {
+		return "", ErrRestoreDocumentInvalid
+	}
+	targetPath, pathErr := ValidateTargetPath(targetPath)
+	riskLevel, riskErr := ValidateProposalRiskLevelForType(ProposalTypeRestoreDocument, riskLevel)
+	if pathErr != nil || strings.TrimSpace(content) == "" || strings.TrimSpace(evidence) == "" || strings.TrimSpace(risk) == "" || strings.TrimSpace(rollback) == "" || riskErr != nil {
+		return "", ErrRestoreDocumentInvalid
+	}
+	payload := struct {
+		RequestSchema string            `json:"request_schema"`
+		WorkspaceID   foundation.ID     `json:"workspace_id"`
+		ProposalType  ProposalType      `json:"proposal_type"`
+		Restore       RestoreDocument   `json:"restore"`
+		TargetPath    string            `json:"target_path"`
+		Content       string            `json:"content"`
+		Evidence      string            `json:"evidence"`
+		RiskLevel     ProposalRiskLevel `json:"risk_level"`
+		Risk          string            `json:"risk"`
+		Rollback      string            `json:"rollback"`
+	}{
+		RequestSchema: "restore-document-proposal-request/v1", WorkspaceID: workspaceID,
+		ProposalType: ProposalTypeRestoreDocument, Restore: canonical, TargetPath: targetPath,
+		Content: strings.ReplaceAll(content, "\r\n", "\n"), Evidence: strings.TrimSpace(evidence),
+		RiskLevel: riskLevel, Risk: strings.TrimSpace(risk), Rollback: strings.TrimSpace(rollback),
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // ValidateKnowledgeChange 规范化并校验 `knowledge_change` 载荷。
@@ -609,16 +698,33 @@ func ComputeKnowledgeChangeRequestHashWithRiskLevel(workspaceID foundation.ID, c
 func ValidateProposalRevisionForType(proposalType ProposalType, revision Revision) error {
 	switch NormalizeProposalType(proposalType) {
 	case ProposalTypeFilePatch:
-		if revision.KnowledgeChange != nil || revision.PublishArtifact != nil || revision.DownstreamUpdate != nil {
+		if revision.KnowledgeChange != nil || revision.PublishArtifact != nil || revision.DownstreamUpdate != nil || revision.RestoreDocument != nil {
 			return ErrProposalTypeInvalid
 		}
 		targetPath, err := ValidateTargetPath(revision.TargetPath)
-		if err != nil || targetPath != revision.TargetPath || !ValidHash(revision.BaseHash) || strings.TrimSpace(revision.Content) == "" || revision.ChangeHash != ComputeChangeHash(revision.TargetPath, revision.BaseHash, revision.Content) {
+		mode, modeErr := ValidateTargetMode(revision.TargetMode)
+		expectedHash, hashErr := computeChangeHashForMode(revision.TargetPath, mode, revision.BaseHash, revision.Content)
+		if err != nil || modeErr != nil || targetPath != revision.TargetPath || strings.TrimSpace(revision.Content) == "" || hashErr != nil || revision.ChangeHash != expectedHash {
+			return ErrProposalTypeInvalid
+		}
+		return nil
+	case ProposalTypeRestoreDocument:
+		if revision.KnowledgeChange != nil || revision.PublishArtifact != nil || revision.DownstreamUpdate != nil || revision.RestoreDocument == nil ||
+			NormalizeTargetMode(revision.TargetMode) != TargetModeReplace {
+			return ErrProposalTypeInvalid
+		}
+		restore, err := ValidateRestoreDocument(*revision.RestoreDocument)
+		targetPath, pathErr := ValidateTargetPath(revision.TargetPath)
+		expectedHash, hashErr := ComputeChangeHashForTarget(restore.WorkspaceID, revision.TargetPath, revision.TargetMode, revision.BaseHash, revision.Content)
+		if err != nil || pathErr != nil || targetPath != revision.TargetPath || hashErr != nil ||
+			strings.TrimSpace(revision.Content) == "" || strings.TrimSpace(revision.EvidenceSummary) == "" ||
+			strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" ||
+			revision.BaseHash != restore.CurrentContentHash || ComputeContentHash([]byte(revision.Content)) != restore.TargetContentHash || revision.ChangeHash != expectedHash {
 			return ErrProposalTypeInvalid
 		}
 		return nil
 	case ProposalTypeKnowledgeChange:
-		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange == nil || revision.PublishArtifact != nil || revision.DownstreamUpdate != nil {
+		if NormalizeTargetMode(revision.TargetMode) != TargetModeReplace || strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange == nil || revision.PublishArtifact != nil || revision.DownstreamUpdate != nil || revision.RestoreDocument != nil {
 			return ErrProposalTypeInvalid
 		}
 		canonicalChange, err := ValidateKnowledgeChange(*revision.KnowledgeChange)
@@ -631,7 +737,7 @@ func ValidateProposalRevisionForType(proposalType ProposalType, revision Revisio
 		}
 		return nil
 	case ProposalTypePublishArtifact:
-		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange != nil || revision.PublishArtifact == nil || revision.DownstreamUpdate != nil {
+		if NormalizeTargetMode(revision.TargetMode) != TargetModeReplace || strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange != nil || revision.PublishArtifact == nil || revision.DownstreamUpdate != nil || revision.RestoreDocument != nil {
 			return ErrProposalTypeInvalid
 		}
 		canonical, err := ValidatePublishArtifact(*revision.PublishArtifact)
@@ -644,7 +750,7 @@ func ValidateProposalRevisionForType(proposalType ProposalType, revision Revisio
 		}
 		return nil
 	case ProposalTypeDownstreamUpdate:
-		if strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange != nil || revision.PublishArtifact != nil || revision.DownstreamUpdate == nil {
+		if NormalizeTargetMode(revision.TargetMode) != TargetModeReplace || strings.TrimSpace(revision.TargetPath) != "" || strings.TrimSpace(revision.BaseHash) != "" || strings.TrimSpace(revision.Content) != "" || strings.TrimSpace(revision.EvidenceSummary) != "" || strings.TrimSpace(revision.Risk) == "" || strings.TrimSpace(revision.RollbackPlan) == "" || revision.KnowledgeChange != nil || revision.PublishArtifact != nil || revision.DownstreamUpdate == nil || revision.RestoreDocument != nil {
 			return ErrProposalTypeInvalid
 		}
 		canonical, err := ValidateDownstreamUpdate(*revision.DownstreamUpdate)

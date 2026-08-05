@@ -1,18 +1,22 @@
 package filesystem
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 )
 
 func TestRootCapturePublishesImmutableArtifactAndExcludesManagedStore(t *testing.T) {
@@ -136,11 +140,261 @@ func TestRootCaptureBytesPublishesCommitContentWithoutReadingWorktree(t *testing
 	}
 }
 
-func TestScannerCaptureCommittedRejectsUnsupportedAndOversizedContent(t *testing.T) {
+func TestRootManagedStageDoesNotPublishBeforeConfirmation(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("staged capture")
+	hash := testContentHash(content)
+	stage, err := root.StageManagedBytes(context.Background(), "captures/one/input", content, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage.ManagedLocation != ".knowledge/sources/"+hash || stage.StagingLocation == "" {
+		t.Fatalf("stage=%#v", stage)
+	}
+	if _, err := os.Lstat(filepath.Join(rootPath, filepath.FromSlash(stage.ManagedLocation))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final artifact published before confirmation: %v", err)
+	}
+	info, err := os.Lstat(filepath.Join(rootPath, filepath.FromSlash(stage.StagingLocation)))
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("staging info=%#v err=%v", info, err)
+	}
+}
+
+func TestEnsureManagedStagingDirectoriesSyncEveryCreatedParent(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	workspaceRoot, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workspaceRoot.Close()
+
+	var synced []string
+	err = ensureManagedStagingHashDirectoryRootWithSync(workspaceRoot, strings.Repeat("a", 64), func(_ *os.Root, path string) error {
+		synced = append(synced, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{".", ".knowledge", managedSourceDirectory, managedSourceStagingDirectory}
+	if !slices.Equal(synced, want) {
+		t.Fatalf("synced parents=%q want=%q", synced, want)
+	}
+}
+
+func TestRootManagedStageRejectsSymlinkedStagingDirectory(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(rootPath, managedSourceDirectory), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(rootPath, managedSourceStagingDirectory)); err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("private staged content")
+	_, err = root.StageManagedBytes(context.Background(), "captures/symlink/input", content, testContentHash(content))
+	requireFilesystemError(t, err, foundation.ErrorPermissionDenied, "CONTENT_ARTIFACT_STAGE_UNSAFE")
+	entries, err := os.ReadDir(outside)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("outside staging target changed: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRootManagedStageRejectsSymlinkedStageFile(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("expected staged content")
+	hash := testContentHash(content)
+	stageLocation := managedStageLocation("captures/symlink-file/input", hash)
+	if err := os.MkdirAll(filepath.Join(rootPath, filepath.FromSlash(filepath.Dir(stageLocation))), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(t.TempDir(), "outside.stage")
+	if err := os.WriteFile(outsidePath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsidePath, filepath.Join(rootPath, filepath.FromSlash(stageLocation))); err != nil {
+		t.Fatal(err)
+	}
+	_, err = root.StageManagedBytes(context.Background(), "captures/symlink-file/input", content, hash)
+	requireFilesystemError(t, err, foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_STAGE_INVALID")
+}
+
+func TestRootManagedStageConcurrentSameHashPublishesExactlyOnce(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("shared immutable bytes")
+	hash := testContentHash(content)
+	stages := make([]domain.ManagedContentStage, 8)
+	for index := range stages {
+		stages[index], err = root.StageManagedBytes(context.Background(), fmt.Sprintf("captures/%d/input", index), content, hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var created atomic.Int32
+	errorsFound := make(chan error, len(stages))
+	var wait sync.WaitGroup
+	for _, stage := range stages {
+		stage := stage
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			published, publishErr := root.PublishManagedStage(context.Background(), stage)
+			if publishErr != nil {
+				errorsFound <- publishErr
+				return
+			}
+			if published.Created {
+				created.Add(1)
+			}
+		}()
+	}
+	wait.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		t.Fatal(err)
+	}
+	if created.Load() != 1 {
+		t.Fatalf("created=%d want=1", created.Load())
+	}
+	got, err := root.ReadArtifact(context.Background(), stages[0].ManagedLocation, hash, int64(len(content)))
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("artifact=%q err=%v", got, err)
+	}
+	for _, stage := range stages {
+		if _, err := os.Lstat(filepath.Join(rootPath, filepath.FromSlash(stage.StagingLocation))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("staging remains after publish: %s: %v", stage.StagingLocation, err)
+		}
+	}
+}
+
+func TestRootReadArtifactSelfHealsConfirmedDeterministicStage(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("recover after database commit")
+	hash := testContentHash(content)
+	stage, err := root.StageManagedBytes(context.Background(), "captures/recovery/input", content, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := root.ReadArtifact(context.Background(), stage.ManagedLocation, hash, int64(len(content)))
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("ReadArtifact()=%q err=%v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(rootPath, filepath.FromSlash(stage.StagingLocation))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("self-healed staging remains: %v", err)
+	}
+}
+
+func TestRootDiscardManagedStageNeverDeletesPublishedSameHash(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("same hash independent commands")
+	hash := testContentHash(content)
+	committed, err := root.StageManagedBytes(context.Background(), "captures/committed/input", content, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreferenced, err := root.StageManagedBytes(context.Background(), "captures/rolled-back/input", content, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.PublishManagedStage(context.Background(), committed); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.DiscardManagedStage(context.Background(), unreferenced); err != nil {
+		t.Fatal(err)
+	}
+	got, err := root.ReadArtifact(context.Background(), committed.ManagedLocation, hash, int64(len(content)))
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("published artifact changed by discard: %q %v", got, err)
+	}
+}
+
+func TestRootPublishManagedStageRejectsStagingSymlink(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("trusted stage")
+	hash := testContentHash(content)
+	stage, err := root.StageManagedBytes(context.Background(), "captures/symlink/input", content, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagePath := filepath.Join(rootPath, filepath.FromSlash(stage.StagingLocation))
+	if err := os.Remove(stagePath); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, stagePath); err != nil {
+		t.Fatal(err)
+	}
+	_, err = root.PublishManagedStage(context.Background(), stage)
+	requireFilesystemError(t, err, foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_STAGE_INVALID")
+	if _, err := os.Lstat(filepath.Join(rootPath, filepath.FromSlash(stage.ManagedLocation))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsafe stage published final artifact: %v", err)
+	}
+}
+
+func TestRootPublishManagedStageRejectsOversizedStagingFileBeforeHashing(t *testing.T) {
+	rootPath := newGitWorkspace(t)
+	root, err := NewRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("trusted stage")
+	hash := testContentHash(content)
+	stage, err := root.StageManagedBytes(context.Background(), "captures/oversized/input", content, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagePath := filepath.Join(rootPath, filepath.FromSlash(stage.StagingLocation))
+	if err := os.WriteFile(stagePath, bytes.Repeat([]byte("x"), 1024*1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = root.PublishManagedStage(context.Background(), stage)
+	requireFilesystemError(t, err, foundation.ErrorConsistencyViolation, "CONTENT_ARTIFACT_CONTENT_CONFLICT")
+	if _, err := os.Lstat(filepath.Join(rootPath, filepath.FromSlash(stage.ManagedLocation))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized stage published final artifact: %v", err)
+	}
+}
+
+func TestScannerCaptureCommittedSupportsIngestionExtensionsAndRejectsInvalidContent(t *testing.T) {
 	rootPath := newGitWorkspace(t)
 	scanner := Scanner{Options: ScanOptions{MaxBytes: 4}}
 	content := []byte("hello")
-	if _, err := scanner.CaptureCommitted(context.Background(), rootPath, "notes/a.pdf", content, testContentHash(content)); err == nil {
+	for _, path := range []string{"notes/a.md", "notes/a.markdown", "notes/a.txt", "notes/a.html", "notes/a.htm", "notes/a.pdf"} {
+		if _, err := (Scanner{Options: ScanOptions{MaxBytes: 16}}).CaptureCommitted(context.Background(), rootPath, path, content, testContentHash(content)); err != nil {
+			t.Fatalf("supported committed path %q rejected: %v", path, err)
+		}
+	}
+	if _, err := scanner.CaptureCommitted(context.Background(), rootPath, "notes/a.bin", content, testContentHash(content)); err == nil {
 		t.Fatal("unsupported committed extension accepted")
 	}
 	if _, err := scanner.CaptureCommitted(context.Background(), rootPath, "notes/a.md", content, testContentHash(content)); err == nil {

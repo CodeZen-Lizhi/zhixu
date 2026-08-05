@@ -82,9 +82,9 @@ describe("dashboard view model", () => {
       kind: "empty",
       label: "今日已收束",
       title: "今天没有等待处理的事项",
-      description: "可以从资料收件箱继续整理新的知识线索。",
-      href: "/inbox",
-      actionLabel: "查看资料收件箱",
+      description: "现在适合从一篇新文章或一次材料整理开始。",
+      href: "/authoring/new",
+      actionLabel: "新建文章",
     });
   });
 

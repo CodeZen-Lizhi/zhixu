@@ -29,16 +29,22 @@ type ContentValidationError struct {
 func (e *ContentValidationError) Error() string { return e.Code }
 func (e *ContentValidationError) Unwrap() error { return e.Cause }
 
-// ValidateSourceContent 校验 MIME、大小、UTF-8 和 NUL，原始字节保持不变。
+// ValidateSourceContent 校验 MIME、大小和格式边界，原始字节保持不变。
 func ValidateSourceContent(mediaType string, content []byte, policy ContentPolicy) ([]domain.Warning, error) {
-	if mediaType != "text/markdown" && mediaType != "text/plain" {
-		return nil, &ContentValidationError{Code: "SOURCE_MEDIA_TYPE_UNSUPPORTED", Cause: errors.New("only markdown and plain text are supported")}
+	if mediaType != "text/markdown" && mediaType != "text/plain" && mediaType != "text/html" && mediaType != "application/pdf" {
+		return nil, &ContentValidationError{Code: "SOURCE_MEDIA_TYPE_UNSUPPORTED", Cause: errors.New("only markdown, plain text, HTML, and PDF are supported")}
 	}
 	if policy.MaxBytes < 0 {
 		return nil, &ContentValidationError{Code: "SOURCE_SIZE_POLICY_INVALID", Cause: errors.New("max bytes must not be negative")}
 	}
 	if policy.MaxBytes > 0 && int64(len(content)) > policy.MaxBytes {
 		return nil, &ContentValidationError{Code: "SOURCE_FILE_TOO_LARGE", Cause: errors.New("source exceeds configured parser limit")}
+	}
+	if mediaType == "application/pdf" {
+		if !bytes.HasPrefix(content, []byte("%PDF-")) {
+			return nil, &ContentValidationError{Code: "SOURCE_PDF_SIGNATURE_INVALID", Cause: errors.New("source does not have a PDF signature")}
+		}
+		return nil, nil
 	}
 	if hasBinaryControl(content) {
 		return nil, &ContentValidationError{Code: "SOURCE_BINARY_CONTENT", Quarantine: true, Cause: errors.New("binary control byte detected")}

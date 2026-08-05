@@ -193,6 +193,71 @@ func TestRevisionHashIsCanonicalAndTamperEvident(t *testing.T) {
 	}
 }
 
+func TestDocumentSourcesUseRevisionV2WithoutChangingLegacyHashes(t *testing.T) {
+	artifact, revision := generatingArtifact(t)
+	legacy := verifiedSection("channels", "Channels", "Legacy verified content.", 20, 21)
+	_, legacyRevision, err := RecordSection(artifact, revision, artifactID(30), legacy, CreatorAgent, agentMetadata(), artifactTime().Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyWithExplicitEmptySources := CloneRevision(legacyRevision)
+	legacyWithExplicitEmptySources.Sections[0].DocumentSources = []DocumentSource{}
+	legacyHash, err := ComputeRevisionContentHash(legacyWithExplicitEmptySources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySchema, err := RevisionSchemaVersion(legacyWithExplicitEmptySources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyHash != legacyRevision.ContentHash || legacySchema != RevisionSchemaV1 {
+		t.Fatalf("legacy hash/schema drifted: got %s/%s want %s/%s", legacyHash, legacySchema, legacyRevision.ContentHash, RevisionSchemaV1)
+	}
+
+	documentBacked := Section{
+		Key: "channels", Title: "Channels", Content: "Content from an immutable document revision.", Citations: []Citation{},
+		DocumentSources: []DocumentSource{
+			{DocumentID: artifactID(40), ArticleRevisionID: artifactID(41), RevisionNo: 2, VerifiedContentHash: strings.Repeat("c", 64), Verified: true},
+			{DocumentID: artifactID(42), ArticleRevisionID: artifactID(43), RevisionNo: 1, VerifiedContentHash: strings.Repeat("d", 64), Verified: true},
+		},
+		Coverage: Coverage{SectionKey: "channels", Status: CoverageCovered, Gaps: []Gap{}},
+	}
+	_, v2Revision, err := RecordSection(artifact, revision, artifactID(31), documentBacked, CreatorAgent, agentMetadata(), artifactTime().Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2Schema, err := RevisionSchemaVersion(v2Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v2Schema != RevisionSchemaV2 || v2Revision.ContentHash == legacyRevision.ContentHash {
+		t.Fatalf("document-backed revision did not use v2: schema=%s hash=%s", v2Schema, v2Revision.ContentHash)
+	}
+	reordered := CloneRevision(v2Revision)
+	reordered.Sections[0].DocumentSources[0], reordered.Sections[0].DocumentSources[1] = reordered.Sections[0].DocumentSources[1], reordered.Sections[0].DocumentSources[0]
+	reorderedHash, err := ComputeRevisionContentHash(reordered)
+	if err != nil || reorderedHash != v2Revision.ContentHash {
+		t.Fatalf("document source order changed canonical hash: hash=%s err=%v", reorderedHash, err)
+	}
+	tampered := CloneRevision(v2Revision)
+	tampered.Sections[0].DocumentSources[0].RevisionNo++
+	assertErrorCode(t, ValidateRevision(tampered), ErrorCodeArtifactInvalid)
+}
+
+func TestDocumentSourceCoverageSemanticsFailClosed(t *testing.T) {
+	artifact, revision := generatingArtifact(t)
+	source := DocumentSource{DocumentID: artifactID(50), ArticleRevisionID: artifactID(51), RevisionNo: 1, VerifiedContentHash: strings.Repeat("e", 64), Verified: true}
+	covered := Section{Key: "channels", Title: "Channels", Content: "Document-backed content.", Citations: []Citation{}, DocumentSources: []DocumentSource{source}, Coverage: Coverage{SectionKey: "channels", Status: CoverageCovered, Gaps: []Gap{}}}
+	if _, _, err := RecordSection(artifact, revision, artifactID(52), covered, CreatorAgent, agentMetadata(), artifactTime().Add(3*time.Minute)); err != nil {
+		t.Fatalf("document-only covered section was rejected: %v", err)
+	}
+	gap := covered
+	gap.Content = ""
+	gap.Coverage = Coverage{SectionKey: "channels", Status: CoverageGap, Gaps: []Gap{{Code: "NO_SOURCE", Description: "No source"}}}
+	_, _, err := RecordSection(artifact, revision, artifactID(53), gap, CreatorAgent, agentMetadata(), artifactTime().Add(3*time.Minute))
+	assertErrorCode(t, err, ErrorCodeArtifactCoverageInvalid)
+}
+
 func generatingArtifact(t *testing.T) (Artifact, Revision) {
 	t.Helper()
 	now := artifactTime()

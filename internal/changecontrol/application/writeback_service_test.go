@@ -10,6 +10,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitoperation"
 	reindexcontract "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/contract"
 )
 
@@ -50,6 +51,33 @@ func (*sagaAuditRecorder) RequireStarted(context.Context, WritebackResumeIdentit
 
 func (*sagaAuditRecorder) RecordSucceeded(context.Context, WritebackResumeIdentity, domain.WritebackExecution, WritebackAuditStep) error {
 	return nil
+}
+
+type sagaPublicationFinalizer struct {
+	publications     []WritebackPublication
+	validated        []domain.Proposal
+	errors           []error
+	validationErrors []error
+}
+
+func (finalizer *sagaPublicationFinalizer) FinalizePublication(_ context.Context, publication WritebackPublication) error {
+	finalizer.publications = append(finalizer.publications, publication)
+	if len(finalizer.errors) == 0 {
+		return nil
+	}
+	err := finalizer.errors[0]
+	finalizer.errors = finalizer.errors[1:]
+	return err
+}
+
+func (finalizer *sagaPublicationFinalizer) ValidateWritebackPreparation(_ context.Context, proposal domain.Proposal) error {
+	finalizer.validated = append(finalizer.validated, proposal)
+	if len(finalizer.validationErrors) == 0 {
+		return nil
+	}
+	err := finalizer.validationErrors[0]
+	finalizer.validationErrors = finalizer.validationErrors[1:]
+	return err
 }
 
 func sagaResumeIdentity(owner string) WritebackResumeIdentity {
@@ -198,11 +226,12 @@ func (r *sagaRepository) FinalizeWritebackCleanup(_ context.Context, _ foundatio
 }
 
 type sagaWorkspace struct {
-	lock         *sagaTargetLock
-	acquireCalls int
-	resumeCalls  int
-	resumes      []domain.ResumeWrite
-	resumeErr    error
+	lock          *sagaTargetLock
+	acquireCalls  int
+	resumeCalls   int
+	resumes       []domain.ResumeWrite
+	resumeErr     error
+	resumePending bool
 }
 
 func (w *sagaWorkspace) AcquireTarget(context.Context, foundation.ID, string) (domain.TargetLock, error) {
@@ -219,6 +248,9 @@ func (w *sagaWorkspace) ResumeTarget(_ context.Context, _ foundation.ID, _ strin
 	prepared := resume.Prepared
 	if prepared.ExecutionID == "" {
 		prepared = w.lock.prepared
+	}
+	if w.resumePending {
+		return w.lock, prepared, nil, nil
 	}
 	applied := w.lock.applied
 	return w.lock, prepared, &applied, nil
@@ -357,7 +389,8 @@ func TestWritebackResumeCompletesStrictSagaAndCleanup(t *testing.T) {
 	lock := targetLockFixture(t)
 	workspace := &sagaWorkspace{lock: lock}
 	git := &sagaGit{}
-	service := newSagaService(t, repository, workspace, git, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
+	publication := &sagaPublicationFinalizer{}
+	service := newSagaServiceWithFinalizer(t, repository, workspace, git, publication, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
 	result, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
 	if err != nil {
 		t.Fatal(err)
@@ -365,8 +398,14 @@ func TestWritebackResumeCompletesStrictSagaAndCleanup(t *testing.T) {
 	wantStatuses := []domain.WritebackStatus{
 		domain.WritebackStatusFilePrepared, domain.WritebackStatusFileApplied, domain.WritebackStatusGitPrepared, domain.WritebackStatusGitCommitted,
 	}
-	if strings.TrimSpace(result.GitCommit) != sagaCommit || result.Status != domain.WritebackStatusVerifying || result.IndexStatus != WritebackIndexStatusPending || result.CleanupPending || repository.finalizeCalls != 1 || git.commitCalls != 1 || len(repository.publishCommands) != 1 || lock.cleanupCalls != 1 {
+	if strings.TrimSpace(result.GitCommit) != sagaCommit || result.Status != domain.WritebackStatusVerifying || result.IndexStatus != WritebackIndexStatusPending || result.CleanupPending || repository.finalizeCalls != 1 || git.commitCalls != 1 || len(repository.publishCommands) != 1 || lock.cleanupCalls != 1 || len(publication.publications) != 1 {
 		t.Fatalf("result=%#v checkpoints=%v commit=%d publish=%d cleanup=%d finalize=%d", result, repository.checkpointStatuses, git.commitCalls, len(repository.publishCommands), lock.cleanupCalls, repository.finalizeCalls)
+	}
+	finalized := publication.publications[0]
+	if finalized.WorkspaceID != sagaWorkspaceID || finalized.ProposalID != sagaProposalID ||
+		finalized.ProposalRevisionID != sagaRevisionID || finalized.WritebackID != sagaExecutionID ||
+		finalized.GitCommit != sagaCommit || finalized.ResultHash != result.ResultHash {
+		t.Fatalf("publication=%#v", finalized)
 	}
 	if len(repository.checkpointStatuses) < len(wantStatuses) {
 		t.Fatalf("checkpoints=%v", repository.checkpointStatuses)
@@ -375,6 +414,74 @@ func TestWritebackResumeCompletesStrictSagaAndCleanup(t *testing.T) {
 		if repository.checkpointStatuses[index] != status {
 			t.Fatalf("checkpoint[%d]=%s want=%s all=%v", index, repository.checkpointStatuses[index], status, repository.checkpointStatuses)
 		}
+	}
+}
+
+func TestRestoreWritebackRevalidatesDocumentOwnerBeforePreparingFile(t *testing.T) {
+	proposal := proposalFixture(domain.StatusApplying)
+	proposal.Type = domain.ProposalTypeRestoreDocument
+	proposal.Revision.RestoreDocument = &domain.RestoreDocument{
+		WorkspaceID: sagaWorkspaceID, DocumentID: "50000000-0000-4000-8000-000000000002",
+		TargetCommit: strings.Repeat("e", 40), ExpectedHead: sagaGitHead,
+		ExpectedDocumentVersion: 7, PreviewHash: strings.Repeat("f", 64),
+		CurrentContentHash: proposal.Revision.BaseHash,
+		TargetContentHash:  domain.ComputeContentHash([]byte(proposal.Revision.Content)),
+		SchemaVersion:      domain.RestoreDocumentSchemaVersion,
+	}
+	repository := &sagaRepository{proposal: proposal, execution: executionFixture(domain.WritebackStatusPrepared)}
+	lock := targetLockFixture(t)
+	workspace := &sagaWorkspace{lock: lock}
+	stale := foundation.NewError(foundation.ErrorVersionConflict, "DOCUMENT_RESTORE_STALE", false, errors.New("document changed after approval"))
+	publication := &sagaPublicationFinalizer{validationErrors: []error{stale}}
+	service := newSagaServiceWithFinalizer(t, repository, workspace, &sagaGit{}, publication, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
+
+	result, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
+	if !errors.Is(err, stale) || result.Status != domain.WritebackStatusNeedsRevision ||
+		workspace.acquireCalls != 1 || lock.prepareCalls != 0 || len(publication.validated) != 1 {
+		t.Fatalf("result=%#v err=%v acquire=%d prepare=%d validated=%d checkpoints=%v",
+			result, err, workspace.acquireCalls, lock.prepareCalls, len(publication.validated), repository.checkpointStatuses)
+	}
+}
+
+func TestRestoreWritebackRevalidatesDocumentOwnerBeforeResumingPreparedFile(t *testing.T) {
+	proposal := proposalFixture(domain.StatusApplying)
+	proposal.Type = domain.ProposalTypeRestoreDocument
+	proposal.Revision.RestoreDocument = &domain.RestoreDocument{
+		WorkspaceID: sagaWorkspaceID, DocumentID: "50000000-0000-4000-8000-000000000002",
+		TargetCommit: strings.Repeat("e", 40), ExpectedHead: sagaGitHead,
+		ExpectedDocumentVersion: 7, PreviewHash: strings.Repeat("f", 64),
+		CurrentContentHash: proposal.Revision.BaseHash,
+		TargetContentHash:  domain.ComputeContentHash([]byte(proposal.Revision.Content)),
+		SchemaVersion:      domain.RestoreDocumentSchemaVersion,
+	}
+	repository := &sagaRepository{proposal: proposal, execution: executionFixture(domain.WritebackStatusFilePrepared)}
+	lock := targetLockFixture(t)
+	workspace := &sagaWorkspace{lock: lock, resumePending: true}
+	stale := foundation.NewError(foundation.ErrorVersionConflict, "DOCUMENT_RESTORE_STALE", false, errors.New("document changed after file preparation"))
+	publication := &sagaPublicationFinalizer{validationErrors: []error{stale}}
+	service := newSagaServiceWithFinalizer(t, repository, workspace, &sagaGit{}, publication, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
+
+	result, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
+	if !errors.Is(err, stale) || result.Status != domain.WritebackStatusNeedsRevision ||
+		workspace.resumeCalls != 1 || lock.commitCalls != 0 || len(publication.validated) != 1 {
+		t.Fatalf("result=%#v err=%v resume=%d commit=%d validated=%d checkpoints=%v",
+			result, err, workspace.resumeCalls, lock.commitCalls, len(publication.validated), repository.checkpointStatuses)
+	}
+}
+
+func TestWritebackPublicationFinalizerFailureRetriesWithoutSecondGitCommit(t *testing.T) {
+	repository := &sagaRepository{proposal: proposalFixture(domain.StatusApplying), execution: executionFixture(domain.WritebackStatusVerifying)}
+	lock := targetLockFixture(t)
+	publication := &sagaPublicationFinalizer{errors: []error{errors.New("authoring unavailable"), nil}}
+	service := newSagaServiceWithFinalizer(t, repository, &sagaWorkspace{lock: lock}, &sagaGit{}, publication, &sagaIDGenerator{ids: []foundation.ID{sagaSecondExecID}})
+
+	first, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
+	if err == nil || first.Status != domain.WritebackStatusVerifying || repository.finalizeCalls != 0 || len(publication.publications) != 1 {
+		t.Fatalf("first=%#v err=%v cleanup-finalize=%d publication=%d", first, err, repository.finalizeCalls, len(publication.publications))
+	}
+	second, err := service.Resume(context.Background(), sagaExecutionID, sagaResumeIdentity("worker-a"))
+	if err != nil || second.CleanupPending || repository.finalizeCalls != 1 || len(publication.publications) != 2 || lock.cleanupCalls != 2 {
+		t.Fatalf("second=%#v err=%v cleanup=%d cleanup-finalize=%d publication=%d", second, err, lock.cleanupCalls, repository.finalizeCalls, len(publication.publications))
 	}
 }
 
@@ -582,16 +689,30 @@ func TestBuildPublishWritebackPreservesEncodingErrorContract(t *testing.T) {
 }
 
 func newSagaService(t *testing.T, repository *sagaRepository, workspace *sagaWorkspace, git *sagaGit, ids foundation.IDGenerator) *WritebackService {
+	return newSagaServiceWithFinalizer(t, repository, workspace, git, &sagaPublicationFinalizer{}, ids)
+}
+
+func newSagaServiceWithFinalizer(t *testing.T, repository *sagaRepository, workspace *sagaWorkspace, git *sagaGit, publication WritebackPublicationFinalizer, ids foundation.IDGenerator) *WritebackService {
 	t.Helper()
 	service, err := NewWritebackService(WritebackServiceDependencies{
-		Repository: repository, Workspace: workspace, Git: git, Audit: &sagaAuditRecorder{}, IDs: ids,
-		Clock: foundation.FixedClock{Value: time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)},
+		Repository: repository, Workspace: workspace, Git: git, GitOperations: sagaGitOperationLocker{}, Audit: &sagaAuditRecorder{}, IDs: ids,
+		Publication: publication, Clock: foundation.FixedClock{Value: time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return service
 }
+
+type sagaGitOperationLocker struct{}
+
+func (sagaGitOperationLocker) Acquire(context.Context, foundation.ID) (gitoperation.Lease, error) {
+	return sagaGitOperationLease{}, nil
+}
+
+type sagaGitOperationLease struct{}
+
+func (sagaGitOperationLease) Release(context.Context) error { return nil }
 
 func proposalFixture(status domain.ProposalStatus) domain.Proposal {
 	content := "# approved\n"

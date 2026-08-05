@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -52,6 +54,40 @@ func TestManagedModelSettingsConfigValidation(t *testing.T) {
 				t.Fatal("Validate() succeeded")
 			}
 		})
+	}
+}
+
+func TestGitSyncKeyFileConfigIsOptionalAndSecretSafe(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	yamlKeyFile := filepath.Join(dir, "git-sync-from-yaml.key")
+	envKeyFile := filepath.Join(dir, "git-sync-from-env.key")
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("git_sync_key_file: "+yamlKeyFile+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWithLookup(configPath, mapLookup(map[string]string{
+		"ZHIXU_GIT_SYNC_KEY_FILE": envKeyFile,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitSyncKeyFile != envKeyFile {
+		t.Fatalf("GitSyncKeyFile=%q", cfg.GitSyncKeyFile)
+	}
+	if !strings.Contains(cfg.String(), "GitSyncKeyConfigured:true") || strings.Contains(cfg.String(), envKeyFile) || strings.Contains(cfg.String(), yamlKeyFile) {
+		t.Fatalf("config summary leaked or omitted Git sync key state: %s", cfg.String())
+	}
+}
+
+func TestGitSyncKeyFileValidation(t *testing.T) {
+	t.Parallel()
+	for _, keyFile := range []string{"relative.key", " /run/git-sync.key", "/run/../git-sync.key", "/run/git\x00-sync.key"} {
+		cfg := Defaults()
+		cfg.GitSyncKeyFile = keyFile
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("Validate() succeeded for %q", keyFile)
+		}
 	}
 }
 

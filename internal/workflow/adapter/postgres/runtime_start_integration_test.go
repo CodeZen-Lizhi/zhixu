@@ -34,7 +34,7 @@ func TestRuntimeRepositoryStartReplayConflictRollbackAndLegacyGuard(t *testing.T
 	defer func() { _ = outer.Rollback(ctx) }()
 	workspaceID := foundation.ID("a0000000-0000-4000-8000-000000000001")
 	now := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
-	if _, err := outer.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A Runtime',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/m4a-runtime", now); err != nil {
+	if _, err := outer.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A Runtime',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), "/tmp/m4a-runtime", now); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -118,7 +118,7 @@ func TestRuntimeRepositoryConcurrentDuplicateCreatesOneRunNodeOutboxAndJob(t *te
 	defer cleanup()
 	workspaceID := foundation.ID("e0000000-0000-4000-8000-000000000001")
 	now := time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A Concurrent',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/m4a-concurrent", now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A Concurrent',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), "/tmp/m4a-concurrent", now); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -179,7 +179,7 @@ func TestRuntimeRepositoryRecoversCommitResponseLoss(t *testing.T) {
 	defer cleanup()
 	workspaceID := foundation.ID("90000000-0000-4000-8000-000000000001")
 	now := time.Date(2026, 7, 17, 11, 0, 0, 0, time.UTC)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A Commit Loss',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/m4a-commit-loss", now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A Commit Loss',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), "/tmp/m4a-commit-loss", now); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -219,7 +219,7 @@ func TestRuntimeRepositoryStartTxUsesCallerTransactionAndReportsReplay(t *testin
 	defer cleanup()
 	workspaceID := foundation.ID("91000000-0000-4000-8000-000000000001")
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A StartTx',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/m4a-start-tx", now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A StartTx',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), "/tmp/m4a-start-tx", now); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)

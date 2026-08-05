@@ -62,6 +62,34 @@ func TestEvidenceReferenceStoreLoadsFullyBoundReferences(t *testing.T) {
 	}
 }
 
+func TestEvidenceReferenceStoreLoadsDerivedTextEvidence(t *testing.T) {
+	_, database, ctx := newRetrievalTestRepository(t)
+	repository, err := NewSearchRepository(database.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedEvidenceReferenceFixture(t, ctx, database.DB())
+	derived := "Java AI derived PDF evidence"
+	digest := sha256.Sum256([]byte(derived))
+	const derivedSpanID foundation.ID = "95000000-0000-4000-8000-000000000030"
+	if _, err := database.DB().Exec(ctx, `INSERT INTO ingestion.source_span(
+		id,workspace_id,content_artifact_id,parse_projection_id,span_type,start_line,end_line,start_byte,end_byte,
+		selector,excerpt_hash,evidence_kind,derived_excerpt,parser_version,schema_version,created_at)
+		VALUES($1,$2,$3,$4,'document',1,1,0,$5,'{"format":"pdf","page_start":"1","page_end":"1"}',
+		$6,'derived_text',$7,'goldmark-v1','schema-v1',$8)`, string(derivedSpanID), string(fixture.workspaceID),
+		string(fixture.artifactID), string(fixture.projectionID), fixture.byteSize, hex.EncodeToString(digest[:]), derived, fixture.capturedAt); err != nil {
+		t.Fatal(err)
+	}
+	reference, err := repository.LoadSourceSpanReference(ctx, fixture.workspaceID, fixture.sourceVersionID, derivedSpanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reference.EvidenceKind != domain.EvidenceDerivedText || reference.DerivedExcerpt != derived ||
+		reference.ExcerptHash != hex.EncodeToString(digest[:]) || reference.Span.StartByte != 0 || reference.Span.EndByte != fixture.byteSize {
+		t.Fatalf("derived reference = %#v", reference)
+	}
+}
+
 func TestEvidenceReferenceStoreUsesLatestAttemptSecurityStatus(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
 	repository, err := NewSearchRepository(database.DB())
@@ -280,10 +308,16 @@ func seedEvidenceReferenceFixture(t *testing.T, ctx context.Context, database *p
 		sql  string
 		args []any
 	}{
-		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		  VALUES($1,'evidence','/tmp/evidence','/tmp/evidence',$2,'test',1,$2,$2)`, []any{string(fixture.workspaceID), now}},
-		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		  VALUES($1,'other','/tmp/evidence-other','/tmp/evidence-other',$2,'test',1,$2,$2)`, []any{string(fixture.otherWorkspaceID), now}},
+		{`INSERT INTO core.workspace(
+			id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,status,
+			availability,availability_reason,availability_checked_at,version,created_at,updated_at)
+		  VALUES($1,'evidence','/tmp/evidence',$2,1,'/tmp/evidence',$3,'inactive','available',NULL,$3,1,$3,$3)`,
+			[]any{string(fixture.workspaceID), hex64('1'), now}},
+		{`INSERT INTO core.workspace(
+			id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,status,
+			availability,availability_reason,availability_checked_at,version,created_at,updated_at)
+		  VALUES($1,'other','/tmp/evidence-other',$2,1,'/tmp/evidence-other',$3,'inactive','available',NULL,$3,1,$3,$3)`,
+			[]any{string(fixture.otherWorkspaceID), hex64('2'), now}},
 		{`INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at)
 		  VALUES('95000000-0000-4000-8000-000000000010',$1,'evidence-ingestion',1,'{}',$2)`, []any{string(fixture.workspaceID), now}},
 		{`INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at)

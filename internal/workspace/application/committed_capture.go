@@ -22,57 +22,94 @@ type CaptureCommittedSourceRequest struct {
 
 // CaptureCommittedSourceVersion 从指定 Commit 捕获确切 bytes 并幂等注册 SourceVersion。
 func (s *Service) CaptureCommittedSourceVersion(ctx context.Context, request CaptureCommittedSourceRequest) (domain.SourceRegistrationResult, error) {
+	registration, err := s.PrepareCommittedSourceVersion(ctx, request)
+	if err != nil {
+		return domain.SourceRegistrationResult{}, err
+	}
+	result, err := s.dependencies.Repository.RegisterSourceVersion(ctx, registration)
+	if err != nil {
+		return domain.SourceRegistrationResult{}, err
+	}
+	capture := domain.ContentCapture{
+		ContentHash: registration.Artifact.ContentHash, ByteSize: registration.Artifact.ByteSize,
+		ManagedLocation: registration.Artifact.ManagedLocation,
+	}
+	mediaType := registration.Version.MediaType
+	if err := validateCommittedRegistrationResult(request.WorkspaceID, request, mediaType, capture, result); err != nil {
+		return domain.SourceRegistrationResult{}, err
+	}
+	return result, nil
+}
+
+// PrepareCommittedSourceVersion captures exact immutable Commit bytes and
+// returns a registration that a caller can persist in a larger transaction.
+func (s *Service) PrepareCommittedSourceVersion(ctx context.Context, request CaptureCommittedSourceRequest) (domain.SourceRegistration, error) {
 	if s == nil || s.dependencies.Repository == nil || s.dependencies.CommittedGit == nil ||
 		s.dependencies.CommittedFiles == nil || s.dependencies.IDs == nil || s.dependencies.Clock == nil {
-		return domain.SourceRegistrationResult{}, dependencyError("COMMITTED_SOURCE_SERVICE_UNAVAILABLE")
+		return domain.SourceRegistration{}, dependencyError("COMMITTED_SOURCE_SERVICE_UNAVAILABLE")
 	}
 	if err := committedContextError(ctx); err != nil {
-		return domain.SourceRegistrationResult{}, err
+		return domain.SourceRegistration{}, err
 	}
-	mediaType, err := validateCommittedSourceRequest(request)
-	if err != nil {
-		return domain.SourceRegistrationResult{}, err
-	}
-	workspace, err := s.dependencies.Repository.GetWorkspaceByID(ctx, request.WorkspaceID)
-	if err != nil {
-		return domain.SourceRegistrationResult{}, err
-	}
-	if workspace.ID != request.WorkspaceID || strings.TrimSpace(workspace.RootPath) == "" {
-		return domain.SourceRegistrationResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "COMMITTED_SOURCE_WORKSPACE_BINDING_INVALID", false, errors.New("workspace lookup returned a different or incomplete workspace"))
+	if _, err := validateCommittedSourceRequest(request); err != nil {
+		return domain.SourceRegistration{}, err
 	}
 	blob, err := s.dependencies.CommittedGit.ReadCommittedBlob(ctx, request.WorkspaceID, request.GitCommit, request.RelativePath)
 	if err != nil {
-		return domain.SourceRegistrationResult{}, err
+		return domain.SourceRegistration{}, err
+	}
+	return s.PrepareCommittedSourceBlob(ctx, request, blob)
+}
+
+// PrepareCommittedSourceBlob captures caller-read immutable Commit bytes while
+// keeping Source registration under the Workspace owner's validation policy.
+func (s *Service) PrepareCommittedSourceBlob(ctx context.Context, request CaptureCommittedSourceRequest, blob domain.CommittedBlob) (domain.SourceRegistration, error) {
+	if s == nil || s.dependencies.Repository == nil || s.dependencies.CommittedFiles == nil || s.dependencies.IDs == nil || s.dependencies.Clock == nil {
+		return domain.SourceRegistration{}, dependencyError("COMMITTED_SOURCE_SERVICE_UNAVAILABLE")
+	}
+	if err := committedContextError(ctx); err != nil {
+		return domain.SourceRegistration{}, err
+	}
+	mediaType, err := validateCommittedSourceRequest(request)
+	if err != nil {
+		return domain.SourceRegistration{}, err
+	}
+	workspace, err := s.dependencies.Repository.GetWorkspaceByID(ctx, request.WorkspaceID)
+	if err != nil {
+		return domain.SourceRegistration{}, err
+	}
+	if workspace.ID != request.WorkspaceID || strings.TrimSpace(workspace.RootPath) == "" {
+		return domain.SourceRegistration{}, foundation.NewError(foundation.ErrorConsistencyViolation, "COMMITTED_SOURCE_WORKSPACE_BINDING_INVALID", false, errors.New("workspace lookup returned a different or incomplete workspace"))
 	}
 	if blob.WorkspaceID != request.WorkspaceID || blob.Commit != request.GitCommit || blob.RelativePath != request.RelativePath {
-		return domain.SourceRegistrationResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "COMMITTED_SOURCE_BLOB_BINDING_INVALID", false, errors.New("git reader returned a different blob binding"))
+		return domain.SourceRegistration{}, foundation.NewError(foundation.ErrorConsistencyViolation, "COMMITTED_SOURCE_BLOB_BINDING_INVALID", false, errors.New("git reader returned a different blob binding"))
 	}
 	if int64(len(blob.Bytes)) > domain.MaxCommittedSourceBytes {
-		return domain.SourceRegistrationResult{}, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_FILE_TOO_LARGE", false, errors.New("committed source exceeds the supported size"))
+		return domain.SourceRegistration{}, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_FILE_TOO_LARGE", false, errors.New("committed source exceeds the supported size"))
 	}
 	digest := sha256.Sum256(blob.Bytes)
 	actualHash := hex.EncodeToString(digest[:])
 	if actualHash != request.ExpectedHash {
-		return domain.SourceRegistrationResult{}, foundation.NewError(foundation.ErrorVersionConflict, "SOURCE_RESULT_HASH_CONFLICT", false, errors.New("committed blob hash does not match writeback result"))
+		return domain.SourceRegistration{}, foundation.NewError(foundation.ErrorVersionConflict, "SOURCE_RESULT_HASH_CONFLICT", false, errors.New("committed blob hash does not match writeback result"))
 	}
 	capture, err := s.dependencies.CommittedFiles.CaptureCommitted(ctx, workspace.RootPath, request.RelativePath, blob.Bytes, request.ExpectedHash)
 	if err != nil {
-		return domain.SourceRegistrationResult{}, err
+		return domain.SourceRegistration{}, err
 	}
 	if capture.ContentHash != request.ExpectedHash || capture.ByteSize != int64(len(blob.Bytes)) || strings.TrimSpace(capture.ManagedLocation) == "" {
-		return domain.SourceRegistrationResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "COMMITTED_SOURCE_CAPTURE_BINDING_INVALID", false, errors.New("content store returned a different artifact binding"))
+		return domain.SourceRegistration{}, foundation.NewError(foundation.ErrorConsistencyViolation, "COMMITTED_SOURCE_CAPTURE_BINDING_INVALID", false, errors.New("content store returned a different artifact binding"))
 	}
 	sourceID, err := s.dependencies.IDs.New()
 	if err != nil {
-		return domain.SourceRegistrationResult{}, err
+		return domain.SourceRegistration{}, err
 	}
 	versionID, err := s.dependencies.IDs.New()
 	if err != nil {
-		return domain.SourceRegistrationResult{}, err
+		return domain.SourceRegistration{}, err
 	}
 	artifactID, err := s.dependencies.IDs.New()
 	if err != nil {
-		return domain.SourceRegistrationResult{}, err
+		return domain.SourceRegistration{}, err
 	}
 	now := s.dependencies.Clock.Now()
 	registration := domain.SourceRegistration{
@@ -90,14 +127,7 @@ func (s *Service) CaptureCommittedSourceVersion(ctx context.Context, request Cap
 			OriginalContentLocation: request.RelativePath, SecurityStatus: "pending", CapturedAt: now,
 		},
 	}
-	result, err := s.dependencies.Repository.RegisterSourceVersion(ctx, registration)
-	if err != nil {
-		return domain.SourceRegistrationResult{}, err
-	}
-	if err := validateCommittedRegistrationResult(workspace.ID, request, mediaType, capture, result); err != nil {
-		return domain.SourceRegistrationResult{}, err
-	}
-	return result, nil
+	return registration, nil
 }
 
 func validateCommittedSourceRequest(request CaptureCommittedSourceRequest) (string, error) {
@@ -106,13 +136,26 @@ func validateCommittedSourceRequest(request CaptureCommittedSourceRequest) (stri
 		!lowerHex(request.ExpectedHash, 64) || !canonicalCommittedPath(request.RelativePath) {
 		return "", foundation.NewError(foundation.ErrorInvalidInput, "COMMITTED_SOURCE_REQUEST_INVALID", false, errors.New("committed source request is not canonical"))
 	}
-	switch strings.ToLower(path.Ext(request.RelativePath)) {
+	if mediaType, supported := CommittedSourceMediaType(request.RelativePath); supported {
+		return mediaType, nil
+	}
+	return "", foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_EXTENSION_UNSUPPORTED", false, errors.New("source extension is not supported by ingestion"))
+}
+
+// CommittedSourceMediaType reports the ingestion media type owned by committed
+// Source capture without inspecting mutable file content.
+func CommittedSourceMediaType(relativePath string) (string, bool) {
+	switch strings.ToLower(path.Ext(relativePath)) {
 	case ".md", ".markdown":
-		return "text/markdown", nil
+		return "text/markdown", true
 	case ".txt":
-		return "text/plain", nil
+		return "text/plain", true
+	case ".html", ".htm":
+		return "text/html", true
+	case ".pdf":
+		return "application/pdf", true
 	default:
-		return "", foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_EXTENSION_UNSUPPORTED", false, errors.New("source extension is not supported by ingestion"))
+		return "", false
 	}
 }
 

@@ -13,17 +13,22 @@ import (
 
 	artifacthttp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/http"
 	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
+	authoringhttp "github.com/CodeZen-Lizhi/zhixu/internal/authoring/http"
+	capturehttp "github.com/CodeZen-Lizhi/zhixu/internal/capture/http"
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	collectionhttp "github.com/CodeZen-Lizhi/zhixu/internal/collection/http"
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
+	documenthistoryhttp "github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/http"
 	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
 	exporthttp "github.com/CodeZen-Lizhi/zhixu/internal/export/http"
+	gitsynchttp "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/http"
 	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
 	healthhttp "github.com/CodeZen-Lizhi/zhixu/internal/health/http"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
 	knowledgehttp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/http"
 	memoryhttp "github.com/CodeZen-Lizhi/zhixu/internal/memory/http"
 	modelsettingshttp "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/http"
+	organizinghttp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
@@ -71,6 +76,11 @@ type Dependencies struct {
 	Interview         *interviewhttp.Handler
 	Knowledge         *knowledgehttp.Handler
 	Artifact          *artifacthttp.Handler
+	Authoring         *authoringhttp.Handler
+	Capture           *capturehttp.Handler
+	Organizing        *organizinghttp.Handler
+	DocumentHistory   *documenthistoryhttp.Handler
+	GitSync           *gitsynchttp.Handler
 	ModelSettings     *modelsettingshttp.Handler
 	Auth              *authhttp.Handler
 	AuthRequired      bool
@@ -184,7 +194,8 @@ func NewRouter(deps Dependencies) http.Handler {
 
 func modelSettingsNoStoreMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request != nil && (request.URL.Path == "/api/v1/settings/models" || request.URL.Path == "/api/v1/settings/models/test") {
+		if request != nil && (request.URL.Path == "/api/v1/settings/models" || request.URL.Path == "/api/v1/settings/models/test" ||
+			strings.Contains(request.URL.Path, "/git-remote")) {
 			writer.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(writer, request)
@@ -242,6 +253,21 @@ func registerDomainRoutes(api chi.Router, deps Dependencies) {
 	if deps.Artifact != nil {
 		deps.Artifact.Routes(api)
 	}
+	if deps.Authoring != nil {
+		deps.Authoring.Routes(api)
+	}
+	if deps.Capture != nil {
+		deps.Capture.Routes(api)
+	}
+	if deps.Organizing != nil {
+		deps.Organizing.Routes(api)
+	}
+	if deps.DocumentHistory != nil {
+		deps.DocumentHistory.Routes(api)
+	}
+	if deps.GitSync != nil {
+		deps.GitSync.Routes(api)
+	}
 	if deps.ModelSettings != nil {
 		deps.ModelSettings.Routes(api)
 	}
@@ -293,6 +319,9 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 	reviewStatus := map[string]string{"status": "unavailable"}
 	memoryStatus := map[string]string{"status": "unavailable"}
 	interviewStatus := map[string]string{"status": "unavailable"}
+	authoringStatus := map[string]string{"status": "unavailable"}
+	captureStatus := map[string]string{"status": "unavailable"}
+	organizingStatus := map[string]string{"status": "unavailable"}
 	authStatus := map[string]string{"status": "disabled"}
 	status := "degraded"
 	if err := checkDatabase(r.Context(), deps); err == nil {
@@ -345,6 +374,15 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 	if deps.Interview != nil && deps.Interview.Available() {
 		interviewStatus["status"] = "ready"
 	}
+	if deps.Authoring != nil && deps.Authoring.Available() {
+		authoringStatus["status"] = "ready"
+	}
+	if deps.Capture != nil && deps.Capture.Available() {
+		captureStatus["status"] = "ready"
+	}
+	if deps.Organizing != nil && deps.Organizing.Available() {
+		organizingStatus["status"] = "ready"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":             status,
 		"version":            deps.Version,
@@ -358,6 +396,9 @@ func handleSystemStatus(w http.ResponseWriter, r *http.Request, deps Dependencie
 		"review":             reviewStatus,
 		"memory":             memoryStatus,
 		"interview":          interviewStatus,
+		"authoring":          authoringStatus,
+		"capture":            captureStatus,
+		"organizing":         organizingStatus,
 		"auth":               authStatus,
 		"request_id":         requestID(r.Context()),
 	})

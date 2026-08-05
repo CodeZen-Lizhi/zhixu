@@ -71,6 +71,20 @@ func TestValidateSourceSpanReference(t *testing.T) {
 	}
 }
 
+func TestValidateSourceSpanReferenceAcceptsBoundedDerivedText(t *testing.T) {
+	value := validSourceSpanReference()
+	value.Span.EndByte = value.SourceVersion.ByteSize
+	value.EvidenceKind = EvidenceDerivedText
+	value.DerivedExcerpt = "PDF extracted evidence"
+	if err := ValidateSourceSpanReference(value); err != nil {
+		t.Fatalf("valid derived source span: %v", err)
+	}
+	value.Span.StartByte = 1
+	if err := ValidateSourceSpanReference(value); err == nil {
+		t.Fatal("expected derived evidence to bind the complete artifact")
+	}
+}
+
 func validSourceVersionReference() SourceVersionReference {
 	return SourceVersionReference{
 		WorkspaceID: "91000000-0000-4000-8000-000000000001", SourceID: "91000000-0000-4000-8000-000000000002",

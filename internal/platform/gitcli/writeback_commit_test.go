@@ -93,6 +93,83 @@ func TestWritebackCommitApprovedSupportsSHA256RepositoryWhenAvailable(t *testing
 	}
 }
 
+func TestWritebackCommitApprovedCreateOnlyAddsAndReversesWithoutSyntheticBlob(t *testing.T) {
+	repository := newCreateOnlyWritebackTestRepository(t, "notes/new.md")
+	request := newCreateOnlyApprovedCommitRequest(t, repository, []byte("# created\n"))
+	absence, err := changecontrol.ComputeAbsenceToken(writebackTestWorkspaceID, repository.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.BaseBlobID != "" || request.TargetMode != changecontrol.TargetModeCreateOnly {
+		t.Fatalf("create-only request = %#v", request)
+	}
+	forward, err := repository.client.CommitApproved(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forward.TargetMode != changecontrol.TargetModeCreateOnly || forward.BaseBlobID != "" {
+		t.Fatalf("create-only commit = %#v", forward)
+	}
+	if got := runWritebackGit(t, repository.root, "show", "--format=", "--name-status", forward.GitCommit); got != "A\t"+repository.target+"\n" {
+		t.Fatalf("forward name status = %q", got)
+	}
+	if !hasTrailerValue(fixedCommitMessage(lookupFromExistingCommit(forward)), changecontrol.GitTrailerTargetMode, string(changecontrol.TargetModeCreateOnly)) {
+		t.Fatal("CREATE_ONLY trailer is missing")
+	}
+
+	reverse, err := repository.client.CreateReverseCommit(context.Background(), changecontrol.ReverseCommitRequest{Commit: forward, ExpectedBaseHash: absence})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reverse.TargetMode != changecontrol.TargetModeCreateOnly || reverse.ResultBlobID != "" || reverse.ResultHash != absence {
+		t.Fatalf("create-only reverse = %#v", reverse)
+	}
+	if got := runWritebackGit(t, repository.root, "show", "--format=", "--name-status", reverse.GitCommit); got != "D\t"+repository.target+"\n" {
+		t.Fatalf("reverse name status = %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(repository.root, filepath.FromSlash(repository.target))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reverse target exists or cannot be inspected: %v", err)
+	}
+	replayed, err := repository.client.CreateReverseCommit(context.Background(), changecontrol.ReverseCommitRequest{Commit: forward, ExpectedBaseHash: absence})
+	if err != nil || !replayed.Replayed || replayed.GitCommit != reverse.GitCommit {
+		t.Fatalf("replayed reverse = %#v, %v", replayed, err)
+	}
+}
+
+func TestWritebackCommitApprovedCreateOnlyRecoversPublishedPrivateIndex(t *testing.T) {
+	repository := newCreateOnlyWritebackTestRepository(t, "notes/recovered.md")
+	request := newCreateOnlyApprovedCommitRequest(t, repository, []byte("# recovered\n"))
+	commit, err := newCommitFaultClient(t, repository, true).CommitApproved(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !commit.Recovered || commit.Replayed || commit.TargetMode != changecontrol.TargetModeCreateOnly {
+		t.Fatalf("recovered create-only commit = %#v", commit)
+	}
+	if status := runWritebackGit(t, repository.root, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
+		t.Fatalf("status = %q", status)
+	}
+}
+
+func TestWritebackCommitApprovedCreateOnlyLeavesRealIndexUntouchedBeforePublish(t *testing.T) {
+	repository := newCreateOnlyWritebackTestRepository(t, "notes/not-published.md")
+	request := newCreateOnlyApprovedCommitRequest(t, repository, []byte("# not published\n"))
+	indexBefore := runWritebackGit(t, repository.root, "ls-files", "--stage")
+	statusBefore := runWritebackGit(t, repository.root, "status", "--porcelain=v1", "--untracked-files=all")
+
+	_, err := newCommitFaultClient(t, repository, false).CommitApproved(context.Background(), request)
+	requireGitErrorCode(t, err, "GIT_COMMIT_FAILED", foundation.ErrorNonRetryableFailure)
+	if head := strings.TrimSpace(runWritebackGit(t, repository.root, "rev-parse", "HEAD")); head != repository.head {
+		t.Fatalf("HEAD = %s, want %s", head, repository.head)
+	}
+	if indexAfter := runWritebackGit(t, repository.root, "ls-files", "--stage"); indexAfter != indexBefore {
+		t.Fatalf("real index changed before publish:\nbefore=%q\nafter=%q", indexBefore, indexAfter)
+	}
+	if statusAfter := runWritebackGit(t, repository.root, "status", "--porcelain=v1", "--untracked-files=all"); statusAfter != statusBefore {
+		t.Fatalf("worktree status changed before publish:\nbefore=%q\nafter=%q", statusBefore, statusAfter)
+	}
+}
+
 func TestWritebackCommitApprovedRecoversCommitAfterCommandError(t *testing.T) {
 	repository := newWritebackTestRepository(t, "", "")
 	request := newApprovedCommitRequest(t, repository, []byte("# approved\n"))
@@ -227,10 +304,10 @@ func TestWritebackPublishCommitUsesExpectedOldHeadCAS(t *testing.T) {
 	repository := newWritebackTestRepository(t, "", "")
 	request := newApprovedCommitRequest(t, repository, []byte("# approved\n"))
 	runWritebackGit(t, repository.root, "add", "--", repository.target)
-	if err := repository.client.verifyStagedTarget(context.Background(), repository.root, request.ApprovedGitHead, request.TargetPath, request.BaseMode, request.ResultBlobID, request.DiffHash, ""); err != nil {
+	if err := repository.client.verifyStagedTarget(context.Background(), repository.root, request.ApprovedGitHead, request.TargetPath, request.TargetMode, request.BaseMode, request.ResultBlobID, request.DiffHash, ""); err != nil {
 		t.Fatal(err)
 	}
-	branchRef, commitID, err := repository.client.createCommitObject(context.Background(), repository.root, lookupFromCommitRequest(request))
+	branchRef, commitID, err := repository.client.createCommitObject(context.Background(), repository.root, lookupFromCommitRequest(request), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,6 +530,24 @@ func newApprovedCommitRequest(t *testing.T, repository writebackTestRepository, 
 		WritebackExecutionID: "execution", ProposalID: "proposal", RevisionID: "revision", ApprovalID: "approval",
 		Operation: changecontrol.GitOperationApply, TargetPath: diff.TargetPath, ApprovedGitHead: diff.ApprovedGitHead,
 		ResultHash: diff.ResultHash, DiffHash: diff.DiffHash, BaseBlobID: diff.BaseBlobID, ResultBlobID: diff.ResultBlobID, BaseMode: diff.BaseMode,
+	}
+}
+
+func newCreateOnlyApprovedCommitRequest(t *testing.T, repository writebackTestRepository, content []byte) changecontrol.GitCommitRequest {
+	t.Helper()
+	resultHash := repository.writeTarget(t, content)
+	diff, err := repository.client.DiffApproved(context.Background(), changecontrol.GitDiffRequest{
+		WorkspaceID: writebackTestWorkspaceID, TargetPath: repository.target, TargetMode: changecontrol.TargetModeCreateOnly,
+		ApprovedGitHead: repository.head, ResultHash: resultHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return changecontrol.GitCommitRequest{
+		WorkspaceID: writebackTestWorkspaceID, WorkflowRunID: "workflow-run", NodeRunID: "node-run", WritebackExecutionID: "execution",
+		ProposalID: "proposal", RevisionID: "revision", ApprovalID: "approval", Operation: changecontrol.GitOperationApply,
+		TargetPath: diff.TargetPath, TargetMode: diff.TargetMode, ApprovedGitHead: diff.ApprovedGitHead, ResultHash: diff.ResultHash,
+		DiffHash: diff.DiffHash, BaseBlobID: diff.BaseBlobID, ResultBlobID: diff.ResultBlobID, BaseMode: diff.BaseMode,
 	}
 }
 

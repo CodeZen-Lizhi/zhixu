@@ -25,12 +25,14 @@ const revisionId = "12000000-0000-4000-8000-000000000003";
 const sourceVersionId = "12000000-0000-4000-8000-000000000004";
 const sourceSpanId = "12000000-0000-4000-8000-000000000005";
 const proposalId = "12000000-0000-4000-8000-000000000006";
+const documentId = "12000000-0000-4000-8000-00000000000a";
+const articleRevisionId = "12000000-0000-4000-8000-00000000000b";
 const generationId = "12000000-0000-4000-8000-000000000007";
 const workflowRunId = "12000000-0000-4000-8000-000000000008";
 const nodeRunId = "12000000-0000-4000-8000-000000000009";
 const hash = "a".repeat(64);
 const at = "2026-07-26T00:00:00Z";
-const artifact = { id: artifactId, workspace_id: workspaceId, type: "knowledge-note", title: "Artifact", status: "DRAFT", scope_definition: "scope", source_coverage: [{ section_key: "gap", status: "GAP", gaps: [{ code: "KNOWLEDGE_GAP", description: "missing" }] }], current_revision_id: revisionId, version: 4, created_at: at, updated_at: at, revision: { id: revisionId, artifact_id: artifactId, revision_no: 4, outline: [{ key: "gap", title: "Gap" }], sections: [{ key: "gap", title: "Gap", content: "", citations: [], coverage: { section_key: "gap", status: "GAP", gaps: [{ code: "KNOWLEDGE_GAP", description: "missing" }] } }], created_by: "HUMAN", content_hash: hash, created_at: at } };
+const artifact = { id: artifactId, workspace_id: workspaceId, type: "knowledge-note", title: "Artifact", status: "DRAFT", scope_definition: "scope", source_coverage: [{ section_key: "gap", status: "GAP", gaps: [{ code: "KNOWLEDGE_GAP", description: "missing" }] }], current_revision_id: revisionId, version: 4, created_at: at, updated_at: at, revision: { id: revisionId, artifact_id: artifactId, revision_no: 4, outline: [{ key: "gap", title: "Gap" }], sections: [{ key: "gap", title: "Gap", content: "", citations: [], document_sources: [], coverage: { section_key: "gap", status: "GAP", gaps: [{ code: "KNOWLEDGE_GAP", description: "missing" }] } }], created_by: "HUMAN", content_hash: hash, created_at: at } };
 const generationItem = {
   generation_id: generationId,
   workspace_id: workspaceId,
@@ -54,10 +56,11 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("Artifact API boundary", () => {
   it("strictly decodes GAP and verified citations without treating them as client claims", () => {
-    const decoded = decodeArtifact({ ...artifact, revision: { ...artifact.revision, outline: [{ key: "covered", title: "Covered" }], sections: [{ key: "covered", title: "Covered", content: "verified body", citations: [{ source_version_id: sourceVersionId, source_span_id: sourceSpanId, verified_content_hash: hash, excerpt: "server excerpt", verified: true }], coverage: { section_key: "covered", status: "COVERED", gaps: [] } }] }, source_coverage: [{ section_key: "covered", status: "COVERED", gaps: [] }] });
+    const decoded = decodeArtifact({ ...artifact, revision: { ...artifact.revision, outline: [{ key: "covered", title: "Covered" }], sections: [{ key: "covered", title: "Covered", content: "verified body", citations: [{ source_version_id: sourceVersionId, source_span_id: sourceSpanId, verified_content_hash: hash, excerpt: "server excerpt", verified: true }], document_sources: [], coverage: { section_key: "covered", status: "COVERED", gaps: [] } }] }, source_coverage: [{ section_key: "covered", status: "COVERED", gaps: [] }] });
     expect(decoded.revision.sections[0]?.citations[0]?.verified).toBe(true);
     expect(decodeArtifact(artifact).revision.sections[0]?.coverage.status).toBe("GAP");
-    expect(decodeArtifact({ ...artifact, revision: { ...artifact.revision, outline: [{ key: "partial", title: "Partial" }], sections: [{ key: "partial", title: "Partial", content: "bounded body", citations: [{ source_version_id: sourceVersionId, source_span_id: sourceSpanId, verified_content_hash: hash, excerpt: "server excerpt", verified: true }], coverage: { section_key: "partial", status: "PARTIAL", gaps: [{ code: "MISSING_DETAIL", description: "partial evidence" }] } }] }, source_coverage: [{ section_key: "partial", status: "PARTIAL", gaps: [{ code: "MISSING_DETAIL", description: "partial evidence" }] }] }).revision.sections[0]?.coverage.status).toBe("PARTIAL");
+    const documentBacked = decodeArtifact({ ...artifact, revision: { ...artifact.revision, outline: [{ key: "partial", title: "Partial" }], sections: [{ key: "partial", title: "Partial", content: "bounded body", citations: [], document_sources: [{ document_id: documentId, article_revision_id: articleRevisionId, revision_no: 2, verified_content_hash: hash, verified: true }], coverage: { section_key: "partial", status: "PARTIAL", gaps: [{ code: "MISSING_DETAIL", description: "partial evidence" }] } }] }, source_coverage: [{ section_key: "partial", status: "PARTIAL", gaps: [{ code: "MISSING_DETAIL", description: "partial evidence" }] }] });
+    expect(documentBacked.revision.sections[0]?.documentSources[0]).toMatchObject({ documentId, articleRevisionId, revisionNo: 2, verified: true });
     expect(() => decodeArtifact({ ...artifact, revision: { ...artifact.revision, sections: [{ ...artifact.revision.sections[0], content: "invented body" }] } })).toThrow(ArtifactApiError);
     expect(() => decodeArtifact({ ...artifact, future: true })).toThrow(ArtifactApiError);
   });
@@ -69,8 +72,8 @@ describe("Artifact API boundary", () => {
       ...artifact.revision,
       outline: [{ key: "covered", title: "Covered" }, { key: "partial", title: "Partial" }],
       sections: [
-        { key: "covered", title: "Covered", content: "verified body", citations: [{ source_version_id: sourceVersionId, source_span_id: sourceSpanId, verified_content_hash: hash, excerpt: "covered citation", verified: true }], coverage: covered },
-        { key: "partial", title: "Partial", content: "bounded body", citations: [{ source_version_id: sourceVersionId, source_span_id: proposalId, verified_content_hash: hash, excerpt: "partial citation", verified: true }], coverage: partial },
+        { key: "covered", title: "Covered", content: "verified body", citations: [{ source_version_id: sourceVersionId, source_span_id: sourceSpanId, verified_content_hash: hash, excerpt: "covered citation", verified: true }], document_sources: [], coverage: covered },
+        { key: "partial", title: "Partial", content: "bounded body", citations: [{ source_version_id: sourceVersionId, source_span_id: proposalId, verified_content_hash: hash, excerpt: "partial citation", verified: true }], document_sources: [], coverage: partial },
       ],
     };
     expect(decodeArtifact({ ...artifact, revision, source_coverage: [covered, partial] }).sourceCoverage).toEqual([

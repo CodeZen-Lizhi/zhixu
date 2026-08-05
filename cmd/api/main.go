@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"flag"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -27,7 +28,14 @@ import (
 	authapplication "github.com/CodeZen-Lizhi/zhixu/internal/auth/application"
 	authdomain "github.com/CodeZen-Lizhi/zhixu/internal/auth/domain"
 	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
+	authoringchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/authoring/adapter/changecontrol"
+	authoringpostgres "github.com/CodeZen-Lizhi/zhixu/internal/authoring/adapter/postgres"
+	authoringapplication "github.com/CodeZen-Lizhi/zhixu/internal/authoring/application"
+	authoringhttp "github.com/CodeZen-Lizhi/zhixu/internal/authoring/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
+	capturepostgres "github.com/CodeZen-Lizhi/zhixu/internal/capture/adapter/postgres"
+	captureapplication "github.com/CodeZen-Lizhi/zhixu/internal/capture/application"
+	capturehttp "github.com/CodeZen-Lizhi/zhixu/internal/capture/http"
 	approvaldispatchpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/approvaldispatchpostgres"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
@@ -40,6 +48,10 @@ import (
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationhttp "github.com/CodeZen-Lizhi/zhixu/internal/conversation/http"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
+	documenthistorychangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/adapter/changecontrol"
+	documenthistorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/adapter/postgres"
+	documenthistoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/application"
+	documenthistoryhttp "github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/http"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	eventshttp "github.com/CodeZen-Lizhi/zhixu/internal/events/http"
 	exportauth "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/auth"
@@ -50,6 +62,10 @@ import (
 	exportapplication "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
 	exporthttp "github.com/CodeZen-Lizhi/zhixu/internal/export/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	gitsyncpostgres "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/adapter/postgres"
+	gitsyncsecurity "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/adapter/security"
+	gitsyncapplication "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/application"
+	gitsynchttp "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/http"
 	graphpostgres "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/postgres"
 	graphapplication "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
@@ -76,6 +92,11 @@ import (
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	modelsettingshttp "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/http"
 	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
+	organizingowner "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/owner"
+	organizingpostgres "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/postgres"
+	organizingapplication "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
+	organizinghttp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/http"
+	organizingworkflow "github.com/CodeZen-Lizhi/zhixu/internal/organizing/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
@@ -292,6 +313,11 @@ func runAPI() int {
 	learningPathHandler := learningpathhttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	knowledgeHandler := knowledgehttp.NewHandler(nil, nil, cfg.GraphQueryTimeout)
 	artifactHandler := artifacthttp.NewHandler(nil, nil, cfg.GraphQueryTimeout)
+	authoringHandler := authoringhttp.NewHandler(nil, cfg.GraphQueryTimeout)
+	captureHandler := capturehttp.NewHandler(nil, 0)
+	organizingHandler := organizinghttp.NewHandler(nil, nil, nil, cfg.GraphQueryTimeout)
+	documentHistoryHandler := documenthistoryhttp.NewHandler(nil, cfg.GraphQueryTimeout)
+	gitSyncHandler := gitsynchttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	ragEnabled := configuredModels.Chat().State() == platformmodels.CapabilityConfigured
 	var ragInitErr error
 	var changeControlService *changecontrolapplication.Service
@@ -350,6 +376,7 @@ func runAPI() int {
 		var repositoryErr error
 		healthEvents, healthEventsErr := eventspostgres.NewStore(database.DB())
 		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB(), healthEvents)
+		var workflowService *workflowapplication.Service
 		var workflowRuntime *workflowpostgres.RuntimeRepository
 		if changeControlRepositoryErr != nil {
 			logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
@@ -368,7 +395,6 @@ func runAPI() int {
 			if cancellationGuardErr != nil {
 				logger.Error("workflow cancellation guard is unavailable", "error_code", "WORKFLOW_CANCELLATION_GUARD_UNAVAILABLE")
 			}
-			var workflowService *workflowapplication.Service
 			var runtime *workflowpostgres.RuntimeRepository
 			var workflowServiceErr error
 			if cancellationGuardErr != nil {
@@ -388,7 +414,13 @@ func runAPI() int {
 				}
 			} else {
 				workflowRuntime = runtime
-				workflowHandler = workflowhttp.NewHandler(workflowService)
+				humanReviewProjector, humanReviewErr := newOrganizingHumanTaskReviewProjector(database.DB(), workflowRuntime)
+				if humanReviewErr != nil {
+					logger.Error("workflow human review projector is unavailable", "error_code", "ORGANIZING_HUMAN_REVIEW_UNAVAILABLE")
+					workflowService = nil
+				} else {
+					workflowHandler = workflowhttp.NewHandler(workflowService, humanReviewProjector)
+				}
 				if err := configureCollectionHealth(database, cfg, &collectionHandler, &healthHandler, workflowRuntime); err != nil {
 					logger.Error("collection and health workflow services are unavailable", "error_code", "COLLECTION_HEALTH_WORKFLOW_DEPENDENCY_UNAVAILABLE")
 				}
@@ -403,12 +435,27 @@ func runAPI() int {
 			workspaceService := workspaceapplication.NewService(workspaceapplication.Dependencies{
 				Repository:     workspaceRepository,
 				Files:          fileScanner,
+				ManagedFiles:   fileScanner,
 				Git:            gitcli.New(""),
 				GitInitializer: gitcli.New(""),
 				IDs:            foundation.NewUUIDGenerator(nil),
 				Clock:          foundation.SystemClock{},
 			})
 			workspaceHandler = workspacehttp.NewHandler(workspaceService)
+			configuredGitSyncHandler, gitSyncHandlerErr := newGitSyncHandler(
+				database.DB(), workspaceRepository, cfg.GitSyncKeyFile, cfg.GraphQueryTimeout,
+			)
+			if gitSyncHandlerErr != nil {
+				logger.Warn("Git sync capability is unavailable", "error_code", "GIT_SYNC_CAPABILITY_UNAVAILABLE")
+			} else {
+				gitSyncHandler = configuredGitSyncHandler
+			}
+			configuredCaptureHandler, captureHandlerErr := newCaptureHandler(database.DB(), workspaceService, 0)
+			if captureHandlerErr != nil {
+				logger.Error("capture service is unavailable", "error_code", "CAPTURE_SERVICE_UNAVAILABLE")
+			} else {
+				captureHandler = configuredCaptureHandler
+			}
 			configuredInterviewHandler, interviewHandlerErr := newInterviewHandler(database.DB(), workspaceRepository, fileScanner, cfg.GraphQueryTimeout)
 			if interviewHandlerErr != nil {
 				logger.Error("interview service is unavailable", "error_code", "INTERVIEW_DEPENDENCY_UNAVAILABLE")
@@ -478,6 +525,41 @@ func runAPI() int {
 					}
 				}
 			}
+			if changeControlService != nil {
+				configuredDocumentHistoryHandler, documentHistoryErr := newDocumentHistoryHandler(
+					database.DB(), workspaceRepository, changeControlService, changeControlRepository, cfg.GraphQueryTimeout,
+				)
+				if documentHistoryErr != nil {
+					logger.Error("document history service is unavailable", "error_code", "DOCUMENT_HISTORY_DEPENDENCY_UNAVAILABLE")
+				} else {
+					documentHistoryHandler = configuredDocumentHistoryHandler
+				}
+			}
+			configuredAuthoringService, authoringHandlerErr := newAuthoringService(
+				database.DB(), changeControlService, targetReader,
+			)
+			if authoringHandlerErr != nil {
+				logger.Error("authoring service is unavailable", "error_code", "AUTHORING_DEPENDENCY_UNAVAILABLE")
+			} else {
+				configuredOrganizingHandler, organizingHandlerErr := newOrganizingHandler(
+					context.Background(), database.DB(), configuredModels.Embedding().Embedder(), workspaceRepository,
+					fileScanner, configuredAuthoringService, workflowService, cfg.GraphQueryTimeout,
+				)
+				if organizingHandlerErr != nil {
+					logger.Error("organizing service is unavailable", "error_code", "ORGANIZING_DEPENDENCY_UNAVAILABLE")
+				} else {
+					organizingHandler = configuredOrganizingHandler
+					availableAuthoringService, availabilityErr := configuredAuthoringService.WithOrganizingAvailability(authoringapplication.OrganizingAvailability{
+						Available: true, Href: "/authoring/organize",
+					})
+					if availabilityErr != nil {
+						logger.Error("organizing overview capability is unavailable", "error_code", "ORGANIZING_OVERVIEW_UNAVAILABLE")
+					} else {
+						configuredAuthoringService = availableAuthoringService
+					}
+				}
+				authoringHandler = authoringhttp.NewHandler(configuredAuthoringService, cfg.GraphQueryTimeout)
+			}
 			generation := []artifactapplication.SectionGenerationStarter(nil)
 			if artifactGeneration != nil {
 				generation = artifactGenerationDependencies(ragEnabled, artifactGeneration)
@@ -533,6 +615,11 @@ func runAPI() int {
 		Interview:         interviewHandler,
 		Knowledge:         knowledgeHandler,
 		Artifact:          artifactHandler,
+		Authoring:         authoringHandler,
+		Capture:           captureHandler,
+		Organizing:        organizingHandler,
+		DocumentHistory:   documentHistoryHandler,
+		GitSync:           gitSyncHandler,
 		ModelSettings:     modelSettingsHandler,
 		Auth:              authHandler,
 		AuthRequired:      authRequired,
@@ -613,6 +700,269 @@ func newAPIServer(address string, handler http.Handler) *http.Server {
 		ReadHeaderTimeout: apiReadHeaderTimeout,
 		IdleTimeout:       apiIdleTimeout,
 	}
+}
+
+// newAuthoringHandler 组装持久草稿、Change Control Proposal 与受控目标读取边界。
+func newAuthoringHandler(
+	pool *pgxpool.Pool,
+	proposals authoringchangecontrol.ProposalService,
+	targets authoringchangecontrol.TargetReader,
+	timeout time.Duration,
+) (*authoringhttp.Handler, error) {
+	service, err := newAuthoringService(pool, proposals, targets)
+	if err != nil {
+		return nil, err
+	}
+	return authoringhttp.NewHandler(service, timeout), nil
+}
+
+// newAuthoringService 组装可供 Authoring HTTP 与 Organizing owner bridge 复用的应用服务。
+func newAuthoringService(
+	pool *pgxpool.Pool,
+	proposals authoringchangecontrol.ProposalService,
+	targets authoringchangecontrol.TargetReader,
+) (*authoringapplication.Service, error) {
+	if pool == nil || proposals == nil || targets == nil {
+		return nil, errors.New("authoring database, proposal service and target reader are required")
+	}
+	repository, err := authoringpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	proposalCreator, err := authoringchangecontrol.NewProposalCreator(proposals, targets)
+	if err != nil {
+		return nil, err
+	}
+	service, err := authoringapplication.NewService(authoringapplication.Dependencies{
+		Repository: repository, Proposals: proposalCreator,
+		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return service, nil
+}
+
+// newDocumentHistoryHandler 组装文档投影、只读 Git 历史与强类型恢复 Proposal 边界。
+func newDocumentHistoryHandler(
+	pool *pgxpool.Pool,
+	workspaces gitcli.WorkspaceRepository,
+	proposals *changecontrolapplication.Service,
+	proposalLookup *changecontrolpostgres.Repository,
+	timeout time.Duration,
+) (*documenthistoryhttp.Handler, error) {
+	if pool == nil || workspaces == nil || proposals == nil || proposalLookup == nil {
+		return nil, errors.New("document history database, workspace and proposal services are required")
+	}
+	documents, err := documenthistorypostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	history, err := gitcli.NewHistoryClient(gitcli.New(""), workspaces)
+	if err != nil {
+		return nil, err
+	}
+	gateway, err := documenthistorychangecontrol.NewGateway(proposals, proposalLookup)
+	if err != nil {
+		return nil, err
+	}
+	cursors, err := documenthistoryapplication.NewRandomCursorCodec()
+	if err != nil {
+		return nil, err
+	}
+	service, err := documenthistoryapplication.NewService(documenthistoryapplication.Dependencies{
+		Documents: documents,
+		Git:       history,
+		Proposals: gateway,
+		Lookup:    gateway,
+		Cursors:   cursors,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return documenthistoryhttp.NewHandler(service, timeout), nil
+}
+
+// newGitSyncHandler composes the production-only Git Remote configuration and
+// run service. The caller retains a fail-closed Handler when this returns an error.
+func newGitSyncHandler(
+	pool *pgxpool.Pool,
+	workspaces gitcli.WorkspaceRepository,
+	keyFile string,
+	timeout time.Duration,
+) (*gitsynchttp.Handler, error) {
+	if pool == nil || workspaces == nil || keyFile == "" {
+		return nil, errors.New("Git sync database, workspace repository and key file are required")
+	}
+	sealer, err := gitsyncsecurity.NewCredentialSealerFromFile(keyFile)
+	if err != nil {
+		return nil, err
+	}
+	repository, err := gitsyncpostgres.NewRepository(pool, sealer)
+	if err != nil {
+		return nil, err
+	}
+	policy := gitsyncsecurity.NewURLPolicy(net.DefaultResolver)
+	remote, err := gitcli.NewRemoteClient(gitcli.New(""), workspaces, policy)
+	if err != nil {
+		return nil, err
+	}
+	cursors, err := gitsyncapplication.NewRandomCursorCodec()
+	if err != nil {
+		return nil, err
+	}
+	service, err := gitsyncapplication.NewService(
+		repository, repository, policy, remote, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, cursors,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return gitsynchttp.NewHandler(service, timeout), nil
+}
+
+// newOrganizingHandler 通过公开 owner 读取服务组装 Draft、Template、Snapshot 与 Run 投影。
+func newOrganizingHandler(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	embedder retrievalapplication.Embedder,
+	workspaceRepository workspacedomain.SourceMaterialRepository,
+	files workspacedomain.FileScanner,
+	authoring organizingowner.AuthoringReader,
+	workflows *workflowapplication.Service,
+	timeout time.Duration,
+) (*organizinghttp.Handler, error) {
+	if ctx == nil || pool == nil || workspaceRepository == nil || files == nil || authoring == nil || workflows == nil {
+		return nil, errors.New("organizing database, owner services and workflow reader are required")
+	}
+	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	artifactReader, err := retrievalworkspace.NewReader(workspaceRepository, files)
+	if err != nil {
+		return nil, err
+	}
+	evidence, err := retrievalapplication.NewEvidenceReferenceService(searchRepository, artifactReader)
+	if err != nil {
+		return nil, err
+	}
+	search, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
+	if err != nil {
+		return nil, err
+	}
+	modelRuns, err := agentpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	profiles, err := capturepostgres.NewProfileRepository(pool, modelRuns)
+	if err != nil {
+		return nil, err
+	}
+	knowledgeRepository, err := knowledgepostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	claims, err := knowledgeapplication.NewClaimQueryService(knowledgeRepository)
+	if err != nil {
+		return nil, err
+	}
+	claimSearch, err := graphpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	collectionRepository, err := collectionpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	collections, err := collectionapplication.NewService(collectionapplication.Dependencies{
+		Repository: collectionRepository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	owners, err := organizingowner.New(organizingowner.Dependencies{
+		Search: search, Evidence: evidence, Profiles: profiles, Knowledge: claims, Collections: collections,
+		Authoring: authoring, Claims: claimSearch,
+	})
+	if err != nil {
+		return nil, err
+	}
+	repository, err := organizingpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	bootstrapTimeout := timeout
+	if bootstrapTimeout <= 0 {
+		bootstrapTimeout = 5 * time.Second
+	}
+	bootstrapCtx, cancel := context.WithTimeout(ctx, bootstrapTimeout)
+	defer cancel()
+	clock := foundation.SystemClock{}
+	if err := repository.EnsureBuiltIns(bootstrapCtx, clock.Now()); err != nil {
+		return nil, err
+	}
+	service, err := organizingapplication.NewService(organizingapplication.Dependencies{
+		Drafts: repository, Templates: repository, Starts: repository, Materials: owners, Suggestions: owners, Searches: owners,
+		IDs: foundation.NewUUIDGenerator(nil), Clock: clock,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return organizinghttp.NewHandler(service, service, workflows, timeout), nil
+}
+
+// newOrganizingHumanTaskReviewProjector binds Workflow Definition, pending
+// task/node and immutable Organizing Snapshot reads before HTTP exposes a
+// reviewable Human Task.
+func newOrganizingHumanTaskReviewProjector(
+	pool *pgxpool.Pool,
+	runtime *workflowpostgres.RuntimeRepository,
+) (*organizingworkflow.HumanTaskReviewProjector, error) {
+	if pool == nil || runtime == nil {
+		return nil, errors.New("organizing human review database and Workflow runtime are required")
+	}
+	repository, err := organizingpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	return organizingworkflow.NewHumanTaskReviewProjector(organizingworkflow.HumanTaskReviewDependencies{
+		Bindings: repository, Snapshots: repository, Stages: runtime, Nodes: runtime, Definitions: runtime,
+	})
+}
+
+// newCaptureHandler 组装 Workspace-owned 原始内容写入与 PostgreSQL Capture 事实边界。
+func newCaptureHandler(pool *pgxpool.Pool, content captureapplication.ManagedContentWriter, timeout time.Duration) (*capturehttp.Handler, error) {
+	if pool == nil || content == nil {
+		return nil, errors.New("capture database and managed content writer are required")
+	}
+	repository, err := capturepostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	service, err := captureapplication.NewService(captureapplication.Dependencies{
+		Repository: repository,
+		Content:    content,
+		IDs:        foundation.NewUUIDGenerator(nil),
+		Clock:      foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	modelRuns, err := agentpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	profiles, err := capturepostgres.NewProfileRepository(pool, modelRuns)
+	if err != nil {
+		return nil, err
+	}
+	profileRetries, err := captureapplication.NewProfileRetryService(captureapplication.ProfileRetryDependencies{
+		Scheduler: profiles, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return capturehttp.NewHandlerWithProfiles(service, profiles, profileRetries, timeout), nil
 }
 
 // newKnowledgeHandler 组装不可变 Timeline 投影查询与只读 Impact 报告服务。

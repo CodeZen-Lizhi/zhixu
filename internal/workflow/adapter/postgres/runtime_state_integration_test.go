@@ -29,7 +29,7 @@ func TestRuntimeStateClaimHeartbeatCompleteAndReplay(t *testing.T) {
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a1000000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-state',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-state"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-state',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-state"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -93,11 +93,14 @@ func TestRuntimeStateClaimHeartbeatCompleteAndReplay(t *testing.T) {
 		t.Fatalf("completed=%+v", completed)
 	}
 	wantEvent := application.WorkflowNodeTerminalEvent{
-		WorkflowRunID: started.Run.ID,
-		NodeRunID:     started.FirstNode.ID,
-		NodeAttemptID: claimed.Attempt.ID,
-		Outcome:       application.WorkflowTerminalOutcomeSucceeded,
-		TerminalAt:    *completed.Attempt.EndedAt,
+		WorkspaceID:    workspaceID,
+		WorkflowRunID:  started.Run.ID,
+		NodeRunID:      started.FirstNode.ID,
+		NodeKind:       started.FirstNode.NodeType,
+		NodeAttemptID:  claimed.Attempt.ID,
+		Outcome:        application.WorkflowTerminalOutcomeSucceeded,
+		TerminalOutput: string(completed.Node.Output),
+		TerminalAt:     *completed.Attempt.EndedAt,
 	}
 	if len(hook.events) != 1 || hook.events[0] != wantEvent {
 		t.Fatalf("terminal events=%+v want=%+v", hook.events, wantEvent)
@@ -119,7 +122,7 @@ func TestRuntimeStateClaimPersistsStaticModelRuntimeAsNull(t *testing.T) {
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a1100000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-static-model',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-static-model"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-static-model',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-static-model"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -162,7 +165,7 @@ func TestRuntimeStateClaimFreezesManagedModelRuntimeOwnership(t *testing.T) {
 	oldInstanceID := foundation.ID("a1200000-0000-4000-8000-000000000002")
 	newInstanceID := foundation.ID("a1200000-0000-4000-8000-000000000003")
 	rolloutID := foundation.ID("a1200000-0000-4000-8000-000000000004")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-managed-model',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-managed-model"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-managed-model',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-managed-model"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO ops.model_settings_runtime(role,instance_id,applied_revision,rollout_id,phase,applied_at,heartbeat_at) VALUES('worker',$1::uuid,0,NULL,'active',clock_timestamp(),clock_timestamp())`, string(oldInstanceID)); err != nil {
@@ -308,7 +311,7 @@ func TestRuntimeStateRetrySchedulesOneBusinessGeneration(t *testing.T) {
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a2000000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-retry',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-retry"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-retry',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-retry"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -373,8 +376,10 @@ func TestRuntimeStateRetrySchedulesOneBusinessGeneration(t *testing.T) {
 		t.Fatalf("retry_wait cancel attempts=%d", attempts)
 	}
 	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkspaceID:    workspaceID,
 		WorkflowRunID:  started.Run.ID,
 		NodeRunID:      started.FirstNode.ID,
+		NodeKind:       started.FirstNode.NodeType,
 		NodeAttemptID:  result.Attempt.ID,
 		Outcome:        application.WorkflowTerminalOutcomeCancelled,
 		FailureClass:   domain.FailureClassCancelled,
@@ -395,7 +400,7 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a3000000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-control',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-control"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-control',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-control"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -486,8 +491,10 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 		t.Fatalf("pending cancel created attempts=%d", attempts)
 	}
 	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkspaceID:    workspaceID,
 		WorkflowRunID:  cancelled.Run.ID,
 		NodeRunID:      cancelled.FirstNode.ID,
+		NodeKind:       cancelled.FirstNode.NodeType,
 		Outcome:        application.WorkflowTerminalOutcomeCancelled,
 		FailureClass:   domain.FailureClassCancelled,
 		FailureCode:    "WORKFLOW_CANCELLED",
@@ -511,7 +518,7 @@ func TestRuntimeStateControlAuthorizesBeforeMutationAndReplay(t *testing.T) {
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a3500000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-control-auth',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-control-auth"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-control-auth',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-control-auth"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -575,7 +582,7 @@ func TestRuntimeStateRunningPauseAndCancelConvergeAtDeliveryCheckpoint(t *testin
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a4000000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-checkpoint',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-checkpoint"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-checkpoint',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-checkpoint"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -653,8 +660,10 @@ func TestRuntimeStateRunningPauseAndCancelConvergeAtDeliveryCheckpoint(t *testin
 		t.Fatalf("cancelled checkpoint=%+v", cancelled)
 	}
 	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkspaceID:    workspaceID,
 		WorkflowRunID:  cancelledStart.Run.ID,
 		NodeRunID:      cancelledStart.FirstNode.ID,
+		NodeKind:       cancelledStart.FirstNode.NodeType,
 		NodeAttemptID:  cancelClaim.Attempt.ID,
 		Outcome:        application.WorkflowTerminalOutcomeCancelled,
 		FailureClass:   domain.FailureClassCancelled,
@@ -679,7 +688,7 @@ func TestRuntimeStateHumanWaitSubmitCompletesNodeAndReplaysDecision(t *testing.T
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a6000000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-human',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-human"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-human',$2,$2,CURRENT_TIMESTAMP,'inactive',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-human"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -714,6 +723,14 @@ func TestRuntimeStateHumanWaitSubmitCompletesNodeAndReplaysDecision(t *testing.T
 	if waited.Task.Status != domain.HumanTaskPending || waited.Run.Status != domain.RunStatusWaitingForHuman || waited.Node.Status != domain.NodeStatusWaitingForHuman || waited.Attempt.Status != domain.AttemptStatusWaitingForHuman || waited.Attempt.LeaseOwner != "" {
 		t.Fatalf("waited=%+v", waited)
 	}
+	queryRepository, err := NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingTask, found, err := queryRepository.GetPendingHumanTask(ctx, started.Run.ID)
+	if err != nil || !found || pendingTask.ID != waited.Task.ID || pendingTask.RunID != started.Run.ID {
+		t.Fatalf("pending task=%+v found=%v err=%v", pendingTask, found, err)
+	}
 	decision := json.RawMessage(`{"approved":true}`)
 	lowScope := application.HumanDecisionCommand{
 		RunID: started.Run.ID, TaskID: waited.Task.ID, TargetVersion: 1, Decision: decision,
@@ -742,6 +759,9 @@ func TestRuntimeStateHumanWaitSubmitCompletesNodeAndReplaysDecision(t *testing.T
 	if submitted.Task.Status != domain.HumanTaskSubmitted || submitted.Node.Status != domain.NodeStatusSucceeded || submitted.Run.Status != domain.RunStatusSucceeded {
 		t.Fatalf("submitted=%+v", submitted)
 	}
+	if pendingTask, found, err = queryRepository.GetPendingHumanTask(ctx, started.Run.ID); err != nil || found {
+		t.Fatalf("resolved pending task=%+v found=%v err=%v", pendingTask, found, err)
+	}
 	if _, err := human.SubmitHuman(ctx, lowScope); !hasCode(err, "WORKFLOW_CALLER_CAPABILITY_DENIED") {
 		t.Fatalf("low-scope human replay error=%v", err)
 	}
@@ -759,7 +779,7 @@ func TestRuntimeStateControlDirectCancelWaitingHumanUsesExistingAttempt(t *testi
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a6500000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-human-cancel',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-human-cancel"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-human-cancel',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-human-cancel"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -813,8 +833,10 @@ func TestRuntimeStateControlDirectCancelWaitingHumanUsesExistingAttempt(t *testi
 		t.Fatal(err)
 	}
 	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkspaceID:    workspaceID,
 		WorkflowRunID:  started.Run.ID,
 		NodeRunID:      started.FirstNode.ID,
+		NodeKind:       started.FirstNode.NodeType,
 		NodeAttemptID:  waited.Attempt.ID,
 		Outcome:        application.WorkflowTerminalOutcomeCancelled,
 		FailureClass:   domain.FailureClassCancelled,
@@ -835,7 +857,7 @@ func TestRuntimeTerminalHookFailureRollsBackDeliveryAndControl(t *testing.T) {
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a6800000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-terminal-rollback',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-terminal-rollback"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-terminal-rollback',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-terminal-rollback"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -931,7 +953,7 @@ func TestRuntimeStateConcurrentClaimAndLeaseReclaimFenceOldOwner(t *testing.T) {
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a7000000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-claim',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-claim"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-claim',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-claim"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -1006,7 +1028,7 @@ func TestRuntimeStateHigherRiverAttemptWaitsForActiveLeaseThenReclaims(t *testin
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a9100000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-transport-retry',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-transport-retry"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-transport-retry',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-transport-retry"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -1046,7 +1068,7 @@ func TestRuntimeStateRetryExhaustionFailsWithoutNewJob(t *testing.T) {
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a8000000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-exhaust',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-exhaust"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-exhaust',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-exhaust"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)
@@ -1078,8 +1100,10 @@ func TestRuntimeStateRetryExhaustionFailsWithoutNewJob(t *testing.T) {
 		t.Fatalf("exhausted=%+v", result)
 	}
 	wantEvent := application.WorkflowNodeTerminalEvent{
+		WorkspaceID:    workspaceID,
 		WorkflowRunID:  started.Run.ID,
 		NodeRunID:      started.FirstNode.ID,
+		NodeKind:       started.FirstNode.NodeType,
 		NodeAttemptID:  claimed.Attempt.ID,
 		Outcome:        application.WorkflowTerminalOutcomeFailed,
 		FailureClass:   domain.FailureClassNonRetryable,
@@ -1118,7 +1142,7 @@ func TestRuntimeStateActivatesJoinSuccessorOnceAfterAllPredecessors(t *testing.T
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)
 	defer cleanup()
 	workspaceID := foundation.ID("a5000000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-dag',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-dag"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-dag',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-dag"); err != nil {
 		t.Fatal(err)
 	}
 	client, err := riveradapter.NewClient(pool, nil)

@@ -187,6 +187,44 @@ func (s *Service) List(ctx context.Context, query ListQuery) (CollectionListPage
 	return s.dependencies.Repository.ListCollections(ctx, query)
 }
 
+// SearchCollections searches active Smart Collections by normalized name or description.
+func (s *Service) SearchCollections(ctx context.Context, query CollectionSearchQuery) ([]Collection, error) {
+	if err := validateContext(ctx); err != nil {
+		return nil, err
+	}
+	if !validID(query.WorkspaceID) || query.Limit < 1 || query.Limit > MaxCollectionSearchLimit {
+		return nil, requestInvalid("collection search request is invalid")
+	}
+	_, normalized, err := normalizeName(query.Query)
+	if err != nil {
+		return nil, requestInvalid("collection search query is invalid")
+	}
+	repository, ok := s.dependencies.Repository.(CollectionSearchRepository)
+	if !ok || repository == nil {
+		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, ErrorCodeDependencyUnavailable, true, errors.New("collection search is unavailable"))
+	}
+	query.Query = normalized
+	items, err := repository.SearchCollections(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if items == nil || len(items) > query.Limit {
+		return nil, resultInconsistent("collection search result exceeds its bound")
+	}
+	seen := make(map[foundation.ID]struct{}, len(items))
+	for _, item := range items {
+		if !validID(item.ID) || item.WorkspaceID != query.WorkspaceID || item.Status != CollectionStatusActive ||
+			strings.TrimSpace(item.Name) == "" || item.Version < 1 || item.UpdatedAt.IsZero() {
+			return nil, resultInconsistent("collection search returned an invalid item")
+		}
+		if _, duplicate := seen[item.ID]; duplicate {
+			return nil, resultInconsistent("collection search returned duplicate items")
+		}
+		seen[item.ID] = struct{}{}
+	}
+	return items, nil
+}
+
 // Results 执行保存集合的统一 read model；Repository 不可执行时显式返回能力不可用。
 func (s *Service) Results(ctx context.Context, query ResultsQuery) (ResultPage, error) {
 	if err := validateContext(ctx); err != nil {

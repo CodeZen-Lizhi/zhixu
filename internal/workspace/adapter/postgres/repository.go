@@ -166,7 +166,7 @@ func (r *Repository) ListSourceVersions(ctx context.Context, request domain.Sour
 
 func buildSourceVersionListQuery(request domain.SourceVersionListQuery) (string, []any) {
 	// included 绑定具体 Source Version；excluded 的 source_version_id 按 Schema 必须为空，表示整个 Source 未进入 Active Index。
-	query := `SELECT sv.id::text,sv.source_id::text,sv.workspace_id::text,s.original_location,sv.mime_type,sv.byte_size,sv.captured_at,sv.content_hash,COALESCE(a.security_status,sv.security_status),COALESCE(a.status,''),COALESCE(wr.status,''),COALESCE(im.selection_status,'') FROM core.source_version sv JOIN core.source s ON s.id=sv.source_id AND s.workspace_id=sv.workspace_id LEFT JOIN LATERAL (SELECT ia.status,ia.security_status,ia.workflow_run_id FROM ingestion.attempt ia WHERE ia.source_version_id=sv.id AND ia.workspace_id=sv.workspace_id ORDER BY ia.started_at DESC,ia.id DESC LIMIT 1) a ON true LEFT JOIN workflow.run wr ON wr.id=a.workflow_run_id AND wr.workspace_id=sv.workspace_id LEFT JOIN retrieval.index_version active_index ON active_index.workspace_id=sv.workspace_id AND active_index.status='active' LEFT JOIN retrieval.index_manifest_source im ON im.index_version_id=active_index.id AND im.workspace_id=sv.workspace_id AND im.source_id=sv.source_id AND (im.selection_status='excluded' OR im.source_version_id=sv.id) WHERE sv.workspace_id=$1`
+	query := `SELECT sv.id::text,sv.source_id::text,sv.workspace_id::text,s.original_location,sv.mime_type,sv.byte_size,sv.captured_at,sv.content_hash,COALESCE(a.security_status,sv.security_status),COALESCE(a.status,''),COALESCE(wr.status,''),COALESCE(im.selection_status,'') FROM core.source_version sv JOIN core.source s ON s.id=sv.source_id AND s.workspace_id=sv.workspace_id AND s.removed_at IS NULL LEFT JOIN LATERAL (SELECT ia.status,ia.security_status,ia.workflow_run_id FROM ingestion.attempt ia WHERE ia.source_version_id=sv.id AND ia.workspace_id=sv.workspace_id ORDER BY ia.started_at DESC,ia.id DESC LIMIT 1) a ON true LEFT JOIN workflow.run wr ON wr.id=a.workflow_run_id AND wr.workspace_id=sv.workspace_id LEFT JOIN retrieval.index_version active_index ON active_index.workspace_id=sv.workspace_id AND active_index.status='active' LEFT JOIN retrieval.index_manifest_source im ON im.index_version_id=active_index.id AND im.workspace_id=sv.workspace_id AND im.source_id=sv.source_id AND (im.selection_status='excluded' OR im.source_version_id=sv.id) WHERE sv.workspace_id=$1`
 	args := []any{string(request.WorkspaceID)}
 	appendFilter := func(column string, value string) {
 		if value == "" {
@@ -388,27 +388,52 @@ func (r *Repository) RegisterSourceVersions(ctx context.Context, registrations [
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	results := make([]domain.SourceRegistrationResult, 0, len(registrations))
+	writer := TransactionWriter{}
 	for _, registration := range registrations {
-		source, err := insertOrGetSource(ctx, tx, registration.Source)
+		result, err := writer.RegisterSourceVersion(ctx, tx, registration)
 		if err != nil {
-			return nil, classify(err, "SOURCE_REGISTER_FAILED")
+			return nil, err
 		}
-		artifact, artifactCreated, err := insertOrGetContentArtifact(ctx, tx, registration.Artifact)
-		if err != nil {
-			return nil, classify(err, "CONTENT_ARTIFACT_REGISTER_FAILED")
-		}
-		registration.Version.SourceID = source.ID
-		registration.Version.ContentArtifactID = artifact.ID
-		version, created, err := insertOrGetSourceVersion(ctx, tx, source.WorkspaceID, registration.Version)
-		if err != nil {
-			return nil, classify(err, "SOURCE_VERSION_REGISTER_FAILED")
-		}
-		results = append(results, domain.SourceRegistrationResult{Source: source, Artifact: artifact, Version: version, ArtifactCreated: artifactCreated, Created: created})
+		results = append(results, result)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, classify(err, "SOURCE_VERSION_COMMIT_FAILED")
 	}
 	return results, nil
+}
+
+// TransactionWriter keeps Workspace-owned Source SQL reusable inside a caller-owned PostgreSQL transaction.
+type TransactionWriter struct{}
+
+// RegisterSource creates or exactly replays a Source inside the supplied transaction.
+func (TransactionWriter) RegisterSource(ctx context.Context, tx pgx.Tx, source domain.Source) (domain.Source, error) {
+	if tx == nil {
+		return domain.Source{}, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_TRANSACTION_REQUIRED", false, errors.New("workspace source transaction is required"))
+	}
+	persisted, err := insertOrGetSource(ctx, tx, source)
+	if err != nil {
+		return domain.Source{}, classify(err, "SOURCE_REGISTER_FAILED")
+	}
+	return persisted, nil
+}
+
+// RegisterSourceVersion atomically registers a Source, Artifact, and Source Version in the supplied transaction.
+func (writer TransactionWriter) RegisterSourceVersion(ctx context.Context, tx pgx.Tx, registration domain.SourceRegistration) (domain.SourceRegistrationResult, error) {
+	source, err := writer.RegisterSource(ctx, tx, registration.Source)
+	if err != nil {
+		return domain.SourceRegistrationResult{}, err
+	}
+	artifact, artifactCreated, err := insertOrGetContentArtifact(ctx, tx, registration.Artifact)
+	if err != nil {
+		return domain.SourceRegistrationResult{}, classify(err, "CONTENT_ARTIFACT_REGISTER_FAILED")
+	}
+	registration.Version.SourceID = source.ID
+	registration.Version.ContentArtifactID = artifact.ID
+	version, created, err := insertOrGetSourceVersion(ctx, tx, source.WorkspaceID, registration.Version)
+	if err != nil {
+		return domain.SourceRegistrationResult{}, classify(err, "SOURCE_VERSION_REGISTER_FAILED")
+	}
+	return domain.SourceRegistrationResult{Source: source, Artifact: artifact, Version: version, ArtifactCreated: artifactCreated, Created: created}, nil
 }
 
 func insertOrGetContentArtifact(ctx context.Context, tx pgx.Tx, artifact domain.ContentArtifact) (domain.ContentArtifact, bool, error) {
@@ -445,7 +470,8 @@ func insertOrGetSource(ctx context.Context, tx pgx.Tx, source domain.Source) (do
 	row := tx.QueryRow(ctx, `
 		INSERT INTO core.source (id, workspace_id, type, logical_name, original_location, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (workspace_id, original_location) DO NOTHING
+		ON CONFLICT (workspace_id, original_location) DO UPDATE SET removed_at=NULL
+		WHERE core.source.removed_at IS NOT NULL
 		RETURNING id::text, workspace_id::text, type, logical_name, original_location, created_at`,
 		string(source.ID), string(source.WorkspaceID), source.Type, source.LogicalName,
 		source.OriginalLocation, source.CreatedAt.UTC(),
@@ -457,11 +483,15 @@ func insertOrGetSource(ctx context.Context, tx pgx.Tx, source domain.Source) (do
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return domain.Source{}, err
 	}
-	return scanSource(tx.QueryRow(ctx, `
+	persisted, err = scanSource(tx.QueryRow(ctx, `
 		SELECT id::text, workspace_id::text, type, logical_name, original_location, created_at
 		FROM core.source WHERE workspace_id = $1 AND original_location = $2`,
 		string(source.WorkspaceID), source.OriginalLocation,
 	))
+	if err == nil && (persisted.Type != source.Type || persisted.LogicalName != source.LogicalName) {
+		return domain.Source{}, foundation.NewError(foundation.ErrorConsistencyViolation, "SOURCE_METADATA_CONFLICT", false, errors.New("existing source metadata differs from the requested registration"))
+	}
+	return persisted, err
 }
 
 func insertOrGetSourceVersion(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, version domain.SourceVersion) (domain.SourceVersion, bool, error) {
