@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 40
-- **Last Active**: 2026-08-02
+- **Total Sessions**: 41
+- **Last Active**: 2026-08-05
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1718 | Active |
+| `journal-1.md` | ~1739 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 41 | 2026-08-05 | 笔记工作流与工作台交付 | `903ffbf` | `dev` |
 | 40 | 2026-08-02 | 首页公开访问与控制授权拆分 | `e812c32`, `1a7add8`, `430f0f9` | `dev` |
 | 39 | 2026-08-01 | 重设计工作台导航与首页 | `c1a7ca3`, `145deee` | `dev` |
 | 38 | 2026-08-01 | 宿主机 Workspace 精确授权 | `a6b5988` | `dev` |
