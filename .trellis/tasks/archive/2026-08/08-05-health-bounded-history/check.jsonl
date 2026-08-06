@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"检查 keyset、索引、Workspace、statement count 和 migration 边界"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"检查 cursor 和资源可见性错误语义"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查 Health 专项集成、fault、browser 和安全门禁"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"检查 query key、取消、分页和缓存清理"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"检查详情/page decoder 与绑定校验"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 OpenAPI、Go、TypeScript 与 UI 数据流"}
+{"file":".trellis/tasks/08-05-architecture-quality-optimization/research/audit-baseline.md","reason":"复核无界风险是否真正关闭"}
+{"file":".trellis/tasks/archive/2026-08/08-05-health-bounded-history/research/current-contract.md","reason":"复核实现是否沿用已确认索引与契约"}

@@ -1737,3 +1737,38 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 42: 架构质量优化阶段 0-1
+
+**Date**: 2026-08-05
+**Task**: 架构质量优化阶段 0-1
+**Branch**: `dev`
+
+### Summary
+
+完成可重复架构质量基线与 Health Issue 有界历史跨层改造；阶段 0、1 均已验证并归档，阶段 2-6 保持未启动。
+
+### Main Changes
+
+- 新增确定性的 tracked-file 架构质量基线脚本、10 个回归测试与 Make 入口。
+- Health 详情固定 25 条历史，新增 observation/decision HMAC cursor 分页端点及精确 current observation 契约。
+- OpenAPI、Web 严格 decoder、TanStack infinite query 和历史 Tabs 同步升级。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] Go 受影响包单测、vet、race 与 integration-tag 编译通过。
+- [OK] 真实 PostgreSQL 261/260 条 fixture 连续两次通过固定 statement、稳定分页与 EXPLAIN 索引断言。
+- [OK] Web 20 个定向用例、typecheck、lint、production build、OpenAPI、基线 10 个用例通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 阶段 2-6 按用户要求保持未启动；后续需单独确认后再继续。
