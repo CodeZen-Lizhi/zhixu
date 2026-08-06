@@ -9,6 +9,16 @@ if (document.openapi !== "3.1.0") {
   throw new Error(`expected OpenAPI 3.1.0, got ${document.openapi}`);
 }
 for (const marker of [
+  '    "/api/v1/health/issues/{issue_id}/observations": {',
+  '    "/api/v1/health/issues/{issue_id}/decisions": {',
+  '      "HealthIssueObservationPage": {',
+  '      "HealthIssueDecisionPage": {',
+]) {
+  if (openAPISource.split(marker).length !== 2) {
+    throw new Error(`Health bounded-history OpenAPI key must occur exactly once: ${marker.trim()}`);
+  }
+}
+for (const marker of [
   '    "/api/v1/workspaces/{workspace_id}/captures": {',
   '    "/api/v1/workspaces/{workspace_id}/capture-files": {',
   '    "/api/v1/workspaces/{workspace_id}/captures/{capture_id}": {',
@@ -3526,6 +3536,50 @@ for (const field of ["source_ids", "source_version_ids", "path_prefixes"]) {
   if (schemas.SearchFilter.properties?.[field]?.uniqueItems === true) {
     throw new Error(`SearchFilter.${field} must allow canonicalizable duplicate input`);
   }
+}
+
+for (const [path, operationId, responseSchema] of [
+  ["/api/v1/health/issues/{issue_id}/observations", "listHealthIssueObservations", "HealthIssueObservationPage"],
+  ["/api/v1/health/issues/{issue_id}/decisions", "listHealthIssueDecisions", "HealthIssueDecisionPage"],
+]) {
+  const operation = document.paths[path]?.get;
+  const limit = operation?.parameters?.find((parameter) => parameter.name === "limit");
+  const cursor = operation?.parameters?.find((parameter) => parameter.name === "cursor");
+  const issueID = operation?.parameters?.find((parameter) => parameter.name === "issue_id");
+  if (operation?.operationId !== operationId || issueID?.in !== "path" || issueID?.required !== true || issueID?.schema?.format !== "uuid" ||
+      !operation.parameters?.some((parameter) => parameter.$ref === "#/components/parameters/WorkspaceIDQuery") ||
+      limit?.schema?.minimum !== 1 || limit?.schema?.maximum !== 100 || limit?.schema?.default !== 25 ||
+      cursor?.schema?.minLength !== 1 || cursor?.schema?.maxLength !== 2048 ||
+      operation.responses?.["200"]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${responseSchema}` ||
+      operation.responses?.["400"]?.$ref !== "#/components/responses/BadRequest" ||
+      operation.responses?.["404"]?.$ref !== "#/components/responses/NotFound" ||
+      operation.responses?.["503"]?.$ref !== "#/components/responses/Unavailable") {
+    throw new Error(`Health bounded-history operation drifted for GET ${path}`);
+  }
+}
+for (const [schemaName, itemSchema] of [
+  ["HealthIssueObservationPage", "HealthIssueObservation"],
+  ["HealthIssueDecisionPage", "HealthIssueDecision"],
+]) {
+  const page = schemas[schemaName];
+  if (page?.additionalProperties !== false || page.required?.join(",") !== "workspace_id,issue_id,items,has_more" ||
+      Object.keys(page.properties ?? {}).join(",") !== "workspace_id,issue_id,items,next_cursor,has_more" ||
+      page.properties.workspace_id?.format !== "uuid" || page.properties.issue_id?.format !== "uuid" ||
+      page.properties.items?.maxItems !== 100 || page.properties.items?.items?.$ref !== `#/components/schemas/${itemSchema}` ||
+      page.properties.next_cursor?.minLength !== 1 || page.properties.next_cursor?.maxLength !== 2048 ||
+      page.properties.has_more?.type !== "boolean") {
+    throw new Error(`${schemaName} must remain strict, Workspace/Issue-scoped, and bounded to 100 items`);
+  }
+}
+const healthDetail = schemas.HealthIssueDetail;
+if (healthDetail?.additionalProperties !== false ||
+    healthDetail.required?.join(",") !== "issue,latest_observation,observations,observations_has_more,decisions,decisions_has_more" ||
+    Object.keys(healthDetail.properties ?? {}).join(",") !== "issue,latest_observation,observations,observations_next_cursor,observations_has_more,decisions,decisions_next_cursor,decisions_has_more" ||
+    healthDetail.properties.latest_observation?.$ref !== "#/components/schemas/HealthIssueObservation" ||
+    healthDetail.properties.observations?.minItems !== 1 || healthDetail.properties.observations?.maxItems !== 25 || healthDetail.properties.decisions?.maxItems !== 25 ||
+    healthDetail.properties.observations_next_cursor?.maxLength !== 2048 || healthDetail.properties.decisions_next_cursor?.maxLength !== 2048 ||
+    healthDetail.properties.observations_has_more?.type !== "boolean" || healthDetail.properties.decisions_has_more?.type !== "boolean") {
+  throw new Error("Health Issue detail must expose two bounded first pages with explicit continuation metadata");
 }
 
 console.log("OpenAPI contract check passed");

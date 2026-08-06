@@ -58,6 +58,8 @@ func (handler *Handler) Routes(router chi.Router) {
 	router.Get("/health/summary", handler.summary)
 	router.Get("/health/issues", handler.issues)
 	router.Get("/health/issues/{issue_id}", handler.issueDetail)
+	router.Get("/health/issues/{issue_id}/observations", handler.issueObservations)
+	router.Get("/health/issues/{issue_id}/decisions", handler.issueDecisions)
 	router.Post("/health/issues/{issue_id}/decisions", handler.decision)
 	router.Post("/health/issues/{issue_id}/repair-proposals", handler.repairProposal)
 	router.Post("/health/scans", handler.startScan)
@@ -246,6 +248,54 @@ func (handler *Handler) issueDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpapi.WriteJSON(w, http.StatusOK, toIssueDetailResponse(detail))
+}
+
+func (handler *Handler) issueObservations(w http.ResponseWriter, r *http.Request) {
+	request, err := issueHistoryRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if handler == nil || handler.read == nil {
+		writeUnavailable(w, "HEALTH_READ_UNAVAILABLE")
+		return
+	}
+	ctx, cancel := handler.withTimeout(r.Context())
+	defer cancel()
+	page, err := handler.read.ListIssueObservations(ctx, request)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	items := make([]observationWire, 0, len(page.Items))
+	for _, item := range page.Items {
+		items = append(items, toObservation(item))
+	}
+	httpapi.WriteJSON(w, http.StatusOK, observationPageResponse{WorkspaceID: string(page.WorkspaceID), IssueID: string(page.IssueID), Items: items, NextCursor: page.NextCursor, HasMore: page.HasMore})
+}
+
+func (handler *Handler) issueDecisions(w http.ResponseWriter, r *http.Request) {
+	request, err := issueHistoryRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if handler == nil || handler.read == nil {
+		writeUnavailable(w, "HEALTH_READ_UNAVAILABLE")
+		return
+	}
+	ctx, cancel := handler.withTimeout(r.Context())
+	defer cancel()
+	page, err := handler.read.ListIssueDecisions(ctx, request)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	items := make([]decisionWire, 0, len(page.Items))
+	for _, item := range page.Items {
+		items = append(items, toDecision(item))
+	}
+	httpapi.WriteJSON(w, http.StatusOK, decisionPageResponse{WorkspaceID: string(page.WorkspaceID), IssueID: string(page.IssueID), Items: items, NextCursor: page.NextCursor, HasMore: page.HasMore})
 }
 
 type decisionRequest struct {
@@ -639,6 +689,22 @@ func parseLimit(raw string) (int, error) {
 	return value, nil
 }
 
+func issueHistoryRequest(r *http.Request) (application.IssueHistoryRequest, error) {
+	query, err := parseQuery(r, "workspace_id", "limit", "cursor")
+	if err != nil {
+		return application.IssueHistoryRequest{}, err
+	}
+	workspaceID, issueID, err := queryAndPathIDs(r, query, "issue_id")
+	if err != nil {
+		return application.IssueHistoryRequest{}, err
+	}
+	limit, err := parseLimit(singleQuery(query, "limit"))
+	if err != nil {
+		return application.IssueHistoryRequest{}, err
+	}
+	return application.IssueHistoryRequest{WorkspaceID: workspaceID, IssueID: issueID, Limit: limit, Cursor: singleQuery(query, "cursor")}, nil
+}
+
 func parseIssueStatuses(values []string) ([]domain.IssueStatus, error) {
 	result := make([]domain.IssueStatus, 0, len(values))
 	seen := make(map[domain.IssueStatus]struct{}, len(values))
@@ -804,31 +870,58 @@ type decisionWire struct {
 	DeferredUntil  *time.Time                 `json:"deferred_until,omitempty"`
 	CreatedAt      time.Time                  `json:"created_at"`
 }
+type observationPageResponse struct {
+	WorkspaceID string            `json:"workspace_id"`
+	IssueID     string            `json:"issue_id"`
+	Items       []observationWire `json:"items"`
+	NextCursor  string            `json:"next_cursor,omitempty"`
+	HasMore     bool              `json:"has_more"`
+}
+type decisionPageResponse struct {
+	WorkspaceID string         `json:"workspace_id"`
+	IssueID     string         `json:"issue_id"`
+	Items       []decisionWire `json:"items"`
+	NextCursor  string         `json:"next_cursor,omitempty"`
+	HasMore     bool           `json:"has_more"`
+}
 type issueDetailResponse struct {
-	Issue             issueResponse     `json:"issue"`
-	LatestObservation *observationWire  `json:"latest_observation,omitempty"`
-	Observations      []observationWire `json:"observations"`
-	Decisions         []decisionWire    `json:"decisions"`
+	Issue                  issueResponse     `json:"issue"`
+	LatestObservation      observationWire   `json:"latest_observation"`
+	Observations           []observationWire `json:"observations"`
+	ObservationsNextCursor string            `json:"observations_next_cursor,omitempty"`
+	ObservationsHasMore    bool              `json:"observations_has_more"`
+	Decisions              []decisionWire    `json:"decisions"`
+	DecisionsNextCursor    string            `json:"decisions_next_cursor,omitempty"`
+	DecisionsHasMore       bool              `json:"decisions_has_more"`
 }
 
 func toIssueDetailResponse(detail application.IssueDetail) issueDetailResponse {
-	result := issueDetailResponse{Issue: toIssueResponse(detail.Issue), Observations: make([]observationWire, 0, len(detail.Observations)), Decisions: make([]decisionWire, 0, len(detail.Decisions))}
+	result := issueDetailResponse{
+		Issue:                  toIssueResponse(detail.Issue),
+		LatestObservation:      toObservation(detail.LatestObservation),
+		Observations:           make([]observationWire, 0, len(detail.Observations)),
+		ObservationsNextCursor: detail.ObservationsNextCursor,
+		ObservationsHasMore:    detail.ObservationsHasMore,
+		Decisions:              make([]decisionWire, 0, len(detail.Decisions)),
+		DecisionsNextCursor:    detail.DecisionsNextCursor,
+		DecisionsHasMore:       detail.DecisionsHasMore,
+	}
 	for _, value := range detail.Observations {
 		result.Observations = append(result.Observations, toObservation(value))
 	}
-	if detail.LatestObservation != nil {
-		latest := toObservation(*detail.LatestObservation)
-		result.LatestObservation = &latest
-	}
 	for _, value := range detail.Decisions {
-		item := decisionWire{ID: string(value.ID), IssueVersion: value.IssueVersion, IdempotencyKey: value.IdempotencyKey, Action: value.Action, Reason: value.Reason, DeferredUntil: value.DeferredUntil, CreatedAt: value.CreatedAt.UTC()}
-		if value.ProposalID != nil {
-			proposal := string(*value.ProposalID)
-			item.ProposalID = &proposal
-		}
-		result.Decisions = append(result.Decisions, item)
+		result.Decisions = append(result.Decisions, toDecision(value))
 	}
 	return result
+}
+
+func toDecision(value application.IssueDecisionRecord) decisionWire {
+	item := decisionWire{ID: string(value.ID), IssueVersion: value.IssueVersion, IdempotencyKey: value.IdempotencyKey, Action: value.Action, Reason: value.Reason, DeferredUntil: value.DeferredUntil, CreatedAt: value.CreatedAt.UTC()}
+	if value.ProposalID != nil {
+		proposal := string(*value.ProposalID)
+		item.ProposalID = &proposal
+	}
+	return item
 }
 
 func toObservation(value application.IssueObservationRecord) observationWire {

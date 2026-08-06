@@ -93,10 +93,22 @@ export interface HealthIssue extends HealthIssueListItem {
 }
 export interface HealthObservation { id: string; issueVersion: number; scanId: string; detectorVersion: string; fingerprint: string; evidenceFingerprint: string; targetVersions: HealthObjectVersion[]; severity: HealthSeverity; observedAt: string; evidence: HealthEvidence[] }
 export interface HealthDecision { id: string; issueVersion: number; proposalId: string | null; idempotencyKey: string; action: HealthDecisionRecordAction; reason: string; deferredUntil: string | null; createdAt: string }
-export interface HealthIssueDetail { issue: HealthIssue; latestObservation: HealthObservation | null; observations: HealthObservation[]; decisions: HealthDecision[] }
+export interface HealthObservationPage { workspaceId: string; issueId: string; items: HealthObservation[]; nextCursor: string | null; hasMore: boolean }
+export interface HealthDecisionPage { workspaceId: string; issueId: string; items: HealthDecision[]; nextCursor: string | null; hasMore: boolean }
+export interface HealthIssueDetail {
+  issue: HealthIssue;
+  latestObservation: HealthObservation;
+  observations: HealthObservation[];
+  observationsNextCursor: string | null;
+  observationsHasMore: boolean;
+  decisions: HealthDecision[];
+  decisionsNextCursor: string | null;
+  decisionsHasMore: boolean;
+}
 export interface HealthScanAcceptance { scan: HealthScan; healthScanId: string; workflowRunId: string; statusUrl: string; replayed: boolean }
 
 export interface ListHealthIssuesInput { workspaceId: string; statuses?: HealthIssueStatus[]; severities?: HealthSeverity[]; types?: HealthIssueType[]; cursor?: string; limit?: number }
+export interface ListHealthIssueHistoryInput { workspaceId: string; issueId: string; cursor?: string; limit?: number }
 export interface StartHealthScanInput { workspaceId: string; scope: HealthScanScope; maxItems?: number; preventScopeConcurrency?: boolean; idempotencyKey: string }
 export interface DecideHealthIssueInput { workspaceId: string; issueId: string; expectedVersion: number; action: HealthDecisionAction; reason?: string; deferredUntil?: string; idempotencyKey: string }
 export interface CreateHealthRepairProposalInput { workspaceId: string; issueId: string; repairOptionCode: string; expectedVersion: number; idempotencyKey: string }
@@ -289,7 +301,35 @@ const decodeIssue = (value: unknown): HealthIssue => {
 };
 const decodeObservation = (value: unknown, field: string): HealthObservation => { if (!isRecord(value)) throw invalidResponse(field); exact(value, ["id", "issue_version", "scan_id", "detector_version", "fingerprint", "evidence_fingerprint", "target_versions", "severity", "observed_at", "evidence"], field); if (!Array.isArray(value.target_versions) || !Array.isArray(value.evidence)) throw invalidResponse(field); return { id: uuid(value.id, `${field}.id`), issueVersion: integer(value.issue_version, `${field}.issue_version`, 1), scanId: uuid(value.scan_id, `${field}.scan_id`), detectorVersion: stringValue(value.detector_version, `${field}.detector_version`), fingerprint: hash(value.fingerprint, `${field}.fingerprint`), evidenceFingerprint: hash(value.evidence_fingerprint, `${field}.evidence_fingerprint`), targetVersions: value.target_versions.map((item, index) => decodeObjectVersion(item, `${field}.target_versions[${String(index)}]`)), severity: enumValue(value.severity, severities, `${field}.severity`), observedAt: timestamp(value.observed_at, `${field}.observed_at`), evidence: value.evidence.map((item, index) => decodeEvidence(item, `${field}.evidence[${String(index)}]`)) }; };
 const decodeDecision = (value: unknown, field: string): HealthDecision => { if (!isRecord(value)) throw invalidResponse(field); exact(value, ["id", "issue_version", "proposal_id", "idempotency_key", "action", "reason", "deferred_until", "created_at"], field); return { id: uuid(value.id, `${field}.id`), issueVersion: integer(value.issue_version, `${field}.issue_version`, 1), proposalId: value.proposal_id === undefined || value.proposal_id === null ? null : uuid(value.proposal_id, `${field}.proposal_id`), idempotencyKey: stringValue(value.idempotency_key, `${field}.idempotency_key`), action: enumValue(value.action, decisionRecordActions, `${field}.action`), reason: value.reason === undefined ? "" : stringValue(value.reason, `${field}.reason`, false), deferredUntil: optionalTimestamp(value.deferred_until, `${field}.deferred_until`), createdAt: timestamp(value.created_at, `${field}.created_at`) }; };
-export const decodeHealthIssueDetail = (value: unknown): HealthIssueDetail => { if (!isRecord(value)) throw invalidResponse("issue_detail"); exact(value, ["issue", "latest_observation", "observations", "decisions"], "issue_detail"); return { issue: decodeIssue(value.issue), latestObservation: value.latest_observation === undefined || value.latest_observation === null ? null : decodeObservation(value.latest_observation, "issue_detail.latest_observation"), observations: boundedArray(value.observations, "issue_detail.observations", 256).map((item, index) => decodeObservation(item, `issue_detail.observations[${String(index)}]`)), decisions: boundedArray(value.decisions, "issue_detail.decisions", 256).map((item, index) => decodeDecision(item, `issue_detail.decisions[${String(index)}]`)) }; };
+const decodeHistoryPage = <T extends { id: string }>(value: unknown, field: string, decoder: (item: unknown, itemField: string) => T): { workspaceId: string; issueId: string; items: T[]; nextCursor: string | null; hasMore: boolean } => {
+  if (!isRecord(value)) throw invalidResponse(field);
+  exact(value, ["workspace_id", "issue_id", "items", "next_cursor", "has_more"], field);
+  const items = boundedArray(value.items, `${field}.items`, 100).map((item, index) => decoder(item, `${field}.items[${String(index)}]`));
+  if (new Set(items.map((item) => item.id)).size !== items.length) throw invalidResponse(`${field}.items.id`);
+  const nextCursor = optionalCursor(value.next_cursor, `${field}.next_cursor`, 2048);
+  const hasMore = booleanValue(value.has_more, `${field}.has_more`);
+  if (hasMore !== (nextCursor !== null)) throw invalidResponse(`${field}.next_cursor`);
+  return { workspaceId: uuid(value.workspace_id, `${field}.workspace_id`), issueId: uuid(value.issue_id, `${field}.issue_id`), items, nextCursor, hasMore };
+};
+export const decodeHealthObservationPage = (value: unknown): HealthObservationPage => decodeHistoryPage(value, "observation_page", decodeObservation);
+export const decodeHealthDecisionPage = (value: unknown): HealthDecisionPage => decodeHistoryPage(value, "decision_page", decodeDecision);
+export const decodeHealthIssueDetail = (value: unknown): HealthIssueDetail => {
+  if (!isRecord(value)) throw invalidResponse("issue_detail");
+  exact(value, ["issue", "latest_observation", "observations", "observations_next_cursor", "observations_has_more", "decisions", "decisions_next_cursor", "decisions_has_more"], "issue_detail");
+  const issue = decodeIssue(value.issue);
+  const latestObservation = decodeObservation(value.latest_observation, "issue_detail.latest_observation");
+  const observations = boundedArray(value.observations, "issue_detail.observations", 25).map((item, index) => decodeObservation(item, `issue_detail.observations[${String(index)}]`));
+  const decisions = boundedArray(value.decisions, "issue_detail.decisions", 25).map((item, index) => decodeDecision(item, `issue_detail.decisions[${String(index)}]`));
+  if (new Set(observations.map((item) => item.id)).size !== observations.length || new Set(decisions.map((item) => item.id)).size !== decisions.length) throw invalidResponse("issue_detail.history.id");
+  if (observations.length === 0 || latestObservation.fingerprint !== issue.fingerprint || latestObservation.detectorVersion !== issue.detectorVersion || latestObservation.severity !== issue.severity || JSON.stringify(latestObservation.evidence) !== JSON.stringify(issue.evidence) || JSON.stringify(latestObservation.targetVersions) !== JSON.stringify(issue.objectVersions)) throw invalidResponse("issue_detail.latest_observation");
+  const observationsNextCursor = optionalCursor(value.observations_next_cursor, "issue_detail.observations_next_cursor", 2048);
+  const observationsHasMore = booleanValue(value.observations_has_more, "issue_detail.observations_has_more");
+  const decisionsNextCursor = optionalCursor(value.decisions_next_cursor, "issue_detail.decisions_next_cursor", 2048);
+  const decisionsHasMore = booleanValue(value.decisions_has_more, "issue_detail.decisions_has_more");
+  if (observationsHasMore !== (observationsNextCursor !== null)) throw invalidResponse("issue_detail.observations_next_cursor");
+  if (decisionsHasMore !== (decisionsNextCursor !== null)) throw invalidResponse("issue_detail.decisions_next_cursor");
+  return { issue, latestObservation, observations, observationsNextCursor, observationsHasMore, decisions, decisionsNextCursor, decisionsHasMore };
+};
 
 const readProblem = (value: unknown, status: number): HealthApiError => { if (isRecord(value) && typeof value.error_code === "string" && typeof value.message === "string" && typeof value.retryable === "boolean") return new HealthApiError("HTTP_ERROR", value.error_code, value.message, value.retryable, status); return new HealthApiError("HTTP_ERROR", "HTTP_ERROR", `Health 请求失败（HTTP ${String(status)}）`, status >= 500, status); };
 const request = async (path: string, init: RequestInit = {}): Promise<unknown> => { const headers = new Headers(init.headers); headers.set("Accept", "application/json"); if (init.body !== undefined) headers.set("Content-Type", "application/json"); let response: Response; try { response = await authFetch(path, { ...init, headers }); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new HealthApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Knowledge Health API。", true, null, { cause: error }); } let payload: unknown; try { payload = await response.json(); } catch (error: unknown) { throw new HealthApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Knowledge Health API 返回了无效 JSON。", false, response.status, { cause: error }); } if (!response.ok) throw readProblem(payload, response.status); return payload; };
@@ -311,6 +351,23 @@ const assertStatusUrl = (value: string, scanId: string, workspaceId: string, fie
 export const getHealthSummary = (workspaceId: string, signal?: AbortSignal): Promise<HealthSummary> => { const expectedWorkspaceId = requireWorkspace(workspaceId); return request(`/api/v1/health/summary?${params(expectedWorkspaceId)}`, signalInit(signal)).then(decodeHealthSummary).then((value) => assertWorkspace(value, expectedWorkspaceId, "summary.workspace_id")); };
 export const listHealthIssues = (input: ListHealthIssuesInput, signal?: AbortSignal): Promise<HealthIssuePage> => { const expectedWorkspaceId = requireWorkspace(input.workspaceId); const query = params(expectedWorkspaceId); query.set("limit", String(requireLimit(input.limit, 25))); if (input.cursor !== undefined) { if (input.cursor.trim() === "" || input.cursor.length > 2048) throw invalidRequest("cursor"); query.set("cursor", input.cursor); } input.statuses?.forEach((item) => query.append("status", enumValue(item, issueStatuses, "status"))); input.severities?.forEach((item) => query.append("severity", enumValue(item, severities, "severity"))); input.types?.forEach((item) => query.append("type", enumValue(item, issueTypes, "type"))); return request(`/api/v1/health/issues?${query}`, signalInit(signal)).then(decodeHealthIssuePage).then((value) => assertWorkspace(value, expectedWorkspaceId, "issue_page.workspace_id")); };
 export const getHealthIssue = (workspaceId: string, issueId: string, signal?: AbortSignal): Promise<HealthIssueDetail> => { const expectedWorkspaceId = requireWorkspace(workspaceId); const expectedIssueId = requireUuid(issueId, "issueId"); return request(`/api/v1/health/issues/${encodeURIComponent(expectedIssueId)}?${params(expectedWorkspaceId)}`, signalInit(signal)).then(decodeHealthIssueDetail).then((detail) => ({ ...detail, issue: assertIssue(detail.issue, expectedWorkspaceId, expectedIssueId) })); };
+const listHealthIssueHistory = <T extends HealthObservationPage | HealthDecisionPage>(input: ListHealthIssueHistoryInput, kind: "observations" | "decisions", decoder: (value: unknown) => T, signal?: AbortSignal): Promise<T> => {
+  const expectedWorkspaceId = requireWorkspace(input.workspaceId);
+  const expectedIssueId = requireUuid(input.issueId, "issueId");
+  const query = params(expectedWorkspaceId);
+  query.set("limit", String(requireLimit(input.limit, 25)));
+  if (input.cursor !== undefined) {
+    if (input.cursor.trim() === "" || input.cursor.length > 2048) throw invalidRequest("cursor");
+    query.set("cursor", input.cursor);
+  }
+  return request(`/api/v1/health/issues/${encodeURIComponent(expectedIssueId)}/${kind}?${query}`, signalInit(signal)).then(decoder).then((page) => {
+    assertWorkspace(page, expectedWorkspaceId, `${kind}_page.workspace_id`);
+    if (page.issueId !== expectedIssueId) throw invalidResponse(`${kind}_page.issue_id`);
+    return page;
+  });
+};
+export const listHealthIssueObservations = (input: ListHealthIssueHistoryInput, signal?: AbortSignal): Promise<HealthObservationPage> => listHealthIssueHistory(input, "observations", decodeHealthObservationPage, signal);
+export const listHealthIssueDecisions = (input: ListHealthIssueHistoryInput, signal?: AbortSignal): Promise<HealthDecisionPage> => listHealthIssueHistory(input, "decisions", decodeHealthDecisionPage, signal);
 export const getHealthScan = (workspaceId: string, scanId: string, signal?: AbortSignal): Promise<HealthScan> => { const expectedWorkspaceId = requireWorkspace(workspaceId); const expectedScanId = requireUuid(scanId, "scanId"); return request(`/api/v1/health/scans/${encodeURIComponent(expectedScanId)}?${params(expectedWorkspaceId)}`, signalInit(signal)).then(decodeHealthScan).then((scan) => { assertWorkspace(scan, expectedWorkspaceId, "scan.workspace_id"); if (scan.id !== expectedScanId) throw invalidResponse("scan.id"); return scan; }); };
 const encodeScope = (scope: HealthScanScope): Record<string, unknown> => {
   const type = scope.type;

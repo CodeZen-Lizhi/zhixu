@@ -1,6 +1,6 @@
-import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/react-query";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
-import { createHealthRepairProposal, decideHealthIssue, getHealthIssue, getHealthScan, getHealthSummary, listHealthIssues, startHealthScan, type CreateHealthRepairProposalInput, type DecideHealthIssueInput, type HealthIssueDetail, type ListHealthIssuesInput, type StartHealthScanInput } from "../../api/health";
+import { createHealthRepairProposal, decideHealthIssue, getHealthIssue, getHealthScan, getHealthSummary, listHealthIssueDecisions, listHealthIssueObservations, listHealthIssues, startHealthScan, type CreateHealthRepairProposalInput, type DecideHealthIssueInput, type HealthDecisionPage, type HealthIssueDetail, type HealthObservationPage, type ListHealthIssuesInput, type StartHealthScanInput } from "../../api/health";
 import { healthQueryKeys } from "./query-keys";
 
 const stable = (value: unknown): unknown => {
@@ -30,7 +30,50 @@ export const useHealthSummary = () => { const workspaceId = useActiveWorkspaceId
 export const useHealthIssues = (input: Omit<ListHealthIssuesInput, "workspaceId">) => { const workspaceId = useActiveWorkspaceId(); const request = { ...normalizeIssueRequest(input), workspaceId }; const requestKey = canonicalHealthRequest(request); return useQuery({ queryKey: healthQueryKeys.issues(workspaceId, requestKey), queryFn: ({ signal }) => listHealthIssues(request, signal), enabled: workspaceId !== "", retry: false }); };
 export const clearHealthIssueDetail = (queryClient: QueryClient, workspaceId: string, issueId: string): void => { if (workspaceId !== "" && issueId !== "") queryClient.removeQueries({ queryKey: healthQueryKeys.issue(workspaceId, issueId) }); };
 export const useClearHealthIssueDetail = () => { const workspaceId = useActiveWorkspaceId(); const queryClient = useQueryClient(); return (issueId: string) => clearHealthIssueDetail(queryClient, workspaceId, issueId); };
-export const useHealthIssue = (issueId: string) => { const workspaceId = useActiveWorkspaceId(); return useQuery({ queryKey: healthQueryKeys.issue(workspaceId, issueId), queryFn: ({ signal }) => getHealthIssue(workspaceId, issueId, signal), enabled: workspaceId !== "" && issueId !== "", retry: false }); };
+export type HealthIssueHistoryKind = "observations" | "decisions";
+export const healthIssueHistoryQueryKey = (workspaceId: string, issueId: string, kind: HealthIssueHistoryKind) => [...healthQueryKeys.issue(workspaceId, issueId), kind] as const;
+export const seedHealthIssueHistoryPage = (queryClient: QueryClient, kind: HealthIssueHistoryKind, page: HealthObservationPage | HealthDecisionPage): void => {
+  queryClient.setQueryData<InfiniteData<HealthObservationPage | HealthDecisionPage, string | undefined>>(healthIssueHistoryQueryKey(page.workspaceId, page.issueId, kind), { pages: [page], pageParams: [undefined] });
+};
+export const useHealthIssue = (issueId: string) => {
+  const workspaceId = useActiveWorkspaceId();
+  const queryClient = useQueryClient();
+  return useQuery({
+    queryKey: healthQueryKeys.issue(workspaceId, issueId),
+    queryFn: async ({ signal }) => {
+      const detail = await getHealthIssue(workspaceId, issueId, signal);
+      seedHealthIssueHistoryPage(queryClient, "observations", { workspaceId, issueId, items: detail.observations, nextCursor: detail.observationsNextCursor, hasMore: detail.observationsHasMore });
+      seedHealthIssueHistoryPage(queryClient, "decisions", { workspaceId, issueId, items: detail.decisions, nextCursor: detail.decisionsNextCursor, hasMore: detail.decisionsHasMore });
+      return detail;
+    },
+    enabled: workspaceId !== "" && issueId !== "",
+    retry: false,
+  });
+};
+export const useHealthIssueObservations = (issueId: string, enabled: boolean) => {
+  const workspaceId = useActiveWorkspaceId();
+  return useInfiniteQuery({
+    queryKey: healthIssueHistoryQueryKey(workspaceId, issueId, "observations"),
+    queryFn: ({ signal, pageParam }) => listHealthIssueObservations({ workspaceId, issueId, limit: 25, ...(pageParam === undefined ? {} : { cursor: pageParam }) }, signal),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    enabled: enabled && workspaceId !== "" && issueId !== "",
+    staleTime: Infinity,
+    retry: false,
+  });
+};
+export const useHealthIssueDecisions = (issueId: string, enabled: boolean) => {
+  const workspaceId = useActiveWorkspaceId();
+  return useInfiniteQuery({
+    queryKey: healthIssueHistoryQueryKey(workspaceId, issueId, "decisions"),
+    queryFn: ({ signal, pageParam }) => listHealthIssueDecisions({ workspaceId, issueId, limit: 25, ...(pageParam === undefined ? {} : { cursor: pageParam }) }, signal),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    enabled: enabled && workspaceId !== "" && issueId !== "",
+    staleTime: Infinity,
+    retry: false,
+  });
+};
 export const useHealthScan = (scanId: string) => { const workspaceId = useActiveWorkspaceId(); return useQuery({ queryKey: healthQueryKeys.scan(workspaceId, scanId), queryFn: ({ signal }) => getHealthScan(workspaceId, scanId, signal), enabled: workspaceId !== "" && scanId !== "", retry: false, refetchInterval: (query) => query.state.data?.status === "PENDING" || query.state.data?.status === "RUNNING" ? 2000 : false }); };
 export const useStartHealthScan = () => { const workspaceId = useActiveWorkspaceId(); const queryClient = useQueryClient(); return useMutation({ mutationFn: (input: Omit<StartHealthScanInput, "workspaceId">) => startHealthScan({ ...input, workspaceId }), onSuccess: (result) => { void queryClient.invalidateQueries({ queryKey: healthQueryKeys.summary(workspaceId) }); queryClient.setQueryData(healthQueryKeys.scan(workspaceId, result.healthScanId), result.scan); } }); };
 export const useDecideHealthIssue = () => { const workspaceId = useActiveWorkspaceId(); const queryClient = useQueryClient(); return useMutation({ mutationFn: (input: Omit<DecideHealthIssueInput, "workspaceId">) => decideHealthIssue({ ...input, workspaceId }), onSuccess: (issue) => { queryClient.setQueryData<HealthIssueDetail>(healthQueryKeys.issue(workspaceId, issue.id), (current) => current === undefined ? current : { ...current, issue }); void queryClient.invalidateQueries({ queryKey: healthQueryKeys.all(workspaceId) }); } }); };

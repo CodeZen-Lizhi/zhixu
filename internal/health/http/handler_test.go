@@ -239,6 +239,8 @@ func TestHealthRoutesRejectUnknownAndRepeatedQueryParameters(t *testing.T) {
 		{name: "summary unknown", method: http.MethodGet, path: "/health/summary?workspace_id=" + string(healthHTTPWorkspaceID) + "&unknown=x"},
 		{name: "issues workspace repeated", method: http.MethodGet, path: "/health/issues?workspace_id=" + string(healthHTTPWorkspaceID) + "&workspace_id=" + string(healthHTTPWorkspaceID)},
 		{name: "issue unknown", method: http.MethodGet, path: "/health/issues/" + string(healthHTTPIssueID) + "?workspace_id=" + string(healthHTTPWorkspaceID) + "&unknown=x"},
+		{name: "observation history unknown", method: http.MethodGet, path: "/health/issues/" + string(healthHTTPIssueID) + "/observations?workspace_id=" + string(healthHTTPWorkspaceID) + "&unknown=x"},
+		{name: "decision history cursor repeated", method: http.MethodGet, path: "/health/issues/" + string(healthHTTPIssueID) + "/decisions?workspace_id=" + string(healthHTTPWorkspaceID) + "&cursor=a&cursor=b"},
 		{name: "decision workspace repeated", method: http.MethodPost, path: "/health/issues/" + string(healthHTTPIssueID) + "/decisions?workspace_id=" + string(healthHTTPWorkspaceID) + "&workspace_id=" + string(healthHTTPWorkspaceID)},
 		{name: "repair workspace repeated", method: http.MethodPost, path: "/health/issues/" + string(healthHTTPIssueID) + "/repair-proposals?workspace_id=" + string(healthHTTPWorkspaceID) + "&workspace_id=" + string(healthHTTPWorkspaceID)},
 		{name: "scan start unknown", method: http.MethodPost, path: "/health/scans?unknown=x"},
@@ -299,8 +301,18 @@ func TestHealthGetRoutesHideCrossWorkspaceAndMissingResources(t *testing.T) {
 	}{
 		{
 			name: "issue", path: "/health/issues/" + string(healthHTTPIssueID) + "?workspace_id=" + string(healthHTTPWorkspaceID), errorCode: "HEALTH_NOT_FOUND",
-			cross:   healthHandlerWithRead(t, healthReadFake{detail: application.IssueDetail{Issue: domain.Issue{ID: healthHTTPIssueID, WorkspaceID: healthHTTPOtherWorkspaceID}}}),
-			missing: healthHandlerWithRead(t, healthReadFake{detailErr: foundation.NewError(foundation.ErrorNotFound, "HEALTH_NOT_FOUND", false, errors.New("missing issue"))}),
+			cross:   healthHandlerWithRead(t, healthReadFake{issue: domain.Issue{ID: healthHTTPIssueID, WorkspaceID: healthHTTPOtherWorkspaceID}}),
+			missing: healthHandlerWithRead(t, healthReadFake{issueErr: foundation.NewError(foundation.ErrorNotFound, "HEALTH_NOT_FOUND", false, errors.New("missing issue"))}),
+		},
+		{
+			name: "observation history", path: "/health/issues/" + string(healthHTTPIssueID) + "/observations?workspace_id=" + string(healthHTTPWorkspaceID), errorCode: "HEALTH_NOT_FOUND",
+			cross:   healthHandlerWithRead(t, healthReadFake{issue: domain.Issue{ID: healthHTTPIssueID, WorkspaceID: healthHTTPOtherWorkspaceID}}),
+			missing: healthHandlerWithRead(t, healthReadFake{issueErr: foundation.NewError(foundation.ErrorNotFound, "HEALTH_NOT_FOUND", false, errors.New("missing issue"))}),
+		},
+		{
+			name: "decision history", path: "/health/issues/" + string(healthHTTPIssueID) + "/decisions?workspace_id=" + string(healthHTTPWorkspaceID), errorCode: "HEALTH_NOT_FOUND",
+			cross:   healthHandlerWithRead(t, healthReadFake{issue: domain.Issue{ID: healthHTTPIssueID, WorkspaceID: healthHTTPOtherWorkspaceID}}),
+			missing: healthHandlerWithRead(t, healthReadFake{issueErr: foundation.NewError(foundation.ErrorNotFound, "HEALTH_NOT_FOUND", false, errors.New("missing issue"))}),
 		},
 		{
 			name: "scan", path: "/health/scans/" + string(healthHTTPScanID) + "?workspace_id=" + string(healthHTTPWorkspaceID), errorCode: "HEALTH_SCAN_NOT_FOUND",
@@ -329,6 +341,113 @@ func TestHealthGetRoutesHideCrossWorkspaceAndMissingResources(t *testing.T) {
 				t.Fatalf("cross=%d/%+v missing=%d/%+v", responses[0].Code, crossProblem, responses[1].Code, missingProblem)
 			}
 		})
+	}
+}
+
+func TestHealthIssueHistoryRoutesReturnStrictBoundedPages(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	observation := application.IssueObservationRecord{ID: foundation.ID("50000000-0000-4000-8000-000000000001"), ObservedAt: now}
+	decision := application.IssueDecisionRecord{ID: foundation.ID("60000000-0000-4000-8000-000000000001"), IssueVersion: 1, IdempotencyKey: "decision-1", Action: domain.IssueDecisionAcknowledge, CreatedAt: now}
+	handler := healthHandlerWithRead(t, healthReadFake{
+		issue:             domain.Issue{ID: healthHTTPIssueID, WorkspaceID: healthHTTPWorkspaceID},
+		observationResult: application.IssueObservationResult{Items: []application.IssueObservationRecord{observation}, HasMore: true, Next: &application.IssueHistoryPosition{At: now, ID: observation.ID}},
+		decisionResult:    application.IssueDecisionResult{Items: []application.IssueDecisionRecord{decision}, HasMore: true, Next: &application.IssueHistoryPosition{At: now, ID: decision.ID}},
+	})
+	for _, test := range []struct {
+		name string
+		path string
+	}{
+		{name: "observations", path: "/health/issues/" + string(healthHTTPIssueID) + "/observations?workspace_id=" + string(healthHTTPWorkspaceID) + "&limit=1"},
+		{name: "decisions", path: "/health/issues/" + string(healthHTTPIssueID) + "/decisions?workspace_id=" + string(healthHTTPWorkspaceID) + "&limit=1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			newHealthRouter(handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"workspace_id", "issue_id", "items", "next_cursor", "has_more"} {
+				if payload[key] == nil {
+					t.Fatalf("missing %s in %s", key, response.Body.String())
+				}
+			}
+			if len(payload) != 5 || string(payload["workspace_id"]) != `"`+string(healthHTTPWorkspaceID)+`"` || string(payload["issue_id"]) != `"`+string(healthHTTPIssueID)+`"` || string(payload["has_more"]) != "true" {
+				t.Fatalf("payload=%s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestHealthIssueHistoryRejectsInvalidCursorBeforeRead(t *testing.T) {
+	response := httptest.NewRecorder()
+	handler := healthHandlerWithRead(t, healthReadFake{issue: domain.Issue{ID: healthHTTPIssueID, WorkspaceID: healthHTTPWorkspaceID}})
+	newHealthRouter(handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/issues/"+string(healthHTTPIssueID)+"/observations?workspace_id="+string(healthHTTPWorkspaceID)+"&cursor=invalid", nil))
+	problem := requireHealthProblem(t, response)
+	if response.Code != http.StatusBadRequest || problem.ErrorCode != "HEALTH_READ_INVALID" {
+		t.Fatalf("status=%d problem=%+v body=%s", response.Code, problem, response.Body.String())
+	}
+}
+
+func TestHealthIssueHistoryRejectsOutOfRangeLimits(t *testing.T) {
+	for _, path := range []string{
+		"/health/issues/" + string(healthHTTPIssueID) + "/observations?workspace_id=" + string(healthHTTPWorkspaceID) + "&limit=0",
+		"/health/issues/" + string(healthHTTPIssueID) + "/observations?workspace_id=" + string(healthHTTPWorkspaceID) + "&limit=101",
+		"/health/issues/" + string(healthHTTPIssueID) + "/decisions?workspace_id=" + string(healthHTTPWorkspaceID) + "&limit=-1",
+	} {
+		response := httptest.NewRecorder()
+		newHealthRouter(NewHandler(nil, nil, nil, nil, nil)).ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		problem := requireHealthProblem(t, response)
+		if response.Code != http.StatusBadRequest || problem.ErrorCode != "HEALTH_LIMIT_INVALID" {
+			t.Fatalf("path=%s status=%d problem=%+v body=%s", path, response.Code, problem, response.Body.String())
+		}
+	}
+}
+
+func TestHealthIssueDetailReturnsTwoBoundedContinuationContracts(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	target := domain.ObjectRef{Type: domain.ObjectTypeTopic, ID: foundation.ID("70000000-0000-4000-8000-000000000001")}
+	evidence := domain.IssueEvidence{Ref: target, Hash: strings.Repeat("a", 64), Summary: "topic is missing a source"}
+	reconciled, err := application.ReconcileObservation(healthHTTPWorkspaceID, healthHTTPIssueID, nil, domain.IssueObservation{
+		Type: domain.IssueTypeMissingSource, Target: target, DetectorID: "health.detector.missing_source", DetectorVersion: "detector/v1",
+		Severity: domain.SeverityHigh, EvidenceSummary: "topic is missing a source", Evidence: []domain.IssueEvidence{evidence},
+		ObjectVersions: []domain.ObjectVersion{{Ref: target, Version: 1}},
+	}, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := application.IssueObservationRecord{
+		ID: foundation.ID("70000000-0000-4000-8000-000000000002"), IssueVersion: reconciled.Issue.Version, ScanID: healthHTTPScanID,
+		DetectorVersion: reconciled.Issue.DetectorVersion, Fingerprint: reconciled.Issue.Fingerprint, EvidenceFingerprint: strings.Repeat("b", 64),
+		TargetVersions: reconciled.Issue.ObjectVersions, Severity: reconciled.Issue.Severity, ObservedAt: now, Evidence: reconciled.Issue.Evidence,
+	}
+	decision := application.IssueDecisionRecord{ID: foundation.ID("70000000-0000-4000-8000-000000000003"), IssueVersion: 1, IdempotencyKey: "detail-decision", Action: domain.IssueDecisionAcknowledge, CreatedAt: now}
+	handler := healthHandlerWithRead(t, healthReadFake{
+		issue:             reconciled.Issue,
+		latestObservation: observation,
+		observationResult: application.IssueObservationResult{Items: []application.IssueObservationRecord{observation}, HasMore: true, Next: &application.IssueHistoryPosition{At: now, ID: observation.ID}},
+		decisionResult:    application.IssueDecisionResult{Items: []application.IssueDecisionRecord{decision}, HasMore: true, Next: &application.IssueHistoryPosition{At: now, ID: decision.ID}},
+	})
+	response := httptest.NewRecorder()
+	newHealthRouter(handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/issues/"+string(healthHTTPIssueID)+"?workspace_id="+string(healthHTTPWorkspaceID), nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := []string{"issue", "latest_observation", "observations", "observations_next_cursor", "observations_has_more", "decisions", "decisions_next_cursor", "decisions_has_more"}
+	for _, key := range wantKeys {
+		if payload[key] == nil {
+			t.Fatalf("missing %s in %s", key, response.Body.String())
+		}
+	}
+	if len(payload) != len(wantKeys) || string(payload["observations_has_more"]) != "true" || string(payload["decisions_has_more"]) != "true" {
+		t.Fatalf("payload=%s", response.Body.String())
 	}
 }
 
@@ -395,16 +514,27 @@ func TestHealthNestedScanWireUsesSnakeCase(t *testing.T) {
 }
 
 type healthReadFake struct {
-	detail    application.IssueDetail
-	detailErr error
-	summary   *application.HealthSummary
+	issue             domain.Issue
+	latestObservation application.IssueObservationRecord
+	issueErr          error
+	observationResult application.IssueObservationResult
+	observationErr    error
+	decisionResult    application.IssueDecisionResult
+	decisionErr       error
+	summary           *application.HealthSummary
 }
 
 func (healthReadFake) ListIssues(context.Context, application.IssueListQuery) (application.IssueListResult, error) {
 	return application.IssueListResult{}, nil
 }
-func (fake healthReadFake) GetIssueDetail(context.Context, foundation.ID, foundation.ID) (application.IssueDetail, error) {
-	return fake.detail, fake.detailErr
+func (fake healthReadFake) GetIssue(context.Context, foundation.ID, foundation.ID) (application.IssueSnapshot, error) {
+	return application.IssueSnapshot{Issue: fake.issue, LatestObservation: fake.latestObservation}, fake.issueErr
+}
+func (fake healthReadFake) ListIssueObservations(context.Context, application.IssueObservationQuery) (application.IssueObservationResult, error) {
+	return fake.observationResult, fake.observationErr
+}
+func (fake healthReadFake) ListIssueDecisions(context.Context, application.IssueDecisionQuery) (application.IssueDecisionResult, error) {
+	return fake.decisionResult, fake.decisionErr
 }
 func (fake healthReadFake) GetHealthSummary(_ context.Context, workspaceID foundation.ID) (application.HealthSummary, error) {
 	if fake.summary != nil {

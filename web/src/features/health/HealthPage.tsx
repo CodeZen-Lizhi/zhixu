@@ -5,16 +5,18 @@ import { Link, useSearchParams } from "react-router-dom";
 import {
   HealthApiError,
   workspaceHealthScope,
+  type HealthDecision,
   type HealthIssue,
   type HealthIssueListItem,
   type HealthIssueStatus,
   type HealthIssueType,
+  type HealthObservation,
   type HealthSeverity,
   type HealthTrendPoint,
 } from "../../api/health";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
-import { Badge, Button, Card, CardHeader, Dialog, EmptyState, ErrorState, UnavailableState } from "../../shared/ui";
-import { useClearHealthIssueDetail, useDecideHealthIssue, useHealthIssue, useHealthIssues, useHealthScan, useHealthSummary, useStartHealthScan } from "./queries";
+import { Badge, Button, Card, CardHeader, Dialog, EmptyState, ErrorState, Tabs, TabsContent, TabsList, TabsTrigger, UnavailableState } from "../../shared/ui";
+import { useClearHealthIssueDetail, useDecideHealthIssue, useHealthIssue, useHealthIssueDecisions, useHealthIssueObservations, useHealthIssues, useHealthScan, useHealthSummary, useStartHealthScan } from "./queries";
 import { parseHealthUrlState, writeHealthUrlState, type HealthUrlState } from "./url-state";
 
 const issueStatuses: HealthIssueStatus[] = ["OPEN", "REOPENED", "ACKNOWLEDGED", "DEFERRED", "PROPOSAL_CREATED", "IGNORED", "FALSE_POSITIVE", "RESOLVED"];
@@ -26,10 +28,21 @@ const severityTone = (severity: HealthSeverity) => severity === "CRITICAL" || se
 const statusTone = (status: HealthIssueStatus) => status === "OPEN" || status === "REOPENED" ? "danger" : status === "RESOLVED" ? "success" : "warning";
 
 interface IdempotentAttempt { signature: string; key: string }
+type IssueDetailTab = "current" | "observations" | "decisions";
 
 const attemptKey = (attempt: { current: IdempotentAttempt | null }, prefix: string, signature: string): string => {
   if (attempt.current?.signature !== signature) attempt.current = { signature, key: newKey(prefix) };
   return attempt.current.key;
+};
+
+const isIssueDetailTab = (value: string): value is IssueDetailTab => value === "current" || value === "observations" || value === "decisions";
+const uniqueHistoryItems = <T extends { id: string }>(pages: { items: T[] }[] | undefined): T[] => {
+  const seen = new Set<string>();
+  return (pages ?? []).flatMap((page) => page.items).filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
 };
 
 const StateMessage = ({ title, description }: { title: string; description: string }) => <div className="ui-state" role="status"><strong>{title}</strong><p>{description}</p></div>;
@@ -88,13 +101,52 @@ const IssueList = ({ state, onChange, returnFocus }: { state: HealthUrlState; on
 
 const IssueDetail = ({ issue }: { issue: HealthIssue }) => <div className="health-issue-detail"><div><Badge tone={severityTone(issue.severity)}>{issue.severity}</Badge><Badge tone={statusTone(issue.status)}>{issue.status}</Badge></div><h3>{issue.type}</h3><p>{issue.evidenceSummary}</p><dl className="detail-grid"><div><dt>Target</dt><dd>{issue.target.type}:{issue.target.id}</dd></div><div><dt>Detector</dt><dd>{issue.detectorId}@{issue.detectorVersion}</dd></div><div><dt>Fingerprint</dt><dd><code>{issue.fingerprint.slice(0, 16)}…</code></dd></div><div><dt>Version</dt><dd>{issue.version}</dd></div></dl></div>;
 
+const ObservationRecord = ({ observation }: { observation: HealthObservation }) => <article className="health-history-record">
+  <header><div><strong>{formatDate(observation.observedAt)}</strong><small>{observation.detectorVersion}</small></div><Badge tone={severityTone(observation.severity)}>{observation.severity}</Badge></header>
+  <dl className="health-history-meta"><div><dt>Issue version</dt><dd>{observation.issueVersion}</dd></div><div><dt>Scan</dt><dd><code>{observation.scanId.slice(0, 8)}…</code></dd></div></dl>
+  {observation.evidence.length === 0 ? <p className="sidebar-note">该次观测没有 Evidence。</p> : <ul className="health-history-evidence">{observation.evidence.map((evidence) => <li key={`${evidence.ref.type}:${evidence.ref.id}:${evidence.hash}`}><strong>{evidence.ref.type}:{evidence.ref.id.slice(0, 8)}…</strong><span>{evidence.summary || "—"}</span></li>)}</ul>}
+</article>;
+
+const DecisionRecord = ({ decision }: { decision: HealthDecision }) => <article className="health-history-record">
+  <header><div><strong>{decision.action}</strong><small>{formatDate(decision.createdAt)}</small></div><Badge tone="info">v{decision.issueVersion}</Badge></header>
+  <p>{decision.reason || "没有填写原因"}</p>
+  {decision.deferredUntil ? <small>暂缓至 {formatDate(decision.deferredUntil)}</small> : null}
+  {decision.proposalId ? <small>Proposal {decision.proposalId}</small> : null}
+</article>;
+
+const ObservationHistory = ({ query }: { query: ReturnType<typeof useHealthIssueObservations> }) => {
+  if (query.isPending) return <StateMessage title="正在读取观测历史" description="读取该 Issue 的观测记录。" />;
+  if (query.isError && query.data === undefined) return <ErrorState title="观测历史不可用" description={query.error.message} onRetry={() => void query.refetch()} />;
+  const items = uniqueHistoryItems(query.data.pages);
+  return <div className="health-history-panel">
+    {items.length === 0 ? <EmptyState title="没有观测历史" description="该 Issue 尚未产生观测记录。" /> : <div className="health-history-list">{items.map((observation) => <ObservationRecord key={observation.id} observation={observation} />)}</div>}
+    {query.isFetchNextPageError ? <div className="ui-state ui-state--error" role="alert"><strong>加载更多观测失败</strong><p>{query.error.message}</p><Button variant="secondary" onClick={() => void query.fetchNextPage()} disabled={query.isFetchingNextPage}>重试加载更多观测</Button></div> : null}
+    {query.hasNextPage && !query.isFetchNextPageError ? <div className="pagination-row"><span /><Button variant="secondary" onClick={() => void query.fetchNextPage()} disabled={query.isFetchingNextPage}>{query.isFetchingNextPage ? "加载中…" : "加载更多观测"}</Button></div> : null}
+  </div>;
+};
+
+const DecisionHistory = ({ query }: { query: ReturnType<typeof useHealthIssueDecisions> }) => {
+  if (query.isPending) return <StateMessage title="正在读取决策历史" description="读取该 Issue 的决策记录。" />;
+  if (query.isError && query.data === undefined) return <ErrorState title="决策历史不可用" description={query.error.message} onRetry={() => void query.refetch()} />;
+  const items = uniqueHistoryItems(query.data.pages);
+  return <div className="health-history-panel">
+    {items.length === 0 ? <EmptyState title="没有决策历史" description="该 Issue 尚未产生决策记录。" /> : <div className="health-history-list">{items.map((decision) => <DecisionRecord key={decision.id} decision={decision} />)}</div>}
+    {query.isFetchNextPageError ? <div className="ui-state ui-state--error" role="alert"><strong>加载更多决策失败</strong><p>{query.error.message}</p><Button variant="secondary" onClick={() => void query.fetchNextPage()} disabled={query.isFetchingNextPage}>重试加载更多决策</Button></div> : null}
+    {query.hasNextPage && !query.isFetchNextPageError ? <div className="pagination-row"><span /><Button variant="secondary" onClick={() => void query.fetchNextPage()} disabled={query.isFetchingNextPage}>{query.isFetchingNextPage ? "加载中…" : "加载更多决策"}</Button></div> : null}
+  </div>;
+};
+
 const EvidenceDialog = ({ issueId, onClose, returnFocus }: { issueId: string; onClose: () => void; returnFocus: RefObject<HTMLButtonElement | null> }) => {
   const detail = useHealthIssue(issueId);
   const decide = useDecideHealthIssue();
   const clearIssueDetail = useClearHealthIssueDetail();
+  const [tabState, setTabState] = useState<{ issueId: string; tab: IssueDetailTab }>({ issueId, tab: "current" });
+  const activeTab = tabState.issueId === issueId ? tabState.tab : "current";
   const [reason, setReason] = useState("");
   const [deferredUntil, setDeferredUntil] = useState("");
   const decisionAttempt = useRef<IdempotentAttempt | null>(null);
+  const observations = useHealthIssueObservations(issueId, activeTab === "observations");
+  const decisions = useHealthIssueDecisions(issueId, activeTab === "decisions");
   useEffect(() => {
     setReason("");
     setDeferredUntil("");
@@ -107,6 +159,7 @@ const EvidenceDialog = ({ issueId, onClose, returnFocus }: { issueId: string; on
   };
   const close = () => {
     const closingIssueId = issueId;
+    setTabState({ issueId: "", tab: "current" });
     setReason("");
     setDeferredUntil("");
     decisionAttempt.current = null;
@@ -119,22 +172,29 @@ const EvidenceDialog = ({ issueId, onClose, returnFocus }: { issueId: string; on
       : `${decide.error.message}${decide.error instanceof HealthApiError && decide.error.retryable ? "（可重试；相同操作将复用幂等键。）" : ""}`
     : "";
 
-  return <Dialog open={issueId !== ""} onOpenChange={(open) => { if (!open) close(); }} restoreFocusRef={returnFocus} title="Issue Evidence" description="Evidence 按需读取，关闭后焦点返回触发按钮。">
+  return <Dialog open={issueId !== ""} onOpenChange={(open) => { if (!open) close(); }} restoreFocusRef={returnFocus} contentClassName="health-evidence-dialog" title="Issue 详情" description="查看当前证据、观测记录和决策记录。">
     {detail.isPending ? <StateMessage title="正在读取 Evidence" description="读取 Issue 当前证据与可用修复选项。" /> : detail.isError ? <ErrorState title="Evidence 不可用" description={detail.error.message} onRetry={() => void detail.refetch()} /> : <div className="health-evidence-detail">
       <IssueDetail issue={detail.data.issue} />
-      <div className="health-evidence-list evidence-list">
-        {detail.data.issue.evidence.length === 0 ? <EmptyState title="没有 Evidence" description="该 Issue 当前没有可展示的证据摘要。" /> : detail.data.issue.evidence.map((evidence) => <article key={`${evidence.ref.type}:${evidence.ref.id}:${evidence.hash}`}><strong>{evidence.ref.type}:{evidence.ref.id.slice(0, 8)}…</strong><p>{evidence.summary || "—"}</p><code>{evidence.hash.slice(0, 16)}…</code></article>)}
-      </div>
-      <div className="health-decision-panel health-decision-form">
-        <label>原因<textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={2} /></label>
-        <label>暂缓到<input value={deferredUntil} onChange={(event) => setDeferredUntil(event.target.value)} type="datetime-local" /></label>
-        <div className="button-row"><Button variant="secondary" disabled={decide.isPending} onClick={() => submitDecision(detail.data.issue, "ACKNOWLEDGE")}><ShieldCheck size={15} />确认</Button><Button variant="secondary" disabled={decide.isPending || reason.trim() === ""} onClick={() => submitDecision(detail.data.issue, "IGNORE")}>忽略</Button><Button variant="secondary" disabled={decide.isPending || reason.trim() === ""} onClick={() => submitDecision(detail.data.issue, "FALSE_POSITIVE")}>误报</Button><Button variant="secondary" disabled={decide.isPending || reason.trim() === "" || deferredUntil === ""} onClick={() => submitDecision(detail.data.issue, "DEFER")}>暂缓</Button></div>
-        {decisionError ? <p role="alert" className="form-error">{decisionError}</p> : null}
-      </div>
-      <div className="health-repair-options repair-options">
-        <h3>修复选项（不可用）</h3>
-        {detail.data.issue.repairOptions.length === 0 ? <p className="sidebar-note">Repair Proposal 端点尚未启用；Health 不会直接修改 Knowledge。</p> : detail.data.issue.repairOptions.map((option) => <div key={option.code}><div><strong>{option.title}</strong><small>{option.unavailableReason ?? "Repair Proposal 端点尚未启用"}</small></div><Button variant="ghost" disabled>创建 Proposal（不可用）</Button></div>)}
-      </div>
+      <Tabs value={activeTab} onValueChange={(value) => { if (isIssueDetailTab(value)) setTabState({ issueId, tab: value }); }}>
+        <TabsList aria-label="Issue 详情分组"><TabsTrigger value="current">当前证据</TabsTrigger><TabsTrigger value="observations">观测历史</TabsTrigger><TabsTrigger value="decisions">决策历史</TabsTrigger></TabsList>
+        <TabsContent value="current">
+          <div className="health-evidence-list evidence-list">
+            {detail.data.issue.evidence.length === 0 ? <EmptyState title="没有 Evidence" description="该 Issue 当前没有可展示的证据摘要。" /> : detail.data.issue.evidence.map((evidence) => <article key={`${evidence.ref.type}:${evidence.ref.id}:${evidence.hash}`}><strong>{evidence.ref.type}:{evidence.ref.id.slice(0, 8)}…</strong><p>{evidence.summary || "—"}</p><code>{evidence.hash.slice(0, 16)}…</code></article>)}
+          </div>
+          <div className="health-decision-panel health-decision-form">
+            <label>原因<textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={2} /></label>
+            <label>暂缓到<input value={deferredUntil} onChange={(event) => setDeferredUntil(event.target.value)} type="datetime-local" /></label>
+            <div className="button-row"><Button variant="secondary" disabled={decide.isPending} onClick={() => submitDecision(detail.data.issue, "ACKNOWLEDGE")}><ShieldCheck size={15} />确认</Button><Button variant="secondary" disabled={decide.isPending || reason.trim() === ""} onClick={() => submitDecision(detail.data.issue, "IGNORE")}>忽略</Button><Button variant="secondary" disabled={decide.isPending || reason.trim() === ""} onClick={() => submitDecision(detail.data.issue, "FALSE_POSITIVE")}>误报</Button><Button variant="secondary" disabled={decide.isPending || reason.trim() === "" || deferredUntil === ""} onClick={() => submitDecision(detail.data.issue, "DEFER")}>暂缓</Button></div>
+            {decisionError ? <p role="alert" className="form-error">{decisionError}</p> : null}
+          </div>
+          <div className="health-repair-options repair-options">
+            <h3>修复选项（不可用）</h3>
+            {detail.data.issue.repairOptions.length === 0 ? <p className="sidebar-note">Repair Proposal 端点尚未启用；Health 不会直接修改 Knowledge。</p> : detail.data.issue.repairOptions.map((option) => <div key={option.code}><div><strong>{option.title}</strong><small>{option.unavailableReason ?? "Repair Proposal 端点尚未启用"}</small></div><Button variant="ghost" disabled>创建 Proposal（不可用）</Button></div>)}
+          </div>
+        </TabsContent>
+        <TabsContent value="observations"><ObservationHistory query={observations} /></TabsContent>
+        <TabsContent value="decisions"><DecisionHistory query={decisions} /></TabsContent>
+      </Tabs>
     </div>}
   </Dialog>;
 };

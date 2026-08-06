@@ -497,6 +497,9 @@ a { color: inherit; }
 .health-issue-detail { display: grid; gap: 1rem; max-height: min(68vh, 720px); overflow-y: auto; padding-right: .25rem; }
 .health-issue-detail section { border-top: 1px solid var(--line); padding-top: .85rem; }
 .health-issue-detail h3, .health-issue-detail h4 { margin: 0 0 .55rem; }
+.ui-dialog__content.health-evidence-dialog { width: min(760px, calc(100% - 2rem)); }
+.health-evidence-detail { display: grid; min-width: 0; gap: 1rem; }
+.health-evidence-detail > .health-issue-detail { max-height: none; overflow: visible; }
 .evidence-list { display: grid; gap: .7rem; padding-left: 1.25rem; }
 .evidence-list li { padding-left: .35rem; }
 .evidence-list span { display: block; margin-top: .25rem; overflow-wrap: anywhere; font-size: .72rem; }
@@ -504,6 +507,19 @@ a { color: inherit; }
 .health-evidence-list { display: grid; gap: .7rem; }
 .health-evidence-list article { padding: .7rem; border: 1px solid var(--line); }
 .health-evidence-list article p { margin: .35rem 0; }
+.health-history-panel, .health-history-list { display: grid; min-width: 0; gap: .75rem; }
+.health-history-record { display: grid; min-width: 0; gap: .65rem; padding: .85rem; border: 1px solid var(--line); border-radius: 6px; background: rgb(255 255 255 / 38%); }
+.health-history-record header { display: flex; align-items: start; justify-content: space-between; gap: .75rem; }
+.health-history-record header > div { display: grid; min-width: 0; gap: .2rem; }
+.health-history-record small, .health-history-record p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.health-history-record code { overflow-wrap: anywhere; }
+.health-history-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 0; }
+.health-history-meta div { min-width: 0; }
+.health-history-meta dt { color: var(--muted); font-size: .68rem; font-weight: 800; }
+.health-history-meta dd { margin: .15rem 0 0; overflow-wrap: anywhere; }
+.health-history-evidence { display: grid; gap: .5rem; margin: 0; padding-left: 1.15rem; }
+.health-history-evidence li { min-width: 0; }
+.health-history-evidence span { display: block; margin-top: .2rem; color: var(--muted); overflow-wrap: anywhere; font-size: .72rem; }
 .health-decision-form { display: grid; gap: .75rem; }
 .health-decision-form label { display: grid; gap: .35rem; color: var(--muted); font-size: .74rem; font-weight: 800; }
 .health-decision-form .ui-button { justify-self: start; }
@@ -531,7 +547,7 @@ a { color: inherit; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 
 @media (max-width: 920px) { .workbench { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); } .workbench__rail { position: sticky; top: 0; z-index: 5; min-height: auto; padding: .7rem 1rem; border-right: 0; border-bottom: 1px solid var(--line); } .mobile-brand-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; } .mobile-menu-button { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; border: 1px solid var(--line); border-radius: 7px; color: var(--ink); background: rgb(255 255 255 / 55%); } .wordmark { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; padding: 0; } .wordmark span { font-size: 1.75rem; } .workbench__rail .rail-section, .workbench__rail .rail-footer { display: none; } .workbench__topbar { padding-top: 1.2rem; } .dashboard-grid { grid-template-columns: 1fr; } .operational-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .review-layout { grid-template-columns: 1fr; } .health-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); } .collection-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .search-form { grid-template-columns: minmax(0, 1fr) minmax(10rem, .45fr); } .search-form__query { grid-column: 1 / -1; } }
-@media (max-width: 620px) { .workbench__topbar { align-items: start; flex-direction: column; } .topbar-actions { width: 100%; justify-content: start; } .page-intro--split { align-items: start; flex-direction: column; } .detail-grid, .diff-viewer, .relation-diff, .operational-grid, .search-result-summary { grid-template-columns: 1fr; } .capability-strip { grid-template-columns: 1fr; } .proposal-row { grid-template-columns: 1fr; } .proposal-row__meta { justify-content: start; } .workflow-row { grid-template-columns: 1fr auto; } .workflow-row__timing { grid-column: 1 / -1; justify-items: start; } .workflow-row time { text-align: left; } .health-metrics, .collection-card-grid { grid-template-columns: 1fr; } .health-overview__hero { grid-column: auto; } .health-severity-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .health-coverage__item, .health-coverage-list > div, .health-issue-row, .search-form, .search-provenance-list section { grid-template-columns: 1fr; min-width: 0; } .health-coverage__item p { grid-column: auto; } .health-issue-row > .ui-button { justify-self: start; } .collection-item { align-items: start; flex-direction: column; } .search-form__query { grid-column: auto; } .search-form .ui-button { width: 100%; } .search-result__header { align-items: start; flex-direction: column; } .search-provenance-actions { justify-content: start; } .workbench__content { width: 100%; padding-right: .8rem; padding-left: .8rem; overflow-x: clip; } }
+@media (max-width: 620px) { .workbench__topbar { align-items: start; flex-direction: column; } .topbar-actions { width: 100%; justify-content: start; } .page-intro--split { align-items: start; flex-direction: column; } .detail-grid, .diff-viewer, .relation-diff, .operational-grid, .search-result-summary, .health-history-meta { grid-template-columns: 1fr; } .capability-strip { grid-template-columns: 1fr; } .proposal-row { grid-template-columns: 1fr; } .proposal-row__meta { justify-content: start; } .workflow-row { grid-template-columns: 1fr auto; } .workflow-row__timing { grid-column: 1 / -1; justify-items: start; } .workflow-row time { text-align: left; } .health-metrics, .collection-card-grid { grid-template-columns: 1fr; } .health-overview__hero { grid-column: auto; } .health-severity-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .health-coverage__item, .health-coverage-list > div, .health-issue-row, .search-form, .search-provenance-list section { grid-template-columns: 1fr; min-width: 0; } .health-coverage__item p { grid-column: auto; } .health-issue-row > .ui-button { justify-self: start; } .collection-item { align-items: start; flex-direction: column; } .search-form__query { grid-column: auto; } .search-form .ui-button { width: 100%; } .search-result__header { align-items: start; flex-direction: column; } .search-provenance-actions { justify-content: start; } .workbench__content { width: 100%; padding-right: .8rem; padding-left: .8rem; overflow-x: clip; } }
 
 .app-shell {
   width: min(1040px, calc(100% - 2rem));

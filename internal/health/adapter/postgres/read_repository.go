@@ -21,6 +21,24 @@ type ReadDB interface {
 // ReadRepository 提供 Issue 列表、详情和 Summary 的 Workspace-scoped 读取。
 type ReadRepository struct{ db ReadDB }
 
+type currentEvidenceRecord struct {
+	RefType string `json:"ref_type"`
+	RefID   string `json:"ref_id"`
+	Hash    string `json:"hash"`
+	Summary string `json:"summary"`
+}
+
+const (
+	issueObservationHistorySelect = `SELECT observation.id::text,observation.issue_version,observation.scan_id::text,observation.detector_version,observation.fingerprint,observation.evidence_fingerprint,observation.target_versions,observation.severity,observation.observed_at
+FROM ops.health_issue_observation observation WHERE observation.workspace_id=$1 AND observation.issue_id=$2`
+	issueObservationEvidenceSelect = `SELECT evidence.observation_id::text,evidence.ref_type,evidence.ref_id::text,evidence.hash,evidence.summary
+FROM ops.health_issue_evidence evidence
+WHERE evidence.workspace_id=$1 AND evidence.observation_id=ANY($2::text[]::uuid[])
+ORDER BY evidence.observation_id,evidence.evidence_no,evidence.id`
+	issueDecisionHistorySelect = `SELECT decision.id::text,decision.issue_version,decision.proposal_id::text,decision.idempotency_key,decision.action,decision.reason,decision.defer_until,decision.created_at
+FROM ops.health_issue_decision decision WHERE decision.workspace_id=$1 AND decision.issue_id=$2`
+)
+
 var _ healthapp.IssueReadPort = (*ReadRepository)(nil)
 
 // ListIssues 让既有写 repository 复用同一只读 seam，避免 HTTP composition 产生第二套 adapter。
@@ -31,12 +49,20 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, request healt
 	return (&ReadRepository{db: repository.db}).ListIssues(ctx, request)
 }
 
-// GetIssueDetail 让既有 IssueRepository 复用 Workspace-scoped 详情读取。
-func (repository *IssueRepository) GetIssueDetail(ctx context.Context, workspaceID, issueID foundation.ID) (healthapp.IssueDetail, error) {
+// ListIssueObservations 让既有 IssueRepository 复用有界 observation 历史读取。
+func (repository *IssueRepository) ListIssueObservations(ctx context.Context, request healthapp.IssueObservationQuery) (healthapp.IssueObservationResult, error) {
 	if repository == nil {
-		return healthapp.IssueDetail{}, errors.New("health issue repository is nil")
+		return healthapp.IssueObservationResult{}, errors.New("health issue repository is nil")
 	}
-	return (&ReadRepository{db: repository.db}).GetIssueDetail(ctx, workspaceID, issueID)
+	return (&ReadRepository{db: repository.db}).ListIssueObservations(ctx, request)
+}
+
+// ListIssueDecisions 让既有 IssueRepository 复用有界 decision 历史读取。
+func (repository *IssueRepository) ListIssueDecisions(ctx context.Context, request healthapp.IssueDecisionQuery) (healthapp.IssueDecisionResult, error) {
+	if repository == nil {
+		return healthapp.IssueDecisionResult{}, errors.New("health issue repository is nil")
+	}
+	return (&ReadRepository{db: repository.db}).ListIssueDecisions(ctx, request)
 }
 
 // GetHealthSummary 让既有 IssueRepository 复用 Health Summary 读取。
@@ -112,37 +138,22 @@ func (repository *ReadRepository) ListIssues(ctx context.Context, request health
 	return result, nil
 }
 
-// GetIssueDetail 返回当前 Issue 与完整 observation/evidence/decision 历史。
-func (repository *ReadRepository) GetIssueDetail(ctx context.Context, workspaceID, issueID foundation.ID) (healthapp.IssueDetail, error) {
+// GetIssue 返回 Workspace-scoped 当前 Issue；不存在与跨 Workspace 使用相同错误。
+func (repository *ReadRepository) GetIssue(ctx context.Context, workspaceID, issueID foundation.ID) (healthapp.IssueSnapshot, error) {
 	if repository == nil || repository.db == nil || !validID(workspaceID) || !validID(issueID) {
-		return healthapp.IssueDetail{}, errors.New("health issue detail request is invalid")
+		return healthapp.IssueSnapshot{}, errors.New("health issue detail request is invalid")
 	}
-	issue, found, err := repository.loadCurrentIssue(ctx, workspaceID, issueID)
+	snapshot, found, err := repository.loadCurrentIssue(ctx, workspaceID, issueID)
 	if err != nil {
-		return healthapp.IssueDetail{}, err
+		return healthapp.IssueSnapshot{}, err
 	}
 	if !found {
-		return healthapp.IssueDetail{}, foundation.NewError(foundation.ErrorNotFound, "HEALTH_NOT_FOUND", false, pgx.ErrNoRows)
+		return healthapp.IssueSnapshot{}, foundation.NewError(foundation.ErrorNotFound, "HEALTH_NOT_FOUND", false, pgx.ErrNoRows)
 	}
-	observations, err := repository.loadObservations(ctx, workspaceID, issueID)
-	if err != nil {
-		return healthapp.IssueDetail{}, err
-	}
-	decisions, err := repository.loadDecisions(ctx, workspaceID, issueID)
-	if err != nil {
-		return healthapp.IssueDetail{}, err
-	}
-	detail := healthapp.IssueDetail{Issue: issue, Observations: observations, Decisions: decisions}
-	if len(observations) > 0 {
-		detail.LatestObservation = &observations[0]
-		// 当前 Issue 聚合的 evidence/object versions 与最新 observation 对齐。
-		detail.Issue.Evidence = append([]domain.IssueEvidence(nil), observations[0].Evidence...)
-		detail.Issue.ObjectVersions = append([]domain.ObjectVersion(nil), observations[0].TargetVersions...)
-	}
-	return detail, nil
+	return snapshot, nil
 }
 
-func (repository *ReadRepository) loadCurrentIssue(ctx context.Context, workspaceID, issueID foundation.ID) (domain.Issue, bool, error) {
+func (repository *ReadRepository) loadCurrentIssue(ctx context.Context, workspaceID, issueID foundation.ID) (healthapp.IssueSnapshot, bool, error) {
 	var issue domain.Issue
 	var id, ws, issueType, targetType, targetID, detectorID, identityHash, fingerprint, detectorVersion, severity, status string
 	var statusReason *string
@@ -150,18 +161,42 @@ func (repository *ReadRepository) loadCurrentIssue(ctx context.Context, workspac
 	var repairID, repairOptionCode, repairBindingFingerprint *string
 	var repairBindingObjectVersions []byte
 	var repairProposalCreatedAt *time.Time
-	err := repository.db.QueryRow(ctx, `SELECT id::text,workspace_id::text,type,target_type,target_id::text,detector_id,identity_hash,fingerprint,detector_version,severity,evidence_summary,status,status_reason,deferred_until,
-repair_proposal_id::text,repair_option_code,repair_binding_fingerprint,repair_binding_object_versions,repair_proposal_created_at,
-version,first_detected_at,last_detected_at,last_verified_at,resolved_at,created_at,updated_at
-FROM ops.health_issue WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(issueID)).Scan(&id, &ws, &issueType, &targetType, &targetID, &detectorID, &identityHash, &fingerprint, &detectorVersion, &severity, &issue.EvidenceSummary, &status, &statusReason, &deferredUntil, &repairID, &repairOptionCode, &repairBindingFingerprint, &repairBindingObjectVersions, &repairProposalCreatedAt, &issue.Version, &issue.FirstDetectedAt, &issue.LastDetectedAt, &issue.LastVerifiedAt, &resolvedAt, &issue.CreatedAt, &issue.UpdatedAt)
+	var observationID, observationScanID, observationDetectorVersion, observationFingerprint, observationEvidenceFingerprint, observationSeverity *string
+	var observationIssueVersion *int64
+	var observationAt *time.Time
+	var observationTargetVersions, observationEvidence []byte
+	err := repository.db.QueryRow(ctx, `SELECT issue.id::text,issue.workspace_id::text,issue.type,issue.target_type,issue.target_id::text,issue.detector_id,issue.identity_hash,issue.fingerprint,issue.detector_version,issue.severity,issue.evidence_summary,issue.status,issue.status_reason,issue.deferred_until,
+issue.repair_proposal_id::text,issue.repair_option_code,issue.repair_binding_fingerprint,issue.repair_binding_object_versions,issue.repair_proposal_created_at,
+issue.version,issue.first_detected_at,issue.last_detected_at,issue.last_verified_at,issue.resolved_at,issue.created_at,issue.updated_at,
+observation.id::text,observation.issue_version,observation.scan_id::text,observation.detector_version,observation.fingerprint,observation.evidence_fingerprint,observation.target_versions,observation.severity,observation.observed_at,
+COALESCE(evidence.items,'[]'::jsonb)
+FROM ops.health_issue issue
+LEFT JOIN LATERAL (
+ SELECT value.id,value.issue_version,value.scan_id,value.detector_version,value.fingerprint,value.evidence_fingerprint,value.target_versions,value.severity,value.observed_at
+ FROM ops.health_issue_observation value
+ WHERE value.workspace_id=issue.workspace_id AND value.issue_id=issue.id AND value.fingerprint=issue.fingerprint
+ LIMIT 1
+) observation ON TRUE
+LEFT JOIN LATERAL (
+ SELECT jsonb_agg(jsonb_build_object('ref_type',value.ref_type,'ref_id',value.ref_id::text,'hash',value.hash,'summary',value.summary) ORDER BY value.evidence_no,value.id) AS items
+ FROM ops.health_issue_evidence value
+ WHERE value.workspace_id=issue.workspace_id AND value.observation_id=observation.id
+) evidence ON TRUE
+WHERE issue.workspace_id=$1 AND issue.id=$2`, string(workspaceID), string(issueID)).Scan(
+		&id, &ws, &issueType, &targetType, &targetID, &detectorID, &identityHash, &fingerprint, &detectorVersion, &severity, &issue.EvidenceSummary, &status, &statusReason, &deferredUntil,
+		&repairID, &repairOptionCode, &repairBindingFingerprint, &repairBindingObjectVersions, &repairProposalCreatedAt,
+		&issue.Version, &issue.FirstDetectedAt, &issue.LastDetectedAt, &issue.LastVerifiedAt, &resolvedAt, &issue.CreatedAt, &issue.UpdatedAt,
+		&observationID, &observationIssueVersion, &observationScanID, &observationDetectorVersion, &observationFingerprint, &observationEvidenceFingerprint, &observationTargetVersions, &observationSeverity, &observationAt,
+		&observationEvidence,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Issue{}, false, nil
+		return healthapp.IssueSnapshot{}, false, nil
 	}
 	if err != nil {
-		return domain.Issue{}, false, err
+		return healthapp.IssueSnapshot{}, false, err
 	}
 	if ws != string(workspaceID) {
-		return domain.Issue{}, false, errors.New("health issue detail crossed workspace boundary")
+		return healthapp.IssueSnapshot{}, false, errors.New("health issue detail crossed workspace boundary")
 	}
 	issue.ID, issue.WorkspaceID = foundation.ID(id), foundation.ID(ws)
 	issue.Type, issue.Target = domain.IssueType(issueType), domain.ObjectRef{Type: domain.ObjectType(targetType), ID: foundation.ID(targetID)}
@@ -173,87 +208,146 @@ FROM ops.health_issue WHERE workspace_id=$1 AND id=$2`, string(workspaceID), str
 	issue.DeferredUntil, issue.ResolvedAt = deferredUntil, resolvedAt
 	if repairID != nil || repairOptionCode != nil || repairBindingFingerprint != nil || len(repairBindingObjectVersions) > 0 || repairProposalCreatedAt != nil {
 		if repairID == nil || repairOptionCode == nil || repairBindingFingerprint == nil || len(repairBindingObjectVersions) == 0 || repairProposalCreatedAt == nil {
-			return domain.Issue{}, false, errors.New("health issue proposal binding is incomplete")
+			return healthapp.IssueSnapshot{}, false, errors.New("health issue proposal binding is incomplete")
 		}
 		var objectVersions []domain.ObjectVersion
 		if err := json.Unmarshal(repairBindingObjectVersions, &objectVersions); err != nil {
-			return domain.Issue{}, false, err
+			return healthapp.IssueSnapshot{}, false, err
 		}
 		issue.Proposal = &domain.ProposalBinding{ProposalID: foundation.ID(*repairID), RepairOptionCode: *repairOptionCode, Fingerprint: *repairBindingFingerprint, ObjectVersions: objectVersions, CreatedAt: repairProposalCreatedAt.UTC()}
 	}
 	issue.RepairOptions = healthapp.RepairOptionsForIssue(issue.Type)
-	return issue, true, nil
+	if observationID == nil || observationIssueVersion == nil || observationScanID == nil || observationDetectorVersion == nil || observationFingerprint == nil || observationEvidenceFingerprint == nil || len(observationTargetVersions) == 0 || observationSeverity == nil || observationAt == nil {
+		return healthapp.IssueSnapshot{}, false, errors.New("health issue current observation is missing")
+	}
+	latest := healthapp.IssueObservationRecord{
+		ID:                  foundation.ID(*observationID),
+		IssueVersion:        *observationIssueVersion,
+		ScanID:              foundation.ID(*observationScanID),
+		DetectorVersion:     *observationDetectorVersion,
+		Fingerprint:         *observationFingerprint,
+		EvidenceFingerprint: *observationEvidenceFingerprint,
+		Severity:            domain.Severity(*observationSeverity),
+		ObservedAt:          observationAt.UTC(),
+	}
+	if err := json.Unmarshal(observationTargetVersions, &latest.TargetVersions); err != nil {
+		return healthapp.IssueSnapshot{}, false, err
+	}
+	var evidence []currentEvidenceRecord
+	if err := json.Unmarshal(observationEvidence, &evidence); err != nil {
+		return healthapp.IssueSnapshot{}, false, err
+	}
+	for _, item := range evidence {
+		latest.Evidence = append(latest.Evidence, domain.IssueEvidence{Ref: domain.ObjectRef{Type: domain.ObjectType(item.RefType), ID: foundation.ID(item.RefID)}, Hash: item.Hash, Summary: item.Summary})
+	}
+	issue.Evidence = append([]domain.IssueEvidence(nil), latest.Evidence...)
+	issue.ObjectVersions = append([]domain.ObjectVersion(nil), latest.TargetVersions...)
+	return healthapp.IssueSnapshot{Issue: issue, LatestObservation: latest}, true, nil
 }
 
-func (repository *ReadRepository) loadObservations(ctx context.Context, workspaceID, issueID foundation.ID) ([]healthapp.IssueObservationRecord, error) {
-	rows, err := repository.db.Query(ctx, `SELECT id::text,issue_version,scan_id::text,detector_version,fingerprint,evidence_fingerprint,target_versions,severity,observed_at
-FROM ops.health_issue_observation WHERE workspace_id=$1 AND issue_id=$2 ORDER BY observed_at DESC,id DESC`, string(workspaceID), string(issueID))
+// ListIssueObservations 使用 (observed_at DESC,id ASC) keyset，并仅批量加载当前页 evidence。
+func (repository *ReadRepository) ListIssueObservations(ctx context.Context, request healthapp.IssueObservationQuery) (healthapp.IssueObservationResult, error) {
+	if repository == nil || repository.db == nil || !validID(request.WorkspaceID) || !validID(request.IssueID) || request.Limit < 1 || request.Limit > healthapp.MaxIssueHistoryLimit {
+		return healthapp.IssueObservationResult{}, errors.New("health issue observation history request is invalid")
+	}
+	args := []any{string(request.WorkspaceID), string(request.IssueID)}
+	query := issueObservationHistorySelect
+	if request.After != nil {
+		if request.After.At.IsZero() || !validID(request.After.ID) {
+			return healthapp.IssueObservationResult{}, errors.New("health issue observation history position is invalid")
+		}
+		query += ` AND observation.observed_at <= $3 AND (observation.observed_at < $3 OR (observation.observed_at = $3 AND observation.id > $4)) ORDER BY observation.observed_at DESC,observation.id ASC LIMIT $5`
+		args = append(args, request.After.At.UTC(), string(request.After.ID), request.Limit+1)
+	} else {
+		query += ` ORDER BY observation.observed_at DESC,observation.id ASC LIMIT $3`
+		args = append(args, request.Limit+1)
+	}
+	rows, err := repository.db.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return healthapp.IssueObservationResult{}, err
 	}
 	defer rows.Close()
-	result := make([]healthapp.IssueObservationRecord, 0)
+	items := make([]healthapp.IssueObservationRecord, 0, request.Limit+1)
 	for rows.Next() {
 		var item healthapp.IssueObservationRecord
 		var id, scanID, severity string
 		var raw []byte
 		if err := rows.Scan(&id, &item.IssueVersion, &scanID, &item.DetectorVersion, &item.Fingerprint, &item.EvidenceFingerprint, &raw, &severity, &item.ObservedAt); err != nil {
-			return nil, err
+			return healthapp.IssueObservationResult{}, err
 		}
 		if err := json.Unmarshal(raw, &item.TargetVersions); err != nil {
-			return nil, err
+			return healthapp.IssueObservationResult{}, err
 		}
 		item.ID, item.ScanID, item.Severity = foundation.ID(id), foundation.ID(scanID), domain.Severity(severity)
-		result = append(result, item)
+		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return healthapp.IssueObservationResult{}, err
 	}
-	if len(result) == 0 {
+	result := healthapp.IssueObservationResult{Items: items}
+	if len(result.Items) > request.Limit {
+		result.HasMore = true
+		result.Items = result.Items[:request.Limit]
+		last := result.Items[len(result.Items)-1]
+		result.Next = &healthapp.IssueHistoryPosition{At: last.ObservedAt, ID: last.ID}
+	}
+	if len(result.Items) == 0 {
 		return result, nil
 	}
-	observationIDs := make([]string, 0, len(result))
-	byObservationID := make(map[foundation.ID]int, len(result))
-	for index := range result {
-		observationIDs = append(observationIDs, string(result[index].ID))
-		byObservationID[result[index].ID] = index
+	observationIDs := make([]string, 0, len(result.Items))
+	byObservationID := make(map[foundation.ID]int, len(result.Items))
+	for index := range result.Items {
+		observationIDs = append(observationIDs, string(result.Items[index].ID))
+		byObservationID[result.Items[index].ID] = index
 	}
-	evidenceRows, err := repository.db.Query(ctx, `SELECT observation_id::text,ref_type,ref_id::text,hash,summary
-FROM ops.health_issue_evidence
-WHERE workspace_id=$1 AND observation_id::text=ANY($2::text[])
-ORDER BY observation_id,evidence_no,id`, string(workspaceID), observationIDs)
+	evidenceRows, err := repository.db.Query(ctx, issueObservationEvidenceSelect, string(request.WorkspaceID), observationIDs)
 	if err != nil {
-		return nil, err
+		return healthapp.IssueObservationResult{}, err
 	}
 	defer evidenceRows.Close()
 	for evidenceRows.Next() {
 		var observationID, refType, refID, hash, summary string
 		if err := evidenceRows.Scan(&observationID, &refType, &refID, &hash, &summary); err != nil {
-			return nil, err
+			return healthapp.IssueObservationResult{}, err
 		}
 		index, ok := byObservationID[foundation.ID(observationID)]
 		if !ok {
-			return nil, errors.New("health observation evidence crossed issue boundary")
+			return healthapp.IssueObservationResult{}, errors.New("health observation evidence crossed issue boundary")
 		}
-		result[index].Evidence = append(result[index].Evidence, domain.IssueEvidence{Ref: domain.ObjectRef{Type: domain.ObjectType(refType), ID: foundation.ID(refID)}, Hash: hash, Summary: summary})
+		result.Items[index].Evidence = append(result.Items[index].Evidence, domain.IssueEvidence{Ref: domain.ObjectRef{Type: domain.ObjectType(refType), ID: foundation.ID(refID)}, Hash: hash, Summary: summary})
 	}
 	return result, evidenceRows.Err()
 }
 
-func (repository *ReadRepository) loadDecisions(ctx context.Context, workspaceID, issueID foundation.ID) ([]healthapp.IssueDecisionRecord, error) {
-	rows, err := repository.db.Query(ctx, `SELECT id::text,issue_version,proposal_id::text,idempotency_key,action,reason,defer_until,created_at
-FROM ops.health_issue_decision WHERE workspace_id=$1 AND issue_id=$2 ORDER BY created_at DESC,id DESC`, string(workspaceID), string(issueID))
+// ListIssueDecisions 使用 (created_at DESC,id ASC) keyset 返回有界 decision 历史。
+func (repository *ReadRepository) ListIssueDecisions(ctx context.Context, request healthapp.IssueDecisionQuery) (healthapp.IssueDecisionResult, error) {
+	if repository == nil || repository.db == nil || !validID(request.WorkspaceID) || !validID(request.IssueID) || request.Limit < 1 || request.Limit > healthapp.MaxIssueHistoryLimit {
+		return healthapp.IssueDecisionResult{}, errors.New("health issue decision history request is invalid")
+	}
+	args := []any{string(request.WorkspaceID), string(request.IssueID)}
+	query := issueDecisionHistorySelect
+	if request.After != nil {
+		if request.After.At.IsZero() || !validID(request.After.ID) {
+			return healthapp.IssueDecisionResult{}, errors.New("health issue decision history position is invalid")
+		}
+		query += ` AND decision.created_at <= $3 AND (decision.created_at < $3 OR (decision.created_at = $3 AND decision.id > $4)) ORDER BY decision.created_at DESC,decision.id ASC LIMIT $5`
+		args = append(args, request.After.At.UTC(), string(request.After.ID), request.Limit+1)
+	} else {
+		query += ` ORDER BY decision.created_at DESC,decision.id ASC LIMIT $3`
+		args = append(args, request.Limit+1)
+	}
+	rows, err := repository.db.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return healthapp.IssueDecisionResult{}, err
 	}
 	defer rows.Close()
-	var result []healthapp.IssueDecisionRecord
+	items := make([]healthapp.IssueDecisionRecord, 0, request.Limit+1)
 	for rows.Next() {
 		var item healthapp.IssueDecisionRecord
 		var id, action string
 		var proposalID, reason *string
 		if err := rows.Scan(&id, &item.IssueVersion, &proposalID, &item.IdempotencyKey, &action, &reason, &item.DeferredUntil, &item.CreatedAt); err != nil {
-			return nil, err
+			return healthapp.IssueDecisionResult{}, err
 		}
 		item.ID, item.Action = foundation.ID(id), domain.IssueDecisionAction(action)
 		if proposalID != nil {
@@ -263,9 +357,19 @@ FROM ops.health_issue_decision WHERE workspace_id=$1 AND issue_id=$2 ORDER BY cr
 		if reason != nil {
 			item.Reason = *reason
 		}
-		result = append(result, item)
+		items = append(items, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return healthapp.IssueDecisionResult{}, err
+	}
+	result := healthapp.IssueDecisionResult{Items: items}
+	if len(result.Items) > request.Limit {
+		result.HasMore = true
+		result.Items = result.Items[:request.Limit]
+		last := result.Items[len(result.Items)-1]
+		result.Next = &healthapp.IssueHistoryPosition{At: last.CreatedAt, ID: last.ID}
+	}
+	return result, nil
 }
 
 // GetHealthSummary 返回 open Issue 聚合和最新 Scan coverage；当前未落地能力显式 unavailable。

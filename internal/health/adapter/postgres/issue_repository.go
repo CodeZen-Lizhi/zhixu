@@ -282,10 +282,9 @@ func (repository *IssueRepository) loadIssuesForUpdate(ctx context.Context, tx p
 	ORDER BY i.identity_hash
 	FOR UPDATE
 ), latest AS (
-	SELECT DISTINCT ON (observation.issue_id) observation.issue_id,observation.id,observation.target_versions
+	SELECT observation.issue_id,observation.id,observation.target_versions
 	FROM ops.health_issue_observation observation
-	JOIN locked issue ON issue.id=observation.issue_id AND issue.workspace_id=observation.workspace_id
-	ORDER BY observation.issue_id,observation.observed_at DESC,observation.id DESC
+	JOIN locked issue ON issue.id=observation.issue_id AND issue.workspace_id=observation.workspace_id AND issue.fingerprint=observation.fingerprint
 ), latest_evidence AS (
 	SELECT evidence.observation_id,
 	       jsonb_agg(jsonb_build_object('ref_type',evidence.ref_type,'ref_id',evidence.ref_id::text,
@@ -903,7 +902,7 @@ func (repository *IssueRepository) loadIssue(ctx context.Context, queryer interf
 func (repository *IssueRepository) loadLatestObservation(ctx context.Context, queryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }, issue *domain.Issue) error {
-	rows, err := queryer.Query(ctx, `SELECT o.target_versions FROM ops.health_issue_observation o WHERE o.workspace_id=$1 AND o.issue_id=$2 ORDER BY o.observed_at DESC,o.id DESC LIMIT 1`, string(issue.WorkspaceID), string(issue.ID))
+	rows, err := queryer.Query(ctx, `SELECT o.target_versions FROM ops.health_issue_observation o WHERE o.workspace_id=$1 AND o.issue_id=$2 AND o.fingerprint=$3`, string(issue.WorkspaceID), string(issue.ID), issue.Fingerprint)
 	if err != nil {
 		return err
 	}
@@ -923,7 +922,7 @@ func (repository *IssueRepository) loadLatestObservation(ctx context.Context, qu
 		return err
 	}
 	rows.Close()
-	rows, err = queryer.Query(ctx, `SELECT e.ref_type,e.ref_id::text,e.hash,e.summary FROM ops.health_issue_evidence e JOIN ops.health_issue_observation o ON o.id=e.observation_id AND o.workspace_id=e.workspace_id WHERE o.workspace_id=$1 AND o.issue_id=$2 AND o.id=(SELECT id FROM ops.health_issue_observation WHERE workspace_id=$1 AND issue_id=$2 ORDER BY observed_at DESC,id DESC LIMIT 1) ORDER BY e.evidence_no`, string(issue.WorkspaceID), string(issue.ID))
+	rows, err = queryer.Query(ctx, `SELECT e.ref_type,e.ref_id::text,e.hash,e.summary FROM ops.health_issue_evidence e JOIN ops.health_issue_observation o ON o.id=e.observation_id AND o.workspace_id=e.workspace_id WHERE o.workspace_id=$1 AND o.issue_id=$2 AND o.fingerprint=$3 ORDER BY e.evidence_no`, string(issue.WorkspaceID), string(issue.ID), issue.Fingerprint)
 	if err != nil {
 		return err
 	}

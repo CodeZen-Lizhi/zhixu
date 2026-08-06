@@ -22,9 +22,21 @@ const (
 	DefaultIssueListLimit = 25
 	// MaxIssueListLimit 是 Issue 列表的硬上限，避免无界读取。
 	MaxIssueListLimit = 100
+	// DefaultIssueHistoryLimit 是 Issue 历史的默认页大小。
+	DefaultIssueHistoryLimit = 25
+	// MaxIssueHistoryLimit 是 Issue 历史的硬上限，避免无界读取。
+	MaxIssueHistoryLimit = 100
 	// HealthTrendDays 是 Summary 固定返回的 UTC 自然日数量。
-	HealthTrendDays   = 7
-	issueCursorSchema = "health-issue-cursor/v1"
+	HealthTrendDays          = 7
+	issueCursorSchema        = "health-issue-cursor/v1"
+	issueHistoryCursorSchema = "health-issue-history-cursor/v1"
+)
+
+type issueHistoryKind string
+
+const (
+	issueObservationHistory issueHistoryKind = "observations"
+	issueDecisionHistory    issueHistoryKind = "decisions"
 )
 
 // IssueListRequest 是 Workspace-scoped Issue 列表查询。
@@ -85,6 +97,36 @@ type IssueListPage struct {
 	HasMore    bool
 }
 
+// IssueHistoryRequest 是 Workspace 和 Issue 双重绑定的历史查询。
+type IssueHistoryRequest struct {
+	WorkspaceID foundation.ID
+	IssueID     foundation.ID
+	Limit       int
+	Cursor      string
+}
+
+// IssueHistoryPosition 是稳定排序 (timestamp DESC, id ASC) 的 keyset 位置。
+type IssueHistoryPosition struct {
+	At time.Time
+	ID foundation.ID
+}
+
+// IssueObservationQuery 是 repository 接收的、已验证的 observation 历史查询。
+type IssueObservationQuery struct {
+	WorkspaceID foundation.ID
+	IssueID     foundation.ID
+	Limit       int
+	After       *IssueHistoryPosition
+}
+
+// IssueDecisionQuery 是 repository 接收的、已验证的 decision 历史查询。
+type IssueDecisionQuery struct {
+	WorkspaceID foundation.ID
+	IssueID     foundation.ID
+	Limit       int
+	After       *IssueHistoryPosition
+}
+
 // IssueObservationRecord 是不可变 observation 历史投影。
 type IssueObservationRecord struct {
 	ID                  foundation.ID
@@ -111,12 +153,54 @@ type IssueDecisionRecord struct {
 	CreatedAt      time.Time
 }
 
-// IssueDetail 是当前 Issue 与完整可审阅历史的只读聚合。
-type IssueDetail struct {
+// IssueObservationResult 是 repository 返回的有界 observation 历史及下一页位置。
+type IssueObservationResult struct {
+	Items   []IssueObservationRecord
+	HasMore bool
+	Next    *IssueHistoryPosition
+}
+
+// IssueDecisionResult 是 repository 返回的有界 decision 历史及下一页位置。
+type IssueDecisionResult struct {
+	Items   []IssueDecisionRecord
+	HasMore bool
+	Next    *IssueHistoryPosition
+}
+
+// IssueObservationPage 是 application 对外返回的 observation 历史页。
+type IssueObservationPage struct {
+	WorkspaceID foundation.ID
+	IssueID     foundation.ID
+	Items       []IssueObservationRecord
+	NextCursor  string
+	HasMore     bool
+}
+
+// IssueDecisionPage 是 application 对外返回的 decision 历史页。
+type IssueDecisionPage struct {
+	WorkspaceID foundation.ID
+	IssueID     foundation.ID
+	Items       []IssueDecisionRecord
+	NextCursor  string
+	HasMore     bool
+}
+
+// IssueSnapshot 是当前 Issue 及与其 fingerprint 精确绑定的 observation 快照。
+type IssueSnapshot struct {
 	Issue             domain.Issue
-	LatestObservation *IssueObservationRecord
-	Observations      []IssueObservationRecord
-	Decisions         []IssueDecisionRecord
+	LatestObservation IssueObservationRecord
+}
+
+// IssueDetail 是当前 Issue 与两类历史首个有界页的只读聚合。
+type IssueDetail struct {
+	Issue                  domain.Issue
+	LatestObservation      IssueObservationRecord
+	Observations           []IssueObservationRecord
+	ObservationsNextCursor string
+	ObservationsHasMore    bool
+	Decisions              []IssueDecisionRecord
+	DecisionsNextCursor    string
+	DecisionsHasMore       bool
 }
 
 // ScanSummary 是 Summary 使用的最后一次扫描精简投影。
@@ -157,7 +241,9 @@ type HealthSummary struct {
 // IssueReadPort 提供 Workspace 隔离的 Issue 读取能力。
 type IssueReadPort interface {
 	ListIssues(context.Context, IssueListQuery) (IssueListResult, error)
-	GetIssueDetail(context.Context, foundation.ID, foundation.ID) (IssueDetail, error)
+	GetIssue(context.Context, foundation.ID, foundation.ID) (IssueSnapshot, error)
+	ListIssueObservations(context.Context, IssueObservationQuery) (IssueObservationResult, error)
+	ListIssueDecisions(context.Context, IssueDecisionQuery) (IssueDecisionResult, error)
 	GetHealthSummary(context.Context, foundation.ID) (HealthSummary, error)
 }
 
@@ -226,25 +312,162 @@ func (service *IssueReadService) ListIssues(ctx context.Context, request IssueLi
 	return page, nil
 }
 
-// GetIssueDetail 返回当前 Issue、最新 observation/evidence 及不可变历史。
+// GetIssueDetail 返回当前 Issue、最新 observation/evidence 及两类历史首个有界页。
 func (service *IssueReadService) GetIssueDetail(ctx context.Context, workspaceID, issueID foundation.ID) (IssueDetail, error) {
-	if service == nil || service.reader == nil {
+	if service == nil || service.reader == nil || service.cursor == nil {
 		return IssueDetail{}, readUnavailable("health issue detail service is unavailable")
 	}
 	if ctx == nil || !validReadID(workspaceID) || !validReadID(issueID) {
 		return IssueDetail{}, readInvalid("health issue detail identity is invalid")
 	}
-	detail, err := service.reader.GetIssueDetail(ctx, workspaceID, issueID)
+	snapshot, err := service.getIssue(ctx, workspaceID, issueID)
 	if err != nil {
 		return IssueDetail{}, err
 	}
-	if detail.Issue.WorkspaceID != workspaceID || detail.Issue.ID != issueID {
-		return IssueDetail{}, readNotFound("health issue is not visible in requested workspace")
+	observationPage, err := service.listIssueObservations(ctx, IssueHistoryRequest{WorkspaceID: workspaceID, IssueID: issueID, Limit: DefaultIssueHistoryLimit}, false)
+	if err != nil {
+		return IssueDetail{}, err
+	}
+	decisionPage, err := service.listIssueDecisions(ctx, IssueHistoryRequest{WorkspaceID: workspaceID, IssueID: issueID, Limit: DefaultIssueHistoryLimit}, false)
+	if err != nil {
+		return IssueDetail{}, err
+	}
+	if len(observationPage.Items) == 0 {
+		return IssueDetail{}, readConsistency("health issue current history is missing")
+	}
+	detail := IssueDetail{
+		Issue:                  snapshot.Issue,
+		LatestObservation:      snapshot.LatestObservation,
+		Observations:           observationPage.Items,
+		ObservationsNextCursor: observationPage.NextCursor,
+		ObservationsHasMore:    observationPage.HasMore,
+		Decisions:              decisionPage.Items,
+		DecisionsNextCursor:    decisionPage.NextCursor,
+		DecisionsHasMore:       decisionPage.HasMore,
+	}
+	if !validReadID(detail.LatestObservation.ID) || !validReadID(detail.LatestObservation.ScanID) ||
+		detail.LatestObservation.IssueVersion < 1 || detail.LatestObservation.IssueVersion > detail.Issue.Version || detail.LatestObservation.ObservedAt.IsZero() ||
+		detail.LatestObservation.Fingerprint != detail.Issue.Fingerprint ||
+		detail.LatestObservation.DetectorVersion != detail.Issue.DetectorVersion ||
+		detail.LatestObservation.Severity != detail.Issue.Severity ||
+		!reflect.DeepEqual(detail.LatestObservation.Evidence, detail.Issue.Evidence) ||
+		!reflect.DeepEqual(detail.LatestObservation.TargetVersions, detail.Issue.ObjectVersions) {
+		return IssueDetail{}, readConsistency("health issue current observation is missing or stale")
 	}
 	if err := domain.ValidateIssue(detail.Issue); err != nil {
 		return IssueDetail{}, err
 	}
 	return detail, nil
+}
+
+// ListIssueObservations 返回绑定 Workspace、Issue、类型和 limit 的 observation 历史页。
+func (service *IssueReadService) ListIssueObservations(ctx context.Context, request IssueHistoryRequest) (IssueObservationPage, error) {
+	return service.listIssueObservations(ctx, request, true)
+}
+
+func (service *IssueReadService) listIssueObservations(ctx context.Context, request IssueHistoryRequest, ensureIssue bool) (IssueObservationPage, error) {
+	limit, err := service.validateHistoryRequest(ctx, request)
+	if err != nil {
+		return IssueObservationPage{}, err
+	}
+	query := IssueObservationQuery{WorkspaceID: request.WorkspaceID, IssueID: request.IssueID, Limit: limit}
+	binding := makeHistoryCursorBinding(request, issueObservationHistory, limit)
+	if request.Cursor != "" {
+		position, err := service.cursor.decodeHistory(request.Cursor, binding)
+		if err != nil {
+			return IssueObservationPage{}, err
+		}
+		query.After = &position
+	}
+	if ensureIssue {
+		if _, err := service.getIssue(ctx, request.WorkspaceID, request.IssueID); err != nil {
+			return IssueObservationPage{}, err
+		}
+	}
+	result, err := service.reader.ListIssueObservations(ctx, query)
+	if err != nil {
+		return IssueObservationPage{}, err
+	}
+	if err := validateObservationResult(result, limit); err != nil {
+		return IssueObservationPage{}, err
+	}
+	page := IssueObservationPage{WorkspaceID: request.WorkspaceID, IssueID: request.IssueID, Items: result.Items, HasMore: result.HasMore}
+	if result.HasMore {
+		page.NextCursor, err = service.cursor.encodeHistory(historyCursorDocument{Binding: binding, Position: *result.Next})
+		if err != nil {
+			return IssueObservationPage{}, err
+		}
+	}
+	return page, nil
+}
+
+// ListIssueDecisions 返回绑定 Workspace、Issue、类型和 limit 的 decision 历史页。
+func (service *IssueReadService) ListIssueDecisions(ctx context.Context, request IssueHistoryRequest) (IssueDecisionPage, error) {
+	return service.listIssueDecisions(ctx, request, true)
+}
+
+func (service *IssueReadService) listIssueDecisions(ctx context.Context, request IssueHistoryRequest, ensureIssue bool) (IssueDecisionPage, error) {
+	limit, err := service.validateHistoryRequest(ctx, request)
+	if err != nil {
+		return IssueDecisionPage{}, err
+	}
+	query := IssueDecisionQuery{WorkspaceID: request.WorkspaceID, IssueID: request.IssueID, Limit: limit}
+	binding := makeHistoryCursorBinding(request, issueDecisionHistory, limit)
+	if request.Cursor != "" {
+		position, err := service.cursor.decodeHistory(request.Cursor, binding)
+		if err != nil {
+			return IssueDecisionPage{}, err
+		}
+		query.After = &position
+	}
+	if ensureIssue {
+		if _, err := service.getIssue(ctx, request.WorkspaceID, request.IssueID); err != nil {
+			return IssueDecisionPage{}, err
+		}
+	}
+	result, err := service.reader.ListIssueDecisions(ctx, query)
+	if err != nil {
+		return IssueDecisionPage{}, err
+	}
+	if err := validateDecisionResult(result, limit); err != nil {
+		return IssueDecisionPage{}, err
+	}
+	page := IssueDecisionPage{WorkspaceID: request.WorkspaceID, IssueID: request.IssueID, Items: result.Items, HasMore: result.HasMore}
+	if result.HasMore {
+		page.NextCursor, err = service.cursor.encodeHistory(historyCursorDocument{Binding: binding, Position: *result.Next})
+		if err != nil {
+			return IssueDecisionPage{}, err
+		}
+	}
+	return page, nil
+}
+
+func (service *IssueReadService) validateHistoryRequest(ctx context.Context, request IssueHistoryRequest) (int, error) {
+	if service == nil || service.reader == nil || service.cursor == nil {
+		return 0, readUnavailable("health issue history service is unavailable")
+	}
+	if ctx == nil || !validReadID(request.WorkspaceID) || !validReadID(request.IssueID) {
+		return 0, readInvalid("health issue history identity is invalid")
+	}
+	limit := request.Limit
+	if limit == 0 {
+		limit = DefaultIssueHistoryLimit
+	}
+	if limit < 1 || limit > MaxIssueHistoryLimit {
+		return 0, readInvalid("health issue history limit is outside the bounded range")
+	}
+	return limit, nil
+}
+
+func (service *IssueReadService) getIssue(ctx context.Context, workspaceID, issueID foundation.ID) (IssueSnapshot, error) {
+	snapshot, err := service.reader.GetIssue(ctx, workspaceID, issueID)
+	if err != nil {
+		return IssueSnapshot{}, err
+	}
+	if snapshot.Issue.WorkspaceID != workspaceID || snapshot.Issue.ID != issueID {
+		return IssueSnapshot{}, readNotFound("health issue is not visible in requested workspace")
+	}
+	return snapshot, nil
 }
 
 // GetHealthSummary 返回 Workspace 健康概览，并保留不可用能力说明。
@@ -315,6 +538,20 @@ type cursorDocument struct {
 	MAC      string            `json:"mac"`
 }
 
+type historyCursorBinding struct {
+	Schema    string           `json:"schema"`
+	Workspace foundation.ID    `json:"workspace_id"`
+	Issue     foundation.ID    `json:"issue_id"`
+	Kind      issueHistoryKind `json:"kind"`
+	Limit     int              `json:"limit"`
+}
+
+type historyCursorDocument struct {
+	Binding  historyCursorBinding `json:"binding"`
+	Position IssueHistoryPosition `json:"position"`
+	MAC      string               `json:"mac"`
+}
+
 // Encode 将 cursor 位置编码为签名字符串。
 func (codec *IssueCursorCodec) Encode(document cursorDocument) (string, error) {
 	if codec == nil || len(codec.key) < 32 || document.Binding.Schema != issueCursorSchema || !validReadID(document.Binding.Workspace) || document.Binding.Limit < 1 || document.Position.UpdatedAt.IsZero() || !validReadID(document.Position.ID) {
@@ -370,11 +607,123 @@ func (codec *IssueCursorCodec) Decode(raw string, binding cursorBinding) (IssueL
 	return document.Position, nil
 }
 
+func (codec *IssueCursorCodec) encodeHistory(document historyCursorDocument) (string, error) {
+	if codec == nil || len(codec.key) < 32 || !validHistoryCursorBinding(document.Binding) || document.Position.At.IsZero() || !validReadID(document.Position.ID) {
+		return "", readInvalid("health issue history cursor document is invalid")
+	}
+	document.MAC = ""
+	payload, err := json.Marshal(document)
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, codec.key)
+	_, _ = mac.Write(payload)
+	document.MAC = base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	raw, err := json.Marshal(document)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func (codec *IssueCursorCodec) decodeHistory(raw string, binding historyCursorBinding) (IssueHistoryPosition, error) {
+	if codec == nil || len(codec.key) < 32 || len(raw) == 0 || len(raw) > 2048 || !validHistoryCursorBinding(binding) {
+		return IssueHistoryPosition{}, readInvalid("health issue history cursor is invalid")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return IssueHistoryPosition{}, readInvalid("health issue history cursor is invalid")
+	}
+	var document historyCursorDocument
+	decoder := json.NewDecoder(strings.NewReader(string(decoded)))
+	if err := decoder.Decode(&document); err != nil {
+		return IssueHistoryPosition{}, readInvalid("health issue history cursor is invalid")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF || document.MAC == "" || document.Binding != binding || document.Position.At.IsZero() || !validReadID(document.Position.ID) {
+		return IssueHistoryPosition{}, readInvalid("health issue history cursor is invalid")
+	}
+	macValue, err := base64.RawURLEncoding.DecodeString(document.MAC)
+	if err != nil {
+		return IssueHistoryPosition{}, readInvalid("health issue history cursor is invalid")
+	}
+	expected := document
+	expected.MAC = ""
+	payload, err := json.Marshal(expected)
+	if err != nil {
+		return IssueHistoryPosition{}, readInvalid("health issue history cursor is invalid")
+	}
+	mac := hmac.New(sha256.New, codec.key)
+	_, _ = mac.Write(payload)
+	if !hmac.Equal(macValue, mac.Sum(nil)) {
+		return IssueHistoryPosition{}, readInvalid("health issue history cursor is invalid")
+	}
+	return document.Position, nil
+}
+
 func makeCursorBinding(request IssueListRequest, limit int) cursorBinding {
 	return cursorBinding{Schema: issueCursorSchema, Workspace: request.WorkspaceID, Limit: limit, Statuses: sortedStatuses(request.Statuses), Severities: sortedSeverities(request.Severities), Types: sortedIssueTypes(request.Types)}
 }
 
+func makeHistoryCursorBinding(request IssueHistoryRequest, kind issueHistoryKind, limit int) historyCursorBinding {
+	return historyCursorBinding{Schema: issueHistoryCursorSchema, Workspace: request.WorkspaceID, Issue: request.IssueID, Kind: kind, Limit: limit}
+}
+
+func validHistoryCursorBinding(binding historyCursorBinding) bool {
+	return binding.Schema == issueHistoryCursorSchema && validReadID(binding.Workspace) && validReadID(binding.Issue) && binding.Workspace != binding.Issue &&
+		(binding.Kind == issueObservationHistory || binding.Kind == issueDecisionHistory) && binding.Limit >= 1 && binding.Limit <= MaxIssueHistoryLimit
+}
+
 func sameCursorBinding(left, right cursorBinding) bool { return reflect.DeepEqual(left, right) }
+
+func validateObservationResult(result IssueObservationResult, limit int) error {
+	if len(result.Items) > limit {
+		return readConsistency("health observation repository returned an unbounded page")
+	}
+	positions := make([]IssueHistoryPosition, 0, len(result.Items))
+	for _, item := range result.Items {
+		positions = append(positions, IssueHistoryPosition{At: item.ObservedAt, ID: item.ID})
+	}
+	return validateHistoryResult(positions, result.HasMore, result.Next)
+}
+
+func validateDecisionResult(result IssueDecisionResult, limit int) error {
+	if len(result.Items) > limit {
+		return readConsistency("health decision repository returned an unbounded page")
+	}
+	positions := make([]IssueHistoryPosition, 0, len(result.Items))
+	for _, item := range result.Items {
+		positions = append(positions, IssueHistoryPosition{At: item.CreatedAt, ID: item.ID})
+	}
+	return validateHistoryResult(positions, result.HasMore, result.Next)
+}
+
+func validateHistoryResult(positions []IssueHistoryPosition, hasMore bool, next *IssueHistoryPosition) error {
+	for index, position := range positions {
+		if position.At.IsZero() || !validReadID(position.ID) {
+			return readConsistency("health issue history repository returned an invalid item")
+		}
+		if index > 0 {
+			previous := positions[index-1]
+			if position.At.After(previous.At) || (position.At.Equal(previous.At) && string(position.ID) <= string(previous.ID)) {
+				return readConsistency("health issue history repository returned unstable ordering")
+			}
+		}
+	}
+	if !hasMore {
+		if next != nil {
+			return readConsistency("health issue history repository returned an unexpected next position")
+		}
+		return nil
+	}
+	if len(positions) == 0 || next == nil {
+		return readConsistency("health issue history repository omitted next position")
+	}
+	last := positions[len(positions)-1]
+	if !next.At.Equal(last.At) || next.ID != last.ID {
+		return readConsistency("health issue history repository returned a mismatched next position")
+	}
+	return nil
+}
 
 func validateIssueFilters(request IssueListRequest) error {
 	seenStatus := map[domain.IssueStatus]struct{}{}

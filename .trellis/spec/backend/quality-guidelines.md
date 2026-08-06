@@ -112,6 +112,56 @@ go vet ./...
 - 统一覆盖率阈值、完整 E2E Fixture 和性能容量基准。
 - License、发布门禁、SBOM 和镜像扫描配置；README 当前仍未确定许可证。
 
+## Scenario: 架构质量基线报告
+
+### 1. Scope / Trigger
+
+- 在架构复评、跨模块重构或质量治理任务开始前，运行只读基线，固定规模、热点、重复信号、Domain 依赖和测试资产口径。
+- 本报告只提供趋势事实，不按 LOC、helper 数量、SKIP 数量或 Bundle 大小自动判定通过/失败。
+
+### 2. Signatures
+
+- 人工入口：`make architecture-quality-baseline`。
+- 机器入口：`python3 deploy/architecture_quality_baseline.py --format json [--web-dist PATH] [--output PATH]`。
+- JSON Schema 固定为 `architecture-quality-baseline/v1`；默认 `--web-dist web/dist`，目录缺失时报告 unavailable。
+
+### 3. Contracts
+
+- 文件集合只来自 `git ls-files -z`。Go 范围固定为 `cmd/`、`internal/`、`eval/`、`migrations/`、`poc/eino/`；Web、E2E 和 SQL 分别使用 `web/src/`、`web/e2e/`、`migrations/*.sql`。
+- JSON 不包含时间、绝对路径、用户名、主机名或 Git commit；所有路径、位置、edge、target 和 asset 显式稳定排序。
+- `parseID`、`decodeJSON`、`writeError`、`isRecord` 与 UUID helper 只是重复候选信号，必须保留匹配位置，禁止按名称直接合并实现。
+- `web/dist` 是可选且被 Git 忽略的输入。未先执行当前 Web build 时，其 Bundle 数字不得声称对应当前源码或 CI 工具链。
+- `--output` 使用同目录临时文件原子替换，并将结果文件权限收敛为 `0600`；命令不得修改业务文件、Git index、数据库、Docker、网络或浏览器状态。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 必须结果 |
+|---|---|
+| tracked 源文件缺失、不是普通文件或无法按 UTF-8 解码 | 非零退出，不静默跳过 |
+| tracked 输入或 Bundle 输入为 symlink | 非零退出，不跟随链接读取工作区外内容 |
+| `web/dist` 不存在 | 静态报告成功，`web_bundle.available=false` |
+| 相同 tracked 文件和相同可选 Bundle 输入重复运行 | JSON 字节完全一致 |
+| helper、edge、LOC 或 SKIP 数量变化 | 报告新事实，不作为当前命令的阻断阈值 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：重构前后保存两份确定性 JSON，用匹配位置和口径解释差异，并把运行时性能、CI 时长另作 observation。
+- Base：没有 `web/dist` 时仍生成完整源码基线，明确 Bundle 不可用。
+- Bad：递归扫描整个工作区、把未跟踪文件算入结果、用陈旧 `web/dist` 证明当前产物，或因热点数增长让报告命令失败。
+
+### 6. Tests Required
+
+- `python3 -m unittest discover -s deploy -p 'architecture_quality_baseline_test.py'` 必须覆盖分类、热点边界、语法掩码、Domain edge、helper 位置、确定性、symlink/UTF-8 拒绝和原子输出。
+- 两个独立临时输出使用 `cmp` 做字节级比较；保存到任务 research 的 JSON 必须与其中一份一致。
+- 运行 `make architecture-quality-baseline` 和 `git diff --check`；工具测试当前不属于根 `make test` 的隐式依赖，调用方不能把 `make test` 绿灯当作该工具已验证。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 手工运行几条 rg/wc 后直接比较总数，或把 helper 同名视为可安全复用。
+Correct: 使用同一确定性报告比较路径、位置和 edge；再逐项审查业务语义，决定是否抽取共享边界。
+```
+
 ## M5-05 Knowledge Quality Gate
 
 - `RelationAssessment` 与 `RelationType` 必须为不同类型；NEW/LOW_CONFIDENCE 不得产生 Relation 行。
@@ -650,4 +700,58 @@ Correct: 先证明 `00060` 与 Repository SQL 一致、Composition 注入真实 
 
 Wrong: 在共享 ChatModel 外包一层 Memory，或 recovery 时对同一 attempt 重新执行 effective query。
 Correct: 只由 Conversation RAG executor 显式 claim snapshot；唯一 claimant 加载一次并让 PLAN/INITIAL/REPAIR/REDUCED/REVIEW 复用同一输入。
+```
+
+## Scenario: Health Issue 有界历史
+
+### 1. Scope / Trigger
+
+- 修改 Health Issue 详情、observation/evidence/decision 历史、cursor、HTTP/OpenAPI wire 或 Web 历史视图时应用本门禁。
+- 目标是让单请求成本只与页大小相关；禁止恢复全历史读取，或让兼容详情字段被前端解释为完整审计历史。
+
+### 2. Signatures
+
+- 详情：`GET /api/v1/health/issues/{issue_id}?workspace_id=...`，两类历史首屏固定最多 25。
+- 历史：`GET .../{issue_id}/observations|decisions?workspace_id&limit&cursor`，默认 25、最大 100。
+- Cursor schema：`health-issue-history-cursor/v1`，绑定 Workspace、Issue、history kind、limit 和 `(timestamp,id)` 位置。
+
+### 3. Contracts
+
+- `latest_observation` required 且非 null，由当前 `issue.fingerprint` 与 `(issue_id,fingerprint)` 唯一约束精确定位；不得按历史时间与随机 UUID 推断。
+- 当前 observation 的 fingerprint、evidence、target/object versions、detector version 和 severity 必须与当前 Issue 对齐；它可以不是 `observations[0]`。
+- Observation 按 `(observed_at DESC,id ASC)`，Decision 按 `(created_at DESC,id ASC)`；同时间戳无重复、无遗漏。
+- SQL 的 `ORDER BY` 必须用表别名限定原生时间/UUID 列，避免 `SELECT id::text` 输出别名改变排序类型并阻断索引。
+- 深页条件同时包含可进入 `Index Cond` 的 `timestamp <= cursor` 与精确 tie-break；evidence 参数转 UUID 数组，禁止 cast `observation_id` 索引列。
+- Repository 使用 `limit+1` 判断下一页，先裁掉 sentinel，再只为返回 observation 页执行一次 evidence batch hydration。
+- 详情最多 4 条 statement，独立 observation 页最多 3 条，decision 页最多 2 条；总历史增长不能增加 statement 数。
+- Web 详情首屏写入按 Workspace + Issue + kind 隔离的 infinite-query cache；打开历史 Tab 不重复请求首屏，关闭详情清理该 Issue 子树。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 必须结果 |
+|---|---|
+| limit 为 0（省略除外）、负数或大于 100 | stable 400；Repository 不执行 |
+| cursor 被篡改或跨 Workspace/Issue/kind/limit 复用 | stable 400；不泄漏资源存在性 |
+| Issue 不存在或跨 Workspace | 与详情一致的 404 |
+| Repository 返回超量、乱序、错误或缺失 next position | consistency error；不生成 cursor |
+| 当前 fingerprint observation 缺失或其投影与 Issue 漂移 | fail closed；不回退到历史首项 |
+| observation 页含 sentinel | sentinel 不进入响应，也不参与 evidence hydration |
+| 加载更多失败 | 保留已加载页并允许同 cursor 重试；不清空当前证据 |
+
+### 5. Tests Required
+
+- Application/HTTP：0/1/25/100/101 边界、cursor tamper 与全部 binding、同时间戳排序、projection fail-closed、严格 query 和 404/400/503。
+- PostgreSQL：至少 256 条 observation/decision 的真实 fixture、固定 statement 数、无重复/遗漏、当前 fingerprint 精确绑定及 sentinel evidence 排除。
+- `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` 必须证明 observation/decision 深页使用既有时间索引且时间进入 `Index Cond`；evidence 合法代表页证明 UUID 索引可用。
+- OpenAPI/TypeScript：非空当前 observation、详情数组上界、page 上界、cursor/has-more 一致性、Workspace/Issue response binding 和未知字段拒绝。
+- Web：Tab 懒启用、详情首屏缓存复用、显式加载更多、分页失败重试、Issue/Workspace key 隔离与关闭清理。
+
+### 6. Wrong vs Correct
+
+```text
+Wrong: ORDER BY id 在 SELECT id::text 后依赖输出别名，或只写 OR keyset 让深页反复扫描前序历史。
+Correct: ORDER BY observation.id，并增加 observation.observed_at <= cursor 作为索引范围。
+
+Wrong: 把 observations[0] 当作当前 observation，或因当前绑定损坏改读任意最新行。
+Correct: 以 Issue fingerprint 精确读取当前快照；历史排序只负责审计浏览，绑定损坏 fail closed。
 ```
