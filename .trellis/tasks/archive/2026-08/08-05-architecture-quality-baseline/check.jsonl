@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查统计、测试和交付证据完整性"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"检查重复指标没有被误当成业务抽象结论"}
+{"file":".trellis/tasks/08-05-architecture-quality-optimization/research/audit-baseline.md","reason":"复核工具输出与人工基线的一致性"}
+{"file":".trellis/tasks/archive/2026-08/08-05-architecture-quality-baseline/research/current-baseline-evidence.md","reason":"复核路径、精确统计口径、依赖和只读约束"}
