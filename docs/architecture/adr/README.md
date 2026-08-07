@@ -20,3 +20,4 @@
 | [0016](0016-capacity-performance-baseline.md) | 确定性容量数据集与可审计性能门禁 | accepted |
 | [0017](0017-exact-workspace-root-grant.md) | Host Controller 与精确 Workspace Root Grant | accepted |
 | [0018](0018-workspace-root-identity.md) | Workspace Root 与 Workspace 身份边界 | accepted |
+| [0019](0019-layered-eino-adoption.md) | Eino 分层采用、Chat/Callback 与 Structured Output 短 Graph 灰度 | accepted |

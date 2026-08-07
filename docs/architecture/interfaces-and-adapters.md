@@ -31,7 +31,8 @@
 
 Adapter：
 
-- 正式实现是直接 OpenAI-Compatible HTTP Adapter；Ollama 只通过 OpenAI-Compatible endpoint 接入。
+- 正式实现包括 direct HTTP 与 Eino-backed 两个 OpenAI-Compatible Adapter；`ZHIXU_CHAT_IMPLEMENTATION=direct|eino`
+  只控制内部实现，默认 `direct`，Ollama 仍只通过 OpenAI-Compatible endpoint 接入。
 - Deterministic Fake 只用于单元、Contract 和 E2E，不是生产 fallback。
 
 约束：
@@ -74,10 +75,12 @@ Adapter：
 
 ### Agent Framework Boundary
 
-M2 PoC 已决定主模块不正式采用 Eino；M6-02 使用项目自有 Interface 与 Application 直接编排：
+主模块已在项目 `ChatModel` Port 后加入 Eino Chat Adapter，并在 `StructuredRunner` 的项目 scheduler Port 后加入固定三阶段 Eino 短 Graph；M6-02 的完整 RAG、领域规则与持久工作流仍由项目编排：
 
 - 对外只暴露本文件定义的 ChatModel、EmbeddingModel、Reranker、EvidenceEligibility 和 ToolExecutor 等稳定 Interface。
 - Provider Message、Tool Schema、回调和错误类型不得进入领域模块；未来替换 Provider 只改 Adapter/Composition Root。
+- Eino Graph 类型只位于 `internal/agent/adapter/eino`；Graph 节点只能推进项目 `StructuredPhaseRun`，不得直接
+  调用 Provider、持久化 state、自动 retry 或执行副作用。
 - Workflow Definition、Run、Node Run、Node Attempt、租约、重试、Human Task 和补偿仍以 PostgreSQL/River 与领域状态机为事实源；Model Run/Call 是模型流水线的专用事实源，两者不能互相替代。
 - Model Run 保存 pipeline 的 generation/retrieval 基线；Recording Chat Adapter 必须让每条 Model Call 在 Provider
   前冻结实际 Model/Profile/Prompt/Schema 与 max output tokens。REVIEW 可使用独立受信 Catalog，但不能只留下
@@ -85,7 +88,7 @@ M2 PoC 已决定主模块不正式采用 Eino；M6-02 使用项目自有 Interfa
 - Proposal、Approval、Write Authorization 和 Tool Permission 必须由领域/Application Service 判定，不委托给模型输出。
 - M4-C 的 `ApprovalDispatcher` 是独立跨 Schema 端口：Application 在数据库事务外完成 Target/Git 安全门，PostgreSQL Adapter 在单一 pgx transaction 内锁定 Proposal→Revision→Approval，并复用 Workflow `StartTx` 原子创建/重放 Definition、Run、Node、Outbox 和 River Job。Bootstrap Executor 只依赖 exact Execution lookup、Authorization Issue、Atomic Begin 与现有 Safe Writeback Node，不依赖 HTTP 或 River 类型。
 
-历史 PoC 与采用门禁见 [ADR-0013](adr/0013-eino-adoption-gate.md)；它不再表示 Eino 是 M6-02 候选实现。
+历史 PoC 与继续有效的不可替换边界见 [ADR-0013](adr/0013-eino-adoption-gate.md)；当前分层采用、灰度和回滚决策见 [ADR-0019](adr/0019-layered-eino-adoption.md)。
 
 ## 4. Parser Interface
 
@@ -347,10 +350,11 @@ Adapter 必须映射原始 SDK/命令/数据库错误，不能把外部错误类
 
 | Seam | 正式 Adapter | 测试 Adapter | 第二实现触发条件 |
 |---|---|---|---|
-| ChatModel | 直接 OpenAI-Compatible HTTP（Ollama 走兼容 endpoint） | Deterministic Fake | 第二厂商提供已验证的兼容协议 |
+| ChatModel | direct HTTP / Eino-backed OpenAI-Compatible（Ollama 走兼容 endpoint） | Deterministic Fake | 新 Provider 或 SDK 升级通过同一合同与真实 smoke |
 | Embedding | OpenAI-Compatible / Ollama direct HTTP | Fake | 第二厂商或本地协议 |
 | Reranker | 未配置，待批准真实协议 | Fake | 选定真实 Provider 并通过 Contract Test |
-| Agent 编排 | 项目自有 Application 直接编排 | Deterministic Fake | 架构决策显式变更并重新通过门禁 |
+| Structured phase scheduler | direct / Eino fixed short Graph | Deterministic scheduler | 新 Graph 拓扑必须另行决策并通过消费者等价门禁 |
+| Agent/RAG 编排 | 项目自有 Application | Deterministic Fake | 完整 RAG Graph 必须另行决策并重新通过持久化/领域门禁 |
 | Parser | Markdown/PDF/HTML | Fixture Fake | 新格式 |
 | Workspace | Local FS | Memory FS | 远程 Workspace |
 | Git | CLI | Fake | 无明确需求不增加 |

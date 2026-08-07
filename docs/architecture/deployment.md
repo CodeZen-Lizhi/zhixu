@@ -212,14 +212,20 @@ Worker 运行参数：
 | `ZHIXU_EMBEDDING_TIMEOUT` | `30s` | 单次 Embedding HTTP 超时，最大 `5m` |
 | `ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES` | `67108864` | 响应读取上限，最大 `134217728` bytes |
 | `ZHIXU_CHAT_PROVIDER` | `disabled` | `disabled/openai-compatible`；禁用时旧 API/Worker 正常，Agent capability 明确 unavailable |
+| `ZHIXU_CHAT_IMPLEMENTATION` | `direct` | `direct/eino`；进程级内部实现选择，不进入 Provider/Model 身份；真实 Provider smoke 通过前保持 `direct` |
 | `ZHIXU_CHAT_BASE_URL` | 无 | 启用时必填；远程仅 HTTPS，loopback OpenAI-compatible endpoint 可用 HTTP，禁止 userinfo/query/fragment |
 | `ZHIXU_CHAT_API_KEY` | 无 | OpenAI-compatible Credential；本地兼容端点可为空，不写日志、Model Run 或配置摘要 |
 | `ZHIXU_CHAT_MODEL` | 无 | Provider 请求使用的 canonical 模型 ID |
 | `ZHIXU_CHAT_MODEL_VERSION` | 无 | Provider 响应必须精确回显的实际模型版本，不允许运行中漂移 |
-| `ZHIXU_CHAT_ADAPTER_VERSION` | `v1` | 直接 HTTP Adapter 的稳定版本 |
+| `ZHIXU_CHAT_ADAPTER_VERSION` | `v1` | OpenAI-Compatible Chat 契约版本，不作为 `direct/eino` 灰度开关 |
 | `ZHIXU_CHAT_TIMEOUT` | `30s` | 单次 Chat Provider timeout，最大 `5m`；三阶段仍受 Agent 总预算约束 |
 | `ZHIXU_CHAT_MAX_REQUEST_BYTES` | `4194304` | 单次 Provider 请求上限，最大 `16777216` bytes |
 | `ZHIXU_CHAT_MAX_RESPONSE_BYTES` | `4194304` | 单次 Provider 响应上限，最大 `16777216` bytes |
+| `ZHIXU_STRUCTURED_SCHEDULER_RAG` | `direct` | RAG Answer StructuredRunner 的 `direct/eino` 内部调度选择 |
+| `ZHIXU_STRUCTURED_SCHEDULER_RELATION` | `direct` | Relation Assessment 的独立 `direct/eino` 调度选择 |
+| `ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT` | `direct` | Artifact Generation 的独立 `direct/eino` 调度选择 |
+| `ZHIXU_STRUCTURED_SCHEDULER_CAPTURE` | `direct` | Capture Profile 的独立 `direct/eino` 调度选择 |
+| `ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING` | `direct` | Organizing Generation 的独立 `direct/eino` 调度选择 |
 | `ZHIXU_RETRIEVAL_RRF_K` | `60` | RRF v1 的 `k`，必须为正数 |
 | `ZHIXU_RETRIEVAL_RRF_LEXICAL_CANDIDATE_LIMIT` | `200` | Lexical 候选上限，范围 `1..500` |
 | `ZHIXU_RETRIEVAL_RRF_VECTOR_CANDIDATE_LIMIT` | `200` | Vector 候选上限，范围 `1..500` |
@@ -248,6 +254,10 @@ Chat 配置同样由 Configured Factory 唯一解释。`disabled` 不读取 Endp
 Compose 的共享 Chat 环境块同时注入 API 与 Worker。API 用它决定 Question dispatch capability，Worker 用它
 构造真实 RAG Model/Executor；两端 Provider/Model/Version 必须一致。`ZHIXU_CHAT_PROVIDER=disabled` 是默认的
 明确关闭状态，此时 `/chat` 可查看/创建 Conversation，但 Question 提交不可用且不得假成功。
+
+Structured scheduler selector 只注入 Worker，并由 Composition Root 为五个消费者分别编译可选 Eino 短 Graph；
+API、modelctl、managed model revision 和持久 Model/Workflow 身份不消费这些字段。任一 selector 可单独切回
+`direct`，不需要数据库迁移；未知值在 Config 和 Compose contract 中 fail closed。
 
 Tool Runtime 同样由 API/Worker 共享配置解释：API 只验证/冻结 Contract 和可启动 Definition，Worker 才注入真实 Executor。
 `disabled` 不构造普通 Tool ExecutionService或可启动 Tool Definition，Tool capability 明确 unavailable但进程仍可 ready；Safe Writeback trusted audit 仍必须可用。`enabled` 时缺 Contract、Executor、
@@ -369,11 +379,16 @@ ZHIXU_TEST_DATABASE_URL='postgres://...' make rag-integration
 make compose-rag-smoke
 ```
 
+`rag-integration` 在独立临时数据库中分别执行 direct/Eino Answer scheduler，并对已完成 Node 注入下一次 River
+transport attempt；两种模式都必须保持三次 Provider/Model Call、一个成功 Attempt 和不变的 Answer/Knowledge
+终态。该测试使用确定性 request-aware model，不替代真实 Provider smoke。
+
 `compose-rag-smoke` 叠加 `deploy/compose.rag-smoke.yml`，随机创建 Compose project、宿主端口、PostgreSQL
 密码和 Chat Bearer canary。模型 fixture 与 Worker 共用 network namespace，使生产 Adapter 仍访问 loopback；
-fixture 只接受匹配 Bearer、已知 strict Schema 和有界 JSON。脚本经公共 Workspace/Scan/Ingestion/Approval/
-Reindex 与 Conversation/Question/Answer/SSE/Feedback API 运行真实 Worker，只用测试 harness 补目前没有公开命令的
-Knowledge Eligibility 事实；不会直接 seed Conversation、Answer 或 Workflow。退出时必须删除容器、volume 和临时目录。
+fixture 只接受匹配 Bearer、已知 strict Schema 和有界 JSON。脚本先经真实 Host Controller Coordinator/ComposeDriver
+建立 `source == target` 的一次性精确 Workspace Grant，再经公共 Scan/Ingestion/Approval/Reindex 与
+Conversation/Question/Answer/SSE/Feedback API 运行真实 Worker；测试 harness 只补目前没有公开命令的 Knowledge
+Eligibility 事实，不直接 seed Conversation、Answer 或 Workflow。退出时必须删除容器、volume 和临时目录。
 
 该门禁证明 M6-04 容器闭环，不单独证明正式 Provider 质量、M10-02 认证安全负测、50 万容量、备份恢复或
 最终发布包；这些必须由各自 M10/M11 门禁给出独立证据。

@@ -65,17 +65,17 @@ M6-03 使用 BSD-3-Clause 的 `golang.org/x/net/html v0.56.0` 解析受控 Web T
 
 | 能力 | 选择 | 采用约束 |
 |---|---|---|
-| Chat | OpenAI-Compatible HTTP Adapter | 默认可替换实现 |
+| Chat | OpenAI-Compatible ChatModel Port：direct HTTP / Eino OpenAI Adapter | `direct` 默认，`eino` 显式灰度；两者保持项目合同等价 |
 | Local Model | Ollama OpenAI-Compatible Endpoint | 通过统一 ChatModel Interface 接入，不维护第二套原生 Chat 协议 |
 | Embedding | OpenAI-Compatible/Local Adapter | 批量调用并记录模型版本 |
 | Rerank | HTTP Adapter，可禁用 | 失败必须显式标记 degraded |
-| Structured Output | JSON Schema + 领域校验 | 框架输出仍需领域校验 |
+| Structured Output | 项目 JSON Schema/领域校验 + direct/Eino phase scheduler | 五消费者独立灰度；框架只调度，不拥有 decoder、预算或审计 |
 | Prompt | 版本化模板 | 运行记录保存实际版本 |
-| Agent 编排 | 项目自有 Application | 直接编排稳定 Interface，不采用 Eino 主模块依赖 |
+| Agent 编排 | 项目自有 Application + 有界 Eino 短 Graph | Eino 只实现 StructuredRunner 三阶段调度，不接管完整 RAG、持久工作流或领域编排 |
 
-Eino 不是当前依赖。[ADR-0013](adr/0013-eino-adoption-gate.md) 定义的采用门禁已由 M2 执行，因关键项未全部通过，主模块正式选择项目自有 Application + 直接 OpenAI-Compatible Adapter。
+主模块正式锁定 Eino core `v0.9.13` 与 OpenAI extension `v0.1.13`，采用范围为 `internal/platform/models` 内的 OpenAI-Compatible Chat Adapter、调用级脱敏 Callback telemetry，以及 `internal/agent/adapter/eino` 内的 Structured Output 三阶段短 Graph。Chat 和五个 scheduler selector 均只选择内部实现，不改变 Provider/Model/Adapter 或持久运行身份，默认保持 `direct`，详见 [ADR-0019](adr/0019-layered-eino-adoption.md)。
 
-M2 已在独立 `poc/eino` module 中验证 Eino `v0.9.12` 的 Chat Graph、ToolsNode、Callback 以及 OpenAI 扩展 `v0.1.13` 的编译/配置边界，但 Streaming、Structured Output、Embedding/Retriever/Rerank、River Node 和真实 Provider Smoke 门禁尚未全部通过。因此当前结论为“不正式采用”，主模块继续保留直接 OpenAI-Compatible Adapter 路线。详见 [`poc/eino/report.md`](../../poc/eino/report.md)。
+独立 `poc/eino` module 继续保存 M2 的 Chat Graph、ToolsNode、Callback 等历史验证样例。生产短 Graph 只覆盖 `INITIAL/REPAIR/REDUCED`；Streaming、完整 RAG Graph、Embedding/Retriever/Rerank、ToolsNode、Checkpoint、River Node 和真实 Provider smoke 尚未通过各自门禁，因此不进入当前生产路径。历史门禁见 [ADR-0013](adr/0013-eino-adoption-gate.md) 与 [`poc/eino/report.md`](../../poc/eino/report.md)。
 
 领域模型、Workflow 持久化与状态机、Proposal/Approval、Tool Permission 和 Write Authorization 不得依赖 Eino 类型或运行时。核心同样不依赖 LangChain；第三方 AI Framework 只能位于 Agent/Application 编排边缘或 Adapter/Infrastructure，且必须通过项目 Interface 隔离。
 
@@ -137,4 +137,4 @@ Graph 展示实现不进入领域模型。当前 `web/package.json` 未引入 Cy
 - Graph 在 500,000 Relation 正式资源预算下的有界渲染与 FPS/交互；若当前 SVG/CSS + 列表方案不达标，
   再验证 Cytoscape.js/Web Worker 候选，不预设 5,000 节点全量渲染。
 - Monaco 大 Diff。
-- Eino Chat、Embedding、Streaming、Structured Output、Tool Calling、Callback/Trace、取消、限流、错误映射和 River Node 集成 PoC；未通过不得成为正式依赖。
+- Eino Chat Adapter、调用级 Callback/Trace 与 Structured Output 三阶段短 Graph 已按 ADR-0019 锁入主模块，所有实现 selector 默认 `direct`；Embedding、Streaming、完整 RAG Graph、Tool Calling、Checkpoint 和 River Node 仍需各自门禁，不能从现有离线门禁推断为已采用。

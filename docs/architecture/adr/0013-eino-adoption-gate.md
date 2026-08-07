@@ -4,6 +4,10 @@ status: accepted
 
 # Eino 采用门禁与 M2 不采用结论
 
+> `M2 Outcome` 中“主模块不正式采用 Eino”的结论已由
+> [ADR-0019](0019-layered-eino-adoption.md) 部分取代；本 ADR 关于 Domain、持久 Workflow、权限、审批、
+> Tool 执行和安全写回的边界继续有效。
+
 项目需要验证 Eino 是否能降低 Chat、Embedding、Streaming、Structured Output、Tool Calling 和可观测回调的集成成本，但不能让未经验证的框架成为领域或持久化执行模型的事实源。
 
 ## Decision
@@ -31,7 +35,7 @@ OpenAI-Compatible HTTP Adapter；Ollama 仅通过兼容 endpoint 接入。重新
 ## Consequences
 
 - M2 必须先提供可重复 PoC 报告和 Contract Test，当前 ADR 不锁定任何未经验证版本。
-- Composition Root 当前只构造直接 OpenAI-Compatible Chat Adapter；测试使用 Deterministic Fake。
+- M2 时 Composition Root 只构造直接 OpenAI-Compatible Chat Adapter；ADR-0019 后可显式选择 Eino-backed Adapter，默认仍为 direct。
 - 需要维护少量项目自有 Model、Retrieval、Tool 和 Workflow Interface。
 - 框架升级或回退不需要迁移领域对象、Proposal 或 Workflow 持久化状态。
 

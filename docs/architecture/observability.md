@@ -146,11 +146,16 @@ M4-D 的生产发射语义固定如下：
 
 ### Model
 
-- calls。
-- tokens。
-- latency。
-- errors。
+- `model.chat.result_total{component,phase,result,error_code?}`。
+- `model.chat.duration_ms{component,phase,result,error_code?}`。
+- tokens 继续由项目 Model Call 事实拥有，不从 callback 重复生成持久事实。
 - schema_repair。
+
+Eino Chat callback 由每次 `Chat` 通过调用 Context 的 `callbacks.InitCallbacks` 注入独立 handler，
+不使用进程级全局可变 handler。它只把稳定 component、Model Call phase、result/error code、耗时和现有
+correlation 写入 Trace/Metrics，不读取 callback input/output/raw error，不记录 API Key、Authorization、
+Cookie、Prompt、请求/响应正文或 Endpoint，也不替代 `RecordingChatModel`、Model Run/Call、Audit 或
+Workflow Progress。Telemetry 失败不改变 Chat 结果。
 
 ### Data
 

@@ -319,7 +319,7 @@ M6-04 已完成 Conversation、RAG HTTP API、持久阶段/SSE、Feedback 和真
 
 路由配置版本化；切换需评测。
 
-主模块使用项目自有 `ChatModel` Interface 和直接 OpenAI-Compatible HTTP Adapter；Ollama 仅通过其 OpenAI-Compatible endpoint 接入。本期不采用 Eino，也不维护 native Ollama 第二套 Chat 协议。同一 Node Attempt 内不得静默切换 Provider 或 Model；`provider=disabled` 表示 capability unavailable，Deterministic Fake 仅用于测试。
+主模块使用项目自有 `ChatModel` Interface，并提供 direct HTTP 与 Eino-backed 两个 OpenAI-Compatible Adapter；`ZHIXU_CHAT_IMPLEMENTATION` 只在 Composition Root 选择实现，默认 `direct`。RAG Answer 使用的 `StructuredRunner` 可由 `ZHIXU_STRUCTURED_SCHEDULER_RAG=direct|eino` 独立选择内部三阶段调度，但 Eino 不接管 Query Plan、Retrieval/Eligibility、Citation/Faithfulness、terminal proposal、Model Run/Call 或 River/PostgreSQL 工作流。Ollama 仍仅通过其 OpenAI-Compatible endpoint 接入，不维护 native Ollama 第二套 Chat 协议。同一 Node Attempt 内不得静默切换 Provider 或 Model；`provider=disabled` 表示 capability unavailable，Deterministic Fake 仅用于测试。
 
 ## 18. 降级
 

@@ -230,8 +230,14 @@ M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一�
 - Repair Budget：精确断言一次 Structured Run 只有 `INITIAL -> REPAIR -> REDUCED` 三次响应上限；REPAIR 仅接收
   脱敏错误摘要，REDUCED 使用任务最小安全 Schema。耗尽返回 `VALIDATION_EXHAUSTED`，不得进入 regex、Markdown
   fence、默认对象、自由文本或 Fake fallback。
-- Chat Contract：正式 OpenAI-Compatible httptest 覆盖成功、429/502/503/504、401/403/其他 4xx、timeout/cancel、
-  redirect、Content-Type、超大/非法响应、模型与 usage 回显、版本快照和 Secret/error-body canary；Adapter 本身
+- Structured Scheduler：direct 与 Eino 短 Graph 必须对照 INITIAL/REPAIR/REDUCED/exhaustion、accepted bytes、
+  RuntimeRefs、usage、请求/响应/token 预算、Provider error、取消、deadline 和错误 kind/code/retryable；同一个已编译
+  scheduler 必须通过并发 race。五个消费者必须用计数包装器委托真实 Eino scheduler，断言 `Schedule` 恰好执行一次，
+  并运行既有 Relation、RAG、Artifact、Capture、Organizing 回归；仅保存 scheduler 指针不算覆盖。Model Call 的
+  call_no/phase/status/bytes/usage 不得漂移。
+- Chat Contract：direct 与 Eino-backed OpenAI-Compatible Adapter 使用共享 fixture 对照 request、`ChatContract`、
+  `ChatResponse` 与 usage，并覆盖 429/502/503/504、401/403/其他 4xx、timeout/cancel、redirect、Content-Type、
+  超大/非法响应、模型与 usage 回显、动态 Schema 并发隔离、版本快照和 Secret/error-body canary；Adapter 本身
   调用次数始终为一次，不隐藏 retry 或 Provider/Model 切换。Ollama 只测试 OpenAI-Compatible endpoint。
 - Eligibility：真实 PostgreSQL 对最多 500 个 Provenance 做一次参数化批量查询，覆盖 Confirmed Claim/Relation、
   Disputed+Conflict、Suggested/Rejected/Deprecated、无正式绑定、多 Provenance、跨 Workspace 和稳定排序；SQL 调用
@@ -279,10 +285,13 @@ M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一�
 - Frontend：严格 API/SSE decoder、Infinite Query、latest Turn/current_stage 恢复、有界轮询、四态 Answer、
   Clarification/Conflict/Citation/summary/topic/follow-up/Feedback，以及桌面/移动无横向溢出和焦点恢复。
 - `ZHIXU_TEST_DATABASE_URL=... make rag-integration` 走公共 HTTP→River→Retrieval→Knowledge→Model→Answer→
-  SSE→Feedback；不能直接 seed Conversation/Question/Answer/Workflow 或绕过 Worker。
+  SSE→Feedback；不能直接 seed Conversation/Question/Answer/Workflow 或绕过 Worker。该门禁分别执行 direct/Eino
+  Answer scheduler，并模拟已完成 Node 的下一 River transport attempt；必须保持三条 PLAN/INITIAL/REVIEW Model Call、
+  单一成功 Attempt、同一 Answer/Knowledge 终态且不重复 Provider。
 - `make compose-rag-smoke` 使用唯一 Compose project、随机端口/数据库密码/Chat canary、disposable Git Workspace
-  和 volume；经公开 Scan/Ingestion/Approval/Reindex 后只补无公开 API 的正式 Knowledge 资格，再执行会话闭环与
-  exact replay，结束 trap 必须清理。request-aware OpenAI-compatible fixture 按 Schema/请求生成，不按调用序号返回。
+  和 volume；先经真实 Host Controller Coordinator/ComposeDriver 建立 exact-root Grant，再经公开
+  Scan/Ingestion/Approval/Reindex，只补无公开 API 的正式 Knowledge 资格，然后执行会话闭环与 exact replay，结束
+  trap 必须清理。request-aware OpenAI-compatible fixture 按 Schema/请求生成，不按调用序号返回。
 - 上述确定性 fixture 证明产品 seam 和失败安全，不是现实模型质量证据；真实 Provider Gold Set、阈值和全产品
   Playwright E2E 仍归 M11。
 

@@ -2,6 +2,10 @@
 
 本目录是 Go API、Worker、领域模块、数据库、Adapter、Workflow 和可观测性实现的规范入口。M1 已建立可运行骨架；后续业务模块必须继续遵守这里的边界，并以真实代码和任务验收结果为准。
 
+Eino 分层迁移阶段 0/1 已交付可显式灰度的 OpenAI-Compatible Chat Adapter，阶段 2 已接入调用级脱敏
+Callback/Trace telemetry，阶段 3 已增加受 Application Port 约束的三阶段短 Graph；Chat 与五个 scheduler
+selector 均默认 `direct`，具体契约见 `eino-chat-adapter.md` 和 `eino-structured-scheduler.md`。
+
 M7-01 已补充 Graph canonical read projection、公共 HTTP/真实进程 smoke、容量 benchmark 与跨层质量门禁；
 首版只读 Topic/Claim，500,000 Relation/FPS 与正式认证仍归 M10。
 M7-02 已补充 Semantic Link Candidate、typed Relation Proposal、Approval 后 Knowledge apply、durable Topic scan、
@@ -82,6 +86,8 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
 | [宿主机 Workspace 精确授权契约](./workspace-root-grant.md) | Host Controller、匿名 runtime discovery、不可变 Root identity、单 Grant 状态机、exact bind 与浏览器运行边界 | 普通业务路由与 Controller Session 解耦；Root/Docker 控制仍受保护，运行时只允许 API/Worker 精确 source=target 授权 |
 | [模型设置与开发运行时契约](./model-settings-runtime.md) | desired/active/applied revision、AEAD、冻结 Model Runtime、受控 restart 与 Docker 生命周期 | managed Settings 与开发一键启动的实现和真实验收门禁 |
+| [Eino Chat Adapter 契约](./eino-chat-adapter.md) | direct/Eino 选择、wire/响应等价、安全传输、调用级 Callback telemetry、错误矩阵与升级门禁 | 阶段 0/1 离线门禁与阶段 2 Callback 聚焦门禁已通过；真实 Provider smoke 待凭据，默认保持 direct |
+| [Eino Structured Scheduler 契约](./eino-structured-scheduler.md) | Application phase-scheduler Port、固定短 Graph、五消费者独立 selector、错误/预算/审计与回滚门禁 | 阶段 3 离线等价、并发、注入和消费者回归门禁已通过；五个 selector 默认 direct |
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker/Web 门禁 | M7-04 与遗留收口已验证；下游 owner executor、Document/Eval impact 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
 | [快速记录与画像契约](./capture-profile-contract.md) | Capture、Source/Version、Outbox、独立阶段、Profile Revision/Evidence 与降级恢复 | TEXT/URL/FILE/IMAGE、Profile v1、真实 PostgreSQL 与桌面/移动 Capture 链已验证 |
@@ -108,12 +114,19 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
    不把附件、`EVALUATION_JSON`、`AUDIT_JSON` 或 AC-33 全量完成推入 M9-03。
 7. 修改 Docker Workspace 路径、Controller、Registry/Active/runtime grant 或启动器时，先阅读
    [`workspace-root-grant.md`](./workspace-root-grant.md)；禁止恢复父目录映射、`/workspace` target 或 Docker socket。
+8. 修改 Chat Adapter、实现选择器、Eino/OpenAI extension 或模型 vendor 时，先阅读
+   [`eino-chat-adapter.md`](./eino-chat-adapter.md)，并保持 direct/Eino 合同、错误和安全边界等价。
+9. 修改 StructuredRunner、Eino Graph、五个消费者 scheduler 或对应配置时，先阅读
+   [`eino-structured-scheduler.md`](./eino-structured-scheduler.md)；Graph 不得获得预算、持久化或副作用所有权。
 
 ## 实现边界
 
 - API 与 Worker 可独立运行，但共享领域 Interface 和 Composition Root。
+- API、Worker 与 model settings 的 Chat capability 必须由同一 Configured Chat Factory 构造；
+  `direct|eino` 只选择内部实现，不得改变 Provider/Model/Adapter 身份。
 - API 与 Worker 的 Embedding Adapter 必须由同一 Configured Embedder Factory 构造，禁止两套配置转换。
-- 领域层不依赖 HTTP、pgx/sqlc、River、模型 SDK、文件系统实现或具体 Git 命令。
+- Eino Chat/Provider SDK 类型只允许位于 `internal/platform/models`，Eino Graph 类型只允许位于
+  `internal/agent/adapter/eino`；领域层不依赖 HTTP、pgx/sqlc、River、模型 SDK、文件系统实现或具体 Git 命令。
 - 正式知识唯一写入路径是 Proposal → Evidence Validation → Approval → Version Check → Atomic Write → Git Commit → Reindex → Regression Validation。
 - 长任务进入持久化 Workflow；River 只负责投递/领取可运行节点，不取代 Workflow 领域状态。
 - 跨文件/Git/DB 的一致性通过有序 Saga、Outbox、幂等和补偿处理；失败必须可解释、可审计、可恢复。
@@ -147,13 +160,18 @@ git diff --check
 - Worker 与数据库边界：[`cmd/worker`](../../../cmd/worker)、[`internal/platform/postgres`](../../../internal/platform/postgres)、[`migrations`](../../../migrations)。
 - 配置、日志与部署：[`internal/platform/config`](../../../internal/platform/config)、[`internal/platform/observability`](../../../internal/platform/observability)、[`deploy`](../../../deploy)、[`Makefile`](../../../Makefile)。
 - M1 Canonical Gate：`make test`、`make openapi-check`、`make compose-check`、`make compose-up`。
-- M2 Eino 隔离门禁：[`poc/eino`](../../../poc/eino)，当前门禁结论为不正式采用，主模块继续使用直接 Adapter 路线。
+- M2 Eino 历史隔离门禁保存在 [`poc/eino`](../../../poc/eino)；ADR-0019 已授权主模块 Chat Adapter、
+  调用级 Callback 和 Structured Output 短 Graph 分层采用。Chat 与五个 scheduler selector 默认 direct；
+  Embedding/Retriever/Rerank、完整 RAG Graph、Tool、Streaming 和 River Node 继续按独立门禁 deferred。
 - M6-02 Agent 门禁：完整 Citation tuple、Knowledge Eligibility/FormalClaimReader、严格 Schema Repair、Model Run/Call
   与 REVIEW 持久化必须按 [`database-guidelines.md`](./database-guidelines.md) 的专项契约验证；Active Index 不等于
   Approved Evidence，Agent 不得直接查询 Knowledge SQL。
 
 ## 当前明确待验证项
 
-- License 和 50 万 Chunk ANN/P95 必须在对应后续任务中通过仓库文件和测试锁定；M2 已明确
-  不采用 Eino 主模块依赖，M6-D 的 exact vector scan/EXPLAIN 只作为正确性基线。
+- License 和 50 万 Chunk ANN/P95 必须在对应后续任务中通过仓库文件和测试锁定；M6-D 的 exact vector
+  scan/EXPLAIN 只作为正确性基线。
+- 生产 Eino Chat Adapter 的真实 Provider smoke 尚待凭据；完成前 Chat `direct` 必须保持默认。阶段 3 只通过了
+  `StructuredRunner` 三阶段无状态短 Graph 门禁；Embedding/Retriever/Rerank、完整 RAG Graph、Tool、Streaming、
+  Checkpoint 和 River Node 不能从 Chat/Callback/短 Graph 的离线门禁推断为已采用。
 - 本规范不提供伪造的实现代码、版本号、数据库字段长度或不存在的测试结果；M1 完成后应将真实文件链接补入各专题规范。

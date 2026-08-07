@@ -2,9 +2,13 @@
 
 日期：2026-07-16
 
+> 本报告记录 ADR-0013/M2 的历史门禁时点。ADR-0019 已在不改变 Domain、Workflow、Proposal/Approval
+> 边界的前提下，授权并实现主模块 Eino Chat Adapter；当前生产默认仍为 `direct`，真实 Provider Smoke
+> 仍待完成。下文中的“不正式采用”“不进入主 `go.mod`”“主模块无 Eino”仅描述 2026-07-16 时点。
+
 ## 结论
 
-当前结论为**不正式采用 Eino**。
+本报告时点的结论为**不正式采用 Eino**。
 
 Eino `v0.9.12` 的 Chat Graph、ToolsNode 和 Callback 能在独立 module 中工作，OpenAI 扩展 `v0.1.13` 也能编译并完成配置校验；但 Streaming、Structured Output、Embedding/Retriever/Rerank 和 River Node 集成尚未全部经过真实 Eino 组件边界，真实 OpenAI-Compatible Provider Smoke 也因缺少显式凭据而未运行。
 

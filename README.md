@@ -278,7 +278,7 @@ an isolated temporary database so a running Compose Worker cannot own its River
 maintenance leader. Do not treat a successful
 image build or config render as evidence that crash recovery passed.
 
-The isolated Eino adoption gate is available under `poc/eino` and is included in `make test`. The current decision is not to adopt Eino formally because several real integration gates and the provider smoke remain incomplete; see `poc/eino/report.md`.
+The isolated Eino adoption gate remains under `poc/eino` and is included in `make test`. The root module now includes an Eino-backed OpenAI-Compatible Chat adapter behind `ZHIXU_CHAT_IMPLEMENTATION=eino` and an optional three-phase Structured Output scheduler with independent Worker selectors for RAG, Relation, Artifact, Capture, and Organizing. All selectors default to `direct`; Eino does not own domain validation, durable workflow, permissions, model-call facts, or writeback boundaries. See [ADR-0019](docs/architecture/adr/0019-layered-eino-adoption.md).
 
 ## Documentation
 
