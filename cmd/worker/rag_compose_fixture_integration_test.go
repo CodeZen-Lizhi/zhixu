@@ -210,7 +210,7 @@ func seedRAGConversationKnowledge(t *testing.T, ctx context.Context, pool *pgxpo
 		sql  string
 		args []any
 	}{
-		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'rag-conversation-smoke',$2,$2,$3,'test',1,$3,$3)`, []any{string(ragSmokeWorkspaceID), root, at}},
+		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'rag-conversation-smoke',$2,$2,$3,'active',1,$3,$3)`, []any{string(ragSmokeWorkspaceID), root, at}},
 		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at) VALUES($1,$2,$3,$4,$5,$6)`, []any{string(ragSmokeArtifactID), string(ragSmokeWorkspaceID), contentHash, int64(len(content)), managedLocation, at}},
 		{`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at) VALUES($1,$2,'text','Recovery','docs/recovery.txt',$3)`, []any{string(ragSmokeSourceID), string(ragSmokeWorkspaceID), at}},
 		{`INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) VALUES($1,$2,$3,$4,$5,$6,'text/plain','docs/recovery.txt','passed',$7)`, []any{string(ragSmokeSourceVersionID), string(ragSmokeSourceID), string(ragSmokeWorkspaceID), string(ragSmokeArtifactID), contentHash, int64(len(content)), at}},
@@ -269,7 +269,7 @@ func seedComposeRAGProvenance(t *testing.T, ctx context.Context, pool *pgxpool.P
 		sql  string
 		args []any
 	}{
-		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'compose-rag-smoke','/tmp/compose-rag-smoke','/tmp/compose-rag-smoke',$2,'test',1,$2,$2)`, []any{string(fixture.WorkspaceID), at}},
+		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'compose-rag-smoke','/tmp/compose-rag-smoke','/tmp/compose-rag-smoke',$2,'active',1,$2,$2)`, []any{string(fixture.WorkspaceID), at}},
 		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at) VALUES('a0000000-0000-4000-8000-000000000002',$1,$2,75,'.knowledge/sources/'||$2,$3)`, []any{string(fixture.WorkspaceID), contentHash, at}},
 		{`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at) VALUES('a0000000-0000-4000-8000-000000000003',$1,'text','rag-smoke.txt','rag-smoke.txt',$2)`, []any{string(fixture.WorkspaceID), at}},
 		{`INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) VALUES($1,'a0000000-0000-4000-8000-000000000003',$2,'a0000000-0000-4000-8000-000000000002',$3,75,'text/plain','rag-smoke.txt','passed',$4)`, []any{string(fixture.SourceVersionID), string(fixture.WorkspaceID), contentHash, at}},

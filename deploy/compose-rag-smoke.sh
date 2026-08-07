@@ -19,6 +19,10 @@ PROJECT_NAME=""
 API_BASE_URL=""
 LAST_RESPONSE_FILE=""
 CANARY_COMPOSE_FILE=""
+RUNTIME_COMPOSE_FILE=""
+GRANT_COMPOSE_FILE=""
+WORKSPACE_ROOT=""
+WORKSPACE_ID=""
 CURRENT_ANSWER_ID=""
 AUTH_ORIGIN=""
 CSRF_TOKEN=""
@@ -29,6 +33,7 @@ log() { printf '[compose-rag-smoke] %s\n' "$1"; }
 compose() {
   local -a compose_files=(-f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" -f "${RAG_COMPOSE_FILE}")
   [[ -z "${CANARY_COMPOSE_FILE}" ]] || compose_files+=(-f "${CANARY_COMPOSE_FILE}")
+  [[ -z "${GRANT_COMPOSE_FILE}" || ! -f "${GRANT_COMPOSE_FILE}" ]] || compose_files+=(-f "${GRANT_COMPOSE_FILE}")
   docker compose --project-name "${PROJECT_NAME}" "${compose_files[@]}" --env-file "${ENV_FILE}" "$@"
 }
 
@@ -63,6 +68,10 @@ cleanup() {
   local cleanup_exit=0
   trap - EXIT HUP INT TERM
   if [[ -n "${PROJECT_NAME}" ]]; then
+    if [[ -n "${GRANT_COMPOSE_FILE}" && -f "${GRANT_COMPOSE_FILE}" ]]; then
+      compose stop proxy app-model-relay worker-model-relay app worker >/dev/null 2>&1 || cleanup_exit=1
+      compose rm --force --stop proxy firewall app-model-relay worker-model-relay app worker >/dev/null 2>&1 || cleanup_exit=1
+    fi
     cleanup_compose_smoke_project_images "${PROJECT_NAME}" || cleanup_exit=$?
   fi
   if [[ -n "${STATE_DIR}" ]]; then
@@ -108,6 +117,7 @@ request_json() {
       args+=(--header "Origin: ${AUTH_ORIGIN}" --header "X-CSRF-Token: ${CSRF_TOKEN}")
     fi
   fi
+  [[ -z "${WORKSPACE_ID}" ]] || args+=(--header "X-Workspace-ID: ${WORKSPACE_ID}")
   [[ -z "${idempotency_key}" ]] || args+=(--header "Idempotency-Key: ${idempotency_key}")
   if [[ -n "${body}" ]]; then
     args+=(--header 'Content-Type: application/json' --data-binary "${body}")
@@ -189,8 +199,38 @@ seed_knowledge_eligibility() {
     fail 'formal Knowledge eligibility fixture failed'
 }
 
+activate_workspace_grant() {
+  local database_url workspace_switch_log workspace_switch_code
+  database_url="postgres://${ZHIXU_POSTGRES_USER}:${ZHIXU_POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/${ZHIXU_POSTGRES_DB}?sslmode=disable"
+  workspace_switch_log="${STATE_DIR}/workspace-switch.log"
+  if ! ZHIXU_COMPOSE_RAG_WORKSPACE_SWITCH=1 \
+    ZHIXU_TEST_DATABASE_URL="${database_url}" \
+    ZHIXU_TEST_COMPOSE_PROJECT="${PROJECT_NAME}" \
+    ZHIXU_TEST_COMPOSE_FILE="${RUNTIME_COMPOSE_FILE}" \
+    ZHIXU_TEST_GRANT_OVERRIDE="${GRANT_COMPOSE_FILE}" \
+    ZHIXU_TEST_COMPOSE_ENV_FILE="${ENV_FILE}" \
+    ZHIXU_TEST_WORKSPACE_ROOT="${WORKSPACE_ROOT}" \
+      go test -tags=integration -count=1 -run '^TestComposeRAGWorkspaceSwitchExternalFixture$' ./cmd/hostcontroller \
+        >"${workspace_switch_log}" 2>&1; then
+    workspace_switch_code="$(python3 - "${workspace_switch_log}" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    matches = re.findall(r"external Workspace runtime failed: ([A-Z0-9_]+)", stream.read())
+print(matches[-1] if matches else "WORKSPACE_SWITCH_FAILED")
+PY
+)"
+    fail "Host Controller Workspace grant activation failed (${workspace_switch_code})"
+  fi
+  WORKSPACE_ID="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" \
+    -c 'SELECT active_workspace_id::text FROM ops.workspace_control_state WHERE singleton=true')"
+  [[ "${WORKSPACE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || \
+    fail 'Host Controller did not publish an Active Workspace identity'
+}
+
 main() {
-  for command in bash curl docker go jq python3; do require_command "${command}"; done
+  for command in bash curl docker git go jq python3; do require_command "${command}"; done
   docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is unavailable'
   [[ "${TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]] || fail 'timeout must be a positive integer'
   [[ "${POLL_INTERVAL_SECONDS}" =~ ^[1-9][0-9]*$ ]] || fail 'poll interval must be a positive integer'
@@ -201,9 +241,10 @@ main() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  local run_id http_port workspace_root target_path evidence_token chat_canary canary_compose_file
+  STATE_DIR="$(cd -- "${STATE_DIR}" && pwd -P)"
+  local run_id http_port target_path evidence_token chat_canary canary_compose_file
   run_id="$(random_hex 6)"; PROJECT_NAME="zhixu-rag-smoke-${run_id}"; http_port="$(allocate_port)"; POSTGRES_PORT="$(allocate_port)"
-  API_BASE_URL="http://127.0.0.1:${http_port}"; AUTH_ORIGIN="${API_BASE_URL}"; workspace_root="${STATE_DIR}/workspace"; target_path='docs/rag-smoke.md'
+  API_BASE_URL="http://127.0.0.1:${http_port}"; AUTH_ORIGIN="${API_BASE_URL}"; WORKSPACE_ROOT="${STATE_DIR}/project"; target_path='docs/rag-smoke.md'
   evidence_token="durable-rag-${run_id}"; chat_canary="chat_${run_id}_$(random_hex 12)"
   canary_compose_file="${STATE_DIR}/compose.canary.yml"
   cat >"${canary_compose_file}" <<YAML
@@ -215,6 +256,11 @@ services:
     environment:
       ZHIXU_RAG_FIXTURE_API_KEY: ${chat_canary}
   app:
+    ports: !override
+      - target: 8080
+        published: "${http_port}"
+        host_ip: 127.0.0.1
+        protocol: tcp
     environment:
       ZHIXU_CHAT_API_KEY: ${chat_canary}
   worker:
@@ -222,12 +268,19 @@ services:
       ZHIXU_CHAT_API_KEY: ${chat_canary}
 YAML
   CANARY_COMPOSE_FILE="${canary_compose_file}"
-  mkdir -p "${workspace_root}/project/docs"
-  printf '# RAG Compose Smoke\n\nBase content awaiting approved recovery guidance.\n' >"${workspace_root}/project/${target_path}"
-  chmod -R a+rwX "${workspace_root}"
+  RUNTIME_COMPOSE_FILE="${STATE_DIR}/compose.runtime.yml"
+  GRANT_COMPOSE_FILE="${STATE_DIR}/compose.grant.yml"
+  mkdir -p "${WORKSPACE_ROOT}/docs"
+  printf '# RAG Compose Smoke\n\nBase content awaiting approved recovery guidance.\n' >"${WORKSPACE_ROOT}/${target_path}"
+  git -C "${WORKSPACE_ROOT}" init --initial-branch=main >/dev/null
+  git -C "${WORKSPACE_ROOT}" config user.name 'ZHIXU RAG Smoke'
+  git -C "${WORKSPACE_ROOT}" config user.email 'rag-smoke@example.invalid'
+  git -C "${WORKSPACE_ROOT}" add -- "${target_path}"
+  git -C "${WORKSPACE_ROOT}" commit -m base >/dev/null
+  chmod -R a+rwX "${WORKSPACE_ROOT}"
 
   export ZHIXU_HTTP_PORT="${http_port}" ZHIXU_POSTGRES_DB='zhixu_rag_smoke' ZHIXU_POSTGRES_USER='zhixu_rag_smoke'
-  export ZHIXU_POSTGRES_PASSWORD="pg_${run_id}_$(random_hex 12)" ZHIXU_WORKSPACE_ROOT="${workspace_root}"
+  export ZHIXU_POSTGRES_PASSWORD="pg_${run_id}_$(random_hex 12)"
   export ZHIXU_AUTH_MODE='required' ZHIXU_AUTH_BOOTSTRAP_TOKEN="auth_${run_id}_$(random_hex 24)"
   export ZHIXU_AUTH_ALLOWED_ORIGINS="${AUTH_ORIGIN}" ZHIXU_AUTH_SECURE_COOKIE='false'
   export ZHIXU_EMBEDDING_PROVIDER='disabled' ZHIXU_EMBEDDING_BASE_URL='' ZHIXU_EMBEDDING_API_KEY='' ZHIXU_EMBEDDING_MODEL='' ZHIXU_EMBEDDING_DIMENSIONS='0'
@@ -235,22 +288,18 @@ YAML
 
   log 'validating and building disposable RAG Compose stack'
   compose config --quiet
-  compose build --quiet
-  compose run --rm --no-deps --user root --entrypoint sh app -c 'chown -R 10001:10001 /workspace/project && chmod -R u+rwX /workspace/project' >/dev/null
-  compose run --rm --no-deps --entrypoint sh app -c 'git -C /workspace/project init --initial-branch=main >/dev/null && git -C /workspace/project config user.name "ZHIXU RAG Smoke" && git -C /workspace/project config user.email "rag-smoke@example.invalid" && git -C /workspace/project add -- docs/rag-smoke.md && git -C /workspace/project commit -m base >/dev/null' >/dev/null
+  compose --profile workspace-runtime config >"${RUNTIME_COMPOSE_FILE}"
+  chmod 600 "${RUNTIME_COMPOSE_FILE}"
+  compose --profile workspace-runtime build --quiet
   compose up --detach --wait postgres >/dev/null
   compose run --rm --no-deps -T model-settings-key-init >/dev/null
   compose run --rm --no-deps -T migrate >/dev/null
-  compose up --detach --no-deps --wait app worker >/dev/null
-  compose up --detach --no-deps --wait app-model-relay worker-model-relay >/dev/null
-  compose run --rm --no-deps -T firewall >/dev/null
-  compose up --detach --no-deps --wait proxy >/dev/null
+  compose up --detach --no-deps --wait rag-model-fixture >/dev/null
+  log 'activating an exact Workspace grant through the Host Controller coordinator'
+  activate_workspace_grant
   authenticate
 
   local payload base_hash proposal_id revision_id change_hash workflow_path search_payload citation_href
-  payload="$(jq -cn --arg name 'Compose RAG Smoke' '{name:$name,root_path:"/workspace/project",initialize_git:false}')"
-  request_json POST /api/v1/workspaces 201 "${payload}" 'workspace creation'
-  WORKSPACE_ID="$(jq -er '.id' "${LAST_RESPONSE_FILE}")"
   request_json POST "/api/v1/workspaces/${WORKSPACE_ID}/scan" 200 '{}' 'workspace scan'
   SOURCE_VERSION_ID="$(jq -er --arg path "${target_path}" '.files[] | select(.relative_path==$path) | .source_version_id' "${LAST_RESPONSE_FILE}")"
   base_hash="$(jq -er --arg path "${target_path}" '.files[] | select(.relative_path==$path) | .content_hash' "${LAST_RESPONSE_FILE}")"

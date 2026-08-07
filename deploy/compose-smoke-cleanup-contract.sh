@@ -87,15 +87,26 @@ assert_runtime_startup_contract() {
   local script_path="${SCRIPT_DIR}/${smoke_script}"
   local previous_line=0
   local startup_step line
-  local -a startup_steps=(
-    'up --detach --wait postgres'
-    'run --rm --no-deps -T model-settings-key-init'
-    'run --rm --no-deps -T migrate'
-    'up --detach --no-deps --wait app worker'
-    'up --detach --no-deps --wait app-model-relay worker-model-relay'
-    'run --rm --no-deps -T firewall'
-    'up --detach --no-deps --wait proxy'
-  )
+  local -a startup_steps=()
+  if [[ "${smoke_script}" == compose-rag-smoke.sh ]]; then
+    startup_steps=(
+      'up --detach --wait postgres'
+      'run --rm --no-deps -T model-settings-key-init'
+      'run --rm --no-deps -T migrate'
+      'up --detach --no-deps --wait rag-model-fixture'
+      '  activate_workspace_grant'
+    )
+  else
+    startup_steps=(
+      'up --detach --wait postgres'
+      'run --rm --no-deps -T model-settings-key-init'
+      'run --rm --no-deps -T migrate'
+      'up --detach --no-deps --wait app worker'
+      'up --detach --no-deps --wait app-model-relay worker-model-relay'
+      'run --rm --no-deps -T firewall'
+      'up --detach --no-deps --wait proxy'
+    )
+  fi
 
   if grep -Eq 'up[[:space:]]+--detach[[:space:]]+--wait([[:space:]]*$|[[:space:]]*[>/])' "${script_path}"; then
     fail "${smoke_script} can still start every Compose service with --wait"
