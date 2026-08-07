@@ -189,20 +189,14 @@ func (config chatHTTPConfig) contractCopy() ChatContract {
 }
 
 func (config chatHTTPConfig) chat(ctx context.Context, request agentapplication.ChatRequest, payload any, result any) error {
-	if err := agentapplication.ValidateChatRequest(request); err != nil {
+	if err := config.validateRequest(request); err != nil {
 		return err
 	}
-	if request.Model != config.contract.Model {
-		return chatError(foundation.ErrorConsistencyViolation, ErrorCodeChatRequestInvalid, false, errChatRequestInvalid)
+	encoded, err := config.encodeRequest(payload)
+	if err != nil {
+		return err
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil || int64(len(encoded)) > config.maxRequestBytes {
-		return chatError(foundation.ErrorInvalidInput, ErrorCodeChatRequestInvalid, false, errChatRequestInvalid)
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	requestContext, cancel := context.WithTimeout(ctx, config.timeout)
+	requestContext, cancel := config.requestContext(ctx)
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, config.endpointURL, bytes.NewReader(encoded))
 	if err != nil {
@@ -233,14 +227,43 @@ func (config chatHTTPConfig) chat(ctx context.Context, request agentapplication.
 	if int64(len(encodedResponse)) > config.maxResponseBytes || !utf8.Valid(encodedResponse) {
 		return chatResponseError(ErrorCodeChatResponseInvalid)
 	}
+	return decodeChatJSONResponse(encodedResponse, config.maxResponseBytes, result)
+}
+
+func (config chatHTTPConfig) validateRequest(request agentapplication.ChatRequest) error {
+	if err := agentapplication.ValidateChatRequest(request); err != nil {
+		return err
+	}
+	if request.Model != config.contract.Model {
+		return chatError(foundation.ErrorConsistencyViolation, ErrorCodeChatRequestInvalid, false, errChatRequestInvalid)
+	}
+	return nil
+}
+
+func (config chatHTTPConfig) encodeRequest(payload any) ([]byte, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil || int64(len(encoded)) > config.maxRequestBytes {
+		return nil, chatError(foundation.ErrorInvalidInput, ErrorCodeChatRequestInvalid, false, errChatRequestInvalid)
+	}
+	return encoded, nil
+}
+
+func (config chatHTTPConfig) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, config.timeout)
+}
+
+func decodeChatJSONResponse(encoded []byte, maxResponseBytes int64, result any) error {
 	limits := agentdomain.DecodeLimits{
-		MaxDocumentBytes: int(config.maxResponseBytes),
+		MaxDocumentBytes: int(maxResponseBytes),
 		MaxDepth:         16,
-		MaxStringBytes:   int(config.maxResponseBytes),
+		MaxStringBytes:   int(maxResponseBytes),
 		MaxArrayItems:    128,
 		MaxObjectFields:  128,
 	}
-	decoded, err := agentdomain.DecodeStrict(encodedResponse, limits, func(value json.RawMessage) error { return nil })
+	decoded, err := agentdomain.DecodeStrict(encoded, limits, func(value json.RawMessage) error { return nil })
 	if err != nil {
 		return chatResponseError(ErrorCodeChatResponseInvalid)
 	}

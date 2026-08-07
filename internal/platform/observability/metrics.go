@@ -24,6 +24,10 @@ const (
 	MetricHeartbeatFailureTotal  MetricName = "workflow.heartbeat_failure_total"
 	MetricDuplicateDeliveryTotal MetricName = "river.duplicate_delivery_total"
 	MetricShutdownTotal          MetricName = "worker.shutdown_total"
+	// MetricModelCallDuration 是 Eino Chat callback 观测到的调用耗时。
+	MetricModelCallDuration MetricName = "model.chat.duration_ms"
+	// MetricModelCallTotal 是 Eino Chat callback 观测到的调用结果计数。
+	MetricModelCallTotal MetricName = "model.chat.result_total"
 )
 
 // MetricKind controls aggregation semantics in concrete adapters.
@@ -64,6 +68,8 @@ var metricDefinitions = map[MetricName]metricDefinition{
 	MetricHeartbeatFailureTotal:  newMetricDefinition(MetricKindCounter, []string{"node_kind", "error_code"}, []string{"node_kind"}),
 	MetricDuplicateDeliveryTotal: newMetricDefinition(MetricKindCounter, []string{"node_kind"}, []string{"node_kind"}),
 	MetricShutdownTotal:          newMetricDefinition(MetricKindCounter, []string{"shutdown_kind", "result"}, []string{"shutdown_kind", "result"}),
+	MetricModelCallDuration:      newMetricDefinition(MetricKindHistogram, []string{"component", "phase", "result", "error_code"}, []string{"component", "phase", "result"}),
+	MetricModelCallTotal:         newMetricDefinition(MetricKindCounter, []string{"component", "phase", "result", "error_code"}, []string{"component", "phase", "result"}),
 }
 
 func newMetricDefinition(kind MetricKind, allowed, required []string) metricDefinition {
@@ -117,7 +123,7 @@ func NewLabels(values map[string]string) (Labels, error) {
 }
 
 var globallyAllowedMetricLabels = map[string]struct{}{
-	"queue": {}, "node_kind": {}, "result": {}, "error_code": {}, "shutdown_kind": {},
+	"queue": {}, "node_kind": {}, "result": {}, "error_code": {}, "shutdown_kind": {}, "component": {}, "phase": {},
 }
 
 var boundedMetricLabelValues = map[string]map[string]struct{}{
@@ -125,6 +131,8 @@ var boundedMetricLabelValues = map[string]map[string]struct{}{
 		"success": {}, "failure": {}, "retry": {}, "manual_recovery": {}, "cancelled": {},
 	},
 	"shutdown_kind": {"graceful": {}, "forced": {}},
+	"component":     {"eino_chat": {}},
+	"phase":         {"PLAN": {}, "INITIAL": {}, "REPAIR": {}, "REDUCED": {}, "REVIEW": {}},
 }
 
 func isLongNumericIdentifier(value string) bool {

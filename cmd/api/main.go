@@ -171,6 +171,7 @@ func runAPI() int {
 	if telemetryStatus := telemetry.Status(); telemetryStatus.Degraded {
 		logger.Warn("telemetry exporter is unavailable", "error_code", telemetryStatus.Code)
 	}
+	modelTelemetry := platformmodels.NewModelTelemetry(telemetry.Tracer(), telemetry.Metrics())
 
 	var database *postgres.Pool
 	var databaseErr error
@@ -200,7 +201,7 @@ func runAPI() int {
 				return 1
 			}
 		} else {
-			bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg)
+			bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg, modelTelemetry)
 			modelSettingsManager = bootstrap.Manager
 			if bootstrap.Repository != nil {
 				modelEnqueueFences = append(modelEnqueueFences, bootstrap.Repository)
@@ -232,7 +233,7 @@ func runAPI() int {
 			}
 		}
 	} else {
-		loaded, modelsErr := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil)
+		loaded, modelsErr := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil, modelTelemetry)
 		if modelsErr != nil {
 			logger.Error("static model runtime is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 			return 1
@@ -240,7 +241,7 @@ func runAPI() int {
 		configuredModels = loaded.Models
 	}
 	if configuredModels == nil {
-		fallback, fallbackErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()})
+		fallback, fallbackErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()}, modelTelemetry)
 		if fallbackErr != nil {
 			logger.Error("disabled model runtime is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 			return 1

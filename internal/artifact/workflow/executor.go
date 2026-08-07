@@ -30,6 +30,7 @@ const (
 // ExecutorDependencies 是 Artifact 章节生成节点的全部受控依赖。
 type ExecutorDependencies struct {
 	Model       agentapplication.ChatModel
+	Scheduler   agentapplication.StructuredPhaseScheduler
 	Catalog     *agentapplication.RuntimeCatalog
 	Repository  agentapplication.ModelRunRepository
 	Context     ContextLoader
@@ -56,7 +57,7 @@ func NewExecutor(dependencies ExecutorDependencies) (*Executor, error) {
 	if dependencies.Budget == (agentapplication.RunBudget{}) {
 		dependencies.Budget = agentapplication.DefaultRunBudget()
 	}
-	if _, err := agentapplication.NewStructuredRunner(dependencies.Model, dependencies.Catalog, dependencies.Budget); err != nil {
+	if _, err := agentapplication.NewStructuredRunnerWithScheduler(dependencies.Model, dependencies.Catalog, dependencies.Budget, dependencies.Scheduler); err != nil {
 		return nil, err
 	}
 	return &Executor{dependencies: dependencies}, nil
@@ -378,7 +379,7 @@ func (executor *Executor) executeCreatedRun(
 	if err != nil {
 		return SectionProposal{}, err, false
 	}
-	runner, err := agentapplication.NewStructuredRunner(recorded, executor.dependencies.Catalog, executor.dependencies.Budget)
+	runner, err := agentapplication.NewStructuredRunnerWithScheduler(recorded, executor.dependencies.Catalog, executor.dependencies.Budget, executor.dependencies.Scheduler)
 	if err != nil {
 		return SectionProposal{}, err, false
 	}

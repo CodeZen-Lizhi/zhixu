@@ -18,6 +18,7 @@ const ragFinalizeTimeout = 5 * time.Second
 // RAGWorkflowExecutorDependencies 是 RAG Workflow 节点的全部真实依赖。
 type RAGWorkflowExecutorDependencies struct {
 	Model       agentapplication.ChatModel
+	Scheduler   agentapplication.StructuredPhaseScheduler
 	Catalog     *agentapplication.RuntimeCatalog
 	Repository  agentapplication.ModelRunRepository
 	Snapshots   agentapplication.RAGMemorySnapshotRepository
@@ -53,7 +54,7 @@ func NewRAGWorkflowExecutor(dependencies RAGWorkflowExecutorDependencies) (*RAGW
 	if dependencies.Budget == (agentapplication.RunBudget{}) {
 		dependencies.Budget = agentapplication.DefaultRunBudget()
 	}
-	if _, err := agentapplication.NewStructuredRunner(dependencies.Model, dependencies.Catalog, dependencies.Budget); err != nil {
+	if _, err := agentapplication.NewStructuredRunnerWithScheduler(dependencies.Model, dependencies.Catalog, dependencies.Budget, dependencies.Scheduler); err != nil {
 		return nil, err
 	}
 	return &RAGWorkflowExecutor{dependencies: dependencies}, nil
@@ -232,7 +233,7 @@ func (executor *RAGWorkflowExecutor) executeRun(
 	if err != nil {
 		return agentapplication.RAGTerminalProposal{}, err, false
 	}
-	runner, err := agentapplication.NewStructuredRunner(recorded, executor.dependencies.Catalog, executor.dependencies.Budget)
+	runner, err := agentapplication.NewStructuredRunnerWithScheduler(recorded, executor.dependencies.Catalog, executor.dependencies.Budget, executor.dependencies.Scheduler)
 	if err != nil {
 		return agentapplication.RAGTerminalProposal{}, err, false
 	}

@@ -24,6 +24,9 @@ func TestFacadeUsesPlatformRedactionAndCorrelation(t *testing.T) {
 }
 
 func TestFacadeAliasesTelemetryAndTraceContracts(t *testing.T) {
+	if MetricModelCallDuration != "model.chat.duration_ms" || MetricModelCallTotal != "model.chat.result_total" {
+		t.Fatal("facade omitted model callback metric aliases")
+	}
 	telemetry, err := InitializeTelemetry(context.Background(), TelemetryOptions{Mode: TelemetryModeDisabled})
 	if err != nil {
 		t.Fatalf("InitializeTelemetry: %v", err)

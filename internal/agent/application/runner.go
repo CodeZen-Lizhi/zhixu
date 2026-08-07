@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -37,6 +38,8 @@ const (
 	errorCodeRequestEncode       = "AGENT_CHAT_REQUEST_ENCODING_FAILED"
 	errorCodeDecoderContract     = "AGENT_OUTPUT_DECODER_CONTRACT_VIOLATION"
 	errorCodeValidationExhausted = domain.ErrorCodeValidationExhausted
+	// ErrorCodeStructuredSchedulerContract 表示调度器没有把运行推进到终态。
+	ErrorCodeStructuredSchedulerContract = "AGENT_STRUCTURED_SCHEDULER_CONTRACT_VIOLATION"
 )
 
 // RunBudget 是一次三阶段结构化运行的累计字节、Token 与时间预算。
@@ -77,6 +80,33 @@ type StructuredRunResult struct {
 	Runtime       FrozenRuntimeRefs
 }
 
+// StructuredPhaseScheduler 只负责驱动固定的 INITIAL、REPAIR、REDUCED 阶段。
+//
+// 实现不得自行调用 ChatModel、重试、持久化状态或改变阶段顺序；所有实际调用
+// 必须通过 StructuredPhaseRun.Advance 进入 Application 的预算和严格解码边界。
+type StructuredPhaseScheduler interface {
+	Schedule(context.Context, *StructuredPhaseRun) error
+}
+
+// StructuredPhaseRun 是由 StructuredRunner 创建的不可变快照驱动状态句柄。
+//
+// 字段不对外暴露；Adapter 只能通过 Advance、Completed 和 Failure 观察或推进状态，
+// 因此 Eino Graph 不会获得 Provider、目录或预算的可变引用。
+type StructuredPhaseRun struct {
+	mu sync.Mutex
+
+	model    ChatModel
+	input    []byte
+	snapshot RuntimeSnapshot
+	budget   RunBudget
+
+	result         StructuredRunResult
+	validationCode string
+	nextPhase      domain.ModelCallPhase
+	completed      bool
+	failure        error
+}
+
 // FrozenRuntimeRefs 是可持久化且不含 Prompt、Schema 文本的实际运行版本快照。
 type FrozenRuntimeRefs struct {
 	Profile domain.ModelProfileRef
@@ -87,13 +117,22 @@ type FrozenRuntimeRefs struct {
 
 // StructuredRunner 是 INITIAL、REPAIR、REDUCED 调用预算的唯一所有者。
 type StructuredRunner struct {
-	model   ChatModel
-	catalog *RuntimeCatalog
-	budget  RunBudget
+	model     ChatModel
+	catalog   *RuntimeCatalog
+	budget    RunBudget
+	scheduler StructuredPhaseScheduler
 }
 
 // NewStructuredRunner 校验依赖和有界预算后创建 Runner。
 func NewStructuredRunner(model ChatModel, catalog *RuntimeCatalog, budget RunBudget) (*StructuredRunner, error) {
+	return NewStructuredRunnerWithScheduler(model, catalog, budget, directStructuredPhaseScheduler{})
+}
+
+// NewStructuredRunnerWithScheduler 使用项目自有调度 Port 创建 Runner。
+//
+// nil 调度器保持 direct 行为，供 Composition Root 用可选 Adapter 做逐消费者灰度；
+// 实现选择只影响内部调度，不进入运行结果或持久身份。
+func NewStructuredRunnerWithScheduler(model ChatModel, catalog *RuntimeCatalog, budget RunBudget, scheduler StructuredPhaseScheduler) (*StructuredRunner, error) {
 	if isNilChatModel(model) {
 		return nil, applicationError(foundation.ErrorDependencyUnavailable, errorCodeChatModelMissing, false, errors.New("chat model is nil"))
 	}
@@ -103,12 +142,15 @@ func NewStructuredRunner(model ChatModel, catalog *RuntimeCatalog, budget RunBud
 	if err := validateRunBudget(budget); err != nil {
 		return nil, err
 	}
-	return &StructuredRunner{model: model, catalog: catalog, budget: budget}, nil
+	if isNilPort(scheduler) {
+		scheduler = directStructuredPhaseScheduler{}
+	}
+	return &StructuredRunner{model: model, catalog: catalog, budget: budget, scheduler: scheduler}, nil
 }
 
 // Run 精确执行 INITIAL→REPAIR→REDUCED；Provider 失败不会在本层重试。
 func (r *StructuredRunner) Run(ctx context.Context, request StructuredRunRequest) (StructuredRunResult, error) {
-	if r == nil || isNilChatModel(r.model) || r.catalog == nil {
+	if r == nil || isNilChatModel(r.model) || r.catalog == nil || isNilPort(r.scheduler) {
 		return StructuredRunResult{}, applicationError(foundation.ErrorDependencyUnavailable, errorCodeRunnerMissing, false, errors.New("structured runner is not initialized"))
 	}
 	if ctx == nil {
@@ -132,70 +174,159 @@ func (r *StructuredRunner) Run(ctx context.Context, request StructuredRunRequest
 		Schema:  snapshot.Schema.Ref,
 		Model:   snapshot.Profile.Model,
 	}}
-	var validationCode string
-	phases := []domain.ModelCallPhase{domain.ModelCallInitial, domain.ModelCallRepair, domain.ModelCallReduced}
-	for _, phase := range phases {
-		if err := runCtx.Err(); err != nil {
-			return result, operationContextError(err)
-		}
-		schema := snapshot.Schema
-		instruction := snapshot.Prompt.InitialInstruction
-		if phase == domain.ModelCallRepair {
-			instruction = snapshot.Prompt.RepairInstruction
-		}
-		if phase == domain.ModelCallReduced {
-			instruction = snapshot.Prompt.ReducedInstruction
-			schema = snapshot.ReducedSchema
-		}
-		result.Runtime.Schema = schema.Ref
-		chatRequest := buildChatRequest(snapshot, schema, phase, instruction, request.Input, validationCode)
-		requestBytes, err := encodedChatRequestBytes(chatRequest)
-		if err != nil {
-			return result, err
-		}
-		if requestBytes > r.budget.MaxRequestBytes-result.RequestBytes {
-			return result, applicationError(foundation.ErrorNonRetryableFailure, errorCodeRequestBudget, false, errors.New("structured run request byte budget is exhausted"))
-		}
-		result.RequestBytes += requestBytes
-
-		callTimeout := minPositiveDuration(snapshot.Profile.Timeout, time.Until(runDeadline(runCtx)))
-		callCtx, callCancel := context.WithTimeout(runCtx, callTimeout)
-		response, callErr := r.model.Chat(callCtx, cloneChatRequest(chatRequest))
-		callContextErr := callCtx.Err()
-		callCancel()
-		result.CallCount++
-		if callErr != nil {
-			if callContextErr != nil {
-				return result, operationContextError(callContextErr)
-			}
-			return result, callErr
-		}
-		if err := ValidateChatResponse(chatRequest, response); err != nil {
-			return result, err
-		}
-		responseBytes := int64(len(response.Content))
-		if responseBytes > r.budget.MaxResponseBytes-result.ResponseBytes {
-			return result, applicationError(foundation.ErrorNonRetryableFailure, errorCodeResponseBudget, false, errors.New("structured run response byte budget is exhausted"))
-		}
-		result.ResponseBytes += responseBytes
-		usage, err := addUsage(result.Usage, response.Usage, r.budget.MaxTotalTokens)
-		if err != nil {
-			return result, err
-		}
-		result.Usage = usage
-
-		output, decodeErr := schema.Decode(append([]byte(nil), response.Content...))
-		if decodeErr == nil {
-			if !bytes.Equal(output, response.Content) {
-				return result, applicationError(foundation.ErrorConsistencyViolation, errorCodeDecoderContract, false, errors.New("strict output decoder must return the accepted original document without defaults or transformation"))
-			}
-			result.Output = append(json.RawMessage(nil), output...)
-			result.Phase = phase
-			return result, nil
-		}
-		validationCode = redactedValidationCode(decodeErr)
+	phaseRun := &StructuredPhaseRun{
+		model: r.model, input: append([]byte(nil), request.Input...), snapshot: snapshot, budget: r.budget,
+		result: result, nextPhase: domain.ModelCallInitial,
 	}
-	return result, applicationError(foundation.ErrorNonRetryableFailure, errorCodeValidationExhausted, false, errors.New("structured output validation exhausted after three model responses"))
+	if err := r.scheduler.Schedule(runCtx, phaseRun); err != nil {
+		if failure := phaseRun.Failure(); failure != nil {
+			return phaseRun.result, failure
+		}
+		return phaseRun.result, err
+	}
+	if failure := phaseRun.Failure(); failure != nil {
+		return phaseRun.result, failure
+	}
+	if !phaseRun.Completed() {
+		return phaseRun.result, applicationError(foundation.ErrorConsistencyViolation, ErrorCodeStructuredSchedulerContract, false, errors.New("structured phase scheduler returned before a terminal result"))
+	}
+	return phaseRun.result, nil
+}
+
+// Advance 执行一个严格阶段；模型调用、响应校验和预算均在此边界内完成。
+func (run *StructuredPhaseRun) Advance(ctx context.Context, phase domain.ModelCallPhase) error {
+	if run == nil {
+		return applicationError(foundation.ErrorConsistencyViolation, ErrorCodeStructuredSchedulerContract, false, errors.New("structured phase run is nil"))
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if run.failure != nil {
+		return run.failure
+	}
+	if run.completed || phase != run.nextPhase {
+		return run.fail(applicationError(foundation.ErrorConsistencyViolation, ErrorCodeStructuredSchedulerContract, false, errors.New("structured phase scheduler changed the frozen phase order")))
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return run.fail(operationContextError(err))
+	}
+
+	schema := run.snapshot.Schema
+	instruction := run.snapshot.Prompt.InitialInstruction
+	switch phase {
+	case domain.ModelCallRepair:
+		instruction = run.snapshot.Prompt.RepairInstruction
+	case domain.ModelCallReduced:
+		instruction = run.snapshot.Prompt.ReducedInstruction
+		schema = run.snapshot.ReducedSchema
+	case domain.ModelCallInitial:
+	default:
+		return run.fail(applicationError(foundation.ErrorConsistencyViolation, ErrorCodeStructuredSchedulerContract, false, errors.New("structured phase is not part of the bounded scheduler")))
+	}
+	run.result.Runtime.Schema = schema.Ref
+	chatRequest := buildChatRequest(run.snapshot, schema, phase, instruction, run.input, run.validationCode)
+	requestBytes, err := encodedChatRequestBytes(chatRequest)
+	if err != nil {
+		return run.fail(err)
+	}
+	if requestBytes > run.budget.MaxRequestBytes-run.result.RequestBytes {
+		return run.fail(applicationError(foundation.ErrorNonRetryableFailure, errorCodeRequestBudget, false, errors.New("structured run request byte budget is exhausted")))
+	}
+	run.result.RequestBytes += requestBytes
+
+	callTimeout := minPositiveDuration(run.snapshot.Profile.Timeout, time.Until(runDeadline(ctx)))
+	callCtx, callCancel := context.WithTimeout(ctx, callTimeout)
+	response, callErr := run.model.Chat(callCtx, cloneChatRequest(chatRequest))
+	callContextErr := callCtx.Err()
+	callCancel()
+	run.result.CallCount++
+	if callErr != nil {
+		if callContextErr != nil {
+			return run.fail(operationContextError(callContextErr))
+		}
+		return run.fail(callErr)
+	}
+	if err := ValidateChatResponse(chatRequest, response); err != nil {
+		return run.fail(err)
+	}
+	responseBytes := int64(len(response.Content))
+	if responseBytes > run.budget.MaxResponseBytes-run.result.ResponseBytes {
+		return run.fail(applicationError(foundation.ErrorNonRetryableFailure, errorCodeResponseBudget, false, errors.New("structured run response byte budget is exhausted")))
+	}
+	run.result.ResponseBytes += responseBytes
+	usage, err := addUsage(run.result.Usage, response.Usage, run.budget.MaxTotalTokens)
+	if err != nil {
+		return run.fail(err)
+	}
+	run.result.Usage = usage
+
+	output, decodeErr := schema.Decode(append([]byte(nil), response.Content...))
+	if decodeErr == nil {
+		if !bytes.Equal(output, response.Content) {
+			return run.fail(applicationError(foundation.ErrorConsistencyViolation, errorCodeDecoderContract, false, errors.New("strict output decoder must return the accepted original document without defaults or transformation")))
+		}
+		run.result.Output = append(json.RawMessage(nil), output...)
+		run.result.Phase = phase
+		run.completed = true
+		run.nextPhase = ""
+		return nil
+	}
+	run.validationCode = redactedValidationCode(decodeErr)
+	switch phase {
+	case domain.ModelCallInitial:
+		run.nextPhase = domain.ModelCallRepair
+	case domain.ModelCallRepair:
+		run.nextPhase = domain.ModelCallReduced
+	case domain.ModelCallReduced:
+		return run.fail(applicationError(foundation.ErrorNonRetryableFailure, errorCodeValidationExhausted, false, errors.New("structured output validation exhausted after three model responses")))
+	}
+	return nil
+}
+
+// Completed 报告是否已经通过严格解码得到终态输出。
+func (run *StructuredPhaseRun) Completed() bool {
+	if run == nil {
+		return false
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return run.completed
+}
+
+// Failure 返回该阶段运行遇到的原始项目错误；Adapter 不应重新包装它。
+func (run *StructuredPhaseRun) Failure() error {
+	if run == nil {
+		return nil
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return run.failure
+}
+
+func (run *StructuredPhaseRun) fail(err error) error {
+	if err == nil {
+		err = applicationError(foundation.ErrorConsistencyViolation, ErrorCodeStructuredSchedulerContract, false, errors.New("structured phase run failed without an error"))
+	}
+	if run.failure == nil {
+		run.failure = err
+	}
+	return run.failure
+}
+
+type directStructuredPhaseScheduler struct{}
+
+func (directStructuredPhaseScheduler) Schedule(ctx context.Context, run *StructuredPhaseRun) error {
+	for _, phase := range []domain.ModelCallPhase{domain.ModelCallInitial, domain.ModelCallRepair, domain.ModelCallReduced} {
+		if err := run.Advance(ctx, phase); err != nil {
+			return err
+		}
+		if run.Completed() {
+			return nil
+		}
+	}
+	return nil
 }
 
 func validateRunBudget(budget RunBudget) error {

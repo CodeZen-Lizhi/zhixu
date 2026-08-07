@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -229,6 +230,88 @@ func TestStructuredRunnerBoundsTotalTimeout(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("bounded timeout took %s", elapsed)
 	}
+}
+
+func TestStructuredRunnerWithSchedulerPortPreservesPhaseContract(t *testing.T) {
+	catalog, request, profile := testCatalog(t, time.Second)
+	model := NewDeterministicChatModel(
+		DeterministicChatStep{Response: testResponse(profile.Model, `{}`, 2, 1)},
+		DeterministicChatStep{Response: testResponse(profile.Model, `{"value":"scheduled"}`, 3, 2)},
+	)
+	scheduler := &contractTestScheduler{}
+	runner, err := NewStructuredRunnerWithScheduler(model, catalog, DefaultRunBudget(), scheduler)
+	if err != nil {
+		t.Fatalf("NewStructuredRunnerWithScheduler() error = %v", err)
+	}
+
+	result, err := runner.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.CallCount != 2 || result.Phase != domain.ModelCallRepair || string(result.Output) != `{"value":"scheduled"}` {
+		t.Fatalf("result = %+v output=%s", result, result.Output)
+	}
+	if result.Usage != (domain.TokenUsage{InputTokens: 5, OutputTokens: 3, TotalTokens: 8}) {
+		t.Fatalf("usage = %+v", result.Usage)
+	}
+	if !reflect.DeepEqual(scheduler.phases, []domain.ModelCallPhase{domain.ModelCallInitial, domain.ModelCallRepair}) {
+		t.Fatalf("scheduler phases = %v", scheduler.phases)
+	}
+}
+
+func TestStructuredRunnerWithNilSchedulerKeepsDirectBehavior(t *testing.T) {
+	catalog, request, profile := testCatalog(t, time.Second)
+	response := testResponse(profile.Model, `{"value":"direct"}`, 2, 3)
+	model := NewDeterministicChatModel(DeterministicChatStep{Response: response})
+	runner, err := NewStructuredRunnerWithScheduler(model, catalog, DefaultRunBudget(), nil)
+	if err != nil {
+		t.Fatalf("NewStructuredRunnerWithScheduler() error = %v", err)
+	}
+
+	result, err := runner.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.CallCount != 1 || result.Phase != domain.ModelCallInitial || string(result.Output) != `{"value":"direct"}` || model.CallCount() != 1 {
+		t.Fatalf("result=%+v output=%s calls=%d", result, result.Output, model.CallCount())
+	}
+}
+
+func TestStructuredRunnerRejectsSchedulerThatDoesNotReachTerminalState(t *testing.T) {
+	catalog, request, profile := testCatalog(t, time.Second)
+	model := NewDeterministicChatModel(DeterministicChatStep{Response: testResponse(profile.Model, `{}`, 1, 1)})
+	scheduler := &contractTestScheduler{maxPhases: 1}
+	runner, err := NewStructuredRunnerWithScheduler(model, catalog, DefaultRunBudget(), scheduler)
+	if err != nil {
+		t.Fatalf("NewStructuredRunnerWithScheduler() error = %v", err)
+	}
+
+	result, err := runner.Run(context.Background(), request)
+	if errorCode(err) != ErrorCodeStructuredSchedulerContract || result.CallCount != 1 || model.CallCount() != 1 {
+		t.Fatalf("error=%v code=%q result=%+v calls=%d", err, errorCode(err), result, model.CallCount())
+	}
+}
+
+type contractTestScheduler struct {
+	phases    []domain.ModelCallPhase
+	maxPhases int
+}
+
+func (scheduler *contractTestScheduler) Schedule(ctx context.Context, run *StructuredPhaseRun) error {
+	phases := []domain.ModelCallPhase{domain.ModelCallInitial, domain.ModelCallRepair, domain.ModelCallReduced}
+	for index, phase := range phases {
+		if scheduler.maxPhases > 0 && index >= scheduler.maxPhases {
+			return nil
+		}
+		scheduler.phases = append(scheduler.phases, phase)
+		if err := run.Advance(ctx, phase); err != nil {
+			return err
+		}
+		if run.Completed() {
+			return nil
+		}
+	}
+	return nil
 }
 
 func TestDeterministicChatModelStrictlyMatchesRequestAndCopiesCalls(t *testing.T) {

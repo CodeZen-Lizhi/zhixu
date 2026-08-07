@@ -24,6 +24,7 @@ type evidenceOpener interface {
 // ExecutorDependencies 是 Agent Workflow Executor 的显式依赖。
 type ExecutorDependencies struct {
 	Model      agentapplication.ChatModel
+	Scheduler  agentapplication.StructuredPhaseScheduler
 	Catalog    *agentapplication.RuntimeCatalog
 	Repository agentapplication.ModelRunRepository
 	Knowledge  agentapplication.RelationKnowledgePort
@@ -36,6 +37,7 @@ type ExecutorDependencies struct {
 // Executor 把一个 Workflow Node Attempt 绑定到唯一 Model Run。
 type Executor struct {
 	model      agentapplication.ChatModel
+	scheduler  agentapplication.StructuredPhaseScheduler
 	catalog    *agentapplication.RuntimeCatalog
 	repository agentapplication.ModelRunRepository
 	knowledge  agentapplication.RelationKnowledgePort
@@ -55,11 +57,11 @@ func NewExecutor(dependencies ExecutorDependencies) (*Executor, error) {
 		dependencies.Budget = agentapplication.DefaultRunBudget()
 	}
 	// 复用 Runner 构造器作为预算契约校验，不执行 Provider。
-	if _, err := agentapplication.NewStructuredRunner(dependencies.Model, dependencies.Catalog, dependencies.Budget); err != nil {
+	if _, err := agentapplication.NewStructuredRunnerWithScheduler(dependencies.Model, dependencies.Catalog, dependencies.Budget, dependencies.Scheduler); err != nil {
 		return nil, err
 	}
 	return &Executor{
-		model: dependencies.Model, catalog: dependencies.Catalog, repository: dependencies.Repository, knowledge: dependencies.Knowledge, evidence: dependencies.Evidence,
+		model: dependencies.Model, scheduler: dependencies.Scheduler, catalog: dependencies.Catalog, repository: dependencies.Repository, knowledge: dependencies.Knowledge, evidence: dependencies.Evidence,
 		ids: dependencies.IDs, clock: dependencies.Clock, budget: dependencies.Budget,
 	}, nil
 }
@@ -134,7 +136,7 @@ func (executor *Executor) executeCreatedRun(ctx context.Context, run agentdomain
 	if err != nil {
 		return workflowapplication.ExecutionResult{}, err, false
 	}
-	runner, err := agentapplication.NewStructuredRunner(recordedModel, executor.catalog, executor.budget)
+	runner, err := agentapplication.NewStructuredRunnerWithScheduler(recordedModel, executor.catalog, executor.budget, executor.scheduler)
 	if err != nil {
 		return workflowapplication.ExecutionResult{}, err, false
 	}

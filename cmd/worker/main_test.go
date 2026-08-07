@@ -377,6 +377,7 @@ func TestCaptureWorkflowReadinessRequiresFrozenExecutorDefinitionAndOutbox(t *te
 func TestNewCaptureProfileGeneratorRequiresPersistenceWhenCapabilityIsDisabled(t *testing.T) {
 	generator, capabilityStatus, err := newCaptureProfileGenerator(
 		nil, nil, platformmodels.ChatContract{}, nil,
+		nil,
 		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err == nil || generator != nil || capabilityStatus.available || capabilityStatus.code != captureprofile.ErrorCodeCapabilityUnavailable {

@@ -8,6 +8,7 @@ import (
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 )
 
 // RevisionService is the read boundary required during managed process composition.
@@ -24,10 +25,10 @@ type LoadedSettings struct {
 	InitialPhase modelsettingsdomain.RuntimePhase
 }
 
-// LoadSettings loads active for ordinary processes or the fixed rollout target for candidates.
-func LoadSettings(ctx context.Context, base config.Config, service RevisionService) (LoadedSettings, error) {
+// LoadSettings 为普通进程加载 active revision，为候选进程加载固定 rollout target，并透传可选模型 telemetry。
+func LoadSettings(ctx context.Context, base config.Config, service RevisionService, telemetry ...platformmodels.ModelTelemetry) (LoadedSettings, error) {
 	if base.ModelSettingsMode != config.ModelSettingsModeManaged {
-		models, err := newModels(base, 0)
+		models, err := newModels(base, 0, telemetry...)
 		if err != nil {
 			return LoadedSettings{}, err
 		}
@@ -60,7 +61,7 @@ func LoadSettings(ctx context.Context, base config.Config, service RevisionServi
 		if rolloutID != nil {
 			return LoadedSettings{}, err
 		}
-		return unavailableLoaded(base, revision, err)
+		return unavailableLoaded(base, revision, err, telemetry...)
 	}
 	defer resolved.ChatAPIKey.Destroy()
 	defer resolved.EmbeddingAPIKey.Destroy()
@@ -69,20 +70,20 @@ func LoadSettings(ctx context.Context, base config.Config, service RevisionServi
 		if rolloutID != nil {
 			return LoadedSettings{}, mismatch
 		}
-		return unavailableLoaded(base, revision, mismatch)
+		return unavailableLoaded(base, revision, mismatch, telemetry...)
 	}
-	models, err := Build(base, resolved)
+	models, err := Build(base, resolved, telemetry...)
 	if err != nil {
 		if rolloutID != nil {
 			return LoadedSettings{}, err
 		}
-		return unavailableLoaded(base, revision, err)
+		return unavailableLoaded(base, revision, err, telemetry...)
 	}
 	return LoadedSettings{Models: models, Revision: revision, RolloutID: rolloutID, InitialPhase: phase}, nil
 }
 
-func unavailableLoaded(base config.Config, revision int64, cause error) (LoadedSettings, error) {
-	models, fallbackErr := Build(base, modelsettingsdomain.ResolvedSettings{Revision: revision, Settings: modelsettingsdomain.CanonicalDisabledSettings()})
+func unavailableLoaded(base config.Config, revision int64, cause error, telemetry ...platformmodels.ModelTelemetry) (LoadedSettings, error) {
+	models, fallbackErr := Build(base, modelsettingsdomain.ResolvedSettings{Revision: revision, Settings: modelsettingsdomain.CanonicalDisabledSettings()}, telemetry...)
 	if fallbackErr != nil {
 		return LoadedSettings{}, cause
 	}

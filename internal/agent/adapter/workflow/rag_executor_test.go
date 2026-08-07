@@ -53,6 +53,140 @@ func TestRAGWorkflowExecutorReplaysTerminalReceiptBeforeContextOrProvider(t *tes
 	}
 }
 
+func TestRAGWorkflowExecutorRetainsConfiguredEinoStructuredScheduler(t *testing.T) {
+	scheduler := newTrackingEinoStructuredScheduler(t)
+	executor := newRAGWorkflowExecutorWithScheduler(
+		t,
+		agentapplication.NewDeterministicChatModel(),
+		&ragContextLoaderFake{result: validRAGExecutionContext(t)},
+		&ragFinalizerFake{},
+		&ragSnapshotRepositoryFake{},
+		&ragMemoryLoaderFake{},
+		nil,
+		scheduler,
+	)
+	if executor.dependencies.Scheduler != scheduler {
+		t.Fatalf("scheduler=%T want=%T", executor.dependencies.Scheduler, scheduler)
+	}
+}
+
+func TestRAGWorkflowExecutorExecutesAnswerThroughEinoStructuredScheduler(t *testing.T) {
+	scheduler := newTrackingEinoStructuredScheduler(t)
+	executionContext := validRAGExecutionContext(t)
+	executionContext.Question.Request.WorkspaceID = testWorkspaceID
+	executionContext.Answer.WorkspaceID = testWorkspaceID
+	var err error
+	executionContext.Question.RequestHash, err = conversationdomain.ComputeQuestionRequestHash(executionContext.Question.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, encoded := ragWorkflowExecution(t, executionContext)
+	execution.Input = encoded
+
+	topicID := foundation.ID("82000000-0000-4000-8000-000000000099")
+	citation := agentdomain.Citation{
+		ID: "citation-1", WorkspaceID: testWorkspaceID, IndexVersionID: testIndexID,
+		ChunkID: testChunkID, SourceVersionID: testSourceID, SourceSpanID: testSpanID,
+	}
+	plan := agentdomain.RAGQueryPlanResult{
+		ResultType: agentdomain.ResultTypeRAGQueryPlan, SchemaID: agentdomain.RAGQueryPlanSchemaID,
+		SchemaVersion: agentdomain.OutputSchemaVersionV1, ModelRunRef: testModelRunID,
+		Payload: agentdomain.RAGQueryPlanPayload{Intent: "deployment", Rewrites: []string{"deployment behavior"}, SuggestedScopes: []string{}},
+	}
+	answer := agentdomain.RAGAnswerResultV2{
+		ResultType: agentdomain.ResultTypeRAGAnswer, SchemaID: agentdomain.RAGAnswerSchemaID,
+		SchemaVersion: agentdomain.OutputSchemaVersionV2, ModelRunRef: testModelRunID,
+		Payload: agentdomain.RAGAnswerPayloadV2{
+			RAGAnswerPayload: agentdomain.RAGAnswerPayload{
+				Conclusion: "Deployment uses an approved gate.",
+				Assertions: []agentdomain.Assertion{{
+					ID: "assertion-1", Text: "Production deployment uses an approved gate.",
+					Kind: agentdomain.AssertionFactual, CitationIDs: []string{citation.ID},
+				}},
+				Citations: []agentdomain.Citation{citation}, ConflictPositions: []agentdomain.ConflictPosition{},
+			},
+			RelatedTopics:     []agentdomain.RelatedTopic{{TopicID: topicID, Name: "Deployment", CitationIDs: []string{citation.ID}}},
+			FollowUpQuestions: []string{"Which deployment stage is next?"},
+		},
+	}
+	review := agentdomain.FaithfulnessReviewResult{
+		ResultType: agentdomain.ResultTypeFaithfulnessReview, SchemaID: agentdomain.FaithfulnessReviewSchemaID,
+		SchemaVersion: agentdomain.OutputSchemaVersionV1, ModelRunRef: testModelRunID,
+		Payload: agentdomain.FaithfulnessReviewPayload{
+			Passed: true, Summary: "supported",
+			Items: []agentdomain.FaithfulnessReviewItem{
+				{AssertionID: "assertion-1", Verdict: agentdomain.FaithfulnessSupported, CitationIDs: []string{citation.ID}, Reason: "supported by the approved span"},
+				{AssertionID: "@answer/conclusion", Verdict: agentdomain.FaithfulnessSupported, CitationIDs: []string{citation.ID}, Reason: "supported by the approved span"},
+			},
+		},
+	}
+	usage := agentdomain.TokenUsage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5}
+	model := agentapplication.NewDeterministicChatModel(
+		agentapplication.DeterministicChatStep{Response: agentapplication.ChatResponse{Model: testModelRef(), Content: mustJSON(plan), Usage: usage}},
+		agentapplication.DeterministicChatStep{Response: agentapplication.ChatResponse{Model: testModelRef(), Content: mustJSON(answer), Usage: usage}},
+		agentapplication.DeterministicChatStep{Response: agentapplication.ChatResponse{Model: testModelRef(), Content: mustJSON(review), Usage: usage}},
+	)
+	repository := &workflowRepository{}
+	snapshots := &ragSnapshotRepositoryFake{}
+	finalizer := &ragFinalizerFake{receipt: conversationworkflow.OutputReceipt{
+		SchemaVersion: conversationworkflow.OutputSchemaVersion, AnswerID: executionContext.Answer.ID,
+		PublicationStatus: conversationworkflow.PublicationStatusCompleted, ResultType: conversationworkflow.ResultTypeRAGAnswer,
+		ModelRunID: testModelRunID, ResultHash: ragInputHash('b'),
+	}}
+	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := knowledgedomain.ProvenanceRef{WorkspaceID: testWorkspaceID, SourceVersionID: testSourceID, SourceSpanID: testSpanID}
+	retrieval := ragRetrievalFake{search: agentapplication.ScopedRetrievalResult{
+		SearchResult: retrievaldomain.SearchResult{
+			WorkspaceID: testWorkspaceID, RequestedMode: retrievaldomain.SearchModeHybrid,
+			EffectiveMode: retrievaldomain.SearchModeHybrid, IndexVersionID: testIndexID,
+		},
+		RetrievalBatch: agentapplication.RetrievalBatch{
+			WorkspaceID: testWorkspaceID, IndexVersionID: testIndexID,
+			Items: []agentapplication.RetrievedEvidence{{Citation: citation, SearchExcerpt: "approved deployment evidence", CapturedAt: time.Unix(1, 0).UTC()}},
+		},
+	}}
+	executor, err := NewRAGWorkflowExecutor(RAGWorkflowExecutorDependencies{
+		Model: model, Scheduler: scheduler, Catalog: catalog, Repository: repository, Snapshots: snapshots,
+		Memory: &ragMemoryLoaderFake{}, MemoryOwner: testRAGMemoryOwner(), Context: &ragContextLoaderFake{result: executionContext},
+		Search: retrieval, Retrieval: retrieval, Eligibility: workflowKnowledgePort{},
+		Topics:    ragTopicsFake{bindings: []knowledgedomain.EvidenceTopicBinding{{Provenance: ref, TopicID: topicID, TopicName: "Deployment"}}},
+		Finalizer: finalizer, Progress: &ragProgressFake{},
+		IDs: &workflowIDs{values: []foundation.ID{
+			ragAuxiliaryID(1), ragAuxiliaryID(2), testModelRunID,
+			ragAuxiliaryID(3), ragAuxiliaryID(4), ragAuxiliaryID(5),
+		}},
+		Clock: &workflowClock{next: time.Unix(1, 0).UTC()}, Budget: agentapplication.DefaultRunBudget(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := executor.Execute(context.Background(), execution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := DecodeRAGWorkflowOutput(result.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := model.Calls()
+	if len(calls) != 3 || calls[0].Phase != agentdomain.ModelCallPlan || calls[1].Phase != agentdomain.ModelCallInitial || calls[2].Phase != agentdomain.ModelCallReview {
+		t.Fatalf("provider calls=%+v", calls)
+	}
+	if len(repository.calls) != 3 || repository.calls[1].CallNo != 2 || repository.calls[1].Phase != agentdomain.ModelCallInitial ||
+		repository.calls[1].Status != agentdomain.ModelCallSucceeded || repository.calls[1].ResponseBytes == 0 || repository.calls[1].Usage != usage {
+		t.Fatalf("persisted model calls=%+v", repository.calls)
+	}
+	if scheduler.calls.Load() != 1 || finalizer.finalizeCalls != 1 || finalizer.command.Proposal.Answer == nil ||
+		finalizer.command.Proposal.Generation == nil || finalizer.command.Proposal.Generation.Phase != agentdomain.ModelCallInitial ||
+		receipt.PublicationStatus != conversationworkflow.PublicationStatusCompleted || receipt.ModelRunID != testModelRunID {
+		t.Fatalf("scheduler_calls=%d finalizer=%+v receipt=%+v", scheduler.calls.Load(), finalizer, receipt)
+	}
+}
+
 func TestRAGWorkflowExecutorLoadsFrozenContextAndFinalizesDeterministicRefusal(t *testing.T) {
 	executionContext := validRAGExecutionContext(t)
 	request := executionContext.Question.Request
@@ -244,6 +378,19 @@ func newRAGWorkflowExecutorWithDependencies(
 	memory *ragMemoryLoaderFake,
 	ids []foundation.ID,
 ) *RAGWorkflowExecutor {
+	return newRAGWorkflowExecutorWithScheduler(t, model, contextLoader, finalizer, snapshots, memory, ids, nil)
+}
+
+func newRAGWorkflowExecutorWithScheduler(
+	t *testing.T,
+	model agentapplication.ChatModel,
+	contextLoader *ragContextLoaderFake,
+	finalizer *ragFinalizerFake,
+	snapshots *ragSnapshotRepositoryFake,
+	memory *ragMemoryLoaderFake,
+	ids []foundation.ID,
+	scheduler agentapplication.StructuredPhaseScheduler,
+) *RAGWorkflowExecutor {
 	t.Helper()
 	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 1024})
 	if err != nil {
@@ -251,7 +398,7 @@ func newRAGWorkflowExecutorWithDependencies(
 	}
 	retrieval := ragRetrievalFake{}
 	executor, err := NewRAGWorkflowExecutor(RAGWorkflowExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: &workflowRepository{}, Snapshots: snapshots,
+		Model: model, Scheduler: scheduler, Catalog: catalog, Repository: &workflowRepository{}, Snapshots: snapshots,
 		Memory: memory, MemoryOwner: testRAGMemoryOwner(), Context: contextLoader,
 		Search: retrieval, Retrieval: retrieval, Eligibility: workflowKnowledgePort{}, Topics: ragTopicsFake{},
 		Finalizer: finalizer, Progress: &ragProgressFake{}, IDs: &workflowIDs{values: ids},
@@ -417,28 +564,36 @@ func mustJSON(value any) []byte {
 	return encoded
 }
 
-type ragRetrievalFake struct{}
+type ragRetrievalFake struct {
+	search agentapplication.ScopedRetrievalResult
+}
 
-func (ragRetrievalFake) Search(context.Context, retrievaldomain.SearchRequest) (agentapplication.ScopedRetrievalResult, error) {
-	return agentapplication.ScopedRetrievalResult{}, nil
+func (fake ragRetrievalFake) Search(context.Context, retrievaldomain.SearchRequest) (agentapplication.ScopedRetrievalResult, error) {
+	return fake.search, nil
 }
 
 func (ragRetrievalFake) Retrieve(context.Context, agentapplication.RetrievalRequest) (agentapplication.RetrievalBatch, error) {
 	return agentapplication.RetrievalBatch{}, nil
 }
 
-func (ragRetrievalFake) Open(context.Context, agentdomain.Citation) (agentapplication.OpenedEvidence, error) {
-	return agentapplication.OpenedEvidence{}, nil
+func (ragRetrievalFake) Open(_ context.Context, citation agentdomain.Citation) (agentapplication.OpenedEvidence, error) {
+	return agentapplication.OpenedEvidence{Citation: citation, Excerpt: "server-opened-" + citation.ID}, nil
 }
 
-func (ragRetrievalFake) OpenBatch(context.Context, []agentdomain.Citation) ([]agentapplication.OpenedEvidence, error) {
-	return nil, nil
+func (ragRetrievalFake) OpenBatch(_ context.Context, citations []agentdomain.Citation) ([]agentapplication.OpenedEvidence, error) {
+	result := make([]agentapplication.OpenedEvidence, len(citations))
+	for index, citation := range citations {
+		result[index] = agentapplication.OpenedEvidence{Citation: citation, Excerpt: "server-opened-" + citation.ID}
+	}
+	return result, nil
 }
 
-type ragTopicsFake struct{}
+type ragTopicsFake struct {
+	bindings []knowledgedomain.EvidenceTopicBinding
+}
 
-func (ragTopicsFake) ResolveRAGTopics(context.Context, foundation.ID, []knowledgedomain.ProvenanceRef) ([]knowledgedomain.EvidenceTopicBinding, error) {
-	return nil, nil
+func (fake ragTopicsFake) ResolveRAGTopics(context.Context, foundation.ID, []knowledgedomain.ProvenanceRef) ([]knowledgedomain.EvidenceTopicBinding, error) {
+	return append([]knowledgedomain.EvidenceTopicBinding(nil), fake.bindings...), nil
 }
 
 type ragProgressFake struct {

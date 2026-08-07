@@ -94,6 +94,34 @@ def validate_restart_policy(model: dict[str, Any], prepared_candidate: bool) -> 
         fail("prepared app candidate must not auto-restart")
 
 
+def validate_chat_implementation(model: dict[str, Any]) -> None:
+    implementations: list[str] = []
+    service_names = ["app", "worker"]
+    services = model.get("services")
+    if isinstance(services, dict) and "modelctl" in services:
+        service_names.append("modelctl")
+    for service_name in service_names:
+        value = environment(service(model, service_name), service_name).get("ZHIXU_CHAT_IMPLEMENTATION")
+        if value not in ("direct", "eino"):
+            fail(f"{service_name} chat implementation must be direct or eino")
+        implementations.append(value)
+    if len(set(implementations)) != 1:
+        fail("API, Worker, and modelctl must use the same chat implementation")
+
+
+def validate_structured_schedulers(model: dict[str, Any]) -> None:
+    worker_environment = environment(service(model, "worker"), "worker")
+    for key in (
+        "ZHIXU_STRUCTURED_SCHEDULER_RAG",
+        "ZHIXU_STRUCTURED_SCHEDULER_RELATION",
+        "ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT",
+        "ZHIXU_STRUCTURED_SCHEDULER_CAPTURE",
+        "ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING",
+    ):
+        if worker_environment.get(key) not in ("direct", "eino"):
+            fail(f"worker {key} must be direct or eino")
+
+
 def validate_secret_boundary(model: dict[str, Any], prepared_candidate: bool = False) -> None:
     volumes = model.get("volumes")
     if not isinstance(volumes, dict) or SECRET_VOLUME not in volumes:
@@ -341,6 +369,8 @@ def main() -> None:
         validate_secret_boundary(model, prepared_candidate=True)
     else:
         validate_secret_boundary(model)
+    validate_chat_implementation(model)
+    validate_structured_schedulers(model)
     validate_relays(model)
     validate_ingress(model)
     validate_zero_base_grant(model)

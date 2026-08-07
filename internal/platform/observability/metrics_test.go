@@ -70,6 +70,33 @@ func TestMetricsEnforcePerMetricLabelContract(t *testing.T) {
 	}
 }
 
+func TestModelMetricsAcceptOnlyBoundedCallbackLabels(t *testing.T) {
+	labels, err := NewLabels(map[string]string{
+		"component": "eino_chat", "phase": "REPAIR", "result": "failure", "error_code": "MODEL_CHAT_TIMEOUT",
+	})
+	if err != nil {
+		t.Fatalf("NewLabels: %v", err)
+	}
+	for _, measurement := range []Measurement{
+		{Name: MetricModelCallDuration, Kind: MetricKindHistogram, Value: 12.5, Labels: labels},
+		{Name: MetricModelCallTotal, Kind: MetricKindCounter, Value: 1, Labels: labels},
+	} {
+		if err := measurement.Validate(); err != nil {
+			t.Fatalf("Validate(%s): %v", measurement.Name, err)
+		}
+	}
+	for name, values := range map[string]map[string]string{
+		"unknown component": {"component": "provider-secret", "phase": "REPAIR", "result": "failure"},
+		"unknown phase":     {"component": "eino_chat", "phase": "CUSTOM", "result": "failure"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewLabels(values); !errors.Is(err, ErrUnboundedMetricLabel) {
+				t.Fatalf("NewLabels error = %v, want unbounded label", err)
+			}
+		})
+	}
+}
+
 func TestMemoryMetricsRejectRecordAfterProviderShutdown(t *testing.T) {
 	provider := NewMemoryProvider()
 	labels, err := NewLabels(map[string]string{"queue": "workflow"})

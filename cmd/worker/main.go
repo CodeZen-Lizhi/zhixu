@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	agenteino "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/eino"
 	agentknowledge "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/knowledge"
 	agentmemory "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/memory"
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
@@ -283,6 +284,7 @@ func run(configPath string, logger *slog.Logger) error {
 	if telemetryStatus.Degraded {
 		logger.Warn("telemetry exporter is unavailable", "error_code", telemetryStatus.Code)
 	}
+	modelTelemetry := platformmodels.NewModelTelemetry(telemetry.Tracer(), telemetry.Metrics())
 	databaseURL, err := cfg.DatabaseConnectionString()
 	if err != nil {
 		logger.Error("database is not configured", "error_code", "DEPENDENCY_UNAVAILABLE")
@@ -327,7 +329,7 @@ func run(configPath string, logger *slog.Logger) error {
 	var modelEnqueueFences []riveradapter.EnqueueFence
 	var configuredModels *modelsettingsruntime.Models
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
-		bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg)
+		bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg, modelTelemetry)
 		managedModels = bootstrap
 		if bootstrap.Repository != nil {
 			modelEnqueueFences = append(modelEnqueueFences, bootstrap.Repository)
@@ -343,14 +345,14 @@ func run(configPath string, logger *slog.Logger) error {
 			}
 		}
 	} else {
-		loaded, modelsErr := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil)
+		loaded, modelsErr := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil, modelTelemetry)
 		if modelsErr != nil {
 			return modelsErr
 		}
 		configuredModels = loaded.Models
 	}
 	if configuredModels == nil {
-		fallback, fallbackErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()})
+		fallback, fallbackErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()}, modelTelemetry)
 		if fallbackErr != nil {
 			return fallbackErr
 		}
@@ -1320,6 +1322,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	}
 	captureProfileGenerator, captureProfileCapability, err := newCaptureProfileGenerator(
 		db, agentComponents.model, agentComponents.contract, artifactAgentRepository,
+		agentComponents.captureScheduler,
 		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
@@ -1350,7 +1353,8 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	artifactClock := foundation.SystemClock{}
 	artifactComponents, err := newArtifactWorkflowComponents(
 		db, workspaceRepository, runtimeRepository, artifactAgentRepository, artifactTerminal,
-		agentComponents.model, agentComponents.contract, artifactIDs, artifactClock, models.Embedding().Embedder(),
+		agentComponents.model, agentComponents.contract, agentComponents.artifactScheduler,
+		artifactIDs, artifactClock, models.Embedding().Embedder(),
 	)
 	if err != nil {
 		return workerComponents{}, err
@@ -1409,7 +1413,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 			return workerComponents{}, catalogErr
 		}
 		organizingGenerator, err = organizingworkflow.NewGenerator(organizingworkflow.GeneratorDependencies{
-			Model: agentComponents.model, Catalog: organizingCatalog, ModelRuns: artifactAgentRepository,
+			Model: agentComponents.model, Scheduler: agentComponents.organizingScheduler, Catalog: organizingCatalog, ModelRuns: artifactAgentRepository,
 			Store: organizingGenerationRepository, Evidence: organizingRenderer, Documents: documentContentReader,
 			ProfileRef: agentworkflow.DefaultProfileRef(), IDs: foundation.NewUUIDGenerator(nil),
 			Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(agentComponents.contract),
@@ -1940,11 +1944,30 @@ func artifactWorkflowReadiness(components workerComponents) bool {
 }
 
 type agentWorkflowComponents struct {
-	relation   *agentworkflow.Executor
-	rag        *agentworkflow.RAGWorkflowExecutor
-	model      agentapplication.ChatModel
-	contract   platformmodels.ChatContract
-	capability agentCapabilityStatus
+	relation            *agentworkflow.Executor
+	rag                 *agentworkflow.RAGWorkflowExecutor
+	model               agentapplication.ChatModel
+	contract            platformmodels.ChatContract
+	relationScheduler   agentapplication.StructuredPhaseScheduler
+	ragScheduler        agentapplication.StructuredPhaseScheduler
+	artifactScheduler   agentapplication.StructuredPhaseScheduler
+	captureScheduler    agentapplication.StructuredPhaseScheduler
+	organizingScheduler agentapplication.StructuredPhaseScheduler
+	capability          agentCapabilityStatus
+}
+
+// newStructuredPhaseScheduler 在 Composition Root 编译一次短 Graph；direct 返回 nil，
+// 让 Application 保持原有直接调度实现。
+func newStructuredPhaseScheduler(implementation config.StructuredSchedulerImplementation) (agentapplication.StructuredPhaseScheduler, error) {
+	switch implementation {
+	case config.StructuredSchedulerImplementationDirect:
+		return nil, nil
+	case config.StructuredSchedulerImplementationEino:
+		return agenteino.NewStructuredPhaseScheduler(context.Background())
+	default:
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKER_STRUCTURED_SCHEDULER_INVALID", false,
+			fmt.Errorf("unknown structured scheduler implementation %q", implementation))
+	}
 }
 
 func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
@@ -1964,6 +1987,26 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 	catalog, err := agentworkflow.NewRuntimeCatalog(agentworkflow.CatalogOptions{
 		Model: contract.Model, Timeout: contract.Timeout, MaxOutputTokens: agentStructuredMaxOutputTokens,
 	})
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	relationScheduler, err := newStructuredPhaseScheduler(cfg.StructuredSchedulerRelation)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	ragScheduler, err := newStructuredPhaseScheduler(cfg.StructuredSchedulerRAG)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	artifactScheduler, err := newStructuredPhaseScheduler(cfg.StructuredSchedulerArtifact)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	captureScheduler, err := newStructuredPhaseScheduler(cfg.StructuredSchedulerCapture)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	organizingScheduler, err := newStructuredPhaseScheduler(cfg.StructuredSchedulerOrganizing)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
@@ -2004,7 +2047,7 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 		return agentWorkflowComponents{}, err
 	}
 	relation, err := agentworkflow.NewExecutor(agentworkflow.ExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: repository, Knowledge: knowledgePort, Evidence: evidenceOpener,
+		Model: model, Scheduler: relationScheduler, Catalog: catalog, Repository: repository, Knowledge: knowledgePort, Evidence: evidenceOpener,
 		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(contract),
 	})
 	if err != nil {
@@ -2048,7 +2091,7 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 		return agentWorkflowComponents{}, err
 	}
 	rag, err := agentworkflow.NewRAGWorkflowExecutor(agentworkflow.RAGWorkflowExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: repository, Snapshots: repository,
+		Model: model, Scheduler: ragScheduler, Catalog: catalog, Repository: repository, Snapshots: repository,
 		Memory: memoryLoader, MemoryOwner: agentapplication.MemoryOwnerRef{Kind: string(memoryOwner.Kind), ID: memoryOwner.ID},
 		Context: conversationRepository,
 		Search:  retrievalAdapter, Retrieval: retrievalAdapter, Eligibility: knowledgePort, Topics: topicAdapter,
@@ -2060,6 +2103,8 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 	}
 	return agentWorkflowComponents{
 		relation: relation, rag: rag, model: model, contract: contract,
+		relationScheduler: relationScheduler, ragScheduler: ragScheduler,
+		artifactScheduler: artifactScheduler, captureScheduler: captureScheduler, organizingScheduler: organizingScheduler,
 		capability: agentCapabilityStatus{available: true},
 	}, nil
 }
@@ -2078,6 +2123,7 @@ func newCaptureProfileGenerator(
 	model agentapplication.ChatModel,
 	contract platformmodels.ChatContract,
 	modelRuns *agentpostgres.Repository,
+	scheduler agentapplication.StructuredPhaseScheduler,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
 ) (captureworkflow.ProfileGenerator, agentCapabilityStatus, error) {
@@ -2105,7 +2151,7 @@ func newCaptureProfileGenerator(
 	}
 	profileRef := agentworkflow.DefaultProfileRef()
 	generator, err := captureprofile.NewGenerator(captureprofile.GeneratorDependencies{
-		Repository: profileRepository, ModelRuns: modelRuns, Model: model, Catalog: catalog,
+		Repository: profileRepository, ModelRuns: modelRuns, Model: model, Scheduler: scheduler, Catalog: catalog,
 		ModelProfileRef: profileRef, Budget: agentApplicationBudget(contract), IDs: ids, Clock: clock,
 	})
 	if err != nil {
@@ -2141,6 +2187,7 @@ func newArtifactWorkflowComponents(
 	terminal *artifactpostgres.SectionGenerationTerminalHook,
 	model agentapplication.ChatModel,
 	contract platformmodels.ChatContract,
+	scheduler agentapplication.StructuredPhaseScheduler,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
 	embedders ...retrievalapplication.Embedder,
@@ -2208,7 +2255,7 @@ func newArtifactWorkflowComponents(
 		return artifactWorkflowComponents{}, err
 	}
 	executor, err := artifactworkflow.NewExecutor(artifactworkflow.ExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: agentRepository, Context: generation,
+		Model: model, Scheduler: scheduler, Catalog: catalog, Repository: agentRepository, Context: generation,
 		Retrieval: retrievalAdapter, Eligibility: eligibility, Finalizer: generation,
 		IDs: ids, Clock: clock, Budget: agentApplicationBudget(contract),
 	})

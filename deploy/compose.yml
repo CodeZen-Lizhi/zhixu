@@ -20,6 +20,14 @@ x-runtime-environment: &runtime-environment
 x-model-settings-environment: &model-settings-environment
   ZHIXU_MODEL_SETTINGS_MODE: ${ZHIXU_MODEL_SETTINGS_MODE:-managed}
   ZHIXU_MODEL_SETTINGS_KEY_FILE: /run/zhixu-model-secrets/model-settings.key
+  ZHIXU_CHAT_IMPLEMENTATION: ${ZHIXU_CHAT_IMPLEMENTATION:-direct}
+
+x-structured-scheduler-environment: &structured-scheduler-environment
+  ZHIXU_STRUCTURED_SCHEDULER_RAG: ${ZHIXU_STRUCTURED_SCHEDULER_RAG:-direct}
+  ZHIXU_STRUCTURED_SCHEDULER_RELATION: ${ZHIXU_STRUCTURED_SCHEDULER_RELATION:-direct}
+  ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT: ${ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT:-direct}
+  ZHIXU_STRUCTURED_SCHEDULER_CAPTURE: ${ZHIXU_STRUCTURED_SCHEDULER_CAPTURE:-direct}
+  ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING: ${ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING:-direct}
 
 x-api-auth-environment: &api-auth-environment
   ZHIXU_AUTH_MODE: ${ZHIXU_AUTH_MODE:-required}
@@ -173,7 +181,7 @@ services:
     restart: ${ZHIXU_WORKER_RESTART_POLICY:-on-failure}
     entrypoint: ["/app/zhixu-worker"]
     environment:
-      <<: [*tool-environment, *runtime-environment, *model-settings-environment]
+      <<: [*tool-environment, *runtime-environment, *model-settings-environment, *structured-scheduler-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
       ZHIXU_MODEL_SETTINGS_ROLLOUT_ID: ${ZHIXU_MODEL_SETTINGS_ROLLOUT_ID:-}
       ZHIXU_MODEL_SETTINGS_PREPARED: ${ZHIXU_MODEL_SETTINGS_PREPARED:-false}

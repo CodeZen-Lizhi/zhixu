@@ -136,6 +136,28 @@ func TestBuildAllowsCanonicalDisabledRevision(t *testing.T) {
 	assertInvalid(t, NewConnectionTester(config.Defaults()).TestResolvedConnection(context.Background(), ConnectionTargetChat, domain.ResolvedSettings{Settings: domain.CanonicalDisabledSettings()}))
 }
 
+func TestBuildPreservesProcessChatImplementationForManagedRuntime(t *testing.T) {
+	t.Parallel()
+	base := config.Defaults()
+	base.ChatImplementation = config.ChatImplementationEino
+	settings := domain.CanonicalDisabledSettings()
+	settings.Chat.Provider = domain.ChatProviderOpenAICompatible
+	settings.Chat.BaseURL = managedOllamaBaseURL
+	settings.Chat.Model = "chat-v1"
+	settings.Chat.ModelVersion = "chat-v1"
+	modelsRuntime, err := Build(base, domain.ResolvedSettings{Revision: 7, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat := modelsRuntime.Chat().Model()
+	if _, ok := chat.(*platformmodels.EinoOpenAIChatModel); !ok {
+		t.Fatalf("chat model=%T", chat)
+	}
+	if chat != modelsRuntime.Chat().Model() || modelsRuntime.Revision() != 7 {
+		t.Fatal("managed runtime did not retain one frozen Chat adapter")
+	}
+}
+
 func TestBuildBindsNonSensitiveRevisionAndClearsBaseCredentials(t *testing.T) {
 	t.Parallel()
 

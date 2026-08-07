@@ -32,6 +32,7 @@ type GeneratorDependencies struct {
 	Repository      captureapplication.ProfileGenerationRepository
 	ModelRuns       agentapplication.ModelRunRepository
 	Model           agentapplication.ChatModel
+	Scheduler       agentapplication.StructuredPhaseScheduler
 	Catalog         *agentapplication.RuntimeCatalog
 	ModelProfileRef agentdomain.ModelProfileRef
 	Budget          agentapplication.RunBudget
@@ -44,6 +45,7 @@ type Generator struct {
 	repository      captureapplication.ProfileGenerationRepository
 	modelRuns       agentapplication.ModelRunRepository
 	model           agentapplication.ChatModel
+	scheduler       agentapplication.StructuredPhaseScheduler
 	catalog         *agentapplication.RuntimeCatalog
 	modelProfileRef agentdomain.ModelProfileRef
 	budget          agentapplication.RunBudget
@@ -63,11 +65,11 @@ func NewGenerator(dependencies GeneratorDependencies) (*Generator, error) {
 	if dependencies.Budget == (agentapplication.RunBudget{}) {
 		dependencies.Budget = agentapplication.DefaultRunBudget()
 	}
-	if _, err := agentapplication.NewStructuredRunner(dependencies.Model, dependencies.Catalog, dependencies.Budget); err != nil {
+	if _, err := agentapplication.NewStructuredRunnerWithScheduler(dependencies.Model, dependencies.Catalog, dependencies.Budget, dependencies.Scheduler); err != nil {
 		return nil, err
 	}
 	return &Generator{
-		repository: dependencies.Repository, modelRuns: dependencies.ModelRuns, model: dependencies.Model,
+		repository: dependencies.Repository, modelRuns: dependencies.ModelRuns, model: dependencies.Model, scheduler: dependencies.Scheduler,
 		catalog: dependencies.Catalog, modelProfileRef: dependencies.ModelProfileRef,
 		budget: dependencies.Budget, ids: dependencies.IDs, clock: dependencies.Clock,
 	}, nil
@@ -175,7 +177,7 @@ func (generator *Generator) Generate(ctx context.Context, request captureapplica
 		return captureapplication.ProfileGenerationResult{}, generator.failPrepared(ctx, request.Capture.WorkspaceID, bound, run,
 			capturedomain.ProfileStatusFailed, err)
 	}
-	runner, err := agentapplication.NewStructuredRunner(recorded, generator.catalog, generator.budget)
+	runner, err := agentapplication.NewStructuredRunnerWithScheduler(recorded, generator.catalog, generator.budget, generator.scheduler)
 	if err != nil {
 		return captureapplication.ProfileGenerationResult{}, generator.failPrepared(ctx, request.Capture.WorkspaceID, bound, run,
 			capturedomain.ProfileStatusFailed, err)

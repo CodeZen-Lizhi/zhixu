@@ -54,8 +54,24 @@ func (model *OpenAICompatibleChatModel) Chat(ctx context.Context, request agenta
 	if model == nil {
 		return agentapplication.ChatResponse{}, chatError(foundation.ErrorDependencyUnavailable, ErrorCodeChatCapabilityUnavailable, false, errChatCapabilityOff)
 	}
+	payload := buildOpenAIChatRequest(model.http.contract.Model.ModelID, request)
+	var response openAIChatResponse
+	if err := model.http.chat(ctx, request, payload, &response); err != nil {
+		return agentapplication.ChatResponse{}, err
+	}
+	result, err := validateOpenAIChatResponse(model.http.contract.Model, response)
+	if err != nil {
+		return agentapplication.ChatResponse{}, err
+	}
+	if err := agentapplication.ValidateChatResponse(request, result); err != nil {
+		return agentapplication.ChatResponse{}, err
+	}
+	return result, nil
+}
+
+func buildOpenAIChatRequest(modelID string, request agentapplication.ChatRequest) openAIChatRequest {
 	payload := openAIChatRequest{
-		Model:     model.http.contract.Model.ModelID,
+		Model:     modelID,
 		Messages:  make([]openAIChatRequestMessage, len(request.Messages)),
 		MaxTokens: request.MaxOutputTokens,
 		ResponseFormat: openAIChatResponseFormat{
@@ -70,18 +86,7 @@ func (model *OpenAICompatibleChatModel) Chat(ctx context.Context, request agenta
 	for index, message := range request.Messages {
 		payload.Messages[index] = openAIChatRequestMessage{Role: string(message.Role), Content: message.Content}
 	}
-	var response openAIChatResponse
-	if err := model.http.chat(ctx, request, payload, &response); err != nil {
-		return agentapplication.ChatResponse{}, err
-	}
-	result, err := validateOpenAIChatResponse(model.http.contract.Model, response)
-	if err != nil {
-		return agentapplication.ChatResponse{}, err
-	}
-	if err := agentapplication.ValidateChatResponse(request, result); err != nil {
-		return agentapplication.ChatResponse{}, err
-	}
-	return result, nil
+	return payload
 }
 
 // String 返回不含 Endpoint、Credential、Prompt 或原始响应的 Adapter 摘要。

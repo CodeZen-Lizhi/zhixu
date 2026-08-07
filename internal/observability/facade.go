@@ -55,6 +55,10 @@ const (
 	MetricDuplicateDeliveryTotal = platform.MetricDuplicateDeliveryTotal
 	// MetricShutdownTotal 是 Worker 关闭结果计数。
 	MetricShutdownTotal = platform.MetricShutdownTotal
+	// MetricModelCallDuration 是 Eino Chat callback 观测到的调用耗时。
+	MetricModelCallDuration = platform.MetricModelCallDuration
+	// MetricModelCallTotal 是 Eino Chat callback 观测到的调用结果计数。
+	MetricModelCallTotal = platform.MetricModelCallTotal
 )
 
 var (

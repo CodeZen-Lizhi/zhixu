@@ -130,8 +130,8 @@ type ModelRuntime struct {
 	embedding EmbeddingCapability
 }
 
-// NewConfiguredModelRuntime validates model configuration and constructs each enabled adapter once.
-func NewConfiguredModelRuntime(cfg config.Config) (*ModelRuntime, error) {
+// NewConfiguredModelRuntime 校验模型配置，并使用可选项目 telemetry 各构造一次已启用 Adapter。
+func NewConfiguredModelRuntime(cfg config.Config, telemetry ...ModelTelemetry) (*ModelRuntime, error) {
 	if err := cfg.ValidateModels(); err != nil {
 		return nil, fmt.Errorf("model runtime configuration is invalid: %w", err)
 	}
@@ -140,7 +140,7 @@ func NewConfiguredModelRuntime(cfg config.Config) (*ModelRuntime, error) {
 		embedding: EmbeddingCapability{state: CapabilityDisabled},
 	}
 	if cfg.ChatProvider != config.ChatProviderDisabled {
-		chat, err := NewConfiguredChatModel(cfg)
+		chat, err := NewConfiguredChatModel(cfg, telemetry...)
 		if err != nil {
 			return nil, err
 		}

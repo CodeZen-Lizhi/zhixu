@@ -239,6 +239,25 @@ func TestWorkerChatCompositionRegistersRelationAndRAGTogether(t *testing.T) {
 	if agent.relation == nil || agent.rag == nil || !agent.capability.available || agent.capability.code != "" {
 		t.Fatalf("agent components=%+v", agent)
 	}
+	if agent.relationScheduler != nil || agent.ragScheduler != nil || agent.artifactScheduler != nil ||
+		agent.captureScheduler != nil || agent.organizingScheduler != nil {
+		t.Fatalf("direct selectors unexpectedly compiled Eino schedulers: %+v", agent)
+	}
+	einoCfg := cfg
+	einoCfg.StructuredSchedulerRelation = config.StructuredSchedulerImplementationEino
+	einoCfg.StructuredSchedulerRAG = config.StructuredSchedulerImplementationEino
+	einoCfg.StructuredSchedulerArtifact = config.StructuredSchedulerImplementationEino
+	einoCfg.StructuredSchedulerCapture = config.StructuredSchedulerImplementationEino
+	einoCfg.StructuredSchedulerOrganizing = config.StructuredSchedulerImplementationEino
+	einoAgent, err := newAgentWorkflowComponents(pool, einoCfg, workspaceRepository, memoryService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if einoAgent.relation == nil || einoAgent.rag == nil || einoAgent.relationScheduler == nil ||
+		einoAgent.ragScheduler == nil || einoAgent.artifactScheduler == nil || einoAgent.captureScheduler == nil ||
+		einoAgent.organizingScheduler == nil || !einoAgent.capability.available {
+		t.Fatalf("Eino selectors were not wired through Worker composition: %+v", einoAgent)
+	}
 
 	worker, err := newWorkerComponents(pool, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), observability.NewMemoryMetrics())
 	if err != nil {

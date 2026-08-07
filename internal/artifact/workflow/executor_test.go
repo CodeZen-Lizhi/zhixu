@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	agenteino "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/eino"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	artifactapplication "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
@@ -44,6 +46,103 @@ func TestExecutorReplaysFinalReceiptBeforeContextRetrievalOrProvider(t *testing.
 		model.CallCount() != 0 || repository.createCalls != 0 {
 		t.Fatalf("finalizer=%#v loader=%#v retrieval=%#v model_calls=%d repository=%#v", finalizer, loader, retrieval, model.CallCount(), repository)
 	}
+}
+
+func TestExecutorRetainsConfiguredEinoStructuredScheduler(t *testing.T) {
+	scheduler := newArtifactTrackingEinoScheduler(t)
+	executor := newArtifactExecutorWithScheduler(
+		t,
+		agentapplication.NewDeterministicChatModel(),
+		&artifactModelRepository{},
+		&artifactContextLoaderFake{},
+		&artifactRetrievalFake{},
+		artifactEligibilityFake{},
+		&artifactFinalizerFake{},
+		nil,
+		scheduler,
+	)
+	if executor.dependencies.Scheduler != scheduler {
+		t.Fatalf("scheduler=%T want=%T", executor.dependencies.Scheduler, scheduler)
+	}
+}
+
+func TestExecutorExecutesEinoStructuredSchedulerRepairWithoutChangingTerminalReceipt(t *testing.T) {
+	source, current := artifactSourceAndAdvancedCurrent(t)
+	input := Input{
+		SchemaVersion: InputSchemaVersion, ArtifactID: source.Artifact.ID, RevisionID: source.Revision.ID,
+		RevisionNo: source.Revision.RevisionNo, ArtifactVersion: source.Artifact.Version, SectionKey: "second",
+	}
+	scheduler := newArtifactTrackingEinoScheduler(t)
+	model := agentapplication.NewDeterministicChatModel(
+		agentapplication.DeterministicChatStep{Response: agentapplication.ChatResponse{
+			Model: artifactTestModelRef(), Content: []byte(`{}`), Usage: agentdomain.TokenUsage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5},
+		}},
+		agentapplication.DeterministicChatStep{Response: agentapplication.ChatResponse{
+			Model: artifactTestModelRef(), Content: sectionGenerationDocument(t, SectionGenerationPayload{
+				CoverageStatus: artifactdomain.CoverageGap, Content: "", CitationLabels: []string{},
+				Gaps: []GapOutput{{Code: "missing-second", Description: "no approved evidence"}},
+			}), Usage: agentdomain.TokenUsage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5},
+		}},
+	)
+	repository := &artifactModelRepository{}
+	finalizer := &artifactFinalizerFake{current: current}
+	executor := newArtifactExecutorWithScheduler(
+		t, model, repository,
+		&artifactContextLoaderFake{result: GenerationContext{
+			Current: current, SourceRevision: source.Revision, ProfileRef: artifactTestProfileRef(),
+		}},
+		&artifactRetrievalFake{batch: agentapplication.RetrievalBatch{
+			WorkspaceID: source.Artifact.WorkspaceID, IndexVersionID: artifactWorkflowTestID(30), Items: []agentapplication.RetrievedEvidence{},
+		}},
+		artifactEligibilityFake{}, finalizer,
+		[]foundation.ID{artifactWorkflowTestID(40), artifactWorkflowTestID(41), artifactWorkflowTestID(42)}, scheduler,
+	)
+
+	result, err := executor.Execute(context.Background(), artifactExecutionForInput(t, input, source.Artifact.WorkspaceID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := DecodeOutputReceipt(result.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheduler.calls.Load() != 1 || receipt != finalizer.receipt || receipt.ModelRunID != repository.run.ID ||
+		finalizer.lookupCalls != 1 || finalizer.finalizeCalls != 1 {
+		t.Fatalf("scheduler_calls=%d receipt=%#v finalizer=%#v run=%#v", scheduler.calls.Load(), receipt, finalizer, repository.run)
+	}
+	if finalizer.command.Proposal.Coverage.Status != artifactdomain.CoverageGap || finalizer.command.Proposal.Content != "" ||
+		len(finalizer.command.Proposal.Citations) != 0 || finalizer.command.Proposal.Metadata.SchemaVersion != RuntimeVersion {
+		t.Fatalf("finalize command=%#v", finalizer.command)
+	}
+	calls := model.Calls()
+	if len(calls) != 2 || calls[0].Phase != agentdomain.ModelCallInitial || calls[1].Phase != agentdomain.ModelCallRepair ||
+		calls[0].SchemaRef != ReducedSchemaRef() || calls[1].SchemaRef != ReducedSchemaRef() || len(repository.calls) != 2 {
+		t.Fatalf("provider_calls=%#v persisted_calls=%#v", calls, repository.calls)
+	}
+	for index, call := range repository.calls {
+		if call.CallNo != index+1 || call.Phase != calls[index].Phase || call.Status != agentdomain.ModelCallSucceeded {
+			t.Fatalf("persisted_call[%d]=%#v provider_call=%#v", index, call, calls[index])
+		}
+	}
+}
+
+type artifactTrackingScheduler struct {
+	delegate agentapplication.StructuredPhaseScheduler
+	calls    atomic.Int64
+}
+
+func newArtifactTrackingEinoScheduler(t *testing.T) *artifactTrackingScheduler {
+	t.Helper()
+	scheduler, err := agenteino.NewStructuredPhaseScheduler(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &artifactTrackingScheduler{delegate: scheduler}
+}
+
+func (scheduler *artifactTrackingScheduler) Schedule(ctx context.Context, run *agentapplication.StructuredPhaseRun) error {
+	scheduler.calls.Add(1)
+	return scheduler.delegate.Schedule(ctx, run)
 }
 
 func TestExecutorGeneratesFromFrozenSourceAndRebasesOntoCurrentRevision(t *testing.T) {
@@ -235,9 +334,23 @@ func newArtifactExecutor(
 	finalizer *artifactFinalizerFake,
 	ids []foundation.ID,
 ) *Executor {
+	return newArtifactExecutorWithScheduler(t, model, repository, loader, retrieval, eligibility, finalizer, ids, nil)
+}
+
+func newArtifactExecutorWithScheduler(
+	t *testing.T,
+	model agentapplication.ChatModel,
+	repository *artifactModelRepository,
+	loader *artifactContextLoaderFake,
+	retrieval *artifactRetrievalFake,
+	eligibility artifactEligibilityFake,
+	finalizer *artifactFinalizerFake,
+	ids []foundation.ID,
+	scheduler agentapplication.StructuredPhaseScheduler,
+) *Executor {
 	t.Helper()
 	executor, err := NewExecutor(ExecutorDependencies{
-		Model: model, Catalog: newArtifactRuntimeCatalog(t), Repository: repository, Context: loader,
+		Model: model, Scheduler: scheduler, Catalog: newArtifactRuntimeCatalog(t), Repository: repository, Context: loader,
 		Retrieval: retrieval, Eligibility: eligibility, Finalizer: finalizer,
 		IDs: &artifactIDs{values: ids}, Clock: &artifactClock{next: time.Unix(1_000, 0).UTC()},
 		Budget: agentapplication.DefaultRunBudget(),

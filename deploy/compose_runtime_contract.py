@@ -161,6 +161,28 @@ def main() -> None:
         lambda model: model["services"]["worker"]["environment"].update(ZHIXU_CHAT_API_KEY="canary"),
     )
     expect_invalid(
+        "unknown chat implementation",
+        managed,
+        lambda model: model["services"]["app"]["environment"].update(ZHIXU_CHAT_IMPLEMENTATION="automatic"),
+    )
+    expect_invalid(
+        "API Worker chat implementation mismatch",
+        managed,
+        lambda model: model["services"]["worker"]["environment"].update(ZHIXU_CHAT_IMPLEMENTATION="eino"),
+    )
+    expect_invalid(
+        "modelctl chat implementation mismatch",
+        managed,
+        lambda model: model["services"]["modelctl"]["environment"].update(ZHIXU_CHAT_IMPLEMENTATION="eino"),
+    )
+    expect_invalid(
+        "unknown structured scheduler implementation",
+        managed,
+        lambda model: model["services"]["worker"]["environment"].update(
+            ZHIXU_STRUCTURED_SCHEDULER_RAG="automatic"
+        ),
+    )
+    expect_invalid(
         "Docker socket",
         managed,
         lambda model: model["services"]["modelctl"]["volumes"].append(

@@ -16,9 +16,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	agenteino "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/eino"
 	agentknowledge "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/knowledge"
 	agentmemory "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/memory"
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
@@ -47,8 +49,11 @@ import (
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
+	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 const (
@@ -71,13 +76,45 @@ func TestPublicConversationRunsThroughRiverRAGAndFeedback(t *testing.T) {
 	if baseURL == "" {
 		t.Skip("set ZHIXU_TEST_DATABASE_URL for the RAG Conversation integration gate")
 	}
+	for _, test := range []struct {
+		name      string
+		scheduler func(*testing.T) *ragIntegrationTrackingScheduler
+	}{
+		{name: "direct", scheduler: func(*testing.T) *ragIntegrationTrackingScheduler { return nil }},
+		{name: "eino", scheduler: func(t *testing.T) *ragIntegrationTrackingScheduler {
+			t.Helper()
+			scheduler, err := agenteino.NewStructuredPhaseScheduler(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &ragIntegrationTrackingScheduler{delegate: scheduler}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tracking := test.scheduler(t)
+			var scheduler agentapplication.StructuredPhaseScheduler
+			if tracking != nil {
+				scheduler = tracking
+			}
+			runRAGConversationIntegration(t, baseURL, scheduler, tracking)
+		})
+	}
+}
+
+func runRAGConversationIntegration(
+	t *testing.T,
+	baseURL string,
+	scheduler agentapplication.StructuredPhaseScheduler,
+	tracking *ragIntegrationTrackingScheduler,
+) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	pool := newMigratedWorkerTestPool(t, baseURL)
 	seedRAGConversationKnowledge(t, ctx, pool, t.TempDir())
 
 	model := &ragRequestAwareModel{}
-	router, workerClient, eventStore := newRAGConversationIntegrationRuntime(t, pool, model)
+	router, workerClient, runtimeWorker, eventStore := newRAGConversationIntegrationRuntime(t, pool, model, scheduler)
 	server := httptest.NewServer(router)
 	defer server.Close()
 	if err := workerClient.Start(ctx); err != nil {
@@ -107,6 +144,8 @@ func TestPublicConversationRunsThroughRiverRAGAndFeedback(t *testing.T) {
 	waitForRAGAnswerHTTP(t, ctx, pool, model, server.URL, answerID)
 	answer := doRAGGET(t, ctx, server.URL+"/api/v1/answers/"+answerID+"?workspace_id="+string(ragSmokeWorkspaceID), http.StatusOK)
 	assertCompletedRAGAnswer(t, answer)
+	workflowRunID := foundation.ID(mustRAGNestedString(t, answer, "workflow", "run_id"))
+	assertRAGWorkflowAudit(t, ctx, pool, workflowRunID)
 
 	providerCalls := model.CallCount()
 	if providerCalls != 3 {
@@ -116,6 +155,16 @@ func TestPublicConversationRunsThroughRiverRAGAndFeedback(t *testing.T) {
 	if mustRAGNestedString(t, replayed, "answer", "id") != answerID || model.CallCount() != providerCalls {
 		t.Fatalf("exact replay changed answer or repeated provider: replay=%v calls=%d", replayed, model.CallCount())
 	}
+	beforeRedelivery := ragKnowledgeAndAnswerSnapshot(t, ctx, pool, answerID)
+	redeliverCompletedRAGNode(t, ctx, pool, runtimeWorker, workflowRunID)
+	afterRedelivery := ragKnowledgeAndAnswerSnapshot(t, ctx, pool, answerID)
+	if beforeRedelivery != afterRedelivery || model.CallCount() != providerCalls {
+		t.Fatalf("River redelivery changed durable result or repeated provider: before=%+v after=%+v calls=%d", beforeRedelivery, afterRedelivery, model.CallCount())
+	}
+	if tracking != nil && tracking.calls.Load() != 1 {
+		t.Fatalf("Eino scheduler calls=%d want=1", tracking.calls.Load())
+	}
+	assertRAGWorkflowAudit(t, ctx, pool, workflowRunID)
 
 	assertRAGSSEReplay(t, ctx, server.URL, watermark, answerID)
 	before := ragKnowledgeAndAnswerSnapshot(t, ctx, pool, answerID)
@@ -132,7 +181,22 @@ func TestPublicConversationRunsThroughRiverRAGAndFeedback(t *testing.T) {
 	}
 }
 
-func newRAGConversationIntegrationRuntime(t *testing.T, pool *pgxpool.Pool, model agentapplication.ChatModel) (http.Handler, *riveradapter.Client, *eventspostgres.Store) {
+type ragIntegrationTrackingScheduler struct {
+	delegate agentapplication.StructuredPhaseScheduler
+	calls    atomic.Int64
+}
+
+func (scheduler *ragIntegrationTrackingScheduler) Schedule(ctx context.Context, run *agentapplication.StructuredPhaseRun) error {
+	scheduler.calls.Add(1)
+	return scheduler.delegate.Schedule(ctx, run)
+}
+
+func newRAGConversationIntegrationRuntime(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	model agentapplication.ChatModel,
+	scheduler agentapplication.StructuredPhaseScheduler,
+) (http.Handler, *riveradapter.Client, *riveradapter.RuntimeNodeWorker, *eventspostgres.Store) {
 	t.Helper()
 	events, err := eventspostgres.NewStore(pool)
 	if err != nil {
@@ -225,7 +289,7 @@ func newRAGConversationIntegrationRuntime(t *testing.T, pool *pgxpool.Pool, mode
 		t.Fatal(err)
 	}
 	ragExecutor, err := agentworkflow.NewRAGWorkflowExecutor(agentworkflow.RAGWorkflowExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: agentRepository, Snapshots: agentRepository,
+		Model: model, Scheduler: scheduler, Catalog: catalog, Repository: agentRepository, Snapshots: agentRepository,
 		Memory: memoryLoader, MemoryOwner: agentapplication.MemoryOwnerRef{Kind: string(memoryOwner.Kind), ID: memoryOwner.ID},
 		Context: conversationRepository,
 		Search:  retrievalAdapter, Retrieval: retrievalAdapter, Eligibility: knowledgeAdapter, Topics: topicAdapter,
@@ -287,7 +351,88 @@ func newRAGConversationIntegrationRuntime(t *testing.T, pool *pgxpool.Pool, mode
 	conversationHandler := conversationhttp.NewHandler(service, conversationhttp.NewCursorCodec())
 	eventHandler := eventshttp.NewHandler(events, eventshttp.StreamConfig{PollInterval: 10 * time.Millisecond, HeartbeatInterval: 100 * time.Millisecond})
 	router := app.NewRouter(app.Dependencies{Version: "rag-integration", Database: pool, Conversation: conversationHandler, Events: eventHandler, RAGEnabled: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	return router, workerClient, events
+	return router, workerClient, runtimeWorker, events
+}
+
+func assertRAGWorkflowAudit(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workflowRunID foundation.ID) {
+	t.Helper()
+	var modelRunStatus, finalResultType, phases, callStatuses string
+	var callCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT run.status,COALESCE(run.final_result_type,''),count(call.id),
+			COALESCE(string_agg(call.phase::text,',' ORDER BY call.call_no),''),
+			COALESCE(string_agg(call.status::text,',' ORDER BY call.call_no),'')
+		FROM agent.model_run run
+		LEFT JOIN agent.model_call call ON call.model_run_id=run.id
+		WHERE run.workflow_run_id=$1
+		GROUP BY run.id,run.status,run.final_result_type`, string(workflowRunID)).Scan(
+		&modelRunStatus, &finalResultType, &callCount, &phases, &callStatuses,
+	); err != nil {
+		t.Fatal(err)
+	}
+	wantPhases := strings.Join([]string{
+		string(agentdomain.ModelCallPlan), string(agentdomain.ModelCallInitial), string(agentdomain.ModelCallReview),
+	}, ",")
+	wantCallStatuses := strings.Join([]string{
+		string(agentdomain.ModelCallSucceeded), string(agentdomain.ModelCallSucceeded), string(agentdomain.ModelCallSucceeded),
+	}, ",")
+	if modelRunStatus != string(agentdomain.ModelRunSucceeded) || finalResultType != agentdomain.ResultTypeRAGAnswer ||
+		callCount != 3 || phases != wantPhases || callStatuses != wantCallStatuses {
+		t.Fatalf("model audit status=%s result=%s calls=%d phases=%s call_statuses=%s", modelRunStatus, finalResultType, callCount, phases, callStatuses)
+	}
+
+	var runStatus, nodeStatus, attemptStatus string
+	var attemptCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT run.status,node.status,attempt.status,count(*) OVER ()
+		FROM workflow.run run
+		JOIN workflow.node_run node ON node.run_id=run.id
+		JOIN workflow.node_attempt attempt ON attempt.node_run_id=node.id
+		WHERE run.id=$1
+		ORDER BY attempt.attempt_no DESC
+		LIMIT 1`, string(workflowRunID)).Scan(&runStatus, &nodeStatus, &attemptStatus, &attemptCount); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != string(workflowdomain.RunStatusSucceeded) || nodeStatus != string(workflowdomain.NodeStatusSucceeded) ||
+		attemptStatus != string(workflowdomain.AttemptStatusSucceeded) || attemptCount != 1 {
+		t.Fatalf("workflow audit run=%s node=%s attempt=%s attempt_count=%d", runStatus, nodeStatus, attemptStatus, attemptCount)
+	}
+}
+
+func redeliverCompletedRAGNode(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	worker *riveradapter.RuntimeNodeWorker,
+	workflowRunID foundation.ID,
+) {
+	t.Helper()
+	if worker == nil {
+		t.Fatal("runtime worker is nil")
+	}
+	var nodeRunID foundation.ID
+	var dispatchNo, riverJobAttempt int
+	var riverJobID int64
+	if err := pool.QueryRow(ctx, `
+		SELECT node.id,node.dispatch_no,attempt.river_job_id,attempt.river_job_attempt
+		FROM workflow.node_run node
+		JOIN workflow.node_attempt attempt ON attempt.node_run_id=node.id
+		WHERE node.run_id=$1
+		ORDER BY attempt.attempt_no DESC
+		LIMIT 1`, string(workflowRunID)).Scan(&nodeRunID, &dispatchNo, &riverJobID, &riverJobAttempt); err != nil {
+		t.Fatal(err)
+	}
+	job := &river.Job[riveradapter.NodeJobArgs]{
+		JobRow: &rivertype.JobRow{ID: riverJobID, Attempt: riverJobAttempt + 1},
+		Args: riveradapter.NodeJobArgs{
+			SchemaVersion: riveradapter.NodeJobSchemaVersion,
+			NodeRunID:     nodeRunID,
+			DispatchNo:    dispatchNo,
+		},
+	}
+	if err := worker.Work(ctx, job); err != nil {
+		t.Fatalf("redeliver completed RAG node: %v", err)
+	}
 }
 
 type ragRequestAwareModel struct {

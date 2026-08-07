@@ -88,8 +88,8 @@ func (validator Validator) ValidateModelSettings(_ context.Context, settings mod
 	return err
 }
 
-// Build constructs production Chat and Embedding adapters for one resolved revision.
-func Build(base config.Config, resolved modelsettingsdomain.ResolvedSettings) (*Models, error) {
+// Build 使用同一生产 Factory 和可选项目 telemetry 构造指定 revision 的 Chat 与 Embedding Adapter。
+func Build(base config.Config, resolved modelsettingsdomain.ResolvedSettings, telemetry ...platformmodels.ModelTelemetry) (*Models, error) {
 	if resolved.Revision < 0 {
 		return nil, invalid(errors.New("model runtime revision is invalid"))
 	}
@@ -97,12 +97,12 @@ func Build(base config.Config, resolved modelsettingsdomain.ResolvedSettings) (*
 	if err != nil {
 		return nil, err
 	}
-	return newModels(cfg, resolved.Revision)
+	return newModels(cfg, resolved.Revision, telemetry...)
 }
 
-func newModels(cfg config.Config, revision int64) (*Models, error) {
+func newModels(cfg config.Config, revision int64, telemetry ...platformmodels.ModelTelemetry) (*Models, error) {
 	defer forgetModelCredentials(&cfg)
-	runtime, err := platformmodels.NewConfiguredModelRuntime(cfg)
+	runtime, err := platformmodels.NewConfiguredModelRuntime(cfg, telemetry...)
 	if err != nil {
 		return nil, err
 	}
@@ -170,13 +170,16 @@ func overlay(base config.Config, settings modelsettingsdomain.Settings, chatKey,
 }
 
 // ConnectionTester executes minimal requests through the production adapters.
-type ConnectionTester struct{ base config.Config }
+type ConnectionTester struct {
+	base      config.Config
+	telemetry []platformmodels.ModelTelemetry
+}
 
 var _ modelsettingsapplication.ResolvedConnectionTester = (*ConnectionTester)(nil)
 
-// NewConnectionTester creates a target-specific connection tester.
-func NewConnectionTester(base config.Config) *ConnectionTester {
-	return &ConnectionTester{base: WithoutModelCredentials(base)}
+// NewConnectionTester 创建复用生产模型 telemetry 的目标连接测试器。
+func NewConnectionTester(base config.Config, telemetry ...platformmodels.ModelTelemetry) *ConnectionTester {
+	return &ConnectionTester{base: WithoutModelCredentials(base), telemetry: append([]platformmodels.ModelTelemetry(nil), telemetry...)}
 }
 
 // TestChat tests one resolved Chat target without persisting or touching Embedding settings.
@@ -203,7 +206,7 @@ func (tester *ConnectionTester) TestResolvedConnection(ctx context.Context, targ
 	if tester == nil {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, modelsettingsdomain.ErrorCodeUnavailable, true, errors.New("model connection tester is unavailable"))
 	}
-	models, err := Build(tester.base, resolved)
+	models, err := Build(tester.base, resolved, tester.telemetry...)
 	if err != nil {
 		return err
 	}
