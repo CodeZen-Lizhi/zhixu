@@ -1808,3 +1808,24 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 44: 接入 OpenTelemetry 与 Prometheus
+
+**Date**: 2026-08-08
+**Task**: 接入 OpenTelemetry 与 Prometheus
+**Branch**: `dev`
+
+### Summary
+
+使用 OTel SDK/OTLP 替换生产 Trace Provider，使用 prometheus/client_golang 暴露 API/Worker /metrics，保留脱敏、有限标签、traceparent 传播和三种模式，并补齐生命周期、采集测试与文档。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ebaf20db8b131e0a34302c7e4daebf4eb1028e60` | (see git log) |
+
+### Status
+
+[OK] **Completed**
