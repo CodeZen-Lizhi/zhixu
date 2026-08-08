@@ -64,6 +64,12 @@ Apply embedded project migrations followed by River migrations. The command requ
 go run ./cmd/migrate
 ```
 
+API、Worker 和 Migrate 直接运行时接受可选 `-config <path>`，该参数只选择 YAML 文件；字段覆盖优先级固定为
+`环境变量 > YAML > Defaults()`。环境变量显式空值也算覆盖，不会回退到低优先级来源。每次加载使用独立
+Viper 实例，不启用全局单例、自动环境扫描或热更新；Worker/Migrate/ModelCtl 使用不读取 API-only Secret
+的 non-API profile，但其他共享配置仍完整校验。完整契约见
+[进程启动配置架构](docs/architecture/configuration.md)。
+
 Start the local control plane from the repository root. The launcher creates a
 Git-ignored `.env` with mode `0600`, runs migrations, exports a native Host
 Controller plus the built SPA from Docker, and prints a one-time fragment link.

@@ -2,7 +2,6 @@
 package config
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -21,8 +20,6 @@ import (
 	authorigin "github.com/CodeZen-Lizhi/zhixu/internal/auth/origin"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/operability"
-
-	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -175,22 +172,22 @@ const (
 // Config contains process settings, including connection secrets. Callers must
 // use String or GoString rather than serializing the struct for diagnostics.
 type Config struct {
-	AppName                    string        `yaml:"app_name"`
-	Version                    string        `yaml:"version"`
+	AppName                    string        `yaml:"app_name" validate:"notblank"`
+	Version                    string        `yaml:"version" validate:"notblank"`
 	Environment                string        `yaml:"environment"`
-	HTTPAddr                   string        `yaml:"http_addr"`
+	HTTPAddr                   string        `yaml:"http_addr" validate:"notblank"`
 	DatabaseURL                string        `yaml:"database_url"`
 	DatabaseHost               string        `yaml:"database_host"`
 	DatabasePort               string        `yaml:"database_port"`
 	DatabaseName               string        `yaml:"database_name"`
 	DatabaseUser               string        `yaml:"database_user"`
 	DatabasePassword           string        `yaml:"database_password"`
-	DatabaseMaxConns           int32         `yaml:"database_max_conns"`
-	DatabaseMinConns           int32         `yaml:"database_min_conns"`
-	DatabasePingTimeout        time.Duration `yaml:"database_ping_timeout"`
-	GraphQueryTimeout          time.Duration `yaml:"graph_query_timeout"`
-	HealthInterval             time.Duration `yaml:"health_interval"`
-	ShutdownTimeout            time.Duration `yaml:"shutdown_timeout"`
+	DatabaseMaxConns           int32         `yaml:"database_max_conns" validate:"gte=0"`
+	DatabaseMinConns           int32         `yaml:"database_min_conns" validate:"gte=0"`
+	DatabasePingTimeout        time.Duration `yaml:"database_ping_timeout" validate:"gt=0"`
+	GraphQueryTimeout          time.Duration `yaml:"graph_query_timeout" validate:"gt=0"`
+	HealthInterval             time.Duration `yaml:"health_interval" validate:"gt=0"`
+	ShutdownTimeout            time.Duration `yaml:"shutdown_timeout" validate:"gt=0"`
 	WebAssetsDir               string        `yaml:"web_assets_dir"`
 	WorkerQueue                string        `yaml:"worker_queue"`
 	WorkerMaxWorkers           int           `yaml:"worker_max_workers"`
@@ -361,17 +358,17 @@ func Load(path string) (Config, error) {
 	})
 }
 
-// LoadWorker reads Worker configuration without consuming the API-only
-// Bootstrap credential. Authentication is enforced at the API boundary; the
-// Worker still validates every configuration group it actually consumes.
+// LoadWorker reads Worker configuration through the non-API profile. It does
+// not query or retain API-only Bootstrap/Review secrets and skips their
+// validation, while still validating every other shared configuration group.
 func LoadWorker(path string) (Config, error) {
 	return loadNonAPIWithLookup(path, os.LookupEnv)
 }
 
-// LoadMigration reads migration configuration without consuming API-only
-// authentication credentials or validating API listener authentication rules.
-// Migrations only require database configuration and must be runnable before
-// the API process receives its Bootstrap credential.
+// LoadMigration uses the same non-API profile as Worker and ModelCtl. It does
+// not query or retain API-only Bootstrap/Review secrets, but it deliberately
+// keeps validation for every other shared configuration group rather than
+// reducing migration startup to database-only validation.
 func LoadMigration(path string) (Config, error) {
 	return loadNonAPIWithLookup(path, os.LookupEnv)
 }
@@ -401,409 +398,11 @@ func loadWorkerWithLookup(path string, lookup func(string) (string, bool)) (Conf
 }
 
 func loadWithLookup(path string, lookup func(string) (string, bool), options loadOptions) (Config, error) {
-	cfg := Defaults()
-	if path != "" {
-		if err := applyYAMLFile(path, &cfg); err != nil {
-			return cfg, err
-		}
-	}
-	if !options.consumeAPISecrets {
-		cfg.AuthBootstrapToken = ""
-		cfg.ReviewQuestionRefKey = ""
-		cfg.reviewQuestionRefKeyExplicit = false
-	}
-	if err := applyEnv(&cfg, lookup, options.consumeAPISecrets); err != nil {
-		return cfg, err
-	}
-	if options.consumeAPISecrets {
-		if err := materializeReviewQuestionRefKey(&cfg); err != nil {
-			return cfg, err
-		}
-	}
-	if !options.consumeAPISecrets {
-		cfg.AuthBootstrapToken = ""
-		cfg.ReviewQuestionRefKey = ""
-		cfg.reviewQuestionRefKeyExplicit = false
-	}
-	return cfg, cfg.validate(options.validateAuth)
-}
-
-// fileConfig keeps YAML duration values as strings so their parsing is
-// explicit and consistent across yaml.v3 versions. Pointer fields preserve
-// defaults when a YAML key is omitted.
-type fileConfig struct {
-	AppName                    *string `yaml:"app_name"`
-	Version                    *string `yaml:"version"`
-	Environment                *string `yaml:"environment"`
-	HTTPAddr                   *string `yaml:"http_addr"`
-	DatabaseURL                *string `yaml:"database_url"`
-	DatabaseHost               *string `yaml:"database_host"`
-	DatabasePort               *string `yaml:"database_port"`
-	DatabaseName               *string `yaml:"database_name"`
-	DatabaseUser               *string `yaml:"database_user"`
-	DatabasePassword           *string `yaml:"database_password"`
-	DatabaseMaxConns           *int32  `yaml:"database_max_conns"`
-	DatabaseMinConns           *int32  `yaml:"database_min_conns"`
-	DatabasePingTimeout        *string `yaml:"database_ping_timeout"`
-	GraphQueryTimeout          *string `yaml:"graph_query_timeout"`
-	HealthInterval             *string `yaml:"health_interval"`
-	ShutdownTimeout            *string `yaml:"shutdown_timeout"`
-	WebAssetsDir               *string `yaml:"web_assets_dir"`
-	WorkerQueue                *string `yaml:"worker_queue"`
-	WorkerMaxWorkers           *int    `yaml:"worker_max_workers"`
-	WorkerJobTimeout           *string `yaml:"worker_job_timeout"`
-	WorkerRescueStuckJobsAfter *string `yaml:"worker_rescue_stuck_jobs_after"`
-	WorkflowLeaseDuration      *string `yaml:"workflow_lease"`
-	WorkflowHeartbeatInterval  *string `yaml:"workflow_heartbeat"`
-
-	ReindexDispatchPollInterval *string `yaml:"reindex_dispatch_poll_interval"`
-	ReindexDispatchBatchSize    *int    `yaml:"reindex_dispatch_batch_size"`
-	ReindexDispatchErrorBackoff *string `yaml:"reindex_dispatch_error_backoff"`
-	ReindexLeaseDuration        *string `yaml:"reindex_lease_duration"`
-	ReindexHeartbeatInterval    *string `yaml:"reindex_heartbeat_interval"`
-
-	EmbeddingProvider           *EmbeddingProvider             `yaml:"embedding_provider"`
-	EmbeddingBaseURL            *string                        `yaml:"embedding_base_url"`
-	EmbeddingAPIKey             *string                        `yaml:"embedding_api_key"`
-	EmbeddingModel              *string                        `yaml:"embedding_model"`
-	EmbeddingDimensions         *int32                         `yaml:"embedding_dimensions"`
-	EmbeddingNormalization      *domain.EmbeddingNormalization `yaml:"embedding_normalization"`
-	EmbeddingDistanceMetric     *domain.DistanceMetric         `yaml:"embedding_distance_metric"`
-	EmbeddingMaxBatchSize       *int32                         `yaml:"embedding_max_batch_size"`
-	EmbeddingMaxInputBytes      *int32                         `yaml:"embedding_max_input_bytes"`
-	EmbeddingMaxBatchInputBytes *int64                         `yaml:"embedding_max_batch_input_bytes"`
-	EmbeddingTimeout            *string                        `yaml:"embedding_timeout"`
-	EmbeddingMaxResponseBytes   *int64                         `yaml:"embedding_max_response_bytes"`
-
-	ChatProvider         *ChatProvider `yaml:"chat_provider"`
-	ChatBaseURL          *string       `yaml:"chat_base_url"`
-	ChatAPIKey           *string       `yaml:"chat_api_key"`
-	ChatModel            *string       `yaml:"chat_model"`
-	ChatModelVersion     *string       `yaml:"chat_model_version"`
-	ChatAdapterVersion   *string       `yaml:"chat_adapter_version"`
-	ChatTimeout          *string       `yaml:"chat_timeout"`
-	ChatMaxRequestBytes  *int64        `yaml:"chat_max_request_bytes"`
-	ChatMaxResponseBytes *int64        `yaml:"chat_max_response_bytes"`
-
-	ModelSettingsMode      *ModelSettingsMode `yaml:"model_settings_mode"`
-	ModelSettingsKeyFile   *string            `yaml:"model_settings_key_file"`
-	GitSyncKeyFile         *string            `yaml:"git_sync_key_file"`
-	ModelSettingsRolloutID *string            `yaml:"model_settings_rollout_id"`
-	ModelSettingsPrepared  *bool              `yaml:"model_settings_prepared"`
-
-	ToolRuntimeMode *ToolMode `yaml:"tool_runtime_mode"`
-	WebFetchMode    *ToolMode `yaml:"web_fetch_mode"`
-
-	WebFetchTimeout                *string   `yaml:"web_fetch_timeout"`
-	WebFetchResponseHeaderTimeout  *string   `yaml:"web_fetch_response_header_timeout"`
-	WebFetchTLSHandshakeTimeout    *string   `yaml:"web_fetch_tls_handshake_timeout"`
-	WebFetchMaxRedirects           *int      `yaml:"web_fetch_max_redirects"`
-	WebFetchMaxURLBytes            *int      `yaml:"web_fetch_max_url_bytes"`
-	WebFetchMaxResponseHeaderBytes *int64    `yaml:"web_fetch_max_response_header_bytes"`
-	WebFetchMaxBodyBytes           *int64    `yaml:"web_fetch_max_body_bytes"`
-	WebFetchMaxTextBytes           *int      `yaml:"web_fetch_max_text_bytes"`
-	WebFetchMaxResolvedIPs         *int      `yaml:"web_fetch_max_resolved_ips"`
-	WebFetchAllowedContentTypes    *[]string `yaml:"web_fetch_allowed_content_types"`
-
-	RetrievalRRFK                     *int32 `yaml:"retrieval_rrf_k"`
-	RetrievalRRFLexicalCandidateLimit *int32 `yaml:"retrieval_rrf_lexical_candidate_limit"`
-	RetrievalRRFVectorCandidateLimit  *int32 `yaml:"retrieval_rrf_vector_candidate_limit"`
-	RetrievalRRFFusedCandidateLimit   *int32 `yaml:"retrieval_rrf_fused_candidate_limit"`
-	RetrievalRRFRerankCandidateLimit  *int32 `yaml:"retrieval_rrf_rerank_candidate_limit"`
-
-	WorkerSoftStopTimeout *string        `yaml:"worker_soft_stop_timeout"`
-	WorkerHardStopTimeout *string        `yaml:"worker_hard_stop_timeout"`
-	WorkerHealthAddr      *string        `yaml:"worker_health_addr"`
-	TelemetryMode         *TelemetryMode `yaml:"telemetry_mode"`
-	TelemetryEndpoint     *string        `yaml:"telemetry_endpoint"`
-
-	AuthMode           *AuthMode `yaml:"auth_mode"`
-	AuthBootstrapToken *string   `yaml:"auth_bootstrap_token"`
-	AuthSessionTTL     *string   `yaml:"auth_session_ttl"`
-	AuthAPITokenTTL    *string   `yaml:"auth_api_token_ttl"`
-	AuthSecureCookie   *bool     `yaml:"auth_secure_cookie"`
-	AuthAllowedOrigins *[]string `yaml:"auth_allowed_origins"`
-
-	ReviewQuestionRefKey *string `yaml:"review_question_ref_key"`
-}
-
-func applyYAMLFile(path string, cfg *Config) error {
-	data, err := os.ReadFile(path)
+	loader, err := newConfigLoader(lookup, options)
 	if err != nil {
-		return fmt.Errorf("read config file: %w", err)
+		return Config{}, err
 	}
-	var raw fileConfig
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&raw); err != nil {
-		return fmt.Errorf("parse config file: %w", err)
-	}
-	if raw.AppName != nil {
-		cfg.AppName = *raw.AppName
-	}
-	if raw.Version != nil {
-		cfg.Version = *raw.Version
-	}
-	if raw.Environment != nil {
-		cfg.Environment = *raw.Environment
-	}
-	if raw.HTTPAddr != nil {
-		cfg.HTTPAddr = *raw.HTTPAddr
-	}
-	if raw.DatabaseURL != nil {
-		cfg.DatabaseURL = *raw.DatabaseURL
-	}
-	if raw.DatabaseHost != nil {
-		cfg.DatabaseHost = *raw.DatabaseHost
-	}
-	if raw.DatabasePort != nil {
-		cfg.DatabasePort = *raw.DatabasePort
-	}
-	if raw.DatabaseName != nil {
-		cfg.DatabaseName = *raw.DatabaseName
-	}
-	if raw.DatabaseUser != nil {
-		cfg.DatabaseUser = *raw.DatabaseUser
-	}
-	if raw.DatabasePassword != nil {
-		cfg.DatabasePassword = *raw.DatabasePassword
-	}
-	if raw.DatabaseMaxConns != nil {
-		cfg.DatabaseMaxConns = *raw.DatabaseMaxConns
-	}
-	if raw.DatabaseMinConns != nil {
-		cfg.DatabaseMinConns = *raw.DatabaseMinConns
-	}
-	if raw.WebAssetsDir != nil {
-		cfg.WebAssetsDir = *raw.WebAssetsDir
-	}
-	if raw.WorkerQueue != nil {
-		cfg.WorkerQueue = *raw.WorkerQueue
-	}
-	if raw.WorkerMaxWorkers != nil {
-		cfg.WorkerMaxWorkers = *raw.WorkerMaxWorkers
-	}
-	if raw.ReindexDispatchBatchSize != nil {
-		cfg.ReindexDispatchBatchSize = *raw.ReindexDispatchBatchSize
-	}
-	if raw.EmbeddingProvider != nil {
-		cfg.EmbeddingProvider = *raw.EmbeddingProvider
-	}
-	if raw.EmbeddingBaseURL != nil {
-		cfg.EmbeddingBaseURL = *raw.EmbeddingBaseURL
-	}
-	if raw.EmbeddingAPIKey != nil {
-		cfg.EmbeddingAPIKey = *raw.EmbeddingAPIKey
-	}
-	if raw.EmbeddingModel != nil {
-		cfg.EmbeddingModel = *raw.EmbeddingModel
-	}
-	if raw.EmbeddingDimensions != nil {
-		cfg.EmbeddingDimensions = *raw.EmbeddingDimensions
-	}
-	if raw.EmbeddingNormalization != nil {
-		cfg.EmbeddingNormalization = *raw.EmbeddingNormalization
-	}
-	if raw.EmbeddingDistanceMetric != nil {
-		cfg.EmbeddingDistanceMetric = *raw.EmbeddingDistanceMetric
-	}
-	if raw.EmbeddingMaxBatchSize != nil {
-		cfg.EmbeddingMaxBatchSize = *raw.EmbeddingMaxBatchSize
-	}
-	if raw.EmbeddingMaxInputBytes != nil {
-		cfg.EmbeddingMaxInputBytes = *raw.EmbeddingMaxInputBytes
-	}
-	if raw.EmbeddingMaxBatchInputBytes != nil {
-		cfg.EmbeddingMaxBatchInputBytes = *raw.EmbeddingMaxBatchInputBytes
-	}
-	if raw.EmbeddingMaxResponseBytes != nil {
-		cfg.EmbeddingMaxResponseBytes = *raw.EmbeddingMaxResponseBytes
-	}
-	if raw.ChatProvider != nil {
-		cfg.ChatProvider = *raw.ChatProvider
-	}
-	if raw.ChatBaseURL != nil {
-		cfg.ChatBaseURL = *raw.ChatBaseURL
-	}
-	if raw.ChatAPIKey != nil {
-		cfg.ChatAPIKey = *raw.ChatAPIKey
-	}
-	if raw.ChatModel != nil {
-		cfg.ChatModel = *raw.ChatModel
-	}
-	if raw.ChatModelVersion != nil {
-		cfg.ChatModelVersion = *raw.ChatModelVersion
-	}
-	if raw.ChatAdapterVersion != nil {
-		cfg.ChatAdapterVersion = *raw.ChatAdapterVersion
-	}
-	if raw.ChatMaxRequestBytes != nil {
-		cfg.ChatMaxRequestBytes = *raw.ChatMaxRequestBytes
-	}
-	if raw.ChatMaxResponseBytes != nil {
-		cfg.ChatMaxResponseBytes = *raw.ChatMaxResponseBytes
-	}
-	if raw.ModelSettingsMode != nil {
-		cfg.ModelSettingsMode = *raw.ModelSettingsMode
-	}
-	if raw.ModelSettingsKeyFile != nil {
-		cfg.ModelSettingsKeyFile = *raw.ModelSettingsKeyFile
-	}
-	if raw.GitSyncKeyFile != nil {
-		cfg.GitSyncKeyFile = *raw.GitSyncKeyFile
-	}
-	if raw.ModelSettingsRolloutID != nil {
-		cfg.ModelSettingsRolloutID = *raw.ModelSettingsRolloutID
-	}
-	if raw.ModelSettingsPrepared != nil {
-		cfg.ModelSettingsPrepared = *raw.ModelSettingsPrepared
-	}
-	if raw.ToolRuntimeMode != nil {
-		cfg.ToolRuntimeMode = *raw.ToolRuntimeMode
-	}
-	if raw.WebFetchMode != nil {
-		cfg.WebFetchMode = *raw.WebFetchMode
-	}
-	if raw.WebFetchMaxRedirects != nil {
-		cfg.WebFetchMaxRedirects = *raw.WebFetchMaxRedirects
-	}
-	if raw.WebFetchMaxURLBytes != nil {
-		cfg.WebFetchMaxURLBytes = *raw.WebFetchMaxURLBytes
-	}
-	if raw.WebFetchMaxResponseHeaderBytes != nil {
-		cfg.WebFetchMaxResponseHeaderBytes = *raw.WebFetchMaxResponseHeaderBytes
-	}
-	if raw.WebFetchMaxBodyBytes != nil {
-		cfg.WebFetchMaxBodyBytes = *raw.WebFetchMaxBodyBytes
-	}
-	if raw.WebFetchMaxTextBytes != nil {
-		cfg.WebFetchMaxTextBytes = *raw.WebFetchMaxTextBytes
-	}
-	if raw.WebFetchMaxResolvedIPs != nil {
-		cfg.WebFetchMaxResolvedIPs = *raw.WebFetchMaxResolvedIPs
-	}
-	if raw.WebFetchAllowedContentTypes != nil {
-		cfg.WebFetchAllowedContentTypes = append([]string(nil), (*raw.WebFetchAllowedContentTypes)...)
-	}
-	if raw.RetrievalRRFK != nil {
-		cfg.RetrievalRRFK = *raw.RetrievalRRFK
-	}
-	if raw.RetrievalRRFLexicalCandidateLimit != nil {
-		cfg.RetrievalRRFLexicalCandidateLimit = *raw.RetrievalRRFLexicalCandidateLimit
-	}
-	if raw.RetrievalRRFVectorCandidateLimit != nil {
-		cfg.RetrievalRRFVectorCandidateLimit = *raw.RetrievalRRFVectorCandidateLimit
-	}
-	if raw.RetrievalRRFFusedCandidateLimit != nil {
-		cfg.RetrievalRRFFusedCandidateLimit = *raw.RetrievalRRFFusedCandidateLimit
-	}
-	if raw.RetrievalRRFRerankCandidateLimit != nil {
-		cfg.RetrievalRRFRerankCandidateLimit = *raw.RetrievalRRFRerankCandidateLimit
-	}
-	if raw.WorkerHealthAddr != nil {
-		cfg.WorkerHealthAddr = *raw.WorkerHealthAddr
-	}
-	if raw.TelemetryMode != nil {
-		cfg.TelemetryMode = *raw.TelemetryMode
-	}
-	if raw.TelemetryEndpoint != nil {
-		cfg.TelemetryEndpoint = *raw.TelemetryEndpoint
-	}
-	if raw.AuthMode != nil {
-		cfg.AuthMode = *raw.AuthMode
-	}
-	if raw.AuthBootstrapToken != nil {
-		cfg.AuthBootstrapToken = *raw.AuthBootstrapToken
-	}
-	if raw.AuthSecureCookie != nil {
-		cfg.AuthSecureCookie = *raw.AuthSecureCookie
-	}
-	if raw.AuthAllowedOrigins != nil {
-		cfg.AuthAllowedOrigins = append([]string(nil), (*raw.AuthAllowedOrigins)...)
-	}
-	if raw.ReviewQuestionRefKey != nil {
-		cfg.ReviewQuestionRefKey = *raw.ReviewQuestionRefKey
-		cfg.reviewQuestionRefKeyExplicit = true
-	}
-	for name, value := range map[string]*string{
-		"database_ping_timeout":             raw.DatabasePingTimeout,
-		"graph_query_timeout":               raw.GraphQueryTimeout,
-		"health_interval":                   raw.HealthInterval,
-		"shutdown_timeout":                  raw.ShutdownTimeout,
-		"worker_job_timeout":                raw.WorkerJobTimeout,
-		"worker_rescue_stuck_jobs_after":    raw.WorkerRescueStuckJobsAfter,
-		"workflow_lease":                    raw.WorkflowLeaseDuration,
-		"workflow_heartbeat":                raw.WorkflowHeartbeatInterval,
-		"reindex_dispatch_poll_interval":    raw.ReindexDispatchPollInterval,
-		"reindex_dispatch_error_backoff":    raw.ReindexDispatchErrorBackoff,
-		"reindex_lease_duration":            raw.ReindexLeaseDuration,
-		"reindex_heartbeat_interval":        raw.ReindexHeartbeatInterval,
-		"embedding_timeout":                 raw.EmbeddingTimeout,
-		"chat_timeout":                      raw.ChatTimeout,
-		"web_fetch_timeout":                 raw.WebFetchTimeout,
-		"web_fetch_response_header_timeout": raw.WebFetchResponseHeaderTimeout,
-		"web_fetch_tls_handshake_timeout":   raw.WebFetchTLSHandshakeTimeout,
-		"worker_soft_stop_timeout":          raw.WorkerSoftStopTimeout,
-		"worker_hard_stop_timeout":          raw.WorkerHardStopTimeout,
-		"auth_session_ttl":                  raw.AuthSessionTTL,
-		"auth_api_token_ttl":                raw.AuthAPITokenTTL,
-	} {
-		if value == nil {
-			continue
-		}
-		parsed, err := time.ParseDuration(strings.TrimSpace(*value))
-		if err != nil {
-			if name == "graph_query_timeout" || strings.HasPrefix(name, "web_fetch_") {
-				return fmt.Errorf("parse %s: invalid duration", name)
-			}
-			return fmt.Errorf("parse %s: %w", name, err)
-		}
-		switch name {
-		case "database_ping_timeout":
-			cfg.DatabasePingTimeout = parsed
-		case "graph_query_timeout":
-			cfg.GraphQueryTimeout = parsed
-		case "health_interval":
-			cfg.HealthInterval = parsed
-		case "shutdown_timeout":
-			cfg.ShutdownTimeout = parsed
-		case "worker_job_timeout":
-			cfg.WorkerJobTimeout = parsed
-		case "worker_rescue_stuck_jobs_after":
-			cfg.WorkerRescueStuckJobsAfter = parsed
-		case "workflow_lease":
-			cfg.WorkflowLeaseDuration = parsed
-		case "workflow_heartbeat":
-			cfg.WorkflowHeartbeatInterval = parsed
-		case "reindex_dispatch_poll_interval":
-			cfg.ReindexDispatchPollInterval = parsed
-		case "reindex_dispatch_error_backoff":
-			cfg.ReindexDispatchErrorBackoff = parsed
-		case "reindex_lease_duration":
-			cfg.ReindexLeaseDuration = parsed
-		case "reindex_heartbeat_interval":
-			cfg.ReindexHeartbeatInterval = parsed
-		case "embedding_timeout":
-			cfg.EmbeddingTimeout = parsed
-		case "chat_timeout":
-			cfg.ChatTimeout = parsed
-		case "web_fetch_timeout":
-			cfg.WebFetchTimeout = parsed
-		case "web_fetch_response_header_timeout":
-			cfg.WebFetchResponseHeaderTimeout = parsed
-		case "web_fetch_tls_handshake_timeout":
-			cfg.WebFetchTLSHandshakeTimeout = parsed
-		case "worker_soft_stop_timeout":
-			cfg.WorkerSoftStopTimeout = parsed
-		case "worker_hard_stop_timeout":
-			cfg.WorkerHardStopTimeout = parsed
-		case "auth_session_ttl":
-			cfg.AuthSessionTTL = parsed
-		case "auth_api_token_ttl":
-			cfg.AuthAPITokenTTL = parsed
-		}
-	}
-	return nil
+	return loader.load(path)
 }
 
 // Validate checks process settings that must be valid before starting a
@@ -825,32 +424,19 @@ func (c Config) ValidateModels() error {
 }
 
 func (c Config) validate(validateAuth bool) error {
-	if strings.TrimSpace(c.AppName) == "" {
-		return errors.New("app_name must not be empty")
+	configValidation, err := newConfigValidator()
+	if err != nil {
+		return err
 	}
-	if strings.TrimSpace(c.Version) == "" {
-		return errors.New("version must not be empty")
-	}
-	if strings.TrimSpace(c.HTTPAddr) == "" {
-		return errors.New("http_addr must not be empty")
-	}
-	if c.DatabaseMaxConns < 0 || c.DatabaseMinConns < 0 {
-		return errors.New("database pool sizes must not be negative")
+	return c.validateWith(configValidation, validateAuth)
+}
+
+func (c Config) validateWith(configValidation *configValidator, validateAuth bool) error {
+	if err := configValidation.validate(c); err != nil {
+		return err
 	}
 	if c.DatabaseMaxConns > 0 && c.DatabaseMinConns > c.DatabaseMaxConns {
 		return errors.New("database_min_conns must not exceed database_max_conns")
-	}
-	if c.DatabasePingTimeout <= 0 {
-		return errors.New("database_ping_timeout must be positive")
-	}
-	if c.GraphQueryTimeout <= 0 {
-		return errors.New("graph_query_timeout must be positive")
-	}
-	if c.HealthInterval <= 0 {
-		return errors.New("health_interval must be positive")
-	}
-	if c.ShutdownTimeout <= 0 {
-		return errors.New("shutdown_timeout must be positive")
 	}
 	if err := operability.ValidateRiverOptions(c.WorkerQueue, c.WorkerMaxWorkers, c.WorkerJobTimeout, c.WorkerRescueStuckJobsAfter, c.WorkerSoftStopTimeout); err != nil {
 		return err
@@ -1508,274 +1094,6 @@ func (c Config) String() string {
 // GoString applies the same secret-safe representation to %#v formatting.
 func (c Config) GoString() string {
 	return c.String()
-}
-
-func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAPISecrets bool) error {
-	if value, ok := lookup("ZHIXU_AUTH_MODE"); ok {
-		cfg.AuthMode = AuthMode(value)
-	}
-	if value, ok := lookup("ZHIXU_TOOL_RUNTIME_MODE"); ok {
-		cfg.ToolRuntimeMode = ToolMode(value)
-	}
-	if value, ok := lookup("ZHIXU_WEB_FETCH_MODE"); ok {
-		cfg.WebFetchMode = ToolMode(value)
-	}
-	if value, ok := lookup("ZHIXU_MODEL_SETTINGS_MODE"); ok {
-		cfg.ModelSettingsMode = ModelSettingsMode(value)
-	}
-	if value, ok := lookup("ZHIXU_CHAT_PROVIDER"); ok {
-		cfg.ChatProvider = ChatProvider(value)
-		if cfg.ChatProvider == ChatProviderDisabled {
-			cfg.ChatBaseURL = ""
-			cfg.ChatAPIKey = ""
-			cfg.ChatModel = ""
-			cfg.ChatModelVersion = ""
-		}
-	}
-	if value, ok := lookup("ZHIXU_EMBEDDING_PROVIDER"); ok {
-		cfg.EmbeddingProvider = EmbeddingProvider(value)
-		if cfg.EmbeddingProvider == EmbeddingProviderDisabled {
-			cfg.EmbeddingBaseURL = ""
-			cfg.EmbeddingAPIKey = ""
-			cfg.EmbeddingModel = ""
-			cfg.EmbeddingDimensions = 0
-		}
-	}
-	values := map[string]*string{
-		"ZHIXU_APP_NAME":                  &cfg.AppName,
-		"ZHIXU_VERSION":                   &cfg.Version,
-		"ZHIXU_ENVIRONMENT":               &cfg.Environment,
-		"ZHIXU_HTTP_ADDR":                 &cfg.HTTPAddr,
-		"ZHIXU_DATABASE_URL":              &cfg.DatabaseURL,
-		"ZHIXU_DATABASE_HOST":             &cfg.DatabaseHost,
-		"ZHIXU_DATABASE_PORT":             &cfg.DatabasePort,
-		"ZHIXU_DATABASE_NAME":             &cfg.DatabaseName,
-		"ZHIXU_DATABASE_USER":             &cfg.DatabaseUser,
-		"ZHIXU_DATABASE_PASSWORD":         &cfg.DatabasePassword,
-		"ZHIXU_WEB_ASSETS_DIR":            &cfg.WebAssetsDir,
-		"ZHIXU_WORKER_QUEUE":              &cfg.WorkerQueue,
-		"ZHIXU_WORKER_HEALTH_ADDR":        &cfg.WorkerHealthAddr,
-		"ZHIXU_MODEL_SETTINGS_KEY_FILE":   &cfg.ModelSettingsKeyFile,
-		"ZHIXU_GIT_SYNC_KEY_FILE":         &cfg.GitSyncKeyFile,
-		"ZHIXU_MODEL_SETTINGS_ROLLOUT_ID": &cfg.ModelSettingsRolloutID,
-	}
-	for key, target := range values {
-		if value, ok := lookup(key); ok {
-			*target = value
-		}
-	}
-	if cfg.EmbeddingProvider != EmbeddingProviderDisabled {
-		for key, target := range map[string]*string{
-			"ZHIXU_EMBEDDING_BASE_URL": &cfg.EmbeddingBaseURL,
-			"ZHIXU_EMBEDDING_API_KEY":  &cfg.EmbeddingAPIKey,
-			"ZHIXU_EMBEDDING_MODEL":    &cfg.EmbeddingModel,
-		} {
-			if value, ok := lookup(key); ok {
-				*target = value
-			}
-		}
-	}
-	if cfg.ChatProvider != ChatProviderDisabled {
-		for key, target := range map[string]*string{
-			"ZHIXU_CHAT_BASE_URL":        &cfg.ChatBaseURL,
-			"ZHIXU_CHAT_API_KEY":         &cfg.ChatAPIKey,
-			"ZHIXU_CHAT_MODEL":           &cfg.ChatModel,
-			"ZHIXU_CHAT_MODEL_VERSION":   &cfg.ChatModelVersion,
-			"ZHIXU_CHAT_ADAPTER_VERSION": &cfg.ChatAdapterVersion,
-		} {
-			if value, ok := lookup(key); ok {
-				*target = value
-			}
-		}
-	}
-	if consumeAPISecrets {
-		if value, ok := lookup("ZHIXU_AUTH_BOOTSTRAP_TOKEN"); ok {
-			cfg.AuthBootstrapToken = value
-		}
-		if value, ok := lookup("ZHIXU_REVIEW_QUESTION_REF_KEY"); ok {
-			cfg.ReviewQuestionRefKey = value
-			cfg.reviewQuestionRefKeyExplicit = true
-		}
-	}
-	if value, ok := lookup("ZHIXU_AUTH_ALLOWED_ORIGINS"); ok {
-		origins, err := parseAuthOrigins(value)
-		if err != nil {
-			return err
-		}
-		cfg.AuthAllowedOrigins = origins
-	}
-	if value, ok := lookup("ZHIXU_AUTH_SECURE_COOKIE"); ok {
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("parse ZHIXU_AUTH_SECURE_COOKIE: invalid boolean")
-		}
-		cfg.AuthSecureCookie = parsed
-	}
-	if value, ok := lookup("ZHIXU_MODEL_SETTINGS_PREPARED"); ok {
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return errors.New("parse ZHIXU_MODEL_SETTINGS_PREPARED: invalid boolean")
-		}
-		cfg.ModelSettingsPrepared = parsed
-	}
-	if value, ok := lookup("ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES"); ok {
-		contentTypes, err := parseWebFetchContentTypes(value)
-		if err != nil {
-			return err
-		}
-		cfg.WebFetchAllowedContentTypes = contentTypes
-	}
-	if value, ok := lookup("ZHIXU_EMBEDDING_NORMALIZATION"); ok {
-		cfg.EmbeddingNormalization = domain.EmbeddingNormalization(value)
-	}
-	if value, ok := lookup("ZHIXU_EMBEDDING_DISTANCE_METRIC"); ok {
-		cfg.EmbeddingDistanceMetric = domain.DistanceMetric(value)
-	}
-
-	if value, ok := lookup("ZHIXU_DATABASE_MAX_CONNS"); ok {
-		parsed, err := strconv.ParseInt(value, 10, 32)
-		if err != nil {
-			return fmt.Errorf("parse %s: %w", "ZHIXU_DATABASE_MAX_CONNS", err)
-		}
-		cfg.DatabaseMaxConns = int32(parsed)
-	}
-	if value, ok := lookup("ZHIXU_DATABASE_MIN_CONNS"); ok {
-		parsed, err := strconv.ParseInt(value, 10, 32)
-		if err != nil {
-			return fmt.Errorf("parse %s: %w", "ZHIXU_DATABASE_MIN_CONNS", err)
-		}
-		cfg.DatabaseMinConns = int32(parsed)
-	}
-	if value, ok := lookup("ZHIXU_WORKER_MAX_WORKERS"); ok {
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("parse %s: %w", "ZHIXU_WORKER_MAX_WORKERS", err)
-		}
-		cfg.WorkerMaxWorkers = parsed
-	}
-	if value, ok := lookup("ZHIXU_REINDEX_DISPATCH_BATCH_SIZE"); ok {
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("parse %s: %w", "ZHIXU_REINDEX_DISPATCH_BATCH_SIZE", err)
-		}
-		cfg.ReindexDispatchBatchSize = parsed
-	}
-	for key, target := range map[string]*int{
-		"ZHIXU_WEB_FETCH_MAX_REDIRECTS":    &cfg.WebFetchMaxRedirects,
-		"ZHIXU_WEB_FETCH_MAX_URL_BYTES":    &cfg.WebFetchMaxURLBytes,
-		"ZHIXU_WEB_FETCH_MAX_TEXT_BYTES":   &cfg.WebFetchMaxTextBytes,
-		"ZHIXU_WEB_FETCH_MAX_RESOLVED_IPS": &cfg.WebFetchMaxResolvedIPs,
-	} {
-		if value, ok := lookup(key); ok {
-			parsed, err := strconv.Atoi(value)
-			if err != nil {
-				return fmt.Errorf("parse %s: invalid integer", key)
-			}
-			*target = parsed
-		}
-	}
-	if cfg.EmbeddingProvider != EmbeddingProviderDisabled {
-		if value, ok := lookup("ZHIXU_EMBEDDING_DIMENSIONS"); ok {
-			parsed, err := strconv.ParseInt(value, 10, 32)
-			if err != nil {
-				return errors.New("parse ZHIXU_EMBEDDING_DIMENSIONS: invalid integer")
-			}
-			cfg.EmbeddingDimensions = int32(parsed)
-		}
-	}
-	for key, target := range map[string]*int32{
-		"ZHIXU_EMBEDDING_MAX_BATCH_SIZE":              &cfg.EmbeddingMaxBatchSize,
-		"ZHIXU_EMBEDDING_MAX_INPUT_BYTES":             &cfg.EmbeddingMaxInputBytes,
-		"ZHIXU_RETRIEVAL_RRF_K":                       &cfg.RetrievalRRFK,
-		"ZHIXU_RETRIEVAL_RRF_LEXICAL_CANDIDATE_LIMIT": &cfg.RetrievalRRFLexicalCandidateLimit,
-		"ZHIXU_RETRIEVAL_RRF_VECTOR_CANDIDATE_LIMIT":  &cfg.RetrievalRRFVectorCandidateLimit,
-		"ZHIXU_RETRIEVAL_RRF_FUSED_CANDIDATE_LIMIT":   &cfg.RetrievalRRFFusedCandidateLimit,
-		"ZHIXU_RETRIEVAL_RRF_RERANK_CANDIDATE_LIMIT":  &cfg.RetrievalRRFRerankCandidateLimit,
-	} {
-		if value, ok := lookup(key); ok {
-			parsed, err := strconv.ParseInt(value, 10, 32)
-			if err != nil {
-				return fmt.Errorf("parse %s: invalid integer", key)
-			}
-			*target = int32(parsed)
-		}
-	}
-	if value, ok := lookup("ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES"); ok {
-		parsed, err := strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			return errors.New("parse ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES: invalid integer")
-		}
-		cfg.EmbeddingMaxResponseBytes = parsed
-	}
-	if value, ok := lookup("ZHIXU_EMBEDDING_MAX_BATCH_INPUT_BYTES"); ok {
-		parsed, err := strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			return errors.New("parse ZHIXU_EMBEDDING_MAX_BATCH_INPUT_BYTES: invalid integer")
-		}
-		cfg.EmbeddingMaxBatchInputBytes = parsed
-	}
-	for key, target := range map[string]*int64{
-		"ZHIXU_CHAT_MAX_REQUEST_BYTES":              &cfg.ChatMaxRequestBytes,
-		"ZHIXU_CHAT_MAX_RESPONSE_BYTES":             &cfg.ChatMaxResponseBytes,
-		"ZHIXU_WEB_FETCH_MAX_RESPONSE_HEADER_BYTES": &cfg.WebFetchMaxResponseHeaderBytes,
-		"ZHIXU_WEB_FETCH_MAX_BODY_BYTES":            &cfg.WebFetchMaxBodyBytes,
-	} {
-		if value, ok := lookup(key); ok {
-			parsed, err := strconv.ParseInt(value, 10, 64)
-			if err != nil {
-				return fmt.Errorf("parse %s: invalid integer", key)
-			}
-			*target = parsed
-		}
-	}
-	for key, target := range map[string]*time.Duration{
-		"ZHIXU_DATABASE_PING_TIMEOUT":     &cfg.DatabasePingTimeout,
-		"ZHIXU_GRAPH_QUERY_TIMEOUT":       &cfg.GraphQueryTimeout,
-		"ZHIXU_HEALTH_INTERVAL":           &cfg.HealthInterval,
-		"ZHIXU_SHUTDOWN_TIMEOUT":          &cfg.ShutdownTimeout,
-		"ZHIXU_WORKER_JOB_TIMEOUT":        &cfg.WorkerJobTimeout,
-		"ZHIXU_WORKER_RESCUE_STUCK_AFTER": &cfg.WorkerRescueStuckJobsAfter,
-		"ZHIXU_WORKFLOW_LEASE":            &cfg.WorkflowLeaseDuration,
-		"ZHIXU_WORKFLOW_HEARTBEAT":        &cfg.WorkflowHeartbeatInterval,
-
-		"ZHIXU_REINDEX_DISPATCH_POLL_INTERVAL":    &cfg.ReindexDispatchPollInterval,
-		"ZHIXU_REINDEX_DISPATCH_ERROR_BACKOFF":    &cfg.ReindexDispatchErrorBackoff,
-		"ZHIXU_REINDEX_LEASE_DURATION":            &cfg.ReindexLeaseDuration,
-		"ZHIXU_REINDEX_HEARTBEAT_INTERVAL":        &cfg.ReindexHeartbeatInterval,
-		"ZHIXU_EMBEDDING_TIMEOUT":                 &cfg.EmbeddingTimeout,
-		"ZHIXU_CHAT_TIMEOUT":                      &cfg.ChatTimeout,
-		"ZHIXU_WEB_FETCH_TIMEOUT":                 &cfg.WebFetchTimeout,
-		"ZHIXU_WEB_FETCH_RESPONSE_HEADER_TIMEOUT": &cfg.WebFetchResponseHeaderTimeout,
-		"ZHIXU_WEB_FETCH_TLS_HANDSHAKE_TIMEOUT":   &cfg.WebFetchTLSHandshakeTimeout,
-
-		"ZHIXU_WORKER_SOFT_STOP_TIMEOUT": &cfg.WorkerSoftStopTimeout,
-		"ZHIXU_WORKER_HARD_STOP_TIMEOUT": &cfg.WorkerHardStopTimeout,
-		"ZHIXU_AUTH_SESSION_TTL":         &cfg.AuthSessionTTL,
-		"ZHIXU_AUTH_API_TOKEN_TTL":       &cfg.AuthAPITokenTTL,
-	} {
-		if value, ok := lookup(key); ok {
-			parsed, err := time.ParseDuration(value)
-			if err != nil {
-				if key == "ZHIXU_GRAPH_QUERY_TIMEOUT" || key == "ZHIXU_EMBEDDING_TIMEOUT" || key == "ZHIXU_CHAT_TIMEOUT" || strings.HasPrefix(key, "ZHIXU_WEB_FETCH_") {
-					return fmt.Errorf("parse %s: invalid duration", key)
-				}
-				return fmt.Errorf("parse %s: %w", key, err)
-			}
-			*target = parsed
-		}
-	}
-	if value, ok := lookup("ZHIXU_TELEMETRY_MODE"); ok {
-		cfg.TelemetryMode = TelemetryMode(value)
-		if cfg.TelemetryMode == TelemetryModeDisabled {
-			cfg.TelemetryEndpoint = ""
-		}
-	}
-	if cfg.TelemetryMode != TelemetryModeDisabled {
-		if value, ok := lookup("OTEL_EXPORTER_OTLP_ENDPOINT"); ok {
-			cfg.TelemetryEndpoint = value
-		}
-	}
-	return nil
 }
 
 func parseWebFetchContentTypes(raw string) ([]string, error) {

@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "执行后端 Composition Root、Secret、安全与交付质量门禁"}
+{"file": ".trellis/tasks/08-08-viper-validator-config/research/framework-fit.md", "reason": "复核 Viper 默认差异均有显式处理和测试"}
+{"file": ".trellis/spec/backend/model-settings-runtime.md", "reason": "复核 Rollout 和不可变 Runtime 没有回归"}
+{"file": ".trellis/tasks/08-08-viper-validator-config/research/config-loader-compatibility.md", "reason": "逐项复核入口、来源、Secret、validator、Rollout 兼容矩阵和测试缺口"}
+{"file": ".trellis/tasks/08-08-viper-validator-config/research/library-integration.md", "reason": "复核严格 YAML、来源 presence、validator 与 vendor 实现符合源码约束"}

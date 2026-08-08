@@ -15,12 +15,15 @@
 - [领域模型](architecture/domain-model.md)
 - [模块化单体架构](architecture/module-architecture.md)
 - [技术栈与依赖选择](architecture/technology-stack.md)
+- [进程启动配置架构](architecture/configuration.md)
+- [部署架构](architecture/deployment.md)
 - [数据架构](architecture/data-architecture.md)
 - [数据库设计](architecture/database-design.md)
 - [检索与索引架构](architecture/retrieval-architecture.md)
 - [Agent 与 RAG 架构](architecture/agent-rag-architecture.md)
 - [持久化工作流引擎](architecture/workflow-engine.md)
-- [安全、性能与测试](architecture/security.md)
+- [安全架构与威胁模型](architecture/security.md)
+- [测试与 AI 评测](architecture/testing-and-evaluation.md)
 
 ## 专项目录
 

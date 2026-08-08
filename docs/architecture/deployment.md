@@ -50,6 +50,7 @@ flowchart TB
 
 - 与 API/Worker 使用同一镜像中的 `/app/zhixu-migrate`。
 - 固定执行项目 Goose Up → River Up → River Validate。
+- 复用 non-API 配置入口：不查询或保留 API-only Secret，跳过 Auth/Review 校验，但其他共享配置组仍完整校验。
 - PostgreSQL 健康后才运行；非零退出会阻止 API/Worker 启动。
 - 不挂载或维护第二套 shell migration runner。
 
@@ -68,7 +69,8 @@ flowchart TB
 ### worker
 
 - 同一镜像不同命令。
-- 不接收也不读取 API Bootstrap Token 或 Review question-reference key；使用 Worker 专属配置加载，只校验自身消费的配置组。
+- 不接收也不查询 API Bootstrap Token 或 Review question-reference key；使用 non-API 配置入口，跳过 Auth/Review
+  校验，但其他共享配置组仍完整校验。
 - 可扩为多个实例。
 - 使用 DB 租约。
 - 独立监听容器内 `0.0.0.0:8081`，不发布宿主端口。
@@ -152,14 +154,16 @@ Worker `/livez` 只证明进程与 health server 存活，不检查上述依赖�
 
 ## 9. 配置
 
-来源优先级：
+API、Worker 和 Migrate 的 `-config` 只选择可选 YAML 文件，不提供命令行逐字段覆盖；ModelCtl 当前没有
+`-config` flag，并复用 `LoadMigration("")`。字段来源优先级固定为：
 
-1. 命令行。
-2. 环境变量。
-3. 配置文件。
-4. 默认值。
+1. 环境变量。
+2. YAML。
+3. `Defaults()`。
 
-Secret 不写配置导出。
+每次加载使用独立 `viper.New()`，不启用全局单例、`AutomaticEnv`、`BindEnv`、watch 或 remote provider。显式空环境
+变量仍覆盖 YAML/默认值；严格 YAML、process profile、Secret lookup gate、脱敏和 validator 职责见
+[进程启动配置架构](configuration.md)。Secret 不写配置导出。
 
 M1 Compose 不把密码直接拼接到 PostgreSQL URL；API/Worker 使用独立的
 `ZHIXU_DATABASE_HOST/PORT/NAME/USER/PASSWORD` 配置，由 Go 配置层负责安全构造连接字符串。

@@ -55,6 +55,7 @@
 
 - [API 与事件](api-and-events.md)
 - [前端架构](frontend-architecture.md)
+- [进程启动配置](configuration.md)
 - [部署架构](deployment.md)
 - [可观测性](observability.md)
 - [安全架构](security.md)
@@ -129,6 +130,7 @@ flowchart TB
 | 前端 | React + TypeScript + Vite |
 | API | Go net/http + chi |
 | Worker | Go Worker + River/PostgreSQL 任务队列 |
+| 配置 | Viper v1 + validator v10 + YAML v3 AST 预检；每次加载独立实例 |
 | 数据访问 | pgx + sqlc |
 | 数据库 | PostgreSQL + pgvector |
 | 文件 | 本地 Workspace Bind Mount |

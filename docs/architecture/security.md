@@ -109,6 +109,15 @@ Compose 只把 Bootstrap Token 与可选 `ZHIXU_REVIEW_QUESTION_REF_KEY` 注入 
 
 ## 7. Secret
 
+- 配置加载每次使用短生命周期 `viper.New()`，不使用全局单例、`AutomaticEnv`、`BindEnv`、watch 或 remote provider；
+  不记录 Viper settings。完整边界见 [进程启动配置架构](configuration.md)。
+- non-API profile 对 Bootstrap/Review 环境变量必须零查询，并在返回前防御性清空 YAML 遗留值。共享 YAML
+  仍会被进程读取，因此这不是文件字节级隔离；需要更强边界时使用进程专用配置或 Secret mount。
+- Chat、Embedding 或 Telemetry disabled 时，对应 gated Secret/Endpoint/模型标识环境变量必须零查询；
+  清除低优先级 Provider URL、API Key、模型标识、Embedding Dimensions 或 Telemetry Endpoint，通用 limits/timeout 仍保留并校验。
+- `Config.String`/`GoString`、decode 与 validation 错误不得回显 Secret、DSN、完整 Endpoint、绝对密钥路径、
+  Rollout ID 或完整配置对象；validator 默认错误必须映射，Viper/mapstructure decode 路径必须通过值泄漏
+  canary 回归。
 - 环境变量或 Secret File。
 - Bootstrap Token 只进入 API 进程，不进入 Worker、Migrate 或 Compose 共享环境块。
 - Review question-reference key 只进入 API 进程；不进入响应、日志、配置摘要、Worker 或 Migrate。

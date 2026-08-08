@@ -99,8 +99,10 @@ Testcontainers：
 
 已落地的自动测试契约：
 
-- `internal/platform/config`：默认值、YAML/环境变量覆盖、非法 queue/timeout/
-  lease/heartbeat/stop 组合、Telemetry mode/endpoint 和安全配置字符串。
+- `internal/platform/config`：`env > YAML > Defaults()`、显式空环境覆盖、独立 Viper/slice 隔离、registry
+  完整性；YAML unknown/null/empty-map/case/duplicate/alias/merge/multi-document/type/整数位宽边界；API-only
+  与 disabled capability 的 lookup 零调用和低优先级清理；validator 稳定错误、跨字段组合、Secret-safe
+  `String`/`GoString` 与 decode 错误。完整矩阵见 [进程启动配置架构](configuration.md)。
 - `internal/workflow/runtime`、`internal/workflow/httphealth`：并发 readiness snapshot、
   shutdown 不可逆、`/livez|readyz` 状态码、稳定错误白名单和无敏感 payload。
 - `internal/workflow/adapter/river`：Producer/Consumer 同 queue、显式 Insert queue、

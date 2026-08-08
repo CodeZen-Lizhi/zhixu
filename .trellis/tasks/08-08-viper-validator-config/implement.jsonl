@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "按成熟框架门禁限定 Viper/validator 与自有逻辑边界"}
+{"file": ".trellis/spec/backend/model-settings-runtime.md", "reason": "保留 managed/static revision、fixed target、prepared 与不可变 Runtime 契约"}
+{"file": ".trellis/tasks/08-08-viper-validator-config/research/framework-fit.md", "reason": "注入已核实的库行为差异、版本和兼容边界"}
+{"file": ".trellis/tasks/08-08-viper-validator-config/research/config-loader-compatibility.md", "reason": "提供完整入口、来源、Secret、validator、Rollout 兼容矩阵与测试缺口"}
+{"file": ".trellis/tasks/08-08-viper-validator-config/research/library-integration.md", "reason": "注入 Viper/mapstructure/YAML AST/validator 源码行为和依赖版本约束"}

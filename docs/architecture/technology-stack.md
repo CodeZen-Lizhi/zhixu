@@ -20,7 +20,7 @@
 | Job Queue | River | PostgreSQL Job、重试、Worker |
 | Logging | slog | 结构化日志 |
 | Telemetry | 项目自有接口 + OpenTelemetry Adapter seam | Trace/Metrics；真实 exporter 尚未接入 Composition |
-| Config | 环境变量 + YAML | 本地与自托管配置 |
+| Config | Viper v1 + validator v10 + YAML v3 AST 预检 | 实例化合并默认值/YAML/环境覆盖，基础字段校验与严格输入契约 |
 
 M4-A 已在主模块精确锁定 River/riverpgxv5 `v0.40.0` 与 Goose `v3.27.0`。River 使用 MPL-2.0，Goose 使用 MIT；当前 Go/Docker 基线为 `1.25.4`，因此不采用要求 Go `1.25.7` 的 Goose `v3.27.2`。迁移、依赖 License、升级与退出门禁见 [ADR-0015](adr/0015-river-goose-runtime.md)。项目自身采用仓库根目录 `LICENSE` 中的 MIT License。
 
@@ -28,6 +28,13 @@ M4-D 已提供项目自有 Logger/Metrics/Tracer/Provider 接口、bounded label
 `traceparent` 异步传播，并定义 `disabled/optional/required`。当前生产 Composition
 没有注入 OpenTelemetry exporter factory：optional 明确 degraded，required
 fail-fast；在真实 Adapter 和部署 smoke 完成前不得宣称外部 Telemetry 已启用。
+
+进程配置精确锁定 `github.com/spf13/viper v1.21.0`、`github.com/go-playground/validator/v10 v10.30.3`、
+`github.com/go-viper/mapstructure/v2 v2.4.0` 与 `go.yaml.in/yaml/v3 v3.0.4`。每次加载都创建独立
+`viper.New()`，不使用 Viper 全局单例、`AutomaticEnv`、`BindEnv`、watch 或 remote provider。显式 registry 保留
+`env > YAML > defaults`、API/non-API 读取范围以及 disabled Provider/Telemetry 的 Secret lookup gate；
+validator 只承载局部字段约束，跨字段、安全、Secret 脱敏和 Model Settings Rollout 仍由项目逻辑拥有。
+完整实现边界见 [进程启动配置架构](configuration.md)。
 
 M6-A 已锁定官方 `pgvector-go/pgx v0.4.0`（MIT）作为 pgx 向量编解码与连接类型注册实现；
 迁移入口使用不注册扩展类型的专用 Pool，避免空库创建 `vector` 扩展前启动失败。当前不锁定
