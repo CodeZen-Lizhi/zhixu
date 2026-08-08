@@ -1797,3 +1797,24 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 44: 收口 Eino 依赖账本
+
+**Date**: 2026-08-08
+**Task**: 收口 Eino 依赖账本
+**Branch**: `codex/eino-layered-migration`
+
+### Summary
+
+完成 Eino 迁移的 go.sum tidy 收口，删除 63 条未使用的 go.mod 校验记录；依赖版本、go.mod 与 vendor 保持不变，并通过 tidy、verify、vendor 编译、API/Worker 构建、race 与 vet 门禁。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9d1a34e` | (see git log) |
+
+### Status
+
+[OK] **Completed**
