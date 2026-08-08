@@ -1850,3 +1850,36 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 46: 完成 Docker 直连与 Workspace 控制重构
+
+**Date**: 2026-08-08
+**Task**: 完成 Docker 直连与 Workspace 控制重构
+**Branch**: `dev`
+
+### Summary
+
+移除常驻 Host Controller 网页代理，Docker 固定监听 127.0.0.1:8080；新增一次性 Workspace Control、Active Workspace API 与前端 Workspace 缓存隔离，并完成真实 Docker 与浏览器验收。
+
+### Main Changes
+
+- Docker Web/API 固定通过 127.0.0.1:8080 访问，删除 Controller Session、HTTP 代理及对应前端入口。
+- 新增 workspacectl 一次性校验、切换、回滚流程，并按 Workspace ID 隔离数据库与前端状态。
+- 保留现有 PostgreSQL/模型密钥 Volume 和 Workspace ID，完成 ADR、OpenAPI、启动器及部署文档同步。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a12c343` | (see git log) |
+
+### Testing
+
+- [OK] Go 定向测试、workspacecontrol race、go vet、OpenAPI 与 Compose/launcher 契约通过。
+- [OK] Web lint、typecheck、1115 项测试、生产构建通过。
+- [OK] 真实 Docker 迁移后服务健康，桌面与移动浏览器烟测无控制密钥且无控制台错误。
+
+### Status
+
+[OK] **Completed**
