@@ -347,6 +347,35 @@ func TestRouterLivezDoesNotNeedDatabase(t *testing.T) {
 	}
 }
 
+func TestRouterMetricsIsPublicAndOperationalPathsDoNotCreateSpans(t *testing.T) {
+	tracer := observability.NewMemoryTracer()
+	router := NewRouter(Dependencies{
+		Version:      "test",
+		Database:     fakePinger{},
+		Tracer:       tracer,
+		AuthRequired: true,
+		MetricsHandler: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			_, _ = response.Write([]byte("# TYPE zhixu_test gauge\nzhixu_test 1\n"))
+		}),
+	})
+
+	for _, path := range []string{"/livez", "/readyz", "/metrics"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if path != "/readyz" && response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+		if response.Header().Get("traceparent") != "" {
+			t.Fatalf("%s emitted traceparent", path)
+		}
+	}
+	if spans := tracer.Snapshot(); len(spans) != 0 {
+		t.Fatalf("operational paths created spans: %+v", spans)
+	}
+}
+
 func TestRouterReadyzFailsWhenDatabaseUnavailable(t *testing.T) {
 	router := NewRouter(Dependencies{Version: "test", Database: fakePinger{err: errors.New("down")}, PingTimeout: time.Second})
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
@@ -714,7 +743,7 @@ func TestRouterPropagatesIncomingTraceToHandlers(t *testing.T) {
 		Tracer:  tracer,
 		Logger:  observability.NewLogger("info", &output),
 	})
-	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil)
 	req.Header.Set("X-Request-ID", "request-trace-test")
 	req.Header.Set("traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01")
 	res := httptest.NewRecorder()

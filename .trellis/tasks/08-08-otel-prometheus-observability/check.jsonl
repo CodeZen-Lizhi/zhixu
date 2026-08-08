@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/index.md","reason":"审查边界、目录归属和后端共享合同是否一致。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"审查 endpoint、Secret、路径和 raw exporter error 未进入日志/状态/Trace。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行 Go 质量、context、并发、关闭、race 和测试覆盖审查。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审查 API/Worker/River 传播、运维路由与启停数据流无断点。"}
+{"file":".trellis/tasks/08-08-otel-prometheus-observability/research/observability-integration.md","reason":"对照官方 SDK 行为、冻结 metric 映射、模式矩阵、安全风险与影响面。"}

@@ -83,12 +83,42 @@ func TestMemoryTracerMaintainsParentAndRedactsAttributes(t *testing.T) {
 	}
 }
 
-func TestMemoryTracerRejectsStartAfterProviderShutdown(t *testing.T) {
-	provider := NewMemoryProvider()
-	if err := provider.Shutdown(context.Background()); err != nil {
-		t.Fatalf("Shutdown: %v", err)
+func TestMemorySpanRecordErrorAllowsOnlyStableErrorCodes(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "stable code", input: "WORKFLOW_RETRY_1", want: "WORKFLOW_RETRY_1"},
+		{name: "surrounding whitespace", input: " WORKFLOW_FAILED ", want: "WORKFLOW_FAILED"},
+		{name: "clean raw error", input: "connection refused", want: RedactedValue},
+		{name: "lowercase identifier", input: "workflow_failed", want: RedactedValue},
+		{name: "sensitive error", input: "password=database-secret", want: RedactedValue},
+		{name: "oversized code", input: strings.Repeat("A", 65), want: RedactedValue},
 	}
-	if _, _, err := provider.Tracer().Start(context.Background(), "workflow.start"); !errors.Is(err, ErrObservabilityClosed) {
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tracer := NewMemoryTracer()
+			_, span, err := tracer.Start(context.Background(), "workflow.node.consume")
+			if err != nil {
+				t.Fatal(err)
+			}
+			span.RecordError(test.input)
+			span.End()
+			spans := tracer.Snapshot()
+			if len(spans) != 1 || spans[0].ErrorCode != test.want {
+				t.Fatalf("RecordError(%q) snapshot=%#v want=%q", test.input, spans, test.want)
+			}
+		})
+	}
+}
+
+func TestMemoryTracerRejectsStartAfterClose(t *testing.T) {
+	tracer := NewMemoryTracer()
+	if err := tracer.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, _, err := tracer.Start(context.Background(), "workflow.start"); !errors.Is(err, ErrObservabilityClosed) {
 		t.Fatalf("Start after shutdown = %v, want closed", err)
 	}
 }

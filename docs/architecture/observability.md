@@ -94,19 +94,15 @@ Span 属性：
 校验 trace/span ID，Consumer 使用严格 JSON 解析；除 River 自身保留且不会向
 Application 暴露的 `river:*` recovery 字段外，拒绝额外字段、非法格式和多 JSON
 值。不传播 baggage、正文、Credential、路径或任意项目 metadata。即使外部 exporter
-disabled，API middleware 仍会为每个请求创建可传播的 child/root trace context，合法
-trace context 可继续跨 Approval、River Job、Runtime Node 与 Safe Writeback 传播。
+disabled，显式 OTel SDK Provider 仍会创建可传播的 child/root trace context，合法
+trace context 可继续跨 Approval、River Job、Runtime Node 与 Safe Writeback 传播。API
+业务请求创建 `http.request` span；Runtime Worker 仅在严格 metadata 解码、成功 Claim 且
+不是 stale delivery 后创建 `workflow.node.consume` child span。`/metrics`、`/livez`、
+`/readyz` 不创建 request span。
 
 ## 6. Metrics
 
-### API
-
-- request_total。
-- latency。
-- error_code_total。
-- active_sse。
-
-### Workflow
+### 当前生产 Registry
 
 - `river.queue.depth{queue}`。
 - `river.workers.active{queue}`。
@@ -123,6 +119,17 @@ Metric 名称、kind、允许/必填 label 都由项目 registry 固定。Label 
 拒绝 UUID、长十六进制、Secret 和未注册字段；`workspace_id`、`proposal_id`、
 `workflow_run_id`、`node_run_id`、`river_job_id` 等只能进入日志或 Trace。
 
+生产 Adapter 为每个 API/Worker 进程创建独立 Prometheus Registry，固定注册十个项目
+collector 以及 Go/process collector，不使用全局 registry。对外名称统一使用 `zhixu_`
+前缀；`workflow.node.duration_ms` 暴露为
+`zhixu_workflow_node_duration_seconds` 并在记录时从毫秒转换为秒。optional label 仍是固定
+Vec 维度，缺失时投影为空字符串，不允许运行时新增 label 或 collector。
+
+API 在自身 listener 顶层暴露 `GET /metrics`，Worker 在既有 `:8081` 运维 listener 上与
+`/livez`、`/readyz` 共存。直接抓取只得到当前进程快照：Gauge 是当前值，Counter 与
+Histogram 是本次进程启动后的累计值；进程重启后重置，也不保存抓取历史。跨时间查询
+需要外部 Prometheus Server 定期抓取，Grafana 仅是可选展示层。
+
 M4-D 的生产发射语义固定如下：
 
 - queue depth 只统计目标 queue 中 `state='available' AND scheduled_at<=数据库当前时间`
@@ -136,7 +143,19 @@ M4-D 的生产发射语义固定如下：
 - heartbeat control 信号不计 failure；真实 heartbeat error 才发射 failure。
 - metrics 记录失败只写稳定告警，不改变业务结果，也不触发 emergency shutdown。
 
-### Retrieval
+### 后续候选
+
+以下指标是产品级可观测目标，尚未注册到当前十个生产 collector，不能写成已有
+`/metrics` 输出：
+
+API：
+
+- request_total。
+- latency。
+- error_code_total。
+- active_sse。
+
+Retrieval：
 
 - query_latency。
 - fts/vector/rerank latency。
@@ -144,7 +163,7 @@ M4-D 的生产发射语义固定如下：
 - zero_result。
 - degraded_total。
 
-### Model
+Model：
 
 - calls。
 - tokens。
@@ -152,7 +171,7 @@ M4-D 的生产发射语义固定如下：
 - errors。
 - schema_repair。
 
-### Data
+Data：
 
 - documents/chunks/relations。
 - index_version。
@@ -213,7 +232,7 @@ Workspace 管理查询。列表按 `occurred_at,id` 倒序并使用二元游标�
 
 本地默认不强依赖 Grafana。
 
-应用内提供：
+应用内产品目标包括：
 
 - Workflow。
 - 模型 Token。
@@ -221,21 +240,36 @@ Workspace 管理查询。列表按 `occurred_at,id` 倒序并使用二元游标�
 - Index Health。
 - Knowledge Health。
 
-可选导出 OTel/Prometheus 到外部平台。
+OTLP Trace 仅在 `optional|required` 下推送到外部 Collector；Prometheus Metrics 在所有
+模式下通过 `/metrics` 暴露，由外部 Prometheus Server 按需抓取。项目默认不部署这些
+外部后端。
 
 ### 9.1 Telemetry mode
 
 | 模式 | Endpoint | 初始化失败 | Runtime 行为 |
 |---|---|---|---|
-| `disabled` | 必须为空 | 不构造 exporter | 使用 noop metrics/tracer，不声称外部导出 |
-| `optional` | 必填绝对 HTTP(S) URL | 稳定 `TELEMETRY_EXPORTER_UNAVAILABLE` | 使用 noop provider 并记录 degraded，Worker 仍可 ready |
-| `required` | 必填绝对 HTTP(S) URL | 稳定失败 | Worker fail-fast，不进入 ready |
+| `disabled` | 必须为空 | 不构造 exporter、零 OTLP 网络 | 无 exporter SDK Provider 继续传播 context；Prometheus 始终启用 |
+| `optional` | 必填绝对 HTTP(S) base URL | 启动探针失败后逆序清理 | 改用无 exporter Provider、标记 degraded；Prometheus 始终启用 |
+| `required` | 必填绝对 HTTP(S) base URL | 稳定 `TELEMETRY_EXPORTER_UNAVAILABLE` | API/Worker 在 listener/ready 前 fail-fast；Prometheus registry 随进程退出 |
 
-环境变量为 `ZHIXU_TELEMETRY_MODE` 与 `OTEL_EXPORTER_OTLP_ENDPOINT`。当前仓库只
-提供项目自有 Provider/Factory seam，Composition 尚未注入真实 exporter factory；
-因此 `optional` 会明确 degraded，`required` 会启动失败，不能把内存/noop Adapter
-包装成“已上报”。后续接入 OpenTelemetry SDK 时，SDK 类型只能位于 Adapter 或
-Composition，不能进入 Workflow Domain/Application。
+环境变量为 `ZHIXU_TELEMETRY_MODE` 与项目配置唯一读取的
+`OTEL_EXPORTER_OTLP_ENDPOINT`。Composition 将 API/Worker 分别标识为
+`<app>-api`/`<app>-worker`，Resource 只导出 `service.name`、`service.version`、
+`deployment.environment`。Adapter 使用 OpenTelemetry Go SDK、OTLP/HTTP protobuf、
+有界 BatchSpanProcessor、短超时与有界 retry；base URL 保留原 path 后追加
+`/v1/traces`。SDK 的 endpoint/header/compression/TLS/timeout/retry/sampler/span limit/
+BSP 环境默认均由项目显式配置覆盖，Exporter 在生成 payload 时强制使用上述精确 Resource。
+
+启动成功不是“构造 exporter 成功”：初始化会结束 `telemetry.startup` span 并执行有界
+`ForceFlush`，只有 Collector 实际接受 protobuf 才标记 exporting。Shutdown 在业务
+listener/Worker 停止、业务 span 结束后执行一次 ForceFlush/Shutdown，重复或并发调用共享
+同一稳定结果；底层 endpoint、Header 和响应错误不会进入返回错误或日志。
+
+默认 `disabled` 形态只运行结构化日志、health、进程内 Metrics 和 context 传播，不自动
+启动 Collector、Prometheus Server、Grafana、Jaeger 或 Tempo。复杂问题排查时，可在项目外
+临时启动 OTLP/HTTP Collector（需要查询/UI 时再接 Jaeger 或 Tempo），设置
+`optional|required` 与 endpoint 后重启 API/Worker；结束后清空 endpoint、恢复 disabled 并
+再次重启。Collector 单独运行只表示能接收/转发 Trace，不等于具备历史查询或 UI。
 
 ## 10. 告警
 
@@ -256,7 +290,7 @@ Composition，不能进入 Workflow Domain/Application。
 - Workflow Summary：长期。
 - Node Full Output：可配置。
 - Debug Prompt：短期且默认关闭。
-- Metrics：滚动保留。
+- Metrics：进程内不保留历史；外部 Prometheus Server 可按部署策略滚动保留。
 
 ## 12. 可观测性测试
 
@@ -276,11 +310,15 @@ Composition，不能进入 Workflow Domain/Application。
 - 持久结果 replay 不重复发射 node/retry/manual 指标；租约回收与 duplicate observation
   来自 PostgreSQL 事务事实，不通过 AttemptNo 猜测。
 - Health payload 只含稳定 `status/code/version`。
+- fake Collector 解析真实 OTLP protobuf，并验证 `/v1/traces`、Resource、Secret 环境污染、
+  有界 retry/timeout、redirect 拒绝和关闭前 flush。
+- API/Worker `/metrics` 可抓取，十个固定映射、单位、optional 空 label、并发记录和拒绝路径
+  均有契约测试。
 - `disabled/optional/required` 不伪造 exporter 成功，Provider 资源只关闭一次。
 
 发布门禁还应对日志、Audit row、Metric snapshot、Trace snapshot、River metadata 和
 Worker health response 做 Secret canary 扫描。Audit 单元门禁为
 `go test ./internal/audit/...`；真实 PostgreSQL 门禁使用
 `go test -tags integration ./internal/audit/adapter/postgres`，并要求指向已迁移的可丢弃
-数据库。单元测试通过不等同于生产 exporter 或 Compose 网络已验证；真实 exporter、
-数据库与容器烟测必须单独记录结果。
+数据库。fake Collector 测试通过不等同于外部 Collector、真实 TLS 信任链或 Compose
+网络已验证；数据库与容器烟测也必须单独记录结果。

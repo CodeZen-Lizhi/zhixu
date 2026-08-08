@@ -400,6 +400,11 @@ Authorization 保持独立。
 - latency。
 - response size。
 
+当前 API 业务请求创建 `http.request` span，并继续只通过校验后的 `traceparent` 与 River
+异步边界关联。顶层 `GET /metrics` 位于 `/api/v1` 业务鉴权/CSRF 外，暴露该 API 进程的
+独立 Prometheus Registry；`/metrics`、`/livez`、`/readyz` 不创建 request span，避免
+抓取和探活噪声。Telemetry `disabled` 只关闭 OTLP exporter，不关闭该端点或 context 传播。
+
 ## 14. OpenAPI
 
 - OpenAPI 3.1 JSON 是 API wire 契约事实源；Search、Graph、Source Version、Source Span、Cursor、Evidence、

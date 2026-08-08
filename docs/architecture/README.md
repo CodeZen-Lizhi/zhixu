@@ -136,5 +136,5 @@ flowchart TB
 | 文件 | 本地 Workspace Bind Mount |
 | 版本 | Git CLI Adapter |
 | 检索 | PostgreSQL FTS + pgvector + RRF + 可选 Rerank |
-| 可观测 | slog + OpenTelemetry + Prometheus-compatible Metrics |
+| 可观测 | slog + OpenTelemetry OTLP/HTTP Trace + `prometheus/client_golang` Metrics |
 | 部署 | Docker Compose，本地和自托管两种模式 |

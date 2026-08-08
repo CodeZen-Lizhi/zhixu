@@ -70,8 +70,8 @@ func TestMetricsEnforcePerMetricLabelContract(t *testing.T) {
 	}
 }
 
-func TestMemoryMetricsRejectRecordAfterProviderShutdown(t *testing.T) {
-	provider := NewMemoryProvider()
+func TestMemoryMetricsRejectRecordAfterClose(t *testing.T) {
+	metrics := NewMemoryMetrics()
 	labels, err := NewLabels(map[string]string{"queue": "workflow"})
 	if err != nil {
 		t.Fatalf("NewLabels: %v", err)
@@ -80,10 +80,10 @@ func TestMemoryMetricsRejectRecordAfterProviderShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMeasurement: %v", err)
 	}
-	if err := provider.Shutdown(context.Background()); err != nil {
-		t.Fatalf("Shutdown: %v", err)
+	if err := metrics.close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
-	if err := provider.Metrics().Record(context.Background(), measurement); !errors.Is(err, ErrObservabilityClosed) {
+	if err := metrics.Record(context.Background(), measurement); !errors.Is(err, ErrObservabilityClosed) {
 		t.Fatalf("Record after shutdown = %v, want closed", err)
 	}
 }

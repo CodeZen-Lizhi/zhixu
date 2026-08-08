@@ -15,6 +15,7 @@ import (
 // RuntimeWorkerObservability 配置 Runtime Worker 的有界指标和 fatal invariant 上报边界。
 type RuntimeWorkerObservability struct {
 	Metrics         observability.Metrics
+	Tracer          observability.Tracer
 	Queue           string
 	Logger          *slog.Logger
 	FatalInvariants chan<- error
@@ -22,6 +23,7 @@ type RuntimeWorkerObservability struct {
 
 type runtimeWorkerObserver struct {
 	metrics         observability.Metrics
+	tracer          observability.Tracer
 	queue           string
 	logger          *slog.Logger
 	fatalInvariants chan<- error
@@ -29,9 +31,26 @@ type runtimeWorkerObserver struct {
 }
 
 func newRuntimeWorkerObserver(options RuntimeWorkerObservability) runtimeWorkerObserver {
-	return runtimeWorkerObserver{
-		metrics: options.Metrics, queue: options.Queue, logger: options.Logger, fatalInvariants: options.FatalInvariants,
+	if options.Tracer == nil {
+		options.Tracer = observability.NewNoopTracer()
 	}
+	return runtimeWorkerObserver{
+		metrics: options.Metrics, tracer: options.Tracer, queue: options.Queue, logger: options.Logger, fatalInvariants: options.FatalInvariants,
+	}
+}
+
+func (observer *runtimeWorkerObserver) startConsumer(ctx context.Context, nodeKind string) (context.Context, observability.Span) {
+	if observer == nil || observer.tracer == nil {
+		return ctx, nil
+	}
+	traced, span, err := observer.tracer.Start(ctx, "workflow.node.consume", observability.TraceAttribute{Key: "node_kind", Value: nodeKind})
+	if err != nil {
+		if observer.logger != nil {
+			observer.logger.WarnContext(ctx, "workflow trace span creation failed", "error_code", "WORKFLOW_TRACE_START_FAILED")
+		}
+		return ctx, nil
+	}
+	return traced, span
 }
 
 func (observer *runtimeWorkerObserver) reportFatal(err error) {

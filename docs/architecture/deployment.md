@@ -234,9 +234,16 @@ Worker 运行参数：
 | `ZHIXU_TELEMETRY_MODE` | `disabled` | `disabled/optional/required` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | 无 | optional/required 时必填 URL |
 
-`optional` exporter 不可用时 Worker 明确 degraded 但不阻塞 Runtime；`required`
-不可用时 fail-fast。当前 Composition 没有真实 exporter factory，不能声称已向
-外部平台导出。Secret 只通过本地 `.env`/Secret 管理，不写镜像或提交仓库。
+`disabled` 是默认轻量形态：API/Worker 不构造 OTLP exporter，也不需要 Collector、
+Prometheus Server、Grafana、Jaeger 或 Tempo；两个进程仍分别暴露 `/metrics`。API 使用
+自身 listener，Worker 使用容器内 `:8081` 运维 listener，Compose 不新增宿主端口。
+`/metrics` 是当前进程快照/启动后累计值，不保存跨抓取或重启历史。
+
+`optional|required` 启动时会向 endpoint base path 下的 `/v1/traces` 发送真实 OTLP/HTTP
+protobuf 探针。optional 失败时明确 degraded 但不阻塞 Runtime；required 在 listener/ready
+前 fail-fast。临时排障可在项目外启动 Collector 与可选 Trace 后端，设置 mode+endpoint 后
+重启两个进程；排障结束后恢复 disabled、清空 endpoint 并重启。Secret 只通过本地
+`.env`/Secret 管理，不写镜像、Resource、日志或提交仓库。
 
 Embedding 配置按 Provider 分组 fail-fast：`disabled` 不消费 Base URL、API Key、Model
 或 Dimensions；`openai-compatible` 要求完整 HTTPS Endpoint、API Key、Model 和 Dimensions；

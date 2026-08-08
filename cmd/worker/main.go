@@ -267,9 +267,7 @@ func run(configPath string, logger *slog.Logger) error {
 		logger.Error("configuration is invalid", "error_code", "INVALID_CONFIGURATION")
 		return err
 	}
-	telemetry, err := observability.InitializeTelemetry(context.Background(), observability.TelemetryOptions{
-		Mode: observability.TelemetryMode(cfg.TelemetryMode), Endpoint: cfg.TelemetryEndpoint,
-	})
+	telemetry, err := initializeWorkerTelemetry(context.Background(), cfg)
 	if err != nil {
 		logger.Error("telemetry initialization failed", "error_code", "TELEMETRY_EXPORTER_UNAVAILABLE")
 		return err
@@ -361,7 +359,7 @@ func run(configPath string, logger *slog.Logger) error {
 		return err
 	}
 	cfg = modelsettingsruntime.WithoutModelCredentials(cfg)
-	components, err := newWorkerComponentsWithModels(database.DB(), cfg, configuredModels, modelBinding, workspaceRuntime.Repository, logger, telemetry.Metrics(), modelEnqueueFences...)
+	components, err := newWorkerComponentsWithModels(database.DB(), cfg, configuredModels, modelBinding, workspaceRuntime.Repository, logger, telemetry.Metrics(), telemetry.Tracer(), modelEnqueueFences...)
 	if err != nil {
 		logger.Error("worker components are unavailable", "error_code", "WORKER_COMPONENTS_UNAVAILABLE")
 		return err
@@ -377,7 +375,12 @@ func run(configPath string, logger *slog.Logger) error {
 	toolContractsOK, toolExecutorsOK, toolDependenciesOK := toolWorkflowReadiness(components)
 	readiness.SetToolRuntimeState(toolEnabled, toolContractsOK, toolExecutorsOK, toolDependenciesOK)
 	readiness.SetWebFetchState(cfg.WebFetchMode == config.ToolModeEnabled, false)
-	health, err := startWorkerHealthServer(cfg.WorkerHealthAddr, workflowhealth.NewHandler(readiness))
+	opsHandler, err := newWorkerOpsHandler(workflowhealth.NewHandler(readiness), telemetry.MetricsHandler())
+	if err != nil {
+		logger.Error("worker operations handler could not be created", "error_code", "WORKER_HEALTH_START_FAILED")
+		return err
+	}
+	health, err := startWorkerHealthServer(cfg.WorkerHealthAddr, opsHandler)
 	if err != nil {
 		logger.Error("worker health server could not be started", "error_code", "WORKER_HEALTH_START_FAILED")
 		return err
@@ -685,6 +688,16 @@ shutdown:
 		runErr = err
 	}
 	return runErr
+}
+
+func initializeWorkerTelemetry(ctx context.Context, cfg config.Config) (*observability.Telemetry, error) {
+	return observability.InitializeTelemetry(ctx, observability.TelemetryOptions{
+		Mode:           observability.TelemetryMode(cfg.TelemetryMode),
+		Endpoint:       cfg.TelemetryEndpoint,
+		ServiceName:    cfg.AppName + "-worker",
+		ServiceVersion: cfg.Version,
+		Environment:    cfg.Environment,
+	})
 }
 
 func dispatchCaptureOutbox(ctx context.Context, logger *slog.Logger, dispatcher captureOutboxDispatchService, phase string) (captureapplication.DispatchBatchResult, error) {
@@ -995,7 +1008,7 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 	if err != nil {
 		return workerComponents{}, err
 	}
-	return newWorkerComponentsWithModels(db, cfg, models, workerModelRuntimeBinding{}, nil, logger, metrics, enqueueFences...)
+	return newWorkerComponentsWithModels(db, cfg, models, workerModelRuntimeBinding{}, nil, logger, metrics, observability.NewNoopTracer(), enqueueFences...)
 }
 
 type workerModelRuntimeBinding struct {
@@ -1049,7 +1062,7 @@ func modelRuntimeForComposition(cfg config.Config, supplied ...*modelsettingsrun
 	return loaded.Models, nil
 }
 
-func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *modelsettingsruntime.Models, modelBinding workerModelRuntimeBinding, workspaceRepository *workspacepostgres.Repository, logger *slog.Logger, metrics observability.Metrics, enqueueFences ...riveradapter.EnqueueFence) (workerComponents, error) {
+func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *modelsettingsruntime.Models, modelBinding workerModelRuntimeBinding, workspaceRepository *workspacepostgres.Repository, logger *slog.Logger, metrics observability.Metrics, tracer observability.Tracer, enqueueFences ...riveradapter.EnqueueFence) (workerComponents, error) {
 	if db == nil {
 		return workerComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_DATABASE_UNAVAILABLE", true, errors.New("database pool is nil"))
 	}
@@ -1624,7 +1637,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	}
 	fatalInvariants := make(chan error, 1)
 	runtimeWorker, err := riveradapter.NewRuntimeNodeWorkerWithObservability(executors, runtimeCoordinator, fmt.Sprintf("worker:%s", workerID), cfg.WorkflowLeaseDuration, cfg.WorkflowHeartbeatInterval, riveradapter.RuntimeWorkerObservability{
-		Metrics: metrics, Queue: cfg.WorkerQueue, Logger: logger, FatalInvariants: fatalInvariants,
+		Metrics: metrics, Tracer: tracer, Queue: cfg.WorkerQueue, Logger: logger, FatalInvariants: fatalInvariants,
 	}, modelBinding.runtimeWorkerOptions()...)
 	if err != nil {
 		return workerComponents{}, err
@@ -2532,6 +2545,16 @@ func startWorkerHealthServer(address string, handler http.Handler) (workerHealth
 		close(errorsChannel)
 	}()
 	return workerHealthServer{server: server, errors: errorsChannel, address: listener.Addr().String()}, nil
+}
+
+func newWorkerOpsHandler(healthHandler, metricsHandler http.Handler) (http.Handler, error) {
+	if healthHandler == nil || metricsHandler == nil {
+		return nil, errors.New("worker operations handler is incomplete")
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metricsHandler)
+	mux.Handle("/", healthHandler)
+	return mux, nil
 }
 
 func recordShutdownMetric(metrics observability.Metrics, mode shutdownMode, result string) error {

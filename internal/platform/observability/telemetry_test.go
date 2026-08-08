@@ -3,190 +3,199 @@ package observability
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
-func TestInitializeTelemetryModes(t *testing.T) {
-	t.Run("disabled never opens exporter", func(t *testing.T) {
-		opened := 0
-		telemetry, err := InitializeTelemetry(context.Background(), TelemetryOptions{
-			Mode: TelemetryModeDisabled,
-			Factory: ProviderFactoryFunc(func(context.Context, string) (Provider, error) {
-				opened++
-				return NewMemoryProvider(), nil
-			}),
-		})
+func TestInitializeTelemetryModesUseRealExporterProbe(t *testing.T) {
+	t.Run("disabled keeps local context and never dials endpoint", func(t *testing.T) {
+		var requests atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
+		t.Cleanup(server.Close)
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", server.URL)
+
+		telemetry, err := InitializeTelemetry(context.Background(), TelemetryOptions{Mode: TelemetryModeDisabled})
 		if err != nil {
-			t.Fatalf("InitializeTelemetry: %v", err)
+			t.Fatal(err)
 		}
-		if opened != 0 || telemetry.Status() != (TelemetryStatus{Mode: TelemetryModeDisabled, Code: TelemetryStatusDisabled}) {
-			t.Fatalf("opened=%d status=%#v", opened, telemetry.Status())
+		defer func() { _ = telemetry.Shutdown(context.Background()) }()
+		if telemetry.Status() != (TelemetryStatus{Mode: TelemetryModeDisabled, Code: TelemetryStatusDisabled}) {
+			t.Fatalf("status=%#v", telemetry.Status())
+		}
+		ctx, span, err := telemetry.Tracer().Start(context.Background(), "local.root")
+		if err != nil {
+			t.Fatal(err)
+		}
+		span.End()
+		if trace, found := TraceContextFromContext(ctx); !found || trace.TraceID == "" {
+			t.Fatalf("disabled context=%+v found=%t", trace, found)
+		}
+		if requests.Load() != 0 {
+			t.Fatalf("disabled exporter dialed %d times", requests.Load())
+		}
+		if telemetry.MetricsHandler() == nil {
+			t.Fatal("disabled telemetry has no metrics handler")
 		}
 	})
 
-	t.Run("optional failure is explicit degraded noop", func(t *testing.T) {
+	t.Run("optional probe failure degrades but preserves context", func(t *testing.T) {
+		var requests atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			requests.Add(1)
+			http.Error(response, "collector unavailable", http.StatusServiceUnavailable)
+		}))
+		t.Cleanup(server.Close)
 		telemetry, err := InitializeTelemetry(context.Background(), TelemetryOptions{
-			Mode: TelemetryModeOptional, Endpoint: "https://collector.example.test:4318",
-			Factory: ProviderFactoryFunc(func(context.Context, string) (Provider, error) {
-				return nil, errors.New("dial collector with token=exporter-secret")
-			}),
+			Mode: TelemetryModeOptional, Endpoint: server.URL,
+			ServiceName: "zhixu-api", ServiceVersion: "v-test", Environment: "integration",
 		})
 		if err != nil {
-			t.Fatalf("InitializeTelemetry: %v", err)
+			t.Fatal(err)
 		}
+		defer func() { _ = telemetry.Shutdown(context.Background()) }()
 		want := TelemetryStatus{Mode: TelemetryModeOptional, Degraded: true, Code: TelemetryStatusExporterUnavailable}
 		if telemetry.Status() != want {
-			t.Fatalf("status = %#v, want %#v", telemetry.Status(), want)
+			t.Fatalf("status=%#v want=%#v", telemetry.Status(), want)
+		}
+		ctx, span, err := telemetry.Tracer().Start(context.Background(), "degraded.root")
+		if err != nil {
+			t.Fatal(err)
+		}
+		span.End()
+		if _, found := TraceContextFromContext(ctx); !found {
+			t.Fatal("optional fallback did not preserve context")
+		}
+		if requests.Load() < 2 {
+			t.Fatalf("optional probe did not attempt bounded retry: %d", requests.Load())
 		}
 	})
 
-	t.Run("required failure is stable", func(t *testing.T) {
-		_, err := InitializeTelemetry(context.Background(), TelemetryOptions{
-			Mode: TelemetryModeRequired, Endpoint: "https://user:exporter-secret@collector.example.test:4318",
-			Factory: ProviderFactoryFunc(func(context.Context, string) (Provider, error) {
-				return nil, errors.New("dial https://user:exporter-secret@collector.example.test:4318")
-			}),
-		})
-		if !errors.Is(err, ErrTelemetryExporterRequired) {
-			t.Fatalf("error = %v, want exporter required", err)
-		}
-		if stringsContainsAny(err.Error(), "exporter-secret", "collector.example.test") {
-			t.Fatalf("required error leaked endpoint: %v", err)
-		}
-	})
-
-	t.Run("optional success records real provider status", func(t *testing.T) {
-		provider := &countingProvider{metrics: NewNoopMetrics(), tracer: NewNoopTracer(), external: true}
+	t.Run("optional probe success exports", func(t *testing.T) {
+		var requests atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			requests.Add(1)
+			response.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(server.Close)
 		telemetry, err := InitializeTelemetry(context.Background(), TelemetryOptions{
-			Mode: TelemetryModeOptional, Endpoint: "http://collector:4318",
-			Factory: ProviderFactoryFunc(func(context.Context, string) (Provider, error) {
-				return provider, nil
-			}),
+			Mode: TelemetryModeOptional, Endpoint: server.URL,
+			ServiceName: "zhixu-api", ServiceVersion: "v-test", Environment: "integration",
 		})
 		if err != nil {
-			t.Fatalf("InitializeTelemetry: %v", err)
+			t.Fatal(err)
 		}
-		want := TelemetryStatus{Mode: TelemetryModeOptional, Exporting: true, Code: TelemetryStatusExporting}
-		if telemetry.Status() != want {
-			t.Fatalf("status = %#v, want %#v", telemetry.Status(), want)
+		if telemetry.Status() != (TelemetryStatus{Mode: TelemetryModeOptional, Exporting: true, Code: TelemetryStatusExporting}) {
+			t.Fatalf("status=%#v", telemetry.Status())
 		}
-	})
-
-	t.Run("memory provider cannot masquerade as external export", func(t *testing.T) {
-		provider := NewMemoryProvider()
-		telemetry, err := InitializeTelemetry(context.Background(), TelemetryOptions{
-			Mode: TelemetryModeOptional, Endpoint: "http://collector:4318",
-			Factory: ProviderFactoryFunc(func(context.Context, string) (Provider, error) {
-				return provider, nil
-			}),
-		})
+		ctx, span, err := telemetry.Tracer().Start(context.Background(), "optional.root")
 		if err != nil {
-			t.Fatalf("InitializeTelemetry: %v", err)
+			t.Fatal(err)
 		}
-		if status := telemetry.Status(); !status.Degraded || status.Exporting || status.Code != TelemetryStatusExporterUnavailable {
-			t.Fatalf("status = %#v", status)
+		span.End()
+		if err := telemetry.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
 		}
-		labels, labelErr := NewLabels(map[string]string{"queue": "workflow"})
-		if labelErr != nil {
-			t.Fatalf("NewLabels: %v", labelErr)
+		if requests.Load() < 2 {
+			t.Fatalf("startup/business export requests=%d", requests.Load())
 		}
-		measurement, measurementErr := NewMeasurement(MetricQueueDepth, MetricKindGauge, 0, labels)
-		if measurementErr != nil {
-			t.Fatalf("NewMeasurement: %v", measurementErr)
-		}
-		if recordErr := provider.Metrics().Record(context.Background(), measurement); !errors.Is(recordErr, ErrObservabilityClosed) {
-			t.Fatalf("rejected provider was not closed: %v", recordErr)
+		if _, found := TraceContextFromContext(ctx); !found {
+			t.Fatal("optional success lost context")
 		}
 	})
 }
 
-func TestInitializeTelemetryValidatesModeEndpointContract(t *testing.T) {
+func TestInitializeTelemetryValidatesModeEndpointAndResourceContract(t *testing.T) {
 	tests := []struct {
 		name    string
 		options TelemetryOptions
 		want    error
 	}{
-		{name: "unknown", options: TelemetryOptions{Mode: "best-effort"}, want: ErrInvalidTelemetryMode},
+		{name: "unknown mode", options: TelemetryOptions{Mode: "best-effort"}, want: ErrInvalidTelemetryMode},
 		{name: "disabled endpoint", options: TelemetryOptions{Mode: TelemetryModeDisabled, Endpoint: "http://collector:4318"}, want: ErrTelemetryEndpointForbidden},
 		{name: "optional endpoint", options: TelemetryOptions{Mode: TelemetryModeOptional}, want: ErrTelemetryEndpointRequired},
 		{name: "required endpoint", options: TelemetryOptions{Mode: TelemetryModeRequired}, want: ErrTelemetryEndpointRequired},
+		{name: "required identity", options: TelemetryOptions{Mode: TelemetryModeRequired, Endpoint: "http://collector:4318", ServiceName: ""}, want: ErrTelemetryResource},
+		{name: "invalid endpoint", options: TelemetryOptions{Mode: TelemetryModeRequired, Endpoint: "ftp://collector:4318", ServiceName: "api", ServiceVersion: "v", Environment: "test"}, want: ErrTelemetryExporterRequired},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := InitializeTelemetry(context.Background(), test.options)
 			if !errors.Is(err, test.want) {
-				t.Fatalf("error = %v, want %v", err, test.want)
+				t.Fatalf("error=%v want=%v", err, test.want)
 			}
 		})
 	}
 }
 
-func TestTelemetryShutdownClosesProviderExactlyOnce(t *testing.T) {
-	provider := &countingProvider{metrics: NewNoopMetrics(), tracer: NewNoopTracer()}
-	provider.external = true
+func TestTelemetryShutdownIsConcurrentAndSecretSafe(t *testing.T) {
+	var mutex sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		mutex.Lock()
+		requests++
+		mutex.Unlock()
+		response.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
 	telemetry, err := InitializeTelemetry(context.Background(), TelemetryOptions{
-		Mode: TelemetryModeRequired, Endpoint: "http://collector:4318",
-		Factory: ProviderFactoryFunc(func(context.Context, string) (Provider, error) {
-			return provider, nil
-		}),
+		Mode: TelemetryModeRequired, Endpoint: server.URL,
+		ServiceName: "zhixu-api", ServiceVersion: "v-test", Environment: "integration",
 	})
 	if err != nil {
-		t.Fatalf("InitializeTelemetry: %v", err)
+		t.Fatal(err)
 	}
-	for range 3 {
-		if err := telemetry.Shutdown(context.Background()); err != nil {
-			t.Fatalf("Shutdown: %v", err)
-		}
+	_, span, err := telemetry.Tracer().Start(context.Background(), "shutdown.root")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if provider.shutdowns != 1 {
-		t.Fatalf("shutdowns = %d, want 1", provider.shutdowns)
+	span.End()
+
+	var wait sync.WaitGroup
+	for range 16 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if err := telemetry.Shutdown(context.Background()); err != nil {
+				t.Errorf("Shutdown: %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+	mutex.Lock()
+	defer mutex.Unlock()
+	if requests != 2 {
+		t.Fatalf("export requests=%d want startup plus one flush", requests)
 	}
 }
 
 func TestTelemetryShutdownReturnsStableSecretSafeError(t *testing.T) {
-	provider := &countingProvider{
-		metrics: NewNoopMetrics(), tracer: NewNoopTracer(), external: true,
-		shutdownErr: errors.New("close https://user:shutdown-secret@collector.example.test"),
-	}
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			response.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Error(response, "shutdown-secret-response", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
 	telemetry, err := InitializeTelemetry(context.Background(), TelemetryOptions{
-		Mode: TelemetryModeRequired, Endpoint: "http://collector:4318",
-		Factory: ProviderFactoryFunc(func(context.Context, string) (Provider, error) {
-			return provider, nil
-		}),
+		Mode: TelemetryModeRequired, Endpoint: server.URL,
+		ServiceName: "zhixu-api", ServiceVersion: "v-test", Environment: "integration",
 	})
 	if err != nil {
-		t.Fatalf("InitializeTelemetry: %v", err)
+		t.Fatal(err)
 	}
+	_, span, err := telemetry.Tracer().Start(context.Background(), "shutdown.error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	span.End()
 	err = telemetry.Shutdown(context.Background())
-	if !errors.Is(err, ErrTelemetryShutdown) || stringsContainsAny(err.Error(), "shutdown-secret", "collector.example.test") {
-		t.Fatalf("Shutdown error = %v", err)
+	if !errors.Is(err, ErrTelemetryShutdown) || strings.Contains(err.Error(), "shutdown-secret-response") || strings.Contains(err.Error(), server.URL) {
+		t.Fatalf("Shutdown error=%v", err)
 	}
-}
-
-type countingProvider struct {
-	metrics     Metrics
-	tracer      Tracer
-	shutdowns   int
-	external    bool
-	shutdownErr error
-}
-
-func (provider *countingProvider) Metrics() Metrics { return provider.metrics }
-func (provider *countingProvider) Tracer() Tracer   { return provider.tracer }
-func (provider *countingProvider) ExternalExport() bool {
-	return provider.external
-}
-func (provider *countingProvider) Shutdown(context.Context) error {
-	provider.shutdowns++
-	return provider.shutdownErr
-}
-
-func stringsContainsAny(value string, substrings ...string) bool {
-	for _, substring := range substrings {
-		if strings.Contains(value, substring) {
-			return true
-		}
-	}
-	return false
 }

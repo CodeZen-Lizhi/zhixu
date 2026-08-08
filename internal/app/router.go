@@ -91,6 +91,8 @@ type Dependencies struct {
 	RAGInitErr error
 	Logger     *slog.Logger
 	Tracer     observability.Tracer
+	// MetricsHandler exposes the process-local Prometheus registry.
+	MetricsHandler http.Handler
 }
 
 // NewRouter builds the API and static-resource boundary. Domain modules are
@@ -151,6 +153,9 @@ func NewRouter(deps Dependencies) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
+	if deps.MetricsHandler != nil {
+		router.Method(http.MethodGet, "/metrics", deps.MetricsHandler)
+	}
 	router.Route("/api/v1", func(api chi.Router) {
 		api.Get("/system/status", func(w http.ResponseWriter, r *http.Request) {
 			handleSystemStatus(w, r, deps)
@@ -286,6 +291,10 @@ func authUnavailableMiddleware(next http.Handler) http.Handler {
 func requestTraceMiddleware(tracer observability.Tracer) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isOperationalPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			ctx := r.Context()
 			if incoming := strings.TrimSpace(r.Header.Get("traceparent")); incoming != "" {
 				if decoded, err := observability.DecodeTraceMetadata(ctx, map[string]string{observability.TraceParentMetadataKey: incoming}); err == nil {
@@ -305,6 +314,15 @@ func requestTraceMiddleware(tracer observability.Tracer) func(http.Handler) http
 			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
+	}
+}
+
+func isOperationalPath(path string) bool {
+	switch path {
+	case "/metrics", "/livez", "/readyz":
+		return true
+	default:
+		return false
 	}
 }
 

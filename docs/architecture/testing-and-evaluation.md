@@ -114,10 +114,17 @@ Testcontainers：
   `StopAndCancel` 首事件互斥、hard deadline 和资源关闭；fatal channel 在生产
   Composition 中实际注入，只接受四个 Runtime 契约不变量错误码。
 - `internal/platform/observability`：Context correlation、日志 fail-closed 脱敏、
-  bounded metrics、高基数 label 拒绝、Trace metadata 严格解析、Telemetry
-  `disabled/optional/required` 及 shutdown 幂等。
-- `internal/app` 与 `RuntimeNodeWorker`：API 在 noop telemetry 下也生成 trace，
-  Consumer 在 Claim 前解码 metadata，Claim 后注入 Run/Node/Attempt correlation；
+  bounded metrics、高基数 label 拒绝、Trace metadata 严格解析、真实 OTLP protobuf
+  startup probe、环境默认隔离、Telemetry `disabled/optional/required` 及 shutdown 幂等；
+  fake Collector 还验证 API 到 River consumer 的跨进程 TraceID/ParentSpanID 和精确 Resource。
+- `cmd/api` 与 `cmd/worker` Telemetry composition：使用本地 fake Collector 覆盖 optional/required
+  探针成功与失败、degraded/fail-fast，以及 Tracer/Metrics 始终接线；Composition 分别固定
+  `<app>-api`/`<app>-worker` identity，精确 Resource 由平台 fake Collector 契约验证。平台生命周期
+  测试覆盖 disabled 零网络、调用方取消、关闭前 flush 以及重复/并发 shutdown 只关闭一次。
+- `internal/app` 与 `RuntimeNodeWorker`：API 在 disabled 或 optional fallback 的无 exporter
+  SDK Provider 下仍生成 trace；Consumer 在 Claim 前解码 metadata，Claim 后创建
+  `workflow.node.consume` 并注入 Run/Node/Attempt correlation；API/Worker `/metrics` 使用
+  隔离 Prometheus Registry，运维路径不创建 request span；
   queue/active/node/retry/manual/lease/heartbeat/duplicate/shutdown 指标在真实事实点发射，
   幂等 transition replay 不重复计数。
 - Workflow PostgreSQL/Change Control：用户 Cancel 与 forced cancel 只有在

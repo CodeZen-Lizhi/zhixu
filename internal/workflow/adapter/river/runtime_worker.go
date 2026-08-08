@@ -143,6 +143,31 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 		RetryNo:       claim.Node.RetryNo,
 		RiverJobID:    job.ID,
 	})
+	ctx, consumerSpan := w.observer.startConsumer(ctx, claim.Node.NodeType)
+	consumerResult := "success"
+	consumerErrorCode := ""
+	observeConsumerTransition := func(transition application.DeliveryTransitionResult) {
+		if result, ok := metricResult(transition.Attempt.Status); ok {
+			consumerResult = result
+			consumerErrorCode = transition.Attempt.ErrorCode
+		}
+	}
+	if consumerSpan != nil {
+		defer func() {
+			if workErr != nil {
+				consumerResult = "failure"
+				consumerErrorCode = stableErrorCode(workErr)
+				if consumerErrorCode == "" {
+					consumerErrorCode = "WORKFLOW_NODE_CONSUME_FAILED"
+				}
+			}
+			if consumerErrorCode != "" {
+				consumerSpan.RecordError(consumerErrorCode)
+			}
+			consumerSpan.SetAttributes(observability.TraceAttribute{Key: "result", Value: consumerResult})
+			consumerSpan.End()
+		}()
+	}
 	w.observer.beginExecution(ctx)
 	defer w.observer.endExecution(ctx)
 	executor, err := w.registry.Resolve(claim.Node.NodeType, claim.Node.InputSchemaVersion)
@@ -150,6 +175,7 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 		transition, transitionErr := w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: deliveryBinding(claim, deliveryID), Failure: domain.FailureInput{Err: err}})
 		if transitionErr == nil {
 			w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+			observeConsumerTransition(transition)
 		}
 		return transitionErr
 	}
@@ -176,6 +202,8 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	case heartbeatErr := <-heartbeatErrors:
 		if heartbeatErr != nil {
 			if isLeaseLostError(heartbeatErr) {
+				consumerResult = "failure"
+				consumerErrorCode = "WORKFLOW_LEASE_LOST"
 				return nil
 			}
 			if !isControlRequestedError(heartbeatErr) {
@@ -192,6 +220,7 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 		transition, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CONTROL_CHECKPOINT", false, errors.New("workflow control checkpoint requested"))}})
 		if err == nil {
 			w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+			observeConsumerTransition(transition)
 		}
 		return err
 	}
@@ -200,6 +229,7 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 		transition, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: executionErr, CancellationProven: errors.Is(executionErr, context.Canceled) && ctx.Err() != nil}})
 		if err == nil {
 			w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+			observeConsumerTransition(transition)
 		}
 		return err
 	}
@@ -208,6 +238,7 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 		transition, err = w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: binding, Failure: domain.FailureInput{Err: foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CONTROL_CHECKPOINT", false, errors.New("workflow control checkpoint requested"))}})
 		if err == nil {
 			w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+			observeConsumerTransition(transition)
 		}
 		return err
 	}
@@ -230,6 +261,7 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	transition, err = w.runtime.Complete(ctx, application.CompleteDeliveryCommand{Binding: binding, Output: result.Output, OutputSchemaVersion: claim.Node.OutputSchemaVersion})
 	if err == nil {
 		w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+		observeConsumerTransition(transition)
 	}
 	return err
 }

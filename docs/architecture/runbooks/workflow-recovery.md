@@ -132,12 +132,15 @@ River maintenance leader，可能让常驻 Worker 的 rescue 配置污染测试�
 
 ## 10. Telemetry 故障
 
-- `disabled`：没有 exporter 是预期状态。
-- `optional`：exporter 不可用记录稳定 degraded code，Workflow Runtime 可继续
-  ready；必须在事件记录中声明观测缺口。
-- `required`：初始化失败时 Worker 不启动。恢复 endpoint/factory 后重新启动，
-  不绕过为 noop success。
+- `disabled`：没有 OTLP exporter 是预期状态；API/Worker `/metrics` 与本地 trace context
+  传播仍应可用。
+- `optional`：exporter 不可用记录稳定 degraded code，API/Worker 可继续
+  ready，且 `/metrics` 继续可抓取；必须在事件记录中声明 Trace 观测缺口。
+- `required`：真实 startup export/flush 失败时 API/Worker 不启动。恢复 Collector 与
+  endpoint 连通性后重新启动，不绕过为伪造的 exporting success。
 - 健康和日志只记录稳定 code，不粘贴 endpoint、DSN 或原始 exporter error。
+- `/metrics` 故障应按对应 API/Worker listener、进程状态和网络边界排查，不依赖 OTLP
+  Collector、Prometheus Server 或 Grafana 是否运行。
 
 ## 11. 验证
 

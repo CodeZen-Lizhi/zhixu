@@ -50,7 +50,8 @@
     "07-27-m8-interview-memory",
     "07-28-m7-timeline-impact-residuals",
     "07-28-m8-learning-residuals",
-    "07-28-m9-export-residuals"
+    "07-28-m9-export-residuals",
+    "08-08-otel-prometheus-observability"
   ],
   "parent": null,
   "relatedFiles": [],

@@ -23,6 +23,7 @@
 - [Agent 与 RAG 架构](architecture/agent-rag-architecture.md)
 - [持久化工作流引擎](architecture/workflow-engine.md)
 - [安全架构与威胁模型](architecture/security.md)
+- [可观测性与审计架构](architecture/observability.md)
 - [测试与 AI 评测](architecture/testing-and-evaluation.md)
 
 ## 专项目录

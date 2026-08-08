@@ -14,7 +14,7 @@ const (
 	// TraceParentMetadataKey 是异步传播允许的唯一项目 Trace 字段。
 	TraceParentMetadataKey = platform.TraceParentMetadataKey
 
-	// TelemetryStatusDisabled 表示 Telemetry 已显式关闭。
+	// TelemetryStatusDisabled 表示外部 OTLP Trace 导出已关闭。
 	TelemetryStatusDisabled = platform.TelemetryStatusDisabled
 	// TelemetryStatusExporting 表示真实外部 Provider 正在导出。
 	TelemetryStatusExporting = platform.TelemetryStatusExporting
@@ -77,6 +77,10 @@ var (
 	ErrTelemetryEndpointForbidden = platform.ErrTelemetryEndpointForbidden
 	// ErrTelemetryExporterRequired 表示 required exporter 不可用。
 	ErrTelemetryExporterRequired = platform.ErrTelemetryExporterRequired
+	// ErrTelemetryMetrics 表示 Prometheus Registry 初始化失败。
+	ErrTelemetryMetrics = platform.ErrTelemetryMetrics
+	// ErrTelemetryResource 表示 OTel Resource 身份非法。
+	ErrTelemetryResource = platform.ErrTelemetryResource
 	// ErrTelemetryShutdown 表示 Provider 关闭失败。
 	ErrTelemetryShutdown = platform.ErrTelemetryShutdown
 
@@ -99,16 +103,8 @@ type (
 	MetricName = platform.MetricName
 	// Metrics 是项目自有指标记录接口。
 	Metrics = platform.Metrics
-	// MemoryMetrics 是测试与本地诊断 Adapter。
+	// MemoryMetrics 是测试用内存 Adapter。
 	MemoryMetrics = platform.MemoryMetrics
-	// Provider 统一拥有 Metrics、Tracer 及关闭生命周期。
-	Provider = platform.Provider
-	// ProviderFactory 构造真实外部导出 Provider。
-	ProviderFactory = platform.ProviderFactory
-	// ProviderFactoryFunc 将函数适配为 ProviderFactory。
-	ProviderFactoryFunc = platform.ProviderFactoryFunc
-	// MemoryProvider 是不声称外部导出的内存 Provider。
-	MemoryProvider = platform.MemoryProvider
 	// TelemetryOptions 定义显式 exporter 初始化配置。
 	TelemetryOptions = platform.TelemetryOptions
 	// TelemetryStatus 是不暴露 endpoint 的安全状态。
@@ -127,7 +123,7 @@ type (
 	SpanSnapshot = platform.SpanSnapshot
 	// Tracer 是项目自有 Trace 创建接口。
 	Tracer = platform.Tracer
-	// MemoryTracer 是测试与本地诊断 Adapter。
+	// MemoryTracer 是测试用内存 Adapter。
 	MemoryTracer = platform.MemoryTracer
 )
 
@@ -165,9 +161,6 @@ func NewMemoryMetrics() *MemoryMetrics { return platform.NewMemoryMetrics() }
 func InitializeTelemetry(ctx context.Context, options TelemetryOptions) (*Telemetry, error) {
 	return platform.InitializeTelemetry(ctx, options)
 }
-
-// NewMemoryProvider 创建不声称外部导出的内存 Provider。
-func NewMemoryProvider() *MemoryProvider { return platform.NewMemoryProvider() }
 
 // WithTraceContext 校验并写入 Trace Context。
 func WithTraceContext(ctx context.Context, trace TraceContext) (context.Context, error) {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,50 @@ import (
 	workflowhealth "github.com/CodeZen-Lizhi/zhixu/internal/workflow/httphealth"
 	workflowruntime "github.com/CodeZen-Lizhi/zhixu/internal/workflow/runtime"
 )
+
+func TestInitializeWorkerTelemetryHonorsConfiguredMode(t *testing.T) {
+	available := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(available.Close)
+	unavailable := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		http.Error(response, "collector unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(unavailable.Close)
+
+	tests := []struct {
+		name          string
+		mode          config.TelemetryMode
+		endpoint      string
+		wantErr       error
+		wantDegraded  bool
+		wantExporting bool
+	}{
+		{name: "disabled", mode: config.TelemetryModeDisabled},
+		{name: "optional unavailable", mode: config.TelemetryModeOptional, endpoint: unavailable.URL, wantDegraded: true},
+		{name: "required unavailable", mode: config.TelemetryModeRequired, endpoint: unavailable.URL, wantErr: observability.ErrTelemetryExporterRequired},
+		{name: "required available", mode: config.TelemetryModeRequired, endpoint: available.URL, wantExporting: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.TelemetryMode = test.mode
+			cfg.TelemetryEndpoint = test.endpoint
+			telemetry, err := initializeWorkerTelemetry(context.Background(), cfg)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("initializeWorkerTelemetry error=%v want=%v", err, test.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			defer func() { _ = telemetry.Shutdown(context.Background()) }()
+			status := telemetry.Status()
+			if telemetry.Tracer() == nil || telemetry.MetricsHandler() == nil || status.Degraded != test.wantDegraded || status.Exporting != test.wantExporting {
+				t.Fatalf("status=%#v", status)
+			}
+		})
+	}
+}
 
 func TestRunMemoryExpiryMaintenanceUsesBoundedBatchAndReportsResult(t *testing.T) {
 	service := &memoryExpiryServiceFake{expired: 3}
@@ -497,7 +542,14 @@ func TestStartWorkerHealthServerServesReadinessAndCloses(t *testing.T) {
 	readiness.SetDependenciesOK(true)
 	readiness.SetReindexDispatcherStarted(true)
 
-	health, err := startWorkerHealthServer("127.0.0.1:0", workflowhealth.NewHandler(readiness))
+	metrics := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write([]byte("# TYPE zhixu_worker_test gauge\nzhixu_worker_test 1\n"))
+	})
+	ops, err := newWorkerOpsHandler(workflowhealth.NewHandler(readiness), metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health, err := startWorkerHealthServer("127.0.0.1:0", ops)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,6 +561,15 @@ func TestStartWorkerHealthServerServesReadinessAndCloses(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("readyz status=%d", response.StatusCode)
+	}
+	metricsResponse, err := http.Get("http://" + health.address + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricsBody, _ := io.ReadAll(metricsResponse.Body)
+	_ = metricsResponse.Body.Close()
+	if metricsResponse.StatusCode != http.StatusOK || !strings.Contains(string(metricsBody), "zhixu_worker_test 1") {
+		t.Fatalf("metrics status=%d body=%s", metricsResponse.StatusCode, metricsBody)
 	}
 
 	shutdownContext, cancel := context.WithTimeout(context.Background(), time.Second)

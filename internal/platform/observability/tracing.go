@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 const TraceParentMetadataKey = "traceparent"
@@ -19,8 +21,6 @@ var (
 	traceParentPattern     = regexp.MustCompile(`^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$`)
 	traceAttributePattern  = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,63}$`)
 )
-
-type traceContextKey struct{}
 
 // TraceContext is the project-owned subset of W3C trace context persisted
 // across asynchronous boundaries. Baggage and arbitrary metadata are excluded.
@@ -44,17 +44,19 @@ func (trace TraceContext) TraceParent() (string, error) {
 
 // WithTraceContext validates and attaches trace context to ctx.
 func WithTraceContext(ctx context.Context, trace TraceContext) (context.Context, error) {
-	if _, err := trace.TraceParent(); err != nil {
+	normalized, err := normalizedTraceContext(trace)
+	if err != nil {
 		return ctx, err
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	trace.TraceID = strings.ToLower(strings.TrimSpace(trace.TraceID))
-	trace.SpanID = strings.ToLower(strings.TrimSpace(trace.SpanID))
-	trace.TraceFlags = strings.ToLower(strings.TrimSpace(trace.TraceFlags))
-	ctx = context.WithValue(ctx, traceContextKey{}, trace)
-	ctx = WithCorrelation(ctx, Correlation{TraceID: trace.TraceID})
+	spanContext, err := otelSpanContext(normalized, true)
+	if err != nil {
+		return ctx, err
+	}
+	ctx = oteltrace.ContextWithRemoteSpanContext(ctx, spanContext)
+	ctx = WithCorrelation(ctx, Correlation{TraceID: normalized.TraceID})
 	return ctx, nil
 }
 
@@ -63,14 +65,51 @@ func TraceContextFromContext(ctx context.Context) (TraceContext, bool) {
 	if ctx == nil {
 		return TraceContext{}, false
 	}
-	trace, found := ctx.Value(traceContextKey{}).(TraceContext)
-	if !found {
+	spanContext := oteltrace.SpanContextFromContext(ctx)
+	if !spanContext.IsValid() {
 		return TraceContext{}, false
 	}
+	projected := TraceContext{
+		TraceID:    spanContext.TraceID().String(),
+		SpanID:     spanContext.SpanID().String(),
+		TraceFlags: fmt.Sprintf("%02x", byte(spanContext.TraceFlags())),
+	}
+	if _, err := projected.TraceParent(); err != nil {
+		return TraceContext{}, false
+	}
+	return projected, true
+}
+
+func normalizedTraceContext(trace TraceContext) (TraceContext, error) {
+	trace.TraceID = strings.ToLower(strings.TrimSpace(trace.TraceID))
+	trace.SpanID = strings.ToLower(strings.TrimSpace(trace.SpanID))
+	trace.TraceFlags = strings.ToLower(strings.TrimSpace(trace.TraceFlags))
 	if _, err := trace.TraceParent(); err != nil {
-		return TraceContext{}, false
+		return TraceContext{}, err
 	}
-	return trace, true
+	return trace, nil
+}
+
+func otelSpanContext(projected TraceContext, remote bool) (oteltrace.SpanContext, error) {
+	traceID, err := oteltrace.TraceIDFromHex(projected.TraceID)
+	if err != nil {
+		return oteltrace.SpanContext{}, ErrInvalidTraceContext
+	}
+	spanID, err := oteltrace.SpanIDFromHex(projected.SpanID)
+	if err != nil {
+		return oteltrace.SpanContext{}, ErrInvalidTraceContext
+	}
+	flags, err := hex.DecodeString(projected.TraceFlags)
+	if err != nil || len(flags) != 1 {
+		return oteltrace.SpanContext{}, ErrInvalidTraceContext
+	}
+	spanContext := oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+		TraceID: traceID, SpanID: spanID, TraceFlags: oteltrace.TraceFlags(flags[0]), Remote: remote,
+	})
+	if !spanContext.IsValid() {
+		return oteltrace.SpanContext{}, ErrInvalidTraceContext
+	}
+	return spanContext, nil
 }
 
 // EncodeTraceMetadata returns the only River metadata field owned by this
@@ -174,7 +213,7 @@ type SpanSnapshot struct {
 	EndedAt      time.Time
 }
 
-// MemoryTracer is a concurrency-safe test and local diagnostic adapter.
+// MemoryTracer is a concurrency-safe test spy.
 type MemoryTracer struct {
 	mutex     sync.RWMutex
 	active    map[string]*memorySpan
@@ -252,7 +291,21 @@ func newChildTraceContext(ctx context.Context) (context.Context, error) {
 	if err != nil {
 		return ctx, ErrInvalidTraceContext
 	}
-	return WithTraceContext(ctx, TraceContext{TraceID: traceID, SpanID: spanID, TraceFlags: traceFlags})
+	projected, err := normalizedTraceContext(TraceContext{TraceID: traceID, SpanID: spanID, TraceFlags: traceFlags})
+	if err != nil {
+		return ctx, err
+	}
+	spanContext, err := otelSpanContext(projected, false)
+	if err != nil {
+		return ctx, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = oteltrace.ContextWithSpanContext(ctx, spanContext)
+	correlation := CorrelationFromContext(ctx)
+	correlation.TraceID = projected.TraceID
+	return WithCorrelation(ctx, correlation), nil
 }
 
 func validateTraceInput(operation string, attrs []TraceAttribute) error {
@@ -266,6 +319,14 @@ func validateTraceInput(operation string, attrs []TraceAttribute) error {
 		}
 	}
 	return nil
+}
+
+func normalizeStableErrorCode(value string) string {
+	value = strings.TrimSpace(value)
+	if !stableErrorCodePattern.MatchString(value) {
+		return RedactedValue
+	}
+	return value
 }
 
 func correlationTraceAttributes(correlation Correlation) []TraceAttribute {
@@ -321,7 +382,7 @@ func (span *memorySpan) RecordError(errorCode string) {
 	if span.tracer.closed {
 		return
 	}
-	span.errorCode = redactString("error_code", strings.TrimSpace(errorCode))
+	span.errorCode = normalizeStableErrorCode(errorCode)
 }
 
 func (span *memorySpan) End() {

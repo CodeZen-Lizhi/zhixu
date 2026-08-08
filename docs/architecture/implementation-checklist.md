@@ -100,7 +100,9 @@
 
 ## Quality
 
-- [ ] Structured Logs/Trace/Metrics。
+- [x] Structured Logs 与平台级 Trace/Metrics 基线（slog、API→River consumer OTel Trace、
+  API/Worker 独立 Prometheus Registry 与 `/metrics`）。
+- [ ] 产品级 Model/Tool/Token/成本可观测、外部历史存储、告警与 Dashboard。
 - [ ] Audit。
 - [ ] Security Tests。
 - [x] Agent 确定性 Eval 基线（真实 Provider 质量阈值仍归 M11）。
@@ -110,7 +112,9 @@
 - [x] Docker Smoke（基础、Workspace、Search、Tool 与 RAG Conversation 独立闭环）。
 
 > 边界：上述勾选只表示对应已实现切片已有代码和门禁，不表示项目整体完成。PDF/Web Parser、HNSW/容量、
-> Timeline/Impact 下游 executor、Document/Eval impact 与 POISONED 运维入口、上述 Memory 后续产品缺口、Review Path reservation/hold 专门并发与 ABANDONED 重开、Export 的 Evaluation/Audit/CSV/XLSX 等未覆盖格式、正式 Document/Article Revision、M10 后续安全/
-> 可观测/备份恢复，以及 M11 全量 E2E/发布交付仍未完成。
+> Timeline/Impact 下游 executor、Document/Eval impact 与 POISONED 运维入口、上述 Memory 后续产品缺口、
+> Review Path reservation/hold 专门并发与 ABANDONED 重开、Export 的 Evaluation/Audit/CSV/XLSX 等
+> 未覆盖格式、正式 Document/Article Revision、M10 后续安全、产品级 Model/Tool/Token/成本观测、
+> 外部历史/告警 Dashboard、备份恢复，以及 M11 全量 E2E/发布交付仍未完成。
 
 > M8-02/M8-03 已补验 Review/Interview/Memory PostgreSQL、M8/Review migration race、前端 746 条测试，以及真实 API/Worker/Vite 的桌面与 390x844 浏览器主链路；业务数据 Down guard、Review Path reservation/hold 专门并发与 ABANDONED 重开仍未直接覆盖。

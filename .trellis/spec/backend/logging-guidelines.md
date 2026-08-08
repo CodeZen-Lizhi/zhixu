@@ -6,7 +6,7 @@
 
 ## 已确认事实
 
-- 后端日志库选用 Go 标准库 `slog`，输出结构化 JSON；Trace/Metrics 使用 OpenTelemetry（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 第 2 节）。
+- 后端日志库选用 Go 标准库 `slog`，输出结构化 JSON；Trace 使用 OpenTelemetry，Metrics 使用 `prometheus/client_golang`（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 第 2 节）。
 - 级别语义为：DEBUG 开发诊断，INFO 状态变化，WARN 降级/重试/低置信度，ERROR 节点失败或依赖失败（依据 [`observability.md`](../../../docs/architecture/observability.md) 第 4 节）。
 - 相关字段包括 `request_id`、`trace_id`、`workspace_id`、`workflow_run_id`、`node_run_id`、`proposal_id`、`tool_call_id`、`document_id`；异步边界必须保持关联（依据 [`observability.md`](../../../docs/architecture/observability.md) 第 3、5 节）。
 - 禁止记录 API Key、Authorization Header、完整 Prompt/Source（默认）、无保留期限的用户回答全文；不展示模型私有思维链。
@@ -16,7 +16,7 @@
 
 - `cmd/api`、`cmd/worker`：创建带统一字段和级别策略的 slog Handler，并注入应用与 Worker。
 - `internal/observability/`：业务包使用的稳定 facade；不复制实现。
-- `internal/platform/observability/`：slog JSON、OpenTelemetry Trace/Metrics、字段规范和 Secret Redaction 的单一事实源。
+- `internal/platform/observability/`：slog JSON、OpenTelemetry Trace、Prometheus Metrics、字段规范和 Secret Redaction 的单一事实源。
 - `internal/audit/`：append-only Audit Interface、持久化 Adapter、查询投影和脱敏边界。
 - `internal/workflow/`、`internal/tools/`、`internal/changecontrol/`：写入运行摘要和业务审计事件，不自行拼接无结构日志。
 - `internal/platform/models/`、`internal/platform/gitcli/`、`internal/platform/filesystem/`：记录调用摘要、耗时、错误码和版本，不记录完整敏感载荷。
@@ -67,16 +67,26 @@ git diff --check
 - 日志契约测试验证 JSON 可解析、error code 可查询、关键资源可反查且 SSE/用户时间线只暴露摘要。
 - 安全测试和导出测试确认日志、Audit、Trace 和导出包均不泄露 Secret 或未授权全文。
 
-## M4-D 已验证边界
+## OTel/Prometheus 已验证边界
 
-- `internal/platform/observability` 已实现 slog JSON safe Handler、Context correlation、Secret/绝对路径 fail-closed redaction、bounded Metrics registry 和 traceparent seam。
+- `internal/platform/observability` 已实现 slog JSON safe Handler、Context correlation、
+  Secret/绝对路径 fail-closed redaction、显式 OTel SDK Provider/OTLP HTTP exporter、
+  进程独立 Prometheus Registry 和 traceparent seam；业务包不得直接依赖 SDK 类型。
 - API request middleware 在 exporter disabled 时也创建 child/root trace；生产
-  `RuntimeNodeWorker` 在 Claim 前解码 metadata、Claim 后补齐 Workspace/Run/Node/
-  Attempt/Dispatch/Retry/River Job correlation。
+  `RuntimeNodeWorker` 在 Claim 前解码 metadata、Claim 后补齐 correlation，并只对非 stale
+  delivery 创建 `workflow.node.consume` child span。
 - queue/active/node result/retry/manual/lease/heartbeat/duplicate/shutdown 指标已接到真实
   Worker/PostgreSQL 事实点；持久 transition replay 不重复发射，metric 失败不改变业务结果。
 - 项目自有 River metadata 只写 `traceparent`；River 保留的 `river:*` recovery 字段可共存但不进入 Application 或可观测载荷。
-- `disabled/optional/required` 不伪造 exporter 成功；当前生产 Composition 未提供真实 exporter factory，optional 明确 degraded，required fail-fast。
+- `disabled` 零 OTLP 网络但保留 context 和 `/metrics`；optional/required 只有在
+  `telemetry.startup` 真实 export+ForceFlush 成功后才标记 exporting。optional 失败清理后
+  使用无 exporter Provider，required 在 listener/ready 前 fail-fast。
+- OTLP base URL 保留 base path 后追加 `/v1/traces`；endpoint/header/compression/TLS/
+  timeout/retry、sampler、span limits 和 BSP 参数必须由项目显式覆盖环境默认。实际 payload
+  Resource 只能含 service name/version/deployment environment。
+- API 顶层 `/metrics` 与 Worker `:8081/metrics` 暴露固定十个项目 collector 及 Go/process
+  collector；`/metrics|/livez|/readyz` 不创建 request span。Metrics 只表示当前进程快照和
+  本次启动累计值，历史由外部 Prometheus Server 拥有。
 - Worker `/livez|readyz` 只返回稳定 `status/code/version`；真实容器日志和 health response 已执行 Secret canary 扫描。
 
 ## M10-01 Audit 与安全脱敏边界
@@ -143,9 +153,8 @@ Correct: 用 canonical UUID + ':' + 已验证幂等键构造可打印锁键，�
 
 ## 后续待验证
 
-- 真实 OpenTelemetry exporter Adapter、采样/保留策略，以及全部安全/业务决策调用点
-  对 Audit Recorder 的接入覆盖。
-- 采样策略、日志保留和外部 OTel/Prometheus 接入方式。
+- 生产采样/保留策略、外部 Collector/Prometheus/Trace 后端部署，以及全部安全/业务决策
+  调用点对 Audit Recorder 的接入覆盖。
 - Audit 访问权限、长期归档策略与真实自托管数据库演练。
 
 ## M6-03 Tool Redaction Boundary

@@ -42,13 +42,14 @@ var (
 	ErrSensitiveMetricLabel   = errors.New("sensitive metric label")
 	ErrObservabilityClosed    = errors.New("observability resource is closed")
 	metricLabelValuePattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
-	errorCodeLabelPattern     = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+	stableErrorCodePattern    = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 	highCardinalityHexPattern = regexp.MustCompile(`(?i)^[0-9a-f]{16,}$`)
 	uuidPattern               = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 )
 
 type metricDefinition struct {
 	kind     MetricKind
+	labels   []string
 	allowed  map[string]struct{}
 	required map[string]struct{}
 }
@@ -69,6 +70,7 @@ var metricDefinitions = map[MetricName]metricDefinition{
 func newMetricDefinition(kind MetricKind, allowed, required []string) metricDefinition {
 	definition := metricDefinition{
 		kind:     kind,
+		labels:   append([]string(nil), allowed...),
 		allowed:  make(map[string]struct{}, len(allowed)),
 		required: make(map[string]struct{}, len(required)),
 	}
@@ -103,7 +105,7 @@ func NewLabels(values map[string]string) (Labels, error) {
 			highCardinalityHexPattern.MatchString(value) || isLongNumericIdentifier(value) {
 			return Labels{}, ErrUnboundedMetricLabel
 		}
-		if key == "error_code" && !errorCodeLabelPattern.MatchString(value) {
+		if key == "error_code" && !stableErrorCodePattern.MatchString(value) {
 			return Labels{}, ErrUnboundedMetricLabel
 		}
 		if allowedValues, bounded := boundedMetricLabelValues[key]; bounded {
@@ -207,7 +209,7 @@ func (noopMetrics) Record(_ context.Context, measurement Measurement) error {
 	return measurement.Validate()
 }
 
-// MemoryMetrics is a concurrency-safe test and local diagnostic adapter.
+// MemoryMetrics is a concurrency-safe test spy.
 type MemoryMetrics struct {
 	mutex        sync.RWMutex
 	measurements []Measurement

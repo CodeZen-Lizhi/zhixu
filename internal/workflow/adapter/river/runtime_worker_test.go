@@ -134,7 +134,7 @@ func TestRuntimeNodeWorkerPropagatesTraceAndClaimedCorrelation(t *testing.T) {
 		t.Fatalf("claim trace=%+v found=%t", claimTrace, found)
 	}
 	executionTrace, found := observability.TraceContextFromContext(executor.ctx)
-	if !found || executionTrace != claimTrace {
+	if !found || executionTrace.TraceID != claimTrace.TraceID || executionTrace.SpanID == claimTrace.SpanID {
 		t.Fatalf("execution trace=%+v found=%t", executionTrace, found)
 	}
 	correlation := observability.CorrelationFromContext(executor.ctx)
@@ -150,6 +150,80 @@ func TestRuntimeNodeWorkerPropagatesTraceAndClaimedCorrelation(t *testing.T) {
 		executor.execution.RunID != claim.Run.ID || executor.execution.NodeKey != claim.Node.NodeKey || executor.execution.NodeRunID != claim.Node.ID ||
 		executor.execution.NodeAttemptID != claim.Attempt.ID || executor.execution.NodeVersion != claim.Node.Version {
 		t.Fatalf("execution identity=%+v claim=%+v", executor.execution, claim)
+	}
+}
+
+func TestRuntimeNodeWorkerCreatesConsumerSpanOnlyAfterSuccessfulClaim(t *testing.T) {
+	parent := "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+	tracer := observability.NewMemoryTracer()
+	runtime := &runtimeWorkerFake{claim: claimedRuntimeResult()}
+	executor := &capturingRuntimeExecutor{output: json.RawMessage(`{"ok":true}`)}
+	worker, err := NewRuntimeNodeWorkerWithObservability(
+		runtimeExecutorRegistry(t, executor), runtime, "worker-a", time.Minute, time.Second,
+		RuntimeWorkerObservability{Tracer: tracer},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := runtimeRiverJob()
+	job.Metadata = []byte(`{"traceparent":"` + parent + `"}`)
+	if err := worker.Work(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	spans := tracer.Snapshot()
+	if len(spans) != 1 {
+		t.Fatalf("consumer spans=%+v", spans)
+	}
+	span := spans[0]
+	if span.Operation != "workflow.node.consume" || span.TraceContext.TraceID != "0123456789abcdef0123456789abcdef" || span.ParentSpanID != "0123456789abcdef" {
+		t.Fatalf("consumer span=%+v", span)
+	}
+	if span.Attributes["node_kind"] != application.CanonicalJSONHashNodeKind || span.Attributes["result"] != "success" {
+		t.Fatalf("consumer attributes=%+v", span.Attributes)
+	}
+	executionTrace, found := observability.TraceContextFromContext(executor.ctx)
+	if !found || executionTrace.SpanID != span.TraceContext.SpanID {
+		t.Fatalf("executor trace=%+v found=%t span=%+v", executionTrace, found, span.TraceContext)
+	}
+
+	staleTracer := observability.NewMemoryTracer()
+	staleWorker, err := NewRuntimeNodeWorkerWithObservability(
+		runtimeExecutorRegistry(t, runtimeExecutor{}),
+		&runtimeWorkerFake{claim: application.ClaimResult{Disposition: application.ClaimDispositionStale}},
+		"worker-a", time.Minute, time.Second, RuntimeWorkerObservability{Tracer: staleTracer},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := staleWorker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	if spans := staleTracer.Snapshot(); len(spans) != 0 {
+		t.Fatalf("stale delivery created spans: %+v", spans)
+	}
+}
+
+func TestRuntimeNodeWorkerConsumerSpanUsesCommittedFailureResult(t *testing.T) {
+	tracer := observability.NewMemoryTracer()
+	runtime := &runtimeWorkerFake{
+		claim: claimedRuntimeResult(),
+		fail: application.DeliveryTransitionResult{Attempt: domain.NodeAttempt{
+			Status: domain.AttemptStatusRetryScheduled, ErrorCode: "DEPENDENCY_BUSY",
+		}},
+	}
+	worker, err := NewRuntimeNodeWorkerWithObservability(
+		runtimeExecutorRegistry(t, runtimeExecutor{err: foundation.NewError(foundation.ErrorRetryableFailure, "DEPENDENCY_BUSY", true, errors.New("busy"))}),
+		runtime, "worker-a", time.Minute, time.Second, RuntimeWorkerObservability{Tracer: tracer},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	spans := tracer.Snapshot()
+	if len(spans) != 1 || spans[0].Attributes["result"] != "retry" || spans[0].ErrorCode != "DEPENDENCY_BUSY" {
+		t.Fatalf("consumer spans=%+v", spans)
 	}
 }
 

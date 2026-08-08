@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"实施前确认 Go 后端分层、稳定合同与必读指南。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"保持 Telemetry 启停、exporter 故障和 Worker 日志的稳定 error_code 与脱敏边界。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"指导 Go 错误、context、并发关闭、测试与质量门实施。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"本任务引入成熟 SDK，必须保持项目 facade 并删除重复自研能力。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"追踪 platform adapter 到 API/Worker/River composition 的完整数据与生命周期。"}
+{"file":".trellis/tasks/08-08-otel-prometheus-observability/research/observability-integration.md","reason":"提供已验证的仓库事实、官方 SDK 行为、版本许可证、指标映射和影响面。"}

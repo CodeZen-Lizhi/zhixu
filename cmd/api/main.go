@@ -631,6 +631,7 @@ func runAPI() int {
 		RAGInitErr:        ragInitErr,
 		Logger:            logger,
 		Tracer:            telemetry.Tracer(),
+		MetricsHandler:    telemetry.MetricsHandler(),
 	}
 	server := newAPIServer(cfg.HTTPAddr, workspaceGate.Wrap(producerGate.Wrap(app.NewRouter(deps))))
 	stop, stopCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -687,8 +688,11 @@ func runAPI() int {
 // initializeAPITelemetry 按 API 配置构造 telemetry，并保留 disabled、optional、required 的统一语义。
 func initializeAPITelemetry(ctx context.Context, cfg config.Config) (*observability.Telemetry, error) {
 	return observability.InitializeTelemetry(ctx, observability.TelemetryOptions{
-		Mode:     observability.TelemetryMode(cfg.TelemetryMode),
-		Endpoint: cfg.TelemetryEndpoint,
+		Mode:           observability.TelemetryMode(cfg.TelemetryMode),
+		Endpoint:       cfg.TelemetryEndpoint,
+		ServiceName:    cfg.AppName + "-api",
+		ServiceVersion: cfg.Version,
+		Environment:    cfg.Environment,
 	})
 }
 

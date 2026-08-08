@@ -49,16 +49,27 @@ func TestNewAPIServerBoundsRequestReads(t *testing.T) {
 }
 
 func TestInitializeAPITelemetryHonorsConfiguredMode(t *testing.T) {
+	available := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(available.Close)
+	unavailable := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		http.Error(response, "collector unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(unavailable.Close)
 	tests := []struct {
-		name         string
-		mode         config.TelemetryMode
-		endpoint     string
-		wantErr      error
-		wantDegraded bool
+		name          string
+		mode          config.TelemetryMode
+		endpoint      string
+		wantErr       error
+		wantDegraded  bool
+		wantExporting bool
 	}{
 		{name: "disabled", mode: config.TelemetryModeDisabled},
-		{name: "optional exporter unavailable", mode: config.TelemetryModeOptional, endpoint: "https://collector.example.test:4318", wantDegraded: true},
-		{name: "required exporter unavailable", mode: config.TelemetryModeRequired, endpoint: "https://collector.example.test:4318", wantErr: observability.ErrTelemetryExporterRequired},
+		{name: "optional exporter unavailable", mode: config.TelemetryModeOptional, endpoint: unavailable.URL, wantDegraded: true},
+		{name: "required exporter unavailable", mode: config.TelemetryModeRequired, endpoint: unavailable.URL, wantErr: observability.ErrTelemetryExporterRequired},
+		{name: "optional exporter available", mode: config.TelemetryModeOptional, endpoint: available.URL, wantExporting: true},
+		{name: "required exporter available", mode: config.TelemetryModeRequired, endpoint: available.URL, wantExporting: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -77,7 +88,7 @@ func TestInitializeAPITelemetryHonorsConfiguredMode(t *testing.T) {
 					t.Fatalf("telemetry shutdown: %v", shutdownErr)
 				}
 			}()
-			if telemetry.Tracer() == nil || telemetry.Status().Degraded != test.wantDegraded {
+			if telemetry.Tracer() == nil || telemetry.MetricsHandler() == nil || telemetry.Status().Degraded != test.wantDegraded || telemetry.Status().Exporting != test.wantExporting {
 				t.Fatalf("telemetry=%#v tracer=%#v", telemetry.Status(), telemetry.Tracer())
 			}
 		})

@@ -8,7 +8,7 @@
 
 使用 PostgreSQL 持久化领域工作流状态，River 负责可运行节点的任务投递与 Worker 获取；不在正式 v1.0 引入 Temporal。Workflow Definition、Node 状态和补偿语义仍由 Workflow Module 掌握，River 不是业务事实源。
 
-实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和 Deterministic Worker smoke。M4-B 已接入 PostgreSQL DB-time Claim/Heartbeat、append-only Attempt、Retry/Fail/Complete、DAG 后继、Human Task、Pause/Resume/Cancel。M4-C 已接入 Approval/Safe Writeback 原子 Dispatch、pre-Begin Bootstrap、Execution exact lookup 与真实 River Worker 闭环；每次 delivery 使用唯一 lease owner，持久 Args 严格拒绝额外字段。M4-D 已将生产 Worker 的 queue/concurrency/timeout/rescue/lease/heartbeat 配置、River migration Validate、独立 `/livez|readyz`、互斥停机控制器、脱敏 observability seam 和 Docker API/Worker/Migrate 交付入口接线。M6-B 在同一 River Client、Workers bundle 和 queue 注册 Reindex Worker，并运行独立 Dispatcher；Reindex Delivery/Attempt 使用自己的 DB-time lease、fence 与 checkpoint，但 River 仍只负责 transport，Workflow 与 Retrieval PostgreSQL 表分别是业务事实源。
+实现边界：M4-A 已接入 River v0.40.0 的 schema-scoped Client、稳定 Node Job Args、tx-scoped InsertTx、Definition/Executor Registry 和 Deterministic Worker smoke。M4-B 已接入 PostgreSQL DB-time Claim/Heartbeat、append-only Attempt、Retry/Fail/Complete、DAG 后继、Human Task、Pause/Resume/Cancel。M4-C 已接入 Approval/Safe Writeback 原子 Dispatch、pre-Begin Bootstrap、Execution exact lookup 与真实 River Worker 闭环；每次 delivery 使用唯一 lease owner，持久 Args 严格拒绝额外字段。M4-D 已将生产 Worker 的 queue/concurrency/timeout/rescue/lease/heartbeat 配置、River migration Validate、独立 `/livez`、`/readyz`、`/metrics`，互斥停机控制器、真实 OTel/OTLP Trace、`client_golang` Registry 和 Docker API/Worker/Migrate 交付入口接线。M6-B 在同一 River Client、Workers bundle 和 queue 注册 Reindex Worker，并运行独立 Dispatcher；Reindex Delivery/Attempt 使用自己的 DB-time lease、fence 与 checkpoint，但 River 仍只负责 transport，Workflow 与 Retrieval PostgreSQL 表分别是业务事实源。
 
 见 [ADR-0006](adr/0006-postgres-durable-workflow.md)。
 
@@ -316,6 +316,8 @@ Metrics：
   workers 使用本进程 Work 进入/退出计数。
 - Claim 结果以 `ObservedNodeKind/DuplicateDelivery/LeaseReclaimed` 暴露事务事实；
   结果事务以 `Replayed` 区分新提交与幂等重放，避免重复发射结果指标。
+- 上述十个项目指标写入 Worker 进程独立 Prometheus Registry，并在既有 `:8081`
+  运维 listener 的 `GET /metrics` 暴露；Telemetry mode 不关闭 Metrics。
 
 Trace：
 
@@ -323,6 +325,9 @@ Trace：
   `river:*` recovery metadata 可被 transport 更新但不会进入 Application；其余
   metadata 一律拒绝，Job Args 仍只携带 Node identity。
 - Workflow Run ID 等业务 ID 作为 correlation/trace attribute，不写入 metric label。
+- API `http.request` 经项目 `traceparent` metadata 传播到 Claim 后创建的
+  `workflow.node.consume` child span；stale delivery 不创建 consumer span。optional/required
+  通过 OTLP/HTTP 导出，disabled 与 optional fallback 仍创建可传播 SpanContext。
 - emergency reporter 只接受 Claim/Heartbeat/Transition/Executor Result 四类契约不变量码；
   Manual Recovery、依赖错误、lease/control 和非法 Job 不升级为全进程强停。
 

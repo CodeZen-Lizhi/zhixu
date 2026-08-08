@@ -208,14 +208,15 @@ hard process deadline. Reindex Dispatcher poll/batch/backoff and its independent
 database lease/heartbeat are configured through the `ZHIXU_REINDEX_*` variables;
 the Reindex heartbeat must be shorter than its lease.
 
-Telemetry defaults to `disabled`. `optional` requires
-`OTEL_EXPORTER_OTLP_ENDPOINT` but may start with a stable degraded status when
-no exporter Adapter is available; `required` fails startup in that case. The
-current repository provides project-owned logging/metrics/tracing contracts and
-no production exporter factory, so it never claims external export succeeded.
-API requests still create propagatable trace context, and the Worker emits
-bounded ready-queue/active/node/retry/manual/lease/heartbeat/duplicate/shutdown
-measurements to the configured project Metrics adapter.
+Telemetry defaults to `disabled`: API and Worker keep propagatable trace context
+and expose independent Prometheus registries at `/metrics`, but make no OTLP
+network requests and require no observability backend. `optional|required`
+require `OTEL_EXPORTER_OTLP_ENDPOINT`; startup exports and flushes a real
+`telemetry.startup` span before reporting success. Optional mode falls back to a
+non-exporting SDK provider with a stable degraded status, while required mode
+fails before listening. API `http.request` and claimed River
+`workflow.node.consume` spans use the project-owned validation/redaction and
+only persist `traceparent` across the job boundary.
 
 SIGINT/SIGTERM first remove Worker readiness and choose the graceful River
 `Stop` path. A fatal runtime invariant may instead choose `StopAndCancel`; the
