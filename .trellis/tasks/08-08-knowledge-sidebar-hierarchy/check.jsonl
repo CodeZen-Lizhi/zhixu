@@ -1,0 +1,2 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"前端定向测试、键盘、焦点、响应式和真实浏览器 Review 门禁。"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"验证 AppShell 导航 registry、移动 Sheet 与可访问性契约未回归。"}

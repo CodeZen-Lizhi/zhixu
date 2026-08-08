@@ -18,7 +18,9 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [],
+  "children": [
+    "08-08-knowledge-sidebar-hierarchy"
+  ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",

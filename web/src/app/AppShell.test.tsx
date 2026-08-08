@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { lazy, type ComponentType } from "react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const useActiveWorkspaceId = vi.hoisted(() => vi.fn());
@@ -27,13 +27,6 @@ vi.mock("./auth-context", () => ({
 
 import { AppShell } from "./AppShell";
 
-const findKnowledgeMenu = async (): Promise<HTMLElement> => {
-  await waitFor(() => expect(document.querySelector('[role="menu"][aria-label="知识菜单"]')).toBeInTheDocument());
-  const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="知识菜单"]');
-  if (menu === null) throw new Error("知识菜单未挂载");
-  return menu;
-};
-
 describe("AppShell", () => {
   beforeEach(() => {
     useActiveWorkspaceId.mockReturnValue("10000000-0000-4000-8000-000000000002");
@@ -41,7 +34,7 @@ describe("AppShell", () => {
     captureMutation.reset.mockReset();
   });
 
-  it("在懒加载期间保留一级入口，并从知识菜单按分组打开工作区", async () => {
+  it("在懒加载期间保留一级入口，并以内联三级结构展示知识导航", async () => {
     let resolvePage: ((module: { default: ComponentType }) => void) | undefined;
     const DeferredPage = lazy(() => new Promise<{ default: ComponentType }>((resolve) => {
       resolvePage = resolve;
@@ -60,8 +53,12 @@ describe("AppShell", () => {
     expect(container.querySelector(".workbench")).toHaveClass("workbench--dashboard");
     const navigation = screen.getByRole("navigation", { name: "主导航" });
     expect(within(navigation).getByRole("link", { name: "工作台" })).toHaveAttribute("href", "/dashboard");
-    expect(within(navigation).getByRole("link", { name: "知识" })).toHaveAttribute("href", "/inbox");
-    const knowledgeMenuTrigger = within(navigation).getByRole("button", { name: "打开知识菜单" });
+    expect(within(navigation).queryByRole("link", { name: "知识" })).not.toBeInTheDocument();
+    const knowledgeDisclosure = within(navigation).getByRole("button", { name: "知识" });
+    expect(knowledgeDisclosure).toHaveAttribute("aria-expanded", "true");
+    const knowledgeGroups = document.getElementById(knowledgeDisclosure.getAttribute("aria-controls") ?? "");
+    expect(knowledgeGroups).toBeInTheDocument();
+    expect(knowledgeGroups).not.toHaveAttribute("hidden");
     expect(within(navigation).getByRole("link", { name: "创作" })).toHaveAttribute("href", "/authoring");
     expect(within(navigation).queryByRole("button", { name: "打开创作菜单" })).not.toBeInTheDocument();
     expect(within(navigation).getByRole("link", { name: "设置" })).toHaveAttribute("href", "/settings");
@@ -82,18 +79,31 @@ describe("AppShell", () => {
     expect(within(topbar).queryByRole("link", { name: "系统状态" })).not.toBeInTheDocument();
     expect(within(topbar).queryByRole("link", { name: "资料收件箱" })).not.toBeInTheDocument();
 
-    fireEvent.pointerDown(knowledgeMenuTrigger, { button: 0, ctrlKey: false });
-    const knowledgeMenu = await findKnowledgeMenu();
-    expect(within(knowledgeMenu).getByText("资料")).toBeInTheDocument();
-    expect(within(knowledgeMenu).getByText("探索")).toBeInTheDocument();
-    expect(within(knowledgeMenu).getByText("组织")).toBeInTheDocument();
-    expect(within(knowledgeMenu).getByText("学习")).toBeInTheDocument();
-    expect(within(knowledgeMenu).getByRole("menuitem", { name: "资料收件箱", hidden: true })).toHaveAttribute("href", "/inbox");
-    expect(within(knowledgeMenu).getByRole("menuitem", { name: "检索", hidden: true })).toHaveAttribute("href", "/search");
-    expect(within(knowledgeMenu).getByRole("menuitem", { name: "集合", hidden: true })).toHaveAttribute("href", "/collections");
-    expect(within(knowledgeMenu).getByRole("menuitem", { name: "复习", hidden: true })).toHaveAttribute("href", "/review");
-    fireEvent.keyDown(knowledgeMenu, { key: "Escape" });
-    await waitFor(() => expect(knowledgeMenuTrigger).toHaveFocus());
+    const groups = [
+      { name: "资料", iconClass: "lucide-folder-open" },
+      { name: "探索", iconClass: "lucide-compass" },
+      { name: "组织", iconClass: "lucide-network" },
+      { name: "学习", iconClass: "lucide-graduation-cap" },
+    ];
+    groups.forEach(({ name, iconClass }) => {
+      const disclosure = within(navigation).getByRole("button", { name });
+      expect(disclosure).toHaveAttribute("aria-expanded", "false");
+      expect(disclosure.querySelector(".rail-disclosure__group-icon")).toHaveClass(iconClass);
+      const destinations = document.getElementById(disclosure.getAttribute("aria-controls") ?? "");
+      expect(destinations).toHaveAttribute("hidden");
+    });
+    expect(within(navigation).queryByRole("link", { name: "资料收件箱" })).not.toBeInTheDocument();
+    fireEvent.click(within(navigation).getByRole("button", { name: "资料" }));
+    expect(within(navigation).getByRole("link", { name: "资料收件箱" })).toHaveAttribute("href", "/inbox");
+    expect(document.querySelector('[role="menu"][aria-label="知识菜单"]')).not.toBeInTheDocument();
+
+    fireEvent.click(knowledgeDisclosure);
+    expect(knowledgeDisclosure).toHaveAttribute("aria-expanded", "false");
+    expect(within(navigation).queryByRole("button", { name: "资料" })).not.toBeInTheDocument();
+    knowledgeDisclosure.focus();
+    expect(knowledgeDisclosure).toHaveFocus();
+    fireEvent.click(knowledgeDisclosure);
+    expect(knowledgeDisclosure).toHaveAttribute("aria-expanded", "true");
 
     act(() => {
       resolvePage?.({ default: () => <p>Lazy route ready</p> });
@@ -151,12 +161,12 @@ describe("AppShell", () => {
     expect(screen.queryByRole("button", { name: "打开主导航" })).not.toBeInTheDocument();
   });
 
-  it("移动导航复用知识菜单，并在关闭后把焦点还给菜单按钮", async () => {
+  it("移动导航复用知识层级，选择入口后关闭，并在 Escape 后恢复焦点", async () => {
     render(
       <MemoryRouter initialEntries={["/dashboard"]}>
         <Routes>
           <Route element={<AppShell />}>
-            <Route path="/dashboard" element={<p>Dashboard</p>} />
+            <Route path="*" element={<p>Dashboard</p>} />
           </Route>
         </Routes>
       </MemoryRouter>,
@@ -168,32 +178,64 @@ describe("AppShell", () => {
     const sheet = await screen.findByRole("dialog", { name: "主导航" });
     const mobileNavigation = within(sheet).getByRole("navigation", { name: "主导航" });
     expect(within(mobileNavigation).getByRole("link", { name: "设置" })).toBeInTheDocument();
-    expect(within(mobileNavigation).getByRole("link", { name: "知识" })).toHaveAttribute("href", "/inbox");
-    const knowledgeMenuTrigger = within(mobileNavigation).getByRole("button", { name: "打开知识菜单" });
-    fireEvent.pointerDown(knowledgeMenuTrigger, { button: 0, ctrlKey: false });
-    fireEvent.keyDown(await findKnowledgeMenu(), { key: "Escape" });
-    await waitFor(() => expect(knowledgeMenuTrigger).toHaveFocus());
+    const knowledgeDisclosure = within(mobileNavigation).getByRole("button", { name: "知识" });
+    expect(knowledgeDisclosure).toHaveAttribute("aria-expanded", "true");
+    const organizeDisclosure = within(mobileNavigation).getByRole("button", { name: "组织" });
+    fireEvent.click(organizeDisclosure);
+    expect(organizeDisclosure).toHaveAttribute("aria-expanded", "true");
 
     fireEvent.keyDown(sheet, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "主导航" })).not.toBeInTheDocument());
     expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    const reopenedSheet = await screen.findByRole("dialog", { name: "主导航" });
+    const reopenedNavigation = within(reopenedSheet).getByRole("navigation", { name: "主导航" });
+    expect(within(reopenedNavigation).getByRole("button", { name: "组织" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(reopenedNavigation).getByRole("link", { name: "集合" })).toBeInTheDocument();
+    fireEvent.click(within(reopenedNavigation).getByRole("button", { name: "资料" }));
+    fireEvent.click(within(reopenedNavigation).getByRole("link", { name: "资料收件箱" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "主导航" })).not.toBeInTheDocument());
   });
 
-  it("子页只高亮所属分组，不把分组入口误报为当前页面", () => {
+  it("标识三级当前状态，并在路由变化时追加展开所属分组", async () => {
     render(
       <MemoryRouter initialEntries={["/search"]}>
         <Routes>
           <Route element={<AppShell />}>
-            <Route path="/search" element={<p>Search</p>} />
+            <Route path="*" element={<Link to="/review">切换到复习</Link>} />
           </Route>
         </Routes>
       </MemoryRouter>,
     );
 
     const navigation = screen.getByRole("navigation", { name: "主导航" });
-    const knowledgeLink = within(navigation).getByRole("link", { name: "知识" });
-    expect(knowledgeLink).toHaveClass("rail-link--active");
-    expect(knowledgeLink).not.toHaveAttribute("aria-current");
+    const knowledgeDisclosure = within(navigation).getByRole("button", { name: "知识" });
+    const exploreDisclosure = within(navigation).getByRole("button", { name: "探索" });
+    const organizeDisclosure = within(navigation).getByRole("button", { name: "组织" });
+    const learningDisclosure = within(navigation).getByRole("button", { name: "学习" });
+    expect(knowledgeDisclosure).toHaveClass("rail-disclosure--current-path");
+    expect(knowledgeDisclosure).not.toHaveClass("rail-link--active");
+    expect(knowledgeDisclosure).toHaveAttribute("aria-current", "true");
+    expect(exploreDisclosure).toHaveClass("rail-disclosure--current-path");
+    expect(exploreDisclosure).not.toHaveClass("rail-link--active");
+    expect(exploreDisclosure).toHaveAttribute("aria-expanded", "true");
+    expect(within(navigation).getByRole("link", { name: "检索" })).toHaveAttribute("aria-current", "page");
+
+    fireEvent.click(organizeDisclosure);
+    expect(organizeDisclosure).toHaveAttribute("aria-expanded", "true");
+    expect(within(navigation).getByRole("link", { name: "集合" })).toBeInTheDocument();
+    fireEvent.click(organizeDisclosure);
+    expect(organizeDisclosure).toHaveAttribute("aria-expanded", "false");
+    expect(exploreDisclosure).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(organizeDisclosure);
+
+    fireEvent.click(screen.getByRole("link", { name: "切换到复习" }));
+    await waitFor(() => expect(learningDisclosure).toHaveAttribute("aria-expanded", "true"));
+    expect(within(navigation).getByRole("link", { name: "复习" })).toHaveAttribute("aria-current", "page");
+    expect(learningDisclosure).toHaveClass("rail-disclosure--current-path");
+    expect(exploreDisclosure).toHaveAttribute("aria-expanded", "true");
+    expect(organizeDisclosure).toHaveAttribute("aria-expanded", "true");
   });
 
   it("从业务页用快捷键打开快速记录，关闭后把焦点还给原控件", async () => {
