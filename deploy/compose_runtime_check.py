@@ -86,12 +86,19 @@ def has_dependency(definition: dict[str, Any], dependency_name: str, condition: 
     return isinstance(dependency, dict) and dependency.get("condition") == condition
 
 
+def validate_runtime_dependencies(model: dict[str, Any]) -> None:
+    for service_name in ("app", "worker"):
+        if not has_dependency(service(model, service_name), "postgres", "service_healthy"):
+            fail(f"{service_name} must wait for PostgreSQL health")
+
+
 def validate_restart_policy(model: dict[str, Any], prepared_candidate: bool) -> None:
+    expected_app_policy = "no" if prepared_candidate else "on-failure"
     expected_worker_policy = "no" if prepared_candidate else "on-failure"
+    if service(model, "app").get("restart") != expected_app_policy:
+        fail(f"app restart policy must be {expected_app_policy}")
     if service(model, "worker").get("restart") != expected_worker_policy:
         fail(f"worker restart policy must be {expected_worker_policy}")
-    if prepared_candidate and service(model, "app").get("restart") not in (None, "no"):
-        fail("prepared app candidate must not auto-restart")
 
 
 def validate_secret_boundary(model: dict[str, Any], prepared_candidate: bool = False) -> None:
@@ -248,12 +255,17 @@ def validate_ingress(model: dict[str, Any]) -> None:
     port = ports[0]
     if not isinstance(port, dict) or port.get("host_ip") != "127.0.0.1" or port.get("target") != 8080 or port.get("protocol") != "tcp":
         fail("app must map host loopback to namespace port 8080")
-    if port.get("published") not in (None, 0, "0"):
-        fail("app ingress host port must be allocated automatically")
+    published = port.get("published")
+    try:
+        published_port = int(published)
+    except (TypeError, ValueError):
+        fail("app ingress host port must be fixed")
+    if published_port < 1 or published_port > 65535:
+        fail("app ingress host port must be fixed")
 
     postgres_ports = service(model, "postgres").get("ports")
     if not isinstance(postgres_ports, list) or len(postgres_ports) != 1:
-        fail("PostgreSQL must publish exactly one controller-only loopback port")
+        fail("PostgreSQL must publish exactly one Workspace-control loopback port")
     postgres_port = postgres_ports[0]
     if (
         not isinstance(postgres_port, dict)
@@ -270,6 +282,8 @@ def validate_ingress(model: dict[str, Any]) -> None:
         fail("proxy must be the only bridge from namespace port 8080 to the API listener")
     if proxy.get("user") != "10001:10001" or "ports" in proxy:
         fail("proxy must be unprivileged and publish no independent ports")
+    if proxy.get("restart") != "on-failure":
+        fail("proxy restart policy must be on-failure")
 
 
 def validate_static_models(model: dict[str, Any]) -> None:
@@ -333,6 +347,7 @@ def resolved_compose_model() -> tuple[dict[str, Any], str]:
 
 def main() -> None:
     model, mode = resolved_compose_model()
+    validate_runtime_dependencies(model)
     if mode == "static":
         validate_static_models(model)
     elif mode == "legacy":

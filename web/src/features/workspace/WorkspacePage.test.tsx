@@ -1,90 +1,83 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 
-import { activeWorkspaceStorageKey } from "../../app/active-workspace";
+import type { ActiveWorkspace } from "../../api/active-workspace";
+
+interface ActiveWorkspaceMock {
+  status: "loading" | "ready" | "unavailable" | "error";
+  workspace: ActiveWorkspace | undefined;
+  error: Error | undefined;
+  refresh: Mock<() => Promise<void>>;
+}
+
+const fixtures = vi.hoisted((): { workspace: ActiveWorkspace; active: ActiveWorkspaceMock } => {
+  const workspace: ActiveWorkspace = {
+    id: "11111111-1111-4111-8111-111111111111",
+    name: "知识库",
+    rootPath: "/tmp/knowledge",
+    status: "active",
+    availability: "available",
+    version: 3,
+  };
+  return {
+    workspace,
+    active: {
+      status: "ready",
+      workspace,
+      error: undefined,
+      refresh: vi.fn(() => Promise.resolve()),
+    },
+  };
+});
+const { active, workspace: workspaceFixture } = fixtures;
+
+vi.mock("../../app/WorkspaceCacheBoundary", () => ({ useActiveWorkspace: () => active }));
+
 import { renderWithAppProviders } from "../../test/render";
 import { WorkspacePage } from "./WorkspacePage";
 
-const jsonResponse = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-
-const requestURL = (input: RequestInfo | URL) => {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return input.href;
-  return input.url;
-};
-
-const workspace = {
-  id: "11111111-1111-4111-8111-111111111111",
-  name: "知识库",
-  root_path: "/tmp/knowledge",
-  status: "active",
-  version: 1,
-  git: {
-    present: true,
-    repository_path: "/tmp/knowledge",
-    branch: "main",
-    head: "abcdef",
-    dirty: true,
-    checked_at: "2026-07-16T10:00:00Z",
-  },
-  warnings: ["GIT_WORKTREE_DIRTY"],
-  created_at: "2026-07-16T10:00:00Z",
-  updated_at: "2026-07-16T10:00:00Z",
-};
+beforeEach(() => {
+  active.status = "ready";
+  active.workspace = { ...workspaceFixture, availability: "available" };
+  active.error = undefined;
+  active.refresh.mockClear();
+});
 
 describe("WorkspacePage", () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.reject(new Error(`unexpected request: ${requestURL(input)}`))));
-  });
-
-  it("每次只展示一种连接方式", () => {
+  it("只读展示服务端 Active Workspace 与本机切换命令", () => {
     renderWithAppProviders(<WorkspacePage />);
 
-    expect(screen.getByRole("heading", { name: "连接工作区", level: 1 })).toBeInTheDocument();
-    expect(screen.getByLabelText("名称")).toBeInTheDocument();
-    expect(screen.getByLabelText("宿主机目录")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Workspace ID")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "使用 Workspace ID" }));
-
-    expect(screen.getByLabelText("Workspace ID")).toBeInTheDocument();
-    expect(screen.queryByLabelText("名称")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "当前 Workspace", level: 1 })).toBeInTheDocument();
+    expect(screen.getByText("知识库")).toBeInTheDocument();
+    expect(screen.getByText("/tmp/knowledge")).toBeInTheDocument();
+    expect(screen.getByText(workspaceFixture.id)).toBeInTheDocument();
+    expect(screen.getByText("./zhixu up --workspace <宿主机绝对目录>")).toBeInTheDocument();
+    expect(screen.getByText("./zhixu workspace switch <宿主机绝对目录>")).toBeInTheDocument();
     expect(screen.queryByLabelText("宿主机目录")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /扫描/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Workspace ID")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /创建|打开工作区/ })).not.toBeInTheDocument();
   });
 
-  it("创建工作区后保存活动 ID", async () => {
-    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
-      const url = requestURL(input);
-      if (url.endsWith("/api/v1/workspaces")) return Promise.resolve(jsonResponse(workspace, 201));
-      return Promise.reject(new Error(`unexpected request: ${url}`));
-    });
-
+  it("不可用时保留只读身份并提供重新检查", () => {
+    active.status = "unavailable";
+    active.workspace = { ...workspaceFixture, availability: "unavailable" };
     renderWithAppProviders(<WorkspacePage />);
-    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "知识库" } });
-    fireEvent.change(screen.getByLabelText("宿主机目录"), { target: { value: "/tmp/knowledge" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建工作区" }));
 
-    await waitFor(() => expect(window.localStorage.getItem(activeWorkspaceStorageKey)).toBe(workspace.id));
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("button", { name: /扫描/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("当前目录暂不可用于业务请求");
+    expect(screen.getByText(workspaceFixture.id)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
+    expect(active.refresh).toHaveBeenCalledOnce();
   });
 
-  it("使用 Workspace ID 连接后保存活动 ID", async () => {
-    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
-      const url = requestURL(input);
-      if (url.endsWith(`/api/v1/workspaces/${workspace.id}`)) return Promise.resolve(jsonResponse(workspace));
-      return Promise.reject(new Error(`unexpected request: ${url}`));
-    });
-
+  it("Active API 失败时显示服务端错误且不恢复本地 Workspace", () => {
+    active.status = "error";
+    active.error = new Error("active unavailable");
+    active.workspace = undefined;
     renderWithAppProviders(<WorkspacePage />);
-    fireEvent.click(screen.getByRole("button", { name: "使用 Workspace ID" }));
-    fireEvent.change(screen.getByLabelText("Workspace ID"), { target: { value: workspace.id } });
-    fireEvent.click(screen.getByRole("button", { name: "打开工作区" }));
 
-    await waitFor(() => expect(window.localStorage.getItem(activeWorkspaceStorageKey)).toBe(workspace.id));
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("active unavailable");
+    expect(screen.queryByText(workspaceFixture.id)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    expect(active.refresh).toHaveBeenCalledOnce();
   });
 });

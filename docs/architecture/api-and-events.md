@@ -208,6 +208,14 @@ Knowledge Eligibility、结构化生成、Citation 与 Faithfulness 门禁后才
 Workflow 失败，不伪装成业务 Refusal。`allow_original_sources/allow_web` 当前没有可发布资格时显式拒绝，
 不会静默忽略。
 
+### Active Workspace Bootstrap
+
+- `GET /api/v1/workspaces/active` 返回当前 managed grant 对应的唯一 Active Workspace，供 Docker Web 在业务认证准备后建立作用域。
+- Repository 必须同时证明数据库只有一个 `status='active'` Workspace，并经 RootGrantResolver 核对该 ID/Root 与进程 grant；
+  零个、多个或不匹配均返回稳定错误，不得任选记录或回退浏览器缓存。
+- 响应复用严格 Workspace 投影；浏览器不通过该端点创建/打开 Root，也不把 `workspace_id` 当作身份凭据。
+- Workspace A -> B 时，客户端先 Abort A 请求、停止 A SSE 并清理 A Query/cache/草稿，再接受 B；SSE 不是 Active 身份事实源。
+
 ### M9 Workspace 业务列表
 
 M9-01 为页面增加三个 Workspace-scoped 只读投影，详情仍由各领域已有接口拥有：

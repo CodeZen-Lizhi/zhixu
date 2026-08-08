@@ -1,8 +1,7 @@
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const workspaceStorageKey = "zhixu.active-workspace-id";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const optionalUUID = (name: string): string | undefined => {
@@ -33,12 +32,6 @@ interface FrameSchedulingDiagnostic {
   p95FrameIntervalMs: number;
   framesOver60HzBudget: number;
 }
-
-const installWorkspace = async (context: BrowserContext, id: string): Promise<void> => {
-  await context.addInitScript(({ key, value }) => {
-    window.localStorage.setItem(key, value);
-  }, { key: workspaceStorageKey, value: id });
-};
 
 const measureFrames = async (page: Page): Promise<FrameSchedulingDiagnostic> => page.evaluate(async ({ duration, frameBudget }) => {
   const canvas = document.querySelector<HTMLElement>(".graph-canvas");
@@ -108,7 +101,6 @@ test("Graph 页面写出非正式帧调度诊断", async ({ page }) => {
   if (workspaceID === undefined || centerTopicID === undefined) {
     throw new Error("ZHIXU_GRAPH_FPS_WORKSPACE_ID and ZHIXU_GRAPH_FPS_CENTER_TOPIC_ID must be set together");
   }
-  await installWorkspace(page.context(), workspaceID);
   await page.goto(`/graph?mode=local&center_type=TOPIC&center_id=${centerTopicID}&depth=1&direction=BOTH`);
   await expect(page.getByRole("heading", { name: "知识图谱" })).toBeVisible();
   await expect(page.locator(".graph-canvas")).toBeVisible();

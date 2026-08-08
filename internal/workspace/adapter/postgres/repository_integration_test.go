@@ -57,6 +57,13 @@ func TestRepositoryWorkspaceAndSourceVersionLifecycle(t *testing.T) {
 	if persisted.ID != workspace.ID || persisted.RootPath != workspace.RootPath {
 		t.Fatalf("workspace = %#v", persisted)
 	}
+	active, err := repository.GetActiveWorkspace(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.ID != workspace.ID || active.Status != domain.WorkspaceStatusActive {
+		t.Fatalf("active workspace = %#v", active)
+	}
 
 	registration := domain.SourceRegistration{
 		Source: domain.Source{

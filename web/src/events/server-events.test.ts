@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { setCsrfToken, subscribeAuthInvalidation } from "../api/auth";
-import { subscribeRuntimeAccessInvalidation } from "../shared/runtime-access-invalidation";
 import {
   ServerEventClientError,
   connectServerEvents,
@@ -267,21 +266,6 @@ describe("connectServerEvents", () => {
     expect(fetcher).toHaveBeenCalledOnce();
     expect(window.localStorage.getItem("zhixu.csrf-token")).toBeNull();
     expect(invalidated).toHaveBeenCalledOnce();
-    unsubscribe();
-  });
-
-  it("SSE runtime unavailable header 通知共享运行时边界", async () => {
-    const invalidated = vi.fn();
-    const unsubscribe = subscribeRuntimeAccessInvalidation(invalidated);
-    const fetcher = vi.fn(() => Promise.resolve(new Response(JSON.stringify({ code: "RUNTIME_NOT_READY", message: "暂不可用", retryable: true }), {
-      status: 503,
-      headers: { "Content-Type": "application/problem+json", "X-Zhixu-Runtime-Status": "unavailable" },
-    })));
-    const connection = connectServerEvents({ workspaceId, fetcher, onRecoveryRequired: ignoreRecovery });
-
-    await vi.waitFor(() => expect(invalidated).toHaveBeenCalledOnce());
-    connection.close();
-    await connection.done;
     unsubscribe();
   });
 

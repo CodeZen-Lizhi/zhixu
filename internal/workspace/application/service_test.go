@@ -282,6 +282,73 @@ func TestServiceOpenWorkspace(t *testing.T) {
 	}
 }
 
+func TestServiceGetActiveWorkspace(t *testing.T) {
+	workspace := domain.Workspace{
+		ID: testWorkspaceID, Name: "Active", RootPath: "/workspace",
+		Status: domain.WorkspaceStatusActive, Availability: domain.WorkspaceAvailabilityAvailable, Version: 3,
+	}
+	repository := &fakeRepository{activeWorkspace: workspace}
+	files := &fakeFileScanner{}
+	git := &fakeGitStatusReader{err: errors.New("transient Git status failure")}
+	service := newTestService(repository, files, git)
+
+	result, err := service.GetActiveWorkspace(context.Background())
+	if err != nil {
+		t.Fatalf("GetActiveWorkspace() error = %v", err)
+	}
+	if repository.activeCalls != 1 || result.ID != workspace.ID || result.Availability != domain.WorkspaceAvailabilityAvailable || result.Version != workspace.Version {
+		t.Fatalf("active result=%#v calls=%d", result, repository.activeCalls)
+	}
+	if repository.createCalls != 0 || repository.requestedRoot != "" || len(files.canonicalPaths) != 0 || len(files.scanRoots) != 0 {
+		t.Fatalf("active query reached root mutation/selection: create=%d requested_root=%q canonical=%v scan=%v",
+			repository.createCalls, repository.requestedRoot, files.canonicalPaths, files.scanRoots)
+	}
+	if git.calls != 0 || len(git.roots) != 0 {
+		t.Fatalf("Git status calls=%d roots=%#v, want no Git dependency", git.calls, git.roots)
+	}
+}
+
+func TestServiceGetActiveWorkspaceDoesNotRequireGitDependency(t *testing.T) {
+	workspace := domain.Workspace{
+		ID: testWorkspaceID, Name: "Active", RootPath: "/workspace",
+		Status: domain.WorkspaceStatusActive, Availability: domain.WorkspaceAvailabilityAvailable, Version: 3,
+	}
+	service := newTestService(&fakeRepository{activeWorkspace: workspace}, &fakeFileScanner{}, nil)
+
+	result, err := service.GetActiveWorkspace(context.Background())
+	if err != nil {
+		t.Fatalf("GetActiveWorkspace() with nil Git error = %v", err)
+	}
+	if result.ID != workspace.ID || result.RootPath != workspace.RootPath {
+		t.Fatalf("active result=%#v", result)
+	}
+}
+
+func TestServiceGetActiveWorkspaceFailsClosed(t *testing.T) {
+	notFound := foundation.NewError(foundation.ErrorNotFound, domain.ErrorCodeActiveWorkspaceNotFound, false, errors.New("no active workspace"))
+	for _, test := range []struct {
+		name       string
+		repository domain.Repository
+		kind       foundation.ErrorKind
+		code       string
+	}{
+		{name: "no active workspace", repository: &fakeRepository{activeErr: notFound}, kind: foundation.ErrorNotFound, code: domain.ErrorCodeActiveWorkspaceNotFound},
+		{name: "invalid active binding", repository: &fakeRepository{activeWorkspace: domain.Workspace{ID: testWorkspaceID, Name: "Active", RootPath: "/workspace", Status: domain.WorkspaceStatusInactive, Availability: domain.WorkspaceAvailabilityAvailable, Version: 1}}, kind: foundation.ErrorConsistencyViolation, code: domain.ErrorCodeActiveWorkspaceBindingInvalid},
+		{name: "invalid active availability", repository: &fakeRepository{activeWorkspace: domain.Workspace{ID: testWorkspaceID, Name: "Active", RootPath: "/workspace", Status: domain.WorkspaceStatusActive, Availability: "unknown", Version: 1}}, kind: foundation.ErrorConsistencyViolation, code: domain.ErrorCodeActiveWorkspaceBindingInvalid},
+		{name: "query capability missing", repository: repositoryWithoutActive{Repository: &fakeRepository{}}, kind: foundation.ErrorDependencyUnavailable, code: "ACTIVE_WORKSPACE_QUERY_UNAVAILABLE"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			git := &fakeGitStatusReader{status: domain.GitStatus{Present: true}}
+			service := newTestService(test.repository, &fakeFileScanner{}, git)
+			_, err := service.GetActiveWorkspace(context.Background())
+			requireClassifiedError(t, err, test.kind, test.code)
+			if git.calls != 0 {
+				t.Fatalf("Git status calls=%d, want 0", git.calls)
+			}
+		})
+	}
+}
+
 func TestServiceScanWorkspace(t *testing.T) {
 	files := []domain.ScannedFile{
 		{RelativePath: "a.md", ByteSize: 12, ContentHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", MediaType: "text/markdown"},
@@ -336,16 +403,21 @@ func requireClassifiedError(t *testing.T, err error, kind foundation.ErrorKind, 
 }
 
 type fakeRepository struct {
-	roots          []string
-	workspace      domain.Workspace
-	created        domain.Workspace
-	requestedRoot  string
-	createCalls    int
-	registrations  []domain.SourceRegistration
-	registration   domain.SourceRegistration
-	registerCalls  int
-	registerResult domain.SourceRegistrationResult
+	roots           []string
+	workspace       domain.Workspace
+	activeWorkspace domain.Workspace
+	activeErr       error
+	activeCalls     int
+	created         domain.Workspace
+	requestedRoot   string
+	createCalls     int
+	registrations   []domain.SourceRegistration
+	registration    domain.SourceRegistration
+	registerCalls   int
+	registerResult  domain.SourceRegistrationResult
 }
+
+type repositoryWithoutActive struct{ domain.Repository }
 
 type deniedRootSelectionRepository struct {
 	*fakeRepository
@@ -369,6 +441,11 @@ func (f *fakeRepository) GetWorkspaceByID(_ context.Context, _ foundation.ID) (d
 func (f *fakeRepository) GetWorkspaceByRootPath(_ context.Context, rootPath string) (domain.Workspace, error) {
 	f.requestedRoot = rootPath
 	return f.workspace, nil
+}
+
+func (f *fakeRepository) GetActiveWorkspace(context.Context) (domain.Workspace, error) {
+	f.activeCalls++
+	return f.activeWorkspace, f.activeErr
 }
 
 func (f *fakeRepository) ListWorkspaceRoots(context.Context) ([]string, error) {
@@ -420,6 +497,7 @@ func (f *fakeFileScanner) ReadArtifact(context.Context, string, domain.ContentAr
 
 type fakeGitStatusReader struct {
 	status domain.GitStatus
+	err    error
 	roots  []string
 	calls  int
 }
@@ -457,7 +535,7 @@ func (f *fakeCommittedContentStore) CaptureCommitted(_ context.Context, rootPath
 func (f *fakeGitStatusReader) Status(_ context.Context, rootPath string) (domain.GitStatus, error) {
 	f.calls++
 	f.roots = append(f.roots, rootPath)
-	return f.status, nil
+	return f.status, f.err
 }
 
 type fakeIDGenerator struct {

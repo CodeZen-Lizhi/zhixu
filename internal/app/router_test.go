@@ -203,6 +203,18 @@ func readyKnowledgeHandler() *knowledgehttp.Handler {
 	return knowledgehttp.NewHandler(routerTimelineService{}, routerImpactService{}, time.Second)
 }
 
+func TestRouterRegistersActiveWorkspaceBeforeWorkspaceID(t *testing.T) {
+	router := NewRouter(Dependencies{Version: "test", Workspace: workspacehttp.NewHandler(nil)})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/workspaces/active", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(response.Body.String(), "WORKSPACE_SERVICE_UNAVAILABLE") ||
+		strings.Contains(response.Body.String(), "INVALID_ID") {
+		t.Fatalf("active workspace route status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestRouterRegistersRetrievalRoutes(t *testing.T) {
 	router := NewRouter(Dependencies{Version: "test", Retrieval: retrievalhttp.NewHandler(nil, nil, nil)})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/search", strings.NewReader(`{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"q"}`))
@@ -493,10 +505,12 @@ func TestRouterAuthProtectsBusinessRoutesButKeepsPublicHealth(t *testing.T) {
 	router := NewRouter(Dependencies{
 		Version: "auth-test", Database: fakePinger{}, Auth: readyAuthHandler(t), AuthRequired: true,
 		AuthCheck: func(context.Context) error { return nil },
+		Workspace: workspacehttp.NewHandler(nil),
 		Graph:     readyGraphHandler(), Candidate: readyCandidateHandler(), Knowledge: readyKnowledgeHandler(),
 	})
 	for _, path := range []string{
 		"/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001",
+		"/api/v1/workspaces/active",
 		"/api/v1/workspaces/92000000-0000-4000-8000-000000000001/timeline",
 	} {
 		unauthenticated := httptest.NewRequest(http.MethodGet, path, nil)
@@ -564,6 +578,10 @@ func TestRouterScopedBearerCapabilityMatrixAndBootstrapIsolation(t *testing.T) {
 	if readResponse.Code != http.StatusOK {
 		t.Fatalf("READ_LOCAL read status=%d body=%s", readResponse.Code, readResponse.Body.String())
 	}
+	activeWorkspaceResponse := request(http.MethodGet, "/api/v1/workspaces/active", readToken)
+	if activeWorkspaceResponse.Code != http.StatusServiceUnavailable || !strings.Contains(activeWorkspaceResponse.Body.String(), "WORKSPACE_SERVICE_UNAVAILABLE") {
+		t.Fatalf("READ_LOCAL active Workspace status=%d body=%s", activeWorkspaceResponse.Code, activeWorkspaceResponse.Body.String())
+	}
 
 	for _, test := range []struct {
 		name   string
@@ -577,6 +595,7 @@ func TestRouterScopedBearerCapabilityMatrixAndBootstrapIsolation(t *testing.T) {
 		{name: "index cannot read", token: indexToken, method: http.MethodGet, path: "/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001"},
 		{name: "index alone cannot run composite scan", token: indexToken, method: http.MethodPost, path: "/api/v1/workspaces/92000000-0000-4000-8000-000000000001/scan"},
 		{name: "proposal cannot read", token: proposalToken, method: http.MethodGet, path: "/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001"},
+		{name: "proposal cannot read active workspace", token: proposalToken, method: http.MethodGet, path: "/api/v1/workspaces/active"},
 		{name: "proposal cannot approve knowledge", token: proposalToken, method: http.MethodPost, path: "/api/v1/proposals/92000000-0000-4000-8000-000000000001/approvals"},
 		{name: "read cannot mutate review", token: readToken, method: http.MethodPost, path: "/api/v1/review/decks"},
 	} {

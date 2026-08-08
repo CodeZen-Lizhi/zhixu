@@ -70,44 +70,67 @@ Viper 实例，不启用全局单例、自动环境扫描或热更新；Worker/M
 的 non-API profile，但其他共享配置仍完整校验。完整契约见
 [进程启动配置架构](docs/architecture/configuration.md)。
 
-Start the local control plane from the repository root. The launcher creates a
-Git-ignored `.env` with mode `0600`, runs migrations, exports a native Host
-Controller plus the built SPA from Docker, and prints a one-time fragment link.
-The Controller stays on the stable loopback URL while the API and Worker are
-stopped or rebuilt. `.env.example` contains development-only values and must
-not be used as production secrets.
+Start the local stack from the repository root. The launcher creates a
+Git-ignored `.env` with mode `0600`, runs migrations, validates one exact host
+Workspace Root, and publishes the Docker Web/API directly on the fixed IPv4
+loopback URL. `.env.example` contains development-only values and must not be
+used as production secrets.
+
+```bash
+./zhixu up --workspace /Users/me/Knowledge
+```
+
+The root must already be a Git repository. For a brand-new directory, append
+`--initialize-git` explicitly; the launcher never initializes Git silently.
+
+The first start requires one existing absolute directory. The launcher resolves
+it to a physical canonical path and grants that exact path to API and Worker as
+both bind source and target. It never mounts a parent, Home, `/`, or the legacy
+`/workspace` target, and it never creates the directory or changes its
+permissions. After a successful activation, the protected local selection is
+remembered, so later starts need no path:
 
 ```bash
 ./zhixu up
+./zhixu restart
 ```
 
-The first start grants no host directory and starts no API or Worker. Open the
-printed link, establish the process-local control session, and select one
-existing absolute directory. The Controller resolves it to a physical canonical
-path and grants that exact path to API and Worker as both bind source and target.
-It never mounts a parent, Home, `/`, or the legacy `/workspace` target, and it
-never creates the directory or changes its permissions. `ZHIXU_WORKSPACE_ROOT`
-is obsolete and only produces a migration warning when left in an old `.env`.
+`ZHIXU_WORKSPACE_ROOT` remains obsolete and is never a second source of truth.
 
 On Docker Desktop, make sure the selected directory is shared with Docker. The
 directory must also be accessible to container UID/GID `10001:10001`; sharing or
 permission failures are reported without falling back to a broader mount. A
-switch stops and removes the old runtime before applying the new exact grant.
-While no verified runtime is ready, `/api/v1/*` fails closed with `503`, but the
-Controller page and protected operation state remain available.
+switch uses the same validate, quiesce, revoke, prepare, verify, commit and
+activate state machine, and stops/removes the old runtime before applying the
+new exact grant:
+
+```bash
+./zhixu workspace switch /Users/me/Other-Knowledge
+```
+
+Workspace A and B keep different stable IDs. B cannot read A's RAG, search,
+notes, review, interview, Git or source-file data; switching back to A restores
+A's original data. During the short runtime rebuild, `/api/v1/*` fails closed
+rather than serving mixed or stale Workspace state.
 
 Model settings remain immutable encrypted revisions in PostgreSQL, with the
 master key in the project-owned `zhixu_zhixu-model-secrets` volume. Runtime
-restart and Workspace switching are Controller-owned mutations; the legacy
-`./zhixu restart` command deliberately refuses to bypass that gate. The launcher
-is fixed to Compose project `zhixu` and rejects `ZHIXU_COMPOSE_PROJECT_NAME`,
-so `down` and `reset` cannot target an unrelated stack.
+restart and Workspace switching are serialized launcher mutations backed by a
+one-shot native control command; no host Web server stays running afterward.
+The launcher also keeps a non-secret stable UUID in
+`.zhixu/control-instance-id` so retries share one durable idempotency namespace;
+each command still uses a new short-lived lease owner. This UUID is never a Web
+credential or URL parameter and survives both `down` and `reset`.
+The launcher is fixed to Compose project `zhixu` and rejects
+`ZHIXU_COMPOSE_PROJECT_NAME`, so `down` and `reset` cannot target an unrelated
+stack.
 
-Use `./zhixu status`, `./zhixu logs [controller|service]`, and `./zhixu down` for
-normal operation. `down` preserves PostgreSQL, model settings, the master key,
-and every host Workspace file while clearing the active grant override.
-`./zhixu reset` is the explicit destructive command for Compose volumes and
-requires typing `DELETE`; it still never deletes a selected host directory.
+Use `./zhixu status`, `./zhixu logs [service]`, and `./zhixu down` for normal
+operation. `down` preserves PostgreSQL, model settings, the master key, the
+remembered Workspace selection and every host Workspace file while clearing the
+derived grant override. `./zhixu reset` is the explicit destructive command for
+Compose volumes and requires typing `DELETE`; it clears the local selection but
+preserves the launcher identity and never deletes a selected host directory.
 
 The checked-in example explicitly uses development-only `disabled` auth, so it
 starts without a Bootstrap Token. To exercise `required` mode, set both
@@ -121,23 +144,22 @@ from the Bootstrap Token, while local `disabled` mode generates a process-local
 key whose outstanding references expire on API restart. The official Compose
 example supplies a development-only explicit key so its startup guard can verify
 the resolved model; replace that value before non-development use. Any local
-browser can open <http://127.0.0.1:8080/dashboard> without a Controller
-credential; business authentication still follows `required|disabled`. The
-one-time link printed by `./zhixu up` is only required for `/`, `/workspace`,
-Workspace Root changes, runtime switching, and other Host Controller operations.
-Public runtime discovery is `GET /host/v1/runtime`; it exposes only readiness and
-the active opaque Workspace ID. Controller liveness is `GET /control/v1/livez`.
-After a Workspace runtime is ready, business health and dependency status are
-proxied at:
+browser can open <http://127.0.0.1:8080/dashboard> directly; business
+authentication still follows `required|disabled`. There is no one-time control
+link, control Cookie or host-side HTTP proxy. The browser reads the current
+server-authorized Workspace from `GET /api/v1/workspaces/active`; host path and
+Docker mutations remain available only through the local launcher. After a
+Workspace runtime is ready, business health and dependency status are served at:
 
 - `GET /livez`: API process liveness
 - `GET /readyz`: API readiness including PostgreSQL connectivity
 - `GET /api/v1/system/status`: API and database status used by the web page
+- `GET /api/v1/workspaces/active`: read the unique server-authorized Active Workspace
 - `POST /api/v1/auth/sessions`: exchange the configured Bootstrap Bearer credential for an HttpOnly Session Cookie and one-time CSRF token
 - `GET/POST/DELETE /api/v1/auth/session`: inspect, rotate, or revoke the current browser Session
 - `GET/POST /api/v1/auth/api-tokens`: list metadata or create a scoped automation Token (plaintext returned once)
 - `DELETE /api/v1/auth/api-tokens/{token_id}`: revoke an automation Token
-- `POST /api/v1/workspaces`: create the single active Workspace and record its Git baseline
+- `POST /api/v1/workspaces`: direct-binary compatibility path; managed Docker roots are created by the local control command
 - `GET /api/v1/workspaces/{workspace_id}`: reopen the persisted Workspace
 - `POST /api/v1/workspaces/{workspace_id}/scan`: scan supported files and register immutable Source Version metadata
 - `POST /api/v1/workspaces/{workspace_id}/workflows`: start a durable Workflow Run and return `202 + workflow_run_id`
@@ -173,7 +195,7 @@ both Claims have a formal `CONFIRMED BELONGS_TO` membership in that Topic; they 
 
 Open `/chat` to create/select a Conversation and `/chat/{conversationId}` to continue it. Chat is fail-closed by
 default. For the normal Compose stack, configure Chat and Embedding in the Settings page, save the desired revision,
-then apply the saved revision through the Host Controller workflow. Customized legacy `ZHIXU_CHAT_*` or `ZHIXU_EMBEDDING_*` values in `.env` are rejected
+then apply the saved revision with `./zhixu restart`. Customized legacy `ZHIXU_CHAT_*` or `ZHIXU_EMBEDDING_*` values in `.env` are rejected
 before build/start; restore those fields to `.env.example` defaults. Static model environment variables remain for
 direct binaries and isolated smoke overlays only, and API keys must never be committed. 认证配置由
 `ZHIXU_AUTH_MODE=required|disabled` 控制：`required` 使用一次性 Bootstrap

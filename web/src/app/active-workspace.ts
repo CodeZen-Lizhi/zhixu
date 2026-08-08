@@ -1,54 +1,22 @@
 import { useSyncExternalStore } from "react";
 
-import { runtimeMode } from "./runtime-mode";
-
-export const activeWorkspaceStorageKey = "zhixu.active-workspace-id";
-
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const listeners = new Set<() => void>();
 let snapshot = "";
 
-const readStorage = (): string => {
-  if (runtimeMode === "controller") return snapshot;
-  if (typeof window === "undefined") return "";
-  try {
-    const value = window.localStorage.getItem(activeWorkspaceStorageKey) ?? "";
-    return uuidPattern.test(value) ? value : "";
-  } catch {
-    return "";
-  }
-};
-
-snapshot = readStorage();
-
-const emit = (): void => {
-  snapshot = readStorage();
-  listeners.forEach((listener) => listener());
-};
-
-if (typeof window !== "undefined") {
-  window.addEventListener("storage", (event) => {
-    if (event.key === activeWorkspaceStorageKey) emit();
-  });
-}
-
-export const getActiveWorkspaceId = (): string => {
-  snapshot = readStorage();
-  return snapshot;
-};
+/**
+ * 仅保留页面生命周期内的投影。生产环境的 ID 由 Active Workspace API 发布，
+ * 这里的 setter 只供边界和测试同步 React 订阅者，不读写浏览器存储。
+ */
+export const getActiveWorkspaceId = (): string => snapshot;
 
 export const setActiveWorkspaceId = (workspaceId: string): void => {
   if (workspaceId !== "" && !uuidPattern.test(workspaceId)) {
     throw new Error("活动 Workspace ID 必须是规范 UUID");
   }
-  if (runtimeMode === "controller") {
-    snapshot = workspaceId;
-    listeners.forEach((listener) => listener());
-    return;
-  }
-  if (workspaceId === "") window.localStorage.removeItem(activeWorkspaceStorageKey);
-  else window.localStorage.setItem(activeWorkspaceStorageKey, workspaceId);
-  emit();
+  if (snapshot === workspaceId) return;
+  snapshot = workspaceId;
+  listeners.forEach((listener) => listener());
 };
 
 export const subscribeActiveWorkspace = (listener: () => void): (() => void) => {

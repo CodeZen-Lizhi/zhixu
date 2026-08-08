@@ -84,6 +84,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     user: "10001:10001"
+    restart: ${ZHIXU_APP_RESTART_POLICY:-on-failure}
     environment:
       <<: [*tool-environment, *runtime-environment, *model-settings-environment, *api-auth-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
@@ -99,12 +100,15 @@ services:
       ZHIXU_WEB_ASSETS_DIR: /app/web
       ZHIXU_WORKER_QUEUE: ${ZHIXU_WORKER_QUEUE:-workflow}
     depends_on:
+      postgres:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
       model-settings-key-init:
         condition: service_completed_successfully
     ports:
       - target: 8080
+        published: ${ZHIXU_HTTP_PORT:-8080}
         host_ip: 127.0.0.1
         protocol: tcp
     volumes:
@@ -141,6 +145,7 @@ services:
       dockerfile: deploy/Dockerfile
     entrypoint: ["socat", "TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:8081"]
     user: "10001:10001"
+    restart: on-failure
     network_mode: "service:app"
     depends_on:
       firewall:
@@ -204,6 +209,8 @@ services:
       ZHIXU_TELEMETRY_MODE: ${ZHIXU_TELEMETRY_MODE:-disabled}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
+      postgres:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
       model-settings-key-init:

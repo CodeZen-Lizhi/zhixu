@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"精确 Workspace 根目录授权、Controller 迁移、切换恢复和 Docker 安全边界的主规范。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"一次性控制命令、Active Workspace API 和启动失败必须保持稳定错误与 fail-closed 语义。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"唯一 Active Workspace 查询、事务切换、持久化 operation 与 workspace_id 隔离需要遵守数据库契约。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go、Compose、恢复测试、跨层验证与交付门禁。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"服务端 Active Workspace 事实源、Query 缓存和切换清理顺序。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Active Workspace 响应必须经过严格 decoder，组件不得解析原始 wire。"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"移除 Controller 页面后 Workspace 状态、重连和错误界面的组件约束。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"前端切换隔离、认证保留、测试和浏览器验证门禁。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"启动器、Compose、Go API、OpenAPI 和 Web 的完整数据流需要同步。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有切换状态机与严格边界，避免复制安全规则。"}

@@ -1123,20 +1123,14 @@ h1 {
 }
 .workspace-connection__heading h2 { margin: 0; font-size: 1rem; font-weight: 650; }
 .workspace-connection__heading p { margin: 0; color: var(--muted); font-size: .8rem; }
-.workspace-mode-switch { display: inline-grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px; margin-bottom: 1.25rem; padding: 2px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-subtle); }
-.workspace-mode-switch button { min-height: 36px; border: 0; padding: .45rem .75rem; color: var(--muted); background: transparent; font-size: .8rem; }
-.workspace-mode-switch button.is-active { color: var(--blue); background: var(--surface); }
-
-.workspace-connection__body {
+.workspace-command-list {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(18rem, 0.65fr);
-  gap: 2rem;
-  align-items: start;
+  gap: 1rem;
 }
 
-.workspace-connection__primary {
-  min-width: 0;
-}
+.workspace-command-list > div { display: grid; gap: .4rem; min-width: 0; }
+.workspace-command-list p { margin: 0; }
+.workspace-command { display: block; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
 
 .section-heading {
   display: grid;
@@ -1159,25 +1153,6 @@ h1 {
   color: var(--muted);
   line-height: 1.65;
 }
-
-.workspace-form {
-  display: grid;
-  grid-template-columns: minmax(0, .8fr) minmax(0, 1.3fr);
-  gap: .9rem;
-  align-items: end;
-  max-width: 720px;
-}
-
-.workspace-open-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; align-items: end; max-width: 720px; }
-.workspace-open-form label { display: grid; gap: .35rem; font-weight: 600; }
-.workspace-open-form .secondary-button { margin: 0; }
-
-.workspace-form label:not(.checkbox-field) {
-  display: grid;
-  gap: 0.35rem;
-  font-weight: 600;
-}
-.workspace-form > .ui-button { grid-column: 1 / -1; justify-self: start; }
 
 .checkbox-field {
   display: flex;
@@ -1556,12 +1531,6 @@ h1 {
   to { transform: rotate(360deg); }
 }
 
-@media (max-width: 920px) {
-  .workspace-connection__body {
-    grid-template-columns: 1fr;
-  }
-}
-
 @media (max-width: 720px) {
   .app-shell {
     width: min(100% - 1.25rem, 1040px);
@@ -1581,9 +1550,7 @@ h1 {
     grid-template-columns: 1fr 1fr;
   }
 
-  .section-heading,
-  .workspace-form,
-  .workspace-open-form {
+  .section-heading {
     grid-template-columns: 1fr;
   }
 
@@ -1687,8 +1654,6 @@ h1 {
   .settings-facts > div { grid-template-columns: 1fr; gap: .3rem; }
   .settings-form-grid { grid-template-columns: 1fr; }
   .workspace-connection__heading { flex-direction: column; }
-  .workspace-form, .workspace-open-form { grid-template-columns: 1fr; }
-  .workspace-form > .ui-button, .workspace-open-form > .ui-button { width: 100%; }
   .workspace-meta { grid-template-columns: 1fr 1fr; }
   .topbar-actions .local-mode-badge { display: none; }
 }

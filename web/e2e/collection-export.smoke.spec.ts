@@ -1,8 +1,7 @@
-import { expect, test, type BrowserContext, type Page, type Response } from "@playwright/test";
+import { expect, test, type Page, type Response } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-const workspaceStorageKey = "zhixu.active-workspace-id";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const requiredEnvironment = (name: string): string => {
@@ -18,9 +17,6 @@ const fixture = {
 };
 
 const collectionPath = `/collections/${fixture.collectionId}`;
-const installWorkspace = (context: BrowserContext): void => {
-  void context.addInitScript(({ key, workspaceId }) => { window.localStorage.setItem(key, workspaceId); }, { key: workspaceStorageKey, workspaceId: fixture.workspaceId });
-};
 const captureRuntimeIssues = (page: Page, issues: string[]): void => {
   page.on("console", (message) => { if (message.type() === "warning" || message.type() === "error") issues.push(`console.${message.type()}: ${message.text()}`); });
   page.on("pageerror", (error) => issues.push(`pageerror: ${error.message}`));
@@ -86,7 +82,6 @@ const assertSafeExportText = (text: string): void => {
 
 test("真实 Collection Export 创建、刷新恢复、下载和桌面/移动状态", async ({ browser, page }) => {
   const runtimeIssues: string[] = [];
-  installWorkspace(page.context());
   captureRuntimeIssues(page, runtimeIssues);
   const sseConnection = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/events" && response.headers()["content-type"]?.toLowerCase().startsWith("text/event-stream") === true);
   await page.goto(collectionPath);
@@ -212,7 +207,6 @@ test("真实 Collection Export 创建、刷新恢复、下载和桌面/移动状
   expect(historyAfterRetries.length).toBeGreaterThanOrEqual(beforeFailedRetry.size + 2);
 
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 } });
-  installWorkspace(mobile);
   const mobilePage = await mobile.newPage();
   captureRuntimeIssues(mobilePage, runtimeIssues);
   try {

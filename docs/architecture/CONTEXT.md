@@ -40,9 +40,10 @@ _Avoid_: 已删除 Workspace、空目录、自动迁移候选
 Workspace 已停止接收新的 Root 相关工作，且正在执行的文件操作已到达可安全暂停或切换的检查点。
 _Avoid_: 所有 Workflow 已结束、强制停机、普通空闲状态
 
-**Host Controller**:
-受用户本机信任、负责应用 Workspace Root Grant 并协调运行时切换的本地控制组件；它不处理知识业务，也不读取 Workspace 内容。
-_Avoid_: 业务 API、Docker Socket、文件扫描器
+**Workspace Control Command**:
+受用户本机信任、由 `zhixu` 在启动或切换时一次性调用、负责应用 Workspace Root Grant 并协调运行时切换的本地命令；
+它不监听网页端口、不处理知识业务，也不读取 Workspace 内容。
+_Avoid_: 常驻宿主机网页控制进程、业务 API、Docker Socket、文件扫描器
 
 ## 工作台体验
 

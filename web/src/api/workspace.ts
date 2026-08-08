@@ -1,26 +1,5 @@
 import { authFetch } from "./auth";
 
-export interface WorkspaceGitStatus {
-  present: boolean;
-  repositoryPath: string;
-  branch: string;
-  head: string;
-  dirty: boolean;
-  checkedAt: string;
-}
-
-export interface Workspace {
-  id: string;
-  name: string;
-  rootPath: string;
-  status: "active";
-  version: number;
-  git: WorkspaceGitStatus;
-  warnings: string[];
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface ScannedFile {
   relativePath: string;
   byteSize: number;
@@ -36,12 +15,6 @@ export interface WorkspaceScan {
   workspaceId: string;
   files: ScannedFile[];
   count: number;
-}
-
-export interface CreateWorkspaceInput {
-  name: string;
-  rootPath: string;
-  initializeGit: boolean;
 }
 
 export class WorkspaceApiError extends Error {
@@ -83,35 +56,6 @@ const invalidResponse = (field: string) =>
 
 const isAbortError = (value: unknown): boolean =>
   (value instanceof DOMException || value instanceof Error) && value.name === "AbortError";
-
-export const decodeWorkspace = (value: unknown): Workspace => {
-  if (!isRecord(value) || !isRecord(value.git)) throw invalidResponse("workspace");
-  const rawWarnings: unknown = value.warnings ?? [];
-  if (!Array.isArray(rawWarnings) || rawWarnings.some((item: unknown) => typeof item !== "string")) {
-    throw invalidResponse("warnings");
-  }
-  const warnings = rawWarnings.map((item: unknown) => item as string);
-  const status = stringField(value, "status");
-  if (status !== "active") throw invalidResponse("status");
-  return {
-    id: stringField(value, "id"),
-    name: stringField(value, "name"),
-    rootPath: stringField(value, "root_path"),
-    status,
-    version: numberField(value, "version"),
-    warnings,
-    createdAt: stringField(value, "created_at"),
-    updatedAt: stringField(value, "updated_at"),
-    git: {
-      present: booleanField(value.git, "present"),
-      repositoryPath: stringField(value.git, "repository_path"),
-      branch: stringField(value.git, "branch"),
-      head: stringField(value.git, "head"),
-      dirty: booleanField(value.git, "dirty"),
-      checkedAt: stringField(value.git, "checked_at"),
-    },
-  };
-};
 
 export const decodeWorkspaceScan = (value: unknown): WorkspaceScan => {
   if (!isRecord(value) || !Array.isArray(value.files)) throw invalidResponse("scan");
@@ -158,21 +102,6 @@ const request = async (path: string, init?: RequestInit): Promise<unknown> => {
     throw new WorkspaceApiError("HTTP_ERROR", `Workspace 请求失败（HTTP ${String(response.status)}）。`, response.status >= 500);
   }
   return payload;
-};
-
-export const createWorkspace = async (input: CreateWorkspaceInput): Promise<Workspace> =>
-  decodeWorkspace(await request("/api/v1/workspaces", {
-    method: "POST",
-    body: JSON.stringify({ name: input.name, root_path: input.rootPath, initialize_git: input.initializeGit }),
-  }));
-
-export const getWorkspace = async (id: string, signal?: AbortSignal): Promise<Workspace> => {
-  const workspace = decodeWorkspace(await request(
-    `/api/v1/workspaces/${encodeURIComponent(id)}`,
-    signal === undefined ? undefined : { signal },
-  ));
-  if (workspace.id !== id) throw invalidResponse("id");
-  return workspace;
 };
 
 export const scanWorkspace = async (id: string): Promise<WorkspaceScan> =>

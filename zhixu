@@ -12,15 +12,23 @@ readonly STATE_DIR="${SCRIPT_DIR}/.zhixu"
 readonly LOCK_DIR="${STATE_DIR}/launcher.lock"
 readonly LOCK_METADATA="${LOCK_DIR}/owner"
 readonly BUNDLE_DIR="${STATE_DIR}/bundle"
-readonly CONTROLLER_BINARY="${BUNDLE_DIR}/zhixu-host-controller"
-readonly CONTROLLER_ASSETS="${BUNDLE_DIR}/web"
-readonly CONTROLLER_PID_FILE="${STATE_DIR}/controller.pid"
-readonly CONTROLLER_LOG_FILE="${STATE_DIR}/controller.log"
+readonly WORKSPACECTL_BINARY="${BUNDLE_DIR}/zhixu-workspacectl"
 readonly GRANT_OVERRIDE="${STATE_DIR}/workspace-grant.yml"
+readonly SELECTION_FILE="${STATE_DIR}/workspace-selection"
+readonly CONTROL_INSTANCE_FILE="${STATE_DIR}/control-instance-id"
 
 ENV_FILE="${LOCAL_ENV_FILE}"
 MUTATION_LOCK_HELD=0
 MUTATION_COMMAND_PID=""
+WORKSPACECTL_RESULT_FILE=""
+RUNTIME_STATUS_FILE=""
+CONTROL_ROOT=""
+CONTROL_WORKSPACE_ID=""
+CONTROL_ROOT_FINGERPRINT=""
+CONTROL_INSTANCE_ID=""
+SELECTION_ROOT=""
+SELECTION_WORKSPACE_ID=""
+SELECTION_ROOT_FINGERPRINT=""
 
 log() {
   printf '[zhixu] %s\n' "$1"
@@ -36,12 +44,16 @@ usage() {
 Usage: ./zhixu <command> [arguments]
 
 Commands:
-  up                       Start base services and the native Host Controller
-  restart                  Restart services and restore the saved exact Workspace
-  status                   Show Controller and Compose process status
-  logs [controller|service] Follow Controller or one known Compose service
-  down                     Stop Controller and Compose while preserving volumes
-  reset [--confirm DELETE] Delete PostgreSQL/model-secret volumes and the active grant
+  up --workspace ABS [--initialize-git]
+                           Select and start an exact host Workspace
+  up                       Reuse the last successfully selected Workspace
+  restart                  Restart the selected Workspace
+  workspace switch ABS [--initialize-git]
+                           Safely switch to another exact host Workspace
+  status                   Show Compose and local Workspace state
+  logs [service]           Follow one known Compose service (default: app)
+  down                     Stop Compose and revoke the grant; keep selection/data
+  reset [--confirm DELETE] Delete project volumes, selection, and derived grant
   help                     Show this help
 EOF
 }
@@ -74,16 +86,22 @@ path_mode() {
   stat -c '%a' -- "$1" 2>/dev/null || return 1
 }
 
+validate_protected_directory() {
+  local path=$1 label=$2 mode owner
+  [[ -d "${path}" && ! -L "${path}" ]] || fail "${label} must be a regular directory, not a symlink"
+  owner="$(path_owner "${path}")" || fail "could not inspect ${label} owner"
+  [[ "${owner}" == "$(id -u)" ]] || fail "${label} has an unexpected owner"
+  mode="$(path_mode "${path}")" || fail "could not inspect ${label} permissions"
+  [[ "${mode}" == "700" ]] || fail "${label} permissions must be 0700"
+}
+
 validate_state_directory() {
-  [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || fail ".zhixu must be a regular directory, not a symlink"
-  [[ "$(path_owner "${STATE_DIR}")" == "$(id -u)" ]] || fail ".zhixu has an unexpected owner"
-  local mode="$(path_mode "${STATE_DIR}")"
-  [[ "${mode}" == "700" ]] || fail ".zhixu permissions must be 0700"
+  validate_protected_directory "${STATE_DIR}" ".zhixu"
 }
 
 ensure_state_directory() {
   if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
-    (umask 077; mkdir -- "${STATE_DIR}") || fail "could not create protected Controller state"
+    (umask 077; mkdir -- "${STATE_DIR}") || fail "could not create protected launcher state"
   fi
   validate_state_directory
 }
@@ -94,12 +112,121 @@ validate_optional_state_directory() {
   fi
 }
 
+ensure_control_instance_id() {
+  python3 - "${CONTROL_INSTANCE_FILE}" <<'PY'
+import os
+import stat
+import sys
+import uuid
+
+path = sys.argv[1]
+directory = os.path.dirname(path)
+
+
+def fail(message):
+    raise SystemExit(message)
+
+
+def read_identity():
+    descriptor = None
+    try:
+        before = os.lstat(path)
+        if stat.S_ISLNK(before.st_mode):
+            fail("control instance identity is a symlink")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or not os.path.samestat(before, info):
+            fail("control instance identity is not a stable regular file")
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size != 37:
+            fail("control instance identity protection is invalid")
+        raw = os.read(descriptor, 38)
+    except OSError:
+        fail("control instance identity is unavailable")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError:
+        fail("control instance identity is invalid")
+    if not text.endswith("\n"):
+        fail("control instance identity is invalid")
+    value = text[:-1]
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        fail("control instance identity is invalid")
+    if parsed.int == 0 or str(parsed) != value:
+        fail("control instance identity is not canonical")
+    return value
+
+
+if not os.path.lexists(path):
+    value = str(uuid.uuid4())
+    document = (value + "\n").encode("ascii")
+    temporary = path + ".tmp." + str(os.getpid())
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = None
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+        view = memoryview(document)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                fail("control instance identity write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, path)
+        directory_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            directory_flags |= os.O_DIRECTORY
+        directory_descriptor = os.open(directory, directory_flags)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+
+print(read_identity())
+PY
+}
+
 validate_protected_file() {
-  local path=$1 label=$2 mode
+  local path=$1 label=$2 mode owner
   [[ -f "${path}" && ! -L "${path}" ]] || fail "${label} must be a regular file, not a symlink"
-  [[ "$(path_owner "${path}")" == "$(id -u)" ]] || fail "${label} has an unexpected owner"
+  owner="$(path_owner "${path}")" || fail "could not inspect ${label} owner"
+  [[ "${owner}" == "$(id -u)" ]] || fail "${label} has an unexpected owner"
   mode="$(path_mode "${path}")" || fail "could not inspect ${label} permissions"
   [[ "${mode}" == "600" ]] || fail "${label} permissions must be 0600"
+}
+
+protected_file_is_valid() {
+  local path=$1 mode owner
+  [[ -f "${path}" && ! -L "${path}" ]] || return 1
+  owner="$(path_owner "${path}")" || return 1
+  [[ "${owner}" == "$(id -u)" ]] || return 1
+  mode="$(path_mode "${path}")" || return 1
+  [[ "${mode}" == "600" ]]
+}
+
+validate_private_executable() {
+  local path=$1 label=$2 mode owner
+  [[ -f "${path}" && ! -L "${path}" && -x "${path}" ]] || fail "${label} must be a regular executable, not a symlink"
+  owner="$(path_owner "${path}")" || fail "could not inspect ${label} owner"
+  [[ "${owner}" == "$(id -u)" ]] || fail "${label} has an unexpected owner"
+  mode="$(path_mode "${path}")" || fail "could not inspect ${label} permissions"
+  [[ "${mode}" == "700" ]] || fail "${label} permissions must be 0700"
 }
 
 select_existing_env() {
@@ -113,6 +240,8 @@ select_existing_env() {
 
 initialize_local_state() {
   ensure_state_directory
+  CONTROL_INSTANCE_ID="$(ensure_control_instance_id)" \
+    || fail "Workspace control instance identity is invalid"
   if [[ ! -e "${LOCAL_ENV_FILE}" && ! -L "${LOCAL_ENV_FILE}" ]]; then
     (umask 077; cp -- "${ENV_TEMPLATE}" "${LOCAL_ENV_FILE}") || fail "could not create local .env"
     log "created local .env from .env.example"
@@ -123,18 +252,302 @@ initialize_local_state() {
   validate_protected_file "${LOCAL_ENV_FILE}" ".env"
   ENV_FILE="${LOCAL_ENV_FILE}"
   if awk -F= '$1 == "ZHIXU_WORKSPACE_ROOT" && $2 != "" { found = 1 } END { exit found ? 0 : 1 }' "${ENV_FILE}"; then
-    log "warning: ZHIXU_WORKSPACE_ROOT is obsolete and will not be mounted; select the directory in the browser"
+    log "warning: ZHIXU_WORKSPACE_ROOT is obsolete and ignored; use up --workspace ABS"
   fi
 }
 
-ensure_empty_grant_override() {
-  if [[ ! -e "${GRANT_OVERRIDE}" && ! -L "${GRANT_OVERRIDE}" ]]; then
-    (umask 077; printf 'services: {}\n' >"${GRANT_OVERRIDE}") || fail "could not create empty Workspace grant file"
+selection_document() {
+  python3 - "$@" <<'PY'
+import datetime
+import json
+import os
+import posixpath
+import re
+import stat
+import sys
+import uuid
+
+MAX_DOCUMENT_BYTES = 8192
+SELECTION_KEYS = {
+    "schema_version", "canonical_root", "workspace_id",
+    "root_fingerprint", "committed_at",
+}
+RESULT_REQUIRED_KEYS = {"schema", "action", "status", "changed"}
+RESULT_BINDING_KEYS = {
+    "workspace_id", "canonical_root", "root_fingerprint", "binding_version",
+}
+RESULT_OPERATION_KEYS = {"grant_generation", "operation_id", "operation_result"}
+RESULT_ALLOWED_KEYS = RESULT_REQUIRED_KEYS | RESULT_BINDING_KEYS | RESULT_OPERATION_KEYS
+
+
+def die(message):
+    raise SystemExit(message)
+
+
+def object_without_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            die("document contains duplicate fields")
+        result[key] = value
+    return result
+
+
+def read_document(path):
+    descriptor = None
+    try:
+        before = os.lstat(path)
+        if stat.S_ISLNK(before.st_mode):
+            die("document is not a regular file")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        info = os.fstat(descriptor)
+    except OSError:
+        die("document is unavailable")
+    try:
+        if not stat.S_ISREG(info.st_mode) or not os.path.samestat(before, info):
+            die("document is not a stable regular file")
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            die("document protection is invalid")
+        with os.fdopen(descriptor, "rb", closefd=True) as source:
+            descriptor = None
+            raw = source.read(MAX_DOCUMENT_BYTES + 1)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if len(raw) > MAX_DOCUMENT_BYTES:
+        die("document is too large")
+    try:
+        text = raw.decode("utf-8")
+        value = json.loads(text, object_pairs_hook=object_without_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        die("document is invalid JSON")
+    if not isinstance(value, dict):
+        die("document must be an object")
+    return value
+
+
+def validate_root(value):
+    if (
+        not isinstance(value, str)
+        or not value.startswith("/")
+        or value.startswith("//")
+        or value == "/"
+        or len(value.encode("utf-8")) > 4096
+        or posixpath.normpath(value) != value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        die("canonical_root is invalid")
+    return value
+
+
+def validate_workspace_id(value):
+    if not isinstance(value, str):
+        die("workspace_id is invalid")
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        die("workspace_id is invalid")
+    if parsed.int == 0 or str(parsed) != value:
+        die("workspace_id is not canonical")
+    return value
+
+
+def validate_fingerprint(value):
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        die("root_fingerprint is invalid")
+    return value
+
+
+def validate_schema(value):
+    if type(value) is not int or value != 1:
+        die("schema_version is unsupported")
+
+
+def validate_timestamp(value):
+    if not isinstance(value, str) or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z",
+        value,
+    ) is None:
+        die("committed_at is invalid")
+    try:
+        datetime.datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        die("committed_at is invalid")
+
+
+def validate_positive_integer(value, field):
+    if type(value) is not int or value <= 0:
+        die(field + " is invalid")
+    return value
+
+
+def validate_result(value):
+    keys = set(value)
+    if not RESULT_REQUIRED_KEYS.issubset(keys) or not keys.issubset(RESULT_ALLOWED_KEYS):
+        die("workspacectl result fields are invalid")
+    if value["schema"] != "workspace-control-result/v1":
+        die("workspacectl result schema is unsupported")
+    if value["action"] != "switch":
+        die("workspacectl result action is invalid")
+    if type(value["changed"]) is not bool:
+        die("workspacectl result changed is invalid")
+    if "grant_generation" in value:
+        validate_positive_integer(value["grant_generation"], "grant_generation")
+
+    binding_keys = keys & RESULT_BINDING_KEYS
+    operation_keys = keys & {"operation_id", "operation_result"}
+    if binding_keys != RESULT_BINDING_KEYS:
+        die("switch workspacectl result is missing its Workspace binding")
+    if value["changed"]:
+        if value["status"] != "switched" or not RESULT_OPERATION_KEYS.issubset(keys):
+            die("changed switch result is missing its operation binding")
+        validate_workspace_id(value["operation_id"])
+        if value["operation_result"] != "succeeded":
+            die("switch operation did not succeed")
+    elif value["status"] != "reconciled" or operation_keys or "grant_generation" not in value:
+        die("unchanged switch result is invalid")
+
+    validate_root(value["canonical_root"])
+    validate_workspace_id(value["workspace_id"])
+    validate_fingerprint(value["root_fingerprint"])
+    validate_positive_integer(value["binding_version"], "binding_version")
+    return value
+
+
+def validate_selection(value):
+    if set(value) != SELECTION_KEYS:
+        die("selection fields are invalid")
+    validate_schema(value["schema_version"])
+    validate_root(value["canonical_root"])
+    validate_workspace_id(value["workspace_id"])
+    validate_fingerprint(value["root_fingerprint"])
+    validate_timestamp(value["committed_at"])
+    return value
+
+
+action = sys.argv[1]
+if action == "read":
+    value = validate_selection(read_document(sys.argv[2]))
+    print("\t".join((value["canonical_root"], value["workspace_id"], value["root_fingerprint"])))
+elif action == "result":
+    value = validate_result(read_document(sys.argv[2]))
+    print("\x1f".join((
+        value.get("canonical_root", ""),
+        value.get("workspace_id", ""),
+        value.get("root_fingerprint", ""),
+    )))
+elif action == "write":
+    target, root, workspace_id, fingerprint = sys.argv[2:6]
+    validate_root(root)
+    validate_workspace_id(workspace_id)
+    validate_fingerprint(fingerprint)
+    directory = os.path.dirname(target)
+    if os.path.lexists(target):
+        validate_selection(read_document(target))
+    value = {
+        "schema_version": 1,
+        "canonical_root": root,
+        "workspace_id": workspace_id,
+        "root_fingerprint": fingerprint,
+        "committed_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    document = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    temporary = target + ".tmp." + str(os.getpid())
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = None
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+        view = memoryview(document)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                die("selection write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, target)
+        directory_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            directory_flags |= os.O_DIRECTORY
+        directory_descriptor = os.open(directory, directory_flags)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+else:
+    die("selection action is invalid")
+PY
+}
+
+selection_exists() {
+  [[ -e "${SELECTION_FILE}" || -L "${SELECTION_FILE}" ]]
+}
+
+load_selection() {
+  local document
+  validate_protected_file "${SELECTION_FILE}" "Workspace selection"
+  document="$(selection_document read "${SELECTION_FILE}")" || fail "Workspace selection is invalid"
+  IFS=$'\t' read -r SELECTION_ROOT SELECTION_WORKSPACE_ID SELECTION_ROOT_FINGERPRINT <<<"${document}"
+  [[ -n "${SELECTION_ROOT}" && -n "${SELECTION_WORKSPACE_ID}" && -n "${SELECTION_ROOT_FINGERPRINT}" ]] \
+    || fail "Workspace selection is invalid"
+}
+
+commit_selection() {
+  local root=$1 workspace_id=$2 fingerprint=$3
+  selection_document write "${SELECTION_FILE}" "${root}" "${workspace_id}" "${fingerprint}" \
+    || return 1
+  protected_file_is_valid "${SELECTION_FILE}"
+}
+
+canonicalize_workspace_root() {
+  local requested=$1
+  python3 - "${requested}" <<'PY'
+import os
+import posixpath
+import sys
+
+value = sys.argv[1]
+if (
+    not value
+    or not value.startswith("/")
+    or value.startswith("//")
+    or len(value.encode("utf-8")) > 4096
+    or any(ord(character) < 32 or ord(character) == 127 for character in value)
+):
+    raise SystemExit("Workspace root must be a usable absolute path")
+if not os.path.isdir(value) or not os.access(value, os.R_OK | os.X_OK):
+    raise SystemExit("Workspace root must be an accessible existing directory")
+canonical = os.path.realpath(value)
+if canonical == "/" or not canonical.startswith("/") or canonical.startswith("//") or posixpath.normpath(canonical) != canonical:
+    raise SystemExit("Workspace root resolves to a dangerous path")
+print(canonical)
+PY
+}
+
+cleanup_transient_files() {
+  if [[ -n "${WORKSPACECTL_RESULT_FILE}" && ( -e "${WORKSPACECTL_RESULT_FILE}" || -L "${WORKSPACECTL_RESULT_FILE}" ) ]]; then
+    rm -f -- "${WORKSPACECTL_RESULT_FILE}" || true
   fi
-  validate_protected_file "${GRANT_OVERRIDE}" "Workspace grant file"
+  if [[ -n "${RUNTIME_STATUS_FILE}" && ( -e "${RUNTIME_STATUS_FILE}" || -L "${RUNTIME_STATUS_FILE}" ) ]]; then
+    rm -f -- "${RUNTIME_STATUS_FILE}" || true
+  fi
+  WORKSPACECTL_RESULT_FILE=""
+  RUNTIME_STATUS_FILE=""
 }
 
 release_mutation_lock() {
+  cleanup_transient_files
   if [[ "${MUTATION_LOCK_HELD}" -eq 1 ]]; then
     if ! rm -f -- "${LOCK_METADATA}" || ! rmdir -- "${LOCK_DIR}"; then
       printf '[zhixu] warning: could not release launcher lock %s\n' "${LOCK_DIR}" >&2
@@ -147,14 +560,14 @@ release_mutation_lock() {
 read_lock_metadata() {
   awk -F= '
     NR == 1 && NF == 2 && $1 == "pid" && $2 ~ /^[1-9][0-9]*$/ { pid = $2; next }
-    NR == 2 && NF == 2 && $1 == "command" && $2 ~ /^(up|restart|down|reset)$/ { command = $2; next }
+    NR == 2 && NF == 2 && $1 == "command" && $2 ~ /^(up|restart|workspace-switch|down|reset)$/ { command = $2; next }
     { invalid = 1 }
     END { if (!invalid && NR == 2 && pid != "" && command != "") print pid, command; else exit 1 }
   ' "${LOCK_METADATA}"
 }
 
 acquire_mutation_lock() {
-  local command=$1 metadata owner_pid owner_command stale
+  local command=$1 metadata owner_pid owner_command stale ps_output
   if mkdir -m 0700 -- "${LOCK_DIR}" 2>/dev/null; then
     MUTATION_LOCK_HELD=1
     (umask 077; printf 'pid=%s\ncommand=%s\n' "$$" "${command}" >"${LOCK_METADATA}") || fail "could not write launcher lock"
@@ -167,7 +580,6 @@ acquire_mutation_lock() {
   if kill -0 "${owner_pid}" 2>/dev/null; then
     fail "another mutating command is running (pid=${owner_pid}, command=${owner_command})"
   fi
-  local ps_output
   if ps_output="$(ps -p "${owner_pid}" -o pid= 2>&1)"; then
     fail "launcher lock owner is still present (pid=${owner_pid}, command=${owner_command})"
   elif [[ -n "${ps_output}" ]]; then
@@ -225,11 +637,41 @@ compose() {
   fi
   local prefix=(docker compose --project-name "${PROJECT_NAME}" "${compose_files[@]}" --env-file "${ENV_FILE}")
   if [[ "${MUTATION_LOCK_HELD}" -eq 1 ]]; then
-    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false ZHIXU_WORKER_RESTART_POLICY=on-failure \
+    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
+      ZHIXU_APP_RESTART_POLICY=on-failure ZHIXU_WORKER_RESTART_POLICY=on-failure \
       run_mutation_command "${prefix[@]}" "$@"
   else
-    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false ZHIXU_WORKER_RESTART_POLICY=on-failure \
+    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
+      ZHIXU_APP_RESTART_POLICY=on-failure ZHIXU_WORKER_RESTART_POLICY=on-failure \
       "${prefix[@]}" "$@"
+  fi
+}
+
+compose_without_grant() {
+  local prefix=(docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}")
+  if [[ "${MUTATION_LOCK_HELD}" -eq 1 ]]; then
+    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
+      ZHIXU_APP_RESTART_POLICY=on-failure ZHIXU_WORKER_RESTART_POLICY=on-failure \
+      run_mutation_command "${prefix[@]}" "$@"
+  else
+    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
+      ZHIXU_APP_RESTART_POLICY=on-failure ZHIXU_WORKER_RESTART_POLICY=on-failure \
+      "${prefix[@]}" "$@"
+  fi
+}
+
+contain_uncommitted_runtime() {
+  printf '[zhixu] warning: stopping the uncommitted Workspace runtime\n' >&2
+  compose_without_grant --profile workspace-runtime stop \
+    proxy app-model-relay worker-model-relay firewall app worker >/dev/null 2>&1 || true
+  compose_without_grant --profile workspace-runtime rm --force --stop \
+    proxy app-model-relay worker-model-relay firewall app worker >/dev/null 2>&1 || true
+  if [[ -e "${GRANT_OVERRIDE}" || -L "${GRANT_OVERRIDE}" ]]; then
+    if protected_file_is_valid "${GRANT_OVERRIDE}"; then
+      rm -f -- "${GRANT_OVERRIDE}" || true
+    else
+      printf '[zhixu] warning: unsafe Workspace grant was retained for diagnosis\n' >&2
+    fi
   fi
 }
 
@@ -259,96 +701,94 @@ host_platform() {
   case "$(uname -s)" in
     Darwin) os_name=darwin ;;
     Linux) os_name=linux ;;
-    *) fail "Host Controller supports only macOS and Linux" ;;
+    *) fail "Workspace control supports only macOS and Linux" ;;
   esac
   case "$(uname -m)" in
     x86_64|amd64) architecture=amd64 ;;
     arm64|aarch64) architecture=arm64 ;;
-    *) fail "Host Controller supports only amd64 and arm64" ;;
+    *) fail "Workspace control supports only amd64 and arm64" ;;
   esac
   printf '%s %s\n' "${os_name}" "${architecture}"
 }
 
 remove_bundle_directory() {
-  [[ -d "${BUNDLE_DIR}" && ! -L "${BUNDLE_DIR}" ]] || fail "Controller bundle path is unsafe"
-  find "${BUNDLE_DIR}" -depth -mindepth 1 -delete || fail "could not replace Controller bundle"
-  rmdir -- "${BUNDLE_DIR}" || fail "could not replace Controller bundle"
+  validate_protected_directory "${BUNDLE_DIR}" "Workspace control bundle"
+  find "${BUNDLE_DIR}" -depth -mindepth 1 -delete || fail "could not replace Workspace control bundle"
+  rmdir -- "${BUNDLE_DIR}" || fail "could not replace Workspace control bundle"
 }
 
-build_controller_bundle() {
+build_workspace_control_bundle() {
   local host_os host_arch temporary
   read -r host_os host_arch <<<"$(host_platform)"
   temporary="${STATE_DIR}/bundle.new.$$"
-  [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || fail "Controller bundle staging path already exists"
-  mkdir -m 0700 -- "${temporary}" || fail "could not stage Controller bundle"
-  log "building native Host Controller and web bundle"
-  if ! run_mutation_command docker buildx build --target host-controller-bundle \
+  [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || fail "Workspace control bundle staging path already exists"
+  mkdir -m 0700 -- "${temporary}" || fail "could not stage Workspace control bundle"
+  log "building native one-shot Workspace control"
+  if ! run_mutation_command docker buildx build --target workspace-control-bundle \
     --build-arg "ZHIXU_HOST_GOOS=${host_os}" --build-arg "ZHIXU_HOST_GOARCH=${host_arch}" \
     --output "type=local,dest=${temporary}" -f "${DOCKERFILE}" "${SCRIPT_DIR}"; then
     find "${temporary}" -depth -mindepth 1 -delete 2>/dev/null || true
     rmdir -- "${temporary}" 2>/dev/null || true
-    fail "Host Controller bundle build failed"
+    fail "Workspace control bundle build failed"
   fi
-  [[ -f "${temporary}/zhixu-host-controller" && ! -L "${temporary}/zhixu-host-controller" ]] || fail "Controller bundle binary is missing"
-  [[ -d "${temporary}/web" && ! -L "${temporary}/web" ]] || fail "Controller web bundle is missing"
-  chmod 0700 "${temporary}/zhixu-host-controller"
+  [[ -f "${temporary}/zhixu-workspacectl" && ! -L "${temporary}/zhixu-workspacectl" ]] \
+    || fail "Workspace control bundle binary is missing"
+  chmod 0700 "${temporary}/zhixu-workspacectl"
   [[ ! -e "${BUNDLE_DIR}" && ! -L "${BUNDLE_DIR}" ]] || remove_bundle_directory
-  mv -- "${temporary}" "${BUNDLE_DIR}" || fail "could not publish Controller bundle"
+  mv -- "${temporary}" "${BUNDLE_DIR}" || fail "could not publish Workspace control bundle"
+  validate_protected_directory "${BUNDLE_DIR}" "Workspace control bundle"
+  validate_private_executable "${WORKSPACECTL_BINARY}" "Workspace control binary"
 }
 
-controller_pid() {
-  [[ -e "${CONTROLLER_PID_FILE}" || -L "${CONTROLLER_PID_FILE}" ]] || return 1
-  validate_protected_file "${CONTROLLER_PID_FILE}" "Controller PID file"
-  local pid
-  pid="$(tr -d '\r\n' <"${CONTROLLER_PID_FILE}")"
-  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 1
-  printf '%s\n' "${pid}"
-}
-
-stop_controller() {
-  if [[ ! -e "${CONTROLLER_PID_FILE}" && ! -L "${CONTROLLER_PID_FILE}" ]]; then
+configured_value() {
+  local key=$1 fallback=$2 environment_value="" environment_is_set=0
+  case "${key}" in
+    ZHIXU_HTTP_PORT)
+      environment_value="${ZHIXU_HTTP_PORT:-}"
+      [[ -n "${ZHIXU_HTTP_PORT+x}" ]] && environment_is_set=1
+      ;;
+    *) fail "unsupported launcher configuration: ${key}" ;;
+  esac
+  if [[ "${environment_is_set}" -eq 1 ]]; then
+    printf '%s\n' "${environment_value:-${fallback}}"
     return
   fi
-  local pid command process_uid attempt
-  pid="$(controller_pid)" || fail "Controller PID file is unsafe"
-  if kill -0 "${pid}" 2>/dev/null; then
-    command="$(ps -p "${pid}" -o command= 2>/dev/null)" || fail "could not verify Controller process"
-    process_uid="$(ps -p "${pid}" -o uid= 2>/dev/null | tr -d '[:space:]')" || fail "could not verify Controller process owner"
-    [[ "${process_uid}" == "$(id -u)" && "${command}" == *"${CONTROLLER_BINARY}"* ]] || fail "Controller PID belongs to another process"
-    kill -TERM "${pid}" || fail "could not stop Host Controller"
-    for ((attempt = 0; attempt < 100; attempt++)); do
-      kill -0 "${pid}" 2>/dev/null || break
-      sleep 0.05
-    done
-    kill -0 "${pid}" 2>/dev/null && fail "Host Controller did not stop cleanly"
-  fi
-  rm -f -- "${CONTROLLER_PID_FILE}"
+  local file_value
+  file_value="$(awk -F= -v expected="${key}" '$1 == expected {sub(/\r$/, "", $2); print $2; exit}' "${ENV_FILE}")" \
+    || fail "could not read ${key}"
+  printf '%s\n' "${file_value:-${fallback}}"
 }
 
-revoke_workspace_runtime() {
-  log "revoking any previous Workspace runtime"
-  compose --profile workspace-runtime stop proxy app-model-relay worker-model-relay app worker \
-    || fail "could not stop the previous Workspace runtime"
-  compose --profile workspace-runtime rm --force --stop proxy firewall app-model-relay worker-model-relay app worker \
-    || fail "could not remove the previous Workspace runtime"
-  remove_active_grant
-}
-
-controller_port() {
-  local configured
-  configured="${ZHIXU_HTTP_PORT:-$(awk -F= '$1 == "ZHIXU_HTTP_PORT" {sub(/\r$/, "", $2); print $2; exit}' "${ENV_FILE}")}" || fail "could not read Controller port"
-  [[ "${configured}" =~ ^[1-9][0-9]{0,4}$ && "${configured}" -le 65535 ]] || fail "ZHIXU_HTTP_PORT is invalid"
-  printf '%s\n' "${configured}"
-}
-
-generate_token() {
-  local value
-  value="$(LC_ALL=C od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" || fail "could not generate Controller credential"
-  [[ "${#value}" -eq 64 ]] || fail "could not generate Controller credential"
+validated_port() {
+  local key=$1 fallback=$2 value
+  value="$(configured_value "${key}" "${fallback}")"
+  [[ "${value}" =~ ^[1-9][0-9]{0,4}$ && "${value}" -le 65535 ]] || fail "${key} is invalid"
   printf '%s\n' "${value}"
 }
 
-controller_database_url() {
+ensure_http_port_available() {
+  local port current_endpoint=""
+  port="$(validated_port ZHIXU_HTTP_PORT 8080)"
+  if current_endpoint="$(compose_without_grant port app 8080 2>/dev/null)" \
+    && [[ "${current_endpoint}" == "127.0.0.1:${port}" ]]; then
+    return
+  fi
+  if ! python3 - "${port}" <<'PY'
+import socket
+import sys
+
+candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    candidate.bind(("127.0.0.1", int(sys.argv[1])))
+finally:
+    candidate.close()
+PY
+  then
+    fail "ZHIXU_HTTP_PORT=${port} is already in use; release it or choose another port"
+  fi
+}
+
+workspace_database_url() {
   local endpoint
   endpoint="$(compose port postgres 5432)" || fail "could not discover the PostgreSQL host port"
   [[ "${endpoint}" =~ ^127\.0\.0\.1:([1-9][0-9]{0,4})$ && "${BASH_REMATCH[1]}" -le 65535 ]] \
@@ -370,107 +810,226 @@ if not all(isinstance(value, str) and value for value in (database, username, pa
     raise SystemExit("PostgreSQL credentials are unavailable")
 print(
     "postgres://{}:{}@{}/{}?sslmode=disable".format(
-        quote(username, safe=""),
-        quote(password, safe=""),
-        endpoint,
-        quote(database, safe=""),
+        quote(username, safe=""), quote(password, safe=""), endpoint, quote(database, safe=""),
     )
 )
-' "${endpoint}" || fail "could not derive the Controller database connection"
+' "${endpoint}" || fail "could not derive the Workspace control database connection"
 }
 
-start_controller() {
-  local port token database_url pid attempt ready=0
-  port="$(controller_port)"
-  token="$(generate_token)"
-  database_url="$(controller_database_url)"
-  (umask 077; : >"${CONTROLLER_LOG_FILE}") || fail "could not create Controller log"
-  chmod 0600 "${CONTROLLER_LOG_FILE}"
-  # macOS still ships Bash 3.2, so use a fixed inherited descriptor instead of
-  # the Bash 4 dynamic-FD syntax.
+new_idempotency_key() {
+  python3 -c 'import uuid; print(uuid.uuid4())' \
+    || fail "could not create a Workspace switch idempotency key"
+}
+
+invoke_workspace_control() {
+  local root=$1 initialize_git=${2:-0} database_url exit_code=0 result_fields idempotency_key=""
+  local -a command_arguments
+  validate_private_executable "${WORKSPACECTL_BINARY}" "Workspace control binary"
+  WORKSPACECTL_RESULT_FILE="${STATE_DIR}/workspacectl-result.$$"
+  [[ ! -e "${WORKSPACECTL_RESULT_FILE}" && ! -L "${WORKSPACECTL_RESULT_FILE}" ]] \
+    || fail "Workspace control result path already exists"
+  (umask 077; : >"${WORKSPACECTL_RESULT_FILE}") || fail "could not create Workspace control result"
+  chmod 0600 "${WORKSPACECTL_RESULT_FILE}"
+  database_url="$(workspace_database_url)"
+  # macOS Bash 3.2 has no dynamic-FD syntax; descriptor 8 is inherited only by
+  # the one-shot native command and is never placed in argv or logs.
   exec 8<<<"${database_url}"
-  exec 9<<<"${token}"
-  nohup "${CONTROLLER_BINARY}" \
-    --addr "127.0.0.1:${port}" \
-    --assets "${CONTROLLER_ASSETS}" \
-    --state-dir "${STATE_DIR}" \
-    --compose-file "${COMPOSE_FILE}" \
-    --env-file "${ENV_FILE}" \
-    --grant-override "${GRANT_OVERRIDE}" \
-    --database-url-fd 8 \
-    --bootstrap-token-fd 9 \
-    >"${CONTROLLER_LOG_FILE}" 2>&1 </dev/null &
-  pid=$!
-  exec 8<&-
-  exec 9<&-
-  (umask 077; printf '%s\n' "${pid}" >"${CONTROLLER_PID_FILE}") || fail "could not write Controller PID"
-  chmod 0600 "${CONTROLLER_PID_FILE}"
-  for ((attempt = 0; attempt < 100; attempt++)); do
-    if ! kill -0 "${pid}" 2>/dev/null; then
-      break
-    fi
-    if curl --fail --silent --show-error --connect-timeout 1 --max-time 2 --output /dev/null \
-      -H "Host: 127.0.0.1:${port}" "http://127.0.0.1:${port}/control/v1/livez"; then
-      ready=1
-      break
-    fi
-    sleep 0.05
-  done
-  if [[ "${ready}" -ne 1 ]]; then
-    stop_controller
-    fail "Host Controller liveness check failed"
+  [[ "${initialize_git}" == "0" || "${initialize_git}" == "1" ]] \
+    || fail "internal Workspace initialize-git state is invalid"
+  idempotency_key="$(new_idempotency_key)"
+  command_arguments=(
+    "${WORKSPACECTL_BINARY}" switch --workspace-root "${root}"
+    --idempotency-key "${idempotency_key}" --control-instance-id "${CONTROL_INSTANCE_ID}"
+    --compose-file "${COMPOSE_FILE}" --env-file "${ENV_FILE}"
+    --grant-override "${GRANT_OVERRIDE}" --compose-project "${PROJECT_NAME}" --database-url-fd 8
+  )
+  if [[ "${initialize_git}" == "1" ]]; then
+    command_arguments+=(--initialize-git)
   fi
-  log "ready: http://127.0.0.1:${port}/#control=${token}"
+  if run_mutation_command "${command_arguments[@]}" >"${WORKSPACECTL_RESULT_FILE}"; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+  exec 8<&-
+  database_url=""
+  idempotency_key=""
+  if [[ "${exit_code}" -ne 0 ]]; then
+    rm -f -- "${WORKSPACECTL_RESULT_FILE}"
+    WORKSPACECTL_RESULT_FILE=""
+    printf '[zhixu] Workspace control failed; the saved selection was not changed\n' >&2
+    return "${exit_code}"
+  fi
+  if ! protected_file_is_valid "${WORKSPACECTL_RESULT_FILE}"; then
+    rm -f -- "${WORKSPACECTL_RESULT_FILE}"
+    WORKSPACECTL_RESULT_FILE=""
+    contain_uncommitted_runtime
+    fail "Workspace control returned an unsafe result"
+  fi
+  if ! result_fields="$(selection_document result "${WORKSPACECTL_RESULT_FILE}")"; then
+    rm -f -- "${WORKSPACECTL_RESULT_FILE}"
+    WORKSPACECTL_RESULT_FILE=""
+    contain_uncommitted_runtime
+    fail "Workspace control returned an invalid result"
+  fi
+  IFS=$'\x1f' read -r CONTROL_ROOT CONTROL_WORKSPACE_ID CONTROL_ROOT_FINGERPRINT <<<"${result_fields}"
+  rm -f -- "${WORKSPACECTL_RESULT_FILE}"
+  WORKSPACECTL_RESULT_FILE=""
 }
 
-run_up() {
-  require_command curl
+runtime_services_ready() {
+  python3 - "${RUNTIME_STATUS_FILE}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as source:
+    text = source.read().strip()
+if not text:
+    raise SystemExit(1)
+try:
+    value = json.loads(text)
+except json.JSONDecodeError:
+    value = [json.loads(line) for line in text.splitlines() if line.strip()]
+if isinstance(value, dict):
+    value = [value]
+if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+    raise SystemExit(1)
+states = {item.get("Service"): (item.get("State"), item.get("Health")) for item in value}
+for service in ("app", "worker", "proxy"):
+    if states.get(service) != ("running", "healthy"):
+        raise SystemExit(1)
+PY
+}
+
+verify_runtime_ready() {
+  local attempt
+  RUNTIME_STATUS_FILE="${STATE_DIR}/runtime-status.$$"
+  [[ ! -e "${RUNTIME_STATUS_FILE}" && ! -L "${RUNTIME_STATUS_FILE}" ]] || fail "runtime status path already exists"
+  (umask 077; : >"${RUNTIME_STATUS_FILE}") || fail "could not create runtime status file"
+  chmod 0600 "${RUNTIME_STATUS_FILE}"
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    if compose --profile workspace-runtime ps --format json app worker proxy >"${RUNTIME_STATUS_FILE}" 2>/dev/null \
+      && runtime_services_ready; then
+      rm -f -- "${RUNTIME_STATUS_FILE}"
+      RUNTIME_STATUS_FILE=""
+      return
+    fi
+    sleep 0.25
+  done
+  rm -f -- "${RUNTIME_STATUS_FILE}"
+  RUNTIME_STATUS_FILE=""
+  return 1
+}
+
+run_workspace_lifecycle() {
+  local root=$1 expected_workspace_id=${2:-} expected_fingerprint=${3:-} initialize_git=${4:-0}
   require_command docker
   require_command id
-  require_command od
   require_command python3
   validate_project_scope
   docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
   docker buildx version >/dev/null 2>&1 || fail "Docker Buildx is unavailable"
   initialize_local_state
+  root="$(canonicalize_workspace_root "${root}")" || fail "Workspace root is invalid"
   validate_compose
-  stop_controller
-  revoke_workspace_runtime
-  ensure_empty_grant_override
+  ensure_http_port_available
+  build_workspace_control_bundle
   start_base_stack
-  build_controller_bundle
-  start_controller
+  invoke_workspace_control "${root}" "${initialize_git}"
+  if [[ "${CONTROL_ROOT}" != "${root}" ]]; then
+    contain_uncommitted_runtime
+    fail "Workspace control activated an unexpected root"
+  fi
+  if [[ ! -e "${GRANT_OVERRIDE}" && ! -L "${GRANT_OVERRIDE}" ]]; then
+    contain_uncommitted_runtime
+    fail "Workspace control did not create a grant"
+  fi
+  if ! protected_file_is_valid "${GRANT_OVERRIDE}"; then
+    contain_uncommitted_runtime
+    fail "Workspace control created an unsafe grant"
+  fi
+  if [[ -n "${expected_workspace_id}" && "${CONTROL_WORKSPACE_ID}" != "${expected_workspace_id}" ]]; then
+    contain_uncommitted_runtime
+    fail "Workspace control returned a different Workspace ID for the saved selection"
+  fi
+  if [[ -n "${expected_fingerprint}" && "${CONTROL_ROOT_FINGERPRINT}" != "${expected_fingerprint}" ]]; then
+    contain_uncommitted_runtime
+    fail "Workspace control returned a different root fingerprint for the saved selection"
+  fi
+  if ! verify_runtime_ready; then
+    contain_uncommitted_runtime
+    fail "Docker Workspace runtime did not become ready"
+  fi
+  if ! commit_selection "${CONTROL_ROOT}" "${CONTROL_WORKSPACE_ID}" "${CONTROL_ROOT_FINGERPRINT}"; then
+    contain_uncommitted_runtime
+    fail "could not commit Workspace selection"
+  fi
+  log "ready: http://127.0.0.1:$(validated_port ZHIXU_HTTP_PORT 8080)/"
+}
+
+run_up() {
+  local explicit=$1 requested_root=${2:-} initialize_git=${3:-0} selected_root \
+    expected_workspace_id="" expected_fingerprint=""
+  if [[ "${explicit}" -eq 1 ]]; then
+    selected_root="$(canonicalize_workspace_root "${requested_root}")" || fail "Workspace root is invalid"
+    if selection_exists; then
+      load_selection
+      if [[ "${SELECTION_ROOT}" == "${selected_root}" ]]; then
+        expected_workspace_id="${SELECTION_WORKSPACE_ID}"
+        expected_fingerprint="${SELECTION_ROOT_FINGERPRINT}"
+        initialize_git=0
+      fi
+    fi
+  else
+    selection_exists || fail "no Workspace has been selected; run ./zhixu up --workspace ABS"
+    load_selection
+    selected_root="${SELECTION_ROOT}"
+    expected_workspace_id="${SELECTION_WORKSPACE_ID}"
+    expected_fingerprint="${SELECTION_ROOT_FINGERPRINT}"
+    initialize_git=0
+  fi
+  run_workspace_lifecycle "${selected_root}" "${expected_workspace_id}" "${expected_fingerprint}" "${initialize_git}"
 }
 
 run_restart() {
-  run_up
+  selection_exists || fail "no Workspace has been selected; run ./zhixu up --workspace ABS"
+  load_selection
+  run_workspace_lifecycle "${SELECTION_ROOT}" "${SELECTION_WORKSPACE_ID}" "${SELECTION_ROOT_FINGERPRINT}" 0
+}
+
+run_workspace_switch() {
+  local selected_root initialize_git=${2:-0} expected_workspace_id="" expected_fingerprint=""
+  selected_root="$(canonicalize_workspace_root "$1")" || fail "Workspace root is invalid"
+  if selection_exists; then
+    load_selection
+    if [[ "${SELECTION_ROOT}" == "${selected_root}" ]]; then
+      expected_workspace_id="${SELECTION_WORKSPACE_ID}"
+      expected_fingerprint="${SELECTION_ROOT_FINGERPRINT}"
+      initialize_git=0
+    fi
+  fi
+  run_workspace_lifecycle "${selected_root}" "${expected_workspace_id}" "${expected_fingerprint}" "${initialize_git}"
 }
 
 run_status() {
-  require_command curl
   require_command docker
+  require_command python3
   validate_project_scope
   validate_optional_state_directory
   select_existing_env
-  compose --profile workspace-runtime --profile modelctl ps
-  local port pid status="stopped"
-  port="$(controller_port)"
-  if [[ -e "${CONTROLLER_PID_FILE}" || -L "${CONTROLLER_PID_FILE}" ]]; then
-    pid="$(controller_pid)" || fail "Controller PID file is invalid"
+  compose_without_grant --profile workspace-runtime --profile modelctl ps
+  printf 'URL: http://127.0.0.1:%s/\n' "$(validated_port ZHIXU_HTTP_PORT 8080)"
+  if selection_exists; then
+    load_selection
+    printf 'Workspace: selected\nRoot: %s\n' "${SELECTION_ROOT}"
+  else
+    printf 'Workspace: not selected\n'
   fi
-  if [[ -n "${pid:-}" ]] && kill -0 "${pid}" 2>/dev/null; then
-    status="unavailable"
-    if curl --fail --silent --connect-timeout 1 --max-time 2 --output /dev/null \
-      -H "Host: 127.0.0.1:${port}" "http://127.0.0.1:${port}/control/v1/livez"; then
-      status="ready"
-    fi
-  fi
-  printf 'Controller: %s\nURL: http://127.0.0.1:%s/\n' "${status}" "${port}"
   if [[ -e "${GRANT_OVERRIDE}" || -L "${GRANT_OVERRIDE}" ]]; then
     validate_protected_file "${GRANT_OVERRIDE}" "Workspace grant file"
-    printf 'Grant: configured (details require a Controller session)\n'
+    printf 'Grant: active\n'
   else
-    printf 'Grant: waiting for Workspace selection\n'
+    printf 'Grant: revoked\n'
   fi
 }
 
@@ -479,18 +1038,13 @@ run_logs() {
   validate_project_scope
   validate_optional_state_directory
   select_existing_env
-  local service="${1:-controller}"
+  local service="${1:-app}"
   [[ $# -le 1 ]] || fail "logs accepts at most one service"
-  if [[ "${service}" == "controller" ]]; then
-    validate_protected_file "${CONTROLLER_LOG_FILE}" "Controller log"
-    tail -n 200 -f -- "${CONTROLLER_LOG_FILE}"
-    return
-  fi
   case "${service}" in
     postgres|model-settings-key-init|migrate|app|worker|app-model-relay|worker-model-relay|firewall|proxy|modelctl) ;;
     *) fail "unknown service: ${service}" ;;
   esac
-  compose --profile workspace-runtime --profile modelctl logs --follow --tail 200 "${service}"
+  compose_without_grant --profile workspace-runtime --profile modelctl logs --follow --tail 200 "${service}"
 }
 
 remove_active_grant() {
@@ -500,19 +1054,27 @@ remove_active_grant() {
   fi
 }
 
+remove_selection() {
+  if selection_exists; then
+    validate_protected_file "${SELECTION_FILE}" "Workspace selection"
+    rm -f -- "${SELECTION_FILE}"
+  fi
+}
+
 run_down() {
   require_command docker
   validate_project_scope
+  validate_optional_state_directory
   select_existing_env
-  stop_controller
-  compose --profile workspace-runtime --profile modelctl down --remove-orphans
+  compose_without_grant --profile workspace-runtime --profile modelctl down --remove-orphans
   remove_active_grant
-  log "stopped; PostgreSQL and model-secret volumes were preserved; no Workspace remains granted"
+  log "stopped; selection, PostgreSQL, model secrets, and host Workspace files were preserved"
 }
 
 run_reset() {
   require_command docker
   validate_project_scope
+  validate_optional_state_directory
   select_existing_env
   local confirmation=""
   if [[ $# -eq 2 && "$1" == "--confirm" ]]; then
@@ -524,21 +1086,55 @@ run_reset() {
     fail "reset requires an interactive confirmation or --confirm DELETE"
   fi
   [[ "${confirmation}" == "DELETE" ]] || fail "reset confirmation did not match DELETE"
-  stop_controller
-  compose down --volumes --remove-orphans
+  if selection_exists; then
+    validate_protected_file "${SELECTION_FILE}" "Workspace selection"
+  fi
+  if [[ -e "${GRANT_OVERRIDE}" || -L "${GRANT_OVERRIDE}" ]]; then
+    validate_protected_file "${GRANT_OVERRIDE}" "Workspace grant file"
+  fi
+  compose_without_grant down --volumes --remove-orphans
   remove_active_grant
-  log "deleted Compose volumes and cleared the active grant; host Workspace files were not touched"
+  remove_selection
+  log "deleted Compose volumes and cleared selection/grant; host Workspace files were not touched"
 }
 
 main() {
   local command="${1:-help}"
   [[ $# -eq 0 ]] || shift
   case "${command}" in
-    up) [[ $# -eq 0 ]] || fail "up accepts no arguments"; run_with_mutation_lock up run_up ;;
-    restart) [[ $# -eq 0 ]] || fail "restart accepts no arguments"; run_with_mutation_lock restart run_restart ;;
-    status) [[ $# -eq 0 ]] || fail "status accepts no arguments"; run_status ;;
+    up)
+      if [[ $# -eq 0 ]]; then
+        run_with_mutation_lock up run_up 0 "" 0
+      elif [[ $# -eq 2 && "$1" == "--workspace" && -n "$2" ]]; then
+        run_with_mutation_lock up run_up 1 "$2" 0
+      elif [[ $# -eq 3 && "$1" == "--workspace" && -n "$2" && "$3" == "--initialize-git" ]]; then
+        run_with_mutation_lock up run_up 1 "$2" 1
+      else
+        fail "up accepts no arguments or --workspace ABS [--initialize-git]"
+      fi
+      ;;
+    restart)
+      [[ $# -eq 0 ]] || fail "restart accepts no arguments"
+      run_with_mutation_lock restart run_restart
+      ;;
+    workspace)
+      if [[ $# -eq 2 && "$1" == "switch" && -n "$2" ]]; then
+        run_with_mutation_lock workspace-switch run_workspace_switch "$2" 0
+      elif [[ $# -eq 3 && "$1" == "switch" && -n "$2" && "$3" == "--initialize-git" ]]; then
+        run_with_mutation_lock workspace-switch run_workspace_switch "$2" 1
+      else
+        fail "workspace requires: switch ABS [--initialize-git]"
+      fi
+      ;;
+    status)
+      [[ $# -eq 0 ]] || fail "status accepts no arguments"
+      run_status
+      ;;
     logs) run_logs "$@" ;;
-    down) [[ $# -eq 0 ]] || fail "down accepts no arguments"; run_with_mutation_lock down run_down ;;
+    down)
+      [[ $# -eq 0 ]] || fail "down accepts no arguments"
+      run_with_mutation_lock down run_down
+      ;;
     reset) run_with_mutation_lock reset run_reset "$@" ;;
     help|-h|--help) usage ;;
     *) usage >&2; fail "unknown command: ${command}" ;;

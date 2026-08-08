@@ -73,10 +73,10 @@ func NewRepository(db DB, options ...RepositoryOption) (*Repository, error) {
 }
 
 // AuthorizeRootSelection reserves root creation and root-based opening to the
-// Host Controller when this repository belongs to a managed runtime.
+// one-shot local Workspace control command in a managed runtime.
 func (r *Repository) AuthorizeRootSelection(context.Context) error {
 	if r != nil && r.managed {
-		return foundation.NewError(foundation.ErrorPermissionDenied, rootgrant.ErrorCodeRootNotGranted, false, errors.New("managed Workspace roots are selected by the Host Controller"))
+		return foundation.NewError(foundation.ErrorPermissionDenied, rootgrant.ErrorCodeRootNotGranted, false, errors.New("managed Workspace roots are selected by the local Workspace control command"))
 	}
 	return nil
 }
@@ -84,7 +84,7 @@ func (r *Repository) AuthorizeRootSelection(context.Context) error {
 // CreateWorkspace inserts one Workspace mapping and returns database timestamps.
 func (r *Repository) CreateWorkspace(ctx context.Context, workspace domain.Workspace) (domain.Workspace, error) {
 	if r.managed {
-		return domain.Workspace{}, foundation.NewError(foundation.ErrorPermissionDenied, rootgrant.ErrorCodeRootNotGranted, false, errors.New("managed Workspace identities are created by the Host Controller"))
+		return domain.Workspace{}, foundation.NewError(foundation.ErrorPermissionDenied, rootgrant.ErrorCodeRootNotGranted, false, errors.New("managed Workspace identities are created by the local Workspace control command"))
 	}
 	availability := workspace.Availability
 	availabilityReason := nullableText(workspace.AvailabilityReason)
@@ -131,6 +131,42 @@ func (r *Repository) GetWorkspaceByRootPath(ctx context.Context, rootPath string
 		return domain.Workspace{}, err
 	}
 	return r.authorizeWorkspace(ctx, workspace)
+}
+
+// GetActiveWorkspace returns the only active Workspace and verifies its root
+// grant before any root-bearing data leaves the adapter.
+func (r *Repository) GetActiveWorkspace(ctx context.Context) (domain.Workspace, error) {
+	if r == nil || r.db == nil {
+		return domain.Workspace{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKSPACE_DATABASE_UNAVAILABLE", true, errors.New("workspace database is unavailable"))
+	}
+	var activeCount int64
+	workspace, err := scanWorkspace(activeWorkspaceRow{
+		row: r.db.QueryRow(ctx, `SELECT `+workspaceColumns+`,count(*) OVER ()
+			FROM core.workspace
+			WHERE status = $1
+			ORDER BY id
+			LIMIT 2`, string(domain.WorkspaceStatusActive)),
+		count: &activeCount,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Workspace{}, foundation.NewError(foundation.ErrorNotFound, domain.ErrorCodeActiveWorkspaceNotFound, false, err)
+		}
+		return domain.Workspace{}, classify(err, "ACTIVE_WORKSPACE_QUERY_FAILED")
+	}
+	if activeCount != 1 {
+		return domain.Workspace{}, foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeActiveWorkspaceNotUnique, false, errors.New("active Workspace projection is not unique"))
+	}
+	return r.authorizeWorkspace(ctx, workspace)
+}
+
+type activeWorkspaceRow struct {
+	row   pgx.Row
+	count *int64
+}
+
+func (row activeWorkspaceRow) Scan(destinations ...any) error {
+	return row.row.Scan(append(destinations, row.count)...)
 }
 
 // ListSourceVersions 返回按捕获时间和 ID 倒序排列的 Source Version 摘要。
@@ -342,11 +378,17 @@ func (r *Repository) GetSourceMaterial(ctx context.Context, sourceVersionID foun
 
 func (r *Repository) authorizeWorkspace(ctx context.Context, workspace domain.Workspace) (domain.Workspace, error) {
 	if r.grants == nil {
+		if r.managed {
+			return domain.Workspace{}, foundation.NewError(foundation.ErrorDependencyUnavailable, rootgrant.ErrorCodeGrantStale, false, errors.New("managed workspace root grant resolver is unavailable"))
+		}
 		return workspace, nil
 	}
 	capability, err := r.grants.Resolve(ctx, workspace.ID)
 	if err != nil {
 		return domain.Workspace{}, err
+	}
+	if capability == nil {
+		return domain.Workspace{}, foundation.NewError(foundation.ErrorConsistencyViolation, rootgrant.ErrorCodeGrantStale, false, errors.New("workspace root grant resolver returned no capability"))
 	}
 	defer func() { _ = capability.Close() }()
 	if capability.WorkspaceID() != workspace.ID || capability.CanonicalRoot() != workspace.RootPath {
@@ -694,4 +736,5 @@ func classify(err error, fallbackCode string) error {
 }
 
 var _ domain.Repository = (*Repository)(nil)
+var _ domain.ActiveWorkspaceRepository = (*Repository)(nil)
 var _ domain.SourceMaterialRepository = (*Repository)(nil)

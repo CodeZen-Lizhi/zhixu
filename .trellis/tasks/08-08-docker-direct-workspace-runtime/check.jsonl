@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"审查精确 root grant、切换回滚、无 Docker Socket 和旧 Controller 零残留。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"审查启动、切换、Active Workspace 不一致和恢复错误没有被吞掉。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"审查唯一 active 查询、事务、参数化和 Workspace ID 隔离。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行 Go、Compose、恢复和交付质量门禁。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"审查服务端事实源、跨 Workspace Abort 和缓存清理。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"审查 Active Workspace strict decoder 与响应绑定。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"执行认证、切换隔离、前端构建与浏览器门禁。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"核对 CLI 到页面的全链路契约与零漂移。"}

@@ -137,7 +137,7 @@ type RuntimeRecord struct {
 	Fresh           bool
 }
 
-// ControlSnapshot is the complete persistence view used by the host controller.
+// ControlSnapshot is the complete persistence view used by one-shot Workspace coordination.
 type ControlSnapshot struct {
 	State     ControlState
 	Active    *Workspace

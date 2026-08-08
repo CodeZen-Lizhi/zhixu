@@ -16,17 +16,16 @@ RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-modelctl ./cmd/modelctl
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-workspace-probe ./cmd/workspaceprobe
 
-FROM go-build AS host-controller-build
+FROM go-build AS workspace-control-build
 ARG ZHIXU_HOST_GOOS
 ARG ZHIXU_HOST_GOARCH
 RUN test "${ZHIXU_HOST_GOOS}" = darwin -o "${ZHIXU_HOST_GOOS}" = linux
 RUN test "${ZHIXU_HOST_GOARCH}" = amd64 -o "${ZHIXU_HOST_GOARCH}" = arm64
 RUN CGO_ENABLED=0 GOOS="${ZHIXU_HOST_GOOS}" GOARCH="${ZHIXU_HOST_GOARCH}" \
-  go build -mod=vendor -trimpath -ldflags='-s -w' -o /host/zhixu-host-controller ./cmd/hostcontroller
+  go build -mod=vendor -trimpath -ldflags='-s -w' -o /host/zhixu-workspacectl ./cmd/workspacectl
 
-FROM scratch AS host-controller-bundle
-COPY --from=host-controller-build /host/zhixu-host-controller /zhixu-host-controller
-COPY --from=web-build /src/web/dist /web
+FROM scratch AS workspace-control-bundle
+COPY --from=workspace-control-build /host/zhixu-workspacectl /zhixu-workspacectl
 
 FROM alpine:3.22 AS runtime
 RUN apk add --no-cache ca-certificates git iproute2 iptables socat \

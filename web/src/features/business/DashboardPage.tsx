@@ -17,7 +17,7 @@ import { Link } from "react-router-dom";
 
 import type { SourceVersionItem } from "../../api/business";
 import { listProposals, listSourceVersions, listWorkflows } from "../../api/business";
-import { getWorkspace } from "../../api/workspace";
+import { useActiveWorkspace } from "../../app/WorkspaceCacheBoundary";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
 import { requestQuickCapture } from "../capture/quick-capture-intent";
 import { useAuthoringOverview } from "../authoring";
@@ -196,13 +196,15 @@ const ActivityLink = ({ activity }: { activity: DashboardActivity }) => <Link cl
 
 export const DashboardPage = () => {
   const workspaceId = useActiveWorkspaceId();
+  const activeWorkspace = useActiveWorkspace();
   const enabled = workspaceId !== "";
-  const workspace = useQuery({
-    queryKey: ["workspace", workspaceId],
-    queryFn: ({ signal }) => getWorkspace(workspaceId, signal),
-    enabled,
-    retry: false,
-  });
+  const workspace = {
+    isPending: activeWorkspace.status === "loading",
+    isError: activeWorkspace.status === "error",
+    data: activeWorkspace.workspace,
+    error: activeWorkspace.error,
+    refetch: activeWorkspace.refresh,
+  };
   const waitingWorkflows = useQuery({
     queryKey: ["business", workspaceId, "workflows", "dashboard", "waiting_for_human"],
     queryFn: ({ signal }) => listWorkflows(workspaceId, { limit: 1, status: "waiting_for_human" }, signal),
@@ -308,7 +310,7 @@ export const DashboardPage = () => {
         <h1>今天的知识桌面</h1>
         <p>
           {workspace.isPending ? "正在读取工作区…" : workspace.data
-            ? <>{workspace.data.name}<span aria-hidden="true"> · </span>{workspace.data.git.present ? `${workspace.data.git.branch || "未命名分支"} · ${workspace.data.git.dirty ? "有未提交改动" : "工作树干净"}` : "未检测到 Git"}</>
+            ? <>{workspace.data.name}<span aria-hidden="true"> · </span>{workspace.data.availability === "available" ? "当前目录可用" : "当前目录暂不可用"}</>
             : "当前工作区信息暂不可用"}
         </p>
       </div>

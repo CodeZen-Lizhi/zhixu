@@ -168,7 +168,7 @@ editor.getModifiedEditor().onDidDispose(() => {
 
 ### 1. Scope / Trigger
 
-- 修改 `AppShell`、入口 Dashboard、Workspace 首次连接页、设置分组、根路由 `/` 或 Controller 运行时门禁时应用。
+- 修改 `AppShell`、入口 Dashboard、Workspace 状态页、设置分组、根路由 `/` 或 Active Workspace 启动/重连门禁时应用。
 
 ### 2. Signatures
 
@@ -182,15 +182,17 @@ selectDashboardFocus({ waitingWorkflows, failedWorkflows, proposals })
 ### 3. Contracts
 
 - `routeDisplayRegistry` 是导航分组、面包屑和路由归属的唯一来源；`AppShell` 不得复制一份手写菜单或按 URL 子串猜测所属分组。
-- Direct 模式未连接 Workspace 且位于 `/dashboard` 时，Shell 使用入口模式：仅保留工作台与设置两个图标入口、`知序` 品牌和“本地模式”提示。入口 Dashboard 只展示知识脉络、连接目录和可展开的数据边界，不请求 Workspace、Proposal、Workflow、Source Version 或 System Status。
-- Controller 模式下，`/dashboard` 及其他普通业务 deep link 不要求控制凭证；它们先显示简短的公开 runtime waiting/unavailable 状态，ready 后进入独立业务认证和既有工作台。状态页只保留一个标题、一句必要说明和一个明确动作，不展示控制 Session、Root Path、operation 详情或大段能力介绍。
+- 无 Active Workspace 或切换重建期间，`/dashboard` 及其他业务 deep link 保留原 URL 并显示简短的启动/重连状态；
+  服务恢复后重新读取 Active Workspace，再进入独立业务认证和既有工作台。状态页只保留一个紧凑标题、必要说明和重试动作，
+  不展示旧 Workspace 事实、数据库 operation 细节或大段能力介绍。
 - 已连接时一级导航固定为“工作台 / 知识 / 创作 / 设置”。知识必须使用由 registry 派生的内联三级 Disclosure：一级“知识”、二级“资料 / 探索 / 组织 / 学习”、三级具体路由；不得恢复覆盖正文的大型 Dropdown 或复制第二份菜单配置。“资料收件箱”是“资料”下的三级链接，不再由一级“知识”隐式直达。
 - 知识一级与各二级分组使用原生按钮、Chevron、`aria-expanded` 和指向真实节点的 `aria-controls`；折叠分支保留 `hidden`，其中链接不可聚焦。`RouteNavigationGroup.icon` 是二级分组图标的唯一来源，同一分组各路由的 `label/order/icon` 必须一致；`AppShell` 不得按分组名称另建图标映射。二级按钮固定为“图标 / 标签 / Chevron”三列，三级标签相对二级标签至少额外缩进 `16px`，桌面 Rail 与移动 Sheet 使用同一规则。
 - 当前知识路由必须同时以 `aria-current="true"` 标识一级和所属二级分组，并以 `aria-current="page"` 标识三级入口。选中视觉采用单一焦点：只有当前三级入口使用浅色背景与蓝色左边线；一级、二级祖先只用前景色、图标和字重表达当前路径，不得再叠加选中背景或蓝色边线。
 - 知识展开状态由 `AppShell` 生命周期拥有，桌面 Rail 与移动 Sheet 复用同一状态；当前路由只追加展开所属分组，不关闭用户已展开的其他分组。关闭并重开移动 Sheet 不得重置非当前分组，选择三级链接后关闭 Sheet，Escape 关闭后恢复主导航按钮焦点。
 - 桌面 Rail 高度必须受当前视口约束，超长知识树只滚动 `rail-section`，不得撑高整页；设置入口必须能在侧栏滚动区内到达。移动断点恢复自动高度，并在现有 Sheet 内展示同一层级。
 - 创作直达 `/authoring`，不得恢复 Proposal、Workflow、Artifact 技术对象菜单。设置只保留一个入口，并通过 `section=workspace|models|exports|access|system` 选择内容；旧 `section=sync` 只做兼容归一化并保留其他 URL 参数。
-- Controller 模式的 `/`、`/workspace` 是受保护的 Host Control 页面；Direct 模式根路由 `/` 仍语义等同 Workspace 页面并归属设置。已有业务 deep link 保持原 URL，不能因控制 Session 缺失重定向到 `/workspace` 或假成功页。
+- `/`、`/workspace` 是同一业务 Workspace 只读页面并归属设置，展示当前 Root 与本机切换命令；浏览器不得选择路径或触发
+  Docker mutation。已有业务 deep link 保持原 URL，不能因 Active Workspace 短暂不可用重定向到 `/workspace` 或假成功页。
 - System Status 只在设置的 `section=system` 使用 `SystemStatusPage display="full"` 展示。默认先回答能否继续工作；`unavailable|disabled` 项必须给出影响、原因和恢复入口，最近检查时间取 Query 的 `dataUpdatedAt`，全部运行事实默认折叠到技术详情。不得在入口 Dashboard 拼接能力矩阵、请求 ID 或运行摘要，也不得把 SSE 连接状态描述为业务成功/失败。
 - 已连接 Dashboard 的“先处理这一件”只从有界真实列表派生：`waiting_for_human` Workflow（1 条）优先于 `failed` Workflow（1 条），再优先于当前 `ready_for_review` Proposal（最多 5 条，风险等级后按更新时间）；最近资料只使用最多 4 条 Source Version 的服务端捕获时间。无数据时展示下一步入口，不得伪造总数、最近访问或跨资源关联。
 - 创建或打开 Workspace 后提供资料收件箱与工作台入口。不得自动扫描、伪造索引完成或改变 Workspace/storage owner。
@@ -202,10 +204,9 @@ selectDashboardFocus({ waitingWorkflows, failedWorkflows, proposals })
 
 | Condition | Required result |
 |---|---|
-| Direct 模式无 Active Workspace 的 `/dashboard` | 只显示入口脉络与连接动作，不建立业务 Query/SSE，也不显示系统状态 |
-| Controller 模式 runtime waiting/unavailable | 原业务 URL 显示简短状态和进入 `/workspace`/重试动作，不显示控制凭证错误或旧业务事实 |
-| Controller 模式 runtime ready 且无控制 Session | 普通业务路由进入业务 Auth；`/workspace` 显示控制授权门禁 |
-| `/` 打开 Workspace 页 | 工作区 active 且无“详情”面包屑；Controller 模式仍要求控制 Session |
+| 无 Active Workspace 或切换中打开业务 deep link | 原业务 URL 显示简短重连与重试，不建立 Workspace Query/SSE，也不显示旧业务事实 |
+| Active Workspace ready 且业务 Session 未恢复 | 进入正常业务 Auth；不显示任何控制链接或 Controller 会话门禁 |
+| `/` 打开 Workspace 页 | 工作区 active 且无“详情”面包屑；只读展示 Root 和 `zhixu workspace switch` 命令 |
 | `/search` 等知识路由 | “知识”和所属分组为 current path 但无选中背景/蓝色边线；只有当前三级链接显示强选中面并为 `aria-current="page"` |
 | 展开任一知识二级分组 | 二级显示 registry 提供的语义图标，图标/标签/Chevron 列稳定；三级标签相对二级标签至少右移 `16px` |
 | 移动 Sheet 关闭后重开 | AppShell 生命周期内的一级/分组展开状态保持；选择三级链接关闭 Sheet，Escape 恢复焦点 |
@@ -220,20 +221,20 @@ selectDashboardFocus({ waitingWorkflows, failedWorkflows, proposals })
 
 ### 5. Good / Base / Bad Cases
 
-- Good：全新浏览器可直接打开 ready 的 `/dashboard`；进入 `/workspace` 才要求控制链接。连接后知识以可独立展开的内联三级树呈现，二级有语义图标、三级缩进明确且只有当前三级入口显示强选中面；创作直达入口、四个常用动作与五类设置可用。
-- Base：没有 Workspace 时业务 deep link 保持原 URL 并显示简短 runtime gate；有效控制会话可从 `/workspace` 连接目录。
-- Bad：用大型浮层或级联菜单遮挡正文、一级/二级/三级同时铺选中背景、二级缺少图标、二级与三级标签平齐、移动 Sheet 重开后丢失展开状态、侧栏内容撑高整页、平铺全部路由、恢复“产出”技术菜单或 Topbar 省略号、把控制链接失效当作首页错误、把 `disabled` 隐藏成完全健康、在入口页渲染完整状态矩阵、以首屏列表长度冒充总数，或创建后自动扫描。
+- Good：全新浏览器可直接打开 ready 的 `/dashboard`；`/workspace` 只读展示 Active Workspace。知识以可独立展开的内联三级树呈现，二级有语义图标、三级缩进明确且只有当前三级入口显示强选中面；创作直达入口、四个常用动作与五类设置可用。
+- Base：Workspace 切换重建时业务 deep link 保持原 URL 并显示简短重连状态，恢复后从服务端 Active Workspace 继续。
+- Bad：用大型浮层或级联菜单遮挡正文、一级/二级/三级同时铺选中背景、二级缺少图标、二级与三级标签平齐、移动 Sheet 重开后丢失展开状态、侧栏内容撑高整页、平铺全部路由、恢复“产出”技术菜单或 Topbar 省略号、从 localStorage 显示旧 Workspace、把 `disabled` 隐藏成完全健康、在入口页渲染完整状态矩阵、以首屏列表长度冒充总数，或在浏览器中选择宿主机目录。
 
 ### 6. Tests Required
 
-- Component：Direct 未连接入口不发业务请求；Controller 业务 deep link 不探测控制 Session；runtime gate、已连接待办优先级、四个常用动作、Source Version 真实投影、导航 registry/根路由、知识三级层级与十个入口、二级分组图标、祖先无强选中 class、独立分组展开、路由追加展开、`aria-controls` 目标、隐藏分支、移动 Sheet 状态保持/关闭/焦点、Topbar 无通用菜单、非法/旧设置分类归一化、系统 `disabled` 详情和一次性 Token 离页保护。
-- Browser：真实 API 下使用两个隔离上下文检查无 Cookie `/dashboard` 与受保护 `/workspace`，并覆盖 `1440x900`、`1024x768`、`768x1024`、`390x844`、二级图标与三列对齐、三级至少 `16px` 额外缩进、只有三级强选中面、知识多分组展开与侧栏内部滚动、移动 Sheet 状态保持/链接关闭/Escape 焦点恢复、44px 触达区、无重复 ID/失效 `aria-controls`、主操作可见、系统关闭项/技术详情、零横向溢出及零 console warning/error。
+- Component：Active Workspace unavailable 时不发作用域业务请求；业务 deep link 不探测控制 Session或 Browser Storage；重连 gate、已连接待办优先级、四个常用动作、Source Version 真实投影、导航 registry/根路由、知识三级层级与十个入口、二级分组图标、祖先无强选中 class、独立分组展开、路由追加展开、`aria-controls` 目标、隐藏分支、移动 Sheet 状态保持/关闭/焦点、Topbar 无通用菜单、非法/旧设置分类归一化和系统 `disabled` 详情。
+- Browser：真实 API 下使用两个隔离上下文检查无需控制 Cookie/fragment 的 `/dashboard` 与只读 `/workspace`，并覆盖 `1440x900`、`1024x768`、`768x1024`、`390x844`、二级图标与三列对齐、三级至少 `16px` 额外缩进、只有三级强选中面、知识多分组展开与侧栏内部滚动、移动 Sheet 状态保持/链接关闭/Escape 焦点恢复、44px 触达区、无重复 ID/失效 `aria-controls`、主操作可见、系统关闭项/技术详情、零横向溢出及零 console warning/error。
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: 没有 Controller Cookie 就把 `/dashboard` 替换成“控制链接已失效”，并展示完整状态矩阵或大段解释。
-Correct: `/dashboard` 只依赖公开 runtime 与业务认证；控制授权留在 `/workspace`，过渡状态保持短、清楚、可操作。
+Wrong: Active Workspace 暂不可用时从 localStorage 恢复旧 Workspace，或把 `/dashboard` 重定向到目录选择表单。
+Correct: `/dashboard` 从 Active Workspace API 和业务认证恢复；宿主机授权只走本机命令，过渡状态保持短、清楚、可操作。
 
 Wrong: “知识”打开覆盖正文的 Dropdown，或把展开状态放在会随移动 Sheet 关闭而卸载的树组件里。
 Correct: 菜单内容从 `routeDisplayRegistry` 派生为内联三级 Disclosure，展开状态由 `AppShell` 持有，桌面超长内容只滚动侧栏。

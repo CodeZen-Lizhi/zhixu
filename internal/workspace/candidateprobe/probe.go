@@ -44,7 +44,7 @@ const (
 )
 
 // Candidate process exit codes form a private protocol between the bundled
-// probe and the native Host Controller.
+// probe and the one-shot native Workspace control command.
 const (
 	ExitConfiguration = 20 + iota
 	ExitPathIdentity

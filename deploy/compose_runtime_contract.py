@@ -100,6 +100,11 @@ def secret_mount(model: dict[str, Any], service_name: str) -> dict[str, Any]:
 
 def main() -> None:
     managed = render(COMPOSE, profiles=("workspace-runtime", "modelctl"))
+    custom_ports = render(
+        COMPOSE,
+        profiles=("workspace-runtime", "modelctl"),
+        environment={"ZHIXU_HTTP_PORT": "18080"},
+    )
     static = render(COMPOSE, STATIC_MODELS, profiles=("workspace-runtime",))
     prepared = render(
         COMPOSE,
@@ -107,19 +112,42 @@ def main() -> None:
         environment={
             "ZHIXU_MODEL_SETTINGS_ROLLOUT_ID": "compose-contract-rollout",
             "ZHIXU_MODEL_SETTINGS_PREPARED": "true",
+            "ZHIXU_APP_RESTART_POLICY": "no",
             "ZHIXU_WORKER_RESTART_POLICY": "no",
         },
     )
     expect_valid(managed)
+    expect_valid(custom_ports)
     expect_valid(static, mode="static")
     expect_valid(static, mode="legacy")
     expect_valid(prepared, mode="prepared")
+    if int(managed["services"]["app"]["ports"][0]["published"]) != 8080:
+        fail("default Web ingress is not fixed to 127.0.0.1:8080")
+    if int(custom_ports["services"]["app"]["ports"][0]["published"]) != 18080:
+        fail("ZHIXU_HTTP_PORT did not select the fixed Web ingress")
+    if managed["services"]["postgres"]["ports"][0].get("published") not in (None, 0, "0"):
+        fail("Workspace-control PostgreSQL ingress must use a random loopback port")
 
-    expect_invalid(
-        "steady Worker without auto-restart",
-        managed,
-        lambda model: model["services"]["worker"].update(restart="no"),
-    )
+    for service_name in ("app", "worker"):
+        expect_invalid(
+            f"{service_name} without PostgreSQL health gate",
+            managed,
+            lambda model, name=service_name: model["services"][name]["depends_on"].pop("postgres"),
+        )
+        expect_invalid(
+            f"{service_name} with weak PostgreSQL dependency",
+            managed,
+            lambda model, name=service_name: model["services"][name]["depends_on"]["postgres"].update(
+                condition="service_started"
+            ),
+        )
+
+    for service_name in ("app", "worker"):
+        expect_invalid(
+            f"steady {service_name} without auto-restart",
+            managed,
+            lambda model, name=service_name: model["services"][name].update(restart="no"),
+        )
     expect_invalid(
         "prepared Worker auto-restart",
         prepared,
@@ -140,6 +168,11 @@ def main() -> None:
             managed,
             lambda model, name=relay_name: model["services"][name].update(restart="no"),
         )
+    expect_invalid(
+        "proxy without auto-restart",
+        managed,
+        lambda model: model["services"]["proxy"].update(restart="no"),
+    )
 
     expect_invalid("external secret volume", managed, lambda model: model["volumes"]["zhixu-model-secrets"].update(external=True))
     expect_invalid("writable app key", managed, lambda model: secret_mount(model, "app").update(read_only=False))
@@ -201,6 +234,11 @@ def main() -> None:
         "public ingress",
         managed,
         lambda model: model["services"]["app"]["ports"][0].update(host_ip="0.0.0.0"),
+    )
+    expect_invalid(
+        "automatic Web ingress",
+        managed,
+        lambda model: model["services"]["app"]["ports"][0].update(published="0"),
     )
     expect_invalid(
         "static mode missing identity field",

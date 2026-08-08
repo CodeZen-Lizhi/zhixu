@@ -38,8 +38,8 @@ strict wire 保留 managed partial relations，Query/SSE 恢复绑定 Workspace/
 Git Remote Sync 已交付 `/settings?section=workspace`（旧 `/settings?section=sync` 兼容归一化）、唯一 strict wire、Workspace-bound Query、write-only Secret action、
 配置/测试/手动同步/重试和 Git/索引分列状态。未配置 `current_run: null`、网络重试 key、Secret 销毁、终态轮询停止及
 桌面/390x844 无横向溢出门禁见 `git-sync-settings.md`。
-Controller 模式现以公开 `/host/v1/runtime` 独立发布业务 Workspace：普通业务 deep link 不再依赖控制会话，
-`/`、`/workspace` 与宿主机命令继续进入 Host Control 边界；Controller 模式禁止从 localStorage 恢复业务作用域。
+前端已收敛为 Docker 单一业务模式：`GET /api/v1/workspaces/active` 是 Active Workspace 唯一事实源，所有业务 deep link
+独立经过业务认证；宿主机目录选择和切换只由本机 `zhixu` 命令执行，浏览器不从 localStorage 恢复业务作用域。
 M8-01 已交付 `/artifacts` 工作台、严格 Artifact decoder、Workspace-bound Query 与 generation 恢复；
 Citation 可信性、Artifact 状态和 export/publication 绑定只来自服务端响应。
 M8-02 已交付 `/review` 与 `/review/session`：Deck 管理、绑定 Workspace/Session/Deck 的仅问题 due 投影、服务端评分与
@@ -75,9 +75,9 @@ M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`�
 | 规范 | 职责 | 当前状态/后续门禁 |
 | --- | --- | --- |
 | [目录结构](./directory-structure.md) | Feature 边界和依赖方向 | 实际根目录、Alias、Public Export |
-| [组件规范](./component-guidelines.md) | 组合、Props、UI 状态和可访问性 | 已记录白蓝低噪声 Dashboard、Controller runtime gate、M7-01 Graph 与 M9 Monaco DiffEditor 安全卸载契约 |
+| [组件规范](./component-guidelines.md) | 组合、Props、UI 状态和可访问性 | 已记录白蓝低噪声 Dashboard、Active Workspace 启动/重连边界、M7-01 Graph 与 M9 Monaco DiffEditor 安全卸载契约 |
 | [Hook 规范](./hook-guidelines.md) | Query、Command、URL 和 SSE Hook | Query Key Factory 和 Hook Test Harness |
-| [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | 已记录 Host Control/runtime 双 Owner、Controller 模式 Workspace 清理顺序、M9 唯一 SSE Owner、Export recovery 与 M10 Auth/CSRF 契约 |
+| [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | 已记录服务端 Active Workspace 单一 Owner、Workspace 清理顺序、M9 唯一 SSE Owner、Export recovery 与 M10 Auth/CSRF 契约 |
 | [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 Timeline/Impact v1/v2 与 downstream Proposal、M7-03 Collection/Health、M9 Business/M9-03 Export 与 M10 Auth 响应/Problem 的严格解码 |
 | [模型设置前端契约](./model-settings.md) | strict wire、desired/active/applied 状态、Session-only 与 Secret 生命周期 | Settings 模型面板和桌面/移动浏览器门禁 |
 | [Artifact 工作台契约](./artifact-workbench.md) | Artifact wire、Query、generation 恢复、GAP/export/publish UI 边界 | M8-01 decoder、组件、桌面/移动真实浏览器闭环已验证 |

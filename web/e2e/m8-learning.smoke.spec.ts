@@ -1,6 +1,5 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 
-const workspaceStorageKey = "zhixu.active-workspace-id";
 const csrfStorageKey = "zhixu.csrf-token";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const appBaseURL = process.env.ZHIXU_PLAYWRIGHT_BASE_URL?.trim() ?? (() => { throw new Error("ZHIXU_PLAYWRIGHT_BASE_URL is required"); })();
@@ -22,11 +21,10 @@ const fixture = {
   pathId: requiredUUID("ZHIXU_M8_LEARNING_SMOKE_PATH_ID"),
 };
 
-const installWorkspace = (context: BrowserContext): void => {
-  void context.addInitScript(({ workspaceKey, workspaceId, csrfKey, csrf }) => {
-    window.localStorage.setItem(workspaceKey, workspaceId);
+const installCsrf = (context: BrowserContext): void => {
+  void context.addInitScript(({ csrfKey, csrf }) => {
     window.localStorage.setItem(csrfKey, csrf);
-  }, { workspaceKey: workspaceStorageKey, workspaceId: fixture.workspaceId, csrfKey: csrfStorageKey, csrf: csrfToken });
+  }, { csrfKey: csrfStorageKey, csrf: csrfToken });
 };
 
 const installSession = async (context: BrowserContext): Promise<void> => {
@@ -126,14 +124,14 @@ const assertPages = async (page: Page, reviewSessionId: string, completeBrowserC
 
 test("M8 Learning 在真实 API/Worker/Vite 下完成桌面与 390x844 浏览器 smoke", async ({ browser, page }) => {
   const issues: string[] = [];
-  installWorkspace(page.context());
+  installCsrf(page.context());
   await installSession(page.context());
   captureRuntimeIssues(page, "desktop", issues);
   expect(page.viewportSize()).toEqual({ width: 1440, height: 900 });
   await assertPages(page, fixture.reviewSessionId, true);
 
   const mobile = await browser.newContext({ baseURL: appBaseURL, viewport: { width: 390, height: 844 } });
-  installWorkspace(mobile);
+  installCsrf(mobile);
   await installSession(mobile);
   const mobilePage = await mobile.newPage();
   captureRuntimeIssues(mobilePage, "mobile", issues);

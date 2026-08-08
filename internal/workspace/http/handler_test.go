@@ -44,6 +44,7 @@ func TestHandlerCreateWorkspaceContract(t *testing.T) {
 	if response.Status != string(domain.WorkspaceStatusActive) || response.Version != 1 {
 		t.Fatalf("workspace status/version = %q/%d", response.Status, response.Version)
 	}
+	requireWorkspaceResponseWithoutAvailability(t, recorder)
 	if response.CreatedAt != "2026-07-16T04:30:00.000Z" || response.UpdatedAt != "2026-07-16T04:30:00.000Z" {
 		t.Fatalf("workspace timestamps = %q/%q", response.CreatedAt, response.UpdatedAt)
 	}
@@ -68,6 +69,77 @@ func TestHandlerWorkspaceDetailContract(t *testing.T) {
 	}
 	if response.ID != string(handlerTestWorkspaceID) || response.Name != "Product Workspace" {
 		t.Fatalf("detail response = %#v", response)
+	}
+	requireWorkspaceResponseWithoutAvailability(t, recorder)
+}
+
+func requireWorkspaceResponseWithoutAvailability(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw Workspace response: %v", err)
+	}
+	if _, ok := raw["availability"]; ok {
+		t.Fatalf("detail/create Workspace response unexpectedly contains availability: %s", recorder.Body.String())
+	}
+}
+
+func TestHandlerActiveWorkspaceUsesExactMinimalResponse(t *testing.T) {
+	service := &fakeWorkspaceService{activeResult: workspaceResult(false).Workspace}
+	recorder := serveWorkspaceRequest(t, service, http.MethodGet, "/api/v1/workspaces/active", "")
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	response := decodeBody[activeWorkspaceResponse](t, recorder)
+	if service.activeCalls != 1 || service.getCalls != 0 {
+		t.Fatalf("active calls=%d detail calls=%d", service.activeCalls, service.getCalls)
+	}
+	if response.ID != string(handlerTestWorkspaceID) || response.Status != string(domain.WorkspaceStatusActive) ||
+		response.Availability != string(domain.WorkspaceAvailabilityAvailable) || response.RootPath != "/workspace" ||
+		response.Name != "Product Workspace" || response.Version != 1 {
+		t.Fatalf("active response = %#v", response)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw Active Workspace response: %v", err)
+	}
+	for _, field := range []string{"id", "name", "root_path", "status", "availability", "version"} {
+		if _, ok := raw[field]; !ok {
+			t.Fatalf("Active Workspace response missing %q: %s", field, recorder.Body.String())
+		}
+	}
+	for _, field := range []string{"git", "warnings", "created_at", "updated_at"} {
+		if _, ok := raw[field]; ok {
+			t.Fatalf("Active Workspace response must not contain %q: %s", field, recorder.Body.String())
+		}
+	}
+	if len(raw) != 6 {
+		t.Fatalf("Active Workspace response fields=%v, want exact six-field contract", raw)
+	}
+}
+
+func TestHandlerActiveWorkspaceProblemContract(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		err       error
+		status    int
+		code      string
+		retryable bool
+	}{
+		{name: "not found", err: classifiedError(foundation.ErrorNotFound, domain.ErrorCodeActiveWorkspaceNotFound, false), status: http.StatusNotFound, code: domain.ErrorCodeActiveWorkspaceNotFound},
+		{name: "not unique", err: classifiedError(foundation.ErrorConsistencyViolation, domain.ErrorCodeActiveWorkspaceNotUnique, false), status: http.StatusConflict, code: domain.ErrorCodeActiveWorkspaceNotUnique},
+		{name: "grant unavailable", err: classifiedError(foundation.ErrorPermissionDenied, "WORKSPACE_ROOT_NOT_GRANTED", false), status: http.StatusForbidden, code: "WORKSPACE_ROOT_NOT_GRANTED"},
+		{name: "dependency unavailable", err: classifiedError(foundation.ErrorDependencyUnavailable, "ACTIVE_WORKSPACE_QUERY_FAILED", true), status: http.StatusServiceUnavailable, code: "ACTIVE_WORKSPACE_QUERY_FAILED", retryable: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeWorkspaceService{activeErr: test.err}
+			recorder := serveWorkspaceRequest(t, service, http.MethodGet, "/api/v1/workspaces/active", "")
+			requireProblem(t, recorder, test.status, test.code, test.retryable)
+			if service.activeCalls != 1 || service.getCalls != 0 {
+				t.Fatalf("active calls=%d detail calls=%d", service.activeCalls, service.getCalls)
+			}
+		})
 	}
 }
 
@@ -226,10 +298,11 @@ func workspaceResult(dirty bool) application.WorkspaceResult {
 				Dirty:          dirty,
 				CheckedAt:      handlerTestTime,
 			},
-			Status:    domain.WorkspaceStatusActive,
-			Version:   1,
-			CreatedAt: handlerTestTime,
-			UpdatedAt: handlerTestTime,
+			Status:       domain.WorkspaceStatusActive,
+			Availability: domain.WorkspaceAvailabilityAvailable,
+			Version:      1,
+			CreatedAt:    handlerTestTime,
+			UpdatedAt:    handlerTestTime,
 		},
 		Git: domain.GitStatus{
 			Present:        true,
@@ -302,6 +375,9 @@ type fakeWorkspaceService struct {
 	getErr        error
 	getID         foundation.ID
 	getCalls      int
+	activeResult  domain.Workspace
+	activeErr     error
+	activeCalls   int
 	scanFiles     []domain.ScannedFile
 	scanErr       error
 	scanID        foundation.ID
@@ -332,6 +408,11 @@ func (f *fakeWorkspaceService) GetWorkspace(_ context.Context, id foundation.ID)
 	f.getCalls++
 	f.getID = id
 	return f.getResult, f.getErr
+}
+
+func (f *fakeWorkspaceService) GetActiveWorkspace(context.Context) (domain.Workspace, error) {
+	f.activeCalls++
+	return f.activeResult, f.activeErr
 }
 
 func (f *fakeWorkspaceService) ScanWorkspace(_ context.Context, id foundation.ID) ([]domain.ScannedFile, error) {

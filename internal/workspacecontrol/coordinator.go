@@ -1,11 +1,16 @@
-package hostcontroller
+package workspacecontrol
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
-	"net/url"
-	"sync"
+	"path/filepath"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
@@ -13,69 +18,64 @@ import (
 )
 
 const (
-	controllerLeaseDuration = 45 * time.Second
-	leaseRenewInterval      = 15 * time.Second
-	switchDeadlineDuration  = 30 * time.Minute
-	runtimeFreshWithin      = 20 * time.Second
-	candidateFreshWithin    = 5 * time.Minute
-	runtimeReadyTimeout     = 45 * time.Second
-	quiescenceTimeout       = 90 * time.Second
-	runtimePollInterval     = 250 * time.Millisecond
-	recoveryInitialBackoff  = 2 * time.Second
-	recoveryMaximumBackoff  = 30 * time.Second
-	recoveryAttemptTimeout  = 2 * time.Minute
+	controlLeaseDuration   = 45 * time.Second
+	leaseRenewInterval     = 15 * time.Second
+	switchDeadlineDuration = 30 * time.Minute
+	runtimeFreshWithin     = 20 * time.Second
+	candidateFreshWithin   = 5 * time.Minute
+	runtimeReadyTimeout    = 45 * time.Second
+	quiescenceTimeout      = 90 * time.Second
+	runtimePollInterval    = 250 * time.Millisecond
+	recoveryInitialBackoff = 2 * time.Second
+	recoveryMaximumBackoff = 30 * time.Second
+	recoveryAttemptTimeout = 2 * time.Minute
 )
 
 // SwitchRuntime is the fixed Docker lifecycle used by the coordinator.
 type SwitchRuntime interface {
 	PrepareGrant(context.Context, foundation.ID, Grant, bool) error
-	ApplyGrant(context.Context, Grant) (*url.URL, error)
+	ApplyGrant(context.Context, Grant) error
 	RevokeGrant(context.Context) error
-	CurrentBackend(context.Context) (*url.URL, error)
 }
 
-// CoordinatorOptions fixes the durable state service and host runtime owner.
+// CoordinatorOptions separates the stable idempotency namespace from this process's lease owner.
 type CoordinatorOptions struct {
-	Service   *workspaceapplication.ControlService
-	Runtime   SwitchRuntime
-	Validator PathValidator
-	OwnerID   foundation.ID
+	Service           *workspaceapplication.ControlService
+	Runtime           SwitchRuntime
+	Validator         PathValidator
+	ControlInstanceID foundation.ID
+	LeaseOwnerID      foundation.ID
 }
 
-// Coordinator adapts the durable Workspace state machine to the Host Control API.
+// Coordinator adapts the durable Workspace state machine to one-shot host operations.
 type Coordinator struct {
-	service   *workspaceapplication.ControlService
-	runtime   SwitchRuntime
-	validator PathValidator
-	ownerID   foundation.ID
-	lifecycle context.Context
-	cancel    context.CancelFunc
-
-	mu            sync.Mutex
-	closed        bool
-	running       map[foundation.ID]struct{}
-	lastOperation *workspacedomain.SwitchOperation
-	wg            sync.WaitGroup
-	runtimeGate   chan struct{}
+	service           *workspaceapplication.ControlService
+	runtime           SwitchRuntime
+	validator         PathValidator
+	controlInstanceID foundation.ID
+	leaseOwnerID      foundation.ID
+	runtimeGate       chan struct{}
 
 	recoveryInitialBackoff time.Duration
 	recoveryMaximumBackoff time.Duration
 	recoveryAttemptTimeout time.Duration
 }
 
-// NewCoordinator creates one process owner for asynchronous Workspace switches.
+// NewCoordinator creates a synchronous coordinator for one command process.
 func NewCoordinator(options CoordinatorOptions) (*Coordinator, error) {
-	if options.Service == nil || options.Runtime == nil || options.OwnerID == "" {
+	if options.Service == nil || options.Runtime == nil || options.ControlInstanceID == "" || options.LeaseOwnerID == "" {
 		return nil, errors.New("workspace coordinator options are incomplete")
 	}
-	if parsed, err := foundation.ParseID(string(options.OwnerID)); err != nil || parsed != options.OwnerID {
-		return nil, errors.New("workspace coordinator owner is invalid")
+	if parsed, err := foundation.ParseID(string(options.ControlInstanceID)); err != nil || parsed != options.ControlInstanceID {
+		return nil, errors.New("workspace coordinator control instance is invalid")
 	}
-	lifecycle, cancel := context.WithCancel(context.Background())
+	if parsed, err := foundation.ParseID(string(options.LeaseOwnerID)); err != nil || parsed != options.LeaseOwnerID {
+		return nil, errors.New("workspace coordinator lease owner is invalid")
+	}
 	return &Coordinator{
 		service: options.Service, runtime: options.Runtime, validator: options.Validator,
-		ownerID: options.OwnerID, lifecycle: lifecycle, cancel: cancel,
-		running:                make(map[foundation.ID]struct{}),
+		controlInstanceID:      options.ControlInstanceID,
+		leaseOwnerID:           options.LeaseOwnerID,
 		runtimeGate:            make(chan struct{}, 1),
 		recoveryInitialBackoff: recoveryInitialBackoff,
 		recoveryMaximumBackoff: recoveryMaximumBackoff,
@@ -83,213 +83,202 @@ func NewCoordinator(options CoordinatorOptions) (*Coordinator, error) {
 	}, nil
 }
 
-// Close stops in-process switch and recovery work and waits for it to exit.
-func (coordinator *Coordinator) Close() {
-	coordinator.mu.Lock()
-	if coordinator.closed {
-		coordinator.mu.Unlock()
-		return
-	}
-	coordinator.closed = true
-	coordinator.cancel()
-	coordinator.mu.Unlock()
-	coordinator.wg.Wait()
-}
-
-// Reconcile restores a previously committed exact grant after Controller or
-// host restart. It never guesses a different root or generation.
+// Reconcile restores a previously committed exact grant after a host restart.
+// It never guesses a different root or generation.
 func (coordinator *Coordinator) Reconcile(ctx context.Context) error {
 	if err := coordinator.lockRuntime(ctx); err != nil {
 		return err
 	}
 	defer coordinator.unlockRuntime()
+	return coordinator.reconcileLocked(ctx)
+}
 
+func (coordinator *Coordinator) reconcileLocked(ctx context.Context) error {
+	snapshot, err := coordinator.recoverPendingLocked(ctx)
+	if err != nil {
+		return err
+	}
+	return coordinator.reapplyActiveLocked(ctx, snapshot)
+}
+
+func (coordinator *Coordinator) recoverPendingLocked(ctx context.Context) (workspacedomain.ControlSnapshot, error) {
 	snapshot, err := coordinator.service.Snapshot(ctx, runtimeFreshWithin)
 	if err != nil {
-		return controllerFault(err, "")
+		return workspacedomain.ControlSnapshot{}, controlFault(err, "")
 	}
 	if snapshot.Operation != nil && snapshot.Operation.Result == "" {
 		operation, claimErr := coordinator.renewOrTakeOverSwitch(ctx, snapshot.Operation.ID)
 		if claimErr != nil {
-			return claimErr
+			return workspacedomain.ControlSnapshot{}, claimErr
 		}
 		if err := coordinator.recoverSwitchUntilTerminal(ctx, operation.ID, &Fault{
-			Code: "WORKSPACE_CONTROLLER_RESTARTED", Message: "控制器重启后正在恢复 Workspace", Retryable: true, Status: 503,
+			Code: "WORKSPACE_CONTROL_RESTARTED", Message: "控制进程重启后正在恢复 Workspace", Retryable: true,
 		}); err != nil {
-			return err
+			return workspacedomain.ControlSnapshot{}, controlFault(err, string(operation.ID))
 		}
 		terminal, terminalErr := coordinator.service.GetSwitchOperation(ctx, operation.ID)
 		if terminalErr != nil {
-			return controllerFault(terminalErr, string(operation.ID))
+			return workspacedomain.ControlSnapshot{}, controlFault(terminalErr, string(operation.ID))
 		}
 		if terminal.Result == "" {
-			return &Fault{Code: "WORKSPACE_RECOVERY_INCOMPLETE", Message: "Workspace 自动恢复尚未完成", Retryable: true, Status: 503, OperationID: string(operation.ID)}
+			return workspacedomain.ControlSnapshot{}, &Fault{Code: "WORKSPACE_RECOVERY_INCOMPLETE", Message: "Workspace 自动恢复尚未完成", Retryable: true, OperationID: string(operation.ID)}
 		}
 		snapshot, err = coordinator.service.Snapshot(ctx, runtimeFreshWithin)
 		if err != nil {
-			return controllerFault(err, "")
+			return workspacedomain.ControlSnapshot{}, controlFault(err, "")
 		}
 	}
+	return snapshot, nil
+}
+
+func (coordinator *Coordinator) reapplyActiveLocked(ctx context.Context, snapshot workspacedomain.ControlSnapshot) error {
 	if snapshot.Active == nil {
 		return coordinator.runtime.RevokeGrant(ctx)
 	}
-	validated, err := coordinator.validator.Validate(snapshot.Active.RootPath)
-	if err != nil || validated.CanonicalPath != snapshot.Active.RootPath ||
-		validated.Fingerprint.Digest() != snapshot.Active.RootFingerprint || validated.Fingerprint.BindingVersion != snapshot.Active.BindingVersion {
-		return &Fault{Code: "WORKSPACE_PATH_IDENTITY_CHANGED", Message: "已登记的宿主机目录不可恢复", Status: 409}
+	availability, reason := coordinator.workspaceAvailability(*snapshot.Active)
+	if availability != workspacedomain.WorkspaceAvailabilityAvailable {
+		fault := &Fault{Code: reason, Message: "已登记的宿主机目录不可恢复"}
+		revokeErr := coordinator.runtime.RevokeGrant(ctx)
+		_, availabilityErr := coordinator.service.SetWorkspaceAvailability(ctx, workspacedomain.AvailabilityUpdate{
+			WorkspaceID: snapshot.Active.ID, ExpectedVersion: snapshot.Active.Version,
+			Availability: availability, Reason: reason, CheckedAt: time.Now().UTC(),
+		})
+		if revokeErr != nil {
+			return errors.Join(revokeErr, fault, controlFault(availabilityErr, ""))
+		}
+		if availabilityErr != nil {
+			return errors.Join(controlFault(availabilityErr, ""), fault)
+		}
+		return fault
 	}
 	grant := grantForWorkspace(*snapshot.Active, snapshot.State.GrantGeneration)
-	if _, err := coordinator.runtime.ApplyGrant(ctx, grant); err != nil {
+	if err := coordinator.runtime.ApplyGrant(ctx, grant); err != nil {
 		return err
 	}
 	return coordinator.waitForActiveRuntimes(ctx, snapshot.Active.ID, snapshot.State.GrantGeneration)
 }
 
-// State projects the complete durable state without exposing unverified roots.
-func (coordinator *Coordinator) State(ctx context.Context) (State, error) {
-	snapshot, err := coordinator.service.Snapshot(ctx, runtimeFreshWithin)
+// Switch validates one host root and completes the durable switch or its recovery before returning.
+func (coordinator *Coordinator) Switch(ctx context.Context, command SwitchCommand) (SwitchOutcome, error) {
+	if err := validateSwitchCommand(command); err != nil {
+		return SwitchOutcome{}, err
+	}
+	validated, err := coordinator.validator.Validate(command.RootPath)
 	if err != nil {
-		return State{}, controllerFault(err, "")
+		return SwitchOutcome{}, controlFault(err, "")
 	}
-	operation := snapshot.Operation
-	if operation == nil {
-		coordinator.mu.Lock()
-		if coordinator.lastOperation != nil {
-			copy := *coordinator.lastOperation
-			operation = &copy
-		}
-		coordinator.mu.Unlock()
+	name := strings.TrimSpace(command.Name)
+	if name == "" {
+		name = filepath.Base(validated.CanonicalPath)
 	}
-	return projectState(snapshot, operation), nil
-}
+	if err := coordinator.lockRuntime(ctx); err != nil {
+		return SwitchOutcome{}, err
+	}
+	defer coordinator.unlockRuntime()
+	if _, err := coordinator.recoverPendingLocked(ctx); err != nil {
+		return SwitchOutcome{}, err
+	}
 
-// BeginSwitch validates or resolves the Registry target and starts one durable operation.
-func (coordinator *Coordinator) BeginSwitch(ctx context.Context, command SwitchCommand) (Operation, error) {
-	coordinator.mu.Lock()
-	closed := coordinator.closed
-	coordinator.mu.Unlock()
-	if closed {
-		return Operation{}, &Fault{Code: "WORKSPACE_CONTROLLER_STOPPING", Message: "Workspace 控制器正在停止", Retryable: true, Status: 503}
-	}
-	snapshot, err := coordinator.service.Snapshot(ctx, runtimeFreshWithin)
-	if err != nil {
-		return Operation{}, controllerFault(err, "")
-	}
-	if snapshot.State.StateVersion != command.ExpectedStateVersion {
-		return Operation{}, &Fault{Code: workspacedomain.ErrorCodeControlStateConflict, Message: "控制状态已变化，请重试", Status: 409}
-	}
-	controllerID, err := foundation.ParseID(command.ControllerInstanceID)
-	if err != nil {
-		return Operation{}, &Fault{Code: "CONTROLLER_INSTANCE_INVALID", Message: "控制器实例无效", Status: 409}
-	}
-	target, err := coordinator.resolveTarget(ctx, snapshot, command)
-	if err != nil {
-		return Operation{}, err
-	}
-	operation, err := coordinator.service.BeginSwitch(ctx, workspaceapplication.BeginSwitchCommand{
-		ControllerInstanceID: controllerID, IdempotencyKey: command.IdempotencyKey,
-		RequestHash: command.RequestHash, TargetWorkspaceID: target.ID,
-		ExpectedStateVersion: command.ExpectedStateVersion, LeaseOwnerID: coordinator.ownerID,
-		LeaseDuration: controllerLeaseDuration, Deadline: time.Now().UTC().Add(switchDeadlineDuration),
-	})
-	if err != nil {
-		return Operation{}, controllerFault(err, "")
-	}
-	coordinator.mu.Lock()
-	coordinator.lastOperation = nil
-	_, alreadyRunning := coordinator.running[operation.ID]
-	closed = coordinator.closed
-	shouldRun := !alreadyRunning && !closed && operation.Result == ""
-	if shouldRun {
-		coordinator.running[operation.ID] = struct{}{}
-		coordinator.wg.Add(1)
-	}
-	coordinator.mu.Unlock()
-	if shouldRun {
-		go coordinator.runSwitch(operation.ID, target, command.InitializeGit)
-	}
-	return projectOperation(operation, target.Name), nil
-}
-
-// Operation returns one durable operation, including terminal history.
-func (coordinator *Coordinator) Operation(ctx context.Context, rawID string) (Operation, error) {
-	id, err := foundation.ParseID(rawID)
-	if err != nil {
-		return Operation{}, &Fault{Code: workspacedomain.ErrorCodeSwitchNotFound, Message: "切换操作不存在", Status: 404}
-	}
-	operation, err := coordinator.service.GetSwitchOperation(ctx, id)
-	if err != nil {
-		return Operation{}, controllerFault(err, rawID)
-	}
-	name := coordinator.workspaceName(ctx, operation.TargetWorkspaceID)
-	return projectOperation(operation, name), nil
-}
-
-// CheckAvailability revalidates the exact persisted physical identity.
-func (coordinator *Coordinator) CheckAvailability(ctx context.Context, rawID string, expectedStateVersion int64) (Workspace, error) {
-	_, workspace, err := coordinator.versionedWorkspace(ctx, rawID, expectedStateVersion)
-	if err != nil {
-		return Workspace{}, err
-	}
-	availability, reason := coordinator.workspaceAvailability(workspace)
-	updated, err := coordinator.service.SetWorkspaceAvailability(ctx, workspacedomain.AvailabilityUpdate{
-		WorkspaceID: workspace.ID, ExpectedVersion: workspace.Version,
-		Availability: availability, Reason: reason, CheckedAt: time.Now().UTC(),
-	})
-	if err != nil {
-		return Workspace{}, controllerFault(err, "")
-	}
-	return projectWorkspace(updated), nil
-}
-
-// RemoveWorkspace soft-removes one inactive Registry identity.
-func (coordinator *Coordinator) RemoveWorkspace(ctx context.Context, rawID string, expectedStateVersion int64) error {
-	_, workspace, err := coordinator.versionedWorkspace(ctx, rawID, expectedStateVersion)
-	if err != nil {
-		return err
-	}
-	_, err = coordinator.service.RemoveWorkspace(ctx, workspacedomain.WorkspaceRemoval{
-		WorkspaceID: workspace.ID, ExpectedVersion: workspace.Version, RemovedAt: time.Now().UTC(),
-	})
-	return controllerFault(err, "")
-}
-
-func (coordinator *Coordinator) resolveTarget(ctx context.Context, snapshot workspacedomain.ControlSnapshot, command SwitchCommand) (workspacedomain.Workspace, error) {
-	if command.TargetKind == "registered" {
-		id, err := foundation.ParseID(command.WorkspaceID)
-		if err != nil {
-			return workspacedomain.Workspace{}, &Fault{Code: workspacedomain.ErrorCodeWorkspaceNotFound, Message: "Workspace 不存在", Status: 404}
-		}
-		workspace, found := findWorkspace(snapshot.Registry, id)
-		if !found {
-			return workspacedomain.Workspace{}, &Fault{Code: workspacedomain.ErrorCodeWorkspaceNotFound, Message: "Workspace 不存在", Status: 404}
-		}
-		availability, reason := coordinator.workspaceAvailability(workspace)
-		if availability != workspacedomain.WorkspaceAvailabilityAvailable {
-			if _, updateErr := coordinator.service.SetWorkspaceAvailability(ctx, workspacedomain.AvailabilityUpdate{
-				WorkspaceID: workspace.ID, ExpectedVersion: workspace.Version,
-				Availability: availability, Reason: reason, CheckedAt: time.Now().UTC(),
-			}); updateErr != nil {
-				return workspacedomain.Workspace{}, controllerFault(updateErr, "")
-			}
-			return workspacedomain.Workspace{}, &Fault{
-				Code: reason, Message: "该 Workspace 的宿主机目录不可用，请重新选择目录", Status: 409,
-			}
-		}
-		return workspace, nil
-	}
-	if command.TargetKind != "new" {
-		return workspacedomain.Workspace{}, &Fault{Code: "WORKSPACE_SWITCH_TARGET_INVALID", Message: "Workspace 切换目标无效", Status: 400}
-	}
 	resolution, err := coordinator.service.ResolveWorkspace(ctx, workspaceapplication.RegisterWorkspaceCommand{
-		Name: command.Name, CanonicalRoot: command.RootPath, GitRepositoryPath: command.RootPath,
-		RootFingerprint: command.RootFingerprint, BindingVersion: command.BindingVersion,
+		Name: name, CanonicalRoot: validated.CanonicalPath, GitRepositoryPath: validated.CanonicalPath,
+		RootFingerprint: validated.Fingerprint.Digest(), BindingVersion: validated.Fingerprint.BindingVersion,
 		GitCheckedAt: time.Now().UTC(),
 	})
 	if err != nil {
-		return workspacedomain.Workspace{}, controllerFault(err, "")
+		return SwitchOutcome{}, controlFault(err, "")
 	}
-	return resolution.Workspace, nil
+	target := resolution.Workspace
+	snapshot, err := coordinator.service.Snapshot(ctx, runtimeFreshWithin)
+	if err != nil {
+		return SwitchOutcome{Workspace: target}, controlFault(err, "")
+	}
+	if snapshot.Active != nil && snapshot.Active.ID == target.ID {
+		if err := coordinator.reapplyActiveLocked(ctx, snapshot); err != nil {
+			return SwitchOutcome{Workspace: target, GrantGeneration: snapshot.State.GrantGeneration}, err
+		}
+		return SwitchOutcome{Workspace: target, GrantGeneration: snapshot.State.GrantGeneration, Changed: false}, nil
+	}
+
+	requestHash, err := switchRequestHash(target, name, command.InitializeGit)
+	if err != nil {
+		return SwitchOutcome{Workspace: target}, &Fault{Code: "WORKSPACE_SWITCH_REQUEST_INVALID", Message: "Workspace 切换请求无效"}
+	}
+	operation, err := coordinator.service.BeginSwitch(ctx, workspaceapplication.BeginSwitchCommand{
+		ControllerInstanceID: coordinator.controlInstanceID, IdempotencyKey: command.IdempotencyKey,
+		RequestHash: requestHash, TargetWorkspaceID: target.ID,
+		ExpectedStateVersion: snapshot.State.StateVersion, LeaseOwnerID: coordinator.leaseOwnerID,
+		LeaseDuration: controlLeaseDuration, Deadline: time.Now().UTC().Add(switchDeadlineDuration),
+	})
+	if err != nil {
+		return SwitchOutcome{Workspace: target}, controlFault(err, "")
+	}
+	outcome := SwitchOutcome{Operation: operation, Workspace: target, Changed: true}
+	if operation.Result == "" {
+		if err := coordinator.executeSwitch(ctx, operation, target, command.InitializeGit); err != nil {
+			if recoveryErr := coordinator.recoverSwitchUntilTerminal(ctx, operation.ID, err); recoveryErr != nil {
+				return outcome, controlFault(recoveryErr, string(operation.ID))
+			}
+		}
+	}
+	terminal, err := coordinator.service.GetSwitchOperation(ctx, operation.ID)
+	if err != nil {
+		return outcome, controlFault(err, string(operation.ID))
+	}
+	outcome.Operation = terminal
+	outcome.GrantGeneration = terminal.GrantGeneration
+	if terminal.Result != workspacedomain.SwitchResultSucceeded {
+		return outcome, switchOutcomeFault(terminal)
+	}
+	return outcome, nil
+}
+
+func validateSwitchCommand(command SwitchCommand) error {
+	key := command.IdempotencyKey
+	if key == "" || len(key) > 256 || key != strings.TrimSpace(key) || !utf8.ValidString(key) || strings.ContainsAny(key, "\x00\r\n") {
+		return &Fault{Code: "WORKSPACE_SWITCH_IDEMPOTENCY_KEY_INVALID", Message: "Workspace 切换幂等键无效"}
+	}
+	name := strings.TrimSpace(command.Name)
+	if len(name) > 256 || !utf8.ValidString(name) {
+		return &Fault{Code: "WORKSPACE_NAME_INVALID", Message: "Workspace 名称无效"}
+	}
+	for _, character := range name {
+		if unicode.IsControl(character) {
+			return &Fault{Code: "WORKSPACE_NAME_INVALID", Message: "Workspace 名称无效"}
+		}
+	}
+	return nil
+}
+
+func switchRequestHash(target workspacedomain.Workspace, requestedName string, initializeGit bool) (string, error) {
+	document := struct {
+		Schema            string `json:"schema"`
+		TargetWorkspaceID string `json:"target_workspace_id"`
+		Name              string `json:"name"`
+		RootFingerprint   string `json:"root_fingerprint"`
+		BindingVersion    int64  `json:"binding_version"`
+		InitializeGit     bool   `json:"initialize_git"`
+	}{
+		Schema: "workspace-switch/v1", TargetWorkspaceID: string(target.ID),
+		Name: requestedName, RootFingerprint: target.RootFingerprint, BindingVersion: target.BindingVersion,
+		InitializeGit: initializeGit,
+	}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func switchOutcomeFault(operation workspacedomain.SwitchOperation) error {
+	code := operation.ErrorCode
+	if code == "" {
+		code = "WORKSPACE_SWITCH_" + strings.ToUpper(string(operation.Result))
+	}
+	return &Fault{
+		Code: code, Message: "Workspace 切换未完成", Retryable: operation.Result == workspacedomain.SwitchResultFailed,
+		OperationID: string(operation.ID),
+	}
 }
 
 func (coordinator *Coordinator) workspaceAvailability(workspace workspacedomain.Workspace) (workspacedomain.WorkspaceAvailability, string) {
@@ -302,29 +291,6 @@ func (coordinator *Coordinator) workspaceAvailability(workspace workspacedomain.
 		return workspacedomain.WorkspaceAvailabilityUnavailable, "WORKSPACE_PATH_IDENTITY_CHANGED"
 	}
 	return workspacedomain.WorkspaceAvailabilityAvailable, ""
-}
-
-func (coordinator *Coordinator) runSwitch(operationID foundation.ID, target workspacedomain.Workspace, initializeGit bool) {
-	defer func() {
-		coordinator.mu.Lock()
-		delete(coordinator.running, operationID)
-		coordinator.mu.Unlock()
-		coordinator.wg.Done()
-	}()
-	if err := coordinator.lockRuntime(coordinator.lifecycle); err != nil {
-		return
-	}
-	defer coordinator.unlockRuntime()
-
-	ctx, cancel := context.WithTimeout(coordinator.lifecycle, switchDeadlineDuration)
-	defer cancel()
-	operation, err := coordinator.service.GetSwitchOperation(ctx, operationID)
-	if err == nil {
-		err = coordinator.executeSwitch(ctx, operation, target, initializeGit)
-	}
-	if err != nil && coordinator.lifecycle.Err() == nil {
-		_ = coordinator.recoverSwitchUntilTerminal(coordinator.lifecycle, operationID, err)
-	}
 }
 
 func (coordinator *Coordinator) lockRuntime(ctx context.Context) error {
@@ -367,9 +333,9 @@ func (coordinator *Coordinator) executeSwitch(ctx context.Context, operation wor
 		return err
 	}
 	if _, err := coordinator.service.RevokeActiveWorkspace(ctx, workspaceapplication.RevokeActiveCommand{
-		OperationID: operation.ID, LeaseOwnerID: coordinator.ownerID,
+		OperationID: operation.ID, LeaseOwnerID: coordinator.leaseOwnerID,
 		ExpectedOperationVersion: operation.Version, ExpectedStateVersion: snapshot.State.StateVersion,
-		LeaseDuration: controllerLeaseDuration,
+		LeaseDuration: controlLeaseDuration,
 	}); err != nil {
 		return err
 	}
@@ -421,9 +387,9 @@ func (coordinator *Coordinator) executeSwitch(ctx context.Context, operation wor
 		return err
 	}
 	if _, err := coordinator.service.CommitTargetWorkspace(ctx, workspaceapplication.CommitTargetCommand{
-		OperationID: operation.ID, LeaseOwnerID: coordinator.ownerID,
+		OperationID: operation.ID, LeaseOwnerID: coordinator.leaseOwnerID,
 		ExpectedOperationVersion: operation.Version, ExpectedStateVersion: snapshot.State.StateVersion,
-		LeaseDuration: controllerLeaseDuration, RuntimeFreshWithin: candidateFreshWithin,
+		LeaseDuration: controlLeaseDuration, RuntimeFreshWithin: candidateFreshWithin,
 	}); err != nil {
 		return err
 	}
@@ -436,8 +402,7 @@ func (coordinator *Coordinator) executeSwitch(ctx context.Context, operation wor
 		return err
 	}
 	operation, err = coordinator.runLeasedAction(ctx, operation, func(actionContext context.Context) error {
-		_, applyErr := coordinator.runtime.ApplyGrant(actionContext, grant)
-		return applyErr
+		return coordinator.runtime.ApplyGrant(actionContext, grant)
 	})
 	if err != nil {
 		return err
@@ -492,9 +457,9 @@ func (coordinator *Coordinator) renewOrTakeOverSwitch(ctx context.Context, opera
 		return workspacedomain.SwitchOperation{}, err
 	}
 	renewed, err := coordinator.service.RenewSwitch(ctx, workspaceapplication.RenewSwitchCommand{
-		OperationID: operation.ID, LeaseOwnerID: coordinator.ownerID, ExpectedPhase: operation.Phase,
+		OperationID: operation.ID, LeaseOwnerID: coordinator.leaseOwnerID, ExpectedPhase: operation.Phase,
 		ExpectedOperationVersion: operation.Version, ExpectedStateVersion: snapshot.State.StateVersion,
-		LeaseDuration: controllerLeaseDuration,
+		LeaseDuration: controlLeaseDuration,
 	})
 	if err == nil {
 		return renewed, nil
@@ -529,9 +494,9 @@ func (coordinator *Coordinator) recoverSwitch(ctx context.Context, operationID f
 		}
 		if snapshot.State.ActiveWorkspaceID != nil {
 			if _, revokeErr := coordinator.service.RevokeActiveWorkspace(ctx, workspaceapplication.RevokeActiveCommand{
-				OperationID: operation.ID, LeaseOwnerID: coordinator.ownerID,
+				OperationID: operation.ID, LeaseOwnerID: coordinator.leaseOwnerID,
 				ExpectedOperationVersion: operation.Version, ExpectedStateVersion: snapshot.State.StateVersion,
-				LeaseDuration: controllerLeaseDuration,
+				LeaseDuration: controlLeaseDuration,
 			}); revokeErr != nil {
 				return revokeErr
 			}
@@ -566,6 +531,16 @@ func (coordinator *Coordinator) recoverSwitch(ctx context.Context, operationID f
 	}
 	validated, validationErr := coordinator.validator.Validate(previous.RootPath)
 	if validationErr != nil || validated.Fingerprint.Digest() != previous.RootFingerprint {
+		availability, reason := coordinator.workspaceAvailability(previous)
+		if previous.Availability != workspacedomain.WorkspaceAvailabilityMigrationRequired &&
+			(previous.Availability != availability || previous.AvailabilityReason != reason) {
+			if _, updateErr := coordinator.service.SetWorkspaceAvailability(ctx, workspacedomain.AvailabilityUpdate{
+				WorkspaceID: previous.ID, ExpectedVersion: previous.Version,
+				Availability: availability, Reason: reason, CheckedAt: time.Now().UTC(),
+			}); updateErr != nil {
+				return updateErr
+			}
+		}
 		return coordinator.finish(ctx, operation, workspacedomain.SwitchResultFailed, errorCode)
 	}
 	grant := grantForWorkspace(previous, operation.RecoveryGeneration)
@@ -594,9 +569,9 @@ func (coordinator *Coordinator) recoverSwitch(ctx context.Context, operationID f
 		return err
 	}
 	if _, err := coordinator.service.RestorePreviousWorkspace(ctx, workspaceapplication.RestorePreviousCommand{
-		OperationID: operation.ID, LeaseOwnerID: coordinator.ownerID,
+		OperationID: operation.ID, LeaseOwnerID: coordinator.leaseOwnerID,
 		ExpectedOperationVersion: operation.Version, ExpectedStateVersion: snapshot.State.StateVersion,
-		LeaseDuration: controllerLeaseDuration, RuntimeFreshWithin: candidateFreshWithin,
+		LeaseDuration: controlLeaseDuration, RuntimeFreshWithin: candidateFreshWithin,
 	}); err != nil {
 		return coordinator.finishFailedAfterRevocation(ctx, operation.ID, errorCode)
 	}
@@ -616,8 +591,7 @@ func (coordinator *Coordinator) activateRecoveredGrant(
 ) error {
 	var err error
 	operation, err = coordinator.runLeasedAction(ctx, operation, func(actionContext context.Context) error {
-		_, applyErr := coordinator.runtime.ApplyGrant(actionContext, grant)
-		return applyErr
+		return coordinator.runtime.ApplyGrant(actionContext, grant)
 	})
 	if err != nil {
 		return coordinator.finishFailedAfterRevocation(ctx, operation.ID, errorCode)
@@ -666,9 +640,9 @@ func (coordinator *Coordinator) runLeasedAction(
 				return operation, err
 			}
 			operation, err = coordinator.service.RenewSwitch(ctx, workspaceapplication.RenewSwitchCommand{
-				OperationID: operation.ID, LeaseOwnerID: coordinator.ownerID, ExpectedPhase: operation.Phase,
+				OperationID: operation.ID, LeaseOwnerID: coordinator.leaseOwnerID, ExpectedPhase: operation.Phase,
 				ExpectedOperationVersion: operation.Version, ExpectedStateVersion: snapshot.State.StateVersion,
-				LeaseDuration: controllerLeaseDuration,
+				LeaseDuration: controlLeaseDuration,
 			})
 			if err != nil {
 				cancelAction()
@@ -695,7 +669,7 @@ func (coordinator *Coordinator) waitForQuiescedRuntimes(ctx context.Context, wor
 		}
 		select {
 		case <-waitContext.Done():
-			return &Fault{Code: "WORKSPACE_QUIESCENCE_TIMEOUT", Message: "旧 Workspace 未能在安全检查点暂停", Retryable: true, Status: 503}
+			return &Fault{Code: "WORKSPACE_QUIESCENCE_TIMEOUT", Message: "旧 Workspace 未能在安全检查点暂停", Retryable: true}
 		case <-ticker.C:
 		}
 	}
@@ -726,11 +700,17 @@ func (coordinator *Coordinator) cancelQuiescence(ctx context.Context, operation 
 			continue
 		}
 		if record.Phase == workspacedomain.RuntimePhaseActive && record.OperationID == nil {
+			if !record.Fresh {
+				continue
+			}
 			expected[record.Role] = runtimeResumeExpectation{InstanceID: record.InstanceID, Version: record.Version}
 			continue
 		}
 		if record.OperationID == nil || *record.OperationID != operation.ID ||
 			(record.Phase != workspacedomain.RuntimePhaseQuiescing && record.Phase != workspacedomain.RuntimePhaseQuiesced) {
+			continue
+		}
+		if !record.Fresh {
 			continue
 		}
 		updated, err := coordinator.service.SetRuntimePhase(ctx, workspaceapplication.RuntimePhaseCommand{
@@ -744,7 +724,7 @@ func (coordinator *Coordinator) cancelQuiescence(ctx context.Context, operation 
 		expected[record.Role] = runtimeResumeExpectation{InstanceID: updated.InstanceID, Version: updated.Version}
 	}
 	if len(expected) != 2 {
-		return &Fault{Code: "WORKSPACE_QUIESCENCE_RESUME_FAILED", Message: "旧 Workspace 运行时无法恢复", Retryable: true, Status: 503, OperationID: string(operation.ID)}
+		return coordinator.restorePreviousGrantBeforeCancellation(ctx, operation, snapshot)
 	}
 	if err := coordinator.waitForResumedRuntimes(ctx, *operation.PreviousWorkspaceID, operation.GrantGeneration-1, expected); err != nil {
 		return err
@@ -754,6 +734,56 @@ func (coordinator *Coordinator) cancelQuiescence(ctx context.Context, operation 
 		return err
 	}
 	return coordinator.finish(ctx, operation, workspacedomain.SwitchResultCancelled, "")
+}
+
+func (coordinator *Coordinator) restorePreviousGrantBeforeCancellation(
+	ctx context.Context,
+	operation workspacedomain.SwitchOperation,
+	snapshot workspacedomain.ControlSnapshot,
+) error {
+	previousGeneration := operation.GrantGeneration - 1
+	previous, found := findWorkspace(snapshot.Registry, *operation.PreviousWorkspaceID)
+	if previousGeneration < 1 || !found || previous.Availability != workspacedomain.WorkspaceAvailabilityAvailable ||
+		!previous.RemovedAt.IsZero() || snapshot.State.ActiveWorkspaceID == nil ||
+		*snapshot.State.ActiveWorkspaceID != previous.ID || snapshot.State.GrantGeneration != previousGeneration {
+		return &Fault{Code: "WORKSPACE_QUIESCENCE_RESUME_FAILED", Message: "旧 Workspace 运行时无法恢复", Retryable: true, OperationID: string(operation.ID)}
+	}
+	grant := grantForWorkspace(previous, previousGeneration)
+	if err := coordinator.validateGrantIdentity(grant); err != nil {
+		var validationError *ValidationError
+		if errors.As(err, &validationError) && validationError.Code == "WORKSPACE_PATH_IDENTITY_CHANGED" {
+			return coordinator.failClosedAfterPreviousIdentityChange(ctx, operation)
+		}
+		return err
+	}
+	var err error
+	operation, err = coordinator.runLeasedAction(ctx, operation, func(actionContext context.Context) error {
+		return coordinator.runtime.ApplyGrant(actionContext, grant)
+	})
+	if err != nil {
+		return err
+	}
+	operation, err = coordinator.runLeasedAction(ctx, operation, func(actionContext context.Context) error {
+		return coordinator.waitForActiveRuntimes(actionContext, previous.ID, previousGeneration)
+	})
+	if err != nil {
+		return err
+	}
+	return coordinator.finish(ctx, operation, workspacedomain.SwitchResultCancelled, "")
+}
+
+func (coordinator *Coordinator) failClosedAfterPreviousIdentityChange(
+	ctx context.Context,
+	operation workspacedomain.SwitchOperation,
+) error {
+	operation, err := coordinator.advance(ctx, operation, workspacedomain.SwitchPhaseRevoking)
+	if err != nil {
+		return err
+	}
+	return coordinator.recoverSwitch(ctx, operation.ID, &Fault{
+		Code: "WORKSPACE_PATH_IDENTITY_CHANGED", Message: "已登记的宿主机目录身份已变化",
+		OperationID: string(operation.ID),
+	})
 }
 
 type runtimeResumeExpectation struct {
@@ -778,7 +808,7 @@ func (coordinator *Coordinator) waitForResumedRuntimes(
 		}
 		select {
 		case <-waitContext.Done():
-			return &Fault{Code: "WORKSPACE_QUIESCENCE_RESUME_TIMEOUT", Message: "旧 Workspace 运行时未能恢复", Retryable: true, Status: 503}
+			return &Fault{Code: "WORKSPACE_QUIESCENCE_RESUME_TIMEOUT", Message: "旧 Workspace 运行时未能恢复", Retryable: true}
 		case <-ticker.C:
 		}
 	}
@@ -821,16 +851,16 @@ func (coordinator *Coordinator) takeOverSwitch(ctx context.Context, operation wo
 		}
 		snapshot, err := coordinator.service.Snapshot(ctx, runtimeFreshWithin)
 		if err != nil {
-			return workspacedomain.SwitchOperation{}, controllerFault(err, string(operation.ID))
+			return workspacedomain.SwitchOperation{}, controlFault(err, string(operation.ID))
 		}
 		if snapshot.Operation == nil || snapshot.Operation.ID != operation.ID || snapshot.Operation.Result != "" {
-			return workspacedomain.SwitchOperation{}, &Fault{Code: workspacedomain.ErrorCodeControlStateConflict, Message: "Workspace 切换状态已变化", Status: 409}
+			return workspacedomain.SwitchOperation{}, &Fault{Code: workspacedomain.ErrorCodeControlStateConflict, Message: "Workspace 切换状态已变化"}
 		}
 		operation = *snapshot.Operation
 		taken, err := coordinator.service.TakeOverSwitch(ctx, workspaceapplication.TakeOverSwitchCommand{
-			OperationID: operation.ID, NewLeaseOwnerID: coordinator.ownerID, ExpectedPhase: operation.Phase,
+			OperationID: operation.ID, NewLeaseOwnerID: coordinator.leaseOwnerID, ExpectedPhase: operation.Phase,
 			ExpectedOperationVersion: operation.Version, ExpectedStateVersion: snapshot.State.StateVersion,
-			LeaseDuration: controllerLeaseDuration,
+			LeaseDuration: controlLeaseDuration,
 		})
 		if err == nil {
 			return taken, nil
@@ -839,7 +869,7 @@ func (coordinator *Coordinator) takeOverSwitch(ctx context.Context, operation wo
 		if errors.As(err, &classified) && classified.Code == workspacedomain.ErrorCodeSwitchLeaseHeld {
 			continue
 		}
-		return workspacedomain.SwitchOperation{}, controllerFault(err, string(operation.ID))
+		return workspacedomain.SwitchOperation{}, controlFault(err, string(operation.ID))
 	}
 }
 
@@ -867,7 +897,7 @@ func (coordinator *Coordinator) preparedRuntimes(
 	for _, role := range []workspacedomain.RuntimeRole{workspacedomain.RuntimeRoleAPI, workspacedomain.RuntimeRoleWorker} {
 		record, found := byRole[role]
 		if !found {
-			return nil, &Fault{Code: "WORKSPACE_CANDIDATE_NOT_PREPARED", Message: "Workspace 候选运行时尚未准备完成", Retryable: true, Status: 503, OperationID: string(operation.ID)}
+			return nil, &Fault{Code: "WORKSPACE_CANDIDATE_NOT_PREPARED", Message: "Workspace 候选运行时尚未准备完成", Retryable: true, OperationID: string(operation.ID)}
 		}
 		records = append(records, record)
 	}
@@ -889,10 +919,10 @@ func (coordinator *Coordinator) advance(ctx context.Context, operation workspace
 		return workspacedomain.SwitchOperation{}, err
 	}
 	return coordinator.service.AdvanceSwitch(ctx, workspaceapplication.AdvanceSwitchCommand{
-		OperationID: operation.ID, LeaseOwnerID: coordinator.ownerID,
+		OperationID: operation.ID, LeaseOwnerID: coordinator.leaseOwnerID,
 		ExpectedPhase: operation.Phase, NextPhase: next,
 		ExpectedOperationVersion: operation.Version, ExpectedStateVersion: snapshot.State.StateVersion,
-		LeaseDuration: controllerLeaseDuration,
+		LeaseDuration: controlLeaseDuration,
 	})
 }
 
@@ -905,16 +935,11 @@ func (coordinator *Coordinator) finish(ctx context.Context, operation workspaced
 	if err != nil {
 		return err
 	}
-	terminal, err := coordinator.service.FinishSwitch(ctx, workspaceapplication.FinishSwitchCommand{
-		OperationID: current.ID, LeaseOwnerID: coordinator.ownerID, Result: result, ErrorCode: errorCode,
+	_, err = coordinator.service.FinishSwitch(ctx, workspaceapplication.FinishSwitchCommand{
+		OperationID: current.ID, LeaseOwnerID: coordinator.leaseOwnerID, Result: result, ErrorCode: errorCode,
 		ExpectedOperationVersion: current.Version, ExpectedStateVersion: snapshot.State.StateVersion,
 		RuntimeFreshWithin: runtimeFreshWithin,
 	})
-	if err == nil {
-		coordinator.mu.Lock()
-		coordinator.lastOperation = &terminal
-		coordinator.mu.Unlock()
-	}
 	return err
 }
 
@@ -930,7 +955,7 @@ func (coordinator *Coordinator) waitForActiveRuntimes(ctx context.Context, works
 		}
 		select {
 		case <-waitContext.Done():
-			return &Fault{Code: "WORKSPACE_RUNTIME_READY_TIMEOUT", Message: "Workspace 运行时未能就绪", Retryable: true, Status: 503}
+			return &Fault{Code: "WORKSPACE_RUNTIME_READY_TIMEOUT", Message: "Workspace 运行时未能就绪", Retryable: true}
 		case <-ticker.C:
 		}
 	}
@@ -945,33 +970,6 @@ func activeRuntimesReady(records []workspacedomain.RuntimeRecord, workspaceID fo
 		}
 	}
 	return ready[workspacedomain.RuntimeRoleAPI] && ready[workspacedomain.RuntimeRoleWorker]
-}
-
-func (coordinator *Coordinator) versionedWorkspace(ctx context.Context, rawID string, expectedStateVersion int64) (workspacedomain.ControlSnapshot, workspacedomain.Workspace, error) {
-	id, err := foundation.ParseID(rawID)
-	if err != nil {
-		return workspacedomain.ControlSnapshot{}, workspacedomain.Workspace{}, &Fault{Code: workspacedomain.ErrorCodeWorkspaceNotFound, Message: "Workspace 不存在", Status: 404}
-	}
-	snapshot, err := coordinator.service.Snapshot(ctx, runtimeFreshWithin)
-	if err != nil {
-		return workspacedomain.ControlSnapshot{}, workspacedomain.Workspace{}, controllerFault(err, "")
-	}
-	if snapshot.State.StateVersion != expectedStateVersion {
-		return workspacedomain.ControlSnapshot{}, workspacedomain.Workspace{}, &Fault{Code: workspacedomain.ErrorCodeControlStateConflict, Message: "控制状态已变化，请重试", Status: 409}
-	}
-	workspace, found := findWorkspace(snapshot.Registry, id)
-	if !found {
-		return workspacedomain.ControlSnapshot{}, workspacedomain.Workspace{}, &Fault{Code: workspacedomain.ErrorCodeWorkspaceNotFound, Message: "Workspace 不存在", Status: 404}
-	}
-	return snapshot, workspace, nil
-}
-
-func (coordinator *Coordinator) workspaceName(ctx context.Context, id foundation.ID) string {
-	workspace, found := coordinator.registryWorkspace(ctx, id)
-	if !found {
-		return ""
-	}
-	return workspace.Name
 }
 
 func (coordinator *Coordinator) registryWorkspace(ctx context.Context, id foundation.ID) (workspacedomain.Workspace, bool) {
@@ -999,58 +997,6 @@ func grantForWorkspace(workspace workspacedomain.Workspace, generation int64) Gr
 	}
 }
 
-func projectState(snapshot workspacedomain.ControlSnapshot, operation *workspacedomain.SwitchOperation) State {
-	state := State{StateVersion: snapshot.State.StateVersion, RecentWorkspaces: make([]Workspace, 0, len(snapshot.Registry)), PollAfterMS: 750}
-	for _, workspace := range snapshot.Registry {
-		state.RecentWorkspaces = append(state.RecentWorkspaces, projectWorkspace(workspace))
-	}
-	if snapshot.Active != nil {
-		active := projectWorkspace(*snapshot.Active)
-		state.ActiveWorkspace = &active
-	}
-	if operation != nil {
-		name := ""
-		if target, found := findWorkspace(snapshot.Registry, operation.TargetWorkspaceID); found {
-			name = target.Name
-		}
-		projected := projectOperation(*operation, name)
-		state.Operation = &projected
-	}
-	ready := snapshot.Active != nil && activeRuntimesReady(snapshot.Runtimes, snapshot.Active.ID, snapshot.State.GrantGeneration)
-	switch {
-	case snapshot.Operation != nil && snapshot.Operation.Result == "":
-		state.Runtime = RuntimeState{Status: RuntimeSwitching, API: ProcessState{Status: ProcessStarting}, Worker: ProcessState{Status: ProcessStarting}}
-	case ready:
-		state.Runtime = RuntimeState{Status: RuntimeReady, API: ProcessState{Status: ProcessReady}, Worker: ProcessState{Status: ProcessReady}}
-	case snapshot.Active == nil && snapshot.State.LastErrorCode != "":
-		state.Runtime = RuntimeState{Status: RuntimeRecoveryFailed, API: ProcessState{Status: ProcessUnavailable}, Worker: ProcessState{Status: ProcessUnavailable}}
-	default:
-		state.Runtime = RuntimeState{Status: RuntimeWaitingForWorkspace, API: ProcessState{Status: ProcessStopped}, Worker: ProcessState{Status: ProcessStopped}}
-	}
-	return state
-}
-
-func projectWorkspace(workspace workspacedomain.Workspace) Workspace {
-	projected := Workspace{
-		WorkspaceID: string(workspace.ID), Name: workspace.Name, RootPath: workspace.RootPath,
-		Availability: Availability(workspace.Availability), AvailabilityReason: workspace.AvailabilityReason,
-	}
-	if !workspace.LastOpenedAt.IsZero() {
-		opened := workspace.LastOpenedAt.UTC()
-		projected.LastOpenedAt = &opened
-	}
-	return projected
-}
-
-func projectOperation(operation workspacedomain.SwitchOperation, targetName string) Operation {
-	return Operation{
-		OperationID: string(operation.ID), Phase: string(operation.Phase), Result: string(operation.Result),
-		TargetWorkspaceID: string(operation.TargetWorkspaceID), TargetName: targetName,
-		ErrorCode: operation.ErrorCode, Retryable: operation.Result == workspacedomain.SwitchResultFailed,
-		StartedAt: operation.CreatedAt.UTC(), UpdatedAt: operation.UpdatedAt.UTC(),
-	}
-}
-
 func pathErrorCode(err error) string {
 	var pathError *PathError
 	if errors.As(err, &pathError) && pathError.Code != "" {
@@ -1074,36 +1020,41 @@ func stableOperationError(err error) string {
 	return "WORKSPACE_SWITCH_FAILED"
 }
 
-func controllerFault(err error, operationID string) error {
+func controlFault(err error, operationID string) error {
 	if err == nil {
 		return nil
 	}
 	if fault, ok := AsFault(err); ok {
+		if operationID != "" && fault.OperationID == "" {
+			copy := *fault
+			copy.OperationID = operationID
+			copy.cause = err
+			return &copy
+		}
 		return fault
 	}
 	var pathError *PathError
 	if errors.As(err, &pathError) {
-		return &Fault{Code: pathError.Code, Message: "Workspace 路径不可用", Status: 400, OperationID: operationID}
+		return &Fault{Code: pathError.Code, Message: "Workspace 路径不可用", OperationID: operationID, cause: err}
 	}
 	var classified *foundation.Error
 	if !errors.As(err, &classified) {
-		return &Fault{Code: "WORKSPACE_CONTROL_UNAVAILABLE", Message: "Workspace 控制服务暂不可用", Retryable: true, Status: 503, OperationID: operationID}
+		return &Fault{Code: "WORKSPACE_CONTROL_UNAVAILABLE", Message: "Workspace 控制服务暂不可用", Retryable: true, OperationID: operationID, cause: err}
 	}
-	status := 500
 	message := "Workspace 控制操作失败"
 	switch classified.Kind {
 	case foundation.ErrorInvalidInput:
-		status, message = 400, "Workspace 控制请求无效"
+		message = "Workspace 控制请求无效"
 	case foundation.ErrorNotFound:
-		status, message = 404, "Workspace 或切换操作不存在"
+		message = "Workspace 或切换操作不存在"
 	case foundation.ErrorVersionConflict:
-		status, message = 409, "Workspace 状态已变化，请重试"
+		message = "Workspace 状态已变化，请重试"
 	case foundation.ErrorPermissionDenied:
-		status, message = 403, "Workspace 目录未获授权"
+		message = "Workspace 目录未获授权"
 	case foundation.ErrorDependencyUnavailable, foundation.ErrorRetryableFailure:
-		status, message = 503, "Workspace 控制依赖暂不可用"
+		message = "Workspace 控制依赖暂不可用"
 	case foundation.ErrorManualRecoveryRequired:
-		status, message = 503, "Workspace 需要人工恢复"
+		message = "Workspace 需要人工恢复"
 	}
-	return &Fault{Code: classified.Code, Message: message, Retryable: classified.Retryable, Status: status, OperationID: operationID}
+	return &Fault{Code: classified.Code, Message: message, Retryable: classified.Retryable, OperationID: operationID, cause: err}
 }

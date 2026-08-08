@@ -34,18 +34,8 @@ const workspacePayload = (id: string): Record<string, unknown> => ({
   name: id === workspaceA ? "Workspace A" : "Workspace B",
   root_path: `/tmp/${id}`,
   status: "active",
+  availability: "available",
   version: 1,
-  git: {
-    present: true,
-    repository_path: `/tmp/${id}`,
-    branch: "main",
-    head: "abc",
-    dirty: false,
-    checked_at: "2026-07-22T00:00:00Z",
-  },
-  warnings: [],
-  created_at: "2026-07-22T00:00:00Z",
-  updated_at: "2026-07-22T00:00:00Z",
 });
 
 const workspaceResponse = (id: string): Response => new Response(JSON.stringify(workspacePayload(id)), {
@@ -735,7 +725,7 @@ describe("EventStoreProvider", () => {
     const requestUrl = request?.[0];
     expect(typeof requestUrl).toBe("string");
     if (typeof requestUrl !== "string") throw new Error("Workspace recovery request URL is not a string");
-    expect(requestUrl).toContain(`/api/v1/workspaces/${workspaceA}`);
+    expect(requestUrl).toContain("/api/v1/workspaces/active");
     expect(request?.[1]?.signal).toBeInstanceOf(AbortSignal);
     expect(order).toEqual(["workspace", "business", "rag", "collections", "collection-exports", "knowledge-health", "graph", "semantic-links"]);
     expect(queryClient.getQueryData(["document-history", workspaceA, "documents"])).toBeUndefined();

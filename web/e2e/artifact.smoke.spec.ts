@@ -1,6 +1,5 @@
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-const workspaceStorageKey = "zhixu.active-workspace-id";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const artifactTitle = "Approved recovery replays durable facts without duplicating provider work.";
 const artifactScope = "Approved recovery replays durable facts without duplicating provider work.";
@@ -29,10 +28,6 @@ const appBaseUrl = requiredUrl("ZHIXU_ARTIFACT_SMOKE_BASE_URL");
 const workspaceId = requiredUuid("ZHIXU_ARTIFACT_SMOKE_WORKSPACE_ID");
 const sourceVersionId = requiredUuid("ZHIXU_ARTIFACT_SMOKE_SOURCE_VERSION_ID");
 const sourceSpanId = requiredUuid("ZHIXU_ARTIFACT_SMOKE_SOURCE_SPAN_ID");
-
-const installWorkspace = async (context: BrowserContext): Promise<void> => {
-  await context.addInitScript(({ key, value }) => window.localStorage.setItem(key, value), { key: workspaceStorageKey, value: workspaceId });
-};
 
 const captureRuntimeIssues = (page: Page, label: string, issues: string[]): void => {
   page.on("console", (message) => {
@@ -158,7 +153,6 @@ const expectPublicationBinding = (value: Record<string, unknown>, artifact: Reco
 
 test("Artifact 在真实 API/Worker/Vite 下完成隔离草稿、导出和 Publish Proposal 的桌面与移动 smoke", async ({ browser, page }) => {
   const runtimeIssues: string[] = [];
-  await installWorkspace(page.context());
   captureRuntimeIssues(page, "desktop", runtimeIssues);
 
   await page.goto("/artifacts");
@@ -310,7 +304,6 @@ test("Artifact 在真实 API/Worker/Vite 下完成隔离草稿、导出和 Publi
   await assertNoHorizontalOverflow(page);
 
   const mobileContext = await browser.newContext({ baseURL: appBaseUrl, viewport: { width: 390, height: 844 } });
-  await installWorkspace(mobileContext);
   const mobilePage = await mobileContext.newPage();
   captureRuntimeIssues(mobilePage, "mobile", runtimeIssues);
   try {

@@ -127,8 +127,13 @@ loopback 端口；代理只接受 Docker bridge gateway 转发的流量，拒绝
 6. 接收流量。
 
 开发 launcher 在 PostgreSQL healthy 后，使用 `compose run --rm --no-deps -T` 依次执行模型密钥初始化与迁移；
-完成即退出的 one-shot 不进入 `compose up --wait`。普通重复 `./zhixu up` 采用 Compose 差异驱动启动，镜像和配置未变时
-不强制替换 API/Worker；只有应用 desired model revision 的 `./zhixu restart` 强制重建候选与 steady runtime。
+完成即退出的 one-shot 不进入 `compose up --wait`。随后 launcher 调用一次性 `zhixu-workspacectl`，从首次
+`--workspace` 参数或受保护的上次成功 selection 重建 exact grant，并通过持久化切换状态机恢复/激活 API 与 Worker。
+该命令完成后退出；Docker Web/API 固定发布到 `127.0.0.1:${ZHIXU_HTTP_PORT:-8080}`，不依赖宿主机常驻代理。
+稳态 `app`、容器内入口 `proxy` 和 `worker` 对异常退出使用 `on-failure`；prepared candidate 禁止自动重启，
+其失败仍由 Workspace 或模型切换状态机恢复/回滚。
+launcher 在 `.zhixu/control-instance-id` 保存一个 `0600` 的稳定非密钥 UUID，作为数据库幂等命名空间；每次一次性
+命令另生成瞬时 lease owner。该 UUID 不进入浏览器、URL 或业务 API，并在 `down`/`reset` 后继续保留。
 
 ## 8. Readiness
 
@@ -284,7 +289,8 @@ modelctl。Compose 不读取 `.env` 中的旧模型身份或 API Key；static En
 
 无设置时 revision 0 是 canonical disabled，基础 API、Worker、Keyword Search 和 Settings 仍可 ready。
 Key 缺失、密文损坏或 Provider 预检失败时模型能力 fail closed，active 保持 previous，日志只报告稳定错误码。
-`./zhixu down` 保留 PostgreSQL、模型密钥和 Workspace；只有显式确认的 `./zhixu reset` 删除 Compose volumes。
+`./zhixu down` 保留 PostgreSQL、模型密钥、Workspace selection 和宿主机文件，只撤销派生 grant；只有显式确认的
+`./zhixu reset` 删除 Compose volumes、selection 和 grant，保留 launcher control instance identity，仍不删除宿主机 Workspace 文件。
 
 ## 10. 升级
 
@@ -357,11 +363,14 @@ prepared 失败或 drain timeout 时必须 abort/recover 到 previous active；�
 环境完成一轮验证，后续发布仍需重新执行：
 
 ```bash
-docker compose --project-name zhixu -f deploy/compose.yml --env-file .env.example config --quiet
+docker compose --project-name zhixu --profile workspace-runtime --profile modelctl \
+  -f deploy/compose.yml --env-file .env.example config --quiet
 docker build -f deploy/Dockerfile -t zhixu:local .
-docker compose --project-name zhixu -f deploy/compose.yml --env-file .env.example up -d --build --wait
+./zhixu up --workspace /absolute/path/to/knowledge
+# 后续启动可直接执行 ./zhixu up；低频切换使用 ./zhixu workspace switch /other/absolute/path
 curl -fsS http://127.0.0.1:8080/readyz
-docker compose --project-name zhixu -f deploy/compose.yml --env-file .env.example exec -T worker \
+docker compose --project-name zhixu --profile workspace-runtime \
+  -f deploy/compose.yml --env-file .env.example exec -T worker \
   wget -q -O - http://127.0.0.1:8081/readyz
 ./zhixu down
 ```

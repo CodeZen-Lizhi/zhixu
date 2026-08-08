@@ -1,5 +1,3 @@
-import { notifyRuntimeAccessInvalidation } from "../shared/runtime-access-invalidation";
-
 export type AuthCapability =
   | "READ_LOCAL"
   | "READ_EXTERNAL"
@@ -257,9 +255,6 @@ export const authFetch = async (path: string, init: RequestInit = {}): Promise<R
     if (csrf !== undefined) headers.set("X-CSRF-Token", csrf);
   }
   const response = await fetch(`${apiBaseUrl}${path}`, { ...init, headers, credentials: "include" });
-  if (response.headers.get("X-Zhixu-Runtime-Status") === "unavailable") {
-    notifyRuntimeAccessInvalidation();
-  }
   if (response.status === 401 && path !== "/api/v1/auth/sessions") {
     invalidateAuthSession();
   }

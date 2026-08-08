@@ -24,8 +24,8 @@ TTL/cleanup 与下载 Audit；附件 ZIP 从固定 `attachments/` 生成，使�
 AC-33 已由 Markdown、领域 Metadata JSON 和真实附件字节闭环关闭。
 M10-02 已交付单用户 Auth、Cookie Session、受限 API Token、CSRF/Origin、Capability Middleware 和 Compose
 启动预检；认证与 Write Authorization 保持两道独立边界，具体可执行契约见 `auth-security.md`。
-Host Controller 已拆分匿名最小 runtime discovery 与受保护 control surface：普通业务路由不依赖 Controller Session，
-但业务代理仍逐请求校验权威 readiness，Workspace Root/Docker mutation 继续保留完整控制授权。
+Docker Web/API 固定通过 IPv4 loopback 发布，宿主机不再运行常驻网页控制进程。Workspace Root/Docker mutation
+由启动器调用的一次性原生命令执行；精确 bind、quiescence、lease、失败回滚和 Workspace ID 隔离保持不变。
 M8-01 已交付 Workspace 隔离的 Artifact/Revision、证据复核章节生成、受控 Markdown 导出和
 `PUBLISH_ARTIFACT` Proposal；外部副作用由持久 reservation 与 receipt/side-fact 原子闭合保护。
 M8-02 补充 Review Deck/Card、服务端评分、冻结 FSRS/Scorer version、Review-only Session 边界、严格 due 投影和
@@ -81,7 +81,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
 | [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
 | [进程配置加载契约](./config-loading.md) | 实例化 Viper、validator、YAML/env 严格边界、process profile、Secret 与 Rollout 归属 | defaults/YAML/env 迁移已锁定；[维护者总览](../../../docs/architecture/configuration.md) 已同步，无全局 Viper、热更新或数据库 Rollout 状态读取 |
-| [宿主机 Workspace 精确授权契约](./workspace-root-grant.md) | Host Controller、匿名 runtime discovery、不可变 Root identity、单 Grant 状态机、exact bind 与浏览器运行边界 | 普通业务路由与 Controller Session 解耦；Root/Docker 控制仍受保护，运行时只允许 API/Worker 精确 source=target 授权 |
+| [宿主机 Workspace 精确授权契约](./workspace-root-grant.md) | 一次性 Workspace Control、不可变 Root identity、单 Grant 状态机、exact bind 与 Docker 固定入口 | Root/Docker 控制由本机命令保护；运行时只允许 API/Worker 精确 source=target 授权，Web 以 Active Workspace API 为事实源 |
 | [模型设置与开发运行时契约](./model-settings-runtime.md) | desired/active/applied revision、AEAD、冻结 Model Runtime、受控 restart 与 Docker 生命周期 | managed Settings 与开发一键启动的实现和真实验收门禁 |
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker/Web 门禁 | M7-04 与遗留收口已验证；下游 owner executor、Document/Eval impact 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
@@ -107,7 +107,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 5. 只有 Composition Root 读取配置并构造 Adapter；领域模块不自行创建数据库、模型或 Git 客户端。
 6. 修改 Export Job、结果文件、下载、清理或 Collection Export UI 时，先阅读 [`export-contract.md`](./export-contract.md)；
    不把附件、`EVALUATION_JSON`、`AUDIT_JSON` 或 AC-33 全量完成推入 M9-03。
-7. 修改 Docker Workspace 路径、Controller、Registry/Active/runtime grant 或启动器时，先阅读
+7. 修改 Docker Workspace 路径、一次性 Workspace control、Registry/Active/runtime grant 或启动器时，先阅读
    [`workspace-root-grant.md`](./workspace-root-grant.md)；禁止恢复父目录映射、`/workspace` target 或 Docker socket。
 
 ## 实现边界

@@ -12,6 +12,12 @@ describe("clearWorkspaceRuntimeState", () => {
       queryClient.setQueryData([root, workspaceId, "detail"], root);
       queryClient.setQueryData([root, otherWorkspaceId, "detail"], root);
     }
+    queryClient.setQueryData(["settings", "git-sync", workspaceId, "status"], "alpha-settings");
+    queryClient.setQueryData(["settings", "git-sync", otherWorkspaceId, "status"], "beta-settings");
+    queryClient.getMutationCache().build(queryClient, {
+      mutationKey: ["business", workspaceId, "draft"],
+      mutationFn: () => Promise.resolve(undefined),
+    });
     const cancel = vi.spyOn(queryClient, "cancelQueries");
     const remove = vi.spyOn(queryClient, "removeQueries");
 
@@ -21,16 +27,15 @@ describe("clearWorkspaceRuntimeState", () => {
 
     await clearWorkspaceRuntimeState(queryClient, workspaceId);
 
-    expect(cancel.mock.calls.map(([filters]) => filters?.queryKey)).toEqual(
-      workspaceQueryRoots.map((root) => [root, workspaceId]),
-    );
-    expect(remove.mock.calls.map(([filters]) => filters?.queryKey)).toEqual(
-      workspaceQueryRoots.map((root) => [root, workspaceId]),
-    );
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledOnce();
     const lastCancelOrder = Math.max(...cancel.mock.invocationCallOrder);
     const firstRemoveOrder = Math.min(...remove.mock.invocationCallOrder);
     expect(lastCancelOrder).toBeLessThan(firstRemoveOrder);
     expect(queryClient.getQueryData(["artifacts", workspaceId, "detail"])).toBeUndefined();
     expect(queryClient.getQueryData(["artifacts", otherWorkspaceId, "detail"])).toBe("artifacts");
+    expect(queryClient.getQueryData(["settings", "git-sync", workspaceId, "status"])).toBeUndefined();
+    expect(queryClient.getQueryData(["settings", "git-sync", otherWorkspaceId, "status"])).toBe("beta-settings");
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
   });
 });

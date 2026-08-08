@@ -32,6 +32,10 @@ type listService interface {
 	ListSourceVersions(context.Context, domain.SourceVersionListQuery) ([]domain.SourceVersionListItem, bool, error)
 }
 
+type activeService interface {
+	GetActiveWorkspace(context.Context) (domain.Workspace, error)
+}
+
 // Handler 负责 Workspace 请求解析、响应编码和错误映射。
 type Handler struct{ service Service }
 
@@ -41,6 +45,7 @@ func NewHandler(service Service) *Handler { return &Handler{service: service} }
 // Routes 注册 Workspace 资源路由。
 func (h *Handler) Routes(router chi.Router) {
 	router.Post("/workspaces", h.create)
+	router.Get("/workspaces/active", h.active)
 	router.Get("/workspaces/{workspaceID}", h.detail)
 	router.Post("/workspaces/{workspaceID}/scan", h.scan)
 	router.Get("/workspaces/{workspaceID}/source-versions", h.listSourceVersions)
@@ -238,6 +243,15 @@ type workspaceResponse struct {
 	UpdatedAt string      `json:"updated_at"`
 }
 
+type activeWorkspaceResponse struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	RootPath     string `json:"root_path"`
+	Status       string `json:"status"`
+	Availability string `json:"availability"`
+	Version      int64  `json:"version"`
+}
+
 type gitResponse struct {
 	Present        bool   `json:"present"`
 	RepositoryPath string `json:"repository_path"`
@@ -282,6 +296,24 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, toWorkspaceResponse(result))
+}
+
+func (h *Handler) active(w http.ResponseWriter, r *http.Request) {
+	if h == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "WORKSPACE_SERVICE_UNAVAILABLE", "Workspace 服务暂不可用", true, nil)
+		return
+	}
+	service, ok := h.service.(activeService)
+	if !ok {
+		writeProblem(w, http.StatusServiceUnavailable, "WORKSPACE_SERVICE_UNAVAILABLE", "Workspace 服务暂不可用", true, nil)
+		return
+	}
+	workspace, err := service.GetActiveWorkspace(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toActiveWorkspaceResponse(workspace))
 }
 
 func (h *Handler) detail(w http.ResponseWriter, r *http.Request) {
@@ -336,6 +368,13 @@ func toWorkspaceResponse(result application.WorkspaceResult) workspaceResponse {
 		CreatedAt: workspace.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
 		UpdatedAt: workspace.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
 		Git:       gitResponse{Present: result.Git.Present, RepositoryPath: result.Git.RepositoryPath, Branch: result.Git.Branch, Head: result.Git.Head, Dirty: result.Git.Dirty, CheckedAt: workspace.Git.CheckedAt.UTC().Format("2006-01-02T15:04:05.000Z07:00")},
+	}
+}
+
+func toActiveWorkspaceResponse(workspace domain.Workspace) activeWorkspaceResponse {
+	return activeWorkspaceResponse{
+		ID: string(workspace.ID), Name: workspace.Name, RootPath: workspace.RootPath,
+		Status: string(workspace.Status), Availability: string(workspace.Availability), Version: workspace.Version,
 	}
 }
 

@@ -373,6 +373,85 @@
         }
       }
     },
+    "/api/v1/workspaces/active": {
+      "get": {
+        "operationId": "getActiveWorkspace",
+        "x-required-capability": "READ_LOCAL",
+        "description": "Returns the unique active Workspace only after its current root grant has been verified. This operation never creates, opens, or switches a Workspace root.",
+        "responses": {
+          "200": {
+            "description": "The unique authorized active Workspace bootstrap projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActiveWorkspace"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Business authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "READ_LOCAL is missing or the current root grant does not authorize the active Workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active Workspace is available.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "The method is not supported.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The active Workspace projection or root grant is inconsistent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Workspace, database, or root grant dependency unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{workspace_id}": {
       "parameters": [
         {
@@ -13091,6 +13170,48 @@
           "checked_at": {
             "type": "string",
             "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ActiveWorkspace": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "root_path",
+          "status",
+          "availability",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "root_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "const": "active"
+          },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "available",
+              "unavailable",
+              "migration_required"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
           }
         },
         "additionalProperties": false

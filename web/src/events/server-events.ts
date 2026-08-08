@@ -1,6 +1,4 @@
 import { invalidateAuthSession } from "../api/auth";
-import { notifyRuntimeAccessInvalidation } from "../shared/runtime-access-invalidation";
-
 export type ServerEventResource =
   | "conversation"
   | "question"
@@ -604,9 +602,6 @@ export const connectServerEvents = (
           { headers, signal: attemptController.signal, credentials: "include" },
         );
         if (!response.ok) {
-          if (response.headers.get("X-Zhixu-Runtime-Status") === "unavailable") {
-            notifyRuntimeAccessInvalidation();
-          }
           if (response.status === 401) {
             try {
               invalidateAuthSession();

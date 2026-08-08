@@ -4,10 +4,24 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const workspaceId = "10000000-0000-4000-8000-000000000002";
-const workspaceState = vi.hoisted(() => ({ id: "10000000-0000-4000-8000-000000000002" }));
+const workspaceState = vi.hoisted(() => ({
+  id: "10000000-0000-4000-8000-000000000002",
+  active: {
+    status: "ready",
+    workspace: {
+      id: "10000000-0000-4000-8000-000000000002",
+      name: "知序产品知识库",
+      rootPath: "/tmp/workspace",
+      status: "active" as const,
+      availability: "available" as const,
+      version: 1,
+    },
+    error: undefined as Error | undefined,
+    refresh: vi.fn(() => Promise.resolve()),
+  },
+}));
 const api = vi.hoisted(() => ({
   getAuthoringOverview: vi.fn(),
-  getWorkspace: vi.fn(),
   listProposals: vi.fn(),
   listSourceVersions: vi.fn(),
   listWorkflows: vi.fn(),
@@ -19,17 +33,13 @@ vi.mock("../../app/active-workspace", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/active-workspace")>()),
   useActiveWorkspaceId: () => workspaceState.id,
 }));
+vi.mock("../../app/WorkspaceCacheBoundary", () => ({ useActiveWorkspace: () => workspaceState.active }));
 vi.mock("../../api/business", async (importOriginal) => ({
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   ...(await importOriginal<typeof import("../../api/business")>()),
   listProposals: api.listProposals,
   listSourceVersions: api.listSourceVersions,
   listWorkflows: api.listWorkflows,
-}));
-vi.mock("../../api/workspace", async (importOriginal) => ({
-  // eslint-disable-next-line @typescript-eslint/consistent-type-imports
-  ...(await importOriginal<typeof import("../../api/workspace")>()),
-  getWorkspace: api.getWorkspace,
 }));
 vi.mock("../../api/authoring", async (importOriginal) => ({
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
@@ -61,17 +71,10 @@ const source = (id: string, path: string, capturedAt = new Date().toISOString())
 
 beforeEach(() => {
   workspaceState.id = workspaceId;
-  api.getWorkspace.mockResolvedValue({
-    id: workspaceId,
-    name: "知序产品知识库",
-    rootPath: "/tmp/workspace",
-    status: "active",
-    version: 1,
-    git: { present: true, repositoryPath: "/tmp/workspace", branch: "main", head: "abc", dirty: false, checkedAt: "2026-07-22T00:00:00Z" },
-    warnings: [],
-    createdAt: "2026-07-22T00:00:00Z",
-    updatedAt: "2026-07-22T00:00:00Z",
-  });
+  workspaceState.active.status = "ready";
+  workspaceState.active.workspace.id = workspaceId;
+  workspaceState.active.workspace.name = "知序产品知识库";
+  workspaceState.active.workspace.rootPath = "/tmp/workspace";
   api.listProposals.mockResolvedValue({ items: [] });
   api.listSourceVersions.mockResolvedValue({ items: [] });
   api.listWorkflows.mockResolvedValue({ items: [] });
@@ -86,7 +89,6 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  api.getWorkspace.mockReset();
   api.listProposals.mockReset();
   api.listSourceVersions.mockReset();
   api.listWorkflows.mockReset();
@@ -115,7 +117,6 @@ describe("DashboardPage", () => {
     expect(boundaryTrigger).toHaveAttribute("aria-expanded", "true");
     expect(boundary).toBeVisible();
 
-    expect(api.getWorkspace).not.toHaveBeenCalled();
     expect(api.listProposals).not.toHaveBeenCalled();
     expect(api.listSourceVersions).not.toHaveBeenCalled();
     expect(api.listWorkflows).not.toHaveBeenCalled();
@@ -174,7 +175,7 @@ describe("DashboardPage", () => {
     const dashboardHeading = screen.getByRole("heading", { name: "今天的知识桌面" });
     expect(dashboardHeading).toBeInTheDocument();
     const workspaceSummary = dashboardHeading.parentElement?.querySelector("p");
-    await waitFor(() => expect(workspaceSummary).toHaveTextContent("知序产品知识库 · main · 工作树干净"));
+    await waitFor(() => expect(workspaceSummary).toHaveTextContent("知序产品知识库 · 当前目录可用"));
     expect(workspaceSummary).not.toHaveAttribute("title");
     expect(screen.queryByText("/tmp/workspace")).not.toBeInTheDocument();
     expect(screen.queryByTitle("/tmp/workspace")).not.toBeInTheDocument();

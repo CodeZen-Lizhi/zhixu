@@ -1,6 +1,5 @@
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-const workspaceStorageKey = "zhixu.active-workspace-id";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const requiredEnvironment = (name: string): string => {
@@ -32,12 +31,6 @@ const graphPath = (): string => {
     direction: "BOTH",
   });
   return `/graph?${parameters.toString()}`;
-};
-
-const installWorkspace = async (context: BrowserContext): Promise<void> => {
-  await context.addInitScript(({ key, workspaceId }) => {
-    window.localStorage.setItem(key, workspaceId);
-  }, { key: workspaceStorageKey, workspaceId: fixture.workspaceId });
 };
 
 const captureRuntimeIssues = (page: Page, label: string, issues: string[]): void => {
@@ -130,7 +123,6 @@ const assertDecisionKeyboardFlow = async (page: Page): Promise<void> => {
 
 test("真实 Topic scan 在桌面与移动端恢复 Candidate 且不污染正式 Graph", async ({ browser, page }) => {
   const runtimeIssues: string[] = [];
-  await installWorkspace(page.context());
   captureRuntimeIssues(page, "desktop", runtimeIssues);
 
   let scanPosts = 0;
@@ -165,7 +157,6 @@ test("真实 Topic scan 在桌面与移动端恢复 Candidate 且不污染正式
     baseURL,
     viewport: { width: 390, height: 844 },
   });
-  await installWorkspace(mobileContext);
   const mobilePage = await mobileContext.newPage();
   captureRuntimeIssues(mobilePage, "mobile", runtimeIssues);
   let mobileScanPosts = 0;

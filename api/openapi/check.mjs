@@ -9,6 +9,14 @@ if (document.openapi !== "3.1.0") {
   throw new Error(`expected OpenAPI 3.1.0, got ${document.openapi}`);
 }
 for (const marker of [
+  '    "/api/v1/workspaces/active": {',
+  '      "ActiveWorkspace": {',
+]) {
+  if (openAPISource.split(marker).length !== 2) {
+    throw new Error(`Active Workspace OpenAPI key must occur exactly once: ${marker.trim()}`);
+  }
+}
+for (const marker of [
   '    "/api/v1/health/issues/{issue_id}/observations": {',
   '    "/api/v1/health/issues/{issue_id}/decisions": {',
   '      "HealthIssueObservationPage": {',
@@ -148,6 +156,7 @@ const requiredOperations = [
   ["/api/v1/settings/models", "put", "200"],
   ["/api/v1/settings/models/test", "post", "200"],
   ["/api/v1/workspaces", "post", "201"],
+  ["/api/v1/workspaces/active", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}", "get", "200"],
   ["/api/v1/workspaces/{workspace_id}/scan", "post", "200"],
   ["/api/v1/workspaces/{workspace_id}/captures", "post", "201"],
@@ -259,6 +268,58 @@ for (const [path, method, successResponse] of requiredOperations) {
   for (const response of [successResponse, "405"]) {
     if (!operation.responses?.[response]) throw new Error(`missing ${response} response for ${method.toUpperCase()} ${path}`);
   }
+}
+const activeWorkspacePath = "/api/v1/workspaces/active";
+const activeWorkspaceOperation = document.paths?.[activeWorkspacePath]?.get;
+if (activeWorkspaceOperation?.operationId !== "getActiveWorkspace" ||
+    activeWorkspaceOperation.security !== undefined ||
+    activeWorkspaceOperation["x-required-capability"] !== "READ_LOCAL" ||
+    activeWorkspaceOperation.requestBody !== undefined ||
+    (activeWorkspaceOperation.parameters ?? []).length !== 0) {
+  throw new Error("GET /api/v1/workspaces/active must remain a parameter-free READ_LOCAL business operation");
+}
+if (activeWorkspaceOperation.responses?.["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ActiveWorkspace") {
+  throw new Error("GET /api/v1/workspaces/active must use the dedicated ActiveWorkspace response schema");
+}
+const activeWorkspaceResponseStatuses = Object.keys(activeWorkspaceOperation.responses ?? {}).sort();
+if (activeWorkspaceResponseStatuses.join(",") !== "200,401,403,404,405,409,503") {
+  throw new Error("GET /api/v1/workspaces/active response statuses drifted");
+}
+for (const status of ["401", "403", "404", "405", "409", "503"]) {
+  if (activeWorkspaceOperation.responses?.[status]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+    throw new Error(`GET /api/v1/workspaces/active ${status} must return Problem`);
+  }
+}
+const activeWorkspacePathPosition = openAPISource.indexOf('    "/api/v1/workspaces/active": {');
+const workspaceIDPathPosition = openAPISource.indexOf('    "/api/v1/workspaces/{workspace_id}": {');
+if (activeWorkspacePathPosition < 0 || workspaceIDPathPosition < 0 || activeWorkspacePathPosition >= workspaceIDPathPosition) {
+  throw new Error("Active Workspace path must remain before the dynamic Workspace path");
+}
+const activeWorkspaceSchema = document.components?.schemas?.ActiveWorkspace;
+const activeWorkspaceFields = "id,name,root_path,status,availability,version";
+const forbiddenActiveWorkspaceFields = ["git", "warnings", "created_at", "updated_at"];
+if (activeWorkspaceSchema?.type !== "object" ||
+    activeWorkspaceSchema.additionalProperties !== false ||
+    activeWorkspaceSchema.required?.join(",") !== activeWorkspaceFields ||
+    Object.keys(activeWorkspaceSchema.properties ?? {}).join(",") !== activeWorkspaceFields ||
+    forbiddenActiveWorkspaceFields.some((field) => activeWorkspaceSchema.properties?.[field] !== undefined) ||
+    activeWorkspaceSchema.properties?.id?.type !== "string" ||
+    activeWorkspaceSchema.properties?.id?.format !== "uuid" ||
+    activeWorkspaceSchema.properties?.name?.type !== "string" ||
+    activeWorkspaceSchema.properties?.name?.minLength !== 1 ||
+    activeWorkspaceSchema.properties?.root_path?.type !== "string" ||
+    activeWorkspaceSchema.properties?.root_path?.minLength !== 1 ||
+    activeWorkspaceSchema.properties?.status?.type !== "string" ||
+    activeWorkspaceSchema.properties?.status?.const !== "active" ||
+    activeWorkspaceSchema.properties?.availability?.type !== "string" ||
+    activeWorkspaceSchema.properties?.availability?.enum?.join(",") !== "available,unavailable,migration_required" ||
+    activeWorkspaceSchema.properties?.version?.type !== "integer" ||
+    activeWorkspaceSchema.properties?.version?.minimum !== 1) {
+  throw new Error("ActiveWorkspace must remain the exact six-field bootstrap projection");
+}
+const workspaceSchema = document.components?.schemas?.Workspace;
+if (workspaceSchema?.required?.includes("availability") || workspaceSchema?.properties?.availability !== undefined) {
+  throw new Error("Workspace detail/create schema must not absorb the ActiveWorkspace availability field");
 }
 for (const [path, method] of [
   ["/api/v1/workflows/{run_id}", "get"],
@@ -585,6 +646,7 @@ for (const schema of [
   "APITokenPage",
   "RAGCapabilityStatus",
   "CreateWorkspaceRequest",
+  "ActiveWorkspace",
   "Workspace",
   "WorkspaceScan",
   "IngestionRequest",

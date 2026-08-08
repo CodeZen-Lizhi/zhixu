@@ -47,6 +47,8 @@
   必须按实际列/约束检测旧形态，在单一事务内 repair 或 fail closed，不得改写已发布迁移并假设会重跑。
 - launcher 必须先等待 PostgreSQL healthy，再用 `compose run --rm --no-deps -T` 顺序执行 Key 初始化和迁移；任一步
   非零退出都原样终止。完成即退出的 one-shot 不得交给 `compose up --wait` 或与 `compose wait` 竞态。
+- API 与 Worker 即使依赖 migration 完成，也必须直接声明 `postgres: service_healthy`；Compose 可能复用已完成的
+  migration one-shot，不能把 migration 完成当作当前 PostgreSQL 健康状态。
 - 普通重复 `up` 使用 Compose 的差异检测，不强制重建未变化的 API/Worker；受控 `restart` 仍必须强制替换
   prepared 与 steady runtime，避免候选启动参数或旧实例被误用。
 - relay 使用 `network_mode: service:app|worker` 时不拥有独立网络配置；host-gateway 等映射只配置在 app/worker

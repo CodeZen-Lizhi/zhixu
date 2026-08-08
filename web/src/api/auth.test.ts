@@ -13,7 +13,6 @@ import {
   setCsrfToken,
   subscribeAuthInvalidation,
 } from "./auth";
-import { subscribeRuntimeAccessInvalidation } from "../shared/runtime-access-invalidation";
 
 const sessionId = "10000000-0000-4000-8000-000000000001";
 const tokenId = "10000000-0000-4000-8000-000000000002";
@@ -187,17 +186,6 @@ describe("auth API boundary", () => {
 
     expect(getCsrfToken()).toBeUndefined();
     expect(listener).toHaveBeenCalledOnce();
-    unsubscribe();
-  });
-
-  it("业务代理明确撤销 runtime 时通知共享运行时边界", async () => {
-    const invalidated = vi.fn();
-    const unsubscribe = subscribeRuntimeAccessInvalidation(invalidated);
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 503, headers: { "X-Zhixu-Runtime-Status": "unavailable" } }));
-
-    await authFetch("/api/v1/workspaces");
-
-    expect(invalidated).toHaveBeenCalledOnce();
     unsubscribe();
   });
 

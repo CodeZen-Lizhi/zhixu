@@ -1,6 +1,5 @@
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-const workspaceStorageKey = "zhixu.active-workspace-id";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const requiredUuid = (name: string): string => {
@@ -27,12 +26,6 @@ const fixture = {
   workspaceId: requiredUuid("ZHIXU_COLLECTION_HEALTH_SMOKE_WORKSPACE_ID"),
   collectionId: requiredUuid("ZHIXU_COLLECTION_HEALTH_SMOKE_COLLECTION_ID"),
   initialScanId: requiredUuid("ZHIXU_COLLECTION_HEALTH_SMOKE_SCAN_ID"),
-};
-
-const installWorkspace = async (context: BrowserContext): Promise<void> => {
-  await context.addInitScript(({ key, workspaceId }) => {
-    window.localStorage.setItem(key, workspaceId);
-  }, { key: workspaceStorageKey, workspaceId: fixture.workspaceId });
 };
 
 const captureRuntimeIssues = (page: Page, label: string, issues: string[]): void => {
@@ -137,7 +130,6 @@ const assertHealthIssueEvidenceAndDecision = async (page: Page): Promise<void> =
 
 test("Collection 与 Knowledge Health 在真实 API/Worker/Vite 下完成桌面和移动 smoke", async ({ browser, page }) => {
   const runtimeIssues: string[] = [];
-  await installWorkspace(page.context());
   captureRuntimeIssues(page, "desktop", runtimeIssues);
 
   await page.goto("/collections");
@@ -157,7 +149,6 @@ test("Collection 与 Knowledge Health 在真实 API/Worker/Vite 下完成桌面�
     baseURL: appBaseUrl,
     viewport: { width: 390, height: 844 },
   });
-  await installWorkspace(mobileContext);
   const mobilePage = await mobileContext.newPage();
   captureRuntimeIssues(mobilePage, "mobile", runtimeIssues);
   try {

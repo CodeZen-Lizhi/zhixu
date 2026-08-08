@@ -7,6 +7,15 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
+const (
+	// ErrorCodeActiveWorkspaceNotFound means no Workspace is currently active.
+	ErrorCodeActiveWorkspaceNotFound = "ACTIVE_WORKSPACE_NOT_FOUND"
+	// ErrorCodeActiveWorkspaceNotUnique means the persisted active projection cannot be trusted.
+	ErrorCodeActiveWorkspaceNotUnique = "ACTIVE_WORKSPACE_NOT_UNIQUE"
+	// ErrorCodeActiveWorkspaceBindingInvalid means an adapter returned a non-active or incomplete binding.
+	ErrorCodeActiveWorkspaceBindingInvalid = "ACTIVE_WORKSPACE_BINDING_INVALID"
+)
+
 // SourceVersionListItem 是 Inbox 使用的不可变 Source Version 摘要。
 type SourceVersionListItem struct {
 	ID              foundation.ID
@@ -39,6 +48,12 @@ type SourceVersionListQuery struct {
 // SourceVersionListRepository 提供 Workspace 绑定的稳定 Source Version 分页。
 type SourceVersionListRepository interface {
 	ListSourceVersions(context.Context, SourceVersionListQuery) ([]SourceVersionListItem, bool, error)
+}
+
+// ActiveWorkspaceRepository returns the only Workspace currently marked active.
+// Implementations must fail closed when the persisted active projection is not unique.
+type ActiveWorkspaceRepository interface {
+	GetActiveWorkspace(context.Context) (Workspace, error)
 }
 
 // Repository persists Workspace mappings and immutable Source Versions without

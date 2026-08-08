@@ -1,12 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
 import { Archive, Bot, ChevronDown, FolderCog, ServerCog, ShieldCheck } from "lucide-react";
 import { useEffect } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
-import { getWorkspace } from "../../api/workspace";
-import { setActiveWorkspaceId, useActiveWorkspaceId } from "../../app/active-workspace";
+import { useActiveWorkspace } from "../../app/WorkspaceCacheBoundary";
+import { useActiveWorkspaceId } from "../../app/active-workspace";
 import { useAuth } from "../../app/auth-context";
-import { runtimeMode } from "../../app/runtime-mode";
 import { Badge, Button, DropdownMenu, DropdownMenuItem, EmptyState, PageHeader, UnavailableState } from "../../shared/ui";
 import { SystemStatusPage } from "../system-status/SystemStatusPage";
 import { ApiTokenSettings } from "./ApiTokenSettings";
@@ -27,30 +25,25 @@ type SettingsSection = typeof settingsSections[number]["id"];
 const isSettingsSection = (value: string | null): value is SettingsSection =>
   settingsSections.some((section) => section.id === value);
 
-const WorkspaceSettingsPanel = ({ workspaceId }: { workspaceId: string }) => {
-  const navigate = useNavigate();
-  const workspace = useQuery({
-    queryKey: ["workspace", workspaceId],
-    queryFn: ({ signal }) => getWorkspace(workspaceId, signal),
-    enabled: workspaceId !== "",
-    retry: false,
-  });
-  const reconnect = (): void => {
-    if (runtimeMode === "direct") setActiveWorkspaceId("");
-    void navigate("/workspace");
-  };
+const availabilityLabel = (availability: string): string => availability === "available" ? "可用" : availability === "migration_required" ? "需要迁移" : "暂不可用";
+const availabilityTone = (availability: string): "success" | "warning" | "danger" => availability === "available" ? "success" : availability === "migration_required" ? "warning" : "danger";
+
+const WorkspaceSettingsPanel = () => {
+  const { status, workspace, error, refresh } = useActiveWorkspace();
 
   return <section className="settings-section" aria-labelledby="workspace-settings-title">
-    <header className="settings-section__header"><div><h2 id="workspace-settings-title">工作区</h2><p>当前目录与 Git 状态。</p></div>{workspaceId !== "" ? <Button variant="secondary" size="sm" onClick={reconnect}>切换工作区</Button> : null}</header>
-    {workspaceId === "" ? <EmptyState title="尚未连接工作区" description="连接本地目录后即可使用知识与创作功能。" action={<Button asChild variant="primary"><Link to="/workspace">连接工作区</Link></Button>} /> : workspace.isPending ? <p role="status">正在读取工作区…</p> : workspace.isError ? <div className="ui-state ui-state--error" role="alert"><strong>工作区不可用</strong><p>{workspace.error.message}</p><Button variant="secondary" size="sm" onClick={reconnect}>重新连接</Button></div> : <>
+    <header className="settings-section__header"><div><h2 id="workspace-settings-title">工作区</h2><p>当前 Active Workspace 的只读投影。</p></div><Button variant="secondary" size="sm" onClick={() => void refresh()}>重新读取</Button></header>
+    {status === "loading" ? <p role="status">正在读取当前 Workspace…</p> : status === "error" ? <div className="ui-state ui-state--error" role="alert"><strong>工作区信息不可用</strong><p>{error?.message ?? "Active Workspace API 暂不可用。"}</p></div> : workspace === undefined ? <EmptyState title="尚未激活工作区" description="请在本机命令行执行启动命令指定知识库目录。" action={<Button asChild variant="primary"><Link to="/workspace">查看命令</Link></Button>} /> : <>
       <dl className="settings-facts">
-        <div><dt>名称</dt><dd>{workspace.data.name}</dd></div>
-        <div><dt>宿主机目录</dt><dd className="mono">{workspace.data.rootPath}</dd></div>
-        <div><dt>连接状态</dt><dd><Badge tone="success">{workspace.data.status}</Badge></dd></div>
-        <div><dt>Workspace ID</dt><dd className="mono">{workspace.data.id}</dd></div>
+        <div><dt>名称</dt><dd>{workspace.name}</dd></div>
+        <div><dt>宿主机目录</dt><dd className="mono">{workspace.rootPath}</dd></div>
+        <div><dt>连接状态</dt><dd><Badge tone="success">{workspace.status}</Badge></dd></div>
+        <div><dt>可用性</dt><dd><Badge tone={availabilityTone(workspace.availability)}>{availabilityLabel(workspace.availability)}</Badge></dd></div>
+        <div><dt>Workspace ID</dt><dd className="mono">{workspace.id}</dd></div>
+        <div><dt>版本</dt><dd className="mono">{workspace.version}</dd></div>
       </dl>
       <div className="settings-divider" />
-      <div className="settings-subsection"><h3>Git</h3><dl className="settings-facts settings-facts--compact"><div><dt>仓库</dt><dd>{workspace.data.git.present ? "已检测" : "未检测到"}</dd></div><div><dt>分支</dt><dd>{workspace.data.git.branch || "无分支"}</dd></div><div><dt>工作树</dt><dd><Badge tone={workspace.data.git.dirty ? "danger" : "success"}>{workspace.data.git.dirty ? "有未提交修改" : "干净"}</Badge></dd></div><div><dt>HEAD</dt><dd className="mono">{workspace.data.git.head || "未提供"}</dd></div></dl></div>
+      <div className="settings-subsection"><h3>切换方式</h3><p>请在本机终端执行 <code>./zhixu workspace switch &lt;宿主机绝对目录&gt;</code>。切换完成后刷新本页；网页不会提交根目录。</p></div>
       <div className="settings-section__actions"><Button asChild variant="secondary"><Link to="/inbox">前往资料收件箱</Link></Button></div>
     </>}
   </section>;
@@ -58,7 +51,7 @@ const WorkspaceSettingsPanel = ({ workspaceId }: { workspaceId: string }) => {
 
 const WorkspaceAndGitSettings = () => {
   const workspaceId = useActiveWorkspaceId();
-  return <><WorkspaceSettingsPanel workspaceId={workspaceId} />{workspaceId === "" ? null : <GitRemoteSettingsPanel />}</>;
+  return <><WorkspaceSettingsPanel />{workspaceId === "" ? null : <GitRemoteSettingsPanel />}</>;
 };
 
 export const SettingsPage = () => {

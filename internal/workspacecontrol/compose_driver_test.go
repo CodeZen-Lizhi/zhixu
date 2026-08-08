@@ -1,4 +1,4 @@
-package hostcontroller
+package workspacecontrol
 
 import (
 	"context"
@@ -26,6 +26,7 @@ type fakeCommandRunner struct {
 	model    []byte
 	failOn   string
 	failCode int
+	failErr  error
 }
 
 func (runner *fakeCommandRunner) Run(_ context.Context, executable string, arguments ...string) ([]byte, error) {
@@ -35,6 +36,9 @@ func (runner *fakeCommandRunner) Run(_ context.Context, executable string, argum
 	runner.commands = append(runner.commands, recordedCommand{executable: executable, arguments: copied})
 	joined := strings.Join(arguments, " ")
 	if runner.failOn != "" && strings.Contains(joined, runner.failOn) {
+		if runner.failErr != nil {
+			return nil, runner.failErr
+		}
 		if runner.failCode != 0 {
 			return nil, fakeProcessError(runner.failCode)
 		}
@@ -49,8 +53,6 @@ func (runner *fakeCommandRunner) Run(_ context.Context, executable string, argum
 		return []byte("bbbbbbbbbbbb\n"), nil
 	case len(arguments) >= 2 && arguments[0] == "inspect":
 		return []byte(fmt.Sprintf(`[{"Type":"bind","Source":%q,"Destination":%q,"RW":true},{"Type":"volume","Source":"secret","Destination":"/run/secret","RW":false}]`, runner.grant.Root, runner.grant.Root)), nil
-	case strings.Contains(joined, " port --index 1 app 8080"):
-		return []byte("127.0.0.1:49152\n"), nil
 	default:
 		return nil, nil
 	}
@@ -75,12 +77,8 @@ func TestComposeDriverAppliesOnlyFixedArgvWithoutHostPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewComposeDriver() error: %v", err)
 	}
-	backend, err := driver.ApplyGrant(context.Background(), grant)
-	if err != nil {
+	if err := driver.ApplyGrant(context.Background(), grant); err != nil {
 		t.Fatalf("ApplyGrant() error: %v", err)
-	}
-	if backend.String() != "http://127.0.0.1:49152" {
-		t.Fatalf("backend=%s", backend)
 	}
 	if _, err := os.Stat(filepath.Join(stateDirectory, "grant.yml")); err != nil {
 		t.Fatalf("grant override missing: %v", err)
@@ -89,7 +87,7 @@ func TestComposeDriverAppliesOnlyFixedArgvWithoutHostPath(t *testing.T) {
 	runner.mu.Lock()
 	commands := append([]recordedCommand(nil), runner.commands...)
 	runner.mu.Unlock()
-	if len(commands) < 10 {
+	if len(commands) < 9 {
 		t.Fatalf("recorded %d commands, want complete lifecycle", len(commands))
 	}
 	for _, command := range commands {
@@ -131,7 +129,7 @@ func TestComposeDriverRevokesAfterPostStartFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewComposeDriver() error: %v", err)
 	}
-	if _, err := driver.ApplyGrant(context.Background(), grant); err == nil {
+	if err := driver.ApplyGrant(context.Background(), grant); err == nil {
 		t.Fatal("ApplyGrant() succeeded after firewall failure")
 	} else if fault, ok := AsFault(err); !ok || fault.Code != "WORKSPACE_RUNTIME_FIREWALL_FAILED" {
 		t.Fatalf("ApplyGrant() error=%v before firewall fixture", err)
@@ -166,7 +164,7 @@ func TestComposeDriverRevokesPartialInitialStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewComposeDriver() error: %v", err)
 	}
-	if _, err := driver.ApplyGrant(context.Background(), grant); err == nil {
+	if err := driver.ApplyGrant(context.Background(), grant); err == nil {
 		t.Fatal("ApplyGrant() succeeded after partial startup failure")
 	}
 	runner.mu.Lock()
@@ -177,6 +175,26 @@ func TestComposeDriverRevokesPartialInitialStart(t *testing.T) {
 	}
 	if !strings.Contains(all, "rm --force --stop proxy firewall app-model-relay worker-model-relay app worker") {
 		t.Fatalf("partial startup was not revoked:\n%s", all)
+	}
+}
+
+func TestComposeDriverPreservesCommandCancellation(t *testing.T) {
+	t.Parallel()
+	root := canonicalTestDirectory(t)
+	grant := validatedTestGrant(t, "workspace-driver-cancel", root, 6)
+	runner := &fakeCommandRunner{
+		grant: grant, model: composeFixture(grant, true),
+		failOn: "config --format json", failErr: context.Canceled,
+	}
+	driver, err := NewComposeDriver(ComposeDriverOptions{
+		Executable: "docker", Project: "zhixu", BaseFile: "/repo/compose.yml",
+		OverrideFile: filepath.Join(t.TempDir(), "grant.yml"), EnvFile: "/repo/.env", Runner: runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.ApplyGrant(context.Background(), grant); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ApplyGrant() error=%v", err)
 	}
 }
 
@@ -209,7 +227,7 @@ func TestComposeDriverPreparesBothRealCandidateRolesWithFixedArgv(t *testing.T) 
 			t.Fatalf("host path leaked to candidate argv: %s", joined)
 		}
 		if strings.Contains(joined, "--entrypoint git") {
-			t.Fatalf("Controller invoked Git directly: %s", joined)
+			t.Fatalf("control process invoked Git directly: %s", joined)
 		}
 	}
 	joined := strings.Join(all, "\n")
@@ -289,36 +307,6 @@ func TestComposeDriverMapsCandidateExitCodes(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestComposeDriverRejectsPublicBackend(t *testing.T) {
-	t.Parallel()
-	runner := &fakeCommandRunner{}
-	driver, err := NewComposeDriver(ComposeDriverOptions{
-		Executable: "docker", Project: "zhixu", BaseFile: "/repo/compose.yml",
-		OverrideFile: "/state/grant.yml", EnvFile: "/repo/.env", Runner: runner,
-	})
-	if err != nil {
-		t.Fatalf("NewComposeDriver() error: %v", err)
-	}
-	runner.failOn = "unreachable"
-	runner.model = nil
-	// Override the port response by recording a purpose-specific runner.
-	driver.runner = commandRunnerFunc(func(_ context.Context, _ string, arguments ...string) ([]byte, error) {
-		if strings.Contains(strings.Join(arguments, " "), " port --index 1 app 8080") {
-			return []byte("0.0.0.0:8080\n"), nil
-		}
-		return nil, nil
-	})
-	if _, err := driver.CurrentBackend(context.Background()); err == nil {
-		t.Fatal("CurrentBackend() accepted a public listener")
-	}
-}
-
-type commandRunnerFunc func(context.Context, string, ...string) ([]byte, error)
-
-func (function commandRunnerFunc) Run(ctx context.Context, executable string, arguments ...string) ([]byte, error) {
-	return function(ctx, executable, arguments...)
 }
 
 func canonicalTestDirectory(t *testing.T) string {

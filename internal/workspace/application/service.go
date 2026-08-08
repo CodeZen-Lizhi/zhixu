@@ -235,6 +235,34 @@ func (s *Service) GetWorkspace(ctx context.Context, workspaceID foundation.ID) (
 	if err != nil {
 		return WorkspaceResult{}, err
 	}
+	return s.refreshWorkspaceResult(ctx, workspace)
+}
+
+// GetActiveWorkspace returns the unique active Workspace after the repository
+// has applied the process RootGrantResolver boundary.
+func (s *Service) GetActiveWorkspace(ctx context.Context) (domain.Workspace, error) {
+	if s == nil || s.dependencies.Repository == nil {
+		return domain.Workspace{}, dependencyError("WORKSPACE_SERVICE_UNAVAILABLE")
+	}
+	repository, ok := s.dependencies.Repository.(domain.ActiveWorkspaceRepository)
+	if !ok {
+		return domain.Workspace{}, dependencyError("ACTIVE_WORKSPACE_QUERY_UNAVAILABLE")
+	}
+	workspace, err := repository.GetActiveWorkspace(ctx)
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+	validAvailability := workspace.Availability == domain.WorkspaceAvailabilityAvailable ||
+		workspace.Availability == domain.WorkspaceAvailabilityUnavailable ||
+		workspace.Availability == domain.WorkspaceAvailabilityMigrationRequired
+	if workspace.ID == "" || strings.TrimSpace(workspace.Name) == "" || workspace.RootPath == "" ||
+		workspace.Status != domain.WorkspaceStatusActive || !validAvailability || workspace.Version < 1 {
+		return domain.Workspace{}, foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeActiveWorkspaceBindingInvalid, false, errors.New("active Workspace repository returned an invalid binding"))
+	}
+	return workspace, nil
+}
+
+func (s *Service) refreshWorkspaceResult(ctx context.Context, workspace domain.Workspace) (WorkspaceResult, error) {
 	gitStatus, err := s.dependencies.Git.Status(ctx, workspace.RootPath)
 	if err != nil {
 		return WorkspaceResult{}, err

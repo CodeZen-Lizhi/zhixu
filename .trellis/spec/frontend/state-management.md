@@ -322,73 +322,65 @@ Correct: Bootstrap 只用于一次交换；浏览器身份由 HttpOnly Cookie �
 - canonical filter/query key、Workspace isolation/cleanup、filter cursor reset、显式刷新、Impact/Proposal same-key retry、
   source Event/Report/Proposal 精确失效，以及分析成功不失效 Timeline list。
 
-## Scenario: Host Control 与 Business Runtime State Ownership
+## Scenario: Active Workspace 与 Business Runtime State Ownership
 
 ### 1. Scope / Trigger
 
-- 修改 `web/src/api/controller.ts`、`runtime-access.ts`、`host-control-context.tsx`、
-  `runtime-access-context.tsx`、`App.tsx`、Controller Workspace 页面或 Workspace cache/SSE/Auth 根边界时应用。
+- 修改 Workspace API decoder、`App.tsx`、active Workspace context、Workspace 页面或 Workspace cache/SSE/Auth 根边界时应用。
 
 ### 2. Signatures
 
 ```ts
-getControllerSession(signal?): Promise<ControllerSession>
-getControllerState(signal?): Promise<ControllerState>
-getRuntimeAccess(signal?): Promise<RuntimeAccess>
-startControllerWorkspaceSwitch(request, { stateVersion, idempotencyKey, signal? })
-<HostControlProvider><RuntimeAccessProvider>...</RuntimeAccessProvider></HostControlProvider>
+getActiveWorkspace(signal?): Promise<Workspace>
+<ActiveWorkspaceBoundary>...</ActiveWorkspaceBoundary>
 ```
 
 ### 3. Contracts
 
-- `/control/v1/state` 是 Root、operation 与控制命令前置状态的唯一事实源；只允许控制页面消费。
-- `/host/v1/runtime` 是 Controller 模式业务 Active Workspace 的唯一前端事实源，只公开
-  `waiting|ready|unavailable`、ready Workspace UUID 与有界轮询间隔。它是发现信息，不替代代理逐请求 readiness
-  检查或业务 Auth/Capability。
-- Fragment bootstrap 只在首屏读取一次并立即从 URL 清除；不得写入 Browser Storage。Cookie 不可由 JavaScript 读取，
-  CSRF 只保存在可清除的进程内状态。
-- `HostControlProvider` 只拥有控制 Session、完整控制状态和命令；普通业务路由不得为恢复控制 Session 主动请求
-  `/control/v1/*`。Controller 401 只清控制 CSRF/state，不清仍有效的业务身份或 runtime。
-- `RuntimeAccessProvider` 在非 ready、请求失败或代理返回
-  `X-Zhixu-Runtime-Status: unavailable` 时立即撤销当前 Workspace 并卸载业务树。Workspace A -> B 必须先取消请求、
-  清除 A Query 并关闭 SSE，再发布 B；Abort/epoch 之前的迟到响应不得覆盖新状态。
-- Controller 模式不从 `localStorage` 恢复 Active Workspace，也不响应 storage event；Direct 模式保留既有本地存储行为。
-- `/`、`/workspace` 进入控制边界；其他业务路由先经过 runtime boundary，再由独立 `AuthProvider` 决定访问。
-- command 必须绑定当前 `stateVersion` 与单次 intent 的 idempotency key；未知结果回查 Controller state，不能 optimistic
-  显示成功。两个 Provider 的 poll interval 只消费各自响应的 `poll_after_ms`，卸载必须清理 timer 和 AbortController。
+- `GET /api/v1/workspaces/active` 是浏览器 Active Workspace 的唯一事实源；响应必须由 Workspace API 边界从
+  `unknown` 严格解码并校验 canonical UUID、状态、availability 和版本。
+- 浏览器不从 `localStorage`、URL、旧缓存或 SSE payload 恢复 Active Workspace ID，也不响应 storage event 切换作用域。
+- `ActiveWorkspaceBoundary` 只在业务认证准备完成后读取 Active Workspace；它不选择宿主机路径、不触发 Docker mutation，
+  目录选择和切换只由本机 `zhixu` 命令完成。
+- Workspace A -> B 必须先 abort A 请求、关闭 A SSE、清除 A Query/cache/草稿投影，再发布 B；Abort/epoch 之前的迟到
+  success/error 不得覆盖 B。SSE 只能失效当前 Workspace Query，不能成为 Workspace 身份事实源。
+- Active Workspace 请求失败、返回零个/多个、不满足 grant 或 strict decoder 失败时，立即卸载业务树并显示可恢复错误；
+  不得用 A 的本地数据伪装可用。重试重新读取服务端事实。
+- `/`、`/workspace` 与其他业务路由使用同一个 Active Workspace 边界，再由独立 `AuthProvider`/Capability 决定业务访问。
+  Workspace 页面只读展示当前 Workspace 和本机切换命令，不提供 root path mutation。
+- 删除宿主机 Controller 控制会话不改变业务 Auth 所有权。业务 401/CSRF 仍由 `AuthProvider` 处理；Active Workspace
+  unavailable 不能被解释为业务登出，业务登出也不能篡改服务端 Active Workspace。
 
 ### 4. Validation & Error Matrix
 
 | 条件 | 必须结果 |
 | --- | --- |
-| 普通业务路由没有 Controller Session | 不请求控制状态；runtime ready 后继续进入业务认证 |
-| `/`、`/workspace` 的 fragment 缺失/失效或 session 401 | 只清控制 CSRF/state，显示控制链接失效；不撤销业务 runtime |
-| Controller response 缺字段、未知字段或 enum/time/version 非法 | `INVALID_RESPONSE`，不渲染部分权威事实 |
-| runtime waiting/unavailable、请求失败或代理 runtime-invalid header | 立即卸载业务 Auth/Query/SSE，显示脱敏状态并重试 |
-| runtime ready A -> B | A cache/SSE 清理完成后才发布 B，不短暂显示 A |
-| state version 409 | 回查 state 后等待用户重试；不改本地 Active |
-| Root unavailable | 保留最近记录，提供重查与仅移除记录；不得自动创建目录 |
-| control/runtime epoch 变化或 Provider 卸载 | abort 对应请求并忽略迟到 success/error |
+| Active Workspace 响应缺字段、未知字段或 ID/status/version 非法 | `INVALID_RESPONSE`，不渲染部分权威事实 |
+| Active Workspace 请求 unavailable/失败 | 卸载 Workspace Query/SSE，保留当前 URL，显示可恢复错误并重试 |
+| Active A -> B | A cache/SSE/草稿清理完成后才发布 B，不短暂显示 A |
+| A 的迟到响应在 B 发布后返回 | 通过 Abort/epoch 丢弃，不能写入 B cache 或页面 |
+| 浏览器存在旧 localStorage Workspace ID | 忽略并清理；只接受服务端 Active Workspace |
+| 业务 Auth 401 | 只处理业务 Session/CSRF；不得在浏览器改变服务端 Active Workspace |
+| `/workspace` 打开 | 只读展示 Active Workspace 和本机命令；不发送 Root/Docker mutation |
 
 ### 5. Good / Base / Bad Cases
 
-- Good：全新浏览器直接打开 `/dashboard`，只读取公开 runtime；业务认证独立恢复。进入 `/workspace` 时才恢复控制 Session。
-- Base：zero Active 时业务路由显示简短等待入口；控制页在有效会话下提供本机目录授权，浏览器不探测文件系统。
-- Bad：普通路由请求 `/control/v1/state`；用 Controller 401 注销业务用户；用 localStorage 挂载 Workspace；切换中保留旧 Query/SSE；把 bootstrap/CSRF 写入 storage。
+- Good：全新浏览器直接打开 `/dashboard`，业务认证完成后读取 Active Workspace；A -> B 时先清理 A 再展示 B。
+- Base：切换重建期间原业务 URL 显示简短重连状态，服务恢复后从 Active Workspace API 进入 B。
+- Bad：从 localStorage 挂载 Workspace；浏览器提交宿主机路径；切换中保留旧 Query/SSE；用 A 缓存掩盖 Active API 失败。
 
 ### 6. Tests Required
 
-- Controller/runtime strict decoder、fragment 清除、Cookie credentials、CSRF/If-Match/idempotency headers、401 隔离和 Abort。
-- App 根边界分别断言公开 runtime waiting/unavailable/ready、业务 deep link 不探测控制 Session、业务 Auth 独立挂载；
-  旧 control/runtime 响应不能回写。
-- Controller 页面覆盖新建、显式 Git、registered 切换、operation、Unavailable 重查/移除和长 Unicode 路径。
-- Playwright 覆盖无 Cookie 多浏览器 `/dashboard`、受保护 `/workspace`、Controller/restart 恢复、Workspace 切换、
-  expected 409、桌面/390x844 overflow 与 console/network。
+- Active Workspace strict decoder、认证顺序、请求失败/重试、零个/多个 Active、grant mismatch、Abort 与 epoch。
+- App 根边界断言业务 deep link 不读取控制 API或 Browser Storage；旧 Workspace 响应不能回写。
+- Workspace 页面覆盖只读 Root、切换命令、重连和长 Unicode 路径，不存在浏览器 Root 表单。
+- Browser 覆盖无控制 Cookie/fragment 的多浏览器 `/dashboard`、`/workspace`、`down -> up`、A -> B -> A、
+  桌面/390x844 overflow 与 console/network。
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: 用控制 Session 是否存在决定 `/dashboard` 能否挂载，或从 localStorage 直接恢复 Active Workspace。
-Correct: 控制 Session 只保护 `/workspace` 和命令；公开 runtime 先撤销旧作用域并清理，再发布权威 Workspace，
+Wrong: 从 localStorage 恢复 Workspace，或让 `/workspace` 表单直接触发宿主机 mount。
+Correct: 服务端 Active Workspace 是唯一身份事实；先清理旧作用域再发布新 Workspace，宿主机切换只走本机命令，
          业务访问始终由独立 Auth/Capability 决定。
 ```

@@ -25,6 +25,8 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
 - 确定性前端测试使用受控 API/SSE Fixture；真实 AI 行为属于独立 Evaluation Suite。
 - Search 网络响应只能由 `web/src/api/search.ts` 从 `unknown` 严格解码；Feature/Component 必须保留
   requested/effective mode、degradation、Evidence href、Cursor 与 vector `distance`，不能静默归一为假成功。
+- Active Workspace 只能由 Workspace API 边界严格解码 `GET /api/v1/workspaces/active`；浏览器存储、URL、SSE 和旧 Query
+  cache 都不能成为 Workspace 身份事实源。A -> B 必须先 Abort/停止 SSE/清理 A cache 与草稿投影，再发布 B；迟到响应不得回写。
 
 ## 禁止模式
 
@@ -37,6 +39,8 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
 - 新增依赖或版本但没有锁定 Manifest 和相关回归检查。
 - 把 `distance` 改名为 similarity、忽略未知 mode/capability、缺失 href 仍渲染 Evidence，或解析
   HMAC Cursor 内部结构并长期持久化。
+- 从 localStorage 恢复 Active Workspace、在浏览器选择宿主机 mount、用旧 Workspace 缓存掩盖 Active API 失败，
+  或把删除宿主机控制凭证误实现为删除业务 Auth/CSRF/API Token。
 
 ## 测试要求
 
@@ -50,6 +54,8 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
   UUID/Hash/RFC3339、NaN/Inf、未知 mode/capability、缺失 href、错误 cursor 与 Problem；不得只测 happy path。
 - M6-D 至少执行 `npm run lint --prefix web`、`npm run typecheck --prefix web`、
   `npm run test --prefix web` 和 `npm run build --prefix web`；只有实际输出可标记通过。
+- Workspace 启动边界测试必须覆盖 strict Active 响应、零个/多个/不匹配、认证顺序、重连、A -> B cache/SSE/草稿清理、
+  迟到响应、无控制 fragment/Cookie 的多浏览器访问和 `/workspace` 无宿主路径 mutation。
 
 ## Review 清单
 
@@ -65,6 +71,7 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
 - Search 是否只有一个 Decoder owner，并拒绝未知字段语义、非有限分数和不可打开 Evidence？
 - Cursor invalid/stale 是否显式要求从第一页重启，而不是静默复用旧结果？
 - UI 是否没有把 M6-D Workspace 隔离误当作 M10 Auth/CSRF/Capability 已完成？
+- Active Workspace 是否只有服务端 API 一个 Owner，切换时是否先清理旧作用域且业务认证保持独立？
 
 ## 验证
 

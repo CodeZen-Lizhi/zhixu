@@ -18,5 +18,6 @@
 | [0014](0014-single-user-authentication.md) | 单用户 Session、API Token 与写授权分离 | accepted |
 | [0015](0015-river-goose-runtime.md) | River/Goose Runtime 版本、迁移和兼容边界 | accepted |
 | [0016](0016-capacity-performance-baseline.md) | 确定性容量数据集与可审计性能门禁 | accepted |
-| [0017](0017-exact-workspace-root-grant.md) | Host Controller 与精确 Workspace Root Grant | accepted |
+| [0017](0017-exact-workspace-root-grant.md) | Host Controller 与精确 Workspace Root Grant | superseded in delivery by 0020 |
 | [0018](0018-workspace-root-identity.md) | Workspace Root 与 Workspace 身份边界 | accepted |
+| [0020](0020-docker-direct-web-and-one-shot-workspace-control.md) | Docker 固定 Web 入口与一次性 Workspace Control | accepted |

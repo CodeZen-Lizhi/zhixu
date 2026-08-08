@@ -1,4 +1,4 @@
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -7,7 +7,6 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const workspaceStorageKey = "zhixu.active-workspace-id";
 const eventCursorStorageKey = (workspaceId: string): string => `zhixu.event-cursor.${workspaceId}`;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -95,10 +94,6 @@ const expectBrowserError = (response: BrowserJSONResponse, status: number, code:
   expect(response.status).toBe(status);
   if (!isRecord(response.body)) throw new Error("Malformed API error response");
   expect(response.body.error_code).toBe(code);
-};
-
-const installWorkspace = async (context: BrowserContext): Promise<void> => {
-  await context.addInitScript(({ key, workspaceId }) => window.localStorage.setItem(key, workspaceId), { key: workspaceStorageKey, workspaceId: fixture.workspaceId });
 };
 
 const captureRuntimeIssues = (page: Page, issues: string[]): void => {
@@ -249,7 +244,6 @@ test("浏览器网络边界拒绝越权、跨 Workspace 与不可下载结果", 
 
 test("真实 Workspace 附件导出可恢复、下载并保持桌面与移动布局", async ({ browser, page }) => {
   const runtimeIssues: string[] = [];
-  await installWorkspace(page.context());
   captureRuntimeIssues(page, runtimeIssues);
   const attachmentEvents = page.waitForRequest((request) => isRequestForPath(request, "/api/v1/events"));
   await openAttachmentPanel(page);
@@ -258,7 +252,6 @@ test("真实 Workspace 附件导出可恢复、下载并保持桌面与移动布
   await attachmentEvents;
 
   const collectionContext = await browser.newContext();
-  await installWorkspace(collectionContext);
   const collectionPage = await collectionContext.newPage();
   captureRuntimeIssues(collectionPage, runtimeIssues);
   let attachmentListRequests = 0;
@@ -327,7 +320,6 @@ test("真实 Workspace 附件导出可恢复、下载并保持桌面与移动布
   await assertNoHorizontalOverflow(page);
 
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 } });
-  await installWorkspace(mobile);
   const mobilePage = await mobile.newPage();
   captureRuntimeIssues(mobilePage, runtimeIssues);
   try {

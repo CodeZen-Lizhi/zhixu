@@ -1,14 +1,36 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+
+import type { ActiveWorkspace } from "../../api/active-workspace";
+
+interface ActiveWorkspaceMock {
+  id: string;
+  status: "loading" | "ready" | "unavailable" | "error";
+  workspace: ActiveWorkspace | undefined;
+  error: Error | undefined;
+  refresh: Mock<() => Promise<void>>;
+}
 
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 const tokenId = "10000000-0000-4000-8000-000000000003";
-const workspaceApi = vi.hoisted(() => ({ getWorkspace: vi.fn() }));
 const auth = vi.hoisted(() => ({ createApiToken: vi.fn(), listApiTokens: vi.fn(), revokeApiToken: vi.fn() }));
 const systemStatus = vi.hoisted(() => ({ render: vi.fn() }));
-const activeWorkspace = vi.hoisted(() => ({ id: "10000000-0000-4000-8000-000000000002", setActiveWorkspaceId: vi.fn() }));
+const activeWorkspace = vi.hoisted((): ActiveWorkspaceMock => ({
+  id: "10000000-0000-4000-8000-000000000002",
+  status: "ready",
+  workspace: {
+    id: "10000000-0000-4000-8000-000000000002",
+    name: "Docs",
+    rootPath: "/workspace",
+    status: "active" as const,
+    availability: "available" as "available" | "unavailable" | "migration_required",
+    version: 2,
+  },
+  error: undefined,
+  refresh: vi.fn(() => Promise.resolve()),
+}));
 
 vi.mock("../../api/auth", async (importOriginal) => ({
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
@@ -17,20 +39,16 @@ vi.mock("../../api/auth", async (importOriginal) => ({
   listApiTokens: auth.listApiTokens,
   revokeApiToken: auth.revokeApiToken,
 }));
-vi.mock("../../api/workspace", () => ({
-  getWorkspace: workspaceApi.getWorkspace,
-}));
 vi.mock("../../app/active-workspace", () => ({
-  setActiveWorkspaceId: activeWorkspace.setActiveWorkspaceId,
   useActiveWorkspaceId: () => activeWorkspace.id,
 }));
+vi.mock("../../app/WorkspaceCacheBoundary", () => ({ useActiveWorkspace: () => activeWorkspace }));
 vi.mock("../../app/auth-context", () => ({ useAuth: () => ({ state: { status: "authenticated", mode: "required" } }) }));
 vi.mock("../settings/ModelSettingsPanel", () => ({ ModelSettingsPanel: () => <section aria-label="模型设置面板">真实模型设置面板</section> }));
 vi.mock("../settings/GitRemoteSettingsPanel", () => ({ GitRemoteSettingsPanel: () => <section aria-label="Git 同步设置面板">Git 同步设置</section> }));
 vi.mock("../system-status/SystemStatusPage", () => ({ SystemStatusPage: (props: { display?: string }) => { systemStatus.render(props); return <section aria-label="系统状态面板">{props.display}</section>; } }));
 
 import { SettingsPage } from "../settings/SettingsPage";
-import { runtimeMode } from "../../app/runtime-mode";
 
 const LocationProbe = () => {
   const location = useLocation();
@@ -51,8 +69,10 @@ beforeEach(() => {
   window.localStorage.clear();
   systemStatus.render.mockClear();
   activeWorkspace.id = workspaceId;
-  activeWorkspace.setActiveWorkspaceId.mockClear();
-  workspaceApi.getWorkspace.mockResolvedValue({ id: workspaceId, name: "Docs", rootPath: "/workspace", status: "active", git: { present: true, dirty: false, branch: "dev", head: "abc" } });
+  activeWorkspace.status = "ready";
+  activeWorkspace.workspace = { id: workspaceId, name: "Docs", rootPath: "/workspace", status: "active", availability: "available", version: 2 };
+  activeWorkspace.error = undefined;
+  activeWorkspace.refresh.mockClear();
 });
 
 afterEach(() => {
@@ -62,18 +82,15 @@ afterEach(() => {
 });
 
 describe("SettingsPage API Token management", () => {
-  it("切换工作区始终进入控制页，且 Controller 模式不自行清空权威 Workspace", async () => {
+  it("工作区设置只读展示 Active Workspace 和本机切换命令", () => {
     auth.listApiTokens.mockResolvedValue({ items: [] });
     renderSettings();
 
-    fireEvent.click(screen.getByRole("button", { name: "切换工作区" }));
-
-    await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent("/workspace"));
-    if (runtimeMode === "direct") {
-      expect(activeWorkspace.setActiveWorkspaceId).toHaveBeenCalledWith("");
-    } else {
-      expect(activeWorkspace.setActiveWorkspaceId).not.toHaveBeenCalled();
-    }
+    expect(screen.getByText("Docs")).toBeInTheDocument();
+    expect(screen.getByText("/workspace")).toBeInTheDocument();
+    expect(screen.getByText(/\.\/zhixu workspace switch/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "切换工作区" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("宿主机目录")).not.toBeInTheDocument();
   });
 
   it("模型分类挂载真实设置面板，不再显示无契约占位", () => {
@@ -107,9 +124,10 @@ describe("SettingsPage API Token management", () => {
 
   it("未连接工作区时不重复展示 Git 空态", () => {
     activeWorkspace.id = "";
+    activeWorkspace.workspace = undefined;
     renderSettings();
 
-    expect(screen.getByRole("heading", { name: "尚未连接工作区" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "尚未激活工作区" })).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Git 同步设置面板" })).not.toBeInTheDocument();
   });
 

@@ -2,7 +2,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { getWorkspace } from "../api/workspace";
+import { ActiveWorkspaceApiError, getActiveWorkspace } from "../api/active-workspace";
 import { useActiveWorkspaceId } from "../app/active-workspace";
 import { clearWorkspaceRuntimeState } from "../app/workspace-runtime-state";
 import { resetDocumentHistoryWorkspaceQueriesForRecovery } from "../features/document-history/query-keys";
@@ -65,6 +65,7 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
     let reconnectInFlight = false;
     let connectionGeneration = 0;
     let activeConnectionGeneration = 0;
+    const recoveryController = new AbortController();
     const isActive = (): boolean => !disposed
       && activeEffectRef.current === effectIdentity
       && currentWorkspaceIdRef.current === workspaceId;
@@ -87,15 +88,11 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
           await recoverWorkspace(workspaceId);
         }
         assertActive();
-        await queryClient.fetchQuery({
-          queryKey: ["workspace", workspaceId],
-          queryFn: async ({ signal }) => {
-            const workspace = await getWorkspace(workspaceId, signal);
-            assertActive();
-            return workspace;
-          },
-          staleTime: 0,
-        });
+        const activeWorkspace = await getActiveWorkspace(recoveryController.signal);
+        assertActive();
+        if (activeWorkspace.id !== workspaceId || activeWorkspace.availability !== "available") {
+          throw new ActiveWorkspaceApiError("INVALID_RESPONSE", "Active Workspace 已发生变化。", false);
+        }
         assertActive();
         await queryClient.refetchQueries({ queryKey: ["business", workspaceId], type: "all" }, { throwOnError: true });
         assertActive();
@@ -383,6 +380,7 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
 
     return () => {
       disposed = true;
+      recoveryController.abort();
       if (activeEffectRef.current === effectIdentity) activeEffectRef.current = undefined;
       retryRecoveryRef.current = undefined;
       closeConnection();

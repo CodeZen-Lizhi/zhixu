@@ -1,4 +1,4 @@
-package hostcontroller
+package workspacecontrol
 
 import (
 	"errors"
