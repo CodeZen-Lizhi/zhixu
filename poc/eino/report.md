@@ -3,8 +3,9 @@
 日期：2026-07-16
 
 > 本报告记录 ADR-0013/M2 的历史门禁时点。ADR-0019 已在不改变 Domain、Workflow、Proposal/Approval
-> 边界的前提下，授权并实现主模块 Eino Chat Adapter；当前生产默认仍为 `direct`，真实 Provider Smoke
-> 仍待完成。下文中的“不正式采用”“不进入主 `go.mod`”“主模块无 Eino”仅描述 2026-07-16 时点。
+> 边界的前提下，授权并实现主模块 Eino Chat Adapter；主模块生产 Adapter 已在 2026-08-07 通过真实本地
+> Ollama/qwen3 OpenAI-Compatible Smoke，当前生产默认仍按灰度策略保持 `direct`。下文中的“不正式采用”、
+> “不进入主 `go.mod`”“主模块无 Eino”和 Provider `SKIP` 仅描述 2026-07-16 时点。
 
 ## 结论
 

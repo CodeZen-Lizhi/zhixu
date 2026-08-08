@@ -83,6 +83,95 @@ func TestChatAdaptersShareProjectRequestAndResponseContract(t *testing.T) {
 	}
 }
 
+func TestChatAdaptersAcceptKnownReasoningExtensionWithoutExposingIt(t *testing.T) {
+	t.Parallel()
+	const reasoningCanary = "private-reasoning-canary"
+	tests := []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "reasoning string", field: "reasoning", value: `"` + reasoningCanary + `"`},
+		{name: "reasoning null", field: "reasoning", value: "null"},
+		{name: "reasoning content string", field: "reasoning_content", value: `"` + reasoningCanary + `"`},
+		{name: "reasoning content null", field: "reasoning_content", value: "null"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(writer, `{"id":"call-1","object":"chat.completion","created":1,"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{\"result\":\"ok\"}",%q:%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, test.field, test.value)
+			}))
+			defer server.Close()
+
+			options := chatOptions(server.URL, server.Client())
+			direct, err := models.NewOpenAICompatibleChatModel(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eino, err := models.NewEinoOpenAIChatModel(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			adapters := []contractChatAdapter{direct, eino}
+			responses := make([]agentapplication.ChatResponse, len(adapters))
+			for index, adapter := range adapters {
+				responses[index], err = adapter.Chat(context.Background(), validChatRequest(adapter.Contract().Model))
+				if err != nil {
+					t.Fatalf("%T: %v", adapter, err)
+				}
+				if string(responses[index].Content) != `{"result":"ok"}` || strings.Contains(fmt.Sprintf("%#v", responses[index]), reasoningCanary) {
+					t.Fatalf("%T exposed reasoning extension: %#v", adapter, responses[index])
+				}
+			}
+			if !reflect.DeepEqual(responses[0], responses[1]) {
+				t.Fatalf("direct=%#v eino=%#v", responses[0], responses[1])
+			}
+		})
+	}
+}
+
+func TestChatAdaptersRejectInvalidReasoningExtensionTypes(t *testing.T) {
+	t.Parallel()
+	invalidValues := []struct {
+		name  string
+		value string
+	}{
+		{name: "object", value: `{}`},
+		{name: "array", value: `[]`},
+		{name: "number", value: `1`},
+		{name: "boolean", value: `true`},
+	}
+	for _, field := range []string{"reasoning", "reasoning_content"} {
+		field := field
+		for _, invalid := range invalidValues {
+			invalid := invalid
+			t.Run(field+" "+invalid.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+					writer.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprintf(writer, `{"id":"call-1","object":"chat.completion","created":1,"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}",%q:%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, field, invalid.value)
+				}))
+				defer server.Close()
+
+				options := chatOptions(server.URL, server.Client())
+				direct, err := models.NewOpenAICompatibleChatModel(options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				eino, err := models.NewEinoOpenAIChatModel(options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, adapter := range []contractChatAdapter{direct, eino} {
+					_, err := adapter.Chat(context.Background(), validChatRequest(adapter.Contract().Model))
+					assertChatError(t, err, foundation.ErrorConsistencyViolation, models.ErrorCodeChatResponseInvalid, false)
+				}
+			})
+		}
+	}
+}
+
 func TestEinoOpenAIChatModelNormalizesSupportedBaseURLs(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -233,6 +322,8 @@ func TestEinoOpenAIChatModelRejectsMalformedOrInconsistentResponses(t *testing.T
 		{name: "trailing json", contentType: "application/json", body: validChatResponse("chat-v1", `{}`) + `{}`, code: models.ErrorCodeChatResponseInvalid},
 		{name: "duplicate", contentType: "application/json", body: `{"model":"chat-v1","model":"chat-v1","choices":[],"usage":null}`, code: models.ErrorCodeChatResponseInvalid},
 		{name: "unknown field", contentType: "application/json", body: `{"model":"chat-v1","choices":[],"usage":null,"secret_unknown":true}`, code: models.ErrorCodeChatResponseInvalid},
+		{name: "unknown message field", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}","secret_unknown":true},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid},
+		{name: "invalid reasoning type", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}","reasoning":{}},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid},
 		{name: "missing usage", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}]}`, code: models.ErrorCodeChatResponseInvalid},
 		{name: "empty usage", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`, code: models.ErrorCodeChatResponseInvalid},
 		{name: "empty choices", contentType: "application/json", body: `{"model":"chat-v1","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid},

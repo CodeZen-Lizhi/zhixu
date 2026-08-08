@@ -35,4 +35,8 @@ ZHIXU_EINO_LIVE_TIMEOUT='30s' \
 go test -run TestEinoOpenAIChatModelLiveSmoke -v ./internal/platform/models
 ```
 
+2026-08-07，生产 Adapter 已用 loopback Ollama `0.32.6` + `qwen3:0.6b` 连续通过两次该 smoke。推理模型可能先
+消费输出预算并返回 `reasoning`/`reasoning_content`；项目只显式接收 string/null 后丢弃，其他未知字段继续拒绝。
+该 PASS 只证明协议兼容，不是模型效果或生产灰度证据。
+
 历史门禁结论见 [report.md](report.md)，当前采用范围以 ADR-0019 为准。

@@ -41,9 +41,9 @@
 - [x] 阶段 2 Callback/Trace 只写脱敏 telemetry，不替代 Model Run/Call、Audit 或 Workflow Progress 事务事实。
 - [x] 完成阶段 3 Go/No-Go 证据；五个消费者通过计数包装器证明实际调用 Eino Graph，并通过 direct/Eino 等价、race、真实 PostgreSQL/River 重投递与 Model Call 审计门禁。
 - [x] 完成阶段 4 Go/No-Go：当前缺少可信持久 Attempt 入口和独立 Tool Calling model contract，因此本任务 No-Go；未来实现仍须经过项目 Registry、Policy、Capability、lease/fence 和 receipt，写工具继续走 Proposal/Approval/Safe Writeback。
-- [x] 阶段 5 只按实际通过的能力更新文档、回滚说明和面试材料；真实 Provider smoke 仍明确记录为 SKIP，`direct` 保持默认且未删除。
+- [x] 阶段 5 只按实际通过的能力更新文档、回滚说明和面试材料；真实 Provider 协议 smoke 已记录为 PASS，`direct` 仍作为灰度默认和回滚路径且未删除。
 - [x] Eino Chat 与 RAG Structured Scheduler 在真实 Compose/River 闭环中通过；Workspace 由 Host Controller exact-root Grant 激活，公开业务链路和 exact replay 通过且测试资源完整清理。
-- [ ] 使用真实 OpenAI-Compatible Provider 对生产 Eino Adapter 完成 live smoke；通过前不默认启用 `eino`。
+- [x] 使用真实 OpenAI-Compatible Provider 对生产 Eino Adapter 完成 live smoke；本地 Ollama `0.32.6` + `qwen3:0.6b` 连续通过两次，默认仍按受控灰度策略保持 `direct`。
 
 ## Out of Scope
 

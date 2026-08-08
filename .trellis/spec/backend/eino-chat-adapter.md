@@ -54,6 +54,15 @@ func (model *EinoOpenAIChatModel) Contract() ChatContract
   `RecordingChatModel` 继续位于 Eino Adapter 外层。
 - 请求先通过项目校验和字节上限。成功响应必须有 JSON Content-Type、合法 UTF-8、单一严格 JSON 文档、
   单 choice、assistant、`finish_reason=stop`、无 refusal/tool call、准确 model echo 和非空且加总一致的 usage。
+- `choices[].message.reasoning` 与 `reasoning_content` 是唯一额外允许的推理元数据字段，只接受 string 或 null；
+  Adapter 必须在严格解码后丢弃，不得进入 `ChatResponse`、Model Run/Call、Audit、日志或 telemetry。其他未声明的
+  envelope/message 字段继续 fail closed，不能用 `map[string]any` 或 `json.RawMessage` 扩大白名单。
+
+```json
+{"role":"assistant","content":"{\"ok\":true}","reasoning":"provider-private-text"}
+```
+
+上例只把 `content` 和 usage 投影到项目响应；`reasoning` 不得离开 Adapter。
 - Eino SDK 返回的 `RawBody` 可能去掉 JSON 文档首尾空白。wire 层仍严格校验原始字节；跨层摘要只比较
   `bytes.TrimSpace` 后的完整 JSON envelope，不得因此接受尾随第二个 JSON 文档。
 - Adapter 不启用 SDK 自动 retry、fallback、stream、tool 或 checkpoint。Credential 只保留在发起认证请求所需
@@ -75,6 +84,7 @@ func (model *EinoOpenAIChatModel) Contract() ChatContract
 | 其他非 2xx Provider 状态 | `NonRetryableFailure` | `MODEL_CHAT_REJECTED` | false |
 | 未分类 transport/SDK 失败 | `NonRetryableFailure` | `MODEL_CHAT_REQUEST_FAILED` | false |
 | model echo 不一致 | `ConsistencyViolation` | `MODEL_CHAT_RESPONSE_MODEL_MISMATCH` | false |
+| reasoning/reasoning_content 非 string/null，或其他未知 message 字段 | `ConsistencyViolation` | `MODEL_CHAT_RESPONSE_INVALID` | false |
 | 其他响应合同不一致 | `ConsistencyViolation` | `MODEL_CHAT_RESPONSE_INVALID` | false |
 | Callback/Tracer/Metrics 失败 | 不改变 Chat 分类 | 不新增业务错误码 | false |
 
@@ -88,10 +98,12 @@ func (model *EinoOpenAIChatModel) Contract() ChatContract
 | Good | direct/Eino 同一消息、Schema、响应和 usage | wire body、`ChatContract`、`ChatResponse` 等价 |
 | Good | 目录、`/v1`、完整 endpoint | 都只请求一次正确 `/v1/chat/completions` |
 | Good | SDK denylist 中的历史兼容模型名 | wire body 保留真实模型名且两实现都到达 Provider |
+| Good | Provider 返回 string/null `reasoning` 或 `reasoning_content` | 两实现接受后丢弃，项目响应和 usage 等价且不泄漏推理正文 |
 | Base | 32 个并发请求使用不同 `INITIAL/REPAIR/REDUCED` Schema | 无串扰，race 通过 |
 | Base | 32 个并发 callback 使用不同 correlation/phase | Span 精确隔离，Metric 无高基数 correlation |
 | Base | JSON envelope 有首尾空白 | 两实现都接受且响应等价 |
-| Bad | 无效 UTF-8、尾随 JSON、重复/未知字段、空或多 choice | fail closed 为响应合同错误 |
+| Bad | 无效 UTF-8、尾随 JSON、重复/未知字段、未知 message 字段、空或多 choice | fail closed 为响应合同错误 |
+| Bad | reasoning 为 object/array/number/bool | fail closed，不能为兼容 Provider 改成任意类型 |
 | Bad | usage 缺失、全零、加总错误，model/finish/refusal/tool 不符 | fail closed，model mismatch 使用独立 code |
 | Bad | oversize、redirect、401、429、5xx、取消、deadline | 有界读取、无内部重试、稳定分类 |
 | Bad | transport/Provider 错误包含 canary secret | 对外错误与格式化输出不含 secret |
@@ -99,8 +111,9 @@ func (model *EinoOpenAIChatModel) Contract() ChatContract
 
 ## 6. Tests Required
 
-- `internal/platform/models/eino_chat_contract_test.go`：双实现 fixture、BaseURL、legacy model、状态码、严格响应、
-  request/response 上限、取消/超时、redirect、并发 Schema、错误体上限和脱敏。
+- `internal/platform/models/chat_contract_test.go` 与 `eino_chat_contract_test.go`：双实现 fixture、BaseURL、legacy model、状态码、严格响应、
+  reasoning 两种别名的接收后丢弃、message 未知字段/错误类型、request/response 上限、取消/超时、redirect、
+  并发 Schema、错误体上限和脱敏。
 - `internal/platform/models/eino_chat_live_test.go`：复用 `ZHIXU_EINO_LIVE_*` 显式 opt-in 配置调用生产 Adapter；
   Provider 回显与请求别名不同时用 `ZHIXU_EINO_LIVE_MODEL_VERSION` 冻结实际版本。
 - `internal/platform/models/chat_factory_test.go`：缺省 `direct`、显式 `eino`、未知选择器 fail closed。
@@ -112,8 +125,9 @@ func (model *EinoOpenAIChatModel) Contract() ChatContract
 - `internal/modelsettings/runtime/models_test.go`：managed revision 不覆盖进程级实现选择。
 - 修改 Adapter 或 SDK 版本后至少运行相关单测、`go test -race ./internal/platform/models`、相关 `go vet`、
   vendor 模式 API/Worker 构建、`go mod tidy -diff`、`make compose-check`、PoC race/vet 和 `git diff --check`。
-- 默认切换到 `eino` 前必须使用生产 Adapter 完成真实 OpenAI-Compatible Provider smoke；没有凭据时记录 SKIP，
-  不得写成 PASS。
+- 默认切换到 `eino` 前必须使用生产 Adapter 完成真实 OpenAI-Compatible Provider smoke；框架/Provider/模型版本
+  变化后必须重跑。2026-08-07 已用本地 Ollama `0.32.6` + `qwen3:0.6b` 连续通过两次；这只关闭协议兼容门禁，
+  不代表模型质量达标，也不替代灰度、回滚观测或 Gold Set。
 
 ## 7. Wrong vs Correct
 
@@ -123,6 +137,7 @@ func (model *EinoOpenAIChatModel) Contract() ChatContract
 | 把调用方模型名交给 SDK 预检 | SDK 使用中性内部模型名，项目 payload 写真实 wire 模型名 |
 | 在共享 Eino model 上修改 Schema | 每次 `Generate` 使用 request-level option 和私有 call state |
 | 相信 SDK 已完整验证响应 | transport 先执行项目严格 wire 校验，再交叉校验 Eino message/usage/raw body |
+| 为兼容推理模型忽略所有未知 message 字段，或透传 reasoning | 只显式允许 string/null `reasoning`/`reasoning_content`，校验后丢弃；其他字段仍拒绝 |
 | 记录 SDK error/raw response 便于排障 | 返回稳定脱敏错误，仅保存项目允许的审计事实 |
 | 用 `AppendGlobalHandlers` 注册进程共享 callback | 每次 `Chat` 通过 Context 注入独立 handler |
 | Callback 写 Model Call/Audit/Workflow Progress | Callback 只写 Trace/Metrics，事务事实继续由项目 owner 写入 |

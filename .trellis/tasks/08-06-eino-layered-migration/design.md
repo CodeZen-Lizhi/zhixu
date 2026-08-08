@@ -130,4 +130,4 @@ Graph 的节点输入/输出保持项目自有 DTO，所有模型节点仍调用
 - 阶段 3 的 Go 决策已执行：固定三节点 Eino Graph 通过项目 `StructuredPhaseScheduler` Port 接入五个消费者。计数包装器测试证明消费者实际调用 Graph，而不是仅保存 selector；真实 PostgreSQL/River RAG 门禁证明 transport 重投递不重复 Provider/Model Call 或业务终态。
 - 阶段 4 为 No-Go：没有新增 ToolsNode、Tool bridge 或运行时开关；未来边界按 4.3 节冻结。
 - Eino core/OpenAI extension 已锁定并同步 vendor；Embedding/Retriever/Rerank、完整 RAG Graph、Streaming、Checkpoint 和 Tool Calling 没有进入主运行路径。
-- 真实 OpenAI-Compatible Provider smoke 因当前没有凭据仍为 SKIP。基于该未完成门禁，direct Adapter/scheduler 与五个独立回退 selector 全部保留，Eino 不设为默认。
+- 真实 OpenAI-Compatible Provider smoke 已用生产 Eino Adapter 对本地 Ollama `0.32.6` + `qwen3:0.6b` 连续通过两次；`reasoning`/`reasoning_content` 只作为显式 string/null allowlist 接收后丢弃，其他未知字段继续拒绝。该结果只证明协议兼容，direct Adapter/scheduler 与五个独立 selector 仍保留为灰度默认和回滚路径。

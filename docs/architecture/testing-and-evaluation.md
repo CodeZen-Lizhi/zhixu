@@ -238,7 +238,8 @@ M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一�
 - Chat Contract：direct 与 Eino-backed OpenAI-Compatible Adapter 使用共享 fixture 对照 request、`ChatContract`、
   `ChatResponse` 与 usage，并覆盖 429/502/503/504、401/403/其他 4xx、timeout/cancel、redirect、Content-Type、
   超大/非法响应、模型与 usage 回显、动态 Schema 并发隔离、版本快照和 Secret/error-body canary；Adapter 本身
-  调用次数始终为一次，不隐藏 retry 或 Provider/Model 切换。Ollama 只测试 OpenAI-Compatible endpoint。
+  调用次数始终为一次，不隐藏 retry 或 Provider/Model 切换。已知 string/null `reasoning`/`reasoning_content` 必须
+  接收后丢弃，未知 message 字段和错误 reasoning 类型仍失败。Ollama 只测试 OpenAI-Compatible endpoint。
 - Eligibility：真实 PostgreSQL 对最多 500 个 Provenance 做一次参数化批量查询，覆盖 Confirmed Claim/Relation、
   Disputed+Conflict、Suggested/Rejected/Deprecated、无正式绑定、多 Provenance、跨 Workspace 和稳定排序；SQL 调用
   计数证明无 N+1，Active Index Evidence 不能被当作 eligible。
@@ -259,7 +260,8 @@ M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一�
   与 max_output_tokens，不能只依赖 request hash。断言数据库、日志、Trace 和错误不含完整 Prompt/Evidence/raw response、
   Credential 或绝对路径。
 - Fake 与真实评测：Deterministic Fake 只证明 Pipeline/错误路径/E2E 确定性；真实 Provider 未配置时必须明确 SKIP，
-  不能计为模型质量 PASS，也不能让生产 Factory 构造 Fake。
+  不能计为模型质量 PASS，也不能让生产 Factory 构造 Fake。真实 Provider live smoke 即使通过也只证明生产 Adapter
+  的协议兼容；当前 Ollama `0.32.6` + `qwen3:0.6b` PASS 不计作 Gold Set、模型效果或生产灰度 PASS。
 
 ### 8.8 M6-03 Tool Registry And Security 专项
 

@@ -22,6 +22,7 @@ const (
 	einoLiveTimeoutEnv      = "ZHIXU_EINO_LIVE_TIMEOUT"
 	einoLiveDefaultBaseURL  = "https://api.openai.com/v1"
 	einoLiveDefaultTimeout  = 30 * time.Second
+	einoLiveMaxOutputTokens = 512
 )
 
 // TestEinoOpenAIChatModelLiveSmoke exercises the production adapter only when
@@ -67,6 +68,8 @@ func TestEinoOpenAIChatModelLiveSmoke(t *testing.T) {
 		t.Fatalf("create production Eino adapter: %v", err)
 	}
 	request := validChatRequest(model.Contract().Model)
+	// Reasoning-capable providers may spend part of this budget before emitting JSON.
+	request.MaxOutputTokens = einoLiveMaxOutputTokens
 	request.Messages = []agentapplication.ChatMessage{
 		{Role: agentapplication.MessageRoleSystem, Content: "Return one JSON object that follows the response schema."},
 		{Role: agentapplication.MessageRoleUser, Content: `Return {"ok":true}.`},

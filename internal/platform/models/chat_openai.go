@@ -172,11 +172,15 @@ type openAIChatChoice struct {
 }
 
 type openAIChatMessage struct {
-	Role        string            `json:"role"`
-	Content     *string           `json:"content"`
-	Refusal     *string           `json:"refusal"`
-	ToolCalls   []json.RawMessage `json:"tool_calls"`
-	Annotations []json.RawMessage `json:"annotations"`
+	Role    string  `json:"role"`
+	Content *string `json:"content"`
+	Refusal *string `json:"refusal"`
+	// Reasoning 接收已知 Provider 推理扩展；项目响应不会暴露或持久化该内容。
+	Reasoning *string `json:"reasoning"`
+	// ReasoningContent 接收 reasoning_content 别名，并保持与 Reasoning 相同的丢弃语义。
+	ReasoningContent *string           `json:"reasoning_content"`
+	ToolCalls        []json.RawMessage `json:"tool_calls"`
+	Annotations      []json.RawMessage `json:"annotations"`
 }
 
 type openAIChatUsage struct {

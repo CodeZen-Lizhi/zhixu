@@ -26,7 +26,7 @@
 - [x] API、Worker 与 model settings connection test 继续走同一 factory/runtime；Credential 只保留在认证请求所需的私有 Adapter/SDK client，不进入 Runtime contract、日志、错误或格式化输出。
 - [x] 更新根 `go.mod`/`go.sum`/`vendor` 并记录版本与许可证；现有 CI/Docker 已消费根 `go.sum` 与 `vendor`，无需新增构建路径。
 
-门禁状态：direct/Eino 离线 fixture、相关 Go race/vet、vendor 构建与 Compose 合同已通过，失败可切回 direct；真实 OpenAI-Compatible Provider smoke 因当前无凭据仍为待办，因此不默认启用 `eino`。
+门禁状态：direct/Eino 离线 fixture、相关 Go race/vet、vendor 构建、Compose 合同和真实 OpenAI-Compatible Provider smoke 均已通过。`direct` 仍为受控灰度默认和回滚路径，不因单次协议门禁自动切换。
 
 ## 阶段 2：Callback/Trace 适配（3-5 人日）
 
@@ -37,7 +37,7 @@
 
 门禁状态：受影响包测试与 `go vet`、Callback 20 轮压力测试、模型/可观测性/runtime `-race`、
 全局 handler 与 Eino 类型边界静态扫描均通过；Trace/Metrics 只含稳定摘要，telemetry error/panic 不改变 Chat 结果。
-当前没有外部 exporter 和真实 Provider 凭据，未把对应 smoke 写成通过，`direct` 继续为默认。
+当前没有外部 exporter，因此 exporter smoke 仍未宣称通过；真实 Provider Chat smoke 已在阶段 5 补充完成。`direct` 继续作为灰度默认。
 
 阶段 2 后二次决策：只有至少两个现有/近期流程需要相同分支编排，或对照结果证明 Graph 在测试、可观测性或维护成本上有净收益，才进入阶段 3；否则正式采用范围停在 Chat + Callback。
 
@@ -74,10 +74,10 @@
 ## 阶段 5：收口（2-4 人日）
 
 - [x] 根据已通过门禁的实际范围更新 README、后端规范、部署/测试文档和分层采用 ADR，不提前宣称未落地能力。
-- [x] 执行旧实现删除门禁：因真实 Provider smoke 仍为 SKIP，本次不删除 direct Adapter、direct scheduler 或独立回退开关，也不默认启用 Eino。
+- [x] 执行旧实现删除门禁：真实 Provider smoke 已通过，但尚未完成生产灰度与回滚观测，本次不删除 direct Adapter、direct scheduler 或独立回退开关，也不默认启用 Eino。
 - [x] 保留版本升级说明、五个独立 scheduler selector、回滚步骤和面试可解释的边界决策。
 
-阶段 5 结果：代码、离线、真实 PostgreSQL/River 和 Eino Compose 门禁已收口；唯一未完成的激活门禁是需要外部凭据的真实 OpenAI-Compatible Provider smoke。该门禁不影响 direct 默认路径，但在通过前禁止删除回退实现或将 `eino` 设为默认。
+阶段 5 结果：代码、离线、真实 PostgreSQL/River、Eino Compose 和真实 OpenAI-Compatible Provider 协议门禁均已收口。live smoke 使用生产 Eino Adapter 连接本地 Ollama `0.32.6` 与真实 `qwen3:0.6b`，连续两次返回严格 JSON、精确 model echo 和一致 usage；该结果不等于模型质量或生产灰度证据，因此保留 direct 默认与全部回退实现。
 
 ## 影响文件地图
 
@@ -103,10 +103,13 @@ go test ./cmd/api ./cmd/worker
 make openapi-check
 make compose-check
 ZHIXU_CHAT_IMPLEMENTATION=eino ZHIXU_STRUCTURED_SCHEDULER_RAG=eino make compose-rag-smoke
+ZHIXU_EINO_LIVE_ENABLED=true ZHIXU_EINO_LIVE_API_KEY='...' ZHIXU_EINO_LIVE_MODEL='...' \
+  ZHIXU_EINO_LIVE_BASE_URL='https://provider.example/v1' \
+  go test -count=2 -run '^TestEinoOpenAIChatModelLiveSmoke$' -v ./internal/platform/models
 cd poc/eino && go test -race ./... && go vet ./...
 ```
 
-真实 PostgreSQL/River integration 与确定性 Provider Compose smoke 已执行；有真实 Provider 凭据后再执行 live smoke，不把跳过的 live smoke 写成通过。
+真实 PostgreSQL/River integration、确定性 Provider Compose smoke 与真实 Ollama Provider live smoke 均已执行；live smoke 的真实模型协议 PASS 不计作 Gold Set 或业务质量 PASS。
 
 ## 风险点与回滚点
 

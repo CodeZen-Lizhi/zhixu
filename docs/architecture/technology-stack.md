@@ -75,7 +75,7 @@ M6-03 使用 BSD-3-Clause 的 `golang.org/x/net/html v0.56.0` 解析受控 Web T
 
 主模块正式锁定 Eino core `v0.9.13` 与 OpenAI extension `v0.1.13`，采用范围为 `internal/platform/models` 内的 OpenAI-Compatible Chat Adapter、调用级脱敏 Callback telemetry，以及 `internal/agent/adapter/eino` 内的 Structured Output 三阶段短 Graph。Chat 和五个 scheduler selector 均只选择内部实现，不改变 Provider/Model/Adapter 或持久运行身份，默认保持 `direct`，详见 [ADR-0019](adr/0019-layered-eino-adoption.md)。
 
-独立 `poc/eino` module 继续保存 M2 的 Chat Graph、ToolsNode、Callback 等历史验证样例。生产短 Graph 只覆盖 `INITIAL/REPAIR/REDUCED`；Streaming、完整 RAG Graph、Embedding/Retriever/Rerank、ToolsNode、Checkpoint、River Node 和真实 Provider smoke 尚未通过各自门禁，因此不进入当前生产路径。历史门禁见 [ADR-0013](adr/0013-eino-adoption-gate.md) 与 [`poc/eino/report.md`](../../poc/eino/report.md)。
+独立 `poc/eino` module 继续保存 M2 的 Chat Graph、ToolsNode、Callback 等历史验证样例。生产 Eino Chat Adapter 已通过本地 Ollama/qwen3 真实 OpenAI-Compatible 协议 smoke；生产短 Graph 只覆盖 `INITIAL/REPAIR/REDUCED`。Streaming、完整 RAG Graph、Embedding/Retriever/Rerank、ToolsNode、Checkpoint 和独立 River Node 仍未通过各自门禁，因此不进入当前生产路径。历史门禁见 [ADR-0013](adr/0013-eino-adoption-gate.md) 与 [`poc/eino/report.md`](../../poc/eino/report.md)。
 
 领域模型、Workflow 持久化与状态机、Proposal/Approval、Tool Permission 和 Write Authorization 不得依赖 Eino 类型或运行时。核心同样不依赖 LangChain；第三方 AI Framework 只能位于 Agent/Application 编排边缘或 Adapter/Infrastructure，且必须通过项目 Interface 隔离。
 

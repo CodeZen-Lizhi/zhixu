@@ -86,7 +86,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
 | [宿主机 Workspace 精确授权契约](./workspace-root-grant.md) | Host Controller、匿名 runtime discovery、不可变 Root identity、单 Grant 状态机、exact bind 与浏览器运行边界 | 普通业务路由与 Controller Session 解耦；Root/Docker 控制仍受保护，运行时只允许 API/Worker 精确 source=target 授权 |
 | [模型设置与开发运行时契约](./model-settings-runtime.md) | desired/active/applied revision、AEAD、冻结 Model Runtime、受控 restart 与 Docker 生命周期 | managed Settings 与开发一键启动的实现和真实验收门禁 |
-| [Eino Chat Adapter 契约](./eino-chat-adapter.md) | direct/Eino 选择、wire/响应等价、安全传输、调用级 Callback telemetry、错误矩阵与升级门禁 | 阶段 0/1 离线门禁与阶段 2 Callback 聚焦门禁已通过；真实 Provider smoke 待凭据，默认保持 direct |
+| [Eino Chat Adapter 契约](./eino-chat-adapter.md) | direct/Eino 选择、wire/响应等价、安全传输、调用级 Callback telemetry、错误矩阵与升级门禁 | 离线/Callback 门禁与真实 Ollama Provider smoke 已通过；默认仍保持 direct，供受控灰度与一键回滚 |
 | [Eino Structured Scheduler 契约](./eino-structured-scheduler.md) | Application phase-scheduler Port、固定短 Graph、五消费者独立 selector、错误/预算/审计与回滚门禁 | 阶段 3 离线等价、并发、注入和消费者回归门禁已通过；五个 selector 默认 direct |
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker/Web 门禁 | M7-04 与遗留收口已验证；下游 owner executor、Document/Eval impact 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
@@ -171,7 +171,8 @@ git diff --check
 
 - License 和 50 万 Chunk ANN/P95 必须在对应后续任务中通过仓库文件和测试锁定；M6-D 的 exact vector
   scan/EXPLAIN 只作为正确性基线。
-- 生产 Eino Chat Adapter 的真实 Provider smoke 尚待凭据；完成前 Chat `direct` 必须保持默认。阶段 3 只通过了
+- 生产 Eino Chat Adapter 已用 Ollama `0.32.6` + `qwen3:0.6b` 关闭真实 Provider 协议门禁；该结果不是模型质量
+  或生产灰度证据，Chat `direct` 继续保持默认并作为回滚路径。阶段 3 只通过了
   `StructuredRunner` 三阶段无状态短 Graph 门禁；Embedding/Retriever/Rerank、完整 RAG Graph、Tool、Streaming、
   Checkpoint 和 River Node 不能从 Chat/Callback/短 Graph 的离线门禁推断为已采用。
 - 本规范不提供伪造的实现代码、版本号、数据库字段长度或不存在的测试结果；M1 完成后应将真实文件链接补入各专题规范。

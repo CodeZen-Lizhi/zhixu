@@ -13,7 +13,7 @@ PostgreSQL 持久状态、River 重试和安全写回仍由项目代码负责。
 - 保留 PostgreSQL + River 作为 Workflow 与 Model Run/Call 唯一事实源，通过 direct/Eino 合同、并发 race 和真实 PostgreSQL/River 重投递测试，验证模型调用审计、错误语义、终态与回滚路径不漂移。
 - 对 Tool Calling 执行 No-Go 门禁：在缺少可信持久 Attempt、lease/fence 和独立 Tool Calling 模型合同的情况下，不注册 Eino ToolsNode，避免绕过现有权限、幂等和安全写回链路。
 
-不要写“Eino 已成为默认生产实现”或“真实模型效果已验证”。当前真实 Provider smoke 没有凭据，默认仍是 direct。
+不要写“Eino 已成为默认生产实现”或“真实模型效果已验证”。生产 Adapter 已通过真实 Ollama/qwen3 协议 smoke，但这不是 Gold Set；默认仍按灰度策略保持 direct。
 
 ## 为什么用了框架，还保留自研代码
 
@@ -56,8 +56,8 @@ Port，供应商和框架升级仍可通过合同测试控制。
 
 **为什么保留 direct？**
 
-真实 Provider smoke 还没有执行，直接删除旧实现或默认切换会失去已验证的回滚路径。五个 scheduler selector 独立存在，
-某一类消费者有兼容问题时可以只切回它，不需要改数据库或回放其他工作流。
+真实 Provider smoke 已通过，但单次协议门禁不等于生产灰度、质量和回滚观测都完成。保留 direct 可以先小范围显式启用
+Eino；五个 scheduler selector 独立存在，某一类消费者有兼容问题时可以只切回它，不需要改数据库或回放其他工作流。
 
 **Tool Calling 为什么不顺手做了？**
 

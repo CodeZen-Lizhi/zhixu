@@ -212,7 +212,7 @@ Worker 运行参数：
 | `ZHIXU_EMBEDDING_TIMEOUT` | `30s` | 单次 Embedding HTTP 超时，最大 `5m` |
 | `ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES` | `67108864` | 响应读取上限，最大 `134217728` bytes |
 | `ZHIXU_CHAT_PROVIDER` | `disabled` | `disabled/openai-compatible`；禁用时旧 API/Worker 正常，Agent capability 明确 unavailable |
-| `ZHIXU_CHAT_IMPLEMENTATION` | `direct` | `direct/eino`；进程级内部实现选择，不进入 Provider/Model 身份；真实 Provider smoke 通过前保持 `direct` |
+| `ZHIXU_CHAT_IMPLEMENTATION` | `direct` | `direct/eino`；进程级内部实现选择，不进入 Provider/Model 身份；真实 Provider smoke 通过后仍按灰度策略默认 `direct`，可一键回滚 |
 | `ZHIXU_CHAT_BASE_URL` | 无 | 启用时必填；远程仅 HTTPS，loopback OpenAI-compatible endpoint 可用 HTTP，禁止 userinfo/query/fragment |
 | `ZHIXU_CHAT_API_KEY` | 无 | OpenAI-compatible Credential；本地兼容端点可为空，不写日志、Model Run 或配置摘要 |
 | `ZHIXU_CHAT_MODEL` | 无 | Provider 请求使用的 canonical 模型 ID |
@@ -382,6 +382,11 @@ make compose-rag-smoke
 `rag-integration` 在独立临时数据库中分别执行 direct/Eino Answer scheduler，并对已完成 Node 注入下一次 River
 transport attempt；两种模式都必须保持三次 Provider/Model Call、一个成功 Attempt 和不变的 Answer/Knowledge
 终态。该测试使用确定性 request-aware model，不替代真实 Provider smoke。
+
+生产 Eino Adapter 的 live smoke 通过 `internal/platform/models/eino_chat_live_test.go` 显式 opt-in 执行；必须提供
+`ZHIXU_EINO_LIVE_ENABLED=true`、Provider BaseURL、API Key、Model 和可选 Model Version，且不得在日志或提交中
+记录凭据。2026-08-07 已用仅绑定 loopback 的 Ollama `0.32.6` 与 `qwen3:0.6b` 连续通过两次。该命令只验证
+OpenAI-Compatible wire/Schema/model/usage 合同，不替代 Gold Set、生产灰度或业务质量评测。
 
 `compose-rag-smoke` 叠加 `deploy/compose.rag-smoke.yml`，随机创建 Compose project、宿主端口、PostgreSQL
 密码和 Chat Bearer canary。模型 fixture 与 Worker 共用 network namespace，使生产 Adapter 仍访问 loopback；
