@@ -1772,3 +1772,39 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 阶段 2-6 按用户要求保持未启动；后续需单独确认后再继续。
+
+
+## Session 43: Viper 与 validator 配置加载
+
+**Date**: 2026-08-08
+**Task**: Viper 与 validator 配置加载
+**Branch**: `dev`
+
+### Summary
+
+使用实例化 Viper 与 validator 替换手写配置加载，保留严格 YAML、配置覆盖优先级、进程 Secret 边界、脱敏、跨字段校验及 Model Settings Rollout 语义，并同步相关文档。
+
+### Main Changes
+
+- 以每次 viper.New() 的实例化加载器统一默认值、YAML 与环境变量覆盖。
+- 保留显式空值、disabled 清理、Secret 零查询与稳定脱敏错误契约。
+- 补充配置架构文档、Trellis 规范与兼容性回归测试。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8da6fc1f` | (see git log) |
+| `acd7c648` | (see git log) |
+
+### Testing
+
+- [OK] go test ./... -count=1 -timeout 120s
+- [OK] go vet ./...
+- [OK] go test -race ./internal/platform/config -count=1 -timeout 60s
+- [OK] 受影响命令与 modelsettings 使用 -mod=vendor 测试通过
+- [OK] go mod verify、Markdown 解析与相对链接检查通过
+
+### Status
+
+[OK] **Completed**
