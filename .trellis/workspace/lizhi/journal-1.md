@@ -1829,3 +1829,24 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 45: 优化知识侧边栏分级导航
+
+**Date**: 2026-08-08
+**Task**: 优化知识侧边栏分级导航
+**Branch**: `dev`
+
+### Summary
+
+将知识导航从大型浮层改为 registry 派生的内联三级 Disclosure，保留独立分组展开、当前路由自动展开、移动 Sheet 状态与焦点恢复，并补齐 ARIA、侧栏滚动、组件测试和前端规范。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8cbdacb635d1df25fb8732c59eb45344c05fa04d` | (see git log) |
+
+### Status
+
+[OK] **Completed**

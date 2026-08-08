@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 44
+- **Total Sessions**: 45
 - **Last Active**: 2026-08-08
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1831 | Active |
+| `journal-1.md` | ~1852 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 45 | 2026-08-08 | 优化知识侧边栏分级导航 | `8cbdacb635d1df25fb8732c59eb45344c05fa04d` | `dev` |
 | 44 | 2026-08-08 | 接入 OpenTelemetry 与 Prometheus | `ebaf20db8b131e0a34302c7e4daebf4eb1028e60` | `dev` |
 | 43 | 2026-08-08 | Viper 与 validator 配置加载 | `8da6fc1f`, `acd7c648` | `dev` |
 | 42 | 2026-08-05 | 架构质量优化阶段 0-1 | - | `dev` |
