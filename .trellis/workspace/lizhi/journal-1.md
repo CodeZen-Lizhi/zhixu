@@ -1772,3 +1772,28 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Next Steps
 
 - 阶段 2-6 按用户要求保持未启动；后续需单独确认后再继续。
+
+
+## Session 43: 完成 Eino 分层迁移
+
+**Date**: 2026-08-08
+**Task**: 完成 Eino 分层迁移
+**Branch**: `codex/eino-layered-migration`
+
+### Summary
+
+分层接入 Eino Chat Adapter、调用级脱敏 Callback 与 Structured Output 短 Graph，保留 PostgreSQL/River、领域校验和 direct 回滚边界；完成真实 Compose/River 闭环及 Ollama qwen3 Provider smoke，并以 typed allowlist 兼容 reasoning 扩展。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e51f5acc` | (see git log) |
+| `e376ad01` | (see git log) |
+| `4bcc916f` | (see git log) |
+| `62e15152` | (see git log) |
+| `675181e4` | (see git log) |
+
+### Status
+
+[OK] **Completed**

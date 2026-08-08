@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 42
-- **Last Active**: 2026-08-05
+- **Total Sessions**: 43
+- **Last Active**: 2026-08-08
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1774 | Active |
+| `journal-1.md` | ~1799 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 43 | 2026-08-08 | 完成 Eino 分层迁移 | `e51f5acc`, `e376ad01`, `4bcc916f`, `62e15152`, `675181e4` | `codex/eino-layered-migration` |
 | 42 | 2026-08-05 | 架构质量优化阶段 0-1 | - | `dev` |
 | 41 | 2026-08-05 | 笔记工作流与工作台交付 | `903ffbf` | `dev` |
 | 40 | 2026-08-02 | 首页公开访问与控制授权拆分 | `e812c32`, `1a7add8`, `430f0f9` | `dev` |
