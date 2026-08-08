@@ -25,6 +25,7 @@
 - [安全架构与威胁模型](architecture/security.md)
 - [可观测性与审计架构](architecture/observability.md)
 - [测试与 AI 评测](architecture/testing-and-evaluation.md)
+- [Workspace 与 Docker 运行手册](architecture/runbooks/workspace-runtime.md)
 
 ## 专项目录
 

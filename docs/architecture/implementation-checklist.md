@@ -11,7 +11,10 @@
 
 ## Workspace
 
-- [x] Workspace 创建校验。
+- [x] 本机绝对 Root 选择、Git 校验与稳定 Workspace 身份注册。
+- [x] 一次性 Workspace Control、精确 API/Worker bind、切换状态机与失败恢复。
+- [x] Docker Web 固定 IPv4 loopback 入口，无 Host Controller HTTP/控制会话依赖。
+- [x] 唯一 Active Workspace API 与前端请求、SSE、Query/cache 隔离。
 - [x] 安全路径解析。
 - [x] Source Version Hash。
 - [x] 文件扫描。

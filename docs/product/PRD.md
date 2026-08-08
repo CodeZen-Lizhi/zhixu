@@ -693,59 +693,56 @@ M8-02 的持久化状态使用 `DRAFT/APPROVED/INVALIDATED/REJECTED`，与上述
 
 ## 10. 详细功能需求
 
-### 10.1 Workspace 创建与配置
+### 10.1 Workspace 选择、激活与配置
 
 #### 10.1.1 功能目标
 
-创建一个能够被系统安全读取、写入、索引和 Git 管理的本地知识空间。
+把用户已有的本地目录注册为稳定 Workspace 身份，只向当前活动 Workspace 授予精确文件访问，并让系统安全读取、写入、索引和 Git 管理该知识空间。
 
 #### 10.1.2 入口
 
-- 首次启动引导。
-- 设置 → Workspace。
-- 设置 → Git 同步。
-- 首页“创建 Workspace”。
+- 首次或显式启动：`./zhixu up --workspace <absolute-root> [--initialize-git]`。
+- 后续启动与重启：`./zhixu up`、`./zhixu restart`，复用上次成功选择。
+- 低频切换：`./zhixu workspace switch <absolute-root> [--initialize-git]`。
+- 设置 → Workspace：只读展示服务端 Active Workspace、Root 和本机切换命令，不选择宿主机目录。
+- 设置 → Git 同步、模型设置：管理当前 Active Workspace 的业务配置，不改变 Root Grant。
 
 #### 10.1.3 输入项
 
-- Workspace 名称。
-- 根目录。
-- Inbox 子目录。
-- 正式知识目录。
-- 附件目录。
-- 是否初始化 Git。
+- 本机命令提供一个已经存在的宿主机绝对 Root。
+- `--initialize-git` 只在用户明确允许时初始化新的 Git 仓库；系统不得静默初始化。
 - 可选的标准 HTTPS Git Remote、分支和访问令牌；令牌只写不可回读。
 - “批准写回后自动同步”开关，默认关闭。
-- 模型配置。
-- Embedding 配置。
-- 默认语言和时区。
+- 模型、Embedding、默认语言和时区属于 Active Workspace 的业务设置，不是目录挂载参数。
+- `ZHIXU_HTTP_PORT`、业务认证和数据库开发配置来自受保护 `.env`；`ZHIXU_WORKSPACE_ROOT` 已废弃，不能成为第二事实源。
 
 #### 10.1.4 主流程
 
-1. 用户选择根目录。
-2. 系统检查目录存在性、读写权限和符号链接。
-3. 系统检查目标目录是否位于允许范围。
-4. 检测 Git 仓库：
+1. 用户在本机命令中提供 Root；浏览器和业务 API 不接收宿主机 mount source。
+2. launcher 检查目录已经存在、是规范绝对路径、可访问且不属于保留运行目录，并解析稳定物理身份。
+3. 检测 Git 仓库：
    - 已存在：读取当前分支、HEAD 和工作区状态。
-   - 不存在且用户允许：初始化仓库并创建初始提交。
+   - 不存在且用户显式传入 `--initialize-git`：初始化仓库。
    - 不存在且用户拒绝：阻止创建，因为正式 v1.0 强制要求 Git。
-5. 检查数据库连接和 pgvector 扩展。
-6. 检查模型与 Embedding Adapter 可用性。
-7. 保存 Workspace 配置。
-8. 创建默认目录和内置 Smart Collection。
-9. 执行初始扫描。
+4. 一次性 Workspace Control 按 canonical Root/fingerprint 复用或创建稳定 Workspace ID；Root 身份不可通过普通切换重绑。
+5. 若从 A 切到 B，先停止 A 的新写入并撤销旧 grant，再准备 B；只有 API/Worker 获得 `source == target == canonical root` 的单一精确 bind。
+6. 等待 PostgreSQL、API、Worker 与 Web 入口 ready，并核对 grant generation、数据库 Active 和运行时状态一致。
+7. 全部成功后原子保存 `.zhixu/workspace-selection`；失败时恢复 A，无法安全恢复时保持零 Active 并显式报错。
+8. 浏览器直接访问 Docker Web，通过 `GET /api/v1/workspaces/active` 建立业务作用域；随后可发起扫描并配置 Git、模型和 Embedding。
 
 #### 10.1.5 页面效果
 
-- 使用步骤式引导展示检查结果。
-- 每项检查显示成功、警告或失败。
-- 失败项提供修复说明和重新检查按钮。
-- 创建成功后进入首页，并显示初始扫描进度。
+- 启动成功后直接打开 `http://127.0.0.1:${ZHIXU_HTTP_PORT:-8080}`，不需要 Host Controller 密钥、一次性链接或控制 Cookie。
+- `/workspace` 只读展示当前 Active Workspace、Root 和本机切换命令；浏览器不得创建、打开或重新挂载宿主机目录。
+- 切换期间页面显示短暂重连，先取消 A 请求、停止 A SSE 并清理 A 缓存，再发布 B。
+- 失败必须显示可操作错误，不得从 localStorage、旧 Query cache 或任意数据库记录恢复 Workspace 身份。
 
 #### 10.1.6 业务规则
 
-- 正式 v1.0 只允许一个活动 Workspace，但数据模型保留 workspace_id。
-- Workspace 根目录不能相互嵌套。
+- 正式 v1.0 只允许一个活动 Workspace，但 Registry 和全部业务数据保留稳定 `workspace_id`，切回已有 Root 必须恢复原 ID 和历史。
+- 默认推荐只选择一个较大的 Workspace Root，并用子目录分类。父目录与其子目录可以登记为不同的精确身份，但活动父 Root 在文件系统上仍包含该子目录；要求双向文件隔离时必须使用互不重叠的 Root。
+- A 和 B 的数据库业务数据、索引、问答、整理、复习、面试和浏览器状态按 Workspace ID 隔离；切换不得清空 PostgreSQL 或重建其他 Workspace。
+- Workspace Root 只能由本机 launcher 选择；网页、业务 API、Browser Storage 和 SSE 都不是 mount 或 Active 身份事实源。
 - Git 工作区存在未提交修改时允许创建，但必须显示警告并建立基线。
 - 模型暂时不可用时允许保存配置，但 AI 功能显示不可用，不得假装成功。
 
@@ -753,15 +750,19 @@ M8-02 的持久化状态使用 `DRAFT/APPROVED/INVALIDATED/REJECTED`，与上述
 
 - 目录不可写：阻止创建。
 - Git 命令不可用：阻止创建并提供安装提示。
-- 数据库不可用：阻止完成，但保留未完成配置草稿。
+- 默认端口占用：启动前失败并提示释放端口或修改 `ZHIXU_HTTP_PORT`，不得选择随机端口。
+- Docker 目录未共享或容器 UID/GID 无权访问：阻止 grant，不得扩大到父目录挂载。
+- 数据库不可用：阻止激活，不提交新的 selection；切换时恢复旧 Active 或显式进入零 Active。
 - Embedding 未配置或暂时不可用：允许建立 FTS-only Active Index，Keyword 正常可用；Hybrid
   显式退化为 Keyword 并展示 vector/rerank degraded，Semantic 返回能力不可用。不得用
   `WAITING_DEPENDENCY` 阻断已经具备的全文检索，也不得以空结果冒充语义检索成功。
 
 #### 10.1.8 验收标准
 
-- 能够创建、重新打开和删除 Workspace 配置。
-- 删除配置不得删除用户文件或 Git 历史。
+- 首次可以通过本机绝对 Root 激活 Workspace，后续无参数启动复用上次成功选择。
+- A -> B 后看不到 A 的业务数据，B -> A 后恢复 A 的原 ID、索引和历史；失败切换不覆盖上次成功 selection。
+- `down` 保留 selection、PostgreSQL、模型密钥和宿主机文件；经确认的 `reset` 删除项目卷与 selection，但不得删除用户文件或 Git 历史。
+- Docker Web 固定发布到 IPv4 loopback，浏览器不依赖 Host Controller 进程或控制密钥。
 - 路径穿越和 Workspace 外写入必须被拒绝。
 - 初始扫描可以中断并恢复。
 
@@ -4799,6 +4800,9 @@ M9-03 已将 Export Panel 嵌入 Collection 详情：它只使用当前 Collecti
 - 数据导出。
 - 危险操作确认。
 
+Workspace 分类只读展示 `GET /api/v1/workspaces/active` 返回的当前身份、Root、可用性和本机切换命令。浏览器不得出现宿主机目录选择器、
+Root 修改请求或 Host Controller 控制凭据；Git 同步、模型、导出等设置继续作用于当前 Active Workspace。
+
 M9-01、M9-02、M9-03 与 M9-04 已交付当前真实契约切片：响应式 App Shell、Dashboard、Inbox、资料版本详情、Proposal、
 Workflow、Settings，以及每个 Active Workspace 唯一 SSE Owner。Inbox/详情展示的是 Source Version、摄取、解析、
 索引和 Workflow 事实，不能假称正式 Document 或伪造标准化正文。Proposal 支持 `file_patch|knowledge_change`、
@@ -4837,7 +4841,7 @@ Git 同步已在 Settings 交付独立分类：配置一个标准 HTTPS Remote�
 
 | 编号 | 能力 | 验收结果 |
 |---|---|---|
-| AC-01 | Workspace | 能完成路径、Git、数据库、模型和索引检查并创建 Workspace |
+| AC-01 | Workspace | 本机命令可精确激活、复用和安全切换 Workspace；Docker Web 固定直连，Active API 与 Workspace ID 保证业务数据不串 |
 | AC-02 | 导入 | Markdown、TXT、PDF、网页和粘贴文本可进入可追踪工作流 |
 | AC-03 | 幂等 | 相同 Source 重复导入不产生重复 Chunk 和默认检索结果 |
 | AC-04 | 隔离 | 可疑或解析失败内容不进入默认索引 |

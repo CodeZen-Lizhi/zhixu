@@ -140,20 +140,30 @@ Git 版本化正式知识和架构允许纳入版本的元数据，不版本化�
 
 ```mermaid
 flowchart LR
-    Browser["浏览器"] --> LocalApp["本机 Go API"]
-    LocalApp --> LocalWorker["本机 Go Worker"]
-    LocalApp --> PG["本机 Docker PostgreSQL"]
-    LocalWorker --> PG
-    LocalWorker --> Folder["用户本地 Workspace"]
-    LocalWorker --> Model["本地或云端模型"]
+    Terminal["本机终端\n./zhixu"] --> Control["一次性 Workspace Control"]
+    subgraph Docker["Docker Compose Runtime"]
+        Web["Web/Proxy"] --> API["Go API"]
+        API --> PG["PostgreSQL Volume"]
+        Worker["Go Worker"] --> PG
+    end
+    Browser["浏览器\n127.0.0.1:8080"] --> Web
+    Control -->|"应用 grant / 验证 ready"| API
+    Control -->|"应用 grant / 验证 ready"| Worker
+    API --> Folder["精确 Workspace Bind"]
+    Worker --> Folder
+    Worker --> Model["本地或云端模型"]
 ```
 
 特点：
 
 - 用户文件位于本机。
 - PostgreSQL 位于本机 Docker Volume。
-- 浏览器只是客户端界面。
+- Docker Web/API 固定发布到 IPv4 loopback；浏览器只是业务客户端，不选择宿主机挂载。
+- `./zhixu` 在首次启动或低频切换时调用一次性 Workspace Control，完成后不存在常驻宿主机网页进程。
+- 只有 API 与 Worker 获得当前 canonical Root 的精确 bind；切换成功后浏览器通过 Active Workspace API 建立新作用域。
 - 允许模型在本地或云端。
+
+具体命令、状态保存和故障排查见 [Workspace 与 Docker 运行手册](runbooks/workspace-runtime.md)。
 
 ## 7. 自托管模式
 
@@ -199,7 +209,7 @@ flowchart TB
 
 ## 9. 关键架构约束
 
-- 单个活动 Workspace，但所有领域表保留 workspace_id。
+- 单个活动 Workspace，但 Registry 和所有领域表保留稳定 `workspace_id`；切换 Root 不迁移或覆盖既有 Workspace 身份。
 - 正式 v1.0 不要求公网部署。
 - PostgreSQL 是必需依赖。
 - Git 是正式写回的必需依赖。

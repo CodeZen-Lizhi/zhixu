@@ -131,6 +131,8 @@ remembered Workspace selection and every host Workspace file while clearing the
 derived grant override. `./zhixu reset` is the explicit destructive command for
 Compose volumes and requires typing `DELETE`; it clears the local selection but
 preserves the launcher identity and never deletes a selected host directory.
+The complete first-use, switching, data-retention and troubleshooting guide is
+[Workspace 与 Docker 运行手册](docs/architecture/runbooks/workspace-runtime.md).
 
 The checked-in example explicitly uses development-only `disabled` auth, so it
 starts without a Bootstrap Token. To exercise `required` mode, set both

@@ -47,7 +47,8 @@ flowchart TD
 
 垂直切片：
 
-- 创建 Workspace。
+- 本机命令选择 Root、注册稳定 Workspace 身份并激活精确 grant。
+- Docker 固定 Web 入口、Active Workspace API 与低频安全切换。
 - 文件扫描。
 - Source Version Hash。
 - Git Status。
@@ -177,4 +178,3 @@ flowchart TD
 - Fault Injection。
 - Backup Restore Drill。
 - Security Scan。
-

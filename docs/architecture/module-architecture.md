@@ -69,7 +69,8 @@ flowchart TB
 
 Interface：
 
-- 创建和校验 Workspace。
+- 注册、读取和校验 Workspace 身份。
+- 返回唯一 Active Workspace 业务投影。
 - 安全读取与准备写入。
 - 计算文件版本。
 - 管理目录布局。
@@ -80,6 +81,21 @@ Interface：
 - 文件锁。
 - 临时文件。
 - 符号链接检查。
+
+### Workspace Control Boundary
+
+入口：[`zhixu`](../../zhixu) → [`cmd/workspacectl`](../../cmd/workspacectl) →
+[`internal/workspacecontrol`](../../internal/workspacecontrol)。
+
+职责：
+
+- 接受本机命令提供的绝对 Root，校验物理身份并解析稳定 Workspace ID。
+- 协调 quiesce、revoke、prepare、verify、commit、activate 与失败恢复。
+- 生成只包含 API/Worker 精确 bind 的派生 Compose grant，等待运行时 ready 后再提交 selection。
+- 完成后退出，不监听 Web 端口，也不承担业务认证、文件扫描、RAG 或页面代理。
+
+该边界不由 Presentation/Application 调用。浏览器只能通过 Workspace Module 的 Active Workspace API 读取当前业务身份，
+不能直接调用 Workspace Control 或提交宿主机路径。
 
 ### Ingestion Module
 

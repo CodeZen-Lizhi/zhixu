@@ -8,7 +8,7 @@
 
 | PRD | 功能 | 主要架构文档 | 流程/质量 |
 |---|---|---|---|
-| 10.1 | Workspace | system-context、module、data | lifecycle、security |
+| 10.1 | Workspace 选择、激活与切换 | [system-context](system-context.md)、[module](module-architecture.md)、[deployment](deployment.md)、[ADR-0020](adr/0020-docker-direct-web-and-one-shot-workspace-control.md) | [Workspace 运行手册](runbooks/workspace-runtime.md)、[security](security.md)、[Workspace Root Grant 契约](../../.trellis/spec/backend/workspace-root-grant.md) |
 | 10.2 | Inbox/导入 | data、module、workflow-engine | workflow 01 |
 | 10.3 | 解析/分块 | retrieval、interfaces | workflow 01 |
 | 10.4 | 混合检索 | retrieval、database | RAG eval |
@@ -48,6 +48,7 @@
 | AI 质量 | testing-and-evaluation、agent-rag |
 | 可替换 | interfaces-and-adapters |
 | 部署 | deployment |
+| Workspace 本机运行与切换 | [deployment](deployment.md)、[ADR-0020](adr/0020-docker-direct-web-and-one-shot-workspace-control.md)、[Workspace 运行手册](runbooks/workspace-runtime.md)、[Workspace Root Grant 契约](../../.trellis/spec/backend/workspace-root-grant.md) |
 | API 契约 | api-and-events、OpenAPI（M1 生成） |
 | 认证与授权 | ADR-0014、security、tool-security |
 | 表格与导出 | PRD 10.14/10.22、data-architecture、api-and-events |

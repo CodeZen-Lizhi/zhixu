@@ -6,6 +6,9 @@
 
 - 修改 `zhixu` 启动器、`cmd/workspacectl`、`internal/workspacecontrol`、Workspace
   Registry/Control/Runtime、`deploy/compose*.yml`、API/Worker Workspace gate、Active Workspace API 或前端根边界时，必须应用本契约。
+- 上述入口的命令、端口、状态保存、切换、认证边界或错误行为发生变化时，必须在同一改动中同步
+  `docs/architecture/runbooks/workspace-runtime.md`、`docs/architecture/deployment.md`、`docs/product/PRD.md` 和
+  `docs/architecture/requirements-traceability.md`；Active Workspace wire 变化还必须同步 OpenAPI 与前端 strict decoder。
 - Workspace Root 只由用户在本机命令中提供宿主机真实绝对路径；浏览器、业务 API 和业务容器均不得选择 mount source。
 - Docker Web/API 固定通过 IPv4 loopback 发布；宿主机不再运行常驻 Web Controller、控制会话或 HTTP 反向代理。
 
@@ -55,6 +58,8 @@
   网络命名空间的 `127.0.0.1:8081`，Docker 内 proxy/firewall 只负责 loopback 转发与容器网络隔离，不拥有 Workspace 状态。
 - `GET /api/v1/workspaces/active` 必须只接受唯一 `status='active'` Workspace，并在 managed runtime 中经 RootGrantResolver
   验证 ID、Root 和 grant 一致。零个、多个或不匹配均 fail closed，不得任选、回退 localStorage 或返回旧 Workspace。
+- `docs/architecture/runbooks/workspace-runtime.md` 是面向使用者的运行操作入口，但命令和状态语义仍以 `zhixu`、
+  `cmd/workspacectl`、Compose、OpenAPI 和本契约为实现事实源；文档不得复制已经删除的 Host Controller 操作路径。
 - 前端以 Active Workspace API 为唯一 Workspace 身份事实源。A -> B 时先 abort A 请求、停止 A SSE、清理 A Query/cache/草稿
   投影，再发布 B；旧 epoch 的迟到响应不得写入 B。
 - 删除控制 fragment、控制 Cookie、Controller CSRF/Origin 和 Controller HTTP API 不等于删除业务认证。
@@ -79,6 +84,7 @@
 | 恢复也失败但已证明 zero bind | failed + zero Active + `recovery_failed`；业务入口保持不可用 |
 | Active API 为零个、多个或与 grant 不匹配 | 稳定错误；前端卸载 Workspace 业务树，不显示旧缓存 |
 | 默认 `8080` 已占用 | 启动失败并提示释放端口或设置 `ZHIXU_HTTP_PORT`；不选随机端口 |
+| 运行手册、PRD、部署文档或 OpenAPI 与当前命令/API 不一致 | 文档一致性检查失败；不得以历史说明覆盖当前实现契约 |
 | `down` | 撤销 runtime/grant，保留 selection、PostgreSQL、模型密钥和宿主机文件 |
 | 经确认的 `reset` | 删除项目卷、selection/grant；宿主机 Workspace 文件保持原样 |
 
@@ -104,6 +110,8 @@
 - Compose contract：base zero bind；grant 模型只有 API/Worker exact bind；固定 IPv4 loopback 端口；API 内部 loopback；
   proxy/firewall 保留；无 Docker socket、随机 host port、父目录或 legacy `/workspace`。
 - HTTP/前端：Active Workspace strict decoder、唯一 active/grant mismatch、Auth 独立、A -> B Abort/cache/SSE 清理、重连与迟到响应。
+- 文档：`./zhixu help` 与运行手册命令一致；新增本地链接可解析；现行文档不得把浏览器选 Root、Host Controller 控制密钥、
+  宿主机 HTTP 代理或随机 Web 端口写成当前操作方式。
 - 真实 Docker + Browser：首次 A、刷新、`down -> up`、A -> B -> A、Unicode/空格路径、端口占用、原 Root/兄弟目录不可访问，
   桌面与移动无溢出、console/network 无意外错误。
 
@@ -115,4 +123,7 @@ Correct: Docker 固定发布 127.0.0.1:8080；一次性 workspacectl 只在启�
 
 Wrong: 切换时只改挂载路径或 localStorage Workspace ID。
 Correct: 复用持久化状态机完成 quiesce/revoke/prepare/verify/commit/activate，成功后才原子更新 selection。
+
+Wrong: 修改 launcher、Compose 或 Active Workspace API 后，只更新代码或历史 ADR。
+Correct: 同一改动同步运行手册、PRD、部署/追踪文档、OpenAPI 与前端 decoder，并用实际命令和链接检查验证。
 ```

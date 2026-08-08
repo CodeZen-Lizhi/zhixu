@@ -134,6 +134,8 @@ loopback 端口；代理只接受 Docker bridge gateway 转发的流量，拒绝
 其失败仍由 Workspace 或模型切换状态机恢复/回滚。
 launcher 在 `.zhixu/control-instance-id` 保存一个 `0600` 的稳定非密钥 UUID，作为数据库幂等命名空间；每次一次性
 命令另生成瞬时 lease owner。该 UUID 不进入浏览器、URL 或业务 API，并在 `down`/`reset` 后继续保留。
+面向使用者的首次启动、日常命令、Workspace 切换、数据保留与故障排查统一见
+[Workspace 与 Docker 运行手册](runbooks/workspace-runtime.md)。
 
 ## 8. Readiness
 

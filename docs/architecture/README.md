@@ -83,6 +83,7 @@
 
 ### Runbook
 
+- [Workspace 与 Docker 运行手册](runbooks/workspace-runtime.md)
 - [备份与恢复](runbooks/backup-and-restore.md)
 - [数据库与 Git 不一致恢复](runbooks/consistency-recovery.md)
 - [索引重建](runbooks/index-rebuild.md)
