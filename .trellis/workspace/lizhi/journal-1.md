@@ -1883,3 +1883,35 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 47: 同步 Workspace Docker 运行文档
+
+**Date**: 2026-08-09
+**Task**: 同步 Workspace Docker 运行文档
+**Branch**: `dev`
+
+### Summary
+
+以当前 zhixu launcher、一次性 Workspace Control、Docker 固定入口和 Active Workspace API 为事实源，补齐首次启动、日常操作、切换、数据保留与故障排查文档，并修正 PRD 和架构文档中的旧 Host Controller 使用流程。
+
+### Main Changes
+
+- 新增 Workspace 与 Docker 运行手册，覆盖启动前配置、首次启动、重启、切换、down、reset 和 ERR_CONNECTION_REFUSED 排查。
+- 同步 PRD 10.1、AC-01、系统上下文、模块边界、部署、需求追踪、实施清单及文档导航。
+- 在 Workspace Root Grant 规范中加入代码、运行手册、PRD、部署文档、OpenAPI 和前端 Decoder 的同步门禁。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0a8f031b` | (see git log) |
+
+### Testing
+
+- [OK] ./zhixu help 与文档命令契约一致，实时 readyz 和 Active Workspace API 正常。
+- [OK] 本地 Markdown 链接、旧行为搜索和 git diff --check 通过。
+
+### Status
+
+[OK] **Completed**

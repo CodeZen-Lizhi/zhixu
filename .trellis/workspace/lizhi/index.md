@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 46
-- **Last Active**: 2026-08-08
+- **Total Sessions**: 47
+- **Last Active**: 2026-08-09
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1885 | Active |
+| `journal-1.md` | ~1917 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 47 | 2026-08-09 | 同步 Workspace Docker 运行文档 | `0a8f031b` | `dev` |
 | 46 | 2026-08-08 | 完成 Docker 直连与 Workspace 控制重构 | `a12c343` | `dev` |
 | 45 | 2026-08-08 | 优化知识侧边栏分级导航 | `8cbdacb635d1df25fb8732c59eb45344c05fa04d` | `dev` |
 | 44 | 2026-08-08 | 接入 OpenTelemetry 与 Prometheus | `ebaf20db8b131e0a34302c7e4daebf4eb1028e60` | `dev` |
