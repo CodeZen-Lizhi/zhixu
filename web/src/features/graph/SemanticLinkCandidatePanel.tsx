@@ -12,6 +12,7 @@ import {
 } from "../../api/semantic-links";
 import type { GraphNodeRef } from "../../api/graph";
 import { SourceSpanViewer } from "../source-spans";
+import { nodeTypeLabel } from "./view-model";
 import {
   createSemanticLinkIdempotencyKey,
   useDecideSemanticLinkCandidate,
@@ -27,6 +28,7 @@ import {
   semanticLinkDiscoveryLabels,
   semanticLinkRelationLabels,
   semanticLinkRelationTypes,
+  semanticLinkScanStatusLabels,
   semanticLinkStatusLabels,
 } from "./semantic-link-view-model";
 
@@ -115,7 +117,7 @@ const CandidateCard = ({
   const actions = semanticLinkCandidateActions(candidate.status);
   return <article className={`semantic-link-card${compact ? " semantic-link-card--compact" : ""}`} aria-labelledby={titleId}>
     <div className="semantic-link-card__meta">
-      <span className="semantic-link-card__kind">Candidate · 未进入正式图</span>
+      <span className="semantic-link-card__kind">候选 · 未进入正式图</span>
       <span className={`semantic-link-status semantic-link-status--${candidate.status.toLowerCase()}`}>
         {semanticLinkStatusLabels[candidate.status]}
       </span>
@@ -124,9 +126,9 @@ const CandidateCard = ({
       因端点内容变化重新评估
     </p> : null}
     <div className="semantic-link-endpoints">
-      <div><span>{candidate.source.type}</span><strong id={titleId}>{candidate.source.summary}</strong>{candidate.source.excerpt === "" ? null : <p>{candidate.source.excerpt}</p>}<code>v{candidate.source.version} · {candidate.source.id}</code></div>
+      <div><span>{nodeTypeLabel(candidate.source.type)}</span><strong id={titleId}>{candidate.source.summary}</strong>{candidate.source.excerpt === "" ? null : <p>{candidate.source.excerpt}</p>}<code>v{candidate.source.version} · {candidate.source.id}</code></div>
       <span className="semantic-link-endpoints__arrow" aria-label="建议关联到">→</span>
-      <div><span>{candidate.target.type}</span><strong>{candidate.target.summary}</strong>{candidate.target.excerpt === "" ? null : <p>{candidate.target.excerpt}</p>}<code>v{candidate.target.version} · {candidate.target.id}</code></div>
+      <div><span>{nodeTypeLabel(candidate.target.type)}</span><strong>{candidate.target.summary}</strong>{candidate.target.excerpt === "" ? null : <p>{candidate.target.excerpt}</p>}<code>v{candidate.target.version} · {candidate.target.id}</code></div>
     </div>
     <dl className="semantic-link-card__facts">
       <div><dt>建议关系</dt><dd>{semanticLinkRelationLabels[candidate.proposedRelationType]} <code>{candidate.proposedRelationType}</code></dd></div>
@@ -148,7 +150,7 @@ const CandidateCard = ({
       </ol>}
     </details>
     {candidate.proposalId === null ? null : <p className="semantic-link-proposal">
-      <span>独立 Proposal</span><code>{candidate.proposalId}</code><strong>尚未写入正式图</strong>
+      <span>独立提案</span><code>{candidate.proposalId}</code><strong>尚未写入正式图</strong>
     </p>}
     {notice?.candidateId === candidate.id ? <p className="semantic-link-card__success" role="status">{notice.message}</p> : null}
     {actions.length === 0 ? null : <div className="semantic-link-actions" aria-label="候选决策">
@@ -345,7 +347,7 @@ export const SemanticLinkCandidatePanel = ({
       onSuccess: (receipt) => {
         const message = receipt.proposalId === null
           ? `已完成“${semanticLinkActionLabels[receipt.action]}”，服务端版本为 ${String(receipt.version)}。`
-          : `已创建独立 Proposal ${receipt.proposalId}；审批应用前不会进入正式图。`;
+          : `已创建独立提案 ${receipt.proposalId}；审批应用前不会进入正式图。`;
         setNotice({ candidateId: receipt.candidateId, message });
         setDecision(null);
         restoreDecisionFocus();
@@ -406,9 +408,9 @@ export const SemanticLinkCandidatePanel = ({
   return <section className={`semantic-link-panel${open ? " is-open" : ""}`} aria-labelledby="semantic-link-panel-title">
     <header className="semantic-link-panel__header">
       <div>
-        <span className="graph-kicker">Review queue · Candidate only</span>
+        <span className="graph-kicker">审阅队列 · 仅候选</span>
         <h2 id="semantic-link-panel-title">语义关系候选</h2>
-        <p>{nodeScope === null ? "当前 Workspace" : `${nodeScope.type} · ${nodeScope.id}`} · 与正式图谱隔离</p>
+        <p>{nodeScope === null ? "当前 Workspace" : `${nodeTypeLabel(nodeScope.type)} · ${nodeScope.id}`} · 与正式图谱隔离</p>
       </div>
       <div className="semantic-link-panel__header-actions">
         {pageCountLabel === "" ? null : <output aria-label="当前已加载候选数">{pageCountLabel}</output>}
@@ -420,7 +422,7 @@ export const SemanticLinkCandidatePanel = ({
             setOpen(true);
             startTopicScan(false);
           }}
-        >{scanMutation.isPending ? "正在启动扫描" : scanActive ? "扫描进行中" : "扫描当前 Topic"}</button>}
+        >{scanMutation.isPending ? "正在启动扫描" : scanActive ? "扫描进行中" : "扫描当前主题"}</button>}
         <button
           ref={panelTriggerRef}
           type="button"
@@ -432,9 +434,9 @@ export const SemanticLinkCandidatePanel = ({
       </div>
     </header>
     {!open ? null : <div id="semantic-link-panel-body" className="semantic-link-panel__body">
-      {topicScope === null ? <p className="semantic-link-scan-hint">选择正式 Topic 后可启动持久候选扫描；Claim 选择只过滤现有候选。</p> : null}
+      {topicScope === null ? <p className="semantic-link-scan-hint">选择正式主题后可启动持久候选扫描；主张选择只过滤现有候选。</p> : null}
       {scan === undefined ? null : <section className="semantic-link-scan" aria-live="polite">
-        <div><strong>Topic 扫描 · {scan.status}</strong><span>{String(scan.processedCount)} / {String(scan.totalCount)} 节点</span></div>
+        <div><strong>主题扫描 · {semanticLinkScanStatusLabels[scan.status]}</strong><span>{String(scan.processedCount)} / {String(scan.totalCount)} 节点</span></div>
         <progress max={Math.max(scan.totalCount, 1)} value={scan.processedCount}>{String(scan.processedCount)}</progress>
         <p>候选 {String(scan.candidateCount)} · 忽略 {String(scan.ignoredCount)} · 失败 {String(scan.failedCount)}</p>
       </section>}
@@ -519,7 +521,7 @@ export const SemanticLinkCandidatePanel = ({
         onKeyDown={handleDialogKeyDown}
       >
         <div className="semantic-link-dialog__heading">
-          <div><span className="graph-kicker">Candidate decision</span><h3 id="semantic-link-dialog-title">{semanticLinkActionLabels[decision.action]}</h3></div>
+          <div><span className="graph-kicker">候选决策</span><h3 id="semantic-link-dialog-title">{semanticLinkActionLabels[decision.action]}</h3></div>
           <button type="button" aria-label="关闭候选决策" title="关闭" disabled={decisionMutation.isPending} onClick={closeDecision}>×</button>
         </div>
         <p className="semantic-link-dialog__candidate">{decision.candidate.source.summary} → {decision.candidate.target.summary}</p>
@@ -545,7 +547,7 @@ export const SemanticLinkCandidatePanel = ({
           /></label> : null}
           {decision.action === "CONFIRM" || decision.action === "RESUME" ? <p className="semantic-link-dialog__confirmation" data-autofocus tabIndex={-1}>
             {decision.action === "CONFIRM"
-              ? `确认后将创建 ${semanticLinkRelationLabels[decision.candidate.proposedRelationType]} Proposal；审批前不会写入正式图。`
+              ? `确认后将创建 ${semanticLinkRelationLabels[decision.candidate.proposedRelationType]}提案；审批前不会写入正式图。`
               : "恢复后，该候选将回到待处理队列。"}
           </p> : null}
           {validationError === "" ? null : <p id="semantic-link-dialog-validation" className="semantic-link-dialog__validation" role="alert">{validationError}</p>}

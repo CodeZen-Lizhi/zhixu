@@ -56,6 +56,7 @@ interface AttemptStore {
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const difficultyValues: readonly InterviewDifficulty[] = ["FOUNDATION", "INTERMEDIATE", "ADVANCED"];
+const difficultyLabels: Record<InterviewDifficulty, string> = { FOUNDATION: "基础", INTERMEDIATE: "进阶", ADVANCED: "高级" };
 const textBytes = (value: string): number => new TextEncoder().encode(value).length;
 const errorText = (value: unknown): string => value instanceof Error ? value.message : "请求未完成，请重试。";
 const isRetryable = (value: unknown): value is InterviewApiError => value instanceof InterviewApiError && value.retryable;
@@ -104,11 +105,11 @@ const CommandError = ({ title, error, canRetry, onRetry }: { title: string; erro
 };
 
 const EvidenceList = ({ values, workspaceId }: { values: InterviewEvidence[]; workspaceId: string }) => {
-  if (values.length === 0) return <p className="artifact-note">报告没有附加 Evidence。</p>;
+  if (values.length === 0) return <p className="artifact-note">报告没有附加证据。</p>;
   return <ul className="interview-evidence-list">
     {values.map((item) => <li key={item.evidenceHash}>
       <div>
-        <strong>Claim {item.claimId.slice(0, 8)}…</strong>
+        <strong>知识点 {item.claimId.slice(0, 8)}…</strong>
         <code>{item.evidenceHash.slice(0, 16)}…</code>
       </div>
       <div className="button-row">
@@ -133,7 +134,7 @@ const ScorePanel = ({ result, workspaceId }: { result: SubmitInterviewTurnResult
   ];
   return <section className="interview-score" aria-label="本题服务端评分" aria-live="polite">
     <div className="interview-score__header">
-      <div><p className="eyebrow">Server score</p><h3>本题评分</h3></div>
+      <div><p className="eyebrow">服务端评分</p><h3>本题评分</h3></div>
       <div className="button-row">
         {result.turn.decision.followUpCreated ? <Badge tone="warning">已安排追问</Badge> : null}
         {result.replayed ? <Badge tone="neutral">精确重放</Badge> : null}
@@ -191,10 +192,10 @@ const ReportAndLearningPath = ({ snapshot, pending, candidatePendingStepId, cand
   return <div className="interview-report-stack">
     <Card>
       <CardHeader
-        eyebrow="Interview report"
+        eyebrow="访谈报告"
         title="面试报告"
         description={`已回答 ${String(report.summary.answeredTotal)}，跳过 ${String(report.summary.skippedTotal)}，共 ${String(report.summary.questionsTotal)} 题`}
-        action={<Button asChild size="sm" variant="secondary"><Link to={`/artifacts/${report.artifact.artifactId}`}><BookOpen size={14} />报告 Artifact</Link></Button>}
+        action={<Button asChild size="sm" variant="secondary"><Link to={`/artifacts/${report.artifact.artifactId}`}><BookOpen size={14} />查看报告产物</Link></Button>}
       />
       <dl className="interview-score-grid interview-score-grid--summary">
         {scores.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{Math.round(value * 100)}%</dd></div>)}
@@ -207,13 +208,13 @@ const ReportAndLearningPath = ({ snapshot, pending, candidatePendingStepId, cand
 
     <Card>
       <CardHeader
-        eyebrow="Learning path"
+        eyebrow="学习路径"
         title="学习路径"
-        description={`Artifact v${String(path.artifact.artifactVersion)} · ${pathStatusLabel[path.status]} · 路径版本 ${String(path.version)}`}
+        description={`产物 v${String(path.artifact.artifactVersion)} · ${pathStatusLabel[path.status]} · 路径版本 ${String(path.version)}`}
         action={path.status === "COMPLETED" ? <Badge tone="success">已完成</Badge> : pathActions}
       />
       <div className="button-row interview-artifact-link">
-        <Button asChild size="sm" variant="ghost"><Link to={`/artifacts/${path.artifact.artifactId}`}><BookOpen size={14} />打开 Learning Path Artifact</Link></Button>
+        <Button asChild size="sm" variant="ghost"><Link to={`/artifacts/${path.artifact.artifactId}`}><BookOpen size={14} />打开学习路径产物</Link></Button>
       </div>
       {path.status === "PAUSED" ? <UnavailableState title="学习路径已暂停" description="恢复后可继续更新步骤。" /> : null}
       {steps.length === 0 ? <EmptyState title="没有学习步骤" description="当前报告没有生成需要补强的知识步骤。" /> : <ol className="learning-path-list">
@@ -225,7 +226,7 @@ const ReportAndLearningPath = ({ snapshot, pending, candidatePendingStepId, cand
             <div className="learning-path-step__body">
               <div className="learning-path-step__header"><h3>{step.title}</h3><Badge tone={step.status === "COMPLETED" ? "success" : step.status === "SKIPPED" ? "neutral" : "info"}>{stepStatusLabel[step.status]}</Badge></div>
               <p>{step.rationale}</p>
-              <p className="learning-path-step__binding">Claim {step.claimId} · Evidence {step.evidenceHash.slice(0, 16)}…</p>
+              <p className="learning-path-step__binding">知识点 {step.claimId} · 证据 {step.evidenceHash.slice(0, 16)}…</p>
               <div className="button-row">
                 <SourceSpanViewer
                   className="ui-button ui-button--secondary ui-button--sm"
@@ -233,14 +234,14 @@ const ReportAndLearningPath = ({ snapshot, pending, candidatePendingStepId, cand
                   reference={{ workspaceId: step.workspaceId, sourceVersionId: step.sourceVersionId, sourceSpanId: step.sourceSpanId }}
                 />
                 <Button size="sm" variant="secondary" onClick={() => onMemoryCandidate(step.id)} disabled={pending}>
-                  <Brain size={14} />{candidatePendingStepId === step.id ? "正在创建…" : "创建 Memory 候选"}
+                  <Brain size={14} />{candidatePendingStepId === step.id ? "正在创建…" : "创建记忆候选"}
                 </Button>
                 {step.status === "PENDING" ? <Button size="sm" onClick={() => onStep(step.id, "IN_PROGRESS")} disabled={disabled}><CirclePlay size={14} />开始</Button> : null}
                 {step.status === "PENDING" || step.status === "IN_PROGRESS" ? <Button size="sm" onClick={() => onStep(step.id, "COMPLETED")} disabled={disabled}><CheckCircle2 size={14} />完成</Button> : null}
                 {!terminal ? <Button size="sm" variant="ghost" onClick={() => onStep(step.id, "SKIPPED")} disabled={disabled}>跳过</Button> : null}
               </div>
               {candidateNotice?.stepId === step.id ? <p className="sidebar-note" role="status">
-                {candidateNotice.replayed ? "该步骤的待确认候选已存在。" : "待确认候选已创建。"} <Link to="/memories">前往 Memory 确认</Link>
+                {candidateNotice.replayed ? "该步骤的待确认候选已存在。" : "待确认候选已创建。"} <Link to="/memories">前往记忆确认</Link>
               </p> : null}
             </div>
           </li>;
@@ -282,13 +283,13 @@ export const InterviewsPage = () => {
     setFormError(undefined);
     try {
       const normalizedRole = role.trim();
-      const claims = parseScopeIds(claimIds, "Claim IDs");
-      const topics = parseScopeIds(topicIds, "Topic IDs");
+      const claims = parseScopeIds(claimIds, "知识点 ID");
+      const topics = parseScopeIds(topicIds, "主题 ID");
       const durationMinutes = Number(duration);
       const questions = Number(questionCount);
       const followUps = Number(maxFollowUps);
       if (normalizedRole === "" || textBytes(normalizedRole) > 256) throw new Error("岗位名称必须为 1 到 256 字节。 ");
-      if (claims.length === 0 && topics.length === 0) throw new Error("至少需要一个 Claim 或 Topic ID。");
+      if (claims.length === 0 && topics.length === 0) throw new Error("至少需要一个知识点或主题 ID。");
       if (!Number.isInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 240) throw new Error("面试时长必须为 1 到 240 分钟。");
       if (!Number.isInteger(questions) || questions < 1 || questions > 20) throw new Error("题目数必须为 1 到 20。");
       if (!Number.isInteger(followUps) || followUps < 0 || followUps > 20) throw new Error("追问数必须为 0 到 20。");
@@ -311,27 +312,27 @@ export const InterviewsPage = () => {
   const recoverSession = (): void => {
     const value = recoverySessionId.trim();
     if (!uuidPattern.test(value)) {
-      setRecoveryError("请输入有效的 Interview Session UUID。");
+      setRecoveryError("请输入有效的访谈会话 UUID。");
       return;
     }
     setRecoveryError(undefined);
     void navigate(`/interviews/${value}`);
   };
 
-  if (workspaceId === "") return <div className="page-stack"><UnavailableState title="请选择 Workspace" description="Interview 只能从当前 Workspace 的正式知识开始。" /></div>;
+  if (workspaceId === "") return <div className="page-stack"><UnavailableState title="请选择 Workspace" description="访谈只能从当前 Workspace 的正式知识开始。" /></div>;
 
   return <div className="page-stack">
     <div className="page-intro page-intro--split">
       <div><h1>访谈</h1><p>基于知识内容进行模拟问答。</p></div>
-      <div className="folio-mark"><Target size={20} /><strong>Interview</strong><span>evidence bound</span></div>
+      <div className="folio-mark"><Target size={20} /><strong>访谈</strong><span>证据绑定</span></div>
     </div>
     <div className="interview-start-grid">
       <Card>
-        <CardHeader eyebrow="Start interview" title="配置面试" description="范围可由 Claim、Topic 或两者共同组成。" />
+        <CardHeader eyebrow="开始访谈" title="配置面试" description="范围可由知识点、主题或两者共同组成。" />
         <form className="artifact-form" onSubmit={(event) => { event.preventDefault(); submitConfiguration(); }}>
           <label className="artifact-form__wide">岗位<input required value={role} onChange={(event) => setRole(event.target.value)} maxLength={256} autoComplete="off" /></label>
-          <label className="artifact-form__wide">Claim IDs<textarea value={claimIds} onChange={(event) => setClaimIds(event.target.value)} spellCheck={false} /></label>
-          <label className="artifact-form__wide">Topic IDs<textarea value={topicIds} onChange={(event) => setTopicIds(event.target.value)} spellCheck={false} /></label>
+          <label className="artifact-form__wide">知识点 ID<textarea value={claimIds} onChange={(event) => setClaimIds(event.target.value)} spellCheck={false} /></label>
+          <label className="artifact-form__wide">主题 ID<textarea value={topicIds} onChange={(event) => setTopicIds(event.target.value)} spellCheck={false} /></label>
           <label>难度<select value={difficulty} onChange={(event) => { if (isDifficulty(event.target.value)) setDifficulty(event.target.value); }}><option value="FOUNDATION">基础</option><option value="INTERMEDIATE">进阶</option><option value="ADVANCED">高级</option></select></label>
           <label>时长（分钟）<input type="number" min="1" max="240" step="1" value={duration} onChange={(event) => setDuration(event.target.value)} /></label>
           <label>题目数<input type="number" min="1" max="20" step="1" value={questionCount} onChange={(event) => setQuestionCount(event.target.value)} /></label>
@@ -343,9 +344,9 @@ export const InterviewsPage = () => {
       </Card>
 
       <Card>
-        <CardHeader eyebrow="Resume" title="恢复面试会话" description="会话、已答题目和报告从服务端投影恢复。" />
+        <CardHeader eyebrow="恢复会话" title="恢复面试会话" description="会话、已答题目和报告从服务端投影恢复。" />
         <form className="interview-resume-form" onSubmit={(event) => { event.preventDefault(); recoverSession(); }}>
-          <label>Session ID<input value={recoverySessionId} onChange={(event) => setRecoverySessionId(event.target.value)} spellCheck={false} autoComplete="off" /></label>
+          <label>会话 ID<input value={recoverySessionId} onChange={(event) => setRecoverySessionId(event.target.value)} spellCheck={false} autoComplete="off" /></label>
           <Button type="submit" variant="secondary"><RefreshCw size={15} />恢复会话</Button>
         </form>
         {recoveryError !== undefined ? <p className="form-error" role="alert">{recoveryError}</p> : null}
@@ -353,7 +354,7 @@ export const InterviewsPage = () => {
     </div>
     <Card className="interview-session-history">
       <CardHeader
-        eyebrow="Session history"
+        eyebrow="会话历史"
         title="最近会话"
         description="按开始时间倒序"
         action={<span className="interview-session-history__count"><History size={15} />{String(sessionItems.length)} 场</span>}
@@ -368,7 +369,7 @@ export const InterviewsPage = () => {
               <strong>{session.config.role}</strong>
               <Badge tone={session.status === "COMPLETED" ? "success" : session.status === "CANCELLED" ? "danger" : "info"}>{interviewSessionStatusLabel[session.status]}</Badge>
             </div>
-            <span>{session.config.difficulty} · {String(session.config.questionCount)} 题 · {String(session.config.durationMinutes)} 分钟</span>
+            <span>{difficultyLabels[session.config.difficulty]} · {String(session.config.questionCount)} 题 · {String(session.config.durationMinutes)} 分钟</span>
             <time dateTime={session.startedAt}>{new Date(session.startedAt).toLocaleString("zh-CN")}</time>
           </div>
           <Button asChild size="sm" variant={session.status === "ACTIVE" ? "primary" : "secondary"}>
@@ -552,12 +553,12 @@ export const InterviewSessionPage = () => {
     {data === undefined ? null : <>
       <Card className="interview-session-summary">
         <CardHeader
-          eyebrow="Session"
+          eyebrow="面试会话"
           title={data.session.config.role}
-          description={`${data.session.config.difficulty} · ${String(data.session.config.durationMinutes)} 分钟 · 最多 ${String(data.session.config.maxFollowUps)} 次追问`}
+          description={`${difficultyLabels[data.session.config.difficulty]} · ${String(data.session.config.durationMinutes)} 分钟 · 最多 ${String(data.session.config.maxFollowUps)} 次追问`}
           action={<div className="button-row">
             {data.session.status === "ACTIVE" ? <Badge tone={deadlineExpired ? "warning" : "info"}>{deadlineExpired ? "时间已到" : `剩余 ${remainingTimeLabel(remainingMilliseconds)}`}</Badge> : null}
-            <Badge tone={data.session.status === "COMPLETED" ? "success" : data.session.status === "CANCELLED" ? "danger" : "info"}>{data.session.status}</Badge>
+            <Badge tone={data.session.status === "COMPLETED" ? "success" : data.session.status === "CANCELLED" ? "danger" : "info"}>{interviewSessionStatusLabel[data.session.status]}</Badge>
           </div>}
         />
         <div className="interview-progress-row">
@@ -570,7 +571,7 @@ export const InterviewSessionPage = () => {
       {data.session.status === "CANCELLED" ? <UnavailableState title="面试已取消" description="该会话保留为只读恢复事实，不会生成报告。" /> : null}
       {data.session.status === "ACTIVE" ? <Card className="interview-question-card">
         <CardHeader
-          eyebrow={lastResult === undefined && activeQuestion !== undefined ? `Question ${String(activeQuestion.questionNo)}${activeQuestion.followUpNo > 0 ? ` · Follow-up ${String(activeQuestion.followUpNo)}` : ""}` : "Turn result"}
+          eyebrow={lastResult === undefined && activeQuestion !== undefined ? `第 ${String(activeQuestion.questionNo)} 题${activeQuestion.followUpNo > 0 ? ` · 第 ${String(activeQuestion.followUpNo)} 次追问` : ""}` : "作答结果"}
           title={lastResult === undefined ? activeQuestion?.prompt ?? "题目已全部处理" : "评分已记录"}
           description={lastResult === undefined ? "评分依据将在提交后显示。" : "下一题决策来自已持久化的服务端 Turn。"}
         />
@@ -615,7 +616,7 @@ export const InterviewSessionPage = () => {
       />
       <CommandError title="学习路径状态未更新" error={pathStatus.error} canRetry={pathStatus.variables !== undefined} onRetry={() => { if (pathStatus.variables !== undefined) runPathStatus(pathStatus.variables); }} />
       <CommandError title="学习步骤未更新" error={stepStatus.error} canRetry={stepStatus.variables !== undefined} onRetry={() => { if (stepStatus.variables !== undefined) runStepStatus(stepStatus.variables); }} />
-      <CommandError title="Memory 候选未创建" error={memoryCandidate.error} canRetry={memoryCandidate.variables !== undefined} onRetry={() => { if (memoryCandidate.variables !== undefined) runMemoryCandidate(memoryCandidate.variables); }} />
+      <CommandError title="记忆候选未创建" error={memoryCandidate.error} canRetry={memoryCandidate.variables !== undefined} onRetry={() => { if (memoryCandidate.variables !== undefined) runMemoryCandidate(memoryCandidate.variables); }} />
     </>}
     <EarlyEndDialog open={earlyEndOpen} onOpenChange={setEarlyEndOpen} onConfirm={() => finish(true)} pending={complete.isPending} expired={deadlineExpired} restoreFocusRef={earlyEndButtonRef} />
   </div>;

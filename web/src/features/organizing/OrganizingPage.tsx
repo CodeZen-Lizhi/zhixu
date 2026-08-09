@@ -65,10 +65,10 @@ const commandKey = (kind: string): string => `${kind}-${crypto.randomUUID()}`;
 const mandatoryGovernanceSectionKeys = new Set(["conflicts", "gaps", "sources"]);
 
 const kindMeta: Record<OrganizingMaterialKind, { label: string; hint: string; icon: typeof FileText }> = {
-  SOURCE_VERSION: { label: "资料版本", hint: "Source Version ID", icon: FileText },
-  DOCUMENT_REVISION: { label: "文章版本", hint: "Article Revision ID", icon: BookOpenText },
-  CLAIM: { label: "正式知识", hint: "Claim ID", icon: CircleDot },
-  SMART_COLLECTION: { label: "智能集合", hint: "Collection ID", icon: FolderSearch },
+  SOURCE_VERSION: { label: "资料版本", hint: "资料版本 ID", icon: FileText },
+  DOCUMENT_REVISION: { label: "文章版本", hint: "文章修订版本 ID", icon: BookOpenText },
+  CLAIM: { label: "正式知识", hint: "知识点 ID", icon: CircleDot },
+  SMART_COLLECTION: { label: "智能集合", hint: "集合 ID", icon: FolderSearch },
 };
 
 const templateMeta: Record<OrganizingTemplateKind, { output: string; governance: string }> = {
@@ -119,7 +119,7 @@ const originCollectionId = (reference: OrganizingMaterialReference): string | nu
 };
 
 const EvidenceList = ({ evidence, workspaceId, summary }: { evidence: readonly OrganizingEvidence[]; workspaceId: string; summary: string }) => evidence.length === 0
-  ? <p className="organizing-material__no-evidence">当前材料没有可打开的 Source Span。</p>
+  ? <p className="organizing-material__no-evidence">当前材料没有可打开的来源片段。</p>
   : <details className="organizing-evidence">
     <summary>{summary} ({evidence.length})</summary>
     <ol>{evidence.map((item) => <li key={`${item.indexVersionId}:${item.chunkId}:${item.sourceSpanId}`}>
@@ -138,13 +138,13 @@ const SnapshotMaterialRow = ({ material, workspaceId }: { material: OrganizingSn
       {material.reference.kind === "SMART_COLLECTION" ? <>
         <div><dt>集合标记</dt><dd><code>{material.reference.collectionId}</code></dd></div>
         <div><dt>集合版本</dt><dd>{material.reference.collectionVersion}</dd></div>
-        <div><dt>查询 Hash</dt><dd><code>{material.reference.queryHash}</code></dd></div>
-        <div><dt>Read Model Revision</dt><dd><code>{material.reference.readModelRevision}</code></dd></div>
+        <div><dt>查询哈希</dt><dd><code>{material.reference.queryHash}</code></dd></div>
+        <div><dt>读模型修订版本</dt><dd><code>{material.reference.readModelRevision}</code></dd></div>
       </> : <>
-        <div><dt>内容 Hash</dt><dd><code>{material.reference.contentHash}</code></dd></div>
-        {material.reference.kind === "SOURCE_VERSION" ? <div><dt>Profile Revision</dt><dd>{material.reference.profileRevisionId === null ? "未绑定" : <code>{material.reference.profileRevisionId}</code>}</dd></div> : null}
-        {material.reference.kind === "DOCUMENT_REVISION" ? <div><dt>Revision 序号</dt><dd>{material.reference.revisionNo}</dd></div> : null}
-        {material.reference.kind === "CLAIM" ? <div><dt>Claim 版本</dt><dd>{material.reference.claimVersion}</dd></div> : null}
+        <div><dt>内容哈希</dt><dd><code>{material.reference.contentHash}</code></dd></div>
+        {material.reference.kind === "SOURCE_VERSION" ? <div><dt>知识配置修订版本</dt><dd>{material.reference.profileRevisionId === null ? "未绑定" : <code>{material.reference.profileRevisionId}</code>}</dd></div> : null}
+        {material.reference.kind === "DOCUMENT_REVISION" ? <div><dt>修订版本序号</dt><dd>{material.reference.revisionNo}</dd></div> : null}
+        {material.reference.kind === "CLAIM" ? <div><dt>知识点版本</dt><dd>{material.reference.claimVersion}</dd></div> : null}
         {collectionId !== null ? <div><dt>来源集合</dt><dd><code>{collectionId}</code></dd></div> : null}
       </>}
     </dl>
@@ -172,22 +172,22 @@ const RunPanel = ({ snapshot, run, loading, error, onRetry }: { snapshot: Organi
           ? { title: "整理结果已生成", detail: "结果仍遵守对应的发布与审批边界。" }
           : run?.status === "FAILED"
             ? { title: "整理流程失败", detail: run.errorCode ?? "服务端没有返回失败码。" }
-            : { title: "正在读取启动状态", detail: "Snapshot 已经保存，页面刷新不会改变它。" };
+            : { title: "正在读取启动状态", detail: "快照已经保存，页面刷新不会改变它。" };
 
   return <section className="organizing-result" aria-labelledby="organizing-result-heading">
     <div className="organizing-result__mark"><Check size={20} /></div>
     <div>
-      <p className="eyebrow">Workflow Input Snapshot</p>
+      <p className="eyebrow">Workflow 输入快照</p>
       <h2 id="organizing-result-heading">{meta.title}</h2>
       <p>{meta.detail}</p>
       <dl>
         <div><dt>材料</dt><dd>{snapshot.materials.length} 项</dd></div>
-        <div><dt>模板 Revision</dt><dd><code>{snapshot.templateRevisionId}</code></dd></div>
-        <div><dt>模板 Hash</dt><dd><code>{snapshot.templateHash}</code></dd></div>
-        <div><dt>Snapshot</dt><dd><code>{snapshot.canonicalHash}</code></dd></div>
+        <div><dt>模板修订版本</dt><dd><code>{snapshot.templateRevisionId}</code></dd></div>
+        <div><dt>模板哈希</dt><dd><code>{snapshot.templateHash}</code></dd></div>
+        <div><dt>快照</dt><dd><code>{snapshot.canonicalHash}</code></dd></div>
       </dl>
       <section className="organizing-snapshot-detail" aria-labelledby="organizing-snapshot-detail-heading">
-        <div><p className="eyebrow">Frozen Inputs</p><h3 id="organizing-snapshot-detail-heading">已冻结的材料与证据</h3></div>
+        <div><p className="eyebrow">已冻结输入</p><h3 id="organizing-snapshot-detail-heading">已冻结的材料与证据</h3></div>
         <ol>{snapshot.materials.map((material) => <SnapshotMaterialRow key={material.position} material={material} workspaceId={snapshot.workspaceId} />)}</ol>
       </section>
       {loading ? <p className="organizing-inline-state" role="status"><LoaderCircle className="organizing-spin" size={16} />正在读取流程状态…</p> : null}
@@ -400,10 +400,10 @@ const TemplateManagement = ({ templates, onTemplateRevised }: { templates: Organ
 
   return <section className="organizing-template-management" aria-labelledby="organizing-template-management-heading">
     <div className="organizing-section-heading">
-      <div><p className="eyebrow">Template Library</p><h2 id="organizing-template-management-heading">管理自定义模板</h2></div>
+      <div><p className="eyebrow">模板库</p><h2 id="organizing-template-management-heading">管理自定义模板</h2></div>
       <span>{customTemplates.length} 个自定义模板</span>
     </div>
-    <p className="organizing-template-management__intro">内置模板保持受控；复制后才可在当前 Workspace 中维护新的 Revision。修改只影响之后确认的整理任务。</p>
+    <p className="organizing-template-management__intro">内置模板保持受控；复制后才可在当前 Workspace 中维护新的修订版本。修改只影响之后确认的整理任务。</p>
 
     <div className="organizing-template-clone">
       <label><span>复制来源</span><select value={cloneSource?.id ?? ""} disabled={busy || cloneSource === undefined} onChange={(event) => {
@@ -464,8 +464,8 @@ const TemplateManagement = ({ templates, onTemplateRevised }: { templates: Organ
         </div>
         <label className="organizing-template-editor__instructions"><span>补充要求</span><textarea value={form.additionalInstructions} rows={3} maxLength={8192} disabled={busy} onChange={(event) => updateForm((current) => ({ ...current, additionalInstructions: event.target.value }))} /></label>
         {declarationValidation !== null ? <p className="organizing-form-error" role="alert">{declarationValidation}</p> : null}
-        {revisionError !== undefined ? <ErrorState title="模板 Revision 没有保存" description={errorText(revisionError)} onRetry={() => { void saveRevision(); }} /> : null}
-        <div className="organizing-template-editor__actions"><Button variant="secondary" onClick={() => { setForm(declarationCopy(editingTemplate.currentRevision.declaration)); setRevisionError(undefined); }} disabled={busy}><RotateCcw size={16} />恢复已保存版本</Button><Button onClick={() => { void saveRevision(); }} disabled={busy || declarationValidation !== null}><Save size={16} />{revise.isPending ? "正在保存…" : `保存 Revision ${String(editingTemplate.currentRevision.revisionNo + 1)}`}</Button></div>
+        {revisionError !== undefined ? <ErrorState title="模板修订版本没有保存" description={errorText(revisionError)} onRetry={() => { void saveRevision(); }} /> : null}
+        <div className="organizing-template-editor__actions"><Button variant="secondary" onClick={() => { setForm(declarationCopy(editingTemplate.currentRevision.declaration)); setRevisionError(undefined); }} disabled={busy}><RotateCcw size={16} />恢复已保存版本</Button><Button onClick={() => { void saveRevision(); }} disabled={busy || declarationValidation !== null}><Save size={16} />{revise.isPending ? "正在保存…" : `保存修订版本 ${String(editingTemplate.currentRevision.revisionNo + 1)}`}</Button></div>
       </div> : null}
     </div>}
   </section>;
@@ -636,7 +636,7 @@ const DraftWorkspace = ({ draft, templates, snapshotId, onSnapshot, onRefresh }:
   return <>
     <section className="organizing-brief" aria-labelledby="organizing-brief-heading">
       <div className="organizing-section-heading">
-        <div><p className="eyebrow">01 · Brief</p><h2 id="organizing-brief-heading">定义整理目标</h2></div>
+        <div><p className="eyebrow">01 · 整理目标</p><h2 id="organizing-brief-heading">定义整理目标</h2></div>
         <Badge tone={editing ? "info" : "neutral"}>{editing ? `草稿 v${String(draft.version)}` : "输入已冻结"}</Badge>
       </div>
       <label className="organizing-intent">
@@ -695,13 +695,13 @@ const DraftWorkspace = ({ draft, templates, snapshotId, onSnapshot, onRefresh }:
       <aside className="organizing-confirm" aria-labelledby="organizing-confirm-heading">
         <p className="eyebrow">03 · Confirm</p>
         <h2 id="organizing-confirm-heading">冻结本次输入</h2>
-        <p>确认后会保存材料版本、证据和模板 Revision，再异步启动整理流程。</p>
+        <p>确认后会保存材料版本、证据和模板修订版本，再异步启动整理流程。</p>
         <dl>
           <div><dt>已选择</dt><dd>{selectedCount} / {draft.materials.length}</dd></div>
           <div><dt>需处理</dt><dd>{unavailableCount}</dd></div>
           <div><dt>模板</dt><dd>{selectedTemplate?.name ?? "未选择"}</dd></div>
         </dl>
-        {confirmBlocked !== null ? <p className="organizing-confirm__blocked"><AlertTriangle size={15} />{confirmBlocked}</p> : <p className="organizing-confirm__ready"><Check size={15} />可以冻结为不可变 Snapshot</p>}
+        {confirmBlocked !== null ? <p className="organizing-confirm__blocked"><AlertTriangle size={15} />{confirmBlocked}</p> : <p className="organizing-confirm__ready"><Check size={15} />可以冻结为不可变快照</p>}
         <Button onClick={() => { void confirmMaterials(); }} disabled={!editing || busy || confirmBlocked !== null}>{confirm.isPending ? <LoaderCircle className="organizing-spin" size={16} /> : <Layers3 size={16} />}{confirm.isPending ? "正在确认…" : "确认材料并开始整理"}</Button>
         <small>这个操作不会直接覆盖资料或文章。</small>
       </aside>
@@ -763,14 +763,14 @@ export const OrganizingPage = () => {
   const humanTask = waitingForHuman ? workflow.data?.humanTask : undefined;
 
   if (workspaceId === "") return <div className="page-stack organizing-page"><PageHeader title="整理成文" /><EmptyState title="先连接 Workspace" description="连接工作区后才能建议、确认和冻结材料。" action={<Button asChild><Link to="/workspace">连接 Workspace</Link></Button>} /></div>;
-  if (invalidRoute) return <div className="page-stack organizing-page"><PageHeader title="整理成文" /><ErrorState title="整理链接无效" description="Draft 或 Snapshot 参数不是唯一的规范 UUID。" /><Button asChild variant="secondary"><Link to="/authoring/organize">重新开始</Link></Button></div>;
+  if (invalidRoute) return <div className="page-stack organizing-page"><PageHeader title="整理成文" /><ErrorState title="整理链接无效" description="草稿或快照参数不是唯一的规范 UUID。" /><Button asChild variant="secondary"><Link to="/authoring/organize">重新开始</Link></Button></div>;
 
   return <div className="page-stack organizing-page">
     <div className="organizing-page__back"><Link to="/authoring"><ArrowLeft size={15} />返回创作</Link></div>
     <PageHeader title="整理成文" description="先核对材料和版本，再明确授权启动生成。" />
 
     {draftId === "" ? <section className="organizing-bootstrap" aria-labelledby="organizing-start-heading">
-      <div className="organizing-section-heading"><div><p className="eyebrow">Start With An Intent</p><h2 id="organizing-start-heading">先写下你要解决的问题</h2></div></div>
+      <div className="organizing-section-heading"><div><p className="eyebrow">从意图开始</p><h2 id="organizing-start-heading">先写下你要解决的问题</h2></div></div>
       <label className="organizing-intent"><span>整理目标</span><textarea value={newIntent} rows={4} maxLength={4096} placeholder="例如：把项目里关于事件恢复和幂等处理的资料整理成一篇专题文章" onChange={(event) => setNewIntent(event.target.value)} /></label>
       <div className="organizing-brief__actions"><Button onClick={startCreate} disabled={create.isPending || newIntent.trim() === ""}><Plus size={16} />{create.isPending ? "正在建立草稿…" : "开始整理"}</Button></div>
       {create.isError ? <ErrorState title="无法建立整理草稿" description={errorText(create.error)} onRetry={startCreate} /> : null}
@@ -780,12 +780,12 @@ export const OrganizingPage = () => {
     {draftId !== "" && draftQuery.isError ? <ErrorState title="无法恢复整理草稿" description={errorText(draftQuery.error)} onRetry={() => { void draftQuery.refetch(); }} /> : null}
     {draftId !== "" && templates.isPending ? <p className="organizing-inline-state" role="status"><LoaderCircle className="organizing-spin" size={18} />正在读取整理模板…</p> : null}
     {templates.isError ? <ErrorState title="模板暂不可读" description={errorText(templates.error)} onRetry={() => { void templates.refetch(); }} /> : null}
-    {draftQuery.data && !templates.isPending && !templates.isError && templates.data.length === 0 ? <EmptyState title="没有可用的整理模板" description="至少需要一个服务端模板 Revision 才能冻结整理输入。" /> : null}
+    {draftQuery.data && !templates.isPending && !templates.isError && templates.data.length === 0 ? <EmptyState title="没有可用的整理模板" description="至少需要一个服务端模板修订版本才能冻结整理输入。" /> : null}
     {draftQuery.data && templates.data && templates.data.length > 0 && !snapshotBindingInvalid ? <DraftWorkspace draft={draftQuery.data} templates={templates.data} snapshotId={snapshotId} onSnapshot={showSnapshot} onRefresh={() => { void draftQuery.refetch(); }} /> : null}
 
-    {snapshotId !== "" && snapshot.isPending ? <p className="organizing-inline-state" role="status"><LoaderCircle className="organizing-spin" size={18} />正在恢复输入 Snapshot…</p> : null}
-    {snapshotId !== "" && snapshot.isError ? <ErrorState title="无法恢复输入 Snapshot" description={errorText(snapshot.error)} onRetry={() => { void snapshot.refetch(); }} /> : null}
-    {snapshotBindingInvalid ? <ErrorState title="Snapshot 与草稿不匹配" description="这个链接组合了不同整理任务的 Draft 与 Snapshot。" /> : null}
+    {snapshotId !== "" && snapshot.isPending ? <p className="organizing-inline-state" role="status"><LoaderCircle className="organizing-spin" size={18} />正在恢复输入快照…</p> : null}
+    {snapshotId !== "" && snapshot.isError ? <ErrorState title="无法恢复输入快照" description={errorText(snapshot.error)} onRetry={() => { void snapshot.refetch(); }} /> : null}
+    {snapshotBindingInvalid ? <ErrorState title="快照与草稿不匹配" description="这个链接组合了不同整理任务的草稿与快照。" /> : null}
     {snapshot.data && !snapshotBindingInvalid ? <RunPanel snapshot={snapshot.data} run={run.data} loading={run.isPending} error={run.error} onRetry={() => { void run.refetch(); }} /> : null}
     {waitingForHuman && workflow.isPending ? <p className="organizing-inline-state" role="status"><LoaderCircle className="organizing-spin" size={18} />正在读取待确认内容…</p> : null}
     {waitingForHuman && workflow.isError ? <ErrorState title="待确认内容暂不可读" description={workflow.error.message} onRetry={() => { void workflow.refetch(); }} /> : null}

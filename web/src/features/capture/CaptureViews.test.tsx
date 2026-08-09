@@ -171,7 +171,7 @@ describe("Capture Inbox and detail views", () => {
 
     renderDetail();
 
-    expect(screen.getByText(/不是已确认的 Topic、Claim 或 Relation/)).toBeInTheDocument();
+    expect(screen.getByText(/不是已确认的主题、主张或关系/)).toBeInTheDocument();
     const candidate = screen.getByText("Java AI").closest("article");
     if (candidate === null) throw new Error("candidate article is missing");
     fireEvent.click(within(candidate).getByText("1 个来源片段"));

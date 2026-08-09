@@ -12,6 +12,7 @@ import {
   saveGitRemoteConfig,
   testGitRemoteConfig,
   type GitSecretAction,
+  type GitFileChangeKind,
   type SaveGitRemoteInput,
   type TestGitRemoteInput,
   type GitSyncFailureClass,
@@ -48,6 +49,12 @@ const failureLabel: Record<GitSyncFailureClass, string> = {
 const indexLabel: Record<GitSyncIndexStatus, string> = {
   NOT_REQUIRED: "无需更新", PENDING: "等待重新索引", RUNNING: "正在重新索引", SUCCEEDED: "知识索引已更新", FAILED: "重新索引失败",
 };
+const fileChangeLabel: Record<GitFileChangeKind, string> = {
+  ADDED: "新增",
+  MODIFIED: "修改",
+  DELETED: "删除",
+  RENAMED: "重命名",
+};
 
 const statusTone = (status: GitSyncRunStatus): "success" | "warning" | "danger" | "info" => status === "SUCCEEDED" ? "success" : activeStatuses.has(status) ? "info" : status === "CONFLICT" || status === "STALE" ? "warning" : "danger";
 const indexTone = (status: GitSyncIndexStatus): "success" | "warning" | "danger" | "neutral" => status === "SUCCEEDED" ? "success" : status === "FAILED" ? "danger" : status === "PENDING" || status === "RUNNING" ? "warning" : "neutral";
@@ -66,7 +73,7 @@ const RunSummary = ({ run, onRetry, retrying }: { run: GitSyncRun; onRetry: () =
       <div><span>知识索引</span><strong><Badge tone={indexTone(run.indexStatus)}>{indexLabel[run.indexStatus]}</Badge></strong></div>
     </div>
     {run.failureClass === "NONE" ? null : <p className="git-sync-run__notice" role="alert"><AlertTriangle size={15} />{failureLabel[run.failureClass]}{run.errorCode ? `（${run.errorCode}）` : ""}</p>}
-    {run.changedFiles.length === 0 ? null : <details className="git-sync-run__changes"><summary>{run.changedFiles.length === gitSyncMaxChangedFiles ? `显示前 ${String(gitSyncMaxChangedFiles)} 个文件变化，可能还有更多` : `${String(run.changedFiles.length)} 个文件发生变化`}</summary><ul>{run.changedFiles.map((change) => <li key={`${change.kind}:${change.oldPath ?? ""}:${change.path}`}><span>{change.kind}</span><code>{change.oldPath ? `${change.oldPath} → ${change.path}` : change.path}</code></li>)}</ul></details>}
+    {run.changedFiles.length === 0 ? null : <details className="git-sync-run__changes"><summary>{run.changedFiles.length === gitSyncMaxChangedFiles ? `显示前 ${String(gitSyncMaxChangedFiles)} 个文件变化，可能还有更多` : `${String(run.changedFiles.length)} 个文件发生变化`}</summary><ul>{run.changedFiles.map((change) => <li key={`${change.kind}:${change.oldPath ?? ""}:${change.path}`}><span>{fileChangeLabel[change.kind]}</span><code>{change.oldPath ? `${change.oldPath} → ${change.path}` : change.path}</code></li>)}</ul></details>}
     {showRetry ? <Button size="sm" variant="secondary" disabled={retrying} onClick={onRetry}><RefreshCw className={retrying ? "is-spinning" : undefined} size={14} />{retrying ? "正在重试…" : retryIndex ? "重试索引" : "重新同步"}</Button> : null}
   </article>;
 };
@@ -248,7 +255,7 @@ export const GitRemoteSettingsPanel = () => {
     <header className="settings-section__header"><div><h2 id="git-remote-settings-title">Git 同步</h2><p>使用标准 HTTPS Remote 同步当前分支；不会自动合并、变基或强制推送。</p></div>{loadedConfig.configured ? <Badge tone={loadedConfig.tokenConfigured ? "success" : "warning"}>{loadedConfig.tokenConfigured ? "已配置" : "缺少令牌"}</Badge> : <Badge tone="neutral">未配置</Badge>}</header>
     <form className="git-remote-form" onSubmit={(event) => { event.preventDefault(); submitWithSecret("save"); }}>
       <div className="git-remote-fields">
-        <label className="git-remote-field--wide">Remote URL<input type="url" inputMode="url" autoComplete="off" value={remoteUrl} maxLength={2048} placeholder="https://git.example.com/team/knowledge.git" disabled={pending} onChange={(event) => setRemoteUrl(event.target.value)} /></label>
+        <label className="git-remote-field--wide">远端 URL<input type="url" inputMode="url" autoComplete="off" value={remoteUrl} maxLength={2048} placeholder="https://git.example.com/team/knowledge.git" disabled={pending} onChange={(event) => setRemoteUrl(event.target.value)} /></label>
         <label>分支<input value={branch} maxLength={255} autoComplete="off" disabled={pending} onChange={(event) => setBranch(event.target.value)} /></label>
         <label className="git-remote-toggle"><input type="checkbox" checked={autoSync} disabled={pending} onChange={(event) => setAutoSync(event.target.checked)} /><span><strong>批准写回后自动同步</strong><small>默认关闭；失败不会回滚本地提交。</small></span></label>
       </div>

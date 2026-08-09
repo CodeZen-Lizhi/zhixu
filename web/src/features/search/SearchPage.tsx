@@ -24,9 +24,9 @@ import {
 } from "./url-state";
 
 const searchModeLabels: Record<SearchMode, string> = {
-  keyword: "Keyword",
-  semantic: "Semantic",
-  hybrid: "Hybrid",
+  keyword: "关键词",
+  semantic: "语义",
+  hybrid: "混合",
 };
 
 const isSearchMode = (value: string): value is SearchMode =>
@@ -39,15 +39,15 @@ const isCursorRecoveryError = (error: unknown): boolean =>
 const formatTimestamp = (value: string): string => new Date(value).toLocaleString("zh-CN");
 
 const scoreSummary = (item: SearchEvidence): string[] => {
-  const values = [`Fusion #${String(item.scores.fusion.rank)} · ${item.scores.fusion.score.toFixed(4)}`];
+  const values = [`融合 #${String(item.scores.fusion.rank)} · ${item.scores.fusion.score.toFixed(4)}`];
   if (item.scores.lexical !== null) {
-    values.push(`Lexical #${String(item.scores.lexical.rank)} · ${item.scores.lexical.score.toFixed(4)}`);
+    values.push(`关键词 #${String(item.scores.lexical.rank)} · ${item.scores.lexical.score.toFixed(4)}`);
   }
   if (item.scores.vector !== null) {
-    values.push(`Vector #${String(item.scores.vector.rank)} · distance ${item.scores.vector.distance.toFixed(4)}`);
+    values.push(`向量 #${String(item.scores.vector.rank)} · 距离 ${item.scores.vector.distance.toFixed(4)}`);
   }
   if (item.scores.rerank !== null) {
-    values.push(`Rerank #${String(item.scores.rerank.rank)} · ${item.scores.rerank.score.toFixed(4)}`);
+    values.push(`重排序 #${String(item.scores.rerank.rank)} · ${item.scores.rerank.score.toFixed(4)}`);
   }
   return values;
 };
@@ -56,16 +56,16 @@ const SearchEvidenceCard = ({ item, workspaceId }: { item: SearchEvidence; works
   const primaryProvenance = item.provenances[0];
   const title = item.headingPath.length > 0
     ? item.headingPath.join(" / ")
-    : primaryProvenance?.relativePath ?? "未命名 Evidence";
+    : primaryProvenance?.relativePath ?? "未命名证据";
 
   return <article className="search-result">
     <header className="search-result__header">
       <div>
-        <p className="eyebrow">Evidence #{String(item.sequence)}</p>
+        <p className="eyebrow">证据 #{String(item.sequence)}</p>
         <h3>{title}</h3>
       </div>
       <Badge tone={item.scores.rerank === null ? "info" : "success"}>
-        Fusion #{String(item.scores.fusion.rank)}
+        融合 #{String(item.scores.fusion.rank)}
       </Badge>
     </header>
     <p className="search-result__snippet">{item.snippet}</p>
@@ -86,15 +86,15 @@ const SearchEvidenceCard = ({ item, workspaceId }: { item: SearchEvidence; works
         </div>
       </section>)}
     </div>
-    {item.provenanceTruncated ? <p className="search-result__notice">该 Evidence 还有更多来源，当前响应已按服务端上限截断。</p> : null}
+    {item.provenanceTruncated ? <p className="search-result__notice">该证据还有更多来源，当前响应已按服务端上限截断。</p> : null}
   </article>;
 };
 
 const SearchResultSummary = ({ response, fetching }: { response: SearchResponse; fetching: boolean }) => <Card>
   <CardHeader
     eyebrow="检索事实"
-    title={`${String(response.items.length)} 条当前页 Evidence`}
-    description="Search 不返回虚构总数；结果来自当前 Active Index 的有界窗口。"
+    title={`${String(response.items.length)} 条当前页证据`}
+    description="检索不返回虚构总数；结果来自当前生效索引的有界窗口。"
   />
   <div className="search-result-summary" role="status" aria-live="polite">
     <div><span>请求模式</span><Badge tone="neutral">{searchModeLabels[response.requestedMode]}</Badge></div>
@@ -104,7 +104,7 @@ const SearchResultSummary = ({ response, fetching }: { response: SearchResponse;
     {fetching ? <div><span>刷新状态</span><Badge tone="info">正在回查</Badge></div> : null}
   </div>
   {response.indexDegradedCapabilities.length > 0 || response.degradations.length > 0 ? <div className="ui-state ui-state--warning" role="status">
-    <strong>Search 已降级，但没有隐藏能力差异</strong>
+    <strong>检索已降级，但没有隐藏能力差异</strong>
     {response.indexDegradedCapabilities.length > 0 ? <p>索引缺失能力：{response.indexDegradedCapabilities.join("、")}</p> : null}
     {response.degradations.map((item) => <p key={item.capability}>{item.capability}：{item.errorCode}{item.retryable ? "（可重试）" : ""}</p>)}
   </div> : null}
@@ -213,7 +213,7 @@ export const SearchPage = () => {
       ? ""
       : normalizeSourceVersionId(sourceVersionDraft);
     if (sourceVersionId === undefined) {
-      setFormError("Source Version 必须为空或使用规范 UUID。");
+      setFormError("资料版本必须为空或使用规范 UUID。");
       return;
     }
     setFormError("");
@@ -234,7 +234,7 @@ export const SearchPage = () => {
   const restartFromFirstPage = (): void => updateUrlState({ cursor: "" });
 
   if (!workspaceId) {
-    return <BusinessWorkspaceGate description="Search 必须绑定已连接 Workspace；页面不会发送无作用域检索或使用本地假结果。" />;
+    return <BusinessWorkspaceGate description="检索必须绑定已连接 Workspace；页面不会发送无作用域检索或使用本地假结果。" />;
   }
 
   return <div className="page-stack">
@@ -252,7 +252,7 @@ export const SearchPage = () => {
             type="search"
             value={queryDraft}
             onChange={(event) => setQueryDraft(event.currentTarget.value)}
-            placeholder="例如：Approval 后 Relation 如何正式写入？"
+            placeholder="例如：审批后关系如何正式写入？"
             autoComplete="off"
           />
         </label>
@@ -262,13 +262,13 @@ export const SearchPage = () => {
             const mode = event.currentTarget.value;
             if (isSearchMode(mode)) updateUrlState({ mode, cursor: "" });
           }}>
-            <option value="hybrid">Hybrid</option>
-            <option value="keyword">Keyword</option>
-            <option value="semantic">Semantic</option>
+            <option value="hybrid">{searchModeLabels.hybrid}</option>
+            <option value="keyword">{searchModeLabels.keyword}</option>
+            <option value="semantic">{searchModeLabels.semantic}</option>
           </select>
         </label>
         <label htmlFor="search-source-version">
-          Source Version（可选）
+          资料版本（可选）
           <input
             id="search-source-version"
             value={sourceVersionDraft}
@@ -281,17 +281,17 @@ export const SearchPage = () => {
           <SearchIcon size={16} />{searchQuery.isFetching ? "检索中…" : "检索"}
         </Button>
       </form>
-      {formError !== "" ? <div className="ui-state ui-state--error" role="alert"><strong>Search 输入无效</strong><p>{formError}</p></div> : null}
-      {urlState.sourceVersionId !== "" ? <p className="search-filter-note"><FileSearch size={15} />当前只检索 Source Version <code>{urlState.sourceVersionId}</code></p> : null}
+      {formError !== "" ? <div className="ui-state ui-state--error" role="alert"><strong>检索输入无效</strong><p>{formError}</p></div> : null}
+      {urlState.sourceVersionId !== "" ? <p className="search-filter-note"><FileSearch size={15} />当前只检索资料版本 <code>{urlState.sourceVersionId}</code></p> : null}
     </Card>
 
-    {urlState.query === "" ? <Card><EmptyState title="输入检索内容开始" description="URL 可恢复 query、mode 和 Source Version；游标只在同一 Workspace 与同一规范请求中继续使用。" /></Card> : null}
+    {urlState.query === "" ? <Card><EmptyState title="输入检索内容开始" description="URL 可恢复查询词、检索模式和资料版本；游标只在同一 Workspace 与同一规范请求中继续使用。" /></Card> : null}
 
-    {urlState.query !== "" && searchQuery.isPending ? <Card><p className="skeleton-line" aria-label="正在加载 Search Evidence" /></Card> : null}
+    {urlState.query !== "" && searchQuery.isPending ? <Card><p className="skeleton-line" aria-label="正在加载检索证据" /></Card> : null}
 
     {searchQuery.isError ? <Card>
       <div className="ui-state ui-state--error" role="alert">
-        <strong>{isCursorRecoveryError(searchQuery.error) ? "Search 结果窗口已失效" : "Search 请求失败"}</strong>
+        <strong>{isCursorRecoveryError(searchQuery.error) ? "检索结果窗口已失效" : "检索请求失败"}</strong>
         <p>{searchQuery.error.message}{searchQuery.error instanceof SearchApiError ? `（${searchQuery.error.code}）` : ""}</p>
         <div className="document-actions">
           {isCursorRecoveryError(searchQuery.error) ? <Button variant="secondary" onClick={restartFromFirstPage}><RotateCcw size={15} />从第一页重新检索</Button> : null}
@@ -302,7 +302,7 @@ export const SearchPage = () => {
 
     {searchQuery.data ? <>
       <SearchResultSummary response={searchQuery.data} fetching={searchQuery.isFetching} />
-      {searchQuery.data.items.length === 0 ? <Card><EmptyState title="没有命中 Evidence" description="服务端完成了检索但当前条件没有结果；这不是依赖故障或假成功。" /></Card> : <div className="search-results" aria-label="Search Evidence 列表">
+      {searchQuery.data.items.length === 0 ? <Card><EmptyState title="没有命中证据" description="服务端完成了检索但当前条件没有结果；这不是依赖故障或假成功。" /></Card> : <div className="search-results" aria-label="检索证据列表">
         {searchQuery.data.items.map((item) => <SearchEvidenceCard key={item.chunkId} item={item} workspaceId={searchQuery.data.workspaceId} />)}
       </div>}
       <div className="pagination-row">

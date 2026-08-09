@@ -65,16 +65,16 @@ afterEach(() => {
 
 describe("DocumentsPage Source Version projections", () => {
   it.each([
-    ["included", "included（该版本已纳入）"],
-    ["excluded", "excluded（来源已排除）"],
-  ] as const)("renders the real Parse, Workflow, and %s Index state", async (indexStatus, indexLabel) => {
+    ["included", "已纳入"],
+    ["excluded", "已排除"],
+  ] as const)("展示解析、Workflow 与 %s 索引状态", async (indexStatus, indexLabel) => {
     api.getSourceVersion.mockResolvedValue(sourceVersion({ indexStatus }));
     renderDetail();
 
-    expect(await screen.findByText("parsed")).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
+    expect(await screen.findByText("已解析")).toBeInTheDocument();
+    expect(screen.getByText("运行中")).toBeInTheDocument();
     expect(screen.getByText(indexLabel)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "在 Search 中限定此版本" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "在搜索中限定此版本" })).toHaveAttribute(
       "href",
       `/search?source_version_id=${sourceVersionId}&scope_workspace=${workspaceId}`,
     );
@@ -93,7 +93,7 @@ describe("DocumentsPage Source Version projections", () => {
     expect(await screen.findByText("未开始")).toBeInTheDocument();
     expect(screen.getByText("未绑定")).toBeInTheDocument();
     expect(screen.getByText("未选择")).toBeInTheDocument();
-    expect(screen.queryByText("parsed")).not.toBeInTheDocument();
+    expect(screen.queryByText("已解析")).not.toBeInTheDocument();
   });
 
   it("没有活动 Workspace 时不发详情请求且提供连接入口", () => {

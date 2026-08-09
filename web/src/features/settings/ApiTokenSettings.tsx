@@ -7,6 +7,17 @@ import { Button, EmptyState, UnavailableState } from "../../shared/ui";
 
 const authCapabilities: readonly AuthCapability[] = ["READ_LOCAL", "READ_EXTERNAL", "WRITE_PROPOSAL", "WRITE_KNOWLEDGE", "GIT_WRITE", "INDEX_MAINTENANCE", "EVALUATION_RUN"];
 
+const authCapabilityLabels: Record<AuthCapability, string> = {
+  READ_LOCAL: "读取本地资料",
+  READ_EXTERNAL: "读取外部资源",
+  WRITE_PROPOSAL: "创建写入提案",
+  WRITE_KNOWLEDGE: "应用知识变更",
+  GIT_WRITE: "写入 Git",
+  INDEX_MAINTENANCE: "维护索引",
+  EVALUATION_RUN: "执行评测",
+  MANAGE_SYSTEM_SETTINGS: "管理系统设置",
+};
+
 export const ApiTokenSettings = () => {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
@@ -32,7 +43,7 @@ export const ApiTokenSettings = () => {
       return;
     }
     if (name.trim() === "" || scopes.length === 0 || !Number.isSafeInteger(Number(expiresInSeconds)) || Number(expiresInSeconds) < 0) {
-      setFormError("请填写名称、至少一个 Scope 和有效期。");
+      setFormError("请填写名称、至少一个权限和有效期。");
       return;
     }
 
@@ -83,12 +94,12 @@ export const ApiTokenSettings = () => {
       void handleCreate();
     }}>
       <div className="settings-form-grid"><label>名称<input value={name} maxLength={80} onChange={(event) => setName(event.target.value)} placeholder="例如：CI 只读" /></label><label>有效期（秒）<input value={expiresInSeconds} inputMode="numeric" onChange={(event) => setExpiresInSeconds(event.target.value)} /></label></div>
-      <fieldset><legend>Capabilities</legend>{authCapabilities.map((scope) => <label key={scope} className="token-scope"><input type="checkbox" checked={scopes.includes(scope)} onChange={() => toggleScope(scope)} />{scope}</label>)}</fieldset>
+      <fieldset><legend>权限</legend>{authCapabilities.map((scope) => <label key={scope} className="token-scope"><input type="checkbox" checked={scopes.includes(scope)} onChange={() => toggleScope(scope)} />{authCapabilityLabels[scope]}</label>)}</fieldset>
       {formError ? <p className="form-error" role="alert">{formError}</p> : null}
       <Button type="submit" disabled={creating || created !== undefined}><KeyRound size={15} />{creating ? "正在创建…" : "创建 API Token"}</Button>
     </form>
     <div className="settings-section__body">
-      {initialTokenListError ? <UnavailableState title="API Token 列表不可用" description={tokens.error.message} /> : tokens.isPending ? <p>正在读取 Token 元数据…</p> : tokenItems.length === 0 ? <EmptyState title="尚无 API Token" description="为脚本或自动化任务创建一个限 Scope Token。" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th>名称</th><th>Scope</th><th>有效期</th><th>最后使用</th><th /></tr></thead><tbody>{tokenItems.map((token) => <tr key={token.id}><td>{token.name}</td><td><span className="mono">{token.scopes.join(", ")}</span></td><td>{new Date(token.expiresAt).toLocaleString("zh-CN")}</td><td>{token.lastUsedAt ? new Date(token.lastUsedAt).toLocaleString("zh-CN") : "未使用"}</td><td><Button variant="danger" size="sm" onClick={() => revoke.mutate(token.id)} disabled={(revoke.isPending && revoke.variables === token.id) || token.revokedAt !== undefined}>{token.revokedAt ? "已撤销" : revoke.isPending && revoke.variables === token.id ? "撤销中…" : "撤销"}</Button></td></tr>)}</tbody></table></div>{revoke.isError ? <div className="ui-state ui-state--error" role="alert"><strong>撤销 API Token 失败</strong><p>{revoke.error.message}</p><Button variant="secondary" size="sm" onClick={() => revoke.mutate(revoke.variables)} disabled={revoke.isPending}>重试撤销 {tokenItems.find((token) => token.id === revoke.variables)?.name ?? "Token"}</Button></div> : null}{tokens.isFetchNextPageError ? <div className="ui-state ui-state--error" role="alert"><strong>加载更多 API Token 失败</strong><p>{tokens.error.message}</p><Button variant="secondary" size="sm" onClick={() => void tokens.fetchNextPage()} disabled={tokens.isFetchingNextPage}>重试加载更多 Token</Button></div> : null}{tokens.hasNextPage && !tokens.isFetchNextPageError ? <div className="pagination-row"><span /><Button variant="secondary" onClick={() => void tokens.fetchNextPage()} disabled={tokens.isFetchingNextPage}>{tokens.isFetchingNextPage ? "加载中…" : "加载更多 Token"}</Button></div> : null}</>}
+      {initialTokenListError ? <UnavailableState title="API Token 列表不可用" description={tokens.error.message} /> : tokens.isPending ? <p>正在读取 Token 元数据…</p> : tokenItems.length === 0 ? <EmptyState title="尚无 API Token" description="为脚本或自动化任务创建一个限权限 Token。" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th>名称</th><th>权限</th><th>有效期</th><th>最后使用</th><th /></tr></thead><tbody>{tokenItems.map((token) => <tr key={token.id}><td>{token.name}</td><td><span className="mono">{token.scopes.map((scope) => authCapabilityLabels[scope]).join(", ")}</span></td><td>{new Date(token.expiresAt).toLocaleString("zh-CN")}</td><td>{token.lastUsedAt ? new Date(token.lastUsedAt).toLocaleString("zh-CN") : "未使用"}</td><td><Button variant="danger" size="sm" onClick={() => revoke.mutate(token.id)} disabled={(revoke.isPending && revoke.variables === token.id) || token.revokedAt !== undefined}>{token.revokedAt ? "已撤销" : revoke.isPending && revoke.variables === token.id ? "撤销中…" : "撤销"}</Button></td></tr>)}</tbody></table></div>{revoke.isError ? <div className="ui-state ui-state--error" role="alert"><strong>撤销 API Token 失败</strong><p>{revoke.error.message}</p><Button variant="secondary" size="sm" onClick={() => revoke.mutate(revoke.variables)} disabled={revoke.isPending}>重试撤销 {tokenItems.find((token) => token.id === revoke.variables)?.name ?? "Token"}</Button></div> : null}{tokens.isFetchNextPageError ? <div className="ui-state ui-state--error" role="alert"><strong>加载更多 API Token 失败</strong><p>{tokens.error.message}</p><Button variant="secondary" size="sm" onClick={() => void tokens.fetchNextPage()} disabled={tokens.isFetchingNextPage}>重试加载更多 Token</Button></div> : null}{tokens.hasNextPage && !tokens.isFetchNextPageError ? <div className="pagination-row"><span /><Button variant="secondary" onClick={() => void tokens.fetchNextPage()} disabled={tokens.isFetchingNextPage}>{tokens.isFetchingNextPage ? "加载中…" : "加载更多 Token"}</Button></div> : null}</>}
     </div>
   </section>;
 };

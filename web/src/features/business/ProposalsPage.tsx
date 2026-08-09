@@ -10,6 +10,7 @@ import {
   getProposalCurrentContent,
   listProposals,
   preflightProposal,
+  type KnowledgeChangeRevision,
   proposalRiskLevels,
   type ProposalDetail,
   type ProposalRiskLevel,
@@ -80,7 +81,7 @@ class DiffViewerErrorBoundary extends Component<DiffViewerErrorBoundaryProps, Di
   }
 
   static getDerivedStateFromError(error: unknown): Partial<DiffViewerErrorBoundaryState> {
-    return { error: error instanceof Error ? error : new Error("Diff Viewer 加载失败") };
+    return { error: error instanceof Error ? error : new Error("差异查看器加载失败") };
   }
 
   override componentDidCatch(error: Error): void {
@@ -111,9 +112,47 @@ const proposalTypeLabel = (type: ProposalDetail["type"]): string => ({
   file_patch: "文件变更",
   restore_document: "文档恢复",
   knowledge_change: "知识关系变更",
-  publish_artifact: "Artifact 发布",
+  publish_artifact: "产物发布",
   downstream_update: "下游更新",
 })[type];
+const proposalStatusLabel = (status: ProposalDetail["status"]): string => proposalStatusOptions.find(([value]) => value === status)?.[1] ?? status;
+const approvalDecisionLabel = (decision: "approved" | "rejected"): string => decision === "approved" ? "已批准" : "已驳回";
+const coverageStatusLabel = (status: "COVERED" | "PARTIAL" | "GAP"): string => ({
+  COVERED: "已覆盖",
+  PARTIAL: "部分覆盖",
+  GAP: "知识缺口",
+})[status];
+const knowledgeNodeTypeLabel = (type: KnowledgeChangeRevision["changeSet"]["source"]["type"]): string => ({
+  TOPIC: "主题",
+  CLAIM: "主张",
+})[type];
+const knowledgeRelationTypeLabel = (type: KnowledgeChangeRevision["changeSet"]["relationType"]): string => ({
+  CITES: "引用",
+  DERIVED_FROM: "派生自",
+  BELONGS_TO: "属于",
+  SUPPORTS: "支持",
+  COMPLEMENTS: "补充",
+  DUPLICATES: "重复",
+  CONFLICTS_WITH: "冲突",
+  PREREQUISITE_OF: "前置条件",
+  VERSION_OF: "版本关系",
+  IMPACTS: "影响",
+})[type];
+const knowledgeOperationLabel = (operation: KnowledgeChangeRevision["changeSet"]["operation"]): string => ({
+  CREATE_RELATION: "创建关系",
+})[operation];
+const knowledgeTargetRefTypeLabel = (type: KnowledgeChangeRevision["targetRefs"][number]["type"]): string => ({
+  RELATION_CANDIDATE: "关系候选",
+})[type];
+const downstreamTargetLabel = (targetType: "ARTIFACT" | "REVIEW_CARD"): string => targetType === "ARTIFACT" ? "产物" : "复习卡";
+const downstreamActionLabel = (action: "REGENERATE_ARTIFACT" | "REVALIDATE_REVIEW_CARD"): string =>
+  action === "REGENERATE_ARTIFACT" ? "重新生成产物" : "重新校验复习卡";
+const reviewCardStatusLabel = (status: "DRAFT" | "APPROVED" | "INVALIDATED" | "REJECTED"): string => ({
+  DRAFT: "草稿",
+  APPROVED: "已批准",
+  INVALIDATED: "已失效",
+  REJECTED: "已驳回",
+})[status];
 
 export const ProposalsPage = () => {
   const workspaceId = useActiveWorkspaceId();
@@ -143,7 +182,7 @@ export const ProposalsPage = () => {
     setParams(writeProposalUrlState({ ...urlState, ...updates }));
   };
 
-  if (!workspaceId) return <BusinessWorkspaceGate description="Proposal 队列必须绑定已连接 Workspace；未连接时不会发出列表请求或显示无限加载。" />;
+  if (!workspaceId) return <BusinessWorkspaceGate description="提案队列必须绑定已连接 Workspace；未连接时不会发出列表请求或显示无限加载。" />;
 
   return <div className="page-stack">
     <div className="page-intro">
@@ -151,27 +190,27 @@ export const ProposalsPage = () => {
       <p>审阅并决定待处理变更。</p>
     </div>
     <Card>
-      <div className="filter-bar" aria-label="Proposal 筛选">
+      <div className="filter-bar" aria-label="提案筛选">
         <label>状态<select value={status} onChange={(event) => updateFilter({ status: event.target.value as ProposalUrlState["status"] })}><option value="">全部</option>{proposalStatusOptions.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-        <label>类型<select value={type} onChange={(event) => updateFilter({ type: event.target.value as ProposalUrlState["type"] })}><option value="">全部</option><option value="file_patch">文件变更</option><option value="restore_document">文档恢复</option><option value="knowledge_change">知识关系</option><option value="publish_artifact">Artifact 发布</option><option value="downstream_update">下游更新</option></select></label>
+        <label>类型<select value={type} onChange={(event) => updateFilter({ type: event.target.value as ProposalUrlState["type"] })}><option value="">全部</option><option value="file_patch">文件变更</option><option value="restore_document">文档恢复</option><option value="knowledge_change">知识关系</option><option value="publish_artifact">产物发布</option><option value="downstream_update">下游更新</option></select></label>
         <label>风险等级<select value={risk} onChange={(event) => updateFilter({ risk: event.target.value as ProposalUrlState["risk"] })}><option value="">全部</option>{proposalRiskLevels.map((riskLevel) => <option value={riskLevel} key={riskLevel}>{riskLevelLabel(riskLevel)}</option>)}</select></label>
         <label>创建日期起<input type="date" value={canonicalLocalDate(createdDate) ?? ""} onChange={(event) => updateFilter({ createdDate: canonicalLocalDate(event.target.value) ?? "" })} /></label>
       </div>
-      <CardHeader eyebrow="待审队列" title={query.isPending ? "读取中…" : `${String(query.data?.items.length ?? 0)} 条 Proposal`} />
+      <CardHeader eyebrow="待审队列" title={query.isPending ? "读取中…" : `${String(query.data?.items.length ?? 0)} 条提案`} />
       {query.isError
-        ? <UnavailableState title="Proposal 列表不可用" description={query.error.message} />
+        ? <UnavailableState title="提案列表不可用" description={query.error.message} />
         : query.data?.items.length === 0
-          ? <EmptyState title="没有可审变更" description="真实 Proposal 会按更新时间倒序出现在这里。" />
+          ? <EmptyState title="没有可审变更" description="真实提案会按更新时间倒序出现在这里。" />
           : <div className="proposal-list">{query.data?.items.map((item) => <Link to={`/proposals/${item.id}`} className="proposal-row" key={item.id}>
             <div className="proposal-row__kind">
               <span className={`kind-mark kind-mark--${item.type}`}>{item.type === "file_patch" ? <FileDiff size={16} /> : item.type === "restore_document" ? <History size={16} /> : item.type === "knowledge_change" ? <GitMerge size={16} /> : item.type === "publish_artifact" ? <BookUp size={16} /> : <RotateCcw size={16} />}</span>
-              <div><strong>{item.type === "publish_artifact" ? "Artifact 发布" : item.type === "downstream_update" ? "下游更新" : item.target}</strong><small>{proposalTypeLabel(item.type)} · <CalendarDays size={12} /> {new Date(item.createdAt).toLocaleString("zh-CN")} · <Clock3 size={12} /> {item.status === "ready_for_review" ? `等待 ${formatElapsedDuration(item.createdAt)}` : `存在 ${formatElapsedDuration(item.createdAt)}`}</small></div>
+              <div><strong>{item.type === "publish_artifact" ? "产物发布" : item.type === "downstream_update" ? "下游更新" : item.target}</strong><small>{proposalTypeLabel(item.type)} · <CalendarDays size={12} /> {new Date(item.createdAt).toLocaleString("zh-CN")} · <Clock3 size={12} /> {item.status === "ready_for_review" ? `等待 ${formatElapsedDuration(item.createdAt)}` : `存在 ${formatElapsedDuration(item.createdAt)}`}</small></div>
             </div>
             <div className="proposal-row__meta">
-              <Badge tone={item.status === "ready_for_review" ? "warning" : item.status === "needs_revision" ? "danger" : "neutral"}>{item.status}</Badge>
-              <Badge tone={riskLevelTone(item.riskLevel)}>风险等级 {item.riskLevel}</Badge>
+              <Badge tone={item.status === "ready_for_review" ? "warning" : item.status === "needs_revision" ? "danger" : "neutral"}>{proposalStatusLabel(item.status)}</Badge>
+              <Badge tone={riskLevelTone(item.riskLevel)}>风险等级 {riskLevelLabel(item.riskLevel)}</Badge>
               <span className="risk-copy" title={item.risk}>风险说明：{item.risk}</span>
-              {item.approval ? <Badge tone={item.approval.decision === "approved" ? "success" : "danger"}>{item.approval.decision}</Badge> : null}
+              {item.approval ? <Badge tone={item.approval.decision === "approved" ? "success" : "danger"}>{approvalDecisionLabel(item.approval.decision)}</Badge> : null}
               {item.approval?.workflowRunId ? <span className="mono">Workflow {item.approval.workflowRunId.slice(0, 8)}…</span> : null}
               {item.approval?.writebackState === "pending_dispatch" ? <Badge tone="warning">待恢复写回</Badge> : null}
               {item.approval?.writebackState === "legacy_unrecoverable" ? <Badge tone="danger">历史审批缺少 Git 基线</Badge> : null}
@@ -215,7 +254,7 @@ export const ProposalDetailPage = () => {
   const currentContentQuery = useQuery({
     queryKey: proposalCurrentContentKey,
     queryFn: ({ signal }) => {
-      if (fileWritebackProposal === undefined) throw new Error("文件型 Proposal 绑定不完整");
+      if (fileWritebackProposal === undefined) throw new Error("文件型提案绑定不完整");
       return readCurrentContent(workspaceId, proposalId, fileWritebackProposal, signal);
     },
     enabled: Boolean(workspaceId && proposalId && fileWritebackProposal),
@@ -287,7 +326,7 @@ export const ProposalDetailPage = () => {
     mutationFn: async () => {
       const current = proposalQuery.data;
       if (!isFileWritebackProposal(current) || current.status !== "approved") {
-        throw new Error("只有已批准的文件 Proposal 可以执行写回前检查");
+        throw new Error("只有已批准的文件提案可以执行写回前检查");
       }
       return preflightProposal(proposalId, {
         revisionId: current.revision.id,
@@ -303,12 +342,12 @@ export const ProposalDetailPage = () => {
     },
   });
 
-  if (!workspaceId) return <BusinessWorkspaceGate description="Proposal 详情必须绑定已连接 Workspace；未连接时不会读取 Revision、正文或 Approval。" />;
+  if (!workspaceId) return <BusinessWorkspaceGate description="提案详情必须绑定已连接 Workspace；未连接时不会读取版本、正文或审批结果。" />;
   if (proposalQuery.isError) {
-    return <div className="page-stack"><ErrorState title="Proposal 读取失败" description={proposalQuery.error.message} onRetry={() => void proposalQuery.refetch()} /></div>;
+    return <div className="page-stack"><ErrorState title="提案读取失败" description={proposalQuery.error.message} onRetry={() => void proposalQuery.refetch()} /></div>;
   }
   if (proposalQuery.isPending || !proposal) {
-    return <div className="page-stack"><Card><p>正在读取 Proposal 详情…</p></Card></div>;
+    return <div className="page-stack"><Card><p>正在读取提案详情…</p></Card></div>;
   }
 
   const revision = proposal.revision;
@@ -317,7 +356,7 @@ export const ProposalDetailPage = () => {
   const knowledgeRevision = proposal.type === "knowledge_change" ? proposal.revision : undefined;
   const publishRevision = proposal.type === "publish_artifact" ? proposal.revision : undefined;
   const downstreamRevision = proposal.type === "downstream_update" ? proposal.revision : undefined;
-  const versionBindingLabel = restoreRevision ? "Restore Preview Hash" : fileRevision?.targetMode === "CREATE_ONLY" ? "缺失证明" : fileRevision ? "Base Hash" : publishRevision ? "Artifact Content Hash" : downstreamRevision ? "Target Base Version" : "版本来源";
+  const versionBindingLabel = restoreRevision ? "恢复预览哈希" : fileRevision?.targetMode === "CREATE_ONLY" ? "缺失证明" : fileRevision ? "基线哈希" : publishRevision ? "产物内容哈希" : downstreamRevision ? "目标基线版本" : "版本来源";
   const versionBindingValue = restoreRevision?.restore.previewHash ?? fileRevision?.baseHash ?? publishRevision?.publication.contentHash ?? (downstreamRevision ? `v${String(downstreamRevision.update.baseVersion)}` : "结构化节点版本");
   const proposedContent = fileRevision?.content ?? "";
   const changeHash = revision.changeHash;
@@ -366,48 +405,48 @@ export const ProposalDetailPage = () => {
     : proposal.type === "knowledge_change"
       ? "知识关系变更"
       : proposal.type === "publish_artifact"
-        ? "Artifact 发布"
+        ? "产物发布"
         : "下游更新意图";
   const changeBodyTitle = restoreRevision
     ? "当前文档 → 恢复目标"
     : fileRevision
-      ? fileRevision.targetMode === "CREATE_ONLY" ? "新文件 → Proposal" : "当前文件 → Proposal"
+      ? fileRevision.targetMode === "CREATE_ONLY" ? "新文件 → 提案" : "当前文件 → 提案"
       : knowledgeRevision
-        ? "Relation Diff"
-        : publishRevision
-          ? "Artifact Publication Snapshot"
-          : "Downstream Update Snapshot";
+        ? "关系变更"
+      : publishRevision
+          ? "产物发布快照"
+          : "下游更新快照";
   const changeBodyDescription = restoreRevision
-    ? "对比服务端当前正文与冻结的历史版本正文；Document、来源 Commit、Document Version 与 Preview Hash 作为不可变审批证据，批准前实时检查当前内容 Hash 和 Git HEAD。"
+    ? "对比服务端当前正文与冻结的历史版本正文；文档、来源 Commit、文档版本与预览哈希作为不可变审批证据，批准前实时检查当前内容哈希和 Git HEAD。"
     : fileRevision
-      ? fileRevision.targetMode === "CREATE_ONLY" ? "目标路径当前不存在；Diff 基线为空文件。" : "当前正文由服务端安全读取；只有 current hash 与 Proposal base hash 一致时才允许批准。"
+      ? fileRevision.targetMode === "CREATE_ONLY" ? "目标路径当前不存在；差异对比基线为空文件。" : "当前正文由服务端安全读取；只有当前哈希与提案基线哈希一致时才允许批准。"
       : knowledgeRevision
-        ? "结构化关系端点、版本和 Evidence，不伪装成 Markdown Diff。"
-        : publishRevision
-          ? "冻结 Artifact、Revision、版本、内容哈希与来源覆盖；这里只审阅发布请求，不写入正式知识。"
-          : "冻结 Impact Report、来源 Event、目标版本和 owner 绑定；Approval 只记录更新意图，不授予执行能力。";
+        ? "结构化关系端点、版本和证据，不伪装成 Markdown 差异。"
+      : publishRevision
+          ? "冻结产物、修订版本、版本、内容哈希与来源覆盖；这里只审阅发布请求，不写入正式知识。"
+          : "冻结影响报告、来源事件、目标版本和归属绑定；审批只记录更新意图，不授予执行能力。";
   const confirmationDescription = activeConfirm?.action === "redispatch"
     ? activeConfirm.proposalType === "restore_document"
-      ? "恢复写回继续绑定页面展示的恢复来源 Document、目标 Commit、Document Version、Preview Hash 与 Change Hash；服务端会实时重查当前内容 Hash 和 Git HEAD，再原子补建唯一 Safe Writeback Workflow，不会改写既有历史。"
-      : "服务端会重做 Target Hash 与 strict-clean Git 安全门，再原子补建唯一 Workflow；前端不会把请求受理显示成写回完成。"
+      ? "恢复写回继续绑定页面展示的恢复来源文档、目标 Commit、文档版本、预览哈希与变更哈希；服务端会实时重查当前内容哈希和 Git HEAD，再原子补建唯一安全写回 Workflow，不会改写既有历史。"
+      : "服务端会重做目标哈希与严格清理的 Git 安全门，再原子补建唯一 Workflow；前端不会把请求受理显示成写回完成。"
     : activeConfirm?.proposalType === "restore_document"
-      ? "本次审批绑定页面展示的恢复来源 Document、目标 Commit、Document Version、Preview Hash 与 Change Hash；服务端会实时检查当前内容 Hash 和 Git HEAD 是否仍等于预览基线。恢复通过追加 Safe Writeback 完成，不会改写既有历史。"
+      ? "本次审批绑定页面展示的恢复来源文档、目标 Commit、文档版本、预览哈希与变更哈希；服务端会实时检查当前内容哈希和 Git HEAD 是否仍等于预览基线。恢复通过追加安全写回完成，不会改写既有历史。"
       : activeConfirm?.proposalType === "downstream_update"
-        ? "提交后服务端会再次校验冻结的 Impact Report、Event、目标版本、owner 绑定与 Change Hash。批准只记录更新意图，不授予目标执行能力。"
+        ? "提交后服务端会再次校验冻结的影响报告、事件、目标版本、归属绑定与变更哈希。批准只记录更新意图，不授予目标执行能力。"
         : activeConfirm?.proposalType === "publish_artifact"
-          ? "提交后服务端会再次校验冻结的 Artifact、Revision、版本与 Change Hash。批准只形成 Approval，不表示已经创建 Document、Git 写入或索引。"
+          ? "提交后服务端会再次校验冻结的产物、修订版本、版本与变更哈希。批准只形成审批记录，不表示已经创建文档、Git 写入或索引。"
           : activeConfirm?.proposalType === "file_patch"
-            ? "提交后服务端会再次校验 Proposal 状态、Revision、Change Hash 与当前文件基线；前端不会乐观显示成功。"
-            : "提交后服务端会再次校验 Proposal 状态、Revision 与 Change Hash；前端不会乐观显示成功。";
+            ? "提交后服务端会再次校验提案状态、修订版本、变更哈希与当前文件基线；前端不会乐观显示成功。"
+            : "提交后服务端会再次校验提案状态、修订版本与变更哈希；前端不会乐观显示成功。";
 
   return <div className="page-stack">
     <div className="page-intro page-intro--split">
       <div>
         <p className="eyebrow">审阅台 / {proposalTypeLabel(type)}</p>
         <h1>{proposalTitle}</h1>
-        <p>Proposal 状态：<Badge tone={proposal.status === "needs_revision" ? "danger" : ready ? "warning" : "neutral"}>{proposal.status}</Badge></p>
+        <p>提案状态：<Badge tone={proposal.status === "needs_revision" ? "danger" : ready ? "warning" : "neutral"}>{proposalStatusLabel(proposal.status)}</Badge></p>
       </div>
-      <div className="hash-card"><span>Change Hash</span><code>{changeHash.slice(0, 16)}…</code></div>
+      <div className="hash-card"><span>变更哈希</span><code>{changeHash.slice(0, 16)}…</code></div>
     </div>
 
     <div className="review-layout">
@@ -421,22 +460,22 @@ export const ProposalDetailPage = () => {
           />
           {fileRevision ? <>
             {restoreRevision ? <div className="relation-diff" aria-label="文档恢复来源">
-              <div><span>恢复来源 Document</span><strong><Link className="table-link" to={`/authoring/documents/${restoreRevision.restore.documentId}/history`}>{restoreRevision.restore.documentId}</Link></strong></div>
+              <div><span>恢复来源文档</span><strong><Link className="table-link" to={`/authoring/documents/${restoreRevision.restore.documentId}/history`}>{restoreRevision.restore.documentId}</Link></strong></div>
               <div><span>来源 Commit</span><strong><code className="mono">{restoreRevision.restore.targetCommit}</code></strong></div>
               <div><span>预览 HEAD</span><strong><code className="mono">{restoreRevision.restore.expectedHead}</code></strong></div>
-              <div><span>Document Version</span><strong>v{restoreRevision.restore.expectedDocumentVersion}</strong></div>
-              <div><span>Preview Hash</span><strong><code className="mono">{restoreRevision.restore.previewHash}</code></strong></div>
-              <div><span>当前内容 Hash</span><strong><code className="mono">{restoreRevision.restore.currentContentHash}</code></strong></div>
-              <div><span>目标内容 Hash</span><strong><code className="mono">{restoreRevision.restore.targetContentHash}</code></strong></div>
-              <div><span>Schema</span><strong>{restoreRevision.restore.schemaVersion}</strong></div>
+              <div><span>文档版本</span><strong>v{restoreRevision.restore.expectedDocumentVersion}</strong></div>
+              <div><span>预览哈希</span><strong><code className="mono">{restoreRevision.restore.previewHash}</code></strong></div>
+              <div><span>当前内容哈希</span><strong><code className="mono">{restoreRevision.restore.currentContentHash}</code></strong></div>
+              <div><span>目标内容哈希</span><strong><code className="mono">{restoreRevision.restore.targetContentHash}</code></strong></div>
+              <div><span>结构版本</span><strong>{restoreRevision.restore.schemaVersion}</strong></div>
             </div> : null}
             {currentContentQuery.isPending ? <p className="skeleton-line">正在读取当前 Workspace 文件…</p> : null}
             {currentContentQuery.isError ? <ErrorState title="当前文件读取失败" description={currentContentQuery.error.message} onRetry={() => void currentContentQuery.refetch()} /> : null}
-            {currentContentQuery.data && !currentContentQuery.data.baseHashMatch ? <div className="ui-state ui-state--error" role="alert"><strong>版本冲突：基线已经漂移</strong><p>当前 hash 为 <code>{currentContentQuery.data.currentHash}</code>，Proposal base hash 为 <code>{currentContentQuery.data.baseHash}</code>。批准已被禁用，请重新生成 Revision。</p></div> : null}
-            {fileDiffPending ? <p className="sidebar-note" role="status">Diff Viewer 正在挂载；完成前文件批准和恢复派发保持禁用。</p> : null}
-            {fileDiffFailed ? <ErrorState title="Diff Viewer 加载失败" description={diffLoadState.message || "无法加载本地 Monaco Diff Viewer；请重试或驳回该 Proposal。"} onRetry={retryDiffViewer} /> : null}
-            {currentContentQuery.data && !fileDiffFailed ? <Suspense fallback={<p>正在加载 Diff Viewer…</p>}>
-              <div className="monaco-diff-shell" aria-label={restoreRevision ? "当前文档与恢复目标内容差异" : "当前文件与 Proposal 内容差异"}>
+            {currentContentQuery.data && !currentContentQuery.data.baseHashMatch ? <div className="ui-state ui-state--error" role="alert"><strong>版本冲突：基线已经漂移</strong><p>当前哈希为 <code>{currentContentQuery.data.currentHash}</code>，提案基线哈希为 <code>{currentContentQuery.data.baseHash}</code>。批准已被禁用，请重新生成修订版本。</p></div> : null}
+            {fileDiffPending ? <p className="sidebar-note" role="status">差异查看器正在挂载；完成前文件批准和恢复派发保持禁用。</p> : null}
+            {fileDiffFailed ? <ErrorState title="差异查看器加载失败" description={diffLoadState.message || "无法加载本地 Monaco 差异查看器；请重试或驳回该提案。"} onRetry={retryDiffViewer} /> : null}
+            {currentContentQuery.data && !fileDiffFailed ? <Suspense fallback={<p>正在加载差异查看器…</p>}>
+              <div className="monaco-diff-shell" aria-label={restoreRevision ? "当前文档与恢复目标内容差异" : "当前文件与提案内容差异"}>
                 <DiffViewerErrorBoundary
                   identity={`${diffIdentity}:${String(diffRetryNonce)}`}
                   onError={(error) => setDiffLoadState({ identity: diffIdentity, status: "error", message: error.message })}
@@ -455,52 +494,52 @@ export const ProposalDetailPage = () => {
               </div>
             </Suspense> : null}
           </> : knowledgeRevision ? <div className="relation-diff">
-            <div><span>操作</span><strong>{knowledgeRevision.changeSet.operation}</strong></div>
-            <div><span>关系类型</span><strong>{knowledgeRevision.changeSet.relationType}</strong></div>
-            <div><span>来源节点</span><strong>{knowledgeRevision.changeSet.source.type}:{knowledgeRevision.changeSet.source.id} · v{knowledgeRevision.changeSet.source.version}</strong></div>
-            <div><span>目标节点</span><strong>{knowledgeRevision.changeSet.target.type}:{knowledgeRevision.changeSet.target.id} · v{knowledgeRevision.changeSet.target.version}</strong></div>
-            <div><span>Revision</span><strong>#{knowledgeRevision.revisionNo} · <code className="mono">{knowledgeRevision.id}</code></strong></div>
-            {knowledgeRevision.targetRefs.map((targetRef, index) => <div key={`${targetRef.type}:${targetRef.id}:${targetRef.fingerprint}`}><span>目标引用 {index + 1}</span><strong>{targetRef.type}:{targetRef.id}<br /><code className="mono">fingerprint: {targetRef.fingerprint}</code></strong></div>)}
-            {knowledgeRevision.baseVersions.map((baseVersion) => <div key={`${baseVersion.nodeType}-${baseVersion.nodeId}`}><span>基线版本</span><strong>{baseVersion.nodeType}:{baseVersion.nodeId} · v{baseVersion.version}</strong></div>)}
-            {knowledgeRevision.evidenceRefs.map((evidence) => <div key={evidence.candidateEvidenceId}><span>Evidence</span><strong>{evidence.candidateEvidenceId}<br /><code className="mono">semantic hash: {evidence.semanticHash}</code></strong></div>)}
+            <div><span>操作</span><strong>{knowledgeOperationLabel(knowledgeRevision.changeSet.operation)}</strong></div>
+            <div><span>关系类型</span><strong>{knowledgeRelationTypeLabel(knowledgeRevision.changeSet.relationType)}</strong></div>
+            <div><span>来源节点</span><strong>{knowledgeNodeTypeLabel(knowledgeRevision.changeSet.source.type)}：{knowledgeRevision.changeSet.source.id} · v{knowledgeRevision.changeSet.source.version}</strong></div>
+            <div><span>目标节点</span><strong>{knowledgeNodeTypeLabel(knowledgeRevision.changeSet.target.type)}：{knowledgeRevision.changeSet.target.id} · v{knowledgeRevision.changeSet.target.version}</strong></div>
+            <div><span>修订版本</span><strong>#{knowledgeRevision.revisionNo} · <code className="mono">{knowledgeRevision.id}</code></strong></div>
+            {knowledgeRevision.targetRefs.map((targetRef, index) => <div key={`${targetRef.type}:${targetRef.id}:${targetRef.fingerprint}`}><span>目标引用 {index + 1}</span><strong>{knowledgeTargetRefTypeLabel(targetRef.type)}：{targetRef.id}<br /><code className="mono">指纹：{targetRef.fingerprint}</code></strong></div>)}
+            {knowledgeRevision.baseVersions.map((baseVersion) => <div key={`${baseVersion.nodeType}-${baseVersion.nodeId}`}><span>基线版本</span><strong>{knowledgeNodeTypeLabel(baseVersion.nodeType)}：{baseVersion.nodeId} · v{baseVersion.version}</strong></div>)}
+            {knowledgeRevision.evidenceRefs.map((evidence) => <div key={evidence.candidateEvidenceId}><span>证据</span><strong>{evidence.candidateEvidenceId}<br /><code className="mono">语义哈希：{evidence.semanticHash}</code></strong></div>)}
           </div> : publishRevision ? <div className="relation-diff">
-            <div><span>Artifact</span><strong>{publishRevision.publication.artifactId}</strong></div>
-            <div><span>Artifact Revision</span><strong>#{publishRevision.publication.revisionNo} · <code className="mono">{publishRevision.publication.revisionId}</code></strong></div>
-            <div><span>Artifact Version</span><strong>v{publishRevision.publication.artifactVersion}</strong></div>
-            <div><span>Content Hash</span><strong><code className="mono">{publishRevision.publication.contentHash}</code></strong></div>
-            <div><span>Schema</span><strong>{publishRevision.publication.schemaVersion}</strong></div>
-            <div><span>Change Control Revision</span><strong>#{publishRevision.revisionNo} · <code className="mono">{publishRevision.id}</code></strong></div>
+            <div><span>产物</span><strong>{publishRevision.publication.artifactId}</strong></div>
+            <div><span>产物修订版本</span><strong>#{publishRevision.publication.revisionNo} · <code className="mono">{publishRevision.publication.revisionId}</code></strong></div>
+            <div><span>产物版本</span><strong>v{publishRevision.publication.artifactVersion}</strong></div>
+            <div><span>内容哈希</span><strong><code className="mono">{publishRevision.publication.contentHash}</code></strong></div>
+            <div><span>结构版本</span><strong>{publishRevision.publication.schemaVersion}</strong></div>
+            <div><span>变更控制修订版本</span><strong>#{publishRevision.revisionNo} · <code className="mono">{publishRevision.id}</code></strong></div>
             {publishRevision.publication.sourceCoverage.map((coverage) => <div key={coverage.sectionKey}>
               <span>章节覆盖 · {coverage.sectionKey}</span>
-              <strong>{coverage.status} · {coverage.gaps.length === 0 ? "无知识缺口" : coverage.gaps.map((gap) => `${gap.code}：${gap.description}`).join("；")}</strong>
+              <strong>{coverageStatusLabel(coverage.status)} · {coverage.gaps.length === 0 ? "无知识缺口" : coverage.gaps.map((gap) => `${gap.code}：${gap.description}`).join("；")}</strong>
             </div>)}
           </div> : downstreamRevision ? <div className="relation-diff">
-            <div><span>Impact Report</span><strong><code className="mono">{downstreamRevision.update.sourceReport.id}</code></strong></div>
-            <div><span>Analysis Version</span><strong>{downstreamRevision.update.sourceReport.analysisVersion}</strong></div>
-            <div><span>Report Fingerprint</span><strong><code className="mono">{downstreamRevision.update.sourceReport.fingerprint}</code></strong></div>
-            <div><span>Source Event</span><strong><code className="mono">{downstreamRevision.update.sourceEvent.id}</code> · v{downstreamRevision.update.sourceEvent.eventVersion}</strong></div>
-            <div><span>Target</span><strong>{downstreamRevision.update.targetType}:{downstreamRevision.update.targetId}</strong></div>
-            <div><span>Target Base Version</span><strong>v{downstreamRevision.update.baseVersion}</strong></div>
-            <div><span>Action</span><strong>{downstreamRevision.update.action}</strong></div>
-            <div><span>Schema</span><strong>{downstreamRevision.update.schemaVersion}</strong></div>
-            <div><span>Change Control Revision</span><strong>#{downstreamRevision.revisionNo} · <code className="mono">{downstreamRevision.id}</code></strong></div>
+            <div><span>影响报告</span><strong><code className="mono">{downstreamRevision.update.sourceReport.id}</code></strong></div>
+            <div><span>分析版本</span><strong>{downstreamRevision.update.sourceReport.analysisVersion}</strong></div>
+            <div><span>报告指纹</span><strong><code className="mono">{downstreamRevision.update.sourceReport.fingerprint}</code></strong></div>
+            <div><span>来源事件</span><strong><code className="mono">{downstreamRevision.update.sourceEvent.id}</code> · v{downstreamRevision.update.sourceEvent.eventVersion}</strong></div>
+            <div><span>目标</span><strong>{downstreamTargetLabel(downstreamRevision.update.targetType)}：{downstreamRevision.update.targetId}</strong></div>
+            <div><span>目标基线版本</span><strong>v{downstreamRevision.update.baseVersion}</strong></div>
+            <div><span>操作</span><strong>{downstreamActionLabel(downstreamRevision.update.action)}</strong></div>
+            <div><span>结构版本</span><strong>{downstreamRevision.update.schemaVersion}</strong></div>
+            <div><span>变更控制修订版本</span><strong>#{downstreamRevision.revisionNo} · <code className="mono">{downstreamRevision.id}</code></strong></div>
             {downstreamRevision.update.targetType === "ARTIFACT" ? <>
-              <div><span>Artifact Owner</span><strong>{downstreamRevision.update.artifactBinding.artifactId} · v{downstreamRevision.update.artifactBinding.artifactVersion}</strong></div>
-              <div><span>Artifact Revision</span><strong>#{downstreamRevision.update.artifactBinding.revisionNo} · <code className="mono">{downstreamRevision.update.artifactBinding.revisionId}</code></strong></div>
-              <div><span>Artifact Content Hash</span><strong><code className="mono">{downstreamRevision.update.artifactBinding.contentHash}</code></strong></div>
+              <div><span>产物绑定</span><strong>{downstreamRevision.update.artifactBinding.artifactId} · v{downstreamRevision.update.artifactBinding.artifactVersion}</strong></div>
+              <div><span>产物修订版本</span><strong>#{downstreamRevision.update.artifactBinding.revisionNo} · <code className="mono">{downstreamRevision.update.artifactBinding.revisionId}</code></strong></div>
+              <div><span>产物内容哈希</span><strong><code className="mono">{downstreamRevision.update.artifactBinding.contentHash}</code></strong></div>
             </> : <>
-              <div><span>Review Card Owner</span><strong>{downstreamRevision.update.reviewCardBinding.cardId} · v{downstreamRevision.update.reviewCardBinding.cardVersion} · {downstreamRevision.update.reviewCardBinding.status}</strong></div>
-              <div><span>Claim</span><strong><code className="mono">{downstreamRevision.update.reviewCardBinding.claimId}</code></strong></div>
-              <div><span>Card Fingerprint</span><strong><code className="mono">{downstreamRevision.update.reviewCardBinding.fingerprint}</code></strong></div>
-              <div><span>Evidence Binding</span><strong><code className="mono">{downstreamRevision.update.reviewCardBinding.evidenceBindingFingerprint}</code></strong></div>
+              <div><span>复习卡绑定</span><strong>{downstreamRevision.update.reviewCardBinding.cardId} · v{downstreamRevision.update.reviewCardBinding.cardVersion} · {reviewCardStatusLabel(downstreamRevision.update.reviewCardBinding.status)}</strong></div>
+              <div><span>知识点</span><strong><code className="mono">{downstreamRevision.update.reviewCardBinding.claimId}</code></strong></div>
+              <div><span>卡片指纹</span><strong><code className="mono">{downstreamRevision.update.reviewCardBinding.fingerprint}</code></strong></div>
+              <div><span>证据绑定</span><strong><code className="mono">{downstreamRevision.update.reviewCardBinding.evidenceBindingFingerprint}</code></strong></div>
             </>}
           </div> : null}
         </Card>
         <Card>
           <CardHeader eyebrow="证据与回滚" title="为什么要改" />
           <div className="prose-block">
-            <p>{fileRevision ? readText(fileRevision.evidenceSummary, "该 Proposal 没有提供摘要。") : knowledgeRevision ? `结构化变更绑定 ${String(knowledgeRevision.evidenceRefs.length)} 条 Evidence。` : publishRevision ? `冻结 ${String(publishRevision.publication.sourceCoverage.length)} 个章节的来源覆盖；该快照仅供发布审批。` : downstreamRevision?.update.reason}</p>
-            <p><strong>风险等级：</strong><Badge tone={riskLevelTone(proposal.riskLevel)}>{proposal.riskLevel} · {riskLevelLabel(proposal.riskLevel)}</Badge></p>
+            <p>{fileRevision ? readText(fileRevision.evidenceSummary, "该提案没有提供摘要。") : knowledgeRevision ? `结构化变更绑定 ${String(knowledgeRevision.evidenceRefs.length)} 条证据。` : publishRevision ? `冻结 ${String(publishRevision.publication.sourceCoverage.length)} 个章节的来源覆盖；该快照仅供发布审批。` : downstreamRevision?.update.reason}</p>
+            <p><strong>风险等级：</strong><Badge tone={riskLevelTone(proposal.riskLevel)}>{riskLevelLabel(proposal.riskLevel)}</Badge></p>
             <p><strong>风险说明：</strong>{riskDescription}</p>
             <p><strong>回滚计划：</strong>{readText(revision.rollbackPlan)}</p>
           </div>
@@ -509,55 +548,55 @@ export const ProposalDetailPage = () => {
 
       <aside className="review-sidebar">
         <Card>
-          <CardHeader eyebrow="Change Control" title="决策" />
+          <CardHeader eyebrow="变更控制" title="决策" />
           {proposal.status === "needs_revision" || (fileWriteback && currentContentQuery.data?.baseHashMatch === false)
-            ? <UnavailableState title="基线已漂移" description="批准已被阻止；请重新生成 Proposal Revision。" />
+            ? <UnavailableState title="基线已漂移" description="批准已被阻止；请重新生成提案修订版本。" />
             : ready ? <>
               <Button className="full-button" disabled={!canApprove || mutation.isPending} onClick={(event) => openConfirmation("approved", event.currentTarget)}><Check size={16} />批准</Button>
               <Button className="full-button" variant="danger" disabled={!canReject || mutation.isPending} onClick={(event) => openConfirmation("rejected", event.currentTarget)}><X size={16} />驳回</Button>
               {fileWriteback && !baselineVerified && !currentContentQuery.isError ? <p className="sidebar-note">等待当前文件基线校验完成后才能批准。</p> : null}
-              {fileWriteback && baselineVerified && !fileDiffReady && !currentContentQuery.isError ? <p className="sidebar-note">等待 Diff Viewer 成功挂载后才能批准；驳回仍可提交。</p> : null}
+              {fileWriteback && baselineVerified && !fileDiffReady && !currentContentQuery.isError ? <p className="sidebar-note">等待差异查看器成功挂载后才能批准；驳回仍可提交。</p> : null}
             </> : proposal.type === "downstream_update" && proposal.status === "approved"
-              ? <UnavailableState title="执行能力不可用" description="该 Approval 仅记录下游更新意图；当前没有目标执行器，页面不会显示执行、派发或写入成功状态。" />
+              ? <UnavailableState title="执行能力不可用" description="该审批仅记录下游更新意图；当前没有目标执行器，页面不会显示执行、派发或写入成功状态。" />
               : writebackState === "pending_dispatch" ? <>
-              <UnavailableState title="历史批准尚未派发" description="该 Approval 已有可信 Git 基线，但尚未绑定 Safe Writeback Workflow。恢复时服务端会重新检查当前文件与 Git。" />
+              <UnavailableState title="历史批准尚未派发" description="该审批已有可信 Git 基线，但尚未绑定安全写回 Workflow。恢复时服务端会重新检查当前文件与 Git。" />
               <Button className="full-button" variant="secondary" disabled={!canRedispatch || mutation.isPending} onClick={(event) => openConfirmation("redispatch", event.currentTarget)}><RotateCcw size={15} />恢复写回 Workflow</Button>
               {!baselineVerified && !currentContentQuery.isError ? <p className="sidebar-note">等待当前文件基线校验完成后才能恢复派发。</p> : null}
-              {baselineVerified && !fileDiffReady && !currentContentQuery.isError ? <p className="sidebar-note">等待 Diff Viewer 成功挂载后才能恢复派发。</p> : null}
-            </> : writebackState === "legacy_unrecoverable" ? <UnavailableState title="历史审批缺少 Git 基线" description="该记录可只读查看，但服务端禁止自动补建写回 Workflow；请按恢复手册人工处理或重新生成 Proposal。" />
-              : <UnavailableState title="当前状态不可决策" description="该 Proposal 已有决定或已进入后续状态；页面不会重复显示批准/驳回操作。" />}
+              {baselineVerified && !fileDiffReady && !currentContentQuery.isError ? <p className="sidebar-note">等待差异查看器成功挂载后才能恢复派发。</p> : null}
+            </> : writebackState === "legacy_unrecoverable" ? <UnavailableState title="历史审批缺少 Git 基线" description="该记录可只读查看，但服务端禁止自动补建写回 Workflow；请按恢复手册人工处理或重新生成提案。" />
+              : <UnavailableState title="当前状态不可决策" description="该提案已有决定或已进入后续状态；页面不会重复显示批准/驳回操作。" />}
           {mutation.isError ? <p className="form-error" role="alert">{mutation.error.message}</p> : null}
           <p className="sidebar-note">暂缓、编辑后批准、批量审批与完整三方合并尚未交付。</p>
         </Card>
         {fileWriteback && proposal.status === "approved" ? <Card>
-          <CardHeader eyebrow="Safe Writeback" title="写回前检查" />
-          <p className="sidebar-note">Apply Preflight 只检查已批准 Revision 的当前基线{restoreRevision ? "与冻结的文档恢复绑定" : ""}，不写文件，也不代替首次审批。</p>
+          <CardHeader eyebrow="安全写回" title="写回前检查" />
+          <p className="sidebar-note">Apply Preflight 只检查已批准修订版本的当前基线{restoreRevision ? "与冻结的文档恢复绑定" : ""}，不写文件，也不代替首次审批。</p>
           <Button className="full-button" variant="secondary" disabled={!canPreflight || preflight.isPending} onClick={() => preflight.mutate()}>
             <RotateCcw size={15} />{preflight.isPending ? "检查中…" : "执行 Apply Preflight"}
           </Button>
-          {preflightStillCurrent ? <div className="ui-state ui-state--success" role="status"><strong>写回前检查通过</strong><p>当前 Base Hash 与已批准 Revision 一致；本次检查没有执行写入。</p></div> : null}
+          {preflightStillCurrent ? <div className="ui-state ui-state--success" role="status"><strong>写回前检查通过</strong><p>当前基线哈希与已批准修订版本一致；本次检查没有执行写入。</p></div> : null}
           {preflight.isError ? <p className="form-error" role="alert">{preflight.error.message}</p> : null}
         </Card> : null}
         {proposal.type === "publish_artifact" ? <Card>
           <CardHeader eyebrow="知识隔离边界" title="尚未成为正式知识" />
-          <p className="sidebar-note">该 Proposal 只冻结并审阅 Artifact 发布请求。即使 Approval 为 approved，本页也不表示已创建 Document、Git 写入或索引；正式知识状态必须由后续受控执行结果确认。</p>
+          <p className="sidebar-note">该提案只冻结并审阅产物发布请求。即使审批状态为已批准，本页也不表示已创建文档、Git 写入或索引；正式知识状态必须由后续受控执行结果确认。</p>
         </Card> : null}
         <Card>
-          <CardHeader eyebrow="决策快照" title="Approval" />
+          <CardHeader eyebrow="决策快照" title="审批结果" />
           {proposal.approval ? <dl className="stacked-meta">
-            <div><dt>Decision</dt><dd><Badge tone={proposal.approval.decision === "approved" ? "success" : "danger"}>{proposal.approval.decision}</Badge></dd></div>
-            <div><dt>Decided At</dt><dd>{new Date(proposal.approval.decidedAt).toLocaleString("zh-CN")}</dd></div>
-            <div><dt>Approval ID</dt><dd className="mono">{proposal.approval.id}</dd></div>
-            {proposal.approval.approvedGitHead ? <div><dt>Approved Git Head</dt><dd className="mono">{proposal.approval.approvedGitHead}</dd></div> : null}
-            {proposal.approval.workflowRunId ? <div><dt>Writeback Workflow</dt><dd><Link className="table-link" to={`/workflows/${proposal.approval.workflowRunId}`}>{proposal.approval.workflowRunId}</Link></dd></div> : null}
-          </dl> : <UnavailableState title="尚无 Approval" description="当前 Revision 尚未形成服务端批准或驳回决定。" />}
+            <div><dt>决策</dt><dd><Badge tone={proposal.approval.decision === "approved" ? "success" : "danger"}>{approvalDecisionLabel(proposal.approval.decision)}</Badge></dd></div>
+            <div><dt>决策时间</dt><dd>{new Date(proposal.approval.decidedAt).toLocaleString("zh-CN")}</dd></div>
+            <div><dt>审批 ID</dt><dd className="mono">{proposal.approval.id}</dd></div>
+            {proposal.approval.approvedGitHead ? <div><dt>已批准的 Git Head</dt><dd className="mono">{proposal.approval.approvedGitHead}</dd></div> : null}
+            {proposal.approval.workflowRunId ? <div><dt>写回 Workflow</dt><dd><Link className="table-link" to={`/workflows/${proposal.approval.workflowRunId}`}>{proposal.approval.workflowRunId}</Link></dd></div> : null}
+          </dl> : <UnavailableState title="尚无审批结果" description="当前版本尚未形成服务端批准或驳回决定。" />}
         </Card>
         <Card>
-          <CardHeader eyebrow="版本绑定" title="Revision" />
+          <CardHeader eyebrow="版本绑定" title="变更版本" />
           <dl className="stacked-meta">
-            <div><dt>Revision ID</dt><dd className="mono">{readText(revision.id)}</dd></div>
+            <div><dt>版本 ID</dt><dd className="mono">{readText(revision.id)}</dd></div>
             <div><dt>{versionBindingLabel}</dt><dd className="mono">{versionBindingValue}</dd></div>
-            <div><dt>风险等级</dt><dd><AlertTriangle size={14} /><Badge tone={riskLevelTone(proposal.riskLevel)}>{proposal.riskLevel} · {riskLevelLabel(proposal.riskLevel)}</Badge></dd></div>
+            <div><dt>风险等级</dt><dd><AlertTriangle size={14} /><Badge tone={riskLevelTone(proposal.riskLevel)}>{riskLevelLabel(proposal.riskLevel)}</Badge></dd></div>
             <div><dt>风险说明</dt><dd>{riskDescription}</dd></div>
           </dl>
         </Card>

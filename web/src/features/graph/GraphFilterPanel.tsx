@@ -1,6 +1,6 @@
 import { type SyntheticEvent, useEffect, useState } from "react";
 
-import type { ClaimStatus, NodeType, RelationStatus, RelationType } from "../../api/graph";
+import type { RelationType } from "../../api/graph";
 import {
   graphFilterClaimStatuses,
   graphNodeTypes,
@@ -8,10 +8,7 @@ import {
   graphRelationTypes,
 } from "./options";
 import type { GraphUrlFilter } from "./url-state";
-
-const nodeTypeLabels: Record<NodeType, string> = { TOPIC: "Topic", CLAIM: "Claim" };
-const relationStatusLabels: Record<RelationStatus, string> = { CONFIRMED: "Confirmed", STALE: "Stale" };
-const claimStatusLabels: Partial<Record<ClaimStatus, string>> = { CONFIRMED: "Confirmed", DISPUTED: "Disputed" };
+import { graphClaimStatusLabel, nodeTypeLabel, relationStatusLabel, relationTypeLabel } from "./view-model";
 
 const toggle = <T extends string>(values: T[], value: T): T[] => {
   const next = values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
@@ -46,7 +43,7 @@ const RelationTypeOptions = ({ filter, onChange }: {
   onChange: (filter: GraphUrlFilter) => void;
 }) => (
   <div className="graph-relation-filter__grid">
-    {graphRelationTypes.map((type) => <label key={type}><input type="checkbox" checked={filter.relationTypes.includes(type)} onChange={() => onChange({ ...filter, relationTypes: toggle<RelationType>(filter.relationTypes, type) })} /><span>{type}</span></label>)}
+    {graphRelationTypes.map((type) => <label key={type}><input type="checkbox" checked={filter.relationTypes.includes(type)} onChange={() => onChange({ ...filter, relationTypes: toggle<RelationType>(filter.relationTypes, type) })} /><span>{relationTypeLabel(type)}</span></label>)}
   </div>
 );
 
@@ -80,35 +77,35 @@ export const GraphFilterPanel = ({ filter, onChange, pathOnly = false }: {
         <fieldset>
           <legend>节点类型</legend>
           <div className="graph-toggle-grid">
-            {graphNodeTypes.map((type) => <label key={type}><input type="checkbox" checked={filter.nodeTypes.includes(type)} onChange={() => onChange({ ...filter, nodeTypes: toggle(filter.nodeTypes, type) })} /><span>{nodeTypeLabels[type]}</span></label>)}
+            {graphNodeTypes.map((type) => <label key={type}><input type="checkbox" checked={filter.nodeTypes.includes(type)} onChange={() => onChange({ ...filter, nodeTypes: toggle(filter.nodeTypes, type) })} /><span>{nodeTypeLabel(type)}</span></label>)}
           </div>
         </fieldset>
         <fieldset>
-          <legend>Relation 状态</legend>
+          <legend>关系状态</legend>
           <div className="graph-toggle-grid">
-            {graphRelationStatuses.map((status) => <label key={status}><input type="checkbox" checked={filter.relationStatuses.includes(status)} onChange={() => onChange({ ...filter, relationStatuses: toggle(filter.relationStatuses, status) })} /><span>{relationStatusLabels[status]}</span></label>)}
+            {graphRelationStatuses.map((status) => <label key={status}><input type="checkbox" checked={filter.relationStatuses.includes(status)} onChange={() => onChange({ ...filter, relationStatuses: toggle(filter.relationStatuses, status) })} /><span>{relationStatusLabel(status)}</span></label>)}
           </div>
         </fieldset>
         <fieldset>
-          <legend>Claim 状态</legend>
+          <legend>主张状态</legend>
           <div className="graph-toggle-grid">
-            {graphFilterClaimStatuses.map((status) => <label key={status}><input type="checkbox" checked={filter.claimStatuses.includes(status)} onChange={() => onChange({ ...filter, claimStatuses: toggle(filter.claimStatuses, status) })} /><span>{claimStatusLabels[status]}</span></label>)}
+            {graphFilterClaimStatuses.map((status) => <label key={status}><input type="checkbox" checked={filter.claimStatuses.includes(status)} onChange={() => onChange({ ...filter, claimStatuses: toggle(filter.claimStatuses, status) })} /><span>{graphClaimStatusLabel(status)}</span></label>)}
           </div>
         </fieldset>
         <details className="graph-relation-filter">
-          <summary>Relation 类型 · {filter.relationTypes.length}</summary>
+          <summary>关系类型 · {filter.relationTypes.length}</summary>
           <RelationTypeOptions filter={filter} onChange={onChange} />
         </details>
         <form className="graph-topic-filter" onSubmit={applyTopicScope}>
-          <label><span>Topic IDs</span><input value={topicDraft} onChange={(event) => setTopicDraft(event.target.value)} placeholder="UUID, UUID" /></label>
-          <button type="submit" className="graph-text-button">应用 Topic 范围</button>
+          <label><span>主题 ID</span><input value={topicDraft} onChange={(event) => setTopicDraft(event.target.value)} placeholder="UUID, UUID" /></label>
+          <button type="submit" className="graph-text-button">应用主题范围</button>
         </form>
         <div className="graph-range-filter">
-          <label className="graph-range-filter__switch"><input type="checkbox" checked={filter.claimMinConfidence !== undefined} onChange={(event) => onChange(event.target.checked ? { ...filter, claimMinConfidence: 0.5 } : withoutOptionalFilter(filter, "claimMinConfidence"))} /><span>Claim 最低置信度</span></label>
+          <label className="graph-range-filter__switch"><input type="checkbox" checked={filter.claimMinConfidence !== undefined} onChange={(event) => onChange(event.target.checked ? { ...filter, claimMinConfidence: 0.5 } : withoutOptionalFilter(filter, "claimMinConfidence"))} /><span>主张最低置信度</span></label>
           <label><input type="range" min="0" max="1" step="0.05" disabled={filter.claimMinConfidence === undefined} value={filter.claimMinConfidence ?? 0.5} onChange={(event) => onChange({ ...filter, claimMinConfidence: Number(event.target.value) })} /><output>{filter.claimMinConfidence?.toFixed(2) ?? "关闭"}</output></label>
         </div>
         <div className="graph-range-filter">
-          <label className="graph-range-filter__switch"><input type="checkbox" checked={filter.relationMinConfidence !== undefined} onChange={(event) => onChange(event.target.checked ? { ...filter, relationMinConfidence: 0.5 } : withoutOptionalFilter(filter, "relationMinConfidence"))} /><span>Relation 最低置信度</span></label>
+          <label className="graph-range-filter__switch"><input type="checkbox" checked={filter.relationMinConfidence !== undefined} onChange={(event) => onChange(event.target.checked ? { ...filter, relationMinConfidence: 0.5 } : withoutOptionalFilter(filter, "relationMinConfidence"))} /><span>关系最低置信度</span></label>
           <label><input type="range" min="0" max="1" step="0.05" disabled={filter.relationMinConfidence === undefined} value={filter.relationMinConfidence ?? 0.5} onChange={(event) => onChange({ ...filter, relationMinConfidence: Number(event.target.value) })} /><output>{filter.relationMinConfidence?.toFixed(2) ?? "关闭"}</output></label>
         </div>
         <label className="graph-date-filter"><span>更新时间晚于</span><input type="datetime-local" value={toLocalInput(filter.updatedAfter)} onChange={(event) => onChange(event.target.value === "" ? withoutOptionalFilter(filter, "updatedAfter") : { ...filter, updatedAfter: new Date(event.target.value).toISOString() })} /></label>

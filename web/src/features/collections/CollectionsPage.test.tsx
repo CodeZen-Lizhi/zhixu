@@ -126,12 +126,12 @@ describe("CollectionsPage", () => {
 
     render(<MemoryRouter initialEntries={[`/collections/${collectionId}`]}><Routes><Route path="/collections/:collectionId" element={<CollectionDetailPage />} /></Routes></MemoryRouter>);
 
-    expect(screen.getByLabelText("Collection 列表视图")).toHaveTextContent("TOPIC 3");
-    fireEvent.click(screen.getByRole("button", { name: /TABLE/ }));
-    expect(screen.getByLabelText("Collection 表格视图")).toHaveTextContent("TOPIC 3");
-    expect(screen.getByLabelText("Collection 表格视图")).toHaveTextContent("CLAIM 4");
-    fireEvent.click(screen.getByRole("button", { name: /COMPACT_CARD/ }));
-    const cardView = screen.getByLabelText("Collection 卡片视图");
+    expect(screen.getByLabelText("集合列表视图")).toHaveTextContent("TOPIC 3");
+    fireEvent.click(screen.getByRole("button", { name: "表格" }));
+    expect(screen.getByLabelText("集合表格视图")).toHaveTextContent("TOPIC 3");
+    expect(screen.getByLabelText("集合表格视图")).toHaveTextContent("CLAIM 4");
+    fireEvent.click(screen.getByRole("button", { name: "紧凑卡片" }));
+    const cardView = screen.getByLabelText("集合卡片视图");
     expect(within(cardView).getByText("TOPIC 3")).toBeInTheDocument();
     expect(within(cardView).getByText("CLAIM 4")).toBeInTheDocument();
   });
@@ -144,7 +144,7 @@ describe("CollectionsPage", () => {
 
     render(<MemoryRouter initialEntries={["/collections"]}><Routes><Route path="/collections" element={<CollectionsPage />} /></Routes></MemoryRouter>);
     fireEvent.change(screen.getByPlaceholderText("集合名称"), { target: { value: "保存的集合" } });
-    fireEvent.click(screen.getByRole("button", { name: /保存 Collection/ }));
+    fireEvent.click(screen.getByRole("button", { name: /保存集合/ }));
 
     expect(mutate).toHaveBeenCalledTimes(1);
     const [payload] = mutate.mock.calls[0] ?? [];
@@ -152,10 +152,10 @@ describe("CollectionsPage", () => {
     expect(payload?.input.name).toBe("保存的集合");
     expect(payload?.input.viewType).toBe("LIST");
     expect(payload?.idempotencyKey).toContain("collection-create-");
-    fireEvent.click(screen.getByRole("button", { name: /保存 Collection/ }));
+    fireEvent.click(screen.getByRole("button", { name: /保存集合/ }));
     expect(mutate.mock.calls[1]?.[0].idempotencyKey).toBe(payload?.idempotencyKey);
     fireEvent.change(screen.getByPlaceholderText("集合名称"), { target: { value: "另一个集合" } });
-    fireEvent.click(screen.getByRole("button", { name: /保存 Collection/ }));
+    fireEvent.click(screen.getByRole("button", { name: /保存集合/ }));
     expect(mutate.mock.calls[2]?.[0].idempotencyKey).not.toBe(payload?.idempotencyKey);
   });
 
@@ -186,12 +186,12 @@ describe("CollectionsPage", () => {
     render(<MemoryRouter initialEntries={["/collections"]}><Routes><Route path="/collections" element={<CollectionsPage />} /></Routes></MemoryRouter>);
     fireEvent.click(screen.getByRole("button", { name: "新增条件" }));
     fireEvent.change(screen.getByLabelText("组合"), { target: { value: "OR" } });
-    const secondClause = screen.getByLabelText("Collection 条件 2");
+    const secondClause = screen.getByLabelText("集合条件 2");
     fireEvent.change(within(secondClause).getByLabelText("字段"), { target: { value: "status" } });
-    await waitFor(() => expect(within(screen.getByLabelText("Collection 条件 2")).getByLabelText("字段")).toHaveValue("status"));
-    fireEvent.change(within(screen.getByLabelText("Collection 条件 2")).getByLabelText("条件 2 值"), { target: { value: "CONFIRMED" } });
+    await waitFor(() => expect(within(screen.getByLabelText("集合条件 2")).getByLabelText("字段")).toHaveValue("status"));
+    fireEvent.change(within(screen.getByLabelText("集合条件 2")).getByLabelText("条件 2 值"), { target: { value: "CONFIRMED" } });
     fireEvent.change(screen.getByPlaceholderText("集合名称"), { target: { value: "多条件集合" } });
-    fireEvent.click(screen.getByRole("button", { name: /保存 Collection/ }));
+    fireEvent.click(screen.getByRole("button", { name: /保存集合/ }));
 
     const [payload] = mutate.mock.calls[0] ?? [];
     expect(payload?.input.query.root).toMatchObject({ kind: "group", operator: "OR" });
@@ -205,19 +205,19 @@ describe("CollectionsPage", () => {
     hooks.useCreateCollection.mockReturnValue({ mutate, isPending: false, isError: false });
 
     render(<MemoryRouter initialEntries={["/collections"]}><Routes><Route path="/collections" element={<CollectionsPage />} /></Routes></MemoryRouter>);
-    fireEvent.change(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("Operator"), { target: { value: "IN" } });
-    await waitFor(() => expect(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("Operator")).toHaveValue("IN"));
-    expect(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("条件 1 值")).toHaveAttribute("multiple");
-    fireEvent.change(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("字段"), { target: { value: "confidence" } });
-    await waitFor(() => expect(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("字段")).toHaveValue("confidence"));
-    fireEvent.change(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("Operator"), { target: { value: "BETWEEN" } });
-    await waitFor(() => expect(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("Operator")).toHaveValue("BETWEEN"));
-    fireEvent.change(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("条件 1 下界"), { target: { value: "0.2" } });
-    fireEvent.change(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("条件 1 上界"), { target: { value: "0.8" } });
-    expect(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("条件 1 下界")).toHaveAttribute("type", "number");
-    expect(within(screen.getByLabelText("Collection 条件 1")).getByLabelText("条件 1 上界")).toHaveAttribute("type", "number");
+    fireEvent.change(within(screen.getByLabelText("集合条件 1")).getByLabelText("条件"), { target: { value: "IN" } });
+    await waitFor(() => expect(within(screen.getByLabelText("集合条件 1")).getByLabelText("条件")).toHaveValue("IN"));
+    expect(within(screen.getByLabelText("集合条件 1")).getByLabelText("条件 1 值")).toHaveAttribute("multiple");
+    fireEvent.change(within(screen.getByLabelText("集合条件 1")).getByLabelText("字段"), { target: { value: "confidence" } });
+    await waitFor(() => expect(within(screen.getByLabelText("集合条件 1")).getByLabelText("字段")).toHaveValue("confidence"));
+    fireEvent.change(within(screen.getByLabelText("集合条件 1")).getByLabelText("条件"), { target: { value: "BETWEEN" } });
+    await waitFor(() => expect(within(screen.getByLabelText("集合条件 1")).getByLabelText("条件")).toHaveValue("BETWEEN"));
+    fireEvent.change(within(screen.getByLabelText("集合条件 1")).getByLabelText("条件 1 下界"), { target: { value: "0.2" } });
+    fireEvent.change(within(screen.getByLabelText("集合条件 1")).getByLabelText("条件 1 上界"), { target: { value: "0.8" } });
+    expect(within(screen.getByLabelText("集合条件 1")).getByLabelText("条件 1 下界")).toHaveAttribute("type", "number");
+    expect(within(screen.getByLabelText("集合条件 1")).getByLabelText("条件 1 上界")).toHaveAttribute("type", "number");
     fireEvent.change(screen.getByPlaceholderText("集合名称"), { target: { value: "置信度集合" } });
-    fireEvent.click(screen.getByRole("button", { name: /保存 Collection/ }));
+    fireEvent.click(screen.getByRole("button", { name: /保存集合/ }));
     const [payload] = mutate.mock.calls[0] ?? [];
     const predicate = payload?.input.query.root.kind === "group" ? payload.input.query.root.clauses[0] : undefined;
     expect(predicate).toMatchObject({ field: "confidence", operator: "BETWEEN", lower: 0.2, upper: 0.8 });
@@ -239,17 +239,17 @@ describe("CollectionsPage", () => {
 
     render(<MemoryRouter initialEntries={[`/collections/${collectionId}`]}><Routes><Route path="/collections/:collectionId" element={<CollectionDetailPage />} /></Routes></MemoryRouter>);
 
-    expect(screen.getByLabelText("Collection 表格视图").closest(".collection-view-density")).toHaveClass("collection-view-density--compact");
-    expect(screen.queryByRole("columnheader", { name: "summary" })).not.toBeInTheDocument();
-    const fixedTitle = screen.getByLabelText("title");
+    expect(screen.getByLabelText("集合表格视图").closest(".collection-view-density")).toHaveClass("collection-view-density--compact");
+    expect(screen.queryByRole("columnheader", { name: "摘要" })).not.toBeInTheDocument();
+    const fixedTitle = screen.getByLabelText("标题");
     expect(fixedTitle).toBeDisabled();
     expect(fixedTitle).toBeChecked();
     fireEvent.click(fixedTitle);
     expect(fixedTitle).toBeChecked();
-    fireEvent.click(screen.getByRole("button", { name: /启动 Health Scan/ }));
+    fireEvent.click(screen.getByRole("button", { name: /启动健康扫描/ }));
     const [healthPayload] = healthScan.mock.calls[0] ?? [];
     expect(healthPayload?.scope).toMatchObject({ type: "SMART_COLLECTION", ref: collectionId, readModelRevision: emptyPage.scanRevisionHash, exactCount: 0 });
-    fireEvent.click(screen.getByRole("button", { name: /启动 Health Scan/ }));
+    fireEvent.click(screen.getByRole("button", { name: /启动健康扫描/ }));
     expect(healthScan.mock.calls[1]?.[0].idempotencyKey).toBe(healthPayload?.idempotencyKey);
     fireEvent.click(screen.getByRole("button", { name: /启动关系分析/ }));
     expect(relationScan).toHaveBeenCalledWith(expect.objectContaining({
@@ -283,10 +283,10 @@ describe("CollectionsPage", () => {
     hooks.useStartSemanticLinkScan.mockReturnValue({ mutate: vi.fn(), isPending: false, isError: false });
 
     render(<MemoryRouter initialEntries={[`/collections/${collectionId}`]}><Routes><Route path="/collections/:collectionId" element={<CollectionDetailPage />} /></Routes></MemoryRouter>);
-    const button = screen.getByRole("button", { name: /启动 Health Scan/ });
+    const button = screen.getByRole("button", { name: /启动健康扫描/ });
     if (disabled) {
       expect(button).toBeDisabled();
-      expect(screen.getByText(new RegExp(`当前集合有 ${String(exactCount)} 个对象，单次 Health Scan 最多处理 5000 个`))).toBeInTheDocument();
+      expect(screen.getByText(new RegExp(`当前集合有 ${String(exactCount)} 个对象，单次健康扫描最多处理 5000 个`))).toBeInTheDocument();
     } else {
       expect(button).toBeEnabled();
       expect(screen.getByText("将扫描 5000 个对象。")).toBeInTheDocument();

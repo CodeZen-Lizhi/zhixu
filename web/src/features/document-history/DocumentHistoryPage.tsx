@@ -128,7 +128,7 @@ const HistoryEntry = ({
           variant="secondary"
           size="sm"
           disabled={dirty || isHead}
-          title={dirty ? "工作树存在未提交改动，不能创建恢复提案" : isHead ? "当前已经是此版本" : "先预览反向 Diff，再创建恢复提案"}
+          title={dirty ? "工作树存在未提交改动，不能创建恢复提案" : isHead ? "当前已经是此版本" : "先预览反向差异，再创建恢复提案"}
           onClick={(event) => onRestore(entry, event.currentTarget)}
         ><RotateCcw size={15} />恢复此版本</Button> : null}
       </header>
@@ -143,15 +143,15 @@ const HistoryEntry = ({
       </div> : <p className="history-entry__note">这不是历史 Commit，只表示当前 canonical 文件尚未提交的变化。</p>}
 
       {entry.kind === "MANAGED" ? <dl className="history-entry__bindings">
-        <div><dt>Article Revision</dt><dd>{entry.articleRevisionId === null ? "未关联" : <><code>{entry.articleRevisionId}</code>{entry.articleRevisionNo === null ? null : <span> · #{String(entry.articleRevisionNo)}</span>}</>}</dd></div>
-        <div><dt>Proposal</dt><dd>{entry.proposalId === null ? "未关联" : <Link to={`/proposals/${entry.proposalId}`}>{entry.proposalType ?? "Proposal"} · {entry.proposalId}</Link>}</dd></div>
-        <div><dt>Approval</dt><dd>{entry.approvalId === null ? "未关联" : <><code>{entry.approvalId}</code>{entry.approvalDecidedAt === null ? null : <time dateTime={entry.approvalDecidedAt}> · {formatTime(entry.approvalDecidedAt)}</time>}</>}</dd></div>
-        <div><dt>Workflow / Writeback</dt><dd>
+        <div><dt>文章修订版本</dt><dd>{entry.articleRevisionId === null ? "未关联" : <><code>{entry.articleRevisionId}</code>{entry.articleRevisionNo === null ? null : <span> · #{String(entry.articleRevisionNo)}</span>}</>}</dd></div>
+        <div><dt>提案</dt><dd>{entry.proposalId === null ? "未关联" : <Link to={`/proposals/${entry.proposalId}`}>{entry.proposalType === "file_patch" ? "文件变更" : entry.proposalType === "restore_document" ? "文档恢复" : "提案"} · {entry.proposalId}</Link>}</dd></div>
+        <div><dt>审批</dt><dd>{entry.approvalId === null ? "未关联" : <><code>{entry.approvalId}</code>{entry.approvalDecidedAt === null ? null : <time dateTime={entry.approvalDecidedAt}> · {formatTime(entry.approvalDecidedAt)}</time>}</>}</dd></div>
+        <div><dt>Workflow / 写回</dt><dd>
           {entry.workflowRunId === null ? <span>Workflow 未关联</span> : <Link to={`/workflows/${entry.workflowRunId}`}>{entry.workflowRunId}</Link>}
           <span> · </span>
-          {entry.writebackId === null ? <span>Writeback 未关联</span> : <code>{entry.writebackId}</code>}
+          {entry.writebackId === null ? <span>写回未关联</span> : <code>{entry.writebackId}</code>}
         </dd></div>
-      </dl> : entry.kind === "EXTERNAL" ? <p className="history-entry__note">未发现知序的 Revision、审批或写回映射；不会补造旧关系。</p> : null}
+      </dl> : entry.kind === "EXTERNAL" ? <p className="history-entry__note">未发现知序的修订版本、审批或写回映射；不会补造旧关系。</p> : null}
     </div>
   </article>;
 };
@@ -299,7 +299,7 @@ const DocumentHistoryPageScope = ({ workspaceId, documentId }: { workspaceId: st
   return <div className="page-stack document-history-page">
     <PageHeader
       title="文档历史"
-      description="查看当前分支的文件版本，比较任意已读取版本，并通过新 Proposal 恢复。"
+      description="查看当前分支的文件版本，比较任意已读取版本，并通过新提案恢复。"
       action={<Button asChild variant="ghost"><Link to="/authoring"><ArrowLeft size={16} />返回创作</Link></Button>}
     />
 
@@ -312,11 +312,11 @@ const DocumentHistoryPageScope = ({ workspaceId, documentId }: { workspaceId: st
 
     {page ? <>
       <section className="history-baseline" aria-label="当前文件基线">
-        <div className="history-baseline__path"><span>Canonical path</span><strong>{page.path}</strong></div>
+        <div className="history-baseline__path"><span>规范路径</span><strong>{page.path}</strong></div>
         <dl>
           <div><dt><GitBranch size={14} />当前分支</dt><dd>{page.branch}</dd></div>
           <div><dt><GitCommitHorizontal size={14} />读取 HEAD</dt><dd><code>{page.head}</code></dd></div>
-          <div><dt>Document version</dt><dd>v{String(page.documentVersion)}</dd></div>
+          <div><dt>文档版本</dt><dd>v{String(page.documentVersion)}</dd></div>
           <div><dt>工作树</dt><dd><Badge tone={page.dirty ? "danger" : "success"}>{page.dirty ? "存在未提交改动" : "干净"}</Badge></dd></div>
         </dl>
         {page.dirty ? <p className="history-baseline__warning"><TriangleAlert size={16} />恢复已暂停，避免覆盖当前未提交内容；比较仍然可用。</p> : null}
@@ -324,7 +324,7 @@ const DocumentHistoryPageScope = ({ workspaceId, documentId }: { workspaceId: st
 
       <section className="history-compare" aria-labelledby="history-compare-heading">
         <header>
-          <div><p className="eyebrow">Compare</p><h2 id="history-compare-heading">版本比较</h2></div>
+          <div><p className="eyebrow">比较</p><h2 id="history-compare-heading">版本比较</h2></div>
           <Button variant="secondary" size="sm" title="交换左右版本" aria-label="交换左右版本" disabled={!compareReady} onClick={() => {
             setLeftRef(rightRef);
             setRightRef(leftRef);
@@ -346,11 +346,11 @@ const DocumentHistoryPageScope = ({ workspaceId, documentId }: { workspaceId: st
           <VersionIdentity label="左侧 / 原始" option={versionByRef.get(submittedCompare?.left ?? leftRef)} />
           <VersionIdentity label="右侧 / 目标" option={versionByRef.get(submittedCompare?.right ?? rightRef)} />
         </div>
-        {compareQuery.isFetching ? <p className="history-inline-state" role="status">正在生成完整 Diff…</p> : null}
+        {compareQuery.isFetching ? <p className="history-inline-state" role="status">正在生成完整差异…</p> : null}
         {compareQuery.isError ? <ErrorState title={compareBaselineChanged ? "比较基线已变化" : "版本比较失败"} description={errorText(compareQuery.error)} onRetry={compareBaselineChanged ? resetHistory : () => { void compareQuery.refetch(); }} /> : null}
         {compareQuery.data ? <div className="history-diff" aria-label="版本比较结果">
-          <p className="history-diff__summary">左侧 {shortRef(compareQuery.data.left)}，右侧 {shortRef(compareQuery.data.right)}。Diff hash <code>{compareQuery.data.diffHash}</code>。</p>
-          {compareViewerError ? <ErrorState title="Diff Viewer 加载失败" description={compareViewerError.message} onRetry={() => setCompareViewerError(undefined)} /> : <Suspense fallback={<p className="history-inline-state">正在加载 Diff Viewer…</p>}>
+          <p className="history-diff__summary">左侧 {shortRef(compareQuery.data.left)}，右侧 {shortRef(compareQuery.data.right)}。差异哈希 <code>{compareQuery.data.diffHash}</code>。</p>
+          {compareViewerError ? <ErrorState title="差异查看器加载失败" description={compareViewerError.message} onRetry={() => setCompareViewerError(undefined)} /> : <Suspense fallback={<p className="history-inline-state">正在加载差异查看器…</p>}>
             <MonacoDiffViewer
               identityKey={`${workspaceId}:${documentId}:${compareQuery.data.head}:${compareQuery.data.diffHash}`}
               original={compareQuery.data.leftContent}
@@ -368,7 +368,7 @@ const DocumentHistoryPageScope = ({ workspaceId, documentId }: { workspaceId: st
       </section>
 
       <section className="history-timeline" aria-labelledby="history-timeline-heading">
-        <header><div><p className="eyebrow">Current branch</p><h2 id="history-timeline-heading">版本时间线</h2></div><span>{historyQuery.isFetching ? "正在刷新" : `${String(page.items.length)} 项`}</span></header>
+        <header><div><p className="eyebrow">当前分支</p><h2 id="history-timeline-heading">版本时间线</h2></div><span>{historyQuery.isFetching ? "正在刷新" : `${String(page.items.length)} 项`}</span></header>
         {page.items.length === 0 ? <EmptyState title="当前路径还没有历史版本" description="文件第一次受控写回后会出现在这里。" /> : <div className="history-timeline__list">{page.items.map((entry) => <HistoryEntry key={entry.commit ?? documentWorktreeRef} entry={entry} head={page.head} dirty={page.dirty} onRestore={openRestore} />)}</div>}
         <nav className="history-pagination" aria-label="文档历史分页">
           <Button variant="ghost" disabled={cursorStack.length <= 1 || historyQuery.isFetching} onClick={() => setCursorStack((current) => current.slice(0, -1))}><ArrowLeft size={16} />上一页</Button>
@@ -384,13 +384,13 @@ const DocumentHistoryPageScope = ({ workspaceId, documentId }: { workspaceId: st
       open={restoreTarget !== undefined}
       onOpenChange={(open) => { if (!open) closeRestore(); }}
       title="恢复为历史版本"
-      description="恢复不会移动 Git 历史；批准后会通过 Safe Writeback 追加一个新 Commit。"
+      description="恢复不会移动 Git 历史；批准后会通过安全写回追加一个新 Commit。"
       restoreFocusRef={restoreTriggerRef}
       contentClassName="history-restore-shell"
     >
       <div className="history-restore-dialog">
         {restoreTarget?.commit ? <div className="history-restore-target"><span>目标 Commit</span><code>{restoreTarget.commit}</code><strong>{restoreTarget.summary}</strong></div> : null}
-        {preview.isPending ? <p className="history-inline-state" role="status"><RefreshCw size={16} />正在重验 HEAD、Document version 与目标 Blob…</p> : null}
+        {preview.isPending ? <p className="history-inline-state" role="status"><RefreshCw size={16} />正在重验 HEAD、文档版本与目标 Blob…</p> : null}
         {preview.isError ? <ErrorState
           title={hasErrorCode(preview.error, "DOCUMENT_RESTORE_DIRTY_WORKTREE") ? "工作树不干净" : hasErrorCode(preview.error, "DOCUMENT_RESTORE_STALE") ? "恢复基线已变化" : "恢复预览失败"}
           description={errorText(preview.error)}
@@ -401,13 +401,13 @@ const DocumentHistoryPageScope = ({ workspaceId, documentId }: { workspaceId: st
               : { onRetry: () => preview.mutate({ workspaceId, documentId, targetCommit: restoreTarget.commit, expectedHead: page.head, expectedDocumentVersion: page.documentVersion }) })}
         /> : null}
         {preview.data ? <>
-          {preview.data.blockedByDirtyWorktree ? <div className="history-restore-blocked" role="alert"><TriangleAlert size={17} /><div><strong>当前存在未提交改动</strong><p>预览可保留，但不能创建恢复 Proposal。</p></div></div> : null}
+          {preview.data.blockedByDirtyWorktree ? <div className="history-restore-blocked" role="alert"><TriangleAlert size={17} /><div><strong>当前存在未提交改动</strong><p>预览可保留，但不能创建恢复提案。</p></div></div> : null}
           <div className="history-version-pair">
             <div className="history-version-identity"><span>左侧 / 当前 HEAD</span><strong>{shortRef(preview.data.expectedHead)}</strong><small>当前受控内容</small></div>
             <div className="history-version-identity"><span>右侧 / 恢复目标</span><strong>{shortRef(preview.data.targetCommit)}</strong><small>{restoreTarget?.summary ?? "历史内容"}</small></div>
           </div>
-          <p className="history-diff__summary">这是相对当前版本的反向 Diff。Preview hash <code>{preview.data.previewHash}</code>。</p>
-          {restoreViewerError ? <ErrorState title="Diff Viewer 加载失败" description={restoreViewerError.message} onRetry={() => setRestoreViewerError(undefined)} /> : <Suspense fallback={<p className="history-inline-state">正在加载 Diff Viewer…</p>}>
+          <p className="history-diff__summary">这是相对当前版本的反向差异。预览哈希 <code>{preview.data.previewHash}</code>。</p>
+          {restoreViewerError ? <ErrorState title="差异查看器加载失败" description={restoreViewerError.message} onRetry={() => setRestoreViewerError(undefined)} /> : <Suspense fallback={<p className="history-inline-state">正在加载差异查看器…</p>}>
             <div className="history-restore-diff"><MonacoDiffViewer
               identityKey={`${workspaceId}:${documentId}:restore:${preview.data.previewHash}`}
               original={preview.data.currentContent}
@@ -421,14 +421,14 @@ const DocumentHistoryPageScope = ({ workspaceId, documentId }: { workspaceId: st
             /></div>
           </Suspense>}
           <details><summary>屏幕阅读器与纯文本补丁</summary><pre>{preview.data.patch || "目标版本与当前文件没有文本变化。"}</pre></details>
-          {proposal.isError ? <ErrorState title={hasErrorCode(proposal.error, "DOCUMENT_RESTORE_STALE") ? "恢复预览已过期" : hasErrorCode(proposal.error, "IDEMPOTENCY_KEY_REUSED") ? "恢复意图键已被占用" : "Proposal 创建结果未确认"} description={errorText(proposal.error)} {...(proposalBlocked ? { onRetry: recoverLatestBaseline } : proposalCommand === undefined ? {} : { onRetry: () => proposal.mutate(proposalCommand) })} /> : null}
-          {proposal.data ? <div className="history-restore-success" role="status"><CheckCircle2 size={18} /><div><strong>{proposal.data.replayed ? "已恢复原创建结果" : "恢复 Proposal 已创建"}</strong><p>正式文件尚未改变，仍需在提案中审批并执行。</p><Button asChild size="sm"><Link to={`/proposals/${proposal.data.proposalId}`}>打开 Proposal</Link></Button></div></div> : <div className="history-restore-actions">
+          {proposal.isError ? <ErrorState title={hasErrorCode(proposal.error, "DOCUMENT_RESTORE_STALE") ? "恢复预览已过期" : hasErrorCode(proposal.error, "IDEMPOTENCY_KEY_REUSED") ? "恢复意图键已被占用" : "提案创建结果未确认"} description={errorText(proposal.error)} {...(proposalBlocked ? { onRetry: recoverLatestBaseline } : proposalCommand === undefined ? {} : { onRetry: () => proposal.mutate(proposalCommand) })} /> : null}
+          {proposal.data ? <div className="history-restore-success" role="status"><CheckCircle2 size={18} /><div><strong>{proposal.data.replayed ? "已恢复原创建结果" : "恢复提案已创建"}</strong><p>正式文件尚未改变，仍需在提案中审批并执行。</p><Button asChild size="sm"><Link to={`/proposals/${proposal.data.proposalId}`}>打开提案</Link></Button></div></div> : <div className="history-restore-actions">
             <Button variant="ghost" onClick={closeRestore}>取消</Button>
             <Button
               disabled={proposalCommand === undefined || preview.data.blockedByDirtyWorktree || proposal.isPending || proposal.isError || preview.data.expectedHead !== scopeHead || preview.data.expectedDocumentVersion !== page?.documentVersion}
-              title={preview.data.blockedByDirtyWorktree ? "先处理当前未提交改动" : "创建受控恢复 Proposal"}
+              title={preview.data.blockedByDirtyWorktree ? "先处理当前未提交改动" : "创建受控恢复提案"}
               onClick={() => { if (proposalCommand !== undefined) proposal.mutate(proposalCommand); }}
-            >{proposal.isPending ? "正在创建…" : "创建恢复 Proposal"}</Button>
+            >{proposal.isPending ? "正在创建…" : "创建恢复提案"}</Button>
           </div>}
         </> : null}
       </div>

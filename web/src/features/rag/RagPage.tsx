@@ -2,7 +2,7 @@ import { type KeyboardEvent, type SyntheticEvent, useEffect, useMemo, useRef, us
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { useActiveWorkspaceId } from "../../app/active-workspace";
-import type { Answer, AnswerCitation, FeedbackType, Turn } from "../../api/conversation";
+import type { Answer, AnswerCitation, FeedbackType, SearchMode, Turn, WorkflowStatus } from "../../api/conversation";
 import { ConversationApiError } from "../../api/conversation";
 import { createCommandId, useCreateConversationCommand, useSubmitFeedbackCommand, useSubmitQuestionCommand } from "./commands";
 import { useWorkspaceEventState } from "../../events/event-store";
@@ -13,6 +13,23 @@ const stageLabels: Record<string, string> = {
   "plan.started": "正在理解问题", "plan.completed": "检索计划已冻结",
   "retrieval.started": "正在检索证据", "retrieval.completed": "证据检索完成",
   "validation.started": "正在校验引用", "validation.completed": "回答校验完成",
+};
+
+const retrievalModeLabels: Record<SearchMode, string> = {
+  keyword: "关键词",
+  semantic: "语义",
+  hybrid: "混合",
+};
+
+const workflowStatusLabels: Record<WorkflowStatus, string> = {
+  pending: "等待",
+  running: "运行中",
+  paused: "已暂停",
+  waiting_for_human: "等待人工",
+  retry_wait: "等待重试",
+  succeeded: "成功",
+  failed: "失败",
+  cancelled: "已取消",
 };
 
 const formatTime = (value: string) => new Intl.DateTimeFormat("zh-CN", {
@@ -54,7 +71,7 @@ const WorkflowStage = ({ answer }: { answer: Answer }) => {
   return (
     <div className="rag-stage" aria-live="polite">
       <span className="rag-stage__pulse" aria-hidden="true" />
-      <div><strong>{stage}</strong><small>Workflow · {answer.workflow.status}</small></div>
+      <div><strong>{stage}</strong><small>工作流 · {workflowStatusLabels[answer.workflow.status]}</small></div>
     </div>
   );
 };
@@ -75,7 +92,7 @@ const RetrievalSummary = ({ answer }: { answer: Exclude<Answer, { publicationSta
   <details className="rag-details">
     <summary>为什么这样回答</summary>
     <dl className="rag-metrics">
-      <div><dt>模式</dt><dd>{answer.retrievalSummary.requestedMode} → {answer.retrievalSummary.effectiveMode}</dd></div>
+      <div><dt>模式</dt><dd>{retrievalModeLabels[answer.retrievalSummary.requestedMode]} → {retrievalModeLabels[answer.retrievalSummary.effectiveMode]}</dd></div>
       <div><dt>候选</dt><dd>{answer.retrievalSummary.candidateCount}</dd></div>
       <div><dt>采用</dt><dd>{answer.retrievalSummary.selectedCount}</dd></div>
       <div><dt>冲突</dt><dd>{answer.retrievalSummary.conflictCount}</dd></div>
@@ -144,13 +161,13 @@ export const AnswerPublication = ({ answer, onCitation, onPrompt = () => undefin
 
 const TurnCard = ({ turn, answer, onCitation, onPrompt }: { turn: Turn; answer: Answer; onCitation: (citation: AnswerCitation) => void; onPrompt: (prompt: string) => void }) => (
   <section className="rag-turn" aria-labelledby={`question-${turn.question.id}`}>
-    <div className="rag-question"><span>Q{turn.question.ordinal}</span><div><h2 id={`question-${turn.question.id}`}>{turn.question.question}</h2><small>{formatTime(turn.question.createdAt)}</small></div></div>
+    <div className="rag-question"><span>问题 {turn.question.ordinal}</span><div><h2 id={`question-${turn.question.id}`}>{turn.question.question}</h2><small>{formatTime(turn.question.createdAt)}</small></div></div>
     <AnswerPublication answer={answer} onCitation={onCitation} onPrompt={onPrompt} />
   </section>
 );
 
 export const CitationInspector = ({ citation, onClose }: { citation: AnswerCitation | undefined; onClose: () => void }) => (
-  citation === undefined ? <><h2>引用会在这里打开</h2><p>选择回答中的编号引用，查看服务端提供的真实段落链接。</p></> : <><h2>已选择引用</h2><dl><div><dt>Source Version</dt><dd>{citation.sourceVersionId}</dd></div><div><dt>Chunk</dt><dd>{citation.chunkId}</dd></div></dl><SourceSpanViewer className="secondary-button" label="打开段落证据" reference={{ workspaceId: citation.workspaceId, sourceVersionId: citation.sourceVersionId, sourceSpanId: citation.sourceSpanId }} /><button className="secondary-button" type="button" onClick={onClose}>关闭引用</button></>
+  citation === undefined ? <><h2>引用会在这里打开</h2><p>选择回答中的编号引用，查看服务端提供的真实段落链接。</p></> : <><h2>已选择引用</h2><dl><div><dt>资料版本</dt><dd>{citation.sourceVersionId}</dd></div><div><dt>文本块</dt><dd>{citation.chunkId}</dd></div></dl><SourceSpanViewer className="secondary-button" label="打开段落证据" reference={{ workspaceId: citation.workspaceId, sourceVersionId: citation.sourceVersionId, sourceSpanId: citation.sourceSpanId }} /><button className="secondary-button" type="button" onClick={onClose}>关闭引用</button></>
 );
 
 export const RagPage = () => {
@@ -228,18 +245,18 @@ export const RagPage = () => {
           {listQuery.hasNextPage ? <button type="button" className="secondary-button" disabled={listQuery.isFetchingNextPage} onClick={() => { void listQuery.fetchNextPage(); }}>{listQuery.isFetchingNextPage ? "加载中…" : "加载更多会话"}</button> : null}</nav>
       </aside>
       <main className="rag-workspace">
-        {conversationId === "" ? <section className="rag-empty"><p className="eyebrow">Conversation</p><h2>选择一个会话，开始基于证据提问。</h2><p>回答只有在引用和忠实度校验通过后才会发布。</p></section> : null}
+        {conversationId === "" ? <section className="rag-empty"><p className="eyebrow">会话</p><h2>选择一个会话，开始基于证据提问。</h2><p>回答只有在引用和忠实度校验通过后才会发布。</p></section> : null}
         {conversationQuery.isError ? <ErrorNotice error={conversationQuery.error} /> : null}
         {turnsQuery.isPending && conversationId !== "" ? <p>正在恢复会话事实…</p> : null}
         {turnsQuery.isError ? <ErrorNotice error={turnsQuery.error} /> : null}
         {conversationId !== "" && turns.length === 0 && !turnsQuery.isPending ? <section className="rag-empty"><p className="eyebrow">空会话</p><h2>提出第一个问题。</h2></section> : null}
         <div className="rag-timeline">{turns.map((turn) => <TurnCard key={turn.question.id} turn={turn} answer={recoveredAnswer.data?.id === turn.answer.id ? recoveredAnswer.data : turn.answer} onCitation={selectCitation} onPrompt={setQuestion} />)}</div>
-        {turnsQuery.hasNextPage ? <button type="button" className="secondary-button" disabled={turnsQuery.isFetchingNextPage} onClick={() => { void turnsQuery.fetchNextPage(); }}>{turnsQuery.isFetchingNextPage ? "正在恢复…" : "加载更多 Turn"}</button> : null}
+        {turnsQuery.hasNextPage ? <button type="button" className="secondary-button" disabled={turnsQuery.isFetchingNextPage} onClick={() => { void turnsQuery.fetchNextPage(); }}>{turnsQuery.isFetchingNextPage ? "正在恢复…" : "加载更多轮次"}</button> : null}
         {conversationId !== "" ? <form className="rag-composer" onSubmit={submitQuestionForm}><label><span>问题</span><textarea maxLength={8192} rows={4} value={question} onKeyDown={keyboardSubmit} onChange={(event) => setQuestion(event.target.value)} placeholder="输入问题。Enter 提交，Shift + Enter 换行。" /></label>
           <details className="rag-scope"><summary>检索范围与证据边界</summary><div className="rag-scope__grid">
             <label><span>检索模式</span><select value={retrievalMode} onChange={(event) => setRetrievalMode(event.target.value as typeof retrievalMode)}><option value="hybrid">混合</option><option value="keyword">关键词</option><option value="semantic">语义</option></select></label>
-            <label><span>Source IDs（逗号分隔）</span><input value={sourceIds} onChange={(event) => setSourceIds(event.target.value)} /></label>
-            <label><span>Source Version IDs</span><input value={sourceVersionIds} onChange={(event) => setSourceVersionIds(event.target.value)} /></label>
+            <label><span>来源 ID（逗号分隔）</span><input value={sourceIds} onChange={(event) => setSourceIds(event.target.value)} /></label>
+            <label><span>资料版本 ID</span><input value={sourceVersionIds} onChange={(event) => setSourceVersionIds(event.target.value)} /></label>
             <label><span>相对路径前缀</span><input value={pathPrefixes} onChange={(event) => setPathPrefixes(event.target.value)} placeholder="docs/architecture" /></label>
             <label><span>捕获时间从</span><input type="datetime-local" value={capturedAtFrom} onChange={(event) => setCapturedAtFrom(event.target.value)} /></label>
             <label><span>捕获时间前</span><input type="datetime-local" value={capturedAtBefore} onChange={(event) => setCapturedAtBefore(event.target.value)} /></label>
@@ -248,7 +265,7 @@ export const RagPage = () => {
           </div></details>
           <div className="rag-composer__options"><label><span>回答深度</span><select value={answerDepth} onChange={(event) => setAnswerDepth(event.target.value as typeof answerDepth)}><option value="concise">简洁</option><option value="standard">标准</option><option value="detailed">详细</option></select></label><label><span>输出格式</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as typeof outputFormat)}><option value="markdown">Markdown</option><option value="outline">大纲</option></select></label><button disabled={questionMutation.isPending || question.trim() === "" || conversationQuery.data?.status === "archived"}>{questionMutation.isPending ? "已接收，正在启动…" : "提交问题"}</button></div>{conversationQuery.data?.status === "archived" ? <p className="rag-muted">此会话已归档，不能继续提问。</p> : null}{questionMutation.isError ? <ErrorNotice error={questionMutation.error} /> : null}</form> : null}
       </main>
-      <aside ref={evidenceRef} tabIndex={selectedCitation === undefined ? undefined : -1} className={`rag-evidence${selectedCitation === undefined ? "" : " is-open"}`} aria-label="引用证据"><p className="eyebrow">Evidence</p><CitationInspector citation={selectedCitation} onClose={closeCitation} /></aside>
+      <aside ref={evidenceRef} tabIndex={selectedCitation === undefined ? undefined : -1} className={`rag-evidence${selectedCitation === undefined ? "" : " is-open"}`} aria-label="引用证据"><p className="eyebrow">证据</p><CitationInspector citation={selectedCitation} onClose={closeCitation} /></aside>
     </div>
   </div>;
 };

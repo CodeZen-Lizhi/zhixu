@@ -54,7 +54,7 @@ const AttachmentExportJobRow = ({ job, onCreateNew, onJobChanged }: { job: Attac
       <div><strong>Workspace 附件 ZIP</strong><span className="mono">{job.id.slice(0, 8)}…</span></div>
       <Badge tone={statusTone(job.status)}>{statusText[job.status]}</Badge>
     </div>
-    <p>{job.status === "PENDING" ? "任务已持久化，正在等待 Worker 领取。" : job.status === "RUNNING" ? `第 ${String(Math.max(1, job.attemptCount))} 次归档正在执行。` : job.status === "SUCCEEDED" ? `${preparedSummary ?? "归档已经完成"}；结果将在 ${formatTime(job.expiresAt)} 过期。` : job.status === "FAILED" ? `${job.errorCode ?? "EXPORT_FAILED"}：${job.errorMessage ?? "服务端未返回失败说明。"}` : job.status === "EXPIRED" ? "生成的 ZIP 已到期；附件源目录未被清理，可创建新的导出。" : "这是历史兼容记录，当前版本不提供取消操作。"}</p>
+    <p>{job.status === "PENDING" ? "任务已持久化，正在等待工作进程领取。" : job.status === "RUNNING" ? `第 ${String(Math.max(1, job.attemptCount))} 次归档正在执行。` : job.status === "SUCCEEDED" ? `${preparedSummary ?? "归档已经完成"}；结果将在 ${formatTime(job.expiresAt)} 过期。` : job.status === "FAILED" ? `${job.errorCode ?? "EXPORT_FAILED"}：${job.errorMessage ?? "服务端未返回失败说明。"}` : job.status === "EXPIRED" ? "生成的 ZIP 已到期；附件源目录未被清理，可创建新的导出。" : "这是历史兼容记录，当前版本不提供取消操作。"}</p>
     <div className="attachment-export-job__meta"><span>创建于 {formatTime(job.createdAt)}</span><span>已下载 {String(job.downloadCount)} 次</span><span>策略 {job.contentPolicy}</span></div>
     <div className="button-row">
       {job.status === "SUCCEEDED" ? <Button size="sm" onClick={() => void download()} disabled={downloading}><Download size={14} />{downloading ? "正在下载…" : "下载 ZIP"}</Button> : null}
@@ -111,7 +111,7 @@ export const AttachmentExportPanel = () => {
 
   if (workspaceId === "") return <UnavailableState title="尚未连接 Workspace" description="连接 Workspace 后才能读取固定 attachments/ 目录并创建可恢复归档。" />;
   return <Card className="attachment-export-panel">
-    <CardHeader eyebrow="Data portability" title="Workspace 附件导出" description="将固定 attachments/ 目录中的普通文件生成确定性 ZIP。任务与下载历史来自服务端，可在刷新或重启后恢复。" action={<Button variant="ghost" size="sm" onClick={() => void exports.refetch()} disabled={exports.isFetching} aria-label="刷新附件导出历史"><RefreshCw size={16} /></Button>} />
+    <CardHeader eyebrow="数据导出" title="Workspace 附件导出" description="将固定 attachments/ 目录中的普通文件生成确定性 ZIP。任务与下载历史来自服务端，可在刷新或重启后恢复。" action={<Button variant="ghost" size="sm" onClick={() => void exports.refetch()} disabled={exports.isFetching} aria-label="刷新附件导出历史"><RefreshCw size={16} /></Button>} />
     <div className="attachment-export-create">
       <div><strong>ATTACHMENTS_ZIP</strong><p>内容策略为 <span className="mono">RAW_USER_OWNED</span>；ZIP 包含原始附件字节和版本化 manifest。</p></div>
       <Button onClick={() => createExport(false)} disabled={create.isPending}><Archive size={15} />{create.isPending ? "正在创建…" : "创建附件导出"}</Button>

@@ -108,18 +108,18 @@ describe("ReviewCardsPanel", () => {
     apiMocks.createReviewCard.mockResolvedValue(card);
     renderPanel();
 
-    await screen.findByText("这个 Deck 还没有 Card");
-    const createButtons = screen.getAllByRole("button", { name: "新建 Card" });
+    await screen.findByText("这个卡组还没有卡片");
+    const createButtons = screen.getAllByRole("button", { name: "新建卡片" });
     expect(createButtons).not.toHaveLength(0);
     fireEvent.click(createButtons[0] as HTMLButtonElement);
-    expect(screen.queryByLabelText("Evidence 摘要（可选）")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Claim ID"), { target: { value: claimId } });
+    expect(screen.queryByLabelText("证据摘要（可选）")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("知识点 ID"), { target: { value: claimId } });
     fireEvent.change(screen.getByLabelText("问题"), { target: { value: card.question } });
     fireEvent.change(screen.getByLabelText("答案要点（每行一项）"), { target: { value: "要点一\n要点二" } });
-    fireEvent.change(screen.getByLabelText("Source Version ID"), { target: { value: sourceVersionId } });
-    fireEvent.change(screen.getByLabelText("Source Span ID"), { target: { value: sourceSpanId } });
-    fireEvent.change(screen.getByLabelText("Evidence Hash"), { target: { value: evidenceHash } });
-    fireEvent.click(screen.getByRole("button", { name: "创建 DRAFT" }));
+    fireEvent.change(screen.getByLabelText("资料版本 ID"), { target: { value: sourceVersionId } });
+    fireEvent.change(screen.getByLabelText("来源片段 ID"), { target: { value: sourceSpanId } });
+    fireEvent.change(screen.getByLabelText("证据哈希"), { target: { value: evidenceHash } });
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
 
     await waitFor(() => expect(apiMocks.createReviewCard).toHaveBeenCalledTimes(1));
     const input = apiMocks.createReviewCard.mock.calls[0]?.[0];

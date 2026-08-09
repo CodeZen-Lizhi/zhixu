@@ -53,7 +53,7 @@ describe("SourceSpanViewer", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开证据片段" }));
 
     expect(await screen.findByText("Session 必须通过 authFetch 读取。")).toBeInTheDocument();
-    expect(screen.getByRole("dialog", { name: "Source Span 证据" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "来源片段证据" })).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       `/api/v1/workspaces/${reference.workspaceId}/source-versions/${reference.sourceVersionId}/spans/${reference.sourceSpanId}`,
       expect.objectContaining({ credentials: "include" }),

@@ -66,7 +66,7 @@ export const AuthoringPage = () => {
         {overview.data.pendingPublications.length === 0 ? <p className="authoring-list-empty">没有等待处理的发布。</p> : <div className="authoring-list">{overview.data.pendingPublications.map((publication) => {
           const meta = publicationMeta[publication.status];
           return <Link className="authoring-row" key={publication.id} to={publication.proposalHref}>
-            <span><strong>{publication.targetPath}</strong><small>Proposal {publication.proposalId}</small></span>
+            <span><strong>{publication.targetPath}</strong><small>提案 {publication.proposalId}</small></span>
             <span className="authoring-row__meta">{publication.status === "RECOVERY_REQUIRED" ? <TriangleAlert size={16} /> : <RefreshCw size={16} />}<Badge tone={meta.tone}>{meta.label}</Badge></span>
           </Link>;
         })}</div>}

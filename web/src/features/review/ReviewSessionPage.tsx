@@ -114,7 +114,7 @@ const ScoreResult = ({ result }: { result: ReviewAnswerResult }) => {
     <section className="artifact-section" aria-label="本题评分结果">
       <header>
         <div>
-          <p className="eyebrow">Server score</p>
+          <p className="eyebrow">服务端评分</p>
           <h3>评分已写入下一次调度</h3>
         </div>
         <Badge tone={result.replayed ? "warning" : "success"}>
@@ -218,7 +218,7 @@ const ReviewLearningPathPanel = ({
     <section className="artifact-section" aria-label="复习学习路径">
       <header>
         <div>
-          <p className="eyebrow">Learning path</p>
+          <p className="eyebrow">学习路径</p>
           <h3>评分缺口学习路径</h3>
         </div>
         <Badge
@@ -234,7 +234,7 @@ const ReviewLearningPathPanel = ({
         </Badge>
       </header>
       <p className="artifact-note">
-        来源策略 {path.sourcePolicyVersion} · Artifact v
+        来源策略 {path.sourcePolicyVersion} · 产物 v
         {String(path.artifact.artifactVersion)} · 路径版本{" "}
         {String(path.version)}
       </p>
@@ -242,7 +242,7 @@ const ReviewLearningPathPanel = ({
         <Button asChild size="sm" variant="ghost">
           <Link to={`/artifacts/${path.artifact.artifactId}`}>
             <BookOpenCheck size={14} />
-            打开路径 Artifact
+            打开路径产物
           </Link>
         </Button>
         {path.status === "ACTIVE" ? (
@@ -316,7 +316,7 @@ const ReviewLearningPathPanel = ({
                   </div>
                   <p>{step.rationale}</p>
                   <p className="learning-path-step__binding">
-                    Claim {step.claimId} · Evidence{" "}
+                    知识点 {step.claimId} · 证据{" "}
                     {step.evidenceHash.slice(0, 16)}…
                   </p>
                   <div className="button-row">
@@ -399,7 +399,7 @@ const ReviewQuestion = ({
     <section className="artifact-section" aria-label="当前复习题">
       <header>
         <div>
-          <p className="eyebrow">Card / {item.card.cardType}</p>
+          <p className="eyebrow">复习卡片 / {item.card.cardType}</p>
           <h3>{item.card.question}</h3>
         </div>
         <Badge tone="info">
@@ -683,7 +683,7 @@ export const ReviewSessionPage = () => {
       <div className="page-stack">
         <UnavailableState
           title="请选择 Workspace"
-          description="Review Session 只能在当前 Workspace 中继续。"
+          description="复习会话只能在当前 Workspace 中继续。"
         />
       </div>
     );
@@ -692,12 +692,12 @@ export const ReviewSessionPage = () => {
       <div className="page-stack">
         <UnavailableState
           title="缺少复习会话"
-          description="请从 Review Deck 进入新的复习会话。"
+          description="请从复习卡组进入新的复习会话。"
         />
         <Button asChild variant="secondary">
           <Link to="/review">
             <ArrowLeft size={15} />
-            返回 Review
+            返回复习
           </Link>
         </Button>
       </div>
@@ -709,7 +709,7 @@ export const ReviewSessionPage = () => {
         <div>
           <Link className="back-link" to="/review">
             <ArrowLeft size={15} />
-            返回 Deck
+            返回卡组
           </Link>
           <h1>今日复习</h1>
           <p>会话 {sessionId.slice(0, 8)}…</p>
@@ -723,7 +723,7 @@ export const ReviewSessionPage = () => {
 
       <Card>
         <CardHeader
-          eyebrow="Active session"
+          eyebrow="当前会话"
           title={
             due.isPending
               ? "正在读取待复习题"
@@ -761,7 +761,7 @@ export const ReviewSessionPage = () => {
         {due.isPending ? (
           <div className="ui-state" role="status">
             <strong>正在读取今日队列</strong>
-            <p>正在从服务器计算已审批且到期的 Card。</p>
+            <p>正在从服务器计算已审批且到期的卡片。</p>
           </div>
         ) : null}
         {!due.isPending && !due.isError && result !== undefined ? (
@@ -938,8 +938,8 @@ export const ReviewSessionPage = () => {
             }
             description={
               completedCards.size > 0
-                ? "所有已加载的到期 Card 都已得到服务端评分。"
-                : "当已审批 Card 到期后，会在这里出现。"
+                ? "所有已加载的到期卡片都已得到服务端评分。"
+                : "当已审批卡片到期后，会在这里出现。"
             }
             action={
               completedCards.size > 0 ? (

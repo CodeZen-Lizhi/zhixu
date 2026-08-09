@@ -72,16 +72,16 @@ describe("Artifact pages", () => {
   it("shows a real loading and error state instead of a placeholder success", () => {
     mocks.list = { isPending: true, isError: false, data: undefined, refetch: vi.fn() };
     const { rerender } = render(<MemoryRouter><ArtifactsPage /></MemoryRouter>);
-    expect(screen.getByText("正在读取 Artifact")).toBeInTheDocument();
+    expect(screen.getByText("正在读取产物")).toBeInTheDocument();
     mocks.list = { isPending: false, isError: true, data: undefined, refetch: vi.fn() };
     rerender(<MemoryRouter><ArtifactsPage /></MemoryRouter>);
-    expect(screen.getByRole("alert")).toHaveTextContent("Artifact 列表不可用");
+    expect(screen.getByRole("alert")).toHaveTextContent("产物列表不可用");
   });
 
   it("shows GAP coverage and keeps PUBLISH_PROPOSED separate from formal knowledge", () => {
     renderDetail();
-    expect(screen.getAllByText("GAP").length).toBeGreaterThan(0);
-    expect(screen.getByText("已创建 Proposal；正式知识写入仍须在 Proposals 中审批与执行。")).toBeInTheDocument();
+    expect(screen.getAllByText("知识缺口").length).toBeGreaterThan(0);
+    expect(screen.getByText("已创建提案；正式知识写入仍须在提案页审批与执行。")).toBeInTheDocument();
     expect(screen.getByText("此章节没有正文，缺口已显式记录。")).toBeInTheDocument();
   });
 
@@ -89,11 +89,11 @@ describe("Artifact pages", () => {
     mocks.detail = { isPending: false, isError: false, data: evidenceArtifact, refetch: detailRefetch };
     renderDetail();
 
-    expect(screen.getAllByText("COVERED").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("PARTIAL").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("已覆盖").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("部分覆盖").length).toBeGreaterThan(0);
     expect(screen.getByText("covered citation")).toBeInTheDocument();
     expect(screen.getByText("来源文档")).toBeInTheDocument();
-    expect(screen.getByText(/Revision 2/)).toBeInTheDocument();
+    expect(screen.getByText(/修订版本 2/)).toBeInTheDocument();
     expect(screen.getByText("citation is bounded")).toBeInTheDocument();
   });
 
@@ -109,14 +109,14 @@ describe("Artifact pages", () => {
     mutation.error = new ArtifactApiError("HTTP_ERROR", "ARTIFACT_VERSION_CONFLICT", "stale", false, 409);
     view.rerender(<MemoryRouter initialEntries={[`/artifacts/${artifact.id}`]}><Routes><Route path="/artifacts/:artifactId" element={<ArtifactDetailPage />} /></Routes></MemoryRouter>);
 
-    expect(screen.getByRole("alert")).toHaveTextContent("当前 Revision 已更新");
+    expect(screen.getByRole("alert")).toHaveTextContent("当前版本已更新");
     expect(screen.getByRole("button", { name: "审批大纲" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "刷新当前 Revision" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新当前版本" }));
     await waitFor(() => expect(detailRefetch).toHaveBeenCalledTimes(1));
     expect(mutation.reset).not.toHaveBeenCalled();
-    expect(screen.getByRole("alert")).toHaveTextContent("当前 Revision 已更新");
+    expect(screen.getByRole("alert")).toHaveTextContent("当前版本已更新");
 
-    fireEvent.click(screen.getByRole("button", { name: "刷新当前 Revision" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新当前版本" }));
     await waitFor(() => expect(detailRefetch).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(mutation.reset).toHaveBeenCalledTimes(7));
     await waitFor(() => expect(generationsRefetch).toHaveBeenCalledTimes(1));
@@ -163,7 +163,7 @@ describe("Artifact pages", () => {
 
     fireEvent.change(screen.getByLabelText("修订章节"), { target: { value: "covered" } });
     fireEvent.change(screen.getByLabelText("缺口说明"), { target: { value: "verified source no longer covers this section" } });
-    fireEvent.click(screen.getByRole("button", { name: "替换为 GAP 章节" }));
+    fireEvent.click(screen.getByRole("button", { name: "替换为知识缺口章节" }));
     expect(mutation.mutate.mock.calls.at(-1)?.[0]).toMatchObject({
       sectionKey: "covered",
       expectedVersion: revisingArtifact.version,
@@ -188,7 +188,7 @@ describe("Artifact pages", () => {
     mocks.workflow = { isPending: false, isError: false, data: workflow("running"), refetch: workflowRefetch };
     renderDetail();
 
-    expect(screen.getByText("Workflow · running")).toBeInTheDocument();
+    expect(screen.getByText("Workflow · 运行中")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "打开 Workflow" })).toHaveAttribute("href", `/workflows/${generationRecord.workflowRunId}`);
     expect(generationMutation.mutate).not.toHaveBeenCalled();
   });

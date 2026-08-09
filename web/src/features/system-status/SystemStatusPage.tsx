@@ -24,7 +24,7 @@ const LoadingState = ({ display }: { display: SystemStatusDisplay }) => display 
     <div>
       <p className="eyebrow">正在连接</p>
       <h2>读取系统真实状态</h2>
-      <p>正在检查 API、数据库、认证边界、Graph 和当前应用版本。</p>
+      <p>正在检查 API、数据库、认证边界、知识图谱和当前应用版本。</p>
     </div>
   </section>
 );
@@ -176,7 +176,7 @@ export const SystemStatusPage = ({ display = "full" }: SystemStatusPageProps) =>
   const compactFacts = [
     { label: "API", value: "可用" },
     { label: "数据库", value: database.status === "ready" ? "可用" : "不可用" },
-    { label: "Graph", value: graph.status === "ready" ? "可用" : "不可用" },
+    { label: "知识图谱", value: graph.status === "ready" ? "可用" : "不可用" },
     { label: "RAG", value: rag.status === "ready" ? "可用" : rag.status === "disabled" ? "可选能力已关闭" : "不可用" },
   ] as const;
 
@@ -212,7 +212,7 @@ export const SystemStatusPage = ({ display = "full" }: SystemStatusPageProps) =>
         { id: "api", label: "API", state: "ready" },
         { id: "database", label: "数据库", state: database.status, impact: "依赖持久化数据的工作流暂不可用。", reason: database.message ?? "数据库连接或运行配置不可用。", recovery: { kind: "retry", label: "重新检查数据库" } },
         { id: "auth", label: "认证", state: auth.status, readyLabel: "已启用", disabledLabel: "开发模式", impact: auth.status === "disabled" ? "当前实例没有登录保护，仅适合受控开发环境。" : "受保护的业务 API 将拒绝访问。", reason: auth.status === "disabled" ? "认证由运行配置明确关闭。" : "认证依赖未能初始化。", recovery: auth.status === "disabled" ? { kind: "link", label: "检查访问权限", to: "/settings?section=access" } : { kind: "retry", label: "重新检查认证" } },
-        { id: "graph", label: "Graph", state: graph.status, impact: "知识图谱查询与依赖它的探索入口暂不可用。", reason: "Graph 查询依赖未就绪。", recovery: { kind: "retry", label: "重新检查 Graph" } },
+        { id: "graph", label: "知识图谱", state: graph.status, impact: "知识图谱查询与依赖它的探索入口暂不可用。", reason: "知识图谱查询依赖未就绪。", recovery: { kind: "retry", label: "重新检查知识图谱" } },
       ],
     },
     {
@@ -221,8 +221,8 @@ export const SystemStatusPage = ({ display = "full" }: SystemStatusPageProps) =>
         { id: "capture", label: "快速记录", state: capture.status, impact: "原始资料仍保留，但新的快速记录请求暂不可用。", reason: "快速记录服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查快速记录" } },
         { id: "authoring", label: "创作", state: authoring.status, impact: "现有资料仍可读取，但草稿与发布流程暂不可用。", reason: "创作服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查创作" } },
         { id: "organizing", label: "整理", state: organizing.status, impact: "资料与文章仍可读取，但材料确认和整理流程暂不可用。", reason: "整理服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查整理" } },
-        { id: "collections", label: "Collections", state: collections.status, impact: "已保存集合与条件查询暂不可用。", reason: "Collection 服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查 Collections" } },
-        { id: "semantic-links", label: "语义候选", state: semanticLinks.status, impact: "正式 Graph 仍可用，但候选扫描与审阅暂不可用。", reason: "语义候选依赖未就绪。", recovery: { kind: "retry", label: "重新检查语义候选" } },
+        { id: "collections", label: "集合", state: collections.status, impact: "已保存集合与条件查询暂不可用。", reason: "集合服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查集合" } },
+        { id: "semantic-links", label: "语义候选", state: semanticLinks.status, impact: "正式知识图谱仍可用，但候选扫描与审阅暂不可用。", reason: "语义候选依赖未就绪。", recovery: { kind: "retry", label: "重新检查语义候选" } },
       ],
     },
     {
@@ -230,9 +230,9 @@ export const SystemStatusPage = ({ display = "full" }: SystemStatusPageProps) =>
       facts: [
         { id: "knowledge-health", label: "知识健康", state: knowledgeHealth.status, impact: "知识健康扫描与问题列表暂不可用。", reason: "知识健康依赖未就绪。", recovery: { kind: "retry", label: "重新检查知识健康" } },
         { id: "knowledge-timeline", label: "知识时间线", state: knowledgeTimeline.status, impact: "知识时间线与影响分析暂不可用。", reason: "时间线投影依赖未就绪。", recovery: { kind: "retry", label: "重新检查知识时间线" } },
-        { id: "review", label: "Review", state: review.status, impact: "主动回忆与复习调度暂不可用。", reason: "Review 服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查 Review" } },
-        { id: "memory", label: "Memory", state: memory.status, impact: "长期上下文管理暂不可用。", reason: "Memory 服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查 Memory" } },
-        { id: "interview", label: "Interview", state: interview.status, impact: "模拟面试与学习路径暂不可用。", reason: "Interview 服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查 Interview" } },
+        { id: "review", label: "复习", state: review.status, impact: "主动回忆与复习调度暂不可用。", reason: "复习服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查复习" } },
+        { id: "memory", label: "记忆", state: memory.status, impact: "长期上下文管理暂不可用。", reason: "记忆服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查记忆" } },
+        { id: "interview", label: "访谈", state: interview.status, impact: "模拟面试与学习路径暂不可用。", reason: "访谈服务依赖未就绪。", recovery: { kind: "retry", label: "重新检查访谈" } },
         { id: "rag", label: "RAG", state: rag.status, disabledLabel: "已关闭（可选）", impact: rag.status === "disabled" ? "问答增强入口不会运行，其他知识能力不受影响。" : "新问题提交暂不可用，已有会话仍可读取。", reason: rag.status === "disabled" ? "可选 RAG 能力未启用。" : "RAG 运行依赖未就绪。", recovery: rag.status === "disabled" ? { kind: "link", label: "配置模型与检索", to: "/settings?section=models" } : { kind: "retry", label: "重新检查 RAG" } },
       ],
     },

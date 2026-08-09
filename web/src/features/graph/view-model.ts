@@ -1,5 +1,8 @@
 import type {
+  ClaimStatus,
+  EdgeTraversal,
   GraphEdge,
+  GraphConfirmationMethod,
   GraphGlobalPage,
   GraphNeighborhood,
   GraphNode,
@@ -8,6 +11,7 @@ import type {
   NodeType,
   RelationStatus,
   RelationType,
+  TopicStatus,
 } from "../../api/graph";
 
 export const GRAPH_CANVAS_WIDTH = 1000;
@@ -99,6 +103,31 @@ const relationStatusLabels: Record<RelationStatus, string> = {
   STALE: "已过期",
 };
 
+const topicStatusLabels: Record<TopicStatus, string> = {
+  ACTIVE: "有效",
+  MERGED: "已合并",
+  DEPRECATED: "已弃用",
+};
+
+const claimStatusLabels: Record<ClaimStatus, string> = {
+  SUGGESTED: "建议",
+  CONFIRMED: "已确认",
+  DISPUTED: "存在争议",
+  SUPERSEDED: "已被替代",
+  DEPRECATED: "已弃用",
+  INVALID: "无效",
+};
+
+const edgeTraversalLabels: Record<EdgeTraversal, string> = {
+  FORWARD: "正向",
+  REVERSE: "反向",
+};
+
+const confirmationMethodLabels: Record<GraphConfirmationMethod, string> = {
+  USER_APPROVAL: "人工审批",
+  SOURCE_DERIVED: "来源推导",
+};
+
 export const graphNodeKey = (ref: GraphNodeRef): string => `${ref.type}:${ref.id}`;
 
 export const graphEdgeKey = (edge: GraphEdge): string => edge.relationId;
@@ -108,6 +137,15 @@ export const nodeTypeLabel = (type: NodeType): string => nodeTypeLabels[type];
 export const relationTypeLabel = (type: RelationType): string => relationTypeLabels[type];
 
 export const relationStatusLabel = (status: RelationStatus): string => relationStatusLabels[status];
+
+export const graphClaimStatusLabel = (status: ClaimStatus): string => claimStatusLabels[status];
+
+export const graphNodeStatusLabel = (node: GraphNode): string =>
+  node.type === "TOPIC" ? topicStatusLabels[node.topicStatus] : graphClaimStatusLabel(node.claimStatus);
+
+export const graphEdgeTraversalLabel = (traversal: EdgeTraversal): string => edgeTraversalLabels[traversal];
+
+export const graphConfirmationMethodLabel = (method: GraphConfirmationMethod): string => confirmationMethodLabels[method];
 
 export const graphNodeLabel = (node: GraphNode): string =>
   node.type === "TOPIC" ? node.name : node.statement;

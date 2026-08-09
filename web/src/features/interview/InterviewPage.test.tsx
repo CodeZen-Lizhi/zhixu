@@ -153,7 +153,7 @@ describe("InterviewSessionPage", () => {
     render(<MemoryRouter initialEntries={[`/interviews/${sessionId}`]}><Routes><Route path="/interviews/:sessionId" element={<InterviewSessionPage />} /></Routes></MemoryRouter>);
 
     expect(suggestCandidate).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "创建 Memory 候选" }));
+    fireEvent.click(screen.getByRole("button", { name: "创建记忆候选" }));
 
     const input = suggestCandidate.mock.calls[0]?.[0];
     expect(input).toMatchObject({

@@ -303,7 +303,7 @@ describe("ProposalsPage", () => {
 
     expect(await screen.findByRole("combobox", { name: "类型" })).toHaveValue("publish_artifact");
     await waitFor(() => expect(api.listProposals).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ type: "publish_artifact" }), expect.any(AbortSignal)));
-    expect(screen.getAllByText("Artifact 发布").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("产物发布").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("风险说明：发布将影响正式知识边界")).toBeInTheDocument();
   });
 
@@ -390,8 +390,8 @@ describe("ProposalsPage", () => {
     renderList();
 
     expect(await screen.findByText(`Workflow ${workflowRunId.slice(0, 8)}…`)).toBeInTheDocument();
-    expect(screen.getAllByText("approved")).toHaveLength(2);
-    expect(screen.getByText("风险等级 LOW")).toBeInTheDocument();
+    expect(screen.getAllByText("已批准", { selector: ".ui-badge" })).toHaveLength(2);
+    expect(screen.getByText("风险等级 低")).toBeInTheDocument();
     expect(screen.getByText("风险说明：低风险说明")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /docs\/a\.md/ })).toHaveAttribute("href", `/proposals/${proposalId}`);
   });
@@ -498,7 +498,7 @@ describe("ProposalDetailPage", () => {
   it("分开展示受控风险等级与 Revision 风险说明", async () => {
     renderDetail();
 
-    expect(await screen.findAllByText("LOW · 低")).toHaveLength(2);
+    expect(await screen.findAllByText("低")).toHaveLength(2);
     expect(screen.getAllByText("变更影响有限")).toHaveLength(2);
   });
 
@@ -541,8 +541,8 @@ describe("ProposalDetailPage", () => {
     });
     renderDetail();
 
-    expect(await screen.findByText("新文件 → Proposal")).toBeInTheDocument();
-    expect(screen.getByText("目标路径当前不存在；Diff 基线为空文件。")).toBeInTheDocument();
+    expect(await screen.findByText("新文件 → 提案")).toBeInTheDocument();
+    expect(screen.getByText("目标路径当前不存在；差异对比基线为空文件。")).toBeInTheDocument();
     expect(screen.getByText("缺失证明")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("button", { name: "批准" })).toBeEnabled());
     expect(monaco.diffViewer).toHaveBeenCalledWith(expect.objectContaining({ original: "", modified: "next" }));
@@ -562,9 +562,9 @@ describe("ProposalDetailPage", () => {
     expect(screen.getByRole("link", { name: restoreDocumentId })).toHaveAttribute("href", `/authoring/documents/${restoreDocumentId}/history`);
     expect(screen.getByText("来源 Commit").parentElement).toHaveTextContent(restoreTargetCommit);
     expect(screen.getByText("预览 HEAD").parentElement).toHaveTextContent(restoreExpectedHead);
-    expect(screen.getByText("Document Version").parentElement).toHaveTextContent("v7");
-    expect(screen.getByText("Preview Hash").parentElement).toHaveTextContent(restorePreviewHash);
-    expect(screen.getByText("目标内容 Hash").parentElement).toHaveTextContent(restoreTargetContentHash);
+    expect(screen.getByText("文档版本").parentElement).toHaveTextContent("v7");
+    expect(screen.getByText("预览哈希").parentElement).toHaveTextContent(restorePreviewHash);
+    expect(screen.getByText("目标内容哈希").parentElement).toHaveTextContent(restoreTargetContentHash);
     expect(screen.getByText("document-restore/v1")).toBeInTheDocument();
     expect(await screen.findByText("Diff Viewer")).toBeInTheDocument();
     expect(api.getProposalCurrentContent).toHaveBeenCalledWith(workspaceId, proposalId, {
@@ -580,7 +580,7 @@ describe("ProposalDetailPage", () => {
     const approve = screen.getByRole("button", { name: "批准" });
     await waitFor(() => expect(approve).toBeEnabled());
     fireEvent.click(approve);
-    expect(screen.getByRole("dialog")).toHaveTextContent("恢复来源 Document");
+    expect(screen.getByRole("dialog")).toHaveTextContent("恢复来源文档");
     expect(screen.getByRole("dialog")).toHaveTextContent("不会改写既有历史");
     fireEvent.click(screen.getByRole("button", { name: "确认提交" }));
 
@@ -659,7 +659,7 @@ describe("ProposalDetailPage", () => {
 
     expect(await screen.findByText("Diff Viewer")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "批准" })).toBeDisabled();
-    expect(screen.getByText("等待 Diff Viewer 成功挂载后才能批准；驳回仍可提交。")).toBeInTheDocument();
+    expect(screen.getByText("等待差异查看器成功挂载后才能批准；驳回仍可提交。")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "驳回" }));
     fireEvent.click(screen.getByRole("button", { name: "确认提交" }));
 
@@ -670,7 +670,7 @@ describe("ProposalDetailPage", () => {
     monaco.mode = "error";
     renderDetail();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Diff Viewer 加载失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent("差异查看器加载失败");
     expect(screen.getByText("本地 Monaco worker 加载失败")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "批准" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "驳回" }));
@@ -838,7 +838,7 @@ describe("ProposalDetailPage", () => {
     expect(await screen.findByText("Diff Viewer")).toBeInTheDocument();
     const redispatch = await screen.findByRole("button", { name: "恢复写回 Workflow" });
     expect(redispatch).toBeDisabled();
-    expect(screen.getByText("等待 Diff Viewer 成功挂载后才能恢复派发。")).toBeInTheDocument();
+    expect(screen.getByText("等待差异查看器成功挂载后才能恢复派发。")).toBeInTheDocument();
     expect(api.decideProposal).not.toHaveBeenCalled();
   });
 
@@ -922,13 +922,13 @@ describe("ProposalDetailPage", () => {
     const { queryClient } = renderDetail();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
 
-    expect(await screen.findByText("Relation Diff")).toBeInTheDocument();
-    expect(screen.getByText("RELATION_CANDIDATE:10000000-0000-4000-8000-000000000004")).toBeInTheDocument();
-    expect(screen.getByText(/fingerprint: d{64}/)).toBeInTheDocument();
-    expect(screen.getAllByText("CLAIM:10000000-0000-4000-8000-000000000005 · v1")).toHaveLength(2);
-    expect(screen.getAllByText("TOPIC:10000000-0000-4000-8000-000000000006 · v2")).toHaveLength(2);
+    expect(await screen.findByText("关系变更")).toBeInTheDocument();
+    expect(screen.getByText("关系候选：10000000-0000-4000-8000-000000000004")).toBeInTheDocument();
+    expect(screen.getByText(/指纹：d{64}/)).toBeInTheDocument();
+    expect(screen.getAllByText("主张：10000000-0000-4000-8000-000000000005 · v1")).toHaveLength(2);
+    expect(screen.getAllByText("主题：10000000-0000-4000-8000-000000000006 · v2")).toHaveLength(2);
     expect(screen.getByText("10000000-0000-4000-8000-000000000007")).toBeInTheDocument();
-    expect(screen.getByText(/semantic hash: e{64}/)).toBeInTheDocument();
+    expect(screen.getByText(/语义哈希：e{64}/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "批准" }));
     fireEvent.click(screen.getByRole("button", { name: "确认提交" }));
 
@@ -945,20 +945,20 @@ describe("ProposalDetailPage", () => {
     api.getProposalCurrentContent.mockClear();
     renderDetail();
 
-    expect(await screen.findByText("Artifact Publication Snapshot")).toBeInTheDocument();
+    expect(await screen.findByText("产物发布快照")).toBeInTheDocument();
     expect(screen.getByText("10000000-0000-4000-8000-000000000006")).toBeInTheDocument();
     expect(screen.getByText(/#3 ·/)).toHaveTextContent("10000000-0000-4000-8000-000000000007");
     expect(screen.getByText("v5")).toBeInTheDocument();
     expect(screen.getAllByText("c".repeat(64))).toHaveLength(2);
-    expect(screen.getByText("COVERED · 无知识缺口")).toBeInTheDocument();
-    expect(screen.getByText("GAP · NO_SOURCE：没有可验证来源")).toBeInTheDocument();
+    expect(screen.getByText("已覆盖 · 无知识缺口")).toBeInTheDocument();
+    expect(screen.getByText("知识缺口 · NO_SOURCE：没有可验证来源")).toBeInTheDocument();
     expect(screen.getByText("尚未成为正式知识")).toBeInTheDocument();
-    expect(screen.getByText(/即使 Approval 为 approved，本页也不表示已创建 Document、Git 写入或索引/)).toBeInTheDocument();
+    expect(screen.getByText(/即使审批状态为已批准，本页也不表示已创建文档、Git 写入或索引/)).toBeInTheDocument();
     expect(api.getProposalCurrentContent).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "执行 Apply Preflight" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "批准" }));
-    expect(screen.getByRole("dialog")).toHaveTextContent("批准只形成 Approval，不表示已经创建 Document、Git 写入或索引");
+    expect(screen.getByRole("dialog")).toHaveTextContent("批准只形成审批记录，不表示已经创建文档、Git 写入或索引");
     fireEvent.click(screen.getByRole("button", { name: "确认提交" }));
 
     await waitFor(() => expect(api.decideProposal).toHaveBeenCalledWith(proposalId, {
@@ -975,13 +975,13 @@ describe("ProposalDetailPage", () => {
     api.getProposalCurrentContent.mockClear();
     renderDetail();
 
-    expect(await screen.findByText("Downstream Update Snapshot")).toBeInTheDocument();
+    expect(await screen.findByText("下游更新快照")).toBeInTheDocument();
     expect(screen.getByText("10000000-0000-4000-8000-000000000006")).toBeInTheDocument();
     expect(screen.getByText("impact-analysis/v2")).toBeInTheDocument();
-    expect(screen.getByText("Source Event").parentElement).toHaveTextContent("10000000-0000-4000-8000-000000000007 · v2");
-    expect(screen.getByText("Target").parentElement).toHaveTextContent("ARTIFACT:10000000-0000-4000-8000-000000000008");
-    expect(screen.getByText("Artifact Owner").parentElement).toHaveTextContent("10000000-0000-4000-8000-000000000008 · v5");
-    expect(screen.getByText("Artifact Revision").parentElement).toHaveTextContent("#3 · 10000000-0000-4000-8000-000000000009");
+    expect(screen.getByText("来源事件").parentElement).toHaveTextContent("10000000-0000-4000-8000-000000000007 · v2");
+    expect(screen.getByText("目标").parentElement).toHaveTextContent("产物：10000000-0000-4000-8000-000000000008");
+    expect(screen.getByText("产物绑定").parentElement).toHaveTextContent("10000000-0000-4000-8000-000000000008 · v5");
+    expect(screen.getByText("产物修订版本").parentElement).toHaveTextContent("#3 · 10000000-0000-4000-8000-000000000009");
     expect(screen.getByText("b".repeat(64))).toBeInTheDocument();
     expect(screen.getByText("引用来源发生变化")).toBeInTheDocument();
     expect(api.getProposalCurrentContent).not.toHaveBeenCalled();
@@ -1015,7 +1015,7 @@ describe("ProposalDetailPage", () => {
     renderDetail();
 
     expect(await screen.findByText("执行能力不可用")).toBeInTheDocument();
-    expect(screen.getByText("Review Card Owner").parentElement).toHaveTextContent("10000000-0000-4000-8000-000000000010 · v4 · INVALIDATED");
+    expect(screen.getByText("复习卡绑定").parentElement).toHaveTextContent("10000000-0000-4000-8000-000000000010 · v4 · 已失效");
     expect(screen.getByText("10000000-0000-4000-8000-000000000011")).toBeInTheDocument();
     expect(screen.getByText("d".repeat(64))).toBeInTheDocument();
     expect(screen.getByText("e".repeat(64))).toBeInTheDocument();
@@ -1035,7 +1035,7 @@ describe("ProposalDetailPage", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("版本冲突：基线已经漂移");
     expect(screen.queryByRole("button", { name: "批准" })).not.toBeInTheDocument();
-    expect(screen.getByText("批准已被阻止；请重新生成 Proposal Revision。")).toBeInTheDocument();
+    expect(screen.getByText("批准已被阻止；请重新生成提案修订版本。")).toBeInTheDocument();
   });
 
   it("审批 409 后重新读取 Proposal 与当前文件", async () => {

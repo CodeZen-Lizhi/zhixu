@@ -459,7 +459,7 @@ describe("NewDocumentPage", () => {
     runInitialFocus();
 
     expect(screen.getByText("已关闭")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "查看 Proposal" })).toHaveAttribute("href", `/proposals/${proposalId}`);
+    expect(screen.getByRole("link", { name: "查看提案" })).toHaveAttribute("href", `/proposals/${proposalId}`);
     expect(screen.getByRole("button", { name: /保存版本/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /提交发布/ })).toBeDisabled();
   });

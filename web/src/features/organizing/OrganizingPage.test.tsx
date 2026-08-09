@@ -401,7 +401,7 @@ describe("OrganizingPage", () => {
     for (const materialKind of ["资料版本", "文章版本", "正式知识", "智能集合"]) fireEvent.click(screen.getByLabelText(materialKind));
 
     expect(screen.getByText("至少选择一种且不重复的材料类型。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /保存 Revision 4/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /保存修订版本 4/ })).toBeDisabled();
     expect(hooks.revise.mutateAsync).not.toHaveBeenCalled();
   });
 
@@ -420,11 +420,11 @@ describe("OrganizingPage", () => {
     renderPage();
 
     await waitFor(() => expect(screen.getByLabelText("正在编辑")).toHaveValue(customTemplate.id));
-    expect(screen.getByRole("button", { name: /保存 Revision 4/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /保存修订版本 4/ })).toBeEnabled();
     fireEvent.change(screen.getByLabelText("输出目录"), { target: { value: "../outside" } });
 
     expect(screen.getByText("输出目录必须是 Workspace 内的规范相对目录。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /保存 Revision 4/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /保存修订版本 4/ })).toBeDisabled();
     expect(hooks.revise.mutateAsync).not.toHaveBeenCalled();
   });
 
@@ -435,9 +435,9 @@ describe("OrganizingPage", () => {
     renderPage();
 
     await waitFor(() => expect(screen.getByLabelText("正在编辑")).toHaveValue(customTemplate.id));
-    fireEvent.click(screen.getByRole("button", { name: /保存 Revision 4/ }));
+    fireEvent.click(screen.getByRole("button", { name: /保存修订版本 4/ }));
     await waitFor(() => expect(hooks.revise.mutateAsync).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole("button", { name: /保存 Revision 4/ }));
+    fireEvent.click(screen.getByRole("button", { name: /保存修订版本 4/ }));
     await waitFor(() => expect(hooks.revise.mutateAsync).toHaveBeenCalledTimes(2));
 
     const firstInput = hooks.revise.mutateAsync.mock.calls[0]?.[0] as { idempotencyKey: string; workspaceId: string; templateId: string; expectedVersion: number };
@@ -592,7 +592,7 @@ describe("OrganizingPage", () => {
     hooks.snapshot.data = { ...snapshot, draftId: "c1000000-0000-4000-8000-000000000091" };
     renderPage(`/authoring/organize?draft=${draftId}&snapshot=${snapshotId}`);
 
-    expect(screen.getByText("Snapshot 与草稿不匹配")).toBeInTheDocument();
+    expect(screen.getByText("快照与草稿不匹配")).toBeInTheDocument();
     expect(screen.queryByText("Workflow Input Snapshot")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认材料并开始整理" })).not.toBeInTheDocument();
   });

@@ -23,6 +23,9 @@ import {
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const cardTypes: readonly ReviewCardType[] = ["SHORT_ANSWER", "CLOZE", "COMPARISON", "SCENARIO", "CODE_READING", "DESIGN"];
+const cardTypeLabels: Record<ReviewCardType, string> = { SHORT_ANSWER: "简答", CLOZE: "填空", COMPARISON: "对比", SCENARIO: "情景", CODE_READING: "代码阅读", DESIGN: "设计" };
+const cardStatusLabels: Record<ReviewCard["status"], string> = { DRAFT: "草稿", APPROVED: "已审批", REJECTED: "已驳回", INVALIDATED: "已失效" };
+const deckStatusLabels: Record<ReviewDeck["status"], string> = { ACTIVE: "进行中", PAUSED: "已暂停", ARCHIVED: "已归档" };
 const textBytes = (value: string): number => new TextEncoder().encode(value).length;
 const errorText = (value: unknown): string => value instanceof Error ? value.message : "请求未完成，请重试。";
 const isRetryable = (value: unknown): value is ReviewApiError => value instanceof ReviewApiError && value.retryable;
@@ -119,7 +122,7 @@ export const ReviewCardsPanel = ({ decks }: { decks: ReviewDeck[] }) => {
   const buildInput = (): CreateReviewCardInput | EditReviewCardInput => {
     if (workspaceId === "" || !uuidPattern.test(selectedDeckId) || !uuidPattern.test(draft.claimId) ||
       !uuidPattern.test(draft.sourceVersionId) || !uuidPattern.test(draft.sourceSpanId) || !hashPattern.test(draft.evidenceHash)) {
-      throw new Error("Deck、Claim 与 Evidence 标识必须完整且有效。");
+      throw new Error("卡组、主张与证据标识必须完整且有效。");
     }
     const question = draft.question.trim();
     const answerPoints = draft.answerPoints.split("\n").map((value) => value.trim()).filter(Boolean);
@@ -195,37 +198,37 @@ export const ReviewCardsPanel = ({ decks }: { decks: ReviewDeck[] }) => {
 
   return <Card>
     <CardHeader
-      eyebrow="Review Cards"
-      title="Card 管理"
-      description="Card 绑定正式 Claim 与 Evidence；编辑后回到 DRAFT，重新审批才进入调度。"
-      action={<div className="button-row"><Button variant="ghost" onClick={() => void cards.refetch()} disabled={cards.isFetching || selectedDeckId === ""} aria-label="刷新 Card 列表"><RefreshCw size={16} /></Button><Button size="sm" onClick={openCreate} disabled={selectedDeckId === ""}><Plus size={15} />新建 Card</Button></div>}
+      eyebrow="复习内容"
+      title="卡片管理"
+      description="卡片绑定正式知识点与证据；编辑后回到草稿状态，重新审批才进入调度。"
+      action={<div className="button-row"><Button variant="ghost" onClick={() => void cards.refetch()} disabled={cards.isFetching || selectedDeckId === ""} aria-label="刷新卡片列表"><RefreshCw size={16} /></Button><Button size="sm" onClick={openCreate} disabled={selectedDeckId === ""}><Plus size={15} />新建卡片</Button></div>}
     />
-    {decks.length === 0 ? <EmptyState title="没有可管理的 Deck" description="创建 Deck 后可在这里维护 Card。" /> : <>
-      <label className="review-card-deck-select">当前 Deck<select value={selectedDeckId} onChange={(event) => { setDeckSelection(event.target.value); closeEditor(); }} disabled={pending}>{decks.map((deck) => <option key={deck.id} value={deck.id}>{deck.name} · {deck.status}</option>)}</select></label>
+    {decks.length === 0 ? <EmptyState title="没有可管理的卡组" description="创建卡组后可在这里维护卡片。" /> : <>
+      <label className="review-card-deck-select">当前卡组<select value={selectedDeckId} onChange={(event) => { setDeckSelection(event.target.value); closeEditor(); }} disabled={pending}>{decks.map((deck) => <option key={deck.id} value={deck.id}>{deck.name} · {deckStatusLabels[deck.status]}</option>)}</select></label>
 
       {editorOpen ? <form className="artifact-form review-card-editor" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-        <div className="artifact-form__wide review-card-editor__heading"><div><strong>{editingCard === undefined ? "新建 DRAFT Card" : "编辑 Card"}</strong>{editingCard === undefined ? null : <span>当前版本 {String(editingCard.version)}；保存后需要重新审批。</span>}</div><Button type="button" variant="ghost" size="sm" onClick={closeEditor} aria-label="关闭 Card 编辑器"><X size={15} /></Button></div>
-        <label>Claim ID<input value={draft.claimId} onChange={(event) => updateDraft("claimId", event.target.value.trim())} spellCheck={false} /></label>
-        <label>Card 类型<select value={draft.cardType} onChange={(event) => updateDraft("cardType", event.target.value as ReviewCardType)}>{cardTypes.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+        <div className="artifact-form__wide review-card-editor__heading"><div><strong>{editingCard === undefined ? "新建草稿卡片" : "编辑卡片"}</strong>{editingCard === undefined ? null : <span>当前版本 {String(editingCard.version)}；保存后需要重新审批。</span>}</div><Button type="button" variant="ghost" size="sm" onClick={closeEditor} aria-label="关闭卡片编辑器"><X size={15} /></Button></div>
+        <label>知识点 ID<input value={draft.claimId} onChange={(event) => updateDraft("claimId", event.target.value.trim())} spellCheck={false} /></label>
+        <label>卡片类型<select value={draft.cardType} onChange={(event) => updateDraft("cardType", event.target.value as ReviewCardType)}>{cardTypes.map((value) => <option key={value} value={value}>{cardTypeLabels[value]}</option>)}</select></label>
         <label className="artifact-form__wide">问题<textarea value={draft.question} onChange={(event) => updateDraft("question", event.target.value)} /></label>
         <label className="artifact-form__wide">答案要点（每行一项）<textarea value={draft.answerPoints} onChange={(event) => updateDraft("answerPoints", event.target.value)} /></label>
-        <label>Source Version ID<input value={draft.sourceVersionId} onChange={(event) => updateDraft("sourceVersionId", event.target.value.trim())} spellCheck={false} /></label>
-        <label>Source Span ID<input value={draft.sourceSpanId} onChange={(event) => updateDraft("sourceSpanId", event.target.value.trim())} spellCheck={false} /></label>
-        <label className="artifact-form__wide">Evidence Hash<input value={draft.evidenceHash} onChange={(event) => updateDraft("evidenceHash", event.target.value.trim())} spellCheck={false} /></label>
+        <label>资料版本 ID<input value={draft.sourceVersionId} onChange={(event) => updateDraft("sourceVersionId", event.target.value.trim())} spellCheck={false} /></label>
+        <label>来源片段 ID<input value={draft.sourceSpanId} onChange={(event) => updateDraft("sourceSpanId", event.target.value.trim())} spellCheck={false} /></label>
+        <label className="artifact-form__wide">证据哈希<input value={draft.evidenceHash} onChange={(event) => updateDraft("evidenceHash", event.target.value.trim())} spellCheck={false} /></label>
         <label>难度<input type="number" min="0" max="1" step="0.05" value={draft.difficulty} onChange={(event) => updateDraft("difficulty", event.target.value)} /></label>
         <label>模型版本<input value={draft.modelVersion} onChange={(event) => updateDraft("modelVersion", event.target.value)} /></label>
-        <div className="artifact-form__wide button-row"><Button type="submit" disabled={pending}><Save size={15} />{editingCard === undefined ? "创建 DRAFT" : "保存并重新校验证据"}</Button><Button type="button" variant="secondary" onClick={closeEditor} disabled={pending}>取消</Button></div>
+        <div className="artifact-form__wide button-row"><Button type="submit" disabled={pending}><Save size={15} />{editingCard === undefined ? "创建草稿" : "保存并重新校验证据"}</Button><Button type="button" variant="secondary" onClick={closeEditor} disabled={pending}>取消</Button></div>
         {formError === undefined ? null : <p className="artifact-form__wide form-error" role="alert">{formError}</p>}
       </form> : null}
 
-      {cards.isPending ? <div className="ui-state" role="status"><strong>正在读取 Card</strong><p>从服务端恢复当前 Deck 的 Card 状态。</p></div> : null}
-      {cards.isError ? <ErrorState title="Card 列表不可用" description={errorText(cards.error)} onRetry={() => void cards.refetch()} /> : null}
-      {!cards.isPending && !cards.isError && cards.data.items.length === 0 ? <EmptyState title="这个 Deck 还没有 Card" description="创建并审批第一张 Card 后，它会进入服务端调度。" action={<Button size="sm" onClick={openCreate}><Plus size={15} />新建 Card</Button>} /> : null}
+      {cards.isPending ? <div className="ui-state" role="status"><strong>正在读取卡片</strong><p>从服务端恢复当前卡组的卡片状态。</p></div> : null}
+      {cards.isError ? <ErrorState title="卡片列表不可用" description={errorText(cards.error)} onRetry={() => void cards.refetch()} /> : null}
+      {!cards.isPending && !cards.isError && cards.data.items.length === 0 ? <EmptyState title="这个卡组还没有卡片" description="创建并审批第一张卡片后，它会进入服务端调度。" action={<Button size="sm" onClick={openCreate}><Plus size={15} />新建卡片</Button>} /> : null}
       {!cards.isPending && !cards.isError && cards.data.items.length > 0 ? <div className="review-card-list">{cards.data.items.map((card) => <article key={card.id} className="review-card-row">
-        <div className="review-card-row__body"><div className="review-card-row__title"><strong>{card.question}</strong><Badge tone={statusTone(card.status)}>{card.status}</Badge></div><small>{card.cardType} · 难度 {String(Math.round(card.difficulty * 100))}% · v{String(card.version)}</small><code>Claim {card.claimId} · Evidence {card.evidence[0]?.evidenceHash.slice(0, 16)}…</code>{card.invalidationReason === undefined ? null : <p className="form-error">{card.invalidationReason}</p>}</div>
+        <div className="review-card-row__body"><div className="review-card-row__title"><strong>{card.question}</strong><Badge tone={statusTone(card.status)}>{cardStatusLabels[card.status]}</Badge></div><small>{cardTypeLabels[card.cardType]} · 难度 {String(Math.round(card.difficulty * 100))}% · v{String(card.version)}</small><code>知识点 {card.claimId} · 证据 {card.evidence[0]?.evidenceHash.slice(0, 16)}…</code>{card.invalidationReason === undefined ? null : <p className="form-error">{card.invalidationReason}</p>}</div>
         <div className="button-row review-card-row__actions"><Button size="sm" variant="ghost" onClick={() => openEdit(card)} disabled={pending}><FilePenLine size={14} />编辑</Button>{card.status === "DRAFT" ? <><Button size="sm" onClick={() => decide(card, "approve")} disabled={pending}><Check size={14} />审批</Button><Button size="sm" variant="secondary" onClick={() => decide(card, "reject")} disabled={pending}><XCircle size={14} />驳回</Button></> : null}</div>
       </article>)}</div> : null}
-      {commandError === null ? null : <div className="ui-state ui-state--error" role="alert"><strong>Card 操作未完成</strong><p>{errorText(commandError)}</p><div className="button-row"><Button variant="secondary" onClick={() => void cards.refetch()}><RefreshCw size={15} />刷新 Card</Button>{isRetryable(commandError) ? <Button variant="secondary" onClick={retryCommand}><RotateCcw size={15} />重试原请求</Button> : null}</div></div>}
+      {commandError === null ? null : <div className="ui-state ui-state--error" role="alert"><strong>卡片操作未完成</strong><p>{errorText(commandError)}</p><div className="button-row"><Button variant="secondary" onClick={() => void cards.refetch()}><RefreshCw size={15} />刷新卡片</Button>{isRetryable(commandError) ? <Button variant="secondary" onClick={retryCommand}><RotateCcw size={15} />重试原请求</Button> : null}</div></div>}
     </>}
   </Card>;
 };

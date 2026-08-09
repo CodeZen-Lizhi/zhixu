@@ -24,6 +24,7 @@ import {
   createGraphLayout,
   graphNodeKey,
   graphNodeLabel,
+  nodeTypeLabel,
   projectGraphGlobalPages,
   projectGraphNeighborhoodPages,
   projectGraphPath,
@@ -36,6 +37,7 @@ type SearchTarget = "center" | "from" | "to";
 
 const modeLabels: Record<GraphMode, string> = { global: "全局", local: "局部", path: "路径" };
 const directionLabels = { BOTH: "双向探索", OUTBOUND: "仅出向", INBOUND: "仅入向" } as const;
+const searchMatchLabels = { EXACT: "精确匹配", PREFIX: "前缀匹配" } as const;
 const compactGraphQuery = "(max-width: 1080px)";
 
 const subscribeCompactGraph = (onStoreChange: () => void): (() => void) => {
@@ -72,32 +74,32 @@ const SearchPanel = ({
   onSelect: (ref: GraphNodeRef) => void;
 }) => (
   <section className="graph-search" aria-labelledby="graph-search-title">
-    <div className="graph-panel-heading"><span className="graph-kicker">Node Search</span><h2 id="graph-search-title">定位正式节点</h2></div>
+    <div className="graph-panel-heading"><span className="graph-kicker">节点搜索</span><h2 id="graph-search-title">定位正式节点</h2></div>
     {mode === "path" ? <div className="graph-target-switch" aria-label="路径搜索目标">
       <button type="button" aria-pressed={target === "from"} onClick={() => onTargetChange("from")}>起点</button>
       <button type="button" aria-pressed={target === "to"} onClick={() => onTargetChange("to")}>终点</button>
     </div> : null}
-    <label className="graph-search__input"><span>节点名称或主张</span><input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="输入 Topic 或 Claim" /></label>
+    <label className="graph-search__input"><span>节点名称或主张</span><input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="输入主题或主张" /></label>
     {search.isFetching ? <p className="graph-search__state" role="status">正在搜索</p> : null}
     {search.isError ? <GraphErrorNotice error={search.error} /> : null}
     {search.data?.matches.length === 0 ? <p className="graph-muted">没有匹配的正式节点。</p> : null}
     {search.data === undefined ? null : <ul className="graph-search-results">
-      {search.data.matches.map((match) => <li key={graphNodeKey(match.node)}><button type="button" onClick={() => onSelect({ type: match.node.type, id: match.node.id })}><span>{match.kind}</span><strong>{graphNodeLabel(match.node)}</strong><small>{match.node.type}</small></button></li>)}
+      {search.data.matches.map((match) => <li key={graphNodeKey(match.node)}><button type="button" onClick={() => onSelect({ type: match.node.type, id: match.node.id })}><span>{searchMatchLabels[match.kind]}</span><strong>{graphNodeLabel(match.node)}</strong><small>{nodeTypeLabel(match.node.type)}</small></button></li>)}
     </ul>}
   </section>
 );
 
 const GraphLegend = () => (
   <section className="graph-legend" aria-labelledby="graph-legend-title">
-    <div className="graph-panel-heading"><span className="graph-kicker">Legend</span><h2 id="graph-legend-title">图例</h2></div>
-    <ul><li><span className="graph-legend__node graph-legend__node--topic" aria-hidden="true" />Topic</li><li><span className="graph-legend__node graph-legend__node--claim" aria-hidden="true" />Claim</li><li><span className="graph-legend__edge" aria-hidden="true" />Confirmed</li><li><span className="graph-legend__edge graph-legend__edge--stale" aria-hidden="true" />Stale</li></ul>
+    <div className="graph-panel-heading"><span className="graph-kicker">图例</span><h2 id="graph-legend-title">图例</h2></div>
+    <ul><li><span className="graph-legend__node graph-legend__node--topic" aria-hidden="true" />主题</li><li><span className="graph-legend__node graph-legend__node--claim" aria-hidden="true" />主张</li><li><span className="graph-legend__edge" aria-hidden="true" />已确认</li><li><span className="graph-legend__edge graph-legend__edge--stale" aria-hidden="true" />已过期</li></ul>
   </section>
 );
 
 const EmptyGraph = ({ mode }: { mode: GraphMode }) => (
   <section className="graph-empty">
-    <span className="graph-kicker">Empty</span>
-    <h2>{mode === "global" ? "当前筛选下没有全局 Topic 聚类" : "当前范围没有可展示的正式关系"}</h2>
+    <span className="graph-kicker">无数据</span>
+    <h2>{mode === "global" ? "当前筛选下没有全局主题聚类" : "当前范围没有可展示的正式关系"}</h2>
   </section>
 );
 
@@ -301,19 +303,19 @@ export const GraphPage = () => {
     <div className="graph-layout">
       <aside className="graph-controls" aria-label="图谱查询控制" {...(detailModalOpen ? { inert: true } : {})}>
         <SearchPanel mode={urlState.mode} target={searchTarget} onTargetChange={setSearchTarget} query={searchText} onQueryChange={setSearchText} search={searchQuery} onSelect={selectSearchResult} />
-        {urlState.mode === "local" ? <section className="graph-scope"><div className="graph-panel-heading"><span className="graph-kicker">Neighborhood</span><h2>展开范围</h2></div><label><span>深度</span><select value={urlState.depth} onChange={(event) => setUrlState({ ...urlState, depth: Number(event.target.value) as typeof urlState.depth })}>{graphDepths.map((depth) => <option key={depth} value={depth}>{depth} 跳</option>)}</select></label><label><span>方向</span><select value={urlState.direction} onChange={(event) => setUrlState({ ...urlState, direction: event.target.value as typeof urlState.direction })}>{graphTraversalDirections.map((direction) => <option key={direction} value={direction}>{directionLabels[direction]}</option>)}</select></label>{urlState.center === null ? <p className="graph-muted">通过节点搜索选择中心。</p> : <div className="graph-endpoint"><span>中心</span><code>{urlState.center.type} · {urlState.center.id}</code></div>}</section> : null}
-        {urlState.mode === "path" ? <section className="graph-scope"><div className="graph-panel-heading"><span className="graph-kicker">Shortest Path</span><h2>路径端点</h2></div>{(["from", "to"] as const).map((endpoint) => { const ref = urlState[endpoint]; return <div className="graph-endpoint" key={endpoint}><span>{endpoint === "from" ? "起点" : "终点"}</span><code>{ref === null ? "尚未选择" : `${ref.type} · ${ref.id}`}</code>{ref === null ? null : <button type="button" className="graph-icon-button" aria-label={`清除${endpoint === "from" ? "起点" : "终点"}`} onClick={() => setUrlState({ ...urlState, [endpoint]: null })}>×</button>}</div>; })}<label><span>方向</span><select value={urlState.direction} onChange={(event) => setUrlState({ ...urlState, direction: event.target.value as typeof urlState.direction })}>{graphTraversalDirections.map((direction) => <option key={direction} value={direction}>{directionLabels[direction]}</option>)}</select></label></section> : null}
+        {urlState.mode === "local" ? <section className="graph-scope"><div className="graph-panel-heading"><span className="graph-kicker">邻域</span><h2>展开范围</h2></div><label><span>深度</span><select value={urlState.depth} onChange={(event) => setUrlState({ ...urlState, depth: Number(event.target.value) as typeof urlState.depth })}>{graphDepths.map((depth) => <option key={depth} value={depth}>{depth} 跳</option>)}</select></label><label><span>方向</span><select value={urlState.direction} onChange={(event) => setUrlState({ ...urlState, direction: event.target.value as typeof urlState.direction })}>{graphTraversalDirections.map((direction) => <option key={direction} value={direction}>{directionLabels[direction]}</option>)}</select></label>{urlState.center === null ? <p className="graph-muted">通过节点搜索选择中心。</p> : <div className="graph-endpoint"><span>中心</span><code>{nodeTypeLabel(urlState.center.type)} · {urlState.center.id}</code></div>}</section> : null}
+        {urlState.mode === "path" ? <section className="graph-scope"><div className="graph-panel-heading"><span className="graph-kicker">最短路径</span><h2>路径端点</h2></div>{(["from", "to"] as const).map((endpoint) => { const ref = urlState[endpoint]; return <div className="graph-endpoint" key={endpoint}><span>{endpoint === "from" ? "起点" : "终点"}</span><code>{ref === null ? "尚未选择" : `${nodeTypeLabel(ref.type)} · ${ref.id}`}</code>{ref === null ? null : <button type="button" className="graph-icon-button" aria-label={`清除${endpoint === "from" ? "起点" : "终点"}`} onClick={() => setUrlState({ ...urlState, [endpoint]: null })}>×</button>}</div>; })}<label><span>方向</span><select value={urlState.direction} onChange={(event) => setUrlState({ ...urlState, direction: event.target.value as typeof urlState.direction })}>{graphTraversalDirections.map((direction) => <option key={direction} value={direction}>{directionLabels[direction]}</option>)}</select></label></section> : null}
         <GraphFilterPanel filter={urlState.filter} pathOnly={urlState.mode === "path"} onChange={(nextFilter) => setUrlState({ ...urlState, filter: nextFilter })} />
         <GraphLegend />
       </aside>
       <main className="graph-workspace" {...(detailModalOpen ? { inert: true } : {})}>
-        <div className="graph-toolbar"><div><span>{modeLabels[urlState.mode]}</span><strong>{String(model.nodes.length)} nodes · {String(model.edges.length)} edges</strong></div><button type="button" className="graph-secondary-command" aria-pressed={displayedFixedLayout} disabled={model.nodes.length === 0 || graphLayout.kind !== "canvas"} onClick={toggleFixedLayout}>{displayedFixedLayout ? "释放固定布局" : "固定当前布局"}</button></div>
+        <div className="graph-toolbar"><div><span>{modeLabels[urlState.mode]}</span><strong>{String(model.nodes.length)} 个节点 · {String(model.edges.length)} 条关系</strong></div><button type="button" className="graph-secondary-command" aria-pressed={displayedFixedLayout} disabled={model.nodes.length === 0 || graphLayout.kind !== "canvas"} onClick={toggleFixedLayout}>{displayedFixedLayout ? "释放固定布局" : "固定当前布局"}</button></div>
         <GraphResultNotice meta={meta} />
         {queryError instanceof Error ? <GraphErrorNotice error={queryError} onRetry={retryActive} {...(urlState.mode === "global" || urlState.mode === "local"
           ? { onResetToFirstPage: resetActiveToFirstPage } : {})} /> : null}
         {queryPending ? <GraphLoading /> : null}
-        {missingScope ? <section className="graph-empty"><span className="graph-kicker">Scope</span><h2>{urlState.mode === "local" ? "选择一个中心节点" : "选择不同的起点和终点"}</h2></section> : null}
-        {pathNotFound === undefined ? null : <section className="graph-path-result" role="status" aria-label="路径查询结果"><strong>未找到正式关系路径</strong><span>已探索 {pathNotFound.exploredNodes} 个节点。</span>{pathNotFound.commonTopicSuggestions.map((topic) => <button type="button" className="graph-text-button" key={topic.id} onClick={() => setUrlState({ ...urlState, mode: "local", center: { type: "TOPIC", id: topic.id }, depth: 1 })}>共同 Topic 建议：{topic.name}</button>)}</section>}
+        {missingScope ? <section className="graph-empty"><span className="graph-kicker">查询范围</span><h2>{urlState.mode === "local" ? "选择一个中心节点" : "选择不同的起点和终点"}</h2></section> : null}
+        {pathNotFound === undefined ? null : <section className="graph-path-result" role="status" aria-label="路径查询结果"><strong>未找到正式关系路径</strong><span>已探索 {pathNotFound.exploredNodes} 个节点。</span>{pathNotFound.commonTopicSuggestions.map((topic) => <button type="button" className="graph-text-button" key={topic.id} onClick={() => setUrlState({ ...urlState, mode: "local", center: { type: "TOPIC", id: topic.id }, depth: 1 })}>共同主题建议：{topic.name}</button>)}</section>}
         {!queryPending && queryError === null && !missingScope && pathNotFound === undefined && model.nodes.length === 0 ? <EmptyGraph mode={urlState.mode} /> : null}
         {model.nodes.length === 0 ? null : <GraphCanvas model={model} mode={urlState.mode} lockedPositions={displayedLockedPositions} selectedNodeKey={selectedNodeKey} selectedEdgeKey={selectedEdgeKey} onSelectNode={selectNode} onSelectEdge={selectEdge} />}
         {hasNextPage ? <button type="button" className="graph-load-more" disabled={fetchingNextPage} onClick={loadNext}>{fetchingNextPage ? "正在加载" : "加载下一页"}</button> : null}

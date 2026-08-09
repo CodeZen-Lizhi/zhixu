@@ -39,16 +39,16 @@ describe("MemoriesPage", () => {
     expect(screen.queryByText(/owner/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("来源类型")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("来源引用")).not.toBeInTheDocument();
-    expect(screen.getByText(/来源 AGENT · agent:candidate-1/)).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Memory 内容（JSON 对象）"), { target: { value: '{"text":"new candidate"}' } });
-    fireEvent.click(screen.getByRole("button", { name: "创建 Candidate" }));
+    expect(screen.getByText(/来源 助手 · agent:candidate-1/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("记忆内容（JSON 对象）"), { target: { value: '{"text":"new candidate"}' } });
+    fireEvent.click(screen.getByRole("button", { name: "创建候选" }));
     const createInput = (mocks.create.mutate as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { idempotencyKey: string };
     expect(createInput).toMatchObject({ workspaceId, type: "PREFERENCE", content: { text: "new candidate" } });
     expect(createInput).not.toHaveProperty("source");
 
     fireEvent.click(screen.getByRole("button", { name: "编辑" }));
     expect(screen.getByLabelText("类型")).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("Memory 内容（JSON 对象）"), { target: { value: '{"text":"edited candidate"}' } });
+    fireEvent.change(screen.getByLabelText("记忆内容（JSON 对象）"), { target: { value: '{"text":"edited candidate"}' } });
     fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
     const editInput = (mocks.edit.mutate as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<string, unknown>;
     expect(editInput).toMatchObject({ workspaceId, memoryId, expectedVersion: 1, content: { text: "edited candidate" } });

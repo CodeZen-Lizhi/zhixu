@@ -27,17 +27,18 @@ const isSettingsSection = (value: string | null): value is SettingsSection =>
 
 const availabilityLabel = (availability: string): string => availability === "available" ? "可用" : availability === "migration_required" ? "需要迁移" : "暂不可用";
 const availabilityTone = (availability: string): "success" | "warning" | "danger" => availability === "available" ? "success" : availability === "migration_required" ? "warning" : "danger";
+const workspaceStatusLabel = (status: string): string => status === "active" ? "已连接" : status;
 
 const WorkspaceSettingsPanel = () => {
   const { status, workspace, error, refresh } = useActiveWorkspace();
 
   return <section className="settings-section" aria-labelledby="workspace-settings-title">
-    <header className="settings-section__header"><div><h2 id="workspace-settings-title">工作区</h2><p>当前 Active Workspace 的只读投影。</p></div><Button variant="secondary" size="sm" onClick={() => void refresh()}>重新读取</Button></header>
-    {status === "loading" ? <p role="status">正在读取当前 Workspace…</p> : status === "error" ? <div className="ui-state ui-state--error" role="alert"><strong>工作区信息不可用</strong><p>{error?.message ?? "Active Workspace API 暂不可用。"}</p></div> : workspace === undefined ? <EmptyState title="尚未激活工作区" description="请在本机命令行执行启动命令指定知识库目录。" action={<Button asChild variant="primary"><Link to="/workspace">查看命令</Link></Button>} /> : <>
+    <header className="settings-section__header"><div><h2 id="workspace-settings-title">工作区</h2><p>当前 Workspace 的只读投影。</p></div><Button variant="secondary" size="sm" onClick={() => void refresh()}>重新读取</Button></header>
+    {status === "loading" ? <p role="status">正在读取当前 Workspace…</p> : status === "error" ? <div className="ui-state ui-state--error" role="alert"><strong>工作区信息不可用</strong><p>{error?.message ?? "当前 Workspace API 暂不可用。"}</p></div> : workspace === undefined ? <EmptyState title="尚未激活工作区" description="请在本机命令行执行启动命令指定知识库目录。" action={<Button asChild variant="primary"><Link to="/workspace">查看命令</Link></Button>} /> : <>
       <dl className="settings-facts">
         <div><dt>名称</dt><dd>{workspace.name}</dd></div>
         <div><dt>宿主机目录</dt><dd className="mono">{workspace.rootPath}</dd></div>
-        <div><dt>连接状态</dt><dd><Badge tone="success">{workspace.status}</Badge></dd></div>
+        <div><dt>连接状态</dt><dd><Badge tone="success">{workspaceStatusLabel(workspace.status)}</Badge></dd></div>
         <div><dt>可用性</dt><dd><Badge tone={availabilityTone(workspace.availability)}>{availabilityLabel(workspace.availability)}</Badge></dd></div>
         <div><dt>Workspace ID</dt><dd className="mono">{workspace.id}</dd></div>
         <div><dt>版本</dt><dd className="mono">{workspace.version}</dd></div>

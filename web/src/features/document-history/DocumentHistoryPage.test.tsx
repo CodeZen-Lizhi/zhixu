@@ -134,7 +134,7 @@ describe("DocumentHistoryPage", () => {
     expect(screen.getByText("当前未提交改动", { selector: ".ui-badge" })).toBeInTheDocument();
     expect(screen.getByText("受控写回")).toBeInTheDocument();
     expect(screen.getByText("外部变更")).toBeInTheDocument();
-    expect(screen.getByText("未发现知序的 Revision、审批或写回映射；不会补造旧关系。")).toBeInTheDocument();
+    expect(screen.getByText("未发现知序的修订版本、审批或写回映射；不会补造旧关系。")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: new RegExp(proposalId) })).toHaveAttribute("href", `/proposals/${proposalId}`);
     expect(screen.getByRole("link", { name: workflowId })).toHaveAttribute("href", `/workflows/${workflowId}`);
     for (const button of screen.getAllByRole("button", { name: "恢复此版本" })) expect(button).toBeDisabled();
@@ -142,7 +142,7 @@ describe("DocumentHistoryPage", () => {
   });
 
   it.each([
-    ["Workflow", { writebackId: null }, workflowId, "Writeback 未关联"],
+    ["Workflow", { writebackId: null }, workflowId, "写回未关联"],
     ["Writeback", { workflowRunId: null }, writebackId, "Workflow 未关联"],
   ])("preserves a managed %s relation when its peer is missing", (_label, changes, present, missing) => {
     const value = page(false);
@@ -202,8 +202,8 @@ describe("DocumentHistoryPage", () => {
     view.rerender(<MemoryRouter initialEntries={[`/authoring/documents/${documentId}/history`]}><Routes><Route path="/authoring/documents/:documentId/history" element={<DocumentHistoryPage />} /></Routes></MemoryRouter>);
 
     const dialog = await screen.findByRole("dialog", { name: "恢复为历史版本" });
-    expect(within(dialog).getByText("这是相对当前版本的反向 Diff。", { exact: false })).toBeInTheDocument();
-    const create = await within(dialog).findByRole("button", { name: "创建恢复 Proposal" });
+    expect(within(dialog).getByText("这是相对当前版本的反向差异。", { exact: false })).toBeInTheDocument();
+    const create = await within(dialog).findByRole("button", { name: "创建恢复提案" });
     await waitFor(() => expect(create).toBeEnabled());
     fireEvent.click(create);
 
@@ -228,7 +228,7 @@ describe("DocumentHistoryPage", () => {
     view.rerender(<MemoryRouter initialEntries={[`/authoring/documents/${documentId}/history`]}><Routes><Route path="/authoring/documents/:documentId/history" element={<DocumentHistoryPage />} /></Routes></MemoryRouter>);
 
     const staleDialog = await screen.findByRole("dialog", { name: "恢复为历史版本" });
-    expect(within(staleDialog).getByRole("button", { name: "创建恢复 Proposal" })).toBeDisabled();
+    expect(within(staleDialog).getByRole("button", { name: "创建恢复提案" })).toBeDisabled();
     fireEvent.click(within(staleDialog).getByRole("button", { name: "重试" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "恢复为历史版本" })).not.toBeInTheDocument());
   });

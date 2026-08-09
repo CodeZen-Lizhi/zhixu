@@ -51,6 +51,7 @@ describe("WorkspacePage", () => {
     expect(screen.getByText("知识库")).toBeInTheDocument();
     expect(screen.getByText("/tmp/knowledge")).toBeInTheDocument();
     expect(screen.getByText(workspaceFixture.id)).toBeInTheDocument();
+    expect(screen.getByText("已连接")).toBeInTheDocument();
     expect(screen.getByText("./zhixu up --workspace <宿主机绝对目录>")).toBeInTheDocument();
     expect(screen.getByText("./zhixu workspace switch <宿主机绝对目录>")).toBeInTheDocument();
     expect(screen.queryByLabelText("宿主机目录")).not.toBeInTheDocument();

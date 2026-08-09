@@ -132,9 +132,9 @@ describe("SemanticLinkCandidatePanel", () => {
     });
     renderPanel(fetchMock, { type: "TOPIC", id: topicId });
 
-    fireEvent.click(screen.getByRole("button", { name: "扫描当前 Topic" }));
-    expect(await screen.findByText("Topic 扫描 · SUCCEEDED")).toBeInTheDocument();
-    expect(await screen.findByText("Candidate · 未进入正式图")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "扫描当前主题" }));
+    expect(await screen.findByText("主题扫描 · 成功")).toBeInTheDocument();
+    expect(await screen.findByText("候选 · 未进入正式图")).toBeInTheDocument();
     await waitFor(() => expect(candidateCalls).toBeGreaterThanOrEqual(1));
     expect(scanReads).toBe(1);
 
@@ -147,7 +147,7 @@ describe("SemanticLinkCandidatePanel", () => {
   it("Claim 选择不暴露未实现的 Node scan", () => {
     const fetchMock = vi.fn<typeof fetch>();
     renderPanel(fetchMock, { type: "CLAIM", id: claimId });
-    expect(screen.queryByRole("button", { name: "扫描当前 Topic" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "扫描当前主题" })).not.toBeInTheDocument();
   });
 
   it("scan 启动响应丢失后复用同一 Idempotency-Key 精确重试", async () => {
@@ -198,10 +198,10 @@ describe("SemanticLinkCandidatePanel", () => {
       scanIdempotencyKeyFactory={keyFactory}
     /></MemoryRouter></QueryClientProvider>);
 
-    fireEvent.click(screen.getByRole("button", { name: "扫描当前 Topic" }));
+    fireEvent.click(screen.getByRole("button", { name: "扫描当前主题" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("NETWORK_ERROR");
     fireEvent.click(screen.getByRole("button", { name: "重试扫描启动" }));
-    expect(await screen.findByText("Topic 扫描 · SUCCEEDED")).toBeInTheDocument();
+    expect(await screen.findByText("主题扫描 · 成功")).toBeInTheDocument();
 
     const requests = fetchMock.mock.calls.filter(([input]) => requestUrl(input).pathname.endsWith("/candidate-scans"));
     expect(requests).toHaveLength(2);
@@ -279,7 +279,7 @@ describe("SemanticLinkCandidatePanel", () => {
       scanIdempotencyKeyFactory={keyFactory}
     /></MemoryRouter></QueryClientProvider>);
 
-    fireEvent.click(screen.getByRole("button", { name: "扫描当前 Topic" }));
+    fireEvent.click(screen.getByRole("button", { name: "扫描当前主题" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("NETWORK_ERROR");
     fireEvent.click(screen.getByRole("button", { name: "重试扫描启动" }));
     await waitFor(() => expect(starts).toBe(2));
@@ -325,7 +325,7 @@ describe("SemanticLinkCandidatePanel", () => {
     /></MemoryRouter></QueryClientProvider>);
 
     fireEvent.click(screen.getByRole("button", { name: "审阅候选" }));
-    expect(await screen.findByText("Topic 扫描 · RUNNING")).toBeInTheDocument();
+    expect(await screen.findByText("主题扫描 · 运行中")).toBeInTheDocument();
     expect(screen.getByText("4 / 10 节点")).toBeInTheDocument();
   });
 
@@ -367,7 +367,7 @@ describe("SemanticLinkCandidatePanel", () => {
     /></MemoryRouter></QueryClientProvider>);
 
     fireEvent.click(screen.getByRole("button", { name: "审阅候选" }));
-    expect(await screen.findByText("Topic 扫描 · RUNNING")).toBeInTheDocument();
+    expect(await screen.findByText("主题扫描 · 运行中")).toBeInTheDocument();
 
     view.rerender(<QueryClientProvider client={queryClient}><MemoryRouter><SemanticLinkCandidatePanel
       workspaceId={workspaceId}
@@ -377,7 +377,7 @@ describe("SemanticLinkCandidatePanel", () => {
     /></MemoryRouter></QueryClientProvider>);
 
     await waitFor(() => expect(onPersistedScanIdChange).toHaveBeenCalledWith(null));
-    expect(screen.queryByText("Topic 扫描 · RUNNING")).not.toBeInTheDocument();
+    expect(screen.queryByText("主题扫描 · 运行中")).not.toBeInTheDocument();
   });
 
   it("刷新后展示持久 FAILED scan 的稳定错误和重新发起入口", async () => {
@@ -448,11 +448,11 @@ describe("SemanticLinkCandidatePanel", () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(pagePayload));
     renderPanel(fetchMock, { type: "CLAIM", id: claimId });
 
-    expect(screen.queryByText("Candidate · 未进入正式图")).not.toBeInTheDocument();
+    expect(screen.queryByText("候选 · 未进入正式图")).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "审阅候选" }));
 
-    expect(await screen.findByText("Candidate · 未进入正式图")).toBeInTheDocument();
+    expect(await screen.findByText("候选 · 未进入正式图")).toBeInTheDocument();
     expect(screen.getByText("Claim source context")).toBeInTheDocument();
     expect(screen.getByText("Topic target context")).toBeInTheDocument();
     expect(screen.getByText("The claim belongs to the topic.")).toBeInTheDocument();
@@ -501,7 +501,7 @@ describe("SemanticLinkCandidatePanel", () => {
     });
     renderPanel(fetchMock);
     fireEvent.click(screen.getByRole("button", { name: "审阅候选" }));
-    await screen.findByText("Candidate · 未进入正式图");
+    await screen.findByText("候选 · 未进入正式图");
     fireEvent.click(screen.getByRole("button", { name: "忽略" }));
     fireEvent.click(screen.getByRole("button", { name: "提交决策" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("请填写非空原因");
@@ -537,12 +537,12 @@ describe("SemanticLinkCandidatePanel", () => {
     });
     renderPanel(fetchMock);
     fireEvent.click(screen.getByRole("button", { name: "审阅候选" }));
-    await screen.findByText("Candidate · 未进入正式图");
+    await screen.findByText("候选 · 未进入正式图");
     fireEvent.click(screen.getByRole("button", { name: "确认建议关系" }));
     fireEvent.click(screen.getByRole("button", { name: "提交决策" }));
     expect(await screen.findByText("候选已变化")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "刷新候选" })).toBeInTheDocument();
-    expect(screen.queryByText(/已创建独立 Proposal/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/已创建独立提案/)).not.toBeInTheDocument();
   });
 
   it("确认成功展示 Proposal 边界，并 Escape 关闭后恢复触发按钮焦点", async () => {
@@ -556,7 +556,7 @@ describe("SemanticLinkCandidatePanel", () => {
     renderPanel(fetchMock);
     const toggle = screen.getByRole("button", { name: "审阅候选" });
     fireEvent.click(toggle);
-    await screen.findByText("Candidate · 未进入正式图");
+    await screen.findByText("候选 · 未进入正式图");
     const confirm = screen.getByRole("button", { name: "确认建议关系" });
     fireEvent.click(confirm);
     const dialog = screen.getByRole("dialog");
@@ -584,7 +584,7 @@ describe("SemanticLinkCandidatePanel", () => {
       created_at: at,
       updated_at: at,
     }, 201));
-    expect(await screen.findByText(new RegExp(`已创建独立 Proposal ${proposalId}`))).toBeInTheDocument();
+    expect(await screen.findByText(new RegExp(`已创建独立提案 ${proposalId}`))).toBeInTheDocument();
     expect(screen.getByText(/审批应用前不会进入正式图/)).toBeInTheDocument();
   });
 
@@ -606,7 +606,7 @@ describe("SemanticLinkCandidatePanel", () => {
     });
     renderPanel(fetchMock);
     fireEvent.click(screen.getByRole("button", { name: "审阅候选" }));
-    await screen.findByText("Candidate · 未进入正式图");
+    await screen.findByText("候选 · 未进入正式图");
     fireEvent.click(screen.getByRole("button", { name: "改类型后确认" }));
     const relationSelect = screen.getByLabelText("确认的关系类型");
     expect(screen.getByRole("option", { name: "归属于 · BELONGS_TO" })).toBeInTheDocument();
@@ -614,7 +614,7 @@ describe("SemanticLinkCandidatePanel", () => {
     expect(screen.queryByRole("option", { name: /支持 · SUPPORTS/ })).not.toBeInTheDocument();
     fireEvent.change(relationSelect, { target: { value: "IMPACTS" } });
     fireEvent.click(screen.getByRole("button", { name: "提交决策" }));
-    await screen.findByText(new RegExp(`已创建独立 Proposal ${proposalId}`));
+    await screen.findByText(new RegExp(`已创建独立提案 ${proposalId}`));
 
     const decisionRequest = fetchMock.mock.calls.find(([input]) => requestUrl(input).pathname.endsWith(`/candidates/${candidateId}/decisions`));
     const body = decisionRequest?.[1]?.body;
@@ -649,7 +649,7 @@ describe("SemanticLinkCandidatePanel", () => {
     });
     renderPanel(fetchMock);
     fireEvent.click(screen.getByRole("button", { name: "审阅候选" }));
-    await screen.findByText("Candidate · 未进入正式图");
+    await screen.findByText("候选 · 未进入正式图");
     fireEvent.click(screen.getByRole("button", { name: "稍后处理" }));
     fireEvent.change(screen.getByLabelText("备注（可选）"), { target: { value: "  等待 新 证据 " } });
     fireEvent.click(screen.getByRole("button", { name: "提交决策" }));

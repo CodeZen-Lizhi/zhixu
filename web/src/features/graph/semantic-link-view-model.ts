@@ -4,6 +4,7 @@ import type {
   SemanticLinkCandidateStatus,
   SemanticLinkDecisionAction,
   SemanticLinkDiscoveryMethod,
+  SemanticLinkScanStatus,
 } from "../../api/semantic-links";
 import { graphNodeRefIdentity, graphRelationTypeCompatible, isSymmetricGraphRelationType } from "../../api/graph";
 
@@ -25,8 +26,16 @@ export const semanticLinkStatusLabels: Record<SemanticLinkCandidateStatus, strin
   DEFERRED: "稍后处理",
   IGNORED: "已忽略",
   FALSE_POSITIVE: "已标记误报",
-  PROPOSAL_CREATED: "Proposal 已创建",
+  PROPOSAL_CREATED: "提案已创建",
   SUPERSEDED: "已被新评估替代",
+};
+
+export const semanticLinkScanStatusLabels: Record<SemanticLinkScanStatus, string> = {
+  PENDING: "等待",
+  RUNNING: "运行中",
+  SUCCEEDED: "成功",
+  FAILED: "失败",
+  CANCELLED: "已取消",
 };
 
 export const semanticLinkRelationLabels: Record<RelationType, string> = {
@@ -45,8 +54,8 @@ export const semanticLinkRelationLabels: Record<RelationType, string> = {
 export const semanticLinkDiscoveryLabels: Record<SemanticLinkDiscoveryMethod, string> = {
   TITLE_ALIAS: "标题 / 别名",
   TERM_MATCH: "术语匹配",
-  CLAIM_SEMANTIC_SIMILARITY: "Claim 语义相似",
-  COMMON_TOPIC: "共同 Topic",
+  CLAIM_SEMANTIC_SIMILARITY: "主张语义相似",
+  COMMON_TOPIC: "共同主题",
   SHARED_SOURCE: "同一来源",
   RAG_CO_RETRIEVAL: "RAG 共召回",
 };

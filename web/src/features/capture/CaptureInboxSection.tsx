@@ -56,9 +56,9 @@ export const CaptureInboxSection = ({ workspaceId }: { workspaceId: string }) =>
 
   return <Card className="capture-inbox">
     <CardHeader
-      eyebrow="Quick Capture"
+      eyebrow="资料收件箱"
       title="快速记录"
-      description="文字、链接和上传原件会立即留下 Capture 事实；后台阶段分别更新，不会覆盖原始输入。"
+      description="文字、链接和上传原件会立即留下记录事实；后台阶段分别更新，不会覆盖原始输入。"
       action={<Button variant="ghost" size="sm" onClick={() => void query.refetch()} disabled={query.isFetching}><RefreshCw size={15} />刷新</Button>}
     />
     <div className="capture-inbox__filters" aria-label="快速记录筛选">

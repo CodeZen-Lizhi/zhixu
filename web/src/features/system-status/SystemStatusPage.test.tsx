@@ -96,7 +96,7 @@ describe("SystemStatusPage", () => {
     expect(screen.queryByText(/ZHIXU 已连接数据库/)).not.toBeInTheDocument();
     expect(screen.getByText("可选能力已关闭")).toBeInTheDocument();
     expect(screen.getByText("RAG", { selector: "dt" })).toBeInTheDocument();
-    expect(screen.getByText("Graph", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.getByText("知识图谱", { selector: "dt" })).toBeInTheDocument();
     expect(screen.queryByText("request-compact")).not.toBeInTheDocument();
     expect(screen.queryByText("认证", { selector: "dt" })).not.toBeInTheDocument();
   });
@@ -143,10 +143,10 @@ describe("SystemStatusPage", () => {
     renderWithAppProviders(<SystemStatusPage />);
 
     expect(await screen.findByText("部分功能受影响")).toBeInTheDocument();
-    const graphIssue = issueByName("Graph");
+    const graphIssue = issueByName("知识图谱");
     expect(within(graphIssue).getByText("知识图谱查询与依赖它的探索入口暂不可用。")).toBeInTheDocument();
-    expect(within(graphIssue).getByText("Graph 查询依赖未就绪。")).toBeInTheDocument();
-    expect(within(graphIssue).getByRole("button", { name: "重新检查 Graph" })).toBeEnabled();
+    expect(within(graphIssue).getByText("知识图谱查询依赖未就绪。")).toBeInTheDocument();
+    expect(within(graphIssue).getByRole("button", { name: "重新检查知识图谱" })).toBeEnabled();
   });
 
   it("语义候选依赖不可用时保持 Graph 可用并显示独立降级状态", async () => {
@@ -168,7 +168,7 @@ describe("SystemStatusPage", () => {
 
     expect(await screen.findByText("部分功能受影响")).toBeInTheDocument();
     const semanticIssue = issueByName("语义候选");
-    expect(within(semanticIssue).getByText("正式 Graph 仍可用，但候选扫描与审阅暂不可用。")).toBeInTheDocument();
+    expect(within(semanticIssue).getByText("正式知识图谱仍可用，但候选扫描与审阅暂不可用。")).toBeInTheDocument();
     expect(within(semanticIssue).getByText("语义候选依赖未就绪。")).toBeInTheDocument();
   });
 
@@ -252,11 +252,11 @@ describe("SystemStatusPage", () => {
     renderWithAppProviders(<SystemStatusPage />);
 
     expect(await screen.findByText("部分功能受影响")).toBeInTheDocument();
-    const reviewIssue = issueByName("Review");
+    const reviewIssue = issueByName("复习");
     expect(within(reviewIssue).getByText("主动回忆与复习调度暂不可用。")).toBeInTheDocument();
-    expect(within(reviewIssue).getByText("Review 服务依赖未就绪。")).toBeInTheDocument();
-    expect(screen.getByText("Memory", { selector: "dt" })).toBeInTheDocument();
-    expect(screen.getByText("Interview", { selector: "dt" })).toBeInTheDocument();
+    expect(within(reviewIssue).getByText("复习服务依赖未就绪。")).toBeInTheDocument();
+    expect(screen.getByText("记忆", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.getByText("访谈", { selector: "dt" })).toBeInTheDocument();
   });
 
   it("请求失败后允许用户重试并恢复", async () => {

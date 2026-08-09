@@ -9,6 +9,14 @@ import {
   useGraphRelationEvidence,
 } from "./queries";
 import { GraphErrorNotice, GraphLoading, GraphResultNotice } from "./feedback";
+import {
+  graphConfirmationMethodLabel,
+  graphEdgeTraversalLabel,
+  graphNodeStatusLabel,
+  nodeTypeLabel,
+  relationStatusLabel,
+  relationTypeLabel,
+} from "./view-model";
 import { SourceSpanViewer } from "../source-spans";
 
 export type GraphSelection =
@@ -22,11 +30,11 @@ const formatTimestamp = (value: string): string => new Intl.DateTimeFormat("zh-C
 
 const NodeDetail = ({ node, incidentCount }: { node: GraphNode; incidentCount: number }) => (
   <div className="graph-detail__body">
-    <div className={`graph-detail__type graph-detail__type--${node.type.toLowerCase()}`}>{node.type === "TOPIC" ? "Topic" : "Claim"}</div>
+    <div className={`graph-detail__type graph-detail__type--${node.type.toLowerCase()}`}>{nodeTypeLabel(node.type)}</div>
     <h2>{node.type === "TOPIC" ? node.name : node.statement}</h2>
     {node.type === "TOPIC" && node.description !== "" ? <p>{node.description}</p> : null}
     <dl className="graph-detail__facts">
-      <div><dt>状态</dt><dd>{node.type === "TOPIC" ? node.topicStatus : node.claimStatus}</dd></div>
+      <div><dt>状态</dt><dd>{graphNodeStatusLabel(node)}</dd></div>
       <div><dt>版本</dt><dd>{node.version}</dd></div>
       <div><dt>当前结果内关系</dt><dd>{incidentCount}</dd></div>
       <div><dt>更新时间</dt><dd>{formatTimestamp(node.updatedAt)}</dd></div>
@@ -142,7 +150,7 @@ export const GraphDetailPanel = ({
       onKeyDown={handleKeyDown}
     >
       <div className="graph-detail__header">
-        <div><span className="graph-kicker">Inspector</span><strong>{selection === null ? "未选择对象" : selection.kind === "node" ? "节点详情" : "关系详情"}</strong></div>
+        <div><span className="graph-kicker">检视</span><strong>{selection === null ? "未选择对象" : selection.kind === "node" ? "节点详情" : "关系详情"}</strong></div>
         {selection === null ? null : <button type="button" className="graph-icon-button" aria-label="关闭详情" title="关闭详情" onClick={onClose}>×</button>}
       </div>
       {selection === null ? <div className="graph-detail__empty"><p>选择图中的节点或关系，查看服务端事实与证据。</p></div> : null}
@@ -156,23 +164,23 @@ export const GraphDetailPanel = ({
         {relationQuery.isPending || evidenceRecoveryPending ? <GraphLoading label={evidenceRecoveryPending ? "正在刷新关系详情" : "正在加载关系详情"} /> : null}
         {relationQuery.isError ? <GraphErrorNotice error={relationQuery.error} onRetry={() => { void relationQuery.refetch(); }} /> : null}
         {relationQuery.data === undefined || relationQuery.isError || evidenceRecoveryPending ? null : <div className="graph-detail__body">
-          <div className={`graph-detail__type graph-detail__type--${relationQuery.data.edge.status.toLowerCase()}`}>Relation · {relationQuery.data.edge.status}</div>
-          <h2>{relationQuery.data.edge.type}</h2>
+          <div className={`graph-detail__type graph-detail__type--${relationQuery.data.edge.status.toLowerCase()}`}>关系 · {relationStatusLabel(relationQuery.data.edge.status)}</div>
+          <h2>{relationTypeLabel(relationQuery.data.edge.type)}</h2>
           <dl className="graph-detail__facts">
-            <div><dt>Source</dt><dd>{relationQuery.data.edge.source.type} · {relationQuery.data.edge.source.id}</dd></div>
-            <div><dt>Target</dt><dd>{relationQuery.data.edge.target.type} · {relationQuery.data.edge.target.id}</dd></div>
-            <div><dt>Traversal</dt><dd>{relationQuery.data.edge.traversal}</dd></div>
+            <div><dt>来源节点</dt><dd>{nodeTypeLabel(relationQuery.data.edge.source.type)} · {relationQuery.data.edge.source.id}</dd></div>
+            <div><dt>目标节点</dt><dd>{nodeTypeLabel(relationQuery.data.edge.target.type)} · {relationQuery.data.edge.target.id}</dd></div>
+            <div><dt>遍历方向</dt><dd>{graphEdgeTraversalLabel(relationQuery.data.edge.traversal)}</dd></div>
             <div><dt>置信度</dt><dd>{relationQuery.data.edge.confidence === null ? "未提供" : relationQuery.data.edge.confidence.toFixed(2)}</dd></div>
             <div><dt>版本</dt><dd>{relationQuery.data.edge.version}</dd></div>
-            <div><dt>Evidence</dt><dd>{relationQuery.data.edge.evidenceCount}</dd></div>
+            <div><dt>证据</dt><dd>{relationQuery.data.edge.evidenceCount}</dd></div>
           </dl>
-          {relationQuery.data.confirmation === null ? null : <p className="graph-detail__confirmation">{relationQuery.data.confirmation.method} · {relationQuery.data.confirmation.reference}</p>}
-          {relationQuery.data.edge.evidenceCount === 0 ? <p className="graph-muted">当前关系没有 Evidence。</p> : <button type="button" className="graph-secondary-command" aria-expanded={evidenceOpen} onClick={() => { setOpenEvidenceRelationId((current) => current === relationId ? null : relationId); }}>{evidenceOpen ? "收起关系证据" : "加载关系证据"}</button>}
+          {relationQuery.data.confirmation === null ? null : <p className="graph-detail__confirmation">{graphConfirmationMethodLabel(relationQuery.data.confirmation.method)} · {relationQuery.data.confirmation.reference}</p>}
+          {relationQuery.data.edge.evidenceCount === 0 ? <p className="graph-muted">当前关系没有证据。</p> : <button type="button" className="graph-secondary-command" aria-expanded={evidenceOpen} onClick={() => { setOpenEvidenceRelationId((current) => current === relationId ? null : relationId); }}>{evidenceOpen ? "收起关系证据" : "加载关系证据"}</button>}
           {!evidenceOpen ? null : <div className="graph-evidence" aria-live="polite">
             {evidenceQuery.isPending ? <GraphLoading label="正在加载关系证据" /> : null}
             {evidenceQuery.isError ? <GraphErrorNotice error={evidenceQuery.error} onRetry={() => { void evidenceQuery.refetch(); }} onResetToFirstPage={() => { void recoverEvidence(); }} /> : null}
             <GraphResultNotice meta={evidenceMeta} title="证据结果已截断" message="当前关系的证据达到显示上限，结果不完整。" ariaLabel="关系证据状态" />
-            {evidence.map((item) => <article key={item.id}><p>{item.reason}</p><dl><div><dt>确认</dt><dd>{item.confirmation?.method ?? "未确认"}</dd></div><div><dt>时间</dt><dd>{formatTimestamp(item.createdAt)}</dd></div></dl><SourceSpanViewer className="graph-text-button" label="打开来源段落" reference={{ workspaceId: item.provenance.workspaceId, sourceVersionId: item.provenance.sourceVersionId, sourceSpanId: item.provenance.sourceSpanId }} /></article>)}
+            {evidence.map((item) => <article key={item.id}><p>{item.reason}</p><dl><div><dt>确认</dt><dd>{item.confirmation === null ? "未确认" : graphConfirmationMethodLabel(item.confirmation.method)}</dd></div><div><dt>时间</dt><dd>{formatTimestamp(item.createdAt)}</dd></div></dl><SourceSpanViewer className="graph-text-button" label="打开来源段落" reference={{ workspaceId: item.provenance.workspaceId, sourceVersionId: item.provenance.sourceVersionId, sourceSpanId: item.provenance.sourceSpanId }} /></article>)}
             {evidenceQuery.hasNextPage ? <button type="button" className="graph-text-button" disabled={evidenceQuery.isFetchingNextPage} onClick={() => { void evidenceQuery.fetchNextPage(); }}>{evidenceQuery.isFetchingNextPage ? "加载中" : "加载更多证据"}</button> : null}
           </div>}
         </div>}

@@ -88,6 +88,7 @@ describe("SettingsPage API Token management", () => {
 
     expect(screen.getByText("Docs")).toBeInTheDocument();
     expect(screen.getByText("/workspace")).toBeInTheDocument();
+    expect(screen.getByText("已连接")).toBeInTheDocument();
     expect(screen.getByText(/\.\/zhixu workspace switch/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "切换工作区" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("宿主机目录")).not.toBeInTheDocument();

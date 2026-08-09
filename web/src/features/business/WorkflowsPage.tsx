@@ -54,25 +54,28 @@ const mergeCategoryLabels: Record<WorkflowMergeCategory, string> = {
   UNIQUE: "独有",
 };
 
+const workflowStatusLabel = (status: WorkflowStatus): string =>
+  workflowStatusOptions.find(([value]) => value === status)?.[1] ?? status;
+
 const ReviewEvidenceList = ({ evidence, label, workspaceId }: { evidence: readonly WorkflowReviewEvidence[]; label: string; workspaceId: string }) => (
   <ol className="workflow-review-evidence" aria-label={label}>
     {evidence.map((item, index) => <li key={item.kind === "SOURCE_VERSION" ? `${item.kind}:${item.sourceVersionId}:${item.sourceSpanId}` : `${item.kind}:${item.documentId}:${item.articleRevisionId}`}>
       <span className="workflow-review-evidence__index">{String(index + 1).padStart(2, "0")}</span>
       {item.kind === "SOURCE_VERSION" ? <><dl>
-        <div><dt>Source Version</dt><dd><code>{item.sourceVersionId}</code></dd></div>
-        <div><dt>Source Span</dt><dd><code>{item.sourceSpanId}</code></dd></div>
-        <div><dt>Content Hash</dt><dd><code>{item.contentHash}</code></dd></div>
-        <div><dt>Excerpt Hash</dt><dd><code>{item.excerptHash}</code></dd></div>
+        <div><dt>资料版本</dt><dd><code>{item.sourceVersionId}</code></dd></div>
+        <div><dt>来源片段</dt><dd><code>{item.sourceSpanId}</code></dd></div>
+        <div><dt>内容哈希</dt><dd><code>{item.contentHash}</code></dd></div>
+        <div><dt>摘录哈希</dt><dd><code>{item.excerptHash}</code></dd></div>
       </dl>
       <SourceSpanViewer
         className="ui-button ui-button--secondary workflow-review-evidence__open"
         label="打开来源片段"
         reference={{ workspaceId, sourceVersionId: item.sourceVersionId, sourceSpanId: item.sourceSpanId }}
       /></> : <dl>
-        <div><dt>Document</dt><dd><code>{item.documentId}</code></dd></div>
-        <div><dt>Article Revision</dt><dd><code>{item.articleRevisionId}</code></dd></div>
-        <div><dt>Revision</dt><dd>{item.revisionNo}</dd></div>
-        <div><dt>Content Hash</dt><dd><code>{item.contentHash}</code></dd></div>
+        <div><dt>文档</dt><dd><code>{item.documentId}</code></dd></div>
+        <div><dt>文章修订版本</dt><dd><code>{item.articleRevisionId}</code></dd></div>
+        <div><dt>修订版本</dt><dd>{item.revisionNo}</dd></div>
+        <div><dt>内容哈希</dt><dd><code>{item.contentHash}</code></dd></div>
       </dl>}
     </li>)}
   </ol>
@@ -99,10 +102,10 @@ const HumanTaskReview = ({ task }: { task: WorkflowHumanTask }) => {
         </div>
       </header>
       <dl className="workflow-review__binding">
-        <div><dt>Snapshot</dt><dd><code>{review.snapshotId}</code></dd></div>
-        <div><dt>Snapshot Hash</dt><dd><code>{review.snapshotHash}</code></dd></div>
-        <div><dt>Template Revision</dt><dd><code>{review.templateRevisionId}</code></dd></div>
-        <div><dt>Template Hash</dt><dd><code>{review.templateHash}</code></dd></div>
+        <div><dt>快照</dt><dd><code>{review.snapshotId}</code></dd></div>
+        <div><dt>快照哈希</dt><dd><code>{review.snapshotHash}</code></dd></div>
+        <div><dt>模板修订版本</dt><dd><code>{review.templateRevisionId}</code></dd></div>
+        <div><dt>模板哈希</dt><dd><code>{review.templateHash}</code></dd></div>
       </dl>
       <ol className="workflow-outline-review">
         {review.outline.map((section, index) => <li key={section.key}>
@@ -112,7 +115,7 @@ const HumanTaskReview = ({ task }: { task: WorkflowHumanTask }) => {
           </div>
           {section.gapCode === null
             ? <ReviewEvidenceList evidence={section.supports} label={`${section.title} 的证据`} workspaceId={review.workspaceId} />
-            : <p className="workflow-review-gap"><strong>GAP</strong><code>{section.gapCode}</code><span>当前章节没有已验证证据。</span></p>}
+            : <p className="workflow-review-gap"><strong>知识缺口</strong><code>{section.gapCode}</code><span>当前章节没有已验证证据。</span></p>}
         </li>)}
       </ol>
     </section>;
@@ -128,14 +131,14 @@ const HumanTaskReview = ({ task }: { task: WorkflowHumanTask }) => {
         </div>
       </div>
       <Link className="workflow-review__artifact-link" to={`/artifacts/${review.artifactId}`}>
-        打开 Artifact <ExternalLink size={14} aria-hidden="true" />
+        打开产物 <ExternalLink size={14} aria-hidden="true" />
       </Link>
     </header>
     <dl className="workflow-review__binding">
-      <div><dt>Snapshot</dt><dd><code>{review.snapshotId}</code></dd></div>
-      <div><dt>Snapshot Hash</dt><dd><code>{review.snapshotHash}</code></dd></div>
-      <div><dt>Revision Hash</dt><dd><code>{review.revisionHash}</code></dd></div>
-      <div><dt>Diff Hash</dt><dd><code>{review.diffHash}</code></dd></div>
+      <div><dt>快照</dt><dd><code>{review.snapshotId}</code></dd></div>
+      <div><dt>快照哈希</dt><dd><code>{review.snapshotHash}</code></dd></div>
+      <div><dt>修订版本哈希</dt><dd><code>{review.revisionHash}</code></dd></div>
+      <div><dt>差异哈希</dt><dd><code>{review.diffHash}</code></dd></div>
     </dl>
     <dl className="workflow-merge-summary" aria-label="合并比较统计">
       <div className="workflow-merge-summary__total"><dt>正式证据</dt><dd>{review.evidenceCount}</dd></div>
@@ -146,9 +149,9 @@ const HumanTaskReview = ({ task }: { task: WorkflowHumanTask }) => {
       </div>)}
     </dl>
     <div className="workflow-review-diff">
-      <div><strong>统一 Diff 预览</strong><code>{review.diffHash}</code></div>
-      <pre aria-label="统一 Diff 预览">{review.diffPreview}</pre>
-      {review.diffTruncated ? <p role="note">Diff 已达到 32 KiB 审阅上限，当前仅显示受控预览；完整修订请在 Artifact 中核对。</p> : null}
+      <div><strong>统一差异预览</strong><code>{review.diffHash}</code></div>
+      <pre aria-label="统一差异预览">{review.diffPreview}</pre>
+      {review.diffTruncated ? <p role="note">差异已达到 32 KiB 审阅上限，当前仅显示受控预览；完整修订请在产物中核对。</p> : null}
     </div>
     {review.comparison.length === 0
       ? <p className="workflow-review-empty">当前合并结果没有材料来源。</p>
@@ -181,7 +184,7 @@ export const WorkflowHumanTaskDecision = ({ task, pending, error, onDecide }: {
     <div>
       <p className="eyebrow">等待人工确认</p>
       <h3 id="workflow-human-task-heading">检查当前整理阶段</h3>
-      <p>{targetRequired ? "确认合并内容及新文件位置后，流程才会创建可审阅的 Proposal。" : "批准当前大纲后，流程才会继续生成 Artifact。"}</p>
+      <p>{targetRequired ? "确认合并内容及新文件位置后，流程才会创建可审阅的提案。" : "批准当前大纲后，流程才会继续生成产物。"}</p>
     </div>
     <HumanTaskReview task={task} />
     {targetRequired ? <label>目标 Markdown 路径<input value={targetPath} maxLength={4096} placeholder="notes/merged-topic.md" onChange={(event) => setTargetPath(event.target.value)} disabled={pending || reviewUnavailable} /></label> : null}
@@ -242,13 +245,13 @@ export const WorkflowsPage = () => {
         </div>
         <CardHeader
           eyebrow="运行记录"
-          title={query.isPending ? "读取中…" : `${String(query.data?.items.length ?? 0)} 个 Run`}
+          title={query.isPending ? "读取中…" : `${String(query.data?.items.length ?? 0)} 个运行记录`}
         />
         {query.isError ? (
           <UnavailableState title="Workflow 列表不可用" description={query.error.message} />
         ) : query.data?.items.length === 0 ? (
           <EmptyState
-            title="暂无 Workflow Run"
+            title="暂无 Workflow 运行记录"
             description="摄取、写回和检索任务的持久状态会出现在这里。"
           />
         ) : (
@@ -272,7 +275,7 @@ export const WorkflowsPage = () => {
                           : "info"
                   }
                 >
-                  {item.status}
+                  {workflowStatusLabel(item.status)}
                 </Badge>
                 <div className="workflow-row__timing"><small>创建 {new Date(item.createdAt).toLocaleString("zh-CN")}</small><time>更新 {new Date(item.updatedAt).toLocaleString("zh-CN")}</time><small>持续 {formatElapsedDuration(item.createdAt, item.completedAt)}</small>{item.waitingForHuman ? <small className="workflow-waiting">等待用户输入</small> : null}{workflowControlPending(item.status, item.pauseRequested, item.cancelRequested) ? <small className="workflow-waiting">等待安全检查点</small> : null}</div>
               </Link>
@@ -370,7 +373,7 @@ export const WorkflowDetailPage = () => {
     <div className="page-stack">
       <div className="page-intro page-intro--split">
         <div>
-          <p className="eyebrow">Workflow Run / durable state</p>
+          <p className="eyebrow">Workflow 运行记录 / 持久状态</p>
           <h1>{run.definitionId}</h1>
           <p>
             <Badge
@@ -382,13 +385,13 @@ export const WorkflowDetailPage = () => {
                     : "info"
               }
             >
-              {run.status}
+              {workflowStatusLabel(run.status)}
             </Badge>{" "}
-            <span className="muted">version {run.version}</span>
+            <span className="muted">版本 {run.version}</span>
           </p>
         </div>
         <div className="hash-card">
-          <span>Run ID</span>
+          <span>运行 ID</span>
           <code>{run.id}</code>
         </div>
       </div>
@@ -422,15 +425,15 @@ export const WorkflowDetailPage = () => {
           >
             <Square size={15} />取消
           </Button> : null}
-        </div> : <UnavailableState title="当前 Run 不允许控制" description="该 Workflow 已进入终态，服务端不接受 pause、resume 或 cancel。" />}
-        {pendingControl ? <UnavailableState title="正在等待安全检查点" description="服务端已受理控制请求；Run 到达安全检查点前，所有控制按钮保持禁用。" /> : null}
+        </div> : <UnavailableState title="当前运行不允许控制" description="该 Workflow 已进入终态，服务端不接受暂停、恢复或取消。" />}
+        {pendingControl ? <UnavailableState title="正在等待安全检查点" description="服务端已受理控制请求；运行到达安全检查点前，所有控制按钮保持禁用。" /> : null}
         {mutation.isError ? <p className="form-error" role="alert">{mutation.error.message}</p> : null}
         <p className="sidebar-note">
           控制命令携带 expected_version；版本冲突时请重新查询后再操作。
         </p>
       </Card>
       <Card>
-        <CardHeader eyebrow="持久事实" title="Run 时间线" />
+        <CardHeader eyebrow="持久事实" title="运行时间线" />
         <dl className="detail-grid">
           <div>
             <dt>创建</dt>
@@ -461,7 +464,7 @@ export const WorkflowDetailPage = () => {
         </dl>
         <UnavailableState
           title="节点级时间线尚未交付"
-          description="当前公共契约只提供 Run 摘要，Tool Call、Token 和节点详情不会被前端猜测。"
+          description="当前公共契约只提供运行摘要，Tool Call、Token 和节点详情不会被前端猜测。"
         />
       </Card>
     </div>

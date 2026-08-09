@@ -163,11 +163,11 @@ describe("HealthPage", () => {
 
     render(<MemoryRouter initialEntries={[`/health?scan=${scanId}`]}><Routes><Route path="/health" element={<HealthPage />} /></Routes></MemoryRouter>);
 
-    expect(screen.getByText("Scan PARTIAL")).toBeInTheDocument();
+    expect(screen.getAllByText("部分完成").length).toBeGreaterThan(0);
     expect(screen.getByText("07-16")).toBeInTheDocument();
     expect(screen.getAllByText("新增").length).toBeGreaterThan(0);
     expect(screen.queryByText("Evidence 摘要")).not.toBeInTheDocument();
-    const trigger = screen.getByRole("button", { name: /Evidence/ });
+    const trigger = screen.getByRole("button", { name: "查看证据" });
     fireEvent.click(trigger);
     expect(await screen.findByText("Evidence 摘要")).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
@@ -209,7 +209,7 @@ describe("HealthPage", () => {
     hooks.useClearHealthIssueDetail.mockReturnValue(vi.fn());
 
     render(<MemoryRouter initialEntries={["/health"]}><Routes><Route path="/health" element={<HealthPage />} /></Routes></MemoryRouter>);
-    fireEvent.click(screen.getByRole("button", { name: /Evidence/ }));
+    fireEvent.click(screen.getByRole("button", { name: "查看证据" }));
     expect(hooks.useHealthIssueObservations).toHaveBeenLastCalledWith(issueId, false);
     expect(hooks.useHealthIssueDecisions).toHaveBeenLastCalledWith(issueId, false);
 
@@ -240,7 +240,7 @@ describe("HealthPage", () => {
     hooks.useClearHealthIssueDetail.mockReturnValue(vi.fn());
 
     render(<MemoryRouter initialEntries={["/health"]}><Routes><Route path="/health" element={<HealthPage />} /></Routes></MemoryRouter>);
-    fireEvent.click(screen.getByRole("button", { name: /Evidence/ }));
+    fireEvent.click(screen.getByRole("button", { name: "查看证据" }));
     fireEvent.click(await screen.findByRole("button", { name: /确认/ }));
     expect(decide).toHaveBeenCalledWith(expect.objectContaining({ issueId, expectedVersion: 4, action: "ACKNOWLEDGE" }), expect.any(Object));
     fireEvent.click(screen.getByRole("button", { name: /确认/ }));
@@ -250,7 +250,7 @@ describe("HealthPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "忽略" }));
     expect(decide.mock.calls[2]?.[0]?.idempotencyKey).not.toBe(firstKey);
 
-    const proposalButtons = screen.getAllByRole("button", { name: /创建 Proposal/ });
+    const proposalButtons = screen.getAllByRole("button", { name: /创建提案/ });
     expect(proposalButtons[0]).toBeDisabled();
     expect(proposalButtons[1]).toBeDisabled();
   });

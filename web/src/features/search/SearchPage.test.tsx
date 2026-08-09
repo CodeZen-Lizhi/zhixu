@@ -116,7 +116,7 @@ describe("SearchPage", () => {
       cursor: "page-2",
       limit: 20,
     }, expect.any(AbortSignal));
-    expect(screen.getByText("Vector #1 · distance 0.1250")).toBeInTheDocument();
+    expect(screen.getByText("向量 #1 · 距离 0.1250")).toBeInTheDocument();
     expect(screen.getByText("rerank：RETRIEVAL_RERANK_UNAVAILABLE（可重试）")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "资料版本" })).toHaveAttribute("href", `/documents/${sourceVersionId}`);
     expect(screen.getByRole("button", { name: "打开证据片段" })).toBeInTheDocument();
@@ -136,12 +136,15 @@ describe("SearchPage", () => {
     }));
     renderPage();
 
+    expect(screen.getByRole("option", { name: "混合" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "关键词" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "语义" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("检索内容"), { target: { value: "  durable relation  " } });
     fireEvent.change(screen.getByLabelText("检索模式"), { target: { value: "keyword" } });
-    fireEvent.change(screen.getByLabelText("Source Version（可选）"), { target: { value: sourceVersionId } });
+    fireEvent.change(screen.getByLabelText("资料版本（可选）"), { target: { value: sourceVersionId } });
     fireEvent.click(screen.getByRole("button", { name: "检索" }));
 
-    expect(await screen.findByText("没有命中 Evidence")).toBeInTheDocument();
+    expect(await screen.findByText("没有命中证据")).toBeInTheDocument();
     expect(api.search).toHaveBeenCalledWith({
       workspaceId,
       query: "durable relation",
@@ -183,7 +186,7 @@ describe("SearchPage", () => {
     }));
     renderPage(`/search?query=relation&scope_workspace=${workspaceId}`);
 
-    expect(await screen.findByText("Search 已降级，但没有隐藏能力差异")).toBeInTheDocument();
+    expect(await screen.findByText("检索已降级，但没有隐藏能力差异")).toBeInTheDocument();
     expect(screen.getByText("索引缺失能力：vector")).toBeInTheDocument();
     expect(screen.getByText("vector：RETRIEVAL_VECTOR_UNAVAILABLE（可重试）")).toBeInTheDocument();
   });
@@ -198,9 +201,9 @@ describe("SearchPage", () => {
     renderPage(`/search?query=relation&mode=semantic&scope_workspace=${workspaceId}`);
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Search 请求失败");
+    expect(alert).toHaveTextContent("检索请求失败");
     expect(alert).toHaveTextContent("RETRIEVAL_SEMANTIC_UNAVAILABLE");
-    expect(screen.queryByText("没有命中 Evidence")).not.toBeInTheDocument();
+    expect(screen.queryByText("没有命中证据")).not.toBeInTheDocument();
   });
 
   it("展示全部返回的 provenance，并明确标记服务端截断", async () => {
@@ -230,17 +233,17 @@ describe("SearchPage", () => {
     expect(await screen.findByText("docs/semantic-links.md")).toBeInTheDocument();
     expect(screen.getByText("docs/approval-river.md")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "打开证据片段" })).toHaveLength(2);
-    expect(screen.getByText("该 Evidence 还有更多来源，当前响应已按服务端上限截断。")).toBeInTheDocument();
+    expect(screen.getByText("该证据还有更多来源，当前响应已按服务端上限截断。")).toBeInTheDocument();
   });
 
   it("输入无效时显示表单错误且不访问 API", () => {
     renderPage();
 
     fireEvent.change(screen.getByLabelText("检索内容"), { target: { value: "valid query" } });
-    fireEvent.change(screen.getByLabelText("Source Version（可选）"), { target: { value: "not-a-uuid" } });
+    fireEvent.change(screen.getByLabelText("资料版本（可选）"), { target: { value: "not-a-uuid" } });
     fireEvent.click(screen.getByRole("button", { name: "检索" }));
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Source Version 必须为空或使用规范 UUID");
+    expect(screen.getByRole("alert")).toHaveTextContent("资料版本必须为空或使用规范 UUID");
     expect(api.search).not.toHaveBeenCalled();
   });
 
@@ -248,7 +251,7 @@ describe("SearchPage", () => {
     api.search.mockImplementation(() => new Promise<SearchResponse>(() => undefined));
     renderPage("/search?query=pending");
 
-    expect(screen.getByLabelText("正在加载 Search Evidence")).toBeInTheDocument();
+    expect(screen.getByLabelText("正在加载检索证据")).toBeInTheDocument();
   });
 
   it("cursor stale 时允许从第一页重新检索", async () => {
@@ -258,7 +261,7 @@ describe("SearchPage", () => {
     renderPage(`/search?query=relation&mode=semantic&cursor=page-2&scope_workspace=${workspaceId}`);
 
     const restart = await screen.findByRole("button", { name: "从第一页重新检索" });
-    expect(screen.getByRole("alert")).toHaveTextContent("Search 结果窗口已失效");
+    expect(screen.getByRole("alert")).toHaveTextContent("检索结果窗口已失效");
     fireEvent.click(restart);
 
     expect(await screen.findByText("Approval 后由 Knowledge apply 正式写入 Relation。")).toBeInTheDocument();

@@ -404,8 +404,8 @@ describe("GraphPage", () => {
     expect(screen.getByRole("button", { name: "释放固定布局" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "已锁定，选择主题：Graph Projection" })).toHaveAttribute("data-locked", "true");
 
-    fireEvent.click(screen.getByRole("button", { name: "扫描当前 Topic" }));
-    expect(await screen.findByText("Topic 扫描 · RUNNING")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "扫描当前主题" }));
+    expect(await screen.findByText("主题扫描 · 运行中")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "释放固定布局" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "已锁定，选择主题：Graph Projection" })).toHaveAttribute("data-locked", "true");
     expect(screen.getByRole("heading", { name: "Graph Projection" })).toBeInTheDocument();
@@ -450,7 +450,7 @@ describe("GraphPage", () => {
     expect(screen.getByRole("button", { name: "释放固定布局" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "加载下一页" }));
-    expect(await screen.findByText("50 nodes · 0 edges")).toBeInTheDocument();
+    expect(await screen.findByText("50 个节点 · 0 条关系")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "加载下一页" }));
     expect(await screen.findByText("节点超过画布上限（60），已切换到完整列表。")).toBeInTheDocument();
     await waitFor(() => expect(view.container.querySelectorAll('[data-locked="true"]')).toHaveLength(0));
@@ -586,7 +586,7 @@ describe("GraphPage", () => {
     expect(await screen.findByText("该来源片段直接支持当前关系。")).toBeInTheDocument();
 
     fireEvent.click(await screen.findByRole("button", { name: "选择关系：支持，已确认" }));
-    await screen.findByRole("heading", { name: "SUPPORTS" });
+    await screen.findByRole("heading", { name: "支持" });
     expect(fetchMock.mock.calls.filter(([input]) => requestUrl(input).pathname === `/api/v1/graph/relations/${secondRelationId}/evidence`)).toHaveLength(0);
 
     fireEvent.click(await screen.findByRole("button", { name: "加载关系证据" }));
@@ -743,9 +743,9 @@ describe("GraphPage", () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(notFound)));
     const first = renderPage(`/graph?mode=path&from_type=TOPIC&from_id=${topicId}&to_type=CLAIM&to_id=${claimId}`);
     expect(await screen.findByRole("status", { name: "路径查询结果" })).toHaveTextContent("未找到正式关系路径");
-    expect(screen.getByText("共同 Topic 建议：Graph Projection")).toBeInTheDocument();
+    expect(screen.getByText("共同主题建议：Graph Projection")).toBeInTheDocument();
     expect(screen.getByText("路径关系过滤 · 10")).toBeInTheDocument();
-    expect(screen.queryByText("Claim 最低置信度")).not.toBeInTheDocument();
+    expect(screen.queryByText("主张最低置信度")).not.toBeInTheDocument();
     first.unmount();
 
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({

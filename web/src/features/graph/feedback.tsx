@@ -8,9 +8,9 @@ const errorTitle = (error: Error): string => {
     case "GRAPH_CURSOR_STALE": return "图谱结果已变化";
     case "GRAPH_CURSOR_INVALID": return "分页状态已失效";
     case "GRAPH_QUERY_BUDGET_EXCEEDED": return "查询超过安全预算";
-    case "GRAPH_DEPENDENCY_UNAVAILABLE": return "Graph 服务暂不可用";
+    case "GRAPH_DEPENDENCY_UNAVAILABLE": return "图谱服务暂不可用";
     case "GRAPH_PROJECTION_INCONSISTENT": return "图谱投影不一致";
-    case "NETWORK_ERROR": return "无法连接 Graph 服务";
+    case "NETWORK_ERROR": return "无法连接图谱服务";
     default: return "图谱请求未完成";
   }
 };

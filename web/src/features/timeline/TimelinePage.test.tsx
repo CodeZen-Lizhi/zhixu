@@ -188,7 +188,7 @@ describe("Timeline workbench", () => {
       refetch: vi.fn(),
     });
     const loading = renderTimeline();
-    expect(screen.getByText("正在读取 Timeline 事件…")).toBeInTheDocument();
+    expect(screen.getByText("正在读取时间线事件…")).toBeInTheDocument();
     loading.unmount();
 
     renderTimeline();
@@ -208,7 +208,7 @@ describe("Timeline workbench", () => {
     });
     renderTimeline();
 
-    expect(screen.getByText("Timeline / Impact 暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("时间线 / 影响分析暂不可用")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     expect(refetch).toHaveBeenCalledTimes(1);
   });
@@ -233,7 +233,7 @@ describe("Timeline workbench", () => {
     fireEvent.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => expect(queryMocks.useTimelinePage).toHaveBeenLastCalledWith({ aggregateType: "CONFLICT" }, "opaque-next", 25));
 
-    fireEvent.change(screen.getByLabelText("Source event ref"), { target: { value: "conflict.opened:7600" } });
+    fireEvent.change(screen.getByLabelText("来源事件引用"), { target: { value: "conflict.opened:7600" } });
     fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
     await waitFor(() => {
       expect(screen.getByTestId("location")).toHaveTextContent("source_event_ref=conflict.opened%3A7600");
@@ -325,12 +325,12 @@ describe("Timeline workbench", () => {
     renderEvent();
 
     fireEvent.click(screen.getByRole("button", { name: "发起分析" }));
-    expect(await screen.findByText("impact-analysis/v2 · READY")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /打开 Artifact/ })).toHaveAttribute("href", `/artifacts/${artifactId}`);
-    expect(screen.getAllByRole("button", { name: "创建 Proposal" })).toHaveLength(1);
+    expect(await screen.findByText("impact-analysis/v2 · 就绪")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /打开产物/ })).toHaveAttribute("href", `/artifacts/${artifactId}`);
+    expect(screen.getAllByRole("button", { name: "创建提案" })).toHaveLength(1);
     expect(screen.getByText("Inspect the formal relation").closest("article")).toHaveTextContent("只读影响");
 
-    fireEvent.click(screen.getByRole("button", { name: "创建 Proposal" }));
+    fireEvent.click(screen.getByRole("button", { name: "创建提案" }));
     expect(createMutate.mock.calls[0]?.[0]).toMatchObject({
       workspaceId,
       reportId,
@@ -353,7 +353,7 @@ describe("Timeline workbench", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "发起分析" }));
     expect(await screen.findByText("已被替代")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "创建 Proposal" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "创建提案" })).not.toBeInTheDocument();
   });
 
   it("retries an unknown Proposal result with the exact report/target/action/key binding", async () => {

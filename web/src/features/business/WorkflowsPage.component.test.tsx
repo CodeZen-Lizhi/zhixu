@@ -155,7 +155,7 @@ describe("WorkflowDetailPage controls", () => {
     api.getWorkflow.mockResolvedValue(workflow("succeeded"));
     renderDetail();
 
-    expect(await screen.findByText("当前 Run 不允许控制")).toBeInTheDocument();
+    expect(await screen.findByText("当前运行不允许控制")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /暂停|恢复|取消/ })).not.toBeInTheDocument();
     expect(screen.getByText("15 分钟")).toBeInTheDocument();
   });
@@ -182,8 +182,8 @@ describe("WorkflowDetailPage controls", () => {
     fireEvent.click(pause);
     await waitFor(() => expect(api.controlWorkflow).toHaveBeenCalledWith(workspaceId, workflowId, "pause", 2));
     await waitFor(() => expect(api.getWorkflow).toHaveBeenCalledTimes(2));
-    expect(screen.getByText("running")).toBeInTheDocument();
-    expect(screen.queryByText("paused")).not.toBeInTheDocument();
+    expect(screen.getByText("运行中")).toBeInTheDocument();
+    expect(screen.queryByText("已暂停")).not.toBeInTheDocument();
     expect(pause).toBeDisabled();
     expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
 
@@ -201,10 +201,10 @@ describe("WorkflowDetailPage controls", () => {
     expect(screen.getByRole("textbox", { name: "目标 Markdown 路径" })).toHaveValue(mergeReview.defaultTargetPath);
     const reviewHeading = screen.getByRole("heading", { name: "确认分类、冲突与来源" });
     expect(reviewHeading.compareDocumentPosition(approve) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-    expect(screen.getByRole("link", { name: "打开 Artifact" })).toHaveAttribute("href", `/artifacts/${mergeReview.artifactId}`);
+    expect(screen.getByRole("link", { name: "打开产物" })).toHaveAttribute("href", `/artifacts/${mergeReview.artifactId}`);
     expect(screen.getByText(mergeReview.revisionHash)).toBeInTheDocument();
     expect(screen.getAllByText(mergeReview.diffHash)).toHaveLength(2);
-    expect(screen.getByLabelText("统一 Diff 预览")).toHaveTextContent("+# merged");
+    expect(screen.getByLabelText("统一差异预览")).toHaveTextContent("+# merged");
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
     const summary = screen.getByLabelText("合并比较统计");
     expect(within(summary).getByText("正式证据")).toBeInTheDocument();

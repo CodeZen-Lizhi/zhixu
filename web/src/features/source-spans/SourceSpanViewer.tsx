@@ -39,7 +39,7 @@ export const SourceSpanViewer = ({ reference, label, className }: SourceSpanView
         if (!controller.signal.aborted) setState({ status: "ready", span });
       })
       .catch((error: unknown) => {
-        if (!controller.signal.aborted) setState({ status: "error", message: error instanceof Error ? error.message : "无法读取 Source Span。" });
+        if (!controller.signal.aborted) setState({ status: "error", message: error instanceof Error ? error.message : "无法读取来源片段。" });
       });
     return () => controller.abort();
   }, [open, reload, sourceSpanId, sourceVersionId, workspaceId]);
@@ -75,8 +75,8 @@ export const SourceSpanViewer = ({ reference, label, className }: SourceSpanView
       <FileText size={15} />{label}
     </button>
     {!open ? null : <div className="source-span-backdrop">
-      <section ref={dialogRef} className="source-span-dialog" tabIndex={-1} role="dialog" aria-modal="true" aria-label="Source Span 证据" onKeyDown={handleKeyDown}>
-        <header><div><p className="eyebrow">Source Span</p><h2>不可变来源片段</h2></div><button type="button" className="source-span-dialog__close" aria-label="关闭来源片段" title="关闭来源片段" onClick={close}><X size={18} /></button></header>
+      <section ref={dialogRef} className="source-span-dialog" tabIndex={-1} role="dialog" aria-modal="true" aria-label="来源片段证据" onKeyDown={handleKeyDown}>
+        <header><div><p className="eyebrow">来源片段</p><h2>不可变来源片段</h2></div><button type="button" className="source-span-dialog__close" aria-label="关闭来源片段" title="关闭来源片段" onClick={close}><X size={18} /></button></header>
         {state.status === "pending" ? <p role="status">正在读取来源片段…</p> : null}
         {state.status === "error" ? <div className="ui-state ui-state--error" role="alert"><strong>来源片段读取失败</strong><p>{state.message}</p><button type="button" className="ui-button ui-button--secondary" onClick={() => setReload((current) => current + 1)}>重试</button></div> : null}
         {state.status !== "ready" ? null : <div className="source-span-dialog__content"><dl><div><dt>文件</dt><dd>{state.span.sourceVersion.relativePath}</dd></div><div><dt>范围</dt><dd>第 {String(state.span.startLine)} 至 {String(state.span.endLine)} 行</dd></div><div><dt>类型</dt><dd>{state.span.spanType}</dd></div></dl><pre>{state.span.excerpt}</pre>{state.span.excerptTruncated ? <p className="source-span-dialog__notice">服务端已按安全上限截断该片段。</p> : null}</div>}

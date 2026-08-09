@@ -32,7 +32,7 @@ describe("AnswerPublication", () => {
     const answer: Answer = { ...base, publicationStatus: "pending", citations: [], retrievalSummary: null };
     renderWithAppProviders(<AnswerPublication answer={answer} onCitation={vi.fn()} />);
     expect(screen.getByText("正在检索证据")).toBeInTheDocument();
-    expect(screen.getByText("Workflow · running")).toBeInTheDocument();
+    expect(screen.getByText("工作流 · 运行中")).toBeInTheDocument();
     expect(screen.queryByText("已校验回答")).not.toBeInTheDocument();
   });
 

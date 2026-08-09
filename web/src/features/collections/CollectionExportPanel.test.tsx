@@ -54,7 +54,7 @@ describe("CollectionExportPanel", () => {
     hooks.useCollectionExports.mockReturnValue({ data: { workspaceId, items: [cancelled], nextCursor: null }, isPending: false, isError: false, isFetching: false, refetch: vi.fn() });
     hooks.useCreateCollectionExport.mockReturnValue({ mutate: vi.fn(), isPending: false, isError: false });
     renderPanel({ ...collection, status: "ARCHIVED" });
-    expect(screen.getByText("归档 Collection 不可创建导出")).toBeInTheDocument();
+    expect(screen.getByText("归档集合不可创建导出")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /创建 .* 导出/ })).not.toBeInTheDocument();
     expect(screen.getByText("已取消（历史）")).toBeInTheDocument();
   });
