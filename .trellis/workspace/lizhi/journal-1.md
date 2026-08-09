@@ -1915,3 +1915,24 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 48: 完成前端中文展示本地化并推送
+
+**Date**: 2026-08-09
+**Task**: 完成前端中文展示本地化并推送
+**Branch**: `dev`
+
+### Summary
+
+扫描 web/src/features 页面并按展示层将通用英文标题、状态和枚举映射为中文；保留 Workflow、Workspace、API、URL、Git、Markdown、JSON 等技术术语及原始请求值。完成 28 个定向测试、260 条测试、typecheck、lint 和 diff check；提交 f4684007 并推送到 origin/dev。按用户选择不归档其他历史任务。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f4684007` | (see git log) |
+
+### Status
+
+[OK] **Completed**
