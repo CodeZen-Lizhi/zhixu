@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"Docker runtime grant、network namespace 与 fail-closed 启动边界。"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"managed runtime、restart policy 与 prepared candidate 兼容约束。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"等待入口的日志脱敏、稳定错误码与可观测性约束。"}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"新增 Go command 与 runtime 镜像入口的模块边界。"}
+{"file":".trellis/tasks/archive/2026-08/08-08-docker-direct-workspace-runtime/design.md","reason":"已批准的 Docker 直连架构、入口安全边界与生命周期语义。"}

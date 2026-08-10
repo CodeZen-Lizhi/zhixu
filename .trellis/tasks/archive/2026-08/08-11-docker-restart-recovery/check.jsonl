@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"审查精确 bind、shared namespace、Docker socket 与 fail-closed 影响。"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"审查 restart/managed/prepared runtime 契约兼容性。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"审查等待入口的日志脱敏、稳定错误码与可观测性。"}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"审查新增 Go command 与 runtime 镜像入口的分层边界。"}
+{"file":".trellis/tasks/08-11-docker-restart-recovery/prd.md","reason":"按本任务验收标准检查启动收敛与 status 行为。"}
