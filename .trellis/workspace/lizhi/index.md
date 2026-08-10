@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 51
+- **Total Sessions**: 52
 - **Last Active**: 2026-08-11
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~28 | Active |
+| `journal-2.md` | ~49 | Active |
 | `journal-1.md` | ~1981 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 52 | 2026-08-11 | 修复 Docker 重启后的运行时恢复 | `540f123e` | `dev` |
 | 51 | 2026-08-11 | 收敛项目文档体系 | `49e09138` | `dev` |
 | 50 | 2026-08-11 | 浏览器原生 EventSource 优化 | `b02d1dec512cc0aaea81b38cee362524008b3720`, `7be55a7ef3860077cf529fbf2b45bc40cc649544` | `dev` |
 | 49 | 2026-08-10 | 代码审核整改与推送 | `9f0f2105` | `dev` |

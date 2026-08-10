@@ -26,3 +26,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 52: 修复 Docker 重启后的运行时恢复
+
+**Date**: 2026-08-11
+**Task**: 修复 Docker 重启后的运行时恢复
+**Branch**: `dev`
+
+### Summary
+
+新增 PostgreSQL runtime wait，修复共享网络命名空间启动竞态；status 显示全部关键容器和 ready/degraded；完成真实 restart、readiness 与契约验证。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `540f123e` | (see git log) |
+
+### Status
+
+[OK] **Completed**
