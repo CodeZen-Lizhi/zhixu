@@ -877,13 +877,12 @@ invoke_workspace_control() {
   WORKSPACECTL_RESULT_FILE=""
 }
 
-runtime_services_ready() {
-  python3 - "${RUNTIME_STATUS_FILE}" <<'PY'
+runtime_status_is_ready() {
+  python3 -c '
 import json
 import sys
 
-with open(sys.argv[1], "r", encoding="utf-8") as source:
-    text = source.read().strip()
+text = sys.stdin.read().strip()
 if not text:
     raise SystemExit(1)
 try:
@@ -895,10 +894,16 @@ if isinstance(value, dict):
 if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
     raise SystemExit(1)
 states = {item.get("Service"): (item.get("State"), item.get("Health")) for item in value}
-for service in ("app", "worker", "proxy"):
-    if states.get(service) != ("running", "healthy"):
+for requirement in sys.argv[1:]:
+    service, expected_health = requirement.split("=", 1)
+    state, health = states.get(service, (None, None))
+    if state != "running" or expected_health != "-" and health != expected_health:
         raise SystemExit(1)
-PY
+' "$@"
+}
+
+runtime_services_ready() {
+  runtime_status_is_ready app=healthy worker=healthy proxy=healthy <"${RUNTIME_STATUS_FILE}"
 }
 
 verify_runtime_ready() {
@@ -1017,7 +1022,15 @@ run_status() {
   validate_project_scope
   validate_optional_state_directory
   select_existing_env
-  compose_without_grant --profile workspace-runtime --profile modelctl ps
+  compose_without_grant --profile workspace-runtime --profile modelctl ps --all
+  if compose_without_grant --profile workspace-runtime --profile modelctl \
+    ps --all --format json postgres app worker proxy app-model-relay worker-model-relay \
+    | runtime_status_is_ready postgres=healthy app=healthy worker=healthy proxy=healthy \
+      app-model-relay=- worker-model-relay=-; then
+    printf 'Runtime: ready\n'
+  else
+    printf 'Runtime: degraded\n'
+  fi
   printf 'URL: http://127.0.0.1:%s/\n' "$(validated_port ZHIXU_HTTP_PORT 8080)"
   if selection_exists; then
     load_selection

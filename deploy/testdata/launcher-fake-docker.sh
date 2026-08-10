@@ -192,6 +192,16 @@ EOF
       printf '[{"Service":"app","State":"running","Health":"starting"},{"Service":"worker","State":"running","Health":"starting"},{"Service":"proxy","State":"running","Health":"starting"}]\n'
     fi
     ;;
+  *" ps --all --format json postgres app worker proxy app-model-relay worker-model-relay "*)
+    if [[ "${ZHIXU_FAKE_STATUS_READY:-1}" == "1" ]]; then
+      printf '[{"Service":"postgres","State":"running","Health":"healthy"},{"Service":"app","State":"running","Health":"healthy"},{"Service":"worker","State":"running","Health":"healthy"},{"Service":"proxy","State":"running","Health":"healthy"},{"Service":"app-model-relay","State":"running","Health":""},{"Service":"worker-model-relay","State":"running","Health":""}]\n'
+    else
+      printf '[{"Service":"postgres","State":"running","Health":"healthy"},{"Service":"app","State":"running","Health":"healthy"},{"Service":"worker","State":"running","Health":"healthy"},{"Service":"proxy","State":"exited","Health":""},{"Service":"app-model-relay","State":"exited","Health":""},{"Service":"worker-model-relay","State":"running","Health":""}]\n'
+    fi
+    ;;
+  *" ps --all "*)
+    printf 'NAME STATUS\nzhixu-app-1 Up\nzhixu-proxy-1 Exited\nzhixu-app-model-relay-1 Exited\nzhixu-worker-model-relay-1 Up\n'
+    ;;
   *" run --rm --no-deps -T model-settings-key-init "*)
     [[ "${ZHIXU_FAKE_KEY_INIT_EXIT:-0}" == "0" ]] || exit "${ZHIXU_FAKE_KEY_INIT_EXIT}"
     ;;

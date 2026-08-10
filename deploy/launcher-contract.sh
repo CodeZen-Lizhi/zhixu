@@ -354,8 +354,17 @@ main() {
   [[ ! -s "${ZHIXU_FAKE_WORKSPACECTL_LOG}" ]] || fail "base failure still invoked workspacectl"
 
   reset_logs
-  (cd "${STATE_DIR}/fixture" && ./zhixu status >/dev/null)
-  assert_log_contains "ps"
+  local status_output
+  status_output="$(cd "${STATE_DIR}/fixture" && ./zhixu status)"
+  grep -F -- "Runtime: ready" <<<"${status_output}" >/dev/null || fail "healthy status was not reported ready"
+  assert_log_contains "ps --all"
+  assert_log_contains "ps --all --format json postgres app worker proxy app-model-relay worker-model-relay"
+  reset_logs
+  export ZHIXU_FAKE_STATUS_READY=0
+  status_output="$(cd "${STATE_DIR}/fixture" && ./zhixu status)"
+  unset ZHIXU_FAKE_STATUS_READY
+  grep -F -- "Runtime: degraded" <<<"${status_output}" >/dev/null || fail "incomplete status was not reported degraded"
+  grep -F -- "zhixu-app-model-relay-1 Exited" <<<"${status_output}" >/dev/null || fail "status hid exited model relay"
   reset_logs
   (cd "${STATE_DIR}/fixture" && ./zhixu logs postgres >/dev/null)
   assert_log_contains "logs --follow --tail 200 postgres"

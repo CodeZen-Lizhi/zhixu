@@ -92,6 +92,16 @@ def validate_runtime_dependencies(model: dict[str, Any]) -> None:
             fail(f"{service_name} must wait for PostgreSQL health")
 
 
+def validate_runtime_entrypoints(model: dict[str, Any]) -> None:
+    expected = {
+        "app": ["/app/zhixu-runtime-wait", "--profile", "api", "--", "/app/zhixu-api"],
+        "worker": ["/app/zhixu-runtime-wait", "--profile", "worker", "--", "/app/zhixu-worker"],
+    }
+    for service_name, entrypoint in expected.items():
+        if service(model, service_name).get("entrypoint") != entrypoint:
+            fail(f"{service_name} must wait for PostgreSQL before starting its runtime")
+
+
 def validate_restart_policy(model: dict[str, Any], prepared_candidate: bool) -> None:
     expected_app_policy = "no" if prepared_candidate else "on-failure"
     expected_worker_policy = "no" if prepared_candidate else "on-failure"
@@ -348,6 +358,7 @@ def resolved_compose_model() -> tuple[dict[str, Any], str]:
 def main() -> None:
     model, mode = resolved_compose_model()
     validate_runtime_dependencies(model)
+    validate_runtime_entrypoints(model)
     if mode == "static":
         validate_static_models(model)
     elif mode == "legacy":

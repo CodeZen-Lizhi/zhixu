@@ -85,6 +85,7 @@ services:
       dockerfile: deploy/Dockerfile
     user: "10001:10001"
     restart: ${ZHIXU_APP_RESTART_POLICY:-on-failure}
+    entrypoint: ["/app/zhixu-runtime-wait", "--profile", "api", "--", "/app/zhixu-api"]
     environment:
       <<: [*tool-environment, *runtime-environment, *model-settings-environment, *api-auth-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
@@ -176,7 +177,7 @@ services:
       dockerfile: deploy/Dockerfile
     user: "10001:10001"
     restart: ${ZHIXU_WORKER_RESTART_POLICY:-on-failure}
-    entrypoint: ["/app/zhixu-worker"]
+    entrypoint: ["/app/zhixu-runtime-wait", "--profile", "worker", "--", "/app/zhixu-worker"]
     environment:
       <<: [*tool-environment, *runtime-environment, *model-settings-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}

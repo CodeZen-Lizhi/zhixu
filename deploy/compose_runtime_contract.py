@@ -141,6 +141,26 @@ def main() -> None:
                 condition="service_started"
             ),
         )
+        expect_invalid(
+            f"{service_name} bypasses PostgreSQL runtime wait",
+            managed,
+            lambda model, name=service_name: model["services"][name].update(
+                entrypoint=[f"/app/zhixu-{name}"]
+            ),
+        )
+
+    expect_invalid(
+        "static app bypasses PostgreSQL runtime wait",
+        static,
+        lambda model: model["services"]["app"].update(entrypoint=["/app/zhixu-api"]),
+        mode="static",
+    )
+    expect_invalid(
+        "prepared Worker bypasses PostgreSQL runtime wait",
+        prepared,
+        lambda model: model["services"]["worker"].update(entrypoint=["/app/zhixu-worker"]),
+        mode="prepared",
+    )
 
     for service_name in ("app", "worker"):
         expect_invalid(
