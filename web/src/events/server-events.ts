@@ -1,4 +1,10 @@
 import { invalidateAuthSession } from "../api/auth";
+import {
+  canonicalUuidPattern as uuidPattern,
+  hasOnlyKeys,
+  isAbortError,
+  isRecord,
+} from "../shared/codec";
 export type ServerEventResource =
   | "conversation"
   | "question"
@@ -125,7 +131,6 @@ const summaryKeys = [
   "citation_count",
 ] as const;
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const sequencePattern = /^[1-9][0-9]*$/;
 const eventTypePattern = /^[a-z][a-z0-9_.-]{0,127}$/;
 const tokenPattern = /^[a-z][a-z0-9_.-]{0,63}$/;
@@ -135,16 +140,12 @@ const maximumSummaryCount = 1_000_000_000;
 const maximumSequence = 9_223_372_036_854_775_807n;
 const maximumFrameCharacters = 32 * 1024;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 const assertExactKeys = (
   value: Record<string, unknown>,
   allowed: readonly string[],
   field: string,
 ): void => {
-  const keys = Object.keys(value);
-  if (keys.some((key) => !allowed.includes(key))) {
+  if (!hasOnlyKeys(value, allowed)) {
     throw invalidEvent(`${field} 包含未知字段`);
   }
 };
@@ -489,7 +490,7 @@ const decodeProblem = async (response: Response): Promise<Problem> => {
     throw new ServerEventClientError("INVALID_RESPONSE", "SSE Problem 响应结构无效", false);
   }
   const allowed = ["error_code", "message", "retryable", "workflow_run_id", "details"] as const;
-  if (Object.keys(value).some((key) => !allowed.includes(key as (typeof allowed)[number])) ||
+  if (!hasOnlyKeys(value, allowed) ||
       typeof value.error_code !== "string" || value.error_code === "" ||
       typeof value.message !== "string" || value.message === "" || typeof value.retryable !== "boolean" ||
       (value.workflow_run_id !== undefined && (typeof value.workflow_run_id !== "string" || !uuidPattern.test(value.workflow_run_id)))) {
@@ -541,9 +542,6 @@ const defaultSleep = async (milliseconds: number, signal: AbortSignal): Promise<
     if (signal.aborted) abort();
     else signal.addEventListener("abort", abort, { once: true });
   });
-
-const isAbortError = (error: unknown): boolean =>
-  error instanceof DOMException && error.name === "AbortError";
 
 const validateConnectOptions = (options: ConnectServerEventsOptions): void => {
   readUuid(options.workspaceId, "workspaceId");

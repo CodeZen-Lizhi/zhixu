@@ -294,7 +294,7 @@ func run(configPath string, logger *slog.Logger) error {
 	}
 	defer database.Close()
 
-	if err := ping(database, cfg.DatabasePingTimeout); err != nil {
+	if err := ping(context.Background(), database, cfg.DatabasePingTimeout); err != nil {
 		logger.Error("worker startup database check failed", "error_code", "DEPENDENCY_UNAVAILABLE")
 		return err
 	}
@@ -588,13 +588,13 @@ func run(configPath string, logger *slog.Logger) error {
 			_, _ = dispatchOrganizingOutbox(organizingContext, logger, components.organizingOutbox, organizingDispatchPeriodicPhase)
 			cancelOrganizing()
 		case <-ticker.C:
-			if err := ping(database, cfg.DatabasePingTimeout); err != nil {
+			if err := ping(processContext, database, cfg.DatabasePingTimeout); err != nil {
 				readiness.SetDatabaseOK(false)
 				logger.Error("worker database health check failed", "error_code", "DEPENDENCY_UNAVAILABLE")
 			} else {
 				readiness.SetDatabaseOK(true)
 				logger.Debug("worker database health check passed")
-				metricContext, cancelMetric := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+				metricContext, cancelMetric := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 				metricErr := recordQueueDepthMetric(metricContext, telemetry.Metrics(), database.DB(), cfg.WorkerQueue)
 				cancelMetric()
 				if metricErr != nil {
@@ -604,7 +604,7 @@ func run(configPath string, logger *slog.Logger) error {
 					continue
 				}
 				if components.healthSchedule != nil {
-					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+					dispatchContext, cancelDispatch := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 					_, dispatchErr := components.healthSchedule.DispatchDue(dispatchContext, 10)
 					cancelDispatch()
 					if dispatchErr != nil {
@@ -612,7 +612,7 @@ func run(configPath string, logger *slog.Logger) error {
 					}
 				}
 				if components.healthAffected != nil {
-					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+					dispatchContext, cancelDispatch := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 					_, dispatchErr := components.healthAffected.DispatchBatch(dispatchContext, 10)
 					cancelDispatch()
 					if dispatchErr != nil {
@@ -620,12 +620,12 @@ func run(configPath string, logger *slog.Logger) error {
 					}
 				}
 				if components.timelineProject != nil {
-					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+					dispatchContext, cancelDispatch := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 					_, _ = dispatchTimelineProjection(dispatchContext, logger, components.timelineProject, timelineProjectionPeriodicPhase)
 					cancelDispatch()
 				}
 				if components.citationBackfill != nil {
-					backfillContext, cancelBackfill := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+					backfillContext, cancelBackfill := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 					_, _ = dispatchCitationBackfill(backfillContext, logger, components.citationBackfill, citationBackfillPeriodicPhase)
 					cancelBackfill()
 				}
@@ -2595,8 +2595,12 @@ func recordQueueDepthMetric(ctx context.Context, metrics observability.Metrics, 
 	return metrics.Record(ctx, measurement)
 }
 
-func ping(database *postgres.Pool, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+type databasePinger interface {
+	Ping(context.Context) error
+}
+
+func ping(parent context.Context, database databasePinger, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	if err := database.Ping(ctx); err != nil {
 		return err

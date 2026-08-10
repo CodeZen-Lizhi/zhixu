@@ -11,6 +11,7 @@ import {
   type ReviewDeck,
 } from "../../api/review";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
+import { canonicalUuidPattern as uuidPattern } from "../../shared/codec";
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorState } from "../../shared/ui";
 import {
   useApproveReviewCard,
@@ -20,7 +21,6 @@ import {
   useReviewCards,
 } from "./queries";
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const cardTypes: readonly ReviewCardType[] = ["SHORT_ANSWER", "CLOZE", "COMPARISON", "SCENARIO", "CODE_READING", "DESIGN"];
 const cardTypeLabels: Record<ReviewCardType, string> = { SHORT_ANSWER: "简答", CLOZE: "填空", COMPARISON: "对比", SCENARIO: "情景", CODE_READING: "代码阅读", DESIGN: "设计" };

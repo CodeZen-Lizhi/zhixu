@@ -1,4 +1,9 @@
 import { authFetch } from "./auth";
+import {
+  canonicalUuidPattern as uuidPattern,
+  hasOnlyKeys,
+  isRecord,
+} from "../shared/codec";
 
 export type ConversationStatus = "open" | "archived";
 export type SearchMode = "keyword" | "semantic" | "hybrid";
@@ -197,17 +202,14 @@ export interface SubmitQuestionInput {
 }
 export interface SubmitFeedbackInput { workspaceId: string; answerId: string; idempotencyKey: string; feedbackType: FeedbackType; citationId?: string | null; comment?: string | null }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const timestampPattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const etagPattern = /^W\/\"(?:[1-9][0-9]*|answer-[1-9][0-9]*-workflow-[1-9][0-9]*-stage-(?:none|plan\.started|plan\.completed|retrieval\.started|retrieval\.completed|validation\.started|validation\.completed))\"$/;
 const ragStages = ["plan.started", "plan.completed", "retrieval.started", "retrieval.completed", "validation.started", "validation.completed"] as const;
 const textEncoder = new TextEncoder();
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const invalidResponse = (field: string) => new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: `Conversation API 响应字段无效：${field}`, retryable: false }, null);
 const invalidRequest = (field: string) => new ConversationApiError({ errorCode: "INVALID_REQUEST", message: `Conversation API 请求字段无效：${field}`, retryable: false }, null);
 const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => {
-  const allowed = new Set(keys);
-  if (Object.keys(value).some((key) => !allowed.has(key))) throw invalidResponse(field);
+  if (!hasOnlyKeys(value, keys)) throw invalidResponse(field);
 };
 const string = (value: unknown, field: string): string => { if (typeof value !== "string") throw invalidResponse(field); return value };
 const bounded = (value: unknown, field: string, max: number, allowEmpty = false): string => {

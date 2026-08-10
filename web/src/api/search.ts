@@ -1,4 +1,9 @@
 import { authFetch } from "./auth";
+import {
+  canonicalUuidPattern as uuidPattern,
+  hasOnlyKeys,
+  isRecord,
+} from "../shared/codec";
 
 export type SearchMode = "keyword" | "semantic" | "hybrid";
 export type IndexDegradedCapability = "vector";
@@ -118,23 +123,18 @@ export class SearchApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const textEncoder = new TextEncoder();
 const maxCursorBytes = 2048;
 const maxSnippetBytes = 4096;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 const assertExactKeys = (
   value: Record<string, unknown>,
   allowed: readonly string[],
   field: string,
 ): void => {
-  const allowedKeys = new Set(allowed);
-  if (Object.keys(value).some((key) => !allowedKeys.has(key))) throw invalidResponse(field);
+  if (!hasOnlyKeys(value, allowed)) throw invalidResponse(field);
 };
 
 const invalidResponse = (field: string) =>

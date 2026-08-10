@@ -85,6 +85,19 @@ describe("Collection query and URL state", () => {
     expect(parsed.columns).toEqual(["object_type", "title", "summary", "status", "updated_at"]);
   });
 
+  it("uses the shared UUID contract for selected object refs", () => {
+    const valid = "TOPIC:13000000-0000-4000-8000-000000000004";
+    expect(parseCollectionUrlState(new URLSearchParams({ selected: valid })).selected).toBe(valid);
+
+    for (const selected of [
+      "topic:13000000-0000-4000-8000-000000000004",
+      "CLAIM:13000000-0000-4000-8000-0000000000AA",
+      "CLAIM:00000000-0000-0000-0000-000000000000",
+    ]) {
+      expect(parseCollectionUrlState(new URLSearchParams({ selected })).selected).toBe("");
+    }
+  });
+
   it("preserves saved fixed columns when URL columns are edited", () => {
     const parsed = parseCollectionUrlState(new URLSearchParams("columns=object_type"), {
       view: "TABLE",

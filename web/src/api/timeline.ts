@@ -1,6 +1,7 @@
 /** Timeline / Impact 的唯一 HTTP 边界；页面只消费这里验证后的领域投影。 */
 
 import { authFetch } from "./auth";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
 
 export const timelineEventTypes = [
   "PROPOSAL_CREATED", "APPROVAL_GRANTED", "APPROVAL_REJECTED", "GIT_COMMITTED",
@@ -293,7 +294,6 @@ export class TimelineApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const textEncoder = new TextEncoder();
@@ -302,9 +302,6 @@ const maxIdempotencyKeyBytes = 128;
 const maxTimelineItems = 100;
 const maxImpactObjects = 500;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 const invalidResponse = (field: string, status: number | null = null): TimelineApiError =>
   new TimelineApiError("INVALID_RESPONSE", "INVALID_RESPONSE", `Timeline/Impact 响应字段无效：${field}`, false, status);
 
@@ -312,8 +309,7 @@ const invalidRequest = (field: string): TimelineApiError =>
   new TimelineApiError("INVALID_REQUEST", "INVALID_REQUEST", `Timeline/Impact 请求字段无效：${field}`, false);
 
 const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => {
-  const allowed = new Set(keys);
-  if (Object.keys(value).some((key) => !allowed.has(key))) throw invalidResponse(field);
+  if (!hasOnlyKeys(value, keys)) throw invalidResponse(field);
 };
 
 const stringValue = (value: unknown, field: string, allowEmpty = false): string => {
@@ -897,9 +893,6 @@ class StrictJsonParser {
 }
 
 const strictJson = (source: string): unknown => new StrictJsonParser(source).parse();
-
-const isAbortError = (value: unknown): boolean =>
-  (value instanceof DOMException || value instanceof Error) && value.name === "AbortError";
 
 const decodeProblem = (value: unknown, status: number): TimelineApiError => {
   if (!isRecord(value)) throw invalidResponse("problem", status);

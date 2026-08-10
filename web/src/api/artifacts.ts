@@ -1,6 +1,7 @@
 /** Artifact 的唯一网络边界：严格解码隔离产物及其不可变 Revision。 */
 
 import { authFetch } from "./auth";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type ArtifactStatus = "PLANNING" | "OUTLINE_REVIEW" | "GENERATING" | "DRAFT" | "APPROVED" | "EXPORTED" | "PUBLISH_PROPOSED" | "PUBLISHED" | "ARCHIVED";
 export type CoverageStatus = "COVERED" | "PARTIAL" | "GAP";
@@ -73,7 +74,6 @@ export class ArtifactApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const generationSectionKeyPattern = /^[a-z0-9-]+$/;
@@ -83,10 +83,9 @@ const generationStatuses: readonly ArtifactSectionGenerationStatus[] = ["PENDING
 const persistedGenerationStatuses: readonly ArtifactSectionGenerationPersistedStatus[] = ["PENDING", "FAILED", "CANCELLED", "RECOVERY_REQUIRED"];
 const generationWireKeys = ["generation_id", "workspace_id", "artifact_id", "source_revision_id", "source_revision_no", "source_artifact_version", "section_key", "workflow_run_id", "node_run_id", "status", "version", "created_at", "updated_at", "status_url"] as const;
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const invalidResponse = (field: string, status: number | null = null): ArtifactApiError => new ArtifactApiError("INVALID_RESPONSE", "INVALID_RESPONSE", `Artifact 响应字段无效：${field}`, false, status);
 const invalidRequest = (field: string): ArtifactApiError => new ArtifactApiError("INVALID_REQUEST", "INVALID_REQUEST", `Artifact 请求字段无效：${field}`, false);
-const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => { if (Object.keys(value).some((key) => !keys.includes(key))) throw invalidResponse(field); };
+const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => { if (!hasOnlyKeys(value, keys)) throw invalidResponse(field); };
 const stringValue = (value: unknown, field: string, allowEmpty = false): string => { if (typeof value !== "string" || (!allowEmpty && value.trim() === "")) throw invalidResponse(field); return value; };
 const uuid = (value: unknown, field: string): string => { const result = stringValue(value, field); if (!uuidPattern.test(result)) throw invalidResponse(field); return result; };
 const hash = (value: unknown, field: string): string => { const result = stringValue(value, field); if (!hashPattern.test(result)) throw invalidResponse(field); return result; };
@@ -247,7 +246,6 @@ export const decodeArtifactSectionGenerationPage = (value: unknown): ArtifactSec
   return { workspaceId, artifactId, items };
 };
 
-const isAbortError = (value: unknown): boolean => (value instanceof DOMException || value instanceof Error) && value.name === "AbortError";
 const readProblem = (value: unknown, status: number): ArtifactApiError => {
   if (!isRecord(value)) return new ArtifactApiError("HTTP_ERROR", "HTTP_ERROR", `Artifact API 返回 HTTP ${String(status)}。`, status >= 500, status);
   const code = typeof value.code === "string" && value.code !== "" ? value.code : typeof value.error_code === "string" && value.error_code !== "" ? value.error_code : "HTTP_ERROR";

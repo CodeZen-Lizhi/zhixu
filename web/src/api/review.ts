@@ -1,6 +1,12 @@
 /** Review 的唯一网络边界：严格隔离 Deck、待复习投影与服务端评分结果。 */
 
 import { authFetch } from "./auth";
+import {
+  canonicalUuidPattern as uuidPattern,
+  hasOnlyKeys,
+  isAbortError,
+  isRecord,
+} from "../shared/codec";
 
 export type ReviewDeckStatus = "ACTIVE" | "PAUSED" | "ARCHIVED";
 export type ReviewCardStatus =
@@ -339,8 +345,6 @@ export class ReviewApiError extends Error {
   }
 }
 
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const timestampPattern =
   /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
@@ -396,8 +400,6 @@ const learningPathStepTargetStatuses: readonly ReviewLearningPathStepTargetStatu
   "SKIPPED",
 ];
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 const invalidResponse = (
   field: string,
   status: number | null = null,
@@ -421,7 +423,7 @@ const exact = (
   keys: readonly string[],
   field: string,
 ): void => {
-  if (Object.keys(value).some((key) => !keys.includes(key)))
+  if (!hasOnlyKeys(value, keys))
     throw invalidResponse(field);
 };
 const stringValue = (
@@ -1525,9 +1527,6 @@ const decodeReviewLearningPathStepResult = (
   };
 };
 
-const isAbortError = (value: unknown): boolean =>
-  (value instanceof DOMException || value instanceof Error) &&
-  value.name === "AbortError";
 const readProblem = (value: unknown, status: number): ReviewApiError => {
   if (!isRecord(value))
     return new ReviewApiError(
@@ -1659,9 +1658,7 @@ const requireEvidence = (
     const field = `evidence[${String(index)}]`;
     if (
       !isRecord(item) ||
-      Object.keys(item).some(
-        (key) => !evidenceInputFields.some((fieldName) => fieldName === key),
-      ) ||
+      !hasOnlyKeys(item, evidenceInputFields) ||
       item.schemaVersion !== "review-evidence/v1" ||
       requireUuid(item.claimId, `${field}.claimId`) !== claimId
     )

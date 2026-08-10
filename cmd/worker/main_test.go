@@ -37,6 +37,22 @@ import (
 	workflowruntime "github.com/CodeZen-Lizhi/zhixu/internal/workflow/runtime"
 )
 
+type databasePingFunc func(context.Context) error
+
+func (function databasePingFunc) Ping(ctx context.Context) error { return function(ctx) }
+
+func TestPingPropagatesParentCancellation(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := ping(parent, databasePingFunc(func(ctx context.Context) error {
+		return ctx.Err()
+	}), time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ping error=%v", err)
+	}
+}
+
 func TestInitializeWorkerTelemetryHonorsConfiguredMode(t *testing.T) {
 	available := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		response.WriteHeader(http.StatusOK)

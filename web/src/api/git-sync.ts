@@ -1,5 +1,6 @@
 import { authFetch } from "./auth";
 import { strictJson } from "./exports";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys } from "../shared/codec";
 
 export type GitSecretAction = { action: "keep" | "clear" } | { action: "replace"; value: string };
 export type GitSyncRunStatus = "PENDING" | "FETCHING" | "COMPARING" | "FAST_FORWARDING" | "PUSHING" | "VERIFYING" | "SUCCEEDED" | "CONFLICT" | "FAILED" | "STALE" | "MANUAL_RECOVERY_REQUIRED";
@@ -113,7 +114,6 @@ const indexStatuses = new Set<GitSyncIndexStatus>(["NOT_REQUIRED", "PENDING", "R
 const changeKinds = new Set<GitFileChangeKind>(["ADDED", "MODIFIED", "DELETED", "RENAMED"]);
 const triggers = new Set<GitSyncRun["trigger"]>(["MANUAL", "AUTOMATIC", "RETRY"]);
 const activeRunStatuses = new Set<GitSyncRunStatus>(["PENDING", "FETCHING", "COMPARING", "FAST_FORWARDING", "PUSHING", "VERIFYING"]);
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const oidPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const rfc3339Pattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const errorCodePattern = /^[A-Z][A-Z0-9_]{0,127}$/;
@@ -125,7 +125,7 @@ const record = (value: unknown, field: string): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 const exact = (value: Record<string, unknown>, fields: readonly string[], field: string): void => {
-  if (Object.keys(value).some((key) => !fields.includes(key))) throw boundary(field);
+  if (!hasOnlyKeys(value, fields)) throw boundary(field);
 };
 const required = (value: Record<string, unknown>, fields: readonly string[], field: string): void => {
   if (fields.some((key) => !Object.prototype.hasOwnProperty.call(value, key) || value[key] === undefined)) throw boundary(`${field}.required`);

@@ -1,6 +1,7 @@
 /** Smart Collection 的唯一网络边界：所有 unknown 响应在这里解码为领域模型。 */
 
 import { authFetch } from "./auth";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type CollectionStatus = "ACTIVE" | "ARCHIVED";
 export type CollectionViewType = "LIST" | "TABLE" | "COMPACT_CARD";
@@ -197,14 +198,11 @@ export class CollectionApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => {
-  const allowed = new Set(keys);
-  if (Object.keys(value).some((key) => !allowed.has(key))) throw invalidResponse(field);
+  if (!hasOnlyKeys(value, keys)) throw invalidResponse(field);
 };
 const invalidResponse = (field: string): CollectionApiError => new CollectionApiError("INVALID_RESPONSE", `Collection 响应字段无效：${field}`, false);
 const invalidRequest = (field: string): CollectionApiError => new CollectionApiError("INVALID_REQUEST", `Collection 请求字段无效：${field}`, false);
@@ -267,10 +265,6 @@ const isValidTimestamp = (value: string): boolean => {
   const hour = Number(rawHour); const minute = Number(rawMinute); const second = Number(rawSecond);
   return month >= 1 && month <= 12 && day >= 1 && day <= new Date(Date.UTC(year, month, 0)).getUTCDate() && hour <= 23 && minute <= 59 && second <= 59;
 };
-
-const isAbortError = (value: unknown): boolean => value instanceof DOMException
-  ? value.name === "AbortError"
-  : isRecord(value) && value.name === "AbortError";
 
 class StrictJsonParser {
   private index = 0;

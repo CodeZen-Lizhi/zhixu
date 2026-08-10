@@ -1,4 +1,5 @@
 import { authFetch } from "./auth";
+import { isAbortError, isRecord } from "../shared/codec";
 
 export interface ScannedFile {
   relativePath: string;
@@ -29,10 +30,6 @@ export class WorkspaceApiError extends Error {
   }
 }
 
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 const stringField = (record: Record<string, unknown>, field: string): string => {
   const value = record[field];
   if (typeof value !== "string") throw invalidResponse(field);
@@ -53,9 +50,6 @@ const numberField = (record: Record<string, unknown>, field: string): number => 
 
 const invalidResponse = (field: string) =>
   new WorkspaceApiError("INVALID_RESPONSE", `Workspace 响应字段无效：${field}`, false);
-
-const isAbortError = (value: unknown): boolean =>
-  (value instanceof DOMException || value instanceof Error) && value.name === "AbortError";
 
 export const decodeWorkspaceScan = (value: unknown): WorkspaceScan => {
   if (!isRecord(value) || !Array.isArray(value.files)) throw invalidResponse("scan");

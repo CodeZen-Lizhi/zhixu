@@ -1,5 +1,6 @@
 /** Interview 与 Learning Path 的唯一 HTTP/JSON 边界。 */
 import { authFetch } from "./auth";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type InterviewDifficulty = "FOUNDATION" | "INTERMEDIATE" | "ADVANCED";
 export type InterviewSessionStatus = "ACTIVE" | "COMPLETED" | "CANCELLED";
@@ -276,7 +277,6 @@ export class InterviewApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const timestampPattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const difficultyValues: readonly InterviewDifficulty[] = ["FOUNDATION", "INTERMEDIATE", "ADVANCED"];
@@ -286,7 +286,6 @@ const pathStatusValues: readonly LearningPathStatus[] = ["ACTIVE", "PAUSED", "CO
 const stepStatusValues: readonly LearningPathStepStatus[] = ["PENDING", "IN_PROGRESS", "COMPLETED", "SKIPPED"];
 const stepTargetStatusValues: readonly LearningPathStepTargetStatus[] = ["IN_PROGRESS", "COMPLETED", "SKIPPED"];
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const bytes = (value: string): number => new TextEncoder().encode(value).length;
 const invalidResponse = (field: string, status: number | null = null): InterviewApiError =>
   new InterviewApiError("INVALID_RESPONSE", "INVALID_RESPONSE", `Interview 响应字段无效：${field}`, false, status);
@@ -294,7 +293,7 @@ const invalidRequest = (field: string): InterviewApiError =>
   new InterviewApiError("INVALID_REQUEST", "INVALID_REQUEST", `Interview 请求字段无效：${field}`, false);
 
 const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => {
-  if (Object.keys(value).some((key) => !keys.includes(key))) throw invalidResponse(field);
+  if (!hasOnlyKeys(value, keys)) throw invalidResponse(field);
 };
 
 const stringValue = (value: unknown, field: string): string => {
@@ -897,8 +896,8 @@ export const decodeInterviewSnapshot = (value: unknown): InterviewSnapshot => {
 const normalizeConfigInput = (value: InterviewConfig): InterviewConfig => {
   if (!isRecord(value)) throw invalidRequest("config");
   const allowedConfigKeys = ["schemaVersion", "role", "scope", "difficulty", "durationMinutes", "questionCount", "maxFollowUps"];
-  if (Object.keys(value).some((key) => !allowedConfigKeys.includes(key)) || !isRecord(value.scope)) throw invalidRequest("config");
-  if (Object.keys(value.scope).some((key) => !["claimIds", "topicIds"].includes(key))) throw invalidRequest("config.scope");
+  if (!hasOnlyKeys(value, allowedConfigKeys) || !isRecord(value.scope)) throw invalidRequest("config");
+  if (!hasOnlyKeys(value.scope, ["claimIds", "topicIds"])) throw invalidRequest("config.scope");
   if (typeof value.role !== "string" || value.role === "" || value.role !== value.role.trim() || value.role.includes("\0") || bytes(value.role) > 256) {
     throw invalidRequest("config.role");
   }
@@ -976,8 +975,6 @@ const decodeProblem = (value: unknown, status: number): InterviewApiError => {
     details,
   );
 };
-
-const isAbortError = (value: unknown): boolean => (value instanceof Error || value instanceof DOMException) && value.name === "AbortError";
 
 const request = async (path: string, init: RequestInit = {}, expectedStatuses: readonly number[] = [200]): Promise<unknown> => {
   const headers = new Headers(init.headers);

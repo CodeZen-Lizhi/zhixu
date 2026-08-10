@@ -21,6 +21,7 @@ import {
   type GraphMode,
 } from "./options";
 import { canonicalGraphTimestamp } from "./normalization";
+import { canonicalUuidPattern as uuidPattern } from "../../shared/codec";
 
 export interface GraphUrlFilter extends GraphFilterInput {
   nodeTypes: NodeType[];
@@ -44,7 +45,6 @@ export interface GraphUrlState {
   filter: GraphUrlFilter;
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const jsonNumberPattern = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
 const compareStrings = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 

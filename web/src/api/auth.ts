@@ -1,3 +1,10 @@
+import {
+  canonicalUuidPattern as uuidPattern,
+  hasOnlyKeys,
+  isAbortError,
+  isRecord,
+} from "../shared/codec";
+
 export type AuthCapability =
   | "READ_LOCAL"
   | "READ_EXTERNAL"
@@ -69,7 +76,6 @@ export class AuthApiError extends Error {
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const csrfStorageKey = "zhixu.csrf-token";
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const capabilityValues: readonly AuthCapability[] = [
   "READ_LOCAL", "READ_EXTERNAL", "WRITE_PROPOSAL", "WRITE_KNOWLEDGE", "GIT_WRITE", "INDEX_MAINTENANCE", "EVALUATION_RUN", "MANAGE_SYSTEM_SETTINGS",
@@ -89,9 +95,6 @@ export const subscribeAuthInvalidation = (listener: (reason: AuthInvalidationRea
 const notifyAuthInvalidation = (reason: AuthInvalidationReason): void => {
   for (const listener of [...authInvalidationListeners]) listener(reason);
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
-const isAbortError = (value: unknown): boolean => (value instanceof DOMException || value instanceof Error) && value.name === "AbortError";
 
 const storageFailure = (operation: "read" | "write" | "remove", cause: unknown): never => {
   const message = operation === "read"
@@ -178,7 +181,7 @@ const optionalString = (record: Record<string, unknown>, field: string): string 
 };
 
 const assertExactKeys = (record: Record<string, unknown>, allowed: readonly string[], field: string): void => {
-  if (Object.keys(record).some((key) => !allowed.includes(key))) {
+  if (!hasOnlyKeys(record, allowed)) {
     throw new AuthApiError("INVALID_RESPONSE", `认证响应包含未知字段：${field}`, null, false);
   }
 };
@@ -228,7 +231,7 @@ const readPayload = async (response: Response): Promise<unknown> => {
 
 const readError = (payload: unknown, response: Response): AuthApiError => {
   if (!isRecord(payload)) throw new AuthApiError("INVALID_RESPONSE", "认证 API 错误响应结构无效", response.status, false);
-  if (Object.keys(payload).some((key) => !["error_code", "message", "retryable", "workflow_run_id", "details"].includes(key))) {
+  if (!hasOnlyKeys(payload, ["error_code", "message", "retryable", "workflow_run_id", "details"])) {
     throw new AuthApiError("INVALID_RESPONSE", "认证 API 错误响应包含未知字段：Problem", response.status, false);
   }
   const code = stringValue(payload, "error_code");

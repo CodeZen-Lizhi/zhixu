@@ -1,6 +1,7 @@
 /** Memory 的严格网络边界：身份只由服务端认证上下文决定，浏览器不接受或显示 owner。 */
 
 import { authFetch } from "./auth";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type MemoryType = "PREFERENCE" | "EPISODIC" | "GOAL" | "FEEDBACK";
 export type MemoryStatus = "CANDIDATE" | "ACTIVE" | "PAUSED" | "EXPIRED" | "DELETED";
@@ -91,17 +92,15 @@ export class MemoryApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const timestampPattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const memoryTypes: readonly MemoryType[] = ["PREFERENCE", "EPISODIC", "GOAL", "FEEDBACK"];
 const memoryStatuses: readonly MemoryStatus[] = ["CANDIDATE", "ACTIVE", "PAUSED", "EXPIRED", "DELETED"];
 const sourceTypes: readonly MemorySourceType[] = ["USER", "AGENT", "INTERVIEW"];
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const invalidResponse = (field: string, status: number | null = null): MemoryApiError => new MemoryApiError("INVALID_RESPONSE", "INVALID_RESPONSE", `Memory 响应字段无效：${field}`, false, status);
 const invalidRequest = (field: string): MemoryApiError => new MemoryApiError("INVALID_REQUEST", "INVALID_REQUEST", `Memory 请求字段无效：${field}`, false);
 const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => {
-  if (Object.keys(value).some((key) => !keys.includes(key))) throw invalidResponse(field);
+  if (!hasOnlyKeys(value, keys)) throw invalidResponse(field);
 };
 const stringValue = (value: unknown, field: string, allowEmpty = false): string => {
   if (typeof value !== "string" || (!allowEmpty && value.trim() === "")) throw invalidResponse(field);
@@ -352,7 +351,6 @@ const decodeCommandResult = (value: unknown): MemoryCommandResult => {
   return { memory: decodeMemory(value.memory), replayed: bool(value.replayed, "memory_command.replayed") };
 };
 
-const isAbortError = (value: unknown): boolean => (value instanceof DOMException || value instanceof Error) && value.name === "AbortError";
 const readProblem = (value: unknown, status: number): MemoryApiError => {
   if (!isRecord(value)) return new MemoryApiError("HTTP_ERROR", "HTTP_ERROR", `Memory API 返回 HTTP ${String(status)}。`, status >= 500, status);
   exact(value, ["error_code", "message", "retryable", "workflow_run_id", "details"], "problem");

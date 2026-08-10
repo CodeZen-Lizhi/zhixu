@@ -2,6 +2,7 @@
 
 import { authFetch } from "./auth";
 import { strictJson } from "./exports";
+import { canonicalUuidPattern as uuidPattern, hasExactKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type DocumentHistoryEntryKind = "MANAGED" | "EXTERNAL" | "CURRENT_CHANGE";
 export type ManagedProposalType = "file_patch" | "restore_document";
@@ -162,7 +163,6 @@ export class DocumentHistoryApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const objectIdPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const errorCodePattern = /^[A-Z][A-Z0-9_]{0,127}$/;
@@ -188,9 +188,6 @@ const managedEntryKeys = [
   "approval_decided_at",
 ] as const;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 const invalidRequest = (field: string, cause?: unknown): DocumentHistoryApiError =>
   new DocumentHistoryApiError("INVALID_REQUEST", "INVALID_REQUEST", `文档历史请求字段无效：${field}`, { cause });
 
@@ -208,9 +205,7 @@ const exactRecord = (
   status: number | null = null,
 ): Record<string, unknown> => {
   if (!isRecord(value)) throw invalidResponse(field, status);
-  const allowed = new Set([...required, ...optional]);
-  if (Object.keys(value).some((key) => !allowed.has(key))) throw invalidResponse(field, status);
-  if (required.some((key) => !Object.hasOwn(value, key))) throw invalidResponse(field, status);
+  if (!hasExactKeys(value, required, optional)) throw invalidResponse(field, status);
   return value;
 };
 
@@ -513,9 +508,6 @@ const decodeProblem = (payload: unknown, status: number): DocumentHistoryApiErro
     return new DocumentHistoryApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "文档历史 API 返回了无效 Problem。", { status, cause: error });
   }
 };
-
-const isAbortError = (value: unknown): boolean =>
-  value instanceof DOMException ? value.name === "AbortError" : isRecord(value) && value.name === "AbortError";
 
 const request = async (path: string, init: RequestInit, successStatuses: readonly number[]): Promise<unknown> => {
   const headers = new Headers(init.headers);

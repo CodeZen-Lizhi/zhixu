@@ -1,6 +1,6 @@
 import type { SearchMode } from "../../api/search";
+import { canonicalUuidPattern as uuidPattern } from "../../shared/codec";
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const textEncoder = new TextEncoder();
 const maxQueryBytes = 8 * 1024;
 const maxCursorBytes = 2048;

@@ -1,4 +1,11 @@
 import { authFetch } from "./auth";
+import {
+  canonicalUuidPattern as uuidPattern,
+  hasExactKeys,
+  hasOnlyKeys,
+  isAbortError,
+  isRecord,
+} from "../shared/codec";
 
 export type ActiveWorkspaceStatus = "active";
 export type ActiveWorkspaceAvailability = "available" | "unavailable" | "migration_required";
@@ -24,20 +31,15 @@ export class ActiveWorkspaceApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const controlCharacterPattern = /[\u0000-\u001f\u007f]/;
 const activeWorkspaceKeys = ["id", "name", "root_path", "status", "availability", "version"] as const;
 const problemKeys = ["error_code", "message", "retryable", "workflow_run_id", "details"] as const;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const invalidResponse = (field: string): ActiveWorkspaceApiError =>
   new ActiveWorkspaceApiError("INVALID_RESPONSE", `Active Workspace 响应字段无效：${field}`, false);
 
 const assertExactKeys = (value: Record<string, unknown>): void => {
-  const keys = Object.keys(value);
-  if (keys.length !== activeWorkspaceKeys.length || keys.some((key) => !activeWorkspaceKeys.includes(key as typeof activeWorkspaceKeys[number]))) {
+  if (!hasExactKeys(value, activeWorkspaceKeys)) {
     throw invalidResponse("workspace");
   }
 };
@@ -87,15 +89,11 @@ export const decodeActiveWorkspace = (value: unknown): ActiveWorkspace => {
   };
 };
 
-const isAbortError = (value: unknown): boolean =>
-  (value instanceof DOMException || value instanceof Error) && value.name === "AbortError";
-
 const readProblem = (value: unknown, response: Response): ActiveWorkspaceApiError => {
   if (!isRecord(value)) {
     return new ActiveWorkspaceApiError("HTTP_ERROR", `Active Workspace 请求失败（HTTP ${String(response.status)}）。`, response.status >= 500);
   }
-  const keys = Object.keys(value);
-  const hasInvalidField = keys.some((key) => !problemKeys.includes(key as typeof problemKeys[number]));
+  const hasInvalidField = !hasOnlyKeys(value, problemKeys);
   const invalidWorkflowRun = value.workflow_run_id !== undefined
     && (typeof value.workflow_run_id !== "string" || !uuidPattern.test(value.workflow_run_id));
   const invalidDetails = value.details !== undefined && !isRecord(value.details);

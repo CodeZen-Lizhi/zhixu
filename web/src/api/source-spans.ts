@@ -1,4 +1,5 @@
 import { authFetch } from "./auth";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isRecord } from "../shared/codec";
 
 export interface SourceSpanReference {
   workspaceId: string;
@@ -33,19 +34,15 @@ export class SourceSpanApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const textEncoder = new TextEncoder();
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const invalidResponse = (field: string, status: number | null = null): SourceSpanApiError =>
   new SourceSpanApiError("INVALID_RESPONSE", `Source Span 响应字段无效：${field}`, status, false);
 
 const assertExactKeys = (value: Record<string, unknown>, allowed: readonly string[], field: string, status?: number): void => {
-  if (Object.keys(value).some((key) => !allowed.includes(key))) throw invalidResponse(field, status ?? null);
+  if (!hasOnlyKeys(value, allowed)) throw invalidResponse(field, status ?? null);
 };
 
 const readString = (value: unknown, field: string, status?: number): string => {

@@ -37,6 +37,7 @@ import {
   type OrganizingTemplateKind,
 } from "../../api/organizing";
 import { getActiveWorkspaceId, useActiveWorkspaceId } from "../../app/active-workspace";
+import { canonicalUuidPattern as uuidPattern } from "../../shared/codec";
 import { Badge, Button, EmptyState, ErrorState, PageHeader } from "../../shared/ui";
 import { WorkflowHumanTaskDecision } from "../business/WorkflowsPage";
 import { SourceSpanViewer } from "../source-spans";
@@ -60,7 +61,6 @@ import {
 } from "./queries";
 import "./organizing.css";
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const commandKey = (kind: string): string => `${kind}-${crypto.randomUUID()}`;
 const mandatoryGovernanceSectionKeys = new Set(["conflicts", "gaps", "sources"]);
 

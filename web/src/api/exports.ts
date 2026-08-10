@@ -1,6 +1,7 @@
 /** Collection Export 的唯一网络边界：只向 Feature 暴露已验证的任务投影。 */
 
 import { authFetch } from "./auth";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type ExportKind = "MARKDOWN" | "METADATA_JSON";
 export type ExportStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "EXPIRED" | "CANCELLED";
@@ -81,7 +82,6 @@ export class ExportApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const tokenPattern = /^[A-Z][A-Z0-9_]{0,127}$/;
@@ -92,10 +92,9 @@ const jobKeys = ["id", "version", "workspace_id", "kind", "schema_version", "col
 const problemKeys = ["error_code", "message", "retryable", "workflow_run_id", "details"] as const;
 const utf8Encoder = new TextEncoder();
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const invalidResponse = (field: string, status: number | null = null): ExportApiError => new ExportApiError("INVALID_RESPONSE", "INVALID_RESPONSE", `Export 响应字段无效：${field}`, false, status);
 const invalidRequest = (field: string): ExportApiError => new ExportApiError("INVALID_REQUEST", "INVALID_REQUEST", `Export 请求字段无效：${field}`, false);
-const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => { if (Object.keys(value).some((key) => !keys.includes(key))) throw invalidResponse(field); };
+const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => { if (!hasOnlyKeys(value, keys)) throw invalidResponse(field); };
 const text = (value: unknown, field: string, allowEmpty = false): string => { if (typeof value !== "string" || (!allowEmpty && value.trim() === "")) throw invalidResponse(field); return value; };
 const optionalText = (value: unknown, field: string): string | null => value === undefined || value === null ? null : text(value, field);
 const uuid = (value: unknown, field: string): string => { const parsed = text(value, field); if (!uuidPattern.test(parsed)) throw invalidResponse(field); return parsed; };
@@ -144,8 +143,6 @@ class StrictJsonParser {
 }
 
 const strictJson = (source: string): unknown => new StrictJsonParser(source).parse();
-const isAbortError = (value: unknown): boolean => value instanceof DOMException ? value.name === "AbortError" : isRecord(value) && value.name === "AbortError";
-
 const decodeJob = (value: unknown): ExportJob => {
   if (!isRecord(value)) throw invalidResponse("job");
   exact(value, jobKeys, "job");

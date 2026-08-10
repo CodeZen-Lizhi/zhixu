@@ -2,6 +2,7 @@
 
 import { authFetch } from "./auth";
 import { strictJson } from "./exports";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type AttachmentExportStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "EXPIRED" | "CANCELLED";
 
@@ -73,7 +74,6 @@ export class AttachmentExportApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const tokenPattern = /^[A-Z][A-Z0-9_]{0,127}$/;
@@ -84,10 +84,9 @@ const responseKeys = ["job", "replayed", "dispatch_pending"] as const;
 const problemKeys = ["error_code", "message", "retryable", "workflow_run_id", "details"] as const;
 const utf8Encoder = new TextEncoder();
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const invalidResponse = (field: string, status: number | null = null): AttachmentExportApiError => new AttachmentExportApiError("INVALID_RESPONSE", "INVALID_RESPONSE", `附件导出响应字段无效：${field}`, false, status);
 const invalidRequest = (field: string): AttachmentExportApiError => new AttachmentExportApiError("INVALID_REQUEST", "INVALID_REQUEST", `附件导出请求字段无效：${field}`, false);
-const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => { if (Object.keys(value).some((key) => !keys.includes(key))) throw invalidResponse(field); };
+const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => { if (!hasOnlyKeys(value, keys)) throw invalidResponse(field); };
 const text = (value: unknown, field: string, allowEmpty = false): string => { if (typeof value !== "string" || (!allowEmpty && value.trim() === "")) throw invalidResponse(field); return value; };
 const optionalText = (value: unknown, field: string): string | null => value === undefined || value === null ? null : text(value, field);
 const uuid = (value: unknown, field: string): string => { const parsed = text(value, field); if (!uuidPattern.test(parsed)) throw invalidResponse(field); return parsed; };
@@ -202,7 +201,6 @@ const request = async (path: string, init: RequestInit = {}): Promise<unknown> =
   return payload;
 };
 
-const isAbortError = (value: unknown): boolean => value instanceof DOMException ? value.name === "AbortError" : isRecord(value) && value.name === "AbortError";
 const requireUuid = (value: string, field: string): string => { if (!uuidPattern.test(value)) throw invalidRequest(field); return value; };
 const requireKey = (value: string): string => { if (value.trim() === "" || value !== value.trim() || value.length > 128) throw invalidRequest("idempotencyKey"); return value; };
 const signalInit = (signal?: AbortSignal): RequestInit => signal === undefined ? {} : { signal };

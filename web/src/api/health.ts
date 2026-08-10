@@ -1,6 +1,7 @@
 /** Knowledge Health 的唯一网络边界：组件只消费这里导出的领域模型。 */
 
 import { authFetch } from "./auth";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type HealthIssueType = "ORPHAN" | "DUPLICATE" | "CONFLICT" | "STALE" | "MISSING_SOURCE" | "LOW_CONFIDENCE" | "BROKEN_REFERENCE" | "INDEX_ERROR" | "SUPERSEDED_USAGE" | "REVIEW_INVALIDATED";
 export type HealthSeverity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
@@ -123,7 +124,6 @@ export class HealthApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 const parseUtcDate = (value: string): number | null => {
@@ -149,8 +149,7 @@ const scopeSchemaVersions: Record<HealthScopeType, string> = {
 };
 const decisionRecordActions: readonly HealthDecisionRecordAction[] = ["ACKNOWLEDGE", "IGNORE", "FALSE_POSITIVE", "DEFER", "CREATE_REPAIR_PROPOSAL"];
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
-const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => { const allowed = new Set(keys); if (Object.keys(value).some((key) => !allowed.has(key))) throw invalidResponse(field); };
+const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => { if (!hasOnlyKeys(value, keys)) throw invalidResponse(field); };
 const invalidResponse = (field: string): HealthApiError => new HealthApiError("INVALID_RESPONSE", "INVALID_RESPONSE", `Health 响应字段无效：${field}`, false);
 const invalidRequest = (field: string): HealthApiError => new HealthApiError("INVALID_REQUEST", "INVALID_REQUEST", `Health 请求字段无效：${field}`, false);
 const stringValue = (value: unknown, field: string, nonEmpty = true): string => { if (typeof value !== "string" || (nonEmpty && value.trim() === "")) throw invalidResponse(field); return value; };
@@ -175,7 +174,6 @@ const optionalCursor = (value: unknown, field: string, maxLength: number): strin
   if (result.length > maxLength) throw invalidResponse(field);
   return result;
 };
-const isAbortError = (value: unknown): boolean => value instanceof DOMException ? value.name === "AbortError" : isRecord(value) && value.name === "AbortError";
 const boundedArray = (value: unknown, field: string, maximum: number): unknown[] => { if (!Array.isArray(value) || value.length > maximum) throw invalidResponse(field); return value; };
 
 const decodeObjectRef = (value: unknown, field: string): HealthObjectRef => { if (!isRecord(value)) throw invalidResponse(field); exact(value, ["type", "id"], field); return { type: enumValue(value.type, objectTypes, `${field}.type`), id: uuid(value.id, `${field}.id`) }; };

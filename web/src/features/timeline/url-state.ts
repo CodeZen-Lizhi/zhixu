@@ -6,6 +6,7 @@ import {
   type TimelineEventType,
   type TimelineFilter,
 } from "../../api/timeline";
+import { canonicalUuidPattern as uuidPattern } from "../../shared/codec";
 
 export interface TimelineUrlState {
   eventTypes: TimelineEventType[];
@@ -25,7 +26,6 @@ export const emptyTimelineUrlState: TimelineUrlState = {
   occurredBefore: "",
 };
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const textEncoder = new TextEncoder();
 

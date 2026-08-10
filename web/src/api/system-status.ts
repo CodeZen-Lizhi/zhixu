@@ -1,4 +1,5 @@
 import { authFetch } from "./auth";
+import { hasOnlyKeys, isRecord } from "../shared/codec";
 
 export type SystemOverallStatus = "ready" | "degraded";
 export type DatabaseStatus = "ready" | "unavailable";
@@ -80,9 +81,6 @@ export class ApiBoundaryError extends Error {
     this.retryable = retryable;
   }
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const readNonEmptyString = (
   value: unknown,
@@ -275,8 +273,7 @@ export const fetchSystemStatus = async (
   return decodeSystemStatus(payload);
 };
 const assertExactKeys = (value: Record<string, unknown>, allowed: readonly string[], field: string): void => {
-  const keys = new Set(allowed);
-  if (Object.keys(value).some((key) => !keys.has(key))) {
+  if (!hasOnlyKeys(value, allowed)) {
     throw new ApiBoundaryError("INVALID_RESPONSE", `系统状态响应包含未知字段：${field}`, false);
   }
 };

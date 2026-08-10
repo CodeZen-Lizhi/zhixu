@@ -1,4 +1,5 @@
 import { collectionFieldOperators, collectionGroupFieldRegistry, collectionQueryFieldRegistry, collectionSortableFieldRegistry, collectionViewColumnRegistry, type CollectionOperator, type CollectionSortDirection, type CollectionViewType } from "../../api/collections";
+import { isCanonicalUuid } from "../../shared/codec";
 
 export interface CollectionUrlState {
   view: CollectionViewType;
@@ -41,7 +42,13 @@ const single = (params: URLSearchParams, key: string): string | null => {
 };
 const defaultOperator = (field: CollectionPredicateDraft["field"]): CollectionOperator => collectionFieldOperators[field][0] ?? "EQ";
 const normalizeOperator = (field: CollectionPredicateDraft["field"], value: string | null): CollectionOperator => pick(value, collectionFieldOperators[field], defaultOperator(field));
-const selectedPattern = /^(?:TOPIC|CLAIM):[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const normalizeSelected = (value: string): string => {
+  const separator = value.indexOf(":");
+  if (separator <= 0 || value.includes(":", separator + 1)) return "";
+  const objectType = value.slice(0, separator);
+  const objectId = value.slice(separator + 1);
+  return (objectType === "TOPIC" || objectType === "CLAIM") && isCanonicalUuid(objectId) ? value : "";
+};
 const normalizeDraft = (value: unknown): CollectionPredicateDraft | null => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
@@ -103,7 +110,7 @@ export const parseCollectionUrlState = (params: URLSearchParams, defaults: Colle
     group,
     columns,
     density: single(params, "density") === null ? defaults.density : single(params, "density") === "COMPACT" ? "COMPACT" : "COMFORTABLE",
-    selected: selectedPattern.test(selected) ? selected : "",
+    selected: normalizeSelected(selected),
   };
 };
 

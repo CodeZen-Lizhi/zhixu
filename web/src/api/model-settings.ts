@@ -1,4 +1,11 @@
 import { authFetch } from "./auth";
+import {
+  canonicalUuidPattern as uuidPattern,
+  hasExactKeys,
+  hasOnlyKeys,
+  isAbortError,
+  isRecord,
+} from "../shared/codec";
 
 export type ChatModelProvider = "disabled" | "openai-compatible";
 export type EmbeddingModelProvider = ChatModelProvider | "ollama";
@@ -142,7 +149,6 @@ const maxResponseBytes = 256 * 1024;
 const maxSecretBytes = 16 * 1024;
 const utf8Encoder = new TextEncoder();
 const tokenPattern = /^[A-Z][A-Z0-9_]{0,127}$/;
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const modelSettingsOllamaRelayUrl = "http://127.0.0.1:11434";
 
 const canonicalEscapedPath = (path: string): string | undefined => {
@@ -216,17 +222,12 @@ const invalidResponse = (field: string, status: number | null = null, cause?: un
     cause === undefined ? undefined : { cause },
   );
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => {
-  const actual = Object.keys(value);
-  if (actual.length !== keys.length || actual.some((key) => !keys.includes(key))) throw invalidResponse(field);
+  if (!hasExactKeys(value, keys)) throw invalidResponse(field);
 };
 
 const exactRequest = (value: Record<string, unknown>, keys: readonly string[], field: string): void => {
-  const actual = Object.keys(value);
-  if (actual.length !== keys.length || actual.some((key) => !keys.includes(key))) throw invalidRequest(field);
+  if (!hasExactKeys(value, keys)) throw invalidRequest(field);
 };
 
 const text = (value: unknown, field: string, maxBytes = 2048): string => {
@@ -603,7 +604,7 @@ const decodeProblem = (value: unknown, status: number): ModelSettingsApiError =>
   try {
     if (!isRecord(value)) throw invalidResponse("problem", status);
     const allowed = ["error_code", "message", "retryable", "workflow_run_id", "details"] as const;
-    if (Object.keys(value).some((key) => !allowed.some((allowedKey) => allowedKey === key))) throw invalidResponse("problem", status);
+    if (!hasOnlyKeys(value, allowed)) throw invalidResponse("problem", status);
     const errorCode = canonicalText(value.error_code, "problem.error_code", 128);
     if (!tokenPattern.test(errorCode)) throw invalidResponse("problem.error_code", status);
     const message = canonicalText(value.message, "problem.message", 4096);
@@ -622,10 +623,6 @@ const decodeProblem = (value: unknown, status: number): ModelSettingsApiError =>
     return new ModelSettingsApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "模型设置 API 返回了无效 Problem。", false, status, undefined, { cause: error });
   }
 };
-
-const isAbortError = (value: unknown): boolean => value instanceof DOMException
-  ? value.name === "AbortError"
-  : isRecord(value) && value.name === "AbortError";
 
 const containsSensitiveValue = (value: unknown, sensitiveValues: readonly string[]): boolean => {
   if (typeof value === "string") return sensitiveValues.some((sensitive) => value.includes(sensitive));

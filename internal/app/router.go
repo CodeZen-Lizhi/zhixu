@@ -118,6 +118,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	router.Use(requestIDMiddleware)
 	router.Use(requestTraceMiddleware(deps.Tracer))
 	router.Use(requestLogMiddleware(deps.Logger))
+	router.Use(recoverPanicMiddleware(deps.Logger))
 	router.Get("/livez", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
 	})

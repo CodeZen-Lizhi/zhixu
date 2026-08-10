@@ -1,4 +1,10 @@
 import { authFetch } from "./auth";
+import {
+  canonicalUuidPattern as uuidPattern,
+  hasOnlyKeys,
+  isAbortError,
+  isRecord,
+} from "../shared/codec";
 
 export type NodeType = "TOPIC" | "CLAIM";
 export type RelationType =
@@ -284,7 +290,6 @@ export class GraphApiError extends Error implements GraphProblem {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const controlPattern = /[\u0000-\u001f\u007f-\u009f]/;
@@ -307,9 +312,6 @@ const invalidRequest = (field: string): GraphApiError => new GraphApiError({
   retryable: false,
 });
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 const hasOwn = (value: Record<string, unknown>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(value, key);
 
@@ -319,8 +321,7 @@ const assertExactKeys = (
   field: string,
   fail: InvalidFactory = invalidResponse,
 ): void => {
-  const allowedKeys = new Set(allowed);
-  if (Object.keys(value).some((key) => !allowedKeys.has(key))) throw fail(field);
+  if (!hasOnlyKeys(value, allowed)) throw fail(field);
 };
 
 const readString = (value: unknown, field: string, fail: InvalidFactory = invalidResponse): string => {
@@ -1212,9 +1213,6 @@ const decodeProblem = (value: unknown, status: number): GraphApiError => {
     return new GraphApiError({ errorCode: "INVALID_RESPONSE", message: "Graph API 返回了无效 Problem。", retryable: false }, status);
   }
 };
-
-const isAbortError = (value: unknown): boolean =>
-  (value instanceof DOMException || value instanceof Error) && value.name === "AbortError";
 
 const requestGraph = async <T>(
   path: string,

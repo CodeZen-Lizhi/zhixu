@@ -3,6 +3,7 @@ import { useMemo, useRef, useState } from "react";
 
 import { MemoryApiError, parseMemoryJsonObject, type CreateMemoryCandidateInput, type EditMemoryInput, type MemoryRecord, type MemorySourceType, type MemoryStatus, type MemoryType, type TransitionMemoryInput } from "../../api/memory";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
+import { isCanonicalUuid } from "../../shared/codec";
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorState, UnavailableState } from "../../shared/ui";
 import { useConfirmMemory, useCreateMemoryCandidate, useDeleteMemory, useEditMemory, useMemories, usePauseMemory, useResumeMemory } from "./queries";
 
@@ -38,7 +39,7 @@ const MemoryForm = ({ item, onSave, pending }: { item?: MemoryRecord; onSave: (i
   const [expiresAt, setExpiresAt] = useState(datetimeValue(item?.expiresAt));
   const parsed = parseMemoryJsonObject(content);
   const expiry = isoTime(expiresAt);
-  const invalid = parsed === undefined || (taskScopeId !== "" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(taskScopeId)) || (type === "EPISODIC" && expiry === undefined) || (expiresAt !== "" && expiry === undefined);
+  const invalid = parsed === undefined || (taskScopeId !== "" && !isCanonicalUuid(taskScopeId)) || (type === "EPISODIC" && expiry === undefined) || (expiresAt !== "" && expiry === undefined);
   return <form className="artifact-form" onSubmit={(event) => {
     event.preventDefault();
     if (invalid) return;

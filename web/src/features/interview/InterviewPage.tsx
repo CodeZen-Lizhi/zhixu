@@ -37,6 +37,7 @@ import {
   type UpdateLearningPathStepInput,
 } from "../../api/interview";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
+import { canonicalUuidPattern as uuidPattern } from "../../shared/codec";
 import { Badge, Button, Card, CardHeader, Dialog, EmptyState, ErrorState, UnavailableState } from "../../shared/ui";
 import { SourceSpanViewer } from "../source-spans";
 import {
@@ -54,7 +55,6 @@ interface AttemptStore {
   current: Map<string, string>;
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const difficultyValues: readonly InterviewDifficulty[] = ["FOUNDATION", "INTERMEDIATE", "ADVANCED"];
 const difficultyLabels: Record<InterviewDifficulty, string> = { FOUNDATION: "基础", INTERMEDIATE: "进阶", ADVANCED: "高级" };
 const textBytes = (value: string): number => new TextEncoder().encode(value).length;

@@ -3,6 +3,11 @@ import { authFetch } from "./auth";
 import { graphNodeRefIdentity, graphRelationTypeCompatible, isSymmetricGraphRelationType } from "./graph";
 import { ApiBoundaryError } from "./system-status";
 import type { ArtifactImpactBinding, ReviewCardImpactBinding } from "./timeline";
+import {
+  canonicalUuidPattern as uuidPattern,
+  hasOnlyKeys,
+  isAbortError,
+} from "../shared/codec";
 
 export type Page<T> = { items: T[]; nextCursor?: string };
 export type SourceSecurityStatus = "pending" | "passed" | "quarantined";
@@ -246,7 +251,6 @@ export class BusinessApiError extends ApiBoundaryError {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const absenceTokenPattern = /^workspace-target-absent\/v1:[0-9a-f]{64}$/;
 const emptyAbsenceToken = `workspace-target-absent/v1:${"0".repeat(64)}`;
@@ -280,8 +284,7 @@ const record = (value: unknown, field: string): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 const exact = (r: Record<string, unknown>, fields: readonly string[], label: string): void => {
-  const allowed = new Set(fields);
-  if (Object.keys(r).some((key) => !allowed.has(key))) throw new BusinessApiError("INVALID_RESPONSE", `响应包含未知字段：${label}`, false);
+  if (!hasOnlyKeys(r, fields)) throw new BusinessApiError("INVALID_RESPONSE", `响应包含未知字段：${label}`, false);
 };
 const requiredFieldValue = (r: Record<string, unknown>, field: string): unknown => {
   if (!Object.prototype.hasOwnProperty.call(r, field) || r[field] === undefined) {
@@ -612,8 +615,6 @@ const page = <T>(value: unknown, decode: (item: unknown) => T): Page<T> => {
   if (nextCursor !== undefined && (nextCursor.length < 1 || nextCursor.length > 2048)) throw new BusinessApiError("INVALID_RESPONSE", "列表响应 cursor 无效", false);
   return { items: r.items.map(decode), ...(nextCursor === undefined || nextCursor === "" ? {} : { nextCursor }) };
 };
-const isAbortError = (value: unknown): boolean =>
-  (value instanceof DOMException || value instanceof Error) && value.name === "AbortError";
 const request = async (path: string, init?: RequestInit): Promise<unknown> => {
   let response: Response;
   const headers = new Headers(init?.headers); headers.set("Accept", "application/json"); if (init?.body !== undefined) headers.set("Content-Type", "application/json");

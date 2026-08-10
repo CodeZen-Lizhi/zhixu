@@ -2,6 +2,7 @@
 
 import { authFetch } from "./auth";
 import { strictJson } from "./exports";
+import { canonicalUuidPattern as uuidPattern, hasExactKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type CaptureKind = "TEXT" | "URL" | "FILE" | "IMAGE";
 
@@ -194,7 +195,6 @@ export class CaptureApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const errorCodePattern = /^[A-Z][A-Z0-9_]{0,127}$/;
@@ -231,9 +231,6 @@ const optionalCaptureKeys = [
   "profile_href",
 ] as const;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 const invalidRequest = (field: string, cause?: unknown): CaptureApiError =>
   new CaptureApiError("INVALID_REQUEST", "INVALID_REQUEST", `Capture 请求字段无效：${field}`, { cause });
 
@@ -251,9 +248,7 @@ const exactRecord = (
   status: number | null = null,
 ): Record<string, unknown> => {
   if (!isRecord(value)) throw invalidResponse(field, status);
-  const allowed = new Set([...required, ...optional]);
-  if (Object.keys(value).some((key) => !allowed.has(key))) throw invalidResponse(field, status);
-  if (required.some((key) => !Object.hasOwn(value, key))) throw invalidResponse(field, status);
+  if (!hasExactKeys(value, required, optional)) throw invalidResponse(field, status);
   return value;
 };
 
@@ -726,11 +721,6 @@ const decodeProblem = (payload: unknown, status: number): CaptureApiError => {
     );
   }
 };
-
-const isAbortError = (value: unknown): boolean =>
-  value instanceof DOMException
-    ? value.name === "AbortError"
-    : isRecord(value) && value.name === "AbortError";
 
 const requestJSON = async (
   path: string,

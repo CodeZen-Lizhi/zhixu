@@ -3,6 +3,7 @@
 import { authFetch } from "./auth";
 import { decodeProblem } from "./conversation";
 import { strictJson } from "./exports";
+import { canonicalUuidPattern as uuidPattern, hasExactKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type OrganizingDraftStatus = "EDITING" | "CONFIRMED";
 export type OrganizingMaterialKind = "SOURCE_VERSION" | "DOCUMENT_REVISION" | "CLAIM" | "SMART_COLLECTION";
@@ -316,7 +317,6 @@ export class OrganizingApiError extends Error {
   }
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 const timestampPattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const calendarDatePattern = /^(\d{4})-(\d{2})-(\d{2})T/;
@@ -333,9 +333,6 @@ const reasonCodes = ["HYBRID_MATCH", "PROFILE_MATCH", "ALIAS_MATCH", "FORMAL_KNO
 const templateKinds = ["TOPIC_ARTICLE", "MERGE_DOCUMENTS", "KNOWLEDGE_REPORT", "INTERVIEW_REVIEW"] as const;
 const materialOrigins = ["SUGGESTED", "USER"] as const;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 const invalidRequest = (field: string, cause?: unknown): OrganizingApiError =>
   new OrganizingApiError("INVALID_REQUEST", "INVALID_REQUEST", `整理请求字段无效：${field}`, null, false, { cause });
 
@@ -344,8 +341,7 @@ const invalidResponse = (field: string, status: number | null = null, cause?: un
 
 const exact = (value: unknown, required: readonly string[], field: string, optional: readonly string[] = []): Record<string, unknown> => {
   if (!isRecord(value)) throw invalidResponse(field);
-  const allowed = new Set([...required, ...optional]);
-  if (Object.keys(value).some((key) => !allowed.has(key)) || required.some((key) => !Object.hasOwn(value, key))) {
+  if (!hasExactKeys(value, required, optional)) {
     throw invalidResponse(field);
   }
   return value;
@@ -724,8 +720,6 @@ const requireKey = (value: string): string => {
 };
 
 const withSignal = (signal?: AbortSignal): RequestInit => signal === undefined ? {} : { signal };
-const isAbortError = (value: unknown): boolean => value instanceof DOMException ? value.name === "AbortError" : isRecord(value) && value.name === "AbortError";
-
 const decodeHttpProblem = (value: unknown, status: number): OrganizingApiError => {
   try {
     const problem = decodeProblem(value);
