@@ -1957,3 +1957,25 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 50: 浏览器原生 EventSource 优化
+
+**Date**: 2026-08-11
+**Task**: 浏览器原生 EventSource 优化
+**Branch**: `dev`
+
+### Summary
+
+将业务 SSE 迁移到浏览器原生 EventSource，保留 committed cursor、有界串行队列与 fatal Fetch 诊断；同步后端双 wire、OpenAPI、规范及真实 Chromium 验证。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b02d1dec512cc0aaea81b38cee362524008b3720` | (see git log) |
+| `7be55a7ef3860077cf529fbf2b45bc40cc649544` | (see git log) |
+
+### Status
+
+[OK] **Completed**
