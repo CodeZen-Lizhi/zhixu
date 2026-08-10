@@ -1936,3 +1936,24 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Status
 
 [OK] **Completed**
+
+
+## Session 49: 代码审核整改与推送
+
+**Date**: 2026-08-10
+**Task**: 代码审核整改与推送
+**Branch**: `dev`
+
+### Summary
+
+完成并推送代码审核中确认的三项整改：API Panic 恢复与安全日志、Worker 定时任务的父级 context 取消传播、前端 UUID/record/AbortError/exact-key 运行时编解码规则收敛。配额限流、SQL 和数据库 JSON 解码按用户要求暂不处理。后端测试与 vet、前端 typecheck 和 28 个文件 581 个关键测试通过；全仓仍有一个既有 Graph 文案测试不一致，未纳入本次改动。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9f0f2105` | (see git log) |
+
+### Status
+
+[OK] **Completed**
