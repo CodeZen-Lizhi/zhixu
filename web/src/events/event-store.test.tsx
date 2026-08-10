@@ -19,7 +19,7 @@ vi.mock("./server-events", async (importOriginal) => {
     connectServerEvents: vi.fn((options: ConnectServerEventsOptions) => {
       if (options.lastEventId === "invalid") throw new actual.ServerEventClientError("CURSOR_REJECTED", "invalid", false);
       connectionMock.options.push(options);
-      return { close: connectionMock.close, done: Promise.resolve(), getLastEventId: () => options.lastEventId };
+      return { close: connectionMock.close, done: Promise.resolve() };
     }),
   };
 });

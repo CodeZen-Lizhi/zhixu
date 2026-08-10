@@ -1,24 +1,25 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setCsrfToken, subscribeAuthInvalidation } from "../api/auth";
 import {
   ServerEventClientError,
   connectServerEvents,
   decodeServerEventEnvelope,
-  parseServerEventStream,
-  type ServerEventEnvelope,
+  type EventSourceFactory,
+  type EventSourceTransport,
 } from "./server-events";
 
 const workspaceId = "7a000000-0000-4000-8000-000000000001";
+const otherWorkspaceId = "7a000000-0000-4000-8000-000000000004";
 const answerId = "7a000000-0000-4000-8000-000000000002";
 const workflowRunId = "7a000000-0000-4000-8000-000000000003";
 
-const envelope = (id = "42"): Record<string, unknown> => ({
+const envelope = (id = "42", scopeWorkspaceId = workspaceId): Record<string, unknown> => ({
   schema_version: 1,
   id,
   type: "answer.completed",
   occurred_at: "2026-07-20T08:09:10.123Z",
-  workspace_id: workspaceId,
+  workspace_id: scopeWorkspaceId,
   resource_ref: `answer:${answerId}`,
   resource_version: 2,
   payload_summary: {
@@ -29,39 +30,75 @@ const envelope = (id = "42"): Record<string, unknown> => ({
   },
 });
 
-const frame = (value: Record<string, unknown>): string =>
-  `id: ${String(value.id)}\nevent: ${String(value.type)}\ndata: ${JSON.stringify(value)}\n\n`;
-
-const streamResponse = (chunks: string[], status = 200): Response => {
-  const encoder = new TextEncoder();
-  return new Response(
-    new ReadableStream<Uint8Array>({
-      start(controller) {
-        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
-        controller.close();
-      },
-    }),
-    { status, headers: { "Content-Type": "text/event-stream" } },
-  );
-};
-
 const problemResponse = (
   status: number,
   errorCode: string,
   details?: Record<string, unknown>,
+  retryable = false,
 ): Response =>
   new Response(
     JSON.stringify({
       error_code: errorCode,
       message: "事件流请求未完成",
-      retryable: false,
+      retryable,
       ...(details === undefined ? {} : { details }),
     }),
     { status, headers: { "Content-Type": "application/json" } },
   );
 
-const resolvedSleep = (): Promise<void> => Promise.resolve();
 const ignoreRecovery = (): void => undefined;
+const resolvedSleep = (): Promise<void> => Promise.resolve();
+
+class FakeEventSource implements EventSourceTransport {
+  readyState = 0;
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  readonly close = vi.fn(() => {
+    this.readyState = 2;
+  });
+
+  constructor(
+    readonly url: string,
+    readonly init: EventSourceInit,
+  ) {}
+
+  open(): void {
+    this.readyState = 1;
+    this.onopen?.(new Event("open"));
+  }
+
+  reconnectingError(): void {
+    this.readyState = 0;
+    this.onerror?.(new Event("error"));
+  }
+
+  fatalError(): void {
+    this.readyState = 2;
+    this.onerror?.(new Event("error"));
+  }
+
+  message(value: Record<string, unknown>, lastEventId = String(value.id)): void {
+    this.rawMessage(JSON.stringify(value), lastEventId);
+  }
+
+  rawMessage(data: string, lastEventId: string): void {
+    this.onmessage?.(new MessageEvent<string>("message", { data, lastEventId }));
+  }
+}
+
+const eventSources: FakeEventSource[] = [];
+const eventSourceFactory: EventSourceFactory = vi.fn((url: string, init: EventSourceInit) => {
+  const source = new FakeEventSource(url, init);
+  eventSources.push(source);
+  return source;
+});
+
+beforeEach(() => {
+  eventSources.length = 0;
+  vi.clearAllMocks();
+  window.localStorage.clear();
+});
 
 describe("decodeServerEventEnvelope", () => {
   it("严格解码通知并产生定向失效提示", () => {
@@ -158,347 +195,358 @@ describe("decodeServerEventEnvelope", () => {
   });
 });
 
-describe("parseServerEventStream", () => {
-  it("跨 chunk 解析 CRLF、heartbeat 与完整事件", async () => {
-    const body = streamResponse([
-      ": heart",
-      "beat\r",
-      "\n\r\nid: 42\r\nevent: answer.completed\r\ndata: ",
-      `${JSON.stringify(envelope())}\r\n\r\n`,
-    ]).body;
-    if (body === null) throw new Error("test response body is missing");
-
-    const parsed: ServerEventEnvelope[] = [];
-    for await (const event of parseServerEventStream(body)) parsed.push(event);
-
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0]?.id).toBe("42");
-  });
-
-  it("拒绝 SSE id/event 与 data Envelope 不一致", async () => {
-    const body = streamResponse([frame(envelope("43")).replace("id: 43", "id: 42")]).body;
-    if (body === null) throw new Error("test response body is missing");
-
-    await expect(async () => {
-      for await (const event of parseServerEventStream(body)) void event;
-    }).rejects.toMatchObject({ code: "INVALID_EVENT" });
-  });
-
-  it("拒绝 EOF 截断帧与无界帧", async () => {
-    const truncated = streamResponse([frame(envelope()).slice(0, -1)]).body;
-    const oversized = streamResponse([`data: ${"x".repeat(33 * 1024)}`]).body;
-    if (truncated === null || oversized === null) throw new Error("test response body is missing");
-
-    await expect(async () => {
-      for await (const event of parseServerEventStream(truncated)) void event;
-    }).rejects.toMatchObject({ code: "INVALID_EVENT" });
-    await expect(async () => {
-      for await (const event of parseServerEventStream(oversized)) void event;
-    }).rejects.toMatchObject({ code: "INVALID_EVENT" });
-  });
-
-  it("同一网络 chunk 可承载多个有界事件", async () => {
-    const frames = Array.from({ length: 200 }, (_value, index) =>
-      frame(envelope(String(index + 1))),
-    ).join("");
-    expect(frames.length).toBeGreaterThan(32 * 1024);
-    const body = streamResponse([frames]).body;
-    if (body === null) throw new Error("test response body is missing");
-
-    const ids: string[] = [];
-    for await (const event of parseServerEventStream(body)) ids.push(event.id);
-    expect(ids).toHaveLength(200);
-  });
-
-  it("预先取消的 signal 只取消一次 reader 并无事件退出", async () => {
-    let cancelCalls = 0;
-    const body = new ReadableStream<Uint8Array>({
-      cancel() {
-        cancelCalls += 1;
-      },
-    });
-    const controller = new AbortController();
-    controller.abort(new DOMException("aborted", "AbortError"));
-
-    const events: ServerEventEnvelope[] = [];
-    for await (const event of parseServerEventStream(body, controller.signal)) events.push(event);
-
-    expect(events).toEqual([]);
-    expect(cancelCalls).toBe(1);
-  });
-
-  it("UTF-8 decoder 失败会取消并释放 reader", async () => {
-    let cancelCalls = 0;
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(Uint8Array.of(0xff));
-      },
-      cancel() {
-        cancelCalls += 1;
-      },
-    });
-
-    await expect(async () => {
-      for await (const event of parseServerEventStream(body)) void event;
-    }).rejects.toMatchObject({ code: "INVALID_EVENT" });
-    expect(cancelCalls).toBe(1);
-  });
-});
-
 describe("connectServerEvents", () => {
-  it("SSE 401 通过共享入口失效认证，且请求不携带 CSRF", async () => {
-    window.localStorage.clear();
-    setCsrfToken("c".repeat(43));
-    const invalidated = vi.fn();
-    const unsubscribe = subscribeAuthInvalidation(invalidated);
-    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
-      expect(new Headers(init?.headers).get("X-CSRF-Token")).toBeNull();
-      return Promise.resolve(problemResponse(401, "AUTH_UNAUTHORIZED"));
-    });
-    const connection = connectServerEvents({
-      workspaceId,
-      fetcher,
-      onRecoveryRequired: ignoreRecovery,
-    });
-
-    await connection.done;
-
-    expect(fetcher).toHaveBeenCalledOnce();
-    expect(window.localStorage.getItem("zhixu.csrf-token")).toBeNull();
-    expect(invalidated).toHaveBeenCalledOnce();
-    unsubscribe();
-  });
-
-  it("拒绝缺少超窗权威回查处理器的连接", () => {
-    expect(() => connectServerEvents({
-      workspaceId,
-      onRecoveryRequired: undefined as never,
-    })).toThrow(
-      expect.objectContaining({ code: "INVALID_RESPONSE", retryable: false }),
-    );
-  });
-
-  it("断线后使用最近已验证事件作为 Last-Event-ID 重连", async () => {
-    const requests: RequestInit[] = [];
-    const fetcher = vi
-      .fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
-      .mockImplementation(async (_input, init) => {
-        requests.push(init ?? {});
-        if (requests.length === 1) return streamResponse([frame(envelope("42"))]);
-        return new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-        });
-      });
-    const received: string[] = [];
-    const connection = connectServerEvents({
-      workspaceId,
-      fetcher,
-      onEvent: (event) => {
-        received.push(event.id);
-      },
-      onRecoveryRequired: ignoreRecovery,
-      sleep: resolvedSleep,
-      initialBackoffMs: 1,
-      maxBackoffMs: 1,
-    });
-
-    await vi.waitFor(() => expect(requests).toHaveLength(2));
-    expect(received).toEqual(["42"]);
-    expect(requests[0]?.credentials).toBe("include");
-    expect(new Headers(requests[0]?.headers).get("Last-Event-ID")).toBeNull();
-    expect(new Headers(requests[1]?.headers).get("Last-Event-ID")).toBe("42");
-
-    connection.close();
-    await connection.done;
-  });
-
-  it("409 expired 先要求回查，再无游标恢复连接", async () => {
-    const headers: (string | null)[] = [];
-    const recoveries: string[] = [];
-    let finishRefetch: (() => void) | undefined;
-    const refetchDone = new Promise<void>((resolve) => {
-      finishRefetch = resolve;
-    });
-    const fetcher = vi
-      .fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
-      .mockImplementation(async (_input, init) => {
-        headers.push(new Headers(init?.headers).get("Last-Event-ID"));
-        if (headers.length === 1) {
-          return problemResponse(409, "SSE_CURSOR_EXPIRED", { action: "refetch" });
-        }
-        return new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-        });
-      });
+  it("创建 message-mode credentialed EventSource，并把普通错误交给原生重连", () => {
+    const states: string[] = [];
+    const fetcher = vi.fn();
     const connection = connectServerEvents({
       workspaceId,
       lastEventId: "41",
-      fetcher,
-      onRecoveryRequired: async (signal) => {
-        recoveries.push(signal.reason);
-        await refetchDone;
-      },
-      sleep: resolvedSleep,
-    });
-
-    await vi.waitFor(() => expect(recoveries).toEqual(["cursor_expired"]));
-    expect(headers).toEqual(["41"]);
-    finishRefetch?.();
-    await vi.waitFor(() => expect(headers).toHaveLength(2));
-    expect(headers).toEqual(["41", null]);
-    expect(recoveries).toEqual(["cursor_expired"]);
-
-    connection.close();
-    await connection.done;
-  });
-
-  it.each(["SSE_CURSOR_INVALID", "SSE_CURSOR_FUTURE"])(
-    "400 %s 完成权威回查后无游标重连",
-    async (errorCode) => {
-      const headers: (string | null)[] = [];
-      const recoveries: string[] = [];
-      const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
-        headers.push(new Headers(init?.headers).get("Last-Event-ID"));
-        if (headers.length === 1) return Promise.resolve(problemResponse(400, errorCode));
-        return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
-      });
-      const connection = connectServerEvents({
-        workspaceId,
-        lastEventId: "41",
-        fetcher,
-        onRecoveryRequired: (signal) => { recoveries.push(signal.reason); },
-        sleep: resolvedSleep,
-      });
-
-      await vi.waitFor(() => expect(headers).toHaveLength(2));
-      expect(headers).toEqual(["41", null]);
-      expect(recoveries).toEqual([errorCode === "SSE_CURSOR_INVALID" ? "cursor_invalid" : "cursor_future"]);
-      connection.close();
-      await connection.done;
-    },
-  );
-
-  it.each([
-    ["过期游标", 409, "SSE_CURSOR_EXPIRED", { action: "refetch" }],
-    ["非法游标", 400, "SSE_CURSOR_INVALID", undefined],
-    ["未来游标", 400, "SSE_CURSOR_FUTURE", undefined],
-  ] as const)("%s权威回查失败时保留游标、报告可重试错误并停止自动重连", async (_label, status, errorCode, details) => {
-    const headers: (string | null)[] = [];
-    const errors: ServerEventClientError[] = [];
-    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
-      headers.push(new Headers(init?.headers).get("Last-Event-ID"));
-      return Promise.resolve(problemResponse(status, errorCode, details));
-    });
-    const connection = connectServerEvents({
-      workspaceId, lastEventId: "41", fetcher, sleep: resolvedSleep, initialBackoffMs: 1, maxBackoffMs: 1,
-      onRecoveryRequired: () => Promise.reject(new Error("database unavailable")),
-      onError: (error) => errors.push(error),
-    });
-
-    await connection.done;
-    expect(headers).toEqual(["41"]);
-    expect(errors[0]).toMatchObject({ code: "RECOVERY_FAILED", retryable: true });
-  });
-
-  it("onEvent 失败后先取消旧流再建立下一次 fetch", async () => {
-    const order: string[] = [];
-    const encoder = new TextEncoder();
-    const firstResponse = new Response(
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(encoder.encode(frame(envelope("42"))));
-        },
-        cancel() {
-          order.push("cancel-first-stream");
-        },
-      }),
-      { status: 200, headers: { "Content-Type": "text/event-stream" } },
-    );
-    const fetcher = vi
-      .fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
-      .mockImplementation((_input, init) => {
-        if (fetcher.mock.calls.length === 1) return Promise.resolve(firstResponse);
-        order.push("start-second-fetch");
-        return new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-        });
-      });
-    const connection = connectServerEvents({
-      workspaceId,
+      eventSourceFactory,
       fetcher,
       onRecoveryRequired: ignoreRecovery,
-      onEvent: () => Promise.reject(new Error("consumer unavailable")),
+      onStateChange: (state) => states.push(state),
+    });
+
+    expect(eventSources).toHaveLength(1);
+    expect(eventSources[0]?.url).toBe(
+      `/api/v1/events?workspace_id=${workspaceId}&event_format=message&last_event_id=41`,
+    );
+    expect(eventSources[0]?.init).toEqual({ withCredentials: true });
+    eventSources[0]?.open();
+    eventSources[0]?.reconnectingError();
+
+    expect(states).toEqual(["connecting", "open", "reconnecting"]);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(eventSources).toHaveLength(1);
+    connection.close();
+  });
+
+  it("拒绝缺少权威回查处理器或非法本地游标的连接", () => {
+    expect(() => connectServerEvents({
+      workspaceId,
+      eventSourceFactory,
+      onRecoveryRequired: undefined as never,
+    })).toThrow(expect.objectContaining({ code: "INVALID_RESPONSE", retryable: false }));
+    expect(() => connectServerEvents({
+      workspaceId,
+      lastEventId: "01",
+      eventSourceFactory,
+      onRecoveryRequired: ignoreRecovery,
+    })).toThrow(expect.objectContaining({ code: "CURSOR_REJECTED", retryable: false }));
+    expect(eventSources).toHaveLength(0);
+  });
+
+  it("严格校验并串行提交消息，对 committed/queued 精确重复保持幂等", async () => {
+    let finishFirst: (() => void) | undefined;
+    const firstPending = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const received: string[] = [];
+    const connection = connectServerEvents({
+      workspaceId,
+      lastEventId: "41",
+      eventSourceFactory,
+      onRecoveryRequired: ignoreRecovery,
+      onEvent: async (event) => {
+        received.push(event.id);
+        if (event.id === "42") await firstPending;
+      },
+    });
+    const source = eventSources[0];
+    source?.message(envelope("41"));
+    source?.message(envelope("42"));
+    source?.message(envelope("42"));
+    source?.message(envelope("43"));
+
+    await vi.waitFor(() => expect(received).toEqual(["42"]));
+    finishFirst?.();
+    await vi.waitFor(() => expect(received).toEqual(["42", "43"]));
+    connection.close();
+  });
+
+  it.each([
+    ["非法 JSON", (source: FakeEventSource) => source.rawMessage("{", "42")],
+    ["metadata 不一致", (source: FakeEventSource) => source.message(envelope("42"), "43")],
+    ["Workspace 不一致", (source: FakeEventSource) => source.message(envelope("42", otherWorkspaceId))],
+    ["data 超限", (source: FakeEventSource) => source.rawMessage("x".repeat(32 * 1024 + 1), "42")],
+  ])("%s 时 fail closed", async (_name, deliver) => {
+    const errors: ServerEventClientError[] = [];
+    const connection = connectServerEvents({
+      workspaceId,
+      eventSourceFactory,
+      onRecoveryRequired: ignoreRecovery,
+      onError: (error) => errors.push(error),
+    });
+    const source = eventSources[0];
+    if (source === undefined) throw new Error("missing fake EventSource");
+    deliver(source);
+    await connection.done;
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ code: "INVALID_EVENT", retryable: false });
+    expect(source.close).toHaveBeenCalledOnce();
+  });
+
+  it("倒退 ID fail closed", async () => {
+    const errors: ServerEventClientError[] = [];
+    const connection = connectServerEvents({
+      workspaceId,
+      eventSourceFactory,
+      onRecoveryRequired: ignoreRecovery,
+      onError: (error) => errors.push(error),
+    });
+    eventSources[0]?.message(envelope("43"));
+    await vi.waitFor(() => expect(errors).toHaveLength(0));
+    eventSources[0]?.message(envelope("42"));
+    await connection.done;
+    expect(errors[0]).toMatchObject({ code: "INVALID_EVENT", retryable: false });
+  });
+
+  it("onEvent 失败不提交游标，并从旧 committed cursor 重放且隔离旧 generation", async () => {
+    const deliveries: string[] = [];
+    let attempt = 0;
+    const connection = connectServerEvents({
+      workspaceId,
+      lastEventId: "41",
+      eventSourceFactory,
+      fetcher: () => Promise.reject(new TypeError("network unavailable")),
+      onRecoveryRequired: ignoreRecovery,
       sleep: resolvedSleep,
       initialBackoffMs: 1,
       maxBackoffMs: 1,
+      onEvent: (event) => {
+        deliveries.push(event.id);
+        attempt += 1;
+        return attempt === 1 ? Promise.reject(new Error("consumer unavailable")) : Promise.resolve();
+      },
     });
+    const first = eventSources[0];
+    first?.message(envelope("42"));
 
-    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
-    expect(order).toEqual(["cancel-first-stream", "start-second-fetch"]);
+    await vi.waitFor(() => expect(eventSources).toHaveLength(2));
+    expect(first?.close).toHaveBeenCalledOnce();
+    expect(eventSources[1]?.url).toContain("last_event_id=41");
+    first?.message(envelope("43"));
+    eventSources[1]?.message(envelope("42"));
+    await vi.waitFor(() => expect(deliveries).toEqual(["42", "42"]));
 
+    eventSources[1]?.fatalError();
+    await vi.waitFor(() => expect(eventSources).toHaveLength(3));
+    expect(eventSources[2]?.url).toContain("last_event_id=42");
     connection.close();
-    await connection.done;
   });
 
-  it("重复取消只中止 fetch 并释放 reader 一次", async () => {
+  it("队列溢出时等待 active handler 收敛后再从 committed cursor 重建", async () => {
+    let finishHandler: (() => void) | undefined;
+    const handlerPending = new Promise<void>((resolve) => {
+      finishHandler = resolve;
+    });
+    const connection = connectServerEvents({
+      workspaceId,
+      eventSourceFactory,
+      onRecoveryRequired: ignoreRecovery,
+      sleep: resolvedSleep,
+      onEvent: () => handlerPending,
+    });
+    const first = eventSources[0];
+    for (let id = 1; id <= 101; id += 1) first?.message(envelope(String(id)));
+
+    expect(first?.close).toHaveBeenCalledOnce();
+    expect(eventSources).toHaveLength(1);
+    finishHandler?.();
+    await vi.waitFor(() => expect(eventSources).toHaveLength(2));
+    expect(eventSources[1]?.url).not.toContain("last_event_id");
+    connection.close();
+  });
+
+  it("fatal CLOSED 用最小 Fetch probe 诊断，取消 200 body 后重建", async () => {
     let cancelCalls = 0;
-    const response = new Response(
-      new ReadableStream<Uint8Array>({
-        cancel() {
-          cancelCalls += 1;
-        },
-      }),
-      { status: 200, headers: { "Content-Type": "text/event-stream" } },
+    const probeResponse = new Response(new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelCalls += 1;
+      },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream; charset=utf-8" } });
+    const fetcher = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      () => Promise.resolve(probeResponse),
     );
+    const connection = connectServerEvents({
+      workspaceId,
+      lastEventId: "41",
+      eventSourceFactory,
+      fetcher,
+      onRecoveryRequired: ignoreRecovery,
+    });
+    eventSources[0]?.fatalError();
+
+    await vi.waitFor(() => expect(eventSources).toHaveLength(2));
+    const [input, init] = fetcher.mock.calls[0] ?? [];
+    expect(input).toBe(`/api/v1/events?workspace_id=${workspaceId}&event_format=message&last_event_id=41`);
+    expect(init).toMatchObject({ method: "GET", credentials: "include", cache: "no-store" });
+    expect(new Headers(init?.headers).get("Last-Event-ID")).toBe("41");
+    expect(new Headers(init?.headers).get("X-CSRF-Token")).toBeNull();
+    expect(cancelCalls).toBe(1);
+    connection.close();
+  });
+
+  it("401 probe 通过共享入口失效认证并停止", async () => {
+    setCsrfToken("c".repeat(43));
+    const invalidated = vi.fn();
+    const unsubscribe = subscribeAuthInvalidation(invalidated);
+    const response = problemResponse(401, "AUTH_UNAUTHORIZED", undefined, true);
+    const decodeProblem = vi.spyOn(response, "json");
     const fetcher = vi.fn(() => Promise.resolve(response));
     const connection = connectServerEvents({
       workspaceId,
+      eventSourceFactory,
       fetcher,
       onRecoveryRequired: ignoreRecovery,
     });
-
-    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
-    connection.close();
-    connection.close();
+    eventSources[0]?.fatalError();
     await connection.done;
-    expect(cancelCalls).toBe(1);
+
+    expect(window.localStorage.getItem("zhixu.csrf-token")).toBeNull();
+    expect(invalidated).toHaveBeenCalledOnce();
+    expect(decodeProblem).not.toHaveBeenCalled();
+    expect(eventSources).toHaveLength(1);
+    unsubscribe();
   });
 
-  it("onEvent 失败时不提交游标并在重连后重放同一事件", async () => {
-    const headers: (string | null)[] = [];
-    const deliveries: string[] = [];
-    let deliveryAttempt = 0;
-    const fetcher = vi
-      .fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
-      .mockImplementation((_input, init) => {
-        headers.push(new Headers(init?.headers).get("Last-Event-ID"));
-        if (headers.length <= 2) return Promise.resolve(streamResponse([frame(envelope("42"))]));
-        return new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-        });
-      });
+  it.each([
+    [409, "SSE_CURSOR_EXPIRED", { action: "refetch" }, "cursor_expired"],
+    [400, "SSE_CURSOR_INVALID", undefined, "cursor_invalid"],
+    [400, "SSE_CURSOR_FUTURE", undefined, "cursor_future"],
+  ] as const)("HTTP %i %s 权威回查成功后清 cursor 重建", async (status, errorCode, details, expectedReason) => {
+    const recoveries: string[] = [];
+    const fetcher = vi.fn(() => Promise.resolve(problemResponse(status, errorCode, details)));
     const connection = connectServerEvents({
       workspaceId,
+      lastEventId: "41",
+      eventSourceFactory,
       fetcher,
-      onRecoveryRequired: ignoreRecovery,
-      onEvent: (event) => {
-        deliveries.push(event.id);
-        deliveryAttempt += 1;
-        return deliveryAttempt === 1
-          ? Promise.reject(new Error("consumer unavailable"))
-          : Promise.resolve();
+      onRecoveryRequired: (signal) => {
+        recoveries.push(signal.reason);
       },
+    });
+    eventSources[0]?.fatalError();
+
+    await vi.waitFor(() => expect(eventSources).toHaveLength(2));
+    expect(recoveries).toEqual([expectedReason]);
+    expect(eventSources[1]?.url).not.toContain("last_event_id");
+    connection.close();
+  });
+
+  it("权威回查失败保留游标并进入 recovery_failed", async () => {
+    const states: string[] = [];
+    const errors: ServerEventClientError[] = [];
+    const connection = connectServerEvents({
+      workspaceId,
+      lastEventId: "41",
+      eventSourceFactory,
+      fetcher: () => Promise.resolve(problemResponse(409, "SSE_CURSOR_EXPIRED", { action: "refetch" })),
+      onRecoveryRequired: () => Promise.reject(new Error("database unavailable")),
+      onStateChange: (state) => states.push(state),
+      onError: (error) => errors.push(error),
+    });
+    eventSources[0]?.fatalError();
+    await connection.done;
+
+    expect(errors[0]).toMatchObject({ code: "RECOVERY_FAILED", retryable: true });
+    expect(states.at(-1)).toBe("recovery_failed");
+    expect(eventSources).toHaveLength(1);
+  });
+
+  it.each([
+    ["503", () => Promise.resolve(problemResponse(503, "SSE_STORE_UNAVAILABLE"))],
+    ["network", () => Promise.reject(new TypeError("network unavailable"))],
+    ["abort without connector cancellation", () => Promise.reject(new DOMException("upstream aborted", "AbortError"))],
+  ])("%s fatal probe 使用有界 fallback 重建", async (_name, response) => {
+    const connection = connectServerEvents({
+      workspaceId,
+      eventSourceFactory,
+      fetcher: vi.fn(response),
+      onRecoveryRequired: ignoreRecovery,
       sleep: resolvedSleep,
       initialBackoffMs: 1,
       maxBackoffMs: 1,
+      random: () => 0.5,
     });
+    eventSources[0]?.fatalError();
+    await vi.waitFor(() => expect(eventSources).toHaveLength(2));
+    connection.close();
+  });
 
-    await vi.waitFor(() => expect(headers).toHaveLength(3));
-    expect(headers).toEqual([null, null, "42"]);
-    expect(deliveries).toEqual(["42", "42"]);
-    expect(connection.getLastEventId()).toBe("42");
+  it("无效 probe Content-Type fail closed", async () => {
+    const errors: ServerEventClientError[] = [];
+    let cancelCalls = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelCalls += 1;
+      },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream-fake" } });
+    const connection = connectServerEvents({
+      workspaceId,
+      eventSourceFactory,
+      fetcher: () => Promise.resolve(response),
+      onRecoveryRequired: ignoreRecovery,
+      onError: (error) => errors.push(error),
+    });
+    eventSources[0]?.fatalError();
+    await connection.done;
+    expect(errors[0]).toMatchObject({ code: "INVALID_RESPONSE", retryable: false });
+    expect(cancelCalls).toBe(1);
+    expect(eventSources).toHaveLength(1);
+  });
+
+  it("close 幂等关闭 EventSource 并 Abort 正在进行的 probe", async () => {
+    let probeSignal: AbortSignal | undefined;
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      probeSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+    });
+    const connection = connectServerEvents({
+      workspaceId,
+      eventSourceFactory,
+      fetcher,
+      onRecoveryRequired: ignoreRecovery,
+    });
+    const first = eventSources[0];
+    first?.fatalError();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
 
     connection.close();
+    connection.close();
     await connection.done;
+    expect(first?.close).toHaveBeenCalledOnce();
+    expect(probeSignal?.aborted).toBe(true);
+    expect(eventSources).toHaveLength(1);
+  });
+
+  it("close 后仍释放忽略 Abort 并迟到返回的 probe body", async () => {
+    let resolveProbe: ((response: Response) => void) | undefined;
+    let cancelCalls = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelCalls += 1;
+      },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    const fetcher = vi.fn(() => new Promise<Response>((resolve) => {
+      resolveProbe = resolve;
+    }));
+    const connection = connectServerEvents({
+      workspaceId,
+      eventSourceFactory,
+      fetcher,
+      onRecoveryRequired: ignoreRecovery,
+    });
+    eventSources[0]?.fatalError();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+
+    connection.close();
+    resolveProbe?.(response);
+    await vi.waitFor(() => expect(cancelCalls).toBe(1));
+    expect(eventSources).toHaveLength(1);
   });
 });

@@ -3146,9 +3146,33 @@
             "$ref": "#/components/parameters/WorkspaceIDQuery"
           },
           {
+            "name": "last_event_id",
+            "in": "query",
+            "required": false,
+            "description": "Bootstrap cursor for a newly constructed browser EventSource. A valid Last-Event-ID header takes precedence while this query value is still validated.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "maxLength": 19
+            }
+          },
+          {
+            "name": "event_format",
+            "in": "query",
+            "required": false,
+            "description": "Set to message to omit the dynamic SSE event field and dispatch every envelope as the browser's default message event. Omission preserves the legacy named-event wire format.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "message"
+              ]
+            }
+          },
+          {
             "name": "Last-Event-ID",
             "in": "header",
             "required": false,
+            "description": "Browser-managed reconnect cursor. When present and valid, it takes precedence over last_event_id.",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]*$",
@@ -3158,7 +3182,7 @@
         ],
         "responses": {
           "200": {
-            "description": "SSE stream. Each data field is a ServerEventEnvelope; heartbeat comments carry no data.",
+            "description": "SSE stream. Each data field is a ServerEventEnvelope and heartbeat comments carry no data. The default legacy format includes event: <Envelope.type>; event_format=message omits event: so browsers dispatch the default message event.",
             "headers": {
               "Cache-Control": {
                 "schema": {

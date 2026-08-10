@@ -25,16 +25,26 @@ const testWorkspaceID = foundation.ID("7e000000-0000-4000-8000-000000000001")
 func TestHandlerRejectsCursorErrorsBeforeStartingSSE(t *testing.T) {
 	earliest := int64(4)
 	tests := []struct {
-		name       string
-		path       string
-		cursor     *string
-		store      *fakeEventStore
-		status     int
-		code       string
-		wantAction string
+		name         string
+		path         string
+		cursor       *string
+		cursorValues []string
+		store        *fakeEventStore
+		status       int
+		code         string
+		wantAction   string
 	}{
 		{name: "workspace missing", path: "/events", store: &fakeEventStore{}, status: http.StatusBadRequest, code: ErrorCodeWorkspaceInvalid},
 		{name: "workspace duplicate", path: "/events?workspace_id=" + string(testWorkspaceID) + "&workspace_id=" + string(testWorkspaceID), store: &fakeEventStore{}, status: http.StatusBadRequest, code: ErrorCodeWorkspaceInvalid},
+		{name: "query unknown", path: eventPath() + "&unknown=value", store: &fakeEventStore{}, status: http.StatusBadRequest, code: ErrorCodeWorkspaceInvalid},
+		{name: "event format empty", path: eventPath() + "&event_format=", store: &fakeEventStore{}, status: http.StatusBadRequest, code: ErrorCodeWorkspaceInvalid},
+		{name: "event format invalid", path: eventPath() + "&event_format=legacy", store: &fakeEventStore{}, status: http.StatusBadRequest, code: ErrorCodeWorkspaceInvalid},
+		{name: "event format duplicate", path: eventPath() + "&event_format=message&event_format=message", store: &fakeEventStore{}, status: http.StatusBadRequest, code: ErrorCodeWorkspaceInvalid},
+		{name: "query cursor empty", path: eventPath() + "&last_event_id=", store: &fakeEventStore{}, status: http.StatusBadRequest, code: domain.ErrorCodeCursorInvalid},
+		{name: "query cursor duplicate", path: eventPath() + "&last_event_id=4&last_event_id=5", store: &fakeEventStore{}, status: http.StatusBadRequest, code: domain.ErrorCodeCursorInvalid},
+		{name: "query cursor invalid", path: eventPath() + "&last_event_id=01", store: &fakeEventStore{}, status: http.StatusBadRequest, code: domain.ErrorCodeCursorInvalid},
+		{name: "header cursor empty", path: eventPath(), cursor: stringPointer(""), store: &fakeEventStore{}, status: http.StatusBadRequest, code: domain.ErrorCodeCursorInvalid},
+		{name: "header cursor duplicate", path: eventPath(), cursorValues: []string{"4", "5"}, store: &fakeEventStore{}, status: http.StatusBadRequest, code: domain.ErrorCodeCursorInvalid},
 		{name: "cursor invalid", path: eventPath(), cursor: stringPointer("01"), store: &fakeEventStore{}, status: http.StatusBadRequest, code: domain.ErrorCodeCursorInvalid},
 		{name: "cursor future", path: eventPath(), cursor: stringPointer("6"), store: &fakeEventStore{watermark: 5}, status: http.StatusBadRequest, code: domain.ErrorCodeCursorFuture},
 		{name: "cursor expired", path: eventPath(), cursor: stringPointer("3"), store: &fakeEventStore{watermark: 5, earliest: &earliest}, status: http.StatusConflict, code: domain.ErrorCodeCursorExpired, wantAction: "refetch"},
@@ -47,14 +57,16 @@ func TestHandlerRejectsCursorErrorsBeforeStartingSSE(t *testing.T) {
 			router := chi.NewRouter()
 			handler.Routes(router)
 			request := httptest.NewRequest(http.MethodGet, test.path, nil)
-			if test.cursor != nil {
+			if test.cursorValues != nil {
+				request.Header["Last-Event-Id"] = test.cursorValues
+			} else if test.cursor != nil {
 				request.Header["Last-Event-Id"] = []string{*test.cursor}
 			}
 			response := httptest.NewRecorder()
 
 			router.ServeHTTP(response, request)
 
-			if response.Code != test.status || response.Header().Get("Content-Type") != "application/json" {
+			if response.Code != test.status || response.Header().Get("Content-Type") != "application/json" || response.Header().Get("Cache-Control") != "no-store" {
 				t.Fatalf("status=%d content_type=%q body=%s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
 			}
 			var problem httpapi.Problem
@@ -118,13 +130,16 @@ func TestHandlerRechecksRetentionAfterInitialReplayRead(t *testing.T) {
 func TestHandlerStartsFromScopedWatermarkOrRetainedCursorAndFramesMonotonically(t *testing.T) {
 	tests := []struct {
 		name          string
-		cursor        string
+		headerCursor  string
+		queryCursor   string
 		watermark     int64
 		earliest      *int64
 		expectedAfter int64
 	}{
 		{name: "fresh connection", watermark: 10, expectedAfter: 10},
-		{name: "retained replay", cursor: "5", watermark: 10, earliest: int64Pointer(4), expectedAfter: 5},
+		{name: "retained header replay", headerCursor: "5", watermark: 10, earliest: int64Pointer(4), expectedAfter: 5},
+		{name: "retained query replay", queryCursor: "5", watermark: 10, earliest: int64Pointer(4), expectedAfter: 5},
+		{name: "header overrides stale query seed", headerCursor: "7", queryCursor: "5", watermark: 10, earliest: int64Pointer(4), expectedAfter: 7},
 	}
 
 	for _, test := range tests {
@@ -143,12 +158,16 @@ func TestHandlerStartsFromScopedWatermarkOrRetainedCursorAndFramesMonotonically(
 			server := httptest.NewServer(eventRouter(handler))
 			t.Cleanup(server.Close)
 			ctx, cancel := context.WithCancel(context.Background())
-			request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+eventPath(), nil)
+			path := server.URL + eventPath()
+			if test.queryCursor != "" {
+				path += "&last_event_id=" + test.queryCursor
+			}
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if test.cursor != "" {
-				request.Header.Set("Last-Event-ID", test.cursor)
+			if test.headerCursor != "" {
+				request.Header.Set("Last-Event-ID", test.headerCursor)
 			}
 			response, err := server.Client().Do(request)
 			if err != nil {
@@ -168,8 +187,57 @@ func TestHandlerStartsFromScopedWatermarkOrRetainedCursorAndFramesMonotonically(
 			if strings.Contains(first+second, "source_event_ref") || strings.Contains(first+second, "expires_at") {
 				t.Fatalf("SSE frame leaked persistence fields: %s%s", first, second)
 			}
-			if store.earliestCalls != 2*boolToInt(test.cursor != "") {
-				t.Fatalf("earliest retained calls=%d cursor=%q", store.earliestCalls, test.cursor)
+			if store.earliestCalls != 2*boolToInt(test.headerCursor != "" || test.queryCursor != "") {
+				t.Fatalf("earliest retained calls=%d header_cursor=%q query_cursor=%q", store.earliestCalls, test.headerCursor, test.queryCursor)
+			}
+		})
+	}
+}
+
+func TestHandlerKeepsLegacyFramesAndSupportsMessageFormat(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		lineCount  int
+		namedEvent bool
+	}{
+		{name: "legacy default", lineCount: 3, namedEvent: true},
+		{name: "native message", query: "&event_format=message", lineCount: 2},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &fakeEventStore{watermark: 4, earliest: int64Pointer(4)}
+			store.list = func(context.Context, int64, int) ([]domain.ServerEvent, error) {
+				return []domain.ServerEvent{testServerEvent(5, "answer.completed", 2)}, nil
+			}
+			handler := NewHandler(store, StreamConfig{PollInterval: time.Hour, HeartbeatInterval: time.Hour})
+			server := httptest.NewServer(eventRouter(handler))
+			t.Cleanup(server.Close)
+			ctx, cancel := context.WithCancel(context.Background())
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+eventPath()+test.query, nil)
+			if err != nil {
+				cancel()
+				t.Fatal(err)
+			}
+			request.Header.Set("Last-Event-ID", "4")
+			response, err := server.Client().Do(request)
+			if err != nil {
+				cancel()
+				t.Fatal(err)
+			}
+			block := readSSEBlock(t, bufio.NewReader(response.Body))
+			_ = response.Body.Close()
+			cancel()
+
+			lines := strings.Split(strings.TrimSuffix(block, "\n\n"), "\n")
+			if len(lines) != test.lineCount || strings.HasPrefix(lines[1], "event: ") != test.namedEvent {
+				t.Fatalf("unexpected SSE format=%q", block)
+			}
+			dataLine := lines[len(lines)-1]
+			var decoded domain.Envelope
+			if !strings.HasPrefix(dataLine, "data: ") || json.Unmarshal([]byte(strings.TrimPrefix(dataLine, "data: ")), &decoded) != nil || decoded.Type != "answer.completed" {
+				t.Fatalf("unexpected SSE envelope=%q", block)
 			}
 		})
 	}
@@ -352,6 +420,21 @@ func assertSSEBlockForWorkspace(t *testing.T, block string, sequence int64, even
 	}
 	if envelope.ID != strconv.FormatInt(sequence, 10) || envelope.Type != eventType || envelope.WorkspaceID != workspaceID {
 		t.Fatalf("unexpected envelope=%#v", envelope)
+	}
+}
+
+func assertSSEMessageBlockForWorkspace(t *testing.T, block string, sequence int64, eventType string, workspaceID foundation.ID) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(block, "\n\n"), "\n")
+	if len(lines) != 2 || lines[0] != "id: "+strconv.FormatInt(sequence, 10) || !strings.HasPrefix(lines[1], "data: ") {
+		t.Fatalf("invalid SSE message frame=%q", block)
+	}
+	var envelope domain.Envelope
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[1], "data: ")), &envelope); err != nil {
+		t.Fatalf("decode SSE message envelope: %v", err)
+	}
+	if envelope.ID != strconv.FormatInt(sequence, 10) || envelope.Type != eventType || envelope.WorkspaceID != workspaceID {
+		t.Fatalf("unexpected message envelope=%#v", envelope)
 	}
 }
 

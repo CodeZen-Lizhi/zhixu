@@ -3179,6 +3179,17 @@ if (sse.responses["200"].content?.["text/event-stream"]?.schema?.$ref !== "#/com
     !sse.parameters.some((item) => item.name === "Last-Event-ID" && item.in === "header")) {
   throw new Error("SSE content type, envelope or Last-Event-ID contract drifted");
 }
+const sseBootstrapCursor = sse.parameters.find((item) => item.name === "last_event_id" && item.in === "query");
+const sseEventFormat = sse.parameters.find((item) => item.name === "event_format" && item.in === "query");
+const sseHeaderCursor = sse.parameters.find((item) => item.name === "Last-Event-ID" && item.in === "header");
+if (sseBootstrapCursor?.schema?.pattern !== "^[1-9][0-9]*$" ||
+    sseBootstrapCursor?.schema?.maxLength !== 19 ||
+    sseEventFormat?.schema?.enum?.join(",") !== "message" ||
+    !sseHeaderCursor?.description?.includes("takes precedence") ||
+    !sse.responses["200"].description.includes("legacy") ||
+    !sse.responses["200"].description.includes("event_format=message")) {
+  throw new Error("SSE native EventSource bootstrap, format or precedence contract drifted");
+}
 for (const field of ["id", "type", "occurred_at", "workspace_id", "resource_ref", "resource_version", "payload_summary", "schema_version"]) {
   if (!schemas.ServerEventEnvelope.required.includes(field)) throw new Error(`ServerEventEnvelope must require ${field}`);
 }
@@ -3221,7 +3232,7 @@ if (!schemas.Answer.required.includes("current_stage") ||
     schemas.Answer.properties.current_stage.enum.join(",") !== "plan.started,plan.completed,retrieval.started,retrieval.completed,validation.started,validation.completed,") {
   throw new Error("Answer current_stage must remain nullable and limited to the six persisted RAG stages");
 }
-const lastEventID = document.paths["/api/v1/events"].get.parameters.find((item) => item.name === "Last-Event-ID");
+const lastEventID = sse.parameters.find((item) => item.name === "Last-Event-ID");
 if (lastEventID?.schema?.pattern !== "^[1-9][0-9]*$" ||
     document.paths["/api/v1/events"].get.responses["200"].headers?.["Cache-Control"]?.schema?.const !== "no-store") {
   throw new Error("SSE cursor or cache-control contract drifted");
