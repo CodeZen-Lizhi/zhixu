@@ -56,6 +56,9 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
   `npm run test --prefix web` 和 `npm run build --prefix web`；只有实际输出可标记通过。
 - Workspace 启动边界测试必须覆盖 strict Active 响应、零个/多个/不匹配、认证顺序、重连、A -> B cache/SSE/草稿清理、
   迟到响应、无控制 fragment/Cookie 的多浏览器访问和 `/workspace` 无宿主路径 mutation。
+- 业务事件流单测使用 FakeEventSource 覆盖严格 MessageEvent、串行确认队列、generation、fatal probe 和 Abort；不得用
+  自研 parser fixture 重测 CR/LF、UTF-8、heartbeat 或多行 data。选定 Playwright smoke 必须由真实 Chromium 原生
+  EventSource 验证 message/heartbeat、多行 data、EOF 自动重连 Header、刷新 seed、Cookie、非法事件和 Workspace 切换。
 
 ## Review 清单
 

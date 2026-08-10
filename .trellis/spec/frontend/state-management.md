@@ -77,7 +77,9 @@ M1 必须记录实际 Query Default、Cache Retention、URL Parsing、Local Draf
 - 409 expired cursor 必须先完成 Workspace 范围的权威资源回查，成功后才清除 cursor 并无游标重连；
   回查失败保留 cursor，避免把恢复失败伪装成成功。
 - `onEvent` 可以异步；只有 handler 成功完成才提交 cursor，失败时重连必须重放同一事件。
-- 400 invalid/future cursor 停止自动重连；网络失败使用有界抖动退避，Abort 必须释放 reader 与 fetch。
+- 400 invalid/future 与 409 expired 由 fatal Fetch probe 分类后先做权威回查；成功才清 cursor 并重建，失败进入
+  `recovery_failed`。已建立连接的普通网络中断由同一原生 EventSource 自动重连；应用消费失败、队列溢出、fatal
+  5xx/网络诊断才使用有界 fallback。Abort 必须同时关闭 EventSource、probe 和 fallback timer。
 
 ## Scenario: M7-03 Collection / Knowledge Health State Ownership
 
@@ -142,13 +144,18 @@ useRegisterWorkspaceRecovery((workspaceId) => Promise<void> | void)
 connectServerEvents({ workspaceId, lastEventId?, onEvent, onRecoveryRequired, ... })
 ```
 
-- `web/src/events/event-store.tsx` 拥有连接；`server-events.ts` 只拥有严格 frame/envelope decoder 和可取消 connector。
+- `web/src/events/event-store.tsx` 拥有连接；`server-events.ts` 只拥有原生 MessageEvent 后的严格 Envelope decoder、
+  committed cursor、有界串行队列、fatal Fetch probe 和可取消 connector，不解析原始 SSE frame/UTF-8/chunk。
 - sessionStorage key 固定按 Workspace 保存 Last-Event-ID，不保存事件正文或业务对象。
 
 ### 3. Contracts
 
 - Server State 仍由 TanStack Query/API 拥有；SSE 只发 typed invalidation hint，Event Store 不重放 Proposal/Workflow/RAG 状态机。
 - `onEvent` 的所有 Query 失效成功完成后才提交 cursor；任一失效失败必须让同一事件在重连后重放。
+- 浏览器内部 observed Last-Event-ID 与项目 committed cursor 必须分离；`MessageEvent.lastEventId`、Envelope ID、Workspace
+  和单调性校验通过后进入固定上限 FIFO，只有串行 `await onEvent` 成功才推进 committed cursor。精确重复幂等忽略。
+- URL 用 `last_event_id` seed 新实例并显式请求 `event_format=message`；同一原生对象重连时浏览器 Header 优先于旧 URL
+  seed。`error + CONNECTING` 不启动 Fetch/timer；只有 `CLOSED` 才短暂 Fetch 同一 URL 诊断 HTTP/Problem，200 立即取消 body。
 - 409 expired、400 invalid/future cursor 都先完成 Workspace 权威 Query 回查；成功后清 cursor 并无游标重连，失败保留 cursor 并进入 `recovery_failed`。
 - Search 的 opaque cursor 绑定 Active Index 和结果 fingerprint，恢复时禁止用 `refetchQueries(type:"all")` 重放旧窗口。Event Store 先取消并移除 Workspace 下全部 Search Query；当前挂载的 Search Feature 通过 recovery callback 清除 URL cursor，并以原 query/mode/filter 回查无 cursor 首屏。首屏回查失败必须拒绝整个恢复并保留 SSE cursor。
 - Search reset 与当前页面 recovery callback 必须先于 Workspace/business 等其他网络回查；后续任一回查失败时旧 cursor 窗口仍保持移除，但 SSE cursor 必须保留。首屏恢复只有一个 Query 请求所有者，callback 必须等待该最终请求成功，不能在随后自动 refetch 失败前提前 resolve。
@@ -161,6 +168,7 @@ connectServerEvents({ workspaceId, lastEventId?, onEvent, onRecoveryRequired, ..
 | Condition | Required result |
 |---|---|
 | Event Workspace 不匹配、ID 非单调或 payload 非法 | connector fail closed，不提交 cursor |
+| MessageEvent metadata 不一致、data 超限或 queue overflow | metadata/data fail closed；overflow 关闭旧 generation 并从 committed cursor 重放 |
 | Query invalidation 失败 | onEvent reject，session cursor 保持旧值 |
 | expired/invalid/future 回查成功 | 删除 Workspace cursor，无 cursor 重连 |
 | 权威回查失败 | 保留 cursor，显示 recovery_failed，不伪装已恢复 |
@@ -172,12 +180,13 @@ connectServerEvents({ workspaceId, lastEventId?, onEvent, onRecoveryRequired, ..
 ### 5. Good / Base / Bad Cases
 
 - Good：一个事件对每个匹配的 Query family 只失效一次后提交 ID；Search recovery 丢弃旧 cursor 窗口并回查规范首屏；切换 Workspace 时旧连接和旧 Workspace-scoped cache 立即失效。
-- Base：无 Active Workspace 时状态 closed 且不建立连接；网络断开按有界抖动重连。
+- Base：无 Active Workspace 时状态 closed 且不建立连接；已建立连接的普通网络断开由浏览器原生 EventSource 重连。
 - Bad：RAG/Proposal 各建一条连接；收到 SSE 直接写业务 cache；对包含旧 cursor 的全部 Search Query 做 refetch；回查失败仍删除 cursor；旧 Workspace 回调覆盖新状态。
 
 ### 6. Tests Required
 
-- 单连接、Workspace switch/cleanup、旧回调隔离、事件 Workspace/单调 ID、Query 失效失败不提交、expired/invalid/future、损坏本地 cursor、recovery_failed 和 Abort cleanup。
+- 单连接、Workspace switch/cleanup、旧 generation 隔离、MessageEvent/Workspace/单调 ID、有界串行队列、Query 失效失败
+  不提交、原生 CONNECTING 重连、CLOSED probe、expired/invalid/future、损坏本地 cursor、recovery_failed 和 Abort cleanup。
 - Search recovery 必须证明：旧 cursor query 不再执行且缓存被移除；挂载页面 URL cursor 清除并以同一 query/mode/filter 回查首屏；首屏失败时 SSE cursor 不清除且重试不复活旧窗口。
 - 浏览器用真实 API 检查同一 Workspace 网络中无重复 SSE；console 无 warning/error；切换后旧页面事实不可见。
 

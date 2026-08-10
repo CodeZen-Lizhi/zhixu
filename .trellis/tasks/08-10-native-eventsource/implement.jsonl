@@ -1,0 +1,11 @@
+{"file":".trellis/spec/frontend/index.md","reason":"前端层入口、SSE Event Store 与 canonical gate"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"单连接 owner、invalidation 后 cursor commit、Workspace recovery 硬约束"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"SSE unknown 边界与严格 Envelope decoder 所有权"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"SSE reconnect、Workspace A/B 与真实浏览器质量门禁"}
+{"file":".trellis/spec/backend/index.md","reason":"后端实现前检查、HTTP 公共契约与验证入口"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"稳定 Problem、cursor error 与 HTTP fail-closed 语义"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Cookie Session、safe GET、Capability 与认证失效边界"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Browser EventSource 到 Go Handler/OpenAPI/Event Store 的跨层数据流"}
+{"file":".trellis/tasks/08-10-native-eventsource/research/eventsource-standard.md","reason":"WHATWG EventSource 能力、限制与重连时序证据"}
+{"file":".trellis/tasks/08-10-native-eventsource/research/backend-contract.md","reason":"服务端 query/wire 兼容、Header precedence 与 Fetch probe 设计"}
+{"file":".trellis/tasks/08-10-native-eventsource/research/frontend-migration.md","reason":"前端 adapter、committed cursor、queue、generation 与测试影响"}

@@ -1,0 +1,9 @@
+{"file":".trellis/spec/frontend/state-management.md","reason":"复验 ack-after-invalidation、recovery_failed、单 owner 与 Workspace cleanup"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"复验 native MessageEvent 到严格 Envelope 的唯一边界"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"复验单测、浏览器、错误矩阵与成熟标准替换目标"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"复验 Problem、HTTP status、cursor 与 no-store 契约"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"复验 Cookie/READ_LOCAL/401/CSRF safe GET 行为"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"复验公共 HTTP/OpenAPI、回归范围和质量门禁"}
+{"file":".trellis/tasks/08-10-native-eventsource/research/eventsource-standard.md","reason":"核对标准 API 行为与不可覆盖差异"}
+{"file":".trellis/tasks/08-10-native-eventsource/research/backend-contract.md","reason":"核对兼容 wire、Header precedence、代理与 rollback"}
+{"file":".trellis/tasks/08-10-native-eventsource/research/frontend-migration.md","reason":"核对 queue/generation/probe 风险与测试矩阵"}

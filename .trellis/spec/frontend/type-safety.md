@@ -104,8 +104,10 @@ OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Fea
   citation、retrieval summary 不一致时拒绝整个响应，禁止静默补默认值。
 - `current_stage` 只接受六个持久 RAG 阶段或 null；Answer ETag 同时绑定 Answer version、Workflow version 和
   stage，200/304 都必须校验该格式。
-- `web/src/events/**` 是唯一 SSE Envelope、frame、cursor 与恢复 owner；未知或非法 payload 不进入 Feature，
-  成功处理事件后才推进 Last-Event-ID。
+- `web/src/events/**` 是唯一 SSE Envelope、原生 MessageEvent、committed cursor 与恢复 owner；浏览器标准实现拥有
+  UTF-8、frame、heartbeat 和多行 data 解析，项目边界不重复解析 raw SSE。MessageEvent data 在 JSON.parse 前限长，
+  再严格校验 Envelope、`lastEventId === id`、Workspace 和单调性；未知或非法 payload 不进入 Feature，成功处理事件后
+  才推进项目 committed Last-Event-ID。
 
 ## Scenario: M7-03 Collection / Health Wire Boundary
 
