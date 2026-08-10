@@ -10,8 +10,18 @@
 
 - 当前架构主干健康：`presentation -> application -> domain` 依赖方向基本成立，未发现 `domain -> adapter/http` 反向依赖。
 - 领域不变量、事务、幂等、认证、SSRF/路径/Secret 防护与前后端类型边界是现有优势，优化不得削弱这些契约。
-- 默认 `make test`、`go mod tidy -diff` 与 `git diff --check` 已通过；外部 PostgreSQL/River 全量门禁和 7 个 Playwright E2E 未在本次审查中全部执行。
+- 2026-08-05 的基线审计曾记录默认 `make test`、`go mod tidy -diff` 与 `git diff --check` 通过；外部 PostgreSQL/River 全量门禁和 7 个 Playwright E2E 当时未全部执行。本轮状态回填不以该历史运行替代当前最终门禁。
 - 详细基线、证据和文件锚点见 `research/audit-baseline.md`。
+
+## 当前状态
+
+- 已批准且完成：步骤 1 Health 历史有界化；AC-01..AC-03 已由归档任务、当前代码和定向测试证据回填。
+- 已批准且部分完成：步骤 0 的可重复静态质量基线已交付；CI duration/flaky 历史和迁移 `00077` 在受控数据量下的耗时、锁等待观察仍缺。
+- 未批准、未实现：WP2 路由错误恢复与 WP5 热点/Domain 边界拆分。
+- 未批准、工作包未完成：WP3 分层 CI/测试门禁与 WP6 性能/契约治理；仓库已有局部基础，但没有满足整组验收。
+- 未批准、部分顺带实现：WP4 的前端 record/exact/UUID primitives 已部分共享；Go HTTP pilot 与 scalar/array/problem 收敛仍未完成。
+
+两个已登记 child 均已归档只说明已批准子任务完成，不表示本父计划或 AC-04..AC-13 完成。步骤 2-6 仍需用户批准后再分别实施，不因现有局部基础反推批准。
 
 ## Requirements
 
@@ -27,7 +37,7 @@
 
 - PR、主分支和定时任务使用分层门禁，不能只由同一套 `make test` 代表所有发布质量。
 - PR 必须运行 Unit、Lint/Static、Migration Contract、OpenAPI Contract 和按改动范围选择的 Integration。
-- 主分支或 nightly 必须执行完整 PostgreSQL/River、Docker Smoke、Security、Evaluation 与全部 7 个 Playwright E2E，并保存失败诊断产物。
+- 主分支或 nightly 必须执行完整 PostgreSQL/River、Docker Smoke、Security、Evaluation 与全部当前 Playwright E2E，并保存失败诊断产物。
 - CI 中被声明为强制的数据库测试在缺少 `ZHIXU_TEST_DATABASE_URL` 时必须失败，不得静默 SKIP。
 - Review Learning Path 的 domain/application/http 关键行为必须进入默认 Go 测试；真实 PostgreSQL 行为继续由独立 integration gate 验证。
 - Go 与 Web 生成可追踪的覆盖率产物。第一阶段采用关键包趋势与不下降门禁，不以全仓单一百分比驱动无价值测试。
@@ -72,11 +82,11 @@
 
 ## Acceptance Criteria
 
-- [ ] AC-01：Health 详情单次响应和数据库读取有明确上限；历史端点默认 `25`、最大 `100`，使用稳定 keyset cursor，cursor 不能跨 Workspace、Issue、历史类型或 limit 复用。
-- [ ] AC-02：大历史 fixture 下，Health 详情与单页历史保持常数级 SQL statement 数；evidence 只对当前 observation 页执行一次批量查询，无 N+1、无跨页预取。
-- [ ] AC-03：Health 旧字段在兼容期内仍可解码，但明确表示分页/截断；当前 Web 调用方迁移后不再假定数组等于完整审计历史。
+- [x] AC-01：Health 详情单次响应和数据库读取有明确上限；历史端点默认 `25`、最大 `100`，使用稳定 keyset cursor，cursor 不能跨 Workspace、Issue、历史类型或 limit 复用。证据见已归档 `08-05-health-bounded-history` 及当前 Application/HTTP/OpenAPI/Web 实现。
+- [x] AC-02：大历史 fixture 下，Health 详情与单页历史保持常数级 SQL statement 数；evidence 只对当前 observation 页执行一次批量查询，无 N+1、无跨页预取。证据见已归档 Health 任务的真实 PostgreSQL 验收记录。
+- [x] AC-03：Health 旧字段在兼容期内仍可解码，但明确表示分页/截断；当前 Web 调用方迁移后不再假定数组等于完整审计历史。证据见当前前端 API/query/page 与定向测试。
 - [ ] AC-04：route lazy import rejection 与页面 render error 都显示稳定恢复状态；重试/刷新可恢复，现有 Suspense loading、认证、导航和 Workspace 隔离测试继续通过。
-- [ ] AC-05：CI 明确区分 PR 快速门禁与 main/nightly 完整门禁；7 个 Playwright spec 都被某个强制 job 执行，失败时上传 trace、截图和相关日志。
+- [ ] AC-05：CI 明确区分 PR 快速门禁与 main/nightly 完整门禁；全部当前 Playwright spec 都被某个强制 job 执行，失败时上传 trace、截图和相关日志。
 - [ ] AC-06：CI 强制 integration job 未配置数据库时失败；Review Learning Path 的命令校验、幂等、状态/CAS、归属校验和 HTTP 错误映射进入默认测试。
 - [ ] AC-07：Go/Web 覆盖率产物可下载；关键包建立基线和不下降规则，且没有通过排除失败分支或堆叠无断言测试达标。
 - [ ] AC-08：后端 HTTP 与前端 decoder 各完成至少一个 2 至 4 模块试点；原模块契约测试不变通过，没有新增业务无关 helper 的第三份实现。

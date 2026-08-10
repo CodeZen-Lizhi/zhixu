@@ -2,7 +2,7 @@
   "id": "product-delivery",
   "name": "product-delivery",
   "title": "ZHIXU 产品级建设与交付",
-  "description": "将文档态 ZHIXU 建设为可运行、可测试、可维护、可部署、可恢复、可审计的本地优先知识工作台；先完成规划，再按依赖实现并交付。",
+  "description": "父任务仍有 M9 Proposal Revision/三方合并、M10 审计/容量/恢复和 M11 最终发布门禁缺口；33/33 只表示当前登记的 children 均已归档，不表示 AC-01..AC-41 或父任务完成。",
   "status": "in_progress",
   "dev_type": null,
   "scope": null,

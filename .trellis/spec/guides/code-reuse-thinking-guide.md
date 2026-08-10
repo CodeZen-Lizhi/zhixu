@@ -27,7 +27,23 @@ grep -r "functionName" .
 grep -r "keyword" .
 ```
 
-### Step 2: Ask These Questions
+### Step 2: Run the Mature Framework Gate
+
+Before adding shared infrastructure, protocol handling, framework capability,
+or a third-party integration:
+
+1. Search the repository for existing implementations and explicit technology choices.
+2. Mark mandatory functional, security, deployment, and testing constraints, assign weights to the remaining requirements, then compare mature candidates.
+3. If a mature option satisfies every mandatory constraint and covers at least 80% of the weighted requirements, adopt it by default. The threshold is about requirements, not lines of code.
+4. Treat an explicit existing choice as a hard constraint; get user confirmation before deviating from it.
+5. If custom code is still necessary, record the candidates, coverage gaps, rejection reasons, exact custom boundary, maintenance cost, required tests, and exit or migration path.
+
+Frameworks may own infrastructure and Adapter details; core domain rules remain
+project-owned and must not be delegated to framework configuration or plugins.
+See [`ADR-0019`](../../../docs/architecture/adr/0019-mature-framework-first.md)
+for the authoritative gate and exception record.
+
+### Step 3: Ask These Questions
 
 | Question | If Yes... |
 |----------|-----------|
@@ -136,6 +152,10 @@ of that replay model.
 ## Checklist Before Commit
 
 - [ ] Searched for existing similar code
+- [ ] For applicable infrastructure/protocol/integration work, compared repository choices and mature candidates across functional, security, deployment, and testing requirements
+- [ ] A candidate satisfying all mandatory constraints and covering at least 80% of weighted requirements was adopted by default, and any deviation from an explicit existing choice has user confirmation
+- [ ] Any custom implementation records candidates, coverage gaps, rejection reasons, boundary, maintenance cost, tests, and exit or migration path
+- [ ] Core domain rules remain project-owned behind framework or Adapter boundaries
 - [ ] No copy-pasted logic that should be shared
 - [ ] No repeated untyped payload field extraction outside a shared decoder
 - [ ] Constants defined in one place

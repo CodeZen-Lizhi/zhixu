@@ -13,35 +13,27 @@
 - Versioned knowledge：使用 Markdown 与 Git 保存正式知识及历史。
 - Durable agents：Agent 工作流支持持久化、恢复、重试和审计。
 
-## Capabilities and roadmap
+## Product scope
 
 - 文章优化与版本管理
-- 混合检索与带引用 RAG 问答（已提供 Conversation API、可恢复 SSE 和 `/chat` 页面）
+- 混合检索与带引用 RAG 问答
 - 知识关系分析与可操作知识图谱
 - 语义反向链接与知识健康检查
 - Proposal、人工审批与 Git 安全写回
 - 面试文档、学习路径、闪卡与智能复习
 - Agent Workflow、Tool Calling、Memory 与 AI 评测
 
-## Planned stack
+完整产品范围和使用方式见 [用户指南](docs/user-guide.md) 与 [产品需求](docs/requirements.md)；这些范围文档不等于当前版本已经全部交付。
 
-- Go
-- React + TypeScript
-- PostgreSQL + pgvector
-- Markdown + Git
-- Docker Compose
+## Technology
+
+当前技术基线由 [系统设计](docs/architecture/system-design.md) 维护；候选框架和未来迁移只记录在 [开发路线图](docs/roadmap.md)，不得从路线图反推当前实现。
 
 ## Status
 
-The project is under active development. The current skeleton provides a Go API and worker, a React web application, and PostgreSQL with pgvector.
+The project is under active development. Current delivery status, acceptance evidence, and detailed task progress are maintained only in [Trellis tasks](.trellis/tasks/); this README does not keep a parallel milestone log.
 
-项目正在开发中。当前仓库已经提供 Go API/Worker、React Web、PostgreSQL + pgvector，以及可运行的
-Workspace→摄取→索引→Search/Evidence、Conversation→RAG Answer→SSE→Feedback 闭环和 Graph v1。
-Graph v1 只读投影 Knowledge 中同一 Workspace 的 Topic、Claim 和 canonical Relation，不是第二事实源；
-M7-02 已交付独立 Semantic Link Candidate、Topic scan、typed Relation Proposal 与 Approval 后 Knowledge apply；
-Health/Timeline、Collection/表格、Artifact/Review/Interview、审计/可观测、50 万容量、备份门禁和
-最终发布验收仍属于后续 M7–M11，不能把当前状态视为整个产品已经交付。M10-02 认证边界已经接入：
-业务 API 默认要求 Session Cookie 或限 Scope API Token；认证关闭只允许 development loopback。
+项目正在开发中。当前交付状态、验收证据和详细任务进度只在 [Trellis 任务](.trellis/tasks/) 维护；本 README 不再维护平行的里程碑状态。
 
 ## Local development
 
@@ -68,7 +60,7 @@ API、Worker 和 Migrate 直接运行时接受可选 `-config <path>`，该参�
 `环境变量 > YAML > Defaults()`。环境变量显式空值也算覆盖，不会回退到低优先级来源。每次加载使用独立
 Viper 实例，不启用全局单例、自动环境扫描或热更新；Worker/Migrate/ModelCtl 使用不读取 API-only Secret
 的 non-API profile，但其他共享配置仍完整校验。完整契约见
-[进程启动配置架构](docs/architecture/configuration.md)。
+[运行与配置手册](docs/operations.md)。
 
 Start the local stack from the repository root. The launcher creates a
 Git-ignored `.env` with mode `0600`, runs migrations, validates one exact host
@@ -132,7 +124,7 @@ derived grant override. `./zhixu reset` is the explicit destructive command for
 Compose volumes and requires typing `DELETE`; it clears the local selection but
 preserves the launcher identity and never deletes a selected host directory.
 The complete first-use, switching, data-retention and troubleshooting guide is
-[Workspace 与 Docker 运行手册](docs/architecture/runbooks/workspace-runtime.md).
+[运行与配置手册](docs/operations.md).
 
 The checked-in example explicitly uses development-only `disabled` auth, so it
 starts without a Bootstrap Token. To exercise `required` mode, set both
@@ -248,7 +240,7 @@ first shutdown mode wins and the two paths are never chained. Exceeding the
 hard deadline is a non-zero process failure, not proof that external side
 effects were rolled back. Recovery uses River delivery plus Workflow
 lease/checkpoint facts; see the
-[Workflow recovery runbook](docs/architecture/runbooks/workflow-recovery.md).
+[运行与恢复手册](docs/operations.md).
 
 Stop the stack while preserving its local database and model-secret volumes:
 
@@ -314,8 +306,11 @@ The isolated Eino adoption gate is available under `poc/eino` and is included in
 ## Documentation
 
 - [Documentation index](docs/README.md)
-- [Product requirements](docs/product/PRD.md)
+- [User guide](docs/user-guide.md)
+- [Product requirements](docs/requirements.md)
 - [Architecture documentation](docs/architecture/README.md)
+- [Development roadmap](docs/roadmap.md)
+- [Operations guide](docs/operations.md)
 
 ## License
 

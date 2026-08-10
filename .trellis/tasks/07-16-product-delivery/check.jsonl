@@ -1,15 +1,12 @@
-{"file": "docs/product/PRD.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/CONTEXT.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/module-architecture.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/domain-model.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/database-design.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/api-and-events.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/workflow-engine.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/tool-security.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/testing-and-evaluation.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/security.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/deployment.md", "reason": "Product delivery verification contract and evidence source"}
-{"file": "docs/architecture/retrieval-architecture.md", "reason": "Product delivery verification contract and evidence source"}
+{"file": "docs/user-guide.md", "reason": "Verify final user journeys, visible results and limitations without treating the guide as delivery status"}
+{"file": "docs/requirements.md", "reason": "Verify the authoritative AC-01..AC-41 product scope and acceptance matrix"}
+{"file": "docs/roadmap.md", "reason": "Verify only high-level remaining directions are stated; detailed status stays in Trellis"}
+{"file": "docs/architecture/system-design.md", "reason": "Verify production topology and module boundaries against current code"}
+{"file": "docs/architecture/domain-and-data.md", "reason": "Verify domain/data ownership and consistency while checking exact schema against migrations"}
+{"file": "docs/architecture/application-contracts.md", "reason": "Verify API/SSE/frontend/config boundaries while checking exact wire against OpenAPI"}
+{"file": "docs/architecture/ai-runtime.md", "reason": "Verify retrieval, Agent and persistent Workflow composition and recovery boundaries"}
+{"file": "docs/architecture/quality.md", "reason": "Verify security, audit, observability, capacity, test and release evidence requirements"}
+{"file": "docs/operations.md", "reason": "Verify supported deployment/recovery procedures against executable code, Make targets and retained run evidence"}
 {"file": ".trellis/spec/guides/index.md", "reason": "Product delivery verification contract and evidence source"}
 {"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Backend quality gate"}
 {"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Frontend quality gate"}

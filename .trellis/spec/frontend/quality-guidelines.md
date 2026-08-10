@@ -9,9 +9,9 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
 
 ## 已确认事实
 
-- `docs/architecture/technology-stack.md` 选择 React、TypeScript、Vite、TanStack Query、React Router、Vitest、Testing Library 和 Playwright，但未锁定版本。
-- `docs/architecture/testing-and-evaluation.md` 要求 Component Test、Route Integration、SSE Reconnect、Diff、Graph Accessibility、Virtualized List、Browser E2E、安全测试和性能分析。
-- `docs/architecture/frontend-architecture.md` 要求 Diff/Evidence/Status 组件测试、Command → Workflow → SSE 集成、最高层 Seam E2E、键盘/颜色/焦点可访问性、路由拆包和大数据策略。
+- `docs/architecture/system-design.md` 选择 React、TypeScript、Vite、TanStack Query、React Router、Vitest、Testing Library 和 Playwright，但未锁定版本。
+- `docs/architecture/quality.md` 要求 Component Test、Route Integration、SSE Reconnect、Diff、Graph Accessibility、Virtualized List、Browser E2E、安全测试和性能分析。
+- `docs/architecture/application-contracts.md` 要求 Diff/Evidence/Status 组件测试、Command → Workflow → SSE 集成、最高层 Seam E2E、键盘/颜色/焦点可访问性、路由拆包和大数据策略。
 - 产品失败必须明确暴露，禁止用空页面或表面成功隐藏 Workflow 或受保护写入失败。
 
 ## 必须模式
@@ -27,6 +27,11 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
   requested/effective mode、degradation、Evidence href、Cursor 与 vector `distance`，不能静默归一为假成功。
 - Active Workspace 只能由 Workspace API 边界严格解码 `GET /api/v1/workspaces/active`；浏览器存储、URL、SSE 和旧 Query
   cache 都不能成为 Workspace 身份事实源。A -> B 必须先 Abort/停止 SSE/清理 A cache 与草稿投影，再发布 B；迟到响应不得回写。
+- 新增通用基础设施、协议处理、框架能力或第三方集成前，先搜索仓库已有实现和明确选型，并将功能、安全、部署、
+  测试需求逐项对照成熟候选。全部强制项满足且成熟候选达到至少 80% 加权需求覆盖时默认采用；80% 不按代码行数
+  计算。已有明确选型是硬约束，偏离前必须取得用户确认。确需自研时，记录候选、覆盖差距、未采用原因、自研边界、
+  维护成本、测试与退出/迁移方式；产品和领域规则仍由 Domain UI/Feature 拥有，不下沉到框架配置、插件或组件库内部。
+  完整判定与例外材料见 [`ADR-0019`](../../../docs/architecture/adr/0019-mature-framework-first.md)。
 
 ## 禁止模式
 
@@ -47,7 +52,7 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
 - Unit Test 覆盖纯 Projection、Reducer、Query Key、Formatter、Validation 和状态转换。
 - Component Test 覆盖 Diff、Evidence、Status、Form、键盘、焦点和全部用户可见状态。
 - Integration Test 覆盖 Route Loader/Param、Command Accepted、Workflow ID 恢复、SSE Invalidation/Reconnect、Cursor Pagination 和 Version Conflict。
-- Playwright E2E 覆盖 `docs/architecture/testing-and-evaluation.md` 定义的六条最高层 Seam，并在适用时使用确定性 Fixture 和 Fake Model。
+- Playwright E2E 覆盖 `docs/architecture/quality.md` 定义的六条最高层 Seam，并在适用时使用确定性 Fixture 和 Fake Model。
 - Security Test 覆盖 XSS/Markdown Sanitization、客户端可观察的 CSRF/Origin 行为、Secret Redaction 和 Unauthorized Write 展示。
 - Performance Check 覆盖大表、Graph Interaction、Route Bundle 和分段 Diff，基于文档容量假设执行。
 - M6-D Search Decoder 单测覆盖成功/空结果、请求 snake_case 映射、三模式/显式降级、vector distance、
@@ -75,13 +80,17 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
 - Cursor invalid/stale 是否显式要求从第一页重启，而不是静默复用旧结果？
 - UI 是否没有把 M6-D Workspace 隔离误当作 M10 Auth/CSRF/Capability 已完成？
 - Active Workspace 是否只有服务端 API 一个 Owner，切换时是否先清理旧作用域且业务认证保持独立？
+- 通用基础设施、协议处理、框架能力或第三方集成是否已搜索仓库实现/明确选型，并按功能、安全、部署、测试需求
+  对照成熟候选？强制项是否全部满足，达到至少 80% 加权覆盖时是否默认采用，偏离明确选型是否已有用户确认？
+- 确需自研时，是否记录候选、覆盖差距、未采用原因、自研边界、维护成本、测试与退出/迁移方式，并保持产品/领域规则
+  由 Domain UI/Feature 拥有？
 
 ## 验证
 
 M1 前执行：
 
 ```bash
-rg -n 'Vitest|Testing Library|Playwright|Accessibility|SSE Reconnect|Virtualized Lists' docs/architecture/technology-stack.md docs/architecture/testing-and-evaluation.md
+rg -n 'Vitest|Testing Library|Playwright|Accessibility|SSE Reconnect|Virtualized Lists' docs/architecture/system-design.md docs/architecture/quality.md
 git diff --check
 ```
 

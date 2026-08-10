@@ -10,11 +10,11 @@
 - `migrations/00001`–`00010` 的 Goose 兼容只在内存 `fs.FS` 中注入 StatementBegin/End；不得改写历史 SQL。没有 Goose history 的旧 shell-runner 数据库只有在完整 `core.schema_meta` 事实匹配时才能 baseline 接管。
 - `workflow.run`、`workflow.node_run`、`workflow.outbox_event` 的 M4-A Runtime identity 字段允许完整 NULL 的 legacy tuple 或完整非 NULL 的 Runtime tuple；active legacy 行由新 Runtime Application/UoW 返回 `WORKFLOW_LEGACY_RUNTIME_UNSUPPORTED`，数据库不猜测回填。
 
-- PostgreSQL 是领域数据、投影和运行数据的主数据库；pgvector 保存向量，PostgreSQL FTS 保存全文索引（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 第 3 节）。
-- PostgreSQL 驱动为 pgx，当前 SQL 访问采用参数化手写查询，迁移采用 Goose，River 只负责可运行 Job 的投递和 Worker 获取，不是 Workflow 业务事实源（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 与 [`workflow-engine.md`](../../../docs/architecture/workflow-engine.md)）。
+- PostgreSQL 是领域数据、投影和运行数据的主数据库；pgvector 保存向量，PostgreSQL FTS 保存全文索引（依据 [`system-design.md`](../../../docs/architecture/system-design.md)）。
+- PostgreSQL 驱动为 pgx，当前 SQL 访问采用参数化手写查询，迁移采用 Goose，River 只负责可运行 Job 的投递和 Worker 获取，不是 Workflow 业务事实源（依据 [`system-design.md`](../../../docs/architecture/system-design.md) 与 [`ai-runtime.md`](../../../docs/architecture/ai-runtime.md)）。
 - 事务边界由维护不变量的领域模块控制：Proposal/Approval、Workflow Node、Review Answer、Relation Confirm 等在数据库内使用 ACID；文件和 Git 不放入数据库事务。
 - Source Version、Article Revision、Proposal Revision、Workflow Definition/Run、Embedding/Index Version 等必须有版本、哈希或状态约束；重复消息不得创建重复 Node、Tool Call、Answer 或 Health Issue。
-- 查询必须支持稳定排序和 cursor 分页；大集合、图谱邻居和 Collection 结果禁止无分页返回（依据 [`api-and-events.md`](../../../docs/architecture/api-and-events.md)）。
+- 查询必须支持稳定排序和 cursor 分页；大集合、图谱邻居和 Collection 结果禁止无分页返回（依据 [`application-contracts.md`](../../../docs/architecture/application-contracts.md)）。
 
 ## 目标代码落点（M1 起）
 
@@ -75,7 +75,7 @@ git diff --check
 
 - Goose 从空数据库执行全部迁移，再次执行不会产生未处理错误。
 - PostgreSQL/Testcontainers 测试覆盖外键、唯一键、乐观锁、幂等、Outbox、租约、FTS、pgvector 和分页稳定性。
-- `EXPLAIN`/容量测试证明核心 Search、Collection、Graph、Workflow 查询使用预期索引；性能门槛以 [`performance.md`](../../../docs/architecture/performance.md) 和任务验收为准。
+- `EXPLAIN`/容量测试证明核心 Search、Collection、Graph、Workflow 查询使用预期索引；性能门槛以 [`quality.md`](../../../docs/architecture/quality.md) 和任务验收为准。
 - 重复消息、重复审批、重复 Tool Call、重复 Answer 和 Health Scan 不产生重复副作用。
 
 ## 待 M1 代码验证

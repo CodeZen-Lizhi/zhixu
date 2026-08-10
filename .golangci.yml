@@ -1,0 +1,62 @@
+# ZHIXU golangci-lint 配置（golangci-lint v2 语法）
+# 安装：go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.0
+# 状态：候选/report-only；全仓基线清零且接入 Makefile/CI 前不得作为阻塞门禁。
+# 运行：golangci-lint run ./cmd/... ./internal/... ./eval/...
+# 目标：把"风格/静态分析/基础安全"交给机器，让人工审查聚焦设计、正确性与安全逻辑。
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - govet          # 官方 vet
+    - errcheck       # 错误不得静默丢弃
+    - staticcheck    # 深度静态分析
+    - ineffassign    # 无效赋值
+    - unused         # 未使用代码
+    - gocyclo        # 圈复杂度
+    - funlen         # 函数长度
+    - wrapcheck      # 错误包装 %w 一致性
+    - bodyclose      # resp.Body 关闭
+    - sqlclosecheck  # pgx *sql.Rows 关闭（本项目 pgx v5 关键）
+    - misspell       # 拼写
+    - unconvert      # 多余类型转换
+    - gocritic       # 通用改进建议
+
+  settings:
+    funlen:
+      lines: 80          # 与 architecture-quality-baseline 热点阈值保持一致
+      statements: 60
+    gocyclo:
+      min-complexity: 15
+  exclusions:
+    rules:
+      # 测试文件放宽长度/复杂度限制
+      - path: _test\.go
+        linters:
+          - funlen
+          - gocyclo
+      # poc/eino 为独立实验模块，暂不强制 wrapcheck
+      - path: poc/eino/
+        linters:
+          - wrapcheck
+    # 生成的 sqlc 代码跳过（如有生成目录）
+    paths:
+      - (_sqlc|\.gen)\.go
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/CodeZen-Lizhi/zhixu
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+# 说明：依赖漏洞请用独立步骤 `govulncheck ./...`（未内置在 golangci-lint）。

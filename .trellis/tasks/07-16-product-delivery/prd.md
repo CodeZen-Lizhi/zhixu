@@ -1,165 +1,108 @@
-# ZHIXU 产品级建设与交付
+# ZHIXU 当前发布收口
 
 ## Goal
 
-将当前仅包含产品与架构文档的 ZHIXU 仓库，按 `docs/product/PRD.md`、已接受 ADR 和本任务确认的补充约束，建设为可运行、可测试、可维护、可部署、可恢复、可审计、可交付的本地优先个人知识工作台。
+在既有产品实现基础上关闭仍未完成的 M9、M10、M11 发布缺口，并用当前需求、生产装配、直接自动化证据和最终发布门禁证明 ZHIXU 可交付。
 
-产品核心价值是让用户在保有 Markdown 与 Git 数据所有权的前提下，完成“资料进入 → 解析与索引 → 证据检索与关系判断 → Proposal → 人工审批 → 安全写回 → Git 版本 → 重新索引与验证 → 图谱/健康/复习”的完整闭环。
+本任务不再承担全量产品需求事实源。稳定产品范围与最终验收以 [`docs/requirements.md`](../../../docs/requirements.md) 的 AC-01..AC-41 为准；用户可见行为与限制以 [`docs/user-guide.md`](../../../docs/user-guide.md) 为准。
 
 ## Authoritative Sources
 
-事实优先级：
+1. 用户当前明确要求与已批准的范围变更。
+2. `docs/requirements.md` 的 AC-01..AC-41，以及 `docs/user-guide.md` 的用户行为说明。
+3. OpenAPI、迁移、当前架构与运维文档所拥有的精确契约和运行边界。
+4. 当前代码、生产 Composition、直接自动化测试和可重复运行证据。
+5. 本任务及已归档子任务保存的实施历史。归档状态只能证明该子任务的约定范围，不能覆盖后来变化的稳定需求。
 
-1. 用户当前明确要求与本任务附加目标。
-2. `AGENTS.md` 与 `.trellis/workflow.md`。
-3. 本任务 `prd.md`、`design.md`、`implement.md`。
-4. `docs/product/PRD.md` 与已接受 ADR。
-5. 其他架构文档、运行手册和实现清单。
-6. 当前代码和实际运行行为。
+`task.py list` 显示的 `33/33 children done` 只表示当前登记的 33 个 child 均已归档，不代表父任务、AC-01..AC-41 或发布门禁已经完成。
 
-当前仓库不存在 `doc/`，只有 `docs/`；本任务统一以 `docs/` 为需求和架构事实目录。
+## Historical Planning Baseline
 
-## Confirmed Current State
+2026-07-16 创建本任务时，仓库仍处于无业务源码的规划阶段，旧 PRD 只包含 AC-01..AC-36。该描述仅用于解释早期里程碑和子任务来源，不是当前仓库事实。
 
-- 当前分支为 `dev`，基线提交 `7ffef09`。
-- `README.md` 明确项目处于产品与架构设计阶段。
-- 仓库没有业务源码、`go.mod`、`package.json`、SQL/迁移、OpenAPI、测试、Dockerfile、项目 Compose 或 CI。
-- `go test ./...` 和 `go vet ./...` 因缺少 Go module 失败；`npm test` 因缺少 `package.json` 失败。
-- `docs/product/PRD.md` 定义正式 v1.0 全量范围和 AC-01..AC-36；当前 36 项均无运行证据。
-- `.trellis/spec/backend/` 与 `.trellis/spec/frontend/` 仍为占位模板，现有 `00-bootstrap-guidelines` 任务未完成。
-- Eino 在仓库文档、依赖和代码中均不存在；当前文档只定义 OpenAI-Compatible/Ollama Adapter。
-- 表格明确需求是 Smart Collection 的列表/表格/卡片视图、列选择、排序、过滤、分组、分页和空状态；导出明确为 Markdown、附件、领域元数据 JSON、评测和审计摘要，没有 Excel/CSV 导入导出要求。
+当前代码已经覆盖大量产品切片；是否完成必须重新对照 AC-01..AC-41、生产装配和测试证据核定，不能沿用 2026-07-16 的“无源码”基线，也不能仅按文件存在、局部测试或子任务归档推断。
 
-## Product Scope
+## Current Release Status
 
-### P0 — 产品运行与安全闭环
+| 范围 | 当前判断 | 仍需关闭 |
+|---|---|---|
+| M8-03 Learning / Memory | 已完成当前稳定范围 | Guarded Down、Review Path 并发/ABANDONED reopen 和 Conversation RAG attempt-scoped Memory 已有代码与归档证据；全局 Memory 注入不是目标实现 |
+| M9-02 Proposal Diff / Merge | 部分完成 | 已有双向 Diff、审批、preflight 和 base-hash 冲突阻断；Proposal Revision 编辑与真正的 base/current/proposed 三方合并尚未实现，AC-13 未关闭 |
+| M9-03 Export | 当前范围完成 | Collection Markdown、Metadata JSON 与 Workspace Attachments ZIP 已交付；`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 已移出当前需求，不作为发布缺口 |
+| M10-01 Observability / Audit | 部分完成 | slog、Secret Redaction、OTel、API/Worker Prometheus 和 append-only Audit 基础已交付；跨业务审计覆盖、查询、留存/归档与演练仍缺 |
+| M10-02 Auth / Security | 完成 | 当前生产装配、负测、PostgreSQL/Compose 与归档验收证据支持完成判断 |
+| M10-03 Capacity / Performance | 部分完成 | 500k 后端 benchmark 与 EXPLAIN harness 已有；缺目标环境完整运行产物和达到阈值的真实前端 FPS 证据 |
+| M10-04 Deployment / Recovery | 部分完成 | Docker、readiness、Migration Job 和启动 smoke 已有；缺备份、临时实例恢复和一致性演练自动化及验收证据 |
+| M11-01 E2E / Demo | 部分完成 | 已有多条局部浏览器与 Compose smoke；缺统一六 seam Playwright、文章/RAG/知识变更完整用户链路和 14 步最终演示 |
+| M11-02 AI Eval | 部分完成 | Agent 与 Semantic Link 两套确定性门禁可运行；缺 Article、Artifact、Graph、Review/Interview 等版本化套件、真实 Provider 与统一回归基线 |
+| M11-03 Release Package | 部分完成 | README、License、运行文档、Docker 基线已存在；缺统一 `make verify`、SBOM、漏洞/镜像扫描、交付包、校验和与最终 review 证据 |
 
-- 项目骨架、配置、数据库迁移、API/Worker、前端和 Docker Compose。
-- Workspace、Source Version、Markdown/Git 事实源和一致性检查。
-- 持久化 Workflow、River 投递、Outbox、Human Task、重试、取消、幂等和补偿。
-- Proposal、Approval、Tool Permission、Safe Writeback、Git Commit、索引更新和只读恢复。
-- Markdown/TXT 摄取、结构化分块、FTS/pgvector、RRF、版本化索引和搜索。
-- 可观测性、审计、认证、安全负测、备份恢复和最小业务烟测。
+详细代码对照证据见文档整合任务的 [M7-M9 状态审计](../08-10-docs-consolidation/research/product-task-drift-audit.md)、[M10 状态审计](../08-10-docs-consolidation/research/m10-code-status-audit.md) 与 [M11 状态审计](../08-10-docs-consolidation/research/m11-code-audit.md)。本文件只保存当前发布边界，不复制动态测试日志。
 
-### P1 — 正式 v1 核心体验
+## Remaining Requirements
 
-- PDF/网页摄取、文章优化、Claim/Topic/Relation/Conflict。
-- Eino PoC 通过后的 AI Adapter、结构化输出、Tool Calling、引用校验、拒答与评测。
-- RAG、图谱、语义关联、Smart Collection、知识健康、时间线与影响分析。
-- Artifact、Review Card、FSRS、面试模拟和 Memory。
-- 对应前端页面、OpenAPI 契约、SSE 状态和端到端测试。
+### R1. Proposal Revision 与三方合并
 
-### P2 — 重要增强
+- 提供受版本约束的 Proposal Revision 编辑能力，编辑结果仍绑定 Evidence、风险、审批与 Change Hash。
+- 目标文件相对 base 发生变化时，必须展示 base/current/proposed 三方差异并进入可恢复的合并流程；不得只提示重新生成，也不得覆盖当前内容。
+- 完成后以 OpenAPI、后端/前端实现、生产装配、冲突/并发测试和真实用户链路共同关闭 AC-13。
 
-- 容量基线压测、图谱聚类/布局缓存、全量索引蓝绿切换。
-- 可选本地模型 Profile、OTel/Prometheus 导出、评测趋势和更丰富的恢复演练。
+### R2. M10 生产质量收口
 
-### Out of Scope
+- 补齐要求范围内的跨领域 append-only Audit 生产者、查询与留存/恢复操作；OTel/Prometheus 已完成部分不得重复立项。
+- 在目标环境执行并保存 500k graph/retrieval、EXPLAIN、环境元数据和正式前端渲染/FPS 证据。
+- 建立备份、临时实例恢复和文件/Git/数据库/索引一致性演练的可执行入口及失败恢复证据。
 
-沿用正式 PRD：多用户/RBAC、SaaS 计费、微服务、Kubernetes、独立图数据库、独立向量数据库、Redis/Kafka 必需依赖、通用低代码数据库、通用拖拽工作流、Agent Swarm、移动原生 App、WYSIWYG、Canvas、音视频处理、自动互联网发布和未经审批修改外部系统。
+### R3. M11 统一发布门禁
 
-Excel/CSV 导入导出当前不在正式范围；除非后续文档明确新增，不得因“表格能力”自行扩展。
+- 用可恢复 fixture 覆盖六条最高层业务 seam，并执行本文件的 14 步最终演示。
+- 建立版本化 AI Eval 数据集、阈值、批准 baseline、真实 Provider 结果和非零回归门禁。
+- 提供统一发布验证入口，聚合静态检查、测试、契约、集成、E2E、Eval、安全、容量、恢复、SBOM 和交付包校验；必需门禁缺环境时不得伪装通过。
 
-## Requirements
+### R4. 状态与证据同步
 
-### R-01 项目基础与规范
+- 每项完成声明必须同时说明实现、生产装配、直接自动化证据和最终验收证据。
+- 文件存在、局部单测通过或 child 已归档只能作为部分证据。
+- 稳定需求若明确移除，先更新 `docs/requirements.md`，再更新本任务；不得用“代码未实现”继续制造假缺口。
 
-- 完成后端、前端、数据库、错误、日志、测试和安全规范，所有规范有真实代码示例后方可关闭 Bootstrap Guidelines。
-- 锁定 Go、Node、PostgreSQL、pgvector、River、Eino（如采用）和前端依赖版本。
-- 提供统一的 `make`/脚本入口，禁止依赖开发者记忆零散命令。
+## Final Demonstration
 
-### R-02 架构与依赖边界
+最终验收必须完整执行以下 14 步；详细执行 fixture、命令和结果保存在 Trellis，不复制到长期路线图：
 
-- 采用 Go 模块化单体，API 与 Worker 两进程共享领域模块和 PostgreSQL。
-- 领域层不得依赖 HTTP、pgx/sqlc、River、Eino、模型 SDK、Git、文件系统或 React 类型。
-- 第三方能力通过 Adapter 接入，公共契约只使用领域类型和稳定错误模型。
-
-### R-03 事实源与数据一致性
-
-- 原始 Source Version 不可变；正式知识由 Markdown + Git 持有。
-- PostgreSQL 保存投影、关系、工作流、审批、审计、评测和学习状态。
-- 文件/Git/数据库/索引通过可恢复 Saga 协作；不一致时进入明确只读恢复状态。
-
-### R-04 Workflow、Proposal 与审批
-
-- PostgreSQL 是业务 Workflow 事实源，River 只负责可执行 Job 投递。
-- 所有副作用有幂等键、可判定执行结果和补偿/人工恢复路径。
-- Agent 只能输出结构化结果或 Tool Request，不得直接操作文件、数据库或 Git。
-- 所有正式知识和关系修改必须经过 Proposal → Evidence Validation → Approval → Version Check → Safe Writeback。
-
-### R-05 摄取、检索与 RAG
-
-- 支持 Markdown、TXT、PDF、网页和粘贴文本的可追踪摄取；不安全内容隔离。
-- 支持 Source Span、结构化分块、FTS、pgvector、RRF、可选 Rerank 和版本化索引。
-- 默认只检索最新批准 Revision；降级必须显式。
-- RAG 回答必须提供可打开引用、冲突说明、推断标识和拒答能力。
-
-### R-06 知识与学习功能
-
-- 支持 Article Revision、Claim、Topic、Relation、Conflict、Graph、Semantic Link、Collection、Health、Timeline、Artifact、Review、Interview 和 Memory。
-- AI 生成的关系、卡片、文章修改和知识产物必须有证据、版本、状态和人工控制。
-
-### R-07 API 与前端
-
-- REST 承载命令/查询，SSE 承载单向状态事件；SSE 不是事实源。
-- 写命令要求 Idempotency-Key，修改要求 Version/ETag，列表统一 cursor + limit。
-- OpenAPI 是前后端契约事实源，生成前端客户端并做 breaking-change 检查。
-- 所有异步页面可刷新恢复；错误展示阶段、影响、可重试性和错误编号。
-
-### R-08 表格与数据能力
-
-- Smart Collection 支持列表、表格、紧凑卡片三种视图。
-- 表格支持固定领域字段的列选择、排序、过滤、分组、分页、空状态和虚拟滚动；不建设通用公式字段或数据库设计器。
-- 导出支持 Markdown、附件、领域元数据 JSON、评测结果和审计摘要，包含 schema_version 与 Workspace ID。
-- 导出权限、敏感字段脱敏、文件生命周期、幂等、可追踪性和公式注入防护需有设计与测试；Excel/CSV 保持未实现。
-
-### R-09 安全、性能与运维
-
-- 本地模式绑定 localhost；自托管必须单用户认证、HTTPS、CSRF/Origin 与 Session/Token 生命周期控制。
-- 防止路径穿越、Symlink Escape、SSRF、Prompt Injection、XSS、SQL/命令注入和 Secret 泄漏。
-- 审计为 append-only 业务记录，普通日志不得替代审计。
-- 达到 50 万 Chunk/Relation 容量基线下的检索、图谱和页面指标，或提供可复现的未达标证据与架构升级决策。
-- 提供非 root 多阶段镜像、显式 Compose、备份恢复、一致性恢复和升级/回滚说明。
-
-### R-10 Eino 采用门禁
-
-- Eino 仅可位于 Agent、Application、Adapter 或 Infrastructure 层。
-- 先完成 16 项最小 PoC；PoC 通过后新增 ADR、锁版本、建立 Fake Adapter 和集成测试。
-- Eino 不得成为持久化 Workflow、Proposal/Approval、Tool Permission、Evidence Validation 或 Safe Writeback 的事实源。
-- PoC 失败时回退到 OpenAI-Compatible HTTP Adapter 或厂商 SDK Adapter，不修改领域契约。
+1. 导入一份新的技术资料。
+2. 系统判断它与旧知识存在互补和冲突。
+3. 生成两个 Proposal。
+4. 用户审批其中一个、驳回另一个。
+5. 系统安全写回 Markdown、创建 Git Commit 和重新索引。
+6. 在知识图谱中看到新关系和冲突状态。
+7. 使用 RAG 提问并看到新引用与冲突说明。
+8. 生成一份面试大纲。
+9. 从相关 Topic 生成 Review Card。
+10. 回答错误后获得知识缺口和复习计划。
+11. 模拟一次索引失败并证明任务可恢复。
+12. 输入一个知识点，在同页补充并确认材料，冻结 Snapshot；分别演示专题文章大纲审批和多文档合并冲突审阅，并从结果反查 Evidence、Template Revision、Artifact 或 Proposal。
+13. 在一个 Document 的文件历史中比较知序写回与外部 Commit，制造当前未提交改动证明恢复被阻止；清理后创建并批准 restore Proposal，验证生成新 Commit/Article Revision 且原历史保留。
+14. 为 Workspace 保存一个标准 HTTPS Remote 和只写 Token，分别演示 same、远端 Fast-forward、本地 non-force Push、dirty/diverged 停止、Worker restart 与结果未知恢复；证明响应、日志、argv、Git Config 和 Workspace 不含明文 Token，并验证 Git 成功而索引失败时两个状态分列。
 
 ## Acceptance Criteria
 
-最终产品必须逐项证明 `docs/product/PRD.md` 的 AC-01..AC-36，并满足：
+- [ ] AC-01..AC-41 逐项有当前代码、生产装配、直接自动化证据和最终验收结论；不以历史 child 状态代替。
+- [ ] AC-13 的 Proposal Revision 编辑与真正三方合并已实现并通过冲突、并发、恢复和用户链路验证。
+- [ ] M10-01、M10-03、M10-04 的剩余审计、容量和恢复门禁已关闭；M10-02 的现有安全证据在最终版本复验。
+- [ ] 六条最高层业务 seam 与 14 步最终演示在可恢复环境中通过，并保存失败诊断和运行结果。
+- [ ] AI Eval 覆盖稳定需求要求的场景，批准 baseline、阈值、真实 Provider 和回归比较均可重复执行。
+- [ ] 统一发布门禁、SBOM、漏洞/镜像扫描、交付包和校验和已生成并验证。
+- [ ] README、需求、用户指南、架构、运维、OpenAPI、迁移、配置和实际行为一致。
 
-- [ ] 一条明确命令可启动 API、Worker、PostgreSQL/pgvector 和 Web，前端页面非空。
-- [ ] 六条最高层业务 seam 均有确定性 E2E：知识变更、文章优化、RAG、Artifact、图谱/健康、Collection/Review。
-- [ ] 正常路径、边界路径、失败路径、故障注入和恢复路径均有自动测试。
-- [ ] 所有正式写入可关联 Proposal、Approval、Tool Authorization、Git Commit、Workflow Run 和 Audit。
-- [ ] Eino 16 项 PoC 有逐项 PASS/FAIL 报告；采用与否有 ADR 和替换路径。
-- [ ] PostgreSQL 迁移、sqlc 生成、关键约束、EXPLAIN、pgvector/FTS 和 50 万容量基线有可重复验证。
-- [ ] OpenAPI、前端生成客户端、SSE 重连、cursor 分页、ETag/Idempotency 行为通过契约测试。
-- [ ] 表格视图、分页、过滤、列选择、批量非破坏性操作和既定导出能力通过 UI/E2E 验收。
-- [ ] 路径穿越、SSRF、Prompt Injection、越权工具、XSS、CSRF、SQL/命令注入和 Secret Redaction 测试通过。
-- [ ] Docker Smoke、备份恢复演练、一致性恢复演练和最终 11 步演示场景通过。
-- [ ] `go test -race ./...`、静态检查、前端 lint/typecheck/test/build、Playwright、AI Eval、漏洞扫描和镜像扫描全部通过。
-- [ ] 所有文档、ADR、API、迁移、配置、运行和回滚说明与实际行为一致。
+## Out Of Scope
 
-## Known Requirement Conflicts and Resolutions
+- 重新实现已有证据支持的 M0-M8 与 M9 已交付切片。
+- 将 `EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 重新纳入当前导出范围。
+- 因修正文档状态而创建未获批准的新 child task、修改产品语义或更换既有技术选型。
+- 用路线图、归档状态或人工说明替代最终运行证据。
 
-1. `doc/` 与 `docs/`：仓库只有 `docs/`，采用 `docs/`。
-2. `PRD-outline.md` 标记“待确认”，`PRD.md` 标记正式 v1.0 需求稿：采用后者；大纲仅作历史参考。
-3. API 文档采用 Cursor Pagination，PRD Search 示例使用 `page`：公共 API 统一 cursor + limit，UI 可做页码表现层映射，并同步修订 PRD。
-4. accepted ADR-0010 明确 SSE，PRD 存在“WebSocket 或 SSE”表述：统一 SSE。
-5. 现有 AI 文档未提 Eino，用户新增 Eino 优先要求：执行 PoC，限定 Adapter 边界，PoC 后新增 ADR。
-6. 文档没有 Excel/CSV：只实现既定表格视图和 Markdown/JSON 类导出，不扩大范围。
+## Rollback And Release Boundary
 
-## Open Decisions That Block Specific Later Tasks
-
-这些问题不阻塞 M0/M1 骨架，但在对应任务开始前必须以 PoC/ADR 或用户决策关闭：
-
-- Eino PoC 后是否采用及锁定版本。
-- 自托管认证使用 Cookie Session 还是 Bearer Token；推荐 Cookie Session + CSRF，CLI/自动化再提供受限 Token。
-- 首个 Embedding 模型、维度与中文 FTS tokenizer；必须通过检索 PoC 与评测选择。
-- 备份 RPO/RTO、频率、保留、加密和密钥管理；推荐个人本地默认 RPO 24h、RTO 2h，允许配置。
-- 开源 License；正式公开分发前必须确定。
+- 数据库继续使用前向兼容迁移；不修改已发布迁移，不把 destructive Down 当普通回滚。
+- 文件恢复使用新的安全写回 Commit，不重写 Git 历史；未知副作用保持人工恢复。
+- 发布保留上一兼容镜像、迁移版本、配置、评测 baseline、备份 Marker 与恢复证据；任一必需门禁未执行或失败时不宣告完成。

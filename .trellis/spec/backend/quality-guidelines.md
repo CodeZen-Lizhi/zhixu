@@ -7,10 +7,10 @@
 
 ## 已确认事实
 
-- 模块必须是深模块：小 Interface、明确输入/输出/不变量/错误/性能约束，复杂度隐藏在实现中（依据 [`module-architecture.md`](../../../docs/architecture/module-architecture.md) 第 2 节）。
-- 核心领域逻辑不能绑定框架；外部工具通过 Adapter，Composition Root 负责配置、构造和注入（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 与 [`interfaces-and-adapters.md`](../../../docs/architecture/interfaces-and-adapters.md)）。
-- 必须覆盖主路径和异常路径、审计、可观测、自动测试、AI Eval、文档和无未说明降级（依据 [`testing-and-evaluation.md`](../../../docs/architecture/testing-and-evaluation.md) 第 21 节）。
-- 测试层级包括 Unit、Adapter Contract、PostgreSQL/Filesystem/Git/Workflow Integration、AI Evaluation、Playwright E2E、Docker Smoke 与恢复演练；Go 单元使用 `testing`/`httptest`，数据库集成采用 Testcontainers-Go。
+- 模块必须是深模块：小 Interface、明确输入/输出、不变量、错误和性能约束，复杂度隐藏在实现中（依据 [`system-design.md`](../../../docs/architecture/system-design.md)）。
+- 核心领域逻辑不能绑定框架；外部工具通过 Adapter，Composition Root 负责配置、构造和注入（依据 [`system-design.md`](../../../docs/architecture/system-design.md)）。
+- 必须覆盖主路径和异常路径、审计、可观测、自动测试、AI Eval、文档和无未说明降级（依据 [`quality.md`](../../../docs/architecture/quality.md)）。
+- 测试层级包括 Unit、Adapter Contract、PostgreSQL/Filesystem/Git/Workflow Integration、AI Evaluation、Playwright E2E、Docker Smoke 与恢复演练；Go 单元使用 `testing`/`httptest`。数据库集成当前通过显式 `ZHIXU_TEST_DATABASE_URL` 连接隔离的 PostgreSQL/pgvector；Testcontainers-Go 尚未采用，只是路线图候选。
 - 安全门禁覆盖路径穿越、Symlink、SSRF、Prompt Injection、XSS、CSRF、SQL Injection、未授权 Tool 和 Secret Redaction。
 
 ## 目标代码落点（M1 起）
@@ -44,6 +44,11 @@
    Search、RRF、Evidence binding 与降级属于 Domain/Application/Adapter，禁止复制到 HTTP。
 8. API/Worker 的 Embedding 构造必须复用 Configured Embedder Factory；前端原始 Search JSON 只能通过
    `web/src/api/search.ts` 严格 Decoder 进入 Feature。
+9. 新增通用基础设施、协议处理、框架能力或第三方集成前，必须先搜索仓库已有实现和明确选型，并将功能、安全、
+   部署、测试需求逐项对照成熟候选。全部强制项满足且成熟候选达到至少 80% 加权需求覆盖时默认采用；80% 不按代码
+   行数计算。已有明确选型是硬约束，偏离前必须取得用户确认。确需自研时，必须记录候选、覆盖差距、未采用原因、
+   自研边界、维护成本、测试与退出/迁移方式；核心领域规则仍由领域层拥有，只通过 Interface/Adapter 与框架隔离。
+   完整判定与例外材料见 [`ADR-0019`](../../../docs/architecture/adr/0019-mature-framework-first.md)。
 
 ## 测试要求
 
@@ -84,6 +89,10 @@ M6-D 已通过真实 PostgreSQL HTTP、River fault 与 Compose API smoke 一轮�
 - Vector wire 是否为 `distance`；Evidence 是否只从不可变 Artifact 读取最多 4 KiB excerpt？
 - 是否误把 Workspace 隔离/loopback 声称为 M10 Auth、CSRF 或 Capability 已完成？
 - 是否误把 exact vector scan/小夹具 EXPLAIN 声称为 500,000 Chunk ANN/P95 已完成？
+- 通用基础设施、协议处理、框架能力或第三方集成是否已搜索仓库实现/明确选型，并按功能、安全、部署、测试需求
+  对照成熟候选？强制项是否全部满足，达到至少 80% 加权覆盖时是否默认采用，偏离明确选型是否已有用户确认？
+- 确需自研时，是否记录候选、覆盖差距、未采用原因、自研边界、维护成本、测试与退出/迁移方式，并保持核心领域规则
+  由领域层拥有？
 
 ## 验证方式
 
@@ -104,6 +113,73 @@ go vet ./...
 ```
 
 并按影响范围补充迁移/集成、API Contract、E2E、Security、AI Eval、Docker Smoke 和恢复演练。`go.mod`、CI 和 Makefile 未创建前，不把具体 lint 工具、版本或命令参数当成既定事实。
+
+## Scenario: 活跃任务上下文与子任务进度门禁
+
+### 1. Scope / Trigger
+
+- 删除、移动或合并长期文档，或修改活跃任务 `implement.jsonl` / `check.jsonl` 时，必须校验全部活跃任务的上下文目标。
+- 展示父任务的 child 进度时，必须把 child 归档进度与父任务状态、AC 和发布证据分开。
+
+### 2. Signatures
+
+```bash
+make trellis-script-test
+make task-context-check
+python3 .trellis/scripts/task.py list
+make test
+```
+
+- `make trellis-script-test` 执行 `.trellis/scripts/**/test_*.py` 的 `unittest` discovery。
+- `make task-context-check` 对 `.trellis/tasks/*/task.json` 对应的每个活跃任务目录执行 `task.py validate`。
+- `make test` 必须包含上述两个门禁；`task.py list` 的父任务进度格式固定为 `[完成数/总数 children done]`。
+
+### 3. Contracts
+
+- 命令不需要环境变量，不修改任务、文档或 Git 状态。
+- `task-context-check` 只检查活跃任务根目录，不改写 `archive/` 和 `research/` 历史证据。
+- manifest 的 JSONL 非法、`file` 为空或目标不存在时非零退出；超过 `context_injection.max_file_bytes` 只产生截断警告，仍可零退出。
+- `children_progress(children, all_statuses)` 在无 child 时返回空字符串；状态为 `completed` / `done` 或已不在活跃状态表中的已归档 child 计为完成。
+- `children done` 只描述已登记 child 的进度，不表示父任务 `status`、父 AC、生产装配或最终门禁完成。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 必须结果 |
+|---|---|
+| 全部活跃 manifest 语法正确且目标存在 | `make task-context-check` 零退出 |
+| 任一 manifest 非法或目标缺失 | 输出具体任务和条目，整体非零退出 |
+| 上下文文件超过注入上限 | 输出截断警告；不得包装为完整上下文已注入 |
+| 父任务没有 child | `task.py list` 不显示进度后缀 |
+| child 已完成、已归档或仍活跃 | 分别按完成、完成、未完成计数，并统一显示 `children done` |
+| 任一直接单测导入失败或断言失败 | `make trellis-script-test` 非零退出，并阻断 `make test` |
+
+### 5. Good/Base/Bad Cases
+
+- Good：移动事实源时在同一变更更新所有活跃 manifest，随后两个 Make 门禁均通过。
+- Base：父任务无 child 时不显示括号；全部 child 归档时显示 `[N/N children done]`，父任务仍按自身状态和 AC 判断。
+- Bad：仅因 `[33/33 children done]` 将父任务或 AC 标记完成，或删除文档后只检查 `docs/` 内链接而跳过活跃 manifest。
+
+### 6. Tests Required
+
+- `common.test_tasks.ChildrenProgressTest` 必须断言：无 child 返回空字符串、混合状态计数正确、已归档 child 的缺失状态按完成计数。
+- `make task-context-check` 必须在当前全部活跃任务上运行，并断言进程退出码为零；截断警告作为剩余风险单独记录。
+- 文档迁移还必须使用 Markdown 解析器检查长期入口、规范和活跃任务中的本地链接，并执行 `git diff --check`。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```text
+07-16-product-delivery (in_progress) [33/33 children done]
+=> 父任务及全部产品验收已经完成
+```
+
+#### Correct
+
+```text
+33/33 只证明已登记 child 均已归档；
+父任务仍需对照稳定需求、当前实现、生产 Composition、直接自动化证据和最终门禁。
+```
 
 ## 当前后续门禁
 

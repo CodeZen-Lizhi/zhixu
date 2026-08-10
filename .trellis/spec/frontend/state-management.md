@@ -8,7 +8,7 @@
 
 ## 已确认事实
 
-`docs/architecture/frontend-architecture.md` 定义四类状态：
+`docs/architecture/application-contracts.md` 定义四类状态：
 
 1. Document、Proposal、Workflow、Graph 和 Collection 等 Server State 由 TanStack Query 管理。
 2. Filter、Sort、Current Object 和 Graph Center Node 等 URL State 由 Router 管理。
@@ -60,7 +60,7 @@ Global Client State 只用于真正全局且非服务端的关注点，例如 UI
 M1 前执行：
 
 ```bash
-rg -n 'Server State|URL State|Local Draft|Event State|SSE 事件' docs/architecture/frontend-architecture.md
+rg -n 'Server State|URL State|Local Draft|Event State|SSE 事件' docs/architecture/application-contracts.md
 git diff --check
 ```
 

@@ -8,9 +8,9 @@
 
 ## 已确认事实
 
-- `docs/architecture/frontend-architecture.md` 要求使用 React + TypeScript，业务状态不得依赖 UI 组件库。
+- `docs/architecture/application-contracts.md` 要求使用 React + TypeScript，业务状态不得依赖 UI 组件库。
 - Diff、Evidence、Status、Graph、Table、Workflow 和 Review 是核心产品界面。
-- `docs/product/PRD.md` 要求关键操作支持键盘、焦点清晰、状态同时使用文字和视觉标识、图谱不只靠颜色区分、Diff 为屏幕阅读器提供文本说明。
+- `docs/requirements.md` 要求关键操作支持键盘、焦点清晰、状态同时使用文字和视觉标识、图谱不只靠颜色区分、Diff 为屏幕阅读器提供文本说明。
 - Error Boundary 仅处理渲染错误；业务错误必须在页面展示错误码、影响和下一步操作。
 
 ## 组件职责
@@ -34,7 +34,7 @@
 - 当前未选择 UI 库和样式系统；M1 必须先记录并锁定方案，之后才能添加示例。
 - 业务状态不得依赖组件库的状态或类型。
 - Status、Risk、Graph Relation 和 Severity 不得只依赖颜色，应结合文字、形状、图标、线型或标签。
-- 大表使用虚拟滚动，图谱增量渲染，大 Diff 分段加载，遵守 `docs/architecture/performance.md`。
+- 大表使用虚拟滚动，图谱增量渲染，大 Diff 分段加载，遵守 `docs/architecture/quality.md`。
 
 ## 可访问性
 
@@ -62,7 +62,7 @@
 M1 前执行：
 
 ```bash
-rg -n 'Accessibility|键盘|颜色|焦点|屏幕阅读器|Error Boundary' docs/architecture/frontend-architecture.md docs/product/PRD.md
+rg -n 'Accessibility|键盘|颜色|焦点|屏幕阅读器|Error Boundary' docs/architecture/application-contracts.md docs/requirements.md
 git diff --check
 ```
 

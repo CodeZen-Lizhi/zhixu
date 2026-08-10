@@ -6,10 +6,10 @@
 
 ## 已确认事实
 
-- 系统采用模块化单体；API 与 Worker 是两个可独立运行的进程，共享领域模块和 PostgreSQL（依据 [`module-architecture.md`](../../../docs/architecture/module-architecture.md) 第 1、8 节）。
-- 依赖方向是 `presentation → application → domain modules`，Workflow 只能依赖 Agent、Tools 和领域接口，Adapter 实现领域接口（依据 [`module-architecture.md`](../../../docs/architecture/module-architecture.md) 第 5、6 节）。
+- 系统采用模块化单体；API 与 Worker 是两个可独立运行的进程，共享领域模块和 PostgreSQL（依据 [`system-design.md`](../../../docs/architecture/system-design.md)）。
+- 依赖方向是 `presentation → application → domain modules`，Workflow 只能依赖 Agent、Tools 和领域接口，Adapter 实现领域接口（依据 [`system-design.md`](../../../docs/architecture/system-design.md)）。
 - 领域模块必须隐藏实现复杂度，对外暴露小而稳定的 Interface；事务由维护不变量的模块控制，HTTP Handler 不得发起跨模块事务。
-- API 负责同步查询、命令提交和 Human Decision；Worker 负责租约、长任务和副作用。预计超过 3 秒的任务通过持久化 Workflow 异步执行（依据 [`api-and-events.md`](../../../docs/architecture/api-and-events.md) 与 [`workflow-engine.md`](../../../docs/architecture/workflow-engine.md)）。
+- API 负责同步查询、命令提交和 Human Decision；Worker 负责租约、长任务和副作用。预计超过 3 秒的任务通过持久化 Workflow 异步执行（依据 [`application-contracts.md`](../../../docs/architecture/application-contracts.md) 与 [`ai-runtime.md`](../../../docs/architecture/ai-runtime.md)）。
 - 当前已有 Go module、API/Worker、Workspace、Workflow、Ingestion、Change Control 和 Retrieval 实现；新增模块必须复用相同的 domain/application/adapter 分层与 Composition Root 模式。
 
 ## 目标代码落点（M1 起）
@@ -46,7 +46,7 @@ migrations/                    # Goose 前向迁移
 web/                           # React 构建产物或嵌入边界；不放领域逻辑
 ```
 
-该布局来源于 [`module-architecture.md`](../../../docs/architecture/module-architecture.md) 第 7 节。实际包名、是否使用 `web/` 嵌入以及数据库逻辑 Schema 需在 M1 manifest、迁移和构建配置落地后再以代码为准。
+该布局来源于 [`system-design.md`](../../../docs/architecture/system-design.md)。实际包名、是否使用 `web/` 嵌入以及数据库逻辑 Schema 需在 M1 manifest、迁移和构建配置落地后再以代码为准。
 
 ## 模块组织规则
 

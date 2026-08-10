@@ -20,4 +20,5 @@
 | [0016](0016-capacity-performance-baseline.md) | 确定性容量数据集与可审计性能门禁 | accepted |
 | [0017](0017-exact-workspace-root-grant.md) | Host Controller 与精确 Workspace Root Grant | superseded in delivery by 0020 |
 | [0018](0018-workspace-root-identity.md) | Workspace Root 与 Workspace 身份边界 | accepted |
+| [0019](0019-mature-framework-first.md) | 成熟框架优先与自研例外门禁 | accepted |
 | [0020](0020-docker-direct-web-and-one-shot-workspace-control.md) | Docker 固定 Web 入口与一次性 Workspace Control | accepted |

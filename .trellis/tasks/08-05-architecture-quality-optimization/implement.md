@@ -9,19 +9,29 @@
 ## 当前批准范围
 
 - 用户已批准先实施步骤 0“建立可重复基线”和步骤 1“Health 有界历史”。
-- 对应子任务为 `08-05-architecture-quality-baseline` 与 `08-05-health-bounded-history`；步骤 1 依赖步骤 0 的基线输出。
-- 步骤 2-6 暂不启动，也不顺带修改路由恢复、CI 分层、公共 decoder、组合根或 Domain 依赖。
+- 对应子任务为 `08-05-architecture-quality-baseline` 与 `08-05-health-bounded-history`，均已归档完成；步骤 1 依赖步骤 0 的基线输出。
+- 步骤 2-6 未批准、无独立 child，不因现有局部基础或其他任务的顺带修改反推批准。
 
-## 0. 建立可重复基线（0.5-1 日）
+## 当前实现状态
+
+- 步骤 0：部分完成。可重复静态基线已交付；CI duration/flaky 历史，以及迁移 `00077` 的受控耗时和锁等待观察仍缺。
+- 步骤 1：完成。Health Application/Repository/HTTP/OpenAPI/Web 与定向测试、归档证据均已落地。
+- 步骤 2、5：未批准、未实现。
+- 步骤 3、6：未批准、只有既存局部基础，工作包未完成。
+- 步骤 4：未批准、部分顺带实现；前端 record/exact/UUID 已部分共享，Go pilot 和 scalar/array/problem 收敛仍缺。
+
+`2/2 children done` 只表示两个已登记 child 均归档，不能作为父任务完成度。
+
+## 0. 建立可重复基线（部分完成）
 
 - 把 `research/audit-baseline.md` 的统计命令整理成只读脚本或 CI report，避免手工口径漂移。
-- 记录现有 Make target、7 个 Playwright spec、integration build tag、SKIP、bundle chunk 和 CI 时长。
+- 记录现有 Make target、当前 Playwright spec 数量、integration build tag、SKIP、bundle chunk 和 CI 时长。
 - 记录 `00077` 在受控测试库上的行数、迁移耗时与锁等待；不修改历史 migration。
 - 为后续每个子任务创建独立 Trellis child task，并复制本任务相关 AC 与 spec/research context。
 
 验收：基线可在干净工作树重复生成，结果差异能够解释。
 
-## 1. Health 有界历史（3-5 日，最高优先级）
+## 1. Health 有界历史（已完成）
 
 1. 为详情与两类历史分页补 domain/application/HTTP 契约测试，先复现超过 256 条历史的无界行为。
 2. 定义 observation/decision page DTO、cursor binding、默认/最大 limit 与稳定排序。
@@ -45,7 +55,7 @@ git diff --check
 
 回滚点：保留新分页端点；只回退 Web 调用方或旧详情投影，不允许恢复无界 SQL。
 
-## 2. Route 恢复边界（1-2 日，可与步骤 1 并行）
+## 2. Route 恢复边界（未批准、未实现）
 
 1. 添加仅覆盖 route content 的 Error Boundary 与稳定错误状态。
 2. 实现 boundary reset/retry 和 chunk 失败刷新，不吞错误日志。
@@ -64,12 +74,12 @@ git diff --check
 
 回滚点：删除 route content boundary 与测试即可，路由定义不变。
 
-## 3. CI、测试与文档门禁（5-8 日）
+## 3. CI、测试与文档门禁（未批准、工作包未完成）
 
 1. 生成 Make target 与领域路径映射，先用 report-only 模式观察 PR 命中结果。
 2. 拆分 Fast、Selected Integration、Full/nightly jobs，并为每个 job 设置明确 timeout。
 3. 让强制 integration 在 CI 缺少数据库配置时失败；保留本地显式 skip 的便利性。
-4. 将全部 7 个 Playwright spec 接入 main/nightly，上传 trace、截图、容器与服务日志。
+4. 将全部当前 Playwright spec 接入 main/nightly，上传 trace、截图、容器与服务日志。
 5. 为 Review Learning Path 增加 domain/application/http 单测和独立 integration target。
 6. 输出 Go coverprofile 与 Web coverage；先归档和展示关键包趋势，稳定后启用不下降门禁。
 7. 增加 `go mod tidy -diff`、`govulncheck`；修正 testing 文档的数据库测试模式。
@@ -89,7 +99,7 @@ Review：使用 `go-review`、`sql-code-review` 和 `code-review-and-quality` �
 
 回滚点：新 job 可先降级为非阻断；保留测试和报告，不删除已补覆盖。
 
-## 4. 边界 primitives 试点（6-9 日）
+## 4. 边界 primitives 试点（未批准、部分顺带实现）
 
 ### 4A. Go HTTP
 
@@ -109,7 +119,7 @@ Review：使用 `go-review`、`sql-code-review` 和 `code-review-and-quality` �
 
 回滚点：按模块恢复本地 helper；共享 helper 可保留给已验证调用方。
 
-## 5. 热点拆分与模块边界试点（8-12 日）
+## 5. 热点拆分与模块边界试点（未批准、未实现）
 
 1. 逐模块提取 Worker builder，锁定共享实例 identity、初始化/关闭顺序和 capability readiness。
 2. 拆 ReviewSessionPage：route orchestration、command hook、展示组件分别测试。
@@ -133,7 +143,7 @@ Review：Go 改动使用 `go-review`，前端与跨层契约使用 `code-review-
 
 回滚点：一个 builder、一个页面、一个 Domain edge 各自独立提交。
 
-## 6. 性能与契约治理（5-8 日）
+## 6. 性能与契约治理（未批准、工作包未完成）
 
 1. 将 Vite manifest/bundle report 作为 CI artifact，按当前 gzip/raw 基线设置 5% 回归预算。
 2. 用 Playwright 网络 trace 测量编辑器冷启动；只在确认未使用 worker/语言后做裁剪。
@@ -146,7 +156,7 @@ Review：Go 改动使用 `go-review`，前端与跨层契约使用 `code-review-
 
 ## 最终验收
 
-1. 运行 `make test`、所有受影响 integration/fault/browser gate、全部 7 个 Playwright spec、`go mod tidy -diff`、`govulncheck` 与 `git diff --check`。
+1. 运行 `make test`、所有受影响 integration/fault/browser gate、全部当前 Playwright spec、`go mod tidy -diff`、`govulncheck` 与 `git diff --check`。
 2. 重跑九维评分与审查统计，逐项关联 PRD AC，而不是只报告总分。
 3. 确认没有新增 domain reverse dependency、无界查询、未分页列表、重复业务规则或 CI 静默 skip。
 4. 更新 `.trellis/spec/` 中稳定的新契约，记录 Health 分页、CI 分层、boundary primitives 和依赖门禁。

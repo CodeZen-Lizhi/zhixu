@@ -1,45 +1,38 @@
 # ZHIXU / 知序文档中心
 
-本目录保存知序项目的产品需求、领域模型、架构设计、业务工作流、架构决策和运行手册。
+知序是一个本地优先、自托管的个人知识工作台。本文档是 `docs/` 的唯一总入口；产品范围、当前架构、运行方式和决策理由分别由下列事实源维护。
 
-## 产品文档
+## 长期事实源
 
-- [正式产品需求文档](product/PRD.md)
-- [产品需求大纲](product/PRD-outline.md)
+| 需要回答的问题 | 权威文档 | 维护边界 |
+|---|---|---|
+| 产品有哪些功能，如何使用 | [完整用户指南](user-guide.md) | 覆盖全部用户可见功能、入口、操作、结果和限制；不维护逐版本完成清单 |
+| 产品必须交付什么 | [产品需求与验收](requirements.md) | 维护范围、需求编号、优先级和验收标准，不记录里程碑日志 |
+| 系统当前如何设计 | [架构文档](architecture/README.md) | 维护当前有效的边界、不变量和数据流，不复制精确 wire 或物理 Schema |
+| 后续按什么顺序推进 | [开发路线图](roadmap.md) | 只维护高层方向、依赖与发布门禁；详细状态在 `.trellis/tasks/` |
+| 如何安装、配置、运行和恢复 | [运行与恢复手册](operations.md) | 说明受支持操作；精确默认值仍以配置代码、示例和 CLI help 为准 |
+| 为什么采用关键技术选择 | [ADR 索引](architecture/adr/README.md) | 一项决策一份记录；架构正文只引用当前结论 |
 
-## 架构文档
+## 契约事实源
 
-- [架构文档总入口](architecture/README.md)
-- [统一领域语言](architecture/CONTEXT.md)
-- [系统上下文与容器架构](architecture/system-context.md)
-- [领域模型](architecture/domain-model.md)
-- [模块化单体架构](architecture/module-architecture.md)
-- [技术栈与依赖选择](architecture/technology-stack.md)
-- [进程启动配置架构](architecture/configuration.md)
-- [部署架构](architecture/deployment.md)
-- [数据架构](architecture/data-architecture.md)
-- [数据库设计](architecture/database-design.md)
-- [检索与索引架构](architecture/retrieval-architecture.md)
-- [Agent 与 RAG 架构](architecture/agent-rag-architecture.md)
-- [持久化工作流引擎](architecture/workflow-engine.md)
-- [安全架构与威胁模型](architecture/security.md)
-- [可观测性与审计架构](architecture/observability.md)
-- [测试与 AI 评测](architecture/testing-and-evaluation.md)
-- [Workspace 与 Docker 运行手册](architecture/runbooks/workspace-runtime.md)
+- 精确 HTTP 路径、请求响应 Schema、状态码和错误码：[OpenAPI 3.1](../api/openapi/openapi.json)。
+- 精确表、列、约束、索引和迁移顺序：[数据库迁移](../migrations/)。
+- 命令和配置默认值：[`zhixu`](../zhixu)、[`.env.example`](../.env.example)、[`internal/platform/config`](../internal/platform/config/) 与 [`deploy`](../deploy/)。
+- 当前任务与交付状态：[`.trellis/tasks/`](../.trellis/tasks/)。
+- 工程规范：根目录 `AGENTS.md`、`.trellis/spec/` 和 [`CONTRIBUTING.md`](../CONTRIBUTING.md)；`docs/` 不维护平行标准。
 
-## 专项目录
+## 维护规则
 
-- [业务工作流](architecture/workflows/)
-- [架构决策 ADR](architecture/adr/README.md)
-- [运行手册 Runbook](architecture/runbooks/)
-- [架构落地实施计划](architecture/implementation-plan.md)
-- [架构落地任务清单](architecture/implementation-checklist.md)
-- [PRD—架构追踪矩阵](architecture/requirements-traceability.md)
+1. 一个事实只在一个权威位置维护，其他文档使用链接。
+2. 用户指南说明“如何使用”，需求说明“必须满足什么”，架构说明“当前如何实现边界”，ADR 说明“为什么选择”。
+3. 精确 API 和数据库结构只改 OpenAPI 与迁移；长期文档只保留语义、不变量和权威链接。
+4. 交付勾选、测试时间点和详细任务拆分只进入 Trellis；路线图不复制任务状态。
+5. 删除或重命名文档时同步更新仓库内引用，不保留长期重定向空壳。
 
-## 文档维护规则
+## 完成判定与同步
 
-1. PRD 是功能范围和验收标准的依据。
-2. `architecture/CONTEXT.md` 是领域术语依据。
-3. 难以逆转的架构选择记录在 ADR 中。
-4. PRD 变化后同步更新架构文档和需求追踪矩阵。
-5. 文档中的 Mermaid 图与所属 Markdown 一起维护。
+1. 文件、路由、脚本或测试存在，只能证明对应资产存在；child 已归档只证明该 child 的约定范围，局部测试只证明被执行的边界。三者都不能单独推出父任务或产品需求完成。
+2. 功能或工作包标记完成前，必须同时核对稳定需求、实现、生产 Composition、直接自动化证据和对应最终门禁；缺任一环节时标为部分完成或明确未验证。
+3. `task.py list` 的 `children done` 只表示已登记子任务进度。父任务状态和 AC 由父任务产物结合代码/运行证据维护，不从 child 数量推导。
+4. 需求变化先更新 `requirements.md`；行为或架构变化同步更新其唯一事实源和相关活跃 Trellis 任务。归档任务与 research 保留历史原貌，不回写成当前事实。
+5. 合并前运行 `make task-context-check`，确保所有活跃任务上下文仍指向可读取的当前文件；删除或重命名事实源时在同一变更更新活跃 manifest。

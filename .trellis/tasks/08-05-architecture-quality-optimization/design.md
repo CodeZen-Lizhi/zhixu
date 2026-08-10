@@ -8,6 +8,13 @@
 4. 每次只迁移一个可验证边界，允许新旧机制短期并存并可单独回滚。
 5. 质量门禁分层执行，避免把完整发布套件强塞进每个 PR。
 
+## 当前适用状态
+
+- 本文件描述的 WP2-WP6 仍是待批准设计，不是当前已交付架构。
+- 已交付的是 WP1 Health 有界历史，以及步骤 0 中收窄后的可重复静态基线；步骤 0 的 CI/迁移运行时观察仍待补。
+- WP4 只有前端 record/exact/UUID 等 primitives 顺带部分落地；这不代表 WP4 获批或完成。
+- WP3/WP6 只有单一 CI、手写 OpenAPI checker、局部 E2E 和可选 bundle 报告等既存基础，不能据此勾选对应验收。
+
 ## 工作包与依赖
 
 ```text
@@ -66,7 +73,7 @@ WP3 CI、测试与文档门禁 -------------------------------┘
 | --- | --- | --- | --- |
 | Fast | 每个 PR | Unit、vet/lint/typecheck、build、OpenAPI、migration static、相关 package tests | 快速反馈 |
 | Selected Integration | PR 路径命中 | 对应 PostgreSQL/River/Fault/Browser smoke | 阻止受影响领域回归 |
-| Full | main/nightly/release | 全部 integration、7 个 Playwright、Security、Eval、Docker smoke、SBOM | 发布证据 |
+| Full | main/nightly/release | 全部 integration、全部当前 Playwright、Security、Eval、Docker smoke、SBOM | 发布证据 |
 
 - 先收集每个 Make target 的耗时和稳定性，再设 PR 总时长预算；长容量测试留在 nightly。
 - 关键 integration helper 增加 CI-required 模式：在 CI job 中缺少数据库配置直接失败，本地仍可明确 SKIP。

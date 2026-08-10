@@ -1,0 +1,38 @@
+# ZHIXU CODEOWNERS —— 自动指派默认审查负责人
+# 当前仓库远端归属 CodeZen-Lizhi；团队 owner 建立后再按目录替换为真实账号或 team。
+# CODEOWNERS 只能指定候选审查人；安全敏感目录的双审需在分支保护或 PR 流程中另行落实。
+
+# ---- 默认 owner ----
+*                              @CodeZen-Lizhi
+
+# ---- 安全敏感（具体双审要求见 CONTRIBUTING.md）----
+/internal/auth/                @CodeZen-Lizhi
+/internal/changecontrol/       @CodeZen-Lizhi
+/internal/gitsync/             @CodeZen-Lizhi
+/migrations/                   @CodeZen-Lizhi
+/internal/platform/migration/  @CodeZen-Lizhi
+/api/                          @CodeZen-Lizhi
+
+# ---- 业务模块 ----
+/internal/graph/               @CodeZen-Lizhi
+/internal/knowledge/           @CodeZen-Lizhi
+/internal/retrieval/           @CodeZen-Lizhi
+/internal/agent/               @CodeZen-Lizhi
+/internal/workflow/            @CodeZen-Lizhi
+/internal/conversation/        @CodeZen-Lizhi
+/internal/ingestion/           @CodeZen-Lizhi
+/internal/review/              @CodeZen-Lizhi
+/internal/health/              @CodeZen-Lizhi
+
+# ---- 平台/基础设施 ----
+/internal/platform/            @CodeZen-Lizhi
+/internal/observability/       @CodeZen-Lizhi
+/internal/platform/observability/ @CodeZen-Lizhi
+/cmd/                          @CodeZen-Lizhi
+
+# ---- 前端 ----
+/web/                          @CodeZen-Lizhi
+
+# ---- 部署/契约 ----
+/deploy/                       @CodeZen-Lizhi
+/api/openapi/                  @CodeZen-Lizhi

@@ -8,10 +8,10 @@
 
 ## 已确认事实
 
-- `docs/architecture/frontend-architecture.md` 将 Server State 交给 TanStack Query，将可分享的筛选、排序、当前对象和图谱中心节点交给 URL。
+- `docs/architecture/application-contracts.md` 将 Server State 交给 TanStack Query，将可分享的筛选、排序、当前对象和图谱中心节点交给 URL。
 - Local Draft 仅保存 Proposal 编辑、Diff 选择、Artifact 大纲等交互状态；权威 Proposal Revision 由服务端持久化。
 - SSE 报告 Workflow 和 Index 事件并触发定向 Query Invalidation，不是事实源。
-- `docs/architecture/api-and-events.md` 要求通过 Last-Event-ID 重连；事件超出保留窗口时重新查询资源。
+- `docs/architecture/application-contracts.md` 要求通过 Last-Event-ID 重连；事件超出保留窗口时重新查询资源。
 
 ## Hook 职责
 
@@ -55,7 +55,7 @@
 M1 前执行：
 
 ```bash
-rg -n 'TanStack Query|URL State|SSE|Last-Event-ID|Idempotency' docs/architecture/frontend-architecture.md docs/architecture/api-and-events.md
+rg -n 'TanStack Query|URL State|SSE|Last-Event-ID|Idempotency' docs/architecture/application-contracts.md
 git diff --check
 ```
 

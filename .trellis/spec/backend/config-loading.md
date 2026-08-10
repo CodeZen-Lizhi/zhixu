@@ -7,7 +7,7 @@
 - 修改 `internal/platform/config`、`Config` 字段、`Load*` 入口、`ZHIXU_*`/OTel 环境变量或启动配置 YAML 时应用本规范。
 - 配置包是基础设施边界；领域模块与 `internal/modelsettings` 不得依赖 Viper、validator 或原始环境变量。
 - 本规范只约束进程启动配置，不引入热更新、远程配置中心或 Model Settings 数据库状态读取。
-- 面向维护者的架构总览见 [`docs/architecture/configuration.md`](../../../docs/architecture/configuration.md)；
+- 面向维护者的架构总览见 [`application-contracts.md`](../../../docs/architecture/application-contracts.md)；
   本文件继续作为新增/修改配置代码时的可执行契约。
 
 ### 2. Signatures

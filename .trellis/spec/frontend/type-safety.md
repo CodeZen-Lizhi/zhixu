@@ -10,9 +10,9 @@ M6-D Search 使用不新增依赖的手写严格 Decoder。Generated Client 与�
 
 ## 已确认事实
 
-- `docs/architecture/technology-stack.md` 选择 TypeScript。
-- `docs/architecture/api-and-events.md` 要求生成 OpenAPI、检查 Breaking Change、Generated Client 仅位于前端边缘，并使用 Problem Details、Cursor Pagination、ETag/Version 和强类型 SSE Envelope。
-- `docs/architecture/frontend-architecture.md` 将 Generated/Typed API Client 与 Domain UI Model 分离。
+- `docs/architecture/system-design.md` 选择 TypeScript。
+- `docs/architecture/application-contracts.md` 要求生成 OpenAPI、检查 Breaking Change、Generated Client 仅位于前端边缘，并使用 Problem Details、Cursor Pagination、ETag/Version 和强类型 SSE Envelope。
+- `docs/architecture/application-contracts.md` 将 Generated/Typed API Client 与 Domain UI Model 分离。
 - 当前 Search Decoder 不依赖 Runtime Validation Library；不得在规范中虚构未安装包或 Generator。
 
 ## 类型所有权
@@ -80,7 +80,7 @@ M6-D Search 使用不新增依赖的手写严格 Decoder。Generated Client 与�
 M1 前执行：
 
 ```bash
-rg -n 'OpenAPI|Generated Client|Problem Details|SSE|TypeScript' docs/architecture/api-and-events.md docs/architecture/frontend-architecture.md docs/architecture/technology-stack.md
+rg -n 'OpenAPI|Generated Client|Problem Details|SSE|TypeScript' docs/architecture/application-contracts.md docs/architecture/system-design.md
 git diff --check
 ```
 

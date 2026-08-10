@@ -2,7 +2,7 @@
   "id": "architecture-quality-optimization",
   "name": "architecture-quality-optimization",
   "title": "代码质量与架构优化计划",
-  "description": "",
+  "description": "已批准子任务中，静态质量基线与 Health 有界历史已完成；步骤 0 的 CI/迁移运行时观察仍缺。WP2/WP5 未实现，WP3/WP6 只有局部基础且未完成，WP4 仅部分顺带实现；步骤 2-6 仍未批准。",
   "status": "planning",
   "dev_type": null,
   "scope": "cross-layer-architecture",

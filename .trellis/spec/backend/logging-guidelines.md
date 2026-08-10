@@ -6,9 +6,9 @@
 
 ## 已确认事实
 
-- 后端日志库选用 Go 标准库 `slog`，输出结构化 JSON；Trace 使用 OpenTelemetry，Metrics 使用 `prometheus/client_golang`（依据 [`technology-stack.md`](../../../docs/architecture/technology-stack.md) 第 2 节）。
-- 级别语义为：DEBUG 开发诊断，INFO 状态变化，WARN 降级/重试/低置信度，ERROR 节点失败或依赖失败（依据 [`observability.md`](../../../docs/architecture/observability.md) 第 4 节）。
-- 相关字段包括 `request_id`、`trace_id`、`workspace_id`、`workflow_run_id`、`node_run_id`、`proposal_id`、`tool_call_id`、`document_id`；异步边界必须保持关联（依据 [`observability.md`](../../../docs/architecture/observability.md) 第 3、5 节）。
+- 后端日志库选用 Go 标准库 `slog`，输出结构化 JSON；Trace 使用 OpenTelemetry，Metrics 使用 `prometheus/client_golang`（依据 [`system-design.md`](../../../docs/architecture/system-design.md)）。
+- 级别语义为：DEBUG 开发诊断，INFO 状态变化，WARN 降级/重试/低置信度，ERROR 节点失败或依赖失败（依据 [`quality.md`](../../../docs/architecture/quality.md)）。
+- 相关字段包括 `request_id`、`trace_id`、`workspace_id`、`workflow_run_id`、`node_run_id`、`proposal_id`、`tool_call_id`、`document_id`；异步边界必须保持关联（依据 [`quality.md`](../../../docs/architecture/quality.md)）。
 - 禁止记录 API Key、Authorization Header、完整 Prompt/Source（默认）、无保留期限的用户回答全文；不展示模型私有思维链。
 - Audit 独立记录 Approval、Tool Permission、File Write、Git Commit、Rollback、Memory/Settings Change 和 Security Block，并且不能由普通清理任务删除。
 

@@ -7,8 +7,8 @@
 - 修改 `zhixu` 启动器、`cmd/workspacectl`、`internal/workspacecontrol`、Workspace
   Registry/Control/Runtime、`deploy/compose*.yml`、API/Worker Workspace gate、Active Workspace API 或前端根边界时，必须应用本契约。
 - 上述入口的命令、端口、状态保存、切换、认证边界或错误行为发生变化时，必须在同一改动中同步
-  `docs/architecture/runbooks/workspace-runtime.md`、`docs/architecture/deployment.md`、`docs/product/PRD.md` 和
-  `docs/architecture/requirements-traceability.md`；Active Workspace wire 变化还必须同步 OpenAPI 与前端 strict decoder。
+  `docs/operations.md`、`docs/requirements.md` 和 `docs/architecture/system-design.md`；Active Workspace wire 变化还必须同步
+  OpenAPI 与前端 strict decoder。
 - Workspace Root 只由用户在本机命令中提供宿主机真实绝对路径；浏览器、业务 API 和业务容器均不得选择 mount source。
 - Docker Web/API 固定通过 IPv4 loopback 发布；宿主机不再运行常驻 Web Controller、控制会话或 HTTP 反向代理。
 
@@ -16,6 +16,8 @@
 
 - 首次或显式启动：`./zhixu up --workspace <absolute-root> [--initialize-git]`。
 - 重复启动：`./zhixu up`；重启：`./zhixu restart`，均复用上次成功选择。
+- 运行时等待入口：`zhixu-runtime-wait --profile api|worker -- /absolute/target [args...]`；数据库可 ping 后以目标命令替换 PID 1。
+- 状态：`./zhixu status` 只读展示全部关键容器（包括 exited/created）及 `Runtime: ready|degraded`。
 - 低频切换：`./zhixu workspace switch <absolute-root> [--initialize-git]`。
 - 一次性原生命令：`zhixu-workspacectl reconcile|switch --control-instance-id <uuid>`；只处理受控路径、数据库状态和 Compose grant，完成即退出，不监听端口。
 - 业务发现：`GET /api/v1/workspaces/active`；响应是当前 grant 对应的唯一 Active Workspace 业务投影。
@@ -56,9 +58,14 @@
   或继续准备目标 Workspace。
 - Docker 入口固定发布为 `127.0.0.1:${ZHIXU_HTTP_PORT:-8080}:8080`，不得回退到随机端口或 `0.0.0.0`。API 继续只监听共享
   网络命名空间的 `127.0.0.1:8081`，Docker 内 proxy/firewall 只负责 loopback 转发与容器网络隔离，不拥有 Workspace 状态。
+- `app` 与 `worker` 的 PID 1 必须在 PostgreSQL 瞬时不可用时保持容器运行并有界 ping；ready 后用 `exec` 启动对应业务进程。
+  `api` profile 使用 API 配置入口，`worker` profile 使用 Worker 配置入口。参数、profile、配置或数据库 URL 无效时必须有限步骤内
+  fail fast，只输出稳定错误码，不输出 DSN、密码或底层 cause。不得用公开 bridge 端口替代 `network_mode: service:app|worker`。
+- `./zhixu status` 必须以 Compose `ps --all` 为展示事实，并独立检查 PostgreSQL、app、worker、proxy 与两个 model relay；
+  app/worker/proxy health 非 healthy 或任一关键进程非 running 时输出 `Runtime: degraded`，且不得启动、停止或修复容器。
 - `GET /api/v1/workspaces/active` 必须只接受唯一 `status='active'` Workspace，并在 managed runtime 中经 RootGrantResolver
   验证 ID、Root 和 grant 一致。零个、多个或不匹配均 fail closed，不得任选、回退 localStorage 或返回旧 Workspace。
-- `docs/architecture/runbooks/workspace-runtime.md` 是面向使用者的运行操作入口，但命令和状态语义仍以 `zhixu`、
+- `docs/operations.md` 是面向使用者的运行操作入口，但命令和状态语义仍以 `zhixu`、
   `cmd/workspacectl`、Compose、OpenAPI 和本契约为实现事实源；文档不得复制已经删除的 Host Controller 操作路径。
 - 前端以 Active Workspace API 为唯一 Workspace 身份事实源。A -> B 时先 abort A 请求、停止 A SSE、清理 A Query/cache/草稿
   投影，再发布 B；旧 epoch 的迟到响应不得写入 B。
@@ -84,6 +91,9 @@
 | 恢复也失败但已证明 zero bind | failed + zero Active + `recovery_failed`；业务入口保持不可用 |
 | Active API 为零个、多个或与 grant 不匹配 | 稳定错误；前端卸载 Workspace 业务树，不显示旧缓存 |
 | 默认 `8080` 已占用 | 启动失败并提示释放端口或设置 `ZHIXU_HTTP_PORT`；不选随机端口 |
+| PostgreSQL 尚未可 ping | app/worker 等待进程保持 running，业务进程尚未启动；数据库恢复后自动 `exec` |
+| runtime wait 参数、profile、配置或数据库 URL 无效 | `RUNTIME_WAIT_*_INVALID`，有限步骤内失败且日志无 Secret |
+| proxy/relay exited 或关键 health 非 healthy | `status` 保留退出容器并输出 `Runtime: degraded`；零状态修改 |
 | 运行手册、PRD、部署文档或 OpenAPI 与当前命令/API 不一致 | 文档一致性检查失败；不得以历史说明覆盖当前实现契约 |
 | `down` | 撤销 runtime/grant，保留 selection、PostgreSQL、模型密钥和宿主机文件 |
 | 经确认的 `reset` | 删除项目卷、selection/grant；宿主机 Workspace 文件保持原样 |
@@ -93,8 +103,10 @@
 - Good：首次执行 `./zhixu up --workspace /Users/me/knowledge`，命令只给 API/Worker 各一个同路径 bind，成功后浏览器直接打开
   `http://127.0.0.1:8080`；切到 B 后 A 数据不可见，切回 A 复用原 ID 和数据。
 - Base：`down` 后无参数 `up` 重新校验并恢复 selection；切换期间浏览器短暂重连，但没有常驻宿主机网页进程可失效。
+- Good：Docker daemon 重启时 PostgreSQL 较慢，app/worker 等待进程仍持有 namespace；proxy/relay 能加入，数据库 ready 后无需手工补启动。
 - Bad：把 `/Users/me` 映射到 `/workspace` 再拼子路径；允许浏览器决定 mount；缺目录时自动 `mkdir`；撤销失败仍释放 gate；
-  从 localStorage 恢复旧 ID；让 Host HTTP server、随机端口或控制 session 与新入口并存。
+  从 localStorage 恢复旧 ID；让 Host HTTP server、随机端口或控制 session 与新入口并存；只依赖 Compose `depends_on`
+  推断 daemon restart 顺序，或用不带 `--all` 的 `ps` 隐藏失败 sidecar。
 
 ### 6. Tests Required
 
@@ -108,7 +120,9 @@
 - Launcher contract：首次必填、selection 权限/原子提交、同根幂等 switch、A/B 切换、失败不覆盖、restart/down/reset、
   Secret 不进入 argv/log，且不存在 Controller PID/log/token/bundle 生命周期。
 - Compose contract：base zero bind；grant 模型只有 API/Worker exact bind；固定 IPv4 loopback 端口；API 内部 loopback；
-  proxy/firewall 保留；无 Docker socket、随机 host port、父目录或 legacy `/workspace`。
+  app/worker 使用 profile-aware runtime wait；proxy/firewall 与 sidecar 共享 namespace；无 Docker socket、随机 host port、父目录或 legacy `/workspace`。
+- Runtime wait 单测：首次 ping 失败后重试、取消退出、成功后 exec、API/Worker profile 路由、无效配置/URL fail fast 且无 Secret。
+- Launcher contract：`status` 必须调用 `ps --all`，健康模型输出 ready，含 exited sidecar 的模型输出 degraded 且保留退出行。
 - HTTP/前端：Active Workspace strict decoder、唯一 active/grant mismatch、Auth 独立、A -> B Abort/cache/SSE 清理、重连与迟到响应。
 - 文档：`./zhixu help` 与运行手册命令一致；新增本地链接可解析；现行文档不得把浏览器选 Root、Host Controller 控制密钥、
   宿主机 HTTP 代理或随机 Web 端口写成当前操作方式。
@@ -126,4 +140,7 @@ Correct: 复用持久化状态机完成 quiesce/revoke/prepare/verify/commit/act
 
 Wrong: 修改 launcher、Compose 或 Active Workspace API 后，只更新代码或历史 ADR。
 Correct: 同一改动同步运行手册、PRD、部署/追踪文档、OpenAPI 与前端 decoder，并用实际命令和链接检查验证。
+
+Wrong: 只用 `depends_on` 保证 daemon restart 顺序，并让 `status` 默认隐藏 exited sidecar。
+Correct: namespace owner 在 PostgreSQL 暂不可用时保持 running；`status` 用 `ps --all` 明确报告 ready/degraded。
 ```

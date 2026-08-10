@@ -19,3 +19,11 @@ If you're using Codex or another agent-capable tool, additional project-scoped h
 Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
 
 <!-- TRELLIS:END -->
+
+## 项目依赖选型规则
+
+- 新增通用基础设施、协议处理、框架能力或第三方集成前，必须先检索项目已有实现、标准库和主流成熟框架。
+- 在全部强制安全、数据一致性、部署和兼容约束均满足的前提下，成熟方案能够覆盖至少 80% 加权需求时，默认复用该方案，不得重复自研。
+- 用户已经指定或项目已经批准的技术选型属于硬约束；更换、绕开或并行引入替代方案前，必须先取得用户明确确认。
+- 确需自研时，必须用 ADR 记录候选方案、需求覆盖、未采用原因、自研边界、维护成本、测试方式和退出路径。
+- 具体判定与例外要求见 [`docs/architecture/adr/0019-mature-framework-first.md`](docs/architecture/adr/0019-mature-framework-first.md)。

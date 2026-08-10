@@ -11,8 +11,8 @@ Candidate scope、affected-change outbox、真实 PostgreSQL/River/API/浏览器
 Review 批量动作、认证和 M10 最终容量仍未实现。
 M7-04 已交付 append-only Knowledge Timeline、durable Outbox/Worker 恢复、Workspace-bound HMAC cursor、Timeline UI、
 `impact-analysis/v2` Artifact/Review Card impact、一等 owner event、正式 `downstream_update` Proposal 意图与
-`IMPACT_ANALYZED` Audit 原子事务；下游 owner executor、Document/Eval impact、全局 Audit/OTel/Metrics 和
-POISONED 运维入口仍未实现。
+`IMPACT_ANALYZED` Audit 原子事务；下游 owner executor 与 Document/Eval impact 仍不在当前合同。OTel exporter 与
+API/Worker Prometheus 已交付；跨领域 Audit 生产者覆盖、查询/留存/恢复和 POISONED 运维入口仍未完成。
 M9 已补充 Workspace Source Version/Proposal/Workflow 列表、资源绑定 cursor 与 Active Index 选择投影；
 Proposal 等级由不可变 `proposal.risk_level` 唯一拥有，Source Version 使用受复合约束的 Workspace 镜像键支撑
 有界 keyset 查询；Proposal detail 的 Approval 为必需 nullable，Summary 保持 optional non-null。三条真实
@@ -80,7 +80,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 |---|---|---|
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
 | [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
-| [进程配置加载契约](./config-loading.md) | 实例化 Viper、validator、YAML/env 严格边界、process profile、Secret 与 Rollout 归属 | defaults/YAML/env 迁移已锁定；[维护者总览](../../../docs/architecture/configuration.md) 已同步，无全局 Viper、热更新或数据库 Rollout 状态读取 |
+| [进程配置加载契约](./config-loading.md) | 实例化 Viper、validator、YAML/env 严格边界、process profile、Secret 与 Rollout 归属 | defaults/YAML/env 迁移已锁定；[维护者总览](../../../docs/architecture/application-contracts.md) 已同步，无全局 Viper、热更新或数据库 Rollout 状态读取 |
 | [宿主机 Workspace 精确授权契约](./workspace-root-grant.md) | 一次性 Workspace Control、不可变 Root identity、单 Grant 状态机、exact bind 与 Docker 固定入口 | Root/Docker 控制由本机命令保护；运行时只允许 API/Worker 精确 source=target 授权，Web 以 Active Workspace API 为事实源 |
 | [模型设置与开发运行时契约](./model-settings-runtime.md) | desired/active/applied revision、AEAD、冻结 Model Runtime、受控 restart 与 Docker 生命周期 | managed Settings 与开发一键启动的实现和真实验收门禁 |
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker/Web 门禁 | M7-04 与遗留收口已验证；下游 owner executor、Document/Eval impact 与全局 Audit 保持 deferred |
@@ -132,15 +132,15 @@ git diff --check
 
 ## 事实来源
 
-- 产品不变量、状态和验收：[`docs/product/PRD.md`](../../../docs/product/PRD.md)。
-- 领域术语：[`docs/architecture/CONTEXT.md`](../../../docs/architecture/CONTEXT.md)。
-- 模块边界：[`docs/architecture/module-architecture.md`](../../../docs/architecture/module-architecture.md)。
-- API、分页、SSE 和错误：[`docs/architecture/api-and-events.md`](../../../docs/architecture/api-and-events.md)。
-- 数据库、事务、索引和备份：[`docs/architecture/database-design.md`](../../../docs/architecture/database-design.md) 与 [`data-architecture.md`](../../../docs/architecture/data-architecture.md)。
-- Workflow、租约、重试和补偿：[`docs/architecture/workflow-engine.md`](../../../docs/architecture/workflow-engine.md)。
-- Adapter 与错误分类：[`docs/architecture/interfaces-and-adapters.md`](../../../docs/architecture/interfaces-and-adapters.md)。
-- 安全、日志、Trace、Metrics 和审计：[`security.md`](../../../docs/architecture/security.md)、[`observability.md`](../../../docs/architecture/observability.md)、[`tool-security.md`](../../../docs/architecture/tool-security.md)。
-- 测试与评测：[`docs/architecture/testing-and-evaluation.md`](../../../docs/architecture/testing-and-evaluation.md)。
+- 产品不变量、状态和验收：[`docs/requirements.md`](../../../docs/requirements.md)。
+- 领域术语：[`docs/architecture/domain-and-data.md`](../../../docs/architecture/domain-and-data.md)。
+- 模块边界：[`docs/architecture/system-design.md`](../../../docs/architecture/system-design.md)。
+- API、分页、SSE 和错误：[`docs/architecture/application-contracts.md`](../../../docs/architecture/application-contracts.md)。
+- 数据库、事务、索引和备份：[`docs/architecture/domain-and-data.md`](../../../docs/architecture/domain-and-data.md)。
+- Workflow、租约、重试和补偿：[`docs/architecture/ai-runtime.md`](../../../docs/architecture/ai-runtime.md)。
+- Adapter 与错误分类：[`docs/architecture/system-design.md`](../../../docs/architecture/system-design.md)。
+- 安全、日志、Trace、Metrics、审计、性能和测试：[`docs/architecture/quality.md`](../../../docs/architecture/quality.md)。
+- 测试与评测：[`docs/architecture/quality.md`](../../../docs/architecture/quality.md)。
 
 ## M1 真实实现入口
 

@@ -91,7 +91,7 @@ def children_progress(
     children: tuple[str, ...] | list[str],
     all_statuses: dict[str, str],
 ) -> str:
-    """Format children progress string like " [2/3 done]".
+    """Format children progress string like " [2/3 children done]".
 
     Args:
         children: List of child directory names.
@@ -109,4 +109,4 @@ def children_progress(
         1 for c in children
         if c not in all_statuses or all_statuses.get(c) in ("completed", "done")
     )
-    return f" [{done}/{len(children)} done]"
+    return f" [{done}/{len(children)} children done]"

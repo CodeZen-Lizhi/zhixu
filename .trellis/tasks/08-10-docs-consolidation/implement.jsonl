@@ -1,0 +1,8 @@
+{"file": ".trellis/tasks/08-10-docs-consolidation/research/document-inventory.md", "reason": "现有 66 份文档的迁移去向与必须保留锚点"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "文档事实源去重与成熟方案优先约束"}
+{"file": ".trellis/tasks/08-10-docs-consolidation/research/user-guide-coverage.md", "reason": "实现 user-guide.md 时覆盖全部功能面、端到端流程并区分当前与计划能力"}
+{"file": ".trellis/tasks/08-10-docs-consolidation/research/active-task-link-audit.md", "reason": "修复活跃任务的失效文档路径、验收数量与误导性子任务进度"}
+{"file": ".trellis/tasks/08-10-docs-consolidation/research/product-task-drift-audit.md", "reason": "按当前代码核定 M7-M9 与 AC-01..AC-41 的真实状态"}
+{"file": ".trellis/tasks/08-10-docs-consolidation/research/m10-code-status-audit.md", "reason": "按代码、生产装配、测试与最终证据核定 M10 状态"}
+{"file": ".trellis/tasks/08-10-docs-consolidation/research/m11-code-audit.md", "reason": "核定 M11 未完成项并恢复 14 步最终演示范围"}
+{"file": ".trellis/tasks/08-10-docs-consolidation/research/architecture-quality-code-status-audit.md", "reason": "区分架构质量父任务的审批状态、子任务状态与代码实现状态"}

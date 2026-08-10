@@ -1,15 +1,12 @@
-{"file": "docs/product/PRD.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/CONTEXT.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/module-architecture.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/domain-model.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/database-design.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/api-and-events.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/workflow-engine.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/tool-security.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/testing-and-evaluation.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/security.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/deployment.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": "docs/architecture/retrieval-architecture.md", "reason": "Product delivery implementation contract and evidence source"}
+{"file": "docs/user-guide.md", "reason": "Current user-visible behavior, entry points and product limitations; not delivery status"}
+{"file": "docs/requirements.md", "reason": "Authoritative stable product scope and final AC-01..AC-41 acceptance matrix"}
+{"file": "docs/roadmap.md", "reason": "High-level undelivered directions and dependencies; detailed status remains in Trellis"}
+{"file": "docs/architecture/system-design.md", "reason": "Current system topology, module boundaries and deployment shape"}
+{"file": "docs/architecture/domain-and-data.md", "reason": "Current domain vocabulary, data ownership and consistency rules; physical schema remains in migrations"}
+{"file": "docs/architecture/application-contracts.md", "reason": "Current API, SSE, frontend and configuration boundaries; exact wire remains in OpenAPI"}
+{"file": "docs/architecture/ai-runtime.md", "reason": "Current retrieval, Agent, persistent Workflow and business execution boundaries"}
+{"file": "docs/architecture/quality.md", "reason": "Current security, audit, observability, performance, test and release gates"}
+{"file": "docs/operations.md", "reason": "Supported configuration, deployment and recovery procedures; executable behavior remains in code and Make targets"}
 {"file": ".trellis/spec/guides/index.md", "reason": "Product delivery implementation contract and evidence source"}
-{"file": ".trellis/spec/backend/index.md", "reason": "Backend spec entry point; populate before backend implementation"}
-{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend spec entry point; populate before frontend implementation"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Current backend spec entry point and production composition constraints"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Current frontend spec entry point and user-flow quality constraints"}

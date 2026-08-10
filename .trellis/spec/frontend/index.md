@@ -68,7 +68,7 @@ M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`�
 - 支持键盘、可见焦点、非纯颜色状态和 Diff 文本说明。
 - Vitest、Testing Library 和 Playwright 是测试类型；M1 已锁定 Vitest/Testing Library，浏览器烟测通过内置 Browser skill 执行。
 
-事实来源：`docs/architecture/frontend-architecture.md`、`docs/architecture/api-and-events.md`、`docs/architecture/technology-stack.md`、`docs/architecture/testing-and-evaluation.md`、`docs/product/PRD.md`。
+事实来源：`docs/architecture/application-contracts.md`、`docs/architecture/system-design.md`、`docs/architecture/quality.md`、`docs/requirements.md`。
 
 ## 规范索引
 
@@ -92,7 +92,7 @@ M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`�
 
 1. 阅读本索引和目标层相关规范。
 2. 阅读当前 Trellis Task 的 PRD、Design、Implement 和引用上下文。
-3. 阅读 `docs/architecture/frontend-architecture.md` 及相关 API、安全、性能和产品章节。
+3. 阅读 `docs/architecture/application-contracts.md` 及相关 API、安全、性能和产品章节。
 4. 绘制 API/SSE → Boundary Decoder → Domain UI → Feature → Component 完整数据流。
 5. 新建前先搜索已有 Feature、Projection、Query Key、Decoder、Component 或 Utility。
 6. 确认 Server、URL、Draft 和 Event State 的权威 Owner。
@@ -139,7 +139,7 @@ Evidence href 与 vector `distance`；不得把 distance 重命名为 similarity
 持续执行：
 
 ```bash
-rg -n 'React|TypeScript|TanStack Query|React Router|SSE' docs/architecture/frontend-architecture.md docs/architecture/technology-stack.md
+rg -n 'React|TypeScript|TanStack Query|React Router|SSE' docs/architecture/application-contracts.md docs/architecture/system-design.md
 git diff --check
 ```
 

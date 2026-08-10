@@ -8,10 +8,10 @@
 
 ## 已确认事实
 
-- `docs/architecture/frontend-architecture.md` 定义依赖流向：Routes/Pages → Feature Modules → Domain UI Models 与 Query/Command Clients，并单独设置 SSE Event Store。
+- `docs/architecture/application-contracts.md` 定义依赖流向：Routes/Pages → Feature Modules → Domain UI Models 与 Query/Command Clients，并单独设置 SSE Event Store。
 - Feature 包括 dashboard、inbox、documents、optimization、search、rag、proposals、graph、collections、health、artifacts、review、workflows、settings。
 - Feature 禁止导入其他 Feature 的内部状态；共享领域显示模型放在 Domain UI 层。
-- `docs/architecture/api-and-events.md` 要求在前端边界使用生成或强类型 API Client，领域模块不得依赖生成 Client 类型。
+- `docs/architecture/application-contracts.md` 要求在前端边界使用生成或强类型 API Client，领域模块不得依赖生成 Client 类型。
 
 ## 规划目录
 
@@ -44,7 +44,7 @@ Feature 可按需包含 `components`、`hooks`、`queries`、`commands`、`route
 
 ## 命名约定
 
-- Feature 目录使用 `docs/architecture/CONTEXT.md` 和 `docs/product/PRD.md` 中的稳定产品术语。
+- Feature 目录使用 `docs/architecture/domain-and-data.md` 和 `docs/requirements.md` 中的稳定产品术语。
 - React 组件及文件使用 PascalCase；Hook 使用 `use` + PascalCase；其他模块按 M1 确定的 Formatter/Linter 使用描述性小写名称。
 - 测试默认与被测行为共置，除非 M1 明确建立集成测试边界。
 - Feature 只通过显式公开入口暴露能力，禁止跨边界深层导入。
@@ -63,7 +63,7 @@ Feature 可按需包含 `components`、`hooks`、`queries`、`commands`、`route
 M1 前执行：
 
 ```bash
-rg -n 'Feature Modules|Domain UI|Generated Client|SSE' docs/architecture/frontend-architecture.md docs/architecture/api-and-events.md
+rg -n 'Feature Modules|Domain UI|Generated Client|SSE' docs/architecture/application-contracts.md
 git diff --check
 ```
 
