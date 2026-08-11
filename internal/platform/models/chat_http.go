@@ -53,6 +53,15 @@ const (
 const (
 	openAIChatAdapterName = "openai-compatible-http"
 	chatCompletionsPath   = "/v1/chat/completions"
+	responsesPath         = "/v1/responses"
+)
+
+// ChatAPIStyle selects one explicit OpenAI-compatible Chat protocol.
+type ChatAPIStyle string
+
+const (
+	ChatAPIStyleChatCompletions ChatAPIStyle = "chat_completions"
+	ChatAPIStyleResponses       ChatAPIStyle = "responses"
 )
 
 var (
@@ -66,6 +75,8 @@ var (
 // ChatContract 返回不含 Credential 和 Endpoint 的冻结 Adapter 契约。
 type ChatContract struct {
 	Provider         string
+	APIStyle         ChatAPIStyle
+	EndpointPath     string
 	Model            agentdomain.ModelRef
 	Timeout          time.Duration
 	MaxRequestBytes  int64
@@ -80,6 +91,7 @@ type chatHTTPConfig struct {
 	maxRequestBytes  int64
 	maxResponseBytes int64
 	authorization    string
+	apiStyle         ChatAPIStyle
 }
 
 type chatHTTPOptions struct {
@@ -92,9 +104,18 @@ type chatHTTPOptions struct {
 	timeout          time.Duration
 	maxRequestBytes  int64
 	maxResponseBytes int64
+	apiStyle         ChatAPIStyle
 }
 
 func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
+	apiStyle := options.apiStyle
+	if apiStyle == "" {
+		apiStyle = ChatAPIStyleChatCompletions
+	}
+	endpointPath, ok := chatEndpointPath(apiStyle)
+	if !ok {
+		return chatHTTPConfig{}, chatConfigErrorWithCause(errors.New("chat API style is invalid"))
+	}
 	baseURL, err := parseChatBaseURL(options.baseURL)
 	model := agentdomain.ModelRef{
 		AdapterName:    openAIChatAdapterName,
@@ -104,6 +125,11 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 	}
 	if err != nil {
 		return chatHTTPConfig{}, chatConfigErrorWithCause(errors.New("chat base url is invalid"))
+	}
+	cleanedPath := strings.TrimRight(baseURL.Path, "/")
+	if (endpointPath == responsesPath && strings.HasSuffix(cleanedPath, chatCompletionsPath)) ||
+		(endpointPath == chatCompletionsPath && strings.HasSuffix(cleanedPath, responsesPath)) {
+		return chatHTTPConfig{}, chatConfigErrorWithCause(errors.New("chat base url targets another API style"))
 	}
 	if model.Validate() != nil {
 		return chatHTTPConfig{}, chatConfigErrorWithCause(errors.New("chat model identity is invalid"))
@@ -130,12 +156,13 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 	}
 	return chatHTTPConfig{
 		client:           client,
-		endpointURL:      appendChatPath(baseURL),
-		contract:         ChatContract{Provider: openAICompatibleProvider, Model: model, Timeout: options.timeout, MaxRequestBytes: options.maxRequestBytes, MaxResponseBytes: options.maxResponseBytes},
+		endpointURL:      appendChatPath(baseURL, endpointPath),
+		contract:         ChatContract{Provider: openAICompatibleProvider, APIStyle: apiStyle, EndpointPath: endpointPath, Model: model, Timeout: options.timeout, MaxRequestBytes: options.maxRequestBytes, MaxResponseBytes: options.maxResponseBytes},
 		timeout:          options.timeout,
 		maxRequestBytes:  options.maxRequestBytes,
 		maxResponseBytes: options.maxResponseBytes,
 		authorization:    authorization,
+		apiStyle:         apiStyle,
 	}, nil
 }
 
@@ -155,18 +182,29 @@ func parseChatBaseURL(raw string) (*url.URL, error) {
 	return parsed, nil
 }
 
-func appendChatPath(baseURL *url.URL) string {
+func appendChatPath(baseURL *url.URL, endpointPath string) string {
 	requestURL := *baseURL
 	cleaned := strings.TrimRight(requestURL.Path, "/")
 	switch {
-	case strings.HasSuffix(cleaned, chatCompletionsPath):
+	case strings.HasSuffix(cleaned, endpointPath):
 		requestURL.Path = cleaned
 	case strings.HasSuffix(cleaned, "/v1"):
-		requestURL.Path = path.Join(cleaned, "chat/completions")
+		requestURL.Path = path.Join(cleaned, strings.TrimPrefix(endpointPath, "/v1/"))
 	default:
-		requestURL.Path = path.Join(cleaned, chatCompletionsPath)
+		requestURL.Path = path.Join(cleaned, endpointPath)
 	}
 	return requestURL.String()
+}
+
+func chatEndpointPath(style ChatAPIStyle) (string, bool) {
+	switch style {
+	case ChatAPIStyleChatCompletions:
+		return chatCompletionsPath, true
+	case ChatAPIStyleResponses:
+		return responsesPath, true
+	default:
+		return "", false
+	}
 }
 
 func validChatAPIKey(value string) bool {
@@ -189,12 +227,24 @@ func (config chatHTTPConfig) contractCopy() ChatContract {
 }
 
 func (config chatHTTPConfig) chat(ctx context.Context, request agentapplication.ChatRequest, payload any, result any) error {
+	return config.chatWithResponseMode(ctx, request, payload, result, true)
+}
+
+func (config chatHTTPConfig) chatWithResponseMode(ctx context.Context, request agentapplication.ChatRequest, payload any, result any, strictResponse bool) error {
 	if err := agentapplication.ValidateChatRequest(request); err != nil {
 		return err
 	}
 	if request.Model != config.contract.Model {
 		return chatError(foundation.ErrorConsistencyViolation, ErrorCodeChatRequestInvalid, false, errChatRequestInvalid)
 	}
+	return config.post(ctx, payload, result, strictResponse)
+}
+
+func (config chatHTTPConfig) probe(ctx context.Context, payload any, result any) error {
+	return config.post(ctx, payload, result, false)
+}
+
+func (config chatHTTPConfig) post(ctx context.Context, payload any, result any, strictResponse bool) error {
 	encoded, err := json.Marshal(payload)
 	if err != nil || int64(len(encoded)) > config.maxRequestBytes {
 		return chatError(foundation.ErrorInvalidInput, ErrorCodeChatRequestInvalid, false, errChatRequestInvalid)
@@ -206,7 +256,11 @@ func (config chatHTTPConfig) chat(ctx context.Context, request agentapplication.
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, config.endpointURL, bytes.NewReader(encoded))
 	if err != nil {
-		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatRequestFailed, false, errChatRequestFailed)
+		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatRequestFailed, false, &ConnectionDiagnostic{
+			Stage:          ConnectionStageRequest,
+			TransportError: "request construction failed",
+			cause:          err,
+		})
 	}
 	httpRequest.Header.Set("Accept", "application/json")
 	httpRequest.Header.Set("Content-Type", "application/json")
@@ -219,19 +273,19 @@ func (config chatHTTPConfig) chat(ctx context.Context, request agentapplication.
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return classifyChatStatus(response.StatusCode)
+		diagnostic := providerResponseDiagnostic(response, config.authorization, config.endpointURL)
+		return classifyChatStatus(response.StatusCode, diagnostic)
 	}
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		return chatResponseError(ErrorCodeChatResponseInvalid)
+		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnostic())
 	}
 	encodedResponse, err := io.ReadAll(io.LimitReader(response.Body, config.maxResponseBytes+1))
 	if err != nil {
-		return classifyChatTransportError(requestContext, err)
+		return classifyChatTransportErrorWithStage(requestContext, err, ConnectionStageResponseRead)
 	}
 	if int64(len(encodedResponse)) > config.maxResponseBytes || !utf8.Valid(encodedResponse) {
-		return chatResponseError(ErrorCodeChatResponseInvalid)
+		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnostic())
 	}
 	limits := agentdomain.DecodeLimits{
 		MaxDocumentBytes: int(config.maxResponseBytes),
@@ -242,47 +296,58 @@ func (config chatHTTPConfig) chat(ctx context.Context, request agentapplication.
 	}
 	decoded, err := agentdomain.DecodeStrict(encodedResponse, limits, func(value json.RawMessage) error { return nil })
 	if err != nil {
-		return chatResponseError(ErrorCodeChatResponseInvalid)
+		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnostic())
 	}
 	decoder := json.NewDecoder(bytes.NewReader(decoded))
-	decoder.DisallowUnknownFields()
+	if strictResponse {
+		decoder.DisallowUnknownFields()
+	}
 	if err := decoder.Decode(result); err != nil {
-		return chatResponseError(ErrorCodeChatResponseInvalid)
+		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnostic())
 	}
 	var extra json.RawMessage
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return chatResponseError(ErrorCodeChatResponseInvalid)
+		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnostic())
 	}
 	return nil
 }
 
 func classifyChatTransportError(ctx context.Context, cause error) error {
+	return classifyChatTransportErrorWithStage(ctx, cause, ConnectionStageConnect)
+}
+
+func classifyChatTransportErrorWithStage(ctx context.Context, cause error, fallbackStage ConnectionStage) error {
+	diagnostic := transportDiagnostic(ctx, cause, fallbackStage)
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled):
-		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatCancelled, false, context.Canceled)
+		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatCancelled, false, diagnostic)
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return chatError(foundation.ErrorRetryableFailure, ErrorCodeChatTimeout, true, context.DeadlineExceeded)
+		return chatError(foundation.ErrorRetryableFailure, ErrorCodeChatTimeout, true, diagnostic)
 	default:
 		var networkError net.Error
 		if errors.As(cause, &networkError) && networkError.Timeout() {
-			return chatError(foundation.ErrorRetryableFailure, ErrorCodeChatTimeout, true, errChatRequestFailed)
+			return chatError(foundation.ErrorRetryableFailure, ErrorCodeChatTimeout, true, diagnostic)
 		}
-		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatRequestFailed, false, errChatRequestFailed)
+		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatRequestFailed, false, diagnostic)
 	}
 }
 
-func classifyChatStatus(statusCode int) error {
+func classifyChatStatus(statusCode int, diagnostic ...error) error {
+	cause := error(errChatRequestFailed)
+	if len(diagnostic) > 0 && diagnostic[0] != nil {
+		cause = diagnostic[0]
+	}
 	switch statusCode {
 	case http.StatusTooManyRequests:
-		return chatError(foundation.ErrorRetryableFailure, ErrorCodeChatRateLimited, true, errChatRequestFailed)
+		return chatError(foundation.ErrorRetryableFailure, ErrorCodeChatRateLimited, true, cause)
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return chatError(foundation.ErrorRetryableFailure, ErrorCodeChatProviderUnavailable, true, errChatRequestFailed)
+		return chatError(foundation.ErrorRetryableFailure, ErrorCodeChatProviderUnavailable, true, cause)
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatUnauthorized, false, errChatRequestFailed)
+		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatUnauthorized, false, cause)
 	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
-		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatRedirectRejected, false, errChatRequestFailed)
+		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatRedirectRejected, false, cause)
 	default:
-		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatRejected, false, errChatRequestFailed)
+		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatRejected, false, cause)
 	}
 }
 
@@ -293,8 +358,12 @@ func chatConfigErrorWithCause(cause error) error {
 	return chatError(foundation.ErrorInvalidInput, ErrorCodeChatConfigInvalid, false, cause)
 }
 
-func chatResponseError(code string) error {
-	return chatError(foundation.ErrorConsistencyViolation, code, false, errChatResponseInvalid)
+func chatResponseError(code string, diagnostic ...error) error {
+	cause := error(responseValidationDiagnostic(errChatResponseInvalid))
+	if len(diagnostic) > 0 && diagnostic[0] != nil {
+		cause = diagnostic[0]
+	}
+	return chatError(foundation.ErrorConsistencyViolation, code, false, cause)
 }
 
 func chatError(kind foundation.ErrorKind, code string, retryable bool, cause error) error {

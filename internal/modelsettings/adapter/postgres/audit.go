@@ -60,11 +60,12 @@ func (appender *SettingsAuditAppender) AppendModelSettingsChangeTx(ctx context.C
 	metadata, err := json.Marshal(struct {
 		Revision               int64  `json:"revision"`
 		ChatProvider           string `json:"chat_provider"`
+		ChatAPIStyle           string `json:"chat_api_style"`
 		ChatKeyConfigured      bool   `json:"chat_api_key_configured"`
 		EmbeddingProvider      string `json:"embedding_provider"`
 		EmbeddingKeyConfigured bool   `json:"embedding_api_key_configured"`
 	}{
-		Revision: change.Revision, ChatProvider: string(change.ChatProvider),
+		Revision: change.Revision, ChatProvider: string(change.ChatProvider), ChatAPIStyle: string(change.ChatAPIStyle),
 		ChatKeyConfigured: change.ChatKeyConfigured, EmbeddingProvider: string(change.EmbeddingProvider),
 		EmbeddingKeyConfigured: change.EmbeddingKeyConfigured,
 	})
@@ -94,15 +95,15 @@ func (appender *SettingsAuditAppender) AppendModelSettingsChangeTx(ctx context.C
 
 func verifyPersistedModelSettingsChange(ctx context.Context, tx pgx.Tx, change application.ModelSettingsChange) (string, time.Time, error) {
 	var (
-		chatProvider, embeddingProvider string
-		chatConfigured, embedConfigured bool
-		createdBy                       string
-		createdAt                       time.Time
+		chatProvider, chatAPIStyle, embeddingProvider string
+		chatConfigured, embedConfigured               bool
+		createdBy                                     string
+		createdAt                                     time.Time
 	)
-	err := tx.QueryRow(ctx, `SELECT chat_provider,embedding_provider,
+	err := tx.QueryRow(ctx, `SELECT chat_provider,chat_api_style,embedding_provider,
 chat_secret_key_id IS NOT NULL,embedding_secret_key_id IS NOT NULL,created_by,created_at
 FROM ops.model_settings_revisions WHERE revision=$1`, change.Revision).Scan(
-		&chatProvider, &embeddingProvider, &chatConfigured, &embedConfigured, &createdBy, &createdAt,
+		&chatProvider, &chatAPIStyle, &embeddingProvider, &chatConfigured, &embedConfigured, &createdBy, &createdAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", time.Time{}, corrupt(errors.New("model settings audit revision is missing"))
@@ -110,7 +111,7 @@ FROM ops.model_settings_revisions WHERE revision=$1`, change.Revision).Scan(
 	if err != nil {
 		return "", time.Time{}, classify(err)
 	}
-	if chatProvider != string(change.ChatProvider) || embeddingProvider != string(change.EmbeddingProvider) ||
+	if chatProvider != string(change.ChatProvider) || chatAPIStyle != string(change.ChatAPIStyle) || embeddingProvider != string(change.EmbeddingProvider) ||
 		chatConfigured != change.ChatKeyConfigured || embedConfigured != change.EmbeddingKeyConfigured ||
 		!canonicalActor(createdBy) || createdAt.IsZero() {
 		return "", time.Time{}, corrupt(errors.New("model settings audit revision binding is invalid"))
@@ -123,6 +124,9 @@ func validModelSettingsChange(change application.ModelSettingsChange) bool {
 		return false
 	}
 	if change.ChatProvider != domain.ChatProviderDisabled && change.ChatProvider != domain.ChatProviderOpenAICompatible {
+		return false
+	}
+	if change.ChatAPIStyle != domain.ChatAPIStyleChatCompletions && change.ChatAPIStyle != domain.ChatAPIStyleResponses {
 		return false
 	}
 	switch change.EmbeddingProvider {

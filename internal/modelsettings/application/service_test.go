@@ -168,7 +168,8 @@ func TestSettingsManagerTestOwnsResolvedSecretLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Target != ConnectionTargetChat || result.Provider != string(settings.Chat.Provider) || result.Model != settings.Chat.Model {
+	if result.Target != ConnectionTargetChat || result.Provider != string(settings.Chat.Provider) || result.Model != settings.Chat.Model ||
+		result.APIStyle != domain.ChatAPIStyleChatCompletions || result.EndpointPath != "/v1/chat/completions" || result.LatencyMS < 0 {
 		t.Fatalf("result = %+v", result)
 	}
 	if tester.target != ConnectionTargetChat || !tester.resolved.ChatAPIKey.Configured() || !tester.resolved.EmbeddingAPIKey.Configured() {

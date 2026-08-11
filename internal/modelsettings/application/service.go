@@ -134,17 +134,25 @@ func (service *Service) Test(ctx context.Context, command TestCommand) (TestResu
 	if resolved.Revision != command.Draft.ExpectedRevision {
 		return TestResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeCorrupt, false, errors.New("resolved model settings revision is inconsistent"))
 	}
+	startedAt := time.Now()
 	if err := service.tester.TestResolvedConnection(ctx, command.Target, resolved); err != nil {
 		return TestResult{}, err
 	}
-	result := TestResult{Target: command.Target}
+	result := TestResult{Target: command.Target, LatencyMS: time.Since(startedAt).Milliseconds()}
 	switch command.Target {
 	case ConnectionTargetChat:
 		result.Provider = string(resolved.Settings.Chat.Provider)
 		result.Model = resolved.Settings.Chat.Model
+		result.APIStyle = resolved.Settings.Chat.APIStyle
+		if result.APIStyle == domain.ChatAPIStyleResponses {
+			result.EndpointPath = "/v1/responses"
+		} else {
+			result.EndpointPath = "/v1/chat/completions"
+		}
 	case ConnectionTargetEmbedding:
 		result.Provider = string(resolved.Settings.Embedding.Provider)
 		result.Model = resolved.Settings.Embedding.Model
+		result.EndpointPath = "/v1/embeddings"
 	}
 	return result, nil
 }

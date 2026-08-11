@@ -149,6 +149,14 @@ const (
 	ChatProviderOpenAICompatible ChatProvider = "openai-compatible"
 )
 
+// ChatAPIStyle selects the explicit OpenAI-compatible Chat endpoint contract.
+type ChatAPIStyle string
+
+const (
+	ChatAPIStyleChatCompletions ChatAPIStyle = "chat_completions"
+	ChatAPIStyleResponses       ChatAPIStyle = "responses"
+)
+
 // ModelSettingsMode 控制模型身份来自静态配置还是受管数据库 revision。
 type ModelSettingsMode string
 
@@ -216,6 +224,7 @@ type Config struct {
 	EmbeddingMaxResponseBytes   int64                         `yaml:"embedding_max_response_bytes"`
 
 	ChatProvider         ChatProvider  `yaml:"chat_provider"`
+	ChatAPIStyle         ChatAPIStyle  `yaml:"chat_api_style"`
 	ChatBaseURL          string        `yaml:"chat_base_url"`
 	ChatAPIKey           string        `yaml:"chat_api_key"`
 	ChatModel            string        `yaml:"chat_model"`
@@ -311,6 +320,7 @@ func Defaults() Config {
 		EmbeddingMaxResponseBytes:   defaultEmbeddingMaxResponseBytes,
 
 		ChatProvider:         ChatProviderDisabled,
+		ChatAPIStyle:         ChatAPIStyleChatCompletions,
 		ChatAdapterVersion:   defaultChatAdapterVersion,
 		ChatTimeout:          defaultChatTimeout,
 		ChatMaxRequestBytes:  defaultChatMaxRequestBytes,
@@ -883,6 +893,9 @@ func (c Config) validateChat() error {
 	if !canonicalChatSetting(c.ChatAdapterVersion, 64) {
 		return errors.New("chat_adapter_version must be non-empty and canonical")
 	}
+	if c.ChatAPIStyle != ChatAPIStyleChatCompletions && c.ChatAPIStyle != ChatAPIStyleResponses {
+		return errors.New("chat_api_style must be chat_completions or responses")
+	}
 	switch c.ChatProvider {
 	case ChatProviderDisabled:
 		if c.ChatBaseURL != "" || c.ChatAPIKey != "" || c.ChatModel != "" || c.ChatModelVersion != "" {
@@ -901,6 +914,12 @@ func (c Config) validateChat() error {
 		}
 		if err := validateChatBaseURL(c.ChatBaseURL); err != nil {
 			return err
+		}
+		parsed, _ := url.Parse(c.ChatBaseURL)
+		cleanedPath := strings.TrimRight(parsed.Path, "/")
+		if (c.ChatAPIStyle == ChatAPIStyleResponses && strings.HasSuffix(cleanedPath, "/v1/chat/completions")) ||
+			(c.ChatAPIStyle == ChatAPIStyleChatCompletions && strings.HasSuffix(cleanedPath, "/v1/responses")) {
+			return errors.New("chat_base_url targets a different chat_api_style")
 		}
 		return nil
 	default:
@@ -1011,7 +1030,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s ModelSettingsMode:%q ModelSettingsKeyConfigured:%t GitSyncKeyConfigured:%t ModelSettingsRolloutConfigured:%t ModelSettingsPrepared:%t EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s ModelSettingsMode:%q ModelSettingsKeyConfigured:%t GitSyncKeyConfigured:%t ModelSettingsRolloutConfigured:%t ModelSettingsPrepared:%t EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatAPIStyle:%q ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -1053,6 +1072,7 @@ func (c Config) String() string {
 		c.EmbeddingMaxResponseBytes,
 		c.ChatProvider,
 		c.ChatProvider != ChatProviderDisabled,
+		c.ChatAPIStyle,
 		c.ChatModel,
 		c.ChatModelVersion,
 		c.ChatAdapterVersion,

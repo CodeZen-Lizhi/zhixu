@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"net/url"
 
-	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
-	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
@@ -142,6 +140,7 @@ func overlay(base config.Config, settings modelsettingsdomain.Settings, chatKey,
 		return config.Config{}, err
 	}
 	base.ChatProvider = config.ChatProvider(settings.Chat.Provider)
+	base.ChatAPIStyle = config.ChatAPIStyle(settings.Chat.APIStyle)
 	base.ChatBaseURL = settings.Chat.BaseURL
 	base.ChatAPIKey = chatKey
 	base.ChatModel = settings.Chat.Model
@@ -213,30 +212,20 @@ func (tester *ConnectionTester) TestResolvedConnection(ctx context.Context, targ
 		if chat.Model() == nil {
 			return invalid(errors.New("chat provider is disabled"))
 		}
-		contract, ok := chat.Contract()
-		if !ok {
+		if _, ok := chat.Contract(); !ok {
 			return foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeUnavailable, false, errors.New("chat adapter contract is unavailable"))
 		}
-		_, err = chat.Model().Chat(ctx, agentapplication.ChatRequest{
-			Phase:      agentdomain.ModelCallInitial,
-			ProfileRef: agentdomain.ModelProfileRef{ID: "model-settings-connection", Version: "v1"},
-			PromptRef:  agentdomain.PromptRef{ID: "model-settings-connection", Version: "v1"},
-			SchemaRef:  agentdomain.SchemaRef{ID: "model-settings-connection", Version: "v1"},
-			Model:      contract.Model,
-			Messages: []agentapplication.ChatMessage{
-				{Role: agentapplication.MessageRoleSystem, Content: "Return JSON that matches the supplied schema."},
-				{Role: agentapplication.MessageRoleUser, Content: "Return ok=true."},
-			},
-			OutputSchema:    []byte(`{"type":"object","additionalProperties":false,"properties":{"ok":{"type":"boolean"}},"required":["ok"]}`),
-			MaxOutputTokens: 16,
-		})
-		return err
+		prober, ok := chat.Model().(platformmodels.ChatConnectionProber)
+		if !ok {
+			return foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeUnavailable, false, errors.New("chat connection probe is unavailable"))
+		}
+		return prober.ProbeConnection(ctx)
 	case ConnectionTargetEmbedding:
 		embedding := models.Embedding()
 		if embedding.Embedder() == nil {
 			return invalid(errors.New("embedding provider is disabled"))
 		}
-		_, err = embedding.Embedder().Embed(ctx, retrievalapplication.EmbedRequest{Inputs: []string{"zhixu model connection test"}})
+		_, err = embedding.Embedder().Embed(ctx, retrievalapplication.EmbedRequest{Inputs: []string{"test"}})
 		return err
 	default:
 		return invalid(errors.New("model connection target is invalid"))

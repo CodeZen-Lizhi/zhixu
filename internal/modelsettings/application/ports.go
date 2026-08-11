@@ -50,6 +50,7 @@ type ModelSettingsChange struct {
 	Action                 ModelSettingsAuditAction
 	Revision               int64
 	ChatProvider           domain.ChatProvider
+	ChatAPIStyle           domain.ChatAPIStyle
 	EmbeddingProvider      domain.EmbeddingProvider
 	ChatKeyConfigured      bool
 	EmbeddingKeyConfigured bool
@@ -86,9 +87,12 @@ type TestCommand struct {
 
 // TestResult is the non-secret identity returned after a successful provider request.
 type TestResult struct {
-	Target   ConnectionTarget
-	Provider string
-	Model    string
+	Target       ConnectionTarget
+	Provider     string
+	Model        string
+	APIStyle     domain.ChatAPIStyle
+	EndpointPath string
+	LatencyMS    int64
 }
 
 // ResolvedConnectionTester is the provider boundary used only after the manager owns a resolved draft.

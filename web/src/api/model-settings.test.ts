@@ -13,6 +13,7 @@ import {
 
 const disabledChat = {
   provider: "disabled",
+  api_style: "chat_completions",
   base_url: "",
   model: "",
   model_version: "",
@@ -46,6 +47,7 @@ const disabledResponse = {
 
 const configuredChat = {
   provider: "openai-compatible",
+  api_style: "chat_completions",
   base_url: "https://models.example.test/v1",
   model: "chat-v2",
   model_version: "2026-07",
@@ -80,6 +82,7 @@ const updateInput: UpdateModelSettingsInput = {
   expectedRevision: 2,
   chat: {
     provider: "openai-compatible",
+    apiStyle: "chat_completions",
     baseUrl: "https://models.example.test/v1",
     model: "chat-v2",
     modelVersion: "2026-07",
@@ -277,6 +280,7 @@ describe("model settings API boundary", () => {
       expected_revision: 2,
       chat: {
         provider: "openai-compatible",
+        api_style: "chat_completions",
         base_url: "https://models.example.test/v1",
         model: "chat-v2",
         model_version: "2026-07",
@@ -332,6 +336,139 @@ describe("model settings API boundary", () => {
     await expect(updateModelSettings(updateInput)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
+  it("严格解码连接测试诊断并拒绝未知、超限或含 Secret 的 details", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_UNAUTHORIZED",
+        message: "模型 Provider 返回错误",
+        retryable: false,
+        details: {
+          target: "chat",
+          stage: "provider_response",
+          provider_http_status: 401,
+          provider_error_code: "invalid_api_key",
+          provider_error_type: "authentication_error",
+          provider_message: "Invalid API key",
+          provider_request_id: "req_chat_401",
+        },
+      }, 502))
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_REQUEST_FAILED",
+        message: "模型 Provider 连接失败",
+        retryable: false,
+        details: { target: "chat", stage: "tls", transport_error: "EOF", unexpected: true },
+      }, 502))
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_REJECTED",
+        message: "模型 Provider 返回错误",
+        retryable: false,
+        details: { target: "chat", stage: "provider_response", provider_http_status: 400, provider_message: "x".repeat(1025) },
+      }, 502))
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_REJECTED",
+        message: "模型 Provider 返回错误",
+        retryable: false,
+        details: { target: "chat", stage: "provider_response", provider_http_status: 400, provider_message: "secret-chat-key" },
+      }, 502))
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_REQUEST_FAILED",
+        message: "模型 Provider 连接失败",
+        retryable: false,
+        details: { target: "embedding", stage: "tls", transport_error: "EOF" },
+      }, 502))
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_REJECTED",
+        message: "模型 Provider 返回错误",
+        retryable: false,
+        details: { target: "chat", stage: "provider_response", provider_http_status: 400, provider_message: "message\u0085" },
+      }, 502))
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_REJECTED",
+        message: "模型 Provider 返回错误",
+        retryable: false,
+        details: { target: "chat", stage: "provider_response", provider_http_status: 400, provider_message: "message\ud800" },
+      }, 502));
+
+    const input = { target: "chat", chat: updateInput.chat } as const;
+    await expect(testModelSettings(input)).rejects.toMatchObject({
+      code: "HTTP_ERROR",
+      status: 502,
+      details: {
+        target: "chat",
+        stage: "provider_response",
+        provider_http_status: 401,
+        provider_error_code: "invalid_api_key",
+        provider_error_type: "authentication_error",
+        provider_message: "Invalid API key",
+        provider_request_id: "req_chat_401",
+      },
+    });
+    await expect(testModelSettings(input)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    await expect(testModelSettings(input)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    const secretError = await testModelSettings(input).catch((value: unknown) => value);
+    expect(secretError).toMatchObject({ code: "INVALID_RESPONSE" });
+    expect(JSON.stringify(secretError)).not.toContain("secret-chat-key");
+    await expect(testModelSettings(input)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    await expect(testModelSettings(input)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    await expect(testModelSettings(input)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("错误响应按大小写不敏感方式拒绝 Secret 和 Endpoint", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_REJECTED",
+        message: "模型 Provider 返回错误",
+        retryable: false,
+        details: { target: "chat", stage: "provider_response", provider_http_status: 400, provider_message: "SECRET-CHAT-KEY" },
+      }, 502))
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_REJECTED",
+        message: "模型 Provider 返回错误",
+        retryable: false,
+        details: { target: "chat", stage: "provider_response", provider_http_status: 400, provider_message: "HTTPS://MODELS.EXAMPLE.TEST/V1" },
+      }, 502));
+
+    const input = { target: "chat", chat: updateInput.chat } as const;
+    const secretError = await testModelSettings(input).catch((value: unknown) => value);
+    expect(secretError).toMatchObject({ code: "INVALID_RESPONSE" });
+    expect(JSON.stringify(secretError)).not.toContain("SECRET-CHAT-KEY");
+    const endpointError = await testModelSettings(input).catch((value: unknown) => value);
+    expect(endpointError).toMatchObject({ code: "INVALID_RESPONSE" });
+    expect(JSON.stringify(endpointError)).not.toContain("MODELS.EXAMPLE.TEST");
+  });
+
+  it("严格解码响应校验原因并拒绝错误阶段", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_RESPONSE_INVALID",
+        message: "模型 Provider 响应校验失败",
+        retryable: false,
+        details: { target: "chat", stage: "response_validation", validation_reason: "finish_reason_length" },
+      }, 502))
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_RESPONSE_INVALID",
+        message: "模型 Provider 响应校验失败",
+        retryable: false,
+        details: { target: "chat", stage: "tls", validation_reason: "finish_reason_length" },
+      }, 502))
+      .mockResolvedValueOnce(jsonResponse({
+        error_code: "MODEL_CHAT_RESPONSE_INVALID",
+        message: "模型 Provider 响应校验失败",
+        retryable: false,
+        details: { target: "chat", stage: "response_validation", validation_reason: "provider-output-secret-canary" },
+      }, 502));
+
+    const input = { target: "chat", chat: updateInput.chat } as const;
+    await expect(testModelSettings(input)).rejects.toMatchObject({
+      code: "HTTP_ERROR",
+      details: { target: "chat", stage: "response_validation", validation_reason: "finish_reason_length" },
+    });
+    await expect(testModelSettings(input)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    const unknownReason = await testModelSettings(input).catch((value: unknown) => value);
+    expect(unknownReason).toMatchObject({ code: "INVALID_RESPONSE" });
+    expect(JSON.stringify(unknownReason)).not.toContain("provider-output-secret-canary");
+  });
+
   it("服务端错误文本意外回显本次 Secret 时 fail closed 且错误对象不保留明文", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
       error_code: "MODEL_SETTINGS_INVALID",
@@ -347,14 +484,17 @@ describe("model settings API boundary", () => {
 
   it("连接测试只发送目标 draft 并校验响应 binding", async () => {
     vi.mocked(fetch)
-      .mockResolvedValueOnce(jsonResponse({ target: "embedding", status: "ok", provider: "ollama", model: "nomic-embed-text" }))
-      .mockResolvedValueOnce(jsonResponse({ target: "chat", status: "ok", provider: "openai-compatible", model: "wrong-model" }));
+      .mockResolvedValueOnce(jsonResponse({ target: "embedding", status: "ok", provider: "ollama", model: "nomic-embed-text", endpoint_path: "/v1/embeddings", latency_ms: 8 }))
+      .mockResolvedValueOnce(jsonResponse({ target: "chat", status: "ok", provider: "openai-compatible", model: "wrong-model", api_style: "chat_completions", endpoint_path: "/v1/chat/completions", latency_ms: 9 }))
+      .mockResolvedValueOnce(jsonResponse({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", api_style: "responses", endpoint_path: "/v1/responses", latency_ms: 10 }));
 
     await expect(testModelSettings({ target: "embedding", embedding: updateInput.embedding })).resolves.toEqual({
       target: "embedding",
       status: "ok",
       provider: "ollama",
       model: "nomic-embed-text",
+      endpointPath: "/v1/embeddings",
+      latencyMs: 8,
     });
     expect(callJsonBody(0)).toEqual({
       target: "embedding",
@@ -370,7 +510,8 @@ describe("model settings API boundary", () => {
     });
 
     await expect(testModelSettings({ target: "chat", chat: updateInput.chat })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
-    expect(decodeModelSettingsTestResult({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2" })).toEqual({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2" });
+    await expect(testModelSettings({ target: "chat", chat: updateInput.chat })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    expect(decodeModelSettingsTestResult({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", api_style: "responses", endpoint_path: "/v1/responses", latency_ms: 12 })).toEqual({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", apiStyle: "responses", endpointPath: "/v1/responses", latencyMs: 12 });
   });
 
   it("连接测试在网络请求前拒绝 disabled Provider", async () => {
@@ -378,6 +519,7 @@ describe("model settings API boundary", () => {
       target: "chat",
       chat: {
         provider: "disabled",
+        apiStyle: "chat_completions",
         baseUrl: "",
         model: "",
         modelVersion: "",

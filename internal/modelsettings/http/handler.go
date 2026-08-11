@@ -21,6 +21,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
+	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -88,6 +89,7 @@ type testRequest struct {
 
 type chatDraftRequest struct {
 	Provider       json.RawMessage `json:"provider"`
+	APIStyle       json.RawMessage `json:"api_style"`
 	BaseURL        json.RawMessage `json:"base_url"`
 	Model          json.RawMessage `json:"model"`
 	ModelVersion   json.RawMessage `json:"model_version"`
@@ -128,6 +130,7 @@ type settingsSummaryResponse struct {
 
 type chatSettingsResponse struct {
 	Provider         modelsettingsdomain.ChatProvider `json:"provider"`
+	APIStyle         modelsettingsdomain.ChatAPIStyle `json:"api_style"`
 	BaseURL          string                           `json:"base_url"`
 	Model            string                           `json:"model"`
 	ModelVersion     string                           `json:"model_version"`
@@ -169,10 +172,13 @@ type capabilitiesResponse struct {
 }
 
 type testResponse struct {
-	Target   string `json:"target"`
-	Status   string `json:"status"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
+	Target       string                           `json:"target"`
+	Status       string                           `json:"status"`
+	Provider     string                           `json:"provider"`
+	Model        string                           `json:"model"`
+	APIStyle     modelsettingsdomain.ChatAPIStyle `json:"api_style,omitempty"`
+	EndpointPath string                           `json:"endpoint_path"`
+	LatencyMS    int64                            `json:"latency_ms"`
 }
 
 func (handler *Handler) get(writer nethttp.ResponseWriter, request *nethttp.Request) {
@@ -283,11 +289,11 @@ func (handler *Handler) testConnection(writer nethttp.ResponseWriter, request *n
 		if isConflict(err) {
 			handler.writeConflictAwareError(writer, request, err)
 		} else {
-			writeTestError(writer, err)
+			writeTestError(writer, target, err)
 		}
 		return
 	}
-	if result.Target != testTarget || result.Provider == "" || result.Model == "" {
+	if result.Target != testTarget || result.Provider == "" || result.Model == "" || result.LatencyMS < 0 || !validTestResultProtocol(result) {
 		writeManagerError(writer, foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeCorrupt, false, errors.New("model settings test result is inconsistent")), nil)
 		return
 	}
@@ -295,8 +301,21 @@ func (handler *Handler) testConnection(writer nethttp.ResponseWriter, request *n
 		writeInvalid(writer)
 		return
 	}
-	response := testResponse{Target: target, Provider: result.Provider, Model: result.Model, Status: connectionTestSuccessStatus}
+	response := testResponse{Target: target, Provider: result.Provider, Model: result.Model, Status: connectionTestSuccessStatus,
+		APIStyle: result.APIStyle, EndpointPath: result.EndpointPath, LatencyMS: result.LatencyMS}
 	httpapi.WriteJSON(writer, nethttp.StatusOK, response)
+}
+
+func validTestResultProtocol(result modelsettingsapplication.TestResult) bool {
+	switch result.Target {
+	case modelsettingsapplication.ConnectionTargetChat:
+		return (result.APIStyle == modelsettingsdomain.ChatAPIStyleChatCompletions && result.EndpointPath == "/v1/chat/completions") ||
+			(result.APIStyle == modelsettingsdomain.ChatAPIStyleResponses && result.EndpointPath == "/v1/responses")
+	case modelsettingsapplication.ConnectionTargetEmbedding:
+		return result.APIStyle == "" && result.EndpointPath == "/v1/embeddings"
+	default:
+		return false
+	}
 }
 
 func (handler *Handler) authorize(writer nethttp.ResponseWriter, request *nethttp.Request) (authdomain.Principal, bool) {
@@ -387,6 +406,10 @@ func decodeChat(raw json.RawMessage, base modelsettingsdomain.ChatSettings) (mod
 	if err != nil {
 		return modelsettingsdomain.ChatSettings{}, modelsettingsdomain.SecretAction{}, err
 	}
+	apiStyle, err := decodeString(request.APIStyle)
+	if err != nil {
+		return modelsettingsdomain.ChatSettings{}, modelsettingsdomain.SecretAction{}, err
+	}
 	baseURL, err := decodeString(request.BaseURL)
 	if err != nil {
 		return modelsettingsdomain.ChatSettings{}, modelsettingsdomain.SecretAction{}, err
@@ -408,6 +431,7 @@ func decodeChat(raw json.RawMessage, base modelsettingsdomain.ChatSettings) (mod
 		return modelsettingsdomain.ChatSettings{}, modelsettingsdomain.SecretAction{}, err
 	}
 	base.Provider = modelsettingsdomain.ChatProvider(provider)
+	base.APIStyle = modelsettingsdomain.ChatAPIStyle(apiStyle)
 	base.BaseURL = baseURL
 	base.Model = model
 	base.ModelVersion = modelVersion
@@ -588,7 +612,7 @@ func toSettingsResponse(snapshot modelsettingsdomain.Snapshot) settingsResponse 
 func toSettingsSummaryResponse(summary modelsettingsdomain.SettingsSummary) settingsSummaryResponse {
 	return settingsSummaryResponse{
 		Chat: chatSettingsResponse{
-			Provider: summary.Settings.Chat.Provider, BaseURL: summary.Settings.Chat.BaseURL,
+			Provider: summary.Settings.Chat.Provider, APIStyle: summary.Settings.Chat.APIStyle, BaseURL: summary.Settings.Chat.BaseURL,
 			Model: summary.Settings.Chat.Model, ModelVersion: summary.Settings.Chat.ModelVersion,
 			AdapterVersion: summary.Settings.Chat.AdapterVersion, APIKeyConfigured: summary.Secrets.ChatConfigured,
 		},
@@ -671,19 +695,20 @@ func writeManagerError(writer nethttp.ResponseWriter, err error, details map[str
 	httpapi.WriteProblem(writer, status, classified.Code, message, classified.Retryable, details)
 }
 
-func writeTestError(writer nethttp.ResponseWriter, err error) {
+func writeTestError(writer nethttp.ResponseWriter, target string, err error) {
 	var classified *foundation.Error
 	classifiedFound := errors.As(err, &classified)
+	details, diagnosticMessage := testDiagnosticDetails(target, err)
 	if errors.Is(err, context.DeadlineExceeded) || classifiedFound && strings.HasSuffix(classified.Code, "_TIMEOUT") {
 		code, retryable := errorCodeTestTimeout, true
 		if classifiedFound {
 			code, retryable = classified.Code, classified.Retryable
 		}
-		httpapi.WriteProblem(writer, nethttp.StatusGatewayTimeout, code, "模型连接测试超时", retryable, nil)
+		httpapi.WriteProblem(writer, nethttp.StatusGatewayTimeout, code, "模型连接测试超时", retryable, details)
 		return
 	}
 	if errors.Is(err, context.Canceled) {
-		httpapi.WriteProblem(writer, nethttp.StatusServiceUnavailable, modelsettingsdomain.ErrorCodeUnavailable, "模型连接测试未完成", false, nil)
+		httpapi.WriteProblem(writer, nethttp.StatusServiceUnavailable, modelsettingsdomain.ErrorCodeUnavailable, "模型连接测试未完成", false, details)
 		return
 	}
 	if !classifiedFound {
@@ -702,10 +727,63 @@ func writeTestError(writer nethttp.ResponseWriter, err error) {
 			httpapi.WriteProblem(writer, nethttp.StatusServiceUnavailable, classified.Code, "模型连接测试服务暂不可用", classified.Retryable, nil)
 			return
 		}
-		httpapi.WriteProblem(writer, nethttp.StatusBadGateway, classified.Code, "模型 Provider 拒绝请求或返回无效响应", classified.Retryable, nil)
+		message := "模型 Provider 拒绝请求或返回无效响应"
+		if diagnosticMessage != "" {
+			message = diagnosticMessage
+		}
+		httpapi.WriteProblem(writer, nethttp.StatusBadGateway, classified.Code, message, classified.Retryable, details)
 	default:
 		httpapi.WriteProblem(writer, nethttp.StatusInternalServerError, errorCodeInternal, "模型连接测试失败", false, nil)
 	}
+}
+
+func testDiagnosticDetails(target string, err error) (map[string]any, string) {
+	if target != connectionTargetChat && target != connectionTargetEmbedding {
+		return nil, ""
+	}
+	var diagnostic *platformmodels.ConnectionDiagnostic
+	if !errors.As(err, &diagnostic) || diagnostic == nil {
+		return nil, ""
+	}
+	var message string
+	switch diagnostic.Stage {
+	case platformmodels.ConnectionStageProviderResponse:
+		message = "模型 Provider 返回错误"
+	case platformmodels.ConnectionStageResponseRead:
+		message = "模型 Provider 响应读取失败"
+	case platformmodels.ConnectionStageResponseValidation:
+		message = "模型 Provider 响应校验失败"
+	case platformmodels.ConnectionStageRequest, platformmodels.ConnectionStageDNS, platformmodels.ConnectionStageConnect,
+		platformmodels.ConnectionStageTLS, platformmodels.ConnectionStageCancelled, platformmodels.ConnectionStageTimeout:
+		message = "模型 Provider 连接失败"
+	default:
+		return nil, ""
+	}
+	details := map[string]any{"target": target, "stage": diagnostic.Stage}
+	if diagnostic.Stage == platformmodels.ConnectionStageProviderResponse || diagnostic.Stage == platformmodels.ConnectionStageResponseRead {
+		if diagnostic.ProviderHTTPStatus >= 100 && diagnostic.ProviderHTTPStatus <= 599 {
+			details["provider_http_status"] = diagnostic.ProviderHTTPStatus
+		}
+		if diagnostic.ProviderErrorCode != "" {
+			details["provider_error_code"] = diagnostic.ProviderErrorCode
+		}
+		if diagnostic.ProviderErrorType != "" {
+			details["provider_error_type"] = diagnostic.ProviderErrorType
+		}
+		if diagnostic.ProviderMessage != "" {
+			details["provider_message"] = diagnostic.ProviderMessage
+		}
+		if diagnostic.ProviderRequestID != "" {
+			details["provider_request_id"] = diagnostic.ProviderRequestID
+		}
+	}
+	if diagnostic.TransportError != "" && diagnostic.Stage != platformmodels.ConnectionStageProviderResponse && diagnostic.Stage != platformmodels.ConnectionStageResponseValidation {
+		details["transport_error"] = diagnostic.TransportError
+	}
+	if diagnostic.ValidationReason.IsKnown() && diagnostic.Stage == platformmodels.ConnectionStageResponseValidation {
+		details["validation_reason"] = diagnostic.ValidationReason
+	}
+	return details, message
 }
 
 func noStore(writer nethttp.ResponseWriter) {
@@ -721,6 +799,7 @@ func destroyChatRequest(request *chatDraftRequest) {
 		return
 	}
 	destroyRaw(request.Provider)
+	destroyRaw(request.APIStyle)
 	destroyRaw(request.BaseURL)
 	destroyRaw(request.Model)
 	destroyRaw(request.ModelVersion)

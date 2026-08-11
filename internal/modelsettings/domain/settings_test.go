@@ -10,6 +10,17 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
+func TestCanonicalDisabledSettingsDefaultsChatAPIStyle(t *testing.T) {
+	settings := CanonicalDisabledSettings()
+	if settings.Chat.APIStyle != ChatAPIStyleChatCompletions {
+		t.Fatalf("chat API style = %q", settings.Chat.APIStyle)
+	}
+	settings.Chat.APIStyle = ChatAPIStyle("automatic")
+	if err := settings.ValidateStructural(); err == nil {
+		t.Fatal("unknown chat API style was accepted")
+	}
+}
+
 func TestCanonicalizeSettingsNormalizesEndpointIdentity(t *testing.T) {
 	settings := CanonicalDisabledSettings()
 	settings.Chat.Provider = ChatProviderOpenAICompatible

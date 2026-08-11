@@ -12,6 +12,7 @@ import {
   updateModelSettings,
   modelSettingsOllamaRelayUrl,
   type ChatModelProvider,
+  type ChatAPIStyle,
   type ChatModelSettingsInput,
   type ChatModelSettingsSummary,
   type EmbeddingDistanceMetric,
@@ -25,13 +26,26 @@ import {
   type ModelSecretInput,
   type ModelSettingsResponse,
   type ModelSettingsTestResult,
+  type ModelTestStage,
   type ModelTestTarget,
+  type ModelTestValidationReason,
 } from "../../api/model-settings";
 import { Badge, Button, Card, CardHeader, ErrorState } from "../../shared/ui";
 
 import "./model-settings.css";
 
 const modelSettingsQueryKey = ["settings", "models"] as const;
+const modelTestStageLabels: Record<ModelTestStage, string> = {
+  request: "请求构造",
+  dns: "DNS 解析",
+  connect: "连接",
+  tls: "TLS 握手",
+  provider_response: "Provider 响应",
+  response_read: "响应读取",
+  response_validation: "响应校验",
+  cancelled: "请求取消",
+  timeout: "请求超时",
+};
 
 type SecretAction = ModelSecretInput["action"];
 
@@ -42,6 +56,7 @@ interface SecretDraft {
 
 interface ChatDraft {
   provider: ChatModelProvider;
+  apiStyle: ChatAPIStyle;
   baseUrl: string;
   model: string;
   modelVersion: string;
@@ -80,9 +95,19 @@ const providerLabel: Record<EmbeddingModelProvider, string> = {
   ollama: "Ollama",
 };
 
+const chatAPIStyleLabel: Record<ChatAPIStyle, string> = {
+  chat_completions: "Chat Completions",
+  responses: "Responses API",
+};
+
 const chatProviderValue = (value: string): ChatModelProvider => {
   if (value === "disabled" || value === "openai-compatible") return value;
   throw new TypeError("unknown Chat provider");
+};
+
+const chatAPIStyleValue = (value: string): ChatAPIStyle => {
+  if (value === "chat_completions" || value === "responses") return value;
+  throw new TypeError("unknown Chat API style");
 };
 
 const embeddingProviderValue = (value: string): EmbeddingModelProvider => {
@@ -121,6 +146,19 @@ const rolloutPhaseLabels: Record<ModelRolloutPhase, string> = {
   failed: "失败",
 };
 
+const modelValidationReasonLabels: Record<ModelTestValidationReason, string> = {
+  invalid_response: "响应结构无效",
+  model_mismatch: "模型版本不匹配",
+  finish_reason_length: "输出达到长度上限",
+  finish_reason_invalid: "完成原因无效",
+  empty_content: "回复内容为空",
+  refusal: "模型拒绝响应",
+  tool_calls: "返回了未允许的工具调用",
+  missing_usage: "缺少 Token 用量",
+  invalid_usage: "Token 用量无效",
+  response_contract_invalid: "响应契约无效",
+};
+
 const revisionLabel = (revision: number): string => `版本 ${String(revision)}`;
 
 const isRolloutInProgress = (phase: ModelRolloutPhase): boolean => phase !== "idle" && phase !== "failed";
@@ -131,6 +169,7 @@ const draftFromResponse = (settings: ModelSettingsResponse): ModelSettingsDraft 
   revision: settings.desiredRevision,
   chat: {
     provider: settings.desiredSettings.chat.provider,
+    apiStyle: settings.desiredSettings.chat.apiStyle,
     baseUrl: settings.desiredSettings.chat.baseUrl,
     model: settings.desiredSettings.chat.model,
     modelVersion: settings.desiredSettings.chat.modelVersion,
@@ -170,9 +209,10 @@ const secretInput = (secret: SecretDraft): ModelSecretInput => secret.action ===
   : { action: secret.action };
 
 const chatInput = (draft: ChatDraft): ChatModelSettingsInput => draft.provider === "disabled"
-  ? { provider: "disabled", baseUrl: "", model: "", modelVersion: "", adapterVersion: draft.adapterVersion, apiKey: { action: "clear" } }
+  ? { provider: "disabled", apiStyle: draft.apiStyle, baseUrl: "", model: "", modelVersion: "", adapterVersion: draft.adapterVersion, apiKey: { action: "clear" } }
   : {
       provider: draft.provider,
+      apiStyle: draft.apiStyle,
       baseUrl: draft.baseUrl.trim(),
       model: draft.model.trim(),
       modelVersion: draft.modelVersion.trim(),
@@ -229,7 +269,7 @@ const ActiveSummary = ({ kind, summary, differs }: { kind: ModelTestTarget; summ
     <SummaryValue label="基础地址（Base URL）" mono>{summary.baseUrl || "未设置"}</SummaryValue>
     <SummaryValue label="模型" mono>{summary.model || "未设置"}</SummaryValue>
     {kind === "chat"
-      ? <><SummaryValue label="模型版本" mono>{(summary as ChatModelSettingsSummary).modelVersion || "未设置"}</SummaryValue><SummaryValue label="适配器" mono>{(summary as ChatModelSettingsSummary).adapterVersion}</SummaryValue></>
+      ? <><SummaryValue label="调用接口">{chatAPIStyleLabel[(summary as ChatModelSettingsSummary).apiStyle]}</SummaryValue><SummaryValue label="模型版本" mono>{(summary as ChatModelSettingsSummary).modelVersion || "未设置"}</SummaryValue><SummaryValue label="适配器" mono>{(summary as ChatModelSettingsSummary).adapterVersion}</SummaryValue></>
       : <><SummaryValue label="维度">{String((summary as EmbeddingModelSettingsSummary).dimensions)}</SummaryValue><SummaryValue label="向量约定">{(summary as EmbeddingModelSettingsSummary).normalization} / {(summary as EmbeddingModelSettingsSummary).distanceMetric}</SummaryValue></>}
     <SummaryValue label="API Key">{summary.apiKeyConfigured ? "已安全保存" : "未配置"}</SummaryValue>
   </dl>
@@ -275,8 +315,29 @@ const SecretControl = ({
 const TestFeedback = ({ target, mutation }: { target: ModelTestTarget; mutation: UseMutationResult<ModelSettingsTestResult, Error, ModelTestTarget> }) => {
   if (mutation.isPending && mutation.variables === target) return <p className="model-test-result" role="status"><LoaderCircle className="is-spinning" size={15} />正在从服务端测试连接…</p>;
   if (mutation.isError && mutation.variables === target && mutation.error instanceof ModelSettingsApiError && mutation.error.status === 409) return null;
-  if (mutation.isError && mutation.variables === target) return <p className="model-settings-error" role="alert">{mutation.error.message}</p>;
-  if (mutation.data?.target === target) return <p className="model-test-result model-test-result--success" role="status"><Check size={15} />当前草稿连接测试通过，尚未保存或生效：{mutation.data.provider} / {mutation.data.model}</p>;
+  if (mutation.isError && mutation.variables === target) {
+    const error = mutation.error;
+    const apiError = error instanceof ModelSettingsApiError ? error : undefined;
+    const diagnostic = apiError?.details?.target === target && apiError.details.stage !== undefined ? apiError.details : undefined;
+    const diagnosticStage = diagnostic?.stage;
+    if (diagnostic === undefined || diagnosticStage === undefined || apiError === undefined) return <p className="model-settings-error" role="alert">{error.message}{apiError === undefined ? null : <>（错误码：<code>{apiError.errorCode}</code>{apiError.retryable ? "，可重试" : "，不可重试"}）</>}</p>;
+    return <div className="model-test-diagnostic" role="alert">
+      <strong>{error.message}</strong>
+      <dl>
+        <div><dt>阶段</dt><dd>{modelTestStageLabels[diagnosticStage]}</dd></div>
+        {diagnostic.provider_http_status === undefined ? null : <div><dt>Provider HTTP</dt><dd>{String(diagnostic.provider_http_status)}</dd></div>}
+        {diagnostic.provider_error_code === undefined ? null : <div><dt>Provider 错误码</dt><dd><code>{diagnostic.provider_error_code}</code></dd></div>}
+        {diagnostic.provider_error_type === undefined ? null : <div><dt>错误类型</dt><dd><code>{diagnostic.provider_error_type}</code></dd></div>}
+        {diagnostic.provider_message === undefined ? null : <div className="model-test-diagnostic__wide"><dt>Provider 消息</dt><dd>{diagnostic.provider_message}</dd></div>}
+        {diagnostic.transport_error === undefined ? null : <div className="model-test-diagnostic__wide"><dt>连接原因</dt><dd>{diagnostic.transport_error}</dd></div>}
+        {diagnostic.validation_reason === undefined ? null : <div className="model-test-diagnostic__wide"><dt>校验原因</dt><dd>{modelValidationReasonLabels[diagnostic.validation_reason]}</dd></div>}
+        {diagnostic.provider_request_id === undefined ? null : <div className="model-test-diagnostic__wide"><dt>请求 ID</dt><dd><code>{diagnostic.provider_request_id}</code></dd></div>}
+        <div><dt>知序错误码</dt><dd><code>{apiError.errorCode}</code></dd></div>
+        <div><dt>可重试</dt><dd>{apiError.retryable ? "是" : "否"}</dd></div>
+      </dl>
+    </div>;
+  }
+  if (mutation.data?.target === target) return <p className="model-test-result model-test-result--success" role="status"><Check size={15} />当前草稿连接测试通过，尚未保存或生效：{mutation.data.provider} / {mutation.data.model} / {mutation.data.apiStyle === undefined ? "Embedding" : chatAPIStyleLabel[mutation.data.apiStyle]} / <code>{mutation.data.endpointPath}</code> / {String(mutation.data.latencyMs)} ms</p>;
   return null;
 };
 
@@ -473,6 +534,7 @@ export const ModelSettingsPanel = () => {
           <fieldset className="model-settings-fields" disabled={controlsDisabled}>
             <legend><span>待应用</span>待应用配置</legend>
             <label>提供方<select aria-label="对话模型提供方" value={draft.chat.provider} onChange={(event) => changeDraft((current) => { const provider = chatProviderValue(event.target.value); return { ...current, chat: { ...current.chat, provider, ...(provider === "disabled" ? { baseUrl: "", model: "", modelVersion: "", secret: { action: "clear", value: "" } } : {}) } }; })}><option value="disabled">已关闭</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
+            <label>调用接口<select aria-label="对话模型调用接口" value={draft.chat.apiStyle} disabled={draft.chat.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, apiStyle: chatAPIStyleValue(event.target.value) } }))}><option value="chat_completions">Chat Completions</option><option value="responses">Responses API</option></select></label>
             <label className="model-settings-field--wide">基础地址（Base URL）<input type="url" maxLength={2048} aria-label="对话模型基础地址（Base URL）" value={draft.chat.baseUrl} disabled={draft.chat.provider === "disabled" || controlsDisabled} placeholder="https://api.example.com/v1" onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, baseUrl: event.target.value } }))} /></label>
             <label>模型<input maxLength={128} aria-label="对话模型名称" value={draft.chat.model} disabled={draft.chat.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, model: event.target.value } }))} /></label>
             <label>模型版本<input maxLength={64} aria-label="对话模型版本" value={draft.chat.modelVersion} disabled={draft.chat.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, modelVersion: event.target.value } }))} /></label>

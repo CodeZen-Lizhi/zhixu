@@ -229,7 +229,7 @@
     "/api/v1/settings/models/test": {
       "post": {
         "operationId": "testModelSettings",
-        "description": "Tests exactly one Chat or Embedding draft from the API container without persisting it. Provider credentials and response details are never echoed. Bearer API Tokens cannot access this system-secret management endpoint.",
+        "description": "Tests exactly one Chat or Embedding draft from the API container without persisting it. Failures may include only bounded, sanitized Provider or transport diagnostics; credentials, endpoints, request bodies, raw responses, and internal errors are never echoed. Every response uses Cache-Control: no-store. Bearer API Tokens cannot access this system-secret management endpoint.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Origin"
@@ -256,7 +256,7 @@
         },
         "responses": {
           "200": {
-            "description": "The selected provider accepted the bounded connection test and matched the requested model contract.",
+            "description": "The selected provider accepted the bounded connection test and matched the requested model contract. The response includes only a fixed API style/path and non-negative elapsed milliseconds; it never includes the configured base URL or provider output.",
             "headers": {
               "Cache-Control": {
                 "description": "Connection-test results must not be stored by browsers or intermediaries.",
@@ -274,34 +274,34 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+            "$ref": "#/components/responses/ModelSettingsTestProblemNoStore"
           },
           "401": {
-            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+            "$ref": "#/components/responses/ModelSettingsTestProblemNoStore"
           },
           "403": {
-            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+            "$ref": "#/components/responses/ModelSettingsTestProblemNoStore"
           },
           "405": {
-            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+            "$ref": "#/components/responses/ModelSettingsTestProblemNoStore"
           },
           "409": {
             "$ref": "#/components/responses/ModelSettingsConflictNoStore"
           },
           "415": {
-            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+            "$ref": "#/components/responses/ModelSettingsTestProblemNoStore"
           },
           "500": {
-            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+            "$ref": "#/components/responses/ModelSettingsTestProblemNoStore"
           },
           "502": {
-            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+            "$ref": "#/components/responses/ModelSettingsTestProblemNoStore"
           },
           "503": {
-            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+            "$ref": "#/components/responses/ModelSettingsTestProblemNoStore"
           },
           "504": {
-            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+            "$ref": "#/components/responses/ModelSettingsTestProblemNoStore"
           }
         }
       }
@@ -11782,6 +11782,30 @@
             }
           }
         }
+      },
+      "ModelSettingsTestProblemNoStore": {
+        "description": "A model draft connection test failed. Provider HTTP status and bounded sanitized diagnostics may appear in details without changing the local API status semantics.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Connection-test errors must not be stored by browsers or intermediaries.",
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "WWW-Authenticate": {
+            "description": "Authentication challenge only when the local API response status is 401; Provider authentication failures remain local 502 responses.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ModelSettingsTestProblem"
+            }
+          }
+        }
       }
     },
     "schemas": {
@@ -11874,6 +11898,98 @@
         },
         "additionalProperties": false
       },
+      "ModelSettingsTestProblem": {
+        "type": "object",
+        "required": [
+          "error_code",
+          "message",
+          "retryable"
+        ],
+        "properties": {
+          "error_code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "workflow_run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "details": {
+            "$ref": "#/components/schemas/ModelSettingsTestDetails"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelSettingsTestDetails": {
+        "type": "object",
+        "required": [
+          "target",
+          "stage"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": ["chat", "embedding"]
+          },
+          "stage": {
+            "type": "string",
+            "enum": ["request", "dns", "connect", "tls", "provider_response", "response_read", "response_validation", "cancelled", "timeout"]
+          },
+          "provider_http_status": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "provider_error_code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+          },
+          "provider_error_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+          },
+          "provider_message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "x-max-utf8-bytes": 1024
+          },
+          "provider_request_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "x-max-utf8-bytes": 256,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+          },
+          "transport_error": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "x-max-utf8-bytes": 256
+          },
+          "validation_reason": {
+            "type": "string",
+            "enum": ["invalid_response", "model_mismatch", "finish_reason_length", "finish_reason_invalid", "empty_content", "refusal", "tool_calls", "missing_usage", "invalid_usage", "response_contract_invalid"]
+          }
+        },
+        "additionalProperties": false
+      },
       "ModelSettingsResponse": {
         "type": "object",
         "required": [
@@ -11939,6 +12055,7 @@
         "type": "object",
         "required": [
           "provider",
+          "api_style",
           "base_url",
           "model",
           "model_version",
@@ -11952,6 +12069,14 @@
               "disabled",
               "openai-compatible"
             ]
+          },
+          "api_style": {
+            "type": "string",
+            "enum": [
+              "chat_completions",
+              "responses"
+            ],
+            "description": "Explicit OpenAI-compatible Chat protocol; never inferred from provider or model name."
           },
           "base_url": {
             "type": "string",
@@ -12349,6 +12474,7 @@
         "type": "object",
         "required": [
           "provider",
+          "api_style",
           "base_url",
           "model",
           "model_version",
@@ -12361,6 +12487,13 @@
             "enum": [
               "disabled",
               "openai-compatible"
+            ]
+          },
+          "api_style": {
+            "type": "string",
+            "enum": [
+              "chat_completions",
+              "responses"
             ]
           },
           "base_url": {
@@ -12697,7 +12830,9 @@
           "target",
           "status",
           "provider",
-          "model"
+          "model",
+          "endpoint_path",
+          "latency_ms"
         ],
         "properties": {
           "target": {
@@ -12722,19 +12857,62 @@
             "minLength": 1,
             "maxLength": 128,
             "x-max-utf8-bytes": 128
+          },
+          "api_style": {
+            "type": "string",
+            "enum": [
+              "chat_completions",
+              "responses"
+            ]
+          },
+          "endpoint_path": {
+            "type": "string",
+            "enum": [
+              "/v1/chat/completions",
+              "/v1/responses",
+              "/v1/embeddings"
+            ],
+            "description": "Safe fixed protocol path only; it never contains the configured base URL."
+          },
+          "latency_ms": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "oneOf": [
           {
             "title": "Successful Chat connection test",
+            "required": [
+              "api_style"
+            ],
             "properties": {
               "target": {
                 "const": "chat"
               },
               "provider": {
                 "const": "openai-compatible"
+              },
+              "endpoint_path": {
+                "enum": [
+                  "/v1/chat/completions",
+                  "/v1/responses"
+                ]
               }
-            }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "api_style": { "const": "chat_completions" },
+                  "endpoint_path": { "const": "/v1/chat/completions" }
+                }
+              },
+              {
+                "properties": {
+                  "api_style": { "const": "responses" },
+                  "endpoint_path": { "const": "/v1/responses" }
+                }
+              }
+            ]
           },
           {
             "title": "Successful Embedding connection test",
@@ -12747,7 +12925,15 @@
                   "openai-compatible",
                   "ollama"
                 ]
+              },
+              "endpoint_path": {
+                "const": "/v1/embeddings"
               }
+            },
+            "not": {
+              "required": [
+                "api_style"
+              ]
             }
           }
         ],

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
@@ -24,11 +25,17 @@ type OpenAIChatOptions struct {
 	Timeout          time.Duration
 	MaxRequestBytes  int64
 	MaxResponseBytes int64
+	APIStyle         ChatAPIStyle
 }
 
 // OpenAICompatibleChatModel 通过直接 HTTP 执行单次结构化 Chat 调用。
 type OpenAICompatibleChatModel struct {
 	http chatHTTPConfig
+}
+
+// ChatConnectionProber executes a fixed plain probe for the configured Chat API style without returning provider output.
+type ChatConnectionProber interface {
+	ProbeConnection(context.Context) error
 }
 
 // NewOpenAICompatibleChatModel 创建不自动重试且禁止重定向的 Chat Adapter。
@@ -37,6 +44,7 @@ func NewOpenAICompatibleChatModel(options OpenAIChatOptions) (*OpenAICompatibleC
 		client: options.Client, baseURL: options.BaseURL, apiKey: options.APIKey,
 		model: options.Model, modelVersion: options.ModelVersion, adapterVersion: options.AdapterVersion, timeout: options.Timeout,
 		maxRequestBytes: options.MaxRequestBytes, maxResponseBytes: options.MaxResponseBytes,
+		apiStyle: options.APIStyle,
 	})
 	if err != nil {
 		return nil, err
@@ -49,10 +57,13 @@ func (model *OpenAICompatibleChatModel) Contract() ChatContract {
 	return model.http.contractCopy()
 }
 
-// Chat 执行一次 OpenAI-Compatible `/v1/chat/completions` 请求，不在 Adapter 内重试。
+// Chat 执行一次显式配置的 OpenAI-Compatible Chat 请求，不在 Adapter 内重试。
 func (model *OpenAICompatibleChatModel) Chat(ctx context.Context, request agentapplication.ChatRequest) (agentapplication.ChatResponse, error) {
 	if model == nil {
 		return agentapplication.ChatResponse{}, chatError(foundation.ErrorDependencyUnavailable, ErrorCodeChatCapabilityUnavailable, false, errChatCapabilityOff)
+	}
+	if model.http.apiStyle == ChatAPIStyleResponses {
+		return model.chatResponses(ctx, request)
 	}
 	payload := openAIChatRequest{
 		Model:     model.http.contract.Model.ModelID,
@@ -79,9 +90,126 @@ func (model *OpenAICompatibleChatModel) Chat(ctx context.Context, request agenta
 		return agentapplication.ChatResponse{}, err
 	}
 	if err := agentapplication.ValidateChatResponse(request, result); err != nil {
-		return agentapplication.ChatResponse{}, err
+		return agentapplication.ChatResponse{}, withResponseValidationDiagnostic(err)
 	}
 	return result, nil
+}
+
+// ProbeConnection verifies that the configured endpoint, credential, and model can complete one minimal request.
+func (model *OpenAICompatibleChatModel) ProbeConnection(ctx context.Context) error {
+	if model == nil {
+		return chatError(foundation.ErrorDependencyUnavailable, ErrorCodeChatCapabilityUnavailable, false, errChatCapabilityOff)
+	}
+	if model.http.apiStyle == ChatAPIStyleResponses {
+		return model.probeResponses(ctx)
+	}
+	payload := openAIChatProbeRequest{
+		Model: model.http.contract.Model.ModelID,
+		Messages: []openAIChatRequestMessage{
+			{Role: string(agentapplication.MessageRoleUser), Content: "test"},
+		},
+	}
+	var response openAIChatProbeResponse
+	if err := model.http.probe(ctx, payload, &response); err != nil {
+		return err
+	}
+	if len(response.Choices) != 1 || response.Choices[0].Index != 0 || response.Choices[0].Message.Role != "assistant" {
+		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationInvalidResponse))
+	}
+	if response.Choices[0].Message.Content == nil || strings.TrimSpace(*response.Choices[0].Message.Content) == "" {
+		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationEmptyContent))
+	}
+	return nil
+}
+
+func (model *OpenAICompatibleChatModel) chatResponses(ctx context.Context, request agentapplication.ChatRequest) (agentapplication.ChatResponse, error) {
+	payload := openAIResponsesRequest{
+		Model:           model.http.contract.Model.ModelID,
+		Input:           make([]openAIResponsesInput, len(request.Messages)),
+		MaxOutputTokens: request.MaxOutputTokens,
+		Store:           false,
+		Text: openAIResponsesText{Format: openAIResponsesFormat{
+			Type: "json_schema", Name: schemaRequestName(request.SchemaRef), Strict: true,
+			Schema: append(json.RawMessage(nil), request.OutputSchema...),
+		}},
+	}
+	for index, message := range request.Messages {
+		payload.Input[index] = openAIResponsesInput{Role: string(message.Role), Content: []openAIResponsesInputContent{{Type: "input_text", Text: message.Content}}}
+	}
+	var response openAIResponsesResponse
+	if err := model.http.chatWithResponseMode(ctx, request, payload, &response, false); err != nil {
+		return agentapplication.ChatResponse{}, err
+	}
+	result, err := validateOpenAIResponsesResponse(model.http.contract.Model, response)
+	if err != nil {
+		return agentapplication.ChatResponse{}, err
+	}
+	if err := agentapplication.ValidateChatResponse(request, result); err != nil {
+		return agentapplication.ChatResponse{}, withResponseValidationDiagnostic(err)
+	}
+	return result, nil
+}
+
+func (model *OpenAICompatibleChatModel) probeResponses(ctx context.Context) error {
+	var response openAIResponsesProbeResponse
+	if err := model.http.probe(ctx, openAIResponsesProbeRequest{Model: model.http.contract.Model.ModelID, Input: "test", Store: false}, &response); err != nil {
+		return err
+	}
+	if response.Status != "completed" {
+		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationInvalidResponse))
+	}
+	if responsesOutputText(response.Output, false) == "" {
+		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationEmptyContent))
+	}
+	return nil
+}
+
+func validateOpenAIResponsesResponse(model agentdomain.ModelRef, response openAIResponsesResponse) (agentapplication.ChatResponse, error) {
+	if response.Model != model.ModelVersion {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseModelMismatch, responseValidationDiagnosticWithReason(ConnectionValidationModelMismatch))
+	}
+	if response.Status != "completed" {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationInvalidResponse))
+	}
+	if !responsesAssistantMessagesCompleted(response.Output) {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationInvalidResponse))
+	}
+	content := responsesOutputText(response.Output, true)
+	if content == "" {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationEmptyContent))
+	}
+	if response.Usage == nil {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationMissingUsage))
+	}
+	usage := agentdomain.TokenUsage{InputTokens: response.Usage.InputTokens, OutputTokens: response.Usage.OutputTokens, TotalTokens: response.Usage.TotalTokens}
+	if err := usage.Validate(); err != nil || usage.TotalTokens == 0 {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationInvalidUsage))
+	}
+	return agentapplication.ChatResponse{Model: model, Content: []byte(content), Usage: usage}, nil
+}
+
+func responsesOutputText(output []openAIResponsesOutput, requireCompleted bool) string {
+	var builder strings.Builder
+	for _, item := range output {
+		if item.Type != "message" || item.Role != "assistant" || (requireCompleted && item.Status != "completed") {
+			continue
+		}
+		for _, content := range item.Content {
+			if content.Type == "output_text" && strings.TrimSpace(content.Text) != "" {
+				builder.WriteString(content.Text)
+			}
+		}
+	}
+	return builder.String()
+}
+
+func responsesAssistantMessagesCompleted(output []openAIResponsesOutput) bool {
+	for _, item := range output {
+		if item.Type == "message" && item.Role == "assistant" && item.Status != "completed" {
+			return false
+		}
+	}
+	return true
 }
 
 // String 返回不含 Endpoint、Credential、Prompt 或原始响应的 Adapter 摘要。
@@ -104,15 +232,30 @@ func schemaRequestName(ref agentdomain.SchemaRef) string {
 
 func validateOpenAIChatResponse(model agentdomain.ModelRef, response openAIChatResponse) (agentapplication.ChatResponse, error) {
 	if response.Model != model.ModelVersion {
-		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseModelMismatch)
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseModelMismatch, responseValidationDiagnosticWithReason(ConnectionValidationModelMismatch))
 	}
-	if len(response.Choices) != 1 || response.Choices[0].Index != 0 || response.Choices[0].Message.Role != "assistant" ||
-		response.Choices[0].Message.Content == nil || *response.Choices[0].Message.Content == "" ||
-		response.Choices[0].FinishReason == nil || *response.Choices[0].FinishReason != "stop" ||
-		(response.Choices[0].Message.Refusal != nil && *response.Choices[0].Message.Refusal != "") ||
-		len(response.Choices[0].Message.ToolCalls) != 0 || response.Usage == nil ||
-		response.Usage.PromptTokens == nil || response.Usage.CompletionTokens == nil || response.Usage.TotalTokens == nil {
-		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid)
+	if len(response.Choices) != 1 || response.Choices[0].Index != 0 || response.Choices[0].Message.Role != "assistant" {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationInvalidResponse))
+	}
+	choice := response.Choices[0]
+	if choice.FinishReason == nil || *choice.FinishReason != "stop" {
+		reason := ConnectionValidationFinishReasonInvalid
+		if choice.FinishReason != nil && *choice.FinishReason == "length" {
+			reason = ConnectionValidationFinishReasonLength
+		}
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(reason))
+	}
+	if choice.Message.Content == nil || *choice.Message.Content == "" {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationEmptyContent))
+	}
+	if choice.Message.Refusal != nil && *choice.Message.Refusal != "" {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationRefusal))
+	}
+	if len(choice.Message.ToolCalls) != 0 {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationToolCalls))
+	}
+	if response.Usage == nil || response.Usage.PromptTokens == nil || response.Usage.CompletionTokens == nil || response.Usage.TotalTokens == nil {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationMissingUsage))
 	}
 	usage := agentdomain.TokenUsage{
 		InputTokens:  *response.Usage.PromptTokens,
@@ -120,9 +263,9 @@ func validateOpenAIChatResponse(model agentdomain.ModelRef, response openAIChatR
 		TotalTokens:  *response.Usage.TotalTokens,
 	}
 	if err := usage.Validate(); err != nil || usage.TotalTokens == 0 {
-		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid)
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationInvalidUsage))
 	}
-	return agentapplication.ChatResponse{Model: model, Content: []byte(*response.Choices[0].Message.Content), Usage: usage}, nil
+	return agentapplication.ChatResponse{Model: model, Content: []byte(*choice.Message.Content), Usage: usage}, nil
 }
 
 type openAIChatRequest struct {
@@ -130,6 +273,15 @@ type openAIChatRequest struct {
 	Messages       []openAIChatRequestMessage `json:"messages"`
 	MaxTokens      int                        `json:"max_tokens"`
 	ResponseFormat openAIChatResponseFormat   `json:"response_format"`
+}
+
+type openAIChatProbeRequest struct {
+	Model    string                     `json:"model"`
+	Messages []openAIChatRequestMessage `json:"messages"`
+}
+
+type openAIChatProbeResponse struct {
+	Choices []openAIChatChoice `json:"choices"`
 }
 
 type openAIChatRequestMessage struct {
@@ -182,4 +334,68 @@ type openAIChatUsage struct {
 	CompletionTokensDetails json.RawMessage `json:"completion_tokens_details"`
 }
 
+type openAIResponsesRequest struct {
+	Model           string                 `json:"model"`
+	Input           []openAIResponsesInput `json:"input"`
+	MaxOutputTokens int                    `json:"max_output_tokens"`
+	Store           bool                   `json:"store"`
+	Text            openAIResponsesText    `json:"text"`
+}
+
+type openAIResponsesInput struct {
+	Role    string                        `json:"role"`
+	Content []openAIResponsesInputContent `json:"content"`
+}
+
+type openAIResponsesInputContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+type openAIResponsesText struct {
+	Format openAIResponsesFormat `json:"format"`
+}
+type openAIResponsesFormat struct {
+	Type   string          `json:"type"`
+	Name   string          `json:"name"`
+	Strict bool            `json:"strict"`
+	Schema json.RawMessage `json:"schema"`
+}
+type openAIResponsesProbeRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+	Store bool   `json:"store"`
+}
+type openAIResponsesProbeResponse struct {
+	Status string                  `json:"status"`
+	Output []openAIResponsesOutput `json:"output"`
+}
+type openAIResponsesResponse struct {
+	ID     string                  `json:"id"`
+	Object string                  `json:"object"`
+	Status string                  `json:"status"`
+	Model  string                  `json:"model"`
+	Output []openAIResponsesOutput `json:"output"`
+	Usage  *openAIResponsesUsage   `json:"usage"`
+}
+type openAIResponsesOutput struct {
+	ID      string                         `json:"id"`
+	Type    string                         `json:"type"`
+	Role    string                         `json:"role"`
+	Status  string                         `json:"status"`
+	Content []openAIResponsesOutputContent `json:"content"`
+	Summary []json.RawMessage              `json:"summary"`
+}
+type openAIResponsesOutputContent struct {
+	Type        string            `json:"type"`
+	Text        string            `json:"text"`
+	Annotations []json.RawMessage `json:"annotations"`
+	Logprobs    []json.RawMessage `json:"logprobs"`
+}
+type openAIResponsesUsage struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	TotalTokens  int64 `json:"total_tokens"`
+}
+
 var _ agentapplication.ChatModel = (*OpenAICompatibleChatModel)(nil)
+var _ ChatConnectionProber = (*OpenAICompatibleChatModel)(nil)

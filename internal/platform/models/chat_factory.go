@@ -18,6 +18,7 @@ func NewConfiguredChatModel(cfg config.Config) (agentapplication.ChatModel, erro
 			BaseURL: cfg.ChatBaseURL, APIKey: cfg.ChatAPIKey, Model: cfg.ChatModel, ModelVersion: cfg.ChatModelVersion,
 			AdapterVersion: cfg.ChatAdapterVersion, Timeout: cfg.ChatTimeout,
 			MaxRequestBytes: cfg.ChatMaxRequestBytes, MaxResponseBytes: cfg.ChatMaxResponseBytes,
+			APIStyle: ChatAPIStyle(cfg.ChatAPIStyle),
 		})
 	default:
 		return nil, foundation.NewError(foundation.ErrorInvalidInput, ErrorCodeChatConfigInvalid, false, errors.New("chat provider is unsupported"))

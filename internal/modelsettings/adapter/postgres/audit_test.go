@@ -89,7 +89,7 @@ func TestModelSettingsAuditActorMapping(t *testing.T) {
 func TestValidModelSettingsChangeRejectsSecretProviderMismatch(t *testing.T) {
 	valid := application.ModelSettingsChange{
 		Action: application.ModelSettingsAuditActionUpdated, Revision: 1,
-		ChatProvider: domain.ChatProviderOpenAICompatible, ChatKeyConfigured: true,
+		ChatProvider: domain.ChatProviderOpenAICompatible, ChatAPIStyle: domain.ChatAPIStyleChatCompletions, ChatKeyConfigured: true,
 		EmbeddingProvider: domain.EmbeddingProviderOllama,
 	}
 	if !validModelSettingsChange(valid) {
@@ -119,7 +119,7 @@ func TestSettingsAuditAppenderRequiresPGXTransaction(t *testing.T) {
 	}
 	err = adapter.AppendModelSettingsChangeTx(context.Background(), struct{}{}, application.ModelSettingsChange{
 		Action: application.ModelSettingsAuditActionUpdated, Revision: 1,
-		ChatProvider: domain.ChatProviderDisabled, EmbeddingProvider: domain.EmbeddingProviderDisabled,
+		ChatProvider: domain.ChatProviderDisabled, ChatAPIStyle: domain.ChatAPIStyleChatCompletions, EmbeddingProvider: domain.EmbeddingProviderDisabled,
 	})
 	assertModelSettingsUnitErrorCode(t, err, domain.ErrorCodeUnavailable)
 }

@@ -97,6 +97,7 @@ var valueEnvSpecs = []envSpec{
 	{configKey: "chat_model", envKey: "ZHIXU_CHAT_MODEL", gate: envGateChat},
 	{configKey: "chat_model_version", envKey: "ZHIXU_CHAT_MODEL_VERSION", gate: envGateChat},
 	{configKey: "chat_adapter_version", envKey: "ZHIXU_CHAT_ADAPTER_VERSION", gate: envGateChat},
+	{configKey: "chat_api_style", envKey: "ZHIXU_CHAT_API_STYLE"},
 
 	{configKey: "auth_bootstrap_token", envKey: "ZHIXU_AUTH_BOOTSTRAP_TOKEN", apiOnly: true},
 	{configKey: "review_question_ref_key", envKey: "ZHIXU_REVIEW_QUESTION_REF_KEY", apiOnly: true},

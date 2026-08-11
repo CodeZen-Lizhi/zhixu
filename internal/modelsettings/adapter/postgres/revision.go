@@ -14,7 +14,7 @@ import (
 )
 
 const revisionColumns = `revision,
-chat_provider,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
+chat_provider,chat_api_style,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
 chat_timeout_microseconds,chat_max_request_bytes,chat_max_response_bytes,
 chat_secret_key_id,chat_secret_nonce,chat_secret_ciphertext,
 embedding_provider,embedding_base_url,embedding_model,embedding_dimensions,
@@ -34,12 +34,12 @@ type persistedRevision struct {
 
 func scanRevision(row interface{ Scan(...any) error }) (persistedRevision, error) {
 	var persisted persistedRevision
-	var chatProvider, embeddingProvider, normalization, distance string
+	var chatProvider, chatAPIStyle, embeddingProvider, normalization, distance string
 	var chatTimeout, embeddingTimeout int64
 	var chatKeyID, embeddingKeyID sql.NullString
 	if err := row.Scan(
 		&persisted.revision,
-		&chatProvider, &persisted.settings.Chat.BaseURL, &persisted.settings.Chat.Model,
+		&chatProvider, &chatAPIStyle, &persisted.settings.Chat.BaseURL, &persisted.settings.Chat.Model,
 		&persisted.settings.Chat.ModelVersion, &persisted.settings.Chat.AdapterVersion,
 		&chatTimeout, &persisted.settings.Chat.MaxRequestBytes, &persisted.settings.Chat.MaxResponseBytes,
 		&chatKeyID, &persisted.chatSecret.Nonce, &persisted.chatSecret.Ciphertext,
@@ -54,6 +54,7 @@ func scanRevision(row interface{ Scan(...any) error }) (persistedRevision, error
 		return persistedRevision{}, err
 	}
 	persisted.settings.Chat.Provider = domain.ChatProvider(chatProvider)
+	persisted.settings.Chat.APIStyle = domain.ChatAPIStyle(chatAPIStyle)
 	persisted.settings.Chat.Timeout = time.Duration(chatTimeout) * time.Microsecond
 	persisted.settings.Embedding.Provider = domain.EmbeddingProvider(embeddingProvider)
 	persisted.settings.Embedding.Normalization = domain.EmbeddingNormalization(normalization)
@@ -150,7 +151,7 @@ func (repository *Repository) SaveDesired(ctx context.Context, command applicati
 		return domain.Snapshot{}, err
 	}
 	if err := tx.QueryRow(ctx, `INSERT INTO ops.model_settings_revisions(
-revision,chat_provider,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
+revision,chat_provider,chat_api_style,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
 chat_timeout_microseconds,chat_max_request_bytes,chat_max_response_bytes,
 chat_secret_key_id,chat_secret_nonce,chat_secret_ciphertext,
 embedding_provider,embedding_base_url,embedding_model,embedding_dimensions,
@@ -158,10 +159,10 @@ embedding_normalization,embedding_distance_metric,embedding_max_batch_size,
 embedding_max_input_bytes,embedding_max_batch_input_bytes,embedding_timeout_microseconds,
 embedding_max_response_bytes,embedding_secret_key_id,embedding_secret_nonce,embedding_secret_ciphertext,
 created_at,created_by)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,clock_timestamp(),$27)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,clock_timestamp(),$28)
 RETURNING revision`,
 		revision,
-		string(command.Settings.Chat.Provider), command.Settings.Chat.BaseURL, command.Settings.Chat.Model,
+		string(command.Settings.Chat.Provider), string(command.Settings.Chat.APIStyle), command.Settings.Chat.BaseURL, command.Settings.Chat.Model,
 		command.Settings.Chat.ModelVersion, command.Settings.Chat.AdapterVersion, command.Settings.Chat.Timeout.Microseconds(),
 		command.Settings.Chat.MaxRequestBytes, command.Settings.Chat.MaxResponseBytes,
 		nullString(chatEnvelope.KeyID), nullBytes(chatEnvelope.Nonce), nullBytes(chatEnvelope.Ciphertext),
@@ -182,7 +183,7 @@ WHERE singleton=true`, revision); err != nil {
 	}
 	if err := repository.audit.AppendModelSettingsChangeTx(ctx, tx, application.ModelSettingsChange{
 		Action: application.ModelSettingsAuditActionUpdated, Revision: revision,
-		ChatProvider: command.Settings.Chat.Provider, EmbeddingProvider: command.Settings.Embedding.Provider,
+		ChatProvider: command.Settings.Chat.Provider, ChatAPIStyle: command.Settings.Chat.APIStyle, EmbeddingProvider: command.Settings.Embedding.Provider,
 		ChatKeyConfigured: chatEnvelope.Configured(), EmbeddingKeyConfigured: embeddingEnvelope.Configured(),
 	}); err != nil {
 		return domain.Snapshot{}, err

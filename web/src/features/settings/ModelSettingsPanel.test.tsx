@@ -23,6 +23,7 @@ import { ModelSettingsPanel } from "./ModelSettingsPanel";
 
 const disabledChat = {
   provider: "disabled",
+  apiStyle: "chat_completions",
   baseUrl: "",
   model: "",
   modelVersion: "",
@@ -60,6 +61,7 @@ const configuredSettings = (): ModelSettingsResponse => ({
   desiredSettings: {
     chat: {
       provider: "openai-compatible",
+      apiStyle: "chat_completions",
       baseUrl: "https://models.example.test/v1",
       model: "chat-v2",
       modelVersion: "2026-07",
@@ -130,7 +132,7 @@ describe("ModelSettingsPanel", () => {
 
   it("同时展示 desired/active/applied 差异并测试已保存的 Chat Key", async () => {
     api.getModelSettings.mockResolvedValue(configuredSettings());
-    api.testModelSettings.mockResolvedValue({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2" });
+    api.testModelSettings.mockResolvedValue({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", apiStyle: "responses", endpointPath: "/v1/responses", latencyMs: 12 });
 
     renderPanel();
 
@@ -140,14 +142,15 @@ describe("ModelSettingsPanel", () => {
     expect(screen.getAllByText("与待应用配置不同")).toHaveLength(2);
     expect(screen.getByText("版本 2")).toBeInTheDocument();
     expect(screen.getAllByText("版本 1").length).toBeGreaterThanOrEqual(3);
+    fireEvent.change(screen.getByRole("combobox", { name: "对话模型调用接口" }), { target: { value: "responses" } });
     fireEvent.click(screen.getByRole("button", { name: "测试对话连接" }));
 
-    expect(await screen.findByText("当前草稿连接测试通过，尚未保存或生效：openai-compatible / chat-v2")).toBeInTheDocument();
+    expect(await screen.findByText(/当前草稿连接测试通过，尚未保存或生效：openai-compatible \/ chat-v2 \/ Responses API/)).toHaveTextContent("/v1/responses");
     expect(screen.queryByText(/已保存或已应用/)).not.toBeInTheDocument();
     const testInput: unknown = api.testModelSettings.mock.calls[0]?.[0];
     expect(testInput).toMatchObject({
       target: "chat",
-      chat: { apiKey: { action: "keep" } },
+      chat: { apiStyle: "responses", apiKey: { action: "keep" } },
     });
   });
 
@@ -161,7 +164,81 @@ describe("ModelSettingsPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "测试对话连接" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("模型提供方连接超时");
+    expect(screen.getByRole("alert")).toHaveTextContent("错误码：MODEL_PROVIDER_TIMEOUT");
     expect(screen.getByRole("button", { name: "测试对话连接" })).toBeEnabled();
+  });
+
+  it("连接测试展示 Provider HTTP 诊断而不触发 Session 401 语义", async () => {
+    api.getModelSettings.mockResolvedValue(configuredSettings());
+    api.testModelSettings.mockRejectedValue(new ModelSettingsApiError(
+      "HTTP_ERROR",
+      "MODEL_CHAT_UNAUTHORIZED",
+      "模型 Provider 返回错误",
+      false,
+      502,
+      {
+        target: "chat",
+        stage: "provider_response",
+        provider_http_status: 401,
+        provider_error_code: "invalid_api_key",
+        provider_error_type: "authentication_error",
+        provider_message: "Invalid API key",
+        provider_request_id: "req_chat_401",
+      },
+    ));
+
+    renderPanel();
+    await expandModelSection("对话模型");
+    fireEvent.click(screen.getByRole("button", { name: "测试对话连接" }));
+
+    const diagnostic = await screen.findByRole("alert");
+    expect(diagnostic).toHaveTextContent("Provider HTTP401");
+    expect(diagnostic).toHaveTextContent("invalid_api_key");
+    expect(diagnostic).toHaveTextContent("authentication_error");
+    expect(diagnostic).toHaveTextContent("Invalid API key");
+    expect(diagnostic).toHaveTextContent("req_chat_401");
+    expect(diagnostic).toHaveTextContent("知序错误码MODEL_CHAT_UNAUTHORIZED");
+    expect(diagnostic).toHaveTextContent("可重试否");
+  });
+
+  it("连接测试展示 TLS EOF 的安全传输原因", async () => {
+    api.getModelSettings.mockResolvedValue(configuredSettings());
+    api.testModelSettings.mockRejectedValue(new ModelSettingsApiError(
+      "HTTP_ERROR",
+      "MODEL_CHAT_REQUEST_FAILED",
+      "模型 Provider 连接失败",
+      false,
+      502,
+      { target: "chat", stage: "tls", transport_error: "EOF" },
+    ));
+
+    renderPanel();
+    await expandModelSection("对话模型");
+    fireEvent.click(screen.getByRole("button", { name: "测试对话连接" }));
+
+    const diagnostic = await screen.findByRole("alert");
+    expect(diagnostic).toHaveTextContent("阶段TLS 握手");
+    expect(diagnostic).toHaveTextContent("连接原因EOF");
+  });
+
+  it("连接测试展示稳定的响应校验原因", async () => {
+    api.getModelSettings.mockResolvedValue(configuredSettings());
+    api.testModelSettings.mockRejectedValue(new ModelSettingsApiError(
+      "HTTP_ERROR",
+      "MODEL_CHAT_RESPONSE_INVALID",
+      "模型 Provider 响应校验失败",
+      false,
+      502,
+      { target: "chat", stage: "response_validation", validation_reason: "finish_reason_length" },
+    ));
+
+    renderPanel();
+    await expandModelSection("对话模型");
+    fireEvent.click(screen.getByRole("button", { name: "测试对话连接" }));
+
+    const diagnostic = await screen.findByRole("alert");
+    expect(diagnostic).toHaveTextContent("校验原因输出达到长度上限");
+    expect(diagnostic).not.toHaveTextContent("provider-output-secret-canary");
   });
 
   it("在请求前拒绝带凭据、查询参数或片段的 Endpoint", async () => {

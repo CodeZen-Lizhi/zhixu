@@ -21,6 +21,14 @@ const (
 	ChatProviderOpenAICompatible ChatProvider = "openai-compatible"
 )
 
+// ChatAPIStyle selects the explicit OpenAI-compatible Chat wire protocol.
+type ChatAPIStyle string
+
+const (
+	ChatAPIStyleChatCompletions ChatAPIStyle = "chat_completions"
+	ChatAPIStyleResponses       ChatAPIStyle = "responses"
+)
+
 // EmbeddingProvider identifies the configured embedding protocol.
 type EmbeddingProvider string
 
@@ -50,6 +58,7 @@ const (
 // ChatSettings freezes every non-secret chat setting that affects runtime behavior.
 type ChatSettings struct {
 	Provider         ChatProvider
+	APIStyle         ChatAPIStyle
 	BaseURL          string
 	Model            string
 	ModelVersion     string
@@ -104,7 +113,7 @@ type ResolvedSettings struct {
 func CanonicalDisabledSettings() Settings {
 	return Settings{
 		Chat: ChatSettings{
-			Provider: ChatProviderDisabled, AdapterVersion: "v1", Timeout: 30 * time.Second,
+			Provider: ChatProviderDisabled, APIStyle: ChatAPIStyleChatCompletions, AdapterVersion: "v1", Timeout: 30 * time.Second,
 			MaxRequestBytes: 4 << 20, MaxResponseBytes: 4 << 20,
 		},
 		Embedding: EmbeddingSettings{
@@ -154,6 +163,9 @@ func (settings ChatSettings) validate() error {
 		settings.MaxRequestBytes > 16<<20 || settings.MaxResponseBytes <= 0 || settings.MaxResponseBytes > 16<<20 ||
 		!canonicalText(settings.AdapterVersion, 64) {
 		return invalid("chat limits or adapter version are invalid")
+	}
+	if settings.APIStyle != ChatAPIStyleChatCompletions && settings.APIStyle != ChatAPIStyleResponses {
+		return invalid("chat API style is invalid")
 	}
 	switch settings.Provider {
 	case ChatProviderDisabled:

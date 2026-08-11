@@ -1700,7 +1700,11 @@ for (const [path, method, successSchema, requestSchema, statuses] of modelSettin
     throw new Error(`${method.toUpperCase()} ${path} must return ${successSchema} with Cache-Control: no-store`);
   }
   for (const status of statuses.filter((status) => Number(status) >= 400)) {
-    const expectedSchema = status === "409" ? "#/components/schemas/ModelSettingsConflictProblem" : "#/components/schemas/Problem";
+    const expectedSchema = status === "409"
+      ? "#/components/schemas/ModelSettingsConflictProblem"
+      : path === "/api/v1/settings/models/test"
+        ? "#/components/schemas/ModelSettingsTestProblem"
+        : "#/components/schemas/Problem";
     if (resolveRef(operation.responses[status])?.content?.["application/json"]?.schema?.$ref !== expectedSchema) {
       throw new Error(`${method.toUpperCase()} ${path} ${status} must use ${expectedSchema}`);
     }
@@ -1721,6 +1725,8 @@ for (const responseName of ["BadGateway", "GatewayTimeout"]) {
 const strictModelSettingsSchemas = [
   "ModelSettingsConflictProblem",
   "ModelSettingsConflictDetails",
+  "ModelSettingsTestProblem",
+  "ModelSettingsTestDetails",
   "ModelSettingsResponse",
   "ModelSettingsSummary",
   "ModelChatSettingsSummary",
@@ -1756,30 +1762,48 @@ const exactModelSettingsShape = (schemaName, required, properties = required) =>
 exactModelSettingsShape("ModelSettingsResponse", ["desired_revision", "active_revision", "desired_settings", "active_settings", "runtime", "rollout", "restart_required", "capabilities"]);
 exactModelSettingsShape("ModelSettingsConflictProblem", ["error_code", "message", "retryable", "details"]);
 exactModelSettingsShape("ModelSettingsConflictDetails", ["current_revision"]);
+exactModelSettingsShape("ModelSettingsTestProblem", ["error_code", "message", "retryable"], ["error_code", "message", "retryable", "workflow_run_id", "details"]);
+exactModelSettingsShape("ModelSettingsTestDetails", ["target", "stage"], ["target", "stage", "provider_http_status", "provider_error_code", "provider_error_type", "provider_message", "provider_request_id", "transport_error", "validation_reason"]);
 exactModelSettingsShape("ModelSettingsSummary", ["chat", "embedding"]);
-exactModelSettingsShape("ModelChatSettingsSummary", ["provider", "base_url", "model", "model_version", "adapter_version", "api_key_configured"]);
+exactModelSettingsShape("ModelChatSettingsSummary", ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key_configured"]);
 exactModelSettingsShape("ModelEmbeddingSettingsSummary", ["provider", "base_url", "model", "dimensions", "normalization", "distance_metric", "api_key_configured"]);
 exactModelSettingsShape("ModelSettingsRuntime", ["api", "worker"]);
 exactModelSettingsShape("ModelSettingsRuntimeRole", ["applied_revision", "phase", "fresh"]);
 exactModelSettingsShape("ModelSettingsRollout", ["phase", "target_revision", "last_error_code", "retryable"]);
 exactModelSettingsShape("ModelSettingsCapabilities", ["chat", "embedding"]);
 exactModelSettingsShape("UpdateModelSettingsRequest", ["expected_revision", "chat", "embedding"]);
-exactModelSettingsShape("ModelChatSettingsDraft", ["provider", "base_url", "model", "model_version", "adapter_version", "api_key"]);
+exactModelSettingsShape("ModelChatSettingsDraft", ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key"]);
 exactModelSettingsShape("ModelEmbeddingSettingsDraft", ["provider", "base_url", "model", "dimensions", "normalization", "distance_metric", "api_key"]);
 exactModelSettingsShape("ModelAPIKeyKeep", ["action"]);
 exactModelSettingsShape("ModelAPIKeyReplace", ["action", "value"]);
 exactModelSettingsShape("ModelAPIKeyClear", ["action"]);
 exactModelSettingsShape("TestModelSettingsRequest", ["target"], ["target", "chat", "embedding"]);
-exactModelSettingsShape("ModelSettingsTestResponse", ["target", "status", "provider", "model"]);
+exactModelSettingsShape("ModelSettingsTestResponse", ["target", "status", "provider", "model", "endpoint_path", "latency_ms"], ["target", "status", "provider", "model", "api_style", "endpoint_path", "latency_ms"]);
 
 const modelResponse = schemas.ModelSettingsResponse;
 const modelConflict = schemas.ModelSettingsConflictProblem;
+const modelTestProblem = schemas.ModelSettingsTestProblem;
+const modelTestDetails = schemas.ModelSettingsTestDetails;
 if (modelConflict.properties.error_code.pattern !== "^[A-Z][A-Z0-9_]*$" ||
     modelConflict.properties.error_code.maxLength !== 128 || modelConflict.properties.message.maxLength !== 4096 ||
     modelConflict.properties.retryable.type !== "boolean" ||
     modelConflict.properties.details.$ref !== "#/components/schemas/ModelSettingsConflictDetails" ||
     schemas.ModelSettingsConflictDetails.properties.current_revision.minimum !== 0) {
   throw new Error("Model Settings conflict must expose only a bounded stable code and current revision");
+}
+if (modelTestProblem.properties.error_code.pattern !== "^[A-Z][A-Z0-9_]*$" ||
+    modelTestProblem.properties.error_code.maxLength !== 128 || modelTestProblem.properties.message.maxLength !== 4096 ||
+    modelTestProblem.properties.details.$ref !== "#/components/schemas/ModelSettingsTestDetails" ||
+    modelTestDetails.properties.target.enum?.join(",") !== "chat,embedding" ||
+    modelTestDetails.properties.stage.enum?.join(",") !== "request,dns,connect,tls,provider_response,response_read,response_validation,cancelled,timeout" ||
+    modelTestDetails.properties.provider_http_status.minimum !== 100 || modelTestDetails.properties.provider_http_status.maximum !== 599 ||
+    modelTestDetails.properties.provider_error_code.maxLength !== 128 || modelTestDetails.properties.provider_error_type.maxLength !== 128 ||
+    modelTestDetails.properties.provider_error_code["x-max-utf8-bytes"] !== 128 || modelTestDetails.properties.provider_error_type["x-max-utf8-bytes"] !== 128 ||
+    modelTestDetails.properties.provider_message.maxLength !== 1024 || modelTestDetails.properties.provider_message["x-max-utf8-bytes"] !== 1024 ||
+    modelTestDetails.properties.provider_request_id.maxLength !== 256 || modelTestDetails.properties.provider_request_id["x-max-utf8-bytes"] !== 256 ||
+    modelTestDetails.properties.transport_error.maxLength !== 256 || modelTestDetails.properties.transport_error["x-max-utf8-bytes"] !== 256 ||
+    modelTestDetails.properties.validation_reason.enum?.join(",") !== "invalid_response,model_mismatch,finish_reason_length,finish_reason_invalid,empty_content,refusal,tool_calls,missing_usage,invalid_usage,response_contract_invalid") {
+  throw new Error("Model Settings test diagnostics must remain target-bound, bounded, and exhaustive");
 }
 if (modelResponse.properties.desired_revision.minimum !== 0 || modelResponse.properties.active_revision.minimum !== 0 ||
     modelResponse.properties.desired_settings.$ref !== "#/components/schemas/ModelSettingsSummary" ||
@@ -1790,7 +1814,7 @@ if (modelResponse.properties.desired_revision.minimum !== 0 || modelResponse.pro
     modelResponse.properties.restart_required.type !== "boolean") {
   throw new Error("Model Settings desired/active/runtime/rollout response contract drifted");
 }
-const responseSchemas = [modelResponse, modelConflict, schemas.ModelSettingsConflictDetails, schemas.ModelSettingsSummary, schemas.ModelChatSettingsSummary, schemas.ModelEmbeddingSettingsSummary,
+const responseSchemas = [modelResponse, modelConflict, schemas.ModelSettingsConflictDetails, modelTestProblem, modelTestDetails, schemas.ModelSettingsSummary, schemas.ModelChatSettingsSummary, schemas.ModelEmbeddingSettingsSummary,
   schemas.ModelSettingsRuntime, schemas.ModelSettingsRuntimeRole, schemas.ModelSettingsRollout, schemas.ModelSettingsCapabilities];
 if (responseSchemas.some((schema) => JSON.stringify(schema).includes('"writeOnly"') || JSON.stringify(schema).includes('"api_key":') ||
     JSON.stringify(schema).includes('"ciphertext"') || JSON.stringify(schema).includes('"nonce"') ||
@@ -1801,11 +1825,24 @@ if (responseSchemas.some((schema) => JSON.stringify(schema).includes('"writeOnly
 const chatSummary = schemas.ModelChatSettingsSummary;
 const embeddingSummary = schemas.ModelEmbeddingSettingsSummary;
 if (chatSummary.properties.provider.enum?.join(",") !== "disabled,openai-compatible" ||
+    chatSummary.properties.api_style.enum?.join(",") !== "chat_completions,responses" ||
     chatSummary.oneOf?.map((branch) => branch.properties?.provider?.const).join(",") !== "disabled,openai-compatible" ||
     chatSummary.oneOf[0].properties.base_url.const !== "" || chatSummary.oneOf[0].properties.model.const !== "" ||
     chatSummary.oneOf[0].properties.model_version.const !== "" ||
     chatSummary.oneOf[0].properties.api_key_configured.const !== false) {
   throw new Error("Chat summary must remain a strict disabled/openai-compatible provider union");
+}
+const modelTestSuccess = schemas.ModelSettingsTestResponse;
+if (modelTestSuccess.properties.api_style.enum?.join(",") !== "chat_completions,responses" ||
+    modelTestSuccess.properties.endpoint_path.enum?.join(",") !== "/v1/chat/completions,/v1/responses,/v1/embeddings" ||
+    modelTestSuccess.properties.latency_ms.minimum !== 0 || modelTestSuccess.oneOf?.[0]?.required?.join(",") !== "api_style" ||
+    modelTestSuccess.oneOf?.[1]?.properties?.endpoint_path?.const !== "/v1/embeddings" ||
+    modelTestSuccess.oneOf?.[0]?.oneOf?.length !== 2 ||
+    modelTestSuccess.oneOf?.[0]?.oneOf?.[0]?.properties?.api_style?.const !== "chat_completions" ||
+    modelTestSuccess.oneOf?.[0]?.oneOf?.[0]?.properties?.endpoint_path?.const !== "/v1/chat/completions" ||
+    modelTestSuccess.oneOf?.[0]?.oneOf?.[1]?.properties?.api_style?.const !== "responses" ||
+    modelTestSuccess.oneOf?.[0]?.oneOf?.[1]?.properties?.endpoint_path?.const !== "/v1/responses") {
+  throw new Error("Model Settings test success must expose only fixed protocol metadata and non-negative latency");
 }
 if (embeddingSummary.properties.provider.enum?.join(",") !== "disabled,openai-compatible,ollama" ||
     embeddingSummary.oneOf?.map((branch) => branch.properties?.provider?.const).join(",") !== "disabled,openai-compatible,ollama" ||
@@ -1856,6 +1893,11 @@ if (modelSettingsConflict?.headers?.["Cache-Control"]?.schema?.const !== "no-sto
     modelSettingsConflict?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ModelSettingsConflictProblem") {
   throw new Error("Model Settings conflict responses must include current_revision and remain no-store");
 }
+const modelSettingsTestProblem = document.components.responses.ModelSettingsTestProblemNoStore;
+if (modelSettingsTestProblem?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+    modelSettingsTestProblem?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ModelSettingsTestProblem") {
+  throw new Error("Model Settings test Problem responses must use bounded diagnostics and remain no-store");
+}
 for (const [path, method, successStatus] of [
   ["/api/v1/settings/models", "get", "200"],
   ["/api/v1/settings/models", "put", "200"],
@@ -1864,7 +1906,11 @@ for (const [path, method, successStatus] of [
   const responses = document.paths[path][method].responses;
   if (responses[successStatus]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
       Object.entries(responses).some(([status, response]) => status !== successStatus && response.$ref !==
-        (status === "409" ? "#/components/responses/ModelSettingsConflictNoStore" : "#/components/responses/ModelSettingsProblemNoStore"))) {
+        (status === "409"
+          ? "#/components/responses/ModelSettingsConflictNoStore"
+          : path === "/api/v1/settings/models/test"
+            ? "#/components/responses/ModelSettingsTestProblemNoStore"
+            : "#/components/responses/ModelSettingsProblemNoStore"))) {
     throw new Error(`${method.toUpperCase()} ${path} responses must all remain no-store`);
   }
 }

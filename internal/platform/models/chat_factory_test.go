@@ -32,8 +32,10 @@ func TestNewConfiguredChatModelBuildsOnlyOpenAICompatibleAdapter(t *testing.T) {
 		t.Fatalf("model type=%T", model)
 	}
 	configured := model.(*models.OpenAICompatibleChatModel)
-	if configured.Contract().Model.ModelID != cfg.ChatModel || configured.Contract().Model.ModelVersion != cfg.ChatModelVersion || configured.Contract().Model.AdapterVersion != cfg.ChatAdapterVersion {
-		t.Fatalf("contract=%#v", configured.Contract())
+	contract := configured.Contract()
+	if contract.APIStyle != models.ChatAPIStyleResponses || contract.EndpointPath != "/v1/responses" ||
+		contract.Model.ModelID != cfg.ChatModel || contract.Model.ModelVersion != cfg.ChatModelVersion || contract.Model.AdapterVersion != cfg.ChatAdapterVersion {
+		t.Fatalf("contract=%#v", contract)
 	}
 	formatted := fmt.Sprintf("%v %#v %#v", configured, configured, configured.Contract())
 	for _, secret := range []string{cfg.ChatAPIKey, cfg.ChatBaseURL} {
@@ -69,5 +71,6 @@ func configuredChatTestConfig() config.Config {
 	cfg.ChatModel = "chat-v1"
 	cfg.ChatModelVersion = "chat-v1"
 	cfg.ChatAdapterVersion = "v7"
+	cfg.ChatAPIStyle = config.ChatAPIStyleResponses
 	return cfg
 }

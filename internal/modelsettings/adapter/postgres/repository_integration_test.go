@@ -71,6 +71,7 @@ func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	}
 
 	settings.Chat.ModelVersion = "2026-08"
+	settings.Chat.APIStyle = domain.ChatAPIStyleResponses
 	snapshot, err = repository.SaveDesired(ctx, application.SaveCommand{
 		ExpectedRevision: 1, Settings: settings, ChatSecret: domain.KeepSecret(),
 		EmbeddingSecret: domain.KeepSecret(), CreatedBy: "integration-test",
@@ -92,6 +93,9 @@ func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	}
 	if got := string(resolved.ChatAPIKey.Bytes()); got != "chat-secret-value" {
 		t.Fatalf("resolved chat secret=%q", got)
+	}
+	if resolved.Settings.Chat.APIStyle != domain.ChatAPIStyleResponses {
+		t.Fatalf("resolved chat API style=%q", resolved.Settings.Chat.APIStyle)
 	}
 	resolved.ChatAPIKey.Destroy()
 	resolved.EmbeddingAPIKey.Destroy()
@@ -315,7 +319,8 @@ func assertModelSettingsAudit(t *testing.T, ctx context.Context, store *auditpos
 	if err := json.Unmarshal(latest.Metadata, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if len(metadata) != 5 || metadata["revision"] != float64(2) || metadata["chat_provider"] != "openai-compatible" ||
+	if len(metadata) != 6 || metadata["revision"] != float64(2) || metadata["chat_provider"] != "openai-compatible" ||
+		metadata["chat_api_style"] != "responses" ||
 		metadata["chat_api_key_configured"] != true || metadata["embedding_provider"] != "ollama" ||
 		metadata["embedding_api_key_configured"] != false {
 		t.Fatalf("unexpected model settings audit metadata: %s", latest.Metadata)

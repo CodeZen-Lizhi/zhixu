@@ -176,3 +176,40 @@ func TestChatConfigFormattingAndParseErrorsDoNotLeakPrivateValues(t *testing.T) 
 		}
 	}
 }
+
+func TestChatAPIStyleDefaultsAndEnvironmentOverride(t *testing.T) {
+	if got := Defaults().ChatAPIStyle; got != ChatAPIStyleChatCompletions {
+		t.Fatalf("default chat API style = %q", got)
+	}
+	cfg, err := LoadWithLookup("", func(key string) (string, bool) {
+		if key == "ZHIXU_CHAT_API_STYLE" {
+			return "responses", true
+		}
+		return "", false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ChatAPIStyle != ChatAPIStyleResponses {
+		t.Fatalf("chat API style = %q", cfg.ChatAPIStyle)
+	}
+	cfg.ChatAPIStyle = "automatic"
+	if err := cfg.ValidateModels(); err == nil {
+		t.Fatal("unknown chat API style was accepted")
+	}
+	cfg = configuredChatTestConfigForValidation()
+	cfg.ChatAPIStyle = ChatAPIStyleResponses
+	cfg.ChatBaseURL = "https://models.example.test/v1/chat/completions"
+	if err := cfg.ValidateModels(); err == nil {
+		t.Fatal("Responses style accepted a Chat Completions endpoint")
+	}
+}
+
+func configuredChatTestConfigForValidation() Config {
+	cfg := Defaults()
+	cfg.ChatProvider = ChatProviderOpenAICompatible
+	cfg.ChatBaseURL = "https://models.example.test/v1"
+	cfg.ChatModel = "chat-model"
+	cfg.ChatModelVersion = "chat-model"
+	return cfg
+}

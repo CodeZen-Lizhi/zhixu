@@ -8,6 +8,7 @@ import {
 } from "../shared/codec";
 
 export type ChatModelProvider = "disabled" | "openai-compatible";
+export type ChatAPIStyle = "chat_completions" | "responses";
 export type EmbeddingModelProvider = ChatModelProvider | "ollama";
 export type EmbeddingNormalization = "none" | "l2";
 export type EmbeddingDistanceMetric = "cosine" | "inner_product" | "euclidean";
@@ -15,6 +16,21 @@ export type ModelCapability = "disabled" | "configured" | "unavailable";
 export type ModelRuntimePhase = "active" | "quiescing" | "quiesced" | "prepared" | "verifying" | "unavailable";
 export type ModelRolloutPhase = "idle" | "validating" | "draining" | "applying" | "verifying" | "failed";
 export type ModelTestTarget = "chat" | "embedding";
+export type ModelTestStage = "request" | "dns" | "connect" | "tls" | "provider_response" | "response_read" | "response_validation" | "cancelled" | "timeout";
+export type ModelTestValidationReason = "invalid_response" | "model_mismatch" | "finish_reason_length" | "finish_reason_invalid" | "empty_content" | "refusal" | "tool_calls" | "missing_usage" | "invalid_usage" | "response_contract_invalid";
+
+export interface ModelSettingsProblemDetails {
+  current_revision?: number;
+  target?: ModelTestTarget;
+  stage?: ModelTestStage;
+  provider_http_status?: number;
+  provider_error_code?: string;
+  provider_error_type?: string;
+  provider_message?: string;
+  provider_request_id?: string;
+  transport_error?: string;
+  validation_reason?: ModelTestValidationReason;
+}
 
 export type ModelSecretInput =
   | { action: "keep" }
@@ -23,6 +39,7 @@ export type ModelSecretInput =
 
 export interface ChatModelSettingsSummary {
   provider: ChatModelProvider;
+  apiStyle: ChatAPIStyle;
   baseUrl: string;
   model: string;
   modelVersion: string;
@@ -77,6 +94,7 @@ export interface ModelSettingsResponse {
 
 export interface ChatModelSettingsInput {
   provider: ChatModelProvider;
+  apiStyle: ChatAPIStyle;
   baseUrl: string;
   model: string;
   modelVersion: string;
@@ -109,6 +127,9 @@ export interface ModelSettingsTestResult {
   status: "ok";
   provider: EmbeddingModelProvider;
   model: string;
+  apiStyle?: ChatAPIStyle;
+  endpointPath: "/v1/chat/completions" | "/v1/responses" | "/v1/embeddings";
+  latencyMs: number;
 }
 
 export class ModelSettingsApiError extends Error {
@@ -116,7 +137,7 @@ export class ModelSettingsApiError extends Error {
   readonly errorCode: string;
   readonly retryable: boolean;
   readonly status: number | null;
-  readonly details?: Readonly<Record<string, unknown>>;
+  readonly details?: Readonly<ModelSettingsProblemDetails>;
 
   constructor(
     code: ModelSettingsApiError["code"],
@@ -124,7 +145,7 @@ export class ModelSettingsApiError extends Error {
     message: string,
     retryable: boolean,
     status: number | null = null,
-    details?: Readonly<Record<string, unknown>>,
+    details?: Readonly<ModelSettingsProblemDetails>,
     options?: ErrorOptions,
   ) {
     super(message, options);
@@ -138,6 +159,7 @@ export class ModelSettingsApiError extends Error {
 }
 
 const chatProviders = ["disabled", "openai-compatible"] as const;
+const chatAPIStyles = ["chat_completions", "responses"] as const;
 const embeddingProviders = ["disabled", "openai-compatible", "ollama"] as const;
 const normalizations = ["none", "l2"] as const;
 const distanceMetrics = ["cosine", "inner_product", "euclidean"] as const;
@@ -145,10 +167,14 @@ const capabilities = ["disabled", "configured", "unavailable"] as const;
 const runtimePhases = ["active", "quiescing", "quiesced", "prepared", "verifying", "unavailable"] as const;
 const rolloutPhases = ["idle", "validating", "draining", "applying", "verifying", "failed"] as const;
 const testTargets = ["chat", "embedding"] as const;
+const testStages = ["request", "dns", "connect", "tls", "provider_response", "response_read", "response_validation", "cancelled", "timeout"] as const;
+const testValidationReasons = ["invalid_response", "model_mismatch", "finish_reason_length", "finish_reason_invalid", "empty_content", "refusal", "tool_calls", "missing_usage", "invalid_usage", "response_contract_invalid"] as const;
 const maxResponseBytes = 256 * 1024;
 const maxSecretBytes = 16 * 1024;
 const utf8Encoder = new TextEncoder();
 const tokenPattern = /^[A-Z][A-Z0-9_]{0,127}$/;
+const diagnosticTokenPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+const diagnosticControlPattern = /[\p{Cc}\p{Cf}]/u;
 export const modelSettingsOllamaRelayUrl = "http://127.0.0.1:11434";
 
 const canonicalEscapedPath = (path: string): string | undefined => {
@@ -247,6 +273,21 @@ const identityText = (value: unknown, field: string, maxBytes: number): string =
     const codePoint = character.codePointAt(0);
     if (codePoint === undefined || codePoint < 0x21 || codePoint === 0x7f) throw invalidResponse(field);
   }
+  return parsed;
+};
+
+const diagnosticText = (value: unknown, field: string, maxBytes: number): string => {
+  const parsed = canonicalText(value, field, maxBytes);
+  for (const character of parsed) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint === undefined || (codePoint >= 0xd800 && codePoint <= 0xdfff) || diagnosticControlPattern.test(character)) throw invalidResponse(field);
+  }
+  return parsed;
+};
+
+const diagnosticToken = (value: unknown, field: string, maxBytes: number): string => {
+  const parsed = diagnosticText(value, field, maxBytes);
+  if (!diagnosticTokenPattern.test(parsed)) throw invalidResponse(field);
   return parsed;
 };
 
@@ -373,11 +414,12 @@ const strictJson = (source: string): unknown => new StrictJsonParser(source).par
 
 const decodeChatSummary = (value: unknown, field: string): ChatModelSettingsSummary => {
   if (!isRecord(value)) throw invalidResponse(field);
-  exact(value, ["provider", "base_url", "model", "model_version", "adapter_version", "api_key_configured"], field);
+  exact(value, ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key_configured"], field);
   const provider = enumValue(value.provider, chatProviders, `${field}.provider`);
   const disabled = provider === "disabled";
   const result: ChatModelSettingsSummary = {
     provider,
+    apiStyle: enumValue(value.api_style, chatAPIStyles, `${field}.api_style`),
     baseUrl: disabled ? text(value.base_url, `${field}.base_url`) : endpointText(value.base_url, `${field}.base_url`),
     model: disabled ? text(value.model, `${field}.model`, 128) : identityText(value.model, `${field}.model`, 128),
     modelVersion: disabled ? text(value.model_version, `${field}.model_version`, 64) : identityText(value.model_version, `${field}.model_version`, 64),
@@ -434,7 +476,7 @@ const decodeRuntime = (value: unknown, field: string): ModelRuntimeStatus => {
 };
 
 const isCanonicalDisabledSummary = (summary: ModelSettingsSummary): boolean =>
-  summary.chat.provider === "disabled" && summary.chat.adapterVersion === "v1" &&
+  summary.chat.provider === "disabled" && summary.chat.apiStyle === "chat_completions" && summary.chat.adapterVersion === "v1" &&
   summary.embedding.provider === "disabled" && summary.embedding.normalization === "l2" && summary.embedding.distanceMetric === "cosine";
 
 export const decodeModelSettingsResponse = (value: unknown): ModelSettingsResponse => {
@@ -502,15 +544,24 @@ export const decodeModelSettingsResponse = (value: unknown): ModelSettingsRespon
 
 export const decodeModelSettingsTestResult = (value: unknown): ModelSettingsTestResult => {
   if (!isRecord(value)) throw invalidResponse("test_result");
-  exact(value, ["target", "status", "provider", "model"], "test_result");
+  const allowed = ["target", "status", "provider", "model", "api_style", "endpoint_path", "latency_ms"] as const;
+  if (!hasOnlyKeys(value, allowed)) throw invalidResponse("test_result");
   const target = enumValue(value.target, testTargets, "test_result.target");
   const provider = enumValue(value.provider, embeddingProviders, "test_result.provider");
   if (provider === "disabled" || (target === "chat" && provider !== "openai-compatible")) throw invalidResponse("test_result.provider");
+  const endpointPath = enumValue(value.endpoint_path, ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"] as const, "test_result.endpoint_path");
+  const latencyMs = revision(value.latency_ms, "test_result.latency_ms");
+  const apiStyle = value.api_style === undefined ? undefined : enumValue(value.api_style, chatAPIStyles, "test_result.api_style");
+  if ((target === "chat" && (apiStyle === undefined || endpointPath !== (apiStyle === "responses" ? "/v1/responses" : "/v1/chat/completions"))) ||
+      (target === "embedding" && (apiStyle !== undefined || endpointPath !== "/v1/embeddings"))) throw invalidResponse("test_result.protocol");
   return {
     target,
     status: enumValue(value.status, ["ok"] as const, "test_result.status"),
     provider,
     model: identityText(value.model, "test_result.model", 128),
+    ...(apiStyle === undefined ? {} : { apiStyle }),
+    endpointPath,
+    latencyMs,
   };
 };
 
@@ -573,15 +624,17 @@ const encodeSecret = (secret: unknown, field: string, sensitiveValues: string[])
 
 const encodeChat = (input: unknown, field: string, sensitiveValues: string[]): Record<string, unknown> => {
   if (!isRecord(input)) throw invalidRequest(field);
-  exactRequest(input, ["provider", "baseUrl", "model", "modelVersion", "adapterVersion", "apiKey"], field);
+  exactRequest(input, ["provider", "apiStyle", "baseUrl", "model", "modelVersion", "adapterVersion", "apiKey"], field);
   const provider = requireEnum(input.provider, chatProviders, `${field}.provider`);
+  const apiStyle = requireEnum(input.apiStyle, chatAPIStyles, `${field}.apiStyle`);
   const baseUrl = provider === "disabled" ? requireCanonical(input.baseUrl, `${field}.baseUrl`, 2048, true) : requireChatEndpoint(input.baseUrl, provider, `${field}.baseUrl`);
+  if (baseUrl !== "") sensitiveValues.push(baseUrl);
   const model = requireIdentity(input.model, `${field}.model`, 128, provider === "disabled");
   const modelVersion = requireIdentity(input.modelVersion, `${field}.modelVersion`, 64, provider === "disabled");
   const adapterVersion = requireIdentity(input.adapterVersion, `${field}.adapterVersion`, 64);
   const apiKey = encodeSecret(input.apiKey, `${field}.apiKey`, sensitiveValues);
   if (provider === "disabled" && (baseUrl !== "" || model !== "" || modelVersion !== "" || apiKey.action !== "clear")) throw invalidRequest(`${field}.providerSettings`);
-  return { provider, base_url: baseUrl, model, model_version: modelVersion, adapter_version: adapterVersion, api_key: apiKey };
+  return { provider, api_style: apiStyle, base_url: baseUrl, model, model_version: modelVersion, adapter_version: adapterVersion, api_key: apiKey };
 };
 
 const encodeEmbedding = (input: unknown, field: string, sensitiveValues: string[]): Record<string, unknown> => {
@@ -589,6 +642,7 @@ const encodeEmbedding = (input: unknown, field: string, sensitiveValues: string[
   exactRequest(input, ["provider", "baseUrl", "model", "dimensions", "normalization", "distanceMetric", "apiKey"], field);
   const provider = requireEnum(input.provider, embeddingProviders, `${field}.provider`);
   const baseUrl = provider === "disabled" ? requireCanonical(input.baseUrl, `${field}.baseUrl`, 2048, true) : requireEmbeddingEndpoint(input.baseUrl, provider, `${field}.baseUrl`);
+  if (baseUrl !== "") sensitiveValues.push(baseUrl);
   const model = requireIdentity(input.model, `${field}.model`, 128, provider === "disabled");
   const dimensions = requireRevision(input.dimensions, `${field}.dimensions`);
   const normalization = requireEnum(input.normalization, normalizations, `${field}.normalization`);
@@ -598,6 +652,37 @@ const encodeEmbedding = (input: unknown, field: string, sensitiveValues: string[
   if (provider !== "disabled" && (dimensions < 1 || dimensions > 16_000)) throw invalidRequest(`${field}.dimensions`);
   if (provider === "ollama" && apiKey.action !== "clear") throw invalidRequest(`${field}.apiKey`);
   return { provider, base_url: baseUrl, model, dimensions, normalization, distance_metric: distanceMetric, api_key: apiKey };
+};
+
+const decodeProblemDetails = (value: Record<string, unknown>, status: number): Readonly<ModelSettingsProblemDetails> => {
+  if (hasExactKeys(value, ["current_revision"])) {
+    if (status !== 409) throw invalidResponse("problem.details.current_revision", status);
+    return { current_revision: revision(value.current_revision, "problem.details.current_revision") };
+  }
+  if (status === 409) throw invalidResponse("problem.details", status);
+  const allowed = ["target", "stage", "provider_http_status", "provider_error_code", "provider_error_type", "provider_message", "provider_request_id", "transport_error", "validation_reason"] as const;
+  if (!hasOnlyKeys(value, allowed) || value.target === undefined || value.stage === undefined) throw invalidResponse("problem.details", status);
+  const details: ModelSettingsProblemDetails = {
+    target: enumValue(value.target, testTargets, "problem.details.target"),
+    stage: enumValue(value.stage, testStages, "problem.details.stage"),
+  };
+  if (value.provider_http_status !== undefined) {
+    const providerStatus = revision(value.provider_http_status, "problem.details.provider_http_status");
+    if (providerStatus < 100 || providerStatus > 599) throw invalidResponse("problem.details.provider_http_status", status);
+    details.provider_http_status = providerStatus;
+  }
+  if (value.provider_error_code !== undefined) details.provider_error_code = diagnosticToken(value.provider_error_code, "problem.details.provider_error_code", 128);
+  if (value.provider_error_type !== undefined) details.provider_error_type = diagnosticToken(value.provider_error_type, "problem.details.provider_error_type", 128);
+  if (value.provider_message !== undefined) details.provider_message = diagnosticText(value.provider_message, "problem.details.provider_message", 1024);
+  if (value.provider_request_id !== undefined) details.provider_request_id = diagnosticToken(value.provider_request_id, "problem.details.provider_request_id", 256);
+  if (value.transport_error !== undefined) details.transport_error = diagnosticText(value.transport_error, "problem.details.transport_error", 256);
+  if (value.validation_reason !== undefined) details.validation_reason = enumValue(value.validation_reason, testValidationReasons, "problem.details.validation_reason");
+  const providerFieldsPresent = details.provider_http_status !== undefined || details.provider_error_code !== undefined || details.provider_error_type !== undefined || details.provider_message !== undefined || details.provider_request_id !== undefined;
+  if (details.stage === "provider_response" && details.provider_http_status === undefined) throw invalidResponse("problem.details.provider_http_status", status);
+  if (providerFieldsPresent && details.stage !== "provider_response" && details.stage !== "response_read") throw invalidResponse("problem.details.provider_fields", status);
+  if (details.transport_error !== undefined && details.stage === "provider_response") throw invalidResponse("problem.details.transport_error", status);
+  if (details.validation_reason !== undefined && details.stage !== "response_validation") throw invalidResponse("problem.details.validation_reason", status);
+  return details;
 };
 
 const decodeProblem = (value: unknown, status: number): ModelSettingsApiError => {
@@ -611,11 +696,10 @@ const decodeProblem = (value: unknown, status: number): ModelSettingsApiError =>
     const retryable = bool(value.retryable, "problem.retryable");
     if (value.workflow_run_id !== undefined && (typeof value.workflow_run_id !== "string" || !uuidPattern.test(value.workflow_run_id))) throw invalidResponse("problem.workflow_run_id", status);
     const rawDetails = value.details;
-    let details: Readonly<Record<string, unknown>> | undefined;
+    let details: Readonly<ModelSettingsProblemDetails> | undefined;
     if (rawDetails !== undefined) {
       if (!isRecord(rawDetails)) throw invalidResponse("problem.details", status);
-      exact(rawDetails, ["current_revision"], "problem.details");
-      details = { current_revision: revision(rawDetails.current_revision, "problem.details.current_revision") };
+      details = decodeProblemDetails(rawDetails, status);
     }
     return new ModelSettingsApiError("HTTP_ERROR", errorCode, message, retryable, status, details);
   } catch (error: unknown) {
@@ -625,7 +709,10 @@ const decodeProblem = (value: unknown, status: number): ModelSettingsApiError =>
 };
 
 const containsSensitiveValue = (value: unknown, sensitiveValues: readonly string[]): boolean => {
-  if (typeof value === "string") return sensitiveValues.some((sensitive) => value.includes(sensitive));
+  if (typeof value === "string") {
+    const foldedValue = value.toLowerCase();
+    return sensitiveValues.some((sensitive) => foldedValue.includes(sensitive.toLowerCase()));
+  }
   if (Array.isArray(value)) return value.some((item) => containsSensitiveValue(item, sensitiveValues));
   if (!isRecord(value)) return false;
   return Object.entries(value).some(([key, item]) => containsSensitiveValue(key, sensitiveValues) || containsSensitiveValue(item, sensitiveValues));
@@ -697,13 +784,23 @@ export const testModelSettings = async (input: TestModelSettingsInput, signal?: 
     ? { target: "chat", chat: encodeChat(input.chat, "chat", sensitiveValues) }
     : { target: "embedding", embedding: encodeEmbedding(input.embedding, "embedding", sensitiveValues) };
   if (input.target === "chat" ? input.chat.provider === "disabled" : input.embedding.provider === "disabled") throw invalidRequest("provider");
-  const result = decodeModelSettingsTestResult(await request("/api/v1/settings/models/test", {
-    ...signalInit(signal),
-    cache: "no-store",
-    method: "POST",
-    body: JSON.stringify(body),
-  }, sensitiveValues));
+  let payload: unknown;
+  try {
+    payload = await request("/api/v1/settings/models/test", {
+      ...signalInit(signal),
+      cache: "no-store",
+      method: "POST",
+      body: JSON.stringify(body),
+    }, sensitiveValues);
+  } catch (error: unknown) {
+    if (error instanceof ModelSettingsApiError && error.details?.target !== undefined && error.details.target !== target) {
+      throw invalidResponse("problem.details.target_binding", error.status);
+    }
+    throw error;
+  }
+  const result = decodeModelSettingsTestResult(payload);
   const draft = input.target === "chat" ? input.chat : input.embedding;
   if (result.target !== target || result.provider !== draft.provider || result.model !== draft.model) throw invalidResponse("test_result.binding");
+  if (input.target === "chat" && result.target === "chat" && result.apiStyle !== input.chat.apiStyle) throw invalidResponse("test_result.api_style_binding");
   return result;
 };

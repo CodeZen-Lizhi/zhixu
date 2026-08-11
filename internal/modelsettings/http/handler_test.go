@@ -7,6 +7,7 @@ import (
 	"fmt"
 	nethttp "net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -421,6 +422,18 @@ func TestConnectionTestResolvesOneTargetAndDestroysTemporarySecrets(t *testing.T
 					Target:   command.Target,
 					Provider: test.wantProvider,
 					Model:    test.wantModel,
+					APIStyle: func() modelsettingsdomain.ChatAPIStyle {
+						if command.Target == modelsettingsapplication.ConnectionTargetChat {
+							return modelsettingsdomain.ChatAPIStyleChatCompletions
+						}
+						return ""
+					}(),
+					EndpointPath: func() string {
+						if command.Target == modelsettingsapplication.ConnectionTargetChat {
+							return "/v1/chat/completions"
+						}
+						return "/v1/embeddings"
+					}(),
 				}, nil
 			}
 			handler := mustHandler(t, manager, Options{})
@@ -449,7 +462,7 @@ func TestConnectionTestBindsStrictDraftCommandToManager(t *testing.T) {
 			t.Fatalf("test command identity=%+v", command)
 		}
 		if command.Draft.Settings.Chat != (modelsettingsdomain.ChatSettings{
-			Provider: modelsettingsdomain.ChatProviderOpenAICompatible, BaseURL: "https://test-chat.example.test/v1",
+			Provider: modelsettingsdomain.ChatProviderOpenAICompatible, APIStyle: modelsettingsdomain.ChatAPIStyleResponses, BaseURL: "https://test-chat.example.test/v1",
 			Model: "test-chat", ModelVersion: "2026-08", AdapterVersion: "v2",
 			Timeout: current.DesiredSettings.Settings.Chat.Timeout, MaxRequestBytes: current.DesiredSettings.Settings.Chat.MaxRequestBytes,
 			MaxResponseBytes: current.DesiredSettings.Settings.Chat.MaxResponseBytes,
@@ -463,17 +476,18 @@ func TestConnectionTestBindsStrictDraftCommandToManager(t *testing.T) {
 			t.Fatalf("secret actions chat=%s embedding=%s", command.Draft.ChatSecret.Kind, command.Draft.EmbeddingSecret.Kind)
 		}
 		capturedSecret = command.Draft.ChatSecret.Value
-		return modelsettingsapplication.TestResult{Target: command.Target, Provider: string(command.Draft.Settings.Chat.Provider), Model: command.Draft.Settings.Chat.Model}, nil
+		return modelsettingsapplication.TestResult{Target: command.Target, Provider: string(command.Draft.Settings.Chat.Provider), Model: command.Draft.Settings.Chat.Model,
+			APIStyle: command.Draft.Settings.Chat.APIStyle, EndpointPath: "/v1/responses"}, nil
 	}
 	handler := mustHandler(t, manager, Options{})
-	body := `{"target":"chat","chat":{"provider":"openai-compatible","base_url":"https://test-chat.example.test/v1","model":"test-chat","model_version":"2026-08","adapter_version":"v2","api_key":{"action":"replace","value":"draft-command-canary"}}}`
+	body := `{"target":"chat","chat":{"provider":"openai-compatible","api_style":"responses","base_url":"https://test-chat.example.test/v1","model":"test-chat","model_version":"2026-08","adapter_version":"v2","api_key":{"action":"replace","value":"draft-command-canary"}}}`
 	response := serve(t, handler, "POST", "/api/v1/settings/models/test", body, "application/json")
 	if response.Code != nethttp.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	var result testResponse
 	decodeResponse(t, response, &result)
-	if result != (testResponse{Target: "chat", Status: connectionTestSuccessStatus, Provider: "openai-compatible", Model: "test-chat"}) {
+	if result != (testResponse{Target: "chat", Status: connectionTestSuccessStatus, Provider: "openai-compatible", Model: "test-chat", APIStyle: modelsettingsdomain.ChatAPIStyleResponses, EndpointPath: "/v1/responses"}) {
 		t.Fatalf("response=%+v", result)
 	}
 	assertSecretZeroed(t, capturedSecret)
@@ -556,6 +570,102 @@ func TestConnectionTestErrorMappingIsStableAndRedacted(t *testing.T) {
 			assertBodyExcludes(t, response.Body.String(), "private.example.test", "secret-error-canary", "provider rate detail canary", "provider unavailable detail canary", "redirect location canary", "oversized provider body canary", "unexpected model canary", "database DSN canary", "invalid endpoint canary", "unknown secret cause canary")
 		})
 	}
+}
+
+func TestConnectionTestReturnsTargetBoundSafeProviderDiagnostic(t *testing.T) {
+	t.Parallel()
+	diagnostic := &platformmodels.ConnectionDiagnostic{
+		Stage:              platformmodels.ConnectionStageProviderResponse,
+		ProviderHTTPStatus: nethttp.StatusUnauthorized,
+		ProviderErrorCode:  "invalid_api_key",
+		ProviderErrorType:  "authentication_error",
+		ProviderMessage:    "Invalid API key",
+		ProviderRequestID:  "req_chat_401",
+	}
+	manager := managerForSnapshot(configuredSnapshot())
+	manager.test = func(context.Context, modelsettingsapplication.TestCommand) (modelsettingsapplication.TestResult, error) {
+		return modelsettingsapplication.TestResult{}, foundation.NewError(
+			foundation.ErrorNonRetryableFailure,
+			platformmodels.ErrorCodeChatUnauthorized,
+			false,
+			diagnostic,
+		)
+	}
+	handler := mustHandler(t, manager, Options{})
+	body := fmt.Sprintf(`{"target":"chat","chat":%s}`, configuredChatDraft(`{"action":"keep"}`))
+	response := serve(t, handler, "POST", "/api/v1/settings/models/test", body, "application/json")
+	if response.Code != nethttp.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var problem httpapi.Problem
+	decodeResponse(t, response, &problem)
+	want := map[string]any{
+		"target": "chat", "stage": "provider_response", "provider_http_status": float64(401),
+		"provider_error_code": "invalid_api_key", "provider_error_type": "authentication_error",
+		"provider_message": "Invalid API key", "provider_request_id": "req_chat_401",
+	}
+	if !reflect.DeepEqual(problem.Details, want) || problem.Message != "模型 Provider 返回错误" {
+		t.Fatalf("problem=%#v want details=%#v", problem, want)
+	}
+	assertNoStore(t, response)
+	assertBodyExcludes(t, response.Body.String(), "https://chat.example.test/v1", "draft-chat-canary", "Authorization", "Bearer")
+}
+
+func TestConnectionTestReturnsTransportDiagnosticWithoutChangingTimeoutStatus(t *testing.T) {
+	t.Parallel()
+	manager := managerForSnapshot(configuredSnapshot())
+	manager.test = func(context.Context, modelsettingsapplication.TestCommand) (modelsettingsapplication.TestResult, error) {
+		return modelsettingsapplication.TestResult{}, foundation.NewError(
+			foundation.ErrorRetryableFailure,
+			platformmodels.ErrorCodeEmbeddingTimeout,
+			true,
+			&platformmodels.ConnectionDiagnostic{Stage: platformmodels.ConnectionStageTimeout, TransportError: "deadline exceeded"},
+		)
+	}
+	handler := mustHandler(t, manager, Options{})
+	body := fmt.Sprintf(`{"target":"embedding","embedding":%s}`, configuredEmbeddingDraft(`{"action":"keep"}`))
+	response := serve(t, handler, "POST", "/api/v1/settings/models/test", body, "application/json")
+	if response.Code != nethttp.StatusGatewayTimeout {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var problem httpapi.Problem
+	decodeResponse(t, response, &problem)
+	want := map[string]any{"target": "embedding", "stage": "timeout", "transport_error": "deadline exceeded"}
+	if !reflect.DeepEqual(problem.Details, want) || !problem.Retryable {
+		t.Fatalf("problem=%#v want details=%#v", problem, want)
+	}
+}
+
+func TestConnectionTestReturnsStableValidationReasonWithoutProviderOutput(t *testing.T) {
+	t.Parallel()
+	manager := managerForSnapshot(configuredSnapshot())
+	manager.test = func(context.Context, modelsettingsapplication.TestCommand) (modelsettingsapplication.TestResult, error) {
+		return modelsettingsapplication.TestResult{}, foundation.NewError(
+			foundation.ErrorConsistencyViolation,
+			platformmodels.ErrorCodeChatResponseInvalid,
+			false,
+			&platformmodels.ConnectionDiagnostic{
+				Stage:              platformmodels.ConnectionStageResponseValidation,
+				ProviderHTTPStatus: nethttp.StatusOK,
+				ProviderMessage:    "provider-output-secret-canary",
+				TransportError:     "provider-transport-secret-canary",
+				ValidationReason:   platformmodels.ConnectionValidationFinishReasonLength,
+			},
+		)
+	}
+	handler := mustHandler(t, manager, Options{})
+	body := fmt.Sprintf(`{"target":"chat","chat":%s}`, configuredChatDraft(`{"action":"keep"}`))
+	response := serve(t, handler, "POST", "/api/v1/settings/models/test", body, "application/json")
+	if response.Code != nethttp.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var problem httpapi.Problem
+	decodeResponse(t, response, &problem)
+	want := map[string]any{"target": "chat", "stage": "response_validation", "validation_reason": "finish_reason_length"}
+	if !reflect.DeepEqual(problem.Details, want) || problem.Message != "模型 Provider 响应校验失败" {
+		t.Fatalf("problem=%#v want details=%#v", problem, want)
+	}
+	assertBodyExcludes(t, response.Body.String(), "provider-output-secret-canary", "provider-transport-secret-canary", "https://chat.example.test/v1")
 }
 
 func TestConnectionTestRevisionConflictIncludesCurrentRevision(t *testing.T) {
@@ -703,7 +813,7 @@ func configuredUpdateBody(chatAction, embeddingAction string) string {
 }
 
 func disabledChatDraft(action string) string {
-	return fmt.Sprintf(`{"provider":"disabled","base_url":"","model":"","model_version":"","adapter_version":"v1","api_key":%s}`, action)
+	return fmt.Sprintf(`{"provider":"disabled","api_style":"chat_completions","base_url":"","model":"","model_version":"","adapter_version":"v1","api_key":%s}`, action)
 }
 
 func disabledEmbeddingDraft() string {
@@ -711,7 +821,7 @@ func disabledEmbeddingDraft() string {
 }
 
 func configuredChatDraft(action string) string {
-	return fmt.Sprintf(`{"provider":"openai-compatible","base_url":"https://chat.example.test/v1","model":"chat-v2","model_version":"2026-07","adapter_version":"v1","api_key":%s}`, action)
+	return fmt.Sprintf(`{"provider":"openai-compatible","api_style":"chat_completions","base_url":"https://chat.example.test/v1","model":"chat-v2","model_version":"2026-07","adapter_version":"v1","api_key":%s}`, action)
 }
 
 func configuredEmbeddingDraft(action string) string {

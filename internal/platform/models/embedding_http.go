@@ -149,7 +149,15 @@ func isLoopbackHostname(hostname string) bool {
 
 func appendEmbeddingPath(baseURL *url.URL, requestPath string) string {
 	requestURL := *baseURL
-	requestURL.Path = path.Join(requestURL.Path, requestPath)
+	cleaned := strings.TrimRight(requestURL.Path, "/")
+	switch {
+	case strings.HasSuffix(cleaned, "/v1/embeddings"):
+		requestURL.Path = cleaned
+	case strings.HasSuffix(cleaned, "/v1"):
+		requestURL.Path = path.Join(cleaned, "embeddings")
+	default:
+		requestURL.Path = path.Join(cleaned, requestPath)
+	}
 	return requestURL.String()
 }
 
@@ -169,7 +177,11 @@ func (config embeddingHTTPConfig) embed(ctx context.Context, request application
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, config.endpointURL, bytes.NewReader(encoded))
 	if err != nil {
-		return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeEmbeddingRejected, false, errEmbeddingRequestFailed)
+		return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeEmbeddingRejected, false, &ConnectionDiagnostic{
+			Stage:          ConnectionStageRequest,
+			TransportError: "request construction failed",
+			cause:          err,
+		})
 	}
 	httpRequest.Header.Set("Accept", "application/json")
 	httpRequest.Header.Set("Content-Type", "application/json")
@@ -182,27 +194,27 @@ func (config embeddingHTTPConfig) embed(ctx context.Context, request application
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return classifyEmbeddingStatus(response.StatusCode)
+		diagnostic := providerResponseDiagnostic(response, config.authorization, config.endpointURL)
+		return classifyEmbeddingStatus(response.StatusCode, diagnostic)
 	}
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		return embeddingResultError()
+		return embeddingResultError(responseValidationDiagnostic())
 	}
 	encodedResponse, err := io.ReadAll(io.LimitReader(response.Body, config.maxResponseBytes+1))
 	if err != nil {
-		return classifyEmbeddingTransportError(requestContext, err)
+		return classifyEmbeddingTransportErrorWithStage(requestContext, err, ConnectionStageResponseRead)
 	}
 	if int64(len(encodedResponse)) > config.maxResponseBytes {
-		return embeddingResultError()
+		return embeddingResultError(responseValidationDiagnostic())
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encodedResponse))
 	if err := decoder.Decode(result); err != nil {
-		return embeddingResultError()
+		return embeddingResultError(responseValidationDiagnostic())
 	}
 	var extra json.RawMessage
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return embeddingResultError()
+		return embeddingResultError(responseValidationDiagnostic())
 	}
 	return nil
 }
@@ -210,38 +222,47 @@ func (config embeddingHTTPConfig) embed(ctx context.Context, request application
 func validateEmbeddingResult(contract domain.EmbeddingContract, request application.EmbedRequest, result application.EmbedResult) (application.EmbedResult, error) {
 	normalized, err := application.ValidateEmbedResult(contract, request, result)
 	if err != nil {
-		return application.EmbedResult{}, err
+		return application.EmbedResult{}, withResponseValidationDiagnostic(err)
 	}
 	return application.EmbedResult{Model: contract.Model, Embeddings: normalized}, nil
 }
 
 func classifyEmbeddingTransportError(ctx context.Context, cause error) error {
+	return classifyEmbeddingTransportErrorWithStage(ctx, cause, ConnectionStageConnect)
+}
+
+func classifyEmbeddingTransportErrorWithStage(ctx context.Context, cause error, fallbackStage ConnectionStage) error {
+	diagnostic := transportDiagnostic(ctx, cause, fallbackStage)
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled):
-		return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeEmbeddingCancelled, false, context.Canceled)
+		return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeEmbeddingCancelled, false, diagnostic)
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingTimeout, true, context.DeadlineExceeded)
+		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingTimeout, true, diagnostic)
 	default:
 		var networkError net.Error
 		if errors.As(cause, &networkError) && networkError.Timeout() {
-			return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingTimeout, true, errEmbeddingRequestFailed)
+			return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingTimeout, true, diagnostic)
 		}
-		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingRequestFailed, true, errEmbeddingRequestFailed)
+		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingRequestFailed, true, diagnostic)
 	}
 }
 
-func classifyEmbeddingStatus(statusCode int) error {
+func classifyEmbeddingStatus(statusCode int, diagnostic ...error) error {
+	cause := error(errEmbeddingRequestFailed)
+	if len(diagnostic) > 0 && diagnostic[0] != nil {
+		cause = diagnostic[0]
+	}
 	switch {
 	case statusCode == http.StatusRequestTimeout:
-		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingTimeout, true, errEmbeddingRequestFailed)
+		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingTimeout, true, cause)
 	case statusCode == http.StatusTooManyRequests:
-		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingRateLimited, true, errEmbeddingRequestFailed)
+		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingRateLimited, true, cause)
 	case statusCode >= http.StatusInternalServerError:
-		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingUnavailable, true, errEmbeddingRequestFailed)
+		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeEmbeddingUnavailable, true, cause)
 	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
-		return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeEmbeddingUnauthorized, false, errEmbeddingRequestFailed)
+		return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeEmbeddingUnauthorized, false, cause)
 	default:
-		return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeEmbeddingRejected, false, errEmbeddingRequestFailed)
+		return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeEmbeddingRejected, false, cause)
 	}
 }
 
@@ -249,8 +270,12 @@ func embeddingConfigError() error {
 	return foundation.NewError(foundation.ErrorInvalidInput, ErrorCodeEmbeddingConfigInvalid, false, errEmbeddingConfigInvalid)
 }
 
-func embeddingResultError() error {
-	return foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeEmbedResultInvalid, false, errEmbeddingResponseInvalid)
+func embeddingResultError(diagnostic ...error) error {
+	cause := error(responseValidationDiagnostic(errEmbeddingResponseInvalid))
+	if len(diagnostic) > 0 && diagnostic[0] != nil {
+		cause = diagnostic[0]
+	}
+	return foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeEmbedResultInvalid, false, cause)
 }
 
 func safeEmbeddingAdapterString(provider, model string) string {

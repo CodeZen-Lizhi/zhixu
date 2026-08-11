@@ -83,10 +83,198 @@ func TestOpenAICompatibleChatModelContractSuccess(t *testing.T) {
 		t.Fatalf("calls=%d response=%#v", calls.Load(), response)
 	}
 	contract := model.Contract()
-	if contract.Provider != "openai-compatible" || contract.Model.AdapterName != "openai-compatible-http" ||
+	if contract.Provider != "openai-compatible" || contract.APIStyle != models.ChatAPIStyleChatCompletions || contract.EndpointPath != "/v1/chat/completions" ||
+		contract.Model.AdapterName != "openai-compatible-http" ||
 		contract.Model.AdapterVersion != "v7" || contract.Model.ModelID != "chat-alias" || contract.Model.ModelVersion != "chat-v1" || contract.Timeout != time.Second ||
 		contract.MaxRequestBytes != 1<<20 || contract.MaxResponseBytes != 1<<20 {
 		t.Fatalf("contract=%#v", contract)
+	}
+}
+
+func TestOpenAICompatibleResponsesChatModelContractSuccess(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/base/v1/responses" {
+			t.Errorf("path=%s", request.URL.Path)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		if len(payload) != 5 || string(payload["model"]) != `"chat-alias"` || string(payload["max_output_tokens"]) != "256" || string(payload["store"]) != "false" ||
+			!strings.Contains(string(payload["input"]), `"type":"input_text"`) ||
+			!strings.Contains(string(payload["text"]), `"type":"json_schema"`) {
+			t.Errorf("payload=%v", payload)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"id":"resp_1","object":"response","created_at":1786380000,"status":"completed","model":"chat-v1","output":[{"id":"rs_1","type":"reasoning","summary":[]},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{\"result\":\"ok\"}"}]}],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}`)
+	}))
+	defer server.Close()
+	options := chatOptions(server.URL+"/base", server.Client())
+	options.APIStyle = models.ChatAPIStyleResponses
+	model, err := models.NewOpenAICompatibleChatModel(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := model.Chat(context.Background(), validChatRequest(model.Contract().Model))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(response.Content) != `{"result":"ok"}` || response.Usage != (agentdomain.TokenUsage{InputTokens: 7, OutputTokens: 3, TotalTokens: 10}) {
+		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestOpenAICompatibleResponsesProbeUsesMinimalInputAndIgnoresReasoning(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/responses" {
+			t.Errorf("path=%s", request.URL.Path)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		if len(payload) != 3 || string(payload["model"]) != `"chat-alias"` || string(payload["input"]) != `"test"` || string(payload["store"]) != "false" {
+			t.Errorf("payload=%v", payload)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"status":"completed","output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`)
+	}))
+	defer server.Close()
+	options := chatOptions(server.URL+"/v1/responses", server.Client())
+	options.APIStyle = models.ChatAPIStyleResponses
+	model, err := models.NewOpenAICompatibleChatModel(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.ProbeConnection(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAICompatibleResponsesProbeRejectsIncompleteBeforeEmptyOutput(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"status":"incomplete","output":[]}`)
+	}))
+	defer server.Close()
+	options := chatOptions(server.URL, server.Client())
+	options.APIStyle = models.ChatAPIStyleResponses
+	model, err := models.NewOpenAICompatibleChatModel(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = model.ProbeConnection(context.Background())
+	assertChatError(t, err, foundation.ErrorConsistencyViolation, models.ErrorCodeChatResponseInvalid, false)
+	assertDiagnostic(t, err, models.ConnectionDiagnostic{Stage: models.ConnectionStageResponseValidation, ValidationReason: models.ConnectionValidationInvalidResponse})
+}
+
+func TestOpenAICompatibleResponsesValidatesFormalResponseContract(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		body   string
+		code   string
+		reason models.ConnectionValidationReason
+	}{
+		{name: "model mismatch", body: `{"status":"completed","model":"other","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{}"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`, code: models.ErrorCodeChatResponseModelMismatch, reason: models.ConnectionValidationModelMismatch},
+		{name: "incomplete", body: `{"status":"incomplete","model":"chat-v1","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{}"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationInvalidResponse},
+		{name: "empty", body: `{"status":"completed","model":"chat-v1","output":[{"type":"reasoning","summary":[]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationEmptyContent},
+		{name: "incomplete assistant item", body: `{"status":"completed","model":"chat-v1","output":[{"type":"message","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"{}"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationInvalidResponse},
+		{name: "completed and incomplete assistant items", body: `{"status":"completed","model":"chat-v1","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{}"}]},{"type":"message","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"{\"partial\":true}"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationInvalidResponse},
+		{name: "missing usage", body: `{"status":"completed","model":"chat-v1","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{}"}]}]}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationMissingUsage},
+		{name: "invalid usage", body: `{"status":"completed","model":"chat-v1","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{}"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":9}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationInvalidUsage},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(writer, test.body)
+			}))
+			defer server.Close()
+			options := chatOptions(server.URL, server.Client())
+			options.APIStyle = models.ChatAPIStyleResponses
+			model, err := models.NewOpenAICompatibleChatModel(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = model.Chat(context.Background(), validChatRequest(model.Contract().Model))
+			assertChatError(t, err, foundation.ErrorConsistencyViolation, test.code, false)
+			assertDiagnostic(t, err, models.ConnectionDiagnostic{Stage: models.ConnectionStageResponseValidation, ValidationReason: test.reason})
+		})
+	}
+}
+
+func TestOpenAICompatibleChatModelRejectsMismatchedExplicitEndpoint(t *testing.T) {
+	t.Parallel()
+	options := chatOptions("https://models.example.test/v1/chat/completions", nil)
+	options.APIStyle = models.ChatAPIStyleResponses
+	_, err := models.NewOpenAICompatibleChatModel(options)
+	assertChatError(t, err, foundation.ErrorInvalidInput, models.ErrorCodeChatConfigInvalid, false)
+}
+
+func TestOpenAICompatibleChatConnectionProbeUsesPlainMinimalRequest(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, hasMaxTokens := payload["max_tokens"]
+		_, hasResponseFormat := payload["response_format"]
+		if hasMaxTokens || hasResponseFormat {
+			_, _ = io.WriteString(writer, `{"id":"call-1","object":"chat.completion","created":1,"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"length"}],"usage":{"prompt_tokens":7,"completion_tokens":16,"total_tokens":23}}`)
+			return
+		}
+		if len(payload) != 2 || string(payload["model"]) != `"chat-alias"` || string(payload["messages"]) != `[{"role":"user","content":"test"}]` {
+			t.Errorf("plain probe payload fields=%d model=%s messages=%s", len(payload), payload["model"], payload["messages"])
+		}
+		_, _ = io.WriteString(writer, `{"choices":[{"index":0,"message":{"role":"assistant","content":"ok","reasoning_content":"ignored"},"finish_reason":"stop"}],"provider_extension":true}`)
+	}))
+	defer server.Close()
+
+	model, err := models.NewOpenAICompatibleChatModel(chatOptions(server.URL, server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validChatRequest(model.Contract().Model)
+	request.MaxOutputTokens = 16
+	_, err = model.Chat(context.Background(), request)
+	assertChatError(t, err, foundation.ErrorConsistencyViolation, models.ErrorCodeChatResponseInvalid, false)
+	assertDiagnostic(t, err, models.ConnectionDiagnostic{
+		Stage: models.ConnectionStageResponseValidation, ValidationReason: models.ConnectionValidationFinishReasonLength,
+	})
+	if err := model.ProbeConnection(context.Background()); err != nil {
+		t.Fatalf("plain connection probe failed: %v", err)
+	}
+}
+
+func TestOpenAICompatibleChatConnectionProbeRejectsEmptyAssistantWithoutLeakingOutput(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"choices":[{"index":0,"message":{"role":"assistant","content":" ","reasoning_content":"provider-output-secret-canary"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+	model, err := models.NewOpenAICompatibleChatModel(chatOptions(server.URL, server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = model.ProbeConnection(context.Background())
+	assertChatError(t, err, foundation.ErrorConsistencyViolation, models.ErrorCodeChatResponseInvalid, false)
+	assertDiagnostic(t, err, models.ConnectionDiagnostic{
+		Stage: models.ConnectionStageResponseValidation, ValidationReason: models.ConnectionValidationEmptyContent,
+	})
+	if strings.Contains(fmt.Sprintf("%v %#v", err, err), "provider-output-secret-canary") {
+		t.Fatal("connection probe validation error leaked provider output")
 	}
 }
 
@@ -193,6 +381,7 @@ func TestOpenAICompatibleChatModelTimeoutAndCancellation(t *testing.T) {
 	}
 	_, err = timeoutModel.Chat(context.Background(), validChatRequest(timeoutModel.Contract().Model))
 	assertChatError(t, err, foundation.ErrorRetryableFailure, models.ErrorCodeChatTimeout, true)
+	assertDiagnostic(t, err, models.ConnectionDiagnostic{Stage: models.ConnectionStageTimeout, TransportError: "deadline exceeded"})
 
 	cancelModel, err := models.NewOpenAICompatibleChatModel(chatOptions(server.URL, server.Client()))
 	if err != nil {
@@ -202,6 +391,7 @@ func TestOpenAICompatibleChatModelTimeoutAndCancellation(t *testing.T) {
 	cancel()
 	_, err = cancelModel.Chat(ctx, validChatRequest(cancelModel.Contract().Model))
 	assertChatError(t, err, foundation.ErrorNonRetryableFailure, models.ErrorCodeChatCancelled, false)
+	assertDiagnostic(t, err, models.ConnectionDiagnostic{Stage: models.ConnectionStageCancelled, TransportError: "request cancelled"})
 }
 
 func TestOpenAICompatibleChatModelRejectsMalformedOrInconsistentResponses(t *testing.T) {

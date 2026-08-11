@@ -52,6 +52,7 @@ func (routerModelSettingsManager) Test(_ context.Context, command modelsettingsa
 	}
 	return modelsettingsapplication.TestResult{
 		Target: command.Target, Provider: string(command.Draft.Settings.Chat.Provider), Model: command.Draft.Settings.Chat.Model,
+		APIStyle: command.Draft.Settings.Chat.APIStyle, EndpointPath: "/v1/chat/completions",
 	}, nil
 }
 
@@ -170,11 +171,11 @@ func withWrongModelSettingsOrigin(request *http.Request) {
 }
 
 func disabledModelSettingsUpdateBody() string {
-	return `{"expected_revision":0,"chat":{"provider":"disabled","base_url":"","model":"","model_version":"","adapter_version":"v1","api_key":{"action":"clear"}},"embedding":{"provider":"disabled","base_url":"","model":"","dimensions":0,"normalization":"l2","distance_metric":"cosine","api_key":{"action":"clear"}}}`
+	return `{"expected_revision":0,"chat":{"provider":"disabled","api_style":"chat_completions","base_url":"","model":"","model_version":"","adapter_version":"v1","api_key":{"action":"clear"}},"embedding":{"provider":"disabled","base_url":"","model":"","dimensions":0,"normalization":"l2","distance_metric":"cosine","api_key":{"action":"clear"}}}`
 }
 
 func chatModelSettingsTestBody() string {
-	return `{"target":"chat","chat":{"provider":"openai-compatible","base_url":"https://chat.example.test/v1","model":"chat-v1","model_version":"2026-07","adapter_version":"v1","api_key":{"action":"clear"}}}`
+	return `{"target":"chat","chat":{"provider":"openai-compatible","api_style":"chat_completions","base_url":"https://chat.example.test/v1","model":"chat-v1","model_version":"2026-07","adapter_version":"v1","api_key":{"action":"clear"}}}`
 }
 
 func assertModelSettingsNoStore(t *testing.T, response *httptest.ResponseRecorder) {

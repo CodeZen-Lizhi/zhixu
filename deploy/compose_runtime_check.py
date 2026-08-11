@@ -20,6 +20,7 @@ STATIC_MANAGED_VALUES = {
 }
 LEGACY_MODEL_DEFAULTS = {
     "ZHIXU_CHAT_PROVIDER": "disabled",
+    "ZHIXU_CHAT_API_STYLE": "chat_completions",
     "ZHIXU_CHAT_BASE_URL": "",
     "ZHIXU_CHAT_API_KEY": "",
     "ZHIXU_CHAT_MODEL": "",
