@@ -5,6 +5,7 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/compose.netns.yml"
 readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly REQUEST_TIMEOUT_SECONDS="${ZHIXU_COMPOSE_SMOKE_REQUEST_TIMEOUT_SECONDS:-15}"
@@ -13,6 +14,12 @@ source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"
 
 STATE_DIR=""
 PROJECT_NAME=""
+NETNS_PROJECT_NAME=""
+NETNS_NETWORK_NAME=""
+APP_NETNS_CONTAINER=""
+WORKER_NETNS_CONTAINER=""
+MAIN_NETNS_OVERRIDE_FILE=""
+NETNS_OVERRIDE_FILE=""
 API_BASE_URL=""
 AUTH_ORIGIN=""
 COOKIE_JAR=""
@@ -44,7 +51,11 @@ PY
 }
 
 compose() {
-  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
+  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
+}
+
+netns_compose() {
+  docker compose --project-name "${NETNS_PROJECT_NAME}" -f "${NETNS_COMPOSE_FILE}" -f "${NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
 }
 
 run_compose_step() {
@@ -61,7 +72,7 @@ cleanup() {
   local cleanup_exit=0
   trap - EXIT HUP INT TERM
   if [[ -n "${PROJECT_NAME}" ]]; then
-    cleanup_compose_smoke_project_images "${PROJECT_NAME}" || cleanup_exit=$?
+    cleanup_compose_smoke_project_images "${PROJECT_NAME}" "${NETNS_PROJECT_NAME}" || cleanup_exit=$?
   fi
   if [[ -n "${STATE_DIR}" ]]; then
     chmod -R u+rwX "${STATE_DIR}" >/dev/null 2>&1 || true
@@ -90,13 +101,13 @@ assert_bridge_peer_rejected() {
   local app_image result
   app_image="$(compose images -q app)"
   [[ -n "${app_image}" ]] || fail "could not resolve the Compose app image for bridge isolation"
-  if ! result="$(docker run --rm --network "${PROJECT_NAME}_default" --entrypoint /bin/sh "${app_image}" -c '
-if wget -q -T 3 -O /dev/null http://app:8080/livez 2>/dev/null; then
+  if ! result="$(docker run --rm --network "${NETNS_NETWORK_NAME}" --entrypoint /bin/sh "${app_image}" -c '
+if wget -q -T 3 -O /dev/null "http://$1:8080/livez" 2>/dev/null; then
   printf reachable
 else
   printf blocked
 fi
-')"; then
+' _ "${APP_NETNS_CONTAINER}")"; then
     fail "could not execute the bridge-peer isolation assertion"
   fi
   [[ "${result}" == "blocked" ]] || fail "bridge peer reached the loopback-only Compose ingress"
@@ -121,6 +132,7 @@ main() {
   local rejected_response create_response list_response revoke_response logout_response token_payload token_id api_token
   run_id="$(random_hex 6)"
   PROJECT_NAME="zhixu-auth-smoke-${run_id}"
+  prepare_compose_smoke_netns
   http_port="$(allocate_port)"
   API_BASE_URL="http://127.0.0.1:${http_port}"
   AUTH_ORIGIN="${API_BASE_URL}"
@@ -154,14 +166,16 @@ main() {
     docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" --env-file "${ENV_FILE}" config --format json
   log "building required-auth Compose stack"
   run_compose_step "Compose image build" build
+  netns_compose config --quiet
+  netns_compose build
+  log "starting isolated namespace anchors"
+  netns_compose up --detach --wait
   log "starting PostgreSQL, one-shot initialization, and runtime ingress"
   run_compose_step "PostgreSQL startup" up --detach --wait postgres
   run_compose_step "Model settings key initialization" run --rm --no-deps -T model-settings-key-init
   run_compose_step "Database migration" run --rm --no-deps -T migrate
   run_compose_step "API and Worker startup" up --detach --no-deps --wait app worker
   run_compose_step "Model relay startup" up --detach --no-deps --wait app-model-relay worker-model-relay
-  run_compose_step "Loopback firewall" run --rm --no-deps -T firewall
-  run_compose_step "Ingress proxy startup" up --detach --no-deps --wait proxy
   log "checking bridge-peer rejection"
   assert_bridge_peer_rejected
 

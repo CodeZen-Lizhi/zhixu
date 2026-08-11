@@ -40,14 +40,21 @@ main() {
   local referenced_id="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
   local wrong_label_id="sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
   local missing_label_id="sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  local netns_id="sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  local invalid_main_pair_id="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  local invalid_helper_pair_id="sha256:2222222222222222222222222222222222222222222222222222222222222222"
   export ZHIXU_FAKE_REFERENCED_IMAGE_ID="${referenced_id}"
   printf '%b\n' \
     "zhixu-auth-smoke-a1b2c3d4e5f6-app\tlatest\t${auth_id}\tzhixu-auth-smoke-a1b2c3d4e5f6\tapp" \
     "zhixu-auth-smoke-a1b2c3d4e5f6-app\tarchive\t${auth_id}\tzhixu-auth-smoke-a1b2c3d4e5f6\tapp" \
     "zhixu-rag-smoke-d4e5f6071829-worker\tlatest\t${rag_id}\tzhixu-rag-smoke-d4e5f6071829\tworker" \
+    "zhixu-rag-smoke-d4e5f6071829-netns-app-netns\tlatest\t${netns_id}\tzhixu-rag-smoke-d4e5f6071829-netns\tapp-netns" \
+    "zhixu-tool-smoke-deadbeefcafe-app-netns\tlatest\t${invalid_main_pair_id}\tzhixu-tool-smoke-deadbeefcafe\tapp-netns" \
+    "zhixu-auth-smoke-feedfacecafe-netns-app\tlatest\t${invalid_helper_pair_id}\tzhixu-auth-smoke-feedfacecafe-netns\tapp" \
     "zhixu-search-smoke-112233445566-app\tlatest\t${referenced_id}\tzhixu-search-smoke-112233445566\tapp" \
     "zhixu-auth-smoke-010203040506-app\tlatest\t${wrong_label_id}\tzhixu-auth-smoke-010203040506\tworker" \
     "zhixu-tool-smoke-0708090a0b0c-worker\tlatest\t${missing_label_id}\t__missing__\t__missing__" \
+    "zhixu-netns-app-netns\tlatest\t${missing_label_id}\tzhixu-netns\tapp-netns" \
     "zhixu-auth-smoke-a1b2c3-app\tlatest\t${wrong_label_id}\tzhixu-auth-smoke-a1b2c3\tapp" \
     "another-project-app\tlatest\t${missing_label_id}\tanother-project\tapp" \
     >"${ZHIXU_FAKE_IMAGE_INVENTORY}"
@@ -72,13 +79,15 @@ main() {
     || fail "guarded apply did not remove the second exact target tag"
   grep -Fqx -- "zhixu-rag-smoke-d4e5f6071829-worker:latest" "${ZHIXU_FAKE_REMOVED_REFS}" \
     || fail "guarded apply did not remove the rag target"
+  grep -Fqx -- "zhixu-rag-smoke-d4e5f6071829-netns-app-netns:latest" "${ZHIXU_FAKE_REMOVED_REFS}" \
+    || fail "guarded apply did not remove the helper target"
   if grep -Fq -- "zhixu-search-smoke-112233445566-app:latest" "${ZHIXU_FAKE_REMOVED_REFS}"; then
     fail "guarded apply removed a container-referenced target"
   fi
   if grep -Eq '010203040506|0708090a0b0c' "${ZHIXU_FAKE_REMOVED_REFS}"; then
     fail "guarded apply removed a name collision without matching Compose ownership labels"
   fi
-  if grep -Eq 'nothex|another-project' "${ZHIXU_FAKE_REMOVED_REFS}"; then
+  if grep -Eq 'nothex|another-project|zhixu-netns-app-netns|deadbeefcafe|feedfacecafe' "${ZHIXU_FAKE_REMOVED_REFS}"; then
     fail "guarded apply crossed the exact smoke namespace"
   fi
   if grep -Eq 'system prune|builder prune|volume (rm|prune)|container rm' "${ZHIXU_FAKE_DOCKER_LOG}"; then

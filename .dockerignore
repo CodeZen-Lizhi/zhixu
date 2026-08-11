@@ -4,6 +4,7 @@
 .env
 .env.*
 !.env.example
+/.zhixu
 /.zhixu-launcher.lock*
 web/node_modules
 web/dist

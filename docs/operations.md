@@ -7,7 +7,8 @@
 ```text
 host ./zhixu
   -> one-shot Workspace Control validates exact root/grant
-  -> Docker: proxy + app + worker + postgres + one-shot migrate/modelctl
+  -> Docker helper `zhixu-netns`: app/worker network namespace anchors
+  -> Docker main `zhixu`: app + worker + relays + postgres + one-shot migrate/modelctl
   -> browser: http://127.0.0.1:${ZHIXU_HTTP_PORT:-8080}
 ```
 
@@ -20,7 +21,8 @@ host ./zhixu
 5. 自托管使用 HTTPS、反向代理、`ZHIXU_AUTH_MODE=required`、Secure Cookie 和精确 Origin；数据库与 Worker 不暴露公网。
 
 不需要 `ZHIXU_WORKSPACE_ROOT`、Host Controller Key、一次性链接、控制 Cookie 或浏览器目录选择。Root 选择保存在受保护 `.zhixu/workspace-selection`，不是 `.env`。
-运行方式的决策理由见 [ADR-0020](architecture/adr/0020-docker-direct-web-and-one-shot-workspace-control.md)。
+运行方式的决策理由见 [ADR-0020](architecture/adr/0020-docker-direct-web-and-one-shot-workspace-control.md)
+和 [ADR-0021](architecture/adr/0021-stable-network-namespace-anchors.md)。
 
 ## 2. 首次启动与日常命令
 
@@ -76,10 +78,21 @@ http://127.0.0.1:8080/
 ./zhixu down
 ```
 
-- `status` 显示包括 exited/created 在内的 Compose 关键服务、`Runtime: ready|degraded`、浏览器 URL、selection 和 grant；该命令只读，不补启动容器。
+- `status` 同时显示主 `zhixu` 和辅助 `zhixu-netns` 的关键服务（包括 exited/created）、`Runtime: ready|degraded`、浏览器 URL、selection 和 grant；该命令只读，不补启动容器。
 - `logs [service]` 跟踪服务，默认 `app`。
 - `restart` 重新校验上次 selection，并应用 managed model target/rollback 流程。
 - `down` 停容器并撤销派生 grant，保留 selection、PostgreSQL、模型密钥、control instance 和宿主机文件。
+
+### 2.4 Docker Desktop 操作边界
+
+Docker Desktop 中唯一受支持的 UI 操作是主项目 `zhixu` 的 **Restart project**。它不会
+重启 `zhixu-netns` anchor，主项目的 app、worker 与两个 relay 会重新加入既有 anchor；
+完成后用 `./zhixu status` 和固定 URL 确认 ready。
+
+不要在 UI 中单独 Restart/Down/Delete `zhixu-netns`，也不要对主项目执行 Down/Delete。
+Docker daemon 或 helper 的恢复不存在跨项目启动顺序保证；系统会保持入口安全并显示
+`Runtime: degraded`。使用 `./zhixu restart` 进行受控恢复，不能手工启动旧 relay 或
+接管同名容器。`./zhixu down` 可从主项目已被 UI 停掉、仅 helper 残留的状态幂等收敛。
 
 ## 3. Workspace 切换与重置
 
@@ -164,9 +177,9 @@ Compose 服务顺序：
 2. `/app/zhixu-migrate` 固定执行项目 Goose Up → River Up → River Validate；非零退出阻止 API/Worker。
 3. Model key init/migrate one-shot 退出。
 4. 一次性 Workspace Control 重建 exact grant。
-5. API/Worker 的 PID 1 使用各自配置等待 PostgreSQL 可 ping；等待期间容器保持 running，使共享其网络命名空间的 proxy/model relay 可恢复。参数、配置或数据库 URL 无效时以稳定、无 Secret 的错误失败，不无限重试。
+5. API/Worker 的 PID 1 使用各自配置等待 PostgreSQL 可 ping；等待期间容器保持 running，并与对应 model relay 使用 `zhixu-netns` 的稳定 network namespace。参数、配置或数据库 URL 无效时以稳定、无 Secret 的错误失败，不无限重试。
 6. 数据库 ready 后等待入口 `exec` API/Worker；Worker 再次 Validate River Schema、冻结 Definition/Executor Registry、启动 health 与 River。
-7. API `/readyz`、Worker 容器内 `:8081/readyz`、Web 分别就绪后接流量。
+7. API `/readyz`、Worker 容器内 `:8081/readyz`、两个 anchor、两个 relay 与 Web 分别就绪后接流量。app anchor 每次启动均先安装 peer firewall 再监听入口。
 
 Liveness 只证明进程存活。Worker readiness 还要求 DB、River schema/client、Definition、Executor、启用依赖和非 shutdown。健康响应只暴露稳定 `status/code/version`，不返回底层 cause、DSN 或配置。
 
@@ -322,11 +335,11 @@ Embedding rate limit 进入 Retry Wait；Worker crash 从 checkpoint 恢复；�
 ```bash
 ./zhixu status
 ./zhixu logs app
-./zhixu logs proxy
+./zhixu logs app-netns
 ```
 
-检查 Docker、app/worker/proxy health、浏览器 URL、`ZHIXU_HTTP_PORT` 占用；服务停止后执行 `./zhixu up` 或 `./zhixu restart`。这不是浏览器控制密钥问题。
-若 `Runtime: degraded`，先从 `status` 的退出行确认 proxy/model relay 是否因 namespace owner 曾退出而失败；新版本会在 PostgreSQL 恢复前保持 app/worker owner running，正常情况下无需单独 `docker start` sidecar。
+检查 Docker、app/worker/relay 与两个 anchor 的 health、浏览器 URL、`ZHIXU_HTTP_PORT` 占用；服务停止后执行 `./zhixu up` 或 `./zhixu restart`。这不是浏览器控制密钥问题。
+若 `Runtime: degraded`，先从 `status` 的退出行确认 anchor 是否缺失、停止或与 consumer namespace 分叉。不要单独 `docker start` relay；运行 `./zhixu restart` 会先验证/恢复 anchor，再重建 namespace consumer。
 
 ### 未选择 Workspace
 
@@ -350,6 +363,8 @@ Git 校验失败时确认 Root 已是仓库，或首次显式 `--initialize-git`
 ```bash
 docker compose --project-name zhixu --profile workspace-runtime --profile modelctl \
   -f deploy/compose.yml --env-file .env.example config --quiet
+docker compose --project-name zhixu-netns \
+  -f deploy/compose.netns.yml --env-file .env.example config --quiet
 docker build -f deploy/Dockerfile -t zhixu:local .
 ./zhixu up --workspace /absolute/path/to/knowledge
 curl -fsS http://127.0.0.1:8080/readyz

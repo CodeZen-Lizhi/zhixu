@@ -87,7 +87,7 @@ func TestComposeDriverAppliesOnlyFixedArgvWithoutHostPath(t *testing.T) {
 	runner.mu.Lock()
 	commands := append([]recordedCommand(nil), runner.commands...)
 	runner.mu.Unlock()
-	if len(commands) < 9 {
+	if len(commands) < 7 {
 		t.Fatalf("recorded %d commands, want complete lifecycle", len(commands))
 	}
 	for _, command := range commands {
@@ -108,7 +108,7 @@ func TestComposeDriverAppliesOnlyFixedArgvWithoutHostPath(t *testing.T) {
 	for _, required := range []string{
 		"--profile workspace-runtime --project-name zhixu",
 		"up --detach --no-deps --force-recreate --wait app worker",
-		"run --rm --no-deps -T firewall",
+		"up --detach --no-deps --wait app-model-relay worker-model-relay",
 		"inspect --format {{json .Mounts}} aaaaaaaaaaaa",
 	} {
 		if !strings.Contains(all, required) {
@@ -117,11 +117,14 @@ func TestComposeDriverAppliesOnlyFixedArgvWithoutHostPath(t *testing.T) {
 	}
 }
 
-func TestComposeDriverRevokesAfterPostStartFailure(t *testing.T) {
+func TestComposeDriverRevokesAfterRelayStartFailure(t *testing.T) {
 	t.Parallel()
 	root := canonicalTestDirectory(t)
 	grant := validatedTestGrant(t, "workspace-driver-2", root, 4)
-	runner := &fakeCommandRunner{grant: grant, model: composeFixture(grant, true), failOn: "run --rm --no-deps -T firewall"}
+	runner := &fakeCommandRunner{
+		grant: grant, model: composeFixture(grant, true),
+		failOn: "up --detach --no-deps --wait app-model-relay worker-model-relay",
+	}
 	driver, err := NewComposeDriver(ComposeDriverOptions{
 		Executable: "docker", Project: "zhixu", BaseFile: "/repo/compose.yml",
 		OverrideFile: filepath.Join(t.TempDir(), "grant.yml"), EnvFile: "/repo/.env", Runner: runner,
@@ -130,9 +133,9 @@ func TestComposeDriverRevokesAfterPostStartFailure(t *testing.T) {
 		t.Fatalf("NewComposeDriver() error: %v", err)
 	}
 	if err := driver.ApplyGrant(context.Background(), grant); err == nil {
-		t.Fatal("ApplyGrant() succeeded after firewall failure")
-	} else if fault, ok := AsFault(err); !ok || fault.Code != "WORKSPACE_RUNTIME_FIREWALL_FAILED" {
-		t.Fatalf("ApplyGrant() error=%v before firewall fixture", err)
+		t.Fatal("ApplyGrant() succeeded after relay failure")
+	} else if fault, ok := AsFault(err); !ok || fault.Code != "WORKSPACE_RUNTIME_START_FAILED" {
+		t.Fatalf("ApplyGrant() error=%v before relay fixture", err)
 	}
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
@@ -140,8 +143,8 @@ func TestComposeDriverRevokesAfterPostStartFailure(t *testing.T) {
 	for _, command := range runner.commands {
 		all += strings.Join(command.arguments, " ") + "\n"
 	}
-	if !strings.Contains(all, "stop proxy app-model-relay worker-model-relay app worker") ||
-		!strings.Contains(all, "rm --force --stop proxy firewall app-model-relay worker-model-relay app worker") {
+	if !strings.Contains(all, "stop app-model-relay worker-model-relay app worker") ||
+		!strings.Contains(all, "rm --force --stop app-model-relay worker-model-relay app worker") {
 		t.Fatalf("failed grant was not revoked:\n%s", all)
 	}
 	if _, err := os.Lstat(driver.overrideFile); !os.IsNotExist(err) {
@@ -173,7 +176,7 @@ func TestComposeDriverRevokesPartialInitialStart(t *testing.T) {
 	for _, command := range runner.commands {
 		all += strings.Join(command.arguments, " ") + "\n"
 	}
-	if !strings.Contains(all, "rm --force --stop proxy firewall app-model-relay worker-model-relay app worker") {
+	if !strings.Contains(all, "rm --force --stop app-model-relay worker-model-relay app worker") {
 		t.Fatalf("partial startup was not revoked:\n%s", all)
 	}
 }

@@ -96,36 +96,15 @@ def validate_local_auth_ingress(model: dict[str, Any], app_environment: dict[str
         return
     if not is_loopback_listener(app_environment.get("ZHIXU_HTTP_ADDR")):
         fail("disabled or insecure-cookie auth requires the API process to listen on loopback")
-    for service_name in ("app", "firewall", "proxy"):
+    for service_name in ("app", "worker", "app-model-relay", "worker-model-relay"):
         network_mode = service(model, service_name).get("network_mode")
         if network_mode == "host":
             fail("disabled or insecure-cookie auth cannot use host networking")
-    proxy = service(model, "proxy")
-    if proxy.get("network_mode") != "service:app":
-        fail("disabled or insecure-cookie auth requires the loopback proxy to share the app network namespace")
-    if proxy.get("user") != "10001:10001" or "cap_add" in proxy:
-        fail("disabled or insecure-cookie auth requires an unprivileged loopback proxy")
-    firewall = service(model, "firewall")
-    if firewall.get("network_mode") != "service:app" or not has_loopback_firewall(firewall):
-        fail("disabled or insecure-cookie auth requires the root NET_ADMIN loopback firewall sidecar")
-    if not has_dependency_with_condition(firewall, "app", "service_started"):
-        fail("disabled or insecure-cookie auth requires the firewall to wait for the app network namespace")
-    if not has_dependency_with_condition(proxy, "firewall", "service_completed_successfully"):
-        fail("disabled or insecure-cookie auth requires the proxy to wait for firewall completion")
-    ports = service(model, "app").get("ports")
-    if not isinstance(ports, list) or not ports:
-        fail("disabled or insecure-cookie auth requires an app loopback port mapping")
-    has_tcp_port = False
-    for port in ports:
-        if not isinstance(port, dict):
-            fail("app port mapping must be structured")
-        if port.get("protocol", "tcp") != "tcp":
-            continue
-        has_tcp_port = True
-        if not is_loopback_host(port.get("host_ip")):
-            fail("disabled or insecure-cookie auth requires every app TCP port to bind loopback")
-    if not has_tcp_port:
-        fail("disabled or insecure-cookie auth requires an app TCP port mapping")
+    app = service(model, "app")
+    if app.get("network_mode") != "container:zhixu-app-netns":
+        fail("disabled or insecure-cookie auth requires the API to share the fixed loopback ingress namespace")
+    if app.get("ports"):
+        fail("the API must not publish an independent port outside the ingress anchor")
 
 
 def resolved_compose_model() -> dict[str, Any]:

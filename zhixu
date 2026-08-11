@@ -4,10 +4,17 @@ set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/deploy/compose.yml"
+readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/deploy/compose.netns.yml"
 readonly DOCKERFILE="${SCRIPT_DIR}/deploy/Dockerfile"
 readonly ENV_TEMPLATE="${SCRIPT_DIR}/.env.example"
 readonly LOCAL_ENV_FILE="${SCRIPT_DIR}/.env"
 readonly PROJECT_NAME="zhixu"
+readonly NETNS_PROJECT_NAME="zhixu-netns"
+readonly NETNS_NETWORK_NAME="zhixu-runtime"
+readonly APP_NETNS_CONTAINER="zhixu-app-netns"
+readonly WORKER_NETNS_CONTAINER="zhixu-worker-netns"
+readonly APP_NETNS_IMAGE="zhixu-netns-app-netns"
+readonly WORKER_NETNS_IMAGE="zhixu-netns-worker-netns"
 readonly STATE_DIR="${SCRIPT_DIR}/.zhixu"
 readonly LOCK_DIR="${STATE_DIR}/launcher.lock"
 readonly LOCK_METADATA="${LOCK_DIR}/owner"
@@ -660,12 +667,393 @@ compose_without_grant() {
   fi
 }
 
+netns_compose() {
+  local prefix=(docker compose --project-name "${NETNS_PROJECT_NAME}" -f "${NETNS_COMPOSE_FILE}" --env-file "${ENV_FILE}")
+  if [[ "${MUTATION_LOCK_HELD}" -eq 1 ]]; then
+    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
+      ZHIXU_APP_RESTART_POLICY=on-failure ZHIXU_WORKER_RESTART_POLICY=on-failure \
+      run_mutation_command "${prefix[@]}" "$@"
+  else
+    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
+      ZHIXU_APP_RESTART_POLICY=on-failure ZHIXU_WORKER_RESTART_POLICY=on-failure \
+      "${prefix[@]}" "$@"
+  fi
+}
+
+docker_container_exists() {
+  docker inspect --type container "$1" >/dev/null 2>&1
+}
+
+docker_network_exists() {
+  docker network inspect "$1" >/dev/null 2>&1
+}
+
+validate_netns_resource_ownership() {
+  local name labels
+  for name in "${APP_NETNS_CONTAINER}" "${WORKER_NETNS_CONTAINER}"; do
+    if docker_container_exists "${name}"; then
+      labels="$(docker inspect --type container --format '{{ index .Config.Labels "com.docker.compose.project" }}	{{ index .Config.Labels "com.docker.compose.service" }}' "${name}")" \
+        || fail "could not inspect namespace anchor ${name}"
+      [[ "${labels}" == "${NETNS_PROJECT_NAME}"$'\t'"${name#zhixu-}" ]] \
+        || fail "refusing to manage foreign namespace anchor ${name}"
+    fi
+  done
+  if docker_network_exists "${NETNS_NETWORK_NAME}"; then
+    labels="$(docker network inspect --format '{{ index .Labels "com.docker.compose.project" }}	{{ index .Labels "com.docker.compose.network" }}' "${NETNS_NETWORK_NAME}")" \
+      || fail "could not inspect namespace network ${NETNS_NETWORK_NAME}"
+    [[ "${labels}" == "${NETNS_PROJECT_NAME}"$'\tdefault' ]] \
+      || fail "refusing to manage foreign namespace network ${NETNS_NETWORK_NAME}"
+  fi
+  validate_netns_project_scope
+}
+
+helper_stack_matches() {
+  local port=$1 app_image_id worker_image_id
+  docker_container_exists "${APP_NETNS_CONTAINER}" && docker_container_exists "${WORKER_NETNS_CONTAINER}" \
+    && docker_network_exists "${NETNS_NETWORK_NAME}" || return 1
+  app_image_id="$(docker image inspect --format '{{.Id}}' "${APP_NETNS_IMAGE}" 2>/dev/null)" || return 1
+  worker_image_id="$(docker image inspect --format '{{.Id}}' "${WORKER_NETNS_IMAGE}" 2>/dev/null)" || return 1
+  docker network inspect "${NETNS_NETWORK_NAME}" | python3 -c '
+import json
+import sys
+
+items = json.load(sys.stdin)
+if not isinstance(items, list) or len(items) != 1:
+    raise SystemExit(1)
+network = items[0]
+labels = network.get("Labels") or {}
+if (
+    network.get("Name") != "zhixu-runtime"
+    or network.get("Driver") != "bridge"
+    or network.get("Scope") != "local"
+    or network.get("Internal") is not False
+    or network.get("Attachable") is not False
+    or network.get("Ingress") is not False
+    or network.get("EnableIPv6") is not False
+    or labels.get("com.docker.compose.project") != "zhixu-netns"
+    or labels.get("com.docker.compose.network") != "default"
+):
+    raise SystemExit(1)
+' || return 1
+  docker inspect "${APP_NETNS_CONTAINER}" "${WORKER_NETNS_CONTAINER}" | python3 -c '
+import json
+import sys
+
+port = str(int(sys.argv[1]))
+app_image_id = sys.argv[2]
+worker_image_id = sys.argv[3]
+items = json.load(sys.stdin)
+if not isinstance(items, list) or len(items) != 2:
+    raise SystemExit(1)
+by_name = {item.get("Name", "").lstrip("/"): item for item in items}
+app = by_name.get("zhixu-app-netns")
+worker = by_name.get("zhixu-worker-netns")
+if app is None or worker is None:
+    raise SystemExit(1)
+
+def labels(item):
+    return item.get("Config", {}).get("Labels") or {}
+
+def common(item, service, user, entrypoint):
+    cfg = item.get("Config", {})
+    host = item.get("HostConfig", {})
+    state = item.get("State", {})
+    if labels(item).get("com.docker.compose.project") != "zhixu-netns":
+        return False
+    if labels(item).get("com.docker.compose.service") != service:
+        return False
+    if state.get("Status") != "running" or (state.get("Health") or {}).get("Status") != "healthy":
+        return False
+    if cfg.get("User") != user or cfg.get("Entrypoint") != entrypoint:
+        return False
+    if host.get("NetworkMode") != "zhixu-runtime":
+        return False
+    if host.get("Privileged") is not False or host.get("ReadonlyRootfs") is not True:
+        return False
+    if (host.get("SecurityOpt") or []) != ["no-new-privileges:true"]:
+        return False
+    if sorted(host.get("CapDrop") or []) != ["ALL"] or (host.get("Binds") or []) or (item.get("Mounts") or []):
+        return False
+    if host.get("RestartPolicy") != {"Name": "unless-stopped", "MaximumRetryCount": 0}:
+        return False
+    if (host.get("ExtraHosts") or []) != ["host.docker.internal:host-gateway"]:
+        return False
+    networks = (item.get("NetworkSettings") or {}).get("Networks") or {}
+    if set(networks) != {"zhixu-runtime"}:
+        return False
+    for value in cfg.get("Env") or []:
+        key = value.split("=", 1)[0]
+        if key.startswith(("ZHIXU_DATABASE", "ZHIXU_MODEL", "ZHIXU_AUTH", "ZHIXU_WORKSPACE", "POSTGRES", "OLLAMA")):
+            return False
+    return True
+
+if not common(app, "app-netns", "0:0", ["/app/netns-ingress.sh"]):
+    raise SystemExit(1)
+if not common(worker, "worker-netns", "10001:10001", ["/app/netns-ingress.sh", "--worker-sentinel"]):
+    raise SystemExit(1)
+if app.get("Image") != app_image_id or worker.get("Image") != worker_image_id:
+    raise SystemExit(1)
+app_host = app.get("HostConfig") or {}
+worker_host = worker.get("HostConfig") or {}
+if (app_host.get("PortBindings") or {}) != {
+    "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": port}],
+}:
+    raise SystemExit(1)
+if worker_host.get("PortBindings") or {}:
+    raise SystemExit(1)
+if app_host.get("Tmpfs") != {"/run": "rw,noexec,nosuid,size=65536"} or worker_host.get("Tmpfs"):
+    raise SystemExit(1)
+app_caps = {value.removeprefix("CAP_") for value in (app_host.get("CapAdd") or [])}
+if app_caps != {"NET_ADMIN", "SETGID", "SETUID"}:
+    raise SystemExit(1)
+if worker_host.get("CapAdd"):
+    raise SystemExit(1)
+
+def healthcheck(item, expected_test):
+    configured = (item.get("Config") or {}).get("Healthcheck") or {}
+    return (
+        configured.get("Test") == expected_test
+        and configured.get("Interval") == 5000000000
+        and configured.get("Timeout") == 3000000000
+        and configured.get("Retries") == 20
+    )
+
+if not healthcheck(app, ["CMD-SHELL", "ss -H -ltn '\''sport = :8080'\'' | grep -q '\''0.0.0.0:8080'\''"]):
+    raise SystemExit(1)
+if not healthcheck(worker, ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18082"]):
+    raise SystemExit(1)
+' "${port}" "${app_image_id}" "${worker_image_id}"
+}
+
+helper_uses_port() {
+  local port=$1
+  docker_container_exists "${APP_NETNS_CONTAINER}" || return 1
+  docker inspect "${APP_NETNS_CONTAINER}" | python3 -c '
+import json
+import sys
+items = json.load(sys.stdin)
+if not isinstance(items, list) or len(items) != 1:
+    raise SystemExit(1)
+bindings = ((items[0].get("HostConfig") or {}).get("PortBindings") or {}).get("8080/tcp") or []
+if bindings != [{"HostIp": "127.0.0.1", "HostPort": str(int(sys.argv[1]))}]:
+    raise SystemExit(1)
+' "${port}"
+}
+
+validate_netns_runtime_security() {
+  local status
+  status="$(docker exec "${APP_NETNS_CONTAINER}" /bin/sh -c 'awk "/^(Uid|Gid|NoNewPrivs|CapPrm|CapEff|CapAmb):/ {print}" /proc/1/status')" \
+    || return 1
+  python3 -c '
+import sys
+values = {}
+for line in sys.stdin:
+    key, value = line.split(":", 1)
+    values[key] = value.strip().split()
+if values.get("Uid", [""])[0] != "10001" or values.get("Gid", [""])[0] != "10001":
+    raise SystemExit(1)
+if values.get("NoNewPrivs", [""])[0] != "1":
+    raise SystemExit(1)
+for key in ("CapPrm", "CapEff", "CapAmb"):
+    if not values.get(key) or int(values[key][0], 16) != 0:
+        raise SystemExit(1)
+' <<<"${status}"
+  status="$(docker exec "${WORKER_NETNS_CONTAINER}" /bin/sh -c 'awk "/^(Uid|Gid|NoNewPrivs|CapPrm|CapEff|CapAmb):/ {print}" /proc/1/status')" \
+    || return 1
+  python3 -c '
+import sys
+values = {}
+for line in sys.stdin:
+    key, value = line.split(":", 1)
+    values[key] = value.strip().split()
+if values.get("Uid", [""])[0] != "10001" or values.get("Gid", [""])[0] != "10001":
+    raise SystemExit(1)
+if values.get("NoNewPrivs", [""])[0] != "1":
+    raise SystemExit(1)
+for key in ("CapPrm", "CapEff", "CapAmb"):
+    if not values.get(key) or int(values[key][0], 16) != 0:
+        raise SystemExit(1)
+' <<<"${status}"
+}
+
+main_project_container_ids() {
+  docker ps --all --quiet --filter "label=com.docker.compose.project=${PROJECT_NAME}" 2>/dev/null || true
+}
+
+validate_main_project_containers() {
+  local ids=$1 id service
+  [[ -z "${ids}" ]] && return 0
+  while read -r id; do
+    [[ -n "${id}" ]] || continue
+    service="$(docker inspect --type container --format '{{ index .Config.Labels "com.docker.compose.service" }}' "${id}")" \
+      || fail "could not inspect main Compose container"
+    case "${service}" in
+      postgres|model-settings-key-init|migrate|modelctl|app|worker|app-model-relay|worker-model-relay|proxy|firewall) ;;
+      *) fail "refusing to remove unknown zhixu Compose service ${service}" ;;
+    esac
+  done <<<"${ids}"
+}
+
+validate_netns_project_containers() {
+  local ids=$1 id identity
+  [[ -z "${ids}" ]] && return 0
+  while read -r id; do
+    [[ -n "${id}" ]] || continue
+    identity="$(docker inspect --type container --format '{{.Name}}\t{{ index .Config.Labels "com.docker.compose.service" }}' "${id}")" \
+      || fail "could not inspect namespace helper container"
+    case "${identity}" in
+      "/${APP_NETNS_CONTAINER}"'\tapp-netns'|"/${WORKER_NETNS_CONTAINER}"'\tworker-netns') ;;
+      *) fail "refusing to remove unknown zhixu-netns Compose container ${identity}" ;;
+    esac
+  done <<<"${ids}"
+}
+
+validate_netns_project_scope() {
+  local ids networks network identity
+  ids="$(docker ps --all --quiet --filter "label=com.docker.compose.project=${NETNS_PROJECT_NAME}")" \
+    || fail "could not list namespace helper containers"
+  validate_netns_project_containers "${ids}"
+  networks="$(docker network ls --quiet --filter "label=com.docker.compose.project=${NETNS_PROJECT_NAME}")" \
+    || fail "could not list namespace helper networks"
+  while read -r network; do
+    [[ -n "${network}" ]] || continue
+    identity="$(docker network inspect --format '{{.Name}}\t{{ index .Labels "com.docker.compose.project" }}\t{{ index .Labels "com.docker.compose.network" }}' "${network}")" \
+      || fail "could not inspect namespace helper network"
+    [[ "${identity}" == "${NETNS_NETWORK_NAME}"'\t'"${NETNS_PROJECT_NAME}"'\tdefault' ]] \
+      || fail "refusing to manage unknown zhixu-netns Compose network"
+  done <<<"${networks}"
+}
+
+remove_project_containers() {
+  local project=$1 ids id
+  ids="$(docker ps --all --quiet --filter "label=com.docker.compose.project=${project}" 2>/dev/null || true)"
+  [[ -z "${ids}" ]] && return 0
+  if [[ "${project}" == "${PROJECT_NAME}" ]]; then
+    validate_main_project_containers "${ids}"
+  elif [[ "${project}" == "${NETNS_PROJECT_NAME}" ]]; then
+    validate_netns_project_containers "${ids}"
+  fi
+  while read -r id; do
+    [[ -n "${id}" ]] || continue
+    docker stop --time 90 "${id}" >/dev/null 2>&1 || true
+  done <<<"${ids}"
+  while read -r id; do
+    [[ -n "${id}" ]] || continue
+    docker rm --force "${id}" >/dev/null || fail "could not remove ${project} Compose container"
+  done <<<"${ids}"
+}
+
+remove_project_networks() {
+  local project=$1 networks network labels network_name endpoint_count
+  networks="$(docker network ls --quiet --filter "label=com.docker.compose.project=${project}" 2>/dev/null || true)"
+  [[ -z "${networks}" ]] && return 0
+  while read -r network; do
+    [[ -n "${network}" ]] || continue
+    labels="$(docker network inspect --format '{{ index .Labels "com.docker.compose.project" }}	{{ index .Labels "com.docker.compose.network" }}' "${network}")" \
+      || fail "could not inspect ${project} Compose network"
+    if [[ "${project}" == "${NETNS_PROJECT_NAME}" ]]; then
+      network_name="$(docker network inspect --format '{{.Name}}' "${network}")" \
+        || fail "could not inspect ${project} Compose network name"
+      [[ "${network_name}" == "${NETNS_NETWORK_NAME}" && "${labels}" == "${NETNS_PROJECT_NAME}"$'\tdefault' ]] \
+        || fail "refusing to remove unknown zhixu-netns Compose network"
+    else
+      [[ "${labels}" == "${project}"$'\t'* ]] || fail "refusing to remove foreign ${project} Compose network"
+    fi
+    endpoint_count="$(docker network inspect --format '{{ len .Containers }}' "${network}")" \
+      || fail "could not inspect ${project} Compose network endpoints"
+    [[ "${endpoint_count}" == "0" ]] || fail "${project} Compose network still has endpoints"
+    docker network rm "${network}" >/dev/null || fail "could not remove ${project} Compose network"
+  done <<<"${networks}"
+}
+
+docker_volume_exists() {
+  docker volume inspect "$1" >/dev/null 2>&1
+}
+
+validate_main_project_volumes() {
+  local key name identity names
+  for key in zhixu-postgres zhixu-model-secrets; do
+    name="${PROJECT_NAME}_${key}"
+    if docker_volume_exists "${name}"; then
+      identity="$(docker volume inspect --format '{{.Name}}\t{{ index .Labels "com.docker.compose.project" }}\t{{ index .Labels "com.docker.compose.volume" }}' "${name}")" \
+        || fail "could not inspect ${name}"
+      [[ "${identity}" == "${name}"'\t'"${PROJECT_NAME}"'\t'"${key}" ]] \
+        || fail "refusing to remove foreign Compose volume ${name}"
+    fi
+  done
+  names="$(docker volume ls --quiet --filter "label=com.docker.compose.project=${PROJECT_NAME}")" \
+    || fail "could not list ${PROJECT_NAME} Compose volumes"
+  while read -r name; do
+    [[ -n "${name}" ]] || continue
+    identity="$(docker volume inspect --format '{{.Name}}\t{{ index .Labels "com.docker.compose.project" }}\t{{ index .Labels "com.docker.compose.volume" }}' "${name}")" \
+      || fail "could not inspect ${PROJECT_NAME} Compose volume"
+    case "${identity}" in
+      "${PROJECT_NAME}_zhixu-postgres"'\t'"${PROJECT_NAME}"'\tzhixu-postgres'|\
+      "${PROJECT_NAME}_zhixu-model-secrets"'\t'"${PROJECT_NAME}"'\tzhixu-model-secrets') ;;
+      *) fail "refusing to remove unknown ${PROJECT_NAME} Compose volume ${name}" ;;
+    esac
+  done <<<"${names}"
+}
+
+remove_main_project_volumes() {
+  local names name
+  validate_main_project_volumes
+  names="$(docker volume ls --quiet --filter "label=com.docker.compose.project=${PROJECT_NAME}")" \
+    || fail "could not list ${PROJECT_NAME} Compose volumes"
+  while read -r name; do
+    [[ -n "${name}" ]] || continue
+    docker volume rm "${name}" >/dev/null || fail "could not remove ${PROJECT_NAME} Compose volume ${name}"
+  done <<<"${names}"
+  for name in "${PROJECT_NAME}_zhixu-postgres" "${PROJECT_NAME}_zhixu-model-secrets"; do
+    docker_volume_exists "${name}" && fail "${PROJECT_NAME} Compose volume ${name} still exists"
+  done
+  return 0
+}
+
+teardown_main_project() {
+  local ids
+  ids="$(main_project_container_ids)"
+  validate_main_project_containers "${ids}"
+  compose_without_grant --profile workspace-runtime --profile modelctl down --remove-orphans >/dev/null 2>&1 || true
+  remove_project_containers "${PROJECT_NAME}"
+  remove_project_networks "${PROJECT_NAME}"
+}
+
+teardown_netns_project() {
+  validate_netns_resource_ownership
+  netns_compose down --remove-orphans >/dev/null 2>&1 || true
+  remove_project_containers "${NETNS_PROJECT_NAME}"
+  remove_project_networks "${NETNS_PROJECT_NAME}"
+}
+
+ensure_netns_stack() {
+  local port=$1
+  validate_netns_resource_ownership
+  netns_compose build app-netns worker-netns
+  if helper_stack_matches "${port}" && validate_netns_runtime_security; then
+    if netns_compose up --detach --no-recreate --wait app-netns worker-netns >/dev/null \
+      && helper_stack_matches "${port}" && validate_netns_runtime_security; then
+      return
+    fi
+  fi
+  if docker_container_exists "${APP_NETNS_CONTAINER}" && ! helper_uses_port "${port}"; then
+    ensure_http_port_available
+  fi
+  log "rebuilding launcher-owned namespace anchors"
+  teardown_main_project
+  teardown_netns_project
+  ensure_http_port_available
+  netns_compose up --detach --wait app-netns worker-netns >/dev/null
+  helper_stack_matches "${port}" || fail "namespace helper did not become ready"
+  validate_netns_runtime_security || fail "namespace anchor runtime security is invalid"
+}
+
 contain_uncommitted_runtime() {
   printf '[zhixu] warning: stopping the uncommitted Workspace runtime\n' >&2
   compose_without_grant --profile workspace-runtime stop \
-    proxy app-model-relay worker-model-relay firewall app worker >/dev/null 2>&1 || true
+    app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
   compose_without_grant --profile workspace-runtime rm --force --stop \
-    proxy app-model-relay worker-model-relay firewall app worker >/dev/null 2>&1 || true
+    app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
   if [[ -e "${GRANT_OVERRIDE}" || -L "${GRANT_OVERRIDE}" ]]; then
     if protected_file_is_valid "${GRANT_OVERRIDE}"; then
       rm -f -- "${GRANT_OVERRIDE}" || true
@@ -683,12 +1071,15 @@ validate_compose() {
   python3 "${SCRIPT_DIR}/deploy/compose_workspace_check.py" --base -- "${model[@]}"
   local static_model=(docker compose --profile workspace-runtime --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${SCRIPT_DIR}/deploy/compose.static-models.yml" --env-file "${ENV_FILE}" config --format json)
   python3 "${SCRIPT_DIR}/deploy/compose_runtime_check.py" --legacy-model-env -- "${static_model[@]}"
+  netns_compose config --quiet
+  local netns_model=(docker compose --project-name "${NETNS_PROJECT_NAME}" -f "${NETNS_COMPOSE_FILE}" --env-file "${ENV_FILE}" config --format json)
+  python3 "${SCRIPT_DIR}/deploy/compose_netns_check.py" -- "${netns_model[@]}"
 }
 
 start_base_stack() {
   log "building base and Workspace runtime images"
   compose --profile workspace-runtime --profile modelctl build \
-    model-settings-key-init migrate modelctl app worker app-model-relay worker-model-relay firewall proxy
+    model-settings-key-init migrate modelctl app worker app-model-relay worker-model-relay
   log "starting PostgreSQL, secret initialization, and migrations"
   compose up --detach --wait postgres
   compose run --rm --no-deps -T model-settings-key-init
@@ -767,10 +1158,9 @@ validated_port() {
 }
 
 ensure_http_port_available() {
-  local port current_endpoint=""
+  local port
   port="$(validated_port ZHIXU_HTTP_PORT 8080)"
-  if current_endpoint="$(compose_without_grant port app 8080 2>/dev/null)" \
-    && [[ "${current_endpoint}" == "127.0.0.1:${port}" ]]; then
+  if helper_stack_matches "${port}"; then
     return
   fi
   if ! python3 - "${port}" <<'PY'
@@ -903,23 +1293,52 @@ for requirement in sys.argv[1:]:
 }
 
 runtime_services_ready() {
-  runtime_status_is_ready app=healthy worker=healthy proxy=healthy <"${RUNTIME_STATUS_FILE}"
+  runtime_status_is_ready postgres=healthy app=healthy worker=healthy \
+    app-model-relay=healthy worker-model-relay=healthy <"${RUNTIME_STATUS_FILE}"
+}
+
+host_runtime_ready() {
+  local port=$1
+  python3 - "${port}" <<'PY'
+import http.client
+import sys
+
+connection = None
+try:
+    port = int(sys.argv[1])
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    connection.request("GET", "/readyz", headers={"Host": f"127.0.0.1:{port}"})
+    response = connection.getresponse()
+    if response.status != 200:
+        raise SystemExit(1)
+    response.read(1)
+except (OSError, http.client.HTTPException, ValueError):
+    raise SystemExit(1)
+finally:
+    if connection is not None:
+        connection.close()
+PY
 }
 
 verify_runtime_ready() {
-  local attempt
+  local attempt helper_status port
+  port="$(validated_port ZHIXU_HTTP_PORT 8080)"
   RUNTIME_STATUS_FILE="${STATE_DIR}/runtime-status.$$"
   [[ ! -e "${RUNTIME_STATUS_FILE}" && ! -L "${RUNTIME_STATUS_FILE}" ]] || fail "runtime status path already exists"
   (umask 077; : >"${RUNTIME_STATUS_FILE}") || fail "could not create runtime status file"
   chmod 0600 "${RUNTIME_STATUS_FILE}"
-  for ((attempt = 0; attempt < 20; attempt++)); do
-    if compose --profile workspace-runtime ps --format json app worker proxy >"${RUNTIME_STATUS_FILE}" 2>/dev/null \
-      && runtime_services_ready; then
+  for ((attempt = 0; attempt < 120; attempt++)); do
+    helper_status=""
+    if compose --profile workspace-runtime ps --format json postgres app worker app-model-relay worker-model-relay >"${RUNTIME_STATUS_FILE}" 2>/dev/null \
+      && runtime_services_ready \
+      && helper_status="$(netns_compose ps --all --format json app-netns worker-netns 2>/dev/null)" \
+      && printf '%s' "${helper_status}" | runtime_status_is_ready app-netns=healthy worker-netns=healthy \
+      && host_runtime_ready "${port}"; then
       rm -f -- "${RUNTIME_STATUS_FILE}"
       RUNTIME_STATUS_FILE=""
       return
     fi
-    sleep 0.25
+    sleep 0.5
   done
   rm -f -- "${RUNTIME_STATUS_FILE}"
   RUNTIME_STATUS_FILE=""
@@ -937,7 +1356,7 @@ run_workspace_lifecycle() {
   initialize_local_state
   root="$(canonicalize_workspace_root "${root}")" || fail "Workspace root is invalid"
   validate_compose
-  ensure_http_port_available
+  ensure_netns_stack "$(validated_port ZHIXU_HTTP_PORT 8080)"
   build_workspace_control_bundle
   start_base_stack
   invoke_workspace_control "${root}" "${initialize_git}"
@@ -1022,16 +1441,25 @@ run_status() {
   validate_project_scope
   validate_optional_state_directory
   select_existing_env
-  compose_without_grant --profile workspace-runtime --profile modelctl ps --all
-  if compose_without_grant --profile workspace-runtime --profile modelctl \
-    ps --all --format json postgres app worker proxy app-model-relay worker-model-relay \
-    | runtime_status_is_ready postgres=healthy app=healthy worker=healthy proxy=healthy \
-      app-model-relay=- worker-model-relay=-; then
+  printf 'Project: %s\n' "${PROJECT_NAME}"
+  compose_without_grant --profile workspace-runtime --profile modelctl ps --all || true
+  printf 'Project: %s\n' "${NETNS_PROJECT_NAME}"
+  netns_compose ps --all || true
+  local main_status helper_status port
+  port="$(validated_port ZHIXU_HTTP_PORT 8080)"
+  main_status="$(compose_without_grant --profile workspace-runtime --profile modelctl \
+    ps --all --format json postgres app worker app-model-relay worker-model-relay 2>/dev/null || true)"
+  helper_status="$(netns_compose ps --all --format json app-netns worker-netns 2>/dev/null || true)"
+  if printf '%s' "${main_status}" | runtime_status_is_ready postgres=healthy app=healthy worker=healthy \
+      app-model-relay=healthy worker-model-relay=healthy \
+      && printf '%s' "${helper_status}" | runtime_status_is_ready app-netns=healthy worker-netns=healthy \
+      && helper_stack_matches "${port}" \
+      && host_runtime_ready "${port}"; then
     printf 'Runtime: ready\n'
   else
     printf 'Runtime: degraded\n'
   fi
-  printf 'URL: http://127.0.0.1:%s/\n' "$(validated_port ZHIXU_HTTP_PORT 8080)"
+  printf 'URL: http://127.0.0.1:%s/\n' "${port}"
   if selection_exists; then
     load_selection
     printf 'Workspace: selected\nRoot: %s\n' "${SELECTION_ROOT}"
@@ -1054,7 +1482,12 @@ run_logs() {
   local service="${1:-app}"
   [[ $# -le 1 ]] || fail "logs accepts at most one service"
   case "${service}" in
-    postgres|model-settings-key-init|migrate|app|worker|app-model-relay|worker-model-relay|firewall|proxy|modelctl) ;;
+    app-netns|worker-netns)
+      validate_netns_resource_ownership
+      netns_compose logs --follow --tail 200 "${service}"
+      return
+      ;;
+    postgres|model-settings-key-init|migrate|app|worker|app-model-relay|worker-model-relay|modelctl) ;;
     *) fail "unknown service: ${service}" ;;
   esac
   compose_without_grant --profile workspace-runtime --profile modelctl logs --follow --tail 200 "${service}"
@@ -1079,7 +1512,15 @@ run_down() {
   validate_project_scope
   validate_optional_state_directory
   select_existing_env
-  compose_without_grant --profile workspace-runtime --profile modelctl down --remove-orphans
+  validate_netns_resource_ownership
+  compose_without_grant --profile workspace-runtime --profile modelctl stop \
+    app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
+  compose_without_grant --profile workspace-runtime --profile modelctl rm --force --stop \
+    app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
+  compose_without_grant --profile workspace-runtime --profile modelctl down --remove-orphans || true
+  remove_project_containers "${PROJECT_NAME}"
+  remove_project_networks "${PROJECT_NAME}"
+  teardown_netns_project
   remove_active_grant
   log "stopped; selection, PostgreSQL, model secrets, and host Workspace files were preserved"
 }
@@ -1105,7 +1546,18 @@ run_reset() {
   if [[ -e "${GRANT_OVERRIDE}" || -L "${GRANT_OVERRIDE}" ]]; then
     validate_protected_file "${GRANT_OVERRIDE}" "Workspace grant file"
   fi
-  compose_without_grant down --volumes --remove-orphans
+  validate_netns_resource_ownership
+  validate_main_project_volumes
+  compose_without_grant --profile workspace-runtime --profile modelctl stop \
+    app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
+  compose_without_grant --profile workspace-runtime --profile modelctl rm --force --stop \
+    app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
+  compose_without_grant --profile workspace-runtime --profile modelctl down --volumes --remove-orphans || \
+    log "Compose volume teardown was incomplete; applying validated fallback cleanup"
+  remove_project_containers "${PROJECT_NAME}"
+  remove_project_networks "${PROJECT_NAME}"
+  remove_main_project_volumes
+  teardown_netns_project
   remove_active_grant
   remove_selection
   log "deleted Compose volumes and cleared selection/grant; host Workspace files were not touched"

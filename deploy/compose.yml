@@ -107,52 +107,14 @@ services:
         condition: service_completed_successfully
       model-settings-key-init:
         condition: service_completed_successfully
-    ports:
-      - target: 8080
-        published: ${ZHIXU_HTTP_PORT:-8080}
-        host_ip: 127.0.0.1
-        protocol: tcp
     volumes:
       - type: volume
         source: zhixu-model-secrets
         target: /run/zhixu-model-secrets
         read_only: true
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    network_mode: "container:zhixu-app-netns"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/readyz"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
-  firewall:
-    profiles: ["workspace-runtime"]
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-    entrypoint: ["/app/loopback-firewall.sh"]
-    user: "0:0"
-    cap_add:
-      - NET_ADMIN
-    network_mode: "service:app"
-    depends_on:
-      app:
-        condition: service_started
-
-  proxy:
-    profiles: ["workspace-runtime"]
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-    entrypoint: ["socat", "TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:8081"]
-    user: "10001:10001"
-    restart: on-failure
-    network_mode: "service:app"
-    depends_on:
-      firewall:
-        condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/readyz && wget -q -O /dev/null http://127.0.0.1:8080/readyz"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -165,10 +127,15 @@ services:
     restart: on-failure
     entrypoint: ["socat", "TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr", "TCP:host.docker.internal:11434"]
     user: "10001:10001"
-    network_mode: "service:app"
+    network_mode: "container:zhixu-app-netns"
     depends_on:
       app:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "ss -H -ltn 'sport = :11434' | grep -q '127.0.0.1:11434' && wget -q -O /dev/null http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   worker:
     profiles: ["workspace-runtime"]
@@ -221,10 +188,9 @@ services:
         source: zhixu-model-secrets
         target: /run/zhixu-model-secrets
         read_only: true
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    network_mode: "container:zhixu-worker-netns"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/readyz"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/readyz && wget -q -O /dev/null http://127.0.0.1:18082"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -238,10 +204,15 @@ services:
     restart: on-failure
     entrypoint: ["socat", "TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr", "TCP:host.docker.internal:11434"]
     user: "10001:10001"
-    network_mode: "service:worker"
+    network_mode: "container:zhixu-worker-netns"
     depends_on:
       worker:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "ss -H -ltn 'sport = :11434' | grep -q '127.0.0.1:11434' && wget -q -O /dev/null http://127.0.0.1:8081/readyz && wget -q -O /dev/null http://127.0.0.1:18082"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   modelctl:
     profiles: ["modelctl"]
@@ -273,3 +244,8 @@ services:
 volumes:
   zhixu-postgres:
   zhixu-model-secrets:
+
+networks:
+  default:
+    external: true
+    name: zhixu-runtime

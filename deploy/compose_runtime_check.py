@@ -12,7 +12,6 @@ from typing import Any
 SECRET_VOLUME = "zhixu-model-secrets"
 SECRET_TARGET = "/run/zhixu-model-secrets"
 KEY_FILE = f"{SECRET_TARGET}/model-settings.key"
-HOST_GATEWAY = "host.docker.internal=host-gateway"
 STATIC_MANAGED_VALUES = {
     "ZHIXU_MODEL_SETTINGS_KEY_FILE": "",
     "ZHIXU_MODEL_SETTINGS_ROLLOUT_ID": "",
@@ -224,7 +223,20 @@ def validate_zero_base_grant(model: dict[str, Any]) -> None:
                 fail(f"base Compose must not contain {key}")
 
 
-def validate_relay(model: dict[str, Any], relay_name: str, owner_name: str) -> None:
+def validate_network_mode(definition: dict[str, Any], service_name: str, anchor_name: str) -> None:
+    if definition.get("network_mode") != f"container:{anchor_name}":
+        fail(f"{service_name} must share the fixed {anchor_name} network namespace")
+    if definition.get("extra_hosts"):
+        fail(f"{service_name} must inherit host mapping from {anchor_name}")
+
+
+def validate_healthcheck(definition: dict[str, Any], service_name: str, expected: list[str]) -> None:
+    healthcheck = definition.get("healthcheck")
+    if not isinstance(healthcheck, dict) or healthcheck.get("test") != expected:
+        fail(f"{service_name} healthcheck must detect namespace divergence")
+
+
+def validate_relay(model: dict[str, Any], relay_name: str, anchor_name: str, healthcheck: list[str]) -> None:
     relay = service(model, relay_name)
     expected_entrypoint = [
         "socat",
@@ -233,26 +245,38 @@ def validate_relay(model: dict[str, Any], relay_name: str, owner_name: str) -> N
     ]
     if relay.get("entrypoint") != expected_entrypoint:
         fail(f"{relay_name} must use the fixed loopback-to-host Ollama relay")
-    if relay.get("network_mode") != f"service:{owner_name}":
-        fail(f"{relay_name} must share the {owner_name} network namespace")
+    validate_network_mode(relay, relay_name, anchor_name)
     if relay.get("restart") != "on-failure":
         fail(f"{relay_name} restart policy must be on-failure")
     if relay.get("user") != "10001:10001" or relay.get("privileged") is True or "cap_add" in relay or "ports" in relay:
         fail(f"{relay_name} must be unprivileged and publish no ports")
     if volume_mounts(relay, relay_name):
         fail(f"{relay_name} must not receive host or secret mounts")
-    if relay.get("extra_hosts"):
-        fail(f"{relay_name} must not combine extra_hosts with a shared network namespace")
+    owner_name = "app" if relay_name == "app-model-relay" else "worker"
     if not has_dependency(relay, owner_name, "service_started"):
         fail(f"{relay_name} must wait for {owner_name} startup")
+    validate_healthcheck(relay, relay_name, healthcheck)
 
 
 def validate_relays(model: dict[str, Any]) -> None:
-    validate_relay(model, "app-model-relay", "app")
-    validate_relay(model, "worker-model-relay", "worker")
-    for service_name in ("app", "worker"):
-        if service(model, service_name).get("extra_hosts") != [HOST_GATEWAY]:
-            fail(f"{service_name} must retain the fixed host-gateway mapping")
+    validate_relay(
+        model,
+        "app-model-relay",
+        "zhixu-app-netns",
+        [
+            "CMD-SHELL",
+            "ss -H -ltn 'sport = :11434' | grep -q '127.0.0.1:11434' && wget -q -O /dev/null http://127.0.0.1:8080/readyz",
+        ],
+    )
+    validate_relay(
+        model,
+        "worker-model-relay",
+        "zhixu-worker-netns",
+        [
+            "CMD-SHELL",
+            "ss -H -ltn 'sport = :11434' | grep -q '127.0.0.1:11434' && wget -q -O /dev/null http://127.0.0.1:8081/readyz && wget -q -O /dev/null http://127.0.0.1:18082",
+        ],
+    )
 
 
 def validate_ingress(model: dict[str, Any]) -> None:
@@ -260,19 +284,28 @@ def validate_ingress(model: dict[str, Any]) -> None:
     app_environment = environment(app, "app")
     if app_environment.get("ZHIXU_HTTP_ADDR") != "127.0.0.1:8081":
         fail("app must keep the API listener on internal loopback port 8081")
-    ports = app.get("ports")
-    if not isinstance(ports, list) or len(ports) != 1:
-        fail("app must publish exactly one loopback ingress mapping")
-    port = ports[0]
-    if not isinstance(port, dict) or port.get("host_ip") != "127.0.0.1" or port.get("target") != 8080 or port.get("protocol") != "tcp":
-        fail("app must map host loopback to namespace port 8080")
-    published = port.get("published")
-    try:
-        published_port = int(published)
-    except (TypeError, ValueError):
-        fail("app ingress host port must be fixed")
-    if published_port < 1 or published_port > 65535:
-        fail("app ingress host port must be fixed")
+    validate_network_mode(app, "app", "zhixu-app-netns")
+    if "ports" in app:
+        fail("app must not publish ingress; the netns anchor owns host port 8080")
+    validate_healthcheck(
+        app,
+        "app",
+        [
+            "CMD-SHELL",
+            "wget -q -O /dev/null http://127.0.0.1:8081/readyz && wget -q -O /dev/null http://127.0.0.1:8080/readyz",
+        ],
+    )
+
+    worker = service(model, "worker")
+    validate_network_mode(worker, "worker", "zhixu-worker-netns")
+    validate_healthcheck(
+        worker,
+        "worker",
+        [
+            "CMD-SHELL",
+            "wget -q -O /dev/null http://127.0.0.1:8081/readyz && wget -q -O /dev/null http://127.0.0.1:18082",
+        ],
+    )
 
     postgres_ports = service(model, "postgres").get("ports")
     if not isinstance(postgres_ports, list) or len(postgres_ports) != 1:
@@ -287,14 +320,22 @@ def validate_ingress(model: dict[str, Any]) -> None:
     ):
         fail("PostgreSQL host port must be allocated automatically on loopback")
 
-    proxy = service(model, "proxy")
-    expected_entrypoint = ["socat", "TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:8081"]
-    if proxy.get("network_mode") != "service:app" or proxy.get("entrypoint") != expected_entrypoint:
-        fail("proxy must be the only bridge from namespace port 8080 to the API listener")
-    if proxy.get("user") != "10001:10001" or "ports" in proxy:
-        fail("proxy must be unprivileged and publish no independent ports")
-    if proxy.get("restart") != "on-failure":
-        fail("proxy restart policy must be on-failure")
+    services = model.get("services")
+    assert isinstance(services, dict)
+    for removed_service in ("proxy", "firewall"):
+        if removed_service in services:
+            fail(f"{removed_service} must be owned by the zhixu-netns helper instead of the main project")
+
+
+def validate_external_runtime_network(model: dict[str, Any]) -> None:
+    networks = model.get("networks")
+    if not isinstance(networks, dict):
+        fail("main Compose networks are missing")
+    default_network = networks.get("default")
+    if not isinstance(default_network, dict):
+        fail("main Compose default network is missing")
+    if default_network.get("external") is not True or default_network.get("name") != "zhixu-runtime":
+        fail("main Compose default network must be the external zhixu-runtime helper network")
 
 
 def validate_static_models(model: dict[str, Any]) -> None:
@@ -370,6 +411,7 @@ def main() -> None:
         validate_secret_boundary(model)
     validate_relays(model)
     validate_ingress(model)
+    validate_external_runtime_network(model)
     validate_zero_base_grant(model)
 
 

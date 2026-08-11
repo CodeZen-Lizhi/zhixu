@@ -139,7 +139,7 @@ Safe Writeback 的 WorkspaceStore 与 GitRepository 不是通用文件/Git 工�
 | 图形 UI | 当前 SVG/CSS + 有界列表 fallback | Cytoscape/Web Worker 仅在 50 万 Relation/FPS 证据后评估 |
 | 配置 | Viper + validator + YAML v3 AST 预检 | 每次实例化加载、严格输入，详见 [应用契约](application-contracts.md) |
 | 可观测 | slog、OpenTelemetry OTLP/HTTP、Prometheus client | 显式 Provider、独立 Registry、脱敏和有界 label |
-| 部署 | Docker Compose | 固定 Web 入口、精确 Workspace bind、PostgreSQL named volume |
+| 部署 | Docker Compose | 稳定 namespace anchor、固定 Web 入口、精确 Workspace bind、PostgreSQL named volume |
 
 ### 选型原则
 
@@ -155,16 +155,23 @@ Safe Writeback 的 WorkspaceStore 与 GitRepository 不是通用文件/Git 工�
 ### 本地模式
 
 ```text
-browser -> 127.0.0.1:${ZHIXU_HTTP_PORT:-8080} -> Docker proxy -> app loopback
-                                                   |-> worker (no host port)
-                                                   |-> postgres named volume
+Compose project: zhixu-netns
+browser -> 127.0.0.1:${ZHIXU_HTTP_PORT:-8080} -> app anchor -> app loopback
+                                                    \-> app model relay
+worker anchor -> worker loopback + worker model relay
+
+Compose project: zhixu
+postgres + one-shot migration/model control -> zhixu-runtime external network
+app/app relay -> container:zhixu-app-netns
+worker/worker relay -> container:zhixu-worker-netns
 host Workspace <== exact bind ==> app + worker only
 ```
 
 - Web/API 只发布宿主机 IPv4 loopback；Worker 不发布宿主机端口；PostgreSQL 不暴露公网。
-- Docker 内 proxy 只负责静态 Web、容器 loopback 转发与网络隔离，不拥有 Workspace 或认证状态。
-- app/worker 是共享网络命名空间的 owner；其 PID 1 在 PostgreSQL 暂不可用时保持 running，数据库可 ping 后再 `exec` 业务进程，避免 daemon restart 期间 proxy/model relay 因 owner 短暂退出而永久漏启动。
-- API/Worker 共享同一 canonical Root Grant；Migrate、Proxy、数据库和模型密钥卷不能读取 Workspace。
+- `zhixu-netns` 的 app anchor 只负责容器 loopback ingress 转发和 peer firewall；静态 Web/API 仍由 app 提供。anchor 没有 Workspace、认证状态、模型 secret、数据库 credential 或 Docker socket。启动时以 `NET_ADMIN` 安装 firewall，仅以 `SETUID`/`SETGID` 切换到非 root，长期进程 capability 全零。
+- app/worker 与两个 relay 是固定 anchor 的 namespace consumer；其 PID 1 在 PostgreSQL 暂不可用时保持 running，数据库可 ping 后再 `exec` 业务进程。主项目 Restart project 不会替换 anchor，避免 consumer 因短暂 owner 消失而永久漏启动。
+- API/Worker 共享同一 canonical Root Grant；Migrate、anchor、数据库和模型密钥卷不能读取 Workspace。
+- Docker UI 只支持主 `zhixu` Restart project。helper 或 daemon restart 不保证跨项目顺序，health/status 必须显示 degraded；launcher 使用 anchor-first 受控重建恢复。
 
 ### 自托管模式
 
@@ -174,8 +181,8 @@ host Workspace <== exact bind ==> app + worker only
 
 ### 启动与健康
 
-- 启动依赖为 PostgreSQL ready → migration success → API/Worker composition ready → Web ready。
-- Compose 声明式依赖不单独承担 daemon restart 的收敛保证；API/Worker 启动入口按 profile 加载配置并等待 PostgreSQL，配置类错误 fail fast，瞬时连接失败可取消重试。
+- 启动依赖为 helper anchor firewall/health → PostgreSQL ready → migration success → API/Worker composition ready → relay/Web ready。
+- Compose 声明式依赖不单独承担 daemon restart 的收敛保证；API/Worker 启动入口按 profile 加载配置并等待 PostgreSQL，配置类错误 fail fast，瞬时连接失败可取消重试。主项目 restart 依赖持续运行的 helper anchor；helper/daemon 恢复失败只可降级，随后由 launcher 收敛。
 - Migration 固定执行应用迁移、River migration 和 Validate；失败阻止 API/Worker 就绪。
 - Liveness 只说明进程存在；Readiness 验证 DB、Definition/Executor、必要 Provider、Root Grant 和版本兼容。API health 不能替代 Worker `/readyz`。
 - 运维状态以 `docker compose ps --all` 的关键服务集合为事实；关键进程非 running 或核心 health 非 healthy 时显式 degraded，状态查询不执行补偿动作。

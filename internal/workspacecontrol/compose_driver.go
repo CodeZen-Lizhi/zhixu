@@ -107,12 +107,6 @@ func (driver *ComposeDriver) ApplyGrant(ctx context.Context, grant Grant) (retur
 	if _, err := driver.compose(ctx, "up", "--detach", "--no-deps", "--wait", "app-model-relay", "worker-model-relay"); err != nil {
 		return runtimeCommandFault(err, "WORKSPACE_RUNTIME_START_FAILED")
 	}
-	if _, err := driver.compose(ctx, "run", "--rm", "--no-deps", "-T", "firewall"); err != nil {
-		return runtimeCommandFault(err, "WORKSPACE_RUNTIME_FIREWALL_FAILED")
-	}
-	if _, err := driver.compose(ctx, "up", "--detach", "--no-deps", "--wait", "proxy"); err != nil {
-		return runtimeCommandFault(err, "WORKSPACE_RUNTIME_INGRESS_FAILED")
-	}
 	current, err := driver.validator.Validate(grant.Root)
 	if err != nil || current.Fingerprint.Digest() != grant.RootFingerprint || current.Fingerprint.BindingVersion != grant.BindingVersion {
 		return &ValidationError{Code: "WORKSPACE_PATH_IDENTITY_CHANGED"}
@@ -247,7 +241,7 @@ func (driver *ComposeDriver) prepareGrantModel(ctx context.Context, grant Grant)
 	return nil
 }
 
-// RevokeGrant closes ingress and removes every container that could retain the Workspace bind.
+// RevokeGrant removes every runtime container that could retain the Workspace bind.
 func (driver *ComposeDriver) RevokeGrant(ctx context.Context) error {
 	grantPresent, err := driver.grantOverridePresent()
 	if err != nil {
@@ -257,8 +251,8 @@ func (driver *ComposeDriver) RevokeGrant(ctx context.Context) error {
 	if grantPresent {
 		run = driver.compose
 	}
-	_, stopErr := run(ctx, "stop", "proxy", "app-model-relay", "worker-model-relay", "app", "worker")
-	_, removeErr := run(ctx, "rm", "--force", "--stop", "proxy", "firewall", "app-model-relay", "worker-model-relay", "app", "worker")
+	_, stopErr := run(ctx, "stop", "app-model-relay", "worker-model-relay", "app", "worker")
+	_, removeErr := run(ctx, "rm", "--force", "--stop", "app-model-relay", "worker-model-relay", "app", "worker")
 	if stopErr != nil || removeErr != nil {
 		if errors.Is(stopErr, context.Canceled) || errors.Is(stopErr, context.DeadlineExceeded) ||
 			errors.Is(removeErr, context.Canceled) || errors.Is(removeErr, context.DeadlineExceeded) {

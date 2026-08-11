@@ -53,8 +53,9 @@
   migration one-shot，不能把 migration 完成当作当前 PostgreSQL 健康状态。
 - 普通重复 `up` 使用 Compose 的差异检测，不强制重建未变化的 API/Worker；受控 `restart` 仍必须强制替换
   prepared 与 steady runtime，避免候选启动参数或旧实例被误用。
-- relay 使用 `network_mode: service:app|worker` 时不拥有独立网络配置；host-gateway 等映射只配置在 app/worker
-  namespace owner，relay 不重复声明 `extra_hosts`。
+- relay 使用 `network_mode: container:zhixu-app-netns|zhixu-worker-netns` 时不拥有独立网络配置；host-gateway 等映射只配置在
+  对应稳定 anchor，relay 不重复声明 `extra_hosts`。relay health 同时证明本 namespace 的
+  `127.0.0.1:11434` listener 与 anchor loopback health；可选 host Ollama 不是常规 ready 依赖。
 
 ### 4. Validation & Error Matrix
 
@@ -76,7 +77,7 @@
 ### 5. Good / Base / Bad Cases
 
 - Good：保存 desired 后页面显示 restart required；`./zhixu restart` 固定 target、排空、启动两个 prepared candidate、
-  原子 commit，再恢复 queue/proxy，两个 role 的 applied 与 active 一致。
+  原子 commit，再恢复 queue/relay，两个 role 的 applied 与 active 一致。候选与 steady consumer 必须加入已验证的稳定 anchor。
 - Base：全部模型 disabled 时仍完成 Compose、迁移、readiness、Keyword Search 和 Settings 浏览器闭环。
 - Bad：保存时热替换进程 Adapter、Handler 持有明文 Key、只检查第一个 DNS 地址、先暂停 queue 后再提交 draining、
   仅凭容器 healthy 就提交 active、含 Responses 历史时直接删除协议列，或 `down` 隐式删除 volume。
@@ -93,8 +94,8 @@
 - Chat API style 迁移测试必须从旧 schema 插入 revision 后升级，断言回填 `chat_completions`、非法枚举受 `23514` 拒绝、
   仅默认值可 Down；插入 `responses` 后 Down 必须返回 `55000` 且 Goose 版本保持不变。
 - Composition/CLI/Compose：API/Worker disabled/configured/fixed target、单一 Runtime 注入、queue pause/resume、
-  launcher Key/migration one-shot fail-fast、secret/smoke cleanup fake-Docker contract，以及真实 `./zhixu up`、`restart`、
-  重复 `up` 和 readiness。
+  launcher Key/migration one-shot fail-fast、双 Compose helper/main identity、anchor-first recovery、secret/smoke cleanup fake-Docker contract，
+  以及真实 `./zhixu up`、主项目 restart、anchor degraded -> restart、重复 `up` 和 readiness。
 - Canonical Go/contract 门禁至少包含受影响 `go test`、`go test -race`、`go vet`、`go mod tidy -diff`、
   `make openapi-check`、`make compose-check`、`git diff --check` 和 Secret 扫描。
 
@@ -111,7 +112,7 @@ Wrong: docker compose down -v、image prune 或宽泛名称匹配被包装进日
 Correct: down 保留数据；reset 单独确认；历史 smoke 只按精确 namespace 且确认无容器引用后删除。
 
 Wrong: 用 compose up --wait 启动 migrate，或在共享 app 网络命名空间的 relay 上重复 extra_hosts。
-Correct: postgres healthy 后 compose run --rm 顺序执行 one-shot；网络映射由 app/worker namespace owner 持有。
+Correct: postgres healthy 后 compose run --rm 顺序执行 one-shot；网络映射由稳定 app/worker anchor 持有，relay 只消费对应 namespace。
 
 Wrong: 已存在 Responses revision 时直接 Drop `chat_api_style`，依赖再升级的默认值恢复。
 Correct: Down 持有排他锁并 fail closed；先显式迁移业务 revision，再执行降级。

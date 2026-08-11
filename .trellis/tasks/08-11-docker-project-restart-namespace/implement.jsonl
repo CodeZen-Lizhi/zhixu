@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"固定 loopback、exact Workspace bind、无 Docker socket、runtime wait 与 Docker 生命周期的主契约。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"固定 host loopback、bridge peer firewall、proxy 降权与 fail-closed 的安全契约。"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"核对 managed/static/prepared model runtime、relay 与 restart policy 兼容性；文件当前有并行任务改动，实施时只读或精确合并。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Docker 真实 smoke、安全、失败回滚与独立质量门要求。"}
+{"file":"docs/architecture/adr/0020-docker-direct-web-and-one-shot-workspace-control.md","reason":"现行 fixed Web 入口、proxy/firewall 与一次性 Workspace control 架构基线。"}
+{"file":".trellis/tasks/08-11-docker-project-restart-namespace/prd.md","reason":"本任务用户结果、兼容边界和可观察验收标准。"}
+{"file":".trellis/tasks/08-11-docker-project-restart-namespace/design.md","reason":"稳定 external namespace anchor、firewall-before-listen、双项目生命周期、迁移和回滚设计。"}
+{"file":".trellis/tasks/08-11-docker-project-restart-namespace/research/docker-project-restart-root-cause.md","reason":"真实 Docker 复现、反例实验与 external anchor 可行性证据。"}

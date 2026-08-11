@@ -5,6 +5,7 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/compose.netns.yml"
 readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly DEFAULT_ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly TIMEOUT_SECONDS="${ZHIXU_COMPOSE_SMOKE_TIMEOUT_SECONDS:-240}"
@@ -15,6 +16,12 @@ source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"
 
 STATE_DIR=""
 PROJECT_NAME=""
+NETNS_PROJECT_NAME=""
+NETNS_NETWORK_NAME=""
+APP_NETNS_CONTAINER=""
+WORKER_NETNS_CONTAINER=""
+MAIN_NETNS_OVERRIDE_FILE=""
+NETNS_OVERRIDE_FILE=""
 HTTP_PORT=""
 API_BASE_URL=""
 LAST_RESPONSE_FILE=""
@@ -41,7 +48,7 @@ cleanup() {
   local cleanup_exit=0
   trap - EXIT HUP INT TERM
   if [[ -n "${PROJECT_NAME}" ]]; then
-    cleanup_compose_smoke_project_images "${PROJECT_NAME}" || cleanup_exit=$?
+    cleanup_compose_smoke_project_images "${PROJECT_NAME}" "${NETNS_PROJECT_NAME}" || cleanup_exit=$?
   fi
   if [[ -n "${STATE_DIR}" ]]; then
     chmod -R u+rwX "${STATE_DIR}" >/dev/null 2>&1 || true
@@ -76,7 +83,11 @@ PY
 }
 
 compose() {
-  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" --env-file "${DEFAULT_ENV_FILE}" "$@"
+  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${DEFAULT_ENV_FILE}" "$@"
+}
+
+netns_compose() {
+  docker compose --project-name "${NETNS_PROJECT_NAME}" -f "${NETNS_COMPOSE_FILE}" -f "${NETNS_OVERRIDE_FILE}" --env-file "${DEFAULT_ENV_FILE}" "$@"
 }
 
 run_compose_step() {
@@ -221,6 +232,7 @@ main() {
   local run_id search_token workspace_host_root target_path
   run_id="$(random_hex 6)"
   PROJECT_NAME="zhixu-search-smoke-${run_id}"
+  prepare_compose_smoke_netns
   HTTP_PORT="$(allocate_port)"
   API_BASE_URL="http://127.0.0.1:${HTTP_PORT}"
   AUTH_ORIGIN="${API_BASE_URL}"
@@ -252,6 +264,10 @@ main() {
   log "building disposable Compose stack"
   run_compose_step "Compose configuration validation" config --quiet
   run_compose_step "Compose image build" build
+  netns_compose config --quiet
+  netns_compose build
+  log "starting isolated namespace anchors"
+  netns_compose up --detach --wait
 
   run_compose_step "Workspace ownership preparation" run --rm --no-deps --user root --entrypoint sh app -c \
     'chown -R 10001:10001 /workspace/project && chmod -R u+rwX /workspace/project'
@@ -264,8 +280,6 @@ main() {
   run_compose_step "Database migration" run --rm --no-deps -T migrate
   run_compose_step "API and Worker startup" up --detach --no-deps --wait app worker
   run_compose_step "Model relay startup" up --detach --no-deps --wait app-model-relay worker-model-relay
-  run_compose_step "Loopback firewall" run --rm --no-deps -T firewall
-  run_compose_step "Ingress proxy startup" up --detach --no-deps --wait proxy
   authenticate
 
   local workspace_payload workspace_id source_version_id base_hash ingestion_payload

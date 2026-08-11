@@ -20,12 +20,17 @@ compose() {
   docker compose --project-name "${PROJECT_NAME}" -f contract.yml "$@"
 }
 
+netns_compose() {
+  docker compose --project-name "${NETNS_PROJECT_NAME}" -f contract.netns.yml "$@"
+}
+
 harness_cleanup() {
   local exit_code=$?
   local cleanup_exit=0
   local cleanup_name="${ZHIXU_CONTRACT_CLEANUP_NAME:-${PROJECT_NAME}}"
+  local cleanup_netns_name="${ZHIXU_CONTRACT_NETNS_CLEANUP_NAME:-${NETNS_PROJECT_NAME}}"
   trap - EXIT HUP INT TERM
-  cleanup_compose_smoke_project_images "${cleanup_name}" || cleanup_exit=$?
+  cleanup_compose_smoke_project_images "${cleanup_name}" "${cleanup_netns_name}" || cleanup_exit=$?
   if [[ "${exit_code}" -ne 0 ]]; then
     exit "${exit_code}"
   fi
@@ -34,6 +39,7 @@ harness_cleanup() {
 
 run_harness() {
   readonly PROJECT_NAME="${ZHIXU_CONTRACT_PROJECT_NAME:-zhixu-auth-smoke-a1b2c3d4e5f6}"
+  readonly NETNS_PROJECT_NAME="${ZHIXU_CONTRACT_NETNS_PROJECT_NAME:-${PROJECT_NAME}-netns}"
   trap harness_cleanup EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
@@ -70,12 +76,24 @@ run_case() {
 
 assert_cleanup_invocation() {
   local project_name=$1
+  local netns_project_name="${project_name}-netns"
+  local main_down_line helper_down_line
   grep -F -- "compose --project-name ${project_name} -f contract.yml down --volumes --remove-orphans --rmi local" \
     "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "project-scoped Compose cleanup was not invoked"
-  grep -F -- "image ls --quiet --filter label=com.docker.compose.project=${project_name}" \
-    "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "project image cleanup was not verified"
-  grep -F -- "image ls --quiet --filter reference=${project_name}-*" \
-    "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "project image names were not verified"
+  grep -F -- "compose --project-name ${netns_project_name} -f contract.netns.yml down --remove-orphans --rmi local" \
+    "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "helper Compose cleanup was not invoked after the main project"
+  main_down_line="$(grep -n -m 1 -F -- "compose --project-name ${project_name} -f contract.yml down --volumes --remove-orphans --rmi local" "${ZHIXU_FAKE_DOCKER_LOG}" | cut -d: -f1)"
+  helper_down_line="$(grep -n -m 1 -F -- "compose --project-name ${netns_project_name} -f contract.netns.yml down --remove-orphans --rmi local" "${ZHIXU_FAKE_DOCKER_LOG}" | cut -d: -f1)"
+  (( main_down_line < helper_down_line )) || fail "helper cleanup occurred before consumer cleanup"
+  [[ "$(grep -F -- "--volumes" "${ZHIXU_FAKE_DOCKER_LOG}" | wc -l | tr -d ' ')" -eq 1 ]] \
+    || fail "only the disposable main project may remove volumes"
+  local cleanup_name
+  for cleanup_name in "${project_name}" "${netns_project_name}"; do
+    grep -F -- "image ls --quiet --filter label=com.docker.compose.project=${cleanup_name}" \
+      "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "project image cleanup was not verified"
+    grep -F -- "image ls --quiet --filter reference=${cleanup_name}-*" \
+      "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "project image names were not verified"
+  done
 }
 
 assert_docker_not_invoked() {
@@ -88,20 +106,23 @@ assert_runtime_startup_contract() {
   local previous_line=0
   local startup_step line
   local -a startup_steps=(
+    'netns_compose up --detach --wait'
     'up --detach --wait postgres'
     'run --rm --no-deps -T model-settings-key-init'
     'run --rm --no-deps -T migrate'
     'up --detach --no-deps --wait app worker'
     'up --detach --no-deps --wait app-model-relay worker-model-relay'
-    'run --rm --no-deps -T firewall'
-    'up --detach --no-deps --wait proxy'
   )
 
-  if grep -Eq 'up[[:space:]]+--detach[[:space:]]+--wait([[:space:]]*$|[[:space:]]*[>/])' "${script_path}"; then
+  if grep -E 'up[[:space:]]+--detach[[:space:]]+--wait([[:space:]]*$|[[:space:]]*[>/])' "${script_path}" \
+    | grep -Fv 'netns_compose up' | grep -q .; then
     fail "${smoke_script} can still start every Compose service with --wait"
   fi
   if grep -Eq 'up[[:space:]].*(model-settings-key-init|migrate|firewall)' "${script_path}"; then
     fail "${smoke_script} starts a one-shot service through Compose up"
+  fi
+  if grep -Eq '(firewall|proxy)' "${script_path}"; then
+    fail "${smoke_script} still depends on the removed firewall/proxy services"
   fi
   for startup_step in "${startup_steps[@]}"; do
     line="$(grep -n -m 1 -F -- "${startup_step}" "${script_path}" | cut -d: -f1)"
@@ -153,7 +174,7 @@ main() {
   [[ "${CASE_EXIT}" -eq 1 ]] || fail "image name verification failure did not fail cleanup"
 
   local invalid_project
-  for invalid_project in deploy zhixu-auth-smoke-a zhixu-auth-smoke-a1b2c3d4e5f60 zhixu-auth-smoke-A1B2C3D4E5F6; do
+  for invalid_project in deploy zhixu zhixu-netns zhixu-auth-smoke-a zhixu-auth-smoke-a1b2c3d4e5f60 zhixu-auth-smoke-A1B2C3D4E5F6; do
     run_case success ZHIXU_CONTRACT_PROJECT_NAME="${invalid_project}"
     [[ "${CASE_EXIT}" -eq 1 ]] || fail "cleanup accepted broad project namespace ${invalid_project}"
     assert_docker_not_invoked
@@ -163,6 +184,12 @@ main() {
     ZHIXU_CONTRACT_PROJECT_NAME=zhixu-auth-smoke-a1b2c3d4e5f6 \
     ZHIXU_CONTRACT_CLEANUP_NAME=zhixu-rag-smoke-a1b2c3d4e5f6
   [[ "${CASE_EXIT}" -eq 1 ]] || fail "cleanup accepted a mismatched Compose project binding"
+  assert_docker_not_invoked
+
+  run_case success \
+    ZHIXU_CONTRACT_PROJECT_NAME=zhixu-auth-smoke-a1b2c3d4e5f6 \
+    ZHIXU_CONTRACT_NETNS_CLEANUP_NAME=zhixu-rag-smoke-a1b2c3d4e5f6-netns
+  [[ "${CASE_EXIT}" -eq 1 ]] || fail "cleanup accepted a mismatched helper Compose project binding"
   assert_docker_not_invoked
 
   local signal_name expected_exit
@@ -186,6 +213,10 @@ main() {
       || fail "${smoke_script} does not use the shared cleanup contract"
     grep -F -- "cleanup_compose_smoke_project_images" "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
       || fail "${smoke_script} does not remove project-local images"
+    grep -F -- "prepare_compose_smoke_netns" "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+      || fail "${smoke_script} does not create isolated namespace anchors"
+    grep -F -- "netns_compose up --detach --wait" "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+      || fail "${smoke_script} does not start its helper anchors"
     grep -F -- "trap cleanup EXIT" "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
       || fail "${smoke_script} does not bind cleanup to every exit path"
     local trap_contract

@@ -100,11 +100,6 @@ def secret_mount(model: dict[str, Any], service_name: str) -> dict[str, Any]:
 
 def main() -> None:
     managed = render(COMPOSE, profiles=("workspace-runtime", "modelctl"))
-    custom_ports = render(
-        COMPOSE,
-        profiles=("workspace-runtime", "modelctl"),
-        environment={"ZHIXU_HTTP_PORT": "18080"},
-    )
     static = render(COMPOSE, STATIC_MODELS, profiles=("workspace-runtime",))
     prepared = render(
         COMPOSE,
@@ -117,14 +112,9 @@ def main() -> None:
         },
     )
     expect_valid(managed)
-    expect_valid(custom_ports)
     expect_valid(static, mode="static")
     expect_valid(static, mode="legacy")
     expect_valid(prepared, mode="prepared")
-    if int(managed["services"]["app"]["ports"][0]["published"]) != 8080:
-        fail("default Web ingress is not fixed to 127.0.0.1:8080")
-    if int(custom_ports["services"]["app"]["ports"][0]["published"]) != 18080:
-        fail("ZHIXU_HTTP_PORT did not select the fixed Web ingress")
     if managed["services"]["postgres"]["ports"][0].get("published") not in (None, 0, "0"):
         fail("Workspace-control PostgreSQL ingress must use a random loopback port")
 
@@ -188,12 +178,6 @@ def main() -> None:
             managed,
             lambda model, name=relay_name: model["services"][name].update(restart="no"),
         )
-    expect_invalid(
-        "proxy without auto-restart",
-        managed,
-        lambda model: model["services"]["proxy"].update(restart="no"),
-    )
-
     expect_invalid("external secret volume", managed, lambda model: model["volumes"]["zhixu-model-secrets"].update(external=True))
     expect_invalid("writable app key", managed, lambda model: secret_mount(model, "app").update(read_only=False))
     expect_invalid(
@@ -246,19 +230,41 @@ def main() -> None:
         ),
     )
     expect_invalid(
-        "missing host gateway",
+        "app publishes ingress",
         managed,
-        lambda model: model["services"]["worker"].update(extra_hosts=[]),
+        lambda model: model["services"]["app"].update(ports=[]),
     )
     expect_invalid(
-        "public ingress",
+        "app namespace owner drift",
         managed,
-        lambda model: model["services"]["app"]["ports"][0].update(host_ip="0.0.0.0"),
+        lambda model: model["services"]["app"].update(network_mode="service:app"),
     )
     expect_invalid(
-        "automatic Web ingress",
+        "worker namespace owner drift",
         managed,
-        lambda model: model["services"]["app"]["ports"][0].update(published="0"),
+        lambda model: model["services"]["worker"].update(network_mode="container:zhixu-app-netns"),
+    )
+    expect_invalid(
+        "app bypasses anchor ingress health",
+        managed,
+        lambda model: model["services"]["app"]["healthcheck"].update(
+            test=["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/readyz"]
+        ),
+    )
+    expect_invalid(
+        "main network is project owned",
+        managed,
+        lambda model: model["networks"]["default"].update(external=False),
+    )
+    expect_invalid(
+        "main network name drift",
+        managed,
+        lambda model: model["networks"]["default"].update(name="zhixu_default"),
+    )
+    expect_invalid(
+        "legacy proxy remains in main project",
+        managed,
+        lambda model: model["services"].update(proxy={}),
     )
     expect_invalid(
         "static mode missing identity field",

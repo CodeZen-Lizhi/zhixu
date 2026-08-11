@@ -29,7 +29,7 @@ FROM scratch AS workspace-control-bundle
 COPY --from=workspace-control-build /host/zhixu-workspacectl /zhixu-workspacectl
 
 FROM alpine:3.22 AS runtime
-RUN apk add --no-cache ca-certificates git iproute2 iptables socat \
+RUN apk add --no-cache ca-certificates git iproute2 iptables socat util-linux \
   && addgroup -S -g 10001 zhixu \
   && adduser -S -D -H -u 10001 -G zhixu zhixu
 WORKDIR /app
@@ -41,6 +41,8 @@ COPY --from=go-build /out/zhixu-runtime-wait /app/zhixu-runtime-wait
 COPY --from=go-build /out/zhixu-workspace-probe /app/zhixu-workspace-probe
 COPY --from=web-build /src/web/dist /app/web
 COPY --chmod=0755 deploy/loopback-firewall.sh /app/loopback-firewall.sh
+COPY --chmod=0755 deploy/netns-ingress.sh /app/netns-ingress.sh
+COPY deploy/anchor-health /app/anchor-health
 COPY --chmod=0755 deploy/model-secrets-init.sh /app/model-secrets-init.sh
 USER 10001:10001
 ENV ZHIXU_HTTP_ADDR=0.0.0.0:8080 \

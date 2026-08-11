@@ -23,7 +23,9 @@
 - 明文 Bootstrap、Session 与 API Token 不进入数据库、日志、错误响应或 Token 列表。API Token 明文只在 `POST /auth/api-tokens` 的创建响应中出现一次。
 - `POST /auth/sessions`、`POST /auth/session/rotate`、`DELETE /auth/session` 与 `DELETE /auth/api-tokens/{token_id}` 不声明 `requestBody`；固定长度或 chunked 的非空 body 都必须在签发、轮换或撤销前以 `400 AUTH_REQUEST_INVALID` 拒绝，OpenAPI 同步声明 `Problem`。
 - Repository 必须在单条数据库语句中把未撤销且未过期的匹配摘要认证为主体并更新时间戳；损坏或非 canonical 的 Scope JSON 必须 fail closed。
-- `disabled` 与 `Secure=false` 都只允许 development 的 API 进程 loopback 监听。官方 Compose 用同网络命名空间的非特权本地转发器发布 host-loopback TCP 端口；一次性 firewall sidecar 只允许 Docker bridge gateway 与 loopback，拒绝其他 bridge peer。不得用环境变量声明替代监听地址、最终端口模型或运行时隔离验证。
+- `disabled` 与 `Secure=false` 都只允许 development 的 API 进程 loopback 监听。官方 Compose 由无 Workspace 的
+  `zhixu-app-netns` anchor 发布 host-loopback TCP 端口；anchor 每次启动先以 `NET_ADMIN` 安装只允许 Docker bridge gateway 与
+  loopback 的 peer firewall，再仅以 `SETUID`/`SETGID` 完成降权，成为非特权零 capability 长期进程。不得用环境变量声明替代监听地址、最终端口模型或运行时隔离验证。
 - 认证表缺失、权限被收回或探针超时必须让 `/readyz` 返回 `503 AUTH_DEPENDENCY_UNAVAILABLE`，且系统状态 `auth.status=unavailable`；响应不泄漏底层数据库细节。
 
 ### 4. Validation & Error Matrix
@@ -36,7 +38,7 @@
 | 无 `requestBody` 的凭据状态变更端点收到固定长度或 chunked 非空 body | `400 AUTH_REQUEST_INVALID`，不得签发、轮换或撤销凭据 |
 | 过期、撤销、Scope JSON 损坏或并发撤销后的凭据 | fail closed，后续请求不得获得 Principal |
 | `required` 缺 Bootstrap、`disabled` 携带 Bootstrap、生产 insecure Cookie/Origin | API 启动前拒绝 |
-| disabled/insecure Cookie 的 API 非 loopback 监听、host networking、端口缺 host IP、为 `0.0.0.0` 或非 loopback、proxy 缺少 bridge peer 防火墙 | 配置校验或 `compose-auth-check` 在 `compose up` 前拒绝 |
+| disabled/insecure Cookie 的 API 非 loopback 监听、host networking、端口缺 host IP、为 `0.0.0.0` 或非 loopback、anchor 缺少 bridge peer firewall/运行时降权 | 配置校验或 `compose-auth-check` 在 `compose up` 前拒绝 |
 | `auth.session` / `auth.api_token` 缺失、不可读或认证探针超时 | readiness `503 AUTH_DEPENDENCY_UNAVAILABLE`；系统状态标记 auth unavailable |
 
 ### 5. Good / Base / Bad Cases
@@ -49,7 +51,7 @@
 
 - `internal/auth` 的 domain/application/HTTP 单测必须覆盖 Cookie 属性、Bearer 优先级、重复 Header、Origin/CSRF、Scope 越权、过期/撤销、无 body 凭据变更端点的普通/chunked 请求体拒绝与明文不回显。
 - `internal/auth/adapter/postgres` 的真实 PostgreSQL `-race` 测试必须覆盖摘要落库、数据库时钟、原子 last-used、损坏 Scope、keyset cursor 与撤销/认证竞态。
-- `internal/platform/config` 与 `compose_contract_test.go` 必须覆盖 production 配置拒绝、loopback IPv4/IPv6 允许、disabled/insecure Cookie 的非 loopback、host-networking 或缺少 proxy 防火墙拒绝，以及 Secure Cookie 自托管端口允许。
+- `internal/platform/config` 与 `compose_contract_test.go` 必须覆盖 production 配置拒绝、loopback IPv4/IPv6 允许、disabled/insecure Cookie 的非 loopback、host-networking 或缺少 anchor firewall 拒绝、anchor 零 Workspace/secret/socket 与长期降权，以及 Secure Cookie 自托管端口允许。
 - `internal/auth/adapter/postgres` 与 `internal/app` 测试必须覆盖双认证表探针、探针错误不回显、`/readyz` 503 与系统状态 auth unavailable。
 - 发布前运行 `make auth-integration`（带 `ZHIXU_TEST_DATABASE_URL`）、`make compose-auth-smoke`（包含 host loopback 可达和 bridge peer 拒绝）、`make openapi-check`、全仓 `go test -race`/`go vet` 与前端 lint/typecheck/test/build。
 

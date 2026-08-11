@@ -5,6 +5,7 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/compose.netns.yml"
 readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly RAG_COMPOSE_FILE="${SCRIPT_DIR}/compose.rag-smoke.yml"
 readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
@@ -16,6 +17,12 @@ source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"
 
 STATE_DIR=""
 PROJECT_NAME=""
+NETNS_PROJECT_NAME=""
+NETNS_NETWORK_NAME=""
+APP_NETNS_CONTAINER=""
+WORKER_NETNS_CONTAINER=""
+MAIN_NETNS_OVERRIDE_FILE=""
+NETNS_OVERRIDE_FILE=""
 API_BASE_URL=""
 LAST_RESPONSE_FILE=""
 CANARY_COMPOSE_FILE=""
@@ -29,7 +36,12 @@ log() { printf '[compose-rag-smoke] %s\n' "$1"; }
 compose() {
   local -a compose_files=(-f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" -f "${RAG_COMPOSE_FILE}")
   [[ -z "${CANARY_COMPOSE_FILE}" ]] || compose_files+=(-f "${CANARY_COMPOSE_FILE}")
+  compose_files+=(-f "${MAIN_NETNS_OVERRIDE_FILE}")
   docker compose --project-name "${PROJECT_NAME}" "${compose_files[@]}" --env-file "${ENV_FILE}" "$@"
+}
+
+netns_compose() {
+  docker compose --project-name "${NETNS_PROJECT_NAME}" -f "${NETNS_COMPOSE_FILE}" -f "${NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
 }
 
 diagnose() {
@@ -63,7 +75,7 @@ cleanup() {
   local cleanup_exit=0
   trap - EXIT HUP INT TERM
   if [[ -n "${PROJECT_NAME}" ]]; then
-    cleanup_compose_smoke_project_images "${PROJECT_NAME}" || cleanup_exit=$?
+    cleanup_compose_smoke_project_images "${PROJECT_NAME}" "${NETNS_PROJECT_NAME}" || cleanup_exit=$?
   fi
   if [[ -n "${STATE_DIR}" ]]; then
     chmod -R u+rwX "${STATE_DIR}" >/dev/null 2>&1 || true
@@ -202,7 +214,7 @@ main() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   local run_id http_port workspace_root target_path evidence_token chat_canary canary_compose_file
-  run_id="$(random_hex 6)"; PROJECT_NAME="zhixu-rag-smoke-${run_id}"; http_port="$(allocate_port)"; POSTGRES_PORT="$(allocate_port)"
+  run_id="$(random_hex 6)"; PROJECT_NAME="zhixu-rag-smoke-${run_id}"; prepare_compose_smoke_netns; http_port="$(allocate_port)"; POSTGRES_PORT="$(allocate_port)"
   API_BASE_URL="http://127.0.0.1:${http_port}"; AUTH_ORIGIN="${API_BASE_URL}"; workspace_root="${STATE_DIR}/workspace"; target_path='docs/rag-smoke.md'
   evidence_token="durable-rag-${run_id}"; chat_canary="chat_${run_id}_$(random_hex 12)"
   canary_compose_file="${STATE_DIR}/compose.canary.yml"
@@ -236,6 +248,10 @@ YAML
   log 'validating and building disposable RAG Compose stack'
   compose config --quiet
   compose build --quiet
+  netns_compose config --quiet
+  netns_compose build --quiet
+  log 'starting isolated namespace anchors'
+  netns_compose up --detach --wait >/dev/null
   compose run --rm --no-deps --user root --entrypoint sh app -c 'chown -R 10001:10001 /workspace/project && chmod -R u+rwX /workspace/project' >/dev/null
   compose run --rm --no-deps --entrypoint sh app -c 'git -C /workspace/project init --initial-branch=main >/dev/null && git -C /workspace/project config user.name "ZHIXU RAG Smoke" && git -C /workspace/project config user.email "rag-smoke@example.invalid" && git -C /workspace/project add -- docs/rag-smoke.md && git -C /workspace/project commit -m base >/dev/null' >/dev/null
   compose up --detach --wait postgres >/dev/null
@@ -243,8 +259,6 @@ YAML
   compose run --rm --no-deps -T migrate >/dev/null
   compose up --detach --no-deps --wait app worker >/dev/null
   compose up --detach --no-deps --wait app-model-relay worker-model-relay >/dev/null
-  compose run --rm --no-deps -T firewall >/dev/null
-  compose up --detach --no-deps --wait proxy >/dev/null
   authenticate
 
   local payload base_hash proposal_id revision_id change_hash workflow_path search_payload citation_href

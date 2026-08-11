@@ -115,7 +115,7 @@ def main() -> None:
     )
     expect_invalid(
         "sidecar bind", granted,
-        lambda model: model["services"]["proxy"].update(
+        lambda model: model["services"]["app-model-relay"].update(
             volumes=[{"type": "bind", "source": "/tmp/extra", "target": "/tmp/extra"}]
         ),
     )
@@ -133,7 +133,7 @@ def main() -> None:
     )
     expect_invalid(
         "sidecar grant environment", granted,
-        lambda model: model["services"]["proxy"].setdefault("environment", {}).update(
+        lambda model: model["services"]["app-model-relay"].setdefault("environment", {}).update(
             ZHIXU_WORKSPACE_GRANTED_ID="workspace-contract-1"
         ),
     )

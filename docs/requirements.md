@@ -36,6 +36,7 @@
 - 切换遵循 validate → quiesce → revoke → prepare → verify → commit → activate；失败恢复上次成功选择，无法恢复则零 Active。
 - `down` 保留选择、数据库、模型密钥和宿主机文件；显式 `reset` 可删除项目卷与选择，但不得删除用户文件或 Git 历史。
 - 路径穿越、Root 外写入、端口占用、Git 缺失、数据库不可用和挂载权限错误必须 fail closed。
+- Docker 固定入口由独立稳定 namespace anchor 发布；主项目 app/worker/relay 只消费对应 anchor，且只有 app/worker 获得 exact Root bind。Docker UI 仅支持主项目 Restart project；helper 或 daemon 恢复失败必须显示 degraded，并可由 launcher 受控恢复。
 
 ### 10.2 Inbox 与资料导入
 
@@ -222,6 +223,8 @@
 ### 可用性与恢复
 
 - API、Worker、数据库、模型、索引和 Web 有独立 readiness；依赖降级不应扩大权限或产生假成功。
+- 从 ready 状态执行主 Docker Compose 项目 restart 必须在 60 秒内重新收敛为 ready；app/worker 与各自 relay 必须共享对应稳定 anchor 的 network namespace，host loopback 入口与 bridge peer 隔离保持有效。
+- helper/daemon 重启不承诺跨项目自动排序；anchor 缺失、停止或 namespace 分叉必须 fail closed 并显示 degraded，`./zhixu restart` 必须能在不删除数据卷、selection、grant 或宿主机 Workspace 的前提下恢复。
 - 支持 Worker crash、响应丢失、lease 过期、Provider 限流、索引失败和写回未知结果的恢复。
 - 定期执行备份恢复、数据库/文件/Git 一致性和索引切换演练。
 
@@ -278,7 +281,7 @@
 | AC-29 | Evaluation | 每类 AI 功能有固定数据集、指标和回归对比 |
 | AC-30 | Security | 路径穿越、Prompt Injection、SSRF 和 Secret 泄漏测试通过 |
 | AC-31 | Capacity | 在容量基线下检索和局部图谱达到性能目标 |
-| AC-32 | Deployment | Docker Compose 可启动 API、Worker、PostgreSQL 和依赖服务；daemon restart 时数据库启动竞态可自动收敛，`status` 显示全部关键容器并明确 ready/degraded |
+| AC-32 | Deployment | Docker Compose 可启动 API、Worker、PostgreSQL、稳定 namespace anchor 与依赖服务；主 `zhixu` 项目 Restart project 后在 60 秒内收敛，`status` 显示两个项目的关键容器并明确 ready/degraded；daemon/helper 恢复失败必须安全降级并由 launcher 恢复 |
 | AC-33 | Export | Smart Collection Markdown、领域 Metadata JSON 与 Workspace 附件 ZIP 均通过真实运行链路验收 |
 | AC-34 | Recovery | 数据库、Git 和文件状态不一致时进入只读恢复状态 |
 | AC-35 | Lifecycle | Document 和 Topic 的重命名、移动、拆分、合并、归档和删除均通过 Proposal |

@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"审查 loopback/firewall、exact bind、prepared candidate、down/reset 和 fail-closed 不变量。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"审查 anchor 每次恢复先装 firewall、长期进程降权和 bridge peer 拒绝。"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"审查 relay、managed/static 配置与 restart policy 未回退。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"审查真实 Engine smoke、权限、Secret、回滚和验证盲区。"}
+{"file":"docs/architecture/adr/0020-docker-direct-web-and-one-shot-workspace-control.md","reason":"审查新 ADR 对现行架构的兼容或明确 supersede 范围。"}
+{"file":".trellis/tasks/08-11-docker-project-restart-namespace/prd.md","reason":"逐项核对 AC-01 至 AC-13。"}
+{"file":".trellis/tasks/08-11-docker-project-restart-namespace/design.md","reason":"复核双项目依赖、旧拓扑迁移、anchor 重建与 down 顺序。"}
+{"file":".trellis/tasks/08-11-docker-project-restart-namespace/implement.md","reason":"确认实施顺序、验证命令、Go Review 和独立检查完成。"}
+{"file":".trellis/tasks/08-11-docker-project-restart-namespace/research/docker-project-restart-root-cause.md","reason":"对照真实复现证据，防止以命令 exit 0 代替 runtime ready。"}

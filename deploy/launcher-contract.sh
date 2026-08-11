@@ -8,6 +8,8 @@ STATE_DIR=""
 STATE_PARENT=""
 PORT_HOLDER_PID=""
 PORT_HOLDER_PORT=""
+READY_SERVER_PID=""
+READY_SERVER_PORT=""
 
 fail() {
   printf '[launcher-contract] failed: %s\n' "$1" >&2
@@ -15,14 +17,37 @@ fail() {
 }
 
 cleanup() {
+  if [[ -n "${READY_SERVER_PID}" ]]; then
+    kill -TERM "${READY_SERVER_PID}" 2>/dev/null || true
+    wait "${READY_SERVER_PID}" 2>/dev/null || true
+  fi
   if [[ -n "${PORT_HOLDER_PID}" ]]; then
     kill -TERM "${PORT_HOLDER_PID}" 2>/dev/null || true
     wait "${PORT_HOLDER_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${ZHIXU_FAKE_STATE_DIR:-}" && -f "${ZHIXU_FAKE_STATE_DIR}/netns-http-pid" ]]; then
+    kill -TERM "$(cat "${ZHIXU_FAKE_STATE_DIR}/netns-http-pid")" 2>/dev/null || true
+  fi
+  if [[ "${ZHIXU_KEEP_LAUNCHER_FIXTURE:-0}" == "1" ]]; then
+    printf '[launcher-contract] fixture retained: %s\n' "${STATE_DIR}" >&2
+    return
   fi
   if [[ -n "${STATE_DIR}" && -n "${STATE_PARENT}" && -d "${STATE_DIR}" \
     && "${STATE_DIR}" == "${STATE_PARENT}"/zhixu-launcher-contract.* ]]; then
     rm -rf -- "${STATE_DIR}"
   fi
+}
+
+start_ready_server() {
+  READY_SERVER_PORT="$(python3 - <<'PY'
+import socket
+
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.bind(("127.0.0.1", 0))
+print(listener.getsockname()[1])
+listener.close()
+PY
+)"
 }
 
 start_port_holder() {
@@ -61,6 +86,21 @@ stop_port_holder() {
 
 assert_log_contains() {
   grep -F -- "$1" "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "missing Docker invocation: $1"
+}
+
+assert_log_not_contains() {
+  if grep -F -- "$1" "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null; then
+    fail "unexpected Docker invocation: $1"
+  fi
+}
+
+assert_log_order() {
+  local first second third
+  first="$(grep -n -F -- "$1" "${ZHIXU_FAKE_DOCKER_LOG}" | head -n 1 | cut -d: -f1)"
+  second="$(grep -n -F -- "$2" "${ZHIXU_FAKE_DOCKER_LOG}" | head -n 1 | cut -d: -f1)"
+  third="$(grep -n -F -- "$3" "${ZHIXU_FAKE_DOCKER_LOG}" | tail -n 1 | cut -d: -f1)"
+  [[ -n "${first}" && -n "${second}" && -n "${third}" && "${first}" -lt "${second}" && "${second}" -lt "${third}" ]] \
+    || fail "Docker invocation order is invalid"
 }
 
 assert_control_log_contains() {
@@ -180,15 +220,20 @@ main() {
   STATE_DIR="$(mktemp -d "${STATE_PARENT}/zhixu-launcher-contract.XXXXXX")" || fail "could not allocate fixture"
   STATE_DIR="$(cd -- "${STATE_DIR}" && pwd -P)"
   trap cleanup EXIT INT TERM
-  mkdir -p "${STATE_DIR}/fixture/deploy" "${STATE_DIR}/bin" "${STATE_DIR}/workspace A/知识" "${STATE_DIR}/workspace B"
+  mkdir -p "${STATE_DIR}/fixture/deploy/anchor-health" "${STATE_DIR}/bin" "${STATE_DIR}/workspace A/知识" "${STATE_DIR}/workspace B"
   cp "${REPOSITORY_ROOT}/zhixu" "${STATE_DIR}/fixture/zhixu"
   cp "${REPOSITORY_ROOT}/.env.example" "${STATE_DIR}/fixture/.env.example"
   cp "${REPOSITORY_ROOT}/deploy/compose.yml" "${STATE_DIR}/fixture/deploy/compose.yml"
+  cp "${REPOSITORY_ROOT}/deploy/compose.netns.yml" "${STATE_DIR}/fixture/deploy/compose.netns.yml"
   cp "${REPOSITORY_ROOT}/deploy/compose.static-models.yml" "${STATE_DIR}/fixture/deploy/compose.static-models.yml"
   cp "${REPOSITORY_ROOT}/deploy/Dockerfile" "${STATE_DIR}/fixture/deploy/Dockerfile"
   cp "${REPOSITORY_ROOT}/deploy/compose_auth_check.py" "${STATE_DIR}/fixture/deploy/compose_auth_check.py"
   cp "${REPOSITORY_ROOT}/deploy/compose_runtime_check.py" "${STATE_DIR}/fixture/deploy/compose_runtime_check.py"
   cp "${REPOSITORY_ROOT}/deploy/compose_workspace_check.py" "${STATE_DIR}/fixture/deploy/compose_workspace_check.py"
+  cp "${REPOSITORY_ROOT}/deploy/compose_netns_check.py" "${STATE_DIR}/fixture/deploy/compose_netns_check.py"
+  cp "${REPOSITORY_ROOT}/deploy/netns-ingress.sh" "${STATE_DIR}/fixture/deploy/netns-ingress.sh"
+  cp "${REPOSITORY_ROOT}/deploy/loopback-firewall.sh" "${STATE_DIR}/fixture/deploy/loopback-firewall.sh"
+  cp "${REPOSITORY_ROOT}/deploy/anchor-health/index.html" "${STATE_DIR}/fixture/deploy/anchor-health/index.html"
 
   docker compose --profile workspace-runtime --profile modelctl --project-name zhixu \
     -f "${REPOSITORY_ROOT}/deploy/compose.yml" --env-file "${REPOSITORY_ROOT}/.env.example" \
@@ -196,14 +241,23 @@ main() {
   docker compose --profile workspace-runtime --project-name zhixu \
     -f "${REPOSITORY_ROOT}/deploy/compose.yml" -f "${REPOSITORY_ROOT}/deploy/compose.static-models.yml" \
     --env-file "${REPOSITORY_ROOT}/.env.example" config --format json >"${STATE_DIR}/compose-static.json"
+  docker compose --project-name zhixu-netns -f "${REPOSITORY_ROOT}/deploy/compose.netns.yml" \
+    --env-file "${REPOSITORY_ROOT}/.env.example" config --format json >"${STATE_DIR}/compose-netns.json"
 
   cp "${SCRIPT_DIR}/testdata/launcher-fake-docker.sh" "${STATE_DIR}/bin/docker"
+  cp "${SCRIPT_DIR}/testdata/launcher-fake-sleep.sh" "${STATE_DIR}/bin/sleep"
   chmod 0755 "${STATE_DIR}/bin/docker"
+  chmod 0755 "${STATE_DIR}/bin/sleep"
   export PATH="${STATE_DIR}/bin:${PATH}"
   export ZHIXU_FAKE_MANAGED_COMPOSE_MODEL="${STATE_DIR}/compose-managed.json"
   export ZHIXU_FAKE_STATIC_COMPOSE_MODEL="${STATE_DIR}/compose-static.json"
+  export ZHIXU_FAKE_NETNS_COMPOSE_MODEL="${STATE_DIR}/compose-netns.json"
   export ZHIXU_FAKE_DOCKER_LOG="${STATE_DIR}/docker.log"
   export ZHIXU_FAKE_WORKSPACECTL_LOG="${STATE_DIR}/workspacectl.log"
+  export ZHIXU_FAKE_STATE_DIR="${STATE_DIR}/fake-docker-state"
+  mkdir -p "${ZHIXU_FAKE_STATE_DIR}"
+  start_ready_server
+  export ZHIXU_HTTP_PORT="${READY_SERVER_PORT}"
   reset_logs
 
   local workspace_a="${STATE_DIR}/workspace A/知识"
@@ -219,9 +273,10 @@ main() {
   expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu up --workspace /"
   [[ ! -s "${ZHIXU_FAKE_DOCKER_LOG}" ]] || fail "dangerous Workspace validation invoked Docker"
 
-  local up_output workspace_a_id first_selection first_control_instance
+  local up_output workspace_a_id first_selection first_control_instance port_a port_b
+  port_a="${READY_SERVER_PORT}"
   up_output="$(cd "${STATE_DIR}/fixture" && ./zhixu up --workspace "${workspace_a}")"
-  grep -F -- "ready: http://127.0.0.1:8080/" <<<"${up_output}" >/dev/null || fail "first up did not print the fixed URL"
+  grep -F -- "ready: http://127.0.0.1:${READY_SERVER_PORT}/" <<<"${up_output}" >/dev/null || fail "first up did not print the fixed URL"
   [[ "${up_output}" != *"#"* ]] || fail "first up printed a URL fragment"
   [[ -d "${STATE_DIR}/fixture/.zhixu" ]] || fail "up did not create launcher state"
   [[ -f "${selection}" ]] || fail "up did not commit Workspace selection"
@@ -243,13 +298,15 @@ main() {
   first_selection="$(cat "${selection}")"
   first_control_instance="$(cat "${control_instance}")"
   assert_log_contains "buildx build --target workspace-control-bundle"
-  assert_log_contains "build model-settings-key-init migrate modelctl app worker app-model-relay worker-model-relay firewall proxy"
+  assert_log_contains "--project-name zhixu-netns"
+  assert_log_contains "build app-netns worker-netns"
+  assert_log_contains "build model-settings-key-init migrate modelctl app worker app-model-relay worker-model-relay"
   assert_log_contains "up --detach --wait postgres"
   assert_log_contains "run --rm --no-deps -T model-settings-key-init"
   assert_log_contains "run --rm --no-deps -T migrate"
   assert_log_contains "modelctl recover --stale"
   assert_log_contains "port postgres 5432"
-  assert_log_contains "ps --format json app worker proxy"
+  assert_log_contains "ps --format json postgres app worker app-model-relay worker-model-relay"
   assert_log_contains "ZHIXU_APP_RESTART_POLICY=on-failure ZHIXU_WORKER_RESTART_POLICY=on-failure"
   assert_control_log_contains "switch --workspace-root ${workspace_a} --idempotency-key present"
   assert_control_log_contains "--control-instance-id present"
@@ -269,17 +326,58 @@ main() {
     || fail "same-root desired operation changed the Workspace ID"
   [[ "$(cat "${control_instance}")" == "${first_control_instance}" ]] \
     || fail "same-root up changed the stable control instance identity"
+  assert_log_contains "up --detach --no-recreate --wait app-netns worker-netns"
+  assert_log_not_contains "--project-name zhixu-netns -f ${STATE_DIR}/fixture/deploy/compose.netns.yml --env-file ${STATE_DIR}/fixture/.env down"
+
+  reset_logs
+  export ZHIXU_FAKE_NETNS_BUILD_ID=v2
+  (cd "${STATE_DIR}/fixture" && ./zhixu up >/dev/null)
+  unset ZHIXU_FAKE_NETNS_BUILD_ID
+  [[ "$(cat "${ZHIXU_FAKE_STATE_DIR}/netns-app-image")" == "sha256:fake-app-v2" ]] \
+    || fail "anchor image drift did not recreate app-netns"
+  assert_log_contains "--project-name zhixu-netns -f ${STATE_DIR}/fixture/deploy/compose.netns.yml --env-file ${STATE_DIR}/fixture/.env down --remove-orphans"
+  [[ "$(json_field "${selection}" workspace_id)" == "${workspace_a_id}" ]] \
+    || fail "anchor image refresh changed the Workspace ID"
+
+  reset_logs
+  : >"${ZHIXU_FAKE_STATE_DIR}/netns-security-drift"
+  (cd "${STATE_DIR}/fixture" && ./zhixu up >/dev/null)
+  [[ ! -e "${ZHIXU_FAKE_STATE_DIR}/netns-security-drift" ]] \
+    || fail "anchor runtime permission drift was not rebuilt"
+  assert_log_contains "--project-name zhixu-netns -f ${STATE_DIR}/fixture/deploy/compose.netns.yml --env-file ${STATE_DIR}/fixture/.env down --remove-orphans"
+  [[ "$(json_field "${selection}" workspace_id)" == "${workspace_a_id}" ]] \
+    || fail "anchor security recovery changed the Workspace ID"
+
+  start_ready_server
+  port_b="${READY_SERVER_PORT}"
+  [[ "${port_b}" != "${port_a}" ]] || fail "port switch fixture reused port A"
+  reset_logs
+  export ZHIXU_HTTP_PORT="${port_b}"
+  up_output="$(cd "${STATE_DIR}/fixture" && ./zhixu up)"
+  grep -F -- "ready: http://127.0.0.1:${port_b}/" <<<"${up_output}" >/dev/null || fail "A to B did not publish B"
+  [[ "$(cat "${ZHIXU_FAKE_STATE_DIR}/netns-port")" == "${port_b}" ]] || fail "A to B retained the old anchor port"
+  assert_log_order "--profile workspace-runtime --profile modelctl down --remove-orphans" \
+    "--project-name zhixu-netns -f ${STATE_DIR}/fixture/deploy/compose.netns.yml --env-file ${STATE_DIR}/fixture/.env down --remove-orphans" \
+    "up --detach --wait app-netns worker-netns"
+
+  reset_logs
+  READY_SERVER_PORT="${port_a}"
+  export ZHIXU_HTTP_PORT="${port_a}"
+  up_output="$(cd "${STATE_DIR}/fixture" && ./zhixu up)"
+  grep -F -- "ready: http://127.0.0.1:${port_a}/" <<<"${up_output}" >/dev/null || fail "B to A did not restore A"
+  [[ "$(cat "${ZHIXU_FAKE_STATE_DIR}/netns-port")" == "${port_a}" ]] || fail "B to A retained port B"
 
   reset_logs
   start_port_holder
   export ZHIXU_HTTP_PORT="${PORT_HOLDER_PORT}"
-  export ZHIXU_FAKE_APP_ENDPOINT=unavailable
   expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu up"
-  unset ZHIXU_HTTP_PORT ZHIXU_FAKE_APP_ENDPOINT
   stop_port_holder
+  export ZHIXU_HTTP_PORT="${port_a}"
   [[ ! -s "${ZHIXU_FAKE_WORKSPACECTL_LOG}" ]] || fail "occupied Web port still invoked workspacectl"
   [[ "$(json_field "${selection}" workspace_id)" == "${workspace_a_id}" ]] \
     || fail "occupied Web port changed the saved selection"
+  [[ "$(cat "${ZHIXU_FAKE_STATE_DIR}/netns-port")" == "${port_a}" ]] || fail "occupied B tore down the working A anchor"
+  assert_log_not_contains "--project-name zhixu-netns -f ${STATE_DIR}/fixture/deploy/compose.netns.yml --env-file ${STATE_DIR}/fixture/.env down"
 
   reset_logs
   export ZHIXU_FAKE_WORKSPACECTL_WORKSPACE_ID="550e8400-e29b-41d4-a716-446655440099"
@@ -288,7 +386,7 @@ main() {
   [[ "$(json_field "${selection}" workspace_id)" == "${workspace_a_id}" ]] \
     || fail "mismatched desired-root result overwrote the saved selection"
   [[ ! -e "${grant}" ]] || fail "mismatched desired-root result left a grant active"
-  assert_log_contains "stop proxy app-model-relay worker-model-relay firewall app worker"
+  assert_log_contains "stop app-model-relay worker-model-relay app worker"
 
   reset_logs
   export ZHIXU_FAKE_WORKSPACECTL_INVALID_RESULT=1
@@ -358,13 +456,42 @@ main() {
   status_output="$(cd "${STATE_DIR}/fixture" && ./zhixu status)"
   grep -F -- "Runtime: ready" <<<"${status_output}" >/dev/null || fail "healthy status was not reported ready"
   assert_log_contains "ps --all"
-  assert_log_contains "ps --all --format json postgres app worker proxy app-model-relay worker-model-relay"
+  assert_log_contains "ps --all --format json postgres app worker app-model-relay worker-model-relay"
   reset_logs
   export ZHIXU_FAKE_STATUS_READY=0
   status_output="$(cd "${STATE_DIR}/fixture" && ./zhixu status)"
   unset ZHIXU_FAKE_STATUS_READY
   grep -F -- "Runtime: degraded" <<<"${status_output}" >/dev/null || fail "incomplete status was not reported degraded"
   grep -F -- "zhixu-app-model-relay-1 Exited" <<<"${status_output}" >/dev/null || fail "status hid exited model relay"
+
+  reset_logs
+  export ZHIXU_FAKE_POSTGRES_HEALTH=unhealthy
+  status_output="$(cd "${STATE_DIR}/fixture" && ./zhixu status)"
+  unset ZHIXU_FAKE_POSTGRES_HEALTH
+  grep -F -- "Runtime: degraded" <<<"${status_output}" >/dev/null \
+    || fail "unhealthy PostgreSQL was reported ready"
+
+  reset_logs
+  export ZHIXU_FAKE_NETNS_CONFIG_DRIFT=1
+  status_output="$(cd "${STATE_DIR}/fixture" && ./zhixu status)"
+  unset ZHIXU_FAKE_NETNS_CONFIG_DRIFT
+  grep -F -- "Runtime: degraded" <<<"${status_output}" >/dev/null \
+    || fail "anchor configuration drift was reported ready"
+
+  reset_logs
+  export ZHIXU_FAKE_NETNS_NETWORK_DRIFT=1
+  status_output="$(cd "${STATE_DIR}/fixture" && ./zhixu status)"
+  unset ZHIXU_FAKE_NETNS_NETWORK_DRIFT
+  grep -F -- "Runtime: degraded" <<<"${status_output}" >/dev/null \
+    || fail "namespace network drift was reported ready"
+
+  reset_logs
+  printf 'redirect\n' >"${ZHIXU_FAKE_STATE_DIR}/netns-http-mode"
+  status_output="$(cd "${STATE_DIR}/fixture" && ./zhixu status)"
+  rm -f "${ZHIXU_FAKE_STATE_DIR}/netns-http-mode"
+  grep -F -- "Runtime: degraded" <<<"${status_output}" >/dev/null \
+    || fail "redirecting readiness endpoint was reported ready"
+
   reset_logs
   (cd "${STATE_DIR}/fixture" && ./zhixu logs postgres >/dev/null)
   assert_log_contains "logs --follow --tail 200 postgres"
@@ -431,9 +558,21 @@ main() {
   [[ -f "${grant}" ]] || fail "up after down did not restore the grant"
 
   reset_logs
+  export ZHIXU_FAKE_NETNS_UNKNOWN_SERVICE=1
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu down"
+  unset ZHIXU_FAKE_NETNS_UNKNOWN_SERVICE
+  assert_log_not_contains "--project-name zhixu-netns -f ${STATE_DIR}/fixture/deploy/compose.netns.yml --env-file ${STATE_DIR}/fixture/.env down"
+  [[ -f "${selection}" && -f "${grant}" ]] || fail "foreign helper service changed local state"
+
+  reset_logs
   expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu reset </dev/null"
   [[ ! -s "${ZHIXU_FAKE_DOCKER_LOG}" ]] || fail "unconfirmed reset invoked Docker"
   [[ -f "${selection}" && -f "${grant}" ]] || fail "unconfirmed reset changed local state"
+  export ZHIXU_FAKE_VOLUME_API_EXIT=55
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu reset --confirm DELETE"
+  unset ZHIXU_FAKE_VOLUME_API_EXIT
+  [[ -f "${selection}" && -f "${grant}" ]] || fail "failed volume validation cleared local recovery state"
+  reset_logs
   (cd "${STATE_DIR}/fixture" && ./zhixu reset --confirm DELETE >/dev/null)
   assert_log_contains "down --volumes --remove-orphans"
   [[ ! -e "${selection}" && ! -e "${grant}" ]] || fail "confirmed reset retained selection or grant"

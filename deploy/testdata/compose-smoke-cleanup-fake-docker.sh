@@ -6,7 +6,7 @@ printf '%s\n' "$*" >>"${ZHIXU_FAKE_DOCKER_LOG}"
 
 arguments=" $* "
 case "${arguments}" in
-  *" compose "*" down --volumes --remove-orphans --rmi local "*)
+  *" compose "*" down --volumes --remove-orphans --rmi local "*|*" compose "*" down --remove-orphans --rmi local "*)
     [[ "${ZHIXU_FAKE_COMPOSE_DOWN_FAIL:-0}" != "1" ]] || exit 19
     ;;
   *" image ls --quiet --filter label=com.docker.compose.project="*)

@@ -152,23 +152,26 @@ if "config" in sys.argv and "--format" in sys.argv:
     non_api_secret_target = os.environ.get("COMPOSE_CONTRACT_API_SECRET_TARGET", "")
     if non_api_secret_target in non_api_environments:
         non_api_environments[non_api_secret_target]["ZHIXU_REVIEW_QUESTION_REF_KEY"] = os.environ["ZHIXU_REVIEW_QUESTION_REF_KEY"]
+    app = {
+        "environment": app_environment,
+        "network_mode": os.environ.get("COMPOSE_CONTRACT_APP_NETWORK_MODE", "container:zhixu-app-netns"),
+    }
+    if os.environ.get("COMPOSE_CONTRACT_APP_PORT") == "1":
+        app["ports"] = [{"host_ip": "127.0.0.1", "protocol": "tcp"}]
     json.dump({
-		"services": {
-			"app": {"environment": app_environment, "ports": [{"host_ip": os.environ.get("COMPOSE_CONTRACT_HOST_IP", "127.0.0.1"), "protocol": "tcp"}], "network_mode": os.environ.get("COMPOSE_CONTRACT_NETWORK_MODE", "")},
-			"firewall": {
-				"network_mode": os.environ.get("COMPOSE_CONTRACT_FIREWALL_NETWORK_MODE", "service:app"),
-				"entrypoint": [os.environ.get("COMPOSE_CONTRACT_FIREWALL_ENTRYPOINT", "/app/loopback-firewall.sh")],
-				"user": os.environ.get("COMPOSE_CONTRACT_FIREWALL_USER", "0:0"),
-				"cap_add": [os.environ.get("COMPOSE_CONTRACT_FIREWALL_CAPABILITY", "NET_ADMIN")],
-				"depends_on": {} if os.environ.get("COMPOSE_CONTRACT_FIREWALL_DEPENDS_ON") == "none" else {"app": {"condition": os.environ.get("COMPOSE_CONTRACT_FIREWALL_DEPENDENCY_CONDITION", "service_started")}},
-			},
-			"proxy": {
-				"network_mode": os.environ.get("COMPOSE_CONTRACT_PROXY_NETWORK_MODE", "service:app"),
-				"user": os.environ.get("COMPOSE_CONTRACT_PROXY_USER", "10001:10001"),
-				"depends_on": {} if os.environ.get("COMPOSE_CONTRACT_PROXY_DEPENDS_ON") == "none" else {"firewall": {"condition": os.environ.get("COMPOSE_CONTRACT_PROXY_DEPENDENCY_CONDITION", "service_completed_successfully")}},
-			},
-		    "migrate": {"environment": non_api_environments["migrate"]},
-		    "worker": {"environment": non_api_environments["worker"]},
+        "services": {
+            "app": app,
+            "app-model-relay": {
+                "network_mode": os.environ.get("COMPOSE_CONTRACT_APP_RELAY_NETWORK_MODE", "container:zhixu-app-netns"),
+            },
+            "migrate": {"environment": non_api_environments["migrate"]},
+            "worker": {
+                "environment": non_api_environments["worker"],
+                "network_mode": os.environ.get("COMPOSE_CONTRACT_WORKER_NETWORK_MODE", "container:zhixu-worker-netns"),
+            },
+            "worker-model-relay": {
+                "network_mode": os.environ.get("COMPOSE_CONTRACT_WORKER_RELAY_NETWORK_MODE", "container:zhixu-worker-netns"),
+            },
         }
     }, sys.stdout)
 `
@@ -209,46 +212,31 @@ if "config" in sys.argv and "--format" in sys.argv:
 		"Worker Review question-reference key leak": {overrides: map[string]string{
 			"COMPOSE_CONTRACT_API_SECRET_TARGET": "worker",
 		}},
-		"disabled public host binding": {overrides: map[string]string{
-			"COMPOSE_CONTRACT_HOST_IP": "0.0.0.0",
+		"disabled independent app port": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_APP_PORT": "1",
 		}},
-		"insecure required public host binding": {overrides: map[string]string{
+		"insecure required independent app port": {overrides: map[string]string{
 			"ZHIXU_AUTH_MODE":            string(AuthModeRequired),
 			"ZHIXU_AUTH_BOOTSTRAP_TOKEN": composeContractBootstrap,
-			"COMPOSE_CONTRACT_HOST_IP":   "0.0.0.0",
+			"COMPOSE_CONTRACT_APP_PORT":  "1",
 		}},
-		"secure required public host binding": {overrides: map[string]string{
+		"secure required independent app port": {overrides: map[string]string{
 			"ZHIXU_AUTH_MODE":            string(AuthModeRequired),
 			"ZHIXU_AUTH_BOOTSTRAP_TOKEN": composeContractBootstrap,
 			"ZHIXU_AUTH_SECURE_COOKIE":   "true",
-			"COMPOSE_CONTRACT_HOST_IP":   "0.0.0.0",
+			"COMPOSE_CONTRACT_APP_PORT":  "1",
 		}, wantSuccess: true, wantUp: true},
-		"disabled host networking": {overrides: map[string]string{
-			"COMPOSE_CONTRACT_NETWORK_MODE": "host",
+		"disabled app host networking": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_APP_NETWORK_MODE": "host",
 		}},
-		"disabled detached proxy": {overrides: map[string]string{
-			"COMPOSE_CONTRACT_PROXY_NETWORK_MODE": "bridge",
+		"disabled worker host networking": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_WORKER_NETWORK_MODE": "host",
 		}},
-		"disabled privileged proxy": {overrides: map[string]string{
-			"COMPOSE_CONTRACT_PROXY_USER": "0:0",
+		"disabled detached app namespace": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_APP_NETWORK_MODE": "bridge",
 		}},
-		"disabled firewall-free sidecar": {overrides: map[string]string{
-			"COMPOSE_CONTRACT_FIREWALL_CAPABILITY": "",
-		}},
-		"disabled unexpected firewall entrypoint": {overrides: map[string]string{
-			"COMPOSE_CONTRACT_FIREWALL_ENTRYPOINT": "/bin/true",
-		}},
-		"disabled firewall without app startup gate": {overrides: map[string]string{
-			"COMPOSE_CONTRACT_FIREWALL_DEPENDS_ON": "none",
-		}},
-		"disabled firewall wrong app startup gate": {overrides: map[string]string{
-			"COMPOSE_CONTRACT_FIREWALL_DEPENDENCY_CONDITION": "service_completed_successfully",
-		}},
-		"disabled proxy without firewall completion gate": {overrides: map[string]string{
-			"COMPOSE_CONTRACT_PROXY_DEPENDS_ON": "none",
-		}},
-		"disabled proxy wrong firewall completion gate": {overrides: map[string]string{
-			"COMPOSE_CONTRACT_PROXY_DEPENDENCY_CONDITION": "service_started",
+		"disabled app relay host networking": {overrides: map[string]string{
+			"COMPOSE_CONTRACT_APP_RELAY_NETWORK_MODE": "host",
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {

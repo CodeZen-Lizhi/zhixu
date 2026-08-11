@@ -5,6 +5,7 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/compose.netns.yml"
 readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly GO_IMAGE="${ZHIXU_COMPOSE_TOOL_SMOKE_GO_IMAGE:-golang:1.25.4-bookworm}"
@@ -13,6 +14,12 @@ source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"
 
 STATE_DIR=""
 PROJECT_NAME=""
+NETNS_PROJECT_NAME=""
+NETNS_NETWORK_NAME=""
+APP_NETNS_CONTAINER=""
+WORKER_NETNS_CONTAINER=""
+MAIN_NETNS_OVERRIDE_FILE=""
+NETNS_OVERRIDE_FILE=""
 
 log() {
   printf '[compose-tool-smoke] %s\n' "$1"
@@ -47,7 +54,11 @@ PY
 }
 
 compose() {
-  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
+  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
+}
+
+netns_compose() {
+  docker compose --project-name "${NETNS_PROJECT_NAME}" -f "${NETNS_COMPOSE_FILE}" -f "${NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
 }
 
 cleanup() {
@@ -55,7 +66,7 @@ cleanup() {
   local cleanup_exit=0
   trap - EXIT HUP INT TERM
   if [[ -n "${PROJECT_NAME}" ]]; then
-    cleanup_compose_smoke_project_images "${PROJECT_NAME}" || cleanup_exit=$?
+    cleanup_compose_smoke_project_images "${PROJECT_NAME}" "${NETNS_PROJECT_NAME}" || cleanup_exit=$?
   fi
   if [[ -n "${STATE_DIR}" ]]; then
     chmod -R u+rwX "${STATE_DIR}" >/dev/null 2>&1 || true
@@ -85,6 +96,7 @@ main() {
   local run_id database_url
   run_id="$(random_hex 6)"
   PROJECT_NAME="zhixu-tool-smoke-${run_id}"
+  prepare_compose_smoke_netns
   mkdir -p "${STATE_DIR}/workspace/project/docs"
   printf '# Compose Tool Smoke\n' >"${STATE_DIR}/workspace/project/docs/tool-smoke.md"
   chmod -R a+rwX "${STATE_DIR}/workspace"
@@ -108,6 +120,10 @@ main() {
   log "validating and building the disposable Compose stack"
   compose config --quiet
   compose build
+  netns_compose config --quiet
+  netns_compose build
+  log "starting isolated namespace anchors"
+  netns_compose up --detach --wait
   compose run --rm --no-deps --user root --entrypoint sh app -c \
     'chown -R 10001:10001 /workspace/project && chmod -R u+rwX /workspace/project'
   compose run --rm --no-deps --entrypoint sh app -c \
@@ -118,15 +134,13 @@ main() {
   compose run --rm --no-deps -T migrate
   compose up --detach --no-deps --wait app worker
   compose up --detach --no-deps --wait app-model-relay worker-model-relay
-  compose run --rm --no-deps -T firewall
-  compose up --detach --no-deps --wait proxy
   compose exec -T app wget -q -O /dev/null http://127.0.0.1:8080/readyz
   compose exec -T worker wget -q -O /dev/null http://127.0.0.1:8081/readyz
 
   database_url="postgres://${ZHIXU_POSTGRES_USER}:${ZHIXU_POSTGRES_PASSWORD}@postgres:5432/${ZHIXU_POSTGRES_DB}?sslmode=disable"
   log "executing a real persisted Tool Workflow through River on the Compose network"
   docker run --rm \
-    --network "${PROJECT_NAME}_default" \
+    --network "${NETNS_NETWORK_NAME}" \
     --volume "${REPOSITORY_ROOT}:/src:ro" \
     --volume "${STATE_DIR}/workspace:/workspace:ro" \
     --workdir /src \
@@ -139,7 +153,7 @@ main() {
 
   log "executing Safe Writeback fault recovery and Tool audit smoke"
   docker run --rm \
-    --network "${PROJECT_NAME}_default" \
+    --network "${NETNS_NETWORK_NAME}" \
     --volume "${REPOSITORY_ROOT}:/src:ro" \
     --workdir /src \
     --env "ZHIXU_TEST_DATABASE_URL=${database_url}" \

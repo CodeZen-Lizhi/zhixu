@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 readonly CONFIRMATION="DELETE_UNUSED_ZHIXU_SMOKE_IMAGES"
-readonly PROJECT_RE='^zhixu-(auth|rag|search|tool)-smoke-[0-9a-f]{12}$'
+readonly PROJECT_RE='^zhixu-(auth|rag|search|tool)-smoke-[0-9a-f]{12}(-netns)?$'
 readonly IMAGE_ID_RE='^sha256:[0-9a-f]{64}$'
 readonly IMAGE_INSPECT_FORMAT='{{.Id}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}'
 readonly -a BUILD_SERVICES=(
@@ -11,11 +11,22 @@ readonly -a BUILD_SERVICES=(
   app-model-relay
   worker-model-relay
   migrate
-  firewall
-  proxy
+  app-netns
+  worker-netns
   worker
   app
 )
+
+project_service_pair_is_allowed() {
+  local project_name=$1
+  local service_name=$2
+
+  if [[ "${project_name}" == *-netns ]]; then
+    [[ "${service_name}" == "app-netns" || "${service_name}" == "worker-netns" ]]
+    return
+  fi
+  [[ "${service_name}" != "app-netns" && "${service_name}" != "worker-netns" ]]
+}
 
 APPLY=0
 CONFIRMED=""
@@ -86,6 +97,7 @@ parse_target_repository() {
     [[ "${repository}" == *"${suffix}" ]] || continue
     project_name="${repository%"${suffix}"}"
     [[ "${project_name}" =~ ${PROJECT_RE} ]] || continue
+    project_service_pair_is_allowed "${project_name}" "${service_name}" || continue
     TARGET_PROJECT="${project_name}"
     TARGET_SERVICE="${service_name}"
     return 0
