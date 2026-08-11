@@ -89,3 +89,35 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 55: 模型运行时热切换与 Gin 路由迁移
+
+**Date**: 2026-08-11
+**Task**: 模型运行时热切换与 Gin 路由迁移
+**Branch**: `dev`
+
+### Summary
+
+实现 API/Worker 进程内模型 generation 热切换、持久激活状态机、Workflow/Retrieval 版本绑定和保存并应用界面，并将 HTTP 路由统一迁移到 Gin。
+
+### Main Changes
+
+- 模型配置保存后可由 API 与 Worker 原地预检、切换并收敛，无需重启容器。
+- Workflow、检索与重建任务按持久 revision/provenance 获取对应 generation，保护在途任务。
+- HTTP 路由迁移到 Gin，并同步认证、OpenAPI、前端状态与运维文档。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9bb5b939d84fe52993a549216a36e6de831c2f71` | (see git log) |
+
+### Testing
+
+- [OK] Go race/vet、真实 PostgreSQL 迁移与仓储集成、OpenAPI、前端 lint/typecheck/build 均通过。
+- [OK] 隔离 Compose 热切换烟测通过，API/Worker 容器 ID、StartedAt 与 RestartCount 保持不变。
+
+### Status
+
+[OK] **Completed**
