@@ -24,6 +24,7 @@ import (
 	gitsynchttp "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/http"
 	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
 	healthhttp "github.com/CodeZen-Lizhi/zhixu/internal/health/http"
+	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	ingestionhttp "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/http"
 	knowledgehttp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/http"
 	memoryhttp "github.com/CodeZen-Lizhi/zhixu/internal/memory/http"
@@ -37,7 +38,7 @@ import (
 	learningpathhttp "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/http"
 	workflowhttp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/http"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 type requestIDKey struct{}
@@ -97,7 +98,7 @@ type Dependencies struct {
 
 // NewRouter builds the API and static-resource boundary. Domain modules are
 // intentionally absent from M1; later milestones add them behind app seams.
-func NewRouter(deps Dependencies) http.Handler {
+func NewRouter(deps Dependencies) *gin.Engine {
 	if deps.PingTimeout <= 0 {
 		deps.PingTimeout = 2 * time.Second
 	}
@@ -113,16 +114,30 @@ func NewRouter(deps Dependencies) http.Handler {
 	if deps.Candidate == nil {
 		deps.Candidate = graphhttp.NewCandidateHandler(nil, 0)
 	}
-	router := chi.NewRouter()
+	router := gin.New()
+	router.RedirectTrailingSlash = false
+	router.RedirectFixedPath = false
+	router.HandleMethodNotAllowed = true
+	router.RemoveExtraSlash = false
+	router.UseRawPath = true
+	router.UseEscapedPath = false
+	router.UnescapePathValues = false
+	router.ContextWithFallback = false
+	router.ForwardedByClientIP = false
+	router.RemoteIPHeaders = nil
+	router.TrustedPlatform = ""
+	if err := router.SetTrustedProxies(nil); err != nil {
+		panic(fmt.Errorf("configure Gin trusted proxies: %w", err))
+	}
 	router.Use(modelSettingsNoStoreMiddleware)
 	router.Use(requestIDMiddleware)
 	router.Use(requestTraceMiddleware(deps.Tracer))
 	router.Use(requestLogMiddleware(deps.Logger))
 	router.Use(recoverPanicMiddleware(deps.Logger))
-	router.Get("/livez", func(w http.ResponseWriter, _ *http.Request) {
+	router.GET("/livez", httpapi.GinHandler(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
-	})
-	router.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	router.GET("/readyz", httpapi.GinHandler(func(w http.ResponseWriter, r *http.Request) {
 		if err := checkDatabase(r.Context(), deps); err != nil {
 			reason := readinessReason(err)
 			writeProblem(w, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", "服务尚未就绪", reason != "database_configuration_invalid", map[string]any{
@@ -153,62 +168,67 @@ func NewRouter(deps Dependencies) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-	})
+	}))
 	if deps.MetricsHandler != nil {
-		router.Method(http.MethodGet, "/metrics", deps.MetricsHandler)
+		router.GET("/metrics", gin.WrapH(deps.MetricsHandler))
 	}
-	router.Route("/api/v1", func(api chi.Router) {
-		api.Get("/system/status", func(w http.ResponseWriter, r *http.Request) {
-			handleSystemStatus(w, r, deps)
-		})
-		if deps.Auth != nil {
-			deps.Auth.OpenRoutes(api)
-			api.Group(func(protected chi.Router) {
-				protected.Use(deps.Auth.Middleware)
-				deps.Auth.ProtectedRoutes(protected)
-				registerDomainRoutes(protected, deps)
-			})
-		} else if deps.AuthRequired {
-			api.Post("/auth/sessions", authUnavailableHandler)
-			api.Group(func(protected chi.Router) {
-				protected.Use(authUnavailableMiddleware)
-				registerDomainRoutes(protected, deps)
-			})
-		} else {
-			registerDomainRoutes(api, deps)
+	api := router.Group("/api/v1")
+	api.GET("/system/status", httpapi.GinHandler(func(w http.ResponseWriter, r *http.Request) {
+		handleSystemStatus(w, r, deps)
+	}))
+	if deps.Auth != nil {
+		deps.Auth.OpenRoutes(api)
+		protected := api.Group("")
+		protected.Use(deps.Auth.Middleware)
+		deps.Auth.ProtectedRoutes(protected)
+		registerDomainRoutes(protected, deps)
+	} else if deps.AuthRequired {
+		api.POST("/auth/sessions", httpapi.GinHandler(authUnavailableHandler))
+		protected := api.Group("")
+		protected.Use(authUnavailableMiddleware)
+		registerDomainRoutes(protected, deps)
+	} else {
+		registerDomainRoutes(api, deps)
+	}
+	router.NoMethod(func(context *gin.Context) {
+		context.Header("Allow", "")
+		context.Writer.Header().Del("Allow")
+		writeProblem(context.Writer, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "请求方法不被支持", false, nil)
+		context.Abort()
+	})
+	router.NoRoute(func(context *gin.Context) {
+		if !supportedHTTPMethod(context.Request.Method) {
+			writeProblem(context.Writer, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "请求方法不被支持", false, nil)
+			context.Abort()
+			return
 		}
-		api.NotFound(func(w http.ResponseWriter, _ *http.Request) {
-			writeProblem(w, http.StatusNotFound, "NOT_FOUND", "请求的 API 资源不存在", false, nil)
-		})
-	})
-	router.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
-		writeProblem(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "请求方法不被支持", false, nil)
-	})
-	router.NotFound(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			writeProblem(w, http.StatusNotFound, "NOT_FOUND", "请求的 API 资源不存在", false, nil)
+		if strings.HasPrefix(context.Request.URL.Path, "/api/") {
+			writeProblem(context.Writer, http.StatusNotFound, "NOT_FOUND", "请求的 API 资源不存在", false, nil)
+			context.Abort()
 			return
 		}
 		if deps.Static != nil {
-			deps.Static.ServeHTTP(w, r)
+			deps.Static.ServeHTTP(context.Writer, context.Request)
+			context.Abort()
 			return
 		}
-		writeProblem(w, http.StatusNotFound, "WEB_ASSETS_UNAVAILABLE", "Web 静态资源不可用", false, nil)
+		writeProblem(context.Writer, http.StatusNotFound, "WEB_ASSETS_UNAVAILABLE", "Web 静态资源不可用", false, nil)
+		context.Abort()
 	})
 	return router
 }
 
-func modelSettingsNoStoreMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request != nil && (request.URL.Path == "/api/v1/settings/models" || request.URL.Path == "/api/v1/settings/models/test" ||
-			strings.Contains(request.URL.Path, "/git-remote")) {
-			writer.Header().Set("Cache-Control", "no-store")
-		}
-		next.ServeHTTP(writer, request)
-	})
+func modelSettingsNoStoreMiddleware(context *gin.Context) {
+	request := context.Request
+	if request != nil && (request.URL.Path == "/api/v1/settings/models" || request.URL.Path == "/api/v1/settings/models/test" ||
+		request.URL.Path == "/api/v1/settings/models/activations" ||
+		strings.Contains(request.URL.Path, "/git-remote")) {
+		context.Header("Cache-Control", "no-store")
+	}
+	context.Next()
 }
 
-func registerDomainRoutes(api chi.Router, deps Dependencies) {
+func registerDomainRoutes(api gin.IRouter, deps Dependencies) {
 	if deps.Workspace != nil {
 		deps.Workspace.Routes(api)
 	}
@@ -283,44 +303,53 @@ func authUnavailableHandler(w http.ResponseWriter, _ *http.Request) {
 	writeProblem(w, http.StatusServiceUnavailable, "AUTH_DEPENDENCY_UNAVAILABLE", "认证服务不可用", true, nil)
 }
 
-func authUnavailableMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		authUnavailableHandler(w, nil)
-	})
+func authUnavailableMiddleware(context *gin.Context) {
+	authUnavailableHandler(context.Writer, nil)
+	context.Abort()
 }
 
-func requestTraceMiddleware(tracer observability.Tracer) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if isOperationalPath(r.URL.Path) {
-				next.ServeHTTP(w, r)
-				return
+func requestTraceMiddleware(tracer observability.Tracer) gin.HandlerFunc {
+	return func(ginContext *gin.Context) {
+		request := ginContext.Request
+		if isOperationalPath(request.URL.Path) {
+			ginContext.Next()
+			return
+		}
+		ctx := request.Context()
+		if incoming := strings.TrimSpace(request.Header.Get("traceparent")); incoming != "" {
+			if decoded, err := observability.DecodeTraceMetadata(ctx, map[string]string{observability.TraceParentMetadataKey: incoming}); err == nil {
+				ctx = decoded
 			}
-			ctx := r.Context()
-			if incoming := strings.TrimSpace(r.Header.Get("traceparent")); incoming != "" {
-				if decoded, err := observability.DecodeTraceMetadata(ctx, map[string]string{observability.TraceParentMetadataKey: incoming}); err == nil {
-					ctx = decoded
+		}
+		ctx = observability.WithCorrelation(ctx, observability.Correlation{RequestID: requestID(ctx)})
+		traced, span, err := tracer.Start(ctx, "http.request")
+		if err == nil {
+			ctx = traced
+			defer span.End()
+			if trace, found := observability.TraceContextFromContext(ctx); found {
+				if traceParent, encodeErr := trace.TraceParent(); encodeErr == nil {
+					ginContext.Header("traceparent", traceParent)
 				}
 			}
-			ctx = observability.WithCorrelation(ctx, observability.Correlation{RequestID: requestID(ctx)})
-			traced, span, err := tracer.Start(ctx, "http.request")
-			if err == nil {
-				ctx = traced
-				defer span.End()
-				if trace, found := observability.TraceContextFromContext(ctx); found {
-					if traceParent, encodeErr := trace.TraceParent(); encodeErr == nil {
-						w.Header().Set("traceparent", traceParent)
-					}
-				}
-			}
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
+		}
+		ginContext.Request = request.WithContext(ctx)
+		ginContext.Next()
 	}
 }
 
 func isOperationalPath(path string) bool {
 	switch path {
 	case "/metrics", "/livez", "/readyz":
+		return true
+	default:
+		return false
+	}
+}
+
+func supportedHTTPMethod(method string) bool {
+	switch method {
+	case http.MethodConnect, http.MethodDelete, http.MethodGet, http.MethodHead, http.MethodOptions,
+		http.MethodPatch, http.MethodPost, http.MethodPut, http.MethodTrace, "QUERY":
 		return true
 	default:
 		return false
@@ -482,73 +511,76 @@ func readinessReason(err error) string {
 	return "database_ping_failed"
 }
 
-func requestIDMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-		if id == "" || len(id) > 128 {
-			id = newRequestID()
-		}
-		ctx := context.WithValue(r.Context(), requestIDKey{}, id)
-		w.Header().Set("X-Request-ID", id)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+func requestIDMiddleware(ginContext *gin.Context) {
+	request := ginContext.Request
+	id := strings.TrimSpace(request.Header.Get("X-Request-ID"))
+	if id == "" || len(id) > 128 {
+		id = newRequestID()
+	}
+	ctx := context.WithValue(request.Context(), requestIDKey{}, id)
+	ginContext.Header("X-Request-ID", id)
+	ginContext.Request = request.WithContext(ctx)
+	ginContext.Next()
 }
 
-type statusWriter struct {
-	http.ResponseWriter
-	status int
+type responseTracker struct {
+	gin.ResponseWriter
+	started bool
 }
 
-func (w *statusWriter) WriteHeader(status int) {
-	if w.status != 0 {
+func (writer *responseTracker) WriteHeader(status int) {
+	if writer.started {
 		return
 	}
-	w.status = status
-	w.ResponseWriter.WriteHeader(status)
+	writer.started = true
+	writer.ResponseWriter.WriteHeader(status)
 }
 
-func (w *statusWriter) Write(body []byte) (int, error) {
-	if w.status == 0 {
-		w.WriteHeader(http.StatusOK)
+func (writer *responseTracker) Write(body []byte) (int, error) {
+	if !writer.started {
+		writer.WriteHeader(http.StatusOK)
 	}
-	return w.ResponseWriter.Write(body)
+	return writer.ResponseWriter.Write(body)
 }
 
-func (w *statusWriter) Flush() {
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		if w.status == 0 {
-			w.WriteHeader(http.StatusOK)
-		}
-		flusher.Flush()
+func (writer *responseTracker) WriteString(body string) (int, error) {
+	if !writer.started {
+		writer.WriteHeader(http.StatusOK)
+	}
+	return writer.ResponseWriter.WriteString(body)
+}
+
+func (writer *responseTracker) Flush() {
+	if !writer.started {
+		writer.WriteHeader(http.StatusOK)
+	}
+	writer.ResponseWriter.Flush()
+}
+
+func (writer *responseTracker) Unwrap() http.ResponseWriter {
+	if unwrapper, ok := writer.ResponseWriter.(interface{ Unwrap() http.ResponseWriter }); ok {
+		return unwrapper.Unwrap()
+	}
+	return writer.ResponseWriter
+}
+
+func requestLogMiddleware(logger *slog.Logger) gin.HandlerFunc {
+	return func(ginContext *gin.Context) {
+		tracked := &responseTracker{ResponseWriter: ginContext.Writer}
+		ginContext.Writer = tracked
+		ginContext.Next()
+		request := ginContext.Request
+		logger.InfoContext(request.Context(), "http request completed", "request_id", requestID(request.Context()), "method", request.Method,
+			"http_route", requestRoutePattern(ginContext), "status", tracked.Status())
 	}
 }
 
-func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-func requestLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			wrapped := &statusWriter{ResponseWriter: w}
-			next.ServeHTTP(wrapped, r)
-			status := wrapped.status
-			if status == 0 {
-				status = http.StatusOK
-			}
-			logger.InfoContext(r.Context(), "http request completed", "request_id", requestID(r.Context()), "method", r.Method, "http_route", requestRoutePattern(r), "status", status)
-		})
-	}
-}
-
-// requestRoutePattern 只返回 chi 已匹配的路由模板，避免将客户端请求路径写入日志。
-func requestRoutePattern(request *http.Request) string {
-	if request == nil {
+// requestRoutePattern 只返回 Gin 已匹配的路由模板，避免将客户端请求路径写入日志。
+func requestRoutePattern(ginContext *gin.Context) string {
+	if ginContext == nil {
 		return ""
 	}
-	routeContext := chi.RouteContext(request.Context())
-	if routeContext == nil {
-		return ""
-	}
-	return routeContext.RoutePattern()
+	return httpapi.CanonicalRoutePattern(ginContext.FullPath())
 }
 
 func requestID(ctx context.Context) string {

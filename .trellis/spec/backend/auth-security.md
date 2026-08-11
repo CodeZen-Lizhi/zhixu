@@ -11,6 +11,8 @@
 
 - Bootstrap 交换：`POST /api/v1/auth/sessions`，唯一 `Authorization: Bearer <bootstrap>`，响应 `201`、Session Cookie 与 `{session_id, csrf_token, expires_at}`。
 - 受保护管理端点：`GET|DELETE /api/v1/auth/session`、`POST /api/v1/auth/session/rotate`、`POST|GET /api/v1/auth/api-tokens`、`DELETE /api/v1/auth/api-tokens/{token_id}`。
+- 模型设置 GET/PUT、连接测试与 activation 都显式映射 `ManageSystemSettings`；这些命令同时为 Session-only，
+  API Token 与仅有 `WriteKnowledge` 的 Session 均不得触发全局模型切换。
 - 持久化事实：`auth.session(token_hash, csrf_hash, scopes, expires_at, revoked_at)` 与 `auth.api_token(token_hash, scopes, expires_at, revoked_at)`；摘要为 64 位小写 SHA-256 十六进制串。
 - 配置入口：`ZHIXU_AUTH_MODE`、`ZHIXU_AUTH_BOOTSTRAP_TOKEN`、`ZHIXU_AUTH_SESSION_TTL`、`ZHIXU_AUTH_API_TOKEN_TTL`、`ZHIXU_AUTH_SECURE_COOKIE`、`ZHIXU_AUTH_ALLOWED_ORIGINS`。
 - 就绪依赖：`authpostgres.Repository.Check(context.Context)` 必须查询 `auth.session` 与 `auth.api_token`；`app.Dependencies.AuthCheck` 在 `/readyz` 与 `/api/v1/system/status` 复用该探针。
@@ -35,6 +37,7 @@
 | 缺失、重复或错误身份凭据 | `401 AUTH_UNAUTHORIZED`，不得泄漏主体是否存在 |
 | Cookie 不安全请求缺 Origin、Origin 不在白名单或缺 CSRF | `403 AUTH_CSRF_REJECTED` |
 | Bearer Scope 不足或 API Token 调用仅允许 Session 的凭据管理端点 | `403`，不得扩大 Scope 或把 Token 当浏览器 Session |
+| 仅有 `WriteKnowledge` 的 Session 或任意 API Token 调用模型 activation | `403`，不得落入通用 POST capability |
 | 无 `requestBody` 的凭据状态变更端点收到固定长度或 chunked 非空 body | `400 AUTH_REQUEST_INVALID`，不得签发、轮换或撤销凭据 |
 | 过期、撤销、Scope JSON 损坏或并发撤销后的凭据 | fail closed，后续请求不得获得 Principal |
 | `required` 缺 Bootstrap、`disabled` 携带 Bootstrap、生产 insecure Cookie/Origin | API 启动前拒绝 |
@@ -50,6 +53,8 @@
 ### 6. Tests Required
 
 - `internal/auth` 的 domain/application/HTTP 单测必须覆盖 Cookie 属性、Bearer 优先级、重复 Header、Origin/CSRF、Scope 越权、过期/撤销、无 body 凭据变更端点的普通/chunked 请求体拒绝与明文不回显。
+- 路由能力测试必须精确覆盖 `/api/v1/settings/models/activations -> ManageSystemSettings`，并回归仅有
+  `WriteKnowledge` 的主体不能越权；模型设置 HTTP 测试另行锁定 Session-only。
 - `internal/auth/adapter/postgres` 的真实 PostgreSQL `-race` 测试必须覆盖摘要落库、数据库时钟、原子 last-used、损坏 Scope、keyset cursor 与撤销/认证竞态。
 - `internal/platform/config` 与 `compose_contract_test.go` 必须覆盖 production 配置拒绝、loopback IPv4/IPv6 允许、disabled/insecure Cookie 的非 loopback、host-networking 或缺少 anchor firewall 拒绝、anchor 零 Workspace/secret/socket 与长期降权，以及 Secure Cookie 自托管端口允许。
 - `internal/auth/adapter/postgres` 与 `internal/app` 测试必须覆盖双认证表探针、探针错误不回显、`/readyz` 503 与系统状态 auth unavailable。
@@ -66,6 +71,9 @@ Correct: `/readyz` 与系统状态都通过同一个认证表探针，缺表、�
 
 Wrong: API Token 拥有 WRITE_KNOWLEDGE 就直接 Apply Knowledge。
 Correct: Capability 只允许到达业务命令；正式写入仍必须通过 Proposal、Approval 和一次性 Write Authorization。
+
+Wrong: 新增模型 activation POST 后沿用通用 WRITE_KNOWLEDGE 路由能力。
+Correct: activation 显式要求 MANAGE_SYSTEM_SETTINGS，并在业务 Handler 继续强制 Session-only、Origin 和 CSRF。
 
 Wrong: OpenAPI 不声明 requestBody 的凭据端点静默忽略 JSON body 后继续签发或撤销。
 Correct: 固定长度和 chunked 的非空 body 都在状态变更前稳定返回 `400 AUTH_REQUEST_INVALID`，并由 OpenAPI checker 锁定该契约。

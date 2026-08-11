@@ -16,7 +16,7 @@ import (
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -676,8 +676,8 @@ func TestHandleRelationIDsAreIndependentlyScoped(t *testing.T) {
 }
 
 func graphTestRouter(service Service, timeout time.Duration) http.Handler {
-	router := chi.NewRouter()
-	router.Route("/api/v1", NewHandler(service, timeout).Routes)
+	router := gin.New()
+	NewHandler(service, timeout).Routes(router.Group("/api/v1"))
 	return router
 }
 

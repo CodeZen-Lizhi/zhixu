@@ -103,9 +103,12 @@ func NewRepository(db DB, options ...Option) (*Repository, error) {
 }
 
 var (
-	_ application.RevisionStore = (*Repository)(nil)
-	_ application.RolloutStore  = (*Repository)(nil)
-	_ application.RuntimeStore  = (*Repository)(nil)
+	_ application.RevisionStore            = (*Repository)(nil)
+	_ application.RolloutStore             = (*Repository)(nil)
+	_ application.RuntimeStore             = (*Repository)(nil)
+	_ application.RuntimeAvailabilityStore = (*Repository)(nil)
+	_ application.ActivationStore          = (*Repository)(nil)
+	_ application.ParticipantStore         = (*Repository)(nil)
 )
 
 const stateColumns = `desired_revision,active_revision,rollout_id::text,target_revision,
@@ -155,7 +158,9 @@ func (state stateRecord) rollout() (domain.RolloutState, error) {
 			return domain.RolloutState{}, corrupt(errors.New("idle model settings rollout is invalid"))
 		}
 		return domain.RolloutState{Phase: phase, Version: state.version}, nil
-	case domain.RolloutPhaseValidating, domain.RolloutPhaseDraining, domain.RolloutPhaseApplying, domain.RolloutPhaseVerifying, domain.RolloutPhaseFailed:
+	case domain.RolloutPhasePreparing, domain.RolloutPhaseArming, domain.RolloutPhaseActivating,
+		domain.RolloutPhaseValidating, domain.RolloutPhaseDraining, domain.RolloutPhaseApplying,
+		domain.RolloutPhaseVerifying, domain.RolloutPhaseFailed:
 	default:
 		return domain.RolloutState{}, corrupt(errors.New("model settings rollout phase is invalid"))
 	}
@@ -174,11 +179,17 @@ func (state stateRecord) rollout() (domain.RolloutState, error) {
 		result.LeaseExpiresAt = state.leaseExpiresAt.Time.UTC()
 	}
 	if phase == domain.RolloutPhaseFailed {
-		if state.leaseExpiresAt.Valid || !state.lastErrorCode.Valid {
+		if state.leaseExpiresAt.Valid || !state.lastErrorCode.Valid || state.activeRevision != state.previousActive.Int64 {
 			return domain.RolloutState{}, corrupt(errors.New("failed model settings rollout is invalid"))
 		}
 	} else if !state.leaseExpiresAt.Valid || state.lastErrorCode.Valid {
 		return domain.RolloutState{}, corrupt(errors.New("active model settings rollout lease is invalid"))
+	}
+	if (phase == domain.RolloutPhasePreparing || phase == domain.RolloutPhaseArming) && state.activeRevision != state.previousActive.Int64 {
+		return domain.RolloutState{}, corrupt(errors.New("pre-commit model settings activation is invalid"))
+	}
+	if phase == domain.RolloutPhaseActivating && state.activeRevision != state.targetRevision.Int64 {
+		return domain.RolloutState{}, corrupt(errors.New("post-commit model settings activation is invalid"))
 	}
 	return result, nil
 }
@@ -212,6 +223,50 @@ func scanRuntime(row interface{ Scan(...any) error }) (domain.RuntimeRecord, err
 		return domain.RuntimeRecord{}, corrupt(errors.New("model settings runtime record is invalid"))
 	}
 	return result, nil
+}
+
+const participantColumns = `rollout_id::text,role,instance_id::text,target_revision,phase,
+heartbeat_at,last_error_code,last_error_retryable,version,prepared_at,activated_at,retired_at`
+
+func scanParticipant(row interface{ Scan(...any) error }) (domain.ParticipantRecord, error) {
+	var rolloutID, role, instanceID, phase string
+	var targetRevision, version int64
+	var heartbeatAt time.Time
+	var lastErrorCode sql.NullString
+	var errorRetryable bool
+	var preparedAt, activatedAt, retiredAt sql.NullTime
+	if err := row.Scan(
+		&rolloutID, &role, &instanceID, &targetRevision, &phase, &heartbeatAt,
+		&lastErrorCode, &errorRetryable, &version, &preparedAt, &activatedAt, &retiredAt,
+	); err != nil {
+		return domain.ParticipantRecord{}, err
+	}
+	parsedRolloutID, err := foundation.ParseID(rolloutID)
+	if err != nil {
+		return domain.ParticipantRecord{}, corrupt(errors.New("model settings participant rollout is invalid"))
+	}
+	parsedInstanceID, err := foundation.ParseID(instanceID)
+	if err != nil {
+		return domain.ParticipantRecord{}, corrupt(errors.New("model settings participant instance is invalid"))
+	}
+	record := domain.ParticipantRecord{
+		RolloutID: parsedRolloutID, Role: domain.RuntimeRole(role), InstanceID: parsedInstanceID,
+		TargetRevision: targetRevision, Phase: domain.ParticipantPhase(phase), HeartbeatAt: heartbeatAt.UTC(),
+		Version: version, LastErrorCode: lastErrorCode.String, ErrorRetryable: errorRetryable,
+	}
+	if preparedAt.Valid {
+		record.PreparedAt = preparedAt.Time.UTC()
+	}
+	if activatedAt.Valid {
+		record.ActivatedAt = activatedAt.Time.UTC()
+	}
+	if retiredAt.Valid {
+		record.RetiredAt = retiredAt.Time.UTC()
+	}
+	if !domain.ValidRuntimeRole(record.Role) || !domain.ValidParticipantPhase(record.Phase) || record.TargetRevision < 0 || record.Version <= 0 {
+		return domain.ParticipantRecord{}, corrupt(errors.New("model settings participant record is invalid"))
+	}
+	return record, nil
 }
 
 func databaseNow(ctx context.Context, queryer interface {
@@ -298,6 +353,26 @@ func runtimeConflict(cause error) error {
 
 func runtimeNotPrepared(cause error) error {
 	return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeRuntimeNotPrepared, false, cause)
+}
+
+func activationConflict(cause error) error {
+	return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeActivationConflict, false, cause)
+}
+
+func activationLeaseExpired(cause error) error {
+	return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeActivationLeaseExpired, false, cause)
+}
+
+func participantConflict(cause error) error {
+	return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeParticipantConflict, false, cause)
+}
+
+func runtimeOwnershipLost(cause error) error {
+	return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeRuntimeOwnershipLost, false, cause)
+}
+
+func runtimeNotReady(cause error) error {
+	return foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeRuntimeNotReady, true, cause)
 }
 
 func enqueuePaused(cause error) error {

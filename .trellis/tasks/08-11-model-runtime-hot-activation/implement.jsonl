@@ -1,0 +1,17 @@
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"模型设置 desired/active/applied、Secret、runtime ownership、Workflow Attempt 与现有 restart rollout 的主契约。"}
+{"file":".trellis/spec/backend/index.md","reason":"后端规范入口、Model Settings/Workflow/Database/Composition 适用范围与质量路由。"}
+{"file":".trellis/spec/backend/config-loading.md","reason":"managed/static 模式、revision 0、启动 loader 与旧 rollout 环境字段兼容边界。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Settings/Activation Session-only、Origin/CSRF、no-store 与 Secret 管理安全边界。"}
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"Artifact Workflow/ModelRun provenance 及 production wiring；实施需修复漏记 model settings revision。"}
+{"file":".trellis/spec/frontend/model-settings.md","reason":"Settings strict wire、desired/active/applied、Secret 生命周期和页面状态所有权。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"TanStack Query mutation、权威 refetch、polling、Abort 和 response-loss 恢复模式。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"OpenAPI 边界从 unknown 严格解码、稳定 union 和非法 wire fail-closed 要求。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"跨 Migration/Store/Application/HTTP/OpenAPI/Web/Composition 的完整数据流检查。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有 PostgreSQL/pgx/React Query/Provider Adapter 与 ADR-0019 自研边界。"}
+{"file":"docs/architecture/adr/0012-version-workflows-prompts-schemas.md","reason":"长运行 Workflow 版本冻结与旧版本继续执行的既有架构决定。"}
+{"file":"docs/architecture/adr/0019-mature-framework-first.md","reason":"RuntimeHost/状态机采用现有依赖和标准库时必须记录的成熟方案与自研例外门禁。"}
+{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/runtime-consumer-topology.md","reason":"API/Worker 全量消费拓扑、启动期 freeze 点、资源 Close 缺口和最窄 generation seam。"}
+{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/implementation-context.md","reason":"无截断汇总数据库状态机、Workflow Claim、Embedding/Index、RuntimeHost、HTTP/Web 与质量不变量，并指向完整原始资料。"}
+{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/apply-ux-contract.md","reason":"Save/Apply HTTP 与前端现状、strict decoder、轮询、Secret、冲突和主/次操作方案。"}
+{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/design-minimal-interface.md","reason":"RuntimeHost Run/Acquire、role payload、admission fence、错误模型和典型调用草图。"}
+{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/interface-options.md","reason":"动态 proxy、显式 lifecycle、generation host 与独立服务方案比较及推荐接口。"}

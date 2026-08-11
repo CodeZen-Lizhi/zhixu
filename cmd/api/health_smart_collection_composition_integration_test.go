@@ -31,7 +31,7 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowapp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -86,8 +86,8 @@ func TestAPIHealthSmartCollectionCompositionStartsAndRejectsStaleBinding(t *test
 	if !collectionHandler.Available() || !healthHandler.Available() {
 		t.Fatal("production collection/health handlers are unavailable")
 	}
-	router := chi.NewRouter()
-	router.Route("/api/v1", healthHandler.Routes)
+	router := gin.New()
+	healthHandler.Routes(router.Group("/api/v1"))
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
 

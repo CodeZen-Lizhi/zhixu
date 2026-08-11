@@ -6,6 +6,7 @@ import {
   decodeModelSettingsResponse,
   decodeModelSettingsTestResult,
   getModelSettings,
+  startModelSettingsActivation,
   testModelSettings,
   updateModelSettings,
   type UpdateModelSettingsInput,
@@ -31,6 +32,16 @@ const disabledEmbedding = {
   api_key_configured: false,
 } as const;
 
+const rolloutId = "018f5f9e-7b36-7c89-8abc-1234567890ab";
+const absentParticipant = {
+  present: false,
+  target_revision: null,
+  phase: null,
+  fresh: false,
+  last_error_code: null,
+  retryable: false,
+} as const;
+
 const disabledResponse = {
   desired_revision: 0,
   active_revision: 0,
@@ -40,7 +51,9 @@ const disabledResponse = {
     api: { applied_revision: 0, phase: "active", fresh: true },
     worker: { applied_revision: 0, phase: "active", fresh: true },
   },
-  rollout: { phase: "idle", target_revision: null, last_error_code: null, retryable: false },
+  rollout: { id: null, version: 0, phase: "idle", target_revision: null, last_error_code: null, retryable: false },
+  participants: { api: absentParticipant, worker: absentParticipant },
+  apply_required: false,
   restart_required: false,
   capabilities: { chat: "disabled", embedding: "disabled" },
 } as const;
@@ -74,7 +87,8 @@ const configuredResponse = {
     api: { applied_revision: 1, phase: "active", fresh: true },
     worker: { applied_revision: 1, phase: "active", fresh: true },
   },
-  restart_required: true,
+  apply_required: true,
+  restart_required: false,
   capabilities: { chat: "disabled", embedding: "disabled" },
 } as const;
 
@@ -128,6 +142,7 @@ describe("model settings API boundary", () => {
       activeRevision: 0,
       desiredSettings: { chat: { provider: "disabled" }, embedding: { provider: "disabled", dimensions: 0 } },
       runtime: { api: { appliedRevision: 0, phase: "active", fresh: true } },
+      applyRequired: false,
       restartRequired: false,
     });
 
@@ -138,11 +153,12 @@ describe("model settings API boundary", () => {
         chat: { provider: "openai-compatible", apiKeyConfigured: true },
         embedding: { provider: "ollama", dimensions: 768, apiKeyConfigured: false },
       },
-      restartRequired: true,
+      applyRequired: true,
+      restartRequired: false,
     });
     expect(decodeModelSettingsResponse({
       ...configuredResponse,
-      rollout: { phase: "failed", target_revision: 2, last_error_code: "MODEL_SETTINGS_ROLLOUT_PREPARE_FAILED", retryable: true },
+      rollout: { id: rolloutId, version: 4, phase: "failed", target_revision: 2, last_error_code: "MODEL_SETTINGS_ACTIVATION_PREPARE_FAILED", retryable: true },
     })).toMatchObject({ rollout: { phase: "failed", retryable: true } });
   });
 
@@ -161,7 +177,7 @@ describe("model settings API boundary", () => {
     expect(() => decodeModelSettingsResponse({ ...configuredResponse, active_revision: 3 })).toThrow(ModelSettingsApiError);
     expect(() => decodeModelSettingsResponse({
       ...configuredResponse,
-      rollout: { phase: "failed", target_revision: 2, last_error_code: null, retryable: true },
+      rollout: { id: rolloutId, version: 4, phase: "failed", target_revision: 2, last_error_code: null, retryable: true },
     })).toThrow(ModelSettingsApiError);
     expect(() => decodeModelSettingsResponse({
       ...disabledResponse,
@@ -299,6 +315,55 @@ describe("model settings API boundary", () => {
     });
     expect(JSON.stringify(window.localStorage)).not.toContain("secret-chat-key");
     expect(JSON.stringify(window.sessionStorage)).not.toContain("secret-chat-key");
+  });
+
+  it("POST activation 只发送 exact revision，并严格解码参与者进度", async () => {
+    const preparingResponse = {
+      ...configuredResponse,
+      rollout: { id: rolloutId, version: 1, phase: "preparing", target_revision: 2, last_error_code: null, retryable: false },
+      participants: {
+        api: { present: true, target_revision: 2, phase: "prepared", fresh: true, last_error_code: null, retryable: false },
+        worker: absentParticipant,
+      },
+    } as const;
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(preparingResponse, 202));
+
+    await expect(startModelSettingsActivation({ expectedRevision: 2 })).resolves.toMatchObject({
+      rollout: { id: rolloutId, phase: "preparing", targetRevision: 2 },
+      participants: { api: { present: true, phase: "prepared", fresh: true }, worker: { present: false } },
+    });
+
+    const call = vi.mocked(fetch).mock.calls[0];
+    expect(call?.[0]).toBe("/api/v1/settings/models/activations");
+    expect(call?.[1]).toMatchObject({ method: "POST", cache: "no-store" });
+    expect(callJsonBody(0)).toEqual({ expected_revision: 2 });
+    expect(JSON.stringify(callJsonBody(0))).not.toContain("secret-chat-key");
+    expect(JSON.stringify(callJsonBody(0))).not.toContain("models.example.test");
+
+    const withExtraField = { expectedRevision: 2, unexpected: true };
+    await expect(startModelSettingsActivation(withExtraField)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("Snapshot 对 apply_required、restart_required 和 participant shape fail closed", () => {
+    const missingApplyRequired = Object.fromEntries(Object.entries(disabledResponse).filter(([key]) => key !== "apply_required"));
+    const missingParticipants = Object.fromEntries(Object.entries(disabledResponse).filter(([key]) => key !== "participants"));
+    expect(() => decodeModelSettingsResponse(missingApplyRequired)).toThrow(ModelSettingsApiError);
+    expect(() => decodeModelSettingsResponse(missingParticipants)).toThrow(ModelSettingsApiError);
+    expect(() => decodeModelSettingsResponse({ ...disabledResponse, apply_required: true })).toThrow(ModelSettingsApiError);
+    expect(() => decodeModelSettingsResponse({ ...disabledResponse, restart_required: true })).toThrow(ModelSettingsApiError);
+    expect(() => decodeModelSettingsResponse({
+      ...disabledResponse,
+      participants: { ...disabledResponse.participants, api: { ...absentParticipant, unexpected: true } },
+    })).toThrow(ModelSettingsApiError);
+    expect(() => decodeModelSettingsResponse({
+      ...configuredResponse,
+      rollout: { id: rolloutId, version: 1, phase: "preparing", target_revision: 2, last_error_code: null, retryable: false },
+      participants: {
+        api: { present: true, target_revision: 2, phase: "failed", fresh: true, last_error_code: null, retryable: true },
+        worker: absentParticipant,
+      },
+    })).toThrow(ModelSettingsApiError);
   });
 
   it("成功响应不会因短 Secret 与普通响应文本重合而被误判为泄漏", async () => {

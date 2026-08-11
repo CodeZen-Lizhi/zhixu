@@ -114,6 +114,74 @@ go vet ./...
 
 并按影响范围补充迁移/集成、API Contract、E2E、Security、AI Eval、Docker Smoke 和恢复演练。`go.mod`、CI 和 Makefile 未创建前，不把具体 lint 工具、版本或命令参数当成既定事实。
 
+## Scenario: Model Runtime Hot Activation Quality Gate
+
+### 1. Scope / Trigger
+
+- 修改 Model Settings activation、RuntimeHost/generation、Workflow Claim/execution、Embedding acquisition、设置页状态、
+  migration `00079` 或 no-restart smoke 时，必须执行本门禁。
+
+### 2. Signatures
+
+- 后端定向门禁：受影响包 `go test -race -count=1 -timeout 60s`、`go vet`、`go mod tidy -diff`。
+- 协议门禁：真实 PostgreSQL activation/migration/Claim tests、`make openapi-check`、`make compose-check`。
+- 前端门禁：Settings API/Panel tests、lint、typecheck、build，以及 1440x900/390x844 Playwright。
+- 最终证据：`deploy/model-runtime-hot-activation-smoke.sh` 使用受控 loopback fixture 和随机 Compose project。
+
+### 3. Contracts
+
+- RuntimeHost 测试必须使用 `-race` 覆盖 gate/Acquire/Admit、candidate singleflight、同 revision repair、refcount、
+  historical rebuild、canonical revision 0、abort/Close exactly once 和取消；只测最终 active revision 不足以证明并发安全。
+- Workflow/Reindex 必须证明 `Admit -> durable Claim -> exact Acquire` 顺序，token/lease 延续到 binding 解析或 settlement；
+  gate 不能在 Claim 已提交但 heartbeat/lease 尚未建立时让任务阻塞或丢失 revision 0 generation。
+- PostgreSQL 测试必须覆盖 Repository 正路径与 raw SQL 负路径，锁定 DB-time freshness、owner/version CAS、单次 commit、
+  precommit abort、postcommit fail-forward 和 exact Attempt replay。
+- 浏览器只把 GET Snapshot 当权威事实，必须覆盖 Save-only、Save-and-Apply、202 polling、409、响应丢失、失败重试、
+  strict invalid response、Secret 清零和移动端无溢出。
+- 隔离 smoke 必须在成功 Apply、错误凭据失败并保留 previous、修正后再次 Apply 的同一次运行中记录 API/Worker
+  container id、StartedAt、RestartCount；前后 id/StartedAt 必须相同且 RestartCount 为 0。
+- smoke 的请求/响应、DOM、Storage、Playwright 输出和 API/Worker 日志必须扫描 Credential canary、Authorization、完整 Endpoint
+  与 instance id。cleanup 仅接受受限正则的随机 project，并删除该 project 的 container/volume/network/image exact references。
+- 不相关基线失败必须单独报告并证明目标文件无 diff；不得修改无关模块或把部分失败包装为全仓通过。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+| --- | --- |
+| race/stress 出现数据竞争、double close 或 admission 顺序漂移 | 门禁失败，不以普通单次 test 替代 |
+| candidate probe 失败 | smoke 证明 previous active/applied 与容器 identity 均不变 |
+| activation 期间 API/Worker ID、StartedAt 改变或 RestartCount 非 0 | no-restart 验收失败 |
+| `restart_required=true`、Secret canary 可观察或 unknown wire 被接受 | contract/browser gate 失败 |
+| cleanup project 名不匹配、过宽或资源仍残留 | cleanup 拒绝/失败；不得触碰用户现有 Compose project |
+| 全仓门禁存在无关既有失败 | 精确记录失败文件/断言和目标定向门禁；不得声称全绿 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：race、真实 PostgreSQL、OpenAPI、前端与隔离 smoke 全部给出可复核证据；容器 identity 不变，坏配置不影响旧模型。
+- Base：static/disabled revision 0 仍通过固定 registry、Keyword 与 Settings 基础回归。
+- Bad：只断言按钮文案、只看 Docker RestartCount、只跑 fake Repository、或在 smoke cleanup 中使用宽泛 image prune/down -v。
+
+### 6. Tests Required
+
+- 最少覆盖 Model Settings domain/application/runtime/http/postgres、Workflow application/postgres/River、Retrieval Search/Reindex、
+  API/Worker/modelctl composition、auth capability 和 model transport resource ownership。
+- 真实 PostgreSQL 测试串行运行热激活 migration、Repository recovery/takeover 与 Workflow freshness/Claim binding；
+  不把 compile-only integration 当运行证据。
+- 发布前运行 Settings 定向前端测试、lint/typecheck/build、OpenAPI/Compose contracts、`git diff --check` 和隔离浏览器 smoke。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: GET 最终显示 target 就宣称无重启切换成功。
+Correct: 同次 smoke 同时证明 desired/active/applied/fresh 收敛、失败保留 previous，以及容器 ID/StartedAt/RestartCount 不变。
+
+Wrong: 用普通 Acquire 测试替代 Claim/cutover 竞态，或只在内存 fake 验证跨进程状态机。
+Correct: race/stress 锁定 Admit->Claim->Acquire；真实 PostgreSQL 锁定 state/runtime/participant/Attempt 不变量。
+
+Wrong: cleanup 使用 project prefix 模糊匹配或全局 image prune。
+Correct: 随机 project 名先做精确格式/绑定校验，只删除该项目可枚举的 exact resources，并验证零残留。
+```
+
 ## Scenario: 活跃任务上下文与子任务进度门禁
 
 ### 1. Scope / Trigger

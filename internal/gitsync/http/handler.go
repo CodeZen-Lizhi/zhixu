@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 
 	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -62,16 +62,16 @@ func NewHandler(service Service, timeout time.Duration) *Handler {
 func (handler *Handler) Available() bool { return handler != nil && handler.service != nil }
 
 // Routes 在 `/api/v1` Router 下注册 Workspace-scoped Git Sync 端点。
-func (handler *Handler) Routes(router chi.Router) {
-	router.Get("/workspaces/{workspaceID}/git-remote", handler.getConfig)
-	router.Put("/workspaces/{workspaceID}/git-remote", handler.saveConfig)
-	router.Delete("/workspaces/{workspaceID}/git-remote", handler.removeConfig)
-	router.Post("/workspaces/{workspaceID}/git-remote/tests", handler.testConfig)
-	router.Get("/workspaces/{workspaceID}/git-sync", handler.getStatus)
-	router.Get("/workspaces/{workspaceID}/git-sync/runs", handler.listRuns)
-	router.Post("/workspaces/{workspaceID}/git-sync/runs", handler.createRun)
-	router.Get("/workspaces/{workspaceID}/git-sync/runs/{runID}", handler.getRun)
-	router.Post("/workspaces/{workspaceID}/git-sync/runs/{runID}/retries", handler.retryRun)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.GET("/workspaces/:workspace_id/git-remote", httpapi.GinHandler(handler.getConfig))
+	router.PUT("/workspaces/:workspace_id/git-remote", httpapi.GinHandler(handler.saveConfig))
+	router.DELETE("/workspaces/:workspace_id/git-remote", httpapi.GinHandler(handler.removeConfig))
+	router.POST("/workspaces/:workspace_id/git-remote/tests", httpapi.GinHandler(handler.testConfig))
+	router.GET("/workspaces/:workspace_id/git-sync", httpapi.GinHandler(handler.getStatus))
+	router.GET("/workspaces/:workspace_id/git-sync/runs", httpapi.GinHandler(handler.listRuns))
+	router.POST("/workspaces/:workspace_id/git-sync/runs", httpapi.GinHandler(handler.createRun))
+	router.GET("/workspaces/:workspace_id/git-sync/runs/:run_id", httpapi.GinHandler(handler.getRun))
+	router.POST("/workspaces/:workspace_id/git-sync/runs/:run_id/retries", httpapi.GinHandler(handler.retryRun))
 }
 
 type tokenActionRequest struct {
@@ -324,7 +324,7 @@ func (handler *Handler) retryRun(writer stdhttp.ResponseWriter, request *stdhttp
 	if !ok {
 		return
 	}
-	runID, err := foundation.ParseID(chi.URLParam(request, "runID"))
+	runID, err := foundation.ParseID(request.PathValue("run_id"))
 	if err != nil {
 		writeError(writer, invalid("Git sync run identity is invalid"))
 		return
@@ -359,7 +359,7 @@ func (handler *Handler) getRun(writer stdhttp.ResponseWriter, request *stdhttp.R
 	if !ok {
 		return
 	}
-	runID, err := foundation.ParseID(chi.URLParam(request, "runID"))
+	runID, err := foundation.ParseID(request.PathValue("run_id"))
 	if err != nil {
 		writeError(writer, invalid("Git sync run identity is invalid"))
 		return
@@ -413,7 +413,7 @@ func (handler *Handler) prepare(writer stdhttp.ResponseWriter, request *stdhttp.
 		writeError(writer, invalid("Git sync query parameters are invalid"))
 		return "", false
 	}
-	workspaceID, err := foundation.ParseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := foundation.ParseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, invalid("Workspace identity is invalid"))
 		return "", false

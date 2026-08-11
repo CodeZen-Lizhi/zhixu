@@ -17,7 +17,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 // Service 定义 Workspace HTTP 所需的最小应用层契约。
@@ -43,12 +43,12 @@ type Handler struct{ service Service }
 func NewHandler(service Service) *Handler { return &Handler{service: service} }
 
 // Routes 注册 Workspace 资源路由。
-func (h *Handler) Routes(router chi.Router) {
-	router.Post("/workspaces", h.create)
-	router.Get("/workspaces/active", h.active)
-	router.Get("/workspaces/{workspaceID}", h.detail)
-	router.Post("/workspaces/{workspaceID}/scan", h.scan)
-	router.Get("/workspaces/{workspaceID}/source-versions", h.listSourceVersions)
+func (h *Handler) Routes(router gin.IRouter) {
+	router.POST("/workspaces", httpapi.GinHandler(h.create))
+	router.GET("/workspaces/active", httpapi.GinHandler(h.active))
+	router.GET("/workspaces/:workspace_id", httpapi.GinHandler(h.detail))
+	router.POST("/workspaces/:workspace_id/scan", httpapi.GinHandler(h.scan))
+	router.GET("/workspaces/:workspace_id/source-versions", httpapi.GinHandler(h.listSourceVersions))
 }
 
 type sourceVersionPageResponse struct {
@@ -91,7 +91,7 @@ func (h *Handler) listSourceVersions(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusServiceUnavailable, "SOURCE_VERSION_LIST_UNAVAILABLE", "Source Version 列表暂不可用", true, nil)
 		return
 	}
-	workspaceID, err := foundation.ParseID(chi.URLParam(r, "workspaceID"))
+	workspaceID, err := foundation.ParseID(r.PathValue("workspace_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -317,7 +317,7 @@ func (h *Handler) active(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) detail(w http.ResponseWriter, r *http.Request) {
-	id, err := foundation.ParseID(chi.URLParam(r, "workspaceID"))
+	id, err := foundation.ParseID(r.PathValue("workspace_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -335,7 +335,7 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) scan(w http.ResponseWriter, r *http.Request) {
-	id, err := foundation.ParseID(chi.URLParam(r, "workspaceID"))
+	id, err := foundation.ParseID(r.PathValue("workspace_id"))
 	if err != nil {
 		writeError(w, err)
 		return

@@ -16,7 +16,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -68,8 +68,8 @@ func NewHandler(store application.Store, configs ...StreamConfig) *Handler {
 }
 
 // Routes 在既有 `/api/v1` Router 下注册 Events SSE 路由。
-func (handler *Handler) Routes(router chi.Router) {
-	router.Get("/events", handler.handleEvents)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.GET("/events", httpapi.GinHandler(handler.handleEvents))
 }
 
 func (handler *Handler) handleEvents(writer http.ResponseWriter, request *http.Request) {

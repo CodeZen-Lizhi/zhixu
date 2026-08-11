@@ -23,6 +23,7 @@ import (
 	graphapplication "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	graphhttp "github.com/CodeZen-Lizhi/zhixu/internal/graph/http"
+	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	knowledgehttp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/http"
@@ -31,7 +32,7 @@ import (
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 type fakePinger struct {
@@ -723,11 +724,13 @@ func TestRouterMethodNotAllowedReturnsProblem(t *testing.T) {
 }
 
 func TestModelSettingsNoStoreMiddlewareCoversUpstreamFailures(t *testing.T) {
-	upstream := modelSettingsNoStoreMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	upstream := gin.New()
+	upstream.Use(modelSettingsNoStoreMiddleware)
+	upstream.NoRoute(httpapi.GinHandler(func(writer http.ResponseWriter, _ *http.Request) {
 		http.Error(writer, "unauthorized", http.StatusUnauthorized)
 	}))
 
-	for _, path := range []string{"/api/v1/settings/models", "/api/v1/settings/models/test"} {
+	for _, path := range []string{"/api/v1/settings/models", "/api/v1/settings/models/test", "/api/v1/settings/models/activations"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		response := httptest.NewRecorder()
 		upstream.ServeHTTP(response, request)
@@ -787,14 +790,14 @@ func TestRouterPropagatesIncomingTraceToHandlers(t *testing.T) {
 	}
 }
 
-func TestRequestLogUsesChiRouteTemplateWithoutRequestPath(t *testing.T) {
+func TestRequestLogUsesGinRouteTemplateWithoutRequestPath(t *testing.T) {
 	var output bytes.Buffer
-	router := chi.NewRouter()
+	router := gin.New()
 	router.Use(requestIDMiddleware)
 	router.Use(requestLogMiddleware(observability.NewLogger("info", &output)))
-	router.Get("/api/v1/workspaces/{workspace_id}", func(w http.ResponseWriter, _ *http.Request) {
+	router.GET("/api/v1/workspaces/:workspace_id", httpapi.GinHandler(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
-	})
+	}))
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/workspaces/92000000-0000-4000-8000-000000000001", nil)
 	response := httptest.NewRecorder()

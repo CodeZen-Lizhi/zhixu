@@ -13,15 +13,13 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRuntimeStateClaimHeartbeatCompleteAndReplay(t *testing.T) {
@@ -157,137 +155,246 @@ func TestRuntimeStateClaimPersistsStaticModelRuntimeAsNull(t *testing.T) {
 	}
 }
 
-func TestRuntimeStateClaimFreezesManagedModelRuntimeOwnership(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
-	defer cleanup()
-	workspaceID := foundation.ID("a1200000-0000-4000-8000-000000000001")
-	oldInstanceID := foundation.ID("a1200000-0000-4000-8000-000000000002")
-	newInstanceID := foundation.ID("a1200000-0000-4000-8000-000000000003")
-	rolloutID := foundation.ID("a1200000-0000-4000-8000-000000000004")
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-managed-model',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-managed-model"); err != nil {
-		t.Fatal(err)
+func TestRuntimeStateClaimSelectsManagedBindingAndReplaysOldAttemptAcrossCutover(t *testing.T) {
+	fixture := newManagedClaimFixture(t, "managed-cutover", true)
+	targetRevision := int64(1)
+	insertDisabledModelSettingsRevision(t, fixture.ctx, fixture.pool, targetRevision)
+
+	started := fixture.start(t, "managed-old", "a")
+	command := application.ClaimCommand{
+		NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-old-delivery",
+		RiverJobID: started.Job.JobID, ModelRuntimeInstanceID: &fixture.workerInstanceID,
+		LeaseOwner: "managed-worker", LeaseDuration: time.Minute,
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO ops.model_settings_runtime(role,instance_id,applied_revision,rollout_id,phase,applied_at,heartbeat_at) VALUES('worker',$1::uuid,0,NULL,'active',clock_timestamp(),clock_timestamp())`, string(oldInstanceID)); err != nil {
-		t.Fatal(err)
+	claimed, err := fixture.repository.Claim(fixture.ctx, command)
+	if err != nil || claimed.Disposition != application.ClaimDispositionClaimed {
+		t.Fatalf("old claim=%+v err=%v", claimed, err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	revision := int64(0)
-	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "state-managed-model-first", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := application.ClaimCommand{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-model-delivery", RiverJobID: started.Job.JobID, ModelSettingsRevision: &revision, ModelRuntimeInstanceID: &oldInstanceID, LeaseOwner: "managed-worker", LeaseDuration: time.Minute}
-	claimed, err := repository.Claim(ctx, command)
-	if err != nil || claimed.Disposition != application.ClaimDispositionClaimed || claimed.Attempt.ModelSettingsRevision == nil || *claimed.Attempt.ModelSettingsRevision != revision || claimed.Attempt.ModelRuntimeInstanceID == nil || *claimed.Attempt.ModelRuntimeInstanceID != oldInstanceID {
-		t.Fatalf("claimed=%+v err=%v", claimed, err)
-	}
+	assertAttemptModelRuntimeBinding(t, claimed.Attempt, 0, fixture.workerInstanceID)
+
 	var persistedRevision int64
 	var persistedInstanceID string
-	if err := pool.QueryRow(ctx, `SELECT model_settings_revision,model_runtime_instance_id::text FROM workflow.node_attempt WHERE id=$1`, string(claimed.Attempt.ID)).Scan(&persistedRevision, &persistedInstanceID); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT model_settings_revision,model_runtime_instance_id::text FROM workflow.node_attempt WHERE id=$1`, string(claimed.Attempt.ID)).Scan(&persistedRevision, &persistedInstanceID); err != nil {
 		t.Fatal(err)
 	}
-	if persistedRevision != revision || foundation.ID(persistedInstanceID) != oldInstanceID {
+	if persistedRevision != 0 || foundation.ID(persistedInstanceID) != fixture.workerInstanceID {
 		t.Fatalf("persisted binding revision=%d instance=%q", persistedRevision, persistedInstanceID)
 	}
-	replayRevision := int64(0)
-	replayInstanceID := foundation.ID(string(oldInstanceID))
-	replayCommand := command
-	replayCommand.ModelSettingsRevision = &replayRevision
-	replayCommand.ModelRuntimeInstanceID = &replayInstanceID
-	replayed, err := repository.Claim(ctx, replayCommand)
-	if err != nil || replayed.Attempt.ID != claimed.Attempt.ID || replayed.Attempt.ModelSettingsRevision == nil || *replayed.Attempt.ModelSettingsRevision != revision || replayed.Attempt.ModelRuntimeInstanceID == nil || *replayed.Attempt.ModelRuntimeInstanceID != oldInstanceID {
-		t.Fatalf("replayed=%+v err=%v", replayed, err)
-	}
-	_, err = pool.Exec(ctx, `UPDATE workflow.node_attempt SET model_settings_revision=999 WHERE id=$1`, string(claimed.Attempt.ID))
+	otherInstanceID := foundation.ID("a1200000-0000-4000-8000-000000000003")
+	_, err = fixture.pool.Exec(fixture.ctx, `UPDATE workflow.node_attempt SET model_settings_revision=999 WHERE id=$1`, string(claimed.Attempt.ID))
 	assertRuntimePostgresCode(t, err, "55000")
-	_, err = pool.Exec(ctx, `UPDATE workflow.node_attempt SET model_runtime_instance_id=$2::uuid WHERE id=$1`, string(claimed.Attempt.ID), string(newInstanceID))
+	_, err = fixture.pool.Exec(fixture.ctx, `UPDATE workflow.node_attempt SET model_runtime_instance_id=$2::uuid WHERE id=$1`, string(claimed.Attempt.ID), string(otherInstanceID))
 	assertRuntimePostgresCode(t, err, "55000")
-	_, err = pool.Exec(ctx, `INSERT INTO workflow.node_attempt(
+	_, err = fixture.pool.Exec(fixture.ctx, `INSERT INTO workflow.node_attempt(
 id,node_run_id,attempt_no,dispatch_no,retry_no,river_job_id,delivery_id,status,
 model_settings_revision,model_runtime_instance_id,started_at,heartbeat_at,ended_at)
-VALUES($1,$2,2,1,0,$3,'unknown-model-revision','succeeded',999,$4::uuid,
-clock_timestamp(),clock_timestamp(),clock_timestamp())`, "a1200000-0000-4000-8000-000000000005", string(started.FirstNode.ID), started.Job.JobID, string(oldInstanceID))
-	assertRuntimePostgresCode(t, err, "23503")
+VALUES($1,$2,2,1,0,$3,'wrong-active-revision','succeeded',$4,$5::uuid,
+clock_timestamp(),clock_timestamp(),clock_timestamp())`, "a1200000-0000-4000-8000-000000000005", string(started.FirstNode.ID), started.Job.JobID, targetRevision, string(fixture.workerInstanceID))
+	assertRuntimePostgresCode(t, err, "23514")
 
-	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_runtime SET instance_id=$1::uuid,applied_revision=0,rollout_id=NULL,phase='active',applied_at=clock_timestamp(),heartbeat_at=clock_timestamp() WHERE role='worker'`, string(newInstanceID)); err != nil {
-		t.Fatal(err)
-	}
-	replayFromNewOwner := command
-	replayFromNewOwner.ModelRuntimeInstanceID = &newInstanceID
-	if _, err := repository.Claim(ctx, replayFromNewOwner); !hasCode(err, "WORKFLOW_MODEL_RUNTIME_BINDING_MISMATCH") {
-		t.Fatalf("new owner exact replay error=%v", err)
-	}
-
-	secondRequest := runtimeStateStartFixture(workspaceID, "state-managed-model-second", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second})
-	remapRuntimeStartIDs(&secondRequest, "b")
-	second, err := repository.Start(ctx, secondRequest)
+	beginHotActivation(t, fixture.ctx, fixture.pool, fixture.rolloutID, targetRevision)
+	preparingStart := fixture.start(t, "managed-preparing", "b")
+	preparingClaim, err := fixture.repository.Claim(fixture.ctx, application.ClaimCommand{
+		NodeRunID: preparingStart.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-preparing-delivery",
+		RiverJobID: preparingStart.Job.JobID, ModelRuntimeInstanceID: &fixture.workerInstanceID,
+		LeaseOwner: "managed-worker", LeaseDuration: time.Minute,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondCommand := application.ClaimCommand{NodeRunID: second.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-model-second-delivery", RiverJobID: second.Job.JobID, ModelSettingsRevision: &revision, ModelRuntimeInstanceID: &oldInstanceID, LeaseOwner: "managed-worker", LeaseDuration: time.Minute}
-	if _, err := repository.Claim(ctx, secondCommand); !hasCode(err, "WORKFLOW_MODEL_RUNTIME_OWNERSHIP_LOST") {
-		t.Fatalf("superseded owner error=%v", err)
-	}
-	secondCommand.ModelRuntimeInstanceID = &newInstanceID
-	secondClaim, err := repository.Claim(ctx, secondCommand)
-	if err != nil || secondClaim.Disposition != application.ClaimDispositionClaimed {
-		t.Fatalf("replacement owner claim=%+v err=%v", secondClaim, err)
-	}
+	assertAttemptModelRuntimeBinding(t, preparingClaim.Attempt, 0, fixture.workerInstanceID)
 
-	thirdRequest := runtimeStateStartFixture(workspaceID, "state-managed-model-third", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second})
-	remapRuntimeStartIDs(&thirdRequest, "c")
-	third, err := repository.Start(ctx, thirdRequest)
-	if err != nil {
-		t.Fatal(err)
+	setHotActivationPhase(t, fixture.ctx, fixture.pool, "arming")
+	replayed, err := fixture.repository.Claim(fixture.ctx, command)
+	if err != nil || replayed.Attempt.ID != claimed.Attempt.ID {
+		t.Fatalf("arming exact replay=%+v err=%v", replayed, err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_state SET rollout_id=$1::uuid,target_revision=desired_revision,previous_active_revision=active_revision,phase='validating',lease_expires_at=clock_timestamp()+interval '5 minutes',version=version+1,updated_at=clock_timestamp() WHERE singleton=true`, string(rolloutID)); err != nil {
-		t.Fatal(err)
+	assertAttemptModelRuntimeBinding(t, replayed.Attempt, 0, fixture.workerInstanceID)
+
+	blockedStart := fixture.start(t, "managed-blocked", "c")
+	blockedCommand := application.ClaimCommand{
+		NodeRunID: blockedStart.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-blocked-delivery",
+		RiverJobID: blockedStart.Job.JobID, ModelRuntimeInstanceID: &fixture.workerInstanceID,
+		LeaseOwner: "managed-worker", LeaseDuration: time.Minute,
 	}
-	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_state SET phase='draining',lease_expires_at=clock_timestamp()+interval '5 minutes',version=version+1,updated_at=clock_timestamp() WHERE singleton=true`); err != nil {
-		t.Fatal(err)
+	assertRuntimeRetryableCode(t, claimError(fixture.repository.Claim(fixture.ctx, blockedCommand)), "WORKFLOW_MODEL_RUNTIME_CLAIM_BLOCKED")
+
+	setHotActivationPhase(t, fixture.ctx, fixture.pool, "activating")
+	replayed, err = fixture.repository.Claim(fixture.ctx, command)
+	if err != nil || replayed.Attempt.ID != claimed.Attempt.ID {
+		t.Fatalf("activating exact replay=%+v err=%v", replayed, err)
 	}
-	blockedCommand := application.ClaimCommand{NodeRunID: third.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-model-blocked-delivery", RiverJobID: third.Job.JobID, ModelSettingsRevision: &revision, ModelRuntimeInstanceID: &newInstanceID, LeaseOwner: "managed-worker", LeaseDuration: time.Minute}
-	if _, err := repository.Claim(ctx, blockedCommand); !hasCode(err, "WORKFLOW_MODEL_RUNTIME_CLAIM_BLOCKED") {
-		t.Fatalf("draining claim error=%v", err)
+	assertAttemptModelRuntimeBinding(t, replayed.Attempt, 0, fixture.workerInstanceID)
+	replayFromOtherOwner := command
+	replayFromOtherOwner.ModelRuntimeInstanceID = &otherInstanceID
+	if _, err := fixture.repository.Claim(fixture.ctx, replayFromOtherOwner); !hasCode(err, "WORKFLOW_MODEL_RUNTIME_BINDING_MISMATCH") {
+		t.Fatalf("other owner exact replay error=%v", err)
 	}
+	assertRuntimeRetryableCode(t, claimError(fixture.repository.Claim(fixture.ctx, blockedCommand)), "WORKFLOW_MODEL_RUNTIME_CLAIM_BLOCKED")
 	var attempts int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.node_attempt WHERE node_run_id=$1`, string(third.FirstNode.ID)).Scan(&attempts); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM workflow.node_attempt WHERE node_run_id=$1`, string(blockedStart.FirstNode.ID)).Scan(&attempts); err != nil {
 		t.Fatal(err)
 	}
 	if attempts != 0 {
 		t.Fatalf("blocked workflow attempts=%d", attempts)
 	}
+}
 
-	sqlDB := stdlib.OpenDBFromPool(pool)
-	defer sqlDB.Close()
-	annotated, err := platformmigration.NewLegacyAnnotationFS(projectmigrations.FS)
+func TestRuntimeStateClaimRejectsMissingStaleAndUnavailableWorkerOwner(t *testing.T) {
+	fixture := newManagedClaimFixture(t, "managed-owner-health", false)
+	commandFor := func(started application.RuntimeStartResult, delivery string) application.ClaimCommand {
+		return application.ClaimCommand{
+			NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: delivery,
+			RiverJobID: started.Job.JobID, ModelRuntimeInstanceID: &fixture.workerInstanceID,
+			LeaseOwner: "managed-worker", LeaseDuration: time.Minute,
+		}
+	}
+	missing := fixture.start(t, "managed-missing", "a")
+	assertRuntimeRetryableCode(t, claimError(fixture.repository.Claim(fixture.ctx, commandFor(missing, "missing-owner"))), "WORKFLOW_MODEL_RUNTIME_OWNERSHIP_LOST")
+
+	if _, err := fixture.pool.Exec(fixture.ctx, `INSERT INTO ops.model_settings_runtime(
+role,instance_id,applied_revision,rollout_id,phase,applied_at,heartbeat_at)
+VALUES('worker',$1::uuid,0,NULL,'active',clock_timestamp()-interval '1 minute',clock_timestamp()-interval '1 minute')`, string(fixture.workerInstanceID)); err != nil {
+		t.Fatal(err)
+	}
+	stale := fixture.start(t, "managed-stale", "b")
+	assertRuntimeRetryableCode(t, claimError(fixture.repository.Claim(fixture.ctx, commandFor(stale, "stale-owner"))), "WORKFLOW_MODEL_RUNTIME_OWNERSHIP_LOST")
+
+	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE ops.model_settings_runtime
+SET phase='unavailable',heartbeat_at=clock_timestamp() WHERE role='worker'`); err != nil {
+		t.Fatal(err)
+	}
+	unavailable := fixture.start(t, "managed-unavailable", "c")
+	assertRuntimeRetryableCode(t, claimError(fixture.repository.Claim(fixture.ctx, commandFor(unavailable, "unavailable-owner"))), "WORKFLOW_MODEL_RUNTIME_OWNERSHIP_LOST")
+}
+
+func TestRuntimeStateClaimUsesInjectedManagedRuntimeFreshness(t *testing.T) {
+	withinFixture := newManagedClaimFixtureWithFreshness(t, "managed-owner-custom-freshness", false, 45*time.Second)
+	if _, err := withinFixture.pool.Exec(withinFixture.ctx, `INSERT INTO ops.model_settings_runtime(
+role,instance_id,applied_revision,rollout_id,phase,applied_at,heartbeat_at)
+VALUES('worker',$1::uuid,0,NULL,'active',clock_timestamp()-interval '30 seconds',clock_timestamp()-interval '30 seconds')`, string(withinFixture.workerInstanceID)); err != nil {
+		t.Fatal(err)
+	}
+	withinCustomWindow := withinFixture.start(t, "managed-custom-fresh", "a")
+	claimed, err := withinFixture.repository.Claim(withinFixture.ctx, application.ClaimCommand{
+		NodeRunID: withinCustomWindow.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-custom-fresh-delivery",
+		RiverJobID: withinCustomWindow.Job.JobID, ModelRuntimeInstanceID: &withinFixture.workerInstanceID,
+		LeaseOwner: "managed-worker", LeaseDuration: time.Minute,
+	})
+	if err != nil || claimed.Disposition != application.ClaimDispositionClaimed {
+		t.Fatalf("claim within injected freshness window=%+v err=%v", claimed, err)
+	}
+
+	beyondFixture := newManagedClaimFixtureWithFreshness(t, "managed-owner-custom-stale", false, 45*time.Second)
+	if _, err := beyondFixture.pool.Exec(beyondFixture.ctx, `INSERT INTO ops.model_settings_runtime(
+role,instance_id,applied_revision,rollout_id,phase,applied_at,heartbeat_at)
+VALUES('worker',$1::uuid,0,NULL,'active',clock_timestamp()-interval '46 seconds',clock_timestamp()-interval '46 seconds')`, string(beyondFixture.workerInstanceID)); err != nil {
+		t.Fatal(err)
+	}
+	beyondCustomWindow := beyondFixture.start(t, "managed-custom-stale", "a")
+	err = claimError(beyondFixture.repository.Claim(beyondFixture.ctx, application.ClaimCommand{
+		NodeRunID: beyondCustomWindow.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-custom-stale-delivery",
+		RiverJobID: beyondCustomWindow.Job.JobID, ModelRuntimeInstanceID: &beyondFixture.workerInstanceID,
+		LeaseOwner: "managed-worker", LeaseDuration: time.Minute,
+	}))
+	assertRuntimeRetryableCode(t, err, "WORKFLOW_MODEL_RUNTIME_OWNERSHIP_LOST")
+}
+
+func TestRuntimeStateExpiredAttemptHigherDeliveryUsesCurrentBinding(t *testing.T) {
+	fixture := newManagedClaimFixture(t, "managed-reclaim", true)
+	targetRevision := int64(1)
+	insertDisabledModelSettingsRevision(t, fixture.ctx, fixture.pool, targetRevision)
+	started := fixture.start(t, "managed-reclaim", "a")
+	first, err := fixture.repository.Claim(fixture.ctx, application.ClaimCommand{
+		NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-attempt-1",
+		RiverJobID: started.Job.JobID, RiverJobAttempt: 1, ModelRuntimeInstanceID: &fixture.workerInstanceID,
+		LeaseOwner: "managed-worker-1", LeaseDuration: 100 * time.Millisecond,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, annotated, goose.WithTableName("goose_db_version"))
-	if err != nil {
+	assertAttemptModelRuntimeBinding(t, first.Attempt, 0, fixture.workerInstanceID)
+
+	beginHotActivation(t, fixture.ctx, fixture.pool, fixture.rolloutID, targetRevision)
+	setHotActivationPhase(t, fixture.ctx, fixture.pool, "arming")
+	setHotActivationPhase(t, fixture.ctx, fixture.pool, "activating")
+	replacementInstanceID := foundation.ID("a1200000-0000-4000-8000-000000000003")
+	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE ops.model_settings_runtime
+SET instance_id=$1::uuid,applied_revision=$2,rollout_id=NULL,phase='active',
+    applied_at=clock_timestamp(),heartbeat_at=clock_timestamp()
+WHERE role='worker'`, string(replacementInstanceID), targetRevision); err != nil {
 		t.Fatal(err)
 	}
-	_, err = provider.DownTo(ctx, 64)
-	assertRuntimePostgresCode(t, err, "55000")
-	var provenanceColumns int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema='workflow' AND table_name='node_attempt' AND column_name IN ('model_settings_revision','model_runtime_instance_id')`).Scan(&provenanceColumns); err != nil {
+	finalizeHotActivation(t, fixture.ctx, fixture.pool)
+	time.Sleep(180 * time.Millisecond)
+
+	reclaimed, err := fixture.repository.Claim(fixture.ctx, application.ClaimCommand{
+		NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-attempt-2",
+		RiverJobID: started.Job.JobID, RiverJobAttempt: 2, ModelRuntimeInstanceID: &replacementInstanceID,
+		LeaseOwner: "managed-worker-2", LeaseDuration: time.Minute,
+	})
+	if err != nil || !reclaimed.LeaseReclaimed || reclaimed.Attempt.AttemptNo != first.Attempt.AttemptNo+1 {
+		t.Fatalf("reclaimed=%+v err=%v", reclaimed, err)
+	}
+	assertAttemptModelRuntimeBinding(t, reclaimed.Attempt, targetRevision, replacementInstanceID)
+	var oldStatus domain.AttemptStatus
+	var oldRevision, newRevision int64
+	var oldInstance, newInstance string
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT status,model_settings_revision,model_runtime_instance_id::text
+FROM workflow.node_attempt WHERE id=$1`, string(first.Attempt.ID)).Scan(&oldStatus, &oldRevision, &oldInstance); err != nil {
 		t.Fatal(err)
 	}
-	if provenanceColumns != 2 {
-		t.Fatalf("guarded down preserved provenance columns=%d want=2", provenanceColumns)
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT model_settings_revision,model_runtime_instance_id::text
+FROM workflow.node_attempt WHERE id=$1`, string(reclaimed.Attempt.ID)).Scan(&newRevision, &newInstance); err != nil {
+		t.Fatal(err)
+	}
+	if oldStatus != domain.AttemptStatusLeaseLost || oldRevision != 0 || foundation.ID(oldInstance) != fixture.workerInstanceID || newRevision != targetRevision || foundation.ID(newInstance) != replacementInstanceID {
+		t.Fatalf("old=(%s,%d,%s) new=(%d,%s)", oldStatus, oldRevision, oldInstance, newRevision, newInstance)
+	}
+}
+
+func TestRuntimeStateClaimAndActivationCommitSerializeCompleteBinding(t *testing.T) {
+	fixture := newManagedClaimFixture(t, "managed-claim-commit-race", true)
+	targetRevision := int64(1)
+	insertDisabledModelSettingsRevision(t, fixture.ctx, fixture.pool, targetRevision)
+	beginHotActivation(t, fixture.ctx, fixture.pool, fixture.rolloutID, targetRevision)
+	prepareWorkerParticipant(t, fixture.ctx, fixture.pool, fixture.rolloutID, fixture.workerInstanceID, targetRevision)
+	started := fixture.start(t, "managed-race", "a")
+	command := application.ClaimCommand{
+		NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-race-delivery",
+		RiverJobID: started.Job.JobID, ModelRuntimeInstanceID: &fixture.workerInstanceID,
+		LeaseOwner: "managed-worker", LeaseDuration: time.Minute,
+	}
+	start := make(chan struct{})
+	type claimOutcome struct {
+		result application.ClaimResult
+		err    error
+	}
+	claimResult := make(chan claimOutcome, 1)
+	commitResult := make(chan error, 1)
+	go func() {
+		<-start
+		result, err := fixture.repository.Claim(fixture.ctx, command)
+		claimResult <- claimOutcome{result: result, err: err}
+	}()
+	go func() {
+		<-start
+		commitResult <- commitHotActivationSameOwner(fixture.ctx, fixture.pool, fixture.rolloutID, fixture.workerInstanceID, targetRevision)
+	}()
+	close(start)
+	claimed := <-claimResult
+	if err := <-commitResult; err != nil {
+		t.Fatal(err)
+	}
+	if claimed.err != nil {
+		t.Fatal(claimed.err)
+	}
+	if claimed.result.Attempt.ModelSettingsRevision == nil || claimed.result.Attempt.ModelRuntimeInstanceID == nil || *claimed.result.Attempt.ModelRuntimeInstanceID != fixture.workerInstanceID {
+		t.Fatalf("incomplete claim binding=%+v", claimed.result.Attempt)
+	}
+	selected := *claimed.result.Attempt.ModelSettingsRevision
+	if selected != 0 && selected != targetRevision {
+		t.Fatalf("claim observed split revision=%d", selected)
 	}
 }
 
@@ -297,6 +404,200 @@ func assertRuntimePostgresCode(t *testing.T, err error, expected string) {
 	if !errors.As(err, &postgresError) || postgresError.Code != expected {
 		t.Fatalf("postgres error=%v code=%q want=%q", err, postgresErrorCode(postgresError), expected)
 	}
+}
+
+type managedClaimFixture struct {
+	ctx              context.Context
+	pool             *pgxpool.Pool
+	repository       *RuntimeRepository
+	workspaceID      foundation.ID
+	workerInstanceID foundation.ID
+	rolloutID        foundation.ID
+}
+
+func newManagedClaimFixture(t *testing.T, name string, withWorker bool) *managedClaimFixture {
+	return newManagedClaimFixtureWithFreshness(t, name, withWorker, modelsettingsapplication.DefaultRuntimeFreshWithin)
+}
+
+func newManagedClaimFixtureWithFreshness(t *testing.T, name string, withWorker bool, freshness time.Duration) *managedClaimFixture {
+	t.Helper()
+	ctx := context.Background()
+	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	t.Cleanup(cleanup)
+	fixture := &managedClaimFixture{
+		ctx: ctx, pool: pool,
+		workspaceID:      foundation.ID("a1200000-0000-4000-8000-000000000001"),
+		workerInstanceID: foundation.ID("a1200000-0000-4000-8000-000000000002"),
+		rolloutID:        foundation.ID("a1200000-0000-4000-8000-000000000004"),
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
+VALUES($1,$2,$3,$3,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(fixture.workspaceID), name, "/tmp/"+name); err != nil {
+		t.Fatal(err)
+	}
+	if withWorker {
+		if _, err := pool.Exec(ctx, `INSERT INTO ops.model_settings_runtime(role,instance_id,applied_revision,rollout_id,phase,applied_at,heartbeat_at)
+VALUES('worker',$1::uuid,0,NULL,'active',clock_timestamp(),clock_timestamp())`, string(fixture.workerInstanceID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client, err := riveradapter.NewClient(pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserter, err := riveradapter.NewJobInserter(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.repository, err = NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{ModelRuntimeFreshWithin: freshness})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func (fixture *managedClaimFixture) start(t *testing.T, key, prefix string) application.RuntimeStartResult {
+	t.Helper()
+	request := runtimeStateStartFixture(fixture.workspaceID, key, domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second})
+	if prefix != "a" {
+		remapRuntimeStartIDs(&request, prefix)
+	}
+	started, err := fixture.repository.Start(fixture.ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return started
+}
+
+func insertDisabledModelSettingsRevision(t *testing.T, ctx context.Context, pool *pgxpool.Pool, revision int64) {
+	t.Helper()
+	_, err := pool.Exec(ctx, `INSERT INTO ops.model_settings_revisions(
+revision,chat_provider,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
+chat_timeout_microseconds,chat_max_request_bytes,chat_max_response_bytes,
+embedding_provider,embedding_base_url,embedding_model,embedding_dimensions,
+embedding_normalization,embedding_distance_metric,embedding_max_batch_size,
+embedding_max_input_bytes,embedding_max_batch_input_bytes,embedding_timeout_microseconds,
+embedding_max_response_bytes,created_by)
+VALUES($1,'disabled','','','', 'v1',30000000,4194304,4194304,
+'disabled','','',0,'none','cosine',1,1,1,30000000,67108864,'workflow-test')`, revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func beginHotActivation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, rolloutID foundation.ID, targetRevision int64) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_state
+SET desired_revision=$1,version=version+1,updated_at=clock_timestamp()
+WHERE singleton=true AND phase='idle'`, targetRevision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_state
+SET rollout_id=$1::uuid,target_revision=$2,previous_active_revision=active_revision,
+    phase='preparing',lease_expires_at=clock_timestamp()+interval '5 minutes',
+    version=version+1,updated_at=clock_timestamp()
+WHERE singleton=true AND desired_revision=$2 AND phase='idle'`, string(rolloutID), targetRevision); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setHotActivationPhase(t *testing.T, ctx context.Context, pool *pgxpool.Pool, phase string) {
+	t.Helper()
+	var statement string
+	switch phase {
+	case "arming":
+		statement = `UPDATE ops.model_settings_state SET phase='arming',lease_expires_at=clock_timestamp()+interval '5 minutes',version=version+1,updated_at=clock_timestamp() WHERE singleton=true AND phase='preparing'`
+	case "activating":
+		statement = `UPDATE ops.model_settings_state SET active_revision=target_revision,phase='activating',lease_expires_at=clock_timestamp()+interval '5 minutes',version=version+1,updated_at=clock_timestamp() WHERE singleton=true AND phase='arming'`
+	default:
+		t.Fatalf("unsupported hot activation phase %q", phase)
+	}
+	if _, err := pool.Exec(ctx, statement); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func finalizeHotActivation(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_state
+SET rollout_id=NULL,target_revision=NULL,previous_active_revision=NULL,phase='idle',
+    lease_expires_at=NULL,last_error_code=NULL,version=version+1,updated_at=clock_timestamp()
+WHERE singleton=true AND phase='activating'`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func prepareWorkerParticipant(t *testing.T, ctx context.Context, pool *pgxpool.Pool, rolloutID, instanceID foundation.ID, targetRevision int64) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `INSERT INTO ops.model_settings_rollout_participant(
+rollout_id,role,instance_id,target_revision,phase,heartbeat_at,last_error_retryable,version,prepared_at,activated_at,retired_at)
+VALUES($1::uuid,'worker',$2::uuid,$3,'preparing',clock_timestamp(),false,1,NULL,NULL,NULL)`, string(rolloutID), string(instanceID), targetRevision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_rollout_participant
+SET phase='prepared',prepared_at=clock_timestamp(),heartbeat_at=clock_timestamp(),version=version+1
+WHERE rollout_id=$1::uuid AND role='worker' AND phase='preparing'`, string(rolloutID)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func commitHotActivationSameOwner(ctx context.Context, pool *pgxpool.Pool, rolloutID, instanceID foundation.ID, targetRevision int64) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `UPDATE ops.model_settings_state
+SET phase='arming',lease_expires_at=clock_timestamp()+interval '5 minutes',version=version+1,updated_at=clock_timestamp()
+WHERE singleton=true AND phase='preparing' AND rollout_id=$1::uuid`, string(rolloutID)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE ops.model_settings_rollout_participant
+SET phase='armed',heartbeat_at=clock_timestamp(),version=version+1
+WHERE rollout_id=$1::uuid AND role='worker' AND instance_id=$2::uuid AND target_revision=$3 AND phase='prepared'`, string(rolloutID), string(instanceID), targetRevision); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE ops.model_settings_state
+SET active_revision=target_revision,phase='activating',lease_expires_at=clock_timestamp()+interval '5 minutes',version=version+1,updated_at=clock_timestamp()
+WHERE singleton=true AND phase='arming' AND rollout_id=$1::uuid`, string(rolloutID)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE ops.model_settings_runtime
+SET applied_revision=$1,applied_at=clock_timestamp(),heartbeat_at=clock_timestamp()
+WHERE role='worker' AND instance_id=$2::uuid`, targetRevision, string(instanceID)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE ops.model_settings_rollout_participant
+SET phase='activated',activated_at=clock_timestamp(),heartbeat_at=clock_timestamp(),version=version+1
+WHERE rollout_id=$1::uuid AND role='worker' AND instance_id=$2::uuid AND target_revision=$3 AND phase='armed'`, string(rolloutID), string(instanceID), targetRevision); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE ops.model_settings_state
+SET rollout_id=NULL,target_revision=NULL,previous_active_revision=NULL,phase='idle',lease_expires_at=NULL,last_error_code=NULL,version=version+1,updated_at=clock_timestamp()
+WHERE singleton=true AND phase='activating' AND rollout_id=$1::uuid`, string(rolloutID)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func assertAttemptModelRuntimeBinding(t *testing.T, attempt domain.NodeAttempt, revision int64, instanceID foundation.ID) {
+	t.Helper()
+	if attempt.ModelSettingsRevision == nil || *attempt.ModelSettingsRevision != revision || attempt.ModelRuntimeInstanceID == nil || *attempt.ModelRuntimeInstanceID != instanceID {
+		t.Fatalf("attempt model runtime binding=%+v want revision=%d instance=%s", attempt, revision, instanceID)
+	}
+}
+
+func claimError(_ application.ClaimResult, err error) error { return err }
+
+func assertRuntimeRetryableCode(t *testing.T, err error, code string) {
+	t.Helper()
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != code || !classified.Retryable {
+		t.Fatalf("error=%v code=%q retryable=%v want code=%q retryable=true", err, postgresErrorCode(nil), classifiedRetryable(classified), code)
+	}
+}
+
+func classifiedRetryable(err *foundation.Error) bool {
+	return err != nil && err.Retryable
 }
 
 func postgresErrorCode(err *pgconn.PgError) string {

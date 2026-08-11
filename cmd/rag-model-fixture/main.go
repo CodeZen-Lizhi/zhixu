@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -68,6 +70,19 @@ type taskSchema struct {
 	} `json:"properties"`
 }
 
+type structuredRequestGate struct {
+	mu sync.Mutex
+
+	armed   bool
+	entered bool
+	release chan struct{}
+}
+
+type structuredRequestGateState struct {
+	Armed   bool `json:"armed"`
+	Entered bool `json:"entered"`
+}
+
 func main() {
 	address := envOr("ZHIXU_RAG_FIXTURE_ADDR", defaultAddress)
 	if err := validateAddress(address, os.Getenv("ZHIXU_RAG_FIXTURE_COMPOSE") == "true"); err != nil {
@@ -87,6 +102,7 @@ func main() {
 
 func newHandler(modelVersion, apiKey string) http.Handler {
 	mux := http.NewServeMux()
+	gate := &structuredRequestGate{}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -95,12 +111,38 @@ func newHandler(modelVersion, apiKey string) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		serveChat(w, r, modelVersion, apiKey)
+		serveChat(w, r, modelVersion, apiKey, gate)
+	})
+	mux.HandleFunc("/control/block-next", func(w http.ResponseWriter, r *http.Request) {
+		if !authorizeFixtureControl(w, r, apiKey, http.MethodPost) {
+			return
+		}
+		if !gate.arm() {
+			http.Error(w, "structured request gate is already armed", http.StatusConflict)
+			return
+		}
+		writeGateState(w, gate.state())
+	})
+	mux.HandleFunc("/control/state", func(w http.ResponseWriter, r *http.Request) {
+		if !authorizeFixtureControl(w, r, apiKey, http.MethodGet) {
+			return
+		}
+		writeGateState(w, gate.state())
+	})
+	mux.HandleFunc("/control/release", func(w http.ResponseWriter, r *http.Request) {
+		if !authorizeFixtureControl(w, r, apiKey, http.MethodPost) {
+			return
+		}
+		if !gate.open() {
+			http.Error(w, "structured request gate is not armed", http.StatusConflict)
+			return
+		}
+		writeGateState(w, gate.state())
 	})
 	return mux
 }
 
-func serveChat(w http.ResponseWriter, r *http.Request, modelVersion, apiKey string) {
+func serveChat(w http.ResponseWriter, r *http.Request, modelVersion, apiKey string, gate *structuredRequestGate) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -126,8 +168,24 @@ func serveChat(w http.ResponseWriter, r *http.Request, modelVersion, apiKey stri
 		http.Error(w, "request must contain exactly one JSON document", http.StatusBadRequest)
 		return
 	}
-	if request.Model == "" || request.ResponseFormat.Type != "json_schema" || !request.ResponseFormat.JSONSchema.Strict || len(request.Messages) == 0 {
+	if request.Model == "" || len(request.Messages) == 0 {
 		http.Error(w, "unsupported request contract", http.StatusBadRequest)
+		return
+	}
+	if request.ResponseFormat.Type == "" {
+		if request.MaxTokens != 0 || len(request.Messages) != 1 || request.Messages[0].Role != "user" || request.Messages[0].Content != "test" {
+			http.Error(w, "unsupported plain probe contract", http.StatusBadRequest)
+			return
+		}
+		writeChatResponse(w, modelVersion, "ok")
+		return
+	}
+	if request.ResponseFormat.Type != "json_schema" || !request.ResponseFormat.JSONSchema.Strict {
+		http.Error(w, "unsupported request contract", http.StatusBadRequest)
+		return
+	}
+	if err := gate.wait(r.Context()); err != nil {
+		http.Error(w, "blocked request was cancelled", http.StatusRequestTimeout)
 		return
 	}
 	var schema taskSchema
@@ -159,10 +217,95 @@ func serveChat(w http.ResponseWriter, r *http.Request, modelVersion, apiKey stri
 		http.Error(w, "fixture encoding failed", http.StatusInternalServerError)
 		return
 	}
+	writeChatResponse(w, modelVersion, string(encoded))
+}
+
+func (gate *structuredRequestGate) arm() bool {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.armed {
+		return false
+	}
+	gate.armed = true
+	gate.entered = false
+	gate.release = make(chan struct{})
+	return true
+}
+
+func (gate *structuredRequestGate) wait(ctx context.Context) error {
+	gate.mu.Lock()
+	if !gate.armed || gate.entered {
+		gate.mu.Unlock()
+		return nil
+	}
+	gate.entered = true
+	release := gate.release
+	gate.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		gate.reset(release)
+		return ctx.Err()
+	case <-release:
+		return nil
+	}
+}
+
+func (gate *structuredRequestGate) open() bool {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if !gate.armed || gate.release == nil {
+		return false
+	}
+	close(gate.release)
+	gate.armed = false
+	gate.entered = false
+	gate.release = nil
+	return true
+}
+
+func (gate *structuredRequestGate) reset(release chan struct{}) {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.release != release {
+		return
+	}
+	gate.armed = false
+	gate.entered = false
+	gate.release = nil
+}
+
+func (gate *structuredRequestGate) state() structuredRequestGateState {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	return structuredRequestGateState{Armed: gate.armed, Entered: gate.entered}
+}
+
+func authorizeFixtureControl(w http.ResponseWriter, r *http.Request, apiKey, method string) bool {
+	if r.Method != method {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	if !hasBearerCanary(r.Header.Values("Authorization"), apiKey) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	if r.ContentLength > 0 || len(r.TransferEncoding) > 0 {
+		http.Error(w, "control request body is not allowed", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func writeGateState(w http.ResponseWriter, state structuredRequestGateState) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(state)
+}
+
+func writeChatResponse(w http.ResponseWriter, modelVersion, content string) {
 	stop := "stop"
 	response := map[string]any{
 		"id": "chatcmpl-rag-smoke", "object": "chat.completion", "created": int64(1), "model": modelVersion,
-		"choices":            []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": string(encoded), "refusal": nil, "tool_calls": []any{}, "annotations": []any{}}, "finish_reason": stop, "logprobs": nil}},
+		"choices":            []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": content, "refusal": nil, "tool_calls": []any{}, "annotations": []any{}}, "finish_reason": stop, "logprobs": nil}},
 		"usage":              map[string]any{"prompt_tokens": 32, "completion_tokens": 32, "total_tokens": 64, "prompt_tokens_details": nil, "completion_tokens_details": nil},
 		"system_fingerprint": nil, "service_tier": nil,
 	}

@@ -8,16 +8,22 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
-// RolloutPhase is the persisted restart state machine.
+// RolloutPhase is the persisted model activation state machine.
 type RolloutPhase string
 
 const (
 	RolloutPhaseIdle       RolloutPhase = "idle"
+	RolloutPhasePreparing  RolloutPhase = "preparing"
+	RolloutPhaseArming     RolloutPhase = "arming"
+	RolloutPhaseActivating RolloutPhase = "activating"
+	RolloutPhaseFailed     RolloutPhase = "failed"
+
+	// Legacy restart phases remain compile-time compatibility symbols while
+	// modelctl and the process-replacement runtime are retired in later phases.
 	RolloutPhaseValidating RolloutPhase = "validating"
 	RolloutPhaseDraining   RolloutPhase = "draining"
 	RolloutPhaseApplying   RolloutPhase = "applying"
 	RolloutPhaseVerifying  RolloutPhase = "verifying"
-	RolloutPhaseFailed     RolloutPhase = "failed"
 )
 
 // RuntimeRole identifies a process that must apply the same revision.
@@ -85,6 +91,76 @@ type RuntimeSummaries struct {
 	Worker RuntimeSummary
 }
 
+// ParticipantPhase is one role's candidate-generation activation phase.
+type ParticipantPhase string
+
+const (
+	ParticipantPhasePreparing ParticipantPhase = "preparing"
+	ParticipantPhasePrepared  ParticipantPhase = "prepared"
+	ParticipantPhaseArmed     ParticipantPhase = "armed"
+	ParticipantPhaseActivated ParticipantPhase = "activated"
+	ParticipantPhaseFailed    ParticipantPhase = "failed"
+	ParticipantPhaseAborted   ParticipantPhase = "aborted"
+	ParticipantPhaseRetired   ParticipantPhase = "retired"
+)
+
+// ParticipantRecord is the internal candidate owner and CAS projection.
+type ParticipantRecord struct {
+	RolloutID      foundation.ID
+	Role           RuntimeRole
+	InstanceID     foundation.ID
+	TargetRevision int64
+	Phase          ParticipantPhase
+	HeartbeatAt    time.Time
+	Version        int64
+	LastErrorCode  string
+	ErrorRetryable bool
+	PreparedAt     time.Time
+	ActivatedAt    time.Time
+	RetiredAt      time.Time
+	Fresh          bool
+}
+
+// ParticipantSummary is safe to expose without process identity.
+type ParticipantSummary struct {
+	Present        bool
+	TargetRevision int64
+	Phase          ParticipantPhase
+	Fresh          bool
+	LastErrorCode  string
+	ErrorRetryable bool
+}
+
+// ParticipantSummaries contains both mandatory activation roles.
+type ParticipantSummaries struct {
+	API    ParticipantSummary
+	Worker ParticipantSummary
+}
+
+// ActivationCommitSide determines the only safe recovery direction.
+type ActivationCommitSide string
+
+const (
+	ActivationCommitSideNone       ActivationCommitSide = "none"
+	ActivationCommitSidePreCommit  ActivationCommitSide = "pre_commit"
+	ActivationCommitSidePostCommit ActivationCommitSide = "post_commit"
+)
+
+// ActivationRecoveryAction records how an expired durable operation converged.
+type ActivationRecoveryAction string
+
+const (
+	ActivationRecoveryNone              ActivationRecoveryAction = "none"
+	ActivationRecoveryFailedPreCommit   ActivationRecoveryAction = "failed_pre_commit"
+	ActivationRecoveryAdoptedPostCommit ActivationRecoveryAction = "adopted_post_commit"
+)
+
+// ActivationRecovery is the durable result of one recovery pass.
+type ActivationRecovery struct {
+	State  RolloutState
+	Action ActivationRecoveryAction
+}
+
 // Snapshot is the complete non-secret Settings read model.
 type Snapshot struct {
 	DesiredRevision     int64
@@ -93,12 +169,78 @@ type Snapshot struct {
 	ActiveSettings      SettingsSummary
 	Runtime             RuntimeSummaries
 	Rollout             RolloutState
+	Participants        ParticipantSummaries
+	ApplyRequired       bool
 	RestartRequired     bool
 	ChatCapability      Capability
 	EmbeddingCapability Capability
 }
 
-// ValidateRolloutTransition owns the only legal non-terminal rollout phase advances.
+// ValidActivationPhase reports phases accepted by the hot-activation schema.
+func ValidActivationPhase(phase RolloutPhase) bool {
+	switch phase {
+	case RolloutPhaseIdle, RolloutPhasePreparing, RolloutPhaseArming, RolloutPhaseActivating, RolloutPhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// ActiveActivationPhase reports whether a durable activation owns the mutation gate.
+func ActiveActivationPhase(phase RolloutPhase) bool {
+	return phase == RolloutPhasePreparing || phase == RolloutPhaseArming || phase == RolloutPhaseActivating
+}
+
+// CommitSide returns the recovery side implied by the durable phase.
+func (state RolloutState) CommitSide() ActivationCommitSide {
+	switch state.Phase {
+	case RolloutPhasePreparing, RolloutPhaseArming, RolloutPhaseFailed:
+		return ActivationCommitSidePreCommit
+	case RolloutPhaseActivating:
+		return ActivationCommitSidePostCommit
+	default:
+		return ActivationCommitSideNone
+	}
+}
+
+// ValidateActivationTransition owns the legal global hot-activation transitions.
+func ValidateActivationTransition(from, to RolloutPhase) error {
+	valid := (from == RolloutPhaseIdle || from == RolloutPhaseFailed) && to == RolloutPhasePreparing ||
+		from == RolloutPhasePreparing && (to == RolloutPhaseArming || to == RolloutPhaseFailed) ||
+		from == RolloutPhaseArming && (to == RolloutPhaseActivating || to == RolloutPhaseFailed) ||
+		from == RolloutPhaseActivating && to == RolloutPhaseIdle
+	if !valid {
+		return foundation.NewError(foundation.ErrorVersionConflict, ErrorCodeActivationConflict, false, errors.New("model settings activation phase transition is invalid"))
+	}
+	return nil
+}
+
+// ValidParticipantPhase reports phases accepted by the participant history table.
+func ValidParticipantPhase(phase ParticipantPhase) bool {
+	switch phase {
+	case ParticipantPhasePreparing, ParticipantPhasePrepared, ParticipantPhaseArmed, ParticipantPhaseActivated,
+		ParticipantPhaseFailed, ParticipantPhaseAborted, ParticipantPhaseRetired:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateParticipantTransition owns the legal same-owner participant transitions.
+func ValidateParticipantTransition(from, to ParticipantPhase) error {
+	preCommitTerminal := to == ParticipantPhaseFailed || to == ParticipantPhaseAborted
+	valid := from == ParticipantPhasePreparing && (to == ParticipantPhasePrepared || preCommitTerminal) ||
+		from == ParticipantPhasePrepared && (to == ParticipantPhaseArmed || preCommitTerminal) ||
+		from == ParticipantPhaseArmed && (to == ParticipantPhaseActivated || preCommitTerminal) ||
+		from == ParticipantPhaseActivated && to == ParticipantPhaseRetired
+	if !valid {
+		return foundation.NewError(foundation.ErrorVersionConflict, ErrorCodeParticipantConflict, false, errors.New("model settings participant phase transition is invalid"))
+	}
+	return nil
+}
+
+// ValidateRolloutTransition owns the legacy restart phase advances.
+// Deprecated: use ValidateActivationTransition for hot activation.
 func ValidateRolloutTransition(from, to RolloutPhase) error {
 	valid := from == RolloutPhaseValidating && to == RolloutPhaseDraining ||
 		from == RolloutPhaseDraining && to == RolloutPhaseApplying ||

@@ -100,7 +100,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
-	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	platformparser "github.com/CodeZen-Lizhi/zhixu/internal/platform/parser"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
@@ -134,6 +133,7 @@ import (
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 	workspaceruntimegrant "github.com/CodeZen-Lizhi/zhixu/internal/workspace/runtimegrant"
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -149,6 +149,7 @@ func main() {
 
 // runAPI 组装并运行 API，返回退出码以保证资源清理 defer 在进程退出前执行。
 func runAPI() int {
+	gin.SetMode(gin.ReleaseMode)
 	configPath := flag.String("config", "", "optional YAML configuration path")
 	flag.Parse()
 
@@ -189,8 +190,11 @@ func runAPI() int {
 
 	producerGate := newAPIProducerGate()
 	workspaceGate := newAPIWorkspaceRuntimeGate()
-	var modelRuntimeController *modelsettingsruntime.Controller
+	var modelRuntimeController *modelsettingsruntime.HotRuntimeController[*modelsettingsruntime.Models]
+	var activationCoordinator *modelsettingsruntime.ActivationCoordinator
+	var modelRuntimeHost *modelsettingsruntime.RuntimeHost[*modelsettingsruntime.Models]
 	var modelSettingsManager modelsettingsapplication.SettingsManager
+	var modelActivationStarter modelsettingshttp.ActivationStarter
 	var modelEnqueueFences []riveradapter.EnqueueFence
 	var configuredModels *modelsettingsruntime.Models
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
@@ -221,14 +225,33 @@ func runAPI() int {
 					logger.Error("model runtime identity is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 					return 1
 				}
-				modelRuntimeController, bootstrapErr = modelsettingsruntime.NewController(modelsettingsruntime.ControllerOptions{
-					Service: bootstrap.Service, Role: modelsettingsdomain.RuntimeRoleAPI, InstanceID: instanceID, Loaded: bootstrap.Loaded,
-					Drain: producerGate.Hooks(),
+				modelRuntimeHost, bootstrapErr = modelsettingsruntime.NewManagedModelsHost(modelsettingsruntime.ManagedModelsHostOptions{
+					Base: cfg, Revisions: bootstrap.Service, Role: modelsettingsdomain.RuntimeRoleAPI,
+					InstanceID: instanceID, Loaded: bootstrap.Loaded,
 				})
+				if bootstrapErr != nil {
+					logger.Error("model runtime host is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
+					return 1
+				}
+				defer modelRuntimeHost.Close()
+				modelRuntimeController, bootstrapErr = modelsettingsruntime.NewHotRuntimeController(
+					modelsettingsruntime.HotRuntimeControllerOptions[*modelsettingsruntime.Models]{
+						Host: modelRuntimeHost, Activation: bootstrap.Service, Revisions: bootstrap.Service,
+						Runtime: bootstrap.Service, InitialPhase: bootstrap.Loaded.InitialPhase,
+					},
+				)
 				if bootstrapErr != nil {
 					logger.Error("model runtime controller is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 					return 1
 				}
+				activationCoordinator, bootstrapErr = modelsettingsruntime.NewActivationCoordinator(
+					modelsettingsruntime.ActivationCoordinatorOptions{Control: bootstrap.Service, Revisions: bootstrap.Service},
+				)
+				if bootstrapErr != nil {
+					logger.Error("model activation coordinator is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
+					return 1
+				}
+				modelActivationStarter = bootstrap.Service
 			}
 		}
 	} else {
@@ -247,7 +270,21 @@ func runAPI() int {
 		}
 		configuredModels = fallback
 	}
+	if modelRuntimeHost == nil {
+		defer func() { _ = configuredModels.Close() }()
+	}
 	cfg = modelsettingsruntime.WithoutModelCredentials(cfg)
+	fixedSearchEmbedder := configuredModels.Embedding().Embedder()
+	var searchEmbeddingAcquirers []retrievalapplication.CompatibleEmbeddingAcquirer
+	if modelRuntimeHost != nil {
+		fixedSearchEmbedder = nil
+		acquirer, acquirerErr := newAPIEmbeddingRuntimeAcquirer(modelRuntimeHost)
+		if acquirerErr != nil {
+			logger.Error("model embedding runtime is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
+			return 1
+		}
+		searchEmbeddingAcquirers = append(searchEmbeddingAcquirers, acquirer)
+	}
 
 	static, staticErr := webassets.NewDir(cfg.WebAssetsDir)
 	if staticErr != nil {
@@ -286,7 +323,7 @@ func runAPI() int {
 	if modelSettingsManager != nil {
 		configuredHandler, handlerErr := modelsettingshttp.NewHandler(
 			modelSettingsManager,
-			modelsettingshttp.Options{RequireSession: authRequired},
+			modelsettingshttp.Options{RequireSession: authRequired, ActivationStarter: modelActivationStarter},
 		)
 		if handlerErr != nil {
 			logger.Error("model settings HTTP service is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
@@ -318,8 +355,10 @@ func runAPI() int {
 	organizingHandler := organizinghttp.NewHandler(nil, nil, nil, cfg.GraphQueryTimeout)
 	documentHistoryHandler := documenthistoryhttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	gitSyncHandler := gitsynchttp.NewHandler(nil, cfg.GraphQueryTimeout)
-	ragEnabled := configuredModels.Chat().State() == platformmodels.CapabilityConfigured
 	var ragInitErr error
+	if database == nil {
+		ragInitErr = errors.New("RAG database dependency is unavailable")
+	}
 	var changeControlService *changecontrolapplication.Service
 	var artifactGeneration *artifactpostgres.SectionGenerationRepository
 	artifactIDs := foundation.NewUUIDGenerator(nil)
@@ -403,15 +442,13 @@ func runAPI() int {
 				workflowServiceErr = repositoryErr
 			} else {
 				workflowService, runtime, artifactGeneration, workflowServiceErr = newAPIArtifactWorkflowComponents(
-					database.DB(), cfg, workspaceRepository, fileScanner, cancellationGuard, artifactIDs, artifactClock, configuredModels,
+					database.DB(), cfg, workspaceRepository, fileScanner, cancellationGuard, artifactIDs, artifactClock,
 					modelEnqueueFences...,
 				)
 			}
 			if workflowServiceErr != nil {
 				logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
-				if ragEnabled {
-					ragInitErr = firstError(ragInitErr, workflowServiceErr)
-				}
+				ragInitErr = firstError(ragInitErr, workflowServiceErr)
 			} else {
 				workflowRuntime = runtime
 				humanReviewProjector, humanReviewErr := newOrganizingHumanTaskReviewProjector(database.DB(), workflowRuntime)
@@ -428,9 +465,7 @@ func runAPI() int {
 		}
 		if repositoryErr != nil {
 			logger.Error("workspace repository is unavailable", "error_code", "WORKSPACE_DATABASE_UNAVAILABLE")
-			if ragEnabled {
-				ragInitErr = firstError(ragInitErr, errors.New("RAG workspace dependency is unavailable"))
-			}
+			ragInitErr = firstError(ragInitErr, errors.New("RAG workspace dependency is unavailable"))
 		} else {
 			workspaceService := workspaceapplication.NewService(workspaceapplication.Dependencies{
 				Repository:     workspaceRepository,
@@ -474,12 +509,12 @@ func runAPI() int {
 			} else {
 				exportHandler = configuredExportHandler
 			}
-			configuredRetrievalHandler, retrievalHandlerErr := newRetrievalHandler(database.DB(), configuredModels.Embedding().Embedder(), workspaceRepository, fileScanner)
+			configuredRetrievalHandler, retrievalHandlerErr := newRetrievalHandler(
+				database.DB(), fixedSearchEmbedder, workspaceRepository, fileScanner, searchEmbeddingAcquirers...,
+			)
 			if retrievalHandlerErr != nil {
 				logger.Error("retrieval search service is unavailable", "error_code", "RETRIEVAL_SEARCH_SERVICE_UNAVAILABLE")
-				if ragEnabled {
-					ragInitErr = firstError(ragInitErr, retrievalHandlerErr)
-				}
+				ragInitErr = firstError(ragInitErr, retrievalHandlerErr)
 			} else {
 				retrievalHandler = configuredRetrievalHandler
 			}
@@ -542,8 +577,9 @@ func runAPI() int {
 				logger.Error("authoring service is unavailable", "error_code", "AUTHORING_DEPENDENCY_UNAVAILABLE")
 			} else {
 				configuredOrganizingHandler, organizingHandlerErr := newOrganizingHandler(
-					context.Background(), database.DB(), configuredModels.Embedding().Embedder(), workspaceRepository,
+					context.Background(), database.DB(), fixedSearchEmbedder, workspaceRepository,
 					fileScanner, configuredAuthoringService, workflowService, cfg.GraphQueryTimeout,
+					searchEmbeddingAcquirers...,
 				)
 				if organizingHandlerErr != nil {
 					logger.Error("organizing service is unavailable", "error_code", "ORGANIZING_DEPENDENCY_UNAVAILABLE")
@@ -562,7 +598,7 @@ func runAPI() int {
 			}
 			generation := []artifactapplication.SectionGenerationStarter(nil)
 			if artifactGeneration != nil {
-				generation = artifactGenerationDependencies(ragEnabled, artifactGeneration)
+				generation = artifactGenerationDependencies(artifactGeneration)
 			}
 			configuredArtifactHandler, artifactHandlerErr := newArtifactHandlerWithDependencies(
 				database.DB(), workspaceRepository, fileScanner, changeControlService, cfg.GraphQueryTimeout,
@@ -580,12 +616,12 @@ func runAPI() int {
 		} else {
 			candidateHandler = configuredCandidateHandler
 		}
-		configuredConversation, configuredEvents, conversationErr := newConversationHandlers(database.DB(), workflowRuntime, questionDispatchEnabled(ragEnabled, ragInitErr))
+		configuredConversation, configuredEvents, conversationErr := newConversationHandlers(
+			database.DB(), workflowRuntime, questionDispatchEnabled(ragInitErr),
+		)
 		if conversationErr != nil {
 			logger.Error("conversation service is unavailable", "error_code", "CONVERSATION_SERVICE_UNAVAILABLE")
-			if ragEnabled {
-				ragInitErr = firstError(ragInitErr, conversationErr)
-			}
+			ragInitErr = firstError(ragInitErr, conversationErr)
 		} else {
 			conversationHandler = configuredConversation
 			eventsHandler = configuredEvents
@@ -627,7 +663,7 @@ func runAPI() int {
 		AuthCheck:         authCheck,
 		Graph:             graphHandler,
 		Candidate:         candidateHandler,
-		RAGEnabled:        ragEnabled,
+		RAGEnabled:        true,
 		RAGInitErr:        ragInitErr,
 		Logger:            logger,
 		Tracer:            telemetry.Tracer(),
@@ -637,6 +673,7 @@ func runAPI() int {
 	stop, stopCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopCancel()
 	var modelRuntimeErr <-chan error
+	var activationCoordinatorErr <-chan error
 	var workspaceRuntimeErr <-chan error
 	if workspaceRuntime != nil {
 		workspaceRuntimeErr = workspaceRuntime.Errors()
@@ -651,6 +688,11 @@ func runAPI() int {
 		case <-stop.Done():
 			return 0
 		}
+		if activationCoordinator == nil {
+			logger.Error("model activation coordinator is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
+			return 1
+		}
+		activationCoordinatorErr = startAPIActivationCoordinator(stop, activationCoordinator)
 	}
 
 	serverErr := make(chan error, 1)
@@ -668,6 +710,9 @@ func runAPI() int {
 		exitCode = 1
 	case err := <-modelRuntimeErr:
 		logger.Error("model runtime ownership was lost", "error_code", modelsettingsdomain.ErrorCodeRuntimeConflict, "error", err)
+		exitCode = 1
+	case err := <-activationCoordinatorErr:
+		logger.Error("model activation coordinator stopped", "error_code", modelsettingsdomain.ErrorCodeActivationConflict, "error", err)
 		exitCode = 1
 	case err := <-workspaceRuntimeErr:
 		logger.Error("workspace root grant ownership was lost", "error_code", "WORKSPACE_GRANT_STALE", "error", err)
@@ -834,6 +879,7 @@ func newOrganizingHandler(
 	authoring organizingowner.AuthoringReader,
 	workflows *workflowapplication.Service,
 	timeout time.Duration,
+	embeddingAcquirers ...retrievalapplication.CompatibleEmbeddingAcquirer,
 ) (*organizinghttp.Handler, error) {
 	if ctx == nil || pool == nil || workspaceRepository == nil || files == nil || authoring == nil || workflows == nil {
 		return nil, errors.New("organizing database, owner services and workflow reader are required")
@@ -850,7 +896,7 @@ func newOrganizingHandler(
 	if err != nil {
 		return nil, err
 	}
-	search, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
+	search, err := newAPISearchService(searchRepository, embedder, nil, embeddingAcquirers...)
 	if err != nil {
 		return nil, err
 	}
@@ -1351,6 +1397,7 @@ func newRetrievalHandler(
 	embedder retrievalapplication.Embedder,
 	workspaceRepository workspacedomain.SourceMaterialRepository,
 	files workspacedomain.FileScanner,
+	embeddingAcquirers ...retrievalapplication.CompatibleEmbeddingAcquirer,
 ) (*retrievalhttp.Handler, error) {
 	if pool == nil || workspaceRepository == nil || files == nil {
 		return nil, errors.New("retrieval search dependencies are unavailable")
@@ -1367,7 +1414,7 @@ func newRetrievalHandler(
 	if err != nil {
 		return nil, err
 	}
-	searchService, err := retrievalapplication.NewSearchService(searchRepository, embedder, nil)
+	searchService, err := newAPISearchService(searchRepository, embedder, nil, embeddingAcquirers...)
 	if err != nil {
 		return nil, err
 	}
@@ -1528,27 +1575,28 @@ func newArtifactSectionGeneration(
 	return generation, nil
 }
 
-// artifactGenerationDependencies 只在 Chat capability 启用时向 Artifact HTTP 注入章节生成能力。
+// artifactGenerationDependencies 只要持久化 Workflow 边界可用就注入章节生成能力。
+// 模型 capability 在 Worker 获取实际 generation 时再 fail closed。
 func artifactGenerationDependencies(
-	chatEnabled bool,
 	generation artifactapplication.SectionGenerationStarter,
 ) []artifactapplication.SectionGenerationStarter {
-	if !chatEnabled || generation == nil {
+	if generation == nil {
 		return nil
 	}
 	return []artifactapplication.SectionGenerationStarter{generation}
 }
 
-// questionDispatchEnabled 只在显式启用且全部 API RAG 依赖组装成功时开放异步 Question 命令。
-func questionDispatchEnabled(ragEnabled bool, ragInitErr error) bool {
-	return ragEnabled && ragInitErr == nil
+// questionDispatchEnabled 只在全部 API RAG 持久化依赖组装成功时开放异步 Question 命令。
+// 模型 capability 在 Worker 获取实际 generation 时再 fail closed。
+func questionDispatchEnabled(ragInitErr error) bool {
+	return ragInitErr == nil
 }
 
 // newConversationHandlers 使用同一个持久 Event Store 组装 Conversation 写事件与 SSE 重放边界。
 func newConversationHandlers(
 	pool *pgxpool.Pool,
 	runtime *workflowpostgres.RuntimeRepository,
-	ragEnabled bool,
+	questionDispatch bool,
 ) (*conversationhttp.Handler, *eventshttp.Handler, error) {
 	if pool == nil {
 		return nil, nil, errors.New("conversation database is unavailable")
@@ -1562,7 +1610,7 @@ func newConversationHandlers(
 		return nil, nil, err
 	}
 	var dispatcher conversationapplication.QuestionDispatcher
-	if ragEnabled {
+	if questionDispatch {
 		dispatcher, err = conversationpostgres.NewQuestionDispatcher(
 			pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
 		)
@@ -1630,7 +1678,6 @@ func newAPIArtifactWorkflowComponents(
 	cancellation workflowapplication.CancellationSafetyGuard,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
-	models *modelsettingsruntime.Models,
 	enqueueFences ...riveradapter.EnqueueFence,
 ) (*workflowapplication.Service, *workflowpostgres.RuntimeRepository, *artifactpostgres.SectionGenerationRepository, error) {
 	factory, err := newAPIRuntimeRepositoryFactory(pool, cfg, enqueueFences...)
@@ -1652,7 +1699,7 @@ func newAPIArtifactWorkflowComponents(
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	service, err := newWorkflowServiceWithRuntime(factory, runtime, models != nil && models.Chat().State() == platformmodels.CapabilityConfigured)
+	service, err := newWorkflowServiceWithRuntime(factory, runtime)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1685,7 +1732,7 @@ func newWorkflowComponentsWithFactory(
 	if err != nil {
 		return nil, nil, err
 	}
-	service, err := newWorkflowServiceWithRuntime(factory, runtimeRepository, false)
+	service, err := newWorkflowServiceWithRuntime(factory, runtimeRepository)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1695,7 +1742,6 @@ func newWorkflowComponentsWithFactory(
 func newWorkflowServiceWithRuntime(
 	factory *apiRuntimeRepositoryFactory,
 	runtimeRepository *workflowpostgres.RuntimeRepository,
-	chatEnabled bool,
 ) (*workflowapplication.Service, error) {
 	if factory == nil || factory.pool == nil || runtimeRepository == nil {
 		return nil, errors.New("workflow runtime dependencies are unavailable")
@@ -1712,7 +1758,7 @@ func newWorkflowServiceWithRuntime(
 	if err != nil {
 		return nil, err
 	}
-	if err := registerAPIWorkflowExecutors(chatEnabled, executors); err != nil {
+	if err := registerAPIWorkflowExecutors(executors); err != nil {
 		return nil, err
 	}
 	if err := executors.Freeze(); err != nil {
@@ -1726,7 +1772,7 @@ func newWorkflowServiceWithRuntime(
 	if err != nil {
 		return nil, err
 	}
-	if err := registerAPIWorkflowDefinitions(chatEnabled, definitions); err != nil {
+	if err := registerAPIWorkflowDefinitions(definitions); err != nil {
 		return nil, err
 	}
 	if err := definitions.Freeze(); err != nil {
@@ -1743,25 +1789,23 @@ func newToolContractRegistry() (*toolsapplication.Registry, error) {
 	return toolcatalog.NewFrozenContractRegistry()
 }
 
-func registerAPIWorkflowExecutors(chatEnabled bool, executors *workflowapplication.ExecutorRegistry) error {
+func registerAPIWorkflowExecutors(executors *workflowapplication.ExecutorRegistry) error {
 	if err := executors.Register(workflowapplication.CanonicalJSONHashNodeKind, workflowapplication.CanonicalJSONHashInputSchemaVersion, workflowapplication.NewCanonicalJSONHashExecutor()); err != nil {
 		return err
 	}
 	if err := executors.RegisterContract(healthapplication.HealthScanNodeKind, healthapplication.HealthScanInputSchemaVersion); err != nil {
 		return err
 	}
-	if chatEnabled {
-		if err := executors.RegisterContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err != nil {
-			return err
-		}
-		if err := executors.RegisterContract(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion); err != nil {
-			return err
-		}
+	if err := executors.RegisterContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err != nil {
+		return err
+	}
+	if err := executors.RegisterContract(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion); err != nil {
+		return err
 	}
 	return nil
 }
 
-func registerAPIWorkflowDefinitions(chatEnabled bool, definitions *workflowapplication.DefinitionRegistry) error {
+func registerAPIWorkflowDefinitions(definitions *workflowapplication.DefinitionRegistry) error {
 	if err := definitions.Register(workflowdomain.RegisteredDefinition{
 		Key: "deterministic.hash", Version: 1, InputSchemaVersion: 1,
 		Graph: workflowdomain.CanonicalGraph{Nodes: []workflowdomain.NodeDefinition{{
@@ -1779,13 +1823,11 @@ func registerAPIWorkflowDefinitions(chatEnabled bool, definitions *workflowappli
 	if err := definitions.Register(healthDefinition); err != nil {
 		return err
 	}
-	if chatEnabled {
-		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
-			return err
-		}
-		if err := definitions.Register(conversationworkflow.RegisteredDefinition()); err != nil {
-			return err
-		}
+	if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
+		return err
+	}
+	if err := definitions.Register(conversationworkflow.RegisteredDefinition()); err != nil {
+		return err
 	}
 	return nil
 }

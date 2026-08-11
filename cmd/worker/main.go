@@ -69,6 +69,7 @@ import (
 	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
 	memoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
+	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	organizingowner "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/owner"
@@ -204,10 +205,13 @@ type workerComponents struct {
 	gitSyncScheduler   *gitsyncapplication.AutoSyncScheduler
 	gitSyncCapability  agentCapabilityStatus
 	reindexWorker      *reindexriver.Worker
+	reindexRuntime     *workerReindexProcessorAcquirer
 	dispatcher         *retrievalruntime.Runner
 	runtimeClient      *riveradapter.Client
 	definitions        *workflowapplication.DefinitionRegistry
 	executors          *workflowapplication.ExecutorRegistry
+	runtimeGeneration  workerRuntimeGenerationBuilder
+	sourceProcessing   sourceProcessingComponents
 	semanticScan       *graphworkflow.SemanticLinkScanExecutor
 	healthScan         *healthworkflowadapter.HealthScanExecutor
 	healthScanStart    *healthapplication.ScanService
@@ -358,11 +362,67 @@ func run(configPath string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	var runtimeExecutorAcquirer *workerRuntimeExecutorAcquirer
+	var sourceRefreshAcquirer *workerSourceRefreshAcquirer
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		runtimeExecutorAcquirer = &workerRuntimeExecutorAcquirer{}
+		sourceRefreshAcquirer = &workerSourceRefreshAcquirer{}
+		modelBinding.executorAcquirer = runtimeExecutorAcquirer
+		modelBinding.sourceRefreshAcquirer = sourceRefreshAcquirer
+	}
 	cfg = modelsettingsruntime.WithoutModelCredentials(cfg)
 	components, err := newWorkerComponentsWithModels(database.DB(), cfg, configuredModels, modelBinding, workspaceRuntime.Repository, logger, telemetry.Metrics(), telemetry.Tracer(), modelEnqueueFences...)
 	if err != nil {
 		logger.Error("worker components are unavailable", "error_code", "WORKER_COMPONENTS_UNAVAILABLE")
 		return err
+	}
+	var modelController *modelsettingsruntime.HotRuntimeController[*workerRuntimeGeneration]
+	var modelHost *modelsettingsruntime.RuntimeHost[*workerRuntimeGeneration]
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		if managedModels.Service == nil || modelBinding.revision == nil || modelBinding.instanceID == nil ||
+			runtimeExecutorAcquirer == nil || sourceRefreshAcquirer == nil || components.runtimeGeneration == nil || components.reindexRuntime == nil || managedModels.Loaded.RolloutID != nil {
+			return errors.New("managed worker hot runtime composition is unavailable")
+		}
+		modelHost, err = modelsettingsruntime.NewRuntimeHost(modelsettingsruntime.RuntimeHostOptions[*workerRuntimeGeneration]{
+			Initial: modelsettingsruntime.InitialRuntime[*workerRuntimeGeneration]{
+				Binding: modelsettingsruntime.RuntimeBinding{
+					Mode: modelsettingsruntime.RuntimeModeManaged, Role: modelsettingsruntime.RuntimeRoleWorker,
+					Revision: *modelBinding.revision, InstanceID: *modelBinding.instanceID,
+				},
+				Value:       &workerRuntimeGeneration{models: configuredModels, executors: components.executors, sources: components.sourceProcessing},
+				Unavailable: managedModels.Loaded.InitialPhase == modelsettingsdomain.RuntimePhaseUnavailable,
+			},
+			Factory: &workerRuntimeGenerationFactory{
+				base: cfg, revisions: managedModels.Service, buildGeneration: components.runtimeGeneration,
+			},
+			EmbeddingCompatible: func(generation *workerRuntimeGeneration, version retrievaldomain.EmbeddingVersion) error {
+				if generation == nil || generation.models == nil {
+					return errors.New("worker runtime models are unavailable")
+				}
+				return generation.models.ValidateEmbeddingVersion(version)
+			},
+		})
+		if err != nil {
+			return err
+		}
+		defer modelHost.Close()
+		if err := runtimeExecutorAcquirer.bind(modelHost); err != nil {
+			return err
+		}
+		if err := components.reindexRuntime.bind(modelHost); err != nil {
+			return err
+		}
+		if err := sourceRefreshAcquirer.bind(modelHost); err != nil {
+			return err
+		}
+		modelController, err = modelsettingsruntime.NewHotRuntimeController(modelsettingsruntime.HotRuntimeControllerOptions[*workerRuntimeGeneration]{
+			Host: modelHost, Activation: managedModels.Service, Revisions: managedModels.Service,
+			Runtime: managedModels.Service, InitialPhase: managedModels.Loaded.InitialPhase,
+			StaleAfter: modelBinding.runtimeFreshWithin,
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	readiness := workflowruntime.NewReadiness()
@@ -417,20 +477,7 @@ func run(configPath string, logger *slog.Logger) error {
 	defer signal.Stop(signals)
 	modelRuntimeErr := make(chan error, 1)
 	workspaceRuntimeErr := workspaceRuntime.Errors()
-	var modelController *modelsettingsruntime.Controller
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
-		if managedModels.Service == nil || modelBinding.instanceID == nil {
-			_ = health.server.Close()
-			return errors.New("managed model runtime registration is unavailable")
-		}
-		modelController, err = modelsettingsruntime.NewController(modelsettingsruntime.ControllerOptions{
-			Service: managedModels.Service, Role: modelsettingsdomain.RuntimeRoleWorker, InstanceID: *modelBinding.instanceID, Loaded: managedModels.Loaded,
-			Drain: modelDrain.Hooks(),
-		})
-		if err != nil {
-			_ = health.server.Close()
-			return err
-		}
 		go func() {
 			if runErr := modelController.Run(processContext); runErr != nil {
 				modelRuntimeErr <- runErr
@@ -455,21 +502,9 @@ func run(configPath string, logger *slog.Logger) error {
 			return healthErr
 		}
 	}
-	resumeQueue := true
-	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
-		queueResumeContext, cancelQueueResume := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
-		modelSnapshot, snapshotErr := managedModels.Service.Snapshot(queueResumeContext)
-		cancelQueueResume()
-		if snapshotErr != nil {
-			_ = health.server.Close()
-			return snapshotErr
-		}
-		resumeQueue = modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseIdle ||
-			modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseFailed
-	}
 	if err := startWorkerRuntime(
 		processContext,
-		resumeQueue,
+		true,
 		cfg.DatabasePingTimeout,
 		cfg.WorkerHardStopTimeout,
 		lifecycle,
@@ -1012,8 +1047,11 @@ func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logge
 }
 
 type workerModelRuntimeBinding struct {
-	revision   *int64
-	instanceID *foundation.ID
+	revision              *int64
+	instanceID            *foundation.ID
+	runtimeFreshWithin    time.Duration
+	executorAcquirer      riveradapter.RuntimeExecutorAcquirer
+	sourceRefreshAcquirer *workerSourceRefreshAcquirer
 }
 
 func newWorkerModelRuntimeBinding(mode config.ModelSettingsMode, models *modelsettingsruntime.Models, ids foundation.IDGenerator) (workerModelRuntimeBinding, error) {
@@ -1032,14 +1070,19 @@ func newWorkerModelRuntimeBinding(mode config.ModelSettingsMode, models *modelse
 		return workerModelRuntimeBinding{}, errors.New("managed worker model runtime instance is invalid")
 	}
 	revision := models.Revision()
-	return workerModelRuntimeBinding{revision: &revision, instanceID: &instanceID}, nil
+	return workerModelRuntimeBinding{
+		revision: &revision, instanceID: &instanceID, runtimeFreshWithin: modelsettingsapplication.DefaultRuntimeFreshWithin,
+	}, nil
 }
 
 func (binding workerModelRuntimeBinding) runtimeWorkerOptions() []riveradapter.RuntimeWorkerOptions {
-	if binding.revision == nil && binding.instanceID == nil {
+	if binding.revision == nil && binding.instanceID == nil && binding.executorAcquirer == nil {
 		return nil
 	}
-	return []riveradapter.RuntimeWorkerOptions{{ModelSettingsRevision: binding.revision, ModelRuntimeInstanceID: binding.instanceID}}
+	return []riveradapter.RuntimeWorkerOptions{{
+		ModelSettingsRevision: binding.revision, ModelRuntimeInstanceID: binding.instanceID,
+		RuntimeExecutorAcquirer: binding.executorAcquirer,
+	}}
 }
 
 func modelRuntimeForComposition(cfg config.Config, supplied ...*modelsettingsruntime.Models) (*modelsettingsruntime.Models, error) {
@@ -1070,10 +1113,10 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		return workerComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, modelsettingsdomain.ErrorCodeUnavailable, false, errors.New("model runtime is nil"))
 	}
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
-		if modelBinding.revision == nil || modelBinding.instanceID == nil || *modelBinding.revision != models.Revision() {
+		if modelBinding.revision == nil || modelBinding.instanceID == nil || !modelsettingsapplication.ValidRuntimeFreshWithin(modelBinding.runtimeFreshWithin) || modelBinding.executorAcquirer == nil || modelBinding.sourceRefreshAcquirer == nil || *modelBinding.revision != models.Revision() {
 			return workerComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeRuntimeConflict, false, errors.New("managed worker model runtime binding does not match the frozen runtime"))
 		}
-	} else if modelBinding.revision != nil || modelBinding.instanceID != nil {
+	} else if modelBinding.revision != nil || modelBinding.instanceID != nil || modelBinding.runtimeFreshWithin != 0 || modelBinding.executorAcquirer != nil || modelBinding.sourceRefreshAcquirer != nil {
 		return workerComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeRuntimeConflict, false, errors.New("static worker must not bind a managed model runtime"))
 	}
 	if workspaceRepository == nil {
@@ -1283,8 +1326,9 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		return workerComponents{}, err
 	}
 	runtimeRepository, err := workflowpostgres.NewRuntimeRepositoryWithHooks(db, inserter, workflowpostgres.RuntimeRepositoryHooks{
-		CancellationSafety: cancellationGuard,
-		Terminal:           terminalHooks,
+		CancellationSafety:      cancellationGuard,
+		Terminal:                terminalHooks,
+		ModelRuntimeFreshWithin: modelBinding.runtimeFreshWithin,
 	})
 	if err != nil {
 		return workerComponents{}, err
@@ -1299,8 +1343,16 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
+	gitSyncSourceProcessing := sourceProcessing
+	if modelBinding.sourceRefreshAcquirer != nil {
+		dynamicRefresher, dynamicErr := retrievalapplication.NewDynamicSourceRefresher(modelBinding.sourceRefreshAcquirer)
+		if dynamicErr != nil {
+			return workerComponents{}, dynamicErr
+		}
+		gitSyncSourceProcessing.refresher = dynamicRefresher
+	}
 	gitSyncWorker, gitSyncScheduler, err := newGitSyncWorker(
-		db, cfg, workspaceRepository, gitRepository, sourceProcessing, gitOperationLocker, workerID,
+		db, cfg, workspaceRepository, gitRepository, gitSyncSourceProcessing, gitOperationLocker, workerID,
 	)
 	if err != nil {
 		return workerComponents{}, err
@@ -1348,7 +1400,11 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err := executors.Register(captureapplication.ProcessingNodeKind, captureapplication.ProcessingInputSchemaVersion, captureExecutor); err != nil {
 		return workerComponents{}, err
 	}
-	if agentComponents.relation != nil {
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		if err := registerWorkerAgentExecutors(executors, agentComponents); err != nil {
+			return workerComponents{}, err
+		}
+	} else if agentComponents.relation != nil {
 		if err := executors.Register(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion, agentComponents.relation); err != nil {
 			return workerComponents{}, err
 		}
@@ -1368,7 +1424,11 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	if artifactComponents.executor != nil {
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		if err := registerWorkerArtifactExecutor(executors, artifactComponents); err != nil {
+			return workerComponents{}, err
+		}
+	} else if artifactComponents.executor != nil {
 		if err := executors.Register(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion, artifactComponents.executor); err != nil {
 			return workerComponents{}, err
 		}
@@ -1448,6 +1508,16 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
+	var runtimeGeneration workerRuntimeGenerationBuilder
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		runtimeGeneration = newWorkerRuntimeGenerationBuilder(
+			db, cfg, catalog, workspaceRepository, gitRepository,
+			bootstrap, semanticScan, healthScan,
+			artifactAgentRepository, artifactTerminal, runtimeRepository, workflowRepository,
+			captureRepository, captureFetcher, memoryService,
+			organizingRepository, organizingArtifacts, organizingProposals, organizingRenderer, documentContentReader,
+		)
+	}
 	for _, kind := range organizingworkflow.ExecutorNodeKinds() {
 		if err := executors.Register(kind, organizingworkflow.InputSchemaVersion, organizingExecutor); err != nil {
 			return workerComponents{}, err
@@ -1499,7 +1569,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err := definitions.Register(captureDefinition); err != nil {
 		return workerComponents{}, err
 	}
-	if agentComponents.relation != nil {
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged || agentComponents.relation != nil {
 		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
 			return workerComponents{}, err
 		}
@@ -1507,7 +1577,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 			return workerComponents{}, err
 		}
 	}
-	if artifactComponents.executor != nil {
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged || artifactComponents.executor != nil {
 		if err := definitions.Register(artifactworkflow.RegisteredDefinition()); err != nil {
 			return workerComponents{}, err
 		}
@@ -1667,12 +1737,192 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		captureExecutor: captureExecutor, captureOutbox: captureOutbox, captureProfile: captureProfileCapability,
 		organizingExecutor: organizingExecutor, organizingOutbox: organizingOutbox,
 		gitSyncWorker: gitSyncWorker, gitSyncScheduler: gitSyncScheduler, gitSyncCapability: gitSyncCapability,
-		reindexWorker: reindex.worker, dispatcher: reindex.dispatcher,
-		runtimeClient: runtimeClient, definitions: definitions, executors: executors, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject, citationBackfill: citationBackfill,
+		reindexWorker: reindex.worker, reindexRuntime: reindex.runtime, dispatcher: reindex.dispatcher,
+		runtimeClient: runtimeClient, definitions: definitions, executors: executors, runtimeGeneration: runtimeGeneration, sourceProcessing: sourceProcessing, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject, citationBackfill: citationBackfill,
 		exportWorker: exportWorker, exportService: exportService, memoryExpiry: memoryService,
 		interviewCompletion: interviewCompletion, learningPathMaintenance: learningPathMaintenance,
 		fatalInvariants: fatalInvariants,
 	}, nil
+}
+
+func newWorkerRuntimeGenerationBuilder(
+	db *pgxpool.Pool,
+	cfg config.Config,
+	catalog workflowapplication.ValidationCatalog,
+	workspaceRepository *workspacepostgres.Repository,
+	gitRepository *gitcli.WritebackClient,
+	safeWriteback workflowapplication.Executor,
+	semanticScan workflowapplication.Executor,
+	healthScan workflowapplication.Executor,
+	artifactAgentRepository *agentpostgres.Repository,
+	artifactTerminal *artifactpostgres.SectionGenerationTerminalHook,
+	runtimeRepository *workflowpostgres.RuntimeRepository,
+	workflowRepository *workflowpostgres.Repository,
+	captureRepository *capturepostgres.Repository,
+	captureFetcher captureapplication.URLFetcher,
+	memoryService *memoryapplication.Service,
+	organizingRepository *organizingpostgres.Repository,
+	organizingArtifacts *organizingworkflow.ArtifactOwner,
+	organizingProposals *organizingworkflow.ProposalOwner,
+	organizingRenderer *organizingworkflow.EvidenceRenderer,
+	documentContentReader *organizingowner.DocumentContentReader,
+) workerRuntimeGenerationBuilder {
+	return func(ctx context.Context, models *modelsettingsruntime.Models) (*workerRuntimeGeneration, error) {
+		if ctx == nil || models == nil || models.Revision() <= 0 {
+			return nil, workerRuntimeRevisionError(errors.New("managed worker runtime executor build input is invalid"))
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		executors, err := workflowapplication.NewExecutorRegistry(catalog)
+		if err != nil {
+			return nil, err
+		}
+		if err := executors.Register(changecontrolworkflow.SafeWritebackNodeKind, changecontrolworkflow.SafeWritebackBootstrapInputSchemaVersion, safeWriteback); err != nil {
+			return nil, err
+		}
+		if err := executors.Register(graphapplication.SemanticLinkScanNodeKind, graphapplication.SemanticLinkScanInputSchemaVersion, semanticScan); err != nil {
+			return nil, err
+		}
+		if err := executors.Register(graphapplication.SemanticLinkScanNodeKind, graphapplication.SemanticLinkSmartCollectionScanInputSchemaVersion, semanticScan); err != nil {
+			return nil, err
+		}
+		if err := executors.Register(healthapplication.HealthScanNodeKind, healthapplication.HealthScanInputSchemaVersion, healthScan); err != nil {
+			return nil, err
+		}
+
+		toolComponents, err := newToolRuntimeComponents(db, cfg, workspaceRepository, gitRepository, models)
+		if err != nil {
+			return nil, err
+		}
+		revision := models.Revision()
+		sourceProcessing, err := newSourceProcessingComponents(
+			db, cfg, workspaceRepository, gitRepository, &revision, models,
+		)
+		if err != nil {
+			return nil, err
+		}
+		agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository, memoryService, models)
+		if err != nil {
+			return nil, err
+		}
+		captureProfileGenerator, _, err := newCaptureProfileGenerator(
+			db, agentComponents.model, agentComponents.contract, artifactAgentRepository,
+			foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+		)
+		if err != nil {
+			return nil, err
+		}
+		captureExecutor, err := newCaptureWorkflowExecutor(
+			captureRepository, captureRepository, sourceProcessing.workspace, captureFetcher,
+			sourceProcessing.refresher, captureProfileGenerator, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := executors.Register(captureapplication.ProcessingNodeKind, captureapplication.ProcessingInputSchemaVersion, captureExecutor); err != nil {
+			return nil, err
+		}
+		if err := registerWorkerAgentExecutors(executors, agentComponents); err != nil {
+			return nil, err
+		}
+
+		artifactComponents, err := newArtifactWorkflowComponents(
+			db, workspaceRepository, runtimeRepository, artifactAgentRepository, artifactTerminal,
+			agentComponents.model, agentComponents.contract, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, models.Embedding().Embedder(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := registerWorkerArtifactExecutor(executors, artifactComponents); err != nil {
+			return nil, err
+		}
+
+		var organizingGenerator organizingworkflow.ContentGenerator = organizingworkflow.NewUnavailableGenerator()
+		if agentComponents.model != nil {
+			organizingGenerationRepository, err := organizingpostgres.NewGenerationRepository(db, artifactAgentRepository)
+			if err != nil {
+				return nil, err
+			}
+			organizingCatalog, err := newOrganizingRuntimeCatalog(agentComponents.contract)
+			if err != nil {
+				return nil, err
+			}
+			organizingGenerator, err = organizingworkflow.NewGenerator(organizingworkflow.GeneratorDependencies{
+				Model: agentComponents.model, Catalog: organizingCatalog, ModelRuns: artifactAgentRepository,
+				Store: organizingGenerationRepository, Evidence: organizingRenderer, Documents: documentContentReader,
+				ProfileRef: agentworkflow.DefaultProfileRef(), IDs: foundation.NewUUIDGenerator(nil),
+				Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(agentComponents.contract),
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+		organizingExecutor, err := organizingworkflow.NewExecutor(organizingworkflow.ExecutorDependencies{
+			Runs: workflowRepository, Snapshots: organizingRepository, Templates: organizingRepository,
+			Bindings: organizingRepository, Stages: runtimeRepository, Artifacts: organizingArtifacts,
+			Proposals: organizingProposals, Generator: organizingGenerator,
+			IDs: foundation.NewUUIDGenerator(nil),
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, kind := range organizingworkflow.ExecutorNodeKinds() {
+			if err := executors.Register(kind, organizingworkflow.InputSchemaVersion, organizingExecutor); err != nil {
+				return nil, err
+			}
+		}
+		if toolComponents.runtimeEnabled {
+			if toolComponents.workflow == nil || toolComponents.definition == nil {
+				return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_TOOL_EXECUTORS_UNAVAILABLE", false, errors.New("tool workflow executor or definition is unavailable"))
+			}
+			if err := executors.Register(toolworkflow.NodeKind, toolworkflow.InputSchemaVersion, toolComponents.workflow); err != nil {
+				return nil, err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := executors.Freeze(); err != nil {
+			return nil, err
+		}
+		if sourceProcessing.workspace == nil || sourceProcessing.ingestion == nil || sourceProcessing.retrieval == nil ||
+			sourceProcessing.store == nil || sourceProcessing.vectors == nil || sourceProcessing.regression == nil || sourceProcessing.refresher == nil {
+			return nil, workerRuntimeNotReadyError(errors.New("managed worker source-processing generation is incomplete"))
+		}
+		return &workerRuntimeGeneration{executors: executors, sources: sourceProcessing}, nil
+	}
+}
+
+func registerWorkerAgentExecutors(registry *workflowapplication.ExecutorRegistry, components agentWorkflowComponents) error {
+	var relation workflowapplication.Executor = workerUnavailableExecutor{code: agentworkflow.ErrorCodeCapabilityUnavailable}
+	var rag workflowapplication.Executor = workerUnavailableExecutor{code: agentworkflow.ErrorCodeCapabilityUnavailable}
+	if components.capability.available {
+		if components.capability.code != "" || components.relation == nil || components.rag == nil {
+			return foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_AGENT_EXECUTORS_UNAVAILABLE", false, errors.New("enabled chat worker executors are incomplete"))
+		}
+		relation = components.relation
+		rag = components.rag
+	} else if components.capability.code != agentworkflow.ErrorCodeCapabilityUnavailable || components.relation != nil || components.rag != nil {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "WORKER_AGENT_CAPABILITY_INVALID", false, errors.New("disabled chat worker executor state is inconsistent"))
+	}
+	if err := registry.Register(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion, relation); err != nil {
+		return err
+	}
+	return registry.Register(agentworkflow.RAGWorkflowNodeKind, agentworkflow.RAGWorkflowInputSchemaVersion, rag)
+}
+
+func registerWorkerArtifactExecutor(registry *workflowapplication.ExecutorRegistry, components artifactWorkflowComponents) error {
+	var executor workflowapplication.Executor = workerUnavailableExecutor{code: artifactworkflow.ErrorCodeCapabilityUnavailable}
+	if components.capability.available {
+		if components.capability.code != "" || components.executor == nil || components.catalog == nil {
+			return foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_ARTIFACT_EXECUTOR_UNAVAILABLE", false, errors.New("enabled artifact worker executor is incomplete"))
+		}
+		executor = components.executor
+	} else if components.capability.code != artifactworkflow.ErrorCodeCapabilityUnavailable || components.executor != nil || components.catalog != nil {
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "WORKER_ARTIFACT_CAPABILITY_INVALID", false, errors.New("disabled artifact worker executor state is inconsistent"))
+	}
+	return registry.Register(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion, executor)
 }
 
 func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, gitInspector *gitcli.WritebackClient, modelRuntimes ...*modelsettingsruntime.Models) (toolRuntimeComponents, error) {
@@ -1914,10 +2164,16 @@ func newCaptureProfileRuntimeCatalog(contract platformmodels.ChatContract) (*age
 
 // agentWorkflowReadiness 保证 Chat capability 要么显式关闭，要么 Relation 与 RAG 都在冻结 Registry 可达。
 func agentWorkflowReadiness(components workerComponents) bool {
-	if !components.agentCapability.available {
-		return components.agentCapability.code == agentworkflow.ErrorCodeCapabilityUnavailable
+	if components.agentCapability.available {
+		if components.agentCapability.code != "" {
+			return false
+		}
+	} else if components.agentCapability.code != agentworkflow.ErrorCodeCapabilityUnavailable {
+		return false
+	} else if components.runtimeGeneration == nil {
+		return true
 	}
-	if components.agentCapability.code != "" || components.executors == nil || components.definitions == nil {
+	if components.executors == nil || components.definitions == nil {
 		return false
 	}
 	if _, err := components.executors.Resolve(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err != nil {
@@ -1939,10 +2195,16 @@ func artifactWorkflowReadiness(components workerComponents) bool {
 	if artifact.generation == nil || artifact.terminal == nil || artifact.citationVerifier == nil {
 		return false
 	}
-	if !artifact.capability.available {
-		return artifact.capability.code == artifactworkflow.ErrorCodeCapabilityUnavailable && artifact.executor == nil && artifact.catalog == nil
+	if artifact.capability.available {
+		if artifact.capability.code != "" || artifact.executor == nil || artifact.catalog == nil {
+			return false
+		}
+	} else if artifact.capability.code != artifactworkflow.ErrorCodeCapabilityUnavailable || artifact.executor != nil || artifact.catalog != nil {
+		return false
+	} else if components.runtimeGeneration == nil {
+		return true
 	}
-	if artifact.capability.code != "" || artifact.executor == nil || artifact.catalog == nil || components.executors == nil || components.definitions == nil {
+	if components.executors == nil || components.definitions == nil {
 		return false
 	}
 	if _, err := components.executors.Resolve(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion); err != nil {
@@ -2288,6 +2550,7 @@ func agentApplicationBudget(contract platformmodels.ChatContract) agentapplicati
 
 type reindexComponents struct {
 	worker     *reindexriver.Worker
+	runtime    *workerReindexProcessorAcquirer
 	dispatcher *retrievalruntime.Runner
 }
 
@@ -2299,7 +2562,7 @@ type sourceProcessingComponents struct {
 	vectors          retrievalapplication.ProcessorVectorPort
 	regression       *retrievalapplication.RegressionService
 	processorOptions retrievalapplication.ProcessorOptions
-	refresher        *retrievalapplication.SourceRefresher
+	refresher        retrievalapplication.SourceRefreshOperationRunner
 }
 
 func newSourceProcessingComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, committedGit *gitcli.WritebackClient, modelSettingsRevision *int64, modelRuntimes ...*modelsettingsruntime.Models) (sourceProcessingComponents, error) {
@@ -2499,11 +2762,22 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, processing source
 	if err != nil {
 		return reindexComponents{}, err
 	}
-	worker, err := reindexriver.NewWorker(deliveryRuntime, processor, completion, reindexriver.WorkerOptions{
+	workerOptions := reindexriver.WorkerOptions{
 		Owner: fmt.Sprintf("reindex-worker:%s", workerID), LeaseDuration: cfg.ReindexLeaseDuration,
 		HeartbeatInterval: cfg.ReindexHeartbeatInterval, Metrics: metrics, Logger: logger,
 		FatalInvariants: fatalInvariants,
-	})
+	}
+	var worker *reindexriver.Worker
+	var runtimeAcquirer *workerReindexProcessorAcquirer
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		runtimeAcquirer, err = newWorkerReindexProcessorAcquirer(processing.store, deliveryRepository, cfg.ReindexDispatchErrorBackoff)
+		if err != nil {
+			return reindexComponents{}, err
+		}
+		worker, err = reindexriver.NewWorkerWithProcessorAcquirer(deliveryRuntime, runtimeAcquirer, completion, workerOptions)
+	} else {
+		worker, err = reindexriver.NewWorker(deliveryRuntime, processor, completion, workerOptions)
+	}
 	if err != nil {
 		return reindexComponents{}, err
 	}
@@ -2519,7 +2793,7 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, processing source
 		PollInterval: cfg.ReindexDispatchPollInterval, BatchSize: cfg.ReindexDispatchBatchSize,
 		ErrorBackoff: cfg.ReindexDispatchErrorBackoff,
 	})
-	return reindexComponents{worker: worker, dispatcher: runner}, nil
+	return reindexComponents{worker: worker, runtime: runtimeAcquirer, dispatcher: runner}, nil
 }
 
 func configuredRRF(cfg config.Config) (json.RawMessage, error) {

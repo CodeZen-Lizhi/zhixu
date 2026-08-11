@@ -508,11 +508,11 @@ func newArtifactHTTPIntegrationServer(t *testing.T, pool *pgxpool.Pool) *httptes
 	cfg.ChatBaseURL = "http://127.0.0.1:11434/v1"
 	cfg.ChatModel = "artifact-http-integration"
 	cfg.ChatModelVersion = "artifact-http-integration-v1"
-	workflowService, _, generation, err := newAPIArtifactWorkflowComponents(pool, cfg, workspaces, files, nil, ids, clock, mustAPIModels(t, cfg))
+	workflowService, _, generation, err := newAPIArtifactWorkflowComponents(pool, cfg, workspaces, files, nil, ids, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	generationDependencies := artifactGenerationDependencies(cfg.ChatProvider != config.ChatProviderDisabled, generation)
+	generationDependencies := artifactGenerationDependencies(generation)
 	handler, err := newArtifactHandlerWithDependencies(pool, workspaces, files, proposals, 10*time.Second, ids, clock, generationDependencies...)
 	if err != nil {
 		t.Fatal(err)

@@ -22,7 +22,7 @@ import (
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -31,9 +31,10 @@ const (
 )
 
 type fakeManager struct {
-	snapshot func(context.Context) (modelsettingsdomain.Snapshot, error)
-	save     func(context.Context, modelsettingsapplication.SaveCommand) (modelsettingsdomain.Snapshot, error)
-	test     func(context.Context, modelsettingsapplication.TestCommand) (modelsettingsapplication.TestResult, error)
+	snapshot   func(context.Context) (modelsettingsdomain.Snapshot, error)
+	save       func(context.Context, modelsettingsapplication.SaveCommand) (modelsettingsdomain.Snapshot, error)
+	test       func(context.Context, modelsettingsapplication.TestCommand) (modelsettingsapplication.TestResult, error)
+	activation func(context.Context, modelsettingsapplication.StartActivationCommand) (modelsettingsapplication.StartActivationResult, error)
 }
 
 func (manager *fakeManager) Snapshot(ctx context.Context) (modelsettingsdomain.Snapshot, error) {
@@ -55,6 +56,13 @@ func (manager *fakeManager) Test(ctx context.Context, command modelsettingsappli
 		return modelsettingsapplication.TestResult{}, errors.New("unexpected Test call")
 	}
 	return manager.test(ctx, command)
+}
+
+func (manager *fakeManager) StartActivation(ctx context.Context, command modelsettingsapplication.StartActivationCommand) (modelsettingsapplication.StartActivationResult, error) {
+	if manager == nil || manager.activation == nil {
+		return modelsettingsapplication.StartActivationResult{}, errors.New("unexpected StartActivation call")
+	}
+	return manager.activation(ctx, command)
 }
 
 func TestNewHandlerRejectsMissingDependenciesAndInvalidTimeout(t *testing.T) {
@@ -83,7 +91,7 @@ func TestGetReturnsDesiredAndActiveSummariesWithoutSecrets(t *testing.T) {
 	assertNoStore(t, response)
 	var body map[string]any
 	decodeResponse(t, response, &body)
-	if body["desired_revision"] != float64(2) || body["active_revision"] != float64(1) || body["restart_required"] != true {
+	if body["desired_revision"] != float64(2) || body["active_revision"] != float64(1) || body["restart_required"] != false || body["apply_required"] != true {
 		t.Fatalf("revision projection = %#v", body)
 	}
 	desired := body["desired_settings"].(map[string]any)
@@ -382,6 +390,240 @@ func TestUpdateRejectsStaleRevisionBeforeSave(t *testing.T) {
 		t.Fatalf("Save calls = %d", saveCalls)
 	}
 	assertNoStore(t, response)
+}
+
+func TestStartActivationStrictJSONBoundary(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		body        string
+		contentType string
+		status      int
+		code        string
+	}{
+		{name: "unknown field", body: `{"expected_revision":2,"rollout_id":"71000000-0000-4000-8000-000000000099"}`, contentType: "application/json", status: 400, code: errorCodeInvalidJSON},
+		{name: "duplicate field", body: `{"expected_revision":2,"expected_revision":2}`, contentType: "application/json", status: 400, code: errorCodeInvalidJSON},
+		{name: "missing field", body: `{}`, contentType: "application/json", status: 400, code: modelsettingsdomain.ErrorCodeInvalid},
+		{name: "null field", body: `{"expected_revision":null}`, contentType: "application/json", status: 400, code: modelsettingsdomain.ErrorCodeInvalid},
+		{name: "string field", body: `{"expected_revision":"2"}`, contentType: "application/json", status: 400, code: modelsettingsdomain.ErrorCodeInvalid},
+		{name: "negative field", body: `{"expected_revision":-1}`, contentType: "application/json", status: 400, code: modelsettingsdomain.ErrorCodeInvalid},
+		{name: "wrong media type", body: `{"expected_revision":2}`, contentType: "text/plain", status: 415, code: errorCodeUnsupportedMedia},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			activationCalls := 0
+			manager := managerForSnapshot(configuredSnapshot())
+			manager.activation = func(context.Context, modelsettingsapplication.StartActivationCommand) (modelsettingsapplication.StartActivationResult, error) {
+				activationCalls++
+				return modelsettingsapplication.StartActivationResult{}, nil
+			}
+			handler := mustHandler(t, manager, Options{})
+			response := serve(t, handler, nethttp.MethodPost, "/api/v1/settings/models/activations", test.body, test.contentType)
+			if response.Code != test.status {
+				t.Fatalf("status=%d want=%d body=%s", response.Code, test.status, response.Body.String())
+			}
+			assertProblem(t, response, test.code)
+			assertNoStore(t, response)
+			if activationCalls != 0 {
+				t.Fatalf("StartActivation calls=%d", activationCalls)
+			}
+		})
+	}
+}
+
+func TestStartActivationPersistsExactTargetAndReturnsAuthoritativeSnapshot(t *testing.T) {
+	t.Parallel()
+	before := configuredSnapshot()
+	before.Rollout.Version = 7
+	after := before
+	snapshotCalls := 0
+	manager := &fakeManager{}
+	manager.snapshot = func(context.Context) (modelsettingsdomain.Snapshot, error) {
+		snapshotCalls++
+		if snapshotCalls == 1 {
+			return before, nil
+		}
+		return after, nil
+	}
+	manager.activation = func(ctx context.Context, command modelsettingsapplication.StartActivationCommand) (modelsettingsapplication.StartActivationResult, error) {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("activation context unexpectedly cancelled: %v", err)
+		}
+		if _, err := foundation.ParseID(string(command.RolloutID)); err != nil {
+			t.Fatalf("server rollout ID=%q: %v", command.RolloutID, err)
+		}
+		if command.TargetRevision != 2 || command.ExpectedDesiredRevision != 2 || command.ExpectedStateVersion != 7 ||
+			command.LeaseDuration != defaultActivationLease || command.FreshWithin != defaultActivationFreshness {
+			t.Fatalf("activation command=%+v", command)
+		}
+		after.Rollout = modelsettingsdomain.RolloutState{
+			ID: command.RolloutID, TargetRevision: 2, PreviousActiveRevision: 1,
+			Phase: modelsettingsdomain.RolloutPhasePreparing, Version: 8,
+		}
+		after.Participants.API = modelsettingsdomain.ParticipantSummary{
+			Present: true, TargetRevision: 2, Phase: modelsettingsdomain.ParticipantPhasePreparing, Fresh: true,
+		}
+		after.ApplyRequired = true
+		return modelsettingsapplication.StartActivationResult{State: after.Rollout}, nil
+	}
+	handler := mustHandler(t, manager, Options{})
+	response := serve(t, handler, nethttp.MethodPost, "/api/v1/settings/models/activations", `{"expected_revision":2}`, "application/json")
+	if response.Code != nethttp.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	assertNoStore(t, response)
+	var body settingsResponse
+	decodeResponse(t, response, &body)
+	if body.Rollout.ID == nil || *body.Rollout.ID != string(after.Rollout.ID) || body.Rollout.Version != 8 ||
+		body.Rollout.Phase != modelsettingsdomain.RolloutPhasePreparing || body.Rollout.TargetRevision == nil || *body.Rollout.TargetRevision != 2 {
+		t.Fatalf("rollout=%+v", body.Rollout)
+	}
+	if !body.Participants.API.Present || body.Participants.API.TargetRevision == nil || *body.Participants.API.TargetRevision != 2 ||
+		body.Participants.API.Phase == nil || *body.Participants.API.Phase != modelsettingsdomain.ParticipantPhasePreparing ||
+		body.Participants.Worker.Present || body.Participants.Worker.TargetRevision != nil || body.Participants.Worker.Phase != nil || body.Participants.Worker.Fresh {
+		t.Fatalf("participants=%+v", body.Participants)
+	}
+	if !body.ApplyRequired || body.RestartRequired {
+		t.Fatalf("apply_required=%t restart_required=%t", body.ApplyRequired, body.RestartRequired)
+	}
+	assertBodyExcludes(t, response.Body.String(), "chat-secret-canary", "embedding-secret-canary", "instance_id", "ciphertext", "nonce", "Authorization")
+}
+
+func TestStartActivationIsIdempotentForLiveAndAlreadyActiveTargets(t *testing.T) {
+	t.Parallel()
+	existingID := foundation.ID("71000000-0000-4000-8000-000000000090")
+	tests := []struct {
+		name     string
+		snapshot modelsettingsdomain.Snapshot
+	}{
+		{
+			name: "same target live",
+			snapshot: func() modelsettingsdomain.Snapshot {
+				snapshot := configuredSnapshot()
+				snapshot.Rollout = modelsettingsdomain.RolloutState{ID: existingID, TargetRevision: 2, PreviousActiveRevision: 1, Phase: modelsettingsdomain.RolloutPhasePreparing, Version: 9}
+				return snapshot
+			}(),
+		},
+		{
+			name: "already active healthy",
+			snapshot: func() modelsettingsdomain.Snapshot {
+				snapshot := configuredSnapshot()
+				snapshot.ActiveRevision = snapshot.DesiredRevision
+				snapshot.ActiveSettings = snapshot.DesiredSettings
+				snapshot.Runtime.API.AppliedRevision = snapshot.ActiveRevision
+				snapshot.Runtime.Worker.AppliedRevision = snapshot.ActiveRevision
+				snapshot.Rollout = modelsettingsdomain.RolloutState{Phase: modelsettingsdomain.RolloutPhaseIdle, Version: 9}
+				snapshot.ApplyRequired = false
+				return snapshot
+			}(),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			manager := managerForSnapshot(test.snapshot)
+			manager.activation = func(_ context.Context, command modelsettingsapplication.StartActivationCommand) (modelsettingsapplication.StartActivationResult, error) {
+				calls++
+				return modelsettingsapplication.StartActivationResult{State: test.snapshot.Rollout, Replayed: true}, nil
+			}
+			handler := mustHandler(t, manager, Options{})
+			response := serve(t, handler, nethttp.MethodPost, "/api/v1/settings/models/activations", `{"expected_revision":2}`, "application/json")
+			if response.Code != nethttp.StatusAccepted || calls != 1 {
+				t.Fatalf("status=%d calls=%d body=%s", response.Code, calls, response.Body.String())
+			}
+			assertNoStore(t, response)
+		})
+	}
+}
+
+func TestStartActivationConflictReturnsOnlyCurrentRevision(t *testing.T) {
+	t.Parallel()
+	initial := configuredSnapshot()
+	latest := initial
+	latest.DesiredRevision = 3
+	latest.Rollout.Version++
+	snapshotCalls := 0
+	manager := &fakeManager{}
+	manager.snapshot = func(context.Context) (modelsettingsdomain.Snapshot, error) {
+		snapshotCalls++
+		if snapshotCalls == 1 {
+			return initial, nil
+		}
+		return latest, nil
+	}
+	manager.activation = func(context.Context, modelsettingsapplication.StartActivationCommand) (modelsettingsapplication.StartActivationResult, error) {
+		return modelsettingsapplication.StartActivationResult{}, foundation.NewError(
+			foundation.ErrorVersionConflict, modelsettingsdomain.ErrorCodeActivationConflict, false,
+			errors.New("https://private.example.test activation-secret-canary instance_id=71000000-0000-4000-8000-000000000099"),
+		)
+	}
+	handler := mustHandler(t, manager, Options{})
+	response := serve(t, handler, nethttp.MethodPost, "/api/v1/settings/models/activations", `{"expected_revision":2}`, "application/json")
+	if response.Code != nethttp.StatusConflict {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var problem httpapi.Problem
+	decodeResponse(t, response, &problem)
+	if problem.ErrorCode != modelsettingsdomain.ErrorCodeActivationConflict || len(problem.Details) != 1 || problem.Details["current_revision"] != float64(3) {
+		t.Fatalf("problem=%+v", problem)
+	}
+	assertNoStore(t, response)
+	assertBodyExcludes(t, response.Body.String(), "private.example.test", "activation-secret-canary", "instance_id", "71000000-0000-4000-8000-000000000099")
+}
+
+func TestStartActivationRequestCancellationDoesNotCancelDurableStart(t *testing.T) {
+	t.Parallel()
+	current := configuredSnapshot()
+	manager := managerForSnapshot(current)
+	manager.activation = func(ctx context.Context, command modelsettingsapplication.StartActivationCommand) (modelsettingsapplication.StartActivationResult, error) {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("durable activation inherited request cancellation: %v", err)
+		}
+		return modelsettingsapplication.StartActivationResult{State: current.Rollout}, nil
+	}
+	handler := mustHandler(t, manager, Options{})
+	router := gin.New()
+	handler.Routes(router.Group("/api/v1"))
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
+	request := httptest.NewRequest(nethttp.MethodPost, "/api/v1/settings/models/activations", strings.NewReader(`{"expected_revision":2}`)).WithContext(requestContext)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != nethttp.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSnapshotParticipantProjectionKeepsServingAndCandidateSeparate(t *testing.T) {
+	t.Parallel()
+	snapshot := configuredSnapshot()
+	snapshot.Rollout = modelsettingsdomain.RolloutState{
+		ID: foundation.ID("71000000-0000-4000-8000-000000000091"), TargetRevision: 2,
+		PreviousActiveRevision: 1, Phase: modelsettingsdomain.RolloutPhaseFailed,
+		LastErrorCode: modelsettingsdomain.ErrorCodeActivationPrepareFailed, Version: 10,
+	}
+	snapshot.Participants.API = modelsettingsdomain.ParticipantSummary{
+		Present: true, TargetRevision: 2, Phase: modelsettingsdomain.ParticipantPhaseFailed,
+		Fresh: true, LastErrorCode: modelsettingsdomain.ErrorCodeActivationPrepareFailed, ErrorRetryable: true,
+	}
+	handler := mustHandler(t, managerForSnapshot(snapshot), Options{})
+	response := serve(t, handler, nethttp.MethodGet, "/api/v1/settings/models", "", "")
+	if response.Code != nethttp.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body settingsResponse
+	decodeResponse(t, response, &body)
+	if body.Runtime.API.AppliedRevision != 1 || body.Runtime.API.Phase != modelsettingsdomain.RuntimePhaseActive || !body.Runtime.API.Fresh {
+		t.Fatalf("serving runtime=%+v", body.Runtime.API)
+	}
+	if !body.Participants.API.Present || body.Participants.API.Phase == nil || *body.Participants.API.Phase != modelsettingsdomain.ParticipantPhaseFailed ||
+		body.Participants.API.LastErrorCode == nil || *body.Participants.API.LastErrorCode != modelsettingsdomain.ErrorCodeActivationPrepareFailed || !body.Participants.API.Retryable {
+		t.Fatalf("candidate participant=%+v", body.Participants.API)
+	}
+	if body.Participants.Worker != (participantResponse{}) {
+		t.Fatalf("absent worker=%+v", body.Participants.Worker)
+	}
 }
 
 func TestConnectionTestResolvesOneTargetAndDestroysTemporarySecrets(t *testing.T) {
@@ -752,8 +994,8 @@ func mustHandler(t *testing.T, manager modelsettingsapplication.SettingsManager,
 
 func serve(t *testing.T, handler *Handler, method, path, body, contentType string) *httptest.ResponseRecorder {
 	t.Helper()
-	router := chi.NewRouter()
-	router.Route("/api/v1", handler.Routes)
+	router := gin.New()
+	handler.Routes(router.Group("/api/v1"))
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
@@ -769,9 +1011,11 @@ func withAuthentication(t *testing.T, handler *Handler) nethttp.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := chi.NewRouter()
-	router.Route("/api/v1", handler.Routes)
-	return authHandler.Middleware(router)
+	router := gin.New()
+	protected := router.Group("/api/v1")
+	protected.Use(authHandler.Middleware)
+	handler.Routes(protected)
+	return router
 }
 
 type fakeAuthService struct{}

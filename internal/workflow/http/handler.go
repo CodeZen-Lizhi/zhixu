@@ -19,7 +19,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 // Service 定义 Workflow HTTP 所需的最小应用层契约。
@@ -59,14 +59,14 @@ func NewHandler(service Service, reviewProjectors ...HumanTaskReviewProjector) *
 }
 
 // Routes 注册 Workflow 资源路由。
-func (h *Handler) Routes(router chi.Router) {
-	router.Post("/workspaces/{workspaceID}/workflows", h.start)
-	router.Get("/workspaces/{workspaceID}/workflows", h.list)
-	router.Get("/workflows/{runID}", h.detail)
-	router.Post("/workflows/{runID}/human-tasks/{taskID}/decision", h.submitHumanDecision)
-	router.Post("/workflows/{runID}/pause", h.pause)
-	router.Post("/workflows/{runID}/resume", h.resume)
-	router.Post("/workflows/{runID}/cancel", h.cancel)
+func (h *Handler) Routes(router gin.IRouter) {
+	router.POST("/workspaces/:workspace_id/workflows", httpapi.GinHandler(h.start))
+	router.GET("/workspaces/:workspace_id/workflows", httpapi.GinHandler(h.list))
+	router.GET("/workflows/:run_id", httpapi.GinHandler(h.detail))
+	router.POST("/workflows/:run_id/human-tasks/:task_id/decision", httpapi.GinHandler(h.submitHumanDecision))
+	router.POST("/workflows/:run_id/pause", httpapi.GinHandler(h.pause))
+	router.POST("/workflows/:run_id/resume", httpapi.GinHandler(h.resume))
+	router.POST("/workflows/:run_id/cancel", httpapi.GinHandler(h.cancel))
 }
 
 type runPageResponse struct {
@@ -109,7 +109,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusServiceUnavailable, "WORKFLOW_LIST_UNAVAILABLE", "Workflow 列表暂不可用", true, nil)
 		return
 	}
-	workspaceID, err := foundation.ParseID(chi.URLParam(r, "workspaceID"))
+	workspaceID, err := foundation.ParseID(r.PathValue("workspace_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -279,7 +279,7 @@ type controlResponse struct {
 }
 
 func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
-	workspaceID, err := foundation.ParseID(chi.URLParam(r, "workspaceID"))
+	workspaceID, err := foundation.ParseID(r.PathValue("workspace_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -312,7 +312,7 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) detail(w http.ResponseWriter, r *http.Request) {
-	runID, err := foundation.ParseID(chi.URLParam(r, "runID"))
+	runID, err := foundation.ParseID(r.PathValue("run_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -361,12 +361,12 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) submitHumanDecision(w http.ResponseWriter, r *http.Request) {
-	taskID, err := foundation.ParseID(chi.URLParam(r, "taskID"))
+	taskID, err := foundation.ParseID(r.PathValue("task_id"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	runID, err := foundation.ParseID(chi.URLParam(r, "runID"))
+	runID, err := foundation.ParseID(r.PathValue("run_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -440,7 +440,7 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) control(w http.ResponseWriter, r *http.Request, execute func(context.Context, application.RunControlCommand) (application.RunControlResult, error)) {
-	runID, err := foundation.ParseID(chi.URLParam(r, "runID"))
+	runID, err := foundation.ParseID(r.PathValue("run_id"))
 	if err != nil {
 		writeError(w, err)
 		return

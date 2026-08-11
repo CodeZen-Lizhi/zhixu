@@ -17,7 +17,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const testWorkspaceID = foundation.ID("7e000000-0000-4000-8000-000000000001")
@@ -54,7 +54,7 @@ func TestHandlerRejectsCursorErrorsBeforeStartingSSE(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			handler := NewHandler(test.store)
-			router := chi.NewRouter()
+			router := gin.New()
 			handler.Routes(router)
 			request := httptest.NewRequest(http.MethodGet, test.path, nil)
 			if test.cursorValues != nil {
@@ -355,7 +355,7 @@ func (store *fakeEventStore) ListAfter(ctx context.Context, _ foundation.ID, aft
 }
 
 func eventRouter(handler *Handler) http.Handler {
-	router := chi.NewRouter()
+	router := gin.New()
 	handler.Routes(router)
 	return router
 }

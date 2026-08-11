@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/domain"
@@ -55,11 +55,11 @@ func NewHandler(service Service, timeout time.Duration) *Handler {
 func (handler *Handler) Available() bool { return handler != nil && handler.service != nil }
 
 // Routes registers Document-scoped history, compare and restore endpoints.
-func (handler *Handler) Routes(router chi.Router) {
-	router.Get("/workspaces/{workspaceID}/documents/{documentID}/history", handler.listHistory)
-	router.Get("/workspaces/{workspaceID}/documents/{documentID}/history/compare", handler.compare)
-	router.Post("/workspaces/{workspaceID}/documents/{documentID}/restore-previews", handler.previewRestore)
-	router.Post("/workspaces/{workspaceID}/documents/{documentID}/restore-proposals", handler.createRestoreProposal)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.GET("/workspaces/:workspace_id/documents/:document_id/history", httpapi.GinHandler(handler.listHistory))
+	router.GET("/workspaces/:workspace_id/documents/:document_id/history/compare", httpapi.GinHandler(handler.compare))
+	router.POST("/workspaces/:workspace_id/documents/:document_id/restore-previews", httpapi.GinHandler(handler.previewRestore))
+	router.POST("/workspaces/:workspace_id/documents/:document_id/restore-proposals", httpapi.GinHandler(handler.createRestoreProposal))
 }
 
 type historyPageResponse struct {
@@ -349,8 +349,8 @@ func parseRouteIDs(writer stdhttp.ResponseWriter, request *stdhttp.Request) (fou
 		writeError(writer, invalid("request is nil"))
 		return "", "", false
 	}
-	workspaceID, workspaceErr := foundation.ParseID(chi.URLParam(request, "workspaceID"))
-	documentID, documentErr := foundation.ParseID(chi.URLParam(request, "documentID"))
+	workspaceID, workspaceErr := foundation.ParseID(request.PathValue("workspace_id"))
+	documentID, documentErr := foundation.ParseID(request.PathValue("document_id"))
 	if workspaceErr != nil || documentErr != nil {
 		writeError(writer, invalid("route identity is invalid"))
 		return "", "", false

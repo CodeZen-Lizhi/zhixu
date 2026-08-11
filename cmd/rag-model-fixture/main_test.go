@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 const fixtureAPIKey = "fixture-secret-canary"
@@ -30,6 +31,112 @@ func TestFixtureUsesSchemaAndRequestInsteadOfCallOrder(t *testing.T) {
 	}
 }
 
+func TestFixtureAcceptsOnlyTheManagedRuntimePlainProbe(t *testing.T) {
+	handler := newHandler("fixture-model-v1", fixtureAPIKey)
+	for _, test := range []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{name: "managed probe", body: `{"model":"fixture-model","messages":[{"role":"user","content":"test"}]}`, wantStatus: http.StatusOK},
+		{name: "other content", body: `{"model":"fixture-model","messages":[{"role":"user","content":"private prompt"}]}`, wantStatus: http.StatusBadRequest},
+		{name: "multiple messages", body: `{"model":"fixture-model","messages":[{"role":"system","content":"policy"},{"role":"user","content":"test"}]}`, wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer "+fixtureAPIKey)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if test.wantStatus == http.StatusOK && !bytes.Contains(response.Body.Bytes(), []byte(`"content":"ok"`)) {
+				t.Fatalf("probe response=%s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestFixtureControlBlocksOnlyTheNextStructuredRequest(t *testing.T) {
+	handler := newHandler("fixture-model-v1", fixtureAPIKey)
+	state := callFixtureControl(t, handler, http.MethodPost, "/control/block-next", fixtureAPIKey)
+	if !state.Armed || state.Entered {
+		t.Fatalf("armed state=%+v", state)
+	}
+
+	body := fixtureRequest(t, "rag_query_plan", "agent.rag-query-plan", map[string]any{"model_run_ref": "10000000-0000-4000-8000-000000000001"})
+	blocked := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+fixtureAPIKey)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		blocked <- response
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		state = callFixtureControl(t, handler, http.MethodGet, "/control/state", fixtureAPIKey)
+		if state.Armed && state.Entered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("structured request did not enter the fixture gate")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case response := <-blocked:
+		t.Fatalf("first structured request was not blocked: %d", response.Code)
+	default:
+	}
+
+	second := callFixture(t, handler, body)
+	if !bytes.Contains([]byte(second), []byte(`"result_type":"rag_query_plan"`)) {
+		t.Fatalf("second structured response=%s", second)
+	}
+	state = callFixtureControl(t, handler, http.MethodPost, "/control/release", fixtureAPIKey)
+	if state.Armed || state.Entered {
+		t.Fatalf("released state=%+v", state)
+	}
+	select {
+	case response := <-blocked:
+		if response.Code != http.StatusOK {
+			t.Fatalf("released structured request status=%d body=%s", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("released structured request did not finish")
+	}
+}
+
+func TestFixtureControlRequiresExactBearerAndNoBody(t *testing.T) {
+	handler := newHandler("fixture-model-v1", fixtureAPIKey)
+	for _, test := range []struct {
+		name   string
+		key    string
+		body   string
+		status int
+	}{
+		{name: "missing bearer", status: http.StatusUnauthorized},
+		{name: "wrong bearer", key: "wrong", status: http.StatusUnauthorized},
+		{name: "body", key: fixtureAPIKey, body: `{}`, status: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/control/block-next", bytes.NewBufferString(test.body))
+			if test.key != "" {
+				request.Header.Set("Authorization", "Bearer "+test.key)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.status {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestFixtureBuildsFaithfulnessItemsFromReviewTargets(t *testing.T) {
 	input := map[string]any{"model_run_ref": "20000000-0000-4000-8000-000000000001", "review_targets": []any{
 		map[string]any{"id": "fact", "kind": "FACTUAL", "citation_ids": []string{"cite-1"}},
@@ -39,6 +146,22 @@ func TestFixtureBuildsFaithfulnessItemsFromReviewTargets(t *testing.T) {
 	if !bytes.Contains([]byte(response), []byte(`"verdict":"SUPPORTED"`)) || !bytes.Contains([]byte(response), []byte(`"verdict":"INFERENCE_DISCLOSED"`)) {
 		t.Fatalf("faithfulness response=%s", response)
 	}
+}
+
+func callFixtureControl(t *testing.T, handler http.Handler, method, path, apiKey string) structuredRequestGateState {
+	t.Helper()
+	request := httptest.NewRequest(method, path, nil)
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("control %s %s status=%d body=%s", method, path, response.Code, response.Body.String())
+	}
+	var state structuredRequestGateState
+	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	return state
 }
 
 func TestValidateAddressFailsClosedOutsideExplicitCompose(t *testing.T) {

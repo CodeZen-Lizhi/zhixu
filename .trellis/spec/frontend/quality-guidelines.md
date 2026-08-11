@@ -101,6 +101,66 @@ M1 后运行 Canonical Frontend 的锁定安装验证、Lint、Type Check、Unit
 Coverage/Bundle Budget、通用 API/SSE Fixture 与 M9 Search 页面 Component/Route/Browser 测试仍待后续任务。
 M6-D 只交付 Decoder/Client，不得用其单测声称 Search UI 已完成。
 
+## Scenario: Model Settings Hot Activation Frontend Quality Gate
+
+### 1. Scope / Trigger
+
+- 修改 `web/src/api/model-settings.ts`、`ModelSettingsPanel`、模型设置 OpenAPI、认证/CSRF 边界或热生效 Playwright
+  smoke 时，必须应用本门禁，并同时读取 `frontend/model-settings.md`。
+
+### 2. Signatures
+
+- 唯一 wire owner：`web/src/api/model-settings.ts`；activation 请求 exact `{expected_revision}`。
+- 定向命令：Settings API/Panel Vitest、`npm run lint --prefix web`、`npm run typecheck --prefix web`、
+  `npm run build --prefix web`，以及隔离 Compose 中的 Playwright smoke。
+
+### 3. Contracts
+
+- strict decoder 必须拒绝 unknown/missing fields、revision/phase/binding 矛盾、failed non-retryable、
+  `restart_required=true` 与错误的 `apply_required` 派生；组件不能维护服务端不可达状态。
+- Save-only、Save-and-Apply、saved pending Apply、202 polling、409、Start response loss、failed retry、runtime degraded
+  都必须由用户可观察测试覆盖；成功断言必须等待 active 与 API/Worker applied/fresh 权威收敛。
+- Secret replace value 在保存后清零，不进入 Query key/cache、URL、DOM、Storage、toast、错误或测试快照。
+  Playwright 还必须扫描请求/响应和 API/Worker 日志的 credential canary。
+- unsafe activation 使用真实 Cookie Session、Origin 与 CSRF；Bearer 即使有 scope 也必须显式显示拒绝，不能作为 Empty。
+- 1440x900 与 390x844 都必须检查长模型名/错误码、participant 进度、按钮稳定尺寸、焦点、零横向溢出和零 console error。
+- no-restart 是跨层验收：浏览器 smoke 还必须由 shell 记录并比较 API/Worker container id、StartedAt 与 RestartCount；
+  组件单测或页面徽标不能单独证明该性质。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+| --- | --- |
+| 保存成功但 activation 请求失败/响应丢失 | 显示已保存未确认，先回查权威状态，再允许 exact target 重试 |
+| target probe failed | 展示 role/phase/稳定错误，previous active 仍明确可见 |
+| strict wire 不合法 | `ModelSettingsApiError(INVALID_RESPONSE)`，不渲染部分状态 |
+| API Token、缺 Origin/CSRF | 显式 403；不得 optimistic 更新 desired/active |
+| credential/Endpoint/instance id 出现在可观察面 | 安全门禁失败 |
+| desktop/mobile overflow、遮挡或 console/network error | 浏览器门禁失败 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：用户看到“待应用/当前生效/API 已应用/Worker 已应用”和 participant 进度；刷新后恢复真实 rollout，最终无需重启提示。
+- Base：revision 0 disabled 能浏览、编辑和仅保存；模型不可用不阻断 Settings 其他 section。
+- Bad：202 后立即 toast“已生效”、用本地 timer 推进 phase、显示 `./zhixu restart`、或测试构造 strict decoder 永远拒绝的状态。
+
+### 6. Tests Required
+
+- API tests：exact encoder、Snapshot/Problem strict decoder、Abort/network、非法状态矩阵和 Secret error serialization。
+- Component tests：表单 Secret lifecycle、两种保存路径、polling/recovery/conflict/failure/degraded、可访问名称与焦点。
+- Browser smoke：真实 API/Worker + 受控 fixture，桌面/移动执行成功、失败保留 previous、修正重试、刷新恢复、
+  Secret 扫描与容器 identity 断言。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Mock activation 202 后直接渲染“已应用”，并把该组件测试当作端到端证据。
+Correct: 202 仅启动轮询；只有严格 Snapshot 收敛后显示已应用，隔离 smoke 另行证明容器未重启。
+
+Wrong: 为了覆盖按钮禁用而构造 failed+retryable=false，即使 wire 明确拒绝该组合。
+Correct: 测试只构造协议可达状态；非法组合在 decoder test 中断言 fail closed。
+```
+
 ## Scenario: M7-01 Graph Frontend Quality Gate
 
 ### 1. Scope / Trigger

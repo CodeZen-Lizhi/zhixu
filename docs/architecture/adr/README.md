@@ -23,3 +23,4 @@
 | [0019](0019-mature-framework-first.md) | 成熟框架优先与自研例外门禁 | accepted |
 | [0020](0020-docker-direct-web-and-one-shot-workspace-control.md) | Docker 固定 Web 入口与一次性 Workspace Control | accepted |
 | [0021](0021-stable-network-namespace-anchors.md) | 稳定 Network Namespace Anchor 保障 Docker 项目重启 | accepted |
+| [0022](0022-model-runtime-hot-activation.md) | 模型运行时无容器重启热应用 | accepted |

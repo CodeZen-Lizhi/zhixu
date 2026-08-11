@@ -21,7 +21,7 @@ import (
 	organizingapp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/organizing/domain"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -92,23 +92,23 @@ func (handler *Handler) Available() bool {
 }
 
 // Routes registers Organizing commands and read models beneath /api/v1.
-func (handler *Handler) Routes(router chi.Router) {
-	router.Post("/workspaces/{workspaceID}/organizing/drafts", handler.createDraft)
-	router.Get("/workspaces/{workspaceID}/organizing/drafts/{draftID}", handler.getDraft)
-	router.Put("/workspaces/{workspaceID}/organizing/drafts/{draftID}", handler.updateDraft)
-	router.Post("/workspaces/{workspaceID}/organizing/drafts/{draftID}/suggestions", handler.suggest)
-	router.Post("/workspaces/{workspaceID}/organizing/drafts/{draftID}/materials", handler.addMaterial)
-	router.Patch("/workspaces/{workspaceID}/organizing/drafts/{draftID}/materials/{materialID}", handler.setMaterialSelection)
-	router.Delete("/workspaces/{workspaceID}/organizing/drafts/{draftID}/materials/{materialID}", handler.removeMaterial)
-	router.Post("/workspaces/{workspaceID}/organizing/drafts/{draftID}/confirm", handler.confirmDraft)
-	router.Get("/workspaces/{workspaceID}/organizing/materials/search", handler.searchMaterials)
-	router.Get("/workspaces/{workspaceID}/organizing/snapshots/{snapshotID}", handler.getSnapshot)
-	router.Get("/workspaces/{workspaceID}/organizing/templates", handler.listTemplates)
-	router.Post("/workspaces/{workspaceID}/organizing/templates", handler.createTemplate)
-	router.Get("/workspaces/{workspaceID}/organizing/templates/{templateID}", handler.getTemplate)
-	router.Post("/workspaces/{workspaceID}/organizing/templates/{templateID}/clone", handler.cloneTemplate)
-	router.Post("/workspaces/{workspaceID}/organizing/templates/{templateID}/revisions", handler.reviseTemplate)
-	router.Get("/workspaces/{workspaceID}/organizing/runs/{snapshotID}", handler.getRun)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.POST("/workspaces/:workspace_id/organizing/drafts", httpapi.GinHandler(handler.createDraft))
+	router.GET("/workspaces/:workspace_id/organizing/drafts/:draft_id", httpapi.GinHandler(handler.getDraft))
+	router.PUT("/workspaces/:workspace_id/organizing/drafts/:draft_id", httpapi.GinHandler(handler.updateDraft))
+	router.POST("/workspaces/:workspace_id/organizing/drafts/:draft_id/suggestions", httpapi.GinHandler(handler.suggest))
+	router.POST("/workspaces/:workspace_id/organizing/drafts/:draft_id/materials", httpapi.GinHandler(handler.addMaterial))
+	router.PATCH("/workspaces/:workspace_id/organizing/drafts/:draft_id/materials/:material_id", httpapi.GinHandler(handler.setMaterialSelection))
+	router.DELETE("/workspaces/:workspace_id/organizing/drafts/:draft_id/materials/:material_id", httpapi.GinHandler(handler.removeMaterial))
+	router.POST("/workspaces/:workspace_id/organizing/drafts/:draft_id/confirm", httpapi.GinHandler(handler.confirmDraft))
+	router.GET("/workspaces/:workspace_id/organizing/materials/search", httpapi.GinHandler(handler.searchMaterials))
+	router.GET("/workspaces/:workspace_id/organizing/snapshots/:snapshot_id", httpapi.GinHandler(handler.getSnapshot))
+	router.GET("/workspaces/:workspace_id/organizing/templates", httpapi.GinHandler(handler.listTemplates))
+	router.POST("/workspaces/:workspace_id/organizing/templates", httpapi.GinHandler(handler.createTemplate))
+	router.GET("/workspaces/:workspace_id/organizing/templates/:template_id", httpapi.GinHandler(handler.getTemplate))
+	router.POST("/workspaces/:workspace_id/organizing/templates/:template_id/clone", httpapi.GinHandler(handler.cloneTemplate))
+	router.POST("/workspaces/:workspace_id/organizing/templates/:template_id/revisions", httpapi.GinHandler(handler.reviseTemplate))
+	router.GET("/workspaces/:workspace_id/organizing/runs/:snapshot_id", httpapi.GinHandler(handler.getRun))
 }
 
 type createDraftRequest struct {
@@ -238,7 +238,7 @@ func (handler *Handler) createDraft(writer http.ResponseWriter, request *http.Re
 }
 
 func (handler *Handler) getDraft(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, draftID, ok := queryRoute(writer, request, "draftID")
+	workspaceID, draftID, ok := queryRoute(writer, request, "draft_id")
 	if !ok || !handler.available(writer) {
 		return
 	}
@@ -260,7 +260,7 @@ func (handler *Handler) getDraft(writer http.ResponseWriter, request *http.Reque
 }
 
 func (handler *Handler) updateDraft(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draftID")
+	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draft_id")
 	if !ok {
 		return
 	}
@@ -300,7 +300,7 @@ func (handler *Handler) updateDraft(writer http.ResponseWriter, request *http.Re
 }
 
 func (handler *Handler) suggest(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draftID")
+	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draft_id")
 	if !ok {
 		return
 	}
@@ -335,7 +335,7 @@ func (handler *Handler) suggest(writer http.ResponseWriter, request *http.Reques
 }
 
 func (handler *Handler) addMaterial(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draftID")
+	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draft_id")
 	if !ok {
 		return
 	}
@@ -378,11 +378,11 @@ func (handler *Handler) addMaterial(writer http.ResponseWriter, request *http.Re
 }
 
 func (handler *Handler) removeMaterial(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draftID")
+	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draft_id")
 	if !ok {
 		return
 	}
-	materialID, err := parseID(chi.URLParam(request, "materialID"))
+	materialID, err := parseID(request.PathValue("material_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -418,11 +418,11 @@ func (handler *Handler) removeMaterial(writer http.ResponseWriter, request *http
 }
 
 func (handler *Handler) setMaterialSelection(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draftID")
+	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draft_id")
 	if !ok {
 		return
 	}
-	materialID, err := parseID(chi.URLParam(request, "materialID"))
+	materialID, err := parseID(request.PathValue("material_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -467,7 +467,7 @@ func (handler *Handler) setMaterialSelection(writer http.ResponseWriter, request
 }
 
 func (handler *Handler) confirmDraft(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draftID")
+	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draft_id")
 	if !ok {
 		return
 	}
@@ -507,7 +507,7 @@ func (handler *Handler) confirmDraft(writer http.ResponseWriter, request *http.R
 }
 
 func (handler *Handler) getSnapshot(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, snapshotID, ok := queryRoute(writer, request, "snapshotID")
+	workspaceID, snapshotID, ok := queryRoute(writer, request, "snapshot_id")
 	if !ok || !handler.available(writer) {
 		return
 	}
@@ -615,7 +615,7 @@ func (handler *Handler) createTemplate(writer http.ResponseWriter, request *http
 }
 
 func (handler *Handler) getTemplate(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, templateID, ok := queryRoute(writer, request, "templateID")
+	workspaceID, templateID, ok := queryRoute(writer, request, "template_id")
 	if !ok || !handler.available(writer) {
 		return
 	}
@@ -637,7 +637,7 @@ func (handler *Handler) getTemplate(writer http.ResponseWriter, request *http.Re
 }
 
 func (handler *Handler) cloneTemplate(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, sourceTemplateID, key, ok := identifiedCommandRoute(writer, request, "templateID")
+	workspaceID, sourceTemplateID, key, ok := identifiedCommandRoute(writer, request, "template_id")
 	if !ok {
 		return
 	}
@@ -673,7 +673,7 @@ func (handler *Handler) cloneTemplate(writer http.ResponseWriter, request *http.
 }
 
 func (handler *Handler) reviseTemplate(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, templateID, key, ok := identifiedCommandRoute(writer, request, "templateID")
+	workspaceID, templateID, key, ok := identifiedCommandRoute(writer, request, "template_id")
 	if !ok {
 		return
 	}
@@ -712,7 +712,7 @@ func (handler *Handler) reviseTemplate(writer http.ResponseWriter, request *http
 }
 
 func (handler *Handler) getRun(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, snapshotID, ok := queryRoute(writer, request, "snapshotID")
+	workspaceID, snapshotID, ok := queryRoute(writer, request, "snapshot_id")
 	if !ok {
 		return
 	}
@@ -832,7 +832,7 @@ func commandRoute(writer http.ResponseWriter, request *http.Request) (foundation
 		writeError(writer, err)
 		return "", "", false
 	}
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return "", "", false
@@ -850,7 +850,7 @@ func identifiedCommandRoute(writer http.ResponseWriter, request *http.Request, r
 	if !ok {
 		return "", "", "", false
 	}
-	resourceID, err := parseID(chi.URLParam(request, resourceParam))
+	resourceID, err := parseID(request.PathValue(resourceParam))
 	if err != nil {
 		writeError(writer, err)
 		return "", "", "", false
@@ -863,12 +863,12 @@ func queryRoute(writer http.ResponseWriter, request *http.Request, resourceParam
 		writeError(writer, err)
 		return "", "", false
 	}
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return "", "", false
 	}
-	resourceID, err := parseID(chi.URLParam(request, resourceParam))
+	resourceID, err := parseID(request.PathValue(resourceParam))
 	if err != nil {
 		writeError(writer, err)
 		return "", "", false
@@ -939,7 +939,7 @@ func rejectQuery(request *http.Request) error {
 }
 
 func parseTemplateListRequest(request *http.Request) (foundation.ID, domain.TemplateKind, int, error) {
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		return "", "", 0, err
 	}
@@ -967,7 +967,7 @@ func parseTemplateListRequest(request *http.Request) (foundation.ID, domain.Temp
 }
 
 func parseMaterialSearchRequest(request *http.Request) (foundation.ID, string, domain.MaterialKind, int, error) {
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		return "", "", "", 0, err
 	}

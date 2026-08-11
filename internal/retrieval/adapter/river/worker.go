@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -36,6 +37,25 @@ type completionRunner interface {
 	Complete(context.Context, application.CompleteReindexRequest) (domain.CompleteReindexResult, error)
 }
 
+// CompatibleProcessorAcquirer 在持久 Claim 前进入 runtime admission gate。
+type CompatibleProcessorAcquirer interface {
+	Admit(context.Context) (CompatibleProcessorAdmission, error)
+}
+
+// CompatibleProcessorAdmission 允许已入场任务在 gate 关闭后继续按 Claim
+// 返回的完整持久 Delivery 解析不可变 Processor graph；Release 必须幂等。
+type CompatibleProcessorAdmission interface {
+	Acquire(context.Context, domain.Delivery) (CompatibleProcessorLease, error)
+	Release()
+}
+
+// CompatibleProcessorLease 固定一次 Reindex Work 使用的 Processor graph。
+// Release 必须幂等，并且只能在 heartbeat 与 Complete/Fail settlement 结束后调用。
+type CompatibleProcessorLease interface {
+	Processor() application.ProcessorRunner
+	Release()
+}
+
 // WorkerOptions 配置 Reindex Worker 的稳定 owner、数据库租约与独立心跳周期。
 type WorkerOptions struct {
 	Owner             string
@@ -49,30 +69,42 @@ type WorkerOptions struct {
 // Worker 将一个 River transport delivery 归约到 PostgreSQL Reindex 事实源。
 type Worker struct {
 	riverlib.WorkerDefaults[Args]
-	runtime    deliveryRuntime
-	processor  application.ProcessorRunner
-	completion completionRunner
-	options    WorkerOptions
-	observer   workerObserver
+	runtime           deliveryRuntime
+	processorAcquirer CompatibleProcessorAcquirer
+	completion        completionRunner
+	options           WorkerOptions
+	observer          workerObserver
 }
 
 var (
-	_ riverlib.Worker[Args] = (*Worker)(nil)
-	_ deliveryRuntime       = (*application.DeliveryRuntime)(nil)
-	_ completionRunner      = (*application.CompletionService)(nil)
+	_ riverlib.Worker[Args]        = (*Worker)(nil)
+	_ deliveryRuntime              = (*application.DeliveryRuntime)(nil)
+	_ completionRunner             = (*application.CompletionService)(nil)
+	_ CompatibleProcessorAcquirer  = staticProcessorAcquirer{}
+	_ CompatibleProcessorAdmission = (*staticProcessorAdmission)(nil)
+	_ CompatibleProcessorLease     = (*staticProcessorLease)(nil)
 )
 
 // NewWorker 创建严格解码、租约心跳和原子完成的 Reindex River Worker。
 func NewWorker(runtime deliveryRuntime, processor application.ProcessorRunner, completion completionRunner, options WorkerOptions) (*Worker, error) {
+	if nilWorkerDependency(processor) {
+		return nil, workerError(foundation.ErrorInvalidInput, workerInvalidCode, false, errors.New("reindex worker dependencies or lease cadence are invalid"))
+	}
+	return NewWorkerWithProcessorAcquirer(runtime, staticProcessorAcquirer{processor: processor}, completion, options)
+}
+
+// NewWorkerWithProcessorAcquirer 创建按持久 Delivery 取得 operation-scoped
+// Processor graph 的 Reindex River Worker。
+func NewWorkerWithProcessorAcquirer(runtime deliveryRuntime, processorAcquirer CompatibleProcessorAcquirer, completion completionRunner, options WorkerOptions) (*Worker, error) {
 	options.Owner = strings.TrimSpace(options.Owner)
-	if nilWorkerDependency(runtime) || nilWorkerDependency(processor) || nilWorkerDependency(completion) ||
+	if nilWorkerDependency(runtime) || nilWorkerDependency(processorAcquirer) || nilWorkerDependency(completion) ||
 		options.Owner == "" || len(options.Owner) > 128 || strings.ContainsAny(options.Owner, "\r\n\t/") ||
 		options.LeaseDuration <= 0 || options.HeartbeatInterval <= 0 || options.HeartbeatInterval >= options.LeaseDuration ||
 		options.Metrics != nil && nilWorkerDependency(options.Metrics) {
 		return nil, workerError(foundation.ErrorInvalidInput, workerInvalidCode, false, errors.New("reindex worker dependencies or lease cadence are invalid"))
 	}
 	return &Worker{
-		runtime: runtime, processor: processor, completion: completion, options: options,
+		runtime: runtime, processorAcquirer: processorAcquirer, completion: completion, options: options,
 		observer: workerObserver{metrics: options.Metrics, logger: options.Logger},
 	}, nil
 }
@@ -82,7 +114,7 @@ func (worker *Worker) Work(ctx context.Context, job *riverlib.Job[Args]) (workEr
 	if worker != nil {
 		defer func() { worker.reportFatal(workErr) }()
 	}
-	if worker == nil || nilWorkerDependency(worker.runtime) || nilWorkerDependency(worker.processor) || nilWorkerDependency(worker.completion) {
+	if worker == nil || nilWorkerDependency(worker.runtime) || nilWorkerDependency(worker.processorAcquirer) || nilWorkerDependency(worker.completion) {
 		return workerError(foundation.ErrorDependencyUnavailable, workerUnavailableCode, true, errors.New("reindex worker is unavailable"))
 	}
 	if ctx == nil || job == nil || job.JobRow == nil || job.ID < 1 || job.Attempt < 1 {
@@ -99,6 +131,11 @@ func (worker *Worker) Work(ctx context.Context, job *riverlib.Job[Args]) (workEr
 	if err != nil {
 		return err
 	}
+	processorAdmission, err := worker.admitProcessor(ctx)
+	if err != nil {
+		return err
+	}
+	defer processorAdmission.Release()
 
 	deliveryKey := fmt.Sprintf("reindex-job:%d:attempt:%d", job.ID, job.Attempt)
 	leaseOwner := worker.options.Owner + ":" + deliveryKey
@@ -117,6 +154,11 @@ func (worker *Worker) Work(ctx context.Context, job *riverlib.Job[Args]) (workEr
 	if claim.Disposition != application.DeliveryClaimed {
 		return workerError(foundation.ErrorConsistencyViolation, workerResultInvalidCode, false, errors.New("claim returned an unknown disposition"))
 	}
+	processorLease, processor, err := worker.acquireProcessor(ctx, processorAdmission, claim.Delivery)
+	if err != nil {
+		return err
+	}
+	defer processorLease.Release()
 	lease, err := application.NewDeliveryLeaseSession(worker.runtime, claim.Fence)
 	if err != nil {
 		return err
@@ -130,7 +172,7 @@ func (worker *Worker) Work(ctx context.Context, job *riverlib.Job[Args]) (workEr
 	heartbeatErrors := make(chan error, 1)
 	heartbeatDone := make(chan struct{})
 	go worker.heartbeatLoop(processorContext, cancelProcessor, lease, heartbeatErrors, heartbeatDone)
-	result, processorErr := worker.processor.Process(processorContext, application.ProcessorRequest{Lease: lease})
+	result, processorErr := processor.Process(processorContext, application.ProcessorRequest{Lease: lease})
 	cancelProcessor()
 	<-heartbeatDone
 	if heartbeatErr := readHeartbeatError(heartbeatErrors); heartbeatErr != nil {
@@ -188,6 +230,83 @@ func (worker *Worker) Work(ctx context.Context, job *riverlib.Job[Args]) (workEr
 		worker.observer.observeCompletion(ctx, completionResult)
 	}
 	return err
+}
+
+func (worker *Worker) admitProcessor(ctx context.Context) (CompatibleProcessorAdmission, error) {
+	admission, err := worker.processorAcquirer.Admit(ctx)
+	if err != nil {
+		if !nilWorkerDependency(admission) {
+			admission.Release()
+		}
+		return nil, err
+	}
+	if nilWorkerDependency(admission) {
+		return nil, workerError(foundation.ErrorConsistencyViolation, workerResultInvalidCode, false, errors.New("processor acquirer returned a nil admission"))
+	}
+	return admission, nil
+}
+
+func (worker *Worker) acquireProcessor(ctx context.Context, admission CompatibleProcessorAdmission, delivery domain.Delivery) (CompatibleProcessorLease, application.ProcessorRunner, error) {
+	lease, err := admission.Acquire(ctx, delivery)
+	if err != nil {
+		if !nilWorkerDependency(lease) {
+			lease.Release()
+		}
+		return nil, nil, err
+	}
+	if nilWorkerDependency(lease) {
+		return nil, nil, workerError(foundation.ErrorConsistencyViolation, workerResultInvalidCode, false, errors.New("processor acquirer returned a nil lease"))
+	}
+	processor := lease.Processor()
+	if nilWorkerDependency(processor) {
+		lease.Release()
+		return nil, nil, workerError(foundation.ErrorConsistencyViolation, workerResultInvalidCode, false, errors.New("processor lease returned a nil processor"))
+	}
+	return lease, processor, nil
+}
+
+type staticProcessorAcquirer struct {
+	processor application.ProcessorRunner
+}
+
+func (acquirer staticProcessorAcquirer) Admit(context.Context) (CompatibleProcessorAdmission, error) {
+	return &staticProcessorAdmission{processor: acquirer.processor}, nil
+}
+
+type staticProcessorAdmission struct {
+	processor application.ProcessorRunner
+	released  atomic.Bool
+}
+
+func (admission *staticProcessorAdmission) Acquire(context.Context, domain.Delivery) (CompatibleProcessorLease, error) {
+	if admission == nil || admission.released.Load() {
+		return nil, workerError(foundation.ErrorDependencyUnavailable, workerUnavailableCode, true, errors.New("static processor admission is released"))
+	}
+	return &staticProcessorLease{processor: admission.processor}, nil
+}
+
+func (admission *staticProcessorAdmission) Release() {
+	if admission != nil {
+		admission.released.Store(true)
+	}
+}
+
+type staticProcessorLease struct {
+	processor application.ProcessorRunner
+	released  atomic.Bool
+}
+
+func (lease *staticProcessorLease) Processor() application.ProcessorRunner {
+	if lease == nil || lease.released.Load() {
+		return nil
+	}
+	return lease.processor
+}
+
+func (lease *staticProcessorLease) Release() {
+	if lease != nil {
+		lease.released.Store(true)
+	}
 }
 
 func (worker *Worker) heartbeatLoop(ctx context.Context, cancel context.CancelFunc, lease *application.DeliveryLeaseSession, errorsChannel chan<- error, done chan<- struct{}) {

@@ -80,7 +80,7 @@ http://127.0.0.1:8080/
 
 - `status` 同时显示主 `zhixu` 和辅助 `zhixu-netns` 的关键服务（包括 exited/created）、`Runtime: ready|degraded`、浏览器 URL、selection 和 grant；该命令只读，不补启动容器。
 - `logs [service]` 跟踪服务，默认 `app`。
-- `restart` 重新校验上次 selection，并应用 managed model target/rollback 流程。
+- `restart` 重新校验上次 selection并重建主运行进程，用于软件升级、进程故障或运维恢复；它不是模型配置应用步骤，也不会在 idle 时自动应用 pending desired。
 - `down` 停容器并撤销派生 grant，保留 selection、PostgreSQL、模型密钥、control instance 和宿主机文件。
 
 ### 2.4 Docker Desktop 操作边界
@@ -153,7 +153,7 @@ validate -> quiesce -> revoke -> prepare -> verify -> commit -> activate
 - Chat：`ZHIXU_CHAT_PROVIDER`、`ZHIXU_CHAT_API_STYLE`（`chat_completions|responses`）、`ZHIXU_CHAT_BASE_URL`、`ZHIXU_CHAT_API_KEY`、`ZHIXU_CHAT_MODEL`、`ZHIXU_CHAT_MODEL_VERSION`、`ZHIXU_CHAT_ADAPTER_VERSION`、`ZHIXU_CHAT_TIMEOUT`、`ZHIXU_CHAT_MAX_REQUEST_BYTES`、`ZHIXU_CHAT_MAX_RESPONSE_BYTES`。
 - Retrieval：`ZHIXU_RETRIEVAL_RRF_K`、`ZHIXU_RETRIEVAL_RRF_LEXICAL_CANDIDATE_LIMIT`、`ZHIXU_RETRIEVAL_RRF_VECTOR_CANDIDATE_LIMIT`、`ZHIXU_RETRIEVAL_RRF_FUSED_CANDIDATE_LIMIT`、`ZHIXU_RETRIEVAL_RRF_RERANK_CANDIDATE_LIMIT`。
 - Telemetry：`ZHIXU_TELEMETRY_MODE`、`OTEL_EXPORTER_OTLP_ENDPOINT`。
-- Managed model settings：`ZHIXU_MODEL_SETTINGS_MODE`、key file、rollout target/prepared 字段，精确名称以 Loader/Compose 为准。
+- Managed model settings：`ZHIXU_MODEL_SETTINGS_MODE`、key file，以及仅为旧候选进程兼容保留的 rollout/prepared 字段，精确名称以 Loader/Compose 为准。普通 Save/Apply 不修改环境变量，rollout/prepared 保持空/false。
 
 安全关系和范围由 Loader 校验：heartbeat 小于 lease；soft stop 小于 hard deadline；Provider/Endpoint/Secret/Dimensions 组合有效；RRF limits 单调有界；Web budget 有界；disabled capability 不消费 gated Secret。不要通过手工修改 Compose 绕过门禁。
 
@@ -167,7 +167,64 @@ validate -> quiesce -> revoke -> prepare -> verify -> commit -> activate
 
 ### 4.4 Managed 模型设置
 
-开发 Compose 使用 managed 模式：desired/active/applied revision 分离。保存只推进 desired；`./zhixu restart` 固定 target、暂停新 Queue、排空开始的 Attempt，启动 API/Worker candidate，两 role fresh 且 revision 一致后才提交 active。任一失败 abort/recover previous；Key 缺失、密文损坏或 Provider 预检失败不改变 active，只报告稳定错误。
+开发 Compose 使用 managed 模式，并把以下状态作为独立事实：
+
+- `desired_revision`：最后一次成功保存的 immutable 配置；保存不等于生效。
+- `active_revision`：PostgreSQL 已提交给新默认工作的 revision。
+- API/Worker `applied_revision`：当前 role 已安装的 serving revision；还必须检查 `fresh` 与 `phase`。
+- `apply_required`：由上述版本、activation 和 serving health 派生；兼容字段 `restart_required` 恒为 false。
+
+无重启语义只适用于已经安装 `00079` 和对应新 binary 的 managed 模式。安装这次功能本身是一轮正常
+软件升级，可能重建容器一次；升级完成后的后续模型配置 Apply 才不需要重启。static Env/YAML 配置变更
+仍按部署配置重建进程，也不承诺 managed 正 revision 的历史重建能力。
+
+#### 正常保存与应用
+
+页面有三类操作：
+
+1. “保存并应用”先保存 desired，再用返回的 exact revision 启动 activation。
+2. “仅保存”只推进 desired；页面显示“已保存，尚未应用”，之后再点“应用配置”。
+3. 编辑阶段“连接测试”只做提前反馈；Apply 仍会在 API/Worker 两端通过生产 Adapter 做有界 Probe。
+
+普通 Apply 全程在现有 API/Worker 进程内完成，不调用 `./zhixu restart`，不停止或替换容器。页面关闭、
+刷新、断网或 Start 响应丢失不会取消已持久化 operation；重新进入页面会从 PostgreSQL Snapshot 恢复。
+
+| Phase | 运行行为 | 失败方向 |
+|---|---|---|
+| `preparing` | 两端构造并 Probe exact target；旧 active 继续接收模型工作 | 转 `failed`，清候选，旧 active 不变 |
+| `arming` | 短暂阻止新的默认模型 acquisition 和 Worker Claim；已开始操作继续 | commit 前仍可转 `failed` 并恢复旧 admission |
+| `activating` | active 已提交 target；两端安装/ack，admission 在一致前保持 fence | 只向前恢复 target，禁止自动 rollback |
+| `idle` | 无 live activation；只有 active/applied 一致且 role fresh 才算已生效 | desired!=active 表示待应用 |
+| `failed` | commit 前终态；旧 active 仍服务 | 修正配置后保存新 revision或重试 exact desired |
+
+短 fence 内新模型请求可能得到 retryable `MODEL_RUNTIME_SWITCHING`/503，Workflow 新 Claim 暂停；不要把它
+当成容器故障。已经开始的请求和 Attempt 持有旧 generation lease，不等待排空，也不会在执行中换模型。
+
+#### 历史 Attempt 与索引
+
+- Workflow Attempt 按 Claim 时持久化的 runtime instance/revision 获取 exact generation；replay 不改绑当前 active。
+- Search 先读取 Active Index/Embedding Version，再校验完整 Provider、Adapter/Model、dimensions、
+  normalization、distance、endpoint identity、limits 与 revision hint。
+- Source Refresh、Vector Build 与 Reindex 在完整操作期间持有同一 generation lease。相同 Contract 可跨
+  revision 复用；不兼容时按历史正 revision 重建，失败显式 unavailable，绝不使用当前默认 Embedder兜底。
+- revision `0` 是 canonical disabled/static 边界，不承诺 managed 历史重建；新的 Embedding 设置也不会
+  自动创建或激活 Index Version，仍按第 9 节单独重建和切换。
+
+#### 故障与资源限制
+
+- `preparing|arming` 的构造、Secret 解密、Provider Probe、participant 或 lease 失败发生在 commit 前，
+  active/applied 保持 previous；修复后从页面重试，不需要重启容器。
+- `activating` 表示 commit 已发生。恢复主密钥、Provider 连通性或故障进程后让 controller 完成 target
+  applied/finalize；不要手工把 active SQL 改回 previous。业务需要回到旧配置时，收敛后把旧值保存成
+  新 revision再 Apply。
+- runtime 退役只关闭该 generation 自建 Transport 的 idle connections；外部注入 client 不归 Host 关闭。
+  Resolved Secret byte buffer 会尽快销毁，但 HTTP `Authorization` 已进入 Go `string` 后无法提供可验证的
+  硬内存清零，只能缩短引用生命周期并释放 generation。日志、问题响应和诊断不得包含 Key、Authorization、
+  完整 Endpoint 或内部 instance ID。
+
+`./zhixu restart` 仍是升级、runtime ownership 丢失或进程故障的受控恢复工具：pre-commit operation 恢复
+previous active，post-commit operation恢复 target并向前 finalize；`idle` 且 desired!=active 时只重建
+active，不自动应用 pending desired。正常配置生效不要使用 Docker Desktop Restart project。
 
 ## 5. 启动顺序与健康
 
@@ -178,7 +235,7 @@ Compose 服务顺序：
 3. Model key init/migrate one-shot 退出。
 4. 一次性 Workspace Control 重建 exact grant。
 5. API/Worker 的 PID 1 使用各自配置等待 PostgreSQL 可 ping；等待期间容器保持 running，并与对应 model relay 使用 `zhixu-netns` 的稳定 network namespace。参数、配置或数据库 URL 无效时以稳定、无 Secret 的错误失败，不无限重试。
-6. 数据库 ready 后等待入口 `exec` API/Worker；Worker 再次 Validate River Schema、冻结 Definition/Executor Registry、启动 health 与 River。
+6. 数据库 ready 后等待入口 `exec` API/Worker；Worker 再次 Validate River Schema、冻结稳定 Definition/Executor Registry、启动 health 与 River；模型相关 wrapper 在每个 Attempt 执行边界按持久 binding Acquire generation，而不是冻结启动时模型。
 7. API `/readyz`、Worker 容器内 `:8081/readyz`、两个 anchor、两个 relay 与 Web 分别就绪后接流量。app anchor 每次启动均先安装 peer firewall 再监听入口。
 
 Liveness 只证明进程存活。Worker readiness 还要求 DB、River schema/client、Definition、Executor、启用依赖和非 shutdown。健康响应只暴露稳定 `status/code/version`，不返回底层 cause、DSN 或配置。
@@ -212,6 +269,8 @@ Liveness 只证明进程存活。Worker readiness 还要求 DB、River schema/cl
 - 仅回到兼容当前 Schema、River Job kind/args、Workflow context 和 Writeback checkpoint 的应用版本。
 - DB 采用 Expand → Backfill → Contract；不把 destructive down migration 当普通回滚。
 - Prompt/Workflow/Model/Index 可切回上一 Active/Ready version。
+- 模型热应用 migration `00079` 只支持从可证明的 legacy `idle|failed` Up；不支持旧/新 binary 混跑。已存在 participant history、新 live phase 或不满足 legacy shape 时 Down 以 SQLSTATE `55000` fail closed，必须采用 forward fix。
+- 模型 activation 在 commit 前可恢复 previous active；commit 后不得 schema/SQL 回滚 active。回到旧模型应保存旧值为新的 immutable revision并正常 Apply。
 - 回滚应用前停止全部 Worker，保留 River Job、Attempt、Writeback Execution、temp/backup 与 lease；不兼容时保持停止并进入恢复流程。
 
 ## 7. 一致备份与恢复
@@ -352,6 +411,9 @@ Git 校验失败时确认 Root 已是仓库，或首次显式 `--initialize-git`
 ### 模型或检索不可用
 
 - 检查 Settings desired/active/applied revision 与 Provider capability，不在日志粘贴 Key/Endpoint。
+- `preparing|arming` 失败时确认页面仍显示 previous active serving，修复安全错误码对应的 Key/Provider 后重试；不要用 restart 代替 Apply。
+- `activating` 长时间不收敛时检查 API/Worker runtime `fresh`、participant phase 和主密钥/Provider；保持 target active并向前恢复，不手工回写 previous revision。
+- `MODEL_RUNTIME_SWITCHING` 是短 fence 的 retryable 状态；`MODEL_RUNTIME_REVISION_UNAVAILABLE` 或历史 Embedder unavailable 表示精确 provenance 无法重建，禁止切到当前默认模型掩盖。
 - Chat disabled：Conversation 读取可用，Question 提交 unavailable。
 - Embedding disabled：Keyword 可用，Hybrid 明确 degraded，Semantic unavailable。
 - required Telemetry/Provider 依赖导致 readiness fail 时先恢复依赖或使用经批准的显式模式，不注入 Fake。
@@ -399,5 +461,18 @@ go test ./internal/modelsettings/... ./cmd/api ./cmd/worker ./cmd/migrate ./cmd/
 go vet ./internal/platform/config ./internal/modelsettings/... ./cmd/api ./cmd/worker ./cmd/migrate ./cmd/modelctl
 git diff --check
 ```
+
+Managed 模型配置无重启验收使用 disposable Workspace/数据库和受控 loopback fake model。Apply 前后分别记录：
+
+```bash
+docker compose --project-name zhixu --profile workspace-runtime \
+  -f deploy/compose.yml ps -q app worker \
+  | xargs docker inspect --format '{{.Id}} {{.State.StartedAt}}'
+```
+
+在页面执行“保存并应用”，等待 `desired=active=API applied=Worker applied`、两个 role fresh 且 rollout
+回到 `idle`，再执行同一命令；容器 ID 和 `StartedAt` 必须逐项完全相同。同时用一个跨 commit 的受控
+旧请求/Attempt验证它仍使用 previous revision，并验证 commit 后新操作使用 target。验收不得访问用户真实
+Provider，不执行 `restart`、`down -v`、volume删除、Docker daemon重启或 PostgreSQL重启。
 
 发布物包括 Go API/Worker/Migrate、Web 静态资产、Docker image/Compose、迁移、示例配置与 SBOM。本项目不要求 Kubernetes、Service Mesh、Kafka、必需 Redis 或多区域复制。

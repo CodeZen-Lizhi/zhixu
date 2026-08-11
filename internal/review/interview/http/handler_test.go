@@ -19,7 +19,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	interviewapp "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/interview/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 func TestInterviewHTTPRoutesMapCommands(t *testing.T) {
@@ -194,8 +194,8 @@ func TestInterviewHTTPFailsClosedAndRejectsInvalidWire(t *testing.T) {
 
 	t.Run("missing principal", func(t *testing.T) {
 		service := baseService()
-		router := chi.NewRouter()
-		router.Route("/api/v1", func(api chi.Router) { NewHandler(service, 0).Routes(api) })
+		router := gin.New()
+		NewHandler(service, 0).Routes(router.Group("/api/v1"))
 		response := serveInterview(t, router, http.MethodPost, "/api/v1/review/interviews", startJSON(fixture), nil)
 		requireInterviewProblem(t, response, http.StatusForbidden, errorCodeAuthRequired, false)
 		if service.startCalls != 0 {
@@ -573,13 +573,10 @@ func protectedInterviewRouter(t *testing.T, service Service, principal authdomai
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := chi.NewRouter()
-	router.Route("/api/v1", func(api chi.Router) {
-		api.Group(func(protected chi.Router) {
-			protected.Use(authHandler.Middleware)
-			NewHandler(service, 25*time.Millisecond).Routes(protected)
-		})
-	})
+	router := gin.New()
+	protected := router.Group("/api/v1")
+	protected.Use(authHandler.Middleware)
+	NewHandler(service, 25*time.Millisecond).Routes(protected)
 	return router
 }
 

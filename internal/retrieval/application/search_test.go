@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -194,7 +195,7 @@ func TestSearchHybridQueryEmbedRetryableFallsBackButContractAndStoreDamageFailCl
 		embedder := &queryEmbedderFake{contract: mismatch}
 		service := mustSearchService(t, store, embedder, nil)
 		_, err := service.Search(context.Background(), domain.SearchRequest{WorkspaceID: index.Index.WorkspaceID, Query: "damage", Mode: domain.SearchModeHybrid, Limit: 5})
-		assertSearchError(t, err, foundation.ErrorConsistencyViolation, domain.ErrorCodeEmbeddingContractInvalid, false)
+		assertSearchError(t, err, foundation.ErrorDependencyUnavailable, vectorEmbedderVersionUnavailableCode, false)
 		if embedder.calls != 0 || store.vectorCalls != 0 {
 			t.Fatalf("embed calls=%d vector calls=%d", embedder.calls, store.vectorCalls)
 		}
@@ -311,6 +312,226 @@ func TestSearchHybridWaitsForVectorWorkerAfterLexicalFailure(t *testing.T) {
 	}
 }
 
+func TestSearchEmbeddingAcquisitionSkipsKeywordAndFTSOnlyRoutes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("keyword on hybrid index", func(t *testing.T) {
+		index, contract := hybridSearchIndex(t)
+		acquirer := &compatibleEmbeddingAcquirerFake{embedder: &queryEmbedderFake{contract: contract}}
+		service := mustSearchServiceWithAcquirer(t, &searchStoreFake{index: index}, acquirer, nil)
+		result, err := service.Search(context.Background(), domain.SearchRequest{
+			WorkspaceID: index.Index.WorkspaceID, Query: "keyword", Mode: domain.SearchModeKeyword, Limit: 5,
+		})
+		if err != nil || result.EffectiveMode != domain.SearchModeKeyword {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		if calls, _, _ := acquirer.snapshot(); calls != 0 {
+			t.Fatalf("acquire calls=%d", calls)
+		}
+	})
+
+	t.Run("fts only hybrid and semantic", func(t *testing.T) {
+		index := ftsOnlySearchIndex()
+		acquirer := &compatibleEmbeddingAcquirerFake{err: errors.New("must not acquire")}
+		store := &searchStoreFake{index: index}
+		service := mustSearchServiceWithAcquirer(t, store, acquirer, nil)
+		hybrid := domain.SearchRequest{WorkspaceID: index.Index.WorkspaceID, Query: "fts", Mode: domain.SearchModeHybrid, Limit: 5}
+		if result, err := service.Search(context.Background(), hybrid); err != nil || result.EffectiveMode != domain.SearchModeKeyword {
+			t.Fatalf("hybrid result=%#v err=%v", result, err)
+		}
+		semantic := hybrid
+		semantic.Mode = domain.SearchModeSemantic
+		_, err := service.Search(context.Background(), semantic)
+		assertSearchError(t, err, foundation.ErrorDependencyUnavailable, semanticUnavailableCode, false)
+		if calls, _, _ := acquirer.snapshot(); calls != 0 {
+			t.Fatalf("acquire calls=%d", calls)
+		}
+	})
+}
+
+func TestSearchEmbeddingAcquisitionUsesOneLeaseForSemanticAndHybrid(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []domain.SearchMode{domain.SearchModeSemantic, domain.SearchModeHybrid} {
+		mode := mode
+		t.Run(string(mode), func(t *testing.T) {
+			t.Parallel()
+			index, contract := hybridSearchIndex(t)
+			revision := int64(4)
+			index.EmbeddingVersion.ModelSettingsRevision = &revision
+			candidate := searchCandidate(index, 1, 1, []domain.EvidenceProvenance{searchProvenance(10, 11, "a.md")}, domain.SearchRankerVector)
+			store := &searchStoreFake{index: index, vector: []domain.SearchCandidate{candidate}}
+			if mode == domain.SearchModeHybrid {
+				store.lexical = []domain.SearchCandidate{searchCandidate(index, 1, 1, candidate.Provenances, domain.SearchRankerLexical)}
+			}
+			embedder := &queryEmbedderFake{
+				contract: contract,
+				result:   EmbedResult{Model: contract.Model, Embeddings: [][]float32{{1, 0, 0}}},
+			}
+			acquirer := &compatibleEmbeddingAcquirerFake{embedder: embedder}
+			service := mustSearchServiceWithAcquirer(t, store, acquirer, nil)
+			_, err := service.Search(context.Background(), domain.SearchRequest{
+				WorkspaceID: index.Index.WorkspaceID, Query: "lease", Mode: mode, Limit: 5,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls, acquired, leases := acquirer.snapshot()
+			if calls != 1 || !reflect.DeepEqual(acquired, *index.EmbeddingVersion) || len(leases) != 1 || leases[0].releaseCount() != 1 {
+				t.Fatalf("calls=%d acquired=%#v leases=%d releases=%d", calls, acquired, len(leases), leaseReleaseCount(leases))
+			}
+			if embedder.calls != 1 || store.vectorCalls != 1 {
+				t.Fatalf("embed calls=%d vector calls=%d", embedder.calls, store.vectorCalls)
+			}
+		})
+	}
+}
+
+func TestSearchHybridHoldsEmbeddingLeaseThroughVectorAndRerank(t *testing.T) {
+	t.Parallel()
+	index, contract := hybridSearchIndex(t)
+	recorder := &searchLifecycleRecorder{}
+	vector := searchCandidate(index, 1, 1, []domain.EvidenceProvenance{searchProvenance(10, 11, "a.md")}, domain.SearchRankerVector)
+	lexical := searchCandidate(index, 1, 1, vector.Provenances, domain.SearchRankerLexical)
+	store := &searchStoreFake{index: index, lexical: []domain.SearchCandidate{lexical}, vector: []domain.SearchCandidate{vector}, onVector: func() {
+		recorder.add("vector")
+	}}
+	embedder := &queryEmbedderFake{
+		contract: contract,
+		result:   EmbedResult{Model: contract.Model, Embeddings: [][]float32{{1, 0, 0}}},
+		onCall:   func() { recorder.add("embed") },
+	}
+	reranker := &rerankerFake{
+		result: RerankResult{ModelVersion: "rerank-v1", Items: []RerankItem{{ChunkID: vector.ChunkID, Score: 1}}},
+		onCall: func() { recorder.add("rerank") },
+	}
+	acquirer := &compatibleEmbeddingAcquirerFake{
+		embedder:  embedder,
+		onAcquire: func() { recorder.add("acquire") },
+		onRelease: func() { recorder.add("release") },
+	}
+	service := mustSearchServiceWithAcquirer(t, store, acquirer, reranker)
+	_, err := service.Search(context.Background(), domain.SearchRequest{
+		WorkspaceID: index.Index.WorkspaceID, Query: "lifetime", Mode: domain.SearchModeHybrid, Limit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"acquire", "embed", "vector", "rerank", "release"}
+	if got := recorder.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("lifecycle=%v want=%v", got, want)
+	}
+}
+
+func TestSearchUsesPersistedActiveIndexEmbeddingAfterSettingsCutover(t *testing.T) {
+	t.Parallel()
+	index, contract := hybridSearchIndex(t)
+	oldRevision := int64(3)
+	index.EmbeddingVersion.ModelSettingsRevision = &oldRevision
+	vector := searchCandidate(index, 1, 1, []domain.EvidenceProvenance{searchProvenance(10, 11, "old.md")}, domain.SearchRankerVector)
+	store := &searchStoreFake{index: index, vector: []domain.SearchCandidate{vector}}
+	compatibleCurrentGeneration := &queryEmbedderFake{
+		contract: contract,
+		result:   EmbedResult{Model: contract.Model, Embeddings: [][]float32{{1, 0, 0}}},
+	}
+	newDefaultContract := contract
+	newDefaultContract.Model = "embed-v2"
+	newDefaultContract.ConfigHash = searchContractHash(t, newDefaultContract)
+	newDefault := &queryEmbedderFake{contract: newDefaultContract}
+	expectedVersion := cloneEmbeddingVersion(*index.EmbeddingVersion)
+	acquirer := &compatibleEmbeddingAcquirerFake{
+		embedder:         compatibleCurrentGeneration,
+		expectedVersion:  &expectedVersion,
+		fallbackEmbedder: newDefault,
+	}
+	service := mustSearchServiceWithAcquirer(t, store, acquirer, nil)
+	_, err := service.Search(context.Background(), domain.SearchRequest{
+		WorkspaceID: index.Index.WorkspaceID, Query: "old active index", Mode: domain.SearchModeSemantic, Limit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, acquired, _ := acquirer.snapshot()
+	if acquired.ModelSettingsRevision == nil || *acquired.ModelSettingsRevision != oldRevision || acquired.ID != index.EmbeddingVersion.ID {
+		t.Fatalf("acquired=%#v", acquired)
+	}
+	if store.vectorQuery.EmbeddingVersion.ModelSettingsRevision == nil ||
+		*store.vectorQuery.EmbeddingVersion.ModelSettingsRevision != oldRevision ||
+		store.vectorQuery.EmbeddingVersion.ID != index.EmbeddingVersion.ID {
+		t.Fatalf("vector version=%#v", store.vectorQuery.EmbeddingVersion)
+	}
+	if compatibleCurrentGeneration.calls != 1 || newDefault.calls != 0 {
+		t.Fatalf("compatible calls=%d new-default calls=%d", compatibleCurrentGeneration.calls, newDefault.calls)
+	}
+}
+
+func TestSearchIncompatibleAcquiredEmbeddingFailsBeforeProviderOrVector(t *testing.T) {
+	t.Parallel()
+	index, contract := hybridSearchIndex(t)
+	mismatch := contract
+	mismatch.Model = "other-model"
+	mismatch.ConfigHash = searchContractHash(t, mismatch)
+	embedder := &queryEmbedderFake{contract: mismatch}
+	store := &searchStoreFake{index: index}
+	acquirer := &compatibleEmbeddingAcquirerFake{embedder: embedder}
+	service := mustSearchServiceWithAcquirer(t, store, acquirer, nil)
+	_, err := service.Search(context.Background(), domain.SearchRequest{
+		WorkspaceID: index.Index.WorkspaceID, Query: "mismatch", Mode: domain.SearchModeHybrid, Limit: 5,
+	})
+	assertSearchError(t, err, foundation.ErrorDependencyUnavailable, vectorEmbedderVersionUnavailableCode, false)
+	_, _, leases := acquirer.snapshot()
+	if embedder.calls != 0 || store.vectorCalls != 0 || len(leases) != 1 || leases[0].releaseCount() != 1 {
+		t.Fatalf("embed=%d vector=%d leases=%d releases=%d", embedder.calls, store.vectorCalls, len(leases), leaseReleaseCount(leases))
+	}
+}
+
+func TestSearchHistoricalEmbeddingUnavailableDoesNotUseCurrentDefault(t *testing.T) {
+	t.Parallel()
+	index, _ := hybridSearchIndex(t)
+	historicalRevision := int64(2)
+	index.EmbeddingVersion.ModelSettingsRevision = &historicalRevision
+	acquireErr := foundation.NewError(
+		foundation.ErrorConsistencyViolation,
+		"MODEL_RUNTIME_EMBEDDING_CONTRACT_MISMATCH",
+		false,
+		errors.New("historical revision cannot be reconstructed"),
+	)
+	acquirer := &compatibleEmbeddingAcquirerFake{err: acquireErr}
+	store := &searchStoreFake{index: index}
+	service := mustSearchServiceWithAcquirer(t, store, acquirer, nil)
+	_, err := service.Search(context.Background(), domain.SearchRequest{
+		WorkspaceID: index.Index.WorkspaceID, Query: "historical", Mode: domain.SearchModeHybrid, Limit: 5,
+	})
+	assertSearchError(t, err, foundation.ErrorDependencyUnavailable, vectorEmbedderVersionUnavailableCode, false)
+	calls, acquired, leases := acquirer.snapshot()
+	if calls != 1 || acquired.ModelSettingsRevision == nil || *acquired.ModelSettingsRevision != historicalRevision ||
+		len(leases) != 0 || store.lexicalCalls != 0 || store.vectorCalls != 0 {
+		t.Fatalf(
+			"calls=%d acquired=%#v leases=%d lexical=%d vector=%d",
+			calls, acquired, len(leases), store.lexicalCalls, store.vectorCalls,
+		)
+	}
+}
+
+func TestSearchRetryableEmbeddingAcquisitionDoesNotFallbackToKeyword(t *testing.T) {
+	t.Parallel()
+	index, _ := hybridSearchIndex(t)
+	acquirer := &compatibleEmbeddingAcquirerFake{err: foundation.NewError(
+		foundation.ErrorDependencyUnavailable,
+		"MODEL_RUNTIME_SWITCHING",
+		true,
+		errors.New("runtime admission is temporarily fenced"),
+	)}
+	store := &searchStoreFake{index: index}
+	service := mustSearchServiceWithAcquirer(t, store, acquirer, nil)
+	_, err := service.Search(context.Background(), domain.SearchRequest{
+		WorkspaceID: index.Index.WorkspaceID, Query: "switching", Mode: domain.SearchModeHybrid, Limit: 5,
+	})
+	assertSearchError(t, err, foundation.ErrorDependencyUnavailable, vectorEmbedderVersionUnavailableCode, true)
+	if store.lexicalCalls != 0 || store.vectorCalls != 0 {
+		t.Fatalf("lexical=%d vector=%d", store.lexicalCalls, store.vectorCalls)
+	}
+}
+
 type searchStoreFake struct {
 	mu sync.Mutex
 
@@ -325,6 +546,7 @@ type searchStoreFake struct {
 	vectorQuery  VectorSearchQuery
 	lexicalCalls int
 	vectorCalls  int
+	onVector     func()
 }
 
 func (fake *searchStoreFake) LoadActiveSearchIndex(context.Context, foundation.ID) (SearchIndex, error) {
@@ -344,6 +566,9 @@ func (fake *searchStoreFake) SearchVector(_ context.Context, query VectorSearchQ
 	defer fake.mu.Unlock()
 	fake.vectorCalls++
 	fake.vectorQuery = query
+	if fake.onVector != nil {
+		fake.onVector()
+	}
 	return append([]domain.SearchCandidate(nil), fake.vector...), fake.vectorErr
 }
 
@@ -355,6 +580,7 @@ type queryEmbedderFake struct {
 	result   EmbedResult
 	err      error
 	calls    int
+	onCall   func()
 }
 
 type cancellingQueryEmbedder struct {
@@ -379,6 +605,9 @@ func (fake *queryEmbedderFake) Embed(_ context.Context, request EmbedRequest) (E
 	defer fake.mu.Unlock()
 	fake.calls++
 	fake.request = request
+	if fake.onCall != nil {
+		fake.onCall()
+	}
 	return fake.result, fake.err
 }
 
@@ -389,6 +618,7 @@ type rerankerFake struct {
 	result  RerankResult
 	err     error
 	calls   int
+	onCall  func()
 }
 
 func (fake *rerankerFake) Rerank(_ context.Context, request RerankRequest) (RerankResult, error) {
@@ -396,12 +626,148 @@ func (fake *rerankerFake) Rerank(_ context.Context, request RerankRequest) (Rera
 	defer fake.mu.Unlock()
 	fake.calls++
 	fake.request = request
+	if fake.onCall != nil {
+		fake.onCall()
+	}
 	return fake.result, fake.err
+}
+
+type compatibleEmbeddingAcquirerFake struct {
+	mu sync.Mutex
+
+	embedder         QueryEmbedder
+	err              error
+	expectedVersion  *domain.EmbeddingVersion
+	fallbackEmbedder QueryEmbedder
+	onAcquire        func()
+	onRelease        func()
+	calls            int
+	version          domain.EmbeddingVersion
+	leases           []*compatibleEmbeddingLeaseFake
+}
+
+func (fake *compatibleEmbeddingAcquirerFake) Acquire(
+	_ context.Context,
+	version domain.EmbeddingVersion,
+) (CompatibleEmbeddingLease, error) {
+	fake.mu.Lock()
+	fake.calls++
+	fake.version = cloneEmbeddingVersion(version)
+	onAcquire := fake.onAcquire
+	err := fake.err
+	embedder := fake.embedder
+	expectedVersion := fake.expectedVersion
+	fallbackEmbedder := fake.fallbackEmbedder
+	onRelease := fake.onRelease
+	fake.mu.Unlock()
+	if onAcquire != nil {
+		onAcquire()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if expectedVersion != nil && !reflect.DeepEqual(version, *expectedVersion) {
+		embedder = fallbackEmbedder
+	}
+	lease := &compatibleEmbeddingLeaseFake{embedder: embedder, onRelease: onRelease}
+	fake.mu.Lock()
+	fake.leases = append(fake.leases, lease)
+	fake.mu.Unlock()
+	return lease, nil
+}
+
+func (fake *compatibleEmbeddingAcquirerFake) snapshot() (int, domain.EmbeddingVersion, []*compatibleEmbeddingLeaseFake) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.calls, cloneEmbeddingVersion(fake.version), append([]*compatibleEmbeddingLeaseFake(nil), fake.leases...)
+}
+
+type compatibleEmbeddingLeaseFake struct {
+	mu sync.Mutex
+
+	embedder     QueryEmbedder
+	onRelease    func()
+	releaseCalls int
+	released     bool
+}
+
+func (fake *compatibleEmbeddingLeaseFake) Embedder() QueryEmbedder {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.released {
+		return nil
+	}
+	return fake.embedder
+}
+
+func (fake *compatibleEmbeddingLeaseFake) Release() {
+	fake.mu.Lock()
+	fake.releaseCalls++
+	first := !fake.released
+	fake.released = true
+	onRelease := fake.onRelease
+	fake.mu.Unlock()
+	if first && onRelease != nil {
+		onRelease()
+	}
+}
+
+func (fake *compatibleEmbeddingLeaseFake) releaseCount() int {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.releaseCalls
+}
+
+type searchLifecycleRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (recorder *searchLifecycleRecorder) add(event string) {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	recorder.events = append(recorder.events, event)
+}
+
+func (recorder *searchLifecycleRecorder) snapshot() []string {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	return append([]string(nil), recorder.events...)
+}
+
+func cloneEmbeddingVersion(version domain.EmbeddingVersion) domain.EmbeddingVersion {
+	copy := version
+	if version.ModelSettingsRevision != nil {
+		revision := *version.ModelSettingsRevision
+		copy.ModelSettingsRevision = &revision
+	}
+	return copy
+}
+
+func leaseReleaseCount(leases []*compatibleEmbeddingLeaseFake) int {
+	if len(leases) != 1 {
+		return -1
+	}
+	return leases[0].releaseCount()
 }
 
 func mustSearchService(t *testing.T, store SearchStore, embedder QueryEmbedder, reranker Reranker) *SearchService {
 	t.Helper()
 	service, err := NewSearchService(store, embedder, reranker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+func mustSearchServiceWithAcquirer(
+	t *testing.T,
+	store SearchStore,
+	acquirer CompatibleEmbeddingAcquirer,
+	reranker Reranker,
+) *SearchService {
+	t.Helper()
+	service, err := NewSearchServiceWithEmbeddingAcquirer(store, acquirer, reranker)
 	if err != nil {
 		t.Fatal(err)
 	}

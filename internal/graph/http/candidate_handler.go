@@ -21,7 +21,7 @@ import (
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -61,12 +61,12 @@ func NewCandidateHandler(service graphapp.CandidateService, timeout time.Duratio
 }
 
 // Routes 在 `/api/v1` 下注册候选查询、详情、决策和持久 Topic scan 路由。
-func (handler *CandidateHandler) Routes(router chi.Router) {
-	router.Get("/graph/candidates", handler.list)
-	router.Get("/graph/candidates/{candidate_id}", handler.detail)
-	router.Post("/graph/candidates/{candidate_id}/decisions", handler.decide)
-	router.Post("/graph/candidate-scans", handler.startScan)
-	router.Get("/graph/candidate-scans/{scan_id}", handler.getScan)
+func (handler *CandidateHandler) Routes(router gin.IRouter) {
+	router.GET("/graph/candidates", httpapi.GinHandler(handler.list))
+	router.GET("/graph/candidates/:candidate_id", httpapi.GinHandler(handler.detail))
+	router.POST("/graph/candidates/:candidate_id/decisions", httpapi.GinHandler(handler.decide))
+	router.POST("/graph/candidate-scans", httpapi.GinHandler(handler.startScan))
+	router.GET("/graph/candidate-scans/:scan_id", httpapi.GinHandler(handler.getScan))
 }
 
 func nilCandidateHTTPDependency(value any) bool {
@@ -141,7 +141,7 @@ func (handler *CandidateHandler) detail(w http.ResponseWriter, r *http.Request) 
 		writeSemanticLinkError(w, err)
 		return
 	}
-	candidateID, err := parseCandidateID(chi.URLParam(r, "candidate_id"))
+	candidateID, err := parseCandidateID(r.PathValue("candidate_id"))
 	if err != nil {
 		writeSemanticLinkError(w, err)
 		return
@@ -164,7 +164,7 @@ func (handler *CandidateHandler) decide(w http.ResponseWriter, r *http.Request) 
 	if !handler.available(w) {
 		return
 	}
-	candidateID, err := parseCandidateID(chi.URLParam(r, "candidate_id"))
+	candidateID, err := parseCandidateID(r.PathValue("candidate_id"))
 	if err != nil {
 		writeSemanticLinkError(w, err)
 		return

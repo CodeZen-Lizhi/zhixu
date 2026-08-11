@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	defaultRuntimeStaleAfter = 20 * time.Second
+	defaultRuntimeStaleAfter = DefaultRuntimeFreshWithin
 	maxLeaseDuration         = 10 * time.Minute
 )
 
@@ -22,6 +22,9 @@ type Service struct {
 	revisions         RevisionStore
 	rollouts          RolloutStore
 	runtimes          RuntimeStore
+	availability      RuntimeAvailabilityStore
+	activations       ActivationStore
+	participants      ParticipantStore
 	validator         Validator
 	tester            ResolvedConnectionTester
 	runtimeStaleAfter time.Duration
@@ -38,10 +41,12 @@ func (service Service) String() string {
 func (service Service) GoString() string { return service.String() }
 
 var (
-	_ SettingsManager   = (*Service)(nil)
-	_ RevisionLoader    = (*Service)(nil)
-	_ RolloutControl    = (*Service)(nil)
-	_ RuntimeController = (*Service)(nil)
+	_ SettingsManager            = (*Service)(nil)
+	_ RevisionLoader             = (*Service)(nil)
+	_ RolloutControl             = (*Service)(nil)
+	_ RuntimeController          = (*Service)(nil)
+	_ RuntimeAvailabilityControl = (*Service)(nil)
+	_ ActivationControl          = (*Service)(nil)
 )
 
 // NewService creates the compatibility facade while callers migrate to the narrow module interfaces.
@@ -52,13 +57,17 @@ func NewService(revisions RevisionStore, validator Validator, runtimeStaleAfter 
 	if runtimeStaleAfter == 0 {
 		runtimeStaleAfter = defaultRuntimeStaleAfter
 	}
-	if runtimeStaleAfter < time.Second || runtimeStaleAfter > 5*time.Minute {
+	if !ValidRuntimeFreshWithin(runtimeStaleAfter) {
 		return nil, invalid(errors.New("runtime stale interval is invalid"))
 	}
 	rollouts, _ := revisions.(RolloutStore)
 	runtimes, _ := revisions.(RuntimeStore)
+	availability, _ := revisions.(RuntimeAvailabilityStore)
+	activations, _ := revisions.(ActivationStore)
+	participants, _ := revisions.(ParticipantStore)
 	return &Service{
-		revisions: revisions, rollouts: rollouts, runtimes: runtimes,
+		revisions: revisions, rollouts: rollouts, runtimes: runtimes, availability: availability,
+		activations: activations, participants: participants,
 		validator: validator, runtimeStaleAfter: runtimeStaleAfter,
 	}, nil
 }
@@ -254,7 +263,7 @@ func (service *Service) CommitRollout(ctx context.Context, command CommitRollout
 	if err := service.readyRollout(ctx); err != nil {
 		return domain.RolloutState{}, err
 	}
-	if !validID(command.RolloutID) || command.FreshWithin < time.Second || command.FreshWithin > 5*time.Minute {
+	if !validID(command.RolloutID) || !ValidRuntimeFreshWithin(command.FreshWithin) {
 		return domain.RolloutState{}, invalid(errors.New("rollout commit command is invalid"))
 	}
 	return service.rollouts.CommitRollout(ctx, command)
@@ -273,6 +282,9 @@ func (service *Service) RegisterRuntime(ctx context.Context, registration Runtim
 	}
 	if err := validateRuntimeRegistration(registration); err != nil {
 		return domain.RuntimeRecord{}, err
+	}
+	if registration.StaleAfter == 0 {
+		registration.StaleAfter = service.runtimeStaleAfter
 	}
 	return service.runtimes.RegisterRuntime(ctx, registration)
 }
@@ -304,6 +316,18 @@ func (service *Service) SetRuntimePhase(ctx context.Context, command RuntimePhas
 	return service.runtimes.SetRuntimePhase(ctx, command)
 }
 
+// RestoreRuntimeAvailability publishes readiness only after the exact local
+// generation has been rebuilt. It cannot change owner or applied revision.
+func (service *Service) RestoreRuntimeAvailability(ctx context.Context, command RestoreRuntimeAvailabilityCommand) (domain.RuntimeRecord, error) {
+	if err := service.readyRuntimeAvailability(ctx); err != nil {
+		return domain.RuntimeRecord{}, err
+	}
+	if !domain.ValidRuntimeRole(command.Role) || !validID(command.InstanceID) || command.AppliedRevision <= 0 {
+		return domain.RuntimeRecord{}, invalid(errors.New("runtime availability restore command is invalid"))
+	}
+	return service.availability.RestoreRuntimeAvailability(ctx, command)
+}
+
 func (service *Service) ready(ctx context.Context) error {
 	if service == nil || nilInterface(service.revisions) || nilInterface(service.validator) {
 		return unavailable(errors.New("model settings service is unavailable"))
@@ -330,6 +354,16 @@ func (service *Service) readyRuntime(ctx context.Context) error {
 	}
 	if nilInterface(service.runtimes) {
 		return unavailable(errors.New("model settings runtime store is unavailable"))
+	}
+	return nil
+}
+
+func (service *Service) readyRuntimeAvailability(ctx context.Context) error {
+	if err := service.ready(ctx); err != nil {
+		return err
+	}
+	if nilInterface(service.availability) {
+		return unavailable(errors.New("model settings runtime availability store is unavailable"))
 	}
 	return nil
 }
@@ -371,6 +405,9 @@ func validateRuntimeRegistration(registration RuntimeRegistration) error {
 	if !domain.ValidRuntimeRole(registration.Role) || !validID(registration.InstanceID) || registration.AppliedRevision < 0 ||
 		!validOptionalID(registration.RolloutID) || !domain.ValidRuntimePhase(registration.Phase) {
 		return invalid(errors.New("runtime registration is invalid"))
+	}
+	if registration.StaleAfter != 0 && !ValidRuntimeFreshWithin(registration.StaleAfter) {
+		return invalid(errors.New("runtime registration stale interval is invalid"))
 	}
 	if registration.RolloutID == nil && registration.Phase != domain.RuntimePhaseActive && registration.Phase != domain.RuntimePhaseUnavailable {
 		return invalid(errors.New("non-rollout runtime phase is invalid"))

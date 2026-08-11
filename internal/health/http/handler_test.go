@@ -13,7 +13,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const healthHTTPWorkspaceID = foundation.ID("10000000-0000-4000-8000-000000000001")
@@ -34,7 +34,7 @@ func TestHealthSummaryUsesSnakeCasePublicContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(read, nil, nil, nil, nil).Routes(router)
 	request := httptest.NewRequest(http.MethodGet, "/health/summary?workspace_id="+string(healthHTTPWorkspaceID), nil)
 	response := httptest.NewRecorder()
@@ -67,7 +67,7 @@ func TestHealthSummaryUsesSnakeCasePublicContract(t *testing.T) {
 }
 
 func TestHealthRoutesFailClosedPerCapability(t *testing.T) {
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(nil, nil, nil, nil, nil).Routes(router)
 	for _, target := range []string{
 		"/health/summary?workspace_id=" + string(healthHTTPWorkspaceID),
@@ -84,7 +84,7 @@ func TestHealthRoutesFailClosedPerCapability(t *testing.T) {
 }
 
 func TestHealthDecisionRequiresIdempotencyKeyBeforeMutation(t *testing.T) {
-	router := chi.NewRouter()
+	router := gin.New()
 	decisions := &healthDecisionFake{}
 	NewHandler(nil, nil, nil, nil, decisions).Routes(router)
 	body := `{"workspace_id":"` + string(healthHTTPWorkspaceID) + `","expected_version":1,"action":"ACKNOWLEDGE"}`
@@ -619,8 +619,8 @@ func healthHandlerWithSchedule(t *testing.T, state application.ScheduleStatePort
 	return NewHandler(nil, nil, schedules, nil, nil)
 }
 
-func newHealthRouter(handler *Handler) chi.Router {
-	router := chi.NewRouter()
+func newHealthRouter(handler *Handler) *gin.Engine {
+	router := gin.New()
 	handler.Routes(router)
 	return router
 }

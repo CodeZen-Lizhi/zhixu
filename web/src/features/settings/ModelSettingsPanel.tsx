@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient, type UseMutationResult } from "@tanstack/react-query";
-import { AlertTriangle, Check, ChevronDown, KeyRound, LoaderCircle, RefreshCw, Save, TestTube2 } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, KeyRound, LoaderCircle, Play, RefreshCw, Save, TestTube2 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 
 import {
@@ -8,6 +8,7 @@ import {
   canonicalizeEmbeddingModelBaseUrl,
   canonicalizeModelBaseUrl,
   getModelSettings,
+  startModelSettingsActivation,
   testModelSettings,
   updateModelSettings,
   modelSettingsOllamaRelayUrl,
@@ -21,6 +22,7 @@ import {
   type EmbeddingModelSettingsSummary,
   type EmbeddingNormalization,
   type ModelCapability,
+  type ModelParticipantPhase,
   type ModelRuntimePhase,
   type ModelRolloutPhase,
   type ModelSecretInput,
@@ -30,6 +32,7 @@ import {
   type ModelTestTarget,
   type ModelTestValidationReason,
 } from "../../api/model-settings";
+import { isAbortError } from "../../shared/codec";
 import { Badge, Button, Card, CardHeader, ErrorState } from "../../shared/ui";
 
 import "./model-settings.css";
@@ -130,20 +133,25 @@ const runtimeTone = (fresh: boolean, phase: string): "success" | "warning" | "da
 
 const runtimePhaseLabels: Record<ModelRuntimePhase, string> = {
   active: "已生效",
-  quiescing: "正在停止",
-  quiesced: "已停止",
-  prepared: "已准备",
-  verifying: "校验中",
   unavailable: "不可用",
 };
 
 const rolloutPhaseLabels: Record<ModelRolloutPhase, string> = {
   idle: "空闲",
-  validating: "校验中",
-  draining: "排空中",
-  applying: "应用中",
-  verifying: "验证中",
+  preparing: "准备中",
+  arming: "切换准备中",
+  activating: "生效中",
   failed: "失败",
+};
+
+const participantPhaseLabels: Record<ModelParticipantPhase, string> = {
+  preparing: "正在构造",
+  prepared: "已准备",
+  armed: "等待切换",
+  activated: "已应用",
+  failed: "准备失败",
+  aborted: "已终止",
+  retired: "已退役",
 };
 
 const modelValidationReasonLabels: Record<ModelTestValidationReason, string> = {
@@ -162,6 +170,15 @@ const modelValidationReasonLabels: Record<ModelTestValidationReason, string> = {
 const revisionLabel = (revision: number): string => `版本 ${String(revision)}`;
 
 const isRolloutInProgress = (phase: ModelRolloutPhase): boolean => phase !== "idle" && phase !== "failed";
+
+const runtimeReadyForRevision = (runtime: ModelSettingsResponse["runtime"]["api"], revision: number): boolean =>
+  runtime.fresh && runtime.phase === "active" && runtime.appliedRevision === revision;
+
+const snapshotHasTarget = (settings: ModelSettingsResponse, targetRevision: number): boolean =>
+  (settings.rollout.phase !== "idle" && settings.rollout.targetRevision === targetRevision)
+  || (settings.activeRevision === targetRevision
+    && runtimeReadyForRevision(settings.runtime.api, targetRevision)
+    && runtimeReadyForRevision(settings.runtime.worker, targetRevision));
 
 const initialSecret = (configured: boolean): SecretDraft => ({ action: configured ? "keep" : "clear", value: "" });
 
@@ -341,6 +358,49 @@ const TestFeedback = ({ target, mutation }: { target: ModelTestTarget; mutation:
   return null;
 };
 
+const ParticipantProgress = ({ role, participant }: {
+  role: "API" | "工作进程";
+  participant: ModelSettingsResponse["participants"]["api"];
+}) => <div className="model-activation-participant">
+  <div>
+    <strong>{role}</strong>
+    <Badge tone={!participant.present ? "neutral" : participant.phase === "failed" || !participant.fresh ? "danger" : participant.phase === "activated" ? "success" : "warning"}>
+      {!participant.present || participant.phase === null ? "等待登记" : participantPhaseLabels[participant.phase]}
+    </Badge>
+  </div>
+  <p>{participant.present
+    ? `${participant.targetRevision === null ? "目标版本待确认" : revisionLabel(participant.targetRevision)}，${participant.fresh ? "状态正常" : "状态已过期"}`
+    : "尚未报告候选运行时进度。"}</p>
+  {participant.lastErrorCode === null ? null : <p className="model-settings-error">错误码：<code>{participant.lastErrorCode}</code>{participant.retryable ? "，可重试" : "，不可重试"}</p>}
+</div>;
+
+const ActivationProgress = ({ settings }: { settings: ModelSettingsResponse }) => {
+  if (settings.rollout.phase === "idle") return null;
+  const failed = settings.rollout.phase === "failed";
+  const targetRevision = settings.rollout.targetRevision ?? settings.desiredRevision;
+  const activeServing = runtimeReadyForRevision(settings.runtime.api, settings.activeRevision)
+    && runtimeReadyForRevision(settings.runtime.worker, settings.activeRevision);
+  const activeStatus = activeServing
+    ? `旧的${revisionLabel(settings.activeRevision)}继续服务`
+    : `${revisionLabel(settings.activeRevision)}保持为当前生效版本，但 API 或工作进程处于降级状态`;
+  const phaseMessage = settings.rollout.phase === "preparing"
+    ? `${activeStatus}；两端正在构造并检查完整候选运行时。`
+    : settings.rollout.phase === "arming"
+      ? `${activeStatus}；新的模型工作会短暂等待，进行中的工作不受影响。`
+      : settings.rollout.phase === "activating"
+        ? `${revisionLabel(targetRevision)}已经提交；API 与工作进程正在完成本地切换。`
+        : `应用未提交；${activeStatus}。`;
+  return <div className={`ui-state ${failed ? "ui-state--error" : "ui-state--warning"}`} role={failed ? "alert" : "status"}>
+    <strong>{failed ? "配置应用失败" : `配置应用：${rolloutPhaseLabels[settings.rollout.phase]}`}</strong>
+    <p>目标为{revisionLabel(targetRevision)}。{phaseMessage}</p>
+    {settings.rollout.lastErrorCode === null ? null : <p>总体错误码：<code>{settings.rollout.lastErrorCode}</code>{settings.rollout.retryable ? "，可以重试应用。" : "，请先修正配置或运行环境。"}</p>}
+    <div className="model-activation-participants" aria-label="API 与工作进程应用进度">
+      <ParticipantProgress role="API" participant={settings.participants.api} />
+      <ParticipantProgress role="工作进程" participant={settings.participants.worker} />
+    </div>
+  </div>;
+};
+
 export const ModelSettingsPanel = () => {
   const queryClient = useQueryClient();
   const query = useQuery({
@@ -348,6 +408,8 @@ export const ModelSettingsPanel = () => {
     queryFn: ({ signal }) => getModelSettings(signal),
     retry: false,
     refetchInterval: ({ state }) => state.data !== undefined && isRolloutInProgress(state.data.rollout.phase) ? 2_000 : false,
+    refetchOnReconnect: "always",
+    refetchOnWindowFocus: "always",
   });
   const hydratedRevision = useRef<number | null>(null);
   const draftDirty = useRef(false);
@@ -358,6 +420,7 @@ export const ModelSettingsPanel = () => {
   const feedbackRef = useRef<HTMLDivElement>(null);
   const [validationError, setValidationError] = useState<string | undefined>();
   const [conflict, setConflict] = useState<string | undefined>();
+  const [recoveredActivationTarget, setRecoveredActivationTarget] = useState<number | undefined>();
   const [expandedSections, setExpandedSections] = useState<Record<ModelTestTarget, boolean>>({ chat: false, embedding: false });
 
   const replaceDraft = (nextDraft: ModelSettingsDraft): void => {
@@ -439,13 +502,43 @@ export const ModelSettingsPanel = () => {
     setValidationError(undefined);
   }, [query.data]);
 
+  const observedLiveActivation = useRef(false);
+  useEffect(() => {
+    if (query.data === undefined) return;
+    if (isRolloutInProgress(query.data.rollout.phase)) {
+      observedLiveActivation.current = true;
+      return;
+    }
+    if (!observedLiveActivation.current) return;
+    observedLiveActivation.current = false;
+    void query.refetch();
+  }, [query.data?.rollout.id, query.data?.rollout.phase]);
+
+  const activationMutation = useMutation({
+    mutationFn: (targetRevision: number) => runMutationRequest((signal) => startModelSettingsActivation({ expectedRevision: targetRevision }, signal)),
+    onMutate: () => {
+      setRecoveredActivationTarget(undefined);
+      setConflict(undefined);
+    },
+    onSuccess: (response) => {
+      queryClient.setQueryData(modelSettingsQueryKey, response);
+      if (!isRolloutInProgress(response.rollout.phase)) void query.refetch();
+    },
+    onError: async (error: Error, targetRevision: number) => {
+      if (isAbortError(error)) return;
+      const latest = await query.refetch().catch(() => undefined);
+      if (latest?.isSuccess === true && snapshotHasTarget(latest.data, targetRevision)) setRecoveredActivationTarget(targetRevision);
+    },
+  });
+
   const saveMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: (intent: "save_only" | "save_and_apply") => {
+      void intent;
       const currentDraft = draftRef.current;
       if (currentDraft === undefined) throw new Error("模型设置尚未加载。");
       return runMutationRequest((signal) => updateModelSettings({ expectedRevision: currentDraft.revision, chat: chatInput(currentDraft.chat), embedding: embeddingInput(currentDraft.embedding) }, signal));
     },
-    onSuccess: (response) => {
+    onSuccess: (response, intent) => {
       queryClient.setQueryData(modelSettingsQueryKey, response);
       hydratedRevision.current = response.desiredRevision;
       draftDirty.current = false;
@@ -454,6 +547,7 @@ export const ModelSettingsPanel = () => {
       setConflict(undefined);
       setValidationError(undefined);
       testMutation.reset();
+      if (intent === "save_and_apply") activationMutation.mutate(response.desiredRevision);
     },
     onError: async (error: Error) => {
       if (!(error instanceof ModelSettingsApiError) || error.status !== 409) return;
@@ -462,15 +556,18 @@ export const ModelSettingsPanel = () => {
   });
 
   const visibleSaveError = saveMutation.isError && (!(saveMutation.error instanceof ModelSettingsApiError) || saveMutation.error.status !== 409);
+  const visibleActivationError = activationMutation.isError && recoveredActivationTarget !== activationMutation.variables;
 
   useEffect(() => {
-    if (validationError !== undefined || conflict !== undefined || visibleSaveError) feedbackRef.current?.focus();
-  }, [conflict, validationError, visibleSaveError]);
+    if (validationError !== undefined || conflict !== undefined || visibleSaveError || visibleActivationError) feedbackRef.current?.focus();
+  }, [conflict, validationError, visibleActivationError, visibleSaveError]);
 
   const resetFeedback = (): void => {
     setValidationError(undefined);
     setConflict(undefined);
     saveMutation.reset();
+    activationMutation.reset();
+    setRecoveredActivationTarget(undefined);
     testMutation.reset();
   };
 
@@ -489,7 +586,8 @@ export const ModelSettingsPanel = () => {
   const settings = query.data;
   const rolloutLocked = isRolloutInProgress(settings.rollout.phase);
   const rolloutFailed = settings.rollout.phase === "failed";
-  const actionPending = saveMutation.isPending || testMutation.isPending;
+  const retryingFailedTarget = rolloutFailed && settings.rollout.targetRevision === settings.desiredRevision;
+  const actionPending = saveMutation.isPending || activationMutation.isPending || testMutation.isPending;
   const controlsDisabled = rolloutLocked || actionPending || query.isFetching;
   const chatCanKeep = settings.desiredSettings.chat.apiKeyConfigured && sameSecretTarget(draft.chat.provider, draft.chat.baseUrl, settings.desiredSettings.chat.provider, settings.desiredSettings.chat.baseUrl);
   const embeddingCanKeep = settings.desiredSettings.embedding.apiKeyConfigured && sameSecretTarget(draft.embedding.provider, draft.embedding.baseUrl, settings.desiredSettings.embedding.provider, settings.desiredSettings.embedding.baseUrl);
@@ -503,13 +601,25 @@ export const ModelSettingsPanel = () => {
     testMutation.mutate(target);
   };
 
-  const submit = (event: SyntheticEvent<HTMLFormElement>): void => {
-    event.preventDefault();
+  const save = (intent: "save_only" | "save_and_apply"): void => {
     const error = validateDraft(draft, settings);
     setValidationError(error);
     setConflict(undefined);
     if (error !== undefined) return;
-    saveMutation.mutate();
+    saveMutation.mutate(intent);
+  };
+
+  const submit = (event: SyntheticEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    if (!draftDirty.current) {
+      activationMutation.mutate(settings.desiredRevision);
+      return;
+    }
+    const error = validateDraft(draft, settings);
+    setValidationError(error);
+    setConflict(undefined);
+    if (error !== undefined) return;
+    saveMutation.mutate("save_and_apply");
   };
 
   return <Card className="model-settings-panel">
@@ -522,9 +632,9 @@ export const ModelSettingsPanel = () => {
       <div><span>工作进程已应用</span><strong>{revisionLabel(settings.runtime.worker.appliedRevision)}</strong><Badge tone={runtimeTone(settings.runtime.worker.fresh, settings.runtime.worker.phase)}>{runtimePhaseLabels[settings.runtime.worker.phase]}</Badge></div>
     </div>
 
-    {settings.restartRequired ? <div className="ui-state ui-state--warning model-settings-restart" role="status"><strong>已保存的配置尚未生效</strong><p>执行 <code>./zhixu restart</code> 后，API 与工作进程会一起应用{revisionLabel(settings.desiredRevision)}。</p></div> : <div className="model-settings-applied" role="status"><Check size={16} /><span>API 与工作进程已应用当前生效版本。</span></div>}
-    {rolloutLocked ? <div className="ui-state ui-state--warning" role="status"><strong>配置切换：{rolloutPhaseLabels[settings.rollout.phase]}</strong><p>目标为{revisionLabel(settings.rollout.targetRevision ?? settings.activeRevision)}。切换结束前保存和测试已锁定。{settings.rollout.lastErrorCode ? ` ${settings.rollout.lastErrorCode}` : ""}</p></div> : null}
-    {rolloutFailed ? <div className="ui-state ui-state--error" role="alert"><strong>上次配置应用失败</strong><p>当前生效版本为{revisionLabel(settings.activeRevision)}，保持不变。错误码：<code>{settings.rollout.lastErrorCode}</code>{settings.rollout.retryable ? "。可修正待应用配置并重新测试或保存。" : "。请刷新状态后再继续。"}</p></div> : null}
+    {settings.rollout.phase === "idle" && settings.applyRequired ? <div className="ui-state ui-state--warning" role="status"><strong>{settings.desiredRevision === settings.activeRevision ? "模型运行状态需要恢复" : "配置已保存，尚未应用"}</strong><p>{settings.desiredRevision === settings.activeRevision ? `${revisionLabel(settings.activeRevision)}的 API 或工作进程状态尚未一致。` : `${revisionLabel(settings.desiredRevision)}已安全保存，当前仍使用${revisionLabel(settings.activeRevision)}。`} 可直接应用配置。</p></div> : null}
+    {!settings.applyRequired && settings.rollout.phase === "idle" ? <div className="model-settings-applied" role="status"><Check size={16} /><span>API 与工作进程已应用当前生效版本。</span></div> : null}
+    <ActivationProgress settings={settings} />
     {settings.capabilities.chat === "unavailable" || settings.capabilities.embedding === "unavailable" ? <div className="ui-state ui-state--error" role="alert"><strong>部分模型能力不可用</strong><p>检查已保存密钥、提供方和当前生效版本，再重新测试或应用配置。</p></div> : null}
 
     <form className="model-settings-form" onSubmit={submit} noValidate>
@@ -567,9 +677,14 @@ export const ModelSettingsPanel = () => {
         {validationError ? <p className="model-settings-error" role="alert">{validationError}</p> : null}
         {conflict ? <p className="model-settings-warning" role="alert"><AlertTriangle size={15} />{conflict}</p> : null}
         {visibleSaveError ? <p className="model-settings-error" role="alert">{saveMutation.error.message}</p> : null}
-        {saveMutation.isSuccess ? <p className="model-test-result model-test-result--success" role="status"><Check size={15} />待应用版本 {String(saveMutation.data.desiredRevision)} 已保存{saveMutation.data.restartRequired ? "，等待 restart 应用" : "并已生效"}。</p> : null}
+        {visibleActivationError ? <p className="model-settings-error" role="alert">{revisionLabel(activationMutation.variables)}已保存，但应用请求未确认：{activationMutation.error.message}。权威状态未显示应用正在进行，可重试“应用配置”。</p> : null}
+        {recoveredActivationTarget === undefined ? null : <p className="model-test-result model-test-result--success" role="status"><Check size={15} />已从服务端恢复{revisionLabel(recoveredActivationTarget)}的应用状态。</p>}
+        {saveMutation.isSuccess ? <p className="model-test-result model-test-result--success" role="status"><Check size={15} />{revisionLabel(saveMutation.data.desiredRevision)}已保存{settings.activeRevision === saveMutation.data.desiredRevision && !settings.applyRequired ? "并已生效" : isRolloutInProgress(settings.rollout.phase) ? "，正在应用" : "，尚未应用"}。</p> : null}
       </div>
-      <div className="model-settings-save"><Button type="submit" disabled={controlsDisabled}><Save size={16} />{saveMutation.isPending ? "正在保存…" : "保存模型设置"}</Button></div>
+      <div className="model-settings-save">
+        {draftDirty.current ? <Button type="button" variant="secondary" disabled={controlsDisabled} onClick={() => save("save_only")}><Save size={16} />{saveMutation.isPending && saveMutation.variables === "save_only" ? "正在保存…" : "仅保存"}</Button> : null}
+        {draftDirty.current || settings.applyRequired || (rolloutFailed && settings.rollout.retryable) ? <Button type="submit" disabled={controlsDisabled}>{draftDirty.current ? <Save size={16} /> : <Play size={16} />}{saveMutation.isPending ? "正在保存…" : activationMutation.isPending ? "正在启动应用…" : draftDirty.current ? "保存并应用" : retryingFailedTarget ? "重试应用" : "应用配置"}</Button> : null}
+      </div>
     </form>
   </Card>;
 };

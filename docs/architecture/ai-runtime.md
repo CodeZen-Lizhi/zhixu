@@ -72,10 +72,39 @@ Evidence loader 只接受稳定身份，不接受文件路径。它从不可变 
 
 - `Model Run` 冻结 Workspace、Node Attempt、Adapter、Model/Version、Prompt、Schema、Retrieval/Index version、预算和最终状态。
 - `Model Call` 记录 `INITIAL`、`REPAIR`、`REDUCED` 或 `REVIEW` 的顺序、版本、输入/输出 Hash、Token、耗时与稳定错误；不保存完整 Prompt、Evidence 或原始响应。
-- API 与 Worker 使用相同 configured model factory；运行中不得静默换 Provider/模型/版本。
+- API 与 Worker 使用相同 configured model factory；一次操作通过 runtime lease 冻结完整 generation，运行中不得静默换 Provider/模型/版本。
+- 新 Workflow Attempt 在 Claim 事务中冻结 Worker instance 与 `model_settings_revision`；历史 Attempt、Model Run 和 Artifact replay 不得改绑当前默认 revision。
 - Provider timeout、rate limit、malformed response、model drift 和 budget exhaustion 使用不同稳定错误，不折叠为“AI 失败”。
 
-### 3.3 Structured Output
+### 3.3 Managed 模型配置热应用
+
+Managed 模式继续区分 `desired`、`active` 和 API/Worker `applied`。Settings 的“保存并应用”先保存
+immutable desired revision，再启动该 exact revision 的持久 activation；“仅保存”只推进 desired。
+正常 Apply 不执行 launcher，也不停止、替换或重启 API/Worker 容器。
+
+```text
+idle|failed -> preparing -> arming -> activating -> idle
+                 \-> failed
+```
+
+- `preparing`：两端构造并 Probe 同一 revision 的完整 Chat、Embedding 与角色依赖图，旧 active 继续服务。
+- `arming`：短暂关闭新的默认模型 acquisition 和 Worker Claim；已开始请求、Attempt、Source refresh 或 Reindex 继续持有旧 lease。
+- `activating`：PostgreSQL 已唯一提交 target；API/Worker 原子安装本地 generation、确认 applied 后再重开 admission。
+- commit 前失败转 `failed` 并清理 candidate；commit 后禁止自动回滚，只按数据库 target 向前恢复。
+
+每个进程的 `RuntimeHost` 同时拥有 candidate、active、retiring 和按需历史 generation。一次业务操作只
+Acquire 一次不可拆分的 payload，并在最终化后 Release；旧 generation 最后一个 holder 释放后才关闭其
+owned Transport。`./zhixu restart` 仍可用于升级和故障恢复，但不是配置生效步骤，且不会在 idle 时自动
+应用 pending desired。完整决策见 [ADR-0022](adr/0022-model-runtime-hot-activation.md)。
+
+Retrieval 不以“当前 settings Embedding”覆盖持久索引事实。Search 先读取 Active Index/Embedding
+Version，再按 Provider、Adapter/Model、dimensions、normalization、distance、endpoint identity、limits
+及 revision hint Acquire 兼容 generation；Source Refresh、Vector Builder 与 Reindex 在完整操作期间持有
+同一 lease。相同 Contract 可跨 revision 复用，不兼容时按历史正 revision 重建；无法重建则显式
+`RETRIEVAL_VECTOR_EMBEDDER_VERSION_UNAVAILABLE`，不得 fallback 到新默认 Embedder。revision `0` 的
+canonical disabled/static runtime 不承诺历史重建。
+
+### 3.4 Structured Output
 
 ```text
 INITIAL strict schema
@@ -90,7 +119,7 @@ INITIAL strict schema
 - Provider 原生 Tool Call 不绕过项目 strict Agent Tool Request；自由文本中看似命令的内容只当不可信数据。
 - 结构失败不得保存半合法对象、自动降级成字符串或返回假 Proposal/Answer。
 
-### 3.4 当前 AI 选择
+### 3.5 当前 AI 选择
 
 主模块当前使用项目 Application + 直接 OpenAI-Compatible Adapter；Eino PoC 未通过全部采用门禁，因此不是当前正式依赖，见 [ADR-0013](adr/0013-eino-adoption-gate.md)。未来 Eino/Agent 迁移只在 [路线图](../roadmap.md) 描述，不能改变本章当前事实。
 

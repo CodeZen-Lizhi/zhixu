@@ -68,11 +68,38 @@
   justify-self: start;
 }
 
-.model-settings-restart code {
+.model-settings-panel .ui-state code {
   overflow-wrap: anywhere;
 }
 
-.model-settings-panel .ui-state code {
+.model-activation-participants {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .65rem;
+  margin-top: .75rem;
+}
+
+.model-activation-participant {
+  display: grid;
+  min-width: 0;
+  gap: .35rem;
+  border: 1px solid var(--line);
+  padding: .65rem .75rem;
+  background: rgb(255 255 255 / 42%);
+}
+
+.model-activation-participant > div {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: .45rem;
+}
+
+.model-activation-participant p {
+  margin: 0;
   overflow-wrap: anywhere;
 }
 
@@ -420,6 +447,10 @@
 
   .model-settings-save {
     justify-content: flex-start;
+  }
+
+  .model-activation-participants {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .model-test-diagnostic dl {

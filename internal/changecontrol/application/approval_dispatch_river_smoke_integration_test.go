@@ -40,7 +40,7 @@ import (
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -128,7 +128,7 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := chi.NewRouter()
+	router := gin.New()
 	changecontrolhttp.NewHandler(changeService).Routes(router)
 	decision := approveRiverSmokeHTTP(t, ctx, router, created.Proposal, http.StatusCreated)
 	workflowRunID := foundation.ID(decision.WorkflowRunID)

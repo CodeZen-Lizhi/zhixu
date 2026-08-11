@@ -22,7 +22,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -62,15 +62,15 @@ func NewHandler(service Service, timeout time.Duration) *Handler {
 }
 
 // Routes 在 /api/v1 下注册 Collection 生命周期、校验和结果路由。
-func (handler *Handler) Routes(router chi.Router) {
-	router.Get("/collections", handler.list)
-	router.Post("/collections", handler.create)
-	router.Post("/collections/validate", handler.validate)
-	router.Post("/collections/preview", handler.preview)
-	router.Get("/collections/{collection_id}", handler.get)
-	router.Put("/collections/{collection_id}", handler.update)
-	router.Post("/collections/{collection_id}/archive", handler.archive)
-	router.Get("/collections/{collection_id}/results", handler.results)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.GET("/collections", httpapi.GinHandler(handler.list))
+	router.POST("/collections", httpapi.GinHandler(handler.create))
+	router.POST("/collections/validate", httpapi.GinHandler(handler.validate))
+	router.POST("/collections/preview", httpapi.GinHandler(handler.preview))
+	router.GET("/collections/:collection_id", httpapi.GinHandler(handler.get))
+	router.PUT("/collections/:collection_id", httpapi.GinHandler(handler.update))
+	router.POST("/collections/:collection_id/archive", httpapi.GinHandler(handler.archive))
+	router.GET("/collections/:collection_id/results", httpapi.GinHandler(handler.results))
 }
 
 // Available 报告生命周期/结果 Handler 是否持有真实 Application Service。
@@ -296,7 +296,7 @@ func (handler *Handler) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	collectionID, err := parseID(chi.URLParam(r, "collection_id"))
+	collectionID, err := parseID(r.PathValue("collection_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -331,7 +331,7 @@ func (handler *Handler) update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	collectionID, err := parseID(chi.URLParam(r, "collection_id"))
+	collectionID, err := parseID(r.PathValue("collection_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -381,7 +381,7 @@ func (handler *Handler) archive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	collectionID, err := parseID(chi.URLParam(r, "collection_id"))
+	collectionID, err := parseID(r.PathValue("collection_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -421,7 +421,7 @@ func (handler *Handler) results(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	collectionID, err := parseID(chi.URLParam(r, "collection_id"))
+	collectionID, err := parseID(r.PathValue("collection_id"))
 	if err != nil {
 		writeError(w, err)
 		return

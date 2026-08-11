@@ -22,7 +22,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -78,16 +78,16 @@ func (handler *Handler) Available() bool {
 }
 
 // Routes registers Authoring commands and read models beneath /api/v1.
-func (handler *Handler) Routes(router chi.Router) {
-	router.Post("/workspaces/{workspaceID}/authoring/working-drafts", handler.createWorkingDraft)
-	router.Get("/workspaces/{workspaceID}/authoring/working-drafts", handler.listWorkingDrafts)
-	router.Get("/workspaces/{workspaceID}/authoring/working-drafts/{draftID}", handler.getWorkingDraft)
-	router.Put("/workspaces/{workspaceID}/authoring/working-drafts/{draftID}", handler.updateWorkingDraft)
-	router.Post("/workspaces/{workspaceID}/authoring/working-drafts/{draftID}/freeze", handler.freezeWorkingDraft)
-	router.Post("/workspaces/{workspaceID}/documents/{documentID}/revisions/{revisionID}/publish-proposals", handler.publishArticleRevision)
-	router.Get("/workspaces/{workspaceID}/documents/{documentID}", handler.getDocumentDetail)
-	router.Get("/workspaces/{workspaceID}/authoring/documents", handler.listDocumentDrafts)
-	router.Get("/workspaces/{workspaceID}/authoring/overview", handler.getOverview)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.POST("/workspaces/:workspace_id/authoring/working-drafts", httpapi.GinHandler(handler.createWorkingDraft))
+	router.GET("/workspaces/:workspace_id/authoring/working-drafts", httpapi.GinHandler(handler.listWorkingDrafts))
+	router.GET("/workspaces/:workspace_id/authoring/working-drafts/:draft_id", httpapi.GinHandler(handler.getWorkingDraft))
+	router.PUT("/workspaces/:workspace_id/authoring/working-drafts/:draft_id", httpapi.GinHandler(handler.updateWorkingDraft))
+	router.POST("/workspaces/:workspace_id/authoring/working-drafts/:draft_id/freeze", httpapi.GinHandler(handler.freezeWorkingDraft))
+	router.POST("/workspaces/:workspace_id/documents/:document_id/revisions/:revision_id/publish-proposals", httpapi.GinHandler(handler.publishArticleRevision))
+	router.GET("/workspaces/:workspace_id/documents/:document_id", httpapi.GinHandler(handler.getDocumentDetail))
+	router.GET("/workspaces/:workspace_id/authoring/documents", httpapi.GinHandler(handler.listDocumentDrafts))
+	router.GET("/workspaces/:workspace_id/authoring/overview", httpapi.GinHandler(handler.getOverview))
 }
 
 type emptyRequest struct{}
@@ -239,7 +239,7 @@ type overviewResponse struct {
 }
 
 func (handler *Handler) createWorkingDraft(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, key, ok := commandRoute(writer, request, "workspaceID")
+	workspaceID, key, ok := commandRoute(writer, request, "workspace_id")
 	if !ok {
 		return
 	}
@@ -270,7 +270,7 @@ func (handler *Handler) createWorkingDraft(writer http.ResponseWriter, request *
 }
 
 func (handler *Handler) getWorkingDraft(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, draftID, ok := queryRoute(writer, request, "workspaceID", "draftID")
+	workspaceID, draftID, ok := queryRoute(writer, request, "workspace_id", "draft_id")
 	if !ok {
 		return
 	}
@@ -369,7 +369,7 @@ func (handler *Handler) listDocumentDrafts(writer http.ResponseWriter, request *
 }
 
 func (handler *Handler) updateWorkingDraft(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draftID")
+	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draft_id")
 	if !ok {
 		return
 	}
@@ -407,7 +407,7 @@ func (handler *Handler) updateWorkingDraft(writer http.ResponseWriter, request *
 }
 
 func (handler *Handler) freezeWorkingDraft(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draftID")
+	workspaceID, draftID, key, ok := identifiedCommandRoute(writer, request, "draft_id")
 	if !ok {
 		return
 	}
@@ -449,17 +449,17 @@ func (handler *Handler) publishArticleRevision(writer http.ResponseWriter, reque
 		writeError(writer, err)
 		return
 	}
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
 	}
-	documentID, err := parseID(chi.URLParam(request, "documentID"))
+	documentID, err := parseID(request.PathValue("document_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
 	}
-	revisionID, err := parseID(chi.URLParam(request, "revisionID"))
+	revisionID, err := parseID(request.PathValue("revision_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -498,7 +498,7 @@ func (handler *Handler) publishArticleRevision(writer http.ResponseWriter, reque
 }
 
 func (handler *Handler) getDocumentDetail(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, documentID, ok := queryRoute(writer, request, "workspaceID", "documentID")
+	workspaceID, documentID, ok := queryRoute(writer, request, "workspace_id", "document_id")
 	if !ok {
 		return
 	}
@@ -525,7 +525,7 @@ func (handler *Handler) getOverview(writer http.ResponseWriter, request *http.Re
 		writeError(writer, err)
 		return
 	}
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -553,7 +553,7 @@ func commandRoute(writer http.ResponseWriter, request *http.Request, workspacePa
 		writeError(writer, err)
 		return "", "", false
 	}
-	workspaceID, err := parseID(chi.URLParam(request, workspaceParam))
+	workspaceID, err := parseID(request.PathValue(workspaceParam))
 	if err != nil {
 		writeError(writer, err)
 		return "", "", false
@@ -567,11 +567,11 @@ func commandRoute(writer http.ResponseWriter, request *http.Request, workspacePa
 }
 
 func identifiedCommandRoute(writer http.ResponseWriter, request *http.Request, resourceParam string) (foundation.ID, foundation.ID, string, bool) {
-	workspaceID, key, ok := commandRoute(writer, request, "workspaceID")
+	workspaceID, key, ok := commandRoute(writer, request, "workspace_id")
 	if !ok {
 		return "", "", "", false
 	}
-	resourceID, err := parseID(chi.URLParam(request, resourceParam))
+	resourceID, err := parseID(request.PathValue(resourceParam))
 	if err != nil {
 		writeError(writer, err)
 		return "", "", "", false
@@ -584,12 +584,12 @@ func queryRoute(writer http.ResponseWriter, request *http.Request, workspacePara
 		writeError(writer, err)
 		return "", "", false
 	}
-	workspaceID, err := parseID(chi.URLParam(request, workspaceParam))
+	workspaceID, err := parseID(request.PathValue(workspaceParam))
 	if err != nil {
 		writeError(writer, err)
 		return "", "", false
 	}
-	resourceID, err := parseID(chi.URLParam(request, resourceParam))
+	resourceID, err := parseID(request.PathValue(resourceParam))
 	if err != nil {
 		writeError(writer, err)
 		return "", "", false
@@ -699,7 +699,7 @@ func parseDocumentDraftListRequest(request *http.Request) (foundation.ID, author
 }
 
 func parseAuthoringListRequest(request *http.Request) (foundation.ID, url.Values, int, error) {
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		return "", nil, 0, err
 	}

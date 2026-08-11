@@ -78,17 +78,19 @@ assert_cleanup_invocation() {
   local project_name=$1
   local netns_project_name="${project_name}-netns"
   local main_down_line helper_down_line
-  grep -F -- "compose --project-name ${project_name} -f contract.yml down --volumes --remove-orphans --rmi local" \
+  grep -F -- "compose --project-name ${project_name} -f contract.yml --profile workspace-runtime down --volumes --remove-orphans --rmi local" \
     "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "project-scoped Compose cleanup was not invoked"
   grep -F -- "compose --project-name ${netns_project_name} -f contract.netns.yml down --remove-orphans --rmi local" \
     "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "helper Compose cleanup was not invoked after the main project"
-  main_down_line="$(grep -n -m 1 -F -- "compose --project-name ${project_name} -f contract.yml down --volumes --remove-orphans --rmi local" "${ZHIXU_FAKE_DOCKER_LOG}" | cut -d: -f1)"
+  main_down_line="$(grep -n -m 1 -F -- "compose --project-name ${project_name} -f contract.yml --profile workspace-runtime down --volumes --remove-orphans --rmi local" "${ZHIXU_FAKE_DOCKER_LOG}" | cut -d: -f1)"
   helper_down_line="$(grep -n -m 1 -F -- "compose --project-name ${netns_project_name} -f contract.netns.yml down --remove-orphans --rmi local" "${ZHIXU_FAKE_DOCKER_LOG}" | cut -d: -f1)"
   (( main_down_line < helper_down_line )) || fail "helper cleanup occurred before consumer cleanup"
   [[ "$(grep -F -- "--volumes" "${ZHIXU_FAKE_DOCKER_LOG}" | wc -l | tr -d ' ')" -eq 1 ]] \
     || fail "only the disposable main project may remove volumes"
   local cleanup_name
   for cleanup_name in "${project_name}" "${netns_project_name}"; do
+    grep -F -- "image ls --format {{.Repository}}:{{.Tag}} --filter reference=${cleanup_name}-*" \
+      "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "project image references were not enumerated"
     grep -F -- "image ls --quiet --filter label=com.docker.compose.project=${cleanup_name}" \
       "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null || fail "project image cleanup was not verified"
     grep -F -- "image ls --quiet --filter reference=${cleanup_name}-*" \
@@ -208,7 +210,7 @@ main() {
   [[ "${CASE_EXIT}" -eq 143 ]] || fail "cleanup failure replaced TERM status"
 
   local smoke_script
-  for smoke_script in compose-auth-smoke.sh compose-search-smoke.sh compose-tool-smoke.sh compose-rag-smoke.sh; do
+  for smoke_script in compose-auth-smoke.sh compose-search-smoke.sh compose-tool-smoke.sh compose-rag-smoke.sh model-runtime-hot-activation-smoke.sh; do
     grep -F -- 'source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
       || fail "${smoke_script} does not use the shared cleanup contract"
     grep -F -- "cleanup_compose_smoke_project_images" "${SCRIPT_DIR}/${smoke_script}" >/dev/null \

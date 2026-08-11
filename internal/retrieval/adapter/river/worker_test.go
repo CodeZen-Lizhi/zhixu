@@ -69,6 +69,92 @@ func TestWorkerTreatsStaleAndCommittedClaimAsTransportSuccess(t *testing.T) {
 	}
 }
 
+func TestWorkerDoesNotAcquireProcessorForStaleOrCommittedClaim(t *testing.T) {
+	t.Parallel()
+	for _, disposition := range []application.DeliveryClaimDisposition{application.DeliveryClaimStale, application.DeliveryClaimCommitted} {
+		disposition := disposition
+		t.Run(string(disposition), func(t *testing.T) {
+			t.Parallel()
+			runtime := &workerRuntimeFake{claim: application.DeliveryClaimResult{Disposition: disposition}}
+			acquirer := &compatibleProcessorAcquirerFake{lease: &compatibleProcessorLeaseFake{processor: processorRunnerFunc(func(context.Context, application.ProcessorRequest) (application.ProcessorResult, error) {
+				t.Fatal("stale claim reached processor")
+				return application.ProcessorResult{}, nil
+			})}}
+			worker, err := NewWorkerWithProcessorAcquirer(runtime, acquirer, completionRunnerFunc(func(context.Context, application.CompleteReindexRequest) (domain.CompleteReindexResult, error) {
+				t.Fatal("stale claim reached completion")
+				return domain.CompleteReindexResult{}, nil
+			}), validWorkerOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := worker.Work(context.Background(), reindexRiverJob(t)); err != nil {
+				t.Fatal(err)
+			}
+			if _, acquireCalls := acquirer.snapshot(); acquireCalls != 0 {
+				t.Fatalf("acquire calls=%d", acquireCalls)
+			}
+		})
+	}
+}
+
+func TestWorkerEntersProcessorAdmissionBeforePersistentClaim(t *testing.T) {
+	t.Parallel()
+
+	gate := make(chan struct{})
+	admitObserved := make(chan struct{}, 1)
+	runtime := &workerRuntimeFake{claim: application.DeliveryClaimResult{Disposition: application.DeliveryClaimStale}}
+	acquirer := &compatibleProcessorAcquirerFake{admitGate: gate, admitObserved: admitObserved}
+	worker, err := NewWorkerWithProcessorAcquirer(
+		runtime,
+		acquirer,
+		completionRunnerFunc(func(context.Context, application.CompleteReindexRequest) (domain.CompleteReindexResult, error) {
+			t.Fatal("stale claim reached completion")
+			return domain.CompleteReindexResult{}, nil
+		}),
+		validWorkerOptions(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := reindexRiverJob(t)
+	result := make(chan error, 1)
+	go func() {
+		result <- worker.Work(context.Background(), job)
+	}()
+	select {
+	case <-admitObserved:
+	case <-time.After(time.Second):
+		t.Fatal("work did not reach processor admission")
+	}
+	select {
+	case workErr := <-result:
+		t.Fatalf("work passed a closed admission gate: %v", workErr)
+	default:
+	}
+	if claims := runtime.claimCount(); claims != 0 {
+		t.Fatalf("claim calls behind closed admission = %d, want 0", claims)
+	}
+	close(gate)
+	select {
+	case workErr := <-result:
+		if workErr != nil {
+			t.Fatal(workErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("work did not resume after admission opened")
+	}
+	if claims := runtime.claimCount(); claims != 1 {
+		t.Fatalf("claim calls after admission opened = %d, want 1", claims)
+	}
+	admits, releases := acquirer.admissionSnapshot()
+	if admits != 1 || releases != 1 {
+		t.Fatalf("admission calls/releases = %d/%d, want 1/1", admits, releases)
+	}
+	if _, acquireCalls := acquirer.snapshot(); acquireCalls != 0 {
+		t.Fatalf("processor acquire calls for stale claim = %d, want 0", acquireCalls)
+	}
+}
+
 func TestWorkerTreatsReadOnlyProcessorStaleAndCommittedAsTransportSuccess(t *testing.T) {
 	t.Parallel()
 	for _, disposition := range []application.ProcessorDisposition{application.ProcessorStale, application.ProcessorCommitted} {
@@ -143,6 +229,136 @@ func TestWorkerHeartbeatsThroughSharedSessionAndCompletesWithLatestFence(t *test
 	if correlation.WorkspaceID != string(runtime.claim.Delivery.WorkspaceID) || correlation.AttemptNo != runtime.claim.Attempt.AttemptNo ||
 		correlation.DispatchNo != runtime.claim.Delivery.DispatchNo || correlation.RiverJobID != job.ID {
 		t.Fatalf("correlation=%+v", correlation)
+	}
+}
+
+func TestWorkerAcquiresCompatibleProcessorFromClaimedDeliveryUntilCompletion(t *testing.T) {
+	t.Parallel()
+	runtime := newClaimedWorkerRuntime()
+	indexVersionID := foundation.ID("10000000-0000-4000-8000-000000000009")
+	runtime.claim.Delivery.IndexVersionID = &indexVersionID
+	heartbeatObserved := make(chan struct{})
+	runtime.heartbeatObserved = heartbeatObserved
+
+	var processorLease *compatibleProcessorLeaseFake
+	processor := processorRunnerFunc(func(_ context.Context, request application.ProcessorRequest) (application.ProcessorResult, error) {
+		select {
+		case <-heartbeatObserved:
+		case <-time.After(time.Second):
+			t.Fatal("heartbeat was not observed while the processor lease was held")
+		}
+		if processorLease.releaseCalls() != 0 {
+			t.Fatal("processor lease was released before processing completed")
+		}
+		snapshot := request.Lease.Snapshot()
+		return application.ProcessorResult{
+			Disposition:    application.ProcessorReady,
+			WorkspaceID:    runtime.claim.Delivery.WorkspaceID,
+			OutboxEventID:  runtime.claim.Delivery.OutboxEventID,
+			IndexVersionID: indexVersionID,
+			Fence:          snapshot.Fence,
+		}, nil
+	})
+	processorLease = &compatibleProcessorLeaseFake{processor: processor}
+	acquirer := &compatibleProcessorAcquirerFake{lease: processorLease}
+	completion := completionRunnerFunc(func(context.Context, application.CompleteReindexRequest) (domain.CompleteReindexResult, error) {
+		if processorLease.releaseCalls() != 0 {
+			t.Fatal("processor lease was released before completion settled")
+		}
+		return domain.CompleteReindexResult{}, nil
+	})
+	worker, err := NewWorkerWithProcessorAcquirer(runtime, acquirer, completion, WorkerOptions{
+		Owner: "worker:test", LeaseDuration: time.Minute, HeartbeatInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := worker.Work(context.Background(), reindexRiverJob(t)); err != nil {
+		t.Fatal(err)
+	}
+	acquiredDelivery, acquireCalls := acquirer.snapshot()
+	if acquireCalls != 1 || acquiredDelivery.IndexVersionID == nil || *acquiredDelivery.IndexVersionID != indexVersionID {
+		t.Fatalf("acquire calls=%d delivery=%+v", acquireCalls, acquiredDelivery)
+	}
+	if processorLease.releaseCalls() != 1 {
+		t.Fatalf("release calls=%d", processorLease.releaseCalls())
+	}
+}
+
+func TestWorkerFailsClosedWhenCompatibleProcessorVersionIsUnavailable(t *testing.T) {
+	t.Parallel()
+	runtime := newClaimedWorkerRuntime()
+	indexVersionID := foundation.ID("10000000-0000-4000-8000-000000000009")
+	runtime.claim.Delivery.IndexVersionID = &indexVersionID
+	unavailable := foundation.NewError(
+		foundation.ErrorDependencyUnavailable,
+		"RETRIEVAL_VECTOR_EMBEDDER_VERSION_UNAVAILABLE",
+		false,
+		errors.New("historical embedding generation cannot be rebuilt"),
+	)
+	leakedLease := &compatibleProcessorLeaseFake{processor: processorRunnerFunc(func(context.Context, application.ProcessorRequest) (application.ProcessorResult, error) {
+		t.Fatal("unavailable historical target fell back to a processor")
+		return application.ProcessorResult{}, nil
+	})}
+	acquirer := &compatibleProcessorAcquirerFake{lease: leakedLease, err: unavailable}
+	worker, err := NewWorkerWithProcessorAcquirer(runtime, acquirer, completionRunnerFunc(func(context.Context, application.CompleteReindexRequest) (domain.CompleteReindexResult, error) {
+		t.Fatal("unavailable historical target reached completion")
+		return domain.CompleteReindexResult{}, nil
+	}), validWorkerOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if workErr := worker.Work(context.Background(), reindexRiverJob(t)); workErr != unavailable {
+		t.Fatalf("work error=%v; want exact acquisition error", workErr)
+	}
+	acquiredDelivery, acquireCalls := acquirer.snapshot()
+	if acquireCalls != 1 || acquiredDelivery.IndexVersionID == nil || *acquiredDelivery.IndexVersionID != indexVersionID {
+		t.Fatalf("acquire calls=%d delivery=%+v", acquireCalls, acquiredDelivery)
+	}
+	if leakedLease.releaseCalls() != 1 {
+		t.Fatalf("error lease release calls=%d", leakedLease.releaseCalls())
+	}
+	if runtime.heartbeatCalls != 0 || runtime.failCalls != 0 {
+		t.Fatalf("heartbeat=%d fail=%d", runtime.heartbeatCalls, runtime.failCalls)
+	}
+}
+
+func TestWorkerHoldsCompatibleProcessorLeaseThroughFailureSettlement(t *testing.T) {
+	t.Parallel()
+	runtime := newClaimedWorkerRuntime()
+	failure := domain.DeliveryFailure{
+		Class: domain.DeliveryFailureRetryable, ErrorKind: foundation.ErrorRetryableFailure,
+		Code: "REINDEX_EMBEDDING_VERSION_TEMPORARILY_UNAVAILABLE", Summary: "compatible embedding runtime is temporarily unavailable",
+	}
+	processorFailure := application.NewProcessorFailure(failure, time.Second, errors.New("compatible generation is temporarily unavailable"))
+	processorLease := &compatibleProcessorLeaseFake{processor: processorRunnerFunc(func(context.Context, application.ProcessorRequest) (application.ProcessorResult, error) {
+		return application.ProcessorResult{}, processorFailure
+	})}
+	runtime.failObserved = func() {
+		if processorLease.releaseCalls() != 0 {
+			t.Fatal("processor lease was released before failure settled")
+		}
+	}
+	worker, err := NewWorkerWithProcessorAcquirer(
+		runtime,
+		&compatibleProcessorAcquirerFake{lease: processorLease},
+		completionRunnerFunc(func(context.Context, application.CompleteReindexRequest) (domain.CompleteReindexResult, error) {
+			t.Fatal("processor failure reached completion")
+			return domain.CompleteReindexResult{}, nil
+		}),
+		validWorkerOptions(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := worker.Work(context.Background(), reindexRiverJob(t)); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.failCalls != 1 || processorLease.releaseCalls() != 1 {
+		t.Fatalf("fail calls=%d release calls=%d", runtime.failCalls, processorLease.releaseCalls())
 	}
 }
 
@@ -294,6 +510,10 @@ func newWorkerTestFixture(t *testing.T, runtime deliveryRuntime, processor appli
 	return worker
 }
 
+func validWorkerOptions() WorkerOptions {
+	return WorkerOptions{Owner: "worker:test", LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Millisecond}
+}
+
 func readyProcessor(runtime *workerRuntimeFake) application.ProcessorRunner {
 	return processorRunnerFunc(func(_ context.Context, request application.ProcessorRequest) (application.ProcessorResult, error) {
 		snapshot := request.Lease.Snapshot()
@@ -360,6 +580,92 @@ func (function completionRunnerFunc) Complete(ctx context.Context, request appli
 	return function(ctx, request)
 }
 
+type compatibleProcessorAcquirerFake struct {
+	mu                sync.Mutex
+	lease             CompatibleProcessorLease
+	err               error
+	admitErr          error
+	admitGate         <-chan struct{}
+	admitObserved     chan<- struct{}
+	delivery          domain.Delivery
+	admitCalls        int
+	admissionReleases int
+	acquireCalls      int
+}
+
+func (acquirer *compatibleProcessorAcquirerFake) Admit(ctx context.Context) (CompatibleProcessorAdmission, error) {
+	acquirer.mu.Lock()
+	acquirer.admitCalls++
+	gate := acquirer.admitGate
+	observed := acquirer.admitObserved
+	err := acquirer.admitErr
+	acquirer.mu.Unlock()
+	if observed != nil {
+		select {
+		case observed <- struct{}{}:
+		default:
+		}
+	}
+	if gate != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-gate:
+		}
+	}
+	return acquirer, err
+}
+
+func (acquirer *compatibleProcessorAcquirerFake) Acquire(_ context.Context, delivery domain.Delivery) (CompatibleProcessorLease, error) {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	acquirer.acquireCalls++
+	acquirer.delivery = delivery
+	return acquirer.lease, acquirer.err
+}
+
+func (acquirer *compatibleProcessorAcquirerFake) Release() {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	acquirer.admissionReleases++
+}
+
+func (acquirer *compatibleProcessorAcquirerFake) snapshot() (domain.Delivery, int) {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	return acquirer.delivery, acquirer.acquireCalls
+}
+
+func (acquirer *compatibleProcessorAcquirerFake) admissionSnapshot() (admits, releases int) {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	return acquirer.admitCalls, acquirer.admissionReleases
+}
+
+type compatibleProcessorLeaseFake struct {
+	mu        sync.Mutex
+	processor application.ProcessorRunner
+	releases  int
+}
+
+func (lease *compatibleProcessorLeaseFake) Processor() application.ProcessorRunner {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	return lease.processor
+}
+
+func (lease *compatibleProcessorLeaseFake) Release() {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	lease.releases++
+}
+
+func (lease *compatibleProcessorLeaseFake) releaseCalls() int {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	return lease.releases
+}
+
 type workerRuntimeFake struct {
 	mu                   sync.Mutex
 	claim                application.DeliveryClaimResult
@@ -372,6 +678,13 @@ type workerRuntimeFake struct {
 	failCalls            int
 	failure              application.DeliveryFailureCommand
 	failErr              error
+	failObserved         func()
+}
+
+func (runtime *workerRuntimeFake) claimCount() int {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return runtime.claimCalls
 }
 
 func (runtime *workerRuntimeFake) Claim(_ context.Context, command application.DeliveryClaimCommand) (application.DeliveryClaimResult, error) {
@@ -419,6 +732,9 @@ func (runtime *workerRuntimeFake) Fail(_ context.Context, command application.De
 	defer runtime.mu.Unlock()
 	runtime.failCalls++
 	runtime.failure = command
+	if runtime.failObserved != nil {
+		runtime.failObserved()
+	}
 	if runtime.failErr != nil {
 		return application.DeliveryMutationResult{}, runtime.failErr
 	}

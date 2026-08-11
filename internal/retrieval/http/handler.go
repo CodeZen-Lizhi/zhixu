@@ -15,7 +15,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -51,10 +51,10 @@ func NewHandler(search SearchService, evidence EvidenceReferenceService, cursors
 }
 
 // Routes 在既有 `/api/v1` Router 下注册 Retrieval 查询路由。
-func (handler *Handler) Routes(router chi.Router) {
-	router.Post("/search", handler.handleSearch)
-	router.Get("/workspaces/{workspace_id}/source-versions/{source_version_id}", handler.handleSourceVersion)
-	router.Get("/workspaces/{workspace_id}/source-versions/{source_version_id}/spans/{source_span_id}", handler.handleSourceSpan)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.POST("/search", httpapi.GinHandler(handler.handleSearch))
+	router.GET("/workspaces/:workspace_id/source-versions/:source_version_id", httpapi.GinHandler(handler.handleSourceVersion))
+	router.GET("/workspaces/:workspace_id/source-versions/:source_version_id/spans/:source_span_id", httpapi.GinHandler(handler.handleSourceSpan))
 }
 
 type searchRequest struct {
@@ -302,7 +302,7 @@ func (handler *Handler) handleSourceVersion(w http.ResponseWriter, r *http.Reque
 		httpapi.WriteProblem(w, http.StatusServiceUnavailable, evidenceUnavailableCode, "Evidence Reference 服务暂不可用", false, nil)
 		return
 	}
-	workspaceID, sourceVersionID, err := parseEvidenceRouteIDs(chi.URLParam(r, "workspace_id"), chi.URLParam(r, "source_version_id"))
+	workspaceID, sourceVersionID, err := parseEvidenceRouteIDs(r.PathValue("workspace_id"), r.PathValue("source_version_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -320,12 +320,12 @@ func (handler *Handler) handleSourceSpan(w http.ResponseWriter, r *http.Request)
 		httpapi.WriteProblem(w, http.StatusServiceUnavailable, evidenceUnavailableCode, "Evidence Reference 服务暂不可用", false, nil)
 		return
 	}
-	workspaceID, sourceVersionID, err := parseEvidenceRouteIDs(chi.URLParam(r, "workspace_id"), chi.URLParam(r, "source_version_id"))
+	workspaceID, sourceVersionID, err := parseEvidenceRouteIDs(r.PathValue("workspace_id"), r.PathValue("source_version_id"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	spanID, err := parseRouteID(chi.URLParam(r, "source_span_id"))
+	spanID, err := parseRouteID(r.PathValue("source_span_id"))
 	if err != nil {
 		writeError(w, err)
 		return

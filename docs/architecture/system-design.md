@@ -80,6 +80,7 @@ flowchart TD
 | Change Control | Proposal、Approval、Write Authorization、Safe Writeback Execution |
 | Workflow | Definition、Run、Node Run、Attempt、Human Task、lease/重试/补偿 |
 | Agent | Model Run/Call、结构化决策、RAG 计划与回答门禁 |
+| Model Settings | immutable revision、desired/active/applied、activation/participant、进程 generation lifecycle |
 | Tools | Tool Contract Registry、服务端授权、Executor 与 receipt |
 | Graph/Collection/Health/Timeline | 对 Knowledge/运行事实的有界查询投影和各自状态；不写 canonical Relation |
 | Artifact/Review/Interview/Memory | 各自聚合、版本与学习状态；正式发布仍交给 Change Control |
@@ -116,6 +117,7 @@ Knowledge 是 Relation 的唯一写 owner。Graph、Collection、Agent、Semanti
 | Retrieval | 有界过滤/分页/版本化结果；实现替换不能扩大领域 Interface |
 | Evidence Eligibility | 只能由 Knowledge 根据批准 Claim Source/Relation Evidence/Conflict 判断；Active Index、排名和模型置信度不能替代 |
 | Workflow | 持久状态、租约、Attempt、幂等 completion、Human Task 与补偿；队列不是权威状态 |
+| Model Runtime | `RuntimeAcquirer` 一次返回完整 immutable generation lease；current、Attempt binding 与 Embedding Contract 目标必须 fail closed，调用方在完整操作结束后 Release |
 | Tool Registry | name+version 冻结、Schema/Capability/allowlist 校验；receipt 可以读或重算纯函数结果，不能重放副作用 |
 | Review Scheduler | 同一 Answer 幂等，版本化评分/FSRS；无效 Claim 使 Card 失效 |
 
@@ -134,7 +136,7 @@ Safe Writeback 的 WorkspaceStore 与 GitRepository 不是通用文件/Git 工�
 | 图谱 | canonical Relation + PostgreSQL 查询投影 | v1 不引入图数据库，见 [ADR-0005](adr/0005-no-graph-database-v1.md) |
 | 内容 | goldmark、go-readability Adapter、pdftotext/Poppler Adapter、SHA-256 | 外部 Parser 只经 Adapter；HTML 安全文本使用标准 parser，不用正则清洗 |
 | Git | Git CLI Adapter | 固定命令和受控环境，见 [ADR-0009](adr/0009-git-cli-adapter.md) |
-| AI | OpenAI-Compatible Chat/Embedding；Ollama 兼容端点；可选 Rerank | 项目 Application 直接编排；Eino 当前未正式采用，见 [ADR-0013](adr/0013-eino-adoption-gate.md) 与 [PoC 报告](../../poc/eino/report.md) |
+| AI | OpenAI-Compatible Chat/Embedding；Ollama 兼容端点；可选 Rerank | 项目 Application 直接编排；managed settings 由 PostgreSQL activation + 进程 RuntimeHost 热应用，见 [ADR-0022](adr/0022-model-runtime-hot-activation.md)；Eino 当前未正式采用，见 [ADR-0013](adr/0013-eino-adoption-gate.md) 与 [PoC 报告](../../poc/eino/report.md) |
 | 前端 | React + TypeScript + Vite、TanStack Query、React Router、Monaco | strict wire boundary；SSE 只触发回查 |
 | 图形 UI | 当前 SVG/CSS + 有界列表 fallback | Cytoscape/Web Worker 仅在 50 万 Relation/FPS 证据后评估 |
 | 配置 | Viper + validator + YAML v3 AST 预检 | 每次实例化加载、严格输入，详见 [应用契约](application-contracts.md) |
@@ -151,6 +153,29 @@ Safe Writeback 的 WorkspaceStore 与 GitRepository 不是通用文件/Git 工�
 当前不引入 Kafka、Kubernetes、必需 Redis、Elasticsearch、独立向量库、图数据库、Temporal、微服务拆分或核心 Agent Framework。只有容量、故障、运维或兼容证据证明现有模块化单体/PostgreSQL 方案不足时，才记录新 ADR 评估。
 
 ## 6. 部署拓扑
+
+### 模型运行时应用
+
+模型配置应用属于现有 API/Worker 进程内的运行时变更，不属于 Compose deployment。浏览器保存 immutable
+desired revision 后，以 exact revision 启动 PostgreSQL 持久 activation；API coordinator 与两个
+role-local controller 共同收敛状态：
+
+```mermaid
+flowchart LR
+    Settings["Save desired + Start exact revision"] --> State[("PostgreSQL activation state")]
+    State --> APIHost["API RuntimeHost"]
+    State --> WorkerHost["Worker RuntimeHost"]
+    APIHost --> Commit["One active revision commit"]
+    WorkerHost --> Commit
+    Commit --> Applied["API/Worker applied target + idle"]
+```
+
+- `preparing` 时旧 generation 继续服务；`arming|activating` 只建立短暂 admission/Claim fence，不排空在途工作。
+- commit 前失败保留 previous active；commit 后 `active=target` 是唯一恢复方向，不执行自动 rollback。
+- Workflow Attempt 按持久 `(instance_id, revision)` 获取 exact generation；Retrieval 按 Active
+  Index/Embedding Contract 获取兼容 generation，当前默认配置不能覆盖历史 provenance。
+- retiring generation 等最后一个 lease 释放后关闭 owned Transport；外部注入 client 不归 Host 管理。
+- 正常 Apply 不重启 API/Worker 容器；`./zhixu restart` 只保留为升级、进程故障和运维重建手段。
 
 ### 本地模式
 
@@ -181,7 +206,7 @@ host Workspace <== exact bind ==> app + worker only
 
 ### 启动与健康
 
-- 启动依赖为 helper anchor firewall/health → PostgreSQL ready → migration success → API/Worker composition ready → relay/Web ready。
+- 启动依赖为 helper anchor firewall/health → PostgreSQL ready → migration success → API/Worker composition ready → managed RuntimeHost ownership active → relay/Web ready。
 - Compose 声明式依赖不单独承担 daemon restart 的收敛保证；API/Worker 启动入口按 profile 加载配置并等待 PostgreSQL，配置类错误 fail fast，瞬时连接失败可取消重试。主项目 restart 依赖持续运行的 helper anchor；helper/daemon 恢复失败只可降级，随后由 launcher 收敛。
 - Migration 固定执行应用迁移、River migration 和 Validate；失败阻止 API/Worker 就绪。
 - Liveness 只说明进程存在；Readiness 验证 DB、Definition/Executor、必要 Provider、Root Grant 和版本兼容。API health 不能替代 Worker `/readyz`。
@@ -191,10 +216,11 @@ host Workspace <== exact bind ==> app + worker only
 ## 7. 失败与演进
 
 - Provider 不可用：对应 AI capability unavailable/degraded；浏览和 Keyword Search 继续。
+- 模型 activation 在 commit 前失败：保留旧 active 并恢复 admission；commit 后故障：保持 target active，修复 Provider/Secret 或进程后向前完成 applied/finalize。
 - PostgreSQL 不可用：拒绝新命令和写入；Worker readiness 失败，不手工完成 Job。
 - 文件/Git/DB 无法证明一致：进入 READ_ONLY_RECOVERY，保留 temp、backup、index 与 Commit 证据。
 - Worker 崩溃：River rescue 与 Workflow lease reclaim 从持久 checkpoint 继续，不创建第二领域执行。
-- Schema 采用向前 Expand → backfill → Contract；默认不使用 destructive down migration。
+- Schema 采用向前 Expand → backfill → Contract；默认不使用 destructive down migration。模型热应用 migration 已产生 participant history 后 Down fail closed，不支持旧/新 binary 混跑。
 - 模块在证据支持时可拆进程，但必须保持当前 Interface、事务所有权、幂等和审计语义；拆服务不是产品里程碑。
 
 运行命令、配置事实源、升级和恢复步骤见 [运行与恢复手册](../operations.md)。

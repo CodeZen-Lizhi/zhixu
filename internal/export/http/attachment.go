@@ -19,7 +19,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
 )
 
 const (
@@ -146,7 +145,7 @@ func (handler *Handler) listAttachments(writer nethttp.ResponseWriter, request *
 		writeUnavailable(writer)
 		return
 	}
-	workspaceID, err := parseID(chi.URLParam(request, "workspace_id"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -290,7 +289,7 @@ func attachmentWorkspaceID(request *nethttp.Request) (foundation.ID, error) {
 	if _, err := parseQuery(request); err != nil {
 		return "", err
 	}
-	return parseID(chi.URLParam(request, "workspace_id"))
+	return parseID(request.PathValue("workspace_id"))
 }
 
 func attachmentJobIDs(request *nethttp.Request) (foundation.ID, foundation.ID, error) {
@@ -298,7 +297,7 @@ func attachmentJobIDs(request *nethttp.Request) (foundation.ID, foundation.ID, e
 	if err != nil {
 		return "", "", err
 	}
-	exportID, err := parseID(chi.URLParam(request, "export_id"))
+	exportID, err := parseID(request.PathValue("export_id"))
 	return workspaceID, exportID, err
 }
 

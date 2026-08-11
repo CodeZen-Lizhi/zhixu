@@ -11,8 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 func TestRecoverPanicMiddlewareReturnsStableProblemAndSafeLog(t *testing.T) {
@@ -104,8 +105,64 @@ func TestRecoverPanicMiddlewareDoesNotReplaceStartedResponse(t *testing.T) {
 	}
 }
 
+func TestRecoverPanicMiddlewarePreservesWrittenOrFlushedResponse(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(http.ResponseWriter)
+		body  string
+	}{
+		{
+			name: "body write",
+			write: func(writer http.ResponseWriter) {
+				_, _ = writer.Write([]byte("partial response"))
+			},
+			body: "partial response",
+		},
+		{
+			name: "flush",
+			write: func(writer http.ResponseWriter) {
+				writer.(http.Flusher).Flush()
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			router := panicTestRouter(&output, func(writer http.ResponseWriter, _ *http.Request) {
+				test.write(writer)
+				panic("after-response-start")
+			})
+
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/panic/value", nil))
+			if response.Code != http.StatusOK || response.Body.String() != test.body || strings.Contains(response.Body.String(), "INTERNAL_ERROR") {
+				t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestRecoverPanicMiddlewarePreservesStartedStaticFallback(t *testing.T) {
+	var output bytes.Buffer
+	router := NewRouter(Dependencies{
+		Logger: observability.NewLogger("info", &output),
+		Static: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte("partial static response"))
+			panic("after-static-response-start")
+		}),
+	})
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/static/fallback", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "partial static response" || strings.Contains(response.Body.String(), "INTERNAL_ERROR") {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
 func TestRecoverPanicMiddlewareRepanicsAbortHandler(t *testing.T) {
-	handler := recoverPanicMiddleware(observability.NewLogger("info", io.Discard))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	router := gin.New()
+	router.Use(recoverPanicMiddleware(observability.NewLogger("info", io.Discard)))
+	router.GET("/", httpapi.GinHandler(func(http.ResponseWriter, *http.Request) {
 		panic(http.ErrAbortHandler)
 	}))
 
@@ -116,7 +173,7 @@ func TestRecoverPanicMiddlewareRepanicsAbortHandler(t *testing.T) {
 			t.Fatalf("recovered=%v", recovered)
 		}
 	}()
-	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 }
 
 func TestRecoverPanicMiddlewareHandlesWrappedAbortAsOrdinaryPanic(t *testing.T) {
@@ -137,12 +194,12 @@ func TestRecoverPanicMiddlewareHandlesWrappedAbortAsOrdinaryPanic(t *testing.T) 
 }
 
 func panicTestRouter(output *bytes.Buffer, handler http.HandlerFunc) http.Handler {
-	router := chi.NewRouter()
+	router := gin.New()
 	logger := observability.NewLogger("info", output)
 	router.Use(requestIDMiddleware)
 	router.Use(requestLogMiddleware(logger))
 	router.Use(recoverPanicMiddleware(logger))
-	router.Get("/panic/{value}", handler)
+	router.GET("/panic/:value", httpapi.GinHandler(handler))
 	return router
 }
 

@@ -51,6 +51,13 @@ func (embedder *OllamaEmbedder) Contract() domain.EmbeddingContract {
 	return embedder.http.contractCopy()
 }
 
+func (embedder *OllamaEmbedder) closeModelResource() error {
+	if embedder == nil {
+		return nil
+	}
+	return embedder.http.closeModelResource()
+}
+
 // Embed 按 Ollama embeddings 数组顺序校验批量结果，并执行契约校验与归一化。
 func (embedder *OllamaEmbedder) Embed(ctx context.Context, request application.EmbedRequest) (application.EmbedResult, error) {
 	payload := ollamaEmbeddingRequest{Input: request.Inputs, Model: embedder.http.contract.Model, Truncate: false}

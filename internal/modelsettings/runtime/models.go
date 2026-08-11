@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sync"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
@@ -27,8 +28,11 @@ const (
 
 // Models 是进程内唯一冻结的模型运行时及其非敏感配置 revision。
 type Models struct {
-	runtime  *platformmodels.ModelRuntime
-	revision int64
+	runtime      *platformmodels.ModelRuntime
+	revision     int64
+	closeOnce    sync.Once
+	closeErr     error
+	closeRuntime func() error
 }
 
 // Chat 返回同一次生产构造冻结的 Chat Adapter 与 Contract。
@@ -55,6 +59,33 @@ func (models *Models) Revision() int64 {
 	return models.revision
 }
 
+// ValidateEmbeddingVersion 校验本 generation 的 Embedder 与持久 Embedding Version 完整兼容。
+func (models *Models) ValidateEmbeddingVersion(version retrievaldomain.EmbeddingVersion) error {
+	if models == nil || models.runtime == nil {
+		return errors.New("model runtime is unavailable")
+	}
+	contract, configured := models.Embedding().Contract()
+	if !configured {
+		return errors.New("embedding runtime is unavailable")
+	}
+	return retrievaldomain.ValidateEmbeddingContractBinding(contract.Binding(), version)
+}
+
+// Close 幂等释放本 Models 拥有的 Adapter resources。
+func (models *Models) Close() error {
+	if models == nil {
+		return nil
+	}
+	models.closeOnce.Do(func() {
+		if models.closeRuntime != nil {
+			models.closeErr = models.closeRuntime()
+		} else if models.runtime != nil {
+			models.closeErr = models.runtime.Close()
+		}
+	})
+	return models.closeErr
+}
+
 // String 返回不含 Endpoint 或 Credential 的运行时摘要。
 func (models *Models) String() string {
 	if models == nil {
@@ -66,14 +97,26 @@ func (models *Models) String() string {
 // GoString 避免调试格式展开 Adapter 私有字段。
 func (models *Models) GoString() string { return models.String() }
 
+type validationRuntime interface {
+	Close() error
+}
+
 // Validator validates managed settings through the same Config and factory paths used at runtime.
-type Validator struct{ base config.Config }
+type Validator struct {
+	base  config.Config
+	build func(config.Config) (validationRuntime, error)
+}
 
 var _ modelsettingsapplication.Validator = Validator{}
 
 // NewValidator creates the shared managed-settings validator.
 func NewValidator(base config.Config) Validator {
-	return Validator{base: WithoutModelCredentials(base)}
+	return Validator{
+		base: WithoutModelCredentials(base),
+		build: func(cfg config.Config) (validationRuntime, error) {
+			return platformmodels.NewConfiguredModelRuntime(cfg)
+		},
+	}
 }
 
 // ValidateModelSettings validates one non-secret revision plus explicit secret presence.
@@ -82,8 +125,27 @@ func (validator Validator) ValidateModelSettings(_ context.Context, settings mod
 	if err != nil {
 		return err
 	}
-	_, err = platformmodels.NewConfiguredModelRuntime(cfg)
-	return err
+	builder := validator.build
+	if builder == nil {
+		builder = func(cfg config.Config) (validationRuntime, error) {
+			return platformmodels.NewConfiguredModelRuntime(cfg)
+		}
+	}
+	runtime, err := builder(cfg)
+	if err != nil {
+		return errors.Join(err, closeValidationRuntime(runtime))
+	}
+	if runtime == nil {
+		return errors.New("model validation runtime is unavailable")
+	}
+	return runtime.Close()
+}
+
+func closeValidationRuntime(runtime validationRuntime) error {
+	if runtime == nil {
+		return nil
+	}
+	return runtime.Close()
 }
 
 // Build constructs production Chat and Embedding adapters for one resolved revision.
@@ -104,7 +166,7 @@ func newModels(cfg config.Config, revision int64) (*Models, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Models{runtime: runtime, revision: revision}, nil
+	return &Models{runtime: runtime, revision: revision, closeRuntime: runtime.Close}, nil
 }
 
 // WithoutModelCredentials 返回移除模型 Credential 的长生命周期配置副本。
@@ -169,13 +231,16 @@ func overlay(base config.Config, settings modelsettingsdomain.Settings, chatKey,
 }
 
 // ConnectionTester executes minimal requests through the production adapters.
-type ConnectionTester struct{ base config.Config }
+type ConnectionTester struct {
+	base  config.Config
+	build func(config.Config, modelsettingsdomain.ResolvedSettings) (*Models, error)
+}
 
 var _ modelsettingsapplication.ResolvedConnectionTester = (*ConnectionTester)(nil)
 
 // NewConnectionTester creates a target-specific connection tester.
 func NewConnectionTester(base config.Config) *ConnectionTester {
-	return &ConnectionTester{base: WithoutModelCredentials(base)}
+	return &ConnectionTester{base: WithoutModelCredentials(base), build: Build}
 }
 
 // TestChat tests one resolved Chat target without persisting or touching Embedding settings.
@@ -198,14 +263,24 @@ func (tester *ConnectionTester) TestConnection(ctx context.Context, target strin
 }
 
 // TestResolvedConnection validates one Chat or Embedding draft through its production adapter.
-func (tester *ConnectionTester) TestResolvedConnection(ctx context.Context, target modelsettingsapplication.ConnectionTarget, resolved modelsettingsdomain.ResolvedSettings) error {
+func (tester *ConnectionTester) TestResolvedConnection(ctx context.Context, target modelsettingsapplication.ConnectionTarget, resolved modelsettingsdomain.ResolvedSettings) (resultErr error) {
 	if tester == nil {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, modelsettingsdomain.ErrorCodeUnavailable, true, errors.New("model connection tester is unavailable"))
 	}
-	models, err := Build(tester.base, resolved)
-	if err != nil {
-		return err
+	builder := tester.build
+	if builder == nil {
+		builder = Build
 	}
+	models, err := builder(tester.base, resolved)
+	if err != nil {
+		if models == nil {
+			return err
+		}
+		return errors.Join(err, models.Close())
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, models.Close())
+	}()
 	switch target {
 	case ConnectionTargetChat:
 		chat := models.Chat()

@@ -64,23 +64,39 @@ type VectorSearchQuery struct {
 
 // SearchService 编排 Active-only Keyword、Semantic 与 Hybrid 检索。
 type SearchService struct {
-	store         SearchStore
-	queryEmbedder QueryEmbedder
-	reranker      Reranker
+	store             SearchStore
+	embeddingAcquirer CompatibleEmbeddingAcquirer
+	reranker          Reranker
 }
 
 // NewSearchService 创建检索应用服务；Embedder/Reranker 可为空以支持显式能力降级。
+// 该兼容构造器把固定 Embedder 包装成无状态租约；managed composition 应使用
+// NewSearchServiceWithEmbeddingAcquirer 按 Active Index 的持久版本选择 generation。
 func NewSearchService(store SearchStore, queryEmbedder QueryEmbedder, reranker Reranker) (*SearchService, error) {
+	var acquirer CompatibleEmbeddingAcquirer
+	if !nilDispatcherDependency(queryEmbedder) {
+		acquirer = staticEmbeddingAcquirer{embedder: queryEmbedder}
+	}
+	return NewSearchServiceWithEmbeddingAcquirer(store, acquirer, reranker)
+}
+
+// NewSearchServiceWithEmbeddingAcquirer 创建按持久 Embedding Version 获取操作级
+// QueryEmbedder 租约的检索服务；Acquirer/Reranker 可为空以支持 FTS-only 能力。
+func NewSearchServiceWithEmbeddingAcquirer(
+	store SearchStore,
+	embeddingAcquirer CompatibleEmbeddingAcquirer,
+	reranker Reranker,
+) (*SearchService, error) {
 	if nilDispatcherDependency(store) {
 		return nil, searchDependencyError("search store is unavailable")
 	}
-	if nilDispatcherDependency(queryEmbedder) {
-		queryEmbedder = nil
+	if nilDispatcherDependency(embeddingAcquirer) {
+		embeddingAcquirer = nil
 	}
 	if nilDispatcherDependency(reranker) {
 		reranker = nil
 	}
-	return &SearchService{store: store, queryEmbedder: queryEmbedder, reranker: reranker}, nil
+	return &SearchService{store: store, embeddingAcquirer: embeddingAcquirer, reranker: reranker}, nil
 }
 
 // Search 执行统一过滤、双路融合、相邻去重、可选重排和 Evidence v1 映射。
@@ -131,10 +147,15 @@ func (service *SearchService) searchKeyword(
 }
 
 func (service *SearchService) searchSemantic(ctx context.Context, request domain.SearchRequest, index SearchIndex) (domain.SearchResult, error) {
-	if !vectorCapable(index) || service.queryEmbedder == nil {
+	if !vectorCapable(index) {
 		return domain.SearchResult{}, semanticUnavailable()
 	}
-	embedding, err := service.embedQuery(ctx, request.Query, *index.EmbeddingVersion)
+	lease, embedder, err := service.acquireEmbedding(ctx, *index.EmbeddingVersion)
+	if err != nil {
+		return domain.SearchResult{}, err
+	}
+	defer lease.Release()
+	embedding, err := service.embedQuery(ctx, embedder, request.Query, *index.EmbeddingVersion)
 	if err != nil {
 		return domain.SearchResult{}, err
 	}
@@ -152,9 +173,14 @@ func (service *SearchService) searchSemantic(ctx context.Context, request domain
 }
 
 func (service *SearchService) searchHybrid(ctx context.Context, request domain.SearchRequest, index SearchIndex) (domain.SearchResult, error) {
-	if !vectorCapable(index) || service.queryEmbedder == nil {
+	if !vectorCapable(index) {
 		return service.searchKeyword(ctx, request, index, hybridFallbackDegradations(vectorUnavailableCode, false))
 	}
+	lease, embedder, err := service.acquireEmbedding(ctx, *index.EmbeddingVersion)
+	if err != nil {
+		return domain.SearchResult{}, err
+	}
+	defer lease.Release()
 
 	type routeResult struct {
 		candidates []domain.SearchCandidate
@@ -170,7 +196,7 @@ func (service *SearchService) searchHybrid(ctx context.Context, request domain.S
 		lexicalResult <- routeResult{candidates: candidates, err: err}
 	}()
 	go func() {
-		embedding, err := service.embedQuery(searchCtx, request.Query, *index.EmbeddingVersion)
+		embedding, err := service.embedQuery(searchCtx, embedder, request.Query, *index.EmbeddingVersion)
 		if err == nil {
 			candidates, searchErr := service.store.SearchVector(searchCtx, vectorQuery(request, index, embedding, index.Fusion.VectorCandidateLimit))
 			vectorResult <- routeResult{candidates: candidates, err: searchErr}
@@ -229,19 +255,24 @@ func buildKeywordFallback(
 	return buildSearchResult(request, index, domain.SearchModeKeyword, ranked, hybridFallbackDegradations(code, retryable), "")
 }
 
-func (service *SearchService) embedQuery(ctx context.Context, query string, version domain.EmbeddingVersion) ([]float32, error) {
-	if service.queryEmbedder == nil {
-		return nil, semanticUnavailable()
+func (service *SearchService) embedQuery(
+	ctx context.Context,
+	embedder QueryEmbedder,
+	query string,
+	version domain.EmbeddingVersion,
+) ([]float32, error) {
+	if nilDispatcherDependency(embedder) {
+		return nil, vectorEmbedderVersionUnavailable(errors.New("compatible embedding lease is unavailable"))
 	}
-	contract := service.queryEmbedder.Contract()
+	contract := embedder.Contract()
 	if err := domain.ValidateEmbeddingContractBinding(contract, version); err != nil {
-		return nil, err
+		return nil, vectorEmbedderVersionUnavailable(err)
 	}
 	request := EmbedRequest{Inputs: []string{query}}
 	if err := ValidateEmbedRequest(contract, request); err != nil {
 		return nil, err
 	}
-	result, err := service.queryEmbedder.Embed(ctx, request)
+	result, err := embedder.Embed(ctx, request)
 	if err != nil {
 		return nil, err
 	}

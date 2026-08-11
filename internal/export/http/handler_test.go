@@ -19,7 +19,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -339,7 +339,7 @@ func (fake *exportHTTPFake) DownloadAsForScope(_ context.Context, _, _ foundatio
 }
 
 func exportHTTPRouter(service Service) http.Handler {
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(service).Routes(router)
 	return router
 }

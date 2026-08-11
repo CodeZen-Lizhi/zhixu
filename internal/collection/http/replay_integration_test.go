@@ -15,7 +15,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/collection/adapter/postgres"
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -53,8 +53,8 @@ func TestCollectionHTTPExactReplayAfterMutationAndArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := chi.NewRouter()
-	router.Route("/api/v1", NewHandler(service, time.Second).Routes)
+	router := gin.New()
+	NewHandler(service, time.Second).Routes(router.Group("/api/v1"))
 
 	createBody := `{"workspace_id":"` + string(workspaceID) + `","name":"Inbox","description":"first","query":{"schema_version":"collection-query/v1","root":{"kind":"group","operator":"AND","clauses":[{"kind":"predicate","field":"object_type","operator":"EQ","value":"TOPIC"}]}},"view_type":"LIST","view_config":{"density":"COMFORTABLE"}}`
 	created := httpReplayRequest(t, router, http.MethodPost, "/collections", createBody, "create-http-replay")

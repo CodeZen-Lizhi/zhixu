@@ -84,7 +84,7 @@ type ChatContract struct {
 }
 
 type chatHTTPConfig struct {
-	client           *http.Client
+	client           *modelHTTPClient
 	endpointURL      string
 	contract         ChatContract
 	timeout          time.Duration
@@ -224,6 +224,13 @@ func validChatAPIKey(value string) bool {
 
 func (config chatHTTPConfig) contractCopy() ChatContract {
 	return config.contract
+}
+
+func (config chatHTTPConfig) closeModelResource() error {
+	if config.client == nil {
+		return nil
+	}
+	return config.client.Close()
 }
 
 func (config chatHTTPConfig) chat(ctx context.Context, request agentapplication.ChatRequest, payload any, result any) error {

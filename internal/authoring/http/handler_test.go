@@ -14,7 +14,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/authoring/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -573,7 +573,7 @@ func newRouter(service Service, timeout time.Duration) http.Handler {
 }
 
 func routerForHandler(handler *Handler) http.Handler {
-	router := chi.NewRouter()
+	router := gin.New()
 	handler.Routes(router)
 	return router
 }

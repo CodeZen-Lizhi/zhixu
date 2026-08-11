@@ -20,7 +20,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	pathapp "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/application"
 	pathdomain "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -56,11 +56,11 @@ func (handler *Handler) Available() bool {
 }
 
 // Routes registers endpoints under the caller's /api/v1 router.
-func (handler *Handler) Routes(router chi.Router) {
-	router.Post("/review/answers/{answer_id}/learning-path", handler.create)
-	router.Get("/review/answers/{answer_id}/learning-path", handler.get)
-	router.Put("/review/answers/{answer_id}/learning-path/status", handler.updateStatus)
-	router.Put("/review/answers/{answer_id}/learning-path/steps/{step_id}", handler.updateStep)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.POST("/review/answers/:answer_id/learning-path", httpapi.GinHandler(handler.create))
+	router.GET("/review/answers/:answer_id/learning-path", httpapi.GinHandler(handler.get))
+	router.PUT("/review/answers/:answer_id/learning-path/status", httpapi.GinHandler(handler.updateStatus))
+	router.PUT("/review/answers/:answer_id/learning-path/steps/:step_id", httpapi.GinHandler(handler.updateStep))
 }
 
 type workspaceRequest struct {
@@ -147,7 +147,7 @@ func (handler *Handler) create(w http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
-	answerID, ok := id(w, chi.URLParam(request, "answer_id"))
+	answerID, ok := id(w, request.PathValue("answer_id"))
 	if !ok {
 		return
 	}
@@ -182,7 +182,7 @@ func (handler *Handler) get(w http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
-	answerID, ok := id(w, chi.URLParam(request, "answer_id"))
+	answerID, ok := id(w, request.PathValue("answer_id"))
 	if !ok {
 		return
 	}
@@ -212,7 +212,7 @@ func (handler *Handler) updateStatus(w http.ResponseWriter, request *http.Reques
 	if !ok {
 		return
 	}
-	answerID, ok := id(w, chi.URLParam(request, "answer_id"))
+	answerID, ok := id(w, request.PathValue("answer_id"))
 	if !ok {
 		return
 	}
@@ -251,11 +251,11 @@ func (handler *Handler) updateStep(w http.ResponseWriter, request *http.Request)
 	if !ok {
 		return
 	}
-	answerID, ok := id(w, chi.URLParam(request, "answer_id"))
+	answerID, ok := id(w, request.PathValue("answer_id"))
 	if !ok {
 		return
 	}
-	stepID, ok := id(w, chi.URLParam(request, "step_id"))
+	stepID, ok := id(w, request.PathValue("step_id"))
 	if !ok {
 		return
 	}

@@ -5,6 +5,7 @@ const document = JSON.parse(openAPISource);
 const exportHandlerSource = readFileSync(new URL("../../internal/export/http/handler.go", import.meta.url), "utf8");
 const gitSyncHandlerSource = readFileSync(new URL("../../internal/gitsync/http/handler.go", import.meta.url), "utf8");
 const authHandlerSource = readFileSync(new URL("../../internal/auth/http/handler.go", import.meta.url), "utf8");
+const canonicalGinRoute = (path) => path.replaceAll(/:([A-Za-z0-9_]+)/g, "{$1}");
 if (document.openapi !== "3.1.0") {
   throw new Error(`expected OpenAPI 3.1.0, got ${document.openapi}`);
 }
@@ -154,6 +155,7 @@ const requiredOperations = [
   ["/api/v1/auth/api-tokens/{token_id}", "delete", "204"],
   ["/api/v1/settings/models", "get", "200"],
   ["/api/v1/settings/models", "put", "200"],
+  ["/api/v1/settings/models/activations", "post", "202"],
   ["/api/v1/settings/models/test", "post", "200"],
   ["/api/v1/workspaces", "post", "201"],
   ["/api/v1/workspaces/active", "get", "200"],
@@ -385,6 +387,7 @@ for (const [path, method, expected] of [
   ["/api/v1/auth/api-tokens/{token_id}", "delete", [{ sessionCookie: [] }]],
   ["/api/v1/settings/models", "get", [{ sessionCookie: [] }]],
   ["/api/v1/settings/models", "put", [{ sessionCookie: [] }]],
+  ["/api/v1/settings/models/activations", "post", [{ sessionCookie: [] }]],
   ["/api/v1/settings/models/test", "post", [{ sessionCookie: [] }]],
 ]) {
   if (!exactSecurity(document.paths[path][method].security, expected)) {
@@ -397,6 +400,7 @@ for (const [path, method] of [
   ["/api/v1/auth/api-tokens", "post"],
   ["/api/v1/auth/api-tokens/{token_id}", "delete"],
   ["/api/v1/settings/models", "put"],
+  ["/api/v1/settings/models/activations", "post"],
   ["/api/v1/settings/models/test", "post"],
 ]) {
   const parameters = document.paths[path][method].parameters ?? [];
@@ -1279,18 +1283,18 @@ if (actualGitSyncPaths.join(",") !== expectedGitSyncPaths.slice().sort().join(",
   throw new Error("Git Sync path inventory drifted from the HTTP Router");
 }
 const expectedGitSyncRouteRegistrations = [
-  "DELETE /workspaces/{workspaceID}/git-remote handler.removeConfig",
-  "GET /workspaces/{workspaceID}/git-remote handler.getConfig",
-  "GET /workspaces/{workspaceID}/git-sync handler.getStatus",
-  "GET /workspaces/{workspaceID}/git-sync/runs handler.listRuns",
-  "GET /workspaces/{workspaceID}/git-sync/runs/{runID} handler.getRun",
-  "POST /workspaces/{workspaceID}/git-remote/tests handler.testConfig",
-  "POST /workspaces/{workspaceID}/git-sync/runs handler.createRun",
-  "POST /workspaces/{workspaceID}/git-sync/runs/{runID}/retries handler.retryRun",
-  "PUT /workspaces/{workspaceID}/git-remote handler.saveConfig",
+  "DELETE /workspaces/{workspace_id}/git-remote handler.removeConfig",
+  "GET /workspaces/{workspace_id}/git-remote handler.getConfig",
+  "GET /workspaces/{workspace_id}/git-sync handler.getStatus",
+  "GET /workspaces/{workspace_id}/git-sync/runs handler.listRuns",
+  "GET /workspaces/{workspace_id}/git-sync/runs/{run_id} handler.getRun",
+  "POST /workspaces/{workspace_id}/git-remote/tests handler.testConfig",
+  "POST /workspaces/{workspace_id}/git-sync/runs handler.createRun",
+  "POST /workspaces/{workspace_id}/git-sync/runs/{run_id}/retries handler.retryRun",
+  "PUT /workspaces/{workspace_id}/git-remote handler.saveConfig",
 ].sort();
-const actualGitSyncRouteRegistrations = [...gitSyncHandlerSource.matchAll(/router\.(Get|Put|Post|Delete)\(\s*"([^"]+)"\s*,\s*handler\.([A-Za-z0-9_]+)\s*\)/g)]
-  .map((match) => `${match[1].toUpperCase()} ${match[2]} handler.${match[3]}`)
+const actualGitSyncRouteRegistrations = [...gitSyncHandlerSource.matchAll(/router\.(GET|PUT|POST|DELETE)\(\s*"([^"]+)"\s*,\s*httpapi\.GinHandler\(handler\.([A-Za-z0-9_]+)\)\s*\)/g)]
+  .map((match) => `${match[1]} ${canonicalGinRoute(match[2])} handler.${match[3]}`)
   .sort();
 if (actualGitSyncRouteRegistrations.join(",") !== expectedGitSyncRouteRegistrations.join(",")) {
   throw new Error("Git Sync HTTP Router must register exactly the documented operations");
@@ -1303,8 +1307,7 @@ const actualGitSyncCapabilities = new Map(
   [...authHandlerSource.matchAll(/oneCapability\(http\.Method(Get|Put|Post|Delete),\s*"([^"]+)",\s*capability\.([A-Za-z0-9]+)\)/g)]
     .filter((match) => match[2].includes("/git-remote") || match[2].includes("/git-sync"))
     .map((match) => {
-      const path = match[2].replaceAll("{workspaceID}", "{workspace_id}").replaceAll("{runID}", "{run_id}");
-      return [`${match[1].toUpperCase()} ${path}`, gitSyncCapabilityNames.get(match[3])];
+      return [`${match[1].toUpperCase()} ${match[2]}`, gitSyncCapabilityNames.get(match[3])];
     }),
 );
 if (actualGitSyncCapabilities.size !== 9 || [...actualGitSyncCapabilities.values()].some((capability) => capability === undefined)) {
@@ -1685,18 +1688,19 @@ function resolveRef(value) {
 }
 
 const modelSettingsOperations = [
-  ["/api/v1/settings/models", "get", "ModelSettingsResponse", undefined, ["200", "401", "403", "405", "500", "503"]],
-  ["/api/v1/settings/models", "put", "ModelSettingsResponse", "UpdateModelSettingsRequest", ["200", "400", "401", "403", "405", "409", "415", "500", "503"]],
-  ["/api/v1/settings/models/test", "post", "ModelSettingsTestResponse", "TestModelSettingsRequest", ["200", "400", "401", "403", "405", "409", "415", "500", "502", "503", "504"]],
+  ["/api/v1/settings/models", "get", "200", "ModelSettingsResponse", undefined, ["200", "401", "403", "405", "500", "503"]],
+  ["/api/v1/settings/models", "put", "200", "ModelSettingsResponse", "UpdateModelSettingsRequest", ["200", "400", "401", "403", "405", "409", "415", "500", "503"]],
+  ["/api/v1/settings/models/activations", "post", "202", "ModelSettingsResponse", "StartModelSettingsActivationRequest", ["202", "400", "401", "403", "405", "409", "415", "500", "503"]],
+  ["/api/v1/settings/models/test", "post", "200", "ModelSettingsTestResponse", "TestModelSettingsRequest", ["200", "400", "401", "403", "405", "409", "415", "500", "502", "503", "504"]],
 ];
-for (const [path, method, successSchema, requestSchema, statuses] of modelSettingsOperations) {
+for (const [path, method, successStatus, successSchema, requestSchema, statuses] of modelSettingsOperations) {
   const operation = document.paths[path]?.[method];
   if (!operation) throw new Error(`missing Model Settings operation ${method.toUpperCase()} ${path}`);
   if (Object.keys(operation.responses ?? {}).sort().join(",") !== statuses.slice().sort().join(",")) {
     throw new Error(`${method.toUpperCase()} ${path} response status contract drifted`);
   }
-  if (operation.responses["200"]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}` ||
-      operation.responses["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+  if (operation.responses[successStatus]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${successSchema}` ||
+      operation.responses[successStatus]?.headers?.["Cache-Control"]?.schema?.const !== "no-store") {
     throw new Error(`${method.toUpperCase()} ${path} must return ${successSchema} with Cache-Control: no-store`);
   }
   for (const status of statuses.filter((status) => Number(status) >= 400)) {
@@ -1734,7 +1738,10 @@ const strictModelSettingsSchemas = [
   "ModelSettingsRuntime",
   "ModelSettingsRuntimeRole",
   "ModelSettingsRollout",
+  "ModelSettingsParticipants",
+  "ModelSettingsParticipant",
   "ModelSettingsCapabilities",
+  "StartModelSettingsActivationRequest",
   "UpdateModelSettingsRequest",
   "ModelChatSettingsDraft",
   "ModelEmbeddingSettingsDraft",
@@ -1759,7 +1766,7 @@ const exactModelSettingsShape = (schemaName, required, properties = required) =>
     throw new Error(`${schemaName} required/property shape drifted`);
   }
 };
-exactModelSettingsShape("ModelSettingsResponse", ["desired_revision", "active_revision", "desired_settings", "active_settings", "runtime", "rollout", "restart_required", "capabilities"]);
+exactModelSettingsShape("ModelSettingsResponse", ["desired_revision", "active_revision", "desired_settings", "active_settings", "runtime", "rollout", "participants", "apply_required", "restart_required", "capabilities"]);
 exactModelSettingsShape("ModelSettingsConflictProblem", ["error_code", "message", "retryable", "details"]);
 exactModelSettingsShape("ModelSettingsConflictDetails", ["current_revision"]);
 exactModelSettingsShape("ModelSettingsTestProblem", ["error_code", "message", "retryable"], ["error_code", "message", "retryable", "workflow_run_id", "details"]);
@@ -1769,8 +1776,11 @@ exactModelSettingsShape("ModelChatSettingsSummary", ["provider", "api_style", "b
 exactModelSettingsShape("ModelEmbeddingSettingsSummary", ["provider", "base_url", "model", "dimensions", "normalization", "distance_metric", "api_key_configured"]);
 exactModelSettingsShape("ModelSettingsRuntime", ["api", "worker"]);
 exactModelSettingsShape("ModelSettingsRuntimeRole", ["applied_revision", "phase", "fresh"]);
-exactModelSettingsShape("ModelSettingsRollout", ["phase", "target_revision", "last_error_code", "retryable"]);
+exactModelSettingsShape("ModelSettingsRollout", ["id", "version", "phase", "target_revision", "last_error_code", "retryable"]);
+exactModelSettingsShape("ModelSettingsParticipants", ["api", "worker"]);
+exactModelSettingsShape("ModelSettingsParticipant", ["present", "target_revision", "phase", "fresh", "last_error_code", "retryable"]);
 exactModelSettingsShape("ModelSettingsCapabilities", ["chat", "embedding"]);
+exactModelSettingsShape("StartModelSettingsActivationRequest", ["expected_revision"]);
 exactModelSettingsShape("UpdateModelSettingsRequest", ["expected_revision", "chat", "embedding"]);
 exactModelSettingsShape("ModelChatSettingsDraft", ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key"]);
 exactModelSettingsShape("ModelEmbeddingSettingsDraft", ["provider", "base_url", "model", "dimensions", "normalization", "distance_metric", "api_key"]);
@@ -1810,12 +1820,14 @@ if (modelResponse.properties.desired_revision.minimum !== 0 || modelResponse.pro
     modelResponse.properties.active_settings.$ref !== "#/components/schemas/ModelSettingsSummary" ||
     modelResponse.properties.runtime.$ref !== "#/components/schemas/ModelSettingsRuntime" ||
     modelResponse.properties.rollout.$ref !== "#/components/schemas/ModelSettingsRollout" ||
+    modelResponse.properties.participants.$ref !== "#/components/schemas/ModelSettingsParticipants" ||
+    modelResponse.properties.apply_required.type !== "boolean" ||
     modelResponse.properties.capabilities.$ref !== "#/components/schemas/ModelSettingsCapabilities" ||
-    modelResponse.properties.restart_required.type !== "boolean") {
+    modelResponse.properties.restart_required.const !== false || modelResponse.properties.restart_required.deprecated !== true) {
   throw new Error("Model Settings desired/active/runtime/rollout response contract drifted");
 }
 const responseSchemas = [modelResponse, modelConflict, schemas.ModelSettingsConflictDetails, modelTestProblem, modelTestDetails, schemas.ModelSettingsSummary, schemas.ModelChatSettingsSummary, schemas.ModelEmbeddingSettingsSummary,
-  schemas.ModelSettingsRuntime, schemas.ModelSettingsRuntimeRole, schemas.ModelSettingsRollout, schemas.ModelSettingsCapabilities];
+  schemas.ModelSettingsRuntime, schemas.ModelSettingsRuntimeRole, schemas.ModelSettingsRollout, schemas.ModelSettingsParticipants, schemas.ModelSettingsParticipant, schemas.ModelSettingsCapabilities];
 if (responseSchemas.some((schema) => JSON.stringify(schema).includes('"writeOnly"') || JSON.stringify(schema).includes('"api_key":') ||
     JSON.stringify(schema).includes('"ciphertext"') || JSON.stringify(schema).includes('"nonce"') ||
     JSON.stringify(schema).includes('"key_id"') || JSON.stringify(schema).includes('"instance_id"'))) {
@@ -1859,28 +1871,58 @@ if (embeddingSummary.properties.provider.enum?.join(",") !== "disabled,openai-co
 if (schemas.ModelSettingsRuntime.properties.api.$ref !== "#/components/schemas/ModelSettingsRuntimeRole" ||
     schemas.ModelSettingsRuntime.properties.worker.$ref !== "#/components/schemas/ModelSettingsRuntimeRole" ||
     schemas.ModelSettingsRuntimeRole.properties.applied_revision.minimum !== 0 ||
-    schemas.ModelSettingsRuntimeRole.properties.phase.enum?.join(",") !== "active,quiescing,quiesced,prepared,verifying,unavailable" ||
+    schemas.ModelSettingsRuntimeRole.properties.phase.enum?.join(",") !== "active,unavailable" ||
     schemas.ModelSettingsRuntimeRole.properties.fresh.type !== "boolean") {
   throw new Error("Model Settings API/Worker applied runtime contract drifted");
 }
-if (schemas.ModelSettingsRollout.properties.phase.enum?.join(",") !== "idle,validating,draining,applying,verifying,failed" ||
+if (schemas.ModelSettingsRollout.properties.id.type?.join(",") !== "string,null" ||
+    schemas.ModelSettingsRollout.properties.id.format !== "uuid" ||
+    schemas.ModelSettingsRollout.properties.version.minimum !== 0 ||
+    schemas.ModelSettingsRollout.properties.phase.enum?.join(",") !== "idle,preparing,arming,activating,failed" ||
     schemas.ModelSettingsRollout.properties.target_revision.type?.join(",") !== "integer,null" ||
     schemas.ModelSettingsRollout.properties.target_revision.minimum !== 0 ||
     schemas.ModelSettingsRollout.properties.last_error_code.type?.join(",") !== "string,null" ||
+    schemas.ModelSettingsRollout.properties.last_error_code.pattern !== "^[A-Z][A-Z0-9_]*$" ||
     schemas.ModelSettingsRollout.properties.retryable.type !== "boolean") {
-  throw new Error("Model Settings rollout/restart projection contract drifted");
+  throw new Error("Model Settings activation projection contract drifted");
 }
 const rolloutBranches = schemas.ModelSettingsRollout.oneOf ?? [];
 if (rolloutBranches.length !== 3 || rolloutBranches[0].properties?.phase?.const !== "idle" ||
+    rolloutBranches[0].properties?.id?.type !== "null" || rolloutBranches[0].properties?.version?.minimum !== 0 ||
     rolloutBranches[0].properties?.target_revision?.type !== "null" ||
     rolloutBranches[0].properties?.last_error_code?.type !== "null" || rolloutBranches[0].properties?.retryable?.const !== false ||
-    rolloutBranches[1].properties?.phase?.enum?.join(",") !== "validating,draining,applying,verifying" ||
+    rolloutBranches[1].properties?.id?.type !== "string" || rolloutBranches[1].properties?.id?.format !== "uuid" ||
+    rolloutBranches[1].properties?.version?.minimum !== 1 ||
+    rolloutBranches[1].properties?.phase?.enum?.join(",") !== "preparing,arming,activating" ||
     rolloutBranches[1].properties?.target_revision?.type !== "integer" ||
     rolloutBranches[1].properties?.last_error_code?.type !== "null" || rolloutBranches[1].properties?.retryable?.const !== false ||
+    rolloutBranches[2].properties?.id?.type !== "string" || rolloutBranches[2].properties?.id?.format !== "uuid" ||
+    rolloutBranches[2].properties?.version?.minimum !== 1 ||
     rolloutBranches[2].properties?.phase?.const !== "failed" ||
     rolloutBranches[2].properties?.target_revision?.type !== "integer" ||
     rolloutBranches[2].properties?.last_error_code?.type !== "string" || rolloutBranches[2].properties?.retryable?.const !== true) {
   throw new Error("Model Settings rollout must remain an exact idle/in-progress/failed union");
+}
+const modelParticipants = schemas.ModelSettingsParticipants;
+const modelParticipant = schemas.ModelSettingsParticipant;
+const participantBranches = modelParticipant.oneOf ?? [];
+if (modelParticipants.properties.api.$ref !== "#/components/schemas/ModelSettingsParticipant" ||
+    modelParticipants.properties.worker.$ref !== "#/components/schemas/ModelSettingsParticipant" ||
+    modelParticipant.properties.target_revision.type?.join(",") !== "integer,null" ||
+    modelParticipant.properties.target_revision.minimum !== 0 ||
+    modelParticipant.properties.phase.type?.join(",") !== "string,null" ||
+    modelParticipant.properties.phase.enum?.join(",") !== "preparing,prepared,armed,activated,failed,aborted,retired," ||
+    modelParticipant.properties.last_error_code.type?.join(",") !== "string,null" ||
+    modelParticipant.properties.last_error_code.pattern !== "^[A-Z][A-Z0-9_]*$" ||
+    participantBranches.length !== 3 || participantBranches[0].properties?.present?.const !== false ||
+    participantBranches[0].properties?.target_revision?.type !== "null" || participantBranches[0].properties?.phase?.type !== "null" ||
+    participantBranches[0].properties?.fresh?.const !== false || participantBranches[0].properties?.last_error_code?.type !== "null" ||
+    participantBranches[0].properties?.retryable?.const !== false || participantBranches[1].properties?.present?.const !== true ||
+    participantBranches[1].properties?.phase?.enum?.join(",") !== "preparing,prepared,armed,activated,aborted,retired" ||
+    participantBranches[1].properties?.last_error_code?.type !== "null" || participantBranches[1].properties?.retryable?.const !== false ||
+    participantBranches[2].properties?.present?.const !== true || participantBranches[2].properties?.phase?.const !== "failed" ||
+    participantBranches[2].properties?.last_error_code?.type !== "string") {
+  throw new Error("Model Settings participant projection must preserve exact absent and present shapes");
 }
 
 const modelSettingsProblem = document.components.responses.ModelSettingsProblemNoStore;
@@ -1901,6 +1943,7 @@ if (modelSettingsTestProblem?.headers?.["Cache-Control"]?.schema?.const !== "no-
 for (const [path, method, successStatus] of [
   ["/api/v1/settings/models", "get", "200"],
   ["/api/v1/settings/models", "put", "200"],
+  ["/api/v1/settings/models/activations", "post", "202"],
   ["/api/v1/settings/models/test", "post", "200"],
 ]) {
   const responses = document.paths[path][method].responses;
@@ -1916,8 +1959,16 @@ for (const [path, method, successStatus] of [
 }
 
 const updateModelSettings = schemas.UpdateModelSettingsRequest;
+const startModelSettingsActivation = schemas.StartModelSettingsActivationRequest;
 const chatDraft = schemas.ModelChatSettingsDraft;
 const embeddingDraft = schemas.ModelEmbeddingSettingsDraft;
+if (startModelSettingsActivation.properties.expected_revision.minimum !== 0 ||
+    JSON.stringify(startModelSettingsActivation).includes("api_key") ||
+    JSON.stringify(startModelSettingsActivation).includes("base_url") ||
+    JSON.stringify(startModelSettingsActivation).includes("rollout_id") ||
+    JSON.stringify(startModelSettingsActivation).includes("phase")) {
+  throw new Error("Model Settings activation must contain only the exact desired revision");
+}
 if (updateModelSettings.properties.expected_revision.minimum !== 0 ||
     updateModelSettings.properties.chat.$ref !== "#/components/schemas/ModelChatSettingsDraft" ||
     updateModelSettings.properties.embedding.$ref !== "#/components/schemas/ModelEmbeddingSettingsDraft") {
@@ -2000,8 +2051,8 @@ const expectedExportRouteRegistrations = [
   "POST /exports handler.create",
   "POST /workspaces/{workspace_id}/attachment-exports handler.createAttachment",
 ];
-const actualExportRouteRegistrations = [...exportHandlerSource.matchAll(/router\.(Get|Post)\(\s*"([^"]+)"\s*,\s*handler\.([A-Za-z0-9_]+)\s*\)/g)]
-  .map((match) => `${match[1].toUpperCase()} ${match[2]} handler.${match[3]}`)
+const actualExportRouteRegistrations = [...exportHandlerSource.matchAll(/router\.(GET|POST)\(\s*"([^"]+)"\s*,\s*httpapi\.GinHandler\(handler\.([A-Za-z0-9_]+)\)\s*\)/g)]
+  .map((match) => `${match[1]} ${canonicalGinRoute(match[2])} handler.${match[3]}`)
   .sort();
 if (actualExportRouteRegistrations.join(",") !== expectedExportRouteRegistrations.join(",")) {
   throw new Error("Export HTTP Router must register exactly the Collection and attachment operations");

@@ -12,7 +12,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	reviewapp "github.com/CodeZen-Lizhi/zhixu/internal/review/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -27,7 +27,7 @@ const (
 
 func TestRoutesBindWorkspaceAndInvokeReviewCommands(t *testing.T) {
 	fake := newFakeService()
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(fake, time.Second).Routes(router)
 
 	tests := []struct {
@@ -84,7 +84,7 @@ func TestRoutesBindWorkspaceAndInvokeReviewCommands(t *testing.T) {
 
 func TestStrictJSONAndCASAreRejectedBeforeService(t *testing.T) {
 	fake := newFakeService()
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(fake, time.Second).Routes(router)
 
 	tests := []struct {
@@ -129,7 +129,7 @@ func TestReviewSessionEndpointsRejectInterviewResponses(t *testing.T) {
 	fake := newFakeService()
 	fake.session.SessionType = domain.SessionTypeInterview
 	fake.session.DeckID = nil
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(fake, time.Second).Routes(router)
 
 	tests := []struct {
@@ -155,7 +155,7 @@ func TestReviewSessionEndpointsRejectInterviewResponses(t *testing.T) {
 }
 
 func TestMissingServiceFailsClosedForCardDecision(t *testing.T) {
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(nil, time.Second).Routes(router)
 	request := httptest.NewRequest(http.MethodPost, "/review/cards/"+testCardID+"/approve", strings.NewReader(decisionJSON()))
 	request.Header.Set("Content-Type", "application/json")
@@ -169,7 +169,7 @@ func TestMissingServiceFailsClosedForCardDecision(t *testing.T) {
 
 func TestSubmitAnswerUsesServerScoreAndRejectsScoreIngress(t *testing.T) {
 	fake := newFakeService()
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(fake, time.Second).Routes(router)
 	body := `{"workspace_id":"` + testWorkspaceID + `","card_id":"` + testCardID + `","question_ref":"card:1","user_answer":"answer","rating":3}`
 	request := httptest.NewRequest(http.MethodPost, "/review/sessions/"+testSessionID+"/answers", strings.NewReader(body))
@@ -243,7 +243,7 @@ func TestSubmitAnswerUsesServerScoreAndRejectsScoreIngress(t *testing.T) {
 
 func TestDueCardsHideAnswersAndEvidenceBeforeSubmission(t *testing.T) {
 	fake := newFakeService()
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(fake, time.Second).Routes(router)
 	request := httptest.NewRequest(http.MethodGet, "/review/due?workspace_id="+testWorkspaceID+"&session_id="+testSessionID+"&deck_id="+testDeckID+"&limit=1", nil)
 	response := httptest.NewRecorder()
@@ -326,7 +326,7 @@ func TestCompleteSessionMapsReplayAndFailureContracts(t *testing.T) {
 				fake.completeResult.Value = fake.session
 			}
 			fake.completeErr = test.err
-			router := chi.NewRouter()
+			router := gin.New()
 			NewHandler(fake, time.Second).Routes(router)
 
 			request := httptest.NewRequest(http.MethodPost, "/review/sessions/"+testSessionID+"/complete", strings.NewReader(`{"workspace_id":"`+testWorkspaceID+`","cancelled":false}`))

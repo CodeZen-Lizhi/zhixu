@@ -5,11 +5,12 @@ import (
 	"errors"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/jackc/pgx/v5"
 )
 
-const defaultSnapshotStaleAfter = 20 * time.Second
+const defaultSnapshotStaleAfter = application.DefaultRuntimeFreshWithin
 
 // Snapshot reads desired, active, rollout, and runtime projections from one repeatable snapshot.
 func (repository *Repository) Snapshot(ctx context.Context, staleAfter time.Duration) (domain.Snapshot, error) {
@@ -19,7 +20,7 @@ func (repository *Repository) Snapshot(ctx context.Context, staleAfter time.Dura
 	if staleAfter == 0 {
 		staleAfter = defaultSnapshotStaleAfter
 	}
-	if staleAfter < time.Second || staleAfter > 5*time.Minute {
+	if !application.ValidRuntimeFreshWithin(staleAfter) {
 		return domain.Snapshot{}, invalid(errors.New("model settings snapshot stale interval is invalid"))
 	}
 	tx, err := repository.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
@@ -62,15 +63,57 @@ func snapshotTx(ctx context.Context, tx pgx.Tx, staleAfter time.Duration) (domai
 	if err != nil {
 		return domain.Snapshot{}, err
 	}
+	participants, err := loadParticipantSummaries(ctx, tx, state, now, staleAfter)
+	if err != nil {
+		return domain.Snapshot{}, err
+	}
 	activeReady := runtimeReady(runtimes.API, state.activeRevision) && runtimeReady(runtimes.Worker, state.activeRevision)
 	snapshot := domain.Snapshot{
 		DesiredRevision: state.desiredRevision, ActiveRevision: state.activeRevision,
 		DesiredSettings: desired.summary(), ActiveSettings: active.summary(), Runtime: runtimes, Rollout: rollout,
-		RestartRequired: state.desiredRevision != state.activeRevision || !activeReady || rollout.Phase != domain.RolloutPhaseIdle,
+		Participants:    participants,
+		ApplyRequired:   state.desiredRevision != state.activeRevision || domain.ActiveActivationPhase(rollout.Phase) || !activeReady,
+		RestartRequired: false,
 	}
 	snapshot.ChatCapability = chatCapability(snapshot.ActiveSettings, activeReady)
 	snapshot.EmbeddingCapability = embeddingCapability(snapshot.ActiveSettings, activeReady)
 	return snapshot, nil
+}
+
+func loadParticipantSummaries(ctx context.Context, tx pgx.Tx, state stateRecord, now time.Time, staleAfter time.Duration) (domain.ParticipantSummaries, error) {
+	result := domain.ParticipantSummaries{}
+	if !state.rolloutID.Valid {
+		return result, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT `+participantColumns+`
+FROM ops.model_settings_rollout_participant WHERE rollout_id=$1::uuid ORDER BY role`, state.rolloutID.String)
+	if err != nil {
+		return domain.ParticipantSummaries{}, classify(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		record, scanErr := scanParticipant(rows)
+		if scanErr != nil {
+			return domain.ParticipantSummaries{}, classify(scanErr)
+		}
+		summary := domain.ParticipantSummary{
+			Present: true, TargetRevision: record.TargetRevision, Phase: record.Phase,
+			Fresh: !record.HeartbeatAt.Before(now.Add(-staleAfter)), LastErrorCode: record.LastErrorCode,
+			ErrorRetryable: record.ErrorRetryable,
+		}
+		switch record.Role {
+		case domain.RuntimeRoleAPI:
+			result.API = summary
+		case domain.RuntimeRoleWorker:
+			result.Worker = summary
+		default:
+			return domain.ParticipantSummaries{}, corrupt(errors.New("model settings participant role is invalid"))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return domain.ParticipantSummaries{}, classify(err)
+	}
+	return result, nil
 }
 
 func loadRuntimeSummaries(ctx context.Context, tx pgx.Tx, now time.Time, staleAfter time.Duration) (domain.RuntimeSummaries, error) {

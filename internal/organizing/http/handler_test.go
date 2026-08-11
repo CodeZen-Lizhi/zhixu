@@ -15,7 +15,7 @@ import (
 	organizingapp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/organizing/domain"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const testHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -619,8 +619,8 @@ func TestHandlerMapsStableOrganizingErrors(t *testing.T) {
 }
 
 func testRouter(handler *Handler) http.Handler {
-	router := chi.NewRouter()
-	router.Route("/api/v1", handler.Routes)
+	router := gin.New()
+	handler.Routes(router.Group("/api/v1"))
 	return router
 }
 

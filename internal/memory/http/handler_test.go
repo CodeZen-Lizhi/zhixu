@@ -18,7 +18,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	memoryapp "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -130,7 +130,7 @@ func TestHandlerRoutesBindAuthenticatedOwnerAndLifecycleCommands(t *testing.T) {
 
 func TestHandlerRejectsMissingAuthenticationAndForgedOwner(t *testing.T) {
 	service := newMemoryHTTPFake(t)
-	plainRouter := chi.NewRouter()
+	plainRouter := gin.New()
 	NewHandler(service, time.Second).Routes(plainRouter)
 	var router http.Handler = plainRouter
 
@@ -518,13 +518,10 @@ func memoryHTTPAuthenticatedRouter(t *testing.T, service Service, principal auth
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := chi.NewRouter()
-	router.Route("/api/v1", func(api chi.Router) {
-		api.Group(func(protected chi.Router) {
-			protected.Use(authHandler.Middleware)
-			NewHandler(service, time.Second).Routes(protected)
-		})
-	})
+	router := gin.New()
+	protected := router.Group("/api/v1")
+	protected.Use(authHandler.Middleware)
+	NewHandler(service, time.Second).Routes(protected)
 	return router
 }
 

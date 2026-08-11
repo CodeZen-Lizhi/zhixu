@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -33,6 +35,7 @@ func TestBuildReplacesAllStaticModelFieldsWithoutExposingConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = models.Close() })
 	if models.Chat().Model() != nil || models.Chat().State() != platformmodels.CapabilityDisabled {
 		t.Fatalf("chat settings were not replaced: %#v", models.Chat())
 	}
@@ -130,6 +133,7 @@ func TestBuildAllowsCanonicalDisabledRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = models.Close() })
 	if models.Chat().Model() != nil || models.Embedding().Embedder() != nil {
 		t.Fatalf("disabled models = %#v", models)
 	}
@@ -147,6 +151,7 @@ func TestBuildBindsNonSensitiveRevisionAndClearsBaseCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = models.Close() })
 	if models.Revision() != 7 {
 		t.Fatalf("revision = %d", models.Revision())
 	}
@@ -155,6 +160,128 @@ func TestBuildBindsNonSensitiveRevisionAndClearsBaseCredentials(t *testing.T) {
 		t.Fatalf("sanitized config = %s", sanitized)
 	}
 }
+
+func TestModelsCloseIsConcurrentAndIdempotent(t *testing.T) {
+	t.Parallel()
+
+	var closeCalls atomic.Int32
+	models := &Models{closeRuntime: func() error {
+		closeCalls.Add(1)
+		return nil
+	}}
+	var wait sync.WaitGroup
+	for range 64 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if err := models.Close(); err != nil {
+				t.Errorf("Close() error = %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("runtime close calls = %d, want 1", got)
+	}
+}
+
+func TestValidatorClosesTemporaryRuntime(t *testing.T) {
+	t.Parallel()
+
+	var closeCalls atomic.Int32
+	validator := NewValidator(config.Defaults())
+	validator.build = func(config.Config) (validationRuntime, error) {
+		return validationRuntimeFunc(func() error {
+			closeCalls.Add(1)
+			return nil
+		}), nil
+	}
+	if err := validator.ValidateModelSettings(context.Background(), domain.CanonicalDisabledSettings(), domain.SecretConfiguration{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("validator temporary runtime close calls = %d, want 1", got)
+	}
+}
+
+func TestValidatorClosesPartiallyBuiltRuntimeOnError(t *testing.T) {
+	t.Parallel()
+
+	var closeCalls atomic.Int32
+	validator := NewValidator(config.Defaults())
+	wantErr := errors.New("validator build failed")
+	validator.build = func(config.Config) (validationRuntime, error) {
+		return validationRuntimeFunc(func() error {
+			closeCalls.Add(1)
+			return nil
+		}), wantErr
+	}
+	if err := validator.ValidateModelSettings(context.Background(), domain.CanonicalDisabledSettings(), domain.SecretConfiguration{}); !errors.Is(err, wantErr) {
+		t.Fatalf("validation error = %v, want %v", err, wantErr)
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("partially built validator runtime close calls = %d, want 1", got)
+	}
+}
+
+func TestConnectionTesterClosesTemporaryModelsOnProbeError(t *testing.T) {
+	t.Parallel()
+
+	var closeCalls atomic.Int32
+	models := &Models{closeRuntime: func() error {
+		closeCalls.Add(1)
+		return nil
+	}}
+	tester := NewConnectionTester(config.Defaults())
+	tester.build = func(config.Config, domain.ResolvedSettings) (*Models, error) {
+		return models, nil
+	}
+	err := tester.TestResolvedConnection(
+		context.Background(),
+		ConnectionTargetChat,
+		domain.ResolvedSettings{Settings: domain.CanonicalDisabledSettings()},
+	)
+	assertInvalid(t, err)
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("connection tester temporary runtime close calls = %d, want 1", got)
+	}
+	if err := models.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("temporary runtime repeated close calls = %d, want 1", got)
+	}
+}
+
+func TestConnectionTesterClosesPartiallyBuiltModelsOnError(t *testing.T) {
+	t.Parallel()
+
+	var closeCalls atomic.Int32
+	models := &Models{closeRuntime: func() error {
+		closeCalls.Add(1)
+		return nil
+	}}
+	tester := NewConnectionTester(config.Defaults())
+	wantErr := errors.New("connection build failed")
+	tester.build = func(config.Config, domain.ResolvedSettings) (*Models, error) {
+		return models, wantErr
+	}
+	err := tester.TestResolvedConnection(
+		context.Background(),
+		ConnectionTargetChat,
+		domain.ResolvedSettings{Settings: domain.CanonicalDisabledSettings()},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("connection error = %v, want %v", err, wantErr)
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("partially built connection runtime close calls = %d, want 1", got)
+	}
+}
+
+type validationRuntimeFunc func() error
+
+func (close validationRuntimeFunc) Close() error { return close() }
 
 func assertInvalid(t *testing.T, err error) {
 	t.Helper()

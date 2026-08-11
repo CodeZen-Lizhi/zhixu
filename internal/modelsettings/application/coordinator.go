@@ -12,7 +12,6 @@ import (
 
 const (
 	defaultRolloutLeaseDuration = 2 * time.Minute
-	defaultRuntimeFreshWithin   = 20 * time.Second
 	defaultRolloutRenewEvery    = 30 * time.Second
 	maximumRolloutWait          = 10 * time.Minute
 	maximumRolloutPollInterval  = 10 * time.Second
@@ -84,7 +83,7 @@ func NewRolloutCoordinator(
 		options.LeaseDuration = defaultRolloutLeaseDuration
 	}
 	if options.RuntimeFreshWithin == 0 {
-		options.RuntimeFreshWithin = defaultRuntimeFreshWithin
+		options.RuntimeFreshWithin = DefaultRuntimeFreshWithin
 	}
 	if options.RenewEvery == 0 {
 		options.RenewEvery = defaultRolloutRenewEvery
@@ -92,8 +91,7 @@ func NewRolloutCoordinator(
 	if nilInterface(options.Clock) {
 		options.Clock = foundation.SystemClock{}
 	}
-	if !validLease(options.LeaseDuration) || options.RuntimeFreshWithin < time.Second ||
-		options.RuntimeFreshWithin > 5*time.Minute || options.RuntimeFreshWithin%time.Microsecond != 0 ||
+	if !validLease(options.LeaseDuration) || !ValidRuntimeFreshWithin(options.RuntimeFreshWithin) ||
 		options.RenewEvery < time.Second || options.RenewEvery >= options.LeaseDuration {
 		return nil, invalid(errors.New("model settings rollout coordinator policy is invalid"))
 	}

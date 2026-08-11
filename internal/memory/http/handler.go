@@ -25,7 +25,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	memoryapp "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -74,15 +74,15 @@ func (handler *Handler) Available() bool {
 }
 
 // Routes registers Memory candidate, lifecycle, and owner-scoped query routes.
-func (handler *Handler) Routes(router chi.Router) {
-	router.Post("/memories", handler.createCandidate)
-	router.Get("/memories", handler.list)
-	router.Get("/memories/{memory_id}", handler.get)
-	router.Post("/memories/{memory_id}/confirm", handler.confirm)
-	router.Put("/memories/{memory_id}", handler.edit)
-	router.Post("/memories/{memory_id}/pause", handler.pause)
-	router.Post("/memories/{memory_id}/resume", handler.resume)
-	router.Delete("/memories/{memory_id}", handler.delete)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.POST("/memories", httpapi.GinHandler(handler.createCandidate))
+	router.GET("/memories", httpapi.GinHandler(handler.list))
+	router.GET("/memories/:memory_id", httpapi.GinHandler(handler.get))
+	router.POST("/memories/:memory_id/confirm", httpapi.GinHandler(handler.confirm))
+	router.PUT("/memories/:memory_id", httpapi.GinHandler(handler.edit))
+	router.POST("/memories/:memory_id/pause", httpapi.GinHandler(handler.pause))
+	router.POST("/memories/:memory_id/resume", httpapi.GinHandler(handler.resume))
+	router.DELETE("/memories/:memory_id", httpapi.GinHandler(handler.delete))
 }
 
 func (handler *Handler) createCandidate(w http.ResponseWriter, r *http.Request) {
@@ -297,7 +297,7 @@ func (handler *Handler) transition(
 		writeError(w, err)
 		return
 	}
-	memoryID, err := parseID(chi.URLParam(r, "memory_id"))
+	memoryID, err := parseID(r.PathValue("memory_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -353,7 +353,7 @@ func (handler *Handler) edit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	memoryID, err := parseID(chi.URLParam(r, "memory_id"))
+	memoryID, err := parseID(r.PathValue("memory_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -504,7 +504,7 @@ func parseResourceLookup(r *http.Request) (foundation.ID, foundation.ID, error) 
 	if err != nil {
 		return "", "", err
 	}
-	memoryID, err := parseID(chi.URLParam(r, "memory_id"))
+	memoryID, err := parseID(r.PathValue("memory_id"))
 	if err != nil {
 		return "", "", err
 	}

@@ -155,7 +155,7 @@
       },
       "put": {
         "operationId": "updateModelSettings",
-        "description": "Creates a new immutable desired revision. Saving does not change the active revision; ./zhixu restart performs the controlled rollout. Bearer API Tokens cannot access this system-secret management endpoint.",
+        "description": "Creates a new immutable desired revision. Saving does not change the active revision; the activation endpoint applies an exact saved revision in the existing API and Worker processes. Bearer API Tokens cannot access this system-secret management endpoint.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Origin"
@@ -186,6 +186,80 @@
             "headers": {
               "Cache-Control": {
                 "description": "Model configuration projections must not be stored by browsers or intermediaries.",
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelSettingsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "401": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "403": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "405": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "409": {
+            "$ref": "#/components/responses/ModelSettingsConflictNoStore"
+          },
+          "415": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "500": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          },
+          "503": {
+            "$ref": "#/components/responses/ModelSettingsProblemNoStore"
+          }
+        }
+      }
+    },
+    "/api/v1/settings/models/activations": {
+      "post": {
+        "operationId": "startModelSettingsActivation",
+        "description": "Starts or idempotently observes an in-process activation for the exact desired revision. The request never carries model settings, credentials, endpoints, rollout identifiers, or client-selected phases. Request cancellation stops only the HTTP wait; the durable activation continues. Bearer API Tokens cannot access this system-secret management endpoint.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 65536,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartModelSettingsActivationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The exact target is durably started, already live, or already active and healthy. The body is a fresh authoritative Settings snapshot.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Model activation projections must not be stored by browsers or intermediaries.",
                 "schema": {
                   "const": "no-store"
                 }
@@ -11999,6 +12073,8 @@
           "active_settings",
           "runtime",
           "rollout",
+          "participants",
+          "apply_required",
           "restart_required",
           "capabilities"
         ],
@@ -12025,9 +12101,17 @@
           "rollout": {
             "$ref": "#/components/schemas/ModelSettingsRollout"
           },
-          "restart_required": {
+          "participants": {
+            "$ref": "#/components/schemas/ModelSettingsParticipants"
+          },
+          "apply_required": {
             "type": "boolean",
-            "description": "True unless desired and active revisions match and both fresh roles report that active revision."
+            "description": "True when desired differs from active, an activation is live, or either serving role is not fresh and active on the committed revision."
+          },
+          "restart_required": {
+            "const": false,
+            "deprecated": true,
+            "description": "Deprecated compatibility field. Ordinary model activation occurs in process and never requires a container restart."
           },
           "capabilities": {
             "$ref": "#/components/schemas/ModelSettingsCapabilities"
@@ -12310,10 +12394,6 @@
             "type": "string",
             "enum": [
               "active",
-              "quiescing",
-              "quiesced",
-              "prepared",
-              "verifying",
               "unavailable"
             ]
           },
@@ -12326,20 +12406,34 @@
       "ModelSettingsRollout": {
         "type": "object",
         "required": [
+          "id",
+          "version",
           "phase",
           "target_revision",
           "last_error_code",
           "retryable"
         ],
         "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Server-generated durable activation identifier; null only while idle."
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "PostgreSQL activation-state CAS version."
+          },
           "phase": {
             "type": "string",
             "enum": [
               "idle",
-              "validating",
-              "draining",
-              "applying",
-              "verifying",
+              "preparing",
+              "arming",
+              "activating",
               "failed"
             ]
           },
@@ -12357,7 +12451,8 @@
             ],
             "minLength": 1,
             "maxLength": 128,
-            "description": "Stable redacted rollout error code; null when no rollout error is retained."
+            "pattern": "^[A-Z][A-Z0-9_]*$",
+            "description": "Stable redacted activation error code; null outside a failed activation."
           },
           "retryable": {
             "type": "boolean"
@@ -12366,6 +12461,13 @@
         "oneOf": [
           {
             "properties": {
+              "id": {
+                "type": "null"
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 0
+              },
               "phase": {
                 "const": "idle"
               },
@@ -12382,12 +12484,19 @@
           },
           {
             "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1
+              },
               "phase": {
                 "enum": [
-                  "validating",
-                  "draining",
-                  "applying",
-                  "verifying"
+                  "preparing",
+                  "arming",
+                  "activating"
                 ]
               },
               "target_revision": {
@@ -12404,6 +12513,14 @@
           },
           {
             "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1
+              },
               "phase": {
                 "const": "failed"
               },
@@ -12414,10 +12531,153 @@
               "last_error_code": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 128
+                "maxLength": 128,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
               },
               "retryable": {
                 "const": true
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ModelSettingsParticipants": {
+        "type": "object",
+        "required": [
+          "api",
+          "worker"
+        ],
+        "properties": {
+          "api": {
+            "$ref": "#/components/schemas/ModelSettingsParticipant"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/ModelSettingsParticipant"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelSettingsParticipant": {
+        "type": "object",
+        "required": [
+          "present",
+          "target_revision",
+          "phase",
+          "fresh",
+          "last_error_code",
+          "retryable"
+        ],
+        "properties": {
+          "present": {
+            "type": "boolean"
+          },
+          "target_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "preparing",
+              "prepared",
+              "armed",
+              "activated",
+              "failed",
+              "aborted",
+              "retired",
+              null
+            ]
+          },
+          "fresh": {
+            "type": "boolean"
+          },
+          "last_error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "present": {
+                "const": false
+              },
+              "target_revision": {
+                "type": "null"
+              },
+              "phase": {
+                "type": "null"
+              },
+              "fresh": {
+                "const": false
+              },
+              "last_error_code": {
+                "type": "null"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "present": {
+                "const": true
+              },
+              "target_revision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "phase": {
+                "enum": [
+                  "preparing",
+                  "prepared",
+                  "armed",
+                  "activated",
+                  "aborted",
+                  "retired"
+                ]
+              },
+              "last_error_code": {
+                "type": "null"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "present": {
+                "const": true
+              },
+              "target_revision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "phase": {
+                "const": "failed"
+              },
+              "last_error_code": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
               }
             }
           }
@@ -12447,6 +12707,20 @@
           "configured",
           "unavailable"
         ]
+      },
+      "StartModelSettingsActivationRequest": {
+        "type": "object",
+        "required": [
+          "expected_revision"
+        ],
+        "properties": {
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Exact desired revision to activate. The server generates the activation identifier and binds the current state version."
+          }
+        },
+        "additionalProperties": false
       },
       "UpdateModelSettingsRequest": {
         "type": "object",

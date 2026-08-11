@@ -15,7 +15,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const handlerTestWorkspaceID foundation.ID = "123e4567-e89b-42d3-a456-426614174000"
@@ -326,8 +326,8 @@ func classifiedError(kind foundation.ErrorKind, code string, retryable bool) err
 
 func serveWorkspaceRequest(t *testing.T, service Service, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	router := chi.NewRouter()
-	router.Route("/api/v1", NewHandler(service).Routes)
+	router := gin.New()
+	NewHandler(service).Routes(router.Group("/api/v1"))
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")

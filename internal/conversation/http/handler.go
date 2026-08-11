@@ -19,7 +19,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const defaultPageLimit = 20
@@ -54,14 +54,14 @@ func NewHandler(service Service, cursors *CursorCodec) *Handler {
 }
 
 // Routes 在 `/api/v1` Router 下注册 Conversation 产品路由。
-func (handler *Handler) Routes(router chi.Router) {
-	router.Post("/conversations", handler.createConversation)
-	router.Get("/conversations", handler.listConversations)
-	router.Get("/conversations/{conversation_id}", handler.getConversation)
-	router.Post("/conversations/{conversation_id}/questions", handler.submitQuestion)
-	router.Get("/conversations/{conversation_id}/turns", handler.listTurns)
-	router.Get("/answers/{answer_id}", handler.getAnswer)
-	router.Post("/answers/{answer_id}/feedback", handler.submitFeedback)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.POST("/conversations", httpapi.GinHandler(handler.createConversation))
+	router.GET("/conversations", httpapi.GinHandler(handler.listConversations))
+	router.GET("/conversations/:conversation_id", httpapi.GinHandler(handler.getConversation))
+	router.POST("/conversations/:conversation_id/questions", httpapi.GinHandler(handler.submitQuestion))
+	router.GET("/conversations/:conversation_id/turns", httpapi.GinHandler(handler.listTurns))
+	router.GET("/answers/:answer_id", httpapi.GinHandler(handler.getAnswer))
+	router.POST("/answers/:answer_id/feedback", httpapi.GinHandler(handler.submitFeedback))
 }
 
 type createConversationRequest struct {
@@ -262,7 +262,7 @@ func (handler *Handler) getConversation(w http.ResponseWriter, r *http.Request) 
 	if !handler.available(w) {
 		return
 	}
-	workspaceID, conversationID, err := parseScopedIDs(r.URL.Query().Get("workspace_id"), chi.URLParam(r, "conversation_id"))
+	workspaceID, conversationID, err := parseScopedIDs(r.URL.Query().Get("workspace_id"), r.PathValue("conversation_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -286,7 +286,7 @@ func (handler *Handler) submitQuestion(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &wire) {
 		return
 	}
-	workspaceID, conversationID, err := parseScopedIDs(wire.WorkspaceID, chi.URLParam(r, "conversation_id"))
+	workspaceID, conversationID, err := parseScopedIDs(wire.WorkspaceID, r.PathValue("conversation_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -314,7 +314,7 @@ func (handler *Handler) listTurns(w http.ResponseWriter, r *http.Request) {
 	if !handler.available(w) {
 		return
 	}
-	workspaceID, conversationID, err := parseScopedIDs(r.URL.Query().Get("workspace_id"), chi.URLParam(r, "conversation_id"))
+	workspaceID, conversationID, err := parseScopedIDs(r.URL.Query().Get("workspace_id"), r.PathValue("conversation_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -362,7 +362,7 @@ func (handler *Handler) getAnswer(w http.ResponseWriter, r *http.Request) {
 	if !handler.available(w) {
 		return
 	}
-	workspaceID, answerID, err := parseScopedIDs(r.URL.Query().Get("workspace_id"), chi.URLParam(r, "answer_id"))
+	workspaceID, answerID, err := parseScopedIDs(r.URL.Query().Get("workspace_id"), r.PathValue("answer_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -386,7 +386,7 @@ func (handler *Handler) submitFeedback(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &wire) {
 		return
 	}
-	workspaceID, answerID, err := parseScopedIDs(wire.WorkspaceID, chi.URLParam(r, "answer_id"))
+	workspaceID, answerID, err := parseScopedIDs(wire.WorkspaceID, r.PathValue("answer_id"))
 	if err != nil {
 		writeError(w, err)
 		return

@@ -42,6 +42,8 @@ YAML
 cleanup_compose_smoke_project_images() {
   local project_name=${1:-}
   local netns_project_name=${2:-}
+  local project_image_reference=""
+  local project_image_references=""
   local remaining_labeled_images=""
   local remaining_named_images=""
   local cleanup_failed=0
@@ -64,7 +66,7 @@ cleanup_compose_smoke_project_images() {
   fi
 
   # Consumer containers and their disposable volumes must leave before anchors.
-  if ! compose down --volumes --remove-orphans --rmi local >/dev/null 2>&1; then
+  if ! compose --profile workspace-runtime down --volumes --remove-orphans --rmi local >/dev/null 2>&1; then
     log "Compose project cleanup failed"
     cleanup_failed=1
   fi
@@ -73,7 +75,25 @@ cleanup_compose_smoke_project_images() {
     cleanup_failed=1
   fi
 
+  # Compose v5 may retain its generated project tags after --rmi local. Remove
+  # only references under the two validated, randomly generated smoke names.
   local cleanup_name
+  for cleanup_name in "${project_name}" "${netns_project_name}"; do
+    if ! project_image_references="$(docker image ls --format '{{.Repository}}:{{.Tag}}' \
+      --filter "reference=${cleanup_name}-*" 2>/dev/null)"; then
+      log "could not enumerate disposable project image references"
+      cleanup_failed=1
+      continue
+    fi
+    while IFS= read -r project_image_reference; do
+      [[ -n "${project_image_reference}" ]] || continue
+      if ! docker image rm -- "${project_image_reference}" >/dev/null 2>&1; then
+        log "could not remove disposable project image reference"
+        cleanup_failed=1
+      fi
+    done <<<"${project_image_references}"
+  done
+
   for cleanup_name in "${project_name}" "${netns_project_name}"; do
     if ! remaining_labeled_images="$(docker image ls --quiet --filter "label=com.docker.compose.project=${cleanup_name}" 2>/dev/null)"; then
       log "could not verify project image labels"

@@ -225,6 +225,181 @@ func TestCreateModelRunReusesOnlyRunningReplayWithoutCalls(t *testing.T) {
 	}
 }
 
+func TestCreateModelRunClonesModelSettingsRevisionProvenance(t *testing.T) {
+	tests := []struct {
+		name     string
+		revision *int64
+	}{
+		{name: "static nil"},
+		{name: "managed zero", revision: artifactModelSettingsRevision(0)},
+		{name: "managed positive", revision: artifactModelSettingsRevision(7)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, execution := validArtifactExecution(t)
+			execution.ModelSettingsRevision = cloneModelSettingsRevision(test.revision)
+			catalog := newArtifactRuntimeCatalog(t)
+			snapshot, err := catalog.Snapshot(PromptRef(), SchemaRef(), ReducedSchemaRef(), artifactTestProfileRef())
+			if err != nil {
+				t.Fatal(err)
+			}
+			repository := &artifactModelRepository{}
+			executor := newArtifactExecutor(t, agentapplication.NewDeterministicChatModel(), repository,
+				&artifactContextLoaderFake{}, &artifactRetrievalFake{}, artifactEligibilityFake{}, &artifactFinalizerFake{},
+				[]foundation.ID{artifactWorkflowTestID(40)})
+
+			created, err := executor.createModelRun(context.Background(), execution, snapshot,
+				agentdomain.RetrievalRef{IndexVersionID: artifactWorkflowTestID(30)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.revision == nil {
+				if created.ModelSettingsRevision != nil || repository.run.ModelSettingsRevision != nil {
+					t.Fatalf("created revision = %v, stored revision = %v", created.ModelSettingsRevision, repository.run.ModelSettingsRevision)
+				}
+				return
+			}
+			if created.ModelSettingsRevision == nil || *created.ModelSettingsRevision != *test.revision ||
+				repository.run.ModelSettingsRevision == nil || *repository.run.ModelSettingsRevision != *test.revision {
+				t.Fatalf("created revision = %v, stored revision = %v, want = %d", created.ModelSettingsRevision, repository.run.ModelSettingsRevision, *test.revision)
+			}
+			if created.ModelSettingsRevision == execution.ModelSettingsRevision {
+				t.Fatal("model run retained the execution revision pointer")
+			}
+			persisted := *created.ModelSettingsRevision
+			*execution.ModelSettingsRevision = persisted + 1
+			if *created.ModelSettingsRevision != persisted || *repository.run.ModelSettingsRevision != persisted {
+				t.Fatalf("execution mutation changed model run provenance: created=%d stored=%d", *created.ModelSettingsRevision, *repository.run.ModelSettingsRevision)
+			}
+		})
+	}
+}
+
+func TestCreateModelRunReplayUsesNilSensitiveModelSettingsRevision(t *testing.T) {
+	tests := []struct {
+		name      string
+		stored    *int64
+		requested *int64
+		wantError bool
+	}{
+		{name: "same nil"},
+		{name: "same zero", stored: artifactModelSettingsRevision(0), requested: artifactModelSettingsRevision(0)},
+		{name: "same positive", stored: artifactModelSettingsRevision(7), requested: artifactModelSettingsRevision(7)},
+		{name: "nil differs from zero", requested: artifactModelSettingsRevision(0), wantError: true},
+		{name: "zero differs from nil", stored: artifactModelSettingsRevision(0), wantError: true},
+		{name: "different positive", stored: artifactModelSettingsRevision(7), requested: artifactModelSettingsRevision(8), wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, execution := validArtifactExecution(t)
+			execution.ModelSettingsRevision = cloneModelSettingsRevision(test.stored)
+			catalog := newArtifactRuntimeCatalog(t)
+			snapshot, err := catalog.Snapshot(PromptRef(), SchemaRef(), ReducedSchemaRef(), artifactTestProfileRef())
+			if err != nil {
+				t.Fatal(err)
+			}
+			model := agentapplication.NewDeterministicChatModel()
+			repository := &artifactModelRepository{}
+			executor := newArtifactExecutor(t, model, repository, &artifactContextLoaderFake{}, &artifactRetrievalFake{},
+				artifactEligibilityFake{}, &artifactFinalizerFake{},
+				[]foundation.ID{artifactWorkflowTestID(40), artifactWorkflowTestID(41)})
+			first, err := executor.createModelRun(context.Background(), execution, snapshot,
+				agentdomain.RetrievalRef{IndexVersionID: artifactWorkflowTestID(30)})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			repository.replayCreate = true
+			execution.ModelSettingsRevision = cloneModelSettingsRevision(test.requested)
+			replayed, err := executor.createModelRun(context.Background(), execution, snapshot,
+				agentdomain.RetrievalRef{IndexVersionID: artifactWorkflowTestID(30)})
+			if test.wantError {
+				if testWorkflowErrorCode(err) != ErrorCodeRunReplayUnsafe {
+					t.Fatalf("replay error = %v", err)
+				}
+			} else if err != nil || replayed.ID != first.ID {
+				t.Fatalf("replayed = %#v, err = %v", replayed, err)
+			}
+			if model.CallCount() != 0 {
+				t.Fatalf("provider calls = %d", model.CallCount())
+			}
+		})
+	}
+}
+
+func TestExecutorRejectsModelSettingsRevisionReplayDriftBeforeProvider(t *testing.T) {
+	tests := []struct {
+		name      string
+		stored    *int64
+		requested *int64
+	}{
+		{name: "nil differs from zero", requested: artifactModelSettingsRevision(0)},
+		{name: "zero differs from nil", stored: artifactModelSettingsRevision(0)},
+		{name: "different positive", stored: artifactModelSettingsRevision(7), requested: artifactModelSettingsRevision(8)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source, _ := artifactSourceAndAdvancedCurrent(t)
+			input := Input{
+				SchemaVersion: InputSchemaVersion, ArtifactID: source.Artifact.ID, RevisionID: source.Revision.ID,
+				RevisionNo: source.Revision.RevisionNo, ArtifactVersion: source.Artifact.Version, SectionKey: "second",
+			}
+			execution := artifactExecutionForInput(t, input, source.Artifact.WorkspaceID)
+			execution.ModelSettingsRevision = cloneModelSettingsRevision(test.stored)
+			model := agentapplication.NewDeterministicChatModel()
+			repository := &artifactModelRepository{}
+			loader := &artifactContextLoaderFake{result: GenerationContext{
+				Current: source, SourceRevision: source.Revision, ProfileRef: artifactTestProfileRef(),
+			}}
+			retrieval := &artifactRetrievalFake{batch: agentapplication.RetrievalBatch{
+				WorkspaceID: source.Artifact.WorkspaceID, IndexVersionID: artifactWorkflowTestID(30),
+				Items: []agentapplication.RetrievedEvidence{},
+			}}
+			finalizer := &artifactFinalizerFake{}
+			executor := newArtifactExecutor(t, model, repository, loader, retrieval, artifactEligibilityFake{}, finalizer,
+				[]foundation.ID{artifactWorkflowTestID(40), artifactWorkflowTestID(41)})
+			snapshot, err := executor.dependencies.Catalog.Snapshot(PromptRef(), ReducedSchemaRef(), ReducedSchemaRef(), artifactTestProfileRef())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := executor.createModelRun(context.Background(), execution, snapshot,
+				agentdomain.RetrievalRef{IndexVersionID: artifactWorkflowTestID(30)}); err != nil {
+				t.Fatal(err)
+			}
+
+			repository.replayCreate = true
+			execution.ModelSettingsRevision = cloneModelSettingsRevision(test.requested)
+			_, err = executor.Execute(context.Background(), execution)
+			if testWorkflowErrorCode(err) != ErrorCodeRunReplayUnsafe {
+				t.Fatalf("err = %v", err)
+			}
+			if model.CallCount() != 0 || finalizer.finalizeCalls != 0 {
+				t.Fatalf("provider calls = %d, finalizer calls = %d", model.CallCount(), finalizer.finalizeCalls)
+			}
+		})
+	}
+}
+
+func TestExecutorRejectsNegativeModelSettingsRevisionBeforeDependencies(t *testing.T) {
+	_, execution := validArtifactExecution(t)
+	execution.ModelSettingsRevision = artifactModelSettingsRevision(-1)
+	model := agentapplication.NewDeterministicChatModel()
+	repository := &artifactModelRepository{}
+	loader := &artifactContextLoaderFake{}
+	retrieval := &artifactRetrievalFake{}
+	finalizer := &artifactFinalizerFake{}
+	executor := newArtifactExecutor(t, model, repository, loader, retrieval, artifactEligibilityFake{}, finalizer, nil)
+
+	_, err := executor.Execute(context.Background(), execution)
+	if testWorkflowErrorCode(err) != ErrorCodeInputInvalid {
+		t.Fatalf("err = %v", err)
+	}
+	if finalizer.lookupCalls != 0 || loader.calls != 0 || retrieval.retrieveCalls != 0 ||
+		model.CallCount() != 0 || repository.createCalls != 0 {
+		t.Fatalf("finalizer=%#v loader=%#v retrieval=%#v model_calls=%d repository=%#v", finalizer, loader, retrieval, model.CallCount(), repository)
+	}
+}
+
 func newArtifactExecutor(
 	t *testing.T,
 	model agentapplication.ChatModel,
@@ -267,6 +442,10 @@ func artifactExecutionForInput(t *testing.T, input Input, workspaceID foundation
 		NodeVersion: 1, InputSchemaVersion: InputSchemaVersion, AttemptNo: 1, DispatchNo: 1,
 		LeaseOwner: "artifact-worker", Input: encoded,
 	}
+}
+
+func artifactModelSettingsRevision(value int64) *int64 {
+	return &value
 }
 
 func artifactSourceAndAdvancedCurrent(t *testing.T) (artifactapplication.State, artifactapplication.State) {

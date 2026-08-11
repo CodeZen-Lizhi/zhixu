@@ -13,8 +13,9 @@ export type EmbeddingModelProvider = ChatModelProvider | "ollama";
 export type EmbeddingNormalization = "none" | "l2";
 export type EmbeddingDistanceMetric = "cosine" | "inner_product" | "euclidean";
 export type ModelCapability = "disabled" | "configured" | "unavailable";
-export type ModelRuntimePhase = "active" | "quiescing" | "quiesced" | "prepared" | "verifying" | "unavailable";
-export type ModelRolloutPhase = "idle" | "validating" | "draining" | "applying" | "verifying" | "failed";
+export type ModelRuntimePhase = "active" | "unavailable";
+export type ModelRolloutPhase = "idle" | "preparing" | "arming" | "activating" | "failed";
+export type ModelParticipantPhase = "preparing" | "prepared" | "armed" | "activated" | "failed" | "aborted" | "retired";
 export type ModelTestTarget = "chat" | "embedding";
 export type ModelTestStage = "request" | "dns" | "connect" | "tls" | "provider_response" | "response_read" | "response_validation" | "cancelled" | "timeout";
 export type ModelTestValidationReason = "invalid_response" | "model_mismatch" | "finish_reason_length" | "finish_reason_invalid" | "empty_content" | "refusal" | "tool_calls" | "missing_usage" | "invalid_usage" | "response_contract_invalid";
@@ -69,8 +70,19 @@ export interface ModelRuntimeStatus {
 }
 
 export interface ModelRolloutStatus {
+  id: string | null;
+  version: number;
   phase: ModelRolloutPhase;
   targetRevision: number | null;
+  lastErrorCode: string | null;
+  retryable: boolean;
+}
+
+export interface ModelParticipantStatus {
+  present: boolean;
+  targetRevision: number | null;
+  phase: ModelParticipantPhase | null;
+  fresh: boolean;
   lastErrorCode: string | null;
   retryable: boolean;
 }
@@ -85,7 +97,12 @@ export interface ModelSettingsResponse {
     worker: ModelRuntimeStatus;
   };
   rollout: ModelRolloutStatus;
-  restartRequired: boolean;
+  participants: {
+    api: ModelParticipantStatus;
+    worker: ModelParticipantStatus;
+  };
+  applyRequired: boolean;
+  restartRequired: false;
   capabilities: {
     chat: ModelCapability;
     embedding: ModelCapability;
@@ -116,6 +133,10 @@ export interface UpdateModelSettingsInput {
   expectedRevision: number;
   chat: ChatModelSettingsInput;
   embedding: EmbeddingModelSettingsInput;
+}
+
+export interface StartModelSettingsActivationInput {
+  expectedRevision: number;
 }
 
 export type TestModelSettingsInput =
@@ -164,8 +185,9 @@ const embeddingProviders = ["disabled", "openai-compatible", "ollama"] as const;
 const normalizations = ["none", "l2"] as const;
 const distanceMetrics = ["cosine", "inner_product", "euclidean"] as const;
 const capabilities = ["disabled", "configured", "unavailable"] as const;
-const runtimePhases = ["active", "quiescing", "quiesced", "prepared", "verifying", "unavailable"] as const;
-const rolloutPhases = ["idle", "validating", "draining", "applying", "verifying", "failed"] as const;
+const runtimePhases = ["active", "unavailable"] as const;
+const rolloutPhases = ["idle", "preparing", "arming", "activating", "failed"] as const;
+const participantPhases = ["preparing", "prepared", "armed", "activated", "failed", "aborted", "retired"] as const;
 const testTargets = ["chat", "embedding"] as const;
 const testStages = ["request", "dns", "connect", "tls", "provider_response", "response_read", "response_validation", "cancelled", "timeout"] as const;
 const testValidationReasons = ["invalid_response", "model_mismatch", "finish_reason_length", "finish_reason_invalid", "empty_content", "refusal", "tool_calls", "missing_usage", "invalid_usage", "response_contract_invalid"] as const;
@@ -319,6 +341,12 @@ const nullableErrorCode = (value: unknown, field: string): string | null => {
   const parsed = canonicalText(value, field, 128);
   if (!tokenPattern.test(parsed)) throw invalidResponse(field);
   return parsed;
+};
+
+const nullableUuid = (value: unknown, field: string): string | null => {
+  if (value === null) return null;
+  if (typeof value !== "string" || !uuidPattern.test(value)) throw invalidResponse(field);
+  return value;
 };
 
 class StrictJsonParser {
@@ -475,19 +503,50 @@ const decodeRuntime = (value: unknown, field: string): ModelRuntimeStatus => {
   };
 };
 
+const decodeParticipant = (value: unknown, field: string): ModelParticipantStatus => {
+  if (!isRecord(value)) throw invalidResponse(field);
+  exact(value, ["present", "target_revision", "phase", "fresh", "last_error_code", "retryable"], field);
+  const present = bool(value.present, `${field}.present`);
+  const result: ModelParticipantStatus = {
+    present,
+    targetRevision: nullableRevision(value.target_revision, `${field}.target_revision`),
+    phase: value.phase === null ? null : enumValue(value.phase, participantPhases, `${field}.phase`),
+    fresh: bool(value.fresh, `${field}.fresh`),
+    lastErrorCode: nullableErrorCode(value.last_error_code, `${field}.last_error_code`),
+    retryable: bool(value.retryable, `${field}.retryable`),
+  };
+  if (!present) {
+    if (result.targetRevision !== null || result.phase !== null || result.fresh || result.lastErrorCode !== null || result.retryable) {
+      throw invalidResponse(`${field}.absent`);
+    }
+    return result;
+  }
+  if (result.targetRevision === null || result.phase === null) throw invalidResponse(`${field}.present`);
+  if (result.phase === "failed") {
+    if (result.lastErrorCode === null) throw invalidResponse(`${field}.failed`);
+  } else if (result.lastErrorCode !== null || result.retryable) {
+    throw invalidResponse(`${field}.error`);
+  }
+  return result;
+};
+
 const isCanonicalDisabledSummary = (summary: ModelSettingsSummary): boolean =>
   summary.chat.provider === "disabled" && summary.chat.apiStyle === "chat_completions" && summary.chat.adapterVersion === "v1" &&
   summary.embedding.provider === "disabled" && summary.embedding.normalization === "l2" && summary.embedding.distanceMetric === "cosine";
 
 export const decodeModelSettingsResponse = (value: unknown): ModelSettingsResponse => {
   if (!isRecord(value)) throw invalidResponse("settings");
-  exact(value, ["desired_revision", "active_revision", "desired_settings", "active_settings", "runtime", "rollout", "restart_required", "capabilities"], "settings");
+  exact(value, ["desired_revision", "active_revision", "desired_settings", "active_settings", "runtime", "rollout", "participants", "apply_required", "restart_required", "capabilities"], "settings");
   if (!isRecord(value.runtime)) throw invalidResponse("settings.runtime");
   exact(value.runtime, ["api", "worker"], "settings.runtime");
   if (!isRecord(value.rollout)) throw invalidResponse("settings.rollout");
-  exact(value.rollout, ["phase", "target_revision", "last_error_code", "retryable"], "settings.rollout");
+  exact(value.rollout, ["id", "version", "phase", "target_revision", "last_error_code", "retryable"], "settings.rollout");
+  if (!isRecord(value.participants)) throw invalidResponse("settings.participants");
+  exact(value.participants, ["api", "worker"], "settings.participants");
   if (!isRecord(value.capabilities)) throw invalidResponse("settings.capabilities");
   exact(value.capabilities, ["chat", "embedding"], "settings.capabilities");
+  const restartRequired = bool(value.restart_required, "settings.restart_required");
+  if (restartRequired) throw invalidResponse("settings.restart_required");
   const result: ModelSettingsResponse = {
     desiredRevision: revision(value.desired_revision, "settings.desired_revision"),
     activeRevision: revision(value.active_revision, "settings.active_revision"),
@@ -498,27 +557,41 @@ export const decodeModelSettingsResponse = (value: unknown): ModelSettingsRespon
       worker: decodeRuntime(value.runtime.worker, "settings.runtime.worker"),
     },
     rollout: {
+      id: nullableUuid(value.rollout.id, "settings.rollout.id"),
+      version: revision(value.rollout.version, "settings.rollout.version"),
       phase: enumValue(value.rollout.phase, rolloutPhases, "settings.rollout.phase"),
       targetRevision: nullableRevision(value.rollout.target_revision, "settings.rollout.target_revision"),
       lastErrorCode: nullableErrorCode(value.rollout.last_error_code, "settings.rollout.last_error_code"),
       retryable: bool(value.rollout.retryable, "settings.rollout.retryable"),
     },
-    restartRequired: bool(value.restart_required, "settings.restart_required"),
+    participants: {
+      api: decodeParticipant(value.participants.api, "settings.participants.api"),
+      worker: decodeParticipant(value.participants.worker, "settings.participants.worker"),
+    },
+    applyRequired: bool(value.apply_required, "settings.apply_required"),
+    restartRequired,
     capabilities: {
       chat: enumValue(value.capabilities.chat, capabilities, "settings.capabilities.chat"),
       embedding: enumValue(value.capabilities.embedding, capabilities, "settings.capabilities.embedding"),
     },
   };
-  if (result.rollout.phase === "idle" && (result.rollout.targetRevision !== null || result.rollout.lastErrorCode !== null || result.rollout.retryable)) {
+  if (result.rollout.phase === "idle" && (result.rollout.id !== null || result.rollout.targetRevision !== null || result.rollout.lastErrorCode !== null || result.rollout.retryable)) {
     throw invalidResponse("settings.rollout.idle");
   }
-  if (result.rollout.phase !== "idle" && (result.rollout.targetRevision === null || result.rollout.targetRevision > result.desiredRevision)) {
+  if (result.rollout.phase !== "idle" && (result.rollout.id === null || result.rollout.version < 1 || result.rollout.targetRevision === null || result.rollout.targetRevision > result.desiredRevision)) {
     throw invalidResponse("settings.rollout.target_revision");
   }
   if (result.rollout.phase === "failed") {
     if (result.rollout.lastErrorCode === null || !result.rollout.retryable) throw invalidResponse("settings.rollout.failed");
   } else if (result.rollout.lastErrorCode !== null || result.rollout.retryable) {
     throw invalidResponse("settings.rollout.error");
+  }
+  for (const [role, participant] of Object.entries(result.participants)) {
+    if (result.rollout.phase === "idle" && participant.present) throw invalidResponse(`settings.participants.${role}.idle`);
+    if (participant.present && participant.targetRevision !== result.rollout.targetRevision) throw invalidResponse(`settings.participants.${role}.target_revision`);
+  }
+  if (result.rollout.phase === "activating" && result.activeRevision !== result.rollout.targetRevision) {
+    throw invalidResponse("settings.rollout.activating");
   }
   if (result.activeRevision > result.desiredRevision || result.runtime.api.appliedRevision > result.desiredRevision || result.runtime.worker.appliedRevision > result.desiredRevision) {
     throw invalidResponse("settings.revisions");
@@ -531,9 +604,10 @@ export const decodeModelSettingsResponse = (value: unknown): ModelSettingsRespon
   }
   const runtimeReady = (runtime: ModelRuntimeStatus): boolean => runtime.fresh && runtime.phase === "active" && runtime.appliedRevision === result.activeRevision;
   const runtimesReady = runtimeReady(result.runtime.api) && runtimeReady(result.runtime.worker);
-  const expectedRestartRequired = result.desiredRevision !== result.activeRevision || result.rollout.phase !== "idle" || !runtimesReady;
-  if (result.restartRequired !== expectedRestartRequired) {
-    throw invalidResponse("settings.restart_required");
+  const rolloutLive = result.rollout.phase === "preparing" || result.rollout.phase === "arming" || result.rollout.phase === "activating";
+  const expectedApplyRequired = result.desiredRevision !== result.activeRevision || rolloutLive || !runtimesReady;
+  if (result.applyRequired !== expectedApplyRequired) {
+    throw invalidResponse("settings.apply_required");
   }
   const expectedCapability = (provider: EmbeddingModelProvider): ModelCapability => provider === "disabled" ? "disabled" : runtimesReady ? "configured" : "unavailable";
   if (result.capabilities.chat !== expectedCapability(result.activeSettings.chat.provider) || result.capabilities.embedding !== expectedCapability(result.activeSettings.embedding.provider)) {
@@ -773,6 +847,18 @@ export const updateModelSettings = async (input: UpdateModelSettingsInput, signa
     method: "PUT",
     body: JSON.stringify(body),
   }, sensitiveValues));
+};
+
+export const startModelSettingsActivation = async (input: StartModelSettingsActivationInput, signal?: AbortSignal): Promise<ModelSettingsResponse> => {
+  if (!isRecord(input)) throw invalidRequest("body");
+  exactRequest(input, ["expectedRevision"], "body");
+  const body = { expected_revision: requireRevision(input.expectedRevision, "expectedRevision") };
+  return decodeModelSettingsResponse(await request("/api/v1/settings/models/activations", {
+    ...signalInit(signal),
+    cache: "no-store",
+    method: "POST",
+    body: JSON.stringify(body),
+  }));
 };
 
 export const testModelSettings = async (input: TestModelSettingsInput, signal?: AbortSignal): Promise<ModelSettingsTestResult> => {

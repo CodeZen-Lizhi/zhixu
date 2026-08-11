@@ -15,7 +15,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -86,8 +86,8 @@ func TestCreateProposalRequiresExactRiskLevel(t *testing.T) {
 }
 
 func TestCreateProposalRequiresIdempotencyKey(t *testing.T) {
-	router := chi.NewRouter()
-	router.Route("/api/v1", func(api chi.Router) { NewHandler(&fakeService{}).Routes(api) })
+	router := gin.New()
+	NewHandler(&fakeService{}).Routes(router.Group("/api/v1"))
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", strings.NewReader(`{"target_path":"a.md"}`))
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
@@ -240,8 +240,8 @@ func TestCreateDownstreamUpdateProposalMapsImpactFailures(t *testing.T) {
 
 func TestCreateDownstreamUpdateProposalEnforcesConfiguredTimeout(t *testing.T) {
 	service := &fakeService{downstreamWaitForContext: true}
-	router := chi.NewRouter()
-	router.Route("/api/v1", func(api chi.Router) { NewHandlerWithTimeout(service, 10*time.Millisecond).Routes(api) })
+	router := gin.New()
+	NewHandlerWithTimeout(service, 10*time.Millisecond).Routes(router.Group("/api/v1"))
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/api/v1/workspaces/"+string(testWorkspaceID)+"/impact-reports/"+string(testRevisionID)+"/proposals",
@@ -957,8 +957,8 @@ func serve(t *testing.T, service Service, method, path, body string) *httptest.R
 
 func serveRequest(t *testing.T, service Service, method, path, body, contentType string, idempotencyKeys []string) *httptest.ResponseRecorder {
 	t.Helper()
-	router := chi.NewRouter()
-	router.Route("/api/v1", func(api chi.Router) { NewHandler(service).Routes(api) })
+	router := gin.New()
+	NewHandler(service).Routes(router.Group("/api/v1"))
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)

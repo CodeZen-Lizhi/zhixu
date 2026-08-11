@@ -12,7 +12,7 @@ import (
 	artifactapp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/artifact/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -95,7 +95,7 @@ func TestRoutesBindWorkspaceAndArtifactCommands(t *testing.T) {
 
 func TestSectionGenerationListSupportsRefreshWithoutGenerationCapability(t *testing.T) {
 	service := newArtifactHTTPFake()
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(service, service, time.Second).Routes(router)
 	request := httptest.NewRequest(http.MethodGet, "/artifacts/"+artifactHTTPID+"/section-generations?workspace_id="+artifactHTTPWorkspaceID, nil)
 	response := httptest.NewRecorder()
@@ -303,7 +303,7 @@ func TestSectionGenerationCapabilityUnavailableIsStableAndNonRetryable(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			service := newArtifactHTTPFake()
 			service.generationErr = test.starterError
-			router := chi.NewRouter()
+			router := gin.New()
 			if test.starterAvailable {
 				NewHandler(service, service, time.Second, service).Routes(router)
 			} else {
@@ -343,7 +343,7 @@ func TestSectionGenerationRejectsAStarterResponseOutsideTheRequestBinding(t *tes
 }
 
 func TestHandlerFailsClosedAndMapsApplicationConflict(t *testing.T) {
-	missingRouter := chi.NewRouter()
+	missingRouter := gin.New()
 	NewHandler(nil, nil, time.Second).Routes(missingRouter)
 	request := httptest.NewRequest(http.MethodGet, "/artifacts?workspace_id="+artifactHTTPWorkspaceID, nil)
 	response := httptest.NewRecorder()
@@ -386,7 +386,7 @@ func TestPlanExactReplayReturnsOK(t *testing.T) {
 }
 
 func artifactHTTPRouter(service *artifactHTTPFake) http.Handler {
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(service, service, time.Second, service).Routes(router)
 	return router
 }

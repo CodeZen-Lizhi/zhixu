@@ -24,7 +24,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -68,14 +68,14 @@ func NewHandlerWithProfiles(service Service, profiles captureapp.ProfileReader, 
 }
 
 // Routes registers Capture commands and read models under /api/v1.
-func (handler *Handler) Routes(router chi.Router) {
-	router.Post("/workspaces/{workspaceID}/captures", handler.createJSON)
-	router.Post("/workspaces/{workspaceID}/capture-files", handler.createUpload)
-	router.Get("/workspaces/{workspaceID}/captures", handler.list)
-	router.Get("/workspaces/{workspaceID}/captures/{captureID}", handler.get)
-	router.Post("/workspaces/{workspaceID}/captures/{captureID}/retry", handler.retry)
-	router.Get("/workspaces/{workspaceID}/source-versions/{sourceVersionID}/knowledge-profile", handler.getProfile)
-	router.Post("/workspaces/{workspaceID}/source-versions/{sourceVersionID}/knowledge-profile/retry", handler.retryProfile)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.POST("/workspaces/:workspace_id/captures", httpapi.GinHandler(handler.createJSON))
+	router.POST("/workspaces/:workspace_id/capture-files", httpapi.GinHandler(handler.createUpload))
+	router.GET("/workspaces/:workspace_id/captures", httpapi.GinHandler(handler.list))
+	router.GET("/workspaces/:workspace_id/captures/:capture_id", httpapi.GinHandler(handler.get))
+	router.POST("/workspaces/:workspace_id/captures/:capture_id/retry", httpapi.GinHandler(handler.retry))
+	router.GET("/workspaces/:workspace_id/source-versions/:source_version_id/knowledge-profile", httpapi.GinHandler(handler.getProfile))
+	router.POST("/workspaces/:workspace_id/source-versions/:source_version_id/knowledge-profile/retry", httpapi.GinHandler(handler.retryProfile))
 }
 
 // Available reports whether the handler owns a real application service.
@@ -179,7 +179,7 @@ type listCursor struct {
 }
 
 func (handler *Handler) createJSON(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -233,7 +233,7 @@ func (handler *Handler) createJSON(writer http.ResponseWriter, request *http.Req
 }
 
 func (handler *Handler) createUpload(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -307,12 +307,12 @@ func (handler *Handler) createUpload(writer http.ResponseWriter, request *http.R
 }
 
 func (handler *Handler) get(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
 	}
-	captureID, err := parseID(chi.URLParam(request, "captureID"))
+	captureID, err := parseID(request.PathValue("capture_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -335,12 +335,12 @@ func (handler *Handler) get(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (handler *Handler) retry(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
 	}
-	captureID, err := parseID(chi.URLParam(request, "captureID"))
+	captureID, err := parseID(request.PathValue("capture_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -457,11 +457,11 @@ func (handler *Handler) retryProfile(writer http.ResponseWriter, request *http.R
 }
 
 func profileRouteIDs(request *http.Request) (foundation.ID, foundation.ID, error) {
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		return "", "", err
 	}
-	sourceVersionID, err := parseID(chi.URLParam(request, "sourceVersionID"))
+	sourceVersionID, err := parseID(request.PathValue("source_version_id"))
 	if err != nil {
 		return "", "", err
 	}
@@ -469,7 +469,7 @@ func profileRouteIDs(request *http.Request) (foundation.ID, foundation.ID, error
 }
 
 func (handler *Handler) list(writer http.ResponseWriter, request *http.Request) {
-	workspaceID, err := parseID(chi.URLParam(request, "workspaceID"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return

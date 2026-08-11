@@ -16,7 +16,7 @@ import (
 	captureapp "github.com/CodeZen-Lizhi/zhixu/internal/capture/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capture/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 var captureHTTPNow = time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
@@ -355,10 +355,8 @@ func captureHTTPRouter(service Service) http.Handler {
 }
 
 func captureHTTPProfileRouter(service Service, profiles captureapp.ProfileReader, retrier captureapp.ProfileRetrier) http.Handler {
-	router := chi.NewRouter()
-	router.Route("/api/v1", func(api chi.Router) {
-		NewHandlerWithProfiles(service, profiles, retrier, time.Second).Routes(api)
-	})
+	router := gin.New()
+	NewHandlerWithProfiles(service, profiles, retrier, time.Second).Routes(router.Group("/api/v1"))
 	return router
 }
 

@@ -18,7 +18,7 @@ import (
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const maxGraphRequestBytes = 64 * 1024
@@ -49,14 +49,14 @@ func NewHandler(service Service, timeout time.Duration) *Handler {
 }
 
 // Routes 在 `/api/v1` 下注册 Graph 只读路由。
-func (handler *Handler) Routes(router chi.Router) {
-	router.Post("/graph/global", handler.handleGlobal)
-	router.Post("/graph/neighborhood", handler.handleNeighborhood)
-	router.Post("/graph/path", handler.handlePath)
-	router.Get("/graph/nodes", handler.handleNodeSearch)
-	router.Get("/graph/nodes/{node_type}/{node_id}", handler.handleNodeDetail)
-	router.Get("/graph/relations/{relation_id}", handler.handleRelationDetail)
-	router.Get("/graph/relations/{relation_id}/evidence", handler.handleRelationEvidence)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.POST("/graph/global", httpapi.GinHandler(handler.handleGlobal))
+	router.POST("/graph/neighborhood", httpapi.GinHandler(handler.handleNeighborhood))
+	router.POST("/graph/path", httpapi.GinHandler(handler.handlePath))
+	router.GET("/graph/nodes", httpapi.GinHandler(handler.handleNodeSearch))
+	router.GET("/graph/nodes/:node_type/:node_id", httpapi.GinHandler(handler.handleNodeDetail))
+	router.GET("/graph/relations/:relation_id", httpapi.GinHandler(handler.handleRelationDetail))
+	router.GET("/graph/relations/:relation_id/evidence", httpapi.GinHandler(handler.handleRelationEvidence))
 }
 
 // Available 报告 Handler 是否持有可调用的真实 Graph Application Service。
@@ -178,7 +178,7 @@ func (handler *Handler) handleNodeDetail(w http.ResponseWriter, r *http.Request)
 		writeGraphError(w, err)
 		return
 	}
-	ref, err := parseNodeRef(nodeRefRequest{Type: chi.URLParam(r, "node_type"), ID: chi.URLParam(r, "node_id")})
+	ref, err := parseNodeRef(nodeRefRequest{Type: r.PathValue("node_type"), ID: r.PathValue("node_id")})
 	if err != nil {
 		writeGraphError(w, err)
 		return
@@ -201,7 +201,7 @@ func (handler *Handler) handleRelationDetail(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	workspaceID, relationID, err := parseTwoIDs(query.Get("workspace_id"), chi.URLParam(r, "relation_id"))
+	workspaceID, relationID, err := parseTwoIDs(query.Get("workspace_id"), r.PathValue("relation_id"))
 	if err != nil {
 		writeGraphError(w, err)
 		return
@@ -224,7 +224,7 @@ func (handler *Handler) handleRelationEvidence(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	workspaceID, relationID, err := parseTwoIDs(query.Get("workspace_id"), chi.URLParam(r, "relation_id"))
+	workspaceID, relationID, err := parseTwoIDs(query.Get("workspace_id"), r.PathValue("relation_id"))
 	if err != nil {
 		writeGraphError(w, err)
 		return

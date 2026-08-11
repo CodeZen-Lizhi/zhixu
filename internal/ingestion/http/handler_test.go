@@ -12,7 +12,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/ingestion/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/ingestion/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const testSourceVersionID = foundation.ID("81000000-0000-4000-8000-000000000001")
@@ -39,6 +39,10 @@ func TestHandlerRequiresIdempotencyAndMapsErrors(t *testing.T) {
 	recorder := serveWithHeaders(t, service, http.MethodPost, "/source-versions/"+string(testSourceVersionID)+"/ingestion-attempts", `{"attempt_number":1}`, nil)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("missing idempotency status = %d", recorder.Code)
+	}
+	recorder = serve(t, service, http.MethodPost, "/source-versions/"+string(testSourceVersionID)+"/ingestion-attempts", `{"attempt_number":0}`)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "INGESTION_REQUEST_INVALID") {
+		t.Fatalf("validator mapping = %d %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = serveWithHeaders(t, service, http.MethodPost, "/source-versions/"+string(testSourceVersionID)+"/ingestion-attempts", `{"attempt_number":1}`, map[string]string{"Idempotency-Key": "ingest-1"})
 	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "INGESTION_ATTEMPT_VERSION_CONFLICT") {
@@ -75,7 +79,7 @@ func serve(t *testing.T, service Service, method, path, body string) *httptest.R
 
 func serveWithHeaders(t *testing.T, service Service, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(service).Routes(router)
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	for key, value := range headers {

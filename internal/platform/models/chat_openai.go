@@ -57,6 +57,13 @@ func (model *OpenAICompatibleChatModel) Contract() ChatContract {
 	return model.http.contractCopy()
 }
 
+func (model *OpenAICompatibleChatModel) closeModelResource() error {
+	if model == nil {
+		return nil
+	}
+	return model.http.closeModelResource()
+}
+
 // Chat 执行一次显式配置的 OpenAI-Compatible Chat 请求，不在 Adapter 内重试。
 func (model *OpenAICompatibleChatModel) Chat(ctx context.Context, request agentapplication.ChatRequest) (agentapplication.ChatResponse, error) {
 	if model == nil {

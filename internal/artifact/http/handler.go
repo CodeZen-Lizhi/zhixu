@@ -22,7 +22,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -84,20 +84,20 @@ func (handler *Handler) Available() bool {
 }
 
 // Routes registers Artifact routes beneath the caller's /api/v1 router.
-func (handler *Handler) Routes(router chi.Router) {
-	router.Get("/artifacts", handler.list)
-	router.Post("/artifacts", handler.plan)
-	router.Get("/artifacts/{artifact_id}", handler.get)
-	router.Post("/artifacts/{artifact_id}/outline", handler.submitOutline)
-	router.Post("/artifacts/{artifact_id}/outline/approve", handler.approveOutline)
-	router.Post("/artifacts/{artifact_id}/revisions", handler.startRevision)
-	router.Post("/artifacts/{artifact_id}/sections", handler.recordSection)
-	router.Post("/artifacts/{artifact_id}/sections/generate", handler.generateSection)
-	router.Get("/artifacts/{artifact_id}/section-generations", handler.listSectionGenerations)
-	router.Post("/artifacts/{artifact_id}/draft/approve", handler.approveDraft)
-	router.Post("/artifacts/{artifact_id}/exports/markdown", handler.exportMarkdown)
-	router.Get("/artifacts/{artifact_id}/exports/{export_id}", handler.getExport)
-	router.Post("/artifacts/{artifact_id}/publish-proposals", handler.publish)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.GET("/artifacts", httpapi.GinHandler(handler.list))
+	router.POST("/artifacts", httpapi.GinHandler(handler.plan))
+	router.GET("/artifacts/:artifact_id", httpapi.GinHandler(handler.get))
+	router.POST("/artifacts/:artifact_id/outline", httpapi.GinHandler(handler.submitOutline))
+	router.POST("/artifacts/:artifact_id/outline/approve", httpapi.GinHandler(handler.approveOutline))
+	router.POST("/artifacts/:artifact_id/revisions", httpapi.GinHandler(handler.startRevision))
+	router.POST("/artifacts/:artifact_id/sections", httpapi.GinHandler(handler.recordSection))
+	router.POST("/artifacts/:artifact_id/sections/generate", httpapi.GinHandler(handler.generateSection))
+	router.GET("/artifacts/:artifact_id/section-generations", httpapi.GinHandler(handler.listSectionGenerations))
+	router.POST("/artifacts/:artifact_id/draft/approve", httpapi.GinHandler(handler.approveDraft))
+	router.POST("/artifacts/:artifact_id/exports/markdown", httpapi.GinHandler(handler.exportMarkdown))
+	router.GET("/artifacts/:artifact_id/exports/:export_id", httpapi.GinHandler(handler.getExport))
+	router.POST("/artifacts/:artifact_id/publish-proposals", httpapi.GinHandler(handler.publish))
 }
 
 func (handler *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -307,7 +307,7 @@ func (handler *Handler) recordSection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	artifactID, err := parseID(chi.URLParam(r, "artifact_id"))
+	artifactID, err := parseID(r.PathValue("artifact_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -366,7 +366,7 @@ func (handler *Handler) generateSection(w http.ResponseWriter, r *http.Request) 
 		writeError(w, err)
 		return
 	}
-	artifactID, err := parseID(chi.URLParam(r, "artifact_id"))
+	artifactID, err := parseID(r.PathValue("artifact_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -445,7 +445,7 @@ func (handler *Handler) getExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	exportID, err := parseID(chi.URLParam(r, "export_id"))
+	exportID, err := parseID(r.PathValue("export_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -475,7 +475,7 @@ func (handler *Handler) mutationTarget(w http.ResponseWriter, r *http.Request) (
 		writeError(w, err)
 		return "", "", false
 	}
-	artifactID, err := parseID(chi.URLParam(r, "artifact_id"))
+	artifactID, err := parseID(r.PathValue("artifact_id"))
 	if err != nil {
 		writeError(w, err)
 		return "", "", false
@@ -929,7 +929,7 @@ func parsePathWorkspaceArtifact(r *http.Request) (foundation.ID, foundation.ID, 
 	if err != nil {
 		return "", "", err
 	}
-	artifactID, err := parseID(chi.URLParam(r, "artifact_id"))
+	artifactID, err := parseID(r.PathValue("artifact_id"))
 	if err != nil {
 		return "", "", err
 	}

@@ -56,6 +56,13 @@ func (embedder *OpenAICompatibleEmbedder) Contract() domain.EmbeddingContract {
 	return embedder.http.contractCopy()
 }
 
+func (embedder *OpenAICompatibleEmbedder) closeModelResource() error {
+	if embedder == nil {
+		return nil
+	}
+	return embedder.http.closeModelResource()
+}
+
 // Embed 批量请求 Provider，并按 data.index 恢复输入顺序后执行契约校验与归一化。
 func (embedder *OpenAICompatibleEmbedder) Embed(ctx context.Context, request application.EmbedRequest) (application.EmbedResult, error) {
 	payload := openAIEmbeddingRequest{

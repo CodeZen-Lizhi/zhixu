@@ -85,6 +85,77 @@ git diff --check
 - 连接池参数、迁移执行入口和 Testcontainers 版本。
 - 中文 FTS 配置、向量维度、HNSW 参数以及 50 万数据容量结果。
 
+## Scenario: Model Runtime Hot Activation Persistence
+
+### 1. Scope / Trigger
+
+- 修改 `00079_model_settings_hot_activation.sql`、Model Settings activation Repository、runtime/participant ownership、
+  Workflow Claim binding 或相关恢复逻辑时，必须应用本场景，并同时读取 `model-settings-runtime.md`。
+
+### 2. Signatures
+
+- 持久事实为 `ops.model_settings_state`、`ops.model_settings_runtime`、
+  `ops.model_settings_rollout_participant` 与 `workflow.node_attempt` 的 runtime binding。
+- state phase 固定为 `idle|preparing|arming|activating|failed`；participant phase 固定为
+  `preparing|prepared|armed|activated|failed|aborted|retired`。
+- Repository 只通过 Start、participant transition、Commit、Acknowledge、Finalize、Fail/Recover 和 Claim command
+  修改协议事实；HTTP、Controller、CLI 与 shell 不直接拼状态 SQL。
+
+### 3. Contracts
+
+- 所有 activation 事务锁顺序固定为 singleton state -> runtime `api,worker` -> participant `api,worker`；
+  takeover 和 recovery 不得采用相反顺序。
+- target/previous/rollout binding 在 live phase 内不可变；active 只能在 `arming -> activating` 一次更新为 target。
+  commit 前失败先把非终态 participant 原子转 aborted，再转 failed；commit 后只允许向 target finalize。
+- `arming -> activating` 由数据库 trigger 使用 `clock_timestamp()` 验证两个 role 的 serving owner、previous applied、
+  armed participant 和非未来 fresh heartbeat。应用进程时间不能替代该提交不变量。
+- runtime/participant 更换 instance 只允许旧 owner 按数据库时间 stale；fresh owner、future heartbeat、revision jump、
+  缺 role、owner mismatch 或未 armed 的 raw SQL 都必须 fail closed。
+- 新 Workflow Attempt 在 Claim 事务内按 state -> Worker runtime 锁序选择 fresh serving revision/instance 并冻结；
+  exact delivery 先返回持久 binding。caller 不传 revision，激活时不得批量改写历史 Attempt。
+- revision `0` 是存在于状态/Attempt binding 中但没有 revision 行的 canonical disabled；正 revision 才能从历史设置重建。
+  迁移、FK helper 与 Claim 必须显式保留该语义，不能把 0 当缺失值。
+- `00079` 是 forward-only mixed-binary boundary：存在 legacy live rollout 时 Up 返回 `55000`；存在受保护热激活历史时
+  Down 必须 fail closed。不得修改已发布迁移来假设旧环境会重跑。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+| --- | --- |
+| 双 role 未 fresh/armed、owner mismatch 或 future heartbeat 时提交 | PostgreSQL 拒绝，active 保持 previous |
+| fresh runtime/participant owner 被另一个 instance 接管 | PostgreSQL 拒绝；达到 DB-time stale 窗口后才允许受限恢复 |
+| live activation 改 target/previous/rollout 或 desired | CAS/trigger 拒绝，持久 binding 不变 |
+| activating 后尝试回到 previous/failed | 拒绝；只允许 acknowledge target 并 finalize idle |
+| 新 Claim 看见 stale/mismatch Worker runtime | 不创建新 Attempt，返回稳定 runtime unavailable/conflict |
+| exact delivery 重放 | 返回原 Attempt binding，不从当前 active 重新选择 |
+| legacy live rollout 升级或已有 participant 历史 Down | SQLSTATE `55000`，schema/data/version 保持可恢复 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：两端 prepared/armed 后单次提交 active；响应丢失时相同 target 重放或恢复最终收敛，Attempt 全部绑定完整 old 或 target。
+- Base：revision 0 disabled 可作为 active/applied/Attempt binding 启动和切换，但永不伪造对应 revision row。
+- Bad：只用 Go mutex 保护跨进程提交、按进程时钟判断 stale、先锁 participant 再锁 state、或 SQL 手改 active 完成发布。
+
+### 6. Tests Required
+
+- 真实 PostgreSQL `-race -p 1` 覆盖 fresh/legacy migration、raw SQL guard、双 role commit、重复 Start、pre/post-commit
+  recovery、runtime/participant stale takeover、future heartbeat 和 version/owner CAS。
+- Workflow PostgreSQL 测试覆盖 exact replay、新 Attempt 的 DB-selected binding、非默认 freshness 窗口和 Claim/cutover 竞态。
+- Migration 测试必须直接执行非法 INSERT/UPDATE，证明数据库约束独立于 Repository；只做 Go fake 不算协议证据。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Coordinator 先更新 active，再等待 API/Worker 报告 applied。
+Correct: 两端 fresh/armed 后由 arming -> activating 事务单点发布；提交后只向前恢复。
+
+Wrong: Workflow caller 把当前 revision 放进 Claim，或重放时重新读取 active。
+Correct: 新 Attempt 在 PostgreSQL 事务内选择 fresh Worker binding；exact delivery 返回持久 binding。
+
+Wrong: 用 time.Now 判断可接管 owner，或允许 raw SQL 跳过 participant 状态机。
+Correct: trigger/Repository 都以数据库时间和 version/owner CAS fail closed，并由真实 PostgreSQL 负测锁定。
+```
+
 ## Scenario: M7-03 Collection / Health Persistence Contract
 
 ### 1. Scope / Trigger

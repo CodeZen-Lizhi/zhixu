@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -16,39 +18,39 @@ const (
 
 // recoverPanicMiddleware keeps unexpected handler panics inside the HTTP
 // boundary without exposing panic values or local filesystem paths.
-func recoverPanicMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
-				recovered := recover()
-				if recovered == nil {
-					return
-				}
-				if recovered == http.ErrAbortHandler {
-					panic(recovered)
-				}
+func recoverPanicMiddleware(logger *slog.Logger) gin.HandlerFunc {
+	return func(ginContext *gin.Context) {
+		defer func() {
+			recovered := recover()
+			if recovered == nil {
+				return
+			}
+			if recovered == http.ErrAbortHandler {
+				panic(recovered)
+			}
 
-				logger.ErrorContext(
-					r.Context(),
-					"http request panic recovered",
-					"error_code", "HTTP_PANIC_RECOVERED",
-					"request_id", requestID(r.Context()),
-					"http_route", requestRoutePattern(r),
-					"panic_stack", boundedPanicStack(),
-				)
-				if !responseStarted(w) {
-					writeProblem(w, http.StatusInternalServerError, "INTERNAL_ERROR", "服务处理失败", false, nil)
-				}
-			}()
+			request := ginContext.Request
+			logger.ErrorContext(
+				request.Context(),
+				"http request panic recovered",
+				"error_code", "HTTP_PANIC_RECOVERED",
+				"request_id", requestID(request.Context()),
+				"http_route", requestRoutePattern(ginContext),
+				"panic_stack", boundedPanicStack(),
+			)
+			if !responseStarted(ginContext.Writer) {
+				writeProblem(ginContext.Writer, http.StatusInternalServerError, "INTERNAL_ERROR", "服务处理失败", false, nil)
+			}
+			ginContext.Abort()
+		}()
 
-			next.ServeHTTP(w, r)
-		})
+		ginContext.Next()
 	}
 }
 
-func responseStarted(w http.ResponseWriter) bool {
-	tracked, ok := w.(*statusWriter)
-	return ok && tracked.status != 0
+func responseStarted(writer gin.ResponseWriter) bool {
+	tracked, ok := writer.(*responseTracker)
+	return ok && tracked.started
 }
 
 func boundedPanicStack() string {

@@ -17,6 +17,11 @@ type apiModelRuntimeController interface {
 	Run(context.Context) error
 }
 
+// apiActivationCoordinator 是 API 独占的全局 activation 推进边界。
+type apiActivationCoordinator interface {
+	Run(context.Context) error
+}
+
 // apiProducerGate 在 rollout 排空期间快速拒绝新的 API mutation。
 type apiProducerGate struct {
 	// enabled 是 HTTP middleware 与 watcher 共享的无锁 gate 状态。
@@ -93,10 +98,34 @@ func startAPIModelRuntime(ctx context.Context, controller apiModelRuntimeControl
 			errorsChannel <- err
 			return
 		}
+		if ctx != nil && ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-controller.Active():
+			errorsChannel <- errors.New("api model runtime stopped unexpectedly")
 		default:
 			errorsChannel <- errors.New("api model runtime stopped before activation")
+		}
+	}()
+	return errorsChannel
+}
+
+// startAPIActivationCoordinator 使 coordinator 与 role-local controller 的 fatal 通道互相独立。
+func startAPIActivationCoordinator(ctx context.Context, coordinator apiActivationCoordinator) <-chan error {
+	errorsChannel := make(chan error, 1)
+	go func() {
+		if coordinator == nil {
+			errorsChannel <- errors.New("api activation coordinator is unavailable")
+			return
+		}
+		err := coordinator.Run(ctx)
+		if err != nil {
+			errorsChannel <- err
+			return
+		}
+		if ctx == nil || ctx.Err() == nil {
+			errorsChannel <- errors.New("api activation coordinator stopped unexpectedly")
 		}
 	}()
 	return errorsChannel

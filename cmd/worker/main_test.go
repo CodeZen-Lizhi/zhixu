@@ -23,6 +23,7 @@ import (
 	captureworkflow "github.com/CodeZen-Lizhi/zhixu/internal/capture/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
+	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
@@ -225,7 +226,7 @@ func TestWorkerModelRuntimeBindingSharesOneManagedInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := binding.runtimeWorkerOptions()
-	if ids.calls != 1 || binding.revision == nil || *binding.revision != 0 || binding.instanceID == nil || *binding.instanceID != ids.id ||
+	if ids.calls != 1 || binding.revision == nil || *binding.revision != 0 || binding.instanceID == nil || *binding.instanceID != ids.id || binding.runtimeFreshWithin != modelsettingsapplication.DefaultRuntimeFreshWithin ||
 		len(options) != 1 || options[0].ModelSettingsRevision != binding.revision || options[0].ModelRuntimeInstanceID != binding.instanceID {
 		t.Fatalf("binding=%+v options=%+v calls=%d", binding, options, ids.calls)
 	}
@@ -266,7 +267,45 @@ func TestEnabledChatFailsClosedWithoutProductionDependencies(t *testing.T) {
 func TestAgentWorkflowReadinessRejectsPartialChatComposition(t *testing.T) {
 	disabled := workerComponents{agentCapability: agentCapabilityStatus{code: agentworkflow.ErrorCodeCapabilityUnavailable}}
 	if !agentWorkflowReadiness(disabled) {
-		t.Fatal("disabled Chat must not make legacy workers unready")
+		t.Fatal("disabled Chat must not make static workers unready")
+	}
+	disabled.runtimeGeneration = func(context.Context, *modelsettingsruntime.Models) (*workerRuntimeGeneration, error) {
+		return nil, nil
+	}
+	if agentWorkflowReadiness(disabled) {
+		t.Fatal("managed disabled Chat without stable executors and definitions reported ready")
+	}
+	catalog, err := workflowapplication.NewValidationCatalog([]int{1, 2}, capability.All())
+	if err != nil {
+		t.Fatal(err)
+	}
+	executors, err := workflowapplication.NewExecutorRegistry(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registerWorkerAgentExecutors(executors, agentWorkflowComponents{capability: disabled.agentCapability}); err != nil {
+		t.Fatal(err)
+	}
+	if err := executors.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
+		t.Fatal(err)
+	}
+	if err := definitions.Register(agentworkflow.RegisteredRAGDefinition()); err != nil {
+		t.Fatal(err)
+	}
+	if err := definitions.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	disabled.executors = executors
+	disabled.definitions = definitions
+	if !agentWorkflowReadiness(disabled) {
+		t.Fatal("disabled Chat stable fail-closed entries are not ready")
 	}
 	for _, partial := range []workerComponents{
 		{agentCapability: agentCapabilityStatus{available: true}},
@@ -514,6 +553,77 @@ func TestWorkerCompositionConsumesOneFrozenModelRuntime(t *testing.T) {
 			t.Fatalf("%s did not receive the shared frozen model runtime", consumer)
 		}
 	}
+}
+
+func TestWorkerHostMarksUnavailableBootstrapGeneration(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		field, ok := node.(*ast.KeyValueExpr)
+		if !ok {
+			return true
+		}
+		key, ok := field.Key.(*ast.Ident)
+		if !ok || key.Name != "Unavailable" {
+			return true
+		}
+		names := map[string]bool{}
+		ast.Inspect(field.Value, func(value ast.Node) bool {
+			if identifier, ok := value.(*ast.Ident); ok {
+				names[identifier.Name] = true
+			}
+			return true
+		})
+		found = names["managedModels"] && names["Loaded"] && names["InitialPhase"] && names["RuntimePhaseUnavailable"]
+		return !found
+	})
+	if !found {
+		t.Fatal("managed Worker InitialRuntime does not preserve the unavailable bootstrap phase")
+	}
+}
+
+func TestWorkerManagedRuntimeWaitsForControllerReadinessBeforeStartingRiver(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var activeWaitPosition token.Pos
+	var startWorkerPosition token.Pos
+	ast.Inspect(file, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.UnaryExpr:
+			if workerReceivesModelControllerActive(typed) {
+				activeWaitPosition = typed.Pos()
+			}
+		case *ast.CallExpr:
+			if identifier, ok := typed.Fun.(*ast.Ident); ok && identifier.Name == "startWorkerRuntime" {
+				startWorkerPosition = typed.Pos()
+			}
+		}
+		return true
+	})
+	if activeWaitPosition == token.NoPos || startWorkerPosition == token.NoPos || activeWaitPosition >= startWorkerPosition {
+		t.Fatalf("managed runtime readiness wait=%d worker start=%d", activeWaitPosition, startWorkerPosition)
+	}
+}
+
+func workerReceivesModelControllerActive(expression *ast.UnaryExpr) bool {
+	if expression == nil || expression.Op != token.ARROW {
+		return false
+	}
+	call, ok := expression.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "Active" {
+		return false
+	}
+	receiver, ok := selector.X.(*ast.Ident)
+	return ok && receiver.Name == "modelController"
 }
 
 func TestConfiguredRRFUsesVersionedTypedLimits(t *testing.T) {

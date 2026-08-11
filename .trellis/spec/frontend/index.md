@@ -79,7 +79,7 @@ M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`�
 | [Hook 规范](./hook-guidelines.md) | Query、Command、URL 和 SSE Hook | Query Key Factory 和 Hook Test Harness |
 | [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | 已记录服务端 Active Workspace 单一 Owner、Workspace 清理顺序、M9 唯一 SSE Owner、Export recovery 与 M10 Auth/CSRF 契约 |
 | [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 Timeline/Impact v1/v2 与 downstream Proposal、M7-03 Collection/Health、M9 Business/M9-03 Export 与 M10 Auth 响应/Problem 的严格解码 |
-| [模型设置前端契约](./model-settings.md) | strict wire、desired/active/applied 状态、Session-only 与 Secret 生命周期 | Settings 模型面板和桌面/移动浏览器门禁 |
+| [模型设置前端契约](./model-settings.md) | strict wire、desired/active/applied、双进程热应用、Session-only 与 Secret 生命周期 | 无重启 Save-and-Apply、恢复状态和桌面/移动真实容器门禁 |
 | [Artifact 工作台契约](./artifact-workbench.md) | Artifact wire、Query、generation 恢复、GAP/export/publish UI 边界 | M8-01 decoder、组件、桌面/移动真实浏览器闭环已验证 |
 | [快速记录工作台契约](./capture-workbench.md) | Capture/Profile strict wire、Dialog、Inbox、详情、焦点与恢复 | 真实 API/Worker 下 TEXT Capture、降级画像及桌面/移动交互已验证 |
 | [主动创作工作台契约](./authoring-workbench.md) | Authoring wire、autosave、Freeze、preview 与发布恢复 | Decoder、Query、组件、lint/typecheck/build 与真实桌面/移动浏览器门禁已验证 |

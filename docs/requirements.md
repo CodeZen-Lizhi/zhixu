@@ -26,6 +26,7 @@
 8. **权限由服务端裁决**：身份、Capability 与一次性 Approval Write Authorization 分离；模型和客户端不能扩大权限。
 9. **Workspace 隔离**：所有业务数据、索引、任务和浏览器状态绑定稳定 Workspace ID；Root Grant 只覆盖当前规范化 Root。
 10. **范围收敛**：六个最高层验收闭环之外的模块必须直接支撑核心价值，不为完成架构而增加外围产品。
+11. **模型配置保存与生效分离**：desired、全局 active 与各进程 applied 是独立可验证事实；页面和 API 不得把已保存描述为已生效。
 
 ## 4. 功能需求
 
@@ -178,6 +179,11 @@
 
 - 覆盖 Workspace、模型、Embedding、Rerank、网页访问、Git、索引、工作流重试、Memory、Review 和数据保留。
 - Secret 只写不可回读；配置测试不得修改正式知识；disabled/unavailable/degraded 状态必须真实可见。
+- Managed 模型设置提供主操作“保存并应用”和次操作“仅保存”。前者先保存 immutable desired revision，再应用该 exact revision；后者只保存并明确显示待应用。
+- 正常模型 Apply 必须在现有 API/Worker 进程内完成，API/Worker/PostgreSQL 容器 ID 与启动时间不变化；页面不要求执行 `./zhixu restart`。重启只用于升级、进程故障和运维重建，且不得在 idle 时自动应用 pending desired。
+- API/Worker 必须先准备并 Probe 同一 target 的完整 Chat、Embedding 与角色依赖图，再经一次 active commit发布。切换只允许短暂、可重试地阻止新模型工作和 Workflow Claim，不等待或中断已开始操作。
+- commit 前失败必须保留 previous active并清理候选；commit 后禁止自动回滚，系统按 target 向前恢复到两个 role applied/fresh。页面显示 rollout phase、target、各 role状态、安全错误和旧 active是否仍服务。
+- 已 Claim Attempt 按持久 runtime binding使用 exact generation；Search、Source Refresh、Vector Build和 Reindex按持久 Embedding/Index Contract获取兼容 generation。历史 runtime无法重建时显式 unavailable，不得使用当前默认模型兜底。
 - 索引支持增量/全量重建和回退到上一完整版本；重建期间继续服务旧 Active Index。
 - Git Remote 只支持受控 HTTPS、非强制同步和独立状态；自动同步默认关闭，远端失败不回滚本地写回。
 - 导出支持 Collection Markdown、领域 Metadata JSON 和 Workspace 附件 ZIP；Evaluation/Audit JSON、CSV/XLSX、字段映射与公式不在当前范围。
@@ -226,6 +232,7 @@
 - 从 ready 状态执行主 Docker Compose 项目 restart 必须在 60 秒内重新收敛为 ready；app/worker 与各自 relay 必须共享对应稳定 anchor 的 network namespace，host loopback 入口与 bridge peer 隔离保持有效。
 - helper/daemon 重启不承诺跨项目自动排序；anchor 缺失、停止或 namespace 分叉必须 fail closed 并显示 degraded，`./zhixu restart` 必须能在不删除数据卷、selection、grant 或宿主机 Workspace 的前提下恢复。
 - 支持 Worker crash、响应丢失、lease 过期、Provider 限流、索引失败和写回未知结果的恢复。
+- Managed 模型 activation 的浏览器响应丢失、协调者中断、role stale 和 post-commit进程恢复必须从 PostgreSQL持久 operation自动收敛；浏览器轮询只观察，不推进状态机。
 - 定期执行备份恢复、数据库/文件/Git 一致性和索引切换演练。
 
 ### 性能与容量
@@ -291,5 +298,6 @@
 | AC-39 | Organizing Material/Templates | 建议材料增删与确认、不可变 Snapshot、四模板、Evidence/GAP、Human Task、Artifact/Proposal owner binding 和跨 Workspace 恢复可验证 |
 | AC-40 | Document File History/Restore | 当前 path 时间线、稳定分页、任意版本比较、dirty/stale 阻断、restore Proposal、新 Commit 与 append-only Revision 可验证 |
 | AC-41 | Git Remote Sync | 单 HTTPS Remote、加密只写 Token、受控 Fetch/Fast-forward/non-force Push、post-check、并发栅栏、自动调度、恢复及 Git/索引分列状态可验证 |
+| AC-42 | Model Runtime Hot Activation | Save/Apply 在 API/Worker 容器 ID 与 `StartedAt` 不变时收敛为 desired=active=两 role applied/fresh；在途操作保持旧 generation，commit 后新操作使用 target，pre-commit失败保留旧 active，历史 Attempt/Index provenance不被当前默认模型覆盖 |
 
 精确 HTTP、事件和错误契约以 [OpenAPI](../api/openapi/openapi.json) 为准；精确数据库约束以 [迁移](../migrations/) 为准；当前交付状态不在本文件维护。

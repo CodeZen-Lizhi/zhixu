@@ -1,0 +1,15 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端开发前置检查、分层边界和验证门禁"}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Composition Root、Presentation 到 Application 的依赖方向"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Session、API Token、CSRF、Origin、Capability 和 readiness 契约"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Problem Details、SSE 和 HTTP 错误映射契约"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"跨层测试、安全负测、Review 和全仓质量门禁"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"HTTP、Application、OpenAPI 和前端 wire 的跨层数据流检查"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"成熟框架门禁、共享 HTTP helper 和重复实现检查"}
+{"file":"docs/architecture/application-contracts.md","reason":"HTTP/SSE、严格 JSON、Problem 和授权边界事实源"}
+{"file":"docs/architecture/system-design.md","reason":"当前 Composition、Adapter 和 HTTP 技术栈边界"}
+{"file":"docs/architecture/quality.md","reason":"安全、日志、可观测性和测试发布约束"}
+{"file":"docs/architecture/adr/0019-mature-framework-first.md","reason":"Gin 采用和薄适配自研边界的权威选型门禁"}
+{"file":".trellis/tasks/08-11-gin-http-migration/research/core-router-middleware.md","reason":"Gin/Chi Router、Middleware、ResponseWriter、Recovery 和代理配置的源码审计"}
+{"file":".trellis/tasks/08-11-gin-http-migration/research/gin-core-and-boundary.md","reason":"核心 Router 和 HTTP 边界的规划摘要"}
+{"file":".trellis/tasks/08-11-gin-http-migration/research/route-and-test-batches.md","reason":"生产路由清单、参数冲突、测试辅助和互斥迁移批次"}
+{"file":".trellis/tasks/08-11-gin-http-migration/research/strict-stream-file-contract.md","reason":"严格 JSON、validator、SSE、multipart、下载和 panic-after-write 契约"}

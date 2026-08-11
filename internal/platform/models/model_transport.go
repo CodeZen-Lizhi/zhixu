@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 var (
@@ -34,13 +35,41 @@ type modelEndpointAuthority struct {
 	allowLoopbackRelay bool
 }
 
+type idleConnectionCloser interface {
+	CloseIdleConnections()
+}
+
+// modelHTTPClient records transport ownership at construction. A supplied
+// non-nil RoundTripper remains caller-owned even though the client is copied.
+type modelHTTPClient struct {
+	client    *http.Client
+	owned     idleConnectionCloser
+	closeOnce sync.Once
+}
+
+func (client *modelHTTPClient) Do(request *http.Request) (*http.Response, error) {
+	return client.client.Do(request)
+}
+
+func (client *modelHTTPClient) Close() error {
+	if client == nil {
+		return nil
+	}
+	client.closeOnce.Do(func() {
+		if client.owned != nil {
+			client.owned.CloseIdleConnections()
+		}
+	})
+	return nil
+}
+
 // newModelHTTPClient creates the production model transport. Explicit custom
 // transports remain an adapter test seam; production factories pass nil.
-func newModelHTTPClient(endpoint *url.URL, supplied *http.Client) (*http.Client, error) {
+func newModelHTTPClient(endpoint *url.URL, supplied *http.Client) (*modelHTTPClient, error) {
 	return newModelHTTPClientWithNetwork(endpoint, supplied, net.DefaultResolver, &net.Dialer{})
 }
 
-func newModelHTTPClientWithNetwork(endpoint *url.URL, supplied *http.Client, resolver modelHostResolver, dialer modelContextDialer) (*http.Client, error) {
+func newModelHTTPClientWithNetwork(endpoint *url.URL, supplied *http.Client, resolver modelHostResolver, dialer modelContextDialer) (*modelHTTPClient, error) {
 	authority, err := newModelEndpointAuthority(endpoint)
 	if err != nil {
 		return nil, err
@@ -49,6 +78,7 @@ func newModelHTTPClientWithNetwork(endpoint *url.URL, supplied *http.Client, res
 	if supplied != nil {
 		*client = *supplied
 	}
+	var owned idleConnectionCloser
 	if client.Transport == nil {
 		base, ok := http.DefaultTransport.(*http.Transport)
 		if !ok {
@@ -59,11 +89,12 @@ func newModelHTTPClientWithNetwork(endpoint *url.URL, supplied *http.Client, res
 		transport.DialContext = modelDialContext(authority, resolver, dialer)
 		transport.TLSClientConfig = modelTLSConfig(transport.TLSClientConfig, authority.host)
 		client.Transport = transport
+		owned = transport
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	return client, nil
+	return &modelHTTPClient{client: client, owned: owned}, nil
 }
 
 func modelTLSConfig(base *tls.Config, serverName string) *tls.Config {

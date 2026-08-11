@@ -1,4 +1,4 @@
-// Command modelctl coordinates the managed model-settings restart protocol.
+// Command modelctl performs managed model-settings activation recovery.
 package main
 
 import (
@@ -12,12 +12,10 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	modelapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modeldomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	modelruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 )
 
 const (
@@ -41,6 +39,9 @@ func runCommand(ctx context.Context, arguments []string, stdout io.Writer) error
 	command, err := parseCommand(arguments)
 	if err != nil {
 		return err
+	}
+	if isLegacyRolloutCommand(command.name) {
+		return legacyRolloutError()
 	}
 	executionTimeout := defaultCommandTimeout
 	if command.name == commandWaitQuiesced || command.name == commandWaitPrepared {
@@ -77,30 +78,8 @@ func runCommand(ctx context.Context, arguments []string, stdout io.Writer) error
 		}
 		return stateError(errors.New("managed model settings bootstrap is unavailable"))
 	}
-	queue, err := riveradapter.NewClientWithOptions(database.DB(), nil, riveradapter.Options{
-		Queue: cfg.WorkerQueue, MaxWorkers: cfg.WorkerMaxWorkers,
-		JobTimeout: cfg.WorkerJobTimeout, RescueStuckJobsAfter: cfg.WorkerRescueStuckJobsAfter,
-		SoftStopTimeout: cfg.WorkerSoftStopTimeout,
-	})
-	if err != nil {
-		return err
-	}
-	coordinator, err := modelapplication.NewRolloutCoordinator(
-		bootstrap.Service,
-		queue,
-		foundation.NewUUIDGenerator(nil),
-		modelapplication.RolloutCoordinatorOptions{},
-	)
-	if err != nil {
-		return err
-	}
-	coordinatorBoundary, err := newCoordinatorAdapter(coordinator)
-	if err != nil {
-		return err
-	}
 	control := &controller{
-		coordinator: coordinatorBoundary,
-		preflighter: modelPreflighter{tester: modelruntime.NewConnectionTester(cfg)},
+		activations: bootstrap.Service,
 		stdout:      stdout,
 	}
 	return control.execute(executionCtx, command)

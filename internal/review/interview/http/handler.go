@@ -24,7 +24,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	interviewapp "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/interview/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -81,15 +81,15 @@ func (handler *Handler) Available() bool {
 }
 
 // Routes registers routes beneath the caller's /api/v1 router.
-func (handler *Handler) Routes(router chi.Router) {
-	router.Post("/review/interviews", handler.start)
-	router.Get("/review/interviews", handler.list)
-	router.Get("/review/interviews/{session_id}", handler.get)
-	router.Post("/review/interviews/{session_id}/turns", handler.submitTurn)
-	router.Post("/review/interviews/{session_id}/complete", handler.complete)
-	router.Post("/review/interviews/{session_id}/learning-paths/{path_id}/steps/{step_id}/memory-candidate", handler.suggestMemoryCandidate)
-	router.Put("/review/learning-paths/{path_id}/status", handler.updatePathStatus)
-	router.Put("/review/learning-paths/{path_id}/steps/{step_id}", handler.updatePathStep)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.POST("/review/interviews", httpapi.GinHandler(handler.start))
+	router.GET("/review/interviews", httpapi.GinHandler(handler.list))
+	router.GET("/review/interviews/:session_id", httpapi.GinHandler(handler.get))
+	router.POST("/review/interviews/:session_id/turns", httpapi.GinHandler(handler.submitTurn))
+	router.POST("/review/interviews/:session_id/complete", httpapi.GinHandler(handler.complete))
+	router.POST("/review/interviews/:session_id/learning-paths/:path_id/steps/:step_id/memory-candidate", httpapi.GinHandler(handler.suggestMemoryCandidate))
+	router.PUT("/review/learning-paths/:path_id/status", httpapi.GinHandler(handler.updatePathStatus))
+	router.PUT("/review/learning-paths/:path_id/steps/:step_id", httpapi.GinHandler(handler.updatePathStep))
 }
 
 func (handler *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -233,7 +233,7 @@ func (handler *Handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	sessionID, err := parseID(chi.URLParam(r, "session_id"))
+	sessionID, err := parseID(r.PathValue("session_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -293,7 +293,7 @@ func (handler *Handler) complete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	sessionID, err := parseID(chi.URLParam(r, "session_id"))
+	sessionID, err := parseID(r.PathValue("session_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -344,7 +344,7 @@ func (handler *Handler) updatePathStatus(w http.ResponseWriter, r *http.Request)
 		writeError(w, err)
 		return
 	}
-	pathID, err := parseID(chi.URLParam(r, "path_id"))
+	pathID, err := parseID(r.PathValue("path_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -396,12 +396,12 @@ func (handler *Handler) updatePathStep(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	pathID, err := parseID(chi.URLParam(r, "path_id"))
+	pathID, err := parseID(r.PathValue("path_id"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	stepID, err := parseID(chi.URLParam(r, "step_id"))
+	stepID, err := parseID(r.PathValue("step_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -453,17 +453,17 @@ func (handler *Handler) suggestMemoryCandidate(w http.ResponseWriter, r *http.Re
 		writeError(w, err)
 		return
 	}
-	sessionID, err := parseID(chi.URLParam(r, "session_id"))
+	sessionID, err := parseID(r.PathValue("session_id"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	pathID, err := parseID(chi.URLParam(r, "path_id"))
+	pathID, err := parseID(r.PathValue("path_id"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	stepID, err := parseID(chi.URLParam(r, "step_id"))
+	stepID, err := parseID(r.PathValue("step_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1156,7 +1156,7 @@ func parseSessionLookup(r *http.Request) (foundation.ID, foundation.ID, error) {
 	if err != nil {
 		return "", "", err
 	}
-	sessionID, err := parseID(chi.URLParam(r, "session_id"))
+	sessionID, err := parseID(r.PathValue("session_id"))
 	if err != nil {
 		return "", "", err
 	}

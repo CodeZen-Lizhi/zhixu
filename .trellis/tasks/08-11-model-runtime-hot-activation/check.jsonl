@@ -1,0 +1,16 @@
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"逐项审查 desired/active/applied、Secret、runtime ownership、Attempt binding 和正常 no-restart 语义。"}
+{"file":".trellis/spec/backend/index.md","reason":"审查后端跨层适用规范、Model Settings/Database/Composition 与质量门禁路由。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"审查 Activation Session-only、CSRF/Origin、Bearer 拒绝和响应/日志无 Secret。"}
+{"file":".trellis/spec/backend/artifact-contract.md","reason":"审查 Artifact ModelRun 已携带并核对 Attempt model settings revision。"}
+{"file":".trellis/spec/frontend/model-settings.md","reason":"审查保存/应用独立事实、进度状态、Secret 生命周期、桌面/移动交互。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"审查 Query cache owner、polling、refetch、Abort、response-loss 和重挂恢复。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"审查新增 Activation/OpenAPI 字段 strict decode、枚举穷尽与 unknown field fail closed。"}
+{"file":".trellis/spec/frontend/index.md","reason":"审查前端 Feature/API/State/Type/Quality 规范路由与 canonical Web 门禁。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核 Migration 到 UI 的 target/phase/role/error 数据流和所有调用方。"}
+{"file":"docs/architecture/adr/0012-version-workflows-prompts-schemas.md","reason":"复核在途 Workflow 版本冻结与新 Attempt 切换没有回归。"}
+{"file":"docs/architecture/adr/0019-mature-framework-first.md","reason":"复核自研 RuntimeHost 最小边界、依赖复用、维护成本与退出路径。"}
+{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/runtime-consumer-topology.md","reason":"对照全量 consumer inventory，防止只替换 Models pointer 而遗漏捕获依赖。"}
+{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/implementation-context.md","reason":"无截断审查状态机、SQL/Claim、Embedding、RuntimeHost、HTTP/Web 与完整质量证据，并按需打开原始大文档。"}
+{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/apply-ux-contract.md","reason":"对照 Save-and-Apply 中间结果、轮询、冲突、strict wire 和 Secret 泄漏测试。"}
+{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/design-minimal-interface.md","reason":"审查业务调用方只依赖 Acquire/Lease，没有泄漏 rollout lifecycle。"}
+{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/interface-options.md","reason":"确认最终实现遵循推荐 generation host，而未退化为 per-method dynamic proxy。"}

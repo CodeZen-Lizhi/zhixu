@@ -21,7 +21,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	reviewapp "github.com/CodeZen-Lizhi/zhixu/internal/review/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -70,35 +70,32 @@ func NewHandler(service Service, timeout time.Duration) *Handler {
 }
 
 // Routes registers Review endpoints under the caller's /api/v1 router.
-func (handler *Handler) Routes(router chi.Router) {
-	router.Group(func(review chi.Router) {
-		review.Use(noStore)
-		review.Get("/review/decks", handler.listDecks)
-		review.Post("/review/decks", handler.createDeck)
-		review.Get("/review/decks/{deck_id}", handler.getDeck)
-		review.Get("/review/decks/{deck_id}/cards", handler.listCards)
-		review.Post("/review/decks/{deck_id}/cards", handler.createCard)
-		review.Put("/review/cards/{card_id}", handler.editCard)
-		review.Post("/review/decks/{deck_id}/schedule/pause", handler.pauseDeck)
-		review.Post("/review/decks/{deck_id}/schedule/resume", handler.resumeDeck)
-		review.Post("/review/decks/{deck_id}/schedule/reset", handler.resetDeck)
-		review.Get("/review/due", handler.listDue)
-		review.Post("/review/cards/{card_id}/approve", handler.approveCard)
-		review.Post("/review/cards/{card_id}/reject", handler.rejectCard)
-		review.Post("/review/cards/{card_id}/invalidate", handler.invalidateCard)
-		review.Post("/review/invalidation", handler.invalidateCards)
-		review.Post("/review/sessions", handler.startSession)
-		review.Post("/review/sessions/{session_id}/complete", handler.completeSession)
-		review.Post("/review/sessions/{session_id}/answers", handler.submitAnswer)
-	})
+func (handler *Handler) Routes(router gin.IRouter) {
+	review := router.Group("")
+	review.Use(noStore)
+	review.GET("/review/decks", httpapi.GinHandler(handler.listDecks))
+	review.POST("/review/decks", httpapi.GinHandler(handler.createDeck))
+	review.GET("/review/decks/:deck_id", httpapi.GinHandler(handler.getDeck))
+	review.GET("/review/decks/:deck_id/cards", httpapi.GinHandler(handler.listCards))
+	review.POST("/review/decks/:deck_id/cards", httpapi.GinHandler(handler.createCard))
+	review.PUT("/review/cards/:card_id", httpapi.GinHandler(handler.editCard))
+	review.POST("/review/decks/:deck_id/schedule/pause", httpapi.GinHandler(handler.pauseDeck))
+	review.POST("/review/decks/:deck_id/schedule/resume", httpapi.GinHandler(handler.resumeDeck))
+	review.POST("/review/decks/:deck_id/schedule/reset", httpapi.GinHandler(handler.resetDeck))
+	review.GET("/review/due", httpapi.GinHandler(handler.listDue))
+	review.POST("/review/cards/:card_id/approve", httpapi.GinHandler(handler.approveCard))
+	review.POST("/review/cards/:card_id/reject", httpapi.GinHandler(handler.rejectCard))
+	review.POST("/review/cards/:card_id/invalidate", httpapi.GinHandler(handler.invalidateCard))
+	review.POST("/review/invalidation", httpapi.GinHandler(handler.invalidateCards))
+	review.POST("/review/sessions", httpapi.GinHandler(handler.startSession))
+	review.POST("/review/sessions/:session_id/complete", httpapi.GinHandler(handler.completeSession))
+	review.POST("/review/sessions/:session_id/answers", httpapi.GinHandler(handler.submitAnswer))
 }
 
 // noStore 防止题面、答案、评分和 Evidence 被共享或浏览器缓存持久化。
-func noStore(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		next.ServeHTTP(w, r)
-	})
+func noStore(context *gin.Context) {
+	context.Header("Cache-Control", "no-store")
+	context.Next()
 }
 
 // Available reports whether this handler has a real application dependency.
@@ -223,7 +220,7 @@ func (handler *Handler) listCards(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	deckID, err := parseID(chi.URLParam(r, "deck_id"))
+	deckID, err := parseID(r.PathValue("deck_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -265,7 +262,7 @@ func (handler *Handler) createCard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	deckID, err := parseID(chi.URLParam(r, "deck_id"))
+	deckID, err := parseID(r.PathValue("deck_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -311,7 +308,7 @@ func (handler *Handler) editCard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	cardID, err := parseID(chi.URLParam(r, "card_id"))
+	cardID, err := parseID(r.PathValue("card_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -447,7 +444,7 @@ func (handler *Handler) decideCard(w http.ResponseWriter, r *http.Request, decid
 		writeError(w, err)
 		return
 	}
-	cardID, err := parseID(chi.URLParam(r, "card_id"))
+	cardID, err := parseID(r.PathValue("card_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -602,7 +599,7 @@ func (handler *Handler) completeSession(w http.ResponseWriter, r *http.Request) 
 		writeError(w, err)
 		return
 	}
-	sessionID, err := parseID(chi.URLParam(r, "session_id"))
+	sessionID, err := parseID(r.PathValue("session_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -654,7 +651,7 @@ func (handler *Handler) changeDeckSchedule(w http.ResponseWriter, r *http.Reques
 		writeError(w, err)
 		return
 	}
-	deckID, err := parseID(chi.URLParam(r, "deck_id"))
+	deckID, err := parseID(r.PathValue("deck_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -702,7 +699,7 @@ func (handler *Handler) submitAnswer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	sessionID, err := parseID(chi.URLParam(r, "session_id"))
+	sessionID, err := parseID(r.PathValue("session_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1080,7 +1077,7 @@ func parsePathWorkspaceResource(r *http.Request, resource string) (foundation.ID
 	if err != nil {
 		return "", "", err
 	}
-	resourceID, err := parseID(chi.URLParam(r, resource))
+	resourceID, err := parseID(r.PathValue(resource))
 	if err != nil {
 		return "", "", err
 	}

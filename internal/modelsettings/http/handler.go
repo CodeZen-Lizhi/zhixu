@@ -22,13 +22,15 @@ import (
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
 	maxRequestBodyBytes         = 64 * 1024
 	maxSecretBytes              = 16 * 1024
 	defaultOperationTimeout     = 35 * time.Second
+	defaultActivationLease      = 2 * time.Minute
+	defaultActivationFreshness  = 20 * time.Second
 	errorCodeInvalidJSON        = "INVALID_JSON"
 	errorCodeUnsupportedMedia   = "UNSUPPORTED_MEDIA_TYPE"
 	errorCodeSessionRequired    = "MODEL_SETTINGS_SESSION_REQUIRED"
@@ -44,13 +46,29 @@ const (
 type Options struct {
 	RequireSession bool
 	Timeout        time.Duration
+	// ActivationStarter is the narrow durable activation seam.  It deliberately
+	// carries no settings or credential-bearing methods into the HTTP package.
+	ActivationStarter ActivationStarter
+	// ActivationLease and ActivationFreshness keep the HTTP admission policy
+	// bounded while allowing composition roots and tests to use one policy.
+	ActivationLease     time.Duration
+	ActivationFreshness time.Duration
+}
+
+// ActivationStarter persists one exact desired revision under a database CAS.
+// The HTTP layer never receives resolved settings or secrets through this seam.
+type ActivationStarter interface {
+	StartActivation(context.Context, modelsettingsapplication.StartActivationCommand) (modelsettingsapplication.StartActivationResult, error)
 }
 
 // Handler 将模型设置应用接口映射到严格、无缓存的 HTTP 契约。
 type Handler struct {
-	manager        modelsettingsapplication.SettingsManager
-	requireSession bool
-	timeout        time.Duration
+	manager             modelsettingsapplication.SettingsManager
+	activation          ActivationStarter
+	requireSession      bool
+	timeout             time.Duration
+	activationLease     time.Duration
+	activationFreshness time.Duration
 }
 
 // NewHandler 创建 fail-closed 的模型设置 HTTP Handler。
@@ -65,14 +83,37 @@ func NewHandler(manager modelsettingsapplication.SettingsManager, options Option
 	if timeout < time.Millisecond || timeout > 5*time.Minute {
 		return nil, foundation.NewError(foundation.ErrorInvalidInput, modelsettingsdomain.ErrorCodeInvalid, false, errors.New("model settings HTTP timeout is invalid"))
 	}
-	return &Handler{manager: manager, requireSession: options.RequireSession, timeout: timeout}, nil
+	activation := options.ActivationStarter
+	if nilDependency(activation) {
+		activation = nil
+		if candidate, ok := manager.(ActivationStarter); ok {
+			if !nilDependency(candidate) {
+				activation = candidate
+			}
+		}
+	}
+	activationLease := options.ActivationLease
+	if activationLease == 0 {
+		activationLease = defaultActivationLease
+	}
+	activationFreshness := options.ActivationFreshness
+	if activationFreshness == 0 {
+		activationFreshness = defaultActivationFreshness
+	}
+	if activationLease < time.Second || activationLease > 10*time.Minute ||
+		activationFreshness < time.Second || activationFreshness > 5*time.Minute {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, modelsettingsdomain.ErrorCodeInvalid, false, errors.New("model settings activation policy is invalid"))
+	}
+	return &Handler{manager: manager, activation: activation, requireSession: options.RequireSession, timeout: timeout,
+		activationLease: activationLease, activationFreshness: activationFreshness}, nil
 }
 
 // Routes 在调用方的 `/api/v1` Router 下注册模型设置端点。
-func (handler *Handler) Routes(router chi.Router) {
-	router.Get("/settings/models", handler.get)
-	router.Put("/settings/models", handler.update)
-	router.Post("/settings/models/test", handler.testConnection)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.GET("/settings/models", httpapi.GinHandler(handler.get))
+	router.PUT("/settings/models", httpapi.GinHandler(handler.update))
+	router.POST("/settings/models/test", httpapi.GinHandler(handler.testConnection))
+	router.POST("/settings/models/activations", httpapi.GinHandler(handler.startActivation))
 }
 
 type updateRequest struct {
@@ -85,6 +126,10 @@ type testRequest struct {
 	Target    json.RawMessage `json:"target"`
 	Chat      json.RawMessage `json:"chat,omitempty"`
 	Embedding json.RawMessage `json:"embedding,omitempty"`
+}
+
+type activationRequest struct {
+	ExpectedRevision json.RawMessage `json:"expected_revision"`
 }
 
 type chatDraftRequest struct {
@@ -119,6 +164,8 @@ type settingsResponse struct {
 	ActiveSettings  settingsSummaryResponse `json:"active_settings"`
 	Runtime         runtimeResponse         `json:"runtime"`
 	Rollout         rolloutResponse         `json:"rollout"`
+	Participants    participantResponses    `json:"participants"`
+	ApplyRequired   bool                    `json:"apply_required"`
 	RestartRequired bool                    `json:"restart_required"`
 	Capabilities    capabilitiesResponse    `json:"capabilities"`
 }
@@ -160,10 +207,26 @@ type runtimeRoleResponse struct {
 }
 
 type rolloutResponse struct {
+	ID             *string                          `json:"id"`
+	Version        int64                            `json:"version"`
 	Phase          modelsettingsdomain.RolloutPhase `json:"phase"`
 	TargetRevision *int64                           `json:"target_revision"`
 	LastErrorCode  *string                          `json:"last_error_code"`
 	Retryable      bool                             `json:"retryable"`
+}
+
+type participantResponses struct {
+	API    participantResponse `json:"api"`
+	Worker participantResponse `json:"worker"`
+}
+
+type participantResponse struct {
+	Present        bool                                  `json:"present"`
+	TargetRevision *int64                                `json:"target_revision"`
+	Phase          *modelsettingsdomain.ParticipantPhase `json:"phase"`
+	Fresh          bool                                  `json:"fresh"`
+	LastErrorCode  *string                               `json:"last_error_code"`
+	Retryable      bool                                  `json:"retryable"`
 }
 
 type capabilitiesResponse struct {
@@ -249,6 +312,68 @@ func (handler *Handler) update(writer nethttp.ResponseWriter, request *nethttp.R
 		return
 	}
 	httpapi.WriteJSON(writer, nethttp.StatusOK, toSettingsResponse(snapshot))
+}
+
+func (handler *Handler) startActivation(writer nethttp.ResponseWriter, request *nethttp.Request) {
+	noStore(writer)
+	if _, ok := handler.authorize(writer, request); !ok {
+		return
+	}
+	input, ok := decodeRequest[activationRequest](writer, request)
+	if !ok {
+		return
+	}
+	defer destroyRaw(input.ExpectedRevision)
+	expectedRevision, err := decodeInt64(input.ExpectedRevision)
+	if err != nil || expectedRevision < 0 {
+		writeInvalid(writer)
+		return
+	}
+	if nilDependency(handler.activation) {
+		writeManagerError(writer, foundation.NewError(foundation.ErrorDependencyUnavailable, modelsettingsdomain.ErrorCodeRuntimeNotReady, true,
+			errors.New("model settings activation service is unavailable")), nil)
+		return
+	}
+
+	// A browser abort only stops its wait.  It is not an activation-cancel
+	// command, so the durable start is intentionally detached from request
+	// cancellation and remains bounded by the handler policy.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), handler.timeout)
+	defer cancel()
+	current, err := handler.manager.Snapshot(ctx)
+	if err != nil {
+		writeManagerError(writer, err, nil)
+		return
+	}
+	if current.DesiredRevision != expectedRevision {
+		writeActivationConflict(writer, current.DesiredRevision)
+		return
+	}
+	if current.Rollout.Version <= 0 {
+		writeManagerError(writer, foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeCorrupt, false,
+			errors.New("model settings activation state version is invalid")), nil)
+		return
+	}
+	rolloutID, err := foundation.NewUUIDGenerator(nil).New()
+	if err != nil {
+		writeManagerError(writer, err, nil)
+		return
+	}
+	_, err = handler.activation.StartActivation(ctx, modelsettingsapplication.StartActivationCommand{
+		RolloutID: rolloutID, TargetRevision: expectedRevision,
+		ExpectedDesiredRevision: expectedRevision, ExpectedStateVersion: current.Rollout.Version,
+		LeaseDuration: handler.activationLease, FreshWithin: handler.activationFreshness,
+	})
+	if err != nil {
+		handler.writeConflictAwareErrorWithContext(writer, ctx, err)
+		return
+	}
+	snapshot, err := handler.manager.Snapshot(ctx)
+	if err != nil {
+		writeManagerError(writer, err, nil)
+		return
+	}
+	httpapi.WriteJSON(writer, nethttp.StatusAccepted, toSettingsResponse(snapshot))
 }
 
 func (handler *Handler) testConnection(writer nethttp.ResponseWriter, request *nethttp.Request) {
@@ -337,6 +462,14 @@ func (handler *Handler) writeConflictAwareError(writer nethttp.ResponseWriter, r
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), handler.timeout)
 	defer cancel()
+	handler.writeConflictAwareErrorWithContext(writer, ctx, err)
+}
+
+func (handler *Handler) writeConflictAwareErrorWithContext(writer nethttp.ResponseWriter, ctx context.Context, err error) {
+	if !isConflict(err) {
+		writeManagerError(writer, err, nil)
+		return
+	}
 	current, snapshotErr := handler.manager.Snapshot(ctx)
 	if snapshotErr != nil {
 		writeManagerError(writer, snapshotErr, nil)
@@ -591,6 +724,10 @@ func decodeInt64(raw json.RawMessage) (int64, error) {
 }
 
 func toSettingsResponse(snapshot modelsettingsdomain.Snapshot) settingsResponse {
+	applyRequired := snapshot.DesiredRevision != snapshot.ActiveRevision ||
+		modelsettingsdomain.ActiveActivationPhase(snapshot.Rollout.Phase) ||
+		!runtimeReady(snapshot.Runtime.API, snapshot.ActiveRevision) ||
+		!runtimeReady(snapshot.Runtime.Worker, snapshot.ActiveRevision)
 	return settingsResponse{
 		DesiredRevision: snapshot.DesiredRevision,
 		ActiveRevision:  snapshot.ActiveRevision,
@@ -600,13 +737,24 @@ func toSettingsResponse(snapshot modelsettingsdomain.Snapshot) settingsResponse 
 			API:    toRuntimeRoleResponse(snapshot.Runtime.API),
 			Worker: toRuntimeRoleResponse(snapshot.Runtime.Worker),
 		},
-		Rollout:         toRolloutResponse(snapshot.Rollout),
-		RestartRequired: snapshot.RestartRequired,
+		Rollout: toRolloutResponse(snapshot.Rollout),
+		Participants: participantResponses{
+			API:    toParticipantResponse(snapshot.Participants.API),
+			Worker: toParticipantResponse(snapshot.Participants.Worker),
+		},
+		ApplyRequired: applyRequired,
+		// Kept only for old clients; hot activation never requires a container
+		// restart, so this compatibility field is intentionally always false.
+		RestartRequired: false,
 		Capabilities: capabilitiesResponse{
 			Chat:      snapshot.ChatCapability,
 			Embedding: snapshot.EmbeddingCapability,
 		},
 	}
+}
+
+func runtimeReady(runtime modelsettingsdomain.RuntimeSummary, revision int64) bool {
+	return runtime.Fresh && runtime.Phase == modelsettingsdomain.RuntimePhaseActive && runtime.AppliedRevision == revision
 }
 
 func toSettingsSummaryResponse(summary modelsettingsdomain.SettingsSummary) settingsSummaryResponse {
@@ -630,13 +778,33 @@ func toRuntimeRoleResponse(summary modelsettingsdomain.RuntimeSummary) runtimeRo
 }
 
 func toRolloutResponse(state modelsettingsdomain.RolloutState) rolloutResponse {
-	response := rolloutResponse{Phase: state.Phase, Retryable: state.Phase == modelsettingsdomain.RolloutPhaseFailed}
+	response := rolloutResponse{Version: state.Version, Phase: state.Phase, Retryable: state.Phase == modelsettingsdomain.RolloutPhaseFailed}
+	if state.ID != "" {
+		id := string(state.ID)
+		response.ID = &id
+	}
 	if state.Phase != modelsettingsdomain.RolloutPhaseIdle {
 		target := state.TargetRevision
 		response.TargetRevision = &target
 	}
 	if state.LastErrorCode != "" {
 		code := state.LastErrorCode
+		response.LastErrorCode = &code
+	}
+	return response
+}
+
+func toParticipantResponse(summary modelsettingsdomain.ParticipantSummary) participantResponse {
+	if !summary.Present {
+		return participantResponse{}
+	}
+	response := participantResponse{Present: true, Fresh: summary.Fresh, Retryable: summary.ErrorRetryable}
+	target := summary.TargetRevision
+	response.TargetRevision = &target
+	phase := summary.Phase
+	response.Phase = &phase
+	if summary.LastErrorCode != "" {
+		code := summary.LastErrorCode
 		response.LastErrorCode = &code
 	}
 	return response
@@ -649,6 +817,10 @@ func isConflict(err error) bool {
 
 func writeRevisionConflict(writer nethttp.ResponseWriter, revision int64) {
 	writeManagerError(writer, foundation.NewError(foundation.ErrorVersionConflict, modelsettingsdomain.ErrorCodeRevisionConflict, false, errors.New("desired revision changed")), map[string]any{"current_revision": revision})
+}
+
+func writeActivationConflict(writer nethttp.ResponseWriter, revision int64) {
+	writeManagerError(writer, foundation.NewError(foundation.ErrorVersionConflict, modelsettingsdomain.ErrorCodeActivationConflict, false, errors.New("activation target changed")), map[string]any{"current_revision": revision})
 }
 
 func writeInvalid(writer nethttp.ResponseWriter) {
@@ -685,7 +857,8 @@ func writeManagerError(writer nethttp.ResponseWriter, err error, details map[str
 			status, message = nethttp.StatusServiceUnavailable, "模型设置服务暂不可用"
 		}
 	case foundation.ErrorConsistencyViolation:
-		if classified.Code == modelsettingsdomain.ErrorCodeCorrupt || classified.Code == modelsettingsdomain.ErrorCodeUnavailable {
+		if classified.Code == modelsettingsdomain.ErrorCodeCorrupt || classified.Code == modelsettingsdomain.ErrorCodeUnavailable ||
+			classified.Code == modelsettingsdomain.ErrorCodeRuntimeNotReady || classified.Code == modelsettingsdomain.ErrorCodeActivationPrepareFailed {
 			status, message = nethttp.StatusServiceUnavailable, "模型设置服务暂不可用"
 		}
 	}

@@ -150,7 +150,7 @@ func (repository *Repository) FailRollout(ctx context.Context, command applicati
 
 // CommitRollout publishes target only after both role owners are fresh and prepared.
 func (repository *Repository) CommitRollout(ctx context.Context, command application.CommitRolloutCommand) (domain.RolloutState, error) {
-	if ctx == nil || !validID(command.RolloutID) || command.FreshWithin < time.Second || command.FreshWithin > 5*time.Minute {
+	if ctx == nil || !validID(command.RolloutID) || !application.ValidRuntimeFreshWithin(command.FreshWithin) {
 		return domain.RolloutState{}, invalid(errors.New("model settings commit rollout command is invalid"))
 	}
 	tx, err := repository.db.Begin(ctx)

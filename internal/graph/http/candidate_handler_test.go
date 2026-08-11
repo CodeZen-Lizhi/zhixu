@@ -15,7 +15,7 @@ import (
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -612,15 +612,15 @@ func serveCandidateRequest(t *testing.T, service graphapp.CandidateService, time
 }
 
 func candidateHTTPTestRouter(service graphapp.CandidateService, timeout time.Duration) http.Handler {
-	router := chi.NewRouter()
-	router.Route("/api/v1", NewCandidateHandler(service, timeout).Routes)
+	router := gin.New()
+	NewCandidateHandler(service, timeout).Routes(router.Group("/api/v1"))
 	return router
 }
 
 func serveCandidateScanRequest(t *testing.T, scans graphapp.SemanticLinkScanHTTPService, method, path, body, contentType, idempotencyKey string) *httptest.ResponseRecorder {
 	t.Helper()
-	router := chi.NewRouter()
-	router.Route("/api/v1", NewCandidateHandler(&fakeCandidateService{}, time.Second, scans).Routes)
+	router := gin.New()
+	NewCandidateHandler(&fakeCandidateService{}, time.Second, scans).Routes(router.Group("/api/v1"))
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)

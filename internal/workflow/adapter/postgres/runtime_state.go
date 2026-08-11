@@ -3,6 +3,7 @@ package workflowpostgres
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	encodinghex "encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,7 +20,9 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const runtimeEventSchemaVersion = 1
+const (
+	runtimeEventSchemaVersion = 1
+)
 
 const runtimeRunColumns = runColumns
 
@@ -37,9 +40,6 @@ func (r *RuntimeRepository) Claim(ctx context.Context, command application.Claim
 		return application.ClaimResult{}, classify(err, "WORKFLOW_CLAIM_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := authorizeModelRuntimeClaim(ctx, tx, command); err != nil {
-		return application.ClaimResult{}, err
-	}
 	now, err := databaseNow(ctx, tx)
 	if err != nil {
 		return application.ClaimResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
@@ -76,7 +76,7 @@ func (r *RuntimeRepository) Claim(ctx context.Context, command application.Claim
 	if existing, found, queryErr := findAttemptByDelivery(ctx, tx, command.NodeRunID, command.DispatchNo, command.DeliveryID); queryErr != nil {
 		return application.ClaimResult{}, queryErr
 	} else if found {
-		if !sameModelRuntimeBinding(existing.ModelSettingsRevision, existing.ModelRuntimeInstanceID, command.ModelSettingsRevision, command.ModelRuntimeInstanceID) {
+		if !sameModelRuntimeOwner(existing.ModelSettingsRevision, existing.ModelRuntimeInstanceID, command.ModelRuntimeInstanceID) {
 			return application.ClaimResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_MODEL_RUNTIME_BINDING_MISMATCH", false, errors.New("workflow delivery model runtime binding differs"))
 		}
 		if existing.Status == domain.AttemptStatusRunning && existing.LeaseOwner == command.LeaseOwner && node.Status == domain.NodeStatusRunning && existing.LeaseUntil.After(now) && node.LeaseUntil != nil && node.LeaseUntil.After(now) {
@@ -116,6 +116,10 @@ func (r *RuntimeRepository) Claim(ctx context.Context, command application.Claim
 		}
 		return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionStale, ObservedNodeKind: node.NodeType, DuplicateDelivery: true})
 	}
+	modelSettingsRevision, modelRuntimeInstanceID, err := r.selectModelRuntimeClaimBinding(ctx, tx, command.ModelRuntimeInstanceID)
+	if err != nil {
+		return application.ClaimResult{}, err
+	}
 	leaseReclaimed := false
 	if node.Status == domain.NodeStatusRunning {
 		if node.Attempt < 1 {
@@ -143,7 +147,10 @@ WHERE node_run_id=$1 AND attempt_no=$4 AND status='running'`, string(node.ID), s
 	leaseUntil := now.Add(command.LeaseDuration)
 	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_attempt
 (id,node_run_id,attempt_no,dispatch_no,retry_no,river_job_id,river_job_attempt,delivery_id,lease_owner,lease_until,status,model_settings_revision,model_runtime_instance_id,started_at,heartbeat_at)
-VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,0),$8,$9,$10,'running',$11,$12::uuid,$13,$13)`, string(attemptID), string(node.ID), attemptNo, node.DispatchNo, node.RetryNo, command.RiverJobID, command.RiverJobAttempt, command.DeliveryID, command.LeaseOwner, leaseUntil, nullableInt64(command.ModelSettingsRevision), nullableFoundationID(command.ModelRuntimeInstanceID), now); err != nil {
+VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,0),$8,$9,$10,'running',$11,$12::uuid,$13,$13)`,
+		string(attemptID), string(node.ID), attemptNo, node.DispatchNo, node.RetryNo,
+		command.RiverJobID, command.RiverJobAttempt, command.DeliveryID, command.LeaseOwner,
+		leaseUntil, nullableInt64(modelSettingsRevision), nullableFoundationID(modelRuntimeInstanceID), now); err != nil {
 		return application.ClaimResult{}, classify(err, "WORKFLOW_ATTEMPT_CREATE_FAILED")
 	}
 	node, err = scanRuntimeNode(tx.QueryRow(ctx, `UPDATE workflow.node_run SET status='running',attempt=$2,lease_owner=$3,lease_until=$4,next_attempt_at=NULL,failure_class=NULL,error_kind=NULL,error_code=NULL,error_summary=NULL,updated_at=$5,version=version+1 WHERE id=$1 RETURNING `+runtimeNodeColumns, string(node.ID), attemptNo, command.LeaseOwner, leaseUntil, now))
@@ -164,43 +171,64 @@ VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,0),$8,$9,$10,'running',$11,$12::uuid,$13,$13)
 	return commitClaim(ctx, tx, application.ClaimResult{Disposition: application.ClaimDispositionClaimed, Definition: definition, Run: run, Node: node, Attempt: attempt, ObservedNodeKind: node.NodeType, DuplicateDelivery: leaseReclaimed, LeaseReclaimed: leaseReclaimed})
 }
 
-func authorizeModelRuntimeClaim(ctx context.Context, tx pgx.Tx, command application.ClaimCommand) error {
-	if command.ModelSettingsRevision == nil || command.ModelRuntimeInstanceID == nil {
-		if command.ModelSettingsRevision == nil && command.ModelRuntimeInstanceID == nil {
-			return nil
-		}
-		return foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_MODEL_RUNTIME_BINDING_INVALID", false, errors.New("workflow model runtime binding is incomplete"))
+// selectModelRuntimeClaimBinding owns new managed Attempt admission. It locks
+// the global state before the Worker serving row so activation commit and Claim
+// have one linearization order. Exact delivery replay never calls this helper.
+func (r *RuntimeRepository) selectModelRuntimeClaimBinding(ctx context.Context, tx pgx.Tx, owner *foundation.ID) (*int64, *foundation.ID, error) {
+	if owner == nil {
+		return nil, nil, nil
 	}
 	var statePhase string
 	var activeRevision int64
-	if err := tx.QueryRow(ctx, `SELECT phase,active_revision FROM ops.model_settings_state
-WHERE singleton=true FOR SHARE`).Scan(&statePhase, &activeRevision); err != nil {
+	var previousActiveRevision sql.NullInt64
+	if err := tx.QueryRow(ctx, `SELECT phase,active_revision,previous_active_revision
+FROM ops.model_settings_state WHERE singleton=true FOR SHARE`).Scan(&statePhase, &activeRevision, &previousActiveRevision); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_MODEL_RUNTIME_STATE_INVALID", false, errors.New("model settings singleton state is missing"))
+			return nil, nil, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_MODEL_RUNTIME_STATE_INVALID", false, errors.New("model settings singleton state is missing"))
 		}
-		return classify(err, "WORKFLOW_MODEL_RUNTIME_STATE_QUERY_FAILED")
+		return nil, nil, classify(err, "WORKFLOW_MODEL_RUNTIME_STATE_QUERY_FAILED")
 	}
-	if statePhase != "idle" && statePhase != "failed" && statePhase != "validating" {
-		return foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_MODEL_RUNTIME_CLAIM_BLOCKED", true, errors.New("model settings rollout blocks workflow claim"))
+	selectedRevision := activeRevision
+	switch statePhase {
+	case "idle", "failed":
+	case "preparing":
+		if !previousActiveRevision.Valid || previousActiveRevision.Int64 != activeRevision {
+			return nil, nil, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_MODEL_RUNTIME_STATE_INVALID", false, errors.New("preparing model settings state does not preserve active revision"))
+		}
+		selectedRevision = previousActiveRevision.Int64
+	case "arming", "activating":
+		return nil, nil, foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_MODEL_RUNTIME_CLAIM_BLOCKED", true, errors.New("model settings activation blocks new workflow claims"))
+	default:
+		return nil, nil, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_MODEL_RUNTIME_STATE_INVALID", false, errors.New("model settings activation phase is invalid"))
 	}
-	if activeRevision != *command.ModelSettingsRevision {
-		return modelRuntimeOwnershipLost()
+	if selectedRevision < 0 {
+		return nil, nil, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_MODEL_RUNTIME_STATE_INVALID", false, errors.New("model settings active revision is invalid"))
 	}
+
 	var instanceID string
 	var appliedRevision int64
-	var rolloutID *string
+	var rolloutID sql.NullString
 	var runtimePhase string
-	if err := tx.QueryRow(ctx, `SELECT instance_id::text,applied_revision,rollout_id::text,phase
-FROM ops.model_settings_runtime WHERE role='worker' FOR SHARE`).Scan(&instanceID, &appliedRevision, &rolloutID, &runtimePhase); err != nil {
+	var heartbeatAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT instance_id::text,applied_revision,rollout_id::text,phase,heartbeat_at
+FROM ops.model_settings_runtime WHERE role='worker' FOR SHARE`).Scan(&instanceID, &appliedRevision, &rolloutID, &runtimePhase, &heartbeatAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return modelRuntimeOwnershipLost()
+			return nil, nil, modelRuntimeOwnershipLost()
 		}
-		return classify(err, "WORKFLOW_MODEL_RUNTIME_QUERY_FAILED")
+		return nil, nil, classify(err, "WORKFLOW_MODEL_RUNTIME_QUERY_FAILED")
 	}
-	if foundation.ID(instanceID) != *command.ModelRuntimeInstanceID || appliedRevision != *command.ModelSettingsRevision || rolloutID != nil || runtimePhase != "active" {
-		return modelRuntimeOwnershipLost()
+	parsedInstanceID, err := foundation.ParseID(instanceID)
+	if err != nil {
+		return nil, nil, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_MODEL_RUNTIME_STATE_INVALID", false, errors.New("worker model runtime instance is invalid"))
 	}
-	return nil
+	freshnessNow, err := databaseNow(ctx, tx)
+	if err != nil {
+		return nil, nil, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
+	}
+	if parsedInstanceID != *owner || appliedRevision != selectedRevision || rolloutID.Valid || runtimePhase != "active" || heartbeatAt.Before(freshnessNow.Add(-r.modelRuntimeFreshWithin)) {
+		return nil, nil, modelRuntimeOwnershipLost()
+	}
+	return &selectedRevision, &parsedInstanceID, nil
 }
 
 func modelRuntimeOwnershipLost() error {
@@ -221,11 +249,11 @@ func nullableFoundationID(value *foundation.ID) any {
 	return string(*value)
 }
 
-func sameModelRuntimeBinding(leftRevision *int64, leftInstanceID *foundation.ID, rightRevision *int64, rightInstanceID *foundation.ID) bool {
-	if leftRevision == nil || leftInstanceID == nil || rightRevision == nil || rightInstanceID == nil {
-		return leftRevision == nil && leftInstanceID == nil && rightRevision == nil && rightInstanceID == nil
+func sameModelRuntimeOwner(revision *int64, instanceID *foundation.ID, owner *foundation.ID) bool {
+	if owner == nil {
+		return revision == nil && instanceID == nil
 	}
-	return *leftRevision == *rightRevision && *leftInstanceID == *rightInstanceID
+	return revision != nil && *revision >= 0 && instanceID != nil && *instanceID == *owner
 }
 
 func scanClaimDefinition(row pgx.Row) (domain.Definition, error) {

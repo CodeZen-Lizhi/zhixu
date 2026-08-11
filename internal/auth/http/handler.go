@@ -19,7 +19,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -94,41 +94,44 @@ func NewHandler(service Service, options Options) (*Handler, error) {
 }
 
 // OpenRoutes 注册无需既有 Session 的 Bootstrap 交换端点。
-func (handler *Handler) OpenRoutes(router chi.Router) {
-	router.Post("/auth/sessions", handler.exchangeBootstrap)
+func (handler *Handler) OpenRoutes(router gin.IRouter) {
+	router.POST("/auth/sessions", httpapi.GinHandler(handler.exchangeBootstrap))
 }
 
 // ProtectedRoutes 注册必须经过认证 Middleware 的凭据管理端点。
-func (handler *Handler) ProtectedRoutes(router chi.Router) {
-	router.Get("/auth/session", handler.currentSession)
-	router.Post("/auth/session/rotate", handler.rotateSession)
-	router.Delete("/auth/session", handler.revokeCurrentSession)
-	router.Post("/auth/api-tokens", handler.createAPIToken)
-	router.Get("/auth/api-tokens", handler.listAPITokens)
-	router.Delete("/auth/api-tokens/{token_id}", handler.revokeAPIToken)
+func (handler *Handler) ProtectedRoutes(router gin.IRouter) {
+	router.GET("/auth/session", httpapi.GinHandler(handler.currentSession))
+	router.POST("/auth/session/rotate", httpapi.GinHandler(handler.rotateSession))
+	router.DELETE("/auth/session", httpapi.GinHandler(handler.revokeCurrentSession))
+	router.POST("/auth/api-tokens", httpapi.GinHandler(handler.createAPIToken))
+	router.GET("/auth/api-tokens", httpapi.GinHandler(handler.listAPITokens))
+	router.DELETE("/auth/api-tokens/:token_id", httpapi.GinHandler(handler.revokeAPIToken))
 }
 
 // Middleware 验证 Session 或 Bearer Token，并执行 Origin/CSRF 与 Capability 策略。
-func (handler *Handler) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if handler == nil || handler.service == nil {
-			writeAuthProblem(writer, foundation.NewError(foundation.ErrorDependencyUnavailable, application.ErrorCodeUnavailable, true, errors.New("authentication handler is unavailable")))
+func (handler *Handler) Middleware(ginContext *gin.Context) {
+	request := ginContext.Request
+	if handler == nil || handler.service == nil {
+		writeAuthProblem(ginContext.Writer, foundation.NewError(foundation.ErrorDependencyUnavailable, application.ErrorCodeUnavailable, true, errors.New("authentication handler is unavailable")))
+		ginContext.Abort()
+		return
+	}
+	principal, err := handler.authenticate(request)
+	if err != nil {
+		writeAuthProblem(ginContext.Writer, err)
+		ginContext.Abort()
+		return
+	}
+	for _, required := range RequiredCapabilities(request) {
+		if err := application.Authorize(principal, required); err != nil {
+			writeAuthProblem(ginContext.Writer, err)
+			ginContext.Abort()
 			return
 		}
-		principal, err := handler.authenticate(request)
-		if err != nil {
-			writeAuthProblem(writer, err)
-			return
-		}
-		for _, required := range RequiredCapabilities(request) {
-			if err := application.Authorize(principal, required); err != nil {
-				writeAuthProblem(writer, err)
-				return
-			}
-		}
-		ctx := context.WithValue(request.Context(), principalKey{}, principal)
-		next.ServeHTTP(writer, request.WithContext(ctx))
-	})
+	}
+	ctx := context.WithValue(request.Context(), principalKey{}, principal)
+	ginContext.Request = request.WithContext(ctx)
+	ginContext.Next()
 }
 
 // PrincipalFromContext 返回已认证身份的独立 Scope 副本。
@@ -164,7 +167,7 @@ func RequiredCapabilities(request *http.Request) []capability.Capability {
 	if path == "/api/v1/system/status" || isAuthManagementPath(path) {
 		return nil
 	}
-	if path == "/api/v1/settings/models" || path == "/api/v1/settings/models/test" {
+	if path == "/api/v1/settings/models" || path == "/api/v1/settings/models/test" || path == "/api/v1/settings/models/activations" {
 		return []capability.Capability{capability.ManageSystemSettings}
 	}
 	if request.Method == http.MethodGet || request.Method == http.MethodHead || request.Method == http.MethodOptions {
@@ -198,6 +201,7 @@ func multipleCapabilities(method, pattern string, values ...capability.Capabilit
 var capabilityRoutes = []capabilityRoute{
 	oneCapability(http.MethodPut, "/api/v1/settings/models", capability.ManageSystemSettings),
 	oneCapability(http.MethodPost, "/api/v1/settings/models/test", capability.ManageSystemSettings),
+	oneCapability(http.MethodPost, "/api/v1/settings/models/activations", capability.ManageSystemSettings),
 	oneCapability(http.MethodPost, "/api/v1/search", capability.ReadLocal),
 	oneCapability(http.MethodPost, "/api/v1/graph/global", capability.ReadLocal),
 	oneCapability(http.MethodPost, "/api/v1/graph/neighborhood", capability.ReadLocal),
@@ -220,60 +224,60 @@ var capabilityRoutes = []capabilityRoute{
 	oneCapability(http.MethodPost, "/api/v1/artifacts/{artifact_id}/draft/approve", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/artifacts/{artifact_id}/exports/markdown", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/artifacts/{artifact_id}/publish-proposals", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/captures", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/capture-files", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/captures/{captureID}/retry", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/authoring/working-drafts", capability.WriteProposal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/authoring/working-drafts", capability.ReadLocal),
-	oneCapability(http.MethodPut, "/api/v1/workspaces/{workspaceID}/authoring/working-drafts/{draftID}", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/authoring/working-drafts/{draftID}/freeze", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/documents/{documentID}/revisions/{revisionID}/publish-proposals", capability.WriteProposal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/authoring/documents", capability.ReadLocal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/documents/{documentID}/history", capability.ReadLocal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/documents/{documentID}/history/compare", capability.ReadLocal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/documents/{documentID}/restore-previews", capability.ReadLocal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/documents/{documentID}/restore-proposals", capability.WriteProposal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/git-remote", capability.ReadLocal),
-	oneCapability(http.MethodPut, "/api/v1/workspaces/{workspaceID}/git-remote", capability.GitWrite),
-	oneCapability(http.MethodDelete, "/api/v1/workspaces/{workspaceID}/git-remote", capability.GitWrite),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/git-remote/tests", capability.GitWrite),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/git-sync", capability.ReadLocal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/git-sync/runs", capability.ReadLocal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/git-sync/runs/{runID}", capability.ReadLocal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/git-sync/runs", capability.GitWrite),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/git-sync/runs/{runID}/retries", capability.GitWrite),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/source-versions/{sourceVersionID}/knowledge-profile", capability.ReadLocal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/source-versions/{sourceVersionID}/knowledge-profile/retry", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/organizing/drafts", capability.WriteProposal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/organizing/drafts/{draftID}", capability.ReadLocal),
-	oneCapability(http.MethodPut, "/api/v1/workspaces/{workspaceID}/organizing/drafts/{draftID}", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/organizing/drafts/{draftID}/suggestions", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/organizing/drafts/{draftID}/materials", capability.WriteProposal),
-	oneCapability(http.MethodPatch, "/api/v1/workspaces/{workspaceID}/organizing/drafts/{draftID}/materials/{materialID}", capability.WriteProposal),
-	oneCapability(http.MethodDelete, "/api/v1/workspaces/{workspaceID}/organizing/drafts/{draftID}/materials/{materialID}", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/organizing/drafts/{draftID}/confirm", capability.WriteProposal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/organizing/materials/search", capability.ReadLocal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/organizing/snapshots/{snapshotID}", capability.ReadLocal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/organizing/templates", capability.ReadLocal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/organizing/templates", capability.WriteProposal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/organizing/templates/{templateID}", capability.ReadLocal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/organizing/templates/{templateID}/clone", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/organizing/templates/{templateID}/revisions", capability.WriteProposal),
-	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspaceID}/organizing/runs/{snapshotID}", capability.ReadLocal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/workflows", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workflows/{runID}/human-tasks/{taskID}/decision", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workflows/{runID}/pause", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workflows/{runID}/resume", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workflows/{runID}/cancel", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/proposals", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/impact-reports/{reportID}/proposals", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/captures", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/capture-files", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/captures/{capture_id}/retry", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/authoring/working-drafts", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/authoring/working-drafts", capability.ReadLocal),
+	oneCapability(http.MethodPut, "/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/authoring/working-drafts/{draft_id}/freeze", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/publish-proposals", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/authoring/documents", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/documents/{document_id}/history", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/documents/{document_id}/history/compare", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-previews", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore-proposals", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/git-remote", capability.ReadLocal),
+	oneCapability(http.MethodPut, "/api/v1/workspaces/{workspace_id}/git-remote", capability.GitWrite),
+	oneCapability(http.MethodDelete, "/api/v1/workspaces/{workspace_id}/git-remote", capability.GitWrite),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/git-remote/tests", capability.GitWrite),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/git-sync", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/git-sync/runs", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/git-sync/runs", capability.GitWrite),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/git-sync/runs/{run_id}/retries", capability.GitWrite),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/knowledge-profile", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/source-versions/{source_version_id}/knowledge-profile/retry", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/organizing/drafts", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}", capability.ReadLocal),
+	oneCapability(http.MethodPut, "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/suggestions", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials", capability.WriteProposal),
+	oneCapability(http.MethodPatch, "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials/{material_id}", capability.WriteProposal),
+	oneCapability(http.MethodDelete, "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/materials/{material_id}", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/organizing/drafts/{draft_id}/confirm", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/organizing/materials/search", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/organizing/snapshots/{snapshot_id}", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/organizing/templates", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/organizing/templates", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/clone", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/revisions", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/organizing/runs/{snapshot_id}", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/workflows", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workflows/{run_id}/human-tasks/{task_id}/decision", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workflows/{run_id}/pause", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workflows/{run_id}/resume", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workflows/{run_id}/cancel", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/proposals", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}/proposals", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/collections", capability.WriteProposal),
 	oneCapability(http.MethodPut, "/api/v1/collections/{collection_id}", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/collections/{collection_id}/archive", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/health/issues/{issue_id}/decisions", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/health/issues/{issue_id}/repair-proposals", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/graph/candidates/{candidate_id}/decisions", capability.WriteProposal),
-	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspaceID}/timeline/{eventID}/impact-analysis", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/review/decks", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/review/decks/{deck_id}/cards", capability.WriteProposal),
 	oneCapability(http.MethodPut, "/api/v1/review/cards/{card_id}", capability.WriteProposal),
@@ -303,11 +307,11 @@ var capabilityRoutes = []capabilityRoute{
 	oneCapability(http.MethodPut, "/api/v1/review/learning-paths/{path_id}/status", capability.WriteProposal),
 	oneCapability(http.MethodPut, "/api/v1/review/learning-paths/{path_id}/steps/{step_id}", capability.WriteProposal),
 
-	oneCapability(http.MethodPost, "/api/v1/proposals/{proposalID}/approvals", capability.WriteKnowledge),
-	oneCapability(http.MethodPost, "/api/v1/proposals/{proposalID}/apply-preflight", capability.WriteKnowledge),
+	oneCapability(http.MethodPost, "/api/v1/proposals/{proposal_id}/approvals", capability.WriteKnowledge),
+	oneCapability(http.MethodPost, "/api/v1/proposals/{proposal_id}/apply-preflight", capability.WriteKnowledge),
 
-	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspaceID}/scan", capability.ReadLocal, capability.IndexMaintenance),
-	multipleCapabilities(http.MethodPost, "/api/v1/source-versions/{sourceVersionID}/ingestion-attempts", capability.ReadLocal, capability.IndexMaintenance),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/scan", capability.ReadLocal, capability.IndexMaintenance),
+	multipleCapabilities(http.MethodPost, "/api/v1/source-versions/{source_version_id}/ingestion-attempts", capability.ReadLocal, capability.IndexMaintenance),
 	multipleCapabilities(http.MethodPost, "/api/v1/health/scans", capability.ReadLocal, capability.WriteProposal),
 	multipleCapabilities(http.MethodPut, "/api/v1/health/schedules", capability.ReadLocal, capability.WriteProposal),
 	multipleCapabilities(http.MethodPost, "/api/v1/graph/candidate-scans", capability.ReadLocal, capability.WriteProposal),
@@ -597,7 +601,7 @@ func (handler *Handler) revokeAPIToken(writer http.ResponseWriter, request *http
 	if rejectUnexpectedBody(writer, request) {
 		return
 	}
-	tokenID, err := foundation.ParseID(chi.URLParam(request, "token_id"))
+	tokenID, err := foundation.ParseID(request.PathValue("token_id"))
 	if err != nil {
 		httpapi.WriteProblem(writer, http.StatusBadRequest, application.ErrorCodeInvalid, "Token ID 无效", false, nil)
 		return

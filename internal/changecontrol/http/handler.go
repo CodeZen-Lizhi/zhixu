@@ -22,7 +22,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 // Service 定义 Change Control HTTP 所需的最小应用层契约。
@@ -64,14 +64,14 @@ func NewHandlerWithTimeout(service Service, downstreamUpdateTimeout time.Duratio
 }
 
 // Routes 注册 Proposal、Approval 与 Apply preflight 路由。
-func (h *Handler) Routes(router chi.Router) {
-	router.Post("/workspaces/{workspaceID}/proposals", h.createProposal)
-	router.Get("/workspaces/{workspaceID}/proposals", h.listProposals)
-	router.Post("/workspaces/{workspaceID}/impact-reports/{reportID}/proposals", h.createDownstreamUpdateProposal)
-	router.Get("/proposals/{proposalID}", h.getProposal)
-	router.Get("/proposals/{proposalID}/current-content", h.getProposalCurrentContent)
-	router.Post("/proposals/{proposalID}/approvals", h.decideProposal)
-	router.Post("/proposals/{proposalID}/apply-preflight", h.applyPreflight)
+func (h *Handler) Routes(router gin.IRouter) {
+	router.POST("/workspaces/:workspace_id/proposals", httpapi.GinHandler(h.createProposal))
+	router.GET("/workspaces/:workspace_id/proposals", httpapi.GinHandler(h.listProposals))
+	router.POST("/workspaces/:workspace_id/impact-reports/:report_id/proposals", httpapi.GinHandler(h.createDownstreamUpdateProposal))
+	router.GET("/proposals/:proposal_id", httpapi.GinHandler(h.getProposal))
+	router.GET("/proposals/:proposal_id/current-content", httpapi.GinHandler(h.getProposalCurrentContent))
+	router.POST("/proposals/:proposal_id/approvals", httpapi.GinHandler(h.decideProposal))
+	router.POST("/proposals/:proposal_id/apply-preflight", httpapi.GinHandler(h.applyPreflight))
 }
 
 type proposalCurrentContentResponse struct {
@@ -87,7 +87,7 @@ type proposalCurrentContentResponse struct {
 
 func (h *Handler) getProposalCurrentContent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	proposalID, err := foundation.ParseID(chi.URLParam(r, "proposalID"))
+	proposalID, err := foundation.ParseID(r.PathValue("proposal_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -148,7 +148,7 @@ func (h *Handler) listProposals(w http.ResponseWriter, r *http.Request) {
 		writeUnavailable(w)
 		return
 	}
-	workspaceID, err := foundation.ParseID(chi.URLParam(r, "workspaceID"))
+	workspaceID, err := foundation.ParseID(r.PathValue("workspace_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -322,16 +322,16 @@ type downstreamUpdateProposalCreateResponse struct {
 }
 
 type revisionResponse struct {
-	ID              string `json:"id"`
-	RevisionNo      int    `json:"revision_no"`
-	TargetMode      string `json:"target_mode"`
-	BaseHash        string `json:"base_hash"`
-	Content         string `json:"content"`
-	EvidenceSummary string `json:"evidence_summary"`
-	Risk            string `json:"risk"`
-	RollbackPlan    string `json:"rollback_plan"`
-	ChangeHash      string `json:"change_hash"`
-	CreatedAt       string `json:"created_at"`
+	ID              string                   `json:"id"`
+	RevisionNo      int                      `json:"revision_no"`
+	TargetMode      string                   `json:"target_mode"`
+	BaseHash        string                   `json:"base_hash"`
+	Content         string                   `json:"content"`
+	EvidenceSummary string                   `json:"evidence_summary"`
+	Risk            string                   `json:"risk"`
+	RollbackPlan    string                   `json:"rollback_plan"`
+	ChangeHash      string                   `json:"change_hash"`
+	CreatedAt       string                   `json:"created_at"`
 	Restore         *restoreDocumentResponse `json:"restore,omitempty"`
 }
 
@@ -504,7 +504,7 @@ type applyPreflightResponse struct {
 }
 
 func (h *Handler) createProposal(w http.ResponseWriter, r *http.Request) {
-	workspaceID, err := foundation.ParseID(chi.URLParam(r, "workspaceID"))
+	workspaceID, err := foundation.ParseID(r.PathValue("workspace_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -554,12 +554,12 @@ func (h *Handler) createDownstreamUpdateProposal(w http.ResponseWriter, r *http.
 		writeError(w, downstreamUpdateProposalInvalid("query parameters are not supported"))
 		return
 	}
-	workspaceID, err := parseDownstreamUpdateID(chi.URLParam(r, "workspaceID"))
+	workspaceID, err := parseDownstreamUpdateID(r.PathValue("workspace_id"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	reportID, err := parseDownstreamUpdateID(chi.URLParam(r, "reportID"))
+	reportID, err := parseDownstreamUpdateID(r.PathValue("report_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -668,7 +668,7 @@ func downstreamUpdateProposalInvalid(message string) error {
 }
 
 func (h *Handler) getProposal(w http.ResponseWriter, r *http.Request) {
-	proposalID, err := foundation.ParseID(chi.URLParam(r, "proposalID"))
+	proposalID, err := foundation.ParseID(r.PathValue("proposal_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -691,7 +691,7 @@ func (h *Handler) getProposal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) decideProposal(w http.ResponseWriter, r *http.Request) {
-	proposalID, err := foundation.ParseID(chi.URLParam(r, "proposalID"))
+	proposalID, err := foundation.ParseID(r.PathValue("proposal_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -729,7 +729,7 @@ func (h *Handler) decideProposal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) applyPreflight(w http.ResponseWriter, r *http.Request) {
-	proposalID, err := foundation.ParseID(chi.URLParam(r, "proposalID"))
+	proposalID, err := foundation.ParseID(r.PathValue("proposal_id"))
 	if err != nil {
 		writeError(w, err)
 		return

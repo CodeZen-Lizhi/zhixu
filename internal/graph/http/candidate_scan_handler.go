@@ -13,7 +13,6 @@ import (
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
 )
 
 type candidateScanStartRequest struct {
@@ -91,7 +90,7 @@ func (handler *CandidateHandler) getScan(w http.ResponseWriter, r *http.Request)
 		writeSemanticLinkError(w, err)
 		return
 	}
-	scanID, err := parseCandidateID(chi.URLParam(r, "scan_id"))
+	scanID, err := parseCandidateID(r.PathValue("scan_id"))
 	if err != nil {
 		writeSemanticLinkError(w, err)
 		return

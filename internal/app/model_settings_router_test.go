@@ -56,6 +56,16 @@ func (routerModelSettingsManager) Test(_ context.Context, command modelsettingsa
 	}, nil
 }
 
+func (routerModelSettingsManager) StartActivation(_ context.Context, command modelsettingsapplication.StartActivationCommand) (modelsettingsapplication.StartActivationResult, error) {
+	if command.TargetRevision != 0 || command.ExpectedDesiredRevision != 0 || command.ExpectedStateVersion != 1 {
+		return modelsettingsapplication.StartActivationResult{}, errors.New("unexpected model settings activation command")
+	}
+	return modelsettingsapplication.StartActivationResult{
+		State:    modelsettingsdomain.RolloutState{Phase: modelsettingsdomain.RolloutPhaseIdle, Version: 1},
+		Replayed: true,
+	}, nil
+}
+
 func TestRouterRegistersSessionOnlyModelSettingsRoutes(t *testing.T) {
 	router := newModelSettingsRouter(t)
 	tests := []struct {
@@ -64,10 +74,12 @@ func TestRouterRegistersSessionOnlyModelSettingsRoutes(t *testing.T) {
 		path     string
 		body     string
 		contains string
+		status   int
 	}{
-		{name: "get", method: http.MethodGet, path: "/api/v1/settings/models", contains: `"desired_settings"`},
-		{name: "put", method: http.MethodPut, path: "/api/v1/settings/models", body: disabledModelSettingsUpdateBody(), contains: `"desired_revision":1`},
-		{name: "test", method: http.MethodPost, path: "/api/v1/settings/models/test", body: chatModelSettingsTestBody(), contains: `"status":"ok"`},
+		{name: "get", method: http.MethodGet, path: "/api/v1/settings/models", contains: `"desired_settings"`, status: http.StatusOK},
+		{name: "put", method: http.MethodPut, path: "/api/v1/settings/models", body: disabledModelSettingsUpdateBody(), contains: `"desired_revision":1`, status: http.StatusOK},
+		{name: "test", method: http.MethodPost, path: "/api/v1/settings/models/test", body: chatModelSettingsTestBody(), contains: `"status":"ok"`, status: http.StatusOK},
+		{name: "activation", method: http.MethodPost, path: "/api/v1/settings/models/activations", body: `{"expected_revision":0}`, contains: `"restart_required":false`, status: http.StatusAccepted},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -80,7 +92,7 @@ func TestRouterRegistersSessionOnlyModelSettingsRoutes(t *testing.T) {
 			}
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, request)
-			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), test.contains) {
+			if response.Code != test.status || !strings.Contains(response.Body.String(), test.contains) {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
 			assertModelSettingsNoStore(t, response)
@@ -102,12 +114,16 @@ func TestRouterModelSettingsAuthenticationFailsClosed(t *testing.T) {
 		{name: "anonymous get", method: http.MethodGet, path: "/api/v1/settings/models", status: http.StatusUnauthorized, code: "AUTH_UNAUTHORIZED"},
 		{name: "anonymous put", method: http.MethodPut, path: "/api/v1/settings/models", body: disabledModelSettingsUpdateBody(), status: http.StatusUnauthorized, code: "AUTH_UNAUTHORIZED"},
 		{name: "anonymous test", method: http.MethodPost, path: "/api/v1/settings/models/test", body: chatModelSettingsTestBody(), status: http.StatusUnauthorized, code: "AUTH_UNAUTHORIZED"},
+		{name: "anonymous activation", method: http.MethodPost, path: "/api/v1/settings/models/activations", body: `{"expected_revision":0}`, status: http.StatusUnauthorized, code: "AUTH_UNAUTHORIZED"},
 		{name: "bearer get", method: http.MethodGet, path: "/api/v1/settings/models", setup: withModelSettingsBearer, status: http.StatusForbidden, code: "MODEL_SETTINGS_SESSION_REQUIRED"},
 		{name: "bearer put", method: http.MethodPut, path: "/api/v1/settings/models", body: disabledModelSettingsUpdateBody(), setup: withModelSettingsBearer, status: http.StatusForbidden, code: "MODEL_SETTINGS_SESSION_REQUIRED"},
 		{name: "bearer test", method: http.MethodPost, path: "/api/v1/settings/models/test", body: chatModelSettingsTestBody(), setup: withModelSettingsBearer, status: http.StatusForbidden, code: "MODEL_SETTINGS_SESSION_REQUIRED"},
+		{name: "bearer activation", method: http.MethodPost, path: "/api/v1/settings/models/activations", body: `{"expected_revision":0}`, setup: withModelSettingsBearer, status: http.StatusForbidden, code: "MODEL_SETTINGS_SESSION_REQUIRED"},
 		{name: "put missing origin", method: http.MethodPut, path: "/api/v1/settings/models", body: disabledModelSettingsUpdateBody(), setup: withModelSettingsSession, status: http.StatusForbidden, code: "AUTH_CSRF_REJECTED"},
 		{name: "test wrong origin", method: http.MethodPost, path: "/api/v1/settings/models/test", body: chatModelSettingsTestBody(), setup: withWrongModelSettingsOrigin, status: http.StatusForbidden, code: "AUTH_CSRF_REJECTED"},
 		{name: "put missing csrf", method: http.MethodPut, path: "/api/v1/settings/models", body: disabledModelSettingsUpdateBody(), setup: withModelSettingsOrigin, status: http.StatusForbidden, code: "AUTH_CSRF_REJECTED"},
+		{name: "activation missing origin", method: http.MethodPost, path: "/api/v1/settings/models/activations", body: `{"expected_revision":0}`, setup: withModelSettingsSession, status: http.StatusForbidden, code: "AUTH_CSRF_REJECTED"},
+		{name: "activation missing csrf", method: http.MethodPost, path: "/api/v1/settings/models/activations", body: `{"expected_revision":0}`, setup: withModelSettingsOrigin, status: http.StatusForbidden, code: "AUTH_CSRF_REJECTED"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -130,13 +146,15 @@ func TestRouterModelSettingsAuthenticationFailsClosed(t *testing.T) {
 
 func TestRouterModelSettingsMethodFailureIsNoStore(t *testing.T) {
 	router := newModelSettingsRouter(t)
-	request := httptest.NewRequest(http.MethodDelete, "/api/v1/settings/models", nil)
-	response := httptest.NewRecorder()
-	router.ServeHTTP(response, request)
-	if response.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	for _, path := range []string{"/api/v1/settings/models", "/api/v1/settings/models/activations"} {
+		request := httptest.NewRequest(http.MethodDelete, path, nil)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("path=%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+		assertModelSettingsNoStore(t, response)
 	}
-	assertModelSettingsNoStore(t, response)
 }
 
 func newModelSettingsRouter(t *testing.T) http.Handler {

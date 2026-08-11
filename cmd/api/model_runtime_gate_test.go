@@ -123,6 +123,29 @@ func TestStartAPIModelRuntimeReportsOwnershipLossAfterActivation(t *testing.T) {
 	}
 }
 
+func TestStartAPIActivationCoordinatorReportsFatalAndUnexpectedStop(t *testing.T) {
+	want := errors.New("activation ownership lost")
+	if err := <-startAPIActivationCoordinator(context.Background(), fakeAPIActivationCoordinator{runErr: want}); !errors.Is(err, want) {
+		t.Fatalf("fatal error=%v", err)
+	}
+
+	if err := <-startAPIActivationCoordinator(context.Background(), fakeAPIActivationCoordinator{}); err == nil || !strings.Contains(err.Error(), "stopped unexpectedly") {
+		t.Fatalf("unexpected stop error=%v", err)
+	}
+}
+
+func TestStartAPIActivationCoordinatorIgnoresNormalCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	coordinator := fakeAPIActivationCoordinator{waitForCancellation: true}
+	errorsChannel := startAPIActivationCoordinator(ctx, coordinator)
+	cancel()
+	select {
+	case err := <-errorsChannel:
+		t.Fatalf("normal cancellation reported as fatal: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
 func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErrors(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
 	if err != nil {
@@ -134,6 +157,7 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 	}
 
 	var startPosition token.Pos
+	var coordinatorStartPosition token.Pos
 	var activeWaitPosition token.Pos
 	var listenAndServePosition token.Pos
 	var shutdownPosition token.Pos
@@ -144,6 +168,9 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 		case *ast.CallExpr:
 			if identifier, ok := typed.Fun.(*ast.Ident); ok && identifier.Name == "startAPIModelRuntime" {
 				startPosition = typed.Pos()
+			}
+			if identifier, ok := typed.Fun.(*ast.Ident); ok && identifier.Name == "startAPIActivationCoordinator" {
+				coordinatorStartPosition = typed.Pos()
 			}
 			if selector, ok := typed.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "ListenAndServe" {
 				listenAndServePosition = typed.Pos()
@@ -158,7 +185,8 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 		case *ast.SelectStmt:
 			for _, statement := range typed.Body.List {
 				clause, ok := statement.(*ast.CommClause)
-				if ok && (receivesIdentifier(clause.Comm, "modelRuntimeErr") || receivesIdentifier(clause.Comm, "workspaceRuntimeErr")) {
+				if ok && (receivesIdentifier(clause.Comm, "modelRuntimeErr") ||
+					receivesIdentifier(clause.Comm, "activationCoordinatorErr") || receivesIdentifier(clause.Comm, "workspaceRuntimeErr")) {
 					runtimeErrorClauses = append(runtimeErrorClauses, clause)
 				}
 			}
@@ -170,19 +198,20 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 		return true
 	})
 
-	if startPosition == token.NoPos || activeWaitPosition == token.NoPos || listenAndServePosition == token.NoPos || shutdownPosition == token.NoPos {
-		t.Fatalf("startup positions start=%d active=%d serve=%d shutdown=%d", startPosition, activeWaitPosition, listenAndServePosition, shutdownPosition)
+	if startPosition == token.NoPos || coordinatorStartPosition == token.NoPos || activeWaitPosition == token.NoPos || listenAndServePosition == token.NoPos || shutdownPosition == token.NoPos {
+		t.Fatalf("startup positions start=%d active=%d coordinator=%d serve=%d shutdown=%d", startPosition, activeWaitPosition, coordinatorStartPosition, listenAndServePosition, shutdownPosition)
 	}
-	if !(startPosition < activeWaitPosition && activeWaitPosition < listenAndServePosition) {
-		t.Fatalf("managed runtime gate order start=%d active=%d serve=%d", startPosition, activeWaitPosition, listenAndServePosition)
+	if !(startPosition < activeWaitPosition && activeWaitPosition < coordinatorStartPosition && coordinatorStartPosition < listenAndServePosition) {
+		t.Fatalf("managed runtime gate order start=%d active=%d coordinator=%d serve=%d", startPosition, activeWaitPosition, coordinatorStartPosition, listenAndServePosition)
 	}
 	if managedGuard == nil || !(managedGuard.Body.Pos() < startPosition && activeWaitPosition < managedGuard.Body.End()) ||
-		managedGuard.End() >= listenAndServePosition {
+		coordinatorStartPosition >= managedGuard.Body.End() || managedGuard.End() >= listenAndServePosition {
 		t.Fatal("managed runtime activation wait does not guard the real HTTP serve startup path")
 	}
 
 	var beforeServeExit bool
 	var afterServeExit bool
+	var activationCoordinatorExit bool
 	for _, clause := range runtimeErrorClauses {
 		if clause.Pos() < listenAndServePosition {
 			if !containsReturnOne(clause) {
@@ -196,11 +225,68 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 			if clause.Pos() >= shutdownPosition {
 				t.Fatalf("served runtime error branch at %d bypasses shutdown at %d", clause.Pos(), shutdownPosition)
 			}
+			if receivesIdentifier(clause.Comm, "activationCoordinatorErr") {
+				activationCoordinatorExit = true
+			}
 			afterServeExit = true
 		}
 	}
-	if !beforeServeExit || !afterServeExit {
-		t.Fatalf("runtime error exits before_serve=%t after_serve=%t clauses=%d", beforeServeExit, afterServeExit, len(runtimeErrorClauses))
+	if !beforeServeExit || !afterServeExit || !activationCoordinatorExit {
+		t.Fatalf(
+			"runtime error exits before_serve=%t after_serve=%t activation_coordinator=%t clauses=%d",
+			beforeServeExit,
+			afterServeExit,
+			activationCoordinatorExit,
+			len(runtimeErrorClauses),
+		)
+	}
+}
+
+func TestAPIRunComposesHotModelsRuntimeAndActivationStarter(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runBody := findFunctionBody(file, "runAPI")
+	if runBody == nil {
+		t.Fatal("runAPI function was not found")
+	}
+
+	calls := map[string]bool{}
+	var activationStarterWired bool
+	var initialPhaseWired bool
+	ast.Inspect(runBody, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.CallExpr:
+			if selector, ok := typed.Fun.(*ast.SelectorExpr); ok {
+				calls[selector.Sel.Name] = true
+			}
+		case *ast.KeyValueExpr:
+			key, ok := typed.Key.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			value, valueOK := typed.Value.(*ast.Ident)
+			if key.Name == "ActivationStarter" && valueOK && value.Name == "modelActivationStarter" {
+				activationStarterWired = true
+			}
+			if key.Name == "InitialPhase" && mentionsIdentifier(typed.Value, "bootstrap") {
+				initialPhaseWired = true
+			}
+		}
+		return true
+	})
+
+	for _, constructor := range []string{"NewManagedModelsHost", "NewHotRuntimeController", "NewActivationCoordinator"} {
+		if !calls[constructor] {
+			t.Fatalf("runAPI does not call %s", constructor)
+		}
+	}
+	if !activationStarterWired {
+		t.Fatal("runAPI does not pass the durable activation starter to the model settings handler")
+	}
+	if !initialPhaseWired {
+		t.Fatal("runAPI does not preserve the managed bootstrap runtime phase")
 	}
 }
 
@@ -228,6 +314,21 @@ type fakeAPIModelRuntimeController struct {
 	runStarted chan struct{}
 	runResult  <-chan error
 	runErr     error
+}
+
+type fakeAPIActivationCoordinator struct {
+	runErr              error
+	waitForCancellation bool
+}
+
+func (coordinator fakeAPIActivationCoordinator) Run(ctx context.Context) error {
+	if coordinator.runErr != nil {
+		return coordinator.runErr
+	}
+	if coordinator.waitForCancellation {
+		<-ctx.Done()
+	}
+	return nil
 }
 
 func (controller *fakeAPIModelRuntimeController) Active() <-chan struct{} { return controller.active }

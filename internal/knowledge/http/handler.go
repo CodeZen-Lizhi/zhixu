@@ -21,7 +21,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	knowledgeapp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -60,11 +60,11 @@ func NewHandler(timeline TimelineService, impact ImpactService, timeout time.Dur
 }
 
 // Routes 在 /api/v1 下注册 Timeline 与 Impact 路由，不注册 Knowledge Event 写接口。
-func (handler *Handler) Routes(router chi.Router) {
-	router.Get("/workspaces/{workspace_id}/timeline", handler.listTimeline)
-	router.Get("/workspaces/{workspace_id}/timeline/{event_id}", handler.getTimelineEvent)
-	router.Post("/workspaces/{workspace_id}/timeline/{event_id}/impact-analysis", handler.analyzeImpact)
-	router.Get("/workspaces/{workspace_id}/impact-reports/{report_id}", handler.getImpactReport)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.GET("/workspaces/:workspace_id/timeline", httpapi.GinHandler(handler.listTimeline))
+	router.GET("/workspaces/:workspace_id/timeline/:event_id", httpapi.GinHandler(handler.getTimelineEvent))
+	router.POST("/workspaces/:workspace_id/timeline/:event_id/impact-analysis", httpapi.GinHandler(handler.analyzeImpact))
+	router.GET("/workspaces/:workspace_id/impact-reports/:report_id", httpapi.GinHandler(handler.getImpactReport))
 }
 
 // Available 报告 Timeline 与 Impact 两组公开查询是否都已组装。
@@ -77,7 +77,7 @@ func (handler *Handler) listTimeline(w http.ResponseWriter, r *http.Request) {
 		writeUnavailable(w)
 		return
 	}
-	workspaceID, err := parseID(chi.URLParam(r, "workspace_id"))
+	workspaceID, err := parseID(r.PathValue("workspace_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -299,11 +299,11 @@ func parseQuery(r *http.Request, allowed ...string) (url.Values, error) {
 }
 
 func parsePathIDs(r *http.Request, resourceParam string) (foundation.ID, foundation.ID, error) {
-	workspaceID, err := parseID(chi.URLParam(r, "workspace_id"))
+	workspaceID, err := parseID(r.PathValue("workspace_id"))
 	if err != nil {
 		return "", "", err
 	}
-	resourceID, err := parseID(chi.URLParam(r, resourceParam))
+	resourceID, err := parseID(r.PathValue(resourceParam))
 	return workspaceID, resourceID, err
 }
 

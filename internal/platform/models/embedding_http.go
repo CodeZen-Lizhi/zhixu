@@ -51,7 +51,7 @@ var (
 )
 
 type embeddingHTTPConfig struct {
-	client           *http.Client
+	client           *modelHTTPClient
 	endpointURL      string
 	contract         domain.EmbeddingContract
 	timeout          time.Duration
@@ -163,6 +163,13 @@ func appendEmbeddingPath(baseURL *url.URL, requestPath string) string {
 
 func (config embeddingHTTPConfig) contractCopy() domain.EmbeddingContract {
 	return config.contract
+}
+
+func (config embeddingHTTPConfig) closeModelResource() error {
+	if config.client == nil {
+		return nil
+	}
+	return config.client.Close()
 }
 
 func (config embeddingHTTPConfig) embed(ctx context.Context, request application.EmbedRequest, payload, result any) error {

@@ -15,7 +15,8 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/auth/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/go-chi/chi/v5"
+	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
+	"github.com/gin-gonic/gin"
 )
 
 const testOrigin = "http://127.0.0.1:8080"
@@ -156,7 +157,7 @@ func newTestHandler(t *testing.T) (*Handler, *application.Service) {
 
 func TestBootstrapSetsSecureCookieAndRejectsBadOrigin(t *testing.T) {
 	handler, _ := newTestHandler(t)
-	router := chi.NewRouter()
+	router := gin.New()
 	handler.OpenRoutes(router)
 
 	bad := httptest.NewRequest(http.MethodPost, "/auth/sessions", nil)
@@ -207,7 +208,7 @@ func TestBootstrapSetsSecureCookieAndRejectsBadOrigin(t *testing.T) {
 
 func TestAuthMutationEndpointsRejectUnexpectedRequestBodies(t *testing.T) {
 	handler, service := newTestHandler(t)
-	openRouter := chi.NewRouter()
+	openRouter := gin.New()
 	handler.OpenRoutes(openRouter)
 	bootstrap := httptest.NewRequest(http.MethodPost, "/auth/sessions", strings.NewReader(`{}`))
 	bootstrap.Header.Set("Authorization", "Bearer bootstrap-token-with-at-least-32-bytes")
@@ -229,7 +230,7 @@ func TestAuthMutationEndpointsRejectUnexpectedRequestBodies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	protected := chi.NewRouter()
+	protected := gin.New()
 	protected.Use(handler.Middleware)
 	handler.ProtectedRoutes(protected)
 	for _, endpoint := range []struct {
@@ -257,7 +258,7 @@ func TestAuthMutationEndpointsRejectUnexpectedRequestBodies(t *testing.T) {
 
 func TestBootstrapRejectsUnknownLengthBodyWithoutReading(t *testing.T) {
 	handler, _ := newTestHandler(t)
-	router := chi.NewRouter()
+	router := gin.New()
 	handler.OpenRoutes(router)
 
 	reader, writer := io.Pipe()
@@ -312,6 +313,7 @@ func TestRequiredCapabilityDoesNotTreatGraphCommandsAsReadQueries(t *testing.T) 
 		{path: "/api/v1/settings/models", method: http.MethodGet, want: []capability.Capability{capability.ManageSystemSettings}},
 		{path: "/api/v1/settings/models", method: http.MethodPut, want: []capability.Capability{capability.ManageSystemSettings}},
 		{path: "/api/v1/settings/models/test", method: http.MethodPost, want: []capability.Capability{capability.ManageSystemSettings}},
+		{path: "/api/v1/settings/models/activations", method: http.MethodPost, want: []capability.Capability{capability.ManageSystemSettings}},
 		{path: "/api/v1/collections/preview", method: http.MethodPost, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/exports", method: http.MethodPost, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/graph/candidates/10000000-0000-4000-8000-000000000001/decisions", method: http.MethodPost, want: []capability.Capability{capability.WriteProposal}},
@@ -361,21 +363,50 @@ func TestRequiredCapabilityDoesNotTreatGraphCommandsAsReadQueries(t *testing.T) 
 	}
 }
 
+func TestMiddlewareRejectsWriteKnowledgeScopeForModelActivation(t *testing.T) {
+	handler, service := newTestHandler(t)
+	credential, err := service.ExchangeBootstrap(context.Background(), "bootstrap-token-with-at-least-32-bytes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := service.AuthenticateSession(context.Background(), credential.Token, credential.CSRFToken, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := service.CreateAPIToken(context.Background(), owner, "knowledge-writer", []capability.Capability{capability.WriteKnowledge}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	router := gin.New()
+	router.Use(handler.Middleware)
+	router.POST("/api/v1/settings/models/activations", httpapi.GinHandler(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/settings/models/activations", nil)
+	request.Header.Set("Authorization", "Bearer "+token.Plain)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), application.ErrorCodeForbidden) {
+		t.Fatalf("model activation scope status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestMiddlewareEnforcesOriginCSRFAndCapability(t *testing.T) {
 	handler, service := newTestHandler(t)
 	credential, err := service.ExchangeBootstrap(context.Background(), "bootstrap-token-with-at-least-32-bytes")
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := chi.NewRouter()
+	router := gin.New()
 	router.Use(handler.Middleware)
-	router.Get("/read", func(writer http.ResponseWriter, request *http.Request) {
+	router.GET("/read", httpapi.GinHandler(func(writer http.ResponseWriter, request *http.Request) {
 		if _, ok := PrincipalFromContext(request.Context()); !ok {
 			t.Fatal("principal missing")
 		}
 		writer.WriteHeader(http.StatusNoContent)
-	})
-	router.Post("/write", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
+	}))
+	router.POST("/write", httpapi.GinHandler(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) }))
 
 	read := httptest.NewRequest(http.MethodGet, "/read", nil)
 	read.AddCookie(&http.Cookie{Name: SessionCookieName, Value: credential.Token})
@@ -439,7 +470,7 @@ func TestCurrentSessionHonorsBearerPriority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := chi.NewRouter()
+	router := gin.New()
 	router.Use(handler.Middleware)
 	handler.ProtectedRoutes(router)
 
@@ -467,11 +498,11 @@ func TestMiddlewareRejectsDuplicateAuthorizationAndSupportsScopedBearer(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := chi.NewRouter()
+	router := gin.New()
 	router.Use(handler.Middleware)
-	router.Get("/api/v1/read", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
-	router.Post("/api/v1/write", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
-	router.Post("/api/v1/exports", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
+	router.GET("/api/v1/read", httpapi.GinHandler(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) }))
+	router.POST("/api/v1/write", httpapi.GinHandler(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) }))
+	router.POST("/api/v1/exports", httpapi.GinHandler(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) }))
 
 	duplicate := httptest.NewRequest(http.MethodGet, "/api/v1/read", nil)
 	duplicate.Header.Add("Authorization", "Bearer "+token.Plain)
@@ -520,7 +551,7 @@ func TestRevokeMissingAPITokenReturnsNotFoundWithoutInvalidatingSession(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := chi.NewRouter()
+	router := gin.New()
 	router.Use(handler.Middleware)
 	handler.ProtectedRoutes(router)
 

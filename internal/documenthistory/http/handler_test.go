@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/domain"
@@ -263,9 +263,9 @@ func (service *historyHTTPServiceStub) totalCalls() int {
 	return service.listCalls + service.compareCalls + service.previewCalls + service.createCalls
 }
 
-func newHistoryHTTPRouter(service Service) chi.Router {
-	router := chi.NewRouter()
-	router.Route("/api/v1", NewHandler(service, time.Second).Routes)
+func newHistoryHTTPRouter(service Service) *gin.Engine {
+	router := gin.New()
+	NewHandler(service, time.Second).Routes(router.Group("/api/v1"))
 	return router
 }
 

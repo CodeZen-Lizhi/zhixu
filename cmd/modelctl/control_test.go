@@ -73,123 +73,107 @@ func TestParseCommandRejectsInvalidArguments(t *testing.T) {
 	}
 }
 
-func TestControllerDelegatesRolloutToCoordinatorSessions(t *testing.T) {
+func TestControllerRecoverUsesHotActivationBoundary(t *testing.T) {
 	t.Parallel()
-	log := []string{}
-	session := &fakeRolloutSession{
-		id: testRolloutID, log: &log,
-		resolved: modeldomain.ResolvedSettings{Revision: 2, Settings: modeldomain.CanonicalDisabledSettings()},
+	recovery := &fakeActivationRecovery{
+		result: modeldomain.ActivationRecovery{
+			State:  modeldomain.RolloutState{ID: testRolloutID, Phase: modeldomain.RolloutPhaseActivating, Version: 8},
+			Action: modeldomain.ActivationRecoveryAdoptedPostCommit,
+		},
 	}
-	coordinator := &fakeRolloutCoordinator{log: &log, session: session}
-	stdout := &bytes.Buffer{}
-	control := testController(coordinator, &fakePreflighter{log: &log}, stdout)
-	ctx := context.Background()
+	control := testController(recovery)
+	if err := control.execute(context.Background(), command{name: commandRecover}); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if recovery.calls != 1 {
+		t.Fatalf("RecoverActivation calls = %d, want 1", recovery.calls)
+	}
+	want := modelapplication.RecoverActivationCommand{LeaseDuration: activationRecoveryLease}
+	if recovery.command != want {
+		t.Fatalf("recovery command = %#v, want %#v", recovery.command, want)
+	}
+}
 
+func TestControllerRejectsLegacyRolloutCommandsWithoutMutation(t *testing.T) {
+	t.Parallel()
+	recovery := &fakeActivationRecovery{}
+	control := testController(recovery)
 	commands := []command{
-		{name: commandRecover},
 		{name: commandBegin},
 		{name: commandPreflight, rolloutID: testRolloutID, role: modeldomain.RuntimeRoleAPI},
 		{name: commandDrain, rolloutID: testRolloutID},
-		{name: commandWaitQuiesced, rolloutID: testRolloutID, waitTimeout: 7 * time.Second, pollInterval: 250 * time.Millisecond},
-		{name: commandWaitPrepared, rolloutID: testRolloutID, waitTimeout: 8 * time.Second, pollInterval: 500 * time.Millisecond},
+		{name: commandWaitQuiesced, rolloutID: testRolloutID, waitTimeout: time.Second, pollInterval: time.Millisecond},
+		{name: commandWaitPrepared, rolloutID: testRolloutID, waitTimeout: time.Second, pollInterval: time.Millisecond},
 		{name: commandCommit, rolloutID: testRolloutID},
 		{name: commandAbort, rolloutID: testRolloutID},
 	}
 	for _, command := range commands {
-		if err := control.execute(ctx, command); err != nil {
-			t.Fatalf("execute %s: %v", command.name, err)
+		if got := stableErrorCode(control.execute(context.Background(), command)); got != legacyRolloutErrorCode {
+			t.Fatalf("execute %s error code = %q, want %q", command.name, got, legacyRolloutErrorCode)
 		}
 	}
-	if got := stdout.String(); got != string(testRolloutID)+"\n" {
-		t.Fatalf("begin stdout = %q", got)
-	}
-	want := []string{
-		"recover", "begin",
-		"open", "load-target", "preflight:api", "renew-validating",
-		"open", "start-draining",
-		"open", "wait-quiesced:7s:250ms",
-		"open", "wait-prepared:8s:500ms",
-		"open", "commit",
-		"open", "abort:" + rolloutAbortedCode,
-	}
-	if !reflect.DeepEqual(log, want) {
-		t.Fatalf("operation order mismatch:\n got: %#v\nwant: %#v", log, want)
+	if recovery.calls != 0 {
+		t.Fatalf("legacy commands invoked activation recovery %d times", recovery.calls)
 	}
 }
 
-func TestControllerPreflightDestroysLoadedSecrets(t *testing.T) {
-	t.Parallel()
-	chat, err := modeldomain.NewSecret("preflight-chat-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	embedding, err := modeldomain.NewSecret("preflight-embedding-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	log := []string{}
-	session := &fakeRolloutSession{
-		id: testRolloutID, log: &log,
-		resolved: modeldomain.ResolvedSettings{
-			Revision: 2, Settings: modeldomain.CanonicalDisabledSettings(),
-			ChatAPIKey: chat, EmbeddingAPIKey: embedding,
-		},
-	}
-	control := testController(
-		&fakeRolloutCoordinator{log: &log, session: session},
-		&fakePreflighter{log: &log, err: errors.New("preflight failed")},
-		&bytes.Buffer{},
-	)
-	err = control.execute(context.Background(), command{name: commandPreflight, rolloutID: testRolloutID, role: modeldomain.RuntimeRoleWorker})
-	if err == nil {
-		t.Fatal("expected preflight failure")
-	}
-	for name, secret := range map[string]modeldomain.Secret{"chat": session.resolved.ChatAPIKey, "embedding": session.resolved.EmbeddingAPIKey} {
-		value := secret.Bytes()
-		if bytes.Contains(value, []byte("preflight")) || !allZero(value) {
-			t.Fatalf("%s secret was not destroyed", name)
-		}
+func TestRunCommandRejectsLegacyRolloutBeforeLoadingProcessDependencies(t *testing.T) {
+	t.Setenv("ZHIXU_MODEL_SETTINGS_MODE", "")
+	if got := stableErrorCode(runCommand(context.Background(), []string{"begin"}, &bytes.Buffer{})); got != legacyRolloutErrorCode {
+		t.Fatalf("runCommand legacy error code = %q, want %q", got, legacyRolloutErrorCode)
 	}
 }
 
-func TestControllerPreservesStableRecoverAndWaitCodes(t *testing.T) {
+func TestControllerPreservesActivationRecoveryError(t *testing.T) {
 	t.Parallel()
-	log := []string{}
-	conflict := foundation.NewError(
-		foundation.ErrorVersionConflict,
-		modeldomain.ErrorCodeRolloutConflict,
-		false,
-		errors.New("active rollout"),
+	want := foundation.NewError(
+		foundation.ErrorDependencyUnavailable,
+		modeldomain.ErrorCodeUnavailable,
+		true,
+		errors.New("database unavailable"),
 	)
-	coordinator := &fakeRolloutCoordinator{log: &log, recoverErr: conflict}
-	control := testController(coordinator, &fakePreflighter{log: &log}, &bytes.Buffer{})
-	if got := stableErrorCode(control.execute(context.Background(), command{name: commandRecover})); got != modeldomain.ErrorCodeRolloutInProgress {
-		t.Fatalf("recover error code = %q", got)
+	recovery := &fakeActivationRecovery{err: want}
+	err := testController(recovery).execute(context.Background(), command{name: commandRecover})
+	if !errors.Is(err, want) || stableErrorCode(err) != modeldomain.ErrorCodeUnavailable {
+		t.Fatalf("recover error = %v", err)
 	}
+}
 
-	session := &fakeRolloutSession{
-		id: testRolloutID, log: &log,
-		waitQuiescedErr: foundation.NewError(
-			foundation.ErrorRetryableFailure,
-			modeldomain.ErrorCodeRolloutWaitTimeout,
-			true,
-			errors.New("wait expired"),
-		),
+func TestControllerRequiresRecoveryBoundary(t *testing.T) {
+	t.Parallel()
+	for _, control := range []*controller{nil, {stdout: &bytes.Buffer{}}, {activations: &fakeActivationRecovery{}}} {
+		if got := stableErrorCode(control.execute(context.Background(), command{name: commandRecover})); got != "MODELCTL_ROLLOUT_STATE_INVALID" {
+			t.Fatalf("controller error code = %q", got)
+		}
 	}
-	coordinator.session = session
-	coordinator.recoverErr = nil
-	err := control.execute(context.Background(), command{
-		name: commandWaitQuiesced, rolloutID: testRolloutID,
-		waitTimeout: 20 * time.Millisecond, pollInterval: time.Millisecond,
-	})
-	if got := stableErrorCode(err); got != "MODELCTL_WAIT_TIMEOUT" {
-		t.Fatalf("wait error code = %q", got)
+	control := testController(&fakeActivationRecovery{})
+	if got := stableErrorCode(control.execute(nil, command{name: commandRecover})); got != "MODELCTL_ROLLOUT_STATE_INVALID" {
+		t.Fatalf("nil context error code = %q", got)
 	}
+}
 
-	coordinator.openErr = conflict
-	err = control.execute(context.Background(), command{name: commandDrain, rolloutID: testRolloutID})
-	if got := stableErrorCode(err); got != "MODELCTL_ROLLOUT_STATE_INVALID" {
-		t.Fatalf("open error code = %q", got)
+func TestModelctlDoesNotReferenceLegacyRolloutWriter(t *testing.T) {
+	t.Parallel()
+	for _, file := range []string{"control.go", "main.go"} {
+		source, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{
+			"NewRolloutCoordinator",
+			"RolloutSession",
+			"BeginRollout(",
+			"RenewValidating(",
+			"StartDraining(",
+			"WaitQuiesced(",
+			"WaitPrepared(",
+			"CommitRollout(",
+			"FailRollout(",
+		} {
+			if bytes.Contains(source, []byte(forbidden)) {
+				t.Fatalf("%s contains legacy rollout writer %q", file, forbidden)
+			}
+		}
 	}
 }
 
@@ -208,28 +192,6 @@ func TestModelctlExitCodeDistinguishesCommittedQueuePause(t *testing.T) {
 	}
 }
 
-func TestControllerDoesNotOwnRolloutStateMachine(t *testing.T) {
-	t.Parallel()
-	source, err := os.ReadFile("control.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{
-		"AdvanceRolloutCommand",
-		"RenewRolloutCommand",
-		"CommitRolloutCommand",
-		"FailRolloutCommand",
-		"PauseQueue(",
-		"ResumeQueue(",
-		"ExpectedPhase",
-		"FreshWithin",
-	} {
-		if bytes.Contains(source, []byte(forbidden)) {
-			t.Fatalf("control.go contains coordinator-owned operation %q", forbidden)
-		}
-	}
-}
-
 func TestStableErrorCodeDoesNotExposeCause(t *testing.T) {
 	t.Parallel()
 	secret := "do-not-print-this-secret"
@@ -242,101 +204,22 @@ func TestStableErrorCodeDoesNotExposeCause(t *testing.T) {
 	}
 }
 
-func testController(coordinator rolloutCoordinator, preflighter revisionPreflighter, stdout *bytes.Buffer) *controller {
-	return &controller{coordinator: coordinator, preflighter: preflighter, stdout: stdout}
+func testController(recovery activationRecovery) *controller {
+	return &controller{activations: recovery, stdout: &bytes.Buffer{}}
 }
 
-func allZero(value []byte) bool {
-	for _, character := range value {
-		if character != 0 {
-			return false
-		}
-	}
-	return true
+type fakeActivationRecovery struct {
+	calls   int
+	command modelapplication.RecoverActivationCommand
+	result  modeldomain.ActivationRecovery
+	err     error
 }
 
-type fakeRolloutCoordinator struct {
-	log        *[]string
-	session    rolloutSession
-	beginErr   error
-	openErr    error
-	recoverErr error
-}
-
-func (coordinator *fakeRolloutCoordinator) Begin(context.Context) (rolloutSession, error) {
-	*coordinator.log = append(*coordinator.log, "begin")
-	return coordinator.session, coordinator.beginErr
-}
-
-func (coordinator *fakeRolloutCoordinator) Open(_ context.Context, id foundation.ID) (rolloutSession, error) {
-	*coordinator.log = append(*coordinator.log, "open")
-	if id != testRolloutID {
-		return nil, stateError(errors.New("unexpected rollout id"))
-	}
-	return coordinator.session, coordinator.openErr
-}
-
-func (coordinator *fakeRolloutCoordinator) Recover(context.Context) (modeldomain.RolloutState, bool, error) {
-	*coordinator.log = append(*coordinator.log, "recover")
-	return modeldomain.RolloutState{}, false, coordinator.recoverErr
-}
-
-type fakeRolloutSession struct {
-	id              foundation.ID
-	log             *[]string
-	resolved        modeldomain.ResolvedSettings
-	loadErr         error
-	renewErr        error
-	drainErr        error
-	waitQuiescedErr error
-	waitPreparedErr error
-	commitErr       error
-	abortErr        error
-}
-
-func (session *fakeRolloutSession) ID() foundation.ID { return session.id }
-
-func (session *fakeRolloutSession) LoadTarget(context.Context) (modeldomain.ResolvedSettings, error) {
-	*session.log = append(*session.log, "load-target")
-	return session.resolved, session.loadErr
-}
-
-func (session *fakeRolloutSession) RenewValidating(context.Context) error {
-	*session.log = append(*session.log, "renew-validating")
-	return session.renewErr
-}
-
-func (session *fakeRolloutSession) StartDraining(context.Context) error {
-	*session.log = append(*session.log, "start-draining")
-	return session.drainErr
-}
-
-func (session *fakeRolloutSession) WaitQuiesced(_ context.Context, options modelapplication.WaitOptions) error {
-	*session.log = append(*session.log, "wait-quiesced:"+options.Timeout.String()+":"+options.PollInterval.String())
-	return session.waitQuiescedErr
-}
-
-func (session *fakeRolloutSession) WaitPrepared(_ context.Context, options modelapplication.WaitOptions) error {
-	*session.log = append(*session.log, "wait-prepared:"+options.Timeout.String()+":"+options.PollInterval.String())
-	return session.waitPreparedErr
-}
-
-func (session *fakeRolloutSession) Commit(context.Context) error {
-	*session.log = append(*session.log, "commit")
-	return session.commitErr
-}
-
-func (session *fakeRolloutSession) Abort(_ context.Context, errorCode string) error {
-	*session.log = append(*session.log, "abort:"+errorCode)
-	return session.abortErr
-}
-
-type fakePreflighter struct {
-	log *[]string
-	err error
-}
-
-func (preflighter *fakePreflighter) Preflight(_ context.Context, role modeldomain.RuntimeRole, _ modeldomain.ResolvedSettings) error {
-	*preflighter.log = append(*preflighter.log, "preflight:"+string(role))
-	return preflighter.err
+func (recovery *fakeActivationRecovery) RecoverActivation(
+	_ context.Context,
+	command modelapplication.RecoverActivationCommand,
+) (modeldomain.ActivationRecovery, error) {
+	recovery.calls++
+	recovery.command = command
+	return recovery.result, recovery.err
 }

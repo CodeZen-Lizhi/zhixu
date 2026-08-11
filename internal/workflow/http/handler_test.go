@@ -18,7 +18,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -228,8 +228,8 @@ func TestWorkflowControlContract(t *testing.T) {
 
 func TestWorkflowControlRequiresIdempotencyAndPositiveVersion(t *testing.T) {
 	service := &fakeService{}
-	router := chi.NewRouter()
-	router.Route("/api/v1", func(api chi.Router) { NewHandler(service).Routes(api) })
+	router := gin.New()
+	NewHandler(service).Routes(router.Group("/api/v1"))
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/workflows/"+string(testRunID)+"/pause", strings.NewReader(`{"expected_version":1}`))
 	request.Header.Set("X-Workspace-ID", string(testWorkspaceID))
 	recorder := httptest.NewRecorder()
@@ -264,13 +264,10 @@ func TestWorkflowCommandsCarryBearerPrincipalCapabilities(t *testing.T) {
 		controlResult: application.RunControlResult{WorkflowRunID: testRunID, Status: domain.RunStatusPaused, Version: 2, StatusURL: "/api/v1/workflows/" + string(testRunID), PauseRequested: true},
 		task:          domain.HumanTask{ID: testTaskID, RunID: testRunID, NodeRunID: testWorkspaceID, Status: domain.HumanTaskSubmitted, TargetVersion: 1, Decision: json.RawMessage(`{"approved":true}`), SubmittedAt: &now},
 	}
-	router := chi.NewRouter()
-	router.Route("/api/v1", func(api chi.Router) {
-		api.Group(func(protected chi.Router) {
-			protected.Use(authHandler.Middleware)
-			NewHandler(service).Routes(protected)
-		})
-	})
+	router := gin.New()
+	protected := router.Group("/api/v1")
+	protected.Use(authHandler.Middleware)
+	NewHandler(service).Routes(protected)
 
 	for _, test := range []struct {
 		path string
@@ -506,8 +503,8 @@ func serve(t *testing.T, service Service, method, path, body string) *httptest.R
 
 func serveWithWorkspaceHeader(t *testing.T, service Service, method, path, body, workspaceHeader string) *httptest.ResponseRecorder {
 	t.Helper()
-	router := chi.NewRouter()
-	router.Route("/api/v1", func(api chi.Router) { NewHandler(service).Routes(api) })
+	router := gin.New()
+	NewHandler(service).Routes(router.Group("/api/v1"))
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Idempotency-Key", "test-request")
 	if workspaceHeader != "" {
@@ -520,8 +517,8 @@ func serveWithWorkspaceHeader(t *testing.T, service Service, method, path, body,
 
 func serveWithReviewProjector(t *testing.T, service Service, projector HumanTaskReviewProjector, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	router := chi.NewRouter()
-	router.Route("/api/v1", func(api chi.Router) { NewHandler(service, projector).Routes(api) })
+	router := gin.New()
+	NewHandler(service, projector).Routes(router.Group("/api/v1"))
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Idempotency-Key", "test-request")
 	request.Header.Set("X-Workspace-ID", string(testWorkspaceID))

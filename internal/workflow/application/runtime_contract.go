@@ -70,9 +70,9 @@ type ClaimCommand struct {
 	DeliveryID      string
 	RiverJobID      int64
 	RiverJobAttempt int
-	// ModelSettingsRevision 是 Worker 启动时冻结的 managed 模型设置版本；nil 表示 static/unmanaged。
-	ModelSettingsRevision *int64
-	// ModelRuntimeInstanceID 是由 model-settings runtime 登记的 Worker 实例；必须与 managed revision 成对出现。
+	// ModelRuntimeInstanceID 是由 model-settings runtime 登记的 Worker 进程实例。
+	// Claim 只接收 owner 身份；新 Attempt 的 revision 必须由数据库从当前
+	// serving state 选择，不能由 River delivery 或调用方提交。
 	ModelRuntimeInstanceID *foundation.ID
 	LeaseOwner             string
 	LeaseDuration          time.Duration
@@ -360,14 +360,22 @@ func cloneCapabilities(values []capability.Capability) []capability.Capability {
 }
 
 func isValidClaimCommand(command ClaimCommand) bool {
-	return command.NodeRunID != "" && command.DispatchNo >= 1 && command.DeliveryID != "" && command.RiverJobID > 0 && command.RiverJobAttempt >= 0 && validModelRuntimeBinding(command.ModelSettingsRevision, command.ModelRuntimeInstanceID) && command.LeaseOwner != "" && command.LeaseDuration > 0
+	return command.NodeRunID != "" && command.DispatchNo >= 1 && command.DeliveryID != "" && command.RiverJobID > 0 && command.RiverJobAttempt >= 0 && validClaimRuntimeOwner(command.ModelRuntimeInstanceID) && command.LeaseOwner != "" && command.LeaseDuration > 0
 }
 
 func isValidClaimResult(command ClaimCommand, result ClaimResult) bool {
 	if result.Disposition == ClaimDispositionStale {
 		return result.Definition.ID == "" && result.Run.ID == "" && result.Node.ID == "" && result.Attempt.NodeRunID == "" && !result.LeaseReclaimed && (!result.DuplicateDelivery || strings.TrimSpace(result.ObservedNodeKind) != "")
 	}
-	return result.Disposition == ClaimDispositionClaimed && validClaimDefinition(result) && result.Run.ID != "" && result.Node.ID == command.NodeRunID && result.Node.RunID == result.Run.ID && result.Node.Status == domain.NodeStatusRunning && (result.ObservedNodeKind == "" || result.ObservedNodeKind == result.Node.NodeType) && (!result.LeaseReclaimed || result.DuplicateDelivery) && result.Attempt.ID != "" && result.Attempt.NodeRunID == command.NodeRunID && result.Attempt.AttemptNo >= 1 && result.Attempt.DispatchNo == command.DispatchNo && result.Attempt.DeliveryID == command.DeliveryID && result.Attempt.RiverJobID == command.RiverJobID && result.Attempt.RiverJobAttempt == command.RiverJobAttempt && sameModelRuntimeBinding(result.Attempt.ModelSettingsRevision, result.Attempt.ModelRuntimeInstanceID, command.ModelSettingsRevision, command.ModelRuntimeInstanceID) && result.Attempt.LeaseOwner == command.LeaseOwner && result.Attempt.Status == domain.AttemptStatusRunning
+	return result.Disposition == ClaimDispositionClaimed && validClaimDefinition(result) && result.Run.ID != "" && result.Node.ID == command.NodeRunID && result.Node.RunID == result.Run.ID && result.Node.Status == domain.NodeStatusRunning && (result.ObservedNodeKind == "" || result.ObservedNodeKind == result.Node.NodeType) && (!result.LeaseReclaimed || result.DuplicateDelivery) && result.Attempt.ID != "" && result.Attempt.NodeRunID == command.NodeRunID && result.Attempt.AttemptNo >= 1 && result.Attempt.DispatchNo == command.DispatchNo && result.Attempt.DeliveryID == command.DeliveryID && result.Attempt.RiverJobID == command.RiverJobID && result.Attempt.RiverJobAttempt == command.RiverJobAttempt && sameModelRuntimeOwner(result.Attempt.ModelSettingsRevision, result.Attempt.ModelRuntimeInstanceID, command.ModelRuntimeInstanceID) && result.Attempt.LeaseOwner == command.LeaseOwner && result.Attempt.Status == domain.AttemptStatusRunning
+}
+
+func validClaimRuntimeOwner(instanceID *foundation.ID) bool {
+	if instanceID == nil {
+		return true
+	}
+	parsed, err := foundation.ParseID(string(*instanceID))
+	return err == nil && parsed == *instanceID
 }
 
 func validModelRuntimeBinding(revision *int64, instanceID *foundation.ID) bool {
@@ -381,14 +389,17 @@ func validModelRuntimeBinding(revision *int64, instanceID *foundation.ID) bool {
 	return err == nil && parsed == *instanceID
 }
 
-func sameModelRuntimeBinding(leftRevision *int64, leftInstanceID *foundation.ID, rightRevision *int64, rightInstanceID *foundation.ID) bool {
-	if !validModelRuntimeBinding(leftRevision, leftInstanceID) || !validModelRuntimeBinding(rightRevision, rightInstanceID) {
+// sameModelRuntimeOwner verifies the immutable process ownership portion of a
+// persisted Attempt binding. Revision is deliberately database-owned and may
+// differ from the process's current active generation during exact replay.
+func sameModelRuntimeOwner(revision *int64, instanceID *foundation.ID, owner *foundation.ID) bool {
+	if !validModelRuntimeBinding(revision, instanceID) || !validClaimRuntimeOwner(owner) {
 		return false
 	}
-	if leftRevision == nil {
-		return rightRevision == nil
+	if owner == nil {
+		return revision == nil && instanceID == nil
 	}
-	return rightRevision != nil && *leftRevision == *rightRevision && *leftInstanceID == *rightInstanceID
+	return revision != nil && instanceID != nil && *instanceID == *owner
 }
 
 func validClaimDefinition(result ClaimResult) bool {

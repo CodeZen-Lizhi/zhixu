@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,12 +58,15 @@ func TestRuntimeNodeWorkerUsesDeliveryScopedLeaseOwner(t *testing.T) {
 	}
 }
 
-func TestRuntimeNodeWorkerBindsFrozenModelSettingsRevision(t *testing.T) {
-	runtime := &runtimeWorkerFake{claim: claimedRuntimeResult()}
-	executor := &capturingRuntimeExecutor{output: json.RawMessage(`{"ok":true}`)}
+func TestRuntimeNodeWorkerUsesPersistedModelSettingsRevisionAndFrozenRuntimeOwner(t *testing.T) {
 	revision := int64(7)
 	instanceID := foundation.ID("a0000000-0000-4000-8000-000000000077")
-	worker, err := NewRuntimeNodeWorker(runtimeExecutorRegistry(t, executor), runtime, "worker-a", time.Minute, time.Second, RuntimeWorkerOptions{ModelSettingsRevision: &revision, ModelRuntimeInstanceID: &instanceID})
+	claim := claimedRuntimeResult()
+	claim.Attempt.ModelSettingsRevision = cloneOptionalInt64(&revision)
+	claim.Attempt.ModelRuntimeInstanceID = cloneOptionalID(&instanceID)
+	runtime := &runtimeWorkerFake{claim: claim}
+	executor := &capturingRuntimeExecutor{output: json.RawMessage(`{"ok":true}`)}
+	worker, err := NewRuntimeNodeWorker(runtimeExecutorRegistry(t, executor), runtime, "worker-a", time.Minute, time.Second, RuntimeWorkerOptions{ModelRuntimeInstanceID: &instanceID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,8 +75,8 @@ func TestRuntimeNodeWorkerBindsFrozenModelSettingsRevision(t *testing.T) {
 	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.claimCommand.ModelSettingsRevision == nil || *runtime.claimCommand.ModelSettingsRevision != 7 || runtime.claimCommand.ModelRuntimeInstanceID == nil || *runtime.claimCommand.ModelRuntimeInstanceID != foundation.ID("a0000000-0000-4000-8000-000000000077") {
-		t.Fatalf("claim binding revision=%v instance=%v", runtime.claimCommand.ModelSettingsRevision, runtime.claimCommand.ModelRuntimeInstanceID)
+	if runtime.claimCommand.ModelRuntimeInstanceID == nil || *runtime.claimCommand.ModelRuntimeInstanceID != foundation.ID("a0000000-0000-4000-8000-000000000077") {
+		t.Fatalf("claim binding instance=%v", runtime.claimCommand.ModelRuntimeInstanceID)
 	}
 	if executor.execution.ModelSettingsRevision == nil || *executor.execution.ModelSettingsRevision != 7 {
 		t.Fatalf("execution revision=%v", executor.execution.ModelSettingsRevision)
@@ -85,8 +89,146 @@ func TestRuntimeNodeWorkerUsesNullModelRuntimeBindingForStaticMode(t *testing.T)
 	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.claimCommand.ModelSettingsRevision != nil || runtime.claimCommand.ModelRuntimeInstanceID != nil {
-		t.Fatalf("static claim binding revision=%v instance=%v", runtime.claimCommand.ModelSettingsRevision, runtime.claimCommand.ModelRuntimeInstanceID)
+	if runtime.claimCommand.ModelRuntimeInstanceID != nil {
+		t.Fatalf("static claim binding instance=%v", runtime.claimCommand.ModelRuntimeInstanceID)
+	}
+}
+
+func TestRuntimeNodeWorkerAcquiresAttemptExecutorLeaseAndReleasesAfterComplete(t *testing.T) {
+	revision := int64(9)
+	instanceID := foundation.ID("a0000000-0000-4000-8000-000000000099")
+	claim := claimedRuntimeResult()
+	claim.Attempt.ModelSettingsRevision = &revision
+	claim.Attempt.ModelRuntimeInstanceID = &instanceID
+	events := &runtimeLeaseEvents{}
+	executor := &runtimeLeaseExecutor{output: json.RawMessage(`{"leased":true}`), onExecute: func() { events.add("execute") }}
+	registry := runtimeExecutorRegistry(t, executor)
+	lease := &runtimeExecutorLeaseFake{registry: registry, onRelease: func() { events.add("release") }}
+	acquirer := &runtimeExecutorAcquirerFake{lease: lease}
+	runtime := &runtimeWorkerFake{claim: claim, onComplete: func() {
+		events.add("complete")
+		if got := lease.releaseCount(); got != 0 {
+			t.Errorf("lease released before completion: %d", got)
+		}
+	}}
+	worker, err := NewRuntimeNodeWorker(nil, runtime, "worker-a", time.Minute, time.Second, RuntimeWorkerOptions{RuntimeExecutorAcquirer: acquirer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	if calls := acquirer.callCount(); calls != 1 {
+		t.Fatalf("acquire calls=%d", calls)
+	}
+	acquired := acquirer.attempt()
+	if acquired.ModelSettingsRevision == nil || *acquired.ModelSettingsRevision != revision || acquired.ModelRuntimeInstanceID == nil || *acquired.ModelRuntimeInstanceID != instanceID {
+		t.Fatalf("acquired attempt binding=%+v", acquired)
+	}
+	if got := lease.releaseCount(); got != 1 {
+		t.Fatalf("lease releases=%d", got)
+	}
+	if got := events.snapshot(); len(got) != 3 || got[0] != "execute" || got[1] != "complete" || got[2] != "release" {
+		t.Fatalf("lifecycle=%v", got)
+	}
+}
+
+func TestRuntimeNodeWorkerHoldsAdmissionAcrossClaimAndAttemptAcquire(t *testing.T) {
+	revision := int64(0)
+	instanceID := foundation.ID("a0000000-0000-4000-8000-000000000100")
+	claim := claimedRuntimeResult()
+	claim.Attempt.ModelSettingsRevision = &revision
+	claim.Attempt.ModelRuntimeInstanceID = &instanceID
+	lease := &runtimeExecutorLeaseFake{registry: runtimeExecutorRegistry(t, runtimeExecutor{})}
+	admission := &runtimeExecutorAdmissionFake{lease: lease}
+	acquirer := &runtimeExecutorAdmittingFake{admission: admission}
+	runtime := &runtimeWorkerFake{claim: claim, onClaim: func() {
+		if acquirer.admitCallCount() != 1 || admission.acquireCallCount() != 0 {
+			t.Errorf("admission lifecycle at Claim = admit:%d acquire:%d", acquirer.admitCallCount(), admission.acquireCallCount())
+		}
+	}}
+	worker, err := NewRuntimeNodeWorker(nil, runtime, "worker-a", time.Minute, time.Second, RuntimeWorkerOptions{RuntimeExecutorAcquirer: acquirer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	if acquirer.directCallCount() != 0 || admission.acquireCallCount() != 1 || admission.releaseCount() != 1 {
+		t.Fatalf("admission lifecycle = direct:%d acquire:%d release:%d", acquirer.directCallCount(), admission.acquireCallCount(), admission.releaseCount())
+	}
+}
+
+func TestRuntimeNodeWorkerDoesNotAcquireForStaleOrClaimError(t *testing.T) {
+	acquirer := &runtimeExecutorAcquirerFake{lease: &runtimeExecutorLeaseFake{registry: runtimeExecutorRegistry(t, runtimeExecutor{})}}
+	staleRuntime := &runtimeWorkerFake{claim: application.ClaimResult{Disposition: application.ClaimDispositionStale}}
+	staleWorker, err := NewRuntimeNodeWorker(nil, staleRuntime, "worker-a", time.Minute, time.Second, RuntimeWorkerOptions{RuntimeExecutorAcquirer: acquirer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := staleWorker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	if got := acquirer.callCount(); got != 0 {
+		t.Fatalf("stale acquire calls=%d", got)
+	}
+
+	claimErr := errors.New("claim unavailable")
+	errorRuntime := &runtimeWorkerFake{claimErr: claimErr}
+	errorWorker, err := NewRuntimeNodeWorker(nil, errorRuntime, "worker-a", time.Minute, time.Second, RuntimeWorkerOptions{RuntimeExecutorAcquirer: acquirer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := errorWorker.Work(context.Background(), runtimeRiverJob()); !errors.Is(err, claimErr) {
+		t.Fatalf("claim error=%v", err)
+	}
+	if got := acquirer.callCount(); got != 0 {
+		t.Fatalf("claim-error acquire calls=%d", got)
+	}
+}
+
+func TestRuntimeNodeWorkerReleasesLeaseAfterExecutorResolutionFailure(t *testing.T) {
+	claim := claimedRuntimeResult()
+	registry, err := runtimeContractOnlyRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := &runtimeExecutorLeaseFake{registry: registry}
+	runtime := &runtimeWorkerFake{claim: claim, onFail: func() {
+		if got := lease.releaseCount(); got != 0 {
+			t.Errorf("lease released before failure settlement: %d", got)
+		}
+	}}
+	worker, err := NewRuntimeNodeWorker(nil, runtime, "worker-a", time.Minute, time.Second, RuntimeWorkerOptions{RuntimeExecutorAcquirer: &runtimeExecutorAcquirerFake{lease: lease}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.failCalls != 1 || runtime.completeCalls != 0 {
+		t.Fatalf("settlement fail=%d complete=%d", runtime.failCalls, runtime.completeCalls)
+	}
+	if got := lease.releaseCount(); got != 1 {
+		t.Fatalf("lease releases=%d", got)
+	}
+}
+
+func TestRuntimeNodeWorkerSettlesAcquireFailureWithoutExecuting(t *testing.T) {
+	claim := claimedRuntimeResult()
+	acquireErr := errors.New("runtime switching")
+	executor := &runtimeLeaseExecutor{output: json.RawMessage(`{"must_not_run":true}`)}
+	acquirer := &runtimeExecutorAcquirerFake{lease: &runtimeExecutorLeaseFake{registry: runtimeExecutorRegistry(t, executor)}, err: acquireErr}
+	runtime := &runtimeWorkerFake{claim: claim}
+	worker, err := NewRuntimeNodeWorker(nil, runtime, "worker-a", time.Minute, time.Second, RuntimeWorkerOptions{RuntimeExecutorAcquirer: acquirer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Work(context.Background(), runtimeRiverJob()); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.completeCalls != 0 || runtime.failCalls != 1 || !errors.Is(runtime.failCommand.Failure.Err, acquireErr) || executor.executions() != 0 {
+		t.Fatalf("runtime complete=%d fail=%d executions=%d", runtime.completeCalls, runtime.failCalls, executor.executions())
 	}
 }
 
@@ -426,6 +568,24 @@ func runtimeExecutorRegistry(t *testing.T, executor application.Executor) *appli
 	return registry
 }
 
+func runtimeContractOnlyRegistry() (*application.ExecutorRegistry, error) {
+	catalog, err := application.NewValidationCatalog([]int{1}, nil)
+	if err != nil {
+		return nil, err
+	}
+	registry, err := application.NewExecutorRegistry(catalog)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.RegisterContract(application.CanonicalJSONHashNodeKind, 1); err != nil {
+		return nil, err
+	}
+	if err := registry.Freeze(); err != nil {
+		return nil, err
+	}
+	return registry, nil
+}
+
 func runtimeRiverJob() *river.Job[NodeJobArgs] {
 	return &river.Job[NodeJobArgs]{JobRow: &rivertype.JobRow{ID: 41, Attempt: 1}, Args: NodeJobArgs{SchemaVersion: NodeJobSchemaVersion, NodeRunID: foundation.ID("a0000000-0000-4000-8000-000000000001"), DispatchNo: 1}}
 }
@@ -448,6 +608,32 @@ type runtimeExecutor struct {
 	result        application.ExecutionResult
 	err           error
 	waitForCancel bool
+}
+
+type runtimeLeaseExecutor struct {
+	mu sync.Mutex
+
+	output      json.RawMessage
+	onExecute   func()
+	executionsN int
+}
+
+func (executor *runtimeLeaseExecutor) Execute(context.Context, application.ExecutionContext) (application.ExecutionResult, error) {
+	executor.mu.Lock()
+	executor.executionsN++
+	onExecute := executor.onExecute
+	output := append(json.RawMessage(nil), executor.output...)
+	executor.mu.Unlock()
+	if onExecute != nil {
+		onExecute()
+	}
+	return application.ExecutionResult{Output: output}, nil
+}
+
+func (executor *runtimeLeaseExecutor) executions() int {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	return executor.executionsN
 }
 
 type capturingRuntimeExecutor struct {
@@ -479,6 +665,7 @@ type runtimeWorkerFake struct {
 	claimCommand     application.ClaimCommand
 	claimCalls       int
 	claimErr         error
+	onClaim          func()
 	heartbeat        application.HeartbeatResult
 	heartbeatErr     error
 	heartbeatCalls   int
@@ -486,10 +673,12 @@ type runtimeWorkerFake struct {
 	completeErr      error
 	completeCommand  application.CompleteDeliveryCommand
 	completeCalls    int
+	onComplete       func()
 	fail             application.DeliveryTransitionResult
 	failErr          error
 	failCommand      application.FailDeliveryCommand
 	failCalls        int
+	onFail           func()
 	humanWaitCommand application.HumanWaitTransition
 	humanWaitCalls   int
 }
@@ -500,9 +689,10 @@ func (f *runtimeWorkerFake) Claim(ctx context.Context, command application.Claim
 	f.claimCommand = command
 	if f.claim.Disposition == application.ClaimDispositionClaimed {
 		f.claim.Attempt.LeaseOwner = command.LeaseOwner
-		f.claim.Attempt.ModelSettingsRevision = cloneOptionalInt64(command.ModelSettingsRevision)
-		f.claim.Attempt.ModelRuntimeInstanceID = cloneOptionalID(command.ModelRuntimeInstanceID)
 		f.claim.Node.LeaseOwner = command.LeaseOwner
+	}
+	if f.onClaim != nil {
+		f.onClaim()
 	}
 	return f.claim, f.claimErr
 }
@@ -516,11 +706,17 @@ func (f *runtimeWorkerFake) Heartbeat(_ context.Context, command application.Hea
 func (f *runtimeWorkerFake) Complete(_ context.Context, command application.CompleteDeliveryCommand) (application.DeliveryTransitionResult, error) {
 	f.completeCalls++
 	f.completeCommand = command
+	if f.onComplete != nil {
+		f.onComplete()
+	}
 	return f.complete, f.completeErr
 }
 func (f *runtimeWorkerFake) Fail(_ context.Context, command application.FailDeliveryCommand) (application.DeliveryTransitionResult, error) {
 	f.failCalls++
 	f.failCommand = command
+	if f.onFail != nil {
+		f.onFail()
+	}
 	return f.fail, f.failErr
 }
 func (f *runtimeWorkerFake) WaitForHuman(_ context.Context, command application.HumanWaitTransition) (application.HumanTransitionResult, error) {
@@ -534,3 +730,164 @@ func (f *runtimeWorkerFake) SubmitHuman(context.Context, application.HumanDecisi
 
 var _ application.Executor = runtimeExecutor{}
 var _ RuntimeExecutionCoordinator = (*runtimeWorkerFake)(nil)
+
+type runtimeExecutorAcquirerFake struct {
+	mu sync.Mutex
+
+	lease       RuntimeExecutorLease
+	err         error
+	calls       int
+	lastAttempt domain.NodeAttempt
+}
+
+type runtimeExecutorAdmittingFake struct {
+	mu sync.Mutex
+
+	admission   RuntimeExecutorAdmission
+	admitCalls  int
+	directCalls int
+}
+
+func (acquirer *runtimeExecutorAdmittingFake) Admit(context.Context) (RuntimeExecutorAdmission, error) {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	acquirer.admitCalls++
+	return acquirer.admission, nil
+}
+
+func (acquirer *runtimeExecutorAdmittingFake) AcquireAttempt(context.Context, domain.NodeAttempt) (RuntimeExecutorLease, error) {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	acquirer.directCalls++
+	return nil, errors.New("direct attempt acquisition bypassed admission")
+}
+
+func (acquirer *runtimeExecutorAdmittingFake) admitCallCount() int {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	return acquirer.admitCalls
+}
+
+func (acquirer *runtimeExecutorAdmittingFake) directCallCount() int {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	return acquirer.directCalls
+}
+
+type runtimeExecutorAdmissionFake struct {
+	mu sync.Mutex
+
+	lease        RuntimeExecutorLease
+	acquireCalls int
+	releaseCalls int
+	released     bool
+}
+
+func (admission *runtimeExecutorAdmissionFake) AcquireAttempt(context.Context, domain.NodeAttempt) (RuntimeExecutorLease, error) {
+	admission.mu.Lock()
+	defer admission.mu.Unlock()
+	admission.acquireCalls++
+	if admission.released {
+		return nil, errors.New("attempt acquired after admission release")
+	}
+	return admission.lease, nil
+}
+
+func (admission *runtimeExecutorAdmissionFake) Release() {
+	admission.mu.Lock()
+	defer admission.mu.Unlock()
+	if admission.released {
+		return
+	}
+	admission.released = true
+	admission.releaseCalls++
+}
+
+func (admission *runtimeExecutorAdmissionFake) acquireCallCount() int {
+	admission.mu.Lock()
+	defer admission.mu.Unlock()
+	return admission.acquireCalls
+}
+
+func (admission *runtimeExecutorAdmissionFake) releaseCount() int {
+	admission.mu.Lock()
+	defer admission.mu.Unlock()
+	return admission.releaseCalls
+}
+
+func (acquirer *runtimeExecutorAcquirerFake) AcquireAttempt(_ context.Context, attempt domain.NodeAttempt) (RuntimeExecutorLease, error) {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	acquirer.calls++
+	acquirer.lastAttempt = attempt
+	acquirer.lastAttempt.ModelSettingsRevision = cloneOptionalInt64(attempt.ModelSettingsRevision)
+	acquirer.lastAttempt.ModelRuntimeInstanceID = cloneOptionalID(attempt.ModelRuntimeInstanceID)
+	return acquirer.lease, acquirer.err
+}
+
+func (acquirer *runtimeExecutorAcquirerFake) callCount() int {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	return acquirer.calls
+}
+
+func (acquirer *runtimeExecutorAcquirerFake) attempt() domain.NodeAttempt {
+	acquirer.mu.Lock()
+	defer acquirer.mu.Unlock()
+	attempt := acquirer.lastAttempt
+	attempt.ModelSettingsRevision = cloneOptionalInt64(attempt.ModelSettingsRevision)
+	attempt.ModelRuntimeInstanceID = cloneOptionalID(attempt.ModelRuntimeInstanceID)
+	return attempt
+}
+
+type runtimeExecutorLeaseFake struct {
+	mu sync.Mutex
+
+	registry     *application.ExecutorRegistry
+	onRelease    func()
+	releaseCalls int
+}
+
+func (lease *runtimeExecutorLeaseFake) Executors() *application.ExecutorRegistry {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	return lease.registry
+}
+
+func (lease *runtimeExecutorLeaseFake) Release() {
+	lease.mu.Lock()
+	lease.releaseCalls++
+	first := lease.releaseCalls == 1
+	onRelease := lease.onRelease
+	lease.mu.Unlock()
+	if first && onRelease != nil {
+		onRelease()
+	}
+}
+
+func (lease *runtimeExecutorLeaseFake) releaseCount() int {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	return lease.releaseCalls
+}
+
+type runtimeLeaseEvents struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (events *runtimeLeaseEvents) add(event string) {
+	events.mu.Lock()
+	defer events.mu.Unlock()
+	events.events = append(events.events, event)
+}
+
+func (events *runtimeLeaseEvents) snapshot() []string {
+	events.mu.Lock()
+	defer events.mu.Unlock()
+	return append([]string(nil), events.events...)
+}
+
+var _ application.Executor = (*runtimeLeaseExecutor)(nil)
+var _ RuntimeExecutorAcquirer = (*runtimeExecutorAcquirerFake)(nil)
+var _ RuntimeExecutorLease = (*runtimeExecutorLeaseFake)(nil)

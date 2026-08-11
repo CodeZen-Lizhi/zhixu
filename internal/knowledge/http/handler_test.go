@@ -16,7 +16,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	knowledgeapp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 func TestTimelineListAndDetailRoutesReturnWorkspaceBoundProjection(t *testing.T) {
@@ -468,7 +468,7 @@ func TestKnowledgeHTTPHandlerTimeoutCancelsDownstream(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service := &cancelAwareKnowledgeServiceStub{}
-			router := chi.NewRouter()
+			router := gin.New()
 			NewHandler(service, service, 10*time.Millisecond).Routes(router)
 
 			response := serveKnowledgeHTTP(router, test.method, test.path, test.body, test.headers)
@@ -555,7 +555,7 @@ func (service *impactServiceStub) GetReport(_ context.Context, _, _ foundation.I
 }
 
 func knowledgeHTTPRouter(timeline TimelineService, impact ImpactService) http.Handler {
-	router := chi.NewRouter()
+	router := gin.New()
 	NewHandler(timeline, impact, time.Second).Routes(router)
 	return router
 }

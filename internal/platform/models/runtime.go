@@ -3,6 +3,7 @@ package models
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
@@ -128,39 +129,60 @@ func (capability EmbeddingCapability) GoString() string { return capability.Stri
 type ModelRuntime struct {
 	chat      ChatCapability
 	embedding EmbeddingCapability
+	closeOnce sync.Once
+	closeErr  error
+}
+
+type modelResourceCloser interface {
+	closeModelResource() error
+}
+
+type modelRuntimeBuilders struct {
+	chat      func(config.Config) (agentapplication.ChatModel, error)
+	embedding func(config.Config) (retrievalapplication.Embedder, error)
 }
 
 // NewConfiguredModelRuntime validates model configuration and constructs each enabled adapter once.
 func NewConfiguredModelRuntime(cfg config.Config) (*ModelRuntime, error) {
+	return newConfiguredModelRuntime(cfg, modelRuntimeBuilders{
+		chat:      NewConfiguredChatModel,
+		embedding: NewConfiguredEmbedder,
+	})
+}
+
+func newConfiguredModelRuntime(cfg config.Config, builders modelRuntimeBuilders) (*ModelRuntime, error) {
 	if err := cfg.ValidateModels(); err != nil {
 		return nil, fmt.Errorf("model runtime configuration is invalid: %w", err)
+	}
+	if builders.chat == nil || builders.embedding == nil {
+		return nil, errors.New("model runtime builders are unavailable")
 	}
 	runtime := &ModelRuntime{
 		chat:      ChatCapability{state: CapabilityDisabled},
 		embedding: EmbeddingCapability{state: CapabilityDisabled},
 	}
 	if cfg.ChatProvider != config.ChatProviderDisabled {
-		chat, err := NewConfiguredChatModel(cfg)
+		chat, err := builders.chat(cfg)
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(err, closeModelResource(chat))
 		}
 		contractProvider, ok := chat.(interface{ Contract() ChatContract })
 		if !ok {
-			return nil, errors.New("configured chat adapter contract is unavailable")
+			return nil, errors.Join(errors.New("configured chat adapter contract is unavailable"), closeModelResource(chat))
 		}
 		runtime.chat = ChatCapability{state: CapabilityConfigured, model: chat, contract: contractProvider.Contract()}
 	}
 	if cfg.EmbeddingProvider != config.EmbeddingProviderDisabled {
-		embedder, err := NewConfiguredEmbedder(cfg)
+		embedder, err := builders.embedding(cfg)
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(err, closeModelResource(embedder), runtime.Close())
 		}
 		if embedder == nil {
-			return nil, errors.New("configured embedding adapter is unavailable")
+			return nil, errors.Join(errors.New("configured embedding adapter is unavailable"), runtime.Close())
 		}
 		binding := embedder.Contract()
 		if err := retrievaldomain.ValidateEmbeddingContract(binding); err != nil {
-			return nil, errors.New("configured embedding adapter contract is invalid")
+			return nil, errors.Join(errors.New("configured embedding adapter contract is invalid"), closeModelResource(embedder), runtime.Close())
 		}
 		runtime.embedding = EmbeddingCapability{
 			state: CapabilityConfigured, embedder: embedder,
@@ -168,6 +190,29 @@ func NewConfiguredModelRuntime(cfg config.Config) (*ModelRuntime, error) {
 		}
 	}
 	return runtime, nil
+}
+
+// Close 幂等关闭本 runtime 自建 Adapter 拥有的 idle HTTP transports。
+// 外部注入 client 的 RoundTripper 不属于 runtime，不会在此关闭。
+func (runtime *ModelRuntime) Close() error {
+	if runtime == nil {
+		return nil
+	}
+	runtime.closeOnce.Do(func() {
+		runtime.closeErr = errors.Join(
+			closeModelResource(runtime.chat.model),
+			closeModelResource(runtime.embedding.embedder),
+		)
+	})
+	return runtime.closeErr
+}
+
+func closeModelResource(resource any) error {
+	closer, ok := resource.(modelResourceCloser)
+	if !ok || closer == nil {
+		return nil
+	}
+	return closer.closeModelResource()
 }
 
 // Chat returns the frozen Chat capability.

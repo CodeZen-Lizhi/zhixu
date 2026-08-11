@@ -14,7 +14,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/collection/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -289,9 +289,9 @@ func TestCollectionRejectsCrossWorkspaceProjection(t *testing.T) {
 	}
 }
 
-func newRouter(service Service) chi.Router {
-	router := chi.NewRouter()
-	router.Route("/api/v1", NewHandler(service, time.Second).Routes)
+func newRouter(service Service) *gin.Engine {
+	router := gin.New()
+	NewHandler(service, time.Second).Routes(router.Group("/api/v1"))
 	return router
 }
 

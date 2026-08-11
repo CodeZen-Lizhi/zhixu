@@ -55,6 +55,9 @@ List(context.Context, ListQuery) (ArtifactPage, error)
 - `StartRevision` 只允许 DRAFT/APPROVED/EXPORTED 回到 GENERATING；当前 Revision 保持不可变，随后人工 GAP 或受控生成可替换已有章节并创建下一 Revision。
 - Section generation 复用受控 Agent/Workflow。Workflow 成功只有在同事务校验 Model Run 与 output receipt 后才可写入
   Revision；缺失或不一致进入 `RECOVERY_REQUIRED`，不能伪造成功。
+- Artifact generation 创建的 `agent.model_run.model_settings_revision` 必须逐值复制 Workflow Execution/Attempt provenance；
+  `nil` static、managed `0` 与正 revision 语义不同。running replay 必须把该字段纳入 exact binding，相异时在 Provider 调用前
+  fail closed，不能把重放归到当前 active generation。
 - Export/Publish 必须先执行 reservation-aware 只读 probe：已有不同 owner 优先返回 409；无 reservation 或完整 owner 才返回
   current state。Application 对该 state 执行完整、无副作用的 Domain preflight（包括状态和时间），通过后才能 durable reserve，
   随后对 Reserve 返回的 state 再做同一完整领域校验。非法状态或非法时钟不得创建 reservation；完整 owner 可恢复，其他 key、
@@ -77,6 +80,7 @@ List(context.Context, ListQuery) (ArtifactPage, error)
 | Citation 伪造、跨 Workspace、span/hash/excerpt 漂移或非正式知识 | 请求失败，不写 Revision/receipt |
 | GAP 带正文或 Citation，非 Export/Publish 携带 side fact | 请求失败，Artifact、receipt、side fact、reservation 全部不变 |
 | generation dependency disabled | 503 capability unavailable；人工 GAP/section 路径仍按领域规则工作 |
+| Model Run replay 的 model settings revision 与 Attempt 不同 | `ARTIFACT_WORKFLOW_MODEL_RUN_REPLAY_UNSAFE`，Provider 与 finalizer 调用数为 0 |
 | Export/Publish 外部成功但响应丢失 | 相同完整 binding 恢复并只产生一个外部事实 |
 | 00039-00043 存在受保护业务数据时 Down | SQLSTATE `55000`，迁移版本和数据保持不变 |
 
@@ -90,6 +94,8 @@ List(context.Context, ListQuery) (ArtifactPage, error)
 ### 6. Tests Required
 
 - Domain/Application：完整状态序列、非法转换、Revision/hash、Coverage/GAP、receipt replay 和错误映射。
+- Workflow/Agent provenance：`nil|0|positive` revision 复制、指针隔离、replay equality、负 revision 拒绝，
+  以及 PostgreSQL Model Run 持久化/恢复与 Attempt revision 一致。
 - PostgreSQL：Workspace 隔离、CAS、同 key replay、同 key/hash PLAN 不同候选 ID、不同 key race、六类非法 side-fact 组合、reservation owner/recovery/
   terminal close，使用 `-race -tags=integration -count=3 -p 1`。
 - Migration：00039-00043 空库 Up、重复 Up、Down-Up、CHECK/FK/trigger、guarded Down；只运行 Artifact 专属测试，
@@ -108,6 +114,9 @@ Correct: reservation-aware probe -> 完整无副作用 Domain preflight -> durab
 
 Wrong: Workflow 显示 succeeded 就直接接受模型正文和 Citation。
 Correct: terminal hook 在 PostgreSQL 事务内校验 Model Run 与 output receipt，Application 再执行服务器证据复核和领域状态机。
+
+Wrong: Artifact replay 只比较 Prompt/Profile/Schema，并使用当前 active 模型继续旧 Attempt。
+Correct: Model Run 持久化并精确比较 Attempt 的 model settings revision；漂移在任何 Provider 调用前拒绝。
 
 Wrong: 把 PLAN 调用内随机生成的候选 Artifact ID 当作客户端请求身份，导致同 key/hash 并发 loser 与 winner 冲突。
 Correct: PLAN receipt 以 Workspace/key/hash/command/version 识别请求并返回 winner ID；只有后续 transition 把 Artifact ID 纳入 identity。

@@ -140,6 +140,7 @@ type RuntimeRegistration struct {
 	AppliedRevision int64
 	RolloutID       *foundation.ID
 	Phase           domain.RuntimePhase
+	StaleAfter      time.Duration
 }
 
 // RuntimeHeartbeat is a strict role/instance/rollout ownership CAS.
@@ -156,6 +157,119 @@ type RuntimePhaseCommand struct {
 	RolloutID     *foundation.ID
 	ExpectedPhase domain.RuntimePhase
 	NextPhase     domain.RuntimePhase
+}
+
+// RestoreRuntimeAvailabilityCommand repairs one same-owner, same-revision
+// serving runtime after its local generation has been rebuilt successfully.
+type RestoreRuntimeAvailabilityCommand struct {
+	Role            domain.RuntimeRole
+	InstanceID      foundation.ID
+	AppliedRevision int64
+}
+
+// StartActivationCommand fixes an exact desired revision under state-version CAS.
+type StartActivationCommand struct {
+	RolloutID               foundation.ID
+	TargetRevision          int64
+	ExpectedDesiredRevision int64
+	ExpectedStateVersion    int64
+	LeaseDuration           time.Duration
+	FreshWithin             time.Duration
+}
+
+// StartActivationResult distinguishes a durable start from a same-target replay or already-active no-op.
+type StartActivationResult struct {
+	State    domain.RolloutState
+	Replayed bool
+}
+
+// RenewActivationCommand renews one exact live operation under phase/version CAS.
+type RenewActivationCommand struct {
+	RolloutID       foundation.ID
+	ExpectedPhase   domain.RolloutPhase
+	ExpectedVersion int64
+	LeaseDuration   time.Duration
+}
+
+// AdvanceActivationCommand advances preparing to arming under phase/version CAS.
+type AdvanceActivationCommand struct {
+	RolloutID       foundation.ID
+	ExpectedPhase   domain.RolloutPhase
+	ExpectedVersion int64
+	NextPhase       domain.RolloutPhase
+	LeaseDuration   time.Duration
+	FreshWithin     time.Duration
+}
+
+// FailActivationCommand records a pre-commit failure under phase/version CAS.
+type FailActivationCommand struct {
+	RolloutID       foundation.ID
+	ExpectedPhase   domain.RolloutPhase
+	ExpectedVersion int64
+	ErrorCode       string
+}
+
+// CommitActivationCommand performs the sole active-revision change.
+type CommitActivationCommand struct {
+	RolloutID       foundation.ID
+	ExpectedVersion int64
+	FreshWithin     time.Duration
+	LeaseDuration   time.Duration
+}
+
+// FinalizeActivationCommand clears a fully acknowledged post-commit operation.
+type FinalizeActivationCommand struct {
+	RolloutID       foundation.ID
+	ExpectedVersion int64
+	FreshWithin     time.Duration
+}
+
+// RecoverActivationCommand supplies the bounded lease policy for one recovery pass.
+type RecoverActivationCommand struct {
+	LeaseDuration time.Duration
+}
+
+// ParticipantRegistration claims one role's candidate for the current serving owner.
+type ParticipantRegistration struct {
+	RolloutID      foundation.ID
+	Role           domain.RuntimeRole
+	InstanceID     foundation.ID
+	TargetRevision int64
+	InitialPhase   domain.ParticipantPhase
+	StaleAfter     time.Duration
+}
+
+// ParticipantHeartbeat is an ownership and version CAS.
+type ParticipantHeartbeat struct {
+	RolloutID       foundation.ID
+	Role            domain.RuntimeRole
+	InstanceID      foundation.ID
+	TargetRevision  int64
+	ExpectedPhase   domain.ParticipantPhase
+	ExpectedVersion int64
+}
+
+// ParticipantTransitionCommand advances one same-owner participant row.
+type ParticipantTransitionCommand struct {
+	RolloutID       foundation.ID
+	Role            domain.RuntimeRole
+	InstanceID      foundation.ID
+	TargetRevision  int64
+	ExpectedPhase   domain.ParticipantPhase
+	ExpectedVersion int64
+	NextPhase       domain.ParticipantPhase
+	ErrorCode       string
+	ErrorRetryable  bool
+}
+
+// ActivationAcknowledgement atomically publishes one role's local target installation.
+type ActivationAcknowledgement struct {
+	RolloutID                  foundation.ID
+	Role                       domain.RuntimeRole
+	InstanceID                 foundation.ID
+	TargetRevision             int64
+	ExpectedStateVersion       int64
+	ExpectedParticipantVersion int64
 }
 
 // RevisionStore owns desired revisions and transient credential resolution.
@@ -183,6 +297,45 @@ type RuntimeStore interface {
 	SetRuntimePhase(context.Context, RuntimePhaseCommand) (domain.RuntimeRecord, error)
 }
 
+// RuntimeAvailabilityStore owns the narrow unavailable-to-active recovery CAS.
+type RuntimeAvailabilityStore interface {
+	RestoreRuntimeAvailability(context.Context, RestoreRuntimeAvailabilityCommand) (domain.RuntimeRecord, error)
+}
+
+// ActivationStore owns the durable global hot-activation protocol.
+type ActivationStore interface {
+	StartActivation(context.Context, StartActivationCommand) (StartActivationResult, error)
+	RenewActivation(context.Context, RenewActivationCommand) (domain.RolloutState, error)
+	AdvanceActivation(context.Context, AdvanceActivationCommand) (domain.RolloutState, error)
+	FailActivation(context.Context, FailActivationCommand) (domain.RolloutState, error)
+	CommitActivation(context.Context, CommitActivationCommand) (domain.RolloutState, error)
+	AcknowledgeActivation(context.Context, ActivationAcknowledgement) (domain.ParticipantRecord, error)
+	FinalizeActivation(context.Context, FinalizeActivationCommand) (domain.RolloutState, error)
+	RecoverActivation(context.Context, RecoverActivationCommand) (domain.ActivationRecovery, error)
+}
+
+// ParticipantStore owns role-local candidate lifecycle records.
+type ParticipantStore interface {
+	RegisterParticipant(context.Context, ParticipantRegistration) (domain.ParticipantRecord, error)
+	HeartbeatParticipant(context.Context, ParticipantHeartbeat) (domain.ParticipantRecord, error)
+	TransitionParticipant(context.Context, ParticipantTransitionCommand) (domain.ParticipantRecord, error)
+}
+
+// ActivationControl is the application-facing hot-activation state contract.
+type ActivationControl interface {
+	StartActivation(context.Context, StartActivationCommand) (StartActivationResult, error)
+	RenewActivation(context.Context, RenewActivationCommand) (domain.RolloutState, error)
+	AdvanceActivation(context.Context, AdvanceActivationCommand) (domain.RolloutState, error)
+	FailActivation(context.Context, FailActivationCommand) (domain.RolloutState, error)
+	CommitActivation(context.Context, CommitActivationCommand) (domain.RolloutState, error)
+	AcknowledgeActivation(context.Context, ActivationAcknowledgement) (domain.ParticipantRecord, error)
+	FinalizeActivation(context.Context, FinalizeActivationCommand) (domain.RolloutState, error)
+	RecoverActivation(context.Context, RecoverActivationCommand) (domain.ActivationRecovery, error)
+	RegisterParticipant(context.Context, ParticipantRegistration) (domain.ParticipantRecord, error)
+	HeartbeatParticipant(context.Context, ParticipantHeartbeat) (domain.ParticipantRecord, error)
+	TransitionParticipant(context.Context, ParticipantTransitionCommand) (domain.ParticipantRecord, error)
+}
+
 // SettingsManager is the only model-settings surface required by HTTP.
 // Test keeps ResolvedSettings and transient credential destruction inside the module.
 type SettingsManager interface {
@@ -203,4 +356,9 @@ type RuntimeController interface {
 	RegisterRuntime(context.Context, RuntimeRegistration) (domain.RuntimeRecord, error)
 	HeartbeatRuntime(context.Context, RuntimeHeartbeat) (domain.RuntimeRecord, error)
 	SetRuntimePhase(context.Context, RuntimePhaseCommand) (domain.RuntimeRecord, error)
+}
+
+// RuntimeAvailabilityControl exposes only the post-rebuild serving-state repair.
+type RuntimeAvailabilityControl interface {
+	RestoreRuntimeAvailability(context.Context, RestoreRuntimeAvailabilityCommand) (domain.RuntimeRecord, error)
 }

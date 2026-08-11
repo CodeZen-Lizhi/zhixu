@@ -25,6 +25,33 @@ type RuntimeExecutionCoordinator interface {
 	Fail(context.Context, application.FailDeliveryCommand) (application.DeliveryTransitionResult, error)
 }
 
+// RuntimeExecutorAcquirer resolves the immutable executor bundle bound to a
+// persisted Workflow Attempt. The Attempt owns the model settings revision;
+// callers must not derive that revision from the current Worker process state.
+type RuntimeExecutorAcquirer interface {
+	AcquireAttempt(context.Context, domain.NodeAttempt) (RuntimeExecutorLease, error)
+}
+
+// RuntimeExecutorAdmitter 在 Workflow Claim 前进入 runtime admission fence。
+// 动态 generation acquirer 应实现该接口；固定 registry 调用方无需实现。
+type RuntimeExecutorAdmitter interface {
+	Admit(context.Context) (RuntimeExecutorAdmission, error)
+}
+
+// RuntimeExecutorAdmission 固定 Claim 入口 generation，直到持久化 Attempt
+// binding 已解析为 execution lease。Release 必须幂等。
+type RuntimeExecutorAdmission interface {
+	AcquireAttempt(context.Context, domain.NodeAttempt) (RuntimeExecutorLease, error)
+	Release()
+}
+
+// RuntimeExecutorLease keeps a generation's executor registry alive for the
+// complete Work settlement. Implementations must make Release idempotent.
+type RuntimeExecutorLease interface {
+	Executors() *application.ExecutorRegistry
+	Release()
+}
+
 type runtimeHumanWaiter interface {
 	application.RuntimeHumanStatePort
 }
@@ -35,8 +62,8 @@ type RuntimeNodeWorker struct {
 	river.WorkerDefaults[NodeJobArgs]
 	registry               *application.ExecutorRegistry
 	runtime                RuntimeExecutionCoordinator
+	executorAcquirer       RuntimeExecutorAcquirer
 	owner                  string
-	modelSettingsRevision  *int64
 	modelRuntimeInstanceID *foundation.ID
 	leaseDuration          time.Duration
 	heartbeatInterval      time.Duration
@@ -46,9 +73,14 @@ type RuntimeNodeWorker struct {
 // RuntimeWorkerOptions 配置 Worker 生命周期内保持不变的运行时事实。
 type RuntimeWorkerOptions struct {
 	// ModelSettingsRevision 是 Worker 启动时加载的 managed 模型设置版本；nil 表示 static/unmanaged。
+	// Deprecated: Claim 会由数据库从当前 serving state 选择 revision；该字段仅为旧 Composition
+	// Root 保持构造兼容，不再发送到 Claim。
 	ModelSettingsRevision *int64
-	// ModelRuntimeInstanceID 是与该 revision 同时登记的 Worker runtime owner。
+	// ModelRuntimeInstanceID 是由 model-settings runtime 登记的 Worker process owner。
 	ModelRuntimeInstanceID *foundation.ID
+	// RuntimeExecutorAcquirer 可选地按 Claim 返回的 Attempt binding 获取 generation-scoped
+	// ExecutorRegistry；未提供时 Worker 继续使用构造时传入的固定 registry。
+	RuntimeExecutorAcquirer RuntimeExecutorAcquirer
 }
 
 // NewRuntimeNodeWorker constructs the production state-machine worker.
@@ -59,31 +91,42 @@ func NewRuntimeNodeWorker(registry *application.ExecutorRegistry, runtime Runtim
 // NewRuntimeNodeWorkerWithObservability 构造带有界指标和 fatal invariant 上报的生产 Runtime Worker。
 func NewRuntimeNodeWorkerWithObservability(registry *application.ExecutorRegistry, runtime RuntimeExecutionCoordinator, owner string, leaseDuration, heartbeatInterval time.Duration, observabilityOptions RuntimeWorkerObservability, options ...RuntimeWorkerOptions) (*RuntimeNodeWorker, error) {
 	owner = strings.TrimSpace(owner)
-	modelSettingsRevision, modelRuntimeInstanceID, validRuntimeBinding := freezeRuntimeWorkerOptions(options)
-	if registry == nil || isNilRuntimeCoordinator(runtime) || owner == "" || len(owner) > 80 || strings.ContainsAny(owner, "\r\n\t/") || leaseDuration <= 0 || heartbeatInterval <= 0 || heartbeatInterval >= leaseDuration/3 || !validRuntimeBinding || (observabilityOptions.Metrics != nil && strings.TrimSpace(observabilityOptions.Queue) == "") {
+	modelRuntimeInstanceID, validRuntimeBinding := freezeRuntimeWorkerOptions(options)
+	executorAcquirer, validExecutorAcquirer := runtimeExecutorAcquirerOption(options)
+	if (registry == nil && executorAcquirer == nil) || isNilRuntimeCoordinator(runtime) || owner == "" || len(owner) > 80 || strings.ContainsAny(owner, "\r\n\t/") || leaseDuration <= 0 || heartbeatInterval <= 0 || heartbeatInterval >= leaseDuration/3 || !validRuntimeBinding || !validExecutorAcquirer || (observabilityOptions.Metrics != nil && strings.TrimSpace(observabilityOptions.Queue) == "") {
 		return nil, jobError(foundation.ErrorInvalidInput, "WORKFLOW_RUNTIME_WORKER_INVALID", errors.New("runtime worker dependencies or lease cadence are invalid"))
 	}
 	observabilityOptions.Queue = strings.TrimSpace(observabilityOptions.Queue)
-	return &RuntimeNodeWorker{registry: registry, runtime: runtime, owner: owner, modelSettingsRevision: modelSettingsRevision, modelRuntimeInstanceID: modelRuntimeInstanceID, leaseDuration: leaseDuration, heartbeatInterval: heartbeatInterval, observer: newRuntimeWorkerObserver(observabilityOptions)}, nil
+	return &RuntimeNodeWorker{registry: registry, runtime: runtime, executorAcquirer: executorAcquirer, owner: owner, modelRuntimeInstanceID: modelRuntimeInstanceID, leaseDuration: leaseDuration, heartbeatInterval: heartbeatInterval, observer: newRuntimeWorkerObserver(observabilityOptions)}, nil
 }
 
-func freezeRuntimeWorkerOptions(options []RuntimeWorkerOptions) (*int64, *foundation.ID, bool) {
+func runtimeExecutorAcquirerOption(options []RuntimeWorkerOptions) (RuntimeExecutorAcquirer, bool) {
+	if len(options) == 0 || options[0].RuntimeExecutorAcquirer == nil {
+		return nil, true
+	}
+	acquirer := options[0].RuntimeExecutorAcquirer
+	if isNilRuntimeExecutorAcquirer(acquirer) {
+		return nil, false
+	}
+	return acquirer, true
+}
+
+func freezeRuntimeWorkerOptions(options []RuntimeWorkerOptions) (*foundation.ID, bool) {
 	if len(options) > 1 {
-		return nil, nil, false
+		return nil, false
 	}
 	if len(options) == 0 || options[0].ModelSettingsRevision == nil && options[0].ModelRuntimeInstanceID == nil {
-		return nil, nil, true
+		return nil, true
 	}
-	if options[0].ModelSettingsRevision == nil || options[0].ModelRuntimeInstanceID == nil || *options[0].ModelSettingsRevision < 0 {
-		return nil, nil, false
+	if options[0].ModelRuntimeInstanceID == nil || options[0].ModelSettingsRevision != nil && *options[0].ModelSettingsRevision < 0 {
+		return nil, false
 	}
 	parsed, err := foundation.ParseID(string(*options[0].ModelRuntimeInstanceID))
 	if err != nil || parsed != *options[0].ModelRuntimeInstanceID {
-		return nil, nil, false
+		return nil, false
 	}
-	revision := *options[0].ModelSettingsRevision
 	instanceID := *options[0].ModelRuntimeInstanceID
-	return &revision, &instanceID, true
+	return &instanceID, true
 }
 
 func isNilRuntimeCoordinator(runtime RuntimeExecutionCoordinator) bool {
@@ -99,13 +142,65 @@ func isNilRuntimeCoordinator(runtime RuntimeExecutionCoordinator) bool {
 	}
 }
 
+func isNilRuntimeExecutorAcquirer(acquirer RuntimeExecutorAcquirer) bool {
+	if acquirer == nil {
+		return true
+	}
+	value := reflect.ValueOf(acquirer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func isNilRuntimeExecutorAdmitter(admitter RuntimeExecutorAdmitter) bool {
+	if admitter == nil {
+		return true
+	}
+	value := reflect.ValueOf(admitter)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func isNilRuntimeExecutorAdmission(admission RuntimeExecutorAdmission) bool {
+	if admission == nil {
+		return true
+	}
+	value := reflect.ValueOf(admission)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func isNilRuntimeExecutorLease(lease RuntimeExecutorLease) bool {
+	if lease == nil {
+		return true
+	}
+	value := reflect.ValueOf(lease)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
 // Work treats stale deliveries as benign, and returns a River error only when
 // the Workflow result transaction is not known to have committed.
 func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs]) (workErr error) {
 	if w != nil {
 		defer func() { w.observer.reportFatal(workErr) }()
 	}
-	if w == nil || w.registry == nil || w.runtime == nil {
+	if w == nil || (w.registry == nil && isNilRuntimeExecutorAcquirer(w.executorAcquirer)) || w.runtime == nil {
 		return jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUNTIME_WORKER_UNAVAILABLE", errors.New("runtime worker is not initialized"))
 	}
 	if job == nil || job.JobRow == nil {
@@ -126,7 +221,18 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	}
 	deliveryID := fmt.Sprintf("job-%d-attempt-%d", job.ID, job.Attempt)
 	deliveryOwner := w.owner + ":" + deliveryID
-	claim, err := w.runtime.Claim(ctx, application.ClaimCommand{NodeRunID: job.Args.NodeRunID, DispatchNo: job.Args.DispatchNo, DeliveryID: deliveryID, RiverJobID: job.ID, RiverJobAttempt: job.Attempt, ModelSettingsRevision: cloneOptionalInt64(w.modelSettingsRevision), ModelRuntimeInstanceID: cloneOptionalID(w.modelRuntimeInstanceID), LeaseOwner: deliveryOwner, LeaseDuration: w.leaseDuration})
+	var executorAdmission RuntimeExecutorAdmission
+	if admitter, ok := w.executorAcquirer.(RuntimeExecutorAdmitter); ok && !isNilRuntimeExecutorAdmitter(admitter) {
+		executorAdmission, err = admitter.Admit(ctx)
+		if err != nil {
+			return err
+		}
+		if isNilRuntimeExecutorAdmission(executorAdmission) {
+			return jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUNTIME_EXECUTOR_ADMISSION_INVALID", errors.New("runtime executor admitter returned a nil admission"))
+		}
+		defer executorAdmission.Release()
+	}
+	claim, err := w.runtime.Claim(ctx, application.ClaimCommand{NodeRunID: job.Args.NodeRunID, DispatchNo: job.Args.DispatchNo, DeliveryID: deliveryID, RiverJobID: job.ID, RiverJobAttempt: job.Attempt, ModelRuntimeInstanceID: cloneOptionalID(w.modelRuntimeInstanceID), LeaseOwner: deliveryOwner, LeaseDuration: w.leaseDuration})
 	if err != nil {
 		return err
 	}
@@ -152,6 +258,14 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 			consumerErrorCode = transition.Attempt.ErrorCode
 		}
 	}
+	settleClaimFailure := func(failure error) error {
+		transition, transitionErr := w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: deliveryBinding(claim, deliveryID), Failure: domain.FailureInput{Err: failure}})
+		if transitionErr == nil {
+			w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
+			observeConsumerTransition(transition)
+		}
+		return transitionErr
+	}
 	if consumerSpan != nil {
 		defer func() {
 			if workErr != nil {
@@ -170,14 +284,31 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	}
 	w.observer.beginExecution(ctx)
 	defer w.observer.endExecution(ctx)
-	executor, err := w.registry.Resolve(claim.Node.NodeType, claim.Node.InputSchemaVersion)
-	if err != nil {
-		transition, transitionErr := w.runtime.Fail(ctx, application.FailDeliveryCommand{Binding: deliveryBinding(claim, deliveryID), Failure: domain.FailureInput{Err: err}})
-		if transitionErr == nil {
-			w.observer.observeTransition(ctx, claim.Node.NodeType, transition)
-			observeConsumerTransition(transition)
+	registry := w.registry
+	var executorLease RuntimeExecutorLease
+	if !isNilRuntimeExecutorAcquirer(w.executorAcquirer) {
+		if executorAdmission != nil {
+			executorLease, err = executorAdmission.AcquireAttempt(ctx, claim.Attempt)
+			executorAdmission.Release()
+			executorAdmission = nil
+		} else {
+			executorLease, err = w.executorAcquirer.AcquireAttempt(ctx, claim.Attempt)
 		}
-		return transitionErr
+		if err != nil {
+			return settleClaimFailure(err)
+		}
+		if isNilRuntimeExecutorLease(executorLease) {
+			return settleClaimFailure(jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUNTIME_EXECUTOR_LEASE_INVALID", errors.New("runtime executor acquirer returned a nil lease")))
+		}
+		defer executorLease.Release()
+		registry = executorLease.Executors()
+		if registry == nil {
+			return settleClaimFailure(jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUNTIME_EXECUTOR_REGISTRY_MISSING", errors.New("runtime executor lease returned a nil registry")))
+		}
+	}
+	executor, err := registry.Resolve(claim.Node.NodeType, claim.Node.InputSchemaVersion)
+	if err != nil {
+		return settleClaimFailure(err)
 	}
 	executionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/gitsync/application"
@@ -170,7 +170,7 @@ func commandHeaders() map[string][]string {
 
 func serveHTTP(t *testing.T, handler *Handler, method, path, body string, headers map[string][]string) *httptest.ResponseRecorder {
 	t.Helper()
-	router := chi.NewRouter()
+	router := gin.New()
 	handler.Routes(router)
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	for key, values := range headers {

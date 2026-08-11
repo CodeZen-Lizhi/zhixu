@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/jackc/pgx/v5"
@@ -92,6 +94,19 @@ func TestNewRuntimeRepositoryWithHooksValidatesAndInjectsLifecycleHooks(t *testi
 	}
 	if repository.cancellation != cancellation || repository.terminal != terminal {
 		t.Fatalf("hooks were not injected: cancellation=%T terminal=%T", repository.cancellation, repository.terminal)
+	}
+	if repository.modelRuntimeFreshWithin != modelsettingsapplication.DefaultRuntimeFreshWithin {
+		t.Fatalf("default model runtime freshness=%s want=%s", repository.modelRuntimeFreshWithin, modelsettingsapplication.DefaultRuntimeFreshWithin)
+	}
+	custom, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{ModelRuntimeFreshWithin: 45 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if custom.modelRuntimeFreshWithin != 45*time.Second {
+		t.Fatalf("custom model runtime freshness=%s", custom.modelRuntimeFreshWithin)
+	}
+	if _, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{ModelRuntimeFreshWithin: time.Millisecond}); !hasFoundationCode(err, "WORKFLOW_MODEL_RUNTIME_FRESHNESS_INVALID") {
+		t.Fatalf("invalid model runtime freshness error=%v", err)
 	}
 }
 

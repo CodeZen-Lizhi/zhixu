@@ -7,8 +7,10 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
@@ -19,14 +21,18 @@ import (
 type RuntimeRepositoryHooks struct {
 	CancellationSafety application.CancellationSafetyGuard
 	Terminal           application.WorkflowTerminalHook
+	// ModelRuntimeFreshWithin is the Worker-owned admission policy for a
+	// managed runtime owner. Zero uses the shared server default.
+	ModelRuntimeFreshWithin time.Duration
 }
 
 // RuntimeRepository owns the PostgreSQL + River transactional Start unit of work.
 type RuntimeRepository struct {
-	db           DB
-	jobs         riveradapter.JobInserter
-	cancellation application.CancellationSafetyGuard
-	terminal     application.WorkflowTerminalHook
+	db                      DB
+	jobs                    riveradapter.JobInserter
+	cancellation            application.CancellationSafetyGuard
+	terminal                application.WorkflowTerminalHook
+	modelRuntimeFreshWithin time.Duration
 }
 
 // NewRuntimeRepository constructs the reusable registered Workflow Start adapter.
@@ -55,7 +61,16 @@ func NewRuntimeRepositoryWithHooks(db DB, jobs riveradapter.JobInserter, hooks R
 	if hooks.Terminal != nil && isNilWorkflowTerminalHook(hooks.Terminal) {
 		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_TERMINAL_HOOK_INVALID", false, errors.New("runtime terminal hook is nil"))
 	}
-	return &RuntimeRepository{db: db, jobs: jobs, cancellation: hooks.CancellationSafety, terminal: hooks.Terminal}, nil
+	if hooks.ModelRuntimeFreshWithin == 0 {
+		hooks.ModelRuntimeFreshWithin = modelsettingsapplication.DefaultRuntimeFreshWithin
+	}
+	if !modelsettingsapplication.ValidRuntimeFreshWithin(hooks.ModelRuntimeFreshWithin) {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_MODEL_RUNTIME_FRESHNESS_INVALID", false, errors.New("workflow model runtime freshness policy is invalid"))
+	}
+	return &RuntimeRepository{
+		db: db, jobs: jobs, cancellation: hooks.CancellationSafety, terminal: hooks.Terminal,
+		modelRuntimeFreshWithin: hooks.ModelRuntimeFreshWithin,
+	}, nil
 }
 
 func isNilJobInserter(inserter riveradapter.JobInserter) bool {

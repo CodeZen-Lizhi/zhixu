@@ -1,0 +1,14 @@
+{"file":".trellis/spec/backend/index.md","reason":"检查任务状态、影响层和最低验证命令"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"审查认证、CSRF、Origin、Capability 和 readiness 回归"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"审查 Problem、SSE 错误和脱敏语义"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"审查测试金字塔、安全负测、依赖和交付门禁"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核 HTTP/OpenAPI/前端契约跨层一致性"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复核 Gin 能力复用、helper 单一事实源和自研边界"}
+{"file":"docs/architecture/application-contracts.md","reason":"对照公开 HTTP/SSE wire 契约"}
+{"file":"docs/architecture/system-design.md","reason":"对照分层和 Composition Root 约束"}
+{"file":"docs/architecture/quality.md","reason":"对照安全、日志、测试和发布检查"}
+{"file":"docs/architecture/adr/0019-mature-framework-first.md","reason":"复核成熟框架覆盖率、强制约束和退出路径"}
+{"file":".trellis/tasks/08-11-gin-http-migration/research/core-router-middleware.md","reason":"复核 Router 默认值、404/405、ResponseWriter 和 Recovery 风险"}
+{"file":".trellis/tasks/08-11-gin-http-migration/research/gin-core-and-boundary.md","reason":"复核核心 Router 和 HTTP 边界的规划约束"}
+{"file":".trellis/tasks/08-11-gin-http-migration/research/route-and-test-batches.md","reason":"复核 runtime/OpenAPI parity、参数命名和 Chi 清理范围"}
+{"file":".trellis/tasks/08-11-gin-http-migration/research/strict-stream-file-contract.md","reason":"复核严格输入、SSE、文件传输和响应已开始后的恢复语义"}

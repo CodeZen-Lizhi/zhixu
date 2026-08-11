@@ -13,7 +13,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -56,35 +56,35 @@ func TestNewArtifactHandlerComposesCoreServicesWithoutPublisher(t *testing.T) {
 	}
 }
 
-func TestArtifactCompositionKeepsCoreAvailableAndGatesGeneration(t *testing.T) {
+func TestArtifactCompositionKeepsCoreAvailableAndInjectsPersistedGeneration(t *testing.T) {
 	pool := &pgxpool.Pool{}
 	workspaces, err := workspacepostgres.NewRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	disabledGeneration := artifactGenerationDependencies(false, artifactGenerationStarterFake{})
-	disabled, err := newArtifactHandler(pool, workspaces, fakeFileScanner{}, nil, time.Second, disabledGeneration...)
-	if err != nil || disabled == nil || !disabled.Available() {
-		t.Fatalf("disabled handler=%#v err=%v", disabled, err)
+	unavailableGeneration := artifactGenerationDependencies(nil)
+	unavailable, err := newArtifactHandler(pool, workspaces, fakeFileScanner{}, nil, time.Second, unavailableGeneration...)
+	if err != nil || unavailable == nil || !unavailable.Available() {
+		t.Fatalf("unavailable handler=%#v err=%v", unavailable, err)
 	}
-	disabledResponse := postArtifactGeneration(t, disabled, "disabled-generation")
-	if disabledResponse.Code != http.StatusServiceUnavailable || !strings.Contains(disabledResponse.Body.String(), "ARTIFACT_GENERATION_CAPABILITY_UNAVAILABLE") || strings.Contains(disabledResponse.Body.String(), `"retryable":true`) {
-		t.Fatalf("disabled generation status=%d body=%s", disabledResponse.Code, disabledResponse.Body.String())
+	unavailableResponse := postArtifactGeneration(t, unavailable, "unavailable-generation")
+	if unavailableResponse.Code != http.StatusServiceUnavailable || !strings.Contains(unavailableResponse.Body.String(), "ARTIFACT_GENERATION_CAPABILITY_UNAVAILABLE") || strings.Contains(unavailableResponse.Body.String(), `"retryable":true`) {
+		t.Fatalf("unavailable generation status=%d body=%s", unavailableResponse.Code, unavailableResponse.Body.String())
 	}
 
-	enabledGeneration := artifactGenerationDependencies(true, artifactGenerationStarterFake{})
-	enabled, err := newArtifactHandler(pool, workspaces, fakeFileScanner{}, nil, time.Second, enabledGeneration...)
-	if err != nil || enabled == nil || !enabled.Available() {
-		t.Fatalf("enabled handler=%#v err=%v", enabled, err)
+	availableGeneration := artifactGenerationDependencies(artifactGenerationStarterFake{})
+	available, err := newArtifactHandler(pool, workspaces, fakeFileScanner{}, nil, time.Second, availableGeneration...)
+	if err != nil || available == nil || !available.Available() {
+		t.Fatalf("available handler=%#v err=%v", available, err)
 	}
-	enabledResponse := postArtifactGeneration(t, enabled, "enabled-generation")
-	if enabledResponse.Code != http.StatusAccepted || !strings.Contains(enabledResponse.Body.String(), `"status_url":"/api/v1/workflows/`) {
-		t.Fatalf("enabled generation status=%d body=%s", enabledResponse.Code, enabledResponse.Body.String())
+	availableResponse := postArtifactGeneration(t, available, "available-generation")
+	if availableResponse.Code != http.StatusAccepted || !strings.Contains(availableResponse.Body.String(), `"status_url":"/api/v1/workflows/`) {
+		t.Fatalf("available generation status=%d body=%s", availableResponse.Code, availableResponse.Body.String())
 	}
 }
 
-func TestAPIArtifactWorkflowCompositionUsesOneAuthoritativeRuntimeWithoutChat(t *testing.T) {
+func TestAPIArtifactWorkflowCompositionUsesOneAuthoritativeRuntime(t *testing.T) {
 	pool := &pgxpool.Pool{}
 	workspaces, err := workspacepostgres.NewRepository(pool)
 	if err != nil {
@@ -92,14 +92,14 @@ func TestAPIArtifactWorkflowCompositionUsesOneAuthoritativeRuntimeWithoutChat(t 
 	}
 	service, runtime, generation, err := newAPIArtifactWorkflowComponents(
 		pool, config.Defaults(), workspaces, fakeFileScanner{}, nil,
-		foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, mustAPIModels(t, config.Defaults()),
+		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil || service == nil || runtime == nil || generation == nil {
 		t.Fatalf("service=%#v runtime=%#v generation=%#v err=%v", service, runtime, generation, err)
 	}
 }
 
-func postArtifactGeneration(t *testing.T, handler interface{ Routes(chi.Router) }, key string) *httptest.ResponseRecorder {
+func postArtifactGeneration(t *testing.T, handler interface{ Routes(gin.IRouter) }, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(
 		http.MethodPost,
@@ -109,8 +109,8 @@ func postArtifactGeneration(t *testing.T, handler interface{ Routes(chi.Router) 
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Idempotency-Key", key)
 	response := httptest.NewRecorder()
-	router := chi.NewRouter()
-	router.Route("/api/v1", handler.Routes)
+	router := gin.New()
+	handler.Routes(router.Group("/api/v1"))
 	router.ServeHTTP(response, request)
 	return response
 }

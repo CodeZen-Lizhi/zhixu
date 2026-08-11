@@ -11,7 +11,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	"github.com/CodeZen-Lizhi/zhixu/internal/ingestion/application"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 // Service is the minimum application contract required by this HTTP boundary.
@@ -26,13 +26,13 @@ type Handler struct{ service Service }
 func NewHandler(service Service) *Handler { return &Handler{service: service} }
 
 // Routes registers the Source Version ingestion command.
-func (h *Handler) Routes(router chi.Router) {
-	router.Post("/source-versions/{sourceVersionID}/ingestion-attempts", h.process)
+func (h *Handler) Routes(router gin.IRouter) {
+	router.POST("/source-versions/:source_version_id/ingestion-attempts", httpapi.GinHandler(h.process))
 }
 
 type processRequest struct {
 	WorkflowRunID string `json:"workflow_run_id"`
-	AttemptNumber int32  `json:"attempt_number"`
+	AttemptNumber int32  `json:"attempt_number" validate:"gt=0"`
 }
 
 type processResponse struct {
@@ -55,7 +55,7 @@ func (h *Handler) process(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusServiceUnavailable, "INGESTION_SERVICE_UNAVAILABLE", "Ingestion 服务暂不可用", true, nil)
 		return
 	}
-	id, err := foundation.ParseID(chi.URLParam(r, "sourceVersionID"))
+	id, err := foundation.ParseID(r.PathValue("source_version_id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -70,7 +70,7 @@ func (h *Handler) process(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if request.AttemptNumber <= 0 {
+	if err := httpapi.Validate(request); err != nil {
 		writeProblem(w, http.StatusBadRequest, "INGESTION_REQUEST_INVALID", "attempt_number 必须为正数", false, nil)
 		return
 	}

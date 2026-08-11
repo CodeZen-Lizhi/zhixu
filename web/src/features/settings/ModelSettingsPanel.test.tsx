@@ -6,6 +6,7 @@ import type { ModelSettingsResponse } from "../../api/model-settings";
 
 const api = vi.hoisted(() => ({
   getModelSettings: vi.fn(),
+  startModelSettingsActivation: vi.fn(),
   testModelSettings: vi.fn(),
   updateModelSettings: vi.fn(),
 }));
@@ -14,6 +15,7 @@ vi.mock("../../api/model-settings", async (importOriginal) => ({
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   ...(await importOriginal<typeof import("../../api/model-settings")>()),
   getModelSettings: api.getModelSettings,
+  startModelSettingsActivation: api.startModelSettingsActivation,
   testModelSettings: api.testModelSettings,
   updateModelSettings: api.updateModelSettings,
 }));
@@ -41,6 +43,16 @@ const disabledEmbedding = {
   apiKeyConfigured: false,
 } as const;
 
+const rolloutId = "018f5f9e-7b36-7c89-8abc-1234567890ab";
+const absentParticipant = {
+  present: false,
+  targetRevision: null,
+  phase: null,
+  fresh: false,
+  lastErrorCode: null,
+  retryable: false,
+} as const;
+
 const disabledSettings = (): ModelSettingsResponse => ({
   desiredRevision: 0,
   activeRevision: 0,
@@ -50,7 +62,9 @@ const disabledSettings = (): ModelSettingsResponse => ({
     api: { appliedRevision: 0, phase: "active", fresh: true },
     worker: { appliedRevision: 0, phase: "active", fresh: true },
   },
-  rollout: { phase: "idle", targetRevision: null, lastErrorCode: null, retryable: false },
+  rollout: { id: null, version: 0, phase: "idle", targetRevision: null, lastErrorCode: null, retryable: false },
+  participants: { api: absentParticipant, worker: absentParticipant },
+  applyRequired: false,
   restartRequired: false,
   capabilities: { chat: "disabled", embedding: "disabled" },
 });
@@ -83,10 +97,47 @@ const configuredSettings = (): ModelSettingsResponse => ({
     api: { appliedRevision: 1, phase: "active", fresh: true },
     worker: { appliedRevision: 1, phase: "active", fresh: true },
   },
-  rollout: { phase: "idle", targetRevision: null, lastErrorCode: null, retryable: false },
-  restartRequired: true,
+  rollout: { id: null, version: 3, phase: "idle", targetRevision: null, lastErrorCode: null, retryable: false },
+  participants: { api: absentParticipant, worker: absentParticipant },
+  applyRequired: true,
+  restartRequired: false,
   capabilities: { chat: "disabled", embedding: "disabled" },
 });
+
+const preparingSettings = (): ModelSettingsResponse => ({
+  ...configuredSettings(),
+  rollout: { id: rolloutId, version: 4, phase: "preparing", targetRevision: 2, lastErrorCode: null, retryable: false },
+  participants: {
+    api: { present: true, targetRevision: 2, phase: "prepared", fresh: true, lastErrorCode: null, retryable: false },
+    worker: { present: true, targetRevision: 2, phase: "preparing", fresh: true, lastErrorCode: null, retryable: false },
+  },
+});
+
+const failedSettings = (): ModelSettingsResponse => ({
+  ...configuredSettings(),
+  rollout: { id: rolloutId, version: 5, phase: "failed", targetRevision: 2, lastErrorCode: "MODEL_SETTINGS_ACTIVATION_PREPARE_FAILED", retryable: true },
+  participants: {
+    api: { present: true, targetRevision: 2, phase: "failed", fresh: true, lastErrorCode: "MODEL_SETTINGS_ACTIVATION_PREPARE_FAILED", retryable: true },
+    worker: absentParticipant,
+  },
+});
+
+const appliedSettings = (): ModelSettingsResponse => {
+  const configured = configuredSettings();
+  return {
+    ...configured,
+    activeRevision: 2,
+    activeSettings: configured.desiredSettings,
+    runtime: {
+      api: { appliedRevision: 2, phase: "active", fresh: true },
+      worker: { appliedRevision: 2, phase: "active", fresh: true },
+    },
+    rollout: { id: null, version: 7, phase: "idle", targetRevision: null, lastErrorCode: null, retryable: false },
+    participants: { api: absentParticipant, worker: absentParticipant },
+    applyRequired: false,
+    capabilities: { chat: "configured", embedding: "configured" },
+  };
+};
 
 const renderPanel = () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -106,6 +157,7 @@ const expandModelSection = async (name: "对话模型" | "向量模型"): Promis
 
 afterEach(() => {
   api.getModelSettings.mockReset();
+  api.startModelSettingsActivation.mockReset();
   api.testModelSettings.mockReset();
   api.updateModelSettings.mockReset();
   window.localStorage.clear();
@@ -136,7 +188,9 @@ describe("ModelSettingsPanel", () => {
 
     renderPanel();
 
-    expect(await screen.findByText("已保存的配置尚未生效")).toBeInTheDocument();
+    expect(await screen.findByText("配置已保存，尚未应用")).toBeInTheDocument();
+    expect(screen.queryByText(/zhixu restart/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/重启容器/)).not.toBeInTheDocument();
     await expandModelSection("对话模型");
     await expandModelSection("向量模型");
     expect(screen.getAllByText("与待应用配置不同")).toHaveLength(2);
@@ -152,6 +206,34 @@ describe("ModelSettingsPanel", () => {
       target: "chat",
       chat: { apiStyle: "responses", apiKey: { action: "keep" } },
     });
+  });
+
+  it("按 dirty draft 切换保存按钮，并让仅保存不启动应用", async () => {
+    const initial = configuredSettings();
+    const saved = {
+      ...initial,
+      desiredRevision: 3,
+      desiredSettings: {
+        ...initial.desiredSettings,
+        chat: { ...initial.desiredSettings.chat, model: "chat-v3" },
+      },
+    };
+    api.getModelSettings.mockResolvedValue(initial);
+    api.updateModelSettings.mockResolvedValue(saved);
+
+    renderPanel();
+    expect(await screen.findByRole("button", { name: "应用配置" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "仅保存" })).not.toBeInTheDocument();
+    await expandModelSection("对话模型");
+    fireEvent.change(screen.getByLabelText("对话模型名称"), { target: { value: "chat-v3" } });
+
+    expect(screen.getByRole("button", { name: "保存并应用" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "仅保存" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
+
+    expect(await screen.findByText("版本 3已保存，尚未应用。")).toBeInTheDocument();
+    expect(api.updateModelSettings).toHaveBeenCalledOnce();
+    expect(api.startModelSettingsActivation).not.toHaveBeenCalled();
   });
 
   it("连接测试失败时显示服务端脱敏错误并恢复操作", async () => {
@@ -284,7 +366,7 @@ describe("ModelSettingsPanel", () => {
     await expandModelSection("对话模型");
     const baseUrl = await screen.findByLabelText("对话模型基础地址（Base URL）");
     fireEvent.change(baseUrl, { target: { value: "https://new-models.example.test/v1" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存模型设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
 
     expect(await screen.findByText("对话模型提供方或基础地址已改变，请替换或清除 API Key。")).toBeInTheDocument();
     expect(api.updateModelSettings).not.toHaveBeenCalled();
@@ -293,7 +375,7 @@ describe("ModelSettingsPanel", () => {
     fireEvent.click(within(secretActions).getByRole("radio", { name: "替换" }));
     const secret = screen.getByLabelText("对话 API Key");
     fireEvent.change(secret, { target: { value: "new-chat-secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存模型设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
 
     await waitFor(() => expect(api.updateModelSettings).toHaveBeenCalledOnce());
     const updateInput: unknown = api.updateModelSettings.mock.calls[0]?.[0];
@@ -304,7 +386,7 @@ describe("ModelSettingsPanel", () => {
         apiKey: { action: "replace", value: "new-chat-secret" },
       },
     });
-    expect(await screen.findByText("待应用版本 3 已保存，等待 restart 应用。")).toBeInTheDocument();
+    expect(await screen.findByText("版本 3已保存，尚未应用。")).toBeInTheDocument();
     expect(screen.getByLabelText("对话 API Key")).toHaveValue("");
     const cachedState = {
       mutations: client.getMutationCache().getAll().map((mutation) => mutation.state),
@@ -313,6 +395,109 @@ describe("ModelSettingsPanel", () => {
     expect(JSON.stringify(cachedState)).not.toContain("new-chat-secret");
     expect(JSON.stringify(window.localStorage)).not.toContain("new-chat-secret");
     expect(JSON.stringify(window.sessionStorage)).not.toContain("new-chat-secret");
+  });
+
+  it("保存并应用使用 PUT 返回的 exact revision，启动失败仍保留已保存状态并销毁 Secret", async () => {
+    const initial = configuredSettings();
+    const saved: ModelSettingsResponse = {
+      ...initial,
+      desiredRevision: 3,
+      desiredSettings: {
+        ...initial.desiredSettings,
+        chat: { ...initial.desiredSettings.chat, model: "chat-v3" },
+      },
+    };
+    api.getModelSettings.mockResolvedValueOnce(initial).mockResolvedValue(saved);
+    api.updateModelSettings.mockResolvedValue(saved);
+    api.startModelSettingsActivation.mockRejectedValue(new ModelSettingsApiError("NETWORK_ERROR", "NETWORK_ERROR", "应用请求连接中断", true));
+
+    const { client } = renderPanel();
+    await expandModelSection("对话模型");
+    fireEvent.change(screen.getByLabelText("对话模型名称"), { target: { value: "chat-v3" } });
+    const actions = screen.getByRole("radiogroup", { name: "对话 API Key操作" });
+    fireEvent.click(within(actions).getByRole("radio", { name: "替换" }));
+    fireEvent.change(screen.getByLabelText("对话 API Key"), { target: { value: "save-apply-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并应用" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("版本 3已保存，但应用请求未确认");
+    expect(screen.getByRole("alert")).toHaveTextContent("应用请求连接中断");
+    expect(api.updateModelSettings).toHaveBeenCalledOnce();
+    expect(api.startModelSettingsActivation).toHaveBeenCalledOnce();
+    expect(api.startModelSettingsActivation.mock.calls[0]?.[0]).toEqual({ expectedRevision: 3 });
+    expect(JSON.stringify(api.startModelSettingsActivation.mock.calls[0]?.[0])).not.toContain("save-apply-secret");
+    expect(screen.getByLabelText("对话 API Key")).toHaveValue("");
+    expect(screen.getByText("配置已保存，尚未应用")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "应用配置" })).toBeEnabled();
+    const cacheState = {
+      mutations: client.getMutationCache().getAll().map((mutation) => mutation.state),
+      queries: client.getQueryCache().getAll().map((query) => query.state),
+    };
+    expect(JSON.stringify(cacheState)).not.toContain("save-apply-secret");
+    expect(document.body.textContent).not.toContain("save-apply-secret");
+    expect(JSON.stringify(window.localStorage)).not.toContain("save-apply-secret");
+    expect(JSON.stringify(window.sessionStorage)).not.toContain("save-apply-secret");
+  });
+
+  it("应用响应丢失后通过 GET 恢复同一 target，而不重复启动", async () => {
+    const initial = configuredSettings();
+    const preparing = preparingSettings();
+    api.getModelSettings.mockResolvedValueOnce(initial).mockResolvedValue(preparing);
+    api.startModelSettingsActivation.mockRejectedValue(new ModelSettingsApiError("NETWORK_ERROR", "NETWORK_ERROR", "响应丢失", true));
+
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "应用配置" }));
+
+    expect(await screen.findByText("已从服务端恢复版本 2的应用状态。")).toBeInTheDocument();
+    expect(screen.getByText("配置应用：准备中")).toBeInTheDocument();
+    expect(screen.queryByText(/应用请求未确认/)).not.toBeInTheDocument();
+    expect(api.startModelSettingsActivation).toHaveBeenCalledOnce();
+    expect(api.getModelSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("应用响应丢失但同一 target 已失败时展示权威失败状态", async () => {
+    api.getModelSettings.mockResolvedValueOnce(configuredSettings()).mockResolvedValue(failedSettings());
+    api.startModelSettingsActivation.mockRejectedValue(new ModelSettingsApiError("NETWORK_ERROR", "NETWORK_ERROR", "响应丢失", true));
+
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "应用配置" }));
+
+    expect(await screen.findByText("配置应用失败")).toBeInTheDocument();
+    expect(screen.queryByText(/应用请求未确认/)).not.toBeInTheDocument();
+    expect(api.startModelSettingsActivation).toHaveBeenCalledOnce();
+    expect(api.getModelSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("non-terminal 响应立即进入 2 秒轮询，terminal 后最终回查并停止", async () => {
+    const initial = configuredSettings();
+    const preparing = preparingSettings();
+    const applied = appliedSettings();
+    api.getModelSettings.mockResolvedValueOnce(initial).mockResolvedValueOnce(applied).mockResolvedValue(applied);
+    api.startModelSettingsActivation.mockResolvedValue(preparing);
+
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "应用配置" }));
+    expect(await screen.findByText("配置应用：准备中")).toBeInTheDocument();
+
+    await waitFor(() => expect(api.getModelSettings).toHaveBeenCalledTimes(3), { timeout: 4_500 });
+    expect(await screen.findByText("API 与工作进程已应用当前生效版本。")).toBeInTheDocument();
+    const terminalCalls = api.getModelSettings.mock.calls.length;
+    await new Promise((resolve) => window.setTimeout(resolve, 2_200));
+    expect(api.getModelSettings).toHaveBeenCalledTimes(terminalCalls);
+  }, 8_000);
+
+  it("页面重新可见和网络恢复时都重新读取权威状态", async () => {
+    api.getModelSettings.mockResolvedValue(configuredSettings());
+
+    renderPanel();
+    await screen.findByRole("button", { name: "应用配置" });
+    expect(api.getModelSettings).toHaveBeenCalledOnce();
+
+    window.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(api.getModelSettings).toHaveBeenCalledTimes(2));
+
+    window.dispatchEvent(new Event("offline"));
+    window.dispatchEvent(new Event("online"));
+    await waitFor(() => expect(api.getModelSettings).toHaveBeenCalledTimes(3));
   });
 
   it("显式 clear 发送清除动作且不把空字符串当作替换", async () => {
@@ -329,7 +514,7 @@ describe("ModelSettingsPanel", () => {
     const secretActions = await screen.findByRole("radiogroup", { name: "对话 API Key操作" });
     fireEvent.click(within(secretActions).getByRole("radio", { name: "清除" }));
     expect(screen.getByText("保存后会清除已保存的 API Key。")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "保存模型设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
 
     await waitFor(() => expect(api.updateModelSettings).toHaveBeenCalledOnce());
     const updateInput: unknown = api.updateModelSettings.mock.calls[0]?.[0];
@@ -341,12 +526,13 @@ describe("ModelSettingsPanel", () => {
     api.updateModelSettings.mockRejectedValue(new ModelSettingsApiError("HTTP_ERROR", "MODEL_SETTINGS_UNAVAILABLE", "模型设置暂时不可用", true, 503));
 
     renderPanel();
-    await screen.findByRole("heading", { name: "模型与检索" });
-    fireEvent.click(screen.getByRole("button", { name: "保存模型设置" }));
+    await expandModelSection("对话模型");
+    fireEvent.change(screen.getByLabelText("对话模型名称"), { target: { value: "chat-v3" } });
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("模型设置暂时不可用");
     expect(screen.queryByText(/已保存并已生效/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "保存模型设置" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "仅保存" })).toBeEnabled();
   });
 
   it("409 后更新 Revision、保留非 Secret 草稿并要求重新输入 Secret", async () => {
@@ -377,7 +563,7 @@ describe("ModelSettingsPanel", () => {
     const actions = screen.getByRole("radiogroup", { name: "对话 API Key操作" });
     fireEvent.click(within(actions).getByRole("radio", { name: "替换" }));
     fireEvent.change(screen.getByLabelText("对话 API Key"), { target: { value: "conflicted-secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存模型设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("配置已由其他操作更新到版本 5");
     expect(screen.getByRole("alert")).toHaveTextContent("已保留本地非 Secret 草稿并清空 Secret 输入");
@@ -388,7 +574,7 @@ describe("ModelSettingsPanel", () => {
     expect(within(actions).getByRole("radio", { name: "替换" })).toBeChecked();
 
     fireEvent.change(screen.getByLabelText("对话 API Key"), { target: { value: "retry-secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存模型设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
     await waitFor(() => expect(api.updateModelSettings).toHaveBeenCalledTimes(2));
     expect(api.updateModelSettings.mock.calls[1]?.[0]).toMatchObject({
       expectedRevision: 5,
@@ -466,7 +652,7 @@ describe("ModelSettingsPanel", () => {
     const actions = await screen.findByRole("radiogroup", { name: "对话 API Key操作" });
     fireEvent.click(within(actions).getByRole("radio", { name: "替换" }));
     fireEvent.change(screen.getByLabelText("对话 API Key"), { target: { value: "conflicted-secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存模型设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("权威回查失败");
     expect(screen.getByRole("alert")).toHaveTextContent("服务端当前至少为版本 5");
@@ -477,35 +663,57 @@ describe("ModelSettingsPanel", () => {
   it("rollout 与依赖不可用时 fail closed，并保留刷新入口", async () => {
     const applying: ModelSettingsResponse = {
       ...configuredSettings(),
-      rollout: { phase: "applying", targetRevision: 2, lastErrorCode: null, retryable: false },
+      rollout: { id: rolloutId, version: 4, phase: "preparing", targetRevision: 2, lastErrorCode: null, retryable: false },
+      participants: {
+        api: { present: true, targetRevision: 2, phase: "prepared", fresh: true, lastErrorCode: null, retryable: false },
+        worker: absentParticipant,
+      },
       capabilities: { chat: "unavailable", embedding: "configured" },
     };
     api.getModelSettings.mockResolvedValue(applying);
 
     renderPanel();
 
-    expect(await screen.findByText("配置切换：应用中")).toBeInTheDocument();
+    expect(await screen.findByText("配置应用：准备中")).toBeInTheDocument();
     await expandModelSection("对话模型");
     expect(screen.getByText("部分模型能力不可用")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "保存模型设置" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "应用配置" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "测试对话连接" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "刷新模型设置" })).toBeEnabled();
   });
 
   it("failed rollout 保留旧 Active 说明并开放修复、测试和保存", async () => {
-    const failed: ModelSettingsResponse = {
-      ...configuredSettings(),
-      rollout: { phase: "failed", targetRevision: 2, lastErrorCode: "MODEL_SETTINGS_ROLLOUT_PREPARE_FAILED", retryable: true },
-    };
-    api.getModelSettings.mockResolvedValue(failed);
+    api.getModelSettings.mockResolvedValue(failedSettings());
 
     renderPanel();
 
-    expect(await screen.findByText("上次配置应用失败")).toBeInTheDocument();
+    expect(await screen.findByText("配置应用失败")).toBeInTheDocument();
     await expandModelSection("对话模型");
-    expect(screen.getByText(/MODEL_SETTINGS_ROLLOUT_PREPARE_FAILED/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "保存模型设置" })).toBeEnabled();
+    expect(screen.getAllByText(/MODEL_SETTINGS_ACTIVATION_PREPARE_FAILED/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole("button", { name: "重试应用" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "测试对话连接" })).toBeEnabled();
+  });
+
+  it("单边运行时不健康时明确显示降级，而不声称旧版本仍在服务", async () => {
+    const applied = appliedSettings();
+    api.getModelSettings.mockResolvedValue({
+      ...applied,
+      runtime: { ...applied.runtime, worker: { appliedRevision: 2, phase: "unavailable", fresh: false } },
+      rollout: { id: rolloutId, version: 8, phase: "failed", targetRevision: 2, lastErrorCode: "MODEL_RUNTIME_NOT_READY", retryable: true },
+      participants: {
+        api: { present: true, targetRevision: 2, phase: "prepared", fresh: true, lastErrorCode: null, retryable: false },
+        worker: { present: true, targetRevision: 2, phase: "failed", fresh: true, lastErrorCode: "MODEL_RUNTIME_NOT_READY", retryable: true },
+      },
+      applyRequired: true,
+      capabilities: { chat: "unavailable", embedding: "unavailable" },
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText(/API 或工作进程处于降级状态/)).toBeInTheDocument();
+    expect(screen.queryByText(/旧的版本 2继续服务/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/MODEL_RUNTIME_NOT_READY/)).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "重试应用" })).toBeEnabled();
   });
 
   it("卸载面板时中止携带瞬时 Secret 的保存请求", async () => {
@@ -523,7 +731,7 @@ describe("ModelSettingsPanel", () => {
     const actions = await screen.findByRole("radiogroup", { name: "对话 API Key操作" });
     fireEvent.click(within(actions).getByRole("radio", { name: "替换" }));
     fireEvent.change(screen.getByLabelText("对话 API Key"), { target: { value: "transient-secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存模型设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存并应用" }));
     await waitFor(() => expect(requestSignal).toBeDefined());
 
     unmount();

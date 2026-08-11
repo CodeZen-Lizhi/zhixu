@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"time"
 
@@ -16,10 +15,10 @@ import (
 const (
 	defaultWaitTimeout      = 90 * time.Second
 	defaultPollInterval     = time.Second
-	defaultPreflightTimeout = 75 * time.Second
 	maximumWaitTimeout      = 10 * time.Minute
 	maximumPollInterval     = 10 * time.Second
-	rolloutAbortedCode      = "MODEL_SETTINGS_ROLLOUT_ABORTED"
+	activationRecoveryLease = 2 * time.Minute
+	legacyRolloutErrorCode  = "MODELCTL_LEGACY_ROLLOUT_UNSUPPORTED"
 )
 
 type commandName string
@@ -43,58 +42,12 @@ type command struct {
 	pollInterval time.Duration
 }
 
-type rolloutSession interface {
-	ID() foundation.ID
-	LoadTarget(context.Context) (modeldomain.ResolvedSettings, error)
-	RenewValidating(context.Context) error
-	StartDraining(context.Context) error
-	WaitQuiesced(context.Context, modelapplication.WaitOptions) error
-	WaitPrepared(context.Context, modelapplication.WaitOptions) error
-	Commit(context.Context) error
-	Abort(context.Context, string) error
-}
-
-type rolloutCoordinator interface {
-	Begin(context.Context) (rolloutSession, error)
-	Open(context.Context, foundation.ID) (rolloutSession, error)
-	Recover(context.Context) (modeldomain.RolloutState, bool, error)
-}
-
-type coordinatorAdapter struct {
-	inner *modelapplication.RolloutCoordinator
-}
-
-var (
-	_ rolloutCoordinator = coordinatorAdapter{}
-	_ rolloutSession     = (*modelapplication.RolloutSession)(nil)
-)
-
-func newCoordinatorAdapter(inner *modelapplication.RolloutCoordinator) (coordinatorAdapter, error) {
-	if inner == nil {
-		return coordinatorAdapter{}, stateError(errors.New("model settings rollout coordinator is unavailable"))
-	}
-	return coordinatorAdapter{inner: inner}, nil
-}
-
-func (adapter coordinatorAdapter) Begin(ctx context.Context) (rolloutSession, error) {
-	return adapter.inner.Begin(ctx)
-}
-
-func (adapter coordinatorAdapter) Open(ctx context.Context, id foundation.ID) (rolloutSession, error) {
-	return adapter.inner.Open(ctx, id)
-}
-
-func (adapter coordinatorAdapter) Recover(ctx context.Context) (modeldomain.RolloutState, bool, error) {
-	return adapter.inner.Recover(ctx)
-}
-
-type revisionPreflighter interface {
-	Preflight(context.Context, modeldomain.RuntimeRole, modeldomain.ResolvedSettings) error
+type activationRecovery interface {
+	RecoverActivation(context.Context, modelapplication.RecoverActivationCommand) (modeldomain.ActivationRecovery, error)
 }
 
 type controller struct {
-	coordinator rolloutCoordinator
-	preflighter revisionPreflighter
+	activations activationRecovery
 	stdout      io.Writer
 }
 
@@ -160,141 +113,38 @@ func (control *controller) execute(ctx context.Context, command command) error {
 	if err := control.ready(ctx); err != nil {
 		return err
 	}
+	if isLegacyRolloutCommand(command.name) {
+		return legacyRolloutError()
+	}
 	switch command.name {
 	case commandRecover:
 		return control.recover(ctx)
-	case commandBegin:
-		return control.begin(ctx)
-	case commandPreflight:
-		return control.preflight(ctx, command)
-	case commandDrain:
-		return control.withSession(ctx, command.rolloutID, func(session rolloutSession) error {
-			return session.StartDraining(ctx)
-		})
-	case commandWaitQuiesced:
-		return control.wait(ctx, command, func(session rolloutSession, options modelapplication.WaitOptions) error {
-			return session.WaitQuiesced(ctx, options)
-		})
-	case commandWaitPrepared:
-		return control.wait(ctx, command, func(session rolloutSession, options modelapplication.WaitOptions) error {
-			return session.WaitPrepared(ctx, options)
-		})
-	case commandCommit:
-		return control.withSession(ctx, command.rolloutID, func(session rolloutSession) error {
-			return session.Commit(ctx)
-		})
-	case commandAbort:
-		return control.withSession(ctx, command.rolloutID, func(session rolloutSession) error {
-			return session.Abort(ctx, rolloutAbortedCode)
-		})
 	default:
 		return usageError(errors.New("modelctl command is unknown"))
 	}
 }
 
+func isLegacyRolloutCommand(name commandName) bool {
+	switch name {
+	case commandBegin, commandPreflight, commandDrain, commandWaitQuiesced, commandWaitPrepared, commandCommit, commandAbort:
+		return true
+	default:
+		return false
+	}
+}
+
 func (control *controller) recover(ctx context.Context) error {
-	_, _, err := control.coordinator.Recover(ctx)
-	if hasErrorCode(err, modeldomain.ErrorCodeRolloutConflict) {
-		return foundation.NewError(
-			foundation.ErrorVersionConflict,
-			modeldomain.ErrorCodeRolloutInProgress,
-			false,
-			err,
-		)
-	}
+	_, err := control.activations.RecoverActivation(ctx, modelapplication.RecoverActivationCommand{
+		LeaseDuration: activationRecoveryLease,
+	})
 	return err
-}
-
-func (control *controller) begin(ctx context.Context) error {
-	session, err := control.coordinator.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	if session == nil {
-		return stateError(errors.New("rollout begin returned no session"))
-	}
-	id := session.ID()
-	if _, err := foundation.ParseID(string(id)); err != nil {
-		return stateError(errors.New("rollout begin returned an invalid identifier"))
-	}
-	_, err = fmt.Fprintln(control.stdout, id)
-	return err
-}
-
-func (control *controller) preflight(ctx context.Context, command command) error {
-	preflightCtx, cancel := context.WithTimeout(ctx, defaultPreflightTimeout)
-	defer cancel()
-	session, err := control.open(preflightCtx, command.rolloutID)
-	if err != nil {
-		return err
-	}
-	resolved, err := session.LoadTarget(preflightCtx)
-	if err != nil {
-		return err
-	}
-	defer resolved.ChatAPIKey.Destroy()
-	defer resolved.EmbeddingAPIKey.Destroy()
-	if err := control.preflighter.Preflight(preflightCtx, command.role, resolved); err != nil {
-		return err
-	}
-	return session.RenewValidating(preflightCtx)
-}
-
-func (control *controller) wait(
-	ctx context.Context,
-	command command,
-	waiter func(rolloutSession, modelapplication.WaitOptions) error,
-) error {
-	if waiter == nil || command.waitTimeout <= 0 || command.waitTimeout > maximumWaitTimeout || command.pollInterval <= 0 ||
-		command.pollInterval > maximumPollInterval || command.pollInterval > command.waitTimeout {
-		return usageError(errors.New("wait bounds are invalid"))
-	}
-	session, err := control.open(ctx, command.rolloutID)
-	if err != nil {
-		return err
-	}
-	err = waiter(session, modelapplication.WaitOptions{Timeout: command.waitTimeout, PollInterval: command.pollInterval})
-	if hasErrorCode(err, modeldomain.ErrorCodeRolloutWaitTimeout) {
-		return waitError(err)
-	}
-	return err
-}
-
-func (control *controller) withSession(ctx context.Context, rolloutID foundation.ID, action func(rolloutSession) error) error {
-	if action == nil {
-		return stateError(errors.New("modelctl rollout action is unavailable"))
-	}
-	session, err := control.open(ctx, rolloutID)
-	if err != nil {
-		return err
-	}
-	return action(session)
-}
-
-func (control *controller) open(ctx context.Context, rolloutID foundation.ID) (rolloutSession, error) {
-	session, err := control.coordinator.Open(ctx, rolloutID)
-	if err != nil {
-		if hasErrorCode(err, modeldomain.ErrorCodeRolloutConflict) {
-			return nil, stateError(err)
-		}
-		return nil, err
-	}
-	if session == nil || session.ID() != rolloutID {
-		return nil, stateError(errors.New("rollout session binding does not match"))
-	}
-	return session, nil
 }
 
 func (control *controller) ready(ctx context.Context) error {
-	if ctx == nil || control == nil || control.coordinator == nil || control.preflighter == nil || control.stdout == nil {
+	if ctx == nil || control == nil || control.activations == nil || control.stdout == nil {
 		return stateError(errors.New("modelctl controller is unavailable"))
 	}
 	return nil
-}
-
-func hasErrorCode(err error, code string) bool {
-	var classified *foundation.Error
-	return code != "" && errors.As(err, &classified) && classified.Code == code
 }
 
 func usageError(cause error) error {
@@ -305,6 +155,11 @@ func stateError(cause error) error {
 	return foundation.NewError(foundation.ErrorConsistencyViolation, "MODELCTL_ROLLOUT_STATE_INVALID", false, cause)
 }
 
-func waitError(cause error) error {
-	return foundation.NewError(foundation.ErrorRetryableFailure, "MODELCTL_WAIT_TIMEOUT", true, cause)
+func legacyRolloutError() error {
+	return foundation.NewError(
+		foundation.ErrorInvalidInput,
+		legacyRolloutErrorCode,
+		false,
+		errors.New("legacy model settings rollout commands are disabled; use Settings Apply or recover --stale"),
+	)
 }

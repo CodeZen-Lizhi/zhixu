@@ -14,7 +14,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 func TestHandlerSearchDefaultsHybridCanonicalizesAndPaginates(t *testing.T) {
@@ -31,8 +31,7 @@ func TestHandlerSearchDefaultsHybridCanonicalizesAndPaginates(t *testing.T) {
 		return result, nil
 	}
 	handler := NewHandler(search, &fakeEvidenceReferenceService{}, mustCursorCodec(t, 'a'))
-	router := chi.NewRouter()
-	handler.Routes(router)
+	router := retrievalTestRouter(handler)
 
 	body := `{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"  stable query  ","filters":{"path_prefixes":["docs/","docs"]},"limit":2}`
 	first := performJSONRequest(t, router, http.MethodPost, "/search", body)
@@ -74,8 +73,7 @@ func TestHandlerSearchEncodesRootHeadingAsEmptyArray(t *testing.T) {
 	result := cursorSearchResult(1, "92000000-0000-4000-8000-000000000002")
 	result.Items[0].HeadingPath = nil
 	handler := NewHandler(&fakeSearchService{result: result}, &fakeEvidenceReferenceService{}, mustCursorCodec(t, 'a'))
-	router := chi.NewRouter()
-	handler.Routes(router)
+	router := retrievalTestRouter(handler)
 
 	response := performJSONRequest(t, router, http.MethodPost, "/search", `{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"q","retrieval_mode":"keyword"}`)
 	if response.Code != http.StatusOK {
@@ -109,16 +107,14 @@ func TestHandlerSearchRejectsInvalidWireAndMapsServiceError(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			handler := NewHandler(&fakeSearchService{}, &fakeEvidenceReferenceService{}, mustCursorCodec(t, 'a'))
-			router := chi.NewRouter()
-			handler.Routes(router)
+			router := retrievalTestRouter(handler)
 			response := performJSONRequest(t, router, http.MethodPost, "/search", test.body)
 			assertProblem(t, response, http.StatusBadRequest, "")
 		})
 	}
 
 	handler := NewHandler(&fakeSearchService{}, &fakeEvidenceReferenceService{}, mustCursorCodec(t, 'a'))
-	router := chi.NewRouter()
-	handler.Routes(router)
+	router := retrievalTestRouter(handler)
 	invalidFilter := performJSONRequest(t, router, http.MethodPost, "/search", `{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"q","filters":{"source_ids":["invalid"]}}`)
 	assertProblem(t, invalidFilter, http.StatusBadRequest, domain.ErrorCodeSearchRequestInvalid)
 	invalidTime := performJSONRequest(t, router, http.MethodPost, "/search", `{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"q","filters":{"captured_at_from":"not-time"}}`)
@@ -163,8 +159,7 @@ func TestHandlerSearchRejectsInvalidWireAndMapsServiceError(t *testing.T) {
 
 	search := &fakeSearchService{err: foundation.NewError(foundation.ErrorDependencyUnavailable, "RETRIEVAL_SEMANTIC_UNAVAILABLE", false, errors.New("unavailable"))}
 	handler = NewHandler(search, &fakeEvidenceReferenceService{}, mustCursorCodec(t, 'a'))
-	router = chi.NewRouter()
-	handler.Routes(router)
+	router = retrievalTestRouter(handler)
 	response := performJSONRequest(t, router, http.MethodPost, "/search", `{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"q","retrieval_mode":"semantic"}`)
 	assertProblem(t, response, http.StatusServiceUnavailable, "RETRIEVAL_SEMANTIC_UNAVAILABLE")
 }
@@ -172,8 +167,7 @@ func TestHandlerSearchRejectsInvalidWireAndMapsServiceError(t *testing.T) {
 func TestHandlerSearchRejectsTamperedCursor(t *testing.T) {
 	search := &fakeSearchService{result: cursorSearchResult(2, "92000000-0000-4000-8000-000000000002")}
 	handler := NewHandler(search, &fakeEvidenceReferenceService{}, mustCursorCodec(t, 'a'))
-	router := chi.NewRouter()
-	handler.Routes(router)
+	router := retrievalTestRouter(handler)
 	first := performJSONRequest(t, router, http.MethodPost, "/search", `{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"stable query","retrieval_mode":"keyword","limit":1}`)
 	var response searchResponse
 	if first.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &response) != nil || response.NextCursor == "" {
@@ -190,8 +184,7 @@ func TestHandlerSearchRejectsTamperedCursor(t *testing.T) {
 func TestHandlerSearchRejectsCrossRequestAndStaleCursor(t *testing.T) {
 	search := &fakeSearchService{result: cursorSearchResult(2, "92000000-0000-4000-8000-000000000002")}
 	handler := NewHandler(search, &fakeEvidenceReferenceService{}, mustCursorCodec(t, 'a'))
-	router := chi.NewRouter()
-	handler.Routes(router)
+	router := retrievalTestRouter(handler)
 	first := performJSONRequest(t, router, http.MethodPost, "/search", `{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"stable query","retrieval_mode":"keyword","limit":1}`)
 	var response searchResponse
 	if first.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &response) != nil || response.NextCursor == "" {
@@ -216,8 +209,7 @@ func TestHandlerOpensSourceVersionAndImmutableSpan(t *testing.T) {
 		sourceSpan:    application.SourceSpanView{Reference: reference, Excerpt: "immutable excerpt", ExcerptTruncated: true},
 	}
 	handler := NewHandler(&fakeSearchService{}, evidence, mustCursorCodec(t, 'a'))
-	router := chi.NewRouter()
-	handler.Routes(router)
+	router := retrievalTestRouter(handler)
 
 	versionPath := "/workspaces/" + string(reference.SourceVersion.WorkspaceID) + "/source-versions/" + string(reference.SourceVersion.SourceVersionID)
 	versionResponse := httptest.NewRecorder()
@@ -247,8 +239,7 @@ func TestHandlerOpensSourceVersionAndImmutableSpan(t *testing.T) {
 
 func TestHandlerUnavailableDependenciesReturnProblem(t *testing.T) {
 	handler := NewHandler(nil, nil, nil)
-	router := chi.NewRouter()
-	handler.Routes(router)
+	router := retrievalTestRouter(handler)
 	search := performJSONRequest(t, router, http.MethodPost, "/search", `{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"q"}`)
 	assertProblem(t, search, http.StatusServiceUnavailable, "RETRIEVAL_SEARCH_SERVICE_UNAVAILABLE")
 
@@ -270,8 +261,7 @@ func TestHandlerMapsSearchAndEvidenceFailuresWithoutLeakingDetails(t *testing.T)
 	for _, test := range searchErrors {
 		search := &fakeSearchService{err: foundation.NewError(test.kind, "RETRIEVAL_TEST_FAILURE", test.kind == foundation.ErrorRetryableFailure, errors.New("private database detail"))}
 		handler := NewHandler(search, &fakeEvidenceReferenceService{}, mustCursorCodec(t, 'a'))
-		router := chi.NewRouter()
-		handler.Routes(router)
+		router := retrievalTestRouter(handler)
 		response := performJSONRequest(t, router, http.MethodPost, "/search", `{"workspace_id":"92000000-0000-4000-8000-000000000001","query":"q","retrieval_mode":"keyword"}`)
 		assertProblem(t, response, test.status, "RETRIEVAL_TEST_FAILURE")
 		if strings.Contains(response.Body.String(), "private database detail") {
@@ -281,8 +271,7 @@ func TestHandlerMapsSearchAndEvidenceFailuresWithoutLeakingDetails(t *testing.T)
 
 	evidence := &fakeEvidenceReferenceService{err: foundation.NewError(foundation.ErrorNotFound, "RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND", false, errors.New("other workspace identity"))}
 	handler := NewHandler(&fakeSearchService{}, evidence, mustCursorCodec(t, 'a'))
-	router := chi.NewRouter()
-	handler.Routes(router)
+	router := retrievalTestRouter(handler)
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/workspaces/93000000-0000-4000-8000-000000000001/source-versions/93000000-0000-4000-8000-000000000003", nil))
 	assertProblem(t, response, http.StatusNotFound, "RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND")
@@ -298,6 +287,12 @@ func performJSONRequest(t *testing.T, handler http.Handler, method, path, body s
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func retrievalTestRouter(handler *Handler) http.Handler {
+	router := gin.New()
+	handler.Routes(router)
+	return router
 }
 
 func assertProblem(t *testing.T, response *httptest.ResponseRecorder, status int, code string) {

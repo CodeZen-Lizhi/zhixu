@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -23,6 +25,18 @@ type modelDialerFunc func(context.Context, string, string) (net.Conn, error)
 
 func (dial modelDialerFunc) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	return dial(ctx, network, address)
+}
+
+type countingIdleTransport struct {
+	closeCalls atomic.Int32
+}
+
+func (*countingIdleTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("transport is not configured for requests")
+}
+
+func (transport *countingIdleTransport) CloseIdleConnections() {
+	transport.closeCalls.Add(1)
 }
 
 func TestModelAddressAllowed(t *testing.T) {
@@ -260,7 +274,8 @@ func TestModelHTTPClientKeepsOriginalTLSHostname(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := client.Transport.(*http.Transport)
+	t.Cleanup(func() { _ = client.Close() })
+	transport := client.client.Transport.(*http.Transport)
 	if transport.TLSClientConfig == nil || transport.TLSClientConfig.ServerName != endpoint.Hostname() || transport.TLSClientConfig.MinVersion < tls.VersionTLS12 {
 		t.Fatalf("TLS config = %#v, want fixed hostname and TLS 1.2+", transport.TLSClientConfig)
 	}
@@ -268,7 +283,7 @@ func TestModelHTTPClientKeepsOriginalTLSHostname(t *testing.T) {
 	transport.TLSClientConfig.RootCAs = trustedTransport.TLSClientConfig.RootCAs
 	transport.TLSClientConfig.InsecureSkipVerify = trustedTransport.TLSClientConfig.InsecureSkipVerify // test server trust only
 
-	response, err := client.Get(endpoint.String())
+	response, err := client.client.Get(endpoint.String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,17 +307,85 @@ func TestModelHTTPClientDisablesProxyAndRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport, ok := client.Transport.(*http.Transport)
+	t.Cleanup(func() { _ = client.Close() })
+	transport, ok := client.client.Transport.(*http.Transport)
 	if !ok || transport.Proxy != nil || transport.DialContext == nil || transport.TLSClientConfig == nil ||
 		transport.TLSClientConfig.ServerName != endpoint.Hostname() || transport.TLSClientConfig.MinVersion < tls.VersionTLS12 {
-		t.Fatalf("model transport is not hardened: %#v", client.Transport)
+		t.Fatalf("model transport is not hardened: %#v", client.client.Transport)
 	}
 	request, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.CheckRedirect(request, nil); err != http.ErrUseLastResponse {
+	if err := client.client.CheckRedirect(request, nil); err != http.ErrUseLastResponse {
 		t.Fatalf("redirect error = %v, want %v", err, http.ErrUseLastResponse)
+	}
+}
+
+func TestModelHTTPClientClosesOnlyOwnedTransportExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	owned := &countingIdleTransport{}
+	client := &modelHTTPClient{client: &http.Client{Transport: owned}, owned: owned}
+	var wait sync.WaitGroup
+	for range 64 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if err := client.Close(); err != nil {
+				t.Errorf("Close() error = %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+	if got := owned.closeCalls.Load(); got != 1 {
+		t.Fatalf("owned transport close calls = %d, want 1", got)
+	}
+}
+
+func TestModelHTTPClientPreservesExternalTransportOwnership(t *testing.T) {
+	t.Parallel()
+
+	endpoint, err := url.Parse("https://models.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	external := &countingIdleTransport{}
+	supplied := &http.Client{Transport: external}
+	client, err := newModelHTTPClient(endpoint, supplied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.client.Transport != external || client.owned != nil {
+		t.Fatalf("client transport ownership = %T/%T, want shared external transport", client.client.Transport, client.owned)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := external.closeCalls.Load(); got != 0 {
+		t.Fatalf("external transport close calls = %d, want 0", got)
+	}
+}
+
+func TestModelHTTPClientOwnsCloneWhenSuppliedClientUsesDefaultTransport(t *testing.T) {
+	t.Parallel()
+
+	endpoint, err := url.Parse("https://models.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	supplied := &http.Client{}
+	client, err := newModelHTTPClient(endpoint, supplied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if supplied.Transport != nil {
+		t.Fatal("supplied client was mutated")
+	}
+	owned, ok := client.owned.(*http.Transport)
+	if !ok || client.client.Transport == nil || client.client.Transport != owned {
+		t.Fatalf("copied client transport ownership = %T/%T, want one owned clone", client.client.Transport, client.owned)
 	}
 }
 

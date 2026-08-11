@@ -24,7 +24,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -57,15 +57,15 @@ func NewHandler(service Service) *Handler {
 func (handler *Handler) Available() bool { return handler != nil && handler.service != nil }
 
 // Routes 在 /api/v1 下注册导出创建、查询、列表和下载端点。
-func (handler *Handler) Routes(router chi.Router) {
-	router.Post("/exports", handler.create)
-	router.Get("/exports/{export_id}", handler.get)
-	router.Get("/exports/{export_id}/download", handler.download)
-	router.Get("/workspaces/{workspace_id}/exports", handler.list)
-	router.Post("/workspaces/{workspace_id}/attachment-exports", handler.createAttachment)
-	router.Get("/workspaces/{workspace_id}/attachment-exports", handler.listAttachments)
-	router.Get("/workspaces/{workspace_id}/attachment-exports/{export_id}", handler.getAttachment)
-	router.Get("/workspaces/{workspace_id}/attachment-exports/{export_id}/download", handler.downloadAttachment)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.POST("/exports", httpapi.GinHandler(handler.create))
+	router.GET("/exports/:export_id", httpapi.GinHandler(handler.get))
+	router.GET("/exports/:export_id/download", httpapi.GinHandler(handler.download))
+	router.GET("/workspaces/:workspace_id/exports", httpapi.GinHandler(handler.list))
+	router.POST("/workspaces/:workspace_id/attachment-exports", httpapi.GinHandler(handler.createAttachment))
+	router.GET("/workspaces/:workspace_id/attachment-exports", httpapi.GinHandler(handler.listAttachments))
+	router.GET("/workspaces/:workspace_id/attachment-exports/:export_id", httpapi.GinHandler(handler.getAttachment))
+	router.GET("/workspaces/:workspace_id/attachment-exports/:export_id/download", httpapi.GinHandler(handler.downloadAttachment))
 }
 
 type createRequest struct {
@@ -219,7 +219,7 @@ func (handler *Handler) list(writer http.ResponseWriter, request *http.Request) 
 		writeUnavailable(writer)
 		return
 	}
-	workspaceID, err := parseID(chi.URLParam(request, "workspace_id"))
+	workspaceID, err := parseID(request.PathValue("workspace_id"))
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -351,7 +351,7 @@ func parseJobLookup(request *http.Request) (foundation.ID, foundation.ID, error)
 	if err != nil {
 		return "", "", err
 	}
-	exportID, err := parseID(chi.URLParam(request, "export_id"))
+	exportID, err := parseID(request.PathValue("export_id"))
 	return workspaceID, exportID, err
 }
 

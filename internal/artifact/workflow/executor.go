@@ -309,7 +309,8 @@ func (executor *Executor) createModelRun(
 	run := agentdomain.ModelRun{
 		ID: runID, WorkspaceID: execution.WorkspaceID, WorkflowRunID: execution.RunID,
 		NodeRunID: execution.NodeRunID, NodeAttemptID: execution.NodeAttemptID,
-		Model: snapshot.Profile.Model, Profile: snapshot.Profile.Ref, Prompt: snapshot.Prompt.Ref,
+		ModelSettingsRevision: cloneModelSettingsRevision(execution.ModelSettingsRevision),
+		Model:                 snapshot.Profile.Model, Profile: snapshot.Profile.Ref, Prompt: snapshot.Prompt.Ref,
 		Schema: snapshot.Schema.Ref, ReducedSchema: snapshot.ReducedSchema.Ref, Retrieval: retrieval,
 		Status: agentdomain.ModelRunRunning, Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
@@ -345,9 +346,22 @@ func (executor *Executor) createModelRun(
 func sameModelRunExecutionBinding(left, right agentdomain.ModelRun) bool {
 	return left.WorkspaceID == right.WorkspaceID && left.WorkflowRunID == right.WorkflowRunID &&
 		left.NodeRunID == right.NodeRunID && left.NodeAttemptID == right.NodeAttemptID &&
+		sameModelSettingsRevision(left.ModelSettingsRevision, right.ModelSettingsRevision) &&
 		left.Model == right.Model && left.Profile == right.Profile && left.Prompt == right.Prompt &&
 		left.Schema == right.Schema && left.ReducedSchema == right.ReducedSchema &&
 		sameRetrievalRef(left.Retrieval, right.Retrieval)
+}
+
+func sameModelSettingsRevision(left, right *int64) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func cloneModelSettingsRevision(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func sameRetrievalRef(left, right agentdomain.RetrievalRef) bool {
@@ -513,6 +527,7 @@ func validateExecution(execution workflowapplication.ExecutionContext) error {
 	if execution.DefinitionVersion != DefinitionVersion || execution.DefinitionHash != definitionGraphHash ||
 		execution.NodeKey != NodeKey || execution.NodeKind != NodeKind || execution.InputSchemaVersion != InputSchemaVersion ||
 		!validHash(execution.DefinitionHash) || execution.NodeVersion < 1 || execution.AttemptNo < 1 || execution.DispatchNo < 1 ||
+		(execution.ModelSettingsRevision != nil && *execution.ModelSettingsRevision < 0) ||
 		strings.TrimSpace(execution.LeaseOwner) == "" ||
 		!validDistinctIDs(execution.WorkspaceID, execution.DefinitionID, execution.RunID, execution.NodeRunID, execution.NodeAttemptID) {
 		return inputError(errors.New("artifact generation execution binding is invalid"))

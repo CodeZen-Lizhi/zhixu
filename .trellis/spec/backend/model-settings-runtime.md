@@ -1,30 +1,39 @@
-# 模型设置与开发运行时契约
+# 模型设置与热运行时契约
 
-> 锁定 managed model settings、冻结模型运行时、受控 restart 与本地 Docker 生命周期的稳定边界。
+> 锁定 managed model settings、进程内 generation 热生效、冻结任务绑定与本地 Docker 生命周期的稳定边界。
 
-## Scenario: Managed Model Settings And Restart
+## Scenario: Managed Model Settings Hot Activation
 
 ### 1. Scope / Trigger
 
 - 修改 `internal/modelsettings`、`internal/platform/secretstore`、模型 Factory/Transport、API/Worker Composition Root、
-  Workflow enqueue/attempt、
-  `cmd/modelctl`、`deploy/compose.yml` 或根目录 `zhixu` 时，必须应用本规范。
+  Workflow Claim/Attempt、Retrieval Search/Reindex、`cmd/modelctl`、`deploy/compose.yml` 或根目录 `zhixu` 时，必须应用本规范。
 - 本规范只覆盖开发 Compose 的 managed 模式；普通二进制 static Env/YAML 模式继续兼容，revision 固定为 `0`。
 
 ### 2. Signatures
 
-- Settings HTTP 只依赖 Settings Manager：`Snapshot`、`Save`、`Test`。Handler 不接收解密后的
-  `ResolvedSettings`，也不直接调用模型 Adapter。
-- API/Worker 只依赖 Runtime Loader/Session：固定加载当前 active，或有效 rollout 绑定的 target；每个进程只构造
-  一个不可变 Model Runtime，并向全部消费者复用同一 Chat/Embedding capability 与 Contract。
-- `zhixu-modelctl` 只依赖 Rollout Coordinator/Session：`Open`、`Recover` 与业务阶段动作；CLI 不传
-  `expected_phase`，launcher 不拼 PostgreSQL CAS。
-- Revision、Rollout、Runtime Store 和 tx-scoped EnqueueFence 是模块内部 seam，不暴露给 HTTP 或 shell。
+- Settings HTTP 固定为 GET/PUT `/api/v1/settings/models`、POST `/api/v1/settings/models/test` 与
+  POST `/api/v1/settings/models/activations`。激活请求严格只接受 `{expected_revision}`，服务端生成 rollout id 并固定 target。
+- Snapshot 必须同时投影 desired/active、API/Worker runtime、rollout/participants、`apply_required` 与恒为 `false` 的
+  `restart_required`；客户端不得根据容器状态自行推导这些事实。
+- API/Worker 各自持有一个 `RuntimeHost`。不可变 generation 包含完整 Chat/Embedding capability 与 contract；
+  `Acquire` 返回绑定 generation 生命周期的 lease。Workflow Claim-and-acquire 与 Reindex 持久 Claim 都必须先用
+  `Admit` 获取入场 token，消除 gate 关闭前后的持久化竞态。
+- Workflow 新 Attempt 的 runtime binding 只能在 Claim 事务中从 state 和 fresh Worker runtime 选择并冻结；
+  caller 不提交 revision。Retrieval 以持久 Index/Embedding provenance 获取兼容 generation。
+- Revision、Activation Store、Runtime Store、participant 与 generation lifecycle 是模块内部 seam；正常 Apply 由
+  Activation Coordinator 驱动。`zhixu-modelctl` 不再写旧 validating/draining 状态，仅保留兼容的检查/恢复边界。
 
 ### 3. Contracts
 
-- `desired` 是最后保存 revision，`active` 是全局已提交 revision，`applied` 是单进程已加载 revision；保存只推进
-  desired，只有 API/Worker 都 fresh/prepared 且 revision 等于固定 target 时才能 commit active。
+- `desired` 是最后保存 revision，`active` 是全局已提交 revision，`applied` 是单进程已加载 revision。保存只推进
+  desired；Apply 固定一个 exact target，API/Worker 都完成 Build、最小真实 Probe、prepared/armed 且 ownership fresh 后才能提交 active。
+- 全局阶段固定为 `idle -> preparing -> arming -> activating -> idle`。只有 commit 前可转 `failed` 并恢复 previous；
+  commit 后必须 fail-forward 到 target，不得把 active 回滚到 previous。
+- `arming` 只关闭新默认任务的 admission，不等待在途任务排空。commit 后新默认 lease 指向 target；旧 Attempt、旧 Search/Reindex
+  按冻结 binding 继续持有旧 generation，直到 lease 与持久引用都释放后才 Close。
+- Host 的 gate、generation 选择和 refcount 必须在同一互斥边界内原子完成；旧 generation 不用任意 TTL 退役。
+  进程重启后可按正 revision 重建历史 generation；revision `0` 只代表 canonical static disabled，不得伪造动态重建。
 - revision `0` 是无持久行的 canonical disabled。非零 revision append-only；高级 timeout/batch/byte limit 也冻结。
 - Secret 只允许请求瞬时明文、短生命周期进程内明文和 AES-256-GCM 密文。AAD 绑定 revision、用途、schema、
   Provider 和规范化 Endpoint；`keep` 必须解密后以新 revision AAD 重加密。
@@ -37,12 +46,17 @@
 - 远程模型只允许 HTTPS，使用 `Proxy=nil`、禁止 redirect、逐新连接重解析的专用 Transport。A/AAAA 任一地址为
   loopback、私网、link-local、multicast、unspecified 或保留地址时整组拒绝；仅 Ollama preset 可访问精确
   `http://127.0.0.1:11434` relay。
-- draining 必须先提交 validating -> draining，让数据库入队围栏生效，再暂停 River queue；所有 producer 在 job insert 同一事务内取得
-  EnqueueFence。已 claim attempt 保持原 revision，未 claim job 保留到新 active。
-- 每次 `workflow.node_attempt` Claim 都保存冻结的 `model_settings_revision`；重复 delivery 必须核对相同 revision，
-  已开始 attempt 不得热切换。
+- 每次 `workflow.node_attempt` Claim 都保存冻结的 `model_settings_revision` 与 Worker instance；重复 delivery 先按持久
+  owner 精确重放，只有真正追加新 Attempt 时才选择 fresh runtime。已开始 Attempt 不得热切换。
+- Semantic/Hybrid Search 必须按 Active Index 的完整 EmbeddingVersion Acquire；不兼容或历史 generation 无法重建时
+  fail closed，不得退回 current embedding。Reindex lease 覆盖整次 Processor graph，而不是逐页 Acquire。
+- 激活端点必须同时满足 Cookie Session、Origin/CSRF 与 `ManageSystemSettings`；API Token 即使拥有该 capability 也不能
+  调用 Session-only 模型设置命令。`WriteKnowledge` 绝不能隐式获得模型激活权限。
+- Secret 不得出现在 activation request/progress、runtime ownership、participant、日志、DOM 或浏览器存储；错误只使用稳定脱敏码。
 - `./zhixu down` 保留 PostgreSQL、模型主密钥和 Workspace；只有显式 `./zhixu reset` 确认后可删除 Compose volumes。
   应用容器不得挂 Docker Socket。
+- `00079_model_settings_hot_activation.sql` 是 forward-only 协议边界；它必须用约束/trigger 锁定状态迁移、DB-time freshness、
+  owner takeover 与 revision 一致性。新协议 migration 与旧 mutating modelctl 二进制不支持混跑。
 - Goose 只记录迁移版本、不校验已执行文件内容。历史环境可能已经记录同版本的早期 schema；后续 forward migration
   必须按实际列/约束检测旧形态，在单一事务内 repair 或 fail closed，不得改写已发布迁移并假设会重跑。
 - `chat_api_style` 的 Down 只有在全部 revision 均为 `chat_completions` 时才允许；存在 `responses` revision 时必须在
@@ -51,8 +65,8 @@
   非零退出都原样终止。完成即退出的 one-shot 不得交给 `compose up --wait` 或与 `compose wait` 竞态。
 - API 与 Worker 即使依赖 migration 完成，也必须直接声明 `postgres: service_healthy`；Compose 可能复用已完成的
   migration one-shot，不能把 migration 完成当作当前 PostgreSQL 健康状态。
-- 普通重复 `up` 使用 Compose 的差异检测，不强制重建未变化的 API/Worker；受控 `restart` 仍必须强制替换
-  prepared 与 steady runtime，避免候选启动参数或旧实例被误用。
+- 普通模型 Apply 不得替换或重启 API/Worker 容器；`restart_required` 在所有合法响应中恒为 `false`。
+  `./zhixu restart` 只保留为升级、迁移或进程故障恢复等运维命令，不是模型配置生效协议的一部分。
 - relay 使用 `network_mode: container:zhixu-app-netns|zhixu-worker-netns` 时不拥有独立网络配置；host-gateway 等映射只配置在
   对应稳定 anchor，relay 不重复声明 `extra_hosts`。relay health 同时证明本 namespace 的
   `127.0.0.1:11434` listener 与 anchor loopback health；可选 host Ollama 不是常规 ready 依赖。
@@ -62,13 +76,16 @@
 | Condition | Required result |
 |---|---|
 | 无持久设置 | revision 0、Chat/Embedding disabled，基础 API/Worker 可启动 |
-| expected revision 过期或 rollout 进行中 PUT | 409，返回当前 revision，不回显设置或 Secret |
+| expected revision 过期、target 不等于 desired 或已有 live rollout | 409，返回必要的当前 revision，不回显设置或 Secret |
 | Key 缺失、wrong key、密文/AAD tamper | 模型 capability unavailable、稳定脱敏错误；基础诊断与 Settings 可用 |
 | draft 改变 Provider/Endpoint 仍使用 keep | 拒绝；必须 replace 或 clear |
 | DNS mixed public/private、redirect 或 remote HTTP | fail closed，不尝试被拒绝地址，不记录完整 Endpoint |
-| drain 超时、单 role prepared 失败或 launcher 中断 | active 保持 previous；abort/recover 后恢复旧 runtime 与 queue |
-| runtime stale、rollout id 或 applied revision 不匹配 | 进程停止 owner heartbeat/工作并 fail closed |
+| target Build/Probe 或单 role prepare 失败 | commit 前转 failed，active/applied 保持 previous；可修正配置后重试 |
+| arming/activating 时 Coordinator 或进程重启 | 从持久 state/participant 恢复；commit 前可 abort，commit 后只向 target 推进 |
+| runtime stale、rollout id、owner 或 applied revision 不匹配 | DB-time stale 后才允许精确 takeover；fresh owner 与 revision jump 均拒绝 |
 | attempt 重放使用不同 revision | consistency/version conflict；不得复用旧 attempt |
+| EmbeddingVersion 与可用 generation contract 不兼容 | 稳定 version unavailable；Semantic/Hybrid 不降级到 current |
+| 合法 Snapshot 返回 `restart_required=true` | 服务端、OpenAPI 与 strict client 均视为协议错误 |
 | 已记录旧迁移版本但 schema 缺列 | forward migration 按 shape 事务修复；非法旧行失败且 schema/数据完整回滚 |
 | 历史 Export 表数据量较大 | repair 前评估全表回填与 `ACCESS EXCLUSIVE` 锁窗口，并安排维护窗口；不得宣称在线零停机 |
 | 存在 `responses` revision 时降级移除 `chat_api_style` | PostgreSQL `55000`，迁移版本和列保持不变；先创建显式 `chat_completions` revision 并完成业务迁移 |
@@ -76,26 +93,27 @@
 
 ### 5. Good / Base / Bad Cases
 
-- Good：保存 desired 后页面显示 restart required；`./zhixu restart` 固定 target、排空、启动两个 prepared candidate、
-  原子 commit，再恢复 queue/relay，两个 role 的 applied 与 active 一致。候选与 steady consumer 必须加入已验证的稳定 anchor。
+- Good：保存 desired 后显式 Apply；API/Worker 在原进程中各自构建并探测 candidate，短时关闭新 admission 后原子提交，
+  两个 role 的 applied 与 active 收敛，容器 id、StartedAt 与 RestartCount 保持不变。错误 target 不影响 previous serving generation。
 - Base：全部模型 disabled 时仍完成 Compose、迁移、readiness、Keyword Search 和 Settings 浏览器闭环。
-- Bad：保存时热替换进程 Adapter、Handler 持有明文 Key、只检查第一个 DNS 地址、先暂停 queue 后再提交 draining、
-  仅凭容器 healthy 就提交 active、含 Responses 历史时直接删除协议列，或 `down` 隐式删除 volume。
+- Bad：保存时直接替换共享 Adapter、等待所有任务排空、只更新数据库 active、不冻结 Attempt/Embedding provenance、
+  历史 embedding 静默使用 current、把 restart 当正常 Apply、Handler 持有明文 Key，或 `down` 隐式删除 volume。
 
 ### 6. Tests Required
 
-- Domain/Application：canonical Provider value、Secret action、expected revision、Settings Manager Test 生命周期、
-  Rollout Coordinator 合法顺序、lease/stale/recover、runtime ownership 与 attempt revision contract tests。
+- Domain/Application/Runtime：canonical Provider value、Secret action、expected revision、Activation 合法状态、pre/post commit
+  recovery、runtime ownership、generation singleflight/gate/refcount/history、idempotent Release/Close 与 Attempt binding tests。
 - Crypto/Transport：通过 Model Settings 与 Git Sync 业务 wrapper 回归共享 `secretstore` primitive，覆盖 round trip、wrong key、
   nonce/AAD tamper、purpose/schema 隔离、replace/keep、safe String/GoString、redirect、mixed DNS、rebind、IPv4/IPv6 fallback、
   TLS hostname/SNI、精确 loopback relay。
-- PostgreSQL：fresh migration Up/guarded Down、append-only revision、同事务 Audit、并发 PUT/begin、runtime CAS、
-  enqueue/drain 竞态、attempt revision insert/read/replay、历史同版本 schema repair 与失败全回滚；SQL 必须参数化并用真实 PostgreSQL 验证。
+- PostgreSQL：fresh `00079` Up/guarded Down、append-only revision、同事务 Audit、并发 PUT/Start、state/runtime/participant
+  锁序和 CAS、DB-time stale takeover、commit/fail/recovery、Attempt Claim binding/replay；SQL 必须参数化并用真实 PostgreSQL 验证。
 - Chat API style 迁移测试必须从旧 schema 插入 revision 后升级，断言回填 `chat_completions`、非法枚举受 `23514` 拒绝、
   仅默认值可 Down；插入 `responses` 后 Down 必须返回 `55000` 且 Goose 版本保持不变。
-- Composition/CLI/Compose：API/Worker disabled/configured/fixed target、单一 Runtime 注入、queue pause/resume、
-  launcher Key/migration one-shot fail-fast、双 Compose helper/main identity、anchor-first recovery、secret/smoke cleanup fake-Docker contract，
-  以及真实 `./zhixu up`、主项目 restart、anchor degraded -> restart、重复 `up` 和 readiness。
+- HTTP/OpenAPI/Auth：activation exact body、202/409/503、Session-only、Origin/CSRF、`ManageSystemSettings` 路由映射、
+  WriteKnowledge 拒绝、Snapshot strict projection 与 Secret 不回显。
+- Composition/CLI/Compose：API/Worker disabled/configured/unavailable 启动、HotRuntimeController readiness、旧 modelctl mutation
+  fail closed、launcher migration fail-fast、精确 smoke cleanup，以及隔离真实 Compose 中成功/失败/修正 Apply 后容器 identity 不变。
 - Canonical Go/contract 门禁至少包含受影响 `go test`、`go test -race`、`go vet`、`go mod tidy -diff`、
   `make openapi-check`、`make compose-check`、`git diff --check` 和 Secret 扫描。
 
@@ -105,8 +123,14 @@
 Wrong: HTTP Handler ResolveDraft 后把 Secret 交给 ConnectionTester。
 Correct: Handler 只调用 SettingsManager.Test；Manager 在模块内解析、测试并销毁 Secret。
 
-Wrong: 先暂停 Queue、后提交 draining，或 queued job 在入队时宣称模型 revision。
-Correct: 先提交 draining 关闭同事务 fence，再 QueuePause；Worker Claim 时冻结 attempt revision。
+Wrong: 保存后要求重启容器，或切换前等待所有在途 Workflow/Reindex 排空。
+Correct: Build/Probe candidate 后短时关闭新 admission；旧 lease 继续旧 generation，新任务在 commit 后使用 target。
+
+Wrong: caller 或 queued job 指定模型 revision，Search/Reindex 遇到历史 embedding 时退回 current。
+Correct: Worker Claim 事务冻结 fresh runtime binding；Retrieval 按持久 Index/EmbeddingVersion 获取 exact compatible generation。
+
+Wrong: 只更新数据库 active，或逐 consumer 替换 Adapter 指针并立即关闭旧 client。
+Correct: DB 是单一 publish 点；RuntimeHost 用 generation lease/refcount 绑定资源生命周期并在无引用后退役。
 
 Wrong: docker compose down -v、image prune 或宽泛名称匹配被包装进日常 down。
 Correct: down 保留数据；reset 单独确认；历史 smoke 只按精确 namespace 且确认无容器引用后删除。

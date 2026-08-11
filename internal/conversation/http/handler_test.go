@@ -13,7 +13,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -176,8 +176,8 @@ func TestCommandsAcceptCaseInsensitiveJSONMediaType(t *testing.T) {
 }
 
 func testRouter(service Service) http.Handler {
-	router := chi.NewRouter()
-	router.Route("/api/v1", NewHandler(service, NewCursorCodec()).Routes)
+	router := gin.New()
+	NewHandler(service, NewCursorCodec()).Routes(router.Group("/api/v1"))
 	return router
 }
 

@@ -19,7 +19,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -54,18 +54,18 @@ func NewHandler(read *application.IssueReadService, scans *application.ScanServi
 func (handler *Handler) Available() bool { return handler != nil && handler.read != nil }
 
 // Routes 在 /api/v1 下注册 Health 资源。
-func (handler *Handler) Routes(router chi.Router) {
-	router.Get("/health/summary", handler.summary)
-	router.Get("/health/issues", handler.issues)
-	router.Get("/health/issues/{issue_id}", handler.issueDetail)
-	router.Get("/health/issues/{issue_id}/observations", handler.issueObservations)
-	router.Get("/health/issues/{issue_id}/decisions", handler.issueDecisions)
-	router.Post("/health/issues/{issue_id}/decisions", handler.decision)
-	router.Post("/health/issues/{issue_id}/repair-proposals", handler.repairProposal)
-	router.Post("/health/scans", handler.startScan)
-	router.Get("/health/scans/{scan_id}", handler.getScan)
-	router.Get("/health/schedules", handler.getSchedule)
-	router.Put("/health/schedules", handler.updateSchedule)
+func (handler *Handler) Routes(router gin.IRouter) {
+	router.GET("/health/summary", httpapi.GinHandler(handler.summary))
+	router.GET("/health/issues", httpapi.GinHandler(handler.issues))
+	router.GET("/health/issues/:issue_id", httpapi.GinHandler(handler.issueDetail))
+	router.GET("/health/issues/:issue_id/observations", httpapi.GinHandler(handler.issueObservations))
+	router.GET("/health/issues/:issue_id/decisions", httpapi.GinHandler(handler.issueDecisions))
+	router.POST("/health/issues/:issue_id/decisions", httpapi.GinHandler(handler.decision))
+	router.POST("/health/issues/:issue_id/repair-proposals", httpapi.GinHandler(handler.repairProposal))
+	router.POST("/health/scans", httpapi.GinHandler(handler.startScan))
+	router.GET("/health/scans/:scan_id", httpapi.GinHandler(handler.getScan))
+	router.GET("/health/schedules", httpapi.GinHandler(handler.getSchedule))
+	router.PUT("/health/schedules", httpapi.GinHandler(handler.updateSchedule))
 }
 
 type issuePageResponse struct {
@@ -621,7 +621,7 @@ func queryAndPathIDs(r *http.Request, query url.Values, path string) (foundation
 	if err != nil {
 		return "", "", err
 	}
-	raw := chi.URLParam(r, path)
+	raw := r.PathValue(path)
 	value, err := foundation.ParseID(raw)
 	if err != nil || string(value) != raw {
 		return "", "", invalid("HEALTH_ID_INVALID", "resource id is invalid")
