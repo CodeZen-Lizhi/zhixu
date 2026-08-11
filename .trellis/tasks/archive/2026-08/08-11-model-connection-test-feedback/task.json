@@ -1,0 +1,28 @@
+{
+  "id": "model-connection-test-feedback",
+  "name": "model-connection-test-feedback",
+  "title": "模型连接测试真实错误反馈",
+  "description": "",
+  "status": "completed",
+  "dev_type": null,
+  "scope": "fullstack",
+  "package": null,
+  "priority": "P2",
+  "creator": "lizhi",
+  "assignee": "lizhi",
+  "createdAt": "2026-08-11",
+  "completedAt": "2026-08-11",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "description": "真实模型连接探针、Provider/网络诊断安全反馈与 Embedding URL 修复"
+  }
+}

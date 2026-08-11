@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"复核测试隔离、Secret 销毁、Provider Transport 和 URL 行为"}
+{"file":".trellis/spec/backend/index.md","reason":"复核后端错误、质量和交付规范入口"}
+{"file":".trellis/spec/frontend/index.md","reason":"复核严格 codec、错误 UI 与前端门禁入口"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核跨层错误数据流和兼容性"}
+{"file":".trellis/tasks/08-11-model-connection-test-feedback/prd.md","reason":"逐项核对 AC1-AC10"}
+{"file":".trellis/tasks/08-11-model-connection-test-feedback/design.md","reason":"复核实现未越过测试专用诊断边界"}

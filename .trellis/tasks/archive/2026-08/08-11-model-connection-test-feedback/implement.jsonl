@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"模型设置测试、Secret 生命周期、Provider Transport 与 no-store 契约"}
+{"file":".trellis/spec/backend/index.md","reason":"后端错误、质量与模型 Adapter 规范入口"}
+{"file":".trellis/spec/frontend/index.md","reason":"前端 API 严格解码、错误状态与验证入口"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"跨 Adapter/Application/HTTP/OpenAPI/Web 的错误数据流检查"}
+{"file":".trellis/tasks/08-11-model-connection-test-feedback/design.md","reason":"当前任务的安全诊断结构、数据流和兼容性设计"}
