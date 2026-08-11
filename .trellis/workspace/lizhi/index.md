@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 53
+- **Total Sessions**: 54
 - **Last Active**: 2026-08-11
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~70 | Active |
+| `journal-2.md` | ~91 | Active |
 | `journal-1.md` | ~1981 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 54 | 2026-08-11 | 修复 Docker 项目级重启 | `19fdaae2` | `dev` |
 | 53 | 2026-08-11 | 完善模型连接测试诊断与协议探针 | `ba06d590` | `dev` |
 | 52 | 2026-08-11 | 修复 Docker 重启后的运行时恢复 | `540f123e` | `dev` |
 | 51 | 2026-08-11 | 收敛项目文档体系 | `49e09138` | `dev` |

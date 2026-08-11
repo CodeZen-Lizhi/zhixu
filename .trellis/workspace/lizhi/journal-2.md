@@ -68,3 +68,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 54: 修复 Docker 项目级重启
+
+**Date**: 2026-08-11
+**Task**: 修复 Docker 项目级重启
+**Branch**: `dev`
+
+### Summary
+
+以独立 helper Compose 提供稳定网络命名空间 anchor，修复 Docker Desktop 项目级 Restart 的旧 owner 引用失效，并补齐生命周期、安全与回归验证。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `19fdaae2` | (see git log) |
+
+### Status
+
+[OK] **Completed**
