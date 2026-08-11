@@ -47,3 +47,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 53: 完善模型连接测试诊断与协议探针
+
+**Date**: 2026-08-11
+**Task**: 完善模型连接测试诊断与协议探针
+**Branch**: `dev`
+
+### Summary
+
+为 OpenAI-compatible Chat/Responses 与 Embedding 连接测试增加最小探针、真实 Provider/网络诊断、显式接口样式和安全前端展示；完成回归门禁与真实页面复测。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ba06d590` | (see git log) |
+
+### Status
+
+[OK] **Completed**
