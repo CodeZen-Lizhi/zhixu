@@ -445,12 +445,13 @@ make compose-check
 make compose-up
 make compose-rag-smoke
 make compose-tool-smoke
+make compose-model-runtime-hot-activation-smoke
 ZHIXU_TEST_DATABASE_URL='postgres://...' make rag-integration
 ZHIXU_TEST_DATABASE_URL='postgres://...' make tool-integration
 make benchmark-capacity
 ```
 
-集成 target 使用 disposable database/Workspace，缺少 `ZHIXU_TEST_DATABASE_URL` 时必须失败或明确 skip，不能把未运行报为通过。Compose smoke、PostgreSQL integration、River fault、认证负测、容量、备份恢复、浏览器和真实模型评测证明不同边界，不能相互替代。
+`compose-model-runtime-hot-activation-smoke` 精确调用隔离的 `deploy/model-runtime-hot-activation-smoke.sh`，使用 disposable Compose 项目、Workspace、数据库和受控 loopback fake model 验证 Apply 前后容器身份不变；它不属于普通 `make test` 或快速检查。集成 target 使用 disposable database/Workspace，缺少 `ZHIXU_TEST_DATABASE_URL` 时必须失败或明确 skip，不能把未运行报为通过。Compose smoke、PostgreSQL integration、River fault、认证负测、容量、备份恢复、浏览器和真实模型评测证明不同边界，不能相互替代。
 
 配置加载修改的局部门禁：
 

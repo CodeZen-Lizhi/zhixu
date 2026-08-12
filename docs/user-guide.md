@@ -236,7 +236,9 @@
 
 - **用途**：管理当前 Workspace 的模型、Embedding、Rerank、Git Remote、索引、工作流重试、记忆和数据保留。
 - **入口**：设置页；宿主机 Root 切换仍使用本机命令。
-- **主要操作**：测试模型连接、查看 desired/active 配置；配置单 HTTPS Remote 与只写 Token；手动同步、查看 Git/索引分列状态；增量或全量重建索引；清理过期临时数据。
+- **模型设置操作**：先在编辑期使用“连接测试”取得提前反馈；“保存并应用”会保存新的 `desired` revision 并立即启动该 exact revision 的应用；“仅保存”只更新 `desired`，随后可用“应用配置”应用已保存版本。`active` 是已经提交给新默认工作的版本，API/Worker 各自的 `applied` 是进程已加载版本；页面同时显示它们和是否仍待应用。
+- **模型设置进度与恢复**：保存后的 Apply 是持久 operation。刷新、关闭页面、断网或 Start 响应丢失后，重新进入设置页即可从服务端恢复进度。`preparing|arming` 失败时旧 `active` 继续服务；一旦提交进入 `activating`，系统只会向 target 向前恢复。短暂 fence 期间新模型工作可能要求重试，已经开始的工作继续使用其原先 generation。
+- **主要操作**：配置单 HTTPS Remote 与只写 Token；手动同步、查看 Git/索引分列状态；增量或全量重建索引；清理过期临时数据。正常“保存并应用”或“应用配置”不调用 `./zhixu restart`，也不停止或替换 API/Worker 容器；restart 只用于升级、进程故障或运维恢复。
 - **结果**：设置变更可审计，Secret 只写不可回读；模型不可用时相关能力明确 unavailable/degraded，不影响文件浏览和关键词检索。
 - **限制**：配置测试不得修改正式知识；自动 Git 同步默认关闭且远端失败不回滚本地写回。清理不删除 Source Version、Git Commit 或批准知识。
 

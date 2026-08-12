@@ -129,7 +129,7 @@ Safe Writeback 的 WorkspaceStore 与 GitRepository 不是通用文件/Git 工�
 
 | 能力 | 当前选择 | 边界 |
 |---|---|---|
-| 后端 | Go；`net/http + chi` | API、Middleware、REST、SSE；Gin 尚未迁入 |
+| 后端 | Go；Gin v1.12.0 + `net/http` 兼容边界 | Gin 负责 API、Middleware、REST 与 SSE；标准库 `http.Handler` 仅在框架边界适配，Domain/Application 不依赖 Gin |
 | 数据访问 | pgx 参数化手写 SQL | sqlc 尚未配置；Repository 通过模块 Interface 隔离 |
 | Migration/Job | Goose + River/riverpgxv5 | 前向迁移、PostgreSQL Job 与 Worker；选择理由见 [ADR-0015](adr/0015-river-goose-runtime.md) |
 | 数据 | PostgreSQL + pgvector + FTS | exact vector scan 为基线；固定维度容量证据后才使用部分 HNSW |

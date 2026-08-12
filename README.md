@@ -188,10 +188,15 @@ canonical Graph query endpoints. Topic-scoped Candidate pages include direct Top
 both Claims have a formal `CONFIRMED BELONGS_TO` membership in that Topic; they never fall back to Workspace-wide results.
 
 Open `/chat` to create/select a Conversation and `/chat/{conversationId}` to continue it. Chat is fail-closed by
-default. For the normal Compose stack, configure Chat and Embedding in the Settings page, save the desired revision,
-then apply the saved revision with `./zhixu restart`. Customized legacy `ZHIXU_CHAT_*` or `ZHIXU_EMBEDDING_*` values in `.env` are rejected
-before build/start; restore those fields to `.env.example` defaults. Static model environment variables remain for
-direct binaries and isolated smoke overlays only, and API keys must never be committed. 认证配置由
+default. For the normal Compose stack, configure Chat and Embedding in the Settings page, then choose **保存并应用**
+to save and apply the exact desired revision, or choose **仅保存** and later **应用配置**. Apply completes inside the
+running API/Worker processes and does not call `./zhixu restart`; restart remains for upgrades, process failures and
+operational recovery. The Settings page restores durable Apply progress after a refresh and distinguishes desired,
+active and role-local applied revisions. See the [运行与恢复手册](docs/operations.md#44-managed-模型设置) and
+[ADR-0022](docs/architecture/adr/0022-model-runtime-hot-activation.md) for the recovery boundary. Customized legacy
+`ZHIXU_CHAT_*` or `ZHIXU_EMBEDDING_*` values in `.env` are rejected before build/start; restore those fields to
+`.env.example` defaults. Static model environment variables remain for direct binaries and isolated smoke overlays
+only, and API keys must never be committed. 认证配置由
 `ZHIXU_AUTH_MODE=required|disabled` 控制：`required` 使用一次性 Bootstrap
 Token 换取 HttpOnly Session Cookie，浏览器修改请求同时校验精确 Origin 与 CSRF；自动化客户端使用限 Scope、
 可过期、可撤销的 Bearer API Token。Bootstrap Token 只用于首次换取 Session，API Token 明文只在创建响应返回

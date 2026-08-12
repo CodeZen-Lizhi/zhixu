@@ -15,12 +15,20 @@
   "branch": "dev",
   "base_branch": "main",
   "worktree_path": null,
-  "commit": null,
+  "commit": "9bb5b939d84fe52993a549216a36e6de831c2f71",
   "pr_url": null,
   "subtasks": [],
   "children": [],
   "parent": null,
-  "relatedFiles": [],
-  "notes": "",
+  "relatedFiles": [
+    "internal/app/router.go",
+    "internal/app/router_inventory_test.go",
+    "internal/httpapi/gin.go",
+    "docs/architecture/system-design.md",
+    "docs/roadmap.md",
+    "prd.md",
+    "implement.md"
+  ],
+  "notes": "实现已随 9bb5b939 合入。AC-01..05 已有定向证据；AC-06 因一个 Application integration test 直接 import Gin 保持未完成；AC-07 的全仓/Compose/浏览器门禁、AC-08 的独立文档同步尚未关闭，因此任务维持 in_progress。",
   "meta": {}
 }

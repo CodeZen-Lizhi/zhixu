@@ -1,0 +1,12 @@
+{"file":"docs/README.md","reason":"项目文档事实源分工与同步规则。"}
+{"file":"docs/architecture/system-design.md","reason":"当前 HTTP 技术栈、Model Runtime 和部署边界的权威文档。"}
+{"file":"docs/roadmap.md","reason":"Gin 迁移完成态与后续 session 框架 deferred 边界。"}
+{"file":"docs/user-guide.md","reason":"模型设置用户可见操作的唯一长期入口。"}
+{"file":"docs/operations.md","reason":"热切换运行、恢复和 canonical 验收命令。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"River Queue 与 Model Settings hot activation/legacy rollout 的长期工程契约。"}
+{"file":".trellis/spec/backend/config-loading.md","reason":"legacy rollout candidate 配置字段与正常 managed Apply 的边界。"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"desired/active/applied、RuntimeHost Admit/Acquire 和 no-restart 的主规范。"}
+{"file":".trellis/tasks/08-11-gin-http-migration/prd.md","reason":"Gin 迁移原始验收标准，状态只能按证据同步。"}
+{"file":".trellis/tasks/08-11-gin-http-migration/implement.md","reason":"Gin 迁移实施清单与剩余质量门禁。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/prd.md","reason":"已完成热切换需求与 AC，不改写业务范围。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/design.md","reason":"数据模型、协议、恢复与文档同步的最终设计。"}

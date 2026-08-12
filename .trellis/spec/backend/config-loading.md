@@ -41,7 +41,10 @@ func (Config) ValidateDatabase() error
 - non-API 仍会读取共享 YAML 字节后清空 API-only 字段；该契约不等于文件字节级 Secret 隔离。
 - `review_question_ref_key` 必须保留“缺省”和“显式空值”的 presence 差异；物化、Bootstrap 派生、`Config.String`/`GoString` 脱敏继续由项目逻辑拥有。
 - validator 由配置包私有构造，只承载局部字段约束；URL/path、Secret、Provider 条件、进程条件、时间比例、RRF、数据库和 Rollout 组合规则继续由命名校验函数拥有。
-- Viper 只解析 Model Settings mode/key file/rollout ID/prepared。static revision `0`、active/fixed target、UUID/phase/revision 绑定和不可变 Runtime 仍由 `internal/modelsettings/runtime` 拥有。
+- Viper 只解析 Model Settings mode/key file，以及 legacy process-replacement candidate compatibility 的 rollout ID/prepared。
+  `model_settings_rollout_id` 与 `model_settings_prepared` 不属于 `00079` 后正常 managed Save/Apply 的配置：正常 API/Worker
+  从 PostgreSQL activation state 和 `RuntimeHost` 收敛。static revision `0`、active/fixed target、UUID/phase/revision 绑定和
+  不可变 Runtime 仍由 `internal/modelsettings/runtime` 拥有。
 
 ### 4. Validation & Error Matrix
 
@@ -58,13 +61,13 @@ func (Config) ValidateDatabase() error
 | disabled Provider/Telemetry 的 gated 环境变量存在 | lookup 调用数为 0；返回配置清除 Provider URL/Key/Model/Dimensions 或 Telemetry Endpoint，保留并校验共享 limits/timeout 与 Chat Adapter Version |
 | non-API 环境中存在 API-only Secret | lookup 调用数为 0，返回字段为空 |
 | 显式 Review key 为空/过短/非 canonical | 稳定脱敏错误；不得随机替代 |
-| rollout ID 不是 UUID 但满足现有 canonical string 规则 | 配置层接受；runtime 在需要绑定时拒绝 |
+| legacy candidate rollout ID 不是 UUID 但满足现有 canonical string 规则 | 配置层接受；runtime 在兼容绑定需要 UUID 时拒绝 |
 
 ### 5. Good / Base / Bad Cases
 
-- Good：API 每次启动以局部 Viper 合并 defaults/YAML/env，显式 lookup 只读取 profile 与 gate 允许的键，最后运行 validator 和项目跨字段校验。
+- Good：API 每次启动以局部 Viper 合并 defaults/YAML/env，显式 lookup 只读取 profile 与 gate 允许的键，最后运行 validator 和项目跨字段校验；正常 managed API/Worker 不设置 legacy candidate 字段。
 - Base：Worker/Migration 在没有 API-only Secret 的环境中仍加载并校验数据库、Worker、Tool、模型和 Telemetry 共享配置。
-- Bad：使用全局 Viper/`AutomaticEnv`/`BindEnv`，让 disabled capability 查询 Secret，把 Migration 缩成 DB-only，或用 Viper watch 热替换 Model Runtime。
+- Bad：使用全局 Viper/`AutomaticEnv`/`BindEnv`，让 disabled capability 查询 Secret，把 Migration 缩成 DB-only，用 Viper watch 热替换 Model Runtime，或把 legacy candidate 字段当作正常 Apply 控制面。
 
 ### 6. Tests Required
 
@@ -87,6 +90,6 @@ return loader.load(path)
 ```
 
 ```text
-Wrong: managed 模式跳过 Chat/Embedding 环境读取，或在配置层要求 rollout UUID。
-Correct: 配置层保持现有启动字段范围；runtime 绑定数据库 target、UUID、phase 和 revision。
+Wrong: managed 模式跳过 Chat/Embedding 环境读取，或把 rollout/prepared 作为正常 Apply 的启动开关。
+Correct: 配置层保持现有启动字段范围；legacy candidate 仅保留兼容校验，正常 runtime 绑定数据库 target、UUID、phase 和 revision。
 ```

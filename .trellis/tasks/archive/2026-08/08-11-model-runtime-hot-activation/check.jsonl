@@ -9,8 +9,8 @@
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核 Migration 到 UI 的 target/phase/role/error 数据流和所有调用方。"}
 {"file":"docs/architecture/adr/0012-version-workflows-prompts-schemas.md","reason":"复核在途 Workflow 版本冻结与新 Attempt 切换没有回归。"}
 {"file":"docs/architecture/adr/0019-mature-framework-first.md","reason":"复核自研 RuntimeHost 最小边界、依赖复用、维护成本与退出路径。"}
-{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/runtime-consumer-topology.md","reason":"对照全量 consumer inventory，防止只替换 Models pointer 而遗漏捕获依赖。"}
-{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/implementation-context.md","reason":"无截断审查状态机、SQL/Claim、Embedding、RuntimeHost、HTTP/Web 与完整质量证据，并按需打开原始大文档。"}
-{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/apply-ux-contract.md","reason":"对照 Save-and-Apply 中间结果、轮询、冲突、strict wire 和 Secret 泄漏测试。"}
-{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/design-minimal-interface.md","reason":"审查业务调用方只依赖 Acquire/Lease，没有泄漏 rollout lifecycle。"}
-{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/interface-options.md","reason":"确认最终实现遵循推荐 generation host，而未退化为 per-method dynamic proxy。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/research/runtime-consumer-topology.md","reason":"对照全量 consumer inventory，防止只替换 Models pointer 而遗漏捕获依赖。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/research/implementation-context.md","reason":"无截断审查状态机、SQL/Claim、Embedding、RuntimeHost、HTTP/Web 与完整质量证据，并按需打开原始大文档。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/research/apply-ux-contract.md","reason":"对照 Save-and-Apply 中间结果、轮询、冲突、strict wire 和 Secret 泄漏测试。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/research/design-minimal-interface.md","reason":"审查业务调用方只依赖 Acquire/Lease，没有泄漏 rollout lifecycle。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/research/interface-options.md","reason":"确认最终实现遵循推荐 generation host，而未退化为 per-method dynamic proxy。"}

@@ -4,19 +4,19 @@
 
 本路线图只维护未交付方向、优先级、依赖和不可破坏的迁移边界。实际拆分、负责人、状态、验收证据与发布时间在 `.trellis/tasks/` 管理；人天是熟悉项目的单人初估，不含需求澄清、外部协调和发布观察。
 
-当前架构事实以 [架构文档](architecture/README.md) 为准。路线图中的 Gin、Eino、Atlas、GORM、Testcontainers 和生成客户端都是候选或未来迁移，不得提前写成当前技术基线。
+当前架构事实以 [架构文档](architecture/README.md) 为准。Gin 已是当前 HTTP 基线；路线图中的 Eino、Atlas、GORM、Testcontainers、生成客户端，以及 `gin-contrib/sessions` 评估仍是候选或未来迁移，不得提前写成当前技术基线。
 
 ## 当前交付收口（未完成）
 
 当前产品主体已有大量实现与局部验收资产，但发布收口仍缺 Proposal Revision 编辑和真正三方合并、跨领域 Audit 完整覆盖、目标环境容量/FPS 证据、可执行备份恢复/一致性演练，以及统一六 seam、AI Eval、SBOM 和交付包门禁。M10-02 已完成；M9-03 已满足当前导出范围，Evaluation/Audit JSON 不再作为当前缺口。
 
-最终完成以 [需求文档](requirements.md) AC-01..AC-41、生产装配、直接自动化证据和 14 步最终演示为准。详细状态见 [产品交付父任务](../.trellis/tasks/07-16-product-delivery/)；代码对照依据见 [M9 漂移审计](../.trellis/tasks/08-10-docs-consolidation/research/product-task-drift-audit.md)、[M10 审计](../.trellis/tasks/08-10-docs-consolidation/research/m10-code-status-audit.md) 与 [M11 审计](../.trellis/tasks/08-10-docs-consolidation/research/m11-code-audit.md)。
+最终完成以 [需求文档](requirements.md) AC-01..AC-41、生产装配、直接自动化证据和 14 步最终演示为准。详细状态见 [产品交付父任务](../.trellis/tasks/07-16-product-delivery/)；代码对照依据见 [M9 漂移审计](../.trellis/tasks/archive/2026-08/08-10-docs-consolidation/research/product-task-drift-audit.md)、[M10 审计](../.trellis/tasks/archive/2026-08/08-10-docs-consolidation/research/m10-code-status-audit.md) 与 [M11 审计](../.trellis/tasks/archive/2026-08/08-10-docs-consolidation/research/m11-code-audit.md)。
 
 ## 工程质量收口（未完成）
 
 已完成可重复静态质量基线和 Health 历史数据有界化；步骤 0 的 CI/迁移运行时观察仍待补。路由错误恢复、Fast/Selected Integration/Full 分层 CI、完整 E2E 接线、Go HTTP 边界 primitives、热点与 Domain 边界拆分、性能预算、全量路由契约和 SBOM 治理尚未完成或未获批准；共享 TypeScript codec、手写 OpenAPI checker 等局部基础不代表对应工作包完成。
 
-精确批准范围和验收见 [架构质量父任务](../.trellis/tasks/08-05-architecture-quality-optimization/)；当前代码证据见 [架构质量状态审计](../.trellis/tasks/08-10-docs-consolidation/research/architecture-quality-code-status-audit.md)。
+精确批准范围和验收见 [架构质量父任务](../.trellis/tasks/08-05-architecture-quality-optimization/)；当前代码证据见 [架构质量状态审计](../.trellis/tasks/archive/2026-08/08-10-docs-consolidation/research/architecture-quality-code-status-audit.md)。
 
 ## 2. 依赖顺序
 
@@ -27,11 +27,11 @@ flowchart LR
     Testcontainers["Testcontainers-Go"] --> Atlas["Atlas 唯一 Schema 迁移"]
     Atlas --> GORM["GORM 数据访问迁移"]
     Testcontainers --> GORM
-    Gin["Gin HTTP 迁移"] --> Sessions["gin-contrib/sessions 评估"]
+    Gin["Gin HTTP 基线（已交付）"] --> Sessions["gin-contrib/sessions 评估（deferred）"]
     GORM --> Sessions
 ```
 
-数据库方向按 Testcontainers → Atlas → GORM 推进；最终切换前 Atlas 必须成为唯一 Schema 事实源。OpenAPI 门禁先于生成客户端。受限 Workspace Agent 依赖新的 AI 通用能力门禁。Session 框架评估晚于 Gin 和 GORM 收口。
+数据库方向按 Testcontainers → Atlas → GORM 推进；最终切换前 Atlas 必须成为唯一 Schema 事实源。OpenAPI 门禁先于生成客户端。受限 Workspace Agent 依赖新的 AI 通用能力门禁。Gin 已交付；Session 框架评估仍晚于 GORM 收口。
 
 ## 3. 产品方向
 
@@ -60,12 +60,11 @@ flowchart LR
 - **不可破坏边界**：保持现有 Schema、迁移顺序和已部署兼容；新环境和已有数据库结果一致；失败有回滚/恢复路径。
 - **完成态**：应用、Docker/CI、测试与运维不再依赖 Goose；GORM `AutoMigrate`/`Migrator` 在生产、测试和命令入口均禁止，Persistence Model 只能映射 Atlas 已批准结构。
 
-### 4.2 TODO 5：将后端 HTTP 层从 Chi 迁移到 Gin
+### 4.2 已交付 5：后端 HTTP 已从 Chi 迁移到 Gin（2026-08-11）
 
-- **优先级/初估**：P0，15–25 人天。
-- **目标**：用 Gin/validator 收敛 HTTP 通用能力，同时保持现有业务与安全契约。
-- **不可破坏边界**：先冻结 OpenAPI 与行为基线；严格解码、Problem Details、SSE、Session/API Token、CSRF/Origin、Capability、Workspace 隔离、限流和审计语义保持兼容。领域/Application 不暴露 Gin Context。
-- **迁移策略**：按路由组分阶段切换，每阶段行为对等后删除 Chi 路径；不长期保留双 Router 或双 Middleware。
+- **结果**：生产 Router 已收敛为 Gin v1.12.0；严格解码、Problem Details、SSE、Session/API Token、CSRF/Origin、Capability、Workspace 隔离、限流和审计语义仍以 OpenAPI、实现与 Trellis 验收证据为准。
+- **保留边界**：Domain/Application 不暴露 Gin Context；标准库 `http.Handler` 仅在 HTTP 适配边界互操作，不保留双 Router 或双 Middleware。
+- **后续关系**：这只提供 Session 框架评估的前置 HTTP 基线，不代表 TODO 11 已采用或通过验收。
 
 ### 4.3 TODO 6：使用 Eino 收敛 AI 通用基础设施
 

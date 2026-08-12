@@ -7,6 +7,18 @@
 - [x] 保存当前用户脏改文件清单和 `api/openapi/openapi.json` 基线 hash；任何重叠修改只做增量合并。
 - [x] 记录当前分支 `dev` 到任务元数据，禁止把无关脏改加入任务提交。
 
+## 2026-08-12 实施状态（以本节为准）
+
+- [x] Phase 1 的 route inventory、Gin engine 默认差异和迁移相关基线测试已落地；当前 inventory 精确覆盖 183 个
+  OpenAPI operation，初始规划中的 182 是模型 activation endpoint 加入前的历史基线。
+- [x] Phase 2 的 Gin dependency、标准库 Handler bridge、validator 与边界测试已落地。
+- [x] Phase 3-5 的唯一 Gin composition、middleware/auth、领域 route batches、strict JSON、SSE、上传下载和
+  response-started recovery 已落地，并完成定向 race/vet/OpenAPI 验证。
+- [~] Phase 6 的 Chi 清理、tidy、vendor 解析已完成；生产代码无 Chi，且生产 Domain/Application/Repository/Workflow
+  不依赖 Gin。一个 Application integration test 仍 import Gin，所以原“测试也无 Gin import”的严格 AC 不关闭。
+- [ ] Phase 7 的全仓 Go/race/vet、聚合 Compose 与浏览器 smoke 未作为本次定向收口执行，见 `prd.md` 的证据和盲区。
+- [ ] Phase 8 的文档/Trellis 同步由 `08-11-docs-trellis-sync` 独立任务执行；本任务不因实现提交而自动完成或归档。
+
 ## Phase 1. Freeze Baseline
 
 - [ ] 记录 25 个 Handler、179 个 Handler operation、3 个 app operation（livez/readyz/system status）、154 OpenAPI path/

@@ -624,12 +624,13 @@ CancellationSafetyGuard.SafeToCancelWorkflowNode(context.Context, any, foundatio
 - API Producer 与 Worker Consumer 必须读取同一 `ZHIXU_WORKER_QUEUE`；`InsertTx` 必须显式写 `InsertOpts.Queue`，不能依赖 River `default`。
 - 项目自有 Job metadata 只写合法 W3C `traceparent`。Consumer 必须允许 River 保留的 `river:*` recovery metadata（如 `river:rescue_count`）共存，但不得复制到 Application、日志、Metrics 或 Trace；其他字段 fail closed。
 - `JobTimeout < RescueStuckJobsAfter`；真实 SIGKILL 后只能等待同一 Job 被 River rescue，不能手工插入第二 Job。
-- Fresh database 的目标 `river_queue` 行由 River `Client.Start` 创建；Worker 必须先启动 lifecycle，再按 managed rollout 的
-  Idle/Failed 判定调用 `ResumeQueue`，两步都成功后才设置 River readiness。Resume 失败必须进入 shutting down，使用独立
-  hard-stop deadline graceful shutdown 已启动的 dispatcher/River，并关闭 health server；不得吞掉 `ErrNotFound` 或伪造 ready。
-- managed rollout 处于 Draining/Applying/Verifying 时，Worker 必须在 lifecycle Start 前幂等调用 `PauseQueue`：它既固化
-  持久暂停，又要求目标 queue 行已存在。缺失行表示 rollout/queue 事实不一致，必须在 River 创建未暂停行或 claim Job 前
-  fail closed；不得只跳过 Resume 后继续启动。
+- Fresh database 的目标 `river_queue` 行由 River `Client.Start` 创建；普通 Worker 启动必须先启动 lifecycle，再调用
+  `ResumeQueue`，两步都成功后才设置 River readiness。Resume 失败必须进入 shutting down，使用独立 hard-stop deadline
+  graceful shutdown 已启动的 dispatcher/River，并关闭 health server；不得吞掉 `ErrNotFound` 或伪造 ready。
+- `PauseQueue`/`ResumeQueue` 和候选进程的排空协议只保留给旧 process-replacement rollout 兼容路径或显式运维操作。
+  它们不是 `00079` 后 managed Save/Apply 的正常协议：正常热应用在模型相关持久 Claim 前由 `RuntimeHost.Admit` 建立短暂
+  admission fence，不持久暂停整条 River queue，也不等待已 Claim Job 或 generation lease 排空。兼容路径若要求已暂停
+  queue 行，缺失行仍必须 fail closed，不能只跳过 Resume 后继续启动。
 - Writeback Execution 处于 `prepared/file_prepared/file_applied/git_prepared/git_committed/publish_recovery/compensating` 时，Cancel 只记录 request，继续 heartbeat/lease reclaim，并返回 retryable `WORKFLOW_CANCELLATION_DEFERRED`；只有安全失败、补偿、人工恢复、完成或已清理恢复证据后才允许 Run terminal cancelled。
 - Cancellation guard 必须使用 Runtime 当前 pgx transaction 查询，保证 Control/Heartbeat/Transition 与 Execution checkpoint 判定原子。
 - Compose PostgreSQL healthcheck 必须执行实际 `SELECT 1`；`pg_isready` 在数据库尚未创建时也可能报告 server accepting，不能作为 Migrate 前置门禁。
@@ -644,7 +645,7 @@ CancellationSafetyGuard.SafeToCancelWorkflowNode(context.Context, any, foundatio
 | `river:rescue_count` 等保留字段 | 忽略并继续恢复，不向 Application 暴露 |
 | Fresh database 在 `Client.Start` 前调用 `ResumeQueue` | `WORKFLOW_RIVER_QUEUE_RESUME_FAILED` / `ErrNotFound`；启动失败且不得 ready |
 | `Client.Start` 成功后 `ResumeQueue` 失败 | 保留原错误，graceful shutdown 已启动 runtime 并关闭 health；不得遗留半启动进程 |
-| 非终态 managed rollout 的目标 queue 行缺失 | Start 前 `PauseQueue` 返回 `WORKFLOW_RIVER_QUEUE_PAUSE_FAILED` / `ErrNotFound`；不得创建未暂停行或 claim |
+| legacy process-replacement 候选启动时目标 queue 行缺失 | Start 前 `PauseQueue` 返回 `WORKFLOW_RIVER_QUEUE_PAUSE_FAILED` / `ErrNotFound`；不得创建未暂停行或 claim |
 | Cancel 遇到非安全 Writeback checkpoint | `WORKFLOW_CANCELLATION_DEFERRED` / Retryable，事务不归约终态 |
 | Cancellation guard 查询/transaction 无效 | `WORKFLOW_CANCELLATION_SAFETY_UNAVAILABLE`，fail closed |
 | Worker 超 hard deadline | 进程非零退出；保留 Job/lease/checkpoint 供新实例恢复 |
@@ -653,22 +654,24 @@ CancellationSafetyGuard.SafeToCancelWorkflowNode(context.Context, any, foundatio
 
 - Good：子进程在 Job running 后 SIGKILL；River 写入 `river:rescue_count` 并 rescue，同一 Job 新 attempt 完成。
 - Good：空库没有目标 queue 行；Worker lifecycle 启动后 River 创建该行，Resume 成功，最后才报告 ready。
-- Good：Draining/Applying/Verifying 启动先用 `PauseQueue` 验证并固化已有暂停行，再启动 lifecycle，且不执行 Resume。
+- Good：正常 managed Apply 只让 `RuntimeHost.Admit` 在模型相关 Claim 前建立短 fence；已经 admitted 的 Job/lease 不被 drain，River queue 保持运行。
+- Good：legacy process-replacement 候选启动先用 `PauseQueue` 验证并固化已有暂停行，再启动 lifecycle，且不执行 Resume。
 - Base：没有 trace context 时 metadata 为空；有 trace 时只写 `traceparent`。
 - Base：Cancel 发生在 Atomic Begin 后；旧 lease 到期，新 Worker reclaim 并恢复到 ApplyFailed/Compensated/Manual/Completed 后再 terminal cancel。
 - Bad：API 使用 `default` queue，Worker 使用 `workflow` queue；Job 永久 pending。
 - Bad：Consumer 把所有非 `traceparent` 字段都拒绝，导致 River rescue 自有 metadata 触发永久重试。
 - Bad：为了隐藏空库 `ErrNotFound` 在 Queue adapter 中把缺失行视为 Resume 成功，导致其他控制路径的数据不一致被静默掩盖。
-- Bad：非终态 rollout 只跳过 Resume；目标行缺失时 River Start 会创建未暂停行并可能开始 claim。
+- Bad：把正常 hot Apply 实现为 `PauseQueue`、全队列 drain 或等待在途 Job；或 legacy 候选只跳过 Resume，允许目标行缺失时 River Start 创建未暂停队列并开始 claim。
 - Bad：用 `pg_isready` 声称目标 database 已创建，Migrate 在 initdb 完成前启动并失败。
 
 ### 6. Tests Required
 
 - Unit/race：Client options、queue 映射、traceparent、`river:*` 保留字段、lifecycle 首事件互斥、Start→Resume→readiness
-  顺序、非终态 Pause→Start→readiness、缺失暂停行 fail closed、Resume 失败清理、cancel safety 状态表。
+  顺序、legacy Pause→Start→readiness、缺失暂停行 fail closed、Resume 失败清理、cancel safety 状态表；hot Apply 另在
+  `model-settings-runtime.md` 要求验证 `RuntimeHost.Admit` 的 Claim fence 与在途 lease 不被 drain。
 - PostgreSQL：cancel 后 heartbeat、lease expiry/reclaim、unsafe transition 回滚、安全 checkpoint 后 terminal cancel，至少 `-race -count=20`。
 - Integration：独立空库断言目标 queue 从 0 行经 lifecycle Start 变为 1 行且随后 Resume/readiness 成功；另覆盖 Approval
-  双 Worker、非终态 rollout 缺失 queue 行在 Start 前失败、正常 Writeback、fault smoke，并断言
+  双 Worker、legacy process-replacement 候选缺失 queue 行在 Start 前失败、正常 Writeback、fault smoke，并断言
   Execution/Commit/Mapping/Outbox 唯一。
 - Process smoke：真实测试子进程 SIGKILL → River stuck rescue → 新 attempt completed。
 - River maintenance service 在同一 Schema 内通过 leader election 单实例运行；测试只换
@@ -686,10 +689,13 @@ Wrong: metadata 只要不是 traceparent 就拒绝，包括 River 自有 river:r
 Correct: 项目只写 traceparent；Consumer 隔离并忽略 river:*，其余字段 fail closed。
 
 Wrong: Worker 先 ResumeQueue，再 Start River；空库靠忽略 ErrNotFound 继续启动。
-Correct: Start lifecycle 创建 queue 行，按 rollout 判定 Resume，最后设置 readiness；Resume 失败完整清理并返回原错误。
+Correct: 普通启动先 Start lifecycle 创建 queue 行，再 Resume 并设置 readiness；legacy 候选才在 Start 前按兼容协议验证 PauseQueue，失败完整清理并返回原错误。
 
-Wrong: managed rollout 非终态时只跳过 Resume，允许 Start 在缺失行上创建未暂停队列。
-Correct: 非终态启动先 PauseQueue 验证并固化已有队列；缺失行在 lifecycle Start 前 fail closed。
+Wrong: 正常 managed Apply 调用 PauseQueue、排空全队列或等待已 Claim Job 结束。
+Correct: 正常热应用只在模型相关 Claim 前调用 RuntimeHost.Admit；已 admission 的 Job 和 generation lease 继续完成。
+
+Wrong: legacy process-replacement 候选只跳过 Resume，允许 Start 在缺失行上创建未暂停队列。
+Correct: legacy 候选启动先 PauseQueue 验证并固化已有队列；缺失行在 lifecycle Start 前 fail closed。
 
 Wrong: Cancel 直接把 Run cancelled，再留下 prepared/file_applied Execution。
 Correct: 同一事务调用 CancellationSafetyGuard；不安全时保持可恢复 Job/lease/checkpoint。

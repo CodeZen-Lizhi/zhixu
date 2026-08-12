@@ -8,16 +8,16 @@
 
 ## Background
 
-- 路线图 [`docs/roadmap.md`](../../../docs/roadmap.md) TODO 5 将 Gin 迁移列为 P0，并要求先冻结行为基线、按路由组迁移、
-  每批行为对等后删除 Chi 路径。
-- 当前 `go.mod` 使用 Go `1.25.4`、Chi `v5.3.1` 和 validator `v10.30.3`；2026-08-11 通过 Go Module
-  Proxy 核实 Gin 最新稳定版为 `v1.12.0`，其最低 Go 版本为 `1.25.0`。
-- 当前有 59 个非 vendor Go 文件直接导入 Chi、26 个路由注册入口；`api/openapi/openapi.json` 包含 154 个 path、
-  182 个 operation。生产 Composition Root 位于 `internal/app/router.go`。
-- 迁移前基线 `go test ./internal/app ./internal/auth/http ./internal/events/http ./internal/httpapi` 和
-  `make openapi-check` 已通过。
-- 当前工作区已有与本任务重叠的 `internal/modelsettings/http/*`、`api/openapi/*` 未提交改动；它们属于用户现有工作，
-  本任务必须在其上增量集成，不得覆盖或回滚。
+- 任务启动时，路线图 TODO 5 将 Gin 迁移列为 P0，并要求先冻结行为基线、按路由组迁移、每批行为对等后删除 Chi 路径；
+  当前路线图已同步为“Gin HTTP 基线（已交付）”。
+- 启动时的基线是 Go `1.25.4`、Chi `v5.3.1`、182 个 OpenAPI operation。实现提交
+  `9bb5b939d84fe52993a549216a36e6de831c2f71` 已将生产入口改为唯一 `*gin.Engine`，锁定 Gin `v1.12.0` 并删除 Chi。
+- 当前 runtime/OpenAPI inventory 为 183 个 operation：相较初始 182，额外的模型 activation endpoint 是随后受控加入的
+  独立契约；`internal/app/router_inventory_test.go` 对当前集合做精确比较。生产 Composition Root 仍位于
+  `internal/app/router.go`。
+- 当前工作区不再有非 vendor Go 的 Chi import/symbol 命中；但
+  `internal/changecontrol/application/approval_dispatch_river_smoke_integration_test.go` 作为测试辅助直接 import Gin，
+  因而原 AC-06 的“Domain/Application 无 Gin import”严格措辞尚未完全满足。
 
 ## Requirements
 
@@ -74,18 +74,29 @@
 
 ## Acceptance Criteria
 
-- [ ] AC-01：Gin runtime route inventory 与冻结的 182 个 OpenAPI operation 对等；健康检查、可选 metrics 和静态 fallback
-  由专项测试覆盖，OpenAPI 文件无未批准 path/method 漂移。
-- [ ] AC-02：所有 API 通过唯一 Gin Engine 提供；404/405、尾斜杠、路径参数、静态 fallback 和 Middleware 顺序测试通过，
+- [x] AC-01：Gin runtime route inventory 与当前冻结的 183 个 OpenAPI operation 对等；健康检查、可选 metrics 和静态 fallback
+  由专项测试覆盖。初始 182→183 仅对应已受控的模型 activation endpoint，OpenAPI 无其他未批准 path/method 漂移。
+- [x] AC-02：所有 API 通过唯一 Gin Engine 提供；404/405、尾斜杠、路径参数、静态 fallback 和 Middleware 顺序测试通过，
   生产入口未挂载 Chi。
-- [ ] AC-03：Auth、Session、CSRF、Origin、API Token、Capability、Workspace 与写授权测试通过，路由日志保持模板化且不泄露实际 path。
-- [ ] AC-04：严格 JSON、Content-Type、body limit 和 validator 测试通过；Gin 默认 binding 不会输出或替换项目 Problem。
-- [ ] AC-05：SSE、multipart upload、Export/Attachment download、response-started panic recovery 的单元/集成测试通过。
+- [x] AC-03：Auth、Session、CSRF、Origin、API Token、Capability、Workspace 与写授权测试通过，路由日志保持模板化且不泄露实际 path。
+- [x] AC-04：严格 JSON、Content-Type、body limit 和 validator 测试通过；Gin 默认 binding 不会输出或替换项目 Problem。
+- [x] AC-05：SSE、multipart upload、Export/Attachment download、response-started panic recovery 的单元/集成测试通过。
 - [ ] AC-06：`rg 'github.com/go-chi/chi|chi\\.' --glob '!vendor/**'` 在生产和测试代码中无命中，`go.mod`、`go.sum`、`vendor/`
-  无 Chi，且 Domain/Application/Repository/Workflow 无 Gin import。
+  无 Chi，且 Domain/Application/Repository/Workflow 无 Gin import。前半已验证；一个 Application integration test 仍直接
+  import Gin，故本 AC 保持未完成。
 - [ ] AC-07：`go test ./...`、`go test -race ./...`、`go vet ./...`、API build、`make openapi-check`、适用 Compose 门禁和关键浏览器 smoke
   通过，或对不可执行门禁提供可复核的环境原因与剩余风险。
 - [ ] AC-08：架构文档、后端规格、路线图和任务记录与最终实现一致，包含明确的迁移回滚点和 TODO 11 延后边界。
+
+## 2026-08-12 实施证据同步
+
+- `go test -race -count=1 -timeout 60s` 已通过 app、`cmd/api`、auth/http、httpapi 及全部迁移的领域 HTTP package；
+  对应 `go vet` 也已通过。`make openapi-check`、`go mod tidy -diff`、`go list -mod=vendor ./...` 和将 API 输出写入
+  临时目录的 `go build ./cmd/api` 已通过。
+- `router_inventory_test`、Gin engine/boundary、认证与严格输入、SSE/文件传输/recovery 的专项回归均在以上定向范围内。
+- 未执行全仓 `go test ./...`/`-race`/`go vet`、聚合 Compose 门禁和关键浏览器 smoke；这些是 AC-07 尚未关闭的门禁。
+- 文档和长期规范由独立 `docs-trellis-sync` 任务同步；该任务完成前 AC-08 保持未完成。本 Gin 任务维持
+  `in_progress`，不得因实现已合入而归档。
 
 ## Planning Status
 

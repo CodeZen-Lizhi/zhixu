@@ -10,8 +10,8 @@
 {"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有 PostgreSQL/pgx/React Query/Provider Adapter 与 ADR-0019 自研边界。"}
 {"file":"docs/architecture/adr/0012-version-workflows-prompts-schemas.md","reason":"长运行 Workflow 版本冻结与旧版本继续执行的既有架构决定。"}
 {"file":"docs/architecture/adr/0019-mature-framework-first.md","reason":"RuntimeHost/状态机采用现有依赖和标准库时必须记录的成熟方案与自研例外门禁。"}
-{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/runtime-consumer-topology.md","reason":"API/Worker 全量消费拓扑、启动期 freeze 点、资源 Close 缺口和最窄 generation seam。"}
-{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/implementation-context.md","reason":"无截断汇总数据库状态机、Workflow Claim、Embedding/Index、RuntimeHost、HTTP/Web 与质量不变量，并指向完整原始资料。"}
-{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/apply-ux-contract.md","reason":"Save/Apply HTTP 与前端现状、strict decoder、轮询、Secret、冲突和主/次操作方案。"}
-{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/design-minimal-interface.md","reason":"RuntimeHost Run/Acquire、role payload、admission fence、错误模型和典型调用草图。"}
-{"file":".trellis/tasks/08-11-model-runtime-hot-activation/research/interface-options.md","reason":"动态 proxy、显式 lifecycle、generation host 与独立服务方案比较及推荐接口。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/research/runtime-consumer-topology.md","reason":"API/Worker 全量消费拓扑、启动期 freeze 点、资源 Close 缺口和最窄 generation seam。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/research/implementation-context.md","reason":"无截断汇总数据库状态机、Workflow Claim、Embedding/Index、RuntimeHost、HTTP/Web 与质量不变量，并指向完整原始资料。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/research/apply-ux-contract.md","reason":"Save/Apply HTTP 与前端现状、strict decoder、轮询、Secret、冲突和主/次操作方案。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/research/design-minimal-interface.md","reason":"RuntimeHost Run/Acquire、role payload、admission fence、错误模型和典型调用草图。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/research/interface-options.md","reason":"动态 proxy、显式 lifecycle、generation host 与独立服务方案比较及推荐接口。"}

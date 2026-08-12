@@ -1,0 +1,9 @@
+{"file":"docs/README.md","reason":"复核用户/架构/运维/路线图的事实源没有重复或冲突。"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"复核 hot activation 正常路径与更新后的 River/Config 规范一致。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"复核 legacy Queue Pause 与 RuntimeHost admission 边界不再冲突。"}
+{"file":".trellis/spec/backend/config-loading.md","reason":"复核 legacy candidate 字段没有被描述为新 Apply 正常路径。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"复核 smoke、race、真实 PostgreSQL 和容器身份门禁的现有要求。"}
+{"file":".trellis/tasks/08-11-gin-http-migration/prd.md","reason":"逐项核对 AC 的完成证据，禁止伪造 task completion。"}
+{"file":".trellis/tasks/08-11-gin-http-migration/check.jsonl","reason":"复核 Gin 迁移审查上下文与实际状态。"}
+{"file":".trellis/tasks/archive/2026-08/08-11-model-runtime-hot-activation/prd.md","reason":"复核归档元数据和 outcome 不改变原需求/AC。"}
+{"file":"docs/operations.md","reason":"复核新增 Make target 可发现且不进入默认快速门禁。"}
