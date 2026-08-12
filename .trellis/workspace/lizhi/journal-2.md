@@ -121,3 +121,37 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 56: 同步模型热切换与 Gin 文档
+
+**Date**: 2026-08-12
+**Task**: 同步模型热切换与 Gin 文档
+**Branch**: `dev`
+
+### Summary
+
+收口无容器重启模型热切换与 Gin 迁移的长期文档、Trellis 规范、归档证据和 smoke 入口。
+
+### Main Changes
+
+- 将模型设置 Save/Apply、desired/active/applied、短 fence 与故障恢复同步到 README、用户指南和运行手册。
+- 同步 Gin 当前基线、legacy River/config 边界，并修复热切换归档 manifest 与结果摘要。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ab6029c4` | (see git log) |
+
+### Testing
+
+- [OK] 通过 task context、OpenAPI、vendor 解析、Markdown 链接、Makefile/script 和 diff 检查；未运行重型 Compose smoke。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- Gin 任务仍需处理测试 import 并完成全仓、Compose 和浏览器门禁。
