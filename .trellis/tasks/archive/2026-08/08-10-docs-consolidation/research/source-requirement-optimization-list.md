@@ -15,7 +15,7 @@
 - [ ] TODO 9. 使用 Testcontainers-Go 管理数据库集成测试（P0，GORM 迁移前置，5-8 人天）：自动创建、迁移和销毁 PostgreSQL/pgvector 测试环境，并作为 Atlas、GORM 与 River 数据库门禁。
 - [ ] TODO 10. 将应用数据访问层全面迁移到 GORM（P0，高优先级、高风险，80-120 人天）：用 GORM 统一 Repository 和事务入口，复杂 PostgreSQL 查询继续通过 GORM Raw/Exec 执行。
 - [ ] TODO 11. 评估并接入 gin-contrib/sessions（P2，低优先级，5-8 人天）：在 Gin 和 GORM 迁移完成后，仅替换框架能够完整覆盖的 Session 通用机制。
-- [x] TODO 12. 优先使用浏览器原生 EventSource（P2，已完成，3-5 人天）：替换可由 Web 标准覆盖的 SSE 解析与重连代码，保留必要的最小 Fetch 适配器。
+- [ ] TODO 12. 优先使用浏览器原生 EventSource（P2，低优先级，3-5 人天）：替换可由 Web 标准覆盖的 SSE 解析与重连代码，保留必要的最小 Fetch 适配器。
 
 依赖顺序：TODO 6 支撑 TODO 2；TODO 7 完成后再执行 TODO 8；数据库方向按 TODO 9 → TODO 3 → TODO 10 推进，TODO 3 的 Atlas 是唯一 Schema 迁移事实源；TODO 5 和 TODO 10 完成后再执行 TODO 11。
 
@@ -381,9 +381,9 @@
 
 ## TODO 12. 优先使用浏览器原生 EventSource
 
-- [x] 状态：已收口（2026-08-10）
-- 优先级：P2（已完成）
-- 预估工期：3-5 人天（仅作已完成事项的规模参考）
+- [ ] 状态：待规划（Web 标准替换）
+- 优先级：P2（低优先级）
+- 预估工期：3-5 人天
 
 ### 当前问题
 
