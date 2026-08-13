@@ -2,6 +2,9 @@
 
 ## 结果
 
+核心迁移提交为 `9bb5b939`，路线图与系统设计同步提交为 `ab6029c4`，最终边界修复、规范和验收收口提交为
+`39bf654e`。
+
 后端 HTTP 已从 Chi 完整迁移到 Gin v1.12.0。生产入口收敛为 `internal/app.NewRouter` 返回的唯一
 `*gin.Engine`；所有领域 HTTP 注册使用 `gin.IRouter`，业务 Handler 继续通过 `httpapi.GinHandler` 保持标准库
 `http.ResponseWriter`、`*http.Request`、`Request.PathValue` 和 `Request.Context()` 契约。Chi 已从源码、测试、模块依赖和
@@ -33,4 +36,5 @@ fallback 保持原有 owner。TODO 11 的 `gin-contrib/sessions` 仍是独立 de
 
 ## 回滚
 
-如需回滚，整体 revert 核心迁移提交 `9bb5b939` 及最终收口提交后重新构建原 Chi artifact；本任务没有 Schema 或数据回滚步骤。
+如需回滚，整体 revert `39bf654e`、`ab6029c4` 中的 Gin 文档增量和核心迁移提交 `9bb5b939`，再重新构建原 Chi
+artifact；本任务没有 Schema 或数据回滚步骤。

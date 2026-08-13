@@ -172,6 +172,6 @@ git diff --check
 - [x] 将 `docs/roadmap.md` TODO 5 更新为已完成，记录实际范围、Gin 版本和验证证据；TODO 11 保持 deferred。
 - [x] 对照 PRD AC-01..AC-08 做逐项完成审计，任何弱证据均视为未完成。
 - [x] 只 stage 本任务文件和与用户脏改重叠文件中的本任务增量；不纳入其他未提交改动。
-- [x] 完成提交与归档前检查；最终提交、task commit、Trellis archive 和开发日志由本工作流下一步原子收尾。
+- [x] 完成提交与归档前检查；最终收口提交为 `39bf654e`，Trellis archive 和开发日志由当前工作流原子收尾。
 
 Release rollback: revert 本任务最终提交并重新构建原 Chi artifact；本任务没有 Schema 或数据回滚步骤。

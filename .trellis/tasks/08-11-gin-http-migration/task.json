@@ -15,7 +15,7 @@
   "branch": "dev",
   "base_branch": "main",
   "worktree_path": null,
-  "commit": "9bb5b939d84fe52993a549216a36e6de831c2f71",
+  "commit": "39bf654e9f37574a392cb2a3c0f16bd1f448dec4",
   "pr_url": null,
   "subtasks": [],
   "children": [],
@@ -29,6 +29,10 @@
     "prd.md",
     "implement.md"
   ],
-  "notes": "实现已随 9bb5b939 合入。AC-01..05 已有定向证据；AC-06 因一个 Application integration test 直接 import Gin 保持未完成；AC-07 的全仓/Compose/浏览器门禁、AC-08 的独立文档同步尚未关闭，因此任务维持 in_progress。",
-  "meta": {}
+  "notes": "核心 Gin 迁移随 9bb5b939 合入，架构与路线图由 ab6029c4 同步，最终边界修复、验收证据和长期规范由 39bf654e 收口。AC-01..08 已完成；既有 Compose fixture、60 秒 gitcli、外部 PostgreSQL 与浏览器验证边界已在 outcome.md 精确记录。",
+  "meta": {
+    "core_commit": "9bb5b939d84fe52993a549216a36e6de831c2f71",
+    "documentation_commit": "ab6029c40dd50e9e03a4bd6b5934c16831c005df",
+    "final_commit": "39bf654e9f37574a392cb2a3c0f16bd1f448dec4"
+  }
 }
