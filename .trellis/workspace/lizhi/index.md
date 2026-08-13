@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 56
-- **Last Active**: 2026-08-12
+- **Total Sessions**: 57
+- **Last Active**: 2026-08-14
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~157 | Active |
+| `journal-2.md` | ~196 | Active |
 | `journal-1.md` | ~1981 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 57 | 2026-08-14 | 完成 Chi 到 Gin HTTP 迁移收口 | `9bb5b939`, `ab6029c4`, `39bf654e`, `4a90ee9` | `dev` |
 | 56 | 2026-08-12 | 同步模型热切换与 Gin 文档 | `ab6029c4` | `dev` |
 | 55 | 2026-08-11 | 模型运行时热切换与 Gin 路由迁移 | `9bb5b939d84fe52993a549216a36e6de831c2f71` | `dev` |
 | 54 | 2026-08-11 | 修复 Docker 项目级重启 | `19fdaae2` | `dev` |

@@ -155,3 +155,42 @@
 ### Next Steps
 
 - Gin 任务仍需处理测试 import 并完成全仓、Compose 和浏览器门禁。
+
+
+## Session 57: 完成 Chi 到 Gin HTTP 迁移收口
+
+**Date**: 2026-08-14
+**Task**: 完成 Chi 到 Gin HTTP 迁移收口
+**Branch**: `dev`
+
+### Summary
+
+完成唯一 Gin Engine、标准库 Handler bridge、全部领域路由迁移、OpenAPI/runtime 183 operation 对等、Chi 清理、SSE/recovery 边界修复与 Trellis 归档。
+
+### Main Changes
+
+- 以 gin.New 建立唯一生产 HTTP Composition Root，保留严格 JSON、Problem、认证、安全、SSE、上传下载和静态 fallback 契约。
+- 修复不可比较/typed-nil panic recovery、底层 Flusher 检查，并让 Application integration smoke 通过 app.NewRouter 走公开路由。
+- 新增 Gin HTTP 边界长期规范和完整任务 outcome/回滚/验证记录。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9bb5b939` | (see git log) |
+| `ab6029c4` | (see git log) |
+| `39bf654e` | (see git log) |
+| `4a90ee9` | (see git log) |
+
+### Testing
+
+- [OK] 受影响 HTTP/app/cmd 包普通测试与 race 通过；全仓 race/vet、API build、OpenAPI、tidy、vendor 解析通过。
+- [OK] Compose 子合同与独立 Trellis review 通过；已记录既有 config/gitcli/launcher、数据库 URL 和浏览器验证边界。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 继续处理独立的 Managed Ollama lifecycle 任务；不要把 TODO 11 gin-contrib/sessions 误认为本任务已采用。
