@@ -193,7 +193,42 @@ func TestRecoverPanicMiddlewareHandlesWrappedAbortAsOrdinaryPanic(t *testing.T) 
 	}
 }
 
-func panicTestRouter(output *bytes.Buffer, handler http.HandlerFunc) http.Handler {
+func TestRecoverPanicMiddlewareHandlesUncomparablePanicValue(t *testing.T) {
+	var output bytes.Buffer
+	router := panicTestRouter(&output, func(http.ResponseWriter, *http.Request) {
+		panic([]byte("do-not-compare-this-value"))
+	})
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/panic/value", nil))
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(output.String(), "do-not-compare-this-value") {
+		t.Fatalf("uncomparable panic value leaked: %s", output.String())
+	}
+}
+
+type nilPanicError struct{}
+
+func (*nilPanicError) Error() string { return "typed nil panic" }
+
+func TestRecoverPanicMiddlewareHandlesTypedNilErrorPanic(t *testing.T) {
+	var typedNil *nilPanicError
+	router := panicTestRouter(io.Discard, func(http.ResponseWriter, *http.Request) {
+		panic(typedNil)
+	})
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/panic/value", nil))
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func panicTestRouter(output io.Writer, handler http.HandlerFunc) http.Handler {
 	router := gin.New()
 	logger := observability.NewLogger("info", output)
 	router.Use(requestIDMiddleware)

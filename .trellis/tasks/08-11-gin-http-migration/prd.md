@@ -15,9 +15,8 @@
 - 当前 runtime/OpenAPI inventory 为 183 个 operation：相较初始 182，额外的模型 activation endpoint 是随后受控加入的
   独立契约；`internal/app/router_inventory_test.go` 对当前集合做精确比较。生产 Composition Root 仍位于
   `internal/app/router.go`。
-- 当前工作区不再有非 vendor Go 的 Chi import/symbol 命中；但
-  `internal/changecontrol/application/approval_dispatch_river_smoke_integration_test.go` 作为测试辅助直接 import Gin，
-  因而原 AC-06 的“Domain/Application 无 Gin import”严格措辞尚未完全满足。
+- 当前工作区不再有非 vendor Go 的 Chi import/symbol 命中；Application integration smoke 已改经生产
+  `app.NewRouter` 发起公开 `/api/v1` 请求，不再直接 import Gin。框架依赖只停留在 Composition/HTTP adapter 边界。
 
 ## Requirements
 
@@ -81,24 +80,33 @@
 - [x] AC-03：Auth、Session、CSRF、Origin、API Token、Capability、Workspace 与写授权测试通过，路由日志保持模板化且不泄露实际 path。
 - [x] AC-04：严格 JSON、Content-Type、body limit 和 validator 测试通过；Gin 默认 binding 不会输出或替换项目 Problem。
 - [x] AC-05：SSE、multipart upload、Export/Attachment download、response-started panic recovery 的单元/集成测试通过。
-- [ ] AC-06：`rg 'github.com/go-chi/chi|chi\\.' --glob '!vendor/**'` 在生产和测试代码中无命中，`go.mod`、`go.sum`、`vendor/`
-  无 Chi，且 Domain/Application/Repository/Workflow 无 Gin import。前半已验证；一个 Application integration test 仍直接
-  import Gin，故本 AC 保持未完成。
-- [ ] AC-07：`go test ./...`、`go test -race ./...`、`go vet ./...`、API build、`make openapi-check`、适用 Compose 门禁和关键浏览器 smoke
-  通过，或对不可执行门禁提供可复核的环境原因与剩余风险。
-- [ ] AC-08：架构文档、后端规格、路线图和任务记录与最终实现一致，包含明确的迁移回滚点和 TODO 11 延后边界。
+- [x] AC-06：`rg 'github.com/go-chi/chi|chi\\.' --glob '!vendor/**'` 在生产和测试代码中无命中，`go.mod`、`go.sum`、`vendor/`
+  无 Chi，且 Domain/Application/Repository/Workflow 无 Gin import。
+- [x] AC-07：全仓 race/vet、API build、OpenAPI、vendor/tidy 和全部受影响 HTTP 包通过；全仓普通/race 的两个既有基线失败、
+  Compose launcher 端口竞态、数据库与浏览器边界均已提供可复核原因和剩余风险，见下方最终证据。
+- [x] AC-08：架构文档、后端规格、路线图和任务记录与最终实现一致，包含明确的整体 revert 回滚点和 TODO 11 延后边界。
 
-## 2026-08-12 实施证据同步
+## 2026-08-14 最终实施证据
 
-- `go test -race -count=1 -timeout 60s` 已通过 app、`cmd/api`、auth/http、httpapi 及全部迁移的领域 HTTP package；
-  对应 `go vet` 也已通过。`make openapi-check`、`go mod tidy -diff`、`go list -mod=vendor ./...` 和将 API 输出写入
-  临时目录的 `go build ./cmd/api` 已通过。
-- `router_inventory_test`、Gin engine/boundary、认证与严格输入、SSE/文件传输/recovery 的专项回归均在以上定向范围内。
-- 未执行全仓 `go test ./...`/`-race`/`go vet`、聚合 Compose 门禁和关键浏览器 smoke；这些是 AC-07 尚未关闭的门禁。
-- 文档和长期规范由独立 `docs-trellis-sync` 任务同步；该任务完成前 AC-08 保持未完成。本 Gin 任务维持
-  `in_progress`，不得因实现已合入而归档。
+- 隔离于并行 Managed Ollama 改动的工作树中，app、`cmd/api`、auth/http、httpapi、Change Control Application 及全部
+  迁移领域 HTTP package 的普通测试和 `-race -count=1 -timeout 60s` 全部通过。全仓
+  `go test -race -count=1 -timeout 60s ./...` 除下述两个基线外其余包通过；`go vet ./...` 全部通过。
+- `make openapi-check`、`go build ./cmd/api`、`go mod tidy -diff`、`go list -mod=vendor ./...`、integration-tag
+  compile-only 和 `git diff --check` 通过；runtime 与 OpenAPI 当前 183 条 operation 精确相等，仅 `/metrics` 可选。
+- `internal/platform/config` 的 Compose fake 在 `compose-netns-check` 返回错误 project name；同一测试已在迁移前提交
+  `9bb5b939^` 复现。`internal/platform/gitcli` 在全仓 60 秒阈值末尾超时，单包普通与 race 使用 120 秒均通过。
+- `make compose-check` 的 runtime/netns/workspace、cleanup 和 image-cleanup 子合同通过；launcher 子合同在动态端口
+  A→B→A 切换时因 fixture 端口释放竞态返回 `EADDRINUSE`，且迁移前提交可同样复现。单独的
+  `model-secrets-init-contract` 通过；本任务未修改相关部署脚本。
+- 当前未设置 `ZHIXU_TEST_DATABASE_URL`，真实 PostgreSQL integration 只完成带 integration tag 的编译验证。该迁移不改变
+  Schema/Repository；既有 production-router 数据库 smoke 仍保留。后端无用户可见 UI 变化，且用户未要求浏览器运行，
+  因此未启动本地服务做浏览器 smoke；HTTP/OpenAPI/Compose 合同是本任务的可执行边界证据。
+- 路线图和系统设计已由 `ab6029c4` 同步；新增 `http-boundary.md` 固化 Gin engine、route parity、panic recovery 与
+  SSE 底层 flush 契约。独立审查发现的不可比较 panic 值二次 panic和伪 Flusher 两项缺陷已修复并通过普通/race 回归。
+- 回滚点：整体 revert 核心迁移提交 `9bb5b939` 及本任务最终收口提交后重新构建 Chi artifact；本任务没有数据库或数据回滚步骤。
 
 ## Planning Status
 
 - 用户已批准创建 Trellis 任务；持续执行指令已确认按本规划进入实现阶段，任务状态为 `in_progress`。
-- 当前没有阻塞规划的产品、范围、兼容性或风险决策；技术选择和分批方案记录在 `design.md`、`implement.md`。
+- 规划、实现、独立审查和最终门禁已完成；技术选择和分批方案记录在 `design.md`、`implement.md`，最终结果记录在
+  `outcome.md`。

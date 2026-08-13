@@ -12,3 +12,4 @@
 {"file":".trellis/tasks/08-11-gin-http-migration/research/gin-core-and-boundary.md","reason":"复核核心 Router 和 HTTP 边界的规划约束"}
 {"file":".trellis/tasks/08-11-gin-http-migration/research/route-and-test-batches.md","reason":"复核 runtime/OpenAPI parity、参数命名和 Chi 清理范围"}
 {"file":".trellis/tasks/08-11-gin-http-migration/research/strict-stream-file-contract.md","reason":"复核严格输入、SSE、文件传输和响应已开始后的恢复语义"}
+{"file": ".trellis/spec/backend/http-boundary.md", "reason": "复核 Gin 框架隔离、route parity、panic recovery 与底层 Flusher 契约"}

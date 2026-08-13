@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 
@@ -25,8 +26,8 @@ func recoverPanicMiddleware(logger *slog.Logger) gin.HandlerFunc {
 			if recovered == nil {
 				return
 			}
-			if recovered == http.ErrAbortHandler {
-				panic(recovered)
+			if isAbortHandlerPanic(recovered) {
+				panic(http.ErrAbortHandler)
 			}
 
 			request := ginContext.Request
@@ -46,6 +47,15 @@ func recoverPanicMiddleware(logger *slog.Logger) gin.HandlerFunc {
 
 		ginContext.Next()
 	}
+}
+
+func isAbortHandlerPanic(recovered any) bool {
+	err, ok := recovered.(error)
+	if !ok {
+		return false
+	}
+	typeOfError := reflect.TypeOf(err)
+	return typeOfError != nil && typeOfError.Comparable() && err == http.ErrAbortHandler
 }
 
 func responseStarted(writer gin.ResponseWriter) bool {

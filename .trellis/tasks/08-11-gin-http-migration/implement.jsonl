@@ -13,3 +13,4 @@
 {"file":".trellis/tasks/08-11-gin-http-migration/research/gin-core-and-boundary.md","reason":"核心 Router 和 HTTP 边界的规划摘要"}
 {"file":".trellis/tasks/08-11-gin-http-migration/research/route-and-test-batches.md","reason":"生产路由清单、参数冲突、测试辅助和互斥迁移批次"}
 {"file":".trellis/tasks/08-11-gin-http-migration/research/strict-stream-file-contract.md","reason":"严格 JSON、validator、SSE、multipart、下载和 panic-after-write 契约"}
+{"file": ".trellis/spec/backend/http-boundary.md", "reason": "Gin Engine、路由/OpenAPI、Middleware、recovery 和 SSE flush 的可执行边界"}

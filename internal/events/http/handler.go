@@ -95,7 +95,7 @@ func (handler *Handler) handleEvents(writer http.ResponseWriter, request *http.R
 		return
 	}
 	flusher, ok := writer.(http.Flusher)
-	if !ok {
+	if !ok || !supportsUnderlyingFlush(writer) {
 		httpapi.WriteProblem(writer, http.StatusInternalServerError, ErrorCodeStreamingUnsupported, "当前连接不支持事件流", false, nil)
 		return
 	}
@@ -120,6 +120,23 @@ func (handler *Handler) handleEvents(writer http.ResponseWriter, request *http.R
 		prepared.continueDrain,
 		replayRequest.format,
 	)
+}
+
+func supportsUnderlyingFlush(writer http.ResponseWriter) bool {
+	current := writer
+	for depth := 0; depth < 16 && current != nil; depth++ {
+		unwrapper, ok := current.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			_, flushable := current.(http.Flusher)
+			return flushable
+		}
+		next := unwrapper.Unwrap()
+		if next == nil {
+			return false
+		}
+		current = next
+	}
+	return false
 }
 
 type preparedStream struct {

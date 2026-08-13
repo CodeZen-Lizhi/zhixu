@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/app"
 	approvaldispatchpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/approvaldispatchpostgres"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
@@ -40,7 +41,6 @@ import (
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
-	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -128,8 +128,7 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := gin.New()
-	changecontrolhttp.NewHandler(changeService).Routes(router)
+	router := app.NewRouter(app.Dependencies{ChangeControl: changecontrolhttp.NewHandler(changeService)})
 	decision := approveRiverSmokeHTTP(t, ctx, router, created.Proposal, http.StatusCreated)
 	workflowRunID := foundation.ID(decision.WorkflowRunID)
 	var workflowNodeID string
@@ -316,7 +315,7 @@ func approveRiverSmokeHTTP(t *testing.T, ctx context.Context, handler http.Handl
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/proposals/"+string(proposal.ID)+"/approvals", bytes.NewReader(payload)).WithContext(ctx)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/proposals/"+string(proposal.ID)+"/approvals", bytes.NewReader(payload)).WithContext(ctx)
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)

@@ -2,6 +2,7 @@ package eventshttp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -96,6 +97,42 @@ func TestHandlerReturnsProblemWhenInitialReplayReadFails(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil || problem.ErrorCode != domain.ErrorCodeStoreUnavailable || !problem.Retryable {
 		t.Fatalf("initial replay problem=%#v err=%v", problem, err)
 	}
+}
+
+func TestHandlerRejectsWriterWithoutUnderlyingFlusher(t *testing.T) {
+	handler := NewHandler(&fakeEventStore{})
+	router := gin.New()
+	handler.Routes(router)
+	writer := &nonFlushingResponseWriter{header: make(http.Header)}
+	router.ServeHTTP(writer, httptest.NewRequest(http.MethodGet, eventPath(), nil))
+
+	if writer.status != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", writer.status, writer.body.String())
+	}
+	var problem httpapi.Problem
+	if err := json.Unmarshal(writer.body.Bytes(), &problem); err != nil {
+		t.Fatalf("decode problem: %v", err)
+	}
+	if problem.ErrorCode != ErrorCodeStreamingUnsupported {
+		t.Fatalf("problem=%+v", problem)
+	}
+}
+
+type nonFlushingResponseWriter struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (writer *nonFlushingResponseWriter) Header() http.Header { return writer.header }
+
+func (writer *nonFlushingResponseWriter) WriteHeader(status int) { writer.status = status }
+
+func (writer *nonFlushingResponseWriter) Write(body []byte) (int, error) {
+	if writer.status == 0 {
+		writer.status = http.StatusOK
+	}
+	return writer.body.Write(body)
 }
 
 func TestHandlerRechecksRetentionAfterInitialReplayRead(t *testing.T) {
