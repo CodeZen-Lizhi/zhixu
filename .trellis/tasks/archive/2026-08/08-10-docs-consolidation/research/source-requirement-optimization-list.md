@@ -8,14 +8,14 @@
 - [ ] TODO 2. 打通受限 Workspace Agent 的真实用户链路（P1，下一阶段，20-30 人天）：在保留安全边界和 Proposal 审批的前提下，支持可审计的只读工具循环。
 - [ ] TODO 3. 全量从 Goose 迁移到 Atlas（P0，数据库迁移前置，5-8 人天）：统一数据库 Schema 迁移与管理能力，并在 GORM 最终切换前建立唯一 Schema 事实源。
 - [ ] TODO 4. 自动合成可持续演进的知识笔记（P0，高优先级，25-35 人天）：持续整合多篇资料，去重补全、保留冲突和缺口，并附可核验来源。
-- [ ] TODO 5. 将后端 HTTP 层从 Chi 迁移到 Gin（P0，高优先级，15-25 人天）：采用国内使用广泛的 Gin 和 validator，保持现有 HTTP、安全与 SSE 契约兼容。
-- [ ] TODO 6. 使用 Eino 收敛 AI 通用基础设施（P0，高优先级，20-30 人天）：以 Eino/eino-ext 承担模型、Tool Calling、流式输出和 Agent 通用编排，并作为 TODO 2 的基础设施前置。
+- [x] TODO 5. 将后端 HTTP 层从 Chi 迁移到 Gin（P0，已完成，15-25 人天）：采用国内使用广泛的 Gin 和 validator，保持现有 HTTP、安全与 SSE 契约兼容。
+- [x] TODO 6. 使用 Eino 收敛 AI 通用基础设施（P0，已完成，20-30 人天）：以 Eino/eino-ext 承担模型、Tool Calling、流式输出和 Agent 通用编排，并作为 TODO 2 的基础设施前置。
 - [ ] TODO 7. 使用 Spectral 和 oasdiff 建立 OpenAPI 契约门禁（P1，中优先级，3-5 人天）：用成熟标准工具替换通用手写校验，只保留项目专属断言。
 - [ ] TODO 8. 生成前端 OpenAPI 客户端并接入 Zod（P1，中优先级，8-12 人天）：生成类型和请求代码，逐步删除重复的手写 Transport 与 DTO 解析。
 - [ ] TODO 9. 使用 Testcontainers-Go 管理数据库集成测试（P0，GORM 迁移前置，5-8 人天）：自动创建、迁移和销毁 PostgreSQL/pgvector 测试环境，并作为 Atlas、GORM 与 River 数据库门禁。
 - [ ] TODO 10. 将应用数据访问层全面迁移到 GORM（P0，高优先级、高风险，80-120 人天）：用 GORM 统一 Repository 和事务入口，复杂 PostgreSQL 查询继续通过 GORM Raw/Exec 执行。
 - [ ] TODO 11. 评估并接入 gin-contrib/sessions（P2，低优先级，5-8 人天）：在 Gin 和 GORM 迁移完成后，仅替换框架能够完整覆盖的 Session 通用机制。
-- [ ] TODO 12. 优先使用浏览器原生 EventSource（P2，低优先级，3-5 人天）：替换可由 Web 标准覆盖的 SSE 解析与重连代码，保留必要的最小 Fetch 适配器。
+- [x] TODO 12. 优先使用浏览器原生 EventSource（P2，已完成，3-5 人天）：替换可由 Web 标准覆盖的 SSE 解析与重连代码，保留必要的最小 Fetch 适配器。
 
 依赖顺序：TODO 6 支撑 TODO 2；TODO 7 完成后再执行 TODO 8；数据库方向按 TODO 9 → TODO 3 → TODO 10 推进，TODO 3 的 Atlas 是唯一 Schema 迁移事实源；TODO 5 和 TODO 10 完成后再执行 TODO 11。
 
@@ -165,9 +165,9 @@
 
 ## TODO 5. 将后端 HTTP 层从 Chi 迁移到 Gin
 
-- [ ] 状态：待规划（成熟框架替换）
-- 优先级：P0（高优先级）
-- 预估工期：15-25 人天
+- [x] 状态：已收口（2026-08-14）
+- 优先级：P0（已完成）
+- 预估工期：15-25 人天（仅作已完成事项的规模参考）
 
 ### 当前问题
 
@@ -195,9 +195,10 @@
 
 ## TODO 6. 使用 Eino 收敛 AI 通用基础设施
 
-- [ ] 状态：待规划（TODO 2 的基础设施前置）
-- 优先级：P0（高优先级）
-- 预估工期：20-30 人天
+- [x] 状态：已收口（2026-08-12；真实稳定观察独立进行）
+- 优先级：P0（已完成）
+- 预估工期：20-30 人天（仅作已完成事项的规模参考）
+- 发布说明：生产替换、真实 Provider/浏览器闭环和旧 direct 删除已经完成；连续 7 个自然日、至少 100 个终态的稳定观察仍是独立发布质量证据，不属于本清单开头定义的实现工期或完成判定。
 
 ### 当前问题
 
@@ -218,7 +219,7 @@
 - 生产模型、Embedding、Tool Calling、流式输出和 Agent 通用执行路径通过 Eino/eino-ext Adapter，不再保留功能重复的自研协议与编排实现。
 - Eino 类型只出现在 Adapter/Composition 允许范围，现有领域接口、持久 Workflow、审计和 OpenAPI 不需要理解 Eino。
 - 模型禁用、Provider 故障、Schema 修复、流中断、工具超时、预算耗尽和 Worker 重投递保持稳定、可解释且可恢复。
-- 现有 AI 单元/集成测试、Agent Eval、Secret 扫描、race/vet 和 TODO 2 的端到端基线通过，并能按 Adapter 切回迁移前实现。
+- 现有 AI 单元/集成测试、Agent Eval、Secret 扫描、race/vet 和 TODO 2 的端到端基线通过；旧 direct 实现已按 2026-08-11 决策删除，需要恢复时使用 Git 发布记录，不在生产部署中保留第二套 Runtime。
 
 ### 可直接执行的任务描述
 
@@ -381,9 +382,9 @@
 
 ## TODO 12. 优先使用浏览器原生 EventSource
 
-- [ ] 状态：待规划（Web 标准替换）
-- 优先级：P2（低优先级）
-- 预估工期：3-5 人天
+- [x] 状态：已收口（2026-08-10）
+- 优先级：P2（已完成）
+- 预估工期：3-5 人天（仅作已完成事项的规模参考）
 
 ### 当前问题
 
