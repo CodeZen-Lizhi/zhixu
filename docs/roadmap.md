@@ -4,7 +4,7 @@
 
 本路线图只维护未交付方向、优先级、依赖和不可破坏的迁移边界。实际拆分、负责人、状态、验收证据与发布时间在 `.trellis/tasks/` 管理；人天是熟悉项目的单人初估，不含需求澄清、外部协调和发布观察。
 
-当前架构事实以 [架构文档](architecture/README.md) 为准。Gin 已是当前 HTTP 基线；路线图中的 Eino、Atlas、GORM、Testcontainers、生成客户端，以及 `gin-contrib/sessions` 评估仍是候选或未来迁移，不得提前写成当前技术基线。
+当前架构事实以 [架构文档](architecture/README.md) 为准。Gin 与 Eino 已是当前 HTTP/AI Runtime 基线；路线图中的 Atlas、GORM、Testcontainers、生成客户端，以及 `gin-contrib/sessions` 评估仍是候选或未来迁移，不得提前写成当前技术基线。
 
 ## 当前交付收口（未完成）
 
@@ -22,7 +22,7 @@
 
 ```mermaid
 flowchart LR
-    Eino["Eino 通用 AI 能力"] --> WorkspaceAgent["受限 Workspace Agent"]
+    Eino["Eino 通用 AI 能力（已交付）"] --> WorkspaceAgent["受限 Workspace Agent"]
     Spectral["Spectral + oasdiff"] --> GeneratedClient["OpenAPI Generator + Zod"]
     Testcontainers["Testcontainers-Go"] --> Atlas["Atlas 唯一 Schema 迁移"]
     Atlas --> GORM["GORM 数据访问迁移"]
@@ -31,7 +31,7 @@ flowchart LR
     GORM --> Sessions
 ```
 
-数据库方向按 Testcontainers → Atlas → GORM 推进；最终切换前 Atlas 必须成为唯一 Schema 事实源。OpenAPI 门禁先于生成客户端。受限 Workspace Agent 依赖新的 AI 通用能力门禁。Gin 已交付；Session 框架评估仍晚于 GORM 收口。
+数据库方向按 Testcontainers → Atlas → GORM 推进；最终切换前 Atlas 必须成为唯一 Schema 事实源。OpenAPI 门禁先于生成客户端。受限 Workspace Agent 依赖已交付的 Eino AI Runtime 基线，并继续拥有自身产品与安全门禁。Gin 已交付；Session 框架评估仍晚于 GORM 收口。
 
 ## 3. 产品方向
 
@@ -42,7 +42,7 @@ flowchart LR
 - **首期范围**：只开放 `ReadGitStatus`、受证据约束的 RAG、`ReadSource` 和 `ValidateCitation`；其他自由查询或正文工具先完成 Receipt、输入上限、敏感信息处理和循环契约。
 - **边界**：工具仅服务端授权；步骤数、单工具超时、总时限、并发、Token 和费用预算有硬限制；最终事实必须经过 Evidence/Citation 校验。模型不得直接写文件、提交 Git 或扩大 Capability。
 - **验收门禁**：一次对话至少完成两次有依赖的只读调用；时间线区分 Token、工具请求/结果、等待和最终回答，刷新或 Worker 重投递能从持久事实恢复；各种上限以稳定错误终止。
-- **依赖**：AI 通用基础设施评估与迁移；固定 RAG 与 Agent 模式需可独立启用、灰度和回滚，Eino 类型不得进入外部 API、领域对象或前端业务类型。
+- **依赖**：Eino AI Runtime 基线已交付；固定 RAG 与受限 Workspace Agent 模式仍需拥有独立产品入口、能力门禁和 Git 发布恢复路径，Eino 类型不得进入外部 API、领域对象或前端业务类型。
 
 ### 3.2 TODO 4：自动合成可持续演进的知识笔记
 
@@ -66,12 +66,12 @@ flowchart LR
 - **保留边界**：Domain/Application 不暴露 Gin Context；标准库 `http.Handler` 仅在 HTTP 适配边界互操作，不保留双 Router 或双 Middleware。
 - **后续关系**：这只提供 Session 框架评估的前置 HTTP 基线，不代表 TODO 11 已采用或通过验收。
 
-### 4.3 TODO 6：使用 Eino 收敛 AI 通用基础设施
+### 4.3 已交付 6：使用 Eino 收敛 AI 通用基础设施（2026-08-12）
 
-- **优先级/初估**：P0，20–30 人天。
-- **目标**：评估由 Eino/eino-ext 承担模型、Tool Calling、流式输出和通用 Agent 编排，并支撑受限 Workspace Agent。
-- **当前事实**：Eino 尚未正式采用；当前主模块仍是项目 Application + 直接 OpenAI-Compatible Adapter，见 [ADR-0013](architecture/adr/0013-eino-adoption-gate.md)。
-- **不可破坏边界**：先冻结 Chat、Embedding、Tool Calling、结构化输出、流事件、超时、重试和错误分类；项目继续拥有持久 Workflow、权限、Approval、Citation、Model Run/Call、Receipt、Fence 与 PostgreSQL/River 状态机。领域对象和对外契约不得依赖 Eino 类型；每批行为对等后删除重复自研通用实现，并保留可验证回滚点。
+- **优先级/初估**：P0，20–30 人天（已完成，仅作规模参考）。
+- **结果**：Chat、OpenAI-Compatible/Ollama Embedding、五类 Structured Scheduler、RAG Graph、只读 Tool Agent 和最终正文 Stream 已固定使用 Eino/eino-ext；旧 direct 实现、selector 和运行时 fallback 已删除，见 [ADR-0027](architecture/adr/0027-eino-primary-ai-runtime.md)。
+- **保留边界**：项目继续唯一拥有持久 Workflow、权限、Approval、Evidence/Citation、Model Run/Call、Receipt、Fence 与 PostgreSQL/River 状态机；Eino 类型不进入领域对象、外部 API 或持久化合同。
+- **验收状态**：真实 Provider 六项 live gate 与 host-relay 桌面/移动浏览器闭环已通过；容器直连外部 HTTPS 网络路径及连续 7 天/100 个终态的稳定观察仍是独立发布质量证据，不得标记为已通过。
 
 ### 4.4 TODO 7：使用 Spectral 和 oasdiff 建立 OpenAPI 契约门禁
 
