@@ -1,0 +1,80 @@
+# Proposal Revision 编辑与三方合并
+
+## Goal
+
+补齐正式文件 Proposal 在审批期间发生目标漂移后的可恢复流程：用户能够同时核对生成提案时的基线、Workspace 当前内容和提案建议，解决冲突并创建新的不可变 Proposal Revision，再重新完成证据校验、审批、预检查和 Safe Writeback，而不是只能放弃并重新生成整个提案。
+
+## User Value
+
+- 保留用户在 Proposal 创建后对 Workspace 文件所做的修改，不被旧建议覆盖。
+- 对互不冲突的修改给出可核验的合并候选，对真实冲突交给用户明确处理。
+- 延续现有 Proposal、Approval、Change Hash、Git CAS 和 Safe Writeback 审计链，不增加绕过审批的写入路径。
+
+## Confirmed Facts
+
+- 当前 `file_patch` / `restore_document` 已有不可变 `ProposalRevision`、current/proposed 双向 Diff、Approval、Apply Preflight、base-hash 漂移阻断和 Safe Writeback。
+- 当前创建路径只写入 `revision_no=1`，Change Control Repository、Application、HTTP/OpenAPI 和 Web 均没有追加 Revision 或三方合并命令。
+- 当前页面在 `base_hash != current_hash` 时禁用批准，并提示重新生成修订版本；没有 `base/current/proposed` 三方展示和冲突编辑器。
+- `change_control.proposal_revision` 已支持同一 Proposal 多个 `revision_no`，Revision 不可变；Approval 通过外键绑定唯一 Revision 和 Change Hash。
+- 稳定需求要求“修改 Proposal 创建新 Revision，旧 Revision 保留”，并要求审批期间文件或 Git HEAD 变化时展示原目标、当前目标与 Proposal 三方差异且禁止覆盖；AC-13 要求进入三方合并。
+- Proposal 状态机已包含 `needs_revision -> draft`，但当前没有完成新 Revision 后返回 `ready_for_review` 的领域、持久化和 API 流程。
+- 现有 Monaco 只提供双向 Diff Viewer；仓库没有已采用的三方合并引擎。三方合并规则必须由受信后端拥有，不能依赖浏览器自行判断。
+
+## Requirements
+
+### R1. 适用范围与不可变版本
+
+- 三方合并仅用于正文会写入 Workspace 文件、且目标模式为 `REPLACE` 的 Proposal；结构化 `knowledge_change`、`publish_artifact`、`downstream_update` 不进入文本三方合并。
+- 每次编辑或冲突解决都追加新的不可变 Proposal Revision，递增 `revision_no`；旧 Revision、旧 Diff、旧 Approval 和既有审计事实保持可读且不可改写。
+- 新 Revision 必须重新计算并绑定 Target、Base Hash、Content、Evidence、Risk、Rollback Plan 和 Change Hash；任何旧 Approval、Write Authorization、Apply Preflight 或 Workflow 绑定不得复用。
+
+### R2. 三方输入与服务端合并
+
+- 合并输入固定为 `base`（旧 Revision 创建时的精确基线内容）、`current`（服务端当前读取的 Workspace 内容）和 `proposed`（旧 Revision 的建议内容），并绑定 Workspace、Proposal、Revision、Target Path、Target Mode 和当前内容 Hash。
+- 服务端使用确定、受版本约束的三方合并实现生成合并候选和冲突区间；前端只展示服务端结果并提交用户处理后的完整候选及其版本绑定。
+- 无冲突时仍由用户核对并显式创建新 Revision，不自动审批或自动写回。
+- 有冲突时必须显示 base/current/proposed 三方上下文并要求用户解决全部冲突；未解决冲突标记、输入超限或非法编码不得创建 Revision。
+
+### R3. 编辑与重新审批
+
+- 用户可在三方合并结果基础上编辑最终正文；允许同步修订 Evidence Summary、风险说明和回滚计划，风险等级继续遵循 Proposal Type 约束。
+- 创建新 Revision 后 Proposal 回到 `ready_for_review`，页面刷新后可恢复并显示最新 Revision；用户必须重新审批，新 Approval 只绑定该 Revision。
+- 当前文件再次漂移时，新 Revision 创建命令返回稳定冲突并附当前版本摘要；页面重新读取权威事实，不覆盖用户编辑内容，并允许用户以最新 current 重新发起合并。
+
+### R4. 幂等、并发与恢复
+
+- 创建新 Revision 使用 Idempotency Key、expected Proposal version、source Revision ID/Change Hash 和 expected current Hash；同键同请求返回同一结果，同键不同请求稳定冲突。
+- 两个页面并发编辑时最多一个基于同一 Proposal/current 绑定的 Revision 成功；失败方不得静默覆盖或生成分叉的“最新 Revision”。
+- 请求超时或响应丢失后，客户端可用同一键查询/重放并恢复同一结果；数据库提交未知时不得创建第二 Revision。
+- 一旦旧 Revision 已进入不可逆文件/Git 副作用或人工恢复状态，不允许用新 Revision 改写其执行事实。
+
+### R5. 展示与安全边界
+
+- Proposal 详情清楚区分“基线”“当前 Workspace”“原提案”和“待提交的新 Revision”；桌面与移动端不横向溢出，并提供非纯颜色的冲突状态。
+- 正文、绝对路径、内部 Git 命令和敏感错误不得进入日志、Problem Details、URL、Browser Storage 或遥测；错误只返回稳定代码和有界摘要。
+- 合并不会直接修改 Workspace、Git、数据库知识对象或索引；唯一正式写入路径仍是 Proposal Revision -> Approval -> Safe Writeback。
+
+## Acceptance Criteria
+
+- [ ] AC1：`file_patch/REPLACE` 的目标文件在 Proposal 创建后发生非重叠修改时，页面展示 base/current/proposed，服务端生成无冲突候选，用户确认后创建 `revision_no+1`，旧 Revision 保持可读。
+- [ ] AC2：双方修改同一区域时，页面逐处展示三方上下文；存在未解决冲突时不能创建新 Revision，全部解决后可创建并重新审批。
+- [ ] AC3：新 Revision 使用当前 Workspace 内容作为新 Base，重新计算 Change Hash；旧 Approval、Write Authorization、Preflight 和 Workflow 不能用于新 Revision。
+- [ ] AC4：创建新 Revision 后 Proposal 回到 `ready_for_review`；审批、preflight、Safe Writeback 和 Git Commit 全链路绑定新 Revision，最终内容同时保留 current 与 proposed 的已确认修改。
+- [ ] AC5：合并过程中 current 再次漂移、Proposal version 变化或并发创建 Revision时返回稳定 409；不会覆盖文件、丢失旧 Revision或产生两个最新 Revision。
+- [ ] AC6：相同 Idempotency Key 与相同绑定可安全重放；不同载荷复用同键被拒绝；响应丢失后恢复同一 Revision。
+- [ ] AC7：空文件、文件末尾、CRLF/LF、相邻修改、删除/新增同一区域、较大但受限 Markdown 和非法/超限输入有确定测试；合并输出不会残留未解析冲突标记。
+- [ ] AC8：OpenAPI、后端领域/Application/PostgreSQL/HTTP、生产 Composition、前端严格 Decoder/UI 与事件失效均完成；不存在仅前端实现的合并规则或第二写入路径。
+- [ ] AC9：桌面和 `390x844` 移动端真实浏览器链路覆盖无冲突与冲突解决、刷新恢复、再次漂移和重新审批；无横向溢出、控制台错误或失败假成功。
+- [ ] AC10：现有 Proposal 类型、Approval、current-content、preflight、Safe Writeback、Document Restore 和 typed Proposal 测试无回归，`docs/requirements.md` AC-13 与产品交付父任务状态同步。
+
+## Out Of Scope
+
+- 结构化 `knowledge_change`、`publish_artifact`、`downstream_update` 的通用对象合并器。
+- Git branch merge/rebase、远端冲突解决、force push、reset、checkout 或历史重写。
+- 自动审批、自动写回、多人实时协同编辑、评论系统和批量 Proposal 合并。
+- 将完整正文或三方内容写入日志、Audit payload、URL 或浏览器持久存储。
+- 修改已发布迁移；数据库演进只使用新的前向 migration。
+
+## Open Question
+
+- `restore_document` 是否在首期与普通 `file_patch/REPLACE` 一起支持三方合并，还是首期仅支持普通文件修改 Proposal？

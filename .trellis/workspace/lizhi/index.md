@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 58
+- **Total Sessions**: 59
 - **Last Active**: 2026-08-14
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~228 | Active |
+| `journal-2.md` | ~264 | Active |
 | `journal-1.md` | ~1981 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 59 | 2026-08-14 | 完成受管 Ollama 生命周期与工作区重绑定 | `e42790f0` | `dev` |
 | 58 | 2026-08-14 | 暂停 TODO 11 Session 框架评估 | - | `dev` |
 | 57 | 2026-08-14 | 完成 Chi 到 Gin HTTP 迁移收口 | `9bb5b939`, `ab6029c4`, `39bf654e`, `4a90ee9` | `dev` |
 | 56 | 2026-08-12 | 同步模型热切换与 Gin 文档 | `ab6029c4` | `dev` |

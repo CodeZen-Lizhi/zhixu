@@ -226,3 +226,39 @@
 ### Next Steps
 
 - 需要时重新激活 08-14-gin-contrib-sessions-evaluation；实施前须明确确认 TODO 10 从关闭前置改为未来重评条件。
+
+
+## Session 59: 完成受管 Ollama 生命周期与工作区重绑定
+
+**Date**: 2026-08-14
+**Task**: 完成受管 Ollama 生命周期与工作区重绑定
+**Branch**: `dev`
+
+### Summary
+
+交付按模型设置启停的 managed Ollama supervisor、持久模型卷与生命周期状态，并补齐显式 Workspace root rebind、文档和受控 Compose 验收证据。
+
+### Main Changes
+
+- 新增常驻低内存 local-model-runtime 管理器，按需求启动或停止唯一 Ollama child，并持久化 operation、hold、进度和恢复状态。
+- 接入 Chat/Embedding 本地 Ollama 设置、热激活、generation hold、OpenAPI、Settings UI、Compose 与 legacy 迁移工具。
+- 新增显式 workspace rebind 与数据库围栏、审计和 launcher 恢复契约。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e42790f0` | (see git log) |
+
+### Testing
+
+- [OK] 两组指定真实 Compose 验收通过：五种线上/本地模式、单 child、缓存复用、管理容器重启恢复和 60 秒内存采样。
+- [OK] 文档 Markdown 解析 7/7、git diff --check 与暂存区密钥模式检查通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 原生 Linux、Docker daemon restart、浏览器闭环和真实 legacy volume 迁移仍按归档任务文档列为发布门禁。
