@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 59
+- **Total Sessions**: 60
 - **Last Active**: 2026-08-14
 <!-- @@@/auto:current-status -->
 
@@ -19,8 +19,8 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~264 | Active |
-| `journal-1.md` | ~1981 | Archived |
+| `journal-2.md` | ~297 | Active |
+| `journal-1.md` | ~2005 | Archived |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 60 | 2026-08-14 | Eino Runtime 生产迁移与路线图收口 | `64748d92`, `5e5c44cf`, `3acc760b` | `dev` |
 | 59 | 2026-08-14 | 完成受管 Ollama 生命周期与工作区重绑定 | `e42790f0` | `dev` |
 | 58 | 2026-08-14 | 暂停 TODO 11 Session 框架评估 | - | `dev` |
 | 57 | 2026-08-14 | 完成 Chi 到 Gin HTTP 迁移收口 | `9bb5b939`, `ab6029c4`, `39bf654e`, `4a90ee9` | `dev` |

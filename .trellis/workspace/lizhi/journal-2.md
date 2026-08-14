@@ -262,3 +262,36 @@
 ### Next Steps
 
 - 原生 Linux、Docker daemon restart、浏览器闭环和真实 legacy volume 迁移仍按归档任务文档列为发布门禁。
+
+
+## Session 60: Eino Runtime 生产迁移与路线图收口
+
+**Date**: 2026-08-14
+**Task**: Eino Runtime 生产迁移与路线图收口
+**Branch**: `dev`
+
+### Summary
+
+Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并合并到 dev；路线图与需求优化清单状态已校准。按用户明确决定，真实 7 天/100 终态稳定观察不再阻塞本任务归档。
+
+### Main Changes
+
+- 归档 Eino Runtime 父任务及 Checkpoint、Embedding、RAG、Token Stream、Tool Agent 五个子任务。
+- 保留未执行稳定观察的事实记录，不将其误写为已通过。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `64748d92` | (see git log) |
+| `5e5c44cf` | (see git log) |
+| `3acc760b` | (see git log) |
+
+### Testing
+
+- [OK] 合并前全仓 Go、race、vet、前端、OpenAPI、Compose、Provider/browser 与 Trellis 门禁证据通过。
+- [OK] 路线图链接、Markdown 锚点、前端 lint/typecheck 与 git diff --check 通过。
+
+### Status
+
+[OK] **Completed**
