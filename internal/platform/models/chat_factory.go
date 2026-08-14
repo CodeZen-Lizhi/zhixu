@@ -13,12 +13,12 @@ func NewConfiguredChatModel(cfg config.Config) (agentapplication.ChatModel, erro
 	switch cfg.ChatProvider {
 	case config.ChatProviderDisabled:
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, ErrorCodeChatCapabilityUnavailable, false, errChatCapabilityOff)
-	case config.ChatProviderOpenAICompatible:
+	case config.ChatProviderOpenAICompatible, config.ChatProviderOllama:
 		return NewOpenAICompatibleChatModel(OpenAIChatOptions{
 			BaseURL: cfg.ChatBaseURL, APIKey: cfg.ChatAPIKey, Model: cfg.ChatModel, ModelVersion: cfg.ChatModelVersion,
 			AdapterVersion: cfg.ChatAdapterVersion, Timeout: cfg.ChatTimeout,
 			MaxRequestBytes: cfg.ChatMaxRequestBytes, MaxResponseBytes: cfg.ChatMaxResponseBytes,
-			APIStyle: ChatAPIStyle(cfg.ChatAPIStyle),
+			APIStyle: ChatAPIStyle(cfg.ChatAPIStyle), Provider: string(cfg.ChatProvider),
 		})
 	default:
 		return nil, foundation.NewError(foundation.ErrorInvalidInput, ErrorCodeChatConfigInvalid, false, errors.New("chat provider is unsupported"))

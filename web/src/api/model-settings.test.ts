@@ -56,6 +56,7 @@ const disabledResponse = {
   apply_required: false,
   restart_required: false,
   capabilities: { chat: "disabled", embedding: "disabled" },
+  local_runtime: { mode: "managed", phase: "stopped", fresh: true, requirement_hash: "", ready_hash: "", operation_id: null, operation_phase: null, completed_bytes: 0, total_bytes: null, progress_known: false, operation_error: null, operation_retryable: false },
 } as const;
 
 const configuredChat = {
@@ -66,6 +67,16 @@ const configuredChat = {
   model_version: "2026-07",
   adapter_version: "v1",
   api_key_configured: true,
+} as const;
+
+const configuredOllamaChat = {
+  provider: "ollama",
+  api_style: "chat_completions",
+  base_url: "http://127.0.0.1:11434",
+  model: "qwen2.5:3b",
+  model_version: "qwen2.5:3b",
+  adapter_version: "v1",
+  api_key_configured: false,
 } as const;
 
 const configuredEmbedding = {
@@ -162,6 +173,43 @@ describe("model settings API boundary", () => {
     })).toMatchObject({ rollout: { phase: "failed", retryable: true } });
   });
 
+  it("严格解码显式 Ollama Chat，并保留历史固定地址的只读兼容", () => {
+    const ollamaResponse = {
+      ...configuredResponse,
+      desired_settings: { ...configuredResponse.desired_settings, chat: configuredOllamaChat },
+    };
+    expect(decodeModelSettingsResponse(ollamaResponse)).toMatchObject({
+      desiredSettings: {
+        chat: {
+          provider: "ollama",
+          apiStyle: "chat_completions",
+          baseUrl: "http://127.0.0.1:11434",
+          apiKeyConfigured: false,
+        },
+      },
+    });
+    expect(decodeModelSettingsResponse({
+      ...configuredResponse,
+      desired_settings: {
+        ...configuredResponse.desired_settings,
+        chat: { ...configuredChat, base_url: "http://127.0.0.1:11434", api_key_configured: false },
+      },
+    })).toMatchObject({ desiredSettings: { chat: { provider: "openai-compatible" } } });
+
+    expect(() => decodeModelSettingsResponse({
+      ...ollamaResponse,
+      desired_settings: { ...ollamaResponse.desired_settings, chat: { ...configuredOllamaChat, api_style: "responses" } },
+    })).toThrow(ModelSettingsApiError);
+    expect(() => decodeModelSettingsResponse({
+      ...ollamaResponse,
+      desired_settings: { ...ollamaResponse.desired_settings, chat: { ...configuredOllamaChat, api_key_configured: true } },
+    })).toThrow(ModelSettingsApiError);
+    expect(() => decodeModelSettingsResponse({
+      ...ollamaResponse,
+      desired_settings: { ...ollamaResponse.desired_settings, chat: { ...configuredOllamaChat, base_url: "https://models.example.test/v1" } },
+    })).toThrow(ModelSettingsApiError);
+  });
+
   it("拒绝未知字段、Secret 回显、非法状态和不一致 revision", () => {
     expect(() => decodeModelSettingsResponse({ ...disabledResponse, ignored: true })).toThrow(ModelSettingsApiError);
     expect(() => decodeModelSettingsResponse({
@@ -227,6 +275,22 @@ describe("model settings API boundary", () => {
     await expect(updateModelSettings({
       ...updateInput,
       chat: { ...updateInput.chat, baseUrl: "http://models.example.test/v1" },
+    })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(updateModelSettings({
+      ...updateInput,
+      chat: { ...updateInput.chat, baseUrl: "http://127.0.0.1:11434" },
+    })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(updateModelSettings({
+      ...updateInput,
+      chat: { ...updateInput.chat, provider: "ollama", baseUrl: "https://models.example.test/v1", apiKey: { action: "clear" } },
+    })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(updateModelSettings({
+      ...updateInput,
+      chat: { ...updateInput.chat, provider: "ollama", apiStyle: "responses", baseUrl: "http://127.0.0.1:11434", apiKey: { action: "clear" } },
+    })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(updateModelSettings({
+      ...updateInput,
+      chat: { ...updateInput.chat, provider: "ollama", baseUrl: "http://127.0.0.1:11434", apiKey: { action: "keep" } },
     })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
     await expect(updateModelSettings({
       ...updateInput,
@@ -315,6 +379,38 @@ describe("model settings API boundary", () => {
     });
     expect(JSON.stringify(window.localStorage)).not.toContain("secret-chat-key");
     expect(JSON.stringify(window.sessionStorage)).not.toContain("secret-chat-key");
+  });
+
+  it("PUT 将显式 Ollama Chat 编码为固定地址、Chat Completions 和 clear", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      ...configuredResponse,
+      desired_revision: 3,
+      desired_settings: { ...configuredResponse.desired_settings, chat: configuredOllamaChat },
+    }));
+
+    await updateModelSettings({
+      ...updateInput,
+      chat: {
+        provider: "ollama",
+        apiStyle: "chat_completions",
+        baseUrl: "http://127.0.0.1:11434",
+        model: "qwen2.5:3b",
+        modelVersion: "qwen2.5:3b",
+        adapterVersion: "v1",
+        apiKey: { action: "clear" },
+      },
+    });
+
+    expect(callJsonBody(0)).toMatchObject({
+      chat: {
+        provider: "ollama",
+        api_style: "chat_completions",
+        base_url: "http://127.0.0.1:11434",
+        model: "qwen2.5:3b",
+        model_version: "qwen2.5:3b",
+        api_key: { action: "clear" },
+      },
+    });
   });
 
   it("POST activation 只发送 exact revision，并严格解码参与者进度", async () => {
@@ -553,7 +649,7 @@ describe("model settings API boundary", () => {
       .mockResolvedValueOnce(jsonResponse({ target: "chat", status: "ok", provider: "openai-compatible", model: "wrong-model", api_style: "chat_completions", endpoint_path: "/v1/chat/completions", latency_ms: 9 }))
       .mockResolvedValueOnce(jsonResponse({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", api_style: "responses", endpoint_path: "/v1/responses", latency_ms: 10 }));
 
-    await expect(testModelSettings({ target: "embedding", embedding: updateInput.embedding })).resolves.toEqual({
+    await expect(testModelSettings({ target: "embedding", embedding: updateInput.embedding, idempotencyKey: "model-settings-test-embedding" })).resolves.toEqual({
       target: "embedding",
       status: "ok",
       provider: "ollama",
@@ -573,10 +669,60 @@ describe("model settings API boundary", () => {
         api_key: { action: "clear" },
       },
     });
+    expect(new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers).get("Idempotency-Key")).toBe("model-settings-test-embedding");
 
     await expect(testModelSettings({ target: "chat", chat: updateInput.chat })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
     await expect(testModelSettings({ target: "chat", chat: updateInput.chat })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
     expect(decodeModelSettingsTestResult({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", api_style: "responses", endpoint_path: "/v1/responses", latency_ms: 12 })).toEqual({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", apiStyle: "responses", endpointPath: "/v1/responses", latencyMs: 12 });
+  });
+
+  it("连接测试接受显式 Ollama Chat 的固定 Chat Completions binding", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      target: "chat",
+      status: "ok",
+      provider: "ollama",
+      model: "qwen2.5:3b",
+      api_style: "chat_completions",
+      endpoint_path: "/v1/chat/completions",
+      latency_ms: 11,
+    }));
+    const chat = {
+      provider: "ollama",
+      apiStyle: "chat_completions",
+      baseUrl: "http://127.0.0.1:11434",
+      model: "qwen2.5:3b",
+      modelVersion: "qwen2.5:3b",
+      adapterVersion: "v1",
+      apiKey: { action: "clear" },
+    } as const;
+
+    await expect(testModelSettings({ target: "chat", chat })).resolves.toMatchObject({
+      target: "chat",
+      provider: "ollama",
+      apiStyle: "chat_completions",
+      endpointPath: "/v1/chat/completions",
+    });
+    expect(callJsonBody(0)).toEqual({
+      target: "chat",
+      chat: {
+        provider: "ollama",
+        api_style: "chat_completions",
+        base_url: "http://127.0.0.1:11434",
+        model: "qwen2.5:3b",
+        model_version: "qwen2.5:3b",
+        adapter_version: "v1",
+        api_key: { action: "clear" },
+      },
+    });
+    expect(() => decodeModelSettingsTestResult({
+      target: "chat",
+      status: "ok",
+      provider: "ollama",
+      model: "qwen2.5:3b",
+      api_style: "responses",
+      endpoint_path: "/v1/responses",
+      latency_ms: 11,
+    })).toThrow(ModelSettingsApiError);
   });
 
   it("连接测试在网络请求前拒绝 disabled Provider", async () => {

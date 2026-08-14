@@ -1,0 +1,19 @@
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"desired/active/applied、热激活、generation lease、Relay 与本地模型安全边界"}
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"Compose/launcher、stable netns、Docker Socket 禁止与 down/reset ownership 契约"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"forward migration、PostgreSQL lease/CAS、最小权限 role 与事务锁序"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go/Compose 外部进程、Secret、幂等副作用与成熟方案门禁"}
+{"file":".trellis/spec/frontend/model-settings.md","reason":"Settings strict wire、Save/Test/Apply、轮询恢复与状态所有权"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"进度、状态、焦点、可访问性与非颜色语义"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"持久 preparation operation 与前端权威状态同步"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"模型设置前端门禁、桌面/移动和真实浏览器验证"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Provider/DB/runtime/OpenAPI/UI 跨层单一事实源与兼容性"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/runtime-and-official-docs.md","reason":"现有 legacy Ollama、约 700 MiB 基线与官方 tags/show/pull/ps API 证据"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/lifecycle-options.md","reason":"supervisor、host agent、launcher profile 与 Docker Socket 方案比较"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/model-activation.md","reason":"热激活挂接点、generation hold、停止栅栏与失败方向"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/docker-lifecycle.md","reason":"launcher ownership、volume 保留、legacy copy 与恢复边界"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/settings-ux.md","reason":"显式 Ollama provider、strict Snapshot、Test/Apply 与状态 UX"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/supervisor-container.md","reason":"选定 Option A 的 PID1、信号、proxy、image、volume、static overlay 与 migration 细化"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/supervisor-activation.md","reason":"PostgreSQL operation/hold/status、async pull/Test、RuntimeHost 与 activation 集成"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/supervisor-ux.md","reason":"产品状态文案、进度恢复、无基础设施细节 UI 与 launcher migration 归属"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/phase-a-image-probe.md","reason":"最终镜像 pin、arm64 API/推理、non-root、只读根文件系统、clean env 与重启持久性实证"}
+{"file": ".trellis/tasks/08-11-managed-ollama-lifecycle/research/workspace-root-rebinding.md", "reason": "Workspace root replacement 的显式重绑定、锁序、审计和前向恢复契约"}

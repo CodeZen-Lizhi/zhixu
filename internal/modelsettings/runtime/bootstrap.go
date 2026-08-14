@@ -4,6 +4,7 @@ import (
 	"context"
 
 	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	modelsettingspostgres "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/adapter/postgres"
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
@@ -18,11 +19,12 @@ type BootstrapDB interface {
 
 // BootstrapResult contains the shared managed-settings dependencies for one process.
 type BootstrapResult struct {
-	Service    *modelsettingsapplication.Service
-	Manager    modelsettingsapplication.SettingsManager
-	Repository *modelsettingspostgres.Repository
-	Loaded     LoadedSettings
-	KeyError   error
+	Service         *modelsettingsapplication.Service
+	Manager         modelsettingsapplication.SettingsManager
+	Repository      *modelsettingspostgres.Repository
+	Loaded          LoadedSettings
+	KeyError        error
+	LocalModelStore localmodelruntime.LifecycleStore
 }
 
 // Bootstrap builds the repository, key boundary, application service, and fixed process revision.
@@ -36,11 +38,24 @@ func Bootstrap(ctx context.Context, database BootstrapDB, cfg config.Config) (Bo
 	if err != nil {
 		return BootstrapResult{}, err
 	}
-	repository, err := modelsettingspostgres.NewRepository(
-		database,
+	var resultStore localmodelruntime.LifecycleStore
+	var lifecycleOption modelsettingspostgres.Option
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		lifecycleStore, lifecycleErr := localmodelruntime.NewPostgresStore(database)
+		if lifecycleErr != nil {
+			return BootstrapResult{}, lifecycleErr
+		}
+		resultStore = lifecycleStore
+		lifecycleOption = modelsettingspostgres.WithLocalModelLifecycle(lifecycleStore)
+	}
+	options := []modelsettingspostgres.Option{
 		modelsettingspostgres.WithSecretSealer(secretSealer),
 		modelsettingspostgres.WithAuditAppender(auditStore),
-	)
+	}
+	if lifecycleOption != nil {
+		options = append(options, lifecycleOption)
+	}
+	repository, err := modelsettingspostgres.NewRepository(database, options...)
 	if err != nil {
 		return BootstrapResult{}, err
 	}
@@ -49,10 +64,20 @@ func Bootstrap(ctx context.Context, database BootstrapDB, cfg config.Config) (Bo
 	if err != nil {
 		return BootstrapResult{}, err
 	}
-	manager, err := modelsettingsapplication.NewSettingsManager(repository, validator, NewConnectionTester(cfg), 0)
+	var testLifecycle modelsettingsapplication.TestLifecycle
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		lifecycle, lifecycleErr := NewTestLifecycle(resultStore)
+		if lifecycleErr != nil {
+			return BootstrapResult{}, lifecycleErr
+		}
+		testLifecycle = lifecycle
+		// API/Worker create role-scoped generation adapters after their process
+		// instance identity is known; the store itself is shared and read-only.
+	}
+	manager, err := modelsettingsapplication.NewSettingsManagerWithLifecycle(repository, validator, NewConnectionTester(cfg), testLifecycle, 0)
 	if err != nil {
 		return BootstrapResult{}, err
 	}
 	loaded, loadErr := LoadSettings(ctx, cfg, service)
-	return BootstrapResult{Service: service, Manager: manager, Repository: repository, Loaded: loaded, KeyError: keyErr}, loadErr
+	return BootstrapResult{Service: service, Manager: manager, Repository: repository, Loaded: loaded, KeyError: keyErr, LocalModelStore: resultStore}, loadErr
 }

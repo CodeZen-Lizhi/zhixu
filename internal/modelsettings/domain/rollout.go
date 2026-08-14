@@ -174,6 +174,25 @@ type Snapshot struct {
 	RestartRequired     bool
 	ChatCapability      Capability
 	EmbeddingCapability Capability
+	LocalRuntime        LocalRuntimeSummary
+}
+
+// LocalRuntimeSummary is the non-secret projection of the managed Ollama
+// control plane. It intentionally contains no endpoint, credential, PID or
+// Docker identity.
+type LocalRuntimeSummary struct {
+	Mode               string
+	Phase              string
+	Fresh              bool
+	RequirementHash    string
+	ReadyHash          string
+	OperationID        *foundation.ID
+	OperationPhase     string
+	CompletedBytes     int64
+	TotalBytes         *int64
+	ProgressKnown      bool
+	OperationError     string
+	OperationRetryable bool
 }
 
 // ValidActivationPhase reports phases accepted by the hot-activation schema.

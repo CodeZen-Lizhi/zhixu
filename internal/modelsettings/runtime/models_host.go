@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
@@ -25,6 +26,7 @@ type ManagedModelsHostOptions struct {
 
 	BuildTimeout    time.Duration
 	HistoricalLimit int
+	Lifecycle       GenerationLifecycle
 }
 
 // NewManagedModelsHost creates the process-local Chat+Embedding generation host.
@@ -55,6 +57,13 @@ func NewManagedModelsHost(options ManagedModelsHostOptions) (*RuntimeHost[*Model
 		EmbeddingCompatible: func(models *Models, version retrievaldomain.EmbeddingVersion) error {
 			return models.ValidateEmbeddingVersion(version)
 		},
+		LocalDemand: func(models *Models) (localmodelruntime.Requirement, error) {
+			if models == nil {
+				return localmodelruntime.Requirement{}, errors.New("model generation is unavailable")
+			}
+			return models.LocalDemand(), nil
+		},
+		Lifecycle:       options.Lifecycle,
 		BuildTimeout:    options.BuildTimeout,
 		HistoricalLimit: options.HistoricalLimit,
 	})

@@ -82,6 +82,24 @@ func TestValidatorRestrictsManagedOllamaToRelay(t *testing.T) {
 	}
 }
 
+func TestValidatorSupportsExplicitManagedOllamaChat(t *testing.T) {
+	t.Parallel()
+	settings := domain.CanonicalDisabledSettings()
+	settings.Chat.Provider = domain.ChatProviderOllama
+	settings.Chat.BaseURL = managedOllamaBaseURL
+	settings.Chat.Model = "qwen2.5:3b"
+	settings.Chat.ModelVersion = "qwen2.5:3b"
+	validator := NewValidator(config.Defaults())
+	if err := validator.ValidateModelSettings(context.Background(), settings, domain.SecretConfiguration{}); err != nil {
+		t.Fatal(err)
+	}
+	settings.Chat.BaseURL = "https://ollama.example.test"
+	assertInvalid(t, validator.ValidateModelSettings(context.Background(), settings, domain.SecretConfiguration{}))
+	settings.Chat.BaseURL = managedOllamaBaseURL
+	settings.Chat.APIStyle = domain.ChatAPIStyleResponses
+	assertInvalid(t, validator.ValidateModelSettings(context.Background(), settings, domain.SecretConfiguration{}))
+}
+
 func TestValidatorRestrictsManagedLoopbackToExactRelay(t *testing.T) {
 	t.Parallel()
 
@@ -101,12 +119,31 @@ func TestValidatorRestrictsManagedLoopbackToExactRelay(t *testing.T) {
 		assertInvalid(t, validator.ValidateModelSettings(context.Background(), settings, domain.SecretConfiguration{}))
 	}
 	settings := domain.CanonicalDisabledSettings()
-	settings.Chat.Provider = domain.ChatProviderOpenAICompatible
+	settings.Chat.Provider = domain.ChatProviderOllama
 	settings.Chat.BaseURL = managedOllamaBaseURL
 	settings.Chat.Model = "chat-v1"
 	settings.Chat.ModelVersion = "chat-v1"
 	if err := validator.ValidateModelSettings(context.Background(), settings, domain.SecretConfiguration{}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBuildRetainsLegacyManagedChatRevisionCompatibility(t *testing.T) {
+	t.Parallel()
+
+	settings := domain.CanonicalDisabledSettings()
+	settings.Chat.Provider = domain.ChatProviderOpenAICompatible
+	settings.Chat.BaseURL = managedOllamaBaseURL
+	settings.Chat.Model = "qwen2.5:3b"
+	settings.Chat.ModelVersion = "qwen2.5:3b"
+	models, err := Build(config.Defaults(), domain.ResolvedSettings{Revision: 8, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = models.Close() })
+	contract, ok := models.Chat().Contract()
+	if !ok || contract.Provider != string(domain.ChatProviderOpenAICompatible) {
+		t.Fatalf("legacy chat contract = %+v configured=%t", contract, ok)
 	}
 }
 

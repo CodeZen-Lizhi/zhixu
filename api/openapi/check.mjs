@@ -335,6 +335,11 @@ for (const [path, method] of [
     throw new Error(`${method.toUpperCase()} ${path} must require X-Workspace-ID`);
   }
 }
+if (!document.paths["/api/v1/settings/models/test"].post.parameters?.some(
+  (parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey",
+)) {
+  throw new Error("POST /api/v1/settings/models/test must require Idempotency-Key");
+}
 const workflowWorkspaceHeader = document.components?.parameters?.WorkflowWorkspaceID;
 if (workflowWorkspaceHeader?.name !== "X-Workspace-ID" || workflowWorkspaceHeader.in !== "header" ||
     workflowWorkspaceHeader.required !== true || workflowWorkspaceHeader.schema?.type !== "string" ||
@@ -1741,6 +1746,7 @@ const strictModelSettingsSchemas = [
   "ModelSettingsParticipants",
   "ModelSettingsParticipant",
   "ModelSettingsCapabilities",
+  "ModelLocalRuntime",
   "StartModelSettingsActivationRequest",
   "UpdateModelSettingsRequest",
   "ModelChatSettingsDraft",
@@ -1766,7 +1772,7 @@ const exactModelSettingsShape = (schemaName, required, properties = required) =>
     throw new Error(`${schemaName} required/property shape drifted`);
   }
 };
-exactModelSettingsShape("ModelSettingsResponse", ["desired_revision", "active_revision", "desired_settings", "active_settings", "runtime", "rollout", "participants", "apply_required", "restart_required", "capabilities"]);
+exactModelSettingsShape("ModelSettingsResponse", ["desired_revision", "active_revision", "desired_settings", "active_settings", "runtime", "rollout", "participants", "apply_required", "restart_required", "capabilities", "local_runtime"]);
 exactModelSettingsShape("ModelSettingsConflictProblem", ["error_code", "message", "retryable", "details"]);
 exactModelSettingsShape("ModelSettingsConflictDetails", ["current_revision"]);
 exactModelSettingsShape("ModelSettingsTestProblem", ["error_code", "message", "retryable"], ["error_code", "message", "retryable", "workflow_run_id", "details"]);
@@ -1780,6 +1786,7 @@ exactModelSettingsShape("ModelSettingsRollout", ["id", "version", "phase", "targ
 exactModelSettingsShape("ModelSettingsParticipants", ["api", "worker"]);
 exactModelSettingsShape("ModelSettingsParticipant", ["present", "target_revision", "phase", "fresh", "last_error_code", "retryable"]);
 exactModelSettingsShape("ModelSettingsCapabilities", ["chat", "embedding"]);
+exactModelSettingsShape("ModelLocalRuntime", ["mode", "phase", "fresh", "requirement_hash", "ready_hash", "operation_id", "operation_phase", "completed_bytes", "total_bytes", "progress_known", "operation_error", "operation_retryable"]);
 exactModelSettingsShape("StartModelSettingsActivationRequest", ["expected_revision"]);
 exactModelSettingsShape("UpdateModelSettingsRequest", ["expected_revision", "chat", "embedding"]);
 exactModelSettingsShape("ModelChatSettingsDraft", ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key"]);
@@ -1836,13 +1843,17 @@ if (responseSchemas.some((schema) => JSON.stringify(schema).includes('"writeOnly
 
 const chatSummary = schemas.ModelChatSettingsSummary;
 const embeddingSummary = schemas.ModelEmbeddingSettingsSummary;
-if (chatSummary.properties.provider.enum?.join(",") !== "disabled,openai-compatible" ||
+if (chatSummary.properties.provider.enum?.join(",") !== "disabled,openai-compatible,ollama" ||
     chatSummary.properties.api_style.enum?.join(",") !== "chat_completions,responses" ||
-    chatSummary.oneOf?.map((branch) => branch.properties?.provider?.const).join(",") !== "disabled,openai-compatible" ||
+    chatSummary.oneOf?.map((branch) => branch.properties?.provider?.const).join(",") !== "disabled,openai-compatible,ollama" ||
     chatSummary.oneOf[0].properties.base_url.const !== "" || chatSummary.oneOf[0].properties.model.const !== "" ||
     chatSummary.oneOf[0].properties.model_version.const !== "" ||
-    chatSummary.oneOf[0].properties.api_key_configured.const !== false) {
-  throw new Error("Chat summary must remain a strict disabled/openai-compatible provider union");
+    chatSummary.oneOf[0].properties.api_key_configured.const !== false ||
+    chatSummary.oneOf[1].properties.base_url.pattern !== undefined ||
+    chatSummary.oneOf[2].properties.api_style.const !== "chat_completions" ||
+    chatSummary.oneOf[2].properties.base_url.const !== "http://127.0.0.1:11434" ||
+    chatSummary.oneOf[2].properties.api_key_configured.const !== false) {
+  throw new Error("Chat summary must remain a strict disabled/openai-compatible/ollama provider union");
 }
 const modelTestSuccess = schemas.ModelSettingsTestResponse;
 if (modelTestSuccess.properties.api_style.enum?.join(",") !== "chat_completions,responses" ||
@@ -1974,11 +1985,15 @@ if (updateModelSettings.properties.expected_revision.minimum !== 0 ||
     updateModelSettings.properties.embedding.$ref !== "#/components/schemas/ModelEmbeddingSettingsDraft") {
   throw new Error("Model Settings update must remain an optimistic full replacement");
 }
-if (chatDraft.properties.provider.enum?.join(",") !== "disabled,openai-compatible" ||
-    chatDraft.oneOf?.map((branch) => branch.properties?.provider?.const).join(",") !== "disabled,openai-compatible" ||
+if (chatDraft.properties.provider.enum?.join(",") !== "disabled,openai-compatible,ollama" ||
+    chatDraft.oneOf?.map((branch) => branch.properties?.provider?.const).join(",") !== "disabled,openai-compatible,ollama" ||
     chatDraft.properties.api_key.$ref !== "#/components/schemas/ModelAPIKeyAction" ||
     chatDraft.properties.api_key.writeOnly !== true || chatDraft.properties.model.maxLength !== 128 ||
-    chatDraft.properties.model_version.maxLength !== 64 || chatDraft.properties.adapter_version.maxLength !== 64) {
+    chatDraft.properties.model_version.maxLength !== 64 || chatDraft.properties.adapter_version.maxLength !== 64 ||
+    chatDraft.oneOf[1].properties.base_url.pattern !== "^[Hh][Tt][Tt][Pp][Ss]://" ||
+    chatDraft.oneOf[2].properties.api_style.const !== "chat_completions" ||
+    chatDraft.oneOf[2].properties.base_url.const !== "http://127.0.0.1:11434" ||
+    chatDraft.oneOf[2].properties.api_key.$ref !== "#/components/schemas/ModelAPIKeyClear") {
   throw new Error("Chat draft provider or write-only API-key contract drifted");
 }
 if (embeddingDraft.properties.provider.enum?.join(",") !== "disabled,openai-compatible,ollama" ||
@@ -2011,7 +2026,7 @@ if (testModelSettings.properties.target.enum?.join(",") !== "chat,embedding" ||
     testModelSettings.properties.embedding.$ref !== "#/components/schemas/ModelEmbeddingSettingsDraft" ||
     testModelSettings.oneOf?.map((branch) => branch.properties?.target?.const).join(",") !== "chat,embedding" ||
     testModelSettings.oneOf[0].required?.join(",") !== "chat" || testModelSettings.oneOf[0].not?.required?.join(",") !== "embedding" ||
-    testModelSettings.oneOf[0].properties.chat?.properties?.provider?.const !== "openai-compatible" ||
+    testModelSettings.oneOf[0].properties.chat?.properties?.provider?.enum?.join(",") !== "openai-compatible,ollama" ||
     testModelSettings.oneOf[1].required?.join(",") !== "embedding" || testModelSettings.oneOf[1].not?.required?.join(",") !== "chat" ||
     testModelSettings.oneOf[1].properties.embedding?.properties?.provider?.enum?.join(",") !== "openai-compatible,ollama") {
   throw new Error("Model connection test must contain exactly one enabled target draft");
@@ -2020,7 +2035,9 @@ const modelTestResponse = schemas.ModelSettingsTestResponse;
 if (modelTestResponse.properties.status.const !== "ok" ||
     modelTestResponse.properties.model.maxLength !== 128 ||
     modelTestResponse.oneOf?.map((branch) => branch.properties?.target?.const).join(",") !== "chat,embedding" ||
-    modelTestResponse.oneOf[0].properties.provider.const !== "openai-compatible" ||
+    modelTestResponse.oneOf[0].properties.provider.enum?.join(",") !== "openai-compatible,ollama" ||
+    modelTestResponse.oneOf[0].oneOf?.[0]?.properties?.provider?.enum?.join(",") !== "openai-compatible,ollama" ||
+    modelTestResponse.oneOf[0].oneOf?.[1]?.properties?.provider?.const !== "openai-compatible" ||
     modelTestResponse.oneOf[1].properties.provider.enum?.join(",") !== "openai-compatible,ollama") {
   throw new Error("Model connection test success response contract drifted");
 }

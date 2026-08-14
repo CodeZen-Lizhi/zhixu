@@ -21,7 +21,7 @@ func TestNewConfiguredChatModelReturnsUnavailableWhenDisabled(t *testing.T) {
 	assertChatError(t, err, foundation.ErrorDependencyUnavailable, models.ErrorCodeChatCapabilityUnavailable, false)
 }
 
-func TestNewConfiguredChatModelBuildsOnlyOpenAICompatibleAdapter(t *testing.T) {
+func TestNewConfiguredChatModelBuildsOpenAICompatibleAdapter(t *testing.T) {
 	t.Parallel()
 	cfg := configuredChatTestConfig()
 	model, err := models.NewConfiguredChatModel(cfg)
@@ -42,6 +42,23 @@ func TestNewConfiguredChatModelBuildsOnlyOpenAICompatibleAdapter(t *testing.T) {
 		if strings.Contains(formatted, secret) {
 			t.Fatalf("factory output leaked %q", secret)
 		}
+	}
+}
+
+func TestNewConfiguredChatModelBuildsOllamaChatCompletionsAdapter(t *testing.T) {
+	t.Parallel()
+	cfg := configuredChatTestConfig()
+	cfg.ChatProvider = config.ChatProviderOllama
+	cfg.ChatBaseURL = "http://127.0.0.1:11434"
+	cfg.ChatAPIKey = ""
+	cfg.ChatAPIStyle = config.ChatAPIStyleChatCompletions
+	model, err := models.NewConfiguredChatModel(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := model.(*models.OpenAICompatibleChatModel).Contract()
+	if contract.Provider != "ollama" || contract.APIStyle != models.ChatAPIStyleChatCompletions || contract.EndpointPath != "/v1/chat/completions" {
+		t.Fatalf("contract=%#v", contract)
 	}
 }
 

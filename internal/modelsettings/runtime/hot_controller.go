@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 )
@@ -197,6 +198,13 @@ func (controller *HotRuntimeController[T]) runHeartbeats(ctx context.Context, fa
 			return
 		case <-ticker.C:
 		}
+		if err := controller.host.RenewHolds(ctx); err != nil {
+			// A lost generation hold means the supervisor may stop the local
+			// child while this process still serves requests. Fail closed instead
+			// of allowing an expired lease to look healthy.
+			sendHotRuntimeFailure(failures, err)
+			return
+		}
 		if _, err := controller.runtime.HeartbeatRuntime(ctx, modelsettingsapplication.RuntimeHeartbeat{
 			Role: controller.role, InstanceID: controller.instanceID,
 		}); err != nil {
@@ -231,9 +239,9 @@ func (controller *HotRuntimeController[T]) reconcile(ctx context.Context) error 
 	case modelsettingsdomain.RolloutPhaseFailed:
 		return controller.reconcileFailed(ctx, snapshot.ActiveRevision, state)
 	case modelsettingsdomain.RolloutPhasePreparing:
-		return controller.reconcilePreparing(ctx, state)
+		return controller.reconcilePreparing(ctx, snapshot)
 	case modelsettingsdomain.RolloutPhaseArming:
-		return controller.reconcileArming(ctx, state)
+		return controller.reconcileArming(ctx, snapshot)
 	case modelsettingsdomain.RolloutPhaseActivating:
 		return controller.reconcileActivating(ctx, state)
 	default:
@@ -277,7 +285,8 @@ func (controller *HotRuntimeController[T]) reconcileFailed(
 	return controller.reconcileIdle(ctx, activeRevision)
 }
 
-func (controller *HotRuntimeController[T]) reconcilePreparing(ctx context.Context, state modelsettingsdomain.RolloutState) error {
+func (controller *HotRuntimeController[T]) reconcilePreparing(ctx context.Context, snapshot modelsettingsdomain.Snapshot) error {
+	state := snapshot.Rollout
 	if err := controller.restoreRuntimeAvailability(ctx, state.PreviousActiveRevision, false); err != nil {
 		return err
 	}
@@ -289,6 +298,13 @@ func (controller *HotRuntimeController[T]) reconcilePreparing(ctx context.Contex
 		_ = controller.host.abort(state.TargetRevision)
 		return nil
 	}
+	ready, err := localActivationPreparationReady(snapshot)
+	if err != nil {
+		return controller.failPreparation(ctx, state, record, err)
+	}
+	if !ready {
+		return nil
+	}
 	if err := controller.host.prepare(ctx, state.TargetRevision); err != nil {
 		return controller.failPreparation(ctx, state, record, err)
 	}
@@ -298,7 +314,8 @@ func (controller *HotRuntimeController[T]) reconcilePreparing(ctx context.Contex
 	return err
 }
 
-func (controller *HotRuntimeController[T]) reconcileArming(ctx context.Context, state modelsettingsdomain.RolloutState) error {
+func (controller *HotRuntimeController[T]) reconcileArming(ctx context.Context, snapshot modelsettingsdomain.Snapshot) error {
+	state := snapshot.Rollout
 	if err := controller.restoreRuntimeAvailability(ctx, state.PreviousActiveRevision, true); err != nil {
 		return err
 	}
@@ -308,6 +325,14 @@ func (controller *HotRuntimeController[T]) reconcileArming(ctx context.Context, 
 	}
 	if terminalParticipant(record.Phase) {
 		_ = controller.host.abort(state.TargetRevision)
+		return nil
+	}
+	ready, err := localActivationPreparationReady(snapshot)
+	if err != nil {
+		_ = controller.host.reopen(state.PreviousActiveRevision)
+		return controller.failPreparation(ctx, state, record, err)
+	}
+	if !ready {
 		return nil
 	}
 	if err := controller.host.prepare(ctx, state.TargetRevision); err != nil {
@@ -331,6 +356,88 @@ func (controller *HotRuntimeController[T]) reconcileArming(ctx context.Context, 
 		return controller.armPreparedTarget(state.PreviousActiveRevision, state.TargetRevision)
 	}
 	return nil
+}
+
+func localActivationPreparationReady(snapshot modelsettingsdomain.Snapshot) (bool, error) {
+	targetRequirement := modelsettingsdomain.RequiresManagedOllama(snapshot.DesiredSettings.Settings)
+	if !targetRequirement.Required {
+		return true, nil
+	}
+	requirement, err := localActivationRuntimeRequirement(snapshot)
+	if err != nil {
+		return false, foundation.NewError(
+			foundation.ErrorConsistencyViolation,
+			modelsettingsdomain.ErrorCodeCorrupt,
+			false,
+			err,
+		)
+	}
+	local := snapshot.LocalRuntime
+	if local.OperationID == nil {
+		return false, foundation.NewError(
+			foundation.ErrorConsistencyViolation,
+			modelsettingsdomain.ErrorCodeCorrupt,
+			false,
+			errors.New("local activation preparation operation is missing"),
+		)
+	}
+	switch localmodelruntime.OperationPhase(local.OperationPhase) {
+	case localmodelruntime.OperationPhaseQueued,
+		localmodelruntime.OperationPhaseStarting,
+		localmodelruntime.OperationPhaseChecking,
+		localmodelruntime.OperationPhasePulling,
+		localmodelruntime.OperationPhaseVerifying:
+		return false, nil
+	case localmodelruntime.OperationPhaseReady, localmodelruntime.OperationPhaseSucceeded:
+		if !local.Fresh || local.Phase != string(localmodelruntime.RuntimePhaseReady) {
+			return false, nil
+		}
+		if local.Mode != string(localmodelruntime.RuntimeModeManaged) || local.RequirementHash != requirement.Hash ||
+			local.ReadyHash != requirement.Hash {
+			return false, foundation.NewError(
+				foundation.ErrorConsistencyViolation,
+				modelsettingsdomain.ErrorCodeCorrupt,
+				false,
+				errors.New("local activation preparation does not match target requirement"),
+			)
+		}
+		return true, nil
+	case localmodelruntime.OperationPhaseFailed, localmodelruntime.OperationPhaseSuperseded:
+		code := local.OperationError
+		if !canonicalRuntimeErrorCode(code) {
+			code = modelsettingsdomain.ErrorCodeActivationPrepareFailed
+		}
+		kind := foundation.ErrorNonRetryableFailure
+		if local.OperationRetryable {
+			kind = foundation.ErrorDependencyUnavailable
+		}
+		return false, foundation.NewError(kind, code, local.OperationRetryable,
+			errors.New("local activation preparation failed"))
+	default:
+		return false, foundation.NewError(
+			foundation.ErrorConsistencyViolation,
+			modelsettingsdomain.ErrorCodeCorrupt,
+			false,
+			errors.New("local activation preparation phase is invalid"),
+		)
+	}
+}
+
+// localActivationRuntimeRequirement keeps the previous active local generation
+// in the demand set until activation commits. The manager therefore reports the
+// union of active and target models while the hot controller prepares the new
+// process generation.
+func localActivationRuntimeRequirement(snapshot modelsettingsdomain.Snapshot) (localmodelruntime.Requirement, error) {
+	active := modelsettingsdomain.RequiresManagedOllama(snapshot.ActiveSettings.Settings)
+	target := modelsettingsdomain.RequiresManagedOllama(snapshot.DesiredSettings.Settings)
+	models := make([]localmodelruntime.ModelRef, 0, len(active.Models)+len(target.Models))
+	for _, model := range active.Models {
+		models = append(models, localmodelruntime.ModelRef(model))
+	}
+	for _, model := range target.Models {
+		models = append(models, localmodelruntime.ModelRef(model))
+	}
+	return localmodelruntime.NewRequirement(models)
 }
 
 func (controller *HotRuntimeController[T]) reconcileActivating(ctx context.Context, state modelsettingsdomain.RolloutState) error {

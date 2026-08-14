@@ -50,6 +50,31 @@ func TestParseConfigSwitch(t *testing.T) {
 	}
 }
 
+func TestParseConfigRebindRequiresExactConfirmationAndIdentity(t *testing.T) {
+	arguments := []string{
+		"rebind", "--compose-file=/repo/compose.yml", "--env-file=/repo/.env",
+		"--grant-override=/repo/.zhixu/workspace-grant.yml", "--database-url-fd=4",
+		"--control-instance-id=550e8400-e29b-41d4-a716-446655440011",
+		"--workspace-root=/tmp/Knowledge Base", "--workspace-id=550e8400-e29b-41d4-a716-446655440012",
+		"--expected-root-fingerprint=" + strings.Repeat("a", 64), "--idempotency-key=rebind-a", "--confirm=REBIND",
+	}
+	config, err := parseConfig(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.action != "rebind" || config.workspaceID != "550e8400-e29b-41d4-a716-446655440012" ||
+		config.expectedFingerprint != strings.Repeat("a", 64) || config.confirmation != "REBIND" {
+		t.Fatalf("parseConfig()=%#v", config)
+	}
+	for _, replacement := range []string{"", "rebind", "DELETE"} {
+		candidate := append([]string(nil), arguments...)
+		candidate[len(candidate)-1] = "--confirm=" + replacement
+		if _, err := parseConfig(candidate); err == nil {
+			t.Fatalf("parseConfig accepted confirmation %q", replacement)
+		}
+	}
+}
+
 func TestParseConfigRejectsIncompleteOrUnsafeArguments(t *testing.T) {
 	validCommon := []string{
 		"--compose-file=/repo/compose.yml", "--env-file=/repo/.env",
@@ -158,6 +183,19 @@ func TestUnchangedSwitchResultReportsCurrentGrantGeneration(t *testing.T) {
 	})
 	if result.Changed || result.Status != "reconciled" || result.GrantGeneration != 9 || result.OperationID != "" {
 		t.Fatalf("switchResult()=%#v", result)
+	}
+}
+
+func TestRebindResultReportsPersistedBindingGeneration(t *testing.T) {
+	result := rebindResult(workspacedomain.WorkspaceBindingMigrationResult{
+		Workspace: workspacedomain.Workspace{
+			ID: "550e8400-e29b-41d4-a716-446655440014", RootPath: "/tmp/knowledge",
+			RootFingerprint: strings.Repeat("b", 64), BindingVersion: 2,
+		},
+		Changed: true,
+	})
+	if result.Action != "rebind" || result.Status != "rebound" || !result.Changed || result.BindingVersion != 2 || result.GrantGeneration != 0 {
+		t.Fatalf("rebindResult()=%#v", result)
 	}
 }
 

@@ -81,8 +81,9 @@ const (
 
 // TestCommand resolves and exercises one non-persistent settings draft.
 type TestCommand struct {
-	Target ConnectionTarget
-	Draft  DraftCommand
+	Target         ConnectionTarget
+	Draft          DraftCommand
+	IdempotencyKey string
 }
 
 // TestResult is the non-secret identity returned after a successful provider request.
@@ -93,6 +94,41 @@ type TestResult struct {
 	APIStyle     domain.ChatAPIStyle
 	EndpointPath string
 	LatencyMS    int64
+}
+
+// TestLifecycle owns the durable local-model demand and exclusive production
+// probe claim surrounding one connection test. Implementations must return a
+// lease only when this request may call the provider.
+type TestLifecycle interface {
+	BeginTest(context.Context, TestLifecycleCommand) (TestLifecycleLease, error)
+}
+
+// TestLifecycleCommand contains only non-secret draft identity and target data.
+type TestLifecycleCommand struct {
+	ExpectedRevision int64
+	Settings         domain.Settings
+	Target           ConnectionTarget
+	IdempotencyKey   string
+}
+
+// TestLifecycleLease is the idempotent release boundary for one test hold.
+type TestLifecycleLease interface {
+	Close(context.Context) error
+}
+
+// TestLifecycleCompletion is implemented by durable local-model test leases.
+// A successful or provider-failed probe closes the operation. Request
+// cancellation abandons the probe claim so a replay can recover it.
+type TestLifecycleCompletion interface {
+	Complete(context.Context, string, bool) error
+	Abandon(context.Context) error
+}
+
+// TestLifecycleReplay marks an exact replay whose production probe already
+// completed successfully. The application can reconstruct the bounded result
+// from the same validated draft without calling the provider again.
+type TestLifecycleReplay interface {
+	ReplayedSuccess() bool
 }
 
 // ResolvedConnectionTester is the provider boundary used only after the manager owns a resolved draft.

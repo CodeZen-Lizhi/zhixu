@@ -160,7 +160,7 @@ Correct: `secretstore` 只拥有加密原语；两个业务 wrapper 分别拥有
 
 ### 3. Contracts
 
-- Chat 探针通过同一 OpenAI-compatible HTTP Adapter 发送固定 plain `user:test`，不带 `response_format` 或 `max_tokens`，只验证 Endpoint、Credential、模型与基本 assistant 非空响应；正式 Chat 的结构化 payload 与严格校验保持不变。Embedding 探针发送单输入 `test`。
+- Chat 探针通过同一 OpenAI-compatible HTTP Adapter 发送固定 plain `user:test`，不带 `response_format`；线上 provider 不带 `max_tokens`，受管理 Ollama 固定 `max_tokens: 1`，避免 CPU 模型为连通性探针生成无界长响应。探针只验证 Endpoint、Credential、模型与基本 assistant 非空响应；正式 Chat 的结构化 payload 与严格校验保持不变。Embedding 探针发送单输入 `test`。
 - Chat API style 必须显式为 `chat_completions|responses` 并冻结进 revision；静态配置、旧行和 revision `0` 缺省为 `chat_completions`。正式调用与探针共用该选择，不按模型名推断、不跨接口 fallback；Responses 探针只发送 `model`、固定 `input:test` 与 `store:false`，允许 reasoning 等非 message output，并要求 `completed` 与非空 assistant `output_text`。
 - 正式 Responses 请求使用 `text.format=json_schema`、`max_output_tokens` 并显式发送 `store:false`，避免 Provider 默认持久化业务输入；正式响应同时要求根 `status=completed` 和 assistant message `status=completed`，再校验结构化正文、模型与 token usage。探针保持最小 `model+input+store:false`，不继承正式结构化参数。
 - 成功测试只返回固定 `api_style`、白名单 `endpoint_path` 与非负 `latency_ms`；不得由 Base URL 派生可回显路径，也不得返回 Provider 正文。API style 不进入 Secret AAD，旧密文保持可打开。
@@ -210,4 +210,126 @@ Correct: 发请求前 EOF 可归类 TLS；已收到 HTTP 响应后的 EOF 固定
 
 Wrong: Responses 正式调用或探针依赖 Provider 的默认存储行为，并接受 root completed 下的 incomplete message。
 Correct: 正式调用和探针都显式 `store:false`；正式响应同时校验 root 和全部 assistant message completed，probe 则只验证最小连通性。
+```
+
+## Scenario: Managed Local Ollama Lifecycle
+
+### 1. Scope / Trigger
+
+- 修改 `internal/localmodelruntime`、`cmd/local-model-runtime`、`cmd/local-model-runtime-credential-init`、
+  `migrations/00080_managed_ollama_runtime.sql`、`deploy/compose.yml`、`deploy/compose.static-models.yml`、launcher，
+  或 `internal/modelsettings/runtime` 的 local demand/generation lifecycle 时，必须应用本场景。
+- 本场景区分 `managed` 与 `external-static`：前者由项目内 manager 通过 PostgreSQL 协调唯一 child，后者只代理宿主
+  Ollama，必须保持 healthy idle，不连接 lifecycle DB、不创建 hold/operation、不启动 child。
+
+### 2. Signatures
+
+- Runtime supervisor：`ZHIXU_LOCAL_MODEL_RUNTIME_MODE=managed|external-static`；managed 读取
+  `ZHIXU_DATABASE_*`，生产容器只能读取 `ZHIXU_DATABASE_USER_FILE`/`ZHIXU_DATABASE_PASSWORD_FILE`。
+- `GenerationLifecycle.Acquire(context.Context, RuntimeBinding, localmodelruntime.Requirement) (GenerationHold, error)`；
+  `GenerationHold.Renew(context.Context) error` 与 `Release(context.Context) error` 必须幂等且带 owner/epoch/version CAS。
+- `LifecycleStore` 的 runtime/hold/operation CAS 使用 PostgreSQL `clock_timestamp()`；`00080` 的列顺序、nullable 扫描和
+  JSONB requirement 校验必须保持一致。
+- `POST /api/v1/settings/models/test` 必须带一个 canonical `Idempotency-Key`（1--128 UTF-8 bytes、无前后空白或控制字符）；
+  `TestPreparationStore.SeedTestPreparation` 以 `kind+key` 唯一，并用 exact target/revision、全部非 Secret target settings 和
+  requirement hash 生成 `request_hash`。同 key 不同 hash 返回 409；operation/hold/hold owner identity 从请求确定性生成，
+  production probe owner 则必须为每次请求随机生成，不能复用 hold owner。
+- operation graph 中 `ready` 表示 supervisor 已完成 start/pull/show/verify、等待 API production probe，不是数据库终态；只有
+  `succeeded|failed|superseded` 设置 `terminal_at`。reconciler 不再 claim `ready`；API 必须先以 DB-time lease CAS 执行
+  `ready -> probing`，只有 owner+epoch+version 可以写终态并在同一事务释放关联 hold。
+- 每次调用 Ollama `/api/pull` 前必须由 PostgreSQL 原子递增同一 operation 的 `attempt_no`；
+  `(operation_id, attempt_no)` 是持久 attempt identity，跨 supervisor 重启总计最多 3 次，operation 级累计进度不得后退。
+  `created_at + 6 hours` 由 PostgreSQL 时间裁决；pull context 必须收紧到数据库返回的剩余时限。过期或预算耗尽时，
+  operation 进入不可重试的稳定失败，并在同一事务释放对应 test/preparation hold。
+
+### 3. Contracts
+
+- 主拓扑只有一个长期新增 service：`local-model-runtime`；管理器是常驻控制面，`ollama serve` 是同容器内按需 child，
+  `/var/lib/zhixu/ollama/.ollama` 是独立 project-owned Docker Volume。停止 child 释放内存但不得删除卷或自动 prune。
+- API/Worker `RuntimeHost` 构造本地 generation 时 Acquire generation hold；heartbeat 期间 Renew；generation 真正 Close 时
+  Release。Renew 失败必须阻止继续宣称本地 generation fresh；Release 失败不得伪造成功，依赖 lease expiry 做 crash recovery。
+- managed manager 只向 child loopback 发送固定 allowlist 环境变量（包括 `HOME`、`OLLAMA_HOST`、`OLLAMA_NO_CLOUD=true`、
+  `OLLAMA_NOPRUNE=true`、CPU MVP 的 `OLLAMA_VULKAN=0`），不继承 credential 或 Docker Socket。对外只暴露固定 inference relay。
+- 本地 Test 当前同步请求会 seed/join durable preparation operation + hold、等待 supervisor ready、执行 production probe并持久
+  terminal result；同 key 成功重放不再 probe，同 key 失败重放立即返回稳定错误。它仍不是完整 202/poll API，且尚无同
+  Session/target supersede，因此刷新恢复、主动轮询和 AC11/AC12 仍不得宣称完成。
+- 同 key 的 fresh `probing` joiner 只等待权威 operation，不执行第二次 Provider 请求；DB-time probe lease 过期后可由新的
+  随机 owner reclaim。请求取消或 deadline 只执行 `probing -> ready` 并清 claim，不释放 hold、不写终态；进程崩溃由 lease
+  过期恢复。supervisor 的 pending operation 过滤必须排除 `probing`。
+- activation 的 Start 事务必须为 local target 原子 seed activation operation + preparation hold；preparing -> arming 前必须锁定并
+  验证 exact operation 已 `ready`，Finalize/Fail/lease-expiry 在同事务终结 operation 并释放 hold。Commit 事务不得执行外部调用。
+- Snapshot/OpenAPI/strict client 必须把 `local_runtime` 作为 required exact object；缺失或未知字段 fail closed。设置页只显示产品
+  语言状态，不显示 Docker service/volume/port/PID/blob digest。
+- manager role 只读 lifecycle/settings 的限定投影；写入必须经固定 `SECURITY DEFINER` 函数完成 owner/epoch/version/phase
+  CAS，函数固定 `search_path`、撤销 `PUBLIC EXECUTE`，且 operation claim 只能领取 API/Worker 已 seed 的操作。migration 和
+  credential-init 必须拒绝危险 role 属性与任意 membership；本任务已在 disposable PostgreSQL 18 完成角色 ACL、PUBLIC
+  SECURITY DEFINER 和 lifecycle CAS 烟测，但这不替代并发及剩余 Compose/环境发布验收。
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| mode 缺失或非 `managed|external-static` | 启动 fail closed，返回稳定错误，不猜测模式 |
+| managed 缺少 credential file、migration 或 volume init | manager 不启动；one-shot 失败原样阻断 launcher |
+| external-static 被注入 DB credential、credential volume 或 child dependency | Compose contract 失败；不得启动 managed lifecycle |
+| generation hold Renew CAS 冲突/lease 失效 | generation 不再视为 fresh；控制器 fail closed 或停止新 admission，不得静默继续 |
+| empty demand 且无 fresh hold/operation | CAS 到 stopping 后停止唯一 child；模型 Volume 保留 |
+| DB 暂时不可用 | manager 不把未知 demand 当空集合；不得因一次查询失败立即删除/清空已有 child 事实 |
+| credential password 文件已是合法 64 位小写 hex | credential-init 复用，不轮换运行中的 runtime 密码；缺失/损坏时生成新值 |
+| runtime role 带高权限属性或任意 membership | migration/credential-init fail closed；不得写入可用 credential 或静默复用该 role |
+| Test 缺少、重复、超限或带控制字符的 Idempotency-Key | HTTP 400；不得 seed operation、创建 hold 或访问 Provider |
+| 同 Test key + 同 request hash | join 原 operation；ready 时继续 probe，succeeded 时直接重放成功，failed/superseded 时立即返回稳定终态 |
+| 同 Test key + 不同 request hash | 409；不得采用旧模型或覆盖 operation identity |
+| operation 从 verifying 完成本地准备 | 写 `ready` 且 `terminal_at=NULL`、清 claim；等待 API production probe，不被 reconciler 重领 |
+| fresh `probing` 已有其他 owner | joiner 等待权威终态或 lease expiry；不得并发调用 Provider |
+| `probing` owner 请求取消/deadline | owner CAS 回到 `ready` 并清 claim；hold 保留且不写 `terminal_at` |
+| API production probe 成功/失败 | owner+epoch+version CAS 原子写 `succeeded`/`failed` + `terminal_at` 并 exactly-once release operation hold |
+| local activation preparation 未 ready | preparing 不得进入 arming，active revision 不变 |
+| 远程 Provider 在 pre-commit Probe 期间 TLS/transport 失败 | activation 失败并保留 previous active；desired 继续 pending，`restart` 不得替代重试 exact desired Apply |
+| Snapshot 缺少 `local_runtime` 或返回未知 phase/字段 | OpenAPI/client fail closed，不以 stopped fallback 掩盖旧服务端 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：managed 全线上时 manager/healthz 常驻且无 `ollama serve`；切换本地后同一容器内最多一个 child，模型直接复用同一 Volume。
+- Good：同一个本地 Test key 在响应丢失后重放，复用同一 operation；若 probe 已成功则不再触发 pull 或 Provider probe。
+- Base：API/Worker 进程重启后按正 revision 重建 generation 并重新 Acquire hold；旧 hold 超时可被 DB-time lease recovery 清理。
+- Base：远程 Provider 的 pre-commit Probe 因 TLS/transport 失败时，previous active 继续服务，desired 保持 pending；修复出口后重试
+  exact desired Apply，不通过 restart 偷渡生效。
+- Bad：把 Ollama 作为第二个长期容器、让 API/Worker 挂 Docker Socket、把 `/root/.ollama` 当作 non-root 常驻 HOME，或在普通 down 时删除模型卷。
+- Bad：把本地 draft Test 仅实现为一次无持久状态的 HTTP 等待，就宣称具备异步 operation/刷新恢复。
+- Bad：把 `ready` 和 `succeeded` 都设为 `terminal_at IS NOT NULL`，随后又允许 `ready -> succeeded`；终态不可变 trigger 会让
+  状态图自相矛盾。Correct 是 `ready` 非终态、API probe 后再写唯一终态。
+
+### 6. Tests Required
+
+- Unit/race：manager child start/stop、TERM/PGID-KILL/Wait exactly once、same-phase metadata CAS、credential reuse/regeneration、
+  `RuntimeHost` hold acquire/renew/release 与 Close 幂等。
+- Migration/integration：runtime/hold/operation CAS、owner epoch takeover、settings-state fence、nullable/JSONB scan、专用 role
+  无法直接 DML lifecycle 表、无法读取 Endpoint/Secret/无关表，只能执行固定函数；existing role 高权限与 membership 必须拒绝。
+- Compose/launcher：managed/static rendered positive/negative contract、one-shot 顺序、down 保留卷、reset 精确清理。当前
+  Docker Desktop 的 `./deploy/managed-ollama-compose-smoke.sh` 已通过受控 HTTPS fixture 证明五种线上/本地模式、线上 child absence、单 serve、
+  cached model 零 repull、manager container restart 恢复、`child_epoch` 单调递增及 60 秒 idle anonymous RSS 6.39 MiB /
+  manager RSS 9.69 MiB；仍须在原生 Linux 验证网络，并补真实公网 Provider 出口、Docker daemon restart、显式 child
+  crash/signal/reap、旧 generation 在途栅栏、多架构、浏览器和真实 legacy migration。
+- API/activation：空闲 child + local Test、same-key join/conflict/terminal replay、ready -> succeeded、online -> local commit 前
+  失败、local -> online 旧 generation hold 未释放时不停止 child、remote pre-commit TLS/transport 失败保留 previous active；
+  202/poll 与 supersede 未接入前保持发布阻塞。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Chat/Embedding 都线上时删除 local-model-runtime，或把 ollama serve 作为第二个常驻容器。
+Correct: 保留一个低内存 manager；只有本地 demand 存在时在同容器启动唯一 child，模型文件始终留在 project-owned Volume。
+
+Wrong: RuntimeHost 构造本地 generation 后不写 hold，切换 online 只看 active revision 就停止 child。
+Correct: Acquire exact generation hold，heartbeat Renew，Close Release；manager 以 active/rollout/hold/operation 的权威 union 决定停止栅栏。
+
+Wrong: `external-static` overlay 复用 managed DB credential 或启动 child。
+Correct: static 只访问 host Ollama，manager healthy idle，DB/lifecycle/credential/child 依赖全部为空。
+
+Wrong: 把缺失 `local_runtime` 的响应默认成 stopped，或把 preparation `ready` 当最终成功。
+Correct: strict client 拒绝缺失投影；supervisor 写 ready，只有 production probe 后 API 才写 succeeded/failed 并释放 hold。
+
+Wrong: 远程 desired Apply 失败后执行 `restart`，并把容器健康当作 desired 已生效。
+Correct: restart 只重建权威 active；修复 Provider 出口后重试 exact desired Apply，并核对 desired/active/applied 全部收敛。
 ```

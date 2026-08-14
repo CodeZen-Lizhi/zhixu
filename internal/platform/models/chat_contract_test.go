@@ -257,6 +257,35 @@ func TestOpenAICompatibleChatConnectionProbeUsesPlainMinimalRequest(t *testing.T
 	}
 }
 
+func TestOllamaChatConnectionProbeBoundsGeneratedOutput(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		if len(payload) != 3 || string(payload["max_tokens"]) != "1" {
+			t.Errorf("Ollama probe payload=%v", payload)
+		}
+		if _, ok := payload["response_format"]; ok {
+			t.Error("Ollama probe unexpectedly requested structured output")
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"length"}]}`)
+	}))
+	defer server.Close()
+	options := chatOptions(server.URL, server.Client())
+	options.Provider = "ollama"
+	model, err := models.NewOpenAICompatibleChatModel(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.ProbeConnection(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOpenAICompatibleChatConnectionProbeRejectsEmptyAssistantWithoutLeakingOutput(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {

@@ -123,7 +123,7 @@ func validModelSettingsChange(change application.ModelSettingsChange) bool {
 	if change.Action != application.ModelSettingsAuditActionUpdated || change.Revision <= 0 {
 		return false
 	}
-	if change.ChatProvider != domain.ChatProviderDisabled && change.ChatProvider != domain.ChatProviderOpenAICompatible {
+	if change.ChatProvider != domain.ChatProviderDisabled && change.ChatProvider != domain.ChatProviderOpenAICompatible && change.ChatProvider != domain.ChatProviderOllama {
 		return false
 	}
 	if change.ChatAPIStyle != domain.ChatAPIStyleChatCompletions && change.ChatAPIStyle != domain.ChatAPIStyleResponses {

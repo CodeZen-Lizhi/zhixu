@@ -13,6 +13,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	authdomain "github.com/CodeZen-Lizhi/zhixu/internal/auth/domain"
 	authhttp "github.com/CodeZen-Lizhi/zhixu/internal/auth/http"
@@ -168,6 +170,22 @@ type settingsResponse struct {
 	ApplyRequired   bool                    `json:"apply_required"`
 	RestartRequired bool                    `json:"restart_required"`
 	Capabilities    capabilitiesResponse    `json:"capabilities"`
+	LocalRuntime    localRuntimeResponse    `json:"local_runtime"`
+}
+
+type localRuntimeResponse struct {
+	Mode               string  `json:"mode"`
+	Phase              string  `json:"phase"`
+	Fresh              bool    `json:"fresh"`
+	RequirementHash    string  `json:"requirement_hash"`
+	ReadyHash          string  `json:"ready_hash"`
+	OperationID        *string `json:"operation_id"`
+	OperationPhase     *string `json:"operation_phase"`
+	CompletedBytes     int64   `json:"completed_bytes"`
+	TotalBytes         *int64  `json:"total_bytes"`
+	ProgressKnown      bool    `json:"progress_known"`
+	OperationError     *string `json:"operation_error"`
+	OperationRetryable bool    `json:"operation_retryable"`
 }
 
 type settingsSummaryResponse struct {
@@ -385,6 +403,11 @@ func (handler *Handler) testConnection(writer nethttp.ResponseWriter, request *n
 	if !ok {
 		return
 	}
+	idempotencyKey, err := parseTestIdempotencyKey(request)
+	if err != nil {
+		writeInvalid(writer)
+		return
+	}
 	defer destroyRaw(input.Target)
 	defer destroyRaw(input.Chat)
 	defer destroyRaw(input.Embedding)
@@ -409,7 +432,7 @@ func (handler *Handler) testConnection(writer nethttp.ResponseWriter, request *n
 		return
 	}
 	testTarget := modelsettingsapplication.ConnectionTarget(target)
-	result, err := handler.manager.Test(ctx, modelsettingsapplication.TestCommand{Target: testTarget, Draft: command})
+	result, err := handler.manager.Test(ctx, modelsettingsapplication.TestCommand{Target: testTarget, Draft: command, IdempotencyKey: idempotencyKey})
 	if err != nil {
 		if isConflict(err) {
 			handler.writeConflictAwareError(writer, request, err)
@@ -429,6 +452,19 @@ func (handler *Handler) testConnection(writer nethttp.ResponseWriter, request *n
 	response := testResponse{Target: target, Provider: result.Provider, Model: result.Model, Status: connectionTestSuccessStatus,
 		APIStyle: result.APIStyle, EndpointPath: result.EndpointPath, LatencyMS: result.LatencyMS}
 	httpapi.WriteJSON(writer, nethttp.StatusOK, response)
+}
+
+func parseTestIdempotencyKey(request *nethttp.Request) (string, error) {
+	values := request.Header.Values("Idempotency-Key")
+	if len(values) != 1 || !utf8.ValidString(values[0]) || values[0] == "" || values[0] != strings.TrimSpace(values[0]) || len(values[0]) > 128 {
+		return "", errors.New("model settings test requires exactly one valid Idempotency-Key")
+	}
+	for _, character := range values[0] {
+		if unicode.IsControl(character) {
+			return "", errors.New("model settings test Idempotency-Key contains a control character")
+		}
+	}
+	return values[0], nil
 }
 
 func validTestResultProtocol(result modelsettingsapplication.TestResult) bool {
@@ -491,7 +527,7 @@ func decodeDraftCommand(target string, input testRequest, current modelsettingsd
 			return modelsettingsapplication.DraftCommand{}, errors.New("chat test union is invalid")
 		}
 		chat, secret, err := decodeChat(input.Chat, command.Settings.Chat)
-		if err != nil || chat.Provider != modelsettingsdomain.ChatProviderOpenAICompatible {
+		if err != nil || chat.Provider == modelsettingsdomain.ChatProviderDisabled {
 			secret.Value.Destroy()
 			return modelsettingsapplication.DraftCommand{}, errors.New("chat test draft is invalid")
 		}
@@ -750,7 +786,30 @@ func toSettingsResponse(snapshot modelsettingsdomain.Snapshot) settingsResponse 
 			Chat:      snapshot.ChatCapability,
 			Embedding: snapshot.EmbeddingCapability,
 		},
+		LocalRuntime: toLocalRuntimeResponse(snapshot.LocalRuntime),
 	}
+}
+
+func toLocalRuntimeResponse(summary modelsettingsdomain.LocalRuntimeSummary) localRuntimeResponse {
+	result := localRuntimeResponse{
+		Mode: summary.Mode, Phase: summary.Phase, Fresh: summary.Fresh,
+		RequirementHash: summary.RequirementHash, ReadyHash: summary.ReadyHash,
+		CompletedBytes: summary.CompletedBytes, TotalBytes: summary.TotalBytes,
+		ProgressKnown: summary.ProgressKnown, OperationRetryable: summary.OperationRetryable,
+	}
+	if summary.OperationID != nil {
+		value := string(*summary.OperationID)
+		result.OperationID = &value
+	}
+	if summary.OperationPhase != "" {
+		value := summary.OperationPhase
+		result.OperationPhase = &value
+	}
+	if summary.OperationError != "" {
+		value := summary.OperationError
+		result.OperationError = &value
+	}
+	return result
 }
 
 func runtimeReady(runtime modelsettingsdomain.RuntimeSummary, revision int64) bool {

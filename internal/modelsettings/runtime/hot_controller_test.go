@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 )
@@ -738,6 +739,102 @@ func TestHotRuntimeControllerPrepareAndProbeFailureKeepRevisionZeroServing(t *te
 			}
 		})
 	}
+}
+
+func TestHotRuntimeControllerWaitsForLocalPreparationBeforeProbe(t *testing.T) {
+	ctx := context.Background()
+	store := newHotControllerTestStore(0, hotControllerRolloutState(modelsettingsdomain.RolloutPhasePreparing, 1, 0, 1))
+	settings := modelsettingsdomain.CanonicalDisabledSettings()
+	settings.Chat.Provider = modelsettingsdomain.ChatProviderOllama
+	settings.Chat.BaseURL = modelsettingsdomain.ManagedOllamaBaseURL
+	settings.Chat.Model = "smollm2:135m"
+	requirement := modelsettingsdomain.RequiresManagedOllama(settings)
+	operationID := foundation.ID("30000000-0000-4000-8000-000000000101")
+	store.snapshot.DesiredSettings.Settings = settings
+	store.snapshot.LocalRuntime = modelsettingsdomain.LocalRuntimeSummary{
+		Mode: string(localmodelruntime.RuntimeModeManaged), Phase: string(localmodelruntime.RuntimePhaseStarting), Fresh: true,
+		RequirementHash: requirement.Hash, OperationID: &operationID,
+		OperationPhase: string(localmodelruntime.OperationPhaseStarting),
+	}
+
+	factory := newRuntimeHostTestFactory()
+	host := newHotControllerTestHost(t, factory, RuntimeRoleAPI, hotControllerTestAPIID, 0)
+	defer host.Close()
+	controller := newHotControllerTestController(t, store, host, modelsettingsdomain.RuntimePhaseActive)
+	registerHotControllerServing(t, store, host, modelsettingsdomain.RuntimePhaseActive)
+
+	if err := controller.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if builds, probes := factory.counts(1); builds != 0 || probes != 0 {
+		t.Fatalf("pending local preparation build/probe calls = %d/%d, want 0/0", builds, probes)
+	}
+	assertHotControllerParticipantPhase(t, store.currentSnapshot().Participants.API, modelsettingsdomain.ParticipantPhasePreparing)
+
+	store.mu.Lock()
+	store.snapshot.LocalRuntime.OperationPhase = string(localmodelruntime.OperationPhaseReady)
+	store.mu.Unlock()
+	if err := controller.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if builds, probes := factory.counts(1); builds != 0 || probes != 0 {
+		t.Fatalf("ready operation before runtime build/probe calls = %d/%d, want 0/0", builds, probes)
+	}
+
+	store.mu.Lock()
+	store.snapshot.LocalRuntime.Phase = string(localmodelruntime.RuntimePhaseReady)
+	store.snapshot.LocalRuntime.ReadyHash = requirement.Hash
+	store.mu.Unlock()
+	if err := controller.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if builds, probes := factory.counts(1); builds != 1 || probes != 1 {
+		t.Fatalf("ready local preparation build/probe calls = %d/%d, want 1/1", builds, probes)
+	}
+	assertHotControllerParticipantPhase(t, store.currentSnapshot().Participants.API, modelsettingsdomain.ParticipantPhasePrepared)
+}
+
+func TestHotRuntimeControllerAcceptsActiveAndTargetLocalDemandUnion(t *testing.T) {
+	store := newHotControllerTestStore(1, hotControllerRolloutState(modelsettingsdomain.RolloutPhasePreparing, 2, 1, 1))
+	active := modelsettingsdomain.CanonicalDisabledSettings()
+	active.Chat.Provider = modelsettingsdomain.ChatProviderOllama
+	active.Chat.BaseURL = modelsettingsdomain.ManagedOllamaBaseURL
+	active.Chat.Model = "smollm2:135m"
+	target := modelsettingsdomain.CanonicalDisabledSettings()
+	target.Chat.Provider = modelsettingsdomain.ChatProviderOpenAICompatible
+	target.Chat.BaseURL = "https://online.example.test/v1"
+	target.Chat.Model = "online-chat"
+	target.Chat.ModelVersion = "online-chat"
+	target.Chat.AdapterVersion = "v1"
+	target.Embedding.Provider = modelsettingsdomain.EmbeddingProviderOllama
+	target.Embedding.BaseURL = modelsettingsdomain.ManagedOllamaBaseURL
+	target.Embedding.Model = "all-minilm:latest"
+	target.Embedding.Dimensions = 384
+	store.snapshot.ActiveSettings.Settings = active
+	store.snapshot.DesiredSettings.Settings = target
+	operationID := foundation.ID("30000000-0000-4000-8000-000000000102")
+	union, err := localActivationRuntimeRequirement(store.snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.snapshot.LocalRuntime = modelsettingsdomain.LocalRuntimeSummary{
+		Mode: string(localmodelruntime.RuntimeModeManaged), Phase: string(localmodelruntime.RuntimePhaseReady), Fresh: true,
+		RequirementHash: union.Hash, ReadyHash: union.Hash, OperationID: &operationID,
+		OperationPhase: string(localmodelruntime.OperationPhaseReady),
+	}
+	factory := newRuntimeHostTestFactory()
+	host := newHotControllerTestHost(t, factory, RuntimeRoleAPI, hotControllerTestAPIID, 1)
+	defer host.Close()
+	controller := newHotControllerTestController(t, store, host, modelsettingsdomain.RuntimePhaseActive)
+	registerHotControllerServing(t, store, host, modelsettingsdomain.RuntimePhaseActive)
+
+	if err := controller.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if builds, probes := factory.counts(2); builds != 1 || probes != 1 {
+		t.Fatalf("active+target union build/probe calls = %d/%d, want 1/1", builds, probes)
+	}
+	assertHotControllerParticipantPhase(t, store.currentSnapshot().Participants.API, modelsettingsdomain.ParticipantPhasePrepared)
 }
 
 func TestHotRuntimeControllerStartupActivatingRecoveryStaysFencedUntilFinalize(t *testing.T) {

@@ -35,6 +35,12 @@
 - 本机命令接受已存在的绝对 Root，校验 Git、物理身份、访问权限和 Docker 精确挂载；浏览器不能提交宿主机路径。
 - 正式 v1.0 同时只有一个 Active Workspace，但 Registry 为每个 Root 保留稳定 `workspace_id`；A → B → A 必须恢复 A 的数据、索引和历史。
 - 切换遵循 validate → quiesce → revoke → prepare → verify → commit → activate；失败恢复上次成功选择，无法恢复则零 Active。
+- 同一 canonical Root 的物理 fingerprint 改变时，普通 up/restart/switch 必须 fail closed。只有
+  `workspace rebind --confirm REBIND` 可恢复 selection 指向的同一逻辑 Workspace：保持 Workspace ID、Root/Git path 和业务数据，
+  在不可变事务审计支持下替换 fingerprint 并将 persisted binding generation 连续加一。fingerprint schema version 与该 generation
+  独立；旧 runtime 身份必须被围栏。rebind 自身不增加 grant generation，随后的普通 switch 才增加。
+- rebind 响应丢失必须可精确重放，但重放前仍需证明 control state 与全局 mutation gate 空闲；只有新 runtime ready 且
+  switch 返回同一新 binding 后才能更新 selection。未确认、并发占用、错误旧 fingerprint、readiness 失败或旧 runtime 写入均不得产生隐式授权、重复历史或选择状态假成功。
 - `down` 保留选择、数据库、模型密钥和宿主机文件；显式 `reset` 可删除项目卷与选择，但不得删除用户文件或 Git 历史。
 - 路径穿越、Root 外写入、端口占用、Git 缺失、数据库不可用和挂载权限错误必须 fail closed。
 - Docker 固定入口由独立稳定 namespace anchor 发布；主项目 app/worker/relay 只消费对应 anchor，且只有 app/worker 获得 exact Root bind。Docker UI 仅支持主项目 Restart project；helper 或 daemon 恢复失败必须显示 degraded，并可由 launcher 受控恢复。
@@ -181,6 +187,7 @@
 - Secret 只写不可回读；配置测试不得修改正式知识；disabled/unavailable/degraded 状态必须真实可见。
 - Managed 模型设置提供主操作“保存并应用”和次操作“仅保存”。前者先保存 immutable desired revision，再应用该 exact revision；后者只保存并明确显示待应用。
 - 正常模型 Apply 必须在现有 API/Worker 进程内完成，API/Worker/PostgreSQL 容器 ID 与启动时间不变化；页面不要求执行 `./zhixu restart`。重启只用于升级、进程故障和运维重建，且不得在 idle 时自动应用 pending desired。
+- managed Compose 保留一个 `local-model-runtime` 管理容器；仅当 active、候选、测试或仍有 generation lease 的 Chat/Embedding 需求引用本地 Ollama 时，才在该容器内启动唯一的 `ollama serve` 子进程。两者均线上或关闭且停止栅栏满足后，子进程必须退出，但 project-owned 模型卷保留并可复用。
 - API/Worker 必须先准备并 Probe 同一 target 的完整 Chat、Embedding 与角色依赖图，再经一次 active commit发布。切换只允许短暂、可重试地阻止新模型工作和 Workflow Claim，不等待或中断已开始操作。
 - commit 前失败必须保留 previous active并清理候选；commit 后禁止自动回滚，系统按 target 向前恢复到两个 role applied/fresh。页面显示 rollout phase、target、各 role状态、安全错误和旧 active是否仍服务。
 - 已 Claim Attempt 按持久 runtime binding使用 exact generation；Search、Source Refresh、Vector Build和 Reindex按持久 Embedding/Index Contract获取兼容 generation。历史 runtime无法重建时显式 unavailable，不得使用当前默认模型兜底。
@@ -257,7 +264,7 @@
 
 | ID | 能力 | 验收结果 |
 |---|---|---|
-| AC-01 | Workspace | 本机命令可精确激活、复用和安全切换 Workspace；Docker Web 固定直连，Active API 与 Workspace ID 保证业务数据不串 |
+| AC-01 | Workspace | 本机命令可精确激活、复用和安全切换 Workspace；同路径物理身份改变只可经显式确认、不可变审计且可重放的 rebind 恢复同一 ID，旧 runtime 被 binding fence 拒绝，ready 前不更新 selection；Docker Web 固定直连，Active API 与 Workspace ID 保证业务数据不串 |
 | AC-02 | 导入 | Markdown、TXT、PDF、网页和粘贴文本可进入可追踪工作流 |
 | AC-03 | 幂等 | 相同 Source 重复导入不产生重复 Chunk 和默认检索结果 |
 | AC-04 | 隔离 | 可疑或解析失败内容不进入默认索引 |

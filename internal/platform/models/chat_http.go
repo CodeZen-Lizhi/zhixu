@@ -105,9 +105,17 @@ type chatHTTPOptions struct {
 	maxRequestBytes  int64
 	maxResponseBytes int64
 	apiStyle         ChatAPIStyle
+	provider         string
 }
 
 func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
+	provider := options.provider
+	if provider == "" {
+		provider = openAICompatibleProvider
+	}
+	if provider != openAICompatibleProvider && provider != ollamaProvider {
+		return chatHTTPConfig{}, chatConfigErrorWithCause(errors.New("chat provider is invalid"))
+	}
 	apiStyle := options.apiStyle
 	if apiStyle == "" {
 		apiStyle = ChatAPIStyleChatCompletions
@@ -118,7 +126,7 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 	}
 	baseURL, err := parseChatBaseURL(options.baseURL)
 	model := agentdomain.ModelRef{
-		AdapterName:    openAIChatAdapterName,
+		AdapterName:    chatAdapterName(provider),
 		AdapterVersion: options.adapterVersion,
 		ModelID:        options.model,
 		ModelVersion:   options.modelVersion,
@@ -157,13 +165,20 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 	return chatHTTPConfig{
 		client:           client,
 		endpointURL:      appendChatPath(baseURL, endpointPath),
-		contract:         ChatContract{Provider: openAICompatibleProvider, APIStyle: apiStyle, EndpointPath: endpointPath, Model: model, Timeout: options.timeout, MaxRequestBytes: options.maxRequestBytes, MaxResponseBytes: options.maxResponseBytes},
+		contract:         ChatContract{Provider: provider, APIStyle: apiStyle, EndpointPath: endpointPath, Model: model, Timeout: options.timeout, MaxRequestBytes: options.maxRequestBytes, MaxResponseBytes: options.maxResponseBytes},
 		timeout:          options.timeout,
 		maxRequestBytes:  options.maxRequestBytes,
 		maxResponseBytes: options.maxResponseBytes,
 		authorization:    authorization,
 		apiStyle:         apiStyle,
 	}, nil
+}
+
+func chatAdapterName(provider string) string {
+	if provider == ollamaProvider {
+		return "ollama-chat-completions-http"
+	}
+	return openAIChatAdapterName
 }
 
 func parseChatBaseURL(raw string) (*url.URL, error) {

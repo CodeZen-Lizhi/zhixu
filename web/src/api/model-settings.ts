@@ -7,9 +7,9 @@ import {
   isRecord,
 } from "../shared/codec";
 
-export type ChatModelProvider = "disabled" | "openai-compatible";
+export type ChatModelProvider = "disabled" | "openai-compatible" | "ollama";
 export type ChatAPIStyle = "chat_completions" | "responses";
-export type EmbeddingModelProvider = ChatModelProvider | "ollama";
+export type EmbeddingModelProvider = "disabled" | "openai-compatible" | "ollama";
 export type EmbeddingNormalization = "none" | "l2";
 export type EmbeddingDistanceMetric = "cosine" | "inner_product" | "euclidean";
 export type ModelCapability = "disabled" | "configured" | "unavailable";
@@ -107,6 +107,24 @@ export interface ModelSettingsResponse {
     chat: ModelCapability;
     embedding: ModelCapability;
   };
+  localRuntime: ModelLocalRuntimeStatus;
+}
+
+export type ModelLocalRuntimePhase = "stopped" | "starting" | "pulling" | "checking" | "ready" | "stopping" | "failed";
+export type ModelLocalOperationPhase = "queued" | "starting" | "checking" | "pulling" | "verifying" | "ready" | "probing" | "succeeded" | "failed" | "superseded";
+export interface ModelLocalRuntimeStatus {
+  mode: "managed" | "external-static" | "";
+  phase: ModelLocalRuntimePhase;
+  fresh: boolean;
+  requirementHash: string;
+  readyHash: string;
+  operationId: string | null;
+  operationPhase: ModelLocalOperationPhase | null;
+  completedBytes: number;
+  totalBytes: number | null;
+  progressKnown: boolean;
+  operationError: string | null;
+  operationRetryable: boolean;
 }
 
 export interface ChatModelSettingsInput {
@@ -140,8 +158,8 @@ export interface StartModelSettingsActivationInput {
 }
 
 export type TestModelSettingsInput =
-  | { target: "chat"; chat: ChatModelSettingsInput }
-  | { target: "embedding"; embedding: EmbeddingModelSettingsInput };
+	| { target: "chat"; chat: ChatModelSettingsInput; idempotencyKey?: string }
+	| { target: "embedding"; embedding: EmbeddingModelSettingsInput; idempotencyKey?: string };
 
 export interface ModelSettingsTestResult {
   target: ModelTestTarget;
@@ -179,7 +197,7 @@ export class ModelSettingsApiError extends Error {
   }
 }
 
-const chatProviders = ["disabled", "openai-compatible"] as const;
+const chatProviders = ["disabled", "openai-compatible", "ollama"] as const;
 const chatAPIStyles = ["chat_completions", "responses"] as const;
 const embeddingProviders = ["disabled", "openai-compatible", "ollama"] as const;
 const normalizations = ["none", "l2"] as const;
@@ -245,7 +263,13 @@ export const canonicalizeChatModelBaseUrl = (provider: ChatModelProvider, value:
   if (provider === "disabled") return value === "" ? "" : undefined;
   const canonical = canonicalizeModelBaseUrl(value);
   if (canonical === undefined) return undefined;
-  return canonical === modelSettingsOllamaRelayUrl || new URL(canonical).protocol === "https:" ? canonical : undefined;
+  if (provider === "ollama") return canonical === modelSettingsOllamaRelayUrl ? canonical : undefined;
+  return new URL(canonical).protocol === "https:" ? canonical : undefined;
+};
+
+const canonicalizeStoredChatModelBaseUrl = (provider: ChatModelProvider, value: string): string | undefined => {
+  if (provider === "openai-compatible" && canonicalizeModelBaseUrl(value) === modelSettingsOllamaRelayUrl) return modelSettingsOllamaRelayUrl;
+  return canonicalizeChatModelBaseUrl(provider, value);
 };
 
 export const canonicalizeEmbeddingModelBaseUrl = (provider: EmbeddingModelProvider, value: string): string | undefined => {
@@ -457,7 +481,8 @@ const decodeChatSummary = (value: unknown, field: string): ChatModelSettingsSumm
   if ((disabled && (result.baseUrl !== "" || result.model !== "" || result.modelVersion !== "" || result.apiKeyConfigured))) {
     throw invalidResponse(`${field}.provider_settings`);
   }
-  if (!disabled && canonicalizeChatModelBaseUrl(provider, result.baseUrl) !== result.baseUrl) throw invalidResponse(`${field}.base_url`);
+  if (provider === "ollama" && (result.apiStyle !== "chat_completions" || result.apiKeyConfigured)) throw invalidResponse(`${field}.provider_settings`);
+  if (!disabled && canonicalizeStoredChatModelBaseUrl(provider, result.baseUrl) !== result.baseUrl) throw invalidResponse(`${field}.base_url`);
   return result;
 };
 
@@ -536,7 +561,7 @@ const isCanonicalDisabledSummary = (summary: ModelSettingsSummary): boolean =>
 
 export const decodeModelSettingsResponse = (value: unknown): ModelSettingsResponse => {
   if (!isRecord(value)) throw invalidResponse("settings");
-  exact(value, ["desired_revision", "active_revision", "desired_settings", "active_settings", "runtime", "rollout", "participants", "apply_required", "restart_required", "capabilities"], "settings");
+  exact(value, ["desired_revision", "active_revision", "desired_settings", "active_settings", "runtime", "rollout", "participants", "apply_required", "restart_required", "capabilities", "local_runtime"], "settings");
   if (!isRecord(value.runtime)) throw invalidResponse("settings.runtime");
   exact(value.runtime, ["api", "worker"], "settings.runtime");
   if (!isRecord(value.rollout)) throw invalidResponse("settings.rollout");
@@ -545,6 +570,9 @@ export const decodeModelSettingsResponse = (value: unknown): ModelSettingsRespon
   exact(value.participants, ["api", "worker"], "settings.participants");
   if (!isRecord(value.capabilities)) throw invalidResponse("settings.capabilities");
   exact(value.capabilities, ["chat", "embedding"], "settings.capabilities");
+  const localRuntime = value.local_runtime;
+  if (!isRecord(localRuntime)) throw invalidResponse("settings.local_runtime");
+  exact(localRuntime, ["mode", "phase", "fresh", "requirement_hash", "ready_hash", "operation_id", "operation_phase", "completed_bytes", "total_bytes", "progress_known", "operation_error", "operation_retryable"], "settings.local_runtime");
   const restartRequired = bool(value.restart_required, "settings.restart_required");
   if (restartRequired) throw invalidResponse("settings.restart_required");
   const result: ModelSettingsResponse = {
@@ -573,6 +601,20 @@ export const decodeModelSettingsResponse = (value: unknown): ModelSettingsRespon
     capabilities: {
       chat: enumValue(value.capabilities.chat, capabilities, "settings.capabilities.chat"),
       embedding: enumValue(value.capabilities.embedding, capabilities, "settings.capabilities.embedding"),
+    },
+    localRuntime: {
+      mode: localRuntime.mode === "" ? "" : enumValue(localRuntime.mode, ["managed", "external-static"] as const, "settings.local_runtime.mode"),
+      phase: enumValue(localRuntime.phase, ["stopped", "starting", "pulling", "checking", "ready", "stopping", "failed"] as const, "settings.local_runtime.phase"),
+      fresh: bool(localRuntime.fresh, "settings.local_runtime.fresh"),
+      requirementHash: text(localRuntime.requirement_hash, "settings.local_runtime.requirement_hash", 64),
+      readyHash: text(localRuntime.ready_hash, "settings.local_runtime.ready_hash", 64),
+      operationId: nullableUuid(localRuntime.operation_id, "settings.local_runtime.operation_id"),
+      operationPhase: localRuntime.operation_phase === null ? null : identityText(localRuntime.operation_phase, "settings.local_runtime.operation_phase", 32) as ModelLocalOperationPhase,
+      completedBytes: revision(localRuntime.completed_bytes, "settings.local_runtime.completed_bytes"),
+      totalBytes: localRuntime.total_bytes === null ? null : revision(localRuntime.total_bytes, "settings.local_runtime.total_bytes"),
+      progressKnown: bool(localRuntime.progress_known, "settings.local_runtime.progress_known"),
+      operationError: nullableErrorCode(localRuntime.operation_error, "settings.local_runtime.operation_error"),
+      operationRetryable: bool(localRuntime.operation_retryable, "settings.local_runtime.operation_retryable"),
     },
   };
   if (result.rollout.phase === "idle" && (result.rollout.id !== null || result.rollout.targetRevision !== null || result.rollout.lastErrorCode !== null || result.rollout.retryable)) {
@@ -622,12 +664,13 @@ export const decodeModelSettingsTestResult = (value: unknown): ModelSettingsTest
   if (!hasOnlyKeys(value, allowed)) throw invalidResponse("test_result");
   const target = enumValue(value.target, testTargets, "test_result.target");
   const provider = enumValue(value.provider, embeddingProviders, "test_result.provider");
-  if (provider === "disabled" || (target === "chat" && provider !== "openai-compatible")) throw invalidResponse("test_result.provider");
+  if (provider === "disabled") throw invalidResponse("test_result.provider");
   const endpointPath = enumValue(value.endpoint_path, ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"] as const, "test_result.endpoint_path");
   const latencyMs = revision(value.latency_ms, "test_result.latency_ms");
   const apiStyle = value.api_style === undefined ? undefined : enumValue(value.api_style, chatAPIStyles, "test_result.api_style");
   if ((target === "chat" && (apiStyle === undefined || endpointPath !== (apiStyle === "responses" ? "/v1/responses" : "/v1/chat/completions"))) ||
       (target === "embedding" && (apiStyle !== undefined || endpointPath !== "/v1/embeddings"))) throw invalidResponse("test_result.protocol");
+  if (target === "chat" && provider === "ollama" && apiStyle !== "chat_completions") throw invalidResponse("test_result.protocol");
   return {
     target,
     status: enumValue(value.status, ["ok"] as const, "test_result.status"),
@@ -708,6 +751,7 @@ const encodeChat = (input: unknown, field: string, sensitiveValues: string[]): R
   const adapterVersion = requireIdentity(input.adapterVersion, `${field}.adapterVersion`, 64);
   const apiKey = encodeSecret(input.apiKey, `${field}.apiKey`, sensitiveValues);
   if (provider === "disabled" && (baseUrl !== "" || model !== "" || modelVersion !== "" || apiKey.action !== "clear")) throw invalidRequest(`${field}.providerSettings`);
+  if (provider === "ollama" && (apiStyle !== "chat_completions" || apiKey.action !== "clear")) throw invalidRequest(`${field}.providerSettings`);
   return { provider, api_style: apiStyle, base_url: baseUrl, model, model_version: modelVersion, adapter_version: adapterVersion, api_key: apiKey };
 };
 
@@ -862,20 +906,24 @@ export const startModelSettingsActivation = async (input: StartModelSettingsActi
 };
 
 export const testModelSettings = async (input: TestModelSettingsInput, signal?: AbortSignal): Promise<ModelSettingsTestResult> => {
-  if (!isRecord(input)) throw invalidRequest("body");
-  const target = requireEnum(input.target, testTargets, "target");
-  exactRequest(input, target === "chat" ? ["target", "chat"] : ["target", "embedding"], "body");
+	if (!isRecord(input)) throw invalidRequest("body");
+	const target = requireEnum(input.target, testTargets, "target");
+	const requiredKeys = target === "chat" ? ["target", "chat"] : ["target", "embedding"];
+	if (!requiredKeys.every((key) => Object.hasOwn(input, key)) || !hasOnlyKeys(input, [...requiredKeys, "idempotencyKey"])) throw invalidRequest("body");
   const sensitiveValues: string[] = [];
   const body = input.target === "chat"
     ? { target: "chat", chat: encodeChat(input.chat, "chat", sensitiveValues) }
     : { target: "embedding", embedding: encodeEmbedding(input.embedding, "embedding", sensitiveValues) };
-  if (input.target === "chat" ? input.chat.provider === "disabled" : input.embedding.provider === "disabled") throw invalidRequest("provider");
+	if (input.target === "chat" ? input.chat.provider === "disabled" : input.embedding.provider === "disabled") throw invalidRequest("provider");
+	const idempotencyKey = input.idempotencyKey ?? `model-settings-test-${crypto.randomUUID()}`;
+	if (idempotencyKey === "" || idempotencyKey.trim() !== idempotencyKey || new TextEncoder().encode(idempotencyKey).byteLength > 128 || /[\u0000-\u001f\u007f]/.test(idempotencyKey)) throw invalidRequest("idempotencyKey");
   let payload: unknown;
   try {
-    payload = await request("/api/v1/settings/models/test", {
+		payload = await request("/api/v1/settings/models/test", {
       ...signalInit(signal),
       cache: "no-store",
-      method: "POST",
+			method: "POST",
+			headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify(body),
     }, sensitiveValues);
   } catch (error: unknown) {

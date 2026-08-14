@@ -230,6 +230,34 @@ def main() -> None:
         ),
     )
     expect_invalid(
+        "managed runtime receives static database mode",
+        managed,
+        lambda model: model["services"]["local-model-runtime"]["environment"].update(
+            ZHIXU_LOCAL_MODEL_RUNTIME_MODE="external-static"
+        ),
+    )
+    expect_invalid(
+        "managed runtime loses database credentials",
+        managed,
+        lambda model: model["services"]["local-model-runtime"]["environment"].update(
+            ZHIXU_DATABASE_PASSWORD_FILE=""
+        ),
+    )
+    expect_invalid(
+        "credential initializer loses ownership capability",
+        managed,
+        lambda model: model["services"]["local-model-runtime-credential-init"].update(
+            cap_add=[]
+        ),
+    )
+    expect_invalid(
+        "runtime volume loses ownership labels",
+        managed,
+        lambda model: model["volumes"]["zhixu-local-models"]["labels"].update(
+            {"com.zhixu.owner": "foreign"}
+        ),
+    )
+    expect_invalid(
         "app publishes ingress",
         managed,
         lambda model: model["services"]["app"].update(ports=[]),

@@ -1,0 +1,27 @@
+FROM --platform=$BUILDPLATFORM golang:1.25.4-bookworm AS local-model-runtime-build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY vendor/ vendor/
+COPY cmd/local-model-runtime/ cmd/local-model-runtime/
+COPY cmd/local-model-runtime-credential-init/ cmd/local-model-runtime-credential-init/
+COPY internal/ internal/
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+  go build -mod=vendor -trimpath -ldflags='-s -w' \
+  -o /out/zhixu-local-model-runtime ./cmd/local-model-runtime
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+  go build -mod=vendor -trimpath -ldflags='-s -w' \
+  -o /out/local-model-runtime-credential-init ./cmd/local-model-runtime-credential-init
+
+FROM ollama/ollama:0.32.9@sha256:1685741456770df6e3cceb2a945a5f75e020f658d1701509668d6f4688f1dd3f
+RUN install -d -m 0755 -o 10001 -g 10001 /var/lib/zhixu/ollama
+COPY --from=local-model-runtime-build /out/zhixu-local-model-runtime /usr/local/bin/zhixu-local-model-runtime
+COPY --from=local-model-runtime-build /out/local-model-runtime-credential-init /usr/local/bin/local-model-runtime-credential-init
+COPY --chmod=0755 deploy/local-model-volume-init.sh /usr/local/bin/local-model-volume-init
+COPY --chmod=0755 deploy/local-model-legacy-migrate.sh /usr/local/bin/local-model-legacy-migrate
+USER 10001:10001
+ENV HOME=/var/lib/zhixu/ollama
+WORKDIR /var/lib/zhixu/ollama
+EXPOSE 11434
+ENTRYPOINT ["/usr/local/bin/zhixu-local-model-runtime"]

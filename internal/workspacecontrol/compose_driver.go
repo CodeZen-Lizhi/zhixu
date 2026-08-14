@@ -108,7 +108,7 @@ func (driver *ComposeDriver) ApplyGrant(ctx context.Context, grant Grant) (retur
 		return runtimeCommandFault(err, "WORKSPACE_RUNTIME_START_FAILED")
 	}
 	current, err := driver.validator.Validate(grant.Root)
-	if err != nil || current.Fingerprint.Digest() != grant.RootFingerprint || current.Fingerprint.BindingVersion != grant.BindingVersion {
+	if err != nil || current.Fingerprint.Digest() != grant.RootFingerprint {
 		return &ValidationError{Code: "WORKSPACE_PATH_IDENTITY_CHANGED"}
 	}
 	if err := driver.InspectGrant(ctx, grant); err != nil {
@@ -140,7 +140,7 @@ func (driver *ComposeDriver) PrepareGrant(ctx context.Context, operationID found
 	}
 	validated, err := driver.validator.Validate(grant.Root)
 	if err != nil || validated.CanonicalPath != grant.Root ||
-		validated.Fingerprint.Digest() != grant.RootFingerprint || validated.Fingerprint.BindingVersion != grant.BindingVersion {
+		validated.Fingerprint.Digest() != grant.RootFingerprint {
 		return &ValidationError{Code: "WORKSPACE_PATH_IDENTITY_CHANGED"}
 	}
 	return nil
@@ -219,7 +219,7 @@ func (driver *ComposeDriver) prepareGrantModel(ctx context.Context, grant Grant)
 	if validated.CanonicalPath != grant.Root {
 		return &ValidationError{Code: "WORKSPACE_GRANT_ROOT_NOT_CANONICAL"}
 	}
-	if validated.Fingerprint.Digest() != grant.RootFingerprint || validated.Fingerprint.BindingVersion != grant.BindingVersion {
+	if validated.Fingerprint.Digest() != grant.RootFingerprint {
 		return &ValidationError{Code: "WORKSPACE_GRANT_FINGERPRINT_MISMATCH"}
 	}
 	if err := grant.validate(); err != nil {

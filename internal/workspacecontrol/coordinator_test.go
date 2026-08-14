@@ -253,6 +253,39 @@ func TestSwitchSameWorkspaceReappliesCurrentGrant(t *testing.T) {
 	}
 }
 
+func TestSwitchSameReboundWorkspaceUsesPersistedBindingGeneration(t *testing.T) {
+	root := canonicalTestDirectory(t)
+	store := newActiveSuccessfulSwitchStore(t, root, 6)
+	store.active.BindingVersion = 2
+	for index := range store.runtimes {
+		store.runtimes[index].BindingVersion = 2
+		store.runtimes[index].RootFingerprint = store.active.RootFingerprint
+	}
+	service, err := workspaceapplication.NewControlService(store, store, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &successfulSwitchRuntime{store: store}
+	coordinator, err := NewCoordinator(CoordinatorOptions{
+		Service: service, Runtime: runtime, Validator: PathValidator{},
+		ControlInstanceID: "550e8400-e29b-41d4-a716-446655440058",
+		LeaseOwnerID:      "550e8400-e29b-41d4-a716-446655440059",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := coordinator.Switch(context.Background(), SwitchCommand{
+		Name: "Workspace A", RootPath: root, IdempotencyKey: "reapply-rebound-a",
+	})
+	if err != nil {
+		t.Fatalf("Switch() error=%v", err)
+	}
+	if outcome.Changed || outcome.Workspace.BindingVersion != 2 || runtime.applyCalls != 1 ||
+		len(runtime.appliedGrants) != 1 || runtime.appliedGrants[0].BindingVersion != 2 {
+		t.Fatalf("outcome=%#v grants=%#v", outcome, runtime.appliedGrants)
+	}
+}
+
 func TestResumedRuntimesRequireProcessHeartbeatAfterControlTransition(t *testing.T) {
 	workspaceID := foundation.ID("550e8400-e29b-41d4-a716-446655440000")
 	apiID := foundation.ID("550e8400-e29b-41d4-a716-446655440001")
@@ -608,7 +641,7 @@ func newActiveSuccessfulSwitchStore(t *testing.T, root string, generation int64)
 	active := workspacedomain.Workspace{
 		ID: foundation.ID("550e8400-e29b-41d4-a716-446655440050"), Name: "Workspace A",
 		RootPath: validated.CanonicalPath, RootFingerprint: validated.Fingerprint.Digest(),
-		BindingVersion: validated.Fingerprint.BindingVersion, Status: workspacedomain.WorkspaceStatusActive,
+		BindingVersion: 1, Status: workspacedomain.WorkspaceStatusActive,
 		Availability: workspacedomain.WorkspaceAvailabilityAvailable, Version: 1,
 	}
 	activeID := active.ID
@@ -627,8 +660,7 @@ func (store *successfulSwitchStore) ResolveWorkspace(
 	reservation workspacedomain.WorkspaceReservation,
 ) (workspacedomain.WorkspaceResolution, error) {
 	if store.active != nil && store.active.RootPath == reservation.Binding.CanonicalPath &&
-		store.active.RootFingerprint == reservation.Binding.Fingerprint &&
-		store.active.BindingVersion == reservation.Binding.BindingVersion {
+		store.active.RootFingerprint == reservation.Binding.Fingerprint {
 		store.target = *store.active
 		return workspacedomain.WorkspaceResolution{Workspace: store.target}, nil
 	}
@@ -1086,7 +1118,7 @@ func newAvailabilityWorkspace(t *testing.T, id foundation.ID) workspacedomain.Wo
 	}
 	return workspacedomain.Workspace{
 		ID: id, Name: "Workspace", RootPath: validated.CanonicalPath,
-		RootFingerprint: validated.Fingerprint.Digest(), BindingVersion: validated.Fingerprint.BindingVersion,
+		RootFingerprint: validated.Fingerprint.Digest(), BindingVersion: 1,
 		Status: workspacedomain.WorkspaceStatusInactive, Availability: workspacedomain.WorkspaceAvailabilityAvailable,
 		Version: 7,
 	}

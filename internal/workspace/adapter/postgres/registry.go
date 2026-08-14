@@ -69,7 +69,9 @@ FOR UPDATE`, reservation.Binding.CanonicalPath, reservation.Binding.Fingerprint)
 			}
 			return domain.WorkspaceResolution{Workspace: marked, Reused: true}, migrationRequired(errors.New("legacy workspace root identity is not verified"))
 		}
-		if workspace.RootFingerprint != reservation.Binding.Fingerprint || workspace.BindingVersion != reservation.Binding.BindingVersion {
+		// The path fingerprint schema and persisted Workspace binding generation
+		// are independent; the latter may be >1 after an explicit rebind.
+		if workspace.RootFingerprint != reservation.Binding.Fingerprint {
 			marked, markErr := markWorkspaceMigrationRequired(ctx, tx, state, workspace.ID, "WORKSPACE_ROOT_IDENTITY_CHANGED", now)
 			if markErr != nil {
 				return domain.WorkspaceResolution{}, markErr
@@ -131,6 +133,140 @@ RETURNING `+workspaceColumns,
 		return domain.WorkspaceResolution{}, err
 	}
 	return domain.WorkspaceResolution{Workspace: persisted}, nil
+}
+
+// RebindWorkspace performs the only supported root identity mutation. All
+// control references are cleared first, stale runtime rows are made explicit,
+// and the history row plus Registry update commit in one PostgreSQL transaction.
+func (r *Repository) RebindWorkspace(ctx context.Context, migration domain.WorkspaceBindingMigration) (domain.WorkspaceBindingMigrationResult, error) {
+	if r == nil || r.db == nil || nilRepositoryDependency(r.audit) {
+		return domain.WorkspaceBindingMigrationResult{}, controlUnavailable(errors.New("workspace rebind persistence dependencies are unavailable"))
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, classifyControl(err, domain.ErrorCodeControlDatabaseUnavailable)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(migration.WorkspaceID)); err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, classifyControl(err, domain.ErrorCodeControlDatabaseUnavailable)
+	}
+	firstFingerprint, secondFingerprint := migration.OldRootFingerprint, migration.NewRootFingerprint
+	if secondFingerprint < firstFingerprint {
+		firstFingerprint, secondFingerprint = secondFingerprint, firstFingerprint
+	}
+	for _, fingerprint := range []string{firstFingerprint, secondFingerprint} {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, fingerprint); err != nil {
+			return domain.WorkspaceBindingMigrationResult{}, classifyControl(err, domain.ErrorCodeControlDatabaseUnavailable)
+		}
+	}
+	state, err := loadControlState(ctx, tx, `FOR UPDATE`)
+	if err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, err
+	}
+	gate, err := loadMutationGate(ctx, tx, `FOR UPDATE`)
+	if err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, err
+	}
+	workspace, err := loadWorkspaceForUpdate(ctx, tx, migration.WorkspaceID)
+	if err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, err
+	}
+	if gate.OwnerID != nil || state.ActiveWorkspaceID != nil || state.ResumeWorkspaceID != nil ||
+		state.OperationID != nil || state.OperationPhase != "" || state.TargetWorkspaceID != nil ||
+		state.PreviousActiveWorkspaceID != nil || state.ControllerLeaseOwnerID != nil ||
+		state.ControllerLeaseExpiresAt != (time.Time{}) {
+		return domain.WorkspaceBindingMigrationResult{}, rebindConflict(errors.New("workspace control state is still bound"))
+	}
+	// A launcher can lose its response after the database commit. A precise
+	// old->new history record makes the retry a read-only exact replay, but only
+	// after the global gate and control state have both proved idle.
+	if workspace.RootPath == migration.CanonicalRoot && workspace.Git.RepositoryPath == migration.CanonicalRoot &&
+		workspace.RootFingerprint == migration.NewRootFingerprint && workspace.BindingVersion > 1 {
+		var found bool
+		err = tx.QueryRow(ctx, `SELECT EXISTS(
+	SELECT 1
+	FROM ops.workspace_root_binding_history AS history
+	JOIN ops.audit_event AS audit ON audit.id=history.id
+	WHERE history.workspace_id=$1 AND history.canonical_root=$2 AND history.old_root_fingerprint=$3
+	  AND history.new_root_fingerprint=$4 AND history.new_binding_version=$5
+		  AND audit.workspace_id=history.workspace_id
+		  AND audit.actor_type='SYSTEM'
+		  AND audit.actor_ref=history.controller_instance_id::text
+		  AND audit.action='workspace.root.rebound'
+		  AND audit.resource_type='workspace_root_binding')`,
+			string(migration.WorkspaceID), migration.CanonicalRoot, migration.OldRootFingerprint,
+			migration.NewRootFingerprint, workspace.BindingVersion).Scan(&found)
+		if err != nil {
+			return domain.WorkspaceBindingMigrationResult{}, classifyControl(err, domain.ErrorCodeControlDatabaseUnavailable)
+		}
+		if found {
+			if err := commitWorkspaceTx(ctx, tx); err != nil {
+				return domain.WorkspaceBindingMigrationResult{}, err
+			}
+			return domain.WorkspaceBindingMigrationResult{Workspace: workspace, Changed: false}, nil
+		}
+	}
+	if workspace.RootPath != migration.CanonicalRoot || workspace.Git.RepositoryPath != migration.CanonicalRoot ||
+		workspace.RootFingerprint != migration.OldRootFingerprint ||
+		workspace.BindingVersion < 1 || workspace.Status != domain.WorkspaceStatusInactive ||
+		workspace.Availability != domain.WorkspaceAvailabilityMigrationRequired ||
+		workspace.AvailabilityReason != "WORKSPACE_ROOT_IDENTITY_CHANGED" || !workspace.RemovedAt.IsZero() {
+		return domain.WorkspaceBindingMigrationResult{}, identityConflict(errors.New("workspace root identity is not awaiting explicit rebind"))
+	}
+	var hasGitCaptureCheckpoint bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(
+	SELECT 1 FROM core.workspace_git_capture_checkpoint WHERE workspace_id=$1)`, string(migration.WorkspaceID)).Scan(&hasGitCaptureCheckpoint); err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, classifyControl(err, domain.ErrorCodeControlDatabaseUnavailable)
+	}
+	if hasGitCaptureCheckpoint {
+		return domain.WorkspaceBindingMigrationResult{}, rebindConflict(errors.New("workspace Git capture lineage requires explicit rebaseline"))
+	}
+	now, err := workspaceDatabaseNow(ctx, tx)
+	if err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE ops.workspace_runtime
+SET operation_id=NULL,phase='unavailable',heartbeat_at=$2,version=version+1
+WHERE workspace_id=$1 AND phase<>'unavailable'`, string(migration.WorkspaceID), now); err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, classifyControl(err, domain.ErrorCodeControlDatabaseUnavailable)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO ops.workspace_root_binding_history(
+id,workspace_id,controller_instance_id,idempotency_key,canonical_root,
+old_root_fingerprint,new_root_fingerprint,old_binding_version,new_binding_version,
+old_workspace_version,new_workspace_version,created_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		string(migration.ID), string(migration.WorkspaceID), string(migration.ControllerInstanceID), migration.IdempotencyKey,
+		migration.CanonicalRoot, migration.OldRootFingerprint, migration.NewRootFingerprint,
+		workspace.BindingVersion, workspace.BindingVersion+1, workspace.Version, workspace.Version+1, now); err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, classifyControl(err, domain.ErrorCodeControlDatabaseUnavailable)
+	}
+	persisted, err := scanWorkspace(tx.QueryRow(ctx, `UPDATE core.workspace
+SET root_fingerprint=$2,binding_version=binding_version+1,
+    status='inactive',availability='available',availability_reason=NULL,
+    availability_checked_at=$3,removed_at=NULL,version=version+1,updated_at=$3
+WHERE id=$1 AND version=$4
+RETURNING `+workspaceColumns,
+		string(migration.WorkspaceID), migration.NewRootFingerprint, now, workspace.Version))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.WorkspaceBindingMigrationResult{}, workspaceVersionConflict(errors.New("workspace root binding version changed"))
+	}
+	if err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, classifyControl(err, domain.ErrorCodeControlDatabaseUnavailable)
+	}
+	if err := r.appendWorkspaceRootRebindAudit(ctx, tx, migration,
+		workspace.BindingVersion, persisted.BindingVersion, workspace.Version, persisted.Version, now); err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE ops.workspace_control_state
+SET last_error_code=CASE WHEN last_error_code='WORKSPACE_ROOT_IDENTITY_CHANGED' THEN NULL ELSE last_error_code END,
+    state_version=state_version+1,updated_at=$1
+WHERE singleton=true AND state_version=$2`, now, state.StateVersion); err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, classifyControl(err, domain.ErrorCodeControlDatabaseUnavailable)
+	}
+	if err := commitWorkspaceTx(ctx, tx); err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, err
+	}
+	return domain.WorkspaceBindingMigrationResult{Workspace: persisted, Changed: true}, nil
 }
 
 // ListRegistry returns recent identities without granting access to their roots.

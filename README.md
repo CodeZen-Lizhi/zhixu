@@ -117,12 +117,25 @@ The launcher is fixed to Compose project `zhixu` and rejects
 `ZHIXU_COMPOSE_PROJECT_NAME`, so `down` and `reset` cannot target an unrelated
 stack.
 
+在 managed Compose 中，本地 Ollama 由一个常驻但轻量的
+`local-model-runtime` 管理容器负责。它只在当前 active、候选或测试需求需要
+本地模型时，在同一容器内启动唯一的 `ollama serve` 子进程；需求消失并且旧
+generation lease 释放后，只停止该子进程，不删除模型文件。模型文件保存在
+project-owned `zhixu-local-models` volume，管理容器重建或切换线上模型都会保留，
+后续重新选择本地模型可直接复用。Chat 和 Embedding 任意一个选择本地 Ollama
+都会触发同一个运行时；两者都线上或关闭时不启动 `ollama serve`。完整控制面、
+计算面、数据面结构见 [ADR-0023](docs/architecture/adr/0023-managed-local-ollama-runtime.md)。
+
 Use `./zhixu status`, `./zhixu logs [service]`, and `./zhixu down` for normal
 operation. `down` preserves PostgreSQL, model settings, the master key, the
 remembered Workspace selection and every host Workspace file while clearing the
-derived grant override. `./zhixu reset` is the explicit destructive command for
-Compose volumes and requires typing `DELETE`; it clears the local selection but
-preserves the launcher identity and never deletes a selected host directory.
+derived grant override. An allowlisted legacy Ollama `0.9.6` store can be
+inspected with `./zhixu local-model status` and copied only by the explicitly
+confirmed `./zhixu local-model migrate` flow; the legacy source volume is kept
+for rollback. `./zhixu reset` is the explicit destructive command for owned
+Compose volumes, including managed local-model files, and requires typing
+`DELETE`; it clears the local selection but preserves the launcher identity,
+legacy rollback volume, and every selected host directory.
 The complete first-use, switching, data-retention and troubleshooting guide is
 [运行与配置手册](docs/operations.md).
 

@@ -53,7 +53,7 @@ func TestPathValidatorReturnsCanonicalPhysicalIdentity(t *testing.T) {
 	if validated.CanonicalPath != canonical {
 		t.Fatalf("canonical path=%q, want %q", validated.CanonicalPath, canonical)
 	}
-	if validated.Fingerprint.PhysicalPath != canonical || validated.Fingerprint.Device == 0 || validated.Fingerprint.Inode == 0 || validated.Fingerprint.BindingVersion != 1 {
+	if validated.Fingerprint.PhysicalPath != canonical || validated.Fingerprint.Device == 0 || validated.Fingerprint.Inode == 0 || validated.Fingerprint.SchemaVersion != 1 {
 		t.Fatalf("unexpected fingerprint: %+v", validated.Fingerprint)
 	}
 }

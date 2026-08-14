@@ -1,10 +1,13 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -13,12 +16,16 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
+// ManagedOllamaBaseURL is the only endpoint accepted for the managed local runtime.
+const ManagedOllamaBaseURL = "http://127.0.0.1:11434"
+
 // ChatProvider identifies the configured structured-chat protocol.
 type ChatProvider string
 
 const (
 	ChatProviderDisabled         ChatProvider = "disabled"
 	ChatProviderOpenAICompatible ChatProvider = "openai-compatible"
+	ChatProviderOllama           ChatProvider = "ollama"
 )
 
 // ChatAPIStyle selects the explicit OpenAI-compatible Chat wire protocol.
@@ -89,6 +96,43 @@ type Settings struct {
 	Embedding EmbeddingSettings
 }
 
+// ManagedOllamaRequirement is the canonical, non-secret local model demand.
+type ManagedOllamaRequirement struct {
+	Required bool
+	Models   []string
+	Hash     string
+}
+
+// RequiresManagedOllama derives local runtime demand from explicit providers.
+// The exact relay check is retained only for append-only legacy Chat revisions.
+func RequiresManagedOllama(settings Settings) ManagedOllamaRequirement {
+	models := make([]string, 0, 2)
+	if settings.Chat.Provider == ChatProviderOllama ||
+		settings.Chat.Provider == ChatProviderOpenAICompatible && settings.Chat.BaseURL == ManagedOllamaBaseURL {
+		models = append(models, settings.Chat.Model)
+	}
+	if settings.Embedding.Provider == EmbeddingProviderOllama {
+		models = append(models, settings.Embedding.Model)
+	}
+	slicesSortUnique(&models)
+	if len(models) == 0 {
+		return ManagedOllamaRequirement{}
+	}
+	digest := sha256.Sum256([]byte("managed-ollama-requirement/v1\n" + strings.Join(models, "\n")))
+	return ManagedOllamaRequirement{Required: true, Models: models, Hash: hex.EncodeToString(digest[:])}
+}
+
+func slicesSortUnique(values *[]string) {
+	slices.Sort(*values)
+	output := (*values)[:0]
+	for _, value := range *values {
+		if len(output) == 0 || output[len(output)-1] != value {
+			output = append(output, value)
+		}
+	}
+	*values = output
+}
+
 // SecretConfiguration describes credential presence without exposing a value.
 type SecretConfiguration struct {
 	ChatConfigured      bool
@@ -136,6 +180,37 @@ func (settings Settings) ValidateStructural() error {
 	return nil
 }
 
+// ValidateWritableSettings rejects legacy endpoint inference for newly submitted drafts.
+// Historical revisions are intentionally validated through ValidateStructural instead.
+func ValidateWritableSettings(settings Settings) error {
+	switch settings.Chat.Provider {
+	case ChatProviderOpenAICompatible:
+		if !usesHTTPS(settings.Chat.BaseURL) {
+			return invalid("new openai-compatible chat settings must use https")
+		}
+	case ChatProviderOllama:
+		if settings.Chat.BaseURL != ManagedOllamaBaseURL {
+			return invalid("ollama chat must use the managed relay")
+		}
+	}
+	switch settings.Embedding.Provider {
+	case EmbeddingProviderOpenAICompatible:
+		if !usesHTTPS(settings.Embedding.BaseURL) {
+			return invalid("new openai-compatible embedding settings must use https")
+		}
+	case EmbeddingProviderOllama:
+		if settings.Embedding.BaseURL != ManagedOllamaBaseURL {
+			return invalid("ollama embedding must use the managed relay")
+		}
+	}
+	return nil
+}
+
+func usesHTTPS(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed.Scheme == "https"
+}
+
 // CanonicalizeSettings normalizes endpoint identity before validation, encryption, or persistence.
 func CanonicalizeSettings(settings Settings) (Settings, error) {
 	if settings.Chat.Provider != ChatProviderDisabled {
@@ -172,9 +247,12 @@ func (settings ChatSettings) validate() error {
 		if settings.BaseURL != "" || settings.Model != "" || settings.ModelVersion != "" {
 			return invalid("disabled chat settings must not contain a model target")
 		}
-	case ChatProviderOpenAICompatible:
+	case ChatProviderOpenAICompatible, ChatProviderOllama:
 		if !canonicalText(settings.Model, 128) || !canonicalText(settings.ModelVersion, 64) {
 			return invalid("chat model identity is invalid")
+		}
+		if settings.Provider == ChatProviderOllama && settings.APIStyle != ChatAPIStyleChatCompletions {
+			return invalid("ollama chat must use chat completions")
 		}
 		if normalized, err := NormalizeBaseURL(settings.BaseURL); err != nil || normalized != settings.BaseURL {
 			if err == nil {

@@ -12,8 +12,51 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 )
+
+type runtimeHostTestHold struct {
+	mu       sync.Mutex
+	renews   int
+	releases int
+}
+
+func (hold *runtimeHostTestHold) Renew(context.Context) error {
+	hold.mu.Lock()
+	hold.renews++
+	hold.mu.Unlock()
+	return nil
+}
+
+func (hold *runtimeHostTestHold) Release(context.Context) error {
+	hold.mu.Lock()
+	hold.releases++
+	hold.mu.Unlock()
+	return nil
+}
+
+type runtimeHostTestLifecycle struct {
+	mu       sync.Mutex
+	acquires []struct {
+		binding RuntimeBinding
+		hold    *runtimeHostTestHold
+	}
+}
+
+func (lifecycle *runtimeHostTestLifecycle) Acquire(_ context.Context, binding RuntimeBinding, requirement localmodelruntime.Requirement) (GenerationHold, error) {
+	if len(requirement.Models) == 0 {
+		return nil, errors.New("test lifecycle received empty requirement")
+	}
+	hold := &runtimeHostTestHold{}
+	lifecycle.mu.Lock()
+	lifecycle.acquires = append(lifecycle.acquires, struct {
+		binding RuntimeBinding
+		hold    *runtimeHostTestHold
+	}{binding: binding, hold: hold})
+	lifecycle.mu.Unlock()
+	return hold, nil
+}
 
 type runtimeHostTestGeneration struct {
 	revision  int64
@@ -45,6 +88,49 @@ func newRuntimeHostTestFactory() *runtimeHostTestFactory {
 		started:    make(map[int64]chan<- struct{}),
 		buildErrs:  make(map[int64]error),
 		probeErrs:  make(map[int64]error),
+	}
+}
+
+func TestRuntimeHostGenerationLifecyclePinsAndReleasesLocalDemand(t *testing.T) {
+	t.Parallel()
+	factory := newRuntimeHostTestFactory()
+	lifecycle := &runtimeHostTestLifecycle{}
+	initial := &runtimeHostTestGeneration{revision: 1}
+	host, err := NewRuntimeHost(RuntimeHostOptions[*runtimeHostTestGeneration]{
+		Initial: InitialRuntime[*runtimeHostTestGeneration]{
+			Binding: RuntimeBinding{Mode: RuntimeModeManaged, Role: RuntimeRoleAPI, Revision: 1, InstanceID: foundation.ID("10000000-0000-4000-8000-000000000901")},
+			Value:   initial,
+		},
+		Factory: factory,
+		LocalDemand: func(*runtimeHostTestGeneration) (localmodelruntime.Requirement, error) {
+			return localmodelruntime.NewRequirement([]localmodelruntime.ModelRef{"chat-model"})
+		},
+		Lifecycle: lifecycle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.RenewHolds(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle.mu.Lock()
+	if len(lifecycle.acquires) != 1 {
+		t.Fatalf("generation hold acquires = %d, want 1", len(lifecycle.acquires))
+	}
+	hold := lifecycle.acquires[0].hold
+	lifecycle.mu.Unlock()
+	hold.mu.Lock()
+	renews := hold.renews
+	hold.mu.Unlock()
+	if renews != 1 {
+		t.Fatalf("generation hold renews = %d, want 1", renews)
+	}
+	host.Close()
+	hold.mu.Lock()
+	releases := hold.releases
+	hold.mu.Unlock()
+	if releases != 1 {
+		t.Fatalf("generation hold releases = %d, want 1", releases)
 	}
 }
 

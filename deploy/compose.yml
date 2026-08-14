@@ -78,6 +78,112 @@ services:
       ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
       ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
 
+  local-model-volume-init:
+    profiles: ["workspace-runtime"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.local-model-runtime
+    entrypoint: ["/usr/local/bin/local-model-volume-init"]
+    user: "0:0"
+    restart: "no"
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - type: volume
+        source: zhixu-local-models
+        target: /var/lib/zhixu/ollama/.ollama
+
+  local-model-runtime-credential-init:
+    profiles: ["workspace-runtime"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.local-model-runtime
+    entrypoint: ["/usr/local/bin/local-model-runtime-credential-init"]
+    user: "0:0"
+    restart: "no"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      ZHIXU_DATABASE_HOST: postgres
+      ZHIXU_DATABASE_PORT: 5432
+      ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
+      ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
+      ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
+      ZHIXU_LOCAL_MODEL_RUNTIME_CREDENTIAL_DIR: /run/zhixu-local-model-runtime
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - type: volume
+        source: zhixu-local-model-runtime-credentials
+        target: /run/zhixu-local-model-runtime
+
+  local-model-runtime:
+    profiles: ["workspace-runtime"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.local-model-runtime
+    entrypoint: ["/usr/local/bin/zhixu-local-model-runtime"]
+    user: "10001:10001"
+    init: true
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 45s
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      HOME: /var/lib/zhixu/ollama
+      ZHIXU_LOCAL_MODEL_RUNTIME_MODE: managed
+      ZHIXU_DATABASE_HOST: postgres
+      ZHIXU_DATABASE_PORT: 5432
+      ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
+      ZHIXU_DATABASE_USER_FILE: /run/zhixu-local-model-runtime/database-user
+      ZHIXU_DATABASE_PASSWORD_FILE: /run/zhixu-local-model-runtime/database-password
+      ZHIXU_DATABASE_MAX_CONNS: 2
+      ZHIXU_DATABASE_MIN_CONNS: 1
+    working_dir: /var/lib/zhixu/ollama
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      local-model-volume-init:
+        condition: service_completed_successfully
+      local-model-runtime-credential-init:
+        condition: service_completed_successfully
+    volumes:
+      - type: volume
+        source: zhixu-local-models
+        target: /var/lib/zhixu/ollama/.ollama
+      - type: volume
+        source: zhixu-local-model-runtime-credentials
+        target: /run/zhixu-local-model-runtime
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /run:rw,noexec,nosuid,nodev,size=16m,mode=0755
+    healthcheck:
+      test:
+        - CMD
+        - /bin/bash
+        - -ec
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/11434;
+          printf 'GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3;
+          IFS=' ' read -r _ status _ <&3;
+          test "$${status}" = 204
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   app:
     profiles: ["workspace-runtime"]
     build:
@@ -125,12 +231,14 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: on-failure
-    entrypoint: ["socat", "TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr", "TCP:host.docker.internal:11434"]
+    entrypoint: ["socat", "TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr", "TCP:local-model-runtime:11434"]
     user: "10001:10001"
     network_mode: "container:zhixu-app-netns"
     depends_on:
       app:
         condition: service_started
+      local-model-runtime:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "ss -H -ltn 'sport = :11434' | grep -q '127.0.0.1:11434' && wget -q -O /dev/null http://127.0.0.1:8080/readyz"]
       interval: 5s
@@ -202,12 +310,14 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: on-failure
-    entrypoint: ["socat", "TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr", "TCP:host.docker.internal:11434"]
+    entrypoint: ["socat", "TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr", "TCP:local-model-runtime:11434"]
     user: "10001:10001"
     network_mode: "container:zhixu-worker-netns"
     depends_on:
       worker:
         condition: service_started
+      local-model-runtime:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "ss -H -ltn 'sport = :11434' | grep -q '127.0.0.1:11434' && wget -q -O /dev/null http://127.0.0.1:8081/readyz && wget -q -O /dev/null http://127.0.0.1:18082"]
       interval: 5s
@@ -244,6 +354,14 @@ services:
 volumes:
   zhixu-postgres:
   zhixu-model-secrets:
+  zhixu-local-models:
+    labels:
+      com.zhixu.owner: local-model-runtime
+      com.zhixu.schema: local-model-store/v1
+  zhixu-local-model-runtime-credentials:
+    labels:
+      com.zhixu.owner: local-model-runtime
+      com.zhixu.schema: local-model-runtime-credentials/v1
 
 networks:
   default:

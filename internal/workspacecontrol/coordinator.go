@@ -181,7 +181,7 @@ func (coordinator *Coordinator) Switch(ctx context.Context, command SwitchComman
 
 	resolution, err := coordinator.service.ResolveWorkspace(ctx, workspaceapplication.RegisterWorkspaceCommand{
 		Name: name, CanonicalRoot: validated.CanonicalPath, GitRepositoryPath: validated.CanonicalPath,
-		RootFingerprint: validated.Fingerprint.Digest(), BindingVersion: validated.Fingerprint.BindingVersion,
+		RootFingerprint: validated.Fingerprint.Digest(), BindingVersion: 1,
 		GitCheckedAt: time.Now().UTC(),
 	})
 	if err != nil {
@@ -286,8 +286,7 @@ func (coordinator *Coordinator) workspaceAvailability(workspace workspacedomain.
 	if err != nil {
 		return workspacedomain.WorkspaceAvailabilityUnavailable, pathErrorCode(err)
 	}
-	if validated.CanonicalPath != workspace.RootPath || validated.Fingerprint.Digest() != workspace.RootFingerprint ||
-		validated.Fingerprint.BindingVersion != workspace.BindingVersion {
+	if validated.CanonicalPath != workspace.RootPath || validated.Fingerprint.Digest() != workspace.RootFingerprint {
 		return workspacedomain.WorkspaceAvailabilityUnavailable, "WORKSPACE_PATH_IDENTITY_CHANGED"
 	}
 	return workspacedomain.WorkspaceAvailabilityAvailable, ""
@@ -907,7 +906,7 @@ func (coordinator *Coordinator) preparedRuntimes(
 func (coordinator *Coordinator) validateGrantIdentity(grant Grant) error {
 	validated, err := coordinator.validator.Validate(grant.Root)
 	if err != nil || validated.CanonicalPath != grant.Root ||
-		validated.Fingerprint.Digest() != grant.RootFingerprint || validated.Fingerprint.BindingVersion != grant.BindingVersion {
+		validated.Fingerprint.Digest() != grant.RootFingerprint {
 		return &ValidationError{Code: "WORKSPACE_PATH_IDENTITY_CHANGED"}
 	}
 	return nil

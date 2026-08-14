@@ -21,7 +21,8 @@
 - 运行时等待入口：`zhixu-runtime-wait --profile api|worker -- /absolute/target [args...]`；数据库可 ping 后以目标命令替换 PID 1。
 - 状态：`./zhixu status` 只读展示全部关键容器（包括 exited/created）及 `Runtime: ready|degraded`。
 - 低频切换：`./zhixu workspace switch <absolute-root> [--initialize-git]`。
-- 一次性原生命令：`zhixu-workspacectl reconcile|switch --control-instance-id <uuid>`；只处理受控路径、数据库状态和 Compose grant，完成即退出，不监听端口。
+- 同路径物理身份恢复：`./zhixu workspace rebind --confirm REBIND`；只使用受保护 selection 中的 Root 和 Workspace ID，不接受另一条路径或隐式确认。
+- 一次性原生命令：`zhixu-workspacectl reconcile|switch|rebind --control-instance-id <uuid>`；只处理受控路径、数据库状态和 Compose grant，完成即退出，不监听端口；`rebind` 本身不执行 Docker mutation。
 - 业务发现：`GET /api/v1/workspaces/active`；响应是当前 grant 对应的唯一 Active Workspace 业务投影。
 - 运行时环境：`ZHIXU_WORKSPACE_GRANTED_ID`、`ZHIXU_WORKSPACE_GRANTED_ROOT`、
   `ZHIXU_WORKSPACE_GRANT_GENERATION`；禁止恢复 `ZHIXU_WORKSPACE_ROOT`。
@@ -29,9 +30,10 @@
   `.zhixu/workspace-grant.yml`，两者不得互相充当事实源。
 - `.zhixu/control-instance-id` 是 `0600`、稳定、非密钥的幂等命名空间，`down`/`reset` 均保留；每次命令另生成瞬时
   lease owner。它不得成为浏览器凭据、URL 参数或业务 Workspace 身份。
-- 持久状态：`core.workspace` 保存 immutable root identity/availability；
+- 持久状态：`core.workspace` 保存受控 root identity/availability；普通 mutation 不可修改 identity，唯一例外是显式 rebind 的单步审计迁移；
   `ops.workspace_control_state`、`ops.workspace_switch`、`ops.workspace_runtime` 与
-  `ops.runtime_mutation_gate` 保存 Active、operation、heartbeat、lease 和共享 mutation owner。已发布名称保持兼容。
+  `ops.runtime_mutation_gate` 保存 Active、operation、heartbeat、lease 和共享 mutation owner；
+  `ops.workspace_root_binding_history` 保存不可更新、删除或截断的 rebind 历史。已发布名称保持兼容。
 - Helper identity：固定 Compose project `zhixu-netns`、由 helper 创建而被主项目声明为 external 的
   `zhixu-runtime` network、app anchor `zhixu-app-netns` 和 worker anchor `zhixu-worker-netns`。它们是 launcher
   基础设施而不是 Workspace runtime service，不能接收 grant 环境或 Workspace bind。
@@ -39,14 +41,28 @@
 ### 3. Contracts
 
 - `root_path` 必须是已存在目录的规范 POSIX 绝对路径；一次性控制命令只做 metadata 校验，不创建、枚举或猜测目录。
-  符号链接解析为稳定物理路径，fingerprint 至少绑定 physical path、device、inode 和 binding version。
+  符号链接解析为稳定物理路径，fingerprint 至少绑定 physical path、device、inode 和 fingerprint schema version。
+- fingerprint schema version 与持久化 `core.workspace.binding_version` 是两个事实：前者描述 digest 算法，当前为 v1；后者是物理身份的单调 generation，显式 rebind 后可以为 2+。路径校验比较 canonical path 与 digest，不要求两个版本数值相等；grant/runtime/control 必须精确传播和比较持久 binding generation。
 - 一个 Workspace ID 的 root identity 不可普通重绑。路径缺失、权限不足或 fingerprint 变化只更新 availability；
   不自动创建目录、不换到父/兄弟目录，也不产生新的隐式授权。
+- 仅当同一 canonical path 的既有 Workspace 已 inactive、未移除且以 `WORKSPACE_ROOT_IDENTITY_CHANGED` 进入
+  `migration_required`，并且 Active/Resume/operation/target/previous/control lease/global mutation gate 均为空时，
+  显式 rebind 才能将当前 live fingerprint 写回同一 Workspace ID。事务必须先把旧 runtime 行置为
+  `unavailable`，追加精确 old→new history，再将 binding generation 和 Workspace optimistic version 各加一；
+  Root/Git path、业务数据和 `grant_generation` 不变。旧 runtime 行保留旧 binding，旧进程的 heartbeat/re-register
+  由 Registry binding fence 拒绝；紧随其后的普通 switch 再按既有规则递增 grant generation。
+- rebind 审计与 Registry 更新必须处于同一事务，且只允许 old inactive/migration-required → new
+  inactive/available 的一次连续变更。历史 INSERT 必须匹配当前锁定状态；UPDATE/DELETE/TRUNCATE 必须拒绝；存在历史时 migration Down 必须拒绝。
+- rebind 响应丢失时，只在 control/gate 重新证明空闲后，精确 old→new history 与当前 new binding 才允许
+  `changed=false` 重放；不能再增加 binding generation。launcher 必须随后执行普通 switch，并要求 switch 返回的
+  Workspace ID、Root、fingerprint 和 persisted binding generation 与 rebind 结果精确一致。
 - base Compose 对所有服务是 zero bind。Active runtime 中只有 API 与 Worker 各得到一个 Workspace bind，且
   `source == target == canonical root`、`create_host_path=false`、固定非 root 用户；其他服务不得得到 Workspace bind
   或 grant 环境，任何业务容器都不得挂载 Docker socket。
 - 受保护 selection 只在目标 API/Worker ready、grant generation 与数据库 Active 一致后原子提交。`down` 撤销派生 grant
   但保留 selection；经确认的 `reset` 删除项目卷、selection 和 grant，但绝不删除宿主机 Workspace 文件。
+- rebind 的数据库提交、响应成功或普通 switch 成功均不足以提交 selection；只有新 binding 的 API/Worker ready 后才可提交。
+  响应丢失或 readiness 失败保留旧 selection、撤销未提交 grant，下一次显式 rebind 通过精确重放继续恢复。
 - `up --workspace` 与当前 selection 不同必须走完整 switch，不能直接覆盖状态文件。旧版没有 selection 时，用户显式传入原 Root，
   Registry 按 canonical path/fingerprint 复用既有 Workspace ID 和数据。
 - 切换顺序固定为 validate -> quiesce -> revoke -> prepare -> verify -> commit -> activate。未确认旧 runtime/bind
@@ -97,7 +113,10 @@
 | 首次无 selection 且 `up` 未传 Root | 启动业务 runtime 前失败，并提示 `up --workspace` |
 | 相对路径、控制字符、宿主机根目录、保留 runtime namespace | `WORKSPACE_PATH_*`；零目录创建、零 grant |
 | Root 不存在、不是目录或权限不足 | Registry 保留并标记 unavailable；selection 不更新 |
-| physical path/device/inode/binding version 不匹配 | `WORKSPACE_PATH_IDENTITY_CHANGED`；禁止重绑原 Workspace ID |
+| physical path/device/inode/fingerprint 不匹配 | `WORKSPACE_PATH_IDENTITY_CHANGED`；普通 up/restart/switch 禁止重绑原 Workspace ID |
+| identity changed 但 rebind 缺少精确 `--confirm REBIND` | 启动器在 Docker/DB rebind 前失败；selection 与 binding 不变 |
+| rebind 时存在 Active/Resume/operation/target/previous/control lease 或 mutation gate owner | `WORKSPACE_REBIND_CONFLICT`；即使是响应丢失后的精确重放也不得报告成功 |
+| rebind 提交后旧 runtime 心跳或旧 binding 重新注册 | `WORKSPACE_RUNTIME_BINDING_MISMATCH`；旧行保持 unavailable，不能恢复权限 |
 | 未显式初始化且目录不是 Git 仓库 | `WORKSPACE_GIT_REQUIRED`；目录内容不被修改 |
 | Git metadata 位于 Root 外 | `WORKSPACE_GIT_METADATA_OUTSIDE_ROOT`；不得扩大 bind |
 | state version 冲突或幂等键被不同请求复用 | 409；不得启动第二个 operation |
@@ -134,11 +153,13 @@
 - Path/Registry 单测：absolute/canonical/reserved/symlink、missing/permission/not-directory、fingerprint round trip、
   immutable identity、父子目录作为两个独立精确 Workspace。
 - PostgreSQL 集成：唯一 active、Registry identity/availability、state/operation/gate CAS、lease takeover、stale heartbeat、
-  并发切换和 terminal shape；不新增仅为本次重命名服务的迁移。
+  并发切换和 terminal shape；rebind raw update rejection、审计 append-only、事务一致性、精确 replay、旧 runtime fence、
+  binding generation 连续递增和有历史时 Down 拒绝。
 - Coordinator fault：quiescence timeout、revoke/DB/prepare/probe/commit/apply/readiness 失败、pre/post commit rollback、
   revoke 持续失败不终态化、瞬时恢复失败、旧 runtime 已消失时恢复 previous grant、previous identity 变化时收敛为
   failed + zero Active 并释放 mutation gate。
 - Launcher contract：首次必填、selection 权限/原子提交、同根幂等 switch、A/B 切换、失败不覆盖、restart/down/reset、
+  rebind 必须显式确认、响应丢失精确重放、readiness 前不提交 selection、rebind/switch binding generation 一致，
   Secret 不进入 argv/log，且不存在 Controller PID/log/token/bundle 生命周期。
 - Compose contract：主/helper 双 model；base zero bind；grant 模型只有 API/Worker exact bind；固定 IPv4 loopback 端口；API 内部 loopback；
   app/worker 使用 profile-aware runtime wait；consumer 通过固定 anchor 共享 namespace；helper 无 Docker socket、Workspace/secret/grant mount/env；无随机 host port、父目录或 legacy `/workspace`。

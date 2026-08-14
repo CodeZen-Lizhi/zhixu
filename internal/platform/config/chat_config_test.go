@@ -99,6 +99,13 @@ func TestValidateChatProviderAndSecurityBoundaries(t *testing.T) {
 		cfg.ChatBaseURL = "http://localhost:11434/v1"
 		cfg.ChatAPIKey = ""
 		return cfg
+	}(), func() Config {
+		cfg := enabled()
+		cfg.ChatProvider = ChatProviderOllama
+		cfg.ChatBaseURL = "http://127.0.0.1:11434"
+		cfg.ChatAPIKey = ""
+		cfg.ChatAPIStyle = ChatAPIStyleChatCompletions
+		return cfg
 	}()}
 	for _, cfg := range valid {
 		if err := cfg.Validate(); err != nil {
@@ -110,7 +117,7 @@ func TestValidateChatProviderAndSecurityBoundaries(t *testing.T) {
 		change func(*Config)
 		want   string
 	}{
-		{name: "unknown provider", change: func(cfg *Config) { cfg.ChatProvider = "ollama" }, want: "chat_provider"},
+		{name: "unknown provider", change: func(cfg *Config) { cfg.ChatProvider = "native-ollama" }, want: "chat_provider"},
 		{name: "disabled endpoint", change: func(cfg *Config) { cfg.ChatBaseURL = "https://secret.example.test" }, want: "must be empty"},
 		{name: "remote http", change: func(cfg *Config) { *cfg = enabled(); cfg.ChatBaseURL = "http://models.example.test" }, want: "https"},
 		{name: "userinfo", change: func(cfg *Config) { *cfg = enabled(); cfg.ChatBaseURL = "https://user:secret@models.example.test" }, want: "chat_base_url"},

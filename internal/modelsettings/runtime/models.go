@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
@@ -22,7 +23,7 @@ const (
 	ConnectionTargetChat = modelsettingsapplication.ConnectionTargetChat
 	// ConnectionTargetEmbedding identifies the Embedding connection test.
 	ConnectionTargetEmbedding = modelsettingsapplication.ConnectionTargetEmbedding
-	managedOllamaBaseURL      = "http://127.0.0.1:11434"
+	managedOllamaBaseURL      = modelsettingsdomain.ManagedOllamaBaseURL
 	configuredSecretProbe     = "model-settings-configured-secret"
 )
 
@@ -30,6 +31,7 @@ const (
 type Models struct {
 	runtime      *platformmodels.ModelRuntime
 	revision     int64
+	localDemand  localmodelruntime.Requirement
 	closeOnce    sync.Once
 	closeErr     error
 	closeRuntime func() error
@@ -57,6 +59,15 @@ func (models *Models) Revision() int64 {
 		return 0
 	}
 	return models.revision
+}
+
+// LocalDemand exposes only the canonical non-secret Ollama requirement used by
+// the lifecycle hold adapter. Online/disabled revisions return an empty set.
+func (models *Models) LocalDemand() localmodelruntime.Requirement {
+	if models == nil {
+		return localmodelruntime.Requirement{}
+	}
+	return models.localDemand
 }
 
 // ValidateEmbeddingVersion 校验本 generation 的 Embedder 与持久 Embedding Version 完整兼容。
@@ -166,7 +177,29 @@ func newModels(cfg config.Config, revision int64) (*Models, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Models{runtime: runtime, revision: revision, closeRuntime: runtime.Close}, nil
+	local := modelsettingsdomain.RequiresManagedOllama(modelsettingsdomain.Settings{
+		Chat: modelsettingsdomain.ChatSettings{
+			Provider: modelsettingsdomain.ChatProvider(cfg.ChatProvider), Model: cfg.ChatModel,
+			BaseURL: cfg.ChatBaseURL,
+		},
+		Embedding: modelsettingsdomain.EmbeddingSettings{
+			Provider: modelsettingsdomain.EmbeddingProvider(cfg.EmbeddingProvider), Model: cfg.EmbeddingModel,
+		},
+	})
+	requirement, requirementErr := localmodelruntime.NewRequirement(localModels(local))
+	if requirementErr != nil {
+		_ = runtime.Close()
+		return nil, requirementErr
+	}
+	return &Models{runtime: runtime, revision: revision, localDemand: requirement, closeRuntime: runtime.Close}, nil
+}
+
+func localModels(requirement modelsettingsdomain.ManagedOllamaRequirement) []localmodelruntime.ModelRef {
+	models := make([]localmodelruntime.ModelRef, 0, len(requirement.Models))
+	for _, model := range requirement.Models {
+		models = append(models, localmodelruntime.ModelRef(model))
+	}
+	return models
 }
 
 // WithoutModelCredentials 返回移除模型 Credential 的长生命周期配置副本。
@@ -314,10 +347,15 @@ func secretValue(secret modelsettingsdomain.Secret) string {
 }
 
 func validateManagedEndpoints(settings modelsettingsdomain.Settings) error {
-	if settings.Chat.Provider == modelsettingsdomain.ChatProviderOpenAICompatible {
+	switch settings.Chat.Provider {
+	case modelsettingsdomain.ChatProviderOpenAICompatible:
 		parsed, err := url.Parse(settings.Chat.BaseURL)
-		if err != nil || parsed.Scheme != "https" && settings.Chat.BaseURL != managedOllamaBaseURL {
-			return invalid(errors.New("managed chat endpoint must use https or the fixed loopback relay"))
+		if settings.Chat.BaseURL != managedOllamaBaseURL && (err != nil || parsed.Scheme != "https") {
+			return invalid(errors.New("managed openai-compatible chat endpoint must use https"))
+		}
+	case modelsettingsdomain.ChatProviderOllama:
+		if settings.Chat.BaseURL != managedOllamaBaseURL || settings.Chat.APIStyle != modelsettingsdomain.ChatAPIStyleChatCompletions {
+			return invalid(errors.New("managed ollama chat must use the fixed loopback relay and chat completions"))
 		}
 	}
 	switch settings.Embedding.Provider {

@@ -97,6 +97,33 @@ func TestServiceSaveRejectsSecretEndpointRebindBeforeValidation(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsLegacyRelayForNewDraftBeforeValidation(t *testing.T) {
+	t.Parallel()
+
+	settings := configuredServiceSettings()
+	settings.Chat.BaseURL = domain.ManagedOllamaBaseURL
+	repository := &serviceTestRepository{snapshot: domain.Snapshot{DesiredRevision: 3}}
+	validatorCalls := 0
+	service, err := NewService(repository, ValidatorFunc(func(context.Context, domain.Settings, domain.SecretConfiguration) error {
+		validatorCalls++
+		return nil
+	}), 20*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Save(context.Background(), SaveCommand{
+		ExpectedRevision: 3, Settings: settings, ChatSecret: domain.ClearSecret(),
+		EmbeddingSecret: domain.ClearSecret(), CreatedBy: "service-test",
+	})
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != domain.ErrorCodeInvalid {
+		t.Fatalf("error=%v", err)
+	}
+	if validatorCalls != 0 || repository.saveCalls != 0 {
+		t.Fatalf("validation calls=%d save calls=%d", validatorCalls, repository.saveCalls)
+	}
+}
+
 type serviceTestRepository struct {
 	RevisionStore
 	snapshot  domain.Snapshot
@@ -126,15 +153,51 @@ func (repository *serviceTestRepository) LoadRevision(context.Context, int64) (d
 }
 
 type serviceTestConnectionTester struct {
-	err      error
-	target   ConnectionTarget
-	resolved domain.ResolvedSettings
+	err          error
+	target       ConnectionTarget
+	resolved     domain.ResolvedSettings
+	events       *[]string
+	beforeReturn func()
 }
 
 func (tester *serviceTestConnectionTester) TestResolvedConnection(_ context.Context, target ConnectionTarget, resolved domain.ResolvedSettings) error {
+	if tester.events != nil {
+		*tester.events = append(*tester.events, "probe")
+	}
 	tester.target = target
 	tester.resolved = resolved
+	if tester.beforeReturn != nil {
+		tester.beforeReturn()
+	}
 	return tester.err
+}
+
+type serviceTestLifecycle struct {
+	events *[]string
+}
+
+func (lifecycle *serviceTestLifecycle) BeginTest(context.Context, TestLifecycleCommand) (TestLifecycleLease, error) {
+	*lifecycle.events = append(*lifecycle.events, "begin")
+	return serviceTestLifecycleLease{events: lifecycle.events}, nil
+}
+
+type serviceTestLifecycleLease struct {
+	events *[]string
+}
+
+func (lease serviceTestLifecycleLease) Close(context.Context) error {
+	*lease.events = append(*lease.events, "close")
+	return nil
+}
+
+func (lease serviceTestLifecycleLease) Complete(context.Context, string, bool) error {
+	*lease.events = append(*lease.events, "complete")
+	return nil
+}
+
+func (lease serviceTestLifecycleLease) Abandon(context.Context) error {
+	*lease.events = append(*lease.events, "abandon")
+	return nil
 }
 
 func TestSettingsManagerTestOwnsResolvedSecretLifecycle(t *testing.T) {
@@ -162,7 +225,7 @@ func TestSettingsManagerTestOwnsResolvedSecretLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := manager.Test(context.Background(), TestCommand{Target: ConnectionTargetChat, Draft: DraftCommand{
+	result, err := manager.Test(context.Background(), TestCommand{Target: ConnectionTargetChat, IdempotencyKey: "test-chat-secret-lifecycle", Draft: DraftCommand{
 		ExpectedRevision: 3, Settings: settings, ChatSecret: domain.KeepSecret(), EmbeddingSecret: domain.ClearSecret(),
 	}})
 	if err != nil {
@@ -204,7 +267,7 @@ func TestSettingsManagerTestDestroysResolvedSecretsOnProviderFailure(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = manager.Test(context.Background(), TestCommand{Target: ConnectionTargetChat, Draft: DraftCommand{
+	_, err = manager.Test(context.Background(), TestCommand{Target: ConnectionTargetChat, IdempotencyKey: "test-chat-provider-error", Draft: DraftCommand{
 		ExpectedRevision: 3, Settings: settings, ChatSecret: domain.KeepSecret(), EmbeddingSecret: domain.ClearSecret(),
 	}})
 	if !errors.Is(err, providerErr) {
@@ -212,6 +275,141 @@ func TestSettingsManagerTestDestroysResolvedSecretsOnProviderFailure(t *testing.
 	}
 	assertSecretBufferCleared(t, repository.resolved.ChatAPIKey)
 	assertSecretBufferCleared(t, repository.resolved.EmbeddingAPIKey)
+}
+
+func TestSettingsManagerTestUsesManagedLifecycleForLocalDraft(t *testing.T) {
+	settings := domain.CanonicalDisabledSettings()
+	settings.Chat.Provider = domain.ChatProviderOllama
+	settings.Chat.BaseURL = domain.ManagedOllamaBaseURL
+	settings.Chat.Model = "qwen2.5:3b"
+	settings.Chat.ModelVersion = "qwen2.5:3b"
+	repository := &serviceTestRepository{
+		snapshot: domain.Snapshot{DesiredRevision: 3, DesiredSettings: domain.SettingsSummary{Settings: settings}},
+		resolved: domain.ResolvedSettings{Revision: 3, Settings: settings},
+	}
+	events := make([]string, 0, 3)
+	manager, err := NewSettingsManagerWithLifecycle(
+		repository,
+		ValidatorFunc(func(context.Context, domain.Settings, domain.SecretConfiguration) error { return nil }),
+		&serviceTestConnectionTester{events: &events},
+		&serviceTestLifecycle{events: &events},
+		20*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.Test(context.Background(), TestCommand{Target: ConnectionTargetChat, IdempotencyKey: "test-chat-local-lifecycle", Draft: DraftCommand{
+		ExpectedRevision: 3, Settings: settings, ChatSecret: domain.ClearSecret(), EmbeddingSecret: domain.ClearSecret(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Model != settings.Chat.Model {
+		t.Fatalf("result=%+v", result)
+	}
+	want := []string{"begin", "probe", "complete"}
+	if strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Fatalf("lifecycle order=%v, want %v", events, want)
+	}
+}
+
+func TestSettingsManagerCancelledLocalProbeAbandonsLifecycle(t *testing.T) {
+	settings := domain.CanonicalDisabledSettings()
+	settings.Chat.Provider = domain.ChatProviderOllama
+	settings.Chat.BaseURL = domain.ManagedOllamaBaseURL
+	settings.Chat.Model = "qwen2.5:3b"
+	settings.Chat.ModelVersion = "qwen2.5:3b"
+	repository := &serviceTestRepository{
+		snapshot: domain.Snapshot{DesiredRevision: 3, DesiredSettings: domain.SettingsSummary{Settings: settings}},
+		resolved: domain.ResolvedSettings{Revision: 3, Settings: settings},
+	}
+	events := make([]string, 0, 3)
+	manager, err := NewSettingsManagerWithLifecycle(
+		repository,
+		ValidatorFunc(func(context.Context, domain.Settings, domain.SecretConfiguration) error { return nil }),
+		&serviceTestConnectionTester{events: &events, err: context.Canceled},
+		&serviceTestLifecycle{events: &events},
+		20*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.Test(context.Background(), TestCommand{Target: ConnectionTargetChat, IdempotencyKey: "cancel-chat-local-probe", Draft: DraftCommand{
+		ExpectedRevision: 3, Settings: settings, ChatSecret: domain.ClearSecret(), EmbeddingSecret: domain.ClearSecret(),
+	}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want cancellation", err)
+	}
+	want := []string{"begin", "probe", "abandon"}
+	if strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Fatalf("lifecycle order=%v, want %v", events, want)
+	}
+}
+
+func TestSettingsManagerSuccessfulLocalProbeCompletesAfterClientCancellation(t *testing.T) {
+	settings := domain.CanonicalDisabledSettings()
+	settings.Chat.Provider = domain.ChatProviderOllama
+	settings.Chat.BaseURL = domain.ManagedOllamaBaseURL
+	settings.Chat.Model = "qwen2.5:3b"
+	settings.Chat.ModelVersion = "qwen2.5:3b"
+	repository := &serviceTestRepository{
+		snapshot: domain.Snapshot{DesiredRevision: 3, DesiredSettings: domain.SettingsSummary{Settings: settings}},
+		resolved: domain.ResolvedSettings{Revision: 3, Settings: settings},
+	}
+	events := make([]string, 0, 3)
+	ctx, cancel := context.WithCancel(context.Background())
+	manager, err := NewSettingsManagerWithLifecycle(
+		repository,
+		ValidatorFunc(func(context.Context, domain.Settings, domain.SecretConfiguration) error { return nil }),
+		&serviceTestConnectionTester{events: &events, beforeReturn: cancel},
+		&serviceTestLifecycle{events: &events},
+		20*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.Test(ctx, TestCommand{Target: ConnectionTargetChat, IdempotencyKey: "completed-before-client-cancel", Draft: DraftCommand{
+		ExpectedRevision: 3, Settings: settings, ChatSecret: domain.ClearSecret(), EmbeddingSecret: domain.ClearSecret(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"begin", "probe", "complete"}
+	if strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Fatalf("lifecycle order=%v, want %v", events, want)
+	}
+}
+
+func TestSettingsManagerTestDoesNotUseEmbeddingLifecycleForRemoteChatTarget(t *testing.T) {
+	settings := configuredServiceSettings()
+	settings.Embedding.Provider = domain.EmbeddingProviderOllama
+	settings.Embedding.BaseURL = domain.ManagedOllamaBaseURL
+	settings.Embedding.Model = "nomic-embed-text"
+	settings.Embedding.Dimensions = 768
+	repository := &serviceTestRepository{
+		snapshot: domain.Snapshot{DesiredRevision: 3, DesiredSettings: domain.SettingsSummary{Settings: settings, Secrets: domain.SecretConfiguration{ChatConfigured: true}}},
+		resolved: domain.ResolvedSettings{Revision: 3, Settings: settings},
+	}
+	events := make([]string, 0, 1)
+	manager, err := NewSettingsManagerWithLifecycle(
+		repository,
+		ValidatorFunc(func(context.Context, domain.Settings, domain.SecretConfiguration) error { return nil }),
+		&serviceTestConnectionTester{events: &events},
+		&serviceTestLifecycle{events: &events},
+		20*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.Test(context.Background(), TestCommand{Target: ConnectionTargetChat, IdempotencyKey: "test-chat-local-failure", Draft: DraftCommand{
+		ExpectedRevision: 3, Settings: settings, ChatSecret: domain.KeepSecret(), EmbeddingSecret: domain.ClearSecret(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(events, ",") != "probe" {
+		t.Fatalf("remote chat used unrelated embedding lifecycle: %v", events)
+	}
 }
 
 func assertSecretBufferCleared(t *testing.T, secret domain.Secret) {

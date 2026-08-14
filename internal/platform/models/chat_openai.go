@@ -14,6 +14,8 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
+const ollamaConnectionProbeMaxTokens = 1
+
 // OpenAIChatOptions 是 OpenAI-Compatible Chat Adapter 的 Composition Root 输入。
 type OpenAIChatOptions struct {
 	Client           *http.Client
@@ -26,6 +28,7 @@ type OpenAIChatOptions struct {
 	MaxRequestBytes  int64
 	MaxResponseBytes int64
 	APIStyle         ChatAPIStyle
+	Provider         string
 }
 
 // OpenAICompatibleChatModel 通过直接 HTTP 执行单次结构化 Chat 调用。
@@ -44,7 +47,7 @@ func NewOpenAICompatibleChatModel(options OpenAIChatOptions) (*OpenAICompatibleC
 		client: options.Client, baseURL: options.BaseURL, apiKey: options.APIKey,
 		model: options.Model, modelVersion: options.ModelVersion, adapterVersion: options.AdapterVersion, timeout: options.Timeout,
 		maxRequestBytes: options.MaxRequestBytes, maxResponseBytes: options.MaxResponseBytes,
-		apiStyle: options.APIStyle,
+		apiStyle: options.APIStyle, provider: options.Provider,
 	})
 	if err != nil {
 		return nil, err
@@ -115,6 +118,9 @@ func (model *OpenAICompatibleChatModel) ProbeConnection(ctx context.Context) err
 		Messages: []openAIChatRequestMessage{
 			{Role: string(agentapplication.MessageRoleUser), Content: "test"},
 		},
+	}
+	if model.http.contract.Provider == "ollama" {
+		payload.MaxTokens = ollamaConnectionProbeMaxTokens
 	}
 	var response openAIChatProbeResponse
 	if err := model.http.probe(ctx, payload, &response); err != nil {
@@ -283,8 +289,9 @@ type openAIChatRequest struct {
 }
 
 type openAIChatProbeRequest struct {
-	Model    string                     `json:"model"`
-	Messages []openAIChatRequestMessage `json:"messages"`
+	Model     string                     `json:"model"`
+	Messages  []openAIChatRequestMessage `json:"messages"`
+	MaxTokens int                        `json:"max_tokens,omitempty"`
 }
 
 type openAIChatProbeResponse struct {

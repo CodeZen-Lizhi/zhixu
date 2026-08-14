@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
@@ -33,19 +34,22 @@ const (
 var errUsage = errors.New("invalid workspacectl arguments")
 
 type commandConfig struct {
-	action            string
-	composeFile       string
-	environmentFile   string
-	grantOverride     string
-	composeProject    string
-	dockerExecutable  string
-	databaseURLFD     int
-	controlInstanceID foundation.ID
-	timeout           time.Duration
-	workspaceRoot     string
-	workspaceName     string
-	idempotencyKey    string
-	initializeGit     bool
+	action              string
+	composeFile         string
+	environmentFile     string
+	grantOverride       string
+	composeProject      string
+	dockerExecutable    string
+	databaseURLFD       int
+	controlInstanceID   foundation.ID
+	timeout             time.Duration
+	workspaceRoot       string
+	workspaceName       string
+	workspaceID         foundation.ID
+	expectedFingerprint string
+	idempotencyKey      string
+	confirmation        string
+	initializeGit       bool
 }
 
 type commandResult struct {
@@ -130,7 +134,14 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	repository, err := workspacepostgres.NewRepository(database.DB())
+	auditStore, err := auditpostgres.NewStore(database.DB())
+	if err != nil {
+		writeFailure(stderr, &workspacecontrol.Fault{
+			Code: "WORKSPACE_CONTROL_REPOSITORY_UNAVAILABLE", Message: "Workspace 控制存储不可用", Retryable: true,
+		})
+		return 1
+	}
+	repository, err := workspacepostgres.NewRepository(database.DB(), workspacepostgres.WithAuditAppender(auditStore))
 	if err != nil {
 		writeFailure(stderr, &workspacecontrol.Fault{
 			Code: "WORKSPACE_CONTROL_REPOSITORY_UNAVAILABLE", Message: "Workspace 控制存储不可用", Retryable: true,
@@ -145,6 +156,32 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 			Code: "WORKSPACE_CONTROL_SERVICE_UNAVAILABLE", Message: "Workspace 控制服务不可用", Retryable: true,
 		})
 		return 1
+	}
+	if config.action == "rebind" {
+		validated, validationErr := (workspacecontrol.PathValidator{}).Validate(config.workspaceRoot)
+		if validationErr != nil || validated.CanonicalPath != config.workspaceRoot {
+			if validationErr == nil {
+				validationErr = &workspacecontrol.Fault{Code: "WORKSPACE_PATH_INVALID", Message: "Workspace 路径无效"}
+			}
+			writeFailure(stderr, failureFromError(validationErr))
+			return 1
+		}
+		outcome, rebindErr := control.RebindWorkspace(operationContext, workspaceapplication.RebindWorkspaceCommand{
+			ControllerInstanceID: config.controlInstanceID, WorkspaceID: config.workspaceID,
+			CanonicalRoot: validated.CanonicalPath, OldRootFingerprint: config.expectedFingerprint,
+			NewRootFingerprint: validated.Fingerprint.Digest(), IdempotencyKey: config.idempotencyKey,
+		})
+		if rebindErr != nil {
+			writeFailure(stderr, failureFromError(rebindErr))
+			return 1
+		}
+		if err := writeResult(stdout, rebindResult(outcome)); err != nil {
+			writeFailure(stderr, &workspacecontrol.Fault{
+				Code: "WORKSPACE_CONTROL_RESULT_UNAVAILABLE", Message: "Workspace 控制结果无法输出", Retryable: true,
+			})
+			return 1
+		}
+		return 0
 	}
 	driver, err := workspacecontrol.NewComposeDriver(workspacecontrol.ComposeDriverOptions{
 		Executable: config.dockerExecutable, Project: config.composeProject, BaseFile: config.composeFile,
@@ -236,6 +273,13 @@ func parseConfig(arguments []string) (commandConfig, error) {
 		flags.StringVar(&config.workspaceName, "workspace-name", "", "Workspace display name")
 		flags.StringVar(&config.idempotencyKey, "idempotency-key", "", "stable switch idempotency key")
 		flags.BoolVar(&config.initializeGit, "initialize-git", false, "initialize Git when the root is not a repository")
+	} else if config.action == "rebind" {
+		var workspaceID string
+		flags.StringVar(&config.workspaceRoot, "workspace-root", "", "host Workspace root")
+		flags.StringVar(&workspaceID, "workspace-id", "", "selected Workspace UUID")
+		flags.StringVar(&config.expectedFingerprint, "expected-root-fingerprint", "", "selected root fingerprint")
+		flags.StringVar(&config.idempotencyKey, "idempotency-key", "", "stable rebind idempotency key")
+		flags.StringVar(&config.confirmation, "confirm", "", "explicit rebind confirmation")
 	} else if config.action != "reconcile" {
 		return commandConfig{}, errUsage
 	}
@@ -259,6 +303,15 @@ func parseConfig(arguments []string) (commandConfig, error) {
 	}
 	if config.action == "switch" && (config.workspaceRoot == "" || config.idempotencyKey == "") {
 		return commandConfig{}, errUsage
+	}
+	if config.action == "rebind" {
+		parsedWorkspaceID, parseErr := foundation.ParseID(flags.Lookup("workspace-id").Value.String())
+		if parseErr != nil || string(parsedWorkspaceID) != flags.Lookup("workspace-id").Value.String() ||
+			config.workspaceRoot == "" || config.idempotencyKey == "" || config.confirmation != "REBIND" ||
+			len(config.expectedFingerprint) != 64 {
+			return commandConfig{}, errUsage
+		}
+		config.workspaceID = parsedWorkspaceID
 	}
 	return config, nil
 }
@@ -366,6 +419,18 @@ func switchResult(outcome workspacecontrol.SwitchOutcome) commandResult {
 	result.OperationID = string(outcome.Operation.ID)
 	result.OperationResult = string(outcome.Operation.Result)
 	return result
+}
+
+func rebindResult(outcome workspacedomain.WorkspaceBindingMigrationResult) commandResult {
+	status := "reconciled"
+	if outcome.Changed {
+		status = "rebound"
+	}
+	return commandResult{
+		Schema: resultSchema, Action: "rebind", Status: status, Changed: outcome.Changed,
+		WorkspaceID: string(outcome.Workspace.ID), CanonicalRoot: outcome.Workspace.RootPath,
+		RootFingerprint: outcome.Workspace.RootFingerprint, BindingVersion: outcome.Workspace.BindingVersion,
+	}
 }
 
 func failureFromError(err error) *workspacecontrol.Fault {

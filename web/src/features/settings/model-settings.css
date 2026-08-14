@@ -202,13 +202,26 @@
 }
 
 .model-settings-fields > label,
-.model-secret-control__heading > label {
+.model-secret-control__heading > label,
+.model-settings-managed-location {
   display: grid;
   min-width: 0;
   gap: .35rem;
   color: var(--muted);
   font-size: .72rem;
   font-weight: 800;
+}
+
+.model-settings-managed-location {
+  border-left: 3px solid var(--blue);
+  padding: .65rem .75rem;
+  background: rgb(255 255 255 / 32%);
+}
+
+.model-settings-managed-location strong {
+  color: var(--ink);
+  font-size: .85rem;
+  overflow-wrap: anywhere;
 }
 
 .model-settings-fields input,

@@ -97,6 +97,14 @@ Acquire 一次不可拆分的 payload，并在最终化后 Release；旧 generat
 owned Transport。`./zhixu restart` 仍可用于升级和故障恢复，但不是配置生效步骤，且不会在 idle 时自动
 应用 pending desired。完整决策见 [ADR-0022](adr/0022-model-runtime-hot-activation.md)。
 
+受管理本地 Ollama 的进程与数据边界固定如下：主 Compose 保留一个
+`local-model-runtime` 管理容器；管理器常驻但不等同于推理服务，只有 active、候选、
+测试或仍被 generation lease 持有的本地模型需求存在时，才在同一容器内启动唯一的
+`ollama serve` 子进程。模型权重位于独立 project-owned Docker Volume，停止子进程、
+重建管理容器或切换到线上模型都不会删除该卷。Chat 与 Embedding 共用这个服务，
+任一需要即运行，全部线上/关闭且停止栅栏满足后才停止。控制面、计算面和数据面的
+完整取舍记录在 [ADR-0023](adr/0023-managed-local-ollama-runtime.md)。
+
 Retrieval 不以“当前 settings Embedding”覆盖持久索引事实。Search 先读取 Active Index/Embedding
 Version，再按 Provider、Adapter/Model、dimensions、normalization、distance、endpoint identity、limits
 及 revision hint Acquire 兼容 generation；Source Refresh、Vector Builder 与 Reindex 在完整操作期间持有

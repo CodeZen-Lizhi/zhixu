@@ -30,6 +30,8 @@ const (
 	ErrorCodeRuntimeBindingMismatch       = "WORKSPACE_RUNTIME_BINDING_MISMATCH"
 	ErrorCodeWorkspaceAlreadyRemoved      = "WORKSPACE_ALREADY_REMOVED"
 	ErrorCodeWorkspaceAvailabilityInvalid = "WORKSPACE_AVAILABILITY_INVALID"
+	ErrorCodeBindingRebindInvalid         = "WORKSPACE_REBIND_INVALID"
+	ErrorCodeBindingRebindConflict        = "WORKSPACE_REBIND_CONFLICT"
 )
 
 // SwitchPhase is the durable single-grant operation phase.
@@ -183,6 +185,24 @@ type WorkspaceRemoval struct {
 	WorkspaceID     foundation.ID
 	ExpectedVersion int64
 	RemovedAt       time.Time
+}
+
+// WorkspaceBindingMigration is the explicit, fail-closed replacement of a
+// physical root identity while preserving the logical Workspace ID.
+type WorkspaceBindingMigration struct {
+	ID                   foundation.ID
+	ControllerInstanceID foundation.ID
+	IdempotencyKey       string
+	WorkspaceID          foundation.ID
+	CanonicalRoot        string
+	OldRootFingerprint   string
+	NewRootFingerprint   string
+}
+
+// WorkspaceBindingMigrationResult reports the persisted post-rebind identity.
+type WorkspaceBindingMigrationResult struct {
+	Workspace Workspace
+	Changed   bool
 }
 
 // ValidSwitchPhase reports whether phase is persistable.

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 )
@@ -133,6 +134,20 @@ type GenerationFactory[T any] interface {
 	Close(T)
 }
 
+// GenerationHold pins a local-model demand while one immutable generation is
+// still available to API/Worker consumers. Release is idempotent.
+type GenerationHold interface {
+	Renew(context.Context) error
+	Release(context.Context) error
+}
+
+// GenerationLifecycle is optional for static/online-only deployments. Managed
+// model hosts use it to publish generation holds without exposing database
+// details to RuntimeHost callers.
+type GenerationLifecycle interface {
+	Acquire(context.Context, RuntimeBinding, localmodelruntime.Requirement) (GenerationHold, error)
+}
+
 // InitialRuntime 是构造成功后转交给 Host 的初始 serving generation。
 type InitialRuntime[T any] struct {
 	Binding     RuntimeBinding
@@ -146,6 +161,8 @@ type RuntimeHostOptions[T any] struct {
 	Factory GenerationFactory[T]
 	// EmbeddingCompatible 必须是只读取 generation 的快速纯函数；Host 会在 acquisition 锁内调用它。
 	EmbeddingCompatible func(T, retrievaldomain.EmbeddingVersion) error
+	LocalDemand         func(T) (localmodelruntime.Requirement, error)
+	Lifecycle           GenerationLifecycle
 	BuildTimeout        time.Duration
 	HistoricalLimit     int
 }
@@ -169,6 +186,8 @@ type RuntimeHost[T any] struct {
 	identity            RuntimeBinding
 	factory             GenerationFactory[T]
 	embeddingCompatible func(T, retrievaldomain.EmbeddingVersion) error
+	localDemand         func(T) (localmodelruntime.Requirement, error)
+	lifecycle           GenerationLifecycle
 	buildTimeout        time.Duration
 	historicalLimit     int
 	lifetimeContext     context.Context
@@ -205,6 +224,7 @@ type runtimeGeneration[T any] struct {
 	binding RuntimeBinding
 	value   T
 	ready   bool
+	hold    GenerationHold
 
 	references int
 	closeOnce  sync.Once
@@ -215,6 +235,11 @@ func (generation *runtimeGeneration[T]) close(factory GenerationFactory[T]) {
 		return
 	}
 	generation.closeOnce.Do(func() {
+		if generation.hold != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), generationHoldReleaseTimeout)
+			_ = generation.hold.Release(ctx)
+			cancel()
+		}
 		factory.Close(generation.value)
 	})
 }
@@ -238,6 +263,7 @@ type generationPreparation struct {
 const (
 	defaultRuntimeBuildTimeout    = 30 * time.Second
 	defaultRuntimeHistoricalLimit = 8
+	generationHoldReleaseTimeout  = 5 * time.Second
 )
 
 // NewRuntimeHost 创建以一个已构造 generation 开始服务的进程内 Host。
@@ -268,6 +294,8 @@ func NewRuntimeHost[T any](options RuntimeHostOptions[T]) (*RuntimeHost[T], erro
 		identity:            options.Initial.Binding,
 		factory:             options.Factory,
 		embeddingCompatible: options.EmbeddingCompatible,
+		localDemand:         options.LocalDemand,
+		lifecycle:           options.Lifecycle,
 		buildTimeout:        buildTimeout,
 		historicalLimit:     historicalLimit,
 		lifetimeContext:     lifetimeContext,
@@ -281,6 +309,10 @@ func NewRuntimeHost[T any](options RuntimeHostOptions[T]) (*RuntimeHost[T], erro
 	host.active = &runtimeGeneration[T]{
 		id: host.nextID, binding: options.Initial.Binding, value: options.Initial.Value,
 		ready: !options.Initial.Unavailable,
+	}
+	if err := host.attachHold(context.Background(), host.active); err != nil {
+		cancelLifetime()
+		return nil, err
 	}
 	return host, nil
 }
@@ -702,6 +734,12 @@ func (host *RuntimeHost[T]) buildRevision(revision int64, call *generationBuild)
 	var built *runtimeGeneration[T]
 	if err == nil {
 		built = &runtimeGeneration[T]{binding: host.bindingForRevision(revision), value: value, ready: true}
+		if err = host.attachHold(ctx, built); err != nil {
+			built.close(host.factory)
+			built = nil
+		}
+	}
+	if err == nil {
 		if err = host.factory.Probe(ctx, value); err != nil {
 			built.close(host.factory)
 			built = nil
@@ -731,6 +769,62 @@ func (host *RuntimeHost[T]) buildRevision(revision int64, call *generationBuild)
 	for _, generation := range cleanup {
 		generation.close(host.factory)
 	}
+}
+
+func (host *RuntimeHost[T]) attachHold(ctx context.Context, generation *runtimeGeneration[T]) error {
+	if host == nil || generation == nil || host.lifecycle == nil || host.localDemand == nil {
+		return nil
+	}
+	requirement, err := host.localDemand(generation.value)
+	if err != nil {
+		return err
+	}
+	if len(requirement.Models) == 0 {
+		return nil
+	}
+	hold, err := host.lifecycle.Acquire(ctx, generation.binding, requirement)
+	if err != nil {
+		return err
+	}
+	generation.hold = hold
+	return nil
+}
+
+// RenewHolds refreshes every live local generation hold. It intentionally does
+// not hold the Host mutex while making database calls.
+func (host *RuntimeHost[T]) RenewHolds(ctx context.Context) error {
+	if host == nil || ctx == nil {
+		return runtimeBindingError(errors.New("runtime generation hold context is invalid"))
+	}
+	host.mu.Lock()
+	holds := make([]GenerationHold, 0, 1)
+	seen := make(map[*runtimeGeneration[T]]struct{})
+	collect := func(generation *runtimeGeneration[T]) {
+		if generation != nil && generation.hold != nil {
+			if _, ok := seen[generation]; ok {
+				return
+			}
+			seen[generation] = struct{}{}
+			holds = append(holds, generation.hold)
+		}
+	}
+	collect(host.active)
+	if host.candidate != nil {
+		collect(host.candidate.generation)
+	}
+	for _, generation := range host.historical {
+		collect(generation)
+	}
+	for _, generation := range host.retiring {
+		collect(generation)
+	}
+	host.mu.Unlock()
+	for _, hold := range holds {
+		if err := hold.Renew(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (host *RuntimeHost[T]) bindingForRevision(revision int64) RuntimeBinding {

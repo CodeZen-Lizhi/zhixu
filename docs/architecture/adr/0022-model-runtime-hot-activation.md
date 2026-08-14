@@ -14,7 +14,8 @@ Managed 模型设置把 `desired`（已保存）、`active`（全局默认）和
 
 本次决策必须同时满足以下约束：
 
-- 普通 Save/Apply 在现有 API/Worker 进程内完成，不重启、替换或停止容器，也不新增常驻服务；
+- 普通 Save/Apply 在现有 API/Worker 进程内完成，不重启、替换或停止业务容器；本地 Ollama 的按需管理器例外由
+  [ADR-0023](0023-managed-local-ollama-runtime.md) 收窄定义；
 - API 与 Worker 必须准备同一个 exact revision，Chat、Embedding 和角色私有依赖图不能部分生效；
 - 已开始的模型操作和已 Claim Attempt 使用冻结 generation，切换不等待所有在途任务排空；
 - Search、Vector Build、Source Refresh 与 Reindex 继续遵循持久 Embedding/Index Contract；
@@ -28,7 +29,7 @@ Managed 模型设置把 `desired`（已保存）、`active`（全局默认）和
 
 | ID | 需求 | 权重 |
 |---|---|---:|
-| R1 | 本地拓扑内无容器重启、无新增常驻依赖 | 20 |
+| R1 | 正常 Apply 无 API/Worker 容器重启；本地运行时不扩大 Docker 权限 | 20 |
 | R2 | exact target 的跨进程提交、CAS/lease 与 commit-side recovery | 25 |
 | R3 | 完整 immutable generation、在途 lease 和 owned resource 生命周期 | 20 |
 | R4 | Workflow Attempt 与 Embedding/Index 历史 provenance | 20 |

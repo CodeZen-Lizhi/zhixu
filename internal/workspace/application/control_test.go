@@ -84,9 +84,64 @@ func TestControlServiceRejectsInvalidBindingBeforePersistence(t *testing.T) {
 	}
 }
 
+func TestControlServiceRebindsExactWorkspaceIdentity(t *testing.T) {
+	store := &controlContractStore{}
+	now := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	eventID := foundation.ID("67200000-0000-4000-8000-000000000030")
+	service, err := NewControlService(store, store, &sequenceIDGenerator{ids: []foundation.ID{eventID}}, foundation.FixedClock{Value: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := RebindWorkspaceCommand{
+		ControllerInstanceID: "67200000-0000-4000-8000-000000000031",
+		WorkspaceID:          "67200000-0000-4000-8000-000000000032",
+		CanonicalRoot:        "/tmp/workspace-rebound",
+		OldRootFingerprint:   strings.Repeat("a", 64),
+		NewRootFingerprint:   strings.Repeat("b", 64),
+		IdempotencyKey:       "workspace-rebind",
+	}
+	result, err := service.RebindWorkspace(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Changed || result.Workspace.ID != command.WorkspaceID || store.rebind.ID != eventID ||
+		store.rebind.ControllerInstanceID != command.ControllerInstanceID {
+		t.Fatalf("result=%#v migration=%#v", result, store.rebind)
+	}
+}
+
+func TestControlServiceRejectsUnsafeRebindBeforePersistence(t *testing.T) {
+	store := &controlContractStore{}
+	service, err := NewControlService(store, store, &sequenceIDGenerator{}, foundation.FixedClock{Value: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.RebindWorkspace(context.Background(), RebindWorkspaceCommand{
+		ControllerInstanceID: "67200000-0000-4000-8000-000000000041",
+		WorkspaceID:          "67200000-0000-4000-8000-000000000042",
+		CanonicalRoot:        "/tmp/workspace-rebound",
+		OldRootFingerprint:   strings.Repeat("a", 64),
+		NewRootFingerprint:   strings.Repeat("a", 64),
+		IdempotencyKey:       "workspace-rebind",
+	})
+	requireClassifiedError(t, err, foundation.ErrorInvalidInput, domain.ErrorCodeBindingRebindInvalid)
+	if store.rebind.ID != "" {
+		t.Fatalf("invalid rebind reached persistence: %#v", store.rebind)
+	}
+}
+
 type controlContractStore struct {
 	reservations []domain.WorkspaceReservation
 	begin        BeginSwitchStoreCommand
+	rebind       domain.WorkspaceBindingMigration
+}
+
+func (store *controlContractStore) RebindWorkspace(_ context.Context, migration domain.WorkspaceBindingMigration) (domain.WorkspaceBindingMigrationResult, error) {
+	store.rebind = migration
+	return domain.WorkspaceBindingMigrationResult{Workspace: domain.Workspace{
+		ID: migration.WorkspaceID, RootPath: migration.CanonicalRoot,
+		RootFingerprint: migration.NewRootFingerprint, BindingVersion: 2,
+	}, Changed: true}, nil
 }
 
 func (store *controlContractStore) ResolveWorkspace(_ context.Context, reservation domain.WorkspaceReservation) (domain.WorkspaceResolution, error) {

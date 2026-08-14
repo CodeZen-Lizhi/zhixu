@@ -11,6 +11,7 @@ import (
 
 	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/jackc/pgx/v5"
@@ -26,6 +27,22 @@ type DB interface {
 
 // Option configures transaction-bound side facts for model settings writes.
 type Option func(*Repository) error
+
+// WithLocalModelLifecycle binds the transaction-aware managed Ollama facts.
+// The repository never owns or starts a runtime process; it only uses this
+// boundary while it already holds the model-settings transaction.
+func WithLocalModelLifecycle(lifecycle localmodelruntime.TxLifecycle) Option {
+	return func(repository *Repository) error {
+		if nilInterface(lifecycle) {
+			return invalid(errors.New("local model lifecycle is nil"))
+		}
+		if !nilInterface(repository.localLifecycle) {
+			return invalid(errors.New("local model lifecycle is duplicated"))
+		}
+		repository.localLifecycle = lifecycle
+		return nil
+	}
+}
 
 // WithSecretSealer configures the process-owned AEAD boundary used by revision writes and reads.
 func WithSecretSealer(sealer application.SecretSealer) Option {
@@ -68,9 +85,10 @@ func WithAuditAppender(appender auditapplication.Appender) Option {
 
 // Repository is the PostgreSQL atomic boundary for model settings.
 type Repository struct {
-	db     DB
-	sealer application.SecretSealer
-	audit  application.SettingsAuditAppender
+	db             DB
+	sealer         application.SecretSealer
+	audit          application.SettingsAuditAppender
+	localLifecycle localmodelruntime.TxLifecycle
 }
 
 // String returns a dependency-only summary without expanding database or secret configuration.

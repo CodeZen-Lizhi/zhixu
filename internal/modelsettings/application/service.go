@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	defaultRuntimeStaleAfter = DefaultRuntimeFreshWithin
-	maxLeaseDuration         = 10 * time.Minute
+	defaultRuntimeStaleAfter  = DefaultRuntimeFreshWithin
+	maxLeaseDuration          = 10 * time.Minute
+	testLifecycleWriteTimeout = 5 * time.Second
 )
 
 // Service is the stable model settings interface used by HTTP, composition roots, and modelctl.
@@ -25,6 +26,7 @@ type Service struct {
 	availability      RuntimeAvailabilityStore
 	activations       ActivationStore
 	participants      ParticipantStore
+	testLifecycle     TestLifecycle
 	validator         Validator
 	tester            ResolvedConnectionTester
 	runtimeStaleAfter time.Duration
@@ -74,6 +76,13 @@ func NewService(revisions RevisionStore, validator Validator, runtimeStaleAfter 
 
 // NewSettingsManager creates the HTTP-facing module and keeps resolved credentials inside it.
 func NewSettingsManager(revisions RevisionStore, validator Validator, tester ResolvedConnectionTester, runtimeStaleAfter time.Duration) (SettingsManager, error) {
+	return NewSettingsManagerWithLifecycle(revisions, validator, tester, nil, runtimeStaleAfter)
+}
+
+// NewSettingsManagerWithLifecycle creates the HTTP-facing module with an
+// optional durable local-model test lifecycle. The legacy constructor remains
+// valid for static/remote callers.
+func NewSettingsManagerWithLifecycle(revisions RevisionStore, validator Validator, tester ResolvedConnectionTester, lifecycle TestLifecycle, runtimeStaleAfter time.Duration) (SettingsManager, error) {
 	if nilInterface(tester) {
 		return nil, unavailable(errors.New("model settings connection tester is unavailable"))
 	}
@@ -82,6 +91,7 @@ func NewSettingsManager(revisions RevisionStore, validator Validator, tester Res
 		return nil, err
 	}
 	service.tester = tester
+	service.testLifecycle = lifecycle
 	return service, nil
 }
 
@@ -103,6 +113,9 @@ func (service *Service) Save(ctx context.Context, command SaveCommand) (domain.S
 		return domain.Snapshot{}, err
 	}
 	command.Settings = canonical
+	if err := domain.ValidateWritableSettings(command.Settings); err != nil {
+		return domain.Snapshot{}, err
+	}
 	if err := validateSaveCommand(command); err != nil {
 		return domain.Snapshot{}, err
 	}
@@ -124,7 +137,7 @@ func (service *Service) Save(ctx context.Context, command SaveCommand) (domain.S
 }
 
 // Test resolves, exercises, and destroys one non-persistent settings draft inside the module.
-func (service *Service) Test(ctx context.Context, command TestCommand) (TestResult, error) {
+func (service *Service) Test(ctx context.Context, command TestCommand) (result TestResult, resultErr error) {
 	if err := service.ready(ctx); err != nil {
 		return TestResult{}, err
 	}
@@ -133,6 +146,9 @@ func (service *Service) Test(ctx context.Context, command TestCommand) (TestResu
 	}
 	if command.Target != ConnectionTargetChat && command.Target != ConnectionTargetEmbedding {
 		return TestResult{}, invalid(errors.New("model settings connection target is invalid"))
+	}
+	if !validIdempotencyKey(command.IdempotencyKey) {
+		return TestResult{}, invalid(errors.New("model settings connection test idempotency key is invalid"))
 	}
 	resolved, err := service.resolveDraft(ctx, command.Draft)
 	if err != nil {
@@ -143,27 +159,113 @@ func (service *Service) Test(ctx context.Context, command TestCommand) (TestResu
 	if resolved.Revision != command.Draft.ExpectedRevision {
 		return TestResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeCorrupt, false, errors.New("resolved model settings revision is inconsistent"))
 	}
+	var testLease TestLifecycleLease
+	var testCompletion TestLifecycleCompletion
+	if targetRequiresManagedOllama(resolved.Settings, command.Target) {
+		if nilInterface(service.testLifecycle) {
+			return TestResult{}, unavailable(errors.New("managed local model test lifecycle is unavailable"))
+		}
+		testLease, err = service.testLifecycle.BeginTest(ctx, TestLifecycleCommand{
+			ExpectedRevision: command.Draft.ExpectedRevision,
+			Settings:         resolved.Settings,
+			Target:           command.Target,
+			IdempotencyKey:   command.IdempotencyKey,
+		})
+		if err != nil {
+			return TestResult{}, err
+		}
+		testCompletion, _ = testLease.(TestLifecycleCompletion)
+		defer func() {
+			completionCtx, cancel := testLifecycleWriteContext(ctx)
+			defer cancel()
+			if testCompletion != nil {
+				if testLifecycleAbandoned(ctx, resultErr) {
+					cancellation := errors.Join(resultErr, ctx.Err())
+					resultErr = errors.Join(cancellation, testCompletion.Abandon(completionCtx))
+					return
+				}
+				code, retryable := testLifecycleResult(resultErr)
+				resultErr = errors.Join(resultErr, testCompletion.Complete(completionCtx, code, retryable))
+				return
+			}
+			resultErr = errors.Join(resultErr, testLease.Close(completionCtx))
+		}()
+		if replay, ok := testLease.(TestLifecycleReplay); ok && replay.ReplayedSuccess() {
+			return connectionTestResult(command.Target, resolved.Settings, 0), nil
+		}
+	}
 	startedAt := time.Now()
 	if err := service.tester.TestResolvedConnection(ctx, command.Target, resolved); err != nil {
 		return TestResult{}, err
 	}
-	result := TestResult{Target: command.Target, LatencyMS: time.Since(startedAt).Milliseconds()}
-	switch command.Target {
+	return connectionTestResult(command.Target, resolved.Settings, time.Since(startedAt).Milliseconds()), nil
+}
+
+func connectionTestResult(target ConnectionTarget, settings domain.Settings, latencyMS int64) TestResult {
+	result := TestResult{Target: target, LatencyMS: latencyMS}
+	switch target {
 	case ConnectionTargetChat:
-		result.Provider = string(resolved.Settings.Chat.Provider)
-		result.Model = resolved.Settings.Chat.Model
-		result.APIStyle = resolved.Settings.Chat.APIStyle
+		result.Provider = string(settings.Chat.Provider)
+		result.Model = settings.Chat.Model
+		result.APIStyle = settings.Chat.APIStyle
 		if result.APIStyle == domain.ChatAPIStyleResponses {
 			result.EndpointPath = "/v1/responses"
 		} else {
 			result.EndpointPath = "/v1/chat/completions"
 		}
 	case ConnectionTargetEmbedding:
-		result.Provider = string(resolved.Settings.Embedding.Provider)
-		result.Model = resolved.Settings.Embedding.Model
+		result.Provider = string(settings.Embedding.Provider)
+		result.Model = settings.Embedding.Model
 		result.EndpointPath = "/v1/embeddings"
 	}
-	return result, nil
+	return result
+}
+
+func validIdempotencyKey(value string) bool {
+	return value != "" && value == strings.TrimSpace(value) && len(value) <= 128 &&
+		strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) < 0
+}
+
+func testLifecycleResult(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	var classified *foundation.Error
+	if errors.As(err, &classified) && classified.Code != "" {
+		return classified.Code, classified.Retryable
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "LOCAL_MODEL_RUNTIME_TEST_CANCELLED", true
+	}
+	return "LOCAL_MODEL_RUNTIME_TEST_FAILED", false
+}
+
+func testLifecycleAbandoned(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		(ctx != nil && ctx.Err() != nil)
+}
+
+func testLifecycleWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if ctx != nil {
+		base = context.WithoutCancel(ctx)
+	}
+	return context.WithTimeout(base, testLifecycleWriteTimeout)
+}
+
+func targetRequiresManagedOllama(settings domain.Settings, target ConnectionTarget) bool {
+	switch target {
+	case ConnectionTargetChat:
+		return settings.Chat.Provider == domain.ChatProviderOllama ||
+			(settings.Chat.Provider == domain.ChatProviderOpenAICompatible && settings.Chat.BaseURL == domain.ManagedOllamaBaseURL)
+	case ConnectionTargetEmbedding:
+		return settings.Embedding.Provider == domain.EmbeddingProviderOllama
+	default:
+		return false
+	}
 }
 
 func (service *Service) resolveDraft(ctx context.Context, command DraftCommand) (domain.ResolvedSettings, error) {
@@ -175,6 +277,9 @@ func (service *Service) resolveDraft(ctx context.Context, command DraftCommand) 
 		return domain.ResolvedSettings{}, err
 	}
 	command.Settings = canonical
+	if err := domain.ValidateWritableSettings(command.Settings); err != nil {
+		return domain.ResolvedSettings{}, err
+	}
 	if command.ExpectedRevision < 0 || command.ChatSecret.Validate() != nil || command.EmbeddingSecret.Validate() != nil {
 		return domain.ResolvedSettings{}, invalid(errors.New("model settings draft is invalid"))
 	}

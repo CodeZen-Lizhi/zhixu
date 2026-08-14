@@ -2,14 +2,22 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/jackc/pgx/v5"
 )
+
+const localPreparationLeaseDuration = 30 * time.Second
 
 // StartActivation fixes an exact desired revision or replays its live operation.
 func (repository *Repository) StartActivation(ctx context.Context, command application.StartActivationCommand) (application.StartActivationResult, error) {
@@ -33,6 +41,9 @@ func (repository *Repository) StartActivation(ctx context.Context, command appli
 	phase := domain.RolloutPhase(state.phase)
 	if domain.ActiveActivationPhase(phase) {
 		if state.targetRevision.Valid && state.targetRevision.Int64 == command.TargetRevision {
+			if err := repository.ensureActivationPreparation(ctx, tx, command.RolloutID, command.TargetRevision); err != nil {
+				return application.StartActivationResult{}, err
+			}
 			existing, rolloutErr := state.rollout()
 			if rolloutErr != nil {
 				return application.StartActivationResult{}, rolloutErr
@@ -88,6 +99,9 @@ RETURNING `+stateColumns,
 	}
 	result, err := updated.rollout()
 	if err != nil {
+		return application.StartActivationResult{}, err
+	}
+	if err := repository.ensureActivationPreparation(ctx, tx, command.RolloutID, command.TargetRevision); err != nil {
 		return application.StartActivationResult{}, err
 	}
 	if err := commit(tx, ctx); err != nil {
@@ -179,6 +193,9 @@ func (repository *Repository) advanceActivation(ctx context.Context, rolloutID f
 	if err := verifyActivationRoles(ctx, tx, state, now, freshWithin, domain.ParticipantPhasePrepared, state.previousActive.Int64); err != nil {
 		return domain.RolloutState{}, err
 	}
+	if err := repository.verifyLocalPreparation(ctx, tx, state.rolloutID.String); err != nil {
+		return domain.RolloutState{}, err
+	}
 	updated, err := scanState(tx.QueryRow(ctx, `UPDATE ops.model_settings_state
 SET phase='arming',lease_expires_at=clock_timestamp()+($1::bigint*interval '1 microsecond'),
     version=version+1,updated_at=clock_timestamp()
@@ -222,6 +239,11 @@ func (repository *Repository) FailActivation(ctx context.Context, command applic
 	updated, err := failActivationLocked(ctx, tx, state, command.ErrorCode)
 	if err != nil {
 		return domain.RolloutState{}, err
+	}
+	if repository.localLifecycle != nil {
+		if _, err := repository.localLifecycle.CompleteActivationPreparation(ctx, tx, command.RolloutID, command.ErrorCode, false); err != nil && !isNoLocalPreparation(err) {
+			return domain.RolloutState{}, err
+		}
 	}
 	result, err := updated.rollout()
 	if err != nil {
@@ -398,6 +420,11 @@ RETURNING `+stateColumns, string(command.RolloutID), command.ExpectedVersion))
 	if err != nil {
 		return domain.RolloutState{}, classify(err)
 	}
+	if repository.localLifecycle != nil {
+		if _, err := repository.localLifecycle.CompleteActivationPreparation(ctx, tx, command.RolloutID, "", false); err != nil && !isNoLocalPreparation(err) {
+			return domain.RolloutState{}, err
+		}
+	}
 	result, err := updated.rollout()
 	if err != nil {
 		return domain.RolloutState{}, err
@@ -443,6 +470,11 @@ RETURNING `+stateColumns, command.LeaseDuration.Microseconds(), state.version))
 		}
 		if err != nil {
 			return domain.ActivationRecovery{}, classify(err)
+		}
+		if action == domain.ActivationRecoveryFailedPreCommit && repository.localLifecycle != nil && state.rolloutID.Valid {
+			if _, prepErr := repository.localLifecycle.CompleteActivationPreparation(ctx, tx, foundation.ID(state.rolloutID.String), domain.ErrorCodeActivationLeaseExpired, true); prepErr != nil && !isNoLocalPreparation(prepErr) {
+				return domain.ActivationRecovery{}, prepErr
+			}
 		}
 	}
 	result, err := state.rollout()
@@ -571,4 +603,98 @@ func sameActivation(state stateRecord, id foundation.ID, phase domain.RolloutPha
 
 func validFreshWithin(duration time.Duration) bool {
 	return duration >= time.Second && duration <= 5*time.Minute && duration%time.Microsecond == 0
+}
+
+// ensureActivationPreparation projects the target's non-secret local model
+// requirement into the lifecycle tables while the caller still owns the
+// model-settings transaction. This is deliberately a no-op for online and
+// disabled targets, so they never create a resident Ollama demand.
+func (repository *Repository) ensureActivationPreparation(ctx context.Context, tx pgx.Tx, rolloutID foundation.ID, targetRevision int64) error {
+	if repository == nil || repository.localLifecycle == nil {
+		return nil
+	}
+	if !validID(rolloutID) || targetRevision < 0 {
+		return invalid(errors.New("local activation preparation binding is invalid"))
+	}
+	persisted, err := loadRevision(ctx, tx, targetRevision)
+	if err != nil {
+		return err
+	}
+	managed := domain.RequiresManagedOllama(persisted.settings)
+	if !managed.Required || len(managed.Models) == 0 {
+		return nil
+	}
+	models := make([]localmodelruntime.ModelRef, 0, len(managed.Models))
+	for _, model := range managed.Models {
+		models = append(models, localmodelruntime.ModelRef(model))
+	}
+	requirement, err := localmodelruntime.NewRequirement(models)
+	if err != nil {
+		return invalid(fmt.Errorf("local activation requirement is invalid: %w", err))
+	}
+	// Derive both identities from the rollout so idempotent HTTP retries use
+	// the exact same operation/hold pair instead of generating a new pair.
+	operationID := rolloutID
+	holdID, err := deterministicLifecycleID("preparation-hold", rolloutID, targetRevision)
+	if err != nil {
+		return err
+	}
+	idempotencyKey := fmt.Sprintf("activation:%s:%d", rolloutID, targetRevision)
+	hashInput := strings.Join([]string{"model-settings-activation/v1", string(rolloutID), strconv.FormatInt(targetRevision, 10), requirement.Hash}, "\x00")
+	digest := sha256.Sum256([]byte(hashInput))
+	requestHash := hex.EncodeToString(digest[:])
+	_, err = repository.localLifecycle.SeedActivationPreparation(ctx, tx, localmodelruntime.ActivationPreparationCommand{
+		OperationID: operationID, HoldID: holdID, RolloutID: rolloutID, TargetRevision: targetRevision,
+		IdempotencyKey: idempotencyKey, RequestHash: requestHash, Requirement: requirement,
+		OwnerID: rolloutID, OwnerEpoch: 1, LeaseDuration: localPreparationLeaseDuration,
+	})
+	return err
+}
+
+func (repository *Repository) verifyLocalPreparation(ctx context.Context, tx pgx.Tx, rolloutID string) error {
+	if repository == nil || repository.localLifecycle == nil || rolloutID == "" {
+		return nil
+	}
+	parsedRollout, err := foundation.ParseID(rolloutID)
+	if err != nil {
+		return runtimeNotPrepared(errors.New("local model activation rollout identity is invalid"))
+	}
+	state, err := loadState(ctx, tx, ``)
+	if err != nil {
+		return err
+	}
+	targetRevision := state.targetRevision.Int64
+	persisted, err := loadRevision(ctx, tx, targetRevision)
+	if err != nil {
+		return err
+	}
+	managed := domain.RequiresManagedOllama(persisted.settings)
+	if !managed.Required {
+		return nil
+	}
+	operation, err := repository.localLifecycle.ReadOperationByRollout(ctx, tx, parsedRollout)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return runtimeNotPrepared(errors.New("local model preparation operation is missing"))
+	}
+	if err != nil {
+		return err
+	}
+	if operation.Phase != localmodelruntime.OperationPhaseReady && operation.Phase != localmodelruntime.OperationPhaseSucceeded {
+		return runtimeNotPrepared(fmt.Errorf("local model preparation is not ready: %s", operation.Phase))
+	}
+	return nil
+}
+
+func isNoLocalPreparation(err error) bool {
+	return errors.Is(err, pgx.ErrNoRows)
+}
+
+func deterministicLifecycleID(prefix string, rolloutID foundation.ID, revision int64) (foundation.ID, error) {
+	digest := sha256.Sum256([]byte(prefix + "\x00" + string(rolloutID) + "\x00" + strconv.FormatInt(revision, 10)))
+	var raw [16]byte
+	copy(raw[:], digest[:16])
+	raw[6] = (raw[6] & 0x0f) | 0x50 // UUID v5-shaped deterministic identifier.
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	value := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
+	return foundation.ParseID(value)
 }

@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,68 @@ func TestCanonicalizeSettingsNormalizesEndpointIdentity(t *testing.T) {
 	}
 }
 
+func TestRequiresManagedOllamaUsesExplicitProvidersAndLegacyRelay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		settings Settings
+		models   []string
+	}{
+		{name: "disabled", settings: CanonicalDisabledSettings()},
+		{name: "chat", settings: func() Settings {
+			value := CanonicalDisabledSettings()
+			value.Chat.Provider = ChatProviderOllama
+			value.Chat.Model = "qwen2.5:3b"
+			return value
+		}(), models: []string{"qwen2.5:3b"}},
+		{name: "embedding", settings: func() Settings {
+			value := CanonicalDisabledSettings()
+			value.Embedding.Provider = EmbeddingProviderOllama
+			value.Embedding.Model = "all-minilm:latest"
+			return value
+		}(), models: []string{"all-minilm:latest"}},
+		{name: "deduplicated", settings: func() Settings {
+			value := CanonicalDisabledSettings()
+			value.Chat.Provider = ChatProviderOllama
+			value.Chat.Model = "shared:model"
+			value.Embedding.Provider = EmbeddingProviderOllama
+			value.Embedding.Model = "shared:model"
+			return value
+		}(), models: []string{"shared:model"}},
+		{name: "legacy chat", settings: func() Settings {
+			value := CanonicalDisabledSettings()
+			value.Chat.Provider = ChatProviderOpenAICompatible
+			value.Chat.BaseURL = ManagedOllamaBaseURL
+			value.Chat.Model = "legacy:model"
+			return value
+		}(), models: []string{"legacy:model"}},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := RequiresManagedOllama(test.settings)
+			if !slices.Equal(got.Models, test.models) || got.Required != (len(test.models) != 0) || got.Required && len(got.Hash) != 64 {
+				t.Fatalf("requirement=%#v", got)
+			}
+		})
+	}
+}
+
+func TestOllamaChatRequiresFixedChatCompletionsShape(t *testing.T) {
+	t.Parallel()
+	settings := CanonicalDisabledSettings()
+	settings.Chat.Provider = ChatProviderOllama
+	settings.Chat.BaseURL = ManagedOllamaBaseURL
+	settings.Chat.Model = "qwen2.5:3b"
+	settings.Chat.ModelVersion = "qwen2.5:3b"
+	if err := settings.ValidateStructural(); err != nil {
+		t.Fatal(err)
+	}
+	settings.Chat.APIStyle = ChatAPIStyleResponses
+	assertDomainCode(t, settings.ValidateStructural(), ErrorCodeInvalid)
+}
+
 func TestSettingsRejectDurationsThatCannotRoundTripThroughPostgres(t *testing.T) {
 	settings := CanonicalDisabledSettings()
 	settings.Chat.Timeout = time.Nanosecond
@@ -63,6 +126,25 @@ func TestValidateSecretChangeAllowsEquivalentEndpointAndRejectsRebind(t *testing
 		"openai-compatible", "https://other.example.test/v1", KeepSecret(),
 	)
 	assertDomainCode(t, err, ErrorCodeSecretTargetChanged)
+}
+
+func TestValidateWritableSettingsRequiresExplicitManagedProvider(t *testing.T) {
+	t.Parallel()
+
+	legacy := CanonicalDisabledSettings()
+	legacy.Chat.Provider = ChatProviderOpenAICompatible
+	legacy.Chat.BaseURL = ManagedOllamaBaseURL
+	legacy.Chat.Model = "qwen2.5:3b"
+	legacy.Chat.ModelVersion = "qwen2.5:3b"
+	assertDomainCode(t, ValidateWritableSettings(legacy), ErrorCodeInvalid)
+
+	legacy.Chat.Provider = ChatProviderOllama
+	if err := ValidateWritableSettings(legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy.Chat.BaseURL = "https://ollama.example.test"
+	assertDomainCode(t, ValidateWritableSettings(legacy), ErrorCodeInvalid)
 }
 
 func TestSecretAndActionsNeverFormatPlaintext(t *testing.T) {

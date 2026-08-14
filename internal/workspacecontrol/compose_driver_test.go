@@ -117,6 +117,23 @@ func TestComposeDriverAppliesOnlyFixedArgvWithoutHostPath(t *testing.T) {
 	}
 }
 
+func TestComposeDriverAcceptsPersistedBindingGenerationAboveFingerprintSchema(t *testing.T) {
+	root := canonicalTestDirectory(t)
+	grant := validatedTestGrant(t, "workspace-driver-rebound", root, 3)
+	grant.BindingVersion = 2
+	runner := &fakeCommandRunner{grant: grant, model: composeFixture(grant, true)}
+	driver, err := NewComposeDriver(ComposeDriverOptions{
+		Executable: "docker-fixture", Project: "zhixu", BaseFile: "/repo/deploy/compose.yml",
+		OverrideFile: filepath.Join(t.TempDir(), "grant.yml"), EnvFile: "/repo/.env", Runner: runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.ApplyGrant(context.Background(), grant); err != nil {
+		t.Fatalf("ApplyGrant() rejected binding generation 2: %v", err)
+	}
+}
+
 func TestComposeDriverRevokesAfterRelayStartFailure(t *testing.T) {
 	t.Parallel()
 	root := canonicalTestDirectory(t)
@@ -329,7 +346,7 @@ func validatedTestGrant(t *testing.T, workspaceID, root string, generation int64
 	}
 	return Grant{
 		WorkspaceID: workspaceID, Root: validated.CanonicalPath,
-		RootFingerprint: validated.Fingerprint.Digest(), BindingVersion: validated.Fingerprint.BindingVersion,
+		RootFingerprint: validated.Fingerprint.Digest(), BindingVersion: 1,
 		Generation: generation,
 	}
 }

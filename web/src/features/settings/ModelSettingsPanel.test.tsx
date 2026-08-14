@@ -44,6 +44,7 @@ const disabledEmbedding = {
 } as const;
 
 const rolloutId = "018f5f9e-7b36-7c89-8abc-1234567890ab";
+const localRuntime = { mode: "managed" as const, phase: "stopped" as const, fresh: true, requirementHash: "", readyHash: "", operationId: null, operationPhase: null, completedBytes: 0, totalBytes: null, progressKnown: false, operationError: null, operationRetryable: false };
 const absentParticipant = {
   present: false,
   targetRevision: null,
@@ -67,6 +68,7 @@ const disabledSettings = (): ModelSettingsResponse => ({
   applyRequired: false,
   restartRequired: false,
   capabilities: { chat: "disabled", embedding: "disabled" },
+  localRuntime,
 });
 
 const configuredSettings = (): ModelSettingsResponse => ({
@@ -102,6 +104,7 @@ const configuredSettings = (): ModelSettingsResponse => ({
   applyRequired: true,
   restartRequired: false,
   capabilities: { chat: "disabled", embedding: "disabled" },
+  localRuntime,
 });
 
 const preparingSettings = (): ModelSettingsResponse => ({
@@ -337,7 +340,7 @@ describe("ModelSettingsPanel", () => {
     expect(api.testModelSettings).not.toHaveBeenCalled();
   });
 
-  it("Ollama Embedding 切换为固定 Relay 且不允许编辑地址", async () => {
+  it("本地 Ollama Embedding 隐藏内部地址并由系统管理", async () => {
     const initial = configuredSettings();
     initial.desiredSettings.embedding = { ...initial.desiredSettings.embedding, provider: "openai-compatible", baseUrl: "https://models.example.test/v1", apiKeyConfigured: true };
     api.getModelSettings.mockResolvedValue(initial);
@@ -346,8 +349,165 @@ describe("ModelSettingsPanel", () => {
     await expandModelSection("向量模型");
     fireEvent.change(await screen.findByLabelText("向量模型提供方"), { target: { value: "ollama" } });
 
-    expect(screen.getByLabelText("向量模型基础地址（Base URL）")).toHaveValue("http://127.0.0.1:11434");
-    expect(screen.getByLabelText("向量模型基础地址（Base URL）")).toBeDisabled();
+    expect(screen.queryByLabelText("向量模型基础地址（Base URL）")).not.toBeInTheDocument();
+    expect(screen.getByText("本机（系统管理）")).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("127.0.0.1");
+    expect(document.body).not.toHaveTextContent("11434");
+  });
+
+  it("本地 Ollama Chat 隐藏内部地址和 Key，并强制 Chat Completions", async () => {
+    const initial = configuredSettings();
+    const saved: ModelSettingsResponse = {
+      ...initial,
+      desiredRevision: 3,
+      desiredSettings: {
+        ...initial.desiredSettings,
+        chat: {
+          provider: "ollama",
+          apiStyle: "chat_completions",
+          baseUrl: "http://127.0.0.1:11434",
+          model: "qwen2.5:3b",
+          modelVersion: "qwen2.5:3b",
+          adapterVersion: "v1",
+          apiKeyConfigured: false,
+        },
+      },
+    };
+    api.getModelSettings.mockResolvedValue(initial);
+    api.updateModelSettings.mockResolvedValue(saved);
+
+    renderPanel();
+    await expandModelSection("对话模型");
+    fireEvent.change(screen.getByLabelText("对话模型提供方"), { target: { value: "ollama" } });
+
+    expect(screen.getByLabelText("对话模型调用接口")).toHaveValue("chat_completions");
+    expect(screen.getByLabelText("对话模型调用接口")).toBeDisabled();
+    expect(screen.queryByLabelText("对话模型基础地址（Base URL）")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("对话 API Key")).not.toBeInTheDocument();
+    expect(screen.getByText("本机（系统管理）")).toBeInTheDocument();
+    expect(screen.getByText(/不使用 API Key，固定使用 Chat Completions/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("127.0.0.1");
+    expect(document.body.textContent).not.toContain("11434");
+
+    fireEvent.change(screen.getByLabelText("对话模型名称"), { target: { value: "qwen2.5:3b" } });
+    fireEvent.change(screen.getByLabelText("对话模型版本"), { target: { value: "qwen2.5:3b" } });
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
+
+    await waitFor(() => expect(api.updateModelSettings).toHaveBeenCalledOnce());
+    expect(api.updateModelSettings.mock.calls[0]?.[0]).toMatchObject({
+      chat: {
+        provider: "ollama",
+        apiStyle: "chat_completions",
+        baseUrl: "http://127.0.0.1:11434",
+        apiKey: { action: "clear" },
+      },
+    });
+  });
+
+  it("生效的本地 Ollama Chat 只显示系统管理位置，不展示内部地址", async () => {
+    const applied = appliedSettings();
+    const localChat = {
+      provider: "ollama",
+      apiStyle: "chat_completions",
+      baseUrl: "http://127.0.0.1:11434",
+      model: "qwen2.5:3b",
+      modelVersion: "qwen2.5:3b",
+      adapterVersion: "v1",
+      apiKeyConfigured: false,
+    } as const;
+    api.getModelSettings.mockResolvedValue({
+      ...applied,
+      desiredSettings: { ...applied.desiredSettings, chat: localChat },
+      activeSettings: { ...applied.activeSettings, chat: localChat },
+    });
+
+    renderPanel();
+    await expandModelSection("对话模型");
+
+    const active = screen.getByLabelText("Chat 当前生效配置");
+    expect(active).toHaveTextContent("本地 Ollama");
+    expect(active).toHaveTextContent("运行位置");
+    expect(active).toHaveTextContent("本机（系统管理）");
+    expect(active).toHaveTextContent("API Key不使用");
+    expect(active).not.toHaveTextContent("127.0.0.1");
+    expect(active).not.toHaveTextContent("11434");
+  });
+
+  it("从本地 Chat 切回在线提供方时清空系统地址和 Key 动作", async () => {
+    const initial = configuredSettings();
+    initial.desiredSettings.chat = {
+      provider: "ollama",
+      apiStyle: "chat_completions",
+      baseUrl: "http://127.0.0.1:11434",
+      model: "qwen2.5:3b",
+      modelVersion: "qwen2.5:3b",
+      adapterVersion: "v1",
+      apiKeyConfigured: false,
+    };
+    api.getModelSettings.mockResolvedValue(initial);
+
+    renderPanel();
+    await expandModelSection("对话模型");
+    fireEvent.change(screen.getByLabelText("对话模型提供方"), { target: { value: "openai-compatible" } });
+
+    expect(screen.getByLabelText("对话模型基础地址（Base URL）")).toHaveValue("");
+    expect(screen.getByLabelText("对话 API Key")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("127.0.0.1");
+    expect(document.body.textContent).not.toContain("11434");
+  });
+
+  it("历史隐式本地 Chat 保持只读兼容，并在下一次全量保存时转为显式 Ollama", async () => {
+    const initial = configuredSettings();
+    initial.desiredSettings.chat = {
+      provider: "openai-compatible",
+      apiStyle: "chat_completions",
+      baseUrl: "http://127.0.0.1:11434",
+      model: "legacy-chat",
+      modelVersion: "legacy-chat",
+      adapterVersion: "v1",
+      apiKeyConfigured: true,
+    };
+    initial.activeSettings.chat = initial.desiredSettings.chat;
+    const saved: ModelSettingsResponse = {
+      ...initial,
+      desiredRevision: 3,
+      desiredSettings: {
+        ...initial.desiredSettings,
+        chat: {
+          ...initial.desiredSettings.chat,
+          provider: "ollama",
+          apiKeyConfigured: false,
+        },
+        embedding: { ...initial.desiredSettings.embedding, model: "nomic-embed-text-v2" },
+      },
+    };
+    api.getModelSettings.mockResolvedValue(initial);
+    api.updateModelSettings.mockResolvedValue(saved);
+
+    renderPanel();
+    await expandModelSection("对话模型");
+    await expandModelSection("向量模型");
+
+    expect(screen.getByLabelText("对话模型提供方")).toHaveValue("ollama");
+    expect(screen.queryByLabelText("对话模型基础地址（Base URL）")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("对话 API Key")).not.toBeInTheDocument();
+    expect(screen.getByText(/下次保存设置时会转换为显式本地配置/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Chat 当前生效配置")).toHaveTextContent("本地 Ollama（旧配置）");
+    expect(document.body.textContent).not.toContain("127.0.0.1");
+    expect(document.body.textContent).not.toContain("11434");
+
+    fireEvent.change(screen.getByLabelText("向量模型名称"), { target: { value: "nomic-embed-text-v2" } });
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
+
+    await waitFor(() => expect(api.updateModelSettings).toHaveBeenCalledOnce());
+    expect(api.updateModelSettings.mock.calls[0]?.[0]).toMatchObject({
+      chat: {
+        provider: "ollama",
+        apiStyle: "chat_completions",
+        baseUrl: "http://127.0.0.1:11434",
+        apiKey: { action: "clear" },
+      },
+    });
   });
 
   it("Endpoint 改变时拒绝 keep，替换保存后立即清空密码输入", async () => {

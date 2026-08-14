@@ -65,6 +65,10 @@ func identityConflict(cause error) error {
 	return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeIdentityConflict, false, cause)
 }
 
+func rebindConflict(cause error) error {
+	return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeBindingRebindConflict, false, cause)
+}
+
 func activeRemoveConflict(cause error) error {
 	return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeActiveRemoveConflict, false, cause)
 }
@@ -111,4 +115,8 @@ func runtimeMutationConflict(cause error) error {
 
 func controlCorrupt(cause error) error {
 	return foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeControlCorrupt, false, cause)
+}
+
+func controlUnavailable(cause error) error {
+	return foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeControlDatabaseUnavailable, true, cause)
 }

@@ -1000,6 +1000,9 @@ func serve(t *testing.T, handler *Handler, method, path, body, contentType strin
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
+	if method == nethttp.MethodPost && path == "/api/v1/settings/models/test" {
+		request.Header.Set("Idempotency-Key", "model-settings-handler-test")
+	}
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	return response

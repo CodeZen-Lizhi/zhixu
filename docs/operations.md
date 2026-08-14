@@ -109,6 +109,25 @@ validate -> quiesce -> revoke -> prepare -> verify -> commit -> activate
 
 失败不会覆盖上次成功 selection；能够安全恢复时回到旧 Workspace，否则保持零 Active。浏览器短暂重连后从 Active API 恢复，不能从 localStorage/旧 cache 继续旧作用域。父/子目录分别登记仍保留物理包含关系；需要双向文件隔离时使用不重叠 Root。
 
+如果 selection 指向的同一路径已被删除后重建、卷恢复导致 device/inode 改变，普通 `up`、`restart` 和
+`workspace switch` 会以 `WORKSPACE_ROOT_IDENTITY_CHANGED` fail closed，不会把既有 Workspace ID 静默绑定到新对象。
+确认该路径确实是原 Workspace 的恢复副本后，执行：
+
+```bash
+./zhixu workspace rebind --confirm REBIND
+```
+
+该命令只使用受保护 selection 中的 canonical Root、Workspace ID 和旧 fingerprint；不能指定另一目录。它先撤销旧
+runtime/grant，在 PostgreSQL 中以不可变 old→new 历史原子更新物理 fingerprint 并递增 persisted binding version，
+随后走普通 switch 启动新 runtime。Workspace ID、Root/Git path 和业务数据保持不变；rebind 本身不增加 grant
+generation，后续 switch 按正常规则增加。只有新 API/Worker ready 且 switch 返回的 binding version 与 rebind 结果一致后，
+selection 才原子更新。
+
+命令响应丢失或新 runtime 未 ready 时，selection 保持旧值且未提交 grant 会被撤销；修复外部问题后再次执行同一显式
+命令，控制层会在确认 mutation gate/control state 空闲后精确重放，不会再次递增 binding version。不要删除数据库、volume
+或 selection 来规避校验；审计历史存在后也不能向下迁移越过该能力。若新目录并非原 Workspace 的可信恢复副本，应使用
+`workspace switch <new-root>` 创建独立 Workspace，而不是 rebind。
+
 重置需要明确确认：
 
 ```bash
@@ -116,13 +135,15 @@ validate -> quiesce -> revoke -> prepare -> verify -> commit -> activate
 ./zhixu reset --confirm DELETE
 ```
 
-`reset` 删除项目 PostgreSQL/model secret volume、selection 和 grant，但绝不删除宿主机 Workspace 文件或 Git 历史。稳定非密钥 `.zhixu/control-instance-id` 用于命令幂等，保留且不进入浏览器。
+`reset` 删除项目 PostgreSQL、model secret、受管理本地模型和本地模型运行时凭据 volume，以及 selection 和 grant；它绝不删除宿主机 Workspace 文件、Git 历史或另行保留的旧 Ollama 回滚卷。稳定非密钥 `.zhixu/control-instance-id` 用于命令幂等，保留且不进入浏览器。
 
 | 内容 | 切换后 | `down` 后 | `reset` 后 |
 |---|---|---|---|
 | Workspace Markdown/附件/Git | 按 Root 保留 | 保留 | 保留 |
 | PostgreSQL 业务/索引/历史 | 按 Workspace ID 保留 | 保留 | 删除 |
 | 模型加密主密钥 volume | 保留 | 保留 | 删除 |
+| 受管理本地模型 volume | 保留 | 保留 | 删除 |
+| 旧 Ollama 回滚 volume | 保留 | 保留 | 保留 |
 | `.zhixu/workspace-selection` | 更新 | 保留 | 删除 |
 | `.zhixu/workspace-grant.yml` | 更新 | 删除 | 删除 |
 | `.zhixu/control-instance-id` | 保留 | 保留 | 保留 |
@@ -161,6 +182,8 @@ validate -> quiesce -> revoke -> prepare -> verify -> commit -> activate
 
 - Chat/Embedding disabled 时基础 API、Worker、Keyword Search 和 Settings 可 ready；不注入 deterministic Fake。Question/Semantic 等相关命令返回明确 unavailable。
 - OpenAI-compatible 远程 Endpoint 使用 HTTPS；Ollama 只允许受控 loopback HTTP 且不接受 API Key。
+- managed Compose 的“本地 Ollama”由 `local-model-runtime` 管理器按需启动同容器内的 `ollama serve`。两个模型都在线上或关闭且旧 generation 已释放后，重型子进程停止；模型文件仍保存在 project-owned volume 中，下次直接复用。
+- 升级前如存在受支持的旧 `0.9.6` standalone Ollama，可先运行 `./zhixu local-model status` 做只读形态检查，再显式执行 `./zhixu local-model migrate`（非交互环境使用 `--confirm MIGRATE`）。迁移只接受固定旧容器、镜像 digest 和卷形态；它先快照和空间预检，再停止旧服务、把只读源复制到新卷，并以目标版本核对清单和运行 Chat/Embedding Probe。失败会保留两个卷并尝试恢复旧服务；成功也保留旧卷作为回滚源。不要手工改名、挂载或删除这两个卷。
 - API/Worker 使用同一 Configured Factory，Provider/Model/Version/Dimensions/Normalization/Distance/limits 必须一致。
 - Tool Runtime disabled 时普通 Tool capability unavailable，但 Safe Writeback trusted audit 继续；enabled 缺 Contract/Executor/Repository/Workflow/依赖则 readiness fail closed。
 - Web Fetch 即使配置 enabled，持久 Web Policy/安全 Executor 未完整接线时也不能访问 DNS/网络。
@@ -225,6 +248,29 @@ validate -> quiesce -> revoke -> prepare -> verify -> commit -> activate
 `./zhixu restart` 仍是升级、runtime ownership 丢失或进程故障的受控恢复工具：pre-commit operation 恢复
 previous active，post-commit operation恢复 target并向前 finalize；`idle` 且 desired!=active 时只重建
 active，不自动应用 pending desired。正常配置生效不要使用 Docker Desktop Restart project。
+
+#### Managed Ollama 隔离验收
+
+本地模型生命周期变更后，直接运行：
+
+```bash
+./deploy/managed-ollama-compose-smoke.sh
+```
+
+该脚本使用 disposable Compose project、数据库和模型卷，以脚本内受控 HTTPS 线上 fixture 验证全线上、仅 Chat 本地、仅 Embedding 本地、两者本地、切回全线上，
+以及单 child、cached model 复用、管理容器重启恢复、`child_epoch` 单调递增和 60 秒空闲内存采样；结束时只清理它创建的隔离资源。
+它不会验证原生 Linux、真实公网 Provider 出口、Docker daemon restart、显式 child crash/signal/reap、旧 generation 在途栅栏、
+多架构、浏览器或真实 legacy volume 迁移，也不能替代这些发布门禁。
+
+2026-08-14 在当前 Docker Desktop 的记录为：五种模式通过，模型复用零新增 pull；全线上 anonymous RSS 峰值 6.39 MiB，
+manager process RSS 峰值 9.69 MiB，相对 700 MiB 基线下降 99.1%。
+
+#### 远程 Provider Apply 失败
+
+若 desired 已保存为线上 Provider，但 Apply 返回 `MODEL_CHAT_REQUEST_FAILED` 或其他 transport/TLS 错误，系统必须停在 commit 前并
+保留 previous active；这不是“重启后已生效”。先检查 Snapshot 中 desired/active/applied revision，再从 API/Worker 所在 Docker
+网络验证批准的远程 Endpoint DNS、TLS 和出口代理。恢复出口后重试 exact desired revision 的 Apply；不要手改 active SQL，也不要用
+`./zhixu restart` 绕过 production Probe。
 
 ## 5. 启动顺序与健康
 

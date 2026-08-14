@@ -6,8 +6,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
+	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/rootgrant"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
@@ -32,6 +34,7 @@ type RootGrantResolver interface {
 type Repository struct {
 	db      DB
 	grants  RootGrantResolver
+	audit   auditapplication.Appender
 	managed bool
 }
 
@@ -46,6 +49,21 @@ func WithRootGrantResolver(resolver RootGrantResolver, managed bool) RepositoryO
 		}
 		repository.grants = resolver
 		repository.managed = managed
+		return nil
+	}
+}
+
+// WithAuditAppender binds the append-only Audit store used by explicit root
+// rebinding. Ordinary Workspace reads and switch operations do not require it.
+func WithAuditAppender(appender auditapplication.Appender) RepositoryOption {
+	return func(repository *Repository) error {
+		if nilRepositoryDependency(appender) {
+			return errors.New("workspace audit appender is nil")
+		}
+		if !nilRepositoryDependency(repository.audit) {
+			return errors.New("workspace audit appender is duplicated")
+		}
+		repository.audit = appender
 		return nil
 	}
 }
@@ -70,6 +88,19 @@ func NewRepository(db DB, options ...RepositoryOption) (*Repository, error) {
 		}
 	}
 	return repository, nil
+}
+
+func nilRepositoryDependency(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 // AuthorizeRootSelection reserves root creation and root-based opening to the

@@ -23,15 +23,26 @@ readonly WORKSPACECTL_BINARY="${BUNDLE_DIR}/zhixu-workspacectl"
 readonly GRANT_OVERRIDE="${STATE_DIR}/workspace-grant.yml"
 readonly SELECTION_FILE="${STATE_DIR}/workspace-selection"
 readonly CONTROL_INSTANCE_FILE="${STATE_DIR}/control-instance-id"
+readonly LEGACY_MODEL_CONTAINER="zhixu-eino-live-ollama"
+readonly LEGACY_MODEL_VOLUME="zhixu-eino-live-models"
+readonly LEGACY_MODEL_IMAGE="ollama/ollama:0.9.6"
+readonly MANAGED_MODEL_VOLUME="${PROJECT_NAME}_zhixu-local-models"
+readonly MANAGED_MODEL_IMAGE="${PROJECT_NAME}-local-model-runtime"
+readonly LEGACY_MIGRATION_HELPER="/usr/local/bin/local-model-legacy-migrate"
 
 ENV_FILE="${LOCAL_ENV_FILE}"
 MUTATION_LOCK_HELD=0
 MUTATION_COMMAND_PID=""
 WORKSPACECTL_RESULT_FILE=""
 RUNTIME_STATUS_FILE=""
+LEGACY_MIGRATION_SNAPSHOT_FILE=""
+LEGACY_MIGRATION_VERIFY_FILE=""
+LEGACY_MIGRATION_RESTORE_NEEDED=0
+LEGACY_MIGRATION_ROLLBACK_RUNNING=0
 CONTROL_ROOT=""
 CONTROL_WORKSPACE_ID=""
 CONTROL_ROOT_FINGERPRINT=""
+CONTROL_BINDING_VERSION=""
 CONTROL_INSTANCE_ID=""
 SELECTION_ROOT=""
 SELECTION_WORKSPACE_ID=""
@@ -57,10 +68,15 @@ Commands:
   restart                  Restart the selected Workspace
   workspace switch ABS [--initialize-git]
                            Safely switch to another exact host Workspace
+  workspace rebind --confirm REBIND
+                           Recover the selected Workspace after root replacement
   status                   Show Compose and local Workspace state
   logs [service]           Follow one known Compose service (default: app)
   down                     Stop Compose and revoke the grant; keep selection/data
   reset [--confirm DELETE] Delete project volumes, selection, and derived grant
+  local-model status       Inspect only the exact legacy/managed model resources
+  local-model migrate [--confirm MIGRATE]
+                           Copy the allowlisted legacy model store and cut over
   help                     Show this help
 EOF
 }
@@ -391,13 +407,13 @@ def validate_positive_integer(value, field):
     return value
 
 
-def validate_result(value):
+def validate_result(value, expected_action):
     keys = set(value)
     if not RESULT_REQUIRED_KEYS.issubset(keys) or not keys.issubset(RESULT_ALLOWED_KEYS):
         die("workspacectl result fields are invalid")
     if value["schema"] != "workspace-control-result/v1":
         die("workspacectl result schema is unsupported")
-    if value["action"] != "switch":
+    if value["action"] != expected_action or expected_action not in {"switch", "rebind"}:
         die("workspacectl result action is invalid")
     if type(value["changed"]) is not bool:
         die("workspacectl result changed is invalid")
@@ -408,14 +424,17 @@ def validate_result(value):
     operation_keys = keys & {"operation_id", "operation_result"}
     if binding_keys != RESULT_BINDING_KEYS:
         die("switch workspacectl result is missing its Workspace binding")
-    if value["changed"]:
-        if value["status"] != "switched" or not RESULT_OPERATION_KEYS.issubset(keys):
-            die("changed switch result is missing its operation binding")
-        validate_workspace_id(value["operation_id"])
-        if value["operation_result"] != "succeeded":
-            die("switch operation did not succeed")
-    elif value["status"] != "reconciled" or operation_keys or "grant_generation" not in value:
-        die("unchanged switch result is invalid")
+    if expected_action == "switch":
+        if value["changed"]:
+            if value["status"] != "switched" or not RESULT_OPERATION_KEYS.issubset(keys):
+                die("changed switch result is missing its operation binding")
+            validate_workspace_id(value["operation_id"])
+            if value["operation_result"] != "succeeded":
+                die("switch operation did not succeed")
+        elif value["status"] != "reconciled" or operation_keys or "grant_generation" not in value:
+            die("unchanged switch result is invalid")
+    elif operation_keys or "grant_generation" in value or value["status"] not in ({"rebound"} if value["changed"] else {"reconciled"}):
+        die("rebind result is invalid")
 
     validate_root(value["canonical_root"])
     validate_workspace_id(value["workspace_id"])
@@ -440,11 +459,12 @@ if action == "read":
     value = validate_selection(read_document(sys.argv[2]))
     print("\t".join((value["canonical_root"], value["workspace_id"], value["root_fingerprint"])))
 elif action == "result":
-    value = validate_result(read_document(sys.argv[2]))
+    value = validate_result(read_document(sys.argv[2]), sys.argv[3])
     print("\x1f".join((
         value.get("canonical_root", ""),
         value.get("workspace_id", ""),
         value.get("root_fingerprint", ""),
+        str(value.get("binding_version", "")),
     )))
 elif action == "write":
     target, root, workspace_id, fingerprint = sys.argv[2:6]
@@ -549,11 +569,33 @@ cleanup_transient_files() {
   if [[ -n "${RUNTIME_STATUS_FILE}" && ( -e "${RUNTIME_STATUS_FILE}" || -L "${RUNTIME_STATUS_FILE}" ) ]]; then
     rm -f -- "${RUNTIME_STATUS_FILE}" || true
   fi
+  if [[ -n "${LEGACY_MIGRATION_SNAPSHOT_FILE}" && ( -e "${LEGACY_MIGRATION_SNAPSHOT_FILE}" || -L "${LEGACY_MIGRATION_SNAPSHOT_FILE}" ) ]]; then
+    rm -f -- "${LEGACY_MIGRATION_SNAPSHOT_FILE}" || true
+  fi
+  if [[ -n "${LEGACY_MIGRATION_VERIFY_FILE}" && ( -e "${LEGACY_MIGRATION_VERIFY_FILE}" || -L "${LEGACY_MIGRATION_VERIFY_FILE}" ) ]]; then
+    rm -f -- "${LEGACY_MIGRATION_VERIFY_FILE}" || true
+  fi
   WORKSPACECTL_RESULT_FILE=""
   RUNTIME_STATUS_FILE=""
+  LEGACY_MIGRATION_SNAPSHOT_FILE=""
+  LEGACY_MIGRATION_VERIFY_FILE=""
+}
+
+rollback_legacy_model_migration() {
+  [[ "${LEGACY_MIGRATION_RESTORE_NEEDED}" -eq 1 && "${LEGACY_MIGRATION_ROLLBACK_RUNNING}" -eq 0 ]] || return 0
+  LEGACY_MIGRATION_ROLLBACK_RUNNING=1
+  printf '[zhixu] legacy model migration failed; preserving both model volumes and restoring the legacy runtime\n' >&2
+  compose_without_grant --profile workspace-runtime stop local-model-runtime >/dev/null 2>&1 || true
+  compose_without_grant --profile workspace-runtime rm --force --stop local-model-runtime >/dev/null 2>&1 || true
+  if ! docker start "${LEGACY_MODEL_CONTAINER}" >/dev/null 2>&1; then
+    printf '[zhixu] warning: legacy runtime could not be restored; both model volumes were preserved\n' >&2
+  fi
+  LEGACY_MIGRATION_RESTORE_NEEDED=0
+  LEGACY_MIGRATION_ROLLBACK_RUNNING=0
 }
 
 release_mutation_lock() {
+  rollback_legacy_model_migration
   cleanup_transient_files
   if [[ "${MUTATION_LOCK_HELD}" -eq 1 ]]; then
     if ! rm -f -- "${LOCK_METADATA}" || ! rmdir -- "${LOCK_DIR}"; then
@@ -567,7 +609,7 @@ release_mutation_lock() {
 read_lock_metadata() {
   awk -F= '
     NR == 1 && NF == 2 && $1 == "pid" && $2 ~ /^[1-9][0-9]*$/ { pid = $2; next }
-    NR == 2 && NF == 2 && $1 == "command" && $2 ~ /^(up|restart|workspace-switch|down|reset)$/ { command = $2; next }
+    NR == 2 && NF == 2 && $1 == "command" && $2 ~ /^(up|restart|workspace-switch|workspace-rebind|down|reset|local-model-migrate)$/ { command = $2; next }
     { invalid = 1 }
     END { if (!invalid && NR == 2 && pid != "" && command != "") print pid, command; else exit 1 }
   ' "${LOCK_METADATA}"
@@ -888,7 +930,7 @@ validate_main_project_containers() {
     service="$(docker inspect --type container --format '{{ index .Config.Labels "com.docker.compose.service" }}' "${id}")" \
       || fail "could not inspect main Compose container"
     case "${service}" in
-      postgres|model-settings-key-init|migrate|modelctl|app|worker|app-model-relay|worker-model-relay|proxy|firewall) ;;
+      postgres|model-settings-key-init|migrate|modelctl|local-model-volume-init|local-model-runtime-credential-init|local-model-runtime|app|worker|app-model-relay|worker-model-relay|proxy|firewall) ;;
       *) fail "refusing to remove unknown zhixu Compose service ${service}" ;;
     esac
   done <<<"${ids}"
@@ -971,25 +1013,41 @@ docker_volume_exists() {
 }
 
 validate_main_project_volumes() {
-  local key name identity names
-  for key in zhixu-postgres zhixu-model-secrets; do
+  local key name identity names ownership
+  for key in zhixu-postgres zhixu-model-secrets zhixu-local-models zhixu-local-model-runtime-credentials; do
     name="${PROJECT_NAME}_${key}"
     if docker_volume_exists "${name}"; then
-      identity="$(docker volume inspect --format '{{.Name}}\t{{ index .Labels "com.docker.compose.project" }}\t{{ index .Labels "com.docker.compose.volume" }}' "${name}")" \
+      identity="$(docker volume inspect --format '{{.Name}}	{{ index .Labels "com.docker.compose.project" }}	{{ index .Labels "com.docker.compose.volume" }}' "${name}")" \
         || fail "could not inspect ${name}"
-      [[ "${identity}" == "${name}"'\t'"${PROJECT_NAME}"'\t'"${key}" ]] \
+      [[ "${identity}" == "${name}"$'\t'"${PROJECT_NAME}"$'\t'"${key}" ]] \
         || fail "refusing to remove foreign Compose volume ${name}"
+      case "${key}" in
+        zhixu-local-models)
+          ownership="$(docker volume inspect --format '{{ index .Labels "com.zhixu.owner" }}	{{ index .Labels "com.zhixu.schema" }}' "${name}")" \
+            || fail "could not inspect ${name} ownership"
+          [[ "${ownership}" == 'local-model-runtime'$'\t''local-model-store/v1' ]] \
+            || fail "refusing to remove foreign managed model volume ${name}"
+          ;;
+        zhixu-local-model-runtime-credentials)
+          ownership="$(docker volume inspect --format '{{ index .Labels "com.zhixu.owner" }}	{{ index .Labels "com.zhixu.schema" }}' "${name}")" \
+            || fail "could not inspect ${name} ownership"
+          [[ "${ownership}" == 'local-model-runtime'$'\t''local-model-runtime-credentials/v1' ]] \
+            || fail "refusing to remove foreign runtime credential volume ${name}"
+          ;;
+      esac
     fi
   done
   names="$(docker volume ls --quiet --filter "label=com.docker.compose.project=${PROJECT_NAME}")" \
     || fail "could not list ${PROJECT_NAME} Compose volumes"
   while read -r name; do
     [[ -n "${name}" ]] || continue
-    identity="$(docker volume inspect --format '{{.Name}}\t{{ index .Labels "com.docker.compose.project" }}\t{{ index .Labels "com.docker.compose.volume" }}' "${name}")" \
+    identity="$(docker volume inspect --format '{{.Name}}	{{ index .Labels "com.docker.compose.project" }}	{{ index .Labels "com.docker.compose.volume" }}' "${name}")" \
       || fail "could not inspect ${PROJECT_NAME} Compose volume"
     case "${identity}" in
-      "${PROJECT_NAME}_zhixu-postgres"'\t'"${PROJECT_NAME}"'\tzhixu-postgres'|\
-      "${PROJECT_NAME}_zhixu-model-secrets"'\t'"${PROJECT_NAME}"'\tzhixu-model-secrets') ;;
+      "${PROJECT_NAME}_zhixu-postgres"$'\t'"${PROJECT_NAME}"$'\t''zhixu-postgres'|\
+      "${PROJECT_NAME}_zhixu-model-secrets"$'\t'"${PROJECT_NAME}"$'\t''zhixu-model-secrets'|\
+      "${PROJECT_NAME}_zhixu-local-models"$'\t'"${PROJECT_NAME}"$'\t''zhixu-local-models'|\
+      "${PROJECT_NAME}_zhixu-local-model-runtime-credentials"$'\t'"${PROJECT_NAME}"$'\t''zhixu-local-model-runtime-credentials') ;;
       *) fail "refusing to remove unknown ${PROJECT_NAME} Compose volume ${name}" ;;
     esac
   done <<<"${names}"
@@ -1004,7 +1062,7 @@ remove_main_project_volumes() {
     [[ -n "${name}" ]] || continue
     docker volume rm "${name}" >/dev/null || fail "could not remove ${PROJECT_NAME} Compose volume ${name}"
   done <<<"${names}"
-  for name in "${PROJECT_NAME}_zhixu-postgres" "${PROJECT_NAME}_zhixu-model-secrets"; do
+  for name in "${PROJECT_NAME}_zhixu-postgres" "${PROJECT_NAME}_zhixu-model-secrets" "${PROJECT_NAME}_zhixu-local-models" "${PROJECT_NAME}_zhixu-local-model-runtime-credentials"; do
     docker_volume_exists "${name}" && fail "${PROJECT_NAME} Compose volume ${name} still exists"
   done
   return 0
@@ -1079,11 +1137,14 @@ validate_compose() {
 start_base_stack() {
   log "building base and Workspace runtime images"
   compose --profile workspace-runtime --profile modelctl build \
-    model-settings-key-init migrate modelctl app worker app-model-relay worker-model-relay
+    model-settings-key-init migrate modelctl local-model-runtime-credential-init local-model-runtime app worker app-model-relay worker-model-relay
   log "starting PostgreSQL, secret initialization, and migrations"
   compose up --detach --wait postgres
   compose run --rm --no-deps -T model-settings-key-init
   compose run --rm --no-deps -T migrate
+  compose --profile workspace-runtime run --rm --no-deps -T local-model-runtime-credential-init
+  compose --profile workspace-runtime run --rm --no-deps -T local-model-volume-init
+  compose --profile workspace-runtime up --detach --wait local-model-runtime
   compose --profile modelctl run --rm --no-deps -T modelctl recover --stale
 }
 
@@ -1169,6 +1230,7 @@ import sys
 
 candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:
+    candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     candidate.bind(("127.0.0.1", int(sys.argv[1])))
 finally:
     candidate.close()
@@ -1256,13 +1318,59 @@ invoke_workspace_control() {
     contain_uncommitted_runtime
     fail "Workspace control returned an unsafe result"
   fi
-  if ! result_fields="$(selection_document result "${WORKSPACECTL_RESULT_FILE}")"; then
+  if ! result_fields="$(selection_document result "${WORKSPACECTL_RESULT_FILE}" switch)"; then
     rm -f -- "${WORKSPACECTL_RESULT_FILE}"
     WORKSPACECTL_RESULT_FILE=""
     contain_uncommitted_runtime
     fail "Workspace control returned an invalid result"
   fi
-  IFS=$'\x1f' read -r CONTROL_ROOT CONTROL_WORKSPACE_ID CONTROL_ROOT_FINGERPRINT <<<"${result_fields}"
+  IFS=$'\x1f' read -r CONTROL_ROOT CONTROL_WORKSPACE_ID CONTROL_ROOT_FINGERPRINT CONTROL_BINDING_VERSION <<<"${result_fields}"
+  rm -f -- "${WORKSPACECTL_RESULT_FILE}"
+  WORKSPACECTL_RESULT_FILE=""
+}
+
+invoke_workspace_rebind() {
+  local root=$1 workspace_id=$2 old_fingerprint=$3 confirmation=$4
+  local database_url exit_code=0 result_fields idempotency_key=""
+  local -a command_arguments
+  validate_private_executable "${WORKSPACECTL_BINARY}" "Workspace control binary"
+  WORKSPACECTL_RESULT_FILE="${STATE_DIR}/workspacectl-result.$$"
+  [[ ! -e "${WORKSPACECTL_RESULT_FILE}" && ! -L "${WORKSPACECTL_RESULT_FILE}" ]] \
+    || fail "Workspace control result path already exists"
+  (umask 077; : >"${WORKSPACECTL_RESULT_FILE}") || fail "could not create Workspace control result"
+  chmod 0600 "${WORKSPACECTL_RESULT_FILE}"
+  database_url="$(workspace_database_url)"
+  exec 8<<<"${database_url}"
+  idempotency_key="$(new_idempotency_key)"
+  command_arguments=(
+    "${WORKSPACECTL_BINARY}" rebind --workspace-root "${root}" --workspace-id "${workspace_id}"
+    --expected-root-fingerprint "${old_fingerprint}" --idempotency-key "${idempotency_key}"
+    --confirm "${confirmation}" --control-instance-id "${CONTROL_INSTANCE_ID}"
+    --compose-file "${COMPOSE_FILE}" --env-file "${ENV_FILE}"
+    --grant-override "${GRANT_OVERRIDE}" --compose-project "${PROJECT_NAME}" --database-url-fd 8
+  )
+  if run_mutation_command "${command_arguments[@]}" >"${WORKSPACECTL_RESULT_FILE}"; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+  exec 8<&-
+  database_url=""
+  idempotency_key=""
+  if [[ "${exit_code}" -ne 0 ]]; then
+    rm -f -- "${WORKSPACECTL_RESULT_FILE}"
+    WORKSPACECTL_RESULT_FILE=""
+    printf '[zhixu] Workspace rebind failed; the saved selection was not changed\n' >&2
+    return "${exit_code}"
+  fi
+  if ! protected_file_is_valid "${WORKSPACECTL_RESULT_FILE}" \
+    || ! result_fields="$(selection_document result "${WORKSPACECTL_RESULT_FILE}" rebind)"; then
+    rm -f -- "${WORKSPACECTL_RESULT_FILE}"
+    WORKSPACECTL_RESULT_FILE=""
+    contain_uncommitted_runtime
+    fail "Workspace rebind returned an invalid result"
+  fi
+  IFS=$'\x1f' read -r CONTROL_ROOT CONTROL_WORKSPACE_ID CONTROL_ROOT_FINGERPRINT CONTROL_BINDING_VERSION <<<"${result_fields}"
   rm -f -- "${WORKSPACECTL_RESULT_FILE}"
   WORKSPACECTL_RESULT_FILE=""
 }
@@ -1293,7 +1401,7 @@ for requirement in sys.argv[1:]:
 }
 
 runtime_services_ready() {
-  runtime_status_is_ready postgres=healthy app=healthy worker=healthy \
+  runtime_status_is_ready postgres=healthy local-model-runtime=healthy app=healthy worker=healthy \
     app-model-relay=healthy worker-model-relay=healthy <"${RUNTIME_STATUS_FILE}"
 }
 
@@ -1329,7 +1437,7 @@ verify_runtime_ready() {
   chmod 0600 "${RUNTIME_STATUS_FILE}"
   for ((attempt = 0; attempt < 120; attempt++)); do
     helper_status=""
-    if compose --profile workspace-runtime ps --format json postgres app worker app-model-relay worker-model-relay >"${RUNTIME_STATUS_FILE}" 2>/dev/null \
+    if compose --profile workspace-runtime ps --format json postgres local-model-runtime app worker app-model-relay worker-model-relay >"${RUNTIME_STATUS_FILE}" 2>/dev/null \
       && runtime_services_ready \
       && helper_status="$(netns_compose ps --all --format json app-netns worker-netns 2>/dev/null)" \
       && printf '%s' "${helper_status}" | runtime_status_is_ready app-netns=healthy worker-netns=healthy \
@@ -1435,6 +1543,707 @@ run_workspace_switch() {
   run_workspace_lifecycle "${selected_root}" "${expected_workspace_id}" "${expected_fingerprint}" "${initialize_git}"
 }
 
+run_workspace_rebind() {
+  local confirmation=$1 root old_workspace_id old_fingerprint new_fingerprint rebound_binding_version
+  selection_exists || fail "no Workspace has been selected; run ./zhixu up --workspace ABS"
+  load_selection
+  root="$(canonicalize_workspace_root "${SELECTION_ROOT}")" || fail "Workspace root is invalid"
+  [[ "${root}" == "${SELECTION_ROOT}" ]] || fail "saved Workspace root is no longer canonical"
+  old_workspace_id="${SELECTION_WORKSPACE_ID}"
+  old_fingerprint="${SELECTION_ROOT_FINGERPRINT}"
+
+  require_command docker
+  require_command id
+  require_command python3
+  validate_project_scope
+  docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
+  docker buildx version >/dev/null 2>&1 || fail "Docker Buildx is unavailable"
+  initialize_local_state
+  validate_compose
+  ensure_netns_stack "$(validated_port ZHIXU_HTTP_PORT 8080)"
+  build_workspace_control_bundle
+  start_base_stack
+  contain_uncommitted_runtime
+  if ! invoke_workspace_rebind "${root}" "${old_workspace_id}" "${old_fingerprint}" "${confirmation}"; then
+    # The binding or its following switch may already have committed while the
+    # launcher response/selection write was lost. First let the ordinary state
+    # machine recover that exact current identity. If the old active binding is
+    # merely stale, this probe marks it migration-required and the strict rebind
+    # retry below remains the only path that can change the Registry identity.
+    contain_uncommitted_runtime
+    if invoke_workspace_control "${root}" 0; then
+      if [[ "${CONTROL_ROOT}" == "${root}" && "${CONTROL_WORKSPACE_ID}" == "${old_workspace_id}" \
+        && "${CONTROL_ROOT_FINGERPRINT}" != "${old_fingerprint}" \
+        && "${CONTROL_BINDING_VERSION}" =~ ^[1-9][0-9]*$ ]] \
+        && (( CONTROL_BINDING_VERSION > 1 )) \
+        && [[ -e "${GRANT_OVERRIDE}" || -L "${GRANT_OVERRIDE}" ]] \
+        && protected_file_is_valid "${GRANT_OVERRIDE}" \
+        && verify_runtime_ready \
+        && commit_selection "${CONTROL_ROOT}" "${CONTROL_WORKSPACE_ID}" "${CONTROL_ROOT_FINGERPRINT}"; then
+        log "ready: http://127.0.0.1:$(validated_port ZHIXU_HTTP_PORT 8080)/"
+        return
+      fi
+      contain_uncommitted_runtime
+      fail "Workspace control returned an unexpected rebind recovery identity"
+    fi
+    contain_uncommitted_runtime
+    invoke_workspace_rebind "${root}" "${old_workspace_id}" "${old_fingerprint}" "${confirmation}"
+  fi
+  if [[ "${CONTROL_ROOT}" != "${root}" || "${CONTROL_WORKSPACE_ID}" != "${old_workspace_id}" \
+    || "${CONTROL_ROOT_FINGERPRINT}" == "${old_fingerprint}" ]]; then
+    contain_uncommitted_runtime
+    fail "Workspace rebind returned an unexpected identity"
+  fi
+  new_fingerprint="${CONTROL_ROOT_FINGERPRINT}"
+  rebound_binding_version="${CONTROL_BINDING_VERSION}"
+  [[ "${rebound_binding_version}" =~ ^[1-9][0-9]*$ ]] || {
+    contain_uncommitted_runtime
+    fail "Workspace rebind returned an invalid binding version"
+  }
+  invoke_workspace_control "${root}" 0
+  if [[ "${CONTROL_ROOT}" != "${root}" || "${CONTROL_WORKSPACE_ID}" != "${old_workspace_id}" \
+    || "${CONTROL_ROOT_FINGERPRINT}" != "${new_fingerprint}" \
+    || "${CONTROL_BINDING_VERSION}" != "${rebound_binding_version}" ]]; then
+    contain_uncommitted_runtime
+    fail "Workspace control did not activate the rebound identity"
+  fi
+  if [[ ! -e "${GRANT_OVERRIDE}" && ! -L "${GRANT_OVERRIDE}" ]] \
+    || ! protected_file_is_valid "${GRANT_OVERRIDE}"; then
+    contain_uncommitted_runtime
+    fail "Workspace control did not create a safe grant"
+  fi
+  if ! verify_runtime_ready; then
+    contain_uncommitted_runtime
+    fail "Docker Workspace runtime did not become ready"
+  fi
+  if ! commit_selection "${CONTROL_ROOT}" "${CONTROL_WORKSPACE_ID}" "${CONTROL_ROOT_FINGERPRINT}"; then
+    contain_uncommitted_runtime
+    fail "could not commit rebound Workspace selection"
+  fi
+  log "ready: http://127.0.0.1:$(validated_port ZHIXU_HTTP_PORT 8080)/"
+}
+
+legacy_model_container_shape() {
+  local inspect_json
+  inspect_json="$(docker inspect --type container "${LEGACY_MODEL_CONTAINER}")" \
+    || fail "could not inspect the legacy model container"
+  python3 - "${LEGACY_MODEL_CONTAINER}" "${LEGACY_MODEL_VOLUME}" "${LEGACY_MODEL_IMAGE}" "${inspect_json}" <<'PY'
+import json
+import re
+import sys
+
+container_name, volume_name, image_name, inspect_json = sys.argv[1:]
+items = json.loads(inspect_json)
+if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+    raise SystemExit("legacy container inspect shape is invalid")
+item = items[0]
+config = item.get("Config") or {}
+host = item.get("HostConfig") or {}
+state = item.get("State") or {}
+mounts = item.get("Mounts") or []
+networks = (item.get("NetworkSettings") or {}).get("Networks") or {}
+
+expected_ports = {"11434/tcp": [{"HostIp": "127.0.0.1", "HostPort": "11434"}]}
+restart = host.get("RestartPolicy") or {}
+if (
+    item.get("Name") != "/" + container_name
+    or config.get("Image") != image_name
+    or (config.get("Labels") or {}) != {}
+    or config.get("User", "") not in ("", "0", "0:0")
+    or config.get("Entrypoint") != ["/bin/ollama"]
+    or config.get("Cmd") != ["serve"]
+    or (config.get("ExposedPorts") or {}) not in ({}, {"11434/tcp": {}})
+    or (config.get("Volumes") or {}) not in ({}, {"/root/.ollama": {}})
+    or host.get("NetworkMode") not in ("default", "bridge")
+    or host.get("Privileged") is not False
+    or host.get("ReadonlyRootfs") is not False
+    or host.get("AutoRemove") is not False
+    or restart.get("Name") not in ("", "no")
+    or restart.get("MaximumRetryCount", 0) != 0
+    or (host.get("PortBindings") or {}) != expected_ports
+    or host.get("Binds") not in (None, [])
+    or host.get("Devices") not in (None, [])
+    or host.get("DeviceRequests") not in (None, [])
+    or host.get("CapAdd") not in (None, [])
+    or host.get("CapDrop") not in (None, [])
+    or host.get("SecurityOpt") not in (None, [])
+    or host.get("ExtraHosts") not in (None, [])
+    or host.get("Links") not in (None, [])
+    or host.get("VolumesFrom") not in (None, [])
+    or set(networks) != {"bridge"}
+):
+    raise SystemExit("legacy container does not match the approved shape")
+if len(mounts) != 1:
+    raise SystemExit("legacy container mount count is invalid")
+mount = mounts[0]
+if (
+    mount.get("Type") != "volume"
+    or mount.get("Name") != volume_name
+    or mount.get("Destination") != "/root/.ollama"
+    or mount.get("RW") is not True
+):
+    raise SystemExit("legacy container mount is invalid")
+
+allowed_environment = {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "LD_LIBRARY_PATH": "/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+    "OLLAMA_HOST": "0.0.0.0:11434",
+}
+environment = {}
+for entry in config.get("Env") or []:
+    if not isinstance(entry, str) or "=" not in entry:
+        raise SystemExit("legacy container environment is invalid")
+    key, value = entry.split("=", 1)
+    if key in environment or key not in allowed_environment or value != allowed_environment[key]:
+        raise SystemExit("legacy container environment is outside the allowlist")
+    environment[key] = value
+if "PATH" not in environment:
+    raise SystemExit("legacy container PATH is missing")
+
+status = state.get("Status")
+if status not in ("running", "exited"):
+    raise SystemExit("legacy container state is not migratable")
+image_id = item.get("Image")
+if not isinstance(image_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
+    raise SystemExit("legacy container image ID is invalid")
+print(("running" if status == "running" else "stopped") + "\t" + image_id)
+PY
+}
+
+validate_legacy_model_image() {
+  local image_id=$1 repo_digests
+  repo_digests="$(docker image inspect --format '{{json .RepoDigests}}' "${image_id}")" \
+    || fail "could not inspect the legacy Ollama image"
+  python3 - "${repo_digests}" <<'PY'
+import json
+import sys
+
+digests = json.loads(sys.argv[1])
+expected = "ollama/ollama@sha256:f478761c18fea69b1624e095bce0f8aab06825d09ccabcd0f88828db0df185ce"
+if not isinstance(digests, list) or expected not in digests:
+    raise SystemExit("legacy Ollama image digest is outside the migration allowlist")
+PY
+}
+
+validate_legacy_model_volume() {
+  local inspect_json references
+  inspect_json="$(docker volume inspect "${LEGACY_MODEL_VOLUME}")" \
+    || fail "could not inspect the legacy model volume"
+  python3 - "${LEGACY_MODEL_VOLUME}" "${inspect_json}" <<'PY'
+import json
+import sys
+
+items = json.loads(sys.argv[2])
+if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+    raise SystemExit("legacy volume inspect shape is invalid")
+item = items[0]
+if (
+    item.get("Name") != sys.argv[1]
+    or item.get("Driver") != "local"
+    or item.get("Scope") != "local"
+    or (item.get("Labels") or {}) != {}
+    or (item.get("Options") or {}) != {}
+):
+    raise SystemExit("legacy volume does not match the approved shape")
+PY
+  references="$(docker ps --all --filter "volume=${LEGACY_MODEL_VOLUME}" --format '{{.Names}}')" \
+    || fail "could not list legacy volume references"
+  if docker_container_exists "${LEGACY_MODEL_CONTAINER}"; then
+    [[ "${references}" == "${LEGACY_MODEL_CONTAINER}" ]] \
+      || fail "legacy model volume has an unexpected container reference"
+  else
+    [[ -z "${references}" ]] || fail "legacy model volume has an unexpected container reference"
+  fi
+}
+
+validate_managed_model_volume() {
+  local inspect_json references
+  inspect_json="$(docker volume inspect "${MANAGED_MODEL_VOLUME}")" \
+    || fail "could not inspect the managed model volume"
+  python3 - "${MANAGED_MODEL_VOLUME}" "${PROJECT_NAME}" "${inspect_json}" <<'PY'
+import json
+import re
+import sys
+
+items = json.loads(sys.argv[3])
+if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+    raise SystemExit("managed volume inspect shape is invalid")
+item = items[0]
+labels = item.get("Labels") or {}
+required = {
+    "com.docker.compose.project": sys.argv[2],
+    "com.docker.compose.volume": "zhixu-local-models",
+    "com.zhixu.owner": "local-model-runtime",
+    "com.zhixu.schema": "local-model-store/v1",
+}
+allowed = set(required) | {"com.docker.compose.version"}
+if (
+    item.get("Name") != sys.argv[1]
+    or item.get("Driver") != "local"
+    or item.get("Scope") != "local"
+    or (item.get("Options") or {}) != {}
+    or not all(labels.get(key) == value for key, value in required.items())
+    or not set(labels).issubset(allowed)
+):
+    raise SystemExit("managed model volume ownership is invalid")
+if "com.docker.compose.version" in labels and re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", labels["com.docker.compose.version"]) is None:
+    raise SystemExit("managed model volume Compose version label is invalid")
+PY
+  references="$(docker ps --all --filter "volume=${MANAGED_MODEL_VOLUME}" --format '{{.Names}}')" \
+    || fail "could not list managed model volume references"
+  while IFS= read -r name; do
+    [[ -n "${name}" ]] || continue
+    [[ "${name}" == "${PROJECT_NAME}-local-model-volume-init-"* \
+      || "${name}" == "${PROJECT_NAME}-local-model-runtime-"* ]] \
+      || fail "managed model volume has an unexpected container reference"
+  done <<<"${references}"
+}
+
+managed_model_image_id() {
+  local image_id
+  image_id="$(docker image inspect --format '{{.Id}}' "${MANAGED_MODEL_IMAGE}")" \
+    || fail "managed local-model-runtime image is unavailable; run ./zhixu up first"
+  [[ "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "managed local-model-runtime image ID is invalid"
+  printf '%s\n' "${image_id}"
+}
+
+legacy_model_api_get() {
+  local path=$1
+  docker exec -i "${LEGACY_MODEL_CONTAINER}" /bin/bash -s -- "${path}" <<'BASH'
+set -Eeuo pipefail
+
+readonly path=$1
+readonly max_bytes=1048576
+[[ "${path}" == /api/version || "${path}" == /api/tags ]] || exit 1
+exec 3<>/dev/tcp/127.0.0.1/11434
+printf 'GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json\r\nConnection: close\r\n\r\n' "${path}" >&3
+IFS= read -r status <&3
+status="${status%$'\r'}"
+[[ "${status}" == 'HTTP/1.1 200 OK' ]] || exit 1
+content_type=""
+content_length=""
+transfer_encoding=""
+header_count=0
+while IFS= read -r header <&3; do
+  header_count=$((header_count + 1))
+  ((header_count <= 100)) || exit 1
+  header="${header%$'\r'}"
+  [[ -n "${header}" ]] || break
+  case "${header,,}" in
+    content-type:*)
+      [[ -z "${content_type}" ]] || exit 1
+      content_type="${header#*:}"
+      content_type="${content_type# }"
+      ;;
+    content-length:*)
+      [[ -z "${content_length}" ]] || exit 1
+      content_length="${header#*:}"
+      content_length="${content_length# }"
+      ;;
+    transfer-encoding:*)
+      [[ -z "${transfer_encoding}" ]] || exit 1
+      transfer_encoding="${header#*:}"
+      transfer_encoding="${transfer_encoding# }"
+      ;;
+  esac
+done
+[[ "${content_type,,}" == application/json* ]] || exit 1
+[[ -z "${content_length}" || -z "${transfer_encoding}" ]] || exit 1
+if [[ -n "${content_length}" ]]; then
+  [[ "${content_length}" =~ ^[1-9][0-9]*$ ]] || exit 1
+  ((content_length <= max_bytes)) || exit 1
+  head -c "${content_length}" <&3
+elif [[ -n "${transfer_encoding}" ]]; then
+  [[ "${transfer_encoding,,}" == chunked ]] || exit 1
+  total_bytes=0
+  while true; do
+    IFS= read -r chunk_header <&3
+    chunk_header="${chunk_header%$'\r'}"
+    [[ "${chunk_header}" =~ ^[0-9A-Fa-f]{1,8}$ ]] || exit 1
+    chunk_size=$((16#${chunk_header}))
+    if ((chunk_size == 0)); then
+      trailer_count=0
+      while IFS= read -r trailer <&3; do
+        trailer_count=$((trailer_count + 1))
+        ((trailer_count <= 20)) || exit 1
+        trailer="${trailer%$'\r'}"
+        [[ -n "${trailer}" ]] || break
+      done
+      break
+    fi
+    total_bytes=$((total_bytes + chunk_size))
+    ((total_bytes <= max_bytes)) || exit 1
+    head -c "${chunk_size}" <&3
+    IFS= read -r terminator <&3
+    [[ "${terminator}" == $'\r' ]] || exit 1
+  done
+  ((total_bytes > 0)) || exit 1
+else
+  exit 1
+fi
+BASH
+}
+
+capture_legacy_model_snapshot() {
+  local version_json tags_json
+  version_json="$(legacy_model_api_get /api/version)" \
+    || fail "legacy Ollama version endpoint is unavailable"
+  tags_json="$(legacy_model_api_get /api/tags)" \
+    || fail "legacy Ollama model inventory is unavailable"
+  LEGACY_MIGRATION_SNAPSHOT_FILE="${STATE_DIR}/legacy-model-snapshot.$$"
+  [[ ! -e "${LEGACY_MIGRATION_SNAPSHOT_FILE}" && ! -L "${LEGACY_MIGRATION_SNAPSHOT_FILE}" ]] \
+    || fail "legacy model snapshot path already exists"
+  (umask 077; : >"${LEGACY_MIGRATION_SNAPSHOT_FILE}") || fail "could not create legacy model snapshot"
+  python3 - "${version_json}" "${tags_json}" >"${LEGACY_MIGRATION_SNAPSHOT_FILE}" <<'PY'
+import json
+import re
+import sys
+
+version = json.loads(sys.argv[1])
+payload = json.loads(sys.argv[2])
+if version != {"version": "0.9.6"}:
+    raise SystemExit("legacy Ollama version is outside the migration allowlist")
+if not isinstance(payload, dict) or set(payload) != {"models"} or not isinstance(payload["models"], list):
+    raise SystemExit("legacy model inventory shape is invalid")
+models = {}
+for model in payload["models"]:
+    if not isinstance(model, dict):
+        raise SystemExit("legacy model inventory entry is invalid")
+    name = model.get("name")
+    if model.get("model") not in (None, name):
+        raise SystemExit("legacy model inventory aliases disagree")
+    digest = model.get("digest")
+    size = model.get("size")
+    if (
+        not isinstance(name, str)
+        or re.fullmatch(r"[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+", name) is None
+        or not isinstance(digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 0
+        or name in models
+    ):
+        raise SystemExit("legacy model inventory entry is invalid")
+    models[name] = (digest, size)
+required = {"qwen2.5:0.5b", "all-minilm:latest"}
+if not required.issubset(models):
+    raise SystemExit("legacy inventory lacks approved production probe models")
+if not models or len(models) > 128:
+    raise SystemExit("legacy model inventory size is invalid")
+for name in sorted(models):
+    digest, size = models[name]
+    print(f"{name}\t{digest}\t{size}")
+PY
+  validate_protected_file "${LEGACY_MIGRATION_SNAPSHOT_FILE}" "legacy model snapshot"
+}
+
+legacy_model_snapshot_digest() {
+  python3 - "${LEGACY_MIGRATION_SNAPSHOT_FILE}" <<'PY'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as source:
+    print("sha256:" + hashlib.sha256(source.read()).hexdigest())
+PY
+}
+
+legacy_model_snapshot_base64() {
+  python3 - "${LEGACY_MIGRATION_SNAPSHOT_FILE}" <<'PY'
+import base64
+import sys
+
+with open(sys.argv[1], "rb") as source:
+    print(base64.b64encode(source.read()).decode("ascii"))
+PY
+}
+
+legacy_model_source_fingerprint() {
+  local image_id=$1 snapshot_digest=$2 tree_fingerprint=$3
+  python3 - "${image_id}" "${snapshot_digest}" "${tree_fingerprint}" <<'PY'
+import hashlib
+import sys
+
+facts = "\n".join([
+    "zhixu-legacy-model-source/v1",
+    "container=zhixu-eino-live-ollama",
+    "volume=zhixu-eino-live-models",
+    "image=ollama/ollama:0.9.6",
+    "image_id=" + sys.argv[1],
+    "version=0.9.6",
+    "models=" + sys.argv[2],
+    "tree=" + sys.argv[3],
+]) + "\n"
+print("sha256:" + hashlib.sha256(facts.encode("ascii")).hexdigest())
+PY
+}
+
+legacy_helper_source_preflight() {
+  local image_id=$1 mounts=(--mount "type=volume,src=${LEGACY_MODEL_VOLUME},dst=/migration/source,readonly")
+  if docker_volume_exists "${MANAGED_MODEL_VOLUME}"; then
+    mounts+=(--mount "type=volume,src=${MANAGED_MODEL_VOLUME},dst=/var/lib/zhixu/ollama/.ollama,readonly")
+  fi
+  docker run --rm --network none --read-only --user 0:0 --cap-drop ALL --cap-add DAC_READ_SEARCH \
+    --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
+    "${mounts[@]}" --entrypoint "${LEGACY_MIGRATION_HELPER}" "${image_id}" source-preflight
+}
+
+legacy_helper_source_tree_fingerprint() {
+  local image_id=$1
+  docker run --rm --network none --read-only --user 0:0 --cap-drop ALL --cap-add DAC_READ_SEARCH \
+    --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
+    --mount "type=volume,src=${LEGACY_MODEL_VOLUME},dst=/migration/source,readonly" \
+    --entrypoint "${LEGACY_MIGRATION_HELPER}" "${image_id}" source-fingerprint
+}
+
+legacy_helper_destination_state() {
+  local image_id=$1 fingerprint=$2 snapshot_digest=$3 snapshot_base64=$4
+  docker run --rm --network none --read-only --user 10001:10001 --cap-drop ALL \
+    --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
+    --mount "type=volume,src=${MANAGED_MODEL_VOLUME},dst=/var/lib/zhixu/ollama/.ollama,readonly" \
+    --entrypoint "${LEGACY_MIGRATION_HELPER}" "${image_id}" destination-state \
+    "${fingerprint}" "${image_id}" "${snapshot_digest}" "${snapshot_base64}"
+}
+
+legacy_helper_destination_tree_fingerprint() {
+  local image_id=$1
+  docker run --rm --network none --read-only --user 10001:10001 --cap-drop ALL \
+    --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
+    --mount "type=volume,src=${MANAGED_MODEL_VOLUME},dst=/var/lib/zhixu/ollama/.ollama,readonly" \
+    --entrypoint "${LEGACY_MIGRATION_HELPER}" "${image_id}" destination-fingerprint
+}
+
+copy_legacy_model_volume() {
+  local image_id=$1 fingerprint=$2 snapshot_digest=$3 snapshot_base64=$4
+  run_mutation_command docker run --rm --network none --read-only --user 0:0 --cap-drop ALL \
+    --cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER \
+    --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
+    --mount "type=volume,src=${LEGACY_MODEL_VOLUME},dst=/migration/source,readonly" \
+    --mount "type=volume,src=${MANAGED_MODEL_VOLUME},dst=/var/lib/zhixu/ollama/.ollama" \
+    --entrypoint "${LEGACY_MIGRATION_HELPER}" "${image_id}" copy \
+    "${fingerprint}" "${image_id}" "${snapshot_digest}" "${snapshot_base64}"
+}
+
+verify_legacy_model_copy() {
+  local image_id=$1 fingerprint=$2 snapshot_digest=$3 snapshot_base64=$4
+  LEGACY_MIGRATION_VERIFY_FILE="${STATE_DIR}/legacy-model-verify.$$"
+  [[ ! -e "${LEGACY_MIGRATION_VERIFY_FILE}" && ! -L "${LEGACY_MIGRATION_VERIFY_FILE}" ]] \
+    || fail "legacy model verification path already exists"
+  (umask 077; : >"${LEGACY_MIGRATION_VERIFY_FILE}") || fail "could not create legacy model verification state"
+  run_mutation_command docker run --rm --network none --read-only --user 10001:10001 --cap-drop ALL \
+    --security-opt no-new-privileges \
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777 \
+    --mount "type=volume,src=${MANAGED_MODEL_VOLUME},dst=/var/lib/zhixu/ollama/.ollama" \
+    --entrypoint "${LEGACY_MIGRATION_HELPER}" "${image_id}" verify \
+    "${fingerprint}" "${image_id}" "${snapshot_digest}" "${snapshot_base64}" \
+    >"${LEGACY_MIGRATION_VERIFY_FILE}" \
+    || fail "copied model store failed target-version verification"
+  validate_protected_file "${LEGACY_MIGRATION_VERIFY_FILE}" "legacy model verification state"
+  python3 - "${LEGACY_MIGRATION_SNAPSHOT_FILE}" "${LEGACY_MIGRATION_VERIFY_FILE}" <<'PY'
+import base64
+import json
+import math
+import re
+import sys
+
+with open(sys.argv[1], "r", encoding="ascii") as source:
+    expected = [tuple(line.rstrip("\n").split("\t")) for line in source]
+values = {}
+with open(sys.argv[2], "r", encoding="ascii") as source:
+    for line in source:
+        key, separator, encoded = line.rstrip("\n").partition("=")
+        if not separator or key not in {"version_base64", "tags_base64", "chat_base64", "embedding_base64"} or key in values:
+            raise SystemExit("target verification output is invalid")
+        if len(encoded) > 24_000_000 or re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", encoded) is None:
+            raise SystemExit("target verification output is invalid")
+        values[key] = json.loads(base64.b64decode(encoded, validate=True))
+if set(values) != {"version_base64", "tags_base64", "chat_base64", "embedding_base64"}:
+    raise SystemExit("target verification output is incomplete")
+if values["version_base64"] != {"version": "0.32.9"}:
+    raise SystemExit("target Ollama version is not the approved compatibility pin")
+
+tags = values["tags_base64"]
+if not isinstance(tags, dict) or not isinstance(tags.get("models"), list):
+    raise SystemExit("target model inventory is invalid")
+actual = []
+for model in tags["models"]:
+    name = model.get("name") if isinstance(model, dict) else None
+    digest = model.get("digest") if isinstance(model, dict) else None
+    size = model.get("size") if isinstance(model, dict) else None
+    if model.get("model") not in (None, name) or not isinstance(size, int) or isinstance(size, bool):
+        raise SystemExit("target model inventory is invalid")
+    actual.append((name, digest, str(size)))
+if sorted(actual) != expected:
+    raise SystemExit("target model inventory differs from the legacy snapshot")
+
+chat = values["chat_base64"]
+try:
+    content = chat["choices"][0]["message"]["content"]
+except (KeyError, IndexError, TypeError):
+    raise SystemExit("target Chat production probe response is invalid")
+if chat.get("model") not in {"qwen2.5:0.5b", "qwen2.5:0.5b:latest"} or not isinstance(content, str) or not content.strip():
+    raise SystemExit("target Chat production probe response is invalid")
+
+embedding = values["embedding_base64"]
+vectors = embedding.get("embeddings") if isinstance(embedding, dict) else None
+if embedding.get("model") != "all-minilm:latest" or not isinstance(vectors, list) or len(vectors) != 1 or not vectors[0]:
+    raise SystemExit("target Embedding production probe response is invalid")
+if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in vectors[0]):
+    raise SystemExit("target Embedding production probe response is invalid")
+PY
+}
+
+mark_legacy_model_copy_verified() {
+  local image_id=$1 fingerprint=$2 snapshot_digest=$3 snapshot_base64=$4
+  run_mutation_command docker run --rm --network none --read-only --user 10001:10001 --cap-drop ALL \
+    --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
+    --mount "type=volume,src=${MANAGED_MODEL_VOLUME},dst=/var/lib/zhixu/ollama/.ollama" \
+    --entrypoint "${LEGACY_MIGRATION_HELPER}" "${image_id}" mark-verified \
+    "${fingerprint}" "${image_id}" "${snapshot_digest}" "${snapshot_base64}" >/dev/null \
+    || fail "could not commit the verified migration marker"
+}
+
+legacy_model_migration_completed() {
+  local image_id=$1
+  docker run --rm --network none --read-only --user 10001:10001 --cap-drop ALL \
+    --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
+    --mount "type=volume,src=${MANAGED_MODEL_VOLUME},dst=/var/lib/zhixu/ollama/.ollama,readonly" \
+    --entrypoint "${LEGACY_MIGRATION_HELPER}" "${image_id}" completed "${image_id}" >/dev/null
+}
+
+confirm_legacy_model_migration() {
+  local confirmation=""
+  if [[ $# -eq 2 && "$1" == --confirm ]]; then
+    confirmation=$2
+  elif [[ $# -eq 0 && -t 0 ]]; then
+    printf 'Type MIGRATE to stop the exact legacy runtime and copy its model store: '
+    IFS= read -r confirmation
+  else
+    fail "local-model migrate requires interactive confirmation or --confirm MIGRATE"
+  fi
+  [[ "${confirmation}" == MIGRATE ]] || fail "local-model migration confirmation did not match MIGRATE"
+}
+
+run_local_model_status() {
+  local shape
+  require_command docker
+  require_command python3
+  validate_project_scope
+  if docker_container_exists "${LEGACY_MODEL_CONTAINER}"; then
+    shape="$(legacy_model_container_shape)" || fail "legacy model container is present but outside the migration allowlist"
+    validate_legacy_model_image "${shape#*$'\t'}"
+    validate_legacy_model_volume
+    printf 'Legacy: detected (%s)\n' "${shape%%$'\t'*}"
+  elif docker_volume_exists "${LEGACY_MODEL_VOLUME}"; then
+    validate_legacy_model_volume
+    printf 'Legacy: rollback volume preserved\n'
+  else
+    printf 'Legacy: not detected\n'
+  fi
+  if docker_volume_exists "${MANAGED_MODEL_VOLUME}"; then
+    validate_managed_model_volume
+    printf 'Managed model volume: owned\n'
+  else
+    printf 'Managed model volume: absent\n'
+  fi
+}
+
+run_local_model_migrate() {
+  local shape image_id source_image_id snapshot_digest snapshot_base64 fingerprint destination_state
+  local source_tree_fingerprint source_tree_fingerprint_after_stop destination_tree_fingerprint
+  require_command docker
+  require_command python3
+  validate_project_scope
+  select_existing_env
+  if [[ $# -ne 0 && ! ( $# -eq 2 && "$1" == --confirm && "$2" == MIGRATE ) ]]; then
+    fail "local-model migrate accepts no arguments or --confirm MIGRATE"
+  fi
+  image_id="$(managed_model_image_id)"
+
+  if ! docker_container_exists "${LEGACY_MODEL_CONTAINER}"; then
+    docker_volume_exists "${LEGACY_MODEL_VOLUME}" || fail "legacy model source volume is absent"
+    validate_legacy_model_volume
+    docker_volume_exists "${MANAGED_MODEL_VOLUME}" || fail "legacy container is absent and no managed model volume exists"
+    validate_managed_model_volume
+    legacy_model_migration_completed "${image_id}" \
+      || fail "legacy container is absent but the managed migration marker is not verified"
+    log "legacy model migration was already completed; rollback volume ${LEGACY_MODEL_VOLUME} remains preserved"
+    return
+  fi
+
+  shape="$(legacy_model_container_shape)" || fail "legacy model container is outside the migration allowlist"
+  [[ "${shape%%$'\t'*}" == running ]] \
+    || fail "legacy model container must be explicitly started before its API snapshot can be migrated"
+  source_image_id="${shape#*$'\t'}"
+  validate_legacy_model_image "${source_image_id}"
+  validate_legacy_model_volume
+  capture_legacy_model_snapshot
+  snapshot_digest="$(legacy_model_snapshot_digest)"
+  snapshot_base64="$(legacy_model_snapshot_base64)"
+  source_tree_fingerprint="$(legacy_helper_source_tree_fingerprint "${image_id}")" \
+    || fail "could not fingerprint the legacy model tree"
+  fingerprint="$(legacy_model_source_fingerprint "${source_image_id}" "${snapshot_digest}" "${source_tree_fingerprint}")"
+
+  docker_volume_exists "${MANAGED_MODEL_VOLUME}" \
+    || fail "managed model destination is absent; run ./zhixu up before migration"
+  validate_managed_model_volume
+  legacy_helper_source_preflight "${image_id}" \
+    || fail "legacy model source or destination free-space preflight failed"
+  if docker_volume_exists "${MANAGED_MODEL_VOLUME}"; then
+    destination_state="$(legacy_helper_destination_state "${image_id}" "${fingerprint}" "${snapshot_digest}" "${snapshot_base64}")" \
+      || fail "managed model destination is not empty or does not match this migration"
+  else
+    destination_state=fresh
+  fi
+  printf 'Legacy source: %s (%s)\nSource fingerprint: %s\nModels:\n' \
+    "${LEGACY_MODEL_VOLUME}" "${LEGACY_MODEL_IMAGE}" "${fingerprint}"
+  sed 's/^/  /' "${LEGACY_MIGRATION_SNAPSHOT_FILE}"
+  confirm_legacy_model_migration "$@"
+
+  # The source tree is never mutated. Register rollback before stop so a signal
+  # cannot strand an originally-running legacy container between the two steps.
+  LEGACY_MIGRATION_RESTORE_NEEDED=1
+  run_mutation_command docker stop --time 90 "${LEGACY_MODEL_CONTAINER}" >/dev/null \
+    || fail "could not stop the legacy model container"
+  shape="$(legacy_model_container_shape)" || fail "legacy model container changed during migration"
+  [[ "${shape}" == stopped$'\t'"${source_image_id}" ]] || fail "legacy model container did not stop in the approved shape"
+  validate_legacy_model_volume
+  source_tree_fingerprint_after_stop="$(legacy_helper_source_tree_fingerprint "${image_id}")" \
+    || fail "could not re-fingerprint the stopped legacy model tree"
+  [[ "${source_tree_fingerprint_after_stop}" == "${source_tree_fingerprint}" ]] \
+    || fail "legacy model tree changed between confirmation and stop"
+  [[ -z "$(docker ps --filter publish=11434 --format '{{.Names}}')" ]] \
+    || fail "legacy loopback port is still published after stop"
+
+  compose_without_grant --profile workspace-runtime stop local-model-runtime >/dev/null 2>&1 || true
+  compose_without_grant --profile workspace-runtime rm --force --stop local-model-runtime >/dev/null 2>&1 || true
+  docker_volume_exists "${MANAGED_MODEL_VOLUME}" || fail "managed model destination disappeared after confirmation"
+  validate_managed_model_volume
+  destination_state="$(legacy_helper_destination_state "${image_id}" "${fingerprint}" "${snapshot_digest}" "${snapshot_base64}")" \
+    || fail "managed model destination changed after confirmation"
+  if [[ "${destination_state}" == fresh ]]; then
+    copy_legacy_model_volume "${image_id}" "${fingerprint}" "${snapshot_digest}" "${snapshot_base64}" \
+      || fail "legacy model copy failed"
+  elif [[ "${destination_state}" != copied && "${destination_state}" != verified ]]; then
+    fail "managed model destination state is invalid"
+  fi
+  destination_tree_fingerprint="$(legacy_helper_destination_tree_fingerprint "${image_id}")" \
+    || fail "could not fingerprint the copied managed model tree"
+  [[ "${destination_tree_fingerprint}" == "${source_tree_fingerprint}" ]] \
+    || fail "copied managed model tree differs from the read-only legacy source"
+  verify_legacy_model_copy "${image_id}" "${fingerprint}" "${snapshot_digest}" "${snapshot_base64}"
+  mark_legacy_model_copy_verified "${image_id}" "${fingerprint}" "${snapshot_digest}" "${snapshot_base64}"
+  compose_without_grant --profile workspace-runtime up --detach --wait local-model-runtime \
+    || fail "managed local model runtime did not become healthy"
+  run_mutation_command docker rm "${LEGACY_MODEL_CONTAINER}" >/dev/null \
+    || fail "could not remove the migrated legacy container"
+  docker_volume_exists "${LEGACY_MODEL_VOLUME}" || fail "legacy rollback volume disappeared during migration"
+  LEGACY_MIGRATION_RESTORE_NEEDED=0
+  log "migrated legacy models; source volume ${LEGACY_MODEL_VOLUME} was preserved for rollback"
+}
+
 run_status() {
   require_command docker
   require_command python3
@@ -1448,9 +2257,9 @@ run_status() {
   local main_status helper_status port
   port="$(validated_port ZHIXU_HTTP_PORT 8080)"
   main_status="$(compose_without_grant --profile workspace-runtime --profile modelctl \
-    ps --all --format json postgres app worker app-model-relay worker-model-relay 2>/dev/null || true)"
+    ps --all --format json postgres local-model-runtime app worker app-model-relay worker-model-relay 2>/dev/null || true)"
   helper_status="$(netns_compose ps --all --format json app-netns worker-netns 2>/dev/null || true)"
-  if printf '%s' "${main_status}" | runtime_status_is_ready postgres=healthy app=healthy worker=healthy \
+  if printf '%s' "${main_status}" | runtime_status_is_ready postgres=healthy local-model-runtime=healthy app=healthy worker=healthy \
       app-model-relay=healthy worker-model-relay=healthy \
       && printf '%s' "${helper_status}" | runtime_status_is_ready app-netns=healthy worker-netns=healthy \
       && helper_stack_matches "${port}" \
@@ -1487,7 +2296,7 @@ run_logs() {
       netns_compose logs --follow --tail 200 "${service}"
       return
       ;;
-    postgres|model-settings-key-init|migrate|app|worker|app-model-relay|worker-model-relay|modelctl) ;;
+    postgres|model-settings-key-init|migrate|local-model-volume-init|local-model-runtime-credential-init|local-model-runtime|app|worker|app-model-relay|worker-model-relay|modelctl) ;;
     *) fail "unknown service: ${service}" ;;
   esac
   compose_without_grant --profile workspace-runtime --profile modelctl logs --follow --tail 200 "${service}"
@@ -1514,9 +2323,9 @@ run_down() {
   select_existing_env
   validate_netns_resource_ownership
   compose_without_grant --profile workspace-runtime --profile modelctl stop \
-    app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
+    app-model-relay worker-model-relay app worker local-model-runtime >/dev/null 2>&1 || true
   compose_without_grant --profile workspace-runtime --profile modelctl rm --force --stop \
-    app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
+    app-model-relay worker-model-relay app worker local-model-runtime >/dev/null 2>&1 || true
   compose_without_grant --profile workspace-runtime --profile modelctl down --remove-orphans || true
   remove_project_containers "${PROJECT_NAME}"
   remove_project_networks "${PROJECT_NAME}"
@@ -1534,7 +2343,7 @@ run_reset() {
   if [[ $# -eq 2 && "$1" == "--confirm" ]]; then
     confirmation=$2
   elif [[ $# -eq 0 && -t 0 ]]; then
-    printf 'This deletes the zhixu PostgreSQL and model-secret volumes. Type DELETE to continue: '
+    printf 'This deletes the zhixu PostgreSQL, model-secret, managed-model, and runtime-credential volumes. Type DELETE to continue: '
     IFS= read -r confirmation
   else
     fail "reset requires an interactive confirmation or --confirm DELETE"
@@ -1549,9 +2358,9 @@ run_reset() {
   validate_netns_resource_ownership
   validate_main_project_volumes
   compose_without_grant --profile workspace-runtime --profile modelctl stop \
-    app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
+    app-model-relay worker-model-relay app worker local-model-runtime >/dev/null 2>&1 || true
   compose_without_grant --profile workspace-runtime --profile modelctl rm --force --stop \
-    app-model-relay worker-model-relay app worker >/dev/null 2>&1 || true
+    app-model-relay worker-model-relay app worker local-model-runtime >/dev/null 2>&1 || true
   compose_without_grant --profile workspace-runtime --profile modelctl down --volumes --remove-orphans || \
     log "Compose volume teardown was incomplete; applying validated fallback cleanup"
   remove_project_containers "${PROJECT_NAME}"
@@ -1587,13 +2396,28 @@ main() {
         run_with_mutation_lock workspace-switch run_workspace_switch "$2" 0
       elif [[ $# -eq 3 && "$1" == "switch" && -n "$2" && "$3" == "--initialize-git" ]]; then
         run_with_mutation_lock workspace-switch run_workspace_switch "$2" 1
+      elif [[ $# -eq 3 && "$1" == "rebind" && "$2" == "--confirm" && "$3" == "REBIND" ]]; then
+        run_with_mutation_lock workspace-rebind run_workspace_rebind "$3"
       else
-        fail "workspace requires: switch ABS [--initialize-git]"
+        fail "workspace requires: switch ABS [--initialize-git] or rebind --confirm REBIND"
       fi
       ;;
     status)
       [[ $# -eq 0 ]] || fail "status accepts no arguments"
       run_status
+      ;;
+    local-model)
+      case "${1:-}" in
+        status)
+          [[ $# -eq 1 ]] || fail "local-model status accepts no arguments"
+          run_local_model_status
+          ;;
+        migrate)
+          shift
+          run_with_mutation_lock local-model-migrate run_local_model_migrate "$@"
+          ;;
+        *) fail "local-model requires: status or migrate [--confirm MIGRATE]" ;;
+      esac
       ;;
     logs) run_logs "$@" ;;
     down)

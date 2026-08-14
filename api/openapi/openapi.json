@@ -310,6 +310,9 @@
           },
           {
             "$ref": "#/components/parameters/CSRFToken"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "security": [
@@ -12076,7 +12079,8 @@
           "participants",
           "apply_required",
           "restart_required",
-          "capabilities"
+          "capabilities",
+          "local_runtime"
         ],
         "properties": {
           "desired_revision": {
@@ -12115,6 +12119,9 @@
           },
           "capabilities": {
             "$ref": "#/components/schemas/ModelSettingsCapabilities"
+          },
+          "local_runtime": {
+            "$ref": "#/components/schemas/ModelLocalRuntime"
           }
         },
         "additionalProperties": false
@@ -12151,7 +12158,8 @@
             "type": "string",
             "enum": [
               "disabled",
-              "openai-compatible"
+              "openai-compatible",
+              "ollama"
             ]
           },
           "api_style": {
@@ -12227,6 +12235,31 @@
               "model_version": {
                 "type": "string",
                 "minLength": 1
+              }
+            }
+          },
+          {
+            "title": "Ollama Chat settings",
+            "properties": {
+              "provider": {
+                "const": "ollama"
+              },
+              "api_style": {
+                "const": "chat_completions"
+              },
+              "base_url": {
+                "const": "http://127.0.0.1:11434"
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model_version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "api_key_configured": {
+                "const": false
               }
             }
           }
@@ -12375,6 +12408,25 @@
           "worker": {
             "$ref": "#/components/schemas/ModelSettingsRuntimeRole"
           }
+        },
+        "additionalProperties": false
+      },
+      "ModelLocalRuntime": {
+        "type": "object",
+        "required": ["mode", "phase", "fresh", "requirement_hash", "ready_hash", "operation_id", "operation_phase", "completed_bytes", "total_bytes", "progress_known", "operation_error", "operation_retryable"],
+        "properties": {
+          "mode": {"type": "string", "enum": ["", "managed", "external-static"]},
+          "phase": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9_-]*$"},
+          "fresh": {"type": "boolean"},
+          "requirement_hash": {"type": "string", "maxLength": 64, "pattern": "^[0-9a-f]{0,64}$"},
+          "ready_hash": {"type": "string", "maxLength": 64, "pattern": "^[0-9a-f]{0,64}$"},
+          "operation_id": {"type": ["string", "null"], "format": "uuid"},
+          "operation_phase": {"type": ["string", "null"], "maxLength": 32, "pattern": "^[a-z][a-z0-9_-]*$"},
+          "completed_bytes": {"type": "integer", "minimum": 0},
+          "total_bytes": {"type": ["integer", "null"], "minimum": 0},
+          "progress_known": {"type": "boolean"},
+          "operation_error": {"type": ["string", "null"], "maxLength": 128, "pattern": "^[A-Z][A-Z0-9_]*$"},
+          "operation_retryable": {"type": "boolean"}
         },
         "additionalProperties": false
       },
@@ -12760,7 +12812,8 @@
             "type": "string",
             "enum": [
               "disabled",
-              "openai-compatible"
+              "openai-compatible",
+              "ollama"
             ]
           },
           "api_style": {
@@ -12823,6 +12876,7 @@
               "base_url": {
                 "type": "string",
                 "format": "uri",
+                "pattern": "^[Hh][Tt][Tt][Pp][Ss]://",
                 "minLength": 1
               },
               "model": {
@@ -12832,6 +12886,31 @@
               "model_version": {
                 "type": "string",
                 "minLength": 1
+              }
+            }
+          },
+          {
+            "title": "Ollama Chat draft",
+            "properties": {
+              "provider": {
+                "const": "ollama"
+              },
+              "api_style": {
+                "const": "chat_completions"
+              },
+              "base_url": {
+                "const": "http://127.0.0.1:11434"
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model_version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "api_key": {
+                "$ref": "#/components/schemas/ModelAPIKeyClear"
               }
             }
           }
@@ -13058,7 +13137,10 @@
               "chat": {
                 "properties": {
                   "provider": {
-                    "const": "openai-compatible"
+                    "enum": [
+                      "openai-compatible",
+                      "ollama"
+                    ]
                   }
                 }
               }
@@ -13164,7 +13246,10 @@
                 "const": "chat"
               },
               "provider": {
-                "const": "openai-compatible"
+                "enum": [
+                  "openai-compatible",
+                  "ollama"
+                ]
               },
               "endpoint_path": {
                 "enum": [
@@ -13176,14 +13261,31 @@
             "oneOf": [
               {
                 "properties": {
-                  "api_style": { "const": "chat_completions" },
-                  "endpoint_path": { "const": "/v1/chat/completions" }
+                  "provider": {
+                    "enum": [
+                      "openai-compatible",
+                      "ollama"
+                    ]
+                  },
+                  "api_style": {
+                    "const": "chat_completions"
+                  },
+                  "endpoint_path": {
+                    "const": "/v1/chat/completions"
+                  }
                 }
               },
               {
                 "properties": {
-                  "api_style": { "const": "responses" },
-                  "endpoint_path": { "const": "/v1/responses" }
+                  "provider": {
+                    "const": "openai-compatible"
+                  },
+                  "api_style": {
+                    "const": "responses"
+                  },
+                  "endpoint_path": {
+                    "const": "/v1/responses"
+                  }
                 }
               }
             ]

@@ -100,6 +100,17 @@ func TestValidModelSettingsChangeRejectsSecretProviderMismatch(t *testing.T) {
 	if validModelSettingsChange(invalidChat) {
 		t.Fatal("disabled chat provider accepted a configured key")
 	}
+	ollamaChat := valid
+	ollamaChat.ChatProvider = domain.ChatProviderOllama
+	ollamaChat.ChatAPIStyle = domain.ChatAPIStyleChatCompletions
+	ollamaChat.ChatKeyConfigured = false
+	if !validModelSettingsChange(ollamaChat) {
+		t.Fatal("ollama chat provider was rejected")
+	}
+	ollamaChat.ChatKeyConfigured = true
+	if validModelSettingsChange(ollamaChat) {
+		t.Fatal("ollama chat provider accepted a configured key")
+	}
 	invalidEmbedding := valid
 	invalidEmbedding.EmbeddingKeyConfigured = true
 	if validModelSettingsChange(invalidEmbedding) {

@@ -23,6 +23,8 @@ import {
   type EmbeddingNormalization,
   type ModelCapability,
   type ModelParticipantPhase,
+  type ModelLocalOperationPhase,
+  type ModelLocalRuntimePhase,
   type ModelRuntimePhase,
   type ModelRolloutPhase,
   type ModelSecretInput,
@@ -59,6 +61,7 @@ interface SecretDraft {
 
 interface ChatDraft {
   provider: ChatModelProvider;
+  legacyLocal: boolean;
   apiStyle: ChatAPIStyle;
   baseUrl: string;
   model: string;
@@ -92,10 +95,28 @@ const capabilityLabel: Record<ModelCapability, string> = {
   unavailable: "不可用",
 };
 
+const localRuntimePhaseLabel: Record<ModelLocalRuntimePhase, string> = {
+  stopped: "未运行",
+  starting: "正在启动",
+  pulling: "正在准备模型",
+  checking: "正在检查",
+  ready: "已就绪",
+  stopping: "正在停止",
+  failed: "暂不可用",
+};
+
+const localRuntimeTransitional = new Set<ModelLocalRuntimePhase>(["starting", "pulling", "checking", "stopping"]);
+const localOperationTransitional = new Set<ModelLocalOperationPhase>(["queued", "starting", "checking", "pulling", "verifying", "probing"]);
+
+const shouldPollModelSettings = (settings: ModelSettingsResponse): boolean =>
+  isRolloutInProgress(settings.rollout.phase)
+  || localRuntimeTransitional.has(settings.localRuntime.phase)
+  || (settings.localRuntime.operationPhase !== null && localOperationTransitional.has(settings.localRuntime.operationPhase));
+
 const providerLabel: Record<EmbeddingModelProvider, string> = {
   disabled: "已关闭",
   "openai-compatible": "OpenAI-compatible",
-  ollama: "Ollama",
+  ollama: "本地 Ollama",
 };
 
 const chatAPIStyleLabel: Record<ChatAPIStyle, string> = {
@@ -104,7 +125,7 @@ const chatAPIStyleLabel: Record<ChatAPIStyle, string> = {
 };
 
 const chatProviderValue = (value: string): ChatModelProvider => {
-  if (value === "disabled" || value === "openai-compatible") return value;
+  if (value === "disabled" || value === "openai-compatible" || value === "ollama") return value;
   throw new TypeError("unknown Chat provider");
 };
 
@@ -126,6 +147,19 @@ const normalizationValue = (value: string): EmbeddingNormalization => {
 const distanceMetricValue = (value: string): EmbeddingDistanceMetric => {
   if (value === "cosine" || value === "inner_product" || value === "euclidean") return value;
   throw new TypeError("unknown Embedding distance metric");
+};
+
+const changeChatProvider = (draft: ChatDraft, provider: ChatModelProvider): ChatDraft => {
+  switch (provider) {
+    case "disabled":
+      return { ...draft, provider, legacyLocal: false, baseUrl: "", model: "", modelVersion: "", secret: { action: "clear", value: "" } };
+    case "ollama":
+      return { ...draft, provider, legacyLocal: false, apiStyle: "chat_completions", baseUrl: modelSettingsOllamaRelayUrl, secret: { action: "clear", value: "" } };
+    case "openai-compatible":
+      return draft.provider === "ollama" || draft.legacyLocal
+        ? { ...draft, provider, legacyLocal: false, baseUrl: "", secret: { action: "clear", value: "" } }
+        : { ...draft, provider, legacyLocal: false };
+  }
 };
 
 const runtimeTone = (fresh: boolean, phase: string): "success" | "warning" | "danger" =>
@@ -182,16 +216,20 @@ const snapshotHasTarget = (settings: ModelSettingsResponse, targetRevision: numb
 
 const initialSecret = (configured: boolean): SecretDraft => ({ action: configured ? "keep" : "clear", value: "" });
 
+const isLegacyLocalChat = (summary: ChatModelSettingsSummary): boolean =>
+  summary.provider === "openai-compatible" && summary.baseUrl === modelSettingsOllamaRelayUrl;
+
 const draftFromResponse = (settings: ModelSettingsResponse): ModelSettingsDraft => ({
   revision: settings.desiredRevision,
   chat: {
     provider: settings.desiredSettings.chat.provider,
+    legacyLocal: isLegacyLocalChat(settings.desiredSettings.chat),
     apiStyle: settings.desiredSettings.chat.apiStyle,
     baseUrl: settings.desiredSettings.chat.baseUrl,
     model: settings.desiredSettings.chat.model,
     modelVersion: settings.desiredSettings.chat.modelVersion,
     adapterVersion: settings.desiredSettings.chat.adapterVersion,
-    secret: initialSecret(settings.desiredSettings.chat.apiKeyConfigured),
+    secret: isLegacyLocalChat(settings.desiredSettings.chat) ? { action: "clear", value: "" } : initialSecret(settings.desiredSettings.chat.apiKeyConfigured),
   },
   embedding: {
     provider: settings.desiredSettings.embedding.provider,
@@ -212,9 +250,9 @@ const preserveDraftForRevision = (draft: ModelSettingsDraft, revision: number): 
 });
 
 const sameSecretTarget = (
-  provider: EmbeddingModelProvider,
+  provider: ChatModelProvider,
   baseUrl: string,
-  savedProvider: EmbeddingModelProvider,
+  savedProvider: ChatModelProvider,
   savedBaseUrl: string,
 ): boolean => {
   const normalized = canonicalizeModelBaseUrl(baseUrl.trim());
@@ -228,13 +266,13 @@ const secretInput = (secret: SecretDraft): ModelSecretInput => secret.action ===
 const chatInput = (draft: ChatDraft): ChatModelSettingsInput => draft.provider === "disabled"
   ? { provider: "disabled", apiStyle: draft.apiStyle, baseUrl: "", model: "", modelVersion: "", adapterVersion: draft.adapterVersion, apiKey: { action: "clear" } }
   : {
-      provider: draft.provider,
-      apiStyle: draft.apiStyle,
-      baseUrl: draft.baseUrl.trim(),
+      provider: draft.provider === "ollama" || draft.legacyLocal ? "ollama" : draft.provider,
+      apiStyle: draft.provider === "ollama" || draft.legacyLocal ? "chat_completions" : draft.apiStyle,
+      baseUrl: draft.provider === "ollama" || draft.legacyLocal ? modelSettingsOllamaRelayUrl : draft.baseUrl.trim(),
       model: draft.model.trim(),
       modelVersion: draft.modelVersion.trim(),
       adapterVersion: draft.adapterVersion,
-      apiKey: secretInput(draft.secret),
+      apiKey: draft.provider === "ollama" || draft.legacyLocal ? { action: "clear" } : secretInput(draft.secret),
     };
 
 const embeddingInput = (draft: EmbeddingDraft): EmbeddingModelSettingsInput => draft.provider === "disabled"
@@ -251,19 +289,22 @@ const embeddingInput = (draft: EmbeddingDraft): EmbeddingModelSettingsInput => d
 
 const validateDraft = (draft: ModelSettingsDraft, settings: ModelSettingsResponse, target?: ModelTestTarget): string | undefined => {
   if (target === undefined || target === "chat") {
+    const chatProvider = draft.chat.provider === "ollama" || draft.chat.legacyLocal ? "ollama" : draft.chat.provider;
     if (draft.chat.provider !== "disabled" && (draft.chat.baseUrl.trim() === "" || draft.chat.model.trim() === "" || draft.chat.modelVersion.trim() === "")) {
-      return "对话模型启用后必须填写基础地址（Base URL）、模型和模型版本。";
+      return chatProvider === "ollama" ? "本地 Ollama 对话模型必须填写模型和模型版本。" : "对话模型启用后必须填写基础地址（Base URL）、模型和模型版本。";
     }
-    if (draft.chat.provider !== "disabled" && canonicalizeChatModelBaseUrl(draft.chat.provider, draft.chat.baseUrl.trim()) === undefined) return `对话模型基础地址（Base URL）必须使用 HTTPS；本地 Ollama 仅允许固定 Relay ${modelSettingsOllamaRelayUrl}。`;
+    if (draft.chat.provider !== "disabled" && canonicalizeChatModelBaseUrl(chatProvider, draft.chat.baseUrl.trim()) === undefined) return chatProvider === "ollama"
+      ? "本地 Ollama 的运行位置由知序管理。"
+      : "对话模型基础地址（Base URL）必须使用 HTTPS。";
     const canKeep = settings.desiredSettings.chat.apiKeyConfigured && sameSecretTarget(draft.chat.provider, draft.chat.baseUrl, settings.desiredSettings.chat.provider, settings.desiredSettings.chat.baseUrl);
-    if (draft.chat.provider !== "disabled" && draft.chat.secret.action === "keep" && !canKeep) return "对话模型提供方或基础地址已改变，请替换或清除 API Key。";
-    if (draft.chat.provider !== "disabled" && draft.chat.secret.action === "replace" && draft.chat.secret.value.trim() === "") return "请输入新的对话 API Key。";
+    if (chatProvider === "openai-compatible" && draft.chat.secret.action === "keep" && !canKeep) return "对话模型提供方或基础地址已改变，请替换或清除 API Key。";
+    if (chatProvider === "openai-compatible" && draft.chat.secret.action === "replace" && draft.chat.secret.value.trim() === "") return "请输入新的对话 API Key。";
   }
   if (target === undefined || target === "embedding") {
     const dimensions = Number(draft.embedding.dimensions);
     if (draft.embedding.provider !== "disabled" && (draft.embedding.baseUrl.trim() === "" || draft.embedding.model.trim() === "")) return "向量模型启用后必须填写基础地址（Base URL）和模型。";
     if (draft.embedding.provider !== "disabled" && canonicalizeEmbeddingModelBaseUrl(draft.embedding.provider, draft.embedding.baseUrl.trim()) === undefined) return draft.embedding.provider === "ollama"
-      ? `Ollama Embedding 必须使用固定 Relay ${modelSettingsOllamaRelayUrl}。`
+      ? "本地 Ollama 的运行位置由知序管理。"
       : "OpenAI-compatible 向量模型的基础地址（Base URL）必须使用无凭据、查询参数和片段的 HTTPS 地址。";
     if (draft.embedding.provider !== "disabled" && (!Number.isSafeInteger(dimensions) || dimensions < 1 || dimensions > 16_000)) return "向量维度必须是 1 到 16000 的整数。";
     const canKeep = settings.desiredSettings.embedding.apiKeyConfigured && sameSecretTarget(draft.embedding.provider, draft.embedding.baseUrl, settings.desiredSettings.embedding.provider, settings.desiredSettings.embedding.baseUrl);
@@ -279,18 +320,22 @@ const settingsEqual = (left: ChatModelSettingsSummary | EmbeddingModelSettingsSu
 
 const SummaryValue = ({ label, children, mono = false }: { label: string; children: ReactNode; mono?: boolean }) => <div><dt>{label}</dt><dd className={mono ? "mono" : undefined}>{children}</dd></div>;
 
-const ActiveSummary = ({ kind, summary, differs }: { kind: ModelTestTarget; summary: ChatModelSettingsSummary | EmbeddingModelSettingsSummary; differs: boolean }) => <aside className="model-settings-active" aria-label={`${kind === "chat" ? "Chat" : "Embedding"} 当前生效配置`}>
-  <div className="model-settings-active__heading"><div><span>生效配置</span><strong>当前生效</strong></div><Badge tone={differs ? "warning" : "success"}>{differs ? "与待应用配置不同" : "与待应用配置一致"}</Badge></div>
-  <dl>
-    <SummaryValue label="提供方">{providerLabel[summary.provider]}</SummaryValue>
-    <SummaryValue label="基础地址（Base URL）" mono>{summary.baseUrl || "未设置"}</SummaryValue>
+const ActiveSummary = ({ kind, summary, differs }: { kind: ModelTestTarget; summary: ChatModelSettingsSummary | EmbeddingModelSettingsSummary; differs: boolean }) => {
+  const legacyLocalChat = kind === "chat" && isLegacyLocalChat(summary as ChatModelSettingsSummary);
+  const managedLocalChat = kind === "chat" && (summary.provider === "ollama" || legacyLocalChat);
+  return <aside className="model-settings-active" aria-label={`${kind === "chat" ? "Chat" : "Embedding"} 当前生效配置`}>
+    <div className="model-settings-active__heading"><div><span>生效配置</span><strong>当前生效</strong></div><Badge tone={differs ? "warning" : "success"}>{differs ? "与待应用配置不同" : "与待应用配置一致"}</Badge></div>
+    <dl>
+    <SummaryValue label="提供方">{managedLocalChat ? `本地 Ollama${legacyLocalChat ? "（旧配置）" : ""}` : providerLabel[summary.provider]}</SummaryValue>
+    <SummaryValue label={managedLocalChat ? "运行位置" : "基础地址（Base URL）"} mono={!managedLocalChat}>{managedLocalChat ? "本机（系统管理）" : summary.baseUrl || "未设置"}</SummaryValue>
     <SummaryValue label="模型" mono>{summary.model || "未设置"}</SummaryValue>
     {kind === "chat"
       ? <><SummaryValue label="调用接口">{chatAPIStyleLabel[(summary as ChatModelSettingsSummary).apiStyle]}</SummaryValue><SummaryValue label="模型版本" mono>{(summary as ChatModelSettingsSummary).modelVersion || "未设置"}</SummaryValue><SummaryValue label="适配器" mono>{(summary as ChatModelSettingsSummary).adapterVersion}</SummaryValue></>
       : <><SummaryValue label="维度">{String((summary as EmbeddingModelSettingsSummary).dimensions)}</SummaryValue><SummaryValue label="向量约定">{(summary as EmbeddingModelSettingsSummary).normalization} / {(summary as EmbeddingModelSettingsSummary).distanceMetric}</SummaryValue></>}
-    <SummaryValue label="API Key">{summary.apiKeyConfigured ? "已安全保存" : "未配置"}</SummaryValue>
-  </dl>
-</aside>;
+    <SummaryValue label="API Key">{managedLocalChat ? legacyLocalChat && summary.apiKeyConfigured ? "旧配置已保存，下次保存时清除" : "不使用" : summary.apiKeyConfigured ? "已安全保存" : "未配置"}</SummaryValue>
+    </dl>
+  </aside>;
+};
 
 const SecretControl = ({
   id,
@@ -329,10 +374,12 @@ const SecretControl = ({
   {secret.action === "clear" && configured ? <p className="model-settings-warning"><AlertTriangle size={14} />保存后会清除已保存的 API Key。</p> : null}
 </div>;
 
-const TestFeedback = ({ target, mutation }: { target: ModelTestTarget; mutation: UseMutationResult<ModelSettingsTestResult, Error, ModelTestTarget> }) => {
-  if (mutation.isPending && mutation.variables === target) return <p className="model-test-result" role="status"><LoaderCircle className="is-spinning" size={15} />正在从服务端测试连接…</p>;
-  if (mutation.isError && mutation.variables === target && mutation.error instanceof ModelSettingsApiError && mutation.error.status === 409) return null;
-  if (mutation.isError && mutation.variables === target) {
+type ModelTestMutationVariables = { target: ModelTestTarget; idempotencyKey: string };
+
+const TestFeedback = ({ target, mutation }: { target: ModelTestTarget; mutation: UseMutationResult<ModelSettingsTestResult, Error, ModelTestMutationVariables> }) => {
+  if (mutation.isPending && mutation.variables?.target === target) return <p className="model-test-result" role="status"><LoaderCircle className="is-spinning" size={15} />正在从服务端测试连接…</p>;
+  if (mutation.isError && mutation.variables?.target === target && mutation.error instanceof ModelSettingsApiError && mutation.error.status === 409) return null;
+  if (mutation.isError && mutation.variables?.target === target) {
     const error = mutation.error;
     const apiError = error instanceof ModelSettingsApiError ? error : undefined;
     const diagnostic = apiError?.details?.target === target && apiError.details.stage !== undefined ? apiError.details : undefined;
@@ -407,7 +454,7 @@ export const ModelSettingsPanel = () => {
     queryKey: modelSettingsQueryKey,
     queryFn: ({ signal }) => getModelSettings(signal),
     retry: false,
-    refetchInterval: ({ state }) => state.data !== undefined && isRolloutInProgress(state.data.rollout.phase) ? 2_000 : false,
+    refetchInterval: ({ state }) => state.data !== undefined && shouldPollModelSettings(state.data) ? 2_000 : false,
     refetchOnReconnect: "always",
     refetchOnWindowFocus: "always",
   });
@@ -469,13 +516,13 @@ export const ModelSettingsPanel = () => {
     setConflict(`${action}发生版本冲突；${revisionHint}权威回查失败。明文输入已清空，请刷新后重试。`);
   };
 
-  const testMutation = useMutation({
-    mutationFn: (target: ModelTestTarget) => {
+	const testMutation = useMutation({
+		mutationFn: ({ target, idempotencyKey }: { target: ModelTestTarget; idempotencyKey: string }) => {
       const currentDraft = draftRef.current;
       if (currentDraft === undefined) throw new Error("模型设置尚未加载。");
       return target === "chat"
-        ? runMutationRequest((signal) => testModelSettings({ target, chat: chatInput(currentDraft.chat) }, signal))
-        : runMutationRequest((signal) => testModelSettings({ target, embedding: embeddingInput(currentDraft.embedding) }, signal));
+			? runMutationRequest((signal) => testModelSettings({ target, chat: chatInput(currentDraft.chat), idempotencyKey }, signal))
+			: runMutationRequest((signal) => testModelSettings({ target, embedding: embeddingInput(currentDraft.embedding), idempotencyKey }, signal));
     },
     onError: async (error: Error) => {
       if (error instanceof ModelSettingsApiError && error.status === 409) await reloadAfterConflict("连接测试", error);
@@ -598,7 +645,7 @@ export const ModelSettingsPanel = () => {
     setConflict(undefined);
     testMutation.reset();
     if (error !== undefined) return;
-    testMutation.mutate(target);
+		testMutation.mutate({ target, idempotencyKey: `model-settings-test-${crypto.randomUUID()}` });
   };
 
   const save = (intent: "save_only" | "save_and_apply"): void => {
@@ -630,6 +677,7 @@ export const ModelSettingsPanel = () => {
       <div><span>当前生效</span><strong>{revisionLabel(settings.activeRevision)}</strong></div>
       <div><span>API 已应用</span><strong>{revisionLabel(settings.runtime.api.appliedRevision)}</strong><Badge tone={runtimeTone(settings.runtime.api.fresh, settings.runtime.api.phase)}>{runtimePhaseLabels[settings.runtime.api.phase]}</Badge></div>
       <div><span>工作进程已应用</span><strong>{revisionLabel(settings.runtime.worker.appliedRevision)}</strong><Badge tone={runtimeTone(settings.runtime.worker.fresh, settings.runtime.worker.phase)}>{runtimePhaseLabels[settings.runtime.worker.phase]}</Badge></div>
+      <div><span>本地模型运行时</span><strong>{localRuntimePhaseLabel[settings.localRuntime.phase]}</strong><Badge tone={settings.localRuntime.phase === "ready" ? "success" : settings.localRuntime.phase === "failed" ? "danger" : settings.localRuntime.phase === "stopped" ? "neutral" : "warning"}>{localRuntimePhaseLabel[settings.localRuntime.phase]}</Badge></div>
     </div>
 
     {settings.rollout.phase === "idle" && settings.applyRequired ? <div className="ui-state ui-state--warning" role="status"><strong>{settings.desiredRevision === settings.activeRevision ? "模型运行状态需要恢复" : "配置已保存，尚未应用"}</strong><p>{settings.desiredRevision === settings.activeRevision ? `${revisionLabel(settings.activeRevision)}的 API 或工作进程状态尚未一致。` : `${revisionLabel(settings.desiredRevision)}已安全保存，当前仍使用${revisionLabel(settings.activeRevision)}。`} 可直接应用配置。</p></div> : null}
@@ -643,13 +691,13 @@ export const ModelSettingsPanel = () => {
         {expandedSections.chat ? <div className="model-settings-section__body" id="chat-settings-content">
           <fieldset className="model-settings-fields" disabled={controlsDisabled}>
             <legend><span>待应用</span>待应用配置</legend>
-            <label>提供方<select aria-label="对话模型提供方" value={draft.chat.provider} onChange={(event) => changeDraft((current) => { const provider = chatProviderValue(event.target.value); return { ...current, chat: { ...current.chat, provider, ...(provider === "disabled" ? { baseUrl: "", model: "", modelVersion: "", secret: { action: "clear", value: "" } } : {}) } }; })}><option value="disabled">已关闭</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
-            <label>调用接口<select aria-label="对话模型调用接口" value={draft.chat.apiStyle} disabled={draft.chat.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, apiStyle: chatAPIStyleValue(event.target.value) } }))}><option value="chat_completions">Chat Completions</option><option value="responses">Responses API</option></select></label>
-            <label className="model-settings-field--wide">基础地址（Base URL）<input type="url" maxLength={2048} aria-label="对话模型基础地址（Base URL）" value={draft.chat.baseUrl} disabled={draft.chat.provider === "disabled" || controlsDisabled} placeholder="https://api.example.com/v1" onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, baseUrl: event.target.value } }))} /></label>
+            <label>提供方<select aria-label="对话模型提供方" value={draft.chat.legacyLocal ? "ollama" : draft.chat.provider} onChange={(event) => changeDraft((current) => ({ ...current, chat: changeChatProvider(current.chat, chatProviderValue(event.target.value)) }))}><option value="disabled">已关闭</option><option value="openai-compatible">OpenAI-compatible</option><option value="ollama">本地 Ollama</option></select></label>
+            <label>调用接口<select aria-label="对话模型调用接口" value={draft.chat.apiStyle} disabled={draft.chat.provider !== "openai-compatible" || draft.chat.legacyLocal || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, apiStyle: chatAPIStyleValue(event.target.value) } }))}><option value="chat_completions">Chat Completions</option><option value="responses">Responses API</option></select></label>
+            {draft.chat.provider === "ollama" || draft.chat.legacyLocal ? <div className="model-settings-managed-location model-settings-field--wide"><span>运行位置</span><strong>本机（系统管理）</strong></div> : <label className="model-settings-field--wide">基础地址（Base URL）<input type="url" maxLength={2048} aria-label="对话模型基础地址（Base URL）" value={draft.chat.baseUrl} disabled={draft.chat.provider === "disabled" || controlsDisabled} placeholder="https://api.example.com/v1" onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, baseUrl: event.target.value } }))} /></label>}
             <label>模型<input maxLength={128} aria-label="对话模型名称" value={draft.chat.model} disabled={draft.chat.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, model: event.target.value } }))} /></label>
             <label>模型版本<input maxLength={64} aria-label="对话模型版本" value={draft.chat.modelVersion} disabled={draft.chat.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, modelVersion: event.target.value } }))} /></label>
-            {draft.chat.provider === "openai-compatible" ? <SecretControl id="chat-api-key" label="对话 API Key" secret={draft.chat.secret} configured={settings.desiredSettings.chat.apiKeyConfigured} canKeep={chatCanKeep} disabled={controlsDisabled} onChange={(secret) => changeDraft((current) => ({ ...current, chat: { ...current.chat, secret } }))} /> : <p className="model-settings-disabled model-settings-field--wide">对话模型已关闭。{settings.desiredSettings.chat.apiKeyConfigured ? " 保存后会清除已保存的对话 API Key。" : ""}</p>}
-            <div className="model-settings-actions model-settings-field--wide"><Button type="button" variant="secondary" size="sm" disabled={controlsDisabled || draft.chat.provider === "disabled"} onClick={() => runTest("chat")}><TestTube2 size={15} />{testMutation.isPending && testMutation.variables === "chat" ? "测试中…" : "测试对话连接"}</Button><TestFeedback target="chat" mutation={testMutation} /></div>
+            {draft.chat.provider === "openai-compatible" && !draft.chat.legacyLocal ? <SecretControl id="chat-api-key" label="对话 API Key" secret={draft.chat.secret} configured={settings.desiredSettings.chat.apiKeyConfigured} canKeep={chatCanKeep} disabled={controlsDisabled} onChange={(secret) => changeDraft((current) => ({ ...current, chat: { ...current.chat, secret } }))} /> : <p className="model-settings-disabled model-settings-field--wide">{draft.chat.legacyLocal ? "这是旧式本地配置；运行位置由知序管理，不显示 API Key。下次保存设置时会转换为显式本地配置，并固定使用 Chat Completions。" : draft.chat.provider === "ollama" ? "本地 Ollama 由知序管理，不使用 API Key，固定使用 Chat Completions。" : "对话模型已关闭。"}{settings.desiredSettings.chat.apiKeyConfigured ? " 保存后会清除已保存的对话 API Key。" : ""}</p>}
+            <div className="model-settings-actions model-settings-field--wide"><Button type="button" variant="secondary" size="sm" disabled={controlsDisabled || draft.chat.provider === "disabled"} onClick={() => runTest("chat")}><TestTube2 size={15} />{testMutation.isPending && testMutation.variables?.target === "chat" ? "测试中…" : "测试对话连接"}</Button><TestFeedback target="chat" mutation={testMutation} /></div>
           </fieldset>
           <ActiveSummary kind="chat" summary={settings.activeSettings.chat} differs={!settingsEqual(settings.desiredSettings.chat, settings.activeSettings.chat)} />
         </div> : null}
@@ -660,14 +708,14 @@ export const ModelSettingsPanel = () => {
         {expandedSections.embedding ? <div className="model-settings-section__body" id="embedding-settings-content">
           <fieldset className="model-settings-fields" disabled={controlsDisabled}>
             <legend><span>待应用</span>待应用配置</legend>
-            <label>提供方<select aria-label="向量模型提供方" value={draft.embedding.provider} onChange={(event) => changeDraft((current) => { const provider = embeddingProviderValue(event.target.value); return { ...current, embedding: { ...current.embedding, provider, ...(provider === "disabled" ? { baseUrl: "", model: "", dimensions: "0", secret: { action: "clear", value: "" } } : provider === "ollama" ? { baseUrl: modelSettingsOllamaRelayUrl, secret: { action: "clear", value: "" } } : {}) } }; })}><option value="disabled">已关闭</option><option value="openai-compatible">OpenAI-compatible</option><option value="ollama">Ollama</option></select></label>
-            <label className="model-settings-field--wide">基础地址（Base URL）<input type="url" maxLength={2048} aria-label="向量模型基础地址（Base URL）" value={draft.embedding.baseUrl} disabled={draft.embedding.provider !== "openai-compatible" || controlsDisabled} placeholder={draft.embedding.provider === "ollama" ? modelSettingsOllamaRelayUrl : "https://api.example.com/v1"} onChange={(event) => changeDraft((current) => ({ ...current, embedding: { ...current.embedding, baseUrl: event.target.value } }))} /></label>
+            <label>提供方<select aria-label="向量模型提供方" value={draft.embedding.provider} onChange={(event) => changeDraft((current) => { const provider = embeddingProviderValue(event.target.value); return { ...current, embedding: { ...current.embedding, provider, ...(provider === "disabled" ? { baseUrl: "", model: "", dimensions: "0", secret: { action: "clear", value: "" } } : provider === "ollama" ? { baseUrl: modelSettingsOllamaRelayUrl, secret: { action: "clear", value: "" } } : {}) } }; })}><option value="disabled">已关闭</option><option value="openai-compatible">OpenAI-compatible</option><option value="ollama">本地 Ollama</option></select></label>
+            {draft.embedding.provider === "ollama" ? <div className="model-settings-managed-location model-settings-field--wide"><span>运行位置</span><strong>本机（系统管理）</strong></div> : <label className="model-settings-field--wide">基础地址（Base URL）<input type="url" maxLength={2048} aria-label="向量模型基础地址（Base URL）" value={draft.embedding.baseUrl} disabled={draft.embedding.provider === "disabled" || controlsDisabled} placeholder="https://api.example.com/v1" onChange={(event) => changeDraft((current) => ({ ...current, embedding: { ...current.embedding, baseUrl: event.target.value } }))} /></label>}
             <label>模型<input maxLength={128} aria-label="向量模型名称" value={draft.embedding.model} disabled={draft.embedding.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, embedding: { ...current.embedding, model: event.target.value } }))} /></label>
             <label>维度<input type="number" inputMode="numeric" min="1" max="16000" aria-label="向量维度" value={draft.embedding.dimensions} disabled={draft.embedding.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, embedding: { ...current.embedding, dimensions: event.target.value } }))} /></label>
             <label>归一化<select aria-label="向量归一化" value={draft.embedding.normalization} disabled={draft.embedding.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, embedding: { ...current.embedding, normalization: normalizationValue(event.target.value) } }))}><option value="l2">L2</option><option value="none">无</option></select></label>
             <label>距离度量<select aria-label="向量距离度量" value={draft.embedding.distanceMetric} disabled={draft.embedding.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, embedding: { ...current.embedding, distanceMetric: distanceMetricValue(event.target.value) } }))}><option value="cosine">余弦（Cosine）</option><option value="inner_product">内积（Inner product）</option><option value="euclidean">欧氏距离（Euclidean）</option></select></label>
-            {draft.embedding.provider === "openai-compatible" ? <SecretControl id="embedding-api-key" label="向量 API Key" secret={draft.embedding.secret} configured={settings.desiredSettings.embedding.apiKeyConfigured} canKeep={embeddingCanKeep} disabled={controlsDisabled} onChange={(secret) => changeDraft((current) => ({ ...current, embedding: { ...current.embedding, secret } }))} /> : <p className="model-settings-disabled model-settings-field--wide">{draft.embedding.provider === "ollama" ? "Ollama 不使用 API Key。" : "向量模型已关闭；关键词检索保持可用。"}{settings.desiredSettings.embedding.apiKeyConfigured ? " 保存后会清除已保存的向量 API Key。" : ""}</p>}
-            <div className="model-settings-actions model-settings-field--wide"><Button type="button" variant="secondary" size="sm" disabled={controlsDisabled || draft.embedding.provider === "disabled"} onClick={() => runTest("embedding")}><TestTube2 size={15} />{testMutation.isPending && testMutation.variables === "embedding" ? "测试中…" : "测试向量连接"}</Button><TestFeedback target="embedding" mutation={testMutation} /></div>
+            {draft.embedding.provider === "openai-compatible" ? <SecretControl id="embedding-api-key" label="向量 API Key" secret={draft.embedding.secret} configured={settings.desiredSettings.embedding.apiKeyConfigured} canKeep={embeddingCanKeep} disabled={controlsDisabled} onChange={(secret) => changeDraft((current) => ({ ...current, embedding: { ...current.embedding, secret } }))} /> : <p className="model-settings-disabled model-settings-field--wide">{draft.embedding.provider === "ollama" ? "本地 Ollama 由知序管理，不使用 API Key。" : "向量模型已关闭；关键词检索保持可用。"}{settings.desiredSettings.embedding.apiKeyConfigured ? " 保存后会清除已保存的向量 API Key。" : ""}</p>}
+            <div className="model-settings-actions model-settings-field--wide"><Button type="button" variant="secondary" size="sm" disabled={controlsDisabled || draft.embedding.provider === "disabled"} onClick={() => runTest("embedding")}><TestTube2 size={15} />{testMutation.isPending && testMutation.variables?.target === "embedding" ? "测试中…" : "测试向量连接"}</Button><TestFeedback target="embedding" mutation={testMutation} /></div>
           </fieldset>
           <ActiveSummary kind="embedding" summary={settings.activeSettings.embedding} differs={!settingsEqual(settings.desiredSettings.embedding, settings.activeSettings.embedding)} />
         </div> : null}

@@ -36,7 +36,6 @@ func TestManagedModelsHostBuildsAndActivatesExactRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(host.Close)
-
 	if err := host.prepare(context.Background(), 4); err != nil {
 		t.Fatal(err)
 	}

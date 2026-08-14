@@ -147,6 +147,8 @@ const (
 	ChatProviderDisabled ChatProvider = "disabled"
 	// ChatProviderOpenAICompatible 使用 OpenAI-Compatible HTTP 协议。
 	ChatProviderOpenAICompatible ChatProvider = "openai-compatible"
+	// ChatProviderOllama 使用受管理 Ollama 的 Chat Completions 协议。
+	ChatProviderOllama ChatProvider = "ollama"
 )
 
 // ChatAPIStyle selects the explicit OpenAI-compatible Chat endpoint contract.
@@ -902,7 +904,7 @@ func (c Config) validateChat() error {
 			return errors.New("chat provider settings must be empty when chat_provider is disabled")
 		}
 		return nil
-	case ChatProviderOpenAICompatible:
+	case ChatProviderOpenAICompatible, ChatProviderOllama:
 		if !canonicalChatSetting(c.ChatModel, 128) {
 			return errors.New("chat_model must be non-empty and canonical when chat is enabled")
 		}
@@ -911,6 +913,14 @@ func (c Config) validateChat() error {
 		}
 		if c.ChatAPIKey != "" && !canonicalChatSecret(c.ChatAPIKey) {
 			return errors.New("chat_api_key must be canonical when configured")
+		}
+		if c.ChatProvider == ChatProviderOllama {
+			if c.ChatAPIKey != "" {
+				return errors.New("chat_api_key must be empty for ollama")
+			}
+			if c.ChatAPIStyle != ChatAPIStyleChatCompletions {
+				return errors.New("ollama chat must use chat_completions")
+			}
 		}
 		if err := validateChatBaseURL(c.ChatBaseURL); err != nil {
 			return err
@@ -923,7 +933,7 @@ func (c Config) validateChat() error {
 		}
 		return nil
 	default:
-		return errors.New("chat_provider must be disabled or openai-compatible")
+		return errors.New("chat_provider must be disabled, openai-compatible, or ollama")
 	}
 }
 

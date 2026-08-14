@@ -21,6 +21,9 @@ func (r *Repository) ApplyGitCaptureBatch(ctx context.Context, batch domain.GitC
 		return domain.GitCaptureBatchResult{}, classify(err, "GIT_CAPTURE_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(batch.WorkspaceID)); err != nil {
+		return domain.GitCaptureBatchResult{}, classify(err, "GIT_CAPTURE_CHECKPOINT_QUERY_FAILED")
+	}
 	replayed, err := beginGitCaptureCheckpoint(ctx, tx, batch)
 	if err != nil {
 		return domain.GitCaptureBatchResult{}, err
@@ -52,6 +55,9 @@ func (r *Repository) CompleteGitCaptureBatch(ctx context.Context, workspaceID, r
 		return classify(err, "GIT_CAPTURE_CHECKPOINT_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(workspaceID)); err != nil {
+		return classify(err, "GIT_CAPTURE_CHECKPOINT_QUERY_FAILED")
+	}
 	tag, err := tx.Exec(ctx, `UPDATE core.workspace_git_capture_checkpoint
 		SET completed_head_oid=$4,inflight_run_id=NULL,inflight_before_oid=NULL,inflight_after_oid=NULL,
 			inflight_request_hash=NULL,last_run_id=inflight_run_id,last_before_oid=inflight_before_oid,

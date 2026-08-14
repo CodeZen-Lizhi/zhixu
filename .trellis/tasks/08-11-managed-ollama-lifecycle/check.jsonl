@@ -1,0 +1,14 @@
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"核对 lifecycle 状态、热激活、lease 与 no-restart 行为不漂移"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"审查 migration、参数化、锁序、DB-time lease、CAS 与最小权限"}
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"审查 Compose/launcher ownership、stable netns、无 Socket 与数据保留"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"审查进程/并发/Secret/外部副作用与 Go 门禁"}
+{"file":".trellis/spec/frontend/model-settings.md","reason":"审查 strict wire、desired/active/applied、polling、Secret 和浏览器闭环"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"审查下载进度、状态、焦点与可访问性"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"审查 frontend lint/type/test/build、移动布局和无泄漏"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审查 DB/runtime/OpenAPI/frontend 数据流与失败方向一致"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/supervisor-container.md","reason":"核对 PID1/信号、窄 proxy、non-root、image、static overlay、卷和内存验收"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/supervisor-activation.md","reason":"核对 operation/hold/status、停止栅栏、竞态与 crash recovery"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/supervisor-ux.md","reason":"核对状态文案、进度恢复、无基础设施泄漏和迁移入口"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/runtime-and-official-docs.md","reason":"复核 Ollama API、legacy resource 与内存基线证据"}
+{"file":".trellis/tasks/08-11-managed-ollama-lifecycle/research/phase-a-image-probe.md","reason":"复核最终镜像 pin、arm64 实测、安全形态与仍未覆盖的发布门禁"}
+{"file": ".trellis/tasks/08-11-managed-ollama-lifecycle/research/workspace-root-rebinding.md", "reason": "Workspace root replacement 的显式重绑定、锁序、审计和前向恢复契约"}

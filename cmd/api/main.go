@@ -225,9 +225,20 @@ func runAPI() int {
 					logger.Error("model runtime identity is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 					return 1
 				}
+				if bootstrap.LocalModelStore == nil {
+					logger.Error("model generation lifecycle store is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
+					return 1
+				}
+				generationLifecycle, lifecycleErr := modelsettingsruntime.NewGenerationLifecycle(
+					bootstrap.LocalModelStore, modelsettingsdomain.RuntimeRoleAPI, instanceID,
+				)
+				if lifecycleErr != nil {
+					logger.Error("model generation lifecycle is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
+					return 1
+				}
 				modelRuntimeHost, bootstrapErr = modelsettingsruntime.NewManagedModelsHost(modelsettingsruntime.ManagedModelsHostOptions{
 					Base: cfg, Revisions: bootstrap.Service, Role: modelsettingsdomain.RuntimeRoleAPI,
-					InstanceID: instanceID, Loaded: bootstrap.Loaded,
+					InstanceID: instanceID, Loaded: bootstrap.Loaded, Lifecycle: generationLifecycle,
 				})
 				if bootstrapErr != nil {
 					logger.Error("model runtime host is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)

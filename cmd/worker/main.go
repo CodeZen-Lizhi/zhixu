@@ -66,6 +66,7 @@ import (
 	ingestiondomain "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/domain"
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
 	memoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
@@ -383,6 +384,12 @@ func run(configPath string, logger *slog.Logger) error {
 			runtimeExecutorAcquirer == nil || sourceRefreshAcquirer == nil || components.runtimeGeneration == nil || components.reindexRuntime == nil || managedModels.Loaded.RolloutID != nil {
 			return errors.New("managed worker hot runtime composition is unavailable")
 		}
+		generationLifecycle, lifecycleErr := modelsettingsruntime.NewGenerationLifecycle(
+			managedModels.LocalModelStore, modelsettingsdomain.RuntimeRoleWorker, *modelBinding.instanceID,
+		)
+		if lifecycleErr != nil {
+			return lifecycleErr
+		}
 		modelHost, err = modelsettingsruntime.NewRuntimeHost(modelsettingsruntime.RuntimeHostOptions[*workerRuntimeGeneration]{
 			Initial: modelsettingsruntime.InitialRuntime[*workerRuntimeGeneration]{
 				Binding: modelsettingsruntime.RuntimeBinding{
@@ -401,6 +408,13 @@ func run(configPath string, logger *slog.Logger) error {
 				}
 				return generation.models.ValidateEmbeddingVersion(version)
 			},
+			LocalDemand: func(generation *workerRuntimeGeneration) (localmodelruntime.Requirement, error) {
+				if generation == nil || generation.models == nil {
+					return localmodelruntime.Requirement{}, errors.New("worker runtime models are unavailable")
+				}
+				return generation.models.LocalDemand(), nil
+			},
+			Lifecycle: generationLifecycle,
 		})
 		if err != nil {
 			return err

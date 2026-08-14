@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/jackc/pgx/v5"
@@ -67,6 +68,10 @@ func snapshotTx(ctx context.Context, tx pgx.Tx, staleAfter time.Duration) (domai
 	if err != nil {
 		return domain.Snapshot{}, err
 	}
+	localRuntime, localErr := loadLocalRuntimeSummary(ctx, tx, now, staleAfter, state)
+	if localErr != nil {
+		return domain.Snapshot{}, localErr
+	}
 	activeReady := runtimeReady(runtimes.API, state.activeRevision) && runtimeReady(runtimes.Worker, state.activeRevision)
 	snapshot := domain.Snapshot{
 		DesiredRevision: state.desiredRevision, ActiveRevision: state.activeRevision,
@@ -74,10 +79,54 @@ func snapshotTx(ctx context.Context, tx pgx.Tx, staleAfter time.Duration) (domai
 		Participants:    participants,
 		ApplyRequired:   state.desiredRevision != state.activeRevision || domain.ActiveActivationPhase(rollout.Phase) || !activeReady,
 		RestartRequired: false,
+		LocalRuntime:    localRuntime,
 	}
 	snapshot.ChatCapability = chatCapability(snapshot.ActiveSettings, activeReady)
 	snapshot.EmbeddingCapability = embeddingCapability(snapshot.ActiveSettings, activeReady)
 	return snapshot, nil
+}
+
+func loadLocalRuntimeSummary(ctx context.Context, tx pgx.Tx, now time.Time, staleAfter time.Duration, state stateRecord) (domain.LocalRuntimeSummary, error) {
+	result := domain.LocalRuntimeSummary{Phase: "stopped"}
+	var mode, phase, requirementHash, readyHash string
+	var heartbeat *time.Time
+	var errorCode *string
+	if err := tx.QueryRow(ctx, `SELECT mode,observed_phase,requirement_hash,ready_requirement_hash,heartbeat_at,last_error_code,last_error_retryable FROM ops.managed_ollama_runtime WHERE singleton=true`).Scan(&mode, &phase, &requirementHash, &readyHash, &heartbeat, &errorCode, &result.OperationRetryable); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return result, nil
+		}
+		return domain.LocalRuntimeSummary{}, classify(err)
+	}
+	result.Mode, result.Phase, result.RequirementHash, result.ReadyHash = mode, phase, requirementHash, readyHash
+	if errorCode != nil {
+		result.OperationError = *errorCode
+	}
+	result.Fresh = heartbeat != nil && !heartbeat.Before(now.Add(-staleAfter))
+	if state.rolloutID.Valid {
+		var operationID, operationPhase string
+		var operationError *string
+		var operationRetryable bool
+		var completed int64
+		var total *int64
+		var known bool
+		row := tx.QueryRow(ctx, `SELECT operation_id::text,phase,completed_bytes,total_bytes,progress_known,error_code,error_retryable FROM ops.managed_ollama_operations WHERE kind='activation' AND rollout_id=$1::uuid ORDER BY created_at DESC LIMIT 1`, state.rolloutID.String)
+		if err := row.Scan(&operationID, &operationPhase, &completed, &total, &known, &operationError, &operationRetryable); err == nil {
+			if id, parseErr := foundation.ParseID(operationID); parseErr == nil {
+				result.OperationID = &id
+			}
+			result.OperationPhase, result.CompletedBytes, result.ProgressKnown = operationPhase, completed, known
+			if operationError != nil {
+				result.OperationError = *operationError
+			}
+			result.OperationRetryable = operationRetryable
+			if known && total != nil {
+				result.TotalBytes = total
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return domain.LocalRuntimeSummary{}, classify(err)
+		}
+	}
+	return result, nil
 }
 
 func loadParticipantSummaries(ctx context.Context, tx pgx.Tx, state stateRecord, now time.Time, staleAfter time.Duration) (domain.ParticipantSummaries, error) {

@@ -43,6 +43,7 @@ start_ready_server() {
 import socket
 
 listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 listener.bind(("127.0.0.1", 0))
 print(listener.getsockname()[1])
 listener.close()
@@ -211,6 +212,152 @@ expect_failure() {
   [[ "${exit_code}" -eq "${expected}" ]] || fail "command returned ${exit_code}, want ${expected}"
 }
 
+run_legacy_migration_contract() {
+  command -v python3 >/dev/null 2>&1 || fail "python3 is unavailable"
+  STATE_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || fail "could not resolve the temporary directory"
+  STATE_DIR="$(mktemp -d "${STATE_PARENT}/zhixu-launcher-contract.XXXXXX")" || fail "could not allocate fixture"
+  STATE_DIR="$(cd -- "${STATE_DIR}" && pwd -P)"
+  trap cleanup EXIT INT TERM
+  mkdir -p "${STATE_DIR}/fixture/deploy" "${STATE_DIR}/bin"
+  cp "${REPOSITORY_ROOT}/zhixu" "${STATE_DIR}/fixture/zhixu"
+  cp "${REPOSITORY_ROOT}/.env.example" "${STATE_DIR}/fixture/.env.example"
+  cp "${REPOSITORY_ROOT}/deploy/compose.yml" "${STATE_DIR}/fixture/deploy/compose.yml"
+  cp "${SCRIPT_DIR}/testdata/launcher-fake-docker.sh" "${STATE_DIR}/bin/docker"
+  chmod 0755 "${STATE_DIR}/fixture/zhixu" "${STATE_DIR}/bin/docker"
+  export PATH="${STATE_DIR}/bin:${PATH}"
+  export ZHIXU_FAKE_DOCKER_LOG="${STATE_DIR}/docker.log"
+  export ZHIXU_FAKE_WORKSPACECTL_LOG="${STATE_DIR}/workspacectl.log"
+  export ZHIXU_FAKE_STATE_DIR="${STATE_DIR}/fake-docker-state"
+  mkdir -p "${ZHIXU_FAKE_STATE_DIR}"
+  : >"${ZHIXU_FAKE_STATE_DIR}/legacy-model-container"
+  : >"${ZHIXU_FAKE_STATE_DIR}/legacy-model-running"
+  : >"${ZHIXU_FAKE_STATE_DIR}/legacy-model-volume"
+  : >"${ZHIXU_FAKE_STATE_DIR}/managed-model-volume"
+  reset_logs
+
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu local-model migrate </dev/null"
+  assert_log_contains "--mount type=volume,src=zhixu_zhixu-local-models,dst=/var/lib/zhixu/ollama/.ollama,readonly"
+  assert_log_not_contains " stop --time 90 zhixu-eino-live-ollama"
+  assert_log_not_contains " copy sha256:"
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-running" ]] || fail "unconfirmed migration stopped the legacy runtime"
+
+  reset_logs
+  export ZHIXU_FAKE_LEGACY_MODEL_SHAPE_DRIFT=1
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu local-model migrate --confirm MIGRATE"
+  unset ZHIXU_FAKE_LEGACY_MODEL_SHAPE_DRIFT
+  assert_log_not_contains " stop --time 90 zhixu-eino-live-ollama"
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-running" ]] || fail "shape rejection stopped the legacy runtime"
+
+  reset_logs
+  export ZHIXU_FAKE_LEGACY_MODEL_SPACE_EXIT=68
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu local-model migrate --confirm MIGRATE"
+  unset ZHIXU_FAKE_LEGACY_MODEL_SPACE_EXIT
+  assert_log_not_contains " stop --time 90 zhixu-eino-live-ollama"
+
+  reset_logs
+  export ZHIXU_FAKE_LEGACY_MODEL_TREE_DRIFT=1
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu local-model migrate --confirm MIGRATE"
+  unset ZHIXU_FAKE_LEGACY_MODEL_TREE_DRIFT
+  assert_log_contains " stop --time 90 zhixu-eino-live-ollama"
+  assert_log_contains " start zhixu-eino-live-ollama"
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-running" ]] || fail "source fingerprint drift did not restore the legacy runtime"
+
+  : >"${ZHIXU_FAKE_STATE_DIR}/managed-model-volume"
+  printf 'foreign\n' >"${ZHIXU_FAKE_STATE_DIR}/managed-model-migration"
+  reset_logs
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu local-model migrate --confirm MIGRATE"
+  assert_log_not_contains " stop --time 90 zhixu-eino-live-ollama"
+  rm -f "${ZHIXU_FAKE_STATE_DIR}/managed-model-migration"
+
+  : >"${ZHIXU_FAKE_STATE_DIR}/managed-model-volume"
+  reset_logs
+  export ZHIXU_FAKE_MANAGED_MODEL_VOLUME_REFERENCE=foreign-container
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu local-model migrate --confirm MIGRATE"
+  unset ZHIXU_FAKE_MANAGED_MODEL_VOLUME_REFERENCE
+  assert_log_not_contains " stop --time 90 zhixu-eino-live-ollama"
+
+  reset_logs
+  export ZHIXU_FAKE_LEGACY_MODEL_COPY_EXIT=70
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu local-model migrate --confirm MIGRATE"
+  unset ZHIXU_FAKE_LEGACY_MODEL_COPY_EXIT
+  assert_log_contains "--mount type=volume,src=zhixu-eino-live-models,dst=/migration/source,readonly"
+  assert_log_contains " start zhixu-eino-live-ollama"
+  assert_log_not_contains " volume rm zhixu-eino-live-models"
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-running" ]] || fail "failed copy did not restore the legacy runtime"
+
+  reset_logs
+  export ZHIXU_FAKE_LEGACY_MODEL_VERIFY_EXIT=71
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu local-model migrate --confirm MIGRATE"
+  unset ZHIXU_FAKE_LEGACY_MODEL_VERIFY_EXIT
+  assert_log_contains " copy sha256:"
+  assert_log_contains " verify sha256:"
+  assert_log_contains " start zhixu-eino-live-ollama"
+  assert_log_not_contains " volume rm zhixu-eino-live-models"
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-running" ]] || fail "failed verification did not restore the legacy runtime"
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-volume" ]] || fail "failed verification removed the legacy volume"
+
+  rm -f "${ZHIXU_FAKE_STATE_DIR}/managed-model-migration"
+
+  reset_logs
+  (cd "${STATE_DIR}/fixture" && ./zhixu local-model migrate --confirm MIGRATE >/dev/null)
+  assert_log_contains " stop --time 90 zhixu-eino-live-ollama"
+  assert_log_contains " verify sha256:"
+  assert_log_contains " mark-verified sha256:"
+  assert_log_contains " rm zhixu-eino-live-ollama"
+  assert_log_contains " copy sha256:"
+  assert_log_not_contains " volume rm zhixu-eino-live-models"
+  [[ ! -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-container" ]] || fail "successful migration retained the legacy container"
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-volume" ]] || fail "successful migration removed the legacy rollback volume"
+  [[ "$(cat "${ZHIXU_FAKE_STATE_DIR}/managed-model-migration")" == verified ]] \
+    || fail "successful migration did not commit the verified marker"
+
+  reset_logs
+  export ZHIXU_FAKE_LEGACY_MODEL_COMPLETED_MISMATCH=1
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu local-model migrate --confirm MIGRATE"
+  unset ZHIXU_FAKE_LEGACY_MODEL_COMPLETED_MISMATCH
+  assert_log_not_contains " stop --time 90 zhixu-eino-live-ollama"
+  assert_log_not_contains " copy sha256:"
+
+  reset_logs
+  (cd "${STATE_DIR}/fixture" && ./zhixu local-model migrate --confirm MIGRATE >/dev/null)
+  assert_log_contains " completed sha256:"
+  assert_log_not_contains " stop --time 90 zhixu-eino-live-ollama"
+  assert_log_not_contains " copy sha256:"
+  assert_log_not_contains " volume rm zhixu-eino-live-models"
+
+  reset_logs
+  (cd "${STATE_DIR}/fixture" && ./zhixu status >/dev/null)
+  assert_log_not_contains "zhixu-eino-live-ollama"
+  assert_log_not_contains "zhixu-eino-live-models"
+
+  reset_logs
+  (cd "${STATE_DIR}/fixture" && ./zhixu down >/dev/null)
+  assert_log_not_contains "zhixu-eino-live-models"
+  assert_log_not_contains "zhixu-eino-live-ollama"
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-volume" ]] || fail "normal down removed the legacy rollback volume"
+
+  reset_logs
+  export ZHIXU_FAKE_MANAGED_MODEL_VOLUME_DRIFT=1
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu reset --confirm DELETE"
+  unset ZHIXU_FAKE_MANAGED_MODEL_VOLUME_DRIFT
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/managed-model-volume" ]] \
+    || fail "reset ownership rejection removed the managed model volume"
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-volume" ]] \
+    || fail "reset ownership rejection removed the legacy rollback volume"
+  assert_log_not_contains "zhixu-eino-live-models"
+  assert_log_not_contains "zhixu-eino-live-ollama"
+
+  reset_logs
+  (cd "${STATE_DIR}/fixture" && ./zhixu reset --confirm DELETE >/dev/null)
+  [[ ! -f "${ZHIXU_FAKE_STATE_DIR}/managed-model-volume" ]] \
+    || fail "confirmed reset retained the owned managed model volume"
+  [[ -f "${ZHIXU_FAKE_STATE_DIR}/legacy-model-volume" ]] || fail "normal reset removed the legacy rollback volume"
+  assert_log_not_contains "zhixu-eino-live-models"
+  assert_log_not_contains "zhixu-eino-live-ollama"
+
+  printf '[launcher-contract] legacy migration passed\n'
+}
+
 main() {
   command -v docker >/dev/null 2>&1 || fail "docker is unavailable"
   command -v python3 >/dev/null 2>&1 || fail "python3 is unavailable"
@@ -233,6 +380,7 @@ main() {
   cp "${REPOSITORY_ROOT}/deploy/compose_netns_check.py" "${STATE_DIR}/fixture/deploy/compose_netns_check.py"
   cp "${REPOSITORY_ROOT}/deploy/netns-ingress.sh" "${STATE_DIR}/fixture/deploy/netns-ingress.sh"
   cp "${REPOSITORY_ROOT}/deploy/loopback-firewall.sh" "${STATE_DIR}/fixture/deploy/loopback-firewall.sh"
+  cp "${REPOSITORY_ROOT}/deploy/local-model-legacy-migrate.sh" "${STATE_DIR}/fixture/deploy/local-model-legacy-migrate.sh"
   cp "${REPOSITORY_ROOT}/deploy/anchor-health/index.html" "${STATE_DIR}/fixture/deploy/anchor-health/index.html"
 
   docker compose --profile workspace-runtime --profile modelctl --project-name zhixu \
@@ -273,7 +421,7 @@ main() {
   expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu up --workspace /"
   [[ ! -s "${ZHIXU_FAKE_DOCKER_LOG}" ]] || fail "dangerous Workspace validation invoked Docker"
 
-  local up_output workspace_a_id first_selection first_control_instance port_a port_b
+  local up_output workspace_a_id first_selection first_control_instance port_a port_b stale_lock_pid
   port_a="${READY_SERVER_PORT}"
   up_output="$(cd "${STATE_DIR}/fixture" && ./zhixu up --workspace "${workspace_a}")"
   grep -F -- "ready: http://127.0.0.1:${READY_SERVER_PORT}/" <<<"${up_output}" >/dev/null || fail "first up did not print the fixed URL"
@@ -300,13 +448,21 @@ main() {
   assert_log_contains "buildx build --target workspace-control-bundle"
   assert_log_contains "--project-name zhixu-netns"
   assert_log_contains "build app-netns worker-netns"
-  assert_log_contains "build model-settings-key-init migrate modelctl app worker app-model-relay worker-model-relay"
+  assert_log_contains "build model-settings-key-init migrate modelctl local-model-runtime-credential-init local-model-runtime app worker app-model-relay worker-model-relay"
   assert_log_contains "up --detach --wait postgres"
   assert_log_contains "run --rm --no-deps -T model-settings-key-init"
   assert_log_contains "run --rm --no-deps -T migrate"
+  assert_log_contains "run --rm --no-deps -T local-model-runtime-credential-init"
+  assert_log_contains "up --detach --wait local-model-runtime"
+  assert_log_order "run --rm --no-deps -T migrate" \
+    "run --rm --no-deps -T local-model-runtime-credential-init" \
+    "up --detach --wait local-model-runtime"
+  assert_log_order "run --rm --no-deps -T local-model-runtime-credential-init" \
+    "run --rm --no-deps -T local-model-volume-init" \
+    "up --detach --wait local-model-runtime"
   assert_log_contains "modelctl recover --stale"
   assert_log_contains "port postgres 5432"
-  assert_log_contains "ps --format json postgres app worker app-model-relay worker-model-relay"
+  assert_log_contains "ps --format json postgres local-model-runtime app worker app-model-relay worker-model-relay"
   assert_log_contains "ZHIXU_APP_RESTART_POLICY=on-failure ZHIXU_WORKER_RESTART_POLICY=on-failure"
   assert_control_log_contains "switch --workspace-root ${workspace_a} --idempotency-key present"
   assert_control_log_contains "--control-instance-id present"
@@ -402,6 +558,46 @@ main() {
   assert_control_log_not_contains "--initialize-git"
 
   reset_logs
+  local before_rebind rebind_fingerprint
+  before_rebind="$(cat "${selection}")"
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu workspace rebind"
+  [[ "$(cat "${selection}")" == "${before_rebind}" ]] || fail "unconfirmed rebind changed the saved selection"
+  [[ ! -s "${ZHIXU_FAKE_WORKSPACECTL_LOG}" ]] || fail "unconfirmed rebind invoked workspacectl"
+
+  reset_logs
+  export ZHIXU_FAKE_WORKSPACECTL_SWITCH_BINDING_VERSION=3
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu workspace rebind --confirm REBIND"
+  unset ZHIXU_FAKE_WORKSPACECTL_SWITCH_BINDING_VERSION
+  [[ "$(cat "${selection}")" == "${before_rebind}" ]] \
+    || fail "binding-mismatched rebound switch changed the saved selection"
+  [[ ! -e "${grant}" ]] || fail "binding-mismatched rebound switch left a grant active"
+
+  reset_logs
+  export ZHIXU_FAKE_RUNTIME_READY=0
+  expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu workspace rebind --confirm REBIND"
+  unset ZHIXU_FAKE_RUNTIME_READY
+  [[ "$(cat "${selection}")" == "${before_rebind}" ]] \
+    || fail "unready rebound runtime changed the saved selection"
+  [[ ! -e "${grant}" ]] || fail "unready rebound runtime left a grant active"
+
+  reset_logs
+  export ZHIXU_FAKE_WORKSPACECTL_REBIND_RESPONSE_LOSS_ONCE=1
+  (cd "${STATE_DIR}/fixture" && ./zhixu workspace rebind --confirm REBIND >/dev/null)
+  unset ZHIXU_FAKE_WORKSPACECTL_REBIND_RESPONSE_LOSS_ONCE
+  assert_control_log_contains "rebind --workspace-root ${workspace_a} --workspace-id ${workspace_a_id}"
+  assert_control_log_contains "--confirm REBIND"
+  assert_control_log_contains "switch --workspace-root ${workspace_a} --idempotency-key present"
+  [[ "$(grep -F -c -- "rebind --workspace-root ${workspace_a}" "${ZHIXU_FAKE_WORKSPACECTL_LOG}")" -eq 1 ]] \
+    || fail "response-lost rebind was executed more than once"
+  [[ "$(json_field "${selection}" workspace_id)" == "${workspace_a_id}" ]] \
+    || fail "response-lost rebind changed the logical Workspace ID"
+  rebind_fingerprint="$(json_field "${selection}" root_fingerprint)"
+  [[ "${rebind_fingerprint}" != "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(("zhixu-root:"+sys.argv[1]).encode()).hexdigest())' "${workspace_a}")" ]] \
+    || fail "response-lost rebind did not update the physical root fingerprint"
+  [[ "$(grant_root "${grant}")" == "${workspace_a}" ]] \
+    || fail "response-lost rebind did not restore the exact grant"
+
+  reset_logs
   (cd "${STATE_DIR}/fixture" && ./zhixu up --workspace "${workspace_a}" --initialize-git >/dev/null)
   assert_control_log_contains "switch --workspace-root ${workspace_a} --idempotency-key present"
   assert_control_log_not_contains "--initialize-git"
@@ -456,7 +652,7 @@ main() {
   status_output="$(cd "${STATE_DIR}/fixture" && ./zhixu status)"
   grep -F -- "Runtime: ready" <<<"${status_output}" >/dev/null || fail "healthy status was not reported ready"
   assert_log_contains "ps --all"
-  assert_log_contains "ps --all --format json postgres app worker app-model-relay worker-model-relay"
+  assert_log_contains "ps --all --format json postgres local-model-runtime app worker app-model-relay worker-model-relay"
   reset_logs
   export ZHIXU_FAKE_STATUS_READY=0
   status_output="$(cd "${STATE_DIR}/fixture" && ./zhixu status)"
@@ -540,6 +736,18 @@ main() {
   rm -f "${STATE_DIR}/fixture/.zhixu/launcher.lock/owner"
   rmdir "${STATE_DIR}/fixture/.zhixu/launcher.lock"
 
+  (: ) &
+  stale_lock_pid=$!
+  wait "${stale_lock_pid}"
+  mkdir -m 0700 "${STATE_DIR}/fixture/.zhixu/launcher.lock"
+  printf 'pid=%s\ncommand=workspace-rebind\n' "${stale_lock_pid}" >"${STATE_DIR}/fixture/.zhixu/launcher.lock/owner"
+  chmod 0600 "${STATE_DIR}/fixture/.zhixu/launcher.lock/owner"
+  reset_logs
+  (cd "${STATE_DIR}/fixture" && ./zhixu up >/dev/null)
+  [[ ! -d "${STATE_DIR}/fixture/.zhixu/launcher.lock" ]] \
+    || fail "stale workspace rebind launcher lock was not recovered"
+  assert_control_log_contains "switch --workspace-root ${workspace_b} --idempotency-key present"
+
   printf '{invalid-derived-grant\n' >"${grant}"
   chmod 0600 "${grant}"
   reset_logs
@@ -568,6 +776,7 @@ main() {
   expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu reset </dev/null"
   [[ ! -s "${ZHIXU_FAKE_DOCKER_LOG}" ]] || fail "unconfirmed reset invoked Docker"
   [[ -f "${selection}" && -f "${grant}" ]] || fail "unconfirmed reset changed local state"
+
   export ZHIXU_FAKE_VOLUME_API_EXIT=55
   expect_failure 1 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu reset --confirm DELETE"
   unset ZHIXU_FAKE_VOLUME_API_EXIT
@@ -588,4 +797,9 @@ main() {
   printf '[launcher-contract] passed\n'
 }
 
-main "$@"
+if [[ "${1:-}" == --legacy-migration-only ]]; then
+  [[ $# -eq 1 ]] || fail "--legacy-migration-only accepts no arguments"
+  run_legacy_migration_contract
+else
+  main "$@"
+fi

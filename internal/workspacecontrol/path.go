@@ -14,6 +14,8 @@ import (
 
 var fingerprintDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+const rootFingerprintSchemaVersion int64 = 1
+
 var reservedNamespaces = []string{
 	"/app", "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc",
 	"/root", "/run", "/sbin", "/sys", "/usr", "/var/lib", "/var/run", "/workspace",
@@ -26,10 +28,10 @@ var exactReservedTargets = map[string]struct{}{
 
 // RootFingerprint records the physical directory identity bound to one Workspace.
 type RootFingerprint struct {
-	PhysicalPath   string `json:"physical_path"`
-	Device         uint64 `json:"device"`
-	Inode          uint64 `json:"inode"`
-	BindingVersion int64  `json:"binding_version"`
+	PhysicalPath  string `json:"physical_path"`
+	Device        uint64 `json:"device"`
+	Inode         uint64 `json:"inode"`
+	SchemaVersion int64  `json:"schema_version"`
 }
 
 // ValidatedRoot is the canonical result of metadata-only host path validation.
@@ -121,14 +123,14 @@ func (PathValidator) Validate(value string) (ValidatedRoot, error) {
 	return ValidatedRoot{
 		CanonicalPath: canonical,
 		Fingerprint: RootFingerprint{
-			PhysicalPath: canonical, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), BindingVersion: 1,
+			PhysicalPath: canonical, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), SchemaVersion: rootFingerprintSchemaVersion,
 		},
 	}, nil
 }
 
 // Digest returns the non-reversible persisted identity used by the Workspace Registry.
 func (fingerprint RootFingerprint) Digest() string {
-	value := fmt.Sprintf("%s\x00%d\x00%d\x00%d", fingerprint.PhysicalPath, fingerprint.Device, fingerprint.Inode, fingerprint.BindingVersion)
+	value := fmt.Sprintf("%s\x00%d\x00%d\x00%d", fingerprint.PhysicalPath, fingerprint.Device, fingerprint.Inode, fingerprint.SchemaVersion)
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(value)))
 }
 

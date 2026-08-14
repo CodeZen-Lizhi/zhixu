@@ -39,7 +39,12 @@ flowchart LR
 - 同时只有一个 Active Workspace，但 Registry 为每个规范化物理 Root 保存稳定 `workspace_id`。
 - Registry 记录不授予文件访问；只有 Active Workspace 获得 `source == target == canonical root` 的单一精确 bind。
 - Root 只能由本机 `zhixu` → `cmd/workspacectl` → `internal/workspacecontrol` 一次性控制链选择。浏览器、业务 API、SSE、localStorage 和请求 `workspace_id` 都不能改变 mount 或身份。
-- Workspace Switch 替换 Active 身份和 Root Grant；Root Migration 是另一项需要证明内容/Git 连续性的显式操作，不能用普通 switch 代替。
+- Workspace Switch 替换 Active 身份和 Root Grant；同一 canonical path 的物理 identity replacement 只能由
+  `workspace rebind --confirm REBIND` 显式恢复。rebind 保持 Workspace ID/业务数据，以不可变事务历史递增 persisted binding
+  generation；fingerprint schema version 独立，普通 switch/restart 仍对 identity mismatch fail closed。
+- rebind 先撤销旧 runtime/grant，旧 runtime 保留旧 binding 且被新 Registry fence；rebind 自身不增加 grant generation，
+  后续普通 switch 增加 generation。只有 switch 返回相同新 binding 且 API/Worker ready 后才提交 selection；响应丢失可精确重放，
+  但 control state 或全局 mutation gate 非空时仍拒绝。
 - 切换先使旧 Workspace quiescent，再撤销旧 grant；失败恢复上次成功状态，无法证明恢复时保持零 Active。
 - PostgreSQL 查询、文件路径、索引、Workflow、缓存和 SSE 都必须绑定 Workspace。跨 Workspace 与不存在对象使用相同 NotFound 语义，避免枚举。
 
@@ -136,7 +141,7 @@ Safe Writeback 的 WorkspaceStore 与 GitRepository 不是通用文件/Git 工�
 | 图谱 | canonical Relation + PostgreSQL 查询投影 | v1 不引入图数据库，见 [ADR-0005](adr/0005-no-graph-database-v1.md) |
 | 内容 | goldmark、go-readability Adapter、pdftotext/Poppler Adapter、SHA-256 | 外部 Parser 只经 Adapter；HTML 安全文本使用标准 parser，不用正则清洗 |
 | Git | Git CLI Adapter | 固定命令和受控环境，见 [ADR-0009](adr/0009-git-cli-adapter.md) |
-| AI | OpenAI-Compatible Chat/Embedding；Ollama 兼容端点；可选 Rerank | 项目 Application 直接编排；managed settings 由 PostgreSQL activation + 进程 RuntimeHost 热应用，见 [ADR-0022](adr/0022-model-runtime-hot-activation.md)；Eino 当前未正式采用，见 [ADR-0013](adr/0013-eino-adoption-gate.md) 与 [PoC 报告](../../poc/eino/report.md) |
+| AI | OpenAI-Compatible Chat/Embedding；受管理的本地 Ollama；可选 Rerank | 项目 Application 直接编排；managed settings 由 PostgreSQL activation + 进程 RuntimeHost 热应用，本地 Ollama 由主 Compose 小型管理器按需启动同容器子进程并复用持久模型卷，见 [ADR-0022](adr/0022-model-runtime-hot-activation.md) 与 [ADR-0023](adr/0023-managed-local-ollama-runtime.md)；Eino 当前未正式采用，见 [ADR-0013](adr/0013-eino-adoption-gate.md) 与 [PoC 报告](../../poc/eino/report.md) |
 | 前端 | React + TypeScript + Vite、TanStack Query、React Router、Monaco | strict wire boundary；SSE 只触发回查 |
 | 图形 UI | 当前 SVG/CSS + 有界列表 fallback | Cytoscape/Web Worker 仅在 50 万 Relation/FPS 证据后评估 |
 | 配置 | Viper + validator + YAML v3 AST 预检 | 每次实例化加载、严格输入，详见 [应用契约](application-contracts.md) |

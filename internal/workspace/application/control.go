@@ -25,6 +25,7 @@ type RegistryStore interface {
 	ListRegistry(context.Context, bool) ([]domain.Workspace, error)
 	SetWorkspaceAvailability(context.Context, domain.AvailabilityUpdate) (domain.Workspace, error)
 	RemoveWorkspace(context.Context, domain.WorkspaceRemoval) (domain.Workspace, error)
+	RebindWorkspace(context.Context, domain.WorkspaceBindingMigration) (domain.WorkspaceBindingMigrationResult, error)
 }
 
 // ControlStore owns the leased switch state machine and runtime ownership records.
@@ -55,6 +56,16 @@ type RegisterWorkspaceCommand struct {
 	GitHead           string
 	GitDirty          bool
 	GitCheckedAt      time.Time
+}
+
+// RebindWorkspaceCommand is the explicit recovery command for a changed root identity.
+type RebindWorkspaceCommand struct {
+	ControllerInstanceID foundation.ID
+	WorkspaceID          foundation.ID
+	CanonicalRoot        string
+	OldRootFingerprint   string
+	NewRootFingerprint   string
+	IdempotencyKey       string
 }
 
 // BeginSwitchCommand fixes idempotency, target and optimistic state ownership.
@@ -264,6 +275,33 @@ func (service *ControlService) RemoveWorkspace(ctx context.Context, removal doma
 		return domain.Workspace{}, registryInvalid(errors.New("workspace removal command is invalid"))
 	}
 	return service.registry.RemoveWorkspace(ctx, removal)
+}
+
+// RebindWorkspace performs one explicit physical-identity migration and keeps
+// ordinary ResolveWorkspace fail-closed on future mismatches.
+func (service *ControlService) RebindWorkspace(ctx context.Context, command RebindWorkspaceCommand) (domain.WorkspaceBindingMigrationResult, error) {
+	if err := service.ready(ctx); err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, err
+	}
+	if !validID(command.ControllerInstanceID) || !validID(command.WorkspaceID) ||
+		!validCanonicalRoot(command.CanonicalRoot) || !validFingerprint(command.OldRootFingerprint) ||
+		!validFingerprint(command.NewRootFingerprint) || command.OldRootFingerprint == command.NewRootFingerprint ||
+		!validIdempotencyKey(command.IdempotencyKey) {
+		return domain.WorkspaceBindingMigrationResult{}, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeBindingRebindInvalid, false, errors.New("workspace rebind command is invalid"))
+	}
+	eventID, err := service.ids.New()
+	if err != nil {
+		return domain.WorkspaceBindingMigrationResult{}, err
+	}
+	if !validID(eventID) {
+		return domain.WorkspaceBindingMigrationResult{}, controlUnavailable(errors.New("workspace rebind event id is invalid"))
+	}
+	return service.registry.RebindWorkspace(ctx, domain.WorkspaceBindingMigration{
+		ID: eventID, ControllerInstanceID: command.ControllerInstanceID,
+		IdempotencyKey: command.IdempotencyKey, WorkspaceID: command.WorkspaceID,
+		CanonicalRoot: command.CanonicalRoot, OldRootFingerprint: command.OldRootFingerprint,
+		NewRootFingerprint: command.NewRootFingerprint,
+	})
 }
 
 // Snapshot loads Registry, control, operation and runtime facts together.

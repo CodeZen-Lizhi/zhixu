@@ -70,7 +70,7 @@ func scanRevision(row interface{ Scan(...any) error }) (persistedRevision, error
 		persisted.embeddingSecret.Validate() != nil || persisted.createdBy == "" || persisted.createdAt.IsZero() {
 		return persistedRevision{}, corrupt(errors.New("model settings revision is invalid"))
 	}
-	if (persisted.settings.Chat.Provider == domain.ChatProviderDisabled && persisted.chatSecret.Configured()) ||
+	if (persisted.settings.Chat.Provider != domain.ChatProviderOpenAICompatible && persisted.chatSecret.Configured()) ||
 		(persisted.settings.Embedding.Provider != domain.EmbeddingProviderOpenAICompatible && persisted.embeddingSecret.Configured()) {
 		return persistedRevision{}, corrupt(errors.New("model settings revision secret target is invalid"))
 	}
@@ -350,8 +350,8 @@ func secretContext(revision int64, settings domain.Settings, purpose domain.Secr
 }
 
 func validateSecretTargets(settings domain.Settings, chatAction, embeddingAction domain.SecretAction) error {
-	if settings.Chat.Provider == domain.ChatProviderDisabled && chatAction.Kind == domain.SecretActionReplace {
-		return invalid(errors.New("disabled chat provider cannot store a secret"))
+	if settings.Chat.Provider != domain.ChatProviderOpenAICompatible && chatAction.Kind == domain.SecretActionReplace {
+		return invalid(errors.New("chat provider cannot store a secret"))
 	}
 	if settings.Embedding.Provider != domain.EmbeddingProviderOpenAICompatible && embeddingAction.Kind == domain.SecretActionReplace {
 		return invalid(errors.New("embedding provider cannot store a secret"))
