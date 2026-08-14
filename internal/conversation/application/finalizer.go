@@ -24,6 +24,19 @@ type AnswerPublicationLookup struct {
 	AnswerID       foundation.ID
 }
 
+// AnswerDraftTerminalBinding 冻结待原子终结的草稿代际与 Runtime Attempt fence。
+// Workspace、Answer、Workflow 与 Node 身份复用 FinalizeAnswerCommand 的终结绑定。
+type AnswerDraftTerminalBinding struct {
+	SessionID  foundation.ID
+	Generation int64
+	AttemptNo  int
+	LeaseOwner string
+}
+
+// AnswerDraftPublication 是 AnswerDraftTerminalBinding 的兼容别名。
+// Deprecated: 新调用方应使用 AnswerDraftTerminalBinding；终态可能为 PUBLISHED 或 ABORTED。
+type AnswerDraftPublication = AnswerDraftTerminalBinding
+
 // FinalizeAnswerCommand 请求在一个事务中终结 Model Run、Answer、Conversation 和通知事件。
 type FinalizeAnswerCommand struct {
 	AnswerPublicationLookup
@@ -31,6 +44,7 @@ type FinalizeAnswerCommand struct {
 	ExpectedAnswerVersion   int64
 	ExpectedModelRunVersion int64
 	Proposal                agentapplication.RAGTerminalProposal
+	Draft                   *AnswerDraftTerminalBinding
 }
 
 // AnswerFinalizer 是 Workflow 访问最终 Answer 发布事实的唯一应用层端口。

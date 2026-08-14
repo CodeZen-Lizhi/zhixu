@@ -83,8 +83,8 @@ func LoadSettings(ctx context.Context, base config.Config, service RevisionServi
 }
 
 func unavailableLoaded(base config.Config, revision int64, cause error, telemetry ...platformmodels.ModelTelemetry) (LoadedSettings, error) {
-	models, fallbackErr := Build(base, modelsettingsdomain.ResolvedSettings{Revision: revision, Settings: modelsettingsdomain.CanonicalDisabledSettings()}, telemetry...)
-	if fallbackErr != nil {
+	models, disabledErr := Build(base, modelsettingsdomain.ResolvedSettings{Revision: revision, Settings: modelsettingsdomain.CanonicalDisabledSettings()}, telemetry...)
+	if disabledErr != nil {
 		return LoadedSettings{}, cause
 	}
 	return LoadedSettings{Models: models, Revision: revision, InitialPhase: modelsettingsdomain.RuntimePhaseUnavailable}, cause

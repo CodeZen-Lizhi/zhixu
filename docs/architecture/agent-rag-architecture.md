@@ -83,6 +83,14 @@ flowchart TB
 - schema_version。
 - model_run_ref。
 
+`agent.rag-answer-metadata/v2` 是内部最小 envelope 的例外：模型输出不含 `model_run_ref`，也不含正文、hash 或
+任何 Citation/Claim/Topic 身份。项目在结构化调用完成后用当前 ModelRun、同一次最终 Stream 和服务端短引用
+bindings 确定性组装公开 `agent.rag-answer/v2`。
+
+metadata 的 `REDUCED` 阶段使用独立的 `agent.rag-answer-metadata-refusal/v2` 无身份 Schema。模型只生成严格
+`RefusalPayload`，由 Adapter 在可信边界注入当前 ModelRunRef 后转换为公开 `agent.refusal/v1`；不得复用要求模型
+回显身份的通用拒答 Schema。
+
 Relation Assessment、RAG Answer、Refusal 和 Faithfulness Review 各自定义具体 payload，不使用一个巨型万能对象。
 输出必须是单个严格 JSON document；Decoder 拒绝非法 UTF-8、重复 key、unknown field、尾随第二个值、错误类型或枚举，以及越界字符串、数组和嵌套深度。Schema 通过后仍须执行领域、Evidence、Workspace、Applicability 和动作权限校验，禁止 regex、Markdown fence、默认对象或自由文本 fallback。
 
@@ -283,18 +291,21 @@ Tool Registry 负责：
 - 审计。
 
 模型可见 Tool 目录只能使用 Worker 当前真实可执行、配置启用且持久 Workflow Node 精确允许的 Tool 版本。
-M6-03 的 API 只冻结 11 个 Contract 用于 Definition 校验，尚未把动态目录接入模型；不能用 Fake Executor 冒充 Worker 能力。Tool Result
+M6-03 的 API 冻结 Contract 用于 Definition 校验；`/chat` 的 Eino Agent 只接入 Worker 已冻结的只读目录，不能用 Fake Executor 冒充 Worker 能力。Tool Result
 必须经过输出 Schema、大小限制和共享脱敏，并标记 `untrusted_data=true`；Source 或 Tool Result 不得递归
 成为新的 Tool Request。
 
-M6-03 先把 strict Agent Tool Request 转换为不含模型自由文本 `reason` 的 `PersistedToolInvocationV1`。持久
-`agent-rag` Definition 只包含 `ReadSource`、`ValidateCitation`、`ReadGitStatus`：它们的输入为空或稳定 ID tuple。
-Search query 与 Diff before/after 是内容型参数，不得作为 raw Workflow input 持久化。M6-04 的
-retrieval-first RAG 在同一 Agent Attempt 内通过 Retrieval Application seam 执行 Search；持久 RAG Workflow
-Input 只保存 Conversation/Question/Answer、请求/上下文 Hash 和版本绑定，仍未开放通用模型 Tool Loop。
+迁移前的 `agent-rag@1` 只把 strict Agent Tool Request 转换为不含模型自由文本 `reason` 的
+`PersistedToolInvocationV1`，并作为历史任务回放 Definition 保留。它只包含 `ReadSource`、
+`ValidateCitation`、`ReadGitStatus`，输入为空或稳定 ID tuple；Worker 不得用它调度新的模型 Tool Call。
+新的 `/chat` v2 由 Eino `ChatModelAgent`/`ToolsNode` 通过 `RAGAgentToolBridge` 进入同一
+`ExecutionService`。Search query 与 Diff before/after 是内容型参数，不得作为 raw Workflow input 持久化。
+持久 RAG Workflow Input 只保存 Conversation/Question/Answer、请求/上下文 Hash 和版本绑定。
 
-M6-04 已完成 Conversation、RAG HTTP API、持久阶段/SSE、Feedback 和真实 `/chat` 页面；通用模型 Tool Loop
-预算仍未实现，不能把 retrieval-first 单节点 Workflow 描述为任意 Tool Calling 会话。
+M6-04 已完成 Conversation、RAG HTTP API、持久阶段/SSE、Feedback 和真实 `/chat` 页面。正式 `/chat` RAG v2
+使用 Eino classic `ChatModelAgent`/`ToolsNode` 运行有界、顺序的只读 Tool Calling；当前 `ReadSource@2` 在工具成功后
+通过 Eino `ReturnDirectly` 把脱敏结果交给独立的 Eino ANSWER Stream，避免 Agent 内重复综合。通用 Agent Runtime 仍保留
+有界多轮 ReAct 能力。两种路径都共享项目的 Model/Tool 预算、Attempt、lease/fence、allowlist、Schema、receipt 与审计。
 
 ## 16.1 Conversation RAG v2 执行契约
 
@@ -302,8 +313,14 @@ M6-04 已完成 Conversation、RAG HTTP API、持久阶段/SSE、Feedback 和真
   批量绑定→RAG Answer v2→Citation→Faithfulness Review→原子发布。
 - Query Plan 与 Faithfulness Review 的内存模型输入由服务端注入对应 `model_run_ref`；调用方不得伪造保留字段。
   持久 Workflow Input 不保存上述模型输入、Question 正文、历史或 Evidence。
-- 正常 completed 路径固定形成 PLAN、ANSWER、REVIEW 三次 Model Call；每次仍使用 Structured Runner 的严格
-  Schema/Domain 门禁，修复调用只在该阶段输出非法时按既有预算发生。
+- Generation Application Port 保留完整类型化事实，但 workflow Adapter 给 Agent、最终 ANSWER 与 metadata 的
+  Provider 输入只包含问题、Evidence excerpt 和 `E*/C*/T*` 短引用。ReadSource/ValidateCitation 也只接收短引用；
+  `RAGAgentToolBridge` 在可信边界恢复完整 Citation tuple、调用 `ExecutionService`，再将结果脱敏为短引用结果。
+  Workspace、ModelRun、Citation/Claim/Topic、Source/Span UUID 和时间戳不进入上述 Provider 消息或 ToolMessage。
+- 正常 v2 completed 路径固定形成 `PLAN -> AGENT* -> ANSWER -> INITIAL/REPAIR/REDUCED -> REVIEW`；当前确定性
+  fixture 的 direct-return 成功样本为 `PLAN,AGENT,ANSWER,INITIAL,REVIEW`。通用 Agent Runtime 另有两轮 ReAct 回归；每次仍使用严格 Schema/Domain 门禁，
+  metadata 修复调用只在该阶段输出非法时按既有三阶段预算发生；既有 v1 `PLAN -> INITIAL/REPAIR/REDUCED -> REVIEW`
+  继续兼容。
 - RAG Answer v2 在 v1 基础上增加服务端验证的 `related_topics` 和 1..5 个 follow-up questions；Topic 必须来自
   Knowledge binding 并关联实际 Citation，不能信任模型自造 ID/名称。
 - Retrieval summary、真实阶段事件和最终 Answer 都持久化；阶段通知不含正文/Evidence，刷新从数据库投影恢复。
@@ -319,7 +336,23 @@ M6-04 已完成 Conversation、RAG HTTP API、持久阶段/SSE、Feedback 和真
 
 路由配置版本化；切换需评测。
 
-主模块使用项目自有 `ChatModel` Interface，并提供 direct HTTP 与 Eino-backed 两个 OpenAI-Compatible Adapter；`ZHIXU_CHAT_IMPLEMENTATION` 只在 Composition Root 选择实现，默认 `direct`。RAG Answer 使用的 `StructuredRunner` 可由 `ZHIXU_STRUCTURED_SCHEDULER_RAG=direct|eino` 独立选择内部三阶段调度，但 Eino 不接管 Query Plan、Retrieval/Eligibility、Citation/Faithfulness、terminal proposal、Model Run/Call 或 River/PostgreSQL 工作流。Ollama 仍仅通过其 OpenAI-Compatible endpoint 接入，不维护 native Ollama 第二套 Chat 协议。同一 Node Attempt 内不得静默切换 Provider 或 Model；`provider=disabled` 表示 capability unavailable，Deterministic Fake 仅用于测试。
+主模块使用项目自有 `ChatModel`、`EmbeddingModel`、`RAGExecutionScheduler`、`AgentRuntime` 与 `AnswerStreamRuntime`
+Port；Eino 类型只位于 `internal/platform/models` 和 `internal/agent/adapter/eino`。Chat、Embedding 与五个
+StructuredRunner 在生产 Composition 中固定使用 Eino；构造失败或调用失败必须 fail closed，不提供实现选择器或静默切换。
+Ollama Chat 仍通过 OpenAI-Compatible endpoint；Embedding 可经 OpenAI-Compatible 或原生 Ollama Adapter。
+
+新 `/chat` Question 在 Eino 配置下注册 RAG v2。`RAGWorkflowExecutor` 仍拥有 River receipt replay、冻结
+Conversation/Memory、Model Run、NodeAttempt 和 Finalizer；它调用 `RAGExecutor.Execute`，由其中注入的
+`RAGExecutionScheduler` 把项目五个领域节点交给启动时编译的 Eino Graph：Query
+Plan、检索/证据分支、只读 `ChatModelAgent`/`ToolsNode` 循环、无工具最终 Answer stream、metadata envelope、
+Citation/Faithfulness 和 terminal proposal。FTS、pgvector、RRF、Eligibility、Evidence、Citation、Faithfulness、
+权限、审批与 PostgreSQL/River 持久事实仍由项目节点和服务拥有。
+
+Agent 只能调用服务端冻结的只读工具；每次调用仍经 `ExecutionService`、allowlist、Schema、Capability、幂等
+receipt 和审计。写入、维护和可信写回工具不进入 Chat allowlist，模型只能生成 Proposal。Agent 中间消息与工具参数
+不对浏览器发布。Agent 结束后由不绑定工具的 Eino `ChatModel.Stream` 生成最终正文；Worker 以有界队列将其写为
+PostgreSQL draft chunk，SSE 只传草稿。EOF 后仍须通过 metadata、引用和忠实度门禁；Finalizer 在正式 Answer 事务中
+将 draft 原子改为 `PUBLISHED`。失败、取消或门禁拒绝会中止草稿，草稿永远不是 Answer 事实。
 
 ## 18. 降级
 
@@ -342,7 +375,8 @@ M6-04 已完成 Conversation、RAG HTTP API、持久阶段/SSE、Feedback 和真
 
 ## 20. Model Run 事实源
 
-一次 Node Attempt 只创建一个 Model Run；每次 `INITIAL`、`REPAIR`、`REDUCED` 和 `REVIEW` 是独立 Model Call。
+一次 Node Attempt 只创建一个 Model Run；每条 `PLAN`、`AGENT`、`ANSWER`、`INITIAL`、`REPAIR`、`REDUCED` 和 `REVIEW`
+都是独立 Model Call，v2 允许 `AGENT` 重复且 `ANSWER` 单次；既有 v1 调用序列继续兼容。
 Model Run 在首次调用前持久化并冻结 Workspace、Workflow Run、Node Run、Node Attempt、generation
 Adapter/Model/Profile/Prompt/Schema 和 Retrieval 版本；每条 Model Call 还必须冻结该次实际使用的
 Adapter/Model/Profile/Prompt/Schema 与 `max_output_tokens`，因此独立 REVIEW 版本可以直接历史查询，不能只保存

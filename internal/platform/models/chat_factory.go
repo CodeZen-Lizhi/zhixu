@@ -19,14 +19,7 @@ func NewConfiguredChatModel(cfg config.Config, telemetry ...ModelTelemetry) (age
 			AdapterVersion: cfg.ChatAdapterVersion, Timeout: cfg.ChatTimeout,
 			MaxRequestBytes: cfg.ChatMaxRequestBytes, MaxResponseBytes: cfg.ChatMaxResponseBytes,
 		}
-		switch cfg.ChatImplementation {
-		case config.ChatImplementationDirect:
-			return NewOpenAICompatibleChatModel(options)
-		case config.ChatImplementationEino:
-			return NewEinoOpenAIChatModel(options, telemetry...)
-		default:
-			return nil, foundation.NewError(foundation.ErrorInvalidInput, ErrorCodeChatConfigInvalid, false, errors.New("chat implementation is unsupported"))
-		}
+		return NewEinoOpenAIChatModel(options, telemetry...)
 	default:
 		return nil, foundation.NewError(foundation.ErrorInvalidInput, ErrorCodeChatConfigInvalid, false, errors.New("chat provider is unsupported"))
 	}

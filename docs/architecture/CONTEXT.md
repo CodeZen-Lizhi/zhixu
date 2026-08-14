@@ -291,9 +291,10 @@ _Avoid_: Node Run、Model Call
 _Avoid_: Node Run、单次 Provider 请求、日志事件
 
 **Model Call**:
-Model Run 内一次 INITIAL、REPAIR、REDUCED 或 REVIEW Provider 调用，直接冻结该次实际 Adapter/Model/Profile/
-Prompt/Schema 版本和 max output tokens，并记录顺序、哈希、Token、耗时、状态和稳定错误；不保存完整 Prompt、
-Evidence 或原始响应。
+Model Run 内一次受控 Provider 调用。v2 合法顺序为 `PLAN -> AGENT* -> ANSWER -> INITIAL/REPAIR/REDUCED -> REVIEW`；
+其中 `AGENT` 可重复、`ANSWER` 单次，metadata 的 `INITIAL/REPAIR/REDUCED` 仍受三阶段预算约束。每条调用直接冻结
+实际 Adapter/Model/Profile/Prompt/Schema 版本和 max output tokens，并记录顺序、哈希、Token、耗时、状态和稳定错误；
+不保存完整 Prompt、Evidence 或原始响应。既有 v1 的 `PLAN -> INITIAL/REPAIR/REDUCED -> REVIEW` 继续兼容。
 _Avoid_: Model Run、Tool Call、自动重试
 
 **Tool Call**:

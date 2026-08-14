@@ -4,6 +4,12 @@ status: accepted
 
 # Eino 分层采用、Chat/Callback 与 Structured Output 短 Graph 灰度
 
+> 本 ADR 只记录当时获准的基线范围。后续 Embedding 采用见 ADR-0020；完整 RAG、Tool/ReAct、
+> Token Streaming 与 Checkpoint/ADK 的实际门禁结论见 ADR-0021。
+>
+> **已被 ADR-0022 在 Eino 正式生产默认、RAG、Tool/ReAct 与 Streaming 的对应范围取代。** 本 ADR 的
+> Port 隔离、持久 Workflow、权限、审批、证据与安全传输边界仍有效。
+
 项目需要正式采用 Eino 的通用模型能力，同时不能改变知序已经验证的持久工作流、安全传输、模型调用审计、领域校验和安全写回边界。ADR-0013 的 M2 结论基于当时未闭合的 PoC 门禁；当前采用范围收敛为可由项目 Port 隔离和回滚的 Chat Provider Adapter、只写脱敏 Trace/Metrics 的调用级 Callback telemetry，以及 `StructuredRunner` 内部无状态三阶段短 Graph。
 
 ## Decision
@@ -61,7 +67,7 @@ status: accepted
 - 生产 Eino Adapter 已用本地 Ollama `0.32.6` + `qwen3:0.6b` 连续通过两次真实 OpenAI-Compatible smoke；该结果只证明协议兼容，不是模型质量、生产灰度或删除回退实现的证据。默认仍为 `direct`，可显式选择 `eino` 进行受控灰度。
 - Framework 升级必须重新通过同一合同、race、vet、Provider smoke 和错误注入门禁。升级失败或 Provider 兼容性漂移时切回 `direct`，不迁移数据库或持久工作流状态。
 - 调用级 Callback/Trace 与 Structured Output 三阶段短 Graph 已通过离线聚焦门禁；五个消费者的计数包装器证明实际进入 Eino scheduler，真实 PostgreSQL/River RAG direct/Eino 门禁也证明完成 Node 的 transport 重投递不会重复 Provider、Model Call、Attempt 或业务终态。Graph 只获得进程内阶段调度权，不获得业务编排、持久化或审计所有权。
-- Embedding/Retriever/Rerank、完整 RAG Graph、Token Streaming、Checkpoint/Interrupt、只读 Tool Calling 和旧实现删除仍需独立门禁；本 ADR 不提前授权这些能力。
+- Embedding/Retriever/Rerank、完整 RAG Graph、Token Streaming、Checkpoint/Interrupt、只读 Tool Calling 和旧实现删除仍需独立门禁；本 ADR 不提前授权这些能力。Embedding 后续由 ADR-0020 授权，其余路线由 ADR-0021 记录实际 No-Go/PoC-only 结论。
 
 ## Related Decisions
 
@@ -69,3 +75,5 @@ status: accepted
 - [ADR-0007](0007-no-langchain-core-dependency.md)：领域核心不绑定通用 Agent Framework。
 - [ADR-0012](0012-version-workflows-prompts-schemas.md)：Workflow、Prompt、Schema 版本化。
 - [ADR-0013](0013-eino-adoption-gate.md)：Eino 原始采用门禁与继续有效的不可替换边界。
+- [ADR-0020](0020-eino-embedding-adoption.md)：双 Provider Embedding 可回滚采用。
+- [ADR-0021](0021-eino-runtime-expansion-gates.md)：完整 RAG、Tool、Streaming、Checkpoint/ADK 门禁结论。

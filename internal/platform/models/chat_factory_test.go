@@ -3,7 +3,6 @@ package models_test
 import (
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -21,32 +20,9 @@ func TestNewConfiguredChatModelReturnsUnavailableWhenDisabled(t *testing.T) {
 	assertChatError(t, err, foundation.ErrorDependencyUnavailable, models.ErrorCodeChatCapabilityUnavailable, false)
 }
 
-func TestNewConfiguredChatModelDefaultsToDirectOpenAICompatibleAdapter(t *testing.T) {
+func TestNewConfiguredChatModelDefaultsToEinoOpenAICompatibleAdapter(t *testing.T) {
 	t.Parallel()
 	cfg := configuredChatTestConfig()
-	model, err := models.NewConfiguredChatModel(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reflect.TypeOf(model) != reflect.TypeOf((*models.OpenAICompatibleChatModel)(nil)) {
-		t.Fatalf("model type=%T", model)
-	}
-	configured := model.(*models.OpenAICompatibleChatModel)
-	if configured.Contract().Model.ModelID != cfg.ChatModel || configured.Contract().Model.ModelVersion != cfg.ChatModelVersion || configured.Contract().Model.AdapterVersion != cfg.ChatAdapterVersion {
-		t.Fatalf("contract=%#v", configured.Contract())
-	}
-	formatted := fmt.Sprintf("%v %#v %#v", configured, configured, configured.Contract())
-	for _, secret := range []string{cfg.ChatAPIKey, cfg.ChatBaseURL} {
-		if strings.Contains(formatted, secret) {
-			t.Fatalf("factory output leaked %q", secret)
-		}
-	}
-}
-
-func TestNewConfiguredChatModelBuildsEinoAdapterWhenExplicitlySelected(t *testing.T) {
-	t.Parallel()
-	cfg := configuredChatTestConfig()
-	cfg.ChatImplementation = config.ChatImplementationEino
 	model, err := models.NewConfiguredChatModel(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -64,17 +40,6 @@ func TestNewConfiguredChatModelBuildsEinoAdapterWhenExplicitlySelected(t *testin
 			t.Fatalf("factory output leaked %q", secret)
 		}
 	}
-}
-
-func TestNewConfiguredChatModelRejectsUnknownImplementation(t *testing.T) {
-	t.Parallel()
-	cfg := configuredChatTestConfig()
-	cfg.ChatImplementation = "automatic"
-	model, err := models.NewConfiguredChatModel(cfg)
-	if model != nil {
-		t.Fatalf("unsupported implementation constructed %T", model)
-	}
-	assertChatError(t, err, foundation.ErrorInvalidInput, models.ErrorCodeChatConfigInvalid, false)
 }
 
 func TestNewConfiguredChatModelRejectsUnknownProvider(t *testing.T) {

@@ -41,7 +41,6 @@ func NewEinoOpenAIChatModel(options OpenAIChatOptions, telemetry ...ModelTelemet
 	if err != nil {
 		return nil, err
 	}
-	config.authorization = ""
 	config.client.Transport = &einoChatRoundTripper{
 		base:             config.client.Transport,
 		model:            config.contract.Model,
@@ -61,7 +60,7 @@ func NewEinoOpenAIChatModel(options OpenAIChatOptions, telemetry ...ModelTelemet
 	return &EinoOpenAIChatModel{http: config, backend: backend, telemetry: resolveModelTelemetry(telemetry)}, nil
 }
 
-// Contract 返回与 direct Adapter 相同且不含 Credential/Endpoint 的冻结契约。
+// Contract 返回不含 Credential/Endpoint 的冻结项目契约。
 func (model *EinoOpenAIChatModel) Contract() ChatContract {
 	if model == nil {
 		return ChatContract{}

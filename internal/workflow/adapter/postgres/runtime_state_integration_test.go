@@ -948,6 +948,196 @@ func TestRuntimeTerminalHookFailureRollsBackDeliveryAndControl(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateLeaseChecksUseDatabaseTimeAfterLockWait(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	defer cleanup()
+	workspaceID := foundation.ID("a6f00000-0000-4000-8000-000000000001")
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-lease-clock',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-lease-clock"); err != nil {
+		t.Fatal(err)
+	}
+	client, err := riveradapter.NewClient(pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserter, err := riveradapter.NewJobInserter(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRuntimeRepository(pool, inserter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	human, err := application.NewRuntimeHumanCoordinator(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	startAndClaim := func(prefix, key, owner, deliveryID string) (application.RuntimeStartResult, application.ClaimResult) {
+		t.Helper()
+		request := runtimeStateStartFixture(workspaceID, key, domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Millisecond, MaxDelay: time.Second})
+		remapRuntimeStartIDs(&request, prefix)
+		started, startErr := repository.Start(ctx, request)
+		if startErr != nil {
+			t.Fatal(startErr)
+		}
+		claimed, claimErr := repository.Claim(ctx, application.ClaimCommand{
+			NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: deliveryID,
+			RiverJobID: started.Job.JobID, RiverJobAttempt: 1, LeaseOwner: owner, LeaseDuration: time.Minute,
+		})
+		if claimErr != nil || claimed.Disposition != application.ClaimDispositionClaimed {
+			t.Fatalf("claim=%+v err=%v", claimed, claimErr)
+		}
+		return started, claimed
+	}
+
+	runAcrossExpiredLease := func(runID, nodeID, attemptID foundation.ID, operation func() error) error {
+		t.Helper()
+		blocker, beginErr := pool.Begin(ctx)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		defer func() { _ = blocker.Rollback(ctx) }()
+		var locked int
+		if lockErr := blocker.QueryRow(ctx, `SELECT 1 FROM workflow.run WHERE id=$1 FOR UPDATE`, string(runID)).Scan(&locked); lockErr != nil {
+			t.Fatal(lockErr)
+		}
+		result := make(chan error, 1)
+		go func() { result <- operation() }()
+
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			var waiting bool
+			if waitErr := pool.QueryRow(ctx, `SELECT EXISTS(
+				SELECT 1 FROM pg_stat_activity
+				WHERE datname=current_database() AND pid<>pg_backend_pid()
+				  AND state='active' AND wait_event_type='Lock'
+			)`).Scan(&waiting); waitErr != nil {
+				t.Fatal(waitErr)
+			}
+			if waiting {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("runtime operation did not block on the held workflow lock")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if _, updateErr := blocker.Exec(ctx, `UPDATE workflow.node_run SET lease_until=clock_timestamp()+interval '100 milliseconds' WHERE id=$1`, string(nodeID)); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		if _, updateErr := blocker.Exec(ctx, `UPDATE workflow.node_attempt SET lease_until=clock_timestamp()+interval '100 milliseconds' WHERE id=$1`, string(attemptID)); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		time.Sleep(250 * time.Millisecond)
+		if commitErr := blocker.Commit(ctx); commitErr != nil {
+			t.Fatal(commitErr)
+		}
+		select {
+		case operationErr := <-result:
+			return operationErr
+		case <-time.After(5 * time.Second):
+			t.Fatal("runtime operation did not finish after the workflow lock was released")
+			return nil
+		}
+	}
+
+	t.Run("heartbeat rejects expired owner", func(t *testing.T) {
+		started, claimed := startAndClaim("b", "lease-clock-heartbeat", "worker-heartbeat", "lease-clock-heartbeat")
+		err := runAcrossExpiredLease(started.Run.ID, claimed.Node.ID, claimed.Attempt.ID, func() error {
+			_, heartbeatErr := repository.Heartbeat(ctx, application.HeartbeatCommand{
+				NodeRunID: claimed.Node.ID,
+				Fence: domain.LeaseFence{
+					Owner: claimed.Attempt.LeaseOwner, AttemptNo: claimed.Attempt.AttemptNo, NodeVersion: claimed.Node.Version,
+				},
+				LeaseDuration: time.Minute,
+			})
+			return heartbeatErr
+		})
+		if !hasCode(err, "WORKFLOW_LEASE_EXPIRED") {
+			t.Fatalf("heartbeat after lock wait err=%v", err)
+		}
+	})
+
+	t.Run("delivery transition rejects expired owner", func(t *testing.T) {
+		started, claimed := startAndClaim("c", "lease-clock-transition", "worker-transition", "lease-clock-transition")
+		err := runAcrossExpiredLease(started.Run.ID, claimed.Node.ID, claimed.Attempt.ID, func() error {
+			_, transitionErr := repository.TransitionDelivery(ctx, application.DeliveryTransition{
+				Binding: application.DeliveryBinding{
+					NodeRunID: claimed.Node.ID, DispatchNo: claimed.Node.DispatchNo, DeliveryID: claimed.Attempt.DeliveryID,
+					Fence: domain.LeaseFence{
+						Owner: claimed.Attempt.LeaseOwner, AttemptNo: claimed.Attempt.AttemptNo, NodeVersion: claimed.Node.Version,
+					},
+				},
+				Result: domain.AttemptResult{Output: json.RawMessage(`{"ok":true}`), OutputSchemaVersion: 1},
+			})
+			return transitionErr
+		})
+		if !hasCode(err, "WORKFLOW_LEASE_LOST") {
+			t.Fatalf("transition after lock wait err=%v", err)
+		}
+	})
+
+	t.Run("human wait rejects expired owner", func(t *testing.T) {
+		started, claimed := startAndClaim("e", "lease-clock-human", "worker-human", "lease-clock-human")
+		err := runAcrossExpiredLease(started.Run.ID, claimed.Node.ID, claimed.Attempt.ID, func() error {
+			_, waitErr := human.WaitForHuman(ctx, application.HumanWaitCommand{
+				TaskID:    foundation.ID("e6f00000-0000-4000-8000-000000000015"),
+				RunID:     started.Run.ID,
+				NodeRunID: claimed.Node.ID,
+				Fence: domain.LeaseFence{
+					Owner: claimed.Attempt.LeaseOwner, AttemptNo: claimed.Attempt.AttemptNo, NodeVersion: claimed.Node.Version,
+				},
+				ExpectedInputSchema: json.RawMessage(`{}`),
+				TargetVersion:       1,
+				ExpiresIn:           time.Hour,
+			})
+			return waitErr
+		})
+		if !hasCode(err, "WORKFLOW_LEASE_LOST") {
+			t.Fatalf("human wait after lock wait err=%v", err)
+		}
+		var nodeStatus domain.NodeStatus
+		var nodeLeaseOwner string
+		var nodeVersion int64
+		var attemptStatus domain.AttemptStatus
+		var attemptLeaseOwner string
+		var attemptEndedAt *time.Time
+		var taskCount int
+		if err := pool.QueryRow(ctx, `SELECT status,lease_owner,version FROM workflow.node_run WHERE id=$1`, string(claimed.Node.ID)).Scan(&nodeStatus, &nodeLeaseOwner, &nodeVersion); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT status,lease_owner,ended_at FROM workflow.node_attempt WHERE id=$1`, string(claimed.Attempt.ID)).Scan(&attemptStatus, &attemptLeaseOwner, &attemptEndedAt); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.human_task WHERE run_id=$1`, string(started.Run.ID)).Scan(&taskCount); err != nil {
+			t.Fatal(err)
+		}
+		if nodeStatus != domain.NodeStatusRunning || nodeLeaseOwner != claimed.Attempt.LeaseOwner || nodeVersion != claimed.Node.Version ||
+			attemptStatus != domain.AttemptStatusRunning || attemptLeaseOwner != claimed.Attempt.LeaseOwner || attemptEndedAt != nil || taskCount != 0 {
+			t.Fatalf("human wait mutated expired lease node_status=%s node_owner=%q node_version=%d attempt_status=%s attempt_owner=%q attempt_ended_at=%v tasks=%d",
+				nodeStatus, nodeLeaseOwner, nodeVersion, attemptStatus, attemptLeaseOwner, attemptEndedAt, taskCount)
+		}
+	})
+
+	t.Run("claim reclaims lease expired while blocked", func(t *testing.T) {
+		started, claimed := startAndClaim("d", "lease-clock-claim", "worker-old", "lease-clock-old")
+		var reclaimed application.ClaimResult
+		err := runAcrossExpiredLease(started.Run.ID, claimed.Node.ID, claimed.Attempt.ID, func() error {
+			var claimErr error
+			reclaimed, claimErr = repository.Claim(ctx, application.ClaimCommand{
+				NodeRunID: claimed.Node.ID, DispatchNo: claimed.Node.DispatchNo, DeliveryID: "lease-clock-new",
+				RiverJobID: started.Job.JobID, RiverJobAttempt: 2, LeaseOwner: "worker-new", LeaseDuration: time.Minute,
+			})
+			return claimErr
+		})
+		if err != nil || reclaimed.Disposition != application.ClaimDispositionClaimed || !reclaimed.LeaseReclaimed ||
+			reclaimed.Attempt.AttemptNo != claimed.Attempt.AttemptNo+1 {
+			t.Fatalf("reclaimed=%+v err=%v", reclaimed, err)
+		}
+	})
+}
+
 func TestRuntimeStateConcurrentClaimAndLeaseReclaimFenceOldOwner(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newRuntimeTestDatabase(t, ctx)

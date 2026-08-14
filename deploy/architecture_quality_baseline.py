@@ -80,15 +80,25 @@ def physical_lines(text: str) -> int:
 
 def tracked_files(repository: Path) -> list[str]:
     completed = subprocess.run(
-        ["git", "ls-files", "-z"],
+        ["git", "ls-files", "-z", "--cached"],
         cwd=repository,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    deleted = subprocess.run(
+        ["git", "ls-files", "-z", "--deleted"],
+        cwd=repository,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    deleted_paths = {
+        value for value in deleted.stdout.decode("utf-8").split("\0") if value
+    }
     paths: list[str] = []
     for value in completed.stdout.decode("utf-8").split("\0"):
-        if not value:
+        if not value or value in deleted_paths:
             continue
         path = PurePosixPath(value)
         if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):

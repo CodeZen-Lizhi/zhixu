@@ -14,10 +14,13 @@
 | [0010](0010-sse-for-server-events.md) | SSE 任务事件 | accepted |
 | [0011](0011-retrieve-latest-approved-revision.md) | 默认只检索最新批准版本 | accepted |
 | [0012](0012-version-workflows-prompts-schemas.md) | Workflow/Prompt/Schema 版本化 | accepted |
-| [0013](0013-eino-adoption-gate.md) | Eino 采用门禁与 M2 不采用结论 | accepted |
+| [0013](0013-eino-adoption-gate.md) | Eino 采用门禁与 M2 不采用结论（对应生产结论已由 ADR-0022 取代） | accepted |
 | [0014](0014-single-user-authentication.md) | 单用户 Session、API Token 与写授权分离 | accepted |
 | [0015](0015-river-goose-runtime.md) | River/Goose Runtime 版本、迁移和兼容边界 | accepted |
 | [0016](0016-capacity-performance-baseline.md) | 确定性容量数据集与可审计性能门禁 | accepted |
 | [0017](0017-exact-workspace-root-grant.md) | Host Controller 与精确 Workspace Root Grant | accepted |
 | [0018](0018-workspace-root-identity.md) | Workspace Root 与 Workspace 身份边界 | accepted |
-| [0019](0019-layered-eino-adoption.md) | Eino 分层采用、Chat/Callback 与 Structured Output 短 Graph 灰度 | accepted |
+| [0019](0019-layered-eino-adoption.md) | Eino 分层采用、Chat/Callback 与 Structured Output 短 Graph 灰度（对应生产结论已由 ADR-0022 取代） | accepted |
+| [0020](0020-eino-embedding-adoption.md) | Eino OpenAI-Compatible/Ollama Embedding 可回滚采用（对应生产结论已由 ADR-0022 取代） | accepted |
+| [0021](0021-eino-runtime-expansion-gates.md) | Eino RAG、Tool、Streaming、Checkpoint 扩展门禁结论（前三项已由 ADR-0022 取代） | accepted |
+| [0022](0022-eino-primary-ai-runtime.md) | Eino 正式生产 AI Runtime，接入 `/chat` RAG（当前） | accepted |

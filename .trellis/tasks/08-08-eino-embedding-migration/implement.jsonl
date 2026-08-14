@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端改动预检与包级规范路由"}
+{"file":".trellis/spec/backend/eino-chat-adapter.md","reason":"复用 Eino transport、factory 和固定生产实现契约；旧 selector 已退休"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"Embedding 配置需贯穿静态和受管设置"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go 实现、依赖与测试要求"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"provider 错误分类、重试和脱敏"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"配置和 adapter 日志不得泄露密钥或输入"}
+{"file":".trellis/tasks/archive/2026-08/08-06-eino-layered-migration/research/eino-official-capabilities.md","reason":"官方 embedding interface、ext 版本与已知限制"}
+{"file":".trellis/tasks/archive/2026-08/08-06-eino-layered-migration/research/boundary-and-migration-risks.md","reason":"现有 Embedding 严格合同和迁移风险"}
+{"file": ".trellis/spec/backend/eino-embedding-adapter.md", "reason": "实现前读取双 Provider Eino wire、安全、错误与 Git-based 恢复合同"}

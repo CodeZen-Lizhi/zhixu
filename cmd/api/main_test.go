@@ -21,7 +21,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
-	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
@@ -50,37 +49,65 @@ func TestNewAPIServerBoundsRequestReads(t *testing.T) {
 
 func TestInitializeAPITelemetryHonorsConfiguredMode(t *testing.T) {
 	tests := []struct {
-		name         string
-		mode         config.TelemetryMode
-		endpoint     string
-		wantErr      error
-		wantDegraded bool
+		name          string
+		mode          config.TelemetryMode
+		wantExporting bool
 	}{
 		{name: "disabled", mode: config.TelemetryModeDisabled},
-		{name: "optional exporter unavailable", mode: config.TelemetryModeOptional, endpoint: "https://collector.example.test:4318", wantDegraded: true},
-		{name: "required exporter unavailable", mode: config.TelemetryModeRequired, endpoint: "https://collector.example.test:4318", wantErr: observability.ErrTelemetryExporterRequired},
+		{name: "optional exporter configured", mode: config.TelemetryModeOptional, wantExporting: true},
+		{name: "required exporter configured", mode: config.TelemetryModeRequired, wantExporting: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := config.Defaults()
 			cfg.TelemetryMode = test.mode
-			cfg.TelemetryEndpoint = test.endpoint
-			telemetry, err := initializeAPITelemetry(context.Background(), cfg)
-			if !errors.Is(err, test.wantErr) {
-				t.Fatalf("initializeAPITelemetry error=%v, want %v", err, test.wantErr)
+			if test.mode != config.TelemetryModeDisabled {
+				collector := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+					writer.Header().Set("Content-Type", "application/x-protobuf")
+					writer.WriteHeader(http.StatusOK)
+				}))
+				defer collector.Close()
+				cfg.TelemetryEndpoint = collector.URL
 			}
+			telemetry, err := initializeAPITelemetry(context.Background(), cfg)
 			if err != nil {
-				return
+				t.Fatalf("initializeAPITelemetry: %v", err)
 			}
 			defer func() {
 				if shutdownErr := telemetry.Shutdown(context.Background()); shutdownErr != nil {
 					t.Fatalf("telemetry shutdown: %v", shutdownErr)
 				}
 			}()
-			if telemetry.Tracer() == nil || telemetry.Status().Degraded != test.wantDegraded {
+			if telemetry.Tracer() == nil || telemetry.Status().Degraded || telemetry.Status().Exporting != test.wantExporting {
 				t.Fatalf("telemetry=%#v tracer=%#v", telemetry.Status(), telemetry.Tracer())
 			}
 		})
+	}
+}
+
+func TestAPIRunRecordsProcessPresenceMetric(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || (selector.Sel.Name != "RecordProcessPresence" && selector.Sel.Name != "RecordTelemetryRequired") {
+			return true
+		}
+		packageName, ok := selector.X.(*ast.Ident)
+		if ok && packageName.Name == "observability" {
+			found[selector.Sel.Name] = true
+		}
+		return true
+	})
+	if !found["RecordProcessPresence"] || !found["RecordTelemetryRequired"] {
+		t.Fatalf("API composition telemetry signals=%#v", found)
 	}
 }
 
@@ -135,7 +162,7 @@ func TestAPIHasAllToolContractsWithoutExecutors(t *testing.T) {
 		t.Fatal(err)
 	}
 	contracts, err := toolcatalog.Contracts()
-	if err != nil || len(contracts) != 11 {
+	if err != nil || len(contracts) != 13 {
 		t.Fatalf("contracts=%d err=%v", len(contracts), err)
 	}
 	for _, expected := range contracts {
@@ -172,7 +199,11 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 			if err := executors.Freeze(); err != nil {
 				t.Fatal(err)
 			}
-			definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
+			toolContracts, err := newToolContractRegistry()
+			if err != nil {
+				t.Fatal(err)
+			}
+			definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors, toolContracts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -240,6 +271,16 @@ func TestNewConversationHandlersKeepReadFeedbackAndSSECompositionWhenChatDisable
 
 	if handler, stream, enabledErr := newConversationHandlers(&pgxpool.Pool{}, nil, true); enabledErr == nil || handler != nil || stream != nil {
 		t.Fatalf("enabled missing runtime conversation=%#v events=%#v err=%v", handler, stream, enabledErr)
+	}
+}
+
+func TestNewDraftStreamHandlerRequiresDatabaseAndComposesRepository(t *testing.T) {
+	if handler, err := newDraftStreamHandler(nil); err == nil || handler != nil {
+		t.Fatalf("nil database handler=%#v err=%v", handler, err)
+	}
+	handler, err := newDraftStreamHandler(&pgxpool.Pool{})
+	if err != nil || handler == nil {
+		t.Fatalf("configured handler=%#v err=%v", handler, err)
 	}
 }
 
@@ -324,7 +365,11 @@ func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t
 	if _, err := executors.Resolve(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion); err == nil {
 		t.Fatal("api constructed a fake RAG executor")
 	}
-	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors)
+	toolContracts, err := newToolContractRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions, err := workflowapplication.NewDefinitionRegistry(catalog, executors, toolContracts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,9 +383,13 @@ func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t
 	if err != nil || len(resolved.Graph.Nodes) != 1 {
 		t.Fatalf("definition=%+v err=%v", resolved, err)
 	}
-	rag, err := definitions.Resolve(conversationworkflow.DefinitionKey, conversationworkflow.DefinitionVersion)
-	if err != nil || rag.GraphHash != conversationworkflow.RegisteredDefinition().GraphHash {
-		t.Fatalf("rag definition=%+v err=%v", rag, err)
+	expected := conversationworkflow.RegisteredDefinitionV2()
+	rag, err := definitions.Resolve(expected.Key, expected.Version)
+	if err != nil || rag.GraphHash != expected.GraphHash {
+		t.Fatalf("rag definition version=%d definition=%+v err=%v", expected.Version, rag, err)
+	}
+	if _, err := definitions.Resolve(conversationworkflow.DefinitionKey, conversationworkflow.DefinitionVersionV1); err == nil {
+		t.Fatal("api exposed historical v1 RAG definition for new starts")
 	}
 	var classified *foundation.Error
 	_, resolveErr := executors.Resolve(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion)

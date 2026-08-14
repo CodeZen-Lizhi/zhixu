@@ -3059,6 +3059,72 @@
         }
       }
     },
+    "/api/v1/answers/{answer_id}/stream": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AnswerID"
+        },
+        {
+          "$ref": "#/components/parameters/WorkspaceIDQuery"
+        },
+        {
+          "name": "Last-Event-ID",
+          "in": "header",
+          "required": false,
+          "description": "Last acknowledged transient draft chunk as generation:sequence. A cursor from an older generation receives reset and end; a future or malformed cursor is rejected.",
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*:[1-9][0-9]*$",
+            "maxLength": 39
+          }
+        }
+      ],
+      "get": {
+        "operationId": "subscribeAnswerDraft",
+        "responses": {
+          "200": {
+            "description": "Transient final-answer draft SSE. Only chunk frames carry an id (generation:sequence). reset/end require the client to discard the draft and refetch the authoritative Answer; this stream never carries durable Server Events or a published Answer body.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AnswerDraftChunk"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AnswerDraftReset"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AnswerDraftEnd"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "operationId": "subscribeServerEvents",
@@ -19935,6 +20001,86 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AnswerDraftChunk": {
+        "type": "object",
+        "required": [
+          "generation",
+          "sequence",
+          "content"
+        ],
+        "properties": {
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536,
+            "x-max-utf8-bytes": 65536
+          }
+        },
+        "additionalProperties": false
+      },
+      "AnswerDraftReset": {
+        "type": "object",
+        "required": [
+          "generation",
+          "reason",
+          "action"
+        ],
+        "properties": {
+          "generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "generation_replaced",
+              "draft_unavailable",
+              "draft_stale",
+              "aborted",
+              "superseded"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "const": "refetch"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AnswerDraftEnd": {
+        "type": "object",
+        "required": [
+          "generation",
+          "status",
+          "action"
+        ],
+        "properties": {
+          "generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PUBLISHED",
+              "RESET"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "const": "refetch"
           }
         },
         "additionalProperties": false

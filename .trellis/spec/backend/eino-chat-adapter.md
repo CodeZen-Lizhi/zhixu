@@ -17,30 +17,29 @@ Embedding、Retriever、Rerank、ToolsNode、Token Streaming、Checkpoint/Interr
 ```go
 func NewConfiguredChatModel(config.Config, ...ModelTelemetry) (agentapplication.ChatModel, error)
 func NewConfiguredModelRuntime(config.Config, ...ModelTelemetry) (*ModelRuntime, error)
-func NewOpenAICompatibleChatModel(OpenAIChatOptions) (*OpenAICompatibleChatModel, error)
 func NewModelTelemetry(observability.Tracer, observability.Metrics) ModelTelemetry
 func NewEinoOpenAIChatModel(OpenAIChatOptions, ...ModelTelemetry) (*EinoOpenAIChatModel, error)
 func (model *EinoOpenAIChatModel) Chat(context.Context, agentapplication.ChatRequest) (agentapplication.ChatResponse, error)
 func (model *EinoOpenAIChatModel) Contract() ChatContract
 ```
 
-实现选择器为 `ZHIXU_CHAT_IMPLEMENTATION=direct|eino`，YAML 字段为 `chat_implementation`；缺省值必须是
-`direct`。选择器只在 Composition Root/factory 生效，不能进入领域 DTO、HTTP API 或持久记录的模型身份。
+生产实现固定为 Eino；不再提供 `ZHIXU_CHAT_IMPLEMENTATION` 或 `chat_implementation` 选择器。实现只能在
+Composition Root/factory 构造，不能进入领域 DTO、HTTP API 或持久记录的模型身份。
 
 ## 3. Contracts
 
-- `direct` 与 `eino` 必须实现同一个项目 `ChatModel`/`ChatContract`，产生相同 wire payload、项目响应、usage
-  和稳定错误分类；实现选择不是 Provider、Model 或 Adapter version 身份。
+- Eino Adapter 必须实现项目 `ChatModel`/`ChatContract`，产生稳定 wire payload、项目响应、usage
+  和错误分类；Runtime 实现不是 Provider、Model 或 Adapter version 身份。
 - Chat Eino/Provider SDK 类型只允许存在于 `internal/platform/models` Adapter 内。Application、Domain、Workflow、
   Model Run/Call、HTTP API、PostgreSQL 和 River 不得导入这些类型；短 Graph 的 Eino 类型只允许位于
   `internal/agent/adapter/eino`。
 - API、Worker 与 model settings connection test 通过同一个 factory/runtime 构造 Chat capability；managed
-  settings overlay 必须保留进程级 `ChatImplementation`，不能由数据库 revision 暗改实现。
+  settings overlay 不得引入进程级实现选择。
 - BaseURL 目录、以 `/v1` 结尾和完整 `/v1/chat/completions` 三种输入都只能生成一个 chat completions
   suffix，且不得保留 query、fragment、userinfo 或不安全远程 HTTP。
 - Eino SDK 内部使用中性模型名，规避底层 SDK 对 OpenAI 历史模型名的本地 denylist；项目 payload modifier
   必须把冻结的真实 `ModelID` 写到 wire body，Provider 回显仍按项目 `ModelVersion` 校验。
-- 动态 JSON Schema、max tokens、响应捕获和交叉校验状态必须是单次调用私有状态；共享 Adapter 上禁止保存
+- 动态 JSON Schema、max tokens、显式 `temperature=0`、响应捕获和交叉校验状态必须是单次调用私有状态；共享 Adapter 上禁止保存
   可变 Schema、Tool 列表或 response metadata。
 - Eino callback handler 必须由每次 `Chat` 通过调用 Context 的 `callbacks.InitCallbacks` 独立注入，只实现
   `OnStart/OnEnd/OnError`；禁止使用并发不安全的 `AppendGlobalHandlers` 或其他全局可变 handler。
@@ -72,7 +71,7 @@ func (model *EinoOpenAIChatModel) Contract() ChatContract
 
 | 情况 | Error kind | 稳定 code | Retryable |
 |---|---|---|---|
-| 配置/实现选择无效 | `InvalidInput` | `MODEL_CHAT_CONFIG_INVALID` | false |
+| 配置无效或 Eino Adapter 构造失败 | `InvalidInput`/`DependencyUnavailable` | `MODEL_CHAT_CONFIG_INVALID` / `MODEL_CHAT_CAPABILITY_UNAVAILABLE` | false |
 | capability disabled | `DependencyUnavailable` | `MODEL_CHAT_CAPABILITY_UNAVAILABLE` | false |
 | 请求字段或字节上限无效 | 项目现有 request validation kind | `MODEL_CHAT_REQUEST_INVALID` 或既有 Agent code | false |
 | 调用方取消 | `NonRetryableFailure` | `MODEL_CHAT_CANCELLED` | false |
@@ -95,13 +94,13 @@ func (model *EinoOpenAIChatModel) Contract() ChatContract
 
 | 类别 | 必须覆盖的例子 | 期望 |
 |---|---|---|
-| Good | direct/Eino 同一消息、Schema、响应和 usage | wire body、`ChatContract`、`ChatResponse` 等价 |
+| Good | Eino 同一消息、Schema、响应和 usage | wire body、`ChatContract`、`ChatResponse` 符合项目合同 |
 | Good | 目录、`/v1`、完整 endpoint | 都只请求一次正确 `/v1/chat/completions` |
-| Good | SDK denylist 中的历史兼容模型名 | wire body 保留真实模型名且两实现都到达 Provider |
-| Good | Provider 返回 string/null `reasoning` 或 `reasoning_content` | 两实现接受后丢弃，项目响应和 usage 等价且不泄漏推理正文 |
+| Good | SDK denylist 中的历史兼容模型名 | wire body 保留真实模型名且 Eino Adapter 到达 Provider |
+| Good | Provider 返回 string/null `reasoning` 或 `reasoning_content` | 接受后丢弃，项目响应和 usage 符合合同且不泄漏推理正文 |
 | Base | 32 个并发请求使用不同 `INITIAL/REPAIR/REDUCED` Schema | 无串扰，race 通过 |
 | Base | 32 个并发 callback 使用不同 correlation/phase | Span 精确隔离，Metric 无高基数 correlation |
-| Base | JSON envelope 有首尾空白 | 两实现都接受且响应等价 |
+| Base | JSON envelope 有首尾空白 | Eino Adapter 接受且响应符合合同 |
 | Bad | 无效 UTF-8、尾随 JSON、重复/未知字段、未知 message 字段、空或多 choice | fail closed 为响应合同错误 |
 | Bad | reasoning 为 object/array/number/bool | fail closed，不能为兼容 Provider 改成任意类型 |
 | Bad | usage 缺失、全零、加总错误，model/finish/refusal/tool 不符 | fail closed，model mismatch 使用独立 code |
@@ -111,29 +110,28 @@ func (model *EinoOpenAIChatModel) Contract() ChatContract
 
 ## 6. Tests Required
 
-- `internal/platform/models/chat_contract_test.go` 与 `eino_chat_contract_test.go`：双实现 fixture、BaseURL、legacy model、状态码、严格响应、
+- `internal/platform/models/chat_contract_test.go` 与 `eino_chat_contract_test.go`：Eino fixture、BaseURL、legacy model、状态码、严格响应、
   reasoning 两种别名的接收后丢弃、message 未知字段/错误类型、request/response 上限、取消/超时、redirect、
   并发 Schema、错误体上限和脱敏。
 - `internal/platform/models/eino_chat_live_test.go`：复用 `ZHIXU_EINO_LIVE_*` 显式 opt-in 配置调用生产 Adapter；
   Provider 回显与请求别名不同时用 `ZHIXU_EINO_LIVE_MODEL_VERSION` 冻结实际版本。
-- `internal/platform/models/chat_factory_test.go`：缺省 `direct`、显式 `eino`、未知选择器 fail closed。
+- `internal/platform/models/chat_factory_test.go`：Eino 构造、依赖缺失与未知配置 fail closed。
 - `internal/platform/models/eino_callback_test.go`：start/end/error、Context correlation、并发隔离、取消、
   稳定错误码、敏感字段和 telemetry failure/noop 旁路语义。
 - `internal/platform/observability/metrics_test.go`：模型指标 registry、固定 component/phase/result/error labels，
   拒绝未知和高基数 label。
-- `internal/platform/config/chat_config_test.go`：YAML/env/default/invalid selector 与安全格式化。
-- `internal/modelsettings/runtime/models_test.go`：managed revision 不覆盖进程级实现选择。
+- `internal/platform/config/chat_config_test.go`：YAML/env/default 与安全格式化。
+- `internal/modelsettings/runtime/models_test.go`：managed revision 只覆盖模型配置，runtime 只构造一次 Eino Adapter。
 - 修改 Adapter 或 SDK 版本后至少运行相关单测、`go test -race ./internal/platform/models`、相关 `go vet`、
   vendor 模式 API/Worker 构建、`go mod tidy -diff`、`make compose-check`、PoC race/vet 和 `git diff --check`。
-- 默认切换到 `eino` 前必须使用生产 Adapter 完成真实 OpenAI-Compatible Provider smoke；框架/Provider/模型版本
-  变化后必须重跑。2026-08-07 已用本地 Ollama `0.32.6` + `qwen3:0.6b` 连续通过两次；这只关闭协议兼容门禁，
-  不代表模型质量达标，也不替代灰度、回滚观测或 Gold Set。
+- 真实 OpenAI-Compatible Provider smoke、浏览器端到端和稳定观察仍是发布验收；框架/Provider/模型版本变化后必须重跑。
+  后续修改 Adapter、Claim 或 rollout 协议时必须重跑 Eino-only Compose 门禁。已有离线或本地 smoke 不代表模型质量、生产观察或最终发布门禁已完成。
 
 ## 7. Wrong vs Correct
 
 | Wrong | Correct |
 |---|---|
-| 用 `ChatAdapterVersion` 表示 direct/Eino | 使用独立进程级 `ChatImplementation`，模型身份保持不变 |
+| 用 `ChatAdapterVersion` 表示 Runtime 实现 | Adapter version 只描述协议合同；生产固定 Eino，模型身份保持不变 |
 | 把调用方模型名交给 SDK 预检 | SDK 使用中性内部模型名，项目 payload 写真实 wire 模型名 |
 | 在共享 Eino model 上修改 Schema | 每次 `Generate` 使用 request-level option 和私有 call state |
 | 相信 SDK 已完整验证响应 | transport 先执行项目严格 wire 校验，再交叉校验 Eino message/usage/raw body |
@@ -142,4 +140,4 @@ func (model *EinoOpenAIChatModel) Contract() ChatContract
 | 用 `AppendGlobalHandlers` 注册进程共享 callback | 每次 `Chat` 通过 Context 注入独立 handler |
 | Callback 写 Model Call/Audit/Workflow Progress | Callback 只写 Trace/Metrics，事务事实继续由项目 owner 写入 |
 | 由 Adapter 自动重试 429/5xx | Adapter 单次调用并分类，Workflow 决定 Node Attempt 重试 |
-| 用 Eino Graph/Checkpoint 替换 River/PostgreSQL | Eino 仅为 Adapter/短流程能力，项目持久状态仍是唯一事实源 |
+| 用 Eino Graph/Checkpoint 替换 River/PostgreSQL | Eino 是进程内 AI Runtime，项目持久状态仍是唯一跨进程事实源 |

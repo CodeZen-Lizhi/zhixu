@@ -14,6 +14,14 @@ import (
 type MetricName string
 
 const (
+	// MetricProcessPresence emits the current process presence as 1. API and
+	// Worker remain distinguishable through the OTLP service.name resource.
+	// It is intentionally not a readiness or health signal.
+	MetricProcessPresence MetricName = "runtime.process.presence"
+	// MetricTelemetryRequired exposes the configured telemetry mode as 1 only
+	// for required mode. It lets protected observation jobs prove the mode
+	// without trusting an operator-authored manifest boolean.
+	MetricTelemetryRequired      MetricName = "runtime.telemetry.required"
 	MetricQueueDepth             MetricName = "river.queue.depth"
 	MetricActiveWorkers          MetricName = "river.workers.active"
 	MetricNodeDuration           MetricName = "workflow.node.duration_ms"
@@ -28,6 +36,24 @@ const (
 	MetricModelCallDuration MetricName = "model.chat.duration_ms"
 	// MetricModelCallTotal 是 Eino Chat callback 观测到的调用结果计数。
 	MetricModelCallTotal MetricName = "model.chat.result_total"
+	// MetricAnswerFirstTokenDuration 是最终 Answer 流从请求开始到首个正文 token 的耗时。
+	MetricAnswerFirstTokenDuration MetricName = "agent.answer.first_token.duration_ms"
+	// MetricAnswerCompletionDuration 是最终 Answer 流从请求开始到终态的耗时。
+	MetricAnswerCompletionDuration MetricName = "agent.answer.completion.duration_ms"
+	// MetricAnswerResultTotal 是最终 Answer 流的终态计数。
+	MetricAnswerResultTotal MetricName = "agent.answer.result_total"
+	// MetricDraftDegradationTotal 是草稿流因持久化背压或故障降级的计数。
+	MetricDraftDegradationTotal MetricName = "agent.draft.degradation_total"
+	// MetricAgentIterations 是单次 Eino Agent 运行实际使用的迭代次数。
+	MetricAgentIterations MetricName = "agent.runtime.iterations"
+	// MetricAgentToolCalls 是单次 Eino Agent 运行实际调用的冻结工具数量。
+	MetricAgentToolCalls MetricName = "agent.runtime.tool_calls"
+	// MetricAgentResultTotal 是 Eino Agent 运行的终态计数。
+	MetricAgentResultTotal MetricName = "agent.runtime.result_total"
+	// MetricRAGOutcomeTotal 是 RAG 业务终态与运行失败的计数。
+	MetricRAGOutcomeTotal MetricName = "rag.outcome_total"
+	// MetricRAGGraphNodeResultTotal 是 Eino RAG Graph 固定节点的运行结果计数。
+	MetricRAGGraphNodeResultTotal MetricName = "agent.rag.graph_node.result_total"
 )
 
 // MetricKind controls aggregation semantics in concrete adapters.
@@ -44,6 +70,7 @@ var (
 	ErrInvalidMetric          = errors.New("invalid metric")
 	ErrUnboundedMetricLabel   = errors.New("unbounded metric label")
 	ErrSensitiveMetricLabel   = errors.New("sensitive metric label")
+	ErrMetricsUnavailable     = errors.New("metrics recorder is unavailable")
 	ErrObservabilityClosed    = errors.New("observability resource is closed")
 	metricLabelValuePattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
 	errorCodeLabelPattern     = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
@@ -58,18 +85,29 @@ type metricDefinition struct {
 }
 
 var metricDefinitions = map[MetricName]metricDefinition{
-	MetricQueueDepth:             newMetricDefinition(MetricKindGauge, []string{"queue"}, []string{"queue"}),
-	MetricActiveWorkers:          newMetricDefinition(MetricKindGauge, []string{"queue"}, []string{"queue"}),
-	MetricNodeDuration:           newMetricDefinition(MetricKindHistogram, []string{"node_kind", "result"}, []string{"node_kind", "result"}),
-	MetricNodeResultTotal:        newMetricDefinition(MetricKindCounter, []string{"node_kind", "result", "error_code"}, []string{"node_kind", "result"}),
-	MetricRetryTotal:             newMetricDefinition(MetricKindCounter, []string{"node_kind", "error_code"}, []string{"node_kind"}),
-	MetricManualRecoveryTotal:    newMetricDefinition(MetricKindCounter, []string{"node_kind", "error_code"}, []string{"node_kind"}),
-	MetricLeaseExpiryTotal:       newMetricDefinition(MetricKindCounter, []string{"node_kind"}, []string{"node_kind"}),
-	MetricHeartbeatFailureTotal:  newMetricDefinition(MetricKindCounter, []string{"node_kind", "error_code"}, []string{"node_kind"}),
-	MetricDuplicateDeliveryTotal: newMetricDefinition(MetricKindCounter, []string{"node_kind"}, []string{"node_kind"}),
-	MetricShutdownTotal:          newMetricDefinition(MetricKindCounter, []string{"shutdown_kind", "result"}, []string{"shutdown_kind", "result"}),
-	MetricModelCallDuration:      newMetricDefinition(MetricKindHistogram, []string{"component", "phase", "result", "error_code"}, []string{"component", "phase", "result"}),
-	MetricModelCallTotal:         newMetricDefinition(MetricKindCounter, []string{"component", "phase", "result", "error_code"}, []string{"component", "phase", "result"}),
+	MetricProcessPresence:          newMetricDefinition(MetricKindGauge, nil, nil),
+	MetricTelemetryRequired:        newMetricDefinition(MetricKindGauge, nil, nil),
+	MetricQueueDepth:               newMetricDefinition(MetricKindGauge, []string{"queue"}, []string{"queue"}),
+	MetricActiveWorkers:            newMetricDefinition(MetricKindGauge, []string{"queue"}, []string{"queue"}),
+	MetricNodeDuration:             newMetricDefinition(MetricKindHistogram, []string{"node_kind", "result"}, []string{"node_kind", "result"}),
+	MetricNodeResultTotal:          newMetricDefinition(MetricKindCounter, []string{"node_kind", "result", "error_code"}, []string{"node_kind", "result"}),
+	MetricRetryTotal:               newMetricDefinition(MetricKindCounter, []string{"node_kind", "error_code"}, []string{"node_kind"}),
+	MetricManualRecoveryTotal:      newMetricDefinition(MetricKindCounter, []string{"node_kind", "error_code"}, []string{"node_kind"}),
+	MetricLeaseExpiryTotal:         newMetricDefinition(MetricKindCounter, []string{"node_kind"}, []string{"node_kind"}),
+	MetricHeartbeatFailureTotal:    newMetricDefinition(MetricKindCounter, []string{"node_kind", "error_code"}, []string{"node_kind"}),
+	MetricDuplicateDeliveryTotal:   newMetricDefinition(MetricKindCounter, []string{"node_kind"}, []string{"node_kind"}),
+	MetricShutdownTotal:            newMetricDefinition(MetricKindCounter, []string{"shutdown_kind", "result"}, []string{"shutdown_kind", "result"}),
+	MetricModelCallDuration:        newMetricDefinition(MetricKindHistogram, []string{"component", "phase", "result", "error_code"}, []string{"component", "phase", "result"}),
+	MetricModelCallTotal:           newMetricDefinition(MetricKindCounter, []string{"component", "phase", "result", "error_code"}, []string{"component", "phase", "result"}),
+	MetricAnswerFirstTokenDuration: newMetricDefinition(MetricKindHistogram, []string{"result", "error_code"}, []string{"result"}),
+	MetricAnswerCompletionDuration: newMetricDefinition(MetricKindHistogram, []string{"result", "error_code"}, []string{"result"}),
+	MetricAnswerResultTotal:        newMetricDefinition(MetricKindCounter, []string{"result", "error_code"}, []string{"result"}),
+	MetricDraftDegradationTotal:    newMetricDefinition(MetricKindCounter, []string{"error_code"}, nil),
+	MetricAgentIterations:          newMetricDefinition(MetricKindHistogram, []string{"result", "error_code"}, []string{"result"}),
+	MetricAgentToolCalls:           newMetricDefinition(MetricKindHistogram, []string{"result", "error_code"}, []string{"result"}),
+	MetricAgentResultTotal:         newMetricDefinition(MetricKindCounter, []string{"result", "error_code"}, []string{"result"}),
+	MetricRAGOutcomeTotal:          newMetricDefinition(MetricKindCounter, []string{"outcome", "error_code"}, []string{"outcome"}),
+	MetricRAGGraphNodeResultTotal:  newMetricDefinition(MetricKindCounter, []string{"node_kind", "result", "error_code"}, []string{"node_kind", "result"}),
 }
 
 func newMetricDefinition(kind MetricKind, allowed, required []string) metricDefinition {
@@ -123,7 +161,7 @@ func NewLabels(values map[string]string) (Labels, error) {
 }
 
 var globallyAllowedMetricLabels = map[string]struct{}{
-	"queue": {}, "node_kind": {}, "result": {}, "error_code": {}, "shutdown_kind": {}, "component": {}, "phase": {},
+	"queue": {}, "node_kind": {}, "result": {}, "error_code": {}, "shutdown_kind": {}, "component": {}, "phase": {}, "outcome": {},
 }
 
 var boundedMetricLabelValues = map[string]map[string]struct{}{
@@ -132,7 +170,8 @@ var boundedMetricLabelValues = map[string]map[string]struct{}{
 	},
 	"shutdown_kind": {"graceful": {}, "forced": {}},
 	"component":     {"eino_chat": {}},
-	"phase":         {"PLAN": {}, "INITIAL": {}, "REPAIR": {}, "REDUCED": {}, "REVIEW": {}},
+	"phase":         {"PLAN": {}, "AGENT": {}, "ANSWER": {}, "INITIAL": {}, "REPAIR": {}, "REDUCED": {}, "REVIEW": {}},
+	"outcome":       {"completed": {}, "refused": {}, "clarification_required": {}, "failure": {}},
 }
 
 func isLongNumericIdentifier(value string) bool {
@@ -201,6 +240,37 @@ func (measurement Measurement) Validate() error {
 // Metrics is the project-owned metrics recording interface.
 type Metrics interface {
 	Record(context.Context, Measurement) error
+}
+
+// RecordProcessPresence records one unlabelled synchronous gauge sample for
+// this process. Exported resource attributes, rather than metric labels, own
+// the API/Worker distinction.
+func RecordProcessPresence(ctx context.Context, metrics Metrics) error {
+	if metrics == nil {
+		return ErrMetricsUnavailable
+	}
+	measurement, err := NewMeasurement(MetricProcessPresence, MetricKindGauge, 1, Labels{})
+	if err != nil {
+		return err
+	}
+	return metrics.Record(ctx, measurement)
+}
+
+// RecordTelemetryRequired records whether this process was configured with
+// required telemetry. The external service.name resource owns process identity.
+func RecordTelemetryRequired(ctx context.Context, metrics Metrics, required bool) error {
+	if metrics == nil {
+		return ErrMetricsUnavailable
+	}
+	value := float64(0)
+	if required {
+		value = 1
+	}
+	measurement, err := NewMeasurement(MetricTelemetryRequired, MetricKindGauge, value, Labels{})
+	if err != nil {
+		return err
+	}
+	return metrics.Record(ctx, measurement)
 }
 
 type noopMetrics struct{}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
@@ -21,6 +22,8 @@ const (
 	errorCodeRAGRequestInvalid  = "AGENT_RAG_REQUEST_INVALID"
 	errorCodeRAGResultDrift     = "AGENT_RAG_RETRIEVAL_RESULT_DRIFT"
 	errorCodeRAGTopicMismatch   = "AGENT_RAG_RELATED_TOPIC_MISMATCH"
+	// ErrorCodeRAGSchedulerContract 表示 RAG 调度器没有沿冻结 Graph 路由推进到终态。
+	ErrorCodeRAGSchedulerContract = "AGENT_RAG_SCHEDULER_CONTRACT_VIOLATION"
 	// ErrorCodeRAGProgressUnknown 表示阶段事件提交结果无法确认。
 	ErrorCodeRAGProgressUnknown = "AGENT_RAG_PROGRESS_UNKNOWN"
 )
@@ -33,6 +36,41 @@ type RAGQueryPlanPort interface {
 // RAGStructuredRunnerPort 执行 RAG v2 结构化生成。
 type RAGStructuredRunnerPort interface {
 	Run(context.Context, StructuredRunRequest) (StructuredRunResult, error)
+}
+
+// RAGGenerationPort 只负责已经冻结 Evidence 之后的回答生成。生产 v2
+// adapter 在此执行 Eino Agent -> tool-free Stream -> metadata；v1 adapter
+// 继续包装原有 StructuredRunner。
+type RAGGenerationPort interface {
+	Generate(context.Context, RAGGenerationRequest) (RAGGenerationResult, error)
+}
+
+// RAGGenerationRequest 是 Evidence 阶段生成的强类型上下文和冻结运行引用。
+type RAGGenerationRequest struct {
+	ModelRunRef      foundation.ID
+	Context          RAGGenerationContext
+	ProfileRef       domain.ModelProfileRef
+	PromptRef        domain.PromptRef
+	SchemaRef        domain.SchemaRef
+	ReducedSchemaRef domain.SchemaRef
+}
+
+// RAGGenerationContext 是 Evidence 节点交给生成 Adapter 的有界项目 DTO。
+// 它保留完整服务端事实；模型可见的 metadata 投影由 Adapter 另行收窄。
+type RAGGenerationContext struct {
+	ModelRunRef   foundation.ID                     `json:"model_run_ref"`
+	Request       json.RawMessage                   `json:"request"`
+	Evidence      []domain.Evidence                 `json:"evidence"`
+	Conflicts     []RAGConflictDisclosure           `json:"conflicts"`
+	RelatedTopics map[foundation.ID]RAGAllowedTopic `json:"related_topics"`
+}
+
+// RAGGenerationResult 精确返回 Answer 或 Refusal，以及实际 metadata/legacy
+// structured 调用结果。两种终态必须二选一。
+type RAGGenerationResult struct {
+	Answer     *domain.RAGAnswerResultV2
+	Refusal    *domain.RefusalResult
+	Generation StructuredRunResult
 }
 
 // RAGPublicationGatePort 执行 Citation 与 Faithfulness 门禁但不持久化发布。
@@ -149,28 +187,73 @@ type RAGTerminalProposal struct {
 	Generation    *StructuredRunResult
 }
 
-// RAGExecutor 编排 retrieval-first RAG，不拥有任何持久化终结职责。
+// RAGPhaseRoute 是领域节点完成后交给 Graph 的有界路由结果。
+// Application 只报告节点事实；下一节点由 Eino Graph 决定。
+type RAGPhaseRoute string
+
+const (
+	RAGPhaseContinue      RAGPhaseRoute = "continue"
+	RAGPhaseClarification RAGPhaseRoute = "clarification"
+	RAGPhaseRefusal       RAGPhaseRoute = "refusal"
+	RAGPhaseAnswer        RAGPhaseRoute = "answer"
+)
+
+// RAGPhaseOutcome 是一个领域节点的稳定输出，不包含 Eino 类型。
+type RAGPhaseOutcome struct {
+	Route RAGPhaseRoute
+}
+
+// RAGExecutionScheduler 只负责调用 RAG Graph，不拥有任何业务事实或 Provider 调用。
+type RAGExecutionScheduler interface {
+	Schedule(context.Context, *RAGPhaseRun) error
+}
+
+// RAGExecutor 提供 retrieval-first RAG 的项目步骤，不拥有任何持久化终结职责。
 type RAGExecutor struct {
 	planner     RAGQueryPlanPort
 	search      ScopedRetrievalPort
 	eligibility EvidenceEligibilityPort
 	topics      RAGEvidenceTopicPort
-	runner      RAGStructuredRunnerPort
+	generation  RAGGenerationPort
 	publisher   RAGPublicationGatePort
 	progress    RAGProgressPort
+	scheduler   RAGExecutionScheduler
 }
 
-// NewRAGExecutor 创建 fail-closed 的 RAG 编排器。
-func NewRAGExecutor(planner RAGQueryPlanPort, search ScopedRetrievalPort, eligibility EvidenceEligibilityPort, topics RAGEvidenceTopicPort, runner RAGStructuredRunnerPort, publisher RAGPublicationGatePort, progress RAGProgressPort) (*RAGExecutor, error) {
-	if isNilPort(planner) || isNilPort(search) || isNilPort(eligibility) || isNilPort(topics) || isNilPort(runner) || isNilPort(publisher) || isNilPort(progress) {
+// NewRAGExecutorWithScheduler 创建由指定调度器驱动的历史兼容 RAG 执行器。
+func NewRAGExecutorWithScheduler(planner RAGQueryPlanPort, search ScopedRetrievalPort, eligibility EvidenceEligibilityPort, topics RAGEvidenceTopicPort, runner RAGStructuredRunnerPort, publisher RAGPublicationGatePort, progress RAGProgressPort, scheduler RAGExecutionScheduler) (*RAGExecutor, error) {
+	if isNilPort(runner) {
+		return nil, applicationError(foundation.ErrorDependencyUnavailable, errorCodeRAGExecutorMissing, false, errors.New("rag structured runner is required"))
+	}
+	return NewRAGExecutorWithGenerationScheduler(
+		planner, search, eligibility, topics, structuredRAGGeneration{runner: runner}, publisher, progress, scheduler,
+	)
+}
+
+// NewRAGExecutorWithGenerationScheduler 使用显式生成端口创建 RAG 执行器。
+// 该构造器是 v2 Eino Agent/Stream 的正式入口。
+func NewRAGExecutorWithGenerationScheduler(
+	planner RAGQueryPlanPort,
+	search ScopedRetrievalPort,
+	eligibility EvidenceEligibilityPort,
+	topics RAGEvidenceTopicPort,
+	generation RAGGenerationPort,
+	publisher RAGPublicationGatePort,
+	progress RAGProgressPort,
+	scheduler RAGExecutionScheduler,
+) (*RAGExecutor, error) {
+	if isNilPort(planner) || isNilPort(search) || isNilPort(eligibility) || isNilPort(topics) || isNilPort(generation) || isNilPort(publisher) || isNilPort(progress) {
 		return nil, applicationError(foundation.ErrorDependencyUnavailable, errorCodeRAGExecutorMissing, false, errors.New("rag executor dependencies are required"))
 	}
-	return &RAGExecutor{planner: planner, search: search, eligibility: eligibility, topics: topics, runner: runner, publisher: publisher, progress: progress}, nil
+	if isNilPort(scheduler) {
+		return nil, applicationError(foundation.ErrorDependencyUnavailable, errorCodeRAGExecutorMissing, false, errors.New("rag execution scheduler is required"))
+	}
+	return &RAGExecutor{planner: planner, search: search, eligibility: eligibility, topics: topics, generation: generation, publisher: publisher, progress: progress, scheduler: scheduler}, nil
 }
 
 // Execute 生成 canonical terminal proposal；调用方必须交给 T09 在一个事务中终结。
 func (e *RAGExecutor) Execute(ctx context.Context, request RAGExecutionRequest) (RAGTerminalProposal, error) {
-	if e == nil || isNilPort(e.planner) || isNilPort(e.search) || isNilPort(e.eligibility) || isNilPort(e.topics) || isNilPort(e.runner) || isNilPort(e.publisher) || isNilPort(e.progress) {
+	if e == nil || isNilPort(e.planner) || isNilPort(e.search) || isNilPort(e.eligibility) || isNilPort(e.topics) || isNilPort(e.generation) || isNilPort(e.publisher) || isNilPort(e.progress) || isNilPort(e.scheduler) {
 		return RAGTerminalProposal{}, applicationError(foundation.ErrorDependencyUnavailable, errorCodeRAGExecutorMissing, false, errors.New("rag executor is unavailable"))
 	}
 	if ctx == nil {
@@ -197,129 +280,404 @@ func (e *RAGExecutor) Execute(ctx context.Context, request RAGExecutionRequest) 
 		summary := initialRetrievalSummary(request)
 		return refusalProposal(request.ModelRunRef, domain.RefusalExternalFactUnauthorized, "requested external or original-source evidence is not available in this release", &summary), nil
 	}
-	if err := e.progress.RecordRAGProgress(ctx, RAGProgressUpdate{Stage: RAGProgressPlanStarted}); err != nil {
+	run := &RAGPhaseRun{executor: e, request: request}
+	if err := e.scheduler.Schedule(ctx, run); err != nil {
+		if failure := run.Failure(); failure != nil {
+			return RAGTerminalProposal{}, failure
+		}
 		return RAGTerminalProposal{}, err
 	}
-	planRun, err := e.planner.Plan(ctx, QueryPlanRequest{ModelRunRef: request.ModelRunRef, ProfileRef: request.PlanProfileRef, PromptRef: request.PlanPromptRef, SchemaRef: request.PlanSchemaRef, Input: request.PlanInput})
-	if err != nil {
-		return RAGTerminalProposal{}, err
+	if failure := run.Failure(); failure != nil {
+		return RAGTerminalProposal{}, failure
 	}
-	if err := e.recordPostProviderProgress(ctx, RAGProgressUpdate{Stage: RAGProgressPlanCompleted, RewriteCount: len(planRun.Plan.Payload.Rewrites)}); err != nil {
-		return RAGTerminalProposal{}, err
+	if !run.Completed() {
+		return RAGTerminalProposal{}, applicationError(foundation.ErrorConsistencyViolation, ErrorCodeRAGSchedulerContract, false, errors.New("rag scheduler returned before a terminal proposal"))
 	}
-	if planRun.Plan.Payload.RequiresClarification {
-		payload := planRun.Plan.Payload
-		summary := initialRetrievalSummary(request)
-		return RAGTerminalProposal{ModelRunRef: request.ModelRunRef, Clarification: &RAGClarificationProposal{Intent: payload.Intent, Reason: payload.ClarificationReason, Question: payload.ClarificationQuestion, SuggestedScopes: append([]string(nil), payload.SuggestedScopes...)}, Retrieval: &summary}, nil
-	}
+	return run.Result(), nil
+}
 
-	if err := e.recordPostProviderProgress(ctx, RAGProgressUpdate{Stage: RAGProgressRetrievalStarted, RewriteCount: len(planRun.Plan.Payload.Rewrites)}); err != nil {
-		return RAGTerminalProposal{}, err
-	}
-	merged, summary, err := e.retrieve(ctx, request, planRun.Plan.Payload.Rewrites)
-	if err != nil {
-		return RAGTerminalProposal{}, err
-	}
-	if err := e.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressRetrievalCompleted, summary)); err != nil {
-		return RAGTerminalProposal{}, err
-	}
-	if len(merged.Items) == 0 {
-		return refusalProposal(request.ModelRunRef, domain.RefusalNoRelevantEvidence, "no relevant evidence was found in the approved knowledge scope", &summary), nil
-	}
-	if err := e.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressValidationStarted, summary)); err != nil {
-		return RAGTerminalProposal{}, err
-	}
-	eligible, evidence, provenances, conflicts, unconditionable, err := e.projectEligibility(ctx, request.WorkspaceID, merged)
-	if err != nil {
-		return RAGTerminalProposal{}, err
-	}
-	if len(eligible.Items) == 0 {
-		if err := e.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressValidationCompleted, summary)); err != nil {
-			return RAGTerminalProposal{}, err
-		}
-		return refusalProposal(request.ModelRunRef, domain.RefusalUnapprovedEvidenceOnly, "retrieval found candidates, but none are approved knowledge evidence", &summary), nil
-	}
-	summary.SelectedCount = len(eligible.Items)
-	summary.ConflictCount = uniqueConflictCount(conflicts)
-	if unconditionable {
-		if err := e.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressValidationCompleted, summary)); err != nil {
-			return RAGTerminalProposal{}, err
-		}
-		return refusalProposal(request.ModelRunRef, domain.RefusalConflictNotConditionable, "retrieved conflict evidence does not contain at least two selected disputed claim positions", &summary), nil
-	}
+// RAGPhaseRun 是由 RAGExecutor 创建的领域节点状态句柄。
+type RAGPhaseRun struct {
+	mu sync.Mutex
 
-	bindings, err := e.topics.ResolveRAGTopics(ctx, request.WorkspaceID, provenances)
-	if err != nil {
-		return RAGTerminalProposal{}, err
-	}
-	allowed, err := topicAllowlist(bindings, eligible)
-	if err != nil {
-		return RAGTerminalProposal{}, err
-	}
-	if len(allowed) == 0 {
-		if err := e.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressValidationCompleted, summary)); err != nil {
-			return RAGTerminalProposal{}, err
+	executor *RAGExecutor
+	request  RAGExecutionRequest
+
+	plan              QueryPlanRunResult
+	merged            RetrievalBatch
+	eligible          RetrievalBatch
+	summary           RAGRetrievalSummary
+	allowedTopics     map[foundation.ID]RAGAllowedTopic
+	generationContext RAGGenerationContext
+	generation        StructuredRunResult
+	answer            domain.RAGAnswerResultV2
+	proposal          RAGTerminalProposal
+	planDone          bool
+	retrievalDone     bool
+	evidenceDone      bool
+	generationDone    bool
+	publicationDone   bool
+	completed         bool
+	failure           error
+}
+
+// Plan 执行 Query Plan 领域节点，并只返回 Graph 的下一路由。
+func (run *RAGPhaseRun) Plan(ctx context.Context) (RAGPhaseOutcome, error) {
+	return run.runNode(ctx, func() bool {
+		return !run.planDone && !run.retrievalDone && !run.evidenceDone && !run.generationDone && !run.publicationDone
+	}, func() { run.planDone = true }, func() (RAGPhaseOutcome, error) {
+		if err := run.executor.progress.RecordRAGProgress(ctx, RAGProgressUpdate{Stage: RAGProgressPlanStarted}); err != nil {
+			return RAGPhaseOutcome{}, err
 		}
-		return refusalProposal(request.ModelRunRef, domain.RefusalEvidenceInsufficient, "eligible evidence has no active related topic binding", &summary), nil
-	}
-	input, err := json.Marshal(struct {
-		ModelRunRef   foundation.ID                     `json:"model_run_ref"`
-		Request       json.RawMessage                   `json:"request"`
-		Evidence      []domain.Evidence                 `json:"evidence"`
-		Conflicts     []RAGConflictDisclosure           `json:"conflicts"`
-		RelatedTopics map[foundation.ID]RAGAllowedTopic `json:"related_topics"`
-	}{request.ModelRunRef, append(json.RawMessage(nil), request.AnswerInput...), evidence, conflicts, allowed})
-	if err != nil {
-		return RAGTerminalProposal{}, applicationError(foundation.ErrorNonRetryableFailure, errorCodeRAGRequestInvalid, false, err)
-	}
-	generation, err := e.runner.Run(ctx, StructuredRunRequest{ProfileRef: request.AnswerProfileRef, PromptRef: request.AnswerPromptRef, SchemaRef: request.AnswerSchemaRef, ReducedSchemaRef: request.AnswerReducedSchemaRef, Input: input})
-	if err != nil {
-		return RAGTerminalProposal{}, err
-	}
-	if generation.Runtime.Schema.ID == domain.RefusalSchemaID {
-		if generation.Phase != domain.ModelCallReduced || generation.Runtime.Schema.Version != domain.OutputSchemaVersionV1 {
-			return RAGTerminalProposal{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("refusal schema is only valid in the reduced phase"))
+		plan, err := run.executor.planner.Plan(ctx, QueryPlanRequest{
+			ModelRunRef: run.request.ModelRunRef, ProfileRef: run.request.PlanProfileRef,
+			PromptRef: run.request.PlanPromptRef, SchemaRef: run.request.PlanSchemaRef, Input: run.request.PlanInput,
+		})
+		if err != nil {
+			return RAGPhaseOutcome{}, err
 		}
-		refusal, decodeErr := domain.DecodeRefusal(generation.Output, domain.DefaultDecodeLimits())
+		run.plan = plan
+		if err := run.executor.recordPostProviderProgress(ctx, RAGProgressUpdate{Stage: RAGProgressPlanCompleted, RewriteCount: len(plan.Plan.Payload.Rewrites)}); err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		if plan.Plan.Payload.RequiresClarification {
+			payload := plan.Plan.Payload
+			summary := initialRetrievalSummary(run.request)
+			run.finish(RAGTerminalProposal{ModelRunRef: run.request.ModelRunRef, Clarification: &RAGClarificationProposal{
+				Intent: payload.Intent, Reason: payload.ClarificationReason, Question: payload.ClarificationQuestion,
+				SuggestedScopes: append([]string(nil), payload.SuggestedScopes...),
+			}, Retrieval: &summary})
+			return RAGPhaseOutcome{Route: RAGPhaseClarification}, nil
+		}
+		return RAGPhaseOutcome{Route: RAGPhaseContinue}, nil
+	})
+}
+
+// Retrieval 执行项目检索节点；空结果由 Graph 路由到拒答终态。
+func (run *RAGPhaseRun) Retrieval(ctx context.Context) (RAGPhaseOutcome, error) {
+	return run.runNode(ctx, func() bool {
+		return run.planDone && !run.retrievalDone && !run.evidenceDone && !run.generationDone && !run.publicationDone
+	}, func() { run.retrievalDone = true }, func() (RAGPhaseOutcome, error) {
+		rewrites := run.plan.Plan.Payload.Rewrites
+		if err := run.executor.recordPostProviderProgress(ctx, RAGProgressUpdate{Stage: RAGProgressRetrievalStarted, RewriteCount: len(rewrites)}); err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		merged, summary, err := run.executor.retrieve(ctx, run.request, rewrites)
+		if err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		run.merged, run.summary = merged, summary
+		if err := run.executor.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressRetrievalCompleted, summary)); err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		if len(merged.Items) == 0 {
+			run.finish(refusalProposal(run.request.ModelRunRef, domain.RefusalNoRelevantEvidence, "no relevant evidence was found in the approved knowledge scope", &summary))
+			return RAGPhaseOutcome{Route: RAGPhaseRefusal}, nil
+		}
+		return RAGPhaseOutcome{Route: RAGPhaseContinue}, nil
+	})
+}
+
+// Evidence 执行资格、冲突和 Topic 投影节点；拒答分支由 Graph 选择终态。
+func (run *RAGPhaseRun) Evidence(ctx context.Context) (RAGPhaseOutcome, error) {
+	return run.runNode(ctx, func() bool {
+		return run.retrievalDone && !run.evidenceDone && !run.generationDone && !run.publicationDone
+	}, func() { run.evidenceDone = true }, func() (RAGPhaseOutcome, error) {
+		if err := run.executor.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressValidationStarted, run.summary)); err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		eligible, evidence, provenances, conflicts, unconditionable, err := run.executor.projectEligibility(ctx, run.request.WorkspaceID, run.merged)
+		if err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		if len(eligible.Items) == 0 {
+			if err := run.finishValidation(ctx, refusalProposal(run.request.ModelRunRef, domain.RefusalUnapprovedEvidenceOnly, "retrieval found candidates, but none are approved knowledge evidence", &run.summary)); err != nil {
+				return RAGPhaseOutcome{}, err
+			}
+			return RAGPhaseOutcome{Route: RAGPhaseRefusal}, nil
+		}
+		run.summary.SelectedCount = len(eligible.Items)
+		run.summary.ConflictCount = uniqueConflictCount(conflicts)
+		if unconditionable {
+			if err := run.finishValidation(ctx, refusalProposal(run.request.ModelRunRef, domain.RefusalConflictNotConditionable, "retrieved conflict evidence does not contain at least two selected disputed claim positions", &run.summary)); err != nil {
+				return RAGPhaseOutcome{}, err
+			}
+			return RAGPhaseOutcome{Route: RAGPhaseRefusal}, nil
+		}
+		bindings, err := run.executor.topics.ResolveRAGTopics(ctx, run.request.WorkspaceID, provenances)
+		if err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		allowed, err := topicAllowlist(bindings, eligible)
+		if err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		if len(allowed) == 0 {
+			if err := run.finishValidation(ctx, refusalProposal(run.request.ModelRunRef, domain.RefusalEvidenceInsufficient, "eligible evidence has no active related topic binding", &run.summary)); err != nil {
+				return RAGPhaseOutcome{}, err
+			}
+			return RAGPhaseOutcome{Route: RAGPhaseRefusal}, nil
+		}
+		generationContext := RAGGenerationContext{
+			ModelRunRef: run.request.ModelRunRef, Request: append(json.RawMessage(nil), run.request.AnswerInput...),
+			Evidence: evidence, Conflicts: conflicts, RelatedTopics: allowed,
+		}
+		encoded, err := json.Marshal(generationContext)
+		if err != nil {
+			return RAGPhaseOutcome{}, applicationError(foundation.ErrorNonRetryableFailure, errorCodeRAGRequestInvalid, false, err)
+		}
+		if len(encoded) > MaxStructuredInputBytes {
+			return RAGPhaseOutcome{}, applicationError(foundation.ErrorNonRetryableFailure, errorCodeRAGRequestInvalid, false, errors.New("rag generation context exceeds its bounded input"))
+		}
+		run.eligible, run.allowedTopics, run.generationContext = eligible, allowed, cloneRAGGenerationContext(generationContext)
+		return RAGPhaseOutcome{Route: RAGPhaseContinue}, nil
+	})
+}
+
+// Generation 执行 Agent/Stream/metadata 生成节点；结构化拒答走 Graph 拒答分支。
+func (run *RAGPhaseRun) Generation(ctx context.Context) (RAGPhaseOutcome, error) {
+	return run.runNode(ctx, func() bool { return run.evidenceDone && !run.generationDone && !run.publicationDone }, func() { run.generationDone = true }, func() (RAGPhaseOutcome, error) {
+		result, err := run.executor.generation.Generate(ctx, RAGGenerationRequest{
+			ModelRunRef: run.request.ModelRunRef, Context: cloneRAGGenerationContext(run.generationContext),
+			ProfileRef: run.request.AnswerProfileRef, PromptRef: run.request.AnswerPromptRef,
+			SchemaRef: run.request.AnswerSchemaRef, ReducedSchemaRef: run.request.AnswerReducedSchemaRef,
+		})
+		if err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		run.generation = result.Generation
+		if (result.Answer == nil) == (result.Refusal == nil) {
+			return RAGPhaseOutcome{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("rag generation returned no unique terminal result"))
+		}
+		if result.Refusal != nil {
+			if result.Generation.Phase != domain.ModelCallReduced || result.Generation.Runtime.Schema != run.request.AnswerReducedSchemaRef ||
+				result.Refusal.ModelRunRef != run.request.ModelRunRef {
+				return RAGPhaseOutcome{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("refusal schema is only valid in the reduced phase"))
+			}
+			if err := run.finishValidation(ctx, RAGTerminalProposal{ModelRunRef: run.request.ModelRunRef, Refusal: result.Refusal, Retrieval: &run.summary, Generation: &run.generation}); err != nil {
+				return RAGPhaseOutcome{}, err
+			}
+			return RAGPhaseOutcome{Route: RAGPhaseRefusal}, nil
+		}
+		answer := *result.Answer
+		if answer.Validate() != nil || answer.ModelRunRef != run.request.ModelRunRef {
+			return RAGPhaseOutcome{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("rag v2 generation is not bound to the model run"))
+		}
+		if err := validateRelatedTopics(answer.Payload.RelatedTopics, run.allowedTopics); err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		run.answer = answer
+		return RAGPhaseOutcome{Route: RAGPhaseContinue}, nil
+	})
+}
+
+func (run *RAGPhaseRun) runNode(
+	ctx context.Context,
+	canEnter func() bool,
+	markEntered func(),
+	execute func() (RAGPhaseOutcome, error),
+) (RAGPhaseOutcome, error) {
+	if run == nil {
+		return RAGPhaseOutcome{}, applicationError(foundation.ErrorConsistencyViolation, ErrorCodeRAGSchedulerContract, false, errors.New("rag phase run is nil"))
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if run.failure != nil {
+		return RAGPhaseOutcome{}, run.failure
+	}
+	if run.completed || run.executor == nil || canEnter == nil || !canEnter() || markEntered == nil || execute == nil {
+		return RAGPhaseOutcome{}, run.fail(applicationError(foundation.ErrorConsistencyViolation, ErrorCodeRAGSchedulerContract, false, errors.New("rag graph entered a domain node outside its valid predecessor path")))
+	}
+	if ctx == nil {
+		return RAGPhaseOutcome{}, run.fail(applicationError(foundation.ErrorInvalidInput, errorCodeRAGRequestInvalid, false, errors.New("rag phase context is required")))
+	}
+	if err := ctx.Err(); err != nil {
+		return RAGPhaseOutcome{}, run.fail(operationContextError(err))
+	}
+	markEntered()
+	outcome, err := execute()
+	if err != nil {
+		return RAGPhaseOutcome{}, run.fail(err)
+	}
+	validRoute := outcome.Route == RAGPhaseContinue || outcome.Route == RAGPhaseClarification ||
+		outcome.Route == RAGPhaseRefusal || outcome.Route == RAGPhaseAnswer
+	terminalRoute := outcome.Route != RAGPhaseContinue
+	if !validRoute || terminalRoute != run.completed {
+		return RAGPhaseOutcome{}, run.fail(applicationError(foundation.ErrorConsistencyViolation, ErrorCodeRAGSchedulerContract, false, errors.New("rag domain node returned an unsupported or inconsistent graph route")))
+	}
+	return outcome, nil
+}
+
+// Completed 报告 RAG 是否已经形成唯一终态提案。
+func (run *RAGPhaseRun) Completed() bool {
+	if run == nil {
+		return false
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return run.completed
+}
+
+// Failure 返回 Application 产生的原始错误。
+func (run *RAGPhaseRun) Failure() error {
+	if run == nil {
+		return nil
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return run.failure
+}
+
+// Result 返回已经完成的终态提案。
+func (run *RAGPhaseRun) Result() RAGTerminalProposal {
+	if run == nil {
+		return RAGTerminalProposal{}
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return run.proposal
+}
+
+type structuredRAGGeneration struct {
+	runner RAGStructuredRunnerPort
+}
+
+func (generation structuredRAGGeneration) Generate(ctx context.Context, request RAGGenerationRequest) (RAGGenerationResult, error) {
+	if request.Context.ModelRunRef != request.ModelRunRef || len(request.Context.Request) == 0 ||
+		!json.Valid(request.Context.Request) || bytes.IndexByte(request.Context.Request, 0) >= 0 {
+		return RAGGenerationResult{}, applicationError(foundation.ErrorInvalidInput, errorCodeRAGRequestInvalid, false, errors.New("rag generation context is invalid"))
+	}
+	input, err := json.Marshal(request.Context)
+	if err != nil || len(input) > MaxStructuredInputBytes {
+		return RAGGenerationResult{}, applicationError(foundation.ErrorInvalidInput, errorCodeRAGRequestInvalid, false, errors.New("rag generation context exceeds its bounded input"))
+	}
+	result, err := generation.runner.Run(ctx, StructuredRunRequest{
+		ProfileRef: request.ProfileRef, PromptRef: request.PromptRef, SchemaRef: request.SchemaRef,
+		ReducedSchemaRef: request.ReducedSchemaRef, Input: input,
+	})
+	if err != nil {
+		return RAGGenerationResult{}, err
+	}
+	if result.Runtime.Schema.ID == domain.RefusalSchemaID {
+		if result.Phase != domain.ModelCallReduced || result.Runtime.Schema.Version != domain.OutputSchemaVersionV1 {
+			return RAGGenerationResult{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("refusal schema is only valid in the reduced phase"))
+		}
+		refusal, decodeErr := domain.DecodeRefusal(result.Output, domain.DefaultDecodeLimits())
 		if decodeErr != nil || refusal.ModelRunRef != request.ModelRunRef {
-			return RAGTerminalProposal{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("reduced refusal is invalid or not bound to the model run"))
+			return RAGGenerationResult{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("reduced refusal is invalid or not bound to the model run"))
 		}
-		if err := e.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressValidationCompleted, summary)); err != nil {
-			return RAGTerminalProposal{}, err
-		}
-		return RAGTerminalProposal{ModelRunRef: request.ModelRunRef, Refusal: &refusal, Retrieval: &summary, Generation: &generation}, nil
+		return RAGGenerationResult{Refusal: &refusal, Generation: result}, nil
 	}
-	if generation.Runtime.Schema.ID != domain.RAGAnswerSchemaID || generation.Runtime.Schema.Version != domain.OutputSchemaVersionV2 {
-		return RAGTerminalProposal{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("rag generation returned an unexpected schema"))
+	if result.Runtime.Schema.ID != domain.RAGAnswerSchemaID || result.Runtime.Schema.Version != domain.OutputSchemaVersionV2 {
+		return RAGGenerationResult{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("rag generation returned an unexpected schema"))
 	}
-	answer, err := domain.DecodeRAGAnswerV2(generation.Output, domain.DefaultDecodeLimits())
-	if err != nil {
-		return RAGTerminalProposal{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, fmt.Errorf("rag v2 generation is invalid: %w", err))
+	answer, decodeErr := domain.DecodeRAGAnswerV2(result.Output, domain.DefaultDecodeLimits())
+	if decodeErr != nil {
+		return RAGGenerationResult{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, fmt.Errorf("rag v2 generation is invalid: %w", decodeErr))
 	}
 	if answer.ModelRunRef != request.ModelRunRef {
-		return RAGTerminalProposal{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("rag v2 generation is not bound to the model run"))
+		return RAGGenerationResult{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("rag v2 generation is not bound to the model run"))
 	}
-	if err := validateRelatedTopics(answer.Payload.RelatedTopics, allowed); err != nil {
-		return RAGTerminalProposal{}, err
+	return RAGGenerationResult{Answer: &answer, Generation: result}, nil
+}
+
+var _ RAGGenerationPort = structuredRAGGeneration{}
+
+func cloneRAGGenerationContext(input RAGGenerationContext) RAGGenerationContext {
+	cloned := RAGGenerationContext{
+		ModelRunRef: input.ModelRunRef,
+		Request:     append(json.RawMessage(nil), input.Request...),
 	}
-	base := domain.RAGAnswerResult{ResultType: answer.ResultType, SchemaID: answer.SchemaID, SchemaVersion: domain.OutputSchemaVersionV1, ModelRunRef: answer.ModelRunRef, Payload: answer.Payload.RAGAnswerPayload}
-	publication, err := e.publisher.Publish(ctx, AnswerPublicationRequest{WorkspaceID: request.WorkspaceID, Answer: base, Retrieval: eligible, ReviewProfileRef: request.ReviewProfileRef, ReviewPromptRef: request.ReviewPromptRef, ReviewSchemaRef: request.ReviewSchemaRef})
-	if err != nil {
-		return RAGTerminalProposal{}, err
+	if input.Evidence != nil {
+		cloned.Evidence = make([]domain.Evidence, len(input.Evidence))
+		copy(cloned.Evidence, input.Evidence)
 	}
-	if publication.Refusal != nil {
-		if err := e.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressValidationCompleted, summary)); err != nil {
-			return RAGTerminalProposal{}, err
+	if input.Conflicts != nil {
+		cloned.Conflicts = make([]RAGConflictDisclosure, len(input.Conflicts))
+		copy(cloned.Conflicts, input.Conflicts)
+	}
+	for index := range cloned.Evidence {
+		if input.Evidence[index].ConflictIDs != nil {
+			cloned.Evidence[index].ConflictIDs = make([]foundation.ID, len(input.Evidence[index].ConflictIDs))
+			copy(cloned.Evidence[index].ConflictIDs, input.Evidence[index].ConflictIDs)
 		}
-		return RAGTerminalProposal{ModelRunRef: request.ModelRunRef, Refusal: publication.Refusal, Review: publication.Review, Retrieval: &summary, Generation: &generation}, nil
 	}
-	if !publication.Publishable() {
-		return RAGTerminalProposal{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("publication gate returned no terminal decision"))
+	for index := range cloned.Conflicts {
+		if input.Conflicts[index].ConflictIDs != nil {
+			cloned.Conflicts[index].ConflictIDs = make([]foundation.ID, len(input.Conflicts[index].ConflictIDs))
+			copy(cloned.Conflicts[index].ConflictIDs, input.Conflicts[index].ConflictIDs)
+		}
+		if input.Conflicts[index].Applicability != nil {
+			cloned.Conflicts[index].Applicability = make(json.RawMessage, len(input.Conflicts[index].Applicability))
+			copy(cloned.Conflicts[index].Applicability, input.Conflicts[index].Applicability)
+		}
+		if input.Conflicts[index].CitationIDs != nil {
+			cloned.Conflicts[index].CitationIDs = make([]string, len(input.Conflicts[index].CitationIDs))
+			copy(cloned.Conflicts[index].CitationIDs, input.Conflicts[index].CitationIDs)
+		}
 	}
-	if err := e.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressValidationCompleted, summary)); err != nil {
-		return RAGTerminalProposal{}, err
+	if input.RelatedTopics != nil {
+		cloned.RelatedTopics = make(map[foundation.ID]RAGAllowedTopic, len(input.RelatedTopics))
+		for topicID, topic := range input.RelatedTopics {
+			if topic.CitationIDs != nil {
+				topic.CitationIDs = make([]string, len(topic.CitationIDs))
+				copy(topic.CitationIDs, input.RelatedTopics[topicID].CitationIDs)
+			}
+			cloned.RelatedTopics[topicID] = topic
+		}
 	}
-	return RAGTerminalProposal{ModelRunRef: request.ModelRunRef, Answer: &answer, Review: publication.Review, Retrieval: &summary, Generation: &generation}, nil
+	return cloned
+}
+
+// Publication 执行 Citation/Faithfulness 门禁节点，并把终态类型交给 Graph。
+func (run *RAGPhaseRun) Publication(ctx context.Context) (RAGPhaseOutcome, error) {
+	return run.runNode(ctx, func() bool { return run.generationDone && !run.publicationDone }, func() { run.publicationDone = true }, func() (RAGPhaseOutcome, error) {
+		answer := run.answer
+		base := domain.RAGAnswerResult{ResultType: answer.ResultType, SchemaID: answer.SchemaID, SchemaVersion: domain.OutputSchemaVersionV1, ModelRunRef: answer.ModelRunRef, Payload: answer.Payload.RAGAnswerPayload}
+		publication, err := run.executor.publisher.Publish(ctx, AnswerPublicationRequest{
+			WorkspaceID: run.request.WorkspaceID, Answer: base, Retrieval: run.eligible,
+			ReviewProfileRef: run.request.ReviewProfileRef, ReviewPromptRef: run.request.ReviewPromptRef, ReviewSchemaRef: run.request.ReviewSchemaRef,
+		})
+		if err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		if publication.Refusal != nil {
+			if err := run.finishValidation(ctx, RAGTerminalProposal{ModelRunRef: run.request.ModelRunRef, Refusal: publication.Refusal, Review: publication.Review, Retrieval: &run.summary, Generation: &run.generation}); err != nil {
+				return RAGPhaseOutcome{}, err
+			}
+			return RAGPhaseOutcome{Route: RAGPhaseRefusal}, nil
+		}
+		if !publication.Publishable() {
+			return RAGPhaseOutcome{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeRAGRequestInvalid, false, errors.New("publication gate returned no terminal decision"))
+		}
+		if err := run.finishValidation(ctx, RAGTerminalProposal{ModelRunRef: run.request.ModelRunRef, Answer: &run.answer, Review: publication.Review, Retrieval: &run.summary, Generation: &run.generation}); err != nil {
+			return RAGPhaseOutcome{}, err
+		}
+		return RAGPhaseOutcome{Route: RAGPhaseAnswer}, nil
+	})
+}
+
+func (run *RAGPhaseRun) finishValidation(ctx context.Context, proposal RAGTerminalProposal) error {
+	if err := run.executor.recordPostProviderProgress(ctx, progressFromSummary(RAGProgressValidationCompleted, run.summary)); err != nil {
+		return err
+	}
+	run.finish(proposal)
+	return nil
+}
+
+func (run *RAGPhaseRun) finish(proposal RAGTerminalProposal) {
+	run.proposal = proposal
+	run.completed = true
+}
+
+func (run *RAGPhaseRun) fail(err error) error {
+	if err == nil {
+		err = applicationError(foundation.ErrorConsistencyViolation, ErrorCodeRAGSchedulerContract, false, errors.New("rag phase run failed without an error"))
+	}
+	if run.failure == nil {
+		run.failure = err
+	}
+	return run.failure
 }
 
 // RAGAllowedTopic 是进入不可信模型输入的服务端 Topic allowlist。

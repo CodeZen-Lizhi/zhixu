@@ -7,14 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
@@ -79,7 +77,6 @@ type chatHTTPConfig struct {
 	timeout          time.Duration
 	maxRequestBytes  int64
 	maxResponseBytes int64
-	authorization    string
 }
 
 type chatHTTPOptions struct {
@@ -124,10 +121,6 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 	if err != nil {
 		return chatHTTPConfig{}, chatConfigErrorWithCause(err)
 	}
-	authorization := ""
-	if options.apiKey != "" {
-		authorization = "Bearer " + options.apiKey
-	}
 	return chatHTTPConfig{
 		client:           client,
 		endpointURL:      appendChatPath(baseURL),
@@ -135,7 +128,6 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 		timeout:          options.timeout,
 		maxRequestBytes:  options.maxRequestBytes,
 		maxResponseBytes: options.maxResponseBytes,
-		authorization:    authorization,
 	}, nil
 }
 
@@ -186,48 +178,6 @@ func validChatAPIKey(value string) bool {
 
 func (config chatHTTPConfig) contractCopy() ChatContract {
 	return config.contract
-}
-
-func (config chatHTTPConfig) chat(ctx context.Context, request agentapplication.ChatRequest, payload any, result any) error {
-	if err := config.validateRequest(request); err != nil {
-		return err
-	}
-	encoded, err := config.encodeRequest(payload)
-	if err != nil {
-		return err
-	}
-	requestContext, cancel := config.requestContext(ctx)
-	defer cancel()
-	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, config.endpointURL, bytes.NewReader(encoded))
-	if err != nil {
-		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatRequestFailed, false, errChatRequestFailed)
-	}
-	httpRequest.Header.Set("Accept", "application/json")
-	httpRequest.Header.Set("Content-Type", "application/json")
-	if config.authorization != "" {
-		httpRequest.Header.Set("Authorization", config.authorization)
-	}
-	response, err := config.client.Do(httpRequest)
-	if err != nil {
-		return classifyChatTransportError(requestContext, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return classifyChatStatus(response.StatusCode)
-	}
-	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		return chatResponseError(ErrorCodeChatResponseInvalid)
-	}
-	encodedResponse, err := io.ReadAll(io.LimitReader(response.Body, config.maxResponseBytes+1))
-	if err != nil {
-		return classifyChatTransportError(requestContext, err)
-	}
-	if int64(len(encodedResponse)) > config.maxResponseBytes || !utf8.Valid(encodedResponse) {
-		return chatResponseError(ErrorCodeChatResponseInvalid)
-	}
-	return decodeChatJSONResponse(encodedResponse, config.maxResponseBytes, result)
 }
 
 func (config chatHTTPConfig) validateRequest(request agentapplication.ChatRequest) error {

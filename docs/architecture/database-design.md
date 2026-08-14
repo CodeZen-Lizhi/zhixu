@@ -535,7 +535,7 @@ model_run：
 
 model_call：
 
-- id、model_run_id、call_no、phase：INITIAL、REPAIR、REDUCED、REVIEW。
+- id、model_run_id、call_no、phase：`PLAN`、可重复的 `AGENT`、单次 `ANSWER`、`INITIAL`、`REPAIR`、`REDUCED`、`REVIEW`。
 - 该次实际 adapter/model、profile、prompt template、output schema 的 ID/version，以及 max_output_tokens。
 - request_hash、response_hash、request_bytes、response_bytes。
 - input_tokens、output_tokens、latency_ms、error_code。
@@ -1043,7 +1043,9 @@ embedding_version：
 - Relation 两端不存在、跨 Workspace、类型组合非法、自环或对称反向重复时不能成为有效关系。
 - 同一 Workspace 无法同时激活两个 Index Version，失败构建不会污染当前活动检索。
 - Human Task 重复提交、过期 Tool Authorization、重复补偿和重复 Outbox 投递不会产生第二次副作用。
-- Node Run 能反查实际 Workflow/Index/Embedding 版本，并通过 Node Attempt 唯一 Model Run 反查 Prompt、Model、Schema 及 INITIAL/REPAIR/REDUCED/REVIEW 调用；默认配置变化不改写历史运行。
+- Node Run 能反查实际 Workflow/Index/Embedding 版本，并通过 Node Attempt 唯一 Model Run 反查 Prompt、Model、Schema 及
+  `PLAN -> AGENT* -> ANSWER -> INITIAL/REPAIR/REDUCED -> REVIEW` 调用；既有 v1 的
+  `PLAN -> INITIAL/REPAIR/REDUCED -> REVIEW` 继续兼容，默认配置变化不改写历史运行。
 - Model Run/Call 的状态机、调用前 STARTED、CAS 归约、crash→UNKNOWN、同 Workspace FK、唯一 call_no 和 guarded Down 均有真实 PostgreSQL 故障测试。
 - Audit 的业务角色无法更新或删除历史记录，脱敏测试证明 Secret、Authorization 和不必要正文不会落库。
 - Evaluation Run 能固定 Gold Set 和全部实际版本，并能与基线结果做可复现对比。

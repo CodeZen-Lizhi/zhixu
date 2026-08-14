@@ -122,7 +122,9 @@ go vet ./...
 ### 2. Signatures
 
 - 人工入口：`make architecture-quality-baseline`。
-- 机器入口：`python3 deploy/architecture_quality_baseline.py --format json [--web-dist PATH] [--output PATH]`。
+- 机器入口：`python3 deploy/architecture_quality_baseline.py --format json [--web-dist PATH] [--output PATH]`。基线读取
+  Git index 中仍存在于当前工作树的普通文件；工作树已删除但尚未提交的 tracked 文件必须从扫描集合排除，不能让
+  合法删除阻断提交前门禁，也不能回读 HEAD 中的旧实现。
 - JSON Schema 固定为 `architecture-quality-baseline/v1`；默认 `--web-dist web/dist`，目录缺失时报告 unavailable。
 
 ### 3. Contracts
@@ -246,7 +248,10 @@ Correct: 服务端持久身份和冻结 catalog 决定策略，Executor 前写 S
 - Query Plan fixture 从请求 Schema 与输入生成结果，不依赖调用序号；只接受 PLAN v1、RAG Answer v2、Faithfulness v1 的精确三元组。
 - Retrieval Search snippet 与重新打开的 Source Span excerpt 在 Agent Adapter 边界统一 `TrimSpace`；裁剪后为空必须 fail closed。
 - 空 rewrite/degradation/citation 集合必须保持非 nil 空数组语义，禁止在 Adapter copy 时退化成 `null`。
-- Compose 首次回答必须恰好持久化 `PLAN:SUCCEEDED,INITIAL:SUCCEEDED,REVIEW:SUCCEEDED`，Question exact replay 后 Model Call 投影不变。
+- Compose v2 当前 direct-return 首次回答必须恰好持久化
+  `PLAN:SUCCEEDED,AGENT:SUCCEEDED,ANSWER:SUCCEEDED,INITIAL:SUCCEEDED,REVIEW:SUCCEEDED`；通用 Agent Runtime
+  另以无 `ReturnDirectly` 测试覆盖两轮 ReAct。历史 v1 回放路径继续断言
+  `PLAN:SUCCEEDED,INITIAL:SUCCEEDED,REVIEW:SUCCEEDED`，Question exact replay 后 Model Call 投影不变。
 
 ### 4. Validation & Error Matrix
 
@@ -268,15 +273,15 @@ Correct: 服务端持久身份和冻结 catalog 决定策略，Executor 前写 S
 ### 6. Tests Required
 
 - Agent/Conversation/Fixture focused race、Go vet、`go mod tidy -diff`、OpenAPI、前端 lint/typecheck/test/build。
-- 真实 PostgreSQL `make rag-integration` 断言三次 Provider 调用、Citation/Topic/Follow-up、SSE、Feedback 与 exact replay。
-- `make compose-rag-smoke` 断言生产 HTTP Adapter 的 Bearer、精确三阶段 Model Call、重放零新增、Citation 可打开、SSE 无正文/Secret、Feedback 不修改 Answer。
+- 真实 PostgreSQL `make rag-integration` 断言 v2 的 Agent/Answer/metadata/review 调用序列、Citation/Topic/Follow-up、SSE、Feedback 与 exact replay；历史 v1 回放另行断言三阶段序列。
+- `make compose-rag-smoke` 断言生产 HTTP Adapter 的 Bearer、v2 精确 Model Call 序列、重放零新增、Citation 可打开、SSE 无正文/Secret、Feedback 不修改 Answer。
 - 主 Agent 执行 Go/SQL/通用五轴审查，并由独立只读 reviewer 复验。
 
 ### 7. Wrong vs Correct
 
 ```text
 Wrong: Compose 脚本直接 INSERT 假 hash 的正式知识，模型 fixture 按调用顺序返回，Question 重放只比较 Answer ID。
-Correct: 受限 Go harness 复用 Knowledge Domain/Repository；fixture 按 Schema+输入生成；重放同时证明 Model Call 三阶段投影不变。
+Correct: 受限 Go harness 复用 Knowledge Domain/Repository；fixture 按 Schema+输入生成；重放同时证明 v2 Model Call 序列投影不变，历史 v1 回放另测兼容序列。
 
 Wrong: 原样把 Markdown snippet/source excerpt 送入要求 canonical text 的 Agent Evidence。
 Correct: Retrieval Adapter 边界裁剪首尾空白，裁剪后为空则明确失败。
@@ -699,7 +704,8 @@ Wrong: 看到 Review Path 的 Handler、Web 页面和 Store 文件存在，就�
 Correct: 先证明 `00060` 与 Repository SQL 一致、Composition 注入真实 Service/Artifact bridge、maintenance 有生产调用，再登记运行能力。
 
 Wrong: 在共享 ChatModel 外包一层 Memory，或 recovery 时对同一 attempt 重新执行 effective query。
-Correct: 只由 Conversation RAG executor 显式 claim snapshot；唯一 claimant 加载一次并让 PLAN/INITIAL/REPAIR/REDUCED/REVIEW 复用同一输入。
+Correct: 只由 Conversation RAG executor 显式 claim snapshot；唯一 claimant 加载一次并让
+PLAN/AGENT*/ANSWER/INITIAL/REPAIR/REDUCED/REVIEW 复用同一输入，旧 v1 继续使用 PLAN/INITIAL/REPAIR/REDUCED/REVIEW。
 ```
 
 ## Scenario: Health Issue 有界历史

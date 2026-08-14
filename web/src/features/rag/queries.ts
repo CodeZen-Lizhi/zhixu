@@ -4,8 +4,8 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { getAnswer, getConversation, getLatestTurn, listConversations, listTurns, type Answer } from "../../api/conversation";
 import { ragQueryKeys } from "./query-keys";
 
-export const maximumPendingAnswerPolls = 12;
-export const pendingAnswerPollMilliseconds = 2_000;
+export const maximumPendingAnswerPolls = 144;
+export const pendingAnswerPollMilliseconds = 5_000;
 
 export const pendingAnswerPollInterval = (
   answer: Answer | undefined,

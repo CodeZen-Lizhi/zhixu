@@ -7,94 +7,39 @@ import (
 	"testing"
 )
 
-func TestStructuredSchedulerDefaultsAreDirect(t *testing.T) {
+func TestLoadRejectsRemovedStructuredSchedulerSelectors(t *testing.T) {
 	t.Parallel()
-	cfg := Defaults()
-	selectors := []StructuredSchedulerImplementation{
-		cfg.StructuredSchedulerRAG,
-		cfg.StructuredSchedulerRelation,
-		cfg.StructuredSchedulerArtifact,
-		cfg.StructuredSchedulerCapture,
-		cfg.StructuredSchedulerOrganizing,
-	}
-	for index, selector := range selectors {
-		if selector != StructuredSchedulerImplementationDirect {
-			t.Fatalf("selector[%d]=%q", index, selector)
-		}
-	}
-}
-
-func TestLoadStructuredSchedulersFromYAMLAndEnvironment(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	data := []byte(`structured_scheduler_rag: direct
-structured_scheduler_relation: eino
-structured_scheduler_artifact: direct
-structured_scheduler_capture: eino
-structured_scheduler_organizing: direct
-`)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	environment := map[string]string{
-		"ZHIXU_STRUCTURED_SCHEDULER_RAG":        "eino",
-		"ZHIXU_STRUCTURED_SCHEDULER_RELATION":   "direct",
-		"ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT":   "eino",
-		"ZHIXU_STRUCTURED_SCHEDULER_CAPTURE":    "direct",
-		"ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING": "eino",
-	}
-	cfg, err := LoadWithLookup(path, func(key string) (string, bool) {
-		value, ok := environment[key]
-		return value, ok
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.StructuredSchedulerRAG != StructuredSchedulerImplementationEino ||
-		cfg.StructuredSchedulerRelation != StructuredSchedulerImplementationDirect ||
-		cfg.StructuredSchedulerArtifact != StructuredSchedulerImplementationEino ||
-		cfg.StructuredSchedulerCapture != StructuredSchedulerImplementationDirect ||
-		cfg.StructuredSchedulerOrganizing != StructuredSchedulerImplementationEino {
-		t.Fatalf("structured scheduler config=%s", cfg)
-	}
-	for _, expected := range []string{
-		`StructuredSchedulerRAG:"eino"`,
-		`StructuredSchedulerRelation:"direct"`,
-		`StructuredSchedulerArtifact:"eino"`,
-		`StructuredSchedulerCapture:"direct"`,
-		`StructuredSchedulerOrganizing:"eino"`,
-	} {
-		if !strings.Contains(cfg.String(), expected) {
-			t.Fatalf("config formatting omitted %q: %s", expected, cfg)
-		}
-	}
-}
-
-func TestValidateStructuredSchedulerSelectors(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name   string
-		field  string
-		change func(*Config)
+	selectors := []struct {
+		yaml string
+		env  string
 	}{
-		{name: "rag", field: "structured_scheduler_rag", change: func(cfg *Config) { cfg.StructuredSchedulerRAG = "automatic" }},
-		{name: "relation", field: "structured_scheduler_relation", change: func(cfg *Config) { cfg.StructuredSchedulerRelation = "automatic" }},
-		{name: "artifact", field: "structured_scheduler_artifact", change: func(cfg *Config) { cfg.StructuredSchedulerArtifact = "automatic" }},
-		{name: "capture", field: "structured_scheduler_capture", change: func(cfg *Config) { cfg.StructuredSchedulerCapture = "automatic" }},
-		{name: "organizing", field: "structured_scheduler_organizing", change: func(cfg *Config) { cfg.StructuredSchedulerOrganizing = "automatic" }},
+		{yaml: "structured_scheduler_rag", env: "ZHIXU_STRUCTURED_SCHEDULER_RAG"},
+		{yaml: "structured_scheduler_relation", env: "ZHIXU_STRUCTURED_SCHEDULER_RELATION"},
+		{yaml: "structured_scheduler_artifact", env: "ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT"},
+		{yaml: "structured_scheduler_capture", env: "ZHIXU_STRUCTURED_SCHEDULER_CAPTURE"},
+		{yaml: "structured_scheduler_organizing", env: "ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING"},
 	}
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := Defaults()
-			test.change(&cfg)
-			for _, validate := range []func() error{cfg.Validate, cfg.ValidateModels} {
-				err := validate()
-				if err == nil || !strings.Contains(err.Error(), test.field) {
-					t.Fatalf("want %s validation error, got %v", test.field, err)
+	for _, selector := range selectors {
+		selector := selector
+		t.Run(selector.yaml+"/yaml", func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(selector.yaml+": eino\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadWithLookup(path, func(string) (string, bool) { return "", false })
+			if err == nil || !strings.Contains(err.Error(), selector.yaml) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+		t.Run(selector.yaml+"/environment", func(t *testing.T) {
+			_, err := LoadWithLookup("", func(key string) (string, bool) {
+				if key == selector.env {
+					return "direct", true
 				}
+				return "", false
+			})
+			if err == nil || !strings.Contains(err.Error(), selector.env) {
+				t.Fatalf("error=%v", err)
 			}
 		})
 	}

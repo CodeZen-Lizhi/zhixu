@@ -84,6 +84,7 @@
 
 - [备份与恢复](runbooks/backup-and-restore.md)
 - [数据库与 Git 不一致恢复](runbooks/consistency-recovery.md)
+- [Eino Runtime 稳定发布观察](runbooks/eino-stable-observation.md)
 - [索引重建](runbooks/index-rebuild.md)
 - [Workflow 故障恢复](runbooks/workflow-recovery.md)
 

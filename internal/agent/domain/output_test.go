@@ -2,6 +2,8 @@ package domain
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"testing"
 	"time"
@@ -175,6 +177,214 @@ func TestRAGAnswerV2AddsBoundTopicsAndFollowUpsWithoutChangingV1(t *testing.T) {
 				t.Fatalf("err=%v", err)
 			}
 		})
+	}
+}
+
+func TestRAGAnswerMetadataBindsExactStreamAndCannotSupplyConclusion(t *testing.T) {
+	finalText := "Final\nanswer."
+	sum := sha256.Sum256([]byte(finalText))
+	answer := validAnswerPayloadV2()
+	metadata := RAGAnswerMetadataResult{
+		ResultType: ResultTypeRAGAnswerMetadata, SchemaID: RAGAnswerMetadataSchemaID,
+		SchemaVersion: OutputSchemaVersionV1, ModelRunRef: testModelRunID,
+		Payload: RAGAnswerMetadataPayload{
+			AnswerSHA256: hex.EncodeToString(sum[:]), Assertions: answer.Assertions, Citations: answer.Citations,
+			ConflictPositions: answer.ConflictPositions, ConflictSummary: answer.ConflictSummary,
+			RelatedTopics: answer.RelatedTopics, FollowUpQuestions: answer.FollowUpQuestions,
+		},
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeRAGAnswerMetadata(encoded, DefaultDecodeLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	composed, err := decoded.ComposeRAGAnswerV2(finalText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if composed.Payload.Conclusion != finalText || composed.ModelRunRef != testModelRunID {
+		t.Fatalf("composed=%+v", composed)
+	}
+	if _, err := decoded.ComposeRAGAnswerV2("Final answer."); errorCode(err) != ErrorCodeAnswerInvalid {
+		t.Fatalf("hash mismatch err=%v", err)
+	}
+
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	payload := document["payload"].(map[string]any)
+	payload["conclusion"] = "model must not regenerate this"
+	withConclusion, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeRAGAnswerMetadata(withConclusion, DefaultDecodeLimits()); err == nil {
+		t.Fatal("metadata decoder accepted a model-supplied conclusion")
+	}
+}
+
+func TestRAGAnswerMetadataV2ComposesExactStreamWithoutModelOwnedBindingFields(t *testing.T) {
+	finalText := "Final\nanswer."
+	answer := validAnswerPayloadV2()
+	metadata := RAGAnswerMetadataResultV2{
+		ResultType: ResultTypeRAGAnswerMetadata, SchemaID: RAGAnswerMetadataSchemaID,
+		SchemaVersion: OutputSchemaVersionV2,
+		Payload: RAGAnswerMetadataPayloadV2{
+			Assertions: []RAGAnswerMetadataAssertionV2{
+				{ID: answer.Assertions[0].ID, Text: answer.Assertions[0].Text, Kind: AssertionFactual, EvidenceRefs: []string{"E1"}},
+				{ID: answer.Assertions[1].ID, Text: answer.Assertions[1].Text, Kind: AssertionModelInference, EvidenceRefs: []string{}},
+			},
+			ConflictPositions: []RAGAnswerMetadataConflictPositionV2{
+				{ConflictRef: "C1", Position: answer.ConflictPositions[0].Position},
+				{ConflictRef: "C2", Position: answer.ConflictPositions[1].Position},
+			},
+			ConflictSummary: answer.ConflictSummary, RelatedTopicRefs: []string{"T1"},
+			FollowUpQuestions: answer.FollowUpQuestions,
+		},
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeRAGAnswerMetadataV2(encoded, DefaultDecodeLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	composed, err := decoded.ComposeRAGAnswerV2(testModelRunID, finalText, validMetadataBindingsV2())
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer.Conclusion = finalText
+	if composed.Payload.Conclusion != finalText || composed.ModelRunRef != testModelRunID ||
+		!bytes.Equal(mustJSON(t, composed.Payload), mustJSON(t, answer)) {
+		t.Fatalf("composed=%+v", composed)
+	}
+	for _, forbidden := range [][]byte{
+		[]byte(`"model_run_ref"`), []byte(`"conclusion"`), []byte(`"answer_sha256"`), []byte(`"citations"`),
+		[]byte(`"citation_ids"`), []byte(`"workspace_id"`), []byte(`"source_span_id"`), []byte(`"topic_id"`),
+		[]byte(`"claim_id"`), []byte(`"updated_at"`), []byte(testWorkspaceID), []byte(testClaimID),
+	} {
+		if bytes.Contains(encoded, forbidden) {
+			t.Fatalf("metadata v2 contains forbidden server-owned value %q: %s", forbidden, encoded)
+		}
+	}
+
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	payload := document["payload"].(map[string]any)
+	for _, forbidden := range []string{"conclusion", "answer_sha256", "citations", "related_topics"} {
+		payload[forbidden] = "model must not own this field"
+		invalidDocument, marshalErr := json.Marshal(document)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if _, decodeErr := DecodeRAGAnswerMetadataV2(invalidDocument, DefaultDecodeLimits()); decodeErr == nil {
+			t.Fatalf("metadata v2 decoder accepted %s", forbidden)
+		}
+		delete(payload, forbidden)
+	}
+	document["model_run_ref"] = testModelRunID
+	withModelRun, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeRAGAnswerMetadataV2(withModelRun, DefaultDecodeLimits()); err == nil {
+		t.Fatal("metadata v2 decoder accepted model_run_ref")
+	}
+
+	unknownEvidence := decoded
+	unknownEvidence.Payload.Assertions = append([]RAGAnswerMetadataAssertionV2(nil), decoded.Payload.Assertions...)
+	unknownEvidence.Payload.Assertions[0].EvidenceRefs = []string{"E3"}
+	if _, err := unknownEvidence.ComposeRAGAnswerV2(testModelRunID, finalText, validMetadataBindingsV2()); errorCode(err) != ErrorCodeAnswerInvalid {
+		t.Fatalf("unknown evidence err=%v", err)
+	}
+	reservedAssertion := decoded
+	reservedAssertion.Payload.Assertions = append([]RAGAnswerMetadataAssertionV2(nil), decoded.Payload.Assertions...)
+	reservedAssertion.Payload.Assertions[0].ID = "@answer/conclusion"
+	if err := reservedAssertion.Validate(); errorCode(err) != ErrorCodeAnswerInvalid {
+		t.Fatalf("reserved assertion identity err=%v", err)
+	}
+	outOfRangeEvidence := decoded
+	outOfRangeEvidence.Payload.Assertions = append([]RAGAnswerMetadataAssertionV2(nil), decoded.Payload.Assertions...)
+	outOfRangeEvidence.Payload.Assertions[0].EvidenceRefs = []string{"E501"}
+	if err := outOfRangeEvidence.Validate(); errorCode(err) != ErrorCodeAnswerInvalid {
+		t.Fatalf("out-of-range evidence ref err=%v", err)
+	}
+	outOfRangeTopic := decoded
+	outOfRangeTopic.Payload.RelatedTopicRefs = []string{"T51"}
+	if err := outOfRangeTopic.Validate(); errorCode(err) != ErrorCodeAnswerInvalid {
+		t.Fatalf("out-of-range topic ref err=%v", err)
+	}
+	unknownConflict := decoded
+	unknownConflict.Payload.ConflictPositions = append([]RAGAnswerMetadataConflictPositionV2(nil), decoded.Payload.ConflictPositions...)
+	unknownConflict.Payload.ConflictPositions[1].ConflictRef = "C3"
+	if _, err := unknownConflict.ComposeRAGAnswerV2(testModelRunID, finalText, validMetadataBindingsV2()); errorCode(err) != ErrorCodeAnswerInvalid {
+		t.Fatalf("incomplete conflict coverage err=%v", err)
+	}
+	unknownTopic := decoded
+	unknownTopic.Payload.RelatedTopicRefs = []string{"T2"}
+	if _, err := unknownTopic.ComposeRAGAnswerV2(testModelRunID, finalText, validMetadataBindingsV2()); errorCode(err) != ErrorCodeAnswerInvalid {
+		t.Fatalf("unknown topic err=%v", err)
+	}
+}
+
+func TestRAGAnswerMetadataRefusalV2InjectsModelRunOnlyAfterStrictDecode(t *testing.T) {
+	modelOutput := RAGAnswerMetadataRefusalResultV2{
+		ResultType: ResultTypeRefusal, SchemaID: RAGAnswerMetadataRefusalSchemaID, SchemaVersion: OutputSchemaVersionV2,
+		Payload: RefusalPayload{
+			ReasonCode: RefusalValidationExhausted, Summary: "Metadata validation could not be completed.",
+			RetrievalScope: "approved workspace evidence", MissingRequirements: []string{"valid bounded metadata"},
+			SuggestedActions: []string{"retry with the approved evidence set"},
+		},
+	}
+	raw := mustJSON(t, modelOutput)
+	if bytes.Contains(raw, []byte(`"model_run_ref"`)) || bytes.Contains(raw, []byte(testModelRunID)) {
+		t.Fatalf("metadata refusal leaked model run identity: %s", raw)
+	}
+	decoded, err := DecodeRAGAnswerMetadataRefusalV2(raw, DefaultDecodeLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusal, err := decoded.ComposeRefusal(testModelRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refusal.ModelRunRef != testModelRunID || refusal.SchemaID != RefusalSchemaID || refusal.SchemaVersion != OutputSchemaVersionV1 ||
+		!bytes.Equal(mustJSON(t, refusal.Payload), mustJSON(t, modelOutput.Payload)) {
+		t.Fatalf("refusal=%+v", refusal)
+	}
+
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["model_run_ref"] = testModelRunID
+	withIdentity := mustJSON(t, document)
+	if _, err := DecodeRAGAnswerMetadataRefusalV2(withIdentity, DefaultDecodeLimits()); err == nil {
+		t.Fatal("metadata refusal accepted model_run_ref")
+	}
+	if _, err := decoded.ComposeRefusal(""); err == nil {
+		t.Fatal("metadata refusal accepted an invalid server model run binding")
+	}
+	for _, mutate := range []func(*RAGAnswerMetadataRefusalResultV2){
+		func(value *RAGAnswerMetadataRefusalResultV2) {
+			value.Payload.MissingRequirements = []string{"missing", "missing"}
+		},
+		func(value *RAGAnswerMetadataRefusalResultV2) {
+			value.Payload.SuggestedActions = []string{"retry", "retry"}
+		},
+	} {
+		duplicate := modelOutput
+		mutate(&duplicate)
+		if _, err := DecodeRAGAnswerMetadataRefusalV2(mustJSON(t, duplicate), DefaultDecodeLimits()); errorCode(err) != ErrorCodeRefusalInvalid {
+			t.Fatalf("metadata refusal accepted duplicate list: %v", err)
+		}
 	}
 }
 
@@ -401,6 +611,30 @@ func validAnswerPayloadV2() RAGAnswerPayloadV2 {
 		}},
 		FollowUpQuestions: []string{"Which condition applies to production?", "What evidence would resolve the choice?"},
 	}
+}
+
+func validMetadataBindingsV2() RAGAnswerMetadataBindings {
+	answer := validAnswerPayloadV2()
+	return RAGAnswerMetadataBindings{
+		Evidence: []RAGAnswerMetadataEvidenceBinding{
+			{Ref: "E1", Citation: answer.Citations[0]},
+			{Ref: "E2", Citation: answer.Citations[1]},
+		},
+		Conflicts: []RAGAnswerMetadataConflictBinding{
+			{Ref: "C1", ClaimID: answer.ConflictPositions[0].ClaimID, Applicability: answer.ConflictPositions[0].Applicability, CitationIDs: answer.ConflictPositions[0].CitationIDs, UpdatedAt: answer.ConflictPositions[0].UpdatedAt},
+			{Ref: "C2", ClaimID: answer.ConflictPositions[1].ClaimID, Applicability: answer.ConflictPositions[1].Applicability, CitationIDs: answer.ConflictPositions[1].CitationIDs, UpdatedAt: answer.ConflictPositions[1].UpdatedAt},
+		},
+		RelatedTopics: []RAGAnswerMetadataTopicBinding{{Ref: "T1", Topic: answer.RelatedTopics[0]}},
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func testCitation() Citation {

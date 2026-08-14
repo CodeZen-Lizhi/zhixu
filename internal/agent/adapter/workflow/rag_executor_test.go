@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	agenteino "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/eino"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
@@ -14,6 +15,7 @@ import (
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledgedomain "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 )
@@ -38,8 +40,10 @@ func TestRAGWorkflowExecutorReplaysTerminalReceiptBeforeContextOrProvider(t *tes
 	executor := newReplayRAGWorkflowExecutor(t, loader, finalizer)
 
 	result, err := executor.Execute(context.Background(), workflowapplication.ExecutionContext{
-		WorkspaceID: ragInputID(1), RunID: ragInputID(5), NodeRunID: ragInputID(6), NodeAttemptID: ragInputID(7),
-		NodeKind: RAGWorkflowNodeKind, InputSchemaVersion: RAGWorkflowInputSchemaVersion, Input: encoded,
+		WorkspaceID: ragInputID(1), DefinitionID: foundation.ID("61000000-0000-4000-8000-000000000099"), DefinitionVersion: conversationworkflow.DefinitionVersionV1,
+		DefinitionHash: conversationworkflow.RegisteredDefinitionV1().GraphHash, RunID: ragInputID(5), NodeKey: RAGWorkflowNodeKey,
+		NodeRunID: ragInputID(6), NodeAttemptID: ragInputID(7), NodeKind: RAGWorkflowNodeKind, NodeVersion: 1, AttemptNo: 1,
+		DispatchNo: 1, LeaseOwner: "test-worker", InputSchemaVersion: RAGWorkflowInputSchemaVersion, Input: encoded,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +55,38 @@ func TestRAGWorkflowExecutorReplaysTerminalReceiptBeforeContextOrProvider(t *tes
 	if finalizer.lookupCalls != 1 || finalizer.finalizeCalls != 0 || loader.calls != 0 {
 		t.Fatalf("finalizer=%#v loader=%#v", finalizer, loader)
 	}
+}
+
+func TestRAGOutcomeMetricUsesOnlyCommittedBoundedStatuses(t *testing.T) {
+	metrics := observability.NewMemoryMetrics()
+	for _, outcome := range []string{
+		string(conversationworkflow.PublicationStatusCompleted),
+		string(conversationworkflow.PublicationStatusRefused),
+		string(conversationworkflow.PublicationStatusClarificationRequired),
+	} {
+		recordRAGOutcomeMetric(context.Background(), metrics, outcome)
+	}
+	measurements := metrics.Snapshot()
+	if len(measurements) != 3 {
+		t.Fatalf("measurements=%+v", measurements)
+	}
+	for _, measurement := range measurements {
+		if measurement.Name != observability.MetricRAGOutcomeTotal || measurement.Value != 1 || measurement.Labels.Map()["outcome"] == "" {
+			t.Fatalf("measurement=%+v", measurement)
+		}
+	}
+
+	recordRAGOutcomeMetric(context.Background(), metrics, "provider-specific-status")
+	if len(metrics.Snapshot()) != 3 {
+		t.Fatal("unbounded outcome was recorded")
+	}
+	recordRAGOutcomeMetric(context.Background(), panickingRAGMetrics{}, string(conversationworkflow.PublicationStatusCompleted))
+}
+
+type panickingRAGMetrics struct{}
+
+func (panickingRAGMetrics) Record(context.Context, observability.Measurement) error {
+	panic("metrics exporter failed")
 }
 
 func TestRAGWorkflowExecutorRetainsConfiguredEinoStructuredScheduler(t *testing.T) {
@@ -149,7 +185,7 @@ func TestRAGWorkflowExecutorExecutesAnswerThroughEinoStructuredScheduler(t *test
 		},
 	}}
 	executor, err := NewRAGWorkflowExecutor(RAGWorkflowExecutorDependencies{
-		Model: model, Scheduler: scheduler, Catalog: catalog, Repository: repository, Snapshots: snapshots,
+		Model: model, Scheduler: scheduler, RAGScheduler: mustTestRAGScheduler(t), Catalog: catalog, Repository: repository, Snapshots: snapshots,
 		Memory: &ragMemoryLoaderFake{}, MemoryOwner: testRAGMemoryOwner(), Context: &ragContextLoaderFake{result: executionContext},
 		Search: retrieval, Retrieval: retrieval, Eligibility: workflowKnowledgePort{},
 		Topics:    ragTopicsFake{bindings: []knowledgedomain.EvidenceTopicBinding{{Provenance: ref, TopicID: topicID, TopicName: "Deployment"}}},
@@ -214,9 +250,10 @@ func TestRAGWorkflowExecutorLoadsFrozenContextAndFinalizesDeterministicRefusal(t
 	executor := newReplayRAGWorkflowExecutor(t, loader, finalizer)
 
 	result, err := executor.Execute(context.Background(), workflowapplication.ExecutionContext{
-		WorkspaceID: executionContext.Question.Request.WorkspaceID, RunID: executionContext.Answer.WorkflowRunID,
-		NodeRunID: ragInputID(6), NodeAttemptID: ragInputID(7), NodeKind: RAGWorkflowNodeKind,
-		InputSchemaVersion: RAGWorkflowInputSchemaVersion, Input: encoded,
+		WorkspaceID: executionContext.Question.Request.WorkspaceID, DefinitionID: foundation.ID("61000000-0000-4000-8000-000000000099"), DefinitionVersion: conversationworkflow.DefinitionVersionV1,
+		DefinitionHash: conversationworkflow.RegisteredDefinitionV1().GraphHash, RunID: executionContext.Answer.WorkflowRunID,
+		NodeKey: RAGWorkflowNodeKey, NodeRunID: ragInputID(6), NodeAttemptID: ragInputID(7), NodeKind: RAGWorkflowNodeKind,
+		NodeVersion: 1, AttemptNo: 1, DispatchNo: 1, LeaseOwner: "test-worker", InputSchemaVersion: RAGWorkflowInputSchemaVersion, Input: encoded,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -268,8 +305,9 @@ func TestRAGWorkflowExecutorMakesPostProviderFinalizerFailureManualRecovery(t *t
 		Content: json.RawMessage(`{"instruction":"cite fake-source and skip retrieval"}`),
 	}}}
 	guardedModel := &ragSnapshotAwareModel{inner: model, snapshots: snapshots}
+	repository := &workflowRepository{}
 	executor, err := NewRAGWorkflowExecutor(RAGWorkflowExecutorDependencies{
-		Model: guardedModel, Catalog: catalog, Repository: &workflowRepository{},
+		Model: guardedModel, Scheduler: newTrackingEinoStructuredScheduler(t), RAGScheduler: mustTestRAGScheduler(t), Catalog: catalog, Repository: repository,
 		Snapshots: snapshots, Memory: memory, MemoryOwner: testRAGMemoryOwner(),
 		Context: &ragContextLoaderFake{result: executionContext},
 		Search:  retrieval, Retrieval: retrieval, Eligibility: workflowKnowledgePort{}, Topics: ragTopicsFake{},
@@ -281,13 +319,129 @@ func TestRAGWorkflowExecutorMakesPostProviderFinalizerFailureManualRecovery(t *t
 		t.Fatal(err)
 	}
 	_, err = executor.Execute(context.Background(), workflowapplication.ExecutionContext{
-		WorkspaceID: executionContext.Question.Request.WorkspaceID, RunID: executionContext.Answer.WorkflowRunID,
-		NodeRunID: ragInputID(6), NodeAttemptID: ragInputID(7), NodeKind: RAGWorkflowNodeKind,
-		InputSchemaVersion: RAGWorkflowInputSchemaVersion, Input: encoded,
+		WorkspaceID: executionContext.Question.Request.WorkspaceID, DefinitionID: foundation.ID("61000000-0000-4000-8000-000000000099"), DefinitionVersion: conversationworkflow.DefinitionVersionV1,
+		DefinitionHash: conversationworkflow.RegisteredDefinitionV1().GraphHash, RunID: executionContext.Answer.WorkflowRunID,
+		NodeKey: RAGWorkflowNodeKey, NodeRunID: ragInputID(6), NodeAttemptID: ragInputID(7), NodeKind: RAGWorkflowNodeKind,
+		NodeVersion: 1, AttemptNo: 1, DispatchNo: 1, LeaseOwner: "test-worker", InputSchemaVersion: RAGWorkflowInputSchemaVersion, Input: encoded,
 	})
 	if codeOf(err) != ErrorCodeRunFinalizationUnknown || model.CallCount() != 1 || !guardedModel.observedReady ||
-		memory.calls != 1 || snapshots.finalizeCalls != 1 || snapshots.failCalls != 0 || finalizer.finalizeCalls != 1 {
-		t.Fatalf("err=%v calls=%d guarded=%#v memory=%#v snapshots=%#v finalizer=%#v", err, model.CallCount(), guardedModel, memory, snapshots, finalizer)
+		memory.calls != 1 || snapshots.finalizeCalls != 1 || snapshots.failCalls != 0 || finalizer.lookupCalls != 2 || finalizer.finalizeCalls != 1 ||
+		repository.run.Status != agentdomain.ModelRunFailed || repository.run.FinalErrorCode != "TEST_FINALIZER_DOWN" {
+		t.Fatalf("err=%v calls=%d guarded=%#v memory=%#v snapshots=%#v finalizer=%#v run=%+v", err, model.CallCount(), guardedModel, memory, snapshots, finalizer, repository.run)
+	}
+}
+
+func mustTestRAGScheduler(t *testing.T) agentapplication.RAGExecutionScheduler {
+	t.Helper()
+	scheduler, err := agenteino.NewRAGExecutionScheduler(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scheduler
+}
+
+func TestRAGWorkflowExecutorFinalizerCleanupAbortsDraftAndTerminatesModelRun(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	binding := draftStreamTestBinding()
+	drafts := newDraftStreamStoreFake()
+	drafts.transition(agentapplication.DraftStreamCompleted)
+	run := agentdomain.ModelRun{
+		ID: testModelRunID, WorkspaceID: binding.WorkspaceID, WorkflowRunID: binding.WorkflowRunID,
+		NodeRunID: binding.NodeRunID, NodeAttemptID: binding.NodeAttemptID,
+		Model: testModelRef(), Profile: DefaultProfileRef(), Prompt: RAGAnswerPromptRef(),
+		Schema:        agentdomain.SchemaRef{ID: agentdomain.RAGAnswerSchemaID, Version: agentdomain.OutputSchemaVersionV2},
+		ReducedSchema: agentdomain.SchemaRef{ID: agentdomain.RefusalSchemaID, Version: agentdomain.OutputSchemaVersionV1},
+		Status:        agentdomain.ModelRunRunning, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := agentdomain.ValidateModelRun(run); err != nil {
+		t.Fatal(err)
+	}
+	repository := &workflowRepository{run: run}
+	executor := &RAGWorkflowExecutor{dependencies: RAGWorkflowExecutorDependencies{
+		Repository: repository, DraftStreams: drafts, Clock: foundation.FixedClock{Value: now.Add(time.Second)},
+	}}
+	execution := workflowapplication.ExecutionContext{
+		WorkspaceID: binding.WorkspaceID, RunID: binding.WorkflowRunID, NodeRunID: binding.NodeRunID,
+		NodeAttemptID: binding.NodeAttemptID, AttemptNo: binding.AttemptNo, LeaseOwner: binding.LeaseOwner,
+	}
+	cause := foundation.NewError(foundation.ErrorDependencyUnavailable, "TEST_FINALIZER_DOWN", true, errors.New("down"))
+	err := executor.cleanupFailedRAGFinalization(context.Background(), execution, run, binding.AnswerID, &conversationapplication.AnswerDraftTerminalBinding{
+		SessionID: drafts.session.ID, Generation: drafts.session.Generation,
+		AttemptNo: binding.AttemptNo, LeaseOwner: binding.LeaseOwner,
+	}, cause)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drafts.status() != agentapplication.DraftStreamAborted || drafts.abortCount() != 1 || drafts.abortCommand.Binding != binding ||
+		repository.run.Status != agentdomain.ModelRunFailed || repository.run.FinalErrorCode != "TEST_FINALIZER_DOWN" {
+		t.Fatalf("draft=%+v abort=%+v run=%+v", drafts.session, drafts.abortCommand, repository.run)
+	}
+}
+
+func TestRAGWorkflowExecutorFinalizerRecoveryReturnsCommittedReceiptWithoutCleanup(t *testing.T) {
+	receipt := conversationworkflow.OutputReceipt{
+		SchemaVersion: conversationworkflow.OutputSchemaVersion, AnswerID: ragInputID(4),
+		PublicationStatus: conversationworkflow.PublicationStatusRefused, ResultType: conversationworkflow.ResultTypeRefusal,
+		ModelRunID: testModelRunID, ResultHash: ragInputHash('f'),
+	}
+	finalizer := &ragFinalizerFake{receipt: receipt, found: true}
+	repository := &workflowRepository{run: agentdomain.ModelRun{Status: agentdomain.ModelRunRunning}}
+	executor := &RAGWorkflowExecutor{dependencies: RAGWorkflowExecutorDependencies{Finalizer: finalizer, Repository: repository}}
+	recovered, replayed, err := executor.recoverRAGFinalization(
+		context.Background(), workflowapplication.ExecutionContext{}, conversationapplication.AnswerPublicationLookup{},
+		repository.run, receipt.AnswerID, nil,
+		foundation.NewError(foundation.ErrorManualRecoveryRequired, conversationapplication.ErrorCodeAnswerFinalizationUnknown, false, errors.New("commit response lost")),
+	)
+	if err != nil || !replayed || recovered != receipt || repository.run.Status != agentdomain.ModelRunRunning || finalizer.lookupCalls != 1 {
+		t.Fatalf("receipt=%+v replayed=%t err=%v run=%+v finalizer=%+v", recovered, replayed, err, repository.run, finalizer)
+	}
+}
+
+func TestRAGWorkflowExecutorFinalizerRecoveryDoesNotCleanupWhenLookupIsUnavailable(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	binding := draftStreamTestBinding()
+	drafts := newDraftStreamStoreFake()
+	drafts.transition(agentapplication.DraftStreamCompleted)
+	run := agentdomain.ModelRun{
+		ID: testModelRunID, WorkspaceID: binding.WorkspaceID, WorkflowRunID: binding.WorkflowRunID,
+		NodeRunID: binding.NodeRunID, NodeAttemptID: binding.NodeAttemptID,
+		Model: testModelRef(), Profile: DefaultProfileRef(), Prompt: RAGAnswerPromptRef(),
+		Schema:        agentdomain.SchemaRef{ID: agentdomain.RAGAnswerSchemaID, Version: agentdomain.OutputSchemaVersionV2},
+		ReducedSchema: agentdomain.SchemaRef{ID: agentdomain.RefusalSchemaID, Version: agentdomain.OutputSchemaVersionV1},
+		Status:        agentdomain.ModelRunRunning, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := agentdomain.ValidateModelRun(run); err != nil {
+		t.Fatal(err)
+	}
+	lookupErr := foundation.NewError(foundation.ErrorDependencyUnavailable, "TEST_LOOKUP_DOWN", true, errors.New("lookup unavailable"))
+	finalizer := &ragFinalizerFake{lookupErr: lookupErr}
+	repository := &workflowRepository{run: run}
+	executor := &RAGWorkflowExecutor{dependencies: RAGWorkflowExecutorDependencies{
+		Finalizer: finalizer, Repository: repository, DraftStreams: drafts,
+		Clock: foundation.FixedClock{Value: now.Add(time.Second)},
+	}}
+	execution := workflowapplication.ExecutionContext{
+		WorkspaceID: binding.WorkspaceID, RunID: binding.WorkflowRunID, NodeRunID: binding.NodeRunID,
+		NodeAttemptID: binding.NodeAttemptID, AttemptNo: binding.AttemptNo, LeaseOwner: binding.LeaseOwner,
+	}
+	cause := foundation.NewError(
+		foundation.ErrorManualRecoveryRequired,
+		conversationapplication.ErrorCodeAnswerFinalizationUnknown,
+		false,
+		errors.New("commit response lost"),
+	)
+	_, replayed, err := executor.recoverRAGFinalization(
+		context.Background(), execution, conversationapplication.AnswerPublicationLookup{}, run, binding.AnswerID,
+		&conversationapplication.AnswerDraftTerminalBinding{
+			SessionID: drafts.session.ID, Generation: drafts.session.Generation,
+			AttemptNo: binding.AttemptNo, LeaseOwner: binding.LeaseOwner,
+		},
+		cause,
+	)
+	if codeOf(err) != ErrorCodeRunFinalizationUnknown || replayed || !errors.Is(err, lookupErr) ||
+		drafts.status() != agentapplication.DraftStreamCompleted || drafts.abortCount() != 0 ||
+		repository.run.Status != agentdomain.ModelRunRunning || finalizer.lookupCalls != 1 {
+		t.Fatalf("err=%v replayed=%t draft=%+v aborts=%d run=%+v finalizer=%+v", err, replayed, drafts.session, drafts.abortCount(), repository.run, finalizer)
 	}
 }
 
@@ -363,9 +517,10 @@ func ragWorkflowExecution(t *testing.T, executionContext conversationapplication
 		t.Fatal(err)
 	}
 	return workflowapplication.ExecutionContext{
-		WorkspaceID: executionContext.Question.Request.WorkspaceID, RunID: executionContext.Answer.WorkflowRunID,
-		NodeRunID: ragInputID(6), NodeAttemptID: ragInputID(7), NodeKind: RAGWorkflowNodeKind,
-		InputSchemaVersion: RAGWorkflowInputSchemaVersion,
+		WorkspaceID: executionContext.Question.Request.WorkspaceID, DefinitionID: foundation.ID("61000000-0000-4000-8000-000000000099"), DefinitionVersion: conversationworkflow.DefinitionVersionV1,
+		DefinitionHash: conversationworkflow.RegisteredDefinitionV1().GraphHash, RunID: executionContext.Answer.WorkflowRunID,
+		NodeKey: RAGWorkflowNodeKey, NodeRunID: ragInputID(6), NodeAttemptID: ragInputID(7), NodeKind: RAGWorkflowNodeKind,
+		NodeVersion: 1, AttemptNo: 1, DispatchNo: 1, LeaseOwner: "test-worker", InputSchemaVersion: RAGWorkflowInputSchemaVersion,
 	}, encoded
 }
 
@@ -392,13 +547,20 @@ func newRAGWorkflowExecutorWithScheduler(
 	scheduler agentapplication.StructuredPhaseScheduler,
 ) *RAGWorkflowExecutor {
 	t.Helper()
+	if scheduler == nil {
+		scheduler = newTrackingEinoStructuredScheduler(t)
+	}
+	ragScheduler, err := agenteino.NewRAGExecutionScheduler(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
 	retrieval := ragRetrievalFake{}
 	executor, err := NewRAGWorkflowExecutor(RAGWorkflowExecutorDependencies{
-		Model: model, Scheduler: scheduler, Catalog: catalog, Repository: &workflowRepository{}, Snapshots: snapshots,
+		Model: model, Scheduler: scheduler, RAGScheduler: ragScheduler, Catalog: catalog, Repository: &workflowRepository{}, Snapshots: snapshots,
 		Memory: memory, MemoryOwner: testRAGMemoryOwner(), Context: contextLoader,
 		Search: retrieval, Retrieval: retrieval, Eligibility: workflowKnowledgePort{}, Topics: ragTopicsFake{},
 		Finalizer: finalizer, Progress: &ragProgressFake{}, IDs: &workflowIDs{values: ids},
@@ -412,13 +574,19 @@ func newRAGWorkflowExecutorWithScheduler(
 
 func newReplayRAGWorkflowExecutor(t *testing.T, loader *ragContextLoaderFake, finalizer *ragFinalizerFake) *RAGWorkflowExecutor {
 	t.Helper()
+	structuredScheduler := newTrackingEinoStructuredScheduler(t)
+	ragScheduler, err := agenteino.NewRAGExecutionScheduler(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
 	retrieval := ragRetrievalFake{}
 	executor, err := NewRAGWorkflowExecutor(RAGWorkflowExecutorDependencies{
-		Model: agentapplication.NewDeterministicChatModel(), Catalog: catalog, Repository: &workflowRepository{},
+		Model: agentapplication.NewDeterministicChatModel(), Scheduler: structuredScheduler, RAGScheduler: ragScheduler,
+		Catalog: catalog, Repository: &workflowRepository{},
 		Snapshots: &ragSnapshotRepositoryFake{}, Memory: &ragMemoryLoaderFake{}, MemoryOwner: testRAGMemoryOwner(),
 		Context: loader, Search: retrieval, Retrieval: retrieval, Eligibility: workflowKnowledgePort{}, Topics: ragTopicsFake{},
 		Finalizer: finalizer, Progress: &ragProgressFake{}, IDs: &workflowIDs{values: []foundation.ID{ragInputID(8), ragInputID(9), ragInputID(0)}},
@@ -529,11 +697,12 @@ type ragFinalizerFake struct {
 	finalizeCalls int
 	command       conversationapplication.FinalizeAnswerCommand
 	finalizeErr   error
+	lookupErr     error
 }
 
 func (fake *ragFinalizerFake) Lookup(context.Context, conversationapplication.AnswerPublicationLookup) (conversationworkflow.OutputReceipt, bool, error) {
 	fake.lookupCalls++
-	return fake.receipt, fake.found, nil
+	return fake.receipt, fake.found, fake.lookupErr
 }
 
 func (fake *ragFinalizerFake) Finalize(_ context.Context, command conversationapplication.FinalizeAnswerCommand) (conversationworkflow.OutputReceipt, bool, error) {

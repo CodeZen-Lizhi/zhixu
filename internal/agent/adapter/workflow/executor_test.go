@@ -361,6 +361,9 @@ func newWorkflowExecutorWithScheduler(
 	scheduler agentapplication.StructuredPhaseScheduler,
 ) *Executor {
 	t.Helper()
+	if scheduler == nil {
+		scheduler = newTrackingEinoStructuredScheduler(t)
+	}
 	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 128})
 	if err != nil {
 		t.Fatal(err)

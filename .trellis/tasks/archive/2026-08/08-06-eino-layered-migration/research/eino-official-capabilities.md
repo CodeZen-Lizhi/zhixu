@@ -1,7 +1,34 @@
 # Eino 官方能力核对
 
-> 状态：本文件记录实施前的官方能力和版本探针。最终生产范围与门禁结果以 ADR-0019、`implement.md` 和
+> 2026-08-08 修订：本文的“规划结论”是首次迁移前的历史判断，已被同目录修订版 `prd.md`、`design.md` 和
+> `implement.md` 取代。最新复核确认 Eino 具备完整 RAG 编排、OpenAI/原生 Ollama Embedding、ToolsNode/ReAct、
+> Streaming 和 Interrupt/Checkpoint；后续是否生产采用由项目合同、版本和恢复所有权门禁决定，不能再把当时未实施
+> 写成框架能力缺失。下文保留用于追溯首次迁移的证据和约束。
+
+> 状态：本文件记录实施前的官方能力和版本探针。最终生产范围与门禁结果以
+> `docs/architecture/adr/0019-layered-eino-adoption.md`、`implement.md` 和
 > `stage2-gate-and-stage3-stage4-decisions.md` 为准。
+
+## 2026-08-08 能力复核增量
+
+| 能力 | 官方能力事实 | 当前项目决策 |
+|---|---|---|
+| Embedding | `eino-ext` 同时提供 OpenAI 与原生 Ollama 组件 | 按 Provider 先做可行性门禁；两者只返回 vectors，不回显 response model，OpenAI 还不暴露 item index；Ollama 必须保持项目 `truncate=false` |
+| RAG | Workflow 可编排确定性 DAG，Graph 可表达循环/动态分支；Workflow 不支持 cycle | 先比较“现有 `RAGExecutor` + Eino Components”和完整 Eino Workflow 的净收益，不预设必须全迁 |
+| Retriever/Indexer | Core 有接口，ext 有多种外部存储实现 | 官方无项目 PostgreSQL FTS/pgvector/RRF/Active Index 等价实现；保留 `SearchService`/事务，只做 Eino bridge |
+| Tool/ReAct | ToolsNode 与 ChatModelAgent 可承担 schema、dispatch 和循环 | 没有产品 PRD、生产消费者、持久 Attempt 和专用 ADR 时继续 No-Go；权限、receipt、Proposal/Approval/Safe Writeback 仍归项目 |
+| Streaming | Graph/ChatModel 支持真实 Stream/Transform | 新 Token API 可采用；现有 durable phase SSE 不替换，禁止单帧 fake stream |
+| Interrupt/Checkpoint | 支持 Interrupt/Resume 和调用方提供的 CheckPointStore | 首轮只允许同一 Worker 进程、同一活跃 Attempt 内 PoC；Worker/Human Task/Attempt 变化后旧 checkpoint 失效，并定义 TTL/Delete、加密和敏感数据生命周期 |
+
+生产 core 固定 [`v0.9.13`](https://github.com/cloudwego/eino/releases/tag/v0.9.13)。复核时 Embedding 候选 pseudo-version 对应 commit
+[`90a15623ddb66465aea01fbe8c63ecc9d267acc1`](https://github.com/cloudwego/eino-ext/commit/90a15623ddb66465aea01fbe8c63ecc9d267acc1)：
+OpenAI/Ollama Embedding 模块分别声明 core `v0.7.13`/`v0.6.0`，因此“官方已有组件”不等于能直接并入当前根模块。
+采用前必须逐个通过精确版本编译、API、race、Provider 合同、响应上限和 vendor 门禁。
+
+精确源码：[OpenAI Embedder](https://github.com/cloudwego/eino-ext/blob/90a15623ddb66465aea01fbe8c63ecc9d267acc1/components/embedding/openai/embedding.go)、
+[Ollama Embedder](https://github.com/cloudwego/eino-ext/blob/90a15623ddb66465aea01fbe8c63ecc9d267acc1/components/embedding/ollama/embedding.go)、
+[OpenAI module](https://github.com/cloudwego/eino-ext/blob/90a15623ddb66465aea01fbe8c63ecc9d267acc1/components/embedding/openai/go.mod)、
+[Ollama module](https://github.com/cloudwego/eino-ext/blob/90a15623ddb66465aea01fbe8c63ecc9d267acc1/components/embedding/ollama/go.mod)。
 
 ## 来源与版本探针
 

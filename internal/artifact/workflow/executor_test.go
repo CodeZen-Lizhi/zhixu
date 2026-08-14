@@ -334,7 +334,7 @@ func newArtifactExecutor(
 	finalizer *artifactFinalizerFake,
 	ids []foundation.ID,
 ) *Executor {
-	return newArtifactExecutorWithScheduler(t, model, repository, loader, retrieval, eligibility, finalizer, ids, nil)
+	return newArtifactExecutorWithScheduler(t, model, repository, loader, retrieval, eligibility, finalizer, ids, newArtifactTrackingEinoScheduler(t))
 }
 
 func newArtifactExecutorWithScheduler(

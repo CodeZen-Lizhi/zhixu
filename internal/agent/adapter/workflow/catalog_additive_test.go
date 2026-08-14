@@ -1,7 +1,9 @@
 package workflow
 
 import (
+	"bytes"
 	"encoding/json"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +14,31 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	toolagent "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/agent"
 )
+
+func TestRAGMetadataSchemaUsesProviderCompatibleLexicalReferenceBounds(t *testing.T) {
+	for _, test := range []struct {
+		prefix  string
+		valid   []string
+		invalid []string
+	}{
+		{prefix: "E", valid: []string{"E1", "E99", "E999"}, invalid: []string{"E0", "E01", "E1000"}},
+		{prefix: "C", valid: []string{"C1", "C999"}, invalid: []string{"C0", "C1000"}},
+		{prefix: "T", valid: []string{"T1", "T999"}, invalid: []string{"T0", "T1000"}},
+	} {
+		pattern := metadataReferenceSchema(test.prefix)["pattern"].(string)
+		compiled := regexp.MustCompile(pattern)
+		for _, value := range test.valid {
+			if !compiled.MatchString(value) {
+				t.Fatalf("pattern %s rejected %s", pattern, value)
+			}
+		}
+		for _, value := range test.invalid {
+			if compiled.MatchString(value) {
+				t.Fatalf("pattern %s accepted %s", pattern, value)
+			}
+		}
+	}
+}
 
 func TestRuntimeCatalogPublishesAdditiveConversationRAGSchemas(t *testing.T) {
 	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 128})
@@ -41,6 +68,18 @@ func TestRuntimeCatalogPublishesAdditiveConversationRAGSchemas(t *testing.T) {
 			},
 		},
 		{
+			ref: agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataSchemaID, Version: agentdomain.OutputSchemaVersionV2},
+			expectedPayloadFields: []string{
+				"assertions", "conflict_positions", "conflict_summary", "related_topic_refs", "follow_up_questions",
+			},
+		},
+		{
+			ref: agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataRefusalSchemaID, Version: agentdomain.OutputSchemaVersionV2},
+			expectedPayloadFields: []string{
+				"reason_code", "summary", "retrieval_scope", "missing_requirements", "suggested_actions",
+			},
+		},
+		{
 			ref: agentdomain.SchemaRef{ID: conversationdomain.ClarificationSchemaID, Version: conversationdomain.ClarificationSchemaVersionV1},
 			expectedPayloadFields: []string{
 				"reason", "question", "suggested_scopes",
@@ -49,7 +88,16 @@ func TestRuntimeCatalogPublishesAdditiveConversationRAGSchemas(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.ref.ID+"-"+test.ref.Version, func(t *testing.T) {
-			snapshot, err := catalog.Snapshot(DefaultPromptRef(), test.ref, test.ref, DefaultProfileRef())
+			prompt := DefaultPromptRef()
+			reduced := test.ref
+			if test.ref == (agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataSchemaID, Version: agentdomain.OutputSchemaVersionV2}) ||
+				test.ref == (agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataRefusalSchemaID, Version: agentdomain.OutputSchemaVersionV2}) {
+				prompt = RAGAnswerMetadataPromptRef()
+				if test.ref.ID == agentdomain.RAGAnswerMetadataSchemaID {
+					reduced = agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataRefusalSchemaID, Version: agentdomain.OutputSchemaVersionV2}
+				}
+			}
+			snapshot, err := catalog.Snapshot(prompt, test.ref, reduced, DefaultProfileRef())
 			if err != nil {
 				t.Fatalf("snapshot(%s,%s): %v", test.ref.ID, test.ref.Version, err)
 			}
@@ -65,26 +113,158 @@ func TestRuntimeCatalogPublishesAdditiveConversationRAGSchemas(t *testing.T) {
 				t.Fatalf("schema=%s/%s schema_version const=%v", test.ref.ID, test.ref.Version, got)
 			}
 			payload := properties["payload"].(map[string]any)
-			if payload["additionalProperties"] != false {
-				t.Fatalf("schema=%s/%s payload is not strict", test.ref.ID, test.ref.Version)
+			variants := []map[string]any{payload}
+			if rawVariants, ok := payload["anyOf"].([]any); ok {
+				variants = make([]map[string]any, len(rawVariants))
+				for index, raw := range rawVariants {
+					variants[index] = raw.(map[string]any)
+				}
 			}
-			payloadProperties := payload["properties"].(map[string]any)
-			propertyNames := make([]string, 0, len(payloadProperties))
-			for name := range payloadProperties {
-				propertyNames = append(propertyNames, name)
+			for _, variant := range variants {
+				assertStrictPayloadFields(t, test.ref, variant, test.expectedPayloadFields)
 			}
-			required := make([]string, 0, len(payload["required"].([]any)))
-			for _, name := range payload["required"].([]any) {
-				required = append(required, name.(string))
-			}
-			expected := append([]string(nil), test.expectedPayloadFields...)
-			slices.Sort(propertyNames)
-			slices.Sort(required)
-			slices.Sort(expected)
-			if !slices.Equal(propertyNames, expected) || !slices.Equal(required, expected) {
-				t.Fatalf("schema=%s/%s payload=%+v", test.ref.ID, test.ref.Version, payload)
+			if test.ref == (agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataSchemaID, Version: agentdomain.OutputSchemaVersionV2}) ||
+				test.ref == (agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataRefusalSchemaID, Version: agentdomain.OutputSchemaVersionV2}) {
+				assertStrictMetadataV2Root(t, document)
 			}
 		})
+	}
+}
+
+func TestRuntimeCatalogDoesNotExposeLegacyRAGMetadataOrMixedVersions(t *testing.T) {
+	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 128})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1Prompt := agentdomain.PromptRef{ID: "rag-answer-metadata", Version: agentdomain.OutputSchemaVersionV1}
+	v2Prompt := RAGAnswerMetadataPromptRef()
+	v1Schema := agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataSchemaID, Version: agentdomain.OutputSchemaVersionV1}
+	v2Schema := agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataSchemaID, Version: agentdomain.OutputSchemaVersionV2}
+	for name, refs := range map[string]struct {
+		prompt agentdomain.PromptRef
+		schema agentdomain.SchemaRef
+	}{
+		"legacy prompt and schema": {prompt: v1Prompt, schema: v1Schema},
+		"v1 prompt with v2 schema": {prompt: v1Prompt, schema: v2Schema},
+		"v2 prompt with v1 schema": {prompt: v2Prompt, schema: v1Schema},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := catalog.Snapshot(refs.prompt, refs.schema, refs.schema, DefaultProfileRef()); err == nil {
+				t.Fatal("production catalog exposed legacy or mixed metadata refs")
+			}
+		})
+	}
+}
+
+func assertStrictMetadataV2Root(t *testing.T, document map[string]any) {
+	t.Helper()
+	properties := document["properties"].(map[string]any)
+	if _, exists := properties["model_run_ref"]; exists {
+		t.Fatal("metadata v2 root exposes model_run_ref")
+	}
+	expected := []string{"payload", "result_type", "schema_id", "schema_version"}
+	propertyNames := make([]string, 0, len(properties))
+	for name := range properties {
+		propertyNames = append(propertyNames, name)
+	}
+	required := make([]string, 0, len(document["required"].([]any)))
+	for _, name := range document["required"].([]any) {
+		required = append(required, name.(string))
+	}
+	slices.Sort(propertyNames)
+	slices.Sort(required)
+	if !slices.Equal(propertyNames, expected) || !slices.Equal(required, expected) {
+		t.Fatalf("metadata v2 root reused generic task schema: %+v", document)
+	}
+}
+
+func TestRuntimeCatalogQueryPlanSchemaKeepsProviderShapeFlatAndBounded(t *testing.T) {
+	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 128})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := agentdomain.SchemaRef{ID: agentdomain.RAGQueryPlanSchemaID, Version: agentdomain.OutputSchemaVersionV2}
+	snapshot, err := catalog.Snapshot(QueryPlanProviderPromptRef(), ref, ref, DefaultProfileRef())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(snapshot.Schema.JSONSchema, &document); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := document["anyOf"]; exists {
+		t.Fatal("query plan provider schema must not use anyOf; the strict domain decoder owns branch invariants")
+	}
+	if _, exists := document["oneOf"]; exists {
+		t.Fatal("query plan provider schema must not use oneOf; the strict domain decoder owns branch invariants")
+	}
+	fields := []string{"i", "r", "d", "q", "s"}
+	assertStrictPayloadFields(t, ref, document, fields)
+	properties := document["properties"].(map[string]any)
+	if properties["r"].(map[string]any)["maxItems"] != float64(3) ||
+		properties["s"].(map[string]any)["maxItems"] != float64(10) {
+		t.Fatalf("query plan provider bounds drifted: %+v", properties)
+	}
+	for _, field := range []string{"r", "s"} {
+		if _, exists := properties[field].(map[string]any)["uniqueItems"]; exists {
+			t.Fatalf("query plan provider schema uses unsupported uniqueItems for %s", field)
+		}
+	}
+	for _, forbidden := range []string{"result_type", "schema_id", "schema_version", "model_run_ref", "payload", "requires_clarification"} {
+		if _, exists := properties[forbidden]; exists {
+			t.Fatalf("query plan provider schema exposes %s", forbidden)
+		}
+	}
+}
+
+func TestCurrentRAGProviderSchemasDoNotUseUnsupportedUniqueItems(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema func() ([]byte, error)
+	}{
+		{name: "query plan", schema: queryPlanProviderSchemaV2},
+		{name: "metadata", schema: func() ([]byte, error) { return ragMetadataTaskSchemaV2(agentdomain.ResultTypeRAGAnswerMetadata) }},
+		{name: "metadata refusal", schema: func() ([]byte, error) { return ragMetadataRefusalTaskSchemaV2(agentdomain.ResultTypeRefusal) }},
+		{name: "faithfulness", schema: func() ([]byte, error) {
+			return taskSchema(
+				agentdomain.SchemaRef{ID: agentdomain.FaithfulnessReviewSchemaID, Version: agentdomain.OutputSchemaVersionV1},
+				agentdomain.ResultTypeFaithfulnessReview,
+			)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw, err := test.schema()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(raw, []byte(`"uniqueItems"`)) {
+				t.Fatalf("provider schema contains unsupported uniqueItems: %s", raw)
+			}
+		})
+	}
+}
+
+func assertStrictPayloadFields(t *testing.T, ref agentdomain.SchemaRef, payload map[string]any, expectedFields []string) {
+	t.Helper()
+	if payload["additionalProperties"] != false {
+		t.Fatalf("schema=%s/%s payload is not strict", ref.ID, ref.Version)
+	}
+	payloadProperties := payload["properties"].(map[string]any)
+	propertyNames := make([]string, 0, len(payloadProperties))
+	for name := range payloadProperties {
+		propertyNames = append(propertyNames, name)
+	}
+	required := make([]string, 0, len(payload["required"].([]any)))
+	for _, name := range payload["required"].([]any) {
+		required = append(required, name.(string))
+	}
+	expected := append([]string(nil), expectedFields...)
+	slices.Sort(propertyNames)
+	slices.Sort(required)
+	slices.Sort(expected)
+	if !slices.Equal(propertyNames, expected) || !slices.Equal(required, expected) {
+		t.Fatalf("schema=%s/%s payload=%+v", ref.ID, ref.Version, payload)
 	}
 }
 
@@ -160,6 +340,14 @@ func TestRuntimeCatalogNewSchemasUseStrictDecoders(t *testing.T) {
 			replaceTo:   agentdomain.OutputSchemaVersionV1,
 		},
 		{
+			name:        "rag-answer-metadata-v2",
+			ref:         agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataSchemaID, Version: agentdomain.OutputSchemaVersionV2},
+			raw:         validRAGAnswerMetadataV2Document(t),
+			resultType:  agentdomain.ResultTypeRAGAnswerMetadata,
+			replaceFrom: agentdomain.OutputSchemaVersionV2,
+			replaceTo:   agentdomain.OutputSchemaVersionV1,
+		},
+		{
 			name:        "clarification",
 			ref:         agentdomain.SchemaRef{ID: conversationdomain.ClarificationSchemaID, Version: conversationdomain.ClarificationSchemaVersionV1},
 			raw:         validClarificationDocument(t),
@@ -170,7 +358,13 @@ func TestRuntimeCatalogNewSchemasUseStrictDecoders(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			snapshot, err := catalog.Snapshot(DefaultPromptRef(), test.ref, test.ref, DefaultProfileRef())
+			prompt := DefaultPromptRef()
+			reduced := test.ref
+			if test.ref == (agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataSchemaID, Version: agentdomain.OutputSchemaVersionV2}) {
+				prompt = RAGAnswerMetadataPromptRef()
+				reduced = agentdomain.SchemaRef{ID: agentdomain.RAGAnswerMetadataRefusalSchemaID, Version: agentdomain.OutputSchemaVersionV2}
+			}
+			snapshot, err := catalog.Snapshot(prompt, test.ref, reduced, DefaultProfileRef())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -243,6 +437,27 @@ func validRAGAnswerV2Document(t *testing.T) []byte {
 				},
 			}},
 			FollowUpQuestions: []string{"What changed in deployment?", "Which environment is affected?"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return document
+}
+
+func validRAGAnswerMetadataV2Document(t *testing.T) []byte {
+	t.Helper()
+	document, err := json.Marshal(agentdomain.RAGAnswerMetadataResultV2{
+		ResultType: agentdomain.ResultTypeRAGAnswerMetadata, SchemaID: agentdomain.RAGAnswerMetadataSchemaID,
+		SchemaVersion: agentdomain.OutputSchemaVersionV2,
+		Payload: agentdomain.RAGAnswerMetadataPayloadV2{
+			Assertions: []agentdomain.RAGAnswerMetadataAssertionV2{{
+				ID: "assertion-1", Text: "Production deploys use a stricter gate.", Kind: agentdomain.AssertionFactual,
+				EvidenceRefs: []string{"E1"},
+			}},
+			ConflictPositions: []agentdomain.RAGAnswerMetadataConflictPositionV2{}, ConflictSummary: "",
+			RelatedTopicRefs:  []string{"T1"},
+			FollowUpQuestions: []string{"What changed in deployment?"},
 		},
 	})
 	if err != nil {

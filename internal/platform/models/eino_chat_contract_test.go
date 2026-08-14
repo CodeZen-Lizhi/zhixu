@@ -8,25 +8,18 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 )
 
-type contractChatAdapter interface {
-	agentapplication.ChatModel
-	Contract() models.ChatContract
-}
-
-func TestChatAdaptersShareProjectRequestAndResponseContract(t *testing.T) {
+func TestEinoChatModelPreservesProjectRequestAndResponseContract(t *testing.T) {
 	t.Parallel()
 	var (
 		lock   sync.Mutex
@@ -54,36 +47,25 @@ func TestChatAdaptersShareProjectRequestAndResponseContract(t *testing.T) {
 	defer server.Close()
 
 	options := chatOptions(server.URL+"/base", server.Client())
-	direct, err := models.NewOpenAICompatibleChatModel(options)
-	if err != nil {
-		t.Fatal(err)
-	}
 	eino, err := models.NewEinoOpenAIChatModel(options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapters := []contractChatAdapter{direct, eino}
-	responses := make([]agentapplication.ChatResponse, len(adapters))
-	for index, adapter := range adapters {
-		if adapter.Contract() != direct.Contract() {
-			t.Fatalf("contract[%d]=%#v direct=%#v", index, adapter.Contract(), direct.Contract())
-		}
-		responses[index], err = adapter.Chat(context.Background(), validChatRequest(adapter.Contract().Model))
-		if err != nil {
-			t.Fatalf("adapter[%d] %T: %v", index, adapter, err)
-		}
+	response, err := eino.Chat(context.Background(), validChatRequest(eino.Contract().Model))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(responses[0], responses[1]) {
-		t.Fatalf("direct=%#v eino=%#v", responses[0], responses[1])
+	if string(response.Content) != `{"result":"ok"}` {
+		t.Fatalf("response=%#v", response)
 	}
 	lock.Lock()
 	defer lock.Unlock()
-	if len(bodies) != 2 || !reflect.DeepEqual(bodies[0], bodies[1]) {
-		t.Fatalf("wire request bodies differ: %q", bodies)
+	if len(bodies) != 1 {
+		t.Fatalf("wire request count=%d", len(bodies))
 	}
 }
 
-func TestChatAdaptersAcceptKnownReasoningExtensionWithoutExposingIt(t *testing.T) {
+func TestEinoChatModelAcceptsKnownReasoningExtensionWithoutExposingIt(t *testing.T) {
 	t.Parallel()
 	const reasoningCanary = "private-reasoning-canary"
 	tests := []struct {
@@ -106,33 +88,22 @@ func TestChatAdaptersAcceptKnownReasoningExtensionWithoutExposingIt(t *testing.T
 			defer server.Close()
 
 			options := chatOptions(server.URL, server.Client())
-			direct, err := models.NewOpenAICompatibleChatModel(options)
-			if err != nil {
-				t.Fatal(err)
-			}
 			eino, err := models.NewEinoOpenAIChatModel(options)
 			if err != nil {
 				t.Fatal(err)
 			}
-			adapters := []contractChatAdapter{direct, eino}
-			responses := make([]agentapplication.ChatResponse, len(adapters))
-			for index, adapter := range adapters {
-				responses[index], err = adapter.Chat(context.Background(), validChatRequest(adapter.Contract().Model))
-				if err != nil {
-					t.Fatalf("%T: %v", adapter, err)
-				}
-				if string(responses[index].Content) != `{"result":"ok"}` || strings.Contains(fmt.Sprintf("%#v", responses[index]), reasoningCanary) {
-					t.Fatalf("%T exposed reasoning extension: %#v", adapter, responses[index])
-				}
+			response, err := eino.Chat(context.Background(), validChatRequest(eino.Contract().Model))
+			if err != nil {
+				t.Fatalf("%T: %v", eino, err)
 			}
-			if !reflect.DeepEqual(responses[0], responses[1]) {
-				t.Fatalf("direct=%#v eino=%#v", responses[0], responses[1])
+			if string(response.Content) != `{"result":"ok"}` || strings.Contains(fmt.Sprintf("%#v", response), reasoningCanary) {
+				t.Fatalf("%T exposed reasoning extension: %#v", eino, response)
 			}
 		})
 	}
 }
 
-func TestChatAdaptersRejectInvalidReasoningExtensionTypes(t *testing.T) {
+func TestEinoChatModelRejectsInvalidReasoningExtensionTypes(t *testing.T) {
 	t.Parallel()
 	invalidValues := []struct {
 		name  string
@@ -155,18 +126,12 @@ func TestChatAdaptersRejectInvalidReasoningExtensionTypes(t *testing.T) {
 				defer server.Close()
 
 				options := chatOptions(server.URL, server.Client())
-				direct, err := models.NewOpenAICompatibleChatModel(options)
-				if err != nil {
-					t.Fatal(err)
-				}
 				eino, err := models.NewEinoOpenAIChatModel(options)
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, adapter := range []contractChatAdapter{direct, eino} {
-					_, err := adapter.Chat(context.Background(), validChatRequest(adapter.Contract().Model))
-					assertChatError(t, err, foundation.ErrorConsistencyViolation, models.ErrorCodeChatResponseInvalid, false)
-				}
+				_, err = eino.Chat(context.Background(), validChatRequest(eino.Contract().Model))
+				assertChatError(t, err, foundation.ErrorConsistencyViolation, models.ErrorCodeChatResponseInvalid, false)
 			})
 		}
 	}
@@ -200,7 +165,7 @@ func TestEinoOpenAIChatModelNormalizesSupportedBaseURLs(t *testing.T) {
 	}
 }
 
-func TestChatAdaptersPreserveLegacyCompatibleModelIDs(t *testing.T) {
+func TestEinoChatModelPreservesLegacyCompatibleModelIDs(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -225,20 +190,14 @@ func TestChatAdaptersPreserveLegacyCompatibleModelIDs(t *testing.T) {
 
 	options := chatOptions(server.URL, server.Client())
 	options.Model = "text-davinci-003"
-	direct, err := models.NewOpenAICompatibleChatModel(options)
-	if err != nil {
-		t.Fatal(err)
-	}
 	eino, err := models.NewEinoOpenAIChatModel(options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, adapter := range []contractChatAdapter{direct, eino} {
-		if _, err := adapter.Chat(context.Background(), validChatRequest(adapter.Contract().Model)); err != nil {
-			t.Fatalf("%T: %v", adapter, err)
-		}
+	if _, err := eino.Chat(context.Background(), validChatRequest(eino.Contract().Model)); err != nil {
+		t.Fatalf("%T: %v", eino, err)
 	}
-	if calls.Load() != 2 {
+	if calls.Load() != 1 {
 		t.Fatalf("provider calls=%d", calls.Load())
 	}
 }
@@ -529,7 +488,8 @@ type chatWireRequest struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"messages"`
-	MaxTokens      int `json:"max_tokens"`
+	MaxTokens      int      `json:"max_tokens"`
+	Temperature    *float64 `json:"temperature"`
 	ResponseFormat struct {
 		Type       string `json:"type"`
 		JSONSchema struct {
@@ -549,7 +509,7 @@ func assertStrictChatRequest(t *testing.T, body []byte, wantSchema string) {
 		t.Errorf("decode request: %v", err)
 		return
 	}
-	if payload.Model != "chat-alias" || payload.MaxTokens != 256 || len(payload.Messages) != 2 ||
+	if payload.Model != "chat-alias" || payload.MaxTokens != 256 || payload.Temperature == nil || *payload.Temperature != 0 || len(payload.Messages) != 2 ||
 		payload.Messages[0].Role != "system" || payload.Messages[0].Content != "system-policy-canary" ||
 		payload.ResponseFormat.Type != "json_schema" || !payload.ResponseFormat.JSONSchema.Strict ||
 		!strings.HasPrefix(payload.ResponseFormat.JSONSchema.Name, "zhixu_") || string(payload.ResponseFormat.JSONSchema.Schema) != wantSchema {

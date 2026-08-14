@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
 	workspaceruntimegrant "github.com/CodeZen-Lizhi/zhixu/internal/workspace/runtimegrant"
 )
@@ -70,9 +72,32 @@ func tracksWorkspaceRuntimeWork(request *http.Request) bool {
 	if request == nil {
 		return true
 	}
-	// The event stream is database-backed and intentionally long-lived. It is
-	// closed when the old API container is revoked, but it must not block Root I/O drain.
-	return request.Method != http.MethodGet || request.URL.Path != "/api/v1/events"
+	// Database-backed SSE connections are intentionally long-lived. They are
+	// closed when the old API container is revoked, but must not block Root I/O drain.
+	if request.Method != http.MethodGet {
+		return true
+	}
+	if request.URL.Path == "/api/v1/events" {
+		return false
+	}
+	return !isAnswerDraftStreamPath(request.URL.Path)
+}
+
+func isAnswerDraftStreamPath(path string) bool {
+	const (
+		prefix = "/api/v1/answers/"
+		suffix = "/stream"
+	)
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
+	}
+	withoutSuffix := strings.TrimSuffix(path, suffix)
+	answerID := strings.TrimPrefix(withoutSuffix, prefix)
+	if answerID == withoutSuffix || strings.Contains(answerID, "/") {
+		return false
+	}
+	_, err := foundation.ParseID(answerID)
+	return err == nil
 }
 
 func writeWorkspaceQuiescing(writer http.ResponseWriter) {

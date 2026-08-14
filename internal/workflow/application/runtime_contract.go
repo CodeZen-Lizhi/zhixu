@@ -46,7 +46,7 @@ const (
 
 // RuntimeStatePort 隐藏 PostgreSQL DB-time lease、结果事务和控制命令持久化实现。
 type RuntimeStatePort interface {
-	// Claim 使用数据库时间判断 delivery 资格并原子追加 Attempt。
+	// Claim 使用数据库时间判断 delivery 资格；可执行时原子追加 Attempt。
 	Claim(context.Context, ClaimCommand) (ClaimResult, error)
 	// Heartbeat 使用数据库时间续租并执行完整 lease fence CAS。
 	Heartbeat(context.Context, HeartbeatCommand) (HeartbeatResult, error)

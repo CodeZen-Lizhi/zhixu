@@ -47,6 +47,12 @@ const (
 	ErrorCodePersistenceInvalid = "CONVERSATION_PERSISTENCE_INVALID"
 	// ErrorCodePersistenceCorrupt 表示数据库读回事实违反领域不变量。
 	ErrorCodePersistenceCorrupt = "CONVERSATION_PERSISTENCE_CORRUPT"
+	// ErrorCodeDraftStreamInvalid 表示短期草稿投影请求不合法。
+	ErrorCodeDraftStreamInvalid = "CONVERSATION_DRAFT_STREAM_INVALID"
+	// ErrorCodeDraftStreamConflict 表示草稿所属 Attempt 已失去租约或代际已替换。
+	ErrorCodeDraftStreamConflict = "CONVERSATION_DRAFT_STREAM_CONFLICT"
+	// ErrorCodeDraftStreamUnavailable 表示草稿短期存储暂不可用。
+	ErrorCodeDraftStreamUnavailable = "CONVERSATION_DRAFT_STREAM_UNAVAILABLE"
 )
 
 func classify(cause error, code string) error {

@@ -74,7 +74,17 @@ func DecodeRAGWorkflowOutputReceipt(raw json.RawMessage) (RAGWorkflowOutputRecei
 	return conversationworkflow.DecodeOutputReceipt(raw)
 }
 
-// RegisteredRAGDefinition 返回无 Tool、仅需 READ_LOCAL 的单节点 RAG Definition。
+// RegisteredRAGDefinitionV1 返回历史无 Tool 的 RAG Definition。
+func RegisteredRAGDefinitionV1() workflowdomain.RegisteredDefinition {
+	return conversationworkflow.RegisteredDefinitionV1()
+}
+
+// RegisteredRAGDefinitionV2 返回当前只允许精确只读 Tool 的 RAG Definition。
+func RegisteredRAGDefinitionV2() workflowdomain.RegisteredDefinition {
+	return conversationworkflow.RegisteredDefinitionV2()
+}
+
+// RegisteredRAGDefinition 返回当前可启动的 RAG Definition。
 func RegisteredRAGDefinition() workflowdomain.RegisteredDefinition {
-	return conversationworkflow.RegisteredDefinition()
+	return RegisteredRAGDefinitionV2()
 }

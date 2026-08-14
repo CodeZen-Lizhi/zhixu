@@ -1,6 +1,13 @@
 # 所有权矩阵与迁移风险
 
-> 状态：本文件最初用于实施前风险评估。最终范围以 ADR-0019、`implement.md` 和
+> 2026-08-08 修订：下表保留首次迁移的阶段性范围，不再代表 Eino 的能力上限。完整 RAG 编排、Embedding、
+> ToolsNode/ReAct 和 Streaming 的新版归属与执行顺序以同目录修订版 `design.md`、`implement.md` 为准；
+> PostgreSQL/River、权限、审计、Evidence/Citation 和 Safe Writeback 的不可替换边界继续有效。实际结果以
+> ADR-0020、ADR-0021 和各 08-08 子任务为准：Embedding 条件 Go，完整 RAG/Tool/Token 生产 No-Go，
+> Checkpoint PoC-only。
+
+> 状态：本文件最初用于实施前风险评估。最终范围以
+> `docs/architecture/adr/0019-layered-eino-adoption.md`、`implement.md` 和
 > `stage2-gate-and-stage3-stage4-decisions.md` 为准；Stage 4 已判定 No-Go，本任务没有注册 ToolsNode 或 Tool bridge。
 
 ## 所有权矩阵

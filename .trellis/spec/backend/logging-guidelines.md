@@ -76,7 +76,10 @@ git diff --check
 - queue/active/node result/retry/manual/lease/heartbeat/duplicate/shutdown 指标已接到真实
   Worker/PostgreSQL 事实点；持久 transition replay 不重复发射，metric 失败不改变业务结果。
 - 项目自有 River metadata 只写 `traceparent`；River 保留的 `river:*` recovery 字段可共存但不进入 Application 或可观测载荷。
-- `disabled/optional/required` 不伪造 exporter 成功；当前生产 Composition 未提供真实 exporter factory，optional 明确 degraded，required fail-fast。
+- `disabled/optional/required` 不伪造 exporter 成功；API/Worker Composition 使用进程作用域的
+  OTLP/HTTP Provider，分别设置 `zhixu-api`/`zhixu-worker` service name，并在 Shutdown
+  刷新 Metrics/Trace。`TELEMETRY_EXPORTING` 只证明 exporter 已构造，collector 可达性必须
+  由真实 `/v1/metrics`、`/v1/traces` 导出证据证明。
 - Worker `/livez|readyz` 只返回稳定 `status/code/version`；真实容器日志和 health response 已执行 Secret canary 扫描。
 
 ## M10-01 Audit 与安全脱敏边界
@@ -143,9 +146,9 @@ Correct: 用 canonical UUID + ':' + 已验证幂等键构造可打印锁键，�
 
 ## 后续待验证
 
-- 真实 OpenTelemetry exporter Adapter、采样/保留策略，以及全部安全/业务决策调用点
-  对 Audit Recorder 的接入覆盖。
-- 采样策略、日志保留和外部 OTel/Prometheus 接入方式。
+- 灰度环境真实 Collector、采样/保留策略，以及全部安全/业务决策调用点对 Audit Recorder
+  的接入覆盖。
+- 外部 OTel/Prometheus 查询、告警和稳定发布观察证据的受控归档方式。
 - Audit 访问权限、长期归档策略与真实自托管数据库演练。
 
 ## M6-03 Tool Redaction Boundary

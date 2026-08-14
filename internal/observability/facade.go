@@ -59,6 +59,24 @@ const (
 	MetricModelCallDuration = platform.MetricModelCallDuration
 	// MetricModelCallTotal 是 Eino Chat callback 观测到的调用结果计数。
 	MetricModelCallTotal = platform.MetricModelCallTotal
+	// MetricAnswerFirstTokenDuration 是最终 Answer 流的首 token 延迟。
+	MetricAnswerFirstTokenDuration = platform.MetricAnswerFirstTokenDuration
+	// MetricAnswerCompletionDuration 是最终 Answer 流的完成延迟。
+	MetricAnswerCompletionDuration = platform.MetricAnswerCompletionDuration
+	// MetricAnswerResultTotal 是最终 Answer 流的终态计数。
+	MetricAnswerResultTotal = platform.MetricAnswerResultTotal
+	// MetricDraftDegradationTotal 是草稿流降级计数。
+	MetricDraftDegradationTotal = platform.MetricDraftDegradationTotal
+	// MetricAgentIterations 是 Eino Agent 迭代次数。
+	MetricAgentIterations = platform.MetricAgentIterations
+	// MetricAgentToolCalls 是 Eino Agent 工具调用数。
+	MetricAgentToolCalls = platform.MetricAgentToolCalls
+	// MetricAgentResultTotal 是 Eino Agent 终态计数。
+	MetricAgentResultTotal = platform.MetricAgentResultTotal
+	// MetricRAGOutcomeTotal 是 RAG 终态与运行失败计数。
+	MetricRAGOutcomeTotal = platform.MetricRAGOutcomeTotal
+	// MetricRAGGraphNodeResultTotal 是 Eino RAG Graph 节点结果计数。
+	MetricRAGGraphNodeResultTotal = platform.MetricRAGGraphNodeResultTotal
 )
 
 var (
@@ -83,6 +101,10 @@ var (
 	ErrTelemetryExporterRequired = platform.ErrTelemetryExporterRequired
 	// ErrTelemetryShutdown 表示 Provider 关闭失败。
 	ErrTelemetryShutdown = platform.ErrTelemetryShutdown
+	// ErrInvalidOTLPConfiguration 表示 OTLP endpoint 或资源属性非法。
+	ErrInvalidOTLPConfiguration = platform.ErrInvalidOTLPConfiguration
+	// ErrOTLPExporterOpen 表示 OTLP exporter 无法构造。
+	ErrOTLPExporterOpen = platform.ErrOTLPExporterOpen
 
 	// ErrInvalidTraceContext 表示 W3C Trace Context 非法。
 	ErrInvalidTraceContext = platform.ErrInvalidTraceContext
@@ -113,6 +135,8 @@ type (
 	ProviderFactoryFunc = platform.ProviderFactoryFunc
 	// MemoryProvider 是不声称外部导出的内存 Provider。
 	MemoryProvider = platform.MemoryProvider
+	// OTLPHTTPProviderFactory 是进程作用域的 OTLP/HTTP Provider 工厂。
+	OTLPHTTPProviderFactory = platform.OTLPHTTPProviderFactory
 	// TelemetryOptions 定义显式 exporter 初始化配置。
 	TelemetryOptions = platform.TelemetryOptions
 	// TelemetryStatus 是不暴露 endpoint 的安全状态。
@@ -172,6 +196,11 @@ func InitializeTelemetry(ctx context.Context, options TelemetryOptions) (*Teleme
 
 // NewMemoryProvider 创建不声称外部导出的内存 Provider。
 func NewMemoryProvider() *MemoryProvider { return platform.NewMemoryProvider() }
+
+// NewOTLPHTTPProviderFactory 创建真实外部 OTLP/HTTP Provider 工厂。
+func NewOTLPHTTPProviderFactory(serviceName, serviceVersion string) ProviderFactory {
+	return platform.NewOTLPHTTPProviderFactory(serviceName, serviceVersion)
+}
 
 // WithTraceContext 校验并写入 Trace Context。
 func WithTraceContext(ctx context.Context, trace TraceContext) (context.Context, error) {

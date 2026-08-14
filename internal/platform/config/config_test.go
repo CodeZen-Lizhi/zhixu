@@ -493,6 +493,9 @@ func TestValidateTelemetryModes(t *testing.T) {
 		{name: "unknown mode", mode: "best-effort", endpoint: "http://otel:4318", wantErr: true},
 		{name: "relative endpoint", mode: TelemetryModeOptional, endpoint: "otel:4318", wantErr: true},
 		{name: "unsupported scheme", mode: TelemetryModeRequired, endpoint: "file:///tmp/otel", wantErr: true},
+		{name: "userinfo", mode: TelemetryModeOptional, endpoint: "https://collector:secret@otel.example.test", wantErr: true},
+		{name: "query", mode: TelemetryModeRequired, endpoint: "https://otel.example.test?token=secret", wantErr: true},
+		{name: "fragment", mode: TelemetryModeOptional, endpoint: "https://otel.example.test#secret", wantErr: true},
 	}
 	for _, test := range tests {
 		test := test

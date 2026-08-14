@@ -1,6 +1,6 @@
 {"file":".trellis/spec/backend/index.md","reason":"从规范入口检查依赖隔离、Composition Root、测试门禁和持久化所有权，并按影响面继续读取完整专题规范。"}
 {"file":".trellis/spec/backend/model-settings-runtime.md","reason":"检查 API/Worker 共享 runtime、配置 revision、Credential 生命周期和 readiness 行为。"}
 {"file":".trellis/spec/backend/logging-guidelines.md","reason":"检查 Callback/Trace 脱敏且未替代 Audit 事实。"}
-{"file":".trellis/tasks/08-06-eino-layered-migration/research/boundary-and-migration-risks.md","reason":"检查动态 Schema、错误分类、双账、工具越权、vendor 和回滚风险。"}
-{"file":".trellis/tasks/08-06-eino-layered-migration/research/eino-official-capabilities.md","reason":"按当前官方接口复核版本、StreamReader、Graph/Tool/Checkpoint 行为。"}
-{"file":".trellis/tasks/08-06-eino-layered-migration/research/planning-doc-consistency-review.md","reason":"复核四分类互斥性、全部正式消费者、阶段门禁和累计工作量。"}
+{"file":".trellis/tasks/archive/2026-08/08-06-eino-layered-migration/research/boundary-and-migration-risks.md","reason":"检查动态 Schema、错误分类、双账、工具越权、vendor 和回滚风险。"}
+{"file":".trellis/tasks/archive/2026-08/08-06-eino-layered-migration/research/eino-official-capabilities.md","reason":"按当前官方接口复核版本、StreamReader、Graph/Tool/Checkpoint 行为。"}
+{"file":".trellis/tasks/archive/2026-08/08-06-eino-layered-migration/research/planning-doc-consistency-review.md","reason":"复核四分类互斥性、全部正式消费者、阶段门禁和累计工作量。"}

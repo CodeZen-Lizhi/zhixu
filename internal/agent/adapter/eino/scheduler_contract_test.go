@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -22,10 +21,9 @@ type schedulerContractOutput struct {
 type schedulerContractOutcome struct {
 	result agentapplication.StructuredRunResult
 	err    error
-	calls  []agentapplication.ChatRequest
 }
 
-func TestStructuredPhaseSchedulerMatchesDirectContract(t *testing.T) {
+func TestStructuredPhaseSchedulerPreservesStructuredContract(t *testing.T) {
 	tests := []struct {
 		name      string
 		steps     []agentapplication.DeterministicChatStep
@@ -72,30 +70,28 @@ func TestStructuredPhaseSchedulerMatchesDirectContract(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			direct := executeSchedulerContract(t, false, context.Background(), agentapplication.DefaultRunBudget(), test.steps...)
-			eino := executeSchedulerContract(t, true, context.Background(), agentapplication.DefaultRunBudget(), test.steps...)
-			assertEquivalentOutcome(t, direct, eino)
-			if direct.result.CallCount != test.wantCall || eino.result.CallCount != test.wantCall {
-				t.Fatalf("call count direct=%d eino=%d want=%d", direct.result.CallCount, eino.result.CallCount, test.wantCall)
+			outcome := executeSchedulerContract(t, context.Background(), agentapplication.DefaultRunBudget(), test.steps...)
+			if outcome.result.CallCount != test.wantCall {
+				t.Fatalf("call count=%d want=%d", outcome.result.CallCount, test.wantCall)
 			}
-			if direct.result.Usage != test.wantUsage || eino.result.Usage != test.wantUsage {
-				t.Fatalf("usage direct=%+v eino=%+v want=%+v", direct.result.Usage, eino.result.Usage, test.wantUsage)
+			if outcome.result.Usage != test.wantUsage {
+				t.Fatalf("usage=%+v want=%+v", outcome.result.Usage, test.wantUsage)
 			}
 			wantResponseBytes := int64(0)
 			for index := 0; index < test.wantCall; index++ {
 				wantResponseBytes += int64(len(test.steps[index].Response.Content))
 			}
-			if direct.result.ResponseBytes != wantResponseBytes || eino.result.ResponseBytes != wantResponseBytes || direct.result.RequestBytes <= 0 || eino.result.RequestBytes <= 0 {
-				t.Fatalf("bytes direct=(%d,%d) eino=(%d,%d) want response=%d", direct.result.RequestBytes, direct.result.ResponseBytes, eino.result.RequestBytes, eino.result.ResponseBytes, wantResponseBytes)
+			if outcome.result.ResponseBytes != wantResponseBytes || outcome.result.RequestBytes <= 0 {
+				t.Fatalf("bytes=(%d,%d) want response=%d", outcome.result.RequestBytes, outcome.result.ResponseBytes, wantResponseBytes)
 			}
-			if test.wantPhase != "" && (direct.result.Phase != test.wantPhase || eino.result.Phase != test.wantPhase) {
-				t.Fatalf("phase direct=%q eino=%q want=%q", direct.result.Phase, eino.result.Phase, test.wantPhase)
+			if test.wantPhase != "" && outcome.result.Phase != test.wantPhase {
+				t.Fatalf("phase=%q want=%q", outcome.result.Phase, test.wantPhase)
 			}
-			if test.wantOut != "" && (string(direct.result.Output) != test.wantOut || string(eino.result.Output) != test.wantOut) {
-				t.Fatalf("output direct=%q eino=%q want=%q", direct.result.Output, eino.result.Output, test.wantOut)
+			if test.wantOut != "" && string(outcome.result.Output) != test.wantOut {
+				t.Fatalf("output=%q want=%q", outcome.result.Output, test.wantOut)
 			}
-			if test.wantPhase == "" && errorCode(direct.err) != domain.ErrorCodeValidationExhausted {
-				t.Fatalf("direct exhaustion code=%q err=%v", errorCode(direct.err), direct.err)
+			if test.wantPhase == "" && errorCode(outcome.err) != domain.ErrorCodeValidationExhausted {
+				t.Fatalf("exhaustion code=%q err=%v", errorCode(outcome.err), outcome.err)
 			}
 		})
 	}
@@ -164,45 +160,31 @@ func TestStructuredPhaseSchedulerIsReusableAcrossConcurrentRuns(t *testing.T) {
 
 func TestStructuredPhaseSchedulerPreservesProviderAndContextErrors(t *testing.T) {
 	providerErr := foundation.NewError(foundation.ErrorRetryableFailure, "CHAT_PROVIDER_RATE_LIMITED", true, errors.New("provider unavailable"))
-	direct := executeSchedulerContract(t, false, context.Background(), agentapplication.DefaultRunBudget(), agentapplication.DeterministicChatStep{Err: providerErr})
-	eino := executeSchedulerContract(t, true, context.Background(), agentapplication.DefaultRunBudget(), agentapplication.DeterministicChatStep{Err: providerErr})
-	if direct.err != providerErr || eino.err != providerErr || !errors.Is(eino.err, providerErr) {
-		t.Fatalf("provider error direct=%#v eino=%#v want exact foundation error", direct.err, eino.err)
+	provider := executeSchedulerContract(t, context.Background(), agentapplication.DefaultRunBudget(), agentapplication.DeterministicChatStep{Err: providerErr})
+	if provider.err != providerErr || !errors.Is(provider.err, providerErr) {
+		t.Fatalf("provider error=%#v want exact foundation error", provider.err)
 	}
-	if direct.result.CallCount != 1 || eino.result.CallCount != 1 {
-		t.Fatalf("provider call count direct=%d einio=%d", direct.result.CallCount, eino.result.CallCount)
+	if provider.result.CallCount != 1 {
+		t.Fatalf("provider call count=%d want=1", provider.result.CallCount)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	directModel := agentapplication.NewDeterministicChatModel(agentapplication.DeterministicChatStep{WaitForCancel: true})
-	directRunner := newContractRunner(t, false, directModel, agentapplication.DefaultRunBudget())
-	directDone := make(chan error, 1)
-	go func() { _, err := directRunner.Run(ctx, testSchedulerRequest()); directDone <- err }()
-	<-directModel.Started()
+	model := agentapplication.NewDeterministicChatModel(agentapplication.DeterministicChatStep{WaitForCancel: true})
+	runner := newContractRunner(t, model, agentapplication.DefaultRunBudget())
+	done := make(chan error, 1)
+	go func() { _, err := runner.Run(ctx, testSchedulerRequest()); done <- err }()
+	<-model.Started()
 	cancel()
-	directCancelErr := <-directDone
-
-	ctx, cancel = context.WithCancel(context.Background())
-	einoModel := agentapplication.NewDeterministicChatModel(agentapplication.DeterministicChatStep{WaitForCancel: true})
-	einoRunner := newContractRunner(t, true, einoModel, agentapplication.DefaultRunBudget())
-	einoDone := make(chan error, 1)
-	go func() { _, err := einoRunner.Run(ctx, testSchedulerRequest()); einoDone <- err }()
-	<-einoModel.Started()
-	cancel()
-	einoCancelErr := <-einoDone
-	if errorCode(directCancelErr) != agentapplication.ErrorCodeOperationCancelled || errorCode(einoCancelErr) != agentapplication.ErrorCodeOperationCancelled ||
-		!errors.Is(einoCancelErr, context.Canceled) {
-		t.Fatalf("cancel errors direct=%v eino=%v", directCancelErr, einoCancelErr)
+	cancelErr := <-done
+	if errorCode(cancelErr) != agentapplication.ErrorCodeOperationCancelled || !errors.Is(cancelErr, context.Canceled) {
+		t.Fatalf("cancel error=%v", cancelErr)
 	}
 
-	directBudget := agentapplication.DefaultRunBudget()
-	directBudget.Timeout = 20 * time.Millisecond
-	einoBudget := directBudget
-	directDeadline := executeSchedulerContract(t, false, context.Background(), directBudget, agentapplication.DeterministicChatStep{WaitForCancel: true})
-	einoDeadline := executeSchedulerContract(t, true, context.Background(), einoBudget, agentapplication.DeterministicChatStep{WaitForCancel: true})
-	if errorCode(directDeadline.err) != agentapplication.ErrorCodeOperationDeadline || errorCode(einoDeadline.err) != agentapplication.ErrorCodeOperationDeadline ||
-		!errors.Is(einoDeadline.err, context.DeadlineExceeded) {
-		t.Fatalf("deadline errors direct=%v eino=%v", directDeadline.err, einoDeadline.err)
+	budget := agentapplication.DefaultRunBudget()
+	budget.Timeout = 20 * time.Millisecond
+	deadline := executeSchedulerContract(t, context.Background(), budget, agentapplication.DeterministicChatStep{WaitForCancel: true})
+	if errorCode(deadline.err) != agentapplication.ErrorCodeOperationDeadline || !errors.Is(deadline.err, context.DeadlineExceeded) {
+		t.Fatalf("deadline error=%v", deadline.err)
 	}
 }
 
@@ -241,114 +223,81 @@ func TestStructuredPhaseSchedulerPreservesAllBudgets(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			direct := executeSchedulerContract(t, false, context.Background(), test.budget, test.steps...)
-			eino := executeSchedulerContract(t, true, context.Background(), test.budget, test.steps...)
-			assertEquivalentOutcome(t, direct, eino)
-			if errorCode(direct.err) != test.code || errorCode(eino.err) != test.code || direct.result.CallCount != test.calls || eino.result.CallCount != test.calls {
-				t.Fatalf("direct=(%q,%d) eino=(%q,%d), want=(%q,%d)", errorCode(direct.err), direct.result.CallCount, errorCode(eino.err), eino.result.CallCount, test.code, test.calls)
+			outcome := executeSchedulerContract(t, context.Background(), test.budget, test.steps...)
+			if errorCode(outcome.err) != test.code || outcome.result.CallCount != test.calls {
+				t.Fatalf("outcome=(%q,%d), want=(%q,%d)", errorCode(outcome.err), outcome.result.CallCount, test.code, test.calls)
 			}
 		})
 	}
 }
 
 func TestStructuredPhaseSchedulerDoesNotBypassRecordingChatModel(t *testing.T) {
-	for _, useEino := range []bool{false, true} {
-		t.Run(map[bool]string{false: "direct", true: "eino"}[useEino], func(t *testing.T) {
-			inner := agentapplication.NewDeterministicChatModel(
-				agentapplication.DeterministicChatStep{Response: schedulerResponse(testSchedulerModel(), `{}`, 1, 1)},
-				agentapplication.DeterministicChatStep{Response: schedulerResponse(testSchedulerModel(), `{"value":"recorded"}`, 2, 2)},
-			)
-			repository := &schedulerRecordingRepository{}
-			recorded, err := agentapplication.NewRecordingChatModel(agentapplication.RecordingChatModelDependencies{
-				Model: inner, Repository: repository,
-				WorkspaceID: "81000000-0000-4000-8000-000000000001", ModelRunID: "81000000-0000-4000-8000-000000000002",
-				IDs: &schedulerRecordingIDs{next: 10}, Clock: foundation.FixedClock{Value: time.Date(2026, 8, 6, 1, 0, 0, 0, time.UTC)},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			runner := newContractRunner(t, useEino, recorded, agentapplication.DefaultRunBudget())
-			result, err := runner.Run(context.Background(), testSchedulerRequest())
-			if err != nil {
-				t.Fatalf("Run() error = %v", err)
-			}
-			if result.CallCount != 2 || inner.CallCount() != 2 || len(repository.calls) != 2 {
-				t.Fatalf("result calls=%d inner calls=%d persisted calls=%d", result.CallCount, inner.CallCount(), len(repository.calls))
-			}
-			for index, phase := range []domain.ModelCallPhase{domain.ModelCallInitial, domain.ModelCallRepair} {
-				call := repository.calls[index]
-				if call.CallNo != index+1 || call.Phase != phase || call.Status != domain.ModelCallSucceeded || call.ResponseBytes <= 0 || call.Usage.TotalTokens == 0 {
-					t.Fatalf("persisted call[%d]=%+v", index, call)
-				}
-			}
-		})
+	inner := agentapplication.NewDeterministicChatModel(
+		agentapplication.DeterministicChatStep{Response: schedulerResponse(testSchedulerModel(), `{}`, 1, 1)},
+		agentapplication.DeterministicChatStep{Response: schedulerResponse(testSchedulerModel(), `{"value":"recorded"}`, 2, 2)},
+	)
+	repository := &schedulerRecordingRepository{}
+	recorded, err := agentapplication.NewRecordingChatModel(agentapplication.RecordingChatModelDependencies{
+		Model: inner, Repository: repository,
+		WorkspaceID: "81000000-0000-4000-8000-000000000001", ModelRunID: "81000000-0000-4000-8000-000000000002",
+		IDs: &schedulerRecordingIDs{next: 10}, Clock: foundation.FixedClock{Value: time.Date(2026, 8, 6, 1, 0, 0, 0, time.UTC)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := newContractRunner(t, recorded, agentapplication.DefaultRunBudget())
+	result, err := runner.Run(context.Background(), testSchedulerRequest())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.CallCount != 2 || inner.CallCount() != 2 || len(repository.calls) != 2 {
+		t.Fatalf("result calls=%d inner calls=%d persisted calls=%d", result.CallCount, inner.CallCount(), len(repository.calls))
+	}
+	for index, phase := range []domain.ModelCallPhase{domain.ModelCallInitial, domain.ModelCallRepair} {
+		call := repository.calls[index]
+		if call.CallNo != index+1 || call.Phase != phase || call.Status != domain.ModelCallSucceeded || call.ResponseBytes <= 0 || call.Usage.TotalTokens == 0 {
+			t.Fatalf("persisted call[%d]=%+v", index, call)
+		}
 	}
 }
 
 func TestStructuredPhaseSchedulerPreservesModelCallPersistenceUnknown(t *testing.T) {
-	for _, useEino := range []bool{false, true} {
-		t.Run(map[bool]string{false: "direct", true: "eino"}[useEino], func(t *testing.T) {
-			inner := agentapplication.NewDeterministicChatModel(agentapplication.DeterministicChatStep{
-				Response: schedulerResponse(testSchedulerModel(), `{"value":"unknown"}`, 1, 1),
-			})
-			repository := &schedulerRecordingRepository{completeErr: errors.New("commit response lost")}
-			recorded, err := agentapplication.NewRecordingChatModel(agentapplication.RecordingChatModelDependencies{
-				Model: inner, Repository: repository,
-				WorkspaceID: "81000000-0000-4000-8000-000000000001", ModelRunID: "81000000-0000-4000-8000-000000000002",
-				IDs: &schedulerRecordingIDs{next: 20}, Clock: foundation.FixedClock{Value: time.Date(2026, 8, 6, 1, 0, 0, 0, time.UTC)},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			runner := newContractRunner(t, useEino, recorded, agentapplication.DefaultRunBudget())
-			result, err := runner.Run(context.Background(), testSchedulerRequest())
-			if errorCode(err) != agentapplication.ErrorCodeModelCallPersistenceUnknown ||
-				errorKind(err) != foundation.ErrorManualRecoveryRequired || result.CallCount != 1 || inner.CallCount() != 1 || len(repository.calls) != 1 {
-				t.Fatalf("error=%v result=%+v provider_calls=%d persisted_calls=%d", err, result, inner.CallCount(), len(repository.calls))
-			}
-		})
+	inner := agentapplication.NewDeterministicChatModel(agentapplication.DeterministicChatStep{
+		Response: schedulerResponse(testSchedulerModel(), `{"value":"unknown"}`, 1, 1),
+	})
+	repository := &schedulerRecordingRepository{completeErr: errors.New("commit response lost")}
+	recorded, err := agentapplication.NewRecordingChatModel(agentapplication.RecordingChatModelDependencies{
+		Model: inner, Repository: repository,
+		WorkspaceID: "81000000-0000-4000-8000-000000000001", ModelRunID: "81000000-0000-4000-8000-000000000002",
+		IDs: &schedulerRecordingIDs{next: 20}, Clock: foundation.FixedClock{Value: time.Date(2026, 8, 6, 1, 0, 0, 0, time.UTC)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := newContractRunner(t, recorded, agentapplication.DefaultRunBudget())
+	result, err := runner.Run(context.Background(), testSchedulerRequest())
+	if errorCode(err) != agentapplication.ErrorCodeModelCallPersistenceUnknown ||
+		errorKind(err) != foundation.ErrorManualRecoveryRequired || result.CallCount != 1 || inner.CallCount() != 1 || len(repository.calls) != 1 {
+		t.Fatalf("error=%v result=%+v provider_calls=%d persisted_calls=%d", err, result, inner.CallCount(), len(repository.calls))
 	}
 }
 
-func assertEquivalentOutcome(t *testing.T, direct, eino schedulerContractOutcome) {
-	t.Helper()
-	if !reflect.DeepEqual(direct.result, eino.result) {
-		t.Fatalf("result drift\ndirect=%+v\neino=%+v", direct.result, eino.result)
-	}
-	if errorCode(direct.err) != errorCode(eino.err) || errorKind(direct.err) != errorKind(eino.err) || errorRetryable(direct.err) != errorRetryable(eino.err) {
-		t.Fatalf("error drift direct=%v eino=%v", direct.err, eino.err)
-	}
-	if !reflect.DeepEqual(direct.calls, eino.calls) {
-		t.Fatalf("request/call drift\ndirect=%+v\neino=%+v", direct.calls, eino.calls)
-	}
-}
-
-func executeSchedulerContract(t *testing.T, useEino bool, ctx context.Context, budget agentapplication.RunBudget, steps ...agentapplication.DeterministicChatStep) schedulerContractOutcome {
+func executeSchedulerContract(t *testing.T, ctx context.Context, budget agentapplication.RunBudget, steps ...agentapplication.DeterministicChatStep) schedulerContractOutcome {
 	t.Helper()
 	model := agentapplication.NewDeterministicChatModel(steps...)
-	runner := newContractRunner(t, useEino, model, budget)
+	runner := newContractRunner(t, model, budget)
 	result, err := runner.Run(ctx, testSchedulerRequest())
-	return schedulerContractOutcome{result: result, err: err, calls: model.Calls()}
+	return schedulerContractOutcome{result: result, err: err}
 }
 
-func newContractRunner(t *testing.T, useEino bool, model agentapplication.ChatModel, budget agentapplication.RunBudget) *agentapplication.StructuredRunner {
+func newContractRunner(t *testing.T, model agentapplication.ChatModel, budget agentapplication.RunBudget) *agentapplication.StructuredRunner {
 	t.Helper()
 	catalog := testSchedulerCatalog(t)
-	var scheduler agentapplication.StructuredPhaseScheduler
-	if useEino {
-		var err error
-		scheduler, err = NewStructuredPhaseScheduler(context.Background())
-		if err != nil {
-			t.Fatalf("NewStructuredPhaseScheduler() error = %v", err)
-		}
+	scheduler, err := NewStructuredPhaseScheduler(context.Background())
+	if err != nil {
+		t.Fatalf("NewStructuredPhaseScheduler() error = %v", err)
 	}
-	var runner *agentapplication.StructuredRunner
-	var err error
-	if useEino {
-		runner, err = agentapplication.NewStructuredRunnerWithScheduler(model, catalog, budget, scheduler)
-	} else {
-		runner, err = agentapplication.NewStructuredRunner(model, catalog, budget)
-	}
+	runner, err := agentapplication.NewStructuredRunnerWithScheduler(model, catalog, budget, scheduler)
 	if err != nil {
 		t.Fatalf("runner construction error = %v", err)
 	}
@@ -430,11 +379,6 @@ func errorKind(err error) foundation.ErrorKind {
 		return classified.Kind
 	}
 	return ""
-}
-
-func errorRetryable(err error) bool {
-	var classified *foundation.Error
-	return errors.As(err, &classified) && classified.Retryable
 }
 
 type concurrentSchedulerModel struct {

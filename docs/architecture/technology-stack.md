@@ -19,15 +19,16 @@
 | Migration | Goose | 前向迁移与版本管理 |
 | Job Queue | River | PostgreSQL Job、重试、Worker |
 | Logging | slog | 结构化日志 |
-| Telemetry | 项目自有接口 + OpenTelemetry Adapter seam | Trace/Metrics；真实 exporter 尚未接入 Composition |
+| Telemetry | 项目自有接口 + OpenTelemetry OTLP/HTTP Adapter | API/Worker 使用独立 service name 导出 Trace/Metrics；远端可达性仍需 Collector 门禁 |
 | Config | 环境变量 + YAML | 本地与自托管配置 |
 
 M4-A 已在主模块精确锁定 River/riverpgxv5 `v0.40.0` 与 Goose `v3.27.0`。River 使用 MPL-2.0，Goose 使用 MIT；当前 Go/Docker 基线为 `1.25.4`，因此不采用要求 Go `1.25.7` 的 Goose `v3.27.2`。迁移、依赖 License、升级与退出门禁见 [ADR-0015](adr/0015-river-goose-runtime.md)。项目自身采用仓库根目录 `LICENSE` 中的 MIT License。
 
 M4-D 已提供项目自有 Logger/Metrics/Tracer/Provider 接口、bounded label 与
-`traceparent` 异步传播，并定义 `disabled/optional/required`。当前生产 Composition
-没有注入 OpenTelemetry exporter factory：optional 明确 degraded，required
-fail-fast；在真实 Adapter 和部署 smoke 完成前不得宣称外部 Telemetry 已启用。
+`traceparent` 异步传播，并定义 `disabled/optional/required`。当前 API/Worker Composition
+已注入正式 OTLP/HTTP exporter factory：`optional` 只在构造失败时明确 degraded，`required`
+构造失败则 fail-fast。`TELEMETRY_EXPORTING` 仅证明 exporter 已构造，不证明远端 Collector
+已接收数据；真实可达性和稳定观察仍须用外部 Collector 的固定查询单独验收。
 
 M6-A 已锁定官方 `pgvector-go/pgx v0.4.0`（MIT）作为 pgx 向量编解码与连接类型注册实现；
 迁移入口使用不注册扩展类型的专用 Pool，避免空库创建 `vector` 扩展前启动失败。当前不锁定
@@ -65,17 +66,17 @@ M6-03 使用 BSD-3-Clause 的 `golang.org/x/net/html v0.56.0` 解析受控 Web T
 
 | 能力 | 选择 | 采用约束 |
 |---|---|---|
-| Chat | OpenAI-Compatible ChatModel Port：direct HTTP / Eino OpenAI Adapter | `direct` 默认，`eino` 显式灰度；两者保持项目合同等价 |
+| Chat | OpenAI-Compatible ChatModel Port：Eino OpenAI Adapter | 生产固定 Eino；项目合同、错误和安全传输由 Adapter 保证 |
 | Local Model | Ollama OpenAI-Compatible Endpoint | 通过统一 ChatModel Interface 接入，不维护第二套原生 Chat 协议 |
-| Embedding | OpenAI-Compatible/Local Adapter | 批量调用并记录模型版本 |
+| Embedding | Eino-backed OpenAI-Compatible 与 Ollama Adapter | 生产固定 Eino；wire、错误与向量合同由 Adapter 保证 |
 | Rerank | HTTP Adapter，可禁用 | 失败必须显式标记 degraded |
-| Structured Output | 项目 JSON Schema/领域校验 + direct/Eino phase scheduler | 五消费者独立灰度；框架只调度，不拥有 decoder、预算或审计 |
+| Structured Output | 项目 JSON Schema/领域校验 + Eino phase scheduler | 五个消费者固定 Eino；框架只调度，不拥有 decoder、预算或审计 |
 | Prompt | 版本化模板 | 运行记录保存实际版本 |
-| Agent 编排 | 项目自有 Application + 有界 Eino 短 Graph | Eino 只实现 StructuredRunner 三阶段调度，不接管完整 RAG、持久工作流或领域编排 |
+| Agent 编排 | 项目 Application Port + Eino Graph/ChatModelAgent/ToolsNode/Stream | Eino 承担 RAG 内层通用编排；项目拥有 Workflow、检索、权限、审批、证据和持久化 |
 
-主模块正式锁定 Eino core `v0.9.13` 与 OpenAI extension `v0.1.13`，采用范围为 `internal/platform/models` 内的 OpenAI-Compatible Chat Adapter、调用级脱敏 Callback telemetry，以及 `internal/agent/adapter/eino` 内的 Structured Output 三阶段短 Graph。Chat 和五个 scheduler selector 均只选择内部实现，不改变 Provider/Model/Adapter 或持久运行身份，默认保持 `direct`，详见 [ADR-0019](adr/0019-layered-eino-adoption.md)。
+主模块锁定 Eino core `v0.9.13`、OpenAI model extension `v0.1.13`，以及 OpenAI/Ollama Embedding extension `v0.0.0-20260803030130-90a15623ddb6`。采用范围包括 `internal/platform/models` 的 Chat/Embedding Adapter、脱敏 Callback telemetry，以及 `internal/agent/adapter/eino` 的 Structured Graph、classic `ChatModelAgent`/`ToolsNode` 和 final-answer Stream。Chat、Embedding 与五个 scheduler 的生产构造固定为 Eino。详见 [ADR-0022](adr/0022-eino-primary-ai-runtime.md)。
 
-独立 `poc/eino` module 继续保存 M2 的 Chat Graph、ToolsNode、Callback 等历史验证样例。生产 Eino Chat Adapter 已通过本地 Ollama/qwen3 真实 OpenAI-Compatible 协议 smoke；生产短 Graph 只覆盖 `INITIAL/REPAIR/REDUCED`。Streaming、完整 RAG Graph、Embedding/Retriever/Rerank、ToolsNode、Checkpoint 和独立 River Node 仍未通过各自门禁，因此不进入当前生产路径。历史门禁见 [ADR-0013](adr/0013-eino-adoption-gate.md) 与 [`poc/eino/report.md`](../../poc/eino/report.md)。
+独立 `poc/eino` module 继续保存能力验证，特别是 Checkpoint/Interrupt。生产路径不使用 Eino checkpoint 恢复跨进程、跨 Attempt 或 Human Task；River/PostgreSQL 仍是 durable runtime。真实 Ollama Chat/原生 Embedding 和早期 Compose 部分链路证据继续归档；完整浏览器门禁现可显式选择外部 HTTPS OpenAI-Compatible Chat/Embedding，并在任何 Provider 请求前执行脱敏 Compose 预检。稳定性观察是独立发布质量检查，不决定是否保留第二套 Runtime。
 
 领域模型、Workflow 持久化与状态机、Proposal/Approval、Tool Permission 和 Write Authorization 不得依赖 Eino 类型或运行时。核心同样不依赖 LangChain；第三方 AI Framework 只能位于 Agent/Application 编排边缘或 Adapter/Infrastructure，且必须通过项目 Interface 隔离。
 
@@ -137,4 +138,4 @@ Graph 展示实现不进入领域模型。当前 `web/package.json` 未引入 Cy
 - Graph 在 500,000 Relation 正式资源预算下的有界渲染与 FPS/交互；若当前 SVG/CSS + 列表方案不达标，
   再验证 Cytoscape.js/Web Worker 候选，不预设 5,000 节点全量渲染。
 - Monaco 大 Diff。
-- Eino Chat Adapter、调用级 Callback/Trace 与 Structured Output 三阶段短 Graph 已按 ADR-0019 锁入主模块，所有实现 selector 默认 `direct`；Embedding、Streaming、完整 RAG Graph、Tool Calling、Checkpoint 和 River Node 仍需各自门禁，不能从现有离线门禁推断为已采用。
+- Eino 是 Chat、Embedding、五个 Structured Scheduler 与 `/chat` RAG v2 内层 Agent/stream 的唯一正式生产 runtime。Tool Calling 仅使用冻结的只读项目工具，正式 Answer 仍经项目的证据和发布门禁；Checkpoint 不进入生产恢复。历史结论由 ADR-0022 在对应范围取代。

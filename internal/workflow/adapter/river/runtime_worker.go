@@ -126,7 +126,12 @@ func (w *RuntimeNodeWorker) Work(ctx context.Context, job *river.Job[NodeJobArgs
 	}
 	deliveryID := fmt.Sprintf("job-%d-attempt-%d", job.ID, job.Attempt)
 	deliveryOwner := w.owner + ":" + deliveryID
-	claim, err := w.runtime.Claim(ctx, application.ClaimCommand{NodeRunID: job.Args.NodeRunID, DispatchNo: job.Args.DispatchNo, DeliveryID: deliveryID, RiverJobID: job.ID, RiverJobAttempt: job.Attempt, ModelSettingsRevision: cloneOptionalInt64(w.modelSettingsRevision), ModelRuntimeInstanceID: cloneOptionalID(w.modelRuntimeInstanceID), LeaseOwner: deliveryOwner, LeaseDuration: w.leaseDuration})
+	claim, err := w.runtime.Claim(ctx, application.ClaimCommand{
+		NodeRunID: job.Args.NodeRunID, DispatchNo: job.Args.DispatchNo, DeliveryID: deliveryID,
+		RiverJobID: job.ID, RiverJobAttempt: job.Attempt,
+		ModelSettingsRevision: cloneOptionalInt64(w.modelSettingsRevision), ModelRuntimeInstanceID: cloneOptionalID(w.modelRuntimeInstanceID),
+		LeaseOwner: deliveryOwner, LeaseDuration: w.leaseDuration,
+	})
 	if err != nil {
 		return err
 	}

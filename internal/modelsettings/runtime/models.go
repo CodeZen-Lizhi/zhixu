@@ -41,6 +41,14 @@ func (models *Models) Chat() platformmodels.ChatCapability {
 	return models.runtime.Chat()
 }
 
+// RuntimeChat 返回同一次生产构造冻结的 Eino Agent/Stream Chat capability。
+func (models *Models) RuntimeChat() platformmodels.RuntimeChatCapability {
+	if models == nil || models.runtime == nil {
+		return (*platformmodels.ModelRuntime)(nil).RuntimeChat()
+	}
+	return models.runtime.RuntimeChat()
+}
+
 // Embedding 返回同一次生产构造冻结的 Embedding Adapter 与 Contract。
 func (models *Models) Embedding() platformmodels.EmbeddingCapability {
 	if models == nil || models.runtime == nil {

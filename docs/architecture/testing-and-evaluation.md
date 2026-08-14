@@ -230,12 +230,12 @@ M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一�
 - Repair Budget：精确断言一次 Structured Run 只有 `INITIAL -> REPAIR -> REDUCED` 三次响应上限；REPAIR 仅接收
   脱敏错误摘要，REDUCED 使用任务最小安全 Schema。耗尽返回 `VALIDATION_EXHAUSTED`，不得进入 regex、Markdown
   fence、默认对象、自由文本或 Fake fallback。
-- Structured Scheduler：direct 与 Eino 短 Graph 必须对照 INITIAL/REPAIR/REDUCED/exhaustion、accepted bytes、
+- Structured Scheduler：Eino 短 Graph 必须覆盖 INITIAL/REPAIR/REDUCED/exhaustion、accepted bytes、
   RuntimeRefs、usage、请求/响应/token 预算、Provider error、取消、deadline 和错误 kind/code/retryable；同一个已编译
   scheduler 必须通过并发 race。五个消费者必须用计数包装器委托真实 Eino scheduler，断言 `Schedule` 恰好执行一次，
   并运行既有 Relation、RAG、Artifact、Capture、Organizing 回归；仅保存 scheduler 指针不算覆盖。Model Call 的
   call_no/phase/status/bytes/usage 不得漂移。
-- Chat Contract：direct 与 Eino-backed OpenAI-Compatible Adapter 使用共享 fixture 对照 request、`ChatContract`、
+- Chat Contract：Eino-backed OpenAI-Compatible Adapter 使用共享 fixture 对照 request、`ChatContract`、
   `ChatResponse` 与 usage，并覆盖 429/502/503/504、401/403/其他 4xx、timeout/cancel、redirect、Content-Type、
   超大/非法响应、模型与 usage 回显、动态 Schema 并发隔离、版本快照和 Secret/error-body canary；Adapter 本身
   调用次数始终为一次，不隐藏 retry 或 Provider/Model 切换。已知 string/null `reasoning`/`reasoning_content` 必须
@@ -254,14 +254,18 @@ M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一�
   Disputed disclosure 的 claim/conflict/Applicability/UTC updated_at 遗漏、增加或漂移均应失败。
 - Citation Batch：真实 PostgreSQL 覆盖多元素乱序输入、完整 tuple 任一字段损坏时整批失败、稳定 ordinality；
   Application 用计数 Reader 证明同一 Source Version 的 Artifact 只读取一次。
-- Model Run/Call：真实 PostgreSQL 覆盖一个 Node Attempt 一个 Run、INITIAL/REPAIR/REDUCED/REVIEW 唯一 call_no、
+- Model Run/Call：真实 PostgreSQL 覆盖一个 Node Attempt 一个 Run、v2 `PLAN -> AGENT* -> ANSWER -> INITIAL/REPAIR/REDUCED -> REVIEW`
+  的唯一递增 call_no（`AGENT` 可重复、`ANSWER` 单次），并保留 v1 INITIAL/REPAIR/REDUCED/REVIEW 兼容、
   调用前 STARTED、CAS finalize、response loss/replay、crash→UNKNOWN、同 Workspace/FK、版本冻结、Knowledge
   `model_run_ref` 反查和有数据 Down `55000`。每条 Call 必须能直接查询实际 Adapter/Model/Profile/Prompt/Schema
   与 max_output_tokens，不能只依赖 request hash。断言数据库、日志、Trace 和错误不含完整 Prompt/Evidence/raw response、
   Credential 或绝对路径。
 - Fake 与真实评测：Deterministic Fake 只证明 Pipeline/错误路径/E2E 确定性；真实 Provider 未配置时必须明确 SKIP，
   不能计为模型质量 PASS，也不能让生产 Factory 构造 Fake。真实 Provider live smoke 即使通过也只证明生产 Adapter
-  的协议兼容；当前 Ollama `0.32.6` + `qwen3:0.6b` PASS 不计作 Gold Set、模型效果或生产灰度 PASS。
+  和被测链路的协议兼容。2026-08-11 `make eino-live-smoke` 已通过外部 HTTPS OpenAI-Compatible Chat/Embedding、
+  原生 Ollama Embedding、Query Plan、metadata 和 Faithfulness REVIEW；同日 host-relay 外部 Chat + 本地 Ollama
+  Embedding 完整 smoke 已通过 Eino Graph/Agent/ToolsNode/Stream、PostgreSQL draft、API 及桌面/移动浏览器终态。
+  host-relay 不证明容器直连外部 HTTPS 网络路径，真实生产灰度和稳定观察仍须独立取证。
 
 ### 8.8 M6-03 Tool Registry And Security 专项
 
@@ -283,19 +287,50 @@ M6-D 已用真实 PostgreSQL HTTP、River fault 与 Compose API smoke 形成一�
 - SSE：持久单调 ID、连接水位、heartbeat、取消释放、保留窗口内重放，以及 invalid/future 400、expired 409
   `action=refetch`；Payload 脱敏且只触发权威 Query 回查。
 - Agent/Workflow：冻结上下文、PLAN、Retrieval/Eligibility/Topic、RAG v2、Citation/Faithfulness、阶段事件和
-  terminal-first replay。正常 completed seam 精确断言 PLAN+ANSWER+REVIEW 三次 Model Call，Question 重放不再调用 Provider。
+  terminal-first replay。当前产品路径精确断言 Eino `ReturnDirectly` 后的
+  `PLAN,AGENT,ANSWER,INITIAL,REVIEW`；通用 Agent Runtime 独立覆盖两轮 ReAct，Question 重放不再调用 Provider。
 - Frontend：严格 API/SSE decoder、Infinite Query、latest Turn/current_stage 恢复、有界轮询、四态 Answer、
   Clarification/Conflict/Citation/summary/topic/follow-up/Feedback，以及桌面/移动无横向溢出和焦点恢复。
-- `ZHIXU_TEST_DATABASE_URL=... make rag-integration` 走公共 HTTP→River→Retrieval→Knowledge→Model→Answer→
-  SSE→Feedback；不能直接 seed Conversation/Question/Answer/Workflow 或绕过 Worker。该门禁分别执行 direct/Eino
-  Answer scheduler，并模拟已完成 Node 的下一 River transport attempt；必须保持三条 PLAN/INITIAL/REVIEW Model Call、
-  单一成功 Attempt、同一 Answer/Knowledge 终态且不重复 Provider。
+- `ZHIXU_TEST_DATABASE_URL=... make rag-integration` 走公共 HTTP→River→Retrieval→Knowledge→Eino Agent/Stream→
+  draft SSE→Answer→Feedback；不能直接 seed Conversation/Question/Answer/Workflow 或绕过 Worker。它必须覆盖 v2
+  Attempt 的 Agent/只读工具/预算、draft session、EOF 后证据门禁、Finalizer `PUBLISHED` 原子性、lease reclaim 和
+  terminal replay。历史 v1 持久回放继续由 Eino-backed replay Definition 消费，不能作为新 dispatch 入口。
 - `make compose-rag-smoke` 使用唯一 Compose project、随机端口/数据库密码/Chat canary、disposable Git Workspace
   和 volume；先经真实 Host Controller Coordinator/ComposeDriver 建立 exact-root Grant，再经公开
   Scan/Ingestion/Approval/Reindex，只补无公开 API 的正式 Knowledge 资格，然后执行会话闭环与 exact replay，结束
   trap 必须清理。request-aware OpenAI-compatible fixture 按 Schema/请求生成，不按调用序号返回。
 - 上述确定性 fixture 证明产品 seam 和失败安全，不是现实模型质量证据；真实 Provider Gold Set、阈值和全产品
   Playwright E2E 仍归 M11。
+
+### 8.10 Eino 生产 Runtime 专项
+
+- Chat/Embedding/Structured Scheduler：固定 Eino，覆盖构造失败、无自动 fallback、
+  合同、取消/timeout、并发和 Eino 类型隔离。离线 fixture 仍不能替代真实 Provider smoke。
+- RAG v2/Agent：真实 Eino Graph、classic `ChatModelAgent`/`ToolsNode` 完成模型 tool-call→只读工具→独立 Eino
+  ANSWER Stream 闭环；通用 Runtime 另测不启用 `ReturnDirectly` 的多轮 ReAct。覆盖冻结 allowlist/schema、
+  ModelCall `AGENT* -> ANSWER`、共享预算、顺序 call number、receipt、权限、写工具拒绝和 replay。
+- Streaming/draft：验证多帧 `ChatModel.Stream`、reader close、错误/取消、背压、队列降级、draft generation/sequence、
+  `Last-Event-ID` reset、SSE reconnect、TTL、EOF 后门禁失败撤销与 Finalizer 原子 `PUBLISHED`。草稿不得进入 Answer、
+  durable event、Evidence 或审计正文。
+- Checkpoint：`poc/eino/checkpoint` 可继续验证同进程、同活跃 Attempt 的隔离能力；重启/reclaim/Human Task 后恢复旧
+  快照必须失败，不能替代 PostgreSQL/River。
+- RAG 阶段 live gate：`eino-live-query-plan-smoke`、`eino-live-rag-metadata-smoke` 分别要求
+  `ZHIXU_EINO_LIVE_QUERY_PLAN_ENABLED=true` 和 `ZHIXU_EINO_LIVE_RAG_METADATA_ENABLED=true`，并复用现有
+  `ZHIXU_EINO_LIVE_*` Provider 配置。两者均通过生产配置工厂和 Eino Adapter；未启用时跳过，启用但
+  配置不完整时必须在网络前 fail closed。它们是协议/严格领域合同门禁，不代替完整 RAG 终态或模型质量验收。
+- Faithfulness REVIEW：`eino-live-faithfulness-smoke` 是独立 opt-in gate，使用
+  `ZHIXU_EINO_LIVE_FAITHFULNESS_ENABLED=true` 与现有 `ZHIXU_EINO_LIVE_*` Provider 配置，通过生产配置工厂、Eino
+  Chat Adapter 和 `StructuredFaithfulnessReviewer` 验证 `phase=REVIEW`、冻结严格 Schema、动态/显式输出上限、完整
+  domain target coverage 与安全错误摘要；可选 `ZHIXU_EINO_LIVE_FAITHFULNESS_MAX_OUTPUT_TOKENS` 显式收紧上限，
+  未启用时跳过，启用但缺少/非法配置时 fail closed，不对自然语言质量作固定断言。该目标不构造 PostgreSQL
+  `ModelCallRecorder`/Ledger，正式 REVIEW 的持久化与预算事实由 RAG integration/Compose 合同另行验证。
+- `make eino-live-smoke` 是发布级真实 Provider 聚合入口，必须同时启用并执行 Chat、OpenAI-Compatible/Ollama
+  Embedding、Query Plan、RAG metadata 和 Faithfulness REVIEW；`eino-live-smoke-contract` 离线锁定这六个目标，
+  并验证 `make -j` 在缺任一配置时不会启动任何 `go test`，防止遗漏阶段、并行越过环境门禁或意外访问 Provider。
+  单独目标只用于定位或开发，不构成完整发布门禁。
+- 真实 Provider、浏览器端到端、Compose Eino overlay 和稳定发布观察必须单独执行。
+  当前树已分别通过六项真实 Provider live gate，以及 host-relay 外部 Chat + 本地 Ollama Embedding 的完整
+  Compose/桌面/移动浏览器终态；容器直连外部 HTTPS 网络路径与真实稳定观察仍未完成，不能用上述证据替代。
 
 ## 9. E2E
 

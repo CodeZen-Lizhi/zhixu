@@ -26,6 +26,9 @@
 - `desired` 是最后保存 revision，`active` 是全局已提交 revision，`applied` 是单进程已加载 revision；保存只推进
   desired，只有 API/Worker 都 fresh/prepared 且 revision 等于固定 target 时才能 commit active。
 - revision `0` 是无持久行的 canonical disabled。非零 revision append-only；高级 timeout/batch/byte limit 也冻结。
+- Chat、Embedding 与五个 Structured Scheduler 的生产构造固定使用 Eino；implementation selector 不进入
+  revision DTO、数据库身份、Config Hash 或 Compose。历史 v1 持久执行只能通过 Eino-backed replay Definition 消费，
+  不得成为新 dispatch 入口。
 - Secret 只允许请求瞬时明文、短生命周期进程内明文和 AES-256-GCM 密文。AAD 绑定 revision、用途、schema、
   Provider 和规范化 Endpoint；`keep` 必须解密后以新 revision AAD 重加密。
 - AES-256-GCM key/nonce/envelope mechanics 只由 `internal/platform/secretstore` 实现；Model Settings wrapper 继续拥有
@@ -85,9 +88,9 @@
   TLS hostname/SNI、精确 loopback relay。
 - PostgreSQL：fresh migration Up/guarded Down、append-only revision、同事务 Audit、并发 PUT/begin、runtime CAS、
   enqueue/drain 竞态、attempt revision insert/read/replay、历史同版本 schema repair 与失败全回滚；SQL 必须参数化并用真实 PostgreSQL 验证。
-- Composition/CLI/Compose：API/Worker disabled/configured/fixed target、单一 Runtime 注入、queue pause/resume、
-  launcher Key/migration one-shot fail-fast、secret/smoke cleanup fake-Docker contract，以及真实 `./zhixu up`、`restart`、
-  重复 `up` 和 readiness。
+- Composition/CLI/Compose：API/Worker disabled/configured/fixed target、单一 Eino Runtime 注入、queue pause/resume、
+  已退休 implementation selector 不得进入 API/Worker/modelctl、launcher Key/migration
+  one-shot fail-fast、secret/smoke cleanup fake-Docker contract，以及真实 `./zhixu up`、`restart`、重复 `up` 和 readiness。
 - Canonical Go/contract 门禁至少包含受影响 `go test`、`go test -race`、`go vet`、`go mod tidy -diff`、
   `make openapi-check`、`make compose-check`、`git diff --check` 和 Secret 扫描。
 

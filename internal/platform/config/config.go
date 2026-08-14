@@ -73,7 +73,6 @@ const (
 	maxEmbeddingMaxResponseBytes = int64(128 << 20)
 
 	defaultChatAdapterVersion   = "v1"
-	defaultChatImplementation   = ChatImplementationDirect
 	defaultChatTimeout          = 30 * time.Second
 	defaultChatMaxRequestBytes  = int64(4 << 20)
 	defaultChatMaxResponseBytes = int64(4 << 20)
@@ -116,6 +115,16 @@ const (
 	maxReindexHeartbeatInterval    = time.Minute
 )
 
+var removedImplementationSelectorEnvNames = [...]string{
+	"ZHIXU_CHAT_IMPLEMENTATION",
+	"ZHIXU_EMBEDDING_IMPLEMENTATION",
+	"ZHIXU_STRUCTURED_SCHEDULER_RAG",
+	"ZHIXU_STRUCTURED_SCHEDULER_RELATION",
+	"ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT",
+	"ZHIXU_STRUCTURED_SCHEDULER_CAPTURE",
+	"ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING",
+}
+
 // TelemetryMode controls whether telemetry export is disabled or required for
 // process readiness.
 type TelemetryMode string
@@ -151,26 +160,6 @@ const (
 	ChatProviderDisabled ChatProvider = "disabled"
 	// ChatProviderOpenAICompatible 使用 OpenAI-Compatible HTTP 协议。
 	ChatProviderOpenAICompatible ChatProvider = "openai-compatible"
-)
-
-// ChatImplementation 选择 OpenAI-Compatible Chat Port 的内部实现。
-type ChatImplementation string
-
-const (
-	// ChatImplementationDirect 使用项目直接 HTTP Adapter。
-	ChatImplementationDirect ChatImplementation = "direct"
-	// ChatImplementationEino 使用 Eino OpenAI Adapter。
-	ChatImplementationEino ChatImplementation = "eino"
-)
-
-// StructuredSchedulerImplementation 选择 StructuredRunner 的内部阶段调度实现。
-type StructuredSchedulerImplementation string
-
-const (
-	// StructuredSchedulerImplementationDirect 使用项目直接调度器。
-	StructuredSchedulerImplementationDirect StructuredSchedulerImplementation = "direct"
-	// StructuredSchedulerImplementationEino 使用 Eino 短 Graph 调度器。
-	StructuredSchedulerImplementationEino StructuredSchedulerImplementation = "eino"
 )
 
 // ModelSettingsMode 控制模型身份来自静态配置还是受管数据库 revision。
@@ -239,22 +228,15 @@ type Config struct {
 	EmbeddingTimeout            time.Duration                 `yaml:"embedding_timeout"`
 	EmbeddingMaxResponseBytes   int64                         `yaml:"embedding_max_response_bytes"`
 
-	ChatProvider         ChatProvider       `yaml:"chat_provider"`
-	ChatImplementation   ChatImplementation `yaml:"chat_implementation"`
-	ChatBaseURL          string             `yaml:"chat_base_url"`
-	ChatAPIKey           string             `yaml:"chat_api_key"`
-	ChatModel            string             `yaml:"chat_model"`
-	ChatModelVersion     string             `yaml:"chat_model_version"`
-	ChatAdapterVersion   string             `yaml:"chat_adapter_version"`
-	ChatTimeout          time.Duration      `yaml:"chat_timeout"`
-	ChatMaxRequestBytes  int64              `yaml:"chat_max_request_bytes"`
-	ChatMaxResponseBytes int64              `yaml:"chat_max_response_bytes"`
-
-	StructuredSchedulerRAG        StructuredSchedulerImplementation `yaml:"structured_scheduler_rag"`
-	StructuredSchedulerRelation   StructuredSchedulerImplementation `yaml:"structured_scheduler_relation"`
-	StructuredSchedulerArtifact   StructuredSchedulerImplementation `yaml:"structured_scheduler_artifact"`
-	StructuredSchedulerCapture    StructuredSchedulerImplementation `yaml:"structured_scheduler_capture"`
-	StructuredSchedulerOrganizing StructuredSchedulerImplementation `yaml:"structured_scheduler_organizing"`
+	ChatProvider         ChatProvider  `yaml:"chat_provider"`
+	ChatBaseURL          string        `yaml:"chat_base_url"`
+	ChatAPIKey           string        `yaml:"chat_api_key"`
+	ChatModel            string        `yaml:"chat_model"`
+	ChatModelVersion     string        `yaml:"chat_model_version"`
+	ChatAdapterVersion   string        `yaml:"chat_adapter_version"`
+	ChatTimeout          time.Duration `yaml:"chat_timeout"`
+	ChatMaxRequestBytes  int64         `yaml:"chat_max_request_bytes"`
+	ChatMaxResponseBytes int64         `yaml:"chat_max_response_bytes"`
 
 	// ModelSettingsMode 显式选择静态或数据库受管的模型设置来源。
 	ModelSettingsMode ModelSettingsMode `yaml:"model_settings_mode"`
@@ -342,18 +324,12 @@ func Defaults() Config {
 		EmbeddingMaxResponseBytes:   defaultEmbeddingMaxResponseBytes,
 
 		ChatProvider:         ChatProviderDisabled,
-		ChatImplementation:   defaultChatImplementation,
 		ChatAdapterVersion:   defaultChatAdapterVersion,
 		ChatTimeout:          defaultChatTimeout,
 		ChatMaxRequestBytes:  defaultChatMaxRequestBytes,
 		ChatMaxResponseBytes: defaultChatMaxResponseBytes,
 
-		StructuredSchedulerRAG:        StructuredSchedulerImplementationDirect,
-		StructuredSchedulerRelation:   StructuredSchedulerImplementationDirect,
-		StructuredSchedulerArtifact:   StructuredSchedulerImplementationDirect,
-		StructuredSchedulerCapture:    StructuredSchedulerImplementationDirect,
-		StructuredSchedulerOrganizing: StructuredSchedulerImplementationDirect,
-		ModelSettingsMode:             ModelSettingsModeStatic,
+		ModelSettingsMode: ModelSettingsModeStatic,
 
 		ToolRuntimeMode: ToolModeDisabled,
 		WebFetchMode:    ToolModeDisabled,
@@ -510,22 +486,15 @@ type fileConfig struct {
 	EmbeddingTimeout            *string                        `yaml:"embedding_timeout"`
 	EmbeddingMaxResponseBytes   *int64                         `yaml:"embedding_max_response_bytes"`
 
-	ChatProvider         *ChatProvider       `yaml:"chat_provider"`
-	ChatImplementation   *ChatImplementation `yaml:"chat_implementation"`
-	ChatBaseURL          *string             `yaml:"chat_base_url"`
-	ChatAPIKey           *string             `yaml:"chat_api_key"`
-	ChatModel            *string             `yaml:"chat_model"`
-	ChatModelVersion     *string             `yaml:"chat_model_version"`
-	ChatAdapterVersion   *string             `yaml:"chat_adapter_version"`
-	ChatTimeout          *string             `yaml:"chat_timeout"`
-	ChatMaxRequestBytes  *int64              `yaml:"chat_max_request_bytes"`
-	ChatMaxResponseBytes *int64              `yaml:"chat_max_response_bytes"`
-
-	StructuredSchedulerRAG        *StructuredSchedulerImplementation `yaml:"structured_scheduler_rag"`
-	StructuredSchedulerRelation   *StructuredSchedulerImplementation `yaml:"structured_scheduler_relation"`
-	StructuredSchedulerArtifact   *StructuredSchedulerImplementation `yaml:"structured_scheduler_artifact"`
-	StructuredSchedulerCapture    *StructuredSchedulerImplementation `yaml:"structured_scheduler_capture"`
-	StructuredSchedulerOrganizing *StructuredSchedulerImplementation `yaml:"structured_scheduler_organizing"`
+	ChatProvider         *ChatProvider `yaml:"chat_provider"`
+	ChatBaseURL          *string       `yaml:"chat_base_url"`
+	ChatAPIKey           *string       `yaml:"chat_api_key"`
+	ChatModel            *string       `yaml:"chat_model"`
+	ChatModelVersion     *string       `yaml:"chat_model_version"`
+	ChatAdapterVersion   *string       `yaml:"chat_adapter_version"`
+	ChatTimeout          *string       `yaml:"chat_timeout"`
+	ChatMaxRequestBytes  *int64        `yaml:"chat_max_request_bytes"`
+	ChatMaxResponseBytes *int64        `yaml:"chat_max_response_bytes"`
 
 	ModelSettingsMode      *ModelSettingsMode `yaml:"model_settings_mode"`
 	ModelSettingsKeyFile   *string            `yaml:"model_settings_key_file"`
@@ -664,9 +633,6 @@ func applyYAMLFile(path string, cfg *Config) error {
 	if raw.ChatProvider != nil {
 		cfg.ChatProvider = *raw.ChatProvider
 	}
-	if raw.ChatImplementation != nil {
-		cfg.ChatImplementation = *raw.ChatImplementation
-	}
 	if raw.ChatBaseURL != nil {
 		cfg.ChatBaseURL = *raw.ChatBaseURL
 	}
@@ -687,21 +653,6 @@ func applyYAMLFile(path string, cfg *Config) error {
 	}
 	if raw.ChatMaxResponseBytes != nil {
 		cfg.ChatMaxResponseBytes = *raw.ChatMaxResponseBytes
-	}
-	if raw.StructuredSchedulerRAG != nil {
-		cfg.StructuredSchedulerRAG = *raw.StructuredSchedulerRAG
-	}
-	if raw.StructuredSchedulerRelation != nil {
-		cfg.StructuredSchedulerRelation = *raw.StructuredSchedulerRelation
-	}
-	if raw.StructuredSchedulerArtifact != nil {
-		cfg.StructuredSchedulerArtifact = *raw.StructuredSchedulerArtifact
-	}
-	if raw.StructuredSchedulerCapture != nil {
-		cfg.StructuredSchedulerCapture = *raw.StructuredSchedulerCapture
-	}
-	if raw.StructuredSchedulerOrganizing != nil {
-		cfg.StructuredSchedulerOrganizing = *raw.StructuredSchedulerOrganizing
 	}
 	if raw.ModelSettingsMode != nil {
 		cfg.ModelSettingsMode = *raw.ModelSettingsMode
@@ -881,9 +832,6 @@ func (c Config) ValidateModels() error {
 	if err := c.validateChat(); err != nil {
 		return err
 	}
-	if err := c.validateStructuredSchedulers(); err != nil {
-		return err
-	}
 	return c.validateModelSettings()
 }
 
@@ -969,9 +917,6 @@ func (c Config) validate(validateAuth bool) error {
 		return err
 	}
 	if err := c.validateChat(); err != nil {
-		return err
-	}
-	if err := c.validateStructuredSchedulers(); err != nil {
 		return err
 	}
 	if err := c.validateModelSettings(); err != nil {
@@ -1262,6 +1207,9 @@ func (c Config) validateTelemetry() error {
 		if endpoint.Scheme != "http" && endpoint.Scheme != "https" {
 			return errors.New("telemetry_endpoint scheme must be http or https")
 		}
+		if endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.Opaque != "" {
+			return errors.New("telemetry_endpoint must not include userinfo, query, fragment, or opaque data")
+		}
 		return nil
 	default:
 		return errors.New("telemetry_mode must be disabled, optional, or required")
@@ -1351,9 +1299,6 @@ func isLoopbackHost(host string) bool {
 }
 
 func (c Config) validateChat() error {
-	if c.ChatImplementation != ChatImplementationDirect && c.ChatImplementation != ChatImplementationEino {
-		return errors.New("chat_implementation must be direct or eino")
-	}
 	if c.ChatTimeout <= 0 || c.ChatTimeout > maxChatTimeout {
 		return errors.New("chat_timeout must be positive and at most 5m")
 	}
@@ -1389,25 +1334,6 @@ func (c Config) validateChat() error {
 	default:
 		return errors.New("chat_provider must be disabled or openai-compatible")
 	}
-}
-
-func (c Config) validateStructuredSchedulers() error {
-	selectors := []struct {
-		name           string
-		implementation StructuredSchedulerImplementation
-	}{
-		{name: "structured_scheduler_rag", implementation: c.StructuredSchedulerRAG},
-		{name: "structured_scheduler_relation", implementation: c.StructuredSchedulerRelation},
-		{name: "structured_scheduler_artifact", implementation: c.StructuredSchedulerArtifact},
-		{name: "structured_scheduler_capture", implementation: c.StructuredSchedulerCapture},
-		{name: "structured_scheduler_organizing", implementation: c.StructuredSchedulerOrganizing},
-	}
-	for _, selector := range selectors {
-		if selector.implementation != StructuredSchedulerImplementationDirect && selector.implementation != StructuredSchedulerImplementationEino {
-			return fmt.Errorf("%s must be direct or eino", selector.name)
-		}
-	}
-	return nil
 }
 
 func validateChatBaseURL(raw string) error {
@@ -1513,7 +1439,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s ModelSettingsMode:%q ModelSettingsKeyConfigured:%t GitSyncKeyConfigured:%t ModelSettingsRolloutConfigured:%t ModelSettingsPrepared:%t EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatImplementation:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d StructuredSchedulerRAG:%q StructuredSchedulerRelation:%q StructuredSchedulerArtifact:%q StructuredSchedulerCapture:%q StructuredSchedulerOrganizing:%q ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s ModelSettingsMode:%q ModelSettingsKeyConfigured:%t GitSyncKeyConfigured:%t ModelSettingsRolloutConfigured:%t ModelSettingsPrepared:%t EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -1554,7 +1480,6 @@ func (c Config) String() string {
 		c.EmbeddingTimeout,
 		c.EmbeddingMaxResponseBytes,
 		c.ChatProvider,
-		c.ChatImplementation,
 		c.ChatProvider != ChatProviderDisabled,
 		c.ChatModel,
 		c.ChatModelVersion,
@@ -1562,11 +1487,6 @@ func (c Config) String() string {
 		c.ChatTimeout,
 		c.ChatMaxRequestBytes,
 		c.ChatMaxResponseBytes,
-		c.StructuredSchedulerRAG,
-		c.StructuredSchedulerRelation,
-		c.StructuredSchedulerArtifact,
-		c.StructuredSchedulerCapture,
-		c.StructuredSchedulerOrganizing,
 		c.ToolRuntimeMode,
 		c.WebFetchMode,
 		c.WebFetchTimeout,
@@ -1605,6 +1525,11 @@ func (c Config) GoString() string {
 }
 
 func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAPISecrets bool) error {
+	for _, key := range removedImplementationSelectorEnvNames {
+		if _, ok := lookup(key); ok {
+			return fmt.Errorf("%s is no longer supported; Eino is the only AI runtime", key)
+		}
+	}
 	if value, ok := lookup("ZHIXU_AUTH_MODE"); ok {
 		cfg.AuthMode = AuthMode(value)
 	}
@@ -1625,24 +1550,6 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool), consumeAPISecrets
 			cfg.ChatModel = ""
 			cfg.ChatModelVersion = ""
 		}
-	}
-	if value, ok := lookup("ZHIXU_CHAT_IMPLEMENTATION"); ok {
-		cfg.ChatImplementation = ChatImplementation(value)
-	}
-	if value, ok := lookup("ZHIXU_STRUCTURED_SCHEDULER_RAG"); ok {
-		cfg.StructuredSchedulerRAG = StructuredSchedulerImplementation(value)
-	}
-	if value, ok := lookup("ZHIXU_STRUCTURED_SCHEDULER_RELATION"); ok {
-		cfg.StructuredSchedulerRelation = StructuredSchedulerImplementation(value)
-	}
-	if value, ok := lookup("ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT"); ok {
-		cfg.StructuredSchedulerArtifact = StructuredSchedulerImplementation(value)
-	}
-	if value, ok := lookup("ZHIXU_STRUCTURED_SCHEDULER_CAPTURE"); ok {
-		cfg.StructuredSchedulerCapture = StructuredSchedulerImplementation(value)
-	}
-	if value, ok := lookup("ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING"); ok {
-		cfg.StructuredSchedulerOrganizing = StructuredSchedulerImplementation(value)
 	}
 	if value, ok := lookup("ZHIXU_EMBEDDING_PROVIDER"); ok {
 		cfg.EmbeddingProvider = EmbeddingProvider(value)

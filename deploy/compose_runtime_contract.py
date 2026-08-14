@@ -160,26 +160,30 @@ def main() -> None:
         managed,
         lambda model: model["services"]["worker"]["environment"].update(ZHIXU_CHAT_API_KEY="canary"),
     )
+    for service_name, selector in (
+        ("app", "ZHIXU_CHAT_IMPLEMENTATION"),
+        ("worker", "ZHIXU_EMBEDDING_IMPLEMENTATION"),
+        ("modelctl", "ZHIXU_STRUCTURED_SCHEDULER_RAG"),
+    ):
+        expect_invalid(
+            f"retired AI runtime selector in {service_name}",
+            managed,
+            lambda model, name=service_name, key=selector: model["services"][name]["environment"].update(
+                {key: "eino"}
+            ),
+        )
     expect_invalid(
-        "unknown chat implementation",
-        managed,
-        lambda model: model["services"]["app"]["environment"].update(ZHIXU_CHAT_IMPLEMENTATION="automatic"),
-    )
-    expect_invalid(
-        "API Worker chat implementation mismatch",
-        managed,
-        lambda model: model["services"]["worker"]["environment"].update(ZHIXU_CHAT_IMPLEMENTATION="eino"),
-    )
-    expect_invalid(
-        "modelctl chat implementation mismatch",
-        managed,
-        lambda model: model["services"]["modelctl"]["environment"].update(ZHIXU_CHAT_IMPLEMENTATION="eino"),
-    )
-    expect_invalid(
-        "unknown structured scheduler implementation",
+        "Eino chat without Tool runtime",
         managed,
         lambda model: model["services"]["worker"]["environment"].update(
-            ZHIXU_STRUCTURED_SCHEDULER_RAG="automatic"
+            ZHIXU_TOOL_RUNTIME_MODE="disabled"
+        ),
+    )
+    expect_invalid(
+        "unknown Tool runtime mode",
+        managed,
+        lambda model: model["services"]["app"]["environment"].update(
+            ZHIXU_TOOL_RUNTIME_MODE="automatic"
         ),
     )
     expect_invalid(

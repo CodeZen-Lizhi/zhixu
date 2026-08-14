@@ -284,7 +284,7 @@ func newGenerationTestGenerator(
 	verifier CitationVerifier,
 	modelRef agentdomain.ModelRef,
 ) *Generator {
-	return newGenerationTestGeneratorWithScheduler(t, model, modelRuns, generations, verifier, modelRef, nil)
+	return newGenerationTestGeneratorWithScheduler(t, model, modelRuns, generations, verifier, modelRef, newOrganizingTrackingEinoScheduler(t))
 }
 
 func newGenerationTestGeneratorWithScheduler(
@@ -310,7 +310,9 @@ func newGenerationTestGeneratorWithDocuments(
 	modelRef agentdomain.ModelRef,
 	documents organizingapp.FrozenDocumentContentReader,
 ) *Generator {
-	return newGenerationTestGeneratorWithDocumentsAndScheduler(t, model, modelRuns, generations, verifier, modelRef, documents, nil)
+	return newGenerationTestGeneratorWithDocumentsAndScheduler(
+		t, model, modelRuns, generations, verifier, modelRef, documents, newOrganizingTrackingEinoScheduler(t),
+	)
 }
 
 func newGenerationTestGeneratorWithDocumentsAndScheduler(

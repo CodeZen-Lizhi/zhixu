@@ -15,6 +15,7 @@ const (
 	errorCodeQueryPlannerMissing       = "AGENT_QUERY_PLANNER_MISSING"
 	errorCodeQueryPlanRequestInvalid   = "AGENT_QUERY_PLAN_REQUEST_INVALID"
 	errorCodeQueryPlanResponseMismatch = "AGENT_QUERY_PLAN_RESPONSE_MISMATCH"
+	queryPlanMaxOutputTokens           = 256
 )
 
 // QueryPlanRequest 冻结一次 PLAN 调用的模型运行身份、运行时版本和有界未信任输入。
@@ -60,7 +61,14 @@ func (planner *QueryPlanner) Plan(ctx context.Context, request QueryPlanRequest)
 	if err := validateQueryPlanRequest(request); err != nil {
 		return QueryPlanRunResult{}, err
 	}
-	boundInput, err := bindQueryPlanModelRunRef(request.Input, request.ModelRunRef)
+	boundInput := append([]byte(nil), request.Input...)
+	sourceQuery := ""
+	var err error
+	if request.SchemaRef.Version == domain.OutputSchemaVersionV1 {
+		boundInput, err = bindQueryPlanModelRunRef(request.Input, request.ModelRunRef)
+	} else {
+		sourceQuery, err = validateIdentitylessQueryPlanInput(request.Input)
+	}
 	if err != nil {
 		return QueryPlanRunResult{}, err
 	}
@@ -69,6 +77,9 @@ func (planner *QueryPlanner) Plan(ctx context.Context, request QueryPlanRequest)
 		return QueryPlanRunResult{}, err
 	}
 	chatRequest := buildChatRequest(snapshot, snapshot.Schema, domain.ModelCallPlan, snapshot.Prompt.InitialInstruction, boundInput, "")
+	if chatRequest.MaxOutputTokens > queryPlanMaxOutputTokens {
+		chatRequest.MaxOutputTokens = queryPlanMaxOutputTokens
+	}
 	requestBytes, err := encodedChatRequestBytes(chatRequest)
 	if err != nil {
 		return QueryPlanRunResult{}, err
@@ -94,17 +105,43 @@ func (planner *QueryPlanner) Plan(ctx context.Context, request QueryPlanRequest)
 	if !bytes.Equal(decoded, response.Content) {
 		return QueryPlanRunResult{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeDecoderContract, false, errors.New("query plan decoder transformed the accepted document"))
 	}
-	plan, err := domain.DecodeRAGQueryPlan(decoded, domain.DefaultDecodeLimits())
+	var plan domain.RAGQueryPlanResult
+	if request.SchemaRef.Version == domain.OutputSchemaVersionV2 {
+		providerPlan, decodeErr := domain.DecodeRAGQueryPlanProviderV2(decoded, domain.DefaultDecodeLimits())
+		if decodeErr != nil {
+			return QueryPlanRunResult{}, decodeErr
+		}
+		plan, err = providerPlan.Compose(request.ModelRunRef, sourceQuery)
+	} else {
+		plan, err = domain.DecodeRAGQueryPlan(decoded, domain.DefaultDecodeLimits())
+		if err == nil && plan.ModelRunRef != request.ModelRunRef {
+			return QueryPlanRunResult{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeQueryPlanResponseMismatch, false, errors.New("query plan model run reference differs from the frozen request"))
+		}
+	}
 	if err != nil {
 		return QueryPlanRunResult{}, err
-	}
-	if plan.ModelRunRef != request.ModelRunRef {
-		return QueryPlanRunResult{}, applicationError(foundation.ErrorConsistencyViolation, errorCodeQueryPlanResponseMismatch, false, errors.New("query plan model run reference differs from the frozen request"))
 	}
 	return QueryPlanRunResult{
 		Plan: plan, Usage: response.Usage, RequestBytes: requestBytes, ResponseBytes: int64(len(response.Content)),
 		Runtime: FrozenRuntimeRefs{Profile: snapshot.Profile.Ref, Prompt: snapshot.Prompt.Ref, Schema: snapshot.Schema.Ref, Model: snapshot.Profile.Model},
 	}, nil
+}
+
+// validateIdentitylessQueryPlanInput rejects server-owned identity before the
+// v2 provider call; the trusted ModelRun reference is injected only on Compose.
+func validateIdentitylessQueryPlanInput(input []byte) (string, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(input, &document); err != nil || document == nil {
+		return "", applicationError(foundation.ErrorInvalidInput, errorCodeQueryPlanRequestInvalid, false, errors.New("query plan input must be a JSON object"))
+	}
+	if _, exists := document["model_run_ref"]; exists {
+		return "", applicationError(foundation.ErrorInvalidInput, errorCodeQueryPlanRequestInvalid, false, errors.New("query plan input reserves model_run_ref for the server"))
+	}
+	var question string
+	if raw, exists := document["question"]; !exists || json.Unmarshal(raw, &question) != nil || domain.ValidateRAGQueryPlanSourceQuery(question) != nil {
+		return "", applicationError(foundation.ErrorInvalidInput, errorCodeQueryPlanRequestInvalid, false, errors.New("query plan input requires a bounded question"))
+	}
+	return question, nil
 }
 
 // bindQueryPlanModelRunRef 把服务端分配的 Model Run 身份加入仅存在内存的 PLAN 输入，供 Provider 精确回显绑定。
@@ -131,7 +168,7 @@ func bindQueryPlanModelRunRef(input []byte, modelRunRef foundation.ID) ([]byte, 
 func validateQueryPlanRequest(request QueryPlanRequest) error {
 	if !canonicalApplicationID(request.ModelRunRef) || request.ProfileRef.Validate() != nil || request.PromptRef.Validate() != nil ||
 		request.SchemaRef.Validate() != nil || request.SchemaRef.ID != domain.RAGQueryPlanSchemaID ||
-		request.SchemaRef.Version != domain.OutputSchemaVersionV1 || len(request.Input) == 0 ||
+		(request.SchemaRef.Version != domain.OutputSchemaVersionV1 && request.SchemaRef.Version != domain.OutputSchemaVersionV2) || len(request.Input) == 0 ||
 		len(request.Input) > MaxStructuredInputBytes || !utf8.Valid(request.Input) || bytes.IndexByte(request.Input, 0) >= 0 {
 		return applicationError(foundation.ErrorInvalidInput, errorCodeQueryPlanRequestInvalid, false, errors.New("query plan references or bounded input are invalid"))
 	}

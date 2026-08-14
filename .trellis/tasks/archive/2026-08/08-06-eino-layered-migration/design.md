@@ -1,133 +1,206 @@
-# Eino 分层迁移技术设计
+# Eino 分层迁移技术设计（能力复核修订版）
 
-## 1. 设计决策
+> 修订基线：2026-08-08，Eino core `v0.9.13`。本文同时记录“当前已经落地的基线”和“下一阶段计划”，不把未实施能力写成已完成。
 
-采用“Eino AI 能力层 + 知序业务/持久层”的分层方案：
+> ADR 编号冲突已解决：ADR-0019 记录基线分层采用，ADR-0020 记录 Embedding 采用，ADR-0021
+> 记录其余 Runtime 路线的实际门禁结论。
 
-- Eino 在本任务中只负责 ChatModel、短流程 Graph 和 Callback/Trace。受控 Tool Calling 必须由后续独立任务重新通过持久 Attempt 与权限门禁；本任务 Stage 4 结论为 No-Go。
-- 知序的 `agentapplication`、`retrievalapplication`、`tools`、`workflow` Port 继续是稳定边界；Eino 类型只允许出现在 Adapter、Infrastructure 和短流程 Composition 内。
-- PostgreSQL 是 Workflow、Model Run/Call、Tool Call、Evidence/Citation、Proposal/Approval 和 Writeback 的唯一持久事实源；River 只负责投递和领取。
-- 第一阶段不启用 Eino ADK、Checkpoint/Interrupt、自动重试或 Eino 内置长期 Agent 状态，避免和现有恢复协议形成双账。
-- 实施第一步必须新增“分层正式采用 Eino”ADR，并明确 supersede ADR-0013 的“不正式采用”结论；在该 ADR 合入前不修改主模块依赖。
+## 1. 修订后的设计决策
+
+采用“PostgreSQL/River 外层可靠工作流 + Eino 内层 AI Runtime”的分层方案：
+
+- Eino 负责通用 Provider 组件、进程内 Chain/Graph/Workflow、流处理、Callback、通用 Tool dispatch 和 ReAct/Agent loop。
+- 知序负责 durable Workflow、领域状态、租约与 fence、事务、Outbox、权限、审计、Evidence/Citation、Proposal/Approval 和 Safe Writeback。
+- 项目 Application Port 继续是稳定边界；Eino 类型只出现在 Adapter、Infrastructure 和 AI Composition 包，不进入 Domain、HTTP DTO、Workflow input 或数据库。
+- 项目服务适配为 Eino Retriever、Transformer、Tool 或 Lambda，是 Eino 官方支持的自定义 Component 用法；只有重复实现 Graph 调度、流拼装、ReAct 循环或 Provider 协议才属于不必要自研。
+- Eino Checkpoint/Interrupt 是 Agent/Graph 执行快照和交互能力，不是 River/PostgreSQL 的替代品。首轮只允许在同一 Worker 进程、同一个持久 Node Attempt 内试点，PostgreSQL 仍是唯一业务恢复事实源。
+- 生产基线使用 Eino `v0.9.13` 和经典 `schema.Message` 路径；`v0.10` alpha、Agentic OpenAI/`AgenticMessage`、多 Agent 和长时间 checkpoint 恢复先隔离验证。
+- Eino 基线 ADR 只授权当前已完成的 Chat、Callback 和短 Graph。本修订版是后续设计输入，不自动扩大生产授权；任何后续能力进入生产开发前必须新增 ADR，明确 supersede Eino 基线 ADR 的范围限制、版本基线和逐能力回滚策略。
 
 ## 2. 目标架构
 
 ```mermaid
-flowchart LR
-    CFG[Config / Managed Model Settings] --> ROOT[API & Worker Composition Root]
-    ROOT --> EA[Eino Chat Adapter]
-    EA --> EM[Eino OpenAI-Compatible ChatModel]
-    EA --> PORT[agentapplication.ChatModel]
-    PORT --> SR[StructuredRunner / QueryPlan / Faithfulness]
-    SR --> PS[direct / Eino phase scheduler]
-    PS --> RAG[RAGExecutor / Relation / Artifact / Profile / Organizing]
-    RAG --> DOM[Domain Schema + Evidence + Citation + Finalizer]
-    RAG --> DB[(PostgreSQL Model Run / Workflow Facts)]
-    RAG --> RIVER[River Delivery]
-    TOOL[Eino ToolsNode<br/>future task only] --> BRIDGE[Project Tool Request Bridge]
-    BRIDGE --> POLICY[Registry + Schema + Capability + Lease + Idempotency]
-    POLICY --> WRITE[Safe Writeback / Change Control]
-    SEARCH[Eino Retriever bridge, optional] --> SS[Project SearchService]
-    SS --> PG[(PostgreSQL FTS + pgvector + Active Index)]
+flowchart TB
+    API[API Command] --> FACTS[(PostgreSQL Workflow / Outbox / Attempt / Model Facts)]
+    FACTS --> RIVER[River Delivery]
+    RIVER --> CLAIM[Project Runtime Claim / Attempt / Fence]
+    CLAIM --> FACTS
+    CLAIM --> OUTER[Project RAG Workflow Executor]
+    OUTER --> RAG[Candidate Eino RAG Workflow / Graph]
+
+    RAG --> PLAN[Eino ChatModel / Query Plan]
+    PLAN --> RET[Eino Retriever Bridge]
+    RET --> SEARCH[Project SearchService]
+    SEARCH --> PG[(PostgreSQL FTS + pgvector + RRF + Active Index)]
+    RET --> EV[Project Evidence / Eligibility Transformer]
+    EV --> ANSWER[Eino ChatModel / Structured Answer]
+    ANSWER --> REVIEW[Project Citation + Faithfulness + Refusal]
+    REVIEW --> PROPOSAL[Terminal Proposal DTO]
+    PROPOSAL --> FINAL[Project Atomic Finalizer]
+
+    EMB[Eino OpenAI / Ollama Embedding] --> ECONTRACT[Project Embedding Contract Adapter]
+    ECONTRACT --> SEARCH
+
+    AGENT[Eino ChatModelAgent / ToolsNode] --> TBRIDGE[Project Read / Proposal Tool Bridge]
+    TBRIDGE --> POLICY[Registry + Authorization + Attempt + Idempotency + Receipt]
+    POLICY --> CANDIDATE[Candidate / Proposal Only]
+    CANDIDATE --> APPROVAL[Independent Project Approval Workflow]
+    APPROVAL --> SAFE[Trusted Safe Writeback Executor]
+
+    RAG --> STREAM[Eino Stream / Callback]
+    STREAM --> TOKEN[Optional Token API]
+    OUTER --> EVENT[Existing Durable Phase SSE]
 ```
 
-Eino Graph 的节点只能调用图中已有项目 Port；Graph 的生命周期必须短于一个 Worker Node Attempt 的 timeout，不能持有 River lease 或直接写外部副作用。
+API 命令先原子写入项目 Workflow/Outbox 事实；River delivery 到达后，由项目 Runtime Claim 创建或恢复 Node Attempt、校验 lease/fence，再把冻结的执行上下文交给外层 Executor。外层 Executor 创建 Model Run，并在内层 Eino Runnable 成功后原子发布结果。Eino Runnable 不创建 Attempt、不提交业务终态、不直接写文件/Git，也不决定 River 重试。
 
-## 3. 迁移矩阵
+## 3. 修订后的迁移矩阵
 
-下表给每项能力只分配一个主类别；同一行中的“保留边界”表示即使采用 Eino，也不能移动的项目契约。
-
-| 正式能力/入口 | 主类别 | 目标与保留边界 | 阶段 |
+| 正式能力/入口 | 归属 | 修订后的目标与保留边界 | 状态/阶段 |
 |---|---|---|---|
-| `internal/platform/models/chat_openai.go` Provider transport | **替换为 Eino** | 用 Eino OpenAI extension 实现项目 `ChatModel`；项目继续拥有安全 HTTP client、动态 Schema、严格 response/usage 校验和稳定错误 | 1 |
-| 模型组件 Callback/Trace | **通过项目 Port 适配** | Eino callback 接入 `internal/platform/observability`；只写 telemetry，不替代 Model Run/Call/Audit | 2 |
-| `internal/agent/application/runner.go` Structured Output 调度 | **通过项目 Port 适配** | 二次 Go/No-Go 通过后，Eino Graph 只实现内部 `INITIAL/REPAIR/REDUCED` 调度；Facade、decoder、预算、错误和审计保留 | 3，可选 |
-| 关系评估 `internal/agent/adapter/workflow/executor.go` | **保留自研** | 继续拥有五分类语义、版本绑定和发布规则；只复用注入的 Eino-backed Chat/可选 Runner | 随 1/3 验证 |
-| RAG `internal/agent/adapter/workflow/rag_executor.go`、`internal/agent/application/rag.go` | **保留自研** | 继续拥有 Query Plan、检索、Evidence、Citation/Faithfulness、拒答、progress 和 terminal proposal | 随 1/3 验证 |
-| Artifact `internal/artifact/workflow/executor.go` | **保留自研** | 继续拥有 evidence eligibility、Revision 和原子 finalizer；只复用注入的模型/Runner | 随 1/3 验证 |
-| Capture Profile `internal/capture/profile/generator.go` | **保留自研** | 继续拥有 frozen source、Profile Revision/Evidence、能力降级和完成事务 | 随 1/3 验证 |
-| Organizing `internal/organizing/workflow/generation.go` | **保留自研** | 继续拥有模板/标签约束、Human Task、Artifact/Proposal 输出和终态 | 随 1/3 验证 |
-| 只读模型 Tool Call | **通过项目 Port 适配** | Eino `ToolCallingChatModel`/`ToolsNode` 只解析和短路由；执行仍进入项目 `ToolRequest`、Policy、Capability、lease/fence 和 receipt | 4，可选 |
-| `SearchService`、FTS/pgvector、RRF、Active Index | **保留自研** | 不用 Eino Retriever 重写 PostgreSQL 检索；若未来 Graph 有具体消费者，再单独增加只调用 `SearchService` 的 bridge | 后续独立任务 |
-| OpenAI/Ollama Embedding transport | **暂不迁移** | 当前 Eino extension 未完成稳定版本与合同门禁；保留项目批量、顺序、维度、归一化和版本绑定 | 后续独立任务 |
-| Rerank | **暂不迁移** | 当前没有生产 Provider，先完成 Provider 选型和结果合同，再讨论 Eino Adapter | 后续独立任务 |
-| Token Streaming | **暂不迁移** | 当前 SSE 是持久阶段通知而非 Token Stream；有明确产品需求后另立 API/前端任务 | 后续独立任务 |
-| Eino ADK、Checkpoint/Interrupt、长期 Agent 状态 | **暂不迁移** | 不与 PostgreSQL/River 建立第二套恢复事实；除非未来 ADR 重做恢复模型 | 后续独立任务 |
-| `runtime.go`、模型设置、Credential/Revision/Readiness | **保留自研** | 项目配置负责校验并构造私有 Adapter；SDK 只保留发起认证请求所需的最小 Credential，API/Worker 继续共享不暴露密钥的 immutable runtime | 全程 |
-| `RecordingChatModel`、Model Run/Call/Audit | **保留自研** | 每次 Provider 调用前后仍持久化项目事实；Eino callback 不能替代 | 全程 |
-| Workflow/River/PostgreSQL、Human Task、Outbox/补偿 | **保留自研** | 唯一持久工作流状态、投递、lease、重试、暂停/恢复和人工恢复边界 | 全程 |
-| Tool Registry/Policy/执行、Change Control/Safe Writeback | **保留自研** | 写操作、审批、幂等、Git/Reindex 和未知结果恢复绝不交给 Graph/ToolsNode | 全程 |
-
-`poc/eino/chatgraph` 只作为测试和构造参考，不直接复制其 contract 到生产代码；前端、数据库 Schema 和已有 API 契约在本计划中不变。
+| OpenAI-Compatible Chat transport | **Eino 原生组件 + 项目合同适配** | 使用 Eino OpenAI ChatModel；项目保留安全 HTTP、动态 Schema、严格 wire/usage/model/error 校验 | 已完成，默认 direct |
+| Callback/Trace | **Eino Callback + 项目 observability** | Eino 提供生命周期钩子；只写脱敏 telemetry，不替代 Model Run/Call/Audit | 已完成 |
+| Structured Output 三阶段调度 | **Eino Graph + 项目 Port** | Eino 负责节点和分支；项目保留 decoder、预算、阶段上限、错误与审计 | 已完成，按消费者灰度 |
+| 完整 RAG 内层编排 | **保留项目 `RAGExecutor`** | Eino 能表达流程，但当前原生覆盖与净收益不达门禁；继续复用 Eino Chat/Embedding/短 Graph | 生产 No-Go |
+| `SearchService`、FTS/pgvector、RRF、Active Index | **项目实现** | 官方无 PostgreSQL/pgvector/RRF 等价实现；当前完整 RAG No-Go，因此不创建无消费者 Retriever bridge | 保留 |
+| PostgreSQL Indexer/Active Index | **项目实现，按需适配 Eino Indexer** | Eino Indexer 接口不能替代版本激活、事务和一致性 | 有 Graph 消费者时接入 |
+| OpenAI/Ollama Embedding transport | **Eino 原生组件 + 项目合同适配** | 两个 Provider 均已实现可回滚 Adapter；保留批量、顺序、数量、维度、归一化、model 和 `truncate=false` 门禁 | 条件 Go，默认 direct |
+| 模型语义 Rerank | **项目 Port + 自定义 Eino Transformer** | 官方 ScoreReranker 只重排已有 score；真实 rerank Provider 仍由项目选择和校验 | Provider 确定后 |
+| 通用 Tool Calling / ReAct loop | **产品授权后候选 Eino ChatModelAgent/ToolsNode** | ToolsNode PoC 已 PASS；当前无产品入口、终止/审批合同和持久 Attempt，不创建生产路径 | 生产 No-Go |
+| Tool 权限、审批、幂等、receipt、写回 | **保留项目所有权** | 任何 Eino Tool 都必须进入项目 Registry/Policy/Attempt；模型侧工具最多产生 Candidate/Proposal，批准后由独立项目 Workflow 执行 Safe Writeback | 全程 |
+| Token Streaming | **未来新路径使用 Eino Stream** | 实际 Eino Stream PoC 已 PASS；当前无 Token 消费者，持久阶段 SSE 不改变 | 生产 No-Go |
+| ADK 多 Agent | **能力可用，首轮 PoC/灰度** | 经典 `schema.Message` 路径先行；Agentic/Beta 路径不承接核心生产流程，限制来自版本/恢复风险而非能力缺失 | 后续决策 |
+| Checkpoint/Interrupt/HITL | **Eino 进程内子流程能力 + 项目持久事实** | 同进程/Attempt 的实际 PoC 已 PASS；跨进程/reclaim/HITL 无 fenced handoff，不进入生产 | PoC-only |
+| Session/Memory persistence | **保留项目所有权** | Eino 官方不负责对话历史存储；继续使用项目会话和 Memory Snapshot | 全程 |
+| Runtime、Credential、Revision、Readiness | **保留项目所有权** | Composition Root 构造私有 Eino Adapter；Credential 不进入日志、合同或持久状态 | 全程 |
+| RecordingChatModel、Model Run/Call/Audit | **保留项目所有权** | 每次 Provider 调用继续形成项目事实；Callback 不是可靠事件总线 | 全程 |
+| Workflow/River/PostgreSQL、Outbox、Human Task | **保留项目所有权** | 唯一持久工作流状态、投递、重试、暂停、恢复和补偿边界 | 全程 |
 
 ## 4. 关键契约设计
 
-### 4.1 Eino Chat Adapter
+### 4.1 已完成的 Chat 与短 Graph 基线
 
-建议新增 `internal/platform/models/eino_chat.go`（命名以实现阶段实际包结构为准），实现 `agentapplication.ChatModel` 和现有 `Contract()`：
+- `agentapplication.ChatModel`、`ChatContract` 和 `StructuredPhaseScheduler` 继续是调用方看到的稳定接口。
+- Eino OpenAI ChatModel 使用项目安全 HTTP client，并通过请求级 option 注入动态 Schema；共享实例不保存可变 Schema、Tool 列表或响应状态。
+- Provider 响应继续执行项目严格 wire、model echo、usage、响应大小和稳定错误校验；不因为使用 SDK 而信任未经验证的输出。
+- `INITIAL/REPAIR/REDUCED` Eino Graph 继续调用项目 `StructuredPhaseRun.Advance`；Eino 负责调度，项目负责每阶段的模型调用、校验、预算和审计。
+- 五个消费者 selector 与 Chat selector 保持独立，默认 direct。已经通过的合同和真实 PostgreSQL/River 门禁不得因后续 RAG 迁移而降低。
 
-1. Composition Root 用现有 `newModelHTTPClient` 构造禁止重定向、DNS/IP 校验和 TLS 下限的 `http.Client`；Credential 只保留在发起认证请求所需的私有 Adapter/SDK client，不进入 Runtime contract、日志、错误或格式化输出。
-2. `Chat` 入口先调用现有 `ValidateChatRequest`，将项目消息映射为 `schema.Message`。
-3. 通过 Eino OpenAI `WithRequestPayloadModifier` 注入当前 request 的冻结 JSON Schema；不把 Schema 放进全局共享可变配置。
-4. 通过 response modifier/受控 metadata 读取原始响应，复用现有单 choice、assistant、`finish_reason=stop`、无 Tool Call、model echo、usage 和响应大小校验。
-5. 将 Eino `schema.ResponseMeta.Usage` 映射回项目 `domain.TokenUsage`；无法获得完整 usage 时 fail closed，不能把零值当成功。
-6. 对 Eino 错误做稳定映射：取消、deadline、429、5xx、401/403、重定向和 schema/provider 拒绝必须保持既有错误分类；Adapter 不自动重试。
-7. 使用请求级 option 而非修改共享模型；并发请求不得共享可变 Schema、Tool 列表或 response metadata。
+### 4.2 Embedding Adapter
 
-### 4.2 Graph 边界
+目标是删除重复的 Provider transport，而不是删除项目 Embedding 合同：
 
-第三阶段只在 `StructuredRunner` 内建立一个有限 Graph：`initial_call_validate -> repair_call_validate -> reduced_call_validate`，每个节点后按成功终态提前结束。最多消费三次模型响应；严格 decoder、原始响应字节闭包、token/byte/time budget 和稳定错误仍由项目代码掌握。
+1. 分别为 OpenAI-Compatible 与 Ollama 做隔离可行性验证；只有对应 Provider Go 后，才在 `internal/platform/models` 增加 Eino-backed Embedder，实现现有 `retrievalapplication.Embedder`。
+2. 输入先通过 `ValidateEmbedRequest`；Eino `EmbedStrings` 返回后转换为项目 `EmbedResult`，再执行 `ValidateEmbedResult`。
+3. 继续校验批量上限、总字节、UTF-8、向量数量、固定维度、有限数、归一化和调用方独立副本。
+4. Eino OpenAI Embedding 当前按响应数组顺序返回，外层拿不到原始 item `index` 和 response model；Ollama 组件同样只返回 vectors、不回显 response model，且项目现有 native Ollama 合同固定 `truncate=false`。两个 Provider 必须分别用乱序/缺项/重复项、维度漂移、model mismatch 和 truncate fixture 验证。
+5. 注入项目 HTTP client 不代表自然获得 `MaxResponseBytes`。必须证明成功响应与错误响应都受有界读取保护；框架 client 无法满足时，保留对应 Provider 的窄 direct transport 或提供有界 RoundTripper，不整体重写 Embedding 抽象。
+6. `eino-ext/components/embedding/*` 独立锁定精确 tag 或 pseudo-version，记录 commit、许可证和升级门禁。当前复核 commit `90a15623ddb66465aea01fbe8c63ecc9d267acc1` 中，OpenAI/Ollama Embedding 分别依赖 core `v0.7.13`/`v0.6.0`，必须先证明与生产 core `v0.9.13` 编译及行为兼容，不能仅依赖 Go MVS 后能编译就判定通过。
 
-Application 新增项目自有 `StructuredPhaseScheduler` Port 和受控 `StructuredPhaseRun` state handle；现有 for-loop 是 direct 实现，Eino `compose.Graph` 位于 `internal/agent/adapter/eino`。这样 `internal/agent/application` 不导入 Eino 类型，五类消费者仍只依赖项目 Facade。
+### 4.3 Retriever、Indexer 与 Rerank Bridge
 
-Graph 的节点输入/输出保持项目自有 DTO，所有模型节点仍调用注入的项目 `ChatModel`，因此 `RecordingChatModel` 继续完整记录 Model Call。Graph 不保存 checkpoint、不自动重试、不直接写 DB/file/Git；失败返回项目稳定错误，由 River 按原 Node Retry Policy 决定是否重试。
+- 只有完整 RAG 路径 B 获得 Go 且出现明确 Eino 消费者时，才新增 Retriever Adapter；它在 `Retrieve` 中唯一调用现有 `SearchService`，并将 `schema.Document` 与项目结果进行有界、可逆映射。
+- Workspace、Approved Evidence、Source/Version、Active Index、Keyword/Semantic/Hybrid、RRF、TopK、score、provenance 和降级语义仍只有一个事实源。
+- 项目 PostgreSQL Indexer 只有出现 Eino Indexer 消费者时才适配；Eino 接口不获得索引激活或事务提交权。
+- 真实模型 rerank 通过项目 `Reranker` Port 调用，并包装为自定义 Eino Transformer。不得以官方 ScoreReranker 替代 query-dependent semantic score。
 
-完整 RAG 的 Query Plan、Retrieval/Eligibility、Answer、Citation/Faithfulness、拒答和 terminal proposal 仍由 `RAGExecutor` 编排。只有 Structured Output 短 Graph 通过等价门禁并产生明确收益后，才另立任务评估是否值得迁移更大范围的 RAG 编排。
+### 4.4 完整 RAG 内层 Workflow
 
-阶段 2 后的 Go/No-Go 结论为 GO：Relation、RAG、Artifact、Capture、Organizing 五个生产消费者复用相同分支，满足复用门槛。该结论只授权上述短 Graph，不授权完整 RAG Graph、Checkpoint、Tool 或持久状态。
+完整 RAG 不是预设必须迁移。先比较两条路径：A 保留现有 `RAGExecutor`，只复用已经独立通过门禁的 Eino Chat/Embedding，不创建没有消费方的 Retriever bridge；B 由 Eino Workflow 接管完整内层 DAG，并由该 Workflow 消费 Retriever bridge。先逐项检查安全、数据一致性、隐私、部署、许可证和运行时兼容等强制约束，再用实现前冻结的权重计算功能覆盖率；B 至少达到 80% 加权覆盖后，继续量化可删除的重复调度代码、端到端延迟、节点可观测性、错误/取消/重试语义和维护成本。只有 B 有明确净收益且业务合同等价才进入实现；否则保留 A。
 
-### 4.3 Tool Bridge（本任务 No-Go，冻结未来边界）
+若 B 获得 Go，首选 Eino Workflow 承载确定性 DAG；只有需要 cycle 或 Workflow 无法表达的动态分支时使用 Graph。禁止用 Workflow 实现 ReAct 循环。
 
-当前 Chat/RAG 没有可信持久 Attempt、lease/fence 与确定性 `call_no` 来源，现有 Chat Adapter 也明确拒绝
-`ToolCalls`，因此本任务不创建无生产消费者的 bridge，也不注册 Eino ToolsNode。未来独立任务中的 Eino 工具
-只能实现 `Info`/`InvokableRun` 到项目 Tool Registry 的转换：
+建议拓扑：
 
-- Eino 只接收脱敏的工具 schema，不接收 Capability token、Approval token、绝对路径或 Credential。
-- `InvokableRun` 只产生项目 `ToolRequest`；服务端重新从持久 Workflow/Node/Attempt 解析权限和 lease。
-- 只读工具先行；写工具仍由 trusted Safe Writeback audit bridge 处理，不能注册为普通 Eino Tool。
-- Tool Call 结果未知时保持 `UNKNOWN/manual_recovery`，不得由 Graph 直接返回成功。
+```text
+START
+  -> query_plan
+  -> retrieve
+  -> evidence_eligibility_and_topic_projection
+  -> answer
+  -> citation_validation
+  -> faithfulness_review
+  -> refusal_or_terminal_proposal
+  -> END
+```
 
-## 5. 运行时切换与回滚
+- `query_plan`、`answer` 和 `faithfulness_review` 复用 Eino ChatModel/结构化输出能力；项目 Schema、预算、repair/reduced 和 Model Run/Call 仍生效。
+- `retrieve` 调用 Eino Retriever bridge；Evidence/Citation/Refusal/Proposal 使用项目 DTO 和自定义 Component/Lambda。
+- Runnable 只产生 `RAGTerminalProposal`，不调用 Answer finalizer。外层 `RAGWorkflowExecutor` 负责 memory snapshot、Model Run 生命周期、exact replay、失败归类和原子发布。
+- Graph/Workflow 不自动 Provider retry，不保存第二套持久 state。一次 River transport 重投递必须先由项目 receipt/attempt 判断，不得再次运行模型。
+- RAG 评估不依赖 Eino Embedding Go，可继续使用现有 direct Embedder。先做 direct/Eino 离线等价，再做真实 PostgreSQL/River 和公开 HTTP 闭环；通过前不切默认值、不删除现有 `RAGExecutor`。
 
-第一阶段保留旧 `OpenAICompatibleChatModel`，新增 Eino 实现并在 Composition Root 提供显式内部选择（实现方式可为受控配置/工厂参数，不能复用表示身份的 `ChatAdapterVersion` 字段）。默认切换前先在离线 contract fixture 和真实 Provider smoke 上对照两套输出。
+### 4.5 Tool Calling 与 ReAct
 
-阶段 3 的 scheduler 选择按固定 consumer ID 独立配置，使 RAG、关系评估、Artifact、Capture、Organizing 能逐个灰度；该 ID 只控制内部实现，不进入业务身份、数据库契约或 API。
+原 Stage 4 No-Go 的原因是项目缺少明确消费者和可信持久 Tool-loop 入口，不是 Eino 缺少 Tool Calling。保持 No-Go，直到产品 PRD 明确生产调用方、允许工具、终态、预算、人工审批路径，并由新 ADR 授权这一产品行为：
 
-回滚只切回旧 Adapter，不改变 `agentapplication.ChatModel`、Model Run/Call、Workflow input 或数据库；Structured Output Graph 为五个消费者保留独立 direct 路径。Tool Calling 当前没有生产注册或运行路径，无需回滚动作。
+- 只有上述前提满足后才新建持久 Workflow Tool-loop Node，并使用经典 Eino ChatModelAgent 或 Graph + ToolsNode；配置明确 `MaxIterations`、取消和总预算。不得为了展示 Eino 能力先建无消费者的 Node。
+- 首个生产路径禁用 Eino `ModelRetryConfig` 和 `ModelFailoverConfig`；重试继续由项目 Workflow 和 `RecordingChatModel` 形成唯一 Model Call/费用事实。未来启用时，每次底层调用仍必须经过这两层并由新 ADR 明确责任。
+- Eino Tool `Info` 只暴露脱敏 schema。执行入口从持久 Node/Attempt 重新解析 Workspace、Capability、lease/fence、确定性 `call_no` 和幂等键，不接受模型提供这些身份。
+- 第一阶段只注册只读工具，并优先顺序执行，验证工具顺序、重复调用和回放语义后再评估并行。
+- 模型侧不注册 Safe Writeback 工具。涉及写入的 Eino Tool 最多创建 Candidate/Proposal；批准后由独立项目 Workflow 取得一次性 Write Authorization 并调用 trusted Safe Writeback Executor，与原 Agent loop 解耦。
+- Eino Interrupt/Resume 首轮只承载同一进程、同一活跃 Attempt 内的执行交互。项目 Human Task 会结束 Attempt 并释放 lease，不能直接恢复旧 checkpoint；Approval 记录仍是授权事实，未知外部结果保持 `UNKNOWN/manual_recovery`。
 
-## 6. 依赖与发布
+### 4.6 Token Streaming
 
-- 根模块锁定经过测试的 Eino core 与 OpenAI extension 版本；不直接把当前 pseudo-version 的 Embedding extension 纳入第一阶段。
-- 同步 `go.mod`、`go.sum`、`vendor/`、`vendor/modules.txt`、Docker 构建和 CI 缓存；保留 `poc/eino` 作为迁移回归样例，直到主模块门禁关闭。
-- 记录 Eino 及扩展许可证、间接依赖数量和升级策略；升级必须先过同一 contract/eval 门禁。
+- 产品需求和扩展采用 ADR 必须同时批准 Token API、持久终态及回滚边界，之后才能进入生产实现。
+- 当前 durable phase SSE 保持原样；它提供恢复和阶段事实，不等于模型 Token Stream。
+- 新 Token API 必须从 Eino ChatModel/Graph 的 `Stream` 或 `Transform` 入口贯通到 HTTP，不能用 `Invoke` 结果包装成单帧 stream。
+- 每个 StreamReader 必须被消费并关闭；覆盖客户端取消、慢消费者、背压、流内错误、UTF-8/大小上限和 goroutine 泄漏。
+- Callback 的流副本必须独立消费并关闭，且不得把 Prompt、Token 正文或 Provider raw error 写入 telemetry。
+
+### 4.7 ADK 与 Checkpoint/Interrupt
+
+- 首轮使用经典 `schema.Message` 路径；Agentic OpenAI/`AgenticMessage`、AgenticToolsNode 和多 Agent 的能力已存在，但因版本/恢复风险先做隔离 PoC，不代表框架不支持。
+- Checkpoint PoC 必须固定 Eino 版本、Graph topology、CallOptions、自定义类型注册和 serializer；验证进程内快照序列化往返和版本兼容，不宣称进程崩溃后恢复。
+- `CheckpointStore` 只能保存 Eino 执行快照，key 必须同时绑定 Worker owner 与项目 Node Attempt。业务状态、会话消息、权限、Approval 和 side-effect receipt 不得只存在 checkpoint。
+- Checkpoint 只允许在**同一 Worker 进程、同一个仍活跃的 Attempt** 内恢复。Worker 重启会更换 lease owner；lease reclaim 会把旧 Attempt 标记为 `lease_lost` 并创建新 Attempt；Human Task 也会结束当前 Attempt。以上任一情况发生后都不得读取或转移旧 checkpoint。
+- 未来若需要崩溃恢复或跨 Attempt/HITL 转移，必须另立 ADR，设计稳定恢复身份或经 PostgreSQL 授权的 fence 校验与一次性所有权 handoff，并重新估算实现和测试工作量。
+- Store 必须定义 TTL、显式 Delete（实现可选的 checkpoint delete 能力或等价清理）、静态加密、访问控制及 Prompt/消息/工具结果等敏感数据的保留周期；Attempt 终态或失效后及时清理。
+- 同一流程只能有一个恢复 owner：外层 Node 由 River/PostgreSQL 恢复；Eino checkpoint 若启用，只恢复同一 Worker 进程、同一活跃 Node Attempt 内尚未完成且没有外部副作用的 Agent 子流程。
+
+## 5. 运行时切换、灰度与删除条件
+
+- 保留现有 `chat_implementation=direct|eino` 与五个 Structured Scheduler selector。
+- 后续新增独立、进程级内部 selector：Embedding transport、RAG orchestrator、Tool loop 和 Token stream 分别控制；它们不进入 Provider/Model 身份、Workflow input 或持久业务 DTO。
+- 每个能力先跑固定 fixture，再跑真实 Provider/数据库门禁，最后逐消费者灰度。禁止一个全局开关同时切换 Chat、Embedding、RAG 和 Tool。
+- 回滚只切回 direct/现有实现，不迁移或回滚数据库。Eino path 产生的持久事实必须与项目原合同相同。
+- 旧实现删除需要：合同等价、真实 Provider、真实 PostgreSQL/River、生产灰度、错误率/延迟观测和回滚演练全部通过；至少保留一个发布周期后再删除。
+
+## 6. 依赖与升级策略
+
+- Core 固定 Eino `v0.9.13`；不以 main 或 `v0.10` alpha 作为生产设计基线。
+- `eino-ext` 每个组件独立记录 module path、精确版本或 pseudo-version、commit、许可证和间接依赖。
+- Embedding 当前候选 commit `90a15623ddb66465aea01fbe8c63ecc9d267acc1` 的 OpenAI/Ollama 模块分别声明 core `v0.7.13`/`v0.6.0`，与根模块 `v0.9.13` 不同。每个 Provider 先在隔离模块完成编译、API、race 和合同矩阵，再决定锁定、fork/patch 上游或 No-Go；不得把“依赖解析成功”等同于运行时兼容。
+- 首轮 Tool/Agent 使用经典 ChatModel 与 `schema.Message`；Agentic/Beta 模块不得进入默认生产路径。
+- 每次升级重跑 direct/Eino contract、race、取消、stream close、Provider smoke、真实 PostgreSQL/River replay 和 vendor/Docker 门禁。
+- `poc/eino` 只保留无法在主模块 contract tests 中表达的实验；已进入生产 Adapter 的能力不能只靠 PoC 验证。
 
 ## 7. 关键风险与缓解
 
 | 风险 | 缓解 |
 |---|---|
-| 动态 Schema 无法按调用传入 | request payload modifier + httptest；失败则暂留旧 Adapter |
-| Eino 错误包装改变 River 重试 | 稳定错误映射单测/故障注入；关闭框架自动 retry |
-| StreamReader 未 Close 泄漏 | 每条 Stream 路径 `defer Close`，race/goleak/取消测试；当前 SSE 不改 |
-| Eino checkpoint 与 Workflow 双账 | 第一阶段禁用 checkpoint；PostgreSQL 唯一恢复事实源 |
-| Tool 绕过权限或重复副作用 | 当前 No-Go；未来只读 Tool 也必须经项目 Registry/Policy/lease/fence/receipt |
-| Embedding extension 版本不稳 | 保留项目 Adapter，单独评估稳定版本和 Provider smoke |
-| vendor/镜像构建失败 | 依赖迁移单独提交并执行 vendor、Docker、CI 门禁 |
+| 把未实施误写成框架不支持 | 能力判断引用官方接口/源码；实施状态单独列出 |
+| Eino v0.x 或 ext pseudo-version 发生不兼容 | 精确锁版本，升级前跑相同 contract/replay 门禁 |
+| Embedding 响应顺序或 model 信息被 SDK 丢失 | 乱序/缺项/重复/模型 fixture；必要时仅保留窄 transport adapter |
+| 为接 Retriever 重写 PostgreSQL 检索 | 只建调用 `SearchService` 的 Eino bridge，检索规则保持单一事实源 |
+| Graph 获得持久化或业务终态所有权 | Project Runtime Claim 创建/恢复 Attempt 并校验 fence；Runnable 只返回 proposal，外层 executor 只消费已冻结 Attempt 并原子 finalization |
+| Eino Agent 自动 retry/failover 绕过项目审计与费用预算 | 首个生产路径禁用 `ModelRetryConfig`/`ModelFailoverConfig`；所有调用穿过 `RecordingChatModel`，Workflow 是唯一重试 owner |
+| Tool 并行导致重复副作用 | 只读、顺序、持久 call identity 先行；写操作继续走 Proposal/Safe Writeback |
+| `Invoke` 包装成假 Streaming | API 到模型全链路使用 `Stream/Transform`，测试首帧与取消 |
+| Worker 重启、Human Task 或 lease reclaim 后错误恢复旧 checkpoint | 首轮只允许同一进程/活跃 Attempt 恢复；Attempt/owner 变化时 checkpoint 失效并清理，禁止隐式跨 Attempt 转移 |
+| Checkpoint 与 River 形成双账或泄露敏感消息 | PostgreSQL 是唯一恢复事实源；Store 强制 TTL/Delete、加密、访问控制和敏感数据生命周期 |
+| Stream/callback Reader 未关闭 | close、取消、race 和泄漏测试作为发布门禁 |
 
-## 8. 实施结果
+## 8. 当前实施状态与修订结论
 
-- 阶段 1 已实现 Eino OpenAI-Compatible Chat Adapter，保留 direct Adapter；两者继续实现项目 `ChatModel` 合同，默认选择 direct。
-- 阶段 2 已实现请求级 Eino Callback/Trace 旁路；不读取 Prompt/响应正文/raw error，不替代 Model Run/Call 或 Workflow Progress。
-- 阶段 3 的 Go 决策已执行：固定三节点 Eino Graph 通过项目 `StructuredPhaseScheduler` Port 接入五个消费者。计数包装器测试证明消费者实际调用 Graph，而不是仅保存 selector；真实 PostgreSQL/River RAG 门禁证明 transport 重投递不重复 Provider/Model Call 或业务终态。
-- 阶段 4 为 No-Go：没有新增 ToolsNode、Tool bridge 或运行时开关；未来边界按 4.3 节冻结。
-- Eino core/OpenAI extension 已锁定并同步 vendor；Embedding/Retriever/Rerank、完整 RAG Graph、Streaming、Checkpoint 和 Tool Calling 没有进入主运行路径。
-- 真实 OpenAI-Compatible Provider smoke 已用生产 Eino Adapter 对本地 Ollama `0.32.6` + `qwen3:0.6b` 连续通过两次；`reasoning`/`reasoning_content` 只作为显式 string/null allowlist 接收后丢弃，其他未知字段继续拒绝。该结果只证明协议兼容，direct Adapter/scheduler 与五个独立 selector 仍保留为灰度默认和回滚路径。
+- 已完成：Eino Chat Adapter、调用级 Callback/Trace、Structured Output 三阶段短 Graph、五消费者独立 selector、
+  双 Provider Eino Embedding Adapter、真实 Eino ToolsNode/Stream/Checkpoint 隔离能力 PoC，以及对应离线门禁。
+- 已保留：direct Chat、direct scheduler、PostgreSQL/River、全部项目领域/权限/审计/安全写回边界。
+- 条件 Go：Embedding 离线合同已通过且 ADR-0020 已接受，默认仍为 `direct`；各 Provider 的真实 smoke 和生产
+  观察完成前不切默认值、不删除 direct。
+- 生产 No-Go：完整 RAG、Tool/ReAct、Token Streaming、Checkpoint/ADK。完整 RAG 是净收益不足；Tool/Token
+  是缺少产品消费者；Checkpoint 是 Attempt 恢复所有权不兼容。以上均不能表述为框架不具备能力。
+- 未创建：Eino Retriever bridge、完整 RAG Graph/selector、生产 ToolsNode、Token API/selector、根模块
+  CheckpointStore 或跨 Attempt 恢复。
+- ADR-0021 已冻结这些结论和重开条件；未来满足条件时以新任务和新 ADR 重开，而不是继续本次迁移。

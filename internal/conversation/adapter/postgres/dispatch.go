@@ -31,32 +31,27 @@ type questionRuntimeStarter interface {
 
 // QuestionDispatcher 跨 Conversation、Workflow、River 与 Server Event 维护 Question 原子派发。
 type QuestionDispatcher struct {
-	db         DB
-	runtime    questionRuntimeStarter
-	events     eventsapplication.Appender
-	ids        foundation.IDGenerator
-	clock      foundation.Clock
-	definition workflowdomain.RegisteredDefinition
+	db      DB
+	runtime questionRuntimeStarter
+	events  eventsapplication.Appender
+	ids     foundation.IDGenerator
+	clock   foundation.Clock
 }
 
 var _ conversationapplication.QuestionDispatcher = (*QuestionDispatcher)(nil)
 
-// NewQuestionDispatcher 构造只接受内置 RAG Definition 的 Question 原子派发器。
+// NewQuestionDispatcher 构造固定使用当前 RAG v2 Definition 的 Question 原子派发器。
 func NewQuestionDispatcher(
 	db DB,
 	runtime questionRuntimeStarter,
 	events eventsapplication.Appender,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
-	definition workflowdomain.RegisteredDefinition,
 ) (*QuestionDispatcher, error) {
 	if isNilInterface(db) || isNilInterface(runtime) || isNilInterface(events) || isNilInterface(ids) || isNilInterface(clock) {
 		return nil, dependency(ErrorCodeQuestionDispatchUnavailable, errors.New("question dispatch dependency is nil"))
 	}
-	if !reflect.DeepEqual(definition, conversationworkflow.RegisteredDefinition()) {
-		return nil, invalid(ErrorCodeQuestionDispatchInvalid, errors.New("question dispatch definition is not the registered RAG contract"))
-	}
-	return &QuestionDispatcher{db: db, runtime: runtime, events: events, ids: ids, clock: clock, definition: definition}, nil
+	return &QuestionDispatcher{db: db, runtime: runtime, events: events, ids: ids, clock: clock}, nil
 }
 
 // SubmitQuestion 原子创建或精确重放 Question、Answer、Workflow、River Job 与安全摘要事件。
@@ -288,7 +283,7 @@ func (dispatcher *QuestionDispatcher) startQuestionWorkflow(ctx context.Context,
 		return workflowapplication.RuntimeStartResult{}, err
 	}
 	request, err := workflowapplication.BuildRuntimeStartRequest(
-		dispatcher.ids, dispatcher.clock, question.Request.WorkspaceID, questionWorkflowIdempotencyKey(question.ID), input, dispatcher.definition,
+		dispatcher.ids, dispatcher.clock, question.Request.WorkspaceID, questionWorkflowIdempotencyKey(question.ID), input, conversationworkflow.RegisteredDefinitionV2(),
 	)
 	if err != nil {
 		return workflowapplication.RuntimeStartResult{}, classify(err, ErrorCodeQuestionDispatchUnavailable)

@@ -142,6 +142,35 @@ func TestPlanCallAndClarificationResultRemainAdditive(t *testing.T) {
 	}
 }
 
+func TestModelCallValidationAcceptsSupportedPhases(t *testing.T) {
+	for _, phase := range []ModelCallPhase{
+		ModelCallPlan,
+		ModelCallAgent,
+		ModelCallAnswer,
+		ModelCallInitial,
+		ModelCallRepair,
+		ModelCallReduced,
+		ModelCallReview,
+	} {
+		call := validStartedCall()
+		call.Phase = phase
+		if err := ValidateModelCall(call); err != nil {
+			t.Fatalf("phase=%s err=%v", phase, err)
+		}
+	}
+
+	call := validStartedCall()
+	call.Phase = ModelCallPhase("UNSUPPORTED")
+	if err := ValidateModelCall(call); errorCode(err) != ErrorCodeModelCallInvalid {
+		t.Fatalf("unsupported phase err=%v", err)
+	}
+	call = validStartedCall()
+	call.CallNo = MaxModelCallsPerRun + 1
+	if err := ValidateModelCall(call); errorCode(err) != ErrorCodeModelCallInvalid {
+		t.Fatalf("oversized call number err=%v", err)
+	}
+}
+
 func TestRAGModelRunMayBindRetrievalWhenItFinalizes(t *testing.T) {
 	run := validModelRun()
 	run.Schema.Version = OutputSchemaVersionV2

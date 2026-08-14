@@ -26,6 +26,8 @@ const (
 	searchKnowledgeName  = "SearchKnowledge"
 	readSourceName       = "ReadSource"
 	validateCitationName = "ValidateCitation"
+	readToolVersionV1    = int64(1)
+	readToolVersionV2    = int64(2)
 
 	maxSearchInputBytes      = 64 * 1024
 	maxReadSourceInputBytes  = 64 * 1024
@@ -278,7 +280,8 @@ func (executor *ValidateCitationExecutor) LoadResultReceipt(ctx context.Context,
 }
 
 func validateReceiptCall(call toolsdomain.ToolCall, name string) error {
-	if call.Status != toolsdomain.CallSucceeded || call.Tool == nil || call.Tool.Name != name || call.Tool.Version != 1 || call.RequestedToolName != name || call.ResultRef == "" {
+	if call.Status != toolsdomain.CallSucceeded || call.Tool == nil || call.Tool.Name != name ||
+		!validRetrievalToolVersion(name, call.Tool.Version) || call.RequestedToolName != name || call.ResultRef == "" {
 		return errors.New("persisted read receipt binding is invalid")
 	}
 	return nil
@@ -561,13 +564,24 @@ func indexOpenedCitations(workspaceID foundation.ID, queries []retrievaldomain.C
 }
 
 func validateRequestTool(request toolsapplication.ExecutorRequest, name string) error {
-	if request.Tool.Name != name || request.Tool.Version != 1 {
+	if request.Tool.Name != name || !validRetrievalToolVersion(name, request.Tool.Version) {
 		return errors.New("executor request references the wrong tool")
 	}
 	if err := request.Identity.Validate(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func validRetrievalToolVersion(name string, version int64) bool {
+	switch name {
+	case searchKnowledgeName:
+		return version == readToolVersionV1
+	case readSourceName, validateCitationName:
+		return version == readToolVersionV1 || version == readToolVersionV2
+	default:
+		return false
+	}
 }
 
 func parseIDs(values []string) ([]foundation.ID, error) {

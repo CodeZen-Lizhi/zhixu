@@ -42,6 +42,30 @@ func TestStructuredRunnerInitialSuccessUsesFrozenContract(t *testing.T) {
 	}
 }
 
+func TestStructuredRunnerNarrowsPerRunOutputLimitWithoutChangingProfile(t *testing.T) {
+	catalog, request, profile := testCatalog(t, time.Second)
+	request.MaxOutputTokens = 17
+	response := testResponse(profile.Model, `{"value":"ok"}`, 2, 3)
+	model := NewDeterministicChatModel(DeterministicChatStep{Response: response})
+	runner := newTestRunner(t, model, catalog, DefaultRunBudget())
+
+	if _, err := runner.Run(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if calls := model.Calls(); len(calls) != 1 || calls[0].MaxOutputTokens != 17 {
+		t.Fatalf("calls=%+v", calls)
+	}
+}
+
+func TestStructuredRunnerRejectsPerRunOutputLimitAboveHardBound(t *testing.T) {
+	catalog, request, _ := testCatalog(t, time.Second)
+	request.MaxOutputTokens = MaxOutputTokens + 1
+	runner := newTestRunner(t, NewDeterministicChatModel(), catalog, DefaultRunBudget())
+	if _, err := runner.Run(context.Background(), request); errorCode(err) != errorCodeRunRequestInvalid {
+		t.Fatalf("error=%v code=%q", err, errorCode(err))
+	}
+}
+
 func TestStructuredRunnerRepairsWithRedactedErrorOnly(t *testing.T) {
 	catalog, request, profile := testCatalog(t, time.Second)
 	secretInvalid := "invalid-model-output-secret"
@@ -259,21 +283,11 @@ func TestStructuredRunnerWithSchedulerPortPreservesPhaseContract(t *testing.T) {
 	}
 }
 
-func TestStructuredRunnerWithNilSchedulerKeepsDirectBehavior(t *testing.T) {
-	catalog, request, profile := testCatalog(t, time.Second)
-	response := testResponse(profile.Model, `{"value":"direct"}`, 2, 3)
-	model := NewDeterministicChatModel(DeterministicChatStep{Response: response})
-	runner, err := NewStructuredRunnerWithScheduler(model, catalog, DefaultRunBudget(), nil)
-	if err != nil {
-		t.Fatalf("NewStructuredRunnerWithScheduler() error = %v", err)
-	}
-
-	result, err := runner.Run(context.Background(), request)
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if result.CallCount != 1 || result.Phase != domain.ModelCallInitial || string(result.Output) != `{"value":"direct"}` || model.CallCount() != 1 {
-		t.Fatalf("result=%+v output=%s calls=%d", result, result.Output, model.CallCount())
+func TestStructuredRunnerRejectsNilScheduler(t *testing.T) {
+	catalog, _, _ := testCatalog(t, time.Second)
+	model := NewDeterministicChatModel()
+	if _, err := NewStructuredRunnerWithScheduler(model, catalog, DefaultRunBudget(), nil); errorCode(err) != errorCodeRunnerMissing {
+		t.Fatalf("NewStructuredRunnerWithScheduler(nil) error=%v code=%q", err, errorCode(err))
 	}
 }
 
@@ -379,6 +393,29 @@ func TestChatContractAllowsPlanPhase(t *testing.T) {
 	}
 }
 
+func TestChatContractAllowsAgentAndAnswerPhases(t *testing.T) {
+	request := ChatRequest{
+		ProfileRef:      domain.ModelProfileRef{ID: "agent", Version: "v1"},
+		PromptRef:       domain.PromptRef{ID: "agent-runtime", Version: "v1"},
+		SchemaRef:       domain.SchemaRef{ID: "agent.runtime", Version: "v1"},
+		Model:           testModelRef(),
+		Messages:        []ChatMessage{{Role: MessageRoleSystem, Content: "agent policy"}, {Role: MessageRoleUser, Content: "bounded context"}},
+		OutputSchema:    []byte(`{"type":"object"}`),
+		MaxOutputTokens: 100,
+	}
+	for _, phase := range []domain.ModelCallPhase{domain.ModelCallAgent, domain.ModelCallAnswer} {
+		request.Phase = phase
+		if err := ValidateChatRequest(request); err != nil {
+			t.Fatalf("phase=%s err=%v", phase, err)
+		}
+	}
+
+	request.Phase = domain.ModelCallPhase("UNSUPPORTED")
+	if err := ValidateChatRequest(request); errorCode(err) != errorCodeChatRequestInvalid {
+		t.Fatalf("unsupported phase code=%q", errorCode(err))
+	}
+}
+
 func testCatalog(t *testing.T, profileTimeout time.Duration) (*RuntimeCatalog, StructuredRunRequest, ModelProfile) {
 	t.Helper()
 	catalog := NewRuntimeCatalog()
@@ -464,9 +501,9 @@ func testResponse(model domain.ModelRef, content string, inputTokens, outputToke
 
 func newTestRunner(t *testing.T, model ChatModel, catalog *RuntimeCatalog, budget RunBudget) *StructuredRunner {
 	t.Helper()
-	runner, err := NewStructuredRunner(model, catalog, budget)
+	runner, err := NewStructuredRunnerWithScheduler(model, catalog, budget, &contractTestScheduler{})
 	if err != nil {
-		t.Fatalf("NewStructuredRunner() error = %v", err)
+		t.Fatalf("NewStructuredRunnerWithScheduler() error = %v", err)
 	}
 	return runner
 }

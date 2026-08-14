@@ -166,7 +166,8 @@ func operationContextError(err error) error {
 
 func validChatPhase(phase domain.ModelCallPhase) bool {
 	switch phase {
-	case domain.ModelCallPlan, domain.ModelCallInitial, domain.ModelCallRepair, domain.ModelCallReduced, domain.ModelCallReview:
+	case domain.ModelCallPlan, domain.ModelCallAgent, domain.ModelCallAnswer, domain.ModelCallInitial,
+		domain.ModelCallRepair, domain.ModelCallReduced, domain.ModelCallReview:
 		return true
 	default:
 		return false

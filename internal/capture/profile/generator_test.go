@@ -246,7 +246,7 @@ func TestDecodeOutputRejectsUnorderedAndUnknownEvidenceShape(t *testing.T) {
 }
 
 func newProfileGenerator(t *testing.T, repository *profileRepositoryFake, modelRuns *profileModelRunRepository, model *profileChatModel) *Generator {
-	return newProfileGeneratorWithScheduler(t, repository, modelRuns, model, nil)
+	return newProfileGeneratorWithScheduler(t, repository, modelRuns, model, newProfileTrackingEinoScheduler(t))
 }
 
 func newProfileGeneratorWithScheduler(

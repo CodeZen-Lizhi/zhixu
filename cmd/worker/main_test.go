@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,94 @@ import (
 	workflowhealth "github.com/CodeZen-Lizhi/zhixu/internal/workflow/httphealth"
 	workflowruntime "github.com/CodeZen-Lizhi/zhixu/internal/workflow/runtime"
 )
+
+func TestInitializeWorkerTelemetryHonorsConfiguredMode(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		mode          config.TelemetryMode
+		wantExporting bool
+	}{
+		{name: "disabled", mode: config.TelemetryModeDisabled},
+		{name: "optional exporter configured", mode: config.TelemetryModeOptional, wantExporting: true},
+		{name: "required exporter configured", mode: config.TelemetryModeRequired, wantExporting: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.TelemetryMode = test.mode
+			if test.mode != config.TelemetryModeDisabled {
+				collector := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+					writer.Header().Set("Content-Type", "application/x-protobuf")
+					writer.WriteHeader(http.StatusOK)
+				}))
+				defer collector.Close()
+				cfg.TelemetryEndpoint = collector.URL
+			}
+			telemetry, err := initializeWorkerTelemetry(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("initializeWorkerTelemetry: %v", err)
+			}
+			defer func() {
+				if shutdownErr := telemetry.Shutdown(context.Background()); shutdownErr != nil {
+					t.Fatalf("telemetry shutdown: %v", shutdownErr)
+				}
+			}()
+			if telemetry.Tracer() == nil || telemetry.Status().Degraded || telemetry.Status().Exporting != test.wantExporting {
+				t.Fatalf("telemetry=%#v tracer=%#v", telemetry.Status(), telemetry.Tracer())
+			}
+		})
+	}
+}
+
+func TestWorkerRunRecordsProcessPresenceMetric(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || (selector.Sel.Name != "RecordProcessPresence" && selector.Sel.Name != "RecordTelemetryRequired") {
+			return true
+		}
+		packageName, ok := selector.X.(*ast.Ident)
+		if ok && packageName.Name == "observability" {
+			found[selector.Sel.Name] = true
+		}
+		return true
+	})
+	if !found["RecordProcessPresence"] || !found["RecordTelemetryRequired"] {
+		t.Fatalf("Worker composition telemetry signals=%#v", found)
+	}
+}
+
+func TestWorkerShutdownDeadlinesReserveTelemetryFlushWithinHardStop(t *testing.T) {
+	startedAt := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name             string
+		softStop         time.Duration
+		hardStop         time.Duration
+		telemetryTimeout time.Duration
+		wantRuntime      time.Duration
+		wantHard         time.Duration
+	}{
+		{name: "configured flush budget", softStop: 30 * time.Second, hardStop: 60 * time.Second, telemetryTimeout: 10 * time.Second, wantRuntime: 50 * time.Second, wantHard: 60 * time.Second},
+		{name: "flush budget capped by soft stop reserve", softStop: 50 * time.Second, hardStop: 60 * time.Second, telemetryTimeout: 30 * time.Second, wantRuntime: 50 * time.Second, wantHard: 60 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtimeDeadline, hardDeadline := workerShutdownDeadlines(startedAt, test.softStop, test.hardStop, test.telemetryTimeout)
+			if got := runtimeDeadline.Sub(startedAt); got != test.wantRuntime {
+				t.Fatalf("runtime deadline=%s, want=%s", got, test.wantRuntime)
+			}
+			if got := hardDeadline.Sub(startedAt); got != test.wantHard {
+				t.Fatalf("hard deadline=%s, want=%s", got, test.wantHard)
+			}
+		})
+	}
+}
 
 func TestRunMemoryExpiryMaintenanceUsesBoundedBatchAndReportsResult(t *testing.T) {
 	service := &memoryExpiryServiceFake{expired: 3}
@@ -70,6 +159,56 @@ func TestRunMemoryExpiryMaintenanceReportsFailureWithoutRetrying(t *testing.T) {
 		!strings.Contains(logged, `"phase":"periodic"`) {
 		t.Fatalf("maintenance log=%s", logged)
 	}
+}
+
+func TestRunDraftStreamCleanupUsesBoundedBatchAndReportsResult(t *testing.T) {
+	service := &draftStreamCleanupServiceFake{deleted: 3}
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+
+	runDraftStreamCleanup(context.Background(), logger, service, draftStreamCleanupStartupPhase)
+
+	if service.calls != 1 || service.limit != draftStreamCleanupBatchSize {
+		t.Fatalf("calls=%d limit=%d", service.calls, service.limit)
+	}
+	logged := output.String()
+	if !strings.Contains(logged, `"msg":"answer draft stream cleanup completed"`) ||
+		!strings.Contains(logged, `"phase":"startup"`) ||
+		!strings.Contains(logged, `"deleted_count":3`) ||
+		!strings.Contains(logged, `"batch_size":100`) {
+		t.Fatalf("cleanup log=%s", logged)
+	}
+}
+
+func TestRunDraftStreamCleanupReportsFailureWithoutStopping(t *testing.T) {
+	service := &draftStreamCleanupServiceFake{err: errors.New("database unavailable")}
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+
+	runDraftStreamCleanup(context.Background(), logger, service, draftStreamCleanupPeriodicPhase)
+
+	if service.calls != 1 || service.limit != draftStreamCleanupBatchSize {
+		t.Fatalf("calls=%d limit=%d", service.calls, service.limit)
+	}
+	logged := output.String()
+	if !strings.Contains(logged, `"msg":"answer draft stream cleanup failed"`) ||
+		!strings.Contains(logged, `"error_code":"ANSWER_DRAFT_STREAM_CLEANUP_FAILED"`) ||
+		!strings.Contains(logged, `"phase":"periodic"`) {
+		t.Fatalf("cleanup log=%s", logged)
+	}
+}
+
+type draftStreamCleanupServiceFake struct {
+	calls   int
+	limit   int
+	deleted int64
+	err     error
+}
+
+func (fake *draftStreamCleanupServiceFake) CleanupExpiredDraftStreams(_ context.Context, limit int) (int64, error) {
+	fake.calls++
+	fake.limit = limit
+	return fake.deleted, fake.err
 }
 
 type memoryExpiryServiceFake struct {
@@ -202,6 +341,19 @@ func TestEnabledChatFailsClosedWithoutProductionDependencies(t *testing.T) {
 	}
 }
 
+func TestEinoRAGCompositionFailsClosedWithoutToolRuntime(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.ChatProvider = config.ChatProviderOpenAICompatible
+	cfg.ChatBaseURL = "http://127.0.0.1:11434/v1"
+	cfg.ChatModel = "composition-test"
+	cfg.ChatModelVersion = "composition-test-v1"
+	_, err := newAgentWorkflowComponentsWithTools(nil, cfg, nil, nil, toolRuntimeComponents{})
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "WORKER_RAG_EINO_TOOL_RUNTIME_UNAVAILABLE" {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestAgentWorkflowReadinessRejectsPartialChatComposition(t *testing.T) {
 	disabled := workerComponents{agentCapability: agentCapabilityStatus{code: agentworkflow.ErrorCodeCapabilityUnavailable}}
 	if !agentWorkflowReadiness(disabled) {
@@ -217,11 +369,12 @@ func TestAgentWorkflowReadinessRejectsPartialChatComposition(t *testing.T) {
 	}
 }
 
-func TestWorkerToolSubsetContainsOnlyFiveRealReadExecutors(t *testing.T) {
+func TestWorkerToolSubsetContainsOnlyApprovedRealReadExecutors(t *testing.T) {
 	want := []toolsdomain.ToolRef{
 		{Name: "SearchKnowledge", Version: 1}, {Name: "ReadSource", Version: 1},
 		{Name: "ValidateCitation", Version: 1}, {Name: "CalculateDiff", Version: 1},
 		{Name: "ReadGitStatus", Version: 1},
+		{Name: "ReadSource", Version: 2}, {Name: "ValidateCitation", Version: 2},
 	}
 	got := enabledReadToolRefs()
 	if len(got) != len(want) {
@@ -264,7 +417,7 @@ func TestToolWorkflowReadinessRequiresReachableNodeAndDefinition(t *testing.T) {
 		t.Fatalf("incomplete readiness contracts=%t executors=%t dependencies=%t", contractsOK, executorsOK, dependenciesOK)
 	}
 	production := toolworkflow.ModelReadToolRefsV1()
-	if len(production) != 3 || len(enabledReadToolRefs()) != 5 {
+	if len(production) != 3 || len(enabledReadToolRefs()) != 7 {
 		t.Fatalf("production Tool refs=%d execution refs=%d", len(production), len(enabledReadToolRefs()))
 	}
 }
@@ -281,6 +434,28 @@ func TestAgentApplicationBudgetAccountsForAllThreeStructuredCalls(t *testing.T) 
 		budget.MaxResponseBytes != cfg.ChatMaxResponseBytes*agentapplication.StructuredCallLimit ||
 		budget.Timeout != cfg.ChatTimeout*time.Duration(agentapplication.StructuredCallLimit) {
 		t.Fatalf("budget=%+v", budget)
+	}
+}
+
+func TestRAGAttemptTimeoutReservesFullModelCallSequence(t *testing.T) {
+	cfg := config.Defaults()
+	if got, want := agentworkflow.RAGAttemptTimeout(cfg.ChatTimeout), cfg.ChatTimeout*10; got != want {
+		t.Fatalf("rag attempt timeout=%s want=%s", got, want)
+	}
+	if got := agentworkflow.RAGAttemptTimeout(2 * time.Hour); got != agentworkflow.MaxRAGAttemptTimeout {
+		t.Fatalf("capped rag attempt timeout=%s want=%s", got, agentworkflow.MaxRAGAttemptTimeout)
+	}
+}
+
+func TestValidateRAGWorkerJobTimeoutRequiresAttemptHeadroom(t *testing.T) {
+	modelCallTimeout := 30 * time.Second
+	attemptTimeout := agentworkflow.RAGAttemptTimeout(modelCallTimeout)
+	minimumJobTimeout := attemptTimeout + ragWorkerJobTimeoutHeadroom
+	if err := validateRAGWorkerJobTimeout(minimumJobTimeout-time.Nanosecond, modelCallTimeout); err == nil {
+		t.Fatal("expected insufficient non-model headroom to be rejected")
+	}
+	if err := validateRAGWorkerJobTimeout(minimumJobTimeout, modelCallTimeout); err != nil {
+		t.Fatalf("validate timeout with headroom: %v", err)
 	}
 }
 
@@ -405,11 +580,11 @@ func TestWorkerCompositionConsumesOneFrozenModelRuntime(t *testing.T) {
 	}
 	factoryCalls := 0
 	consumers := map[string]bool{
-		"newToolRuntimeComponents":      false,
-		"newAgentWorkflowComponents":    false,
-		"newArtifactWorkflowComponents": false,
-		"newSourceProcessingComponents": false,
-		"newReindexComponents":          false,
+		"newToolRuntimeComponents":                      false,
+		"newAgentWorkflowComponentsWithToolsAndMetrics": false,
+		"newArtifactWorkflowComponents":                 false,
+		"newSourceProcessingComponents":                 false,
+		"newReindexComponents":                          false,
 	}
 	containsModels := func(node ast.Node) bool {
 		found := false

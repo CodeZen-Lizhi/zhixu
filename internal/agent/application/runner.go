@@ -24,7 +24,8 @@ const (
 	MaxRunResponseBytes int64 = 16 * 1024 * 1024
 	// MaxRunTokens 是一次运行累计 Token 预算的硬上限。
 	MaxRunTokens int64 = 1_000_000
-	// MaxRunTimeout 是一次结构化运行的最长总 timeout。
+	// MaxRunTimeout 是一次三阶段结构化运行的最长总 timeout。
+	// 完整 RAG Attempt 使用 workflow 层独立的时间预算，不能复用该上限。
 	MaxRunTimeout = 10 * time.Minute
 )
 
@@ -67,6 +68,9 @@ type StructuredRunRequest struct {
 	SchemaRef        domain.SchemaRef
 	ReducedSchemaRef domain.SchemaRef
 	Input            []byte
+	// MaxOutputTokens optionally narrows the frozen profile limit for this
+	// invocation. Zero keeps the profile limit; it can never raise it.
+	MaxOutputTokens int
 }
 
 // StructuredRunResult 返回唯一通过严格解码的 JSON、成功阶段及累计使用量。
@@ -95,10 +99,11 @@ type StructuredPhaseScheduler interface {
 type StructuredPhaseRun struct {
 	mu sync.Mutex
 
-	model    ChatModel
-	input    []byte
-	snapshot RuntimeSnapshot
-	budget   RunBudget
+	model           ChatModel
+	input           []byte
+	snapshot        RuntimeSnapshot
+	budget          RunBudget
+	maxOutputTokens int
 
 	result         StructuredRunResult
 	validationCode string
@@ -123,15 +128,7 @@ type StructuredRunner struct {
 	scheduler StructuredPhaseScheduler
 }
 
-// NewStructuredRunner 校验依赖和有界预算后创建 Runner。
-func NewStructuredRunner(model ChatModel, catalog *RuntimeCatalog, budget RunBudget) (*StructuredRunner, error) {
-	return NewStructuredRunnerWithScheduler(model, catalog, budget, directStructuredPhaseScheduler{})
-}
-
 // NewStructuredRunnerWithScheduler 使用项目自有调度 Port 创建 Runner。
-//
-// nil 调度器保持 direct 行为，供 Composition Root 用可选 Adapter 做逐消费者灰度；
-// 实现选择只影响内部调度，不进入运行结果或持久身份。
 func NewStructuredRunnerWithScheduler(model ChatModel, catalog *RuntimeCatalog, budget RunBudget, scheduler StructuredPhaseScheduler) (*StructuredRunner, error) {
 	if isNilChatModel(model) {
 		return nil, applicationError(foundation.ErrorDependencyUnavailable, errorCodeChatModelMissing, false, errors.New("chat model is nil"))
@@ -143,7 +140,7 @@ func NewStructuredRunnerWithScheduler(model ChatModel, catalog *RuntimeCatalog, 
 		return nil, err
 	}
 	if isNilPort(scheduler) {
-		scheduler = directStructuredPhaseScheduler{}
+		return nil, applicationError(foundation.ErrorDependencyUnavailable, errorCodeRunnerMissing, false, errors.New("structured phase scheduler is nil"))
 	}
 	return &StructuredRunner{model: model, catalog: catalog, budget: budget, scheduler: scheduler}, nil
 }
@@ -163,6 +160,10 @@ func (r *StructuredRunner) Run(ctx context.Context, request StructuredRunRequest
 	if err != nil {
 		return StructuredRunResult{}, err
 	}
+	maxOutputTokens, err := effectiveStructuredOutputTokens(snapshot.Profile.MaxOutputTokens, request.MaxOutputTokens)
+	if err != nil {
+		return StructuredRunResult{}, err
+	}
 
 	runTimeout := minPositiveDuration(r.budget.Timeout, snapshot.Profile.Timeout*time.Duration(StructuredCallLimit))
 	runCtx, cancel := context.WithTimeout(ctx, runTimeout)
@@ -176,7 +177,7 @@ func (r *StructuredRunner) Run(ctx context.Context, request StructuredRunRequest
 	}}
 	phaseRun := &StructuredPhaseRun{
 		model: r.model, input: append([]byte(nil), request.Input...), snapshot: snapshot, budget: r.budget,
-		result: result, nextPhase: domain.ModelCallInitial,
+		maxOutputTokens: maxOutputTokens, result: result, nextPhase: domain.ModelCallInitial,
 	}
 	if err := r.scheduler.Schedule(runCtx, phaseRun); err != nil {
 		if failure := phaseRun.Failure(); failure != nil {
@@ -227,6 +228,7 @@ func (run *StructuredPhaseRun) Advance(ctx context.Context, phase domain.ModelCa
 	}
 	run.result.Runtime.Schema = schema.Ref
 	chatRequest := buildChatRequest(run.snapshot, schema, phase, instruction, run.input, run.validationCode)
+	chatRequest.MaxOutputTokens = run.maxOutputTokens
 	requestBytes, err := encodedChatRequestBytes(chatRequest)
 	if err != nil {
 		return run.fail(err)
@@ -315,20 +317,6 @@ func (run *StructuredPhaseRun) fail(err error) error {
 	return run.failure
 }
 
-type directStructuredPhaseScheduler struct{}
-
-func (directStructuredPhaseScheduler) Schedule(ctx context.Context, run *StructuredPhaseRun) error {
-	for _, phase := range []domain.ModelCallPhase{domain.ModelCallInitial, domain.ModelCallRepair, domain.ModelCallReduced} {
-		if err := run.Advance(ctx, phase); err != nil {
-			return err
-		}
-		if run.Completed() {
-			return nil
-		}
-	}
-	return nil
-}
-
 func validateRunBudget(budget RunBudget) error {
 	if budget.MaxRequestBytes <= 0 || budget.MaxRequestBytes > MaxRunRequestBytes ||
 		budget.MaxResponseBytes <= 0 || budget.MaxResponseBytes > MaxRunResponseBytes ||
@@ -337,6 +325,16 @@ func validateRunBudget(budget RunBudget) error {
 		return applicationError(foundation.ErrorInvalidInput, errorCodeRunBudgetInvalid, false, errors.New("structured run budget is zero, negative, or above the hard limit"))
 	}
 	return nil
+}
+
+func effectiveStructuredOutputTokens(profileLimit, override int) (int, error) {
+	if profileLimit <= 0 || profileLimit > MaxOutputTokens || override < 0 || override > MaxOutputTokens {
+		return 0, applicationError(foundation.ErrorInvalidInput, errorCodeRunRequestInvalid, false, errors.New("structured output token limit is invalid"))
+	}
+	if override == 0 || override > profileLimit {
+		return profileLimit, nil
+	}
+	return override, nil
 }
 
 func buildChatRequest(snapshot RuntimeSnapshot, schema SchemaDefinition, phase domain.ModelCallPhase, instruction string, input []byte, validationCode string) ChatRequest {

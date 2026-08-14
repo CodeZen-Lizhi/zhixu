@@ -123,7 +123,7 @@ Worker `/livez` 在 health server 存活时返回 200。`/readyz` 只有在以�
 |---|---:|---|
 | `ZHIXU_WORKER_QUEUE` | `workflow` | Producer/Consumer 必须相同；队列名只允许小写字母、数字、`_`、`-` |
 | `ZHIXU_WORKER_MAX_WORKERS` | `4` | 正整数 |
-| `ZHIXU_WORKER_JOB_TIMEOUT` | `15m` | 小于 rescue interval |
+| `ZHIXU_WORKER_JOB_TIMEOUT` | `15m` | 小于 rescue interval；Eino RAG v2 启动时至少为 `min(ZHIXU_CHAT_TIMEOUT * 10, 1h) + 10m` |
 | `ZHIXU_WORKER_RESCUE_STUCK_AFTER` | `30m` | 大于 job timeout |
 | `ZHIXU_WORKFLOW_LEASE` | `2m` | 正时长 |
 | `ZHIXU_WORKFLOW_HEARTBEAT` | `30s` | 小于 lease 的三分之一 |

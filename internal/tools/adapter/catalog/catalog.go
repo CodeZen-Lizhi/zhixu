@@ -13,22 +13,26 @@ import (
 
 const (
 	toolVersionV1   int64 = 1
+	toolVersionV2   int64 = 2
 	schemaVersionV1 int64 = 1
 
-	agentRAGWorkflowKey      = "agent-rag"
-	safeWritebackWorkflowKey = "change-control.safe-writeback"
-	indexMaintenanceWorkflow = "retrieval.index-maintenance"
-	regressionEvaluationFlow = "evaluation.regression"
-	builtinWorkflowVersionV1 = int64(1)
-	localReadTimeout         = 15 * time.Second
-	trustedOperationTimeout  = 5 * time.Minute
-	maxSmallDocumentBytes    = int64(64 * 1024)
-	maxMediumDocumentBytes   = int64(256 * 1024)
-	maxContentDocumentBytes  = int64(1024 * 1024)
+	agentRAGWorkflowKey       = "agent-rag"
+	agentRAGAnswerWorkflowKey = "agent-rag-answer"
+	safeWritebackWorkflowKey  = "change-control.safe-writeback"
+	indexMaintenanceWorkflow  = "retrieval.index-maintenance"
+	regressionEvaluationFlow  = "evaluation.regression"
+	builtinWorkflowVersionV1  = int64(1)
+	agentRAGAnswerVersionV2   = int64(2)
+	localReadTimeout          = 15 * time.Second
+	trustedOperationTimeout   = 5 * time.Minute
+	maxSmallDocumentBytes     = int64(64 * 1024)
+	maxMediumDocumentBytes    = int64(256 * 1024)
+	maxContentDocumentBytes   = int64(1024 * 1024)
 )
 
 type contractSeed struct {
 	name            string
+	version         int64
 	description     string
 	inputSchemaID   string
 	inputSchema     string
@@ -44,17 +48,18 @@ type contractSeed struct {
 	idempotency     domain.IdempotencyMode
 	sensitiveFields []string
 	workflow        string
+	workflowVersion int64
 	maxInputBytes   int64
 	maxOutputBytes  int64
 }
 
-// Contracts 构造全部 11 个内置 Tool 的不可变契约；结果只描述能力，不表示已启用或可执行。
+// Contracts 构造全部 13 个内置 Tool 的不可变契约；结果只描述能力，不表示已启用或可执行。
 func Contracts() ([]application.Contract, error) {
 	seeds := builtinSeeds()
 	contracts := make([]application.Contract, 0, len(seeds))
 	for _, seed := range seeds {
 		definition, err := domain.CanonicalizeDefinition(domain.Definition{
-			Ref:                  domain.ToolRef{Name: seed.name, Version: toolVersionV1},
+			Ref:                  domain.ToolRef{Name: seed.name, Version: seed.version},
 			Description:          seed.description,
 			InputSchema:          domain.SchemaRef{ID: seed.inputSchemaID, Version: schemaVersionV1},
 			InputSchemaDocument:  json.RawMessage(seed.inputSchema),
@@ -68,7 +73,7 @@ func Contracts() ([]application.Contract, error) {
 			IdempotencyMode:      seed.idempotency,
 			SensitiveFields:      seed.sensitiveFields,
 			AllowedWorkflows: []domain.WorkflowBinding{{
-				Key: seed.workflow, Version: builtinWorkflowVersionV1,
+				Key: seed.workflow, Version: seed.workflowVersion,
 			}},
 			MaxInputBytes:  seed.maxInputBytes,
 			MaxOutputBytes: seed.maxOutputBytes,
@@ -83,7 +88,7 @@ func Contracts() ([]application.Contract, error) {
 	return contracts, nil
 }
 
-// NewFrozenContractRegistry 构造 API、Worker 与 trusted audit 共用的全部 11 项冻结契约目录。
+// NewFrozenContractRegistry 构造 API、Worker 与 trusted audit 共用的全部 13 项冻结契约目录。
 // 该 Registry 不包含 Executor，因此不会把 contract-only Tool 宣称为可执行。
 func NewFrozenContractRegistry() (*application.Registry, error) {
 	contracts, err := Contracts()
@@ -107,108 +112,128 @@ func builtinSeeds() []contractSeed {
 	noRetry := domain.RetryPolicy{MaxAttempts: 1}
 	return []contractSeed{
 		{
-			name: "SearchKnowledge", description: "Search approved knowledge in the current workspace through the frozen retrieval index.",
+			name: "SearchKnowledge", version: toolVersionV1, description: "Search approved knowledge in the current workspace through the frozen retrieval index.",
 			inputSchemaID: "tool.search_knowledge.input", inputSchema: searchKnowledgeInputSchema,
 			outputSchemaID: "tool.search_knowledge.output", outputSchema: searchKnowledgeOutputSchema,
 			decodeInput: decodeSearchKnowledgeInput, decodeOutput: decodeSearchKnowledgeOutput,
 			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationModelRequestable,
 			timeout: localReadTimeout, retry: localRetry, idempotency: domain.IdempotencyNone,
-			sensitiveFields: []string{"/items", "/query"}, workflow: agentRAGWorkflowKey,
+			sensitiveFields: []string{"/items", "/query"}, workflow: agentRAGWorkflowKey, workflowVersion: builtinWorkflowVersionV1,
 			maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxContentDocumentBytes,
 		},
 		{
-			name: "ReadSource", description: "Open one immutable source span by stable identifiers in the current workspace.",
+			name: "ReadSource", version: toolVersionV1, description: "Open one immutable source span by stable identifiers in the current workspace.",
 			inputSchemaID: "tool.read_source.input", inputSchema: readSourceInputSchema,
 			outputSchemaID: "tool.read_source.output", outputSchema: readSourceOutputSchema,
 			decodeInput: decodeReadSourceInput, decodeOutput: decodeReadSourceOutput,
 			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationModelRequestable,
 			timeout: localReadTimeout, retry: localRetry, idempotency: domain.IdempotencyNone,
-			sensitiveFields: []string{"/excerpt"}, workflow: agentRAGWorkflowKey,
+			sensitiveFields: []string{"/excerpt"}, workflow: agentRAGWorkflowKey, workflowVersion: builtinWorkflowVersionV1,
 			maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxMediumDocumentBytes,
 		},
 		{
-			name: "ReadDocument", description: "Read one approved document projection by stable identifier in the current workspace.",
+			name: "ReadDocument", version: toolVersionV1, description: "Read one approved document projection by stable identifier in the current workspace.",
 			inputSchemaID: "tool.read_document.input", inputSchema: readDocumentInputSchema,
 			outputSchemaID: "tool.read_document.output", outputSchema: readDocumentOutputSchema,
 			decodeInput: decodeReadDocumentInput, decodeOutput: decodeReadDocumentOutput,
 			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationModelRequestable,
 			timeout: localReadTimeout, retry: localRetry, idempotency: domain.IdempotencyNone,
-			sensitiveFields: []string{"/text"}, workflow: agentRAGWorkflowKey,
+			sensitiveFields: []string{"/text"}, workflow: agentRAGWorkflowKey, workflowVersion: builtinWorkflowVersionV1,
 			maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxContentDocumentBytes,
 		},
 		{
-			name: "FetchWebPage", description: "Fetch one explicitly allowed public HTTP or HTTPS page through the SSRF-safe adapter.",
+			name: "FetchWebPage", version: toolVersionV1, description: "Fetch one explicitly allowed public HTTP or HTTPS page through the SSRF-safe adapter.",
 			inputSchemaID: "tool.fetch_web_page.input", inputSchema: fetchWebPageInputSchema,
 			outputSchemaID: "tool.fetch_web_page.output", outputSchema: fetchWebPageOutputSchema,
 			decodeInput: decodeFetchWebPageInput, decodeOutput: decodeFetchWebPageOutput,
 			capability: capability.ReadExternal, sideEffect: domain.SideEffectExternalRead, invocation: domain.InvocationModelRequestable,
 			timeout: 30 * time.Second, retry: domain.RetryPolicy{MaxAttempts: 2, BaseDelay: time.Second, MaxDelay: 2 * time.Second}, idempotency: domain.IdempotencyNone,
-			sensitiveFields: []string{"/final_url", "/text", "/url"}, workflow: agentRAGWorkflowKey,
+			sensitiveFields: []string{"/final_url", "/text", "/url"}, workflow: agentRAGWorkflowKey, workflowVersion: builtinWorkflowVersionV1,
 			maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxContentDocumentBytes,
 		},
 		{
-			name: "ValidateCitation", description: "Validate a bounded batch of complete citation tuples against immutable retrieval evidence.",
+			name: "ValidateCitation", version: toolVersionV1, description: "Validate a bounded batch of complete citation tuples against immutable retrieval evidence.",
 			inputSchemaID: "tool.validate_citation.input", inputSchema: validateCitationInputSchema,
 			outputSchemaID: "tool.validate_citation.output", outputSchema: validateCitationOutputSchema,
 			decodeInput: decodeValidateCitationInput, decodeOutput: decodeValidateCitationOutput,
 			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationModelRequestable,
 			timeout: localReadTimeout, retry: localRetry, idempotency: domain.IdempotencyNone,
-			workflow: agentRAGWorkflowKey, maxInputBytes: maxMediumDocumentBytes, maxOutputBytes: maxMediumDocumentBytes,
+			workflow: agentRAGWorkflowKey, workflowVersion: builtinWorkflowVersionV1, maxInputBytes: maxMediumDocumentBytes, maxOutputBytes: maxMediumDocumentBytes,
 		},
 		{
-			name: "CalculateDiff", description: "Calculate a bounded deterministic text diff without accessing workspace, network, or Git state.",
+			name: "CalculateDiff", version: toolVersionV1, description: "Calculate a bounded deterministic text diff without accessing workspace, network, or Git state.",
 			inputSchemaID: "tool.calculate_diff.input", inputSchema: calculateDiffInputSchema,
 			outputSchemaID: "tool.calculate_diff.output", outputSchema: calculateDiffOutputSchema,
 			decodeInput: decodeCalculateDiffInput, decodeOutput: decodeCalculateDiffOutput,
 			sideEffect: domain.SideEffectNone, invocation: domain.InvocationModelRequestable,
 			timeout: 5 * time.Second, retry: noRetry, idempotency: domain.IdempotencyNone,
-			sensitiveFields: []string{"/after", "/before", "/patch"}, workflow: agentRAGWorkflowKey,
+			sensitiveFields: []string{"/after", "/before", "/patch"}, workflow: agentRAGWorkflowKey, workflowVersion: builtinWorkflowVersionV1,
 			maxInputBytes: maxContentDocumentBytes, maxOutputBytes: maxContentDocumentBytes,
 		},
 		{
-			name: "ReadGitStatus", description: "Inspect the current workspace Git state through the fixed-argument Git inspector.",
+			name: "ReadGitStatus", version: toolVersionV1, description: "Inspect the current workspace Git state through the fixed-argument Git inspector.",
 			inputSchemaID: "tool.read_git_status.input", inputSchema: readGitStatusInputSchema,
 			outputSchemaID: "tool.read_git_status.output", outputSchema: readGitStatusOutputSchema,
 			decodeInput: decodeReadGitStatusInput, decodeOutput: decodeReadGitStatusOutput,
 			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationModelRequestable,
 			timeout: 10 * time.Second, retry: noRetry, idempotency: domain.IdempotencyNone,
-			workflow: agentRAGWorkflowKey, maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxSmallDocumentBytes,
+			workflow: agentRAGWorkflowKey, workflowVersion: builtinWorkflowVersionV1, maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxSmallDocumentBytes,
 		},
 		{
-			name: "ApplyApprovedPatch", description: "Associate the approved patch step with the existing atomic safe-writeback execution.",
+			name: "ApplyApprovedPatch", version: toolVersionV1, description: "Associate the approved patch step with the existing atomic safe-writeback execution.",
 			inputSchemaID: "tool.apply_approved_patch.input", inputSchema: applyApprovedPatchInputSchema,
 			outputSchemaID: "tool.apply_approved_patch.output", outputSchema: applyApprovedPatchOutputSchema,
 			decodeInput: decodeApplyApprovedPatchInput, decodeOutput: decodeApplyApprovedPatchOutput,
 			capability: capability.WriteKnowledge, sideEffect: domain.SideEffectDomainWrite, invocation: domain.InvocationTrustedWorkflowOnly,
 			timeout: trustedOperationTimeout, retry: noRetry, idempotency: domain.IdempotencyRequired,
-			workflow: safeWritebackWorkflowKey, maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxSmallDocumentBytes,
+			workflow: safeWritebackWorkflowKey, workflowVersion: builtinWorkflowVersionV1, maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxSmallDocumentBytes,
 		},
 		{
-			name: "CreateGitCommit", description: "Associate the approved commit step with the existing atomic safe-writeback execution.",
+			name: "CreateGitCommit", version: toolVersionV1, description: "Associate the approved commit step with the existing atomic safe-writeback execution.",
 			inputSchemaID: "tool.create_git_commit.input", inputSchema: createGitCommitInputSchema,
 			outputSchemaID: "tool.create_git_commit.output", outputSchema: createGitCommitOutputSchema,
 			decodeInput: decodeCreateGitCommitInput, decodeOutput: decodeCreateGitCommitOutput,
 			capability: capability.GitWrite, sideEffect: domain.SideEffectDomainWrite, invocation: domain.InvocationTrustedWorkflowOnly,
 			timeout: trustedOperationTimeout, retry: noRetry, idempotency: domain.IdempotencyRequired,
-			workflow: safeWritebackWorkflowKey, maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxSmallDocumentBytes,
+			workflow: safeWritebackWorkflowKey, workflowVersion: builtinWorkflowVersionV1, maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxSmallDocumentBytes,
 		},
 		{
-			name: "RebuildIndex", description: "Run one existing versioned reindex delivery through the maintenance workflow.",
+			name: "RebuildIndex", version: toolVersionV1, description: "Run one existing versioned reindex delivery through the maintenance workflow.",
 			inputSchemaID: "tool.rebuild_index.input", inputSchema: rebuildIndexInputSchema,
 			outputSchemaID: "tool.rebuild_index.output", outputSchema: rebuildIndexOutputSchema,
 			decodeInput: decodeRebuildIndexInput, decodeOutput: decodeRebuildIndexOutput,
 			capability: capability.IndexMaintenance, sideEffect: domain.SideEffectDomainWrite, invocation: domain.InvocationTrustedWorkflowOnly,
 			timeout: trustedOperationTimeout, retry: noRetry, idempotency: domain.IdempotencyRequired,
-			workflow: indexMaintenanceWorkflow, maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxSmallDocumentBytes,
+			workflow: indexMaintenanceWorkflow, workflowVersion: builtinWorkflowVersionV1, maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxSmallDocumentBytes,
 		},
 		{
-			name: "RunRegressionEvaluation", description: "Run a frozen regression dataset against one exact index version in the evaluation workflow.",
+			name: "RunRegressionEvaluation", version: toolVersionV1, description: "Run a frozen regression dataset against one exact index version in the evaluation workflow.",
 			inputSchemaID: "tool.run_regression_evaluation.input", inputSchema: runRegressionEvaluationInputSchema,
 			outputSchemaID: "tool.run_regression_evaluation.output", outputSchema: runRegressionEvaluationOutputSchema,
 			decodeInput: decodeRunRegressionEvaluationInput, decodeOutput: decodeRunRegressionEvaluationOutput,
 			capability: capability.EvaluationRun, sideEffect: domain.SideEffectDomainWrite, invocation: domain.InvocationTrustedWorkflowOnly,
 			timeout: trustedOperationTimeout, retry: noRetry, idempotency: domain.IdempotencyRequired,
-			workflow: regressionEvaluationFlow, maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxSmallDocumentBytes,
+			workflow: regressionEvaluationFlow, workflowVersion: builtinWorkflowVersionV1, maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxSmallDocumentBytes,
+		},
+		{
+			name: "ReadSource", version: toolVersionV2, description: "Open one immutable source span by stable identifiers in the current workspace.",
+			inputSchemaID: "tool.read_source.input", inputSchema: readSourceInputSchema,
+			outputSchemaID: "tool.read_source.output", outputSchema: readSourceOutputSchema,
+			decodeInput: decodeReadSourceInput, decodeOutput: decodeReadSourceOutput,
+			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationModelRequestable,
+			timeout: localReadTimeout, retry: localRetry, idempotency: domain.IdempotencyNone,
+			sensitiveFields: []string{"/excerpt"}, workflow: agentRAGAnswerWorkflowKey, workflowVersion: agentRAGAnswerVersionV2,
+			maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: maxMediumDocumentBytes,
+		},
+		{
+			name: "ValidateCitation", version: toolVersionV2, description: "Validate a bounded batch of complete citation tuples against immutable retrieval evidence.",
+			inputSchemaID: "tool.validate_citation.input", inputSchema: validateCitationInputSchema,
+			outputSchemaID: "tool.validate_citation.output", outputSchema: validateCitationOutputSchema,
+			decodeInput: decodeValidateCitationInput, decodeOutput: decodeValidateCitationOutput,
+			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationModelRequestable,
+			timeout: localReadTimeout, retry: localRetry, idempotency: domain.IdempotencyNone,
+			workflow: agentRAGAnswerWorkflowKey, workflowVersion: agentRAGAnswerVersionV2,
+			maxInputBytes: maxMediumDocumentBytes, maxOutputBytes: maxMediumDocumentBytes,
 		},
 	}
 }

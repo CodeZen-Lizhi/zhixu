@@ -4,9 +4,9 @@
 - Scope: internal / mixed（以仓库源码、测试、架构文档和本地 Eino PoC 为主）
 - Date: 2026-08-06
 
-> 状态：这是 ADR-0019 与生产实现落地前的审计快照。当前结果以 ADR-0019、`implement.md` 和
-> `research/stage2-gate-and-stage3-stage4-decisions.md` 为准；下文“主模块没有 Eino/未正式采用”的陈述仅代表
-> 当时基线，不代表当前工作树。
+> 状态：这是 ADR-0019 与生产实现落地前的审计快照。当前结果以 ADR-0019、ADR-0020、ADR-0021、
+> 修订版 `implement.md` 和各 08-08 子任务为准；下文“主模块没有 Eino/未正式采用”的陈述仅代表当时基线，
+> 不代表当前工作树。
 
 ## Findings
 

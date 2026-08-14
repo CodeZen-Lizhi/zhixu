@@ -136,10 +136,9 @@ func TestBuildAllowsCanonicalDisabledRevision(t *testing.T) {
 	assertInvalid(t, NewConnectionTester(config.Defaults()).TestResolvedConnection(context.Background(), ConnectionTargetChat, domain.ResolvedSettings{Settings: domain.CanonicalDisabledSettings()}))
 }
 
-func TestBuildPreservesProcessChatImplementationForManagedRuntime(t *testing.T) {
+func TestBuildUsesEinoChatForManagedRuntime(t *testing.T) {
 	t.Parallel()
 	base := config.Defaults()
-	base.ChatImplementation = config.ChatImplementationEino
 	settings := domain.CanonicalDisabledSettings()
 	settings.Chat.Provider = domain.ChatProviderOpenAICompatible
 	settings.Chat.BaseURL = managedOllamaBaseURL
@@ -155,6 +154,34 @@ func TestBuildPreservesProcessChatImplementationForManagedRuntime(t *testing.T) 
 	}
 	if chat != modelsRuntime.Chat().Model() || modelsRuntime.Revision() != 7 {
 		t.Fatal("managed runtime did not retain one frozen Chat adapter")
+	}
+	runtimeChat := modelsRuntime.RuntimeChat()
+	if runtimeChat.State() != platformmodels.CapabilityConfigured || runtimeChat.Model() == nil {
+		t.Fatalf("managed runtime did not retain Eino Agent/Stream capability: %#v", runtimeChat)
+	}
+	if runtimeChat.Model() != modelsRuntime.RuntimeChat().Model() {
+		t.Fatal("managed runtime did not retain one frozen Eino Agent/Stream adapter")
+	}
+}
+
+func TestBuildUsesEinoEmbeddingForManagedRuntime(t *testing.T) {
+	t.Parallel()
+	base := config.Defaults()
+	settings := domain.CanonicalDisabledSettings()
+	settings.Embedding.Provider = domain.EmbeddingProviderOllama
+	settings.Embedding.BaseURL = managedOllamaBaseURL
+	settings.Embedding.Model = "embedding-v1"
+	settings.Embedding.Dimensions = 3
+	modelsRuntime, err := Build(base, domain.ResolvedSettings{Revision: 8, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedder := modelsRuntime.Embedding().Embedder()
+	if _, ok := embedder.(*platformmodels.EinoEmbedder); !ok {
+		t.Fatalf("embedding model=%T", embedder)
+	}
+	if embedder != modelsRuntime.Embedding().Embedder() || modelsRuntime.Revision() != 8 {
+		t.Fatal("managed runtime did not retain one frozen Embedding adapter")
 	}
 }
 

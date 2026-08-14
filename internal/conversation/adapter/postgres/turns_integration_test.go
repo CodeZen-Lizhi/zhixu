@@ -369,14 +369,19 @@ func seedPublishedTurn(
 
 func seedWorkflowRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture conversationRuntimeFixture, ordinal int64, at time.Time) {
 	t.Helper()
-	if _, err := pool.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at)
-		VALUES($1,$2,$3,'running','{}'::jsonb,1,$4,$4)`, string(fixture.runID(ordinal)), string(fixture.workspaceID), string(fixture.definitionID), at); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.run(
+		id,workspace_id,definition_id,status,input,version,created_at,updated_at,idempotency_key,request_hash
+	) VALUES($1,$2,$3,'running','{}'::jsonb,1,$4,$4,$5,repeat('a',64))`,
+		string(fixture.runID(ordinal)), string(fixture.workspaceID), string(fixture.definitionID), at,
+		fmt.Sprintf("conversation-runtime-run-%d", ordinal)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO workflow.node_run(
-		id,run_id,node_key,node_type,status,input,lease_owner,lease_until,version,created_at,updated_at
-	) VALUES($1,$2,'rag','agent.rag-answer','running','{}'::jsonb,'conversation-worker',$3,1,$4,$4)`,
-		string(fixture.nodeID(ordinal)), string(fixture.runID(ordinal)), at.Add(time.Hour), at); err != nil {
+		id,run_id,node_key,node_type,status,input,lease_owner,lease_until,version,created_at,updated_at,
+		idempotency_key,input_schema_version,output_schema_version,dispatch_no
+	) VALUES($1,$2,'rag','agent.rag-answer','running','{}'::jsonb,'conversation-worker',$3,1,$4,$4,$5,1,1,1)`,
+		string(fixture.nodeID(ordinal)), string(fixture.runID(ordinal)), at.Add(time.Hour), at,
+		fmt.Sprintf("conversation-runtime-node-%d", ordinal)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO workflow.node_attempt(

@@ -18,7 +18,9 @@ const (
 )
 
 const (
-	TelemetryStatusDisabled            = "TELEMETRY_DISABLED"
+	TelemetryStatusDisabled = "TELEMETRY_DISABLED"
+	// TelemetryStatusExporting means an external-export-capable Provider was
+	// initialized. Collector reachability is proven by actual export evidence.
 	TelemetryStatusExporting           = "TELEMETRY_EXPORTING"
 	TelemetryStatusExporterUnavailable = "TELEMETRY_EXPORTER_UNAVAILABLE"
 )

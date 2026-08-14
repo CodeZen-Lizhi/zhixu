@@ -200,11 +200,15 @@ M6-04 已实现以下公开契约，精确 Schema、状态码、Problem 和 405 
   `(ordinal,id)` 恢复 Question/Answer 投影；`latest=true` 返回最新一条恢复投影。
 - `GET /api/v1/answers/{answer_id}?workspace_id=`：四态发布结果（pending/completed/refused/
   clarification_required）、Workflow 当前阶段、RAG v2 结果、可打开 Citation 和 retrieval summary。
+- `GET /api/v1/answers/{answer_id}/stream?workspace_id=`：短期 Answer draft SSE，不是 durable event。
+  `Last-Event-ID` 使用 canonical `generation:sequence`；服务端只发送当前 generation 的 `chunk`、`reset`、`end`
+  与 heartbeat。`PUBLISHED` 仅要求客户端回查正式 Answer，`ABORTED`/`SUPERSEDED` 不再返回草稿正文。
 - `POST /api/v1/answers/{answer_id}/feedback`：五类 append-only 反馈；首次 201、精确重放 200。
 
 Question 的持久 Workflow Input 只含稳定 ID、版本和 Hash；正文与有界历史由 Conversation 事实源加载。
 同一 Conversation 同时只允许一个非终态 Answer Workflow。事实性 Answer 经过 Query Plan、Retrieval、
-Knowledge Eligibility、结构化生成、Citation 与 Faithfulness 门禁后才原子发布；Provider/数据库故障保留为
+Knowledge Eligibility、Eino Agent/无工具 final stream、结构化 metadata、Citation 与 Faithfulness 门禁后才原子发布；
+draft EOF 不是 Answer 事实，Finalizer 在正式 Answer 事务中标记 draft `PUBLISHED`。Provider/数据库故障保留为
 Workflow 失败，不伪装成业务 Refusal。`allow_original_sources/allow_web` 当前没有可发布资格时显式拒绝，
 不会静默忽略。
 

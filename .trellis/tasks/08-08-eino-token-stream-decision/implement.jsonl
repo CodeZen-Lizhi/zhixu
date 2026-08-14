@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"复核新增流式 API 与事实源边界。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"复核前端流生命周期和状态所有权。"}
+{"file":".trellis/tasks/08-08-eino-token-stream-decision/research/product-gate.md","reason":"真实产品消费者证据。"}

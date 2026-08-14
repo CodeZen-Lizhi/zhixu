@@ -62,7 +62,7 @@ func TestWorkerToolCompositionSeparatesContractsExecutorsAndTrustedAudit(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if enabled.contracts == nil || enabled.executions == nil || enabled.execution == nil || enabled.repository == nil || enabled.writebackAudit == nil || enabled.workflow == nil || enabled.definition == nil || !enabled.runtimeEnabled || len(enabled.enabledRefs) != 5 {
+	if enabled.contracts == nil || enabled.executions == nil || enabled.execution == nil || enabled.repository == nil || enabled.writebackAudit == nil || enabled.workflow == nil || enabled.definition == nil || !enabled.runtimeEnabled || len(enabled.enabledRefs) != 7 {
 		t.Fatalf("enabled components=%+v", enabled)
 	}
 	for _, ref := range enabled.enabledRefs {
@@ -173,7 +173,7 @@ func newMigratedWorkerTestPool(t *testing.T, baseURL string) *pgxpool.Pool {
 	return pool
 }
 
-func TestWorkerChatCompositionRegistersRelationAndRAGTogether(t *testing.T) {
+func TestWorkerChatCompositionUsesEinoSchedulersAndRegistersRelationAndRAGTogether(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated PostgreSQL database")
@@ -231,32 +231,26 @@ func TestWorkerChatCompositionRegistersRelationAndRAGTogether(t *testing.T) {
 	cfg.ChatBaseURL = "http://127.0.0.1:11434/v1"
 	cfg.ChatModel = "composition-test"
 	cfg.ChatModelVersion = "composition-test-v1"
+	cfg.ToolRuntimeMode = config.ToolModeEnabled
+	gitInspector, err := gitcli.NewWritebackClient(gitcli.New(""), workspaceRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := newToolRuntimeComponents(pool, cfg, workspaceRepository, gitInspector)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	agent, err := newAgentWorkflowComponents(pool, cfg, workspaceRepository, memoryService)
+	agent, err := newAgentWorkflowComponentsWithTools(pool, cfg, workspaceRepository, memoryService, enabled)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if agent.relation == nil || agent.rag == nil || !agent.capability.available || agent.capability.code != "" {
 		t.Fatalf("agent components=%+v", agent)
 	}
-	if agent.relationScheduler != nil || agent.ragScheduler != nil || agent.artifactScheduler != nil ||
-		agent.captureScheduler != nil || agent.organizingScheduler != nil {
-		t.Fatalf("direct selectors unexpectedly compiled Eino schedulers: %+v", agent)
-	}
-	einoCfg := cfg
-	einoCfg.StructuredSchedulerRelation = config.StructuredSchedulerImplementationEino
-	einoCfg.StructuredSchedulerRAG = config.StructuredSchedulerImplementationEino
-	einoCfg.StructuredSchedulerArtifact = config.StructuredSchedulerImplementationEino
-	einoCfg.StructuredSchedulerCapture = config.StructuredSchedulerImplementationEino
-	einoCfg.StructuredSchedulerOrganizing = config.StructuredSchedulerImplementationEino
-	einoAgent, err := newAgentWorkflowComponents(pool, einoCfg, workspaceRepository, memoryService)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if einoAgent.relation == nil || einoAgent.rag == nil || einoAgent.relationScheduler == nil ||
-		einoAgent.ragScheduler == nil || einoAgent.artifactScheduler == nil || einoAgent.captureScheduler == nil ||
-		einoAgent.organizingScheduler == nil || !einoAgent.capability.available {
-		t.Fatalf("Eino selectors were not wired through Worker composition: %+v", einoAgent)
+	if agent.relationScheduler == nil || agent.ragScheduler == nil || agent.ragRuntimeScheduler == nil || agent.artifactScheduler == nil ||
+		agent.captureScheduler == nil || agent.organizingScheduler == nil {
+		t.Fatalf("Eino schedulers were not wired through Worker composition: %+v", agent)
 	}
 
 	worker, err := newWorkerComponents(pool, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), observability.NewMemoryMetrics())
@@ -292,10 +286,13 @@ func TestWorkerChatCompositionRegistersRelationAndRAGTogether(t *testing.T) {
 	if _, err := worker.definitions.Resolve(agentworkflow.RAGWorkflowDefinitionKey, agentworkflow.RAGWorkflowDefinitionVersion); err != nil {
 		t.Fatalf("RAG definition is unreachable: %v", err)
 	}
+	if _, err := worker.definitions.Resolve(agentworkflow.RAGWorkflowDefinitionKey, agentworkflow.RegisteredRAGDefinitionV1().Version); err != nil {
+		t.Fatalf("historical RAG v1 definition is unreachable: %v", err)
+	}
 	if _, err := worker.definitions.Resolve(artifactworkflow.DefinitionKey, artifactworkflow.DefinitionVersion); err != nil {
 		t.Fatalf("Artifact definition is unreachable: %v", err)
 	}
-	if _, err := worker.executors.Resolve(toolworkflow.NodeKind, toolworkflow.InputSchemaVersion); err == nil {
-		t.Fatal("disabled Tool runtime unexpectedly registered the Tool executor")
+	if _, err := worker.executors.Resolve(toolworkflow.NodeKind, toolworkflow.InputSchemaVersion); err != nil {
+		t.Fatalf("enabled Tool runtime executor is unreachable: %v", err)
 	}
 }

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
@@ -96,6 +98,10 @@ func (finalizer *AnswerFinalizer) Finalize(ctx context.Context, command conversa
 	if finalizer == nil || isNilInterface(finalizer.db) || isNilInterface(finalizer.agent) || isNilInterface(finalizer.events) || isNilInterface(finalizer.clock) {
 		return conversationworkflow.OutputReceipt{}, false, dependency(ErrorCodeAnswerFinalizeUnavailable, errors.New("answer finalizer is unavailable"))
 	}
+	if command.Draft != nil {
+		frozen := *command.Draft
+		command.Draft = &frozen
+	}
 	if err := validateFinalizeCommand(ctx, command); err != nil {
 		return conversationworkflow.OutputReceipt{}, false, err
 	}
@@ -145,6 +151,9 @@ func (finalizer *AnswerFinalizer) Finalize(ctx context.Context, command conversa
 		if receiptErr != nil {
 			return conversationworkflow.OutputReceipt{}, false, receiptErr
 		}
+		if err := validateTerminalDraft(ctx, tx, command); err != nil {
+			return conversationworkflow.OutputReceipt{}, false, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return conversationworkflow.OutputReceipt{}, false, classify(err, ErrorCodeAnswerFinalizeUnavailable)
 		}
@@ -163,6 +172,10 @@ func (finalizer *AnswerFinalizer) Finalize(ctx context.Context, command conversa
 		}
 	}
 	publication, err := buildPublication(command, run, view.Answer, now)
+	if err != nil {
+		return conversationworkflow.OutputReceipt{}, false, err
+	}
+	draftLeaseUntil, err := terminalizeDraft(ctx, tx, command, now)
 	if err != nil {
 		return conversationworkflow.OutputReceipt{}, false, err
 	}
@@ -199,6 +212,9 @@ func (finalizer *AnswerFinalizer) Finalize(ctx context.Context, command conversa
 		return conversationworkflow.OutputReceipt{}, false, conflict(ErrorCodeAnswerFinalizeConflict, errors.New("conversation activity CAS failed"))
 	}
 	if err := finalizer.appendTerminalEvent(ctx, tx, publication.answer, now); err != nil {
+		return conversationworkflow.OutputReceipt{}, false, err
+	}
+	if err := validateActiveDraftClaimLease(ctx, tx, draftLeaseUntil); err != nil {
 		return conversationworkflow.OutputReceipt{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -358,6 +374,172 @@ func validateFinalizeCommand(ctx context.Context, command conversationapplicatio
 	parsed, err := foundation.ParseID(string(command.ModelRunID))
 	if err != nil || parsed != command.ModelRunID || command.ExpectedAnswerVersion < 1 || command.ExpectedModelRunVersion < 1 || command.Proposal.ModelRunRef != command.ModelRunID {
 		return invalid(ErrorCodeAnswerFinalizeInvalid, errors.New("answer finalization command is invalid"))
+	}
+	for _, id := range []foundation.ID{command.WorkspaceID, command.WorkflowRunID, command.NodeRunID, command.NodeAttemptID, command.ConversationID, command.QuestionID, command.AnswerID} {
+		if command.ModelRunID == id {
+			return invalid(ErrorCodeAnswerFinalizeInvalid, errors.New("answer finalization identity is reused"))
+		}
+	}
+	if command.Draft == nil {
+		return nil
+	}
+	if _, err := expectedDraftTerminalStatus(command.Proposal); err != nil {
+		return err
+	}
+	draft := *command.Draft
+	parsed, err = foundation.ParseID(string(draft.SessionID))
+	if err != nil || parsed != draft.SessionID || draft.Generation < 1 || draft.AttemptNo < 1 ||
+		draft.LeaseOwner == "" || strings.TrimSpace(draft.LeaseOwner) != draft.LeaseOwner || len(draft.LeaseOwner) > 256 || !utf8.ValidString(draft.LeaseOwner) {
+		return invalid(ErrorCodeAnswerFinalizeInvalid, errors.New("answer draft terminal binding is invalid"))
+	}
+	for _, id := range []foundation.ID{command.WorkspaceID, command.WorkflowRunID, command.NodeRunID, command.NodeAttemptID, command.ConversationID, command.QuestionID, command.AnswerID, command.ModelRunID} {
+		if draft.SessionID == id {
+			return invalid(ErrorCodeAnswerFinalizeInvalid, errors.New("answer draft terminal identity is reused"))
+		}
+	}
+	return nil
+}
+
+func expectedDraftTerminalStatus(proposal agentapplication.RAGTerminalProposal) (agentapplication.DraftStreamStatus, error) {
+	terminalCount := 0
+	if proposal.Answer != nil {
+		terminalCount++
+	}
+	if proposal.Refusal != nil {
+		terminalCount++
+	}
+	if proposal.Clarification != nil {
+		terminalCount++
+	}
+	if terminalCount != 1 {
+		return "", invalid(ErrorCodeAnswerFinalizeInvalid, errors.New("answer draft terminal proposal is incomplete or ambiguous"))
+	}
+	if proposal.Answer != nil {
+		return agentapplication.DraftStreamPublished, nil
+	}
+	return agentapplication.DraftStreamAborted, nil
+}
+
+func terminalizeDraft(ctx context.Context, tx pgx.Tx, command conversationapplication.FinalizeAnswerCommand, now time.Time) (time.Time, error) {
+	if command.Draft == nil {
+		return time.Time{}, nil
+	}
+	target, err := expectedDraftTerminalStatus(command.Proposal)
+	if err != nil {
+		return time.Time{}, err
+	}
+	draft := *command.Draft
+	leaseUntil, err := lockActiveDraftClaim(ctx, tx, command, draft)
+	if err != nil {
+		return time.Time{}, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE agent.answer_draft_session
+		SET status=$10,completed_at=COALESCE(completed_at,GREATEST(updated_at,$11)),updated_at=GREATEST(updated_at,$11)
+		WHERE id=$1 AND workspace_id=$2 AND answer_id=$3 AND workflow_run_id=$4 AND node_run_id=$5
+		  AND node_attempt_id=$6 AND attempt_no=$7 AND lease_owner=$8 AND generation=$9
+		  AND (($10='PUBLISHED' AND status IN ('COMPLETED','DEGRADED'))
+		    OR ($10='ABORTED' AND status IN ('ACTIVE','COMPLETED','DEGRADED')))`,
+		string(draft.SessionID), string(command.WorkspaceID), string(command.AnswerID), string(command.WorkflowRunID), string(command.NodeRunID),
+		string(command.NodeAttemptID), draft.AttemptNo, draft.LeaseOwner, draft.Generation, string(target), now)
+	if err != nil {
+		return time.Time{}, classify(err, ErrorCodeAnswerFinalizeUnavailable)
+	}
+	if tag.RowsAffected() != 1 {
+		return time.Time{}, conflict(ErrorCodeAnswerFinalizeConflict, errors.New("answer draft terminal compare-and-swap failed"))
+	}
+	return leaseUntil, nil
+}
+
+func lockActiveDraftClaim(
+	ctx context.Context,
+	tx pgx.Tx,
+	command conversationapplication.FinalizeAnswerCommand,
+	draft conversationapplication.AnswerDraftTerminalBinding,
+) (time.Time, error) {
+	var nodeLeaseUntil time.Time
+	err := tx.QueryRow(ctx, `SELECT lease_until
+		FROM workflow.node_run
+		WHERE id=$1 AND run_id=$2 AND attempt=$3 AND status='running' AND lease_owner=$4
+		FOR UPDATE`, string(command.NodeRunID), string(command.WorkflowRunID), draft.AttemptNo, draft.LeaseOwner).Scan(&nodeLeaseUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, conflict(ErrorCodeAnswerFinalizeConflict, errors.New("answer draft runtime claim is no longer active"))
+	}
+	if err != nil {
+		return time.Time{}, classify(err, ErrorCodeAnswerFinalizeUnavailable)
+	}
+	var attemptLeaseUntil time.Time
+	err = tx.QueryRow(ctx, `SELECT lease_until
+		FROM workflow.node_attempt
+		WHERE id=$1 AND node_run_id=$2 AND attempt_no=$3 AND status='running' AND lease_owner=$4
+		FOR UPDATE`, string(command.NodeAttemptID), string(command.NodeRunID), draft.AttemptNo, draft.LeaseOwner).Scan(&attemptLeaseUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, conflict(ErrorCodeAnswerFinalizeConflict, errors.New("answer draft runtime claim is no longer active"))
+	}
+	if err != nil {
+		return time.Time{}, classify(err, ErrorCodeAnswerFinalizeUnavailable)
+	}
+	if attemptLeaseUntil.Before(nodeLeaseUntil) {
+		nodeLeaseUntil = attemptLeaseUntil
+	}
+	if err := validateActiveDraftClaimLease(ctx, tx, nodeLeaseUntil); err != nil {
+		return time.Time{}, err
+	}
+	return nodeLeaseUntil, nil
+}
+
+func validateActiveDraftClaimLease(ctx context.Context, tx pgx.Tx, leaseUntil time.Time) error {
+	if leaseUntil.IsZero() {
+		return nil
+	}
+	var now time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return classify(err, ErrorCodeAnswerFinalizeUnavailable)
+	}
+	if !leaseUntil.After(now) {
+		return conflict(ErrorCodeAnswerFinalizeConflict, errors.New("answer draft runtime claim lease has expired"))
+	}
+	return nil
+}
+
+func validateTerminalDraft(ctx context.Context, tx pgx.Tx, command conversationapplication.FinalizeAnswerCommand) error {
+	if command.Draft == nil {
+		return nil
+	}
+	target, err := expectedDraftTerminalStatus(command.Proposal)
+	if err != nil {
+		return err
+	}
+	draft := *command.Draft
+	var workspaceID, answerID, workflowRunID, nodeRunID, nodeAttemptID, leaseOwner, status string
+	var attemptNo int
+	var generation int64
+	err = tx.QueryRow(ctx, `SELECT workspace_id::text,answer_id::text,workflow_run_id::text,node_run_id::text,node_attempt_id::text,
+		attempt_no,lease_owner,generation,status
+		FROM agent.answer_draft_session
+		WHERE id=$1`, string(draft.SessionID)).Scan(
+		&workspaceID, &answerID, &workflowRunID, &nodeRunID, &nodeAttemptID, &attemptNo, &leaseOwner, &generation, &status,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var conflictingProjection bool
+		if queryErr := tx.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM agent.answer_draft_session
+			WHERE workspace_id=$1 AND answer_id=$2 AND status IN ('ACTIVE','COMPLETED','DEGRADED','PUBLISHED','ABORTED')
+		)`, string(command.WorkspaceID), string(command.AnswerID)).Scan(&conflictingProjection); queryErr != nil {
+			return classify(queryErr, ErrorCodeAnswerFinalizeUnavailable)
+		}
+		if conflictingProjection {
+			return conflict(ErrorCodeAnswerFinalizeConflict, errors.New("terminal answer draft identity differs"))
+		}
+		// 草稿是带 TTL 的瞬态投影；清理后仍必须回放 canonical Answer 终态。
+		return nil
+	}
+	if err != nil {
+		return classify(err, ErrorCodeAnswerFinalizeUnavailable)
+	}
+	if foundation.ID(workspaceID) != command.WorkspaceID || foundation.ID(answerID) != command.AnswerID || foundation.ID(workflowRunID) != command.WorkflowRunID ||
+		foundation.ID(nodeRunID) != command.NodeRunID || foundation.ID(nodeAttemptID) != command.NodeAttemptID || attemptNo != draft.AttemptNo ||
+		leaseOwner != draft.LeaseOwner || generation != draft.Generation || status != string(target) {
+		return conflict(ErrorCodeAnswerFinalizeConflict, errors.New("terminal answer draft binding differs"))
 	}
 	return nil
 }

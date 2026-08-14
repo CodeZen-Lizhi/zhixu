@@ -559,6 +559,13 @@ CancellationSafetyGuard.SafeToCancelWorkflowNode(context.Context, any, foundatio
 - managed rollout 处于 Draining/Applying/Verifying 时，Worker 必须在 lifecycle Start 前幂等调用 `PauseQueue`：它既固化
   持久暂停，又要求目标 queue 行已存在。缺失行表示 rollout/queue 事实不一致，必须在 River 创建未暂停行或 claim Job 前
   fail closed；不得只跳过 Resume 后继续启动。
+- Worker 的 Definition 版本准入必须进入 PostgreSQL Claim 事务。启动时全局排空查询不能替代事务 fence；若当前
+  Worker exclusion 命中且 delivery 仍可执行，Claim 返回无 Attempt 身份的 `deferred`，River 用 `JobSnooze` 保留同一
+  Job，不得创建、reclaim 或 fail NodeAttempt。终态、暂停、过期 dispatch 和重复 delivery 必须继续按既有
+  `stale`/lease 语义归约，不能因 exclusion 永久 snooze。
+- Runtime lease/TTL fence 必须先按固定顺序取得参与判定的 Run、Node、Attempt 行锁，再调用 PostgreSQL
+  `clock_timestamp()`；禁止用事务起点 `CURRENT_TIMESTAMP` 或锁前缓存时间比较 `lease_until`。锁等待跨过到期点后，
+  Heartbeat/Transition 必须拒绝旧 owner，Claim 必须按到期后的当前数据库时间 reclaim。
 - Writeback Execution 处于 `prepared/file_prepared/file_applied/git_prepared/git_committed/publish_recovery/compensating` 时，Cancel 只记录 request，继续 heartbeat/lease reclaim，并返回 retryable `WORKFLOW_CANCELLATION_DEFERRED`；只有安全失败、补偿、人工恢复、完成或已清理恢复证据后才允许 Run terminal cancelled。
 - Cancellation guard 必须使用 Runtime 当前 pgx transaction 查询，保证 Control/Heartbeat/Transition 与 Execution checkpoint 判定原子。
 - Compose PostgreSQL healthcheck 必须执行实际 `SELECT 1`；`pg_isready` 在数据库尚未创建时也可能报告 server accepting，不能作为 Migrate 前置门禁。
@@ -596,6 +603,8 @@ CancellationSafetyGuard.SafeToCancelWorkflowNode(context.Context, any, foundatio
 - Unit/race：Client options、queue 映射、traceparent、`river:*` 保留字段、lifecycle 首事件互斥、Start→Resume→readiness
   顺序、非终态 Pause→Start→readiness、缺失暂停行 fail closed、Resume 失败清理、cancel safety 状态表。
 - PostgreSQL：cancel 后 heartbeat、lease expiry/reclaim、unsafe transition 回滚、安全 checkpoint 后 terminal cancel，至少 `-race -count=20`。
+- PostgreSQL：持有 Runtime 行锁并让 Claim/Heartbeat/Transition/WaitForHuman 等待到 lease 过期，证明锁后数据库时间
+  拒绝旧 owner、Human Task 不会被创建，且 Claim 只创建下一 Attempt；不得用普通 `Sleep` 后再发起请求替代该竞态回归。
 - Integration：独立空库断言目标 queue 从 0 行经 lifecycle Start 变为 1 行且随后 Resume/readiness 成功；另覆盖 Approval
   双 Worker、非终态 rollout 缺失 queue 行在 Start 前失败、正常 Writeback、fault smoke，并断言
   Execution/Commit/Mapping/Outbox 唯一。
@@ -702,7 +711,10 @@ OpenAI-Compatible `/v1/embeddings` 与 Ollama `/api/embed`；Reranker 当前只�
 
 - `EmbeddingContract` 冻结 Provider、Adapter/Version、Model、Dimensions、Normalization、Distance、
   Endpoint identity、`MaxBatchSize`、`MaxInputBytes`、`MaxBatchInputBytes` 和不含 Credential 的 Config Hash。
-- 环境键：`ZHIXU_EMBEDDING_PROVIDER|BASE_URL|API_KEY|MODEL|DIMENSIONS|NORMALIZATION|DISTANCE_METRIC|MAX_BATCH_SIZE|MAX_INPUT_BYTES|MAX_BATCH_INPUT_BYTES|TIMEOUT|MAX_RESPONSE_BYTES`；默认 provider 为 `disabled`。
+- 环境键统一使用 `ZHIXU_EMBEDDING_` 前缀，后缀为 `PROVIDER`、`BASE_URL`、`API_KEY`、`MODEL`、
+  `DIMENSIONS`、`NORMALIZATION`、`DISTANCE_METRIC`、`MAX_BATCH_SIZE`、`MAX_INPUT_BYTES`、
+  `MAX_BATCH_INPUT_BYTES`、`TIMEOUT`、`MAX_RESPONSE_BYTES`；默认 provider 为 `disabled`，生产 Adapter
+  固定为 Eino。旧 implementation selector 不再是配置合同，恢复历史版本使用 Git 发布记录。
 - `embedding_cache` 主键为 Workspace + Embedding Version + Content Hash，不保存正文；cache 与 Projection
   terminal update 同事务。cache 使用一条 `INSERT ... SELECT FROM unnest(...)`，Projection 使用一条
   `UPDATE ... FROM unnest(...)`，随后一次批量 readback exact float32 校验。
@@ -903,8 +915,9 @@ Agent 不创建第二套 Claim、Eligibility 或 Conflict 表。
 - Existing Claim 必须由 Knowledge `FormalClaimReader` 读取并核对 Workspace、正文、canonical Applicability、Sources、
   状态和版本；Existing Evidence 还必须命中 `owner_type=CLAIM && owner_id=existing_claim_id`。
 - Disputed disclosure 固定包含 `claim_id/conflict_ids/canonical applicability/UTC updated_at`；模型输出必须精确复制。
-- 一个 Node Attempt 最多一个 Model Run；每次 `INITIAL/REPAIR/REDUCED/REVIEW` 为独立 Model Call。调用前写
-  `STARTED`，完成 CAS；未知结果归 `UNKNOWN`，不得自动重放 Provider 或伪装成功。
+- 一个 Node Attempt 最多一个 Model Run；v2 每次 `PLAN/AGENT/ANSWER/INITIAL/REPAIR/REDUCED/REVIEW` 为独立 Model Call，
+  `AGENT` 可重复、`ANSWER` 单次，且保持唯一递增 `call_no`。调用前写 `STARTED`，完成 CAS；未知结果归 `UNKNOWN`，
+  不得自动重放 Provider 或伪装成功。既有 v1 `PLAN -> INITIAL/REPAIR/REDUCED -> REVIEW` 继续兼容。
 - Model Run 保存 generation/retrieval 基线；每条 Model Call 必须显式保存该次实际 Adapter/Model/Profile/Prompt/Schema
   的 ID/version 与 `max_output_tokens`。REVIEW 可以使用独立受信 Catalog，但不能只留下不可逆 request hash。
 - 只保存版本、Hash、字节、Token、耗时、状态和稳定错误码；Prompt、Evidence、Source、raw response、Credential、
@@ -1168,11 +1181,11 @@ Correct: 首次记录真实时钟；重放在 advisory lock 内恢复既有 occu
 
 ## M6-04 Model Binding And Published Empty-Collection Contract
 
-- PLAN 和 Faithfulness REVIEW 的 Provider 输入必须包含服务端分配的 `model_run_ref`，模型响应必须精确回显；该字段只加入内存 Chat Request，不得复制进持久 Workflow Input。
-- PLAN 调用方不得提供保留字段 `model_run_ref`；输入必须是 JSON object，绑定后的完整输入受 `MaxStructuredInputBytes` 限制。
+- 历史 v1 PLAN 和 Faithfulness REVIEW 的 Provider 输入必须包含服务端分配的 `model_run_ref`，模型响应必须精确回显；该字段只加入内存 Chat Request，不得复制进持久 Workflow Input。正式 v2 PLAN 使用无身份 Provider wire，不包含也不回显 `model_run_ref`；项目严格解码后由 Compose 注入冻结的可信 ModelRunRef。
+- PLAN 调用方不得在原始 Workflow Input 提供保留字段 `model_run_ref`；输入必须是 JSON object，v1 内存绑定后或 v2 无身份投影后的完整输入均受 `MaxStructuredInputBytes` 限制。
 - `RAGRetrievalSummary.Rewrites/Degradations` 与 published `Citations` 的空集合是显式 `[]`，不是 `null`。Repository/Adapter 防御性复制必须使用非 nil 空 slice 作为起点。
 - Search snippet 与 Source Span excerpt 进入 Agent Evidence 前在 Retrieval Adapter 边界规范化首尾空白；空白-only 结果属于一致性失败。
-- 真实 PostgreSQL/Compose 回归必须覆盖 Refusal 可查询、Markdown Evidence 可打开、completed Answer 三次 Model Call 以及 exact replay 零新增调用。
+- 真实 PostgreSQL/Compose 回归必须覆盖 Refusal 可查询、Markdown Evidence 可打开、v2 `PLAN -> AGENT* -> ANSWER -> INITIAL/REPAIR/REDUCED -> REVIEW` Model Call 以及 exact replay 零新增调用；历史 v1 回放另测其兼容序列。
 
 ## Scenario: M7-01 Graph Canonical Read Projection
 

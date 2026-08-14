@@ -157,12 +157,49 @@ correlation 写入 Trace/Metrics，不读取 callback input/output/raw error，�
 Cookie、Prompt、请求/响应正文或 Endpoint，也不替代 `RecordingChatModel`、Model Run/Call、Audit 或
 Workflow Progress。Telemetry 失败不改变 Chat 结果。
 
+Eino Embedding callback 的标准 input/output 会携带原始文本和向量，当前生产 Adapter 禁止注册全局 handler，
+也不把 callback manager 传入 Embedding 调用。未来如需 Embedding telemetry，必须先定义只接收 Provider、
+结果分类、数量、维度和耗时等稳定摘要的调用级桥接，正文和向量不得进入 Trace、Metrics 或日志。
+
+Eino Agent/Stream 的可观测性仍以项目 `ModelRun`、`ModelCall`、`ToolCall`、NodeAttempt 和 draft session 为事实源。
+每次 `AGENT`、`ANSWER` 或结构化 phase 在调用前记录 STARTED，使用项目规范化 hash、usage 与终态归约；Eino callback
+只补充脱敏 trace/metric，不能写入业务审计或持久进度。指标至少覆盖首 token 延迟、完成延迟、draft degradation、
+Agent iteration、Tool Call、Graph node error 和拒答率；Workspace、Answer 或 Provider ID
+不得作为 metric label。草稿正文、Agent 中间消息、Tool 参数和输出均不得进入日志、trace 或持久 event。
+
+正式 Eino Runtime 使用以下项目指标：
+
+- `agent.answer.first_token.duration_ms{result}`、`agent.answer.completion.duration_ms{result,error_code?}` 和
+  `agent.answer.result_total{result,error_code?}`；首 token 只在收到第一个非空正文 frame 后记录，完成耗时覆盖到 EOF 或错误。
+- `agent.draft.degradation_total{error_code?}`；同一 Answer stream 的 sink 首次降级只计一次，Provider 流仍必须继续 drain。
+- `agent.runtime.iterations{result,error_code?}`、`agent.runtime.tool_calls{result,error_code?}` 和
+  `agent.runtime.result_total{result,error_code?}`；迭代/工具直方图只记录通过输出合同的成功 Agent Run。
+- `agent.rag.graph_node.result_total{node_kind,result,error_code?}`；`node_kind` 只能来自编译期固定的 Eino RAG Graph 节点。
+- `rag.outcome_total{outcome}`；只在 v2 Finalizer 事务成功、receipt 校验通过且不是 replay 后记录
+  `completed/refused/clarification_required`，因此可作为正式拒答率分母。
+
+所有指标 exporter 错误或 panic 都必须降级为观测失败，不能改变 Agent、Stream、Graph、Finalizer 或 Worker 结果。
+上述指标已经接入正式 Worker 组合根，并通过进程作用域的 OTLP/HTTP Provider 导出；它们只提供观察能力，
+真实 Provider 灰度数据和一个稳定发布观察周期仍是独立发布质量检查。
+
 ### Data
 
 - documents/chunks/relations。
 - index_version。
 - stale_projection。
 - health_issues。
+
+### Stable observation query surface
+
+稳定观察作业使用 Prometheus-compatible Metrics API 和 Tempo-compatible Trace Search API。OTLP Collector 仅负责接收和
+转换，不作为采集器查询端点。API/Worker 的 `runtime.process.presence` 与 `runtime.telemetry.required` 是无 label 的
+进程级 LastValue gauge；Collector 作业用固定 `service_name` 聚合查询，不能把 workspace、run、provider 或模型放入
+label。查询、阈值和后端 URL/path 信任摘要分别由 `deploy/eino_stable_observation_queries.json`、
+`deploy/eino_stable_observation_thresholds.json` 和 `deploy/eino_stable_observation_backend_trust.json` 冻结；在独立审批
+配置前均保持 `unconfigured`，不得用人工 manifest 或本地接收器宣称稳定观察通过。受保护采集器为每份 start/day
+evidence 计算 HMAC 并绑定完整 manifest；每日续写、最终 attestation 和独立 verifier 都重新验证 evidence 目录，
+因此签发后删除或替换 evidence 也会使正式门禁失败。evidence v2 还将实际 `collected_at` 纳入 HMAC；每日查询必须在
+对应窗口结束后的同一观察时区自然日内完成，禁止在窗口末尾集中补采历史日期。
 
 ## 7. 审计事件
 
@@ -233,14 +270,20 @@ Workspace 管理查询。列表按 `occurred_at,id` 倒序并使用二元游标�
 | 模式 | Endpoint | 初始化失败 | Runtime 行为 |
 |---|---|---|---|
 | `disabled` | 必须为空 | 不构造 exporter | 使用 noop metrics/tracer，不声称外部导出 |
-| `optional` | 必填绝对 HTTP(S) URL | 稳定 `TELEMETRY_EXPORTER_UNAVAILABLE` | 使用 noop provider 并记录 degraded，Worker 仍可 ready |
-| `required` | 必填绝对 HTTP(S) URL | 稳定失败 | Worker fail-fast，不进入 ready |
+| `optional` | 必填绝对 HTTP(S) Base URL | 构造失败时稳定 `TELEMETRY_EXPORTER_UNAVAILABLE` | 使用 noop provider 并记录 degraded，进程仍可 ready |
+| `required` | 必填绝对 HTTP(S) Base URL | 构造失败时稳定失败 | API/Worker fail-fast，不进入 ready |
 
-环境变量为 `ZHIXU_TELEMETRY_MODE` 与 `OTEL_EXPORTER_OTLP_ENDPOINT`。当前仓库只
-提供项目自有 Provider/Factory seam，Composition 尚未注入真实 exporter factory；
-因此 `optional` 会明确 degraded，`required` 会启动失败，不能把内存/noop Adapter
-包装成“已上报”。后续接入 OpenTelemetry SDK 时，SDK 类型只能位于 Adapter 或
-Composition，不能进入 Workflow Domain/Application。
+环境变量为 `ZHIXU_TELEMETRY_MODE` 与 `OTEL_EXPORTER_OTLP_ENDPOINT`。API 和 Worker
+Composition 已注入真实 OTLP/HTTP Provider，分别使用 `<app>-api`、`<app>-worker` 的
+`service.name`，并在进程 Shutdown 时刷新批量 Trace 和周期 Metrics。Base URL 可带受控
+path prefix，Adapter 分别追加 `/v1/metrics` 和 `/v1/traces`；userinfo、query、fragment
+会被拒绝，endpoint 与认证 header 不进入项目日志或错误。
+
+`TELEMETRY_EXPORTING` 只表示 external-export-capable Provider 已成功构造，不声称远端
+Collector 已可达。真实可达性必须由 protobuf 导出集成证据以及灰度 Collector 中的固定
+查询证明；SDK 类型只位于 `internal/platform/observability`，不会进入 Workflow
+Domain/Application。`disabled` 仍使用会校验合同的 noop Adapter，内存 Provider 不能冒充
+外部导出。
 
 ## 10. 告警
 
@@ -281,11 +324,12 @@ Composition，不能进入 Workflow Domain/Application。
 - 持久结果 replay 不重复发射 node/retry/manual 指标；租约回收与 duplicate observation
   来自 PostgreSQL 事务事实，不通过 AttemptNo 猜测。
 - Health payload 只含稳定 `status/code/version`。
-- `disabled/optional/required` 不伪造 exporter 成功，Provider 资源只关闭一次。
+- `disabled/optional/required` 不伪造 exporter 成功，OTLP Provider 资源只关闭一次并在
+  Shutdown 刷新；protobuf receiver 测试必须同时收到 Metrics 与 Trace。
 
 发布门禁还应对日志、Audit row、Metric snapshot、Trace snapshot、River metadata 和
 Worker health response 做 Secret canary 扫描。Audit 单元门禁为
 `go test ./internal/audit/...`；真实 PostgreSQL 门禁使用
 `go test -tags integration ./internal/audit/adapter/postgres`，并要求指向已迁移的可丢弃
-数据库。单元测试通过不等同于生产 exporter 或 Compose 网络已验证；真实 exporter、
-数据库与容器烟测必须单独记录结果。
+数据库。单元测试通过不等同于灰度 Collector 可达或稳定观察已完成；真实 exporter、
+数据库、容器烟测与发布观察必须单独记录结果。稳定观察不决定是否保留第二套 AI Runtime。

@@ -126,8 +126,9 @@ func (capability EmbeddingCapability) GoString() string { return capability.Stri
 // ModelRuntime is one immutable process-wide Chat and Embedding factory result.
 // It intentionally stores neither config.Config nor raw endpoint or credential fields.
 type ModelRuntime struct {
-	chat      ChatCapability
-	embedding EmbeddingCapability
+	chat        ChatCapability
+	runtimeChat RuntimeChatCapability
+	embedding   EmbeddingCapability
 }
 
 // NewConfiguredModelRuntime 校验模型配置，并使用可选项目 telemetry 各构造一次已启用 Adapter。
@@ -136,8 +137,9 @@ func NewConfiguredModelRuntime(cfg config.Config, telemetry ...ModelTelemetry) (
 		return nil, fmt.Errorf("model runtime configuration is invalid: %w", err)
 	}
 	runtime := &ModelRuntime{
-		chat:      ChatCapability{state: CapabilityDisabled},
-		embedding: EmbeddingCapability{state: CapabilityDisabled},
+		chat:        ChatCapability{state: CapabilityDisabled},
+		runtimeChat: RuntimeChatCapability{state: CapabilityDisabled},
+		embedding:   EmbeddingCapability{state: CapabilityDisabled},
 	}
 	if cfg.ChatProvider != config.ChatProviderDisabled {
 		chat, err := NewConfiguredChatModel(cfg, telemetry...)
@@ -149,6 +151,17 @@ func NewConfiguredModelRuntime(cfg config.Config, telemetry ...ModelTelemetry) (
 			return nil, errors.New("configured chat adapter contract is unavailable")
 		}
 		runtime.chat = ChatCapability{state: CapabilityConfigured, model: chat, contract: contractProvider.Contract()}
+		runtimeModel, err := NewEinoRuntimeChatModel(OpenAIChatOptions{
+			BaseURL: cfg.ChatBaseURL, APIKey: cfg.ChatAPIKey, Model: cfg.ChatModel, ModelVersion: cfg.ChatModelVersion,
+			AdapterVersion: cfg.ChatAdapterVersion, Timeout: cfg.ChatTimeout,
+			MaxRequestBytes: cfg.ChatMaxRequestBytes, MaxResponseBytes: cfg.ChatMaxResponseBytes,
+		})
+		if err != nil {
+			return nil, err
+		}
+		runtime.runtimeChat = RuntimeChatCapability{
+			state: CapabilityConfigured, model: runtimeModel, contract: runtimeModel.http.contractCopy(),
+		}
 	}
 	if cfg.EmbeddingProvider != config.EmbeddingProviderDisabled {
 		embedder, err := NewConfiguredEmbedder(cfg)
@@ -168,6 +181,14 @@ func NewConfiguredModelRuntime(cfg config.Config, telemetry ...ModelTelemetry) (
 		}
 	}
 	return runtime, nil
+}
+
+// RuntimeChat 返回仅供 Eino Agent/Stream adapter 使用的基础设施 capability。
+func (runtime *ModelRuntime) RuntimeChat() RuntimeChatCapability {
+	if runtime == nil {
+		return RuntimeChatCapability{state: CapabilityDisabled}
+	}
+	return runtime.runtimeChat
 }
 
 // Chat returns the frozen Chat capability.
@@ -190,7 +211,7 @@ func (runtime *ModelRuntime) String() string {
 	if runtime == nil {
 		return "ModelRuntime{unavailable}"
 	}
-	return fmt.Sprintf("ModelRuntime{%s %s}", runtime.chat, runtime.embedding)
+	return fmt.Sprintf("ModelRuntime{%s %s %s}", runtime.chat, runtime.runtimeChat, runtime.embedding)
 }
 
 // GoString applies the endpoint- and credential-safe representation to %#v.

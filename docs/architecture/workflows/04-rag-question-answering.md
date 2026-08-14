@@ -103,8 +103,9 @@ flowchart TD
 
 ## 12. 当前实现与边界
 
-M6-04 已实现 retrieval-first 单节点持久 Workflow，不是通用模型 Tool Loop。生产正常路径依次持久化
-PLAN、ANSWER、REVIEW Model Call，发布 completed/refused/clarification_required 四态之一，并提供
+M6-04 已实现 retrieval-first 单节点持久 Workflow，并在 v2 中接入有界的经典 Eino 模型 Tool Loop。生产 v2
+正常路径依次持久化 `PLAN -> AGENT* -> ANSWER -> INITIAL/REPAIR/REDUCED -> REVIEW` Model Call，发布
+completed/refused/clarification_required 四态之一，并提供
 Conversation REST、SSE、Feedback 和 `/chat` 页面。正式 Auth、Web Search、全站业务页面、容量门禁与最终
 发布验收仍分别归 M10、后续产品任务、M9/M10/M11。
 

@@ -144,7 +144,7 @@ M6-03 在 Safe Writeback 两个真实副作用点增加逻辑 Tool Call 审计�
 
 - API 冻结全部 11 个 Tool Contract，但不注册 Executor。
 - Worker 只注册配置启用、真实依赖存在且具备完整边界的只读 Executor；显式 disabled 表示 Tool capability unavailable 但进程仍可 ready，enabled 时缺 Executor/Workflow/依赖才 readiness fail closed。
-- M6-03 先把 strict Agent Tool Request 转换为不含模型 `reason` 的持久 invocation；生产 `agent-rag` Definition 只允许 `ReadSource`、`ValidateCitation`、`ReadGitStatus` 的空参数/稳定 ID tuple。Search query 与 Diff before/after 在 M6-04 建立安全 request receipt 或同 Attempt 执行 seam 前不进入持久模型目录。
+- 迁移前 strict Agent Tool Request 只转换为不含模型 `reason` 的持久 invocation，供 `agent-rag@1` 历史回放；该 Definition 只允许 `ReadSource`、`ValidateCitation`、`ReadGitStatus` 的空参数/稳定 ID tuple，Worker 不用它创建新的模型调度。新的 `/chat` v2 经 Eino AgentRuntime/RAGAgentToolBridge 进入 `ExecutionService`。Search query 与 Diff before/after 在建立安全 request receipt 或同 Attempt 执行 seam 前不进入持久模型目录。
 - `ApplyApprovedPatch`、`CreateGitCommit` 只通过 trusted Safe Writeback audit bridge 使用。
 - `FetchWebPage` 默认关闭；持久 Web Policy 未实现前不能进入生产执行目录。
 - `ReadDocument`、`RebuildIndex`、`RunRegressionEvaluation` 缺少本版本真实闭环时不注册 Fake。

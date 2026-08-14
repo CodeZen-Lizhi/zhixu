@@ -31,7 +31,7 @@ type embeddingProviderContract struct {
 	response    func(model string, embeddings [][]float32) string
 }
 
-func TestEmbeddingHTTPAdaptersSharedContract(t *testing.T) {
+func TestEinoEmbeddingProvidersShareProjectContract(t *testing.T) {
 	t.Parallel()
 	for _, provider := range embeddingProviderContracts() {
 		provider := provider
@@ -198,7 +198,7 @@ func embeddingProviderContracts() []embeddingProviderContract {
 			newServer: newTLSEmbeddingServer,
 			newEmbedder: func(t *testing.T, server *httptest.Server, client *http.Client, timeout time.Duration, maxResponseBytes int64) application.Embedder {
 				t.Helper()
-				embedder, err := models.NewOpenAICompatibleEmbedder(openAIOptions(server.URL, client, timeout, maxResponseBytes))
+				embedder, err := models.NewEinoOpenAICompatibleEmbedder(openAIOptions(server.URL, client, timeout, maxResponseBytes))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -211,7 +211,7 @@ func embeddingProviderContracts() []embeddingProviderContract {
 			newServer: newPlainEmbeddingServer,
 			newEmbedder: func(t *testing.T, server *httptest.Server, client *http.Client, timeout time.Duration, maxResponseBytes int64) application.Embedder {
 				t.Helper()
-				embedder, err := models.NewOllamaEmbedder(ollamaOptions(server.URL, client, timeout, maxResponseBytes))
+				embedder, err := models.NewEinoOllamaEmbedder(ollamaOptions(server.URL, client, timeout, maxResponseBytes))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -247,8 +247,7 @@ func TestOpenAICompatibleEmbedderBatchIndexAndFloatContract(t *testing.T) {
 		_, _ = w.Write([]byte(`{"object":"list","unknown":true,"model":"embed-v1","data":[{"index":1,"embedding":[0,0,2]},{"index":0,"embedding":[3,4,0]}]}`))
 	}))
 	defer server.Close()
-	options := openAIOptions(server.URL+"/gateway/", server.Client(), time.Second, 0)
-	embedder, err := models.NewOpenAICompatibleEmbedder(options)
+	embedder, err := models.NewEinoOpenAICompatibleEmbedder(openAIOptions(server.URL+"/gateway/", server.Client(), time.Second, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +273,7 @@ func TestOpenAICompatibleEmbedderRejectsMissingDuplicateAndOutOfRangeIndex(t *te
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(body))
 		}))
-		embedder, err := models.NewOpenAICompatibleEmbedder(openAIOptions(server.URL, server.Client(), time.Second, 0))
+		embedder, err := models.NewEinoOpenAICompatibleEmbedder(openAIOptions(server.URL, server.Client(), time.Second, 0))
 		if err != nil {
 			server.Close()
 			t.Fatal(err)
@@ -309,7 +308,7 @@ func TestOllamaEmbedderBatchOrderAndTruncateContract(t *testing.T) {
 		_, _ = w.Write([]byte(`{"model":"embed-v1","embeddings":[[3,4,0],[0,0,2]],"prompt_eval_count":2}`))
 	}))
 	defer server.Close()
-	embedder, err := models.NewOllamaEmbedder(ollamaOptions(server.URL, server.Client(), time.Second, 0))
+	embedder, err := models.NewEinoOllamaEmbedder(ollamaOptions(server.URL, server.Client(), time.Second, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +332,7 @@ func TestEmbeddingAdapterURLAndSensitiveInformationBoundary(t *testing.T) {
 	}
 	for _, endpoint := range invalidOpenAI {
 		options := openAIOptions(endpoint, nil, time.Second, 0)
-		_, err := models.NewOpenAICompatibleEmbedder(options)
+		_, err := models.NewEinoOpenAICompatibleEmbedder(options)
 		assertEmbeddingError(t, err, foundation.ErrorInvalidInput, models.ErrorCodeEmbeddingConfigInvalid, false)
 		assertErrorExcludes(t, err, "url-secret", endpoint, testEmbeddingKey)
 	}
@@ -345,7 +344,7 @@ func TestEmbeddingAdapterURLAndSensitiveInformationBoundary(t *testing.T) {
 	}
 	for _, endpoint := range invalidOllama {
 		options := ollamaOptions(endpoint, nil, time.Second, 0)
-		_, err := models.NewOllamaEmbedder(options)
+		_, err := models.NewEinoOllamaEmbedder(options)
 		assertEmbeddingError(t, err, foundation.ErrorInvalidInput, models.ErrorCodeEmbeddingConfigInvalid, false)
 		assertErrorExcludes(t, err, "url-secret", endpoint)
 	}
@@ -355,7 +354,7 @@ func TestEmbeddingAdapterURLAndSensitiveInformationBoundary(t *testing.T) {
 		_, _ = w.Write([]byte(`{"credential":"embedding-secret-key","input":"sensitive input"}`))
 	}))
 	defer server.Close()
-	embedder, err := models.NewOpenAICompatibleEmbedder(openAIOptions(server.URL, server.Client(), time.Second, 0))
+	embedder, err := models.NewEinoOpenAICompatibleEmbedder(openAIOptions(server.URL, server.Client(), time.Second, 0))
 	if err != nil {
 		t.Fatal(err)
 	}

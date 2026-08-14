@@ -12,7 +12,7 @@ import (
 func TestDefaultsDisableChatWithBoundedRuntimeSettings(t *testing.T) {
 	t.Parallel()
 	cfg := Defaults()
-	if cfg.ChatProvider != ChatProviderDisabled || cfg.ChatImplementation != ChatImplementationDirect || cfg.ChatBaseURL != "" || cfg.ChatAPIKey != "" || cfg.ChatModel != "" || cfg.ChatModelVersion != "" ||
+	if cfg.ChatProvider != ChatProviderDisabled || cfg.ChatBaseURL != "" || cfg.ChatAPIKey != "" || cfg.ChatModel != "" || cfg.ChatModelVersion != "" ||
 		cfg.ChatAdapterVersion != "v1" || cfg.ChatTimeout != 30*time.Second || cfg.ChatMaxRequestBytes != 4<<20 || cfg.ChatMaxResponseBytes != 4<<20 {
 		t.Fatalf("chat defaults=%s", cfg)
 	}
@@ -23,7 +23,6 @@ func TestLoadWithLookupChatYAMLAndEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	data := []byte(`chat_provider: openai-compatible
-chat_implementation: direct
 chat_base_url: https://yaml.example.test/base
 chat_api_key: yaml-secret
 chat_model: yaml-model
@@ -37,7 +36,6 @@ chat_max_response_bytes: 2000000
 		t.Fatal(err)
 	}
 	values := map[string]string{
-		"ZHIXU_CHAT_IMPLEMENTATION":    "eino",
 		"ZHIXU_CHAT_BASE_URL":          "http://127.0.0.1:11434/compatible",
 		"ZHIXU_CHAT_API_KEY":           "env-secret",
 		"ZHIXU_CHAT_MODEL":             "env-model",
@@ -53,7 +51,7 @@ chat_max_response_bytes: 2000000
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ChatProvider != ChatProviderOpenAICompatible || cfg.ChatImplementation != ChatImplementationEino || cfg.ChatBaseURL != values["ZHIXU_CHAT_BASE_URL"] ||
+	if cfg.ChatProvider != ChatProviderOpenAICompatible || cfg.ChatBaseURL != values["ZHIXU_CHAT_BASE_URL"] ||
 		cfg.ChatAPIKey != values["ZHIXU_CHAT_API_KEY"] || cfg.ChatModel != "env-model" || cfg.ChatModelVersion != "env-model-v2" || cfg.ChatAdapterVersion != "env-v2" ||
 		cfg.ChatTimeout != 50*time.Second || cfg.ChatMaxRequestBytes != 3_000_000 || cfg.ChatMaxResponseBytes != 2_000_000 {
 		t.Fatalf("chat config=%s", cfg)
@@ -113,7 +111,6 @@ func TestValidateChatProviderAndSecurityBoundaries(t *testing.T) {
 		want   string
 	}{
 		{name: "unknown provider", change: func(cfg *Config) { cfg.ChatProvider = "ollama" }, want: "chat_provider"},
-		{name: "unknown implementation", change: func(cfg *Config) { cfg.ChatImplementation = "automatic" }, want: "chat_implementation"},
 		{name: "disabled endpoint", change: func(cfg *Config) { cfg.ChatBaseURL = "https://secret.example.test" }, want: "must be empty"},
 		{name: "remote http", change: func(cfg *Config) { *cfg = enabled(); cfg.ChatBaseURL = "http://models.example.test" }, want: "https"},
 		{name: "userinfo", change: func(cfg *Config) { *cfg = enabled(); cfg.ChatBaseURL = "https://user:secret@models.example.test" }, want: "chat_base_url"},
@@ -159,7 +156,7 @@ func TestChatConfigFormattingAndParseErrorsDoNotLeakPrivateValues(t *testing.T) 
 				t.Fatalf("formatted config exposed %q: %s", private, formatted)
 			}
 		}
-		for _, expected := range []string{"ChatProvider:\"openai-compatible\"", "ChatImplementation:\"direct\"", "ChatConfigured:true", "ChatModel:\"chat-v1\"", "ChatModelVersion:\"chat-v1\"", "ChatAdapterVersion:\"v1\""} {
+		for _, expected := range []string{"ChatProvider:\"openai-compatible\"", "ChatConfigured:true", "ChatModel:\"chat-v1\"", "ChatModelVersion:\"chat-v1\"", "ChatAdapterVersion:\"v1\""} {
 			if !strings.Contains(formatted, expected) {
 				t.Fatalf("formatted config omitted %q: %s", expected, formatted)
 			}
@@ -178,4 +175,32 @@ func TestChatConfigFormattingAndParseErrorsDoNotLeakPrivateValues(t *testing.T) 
 			t.Fatalf("key=%s error=%v", key, err)
 		}
 	}
+}
+
+func TestLoadRejectsRemovedChatImplementationSelector(t *testing.T) {
+	t.Parallel()
+	t.Run("yaml", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(path, []byte("chat_implementation: direct\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadWithLookup(path, func(string) (string, bool) { return "", false }); err == nil {
+			t.Fatal("removed chat YAML implementation selector was accepted")
+		} else if !strings.Contains(err.Error(), "chat_implementation") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("environment", func(t *testing.T) {
+		if _, err := LoadWithLookup("", func(key string) (string, bool) {
+			if key == "ZHIXU_CHAT_IMPLEMENTATION" {
+				return "eino", true
+			}
+			return "", false
+		}); err == nil {
+			t.Fatal("removed chat environment implementation selector was accepted")
+		} else if !strings.Contains(err.Error(), "ZHIXU_CHAT_IMPLEMENTATION") {
+			t.Fatalf("error=%v", err)
+		}
+	})
 }

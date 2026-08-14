@@ -40,10 +40,6 @@ func (r *RuntimeRepository) Claim(ctx context.Context, command application.Claim
 	if err := authorizeModelRuntimeClaim(ctx, tx, command); err != nil {
 		return application.ClaimResult{}, err
 	}
-	now, err := databaseNow(ctx, tx)
-	if err != nil {
-		return application.ClaimResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
-	}
 	var runID string
 	if err := tx.QueryRow(ctx, `SELECT run_id::text FROM workflow.node_run WHERE id=$1`, string(command.NodeRunID)).Scan(&runID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -73,9 +69,15 @@ func (r *RuntimeRepository) Claim(ctx context.Context, command application.Claim
 	if node.DispatchNo < 1 || node.IdempotencyKey == "" {
 		return application.ClaimResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_LEGACY_RUNTIME_UNSUPPORTED", false, errors.New("active workflow node lacks runtime identity"))
 	}
-	if existing, found, queryErr := findAttemptByDelivery(ctx, tx, command.NodeRunID, command.DispatchNo, command.DeliveryID); queryErr != nil {
+	existing, found, queryErr := findAttemptByDelivery(ctx, tx, command.NodeRunID, command.DispatchNo, command.DeliveryID)
+	if queryErr != nil {
 		return application.ClaimResult{}, queryErr
-	} else if found {
+	}
+	now, err := databaseNow(ctx, tx)
+	if err != nil {
+		return application.ClaimResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
+	}
+	if found {
 		if !sameModelRuntimeBinding(existing.ModelSettingsRevision, existing.ModelRuntimeInstanceID, command.ModelSettingsRevision, command.ModelRuntimeInstanceID) {
 			return application.ClaimResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_MODEL_RUNTIME_BINDING_MISMATCH", false, errors.New("workflow delivery model runtime binding differs"))
 		}
@@ -268,10 +270,6 @@ func (r *RuntimeRepository) Heartbeat(ctx context.Context, command application.H
 		return application.HeartbeatResult{}, classify(err, "WORKFLOW_HEARTBEAT_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	now, err := databaseNow(ctx, tx)
-	if err != nil {
-		return application.HeartbeatResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
-	}
 	var runID string
 	if err := tx.QueryRow(ctx, `SELECT run_id::text FROM workflow.node_run WHERE id=$1`, string(command.NodeRunID)).Scan(&runID); err != nil {
 		return application.HeartbeatResult{}, classify(err, "WORKFLOW_NODE_QUERY_FAILED")
@@ -291,6 +289,21 @@ func (r *RuntimeRepository) Heartbeat(ctx context.Context, command application.H
 	}
 	if pauseRequestedAt != nil {
 		return application.HeartbeatResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_PAUSE_REQUESTED", false, errors.New("workflow pause checkpoint requested"))
+	}
+	var locked int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM workflow.node_run WHERE id=$1 FOR UPDATE`, string(command.NodeRunID)).Scan(&locked); errors.Is(err, pgx.ErrNoRows) {
+		return application.HeartbeatResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_LEASE_LOST", false, err)
+	} else if err != nil {
+		return application.HeartbeatResult{}, classify(err, "WORKFLOW_NODE_QUERY_FAILED")
+	}
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM workflow.node_attempt WHERE node_run_id=$1 AND attempt_no=$2 FOR UPDATE`, string(command.NodeRunID), command.Fence.AttemptNo).Scan(&locked); errors.Is(err, pgx.ErrNoRows) {
+		return application.HeartbeatResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_LEASE_LOST", false, err)
+	} else if err != nil {
+		return application.HeartbeatResult{}, classify(err, "WORKFLOW_ATTEMPT_QUERY_FAILED")
+	}
+	now, err := databaseNow(ctx, tx)
+	if err != nil {
+		return application.HeartbeatResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
 	}
 	leaseUntil := now.Add(command.LeaseDuration)
 	node, err := scanRuntimeNode(tx.QueryRow(ctx, `UPDATE workflow.node_run
@@ -332,10 +345,6 @@ func (r *RuntimeRepository) TransitionDelivery(ctx context.Context, command appl
 		return application.DeliveryTransitionResult{}, classify(err, "WORKFLOW_DELIVERY_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	now, err := databaseNow(ctx, tx)
-	if err != nil {
-		return application.DeliveryTransitionResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
-	}
 	var runID string
 	if err := tx.QueryRow(ctx, `SELECT run_id::text FROM workflow.node_run WHERE id=$1`, string(command.Binding.NodeRunID)).Scan(&runID); err != nil {
 		return application.DeliveryTransitionResult{}, classify(err, "WORKFLOW_NODE_QUERY_FAILED")
@@ -374,6 +383,10 @@ func (r *RuntimeRepository) TransitionDelivery(ctx context.Context, command appl
 		}
 		return application.DeliveryTransitionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_COMPLETION_CONFLICT", false, errors.New("delivery already reduced with a different result"))
 	}
+	now, err := databaseNow(ctx, tx)
+	if err != nil {
+		return application.DeliveryTransitionResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
+	}
 	if node.Status != domain.NodeStatusRunning || node.Version != command.Binding.Fence.NodeVersion || node.LeaseOwner != command.Binding.Fence.Owner || node.LeaseUntil == nil || !node.LeaseUntil.After(now) || attempt.AttemptNo != command.Binding.Fence.AttemptNo || attempt.LeaseOwner != command.Binding.Fence.Owner {
 		return application.DeliveryTransitionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_LEASE_LOST", false, errors.New("delivery lease fence failed"))
 	}
@@ -406,10 +419,6 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 		return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	now, err := databaseNow(ctx, tx)
-	if err != nil {
-		return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
-	}
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, `SELECT `+runtimeRunColumns+` FROM workflow.run WHERE id=$1 FOR UPDATE`, string(command.WorkflowRunID)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return application.ControlPersistenceResult{}, foundation.NewError(foundation.ErrorNotFound, "WORKFLOW_RUN_NOT_FOUND", false, err)
@@ -464,6 +473,10 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 	nodes, err := lockRuntimeNodes(ctx, tx, run.ID)
 	if err != nil {
 		return application.ControlPersistenceResult{}, err
+	}
+	now, err := databaseNow(ctx, tx)
+	if err != nil {
+		return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
 	}
 	status := run.Status
 	switch command.Action {
@@ -640,10 +653,6 @@ func (r *RuntimeRepository) WaitForHuman(ctx context.Context, command applicatio
 		return application.HumanTransitionResult{}, classify(err, "HUMAN_TASK_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	now, err := databaseNow(ctx, tx)
-	if err != nil {
-		return application.HumanTransitionResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
-	}
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, `SELECT `+runtimeRunColumns+` FROM workflow.run WHERE id=$1 FOR UPDATE`, string(command.RunID)))
 	if err != nil {
 		return application.HumanTransitionResult{}, classify(err, "WORKFLOW_RUN_QUERY_FAILED")
@@ -659,6 +668,10 @@ func (r *RuntimeRepository) WaitForHuman(ctx context.Context, command applicatio
 	attempt, found, err := findAttemptByNo(ctx, tx, command.NodeRunID, command.Fence.AttemptNo)
 	if err != nil {
 		return application.HumanTransitionResult{}, err
+	}
+	now, err := databaseNow(ctx, tx)
+	if err != nil {
+		return application.HumanTransitionResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
 	}
 	if !found || node.Status != domain.NodeStatusRunning || node.Version != command.Fence.NodeVersion || node.LeaseOwner != command.Fence.Owner || node.LeaseUntil == nil || !node.LeaseUntil.After(now) || attempt.Status != domain.AttemptStatusRunning || attempt.LeaseOwner != command.Fence.Owner {
 		return application.HumanTransitionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_LEASE_LOST", false, errors.New("human task lease fence failed"))
@@ -728,10 +741,6 @@ func (r *RuntimeRepository) SubmitHuman(ctx context.Context, command application
 		return application.HumanTransitionResult{}, classify(err, "HUMAN_SUBMIT_TRANSACTION_FAILED")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	now, err := databaseNow(ctx, tx)
-	if err != nil {
-		return application.HumanTransitionResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
-	}
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, `SELECT `+runtimeRunColumns+` FROM workflow.run WHERE id=$1 FOR UPDATE`, string(command.RunID)))
 	if err != nil {
 		return application.HumanTransitionResult{}, classify(err, "WORKFLOW_RUN_QUERY_FAILED")
@@ -766,6 +775,10 @@ func (r *RuntimeRepository) SubmitHuman(ctx context.Context, command application
 	}
 	if task.Status != domain.HumanTaskPending {
 		return application.HumanTransitionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "HUMAN_TASK_ALREADY_RESOLVED", false, errors.New("human task is not pending"))
+	}
+	now, err := databaseNow(ctx, tx)
+	if err != nil {
+		return application.HumanTransitionResult{}, classify(err, "WORKFLOW_DB_TIME_UNAVAILABLE")
 	}
 	if task.ExpiresAt != nil && !task.ExpiresAt.After(now) {
 		if _, err := tx.Exec(ctx, `UPDATE workflow.human_task SET status='expired' WHERE id=$1`, string(task.ID)); err != nil {
@@ -827,7 +840,7 @@ func (r *RuntimeRepository) SubmitHuman(ctx context.Context, command application
 
 func databaseNow(ctx context.Context, tx pgx.Tx) (time.Time, error) {
 	var now time.Time
-	err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&now)
+	err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now)
 	return now, err
 }
 

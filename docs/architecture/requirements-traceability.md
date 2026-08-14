@@ -33,7 +33,7 @@
 | 10.23 | 生命周期 | domain、data、module | workflow 10 |
 | 10.24 | Conflict | domain、agent-rag | workflow 09 |
 | 10.22/export | Markdown/附件/领域元数据导出 | data、api、security、database、backend/export-contract | Collection Markdown/Metadata JSON 与 Workspace Attachments ZIP 已通过恢复、安全、数据库和浏览器验收，AC-33 完成；Evaluation/Audit JSON 仍 deferred |
-| 附加-Eino | Eino PoC、可替换 Chat Adapter 与短 Graph scheduler | ADR-0013/0019、technology-stack、interfaces | direct/Eino Chat contract、phase scheduler 等价/race、五消费者回归、AI eval |
+| 附加-Eino | Eino 正式 Chat/Embedding/五类 scheduler、RAG v2 Agent/只读工具/final stream、draft SSE 与发布门禁 | ADR-0022、technology-stack、interfaces、agent-rag | Adapter/Graph/Agent/stream/draft/finalizer 合同、六项外部 Provider live gate 与 host-relay 桌面/移动终态已验收；容器直连外部 HTTPS 网络路径和真实稳定观察仍按独立门禁记录；旧 direct 实现已从部署面移除，历史实现由 Git 记录恢复 |
 | 附加-auth | Session、API Token、Approval Write Authorization | ADR-0014、security、api、tool-security | auth/CSRF/token/permission tests |
 
 ## 3. 非功能追踪

@@ -1,0 +1,32 @@
+{
+  "id": "eino-runtime-expansion",
+  "name": "eino-runtime-expansion",
+  "title": "Eino AI Runtime 正式生产替换",
+  "description": "让 Eino/eino-ext 成为模型、Embedding、RAG/Agent、Tool Calling 与 Streaming 的正式生产 Runtime，保留项目领域与持久化事实源。",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "backend",
+  "package": null,
+  "priority": "P2",
+  "creator": "lizhi",
+  "assignee": "lizhi",
+  "createdAt": "2026-08-08",
+  "completedAt": null,
+  "branch": "codex/eino-layered-migration",
+  "base_branch": "dev",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "08-08-eino-embedding-migration",
+    "08-08-eino-rag-decision",
+    "08-08-eino-tool-react-decision",
+    "08-08-eino-token-stream-decision",
+    "08-08-eino-checkpoint-poc"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

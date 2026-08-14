@@ -7,6 +7,7 @@ import (
 
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
@@ -73,16 +74,17 @@ func TestRAGWorkflowContractRejectsUnknownDuplicateTrailingAndInvalidBindings(t 
 	}
 }
 
-func TestRegisteredRAGDefinitionIsStableReadLocalSingleNodeWithoutTools(t *testing.T) {
+func TestRegisteredRAGDefinitionIsStableReadLocalSingleNodeWithV2Tools(t *testing.T) {
 	definition := RegisteredRAGDefinition()
 	if definition.Key != RAGWorkflowDefinitionKey || definition.Version != RAGWorkflowDefinitionVersion ||
 		definition.InputSchemaVersion != RAGWorkflowInputSchemaVersion || len(definition.Graph.Nodes) != 1 {
 		t.Fatalf("definition = %#v", definition)
 	}
 	node := definition.Graph.Nodes[0]
+	wantTools := []toolsdomain.ToolRef{{Name: "ReadSource", Version: 2}, {Name: "ValidateCitation", Version: 2}}
 	if node.Key != RAGWorkflowNodeKey || node.Kind != RAGWorkflowNodeKind ||
 		node.InputSchemaVersion != RAGWorkflowInputSchemaVersion || node.OutputSchemaVersion != RAGWorkflowOutputSchemaVersion ||
-		!reflect.DeepEqual(node.RequiredPermissions, []workflowdomain.Permission{workflowdomain.PermissionReadLocal}) || len(node.AllowedTools) != 0 {
+		!reflect.DeepEqual(node.RequiredPermissions, []workflowdomain.Permission{workflowdomain.PermissionReadLocal}) || !reflect.DeepEqual(node.AllowedTools, wantTools) {
 		t.Fatalf("node = %#v", node)
 	}
 	wantHash, err := workflowapplication.ComputeCanonicalGraphHash(definition.Graph)

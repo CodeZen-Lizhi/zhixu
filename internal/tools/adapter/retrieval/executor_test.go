@@ -115,6 +115,37 @@ func TestSearchKnowledgeExecutorRejectsInputAndInvalidAdapterResult(t *testing.T
 	requireErrorCode(t, err, errorCodeSearchResultInvalid)
 }
 
+func TestRetrievalExecutorVersionBindingsMatchFrozenContracts(t *testing.T) {
+	tests := []struct {
+		name    string
+		version int64
+		valid   bool
+	}{
+		{name: searchKnowledgeName, version: readToolVersionV1, valid: true},
+		{name: searchKnowledgeName, version: readToolVersionV2, valid: false},
+		{name: readSourceName, version: readToolVersionV1, valid: true},
+		{name: readSourceName, version: readToolVersionV2, valid: true},
+		{name: validateCitationName, version: readToolVersionV1, valid: true},
+		{name: validateCitationName, version: readToolVersionV2, valid: true},
+		{name: readSourceName, version: 3, valid: false},
+		{name: validateCitationName, version: 3, valid: false},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("%s@%d", test.name, test.version), func(t *testing.T) {
+			request := executorRequestVersion(test.name, test.version, []byte(`{}`))
+			requestErr := validateRequestTool(request, test.name)
+			tool := request.Tool
+			receiptErr := validateReceiptCall(toolsdomain.ToolCall{
+				Status: toolsdomain.CallSucceeded, Tool: &tool,
+				RequestedToolName: test.name, ResultRef: "read-receipt",
+			}, test.name)
+			if (requestErr == nil) != test.valid || (receiptErr == nil) != test.valid {
+				t.Fatalf("request_err=%v receipt_err=%v valid=%t", requestErr, receiptErr, test.valid)
+			}
+		})
+	}
+}
+
 func TestSearchKnowledgeExecutorPreservesDependencyAndContextErrors(t *testing.T) {
 	dependencyErr := foundation.NewError(foundation.ErrorDependencyUnavailable, "SEARCH_DOWN", false, errors.New("down"))
 	executor, err := NewSearchKnowledgeExecutor(&searchFake{err: dependencyErr})
@@ -504,13 +535,17 @@ func (fake *evidenceFake) OpenCitationEvidenceBatch(ctx context.Context, queries
 }
 
 func executorRequest(name string, arguments []byte) toolsapplication.ExecutorRequest {
+	return executorRequestVersion(name, readToolVersionV1, arguments)
+}
+
+func executorRequestVersion(name string, version int64, arguments []byte) toolsapplication.ExecutorRequest {
 	return toolsapplication.ExecutorRequest{
 		Identity: toolsdomain.TrustedExecutionIdentity{
 			WorkspaceID: testWorkspaceID, DefinitionID: testDefinitionID, DefinitionVersion: 1, DefinitionHash: strings.Repeat("a", 64),
 			WorkflowRunID: testRunID, NodeKey: "tool-node", NodeRunID: testNodeRunID, NodeAttemptID: testAttemptID,
 			LeaseOwner: "worker-1", LeaseFence: 1,
 		},
-		Tool: toolsdomain.ToolRef{Name: name, Version: 1}, Arguments: arguments, Reason: "test",
+		Tool: toolsdomain.ToolRef{Name: name, Version: version}, Arguments: arguments, Reason: "test",
 	}
 }
 

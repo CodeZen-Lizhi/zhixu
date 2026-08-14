@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查测试、lint、依赖和可维护性"}
+{"file":".trellis/spec/backend/eino-chat-adapter.md","reason":"检查 Eino 固定生产实现、退休 selector 拒绝、transport 和 Adapter 契约"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"检查配置来源、冻结和 Git-based 恢复合同"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"检查错误分类、重试和敏感信息"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"检查持久任务、Attempt、事务和幂等边界"}

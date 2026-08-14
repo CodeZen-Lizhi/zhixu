@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查测试覆盖、并发、依赖和代码质量"}
+{"file":".trellis/spec/backend/eino-chat-adapter.md","reason":"检查 Eino adapter 的 transport 合同和退休 selector 拒绝边界"}
+{"file":".trellis/spec/backend/eino-embedding-adapter.md","reason":"检查双 Provider Eino wire、错误、安全与 Git-based 恢复合同"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"检查静态/受管配置一致性与冻结"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"检查错误 taxonomy、重试和脱敏"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"检查安全格式和敏感数据边界"}

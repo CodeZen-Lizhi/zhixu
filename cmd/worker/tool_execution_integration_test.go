@@ -284,7 +284,7 @@ func TestComposeWorkerConsumesPersistedReadGitStatusToolWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	definition, err := toolworkflow.NewProductionRegisteredDefinition(contracts)
+	definition, err := toolworkflow.NewReplayRegisteredDefinition(contracts)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -35,23 +36,23 @@ type contractFixture struct {
 
 func TestContractsContainExactUniqueCoreToolSet(t *testing.T) {
 	contracts := mustContracts(t)
-	if len(contracts) != 11 {
-		t.Fatalf("Contracts() count = %d, want 11", len(contracts))
+	if len(contracts) != 13 {
+		t.Fatalf("Contracts() count = %d, want 13", len(contracts))
 	}
 	got := make([]string, 0, len(contracts))
-	seen := make(map[string]struct{}, len(contracts))
+	seen := make(map[domain.ToolRef]struct{}, len(contracts))
 	for _, contract := range contracts {
-		name := contract.Definition.Ref.Name
-		if _, duplicate := seen[name]; duplicate {
-			t.Fatalf("duplicate built-in tool %q", name)
+		ref := contract.Definition.Ref
+		if _, duplicate := seen[ref]; duplicate {
+			t.Fatalf("duplicate built-in tool %q", ref)
 		}
-		seen[name] = struct{}{}
-		got = append(got, name)
+		seen[ref] = struct{}{}
+		got = append(got, toolRefLabel(ref))
 	}
 	sort.Strings(got)
 	want := []string{
-		"ApplyApprovedPatch", "CalculateDiff", "CreateGitCommit", "FetchWebPage", "ReadDocument", "ReadGitStatus",
-		"ReadSource", "RebuildIndex", "RunRegressionEvaluation", "SearchKnowledge", "ValidateCitation",
+		"ApplyApprovedPatch@1", "CalculateDiff@1", "CreateGitCommit@1", "FetchWebPage@1", "ReadDocument@1", "ReadGitStatus@1",
+		"ReadSource@1", "ReadSource@2", "RebuildIndex@1", "RunRegressionEvaluation@1", "SearchKnowledge@1", "ValidateCitation@1", "ValidateCitation@2",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", got, want)
@@ -61,44 +62,46 @@ func TestContractsContainExactUniqueCoreToolSet(t *testing.T) {
 func TestContractsHaveStableExactSchemaRefsAndHashes(t *testing.T) {
 	left := mustContracts(t)
 	right := mustContracts(t)
-	expectedHashes := map[string]string{
-		"SearchKnowledge":         "c89a7f23de7ac737aefbbd91a7d2231ce303713a0ee451a5aaa152ac0e8024be",
-		"ReadSource":              "c1984a7c2ef56e5fb59ea0c2d38c418023e6e82a814f74143ca9b92d6a111361",
-		"ReadDocument":            "af5c0e57ac8099f23909908c56e7dffe1479912b45492b40f4189ba65511488b",
-		"FetchWebPage":            "d067073172c9934fdb8a363432127ec8f96dbe8f831c6e9b207912ce2abd7c63",
-		"ValidateCitation":        "af9ae558607202a7b9ada28bef5c41859a556b23b9698f03602f5e672e357829",
-		"CalculateDiff":           "e7693463f013f1f5f5d5286629907f2689f871c8d6573071aa090eaa0cddb081",
-		"ReadGitStatus":           "fef29851ef283d17331787512e3982eeb32c111c6372dcdf1e333166a57f2bc8",
-		"ApplyApprovedPatch":      "4a43c6efe8093fd3b25f34683a263fc0b8203fcff2ce24d9be77c92e7493baa5",
-		"CreateGitCommit":         "7f31573506e734c450b8e7a8653716bd9840e3677f9bf831e36dafd2ff3eb45c",
-		"RebuildIndex":            "4184b8712c0b95a55a6412f2bea6bb30f21762ce886fcf4a4afcbde21f7be142",
-		"RunRegressionEvaluation": "4765b2a9a4acc38a8e5c69039d64b55300e7841f0b25082759a9e22fb31fef38",
+	expectedV1Hashes := map[domain.ToolRef]string{
+		{Name: "SearchKnowledge", Version: 1}:         "c89a7f23de7ac737aefbbd91a7d2231ce303713a0ee451a5aaa152ac0e8024be",
+		{Name: "ReadSource", Version: 1}:              "c1984a7c2ef56e5fb59ea0c2d38c418023e6e82a814f74143ca9b92d6a111361",
+		{Name: "ReadDocument", Version: 1}:            "af5c0e57ac8099f23909908c56e7dffe1479912b45492b40f4189ba65511488b",
+		{Name: "FetchWebPage", Version: 1}:            "d067073172c9934fdb8a363432127ec8f96dbe8f831c6e9b207912ce2abd7c63",
+		{Name: "ValidateCitation", Version: 1}:        "af9ae558607202a7b9ada28bef5c41859a556b23b9698f03602f5e672e357829",
+		{Name: "CalculateDiff", Version: 1}:           "e7693463f013f1f5f5d5286629907f2689f871c8d6573071aa090eaa0cddb081",
+		{Name: "ReadGitStatus", Version: 1}:           "fef29851ef283d17331787512e3982eeb32c111c6372dcdf1e333166a57f2bc8",
+		{Name: "ApplyApprovedPatch", Version: 1}:      "4a43c6efe8093fd3b25f34683a263fc0b8203fcff2ce24d9be77c92e7493baa5",
+		{Name: "CreateGitCommit", Version: 1}:         "7f31573506e734c450b8e7a8653716bd9840e3677f9bf831e36dafd2ff3eb45c",
+		{Name: "RebuildIndex", Version: 1}:            "4184b8712c0b95a55a6412f2bea6bb30f21762ce886fcf4a4afcbde21f7be142",
+		{Name: "RunRegressionEvaluation", Version: 1}: "4765b2a9a4acc38a8e5c69039d64b55300e7841f0b25082759a9e22fb31fef38",
 	}
-	expectedRefs := make(map[string][2]string, len(contractFixtures()))
+	expectedRefs := make(map[domain.ToolRef][2]string, len(contractFixtures()))
 	for _, fixture := range contractFixtures() {
-		expectedRefs[fixture.name] = [2]string{fixture.inputSchemaID, fixture.outputSchemaID}
+		expectedRefs[domain.ToolRef{Name: fixture.name, Version: 1}] = [2]string{fixture.inputSchemaID, fixture.outputSchemaID}
 	}
 	for index := range left {
 		leftDefinition := left[index].Definition
 		rightDefinition := right[index].Definition
-		refs, exists := expectedRefs[leftDefinition.Ref.Name]
-		if !exists || leftDefinition.Ref.Version != 1 || leftDefinition.InputSchema != (domain.SchemaRef{ID: refs[0], Version: 1}) ||
-			leftDefinition.OutputSchema != (domain.SchemaRef{ID: refs[1], Version: 1}) {
-			t.Fatalf("unexpected refs for %s: input=%+v output=%+v", leftDefinition.Ref.Name, leftDefinition.InputSchema, leftDefinition.OutputSchema)
+		if leftDefinition.Ref != rightDefinition.Ref || leftDefinition.DefinitionHash != rightDefinition.DefinitionHash {
+			t.Fatalf("unstable definition hash for %s: got %q, replay %q", toolRefLabel(leftDefinition.Ref), leftDefinition.DefinitionHash, rightDefinition.DefinitionHash)
 		}
-		if leftDefinition.DefinitionHash != expectedHashes[leftDefinition.Ref.Name] || leftDefinition.DefinitionHash != rightDefinition.DefinitionHash {
-			t.Fatalf("unstable definition hash for %s: got %q, replay %q, want %q", leftDefinition.Ref.Name, leftDefinition.DefinitionHash, rightDefinition.DefinitionHash, expectedHashes[leftDefinition.Ref.Name])
+		if expectedHash, isV1 := expectedV1Hashes[leftDefinition.Ref]; isV1 && leftDefinition.DefinitionHash != expectedHash {
+			t.Fatalf("v1 definition hash drift for %s: got %q, want %q", toolRefLabel(leftDefinition.Ref), leftDefinition.DefinitionHash, expectedHash)
 		}
-		assertStrictSchemaDocument(t, leftDefinition.Ref.Name+" input", leftDefinition.InputSchemaDocument)
-		assertStrictSchemaDocument(t, leftDefinition.Ref.Name+" output", leftDefinition.OutputSchemaDocument)
+		if refs, isV1 := expectedRefs[leftDefinition.Ref]; isV1 && (leftDefinition.InputSchema != (domain.SchemaRef{ID: refs[0], Version: 1}) ||
+			leftDefinition.OutputSchema != (domain.SchemaRef{ID: refs[1], Version: 1})) {
+			t.Fatalf("unexpected v1 refs for %s: input=%+v output=%+v", toolRefLabel(leftDefinition.Ref), leftDefinition.InputSchema, leftDefinition.OutputSchema)
+		}
+		assertStrictSchemaDocument(t, toolRefLabel(leftDefinition.Ref)+" input", leftDefinition.InputSchemaDocument)
+		assertStrictSchemaDocument(t, toolRefLabel(leftDefinition.Ref)+" output", leftDefinition.OutputSchemaDocument)
 	}
 }
 
 func TestContractGoldenDocumentsAndStrictBoundary(t *testing.T) {
-	byName := contractsByName(t)
+	byRef := contractsByRef(t)
 	for _, fixture := range contractFixtures() {
 		t.Run(fixture.name, func(t *testing.T) {
-			contract := byName[fixture.name]
+			contract := byRef[domain.ToolRef{Name: fixture.name, Version: 1}]
 			assertDecoderAcceptsExactCopy(t, contract.DecodeInput, []byte(fixture.goodInput))
 			assertDecoderAcceptsExactCopy(t, contract.DecodeOutput, []byte(fixture.goodOutput))
 			if _, err := contract.DecodeInput([]byte(fixture.badInput)); err == nil {
@@ -120,9 +123,9 @@ func TestContractGoldenDocumentsAndStrictBoundary(t *testing.T) {
 }
 
 func TestEveryContractDecoderRejectsUnknownDuplicateTrailingNullAndType(t *testing.T) {
-	byName := contractsByName(t)
+	byRef := contractsByRef(t)
 	fixture := contractFixtures()[0]
-	contract := byName[fixture.name]
+	contract := byRef[domain.ToolRef{Name: fixture.name, Version: 1}]
 	bad := map[string][]byte{
 		"unknown":   []byte(`{"query":"q","mode":"keyword","limit":1,"source_ids":[],"source_version_ids":[],"workspace_id":"` + testID1 + `"}`),
 		"duplicate": []byte(`{"query":"q","query":"other","mode":"keyword","limit":1,"source_ids":[],"source_version_ids":[]}`),
@@ -140,7 +143,7 @@ func TestEveryContractDecoderRejectsUnknownDuplicateTrailingNullAndType(t *testi
 }
 
 func TestContractDecoderCanonicalizesEquivalentDocuments(t *testing.T) {
-	contract := contractsByName(t)["RunRegressionEvaluation"]
+	contract := contractsByRef(t)[domain.ToolRef{Name: "RunRegressionEvaluation", Version: 1}]
 	left, err := contract.DecodeInput([]byte(`{"dataset_id":"10000000-0000-4000-8000-000000000001","index_version_id":"10000000-0000-4000-8000-000000000002"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -155,23 +158,23 @@ func TestContractDecoderCanonicalizesEquivalentDocuments(t *testing.T) {
 }
 
 func TestPolicyMappingKeepsWritesHiddenAndMaintenanceCapabilitiesExact(t *testing.T) {
-	contracts := contractsByName(t)
+	contracts := contractsByRef(t)
 	for _, name := range []string{"ApplyApprovedPatch", "CreateGitCommit"} {
-		definition := contracts[name].Definition
+		definition := contracts[domain.ToolRef{Name: name, Version: 1}].Definition
 		if definition.InvocationPolicy != domain.InvocationTrustedWorkflowOnly || definition.SideEffectLevel != domain.SideEffectDomainWrite {
 			t.Fatalf("%s policy = %s/%s", name, definition.InvocationPolicy, definition.SideEffectLevel)
 		}
 	}
-	if contracts["FetchWebPage"].Definition.RequiredCapability != capability.ReadExternal ||
-		contracts["FetchWebPage"].Definition.SideEffectLevel != domain.SideEffectExternalRead {
+	if contracts[domain.ToolRef{Name: "FetchWebPage", Version: 1}].Definition.RequiredCapability != capability.ReadExternal ||
+		contracts[domain.ToolRef{Name: "FetchWebPage", Version: 1}].Definition.SideEffectLevel != domain.SideEffectExternalRead {
 		t.Fatal("FetchWebPage is not bound to external-read policy")
 	}
-	if contracts["CalculateDiff"].Definition.RequiredCapability != "" ||
-		len(contracts["CalculateDiff"].Definition.AllowedWorkflows) != 1 {
+	if contracts[domain.ToolRef{Name: "CalculateDiff", Version: 1}].Definition.RequiredCapability != "" ||
+		len(contracts[domain.ToolRef{Name: "CalculateDiff", Version: 1}].Definition.AllowedWorkflows) != 1 {
 		t.Fatal("CalculateDiff must remain capability-free but workflow-bound")
 	}
-	index := contracts["RebuildIndex"].Definition
-	evaluation := contracts["RunRegressionEvaluation"].Definition
+	index := contracts[domain.ToolRef{Name: "RebuildIndex", Version: 1}].Definition
+	evaluation := contracts[domain.ToolRef{Name: "RunRegressionEvaluation", Version: 1}].Definition
 	if index.RequiredCapability != capability.IndexMaintenance || evaluation.RequiredCapability != capability.EvaluationRun ||
 		index.RequiredCapability == evaluation.RequiredCapability || index.AllowedWorkflows[0] == evaluation.AllowedWorkflows[0] ||
 		index.InvocationPolicy != domain.InvocationTrustedWorkflowOnly || evaluation.InvocationPolicy != domain.InvocationTrustedWorkflowOnly {
@@ -182,6 +185,37 @@ func TestPolicyMappingKeepsWritesHiddenAndMaintenanceCapabilitiesExact(t *testin
 			(contract.Definition.SideEffectLevel == domain.SideEffectDomainWrite || contract.Definition.SideEffectLevel == domain.SideEffectUnknown) {
 			t.Fatalf("write tool %s is model requestable", contract.Definition.Ref.Name)
 		}
+	}
+}
+
+func TestRAGV2ContractsReuseV1SchemasAndBindOnlyCurrentRAGWorkflow(t *testing.T) {
+	contracts := contractsByRef(t)
+	fixtures := make(map[string]contractFixture, len(contractFixtures()))
+	for _, fixture := range contractFixtures() {
+		fixtures[fixture.name] = fixture
+	}
+	for _, name := range []string{"ReadSource", "ValidateCitation"} {
+		t.Run(name, func(t *testing.T) {
+			v1 := contracts[domain.ToolRef{Name: name, Version: 1}]
+			v2 := contracts[domain.ToolRef{Name: name, Version: 2}]
+			if v2.Definition.Ref != (domain.ToolRef{Name: name, Version: 2}) ||
+				v2.Definition.InputSchema != v1.Definition.InputSchema || v2.Definition.OutputSchema != v1.Definition.OutputSchema ||
+				!bytes.Equal(v2.Definition.InputSchemaDocument, v1.Definition.InputSchemaDocument) || !bytes.Equal(v2.Definition.OutputSchemaDocument, v1.Definition.OutputSchemaDocument) ||
+				v2.Definition.RequiredCapability != capability.ReadLocal || v2.Definition.SideEffectLevel != domain.SideEffectNone ||
+				v2.Definition.InvocationPolicy != domain.InvocationModelRequestable ||
+				len(v2.Definition.AllowedWorkflows) != 1 || v2.Definition.AllowedWorkflows[0] != (domain.WorkflowBinding{Key: "agent-rag-answer", Version: 2}) {
+				t.Fatalf("v2 contract = %#v", v2.Definition)
+			}
+			fixture := fixtures[name]
+			assertDecoderAcceptsExactCopy(t, v2.DecodeInput, []byte(fixture.goodInput))
+			assertDecoderAcceptsExactCopy(t, v2.DecodeOutput, []byte(fixture.goodOutput))
+			if _, err := v2.DecodeInput([]byte(fixture.badInput)); err == nil {
+				t.Fatal("v2 input decoder accepted invalid document")
+			}
+			if _, err := v2.DecodeOutput([]byte(fixture.badOutput)); err == nil {
+				t.Fatal("v2 output decoder accepted invalid document")
+			}
+		})
 	}
 }
 
@@ -290,13 +324,17 @@ func mustContracts(t *testing.T) []application.Contract {
 	return contracts
 }
 
-func contractsByName(t *testing.T) map[string]application.Contract {
+func contractsByRef(t *testing.T) map[domain.ToolRef]application.Contract {
 	t.Helper()
-	result := make(map[string]application.Contract, 11)
+	result := make(map[domain.ToolRef]application.Contract, 13)
 	for _, contract := range mustContracts(t) {
-		result[contract.Definition.Ref.Name] = contract
+		result[contract.Definition.Ref] = contract
 	}
 	return result
+}
+
+func toolRefLabel(ref domain.ToolRef) string {
+	return ref.Name + "@" + strconv.FormatInt(ref.Version, 10)
 }
 
 func contractFixtures() []contractFixture {

@@ -42,6 +42,15 @@ LEGACY_MODEL_DEFAULTS = {
     "ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES": "67108864",
 }
 STATIC_MODEL_KEYS = set(LEGACY_MODEL_DEFAULTS)
+RETIRED_AI_RUNTIME_SELECTOR_KEYS = {
+    "ZHIXU_CHAT_IMPLEMENTATION",
+    "ZHIXU_EMBEDDING_IMPLEMENTATION",
+    "ZHIXU_STRUCTURED_SCHEDULER_RAG",
+    "ZHIXU_STRUCTURED_SCHEDULER_RELATION",
+    "ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT",
+    "ZHIXU_STRUCTURED_SCHEDULER_CAPTURE",
+    "ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING",
+}
 
 
 def fail(message: str) -> None:
@@ -94,32 +103,24 @@ def validate_restart_policy(model: dict[str, Any], prepared_candidate: bool) -> 
         fail("prepared app candidate must not auto-restart")
 
 
-def validate_chat_implementation(model: dict[str, Any]) -> None:
-    implementations: list[str] = []
+def validate_eino_primary_runtime(model: dict[str, Any]) -> None:
     service_names = ["app", "worker"]
     services = model.get("services")
     if isinstance(services, dict) and "modelctl" in services:
         service_names.append("modelctl")
     for service_name in service_names:
-        value = environment(service(model, service_name), service_name).get("ZHIXU_CHAT_IMPLEMENTATION")
-        if value not in ("direct", "eino"):
-            fail(f"{service_name} chat implementation must be direct or eino")
-        implementations.append(value)
-    if len(set(implementations)) != 1:
-        fail("API, Worker, and modelctl must use the same chat implementation")
+        service_environment = environment(service(model, service_name), service_name)
+        retired = sorted(RETIRED_AI_RUNTIME_SELECTOR_KEYS.intersection(service_environment))
+        if retired:
+            fail(f"{service_name} contains retired AI runtime selectors")
+        if service_name == "modelctl":
+            continue
+        if service_environment.get("ZHIXU_TOOL_RUNTIME_MODE") not in ("disabled", "enabled"):
+            fail(f"{service_name} tool runtime mode must be disabled or enabled")
 
-
-def validate_structured_schedulers(model: dict[str, Any]) -> None:
     worker_environment = environment(service(model, "worker"), "worker")
-    for key in (
-        "ZHIXU_STRUCTURED_SCHEDULER_RAG",
-        "ZHIXU_STRUCTURED_SCHEDULER_RELATION",
-        "ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT",
-        "ZHIXU_STRUCTURED_SCHEDULER_CAPTURE",
-        "ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING",
-    ):
-        if worker_environment.get(key) not in ("direct", "eino"):
-            fail(f"worker {key} must be direct or eino")
+    if worker_environment.get("ZHIXU_TOOL_RUNTIME_MODE") != "enabled":
+        fail("Eino chat requires the Worker Tool runtime")
 
 
 def validate_secret_boundary(model: dict[str, Any], prepared_candidate: bool = False) -> None:
@@ -369,8 +370,7 @@ def main() -> None:
         validate_secret_boundary(model, prepared_candidate=True)
     else:
         validate_secret_boundary(model)
-    validate_chat_implementation(model)
-    validate_structured_schedulers(model)
+    validate_eino_primary_runtime(model)
     validate_relays(model)
     validate_ingress(model)
     validate_zero_base_grant(model)

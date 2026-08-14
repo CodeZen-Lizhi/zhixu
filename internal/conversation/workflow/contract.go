@@ -10,14 +10,19 @@ import (
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	foundationstrictjson "github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
+	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
 
 const (
 	// DefinitionKey 是 RAG Question 唯一允许启动的内置 Definition。
 	DefinitionKey = "agent-rag-answer"
+	// DefinitionVersionV1 是不含 Tool 的已持久化 RAG Question Definition 版本。
+	DefinitionVersionV1 int64 = 1
+	// DefinitionVersionV2 是允许受控只读 Tool 的当前 RAG Question Definition 版本。
+	DefinitionVersionV2 int64 = 2
 	// DefinitionVersion 是当前 RAG Question Definition 版本。
-	DefinitionVersion int64 = 1
+	DefinitionVersion = DefinitionVersionV2
 	// NodeKey 是单节点 RAG Definition 的稳定逻辑键。
 	NodeKey = "rag-answer"
 	// NodeKind 是 Worker Executor Registry 使用的稳定节点类型。
@@ -28,7 +33,8 @@ const (
 	OutputSchemaVersion = 1
 
 	maxInputBytes = 1024
-	graphHash     = "f57decff412db222c531384812cb42fce7353b3d41940fe69c53a8734a5528a5"
+	graphHashV1   = "f57decff412db222c531384812cb42fce7353b3d41940fe69c53a8734a5528a5"
+	graphHashV2   = "359a4f9851f07268f50b2d597c697d74ed0f67b7439c2747efbf2ed85f98b490"
 )
 
 // PublicationStatus 表示 Workflow receipt 中允许持久化的 Answer 终态。
@@ -93,17 +99,39 @@ type persistedOutputReceipt struct {
 	ResultHash        *string            `json:"result_hash"`
 }
 
-// RegisteredDefinition 返回带稳定 Graph Hash 的单节点 RAG Definition。
-func RegisteredDefinition() workflowdomain.RegisteredDefinition {
+// RegisteredDefinitionV1 返回不含 Tool 的已持久化单节点 RAG Definition。
+func RegisteredDefinitionV1() workflowdomain.RegisteredDefinition {
 	return workflowdomain.RegisteredDefinition{
-		Key: DefinitionKey, Version: DefinitionVersion, InputSchemaVersion: InputSchemaVersion,
+		Key: DefinitionKey, Version: DefinitionVersionV1, InputSchemaVersion: InputSchemaVersion,
 		Graph: workflowdomain.CanonicalGraph{Nodes: []workflowdomain.NodeDefinition{{
 			Key: NodeKey, Kind: NodeKind, InputSchemaVersion: InputSchemaVersion, OutputSchemaVersion: OutputSchemaVersion,
 			RetryPolicy:         workflowdomain.RetryPolicy{MaxRetries: 2, BaseDelay: time.Second, MaxDelay: 10 * time.Second},
 			RequiredPermissions: []workflowdomain.Permission{workflowdomain.PermissionReadLocal},
 		}}},
-		GraphHash: graphHash,
+		GraphHash: graphHashV1,
 	}
+}
+
+// RegisteredDefinitionV2 返回允许受控只读 Tool 的当前单节点 RAG Definition。
+func RegisteredDefinitionV2() workflowdomain.RegisteredDefinition {
+	return workflowdomain.RegisteredDefinition{
+		Key: DefinitionKey, Version: DefinitionVersionV2, InputSchemaVersion: InputSchemaVersion,
+		Graph: workflowdomain.CanonicalGraph{Nodes: []workflowdomain.NodeDefinition{{
+			Key: NodeKey, Kind: NodeKind, InputSchemaVersion: InputSchemaVersion, OutputSchemaVersion: OutputSchemaVersion,
+			RetryPolicy:         workflowdomain.RetryPolicy{MaxRetries: 2, BaseDelay: time.Second, MaxDelay: 10 * time.Second},
+			RequiredPermissions: []workflowdomain.Permission{workflowdomain.PermissionReadLocal},
+			AllowedTools: []toolsdomain.ToolRef{
+				{Name: "ReadSource", Version: 2},
+				{Name: "ValidateCitation", Version: 2},
+			},
+		}}},
+		GraphHash: graphHashV2,
+	}
+}
+
+// RegisteredDefinition 返回当前可启动的单节点 RAG Definition。
+func RegisteredDefinition() workflowdomain.RegisteredDefinition {
+	return RegisteredDefinitionV2()
 }
 
 // EncodeInput 校验并编码不含 Question 正文或历史的 canonical Workflow Input。

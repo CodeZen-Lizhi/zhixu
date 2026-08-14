@@ -171,6 +171,14 @@ func runAPI() int {
 	if telemetryStatus := telemetry.Status(); telemetryStatus.Degraded {
 		logger.Warn("telemetry exporter is unavailable", "error_code", telemetryStatus.Code)
 	}
+	if err := observability.RecordProcessPresence(context.Background(), telemetry.Metrics()); err != nil {
+		logger.Warn("API process presence metric failed", "error_code", "PROCESS_PRESENCE_METRIC_FAILED")
+	}
+	if err := observability.RecordTelemetryRequired(
+		context.Background(), telemetry.Metrics(), telemetry.Status().Mode == observability.TelemetryModeRequired,
+	); err != nil {
+		logger.Warn("API telemetry mode metric failed", "error_code", "TELEMETRY_MODE_METRIC_FAILED")
+	}
 	modelTelemetry := platformmodels.NewModelTelemetry(telemetry.Tracer(), telemetry.Metrics())
 
 	var database *postgres.Pool
@@ -241,12 +249,12 @@ func runAPI() int {
 		configuredModels = loaded.Models
 	}
 	if configuredModels == nil {
-		fallback, fallbackErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()}, modelTelemetry)
-		if fallbackErr != nil {
+		disabledModels, disabledErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()}, modelTelemetry)
+		if disabledErr != nil {
 			logger.Error("disabled model runtime is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 			return 1
 		}
-		configuredModels = fallback
+		configuredModels = disabledModels
 	}
 	cfg = modelsettingsruntime.WithoutModelCredentials(cfg)
 
@@ -306,6 +314,7 @@ func runAPI() int {
 	graphHandler := graphhttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	candidateHandler := graphhttp.NewCandidateHandler(nil, cfg.GraphQueryTimeout)
 	conversationHandler := conversationhttp.NewHandler(nil, conversationhttp.NewCursorCodec())
+	draftStreamHandler := conversationhttp.NewDraftStreamHandler(nil)
 	eventsHandler := eventshttp.NewHandler(nil)
 	exportHandler := exporthttp.NewHandler(nil)
 	reviewHandler := reviewhttp.NewHandler(nil, cfg.GraphQueryTimeout)
@@ -581,7 +590,9 @@ func runAPI() int {
 		} else {
 			candidateHandler = configuredCandidateHandler
 		}
-		configuredConversation, configuredEvents, conversationErr := newConversationHandlers(database.DB(), workflowRuntime, questionDispatchEnabled(ragEnabled, ragInitErr))
+		configuredConversation, configuredEvents, conversationErr := newConversationHandlers(
+			database.DB(), workflowRuntime, questionDispatchEnabled(ragEnabled, ragInitErr),
+		)
 		if conversationErr != nil {
 			logger.Error("conversation service is unavailable", "error_code", "CONVERSATION_SERVICE_UNAVAILABLE")
 			if ragEnabled {
@@ -590,6 +601,12 @@ func runAPI() int {
 		} else {
 			conversationHandler = configuredConversation
 			eventsHandler = configuredEvents
+		}
+		configuredDraftStream, draftStreamErr := newDraftStreamHandler(database.DB())
+		if draftStreamErr != nil {
+			logger.Error("answer draft stream is unavailable", "error_code", conversationhttp.ErrorCodeDraftStreamUnavailable)
+		} else {
+			draftStreamHandler = configuredDraftStream
 		}
 	}
 
@@ -608,6 +625,7 @@ func runAPI() int {
 		Ingestion:         ingestionHandler,
 		Retrieval:         retrievalHandler,
 		Conversation:      conversationHandler,
+		DraftStream:       draftStreamHandler,
 		Events:            eventsHandler,
 		Export:            exportHandler,
 		Review:            reviewHandler,
@@ -690,6 +708,7 @@ func initializeAPITelemetry(ctx context.Context, cfg config.Config) (*observabil
 	return observability.InitializeTelemetry(ctx, observability.TelemetryOptions{
 		Mode:     observability.TelemetryMode(cfg.TelemetryMode),
 		Endpoint: cfg.TelemetryEndpoint,
+		Factory:  observability.NewOTLPHTTPProviderFactory(cfg.AppName+"-api", cfg.Version),
 	})
 }
 
@@ -1561,7 +1580,7 @@ func newConversationHandlers(
 	var dispatcher conversationapplication.QuestionDispatcher
 	if ragEnabled {
 		dispatcher, err = conversationpostgres.NewQuestionDispatcher(
-			pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
+			pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 		)
 		if err != nil {
 			return nil, nil, err
@@ -1575,6 +1594,18 @@ func newConversationHandlers(
 		return nil, nil, err
 	}
 	return conversationhttp.NewHandler(service, conversationhttp.NewCursorCodec()), eventshttp.NewHandler(eventStore), nil
+}
+
+// newDraftStreamHandler 独立于持久 Server Event 组装短期 Answer 草稿流。
+func newDraftStreamHandler(pool *pgxpool.Pool) (*conversationhttp.DraftStreamHandler, error) {
+	if pool == nil {
+		return nil, errors.New("answer draft stream database is unavailable")
+	}
+	repository, err := conversationpostgres.NewDraftStreamRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	return conversationhttp.NewDraftStreamHandler(repository), nil
 }
 
 func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error) {
@@ -1780,7 +1811,7 @@ func registerAPIWorkflowDefinitions(chatEnabled bool, definitions *workflowappli
 		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
 			return err
 		}
-		if err := definitions.Register(conversationworkflow.RegisteredDefinition()); err != nil {
+		if err := definitions.Register(conversationworkflow.RegisteredDefinitionV2()); err != nil {
 			return err
 		}
 	}
