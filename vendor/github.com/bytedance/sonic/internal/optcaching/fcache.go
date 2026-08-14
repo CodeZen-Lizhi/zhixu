@@ -117,7 +117,7 @@ func (self *SmallFieldMap) Get(name string, caseSensitive bool) int {
 2. simd match the aligned prefix of the keys: 4/8/16/32 bytes or larger keys
 3. check the key with strict match
 4. check the key with case-insensitive match
-5. find the index
+5. find the index 
 
 Mem Layout:
      fixed 33 * 5 bytes  165 bytes |||  variable keys  ||| variable lowerkeys
@@ -330,7 +330,7 @@ type FallbackFieldMap struct {
 	inner  map[string]int
 	backup map[string]int
 }
-
+ 
  func NewFallbackFieldMap(n int) *FallbackFieldMap {
 	 return &FallbackFieldMap{
 		 oders:  make([]string, n, n),
@@ -338,7 +338,7 @@ type FallbackFieldMap struct {
 		 backup: make(map[string]int, n*2),
 	 }
  }
-
+ 
  func (self *FallbackFieldMap) Get(name string, caseSensitive bool) int {
 	 if i, ok := self.inner[name]; ok {
 		 return i
@@ -348,14 +348,14 @@ type FallbackFieldMap struct {
 		return -1
 	 }
  }
-
+ 
  func (self *FallbackFieldMap) Set(fields []resolver.FieldMeta) {
 
 	for i, f := range(fields) {
 		name := f.Name
 		self.oders[i] = name
 		self.inner[name] = i
-
+	
 		/* add the case-insensitive version, prefer the one with smaller field ID */
 		key := strings.ToLower(name)
 		if v, ok := self.backup[key]; !ok || i < v {
@@ -363,7 +363,7 @@ type FallbackFieldMap struct {
 		}
 	}
  }
-
+ 
  func (self *FallbackFieldMap) getCaseInsensitive(name string) int {
 	 if i, ok := self.backup[strings.ToLower(name)]; ok {
 		 return i
@@ -371,3 +371,4 @@ type FallbackFieldMap struct {
 		 return -1
 	 }
  }
+ 

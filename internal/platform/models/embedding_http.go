@@ -1,14 +1,10 @@
-// Package models 提供项目自有模型端口的直接 HTTP Adapter。
+// Package models 提供 Eino 模型组件所需的项目安全传输与协议合同。
 package models
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -42,6 +38,9 @@ const (
 	defaultEmbeddingTimeout       = 30 * time.Second
 	defaultEmbeddingResponseBytes = int64(64 << 20)
 	maxEmbeddingResponseBytes     = int64(128 << 20)
+	// embeddingAdapterIdentity 已进入持久 EmbeddingContract/ConfigHash；
+	// 字符串值必须保持历史兼容，它是协议身份而非当前实现选择器。
+	embeddingAdapterIdentity = "direct-http"
 )
 
 var (
@@ -56,13 +55,11 @@ type embeddingHTTPConfig struct {
 	contract         domain.EmbeddingContract
 	timeout          time.Duration
 	maxResponseBytes int64
-	authorization    string
 }
 
 type embeddingHTTPOptions struct {
 	client             *http.Client
 	baseURL            string
-	authorization      string
 	model              string
 	dimensions         int32
 	normalization      domain.EmbeddingNormalization
@@ -92,7 +89,7 @@ func newEmbeddingHTTPConfig(provider, requestPath string, allowLoopbackHTTP bool
 	}
 	contract := domain.EmbeddingContract{
 		Provider:           provider,
-		AdapterName:        "direct-http",
+		AdapterName:        embeddingAdapterIdentity,
 		AdapterVersion:     "v1",
 		Model:              options.model,
 		Dimensions:         options.dimensions,
@@ -117,7 +114,6 @@ func newEmbeddingHTTPConfig(provider, requestPath string, allowLoopbackHTTP bool
 		contract:         contract,
 		timeout:          timeout,
 		maxResponseBytes: maxResponseBytes,
-		authorization:    options.authorization,
 	}, nil
 }
 
@@ -151,9 +147,9 @@ func appendEmbeddingPath(baseURL *url.URL, requestPath string) string {
 	requestURL := *baseURL
 	cleaned := strings.TrimRight(requestURL.Path, "/")
 	switch {
-	case strings.HasSuffix(cleaned, "/v1/embeddings"):
-		requestURL.Path = cleaned
-	case strings.HasSuffix(cleaned, "/v1"):
+	case strings.HasSuffix(cleaned, requestPath):
+		requestURL.Path = path.Clean(cleaned)
+	case requestPath == "/v1/embeddings" && strings.HasSuffix(cleaned, "/v1"):
 		requestURL.Path = path.Join(cleaned, "embeddings")
 	default:
 		requestURL.Path = path.Join(cleaned, requestPath)
@@ -170,60 +166,6 @@ func (config embeddingHTTPConfig) closeModelResource() error {
 		return nil
 	}
 	return config.client.Close()
-}
-
-func (config embeddingHTTPConfig) embed(ctx context.Context, request application.EmbedRequest, payload, result any) error {
-	if err := application.ValidateEmbedRequest(config.contract, request); err != nil {
-		return err
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeEmbedResultInvalid, false, errEmbeddingRequestFailed)
-	}
-	requestContext, cancel := context.WithTimeout(ctx, config.timeout)
-	defer cancel()
-	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, config.endpointURL, bytes.NewReader(encoded))
-	if err != nil {
-		return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeEmbeddingRejected, false, &ConnectionDiagnostic{
-			Stage:          ConnectionStageRequest,
-			TransportError: "request construction failed",
-			cause:          err,
-		})
-	}
-	httpRequest.Header.Set("Accept", "application/json")
-	httpRequest.Header.Set("Content-Type", "application/json")
-	if config.authorization != "" {
-		httpRequest.Header.Set("Authorization", config.authorization)
-	}
-	response, err := config.client.Do(httpRequest)
-	if err != nil {
-		return classifyEmbeddingTransportError(requestContext, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		diagnostic := providerResponseDiagnostic(response, config.authorization, config.endpointURL)
-		return classifyEmbeddingStatus(response.StatusCode, diagnostic)
-	}
-	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		return embeddingResultError(responseValidationDiagnostic())
-	}
-	encodedResponse, err := io.ReadAll(io.LimitReader(response.Body, config.maxResponseBytes+1))
-	if err != nil {
-		return classifyEmbeddingTransportErrorWithStage(requestContext, err, ConnectionStageResponseRead)
-	}
-	if int64(len(encodedResponse)) > config.maxResponseBytes {
-		return embeddingResultError(responseValidationDiagnostic())
-	}
-	decoder := json.NewDecoder(bytes.NewReader(encodedResponse))
-	if err := decoder.Decode(result); err != nil {
-		return embeddingResultError(responseValidationDiagnostic())
-	}
-	var extra json.RawMessage
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return embeddingResultError(responseValidationDiagnostic())
-	}
-	return nil
 }
 
 func validateEmbeddingResult(contract domain.EmbeddingContract, request application.EmbedRequest, result application.EmbedResult) (application.EmbedResult, error) {

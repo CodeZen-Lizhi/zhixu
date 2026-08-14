@@ -23,6 +23,7 @@ type ManagedModelsHostOptions struct {
 	Role       modelsettingsdomain.RuntimeRole
 	InstanceID foundation.ID
 	Loaded     LoadedSettings
+	Telemetry  platformmodels.ModelTelemetry
 
 	BuildTimeout    time.Duration
 	HistoricalLimit int
@@ -43,6 +44,7 @@ func NewManagedModelsHost(options ManagedModelsHostOptions) (*RuntimeHost[*Model
 	factory := &modelsGenerationFactory{
 		base:      WithoutModelCredentials(options.Base),
 		revisions: options.Revisions,
+		telemetry: options.Telemetry,
 	}
 	return NewRuntimeHost(RuntimeHostOptions[*Models]{
 		Initial: InitialRuntime[*Models]{
@@ -72,6 +74,7 @@ func NewManagedModelsHost(options ManagedModelsHostOptions) (*RuntimeHost[*Model
 type modelsGenerationFactory struct {
 	base      config.Config
 	revisions modelsettingsapplication.RevisionLoader
+	telemetry platformmodels.ModelTelemetry
 }
 
 func (factory *modelsGenerationFactory) Build(ctx context.Context, revision int64) (*Models, error) {
@@ -92,7 +95,7 @@ func (factory *modelsGenerationFactory) Build(ctx context.Context, revision int6
 			errors.New("loaded model generation revision does not match target"),
 		)
 	}
-	return Build(factory.base, resolved)
+	return Build(factory.base, resolved, factory.telemetry)
 }
 
 func (factory *modelsGenerationFactory) Probe(ctx context.Context, models *Models) error {

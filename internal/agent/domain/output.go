@@ -2,8 +2,11 @@ package domain
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,6 +20,14 @@ const (
 	RelationAssessmentSchemaID = "agent.relation-assessment"
 	// RAGAnswerSchemaID 是可发布 RAG Answer 的稳定 Schema ID。
 	RAGAnswerSchemaID = "agent.rag-answer"
+	// RAGAnswerMetadataSchemaID 是最终流式正文之后生成的内部元数据 Schema ID。
+	RAGAnswerMetadataSchemaID = "agent.rag-answer-metadata"
+	// RAGAnswerMetadataRefusalSchemaID 是 metadata 校验耗尽后、不含服务端身份的拒答 Schema ID。
+	RAGAnswerMetadataRefusalSchemaID = "agent.rag-answer-metadata-refusal"
+	// RAGAgentTurnSchemaID 标识 Eino ReAct 内部 assistant/tool-call turn 合同。
+	RAGAgentTurnSchemaID = "agent.rag-read-agent-turn"
+	// RAGAnswerContentSchemaID 标识最终 tool-free Markdown Stream 合同。
+	RAGAnswerContentSchemaID = "agent.rag-answer-content"
 	// RefusalSchemaID 是拒答输出的稳定 Schema ID。
 	RefusalSchemaID = "agent.refusal"
 	// FaithfulnessReviewSchemaID 是逐 assertion 审查输出的稳定 Schema ID。
@@ -30,6 +41,7 @@ const (
 
 	ResultTypeRelationAssessment = "relation_assessment"
 	ResultTypeRAGAnswer          = "rag_answer"
+	ResultTypeRAGAnswerMetadata  = "rag_answer_metadata"
 	ResultTypeRefusal            = "refusal"
 	ResultTypeFaithfulnessReview = "faithfulness_review"
 	// ResultTypeArtifactSection 是受控 Artifact 章节生成的稳定终态类型。
@@ -280,6 +292,230 @@ type RAGAnswerPayloadV2 struct {
 	RAGAnswerPayload
 	RelatedTopics     []RelatedTopic `json:"related_topics"`
 	FollowUpQuestions []string       `json:"follow_up_questions"`
+}
+
+// RAGAnswerMetadataPayload 是历史 v1 metadata 载荷。v1 要求模型回显
+// 服务端摘要；仅为已持久化运行兼容保留。
+type RAGAnswerMetadataPayload struct {
+	AnswerSHA256      string             `json:"answer_sha256"`
+	Assertions        []Assertion        `json:"assertions"`
+	Citations         []Citation         `json:"citations"`
+	ConflictPositions []ConflictPosition `json:"conflict_positions"`
+	ConflictSummary   string             `json:"conflict_summary"`
+	RelatedTopics     []RelatedTopic     `json:"related_topics"`
+	FollowUpQuestions []string           `json:"follow_up_questions"`
+}
+
+// Validate 校验摘要格式和完整 RAG v2 元数据闭包。
+func (payload RAGAnswerMetadataPayload) Validate() error {
+	if !canonicalSHA256(payload.AnswerSHA256) {
+		return invalid(ErrorCodeAnswerInvalid, "rag answer metadata hash is invalid")
+	}
+	return validateRAGAnswerMetadataFields(
+		payload.Assertions, payload.Citations, payload.ConflictPositions, payload.ConflictSummary,
+		payload.RelatedTopics, payload.FollowUpQuestions,
+	)
+}
+
+// RAGAnswerMetadataAssertionV2 是模型拥有的原子语义及其短 Evidence 引用。
+// Citation 身份由项目绑定，不进入模型输出。
+type RAGAnswerMetadataAssertionV2 struct {
+	ID           string        `json:"id"`
+	Text         string        `json:"text"`
+	Kind         AssertionKind `json:"kind"`
+	EvidenceRefs []string      `json:"evidence_refs"`
+}
+
+// RAGAnswerMetadataConflictPositionV2 只让模型为服务端短引用生成观点正文。
+type RAGAnswerMetadataConflictPositionV2 struct {
+	ConflictRef string `json:"conflict_ref"`
+	Position    string `json:"position"`
+}
+
+// RAGAnswerMetadataPayloadV2 不包含正文或任何服务端身份。模型只选择
+// E*/C*/T* 短引用；项目在同一调用栈中还原 Citation、Claim、Topic 和时间戳。
+type RAGAnswerMetadataPayloadV2 struct {
+	Assertions        []RAGAnswerMetadataAssertionV2        `json:"assertions"`
+	ConflictPositions []RAGAnswerMetadataConflictPositionV2 `json:"conflict_positions"`
+	ConflictSummary   string                                `json:"conflict_summary"`
+	RelatedTopicRefs  []string                              `json:"related_topic_refs"`
+	FollowUpQuestions []string                              `json:"follow_up_questions"`
+}
+
+// Validate 校验模型拥有字段的形状；服务端引用闭包在 Compose 时校验。
+func (payload RAGAnswerMetadataPayloadV2) Validate() error {
+	if len(payload.Assertions) == 0 || len(payload.Assertions) > maxPayloadItems ||
+		payload.ConflictPositions == nil || len(payload.ConflictPositions) > maxPayloadItems ||
+		len(payload.RelatedTopicRefs) == 0 || len(payload.RelatedTopicRefs) > maxRelatedTopics ||
+		len(payload.FollowUpQuestions) == 0 || len(payload.FollowUpQuestions) > maxFollowUps ||
+		!canonicalTextList(payload.FollowUpQuestions, true, maxFollowUps, maxReasonBytes) {
+		return invalid(ErrorCodeAnswerInvalid, "rag answer metadata v2 payload is incomplete")
+	}
+	assertionIDs := make(map[string]struct{}, len(payload.Assertions))
+	for _, assertion := range payload.Assertions {
+		if !canonicalReference(assertion.ID, maxReferenceIDBytes) || strings.HasPrefix(assertion.ID, "@") ||
+			!boundedText(assertion.Text, maxSummaryBytes, true) ||
+			assertion.EvidenceRefs == nil || !canonicalMetadataReferences(assertion.EvidenceRefs, "E", false, maxPayloadItems) {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer metadata v2 assertion is invalid")
+		}
+		if _, duplicate := assertionIDs[assertion.ID]; duplicate {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer metadata v2 repeats an assertion")
+		}
+		assertionIDs[assertion.ID] = struct{}{}
+		switch assertion.Kind {
+		case AssertionFactual:
+			if len(assertion.EvidenceRefs) == 0 {
+				return invalid(ErrorCodeAnswerInvalid, "factual metadata assertion requires evidence")
+			}
+		case AssertionModelInference:
+			if len(assertion.EvidenceRefs) != 0 {
+				return invalid(ErrorCodeAnswerInvalid, "metadata inference cannot claim evidence")
+			}
+		default:
+			return invalid(ErrorCodeAnswerInvalid, "metadata assertion kind is unsupported")
+		}
+	}
+	conflictRefs := make(map[string]struct{}, len(payload.ConflictPositions))
+	for _, position := range payload.ConflictPositions {
+		if !canonicalMetadataReference(position.ConflictRef, "C", maxPayloadItems) ||
+			!boundedText(position.Position, maxSummaryBytes, true) {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer metadata v2 conflict position is invalid")
+		}
+		if _, duplicate := conflictRefs[position.ConflictRef]; duplicate {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer metadata v2 repeats a conflict reference")
+		}
+		conflictRefs[position.ConflictRef] = struct{}{}
+	}
+	if len(payload.ConflictPositions) == 0 {
+		if payload.ConflictSummary != "" {
+			return invalid(ErrorCodeAnswerInvalid, "metadata cannot summarize conflicts without positions")
+		}
+	} else if len(payload.ConflictPositions) < 2 || !boundedText(payload.ConflictSummary, maxSummaryBytes, true) {
+		return invalid(ErrorCodeAnswerInvalid, "metadata conflict disclosure requires both positions and a summary")
+	}
+	if !canonicalMetadataReferences(payload.RelatedTopicRefs, "T", true, maxRelatedTopics) {
+		return invalid(ErrorCodeAnswerInvalid, "rag answer metadata v2 topic references are invalid")
+	}
+	seenQuestions := make(map[string]struct{}, len(payload.FollowUpQuestions))
+	for _, question := range payload.FollowUpQuestions {
+		if _, duplicate := seenQuestions[question]; duplicate {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer metadata v2 repeats a follow-up question")
+		}
+		seenQuestions[question] = struct{}{}
+	}
+	return nil
+}
+
+// RAGAnswerMetadataEvidenceBinding 将 E* 短引用绑定到项目 Citation 事实。
+type RAGAnswerMetadataEvidenceBinding struct {
+	Ref      string
+	Citation Citation
+}
+
+// RAGAnswerMetadataConflictBinding 将 C* 短引用绑定到项目争议事实。
+type RAGAnswerMetadataConflictBinding struct {
+	Ref           string
+	ClaimID       foundation.ID
+	Applicability json.RawMessage
+	CitationIDs   []string
+	UpdatedAt     time.Time
+}
+
+// RAGAnswerMetadataTopicBinding 将 T* 短引用绑定到项目 Topic 事实。
+type RAGAnswerMetadataTopicBinding struct {
+	Ref   string
+	Topic RelatedTopic
+}
+
+// RAGAnswerMetadataBindings 是一次 metadata 调用的服务端短引用事实表。
+type RAGAnswerMetadataBindings struct {
+	Evidence      []RAGAnswerMetadataEvidenceBinding
+	Conflicts     []RAGAnswerMetadataConflictBinding
+	RelatedTopics []RAGAnswerMetadataTopicBinding
+}
+
+// Validate 校验短引用顺序、身份唯一性及 Citation 闭包。
+func (bindings RAGAnswerMetadataBindings) Validate() error {
+	if len(bindings.Evidence) == 0 || len(bindings.Evidence) > maxPayloadItems ||
+		bindings.Conflicts == nil || len(bindings.Conflicts) > maxPayloadItems ||
+		len(bindings.RelatedTopics) == 0 || len(bindings.RelatedTopics) > maxRelatedTopics {
+		return invalid(ErrorCodeAnswerInvalid, "rag answer metadata bindings are incomplete")
+	}
+	citations := make(map[string]Citation, len(bindings.Evidence))
+	var workspaceID, indexVersionID foundation.ID
+	for index, binding := range bindings.Evidence {
+		if binding.Ref != metadataReference("E", index+1) || binding.Citation.Validate() != nil {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer evidence binding is invalid")
+		}
+		if _, duplicate := citations[binding.Citation.ID]; duplicate {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer evidence binding repeats a citation")
+		}
+		if index == 0 {
+			workspaceID, indexVersionID = binding.Citation.WorkspaceID, binding.Citation.IndexVersionID
+		} else if binding.Citation.WorkspaceID != workspaceID || binding.Citation.IndexVersionID != indexVersionID {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer evidence bindings cross workspace or index version")
+		}
+		citations[binding.Citation.ID] = binding.Citation
+	}
+	claims := make(map[foundation.ID]struct{}, len(bindings.Conflicts))
+	for index, binding := range bindings.Conflicts {
+		position := ConflictPosition{
+			ClaimID: binding.ClaimID, Position: "validated-conflict-position", Applicability: binding.Applicability,
+			CitationIDs: binding.CitationIDs, UpdatedAt: binding.UpdatedAt,
+		}
+		if binding.Ref != metadataReference("C", index+1) || position.Validate() != nil {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer conflict binding is invalid")
+		}
+		if _, duplicate := claims[binding.ClaimID]; duplicate {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer conflict binding repeats a claim")
+		}
+		claims[binding.ClaimID] = struct{}{}
+		for _, citationID := range binding.CitationIDs {
+			if _, exists := citations[citationID]; !exists {
+				return invalid(ErrorCodeAnswerInvalid, "rag answer conflict binding references unknown evidence")
+			}
+		}
+	}
+	if len(bindings.Conflicts) == 1 {
+		return invalid(ErrorCodeAnswerInvalid, "rag answer conflict bindings require both positions")
+	}
+	topics := make(map[foundation.ID]struct{}, len(bindings.RelatedTopics))
+	for index, binding := range bindings.RelatedTopics {
+		topic := binding.Topic
+		displayName, _, err := knowledgedomain.NormalizeTopicText(topic.Name)
+		if binding.Ref != metadataReference("T", index+1) || err != nil || displayName != topic.Name ||
+			!canonicalID(topic.TopicID) || !canonicalUniqueReferences(topic.CitationIDs, true) {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer topic binding is invalid")
+		}
+		if _, duplicate := topics[topic.TopicID]; duplicate {
+			return invalid(ErrorCodeAnswerInvalid, "rag answer topic binding repeats a topic")
+		}
+		topics[topic.TopicID] = struct{}{}
+		for _, citationID := range topic.CitationIDs {
+			if _, exists := citations[citationID]; !exists {
+				return invalid(ErrorCodeAnswerInvalid, "rag answer topic binding references unknown evidence")
+			}
+		}
+	}
+	return nil
+}
+
+func validateRAGAnswerMetadataFields(
+	assertions []Assertion,
+	citations []Citation,
+	conflictPositions []ConflictPosition,
+	conflictSummary string,
+	relatedTopics []RelatedTopic,
+	followUpQuestions []string,
+) error {
+	candidate := RAGAnswerPayloadV2{
+		RAGAnswerPayload: RAGAnswerPayload{
+			Conclusion: "validated-stream-answer", Assertions: assertions, Citations: citations,
+			ConflictPositions: conflictPositions, ConflictSummary: conflictSummary,
+		},
+		RelatedTopics: relatedTopics, FollowUpQuestions: followUpQuestions,
+	}
+	return candidate.Validate()
 }
 
 // Validate 校验 v2 扩展字段与 v1 Citation 闭包保持一致。
@@ -549,6 +785,209 @@ type RAGAnswerResultV2 struct {
 	Payload       RAGAnswerPayloadV2 `json:"payload"`
 }
 
+// RAGAnswerMetadataResult 是不会进入公开 Answer wire 的内部结构化结果。
+type RAGAnswerMetadataResult struct {
+	ResultType    string                   `json:"result_type"`
+	SchemaID      string                   `json:"schema_id"`
+	SchemaVersion string                   `json:"schema_version"`
+	ModelRunRef   foundation.ID            `json:"model_run_ref"`
+	Payload       RAGAnswerMetadataPayload `json:"payload"`
+}
+
+// RAGAnswerMetadataResultV2 是当前模型输出合同。最终正文、ModelRun 与
+// 服务端知识身份均不由模型回显。
+type RAGAnswerMetadataResultV2 struct {
+	ResultType    string                     `json:"result_type"`
+	SchemaID      string                     `json:"schema_id"`
+	SchemaVersion string                     `json:"schema_version"`
+	Payload       RAGAnswerMetadataPayloadV2 `json:"payload"`
+}
+
+// RAGAnswerMetadataRefusalResultV2 是 metadata REDUCED 阶段的模型输出。
+// ModelRunRef 由项目在可信边界内注入，不能要求模型回显。
+type RAGAnswerMetadataRefusalResultV2 struct {
+	ResultType    string         `json:"result_type"`
+	SchemaID      string         `json:"schema_id"`
+	SchemaVersion string         `json:"schema_version"`
+	Payload       RefusalPayload `json:"payload"`
+}
+
+// Validate 校验 metadata envelope 与 payload。
+func (result RAGAnswerMetadataResult) Validate() error {
+	if result.ResultType != ResultTypeRAGAnswerMetadata || result.SchemaID != RAGAnswerMetadataSchemaID ||
+		result.SchemaVersion != OutputSchemaVersionV1 || !canonicalID(result.ModelRunRef) {
+		return invalid(ErrorCodeSchemaInvalid, "rag answer metadata envelope is invalid")
+	}
+	return result.Payload.Validate()
+}
+
+// Validate 校验 v2 metadata envelope 与 payload。
+func (result RAGAnswerMetadataResultV2) Validate() error {
+	if result.ResultType != ResultTypeRAGAnswerMetadata || result.SchemaID != RAGAnswerMetadataSchemaID ||
+		result.SchemaVersion != OutputSchemaVersionV2 {
+		return invalid(ErrorCodeSchemaInvalid, "rag answer metadata v2 envelope is invalid")
+	}
+	return result.Payload.Validate()
+}
+
+// Validate 校验 metadata 专用的无身份拒答 envelope。
+func (result RAGAnswerMetadataRefusalResultV2) Validate() error {
+	if result.ResultType != ResultTypeRefusal || result.SchemaID != RAGAnswerMetadataRefusalSchemaID ||
+		result.SchemaVersion != OutputSchemaVersionV2 {
+		return invalid(ErrorCodeSchemaInvalid, "rag answer metadata refusal envelope is invalid")
+	}
+	if err := result.Payload.Validate(); err != nil {
+		return err
+	}
+	if !canonicalUniqueTextList(result.Payload.MissingRequirements, true, 50, maxReasonBytes) ||
+		!canonicalUniqueTextList(result.Payload.SuggestedActions, true, 50, maxReasonBytes) {
+		return invalid(ErrorCodeRefusalInvalid, "rag answer metadata refusal lists are invalid")
+	}
+	return nil
+}
+
+// ComposeRefusal 在模型输出通过严格校验后绑定项目拥有的 ModelRunRef。
+func (result RAGAnswerMetadataRefusalResultV2) ComposeRefusal(modelRunRef foundation.ID) (RefusalResult, error) {
+	if err := result.Validate(); err != nil {
+		return RefusalResult{}, err
+	}
+	refusal := RefusalResult{
+		ResultType: ResultTypeRefusal, SchemaID: RefusalSchemaID, SchemaVersion: OutputSchemaVersionV1,
+		ModelRunRef: modelRunRef, Payload: result.Payload,
+	}
+	if err := refusal.Validate(); err != nil {
+		return RefusalResult{}, err
+	}
+	return refusal, nil
+}
+
+// ComposeRAGAnswerV2 把原始 Stream 字节与 metadata 确定性组合为公开结果。
+// 正文不会 trim、重写或从 metadata 中读取。
+func (result RAGAnswerMetadataResult) ComposeRAGAnswerV2(finalText string) (RAGAnswerResultV2, error) {
+	if err := result.Validate(); err != nil {
+		return RAGAnswerResultV2{}, err
+	}
+	sum := sha256.Sum256([]byte(finalText))
+	if hex.EncodeToString(sum[:]) != result.Payload.AnswerSHA256 {
+		return RAGAnswerResultV2{}, invalid(ErrorCodeAnswerInvalid, "rag answer metadata does not bind the final stream")
+	}
+	return composeRAGAnswerV2(
+		result.ModelRunRef, finalText, result.Payload.Assertions, result.Payload.Citations,
+		result.Payload.ConflictPositions, result.Payload.ConflictSummary, result.Payload.RelatedTopics,
+		result.Payload.FollowUpQuestions,
+	)
+}
+
+// ComposeRAGAnswerV2 把同一次已完整消费的 Stream、项目 ModelRun 和服务端
+// 短引用绑定组装为公开结果。正文和身份都不会从模型 metadata 中读取。
+func (result RAGAnswerMetadataResultV2) ComposeRAGAnswerV2(modelRunRef foundation.ID, finalText string, bindings RAGAnswerMetadataBindings) (RAGAnswerResultV2, error) {
+	if err := result.Validate(); err != nil {
+		return RAGAnswerResultV2{}, err
+	}
+	if !canonicalID(modelRunRef) {
+		return RAGAnswerResultV2{}, invalid(ErrorCodeAnswerInvalid, "rag answer metadata model run binding is invalid")
+	}
+	if err := bindings.Validate(); err != nil {
+		return RAGAnswerResultV2{}, err
+	}
+	evidenceByRef := make(map[string]Citation, len(bindings.Evidence))
+	for _, binding := range bindings.Evidence {
+		evidenceByRef[binding.Ref] = binding.Citation
+	}
+	assertions := make([]Assertion, 0, len(result.Payload.Assertions))
+	referencedCitations := make(map[string]struct{}, len(bindings.Evidence))
+	for _, metadataAssertion := range result.Payload.Assertions {
+		citationIDs := make([]string, 0, len(metadataAssertion.EvidenceRefs))
+		for _, ref := range metadataAssertion.EvidenceRefs {
+			citation, exists := evidenceByRef[ref]
+			if !exists {
+				return RAGAnswerResultV2{}, invalid(ErrorCodeAnswerInvalid, "metadata assertion references unknown evidence")
+			}
+			citationIDs = append(citationIDs, citation.ID)
+			referencedCitations[citation.ID] = struct{}{}
+		}
+		assertions = append(assertions, Assertion{
+			ID: metadataAssertion.ID, Text: metadataAssertion.Text, Kind: metadataAssertion.Kind, CitationIDs: citationIDs,
+		})
+	}
+	positionsByRef := make(map[string]string, len(result.Payload.ConflictPositions))
+	for _, position := range result.Payload.ConflictPositions {
+		positionsByRef[position.ConflictRef] = position.Position
+	}
+	if len(positionsByRef) != len(bindings.Conflicts) {
+		return RAGAnswerResultV2{}, invalid(ErrorCodeAnswerInvalid, "metadata conflict positions do not cover the server bindings")
+	}
+	conflictPositions := make([]ConflictPosition, 0, len(bindings.Conflicts))
+	for _, binding := range bindings.Conflicts {
+		position, exists := positionsByRef[binding.Ref]
+		if !exists {
+			return RAGAnswerResultV2{}, invalid(ErrorCodeAnswerInvalid, "metadata conflict positions do not cover the server bindings")
+		}
+		citationIDs := append([]string(nil), binding.CitationIDs...)
+		for _, citationID := range citationIDs {
+			referencedCitations[citationID] = struct{}{}
+		}
+		conflictPositions = append(conflictPositions, ConflictPosition{
+			ClaimID: binding.ClaimID, Position: position, Applicability: append(json.RawMessage(nil), binding.Applicability...),
+			CitationIDs: citationIDs, UpdatedAt: binding.UpdatedAt,
+		})
+	}
+	topicsByRef := make(map[string]RelatedTopic, len(bindings.RelatedTopics))
+	for _, binding := range bindings.RelatedTopics {
+		topicsByRef[binding.Ref] = binding.Topic
+	}
+	relatedTopics := make([]RelatedTopic, 0, len(result.Payload.RelatedTopicRefs))
+	for _, ref := range result.Payload.RelatedTopicRefs {
+		topic, exists := topicsByRef[ref]
+		if !exists {
+			return RAGAnswerResultV2{}, invalid(ErrorCodeAnswerInvalid, "metadata references an unknown related topic")
+		}
+		topic.CitationIDs = append([]string(nil), topic.CitationIDs...)
+		for _, citationID := range topic.CitationIDs {
+			referencedCitations[citationID] = struct{}{}
+		}
+		relatedTopics = append(relatedTopics, topic)
+	}
+	citations := make([]Citation, 0, len(referencedCitations))
+	for _, binding := range bindings.Evidence {
+		if _, referenced := referencedCitations[binding.Citation.ID]; referenced {
+			citations = append(citations, binding.Citation)
+		}
+	}
+	return composeRAGAnswerV2(
+		modelRunRef, finalText, assertions, citations,
+		conflictPositions, result.Payload.ConflictSummary, relatedTopics,
+		result.Payload.FollowUpQuestions,
+	)
+}
+
+func composeRAGAnswerV2(
+	modelRunRef foundation.ID,
+	finalText string,
+	assertions []Assertion,
+	citations []Citation,
+	conflictPositions []ConflictPosition,
+	conflictSummary string,
+	relatedTopics []RelatedTopic,
+	followUpQuestions []string,
+) (RAGAnswerResultV2, error) {
+	answer := RAGAnswerResultV2{
+		ResultType: ResultTypeRAGAnswer, SchemaID: RAGAnswerSchemaID, SchemaVersion: OutputSchemaVersionV2,
+		ModelRunRef: modelRunRef,
+		Payload: RAGAnswerPayloadV2{
+			RAGAnswerPayload: RAGAnswerPayload{
+				Conclusion: finalText, Assertions: assertions, Citations: citations,
+				ConflictPositions: conflictPositions, ConflictSummary: conflictSummary,
+			},
+			RelatedTopics: relatedTopics, FollowUpQuestions: followUpQuestions,
+		},
+	}
+	if err := answer.Validate(); err != nil {
+		return RAGAnswerResultV2{}, err
+	}
+	return answer, nil
+}
+
 // Validate 校验 RAG Answer v2 Envelope 与扩展载荷。
 func (result RAGAnswerResultV2) Validate() error {
 	if result.ResultType != ResultTypeRAGAnswer || result.SchemaID != RAGAnswerSchemaID ||
@@ -618,6 +1057,21 @@ func DecodeRAGAnswerV2(raw []byte, limits DecodeLimits) (RAGAnswerResultV2, erro
 	return DecodeStrict(raw, limits, RAGAnswerResultV2.Validate)
 }
 
+// DecodeRAGAnswerMetadata 严格解析一个内部 metadata v1 文档。
+func DecodeRAGAnswerMetadata(raw []byte, limits DecodeLimits) (RAGAnswerMetadataResult, error) {
+	return DecodeStrict(raw, limits, RAGAnswerMetadataResult.Validate)
+}
+
+// DecodeRAGAnswerMetadataV2 严格解析一个当前 metadata v2 文档。
+func DecodeRAGAnswerMetadataV2(raw []byte, limits DecodeLimits) (RAGAnswerMetadataResultV2, error) {
+	return DecodeStrict(raw, limits, RAGAnswerMetadataResultV2.Validate)
+}
+
+// DecodeRAGAnswerMetadataRefusalV2 严格解析 metadata REDUCED 的无身份拒答。
+func DecodeRAGAnswerMetadataRefusalV2(raw []byte, limits DecodeLimits) (RAGAnswerMetadataRefusalResultV2, error) {
+	return DecodeStrict(raw, limits, RAGAnswerMetadataRefusalResultV2.Validate)
+}
+
 // DecodeRefusal 严格解析一个 refusal v1 文档。
 func DecodeRefusal(raw []byte, limits DecodeLimits) (RefusalResult, error) {
 	return DecodeStrict(raw, limits, RefusalResult.Validate)
@@ -649,6 +1103,14 @@ func validRefusalReason(value RefusalReasonCode) bool {
 	}
 }
 
+func canonicalSHA256(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
+}
+
 func canonicalID(value foundation.ID) bool {
 	parsed, err := foundation.ParseID(string(value))
 	return err == nil && parsed == value
@@ -676,6 +1138,39 @@ func canonicalUniqueReferences(values []string, required bool) bool {
 		seen[value] = struct{}{}
 	}
 	return true
+}
+
+func canonicalMetadataReferences(values []string, prefix string, required bool, maximum int) bool {
+	if len(values) > maximum || (required && len(values) == 0) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !canonicalMetadataReference(value, prefix, maximum) {
+			return false
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
+}
+
+func canonicalMetadataReference(value, prefix string, maximum int) bool {
+	if !strings.HasPrefix(value, prefix) || len(value) <= len(prefix) {
+		return false
+	}
+	number := value[len(prefix):]
+	if number[0] == '0' {
+		return false
+	}
+	parsed, err := strconv.Atoi(number)
+	return err == nil && parsed > 0 && parsed <= maximum && value == metadataReference(prefix, parsed)
+}
+
+func metadataReference(prefix string, number int) string {
+	return prefix + strconv.Itoa(number)
 }
 
 func canonicalUniqueIDs(values []foundation.ID, required bool) bool {
@@ -715,6 +1210,20 @@ func canonicalTextList(values []string, required bool, maximumItems, maximumByte
 		if !boundedText(value, maximumBytes, true) {
 			return false
 		}
+	}
+	return true
+}
+
+func canonicalUniqueTextList(values []string, required bool, maximumItems, maximumBytes int) bool {
+	if !canonicalTextList(values, required, maximumItems, maximumBytes) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
 	}
 	return true
 }

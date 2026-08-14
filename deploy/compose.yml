@@ -1,5 +1,5 @@
 x-tool-environment: &tool-environment
-  ZHIXU_TOOL_RUNTIME_MODE: ${ZHIXU_TOOL_RUNTIME_MODE:-disabled}
+  ZHIXU_TOOL_RUNTIME_MODE: ${ZHIXU_TOOL_RUNTIME_MODE:-enabled}
   ZHIXU_WEB_FETCH_MODE: ${ZHIXU_WEB_FETCH_MODE:-disabled}
   ZHIXU_WEB_FETCH_TIMEOUT: ${ZHIXU_WEB_FETCH_TIMEOUT:-30s}
   ZHIXU_WEB_FETCH_RESPONSE_HEADER_TIMEOUT: ${ZHIXU_WEB_FETCH_RESPONSE_HEADER_TIMEOUT:-10s}
@@ -16,6 +16,10 @@ name: zhixu
 
 x-runtime-environment: &runtime-environment
   ZHIXU_ENVIRONMENT: ${ZHIXU_ENVIRONMENT:-development}
+
+x-telemetry-environment: &telemetry-environment
+  ZHIXU_TELEMETRY_MODE: ${ZHIXU_TELEMETRY_MODE:-disabled}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
 
 x-model-settings-environment: &model-settings-environment
   ZHIXU_MODEL_SETTINGS_MODE: ${ZHIXU_MODEL_SETTINGS_MODE:-managed}
@@ -193,7 +197,7 @@ services:
     restart: ${ZHIXU_APP_RESTART_POLICY:-on-failure}
     entrypoint: ["/app/zhixu-runtime-wait", "--profile", "api", "--", "/app/zhixu-api"]
     environment:
-      <<: [*tool-environment, *runtime-environment, *model-settings-environment, *api-auth-environment]
+      <<: [*tool-environment, *runtime-environment, *model-settings-environment, *api-auth-environment, *telemetry-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
       ZHIXU_MODEL_SETTINGS_ROLLOUT_ID: ${ZHIXU_MODEL_SETTINGS_ROLLOUT_ID:-}
       ZHIXU_MODEL_SETTINGS_PREPARED: ${ZHIXU_MODEL_SETTINGS_PREPARED:-false}
@@ -254,7 +258,7 @@ services:
     restart: ${ZHIXU_WORKER_RESTART_POLICY:-on-failure}
     entrypoint: ["/app/zhixu-runtime-wait", "--profile", "worker", "--", "/app/zhixu-worker"]
     environment:
-      <<: [*tool-environment, *runtime-environment, *model-settings-environment]
+      <<: [*tool-environment, *runtime-environment, *model-settings-environment, *telemetry-environment]
       ZHIXU_VERSION: ${ZHIXU_VERSION:-dev}
       ZHIXU_MODEL_SETTINGS_ROLLOUT_ID: ${ZHIXU_MODEL_SETTINGS_ROLLOUT_ID:-}
       ZHIXU_MODEL_SETTINGS_PREPARED: ${ZHIXU_MODEL_SETTINGS_PREPARED:-false}
@@ -282,8 +286,6 @@ services:
       ZHIXU_RETRIEVAL_RRF_RERANK_CANDIDATE_LIMIT: ${ZHIXU_RETRIEVAL_RRF_RERANK_CANDIDATE_LIMIT:-50}
       ZHIXU_WORKER_SOFT_STOP_TIMEOUT: ${ZHIXU_WORKER_SOFT_STOP_TIMEOUT:-30s}
       ZHIXU_WORKER_HARD_STOP_TIMEOUT: ${ZHIXU_WORKER_HARD_STOP_TIMEOUT:-60s}
-      ZHIXU_TELEMETRY_MODE: ${ZHIXU_TELEMETRY_MODE:-disabled}
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       postgres:
         condition: service_healthy

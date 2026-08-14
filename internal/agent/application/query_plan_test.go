@@ -50,6 +50,87 @@ func TestQueryPlannerReturnsRetrievalRewritesFromOnePlanCall(t *testing.T) {
 	assertSinglePlanCall(t, model, request, profile)
 }
 
+func TestQueryPlannerComposesIdentitylessProviderV2(t *testing.T) {
+	catalog, request, profile := queryPlanProviderV2Catalog(t, time.Second)
+	raw := `{"i":"find policy","r":["policy location"],"d":"","q":"","s":[]}`
+	model := NewDeterministicChatModel(DeterministicChatStep{Response: testResponse(profile.Model, raw, 1, 1)})
+	planner := newQueryPlanner(t, model, catalog)
+
+	result, err := planner.Plan(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if result.Plan.ModelRunRef != request.ModelRunRef || result.Plan.SchemaVersion != domain.OutputSchemaVersionV1 ||
+		result.Plan.Payload.RequiresClarification || len(result.Plan.Payload.Rewrites) != 2 ||
+		result.Plan.Payload.Rewrites[0] != "where is the policy?" || result.Plan.Payload.Rewrites[1] != "policy location" ||
+		result.Runtime.Schema != request.SchemaRef {
+		t.Fatalf("result = %+v", result)
+	}
+	call := model.Calls()[0]
+	if strings.Contains(call.Messages[2].Content, "model_run_ref") || !strings.Contains(call.Messages[2].Content, `"question":"where is the policy?"`) {
+		t.Fatalf("provider input leaked identity or lost question: %s", call.Messages[2].Content)
+	}
+}
+
+func TestQueryPlannerProviderV2AnchorsRetrievalAndDropsIrrelevantBranchFields(t *testing.T) {
+	catalog, request, profile := queryPlanProviderV2Catalog(t, time.Second)
+	raw := `{"i":"retrieve","r":["1","2","3"],"d":"","q":"where is the policy?","s":[]}`
+	model := NewDeterministicChatModel(DeterministicChatStep{Response: testResponse(profile.Model, raw, 1, 1)})
+	planner := newQueryPlanner(t, model, catalog)
+
+	result, err := planner.Plan(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if result.Plan.Payload.RequiresClarification || len(result.Plan.Payload.Rewrites) != 1 ||
+		result.Plan.Payload.Rewrites[0] != "where is the policy?" || result.Plan.Payload.ClarificationQuestion != "" ||
+		result.Plan.Payload.ClarificationReason != "" || len(result.Plan.Payload.SuggestedScopes) != 0 {
+		t.Fatalf("anchored plan = %+v", result.Plan.Payload)
+	}
+}
+
+func TestQueryPlannerProviderV2FallsBackToReadOnlyRetrievalWithoutActionableClarification(t *testing.T) {
+	catalog, request, profile := queryPlanProviderV2Catalog(t, time.Second)
+	raw := `{"i":"clarify","r":[],"d":"","q":"","s":["documents containing the policy"]}`
+	model := NewDeterministicChatModel(DeterministicChatStep{Response: testResponse(profile.Model, raw, 1, 1)})
+	planner := newQueryPlanner(t, model, catalog)
+
+	result, err := planner.Plan(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if result.Plan.Payload.RequiresClarification || len(result.Plan.Payload.Rewrites) != 1 ||
+		result.Plan.Payload.Rewrites[0] != "where is the policy?" || result.Plan.Payload.ClarificationQuestion != "" ||
+		result.Plan.Payload.ClarificationReason != "" || len(result.Plan.Payload.SuggestedScopes) != 0 {
+		t.Fatalf("fallback plan = %+v", result.Plan.Payload)
+	}
+}
+
+func TestQueryPlannerProviderV2RejectsServerIdentityBeforeProvider(t *testing.T) {
+	catalog, request, profile := queryPlanProviderV2Catalog(t, time.Second)
+	request.Input = []byte(`{"question":"where?","model_run_ref":"61000000-0000-4000-8000-000000000099"}`)
+	model := NewDeterministicChatModel(DeterministicChatStep{Response: testResponse(profile.Model, `{"i":"x","r":["x"],"d":"","q":"","s":[]}`, 1, 1)})
+	planner := newQueryPlanner(t, model, catalog)
+	_, err := planner.Plan(context.Background(), request)
+	if errorCode(err) != errorCodeQueryPlanRequestInvalid || model.CallCount() != 0 {
+		t.Fatalf("error=%v code=%q calls=%d", err, errorCode(err), model.CallCount())
+	}
+}
+
+func TestQueryPlannerProviderV2RejectsMissingOrInvalidQuestionBeforeProvider(t *testing.T) {
+	catalog, request, profile := queryPlanProviderV2Catalog(t, time.Second)
+	for _, input := range []string{`{"history":[]}`, `{"question":null}`, `{"question":""}`, `{"question":" padded "}`} {
+		candidate := request
+		candidate.Input = []byte(input)
+		model := NewDeterministicChatModel(DeterministicChatStep{Response: testResponse(profile.Model, `{"i":"x","r":["x"],"d":"","q":"","s":[]}`, 1, 1)})
+		planner := newQueryPlanner(t, model, catalog)
+		_, err := planner.Plan(context.Background(), candidate)
+		if errorCode(err) != errorCodeQueryPlanRequestInvalid || model.CallCount() != 0 {
+			t.Fatalf("input=%s error=%v code=%q calls=%d", input, err, errorCode(err), model.CallCount())
+		}
+	}
+}
+
 func TestQueryPlannerRejectsInvalidReferencesAndInputBeforeProvider(t *testing.T) {
 	catalog, request, profile := queryPlanCatalog(t, time.Second, nil)
 	cases := map[string]func(*QueryPlanRequest){
@@ -57,7 +138,7 @@ func TestQueryPlannerRejectsInvalidReferencesAndInputBeforeProvider(t *testing.T
 		"profile":   func(value *QueryPlanRequest) { value.ProfileRef = domain.ModelProfileRef{} },
 		"prompt":    func(value *QueryPlanRequest) { value.PromptRef = domain.PromptRef{} },
 		"schema id": func(value *QueryPlanRequest) { value.SchemaRef.ID = "other" },
-		"schema v":  func(value *QueryPlanRequest) { value.SchemaRef.Version = "v2" },
+		"schema v":  func(value *QueryPlanRequest) { value.SchemaRef.Version = "v3" },
 		"empty":     func(value *QueryPlanRequest) { value.Input = nil },
 		"invalid utf8": func(value *QueryPlanRequest) {
 			value.Input = []byte{0xff}
@@ -174,6 +255,43 @@ func queryPlanCatalog(t *testing.T, timeout time.Duration, decoder OutputDecoder
 	}, profile
 }
 
+func queryPlanProviderV2Catalog(t *testing.T, timeout time.Duration) (*RuntimeCatalog, QueryPlanRequest, ModelProfile) {
+	t.Helper()
+	prompt := PromptDefinition{
+		Ref: domain.PromptRef{ID: "rag-query-plan", Version: "v5"}, System: "bounded query planner system policy",
+		InitialInstruction: "return one identityless plan", RepairInstruction: "unused", ReducedInstruction: "unused",
+	}
+	schema := SchemaDefinition{
+		Ref:        domain.SchemaRef{ID: domain.RAGQueryPlanSchemaID, Version: domain.OutputSchemaVersionV2},
+		JSONSchema: []byte(`{"type":"object"}`),
+		Decode: func(raw []byte) (json.RawMessage, error) {
+			if _, err := domain.DecodeRAGQueryPlanProviderV2(raw, domain.DefaultDecodeLimits()); err != nil {
+				return nil, err
+			}
+			return append(json.RawMessage(nil), raw...), nil
+		},
+	}
+	profile := ModelProfile{
+		Ref: domain.ModelProfileRef{ID: "default", Version: "v1"}, Model: testModelRef(),
+		Timeout: timeout, MaxOutputTokens: 1024,
+	}
+	catalog := NewRuntimeCatalog()
+	for _, register := range []func() error{
+		func() error { return catalog.RegisterPrompt(prompt) },
+		func() error { return catalog.RegisterSchema(schema) },
+		func() error { return catalog.RegisterProfile(profile) },
+		catalog.Freeze,
+	} {
+		if err := register(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return catalog, QueryPlanRequest{
+		ModelRunRef: queryPlanModelRunID, ProfileRef: profile.Ref, PromptRef: prompt.Ref, SchemaRef: schema.Ref,
+		Input: []byte(`{"question":"where is the policy?","history":[]}`),
+	}, profile
+}
+
 func newQueryPlanner(t *testing.T, model ChatModel, catalog *RuntimeCatalog) *QueryPlanner {
 	t.Helper()
 	planner, err := NewQueryPlanner(model, catalog)
@@ -198,7 +316,7 @@ func assertSinglePlanCall(t *testing.T, model *DeterministicChatModel, request Q
 	}
 	call := model.Calls()[0]
 	if call.Phase != domain.ModelCallPlan || call.ProfileRef != request.ProfileRef || call.PromptRef != request.PromptRef ||
-		call.SchemaRef != request.SchemaRef || call.Model != profile.Model || len(call.Messages) != 3 ||
+		call.SchemaRef != request.SchemaRef || call.Model != profile.Model || call.MaxOutputTokens != queryPlanMaxOutputTokens || len(call.Messages) != 3 ||
 		call.Messages[0].Role != MessageRoleSystem || call.Messages[1].Content != "return one strict plan" ||
 		!strings.Contains(call.Messages[2].Content, "UNTRUSTED TASK INPUT") || !strings.Contains(call.Messages[2].Content, `"model_run_ref":"`+string(request.ModelRunRef)+`"`) ||
 		!strings.Contains(call.Messages[2].Content, `"question":"where is the policy?"`) {

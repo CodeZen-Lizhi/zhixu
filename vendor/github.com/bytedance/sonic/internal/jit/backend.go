@@ -214,6 +214,6 @@ func (self *Backend) GetPcspTable(ctxt *obj.Link, cursym *obj.LSym, newprog obj.
     if p != nil {
         pcdata = append(pcdata, loader.Pcvalue{PC: uint32(cursym.Size), Val: int32(maxdepth)})
     }
-
+    
     return pcdata
 }

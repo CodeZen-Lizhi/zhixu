@@ -9,6 +9,8 @@ import (
 
 const (
 	maxStableErrorCodeBytes = 128
+	// MaxModelCallsPerRun 与 PostgreSQL model_call.call_no 上限保持一致。
+	MaxModelCallsPerRun = 32
 	// MaxModelCallOutputTokens 是单次模型调用可持久化的最大输出 Token 上限。
 	MaxModelCallOutputTokens = 128 * 1024
 	// OrganizingOutlineSchemaID 允许由冻结 Snapshot 文档直接驱动、无需伪造 Retrieval Index 的大纲运行。
@@ -33,7 +35,11 @@ type ModelCallPhase string
 
 const (
 	// ModelCallPlan 表示生成检索改写或澄清判断的计划调用。
-	ModelCallPlan    ModelCallPhase = "PLAN"
+	ModelCallPlan ModelCallPhase = "PLAN"
+	// ModelCallAgent 表示可重复执行的 Agent 推理或工具编排调用。
+	ModelCallAgent ModelCallPhase = "AGENT"
+	// ModelCallAnswer 表示 Agent 循环结束后的单次答案生成调用。
+	ModelCallAnswer  ModelCallPhase = "ANSWER"
 	ModelCallInitial ModelCallPhase = "INITIAL"
 	ModelCallRepair  ModelCallPhase = "REPAIR"
 	ModelCallReduced ModelCallPhase = "REDUCED"
@@ -199,7 +205,8 @@ type ModelCall struct {
 
 // ValidateModelCall 校验 Model Call 阶段、hash、usage 和生命周期一致性。
 func ValidateModelCall(call ModelCall) error {
-	if !canonicalID(call.ID) || !canonicalID(call.ModelRunID) || call.ID == call.ModelRunID || call.CallNo < 1 ||
+	if !canonicalID(call.ID) || !canonicalID(call.ModelRunID) || call.ID == call.ModelRunID ||
+		call.CallNo < 1 || call.CallNo > MaxModelCallsPerRun ||
 		!validModelCallPhase(call.Phase) || call.Model.Validate() != nil || call.Profile.Validate() != nil ||
 		call.Prompt.Validate() != nil || call.Schema.Validate() != nil ||
 		call.MaxOutputTokens <= 0 || call.MaxOutputTokens > MaxModelCallOutputTokens ||
@@ -246,7 +253,8 @@ func ValidateModelCallTransition(from, to ModelCallStatus) error {
 }
 
 func validModelCallPhase(value ModelCallPhase) bool {
-	return value == ModelCallPlan || value == ModelCallInitial || value == ModelCallRepair || value == ModelCallReduced || value == ModelCallReview
+	return value == ModelCallPlan || value == ModelCallAgent || value == ModelCallAnswer || value == ModelCallInitial ||
+		value == ModelCallRepair || value == ModelCallReduced || value == ModelCallReview
 }
 
 func validCompletionTime(completedAt *time.Time, earliest time.Time) bool {

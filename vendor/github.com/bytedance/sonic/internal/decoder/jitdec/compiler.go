@@ -769,7 +769,7 @@ func (self *_Compiler) compileArray(p *_Program, sp int, vt reflect.Type) {
     p.add(_OP_is_null)
     p.tag(sp)
     skip := self.checkIfSkip(p, vt, '[')
-
+    
     p.add(_OP_save)
     p.add(_OP_lspace)
     v := []int{p.pc()}
@@ -937,7 +937,7 @@ func (self *_Compiler) compileStructBody(p *_Program, sp int, vt reflect.Type) {
     p.add(_OP_go_skip)
     p.pin(j)
     p.int(_OP_add, 1)
-
+    
     p.add(_OP_save)
     p.add(_OP_lspace)
     x := p.pc()
@@ -1051,7 +1051,7 @@ func (self *_Compiler) compileStructFieldStr(p *_Program, sp int, vt reflect.Typ
     p.add(_OP_lspace)
     n0 := p.pc()
     p.add(_OP_is_null)
-
+    
     skip := self.checkIfSkip(p, stringType, '"')
 
     /* also check for inner "null" */

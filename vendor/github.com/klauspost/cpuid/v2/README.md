@@ -85,7 +85,7 @@ We have Streaming SIMD 2 Extensions
 # usage
 
 The `cpuid.CPU` provides access to CPU features. Use `cpuid.CPU.Supports()` to check for CPU features.
-A faster `cpuid.CPU.Has()` is provided which will usually be inlined by the gc compiler.
+A faster `cpuid.CPU.Has()` is provided which will usually be inlined by the gc compiler.  
 
 To test a larger number of features, they can be combined using `f := CombineFeatures(CMOV, CMPXCHG8, X87, FXSR, MMX, SYSCALL, SSE, SSE2)`, etc.
 This can be using with `cpuid.CPU.HasAll(f)` to quickly test if all features are supported.
@@ -98,18 +98,18 @@ so even if your host supports a feature it may not be visible on guests.
 
 ## arm64 feature detection
 
-Not all operating systems provide ARM features directly
+Not all operating systems provide ARM features directly 
 and there is no safe way to do so for the rest.
 
-Currently `arm64/linux` and `arm64/freebsd` should be quite reliable.
+Currently `arm64/linux` and `arm64/freebsd` should be quite reliable. 
 `arm64/darwin` adds features expected from the M1 processor, but a lot remains undetected.
 
 A `DetectARM()` can be used if you are able to control your deployment,
 it will detect CPU features, but may crash if the OS doesn't intercept the calls.
 A `-cpu.arm` flag for detecting unsafe ARM features can be added. See below.
-
-Note that currently only features are detected on ARM,
-no additional information is currently available.
+ 
+Note that currently only features are detected on ARM, 
+no additional information is currently available. 
 
 ## flags
 
@@ -270,7 +270,7 @@ Exit Code 1
 
 ## Available flags
 
-### x86 & amd64
+### x86 & amd64 
 
 | Feature Flag       | Description                                                                                                                                                                        |
 |--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

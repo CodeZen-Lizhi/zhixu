@@ -53,19 +53,19 @@ type GoC struct {
 	// It won't be set if nil
 	CEntry   *uintptr
 
-	// GoFunc is the POINTER of corresponding go stub function.
-	// It is used to generate Go-C ABI conversion wrapper and receive the wrapper's address
-	//   eg. &func(a int, b int) int
-	//     FOR
+	// GoFunc is the POINTER of corresponding go stub function. 
+	// It is used to generate Go-C ABI conversion wrapper and receive the wrapper's address 
+	//   eg. &func(a int, b int) int 
+	//     FOR 
 	//     int add(int a, int b)
 	// It won't be set if nil
-	GoFunc   interface{}
+	GoFunc   interface{} 
 }
 
 // WrapGoC wraps C functions and loader it into Go stubs
 func WrapGoC(text []byte, natives []CFunc, stubs []GoC, modulename string, filename string) {
 	funcs := make([]Func, len(natives))
-
+	
 	// register C funcs
 	for i, f := range natives {
 		fn := Func{
@@ -116,7 +116,7 @@ func WrapGoC(text []byte, natives []CFunc, stubs []GoC, modulename string, filen
 			if stubs[i].CName != natives[j].Name {
 				continue
 			}
-
+			
 			// calculate corresponding C entry
 			pc := uintptr(native_entry + uintptr(natives[j].EntryOff))
 			if stubs[i].CEntry != nil {
@@ -130,11 +130,11 @@ func WrapGoC(text []byte, natives []CFunc, stubs []GoC, modulename string, filen
 
 			// assemble wrapper codes
 			layout := abi.NewFunctionLayout(reflect.TypeOf(stubs[i].GoFunc).Elem())
-			frame := abi.NewFrame(&layout, _C_Redzone, true)
+			frame := abi.NewFrame(&layout, _C_Redzone, true) 
 			tcode := abi.CallC(pc, frame, natives[j].MaxStack)
 			code = append(code, tcode...)
 			size := uint32(len(tcode))
-
+		
 			fn := Func{
 				Flag: FuncFlag_ASM,
 				ArgsSize: int32(layout.ArgSize()),
@@ -176,7 +176,7 @@ func WrapGoC(text []byte, natives []CFunc, stubs []GoC, modulename string, filen
 	}
 	gofuncs := Load(code, wraps, modulename+"/go", []string{filename+".go"})
 
-	// set go func value
+	// set go func value 
 	for i := range gofuncs {
 		idx := wrapIds[i]
 		w := rt.UnpackEface(stubs[idx].GoFunc)

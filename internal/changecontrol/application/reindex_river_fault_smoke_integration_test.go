@@ -633,7 +633,7 @@ func newReindexSmokeEmbedder(t *testing.T) (retrievalapplication.Embedder, func(
 		response.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(response).Encode(map[string]any{"model": model, "data": data})
 	}))
-	embedder, err := platformmodels.NewOpenAICompatibleEmbedder(platformmodels.OpenAIEmbeddingOptions{
+	embedder, err := platformmodels.NewEinoOpenAICompatibleEmbedder(platformmodels.OpenAIEmbeddingOptions{
 		Client: server.Client(), BaseURL: server.URL, APIKey: reindexEmbeddingKeyCanary, Model: model,
 		Dimensions: 3, Normalization: retrievaldomain.NormalizationL2, DistanceMetric: retrievaldomain.DistanceCosine,
 		MaxBatchSize: 128, MaxInputBytes: 64 * 1024, MaxBatchInputBytes: 8 * 1024 * 1024,

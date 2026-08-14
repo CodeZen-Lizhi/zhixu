@@ -33,6 +33,7 @@ const (
 // GeneratorDependencies 是冻结材料生成器的模型、恢复和证据依赖。
 type GeneratorDependencies struct {
 	Model      agentapp.ChatModel
+	Scheduler  agentapp.StructuredPhaseScheduler
 	Catalog    *agentapp.RuntimeCatalog
 	ModelRuns  agentapp.ModelRunRepository
 	Store      GenerationStore
@@ -70,7 +71,7 @@ func NewGenerator(dependencies GeneratorDependencies) (*Generator, error) {
 	if dependencies.Budget == (agentapp.RunBudget{}) {
 		dependencies.Budget = agentapp.DefaultRunBudget()
 	}
-	if _, err := agentapp.NewStructuredRunner(dependencies.Model, dependencies.Catalog, dependencies.Budget); err != nil {
+	if _, err := agentapp.NewStructuredRunnerWithScheduler(dependencies.Model, dependencies.Catalog, dependencies.Budget, dependencies.Scheduler); err != nil {
 		return nil, err
 	}
 	return &Generator{dependencies: dependencies}, nil
@@ -292,7 +293,7 @@ func (generator *Generator) generate(
 	if err != nil {
 		return GenerationRecord{}, generator.failRun(ctx, prepared, run, err)
 	}
-	runner, err := agentapp.NewStructuredRunner(recorded, generator.dependencies.Catalog, generator.dependencies.Budget)
+	runner, err := agentapp.NewStructuredRunnerWithScheduler(recorded, generator.dependencies.Catalog, generator.dependencies.Budget, generator.dependencies.Scheduler)
 	if err != nil {
 		return GenerationRecord{}, generator.failRun(ctx, prepared, run, err)
 	}

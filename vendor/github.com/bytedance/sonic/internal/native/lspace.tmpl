@@ -32,3 +32,4 @@ var S_lspace uintptr
 func lspace(sp *byte, nb int, off int) (ret int) {
     return F_lspace(rt.NoEscape(unsafe.Pointer(sp)), nb, off)
 }
+

@@ -27,7 +27,7 @@ func TestChatProviderDiagnosticPreservesSafeOpenAIFields(t *testing.T) {
 		_, _ = io.WriteString(writer, `{"error":{"code":"invalid_api_key","type":"authentication_error","message":"Invalid API key","param":null}}`)
 	}))
 	defer server.Close()
-	model, err := models.NewOpenAICompatibleChatModel(chatOptions(server.URL, server.Client()))
+	model, err := models.NewEinoOpenAIChatModel(chatOptions(server.URL, server.Client()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestEmbeddingProviderDiagnosticPreservesDashScopeStatuses(t *testing.T) {
 				_, _ = io.WriteString(writer, `{"code":"InvalidParameter","message":"model is unavailable","request_id":"req_embed"}`)
 			}))
 			defer server.Close()
-			embedder, err := models.NewOpenAICompatibleEmbedder(openAIOptions(server.URL, server.Client(), time.Second, 0))
+			embedder, err := models.NewEinoOpenAICompatibleEmbedder(openAIOptions(server.URL, server.Client(), time.Second, 0))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -111,7 +111,7 @@ func TestProviderDiagnosticRejectsUnsafeOrUnsupportedBodies(t *testing.T) {
 				_, _ = io.WriteString(writer, test.body(server.URL))
 			}))
 			defer server.Close()
-			model, err := models.NewOpenAICompatibleChatModel(chatOptions(server.URL, server.Client()))
+			model, err := models.NewEinoOpenAIChatModel(chatOptions(server.URL, server.Client()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -138,7 +138,7 @@ func TestProviderDiagnosticTokenMatchesPublicContract(t *testing.T) {
 		_, _ = io.WriteString(writer, `{"error":{"code":"-invalid","type":".authentication","message":"safe message","param":null}}`)
 	}))
 	defer server.Close()
-	model, err := models.NewOpenAICompatibleChatModel(chatOptions(server.URL, server.Client()))
+	model, err := models.NewEinoOpenAIChatModel(chatOptions(server.URL, server.Client()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestChatTransportDiagnosticClassifiesDNSAndTLSEOFWithoutURL(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, test.cause })}
-			model, err := models.NewOpenAICompatibleChatModel(chatOptions("https://private-endpoint.example", client))
+			model, err := models.NewEinoOpenAIChatModel(chatOptions("https://private-endpoint.example", client))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -195,7 +195,7 @@ func TestChatResponseReadDiagnosticDoesNotExposeRawReadError(t *testing.T) {
 					Body:       errorReadCloser{err: readErr},
 				}, nil
 			})}
-			model, err := models.NewOpenAICompatibleChatModel(chatOptions("https://private-endpoint.example", client))
+			model, err := models.NewEinoOpenAIChatModel(chatOptions("https://private-endpoint.example", client))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -227,7 +227,7 @@ func TestOpenAIEmbeddingVersionedBaseURLDoesNotDuplicateV1(t *testing.T) {
 				_, _ = io.WriteString(writer, openAIResponse(testEmbeddingModel, [][]float32{{1, 0, 0}}))
 			}))
 			defer server.Close()
-			embedder, err := models.NewOpenAICompatibleEmbedder(openAIOptions(server.URL+basePath, server.Client(), time.Second, 0))
+			embedder, err := models.NewEinoOpenAICompatibleEmbedder(openAIOptions(server.URL+basePath, server.Client(), time.Second, 0))
 			if err != nil {
 				t.Fatal(err)
 			}

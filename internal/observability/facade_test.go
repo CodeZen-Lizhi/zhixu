@@ -24,6 +24,20 @@ func TestFacadeUsesPlatformRedactionAndCorrelation(t *testing.T) {
 }
 
 func TestFacadeAliasesTelemetryAndTraceContracts(t *testing.T) {
+	if MetricModelCallDuration != "model.chat.duration_ms" || MetricModelCallTotal != "model.chat.result_total" {
+		t.Fatal("facade omitted model callback metric aliases")
+	}
+	if MetricAnswerFirstTokenDuration != "agent.answer.first_token.duration_ms" ||
+		MetricAnswerCompletionDuration != "agent.answer.completion.duration_ms" ||
+		MetricAnswerResultTotal != "agent.answer.result_total" ||
+		MetricDraftDegradationTotal != "agent.draft.degradation_total" ||
+		MetricAgentIterations != "agent.runtime.iterations" ||
+		MetricAgentToolCalls != "agent.runtime.tool_calls" ||
+		MetricAgentResultTotal != "agent.runtime.result_total" ||
+		MetricRAGOutcomeTotal != "rag.outcome_total" ||
+		MetricRAGGraphNodeResultTotal != "agent.rag.graph_node.result_total" {
+		t.Fatal("facade omitted Eino runtime metric aliases")
+	}
 	telemetry, err := InitializeTelemetry(context.Background(), TelemetryOptions{Mode: TelemetryModeDisabled})
 	if err != nil {
 		t.Fatalf("InitializeTelemetry: %v", err)

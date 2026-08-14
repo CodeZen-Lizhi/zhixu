@@ -17,7 +17,7 @@ func (d *efaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 	eface := (*rt.GoEface)(vp)
 
 	/*
-	 not pointer type, or nil pointer, or self-pointed interface{}, such as
+	 not pointer type, or nil pointer, or self-pointed interface{}, such as 
 		```go
 		var v interface{}
 		v = &v

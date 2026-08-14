@@ -2,7 +2,7 @@ package native
 
 import (
 	"unsafe"
-
+    
     `github.com/klauspost/cpuid/v2`
 	"github.com/cloudwego/base64x/internal/rt"
 	"github.com/cloudwego/base64x/internal/native/avx2"

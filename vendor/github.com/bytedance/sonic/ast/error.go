@@ -27,7 +27,7 @@ func (self Node) Error() string {
         return ""
     } else {
         return *(*string)(self.p)
-    }
+    } 
 }
 
 func newSyntaxError(err SyntaxError) *Node {

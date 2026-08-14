@@ -36,7 +36,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const expectedOpenAPIOperationCount = 183
+const expectedOpenAPIOperationCount = 184
 
 var openAPIOperationMethods = map[string]struct{}{
 	"delete":  {},
@@ -93,6 +93,7 @@ func completeRouteInventoryDependencies(t *testing.T) Dependencies {
 		Graph:           graphhttp.NewHandler(nil, time.Second),
 		Candidate:       graphhttp.NewCandidateHandler(nil, time.Second),
 		Conversation:    conversationhttp.NewHandler(nil, nil),
+		DraftStream:     conversationhttp.NewDraftStreamHandler(nil),
 		Events:          eventshttp.NewHandler(nil),
 		Export:          exporthttp.NewHandler(nil),
 		Review:          reviewhttp.NewHandler(nil, time.Second),

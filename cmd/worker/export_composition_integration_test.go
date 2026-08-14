@@ -27,7 +27,7 @@ func TestWorkerExportCompositionRegistersWorkerAndMaintenanceService(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if components.exportWorker == nil || components.exportService == nil {
-		t.Fatalf("export worker=%#v service=%#v", components.exportWorker, components.exportService)
+	if components.exportWorker == nil || components.exportService == nil || components.draftStreams == nil {
+		t.Fatalf("export worker=%#v service=%#v draft_streams=%#v", components.exportWorker, components.exportService, components.draftStreams)
 	}
 }

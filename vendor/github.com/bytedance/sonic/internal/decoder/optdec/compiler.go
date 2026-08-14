@@ -429,7 +429,7 @@ func (c *compiler) compileMapKey(vt reflect.Type) decKey {
 	}
 }
 
-// maybe vt is a named type, and not a pointer receiver, see issue 379
+// maybe vt is a named type, and not a pointer receiver, see issue 379  
 func (c *compiler) tryCompilePtrUnmarshaler(vt reflect.Type, strOpt bool) decFunc {
 	pt := reflect.PtrTo(vt)
 

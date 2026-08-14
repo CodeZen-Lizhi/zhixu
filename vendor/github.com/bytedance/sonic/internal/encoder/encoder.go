@@ -34,26 +34,26 @@ import (
 type Options uint64
 
 const (
-    // SortMapKeys indicates that the keys of a map needs to be sorted
+    // SortMapKeys indicates that the keys of a map needs to be sorted 
     // before serializing into JSON.
     // WARNING: This hurts performance A LOT, USE WITH CARE.
     SortMapKeys          Options = 1 << alg.BitSortMapKeys
 
-    // EscapeHTML indicates encoder to escape all HTML characters
+    // EscapeHTML indicates encoder to escape all HTML characters 
     // after serializing into JSON (see https://pkg.go.dev/encoding/json#HTMLEscape).
     // WARNING: This hurts performance A LOT, USE WITH CARE.
     EscapeHTML           Options = 1 << alg.BitEscapeHTML
 
-    // CompactMarshaler indicates that the output JSON from json.Marshaler
-    // is always compact and needs no validation
+    // CompactMarshaler indicates that the output JSON from json.Marshaler 
+    // is always compact and needs no validation 
     CompactMarshaler     Options = 1 << alg.BitCompactMarshaler
 
-    // NoQuoteTextMarshaler indicates that the output text from encoding.TextMarshaler
+    // NoQuoteTextMarshaler indicates that the output text from encoding.TextMarshaler 
     // is always escaped string and needs no quoting
     NoQuoteTextMarshaler Options = 1 << alg.BitNoQuoteTextMarshaler
 
     // NoNullSliceOrMap indicates all empty Array or Object are encoded as '[]' or '{}',
-    // instead of 'null'.
+    // instead of 'null'. 
     // NOTE: The priority of this option is lower than json tag `omitempty`.
     NoNullSliceOrMap     Options = 1 << alg.BitNoNullSliceOrMap
 
@@ -67,7 +67,7 @@ const (
 
     // NoEncoderNewline indicates that the encoder should not add a newline after every message
     NoEncoderNewline Options = 1 << alg.BitNoEncoderNewline
-
+  
     // CompatibleWithStd is used to be compatible with std encoder.
     CompatibleWithStd Options = SortMapKeys | EscapeHTML | CompactMarshaler
 
@@ -84,7 +84,7 @@ type Encoder struct {
 
 // Encode returns the JSON encoding of v.
 func (self *Encoder) Encode(v interface{}) ([]byte, error) {
-    if self.indent != "" || self.prefix != "" {
+    if self.indent != "" || self.prefix != "" { 
         return EncodeIndented(v, self.prefix, self.indent, self.Opts)
     }
     return Encode(v, self.Opts)
@@ -190,7 +190,7 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
     } else {
         ret = *buf
     }
-
+    
     /* return the buffer into pool */
     return ret, nil
 }
@@ -296,7 +296,7 @@ func EncodeIndented(val interface{}, prefix string, indent string, opts Options)
     } else {
         ret = buf.Bytes()
     }
-
+    
     return ret, nil
 }
 

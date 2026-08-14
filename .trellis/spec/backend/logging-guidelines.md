@@ -84,9 +84,12 @@ git diff --check
 - OTLP base URL 保留 base path 后追加 `/v1/traces`；endpoint/header/compression/TLS/
   timeout/retry、sampler、span limits 和 BSP 参数必须由项目显式覆盖环境默认。实际 payload
   Resource 只能含 service name/version/deployment environment。
-- API 顶层 `/metrics` 与 Worker `:8081/metrics` 暴露固定十个项目 collector 及 Go/process
+- API 顶层 `/metrics` 与 Worker `:8081/metrics` 暴露固定二十四个项目 collector 及 Go/process
   collector；`/metrics|/livez|/readyz` 不创建 request span。Metrics 只表示当前进程快照和
   本次启动累计值，历史由外部 Prometheus Server 拥有。
+- API/Worker 的进程作用域 Provider 分别使用 `zhixu-api`/`zhixu-worker` service name，并在 Shutdown 刷新
+  Metrics/Trace。`TELEMETRY_EXPORTING` 只证明 exporter 已构造；Collector 可达性必须由真实 `/v1/metrics`、
+  `/v1/traces` 导出证据证明。
 - Worker `/livez|readyz` 只返回稳定 `status/code/version`；真实容器日志和 health response 已执行 Secret canary 扫描。
 
 ## M10-01 Audit 与安全脱敏边界
@@ -155,6 +158,7 @@ Correct: 用 canonical UUID + ':' + 已验证幂等键构造可打印锁键，�
 
 - 生产采样/保留策略、外部 Collector/Prometheus/Trace 后端部署，以及全部安全/业务决策
   调用点对 Audit Recorder 的接入覆盖。
+- 灰度环境的外部 OTel/Prometheus 查询、告警和稳定发布观察证据的受控归档方式。
 - Audit 访问权限、长期归档策略与真实自托管数据库演练。
 
 ## M6-03 Tool Redaction Boundary

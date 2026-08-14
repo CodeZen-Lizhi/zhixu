@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -12,48 +11,58 @@ import (
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestNewQuestionDispatcherRejectsTypedNilDependenciesAndDefinitionDrift(t *testing.T) {
+func TestNewQuestionDispatcherRejectsTypedNilDependencies(t *testing.T) {
 	db := &questionConstructorDB{}
 	runtime := &questionConstructorRuntime{}
 	events := &questionConstructorAppender{}
 	ids := foundation.NewUUIDGenerator(nil)
 	clock := foundation.SystemClock{}
-	definition := conversationworkflow.RegisteredDefinition()
 
 	var nilDB *questionConstructorDB
 	var nilRuntime *questionConstructorRuntime
 	var nilEvents *questionConstructorAppender
 	tests := []struct {
-		name       string
-		db         DB
-		runtime    questionRuntimeStarter
-		events     eventsapplication.Appender
-		definition workflowdomain.RegisteredDefinition
-		kind       foundation.ErrorKind
-		code       string
+		name    string
+		db      DB
+		runtime questionRuntimeStarter
+		events  eventsapplication.Appender
+		kind    foundation.ErrorKind
+		code    string
 	}{
-		{name: "typed nil database", db: nilDB, runtime: runtime, events: events, definition: definition, kind: foundation.ErrorDependencyUnavailable, code: ErrorCodeQuestionDispatchUnavailable},
-		{name: "typed nil runtime", db: db, runtime: nilRuntime, events: events, definition: definition, kind: foundation.ErrorDependencyUnavailable, code: ErrorCodeQuestionDispatchUnavailable},
-		{name: "typed nil events", db: db, runtime: runtime, events: nilEvents, definition: definition, kind: foundation.ErrorDependencyUnavailable, code: ErrorCodeQuestionDispatchUnavailable},
-		{name: "definition graph drift", db: db, runtime: runtime, events: events, definition: func() workflowdomain.RegisteredDefinition {
-			drifted := definition
-			drifted.GraphHash = strings.Repeat("0", 64)
-			return drifted
-		}(), kind: foundation.ErrorInvalidInput, code: ErrorCodeQuestionDispatchInvalid},
+		{name: "typed nil database", db: nilDB, runtime: runtime, events: events, kind: foundation.ErrorDependencyUnavailable, code: ErrorCodeQuestionDispatchUnavailable},
+		{name: "typed nil runtime", db: db, runtime: nilRuntime, events: events, kind: foundation.ErrorDependencyUnavailable, code: ErrorCodeQuestionDispatchUnavailable},
+		{name: "typed nil events", db: db, runtime: runtime, events: nilEvents, kind: foundation.ErrorDependencyUnavailable, code: ErrorCodeQuestionDispatchUnavailable},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewQuestionDispatcher(test.db, test.runtime, test.events, ids, clock, test.definition)
+			_, err := NewQuestionDispatcher(test.db, test.runtime, test.events, ids, clock)
 			var classified *foundation.Error
 			if !errors.As(err, &classified) || classified.Kind != test.kind || classified.Code != test.code {
 				t.Fatalf("NewQuestionDispatcher() error = %#v", err)
 			}
 		})
+	}
+}
+
+func TestNewQuestionDispatcherUsesRegisteredV2Definition(t *testing.T) {
+	dispatcher, err := NewQuestionDispatcher(
+		&questionConstructorDB{},
+		&questionConstructorRuntime{},
+		&questionConstructorAppender{},
+		foundation.NewUUIDGenerator(nil),
+		foundation.SystemClock{},
+	)
+	if err != nil || dispatcher == nil {
+		t.Fatalf("dispatcher=%#v err=%v", dispatcher, err)
+	}
+	// The constructor deliberately has no Definition selector; startQuestionWorkflow
+	// resolves RegisteredDefinitionV2 at the composition boundary.
+	if got := conversationworkflow.RegisteredDefinitionV2().Version; got != conversationworkflow.DefinitionVersionV2 {
+		t.Fatalf("registered v2 version=%d", got)
 	}
 }
 
@@ -105,7 +114,7 @@ func TestNewQuestionDispatcherRejectsTypedNilIdentityAndClockDependencies(t *tes
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewQuestionDispatcher(db, runtime, events, test.ids, test.clock, conversationworkflow.RegisteredDefinition())
+			_, err := NewQuestionDispatcher(db, runtime, events, test.ids, test.clock)
 			var classified *foundation.Error
 			if !errors.As(err, &classified) || classified.Kind != foundation.ErrorDependencyUnavailable ||
 				classified.Code != ErrorCodeQuestionDispatchUnavailable {

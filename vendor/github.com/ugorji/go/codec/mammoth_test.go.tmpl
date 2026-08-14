@@ -13,7 +13,7 @@ import "reflect"
 
 // TestMammoth has all the different paths optimized in fastpath
 // It has all the primitives, slices and maps.
-//
+// 
 // For each of those types, it has a pointer and a non-pointer field.
 
 func init() { _ = fmt.Printf } // so we can include fmt as needed
@@ -94,8 +94,8 @@ type TestMammoth2Wrapper struct {
 	M map[testMammoth2Basic]TestMammoth
 	L []TestMammoth
 	A [4]int64
-
-	Tcomplex128 complex128
+	
+  	Tcomplex128 complex128
 	Tcomplex64 complex64
 	Tbytes []uint8
 	Tpbytes *[]uint8
@@ -124,11 +124,11 @@ func __doTestMammothSlices(t *testing.T, h Handle) {
     //   - encode ptr to the value
     //   - check if encode bytes are same
     //   - decode into ptrs to: nil, then 1-elem slice, equal-length, then large len slice
-    //   - decode into non-addressable slice of equal length, then larger len
+    //   - decode into non-addressable slice of equal length, then larger len 
     //   - for each decode, compare elem-by-elem to the original slice
-    //   -
+    //   - 
     //   - rinse and repeat for a MapBySlice version
-    //   -
+    //   - 
     */ -}}
 		var v{{$i}}v1, v{{$i}}v2 []{{ .Elem }}
 		var bs{{$i}} []byte
@@ -161,7 +161,7 @@ func __doTestMammothSlices(t *testing.T, h Handle) {
 		testUnmarshalErr(&v{{$i}}va, bs{{$i}}, h, t, "dec-array-v{{$i}}-p-1")
 		if v{{$i}}v1 == nil && v{{$i}}v2 == nil { v{{$i}}v2 = []{{ .Elem }}{} } // so we can compare to zero len slice below
 		testDeepEqualErrHandle(v{{$i}}va[:len(v{{$i}}v2)], v{{$i}}v2, h, t, "equal-array-v{{$i}}-p-1")
-		v{{$i}}va = [8]{{ .Elem }}{} // clear the array
+		v{{$i}}va = [8]{{ .Elem }}{} // clear the array		
 		v{{$i}}v2 = v{{$i}}va[:1:1]
 		testUnmarshalErr(&v{{$i}}v2, bs{{$i}}, h, t, "dec-slice-v{{$i}}-p-1")
 		testDeepEqualErrHandle(v{{$i}}v1, v{{$i}}v2, h, t, "equal-slice-v{{$i}}-p-1")
@@ -264,7 +264,7 @@ func __doTestMammothMaps(t *testing.T, h Handle) {
 		bs{{$i}} = testMarshalErr(s{{$i}}v1, h, t, "enc-map-v{{$i}}-custom")
 		testUnmarshalErr(&s{{$i}}v2, bs{{$i}}, h, t, "dec-map-v{{$i}}-p-len")
 		testDeepEqualErrHandle(s{{$i}}v1, s{{$i}}v2, h, t, "equal-map-v{{$i}}-p-len")
-		testReleaseBytes(bs{{$i}})
+		testReleaseBytes(bs{{$i}})	
     }
 {{end}}{{end}}{{end}}
 

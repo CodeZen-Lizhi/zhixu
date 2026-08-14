@@ -5,7 +5,7 @@ import type { Answer } from "../../api/conversation";
 import type { ServerEventEnvelope } from "../../events";
 import { invalidateRagEvent, recoverRagWorkspace } from "./event-recovery";
 import { ragQueryKeys } from "./query-keys";
-import { maximumPendingAnswerPolls, pendingAnswerPollInterval } from "./queries";
+import { maximumPendingAnswerPolls, pendingAnswerPollInterval, pendingAnswerPollMilliseconds } from "./queries";
 
 const workspaceId = "92000000-0000-4000-8000-000000000001";
 const otherWorkspaceId = "92000000-0000-4000-8000-000000000002";
@@ -21,7 +21,8 @@ describe("RAG query state", () => {
 
   it("pending 只在有界次数内轮询", () => {
     const pending = { publicationStatus: "pending" } as Answer;
-    expect(pendingAnswerPollInterval(pending, maximumPendingAnswerPolls - 1)).toBe(2_000);
+    expect(maximumPendingAnswerPolls * pendingAnswerPollMilliseconds).toBe(12 * 60_000);
+    expect(pendingAnswerPollInterval(pending, maximumPendingAnswerPolls - 1)).toBe(pendingAnswerPollMilliseconds);
     expect(pendingAnswerPollInterval(pending, maximumPendingAnswerPolls)).toBe(false);
     expect(pendingAnswerPollInterval({ publicationStatus: "completed" } as Answer, 1)).toBe(false);
   });

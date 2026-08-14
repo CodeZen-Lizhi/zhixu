@@ -105,7 +105,9 @@
 - 支持问题范围、查询改写、混合检索、证据资格检查、冲突检测、引用验证、回答和反馈。
 - Answer 区分直接证据、推断和冲突；Citation 必须身份正确、可打开、属于批准知识且语义支持结论。
 - 证据不足、来源冲突未解决或引用失效时明确拒答/说明；依赖故障显示故障而不是业务拒答。
-- 对话可恢复并绑定 Workspace；当前正式模式为 retrieval-first 固定 RAG，不承诺开放式工具循环。
+- 对话可恢复并绑定 Workspace；正式 RAG 使用 Eino 的受控只读 Agent loop 与独立 ANSWER 草稿流，不承诺通用或写入型工具循环。
+- 草稿可通过 SSE 逐步显示，但只有 Citation/Faithfulness/metadata 门禁完成并由 Finalizer 原子发布的 Answer 才是正式结果；
+  EOF、取消或校验失败不得将草稿标为成功。
 
 ### 10.11 知识产物生成
 
@@ -191,6 +193,8 @@
 - API/Worker 必须先准备并 Probe 同一 target 的完整 Chat、Embedding 与角色依赖图，再经一次 active commit发布。切换只允许短暂、可重试地阻止新模型工作和 Workflow Claim，不等待或中断已开始操作。
 - commit 前失败必须保留 previous active并清理候选；commit 后禁止自动回滚，系统按 target 向前恢复到两个 role applied/fresh。页面显示 rollout phase、target、各 role状态、安全错误和旧 active是否仍服务。
 - 已 Claim Attempt 按持久 runtime binding使用 exact generation；Search、Source Refresh、Vector Build和 Reindex按持久 Embedding/Index Contract获取兼容 generation。历史 runtime无法重建时显式 unavailable，不得使用当前默认模型兜底。
+- Chat、Embedding、Structured Scheduler 和 RAG 生产实现固定为 Eino；不得提供 direct implementation selector 或运行时 fallback，
+  恢复旧实现只能通过 Git/兼容发布制品完成。
 - 索引支持增量/全量重建和回退到上一完整版本；重建期间继续服务旧 Active Index。
 - Git Remote 只支持受控 HTTPS、非强制同步和独立状态；自动同步默认关闭，远端失败不回滚本地写回。
 - 导出支持 Collection Markdown、领域 Metadata JSON 和 Workspace 附件 ZIP；Evaluation/Audit JSON、CSV/XLSX、字段映射与公式不在当前范围。

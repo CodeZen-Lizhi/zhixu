@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,63 @@ func TestStructuredFaithfulnessReviewerUsesIndependentReviewPhaseAndSchema(t *te
 		!strings.Contains(call.Messages[2].Content, "UNTRUSTED TASK INPUT") ||
 		!strings.Contains(call.Messages[2].Content, `"model_run_ref":"`+string(answer.ModelRunRef)+`"`) {
 		t.Fatalf("review call=%#v", call)
+	}
+	if call.MaxOutputTokens != 1024 {
+		t.Fatalf("review output cap=%d want=1024", call.MaxOutputTokens)
+	}
+}
+
+func TestFaithfulnessOutputBudgetUsesReasoningProviderFloor(t *testing.T) {
+	answer, _ := validCitationAnswer(false)
+	if got := effectiveFaithfulnessOutputTokens(8192, 0, answer); got != 1024 {
+		t.Fatalf("faithfulness output floor=%d want=1024", got)
+	}
+	if got := effectiveFaithfulnessOutputTokens(512, 0, answer); got != 512 {
+		t.Fatalf("profile must still narrow faithfulness output floor: %d", got)
+	}
+}
+
+func TestStructuredFaithfulnessReviewerHonorsExplicitOutputLimit(t *testing.T) {
+	answer, _ := validCitationAnswer(false)
+	review := validFaithfulnessResult(answer, domain.FaithfulnessSupported, []string{"cite-1"})
+	raw, err := json.Marshal(review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, prompt, schema, profile := faithfulnessCatalog(t)
+	model := NewDeterministicChatModel(DeterministicChatStep{Response: ChatResponse{
+		Model: profile.Model, Content: raw, Usage: domain.TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+	}})
+	reviewer, err := NewStructuredFaithfulnessReviewer(model, catalog, DefaultRunBudget())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewer.Review(context.Background(), FaithfulnessReviewRequest{
+		ProfileRef: profile.Ref, PromptRef: prompt.Ref, SchemaRef: schema.Ref,
+		Answer: answer, Evidence: faithfulnessEvidenceFor(answer), MaxOutputTokens: 123,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := model.Calls(); len(calls) != 1 || calls[0].MaxOutputTokens != 123 {
+		t.Fatalf("calls=%+v", calls)
+	}
+}
+
+func TestFaithfulnessOutputBudgetScalesPastSmallFixedCeiling(t *testing.T) {
+	answer, _ := validCitationAnswer(false)
+	assertions := make([]domain.Assertion, 0, 40)
+	for index := 0; index < 40; index++ {
+		assertion := answer.Payload.Assertions[0]
+		assertion.ID = fmt.Sprintf("assertion-%d", index)
+		assertions = append(assertions, assertion)
+	}
+	answer.Payload.Assertions = assertions
+	if err := answer.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	budget := effectiveFaithfulnessOutputTokens(8192, 0, answer)
+	if budget <= 2048 || budget > 8192 {
+		t.Fatalf("faithfulness output budget=%d", budget)
 	}
 }
 

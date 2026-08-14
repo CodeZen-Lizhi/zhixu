@@ -1,11 +1,13 @@
 package workflow_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
@@ -140,9 +142,9 @@ func TestRAGWorkflowOutputReceiptRejectsUntrustedOrIncompatibleDocuments(t *test
 	}
 }
 
-func TestRAGWorkflowDefinitionOwnsSingleReadOnlyNode(t *testing.T) {
-	definition := conversationworkflow.RegisteredDefinition()
-	if definition.Key != conversationworkflow.DefinitionKey || definition.Version != conversationworkflow.DefinitionVersion ||
+func TestRAGWorkflowDefinitionV1PreservesPersistedGraphIdentity(t *testing.T) {
+	definition := conversationworkflow.RegisteredDefinitionV1()
+	if definition.Key != conversationworkflow.DefinitionKey || definition.Version != conversationworkflow.DefinitionVersionV1 ||
 		definition.InputSchemaVersion != conversationworkflow.InputSchemaVersion || len(definition.Graph.Nodes) != 1 {
 		t.Fatalf("definition = %#v", definition)
 	}
@@ -156,6 +158,33 @@ func TestRAGWorkflowDefinitionOwnsSingleReadOnlyNode(t *testing.T) {
 	wantHash, err := workflowapplication.ComputeCanonicalGraphHash(definition.Graph)
 	if err != nil || definition.GraphHash != wantHash {
 		t.Fatalf("graph hash = %q, want %q, error=%v", definition.GraphHash, wantHash, err)
+	}
+	if definition.GraphHash != "f57decff412db222c531384812cb42fce7353b3d41940fe69c53a8734a5528a5" {
+		t.Fatalf("v1 graph hash = %q", definition.GraphHash)
+	}
+}
+
+func TestRAGWorkflowDefinitionV2OwnsExactReadOnlyTools(t *testing.T) {
+	definition := conversationworkflow.RegisteredDefinition()
+	if definition.Key != conversationworkflow.DefinitionKey || definition.Version != conversationworkflow.DefinitionVersionV2 ||
+		conversationworkflow.DefinitionVersion != conversationworkflow.DefinitionVersionV2 ||
+		definition.InputSchemaVersion != conversationworkflow.InputSchemaVersion || len(definition.Graph.Nodes) != 1 {
+		t.Fatalf("definition = %#v", definition)
+	}
+	node := definition.Graph.Nodes[0]
+	wantTools := []toolsdomain.ToolRef{{Name: "ReadSource", Version: 2}, {Name: "ValidateCitation", Version: 2}}
+	if node.Key != conversationworkflow.NodeKey || node.Kind != conversationworkflow.NodeKind ||
+		node.InputSchemaVersion != conversationworkflow.InputSchemaVersion || node.OutputSchemaVersion != conversationworkflow.OutputSchemaVersion ||
+		node.RetryPolicy.MaxRetries != 2 || len(node.RequiredPermissions) != 1 || node.RequiredPermissions[0] != workflowdomain.PermissionReadLocal ||
+		!reflect.DeepEqual(node.AllowedTools, wantTools) {
+		t.Fatalf("node = %#v, want tools %#v", node, wantTools)
+	}
+	wantHash, err := workflowapplication.ComputeCanonicalGraphHash(definition.Graph)
+	if err != nil || definition.GraphHash != wantHash {
+		t.Fatalf("graph hash = %q, want %q, error=%v", definition.GraphHash, wantHash, err)
+	}
+	if !reflect.DeepEqual(definition, conversationworkflow.RegisteredDefinitionV2()) {
+		t.Fatalf("current registered definition drifted from v2: %#v", definition)
 	}
 }
 

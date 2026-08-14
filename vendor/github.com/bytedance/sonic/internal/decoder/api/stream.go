@@ -61,9 +61,9 @@ func NewStreamDecoder(r io.Reader) *StreamDecoder {
     return &StreamDecoder{r : r}
 }
 
-// Decode decodes input stream into val with corresponding data.
+// Decode decodes input stream into val with corresponding data. 
 // Redundantly bytes may be read and left in its buffer, and can be used at next call.
-// Either io error from underlying io.Reader (except io.EOF)
+// Either io error from underlying io.Reader (except io.EOF) 
 // or syntax error from data will be recorded and stop subsequently decoding.
 func (self *StreamDecoder) Decode(val interface{}) (err error) {
     // read more data into buf
@@ -77,7 +77,7 @@ func (self *StreamDecoder) Decode(val interface{}) (err error) {
         if y := native.SkipOneFast(&src, &x); y < 0 {
             if self.readMore()  {
                 goto try_skip
-            }
+            }                
             if self.err == nil {
                 self.err = SyntaxError{e, self.s, types.ParsingError(-s), ""}
                 self.setErr(self.err)
@@ -87,13 +87,13 @@ func (self *StreamDecoder) Decode(val interface{}) (err error) {
             s = y + s
             e = x + s
         }
-
+        
         // must copy string here for safety
         self.Decoder.Reset(string(self.buf[s:e]))
         err = self.Decoder.Decode(val)
         if err != nil {
             self.setErr(err)
-            return
+            return 
         }
 
         self.scanp = e
@@ -107,22 +107,22 @@ func (self *StreamDecoder) Decode(val interface{}) (err error) {
             // remain undecoded bytes, move them onto head
             n := copy(self.buf, self.buf[self.scanp:])
             self.buf = self.buf[:n]
-        }
+        }   
 
         self.scanned += int64(self.scanp)
         self.scanp = 0
-    }
+    }    
 
     return self.err
 }
 
-// InputOffset returns the input stream byte offset of the current decoder position.
+// InputOffset returns the input stream byte offset of the current decoder position. 
 // The offset gives the location of the end of the most recently returned token and the beginning of the next token.
 func (self *StreamDecoder) InputOffset() int64 {
     return self.scanned + int64(self.scanp)
 }
 
-// Buffered returns a reader of the data remaining in the Decoder's buffer.
+// Buffered returns a reader of the data remaining in the Decoder's buffer. 
 // The reader is valid until the next call to Decode.
 func (self *StreamDecoder) Buffered() io.Reader {
     return bytes.NewReader(self.buf[self.scanp:])
@@ -244,3 +244,4 @@ func realloc(buf *[]byte) bool {
     }
     return false
 }
+

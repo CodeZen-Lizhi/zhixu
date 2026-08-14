@@ -214,7 +214,7 @@ func newArtifactGenerationSuccessRuntime(t *testing.T, pool *pgxpool.Pool, model
 		Model:    agentdomain.ModelRef{AdapterName: "integration", AdapterVersion: "v1", ModelID: cfg.ChatModel, ModelVersion: cfg.ChatModelVersion},
 		Timeout:  10 * time.Second, MaxRequestBytes: cfg.ChatMaxRequestBytes, MaxResponseBytes: cfg.ChatMaxResponseBytes,
 	}
-	components, err := newArtifactWorkflowComponents(pool, workspaces, runtime, agentRepository, terminal, model, contract, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	components, err := newArtifactWorkflowComponents(pool, workspaces, runtime, agentRepository, terminal, model, contract, nil, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}

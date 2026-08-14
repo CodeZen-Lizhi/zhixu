@@ -114,6 +114,16 @@ describe("auth API boundary", () => {
     expect(new Headers(call?.[1]?.headers).get("Content-Type")).toBeNull();
   });
 
+  it("调用方声明 SSE 时保留 text/event-stream Accept，并继续携带同源 Cookie", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 200 }));
+
+    await authFetch("/api/v1/answers/example/stream", { headers: { Accept: "text/event-stream" } });
+
+    const call = vi.mocked(fetch).mock.calls.at(-1);
+    expect(new Headers(call?.[1]?.headers).get("Accept")).toBe("text/event-stream");
+    expect(call?.[1]?.credentials).toBe("include");
+  });
+
   it("Bootstrap 把 CSRF 放入与持久 Session 同生命周期的 Local Storage", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
       session_id: sessionId,

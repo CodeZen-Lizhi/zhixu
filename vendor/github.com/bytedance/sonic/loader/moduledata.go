@@ -101,7 +101,7 @@ func makeFtab(funcs []_func, maxpc uint32) (ftab []funcTab, pclntabSize int64, s
 
     ftab = make([]funcTab, 0, len(funcs)+1)
 
-    // write a map of pc->func info offsets
+    // write a map of pc->func info offsets 
     for i, f := range funcs {
         ftab = append(ftab, funcTab{uint32(f.entryOff), uint32(startLocations[i])})
     }
@@ -118,7 +118,7 @@ func makePclntable(size int64, startLocations []uint32, funcs []_func, maxpc uin
     // value that marks the end of the last function in the binary.
     pclntab = make([]byte, size, size)
 
-    // write a map of pc->func info offsets
+    // write a map of pc->func info offsets 
     offs := 0
     for i, f := range funcs {
         byteOrder.PutUint32(pclntab[offs:offs+4], uint32(f.entryOff))
@@ -154,7 +154,7 @@ func makePclntable(size int64, startLocations []uint32, funcs []_func, maxpc uin
     return
 }
 
-// findfunc table used to map pc to belonging func,
+// findfunc table used to map pc to belonging func, 
 // returns the index in the func table.
 //
 // All text section are divided into buckets sized _BUCKETSIZE(4K):
@@ -185,7 +185,7 @@ func writeFindfunctab(out *[]byte, ftab []funcTab) (start int) {
 
             // find the s-th end func of the subbucket
             pc = min + uint32(i*_BUCKETSIZE) + uint32((j+1)*_SUB_BUCKETSIZE)
-            for ; s < len(ftab)-1 && ftab[s+1].entry <= pc; s++ {}
+            for ; s < len(ftab)-1 && ftab[s+1].entry <= pc; s++ {}            
         }
 
         s = e
@@ -197,7 +197,7 @@ func writeFindfunctab(out *[]byte, ftab []funcTab) (start int) {
         size := int(unsafe.Sizeof(findfuncbucket{}))*len(tab)
         *out = append(*out, rt.BytesFrom(unsafe.Pointer(&tab[0]), size, size)...)
     }
-    return
+    return 
 }
 
 func makeModuledata(name string, filenames []string, funcsp *[]Func, text []byte) (mod *moduledata) {
@@ -239,7 +239,7 @@ func makeModuledata(name string, filenames []string, funcsp *[]Func, text []byte
     mod.maxpc = addr + uintptr(len(text))
 
     // make pcdata table
-    // NOTICE: _func only use offset to index pcdata, thus no need mmap() pcdata
+    // NOTICE: _func only use offset to index pcdata, thus no need mmap() pcdata 
     cuOff := cuOffs[0]
     pctab, pcdataOffs, _funcs := makePctab(funcs, cuOff, nameOffs)
     mod.pctab = pctab
@@ -247,7 +247,7 @@ func makeModuledata(name string, filenames []string, funcsp *[]Func, text []byte
     // write func data
     // NOTICE: _func use mod.gofunc+offset to directly point funcdata, thus need cache funcdata
     // TODO: estimate accurate capacity
-    cache := make([]byte, 0, len(funcs)*int(_PtrSize))
+    cache := make([]byte, 0, len(funcs)*int(_PtrSize)) 
     fstart, funcdataOffs := writeFuncdata(&cache, funcs)
 
     // make pc->func (binary search) func table
@@ -340,7 +340,7 @@ func makePctab(funcs []Func, cuOffset uint32, nameOffset []int32) (pctab []byte,
         writer(f.PcStackMapIndex)
         writer(f.PcInlTreeIndex)
         writer(f.PcArgLiveIndex)
-
+        
         _f.entryOff = f.EntryOff
         _f.nameOff = nameOffset[i]
         _f.args = f.ArgsSize
@@ -356,4 +356,4 @@ func makePctab(funcs []Func, cuOffset uint32, nameOffset []int32) (pctab []byte,
     return
 }
 
-func registerFunction(name string, pc uintptr, textSize uintptr, fp int, args int, size uintptr, argptrs uintptr, localptrs uintptr) {}
+func registerFunction(name string, pc uintptr, textSize uintptr, fp int, args int, size uintptr, argptrs uintptr, localptrs uintptr) {} 

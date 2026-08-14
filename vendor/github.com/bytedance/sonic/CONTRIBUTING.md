@@ -51,7 +51,7 @@ Your pr title and commit message should follow https://www.conventionalcommits.o
 ## Contribution Prerequisites
 - Our development environment keeps up with [Go Official](https://golang.org/project/).
 - You need fully checking with lint tools before submit your pull request. [gofmt](https://golang.org/pkg/cmd/gofmt/) & [golangci-lint](https://github.com/golangci/golangci-lint)
-- You are familiar with [Github](https://github.com)
+- You are familiar with [Github](https://github.com) 
 - Maybe you need familiar with [Actions](https://github.com/features/actions)(our default workflow tool).
 
 ## Code Style Guides

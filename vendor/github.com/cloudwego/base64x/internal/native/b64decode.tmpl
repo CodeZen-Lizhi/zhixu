@@ -32,3 +32,4 @@ var S_b64decode uintptr
 func B64decode(out *[]byte, src unsafe.Pointer, len int, mode int) (ret int) {
     return F_b64decode(rt.NoEscape(unsafe.Pointer(out)), rt.NoEscape(unsafe.Pointer(src)), len, mode)
 }
+

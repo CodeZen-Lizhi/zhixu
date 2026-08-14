@@ -33,5 +33,5 @@ type Options struct {
 type Loader struct {
     Name string // module name
     File string // file name
-    Options
+    Options 
 }

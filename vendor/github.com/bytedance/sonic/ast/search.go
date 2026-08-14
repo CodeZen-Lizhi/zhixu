@@ -137,7 +137,7 @@ func _ValidSyntax(json string) bool {
    return true
 }
 
-// SkipFast skip a json value in fast-skip algs,
+// SkipFast skip a json value in fast-skip algs, 
 // while not strictly validate JSON syntax and UTF-8 charset.
 func _SkipFast(src string, i int) (int, int, error) {
     p := NewParserObj(src)

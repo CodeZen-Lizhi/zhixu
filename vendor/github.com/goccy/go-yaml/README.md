@@ -29,7 +29,7 @@ By the way, libraries such as [ghodss/yaml](https://github.com/ghodss/yaml) and 
 # Features
 
 - No dependencies
-- A better parser than `go-yaml/yaml`.
+- A better parser than `go-yaml/yaml`. 
   - [Support recursive processing](https://github.com/apple/device-management/blob/release/docs/schema.yaml)
   - Higher coverage in the [YAML Test Suite](https://github.com/yaml/yaml-test-suite?tab=readme-ov-file)
     - YAML Test Suite consists of 402 cases in total, of which `gopkg.in/yaml.v3` passes `295`. In addition to passing all those test cases, `goccy/go-yaml` successfully passes nearly 60 additional test cases ( 2024/12/15 )
@@ -59,7 +59,7 @@ The repositories that use goccy/go-yaml are listed here.
 
 - https://github.com/goccy/go-yaml/wiki/Users
 
-The source data is [here](https://github.com/goccy/go-yaml/network/dependents).
+The source data is [here](https://github.com/goccy/go-yaml/network/dependents). 
 It is already being used in many repositories. Now it's your turn 😄
 
 # Playground
@@ -170,9 +170,9 @@ a: &a
   c: hello
 ```
 
-Then, if `yaml.ReferenceDirs("testdata")` option is passed to `yaml.Decoder`,
+Then, if `yaml.ReferenceDirs("testdata")` option is passed to `yaml.Decoder`, 
  `Decoder` tries to find the anchor definition from YAML files the under `testdata` directory.
-
+ 
 ```go
 buf := bytes.NewBufferString("a: *a\n")
 dec := yaml.NewDecoder(buf, yaml.ReferenceDirs("testdata"))
@@ -245,7 +245,7 @@ bytes, err := yaml.Marshal(v)
 if err != nil {
 	//...
 }
-fmt.Println(string(bytes))
+fmt.Println(string(bytes)) 
 /*
 a: &a
   i: 1

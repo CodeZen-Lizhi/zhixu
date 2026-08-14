@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	agenteino "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/eino"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -73,6 +75,41 @@ func TestExecutorPersistsRunCallAndValidatesServerModelRunRef(t *testing.T) {
 	if len(calls) != 1 || !strings.Contains(calls[0].Messages[len(calls[0].Messages)-1].Content, string(testModelRunID)) ||
 		!strings.Contains(calls[0].Messages[len(calls[0].Messages)-1].Content, "server-opened-candidate-1") {
 		t.Fatalf("model did not receive server run id: %+v", calls)
+	}
+}
+
+func TestExecutorRetainsConfiguredEinoStructuredScheduler(t *testing.T) {
+	scheduler := newTrackingEinoStructuredScheduler(t)
+	executor := newWorkflowExecutorWithScheduler(t, agentapplication.NewDeterministicChatModel(), &workflowRepository{}, scheduler)
+	if executor.scheduler != scheduler {
+		t.Fatalf("scheduler=%T want=%T", executor.scheduler, scheduler)
+	}
+}
+
+func TestExecutorExecutesRelationAssessmentThroughEinoStructuredScheduler(t *testing.T) {
+	scheduler := newTrackingEinoStructuredScheduler(t)
+	responseDocument := relationDocument(t, testModelRunID, knowledgedomain.AssessmentNew)
+	model := agentapplication.NewDeterministicChatModel(agentapplication.DeterministicChatStep{Response: agentapplication.ChatResponse{
+		Model: testModelRef(), Content: responseDocument, Usage: agentdomain.TokenUsage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5},
+	}})
+	repository := &workflowRepository{}
+	executor := newWorkflowExecutorWithScheduler(t, model, repository, scheduler)
+
+	result, err := executor.Execute(context.Background(), testExecution(t, validInput()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output RelationAssessmentWorkflowOutput
+	if err := json.Unmarshal(result.Output, &output); err != nil {
+		t.Fatal(err)
+	}
+	calls := model.Calls()
+	if len(calls) != 1 || calls[0].Phase != agentdomain.ModelCallInitial || output.Phase != agentdomain.ModelCallInitial || output.CallCount != 1 {
+		t.Fatalf("calls=%+v output=%+v", calls, output)
+	}
+	if scheduler.calls.Load() != 1 || repository.run.Status != agentdomain.ModelRunSucceeded || len(repository.calls) != 1 ||
+		output.Action.Decision != knowledgedomain.AssessmentDecisionProposeNewClaim || string(output.BusinessJSON) != string(responseDocument) {
+		t.Fatalf("scheduler_calls=%d run=%+v persistedCalls=%+v output=%+v", scheduler.calls.Load(), repository.run, repository.calls, output)
 	}
 }
 
@@ -314,13 +351,25 @@ func schemaProperty(document map[string]any, path ...string) map[string]any {
 }
 
 func newWorkflowExecutor(t *testing.T, model agentapplication.ChatModel, repository *workflowRepository) *Executor {
+	return newWorkflowExecutorWithScheduler(t, model, repository, nil)
+}
+
+func newWorkflowExecutorWithScheduler(
+	t *testing.T,
+	model agentapplication.ChatModel,
+	repository *workflowRepository,
+	scheduler agentapplication.StructuredPhaseScheduler,
+) *Executor {
 	t.Helper()
+	if scheduler == nil {
+		scheduler = newTrackingEinoStructuredScheduler(t)
+	}
 	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 128})
 	if err != nil {
 		t.Fatal(err)
 	}
 	executor, err := NewExecutor(ExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: repository, Knowledge: workflowKnowledgePort{}, Evidence: workflowEvidenceOpener{},
+		Model: model, Scheduler: scheduler, Catalog: catalog, Repository: repository, Knowledge: workflowKnowledgePort{}, Evidence: workflowEvidenceOpener{},
 		IDs:   &workflowIDs{values: []foundation.ID{testModelRunID, testCallID, testCallID2, testCallID3}},
 		Clock: &workflowClock{next: time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)}, Budget: agentapplication.DefaultRunBudget(),
 	})
@@ -404,6 +453,25 @@ func codeOf(err error) string {
 		return classified.Code
 	}
 	return ""
+}
+
+type trackingStructuredScheduler struct {
+	delegate agentapplication.StructuredPhaseScheduler
+	calls    atomic.Int64
+}
+
+func newTrackingEinoStructuredScheduler(t *testing.T) *trackingStructuredScheduler {
+	t.Helper()
+	scheduler, err := agenteino.NewStructuredPhaseScheduler(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &trackingStructuredScheduler{delegate: scheduler}
+}
+
+func (scheduler *trackingStructuredScheduler) Schedule(ctx context.Context, run *agentapplication.StructuredPhaseRun) error {
+	scheduler.calls.Add(1)
+	return scheduler.delegate.Schedule(ctx, run)
 }
 
 type workflowRepository struct {

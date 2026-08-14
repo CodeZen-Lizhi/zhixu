@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
@@ -162,6 +163,7 @@ func TestRAGExecutorAcceptsStructuredReducedRefusal(t *testing.T) {
 	request := testRAGRequest()
 	request.WorkspaceID = base.Payload.Citations[0].WorkspaceID
 	request.ModelRunRef = base.ModelRunRef
+	request.AnswerReducedSchemaRef = domain.SchemaRef{ID: domain.RefusalSchemaID, Version: domain.OutputSchemaVersionV1}
 	proposal, err := executor.Execute(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -245,6 +247,54 @@ func TestRAGExecutorProducesValidatedV2TerminalProposal(t *testing.T) {
 	}
 }
 
+func TestStructuredRAGGenerationRejectsMismatchedModelRunWithoutNilWrappedCause(t *testing.T) {
+	base, _ := validCitationAnswer(false)
+	v2 := domain.RAGAnswerResultV2{
+		ResultType: base.ResultType, SchemaID: base.SchemaID, SchemaVersion: domain.OutputSchemaVersionV2,
+		ModelRunRef: ragID(9),
+		Payload: domain.RAGAnswerPayloadV2{
+			RAGAnswerPayload:  base.Payload,
+			RelatedTopics:     []domain.RelatedTopic{{TopicID: ragID(7), Name: "Deployment", CitationIDs: []string{base.Payload.Citations[0].ID}}},
+			FollowUpQuestions: []string{"Which deployment stage should be reviewed next?"},
+		},
+	}
+	raw, err := json.Marshal(v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := structuredRAGGeneration{runner: &ragPorts{generation: StructuredRunResult{
+		Output: raw, Phase: domain.ModelCallInitial,
+		Runtime: FrozenRuntimeRefs{Schema: domain.SchemaRef{ID: domain.RAGAnswerSchemaID, Version: domain.OutputSchemaVersionV2}},
+	}}}
+	_, err = generation.Generate(context.Background(), RAGGenerationRequest{ModelRunRef: base.ModelRunRef})
+	if applicationErrorCode(err) != errorCodeRAGRequestInvalid || strings.Contains(err.Error(), "%!w(<nil>)") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCloneRAGGenerationContextPreservesEmptyCollections(t *testing.T) {
+	input := RAGGenerationContext{
+		Evidence:  []domain.Evidence{{ConflictIDs: []foundation.ID{}}},
+		Conflicts: []RAGConflictDisclosure{},
+		RelatedTopics: map[foundation.ID]RAGAllowedTopic{
+			ragID(1): {CitationIDs: []string{}},
+		},
+	}
+
+	cloned := cloneRAGGenerationContext(input)
+	if cloned.Conflicts == nil || cloned.Evidence[0].ConflictIDs == nil || cloned.RelatedTopics[ragID(1)].CitationIDs == nil {
+		t.Fatalf("clone lost non-nil empty collections: %#v", cloned)
+	}
+	cloned.Conflicts = append(cloned.Conflicts, RAGConflictDisclosure{ClaimID: ragID(2)})
+	cloned.Evidence[0].ConflictIDs = append(cloned.Evidence[0].ConflictIDs, ragID(2))
+	topic := cloned.RelatedTopics[ragID(1)]
+	topic.CitationIDs = append(topic.CitationIDs, "citation-2")
+	cloned.RelatedTopics[ragID(1)] = topic
+	if len(input.Conflicts) != 0 || len(input.Evidence[0].ConflictIDs) != 0 || len(input.RelatedTopics[ragID(1)].CitationIDs) != 0 {
+		t.Fatal("clone shares mutable collection storage")
+	}
+}
+
 type ragPorts struct {
 	plan             domain.RAGQueryPlanResult
 	searches         []ScopedRetrievalResult
@@ -291,12 +341,32 @@ func (p *ragPorts) RecordRAGProgress(_ context.Context, update RAGProgressUpdate
 
 func newTestRAGExecutor(t *testing.T, ports *ragPorts) *RAGExecutor {
 	t.Helper()
-	executor, err := NewRAGExecutor(ports, ports, ports, ports, ports, ports, ports)
+	// Keep the application test double on the historical StructuredRunner
+	// port, but adapt it explicitly to the current generation port. Production
+	// v2 injects the Eino Agent/Stream generation adapter instead.
+	generation := structuredRAGGeneration{runner: ports}
+	executor, err := NewRAGExecutorWithGenerationScheduler(ports, ports, ports, ports, generation, ports, ports, testRAGScheduler{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return executor
 }
+
+// testRAGScheduler is an isolated test double for the production Eino Graph.
+// It exists only to exercise the domain node contracts without importing Eino
+// into the application package.
+type testRAGScheduler struct{}
+
+func (testRAGScheduler) Schedule(ctx context.Context, run *RAGPhaseRun) error {
+	for _, step := range []func(context.Context) (RAGPhaseOutcome, error){run.Plan, run.Retrieval, run.Evidence, run.Generation, run.Publication} {
+		outcome, err := step(ctx)
+		if err != nil || outcome.Route != RAGPhaseContinue {
+			return err
+		}
+	}
+	return nil
+}
+
 func testRAGRequest() RAGExecutionRequest {
 	return RAGExecutionRequest{WorkspaceID: ragID(1), ModelRunRef: ragID(2), PlanInput: []byte(`{"question":"deploy?"}`), AnswerInput: []byte(`{"question":"deploy?","answer_depth":"standard","output_format":"markdown"}`), SearchMode: retrievaldomain.SearchModeHybrid}
 }

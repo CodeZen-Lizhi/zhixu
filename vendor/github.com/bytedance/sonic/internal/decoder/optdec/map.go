@@ -399,7 +399,7 @@ func decodeJsonNumberKey(dec *mapDecoder, raw string) (interface{}, error) {
 	if !ok || end != len(raw) {
 		return nil, error_value(raw, rt.JsonNumberType.Pack())
 	}
-
+	
 	return json.Number(raw[0:end]), nil
 }
 

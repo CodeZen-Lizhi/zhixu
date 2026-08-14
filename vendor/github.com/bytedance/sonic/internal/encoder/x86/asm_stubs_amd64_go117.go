@@ -44,8 +44,8 @@ func (self *Assembler) WritePtr(i int, ptr obj.Addr, rec obj.Addr) {
     self.Emit("MOVQ", ptr, _AX)
     self.Emit("LEAQ", rec, _DI)
     self.Emit("MOVQ", _F_gcWriteBarrierAX, _BX)  // MOVQ ${fn}, AX
-    self.Rjmp("CALL", _BX)
-    self.xload(_DI)
+    self.Rjmp("CALL", _BX)  
+    self.xload(_DI)  
     self.Sjmp("JMP", "_end_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Link("_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Emit("MOVQ", ptr, rec)

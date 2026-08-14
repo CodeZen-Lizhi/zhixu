@@ -14,7 +14,7 @@ const (
 	// TraceParentMetadataKey 是异步传播允许的唯一项目 Trace 字段。
 	TraceParentMetadataKey = platform.TraceParentMetadataKey
 
-	// TelemetryStatusDisabled 表示外部 OTLP Trace 导出已关闭。
+	// TelemetryStatusDisabled 表示 Telemetry 已显式关闭。
 	TelemetryStatusDisabled = platform.TelemetryStatusDisabled
 	// TelemetryStatusExporting 表示真实外部 Provider 正在导出。
 	TelemetryStatusExporting = platform.TelemetryStatusExporting
@@ -55,6 +55,28 @@ const (
 	MetricDuplicateDeliveryTotal = platform.MetricDuplicateDeliveryTotal
 	// MetricShutdownTotal 是 Worker 关闭结果计数。
 	MetricShutdownTotal = platform.MetricShutdownTotal
+	// MetricModelCallDuration 是 Eino Chat callback 观测到的调用耗时。
+	MetricModelCallDuration = platform.MetricModelCallDuration
+	// MetricModelCallTotal 是 Eino Chat callback 观测到的调用结果计数。
+	MetricModelCallTotal = platform.MetricModelCallTotal
+	// MetricAnswerFirstTokenDuration 是最终 Answer 流的首 token 延迟。
+	MetricAnswerFirstTokenDuration = platform.MetricAnswerFirstTokenDuration
+	// MetricAnswerCompletionDuration 是最终 Answer 流的完成延迟。
+	MetricAnswerCompletionDuration = platform.MetricAnswerCompletionDuration
+	// MetricAnswerResultTotal 是最终 Answer 流的终态计数。
+	MetricAnswerResultTotal = platform.MetricAnswerResultTotal
+	// MetricDraftDegradationTotal 是草稿流降级计数。
+	MetricDraftDegradationTotal = platform.MetricDraftDegradationTotal
+	// MetricAgentIterations 是 Eino Agent 迭代次数。
+	MetricAgentIterations = platform.MetricAgentIterations
+	// MetricAgentToolCalls 是 Eino Agent 工具调用数。
+	MetricAgentToolCalls = platform.MetricAgentToolCalls
+	// MetricAgentResultTotal 是 Eino Agent 终态计数。
+	MetricAgentResultTotal = platform.MetricAgentResultTotal
+	// MetricRAGOutcomeTotal 是 RAG 终态与运行失败计数。
+	MetricRAGOutcomeTotal = platform.MetricRAGOutcomeTotal
+	// MetricRAGGraphNodeResultTotal 是 Eino RAG Graph 节点结果计数。
+	MetricRAGGraphNodeResultTotal = platform.MetricRAGGraphNodeResultTotal
 )
 
 var (
@@ -103,8 +125,10 @@ type (
 	MetricName = platform.MetricName
 	// Metrics 是项目自有指标记录接口。
 	Metrics = platform.Metrics
-	// MemoryMetrics 是测试用内存 Adapter。
+	// MemoryMetrics 是测试与本地诊断 Adapter。
 	MemoryMetrics = platform.MemoryMetrics
+	// MemoryProvider 是测试用内存 Adapter 组合。
+	MemoryProvider = platform.MemoryProvider
 	// TelemetryOptions 定义显式 exporter 初始化配置。
 	TelemetryOptions = platform.TelemetryOptions
 	// TelemetryStatus 是不暴露 endpoint 的安全状态。
@@ -123,7 +147,7 @@ type (
 	SpanSnapshot = platform.SpanSnapshot
 	// Tracer 是项目自有 Trace 创建接口。
 	Tracer = platform.Tracer
-	// MemoryTracer 是测试用内存 Adapter。
+	// MemoryTracer 是测试与本地诊断 Adapter。
 	MemoryTracer = platform.MemoryTracer
 )
 
@@ -161,6 +185,9 @@ func NewMemoryMetrics() *MemoryMetrics { return platform.NewMemoryMetrics() }
 func InitializeTelemetry(ctx context.Context, options TelemetryOptions) (*Telemetry, error) {
 	return platform.InitializeTelemetry(ctx, options)
 }
+
+// NewMemoryProvider 创建隔离的内存 Metrics 与 Trace Adapter。
+func NewMemoryProvider() *MemoryProvider { return platform.NewMemoryProvider() }
 
 // WithTraceContext 校验并写入 Trace Context。
 func WithTraceContext(ctx context.Context, trace TraceContext) (context.Context, error) {

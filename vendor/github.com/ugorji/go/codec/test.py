@@ -18,7 +18,7 @@ mylocaladdr="127.0.0.1" # localhost.localdomain localhost 127.0.0.1
 
 def get_test_data_list():
     # get list with all primitive types, and a combo type
-    l0 = [
+    l0 = [ 
         -8,
          -1616,
          -32323232,
@@ -56,12 +56,12 @@ def get_test_data_list():
           "false": False,
           "uint16(1616)": 1616 },
         { "list": [1616, 32323232, True, -3232.0, {"TRUE":True, "FALSE":False}, [True, False] ],
-          "int32":32323232, "bool": True,
+          "int32":32323232, "bool": True, 
           "LONG STRING": u"123456789012345678901234567890123456789012345678901234567890",
           "SHORT STRING": u"1234567890" },
         { True: "true", 138: False, "false": 200 }
         ]
-
+    
     l = []
     l.extend(l0)
     l.append(l0)
@@ -86,7 +86,7 @@ def doRpcServer(port, stopTimeSec):
             return ("1:%s 2:%s 3:%s" % (msg1.decode("utf-8"), msg2.decode("utf-8"), msg3.decode("utf-8")))
         def EchoStruct(self, msg):
             return ("%s" % msg)
-
+    
     addr = msgpackrpc.Address(mylocaladdr, port)
     server = msgpackrpc.Server(EchoHandler())
     server.listen(addr)
@@ -113,7 +113,7 @@ def doRpcClientToPythonSvc(port):
 #     else:
 #         print("\t>>>> Port is not open")
 #     sock.close()
-
+    
 def doRpcClientToGoSvc(port):
     # doCheckSocket(port)
     address = msgpackrpc.Address(mylocaladdr, port)
@@ -131,8 +131,8 @@ def doMain(args):
     elif len(args) == 2 and args[0] == "rpc-client-go-service":
         doRpcClientToGoSvc(int(args[1]))
     else:
-        print("Usage: test.py " +
+        print("Usage: test.py " + 
               "[testdata|rpc-server|rpc-client-python-service|rpc-client-go-service] ...")
-
+    
 if __name__ == "__main__":
     doMain(sys.argv[1:])

@@ -5,17 +5,22 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.25.4-bookworm AS go-build
+FROM --platform=$BUILDPLATFORM golang:1.25.4-bookworm AS go-source
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY vendor/ vendor/
 COPY . ./
+
+FROM go-source AS go-build
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-api ./cmd/api
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-worker ./cmd/worker
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-migrate ./cmd/migrate
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-modelctl ./cmd/modelctl
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-runtime-wait ./cmd/runtimewait
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-workspace-probe ./cmd/workspaceprobe
+
+FROM go-source AS rag-model-fixture-build
+RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-rag-model-fixture ./cmd/rag-model-fixture
 
 FROM go-build AS workspace-control-build
 ARG ZHIXU_HOST_GOOS
@@ -27,6 +32,13 @@ RUN CGO_ENABLED=0 GOOS="${ZHIXU_HOST_GOOS}" GOARCH="${ZHIXU_HOST_GOARCH}" \
 
 FROM scratch AS workspace-control-bundle
 COPY --from=workspace-control-build /host/zhixu-workspacectl /zhixu-workspacectl
+
+FROM alpine:3.22 AS rag-model-fixture
+RUN addgroup -S -g 10001 zhixu \
+  && adduser -S -D -H -u 10001 -G zhixu zhixu
+COPY --from=rag-model-fixture-build /out/zhixu-rag-model-fixture /app/zhixu-rag-model-fixture
+USER 10001:10001
+ENTRYPOINT ["/app/zhixu-rag-model-fixture"]
 
 FROM alpine:3.22 AS runtime
 RUN apk add --no-cache ca-certificates git iproute2 iptables socat util-linux \

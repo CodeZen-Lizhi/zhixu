@@ -237,6 +237,16 @@ func TestRouterRegistersConversationRoutes(t *testing.T) {
 	}
 }
 
+func TestRouterRegistersDraftStreamRoutesFailClosed(t *testing.T) {
+	router := NewRouter(Dependencies{Version: "test", DraftStream: conversationhttp.NewDraftStreamHandler(nil)})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/answers/92000000-0000-4000-8000-000000000002/stream?workspace_id=92000000-0000-4000-8000-000000000001", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), conversationhttp.ErrorCodeDraftStreamUnavailable) {
+		t.Fatalf("draft stream route status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestRouterRegistersEventsRoutes(t *testing.T) {
 	router := NewRouter(Dependencies{Version: "test", Events: eventshttp.NewHandler(nil)})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/events?workspace_id=92000000-0000-4000-8000-000000000001", nil)
@@ -508,11 +518,13 @@ func TestRouterAuthProtectsBusinessRoutesButKeepsPublicHealth(t *testing.T) {
 		AuthCheck: func(context.Context) error { return nil },
 		Workspace: workspacehttp.NewHandler(nil),
 		Graph:     readyGraphHandler(), Candidate: readyCandidateHandler(), Knowledge: readyKnowledgeHandler(),
+		DraftStream: conversationhttp.NewDraftStreamHandler(nil),
 	})
 	for _, path := range []string{
 		"/api/v1/graph/nodes?workspace_id=92000000-0000-4000-8000-000000000001",
 		"/api/v1/workspaces/active",
 		"/api/v1/workspaces/92000000-0000-4000-8000-000000000001/timeline",
+		"/api/v1/answers/92000000-0000-4000-8000-000000000002/stream?workspace_id=92000000-0000-4000-8000-000000000001",
 	} {
 		unauthenticated := httptest.NewRequest(http.MethodGet, path, nil)
 		unauthenticatedResponse := httptest.NewRecorder()

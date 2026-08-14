@@ -140,7 +140,7 @@ func (self *MapIterator) appendConcrete(p *_MapPair, t *rt.GoType, k unsafe.Poin
         p.k = ""
         return nil
     }
-
+    
     out, err := e.MarshalText()
     if err != nil {
         return err

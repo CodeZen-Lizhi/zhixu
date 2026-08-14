@@ -59,3 +59,4 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 	}
 	return gerr
 }
+

@@ -7,14 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
@@ -83,6 +81,12 @@ type ChatContract struct {
 	MaxResponseBytes int64
 }
 
+// ChatConnectionProber executes one bounded production-path request without
+// exposing provider output to the activation controller.
+type ChatConnectionProber interface {
+	ProbeConnection(context.Context) error
+}
+
 type chatHTTPConfig struct {
 	client           *modelHTTPClient
 	endpointURL      string
@@ -90,8 +94,6 @@ type chatHTTPConfig struct {
 	timeout          time.Duration
 	maxRequestBytes  int64
 	maxResponseBytes int64
-	authorization    string
-	apiStyle         ChatAPIStyle
 }
 
 type chatHTTPOptions struct {
@@ -158,10 +160,6 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 	if err != nil {
 		return chatHTTPConfig{}, chatConfigErrorWithCause(err)
 	}
-	authorization := ""
-	if options.apiKey != "" {
-		authorization = "Bearer " + options.apiKey
-	}
 	return chatHTTPConfig{
 		client:           client,
 		endpointURL:      appendChatPath(baseURL, endpointPath),
@@ -169,8 +167,6 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 		timeout:          options.timeout,
 		maxRequestBytes:  options.maxRequestBytes,
 		maxResponseBytes: options.maxResponseBytes,
-		authorization:    authorization,
-		apiStyle:         apiStyle,
 	}, nil
 }
 
@@ -222,6 +218,16 @@ func chatEndpointPath(style ChatAPIStyle) (string, bool) {
 	}
 }
 
+func validateEinoChatAPIStyle(style ChatAPIStyle) error {
+	if style == "" || style == ChatAPIStyleChatCompletions {
+		return nil
+	}
+	if style == ChatAPIStyleResponses {
+		return chatConfigErrorWithCause(errors.New("responses API style is unavailable in the Eino runtime"))
+	}
+	return chatConfigErrorWithCause(errors.New("chat API style is invalid"))
+}
+
 func validChatAPIKey(value string) bool {
 	if value == "" {
 		return true
@@ -248,88 +254,51 @@ func (config chatHTTPConfig) closeModelResource() error {
 	return config.client.Close()
 }
 
-func (config chatHTTPConfig) chat(ctx context.Context, request agentapplication.ChatRequest, payload any, result any) error {
-	return config.chatWithResponseMode(ctx, request, payload, result, true)
-}
-
-func (config chatHTTPConfig) chatWithResponseMode(ctx context.Context, request agentapplication.ChatRequest, payload any, result any, strictResponse bool) error {
+func (config chatHTTPConfig) validateRequest(request agentapplication.ChatRequest) error {
 	if err := agentapplication.ValidateChatRequest(request); err != nil {
 		return err
 	}
 	if request.Model != config.contract.Model {
 		return chatError(foundation.ErrorConsistencyViolation, ErrorCodeChatRequestInvalid, false, errChatRequestInvalid)
 	}
-	return config.post(ctx, payload, result, strictResponse)
+	return nil
 }
 
-func (config chatHTTPConfig) probe(ctx context.Context, payload any, result any) error {
-	return config.post(ctx, payload, result, false)
-}
-
-func (config chatHTTPConfig) post(ctx context.Context, payload any, result any, strictResponse bool) error {
+func (config chatHTTPConfig) encodeRequest(payload any) ([]byte, error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil || int64(len(encoded)) > config.maxRequestBytes {
-		return chatError(foundation.ErrorInvalidInput, ErrorCodeChatRequestInvalid, false, errChatRequestInvalid)
+		return nil, chatError(foundation.ErrorInvalidInput, ErrorCodeChatRequestInvalid, false, errChatRequestInvalid)
 	}
+	return encoded, nil
+}
+
+func (config chatHTTPConfig) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	requestContext, cancel := context.WithTimeout(ctx, config.timeout)
-	defer cancel()
-	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, config.endpointURL, bytes.NewReader(encoded))
-	if err != nil {
-		return chatError(foundation.ErrorNonRetryableFailure, ErrorCodeChatRequestFailed, false, &ConnectionDiagnostic{
-			Stage:          ConnectionStageRequest,
-			TransportError: "request construction failed",
-			cause:          err,
-		})
-	}
-	httpRequest.Header.Set("Accept", "application/json")
-	httpRequest.Header.Set("Content-Type", "application/json")
-	if config.authorization != "" {
-		httpRequest.Header.Set("Authorization", config.authorization)
-	}
-	response, err := config.client.Do(httpRequest)
-	if err != nil {
-		return classifyChatTransportError(requestContext, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		diagnostic := providerResponseDiagnostic(response, config.authorization, config.endpointURL)
-		return classifyChatStatus(response.StatusCode, diagnostic)
-	}
-	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnostic())
-	}
-	encodedResponse, err := io.ReadAll(io.LimitReader(response.Body, config.maxResponseBytes+1))
-	if err != nil {
-		return classifyChatTransportErrorWithStage(requestContext, err, ConnectionStageResponseRead)
-	}
-	if int64(len(encodedResponse)) > config.maxResponseBytes || !utf8.Valid(encodedResponse) {
-		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnostic())
-	}
+	return context.WithTimeout(ctx, config.timeout)
+}
+
+func decodeChatJSONResponse(encoded []byte, maxResponseBytes int64, result any) error {
 	limits := agentdomain.DecodeLimits{
-		MaxDocumentBytes: int(config.maxResponseBytes),
+		MaxDocumentBytes: int(maxResponseBytes),
 		MaxDepth:         16,
-		MaxStringBytes:   int(config.maxResponseBytes),
+		MaxStringBytes:   int(maxResponseBytes),
 		MaxArrayItems:    128,
 		MaxObjectFields:  128,
 	}
-	decoded, err := agentdomain.DecodeStrict(encodedResponse, limits, func(value json.RawMessage) error { return nil })
+	decoded, err := agentdomain.DecodeStrict(encoded, limits, func(value json.RawMessage) error { return nil })
 	if err != nil {
-		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnostic())
+		return chatResponseError(ErrorCodeChatResponseInvalid)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(decoded))
-	if strictResponse {
-		decoder.DisallowUnknownFields()
-	}
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(result); err != nil {
-		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnostic())
+		return chatResponseError(ErrorCodeChatResponseInvalid)
 	}
 	var extra json.RawMessage
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnostic())
+		return chatResponseError(ErrorCodeChatResponseInvalid)
 	}
 	return nil
 }
@@ -392,6 +361,7 @@ func chatError(kind foundation.ErrorKind, code string, retryable bool, cause err
 	return foundation.NewError(kind, code, retryable, cause)
 }
 
-func safeChatAdapterString(model agentdomain.ModelRef) string {
-	return fmt.Sprintf("openai-compatible chat adapter(model=%q model_version=%q adapter_version=%q)", model.ModelID, model.ModelVersion, model.AdapterVersion)
+func safeChatAdapterString(contract ChatContract) string {
+	return fmt.Sprintf("chat adapter(provider=%q api_style=%q model=%q model_version=%q adapter_version=%q)",
+		contract.Provider, contract.APIStyle, contract.Model.ModelID, contract.Model.ModelVersion, contract.Model.AdapterVersion)
 }

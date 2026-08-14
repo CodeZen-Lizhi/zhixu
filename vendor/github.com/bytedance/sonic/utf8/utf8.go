@@ -45,7 +45,7 @@ func CorrectWith(dst []byte, src []byte, repl string) []byte {
                 panic("numbers of invalid utf8 exceed the string len!")
             }
         }
-
+        
         for i := 0; i < m.Sp; i++ {
             ipos := m.Vt[i] // invalid utf8 position
             dst  = append(dst, sstr[scur:ipos]...)

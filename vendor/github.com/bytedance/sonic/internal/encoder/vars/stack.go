@@ -144,7 +144,7 @@ func FreeBuffer(p *bytes.Buffer) {
 var (
 	ArgPtrs   = []bool{true, true, true, false}
 	LocalPtrs = []bool{}
-
+	
     ArgPtrs_generic   = []bool{true}
     LocalPtrs_generic = []bool{}
 )

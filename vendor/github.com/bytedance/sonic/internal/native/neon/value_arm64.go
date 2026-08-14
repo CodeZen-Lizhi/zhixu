@@ -31,3 +31,4 @@ func value(s unsafe.Pointer, n int, p int, v *types.JsonState, flags uint64) (re
 //go:noescape
 //goland:noinspection GoUnusedParameter
 func __value(s unsafe.Pointer, n int, p int, v *types.JsonState, flags uint64) (ret int)
+

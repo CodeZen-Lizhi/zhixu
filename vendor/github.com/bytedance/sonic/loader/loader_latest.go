@@ -24,12 +24,12 @@ import (
 // LoadFuncs loads only one function as module, and returns the function pointer
 //   - text: machine code
 //   - funcName: function name
-//   - frameSize: stack frame size.
+//   - frameSize: stack frame size. 
 //   - argSize: argument total size (in bytes)
 //   - argPtrs: indicates if a slot (8 Bytes) of arguments memory stores pointer, from low to high
 //   - localPtrs: indicates if a slot (8 Bytes) of local variants memory stores pointer, from low to high
-//
-// WARN:
+// 
+// WARN: 
 //   - the function MUST has fixed SP offset equaling to this, otherwise it go.gentraceback will fail
 //   - the function MUST has only one stack map for all arguments and local variants
 func (self Loader) LoadOne(text []byte, funcName string, frameSize int, argSize int, argPtrs []bool, localPtrs []bool, pcdata Pcdata) Function {
@@ -66,7 +66,7 @@ func (self Loader) LoadOne(text []byte, funcName string, frameSize int, argSize 
         }
         fn.ArgsPointerMaps = args.Build()
     }
-
+    
     if localPtrs != nil {
         locals := rt.StackMapBuilder{}
         for _, b := range localPtrs {
@@ -94,7 +94,7 @@ func Load(text []byte, funcs []Func, modulename string, filenames []string) (out
     moduledataverify1(mod)
     registerModule(mod)
 
-    //
+    // 
     // encapsulate function address
     out = make([]Function, len(funcs))
     for i, s := range ids {
@@ -105,5 +105,5 @@ func Load(text []byte, funcs []Func, modulename string, filenames []string) (out
             }
         }
     }
-    return
+    return 
 }

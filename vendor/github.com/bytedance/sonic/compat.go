@@ -140,3 +140,4 @@ func (cfg frozenConfig) Valid(data []byte) bool {
 func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
     return nil
 }
+

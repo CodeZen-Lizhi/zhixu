@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	agenteino "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/eino"
 	agentapp "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	captureapp "github.com/CodeZen-Lizhi/zhixu/internal/capture/application"
@@ -140,6 +142,71 @@ func TestGeneratorRecordsModelCallAndCompletesEvidenceBoundRevision(t *testing.T
 	}
 }
 
+func TestGeneratorRetainsConfiguredEinoStructuredScheduler(t *testing.T) {
+	scheduler := newProfileTrackingEinoScheduler(t)
+	generator := newProfileGeneratorWithScheduler(
+		t,
+		&profileRepositoryFake{},
+		&profileModelRunRepository{},
+		&profileChatModel{},
+		scheduler,
+	)
+	if generator.scheduler != scheduler {
+		t.Fatalf("scheduler=%T want=%T", generator.scheduler, scheduler)
+	}
+}
+
+func TestGeneratorExecutesEinoStructuredSchedulerRepairAndCompletesProfile(t *testing.T) {
+	request := profileGenerationRequest()
+	repository := &profileRepositoryFake{source: profileSourceSnapshot(request)}
+	modelRuns := &profileModelRunRepository{}
+	chat := &profileChatModel{responses: [][]byte{
+		[]byte(`{}`),
+		validProfileOutput("E0001"),
+	}}
+	scheduler := newProfileTrackingEinoScheduler(t)
+	generator := newProfileGeneratorWithScheduler(t, repository, modelRuns, chat, scheduler)
+
+	result, err := generator.Generate(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheduler.calls.Load() != 1 || result.ProfileID != request.ProfileID || result.RevisionID == "" || chat.calls != 2 ||
+		modelRuns.createCalls != 1 || len(modelRuns.calls) != 2 || repository.completeCalls != 1 || repository.failCalls != 0 {
+		t.Fatalf("scheduler_calls=%d result=%#v chat=%d model-runs=%d calls=%d completes=%d failures=%d", scheduler.calls.Load(), result, chat.calls,
+			modelRuns.createCalls, len(modelRuns.calls), repository.completeCalls, repository.failCalls)
+	}
+	if modelRuns.calls[0].Phase != agentdomain.ModelCallInitial || modelRuns.calls[1].Phase != agentdomain.ModelCallRepair ||
+		modelRuns.calls[0].CallNo != 1 || modelRuns.calls[1].CallNo != 2 {
+		t.Fatalf("model calls = %#v", modelRuns.calls)
+	}
+	completed := repository.completed
+	if completed.Revision.ID != result.RevisionID || completed.Revision.ProfileID != request.ProfileID ||
+		completed.Revision.ModelRunID != modelRuns.run.ID || completed.Revision.Content.Topics[0].SourceSpanIDs[0] != repository.source.Chunks[0].SourceSpanID ||
+		completed.ExpectedModelRunVersion != modelRuns.run.Version {
+		t.Fatalf("completed = %#v", completed)
+	}
+}
+
+type profileTrackingScheduler struct {
+	delegate agentapp.StructuredPhaseScheduler
+	calls    atomic.Int64
+}
+
+func newProfileTrackingEinoScheduler(t *testing.T) *profileTrackingScheduler {
+	t.Helper()
+	scheduler, err := agenteino.NewStructuredPhaseScheduler(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &profileTrackingScheduler{delegate: scheduler}
+}
+
+func (scheduler *profileTrackingScheduler) Schedule(ctx context.Context, run *agentapp.StructuredPhaseRun) error {
+	scheduler.calls.Add(1)
+	return scheduler.delegate.Schedule(ctx, run)
+}
+
 func TestProfileFromOutputRejectsUnknownEvidenceLabel(t *testing.T) {
 	output, err := DecodeOutput(validProfileOutput("E0002"))
 	if err != nil {
@@ -179,6 +246,16 @@ func TestDecodeOutputRejectsUnorderedAndUnknownEvidenceShape(t *testing.T) {
 }
 
 func newProfileGenerator(t *testing.T, repository *profileRepositoryFake, modelRuns *profileModelRunRepository, model *profileChatModel) *Generator {
+	return newProfileGeneratorWithScheduler(t, repository, modelRuns, model, newProfileTrackingEinoScheduler(t))
+}
+
+func newProfileGeneratorWithScheduler(
+	t *testing.T,
+	repository *profileRepositoryFake,
+	modelRuns *profileModelRunRepository,
+	model *profileChatModel,
+	scheduler agentapp.StructuredPhaseScheduler,
+) *Generator {
 	t.Helper()
 	catalog := agentapp.NewRuntimeCatalog()
 	if err := RegisterRuntimeCatalog(catalog); err != nil {
@@ -194,7 +271,7 @@ func newProfileGenerator(t *testing.T, repository *profileRepositoryFake, modelR
 		t.Fatal(err)
 	}
 	generator, err := NewGenerator(GeneratorDependencies{
-		Repository: repository, ModelRuns: modelRuns, Model: model, Catalog: catalog,
+		Repository: repository, ModelRuns: modelRuns, Model: model, Scheduler: scheduler, Catalog: catalog,
 		ModelProfileRef: profile.Ref, IDs: &profileIDs{next: 90}, Clock: &profileClock{next: profileTestNow},
 	})
 	if err != nil {
@@ -367,16 +444,21 @@ func (*profileModelRunRepository) MarkStaleModelRunsUnknown(context.Context, age
 }
 
 type profileChatModel struct {
-	content []byte
-	calls   int
-	request agentapp.ChatRequest
+	content   []byte
+	responses [][]byte
+	calls     int
+	request   agentapp.ChatRequest
 }
 
 func (model *profileChatModel) Chat(_ context.Context, request agentapp.ChatRequest) (agentapp.ChatResponse, error) {
 	model.calls++
 	model.request = request
+	content := model.content
+	if len(model.responses) >= model.calls {
+		content = model.responses[model.calls-1]
+	}
 	return agentapp.ChatResponse{
-		Model: request.Model, Content: append([]byte(nil), model.content...),
+		Model: request.Model, Content: append([]byte(nil), content...),
 		Usage: agentdomain.TokenUsage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
 	}, nil
 }

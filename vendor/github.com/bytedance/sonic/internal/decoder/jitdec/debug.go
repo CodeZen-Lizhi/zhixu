@@ -56,7 +56,7 @@ func (self *_Assembler) force_gc() {
 func (self *_Assembler) debug_instr(i int, v *_Instr) {
     if debugSyncGC {
         if (i+1 == len(self.p)) {
-            self.print_gc(i, v, &_Instr_End)
+            self.print_gc(i, v, &_Instr_End) 
         } else {
             next := &(self.p[i+1])
             self.print_gc(i, v, next)

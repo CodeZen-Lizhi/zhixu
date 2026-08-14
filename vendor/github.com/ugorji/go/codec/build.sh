@@ -26,7 +26,7 @@ _build() {
         [ -e "fastpath${_gg}" ] && mv fastpath${_gg} fastpath${_gg}__${_zts}.bak
         [ -e "gen${_gg}" ] && mv gen${_gg} gen${_gg}__${_zts}.bak
     fi
-
+    
     rm -f fast*path.generated.go *mono*generated.go *_generated_test.go gen-from-tmpl*.generated.go
 
     local btags="codec.build codec.notmono codec.safe codec.notfastpath"
@@ -64,7 +64,7 @@ _prebuild() {
 
     # zpkg=${d##*/src/}
     # zgobase=${d%%/src/*}
-    # rm -f *_generated_test.go
+    # rm -f *_generated_test.go 
     # if [[ $zforce ]]; then ${gocmd} install ${zargs[*]} .; fi &&
     true &&
         _build &&
@@ -145,7 +145,7 @@ _tests() {
 _usage() {
     # hidden args:
     # -pf [p=prebuild (f=force)]
-
+    
     cat <<EOF
 primary usage: $0
     -t[esow]   -> t=tests [e=extra, s=short, o=cover, w=wait]
@@ -162,14 +162,14 @@ _main() {
     local zcover # generate cover profile and show in browser when done
     local zwait # run tests in sequence, not parallel ie wait for one to finish before starting another
     local zextra # means run extra (python based tests, etc) during testing
-
+    
     local ztestargs=()
     local zargs=()
     local zverbose=()
     local zbenchflags=""
 
     local gocmd=${MYGOCMD:-go}
-
+    
     OPTIND=1
     while getopts ":cetmnrgpfvldsowikxyz" flag
     do

@@ -62,6 +62,15 @@ LEGACY_MODEL_DEFAULTS = {
     "ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES": "67108864",
 }
 STATIC_MODEL_KEYS = set(LEGACY_MODEL_DEFAULTS)
+RETIRED_AI_RUNTIME_SELECTOR_KEYS = {
+    "ZHIXU_CHAT_IMPLEMENTATION",
+    "ZHIXU_EMBEDDING_IMPLEMENTATION",
+    "ZHIXU_STRUCTURED_SCHEDULER_RAG",
+    "ZHIXU_STRUCTURED_SCHEDULER_RELATION",
+    "ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT",
+    "ZHIXU_STRUCTURED_SCHEDULER_CAPTURE",
+    "ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING",
+}
 
 
 def fail(message: str) -> None:
@@ -349,6 +358,26 @@ def validate_restart_policy(model: dict[str, Any], prepared_candidate: bool) -> 
         fail(f"app restart policy must be {expected_app_policy}")
     if service(model, "worker").get("restart") != expected_worker_policy:
         fail(f"worker restart policy must be {expected_worker_policy}")
+
+
+def validate_eino_primary_runtime(model: dict[str, Any]) -> None:
+    service_names = ["app", "worker"]
+    services = model.get("services")
+    if isinstance(services, dict) and "modelctl" in services:
+        service_names.append("modelctl")
+    for service_name in service_names:
+        service_environment = environment(service(model, service_name), service_name)
+        retired = sorted(RETIRED_AI_RUNTIME_SELECTOR_KEYS.intersection(service_environment))
+        if retired:
+            fail(f"{service_name} contains retired AI runtime selectors")
+        if service_name == "modelctl":
+            continue
+        if service_environment.get("ZHIXU_TOOL_RUNTIME_MODE") not in ("disabled", "enabled"):
+            fail(f"{service_name} tool runtime mode must be disabled or enabled")
+
+    worker_environment = environment(service(model, "worker"), "worker")
+    if worker_environment.get("ZHIXU_TOOL_RUNTIME_MODE") != "enabled":
+        fail("Eino chat requires the Worker Tool runtime")
 
 
 def validate_secret_boundary(model: dict[str, Any], prepared_candidate: bool = False) -> None:
@@ -663,6 +692,7 @@ def main() -> None:
         validate_secret_boundary(model, prepared_candidate=True)
     else:
         validate_secret_boundary(model)
+    validate_eino_primary_runtime(model)
     validate_relays(model, external_static=external_static)
     validate_ingress(model)
     validate_external_runtime_network(model)

@@ -93,6 +93,14 @@ class ArchitectureQualityBaselineTest(unittest.TestCase):
         self.assertEqual(report["test_assets"]["playwright_specs"]["count"], 1)
         self.assertNotIn("internal/untracked/domain/no.go", json.dumps(report))
 
+    def test_excludes_tracked_files_deleted_from_the_worktree(self) -> None:
+        self.write("internal/alpha/domain/deleted.go", "package domain\n")
+        (self.repository / "internal/alpha/domain/deleted.go").unlink()
+
+        report = self.collect(self.repository / "missing-dist")
+
+        self.assertEqual(0, report["languages"]["go"]["production"]["file_count"])
+
     def test_hotspots_include_exact_threshold_and_sort_stably(self) -> None:
         self.write("internal/alpha/large.go", "package alpha\n" + "// line\n" * 999)
         self.write("web/src/z.ts", "// line\n" * 500)

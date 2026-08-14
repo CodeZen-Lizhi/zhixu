@@ -18,7 +18,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+ 
 package {{PACKAGE}}
 
 import (
@@ -101,7 +101,7 @@ func (c *sigctxt) siglr() uintptr    { return 0 }
 
 // only used for test sonic trace
 //go:linkname testSigtrap runtime.testSigtrap
-var testSigtrap func(info unsafe.Pointer, c *sigctxt, gp unsafe.Pointer) bool
+var testSigtrap func(info unsafe.Pointer, c *sigctxt, gp unsafe.Pointer) bool 
 
 func init() {
 	if testSigtrap == nil {
@@ -121,7 +121,7 @@ func sonicSigTrap(info unsafe.Pointer, c *sigctxt, gp unsafe.Pointer) bool {
 }
 
 
-// =================== register mocked functions  ===================
+// =================== register mocked functions  =================== 
 
 var F_mock_f32toa func()
 var S_mock_f32toa uintptr

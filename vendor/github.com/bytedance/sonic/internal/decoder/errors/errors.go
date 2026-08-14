@@ -148,7 +148,7 @@ func swithchJSONType (src string, pos int) string {
         case '"': val = "string"
         case '{': val = "object"
         case '[': val = "array"
-        case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9': val = "number"
+        case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9': val = "number"        
     }
     return val
 }

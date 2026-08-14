@@ -1,9 +1,9 @@
 SHELL := /bin/sh
 DOCKER_COMPOSE ?= docker compose
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke agent-eval semantic-link-eval openapi-check trellis-script-test task-context-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract architecture-quality-baseline docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke compose-model-runtime-hot-activation-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke eino-live-smoke-env eino-live-smoke-contract eino-live-chat-smoke eino-live-query-plan-smoke eino-live-rag-metadata-smoke eino-live-faithfulness-smoke eino-live-openai-embedding-smoke eino-live-ollama-embedding-smoke eino-stable-observation-test eino-stable-observation-preflight eino-stable-observation-start eino-stable-observation-day eino-stable-observation-attest eino-stable-observation-verify agent-eval semantic-link-eval openapi-check trellis-script-test task-context-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract architecture-quality-baseline docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke compose-rag-real-provider-preflight compose-rag-real-provider-smoke compose-model-runtime-hot-activation-smoke
 
-test: trellis-script-test task-context-check go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet agent-eval openapi-check compose-check
+test: trellis-script-test task-context-check go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke-contract eino-stable-observation-test agent-eval openapi-check compose-check
 
 migrate:
 	go run ./cmd/migrate
@@ -37,7 +37,157 @@ eino-vet:
 	cd poc/eino && go vet ./...
 
 eino-live-smoke:
-	cd poc/eino && go test -run TestOpenAICompatibleChatSmoke -v ./live
+	$(MAKE) --no-print-directory eino-live-smoke-env
+	$(MAKE) --no-print-directory eino-live-chat-smoke
+	$(MAKE) --no-print-directory eino-live-openai-embedding-smoke
+	$(MAKE) --no-print-directory eino-live-ollama-embedding-smoke
+	$(MAKE) --no-print-directory eino-live-query-plan-smoke
+	$(MAKE) --no-print-directory eino-live-rag-metadata-smoke
+	$(MAKE) --no-print-directory eino-live-faithfulness-smoke
+
+eino-live-smoke-env:
+	@test "$${ZHIXU_EINO_LIVE_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_ENABLED=true is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_BASE_URL:-}" || (echo "ZHIXU_EINO_LIVE_BASE_URL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_API_KEY:-}" || (echo "ZHIXU_EINO_LIVE_API_KEY is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_MODEL:-}" || (echo "ZHIXU_EINO_LIVE_MODEL is required" >&2; exit 1)
+	@test "$${ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_ENABLED=true is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_BASE_URL:-}" || (echo "ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_BASE_URL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_API_KEY:-}" || (echo "ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_API_KEY is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_MODEL:-}" || (echo "ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_MODEL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_DIMENSIONS:-}" || (echo "ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_DIMENSIONS is required" >&2; exit 1)
+	@test "$${ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_ENABLED=true is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_BASE_URL:-}" || (echo "ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_BASE_URL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_MODEL:-}" || (echo "ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_MODEL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_DIMENSIONS:-}" || (echo "ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_DIMENSIONS is required" >&2; exit 1)
+	@test "$${ZHIXU_EINO_LIVE_QUERY_PLAN_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_QUERY_PLAN_ENABLED=true is required" >&2; exit 1)
+	@test "$${ZHIXU_EINO_LIVE_RAG_METADATA_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_RAG_METADATA_ENABLED=true is required" >&2; exit 1)
+	@test "$${ZHIXU_EINO_LIVE_FAITHFULNESS_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_FAITHFULNESS_ENABLED=true is required" >&2; exit 1)
+
+eino-live-smoke-contract:
+	bash deploy/eino-live-smoke-contract.sh
+
+eino-live-chat-smoke:
+	@test "$${ZHIXU_EINO_LIVE_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_ENABLED=true is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_BASE_URL:-}" || (echo "ZHIXU_EINO_LIVE_BASE_URL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_API_KEY:-}" || (echo "ZHIXU_EINO_LIVE_API_KEY is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_MODEL:-}" || (echo "ZHIXU_EINO_LIVE_MODEL is required" >&2; exit 1)
+	go test -count=1 -run '^TestEinoOpenAIChatModelLiveSmoke$$' -v ./internal/platform/models
+
+eino-live-query-plan-smoke:
+	@test "$${ZHIXU_EINO_LIVE_QUERY_PLAN_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_QUERY_PLAN_ENABLED=true is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_BASE_URL:-}" || (echo "ZHIXU_EINO_LIVE_BASE_URL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_API_KEY:-}" || (echo "ZHIXU_EINO_LIVE_API_KEY is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_MODEL:-}" || (echo "ZHIXU_EINO_LIVE_MODEL is required" >&2; exit 1)
+	go test -count=1 -run '^TestEinoOpenAIQueryPlanLiveSmoke$$' -v ./internal/platform/models
+
+eino-live-rag-metadata-smoke:
+	@test "$${ZHIXU_EINO_LIVE_RAG_METADATA_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_RAG_METADATA_ENABLED=true is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_BASE_URL:-}" || (echo "ZHIXU_EINO_LIVE_BASE_URL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_API_KEY:-}" || (echo "ZHIXU_EINO_LIVE_API_KEY is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_MODEL:-}" || (echo "ZHIXU_EINO_LIVE_MODEL is required" >&2; exit 1)
+	go test -count=1 -run '^TestEinoOpenAIRAGMetadataLiveSmoke$$' -v ./internal/platform/models
+
+eino-live-faithfulness-smoke:
+	@test "$${ZHIXU_EINO_LIVE_FAITHFULNESS_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_FAITHFULNESS_ENABLED=true is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_BASE_URL:-}" || (echo "ZHIXU_EINO_LIVE_BASE_URL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_API_KEY:-}" || (echo "ZHIXU_EINO_LIVE_API_KEY is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_MODEL:-}" || (echo "ZHIXU_EINO_LIVE_MODEL is required" >&2; exit 1)
+	go test -count=1 -run '^TestEinoOpenAIFaithfulnessReviewLiveSmoke$$' -v ./internal/platform/models
+
+eino-live-openai-embedding-smoke:
+	@test "$${ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_ENABLED=true is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_BASE_URL:-}" || (echo "ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_BASE_URL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_API_KEY:-}" || (echo "ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_API_KEY is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_MODEL:-}" || (echo "ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_MODEL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_DIMENSIONS:-}" || (echo "ZHIXU_EINO_LIVE_OPENAI_EMBEDDING_DIMENSIONS is required" >&2; exit 1)
+	go test -count=1 -run '^TestEinoOpenAIEmbeddingLiveSmoke$$' -v ./internal/platform/models
+
+eino-live-ollama-embedding-smoke:
+	@test "$${ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_ENABLED:-}" = true || (echo "ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_ENABLED=true is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_BASE_URL:-}" || (echo "ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_BASE_URL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_MODEL:-}" || (echo "ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_MODEL is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_DIMENSIONS:-}" || (echo "ZHIXU_EINO_LIVE_OLLAMA_EMBEDDING_DIMENSIONS is required" >&2; exit 1)
+	go test -count=1 -run '^TestEinoOllamaEmbeddingLiveSmoke$$' -v ./internal/platform/models
+
+eino-stable-observation-test:
+	python3 -m unittest discover -s deploy -p 'eino_stable_observation_*_test.py'
+
+eino-stable-observation-preflight:
+	@test -n "$${ZHIXU_EINO_OBSERVATION_ARCHIVE_DIR:-}" || (echo "ZHIXU_EINO_OBSERVATION_ARCHIVE_DIR is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_PROMETHEUS_URL_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_PROMETHEUS_URL_FILE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_PROMETHEUS_BEARER_TOKEN_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_PROMETHEUS_BEARER_TOKEN_FILE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_TEMPO_URL_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_TEMPO_URL_FILE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_TEMPO_BEARER_TOKEN_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_TEMPO_BEARER_TOKEN_FILE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_TIMEZONE:-}" || (echo "ZHIXU_EINO_OBSERVATION_TIMEZONE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_IMAGE_DIGEST_SHA256:-}" || (echo "ZHIXU_EINO_OBSERVATION_IMAGE_DIGEST_SHA256 is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_CONFIG_SHA256:-}" || (echo "ZHIXU_EINO_OBSERVATION_CONFIG_SHA256 is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_EMBEDDING_GATE_SHA256:-}" || (echo "ZHIXU_EINO_OBSERVATION_EMBEDDING_GATE_SHA256 is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE is required" >&2; exit 1)
+	python3 deploy/eino_stable_observation_collect.py preflight \
+		--archive-dir "$${ZHIXU_EINO_OBSERVATION_ARCHIVE_DIR}" \
+		--timezone "$${ZHIXU_EINO_OBSERVATION_TIMEZONE}" \
+		--image-digest-sha256 "$${ZHIXU_EINO_OBSERVATION_IMAGE_DIGEST_SHA256}" \
+		--config-sha256 "$${ZHIXU_EINO_OBSERVATION_CONFIG_SHA256}" \
+		--embedding-gate-sha256 "$${ZHIXU_EINO_OBSERVATION_EMBEDDING_GATE_SHA256}" \
+		--attestation-key-file "$${ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE}" \
+		--prometheus-url-file "$${ZHIXU_EINO_OBSERVATION_PROMETHEUS_URL_FILE}" \
+		--prometheus-bearer-token-file "$${ZHIXU_EINO_OBSERVATION_PROMETHEUS_BEARER_TOKEN_FILE}" \
+		--tempo-url-file "$${ZHIXU_EINO_OBSERVATION_TEMPO_URL_FILE}" \
+		--tempo-bearer-token-file "$${ZHIXU_EINO_OBSERVATION_TEMPO_BEARER_TOKEN_FILE}"
+
+eino-stable-observation-start: eino-stable-observation-preflight
+	python3 deploy/eino_stable_observation_collect.py start \
+		--archive-dir "$${ZHIXU_EINO_OBSERVATION_ARCHIVE_DIR}" \
+		--timezone "$${ZHIXU_EINO_OBSERVATION_TIMEZONE}" \
+		--image-digest-sha256 "$${ZHIXU_EINO_OBSERVATION_IMAGE_DIGEST_SHA256}" \
+		--config-sha256 "$${ZHIXU_EINO_OBSERVATION_CONFIG_SHA256}" \
+		--embedding-gate-sha256 "$${ZHIXU_EINO_OBSERVATION_EMBEDDING_GATE_SHA256}" \
+		--attestation-key-file "$${ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE}" \
+		--prometheus-url-file "$${ZHIXU_EINO_OBSERVATION_PROMETHEUS_URL_FILE}" \
+		--prometheus-bearer-token-file "$${ZHIXU_EINO_OBSERVATION_PROMETHEUS_BEARER_TOKEN_FILE}" \
+		--tempo-url-file "$${ZHIXU_EINO_OBSERVATION_TEMPO_URL_FILE}" \
+		--tempo-bearer-token-file "$${ZHIXU_EINO_OBSERVATION_TEMPO_BEARER_TOKEN_FILE}"
+
+eino-stable-observation-day:
+	@test -n "$${ZHIXU_EINO_OBSERVATION_ARCHIVE_DIR:-}" || (echo "ZHIXU_EINO_OBSERVATION_ARCHIVE_DIR is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_PROMETHEUS_URL_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_PROMETHEUS_URL_FILE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_PROMETHEUS_BEARER_TOKEN_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_PROMETHEUS_BEARER_TOKEN_FILE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_TEMPO_URL_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_TEMPO_URL_FILE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_TEMPO_BEARER_TOKEN_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_TEMPO_BEARER_TOKEN_FILE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_IMAGE_DIGEST_SHA256:-}" || (echo "ZHIXU_EINO_OBSERVATION_IMAGE_DIGEST_SHA256 is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_CONFIG_SHA256:-}" || (echo "ZHIXU_EINO_OBSERVATION_CONFIG_SHA256 is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_INCIDENT_EVIDENCE:-}" || (echo "ZHIXU_EINO_OBSERVATION_INCIDENT_EVIDENCE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE is required" >&2; exit 1)
+	python3 deploy/eino_stable_observation_collect.py day \
+		--archive-dir "$${ZHIXU_EINO_OBSERVATION_ARCHIVE_DIR}" \
+		--image-digest-sha256 "$${ZHIXU_EINO_OBSERVATION_IMAGE_DIGEST_SHA256}" \
+		--config-sha256 "$${ZHIXU_EINO_OBSERVATION_CONFIG_SHA256}" \
+		--incident-evidence "$${ZHIXU_EINO_OBSERVATION_INCIDENT_EVIDENCE}" \
+		--attestation-key-file "$${ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE}" \
+		--prometheus-url-file "$${ZHIXU_EINO_OBSERVATION_PROMETHEUS_URL_FILE}" \
+		--prometheus-bearer-token-file "$${ZHIXU_EINO_OBSERVATION_PROMETHEUS_BEARER_TOKEN_FILE}" \
+		--tempo-url-file "$${ZHIXU_EINO_OBSERVATION_TEMPO_URL_FILE}" \
+		--tempo-bearer-token-file "$${ZHIXU_EINO_OBSERVATION_TEMPO_BEARER_TOKEN_FILE}"
+
+eino-stable-observation-attest:
+	@test -n "$${ZHIXU_EINO_OBSERVATION_ARCHIVE_DIR:-}" || (echo "ZHIXU_EINO_OBSERVATION_ARCHIVE_DIR is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE is required" >&2; exit 1)
+	python3 deploy/eino_stable_observation_collect.py attest \
+		--archive-dir "$${ZHIXU_EINO_OBSERVATION_ARCHIVE_DIR}" \
+		--attestation-key-file "$${ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE}"
+
+eino-stable-observation-verify:
+	@test -n "$${ZHIXU_EINO_OBSERVATION_START_MANIFEST:-}" || (echo "ZHIXU_EINO_OBSERVATION_START_MANIFEST is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_DAILY_DIR:-}" || (echo "ZHIXU_EINO_OBSERVATION_DAILY_DIR is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_ATTESTATION:-}" || (echo "ZHIXU_EINO_OBSERVATION_ATTESTATION is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE:-}" || (echo "ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE is required" >&2; exit 1)
+	@test -n "$${ZHIXU_EINO_OBSERVATION_EVIDENCE_DIR:-}" || (echo "ZHIXU_EINO_OBSERVATION_EVIDENCE_DIR is required" >&2; exit 1)
+	python3 deploy/eino_stable_observation_verify.py \
+		--start "$${ZHIXU_EINO_OBSERVATION_START_MANIFEST}" \
+		--daily-dir "$${ZHIXU_EINO_OBSERVATION_DAILY_DIR}" \
+		--attestation "$${ZHIXU_EINO_OBSERVATION_ATTESTATION}" \
+		--attestation-key-file "$${ZHIXU_EINO_OBSERVATION_ATTESTATION_KEY_FILE}" \
+		--evidence-dir "$${ZHIXU_EINO_OBSERVATION_EVIDENCE_DIR}"
 
 agent-eval:
 	go run ./eval/agent/cmd
@@ -185,7 +335,7 @@ compose-workspace-check:
 compose-workspace-contract:
 	python3 deploy/compose_workspace_contract.py
 
-compose-check: compose-auth-check compose-runtime-check compose-static-models-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-smoke-cleanup-contract smoke-image-cleanup-contract launcher-contract model-secrets-init-contract
+compose-check: compose-auth-check compose-runtime-check compose-static-models-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract launcher-contract model-secrets-init-contract
 	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example config --quiet
 	$(DOCKER_COMPOSE) --project-name zhixu-netns -f deploy/compose.netns.yml --env-file .env.example config --quiet
 
@@ -194,6 +344,9 @@ compose-smoke-cleanup-contract:
 
 smoke-image-cleanup-contract:
 	bash deploy/smoke-image-cleanup-contract.sh
+
+compose-rag-real-provider-contract:
+	bash deploy/compose-rag-real-provider-contract.sh
 
 launcher-contract:
 	bash deploy/launcher-contract.sh
@@ -229,3 +382,9 @@ compose-rag-smoke:
 
 compose-model-runtime-hot-activation-smoke:
 	bash deploy/model-runtime-hot-activation-smoke.sh
+
+compose-rag-real-provider-smoke:
+	ZHIXU_COMPOSE_RAG_REAL_PROVIDER=1 ZHIXU_COMPOSE_RAG_REAL_PROVIDER_PREFLIGHT_ONLY=0 bash deploy/compose-rag-real-provider-smoke.sh
+
+compose-rag-real-provider-preflight:
+	ZHIXU_COMPOSE_RAG_REAL_PROVIDER=1 ZHIXU_COMPOSE_RAG_REAL_PROVIDER_PREFLIGHT_ONLY=1 bash deploy/compose-rag-real-provider-smoke.sh

@@ -45,6 +45,14 @@ func (models *Models) Chat() platformmodels.ChatCapability {
 	return models.runtime.Chat()
 }
 
+// RuntimeChat 返回同一次生产构造冻结的 Eino Agent/Stream Chat capability。
+func (models *Models) RuntimeChat() platformmodels.RuntimeChatCapability {
+	if models == nil || models.runtime == nil {
+		return (*platformmodels.ModelRuntime)(nil).RuntimeChat()
+	}
+	return models.runtime.RuntimeChat()
+}
+
 // Embedding 返回同一次生产构造冻结的 Embedding Adapter 与 Contract。
 func (models *Models) Embedding() platformmodels.EmbeddingCapability {
 	if models == nil || models.runtime == nil {
@@ -61,8 +69,7 @@ func (models *Models) Revision() int64 {
 	return models.revision
 }
 
-// LocalDemand exposes only the canonical non-secret Ollama requirement used by
-// the lifecycle hold adapter. Online/disabled revisions return an empty set.
+// LocalDemand exposes the canonical non-secret Ollama requirement for this generation.
 func (models *Models) LocalDemand() localmodelruntime.Requirement {
 	if models == nil {
 		return localmodelruntime.Requirement{}
@@ -70,7 +77,7 @@ func (models *Models) LocalDemand() localmodelruntime.Requirement {
 	return models.localDemand
 }
 
-// ValidateEmbeddingVersion 校验本 generation 的 Embedder 与持久 Embedding Version 完整兼容。
+// ValidateEmbeddingVersion verifies that this generation can serve the stored vector binding.
 func (models *Models) ValidateEmbeddingVersion(version retrievaldomain.EmbeddingVersion) error {
 	if models == nil || models.runtime == nil {
 		return errors.New("model runtime is unavailable")
@@ -82,7 +89,7 @@ func (models *Models) ValidateEmbeddingVersion(version retrievaldomain.Embedding
 	return retrievaldomain.ValidateEmbeddingContractBinding(contract.Binding(), version)
 }
 
-// Close 幂等释放本 Models 拥有的 Adapter resources。
+// Close 幂等释放本 generation 持有的 Eino 模型传输资源。
 func (models *Models) Close() error {
 	if models == nil {
 		return nil
@@ -159,8 +166,8 @@ func closeValidationRuntime(runtime validationRuntime) error {
 	return runtime.Close()
 }
 
-// Build constructs production Chat and Embedding adapters for one resolved revision.
-func Build(base config.Config, resolved modelsettingsdomain.ResolvedSettings) (*Models, error) {
+// Build 使用同一生产 Factory 和可选项目 telemetry 构造指定 revision 的 Chat 与 Embedding Adapter。
+func Build(base config.Config, resolved modelsettingsdomain.ResolvedSettings, telemetry ...platformmodels.ModelTelemetry) (*Models, error) {
 	if resolved.Revision < 0 {
 		return nil, invalid(errors.New("model runtime revision is invalid"))
 	}
@@ -168,12 +175,12 @@ func Build(base config.Config, resolved modelsettingsdomain.ResolvedSettings) (*
 	if err != nil {
 		return nil, err
 	}
-	return newModels(cfg, resolved.Revision)
+	return newModels(cfg, resolved.Revision, telemetry...)
 }
 
-func newModels(cfg config.Config, revision int64) (*Models, error) {
+func newModels(cfg config.Config, revision int64, telemetry ...platformmodels.ModelTelemetry) (*Models, error) {
 	defer forgetModelCredentials(&cfg)
-	runtime, err := platformmodels.NewConfiguredModelRuntime(cfg)
+	runtime, err := platformmodels.NewConfiguredModelRuntime(cfg, telemetry...)
 	if err != nil {
 		return nil, err
 	}
@@ -271,9 +278,14 @@ type ConnectionTester struct {
 
 var _ modelsettingsapplication.ResolvedConnectionTester = (*ConnectionTester)(nil)
 
-// NewConnectionTester creates a target-specific connection tester.
-func NewConnectionTester(base config.Config) *ConnectionTester {
-	return &ConnectionTester{base: WithoutModelCredentials(base), build: Build}
+// NewConnectionTester 创建复用生产模型 telemetry 的目标连接测试器。
+func NewConnectionTester(base config.Config, telemetry ...platformmodels.ModelTelemetry) *ConnectionTester {
+	return &ConnectionTester{
+		base: WithoutModelCredentials(base),
+		build: func(base config.Config, resolved modelsettingsdomain.ResolvedSettings) (*Models, error) {
+			return Build(base, resolved, telemetry...)
+		},
+	}
 }
 
 // TestChat tests one resolved Chat target without persisting or touching Embedding settings.
@@ -302,7 +314,9 @@ func (tester *ConnectionTester) TestResolvedConnection(ctx context.Context, targ
 	}
 	builder := tester.build
 	if builder == nil {
-		builder = Build
+		builder = func(base config.Config, resolved modelsettingsdomain.ResolvedSettings) (*Models, error) {
+			return Build(base, resolved)
+		}
 	}
 	models, err := builder(tester.base, resolved)
 	if err != nil {

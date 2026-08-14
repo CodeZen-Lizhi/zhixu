@@ -32,3 +32,4 @@ var S_i64toa uintptr
 func i64toa(out *byte, val int64) (ret int) {
     return F_i64toa(rt.NoEscape(unsafe.Pointer(out)), val)
 }
+

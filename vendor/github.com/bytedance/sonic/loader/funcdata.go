@@ -35,7 +35,7 @@ const (
     _N_FUNCDATA = 8
     _INVALID_FUNCDATA_OFFSET = ^uint32(0)
     _FUNC_SIZE = unsafe.Sizeof(_func{})
-
+    
     _MINFUNC = 16 // minimum size for a function
     _BUCKETSIZE    = 256 * _MINFUNC
     _SUBBUCKETS    = 16
@@ -85,7 +85,7 @@ type Func struct {
     EntryOff    uint32 // start pc, offset to moduledata.text
     TextSize    uint32 // size of func text
     DeferReturn uint32 // offset of start of a deferreturn call instruction from entry, if any.
-    FileIndex   uint32 // index into filetab
+    FileIndex   uint32 // index into filetab 
     Name        string // name of function
 
     // PC data
@@ -96,7 +96,7 @@ type Func struct {
     PcStackMapIndex *Pcdata // PC -> stack map index, relative to ArgsPointerMaps and LocalsPointerMaps
     PcInlTreeIndex  *Pcdata // PC -> inlining tree index, relative to InlTree
     PcArgLiveIndex  *Pcdata // PC -> arg live index, relative to ArgLiveInfo
-
+    
     // Func data, must implement encoding.BinaryMarshaler
     ArgsPointerMaps    encoding.BinaryMarshaler // concrete type: *StackMap
     LocalsPointerMaps  encoding.BinaryMarshaler // concrete type: *StackMap
@@ -151,8 +151,8 @@ func funcNameParts(name string) (string, string, string) {
 }
 
 
-// func name table format:
-//   nameOff[0] -> namePartA namePartB namePartC \x00
+// func name table format: 
+//   nameOff[0] -> namePartA namePartB namePartC \x00 
 //   nameOff[1] -> namePartA namePartB namePartC \x00
 //  ...
 func makeFuncnameTab(funcs []Func) (tab []byte, offs []int32) {
@@ -241,5 +241,5 @@ func writeFuncdata(out *[]byte, funcs []Func) (fstart int, funcdataOffs [][]uint
         writer(f.ArgLiveInfo)
         writer(f.WrapInfo)
     }
-    return
+    return 
 }

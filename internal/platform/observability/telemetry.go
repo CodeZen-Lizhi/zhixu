@@ -18,7 +18,9 @@ const (
 )
 
 const (
-	TelemetryStatusDisabled            = "TELEMETRY_DISABLED"
+	TelemetryStatusDisabled = "TELEMETRY_DISABLED"
+	// TelemetryStatusExporting means an external-export-capable Provider was
+	// initialized. Collector reachability is proven by actual export evidence.
 	TelemetryStatusExporting           = "TELEMETRY_EXPORTING"
 	TelemetryStatusExporterUnavailable = "TELEMETRY_EXPORTER_UNAVAILABLE"
 )
@@ -152,4 +154,32 @@ func (telemetry *Telemetry) Shutdown(ctx context.Context) error {
 		}
 	})
 	return telemetry.closeErr
+}
+
+// MemoryProvider groups the in-memory adapters used by callback and facade
+// tests without claiming external export capability.
+type MemoryProvider struct {
+	metrics *MemoryMetrics
+	tracer  *MemoryTracer
+	once    sync.Once
+}
+
+// NewMemoryProvider constructs isolated in-memory metric and trace adapters.
+func NewMemoryProvider() *MemoryProvider {
+	return &MemoryProvider{metrics: NewMemoryMetrics(), tracer: NewMemoryTracer()}
+}
+
+func (provider *MemoryProvider) Metrics() Metrics { return provider.metrics }
+func (provider *MemoryProvider) Tracer() Tracer   { return provider.tracer }
+
+// Shutdown closes both in-memory resources exactly once.
+func (provider *MemoryProvider) Shutdown(context.Context) error {
+	if provider == nil {
+		return nil
+	}
+	provider.once.Do(func() {
+		_ = provider.metrics.close()
+		_ = provider.tracer.close()
+	})
+	return nil
 }

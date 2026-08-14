@@ -5,8 +5,8 @@ import { useActiveWorkspaceId } from "../../app/active-workspace";
 import type { Answer, AnswerCitation, FeedbackType, SearchMode, Turn, WorkflowStatus } from "../../api/conversation";
 import { ConversationApiError } from "../../api/conversation";
 import { createCommandId, useCreateConversationCommand, useSubmitFeedbackCommand, useSubmitQuestionCommand } from "./commands";
-import { useWorkspaceEventState } from "../../events/event-store";
 import { SourceSpanViewer } from "../source-spans";
+import { type AnswerDraftState, usePendingAnswerDraft } from "./answer-draft";
 import { useAnswer, useConversation, useConversationList, useConversationTurns, useLatestTurn } from "./queries";
 
 const stageLabels: Record<string, string> = {
@@ -76,6 +76,25 @@ const WorkflowStage = ({ answer }: { answer: Answer }) => {
   );
 };
 
+const PendingAnswer = ({ answer, draft }: { answer: Answer; draft?: AnswerDraftState | undefined }) => {
+  const status = draft?.connectionState === "reconnecting"
+    ? "草稿连接正在恢复，正式结果仍在后台校验。"
+    : "这是生成中的临时草稿，引用与结论尚未通过发布校验。";
+  return <>
+    <WorkflowStage answer={answer} />
+    {draft !== undefined && draft.content !== "" ? <article
+      className="rag-answer rag-answer--draft"
+      aria-label="生成中草稿"
+      data-draft-generation={draft.generation ?? undefined}
+      data-draft-sequence={draft.sequence}
+    >
+      <p className="eyebrow">生成中草稿</p>
+      <div className="rag-answer__copy">{draft.content}</div>
+      <p className="rag-draft__status">{status}</p>
+    </article> : null}
+  </>;
+};
+
 const CitationList = ({ citations, onSelect }: { citations: AnswerCitation[]; onSelect: (citation: AnswerCitation) => void }) => (
   <ol className="rag-citations">
     {citations.map((citation, index) => (
@@ -134,8 +153,8 @@ const FeedbackForm = ({ answer }: { answer: Exclude<Answer, { publicationStatus:
   );
 };
 
-export const AnswerPublication = ({ answer, onCitation, onPrompt = () => undefined }: { answer: Answer; onCitation: (citation: AnswerCitation) => void; onPrompt?: (prompt: string) => void }) => {
-  if (answer.publicationStatus === "pending") return <WorkflowStage answer={answer} />;
+export const AnswerPublication = ({ answer, draft, onCitation, onPrompt = () => undefined }: { answer: Answer; draft?: AnswerDraftState | undefined; onCitation: (citation: AnswerCitation) => void; onPrompt?: (prompt: string) => void }) => {
+  if (answer.publicationStatus === "pending") return <PendingAnswer answer={answer} draft={draft} />;
   if (answer.publicationStatus === "refused") return <article className="rag-answer rag-answer--refused">
     <p className="eyebrow">明确拒答</p><h3>现有证据不足以安全回答</h3><p>{answer.result.payload.summary}</p>
     {answer.result.payload.missingRequirements.length > 0 ? <ul>{answer.result.payload.missingRequirements.map((item) => <li key={item}>{item}</li>)}</ul> : null}
@@ -159,10 +178,10 @@ export const AnswerPublication = ({ answer, onCitation, onPrompt = () => undefin
   </article>;
 };
 
-const TurnCard = ({ turn, answer, onCitation, onPrompt }: { turn: Turn; answer: Answer; onCitation: (citation: AnswerCitation) => void; onPrompt: (prompt: string) => void }) => (
+const TurnCard = ({ turn, answer, draft, onCitation, onPrompt }: { turn: Turn; answer: Answer; draft?: AnswerDraftState | undefined; onCitation: (citation: AnswerCitation) => void; onPrompt: (prompt: string) => void }) => (
   <section className="rag-turn" aria-labelledby={`question-${turn.question.id}`}>
     <div className="rag-question"><span>问题 {turn.question.ordinal}</span><div><h2 id={`question-${turn.question.id}`}>{turn.question.question}</h2><small>{formatTime(turn.question.createdAt)}</small></div></div>
-    <AnswerPublication answer={answer} onCitation={onCitation} onPrompt={onPrompt} />
+    <AnswerPublication answer={answer} draft={draft} onCitation={onCitation} onPrompt={onPrompt} />
   </section>
 );
 
@@ -179,7 +198,6 @@ export const RagPage = () => {
   const conversationQuery = useConversation(workspaceId, conversationId);
   const turnsQuery = useConversationTurns(workspaceId, conversationId);
   const latestTurnQuery = useLatestTurn(workspaceId, conversationId);
-  const connectionState = useWorkspaceEventState();
   const createMutation = useCreateConversationCommand();
   const questionMutation = useSubmitQuestionCommand();
   const [title, setTitle] = useState("");
@@ -202,7 +220,21 @@ export const RagPage = () => {
     return mergeLatestTurn(items, latestTurnQuery.data);
   }, [latestTurnQuery.data, turnsQuery.data]);
   const lastPendingId = [...turns].reverse().find((turn) => turn.answer.publicationStatus === "pending")?.answer.id ?? "";
-  const recoveredAnswer = useAnswer(workspaceId, lastPendingId, connectionState !== "open");
+  const recoveredAnswer = useAnswer(workspaceId, lastPendingId, true);
+  const streamAnswerId = recoveredAnswer.data?.id === lastPendingId && recoveredAnswer.data.publicationStatus !== "pending"
+    ? ""
+    : lastPendingId;
+  const answerDraft = usePendingAnswerDraft({
+    workspaceId,
+    answerId: streamAnswerId,
+    enabled: streamAnswerId !== "",
+    refetchAnswer: async () => {
+      await Promise.all([
+        recoveredAnswer.refetch({ throwOnError: true }),
+        latestTurnQuery.refetch({ throwOnError: true }),
+      ]);
+    },
+  });
   const selectedCitationId = searchParams.get("citation");
   const selectedCitation = useMemo(() => turns.flatMap((turn) => turn.answer.citations).find((item) => item.id === selectedCitationId), [selectedCitationId, turns]);
   const evidenceRef = useRef<HTMLElement>(null);
@@ -250,7 +282,11 @@ export const RagPage = () => {
         {turnsQuery.isPending && conversationId !== "" ? <p>正在恢复会话事实…</p> : null}
         {turnsQuery.isError ? <ErrorNotice error={turnsQuery.error} /> : null}
         {conversationId !== "" && turns.length === 0 && !turnsQuery.isPending ? <section className="rag-empty"><p className="eyebrow">空会话</p><h2>提出第一个问题。</h2></section> : null}
-        <div className="rag-timeline">{turns.map((turn) => <TurnCard key={turn.question.id} turn={turn} answer={recoveredAnswer.data?.id === turn.answer.id ? recoveredAnswer.data : turn.answer} onCitation={selectCitation} onPrompt={setQuestion} />)}</div>
+        <div className="rag-timeline">{turns.map((turn) => {
+          const answer = recoveredAnswer.data?.id === turn.answer.id ? recoveredAnswer.data : turn.answer;
+          const draft = answer.publicationStatus === "pending" && answer.id === answerDraft.answerId ? answerDraft : undefined;
+          return <TurnCard key={turn.question.id} turn={turn} answer={answer} draft={draft} onCitation={selectCitation} onPrompt={setQuestion} />;
+        })}</div>
         {turnsQuery.hasNextPage ? <button type="button" className="secondary-button" disabled={turnsQuery.isFetchingNextPage} onClick={() => { void turnsQuery.fetchNextPage(); }}>{turnsQuery.isFetchingNextPage ? "正在恢复…" : "加载更多轮次"}</button> : null}
         {conversationId !== "" ? <form className="rag-composer" onSubmit={submitQuestionForm}><label><span>问题</span><textarea maxLength={8192} rows={4} value={question} onKeyDown={keyboardSubmit} onChange={(event) => setQuestion(event.target.value)} placeholder="输入问题。Enter 提交，Shift + Enter 换行。" /></label>
           <details className="rag-scope"><summary>检索范围与证据边界</summary><div className="rag-scope__grid">

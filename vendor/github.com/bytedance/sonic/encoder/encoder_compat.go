@@ -40,7 +40,7 @@ type Options uint64
 
 const (
     bitSortMapKeys          = iota
-    bitEscapeHTML
+    bitEscapeHTML          
     bitCompactMarshaler
     bitNoQuoteTextMarshaler
     bitNoNullSliceOrMap
@@ -53,21 +53,21 @@ const (
 )
 
 const (
-    // SortMapKeys indicates that the keys of a map needs to be sorted
+    // SortMapKeys indicates that the keys of a map needs to be sorted 
     // before serializing into JSON.
     // WARNING: This hurts performance A LOT, USE WITH CARE.
     SortMapKeys          Options = 1 << bitSortMapKeys
 
-    // EscapeHTML indicates encoder to escape all HTML characters
+    // EscapeHTML indicates encoder to escape all HTML characters 
     // after serializing into JSON (see https://pkg.go.dev/encoding/json#HTMLEscape).
     // WARNING: This hurts performance A LOT, USE WITH CARE.
     EscapeHTML           Options = 1 << bitEscapeHTML
 
-    // CompactMarshaler indicates that the output JSON from json.Marshaler
-    // is always compact and needs no validation
+    // CompactMarshaler indicates that the output JSON from json.Marshaler 
+    // is always compact and needs no validation 
     CompactMarshaler     Options = 1 << bitCompactMarshaler
 
-    // NoQuoteTextMarshaler indicates that the output text from encoding.TextMarshaler
+    // NoQuoteTextMarshaler indicates that the output text from encoding.TextMarshaler 
     // is always escaped string and needs no quoting
     NoQuoteTextMarshaler Options = 1 << bitNoQuoteTextMarshaler
 
@@ -85,7 +85,7 @@ const (
 
     // NoEncoderNewline indicates that the encoder should not add a newline after every message
     NoEncoderNewline Options = 1 << bitNoEncoderNewline
-
+  
     // CompatibleWithStd is used to be compatible with std encoder.
     CompatibleWithStd Options = SortMapKeys | EscapeHTML | CompactMarshaler
 )
@@ -99,7 +99,7 @@ type Encoder struct {
 
 // Encode returns the JSON encoding of v.
 func (self *Encoder) Encode(v interface{}) ([]byte, error) {
-    if self.indent != "" || self.prefix != "" {
+    if self.indent != "" || self.prefix != "" { 
         return EncodeIndented(v, self.prefix, self.indent, self.Opts)
     }
     return Encode(v, self.Opts)
@@ -250,7 +250,7 @@ func Valid(data []byte) (ok bool, start int) {
    return json.Valid(data), 0
 }
 
-// StreamEncoder uses io.Writer as
+// StreamEncoder uses io.Writer as 
 type StreamEncoder = json.Encoder
 
 // NewStreamEncoder adapts to encoding/json.NewDecoder API.
@@ -259,3 +259,4 @@ type StreamEncoder = json.Encoder
 func NewStreamEncoder(w io.Writer) *StreamEncoder {
    return json.NewEncoder(w)
 }
+

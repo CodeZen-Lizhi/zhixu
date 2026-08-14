@@ -103,7 +103,7 @@ func (d *sliceEfaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) 
 	if ((*rt.GoSlice)(vp)).Len == 0 {
 		return node.AsSliceEface(ctx, vp)
 	}
-
+	
 	decoder := sliceDecoder{
 		elemType: rt.AnyType,
 		elemDec:  &efaceDecoder{},

@@ -158,7 +158,7 @@ func (cfg frozenConfig) Valid(data []byte) bool {
 func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
     if err := encoder.Pretouch(vt, opts...); err != nil {
         return err
-    }
+    } 
     if err := decoder.Pretouch(vt, opts...); err != nil {
         return err
     }
@@ -170,7 +170,7 @@ func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
     }
     if err := encoder.Pretouch(vt, opts...); err != nil {
         return err
-    }
+    } 
     if err := decoder.Pretouch(vt, opts...); err != nil {
         return err
     }

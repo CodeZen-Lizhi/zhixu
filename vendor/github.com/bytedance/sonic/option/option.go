@@ -41,9 +41,9 @@ type CompileOptions struct {
 }
 
 var (
-    // Default value(3) means the compiler only inline 3 layers of nested struct.
-    // when the depth exceeds, the compiler will recurse
-    // and compile subsequent structs when they are decoded
+    // Default value(3) means the compiler only inline 3 layers of nested struct. 
+    // when the depth exceeds, the compiler will recurse 
+    // and compile subsequent structs when they are decoded 
     DefaultMaxInlineDepth = 3
 
     // Default value(1) means `Pretouch()` will be recursively executed once,
@@ -62,12 +62,12 @@ func DefaultCompileOptions() CompileOptions {
 // CompileOption is a function used to change DefaultCompileOptions.
 type CompileOption func(o *CompileOptions)
 
-// WithCompileRecursiveDepth sets the loop times of recursive pretouch
+// WithCompileRecursiveDepth sets the loop times of recursive pretouch 
 // in both decoder and encoder,
 // for both concrete type and its pointer type.
 //
-// For deep nested struct (depth exceeds MaxInlineDepth),
-// try to set more loops to completely compile,
+// For deep nested struct (depth exceeds MaxInlineDepth), 
+// try to set more loops to completely compile, 
 // thus reduce JIT instability in the first hit.
 func WithCompileRecursiveDepth(loop int) CompileOption {
     return func(o *CompileOptions) {
@@ -78,7 +78,7 @@ func WithCompileRecursiveDepth(loop int) CompileOption {
         }
 }
 
-// WithCompileMaxInlineDepth sets the max depth of inline compile
+// WithCompileMaxInlineDepth sets the max depth of inline compile 
 // in decoder and encoder.
 //
 // For large nested struct, try to set smaller depth to reduce compiling time.

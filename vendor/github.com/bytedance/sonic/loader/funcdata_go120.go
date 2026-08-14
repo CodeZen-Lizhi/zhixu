@@ -79,7 +79,7 @@ type _func struct {
     args        int32  // in/out args size
     deferreturn uint32 // offset of start of a deferreturn call instruction from entry, if any.
 
-    pcsp      uint32
+    pcsp      uint32 
     pcfile    uint32
     pcln      uint32
     npcdata   uint32
@@ -88,8 +88,8 @@ type _func struct {
     funcID    uint8 // set for certain special runtime functions
     flag      uint8
     _         [1]byte // pad
-    nfuncdata uint8   //
-
+    nfuncdata uint8   // 
+    
     // The end of the struct is followed immediately by two variable-length
     // arrays that reference the pcdata and funcdata locations for this
     // function.

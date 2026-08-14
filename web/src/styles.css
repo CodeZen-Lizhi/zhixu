@@ -1389,17 +1389,20 @@ h1 {
 .rag-workspace { padding: clamp(1rem, 3vw, 2.5rem); }
 .rag-empty { max-width: 38rem; padding: 4rem 0; }
 .rag-empty h2, .rag-evidence h2 { font-size: 1.35rem; font-weight: 650; }
-.rag-timeline { display: grid; gap: 3rem; }
-.rag-turn { border-top: 1px solid var(--line); padding-top: 1.5rem; }
+.rag-timeline { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3rem; min-width: 0; }
+.rag-turn { min-width: 0; border-top: 1px solid var(--line); padding-top: 1.5rem; }
 .rag-question { display: grid; grid-template-columns: 3rem minmax(0, 1fr); gap: 1rem; }
+.rag-question > div { min-width: 0; }
 .rag-question > span { display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border: 1px solid var(--blue); border-radius: 50%; color: var(--blue); font-weight: 650; }
-.rag-question h2 { margin-bottom: .4rem; font-size: 1.25rem; font-weight: 650; line-height: 1.3; }
+.rag-question h2 { margin-bottom: .4rem; overflow-wrap: anywhere; font-size: 1.25rem; font-weight: 650; line-height: 1.3; }
 .rag-question small { color: var(--muted); }
-.rag-answer { margin: 1.5rem 0 0 4rem; border-left: 2px solid var(--green); padding: 1rem 0 0 1.5rem; }
+.rag-answer { min-width: 0; margin: 1.5rem 0 0 4rem; border-left: 2px solid var(--green); padding: 1rem 0 0 1.5rem; }
+.rag-answer--draft { border-color: var(--amber); border-left-style: dashed; }
 .rag-answer--refused { border-color: var(--red); }
 .rag-answer--clarification { border-color: var(--amber); }
 .rag-answer h3 { font-size: 1.2rem; font-weight: 650; }
-.rag-answer__copy { max-width: 48rem; white-space: pre-wrap; font-size: 1.05rem; line-height: 1.85; }
+.rag-answer__copy { max-width: 48rem; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 1.05rem; line-height: 1.85; }
+.rag-draft__status { max-width: 48rem; margin-top: .75rem; color: var(--muted); font-size: .82rem; }
 .rag-stage { display: flex; gap: 1rem; align-items: center; margin: 1.5rem 0 0 4rem; padding: 1rem 1.25rem; background: var(--surface-subtle); }
 .rag-stage__pulse { width: .8rem; height: .8rem; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 6px #fff7e6; }
 .rag-stage div { display: grid; gap: .2rem; }

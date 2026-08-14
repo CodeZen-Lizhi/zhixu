@@ -36,7 +36,7 @@ func (self FunctionLayout) String() string {
 }
 
 func (self FunctionLayout) ArgSize() uint32 {
-    size := uintptr(0)
+    size := uintptr(0) 
     for _, arg := range self.Args {
         size += arg.Type.Size()
     }

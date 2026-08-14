@@ -100,6 +100,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
+	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	platformparser "github.com/CodeZen-Lizhi/zhixu/internal/platform/parser"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
@@ -172,6 +173,15 @@ func runAPI() int {
 	if telemetryStatus := telemetry.Status(); telemetryStatus.Degraded {
 		logger.Warn("telemetry exporter is unavailable", "error_code", telemetryStatus.Code)
 	}
+	if err := observability.RecordProcessPresence(context.Background(), telemetry.Metrics()); err != nil {
+		logger.Warn("API process presence metric failed", "error_code", "PROCESS_PRESENCE_METRIC_FAILED")
+	}
+	if err := observability.RecordTelemetryRequired(
+		context.Background(), telemetry.Metrics(), telemetry.Status().Mode == observability.TelemetryModeRequired,
+	); err != nil {
+		logger.Warn("API telemetry mode metric failed", "error_code", "TELEMETRY_MODE_METRIC_FAILED")
+	}
+	modelTelemetry := platformmodels.NewModelTelemetry(telemetry.Tracer(), telemetry.Metrics())
 
 	var database *postgres.Pool
 	var databaseErr error
@@ -204,7 +214,7 @@ func runAPI() int {
 				return 1
 			}
 		} else {
-			bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg)
+			bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg, modelTelemetry)
 			modelSettingsManager = bootstrap.Manager
 			if bootstrap.Repository != nil {
 				modelEnqueueFences = append(modelEnqueueFences, bootstrap.Repository)
@@ -238,7 +248,8 @@ func runAPI() int {
 				}
 				modelRuntimeHost, bootstrapErr = modelsettingsruntime.NewManagedModelsHost(modelsettingsruntime.ManagedModelsHostOptions{
 					Base: cfg, Revisions: bootstrap.Service, Role: modelsettingsdomain.RuntimeRoleAPI,
-					InstanceID: instanceID, Loaded: bootstrap.Loaded, Lifecycle: generationLifecycle,
+					InstanceID: instanceID, Loaded: bootstrap.Loaded,
+					Lifecycle: generationLifecycle, Telemetry: modelTelemetry,
 				})
 				if bootstrapErr != nil {
 					logger.Error("model runtime host is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
@@ -266,7 +277,7 @@ func runAPI() int {
 			}
 		}
 	} else {
-		loaded, modelsErr := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil)
+		loaded, modelsErr := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil, modelTelemetry)
 		if modelsErr != nil {
 			logger.Error("static model runtime is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 			return 1
@@ -274,12 +285,12 @@ func runAPI() int {
 		configuredModels = loaded.Models
 	}
 	if configuredModels == nil {
-		fallback, fallbackErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()})
-		if fallbackErr != nil {
+		disabledModels, disabledErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()}, modelTelemetry)
+		if disabledErr != nil {
 			logger.Error("disabled model runtime is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 			return 1
 		}
-		configuredModels = fallback
+		configuredModels = disabledModels
 	}
 	if modelRuntimeHost == nil {
 		defer func() { _ = configuredModels.Close() }()
@@ -353,6 +364,7 @@ func runAPI() int {
 	graphHandler := graphhttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	candidateHandler := graphhttp.NewCandidateHandler(nil, cfg.GraphQueryTimeout)
 	conversationHandler := conversationhttp.NewHandler(nil, conversationhttp.NewCursorCodec())
+	draftStreamHandler := conversationhttp.NewDraftStreamHandler(nil)
 	eventsHandler := eventshttp.NewHandler(nil)
 	exportHandler := exporthttp.NewHandler(nil)
 	reviewHandler := reviewhttp.NewHandler(nil, cfg.GraphQueryTimeout)
@@ -628,7 +640,7 @@ func runAPI() int {
 			candidateHandler = configuredCandidateHandler
 		}
 		configuredConversation, configuredEvents, conversationErr := newConversationHandlers(
-			database.DB(), workflowRuntime, questionDispatchEnabled(ragInitErr),
+			database.DB(), workflowRuntime, questionDispatchEnabled(true, ragInitErr),
 		)
 		if conversationErr != nil {
 			logger.Error("conversation service is unavailable", "error_code", "CONVERSATION_SERVICE_UNAVAILABLE")
@@ -636,6 +648,12 @@ func runAPI() int {
 		} else {
 			conversationHandler = configuredConversation
 			eventsHandler = configuredEvents
+		}
+		configuredDraftStream, draftStreamErr := newDraftStreamHandler(database.DB())
+		if draftStreamErr != nil {
+			logger.Error("answer draft stream is unavailable", "error_code", conversationhttp.ErrorCodeDraftStreamUnavailable)
+		} else {
+			draftStreamHandler = configuredDraftStream
 		}
 	}
 
@@ -654,6 +672,7 @@ func runAPI() int {
 		Ingestion:         ingestionHandler,
 		Retrieval:         retrievalHandler,
 		Conversation:      conversationHandler,
+		DraftStream:       draftStreamHandler,
 		Events:            eventsHandler,
 		Export:            exportHandler,
 		Review:            reviewHandler,
@@ -1597,17 +1616,16 @@ func artifactGenerationDependencies(
 	return []artifactapplication.SectionGenerationStarter{generation}
 }
 
-// questionDispatchEnabled 只在全部 API RAG 持久化依赖组装成功时开放异步 Question 命令。
-// 模型 capability 在 Worker 获取实际 generation 时再 fail closed。
-func questionDispatchEnabled(ragInitErr error) bool {
-	return ragInitErr == nil
+// questionDispatchEnabled 只在显式启用且全部 API RAG 依赖组装成功时开放异步 Question 命令。
+func questionDispatchEnabled(ragEnabled bool, ragInitErr error) bool {
+	return ragEnabled && ragInitErr == nil
 }
 
 // newConversationHandlers 使用同一个持久 Event Store 组装 Conversation 写事件与 SSE 重放边界。
 func newConversationHandlers(
 	pool *pgxpool.Pool,
 	runtime *workflowpostgres.RuntimeRepository,
-	questionDispatch bool,
+	ragEnabled bool,
 ) (*conversationhttp.Handler, *eventshttp.Handler, error) {
 	if pool == nil {
 		return nil, nil, errors.New("conversation database is unavailable")
@@ -1621,9 +1639,9 @@ func newConversationHandlers(
 		return nil, nil, err
 	}
 	var dispatcher conversationapplication.QuestionDispatcher
-	if questionDispatch {
+	if ragEnabled {
 		dispatcher, err = conversationpostgres.NewQuestionDispatcher(
-			pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
+			pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 		)
 		if err != nil {
 			return nil, nil, err
@@ -1637,6 +1655,18 @@ func newConversationHandlers(
 		return nil, nil, err
 	}
 	return conversationhttp.NewHandler(service, conversationhttp.NewCursorCodec()), eventshttp.NewHandler(eventStore), nil
+}
+
+// newDraftStreamHandler 独立于持久 Server Event 组装短期 Answer 草稿流。
+func newDraftStreamHandler(pool *pgxpool.Pool) (*conversationhttp.DraftStreamHandler, error) {
+	if pool == nil {
+		return nil, errors.New("answer draft stream database is unavailable")
+	}
+	repository, err := conversationpostgres.NewDraftStreamRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	return conversationhttp.NewDraftStreamHandler(repository), nil
 }
 
 func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error) {
@@ -1710,7 +1740,7 @@ func newAPIArtifactWorkflowComponents(
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	service, err := newWorkflowServiceWithRuntime(factory, runtime)
+	service, err := newWorkflowServiceWithRuntime(factory, runtime, true)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1743,7 +1773,7 @@ func newWorkflowComponentsWithFactory(
 	if err != nil {
 		return nil, nil, err
 	}
-	service, err := newWorkflowServiceWithRuntime(factory, runtimeRepository)
+	service, err := newWorkflowServiceWithRuntime(factory, runtimeRepository, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1753,6 +1783,7 @@ func newWorkflowComponentsWithFactory(
 func newWorkflowServiceWithRuntime(
 	factory *apiRuntimeRepositoryFactory,
 	runtimeRepository *workflowpostgres.RuntimeRepository,
+	chatEnabled bool,
 ) (*workflowapplication.Service, error) {
 	if factory == nil || factory.pool == nil || runtimeRepository == nil {
 		return nil, errors.New("workflow runtime dependencies are unavailable")
@@ -1769,7 +1800,7 @@ func newWorkflowServiceWithRuntime(
 	if err != nil {
 		return nil, err
 	}
-	if err := registerAPIWorkflowExecutors(executors); err != nil {
+	if err := registerAPIWorkflowExecutors(chatEnabled, executors); err != nil {
 		return nil, err
 	}
 	if err := executors.Freeze(); err != nil {
@@ -1783,7 +1814,7 @@ func newWorkflowServiceWithRuntime(
 	if err != nil {
 		return nil, err
 	}
-	if err := registerAPIWorkflowDefinitions(definitions); err != nil {
+	if err := registerAPIWorkflowDefinitions(chatEnabled, definitions); err != nil {
 		return nil, err
 	}
 	if err := definitions.Freeze(); err != nil {
@@ -1800,23 +1831,25 @@ func newToolContractRegistry() (*toolsapplication.Registry, error) {
 	return toolcatalog.NewFrozenContractRegistry()
 }
 
-func registerAPIWorkflowExecutors(executors *workflowapplication.ExecutorRegistry) error {
+func registerAPIWorkflowExecutors(chatEnabled bool, executors *workflowapplication.ExecutorRegistry) error {
 	if err := executors.Register(workflowapplication.CanonicalJSONHashNodeKind, workflowapplication.CanonicalJSONHashInputSchemaVersion, workflowapplication.NewCanonicalJSONHashExecutor()); err != nil {
 		return err
 	}
 	if err := executors.RegisterContract(healthapplication.HealthScanNodeKind, healthapplication.HealthScanInputSchemaVersion); err != nil {
 		return err
 	}
-	if err := executors.RegisterContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err != nil {
-		return err
-	}
-	if err := executors.RegisterContract(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion); err != nil {
-		return err
+	if chatEnabled {
+		if err := executors.RegisterContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err != nil {
+			return err
+		}
+		if err := executors.RegisterContract(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func registerAPIWorkflowDefinitions(definitions *workflowapplication.DefinitionRegistry) error {
+func registerAPIWorkflowDefinitions(chatEnabled bool, definitions *workflowapplication.DefinitionRegistry) error {
 	if err := definitions.Register(workflowdomain.RegisteredDefinition{
 		Key: "deterministic.hash", Version: 1, InputSchemaVersion: 1,
 		Graph: workflowdomain.CanonicalGraph{Nodes: []workflowdomain.NodeDefinition{{
@@ -1834,11 +1867,13 @@ func registerAPIWorkflowDefinitions(definitions *workflowapplication.DefinitionR
 	if err := definitions.Register(healthDefinition); err != nil {
 		return err
 	}
-	if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
-		return err
-	}
-	if err := definitions.Register(conversationworkflow.RegisteredDefinition()); err != nil {
-		return err
+	if chatEnabled {
+		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
+			return err
+		}
+		if err := definitions.Register(conversationworkflow.RegisteredDefinitionV2()); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -1,6 +1,8 @@
 package postgres
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -35,6 +37,100 @@ func TestBuildPublicationCanonicalizesAllTerminalKinds(t *testing.T) {
 				ExpectedAnswerVersion: 1, ExpectedModelRunVersion: 1, Proposal: test.proposal}, run, pending, now)
 			if err != nil || built.answer.PublicationStatus != test.status || built.modelRun.Status != test.runStatus || built.answer.ResultHash == "" {
 				t.Fatalf("buildPublication=%#v err=%v", built, err)
+			}
+		})
+	}
+}
+
+func TestValidateFinalizeCommandKeepsDraftTerminalBindingStrictAndOptional(t *testing.T) {
+	lookup := finalizerTestLookup()
+	run := finalizerTestRun(lookup, time.Now().UTC())
+	command := conversationapplication.FinalizeAnswerCommand{
+		AnswerPublicationLookup: lookup,
+		ModelRunID:              run.ID,
+		ExpectedAnswerVersion:   1,
+		ExpectedModelRunVersion: 1,
+		Proposal:                finalizerCompletedProposal(run.ID, lookup.WorkspaceID),
+	}
+	if err := validateFinalizeCommand(context.Background(), command); err != nil {
+		t.Fatalf("legacy command without draft = %v", err)
+	}
+	validDraft := conversationapplication.AnswerDraftTerminalBinding{
+		SessionID:  foundation.ID("73000000-0000-4000-8000-000000000009"),
+		Generation: 1,
+		AttemptNo:  1,
+		LeaseOwner: "worker-a",
+	}
+	command.Draft = &validDraft
+	if err := validateFinalizeCommand(context.Background(), command); err != nil {
+		t.Fatalf("valid draft command = %v", err)
+	}
+	for _, proposal := range []agentapplication.RAGTerminalProposal{
+		finalizerRefusalProposal(run.ID),
+		finalizerClarificationProposal(run.ID),
+	} {
+		candidate := command
+		candidate.Proposal = proposal
+		if err := validateFinalizeCommand(context.Background(), candidate); err != nil {
+			t.Fatalf("valid terminal draft command = %v", err)
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*conversationapplication.FinalizeAnswerCommand)
+	}{
+		{name: "invalid session", mutate: func(candidate *conversationapplication.FinalizeAnswerCommand) { candidate.Draft.SessionID = "invalid" }},
+		{name: "reused session identity", mutate: func(candidate *conversationapplication.FinalizeAnswerCommand) {
+			candidate.Draft.SessionID = candidate.AnswerID
+		}},
+		{name: "zero generation", mutate: func(candidate *conversationapplication.FinalizeAnswerCommand) { candidate.Draft.Generation = 0 }},
+		{name: "zero attempt", mutate: func(candidate *conversationapplication.FinalizeAnswerCommand) { candidate.Draft.AttemptNo = 0 }},
+		{name: "padded owner", mutate: func(candidate *conversationapplication.FinalizeAnswerCommand) {
+			candidate.Draft.LeaseOwner = " worker-a"
+		}},
+		{name: "invalid owner encoding", mutate: func(candidate *conversationapplication.FinalizeAnswerCommand) {
+			candidate.Draft.LeaseOwner = string([]byte{0xff})
+		}},
+		{name: "missing terminal proposal", mutate: func(candidate *conversationapplication.FinalizeAnswerCommand) {
+			candidate.Proposal = agentapplication.RAGTerminalProposal{ModelRunRef: candidate.ModelRunID}
+		}},
+		{name: "ambiguous terminal proposal", mutate: func(candidate *conversationapplication.FinalizeAnswerCommand) {
+			candidate.Proposal.Refusal = finalizerRefusalProposal(candidate.ModelRunID).Refusal
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := command
+			draft := *command.Draft
+			candidate.Draft = &draft
+			test.mutate(&candidate)
+			err := validateFinalizeCommand(context.Background(), candidate)
+			var classified *foundation.Error
+			if !errors.As(err, &classified) || classified.Code != ErrorCodeAnswerFinalizeInvalid {
+				t.Fatalf("error = %#v, want %s", err, ErrorCodeAnswerFinalizeInvalid)
+			}
+		})
+	}
+}
+
+func TestExpectedDraftTerminalStatusFollowsProposalKind(t *testing.T) {
+	lookup := finalizerTestLookup()
+	run := finalizerTestRun(lookup, time.Now().UTC())
+	tests := []struct {
+		name     string
+		proposal agentapplication.RAGTerminalProposal
+		want     agentapplication.DraftStreamStatus
+	}{
+		{name: "answer", proposal: finalizerCompletedProposal(run.ID, lookup.WorkspaceID), want: agentapplication.DraftStreamPublished},
+		{name: "refusal", proposal: finalizerRefusalProposal(run.ID), want: agentapplication.DraftStreamAborted},
+		{name: "clarification", proposal: finalizerClarificationProposal(run.ID), want: agentapplication.DraftStreamAborted},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := expectedDraftTerminalStatus(test.proposal)
+			if err != nil || got != test.want {
+				t.Fatalf("expectedDraftTerminalStatus=%s err=%v, want %s", got, err, test.want)
 			}
 		})
 	}

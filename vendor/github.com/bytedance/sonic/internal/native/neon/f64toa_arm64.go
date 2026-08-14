@@ -26,4 +26,4 @@ func f64toa(out *byte, val float64) (ret int) {
 //go:nosplit
 //go:noescape
 //goland:noinspection GoUnusedParameter
-func __f64toa(out *byte, val float64) (ret int)
+func __f64toa(out *byte, val float64) (ret int) 

@@ -36,7 +36,7 @@ func Mapiternext(it *GoMapIterator)
 func Mapiterinit(t *GoMapType, m unsafe.Pointer, it *GoMapIterator)
 
 //go:linkname Maplen reflect.maplen
-func Maplen(h unsafe.Pointer) int
+func Maplen(h unsafe.Pointer) int 
 
 //go:nosplit
 //go:linkname MemclrHasPointers runtime.memclrHasPointers
@@ -48,7 +48,7 @@ func MemclrHasPointers(ptr unsafe.Pointer, n uintptr)
 func MemclrNoHeapPointers(ptr unsafe.Pointer, n uintptr)
 
 //go:linkname newarray runtime.newarray
-func newarray(typ *GoType, n int) unsafe.Pointer
+func newarray(typ *GoType, n int) unsafe.Pointer 
 
 func add(p unsafe.Pointer, x uintptr) unsafe.Pointer {
 	return unsafe.Pointer(uintptr(p) + x)

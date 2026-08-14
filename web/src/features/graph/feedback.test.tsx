@@ -7,7 +7,7 @@ import { GraphErrorNotice } from "./feedback";
 describe("GraphErrorNotice", () => {
   it.each([
     ["GRAPH_CURSOR_STALE", "图谱结果已变化"],
-    ["GRAPH_DEPENDENCY_UNAVAILABLE", "Graph 服务暂不可用"],
+    ["GRAPH_DEPENDENCY_UNAVAILABLE", "图谱服务暂不可用"],
     ["GRAPH_PROJECTION_INCONSISTENT", "图谱投影不一致"],
   ])("明确展示 %s", (errorCode, title) => {
     render(<GraphErrorNotice error={new GraphApiError({

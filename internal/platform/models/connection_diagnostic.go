@@ -102,6 +102,10 @@ func (diagnostic *ConnectionDiagnostic) Unwrap() error {
 }
 
 func providerResponseDiagnostic(response *http.Response, authorization, endpoint string) *ConnectionDiagnostic {
+	return providerResponseDiagnosticBounded(response, authorization, endpoint, maxProviderDiagnosticBodyBytes)
+}
+
+func providerResponseDiagnosticBounded(response *http.Response, authorization, endpoint string, maxBodyBytes int64) *ConnectionDiagnostic {
 	diagnostic := &ConnectionDiagnostic{Stage: ConnectionStageProviderResponse, ProviderHTTPStatus: response.StatusCode}
 	sensitive := diagnosticSensitiveValues(authorization, endpoint)
 	diagnostic.ProviderRequestID = safeDiagnosticToken(firstNonEmpty(
@@ -109,14 +113,20 @@ func providerResponseDiagnostic(response *http.Response, authorization, endpoint
 		response.Header.Get("request-id"),
 		response.Header.Get("x-dashscope-request-id"),
 	), 256, sensitive)
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxProviderDiagnosticBodyBytes+1))
+	if maxBodyBytes <= 0 || maxBodyBytes > maxProviderDiagnosticBodyBytes {
+		maxBodyBytes = maxProviderDiagnosticBodyBytes
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxBodyBytes))
 	if err != nil {
 		diagnostic.Stage = ConnectionStageResponseRead
 		diagnostic.TransportError = "response read failed"
 		diagnostic.cause = err
 		return diagnostic
 	}
-	if int64(len(body)) > maxProviderDiagnosticBodyBytes || !utf8.Valid(body) || !isJSONMediaType(response.Header.Get("Content-Type")) {
+	// Reaching the read ceiling is treated as truncated even when the body may
+	// be exactly that size. Connection diagnostics favor a generic message over
+	// a second read that would exceed the adapter's strict error-body budget.
+	if int64(len(body)) >= maxBodyBytes || !utf8.Valid(body) || !isJSONMediaType(response.Header.Get("Content-Type")) {
 		diagnostic.ProviderMessage = "响应详情无法安全解析"
 		return diagnostic
 	}

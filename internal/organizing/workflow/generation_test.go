@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	agenteino "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/eino"
 	agentapp "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	artifactdomain "github.com/CodeZen-Lizhi/zhixu/internal/artifact/domain"
@@ -74,6 +76,72 @@ func TestGeneratorRecoversFinalizationResponseLossWithoutCallingModelAgain(t *te
 		strings.Contains(modelInput, snapshot.Materials[0].ContentHash) {
 		t.Fatalf("model input exposed an internal identity or omitted evidence: %s", modelInput)
 	}
+}
+
+func TestGeneratorExecutesConfiguredEinoStructuredScheduler(t *testing.T) {
+	snapshot, verifier := semanticSnapshot([]semanticEvidence{{source: 1, span: 11, excerpt: "Cache entries expire after five minutes."}})
+	revision := semanticBuiltInRevision(t, organizingdomain.TemplateKnowledgeReport)
+	snapshot.TemplateID, snapshot.TemplateRevisionID, snapshot.TemplateHash = revision.TemplateID, revision.ID, revision.DeclarationHash
+	var err error
+	snapshot.Hash, err = organizingdomain.ComputeSnapshotHash(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outline := outlineFromTemplate(revision)
+	scheduler := newOrganizingTrackingEinoScheduler(t)
+	modelRef := agentdomain.ModelRef{AdapterName: "test", AdapterVersion: "v1", ModelID: "organizing", ModelVersion: "v1"}
+	model := agentapp.NewDeterministicChatModel(agentapp.DeterministicChatStep{Response: agentapp.ChatResponse{
+		Model: modelRef, Content: generationDocumentOutput(t, outline),
+		Usage: agentdomain.TokenUsage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+	}})
+	modelRuns := &generationModelRunStore{}
+	generations := &generationStoreFake{modelRuns: modelRuns}
+	generator := newGenerationTestGeneratorWithScheduler(
+		t,
+		model,
+		modelRuns,
+		generations,
+		verifier,
+		modelRef,
+		scheduler,
+	)
+	if generator.dependencies.Scheduler != scheduler {
+		t.Fatalf("scheduler=%T want=%T", generator.dependencies.Scheduler, scheduler)
+	}
+	document, err := generator.GenerateDocument(context.Background(), generationExecution(105), snapshot, revision, outline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := model.Calls()
+	if len(requests) != 1 || requests[0].Phase != agentdomain.ModelCallInitial || len(modelRuns.calls) != 1 ||
+		modelRuns.calls[0].CallNo != 1 || modelRuns.calls[0].Phase != agentdomain.ModelCallInitial ||
+		modelRuns.calls[0].Status != agentdomain.ModelCallSucceeded || modelRuns.calls[0].ResponseBytes == 0 ||
+		modelRuns.calls[0].Usage.TotalTokens != 15 {
+		t.Fatalf("requests=%+v model-calls=%+v", requests, modelRuns.calls)
+	}
+	if scheduler.calls.Load() != 1 || generations.record.Status != GenerationReady || modelRuns.run.Status != agentdomain.ModelRunSucceeded ||
+		len(document.Sections) != len(outline) || document.Sections[0].Content != "Verified cache guidance." {
+		t.Fatalf("scheduler_calls=%d generation=%+v model-run=%+v document=%+v", scheduler.calls.Load(), generations.record, modelRuns.run, document)
+	}
+}
+
+type organizingTrackingScheduler struct {
+	delegate agentapp.StructuredPhaseScheduler
+	calls    atomic.Int64
+}
+
+func newOrganizingTrackingEinoScheduler(t *testing.T) *organizingTrackingScheduler {
+	t.Helper()
+	scheduler, err := agenteino.NewStructuredPhaseScheduler(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &organizingTrackingScheduler{delegate: scheduler}
+}
+
+func (scheduler *organizingTrackingScheduler) Schedule(ctx context.Context, run *agentapp.StructuredPhaseRun) error {
+	scheduler.calls.Add(1)
+	return scheduler.delegate.Schedule(ctx, run)
 }
 
 func TestGeneratorUsesHistoricalDocumentWithoutFabricatingRetrievalEvidence(t *testing.T) {
@@ -216,7 +284,21 @@ func newGenerationTestGenerator(
 	verifier CitationVerifier,
 	modelRef agentdomain.ModelRef,
 ) *Generator {
-	return newGenerationTestGeneratorWithDocuments(t, model, modelRuns, generations, verifier, modelRef, emptyGenerationDocumentReader{})
+	return newGenerationTestGeneratorWithScheduler(t, model, modelRuns, generations, verifier, modelRef, newOrganizingTrackingEinoScheduler(t))
+}
+
+func newGenerationTestGeneratorWithScheduler(
+	t *testing.T,
+	model agentapp.ChatModel,
+	modelRuns *generationModelRunStore,
+	generations *generationStoreFake,
+	verifier CitationVerifier,
+	modelRef agentdomain.ModelRef,
+	scheduler agentapp.StructuredPhaseScheduler,
+) *Generator {
+	return newGenerationTestGeneratorWithDocumentsAndScheduler(
+		t, model, modelRuns, generations, verifier, modelRef, emptyGenerationDocumentReader{}, scheduler,
+	)
 }
 
 func newGenerationTestGeneratorWithDocuments(
@@ -227,6 +309,21 @@ func newGenerationTestGeneratorWithDocuments(
 	verifier CitationVerifier,
 	modelRef agentdomain.ModelRef,
 	documents organizingapp.FrozenDocumentContentReader,
+) *Generator {
+	return newGenerationTestGeneratorWithDocumentsAndScheduler(
+		t, model, modelRuns, generations, verifier, modelRef, documents, newOrganizingTrackingEinoScheduler(t),
+	)
+}
+
+func newGenerationTestGeneratorWithDocumentsAndScheduler(
+	t *testing.T,
+	model agentapp.ChatModel,
+	modelRuns *generationModelRunStore,
+	generations *generationStoreFake,
+	verifier CitationVerifier,
+	modelRef agentdomain.ModelRef,
+	documents organizingapp.FrozenDocumentContentReader,
+	scheduler agentapp.StructuredPhaseScheduler,
 ) *Generator {
 	t.Helper()
 	catalog := agentapp.NewRuntimeCatalog()
@@ -247,7 +344,7 @@ func newGenerationTestGeneratorWithDocuments(
 		t.Fatal(err)
 	}
 	generator, err := NewGenerator(GeneratorDependencies{
-		Model: model, Catalog: catalog, ModelRuns: modelRuns, Store: generations, Evidence: evidence, Documents: documents,
+		Model: model, Scheduler: scheduler, Catalog: catalog, ModelRuns: modelRuns, Store: generations, Evidence: evidence, Documents: documents,
 		ProfileRef: profileRef, IDs: &generationIDs{next: 200}, Clock: &generationClock{next: time.Date(2026, 8, 4, 1, 0, 0, 0, time.UTC)},
 	})
 	if err != nil {

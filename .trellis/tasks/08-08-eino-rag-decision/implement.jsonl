@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"约束领域边界、Composition Root 和测试证据。"}
+{"file":".trellis/tasks/archive/2026-08/08-06-eino-layered-migration/research/eino-official-capabilities.md","reason":"冻结 Eino RAG、Retriever 与 Checkpoint 官方能力边界。"}
+{"file":".trellis/tasks/08-08-eino-rag-decision/research/rag-coverage-and-net-benefit.md","reason":"完整 RAG Graph 的加权矩阵和净收益证据。"}

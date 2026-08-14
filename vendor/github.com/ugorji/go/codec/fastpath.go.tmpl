@@ -16,20 +16,20 @@ package codec
 //
 // The advantage of fast paths is:
 //	  - Many calls bypass reflection altogether
-//
+// 
 // Currently support
 //	  - slice of all builtin types (numeric, bool, string, []byte)
 //    - maps of builtin types to builtin or interface{} type, EXCEPT FOR
 //      keys of type uintptr, int8/16/32, uint16/32, float32/64, bool, interface{}
 //      AND values of type type int8/16/32, uint16/32
 // This should provide adequate "typical" implementations.
-//
+// 
 // Note that fast track decode functions must handle values for which an address cannot be obtained.
-// For example:
+// For example: 
 //	 m2 := map[string]int{}
 //	 p2 := []interface{}{m2}
 //	 // decoding into p2 will bomb if fast track functions do not treat like unaddressable.
-//
+// 
 
 {{/*
 // ----------------
@@ -105,7 +105,7 @@ func init() {
 	{{range .Values}}{{if not .Primitive}}{{if not .MapKey -}}
 	fn([]{{ .Elem }}(nil))
 	{{end}}{{end}}{{end}}
-
+	
 	{{range .Values}}{{if not .Primitive}}{{if .MapKey -}}
 	fn(map[{{ .MapKey }}]{{ .Elem }}(nil))
 	{{end}}{{end}}{{end}}
@@ -115,16 +115,16 @@ func init() {
 	slices.Sort(encBuiltinRtids)
 	slices.Sort(decBuiltinRtids)
 }
-
+	
 func fastpathDecodeSetZeroTypeSwitch(iv interface{}) bool {
 	switch v := iv.(type) {
 {{range .Values}}{{if not .Primitive}}{{if not .MapKey -}}
-	case *[]{{ .Elem }}:
+	case *[]{{ .Elem }}: 
 		*v = nil
 {{end}}{{end}}{{end}}
 {{range .Values}}{{if not .Primitive}}{{if .MapKey -}}
-	case *map[{{ .MapKey }}]{{ .Elem }}:
-		*v = nil
+	case *map[{{ .MapKey }}]{{ .Elem }}: 
+		*v = nil 
 {{end}}{{end}}{{end}}
 	default:
 		_ = v // workaround https://github.com/golang/go/issues/12927 seen in go1.4

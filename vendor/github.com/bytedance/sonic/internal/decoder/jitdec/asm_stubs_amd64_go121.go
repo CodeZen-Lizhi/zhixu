@@ -44,8 +44,8 @@ func (self *_Assembler) WritePtrAX(i int, rec obj.Addr, saveDI bool) {
     } else {
         self.save(_R11)
     }
-    self.Emit("MOVQ", _F_gcWriteBarrier2, _R11)
-    self.Rjmp("CALL", _R11)
+    self.Emit("MOVQ", _F_gcWriteBarrier2, _R11)  
+    self.Rjmp("CALL", _R11)  
     self.Emit("MOVQ", _AX, jit.Ptr(_R11, 0))
     self.Emit("MOVQ", rec, _DI)
     self.Emit("MOVQ", _DI, jit.Ptr(_R11, 8))
@@ -53,7 +53,7 @@ func (self *_Assembler) WritePtrAX(i int, rec obj.Addr, saveDI bool) {
         self.load(_DI, _R11)
     } else {
         self.load(_R11)
-    }
+    }   
     self.Link("_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Emit("MOVQ", _AX, rec)
 }
@@ -70,8 +70,8 @@ func (self *_Assembler) WriteRecNotAX(i int, ptr obj.Addr, rec obj.Addr, saveDI 
     } else {
         self.save(_R11)
     }
-    self.Emit("MOVQ", _F_gcWriteBarrier2, _R11)
-    self.Rjmp("CALL", _R11)
+    self.Emit("MOVQ", _F_gcWriteBarrier2, _R11)  
+    self.Rjmp("CALL", _R11)  
     self.Emit("MOVQ", ptr, jit.Ptr(_R11, 0))
     self.Emit("MOVQ", rec, _AX)
     self.Emit("MOVQ", _AX, jit.Ptr(_R11, 8))
@@ -79,7 +79,7 @@ func (self *_Assembler) WriteRecNotAX(i int, ptr obj.Addr, rec obj.Addr, saveDI 
         self.load(_AX, _R11)
     } else {
         self.load(_R11)
-    }
+    }   
     self.Link("_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Emit("MOVQ", ptr, rec)
 }
@@ -93,8 +93,8 @@ func (self *_ValueDecoder) WritePtrAX(i int, rec obj.Addr, saveDI bool) {
     } else {
         self.save(_R11)
     }
-    self.Emit("MOVQ", _F_gcWriteBarrier2, _R11)
-    self.Rjmp("CALL", _R11)
+    self.Emit("MOVQ", _F_gcWriteBarrier2, _R11)  
+    self.Rjmp("CALL", _R11)   
     self.Emit("MOVQ", _AX, jit.Ptr(_R11, 0))
     self.Emit("MOVQ", rec, _DI)
     self.Emit("MOVQ", _DI, jit.Ptr(_R11, 8))
@@ -102,7 +102,7 @@ func (self *_ValueDecoder) WritePtrAX(i int, rec obj.Addr, saveDI bool) {
         self.load(_DI, _R11)
     } else {
         self.load(_R11)
-    }
+    }   
     self.Link("_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Emit("MOVQ", _AX, rec)
 }
@@ -115,12 +115,12 @@ func (self *_ValueDecoder) WriteRecNotAX(i int, ptr obj.Addr, rec obj.Addr, save
     self.Emit("CMPL", jit.Ptr(_AX, 0), jit.Imm(0))
     self.Sjmp("JE", "_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.save(_R11)
-    self.Emit("MOVQ", _F_gcWriteBarrier2, _R11)
-    self.Rjmp("CALL", _R11)
+    self.Emit("MOVQ", _F_gcWriteBarrier2, _R11)  
+    self.Rjmp("CALL", _R11)     
     self.Emit("MOVQ", ptr, jit.Ptr(_R11, 0))
     self.Emit("MOVQ", rec, _AX)
     self.Emit("MOVQ", _AX, jit.Ptr(_R11, 8))
-    self.load(_R11)
+    self.load(_R11)  
     self.Link("_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Emit("MOVQ", ptr, rec)
 }

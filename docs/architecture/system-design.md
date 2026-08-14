@@ -141,7 +141,7 @@ Safe Writeback 的 WorkspaceStore 与 GitRepository 不是通用文件/Git 工�
 | 图谱 | canonical Relation + PostgreSQL 查询投影 | v1 不引入图数据库，见 [ADR-0005](adr/0005-no-graph-database-v1.md) |
 | 内容 | goldmark、go-readability Adapter、pdftotext/Poppler Adapter、SHA-256 | 外部 Parser 只经 Adapter；HTML 安全文本使用标准 parser，不用正则清洗 |
 | Git | Git CLI Adapter | 固定命令和受控环境，见 [ADR-0009](adr/0009-git-cli-adapter.md) |
-| AI | OpenAI-Compatible Chat/Embedding；受管理的本地 Ollama；可选 Rerank | 项目 Application 直接编排；managed settings 由 PostgreSQL activation + 进程 RuntimeHost 热应用，本地 Ollama 由主 Compose 小型管理器按需启动同容器子进程并复用持久模型卷，见 [ADR-0022](adr/0022-model-runtime-hot-activation.md) 与 [ADR-0023](adr/0023-managed-local-ollama-runtime.md)；Eino 当前未正式采用，见 [ADR-0013](adr/0013-eino-adoption-gate.md) 与 [PoC 报告](../../poc/eino/report.md) |
+| AI | OpenAI-Compatible Chat/Embedding；受管理的本地 Ollama；可选 Rerank | Chat、Embedding、Structured Scheduler 与 `/chat` RAG 的进程内运行时固定使用 Eino/eino-ext；项目继续拥有业务编排、持久状态、权限和最终发布。本地 Ollama 管理、模型热应用分别见 [ADR-0023](adr/0023-managed-local-ollama-runtime.md)、[ADR-0022](adr/0022-model-runtime-hot-activation.md)，Eino 采用见 [ADR-0027](adr/0027-eino-primary-ai-runtime.md) |
 | 前端 | React + TypeScript + Vite、TanStack Query、React Router、Monaco | strict wire boundary；SSE 只触发回查 |
 | 图形 UI | 当前 SVG/CSS + 有界列表 fallback | Cytoscape/Web Worker 仅在 50 万 Relation/FPS 证据后评估 |
 | 配置 | Viper + validator + YAML v3 AST 预检 | 每次实例化加载、严格输入，详见 [应用契约](application-contracts.md) |

@@ -32,5 +32,6 @@ var _text_lspace = []byte{
 	0x4c, 0x89, 0xc0, //0x00000052 movq         %r8, %rax
 	//0x00000055 LBB0_7
 	0x5d, //0x00000055 popq         %rbp
-	0xc3, //0x00000056 retq
+	0xc3, //0x00000056 retq         
 }
+ 

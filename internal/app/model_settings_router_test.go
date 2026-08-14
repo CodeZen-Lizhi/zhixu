@@ -85,6 +85,9 @@ func TestRouterRegistersSessionOnlyModelSettingsRoutes(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 			request.AddCookie(&http.Cookie{Name: authhttp.SessionCookieName, Value: "session-cookie"})
+			if test.path == "/api/v1/settings/models/test" {
+				request.Header.Set("Idempotency-Key", "router-model-settings-connection-test")
+			}
 			if test.body != "" {
 				request.Header.Set("Content-Type", "application/json")
 				request.Header.Set("Origin", "https://app.example.test")
@@ -193,7 +196,7 @@ func disabledModelSettingsUpdateBody() string {
 }
 
 func chatModelSettingsTestBody() string {
-	return `{"target":"chat","chat":{"provider":"openai-compatible","api_style":"chat_completions","base_url":"https://chat.example.test/v1","model":"chat-v1","model_version":"2026-07","adapter_version":"v1","api_key":{"action":"clear"}}}`
+	return `{"target":"chat","chat":{"provider":"openai-compatible","api_style":"chat_completions","base_url":"https://chat.example.test/v1","model":"chat-v1","model_version":"2026-07","adapter_version":"v1","api_key":{"action":"replace","value":"router-model-settings-test-key"}}}`
 }
 
 func assertModelSettingsNoStore(t *testing.T, response *httptest.ResponseRecorder) {

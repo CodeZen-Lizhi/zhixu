@@ -187,7 +187,7 @@ describe("ModelSettingsPanel", () => {
 
   it("同时展示 desired/active/applied 差异并测试已保存的 Chat Key", async () => {
     api.getModelSettings.mockResolvedValue(configuredSettings());
-    api.testModelSettings.mockResolvedValue({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", apiStyle: "responses", endpointPath: "/v1/responses", latencyMs: 12 });
+    api.testModelSettings.mockResolvedValue({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", apiStyle: "chat_completions", endpointPath: "/v1/chat/completions", latencyMs: 12 });
 
     renderPanel();
 
@@ -199,16 +199,32 @@ describe("ModelSettingsPanel", () => {
     expect(screen.getAllByText("与待应用配置不同")).toHaveLength(2);
     expect(screen.getByText("版本 2")).toBeInTheDocument();
     expect(screen.getAllByText("版本 1").length).toBeGreaterThanOrEqual(3);
-    fireEvent.change(screen.getByRole("combobox", { name: "对话模型调用接口" }), { target: { value: "responses" } });
+    expect(screen.getByRole("option", { name: "Responses API（仅历史配置）" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "测试对话连接" }));
 
-    expect(await screen.findByText(/当前草稿连接测试通过，尚未保存或生效：openai-compatible \/ chat-v2 \/ Responses API/)).toHaveTextContent("/v1/responses");
+    expect(await screen.findByText(/当前草稿连接测试通过，尚未保存或生效：openai-compatible \/ chat-v2 \/ Chat Completions/)).toHaveTextContent("/v1/chat/completions");
     expect(screen.queryByText(/已保存或已应用/)).not.toBeInTheDocument();
     const testInput: unknown = api.testModelSettings.mock.calls[0]?.[0];
     expect(testInput).toMatchObject({
       target: "chat",
-      chat: { apiStyle: "responses", apiKey: { action: "keep" } },
+      chat: { apiStyle: "chat_completions", apiKey: { action: "keep" } },
     });
+  });
+
+  it("显示历史 Responses 配置但只允许迁移到 Chat Completions", async () => {
+    const historical = configuredSettings();
+    historical.desiredSettings.chat.apiStyle = "responses";
+    api.getModelSettings.mockResolvedValue(historical);
+
+    renderPanel();
+    await screen.findByText("配置已保存，尚未应用");
+    await expandModelSection("对话模型");
+    const selector = screen.getByRole("combobox", { name: "对话模型调用接口" });
+    expect(selector).toHaveValue("responses");
+    expect(screen.getByRole("option", { name: "Responses API（仅历史配置）" })).toBeDisabled();
+
+    fireEvent.change(selector, { target: { value: "chat_completions" } });
+    expect(selector).toHaveValue("chat_completions");
   });
 
   it("按 dirty draft 切换保存按钮，并让仅保存不启动应用", async () => {

@@ -1,8 +1,6 @@
 package models
 
 import (
-	"errors"
-
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 )
@@ -13,23 +11,25 @@ func NewConfiguredEmbedder(cfg config.Config) (application.Embedder, error) {
 	case config.EmbeddingProviderDisabled:
 		return nil, nil
 	case config.EmbeddingProviderOpenAICompatible:
-		return NewOpenAICompatibleEmbedder(OpenAIEmbeddingOptions{
+		options := OpenAIEmbeddingOptions{
 			BaseURL: cfg.EmbeddingBaseURL, APIKey: cfg.EmbeddingAPIKey, Model: cfg.EmbeddingModel,
 			Dimensions: cfg.EmbeddingDimensions, Normalization: cfg.EmbeddingNormalization,
 			DistanceMetric: cfg.EmbeddingDistanceMetric, MaxBatchSize: cfg.EmbeddingMaxBatchSize,
 			MaxInputBytes: cfg.EmbeddingMaxInputBytes, MaxBatchInputBytes: cfg.EmbeddingMaxBatchInputBytes,
 			Timeout:          cfg.EmbeddingTimeout,
 			MaxResponseBytes: cfg.EmbeddingMaxResponseBytes,
-		})
+		}
+		return NewEinoOpenAICompatibleEmbedder(options)
 	case config.EmbeddingProviderOllama:
-		return NewOllamaEmbedder(OllamaEmbeddingOptions{
+		options := OllamaEmbeddingOptions{
 			BaseURL: cfg.EmbeddingBaseURL, Model: cfg.EmbeddingModel, Dimensions: cfg.EmbeddingDimensions,
 			Normalization: cfg.EmbeddingNormalization, DistanceMetric: cfg.EmbeddingDistanceMetric,
 			MaxBatchSize: cfg.EmbeddingMaxBatchSize, MaxInputBytes: cfg.EmbeddingMaxInputBytes,
 			MaxBatchInputBytes: cfg.EmbeddingMaxBatchInputBytes,
 			Timeout:            cfg.EmbeddingTimeout, MaxResponseBytes: cfg.EmbeddingMaxResponseBytes,
-		})
+		}
+		return NewEinoOllamaEmbedder(options)
 	default:
-		return nil, errors.New("embedding provider is unsupported")
+		return nil, embeddingConfigError()
 	}
 }

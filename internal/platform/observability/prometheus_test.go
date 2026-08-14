@@ -67,6 +67,19 @@ func TestPrometheusAdapterMapsEveryMetricAndRejectsBeforeMutation(t *testing.T) 
 	recordMetric(t, telemetry.Metrics(), MetricHeartbeatFailureTotal, MetricKindCounter, 1, map[string]string{"node_kind": "hash"})
 	recordMetric(t, telemetry.Metrics(), MetricDuplicateDeliveryTotal, MetricKindCounter, 1, map[string]string{"node_kind": "hash"})
 	recordMetric(t, telemetry.Metrics(), MetricShutdownTotal, MetricKindCounter, 1, map[string]string{"shutdown_kind": "graceful", "result": "success"})
+	recordMetric(t, telemetry.Metrics(), MetricProcessPresence, MetricKindGauge, 1, nil)
+	recordMetric(t, telemetry.Metrics(), MetricTelemetryRequired, MetricKindGauge, 1, nil)
+	recordMetric(t, telemetry.Metrics(), MetricModelCallDuration, MetricKindHistogram, 25, map[string]string{"component": "eino_chat", "phase": "ANSWER", "result": "success"})
+	recordMetric(t, telemetry.Metrics(), MetricModelCallTotal, MetricKindCounter, 1, map[string]string{"component": "eino_chat", "phase": "ANSWER", "result": "success"})
+	recordMetric(t, telemetry.Metrics(), MetricAnswerFirstTokenDuration, MetricKindHistogram, 10, map[string]string{"result": "success"})
+	recordMetric(t, telemetry.Metrics(), MetricAnswerCompletionDuration, MetricKindHistogram, 30, map[string]string{"result": "success"})
+	recordMetric(t, telemetry.Metrics(), MetricAnswerResultTotal, MetricKindCounter, 1, map[string]string{"result": "success"})
+	recordMetric(t, telemetry.Metrics(), MetricDraftDegradationTotal, MetricKindCounter, 1, map[string]string{"error_code": "DRAFT_STORE_TIMEOUT"})
+	recordMetric(t, telemetry.Metrics(), MetricAgentIterations, MetricKindHistogram, 2, map[string]string{"result": "success"})
+	recordMetric(t, telemetry.Metrics(), MetricAgentToolCalls, MetricKindHistogram, 1, map[string]string{"result": "success"})
+	recordMetric(t, telemetry.Metrics(), MetricAgentResultTotal, MetricKindCounter, 1, map[string]string{"result": "success"})
+	recordMetric(t, telemetry.Metrics(), MetricRAGOutcomeTotal, MetricKindCounter, 1, map[string]string{"outcome": "completed"})
+	recordMetric(t, telemetry.Metrics(), MetricRAGGraphNodeResultTotal, MetricKindCounter, 1, map[string]string{"node_kind": "query_plan", "result": "success"})
 
 	var wait sync.WaitGroup
 	for range 32 {
@@ -100,6 +113,8 @@ func TestPrometheusAdapterMapsEveryMetricAndRejectsBeforeMutation(t *testing.T) 
 
 	body := scrapeMetrics(t, telemetry.MetricsHandler())
 	for _, expected := range []string{
+		`zhixu_runtime_process_presence 1`,
+		`zhixu_runtime_telemetry_required 1`,
 		`zhixu_river_queue_depth{queue="workflow"} 5`,
 		`zhixu_river_workers_active{queue="workflow"} 3`,
 		`zhixu_workflow_node_duration_seconds_sum{node_kind="hash",result="success"} 0.25`,
@@ -110,6 +125,17 @@ func TestPrometheusAdapterMapsEveryMetricAndRejectsBeforeMutation(t *testing.T) 
 		`zhixu_workflow_heartbeat_failure_total{error_code="",node_kind="hash"} 1`,
 		`zhixu_river_duplicate_delivery_total{node_kind="hash"} 1`,
 		`zhixu_worker_shutdown_total{result="success",shutdown_kind="graceful"} 1`,
+		`zhixu_model_chat_duration_seconds_sum{component="eino_chat",error_code="",phase="ANSWER",result="success"} 0.025`,
+		`zhixu_model_chat_result_total{component="eino_chat",error_code="",phase="ANSWER",result="success"} 1`,
+		`zhixu_agent_answer_first_token_duration_seconds_sum{error_code="",result="success"} 0.01`,
+		`zhixu_agent_answer_completion_duration_seconds_sum{error_code="",result="success"} 0.03`,
+		`zhixu_agent_answer_result_total{error_code="",result="success"} 1`,
+		`zhixu_agent_draft_degradation_total{error_code="DRAFT_STORE_TIMEOUT"} 1`,
+		`zhixu_agent_runtime_iterations_sum{error_code="",result="success"} 2`,
+		`zhixu_agent_runtime_tool_calls_sum{error_code="",result="success"} 1`,
+		`zhixu_agent_runtime_result_total{error_code="",result="success"} 1`,
+		`zhixu_rag_outcome_total{error_code="",outcome="completed"} 1`,
+		`zhixu_agent_rag_graph_node_result_total{error_code="",node_kind="query_plan",result="success"} 1`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("metrics body does not contain %q:\n%s", expected, body)
@@ -117,6 +143,29 @@ func TestPrometheusAdapterMapsEveryMetricAndRejectsBeforeMutation(t *testing.T) 
 	}
 	if strings.Contains(body, "workspace-secret") || strings.Contains(body, "workspace_id") || strings.Contains(body, `zhixu_river_queue_depth{queue="workflow"} 99`) {
 		t.Fatalf("invalid measurement mutated exposition:\n%s", body)
+	}
+}
+
+func TestPrometheusMetricDefinitionsCoverStableMetricRegistry(t *testing.T) {
+	if len(prometheusMetricDefinitions) != len(metricDefinitions) {
+		t.Fatalf("Prometheus definitions=%d, stable metric definitions=%d", len(prometheusMetricDefinitions), len(metricDefinitions))
+	}
+	for _, name := range MetricNames() {
+		definition, found := prometheusMetricDefinitions[name]
+		if !found {
+			t.Fatalf("missing Prometheus definition for %q", name)
+		}
+		if definition.name == "" || definition.help == "" {
+			t.Fatalf("incomplete Prometheus definition for %q: %#v", name, definition)
+		}
+		if metricDefinitions[name].kind == MetricKindHistogram && definition.histogramDivisor <= 0 {
+			t.Fatalf("missing histogram divisor for %q", name)
+		}
+	}
+	for name := range prometheusMetricDefinitions {
+		if _, found := metricDefinitions[name]; !found {
+			t.Fatalf("unknown Prometheus metric definition %q", name)
+		}
 	}
 }
 

@@ -278,7 +278,7 @@ func decodeValue(src string, pos int, skipnum bool) (ret int, v types.JsonState)
                 return ret, types.JsonState{Vt: types.ValueType(ret)}
             }
         }
-
+        
     default:
         return -int(types.ERR_INVALID_CHAR), types.JsonState{Vt:-types.ValueType(types.ERR_INVALID_CHAR)}
     }

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	agenteino "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/eino"
 	agentknowledge "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/knowledge"
 	agentmemory "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/memory"
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
@@ -117,7 +118,10 @@ import (
 
 const (
 	// agentStructuredMaxOutputTokens 是 Agent 各结构化阶段单次响应的生产上限。
-	agentStructuredMaxOutputTokens       = 8192
+	agentStructuredMaxOutputTokens = 8192
+	// ragWorkerJobTimeoutHeadroom reserves bounded non-model work around the
+	// ten-call RAG Attempt, including retrieval, persistence, and finalization.
+	ragWorkerJobTimeoutHeadroom          = 10 * time.Minute
 	timelineProjectionDispatchErrorCode  = "KNOWLEDGE_TIMELINE_PROJECTION_FAILED"
 	timelineProjectionStartupPhase       = "startup"
 	timelineProjectionPeriodicPhase      = "periodic"
@@ -132,6 +136,9 @@ const (
 	interviewCompletionPeriodicPhase     = "periodic"
 	learningPathMaintenanceStartupPhase  = "startup"
 	learningPathMaintenancePeriodicPhase = "periodic"
+	draftStreamCleanupStartupPhase       = "startup"
+	draftStreamCleanupPeriodicPhase      = "periodic"
+	draftStreamCleanupBatchSize          = 100
 	captureDispatchStartupPhase          = "startup"
 	captureDispatchPeriodicPhase         = "periodic"
 	captureDispatchInterval              = time.Second
@@ -176,6 +183,11 @@ type learningPathMaintenanceService interface {
 	MaintainExpiredReservations(context.Context) (int, error)
 }
 
+// draftStreamCleanupService 提供有界的短期 Answer 草稿清理。
+type draftStreamCleanupService interface {
+	CleanupExpiredDraftStreams(context.Context, int) (int64, error)
+}
+
 type captureOutboxDispatchService interface {
 	DispatchBatch(context.Context, int) (captureapplication.DispatchBatchResult, error)
 }
@@ -206,13 +218,13 @@ type workerComponents struct {
 	gitSyncScheduler   *gitsyncapplication.AutoSyncScheduler
 	gitSyncCapability  agentCapabilityStatus
 	reindexWorker      *reindexriver.Worker
-	reindexRuntime     *workerReindexProcessorAcquirer
 	dispatcher         *retrievalruntime.Runner
 	runtimeClient      *riveradapter.Client
 	definitions        *workflowapplication.DefinitionRegistry
 	executors          *workflowapplication.ExecutorRegistry
 	runtimeGeneration  workerRuntimeGenerationBuilder
 	sourceProcessing   sourceProcessingComponents
+	reindexRuntime     *workerReindexProcessorAcquirer
 	semanticScan       *graphworkflow.SemanticLinkScanExecutor
 	healthScan         *healthworkflowadapter.HealthScanExecutor
 	healthScanStart    *healthapplication.ScanService
@@ -227,7 +239,9 @@ type workerComponents struct {
 	interviewCompletion interviewCompletionMaintenanceService
 	// learningPathMaintenance 是 Review Path reservation/hidden hold 维护依赖。
 	learningPathMaintenance learningPathMaintenanceService
-	fatalInvariants         <-chan error
+	// draftStreams 是跨 API/Worker 共享的短期 Answer 草稿投影清理依赖。
+	draftStreams    draftStreamCleanupService
+	fatalInvariants <-chan error
 }
 
 type toolRuntimeComponents struct {
@@ -236,6 +250,9 @@ type toolRuntimeComponents struct {
 	execution      *toolsapplication.ExecutionService
 	repository     *toolpostgres.Repository
 	writebackAudit *toolchangecontrol.WritebackAuditRecorder
+	// workflow/definition 只服务迁移前 agent-rag@1 的持久回放。
+	// 新模型 Tool Calling 由 Eino AgentRuntime 通过 RAGAgentToolBridge 执行，
+	// 不会创建本包的 Workflow Node。
 	workflow       *toolworkflow.Executor
 	definition     *workflowdomain.RegisteredDefinition
 	enabledRefs    []toolsdomain.ToolRef
@@ -286,6 +303,15 @@ func run(configPath string, logger *slog.Logger) error {
 	if telemetryStatus.Degraded {
 		logger.Warn("telemetry exporter is unavailable", "error_code", telemetryStatus.Code)
 	}
+	if err := observability.RecordProcessPresence(context.Background(), telemetry.Metrics()); err != nil {
+		logger.Warn("worker process presence metric failed", "error_code", "PROCESS_PRESENCE_METRIC_FAILED")
+	}
+	if err := observability.RecordTelemetryRequired(
+		context.Background(), telemetry.Metrics(), telemetry.Status().Mode == observability.TelemetryModeRequired,
+	); err != nil {
+		logger.Warn("worker telemetry mode metric failed", "error_code", "TELEMETRY_MODE_METRIC_FAILED")
+	}
+	modelTelemetry := platformmodels.NewModelTelemetry(telemetry.Tracer(), telemetry.Metrics())
 	databaseURL, err := cfg.DatabaseConnectionString()
 	if err != nil {
 		logger.Error("database is not configured", "error_code", "DEPENDENCY_UNAVAILABLE")
@@ -299,7 +325,7 @@ func run(configPath string, logger *slog.Logger) error {
 	}
 	defer database.Close()
 
-	if err := ping(context.Background(), database, cfg.DatabasePingTimeout); err != nil {
+	if err := ping(database, cfg.DatabasePingTimeout); err != nil {
 		logger.Error("worker startup database check failed", "error_code", "DEPENDENCY_UNAVAILABLE")
 		return err
 	}
@@ -330,7 +356,7 @@ func run(configPath string, logger *slog.Logger) error {
 	var modelEnqueueFences []riveradapter.EnqueueFence
 	var configuredModels *modelsettingsruntime.Models
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
-		bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg)
+		bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg, modelTelemetry)
 		managedModels = bootstrap
 		if bootstrap.Repository != nil {
 			modelEnqueueFences = append(modelEnqueueFences, bootstrap.Repository)
@@ -346,18 +372,18 @@ func run(configPath string, logger *slog.Logger) error {
 			}
 		}
 	} else {
-		loaded, modelsErr := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil)
+		loaded, modelsErr := modelsettingsruntime.LoadSettings(context.Background(), cfg, nil, modelTelemetry)
 		if modelsErr != nil {
 			return modelsErr
 		}
 		configuredModels = loaded.Models
 	}
 	if configuredModels == nil {
-		fallback, fallbackErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()})
-		if fallbackErr != nil {
-			return fallbackErr
+		disabledModels, disabledErr := modelsettingsruntime.Build(cfg, modelsettingsdomain.ResolvedSettings{Settings: modelsettingsdomain.CanonicalDisabledSettings()}, modelTelemetry)
+		if disabledErr != nil {
+			return disabledErr
 		}
-		configuredModels = fallback
+		configuredModels = disabledModels
 	}
 	modelBinding, err := newWorkerModelRuntimeBinding(cfg.ModelSettingsMode, configuredModels, foundation.NewUUIDGenerator(nil))
 	if err != nil {
@@ -400,7 +426,7 @@ func run(configPath string, logger *slog.Logger) error {
 				Unavailable: managedModels.Loaded.InitialPhase == modelsettingsdomain.RuntimePhaseUnavailable,
 			},
 			Factory: &workerRuntimeGenerationFactory{
-				base: cfg, revisions: managedModels.Service, buildGeneration: components.runtimeGeneration,
+				base: cfg, revisions: managedModels.Service, buildGeneration: components.runtimeGeneration, telemetry: modelTelemetry,
 			},
 			EmbeddingCompatible: func(generation *workerRuntimeGeneration, version retrievaldomain.EmbeddingVersion) error {
 				if generation == nil || generation.models == nil {
@@ -444,17 +470,12 @@ func run(configPath string, logger *slog.Logger) error {
 	readiness.SetRiverSchemaOK(true)
 	readiness.SetDefinitionsOK(components.definitions != nil)
 	readiness.SetExecutorsOK(components.executors != nil)
-	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.timelineProject != nil && components.citationBackfill != nil && components.exportWorker != nil && components.exportService != nil && components.memoryExpiry != nil && components.interviewCompletion != nil && components.learningPathMaintenance != nil && captureWorkflowReadiness(components) && organizingWorkflowReadiness(components) && gitSyncWorkerReadiness(components) && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
+	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.timelineProject != nil && components.citationBackfill != nil && components.exportWorker != nil && components.exportService != nil && components.memoryExpiry != nil && components.interviewCompletion != nil && components.learningPathMaintenance != nil && components.draftStreams != nil && captureWorkflowReadiness(components) && organizingWorkflowReadiness(components) && gitSyncWorkerReadiness(components) && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
 	toolEnabled := cfg.ToolRuntimeMode == config.ToolModeEnabled
 	toolContractsOK, toolExecutorsOK, toolDependenciesOK := toolWorkflowReadiness(components)
 	readiness.SetToolRuntimeState(toolEnabled, toolContractsOK, toolExecutorsOK, toolDependenciesOK)
 	readiness.SetWebFetchState(cfg.WebFetchMode == config.ToolModeEnabled, false)
-	opsHandler, err := newWorkerOpsHandler(workflowhealth.NewHandler(readiness), telemetry.MetricsHandler())
-	if err != nil {
-		logger.Error("worker operations handler could not be created", "error_code", "WORKER_HEALTH_START_FAILED")
-		return err
-	}
-	health, err := startWorkerHealthServer(cfg.WorkerHealthAddr, opsHandler)
+	health, err := startWorkerHealthServer(cfg.WorkerHealthAddr, workflowhealth.NewHandler(readiness))
 	if err != nil {
 		logger.Error("worker health server could not be started", "error_code", "WORKER_HEALTH_START_FAILED")
 		return err
@@ -516,9 +537,21 @@ func run(configPath string, logger *slog.Logger) error {
 			return healthErr
 		}
 	}
+	resumeQueue := true
+	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		queueResumeContext, cancelQueueResume := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+		modelSnapshot, snapshotErr := managedModels.Service.Snapshot(queueResumeContext)
+		cancelQueueResume()
+		if snapshotErr != nil {
+			_ = health.server.Close()
+			return snapshotErr
+		}
+		resumeQueue = modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseIdle ||
+			modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseFailed
+	}
 	if err := startWorkerRuntime(
 		processContext,
-		true,
+		resumeQueue,
 		cfg.DatabasePingTimeout,
 		cfg.WorkerHardStopTimeout,
 		lifecycle,
@@ -561,6 +594,9 @@ func run(configPath string, logger *slog.Logger) error {
 	learningPathContext, cancelLearningPath := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	runLearningPathMaintenance(learningPathContext, logger, components.learningPathMaintenance, learningPathMaintenanceStartupPhase)
 	cancelLearningPath()
+	draftStreamCleanupContext, cancelDraftStreamCleanup := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	runDraftStreamCleanup(draftStreamCleanupContext, logger, components.draftStreams, draftStreamCleanupStartupPhase)
+	cancelDraftStreamCleanup()
 	logger.Info("worker started", "version", cfg.Version, "safe_writeback_node", components.safeWriteback != nil,
 		"semantic_link_scan", components.semanticScan != nil,
 		"agent_available", components.agentCapability.available, "agent_capability_code", components.agentCapability.code,
@@ -575,7 +611,8 @@ func run(configPath string, logger *slog.Logger) error {
 		"timeline_projector", components.timelineProject != nil, "export_worker", components.exportWorker != nil,
 		"artifact_citation_backfill", components.citationBackfill != nil,
 		"interview_completion_maintenance", components.interviewCompletion != nil,
-		"learning_path_maintenance", components.learningPathMaintenance != nil)
+		"learning_path_maintenance", components.learningPathMaintenance != nil,
+		"draft_stream_cleanup", components.draftStreams != nil)
 
 	ticker := time.NewTicker(cfg.HealthInterval)
 	defer ticker.Stop()
@@ -637,13 +674,13 @@ func run(configPath string, logger *slog.Logger) error {
 			_, _ = dispatchOrganizingOutbox(organizingContext, logger, components.organizingOutbox, organizingDispatchPeriodicPhase)
 			cancelOrganizing()
 		case <-ticker.C:
-			if err := ping(processContext, database, cfg.DatabasePingTimeout); err != nil {
+			if err := ping(database, cfg.DatabasePingTimeout); err != nil {
 				readiness.SetDatabaseOK(false)
 				logger.Error("worker database health check failed", "error_code", "DEPENDENCY_UNAVAILABLE")
 			} else {
 				readiness.SetDatabaseOK(true)
 				logger.Debug("worker database health check passed")
-				metricContext, cancelMetric := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+				metricContext, cancelMetric := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
 				metricErr := recordQueueDepthMetric(metricContext, telemetry.Metrics(), database.DB(), cfg.WorkerQueue)
 				cancelMetric()
 				if metricErr != nil {
@@ -653,7 +690,7 @@ func run(configPath string, logger *slog.Logger) error {
 					continue
 				}
 				if components.healthSchedule != nil {
-					dispatchContext, cancelDispatch := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
 					_, dispatchErr := components.healthSchedule.DispatchDue(dispatchContext, 10)
 					cancelDispatch()
 					if dispatchErr != nil {
@@ -661,7 +698,7 @@ func run(configPath string, logger *slog.Logger) error {
 					}
 				}
 				if components.healthAffected != nil {
-					dispatchContext, cancelDispatch := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
 					_, dispatchErr := components.healthAffected.DispatchBatch(dispatchContext, 10)
 					cancelDispatch()
 					if dispatchErr != nil {
@@ -669,12 +706,12 @@ func run(configPath string, logger *slog.Logger) error {
 					}
 				}
 				if components.timelineProject != nil {
-					dispatchContext, cancelDispatch := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+					dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
 					_, _ = dispatchTimelineProjection(dispatchContext, logger, components.timelineProject, timelineProjectionPeriodicPhase)
 					cancelDispatch()
 				}
 				if components.citationBackfill != nil {
-					backfillContext, cancelBackfill := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+					backfillContext, cancelBackfill := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
 					_, _ = dispatchCitationBackfill(backfillContext, logger, components.citationBackfill, citationBackfillPeriodicPhase)
 					cancelBackfill()
 				}
@@ -698,6 +735,9 @@ func run(configPath string, logger *slog.Logger) error {
 					runLearningPathMaintenance(learningPathContext, logger, components.learningPathMaintenance, learningPathMaintenancePeriodicPhase)
 					cancelLearningPath()
 				}
+				draftStreamCleanupContext, cancelDraftStreamCleanup := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+				runDraftStreamCleanup(draftStreamCleanupContext, logger, components.draftStreams, draftStreamCleanupPeriodicPhase)
+				cancelDraftStreamCleanup()
 			}
 		}
 	}
@@ -705,7 +745,11 @@ func run(configPath string, logger *slog.Logger) error {
 shutdown:
 	readiness.BeginShutdown()
 	readiness.SetReindexDispatcherStarted(false)
-	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), cfg.WorkerHardStopTimeout)
+	shutdownStartedAt := time.Now()
+	runtimeShutdownDeadline, hardShutdownDeadline := workerShutdownDeadlines(
+		shutdownStartedAt, cfg.WorkerSoftStopTimeout, cfg.WorkerHardStopTimeout, cfg.ShutdownTimeout,
+	)
+	shutdownContext, cancelShutdown := context.WithDeadline(context.Background(), runtimeShutdownDeadline)
 	defer cancelShutdown()
 	cancelGitSyncProcess()
 	select {
@@ -719,26 +763,35 @@ shutdown:
 	if err := health.server.Shutdown(shutdownContext); err != nil && runErr == nil {
 		runErr = err
 	}
-	if errors.Is(shutdownContext.Err(), context.DeadlineExceeded) {
-		if err := recordShutdownMetric(telemetry.Metrics(), lifecycle.Mode(), "failure"); err != nil {
-			logger.Warn("worker shutdown metric failed", "error_code", "WORKER_METRIC_RECORD_FAILED")
-		}
-		logger.Error("worker hard shutdown deadline exceeded", "error_code", "WORKER_HARD_SHUTDOWN_TIMEOUT")
-		return context.DeadlineExceeded
-	}
+	runtimeShutdownExpired := errors.Is(shutdownContext.Err(), context.DeadlineExceeded)
 	result := "success"
-	if runErr != nil {
+	if runErr != nil || runtimeShutdownExpired {
 		result = "failure"
 	}
 	if err := recordShutdownMetric(telemetry.Metrics(), lifecycle.Mode(), result); err != nil {
 		logger.Warn("worker shutdown metric failed", "error_code", "WORKER_METRIC_RECORD_FAILED")
 	}
-	if err := telemetry.Shutdown(shutdownContext); err != nil && runErr == nil {
-		runErr = err
+	telemetryShutdownContext, cancelTelemetryShutdown := context.WithDeadline(context.Background(), hardShutdownDeadline)
+	telemetryShutdownErr := telemetry.Shutdown(telemetryShutdownContext)
+	hardShutdownExpired := errors.Is(telemetryShutdownContext.Err(), context.DeadlineExceeded)
+	cancelTelemetryShutdown()
+	if telemetryShutdownErr != nil && runErr == nil {
+		runErr = telemetryShutdownErr
+	}
+	if runtimeShutdownExpired || hardShutdownExpired {
+		logger.Error("worker hard shutdown deadline exceeded", "error_code", "WORKER_HARD_SHUTDOWN_TIMEOUT")
+		return context.DeadlineExceeded
 	}
 	return runErr
 }
 
+func workerShutdownDeadlines(startedAt time.Time, softStopTimeout, hardStopTimeout, telemetryTimeout time.Duration) (time.Time, time.Time) {
+	hardDeadline := startedAt.Add(hardStopTimeout)
+	flushBudget := min(telemetryTimeout, hardStopTimeout-softStopTimeout)
+	return hardDeadline.Add(-flushBudget), hardDeadline
+}
+
+// initializeWorkerTelemetry 以独立 service.name 组合 Worker 的 OTLP Provider。
 func initializeWorkerTelemetry(ctx context.Context, cfg config.Config) (*observability.Telemetry, error) {
 	return observability.InitializeTelemetry(ctx, observability.TelemetryOptions{
 		Mode:           observability.TelemetryMode(cfg.TelemetryMode),
@@ -1052,6 +1105,24 @@ func runLearningPathMaintenance(ctx context.Context, logger *slog.Logger, servic
 	}
 }
 
+// runDraftStreamCleanup 执行一次有界 TTL 清理。清理失败只记录日志，下一次
+// 周期继续重试，不能影响 River 消费和 Worker 主循环。
+func runDraftStreamCleanup(ctx context.Context, logger *slog.Logger, service draftStreamCleanupService, phase string) {
+	if service == nil {
+		return
+	}
+	deleted, err := service.CleanupExpiredDraftStreams(ctx, draftStreamCleanupBatchSize)
+	if err != nil {
+		logger.Warn("answer draft stream cleanup failed", "error_code", "ANSWER_DRAFT_STREAM_CLEANUP_FAILED", "phase", phase,
+			"batch_size", draftStreamCleanupBatchSize)
+		return
+	}
+	if phase == draftStreamCleanupStartupPhase || deleted > 0 {
+		logger.Info("answer draft stream cleanup completed", "phase", phase,
+			"deleted_count", deleted, "batch_size", draftStreamCleanupBatchSize)
+	}
+}
+
 func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logger, metrics observability.Metrics, enqueueFences ...riveradapter.EnqueueFence) (workerComponents, error) {
 	models, err := modelRuntimeForComposition(cfg)
 	if err != nil {
@@ -1094,8 +1165,7 @@ func (binding workerModelRuntimeBinding) runtimeWorkerOptions() []riveradapter.R
 		return nil
 	}
 	return []riveradapter.RuntimeWorkerOptions{{
-		ModelSettingsRevision: binding.revision, ModelRuntimeInstanceID: binding.instanceID,
-		RuntimeExecutorAcquirer: binding.executorAcquirer,
+		ModelSettingsRevision: binding.revision, ModelRuntimeInstanceID: binding.instanceID, RuntimeExecutorAcquirer: binding.executorAcquirer,
 	}}
 }
 
@@ -1132,6 +1202,10 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		}
 	} else if modelBinding.revision != nil || modelBinding.instanceID != nil || modelBinding.runtimeFreshWithin != 0 || modelBinding.executorAcquirer != nil || modelBinding.sourceRefreshAcquirer != nil {
 		return workerComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeRuntimeConflict, false, errors.New("static worker must not bind a managed model runtime"))
+	}
+	draftStreams, err := conversationpostgres.NewDraftStreamRepository(db)
+	if err != nil {
+		return workerComponents{}, err
 	}
 	if workspaceRepository == nil {
 		var err error
@@ -1393,12 +1467,13 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository, memoryService, models)
+	agentComponents, err := newAgentWorkflowComponentsWithToolsAndMetrics(db, cfg, workspaceRepository, memoryService, toolComponents, metrics, models)
 	if err != nil {
 		return workerComponents{}, err
 	}
 	captureProfileGenerator, captureProfileCapability, err := newCaptureProfileGenerator(
 		db, agentComponents.model, agentComponents.contract, artifactAgentRepository,
+		agentComponents.captureScheduler,
 		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
@@ -1414,11 +1489,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err := executors.Register(captureapplication.ProcessingNodeKind, captureapplication.ProcessingInputSchemaVersion, captureExecutor); err != nil {
 		return workerComponents{}, err
 	}
-	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
-		if err := registerWorkerAgentExecutors(executors, agentComponents); err != nil {
-			return workerComponents{}, err
-		}
-	} else if agentComponents.relation != nil {
+	if agentComponents.relation != nil {
 		if err := executors.Register(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion, agentComponents.relation); err != nil {
 			return workerComponents{}, err
 		}
@@ -1433,16 +1504,13 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	artifactClock := foundation.SystemClock{}
 	artifactComponents, err := newArtifactWorkflowComponents(
 		db, workspaceRepository, runtimeRepository, artifactAgentRepository, artifactTerminal,
-		agentComponents.model, agentComponents.contract, artifactIDs, artifactClock, models.Embedding().Embedder(),
+		agentComponents.model, agentComponents.contract, agentComponents.artifactScheduler,
+		artifactIDs, artifactClock, models.Embedding().Embedder(),
 	)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
-		if err := registerWorkerArtifactExecutor(executors, artifactComponents); err != nil {
-			return workerComponents{}, err
-		}
-	} else if artifactComponents.executor != nil {
+	if artifactComponents.executor != nil {
 		if err := executors.Register(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion, artifactComponents.executor); err != nil {
 			return workerComponents{}, err
 		}
@@ -1496,7 +1564,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 			return workerComponents{}, catalogErr
 		}
 		organizingGenerator, err = organizingworkflow.NewGenerator(organizingworkflow.GeneratorDependencies{
-			Model: agentComponents.model, Catalog: organizingCatalog, ModelRuns: artifactAgentRepository,
+			Model: agentComponents.model, Scheduler: agentComponents.organizingScheduler, Catalog: organizingCatalog, ModelRuns: artifactAgentRepository,
 			Store: organizingGenerationRepository, Evidence: organizingRenderer, Documents: documentContentReader,
 			ProfileRef: agentworkflow.DefaultProfileRef(), IDs: foundation.NewUUIDGenerator(nil),
 			Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(agentComponents.contract),
@@ -1530,6 +1598,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 			artifactAgentRepository, artifactTerminal, runtimeRepository, workflowRepository,
 			captureRepository, captureFetcher, memoryService,
 			organizingRepository, organizingArtifacts, organizingProposals, organizingRenderer, documentContentReader,
+			metrics,
 		)
 	}
 	for _, kind := range organizingworkflow.ExecutorNodeKinds() {
@@ -1583,15 +1652,20 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err := definitions.Register(captureDefinition); err != nil {
 		return workerComponents{}, err
 	}
-	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged || agentComponents.relation != nil {
+	if agentComponents.relation != nil {
 		if err := definitions.Register(agentworkflow.RegisteredDefinition()); err != nil {
 			return workerComponents{}, err
 		}
-		if err := definitions.Register(agentworkflow.RegisteredRAGDefinition()); err != nil {
+		// v1 remains registered for replaying runs persisted before the
+		// tool-enabled RAG definition was introduced. New starts use v2.
+		if err := definitions.Register(agentworkflow.RegisteredRAGDefinitionV1()); err != nil {
+			return workerComponents{}, err
+		}
+		if err := definitions.Register(agentworkflow.RegisteredRAGDefinitionV2()); err != nil {
 			return workerComponents{}, err
 		}
 	}
-	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged || artifactComponents.executor != nil {
+	if artifactComponents.executor != nil {
 		if err := definitions.Register(artifactworkflow.RegisteredDefinition()); err != nil {
 			return workerComponents{}, err
 		}
@@ -1754,7 +1828,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		reindexWorker: reindex.worker, reindexRuntime: reindex.runtime, dispatcher: reindex.dispatcher,
 		runtimeClient: runtimeClient, definitions: definitions, executors: executors, runtimeGeneration: runtimeGeneration, sourceProcessing: sourceProcessing, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject, citationBackfill: citationBackfill,
 		exportWorker: exportWorker, exportService: exportService, memoryExpiry: memoryService,
-		interviewCompletion: interviewCompletion, learningPathMaintenance: learningPathMaintenance,
+		interviewCompletion: interviewCompletion, learningPathMaintenance: learningPathMaintenance, draftStreams: draftStreams,
 		fatalInvariants: fatalInvariants,
 	}, nil
 }
@@ -1780,6 +1854,7 @@ func newWorkerRuntimeGenerationBuilder(
 	organizingProposals *organizingworkflow.ProposalOwner,
 	organizingRenderer *organizingworkflow.EvidenceRenderer,
 	documentContentReader *organizingowner.DocumentContentReader,
+	metrics observability.Metrics,
 ) workerRuntimeGenerationBuilder {
 	return func(ctx context.Context, models *modelsettingsruntime.Models) (*workerRuntimeGeneration, error) {
 		if ctx == nil || models == nil || models.Revision() <= 0 {
@@ -1810,18 +1885,16 @@ func newWorkerRuntimeGenerationBuilder(
 			return nil, err
 		}
 		revision := models.Revision()
-		sourceProcessing, err := newSourceProcessingComponents(
-			db, cfg, workspaceRepository, gitRepository, &revision, models,
-		)
+		sourceProcessing, err := newSourceProcessingComponents(db, cfg, workspaceRepository, gitRepository, &revision, models)
 		if err != nil {
 			return nil, err
 		}
-		agentComponents, err := newAgentWorkflowComponents(db, cfg, workspaceRepository, memoryService, models)
+		agentComponents, err := newAgentWorkflowComponentsWithToolsAndMetrics(db, cfg, workspaceRepository, memoryService, toolComponents, metrics, models)
 		if err != nil {
 			return nil, err
 		}
 		captureProfileGenerator, _, err := newCaptureProfileGenerator(
-			db, agentComponents.model, agentComponents.contract, artifactAgentRepository,
+			db, agentComponents.model, agentComponents.contract, artifactAgentRepository, agentComponents.captureScheduler,
 			foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 		)
 		if err != nil {
@@ -1843,7 +1916,8 @@ func newWorkerRuntimeGenerationBuilder(
 
 		artifactComponents, err := newArtifactWorkflowComponents(
 			db, workspaceRepository, runtimeRepository, artifactAgentRepository, artifactTerminal,
-			agentComponents.model, agentComponents.contract, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, models.Embedding().Embedder(),
+			agentComponents.model, agentComponents.contract, agentComponents.artifactScheduler,
+			foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, models.Embedding().Embedder(),
 		)
 		if err != nil {
 			return nil, err
@@ -1863,7 +1937,7 @@ func newWorkerRuntimeGenerationBuilder(
 				return nil, err
 			}
 			organizingGenerator, err = organizingworkflow.NewGenerator(organizingworkflow.GeneratorDependencies{
-				Model: agentComponents.model, Catalog: organizingCatalog, ModelRuns: artifactAgentRepository,
+				Model: agentComponents.model, Scheduler: agentComponents.organizingScheduler, Catalog: organizingCatalog, ModelRuns: artifactAgentRepository,
 				Store: organizingGenerationRepository, Evidence: organizingRenderer, Documents: documentContentReader,
 				ProfileRef: agentworkflow.DefaultProfileRef(), IDs: foundation.NewUUIDGenerator(nil),
 				Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(agentComponents.contract),
@@ -1875,8 +1949,7 @@ func newWorkerRuntimeGenerationBuilder(
 		organizingExecutor, err := organizingworkflow.NewExecutor(organizingworkflow.ExecutorDependencies{
 			Runs: workflowRepository, Snapshots: organizingRepository, Templates: organizingRepository,
 			Bindings: organizingRepository, Stages: runtimeRepository, Artifacts: organizingArtifacts,
-			Proposals: organizingProposals, Generator: organizingGenerator,
-			IDs: foundation.NewUUIDGenerator(nil),
+			Proposals: organizingProposals, Generator: organizingGenerator, IDs: foundation.NewUUIDGenerator(nil),
 		})
 		if err != nil {
 			return nil, err
@@ -2023,6 +2096,8 @@ func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepo
 		{refs[2], citationExecutor},
 		{refs[3], toolchangecontrol.NewCalculateDiffExecutor()},
 		{refs[4], gitStatusExecutor},
+		{refs[5], readSourceExecutor},
+		{refs[6], citationExecutor},
 	}
 	for _, item := range enabled {
 		contract, err := contracts.ResolveContract(item.ref)
@@ -2050,7 +2125,7 @@ func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepo
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
-	workflowDefinition, err := toolworkflow.NewProductionRegisteredDefinition(contracts)
+	workflowDefinition, err := toolworkflow.NewReplayRegisteredDefinition(contracts)
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
@@ -2074,6 +2149,8 @@ func enabledReadToolRefs() []toolsdomain.ToolRef {
 		{Name: "ValidateCitation", Version: 1},
 		{Name: "CalculateDiff", Version: 1},
 		{Name: "ReadGitStatus", Version: 1},
+		{Name: "ReadSource", Version: 2},
+		{Name: "ValidateCitation", Version: 2},
 	}
 }
 
@@ -2178,16 +2255,10 @@ func newCaptureProfileRuntimeCatalog(contract platformmodels.ChatContract) (*age
 
 // agentWorkflowReadiness 保证 Chat capability 要么显式关闭，要么 Relation 与 RAG 都在冻结 Registry 可达。
 func agentWorkflowReadiness(components workerComponents) bool {
-	if components.agentCapability.available {
-		if components.agentCapability.code != "" {
-			return false
-		}
-	} else if components.agentCapability.code != agentworkflow.ErrorCodeCapabilityUnavailable {
-		return false
-	} else if components.runtimeGeneration == nil {
-		return true
+	if !components.agentCapability.available {
+		return components.agentCapability.code == agentworkflow.ErrorCodeCapabilityUnavailable
 	}
-	if components.executors == nil || components.definitions == nil {
+	if components.agentCapability.code != "" || components.executors == nil || components.definitions == nil {
 		return false
 	}
 	if _, err := components.executors.Resolve(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion); err != nil {
@@ -2199,8 +2270,15 @@ func agentWorkflowReadiness(components workerComponents) bool {
 	if _, err := components.definitions.Resolve(agentworkflow.RelationAssessmentDefinitionKey, agentworkflow.RelationAssessmentDefinitionVersion); err != nil {
 		return false
 	}
-	_, err := components.definitions.Resolve(agentworkflow.RAGWorkflowDefinitionKey, agentworkflow.RAGWorkflowDefinitionVersion)
-	return err == nil
+	for _, definition := range []workflowdomain.RegisteredDefinition{
+		agentworkflow.RegisteredRAGDefinitionV1(),
+		agentworkflow.RegisteredRAGDefinitionV2(),
+	} {
+		if _, err := components.definitions.Resolve(definition.Key, definition.Version); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // artifactWorkflowReadiness 保证 Generation 终态收敛始终存在，且 Chat 启用时 Executor 与 Definition 成对可达。
@@ -2209,16 +2287,10 @@ func artifactWorkflowReadiness(components workerComponents) bool {
 	if artifact.generation == nil || artifact.terminal == nil || artifact.citationVerifier == nil {
 		return false
 	}
-	if artifact.capability.available {
-		if artifact.capability.code != "" || artifact.executor == nil || artifact.catalog == nil {
-			return false
-		}
-	} else if artifact.capability.code != artifactworkflow.ErrorCodeCapabilityUnavailable || artifact.executor != nil || artifact.catalog != nil {
-		return false
-	} else if components.runtimeGeneration == nil {
-		return true
+	if !artifact.capability.available {
+		return artifact.capability.code == artifactworkflow.ErrorCodeCapabilityUnavailable && artifact.executor == nil && artifact.catalog == nil
 	}
-	if components.executors == nil || components.definitions == nil {
+	if artifact.capability.code != "" || artifact.executor == nil || artifact.catalog == nil || components.executors == nil || components.definitions == nil {
 		return false
 	}
 	if _, err := components.executors.Resolve(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion); err != nil {
@@ -2229,14 +2301,51 @@ func artifactWorkflowReadiness(components workerComponents) bool {
 }
 
 type agentWorkflowComponents struct {
-	relation   *agentworkflow.Executor
-	rag        *agentworkflow.RAGWorkflowExecutor
-	model      agentapplication.ChatModel
-	contract   platformmodels.ChatContract
-	capability agentCapabilityStatus
+	relation            *agentworkflow.Executor
+	rag                 *agentworkflow.RAGWorkflowExecutor
+	model               agentapplication.ChatModel
+	contract            platformmodels.ChatContract
+	relationScheduler   agentapplication.StructuredPhaseScheduler
+	ragScheduler        agentapplication.StructuredPhaseScheduler
+	ragRuntimeScheduler agentapplication.RAGExecutionScheduler
+	artifactScheduler   agentapplication.StructuredPhaseScheduler
+	captureScheduler    agentapplication.StructuredPhaseScheduler
+	organizingScheduler agentapplication.StructuredPhaseScheduler
+	capability          agentCapabilityStatus
 }
 
+// newStructuredPhaseScheduler 在 Composition Root 编译一次 Eino 短 Graph。
+func newStructuredPhaseScheduler() (agentapplication.StructuredPhaseScheduler, error) {
+	return agenteino.NewStructuredPhaseScheduler(context.Background())
+}
+
+// newRAGExecutionScheduler 编译完整 Eino RAG Graph。
+func newRAGExecutionScheduler(metrics ...observability.Metrics) (agentapplication.RAGExecutionScheduler, error) {
+	var selected observability.Metrics
+	if len(metrics) > 0 {
+		selected = metrics[len(metrics)-1]
+	}
+	return agenteino.NewRAGExecutionSchedulerWithMetrics(context.Background(), selected)
+}
+
+// newAgentWorkflowComponents preserves the pre-v2 constructor used by focused
+// composition tests. Production composition must pass the frozen Tool runtime
+// and Metrics through newAgentWorkflowComponentsWithToolsAndMetrics.
 func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
+	return newAgentWorkflowComponentsWithDependencies(db, cfg, workspaceRepository, memoryService, toolRuntimeComponents{}, false, nil, modelRuntimes...)
+}
+
+// newAgentWorkflowComponentsWithTools composes the formal v2 RAG runtime with
+// the same frozen model runtime and the sole project Tool execution boundary.
+func newAgentWorkflowComponentsWithTools(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, tools toolRuntimeComponents, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
+	return newAgentWorkflowComponentsWithDependencies(db, cfg, workspaceRepository, memoryService, tools, true, nil, modelRuntimes...)
+}
+
+func newAgentWorkflowComponentsWithToolsAndMetrics(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, tools toolRuntimeComponents, metrics observability.Metrics, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
+	return newAgentWorkflowComponentsWithDependencies(db, cfg, workspaceRepository, memoryService, tools, true, metrics, modelRuntimes...)
+}
+
+func newAgentWorkflowComponentsWithDependencies(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, tools toolRuntimeComponents, requireV2Runtime bool, metrics observability.Metrics, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
 	models, err := modelRuntimeForComposition(cfg, modelRuntimes...)
 	if err != nil {
 		return agentWorkflowComponents{}, err
@@ -2250,9 +2359,55 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 	if !ok {
 		return agentWorkflowComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, "AGENT_CHAT_CONTRACT_UNAVAILABLE", false, errors.New("configured chat model does not expose its frozen contract"))
 	}
+	var agentRuntime agentapplication.AgentRuntime
+	var answerStream agentapplication.AnswerStreamRuntime
+	if requireV2Runtime {
+		if err := validateRAGWorkerJobTimeout(cfg.WorkerJobTimeout, contract.Timeout); err != nil {
+			return agentWorkflowComponents{}, err
+		}
+		runtimeChat := models.RuntimeChat()
+		if runtimeChat.State() != platformmodels.CapabilityConfigured || runtimeChat.Model() == nil {
+			return agentWorkflowComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_RAG_EINO_RUNTIME_UNAVAILABLE", false, errors.New("configured Eino Agent/Stream runtime is unavailable"))
+		}
+		if !tools.runtimeEnabled || tools.contracts == nil || tools.execution == nil {
+			return agentWorkflowComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_RAG_EINO_TOOL_RUNTIME_UNAVAILABLE", false, errors.New("configured Eino RAG Tool runtime is unavailable"))
+		}
+		agentRuntime, err = agenteino.NewAgentRuntimeWithMetrics(runtimeChat.Model(), metrics)
+		if err != nil {
+			return agentWorkflowComponents{}, err
+		}
+		answerStream, err = agenteino.NewAnswerStreamRuntimeWithMetrics(runtimeChat.Model(), metrics)
+		if err != nil {
+			return agentWorkflowComponents{}, err
+		}
+	}
 	catalog, err := agentworkflow.NewRuntimeCatalog(agentworkflow.CatalogOptions{
 		Model: contract.Model, Timeout: contract.Timeout, MaxOutputTokens: agentStructuredMaxOutputTokens,
 	})
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	relationScheduler, err := newStructuredPhaseScheduler()
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	ragScheduler, err := newStructuredPhaseScheduler()
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	ragRuntimeScheduler, err := newRAGExecutionScheduler(metrics)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	artifactScheduler, err := newStructuredPhaseScheduler()
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	captureScheduler, err := newStructuredPhaseScheduler()
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	organizingScheduler, err := newStructuredPhaseScheduler()
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
@@ -2293,7 +2448,7 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 		return agentWorkflowComponents{}, err
 	}
 	relation, err := agentworkflow.NewExecutor(agentworkflow.ExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: repository, Knowledge: knowledgePort, Evidence: evidenceOpener,
+		Model: model, Scheduler: relationScheduler, Catalog: catalog, Repository: repository, Knowledge: knowledgePort, Evidence: evidenceOpener,
 		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}, Budget: agentApplicationBudget(contract),
 	})
 	if err != nil {
@@ -2308,6 +2463,10 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 		return agentWorkflowComponents{}, err
 	}
 	finalizer, err := conversationpostgres.NewAnswerFinalizer(db, repository, eventStore, foundation.SystemClock{})
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	draftStreams, err := conversationpostgres.NewDraftStreamRepository(db)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
@@ -2337,18 +2496,22 @@ func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRe
 		return agentWorkflowComponents{}, err
 	}
 	rag, err := agentworkflow.NewRAGWorkflowExecutor(agentworkflow.RAGWorkflowExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: repository, Snapshots: repository,
+		Model: model, Scheduler: ragScheduler, RAGScheduler: ragRuntimeScheduler, Catalog: catalog, Repository: repository, Snapshots: repository,
 		Memory: memoryLoader, MemoryOwner: agentapplication.MemoryOwnerRef{Kind: string(memoryOwner.Kind), ID: memoryOwner.ID},
 		Context: conversationRepository,
 		Search:  retrievalAdapter, Retrieval: retrievalAdapter, Eligibility: knowledgePort, Topics: topicAdapter,
 		Finalizer: finalizer, Progress: progress, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
-		Budget: agentApplicationBudget(contract),
+		Budget: agentApplicationBudget(contract), Metrics: metrics,
+		AgentRuntime: agentRuntime, AnswerStream: answerStream, ToolContracts: tools.contracts, ToolExecution: tools.execution,
+		DraftStreams: draftStreams,
 	})
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
 	return agentWorkflowComponents{
 		relation: relation, rag: rag, model: model, contract: contract,
+		relationScheduler: relationScheduler, ragScheduler: ragScheduler, ragRuntimeScheduler: ragRuntimeScheduler,
+		artifactScheduler: artifactScheduler, captureScheduler: captureScheduler, organizingScheduler: organizingScheduler,
 		capability: agentCapabilityStatus{available: true},
 	}, nil
 }
@@ -2367,6 +2530,7 @@ func newCaptureProfileGenerator(
 	model agentapplication.ChatModel,
 	contract platformmodels.ChatContract,
 	modelRuns *agentpostgres.Repository,
+	scheduler agentapplication.StructuredPhaseScheduler,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
 ) (captureworkflow.ProfileGenerator, agentCapabilityStatus, error) {
@@ -2394,7 +2558,7 @@ func newCaptureProfileGenerator(
 	}
 	profileRef := agentworkflow.DefaultProfileRef()
 	generator, err := captureprofile.NewGenerator(captureprofile.GeneratorDependencies{
-		Repository: profileRepository, ModelRuns: modelRuns, Model: model, Catalog: catalog,
+		Repository: profileRepository, ModelRuns: modelRuns, Model: model, Scheduler: scheduler, Catalog: catalog,
 		ModelProfileRef: profileRef, Budget: agentApplicationBudget(contract), IDs: ids, Clock: clock,
 	})
 	if err != nil {
@@ -2430,6 +2594,7 @@ func newArtifactWorkflowComponents(
 	terminal *artifactpostgres.SectionGenerationTerminalHook,
 	model agentapplication.ChatModel,
 	contract platformmodels.ChatContract,
+	scheduler agentapplication.StructuredPhaseScheduler,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
 	embedders ...retrievalapplication.Embedder,
@@ -2497,7 +2662,7 @@ func newArtifactWorkflowComponents(
 		return artifactWorkflowComponents{}, err
 	}
 	executor, err := artifactworkflow.NewExecutor(artifactworkflow.ExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: agentRepository, Context: generation,
+		Model: model, Scheduler: scheduler, Catalog: catalog, Repository: agentRepository, Context: generation,
 		Retrieval: retrievalAdapter, Eligibility: eligibility, Finalizer: generation,
 		IDs: ids, Clock: clock, Budget: agentApplicationBudget(contract),
 	})
@@ -2560,6 +2725,20 @@ func agentApplicationBudget(contract platformmodels.ChatContract) agentapplicati
 	budget.MaxResponseBytes = min(contract.MaxResponseBytes*agentapplication.StructuredCallLimit, agentapplication.MaxRunResponseBytes)
 	budget.Timeout = min(contract.Timeout*time.Duration(agentapplication.StructuredCallLimit), agentapplication.MaxRunTimeout)
 	return budget
+}
+
+func validateRAGWorkerJobTimeout(jobTimeout, modelCallTimeout time.Duration) error {
+	attemptTimeout := agentworkflow.RAGAttemptTimeout(modelCallTimeout)
+	minimumJobTimeout := attemptTimeout + ragWorkerJobTimeoutHeadroom
+	if attemptTimeout <= 0 || jobTimeout < minimumJobTimeout {
+		return foundation.NewError(
+			foundation.ErrorInvalidInput,
+			"WORKER_RAG_EINO_TIMEOUT_BUDGET_INVALID",
+			false,
+			errors.New("worker job timeout does not cover the complete Eino RAG attempt and bounded non-model work"),
+		)
+	}
+	return nil
 }
 
 type reindexComponents struct {
@@ -2835,16 +3014,6 @@ func startWorkerHealthServer(address string, handler http.Handler) (workerHealth
 	return workerHealthServer{server: server, errors: errorsChannel, address: listener.Addr().String()}, nil
 }
 
-func newWorkerOpsHandler(healthHandler, metricsHandler http.Handler) (http.Handler, error) {
-	if healthHandler == nil || metricsHandler == nil {
-		return nil, errors.New("worker operations handler is incomplete")
-	}
-	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", metricsHandler)
-	mux.Handle("/", healthHandler)
-	return mux, nil
-}
-
 func recordShutdownMetric(metrics observability.Metrics, mode shutdownMode, result string) error {
 	if metrics == nil {
 		return errors.New("worker metrics are nil")
@@ -2883,12 +3052,8 @@ func recordQueueDepthMetric(ctx context.Context, metrics observability.Metrics, 
 	return metrics.Record(ctx, measurement)
 }
 
-type databasePinger interface {
-	Ping(context.Context) error
-}
-
-func ping(parent context.Context, database databasePinger, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(parent, timeout)
+func ping(database *postgres.Pool, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := database.Ping(ctx); err != nil {
 		return err

@@ -9,6 +9,7 @@ import (
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 )
 
 // BootstrapDB is the shared PostgreSQL boundary required by settings revisions and append-only Audit.
@@ -28,7 +29,7 @@ type BootstrapResult struct {
 }
 
 // Bootstrap builds the repository, key boundary, application service, and fixed process revision.
-func Bootstrap(ctx context.Context, database BootstrapDB, cfg config.Config) (BootstrapResult, error) {
+func Bootstrap(ctx context.Context, database BootstrapDB, cfg config.Config, telemetry ...platformmodels.ModelTelemetry) (BootstrapResult, error) {
 	sealer, keyErr := modelcrypto.NewSealerFromFile(cfg.ModelSettingsKeyFile)
 	var secretSealer modelsettingsapplication.SecretSealer = sealer
 	if keyErr != nil {
@@ -74,10 +75,10 @@ func Bootstrap(ctx context.Context, database BootstrapDB, cfg config.Config) (Bo
 		// API/Worker create role-scoped generation adapters after their process
 		// instance identity is known; the store itself is shared and read-only.
 	}
-	manager, err := modelsettingsapplication.NewSettingsManagerWithLifecycle(repository, validator, NewConnectionTester(cfg), testLifecycle, 0)
+	manager, err := modelsettingsapplication.NewSettingsManagerWithLifecycle(repository, validator, NewConnectionTester(cfg, telemetry...), testLifecycle, 0)
 	if err != nil {
 		return BootstrapResult{}, err
 	}
-	loaded, loadErr := LoadSettings(ctx, cfg, service)
+	loaded, loadErr := LoadSettings(ctx, cfg, service, telemetry...)
 	return BootstrapResult{Service: service, Manager: manager, Repository: repository, Loaded: loaded, KeyError: keyErr, LocalModelStore: resultStore}, loadErr
 }

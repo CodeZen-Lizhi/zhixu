@@ -141,6 +141,52 @@ with open(os.environ["COMPOSE_CONTRACT_LOG"], "a", encoding="utf-8") as log:
     log.write(" ".join(sys.argv[1:]) + "\n")
 
 if "config" in sys.argv and "--format" in sys.argv:
+    if "deploy/compose.netns.yml" in sys.argv:
+        json.dump({
+            "name": "zhixu-netns",
+            "networks": {"default": {"name": "zhixu-runtime", "external": False}},
+            "services": {
+                "app-netns": {
+                    "build": {"dockerfile": "deploy/Dockerfile"},
+                    "container_name": "zhixu-app-netns",
+                    "restart": "unless-stopped",
+                    "read_only": True,
+                    "privileged": False,
+                    "extra_hosts": ["host.docker.internal=host-gateway"],
+                    "entrypoint": ["/app/netns-ingress.sh"],
+                    "user": "0:0",
+                    "cap_drop": ["ALL"],
+                    "cap_add": ["NET_ADMIN", "SETUID", "SETGID"],
+                    "security_opt": ["no-new-privileges:true"],
+                    "tmpfs": ["/run:rw,noexec,nosuid,size=65536"],
+                    "ports": [{
+                        "host_ip": "127.0.0.1",
+                        "target": 8080,
+                        "published": "8080",
+                        "protocol": "tcp",
+                    }],
+                    "healthcheck": {
+                        "test": ["CMD-SHELL", "ss -H -ltn 'sport = :8080' | grep -q '0.0.0.0:8080'"]
+                    },
+                },
+                "worker-netns": {
+                    "build": {"dockerfile": "deploy/Dockerfile"},
+                    "container_name": "zhixu-worker-netns",
+                    "restart": "unless-stopped",
+                    "read_only": True,
+                    "privileged": False,
+                    "extra_hosts": ["host.docker.internal=host-gateway"],
+                    "entrypoint": ["/app/netns-ingress.sh", "--worker-sentinel"],
+                    "user": "10001:10001",
+                    "cap_drop": ["ALL"],
+                    "security_opt": ["no-new-privileges:true"],
+                    "healthcheck": {
+                        "test": ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18082"]
+                    },
+                },
+            },
+        }, sys.stdout)
+        raise SystemExit(0)
     app_environment = {
         "ZHIXU_AUTH_MODE": os.environ.get("ZHIXU_AUTH_MODE", "disabled"),
         "ZHIXU_AUTH_BOOTSTRAP_TOKEN": os.environ.get("ZHIXU_AUTH_BOOTSTRAP_TOKEN", ""),

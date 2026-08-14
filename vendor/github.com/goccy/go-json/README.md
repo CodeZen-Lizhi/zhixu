@@ -233,7 +233,7 @@ When encoding a structure like the one above, create a sequence of opcodes like 
 
 ※ When processing each operation, write the letters on the right.
 
-In addition, each opcode is managed by the following structure (
+In addition, each opcode is managed by the following structure ( 
 Pseudo code ).
 
 ```go

@@ -22,7 +22,7 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
-
+	
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/internal/native/types"
 )

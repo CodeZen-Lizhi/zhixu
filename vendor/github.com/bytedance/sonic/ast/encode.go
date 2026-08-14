@@ -150,7 +150,7 @@ func (self *Node) encode(buf *[]byte) error {
         case V_STRING: return self.encodeString(buf)
         case V_NUMBER: return self.encodeNumber(buf)
         case V_ANY   : return self.encodeInterface(buf)
-        default      : return ErrUnsupportType
+        default      : return ErrUnsupportType 
     }
 }
 
@@ -211,7 +211,7 @@ func (self *Node) encodeArray(buf *[]byte) error {
         *buf = append(*buf, bytesArray...)
         return nil
     }
-
+    
     *buf = append(*buf, '[')
 
     var started bool
@@ -251,13 +251,13 @@ func (self *Node) encodeObject(buf *[]byte) error {
             return err
         }
     }
-
+    
     nb := self.len()
     if nb == 0 {
         *buf = append(*buf, bytesObject...)
         return nil
     }
-
+    
     *buf = append(*buf, '{')
 
     var started bool

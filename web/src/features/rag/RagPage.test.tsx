@@ -1,9 +1,11 @@
 import { fireEvent, screen } from "@testing-library/react";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Answer } from "../../api/conversation";
 import { renderWithAppProviders } from "../../test/render";
 import { AnswerPublication, CitationInspector, mergeLatestTurn } from "./RagPage";
+import { type AnswerDraftState } from "./answer-draft";
 
 const workspaceId = "92000000-0000-4000-8000-000000000001";
 const conversationId = "92000000-0000-4000-8000-000000000002";
@@ -34,6 +36,49 @@ describe("AnswerPublication", () => {
     expect(screen.getByText("正在检索证据")).toBeInTheDocument();
     expect(screen.getByText("工作流 · 运行中")).toBeInTheDocument();
     expect(screen.queryByText("已校验回答")).not.toBeInTheDocument();
+  });
+
+  it("pending 展示明确标记的纯文本草稿，正式 REST Answer 到达后立即替换", () => {
+    const pending: Answer = { ...base, publicationStatus: "pending", citations: [], retrievalSummary: null };
+    const completed: Answer = {
+      ...base,
+      publicationStatus: "refused",
+      resultType: "refusal",
+      assistantText: "正式拒答",
+      citations: [],
+      retrievalSummary: summary,
+      result: {
+        resultType: "refusal",
+        schemaId: "agent.refusal",
+        schemaVersion: "v1",
+        modelRunRef: modelRunId,
+        payload: { reasonCode: "NO_RELEVANT_EVIDENCE", summary: "正式拒答", retrievalScope: "workspace", missingRequirements: [], suggestedActions: [] },
+      },
+    };
+    const draft: AnswerDraftState = {
+      answerId,
+      generation: 2,
+      sequence: 2,
+      content: "<strong>未校验正文</strong>",
+      bytes: 31,
+      connectionState: "open",
+    };
+    const Harness = () => {
+      const [answer, setAnswer] = useState<Answer>(pending);
+      return <><button type="button" onClick={() => setAnswer(completed)}>发布正式结果</button><AnswerPublication answer={answer} draft={draft} onCitation={vi.fn()} /></>;
+    };
+    renderWithAppProviders(<Harness />);
+
+    const draftRegion = screen.getByRole("article", { name: "生成中草稿" });
+    expect(draftRegion).toHaveTextContent("<strong>未校验正文</strong>");
+    expect(draftRegion).toHaveAttribute("data-draft-generation", "2");
+    expect(draftRegion).toHaveAttribute("data-draft-sequence", "2");
+    expect(draftRegion.querySelector("strong")).toBeNull();
+    expect(draftRegion.querySelector(".rag-answer__copy")).not.toHaveAttribute("aria-live");
+
+    fireEvent.click(screen.getByRole("button", { name: "发布正式结果" }));
+    expect(screen.queryByRole("article", { name: "生成中草稿" })).not.toBeInTheDocument();
+    expect(screen.getByText("正式拒答")).toBeInTheDocument();
   });
 
   it("completed 披露推断、冲突、退化并使用服务端 citation href", () => {

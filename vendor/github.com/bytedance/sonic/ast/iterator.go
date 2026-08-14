@@ -114,7 +114,7 @@ next_start:
     }
 }
 
-// Next scans through children of underlying V_ARRAY,
+// Next scans through children of underlying V_ARRAY, 
 // copies each child to v, and returns .HasNext().
 func (self *ListIterator) Next(v *Node) bool {
     n := self.next()
@@ -139,7 +139,7 @@ next_start:
     }
 }
 
-// Next scans through children of underlying V_OBJECT,
+// Next scans through children of underlying V_OBJECT, 
 // copies each child to v, and returns .HasNext().
 func (self *ObjectIterator) Next(p *Pair) bool {
     n := self.next()
@@ -154,7 +154,7 @@ func (self *ObjectIterator) Next(p *Pair) bool {
 // Index indicates the value's order in both V_ARRAY and V_OBJECT json.
 // Key is the value's key (for V_OBJECT json only, otherwise it will be nil).
 type Sequence struct {
-    Index int
+    Index int 
     Key *string
     // Level int
 }
@@ -170,12 +170,12 @@ func (s Sequence) String() string {
 
 type Scanner func(path Sequence, node *Node) bool
 
-// ForEach scans one V_OBJECT node's children from JSON head to tail,
+// ForEach scans one V_OBJECT node's children from JSON head to tail, 
 // and pass the Sequence and Node of corresponding JSON value.
 //
 // Especially, if the node is not V_ARRAY or V_OBJECT,
 // the node itself will be returned and Sequence.Index == -1.
-//
+// 
 // NOTICE: An unset node WON'T trigger sc, but its index still counts into Path.Index
 func (self *Node) ForEach(sc Scanner) error {
     if err := self.checkRaw(); err != nil {

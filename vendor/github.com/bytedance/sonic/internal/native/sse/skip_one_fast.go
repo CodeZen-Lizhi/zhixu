@@ -32,3 +32,4 @@ var S_skip_one_fast uintptr
 func skip_one_fast(s *string, p *int) (ret int) {
     return F_skip_one_fast(rt.NoEscape(unsafe.Pointer(s)), rt.NoEscape(unsafe.Pointer(p)))
 }
+

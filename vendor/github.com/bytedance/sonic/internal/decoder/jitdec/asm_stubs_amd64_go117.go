@@ -40,10 +40,10 @@ func (self *_Assembler) WritePtrAX(i int, rec obj.Addr, saveDI bool) {
         self.save(_DI)
     }
     self.Emit("LEAQ", rec, _DI)
-    self.call(_F_gcWriteBarrierAX)
+    self.call(_F_gcWriteBarrierAX)  
     if saveDI {
         self.load(_DI)
-    }
+    }    
     self.Sjmp("JMP", "_end_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Link("_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Emit("MOVQ", _AX, rec)
@@ -66,13 +66,13 @@ func (self *_Assembler) WriteRecNotAX(i int, ptr obj.Addr, rec obj.Addr, saveDI 
         self.save(_DI)
     }
     self.Emit("LEAQ", rec, _DI)
-    self.call(_F_gcWriteBarrierAX)
+    self.call(_F_gcWriteBarrierAX) 
     if saveDI {
         self.load(_DI)
-    }
+    } 
     if saveAX {
         self.Emit("XCHGQ", ptr, _AX)
-    }
+    }    
     self.Sjmp("JMP", "_end_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Link("_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Emit("MOVQ", ptr, rec)
@@ -91,7 +91,7 @@ func (self *_ValueDecoder) WritePtrAX(i int, rec obj.Addr, saveDI bool) {
     self.call(_F_gcWriteBarrierAX)
     if saveDI {
         self.load(_DI)
-    }
+    }    
     self.Sjmp("JMP", "_end_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Link("_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Emit("MOVQ", _AX, rec)
@@ -113,7 +113,7 @@ func (self *_ValueDecoder) WriteRecNotAX(i int, ptr obj.Addr, rec obj.Addr, save
     self.call(_F_gcWriteBarrierAX)
     if saveDI {
         self.load(_DI)
-    }
+    }    
     self.Sjmp("JMP", "_end_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Link("_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Emit("MOVQ", ptr, rec)

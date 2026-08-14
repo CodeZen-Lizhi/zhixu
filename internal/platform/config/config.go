@@ -794,6 +794,9 @@ func (c Config) validateTelemetry() error {
 		if endpoint.Scheme != "http" && endpoint.Scheme != "https" {
 			return errors.New("telemetry_endpoint scheme must be http or https")
 		}
+		if endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.Opaque != "" {
+			return errors.New("telemetry_endpoint must not include userinfo, query, fragment, or opaque data")
+		}
 		return nil
 	default:
 		return errors.New("telemetry_mode must be disabled, optional, or required")
@@ -897,6 +900,9 @@ func (c Config) validateChat() error {
 	}
 	if c.ChatAPIStyle != ChatAPIStyleChatCompletions && c.ChatAPIStyle != ChatAPIStyleResponses {
 		return errors.New("chat_api_style must be chat_completions or responses")
+	}
+	if c.ChatAPIStyle == ChatAPIStyleResponses {
+		return errors.New("chat_api_style responses is unavailable in the Eino runtime")
 	}
 	switch c.ChatProvider {
 	case ChatProviderDisabled:

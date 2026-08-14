@@ -4,6 +4,13 @@ status: accepted
 
 # Eino 采用门禁与 M2 不采用结论
 
+> `M2 Outcome` 中“主模块不正式采用 Eino”的结论已由
+> [ADR-0024](0024-layered-eino-adoption.md) 部分取代；Embedding 后续由
+> [ADR-0025](0025-eino-embedding-adoption.md) 采用，其余扩展门禁由
+> [ADR-0026](0026-eino-runtime-expansion-gates.md) 收口。**ADR-0027 已在 Chat、Embedding、Structured Scheduler、
+> RAG、Tool/ReAct 与 Streaming 的生产采用范围取代本 ADR 的旧结论；**本 ADR 关于 Domain、持久 Workflow、权限、审批、
+> Tool 执行和安全写回的边界继续有效。
+
 项目需要验证 Eino 是否能降低 Chat、Embedding、Streaming、Structured Output、Tool Calling 和可观测回调的集成成本，但不能让未经验证的框架成为领域或持久化执行模型的事实源。
 
 ## Decision
@@ -31,7 +38,7 @@ OpenAI-Compatible HTTP Adapter；Ollama 仅通过兼容 endpoint 接入。重新
 ## Consequences
 
 - M2 必须先提供可重复 PoC 报告和 Contract Test，当前 ADR 不锁定任何未经验证版本。
-- Composition Root 当前只构造直接 OpenAI-Compatible Chat Adapter；测试使用 Deterministic Fake。
+- M2 时 Composition Root 只构造直接 OpenAI-Compatible Chat Adapter；ADR-0024 后可显式选择 Eino-backed Adapter，默认仍为 direct。
 - 需要维护少量项目自有 Model、Retrieval、Tool 和 Workflow Interface。
 - 框架升级或回退不需要迁移领域对象、Proposal 或 Workflow 持久化状态。
 
@@ -40,3 +47,6 @@ OpenAI-Compatible HTTP Adapter；Ollama 仅通过兼容 endpoint 接入。重新
 - [ADR-0006](0006-postgres-durable-workflow.md)：PostgreSQL 持久化 Workflow。
 - [ADR-0007](0007-no-langchain-core-dependency.md)：核心不依赖通用 Agent Framework。
 - [ADR-0012](0012-version-workflows-prompts-schemas.md)：Workflow、Prompt、Schema 版本化。
+- [ADR-0024](0024-layered-eino-adoption.md)：Chat、Callback 与短 Graph 的后续分层采用。
+- [ADR-0025](0025-eino-embedding-adoption.md)：双 Provider Embedding 的后续可回滚采用。
+- [ADR-0026](0026-eino-runtime-expansion-gates.md)：其余 Runtime 扩展路线的实际门禁结论。

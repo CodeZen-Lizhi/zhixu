@@ -29,9 +29,17 @@ func TestConfiguredModelRuntimeFreezesCapabilitiesAdaptersAndContracts(t *testin
 		t.Fatalf("chat capability = %#v", chat)
 	}
 	if chat.Model() != runtime.Chat().Model() || chatContract.Model.ModelID != cfg.ChatModel ||
+		chatContract.Provider != string(cfg.ChatProvider) || chatContract.APIStyle != ChatAPIStyleChatCompletions ||
+		chatContract.EndpointPath != chatCompletionsPath ||
 		chatContract.Timeout != cfg.ChatTimeout || chatContract.MaxRequestBytes != cfg.ChatMaxRequestBytes ||
 		chatContract.MaxResponseBytes != cfg.ChatMaxResponseBytes {
 		t.Fatalf("chat contract = %#v", chatContract)
+	}
+	runtimeChat := runtime.RuntimeChat()
+	runtimeChatContract, ok := runtimeChat.Contract()
+	if !ok || runtimeChat.State() != CapabilityConfigured || runtimeChat.Model() == nil ||
+		runtimeChat.Model() != runtime.RuntimeChat().Model() || runtimeChatContract != chatContract {
+		t.Fatalf("runtime chat capability = %#v", runtimeChat)
 	}
 	embedding := runtime.Embedding()
 	embeddingContract, ok := embedding.Contract()
@@ -54,12 +62,25 @@ func TestConfiguredModelRuntimeFreezesCapabilitiesAdaptersAndContracts(t *testin
 	}
 }
 
+func TestConfiguredModelRuntimeRejectsResponsesWithoutFallback(t *testing.T) {
+	t.Parallel()
+	cfg := configuredRuntimeTestConfig()
+	cfg.ChatAPIStyle = config.ChatAPIStyleResponses
+	runtime, err := NewConfiguredModelRuntime(cfg)
+	if runtime != nil {
+		t.Fatalf("Responses style constructed runtime %#v", runtime)
+	}
+	if err == nil || !strings.Contains(err.Error(), "responses") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestConfiguredModelRuntimeDisabledCapabilitiesAndSafeFormatting(t *testing.T) {
 	t.Parallel()
 
 	var zero ModelRuntime
-	if zero.Chat().State() != CapabilityDisabled || zero.Embedding().State() != CapabilityDisabled {
-		t.Fatalf("zero runtime capabilities = %#v / %#v", zero.Chat(), zero.Embedding())
+	if zero.Chat().State() != CapabilityDisabled || zero.RuntimeChat().State() != CapabilityDisabled || zero.Embedding().State() != CapabilityDisabled {
+		t.Fatalf("zero runtime capabilities = %#v / %#v / %#v", zero.Chat(), zero.RuntimeChat(), zero.Embedding())
 	}
 
 	disabled, err := NewConfiguredModelRuntime(config.Defaults())
@@ -72,6 +93,9 @@ func TestConfiguredModelRuntimeDisabledCapabilitiesAndSafeFormatting(t *testing.
 	}
 	if _, ok := disabled.Chat().Contract(); ok {
 		t.Fatal("disabled Chat exposed a contract")
+	}
+	if disabled.RuntimeChat().State() != CapabilityDisabled || disabled.RuntimeChat().Model() != nil {
+		t.Fatalf("runtime chat = %#v", disabled.RuntimeChat())
 	}
 	if disabled.Embedding().State() != CapabilityDisabled || disabled.Embedding().Embedder() != nil {
 		t.Fatalf("embedding = %#v", disabled.Embedding())
@@ -103,6 +127,7 @@ func TestConfiguredModelRuntimeCapabilitiesAreConcurrentReadSafe(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
 	wantChat := runtime.Chat().Model()
+	wantRuntimeChat := runtime.RuntimeChat().Model()
 	wantEmbedding := runtime.Embedding().Embedder()
 	var wait sync.WaitGroup
 	errors := make(chan string, 64)
@@ -112,7 +137,7 @@ func TestConfiguredModelRuntimeCapabilitiesAreConcurrentReadSafe(t *testing.T) {
 			defer wait.Done()
 			chatContract, chatOK := runtime.Chat().Contract()
 			embeddingContract, embeddingOK := runtime.Embedding().Contract()
-			if !chatOK || !embeddingOK || runtime.Chat().Model() != wantChat || runtime.Embedding().Embedder() != wantEmbedding ||
+			if !chatOK || !embeddingOK || runtime.Chat().Model() != wantChat || runtime.RuntimeChat().Model() != wantRuntimeChat || runtime.Embedding().Embedder() != wantEmbedding ||
 				chatContract.Model.ModelID == "" || embeddingContract.Binding().Model == "" {
 				errors <- "runtime capability changed during concurrent access"
 			}
@@ -129,8 +154,9 @@ func TestModelRuntimeCloseClosesOwnedTransportsExactlyOnce(t *testing.T) {
 	t.Parallel()
 
 	chatTransport := &countingIdleTransport{}
+	runtimeChatTransport := &countingIdleTransport{}
 	embeddingTransport := &countingIdleTransport{}
-	runtime := modelRuntimeWithTransports(chatTransport, chatTransport, embeddingTransport, embeddingTransport)
+	runtime := modelRuntimeWithTransports(chatTransport, chatTransport, runtimeChatTransport, runtimeChatTransport, embeddingTransport, embeddingTransport)
 	var wait sync.WaitGroup
 	for range 64 {
 		wait.Add(1)
@@ -145,6 +171,9 @@ func TestModelRuntimeCloseClosesOwnedTransportsExactlyOnce(t *testing.T) {
 	if got := chatTransport.closeCalls.Load(); got != 1 {
 		t.Fatalf("chat transport close calls = %d, want 1", got)
 	}
+	if got := runtimeChatTransport.closeCalls.Load(); got != 1 {
+		t.Fatalf("runtime chat transport close calls = %d, want 1", got)
+	}
 	if got := embeddingTransport.closeCalls.Load(); got != 1 {
 		t.Fatalf("embedding transport close calls = %d, want 1", got)
 	}
@@ -157,13 +186,17 @@ func TestModelRuntimeCloseLeavesExternalTransportsOpen(t *testing.T) {
 	t.Parallel()
 
 	chatTransport := &countingIdleTransport{}
+	runtimeChatTransport := &countingIdleTransport{}
 	embeddingTransport := &countingIdleTransport{}
-	runtime := modelRuntimeWithTransports(chatTransport, nil, embeddingTransport, nil)
+	runtime := modelRuntimeWithTransports(chatTransport, nil, runtimeChatTransport, nil, embeddingTransport, nil)
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if got := chatTransport.closeCalls.Load(); got != 0 {
 		t.Fatalf("external chat transport close calls = %d, want 0", got)
+	}
+	if got := runtimeChatTransport.closeCalls.Load(); got != 0 {
+		t.Fatalf("external runtime chat transport close calls = %d, want 0", got)
 	}
 	if got := embeddingTransport.closeCalls.Load(); got != 0 {
 		t.Fatalf("external embedding transport close calls = %d, want 0", got)
@@ -174,13 +207,20 @@ func TestConfiguredModelRuntimeCompensatesChatWhenEmbeddingBuildFails(t *testing
 	t.Parallel()
 
 	chatTransport := &countingIdleTransport{}
-	chat := &OpenAICompatibleChatModel{http: chatHTTPConfig{
+	runtimeChatTransport := &countingIdleTransport{}
+	chat := &EinoOpenAIChatModel{http: chatHTTPConfig{
 		client: &modelHTTPClient{client: &http.Client{Transport: chatTransport}, owned: chatTransport},
+	}}
+	runtimeChat := &EinoRuntimeChatModel{http: chatHTTPConfig{
+		client: &modelHTTPClient{client: &http.Client{Transport: runtimeChatTransport}, owned: runtimeChatTransport},
 	}}
 	wantErr := errors.New("embedding build failed")
 	_, err := newConfiguredModelRuntime(configuredRuntimeTestConfig(), modelRuntimeBuilders{
 		chat: func(config.Config) (agentapplication.ChatModel, error) {
 			return chat, nil
+		},
+		runtimeChat: func(config.Config) (*EinoRuntimeChatModel, error) {
+			return runtimeChat, nil
 		},
 		embedding: func(config.Config) (retrievalapplication.Embedder, error) {
 			return nil, wantErr
@@ -192,22 +232,31 @@ func TestConfiguredModelRuntimeCompensatesChatWhenEmbeddingBuildFails(t *testing
 	if got := chatTransport.closeCalls.Load(); got != 1 {
 		t.Fatalf("compensated chat transport close calls = %d, want 1", got)
 	}
+	if got := runtimeChatTransport.closeCalls.Load(); got != 1 {
+		t.Fatalf("compensated runtime chat transport close calls = %d, want 1", got)
+	}
 }
 
 func modelRuntimeWithTransports(
 	chatTransport http.RoundTripper,
 	chatOwned idleConnectionCloser,
+	runtimeChatTransport http.RoundTripper,
+	runtimeChatOwned idleConnectionCloser,
 	embeddingTransport http.RoundTripper,
 	embeddingOwned idleConnectionCloser,
 ) *ModelRuntime {
-	chat := &OpenAICompatibleChatModel{http: chatHTTPConfig{
+	chat := &EinoOpenAIChatModel{http: chatHTTPConfig{
 		client: &modelHTTPClient{client: &http.Client{Transport: chatTransport}, owned: chatOwned},
 	}}
-	embedder := &OpenAICompatibleEmbedder{http: embeddingHTTPConfig{
+	runtimeChat := &EinoRuntimeChatModel{http: chatHTTPConfig{
+		client: &modelHTTPClient{client: &http.Client{Transport: runtimeChatTransport}, owned: runtimeChatOwned},
+	}}
+	embedder := &EinoEmbedder{http: embeddingHTTPConfig{
 		client: &modelHTTPClient{client: &http.Client{Transport: embeddingTransport}, owned: embeddingOwned},
 	}}
 	return &ModelRuntime{
-		chat: ChatCapability{state: CapabilityConfigured, model: chat},
+		chat:        ChatCapability{state: CapabilityConfigured, model: chat},
+		runtimeChat: RuntimeChatCapability{state: CapabilityConfigured, model: runtimeChat},
 		embedding: EmbeddingCapability{
 			state: CapabilityConfigured, embedder: embedder,
 		},

@@ -50,7 +50,7 @@ func TestMain(m *testing.M) {
         println("Begin GC looping...")
         for {
         runtime.GC()
-        debug.FreeOSMemory()
+        debug.FreeOSMemory() 
         }
         println("stop GC looping!")
     }()

@@ -3,7 +3,7 @@ module github.com/CodeZen-Lizhi/zhixu/poc/eino
 go 1.25.4
 
 require (
-	github.com/cloudwego/eino v0.9.12
+	github.com/cloudwego/eino v0.9.13
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 )
 

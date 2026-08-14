@@ -69,6 +69,7 @@ type Dependencies struct {
 	Graph             *graphhttp.Handler
 	Candidate         *graphhttp.CandidateHandler
 	Conversation      *conversationhttp.Handler
+	DraftStream       *conversationhttp.DraftStreamHandler
 	Events            *eventshttp.Handler
 	Export            *exporthttp.Handler
 	Review            *reviewhttp.Handler
@@ -254,6 +255,9 @@ func registerDomainRoutes(api gin.IRouter, deps Dependencies) {
 	deps.Candidate.Routes(api)
 	if deps.Conversation != nil {
 		deps.Conversation.Routes(api)
+	}
+	if deps.DraftStream != nil {
+		deps.DraftStream.Routes(api)
 	}
 	if deps.Events != nil {
 		deps.Events.Routes(api)

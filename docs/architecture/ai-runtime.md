@@ -71,7 +71,7 @@ Evidence loader 只接受稳定身份，不接受文件路径。它从不可变 
 ### 3.2 Model Run 与 Call
 
 - `Model Run` 冻结 Workspace、Node Attempt、Adapter、Model/Version、Prompt、Schema、Retrieval/Index version、预算和最终状态。
-- `Model Call` 记录 `INITIAL`、`REPAIR`、`REDUCED` 或 `REVIEW` 的顺序、版本、输入/输出 Hash、Token、耗时与稳定错误；不保存完整 Prompt、Evidence 或原始响应。
+- `Model Call` 记录 `PLAN`、`AGENT`、`ANSWER`、`INITIAL`、`REPAIR`、`REDUCED` 或 `REVIEW` 的顺序、版本、输入/输出 Hash、Token、耗时与稳定错误；不保存完整 Prompt、Evidence 或原始响应。
 - API 与 Worker 使用相同 configured model factory；一次操作通过 runtime lease 冻结完整 generation，运行中不得静默换 Provider/模型/版本。
 - 新 Workflow Attempt 在 Claim 事务中冻结 Worker instance 与 `model_settings_revision`；历史 Attempt、Model Run 和 Artifact replay 不得改绑当前默认 revision。
 - Provider timeout、rate limit、malformed response、model drift 和 budget exhaustion 使用不同稳定错误，不折叠为“AI 失败”。
@@ -129,21 +129,28 @@ INITIAL strict schema
 
 ### 3.5 当前 AI 选择
 
-主模块当前使用项目 Application + 直接 OpenAI-Compatible Adapter；Eino PoC 未通过全部采用门禁，因此不是当前正式依赖，见 [ADR-0013](adr/0013-eino-adoption-gate.md)。未来 Eino/Agent 迁移只在 [路线图](../roadmap.md) 描述，不能改变本章当前事实。
+生产 Chat、Embedding、五个 Structured Scheduler 与 `/chat` RAG 的进程内编排统一使用 Eino/eino-ext；项目 Application、
+Domain、HTTP、PostgreSQL 与 River 仍只暴露项目 Port/DTO。旧 direct Chat、Embedding 与 scheduler 已删除，不提供运行时
+fallback 或 implementation selector；需要恢复旧实现时使用 Git 历史或兼容发布制品恢复整套版本。模型设置的无重启热应用
+仍由 [ADR-0022](adr/0022-model-runtime-hot-activation.md) 约束，Eino 运行时采用范围见
+[ADR-0027](adr/0027-eino-primary-ai-runtime.md)。
 
 ## 4. RAG 发布门禁
 
 ### 4.1 当前执行流
 
-当前 `/chat` 是固定 retrieval-first 单节点 RAG，不是开放 Tool Loop：
+当前 `/chat` 使用 Eino RAG v2：检索与持久业务边界仍由项目拥有，Eino 只连接一次 Attempt 内的 Graph、受控只读 Tool Agent
+与最终正文流，不提供通用 Agent API：
 
 ```text
 Question -> PLAN -> Retrieval -> Knowledge Eligibility
-         -> ANSWER -> REVIEW -> Citation/Faithfulness Gate
+         -> AGENT* -> ANSWER -> REVIEW -> Citation/Faithfulness Gate
          -> Answer | Refusal | Clarification | Failure
 ```
 
-三个阶段可以产生可恢复进度事件，但最终状态以 REST/数据库为准；阶段事件不是逐 Token Answer 草稿。
+最终正文以独立、不绑定 Tool 的 Eino Stream 产生 `ANSWER` 草稿。草稿写入短 TTL、generation+sequence 的 PostgreSQL log，
+经 SSE 发布；只有 metadata、Citation/Faithfulness 与 Finalizer 全部通过后，最终 Answer 才与 `PUBLISHED` 同事务原子提交。
+EOF、取消或验证失败都不能把草稿当正式 Answer。
 
 ### 4.2 Query 与 Conversation
 
@@ -165,7 +172,7 @@ Refusal 只用于检索完成但证据不足/冲突无法安全回答；DB/Provi
 ### 4.4 恢复与反馈
 
 - Question、Workflow、Model Run、Answer/Refusal/Clarification 分开持久化；重试按同一逻辑 key 恢复，不重复发布。
-- SSE 只使 Conversation/Answer 查询失效；断线后用 Last-Event-ID + REST 回查。
+- SSE 同时传递可恢复阶段事件与当前 Attempt 的草稿游标；断线后用 Last-Event-ID + REST 回查，草稿仍不是最终事实。
 - Answer Feedback 是 append-only Evaluation 事实，不直接改 Answer、Claim、Memory 或 Proposal。
 
 ## 5. 受控工具运行时
@@ -189,6 +196,8 @@ flowchart LR
 ### 5.2 当前工具边界
 
 - `ReadSource`、`ValidateCitation`、`ReadGitStatus` 使用稳定 ID tuple 或空参数，并受 Workspace/Workflow 绑定。
+- Eino Agent 只可调用冻结 allowlist 中的只读工具；每次调用都经项目 `ExecutionService`、Capability、lease/fence 和 durable receipt，
+  不向模型暴露 Workspace、Credential、Approval、写工具或完整 Citation 身份。
 - `SearchKnowledge`、`CalculateDiff` 等内容型工具必须有不复制 raw 内容的 request/receipt 或同一 Attempt 执行边界，缺少时不注册假 Executor。
 - `FetchWebPage` 默认关闭；即使进程配置启用，缺少持久 Workspace/Workflow Web Policy 时 readiness fail closed。
 - `RebuildIndex`、`RunRegressionEvaluation` 等 Contract 缺少真实 Application seam/receipt/Workflow 时只能不可用，不能返回空成功。

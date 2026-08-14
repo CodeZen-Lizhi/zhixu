@@ -42,11 +42,11 @@ func (self *Assembler) WritePtr(i int, ptr obj.Addr, old obj.Addr) {
     self.Sjmp("JE", "_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.xsave(_SP_q)
     self.Emit("MOVQ", _F_gcWriteBarrier2, _BX)  // MOVQ ${fn}, AX
-    self.Rjmp("CALL", _BX)
+    self.Rjmp("CALL", _BX)  
     self.Emit("MOVQ", ptr, jit.Ptr(_SP_q, 0))
     self.Emit("MOVQ", old, _AX)
     self.Emit("MOVQ", _AX, jit.Ptr(_SP_q, 8))
-    self.xload(_SP_q)
+    self.xload(_SP_q)  
     self.Link("_no_writeBarrier" + strconv.Itoa(i) + "_{n}")
     self.Emit("MOVQ", ptr, old)
 }

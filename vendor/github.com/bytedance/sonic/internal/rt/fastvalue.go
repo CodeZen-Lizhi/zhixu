@@ -223,3 +223,5 @@ func PtrAdd(ptr unsafe.Pointer, offset uintptr) unsafe.Pointer {
 //go:noescape
 //go:linkname GetItab runtime.getitab
 func GetItab(inter *GoInterfaceType, typ *GoType, canfail bool) *GoItab
+
+

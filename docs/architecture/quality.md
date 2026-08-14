@@ -123,6 +123,9 @@
 - 产品级 API/Retrieval/Model/Data 指标是扩展目标；未注册的指标不能写成当前 `/metrics` 事实。
 - `disabled`：零 OTLP exporter/network，但 SDK context 与 Prometheus 可用；`optional`：探针失败后 degraded；`required`：startup export/flush 失败在 listener/ready 前 fail fast。
 - 外部 Prometheus/Grafana/Collector 可选；本项目 Metrics 不保存跨重启历史。
+- Eino API/Worker 的 OTLP 证据必须与普通服务指标分开标识。六项 live gate 与 host-relay 外部 Chat/本地 Ollama
+  Embedding 的浏览器终态已作为发布证据通过；容器直连外部 HTTPS 网络路径及真实连续 7 天、至少 100 个合格终态的
+  稳定观察尚未完成，不能标记为 PASS。观察操作见 [Eino 稳定发布观察 Runbook](runbooks/eino-stable-observation.md)。
 
 ### 3.5 Append-only Audit
 

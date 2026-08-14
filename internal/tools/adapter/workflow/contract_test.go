@@ -39,7 +39,7 @@ func TestProductionDefinitionExposesOnlyEmptyOrStableIDInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	definition, err := NewProductionRegisteredDefinition(catalog)
+	definition, err := NewReplayRegisteredDefinition(catalog)
 	if err != nil {
 		t.Fatal(err)
 	}

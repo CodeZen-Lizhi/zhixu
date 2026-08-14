@@ -208,8 +208,9 @@ operational recovery. The Settings page restores durable Apply progress after a 
 active and role-local applied revisions. See the [运行与恢复手册](docs/operations.md#44-managed-模型设置) and
 [ADR-0022](docs/architecture/adr/0022-model-runtime-hot-activation.md) for the recovery boundary. Customized legacy
 `ZHIXU_CHAT_*` or `ZHIXU_EMBEDDING_*` values in `.env` are rejected before build/start; restore those fields to
-`.env.example` defaults. Static model environment variables remain for direct binaries and isolated smoke overlays
-only, and API keys must never be committed. 认证配置由
+`.env.example` defaults. Chat、Embedding、Structured Scheduler 和 RAG 编排在部署中固定使用 Eino；不再提供进程级
+implementation selector 或 direct 回滚开关，需要恢复旧实现时通过 Git 历史或兼容发布制品恢复整套版本。Static model
+environment variables remain only for isolated smoke overlays, and API keys must never be committed. 认证配置由
 `ZHIXU_AUTH_MODE=required|disabled` 控制：`required` 使用一次性 Bootstrap
 Token 换取 HttpOnly Session Cookie，浏览器修改请求同时校验精确 Origin 与 CSRF；自动化客户端使用限 Scope、
 可过期、可撤销的 Bearer API Token。Bootstrap Token 只用于首次换取 Session，API Token 明文只在创建响应返回
@@ -251,6 +252,9 @@ non-exporting SDK provider with a stable degraded status, while required mode
 fails before listening. API `http.request` and claimed River
 `workflow.node.consume` spans use the project-owned validation/redaction and
 only persist `traceparent` across the job boundary.
+API and Worker use scoped external Providers with distinct service names, append
+`/v1/metrics` and `/v1/traces`, and flush on shutdown. `TELEMETRY_EXPORTING`
+means the exporter is configured, not that a remote Collector has acknowledged data.
 
 SIGINT/SIGTERM first remove Worker readiness and choose the graceful River
 `Stop` path. A fatal runtime invariant may instead choose `StopAndCancel`; the
@@ -287,12 +291,25 @@ ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-fault-smoke
 make semantic-link-eval
 ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-smoke
 make compose-rag-smoke
+make compose-rag-real-provider-smoke
 ```
 
 `rag-integration` uses a caller-supplied disposable PostgreSQL target and proves the public HTTP→River→Retrieval→
-Knowledge eligibility→three model phases (`PLAN`, `ANSWER`, `REVIEW`)→validated Answer→SSE→Feedback path plus
-exact replay. `compose-rag-smoke` creates an isolated Compose project, ports, database volume, Git workspace and
+Knowledge eligibility→Eino v2 model phases (`PLAN -> AGENT* -> ANSWER -> INITIAL/REPAIR/REDUCED -> REVIEW`)→
+validated Answer→SSE→Feedback path plus exact replay. `compose-rag-smoke` creates an isolated Compose project,
+ports, database volume, Git workspace and
 credential canary, exercises the same black-box product path, then removes all disposable state.
+
+`compose-rag-real-provider-smoke` is the opt-in real Provider release gate. It defaults to local Ollama; setting
+`ZHIXU_RAG_REAL_PROVIDER_KIND=openai-compatible` reuses the protected `ZHIXU_EINO_LIVE_*` Chat and OpenAI-compatible
+Embedding environment. Run `make compose-rag-real-provider-preflight` first to validate the complete environment and
+rendered Eino Compose model without contacting the external Provider. The full gate uses production Eino
+Chat/Embedding, Graph, ChatModelAgent/ToolsNode and final Stream through Worker/API, then verifies the draft and final
+Answer in desktop and mobile browsers. It is protocol and system evidence, not a model-quality Gold Set.
+
+`ZHIXU_RAG_REAL_PROVIDER_TRANSPORT=direct` is the default container-to-Provider network path; `host-relay` routes
+through the host relay when required. This setting does not select an AI implementation: the Chat, Embedding,
+Scheduler and Agent runtime remain Eino-only.
 
 The three Graph gates require a caller-supplied disposable PostgreSQL database. `graph-integration` exercises the
 public HTTP Global→Local→Path→Evidence flow, cursor replay/staleness, Workspace isolation and timeout mapping;
@@ -319,7 +336,16 @@ an isolated temporary database so a running Compose Worker cannot own its River
 maintenance leader. Do not treat a successful
 image build or config render as evidence that crash recovery passed.
 
-The isolated Eino adoption gate is available under `poc/eino` and is included in `make test`. The current decision is not to adopt Eino formally because several real integration gates and the provider smoke remain incomplete; see `poc/eino/report.md`.
+Eino is the only deployable AI runtime: Chat, OpenAI-compatible/Ollama Embedding, and all five structured
+schedulers are fixed to Eino. New `/chat` questions use RAG v2, whose in-process path uses an Eino Graph,
+classic `ChatModelAgent` plus a frozen read-only tool catalog, and a separate tool-free final-answer stream.
+Agent, final-answer and metadata Provider inputs use only bounded `E*/C*/T*` references; the project restores complete
+Citation/Claim/Topic identities around the Tool bridge and final composition, so service UUIDs never become model inputs.
+The Worker persists bounded draft chunks in PostgreSQL; the browser reads them through a dedicated SSE endpoint,
+and the Finalizer atomically publishes the verified Answer before marking the draft `PUBLISHED`. Eino does not own
+domain validation, permissions, approvals, evidence, River delivery, or PostgreSQL workflow facts. There is no runtime
+fallback; recover an earlier implementation from Git history if needed. Checkpoint is still an isolated PoC and
+is not part of production recovery. See [ADR-0027](docs/architecture/adr/0027-eino-primary-ai-runtime.md).
 
 ## Documentation
 

@@ -172,3 +172,4 @@ func ConvTBool(val bool, ep *interface{}) {
 
 	*((*GoEface)(unsafe.Pointer(ep))) = GoEface{Type: BoolType, Value: vp}
 }
+

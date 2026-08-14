@@ -164,7 +164,7 @@ func (self *StackMap) BitmapNums() int {
 }
 
 func (self *StackMap) StackMapHeaderSize() int {
-    return int(unsafe.Sizeof(self.L)) + int(unsafe.Sizeof(self.N))
+    return int(unsafe.Sizeof(self.L)) + int(unsafe.Sizeof(self.N)) 
 }
 
 func (self *StackMap) MarshalBinary() ([]byte, error) {

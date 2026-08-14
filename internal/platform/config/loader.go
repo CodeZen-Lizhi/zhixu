@@ -71,6 +71,16 @@ var selectorEnvSpecs = []envSpec{
 	{configKey: "telemetry_mode", envKey: "ZHIXU_TELEMETRY_MODE"},
 }
 
+var removedImplementationSelectorEnvNames = [...]string{
+	"ZHIXU_CHAT_IMPLEMENTATION",
+	"ZHIXU_EMBEDDING_IMPLEMENTATION",
+	"ZHIXU_STRUCTURED_SCHEDULER_RAG",
+	"ZHIXU_STRUCTURED_SCHEDULER_RELATION",
+	"ZHIXU_STRUCTURED_SCHEDULER_ARTIFACT",
+	"ZHIXU_STRUCTURED_SCHEDULER_CAPTURE",
+	"ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING",
+}
+
 var valueEnvSpecs = []envSpec{
 	{configKey: "app_name", envKey: "ZHIXU_APP_NAME"},
 	{configKey: "version", envKey: "ZHIXU_VERSION"},
@@ -195,6 +205,9 @@ func (l *configLoader) load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("parse config file: %w", err)
 		}
 	}
+	if err := l.rejectRemovedImplementationSelectors(); err != nil {
+		return Config{}, err
+	}
 
 	if !l.options.consumeAPISecrets {
 		l.v.Set("auth_bootstrap_token", "")
@@ -223,6 +236,15 @@ func (l *configLoader) load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return result, result.validateWith(l.validate, l.options.validateAuth)
+}
+
+func (l *configLoader) rejectRemovedImplementationSelectors() error {
+	for _, key := range removedImplementationSelectorEnvNames {
+		if _, ok := l.lookup(key); ok {
+			return fmt.Errorf("%s is no longer supported; Eino is the only AI runtime", key)
+		}
+	}
+	return nil
 }
 
 func (l *configLoader) registerDefaults(defaults Config) error {

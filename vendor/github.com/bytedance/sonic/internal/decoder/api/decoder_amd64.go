@@ -28,7 +28,7 @@ import (
 var (
 	pretouchImpl = jitdec.Pretouch
 	decodeImpl = jitdec.Decode
-)
+) 
 
  func init() {
 	if envs.UseOptDec {

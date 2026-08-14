@@ -35,14 +35,14 @@ func (self *linkedNodes) Cap() int {
     if self == nil {
         return 0
     }
-    return (len(self.tail)+1)*_DEFAULT_NODE_CAP
+    return (len(self.tail)+1)*_DEFAULT_NODE_CAP 
 }
 
 func (self *linkedNodes) Len() int {
     if self == nil {
         return 0
     }
-    return self.size
+    return self.size 
 }
 
 func (self *linkedNodes) At(i int) (*Node) {
@@ -73,13 +73,13 @@ func (self *linkedNodes) MoveOne(source int,  target int) {
         // move every element (source,target] one step back
         for i:=source; i<target; i++ {
             *self.At(i) = *self.At(i+1)
-        }
+        } 
     } else {
         // move every element [target,source) one step forward
         for i:=source; i>target; i-- {
             *self.At(i) = *self.At(i-1)
         }
-    }
+    } 
     // set target
     *self.At(target) = n
 }
@@ -210,14 +210,14 @@ func (self *linkedPairs) Cap() int {
     if self == nil {
         return 0
     }
-    return (len(self.tail)+1)*_DEFAULT_NODE_CAP
+    return (len(self.tail)+1)*_DEFAULT_NODE_CAP 
 }
 
 func (self *linkedPairs) Len() int {
     if self == nil {
         return 0
     }
-    return self.size
+    return self.size 
 }
 
 func (self *linkedPairs) At(i int) *Pair {
@@ -252,7 +252,7 @@ func (self *linkedPairs) Unset(i int) {
         p := self.At(i)
         delete(self.index, p.hash)
     }
-    self.set(i, Pair{})
+    self.set(i, Pair{}) 
 }
 
 func (self *linkedPairs) Set(i int, v Pair) {
@@ -467,3 +467,4 @@ func (self *Node) getParserAndObjectStack() (*Parser, *parseObjectStack) {
     stack := (*parseObjectStack)(self.p)
     return &stack.parser, stack
 }
+

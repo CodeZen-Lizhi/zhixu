@@ -49,3 +49,4 @@ func EncodeTypedPointer(buf *[]byte, vt *rt.GoType, vp *unsafe.Pointer, sb *vars
 		return fn.(vars.Encoder)(buf, unsafe.Pointer(vp), sb, fv)
 	}
 }
+

@@ -14,7 +14,7 @@
 | [0010](0010-sse-for-server-events.md) | SSE 任务事件 | accepted |
 | [0011](0011-retrieve-latest-approved-revision.md) | 默认只检索最新批准版本 | accepted |
 | [0012](0012-version-workflows-prompts-schemas.md) | Workflow/Prompt/Schema 版本化 | accepted |
-| [0013](0013-eino-adoption-gate.md) | Eino 采用门禁与 M2 不采用结论 | accepted |
+| [0013](0013-eino-adoption-gate.md) | Eino 采用门禁与 M2 不采用结论（对应生产结论已由 ADR-0027 取代） | accepted |
 | [0014](0014-single-user-authentication.md) | 单用户 Session、API Token 与写授权分离 | accepted |
 | [0015](0015-river-goose-runtime.md) | River/Goose Runtime 版本、迁移和兼容边界 | accepted |
 | [0016](0016-capacity-performance-baseline.md) | 确定性容量数据集与可审计性能门禁 | accepted |
@@ -25,3 +25,7 @@
 | [0021](0021-stable-network-namespace-anchors.md) | 稳定 Network Namespace Anchor 保障 Docker 项目重启 | accepted |
 | [0022](0022-model-runtime-hot-activation.md) | 模型运行时无容器重启热应用 | accepted |
 | [0023](0023-managed-local-ollama-runtime.md) | 主 Compose 小型管理容器按需运行本地 Ollama | accepted |
+| [0024](0024-layered-eino-adoption.md) | Eino 分层采用、Chat/Callback 与 Structured Output 短 Graph 灰度（对应生产结论已由 ADR-0027 取代） | superseded |
+| [0025](0025-eino-embedding-adoption.md) | Eino OpenAI-Compatible/Ollama Embedding 可回滚采用（对应生产结论已由 ADR-0027 取代） | superseded |
+| [0026](0026-eino-runtime-expansion-gates.md) | Eino RAG、Tool、Streaming、Checkpoint 扩展门禁结论（前三项已由 ADR-0027 取代） | superseded |
+| [0027](0027-eino-primary-ai-runtime.md) | Eino 正式生产 AI Runtime，接入 `/chat` RAG（当前） | accepted |

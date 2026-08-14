@@ -35,21 +35,21 @@ const APIKind = apiKind
 
 // Config is a combination of sonic/encoder.Options and sonic/decoder.Options
 type Config struct {
-    // EscapeHTML indicates encoder to escape all HTML characters
+    // EscapeHTML indicates encoder to escape all HTML characters 
     // after serializing into JSON (see https://pkg.go.dev/encoding/json#HTMLEscape).
     // WARNING: This hurts performance A LOT, USE WITH CARE.
     EscapeHTML                    bool
 
-    // SortMapKeys indicates encoder that the keys of a map needs to be sorted
+    // SortMapKeys indicates encoder that the keys of a map needs to be sorted 
     // before serializing into JSON.
     // WARNING: This hurts performance A LOT, USE WITH CARE.
     SortMapKeys                   bool
 
-    // CompactMarshaler indicates encoder that the output JSON from json.Marshaler
-    // is always compact and needs no validation
+    // CompactMarshaler indicates encoder that the output JSON from json.Marshaler 
+    // is always compact and needs no validation 
     CompactMarshaler              bool
 
-    // NoQuoteTextMarshaler indicates encoder that the output text from encoding.TextMarshaler
+    // NoQuoteTextMarshaler indicates encoder that the output text from encoding.TextMarshaler 
     // is always escaped string and needs no quoting
     NoQuoteTextMarshaler          bool
 
@@ -77,7 +77,7 @@ type Config struct {
     // CopyString indicates decoder to decode string values by copying instead of referring.
     CopyString                    bool
 
-    // ValidateString indicates decoder and encoder to validate string values: decoder will return errors
+    // ValidateString indicates decoder and encoder to validate string values: decoder will return errors 
     // when unescaped control chars(\u0000-\u001f) in the string value of JSON.
     ValidateString                bool
 
@@ -88,7 +88,7 @@ type Config struct {
     // NoValidateJSONSkip indicates the decoder should not validate the JSON value when skipping it,
     // such as unknown-fields, mismatched-type, redundant elements..
     NoValidateJSONSkip bool
-
+    
     // NoEncoderNewline indicates that the encoder should not add a newline after every message
     NoEncoderNewline bool
 
@@ -98,11 +98,11 @@ type Config struct {
     // CaseSensitive indicates that the decoder should not ignore the case of object keys.
     CaseSensitive bool
 }
-
+ 
 var (
     // ConfigDefault is the default config of APIs, aiming at efficiency and safety.
     ConfigDefault = Config{}.Froze()
-
+ 
     // ConfigStd is the standard config of APIs, aiming at being compatible with encoding/json.
     ConfigStd = Config{
         EscapeHTML : true,
@@ -111,15 +111,15 @@ var (
         CopyString : true,
         ValidateString : true,
     }.Froze()
-
+ 
     // ConfigFastest is the fastest config of APIs, aiming at speed.
     ConfigFastest = Config{
         NoValidateJSONMarshaler: true,
         NoValidateJSONSkip: true,
     }.Froze()
 )
-
-
+ 
+ 
 // API is a binding of specific config.
 // This interface is inspired by github.com/json-iterator/go,
 // and has same behaviors under equivalent config.
@@ -146,11 +146,11 @@ type API interface {
 type Encoder interface {
     // Encode writes the JSON encoding of v to the stream, followed by a newline character.
     Encode(val interface{}) error
-    // SetEscapeHTML specifies whether problematic HTML characters
-    // should be escaped inside JSON quoted strings.
-    // The default behavior NOT ESCAPE
+    // SetEscapeHTML specifies whether problematic HTML characters 
+    // should be escaped inside JSON quoted strings. 
+    // The default behavior NOT ESCAPE 
     SetEscapeHTML(on bool)
-    // SetIndent instructs the encoder to format each subsequent encoded value
+    // SetIndent instructs the encoder to format each subsequent encoded value 
     // as if indented by the package-level function Indent(dst, src, prefix, indent).
     // Calling SetIndent("", "") disables indentation
     SetIndent(prefix, indent string)
@@ -163,7 +163,7 @@ type Decoder interface {
     // Buffered returns a reader of the data remaining in the Decoder's buffer.
     // The reader is valid until the next call to Decode.
     Buffered() io.Reader
-    // DisallowUnknownFields causes the Decoder to return an error when the destination is a struct
+    // DisallowUnknownFields causes the Decoder to return an error when the destination is a struct 
     // and the input contains object keys which do not match any non-ignored, exported fields in the destination.
     DisallowUnknownFields()
     // More reports whether there is another element in the current array or object being parsed.
@@ -208,9 +208,9 @@ func UnmarshalString(buf string, val interface{}) error {
 //     - Integer is target index(>=0), means searching current node as array.
 //     - String is target key, means searching current node as object.
 //
-//
+// 
 // Notice: It expects the src json is **Well-formed** and **Immutable** when calling,
-// otherwise it may return unexpected result.
+// otherwise it may return unexpected result. 
 // Considering memory safety, the returned JSON is **Copied** from the input
 func Get(src []byte, path ...interface{}) (ast.Node, error) {
     return GetCopyFromString(rt.Mem2Str(src), path...)
@@ -226,7 +226,7 @@ func GetWithOptions(src []byte, opts ast.SearchOptions, path ...interface{}) (as
 
 // GetFromString is same with Get except src is string.
 //
-// WARNING: The returned JSON is **Referenced** from the input.
+// WARNING: The returned JSON is **Referenced** from the input. 
 // Caching or long-time holding the returned node may cause OOM.
 // If your src is big, consider use GetFromStringCopy().
 func GetFromString(src string, path ...interface{}) (ast.Node, error) {

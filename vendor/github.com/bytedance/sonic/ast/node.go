@@ -208,8 +208,8 @@ func (self *Node) checkRaw() error {
    return self.checkFast()
 }
 
-// Bool returns bool value represented by this node,
-// including types.V_TRUE|V_FALSE|V_NUMBER|V_STRING|V_ANY|V_NULL,
+// Bool returns bool value represented by this node, 
+// including types.V_TRUE|V_FALSE|V_NUMBER|V_STRING|V_ANY|V_NULL, 
 // V_NONE will return error
 func (self *Node) Bool() (bool, error) {
     if err := self.checkRaw(); err != nil {
@@ -219,7 +219,7 @@ func (self *Node) Bool() (bool, error) {
         case types.V_TRUE  : return true , nil
         case types.V_FALSE : return false, nil
         case types.V_NULL  : return false, nil
-        case _V_NUMBER     :
+        case _V_NUMBER     : 
             if i, err := self.toInt64(); err == nil {
                 return i != 0, nil
             } else if f, err := self.toFloat64(); err == nil {
@@ -228,8 +228,8 @@ func (self *Node) Bool() (bool, error) {
                 return false, err
             }
         case types.V_STRING: return strconv.ParseBool(self.toString())
-        case _V_ANY        :
-            any := self.packAny()
+        case _V_ANY        :   
+            any := self.packAny()     
             switch v := any.(type) {
                 case bool   : return v, nil
                 case int    : return v != 0, nil
@@ -245,7 +245,7 @@ func (self *Node) Bool() (bool, error) {
                 case float32: return v != 0, nil
                 case float64: return v != 0, nil
                 case string : return strconv.ParseBool(v)
-                case json.Number:
+                case json.Number: 
                     if i, err := v.Int64(); err == nil {
                         return i != 0, nil
                     } else if f, err := v.Float64(); err == nil {
@@ -259,7 +259,7 @@ func (self *Node) Bool() (bool, error) {
     }
 }
 
-// Int64 casts the node to int64 value,
+// Int64 casts the node to int64 value, 
 // including V_NUMBER|V_TRUE|V_FALSE|V_ANY|V_STRING
 // V_NONE it will return error
 func (self *Node) Int64() (int64, error) {
@@ -278,7 +278,7 @@ func (self *Node) Int64() (int64, error) {
         case types.V_TRUE     : return 1, nil
         case types.V_FALSE    : return 0, nil
         case types.V_NULL     : return 0, nil
-        case _V_ANY           :
+        case _V_ANY           :  
             any := self.packAny()
             switch v := any.(type) {
                 case bool   : if v { return 1, nil } else { return 0, nil }
@@ -294,7 +294,7 @@ func (self *Node) Int64() (int64, error) {
                 case uint64 : return int64(v), nil
                 case float32: return int64(v), nil
                 case float64: return int64(v), nil
-                case string :
+                case string : 
                     if i, err := strconv.ParseInt(v, 10, 64); err == nil {
                         return i, nil
                     } else if f, err := strconv.ParseFloat(v, 64); err == nil {
@@ -302,7 +302,7 @@ func (self *Node) Int64() (int64, error) {
                     } else {
                         return 0, err
                     }
-                case json.Number:
+                case json.Number: 
                     if i, err := v.Int64(); err == nil {
                         return i, nil
                     } else if f, err := v.Float64(); err == nil {
@@ -323,7 +323,7 @@ func (self *Node) StrictInt64() (int64, error) {
     }
     switch self.t {
         case _V_NUMBER        : return self.toInt64()
-        case _V_ANY           :
+        case _V_ANY           :  
             any := self.packAny()
             switch v := any.(type) {
                 case int   : return int64(v), nil
@@ -336,7 +336,7 @@ func (self *Node) StrictInt64() (int64, error) {
                 case uint16: return int64(v), nil
                 case uint32: return int64(v), nil
                 case uint64: return int64(v), nil
-                case json.Number:
+                case json.Number: 
                     if i, err := v.Int64(); err == nil {
                         return i, nil
                     } else {
@@ -356,7 +356,7 @@ func castNumber(v bool) json.Number {
     }
 }
 
-// Number casts node to float64,
+// Number casts node to float64, 
 // including V_NUMBER|V_TRUE|V_FALSE|V_ANY|V_STRING|V_NULL,
 // V_NONE it will return error
 func (self *Node) Number() (json.Number, error) {
@@ -365,7 +365,7 @@ func (self *Node) Number() (json.Number, error) {
     }
     switch self.t {
         case _V_NUMBER        : return self.toNumber(), nil
-        case types.V_STRING :
+        case types.V_STRING : 
             if _, err := self.toInt64(); err == nil {
                 return self.toNumber(), nil
             } else if _, err := self.toFloat64(); err == nil {
@@ -376,7 +376,7 @@ func (self *Node) Number() (json.Number, error) {
         case types.V_TRUE     : return json.Number("1"), nil
         case types.V_FALSE    : return json.Number("0"), nil
         case types.V_NULL     : return json.Number("0"), nil
-        case _V_ANY           :
+        case _V_ANY           :        
             any := self.packAny()
             switch v := any.(type) {
                 case bool   : return castNumber(v), nil
@@ -392,7 +392,7 @@ func (self *Node) Number() (json.Number, error) {
                 case uint64 : return castNumber(v != 0), nil
                 case float32: return castNumber(v != 0), nil
                 case float64: return castNumber(v != 0), nil
-                case string :
+                case string : 
                     if _, err := strconv.ParseFloat(v, 64); err == nil {
                         return json.Number(v), nil
                     } else {
@@ -412,7 +412,7 @@ func (self *Node) StrictNumber() (json.Number, error) {
     }
     switch self.t {
         case _V_NUMBER        : return self.toNumber()  , nil
-        case _V_ANY        :
+        case _V_ANY        :        
             if v, ok := self.packAny().(json.Number); ok {
                 return v, nil
             } else {
@@ -422,7 +422,7 @@ func (self *Node) StrictNumber() (json.Number, error) {
     }
 }
 
-// String cast node to string,
+// String cast node to string, 
 // including V_NUMBER|V_TRUE|V_FALSE|V_ANY|V_STRING|V_NULL,
 // V_NONE it will return error
 func (self *Node) String() (string, error) {
@@ -434,7 +434,7 @@ func (self *Node) String() (string, error) {
         case types.V_TRUE    : return "true" , nil
         case types.V_FALSE   : return "false", nil
         case types.V_STRING, _V_NUMBER  : return self.toString(), nil
-        case _V_ANY          :
+        case _V_ANY          :        
         any := self.packAny()
         switch v := any.(type) {
             case bool   : return strconv.FormatBool(v), nil
@@ -450,7 +450,7 @@ func (self *Node) String() (string, error) {
             case uint64 : return strconv.Itoa(int(v)), nil
             case float32: return strconv.FormatFloat(float64(v), 'g', -1, 64), nil
             case float64: return strconv.FormatFloat(float64(v), 'g', -1, 64), nil
-            case string : return v, nil
+            case string : return v, nil 
             case json.Number: return v.String(), nil
             default: return "", ErrUnsupportType
         }
@@ -466,7 +466,7 @@ func (self *Node) StrictString() (string, error) {
     }
     switch self.t {
         case types.V_STRING  : return self.toString(), nil
-        case _V_ANY          :
+        case _V_ANY          :        
             if v, ok := self.packAny().(string); ok {
                 return v, nil
             } else {
@@ -476,7 +476,7 @@ func (self *Node) StrictString() (string, error) {
     }
 }
 
-// Float64 cast node to float64,
+// Float64 cast node to float64, 
 // including V_NUMBER|V_TRUE|V_FALSE|V_ANY|V_STRING|V_NULL,
 // V_NONE it will return error
 func (self *Node) Float64() (float64, error) {
@@ -488,10 +488,10 @@ func (self *Node) Float64() (float64, error) {
         case types.V_TRUE    : return 1.0, nil
         case types.V_FALSE   : return 0.0, nil
         case types.V_NULL    : return 0.0, nil
-        case _V_ANY          :
+        case _V_ANY          :        
             any := self.packAny()
             switch v := any.(type) {
-                case bool    :
+                case bool    : 
                     if v {
                         return 1.0, nil
                     } else {
@@ -509,13 +509,13 @@ func (self *Node) Float64() (float64, error) {
                 case uint64 : return float64(v), nil
                 case float32: return float64(v), nil
                 case float64: return float64(v), nil
-                case string :
+                case string : 
                     if f, err := strconv.ParseFloat(v, 64); err == nil {
                         return float64(f), nil
                     } else {
                         return 0, err
                     }
-                case json.Number:
+                case json.Number: 
                     if f, err := v.Float64(); err == nil {
                         return float64(f), nil
                     } else {
@@ -551,7 +551,7 @@ func (self *Node) StrictFloat64() (float64, error) {
     }
     switch self.t {
         case _V_NUMBER       : return self.toFloat64()
-        case _V_ANY        :
+        case _V_ANY        :        
             any := self.packAny()
             switch v := any.(type) {
                 case float32 : return float64(v), nil
@@ -610,7 +610,7 @@ func (self *Node) Set(key string, node Node) (bool, error) {
     if node.t == V_ERROR {
         return false, node
     }
-
+    
     if self.t == _V_NONE || self.t == types.V_NULL {
         *self = NewObject([]Pair{NewPair(key, node)})
         return false, nil
@@ -632,7 +632,7 @@ func (self *Node) Set(key string, node Node) (bool, error) {
 
     } else if err := p.Check(); err != nil {
         return false, err
-    }
+    } 
 
     *p = node
     return true, nil
@@ -667,10 +667,10 @@ func (self *Node) Unset(key string) (bool, error) {
 // The index must be within self's children.
 func (self *Node) SetByIndex(index int, node Node) (bool, error) {
     if err := self.checkRaw(); err != nil {
-        return false, err
+        return false, err 
     }
     if err := node.Check(); err != nil {
-        return false, err
+        return false, err 
     }
 
     if index == 0 && (self.t == _V_NONE || self.t == types.V_NULL) {
@@ -814,7 +814,7 @@ func (self *Node) Pop() error {
 
 // Move moves the child at src index to dst index,
 // meanwhile slides siblings from src+1 to dst.
-//
+// 
 // WARN: this will change address of elements, which is a dangerous action.
 func (self *Node) Move(dst, src int) error {
     if err := self.should(types.V_ARRAY); err != nil {
@@ -838,7 +838,7 @@ func (self *Node) Move(dst, src int) error {
             if di == -1 {
                 dst = i
                 di--
-            }
+            } 
             if si == -1 {
                 src = i
                 si--
@@ -1017,7 +1017,7 @@ func (self *Node) MapUseNode() (map[string]Node, error) {
 // MapUnsafe exports the underlying pointer to its children map
 // WARN: don't use it unless you know what you are doing
 //
-// Deprecated:  this API now returns copied nodes instead of directly reference,
+// Deprecated:  this API now returns copied nodes instead of directly reference, 
 // func (self *Node) UnsafeMap() ([]Pair, error) {
 //     if err := self.should(types.V_OBJECT, "an object"); err != nil {
 //         return nil, err
@@ -1162,7 +1162,7 @@ func (self *Node) ArrayUseNode() ([]Node, error) {
 // ArrayUnsafe exports the underlying pointer to its children array
 // WARN: don't use it unless you know what you are doing
 //
-// Deprecated:  this API now returns copied nodes instead of directly reference,
+// Deprecated:  this API now returns copied nodes instead of directly reference, 
 // which has no difference with ArrayUseNode
 // func (self *Node) UnsafeArray() ([]Node, error) {
 //     if err := self.should(types.V_ARRAY, "an array"); err != nil {
@@ -1199,7 +1199,7 @@ func (self *Node) Interface() (interface{}, error) {
         case types.V_ARRAY   : return self.toGenericArray()
         case types.V_OBJECT  : return self.toGenericObject()
         case types.V_STRING  : return self.toString(), nil
-        case _V_NUMBER       :
+        case _V_NUMBER       : 
             v, err := self.toFloat64()
             if err != nil {
                 return nil, err
@@ -1259,7 +1259,7 @@ func (self *Node) InterfaceUseNumber() (interface{}, error) {
     }
 }
 
-// InterfaceUseNode clone itself as a new node,
+// InterfaceUseNode clone itself as a new node, 
 // or its children as map[string]Node (or []Node)
 func (self *Node) InterfaceUseNode() (interface{}, error) {
     if err := self.checkRaw(); err != nil {
@@ -1282,7 +1282,7 @@ func (self *Node) InterfaceUseNode() (interface{}, error) {
     }
 }
 
-// LoadAll loads the node's children
+// LoadAll loads the node's children 
 // and ensure all its children can be READ concurrently (include its children's children)
 func (self *Node) LoadAll() error {
     return self.Load()
@@ -1334,7 +1334,7 @@ func (self *Node) nodeAt(i int) *Node {
                 }
             }
             return nil
-        }
+        } 
     }
     return p.At(i)
 }
@@ -1358,7 +1358,7 @@ func (self *Node) pairAt(i int) *Pair {
                 }
             }
            return nil
-       }
+       } 
     }
     return p.At(i)
 }
@@ -1549,7 +1549,7 @@ func (self *Node) toGenericArray() ([]interface{}, error) {
         return []interface{}{}, nil
     }
     ret := make([]interface{}, 0, nb)
-
+    
     /* convert each item */
     it := self.values()
     for v := it.next(); v != nil; v = it.next() {
@@ -1669,7 +1669,7 @@ func NewRaw(json string) Node {
     parser := NewParserObj(json)
     start, err := parser.skip()
     if err != 0 {
-        return *newError(err, err.Message())
+        return *newError(err, err.Message()) 
     }
     it := switchRawType(parser.s[start])
     if it == _V_NONE {
@@ -1678,14 +1678,14 @@ func NewRaw(json string) Node {
     return newRawNode(parser.s[start:parser.p], it, false)
 }
 
-// NewRawConcurrentRead creates a node of raw json, which can be READ
+// NewRawConcurrentRead creates a node of raw json, which can be READ 
 // (GetByPath/Get/Index/GetOrIndex/Int64/Bool/Float64/String/Number/Interface/Array/Map/Raw/MarshalJSON) concurrently.
 // If the input json is invalid, NewRaw returns a error Node.
 func NewRawConcurrentRead(json string) Node {
     parser := NewParserObj(json)
     start, err := parser.skip()
     if err != 0 {
-        return *newError(err, err.Message())
+        return *newError(err, err.Message()) 
     }
     it := switchRawType(parser.s[start])
     if it == _V_NONE {
@@ -1694,7 +1694,7 @@ func NewRawConcurrentRead(json string) Node {
     return newRawNode(parser.s[start:parser.p], it, true)
 }
 
-// NewAny creates a node of type V_ANY if any's type isn't Node or *Node,
+// NewAny creates a node of type V_ANY if any's type isn't Node or *Node, 
 // which stores interface{} and can be only used for `.Interface()`\`.MarshalJSON()`.
 func NewAny(any interface{}) Node {
     switch n := any.(type) {
@@ -1783,7 +1783,7 @@ func newBytes(v []byte) Node {
     }
 }
 
-// NewString creates a node of type V_STRING.
+// NewString creates a node of type V_STRING. 
 // v is considered to be a valid UTF-8 string,
 // which means it won't be validated and unescaped.
 // when the node is encoded to json, v will be escaped.

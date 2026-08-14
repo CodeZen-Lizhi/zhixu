@@ -171,7 +171,7 @@ selection 才原子更新。
 - Auth：`ZHIXU_AUTH_MODE`、`ZHIXU_AUTH_BOOTSTRAP_TOKEN`、`ZHIXU_AUTH_SESSION_TTL`、`ZHIXU_AUTH_API_TOKEN_TTL`、`ZHIXU_AUTH_SECURE_COOKIE`、`ZHIXU_AUTH_ALLOWED_ORIGINS` 与 `ZHIXU_REVIEW_QUESTION_REF_KEY`。
 - Tool/Web：`ZHIXU_TOOL_RUNTIME_MODE`、`ZHIXU_WEB_FETCH_MODE`、`ZHIXU_WEB_FETCH_TIMEOUT`、`ZHIXU_WEB_FETCH_RESPONSE_HEADER_TIMEOUT`、`ZHIXU_WEB_FETCH_TLS_HANDSHAKE_TIMEOUT`、`ZHIXU_WEB_FETCH_MAX_REDIRECTS`、`ZHIXU_WEB_FETCH_MAX_URL_BYTES`、`ZHIXU_WEB_FETCH_MAX_RESPONSE_HEADER_BYTES`、`ZHIXU_WEB_FETCH_MAX_BODY_BYTES`、`ZHIXU_WEB_FETCH_MAX_TEXT_BYTES`、`ZHIXU_WEB_FETCH_MAX_RESOLVED_IPS`、`ZHIXU_WEB_FETCH_ALLOWED_CONTENT_TYPES`。
 - Embedding：`ZHIXU_EMBEDDING_PROVIDER`、`ZHIXU_EMBEDDING_BASE_URL`、`ZHIXU_EMBEDDING_API_KEY`、`ZHIXU_EMBEDDING_MODEL`、`ZHIXU_EMBEDDING_DIMENSIONS`、`ZHIXU_EMBEDDING_NORMALIZATION`、`ZHIXU_EMBEDDING_DISTANCE_METRIC`、`ZHIXU_EMBEDDING_MAX_BATCH_SIZE`、`ZHIXU_EMBEDDING_MAX_INPUT_BYTES`、`ZHIXU_EMBEDDING_MAX_BATCH_INPUT_BYTES`、`ZHIXU_EMBEDDING_TIMEOUT`、`ZHIXU_EMBEDDING_MAX_RESPONSE_BYTES`。
-- Chat：`ZHIXU_CHAT_PROVIDER`、`ZHIXU_CHAT_API_STYLE`（`chat_completions|responses`）、`ZHIXU_CHAT_BASE_URL`、`ZHIXU_CHAT_API_KEY`、`ZHIXU_CHAT_MODEL`、`ZHIXU_CHAT_MODEL_VERSION`、`ZHIXU_CHAT_ADAPTER_VERSION`、`ZHIXU_CHAT_TIMEOUT`、`ZHIXU_CHAT_MAX_REQUEST_BYTES`、`ZHIXU_CHAT_MAX_RESPONSE_BYTES`。
+- Chat：`ZHIXU_CHAT_PROVIDER`、`ZHIXU_CHAT_API_STYLE`（当前 Eino 制品仅接受 `chat_completions`；`responses` 仅用于读取历史 revision）、`ZHIXU_CHAT_BASE_URL`、`ZHIXU_CHAT_API_KEY`、`ZHIXU_CHAT_MODEL`、`ZHIXU_CHAT_MODEL_VERSION`、`ZHIXU_CHAT_ADAPTER_VERSION`、`ZHIXU_CHAT_TIMEOUT`、`ZHIXU_CHAT_MAX_REQUEST_BYTES`、`ZHIXU_CHAT_MAX_RESPONSE_BYTES`。
 - Retrieval：`ZHIXU_RETRIEVAL_RRF_K`、`ZHIXU_RETRIEVAL_RRF_LEXICAL_CANDIDATE_LIMIT`、`ZHIXU_RETRIEVAL_RRF_VECTOR_CANDIDATE_LIMIT`、`ZHIXU_RETRIEVAL_RRF_FUSED_CANDIDATE_LIMIT`、`ZHIXU_RETRIEVAL_RRF_RERANK_CANDIDATE_LIMIT`。
 - Telemetry：`ZHIXU_TELEMETRY_MODE`、`OTEL_EXPORTER_OTLP_ENDPOINT`。
 - Managed model settings：`ZHIXU_MODEL_SETTINGS_MODE`、key file，以及仅为旧候选进程兼容保留的 rollout/prepared 字段，精确名称以 Loader/Compose 为准。普通 Save/Apply 不修改环境变量，rollout/prepared 保持空/false。
@@ -185,6 +185,8 @@ selection 才原子更新。
 - managed Compose 的“本地 Ollama”由 `local-model-runtime` 管理器按需启动同容器内的 `ollama serve`。两个模型都在线上或关闭且旧 generation 已释放后，重型子进程停止；模型文件仍保存在 project-owned volume 中，下次直接复用。
 - 升级前如存在受支持的旧 `0.9.6` standalone Ollama，可先运行 `./zhixu local-model status` 做只读形态检查，再显式执行 `./zhixu local-model migrate`（非交互环境使用 `--confirm MIGRATE`）。迁移只接受固定旧容器、镜像 digest 和卷形态；它先快照和空间预检，再停止旧服务、把只读源复制到新卷，并以目标版本核对清单和运行 Chat/Embedding Probe。失败会保留两个卷并尝试恢复旧服务；成功也保留旧卷作为回滚源。不要手工改名、挂载或删除这两个卷。
 - API/Worker 使用同一 Configured Factory，Provider/Model/Version/Dimensions/Normalization/Distance/limits 必须一致。
+- Chat、Embedding、Structured Scheduler 和 RAG 的生产实现固定为 Eino；静态环境变量只允许用于隔离 smoke，
+  不提供 direct selector 或运行时 fallback。旧实现恢复只能按 Git 历史或兼容发布制品执行，不能通过 Settings/Compose 切换。
 - Tool Runtime disabled 时普通 Tool capability unavailable，但 Safe Writeback trusted audit 继续；enabled 缺 Contract/Executor/Repository/Workflow/依赖则 readiness fail closed。
 - Web Fetch 即使配置 enabled，持久 Web Policy/安全 Executor 未完整接线时也不能访问 DNS/网络。
 
@@ -492,12 +494,19 @@ make compose-up
 make compose-rag-smoke
 make compose-tool-smoke
 make compose-model-runtime-hot-activation-smoke
+make eino-live-smoke
+make eino-stable-observation-preflight
 ZHIXU_TEST_DATABASE_URL='postgres://...' make rag-integration
 ZHIXU_TEST_DATABASE_URL='postgres://...' make tool-integration
 make benchmark-capacity
 ```
 
 `compose-model-runtime-hot-activation-smoke` 精确调用隔离的 `deploy/model-runtime-hot-activation-smoke.sh`，使用 disposable Compose 项目、Workspace、数据库和受控 loopback fake model 验证 Apply 前后容器身份不变；它不属于普通 `make test` 或快速检查。集成 target 使用 disposable database/Workspace，缺少 `ZHIXU_TEST_DATABASE_URL` 时必须失败或明确 skip，不能把未运行报为通过。Compose smoke、PostgreSQL integration、River fault、认证负测、容量、备份恢复、浏览器和真实模型评测证明不同边界，不能相互替代。
+
+`make eino-live-smoke` 覆盖受控真实 Provider 的即时门禁，不能替代稳定观察。六项 live gate 与 host-relay 外部
+Chat/本地 Ollama Embedding 的浏览器终态已通过；容器直连外部 HTTPS 路径以及连续 7 天、100 个非 replay RAG v2
+终态的观察仍未完成。正式观察必须按 [Eino Runtime 稳定发布观察 Runbook](architecture/runbooks/eino-stable-observation.md)
+执行，先运行 preflight，再由受保护 Collector 归档证据。
 
 配置加载修改的局部门禁：
 

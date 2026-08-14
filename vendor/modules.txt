@@ -1,6 +1,12 @@
+# github.com/bahlo/generic-list-go v0.2.0
+## explicit; go 1.18
+github.com/bahlo/generic-list-go
 # github.com/beorn7/perks v1.0.1
 ## explicit; go 1.11
 github.com/beorn7/perks/quantile
+# github.com/buger/jsonparser v1.1.1
+## explicit; go 1.13
+github.com/buger/jsonparser
 # github.com/bytedance/gopkg v0.1.3
 ## explicit; go 1.18
 github.com/bytedance/gopkg/lang/dirtmake
@@ -59,9 +65,57 @@ github.com/cloudwego/base64x/internal/native
 github.com/cloudwego/base64x/internal/native/avx2
 github.com/cloudwego/base64x/internal/native/sse
 github.com/cloudwego/base64x/internal/rt
+# github.com/cloudwego/eino v0.9.13
+## explicit; go 1.18
+github.com/cloudwego/eino/adk
+github.com/cloudwego/eino/adk/internal
+github.com/cloudwego/eino/callbacks
+github.com/cloudwego/eino/components
+github.com/cloudwego/eino/components/document
+github.com/cloudwego/eino/components/document/parser
+github.com/cloudwego/eino/components/embedding
+github.com/cloudwego/eino/components/indexer
+github.com/cloudwego/eino/components/model
+github.com/cloudwego/eino/components/prompt
+github.com/cloudwego/eino/components/retriever
+github.com/cloudwego/eino/components/tool
+github.com/cloudwego/eino/compose
+github.com/cloudwego/eino/internal
+github.com/cloudwego/eino/internal/callbacks
+github.com/cloudwego/eino/internal/core
+github.com/cloudwego/eino/internal/generic
+github.com/cloudwego/eino/internal/gmap
+github.com/cloudwego/eino/internal/gslice
+github.com/cloudwego/eino/internal/safe
+github.com/cloudwego/eino/internal/serialization
+github.com/cloudwego/eino/schema
+github.com/cloudwego/eino/schema/claude
+github.com/cloudwego/eino/schema/gemini
+github.com/cloudwego/eino/schema/openai
+# github.com/cloudwego/eino-ext/components/embedding/ollama v0.0.0-20260803030130-90a15623ddb6
+## explicit; go 1.24.0
+github.com/cloudwego/eino-ext/components/embedding/ollama
+# github.com/cloudwego/eino-ext/components/embedding/openai v0.0.0-20260803030130-90a15623ddb6
+## explicit; go 1.23.0
+github.com/cloudwego/eino-ext/components/embedding/openai
+# github.com/cloudwego/eino-ext/components/model/openai v0.1.13
+## explicit; go 1.18
+github.com/cloudwego/eino-ext/components/model/openai
+# github.com/cloudwego/eino-ext/libs/acl/openai v0.1.17
+## explicit; go 1.18
+github.com/cloudwego/eino-ext/libs/acl/openai
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
+# github.com/dustin/go-humanize v1.0.1
+## explicit; go 1.16
+github.com/dustin/go-humanize
+# github.com/eino-contrib/jsonschema v1.0.3
+## explicit; go 1.18
+github.com/eino-contrib/jsonschema
+# github.com/evanphx/json-patch v0.5.2
+## explicit; go 1.14
+github.com/evanphx/json-patch
 # github.com/fsnotify/fsnotify v1.9.0
 ## explicit; go 1.17
 github.com/fsnotify/fsnotify
@@ -132,6 +186,9 @@ github.com/goccy/go-yaml/token
 # github.com/google/uuid v1.6.0
 ## explicit
 github.com/google/uuid
+# github.com/goph/emperror v0.17.2
+## explicit; go 1.12
+github.com/goph/emperror
 # github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0
 ## explicit; go 1.25.0
 github.com/grpc-ecosystem/grpc-gateway/v2/internal/httprule
@@ -174,9 +231,18 @@ github.com/ledongthuc/pdf
 ## explicit; go 1.18
 github.com/leodido/go-urn
 github.com/leodido/go-urn/scim/schema
+# github.com/mailru/easyjson v0.9.0
+## explicit; go 1.20
+github.com/mailru/easyjson/buffer
+github.com/mailru/easyjson/jwriter
 # github.com/mattn/go-isatty v0.0.20
 ## explicit; go 1.15
 github.com/mattn/go-isatty
+# github.com/meguminnnnnnnnn/go-openai v0.1.2
+## explicit; go 1.18
+github.com/meguminnnnnnnnn/go-openai
+github.com/meguminnnnnnnnn/go-openai/internal
+github.com/meguminnnnnnnnn/go-openai/jsonschema
 # github.com/mfridman/interpolate v0.0.2
 ## explicit; go 1.19
 github.com/mfridman/interpolate
@@ -189,6 +255,27 @@ github.com/modern-go/reflect2
 # github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
 ## explicit
 github.com/munnerz/goautoneg
+# github.com/nikolalohinski/gonja v1.5.3
+## explicit; go 1.20
+github.com/nikolalohinski/gonja
+github.com/nikolalohinski/gonja/builtins
+github.com/nikolalohinski/gonja/builtins/statements
+github.com/nikolalohinski/gonja/config
+github.com/nikolalohinski/gonja/docs
+github.com/nikolalohinski/gonja/exec
+github.com/nikolalohinski/gonja/loaders
+github.com/nikolalohinski/gonja/nodes
+github.com/nikolalohinski/gonja/parser
+github.com/nikolalohinski/gonja/tokens
+github.com/nikolalohinski/gonja/utils
+# github.com/ollama/ollama v0.9.6
+## explicit; go 1.24.0
+github.com/ollama/ollama/api
+github.com/ollama/ollama/auth
+github.com/ollama/ollama/envconfig
+github.com/ollama/ollama/format
+github.com/ollama/ollama/types/model
+github.com/ollama/ollama/version
 # github.com/pelletier/go-toml/v2 v2.2.4
 ## explicit; go 1.21.0
 github.com/pelletier/go-toml/v2
@@ -202,6 +289,9 @@ github.com/pgvector/pgvector-go
 # github.com/pgvector/pgvector-go/pgx v0.4.0
 ## explicit; go 1.25.0
 github.com/pgvector/pgvector-go/pgx
+# github.com/pkg/errors v0.9.1
+## explicit
+github.com/pkg/errors
 # github.com/pmezard/go-difflib v1.0.0
 ## explicit
 github.com/pmezard/go-difflib/difflib
@@ -314,14 +404,18 @@ github.com/riverqueue/river/rivershared/util/valutil
 # github.com/riverqueue/river/rivertype v0.40.0
 ## explicit; go 1.25.0
 github.com/riverqueue/river/rivertype
-# github.com/rogpeppe/go-internal v1.15.0
-## explicit; go 1.25
 # github.com/sagikazarmark/locafero v0.11.0
 ## explicit; go 1.23.0
 github.com/sagikazarmark/locafero
 # github.com/sethvargo/go-retry v0.3.0
 ## explicit; go 1.21
 github.com/sethvargo/go-retry
+# github.com/sirupsen/logrus v1.9.3
+## explicit; go 1.13
+github.com/sirupsen/logrus
+# github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f
+## explicit; go 1.9
+github.com/slongfield/pyfmt
 # github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8
 ## explicit; go 1.20
 github.com/sourcegraph/conc
@@ -389,9 +483,15 @@ github.com/twitchyliquid64/golang-asm/unsafeheader
 # github.com/ugorji/go/codec v1.3.1
 ## explicit; go 1.21
 github.com/ugorji/go/codec
+# github.com/wk8/go-ordered-map/v2 v2.1.8
+## explicit; go 1.18
+github.com/wk8/go-ordered-map/v2
 # github.com/x448/float16 v0.8.4
 ## explicit; go 1.11
 github.com/x448/float16
+# github.com/yargevad/filepathx v1.0.0
+## explicit; go 1.14
+github.com/yargevad/filepathx
 # github.com/yuin/goldmark v1.8.4
 ## explicit; go 1.22
 github.com/yuin/goldmark
@@ -486,12 +586,21 @@ go.yaml.in/yaml/v3
 golang.org/x/arch/x86/x86asm
 # golang.org/x/crypto v0.54.0
 ## explicit; go 1.25.0
+golang.org/x/crypto/blowfish
 golang.org/x/crypto/chacha20
 golang.org/x/crypto/chacha20poly1305
+golang.org/x/crypto/cryptobyte
+golang.org/x/crypto/cryptobyte/asn1
+golang.org/x/crypto/curve25519
 golang.org/x/crypto/hkdf
 golang.org/x/crypto/internal/alias
 golang.org/x/crypto/internal/poly1305
 golang.org/x/crypto/sha3
+golang.org/x/crypto/ssh
+golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
+# golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa
+## explicit; go 1.25.0
+golang.org/x/exp/slices
 # golang.org/x/net v0.57.0
 ## explicit; go 1.25.0
 golang.org/x/net/bpf

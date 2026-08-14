@@ -38,7 +38,7 @@ const (
 )
 
 var (
-    // ErrNotExist means both key and value doesn't exist
+    // ErrNotExist means both key and value doesn't exist 
     ErrNotExist error = newError(_ERR_NOT_FOUND, "value not exists")
 
     // ErrUnsupportType means API on the node is unsupported
@@ -229,7 +229,7 @@ func (self *Parser) decodeObject(ret *linkedPairs) (Node, types.ParsingError) {
             return Node{}, err
         }
 
-
+        
         if self.skipValue {
             /* skip the value */
             var start int
@@ -668,7 +668,7 @@ func NewParserObj(src string) Parser {
 }
 
 // decodeNumber controls if parser decodes the number values instead of skip them
-//   WARN: once you set decodeNumber(true), please set decodeNumber(false) before you drop the parser
+//   WARN: once you set decodeNumber(true), please set decodeNumber(false) before you drop the parser 
 //   otherwise the memory CANNOT be reused
 func (self *Parser) decodeNumber(decode bool) {
     if !decode && self.dbuf != nil {

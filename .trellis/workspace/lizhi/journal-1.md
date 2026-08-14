@@ -1789,6 +1789,15 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 - 以每次 viper.New() 的实例化加载器统一默认值、YAML 与环境变量覆盖。
 - 保留显式空值、disabled 清理、Secret 零查询与稳定脱敏错误契约。
 - 补充配置架构文档、Trellis 规范与兼容性回归测试。
+## Session 43: 完成 Eino 分层迁移
+
+**Date**: 2026-08-08
+**Task**: 完成 Eino 分层迁移
+**Branch**: `codex/eino-layered-migration`
+
+### Summary
+
+分层接入 Eino Chat Adapter、调用级脱敏 Callback 与 Structured Output 短 Graph，保留 PostgreSQL/River、领域校验和 direct 回滚边界；完成真实 Compose/River 闭环及 Ollama qwen3 Provider smoke，并以 typed allowlist 兼容 reasoning 扩展。
 
 ### Git Commits
 
@@ -1804,6 +1813,11 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 - [OK] go test -race ./internal/platform/config -count=1 -timeout 60s
 - [OK] 受影响命令与 modelsettings 使用 -mod=vendor 测试通过
 - [OK] go mod verify、Markdown 解析与相对链接检查通过
+| `e51f5acc` | (see git log) |
+| `e376ad01` | (see git log) |
+| `4bcc916f` | (see git log) |
+| `62e15152` | (see git log) |
+| `675181e4` | (see git log) |
 
 ### Status
 
@@ -1819,6 +1833,15 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 ### Summary
 
 使用 OTel SDK/OTLP 替换生产 Trace Provider，使用 prometheus/client_golang 暴露 API/Worker /metrics，保留脱敏、有限标签、traceparent 传播和三种模式，并补齐生命周期、采集测试与文档。
+## Session 44: 收口 Eino 依赖账本
+
+**Date**: 2026-08-08
+**Task**: 收口 Eino 依赖账本
+**Branch**: `codex/eino-layered-migration`
+
+### Summary
+
+完成 Eino 迁移的 go.sum tidy 收口，删除 63 条未使用的 go.mod 校验记录；依赖版本、go.mod 与 vendor 保持不变，并通过 tidy、verify、vendor 编译、API/Worker 构建、race 与 vet 门禁。
 
 ### Git Commits
 
@@ -1975,6 +1998,7 @@ exact replay 对 24 小时事件投影的错误依赖；事件清理后幂等创
 |------|---------|
 | `b02d1dec512cc0aaea81b38cee362524008b3720` | (see git log) |
 | `7be55a7ef3860077cf529fbf2b45bc40cc649544` | (see git log) |
+| `9d1a34e` | (see git log) |
 
 ### Status
 

@@ -311,7 +311,7 @@ func TestQuestionDispatcherRollsBackEveryFactAfterRuntimeOrEventFailure(t *testi
 				eventPort = failingConversationEventAppender{err: injected}
 			}
 			dispatcher, err := NewQuestionDispatcher(
-				pool, runtimePort, eventPort, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
+				pool, runtimePort, eventPort, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -370,7 +370,7 @@ func TestQuestionDispatcherClassifiesIDGenerationFailureAndRollsBack(t *testing.
 			injected := errors.New("injected ID generation failure")
 			ids := &failAtQuestionIDGenerator{next: foundation.NewUUIDGenerator(nil), failAt: test.failAt, err: injected}
 			dispatcher, err := NewQuestionDispatcher(
-				pool, runtime, events, ids, foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
+				pool, runtime, events, ids, foundation.SystemClock{},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -406,7 +406,7 @@ func TestQuestionDispatcherRejectsInvalidRuntimeResultAndRollsBack(t *testing.T)
 				result.Job.Duplicate = !result.Job.Duplicate
 			},
 		},
-		events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
+		events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -431,7 +431,7 @@ func TestQuestionDispatcherExactlyReplaysCommitResponseLossAfterEventCleanup(t *
 	runtime, events := newQuestionDispatchDependencies(t, pool)
 	lossDB := &conversationCommitResponseLossDB{Pool: pool, loseNext: true}
 	dispatcher, err := NewQuestionDispatcher(
-		lossDB, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
+		lossDB, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -495,7 +495,7 @@ func TestQuestionDispatcherExactlyReplaysAfterWorkflowAdvancesDuringReplay(t *te
 	}
 	runtime, events := newQuestionDispatchDependencies(t, pool)
 	dispatcher, err := NewQuestionDispatcher(
-		pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
+		pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -510,7 +510,7 @@ func TestQuestionDispatcherExactlyReplaysAfterWorkflowAdvancesDuringReplay(t *te
 		next: runtime, nodeRunID: created.NodeRunID, jobID: created.JobID,
 	}
 	replayDispatcher, err := NewQuestionDispatcher(
-		pool, advancingRuntime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
+		pool, advancingRuntime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -743,7 +743,7 @@ func newQuestionDispatcherIntegration(t *testing.T, pool *pgxpool.Pool) *Questio
 	t.Helper()
 	runtime, events := newQuestionDispatchDependencies(t, pool)
 	dispatcher, err := NewQuestionDispatcher(
-		pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, conversationworkflow.RegisteredDefinition(),
+		pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
 		t.Fatal(err)

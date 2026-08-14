@@ -16,6 +16,10 @@ const (
 	errorCodeFaithfulnessRequestInvalid  = "AGENT_FAITHFULNESS_REQUEST_INVALID"
 	errorCodeFaithfulnessResponseInvalid = "AGENT_FAITHFULNESS_RESPONSE_INVALID"
 	errorCodeFaithfulnessRejected        = "AGENT_FAITHFULNESS_REJECTED"
+	// Reasoning-capable providers count internal reasoning against max_tokens.
+	// Keep a production-proven floor while still scaling with review cardinality.
+	faithfulnessOutputTokenFloor   = 1024
+	faithfulnessOutputTokenCeiling = MaxOutputTokens
 )
 
 // FaithfulnessReviewRequest 使用独立 Prompt、Schema 和 REVIEW Model Call 审查一个 Answer。
@@ -25,6 +29,9 @@ type FaithfulnessReviewRequest struct {
 	SchemaRef  domain.SchemaRef
 	Answer     domain.RAGAnswerResult
 	Evidence   []domain.Evidence
+	// MaxOutputTokens optionally narrows the profile limit for this review.
+	// Zero derives a bounded limit from the review targets.
+	MaxOutputTokens int
 }
 
 // FaithfulnessReviewRunResult 返回独立 REVIEW 调用的结构化结果和可持久化统计。
@@ -87,6 +94,7 @@ func (reviewer *StructuredFaithfulnessReviewer) Review(ctx context.Context, requ
 		return FaithfulnessReviewRunResult{}, err
 	}
 	chatRequest := buildChatRequest(snapshot, snapshot.Schema, domain.ModelCallReview, snapshot.Prompt.InitialInstruction, input, "")
+	chatRequest.MaxOutputTokens = effectiveFaithfulnessOutputTokens(snapshot.Profile.MaxOutputTokens, request.MaxOutputTokens, request.Answer)
 	requestBytes, err := encodedChatRequestBytes(chatRequest)
 	if err != nil {
 		return FaithfulnessReviewRunResult{}, err
@@ -177,6 +185,9 @@ func ValidateFaithfulnessReview(answer domain.RAGAnswerResult, review domain.Fai
 }
 
 func validateFaithfulnessRequest(request FaithfulnessReviewRequest) error {
+	if request.MaxOutputTokens < 0 || request.MaxOutputTokens > MaxOutputTokens {
+		return applicationError(foundation.ErrorInvalidInput, errorCodeFaithfulnessRequestInvalid, false, errors.New("faithfulness output token limit is invalid"))
+	}
 	if err := request.ProfileRef.Validate(); err != nil {
 		return applicationError(foundation.ErrorInvalidInput, errorCodeFaithfulnessRequestInvalid, false, err)
 	}
@@ -213,6 +224,42 @@ func validateFaithfulnessRequest(request FaithfulnessReviewRequest) error {
 		seen[evidence.Citation.ID] = struct{}{}
 	}
 	return nil
+}
+
+// effectiveFaithfulnessOutputTokens keeps semantic review responses bounded by
+// the number and size of targets while respecting the frozen profile ceiling.
+func effectiveFaithfulnessOutputTokens(profileLimit, override int, answer domain.RAGAnswerResult) int {
+	if override > 0 {
+		if override < profileLimit {
+			return override
+		}
+		return profileLimit
+	}
+	targets, err := faithfulnessReviewTargets(answer)
+	if err != nil {
+		return profileLimit
+	}
+	estimate := 160 + len(targets)*64
+	for _, target := range targets {
+		estimate += minInt(len(target.Text)/8, 256)
+	}
+	if estimate < faithfulnessOutputTokenFloor {
+		estimate = faithfulnessOutputTokenFloor
+	}
+	if estimate > faithfulnessOutputTokenCeiling {
+		estimate = faithfulnessOutputTokenCeiling
+	}
+	if estimate > profileLimit {
+		return profileLimit
+	}
+	return estimate
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func encodeFaithfulnessInput(request FaithfulnessReviewRequest) ([]byte, error) {

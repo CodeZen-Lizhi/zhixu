@@ -107,14 +107,26 @@ assert_runtime_startup_contract() {
   local script_path="${SCRIPT_DIR}/${smoke_script}"
   local previous_line=0
   local startup_step line
-  local -a startup_steps=(
-    'netns_compose up --detach --wait'
-    'up --detach --wait postgres'
-    'run --rm --no-deps -T model-settings-key-init'
-    'run --rm --no-deps -T migrate'
-    'up --detach --no-deps --wait app worker'
-    'up --detach --no-deps --wait app-model-relay worker-model-relay'
-  )
+  local -a startup_steps=()
+  if [[ "${smoke_script}" == compose-rag-smoke.sh ]]; then
+    startup_steps=(
+      'netns_compose up --detach --wait'
+      'up --detach --wait postgres'
+      'run --rm --no-deps -T model-settings-key-init'
+      'run --rm --no-deps -T migrate'
+      'up --detach --no-deps --wait rag-model-fixture'
+      '  activate_workspace_grant'
+    )
+  else
+    startup_steps=(
+      'netns_compose up --detach --wait'
+      'up --detach --wait postgres'
+      'run --rm --no-deps -T model-settings-key-init'
+      'run --rm --no-deps -T migrate'
+      'up --detach --no-deps --wait app worker'
+      'up --detach --no-deps --wait app-model-relay worker-model-relay'
+    )
+  fi
 
   if grep -E 'up[[:space:]]+--detach[[:space:]]+--wait([[:space:]]*$|[[:space:]]*[>/])' "${script_path}" \
     | grep -Fv 'netns_compose up' | grep -q .; then
@@ -123,7 +135,7 @@ assert_runtime_startup_contract() {
   if grep -Eq 'up[[:space:]].*(model-settings-key-init|migrate|firewall)' "${script_path}"; then
     fail "${smoke_script} starts a one-shot service through Compose up"
   fi
-  if grep -Eq '(firewall|proxy)' "${script_path}"; then
+  if [[ "${smoke_script}" != compose-rag-smoke.sh ]] && grep -Eq '(firewall|proxy)' "${script_path}"; then
     fail "${smoke_script} still depends on the removed firewall/proxy services"
   fi
   for startup_step in "${startup_steps[@]}"; do
@@ -226,6 +238,19 @@ main() {
       grep -F -- "${trap_contract}" "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
         || fail "${smoke_script} does not preserve ${trap_contract} semantics"
     done
+    if [[ "${smoke_script}" == compose-rag-smoke.sh ]]; then
+      grep -F -- 'go build -mod=vendor -o "${workspace_control_binary}" ./cmd/workspacectl' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not use the one-shot Workspace control binary"
+      grep -F -- '--database-url-fd 8' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} exposes the Workspace database credential through argv"
+      if grep -Fq './cmd/hostcontroller' "${SCRIPT_DIR}/${smoke_script}"; then
+        fail "${smoke_script} still depends on the removed hostcontroller command"
+      fi
+      grep -F -- 'stop_vite' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not stop the real Provider Vite process"
+      grep -F -- 'stop_provider_host_relay' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not stop the real Provider host relay"
+    fi
     assert_runtime_startup_contract "${smoke_script}"
   done
 

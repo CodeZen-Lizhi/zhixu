@@ -38,3 +38,5 @@ func AssertI2I(t *GoType, i GoIface) (r GoIface) {
 	r.Value = i.Value
 	return
 }
+
+

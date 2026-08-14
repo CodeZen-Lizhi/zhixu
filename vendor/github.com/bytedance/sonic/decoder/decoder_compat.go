@@ -41,7 +41,7 @@ const (
      _F_disable_urc     = consts.F_disable_unknown
      _F_disable_unknown = consts.F_disable_unknown
      _F_copy_string     = consts.F_copy_string
-
+ 
      _F_use_number      = consts.F_use_number
      _F_validate_string = consts.F_validate_string
      _F_allow_control   = consts.F_allow_control
@@ -160,7 +160,7 @@ func (self *Decoder) CopyString() {
      self.f |= 1 << _F_copy_string
 }
 
-// ValidateString causes the Decoder to validate string values when decoding string value
+// ValidateString causes the Decoder to validate string values when decoding string value 
 // in JSON. Validation is that, returning error when unescaped control chars(0x00-0x1f) or
 // invalid UTF-8 chars in the string value of JSON.
 func (self *Decoder) ValidateString() {

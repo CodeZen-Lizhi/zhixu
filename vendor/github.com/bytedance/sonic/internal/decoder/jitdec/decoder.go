@@ -138,3 +138,4 @@ func pretouchRec(vtm map[reflect.Type]bool, opts option.CompileOptions) error {
     opts.RecursiveDepth -= 1
     return pretouchRec(next, opts)
 }
+

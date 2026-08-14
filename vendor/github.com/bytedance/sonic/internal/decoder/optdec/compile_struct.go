@@ -72,9 +72,9 @@ func (c *compiler) assertStringOptTypes(vt reflect.Type) {
 func (c *compiler) compileFieldStringOption(vt reflect.Type) decFunc {
 	c.assertStringOptTypes(vt)
 	unmDec := c.tryCompilePtrUnmarshaler(vt, true)
-	if unmDec != nil {
+	if unmDec != nil { 
 		return unmDec
-	}
+	} 
 
 	switch vt.Kind() {
 	case reflect.String:

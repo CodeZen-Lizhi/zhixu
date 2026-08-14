@@ -35,6 +35,9 @@
 - Host 的 gate、generation 选择和 refcount 必须在同一互斥边界内原子完成；旧 generation 不用任意 TTL 退役。
   进程重启后可按正 revision 重建历史 generation；revision `0` 只代表 canonical static disabled，不得伪造动态重建。
 - revision `0` 是无持久行的 canonical disabled。非零 revision append-only；高级 timeout/batch/byte limit 也冻结。
+- Chat、Embedding 与五个 Structured Scheduler 的生产构造固定使用 Eino；implementation selector 不进入
+  revision DTO、数据库身份、Config Hash 或 Compose。历史 v1 持久执行只能通过 Eino-backed replay Definition 消费，
+  不得成为新 dispatch 入口。
 - Secret 只允许请求瞬时明文、短生命周期进程内明文和 AES-256-GCM 密文。AAD 绑定 revision、用途、schema、
   Provider 和规范化 Endpoint；`keep` 必须解密后以新 revision AAD 重加密。
 - AES-256-GCM key/nonce/envelope mechanics 只由 `internal/platform/secretstore` 实现；Model Settings wrapper 继续拥有
@@ -61,6 +64,9 @@
   必须按实际列/约束检测旧形态，在单一事务内 repair 或 fail closed，不得改写已发布迁移并假设会重跑。
 - `chat_api_style` 的 Down 只有在全部 revision 均为 `chat_completions` 时才允许；存在 `responses` revision 时必须在
   `ACCESS EXCLUSIVE` 锁内以 PostgreSQL `55000` 拒绝，禁止丢列后把历史协议静默改回默认值。
+- 当前 Eino-only 制品只允许新建、测试和激活 `chat_completions`。`responses` 仍是持久读模型的合法历史值，
+  但生产 Validator/Build 必须 fail closed，设置页只允许查看并迁移到 Chat Completions；不得修改历史 revision，
+  也不得把其请求改发 Chat Completions。发布前必须确认 active/target 和非终态 Attempt 未绑定 Responses revision。
 - launcher 必须先等待 PostgreSQL healthy，再用 `compose run --rm --no-deps -T` 顺序执行 Key 初始化和迁移；任一步
   非零退出都原样终止。完成即退出的 one-shot 不得交给 `compose up --wait` 或与 `compose wait` 竞态。
 - API 与 Worker 即使依赖 migration 完成，也必须直接声明 `postgres: service_healthy`；Compose 可能复用已完成的
@@ -89,6 +95,7 @@
 | 已记录旧迁移版本但 schema 缺列 | forward migration 按 shape 事务修复；非法旧行失败且 schema/数据完整回滚 |
 | 历史 Export 表数据量较大 | repair 前评估全表回填与 `ACCESS EXCLUSIVE` 锁窗口，并安排维护窗口；不得宣称在线零停机 |
 | 存在 `responses` revision 时降级移除 `chat_api_style` | PostgreSQL `55000`，迁移版本和列保持不变；先创建显式 `chat_completions` revision 并完成业务迁移 |
+| 新保存、测试或激活 `responses` | 非重试配置错误；不发 Provider 请求、不追加可激活 revision、不回退到 Chat Completions |
 | Key 初始化或 migration one-shot 失败 | launcher 保留退出码并停止，不运行 modelctl、API 或 Worker |
 
 ### 5. Good / Base / Bad Cases
@@ -114,6 +121,8 @@
   WriteKnowledge 拒绝、Snapshot strict projection 与 Secret 不回显。
 - Composition/CLI/Compose：API/Worker disabled/configured/unavailable 启动、HotRuntimeController readiness、旧 modelctl mutation
   fail closed、launcher migration fail-fast、精确 smoke cleanup，以及隔离真实 Compose 中成功/失败/修正 Apply 后容器 identity 不变。
+- Composition：单一 Eino Runtime 必须注入 API/Worker；已退休 implementation selector 不得进入 API、Worker、modelctl、
+  revision DTO、Config Hash 或 Compose。
 - Canonical Go/contract 门禁至少包含受影响 `go test`、`go test -race`、`go vet`、`go mod tidy -diff`、
   `make openapi-check`、`make compose-check`、`git diff --check` 和 Secret 扫描。
 
@@ -161,8 +170,9 @@ Correct: `secretstore` 只拥有加密原语；两个业务 wrapper 分别拥有
 ### 3. Contracts
 
 - Chat 探针通过同一 OpenAI-compatible HTTP Adapter 发送固定 plain `user:test`，不带 `response_format`；线上 provider 不带 `max_tokens`，受管理 Ollama 固定 `max_tokens: 1`，避免 CPU 模型为连通性探针生成无界长响应。探针只验证 Endpoint、Credential、模型与基本 assistant 非空响应；正式 Chat 的结构化 payload 与严格校验保持不变。Embedding 探针发送单输入 `test`。
-- Chat API style 必须显式为 `chat_completions|responses` 并冻结进 revision；静态配置、旧行和 revision `0` 缺省为 `chat_completions`。正式调用与探针共用该选择，不按模型名推断、不跨接口 fallback；Responses 探针只发送 `model`、固定 `input:test` 与 `store:false`，允许 reasoning 等非 message output，并要求 `completed` 与非空 assistant `output_text`。
-- 正式 Responses 请求使用 `text.format=json_schema`、`max_output_tokens` 并显式发送 `store:false`，避免 Provider 默认持久化业务输入；正式响应同时要求根 `status=completed` 和 assistant message `status=completed`，再校验结构化正文、模型与 token usage。探针保持最小 `model+input+store:false`，不继承正式结构化参数。
+- Chat API style 仍以 `chat_completions|responses` 冻结进 revision，以便精确读取历史；静态配置、旧行和 revision `0`
+  缺省为 `chat_completions`。当前 Eino-only Runtime 只执行 Chat Completions；Responses 的旧 wire 合同仅是历史证据，
+  不能通过当前 factory 测试或激活，也不能跨接口 fallback。
 - 成功测试只返回固定 `api_style`、白名单 `endpoint_path` 与非负 `latency_ms`；不得由 Base URL 派生可回显路径，也不得返回 Provider 正文。API style 不进入 Secret AAD，旧密文保持可打开。
 - `details.stage` 只能是 `request|dns|connect|tls|provider_response|response_read|response_validation|cancelled|timeout`。
 - `details.validation_reason` 只能由 Adapter 的固定响应校验分支产生，不得包含 Provider 正文；例如 `finish_reason_length|empty_content|missing_usage|invalid_usage`。
@@ -180,7 +190,7 @@ Correct: `secretstore` 只拥有加密原语；两个业务 wrapper 分别拥有
 | DNS/connect/TLS EOF/timeout/cancel | 返回固定 stage 与通用 transport 摘要，不包含 URL 或底层错误原文 |
 | 已收到响应后正文读取 EOF | `stage=response_read`，不得误报 TLS |
 | 2xx 响应不满足探针的基本响应契约 | `stage=response_validation` 与固定 `validation_reason`，不回显生成正文或向量 |
-| 正式 Responses 根完成但 assistant message 未完成 | 拒绝为 `MODEL_CHAT_RESPONSE_INVALID`；不得把部分输出交给业务契约 |
+| Responses 草稿测试或保存 | 在发起 Provider 请求前以配置错误拒绝；历史 revision 保持可读 |
 | 非 JSON、超限、非法 UTF-8、未知 JSON shape | 只保留 HTTP 状态和“响应详情无法安全解析” |
 | details target 与请求 target 不一致 | 前端按 `INVALID_RESPONSE` fail closed |
 
@@ -189,12 +199,12 @@ Correct: `secretstore` 只拥有加密原语；两个业务 wrapper 分别拥有
 - Good：Provider 返回结构化 401，页面显示 `Provider HTTP 401`、错误码、消息和请求 ID，同时浏览器 Session 保持有效。
 - Base：Provider 仅返回无可安全解析的 body，页面仍显示稳定知序错误码、上游 HTTP 状态和可重试性。
 - Bad：把 Provider 401 直接作为本地 401、把 `url.Error.Error()` 或原始 body 填进 Problem、或对 `/v1` Base 生成 `/v1/v1/embeddings`。
-- Bad：正式或探针 Responses 请求省略 `store:false`，或正式调用仅检查根状态便接受未完成的 assistant message。
+- Bad：当前 Eino 制品把历史 Responses revision 静默改发 Chat Completions，或设置页继续允许新建 Responses 配置。
 
 ### 6. Tests Required
 
 - Adapter：401/400/429/5xx、OpenAI/DashScope shape、请求 ID Header 优先、非 JSON/超限/非法字段、Secret/Endpoint canary、DNS/TLS/EOF/timeout/cancel、响应读取 EOF 阶段。
-- Responses Adapter：断言正式 payload 精确包含 `store:false`，probe payload 精确只有 `model+input+store:false`；覆盖 reasoning item、root incomplete、单个及混合 assistant item incomplete、空正文、模型和 usage 不一致。
+- Responses 历史兼容：读模型、迁移 Down guard、设置页历史显示继续保留；production Validator、三个 Eino 构造入口和新写入必须零网络 fail closed。
 - Handler/OpenAPI：target 绑定、502/504 映射、`no-store`、details 字段上限、普通错误无诊断、Secret/Endpoint/原始 body 不泄漏。
 - Frontend：严格 Problem decoder、target mismatch、未知/超长/Unicode control/format 字段、Secret/Endpoint 大小写变体、Provider 401 与 TLS/response-validation 展示。
 - 浏览器：用真实 Provider 或受控 fixture 点击 Chat/Embedding 测试，断言可扫描诊断和本地认证状态不受上游 401 影响。
@@ -208,8 +218,8 @@ Correct: 知序 API 返回 502，details.provider_http_status=401，设置页显
 Wrong: 所有 EOF 都标记为 TLS，或把底层 url.Error 原文返回页面。
 Correct: 发请求前 EOF 可归类 TLS；已收到 HTTP 响应后的 EOF 固定归类 response_read，只返回受限摘要。
 
-Wrong: Responses 正式调用或探针依赖 Provider 的默认存储行为，并接受 root completed 下的 incomplete message。
-Correct: 正式调用和探针都显式 `store:false`；正式响应同时校验 root 和全部 assistant message completed，probe 则只验证最小连通性。
+Wrong: 因当前 Eino extension 不支持 Responses，就删除或改写历史 revision，或把请求静默发到 Chat Completions。
+Correct: 保留历史协议身份和 Down guard；当前制品在构造前拒绝，用户显式创建并激活新的 Chat Completions revision。
 ```
 
 ## Scenario: Managed Local Ollama Lifecycle

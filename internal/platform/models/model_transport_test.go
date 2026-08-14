@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 )
 
 type modelResolverFunc func(context.Context, string, string) ([]netip.Addr, error)
@@ -386,6 +388,49 @@ func TestModelHTTPClientOwnsCloneWhenSuppliedClientUsesDefaultTransport(t *testi
 	owned, ok := client.owned.(*http.Transport)
 	if !ok || client.client.Transport == nil || client.client.Transport != owned {
 		t.Fatalf("copied client transport ownership = %T/%T, want one owned clone", client.client.Transport, client.owned)
+	}
+}
+
+func TestEinoAdaptersPreserveSuppliedClientAndTransportOwnership(t *testing.T) {
+	t.Parallel()
+
+	external := &countingIdleTransport{}
+	supplied := &http.Client{Transport: external, Timeout: 2 * time.Second}
+	chatOptions := OpenAIChatOptions{
+		Client: supplied, BaseURL: "https://models.example.test", APIKey: "test-key",
+		Model: "chat-v1", ModelVersion: "chat-v1", AdapterVersion: "v1",
+		Timeout: time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
+	}
+	chat, err := NewEinoOpenAIChatModel(chatOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeChat, err := NewEinoRuntimeChatModel(chatOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedder, err := NewEinoOpenAICompatibleEmbedder(OpenAIEmbeddingOptions{
+		Client: supplied, BaseURL: "https://models.example.test", APIKey: "test-key",
+		Model: "embedding-v1", Dimensions: 3, Normalization: domain.NormalizationL2,
+		DistanceMetric: domain.DistanceCosine, MaxBatchSize: 4, MaxInputBytes: 1024,
+		MaxBatchInputBytes: 4096, Timeout: time.Second, MaxResponseBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, adapter := range []interface{ closeModelResource() error }{chat, runtimeChat, embedder} {
+		if err := adapter.closeModelResource(); err != nil {
+			t.Fatal(err)
+		}
+		if err := adapter.closeModelResource(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if supplied.Transport != external || supplied.Timeout != 2*time.Second {
+		t.Fatal("adapter mutated the caller-owned HTTP client")
+	}
+	if got := external.closeCalls.Load(); got != 0 {
+		t.Fatalf("external transport close calls = %d, want 0", got)
 	}
 }
 

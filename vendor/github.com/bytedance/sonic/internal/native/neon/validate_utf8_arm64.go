@@ -33,3 +33,4 @@ func validate_utf8(s *string, p *int, m *types.StateMachine) (ret int) {
 //go:noescape
 //goland:noinspection GoUnusedParameter
 func __validate_utf8(s *string, p *int, m *types.StateMachine) (ret int)
+

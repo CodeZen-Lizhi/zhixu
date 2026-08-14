@@ -76,7 +76,7 @@ func radixQsort(kvs []_MapPair, d, maxDepth int) {
             } else {
                 radixQsort(kvs[:lt], d, maxDepth)
                 radixQsort(kvs[lt:gt], d+1, maxDepth)
-                kvs = kvs[gt:]
+                kvs = kvs[gt:] 
             }
         }
     }

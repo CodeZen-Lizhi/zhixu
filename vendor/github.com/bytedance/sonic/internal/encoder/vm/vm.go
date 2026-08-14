@@ -81,7 +81,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			p = rt.Add(p, uintptr(ins.I64()))
 		case ir.OP_load:
 			// NOTICE: load CANNOT change f!
-			x, _, p, q = s.Load()
+			x, _, p, q = s.Load() 
 		case ir.OP_save:
 			if !s.Save(x, f, p, q) {
 				return vars.ERR_too_deep
@@ -234,7 +234,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			vt, itab := ins.Vtab()
 			var it rt.GoIface
 			switch vt.Kind() {
-				case reflect.Interface        :
+				case reflect.Interface        : 
 				if is_nil(p) {
 					buf = append(buf, 'n', 'u', 'l', 'l')
 					continue
@@ -264,7 +264,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			x = v.Len
 			p = v.Ptr
 			//TODO: why?
-			f |= 1<<_S_init
+			f |= 1<<_S_init 
 		case ir.OP_slice_next:
 			if x == 0 {
 				pc = ins.Vi()
@@ -326,7 +326,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			vt, itab := ins.Vtab()
 			var it rt.GoIface
 			switch vt.Kind() {
-				case reflect.Interface        :
+				case reflect.Interface        : 
 				if is_nil(p) {
 					buf = append(buf, 'n', 'u', 'l', 'l')
 					continue

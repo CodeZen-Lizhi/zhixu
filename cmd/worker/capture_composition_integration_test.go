@@ -49,6 +49,7 @@ func TestWorkerCaptureCompositionRegistersExecutorDefinitionAndOutbox(t *testing
 	}
 	disabledGenerator, disabledCapability, err := newCaptureProfileGenerator(
 		pool, nil, platformmodels.ChatContract{}, modelRuns,
+		nil,
 		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil || disabledGenerator == nil || disabledCapability.available ||

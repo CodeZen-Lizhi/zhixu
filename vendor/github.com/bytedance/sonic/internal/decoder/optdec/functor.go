@@ -291,3 +291,4 @@ func (d *unsupportedTypeDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *cont
 	}
 	return error_unsuppoted(d.typ)
 }
+

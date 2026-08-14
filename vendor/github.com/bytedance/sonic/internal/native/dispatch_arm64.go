@@ -133,7 +133,7 @@ func ValidateUTF8Fast(s *string) (ret int)
 //go:nosplit
 //go:noescape
 //go:linkname ParseWithPadding github.com/bytedance/sonic/internal/native/neon.__parse_with_padding
-func ParseWithPadding(parser unsafe.Pointer) (ret int)
+func ParseWithPadding(parser unsafe.Pointer) (ret int) 
 
 //go:nosplit
 //go:noescape

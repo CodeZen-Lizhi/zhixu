@@ -405,7 +405,7 @@ func (self Instr) Disassemble() string {
 	case OP_slice_next:
 		return fmt.Sprintf("%-18sL_%d, %s", self.Op().String(), self.Vi(), self.Vt())
 	default:
-		return fmt.Sprintf("%#v", self)
+		return fmt.Sprintf("%#v", self) 
 	}
 }
 

@@ -50,6 +50,7 @@ type workerRuntimeGenerationFactory struct {
 	base            config.Config
 	revisions       modelsettingsapplication.RevisionLoader
 	buildGeneration workerRuntimeGenerationBuilder
+	telemetry       platformmodels.ModelTelemetry
 }
 
 func (factory *workerRuntimeGenerationFactory) Build(ctx context.Context, revision int64) (*workerRuntimeGeneration, error) {
@@ -70,7 +71,7 @@ func (factory *workerRuntimeGenerationFactory) Build(ctx context.Context, revisi
 			errors.New("loaded worker runtime revision does not match target"),
 		)
 	}
-	models, err := modelsettingsruntime.Build(factory.base, resolved)
+	models, err := modelsettingsruntime.Build(factory.base, resolved, factory.telemetry)
 	if err != nil {
 		return nil, err
 	}

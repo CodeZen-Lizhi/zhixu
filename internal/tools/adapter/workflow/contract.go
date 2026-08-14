@@ -1,4 +1,8 @@
-// Package workflow 把 Tool Application 接入持久化 Workflow Executor/Definition Registry。
+// Package workflow 保留迁移前 Tool Application 的持久化回放边界。
+//
+// 新的模型 Tool Calling 由 internal/agent/adapter/eino 通过 RAGAgentToolBridge
+// 进入 ExecutionService；本包不再是模型编排器，只负责已落库 agent-rag@1
+// invocation 的兼容执行和严格结果解码。
 package workflow
 
 import (
@@ -18,9 +22,9 @@ import (
 )
 
 const (
-	// DefinitionKey 是项目自有 Agent RAG Tool Workflow 的稳定键。
+	// DefinitionKey 是迁移前 Agent RAG Tool Workflow 的稳定回放键。
 	DefinitionKey = "agent-rag"
-	// DefinitionVersion 是当前 Tool Workflow Definition 版本。
+	// DefinitionVersion 是迁移前 Tool Workflow Definition 的持久版本。
 	DefinitionVersion int64 = 1
 	// NodeKey 是单节点 Tool Workflow 的稳定节点键。
 	NodeKey = "tool"
@@ -59,9 +63,10 @@ type RequestContractCatalog interface {
 	ResolveContract(toolsdomain.ToolRef) (toolsapplication.Contract, error)
 }
 
-// ModelReadToolRefsV1 返回生产持久 Agent RAG Workflow 允许的 empty/stable-ID-only Tool 引用。
+// ModelReadToolRefsV1 返回历史回放 Definition 允许的 empty/stable-ID-only Tool 引用。
 // SearchKnowledge query 与 CalculateDiff 正文必须等待 M6-04 安全 request receipt/in-process loop，
-// 不得因为 Worker 存在真实 Executor 就自动进入持久模型目录。
+// 不得因为 Worker 存在真实 Executor 就自动进入持久模型目录。新的 Eino Agent
+// 使用 v2 Definition 的只读目录，但不创建本包的持久 Tool Node。
 func ModelReadToolRefsV1() []toolsdomain.ToolRef {
 	return []toolsdomain.ToolRef{
 		{Name: "ReadSource", Version: 1},
@@ -70,8 +75,11 @@ func ModelReadToolRefsV1() []toolsdomain.ToolRef {
 	}
 }
 
-// NewProductionRegisteredDefinition 构造生产持久模型目录，禁止调用方误把全部已注册 Executor 暴露给模型。
-func NewProductionRegisteredDefinition(catalog ContractCatalog) (workflowdomain.RegisteredDefinition, error) {
+// NewReplayRegisteredDefinition 构造迁移前 Definition 的回放目录。
+//
+// 该 Definition 仅用于 Worker 消费已经持久化的 agent-rag@1 Run；新模型
+// Tool Call 必须走 Eino ChatModelAgent/ToolsNode -> RAGAgentToolBridge。
+func NewReplayRegisteredDefinition(catalog ContractCatalog) (workflowdomain.RegisteredDefinition, error) {
 	return NewRegisteredDefinition(catalog, ModelReadToolRefsV1())
 }
 
@@ -83,7 +91,7 @@ type PersistedToolInvocationV1 struct {
 	Arguments     json.RawMessage `json:"arguments"`
 }
 
-// EncodePersistedToolInvocationV1 在持久化前校验生产 allowlist 与 typed arguments，并丢弃模型 reason。
+// EncodePersistedToolInvocationV1 在历史回放输入落库前校验 allowlist 与 typed arguments，并丢弃模型 reason。
 func EncodePersistedToolInvocationV1(catalog RequestContractCatalog, request toolsdomain.ToolRequestV1) (json.RawMessage, error) {
 	if isNilInterface(catalog) || request.Validate() != nil {
 		return nil, workflowError(foundation.ErrorInvalidInput, ErrorCodeInputInvalid, false, errors.New("agent tool request is invalid"))
@@ -110,7 +118,7 @@ func EncodePersistedToolInvocationV1(catalog RequestContractCatalog, request too
 	return encoded, nil
 }
 
-// DecodePersistedToolInvocationV1 严格解析不含模型 reason 的生产持久命令。
+// DecodePersistedToolInvocationV1 严格解析不含模型 reason 的历史持久命令。
 func DecodePersistedToolInvocationV1(raw []byte) (PersistedToolInvocationV1, error) {
 	limits := strictjson.DefaultLimits()
 	limits.MaxDocumentBytes = maxWorkflowInputBytes
@@ -171,6 +179,7 @@ type ToolResponseSummaryV1 struct {
 }
 
 // NewRegisteredDefinition 从冻结 Tool contract 派生一个服务端拥有的单节点 Definition。
+// 它只供历史回放兼容和测试构造使用；Eino Agent 不应调用它创建新的模型调度。
 // 空 Tool 集合不会生成可启动 Definition，避免 disabled runtime 暴露可达节点。
 func NewRegisteredDefinition(catalog ContractCatalog, refs []toolsdomain.ToolRef) (workflowdomain.RegisteredDefinition, error) {
 	if isNilCatalog(catalog) || len(refs) == 0 {
