@@ -295,3 +295,24 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Status
 
 [OK] **Completed**
+
+
+## Session 61: Proposal Revision 三方合并交付
+
+**Date**: 2026-08-15
+**Task**: Proposal Revision 三方合并交付
+**Branch**: `dev`
+
+### Summary
+
+完成 Proposal Revision 不可变历史、服务端三方合并、并发与授权围栏、Workflow 取消协调、HTTP/OpenAPI 及前端编辑工作台；相关 Go 测试、前端类型检查与 OpenAPI 契约检查通过，真实 PostgreSQL 验证因测试数据库不可用未执行。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b13a183e` | (see git log) |
+
+### Status
+
+[OK] **Completed**
