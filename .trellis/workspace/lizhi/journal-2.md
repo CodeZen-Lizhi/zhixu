@@ -316,3 +316,39 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Status
 
 [OK] **Completed**
+
+
+## Session 62: 分离 Docker 初始化容器与稳态项目
+
+**Date**: 2026-08-15
+**Task**: 分离 Docker 初始化容器与稳态项目
+**Branch**: `dev`
+
+### Summary
+
+将一次性初始化、迁移与 modelctl 从主 Compose 拆到 launcher-only bootstrap 模型，Docker Desktop 稳态项目仅保留六个长期服务。
+
+### Main Changes
+
+- 新增独立 bootstrap Compose，并收敛 launcher、Makefile 与 smoke 入口
+- 补齐稳态/bootstrap 服务集合、Workspace grant 隔离与失败阻断契约
+- 同步运行手册、架构 ADR 与 Trellis 长期规范
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2d04684` | (see git log) |
+
+### Testing
+
+- [OK] Compose runtime/workspace/smoke 契约通过
+- [OK] 相关 Go test、go vet、Shell/Python 语法和 git diff 检查通过
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 下次执行 ./zhixu up 或 restart 时清理旧版 exited one-shot 容器
